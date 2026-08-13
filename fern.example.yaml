@@ -1,0 +1,10 @@
+workspace:
+  name: demo
+  image: fern/opencode:dev
+  repo: .
+  memory: 8Gi
+  env: {}
+idle:
+  after: 10m
+proxy:
+  listen: 127.0.0.1:8080

@@ -1,0 +1,10 @@
+/fern
+/.fern/
+/dist/
+/opencode/
+/experiment/fixture/
+*.db-shm
+*.db-wal
+fern.yaml
+*.out
+*.test

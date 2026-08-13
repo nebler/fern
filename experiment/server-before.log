@@ -1,0 +1,30 @@
+Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.
+timestamp=2026-08-12T18:51:48.053Z level=INFO run=c0aa2497 message=loading path=/Users/noah/.config/opencode/config.json
+timestamp=2026-08-12T18:51:48.062Z level=INFO run=c0aa2497 message=loading path=/Users/noah/.config/opencode/opencode.json
+timestamp=2026-08-12T18:51:48.062Z level=INFO run=c0aa2497 message=loading path=/Users/noah/.config/opencode/opencode.jsonc
+opencode server listening on http://127.0.0.1:4096
+timestamp=2026-08-12T18:51:59.819Z level=INFO run=c0aa2497 message="creating instance" directory=/Users/noah/code/ai/fern/experiment/fixture
+timestamp=2026-08-12T18:51:59.820Z level=INFO run=c0aa2497 message=fromDirectory directory=/Users/noah/code/ai/fern/experiment/fixture
+timestamp=2026-08-12T18:51:59.891Z level=INFO run=c0aa2497 message=bootstrapping directory=/Users/noah/code/ai/fern/experiment/fixture
+timestamp=2026-08-12T18:51:59.894Z level=INFO run=c0aa2497 message=loading path=/Users/noah/.config/opencode/config.json
+timestamp=2026-08-12T18:51:59.894Z level=INFO run=c0aa2497 message=loading path=/Users/noah/.config/opencode/opencode.json
+timestamp=2026-08-12T18:51:59.894Z level=INFO run=c0aa2497 message=loading path=/Users/noah/.config/opencode/opencode.jsonc
+timestamp=2026-08-12T18:51:59.895Z level=INFO run=c0aa2497 message=loading path=/Users/noah/code/ai/fern/experiment/fixture/opencode.json
+timestamp=2026-08-12T18:51:59.907Z level=INFO run=c0aa2497 message="all LSPs are disabled"
+timestamp=2026-08-12T18:51:59.908Z level=INFO run=c0aa2497 message="all formatters are disabled"
+timestamp=2026-08-12T18:51:59.908Z level=INFO run=c0aa2497 message=init
+timestamp=2026-08-12T18:52:10.017Z level=INFO run=c0aa2497 message=created id=ses_008aeac5effetVRJNz8gGi3iig slug=calm-island version=1.18.16 projectID=099c0a529cd7c06e474f9b69b105cd0af5daf71d directory=/Users/noah/code/ai/fern/experiment/fixture path="" workspaceID=undefined parentID=undefined title="New session - 2026-08-12T18:52:10.017Z" agent=undefined model=undefined metadata=undefined permission=undefined cost=0 tokens.input=0 tokens.output=0 tokens.reasoning=0 tokens.cache.read=0 tokens.cache.write=0 time.created=1786560730017 time.updated=1786560730017
+timestamp=2026-08-12T18:52:21.283Z level=INFO run=c0aa2497 message=loop session.id=ses_008aeac5effetVRJNz8gGi3iig step=0
+timestamp=2026-08-12T18:52:21.298Z level=INFO run=c0aa2497 message=stream providerID=test modelID=test-model session.id=ses_008aeac5effetVRJNz8gGi3iig small=true agent=title mode=primary
+timestamp=2026-08-12T18:52:21.302Z level=INFO run=c0aa2497 message="llm runtime selected" llm.runtime=ai-sdk llm.provider=test llm.model=test-model
+timestamp=2026-08-12T18:52:21.443Z level=INFO run=c0aa2497 message=initialized
+timestamp=2026-08-12T18:52:21.523Z level=INFO run=c0aa2497 message=tracking hash=6d82734002f48e34e702f1b0d5572fa70f6b756b cwd=/Users/noah/code/ai/fern/experiment/fixture git=/Users/noah/.local/share/opencode/snapshot/099c0a529cd7c06e474f9b69b105cd0af5daf71d/ef43387f4a681ceba259d5885bd3002453158a2f
+timestamp=2026-08-12T18:52:21.526Z level=INFO run=c0aa2497 message="shell tool using shell" shell=/bin/zsh
+timestamp=2026-08-12T18:52:22.105Z level=INFO run=c0aa2497 message=init count=12
+timestamp=2026-08-12T18:52:22.562Z level=INFO run=c0aa2497 message="watcher backend" directory=/Users/noah/code/ai/fern/experiment/fixture platform=darwin backend=fs-events
+timestamp=2026-08-12T18:52:22.564Z level=INFO run=c0aa2497 message="project copy refresh started" projectID=099c0a529cd7c06e474f9b69b105cd0af5daf71d
+timestamp=2026-08-12T18:52:22.755Z level=INFO run=c0aa2497 message="project copy refresh done" projectID=099c0a529cd7c06e474f9b69b105cd0af5daf71d updated=[] removed=[]
+timestamp=2026-08-12T18:52:22.782Z level=INFO run=c0aa2497 message="booting location services" directory=/Users/noah/code/ai/fern/experiment/fixture workspaceID=undefined
+timestamp=2026-08-12T18:52:22.787Z level=INFO run=c0aa2497 message=process session.id=ses_008aeac5effetVRJNz8gGi3iig messageID=msg_ff7517fa60016I01MSoYR3MKaI
+timestamp=2026-08-12T18:52:22.788Z level=INFO run=c0aa2497 message=stream providerID=test modelID=test-model session.id=ses_008aeac5effetVRJNz8gGi3iig small=false agent=build mode=primary
+timestamp=2026-08-12T18:52:22.789Z level=INFO run=c0aa2497 message="llm runtime selected" llm.runtime=ai-sdk llm.provider=test llm.model=test-model

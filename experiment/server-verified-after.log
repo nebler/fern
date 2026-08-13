@@ -1,0 +1,15 @@
+Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.
+timestamp=2026-08-12T18:58:24.923Z level=INFO run=05a86b54 message=loading path=/Users/noah/.config/opencode/config.json
+timestamp=2026-08-12T18:58:24.931Z level=INFO run=05a86b54 message=loading path=/Users/noah/.config/opencode/opencode.json
+timestamp=2026-08-12T18:58:24.932Z level=INFO run=05a86b54 message=loading path=/Users/noah/.config/opencode/opencode.jsonc
+opencode server listening on http://127.0.0.1:4096
+timestamp=2026-08-12T18:58:37.899Z level=INFO run=05a86b54 message="creating instance" directory=/Users/noah/code/ai/fern/experiment/fixture
+timestamp=2026-08-12T18:58:37.900Z level=INFO run=05a86b54 message=fromDirectory directory=/Users/noah/code/ai/fern/experiment/fixture
+timestamp=2026-08-12T18:58:37.981Z level=INFO run=05a86b54 message=bootstrapping directory=/Users/noah/code/ai/fern/experiment/fixture
+timestamp=2026-08-12T18:58:37.984Z level=INFO run=05a86b54 message=loading path=/Users/noah/.config/opencode/config.json
+timestamp=2026-08-12T18:58:37.984Z level=INFO run=05a86b54 message=loading path=/Users/noah/.config/opencode/opencode.json
+timestamp=2026-08-12T18:58:37.984Z level=INFO run=05a86b54 message=loading path=/Users/noah/.config/opencode/opencode.jsonc
+timestamp=2026-08-12T18:58:37.985Z level=INFO run=05a86b54 message=loading path=/Users/noah/code/ai/fern/experiment/fixture/opencode.json
+timestamp=2026-08-12T18:58:37.995Z level=INFO run=05a86b54 message="all LSPs are disabled"
+timestamp=2026-08-12T18:58:37.996Z level=INFO run=05a86b54 message="all formatters are disabled"
+timestamp=2026-08-12T18:58:37.996Z level=INFO run=05a86b54 message=init

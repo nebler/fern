@@ -1,0 +1,5 @@
+fake LLM listening on http://127.0.0.1:4100/v1
+request 1
+marker FERN_PARTIAL_MARKER
+request 2
+marker FERN_PARTIAL_MARKER
