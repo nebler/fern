@@ -64,6 +64,7 @@ Fern implements a safety-first Docker lifecycle for one OpenCode workspace.
 
 ```text
 fern up
+fern attach
 fern down
 fern resume
 fern status

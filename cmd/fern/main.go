@@ -8,9 +8,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -40,6 +43,8 @@ func run(args []string, log *slog.Logger) error {
 	switch args[0] {
 	case "up":
 		return runUp(args[1:], log)
+	case "attach":
+		return runAttach(args[1:])
 	case "down":
 		return runDown(args[1:], log)
 	case "resume":
@@ -54,6 +59,79 @@ func run(args []string, log *slog.Logger) error {
 		}
 	}
 	return usage()
+}
+
+func runAttach(args []string) error {
+	cfg, flags, err := commandConfig("attach", args)
+	if err != nil {
+		return err
+	}
+	listenAddress := flags.String("listen", cfg.Listen, "proxy listen address")
+	selection, err := configSelection(args)
+	if err != nil {
+		return err
+	}
+	_ = flags.String("config", selection.path, "configuration file")
+	if err := parseFlags(flags, args); err != nil {
+		return err
+	}
+	target, err := attachURL(*listenAddress)
+	if err != nil {
+		return err
+	}
+	executable, err := exec.LookPath("opencode")
+	if err != nil {
+		return errors.New("opencode is not installed or not in PATH; install it from https://opencode.ai")
+	}
+	environment := forwardedEnvironment(cfg.Workspace.Env)
+	command := exec.Command(executable, "attach", target)
+	command.Env = attachEnvironment(os.Environ(), environment)
+	command.Stdin = os.Stdin
+	command.Stdout = os.Stdout
+	command.Stderr = os.Stderr
+	if err := command.Run(); err != nil {
+		return fmt.Errorf("opencode attach: %w", err)
+	}
+	return nil
+}
+
+func attachURL(address string) (string, error) {
+	host, portText, err := net.SplitHostPort(address)
+	if err != nil {
+		return "", fmt.Errorf("invalid proxy listen address %q: %w", address, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 || port > 65535 {
+		return "", fmt.Errorf("invalid proxy port %q", portText)
+	}
+	ip := net.ParseIP(host)
+	if host == "" || ip != nil && ip.IsUnspecified() {
+		if ip != nil && ip.To4() == nil {
+			host = "::1"
+		} else {
+			host = "127.0.0.1"
+		}
+	}
+	return (&url.URL{Scheme: "http", Host: net.JoinHostPort(host, portText)}).String(), nil
+}
+
+func attachEnvironment(base []string, configured map[string]string) []string {
+	const username = "OPENCODE_SERVER_USERNAME"
+	const password = "OPENCODE_SERVER_PASSWORD"
+	result := make([]string, 0, len(base)+2)
+	for _, value := range base {
+		key, _, _ := strings.Cut(value, "=")
+		if key != username && key != password {
+			result = append(result, value)
+		}
+	}
+	if value := configured[username]; value != "" {
+		result = append(result, username+"="+value)
+	}
+	if value := configured[password]; value != "" {
+		result = append(result, password+"="+value)
+	}
+	return result
 }
 
 func runUp(args []string, log *slog.Logger) error {
@@ -192,7 +270,7 @@ func runUp(args []string, log *slog.Logger) error {
 		return nil
 	})
 
-	fmt.Printf("workspace: %s\ndirect: %s\nproxy: http://%s\nready in: %s\n", spec.Name, ep.URL(), listener.Addr(), time.Since(start).Round(time.Millisecond))
+	fmt.Printf("workspace: %s\ndirect: %s\nproxy: http://%s\nready in: %s\nattach: fern attach\n", spec.Name, ep.URL(), listener.Addr(), time.Since(start).Round(time.Millisecond))
 	log.Info("proxy listening", "address", listener.Addr(), "workspace", spec.Name)
 	err = group.Wait()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -548,6 +626,6 @@ func statePath(child string) (string, error) {
 }
 
 func usage() error {
-	fmt.Fprintln(os.Stderr, "usage: fern <up|down|resume|status|logs|debug events> [flags]")
+	fmt.Fprintln(os.Stderr, "usage: fern <up|attach|down|resume|status|logs|debug events> [flags]")
 	return errors.New("invalid command")
 }

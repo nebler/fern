@@ -44,6 +44,8 @@ Kubernetes, setup snapshots, resume hooks, ingress, and the credential proxy are
 docker build -t fern/opencode:dev images/opencode
 cp fern.example.yaml fern.yaml
 go run ./cmd/fern up
+# In another terminal:
+go run ./cmd/fern attach
 ```
 
 The command remains in the foreground because it owns the watcher, idle supervisor, lock, and proxy. It prints output similar to:
@@ -62,6 +64,11 @@ curl -s http://127.0.0.1:8080/global/health | jq
 curl -N http://127.0.0.1:8080/event
 ```
 
+`fern attach` loads the proxy address and OpenCode server credentials from the
+same configuration, then starts the official OpenCode TUI with
+`opencode attach <proxy-url>`. Credentials are passed through the child
+environment rather than command-line arguments.
+
 `fern up` forwards these host variables when present:
 
 - `ANTHROPIC_API_KEY`
@@ -75,6 +82,7 @@ Additional environment values can be declared under `workspace.env` in `fern.yam
 
 ```bash
 go run ./cmd/fern up
+go run ./cmd/fern attach
 go run ./cmd/fern status
 go run ./cmd/fern resume
 go run ./cmd/fern logs

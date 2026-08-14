@@ -3,8 +3,48 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
+
+func TestAttachURLUsesReachableAddress(t *testing.T) {
+	t.Parallel()
+	tests := map[string]string{
+		"127.0.0.1:8080":  "http://127.0.0.1:8080",
+		"0.0.0.0:8080":    "http://127.0.0.1:8080",
+		":8080":           "http://127.0.0.1:8080",
+		"[::]:8080":       "http://[::1]:8080",
+		"100.64.0.1:8080": "http://100.64.0.1:8080",
+	}
+	for input, want := range tests {
+		got, err := attachURL(input)
+		if err != nil {
+			t.Fatalf("attachURL(%q): %v", input, err)
+		}
+		if got != want {
+			t.Fatalf("attachURL(%q) = %q, want %q", input, got, want)
+		}
+	}
+	if _, err := attachURL("127.0.0.1:0"); err == nil {
+		t.Fatal("attachURL accepted a dynamic port")
+	}
+}
+
+func TestAttachEnvironmentReplacesAuthentication(t *testing.T) {
+	t.Parallel()
+	got := attachEnvironment(
+		[]string{"PATH=/bin", "OPENCODE_SERVER_USERNAME=old", "OPENCODE_SERVER_PASSWORD=old"},
+		map[string]string{"OPENCODE_SERVER_USERNAME": "agent", "OPENCODE_SERVER_PASSWORD": "secret"},
+	)
+	for _, want := range []string{"PATH=/bin", "OPENCODE_SERVER_USERNAME=agent", "OPENCODE_SERVER_PASSWORD=secret"} {
+		if !slices.Contains(got, want) {
+			t.Fatalf("environment %v does not contain %q", got, want)
+		}
+	}
+	if slices.Contains(got, "OPENCODE_SERVER_PASSWORD=old") {
+		t.Fatalf("environment retained old password: %v", got)
+	}
+}
 
 func TestConfigSelectionSupportsLongFlags(t *testing.T) {
 	t.Parallel()
