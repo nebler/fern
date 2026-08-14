@@ -1,4 +1,4 @@
-module github.com/noah/fern
+module github.com/nebler/fern
 
 go 1.24.0
 

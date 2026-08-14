@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/noah/fern/internal/runtime"
+	"github.com/nebler/fern/internal/runtime"
 )
 
 func AllSessionsIdle(ctx context.Context, ep runtime.Endpoint, auth runtime.ServerAuth) (bool, error) {

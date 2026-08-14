@@ -8,7 +8,7 @@ import (
 	"strconv"
 	"testing"
 
-	"github.com/noah/fern/internal/runtime"
+	"github.com/nebler/fern/internal/runtime"
 )
 
 func TestAllSessionsIdleUsesAuthAndRejectsBusy(t *testing.T) {

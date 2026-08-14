@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/noah/fern/internal/runtime"
-	"github.com/noah/fern/internal/workspace"
+	"github.com/nebler/fern/internal/runtime"
+	"github.com/nebler/fern/internal/workspace"
 )
 
 type staticWaker struct {
