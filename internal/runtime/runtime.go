@@ -1,7 +1,6 @@
 package runtime
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -98,12 +97,4 @@ type Observation struct {
 	Endpoint        Endpoint
 	HasEndpoint     bool
 	SpecFingerprint string
-}
-
-type Runtime interface {
-	Create(ctx context.Context, spec Spec) (Endpoint, error)
-	Pause(ctx context.Context, name string) error
-	Resume(ctx context.Context, spec Spec) (Endpoint, error)
-	Destroy(ctx context.Context, name string) error
-	Status(ctx context.Context, name string) (Observation, error)
 }

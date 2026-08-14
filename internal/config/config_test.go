@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestParseMemoryBytes(t *testing.T) {
@@ -43,13 +44,43 @@ func TestValidateRejectsUnauthenticatedRemoteListen(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsDynamicProxyPort(t *testing.T) {
+	t.Parallel()
+	config := Default(t.TempDir())
+	config.Listen = "127.0.0.1:0"
+	if err := Validate(config); err == nil {
+		t.Fatal("Validate accepted proxy port 0")
+	}
+}
+
+func TestLoadAppliesOverridesBeforeNormalization(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	repo := filepath.Join(directory, "repo")
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "fern.yaml")
+	if err := os.WriteFile(path, []byte("workspace:\n  repo: ${MISSING_REPO}\nidle:\n  after: invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	idle := "1m"
+	loaded, err := Load(path, directory, true, Overrides{Repo: &repo, IdleAfter: &idle})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Workspace.Repo != repo || loaded.IdleAfter != time.Minute {
+		t.Fatalf("loaded repo=%q idle=%s", loaded.Workspace.Repo, loaded.IdleAfter)
+	}
+}
+
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "fern.yaml")
 	if err := os.WriteFile(path, []byte("workspace:\n  naem: demo\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path, directory, true); err == nil {
+	if _, err := Load(path, directory, true, Overrides{}); err == nil {
 		t.Fatal("Load accepted an unknown field")
 	}
 }
@@ -67,7 +98,7 @@ func TestLoadRejectsMissingEnvironmentReference(t *testing.T) {
 	if err := os.WriteFile(path, []byte("workspace:\n  env:\n    TOKEN: ${FERN_TEST_MISSING}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path, directory, true); err == nil {
+	if _, err := Load(path, directory, true, Overrides{}); err == nil {
 		t.Fatal("Load accepted a missing environment variable")
 	}
 }
@@ -78,7 +109,7 @@ func TestLoadSupportsEscapedDollarAndRejectsTrailingDocument(t *testing.T) {
 	if err := os.WriteFile(path, []byte("workspace:\n  env:\n    PRICE: '$$5'\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := Load(path, directory, true)
+	loaded, err := Load(path, directory, true, Overrides{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +119,7 @@ func TestLoadSupportsEscapedDollarAndRejectsTrailingDocument(t *testing.T) {
 	if err := os.WriteFile(path, []byte("workspace: {}\n---\nworkspace: {}\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path, directory, true); err == nil {
+	if _, err := Load(path, directory, true, Overrides{}); err == nil {
 		t.Fatal("Load accepted multiple YAML documents")
 	}
 }
@@ -103,7 +134,7 @@ func TestLoadResolvesRepoRelativeToConfig(t *testing.T) {
 	if err := os.WriteFile(path, []byte("workspace:\n  repo: ./repo\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	config, err := Load(path, "/wrong", true)
+	config, err := Load(path, "/wrong", true, Overrides{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -19,16 +19,34 @@ import (
 
 var workspaceNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
+type Workspace struct {
+	Name   string
+	Image  string
+	Repo   string
+	Memory string
+	Env    map[string]string
+}
+
 type Config struct {
-	Workspace struct {
-		Name   string
-		Image  string
-		Repo   string
-		Memory string
-		Env    map[string]string
-	}
+	Workspace Workspace
 	IdleAfter time.Duration
 	Listen    string
+}
+
+type Overrides struct {
+	Name      *string
+	Image     *string
+	Repo      *string
+	Memory    *string
+	IdleAfter *string
+	Listen    *string
+}
+
+type Client struct {
+	Name     string
+	Listen   string
+	Username string
+	Password string
 }
 
 type fileConfig struct {
@@ -59,58 +77,73 @@ func Default(repo string) Config {
 	return config
 }
 
-// Load decodes a strict YAML file and normalizes paths and environment values.
-// A missing default file is allowed; a missing explicitly selected file is not.
-func Load(path, defaultRepo string, required bool) (Config, error) {
+// Load merges defaults, a strict YAML file, and explicit CLI overrides before
+// normalizing values. Invalid file values do not block a valid higher-priority
+// override.
+func Load(path, defaultRepo string, required bool, overrides Overrides) (Config, error) {
 	config := Default(defaultRepo)
 	data, err := os.ReadFile(path)
 	if err != nil {
-		if os.IsNotExist(err) && !required {
-			return config, nil
+		if !os.IsNotExist(err) || required {
+			return Config{}, fmt.Errorf("read config %q: %w", path, err)
 		}
-		return Config{}, fmt.Errorf("read config %q: %w", path, err)
-	}
-
-	var file fileConfig
-	file.Workspace.Name = config.Workspace.Name
-	file.Workspace.Image = config.Workspace.Image
-	file.Workspace.Repo = config.Workspace.Repo
-	file.Workspace.Memory = config.Workspace.Memory
-	file.Workspace.Env = config.Workspace.Env
-	file.Idle.After = config.IdleAfter.String()
-	file.Proxy.Listen = config.Listen
-	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	decoder.KnownFields(true)
-	if err := decoder.Decode(&file); err != nil {
-		return Config{}, fmt.Errorf("parse config %q: %w", path, err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		if err == nil {
-			return Config{}, fmt.Errorf("parse config %q: multiple YAML documents are not allowed", path)
+	} else {
+		var file fileConfig
+		file.Workspace.Name = config.Workspace.Name
+		file.Workspace.Image = config.Workspace.Image
+		file.Workspace.Repo = config.Workspace.Repo
+		file.Workspace.Memory = config.Workspace.Memory
+		file.Workspace.Env = config.Workspace.Env
+		file.Idle.After = config.IdleAfter.String()
+		file.Proxy.Listen = config.Listen
+		if err := decode(data, &file, true); err != nil {
+			return Config{}, fmt.Errorf("parse config %q: %w", path, err)
 		}
-		return Config{}, fmt.Errorf("parse trailing config %q: %w", path, err)
+		config.Workspace = Workspace{
+			Name: file.Workspace.Name, Image: file.Workspace.Image, Repo: file.Workspace.Repo,
+			Memory: file.Workspace.Memory, Env: file.Workspace.Env,
+		}
+		config.Listen = file.Proxy.Listen
+		config.IdleAfter, err = time.ParseDuration(file.Idle.After)
+		if err != nil && overrides.IdleAfter == nil {
+			return Config{}, fmt.Errorf("parse idle.after: %w", err)
+		}
 	}
-
-	config.Workspace.Name = file.Workspace.Name
-	config.Workspace.Image = file.Workspace.Image
-	config.Workspace.Memory = file.Workspace.Memory
-	config.Workspace.Env = file.Workspace.Env
 	if config.Workspace.Env == nil {
 		config.Workspace.Env = make(map[string]string)
 	}
-	config.IdleAfter, err = time.ParseDuration(file.Idle.After)
-	if err != nil {
-		return Config{}, fmt.Errorf("parse idle.after: %w", err)
+	if overrides.Name != nil {
+		config.Workspace.Name = *overrides.Name
 	}
-	config.Listen = file.Proxy.Listen
+	if overrides.Image != nil {
+		config.Workspace.Image = *overrides.Image
+	}
+	if overrides.Repo != nil {
+		config.Workspace.Repo = *overrides.Repo
+	}
+	if overrides.Memory != nil {
+		config.Workspace.Memory = *overrides.Memory
+	}
+	if overrides.IdleAfter != nil {
+		config.IdleAfter, err = time.ParseDuration(*overrides.IdleAfter)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse idle duration: %w", err)
+		}
+	}
+	if overrides.Listen != nil {
+		config.Listen = *overrides.Listen
+	}
 
-	repo, err := expandRequired(file.Workspace.Repo)
+	repo, err := expandRequired(config.Workspace.Repo)
 	if err != nil {
 		return Config{}, fmt.Errorf("expand workspace.repo: %w", err)
 	}
 	if !filepath.IsAbs(repo) {
-		repo, err = filepath.Abs(filepath.Join(filepath.Dir(path), repo))
+		base := filepath.Dir(path)
+		if overrides.Repo != nil {
+			base = defaultRepo
+		}
+		repo, err = filepath.Abs(filepath.Join(base, repo))
 		if err != nil {
 			return Config{}, fmt.Errorf("resolve repository path: %w", err)
 		}
@@ -124,6 +157,61 @@ func Load(path, defaultRepo string, required bool) (Config, error) {
 		config.Workspace.Env[key] = expanded
 	}
 	return config, nil
+}
+
+// LoadClient reads only values needed by attach and diagnostic commands.
+func LoadClient(path string, required bool) (Client, error) {
+	client := Client{Name: "demo", Listen: "127.0.0.1:8080"}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) && !required {
+			return client, nil
+		}
+		return Client{}, fmt.Errorf("read config %q: %w", path, err)
+	}
+	var file struct {
+		Workspace struct {
+			Name string            `yaml:"name"`
+			Env  map[string]string `yaml:"env"`
+		} `yaml:"workspace"`
+		Proxy struct {
+			Listen string `yaml:"listen"`
+		} `yaml:"proxy"`
+	}
+	if err := decode(data, &file, false); err != nil {
+		return Client{}, fmt.Errorf("parse config %q: %w", path, err)
+	}
+	if file.Workspace.Name != "" {
+		client.Name = file.Workspace.Name
+	}
+	if file.Proxy.Listen != "" {
+		client.Listen = file.Proxy.Listen
+	}
+	client.Username, err = expandOptional(file.Workspace.Env["OPENCODE_SERVER_USERNAME"])
+	if err != nil {
+		return Client{}, fmt.Errorf("expand OPENCODE_SERVER_USERNAME: %w", err)
+	}
+	client.Password, err = expandOptional(file.Workspace.Env["OPENCODE_SERVER_PASSWORD"])
+	if err != nil {
+		return Client{}, fmt.Errorf("expand OPENCODE_SERVER_PASSWORD: %w", err)
+	}
+	return client, nil
+}
+
+func decode(data []byte, target any, strict bool) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(strict)
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple YAML documents are not allowed")
+		}
+		return fmt.Errorf("parse trailing document: %w", err)
+	}
+	return nil
 }
 
 func Validate(config Config) error {
@@ -180,9 +268,13 @@ func ValidateWorkspaceName(name string) error {
 }
 
 func validateListen(address string, authenticated bool) error {
-	host, _, err := net.SplitHostPort(address)
+	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
 		return fmt.Errorf("invalid proxy listen address %q: %w", address, err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 || port > 65535 {
+		return fmt.Errorf("invalid proxy port %q", portText)
 	}
 	if authenticated {
 		return nil
@@ -280,4 +372,11 @@ func expandRequired(value string) (string, error) {
 		return "", fmt.Errorf("environment variable %s is not set", missing)
 	}
 	return strings.ReplaceAll(expanded, literalDollar, "$"), nil
+}
+
+func expandOptional(value string) (string, error) {
+	if value == "" {
+		return "", nil
+	}
+	return expandRequired(value)
 }

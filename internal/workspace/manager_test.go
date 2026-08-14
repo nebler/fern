@@ -3,8 +3,6 @@ package workspace
 import (
 	"context"
 	"errors"
-	"io"
-	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -87,7 +85,7 @@ func TestObserverRollbackUsesIndependentContext(t *testing.T) {
 	manager := NewManager(serviceCtx, fake, runtime.Spec{Name: "demo"}, func(context.Context, runtime.Endpoint, bool) error {
 		cancelService()
 		return errors.New("observer failed")
-	}, alwaysIdle, nil, discardLogger())
+	}, alwaysIdle, nil)
 	_, _ = manager.EnsureRunning(context.Background())
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
@@ -102,6 +100,24 @@ func (f *fakeRuntime) Resume(context.Context, runtime.Spec) (runtime.Endpoint, e
 	f.resumeN++
 	f.state = runtime.StateRunning
 	return f.endpoint, nil
+}
+
+func (f *fakeRuntime) EnsureRunning(ctx context.Context, spec runtime.Spec) (runtime.Endpoint, bool, error) {
+	f.mu.Lock()
+	state := f.state
+	f.mu.Unlock()
+	switch state {
+	case runtime.StateAbsent:
+		ep, err := f.Create(ctx, spec)
+		return ep, true, err
+	case runtime.StatePaused, runtime.StateProvisioning:
+		ep, err := f.Resume(ctx, spec)
+		return ep, true, err
+	case runtime.StateRunning:
+		return f.endpoint, false, nil
+	default:
+		return runtime.Endpoint{}, false, runtime.ErrFailed
+	}
 }
 
 func (f *fakeRuntime) Destroy(context.Context, string) error { return nil }
@@ -258,12 +274,8 @@ func TestCloseWaitsForActiveRequestAndRejectsNewWork(t *testing.T) {
 	}
 }
 
-func newTestManager(fake runtime.Runtime, observe EndpointObserver, idle IdleChecker) *Manager {
-	return NewManager(context.Background(), fake, runtime.Spec{Name: "demo"}, observe, idle, nil, discardLogger())
+func newTestManager(fake lifecycleRuntime, observe EndpointObserver, idle IdleChecker) *Manager {
+	return NewManager(context.Background(), fake, runtime.Spec{Name: "demo"}, observe, idle, nil)
 }
 
 func alwaysIdle(context.Context, runtime.Endpoint) (bool, error) { return true, nil }
-
-func discardLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
-}

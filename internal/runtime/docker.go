@@ -69,6 +69,10 @@ func (d *Docker) Create(ctx context.Context, spec Spec) (Endpoint, error) {
 	if existing.State != StateAbsent {
 		return Endpoint{}, fmt.Errorf("create %q: workspace already exists", spec.Name)
 	}
+	return d.create(ctx, spec)
+}
+
+func (d *Docker) create(ctx context.Context, spec Spec) (Endpoint, error) {
 	if err := d.ensureVolume(ctx, spec.Name); err != nil {
 		return Endpoint{}, err
 	}
@@ -180,6 +184,35 @@ func (d *Docker) Resume(ctx context.Context, spec Spec) (Endpoint, error) {
 	if err != nil {
 		return Endpoint{}, err
 	}
+	return d.resumeObserved(ctx, spec, observation)
+}
+
+func (d *Docker) EnsureRunning(ctx context.Context, spec Spec) (Endpoint, bool, error) {
+	if err := spec.Validate(); err != nil {
+		return Endpoint{}, false, err
+	}
+	observation, err := d.Status(ctx, spec.Name)
+	if err != nil {
+		return Endpoint{}, false, err
+	}
+	switch observation.State {
+	case StateAbsent:
+		ep, err := d.create(ctx, spec)
+		return ep, true, err
+	case StatePaused, StateProvisioning:
+		ep, err := d.resumeObserved(ctx, spec, observation)
+		return ep, true, err
+	case StateRunning:
+		ep, err := d.resumeObserved(ctx, spec, observation)
+		return ep, false, err
+	case StateFailed:
+		return Endpoint{}, false, fmt.Errorf("%w: inspect logs and run 'fern down' before recreating", ErrFailed)
+	default:
+		return Endpoint{}, false, fmt.Errorf("unexpected workspace state %q", observation.State)
+	}
+}
+
+func (d *Docker) resumeObserved(ctx context.Context, spec Spec, observation Observation) (Endpoint, error) {
 	if observation.State == StateAbsent {
 		return Endpoint{}, fmt.Errorf("resume %q: workspace is absent", spec.Name)
 	}
@@ -284,7 +317,7 @@ func (d *Docker) Destroy(ctx context.Context, name string) error {
 		}
 		observation.Running = true
 	}
-	if observation.Running || observation.State == StateProvisioning {
+	if observation.Running {
 		timeout := 10
 		if err := d.cli.ContainerStop(ctx, observation.ContainerID, container.StopOptions{Timeout: &timeout}); err != nil && !errdefs.IsNotFound(err) {
 			return fmt.Errorf("stop %q before destroy: %w", name, err)
@@ -462,9 +495,6 @@ func (d *Docker) verifyActualSpec(ctx context.Context, containerID string, spec 
 	for _, entry := range info.Config.Env {
 		key, value, _ := strings.Cut(entry, "=")
 		actualEnv[key] = value
-	}
-	if len(actualEnv) != len(spec.Env) {
-		return fmt.Errorf("%w: container environment was modified", ErrSpecDrift)
 	}
 	for key, value := range spec.Env {
 		actual, exists := actualEnv[key]

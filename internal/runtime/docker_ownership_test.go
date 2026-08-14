@@ -13,6 +13,7 @@ import (
 	"testing"
 
 	"github.com/docker/docker/client"
+	"github.com/docker/go-connections/nat"
 )
 
 type memoryIntentStore struct{}
@@ -118,6 +119,78 @@ func TestCreateVerifiesVolumeReturnedAfterCreateRace(t *testing.T) {
 	}
 	if got := containerCreates.Load(); got != 0 {
 		t.Fatalf("created %d containers using a foreign volume", got)
+	}
+}
+
+func TestVerifyActualSpecAllowsImageEnvironment(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || !strings.HasSuffix(request.URL.Path, "/containers/container-id/json") {
+			http.NotFound(writer, request)
+			return
+		}
+		useInit := true
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"Id": "container-id",
+			"Config": map[string]any{
+				"Image":        "image:test",
+				"Env":          []string{"FERN=value", "PATH=/usr/local/bin", "IMAGE_VERSION=1"},
+				"ExposedPorts": nat.PortSet{nat.Port(workspacePort): struct{}{}},
+			},
+			"HostConfig": map[string]any{
+				"Memory":       1024,
+				"Init":         useInit,
+				"PortBindings": nat.PortMap{nat.Port(workspacePort): []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "49152"}}},
+			},
+			"Mounts": []map[string]any{
+				{"Type": "bind", "Source": "/repo", "Destination": "/home/user/workspace", "RW": true},
+				{"Type": "volume", "Name": "fern-demo-data", "Destination": "/home/user/.local/share/opencode", "RW": true},
+			},
+			"State":           map[string]any{"Status": "running", "Running": true},
+			"NetworkSettings": map[string]any{"Ports": map[string]any{}},
+		})
+	}))
+	defer server.Close()
+
+	docker := testDocker(t, server)
+	spec := ownershipTestSpec()
+	spec.Env = map[string]string{"FERN": "value"}
+	if err := docker.verifyActualSpec(context.Background(), "container-id", spec); err != nil {
+		t.Fatalf("image-provided environment caused drift: %v", err)
+	}
+}
+
+func TestDestroyCreatedContainerDoesNotStopIt(t *testing.T) {
+	t.Parallel()
+	var stops, removes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/containers/demo/json"):
+			writeJSON(writer, http.StatusOK, map[string]any{
+				"Id": "created-id",
+				"Config": map[string]any{"Labels": map[string]string{
+					managedLabel: "true", workspaceLabel: "demo",
+				}},
+				"State":           map[string]any{"Status": "created", "Running": false},
+				"NetworkSettings": map[string]any{"Ports": map[string]any{}},
+			})
+		case request.Method == http.MethodPost && strings.Contains(request.URL.Path, "/stop"):
+			stops.Add(1)
+			writer.WriteHeader(http.StatusNoContent)
+		case request.Method == http.MethodDelete && strings.Contains(request.URL.Path, "/containers/created-id"):
+			removes.Add(1)
+			writer.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	if err := testDocker(t, server).Destroy(context.Background(), "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if stops.Load() != 0 || removes.Load() != 1 {
+		t.Fatalf("stop calls = %d, remove calls = %d", stops.Load(), removes.Load())
 	}
 }
 

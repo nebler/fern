@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"sync"
 	"time"
 
@@ -26,9 +25,8 @@ type RequestIntent struct {
 }
 
 type lifecycleRuntime interface {
-	Create(context.Context, runtime.Spec) (runtime.Endpoint, error)
+	EnsureRunning(context.Context, runtime.Spec) (runtime.Endpoint, bool, error)
 	Pause(context.Context, string) error
-	Resume(context.Context, runtime.Spec) (runtime.Endpoint, error)
 	Status(context.Context, string) (runtime.Observation, error)
 }
 
@@ -47,7 +45,6 @@ type Manager struct {
 	observe    EndpointObserver
 	allIdle    IdleChecker
 	onRequest  RequestObserver
-	log        *slog.Logger
 
 	wakeTimeout  time.Duration
 	wakeMu       sync.Mutex
@@ -59,7 +56,7 @@ type Manager struct {
 	requestsDone chan struct{}
 }
 
-func NewManager(serviceCtx context.Context, rt lifecycleRuntime, spec runtime.Spec, observe EndpointObserver, allIdle IdleChecker, onRequest RequestObserver, log *slog.Logger) *Manager {
+func NewManager(serviceCtx context.Context, rt lifecycleRuntime, spec runtime.Spec, observe EndpointObserver, allIdle IdleChecker, onRequest RequestObserver) *Manager {
 	manager := &Manager{
 		serviceCtx:   serviceCtx,
 		runtime:      rt,
@@ -67,7 +64,6 @@ func NewManager(serviceCtx context.Context, rt lifecycleRuntime, spec runtime.Sp
 		observe:      observe,
 		allIdle:      allIdle,
 		onRequest:    onRequest,
-		log:          log,
 		wakeTimeout:  65 * time.Second,
 		lifecycle:    make(chan struct{}, 1),
 		admission:    make(chan struct{}, 1),
@@ -166,29 +162,7 @@ func (m *Manager) ensureRunning(ctx context.Context) (runtime.Endpoint, error) {
 	if m.isClosing() {
 		return runtime.Endpoint{}, errors.New("workspace manager is shutting down")
 	}
-	observation, err := m.runtime.Status(ctx, m.spec.Name)
-	if err != nil {
-		return runtime.Endpoint{}, err
-	}
-
-	var ep runtime.Endpoint
-	transitioned := false
-	switch observation.State {
-	case runtime.StateAbsent:
-		m.log.Info("creating workspace", "workspace", m.spec.Name)
-		ep, err = m.runtime.Create(ctx, m.spec)
-		transitioned = true
-	case runtime.StatePaused, runtime.StateProvisioning:
-		m.log.Info("waking workspace", "workspace", m.spec.Name, "state", observation.State)
-		ep, err = m.runtime.Resume(ctx, m.spec)
-		transitioned = true
-	case runtime.StateRunning:
-		ep, err = m.runtime.Resume(ctx, m.spec)
-	case runtime.StateFailed:
-		return runtime.Endpoint{}, fmt.Errorf("%w: inspect logs and run 'fern down' before recreating", runtime.ErrFailed)
-	default:
-		return runtime.Endpoint{}, fmt.Errorf("unexpected workspace state %q", observation.State)
-	}
+	ep, transitioned, err := m.runtime.EnsureRunning(ctx, m.spec)
 	if err != nil {
 		return runtime.Endpoint{}, err
 	}
