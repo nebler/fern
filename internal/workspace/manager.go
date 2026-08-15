@@ -268,11 +268,7 @@ func (m *Manager) Pause(ctx context.Context) error {
 		return err
 	}
 	if observation.State == runtime.StateProvisioning {
-		if err := m.runtime.Pause(ctx, m.spec.Name); err != nil {
-			return err
-		}
-		m.clearEndpoint()
-		return nil
+		return m.pauseRuntime(ctx)
 	}
 	if observation.State != runtime.StateRunning {
 		m.clearEndpoint()
@@ -291,11 +287,20 @@ func (m *Manager) Pause(ctx context.Context) error {
 	if !idle {
 		return ErrSessionsActive
 	}
-	if err := m.runtime.Pause(ctx, m.spec.Name); err != nil {
-		return err
+	return m.pauseRuntime(ctx)
+}
+
+func (m *Manager) pauseRuntime(ctx context.Context) error {
+	m.wakeMu.Lock()
+	target := RequestTarget{Endpoint: m.endpoint, Generation: m.endpointGeneration}
+	hasEndpoint := m.hasEndpoint
+	m.wakeMu.Unlock()
+
+	err := m.runtime.Pause(ctx, m.spec.Name)
+	if hasEndpoint {
+		m.InvalidateEndpoint(target)
 	}
-	m.clearEndpoint()
-	return nil
+	return err
 }
 
 func (m *Manager) Close(ctx context.Context) error {
