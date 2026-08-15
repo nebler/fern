@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/docker/docker/client"
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/registry"
 	"github.com/nebler/fern/internal/runtime"
@@ -90,11 +91,40 @@ func acquireWorkspaceLease(name string) (*registry.Lease, error) {
 }
 
 func newDocker(log *slog.Logger) (*runtime.Docker, error) {
+	if err := validateDockerTopology(); err != nil {
+		return nil, err
+	}
 	stateDirectory, err := statePath("state")
 	if err != nil {
 		return nil, err
 	}
 	return runtime.NewDocker(log, registry.NewIntentStore(stateDirectory))
+}
+
+func validateDockerTopology() error {
+	host := os.Getenv(client.EnvOverrideHost)
+	if host == "" {
+		return nil
+	}
+	hostURL, err := client.ParseHostURL(host)
+	if err != nil {
+		return unsupportedDockerTopology(host, err)
+	}
+	if hostURL.Scheme != "unix" {
+		return unsupportedDockerTopology(host, nil)
+	}
+	if !filepath.IsAbs(hostURL.Host) {
+		return unsupportedDockerTopology(host, fmt.Errorf("Unix socket path must be absolute"))
+	}
+	return nil
+}
+
+func unsupportedDockerTopology(host string, cause error) error {
+	reason := "only local Unix socket endpoints are supported"
+	if cause != nil {
+		reason = cause.Error()
+	}
+	return fmt.Errorf("unsupported DOCKER_HOST %q: %s; Fern requires Docker on this machine for bind mounts, loopback publication, and host-local coordination", host, reason)
 }
 
 func commandContext() (context.Context, context.CancelFunc) {
