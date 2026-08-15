@@ -122,12 +122,9 @@ func runEvents(args []string, log *slog.Logger) error {
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	client, err := config.LoadClient(*configPath, flagSet(fs, "config"))
+	client, err := config.LoadEvents(*configPath, flagSet(fs, "config"), optionalFlag(fs, "name", nameFlag))
 	if err != nil {
 		return err
-	}
-	if flagSet(fs, "name") {
-		client.Name = *nameFlag
 	}
 	if err := config.ValidateWorkspaceName(client.Name); err != nil {
 		return err
@@ -183,5 +180,9 @@ func runLogs(args []string, log *slog.Logger) error {
 		return err
 	}
 	defer docker.Close()
-	return docker.StreamLogs(ctx, name, *follow, os.Stdout, os.Stderr)
+	err = docker.StreamLogs(ctx, name, *follow, os.Stdout, os.Stderr)
+	if ctx.Err() != nil {
+		return nil
+	}
+	return err
 }

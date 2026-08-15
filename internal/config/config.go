@@ -49,20 +49,20 @@ type Client struct {
 }
 
 type fileWorkspace struct {
-	Name   string            `yaml:"name"`
-	Image  string            `yaml:"image"`
-	Repo   string            `yaml:"repo"`
-	Memory string            `yaml:"memory"`
-	Env    map[string]string `yaml:"env"`
+	Name   yaml.Node `yaml:"name"`
+	Image  yaml.Node `yaml:"image"`
+	Repo   yaml.Node `yaml:"repo"`
+	Memory yaml.Node `yaml:"memory"`
+	Env    yaml.Node `yaml:"env"`
 }
 
 type fileConfig struct {
 	Workspace fileWorkspace `yaml:"workspace"`
 	Idle      struct {
-		After string `yaml:"after"`
+		After yaml.Node `yaml:"after"`
 	} `yaml:"idle"`
 	Proxy struct {
-		Listen string `yaml:"listen"`
+		Listen yaml.Node `yaml:"listen"`
 	} `yaml:"proxy"`
 }
 
@@ -99,31 +99,34 @@ func load(path, defaultRepo string, required bool, overrides Overrides, workspac
 			return Config{}, fmt.Errorf("read config %q: %w", path, err)
 		}
 	} else {
-		workspace := fileWorkspace{
-			Name: config.Workspace.Name, Image: config.Workspace.Image, Repo: config.Workspace.Repo,
-			Memory: config.Workspace.Memory, Env: config.Workspace.Env,
-		}
+		var file fileConfig
 		if workspaceOnly {
-			if err := decodeWorkspace(data, &workspace); err != nil {
+			if err := decodeWorkspace(data, &file.Workspace); err != nil {
 				return Config{}, fmt.Errorf("parse config %q: %w", path, err)
 			}
 		} else {
-			file := fileConfig{Workspace: workspace}
-			file.Idle.After = config.IdleAfter.String()
-			file.Proxy.Listen = config.Listen
 			if err := decode(data, &file, true); err != nil {
 				return Config{}, fmt.Errorf("parse config %q: %w", path, err)
 			}
-			workspace = file.Workspace
-			config.Listen = file.Proxy.Listen
-			config.IdleAfter, err = time.ParseDuration(file.Idle.After)
-			if err != nil && overrides.IdleAfter == nil {
-				return Config{}, fmt.Errorf("parse idle.after: %w", err)
+			if overrides.IdleAfter == nil && file.Idle.After.Kind != 0 {
+				value, err := decodeString(file.Idle.After)
+				if err != nil {
+					return Config{}, fmt.Errorf("parse idle.after: %w", err)
+				}
+				config.IdleAfter, err = time.ParseDuration(value)
+				if err != nil {
+					return Config{}, fmt.Errorf("parse idle.after: %w", err)
+				}
+			}
+			if overrides.Listen == nil && file.Proxy.Listen.Kind != 0 {
+				config.Listen, err = decodeString(file.Proxy.Listen)
+				if err != nil {
+					return Config{}, fmt.Errorf("parse proxy.listen: %w", err)
+				}
 			}
 		}
-		config.Workspace = Workspace{
-			Name: workspace.Name, Image: workspace.Image, Repo: workspace.Repo,
-			Memory: workspace.Memory, Env: workspace.Env,
+		if err := applyFileWorkspace(&config.Workspace, file.Workspace, overrides); err != nil {
+			return Config{}, fmt.Errorf("parse workspace: %w", err)
 		}
 	}
 	if config.Workspace.Env == nil {
@@ -179,45 +182,111 @@ func load(path, defaultRepo string, required bool, overrides Overrides, workspac
 	return config, nil
 }
 
-// LoadClient reads only values needed by attach and diagnostic commands.
-func LoadClient(path string, required bool) (Client, error) {
+func LoadAttach(path string, required bool, listenOverride *string) (Client, error) {
 	client := Client{Name: "demo", Listen: "127.0.0.1:8080", Env: make(map[string]string)}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) && !required {
-			return client, nil
-		}
-		return Client{}, fmt.Errorf("read config %q: %w", path, err)
+	if listenOverride != nil {
+		client.Listen = *listenOverride
 	}
-	var file struct {
-		Workspace struct {
-			Name string            `yaml:"name"`
-			Env  map[string]string `yaml:"env"`
-		} `yaml:"workspace"`
-		Proxy struct {
-			Listen *string `yaml:"listen"`
-		} `yaml:"proxy"`
+	sections, err := loadSections(path, required)
+	if err != nil || sections == nil {
+		return client, err
 	}
-	if err := decode(data, &file, false); err != nil {
-		return Client{}, fmt.Errorf("parse config %q: %w", path, err)
-	}
-	if file.Workspace.Name != "" {
-		client.Name = file.Workspace.Name
-	}
-	if file.Proxy.Listen != nil {
-		client.Listen = *file.Proxy.Listen
-	}
-	for _, key := range []string{"OPENCODE_SERVER_USERNAME", "OPENCODE_SERVER_PASSWORD"} {
-		value, exists := file.Workspace.Env[key]
-		if !exists {
-			continue
-		}
-		client.Env[key], err = expandRequired(value)
+	if proxy, exists := sections["proxy"]; exists && listenOverride == nil {
+		fields, err := decodeNodeMap(proxy)
 		if err != nil {
-			return Client{}, fmt.Errorf("expand %s: %w", key, err)
+			return Client{}, fmt.Errorf("parse proxy: %w", err)
+		}
+		if listen, exists := fields["listen"]; exists {
+			client.Listen, err = decodeString(listen)
+			if err != nil {
+				return Client{}, fmt.Errorf("parse proxy.listen: %w", err)
+			}
+		}
+	}
+	if workspace, exists := sections["workspace"]; exists {
+		if err := loadClientAuth(workspace, client.Env); err != nil {
+			return Client{}, err
 		}
 	}
 	return client, nil
+}
+
+func LoadEvents(path string, required bool, nameOverride *string) (Client, error) {
+	client := Client{Name: "demo", Env: make(map[string]string)}
+	if nameOverride != nil {
+		client.Name = *nameOverride
+	}
+	sections, err := loadSections(path, required)
+	if err != nil || sections == nil {
+		return client, err
+	}
+	workspace, exists := sections["workspace"]
+	if !exists {
+		return client, nil
+	}
+	fields, err := decodeNodeMap(workspace)
+	if err != nil {
+		return Client{}, fmt.Errorf("parse workspace: %w", err)
+	}
+	if name, exists := fields["name"]; exists && nameOverride == nil {
+		client.Name, err = decodeString(name)
+		if err != nil {
+			return Client{}, fmt.Errorf("parse workspace.name: %w", err)
+		}
+	}
+	if err := loadAuthFields(fields, client.Env); err != nil {
+		return Client{}, err
+	}
+	return client, nil
+}
+
+func loadSections(path string, required bool) (map[string]yaml.Node, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) && !required {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read config %q: %w", path, err)
+	}
+	var sections map[string]yaml.Node
+	if err := decode(data, &sections, false); err != nil {
+		return nil, fmt.Errorf("parse config %q: %w", path, err)
+	}
+	return sections, nil
+}
+
+func loadClientAuth(workspace yaml.Node, env map[string]string) error {
+	fields, err := decodeNodeMap(workspace)
+	if err != nil {
+		return fmt.Errorf("parse workspace: %w", err)
+	}
+	return loadAuthFields(fields, env)
+}
+
+func loadAuthFields(workspace map[string]yaml.Node, env map[string]string) error {
+	envNode, exists := workspace["env"]
+	if !exists {
+		return nil
+	}
+	values, err := decodeNodeMap(envNode)
+	if err != nil {
+		return fmt.Errorf("parse workspace.env: %w", err)
+	}
+	for _, key := range []string{"OPENCODE_SERVER_USERNAME", "OPENCODE_SERVER_PASSWORD"} {
+		node, exists := values[key]
+		if !exists {
+			continue
+		}
+		value, err := decodeString(node)
+		if err != nil {
+			return fmt.Errorf("parse %s: %w", key, err)
+		}
+		env[key], err = expandRequired(value)
+		if err != nil {
+			return fmt.Errorf("expand %s: %w", key, err)
+		}
+	}
+	return nil
 }
 
 func decodeWorkspace(data []byte, workspace *fileWorkspace) error {
@@ -234,6 +303,52 @@ func decodeWorkspace(data []byte, workspace *fileWorkspace) error {
 		return err
 	}
 	return decode(data, workspace, true)
+}
+
+func applyFileWorkspace(workspace *Workspace, file fileWorkspace, overrides Overrides) error {
+	fields := []struct {
+		name     string
+		node     yaml.Node
+		override *string
+		target   *string
+	}{
+		{"name", file.Name, overrides.Name, &workspace.Name},
+		{"image", file.Image, overrides.Image, &workspace.Image},
+		{"repo", file.Repo, overrides.Repo, &workspace.Repo},
+		{"memory", file.Memory, overrides.Memory, &workspace.Memory},
+	}
+	for _, field := range fields {
+		if field.override != nil || field.node.Kind == 0 {
+			continue
+		}
+		value, err := decodeString(field.node)
+		if err != nil {
+			return fmt.Errorf("%s: %w", field.name, err)
+		}
+		*field.target = value
+	}
+	if file.Env.Kind != 0 {
+		if err := file.Env.Decode(&workspace.Env); err != nil {
+			return fmt.Errorf("env: %w", err)
+		}
+	}
+	return nil
+}
+
+func decodeNodeMap(node yaml.Node) (map[string]yaml.Node, error) {
+	var values map[string]yaml.Node
+	if err := node.Decode(&values); err != nil {
+		return nil, err
+	}
+	return values, nil
+}
+
+func decodeString(node yaml.Node) (string, error) {
+	var value string
+	if err := node.Decode(&value); err != nil {
+		return "", err
+	}
+	return value, nil
 }
 
 func decode(data []byte, target any, strict bool) error {

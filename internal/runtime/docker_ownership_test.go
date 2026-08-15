@@ -27,11 +27,15 @@ func (memoryIntentStore) Clear(string) error { return nil }
 
 type recordingIntentStore struct {
 	status    PauseIntentStatus
+	beginErr  error
 	commitErr error
 	clears    atomic.Int32
 }
 
 func (s *recordingIntentStore) BeginPause(string, string) error {
+	if s.beginErr != nil {
+		return s.beginErr
+	}
 	s.status = PauseIntentPending
 	return nil
 }
@@ -226,7 +230,7 @@ func TestExitedContainerWithPendingPauseIsRecoverable(t *testing.T) {
 	}
 }
 
-func TestRunningContainerClearsStalePauseIntent(t *testing.T) {
+func TestRunningContainerDoesNotMutatePauseIntent(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet || !strings.HasSuffix(request.URL.Path, "/containers/demo/json") {
@@ -251,7 +255,7 @@ func TestRunningContainerClearsStalePauseIntent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if observation.State != StateRunning || intents.status != PauseIntentNone || intents.clears.Load() != 1 {
+	if observation.State != StateRunning || intents.status != PauseIntentCommitted || intents.clears.Load() != 0 {
 		t.Fatalf("state=%s intent=%d clears=%d", observation.State, intents.status, intents.clears.Load())
 	}
 }
@@ -331,6 +335,29 @@ func TestStopReconciliationPreservesIntentWhenInspectFails(t *testing.T) {
 	}
 	if intents.status != PauseIntentPending || intents.clears.Load() != 0 {
 		t.Fatalf("intent status=%d clears=%d", intents.status, intents.clears.Load())
+	}
+}
+
+func TestPauseRetryCommitsPendingStoppedIntent(t *testing.T) {
+	t.Parallel()
+	intents := &recordingIntentStore{status: PauseIntentPending}
+	docker := &Docker{intents: intents}
+	observation := Observation{State: StateProvisioning, ContainerID: "container-id"}
+	if err := docker.pauseObserved(context.Background(), "demo", observation); err != nil {
+		t.Fatal(err)
+	}
+	if intents.status != PauseIntentCommitted {
+		t.Fatalf("intent status = %d, want committed", intents.status)
+	}
+}
+
+func TestFrozenPauseRecordsIntentBeforeUnpause(t *testing.T) {
+	t.Parallel()
+	want := errors.New("intent unavailable")
+	docker := &Docker{intents: &recordingIntentStore{beginErr: want}}
+	observation := Observation{State: StatePaused, ContainerID: "container-id", Running: true, Frozen: true}
+	if err := docker.pauseObserved(context.Background(), "demo", observation); !errors.Is(err, want) {
+		t.Fatalf("pause error = %v, want intent failure", err)
 	}
 }
 

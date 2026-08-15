@@ -154,16 +154,25 @@ func (d *Docker) pauseObserved(ctx context.Context, name string, observation Obs
 	if observation.State == StateFailed {
 		return fmt.Errorf("%w: %s exited with code %d (oom=%t)", ErrFailed, name, observation.ExitCode, observation.OOMKilled)
 	}
-	if observation.Frozen {
-		if err := d.cli.ContainerUnpause(ctx, observation.ContainerID); err != nil {
-			return fmt.Errorf("unpause %q before stop: %w", name, err)
-		}
-	}
 	if !observation.Running && !observation.Frozen {
+		intent, err := d.intents.PauseStatus(name, observation.ContainerID)
+		if err != nil {
+			return fmt.Errorf("read pause intent: %w", err)
+		}
+		if intent == PauseIntentPending {
+			if err := d.intents.CommitPause(name, observation.ContainerID); err != nil {
+				return fmt.Errorf("commit pending pause intent: %w", err)
+			}
+		}
 		return nil
 	}
 	if err := d.intents.BeginPause(name, observation.ContainerID); err != nil {
 		return fmt.Errorf("record pause intent: %w", err)
+	}
+	if observation.Frozen {
+		if err := d.cli.ContainerUnpause(ctx, observation.ContainerID); err != nil {
+			return fmt.Errorf("unpause %q before stop: %w", name, err)
+		}
 	}
 	start := time.Now()
 	timeout := 10
@@ -276,11 +285,11 @@ func (d *Docker) resumeObserved(ctx context.Context, spec Spec, observation Obse
 	containerID := observation.ContainerID
 	if observation.Frozen {
 		if err := d.cli.ContainerUnpause(ctx, observation.ContainerID); err != nil {
-			return Endpoint{}, fmt.Errorf("unpause %q: %w", spec.Name, err)
+			return Endpoint{}, d.rollbackStarted(spec.Name, containerID, fmt.Errorf("unpause %q: %w", spec.Name, err))
 		}
 	} else if !observation.Running {
 		if err := d.cli.ContainerStart(ctx, observation.ContainerID, container.StartOptions{}); err != nil {
-			return Endpoint{}, fmt.Errorf("start %q: %w", spec.Name, err)
+			return Endpoint{}, d.rollbackStarted(spec.Name, containerID, fmt.Errorf("start %q: %w", spec.Name, err))
 		}
 	}
 	observation, err = d.statusByReference(ctx, containerID, spec.Name)
@@ -358,20 +367,7 @@ func (d *Docker) Destroy(ctx context.Context, name string) error {
 }
 
 func (d *Docker) Status(ctx context.Context, name string) (Observation, error) {
-	observation, err := d.statusByReference(ctx, name, name)
-	if err != nil || !observation.Running || observation.Frozen {
-		return observation, err
-	}
-	intent, err := d.intents.PauseStatus(name, observation.ContainerID)
-	if err != nil {
-		return Observation{}, fmt.Errorf("read pause intent: %w", err)
-	}
-	if intent == PauseIntentCommitted {
-		if err := d.intents.Clear(name); err != nil {
-			return Observation{}, fmt.Errorf("clear stale pause intent: %w", err)
-		}
-	}
-	return observation, nil
+	return d.statusByReference(ctx, name, name)
 }
 
 func (d *Docker) statusByReference(ctx context.Context, reference, workspace string) (Observation, error) {

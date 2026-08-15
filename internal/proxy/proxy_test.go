@@ -24,27 +24,27 @@ func TestRequestIntentDefaultsUnknownReadsToWorkStarting(t *testing.T) {
 	t.Parallel()
 	request := httptest.NewRequest(http.MethodGet, "/future/starts-work", nil)
 	intent := requestIntent(request)
-	if !intent.Hold || !intent.MayStartWork || !intent.MayWake {
+	if intent != workspace.RequestWork {
 		t.Fatalf("unknown GET intent = %+v", intent)
 	}
 	request = httptest.NewRequest(http.MethodGet, "/event/", nil)
-	if intent := requestIntent(request); intent.Hold || intent.MayStartWork || intent.MayWake {
+	if intent := requestIntent(request); intent != workspace.RequestObserve {
 		t.Fatalf("normalized event intent = %+v", intent)
 	}
 	request = httptest.NewRequest(http.MethodPost, "/event", nil)
-	if intent := requestIntent(request); !intent.Hold || !intent.MayStartWork || !intent.MayWake {
+	if intent := requestIntent(request); intent != workspace.RequestWork {
 		t.Fatalf("mutating event-path intent = %+v", intent)
 	}
 	request = httptest.NewRequest(http.MethodGet, "/event", nil)
 	request.Header.Set("Upgrade", "websocket")
-	if intent := requestIntent(request); !intent.Hold || !intent.MayStartWork || !intent.MayWake {
+	if intent := requestIntent(request); intent != workspace.RequestWork {
 		t.Fatalf("upgraded event-path intent = %+v", intent)
 	}
 }
 
 func (w staticWaker) AcquireRequest(_ context.Context, intent workspace.RequestIntent) (runtime.Endpoint, func(), error) {
 	if w.active != nil {
-		w.active <- intent.Hold && intent.MayStartWork
+		w.active <- intent == workspace.RequestWork
 	}
 	return w.endpoint, func() {
 		if w.released != nil {

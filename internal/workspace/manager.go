@@ -20,11 +20,13 @@ type EndpointObserver func(context.Context, runtime.Endpoint, bool) error
 type IdleChecker func(context.Context, runtime.Endpoint) (bool, error)
 type RequestObserver func()
 
-type RequestIntent struct {
-	Hold         bool
-	MayStartWork bool
-	MayWake      bool
-}
+type RequestIntent uint8
+
+const (
+	RequestObserve RequestIntent = iota
+	RequestRead
+	RequestWork
+)
 
 type lifecycleRuntime interface {
 	EnsureRunning(context.Context, runtime.Spec) (runtime.Endpoint, bool, error)
@@ -33,13 +35,9 @@ type lifecycleRuntime interface {
 }
 
 type wakeCall struct {
-	done      chan struct{}
-	cancel    context.CancelFunc
-	waiters   int
-	abandoned bool
-	completed bool
-	ep        runtime.Endpoint
-	err       error
+	done chan struct{}
+	ep   runtime.Endpoint
+	err  error
 }
 
 // Manager owns lifecycle policy for exactly one workspace. Request admission
@@ -81,20 +79,17 @@ func NewManager(serviceCtx context.Context, rt lifecycleRuntime, spec runtime.Sp
 	return manager
 }
 
-// AcquireRequest records request intent before wake begins. Held requests must
-// release after proxying; work-starting requests also invalidate idle policy.
+// AcquireRequest records request policy before wake begins. Read and work
+// requests release after proxying; work requests also invalidate idle policy.
 func (m *Manager) AcquireRequest(ctx context.Context, intent RequestIntent) (runtime.Endpoint, func(), error) {
-	if intent.MayStartWork && !intent.Hold {
-		return runtime.Endpoint{}, func() {}, errors.New("work-starting requests must hold admission")
-	}
-	if intent.MayStartWork && !intent.MayWake {
-		return runtime.Endpoint{}, func() {}, errors.New("work-starting requests must be allowed to wake the workspace")
+	if intent > RequestWork {
+		return runtime.Endpoint{}, func() {}, errors.New("invalid request intent")
 	}
 	if m.isClosing() {
 		return runtime.Endpoint{}, func() {}, errors.New("workspace manager is shutting down")
 	}
 	release := func() {}
-	if intent.Hold {
+	if intent != RequestObserve {
 		if err := m.acquireAdmission(ctx); err != nil {
 			return runtime.Endpoint{}, func() {}, err
 		}
@@ -121,7 +116,7 @@ func (m *Manager) AcquireRequest(ctx context.Context, intent RequestIntent) (run
 	}
 	var ep runtime.Endpoint
 	var err error
-	if intent.MayWake {
+	if intent != RequestObserve {
 		ep, err = m.EnsureRunning(ctx)
 	} else {
 		ep, err = m.runningEndpoint(ctx)
@@ -130,7 +125,7 @@ func (m *Manager) AcquireRequest(ctx context.Context, intent RequestIntent) (run
 		release()
 		return runtime.Endpoint{}, func() {}, err
 	}
-	if intent.MayStartWork && m.onRequest != nil {
+	if intent == RequestWork && m.onRequest != nil {
 		m.onRequest()
 	}
 	return ep, release, nil
@@ -144,48 +139,29 @@ func (m *Manager) EnsureRunning(ctx context.Context) (runtime.Endpoint, error) {
 	}
 	call := m.wake
 	if call == nil {
-		wakeCtx, cancel := context.WithTimeout(m.serviceCtx, m.wakeOperationTimeout)
-		call = &wakeCall{done: make(chan struct{}), cancel: cancel}
+		call = &wakeCall{done: make(chan struct{})}
 		m.wake = call
-		go m.runWake(wakeCtx, call)
+		go m.runWake(call)
 	}
-	call.waiters++
 	m.wakeMu.Unlock()
 	select {
 	case <-ctx.Done():
-		_ = m.leaveWake(call)
 		return runtime.Endpoint{}, ctx.Err()
 	case <-call.done:
-		ep, err := call.ep, call.err
-		abandoned := m.leaveWake(call)
-		if abandoned && errors.Is(err, context.Canceled) && ctx.Err() == nil && m.serviceCtx.Err() == nil {
-			return m.EnsureRunning(ctx)
-		}
-		return ep, err
+		return call.ep, call.err
 	}
 }
 
-func (m *Manager) runWake(wakeCtx context.Context, call *wakeCall) {
+func (m *Manager) runWake(call *wakeCall) {
+	wakeCtx, cancel := context.WithTimeout(m.serviceCtx, m.wakeOperationTimeout)
 	call.ep, call.err = m.ensureRunning(wakeCtx)
+	cancel()
 	m.wakeMu.Lock()
-	call.completed = true
 	if m.wake == call {
 		m.wake = nil
 	}
 	close(call.done)
 	m.wakeMu.Unlock()
-	call.cancel()
-}
-
-func (m *Manager) leaveWake(call *wakeCall) bool {
-	m.wakeMu.Lock()
-	defer m.wakeMu.Unlock()
-	call.waiters--
-	if call.waiters == 0 && !call.completed {
-		call.abandoned = true
-		call.cancel()
-	}
-	return call.abandoned
 }
 
 func (m *Manager) runningEndpoint(ctx context.Context) (runtime.Endpoint, error) {
@@ -193,6 +169,9 @@ func (m *Manager) runningEndpoint(ctx context.Context) (runtime.Endpoint, error)
 		return runtime.Endpoint{}, err
 	}
 	defer m.releaseLifecycle()
+	if m.isClosing() {
+		return runtime.Endpoint{}, errors.New("workspace manager is shutting down")
+	}
 	observation, err := m.runtime.Status(ctx, m.spec.Name)
 	if err != nil {
 		return runtime.Endpoint{}, err
@@ -260,6 +239,9 @@ func (m *Manager) Pause(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if observation.State == runtime.StateProvisioning {
+		return m.runtime.Pause(ctx, m.spec.Name)
+	}
 	if observation.State != runtime.StateRunning {
 		return nil
 	}
@@ -284,17 +266,15 @@ func (m *Manager) Close(ctx context.Context) error {
 	m.closing = true
 	wake := m.wake
 	m.wakeMu.Unlock()
-	for {
-		select {
-		case <-m.admission:
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-		if m.inFlight == 0 {
-			break
-		}
-		done := m.requestsDone
-		m.releaseAdmission()
+	select {
+	case <-m.admission:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	done := m.requestsDone
+	active := m.inFlight != 0
+	m.releaseAdmission()
+	if active {
 		select {
 		case <-done:
 		case <-ctx.Done():
@@ -302,11 +282,9 @@ func (m *Manager) Close(ctx context.Context) error {
 		}
 	}
 	if err := m.acquireLifecycleForClose(ctx); err != nil {
-		m.releaseAdmission()
 		return err
 	}
 	m.releaseLifecycle()
-	m.releaseAdmission()
 	if wake == nil {
 		return nil
 	}

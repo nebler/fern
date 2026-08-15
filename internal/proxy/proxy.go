@@ -73,14 +73,14 @@ func requestIntent(request *http.Request) workspace.RequestIntent {
 	if request.Method == http.MethodGet && !upgrade {
 		switch cleanPath {
 		case "/event", "/global/event", "/api/event":
-			return workspace.RequestIntent{}
+			return workspace.RequestObserve
 		}
 	}
 	if !upgrade && (request.Method == http.MethodGet || request.Method == http.MethodHead) {
 		switch cleanPath {
 		case "/global/health", "/session/status":
-			return workspace.RequestIntent{Hold: true, MayWake: true}
+			return workspace.RequestRead
 		}
 	}
-	return workspace.RequestIntent{Hold: true, MayStartWork: true, MayWake: true}
+	return workspace.RequestWork
 }

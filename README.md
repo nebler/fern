@@ -1,6 +1,6 @@
 # fern
 
-Self-hosted OpenCode workspaces that stop when idle and wake on the next HTTP request.
+Self-hosted OpenCode workspaces that stop when idle and wake on the next ordinary HTTP request.
 
 `fern` runs natively on the host. It controls a Docker container containing `opencode serve`, watches OpenCode's SSE activity stream, and exposes a stable reverse-proxy address to clients.
 

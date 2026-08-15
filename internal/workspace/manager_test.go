@@ -17,6 +17,7 @@ type fakeRuntime struct {
 	ensureN     int
 	resumeN     int
 	pauseN      int
+	statusN     int
 	createWait  time.Duration
 	createErr   error
 	endpoint    runtime.Endpoint
@@ -59,7 +60,7 @@ func (f *fakeRuntime) Create(ctx context.Context, _ runtime.Spec) (runtime.Endpo
 	return f.endpoint, nil
 }
 
-func TestCanceledLastWaiterCancelsWake(t *testing.T) {
+func TestCanceledCallerDoesNotCancelSharedWake(t *testing.T) {
 	t.Parallel()
 	fake := newFakeRuntime(runtime.StateAbsent)
 	fake.createBlock = make(chan struct{})
@@ -70,7 +71,7 @@ func TestCanceledLastWaiterCancelsWake(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		_, release, err := manager.AcquireRequest(ctx, RequestIntent{Hold: true, MayStartWork: true, MayWake: true})
+		_, release, err := manager.AcquireRequest(ctx, RequestWork)
 		release()
 		done <- err
 	}()
@@ -82,8 +83,8 @@ func TestCanceledLastWaiterCancelsWake(t *testing.T) {
 	if requests != 0 {
 		t.Fatalf("canceled request emitted %d activity observations", requests)
 	}
+	close(fake.createBlock)
 	fake.mu.Lock()
-	fake.createBlock = nil
 	fake.createStart = nil
 	fake.mu.Unlock()
 	if _, err := manager.EnsureRunning(context.Background()); err != nil {
@@ -171,7 +172,7 @@ func TestNonWakingRequestDoesNotResumePausedWorkspace(t *testing.T) {
 	t.Parallel()
 	fake := newFakeRuntime(runtime.StatePaused)
 	manager := newTestManager(fake, nil, alwaysIdle)
-	if _, _, err := manager.AcquireRequest(context.Background(), RequestIntent{}); !errors.Is(err, ErrNotRunning) {
+	if _, _, err := manager.AcquireRequest(context.Background(), RequestObserve); !errors.Is(err, ErrNotRunning) {
 		t.Fatalf("non-waking request error = %v, want ErrNotRunning", err)
 	}
 	fake.mu.Lock()
@@ -194,11 +195,43 @@ func (f *fakeRuntime) Destroy(context.Context, string) error { return nil }
 func (f *fakeRuntime) Status(context.Context, string) (runtime.Observation, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.statusN++
 	return runtime.Observation{
 		State:       f.state,
 		Endpoint:    f.endpoint,
 		HasEndpoint: f.state == runtime.StateRunning,
 	}, nil
+}
+
+func TestPauseRetriesPendingProvisioningState(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRuntime(runtime.StateProvisioning)
+	manager := newTestManager(fake, nil, alwaysIdle)
+	if err := manager.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.pauseN != 1 || fake.state != runtime.StatePaused {
+		t.Fatalf("pause calls=%d state=%s", fake.pauseN, fake.state)
+	}
+}
+
+func TestRunningEndpointRechecksClosingBeforeStatus(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRuntime(runtime.StateRunning)
+	manager := newTestManager(fake, nil, alwaysIdle)
+	manager.wakeMu.Lock()
+	manager.closing = true
+	manager.wakeMu.Unlock()
+	if _, err := manager.runningEndpoint(context.Background()); err == nil {
+		t.Fatal("runningEndpoint succeeded while closing")
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.statusN != 0 {
+		t.Fatalf("status calls after closing = %d", fake.statusN)
+	}
 }
 
 func TestConcurrentEnsureRunningCreatesOnce(t *testing.T) {
@@ -274,7 +307,7 @@ func TestActiveRequestDefersPauseUntilRelease(t *testing.T) {
 	t.Parallel()
 	fake := newFakeRuntime(runtime.StateRunning)
 	manager := newTestManager(fake, nil, alwaysIdle)
-	_, release, err := manager.AcquireRequest(context.Background(), RequestIntent{Hold: true, MayStartWork: true, MayWake: true})
+	_, release, err := manager.AcquireRequest(context.Background(), RequestWork)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,6 +322,44 @@ func TestActiveRequestDefersPauseUntilRelease(t *testing.T) {
 	defer fake.mu.Unlock()
 	if fake.pauseN != 1 {
 		t.Fatalf("Pause calls = %d, want 1", fake.pauseN)
+	}
+}
+
+func TestRequestCannotCrossAuthoritativePauseCheck(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRuntime(runtime.StateRunning)
+	idleStarted := make(chan struct{})
+	allowIdle := make(chan struct{})
+	manager := newTestManager(fake, nil, func(context.Context, runtime.Endpoint) (bool, error) {
+		close(idleStarted)
+		<-allowIdle
+		return true, nil
+	})
+	pauseDone := make(chan error, 1)
+	go func() { pauseDone <- manager.Pause(context.Background()) }()
+	<-idleStarted
+	requestDone := make(chan error, 1)
+	go func() {
+		_, release, err := manager.AcquireRequest(context.Background(), RequestWork)
+		release()
+		requestDone <- err
+	}()
+	select {
+	case err := <-requestDone:
+		t.Fatalf("request crossed pause check: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(allowIdle)
+	if err := <-pauseDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-requestDone; err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.pauseN != 1 || fake.resumeN != 1 {
+		t.Fatalf("pause calls=%d resume calls=%d", fake.pauseN, fake.resumeN)
 	}
 }
 
@@ -339,7 +410,7 @@ func TestCloseWaitsForActiveRequestAndRejectsNewWork(t *testing.T) {
 	t.Parallel()
 	fake := newFakeRuntime(runtime.StateRunning)
 	manager := newTestManager(fake, nil, alwaysIdle)
-	_, release, err := manager.AcquireRequest(context.Background(), RequestIntent{Hold: true, MayWake: true})
+	_, release, err := manager.AcquireRequest(context.Background(), RequestRead)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +430,7 @@ func TestCloseWaitsForActiveRequestAndRejectsNewWork(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Close did not finish after request release")
 	}
-	if _, _, err := manager.AcquireRequest(context.Background(), RequestIntent{}); err == nil {
+	if _, _, err := manager.AcquireRequest(context.Background(), RequestObserve); err == nil {
 		t.Fatal("manager accepted request after Close")
 	}
 }

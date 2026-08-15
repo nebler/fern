@@ -50,7 +50,7 @@ Fern implements a safety-first Docker lifecycle for one OpenCode workspace.
 - Proxy and supervisor run under one `errgroup`.
 - Active request contexts inherit the service context.
 - Shutdown drains HTTP and force-closes remaining or hijacked connections after the deadline.
-- Shutdown stops the stream, closes request admission, awaits lifecycle work, closes Docker, then releases the lease.
+- Shutdown closes request admission, awaits lifecycle work, stops the stream, closes Docker, then releases the lease.
 
 ### Docker image
 

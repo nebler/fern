@@ -74,6 +74,24 @@ func TestLoadAppliesOverridesBeforeNormalization(t *testing.T) {
 	}
 }
 
+func TestLoadOverridesInvalidYAMLTypes(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	repo := filepath.Join(directory, "repo")
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "fern.yaml")
+	data := []byte("workspace:\n  repo: [invalid]\nidle:\n  after: [invalid]\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	idle := "1m"
+	if _, err := Load(path, directory, true, Overrides{Repo: &repo, IdleAfter: &idle}); err != nil {
+		t.Fatalf("valid overrides did not replace invalid YAML types: %v", err)
+	}
+}
+
 func TestLoadRejectsEmptyRepository(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
@@ -121,20 +139,60 @@ func TestLoadWorkspaceRejectsDuplicateWorkspaceSections(t *testing.T) {
 	}
 }
 
-func TestLoadClientPreservesExplicitEmptyUsername(t *testing.T) {
+func TestLoadAttachPreservesExplicitEmptyUsername(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
 	path := filepath.Join(directory, "fern.yaml")
 	if err := os.WriteFile(path, []byte("workspace:\n  env:\n    OPENCODE_SERVER_USERNAME: ''\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	client, err := LoadClient(path, true)
+	client, err := LoadAttach(path, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	username, exists := client.Env["OPENCODE_SERVER_USERNAME"]
 	if !exists || username != "" {
 		t.Fatalf("explicit username was not preserved: value=%q exists=%t", username, exists)
+	}
+}
+
+func TestClientProjectionsIgnoreUnrelatedMalformedValues(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "fern.yaml")
+	data := []byte("workspace:\n  name: demo\n  env:\n    UNUSED:\n      nested: value\nproxy:\n  listen: [invalid]\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadEvents(path, true, nil); err != nil {
+		t.Fatalf("event projection parsed unrelated values: %v", err)
+	}
+	data = []byte("workspace:\n  name: [invalid]\n  env:\n    UNUSED:\n      nested: value\nproxy:\n  listen: 127.0.0.1:9090\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := LoadAttach(path, true, nil)
+	if err != nil {
+		t.Fatalf("attach projection parsed unrelated values: %v", err)
+	}
+	if client.Listen != "127.0.0.1:9090" {
+		t.Fatalf("attach listen = %q", client.Listen)
+	}
+}
+
+func TestClientOverridesSkipInvalidRelevantYAML(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "fern.yaml")
+	data := []byte("workspace:\n  name: [invalid]\nproxy:\n  listen: [invalid]\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listen := "127.0.0.1:9090"
+	if _, err := LoadAttach(path, true, &listen); err != nil {
+		t.Fatalf("attach override did not skip invalid YAML: %v", err)
+	}
+	name := "demo"
+	if _, err := LoadEvents(path, true, &name); err != nil {
+		t.Fatalf("event override did not skip invalid YAML: %v", err)
 	}
 }
 

@@ -81,7 +81,7 @@ Lifecycle commands use signal-aware 70-second contexts instead of unbounded back
 - fails if a referenced environment variable is absent;
 - parses the final selected idle duration.
 
-`LoadWorkspace` strictly reads only the workspace section for `resume`, so broken idle or proxy settings cannot block runtime recovery. `LoadClient` reads only name, proxy address, and authentication values for attach and event diagnostics.
+`LoadWorkspace` strictly reads only the workspace section for `resume`, so broken idle or proxy settings cannot block runtime recovery. `LoadAttach` and `LoadEvents` extract only the fields each client operation needs.
 
 `Validate` checks all side-effect prerequisites.
 
@@ -282,21 +282,19 @@ This snapshot is intentionally separate from SSE:
 
 ### Shared wake
 
-`wakeMu` stores at most one `wakeCall`. Concurrent callers wait on its done channel. The operation is registered synchronously before its goroutine starts, derives from service context, and is joined by `Close`. If every caller leaves, the shared operation is canceled; a new live caller waits for that cleanup and retries with a fresh call.
+`wakeMu` stores at most one `wakeCall`. Concurrent callers wait on its done channel. The operation is registered synchronously before its goroutine starts, derives from service context, and is joined by `Close`. Individual callers may stop waiting without canceling shared lifecycle work.
 
 ### Request intent
 
-`RequestIntent` separates three independent facts:
+`RequestIntent` has exactly the three request classes used by the proxy:
 
 ```go
-type RequestIntent struct {
-    Hold         bool
-    MayStartWork bool
-    MayWake      bool
-}
+RequestObserve
+RequestRead
+RequestWork
 ```
 
-Held requests increment `inFlight` before wake and release after proxy completion. Work-starting requests also emit a policy observation that invalidates a previous idle boundary. Event streams are non-waking: reconnects are rejected while compute is paused rather than immediately undoing the pause.
+Read and work requests increment `inFlight` before wake and release after proxy completion. Work requests also emit a policy observation that invalidates a previous idle boundary. Event streams are observational and non-waking: reconnects are rejected while compute is paused rather than immediately undoing the pause.
 
 ### Pause gate
 
@@ -318,11 +316,11 @@ Every running endpoint is handed to `StreamController`. A lifecycle transition f
 
 The proxy classifies requests:
 
-| Request | Hold | May start work | May wake |
-|---|---:|---:|---:|
-| `/event`, `/global/event`, `/api/event` GET | no | no | no |
-| `/global/health`, `/session/status` GET/HEAD | yes | no | yes |
-| all other requests | yes | yes | yes |
+| Request | Class |
+|---|---|
+| `/event`, `/global/event`, `/api/event` GET | observe |
+| `/global/health`, `/session/status` GET/HEAD | read |
+| all other requests | work |
 
 It acquires intent before wake, forwards the untouched method/headers/body, and releases after `ReverseProxy.ServeHTTP` returns.
 
@@ -418,7 +416,7 @@ These invariants hold for traffic through the Fern proxy. Direct backend writes 
 | config | unit semantics, strict projections, missing env, precedence, config-relative paths |
 | registry | actual subprocess contention and release on process exit |
 | runtime | authenticated health, fingerprints, pause-intent recovery, actual-spec drift, and foreign ownership |
-| workspace | shared wake, cancellation, retry, request gate, status gate, observer order and rollback |
+| workspace | shared wake, caller cancellation, request gate, status gate, observer order and rollback |
 | watch | auth, multiline SSE, epochs, disconnect, request invalidation, reconnect recovery, status snapshot |
 | proxy | request classification, first-byte SSE flush, and full-lifetime request lease |
 | CLI | attach URL/auth environment and explicit-name config bypass |

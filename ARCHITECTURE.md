@@ -216,8 +216,8 @@ signal or component error
   -> cancel service context
   -> stop accepting requests
   -> await HTTP Shutdown
-  -> stop stream controller
   -> await manager lifecycle operation
+  -> stop stream controller
   -> close Docker client
   -> release workspace lease
 ```

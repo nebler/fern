@@ -21,12 +21,9 @@ func runAttach(args []string) error {
 	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
-	client, err := config.LoadClient(*configPath, flagSet(flags, "config"))
+	client, err := config.LoadAttach(*configPath, flagSet(flags, "config"), optionalFlag(flags, "listen", listenAddress))
 	if err != nil {
 		return err
-	}
-	if flagSet(flags, "listen") {
-		client.Listen = *listenAddress
 	}
 	target, err := attachURL(client.Listen)
 	if err != nil {
