@@ -1,5 +1,11 @@
 # Fern Architecture
 
+> **Document status (2026-08-15):** This concise overview is retained for
+> historical context but contains implementation details that are no longer
+> exact. Read [ARCHITECTURE_DEEP_DIVE.md](./ARCHITECTURE_DEEP_DIVE.md) for the
+> current source-verified architecture, call stacks, diagrams, trust boundaries,
+> failure paths, persistence model, and known limitations.
+
 Fern is a native Go control process for one Docker-hosted OpenCode workspace. It keeps repository and session data durable, stops compute only after a safe idle boundary, and wakes compute before forwarding the next request.
 
 For a file-by-file map, read [CODEBASE_GUIDE.md](./CODEBASE_GUIDE.md). For the foundation review and its resolution, read [CODE_REVIEW.md](./CODE_REVIEW.md).

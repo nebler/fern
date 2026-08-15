@@ -16,26 +16,35 @@ The Docker implementation is functional:
 - tracks connected epochs and busy, retry, and idle state across all sessions;
 - invalidates idle eligibility on watcher loss or a request that may start work;
 - stops OpenCode only after zero held requests and an authenticated all-idle snapshot;
+- rejects invalid Basic credentials before request admission or workspace wake;
 - wakes a stopped workspace when a request reaches the proxy;
 - coalesces concurrent wake requests into one Docker operation;
+- discards cached endpoints after every attempted runtime pause, including ambiguous failures;
 - streams SSE without response buffering;
 - prevents concurrent lifecycle writers with a cross-process lease;
-- distinguishes failed/OOM compute from an intentional pause.
+- distinguishes failed/OOM compute from an intentional pause;
+- rejects remote Docker endpoints because mounts, loopback routing, locks, and intent are host-local.
 
 Kubernetes, setup snapshots, resume hooks, ingress, and the credential proxy are not implemented yet.
 
 ## Documentation
 
 - [CODEBASE_GUIDE.md](./CODEBASE_GUIDE.md): detailed package map, lifecycle traces, state ownership, invariants, and the current-versus-simpler architecture.
-- [CODE_REVIEW.md](./CODE_REVIEW.md): prioritized Go and Rich Hickey-style review findings.
-- [ARCHITECTURE.md](./ARCHITECTURE.md): concise system design and future Kubernetes mapping.
+- [CODE_REVIEW.md](./CODE_REVIEW.md): historical foundation review and remediation record.
+- [ARCHITECTURE_DEEP_DIVE.md](./ARCHITECTURE_DEEP_DIVE.md): current source-verified system model, diagrams, call stacks, failure paths, and limitations.
+- [ARCHITECTURE.md](./ARCHITECTURE.md): earlier concise architecture overview retained for context.
 - [IMPLEMENTATION.md](./IMPLEMENTATION.md): exact completion and verification record.
+- [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md): supervised systemd and private Tailscale Serve deployment runbook.
+- [integration/lifecycle/README.md](./integration/lifecycle/README.md): repeatable real-Docker lifecycle and timing harness.
 - [DAY-1.md](./DAY-1.md): OpenCode persistence and turn-boundary research.
+- [AMP_PRODUCT_RESEARCH.md](./AMP_PRODUCT_RESEARCH.md): Amp comparison, applied-AI product direction, Grab alignment, and evidence-bound workspace proposal.
+- [ROADMAP.md](./ROADMAP.md): dated two-week delivery plan, implementation sequence, verification gates, and deferred scope.
+- [DEEP_RESEARCH_PROMPT.md](./DEEP_RESEARCH_PROMPT.md): source-driven prompt for independently challenging the Amp research, OpenCode seam, market, roadmap, product design, and Grab alignment.
 
 ## Requirements
 
 - Go 1.24+
-- Docker with at least 8 GiB available
+- A local Docker daemon with at least 8 GiB available; remote `DOCKER_HOST` endpoints are rejected
 - an API key supported by OpenCode, such as `ANTHROPIC_API_KEY`
 
 ## Quick Start
@@ -69,6 +78,13 @@ same configuration, then starts the official OpenCode TUI with
 `opencode attach <proxy-url>`. Credentials are passed through the child
 environment rather than command-line arguments.
 
+For a client-visible origin that differs from the listener, such as Tailscale
+Serve, pass the explicit root origin:
+
+```bash
+fern attach -url https://host.tailnet.ts.net
+```
+
 `fern up` forwards these host variables when present:
 
 - `ANTHROPIC_API_KEY`
@@ -86,6 +102,7 @@ go run ./cmd/fern attach
 go run ./cmd/fern status
 go run ./cmd/fern resume
 go run ./cmd/fern logs
+go run ./cmd/fern version
 go run ./cmd/fern debug events
 go run ./cmd/fern down
 ```
@@ -120,6 +137,21 @@ make test-race
 make vet
 make build
 make image
+```
+
+CI runs formatting, ordinary and race tests, vet, binary build, and a separate
+workspace-image build. Build versioned Linux binaries and checksums with:
+
+```bash
+./scripts/build-release.sh v0.1.0
+shasum -a 256 -c dist/SHA256SUMS
+```
+
+The real-Docker harness is explicit because it creates isolated Docker
+resources and retains redacted evidence on failure:
+
+```bash
+./scripts/test-lifecycle.sh
 ```
 
 ## Safety Boundary

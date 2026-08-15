@@ -2,7 +2,7 @@
 
 This is the detailed map of the current implementation: where each concept lives, who owns mutable state, and how a request moves through the system.
 
-Read [ARCHITECTURE.md](./ARCHITECTURE.md) first for the concise model. Read [CODE_REVIEW.md](./CODE_REVIEW.md) for the foundation review and resolution.
+Read [ARCHITECTURE_DEEP_DIVE.md](./ARCHITECTURE_DEEP_DIVE.md) first for the current system model. Read [CODE_REVIEW.md](./CODE_REVIEW.md) for the historical foundation review and remediation record.
 
 ## Repository Map
 
@@ -322,7 +322,11 @@ The proxy classifies requests:
 | `/global/health`, `/session/status` GET/HEAD | read |
 | all other requests | work |
 
-It acquires intent before wake, forwards the untouched method/headers/body, and releases after `ReverseProxy.ServeHTTP` returns.
+When a server password is configured, the proxy validates Basic credentials
+before classification, admission, or wake. Valid authorization headers remain
+on the request for OpenCode. It then acquires intent before wake, forwards the
+untouched method/headers/body, and releases after `ReverseProxy.ServeHTTP`
+returns.
 
 `FlushInterval: -1` makes SSE and model output immediate.
 
@@ -332,10 +336,14 @@ It acquires intent before wake, forwards the untouched method/headers/body, and 
 
 ```text
 proxy -> acquire request intent
-manager -> share/perform status + health + watcher check
+manager -> return cached endpoint generation
+work request -> synchronously invalidate prior idle evidence
 proxy -> forward
 proxy -> release intent after response
 ```
+
+The cached path does not re-run Docker inspection, health, or watcher setup.
+Those checks occur when no endpoint is cached and the manager performs a wake.
 
 ### Wake
 
@@ -358,6 +366,7 @@ manager requires no held requests
 manager observes owned running runtime
 authenticated status snapshot says all idle
 Docker stops
+manager invalidates the captured endpoint generation even if pause reports an error
 stream disconnect invalidates epoch
 ```
 
@@ -395,7 +404,7 @@ lease releases
 1. Only labeled Fern resources are mutated.
 2. One Fern lifecycle writer exists per workspace.
 3. Desired spec drift is explicit.
-4. A request forwards only after health and current watcher attachment.
+4. A newly published endpoint follows health and watcher attachment; cached requests reuse that endpoint until invalidated.
 5. Concurrent callers share one wake.
 6. Endpoint is re-resolved after every transition.
 7. Watcher disconnect invalidates pause eligibility.
@@ -418,10 +427,13 @@ These invariants hold for traffic through the Fern proxy. Direct backend writes 
 | runtime | authenticated health, fingerprints, pause-intent recovery, actual-spec drift, and foreign ownership |
 | workspace | shared wake, caller cancellation, request gate, status gate, observer order and rollback |
 | watch | auth, multiline SSE, epochs, disconnect, request invalidation, reconnect recovery, status snapshot |
-| proxy | request classification, first-byte SSE flush, and full-lifetime request lease |
-| CLI | attach URL/auth environment and explicit-name config bypass |
+| proxy | pre-wake auth, request classification, first-byte SSE flush, and full-lifetime request lease |
+| CLI | explicit attach origin, auth environment, local-Docker topology, version output, and explicit-name config bypass |
 
-Real Docker tests are recorded in [CODE_REVIEW.md](./CODE_REVIEW.md) and [IMPLEMENTATION.md](./IMPLEMENTATION.md).
+Historical Docker tests are recorded in [CODE_REVIEW.md](./CODE_REVIEW.md) and
+[IMPLEMENTATION.md](./IMPLEMENTATION.md). The checked-in black-box harness under
+`integration/lifecycle` exercises the production binary against a deterministic
+OpenCode-compatible container when a Docker daemon is available.
 
 ## Extension Rules
 

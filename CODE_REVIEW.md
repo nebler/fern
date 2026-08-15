@@ -2,6 +2,15 @@
 
 Date: 2026-08-12
 
+> **Document status:** This is a historical remediation record, not a complete
+> current security or architecture audit. Its resolved findings still explain
+> why the foundation has its present shape, but some assurance language is
+> broader than the checked-in automated tests. Later implementation work added
+> pre-wake authentication, explicit local-Docker enforcement, and endpoint
+> invalidation after failed pause attempts. Read
+> [ARCHITECTURE_DEEP_DIVE.md](./ARCHITECTURE_DEEP_DIVE.md) for the current
+> source-verified system model and limitations.
+
 This document records the Go and Rich Hickey-style foundation review and the remediation completed immediately afterward. The upstream `opencode/` checkout was excluded from implementation review.
 
 ## Result
