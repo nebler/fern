@@ -43,10 +43,18 @@ The paths are deliberately separate:
 | Checked-out workspace | `/srv/fern/workspace` |
 | Backups | `/var/backups/fern` |
 
-Create a non-login service account and directories. Adding it to `docker` is necessary for the current local-Docker implementation and carries the root-equivalent warning above.
+Create a non-login service account and directories. The host account uses the
+same fixed UID/GID as the image so OpenCode can write the bind-mounted
+repository on Linux. Stop and choose another coordinated ID in both the image
+and these commands if either ID is already allocated. Adding the account to
+`docker` is necessary for the current local-Docker implementation and carries
+the root-equivalent warning above.
 
 ```bash
-sudo useradd --system --home-dir /var/lib/fern --create-home --shell /usr/sbin/nologin fern
+getent passwd 1001 && { echo 'UID 1001 is already allocated' >&2; exit 1; }
+getent group 1001 && { echo 'GID 1001 is already allocated' >&2; exit 1; }
+sudo groupadd --gid 1001 fern
+sudo useradd --uid 1001 --gid 1001 --home-dir /var/lib/fern --create-home --shell /usr/sbin/nologin fern
 sudo usermod -aG docker fern
 sudo install -d -o root -g root -m 0755 /opt/fern
 sudo install -d -o root -g fern -m 0750 /etc/fern
@@ -81,6 +89,7 @@ sudo chown root:root /usr/local/bin/fern
 sudo chmod 0755 /usr/local/bin/fern
 sudo docker build --pull -t "fern/opencode:$FERN_COMMIT" images/opencode
 sudo docker image inspect "fern/opencode:$FERN_COMMIT" --format '{{.Id}} {{json .RepoDigests}}'
+test "$(sudo docker run --rm --entrypoint sh "fern/opencode:$FERN_COMMIT" -c 'id -u; id -g')" = "$(printf '1001\n1001')"
 sha256sum /usr/local/bin/fern
 ```
 

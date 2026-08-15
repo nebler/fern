@@ -47,3 +47,8 @@ jobs:
 
       - name: Build workspace image
         run: docker build -t fern/opencode:ci images/opencode
+
+      - name: Verify workspace image identity
+        run: |
+          test "$(docker run --rm --entrypoint id fern/opencode:ci -u)" = "1001"
+          test "$(docker run --rm --entrypoint id fern/opencode:ci -g)" = "1001"

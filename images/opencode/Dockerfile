@@ -4,7 +4,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git openssh-client ripgrep unzip jq procps \
     && rm -rf /var/lib/apt/lists/*
 
-RUN useradd -m -s /bin/bash user
+RUN groupadd --gid 1001 user && useradd --uid 1001 --gid 1001 -m -s /bin/bash user
 USER user
 WORKDIR /home/user
 
