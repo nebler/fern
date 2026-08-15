@@ -32,6 +32,8 @@ func run(args []string, log *slog.Logger) error {
 		return runStatus(args[1:], log)
 	case "logs":
 		return runLogs(args[1:], log)
+	case "version":
+		return runVersion(args[1:], os.Stdout)
 	case "debug":
 		if len(args) > 1 && args[1] == "events" {
 			return runEvents(args[2:], log)
@@ -41,6 +43,8 @@ func run(args []string, log *slog.Logger) error {
 }
 
 func usage() error {
-	fmt.Fprintln(os.Stderr, "usage: fern <up|attach|down|resume|status|logs|debug events> [flags]")
+	fmt.Fprintln(os.Stderr, usageText)
 	return errors.New("invalid command")
 }
+
+const usageText = "usage: fern <up|attach|down|resume|status|logs|version|debug events> [flags]"
