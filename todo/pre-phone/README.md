@@ -10,17 +10,17 @@ The objective is to make the first phone experiment secure, reproducible, deploy
 |---|---|---|
 | `00` Baseline | Not run before implementation | Do not reconstruct or fabricate a pre-change baseline |
 | `01` CI | Implemented and locally linted | First green GitHub-hosted run |
-| `02` Authentication | Implemented; unit/race/vet pass | Real stopped-container scenario in task `07` |
+| `02` Authentication | Implemented; unit/race/vet and stopped-container scenario pass | Target-host verification |
 | `03` Pause endpoint | Implemented; unit/race pass | Real/fault-injected lifecycle evidence |
 | `04` Local Docker | Implemented; unit/race pass | Target-host local socket check |
 | `05` Client origin | Implemented; unit tests pass | Actual Tailscale origin in task `10` |
 | `06` Versioned binary | Implemented; cross-build/checksums pass | Install produced artifact on target host |
-| `07` Harness | Implemented; syntax and unavailable-daemon path pass | Full run with Docker daemon |
+| `07` Harness | All 13 deterministic scenarios and ten measured wakes pass locally | Repeat on target host |
 | `08` Supervision | Implemented as reviewed examples | systemd verification and reboot on target Linux host |
-| `09` Convergence | Implemented in worktree | Green hosted CI and Docker evidence |
+| `09` Convergence | Implemented with local Docker evidence | Green hosted CI |
 | `10` Rehearsal | Not started | Requires target host and another network |
 
-No task has been committed yet. The worktree contains pre-existing unrelated and research-document changes; preserve them when creating commits.
+Tasks `01` through `09` are represented by incremental commits. The worktree also contains pre-existing unrelated research documents; preserve them during later work.
 
 ## Rules
 

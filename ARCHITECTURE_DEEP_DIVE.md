@@ -925,7 +925,7 @@ The Go tests cover substantial component behavior:
 
 ### 18.3 Important Unverified Or Under-Verified Areas
 
-- The checked-in Docker harness has not yet completed on the current machine because its Docker daemon is unavailable.
+- The checked-in Docker harness completed all 13 deterministic scenarios and ten measured wakes on the development machine. Target-host execution remains required because Docker Desktop is not the deployment environment.
 - Power loss, disk full, intent fsync failure, and SQLite recovery are not tested end to end.
 - Request-body stalls, unlimited concurrency, and long-lived resource pinning lack an explicit policy.
 - Remote Docker, rootless Docker, SELinux, Windows, and filesystem portability are not established.

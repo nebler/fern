@@ -7,8 +7,8 @@ Date range: 2026-08-15 through 2026-08-29
 > this original roadmap. CI, pre-wake authentication, failed-pause endpoint
 > recovery, local-Docker enforcement, explicit attach origins, versioned binary
 > builds, a Docker lifecycle harness, and a supervised deployment runbook are
-> now implemented in the worktree. Full Docker harness execution, target-host
-> systemd/reboot validation, laptop rehearsal, and phone testing remain unrun.
+> now implemented in the worktree. The full Docker harness passes locally;
+> target-host systemd/reboot validation, laptop rehearsal, and phone testing remain unrun.
 > Setup/resume hooks and broad `doctor --json` remain deferred.
 
 ## Outcome

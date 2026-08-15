@@ -132,6 +132,9 @@ cleanup() {
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     docker volume rm "$VOLUME" >/dev/null 2>&1 || true
     if [[ "$BUILT_IMAGE" == "1" ]]; then docker image rm "$IMAGE" >/dev/null 2>&1 || true; fi
+    # The Go module cache intentionally makes downloaded modules read-only.
+    # Restore owner write permission so isolated harness state remains removable.
+    chmod -R u+w "$RUN_ROOT" 2>/dev/null || true
     rm -rf "$RUN_ROOT"
     if docker_exists "$NAME" || docker_exists "$BLOCKER" || docker volume inspect "$VOLUME" >/dev/null 2>&1; then
       note "FAIL: cleanup left an exact harness resource"
@@ -212,7 +215,10 @@ http_code() {
 }
 
 wait_status() {
-  local wanted=$1 timeout=${2:-20} line deadline=$((SECONDS + timeout))
+  local wanted=$1
+  local timeout=${2:-20}
+  local line
+  local deadline=$((SECONDS + timeout))
   while (( SECONDS < deadline )); do
     line=$("$FERN_BIN" status -name "$NAME" 2>/dev/null || true)
     [[ "$line" == *$'\t'"$wanted"* ]] && return 0
@@ -339,7 +345,7 @@ for ((iteration=1; iteration<=WAKE_COUNT; iteration++)); do
   request_time=$(timestamp)
   timing_file="$RUN_ROOT/timing-$iteration"
   body_file="$RUN_ROOT/body-$iteration"
-  auth_curl --output "$body_file" --write-out '%{http_code}\t%{time_starttransfer}\t%{time_total}' "$PROXY_URL/global/health" >"$timing_file" &
+  auth_curl --output "$body_file" --write-out '%{http_code}\t%{time_starttransfer}\t%{time_total}\n' "$PROXY_URL/global/health" >"$timing_file" &
   wake_pid=$!
   start_observed="unobservable"
   for _ in {1..700}; do
@@ -354,8 +360,7 @@ for ((iteration=1; iteration<=WAKE_COUNT; iteration++)); do
   id=$(container_id)
   port=$(endpoint)
   started_at=$(container_started_at)
-  direct_identity=$(auth_curl --fail "http://127.0.0.1:$port/control/identity")
-  watcher_ns=$(printf '%s' "$direct_identity" | sed -n 's/.*"last_event_connected_ns":\([0-9]*\).*/\1/p')
+  watcher_ns=$(docker logs "$NAME" 2>&1 | sed -n 's/.*event_connected ts_ns=\([0-9]*\).*/\1/p' | tail -n 1)
   [[ -n "$watcher_ns" && "$watcher_ns" != 0 ]] || watcher_ns=unobservable
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t127.0.0.1:%s\tready\n' \
     "$iteration" "$request_time" "$start_observed" "$started_at" "$health_ready" "$watcher_ns" "$first_byte" "$total" "$id" "$port" >>"$TIMINGS"
