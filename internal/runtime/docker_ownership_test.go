@@ -6,12 +6,17 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"slices"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 )
@@ -348,6 +353,103 @@ func TestPauseRetryCommitsPendingStoppedIntent(t *testing.T) {
 	}
 	if intents.status != PauseIntentCommitted {
 		t.Fatalf("intent status = %d, want committed", intents.status)
+	}
+}
+
+func TestPauseCreatedContainerRecordsCommittedIntent(t *testing.T) {
+	t.Parallel()
+	intents := &recordingIntentStore{}
+	docker := &Docker{intents: intents}
+	observation := Observation{State: StateProvisioning, DockerStatus: "created", ContainerID: "container-id"}
+	if err := docker.pauseObserved(context.Background(), "demo", observation); err != nil {
+		t.Fatal(err)
+	}
+	if intents.status != PauseIntentCommitted {
+		t.Fatalf("intent status = %d, want committed", intents.status)
+	}
+}
+
+func TestVerifyActualSpecRejectsExtraMountAndPrivileges(t *testing.T) {
+	t.Parallel()
+	useInit := true
+	base := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{HostConfig: &container.HostConfig{
+			Resources:    container.Resources{Memory: 1024},
+			Init:         &useInit,
+			PortBindings: nat.PortMap{nat.Port(workspacePort): []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "49152"}}},
+		}},
+		Config: &container.Config{Image: "image:test", ExposedPorts: nat.PortSet{nat.Port(workspacePort): struct{}{}}},
+		Mounts: []container.MountPoint{
+			{Type: mount.TypeBind, Source: "/repo", Destination: "/home/user/workspace", RW: true},
+			{Type: mount.TypeVolume, Name: "fern-demo-data", Destination: "/home/user/.local/share/opencode", RW: true},
+		},
+	}
+	spec := ownershipTestSpec()
+	withMount := base
+	withMount.Mounts = append(slices.Clone(base.Mounts), container.MountPoint{Type: mount.TypeBind, Source: "/tmp", Destination: "/extra", RW: true})
+	if err := verifyActualSpec(withMount, spec); !errors.Is(err, ErrSpecDrift) {
+		t.Fatalf("extra mount error = %v, want ErrSpecDrift", err)
+	}
+	base.HostConfig.Privileged = true
+	if err := verifyActualSpec(base, spec); !errors.Is(err, ErrSpecDrift) {
+		t.Fatalf("privileged error = %v, want ErrSpecDrift", err)
+	}
+}
+
+func TestEnsureRunningUsesOneInspectionForRunningContainer(t *testing.T) {
+	t.Parallel()
+	spec := ownershipTestSpec()
+	fingerprint, err := specFingerprint(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var inspections atomic.Int32
+	server := httptest.NewUnstartedServer(nil)
+	server.Config.Handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/containers/demo/json"):
+			inspections.Add(1)
+			useInit := true
+			port := server.Listener.Addr().(*net.TCPAddr).Port
+			writeJSON(writer, http.StatusOK, map[string]any{
+				"Id": "container-id",
+				"Config": map[string]any{
+					"Image": spec.Image, "Env": sortedEnv(spec.Env),
+					"Labels":       map[string]string{managedLabel: "true", workspaceLabel: spec.Name, specFingerprintLabel: fingerprint},
+					"ExposedPorts": nat.PortSet{nat.Port(workspacePort): struct{}{}},
+				},
+				"HostConfig": map[string]any{
+					"Memory": spec.MemoryBytes, "Init": useInit,
+					"PortBindings":  nat.PortMap{nat.Port(workspacePort): []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: strconv.Itoa(port)}}},
+					"RestartPolicy": map[string]any{"Name": "no"},
+				},
+				"Mounts": []map[string]any{
+					{"Type": "bind", "Source": spec.RepoPath, "Destination": "/home/user/workspace", "RW": true},
+					{"Type": "volume", "Name": dataVolumeName(spec.Name), "Destination": "/home/user/.local/share/opencode", "RW": true},
+				},
+				"State": map[string]any{"Status": "running", "Running": true},
+				"NetworkSettings": map[string]any{"Ports": nat.PortMap{
+					nat.Port(workspacePort): []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: strconv.Itoa(port)}},
+				}},
+			})
+		case request.URL.Path == "/global/health":
+			writer.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(writer, request)
+		}
+	})
+	server.Start()
+	defer server.Close()
+	docker := testDocker(t, server)
+	endpoint, transitioned, err := docker.EnsureRunning(context.Background(), spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if transitioned || endpoint.Port != server.Listener.Addr().(*net.TCPAddr).Port {
+		t.Fatalf("endpoint=%+v transitioned=%t", endpoint, transitioned)
+	}
+	if inspections.Load() != 1 {
+		t.Fatalf("container inspections = %d, want 1", inspections.Load())
 	}
 }
 

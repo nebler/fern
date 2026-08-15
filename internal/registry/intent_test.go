@@ -1,6 +1,8 @@
 package registry
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/nebler/fern/internal/runtime"
@@ -41,5 +43,16 @@ func TestIntentStoreRecordsContainerIdentity(t *testing.T) {
 	status, err = store.PauseStatus("demo", "container-one")
 	if err != nil || status != runtime.PauseIntentNone {
 		t.Fatalf("pause intent remained after clear: status=%d err=%v", status, err)
+	}
+}
+
+func TestIntentStoreRejectsOversizedFile(t *testing.T) {
+	directory := t.TempDir()
+	store := NewIntentStore(directory)
+	if err := os.WriteFile(store.path("demo"), []byte(strings.Repeat("x", 5<<10)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PauseStatus("demo", "container-one"); err == nil {
+		t.Fatal("oversized pause intent was accepted")
 	}
 }

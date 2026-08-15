@@ -159,6 +159,12 @@ func (d *Docker) pauseObserved(ctx context.Context, name string, observation Obs
 		if err != nil {
 			return fmt.Errorf("read pause intent: %w", err)
 		}
+		if intent == PauseIntentNone {
+			if err := d.intents.BeginPause(name, observation.ContainerID); err != nil {
+				return fmt.Errorf("record pause intent: %w", err)
+			}
+			intent = PauseIntentPending
+		}
 		if intent == PauseIntentPending {
 			if err := d.intents.CommitPause(name, observation.ContainerID); err != nil {
 				return fmt.Errorf("commit pending pause intent: %w", err)
@@ -229,30 +235,31 @@ func (d *Docker) Resume(ctx context.Context, spec Spec) (Endpoint, error) {
 	if err := spec.Validate(); err != nil {
 		return Endpoint{}, err
 	}
-	observation, err := d.Status(ctx, spec.Name)
+	inspection, err := d.inspectByReference(ctx, spec.Name, spec.Name)
 	if err != nil {
 		return Endpoint{}, err
 	}
-	return d.resumeObserved(ctx, spec, observation)
+	return d.resumeObserved(ctx, spec, inspection)
 }
 
 func (d *Docker) EnsureRunning(ctx context.Context, spec Spec) (Endpoint, bool, error) {
 	if err := spec.Validate(); err != nil {
 		return Endpoint{}, false, err
 	}
-	observation, err := d.Status(ctx, spec.Name)
+	inspection, err := d.inspectByReference(ctx, spec.Name, spec.Name)
 	if err != nil {
 		return Endpoint{}, false, err
 	}
+	observation := inspection.observation
 	switch observation.State {
 	case StateAbsent:
 		ep, err := d.create(ctx, spec)
 		return ep, true, err
 	case StatePaused, StateProvisioning:
-		ep, err := d.resumeObserved(ctx, spec, observation)
+		ep, err := d.resumeObserved(ctx, spec, inspection)
 		return ep, true, err
 	case StateRunning:
-		ep, err := d.resumeObserved(ctx, spec, observation)
+		ep, err := d.resumeObserved(ctx, spec, inspection)
 		return ep, false, err
 	case StateFailed:
 		return Endpoint{}, false, fmt.Errorf("%w: inspect logs and run 'fern down' before recreating", ErrFailed)
@@ -261,7 +268,8 @@ func (d *Docker) EnsureRunning(ctx context.Context, spec Spec) (Endpoint, bool, 
 	}
 }
 
-func (d *Docker) resumeObserved(ctx context.Context, spec Spec, observation Observation) (Endpoint, error) {
+func (d *Docker) resumeObserved(ctx context.Context, spec Spec, inspection workspaceInspection) (Endpoint, error) {
+	observation := inspection.observation
 	if observation.State == StateAbsent {
 		return Endpoint{}, fmt.Errorf("resume %q: workspace is absent", spec.Name)
 	}
@@ -272,7 +280,7 @@ func (d *Docker) resumeObserved(ctx context.Context, spec Spec, observation Obse
 	if observation.SpecFingerprint != wantFingerprint {
 		return Endpoint{}, fmt.Errorf("%w: run 'fern down' before applying changed image, repository, memory, or environment", ErrSpecDrift)
 	}
-	if err := d.verifyActualSpec(ctx, observation.ContainerID, spec); err != nil {
+	if err := verifyActualSpec(inspection.info, spec); err != nil {
 		return Endpoint{}, err
 	}
 	if observation.State == StateFailed {
@@ -292,9 +300,11 @@ func (d *Docker) resumeObserved(ctx context.Context, spec Spec, observation Obse
 			return Endpoint{}, d.rollbackStarted(spec.Name, containerID, fmt.Errorf("start %q: %w", spec.Name, err))
 		}
 	}
-	observation, err = d.statusByReference(ctx, containerID, spec.Name)
-	if err != nil {
-		return Endpoint{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, err)
+	if transitioned {
+		observation, err = d.statusByReference(ctx, containerID, spec.Name)
+		if err != nil {
+			return Endpoint{}, d.rollbackIfTransitioned(true, spec.Name, containerID, err)
+		}
 	}
 	if !observation.HasEndpoint {
 		return Endpoint{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("workspace %q has no %s port binding", spec.Name, workspacePort))
@@ -371,18 +381,28 @@ func (d *Docker) Status(ctx context.Context, name string) (Observation, error) {
 }
 
 func (d *Docker) statusByReference(ctx context.Context, reference, workspace string) (Observation, error) {
+	inspection, err := d.inspectByReference(ctx, reference, workspace)
+	return inspection.observation, err
+}
+
+type workspaceInspection struct {
+	observation Observation
+	info        container.InspectResponse
+}
+
+func (d *Docker) inspectByReference(ctx context.Context, reference, workspace string) (workspaceInspection, error) {
 	info, err := d.cli.ContainerInspect(ctx, reference)
 	if err != nil {
 		if errdefs.IsNotFound(err) {
-			return Observation{State: StateAbsent}, nil
+			return workspaceInspection{observation: Observation{State: StateAbsent}}, nil
 		}
-		return Observation{}, fmt.Errorf("inspect %q: %w", workspace, err)
+		return workspaceInspection{}, fmt.Errorf("inspect %q: %w", workspace, err)
 	}
 	if info.Config == nil || info.State == nil || info.NetworkSettings == nil {
-		return Observation{}, fmt.Errorf("inspect %q: incomplete Docker state", workspace)
+		return workspaceInspection{}, fmt.Errorf("inspect %q: incomplete Docker state", workspace)
 	}
 	if info.Config.Labels[managedLabel] != "true" || info.Config.Labels[workspaceLabel] != workspace {
-		return Observation{}, fmt.Errorf("%w: container %q", ErrUnmanaged, workspace)
+		return workspaceInspection{}, fmt.Errorf("%w: container %q", ErrUnmanaged, workspace)
 	}
 
 	observation := Observation{
@@ -396,28 +416,38 @@ func (d *Docker) statusByReference(ctx context.Context, reference, workspace str
 	}
 	if bindings := info.NetworkSettings.Ports[nat.Port(workspacePort)]; len(bindings) > 0 {
 		if len(bindings) != 1 || !isLoopbackBinding(bindings[0].HostIP) {
-			return Observation{}, fmt.Errorf("%w: OpenCode port is not bound exclusively to loopback", ErrSpecDrift)
+			return workspaceInspection{}, fmt.Errorf("%w: OpenCode port is not bound exclusively to loopback", ErrSpecDrift)
 		}
 		port, err := strconv.Atoi(bindings[0].HostPort)
 		if err != nil {
-			return Observation{}, fmt.Errorf("parse workspace port %q: %w", bindings[0].HostPort, err)
+			return workspaceInspection{}, fmt.Errorf("parse workspace port %q: %w", bindings[0].HostPort, err)
 		}
 		if port <= 0 || port > 65535 {
-			return Observation{}, fmt.Errorf("invalid workspace port %d", port)
+			return workspaceInspection{}, fmt.Errorf("invalid workspace port %d", port)
 		}
 		observation.Endpoint = Endpoint{Host: bindings[0].HostIP, Port: port}
 		observation.HasEndpoint = true
 	}
 
 	switch {
-	case info.State.Restarting || info.State.Status == "created":
+	case info.State.Restarting:
 		observation.State = StateProvisioning
+	case info.State.Status == "created":
+		intent, err := d.intents.PauseStatus(workspace, info.ID)
+		if err != nil {
+			return workspaceInspection{}, fmt.Errorf("read pause intent: %w", err)
+		}
+		if intent == PauseIntentCommitted {
+			observation.State = StatePaused
+		} else {
+			observation.State = StateProvisioning
+		}
 	case info.State.OOMKilled || info.State.Dead:
 		observation.State = StateFailed
 	case info.State.Status == "exited":
 		intent, err := d.intents.PauseStatus(workspace, info.ID)
 		if err != nil {
-			return Observation{}, fmt.Errorf("read pause intent: %w", err)
+			return workspaceInspection{}, fmt.Errorf("read pause intent: %w", err)
 		}
 		switch intent {
 		case PauseIntentCommitted:
@@ -432,9 +462,9 @@ func (d *Docker) statusByReference(ctx context.Context, reference, workspace str
 	case info.State.Running && info.State.Paused:
 		observation.State = StatePaused
 	default:
-		return Observation{}, fmt.Errorf("unsupported Docker state %q for workspace %q", info.State.Status, workspace)
+		return workspaceInspection{}, fmt.Errorf("unsupported Docker state %q for workspace %q", info.State.Status, workspace)
 	}
-	return observation, nil
+	return workspaceInspection{observation: observation, info: info}, nil
 }
 
 func (d *Docker) rollbackStarted(name, containerID string, cause error) error {
@@ -517,11 +547,18 @@ func (d *Docker) verifyActualSpec(ctx context.Context, containerID string, spec 
 	if err != nil {
 		return fmt.Errorf("inspect actual workspace configuration: %w", err)
 	}
+	return verifyActualSpec(info, spec)
+}
+
+func verifyActualSpec(info container.InspectResponse, spec Spec) error {
 	if info.Config == nil || info.HostConfig == nil {
 		return fmt.Errorf("%w: Docker returned incomplete workspace configuration", ErrSpecDrift)
 	}
 	if info.Config.Image != spec.Image || info.HostConfig.Memory != spec.MemoryBytes || info.HostConfig.Init == nil || !*info.HostConfig.Init || !info.HostConfig.RestartPolicy.IsNone() {
 		return fmt.Errorf("%w: Docker image, memory, init, or restart setting was modified; run 'fern down' to recreate", ErrSpecDrift)
+	}
+	if info.HostConfig.Privileged || info.HostConfig.ReadonlyRootfs || len(info.HostConfig.CapAdd) != 0 || len(info.HostConfig.Devices) != 0 || len(info.HostConfig.DeviceRequests) != 0 || len(info.HostConfig.SecurityOpt) != 0 {
+		return fmt.Errorf("%w: Docker privilege, capability, device, or security settings were modified; run 'fern down' to recreate", ErrSpecDrift)
 	}
 	bindings := info.HostConfig.PortBindings[nat.Port(workspacePort)]
 	if _, ok := info.Config.ExposedPorts[nat.Port(workspacePort)]; !ok || len(bindings) != 1 || !isLoopbackBinding(bindings[0].HostIP) {
@@ -556,7 +593,7 @@ func (d *Docker) verifyActualSpec(ctx context.Context, containerID string, spec 
 			dataVolume = actualMount.Name
 		}
 	}
-	if repoCount != 1 || dataCount != 1 || filepath.Clean(repoPath) != filepath.Clean(spec.RepoPath) || dataVolume != dataVolumeName(spec.Name) {
+	if len(info.Mounts) != 2 || repoCount != 1 || dataCount != 1 || filepath.Clean(repoPath) != filepath.Clean(spec.RepoPath) || dataVolume != dataVolumeName(spec.Name) {
 		return fmt.Errorf("%w: repository or data mount was modified", ErrSpecDrift)
 	}
 	return nil

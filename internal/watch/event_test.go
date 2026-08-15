@@ -56,3 +56,14 @@ func TestStreamDiscardsUnterminatedSSEFrame(t *testing.T) {
 	default:
 	}
 }
+
+func TestDefaultStreamClientBoundsResponseHeaders(t *testing.T) {
+	t.Parallel()
+	transport, ok := defaultStreamClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("default stream transport = %T", defaultStreamClient.Transport)
+	}
+	if transport.ResponseHeaderTimeout <= 0 {
+		t.Fatal("default stream client has no response-header timeout")
+	}
+}

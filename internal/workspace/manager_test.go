@@ -217,15 +217,15 @@ func TestPauseRetriesPendingProvisioningState(t *testing.T) {
 	}
 }
 
-func TestRunningEndpointRechecksClosingBeforeStatus(t *testing.T) {
+func TestRunningTargetRejectsClosingManager(t *testing.T) {
 	t.Parallel()
 	fake := newFakeRuntime(runtime.StateRunning)
 	manager := newTestManager(fake, nil, alwaysIdle)
 	manager.wakeMu.Lock()
 	manager.closing = true
 	manager.wakeMu.Unlock()
-	if _, err := manager.runningEndpoint(context.Background()); err == nil {
-		t.Fatal("runningEndpoint succeeded while closing")
+	if _, err := manager.runningTarget(); err == nil {
+		t.Fatal("runningTarget succeeded while closing")
 	}
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
@@ -300,6 +300,129 @@ func TestFailedWakeCanBeRetriedImmediately(t *testing.T) {
 	defer fake.mu.Unlock()
 	if fake.ensureN != 2 {
 		t.Fatalf("runtime ensure calls = %d, want 2", fake.ensureN)
+	}
+}
+
+func TestSequentialRequestsReuseRunningEndpointUntilInvalidated(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRuntime(runtime.StateRunning)
+	manager := newTestManager(fake, nil, alwaysIdle)
+	var firstTarget RequestTarget
+	for range 2 {
+		target, release, err := manager.AcquireRequest(context.Background(), RequestRead)
+		if err != nil {
+			t.Fatal(err)
+		}
+		release()
+		if target.Endpoint != fake.endpoint || target.Generation == 0 {
+			t.Fatalf("target = %+v, want endpoint %+v with generation", target, fake.endpoint)
+		}
+		if target.Generation != 1 {
+			t.Fatalf("generation = %d, want 1", target.Generation)
+		}
+		if firstTarget.Generation == 0 {
+			firstTarget = target
+		}
+	}
+	fake.mu.Lock()
+	if fake.ensureN != 1 {
+		t.Fatalf("runtime ensure calls = %d, want 1", fake.ensureN)
+	}
+	fake.mu.Unlock()
+
+	manager.InvalidateEndpoint(firstTarget)
+	_, release, err := manager.AcquireRequest(context.Background(), RequestRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.ensureN != 2 {
+		t.Fatalf("runtime ensure calls after invalidation = %d, want 2", fake.ensureN)
+	}
+}
+
+func TestStaleFailureDoesNotInvalidateNewGeneration(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRuntime(runtime.StateRunning)
+	manager := newTestManager(fake, nil, alwaysIdle)
+	first, release, err := manager.AcquireRequest(context.Background(), RequestRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	manager.InvalidateEndpoint(first)
+	second, release, err := manager.AcquireRequest(context.Background(), RequestRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if second.Generation == first.Generation {
+		t.Fatalf("generation was not advanced: first=%+v second=%+v", first, second)
+	}
+	manager.InvalidateEndpoint(first)
+	current, _, err := manager.AcquireRequest(context.Background(), RequestObserve)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current != second {
+		t.Fatalf("stale failure invalidated new generation: current=%+v second=%+v", current, second)
+	}
+}
+
+func TestCloseWaitsForPauseAdmittedBeforeLifecycle(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRuntime(runtime.StateRunning)
+	manager := newTestManager(fake, nil, alwaysIdle)
+	if err := manager.acquireLifecycle(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.beginPause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if manager.isClosing() {
+		t.Fatal("manager unexpectedly closing")
+	}
+	pauseDone := make(chan error, 1)
+	go func() {
+		if err := manager.acquireLifecycle(context.Background()); err != nil {
+			pauseDone <- err
+			return
+		}
+		err := fake.Pause(context.Background(), "demo")
+		manager.releaseLifecycle()
+		manager.endPause()
+		pauseDone <- err
+	}()
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- manager.Close(context.Background()) }()
+	manager.releaseLifecycle()
+	if err := <-pauseDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.pauseN != 1 {
+		t.Fatalf("Close returned without admitted pause: pause calls = %d", fake.pauseN)
+	}
+}
+
+func TestPauseClearsCachedEndpoint(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRuntime(runtime.StateRunning)
+	manager := newTestManager(fake, nil, alwaysIdle)
+	if _, err := manager.EnsureRunning(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := manager.AcquireRequest(context.Background(), RequestObserve); !errors.Is(err, ErrNotRunning) {
+		t.Fatalf("observation after pause error = %v, want ErrNotRunning", err)
 	}
 }
 

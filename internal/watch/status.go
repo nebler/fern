@@ -14,19 +14,21 @@ import (
 	"github.com/nebler/fern/internal/runtime"
 )
 
+var statusHTTPClient = &http.Client{Timeout: 2 * time.Second}
+
 func AllSessionsIdle(ctx context.Context, ep runtime.Endpoint, auth runtime.ServerAuth) (bool, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(ep.URL(), "/")+"/session/status", nil)
 	if err != nil {
 		return false, err
 	}
 	auth.Apply(req)
-	client := &http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Do(req)
+	resp, err := statusHTTPClient.Do(req)
 	if err != nil {
 		return false, fmt.Errorf("query session status: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		return false, fmt.Errorf("query session status: %s", resp.Status)
 	}
 	var statuses map[string]struct {

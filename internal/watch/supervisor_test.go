@@ -63,6 +63,31 @@ func TestRequestInvalidatesPreviousIdleBoundary(t *testing.T) {
 	}
 }
 
+func TestMalformedObservationInvalidatesPreviousIdleBoundary(t *testing.T) {
+	t.Parallel()
+	model := activityModel{active: make(map[string]bool)}
+	model.apply(Observation{Epoch: 1, Kind: ObservationConnected})
+	model.apply(status(1, "one", "busy"))
+	model.apply(status(1, "one", "idle"))
+	action := model.apply(Observation{Epoch: 1, Kind: ObservationInvalidated})
+	if action != timerCancel || model.seenBusy {
+		t.Fatalf("invalid observation did not clear eligibility: model=%+v action=%v", model, action)
+	}
+}
+
+func TestSupervisorDoesNotMutateDefaults(t *testing.T) {
+	t.Parallel()
+	supervisor := Supervisor{IdleAfter: time.Millisecond, OnPause: func(context.Context) error { return nil }}
+	observations := make(chan Observation)
+	close(observations)
+	if err := supervisor.Run(context.Background(), observations); err != nil {
+		t.Fatal(err)
+	}
+	if supervisor.Log != nil || supervisor.PauseTimeout != 0 {
+		t.Fatalf("Run mutated supervisor defaults: %+v", supervisor)
+	}
+}
+
 func TestSupervisorPausesAfterAllSessionsBecomeIdle(t *testing.T) {
 	t.Parallel()
 	observations := make(chan Observation, 8)

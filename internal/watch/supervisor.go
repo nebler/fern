@@ -44,11 +44,13 @@ func (s *Supervisor) Run(ctx context.Context, observations <-chan Observation) e
 	if s.OnPause == nil {
 		return errors.New("pause callback is required")
 	}
-	if s.Log == nil {
-		s.Log = slog.Default()
+	log := s.Log
+	if log == nil {
+		log = slog.Default()
 	}
-	if s.PauseTimeout <= 0 {
-		s.PauseTimeout = 30 * time.Second
+	pauseTimeout := s.PauseTimeout
+	if pauseTimeout <= 0 {
+		pauseTimeout = 30 * time.Second
 	}
 
 	timer := time.NewTimer(time.Hour)
@@ -78,7 +80,7 @@ func (s *Supervisor) Run(ctx context.Context, observations <-chan Observation) e
 				idleSince = time.Now()
 				timer.Reset(s.IdleAfter)
 				armed = true
-				s.Log.Info("workspace idle, arming pause", "epoch", model.epoch, "after", s.IdleAfter)
+				log.Info("workspace idle, arming pause", "epoch", model.epoch, "after", s.IdleAfter)
 			}
 			acknowledge(observation)
 		case <-timer.C:
@@ -115,12 +117,12 @@ func (s *Supervisor) Run(ctx context.Context, observations <-chan Observation) e
 			if !model.connected || !model.seenBusy || len(model.active) != 0 {
 				continue
 			}
-			s.Log.Info("pausing workspace", "epoch", model.epoch, "idle_for", time.Since(idleSince).Round(time.Second))
-			pauseCtx, cancel := context.WithTimeout(ctx, s.PauseTimeout)
+			log.Info("pausing workspace", "epoch", model.epoch, "idle_for", time.Since(idleSince).Round(time.Second))
+			pauseCtx, cancel := context.WithTimeout(ctx, pauseTimeout)
 			err := s.OnPause(pauseCtx)
 			cancel()
 			if err != nil {
-				s.Log.Warn("pause deferred", "err", err)
+				log.Warn("pause deferred", "err", err)
 				timer.Reset(minDuration(s.IdleAfter, 5*time.Second))
 				armed = true
 				continue
@@ -141,7 +143,7 @@ func acknowledge(observation Observation) {
 // model, so state changes are explicit and cannot escape through shared values.
 func (model *activityModel) apply(observation Observation) timerAction {
 	switch observation.Kind {
-	case ObservationRequest:
+	case ObservationRequest, ObservationInvalidated:
 		// A request that may admit work invalidates the previous idle boundary.
 		// A fresh busy->idle transition is required even if the HTTP response
 		// returns before OpenCode begins provider execution.

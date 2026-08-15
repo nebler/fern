@@ -26,6 +26,12 @@ type StreamOptions struct {
 	OnConnect func()
 }
 
+var defaultStreamClient = func() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.ResponseHeaderTimeout = 10 * time.Second
+	return &http.Client{Transport: transport}
+}()
+
 // Stream parses complete SSE frames. Multiple data lines belong to one frame
 // and are joined according to the SSE specification before JSON decoding.
 func Stream(ctx context.Context, options StreamOptions, out chan<- Event) error {
@@ -37,7 +43,7 @@ func Stream(ctx context.Context, options StreamOptions, out chan<- Event) error 
 	options.Auth.Apply(req)
 	client := options.Client
 	if client == nil {
-		client = http.DefaultClient
+		client = defaultStreamClient
 	}
 	resp, err := client.Do(req)
 	if err != nil {
@@ -108,6 +114,9 @@ func Stream(ctx context.Context, options StreamOptions, out chan<- Event) error 
 // StreamForever is used by the diagnostic command. Lifecycle observation uses
 // StreamController, which also publishes connection epochs.
 func StreamForever(ctx context.Context, options StreamOptions, out chan<- Event, log *slog.Logger) {
+	if log == nil {
+		log = slog.Default()
+	}
 	backoff := 500 * time.Millisecond
 	for ctx.Err() == nil {
 		start := time.Now()

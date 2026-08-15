@@ -2,9 +2,11 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -23,6 +25,45 @@ func TestWaitHealthyUsesBasicAuth(t *testing.T) {
 	endpoint := Endpoint{Host: "127.0.0.1", Port: server.Listener.Addr().(*net.TCPAddr).Port}
 	if err := WaitHealthy(context.Background(), endpoint, ServerAuth{Username: "agent", Password: "secret"}, time.Second); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestWaitHealthyReusesConnectionAfterUnhealthyResponse(t *testing.T) {
+	var requests, connections int
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			writer.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = writer.Write(make([]byte, 1024))
+			return
+		}
+		writer.WriteHeader(http.StatusOK)
+	}))
+	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connections++
+		}
+	}
+	server.Start()
+	defer server.Close()
+	endpoint := Endpoint{Host: "127.0.0.1", Port: server.Listener.Addr().(*net.TCPAddr).Port}
+	if err := WaitHealthy(context.Background(), endpoint, ServerAuth{}, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if connections != 1 {
+		t.Fatalf("health checks used %d connections, want 1", connections)
+	}
+}
+
+func TestWaitHealthyReportsParentCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := WaitHealthy(ctx, Endpoint{Host: "127.0.0.1", Port: 1}, ServerAuth{}, time.Minute)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("error = %v, want context cancellation", err)
+	}
+	if strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("cancellation reported as timeout: %v", err)
 	}
 }
 

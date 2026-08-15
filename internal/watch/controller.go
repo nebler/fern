@@ -16,6 +16,7 @@ const (
 	ObservationDisconnected ObservationKind = "disconnected"
 	ObservationStatus       ObservationKind = "status"
 	ObservationRequest      ObservationKind = "request"
+	ObservationInvalidated  ObservationKind = "invalidated"
 )
 
 type Observation struct {
@@ -103,14 +104,9 @@ func (c *StreamController) replace(ctx context.Context, baseURL string) error {
 
 	if err := waitForConnection(ctx, ready); err != nil {
 		cancel()
-		if err := waitDone(ctx, done); err != nil {
-			return fmt.Errorf("stop failed activity stream: %w", err)
+		if stopErr := waitDoneAfterCancel(done); stopErr != nil {
+			return errors.Join(fmt.Errorf("connect activity stream: %w", err), fmt.Errorf("stop failed activity stream: %w", stopErr))
 		}
-		c.mu.Lock()
-		if c.state.epoch == epoch {
-			c.state = streamState{}
-		}
-		c.mu.Unlock()
 		return fmt.Errorf("connect activity stream: %w", err)
 	}
 	c.mu.Lock()
@@ -118,7 +114,7 @@ func (c *StreamController) replace(ctx context.Context, baseURL string) error {
 	c.mu.Unlock()
 	if !connected {
 		cancel()
-		if err := waitDone(ctx, done); err != nil {
+		if err := waitDoneAfterCancel(done); err != nil {
 			return fmt.Errorf("activity stream disconnected during connection setup: %w", err)
 		}
 		c.clearState(epoch)
@@ -129,6 +125,7 @@ func (c *StreamController) replace(ctx context.Context, baseURL string) error {
 
 func (c *StreamController) runGeneration(ctx context.Context, epoch uint64, baseURL string, ready chan struct{}, done chan struct{}) {
 	defer close(done)
+	defer c.clearState(epoch)
 	backoff := 500 * time.Millisecond
 	var readyOnce sync.Once
 	for ctx.Err() == nil {
@@ -136,9 +133,13 @@ func (c *StreamController) runGeneration(ctx context.Context, epoch uint64, base
 		attemptCtx, attemptCancel := context.WithCancel(ctx)
 		options := c.options
 		options.BaseURL = baseURL
+		onConnect := options.OnConnect
 		options.OnConnect = func() {
 			if !c.setConnected(epoch, true) {
 				return
+			}
+			if onConnect != nil {
+				onConnect()
 			}
 			if c.send(attemptCtx, Observation{Epoch: epoch, Kind: ObservationConnected}) {
 				readyOnce.Do(func() { close(ready) })
@@ -150,14 +151,7 @@ func (c *StreamController) runGeneration(ctx context.Context, epoch uint64, base
 		for {
 			select {
 			case event := <-events:
-				observation, ok, err := statusObservation(epoch, event)
-				if err != nil {
-					c.setConnected(epoch, false)
-					c.send(ctx, Observation{Epoch: epoch, Kind: ObservationDisconnected, Err: err.Error()})
-					attemptCancel()
-					waitStream(streamDone)
-					goto retry
-				}
+				observation, ok := statusObservation(epoch, event)
 				if ok {
 					c.send(ctx, observation)
 				}
@@ -268,18 +262,18 @@ func (c *StreamController) send(ctx context.Context, observation Observation) bo
 	}
 }
 
-func statusObservation(epoch uint64, event Event) (Observation, bool, error) {
+func statusObservation(epoch uint64, event Event) (Observation, bool) {
 	if event.Type != "session.status" {
-		return Observation{}, false, nil
+		return Observation{}, false
 	}
 	sessionID, status, ok := parseStatus(event)
 	if !ok {
-		return Observation{}, false, fmt.Errorf("malformed session.status event")
+		return Observation{Epoch: epoch, Kind: ObservationInvalidated, Err: "malformed session.status event"}, true
 	}
 	if status != "idle" && status != "busy" && status != "retry" {
-		return Observation{}, false, fmt.Errorf("unknown session status %q", status)
+		return Observation{Epoch: epoch, Kind: ObservationInvalidated, Err: fmt.Sprintf("unknown session status %q", status)}, true
 	}
-	return Observation{Epoch: epoch, Kind: ObservationStatus, SessionID: sessionID, Status: status}, true, nil
+	return Observation{Epoch: epoch, Kind: ObservationStatus, SessionID: sessionID, Status: status}, true
 }
 
 func waitForConnection(ctx context.Context, ready <-chan struct{}) error {
@@ -305,6 +299,12 @@ func waitDone(ctx context.Context, done <-chan struct{}) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func waitDoneAfterCancel(done <-chan struct{}) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return waitDone(ctx, done)
 }
 
 func waitStream(done <-chan error) {

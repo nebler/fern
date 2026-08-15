@@ -20,6 +20,11 @@ type EndpointObserver func(context.Context, runtime.Endpoint, bool) error
 type IdleChecker func(context.Context, runtime.Endpoint) (bool, error)
 type RequestObserver func()
 
+type RequestTarget struct {
+	Endpoint   runtime.Endpoint
+	Generation uint64
+}
+
 type RequestIntent uint8
 
 const (
@@ -35,9 +40,9 @@ type lifecycleRuntime interface {
 }
 
 type wakeCall struct {
-	done chan struct{}
-	ep   runtime.Endpoint
-	err  error
+	done   chan struct{}
+	target RequestTarget
+	err    error
 }
 
 // Manager owns lifecycle policy for exactly one workspace. Request admission
@@ -53,9 +58,15 @@ type Manager struct {
 	wakeOperationTimeout time.Duration
 	wakeMu               sync.Mutex
 	wake                 *wakeCall
+	endpoint             runtime.Endpoint
+	endpointGeneration   uint64
+	nextGeneration       uint64
+	hasEndpoint          bool
 	closing              bool
 	lifecycle            chan struct{}
-	admission            chan struct{}
+	admissionMu          sync.Mutex
+	pausing              bool
+	pauseDone            chan struct{}
 	inFlight             int
 	requestsDone         chan struct{}
 }
@@ -70,72 +81,73 @@ func NewManager(serviceCtx context.Context, rt lifecycleRuntime, spec runtime.Sp
 		onRequest:            onRequest,
 		wakeOperationTimeout: 90 * time.Second,
 		lifecycle:            make(chan struct{}, 1),
-		admission:            make(chan struct{}, 1),
 		requestsDone:         make(chan struct{}),
+		pauseDone:            make(chan struct{}),
 	}
 	close(manager.requestsDone)
-	manager.admission <- struct{}{}
+	close(manager.pauseDone)
 	manager.lifecycle <- struct{}{}
 	return manager
 }
 
 // AcquireRequest records request policy before wake begins. Read and work
 // requests release after proxying; work requests also invalidate idle policy.
-func (m *Manager) AcquireRequest(ctx context.Context, intent RequestIntent) (runtime.Endpoint, func(), error) {
+func (m *Manager) AcquireRequest(ctx context.Context, intent RequestIntent) (RequestTarget, func(), error) {
 	if intent > RequestWork {
-		return runtime.Endpoint{}, func() {}, errors.New("invalid request intent")
+		return RequestTarget{}, func() {}, errors.New("invalid request intent")
 	}
 	if m.isClosing() {
-		return runtime.Endpoint{}, func() {}, errors.New("workspace manager is shutting down")
+		return RequestTarget{}, func() {}, errors.New("workspace manager is shutting down")
 	}
 	release := func() {}
 	if intent != RequestObserve {
-		if err := m.acquireAdmission(ctx); err != nil {
-			return runtime.Endpoint{}, func() {}, err
+		if err := m.admitRequest(ctx); err != nil {
+			return RequestTarget{}, func() {}, err
 		}
-		if m.isClosing() {
-			m.releaseAdmission()
-			return runtime.Endpoint{}, func() {}, errors.New("workspace manager is shutting down")
-		}
-		if m.inFlight == 0 {
-			m.requestsDone = make(chan struct{})
-		}
-		m.inFlight++
-		m.releaseAdmission()
 		var once sync.Once
 		release = func() {
 			once.Do(func() {
-				<-m.admission
+				m.admissionMu.Lock()
 				m.inFlight--
 				if m.inFlight == 0 {
 					close(m.requestsDone)
 				}
-				m.releaseAdmission()
+				m.admissionMu.Unlock()
 			})
 		}
 	}
-	var ep runtime.Endpoint
+	var target RequestTarget
 	var err error
 	if intent != RequestObserve {
-		ep, err = m.EnsureRunning(ctx)
+		target, err = m.ensureTarget(ctx)
 	} else {
-		ep, err = m.runningEndpoint(ctx)
+		target, err = m.runningTarget()
 	}
 	if err != nil {
 		release()
-		return runtime.Endpoint{}, func() {}, err
+		return RequestTarget{}, func() {}, err
 	}
 	if intent == RequestWork && m.onRequest != nil {
 		m.onRequest()
 	}
-	return ep, release, nil
+	return target, release, nil
 }
 
 func (m *Manager) EnsureRunning(ctx context.Context) (runtime.Endpoint, error) {
+	target, err := m.ensureTarget(ctx)
+	return target.Endpoint, err
+}
+
+func (m *Manager) ensureTarget(ctx context.Context) (RequestTarget, error) {
 	m.wakeMu.Lock()
 	if m.closing {
 		m.wakeMu.Unlock()
-		return runtime.Endpoint{}, errors.New("workspace manager is shutting down")
+		return RequestTarget{}, errors.New("workspace manager is shutting down")
+	}
+	if m.hasEndpoint {
+		target := RequestTarget{Endpoint: m.endpoint, Generation: m.endpointGeneration}
+		m.wakeMu.Unlock()
+		return target, nil
 	}
 	call := m.wake
 	if call == nil {
@@ -146,15 +158,15 @@ func (m *Manager) EnsureRunning(ctx context.Context) (runtime.Endpoint, error) {
 	m.wakeMu.Unlock()
 	select {
 	case <-ctx.Done():
-		return runtime.Endpoint{}, ctx.Err()
+		return RequestTarget{}, ctx.Err()
 	case <-call.done:
-		return call.ep, call.err
+		return call.target, call.err
 	}
 }
 
 func (m *Manager) runWake(call *wakeCall) {
 	wakeCtx, cancel := context.WithTimeout(m.serviceCtx, m.wakeOperationTimeout)
-	call.ep, call.err = m.ensureRunning(wakeCtx)
+	call.target, call.err = m.ensureRunning(wakeCtx)
 	cancel()
 	m.wakeMu.Lock()
 	if m.wake == call {
@@ -164,35 +176,41 @@ func (m *Manager) runWake(call *wakeCall) {
 	m.wakeMu.Unlock()
 }
 
-func (m *Manager) runningEndpoint(ctx context.Context) (runtime.Endpoint, error) {
-	if err := m.acquireLifecycle(ctx); err != nil {
-		return runtime.Endpoint{}, err
+func (m *Manager) runningTarget() (RequestTarget, error) {
+	m.wakeMu.Lock()
+	defer m.wakeMu.Unlock()
+	if m.closing {
+		return RequestTarget{}, errors.New("workspace manager is shutting down")
 	}
-	defer m.releaseLifecycle()
-	if m.isClosing() {
-		return runtime.Endpoint{}, errors.New("workspace manager is shutting down")
+	if !m.hasEndpoint {
+		return RequestTarget{}, ErrNotRunning
 	}
-	observation, err := m.runtime.Status(ctx, m.spec.Name)
-	if err != nil {
-		return runtime.Endpoint{}, err
-	}
-	if observation.State != runtime.StateRunning || !observation.HasEndpoint {
-		return runtime.Endpoint{}, ErrNotRunning
-	}
-	return observation.Endpoint, nil
+	return RequestTarget{Endpoint: m.endpoint, Generation: m.endpointGeneration}, nil
 }
 
-func (m *Manager) ensureRunning(ctx context.Context) (runtime.Endpoint, error) {
+// InvalidateEndpoint discards a failed endpoint without disturbing a newer
+// generation that may already have replaced it.
+func (m *Manager) InvalidateEndpoint(target RequestTarget) {
+	m.wakeMu.Lock()
+	defer m.wakeMu.Unlock()
+	if m.hasEndpoint && m.endpoint == target.Endpoint && m.endpointGeneration == target.Generation {
+		m.endpoint = runtime.Endpoint{}
+		m.endpointGeneration = 0
+		m.hasEndpoint = false
+	}
+}
+
+func (m *Manager) ensureRunning(ctx context.Context) (RequestTarget, error) {
 	if err := m.acquireLifecycle(ctx); err != nil {
-		return runtime.Endpoint{}, err
+		return RequestTarget{}, err
 	}
 	defer m.releaseLifecycle()
 	if m.isClosing() {
-		return runtime.Endpoint{}, errors.New("workspace manager is shutting down")
+		return RequestTarget{}, errors.New("workspace manager is shutting down")
 	}
 	ep, transitioned, err := m.runtime.EnsureRunning(ctx, m.spec)
 	if err != nil {
-		return runtime.Endpoint{}, err
+		return RequestTarget{}, err
 	}
 	if m.observe != nil {
 		if err := m.observe(ctx, ep, transitioned); err != nil {
@@ -200,12 +218,25 @@ func (m *Manager) ensureRunning(ctx context.Context) (runtime.Endpoint, error) {
 				cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				pauseErr := m.runtime.Pause(cleanupCtx, m.spec.Name)
 				cancel()
-				return runtime.Endpoint{}, errors.Join(fmt.Errorf("attach activity observer: %w", err), pauseErr)
+				return RequestTarget{}, errors.Join(fmt.Errorf("attach activity observer: %w", err), pauseErr)
 			}
-			return runtime.Endpoint{}, fmt.Errorf("attach activity observer: %w", err)
+			return RequestTarget{}, fmt.Errorf("attach activity observer: %w", err)
 		}
 	}
-	return ep, nil
+	return m.publishEndpoint(ep), nil
+}
+
+func (m *Manager) publishEndpoint(endpoint runtime.Endpoint) RequestTarget {
+	m.wakeMu.Lock()
+	defer m.wakeMu.Unlock()
+	if m.closing {
+		return RequestTarget{Endpoint: endpoint}
+	}
+	m.nextGeneration++
+	m.endpoint = endpoint
+	m.endpointGeneration = m.nextGeneration
+	m.hasEndpoint = true
+	return RequestTarget{Endpoint: endpoint, Generation: m.endpointGeneration}
 }
 
 func (m *Manager) acquireLifecycleForClose(ctx context.Context) error {
@@ -220,15 +251,12 @@ func (m *Manager) acquireLifecycleForClose(ctx context.Context) error {
 func (m *Manager) Pause(ctx context.Context) error {
 	// Holding admission prevents a new request from entering between
 	// the authoritative status read and Docker stop.
-	if err := m.acquireAdmission(ctx); err != nil {
+	if err := m.beginPause(ctx); err != nil {
 		return err
 	}
-	defer m.releaseAdmission()
+	defer m.endPause()
 	if m.isClosing() {
 		return errors.New("workspace manager is shutting down")
-	}
-	if m.inFlight != 0 {
-		return ErrRequestsActive
 	}
 	if err := m.acquireLifecycle(ctx); err != nil {
 		return err
@@ -240,9 +268,14 @@ func (m *Manager) Pause(ctx context.Context) error {
 		return err
 	}
 	if observation.State == runtime.StateProvisioning {
-		return m.runtime.Pause(ctx, m.spec.Name)
+		if err := m.runtime.Pause(ctx, m.spec.Name); err != nil {
+			return err
+		}
+		m.clearEndpoint()
+		return nil
 	}
 	if observation.State != runtime.StateRunning {
+		m.clearEndpoint()
 		return nil
 	}
 	if !observation.HasEndpoint {
@@ -258,7 +291,11 @@ func (m *Manager) Pause(ctx context.Context) error {
 	if !idle {
 		return ErrSessionsActive
 	}
-	return m.runtime.Pause(ctx, m.spec.Name)
+	if err := m.runtime.Pause(ctx, m.spec.Name); err != nil {
+		return err
+	}
+	m.clearEndpoint()
+	return nil
 }
 
 func (m *Manager) Close(ctx context.Context) error {
@@ -266,17 +303,22 @@ func (m *Manager) Close(ctx context.Context) error {
 	m.closing = true
 	wake := m.wake
 	m.wakeMu.Unlock()
-	select {
-	case <-m.admission:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	m.admissionMu.Lock()
 	done := m.requestsDone
 	active := m.inFlight != 0
-	m.releaseAdmission()
+	pauseDone := m.pauseDone
+	pausing := m.pausing
+	m.admissionMu.Unlock()
 	if active {
 		select {
 		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if pausing {
+		select {
+		case <-pauseDone:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -311,23 +353,75 @@ func (m *Manager) releaseLifecycle() {
 	m.lifecycle <- struct{}{}
 }
 
-func (m *Manager) acquireAdmission(ctx context.Context) error {
-	select {
-	case <-m.admission:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-m.serviceCtx.Done():
-		return m.serviceCtx.Err()
-	}
-}
-
-func (m *Manager) releaseAdmission() {
-	m.admission <- struct{}{}
-}
-
 func (m *Manager) isClosing() bool {
 	m.wakeMu.Lock()
 	defer m.wakeMu.Unlock()
 	return m.closing
+}
+
+func (m *Manager) admitRequest(ctx context.Context) error {
+	for {
+		m.admissionMu.Lock()
+		if !m.pausing {
+			if m.isClosing() {
+				m.admissionMu.Unlock()
+				return errors.New("workspace manager is shutting down")
+			}
+			if m.inFlight == 0 {
+				m.requestsDone = make(chan struct{})
+			}
+			m.inFlight++
+			m.admissionMu.Unlock()
+			return nil
+		}
+		done := m.pauseDone
+		m.admissionMu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-m.serviceCtx.Done():
+			return m.serviceCtx.Err()
+		}
+	}
+}
+
+func (m *Manager) beginPause(ctx context.Context) error {
+	for {
+		m.admissionMu.Lock()
+		if !m.pausing {
+			if m.inFlight != 0 {
+				m.admissionMu.Unlock()
+				return ErrRequestsActive
+			}
+			m.pausing = true
+			m.pauseDone = make(chan struct{})
+			m.admissionMu.Unlock()
+			return nil
+		}
+		done := m.pauseDone
+		m.admissionMu.Unlock()
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-m.serviceCtx.Done():
+			return m.serviceCtx.Err()
+		}
+	}
+}
+
+func (m *Manager) endPause() {
+	m.admissionMu.Lock()
+	m.pausing = false
+	close(m.pauseDone)
+	m.admissionMu.Unlock()
+}
+
+func (m *Manager) clearEndpoint() {
+	m.wakeMu.Lock()
+	m.endpoint = runtime.Endpoint{}
+	m.endpointGeneration = 0
+	m.hasEndpoint = false
+	m.wakeMu.Unlock()
 }

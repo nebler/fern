@@ -29,7 +29,7 @@ func Acquire(directory, workspace string) (*Lease, error) {
 			return nil, fmt.Errorf("lock workspace %q: %w", workspace, err)
 		}
 		_, _ = file.Seek(0, io.SeekStart)
-		data, _ := io.ReadAll(file)
+		data, _ := io.ReadAll(io.LimitReader(file, 4<<10))
 		file.Close()
 		holder := string(data)
 		if holder == "" {

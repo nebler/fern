@@ -126,10 +126,10 @@ func runUp(args []string, log *slog.Logger) error {
 
 	supervisor := &watch.Supervisor{IdleAfter: cfg.IdleAfter, OnPause: manager.Pause, Log: log}
 	connections := newConnectionTracker()
+	trackedListener := connections.wrap(listener)
 	server := &http.Server{
 		Handler: proxy.New(manager, log), ReadHeaderTimeout: 10 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return serviceCtx },
-		ConnState:   connections.track,
 	}
 	group.Go(func() error {
 		err := supervisor.Run(serviceCtx, observations)
@@ -139,7 +139,7 @@ func runUp(args []string, log *slog.Logger) error {
 		return err
 	})
 	group.Go(func() error {
-		err := server.Serve(listener)
+		err := server.Serve(trackedListener)
 		if errors.Is(err, http.ErrServerClosed) {
 			return nil
 		}
@@ -178,19 +178,50 @@ type connectionTracker struct {
 	conns map[net.Conn]struct{}
 }
 
+type trackedListener struct {
+	net.Listener
+	tracker *connectionTracker
+}
+
+type trackedConnection struct {
+	net.Conn
+	tracker *connectionTracker
+}
+
 func newConnectionTracker() *connectionTracker {
 	return &connectionTracker{conns: make(map[net.Conn]struct{})}
 }
 
-func (t *connectionTracker) track(connection net.Conn, state http.ConnState) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	switch state {
-	case http.StateNew:
-		t.conns[connection] = struct{}{}
-	case http.StateClosed:
-		delete(t.conns, connection)
+func (t *connectionTracker) wrap(listener net.Listener) net.Listener {
+	return &trackedListener{Listener: listener, tracker: t}
+}
+
+func (l *trackedListener) Accept() (net.Conn, error) {
+	connection, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
 	}
+	tracked := &trackedConnection{Conn: connection, tracker: l.tracker}
+	l.tracker.add(tracked)
+	return tracked, nil
+}
+
+func (t *connectionTracker) add(connection net.Conn) {
+	t.mu.Lock()
+	t.conns[connection] = struct{}{}
+	t.mu.Unlock()
+}
+
+func (t *connectionTracker) remove(connection net.Conn) {
+	t.mu.Lock()
+	delete(t.conns, connection)
+	t.mu.Unlock()
+}
+
+func (c *trackedConnection) Close() error {
+	err := c.Conn.Close()
+	c.tracker.remove(c)
+	return err
 }
 
 func (t *connectionTracker) closeAll() {

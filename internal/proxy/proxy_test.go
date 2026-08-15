@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -18,6 +19,13 @@ type staticWaker struct {
 	endpoint runtime.Endpoint
 	active   chan bool
 	released chan struct{}
+	invalid  chan workspace.RequestTarget
+}
+
+func (w staticWaker) InvalidateEndpoint(target workspace.RequestTarget) {
+	if w.invalid != nil {
+		w.invalid <- target
+	}
 }
 
 func TestRequestIntentDefaultsUnknownReadsToWorkStarting(t *testing.T) {
@@ -28,8 +36,8 @@ func TestRequestIntentDefaultsUnknownReadsToWorkStarting(t *testing.T) {
 		t.Fatalf("unknown GET intent = %+v", intent)
 	}
 	request = httptest.NewRequest(http.MethodGet, "/event/", nil)
-	if intent := requestIntent(request); intent != workspace.RequestObserve {
-		t.Fatalf("normalized event intent = %+v", intent)
+	if intent := requestIntent(request); intent != workspace.RequestWork {
+		t.Fatalf("noncanonical event intent = %+v", intent)
 	}
 	request = httptest.NewRequest(http.MethodPost, "/event", nil)
 	if intent := requestIntent(request); intent != workspace.RequestWork {
@@ -42,11 +50,11 @@ func TestRequestIntentDefaultsUnknownReadsToWorkStarting(t *testing.T) {
 	}
 }
 
-func (w staticWaker) AcquireRequest(_ context.Context, intent workspace.RequestIntent) (runtime.Endpoint, func(), error) {
+func (w staticWaker) AcquireRequest(_ context.Context, intent workspace.RequestIntent) (workspace.RequestTarget, func(), error) {
 	if w.active != nil {
 		w.active <- intent == workspace.RequestWork
 	}
-	return w.endpoint, func() {
+	return workspace.RequestTarget{Endpoint: w.endpoint, Generation: 1}, func() {
 		if w.released != nil {
 			close(w.released)
 		}
@@ -136,6 +144,37 @@ func TestProxyHoldsMutatingRequestLeaseUntilResponseEnds(t *testing.T) {
 	case <-released:
 	case <-time.After(time.Second):
 		t.Fatal("request lease was not released")
+	}
+}
+
+func TestProxyInvalidatesFailedEndpoint(t *testing.T) {
+	t.Parallel()
+	invalid := make(chan workspace.RequestTarget, 1)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := runtime.Endpoint{Host: "127.0.0.1", Port: listener.Addr().(*net.TCPAddr).Port}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(New(staticWaker{endpoint: endpoint, invalid: invalid}, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	defer server.Close()
+	response, err := http.Get(server.URL + "/global/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusBadGateway)
+	}
+	select {
+	case got := <-invalid:
+		if got.Endpoint != endpoint || got.Generation != 1 {
+			t.Fatalf("invalidated target = %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed endpoint was not invalidated")
 	}
 }
 
