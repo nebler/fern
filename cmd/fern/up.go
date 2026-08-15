@@ -128,7 +128,7 @@ func runUp(args []string, log *slog.Logger) error {
 	connections := newConnectionTracker()
 	trackedListener := connections.wrap(listener)
 	server := &http.Server{
-		Handler: proxy.New(manager, log), ReadHeaderTimeout: 10 * time.Second,
+		Handler: proxy.New(manager, auth, log), ReadHeaderTimeout: 10 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return serviceCtx },
 	}
 	group.Go(func() error {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/workspace"
 )
 
@@ -24,11 +25,12 @@ type proxyTarget struct {
 	request workspace.RequestTarget
 }
 
-func New(waker Waker, log *slog.Logger) http.Handler {
+func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
 	if waker == nil {
-		return http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		unavailable := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 			http.Error(writer, "workspace manager unavailable", http.StatusServiceUnavailable)
 		})
+		return requireServerAuth(unavailable, auth)
 	}
 	if log == nil {
 		log = slog.Default()
@@ -49,7 +51,7 @@ func New(waker Waker, log *slog.Logger) http.Handler {
 		},
 	}
 
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		start := time.Now()
 		target, release, err := waker.AcquireRequest(request.Context(), requestIntent(request))
 		if err != nil {
@@ -69,6 +71,7 @@ func New(waker Waker, log *slog.Logger) http.Handler {
 		ctx := context.WithValue(request.Context(), targetKey{}, proxyTarget{url: targetURL, request: target})
 		reverseProxy.ServeHTTP(writer, request.WithContext(ctx))
 	})
+	return requireServerAuth(handler, auth)
 }
 
 func requestIntent(request *http.Request) workspace.RequestIntent {

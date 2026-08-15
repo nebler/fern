@@ -81,7 +81,7 @@ func TestProxyDoesNotBufferSSE(t *testing.T) {
 	defer upstream.Close()
 	upstreamURL := mustParseEndpoint(t, upstream.URL)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := httptest.NewServer(New(staticWaker{endpoint: upstreamURL}, logger))
+	server := httptest.NewServer(New(staticWaker{endpoint: upstreamURL}, runtime.ServerAuth{}, logger))
 	defer server.Close()
 
 	client := &http.Client{Timeout: time.Second}
@@ -117,7 +117,7 @@ func TestProxyHoldsMutatingRequestLeaseUntilResponseEnds(t *testing.T) {
 	active := make(chan bool, 1)
 	released := make(chan struct{})
 	waker := staticWaker{endpoint: mustParseEndpoint(t, upstream.URL), active: active, released: released}
-	server := httptest.NewServer(New(waker, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	server := httptest.NewServer(New(waker, runtime.ServerAuth{}, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	defer server.Close()
 	done := make(chan error, 1)
 	go func() {
@@ -158,7 +158,7 @@ func TestProxyInvalidatesFailedEndpoint(t *testing.T) {
 	if err := listener.Close(); err != nil {
 		t.Fatal(err)
 	}
-	server := httptest.NewServer(New(staticWaker{endpoint: endpoint, invalid: invalid}, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	server := httptest.NewServer(New(staticWaker{endpoint: endpoint, invalid: invalid}, runtime.ServerAuth{}, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	defer server.Close()
 	response, err := http.Get(server.URL + "/global/health")
 	if err != nil {
