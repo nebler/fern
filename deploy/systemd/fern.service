@@ -1,0 +1,25 @@
+[Unit]
+Description=Fern supervised OpenCode workspace
+Documentation=file:/opt/fern/src/docs/DEPLOYMENT.md
+Wants=network-online.target
+After=network-online.target docker.service
+Requires=docker.service
+StartLimitIntervalSec=120
+StartLimitBurst=3
+
+[Service]
+Type=simple
+User=fern
+Group=fern
+SupplementaryGroups=docker
+WorkingDirectory=/var/lib/fern
+Environment=HOME=/var/lib/fern
+EnvironmentFile=/etc/fern/fern.env
+ExecStart=/usr/local/bin/fern up --config /etc/fern/fern.yaml --listen 127.0.0.1:8080
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=120s
+KillSignal=SIGTERM
+
+[Install]
+WantedBy=multi-user.target
