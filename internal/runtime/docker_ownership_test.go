@@ -18,10 +18,38 @@ import (
 
 type memoryIntentStore struct{}
 
-func (memoryIntentStore) BeginPause(string, string) error       { return nil }
-func (memoryIntentStore) CommitPause(string, string) error      { return nil }
-func (memoryIntentStore) IsPaused(string, string) (bool, error) { return false, nil }
-func (memoryIntentStore) Clear(string) error                    { return nil }
+func (memoryIntentStore) BeginPause(string, string) error  { return nil }
+func (memoryIntentStore) CommitPause(string, string) error { return nil }
+func (memoryIntentStore) PauseStatus(string, string) (PauseIntentStatus, error) {
+	return PauseIntentNone, nil
+}
+func (memoryIntentStore) Clear(string) error { return nil }
+
+type recordingIntentStore struct {
+	status    PauseIntentStatus
+	commitErr error
+	clears    atomic.Int32
+}
+
+func (s *recordingIntentStore) BeginPause(string, string) error {
+	s.status = PauseIntentPending
+	return nil
+}
+func (s *recordingIntentStore) CommitPause(string, string) error {
+	if s.commitErr != nil {
+		return s.commitErr
+	}
+	s.status = PauseIntentCommitted
+	return nil
+}
+func (s *recordingIntentStore) PauseStatus(string, string) (PauseIntentStatus, error) {
+	return s.status, nil
+}
+func (s *recordingIntentStore) Clear(string) error {
+	s.clears.Add(1)
+	s.status = PauseIntentNone
+	return nil
+}
 
 func TestLifecycleRefusesForeignContainerWithoutMutation(t *testing.T) {
 	t.Parallel()
@@ -124,6 +152,8 @@ func TestCreateVerifiesVolumeReturnedAfterCreateRace(t *testing.T) {
 
 func TestVerifyActualSpecAllowsImageEnvironment(t *testing.T) {
 	t.Parallel()
+	var restartPolicy atomic.Value
+	restartPolicy.Store("no")
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet || !strings.HasSuffix(request.URL.Path, "/containers/container-id/json") {
 			http.NotFound(writer, request)
@@ -141,6 +171,9 @@ func TestVerifyActualSpecAllowsImageEnvironment(t *testing.T) {
 				"Memory":       1024,
 				"Init":         useInit,
 				"PortBindings": nat.PortMap{nat.Port(workspacePort): []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "49152"}}},
+				"RestartPolicy": map[string]any{
+					"Name": restartPolicy.Load().(string),
+				},
 			},
 			"Mounts": []map[string]any{
 				{"Type": "bind", "Source": "/repo", "Destination": "/home/user/workspace", "RW": true},
@@ -157,6 +190,147 @@ func TestVerifyActualSpecAllowsImageEnvironment(t *testing.T) {
 	spec.Env = map[string]string{"FERN": "value"}
 	if err := docker.verifyActualSpec(context.Background(), "container-id", spec); err != nil {
 		t.Fatalf("image-provided environment caused drift: %v", err)
+	}
+	restartPolicy.Store("always")
+	if err := docker.verifyActualSpec(context.Background(), "container-id", spec); !errors.Is(err, ErrSpecDrift) {
+		t.Fatalf("restart policy error = %v, want ErrSpecDrift", err)
+	}
+}
+
+func TestExitedContainerWithPendingPauseIsRecoverable(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || !strings.HasSuffix(request.URL.Path, "/containers/demo/json") {
+			http.NotFound(writer, request)
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"Id": "container-id",
+			"Config": map[string]any{"Labels": map[string]string{
+				managedLabel: "true", workspaceLabel: "demo",
+			}},
+			"State":           map[string]any{"Status": "exited", "Running": false},
+			"NetworkSettings": map[string]any{"Ports": map[string]any{}},
+		})
+	}))
+	defer server.Close()
+
+	docker := testDocker(t, server)
+	docker.intents = &recordingIntentStore{status: PauseIntentPending}
+	observation, err := docker.Status(context.Background(), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.State != StateProvisioning {
+		t.Fatalf("pending stopped container state = %s, want provisioning", observation.State)
+	}
+}
+
+func TestRunningContainerClearsStalePauseIntent(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || !strings.HasSuffix(request.URL.Path, "/containers/demo/json") {
+			http.NotFound(writer, request)
+			return
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{
+			"Id": "container-id",
+			"Config": map[string]any{"Labels": map[string]string{
+				managedLabel: "true", workspaceLabel: "demo",
+			}},
+			"State":           map[string]any{"Status": "running", "Running": true},
+			"NetworkSettings": map[string]any{"Ports": map[string]any{}},
+		})
+	}))
+	defer server.Close()
+
+	intents := &recordingIntentStore{status: PauseIntentCommitted}
+	docker := testDocker(t, server)
+	docker.intents = intents
+	observation, err := docker.Status(context.Background(), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.State != StateRunning || intents.status != PauseIntentNone || intents.clears.Load() != 1 {
+		t.Fatalf("state=%s intent=%d clears=%d", observation.State, intents.status, intents.clears.Load())
+	}
+}
+
+func TestPauseFailureReconciliation(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		stopStatus int
+		commitErr  error
+	}{
+		{name: "stop response", stopStatus: http.StatusInternalServerError},
+		{name: "intent commit", stopStatus: http.StatusNoContent, commitErr: errors.New("disk full")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var inspections atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				switch {
+				case request.Method == http.MethodGet && (strings.HasSuffix(request.URL.Path, "/containers/demo/json") || strings.HasSuffix(request.URL.Path, "/containers/container-id/json")):
+					state := map[string]any{"Status": "running", "Running": true}
+					if inspections.Add(1) > 1 && test.stopStatus != http.StatusNoContent {
+						state = map[string]any{"Status": "exited", "Running": false}
+					}
+					writeJSON(writer, http.StatusOK, map[string]any{
+						"Id": "container-id",
+						"Config": map[string]any{"Labels": map[string]string{
+							managedLabel: "true", workspaceLabel: "demo",
+						}},
+						"State":           state,
+						"NetworkSettings": map[string]any{"Ports": map[string]any{}},
+					})
+				case request.Method == http.MethodPost && strings.Contains(request.URL.Path, "/stop"):
+					if test.stopStatus == http.StatusNoContent {
+						writer.WriteHeader(test.stopStatus)
+					} else {
+						writeJSON(writer, test.stopStatus, map[string]string{"message": "stop failed"})
+					}
+				default:
+					http.NotFound(writer, request)
+				}
+			}))
+			defer server.Close()
+
+			intents := &recordingIntentStore{commitErr: test.commitErr}
+			docker := testDocker(t, server)
+			docker.intents = intents
+			err := docker.Pause(context.Background(), "demo")
+			wantStatus := PauseIntentCommitted
+			if test.commitErr != nil {
+				wantStatus = PauseIntentPending
+				if err == nil {
+					t.Fatal("Pause succeeded despite commit failure")
+				}
+			} else if err != nil {
+				t.Fatalf("Pause did not reconcile delayed stop: %v", err)
+			}
+			if intents.status != wantStatus || intents.clears.Load() != 0 {
+				t.Fatalf("intent status=%d clears=%d", intents.status, intents.clears.Load())
+			}
+		})
+	}
+}
+
+func TestStopReconciliationPreservesIntentWhenInspectFails(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writeJSON(writer, http.StatusInternalServerError, map[string]string{"message": "inspect unavailable"})
+	}))
+	defer server.Close()
+	intents := &recordingIntentStore{status: PauseIntentPending}
+	docker := testDocker(t, server)
+	docker.intents = intents
+	err := docker.finishStopReconciliation("demo", "container-id", errors.New("stop failed"))
+	if err == nil {
+		t.Fatal("reconciliation unexpectedly succeeded")
+	}
+	if intents.status != PauseIntentPending || intents.clears.Load() != 0 {
+		t.Fatalf("intent status=%d clears=%d", intents.status, intents.clears.Load())
 	}
 }
 

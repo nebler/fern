@@ -113,6 +113,30 @@ func TestSupervisorDisconnectCancelsPause(t *testing.T) {
 	}
 }
 
+func TestSupervisorAcknowledgesRequestInvalidation(t *testing.T) {
+	t.Parallel()
+	observations := make(chan Observation, 8)
+	paused := make(chan struct{}, 1)
+	supervisor := Supervisor{
+		IdleAfter: 25 * time.Millisecond,
+		OnPause: func(context.Context) error {
+			paused <- struct{}{}
+			return nil
+		},
+		Log: testLogger(),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go supervisor.Run(ctx, observations)
+	observations <- Observation{Epoch: 1, Kind: ObservationConnected}
+	observations <- status(1, "one", "busy")
+	observations <- status(1, "one", "idle")
+	handled := make(chan struct{})
+	observations <- Observation{Kind: ObservationRequest, Handled: handled}
+	assertSignal(t, handled, time.Second)
+	assertNoSignal(t, paused, 60*time.Millisecond)
+}
+
 func status(epoch uint64, sessionID, value string) Observation {
 	return Observation{Epoch: epoch, Kind: ObservationStatus, SessionID: sessionID, Status: value}
 }

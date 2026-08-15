@@ -13,6 +13,7 @@ import (
 var (
 	ErrRequestsActive = errors.New("workspace has in-flight HTTP requests")
 	ErrSessionsActive = errors.New("workspace sessions are not all idle")
+	ErrNotRunning     = errors.New("workspace is not running")
 )
 
 type EndpointObserver func(context.Context, runtime.Endpoint, bool) error
@@ -22,6 +23,7 @@ type RequestObserver func()
 type RequestIntent struct {
 	Hold         bool
 	MayStartWork bool
+	MayWake      bool
 }
 
 type lifecycleRuntime interface {
@@ -31,9 +33,13 @@ type lifecycleRuntime interface {
 }
 
 type wakeCall struct {
-	done chan struct{}
-	ep   runtime.Endpoint
-	err  error
+	done      chan struct{}
+	cancel    context.CancelFunc
+	waiters   int
+	abandoned bool
+	completed bool
+	ep        runtime.Endpoint
+	err       error
 }
 
 // Manager owns lifecycle policy for exactly one workspace. Request admission
@@ -46,28 +52,28 @@ type Manager struct {
 	allIdle    IdleChecker
 	onRequest  RequestObserver
 
-	wakeTimeout  time.Duration
-	wakeMu       sync.Mutex
-	wake         *wakeCall
-	closing      bool
-	lifecycle    chan struct{}
-	admission    chan struct{}
-	inFlight     int
-	requestsDone chan struct{}
+	wakeOperationTimeout time.Duration
+	wakeMu               sync.Mutex
+	wake                 *wakeCall
+	closing              bool
+	lifecycle            chan struct{}
+	admission            chan struct{}
+	inFlight             int
+	requestsDone         chan struct{}
 }
 
 func NewManager(serviceCtx context.Context, rt lifecycleRuntime, spec runtime.Spec, observe EndpointObserver, allIdle IdleChecker, onRequest RequestObserver) *Manager {
 	manager := &Manager{
-		serviceCtx:   serviceCtx,
-		runtime:      rt,
-		spec:         spec,
-		observe:      observe,
-		allIdle:      allIdle,
-		onRequest:    onRequest,
-		wakeTimeout:  65 * time.Second,
-		lifecycle:    make(chan struct{}, 1),
-		admission:    make(chan struct{}, 1),
-		requestsDone: make(chan struct{}),
+		serviceCtx:           serviceCtx,
+		runtime:              rt,
+		spec:                 spec,
+		observe:              observe,
+		allIdle:              allIdle,
+		onRequest:            onRequest,
+		wakeOperationTimeout: 90 * time.Second,
+		lifecycle:            make(chan struct{}, 1),
+		admission:            make(chan struct{}, 1),
+		requestsDone:         make(chan struct{}),
 	}
 	close(manager.requestsDone)
 	manager.admission <- struct{}{}
@@ -80,6 +86,9 @@ func NewManager(serviceCtx context.Context, rt lifecycleRuntime, spec runtime.Sp
 func (m *Manager) AcquireRequest(ctx context.Context, intent RequestIntent) (runtime.Endpoint, func(), error) {
 	if intent.MayStartWork && !intent.Hold {
 		return runtime.Endpoint{}, func() {}, errors.New("work-starting requests must hold admission")
+	}
+	if intent.MayStartWork && !intent.MayWake {
+		return runtime.Endpoint{}, func() {}, errors.New("work-starting requests must be allowed to wake the workspace")
 	}
 	if m.isClosing() {
 		return runtime.Endpoint{}, func() {}, errors.New("workspace manager is shutting down")
@@ -110,13 +119,19 @@ func (m *Manager) AcquireRequest(ctx context.Context, intent RequestIntent) (run
 			})
 		}
 	}
-	if intent.MayStartWork && m.onRequest != nil {
-		m.onRequest()
+	var ep runtime.Endpoint
+	var err error
+	if intent.MayWake {
+		ep, err = m.EnsureRunning(ctx)
+	} else {
+		ep, err = m.runningEndpoint(ctx)
 	}
-	ep, err := m.EnsureRunning(ctx)
 	if err != nil {
 		release()
 		return runtime.Endpoint{}, func() {}, err
+	}
+	if intent.MayStartWork && m.onRequest != nil {
+		m.onRequest()
 	}
 	return ep, release, nil
 }
@@ -129,29 +144,63 @@ func (m *Manager) EnsureRunning(ctx context.Context) (runtime.Endpoint, error) {
 	}
 	call := m.wake
 	if call == nil {
-		call = &wakeCall{done: make(chan struct{})}
+		wakeCtx, cancel := context.WithTimeout(m.serviceCtx, m.wakeOperationTimeout)
+		call = &wakeCall{done: make(chan struct{}), cancel: cancel}
 		m.wake = call
-		go m.runWake(call)
+		go m.runWake(wakeCtx, call)
 	}
+	call.waiters++
 	m.wakeMu.Unlock()
 	select {
 	case <-ctx.Done():
+		_ = m.leaveWake(call)
 		return runtime.Endpoint{}, ctx.Err()
 	case <-call.done:
-		return call.ep, call.err
+		ep, err := call.ep, call.err
+		abandoned := m.leaveWake(call)
+		if abandoned && errors.Is(err, context.Canceled) && ctx.Err() == nil && m.serviceCtx.Err() == nil {
+			return m.EnsureRunning(ctx)
+		}
+		return ep, err
 	}
 }
 
-func (m *Manager) runWake(call *wakeCall) {
-	wakeCtx, cancel := context.WithTimeout(m.serviceCtx, m.wakeTimeout)
+func (m *Manager) runWake(wakeCtx context.Context, call *wakeCall) {
 	call.ep, call.err = m.ensureRunning(wakeCtx)
-	cancel()
-	close(call.done)
 	m.wakeMu.Lock()
+	call.completed = true
 	if m.wake == call {
 		m.wake = nil
 	}
+	close(call.done)
 	m.wakeMu.Unlock()
+	call.cancel()
+}
+
+func (m *Manager) leaveWake(call *wakeCall) bool {
+	m.wakeMu.Lock()
+	defer m.wakeMu.Unlock()
+	call.waiters--
+	if call.waiters == 0 && !call.completed {
+		call.abandoned = true
+		call.cancel()
+	}
+	return call.abandoned
+}
+
+func (m *Manager) runningEndpoint(ctx context.Context) (runtime.Endpoint, error) {
+	if err := m.acquireLifecycle(ctx); err != nil {
+		return runtime.Endpoint{}, err
+	}
+	defer m.releaseLifecycle()
+	observation, err := m.runtime.Status(ctx, m.spec.Name)
+	if err != nil {
+		return runtime.Endpoint{}, err
+	}
+	if observation.State != runtime.StateRunning || !observation.HasEndpoint {
+		return runtime.Endpoint{}, ErrNotRunning
+	}
+	return observation.Endpoint, nil
 }
 
 func (m *Manager) ensureRunning(ctx context.Context) (runtime.Endpoint, error) {

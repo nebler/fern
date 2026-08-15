@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -43,6 +44,17 @@ func TestAttachEnvironmentReplacesAuthentication(t *testing.T) {
 	}
 	if slices.Contains(got, "OPENCODE_SERVER_PASSWORD=old") {
 		t.Fatalf("environment retained old password: %v", got)
+	}
+}
+
+func TestExplicitEmptyAuthenticationSuppressesHostValue(t *testing.T) {
+	t.Setenv("OPENCODE_SERVER_USERNAME", "host-user")
+	configured := forwardedEnvironment(map[string]string{"OPENCODE_SERVER_USERNAME": ""})
+	got := attachEnvironment([]string{"OPENCODE_SERVER_USERNAME=host-user"}, configured)
+	for _, value := range got {
+		if strings.HasPrefix(value, "OPENCODE_SERVER_USERNAME=") {
+			t.Fatalf("explicit empty username was replaced: %v", got)
+		}
 	}
 }
 

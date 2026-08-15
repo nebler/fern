@@ -37,7 +37,7 @@ func runAttach(args []string) error {
 		return errors.New("opencode is not installed or not in PATH; install it from https://opencode.ai")
 	}
 	command := exec.Command(executable, "attach", target)
-	command.Env = attachEnvironment(os.Environ(), forwardedEnvironment(clientEnvironment(client)))
+	command.Env = attachEnvironment(os.Environ(), forwardedEnvironment(client.Env))
 	command.Stdin = os.Stdin
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr

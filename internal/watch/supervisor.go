@@ -80,6 +80,7 @@ func (s *Supervisor) Run(ctx context.Context, observations <-chan Observation) e
 				armed = true
 				s.Log.Info("workspace idle, arming pause", "epoch", model.epoch, "after", s.IdleAfter)
 			}
+			acknowledge(observation)
 		case <-timer.C:
 			armed = false
 			// Prefer already-queued observations over a simultaneously-ready
@@ -103,6 +104,7 @@ func (s *Supervisor) Run(ctx context.Context, observations <-chan Observation) e
 							armed = false
 						}
 					}
+					acknowledge(observation)
 				default:
 					break drain
 				}
@@ -126,6 +128,12 @@ func (s *Supervisor) Run(ctx context.Context, observations <-chan Observation) e
 			model.seenBusy = false
 			clear(model.active)
 		}
+	}
+}
+
+func acknowledge(observation Observation) {
+	if observation.Handled != nil {
+		close(observation.Handled)
 	}
 }
 

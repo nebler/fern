@@ -24,6 +24,7 @@ type Observation struct {
 	SessionID string
 	Status    string
 	Err       string
+	Handled   chan struct{}
 }
 
 type streamState struct {

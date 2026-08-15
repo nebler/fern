@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/nebler/fern/internal/runtime"
 )
 
 type IntentStore struct {
@@ -70,19 +72,25 @@ func (s *IntentStore) write(workspace string, intent pauseIntent) error {
 	return errors.Join(err, directory.Close())
 }
 
-func (s *IntentStore) IsPaused(workspace, containerID string) (bool, error) {
+func (s *IntentStore) PauseStatus(workspace, containerID string) (runtime.PauseIntentStatus, error) {
 	data, err := os.ReadFile(s.path(workspace))
 	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
+		return runtime.PauseIntentNone, nil
 	}
 	if err != nil {
-		return false, err
+		return runtime.PauseIntentNone, err
 	}
 	var intent pauseIntent
 	if err := json.Unmarshal(data, &intent); err != nil {
-		return false, fmt.Errorf("decode pause intent: %w", err)
+		return runtime.PauseIntentNone, fmt.Errorf("decode pause intent: %w", err)
 	}
-	return intent.ContainerID == containerID && intent.Committed, nil
+	if intent.ContainerID != containerID {
+		return runtime.PauseIntentNone, nil
+	}
+	if intent.Committed {
+		return runtime.PauseIntentCommitted, nil
+	}
+	return runtime.PauseIntentPending, nil
 }
 
 func (s *IntentStore) Clear(workspace string) error {

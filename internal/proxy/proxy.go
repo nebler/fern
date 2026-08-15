@@ -68,17 +68,19 @@ func requestIntent(request *http.Request) workspace.RequestIntent {
 	// Event streams are observation-only and intentionally survive until a
 	// pause disconnects them. Every other request, including WebSocket upgrades,
 	// holds an admission lease for its complete proxied lifetime.
-	cleanPath := path.Clean(request.URL.Path)
-	switch cleanPath {
-	case "/event", "/global/event", "/api/event":
-		return workspace.RequestIntent{}
-	}
 	upgrade := strings.EqualFold(request.Header.Get("Upgrade"), "websocket")
+	cleanPath := path.Clean(request.URL.Path)
+	if request.Method == http.MethodGet && !upgrade {
+		switch cleanPath {
+		case "/event", "/global/event", "/api/event":
+			return workspace.RequestIntent{}
+		}
+	}
 	if !upgrade && (request.Method == http.MethodGet || request.Method == http.MethodHead) {
 		switch cleanPath {
 		case "/global/health", "/session/status":
-			return workspace.RequestIntent{Hold: true}
+			return workspace.RequestIntent{Hold: true, MayWake: true}
 		}
 	}
-	return workspace.RequestIntent{Hold: true, MayStartWork: true}
+	return workspace.RequestIntent{Hold: true, MayStartWork: true, MayWake: true}
 }

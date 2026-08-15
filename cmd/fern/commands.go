@@ -53,7 +53,7 @@ func runResume(args []string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load(*configPath, cwd, flagSet(fs, "config"), config.Overrides{
+	cfg, err := config.LoadWorkspace(*configPath, cwd, flagSet(fs, "config"), config.Overrides{
 		Name: optionalFlag(fs, "name", name), Image: optionalFlag(fs, "image", image),
 		Repo: optionalFlag(fs, "repo", repo), Memory: optionalFlag(fs, "memory", memory),
 	})
@@ -146,7 +146,7 @@ func runEvents(args []string, log *slog.Logger) error {
 	if observation.State != runtime.StateRunning || !observation.HasEndpoint {
 		return fmt.Errorf("workspace %q is %s; start it before reading events", client.Name, observation.State)
 	}
-	env := forwardedEnvironment(clientEnvironment(client))
+	env := forwardedEnvironment(client.Env)
 	auth := runtime.ServerAuth{Username: env["OPENCODE_SERVER_USERNAME"], Password: env["OPENCODE_SERVER_PASSWORD"]}
 	events := make(chan watch.Event, 128)
 	go watch.StreamForever(ctx, watch.StreamOptions{BaseURL: observation.Endpoint.URL(), Auth: auth}, events, log)

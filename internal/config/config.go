@@ -43,21 +43,22 @@ type Overrides struct {
 }
 
 type Client struct {
-	Name     string
-	Listen   string
-	Username string
-	Password string
+	Name   string
+	Listen string
+	Env    map[string]string
+}
+
+type fileWorkspace struct {
+	Name   string            `yaml:"name"`
+	Image  string            `yaml:"image"`
+	Repo   string            `yaml:"repo"`
+	Memory string            `yaml:"memory"`
+	Env    map[string]string `yaml:"env"`
 }
 
 type fileConfig struct {
-	Workspace struct {
-		Name   string            `yaml:"name"`
-		Image  string            `yaml:"image"`
-		Repo   string            `yaml:"repo"`
-		Memory string            `yaml:"memory"`
-		Env    map[string]string `yaml:"env"`
-	} `yaml:"workspace"`
-	Idle struct {
+	Workspace fileWorkspace `yaml:"workspace"`
+	Idle      struct {
 		After string `yaml:"after"`
 	} `yaml:"idle"`
 	Proxy struct {
@@ -81,6 +82,16 @@ func Default(repo string) Config {
 // normalizing values. Invalid file values do not block a valid higher-priority
 // override.
 func Load(path, defaultRepo string, required bool, overrides Overrides) (Config, error) {
+	return load(path, defaultRepo, required, overrides, false)
+}
+
+// LoadWorkspace ignores supervisor and proxy values that are irrelevant to an
+// explicit runtime resume, while keeping the workspace section strict.
+func LoadWorkspace(path, defaultRepo string, required bool, overrides Overrides) (Config, error) {
+	return load(path, defaultRepo, required, overrides, true)
+}
+
+func load(path, defaultRepo string, required bool, overrides Overrides, workspaceOnly bool) (Config, error) {
 	config := Default(defaultRepo)
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -88,25 +99,31 @@ func Load(path, defaultRepo string, required bool, overrides Overrides) (Config,
 			return Config{}, fmt.Errorf("read config %q: %w", path, err)
 		}
 	} else {
-		var file fileConfig
-		file.Workspace.Name = config.Workspace.Name
-		file.Workspace.Image = config.Workspace.Image
-		file.Workspace.Repo = config.Workspace.Repo
-		file.Workspace.Memory = config.Workspace.Memory
-		file.Workspace.Env = config.Workspace.Env
-		file.Idle.After = config.IdleAfter.String()
-		file.Proxy.Listen = config.Listen
-		if err := decode(data, &file, true); err != nil {
-			return Config{}, fmt.Errorf("parse config %q: %w", path, err)
+		workspace := fileWorkspace{
+			Name: config.Workspace.Name, Image: config.Workspace.Image, Repo: config.Workspace.Repo,
+			Memory: config.Workspace.Memory, Env: config.Workspace.Env,
+		}
+		if workspaceOnly {
+			if err := decodeWorkspace(data, &workspace); err != nil {
+				return Config{}, fmt.Errorf("parse config %q: %w", path, err)
+			}
+		} else {
+			file := fileConfig{Workspace: workspace}
+			file.Idle.After = config.IdleAfter.String()
+			file.Proxy.Listen = config.Listen
+			if err := decode(data, &file, true); err != nil {
+				return Config{}, fmt.Errorf("parse config %q: %w", path, err)
+			}
+			workspace = file.Workspace
+			config.Listen = file.Proxy.Listen
+			config.IdleAfter, err = time.ParseDuration(file.Idle.After)
+			if err != nil && overrides.IdleAfter == nil {
+				return Config{}, fmt.Errorf("parse idle.after: %w", err)
+			}
 		}
 		config.Workspace = Workspace{
-			Name: file.Workspace.Name, Image: file.Workspace.Image, Repo: file.Workspace.Repo,
-			Memory: file.Workspace.Memory, Env: file.Workspace.Env,
-		}
-		config.Listen = file.Proxy.Listen
-		config.IdleAfter, err = time.ParseDuration(file.Idle.After)
-		if err != nil && overrides.IdleAfter == nil {
-			return Config{}, fmt.Errorf("parse idle.after: %w", err)
+			Name: workspace.Name, Image: workspace.Image, Repo: workspace.Repo,
+			Memory: workspace.Memory, Env: workspace.Env,
 		}
 	}
 	if config.Workspace.Env == nil {
@@ -138,6 +155,9 @@ func Load(path, defaultRepo string, required bool, overrides Overrides) (Config,
 	if err != nil {
 		return Config{}, fmt.Errorf("expand workspace.repo: %w", err)
 	}
+	if strings.TrimSpace(repo) == "" {
+		return Config{}, errors.New("workspace repository is required")
+	}
 	if !filepath.IsAbs(repo) {
 		base := filepath.Dir(path)
 		if overrides.Repo != nil {
@@ -161,7 +181,7 @@ func Load(path, defaultRepo string, required bool, overrides Overrides) (Config,
 
 // LoadClient reads only values needed by attach and diagnostic commands.
 func LoadClient(path string, required bool) (Client, error) {
-	client := Client{Name: "demo", Listen: "127.0.0.1:8080"}
+	client := Client{Name: "demo", Listen: "127.0.0.1:8080", Env: make(map[string]string)}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) && !required {
@@ -175,7 +195,7 @@ func LoadClient(path string, required bool) (Client, error) {
 			Env  map[string]string `yaml:"env"`
 		} `yaml:"workspace"`
 		Proxy struct {
-			Listen string `yaml:"listen"`
+			Listen *string `yaml:"listen"`
 		} `yaml:"proxy"`
 	}
 	if err := decode(data, &file, false); err != nil {
@@ -184,18 +204,36 @@ func LoadClient(path string, required bool) (Client, error) {
 	if file.Workspace.Name != "" {
 		client.Name = file.Workspace.Name
 	}
-	if file.Proxy.Listen != "" {
-		client.Listen = file.Proxy.Listen
+	if file.Proxy.Listen != nil {
+		client.Listen = *file.Proxy.Listen
 	}
-	client.Username, err = expandOptional(file.Workspace.Env["OPENCODE_SERVER_USERNAME"])
-	if err != nil {
-		return Client{}, fmt.Errorf("expand OPENCODE_SERVER_USERNAME: %w", err)
-	}
-	client.Password, err = expandOptional(file.Workspace.Env["OPENCODE_SERVER_PASSWORD"])
-	if err != nil {
-		return Client{}, fmt.Errorf("expand OPENCODE_SERVER_PASSWORD: %w", err)
+	for _, key := range []string{"OPENCODE_SERVER_USERNAME", "OPENCODE_SERVER_PASSWORD"} {
+		value, exists := file.Workspace.Env[key]
+		if !exists {
+			continue
+		}
+		client.Env[key], err = expandRequired(value)
+		if err != nil {
+			return Client{}, fmt.Errorf("expand %s: %w", key, err)
+		}
 	}
 	return client, nil
+}
+
+func decodeWorkspace(data []byte, workspace *fileWorkspace) error {
+	var sections map[string]yaml.Node
+	if err := decode(data, &sections, false); err != nil {
+		return err
+	}
+	section, exists := sections["workspace"]
+	if !exists {
+		return nil
+	}
+	data, err := yaml.Marshal(&section)
+	if err != nil {
+		return err
+	}
+	return decode(data, workspace, true)
 }
 
 func decode(data []byte, target any, strict bool) error {
@@ -305,7 +343,7 @@ func LoadWorkspaceName(path string, required bool) (string, error) {
 			Name string `yaml:"name"`
 		} `yaml:"workspace"`
 	}
-	if err := yaml.Unmarshal(data, &value); err != nil {
+	if err := decode(data, &value, false); err != nil {
 		return "", fmt.Errorf("read workspace name from %q: %w", path, err)
 	}
 	if value.Workspace.Name == "" {
@@ -372,11 +410,4 @@ func expandRequired(value string) (string, error) {
 		return "", fmt.Errorf("environment variable %s is not set", missing)
 	}
 	return strings.ReplaceAll(expanded, literalDollar, "$"), nil
-}
-
-func expandOptional(value string) (string, error) {
-	if value == "" {
-		return "", nil
-	}
-	return expandRequired(value)
 }

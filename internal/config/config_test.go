@@ -74,6 +74,82 @@ func TestLoadAppliesOverridesBeforeNormalization(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsEmptyRepository(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "fern.yaml")
+	if err := os.WriteFile(path, []byte("workspace:\n  repo: ''\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path, directory, true, Overrides{}); err == nil {
+		t.Fatal("Load accepted an empty repository")
+	}
+	empty := ""
+	if _, err := Load(path, directory, true, Overrides{Repo: &empty}); err == nil {
+		t.Fatal("Load accepted an explicitly empty repository override")
+	}
+}
+
+func TestLoadWorkspaceIgnoresInvalidIdleConfiguration(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "fern.yaml")
+	if err := os.WriteFile(path, []byte("workspace:\n  repo: .\nidle:\n  after: invalid\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadWorkspace(path, directory, true, Overrides{}); err != nil {
+		t.Fatalf("workspace-only load rejected idle configuration: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("workspace:\n  naem: demo\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadWorkspace(path, directory, true, Overrides{}); err == nil {
+		t.Fatal("workspace-only load accepted an unknown workspace field")
+	}
+}
+
+func TestLoadWorkspaceRejectsDuplicateWorkspaceSections(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "fern.yaml")
+	data := []byte("workspace:\n  name: first\nworkspace:\n  name: second\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadWorkspace(path, directory, true, Overrides{}); err == nil {
+		t.Fatal("LoadWorkspace accepted duplicate workspace sections")
+	}
+}
+
+func TestLoadClientPreservesExplicitEmptyUsername(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "fern.yaml")
+	if err := os.WriteFile(path, []byte("workspace:\n  env:\n    OPENCODE_SERVER_USERNAME: ''\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client, err := LoadClient(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	username, exists := client.Env["OPENCODE_SERVER_USERNAME"]
+	if !exists || username != "" {
+		t.Fatalf("explicit username was not preserved: value=%q exists=%t", username, exists)
+	}
+}
+
+func TestLoadWorkspaceNameRejectsTrailingDocument(t *testing.T) {
+	t.Parallel()
+	path := filepath.Join(t.TempDir(), "fern.yaml")
+	data := []byte("workspace:\n  name: production\n---\nworkspace:\n  name: staging\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadWorkspaceName(path, true); err == nil {
+		t.Fatal("LoadWorkspaceName accepted multiple YAML documents")
+	}
+}
+
 func TestLoadRejectsUnknownFields(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "fern.yaml")

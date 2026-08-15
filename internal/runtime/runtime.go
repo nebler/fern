@@ -32,9 +32,17 @@ type ServerAuth struct {
 type IntentStore interface {
 	BeginPause(workspace, containerID string) error
 	CommitPause(workspace, containerID string) error
-	IsPaused(workspace, containerID string) (bool, error)
+	PauseStatus(workspace, containerID string) (PauseIntentStatus, error)
 	Clear(workspace string) error
 }
+
+type PauseIntentStatus uint8
+
+const (
+	PauseIntentNone PauseIntentStatus = iota
+	PauseIntentPending
+	PauseIntentCommitted
+)
 
 func (a ServerAuth) Apply(req interface{ SetBasicAuth(string, string) }) {
 	if a.Password == "" {

@@ -29,6 +29,7 @@ import (
 const (
 	workspacePort        = "4096/tcp"
 	healthTimeout        = 60 * time.Second
+	stopReconcileTimeout = 12 * time.Second
 	managedLabel         = "dev.fern.managed"
 	workspaceLabel       = "dev.fern.workspace"
 	specFingerprintLabel = "dev.fern.spec"
@@ -176,6 +177,45 @@ func (d *Docker) pauseObserved(ctx context.Context, name string, observation Obs
 	return nil
 }
 
+func (d *Docker) reconcileStopError(name, containerID string, stopErr error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), stopReconcileTimeout)
+	defer cancel()
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		observation, err := d.statusByReference(ctx, containerID, name)
+		if err == nil && observation.State == StateProvisioning && !observation.Running {
+			if err := d.intents.CommitPause(name, containerID); err != nil {
+				return errors.Join(fmt.Errorf("pause %q has an unknown stop outcome: %w", name, stopErr), fmt.Errorf("commit reconciled pause intent: %w", err))
+			}
+			return nil
+		}
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			return d.finishStopReconciliation(name, containerID, stopErr)
+		}
+	}
+}
+
+func (d *Docker) finishStopReconciliation(name, containerID string, stopErr error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	observation, inspectErr := d.statusByReference(ctx, containerID, name)
+	if inspectErr == nil && observation.State == StateProvisioning && !observation.Running {
+		if err := d.intents.CommitPause(name, containerID); err == nil {
+			return nil
+		} else {
+			return errors.Join(fmt.Errorf("pause %q has an unknown stop outcome: %w", name, stopErr), fmt.Errorf("commit reconciled pause intent: %w", err))
+		}
+	}
+	var clearErr error
+	if inspectErr == nil && observation.Running {
+		clearErr = d.intents.Clear(name)
+	}
+	return errors.Join(fmt.Errorf("pause %q has an unknown stop outcome: %w", name, stopErr), inspectErr, clearErr)
+}
+
 func (d *Docker) Resume(ctx context.Context, spec Spec) (Endpoint, error) {
 	if err := spec.Validate(); err != nil {
 		return Endpoint{}, err
@@ -279,22 +319,6 @@ func (d *Docker) StreamLogs(ctx context.Context, name string, follow bool, stdou
 	return err
 }
 
-func (d *Docker) reconcileStopError(name, containerID string, stopErr error) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	observation, inspectErr := d.statusByReference(ctx, containerID, name)
-	if inspectErr != nil {
-		return errors.Join(fmt.Errorf("pause %q: %w", name, stopErr), inspectErr)
-	}
-	if !observation.Running {
-		// A failed stop response cannot prove Docker caused the exit. Leave the
-		// intent uncommitted so a concurrent process failure is never called a pause.
-		return fmt.Errorf("pause %q stopped ambiguously: %w", name, stopErr)
-	}
-	clearErr := d.intents.Clear(name)
-	return errors.Join(fmt.Errorf("pause %q: %w", name, stopErr), clearErr)
-}
-
 func (d *Docker) rollbackIfTransitioned(transitioned bool, name, containerID string, cause error) error {
 	if !transitioned {
 		return cause
@@ -334,7 +358,20 @@ func (d *Docker) Destroy(ctx context.Context, name string) error {
 }
 
 func (d *Docker) Status(ctx context.Context, name string) (Observation, error) {
-	return d.statusByReference(ctx, name, name)
+	observation, err := d.statusByReference(ctx, name, name)
+	if err != nil || !observation.Running || observation.Frozen {
+		return observation, err
+	}
+	intent, err := d.intents.PauseStatus(name, observation.ContainerID)
+	if err != nil {
+		return Observation{}, fmt.Errorf("read pause intent: %w", err)
+	}
+	if intent == PauseIntentCommitted {
+		if err := d.intents.Clear(name); err != nil {
+			return Observation{}, fmt.Errorf("clear stale pause intent: %w", err)
+		}
+	}
+	return observation, nil
 }
 
 func (d *Docker) statusByReference(ctx context.Context, reference, workspace string) (Observation, error) {
@@ -382,13 +419,16 @@ func (d *Docker) statusByReference(ctx context.Context, reference, workspace str
 	case info.State.OOMKilled || info.State.Dead:
 		observation.State = StateFailed
 	case info.State.Status == "exited":
-		paused, err := d.intents.IsPaused(workspace, info.ID)
+		intent, err := d.intents.PauseStatus(workspace, info.ID)
 		if err != nil {
 			return Observation{}, fmt.Errorf("read pause intent: %w", err)
 		}
-		if paused {
+		switch intent {
+		case PauseIntentCommitted:
 			observation.State = StatePaused
-		} else {
+		case PauseIntentPending:
+			observation.State = StateProvisioning
+		default:
 			observation.State = StateFailed
 		}
 	case info.State.Running && !info.State.Paused:
@@ -484,8 +524,8 @@ func (d *Docker) verifyActualSpec(ctx context.Context, containerID string, spec 
 	if info.Config == nil || info.HostConfig == nil {
 		return fmt.Errorf("%w: Docker returned incomplete workspace configuration", ErrSpecDrift)
 	}
-	if info.Config.Image != spec.Image || info.HostConfig.Memory != spec.MemoryBytes || info.HostConfig.Init == nil || !*info.HostConfig.Init {
-		return fmt.Errorf("%w: Docker image, memory, or init setting was modified; run 'fern down' to recreate", ErrSpecDrift)
+	if info.Config.Image != spec.Image || info.HostConfig.Memory != spec.MemoryBytes || info.HostConfig.Init == nil || !*info.HostConfig.Init || !info.HostConfig.RestartPolicy.IsNone() {
+		return fmt.Errorf("%w: Docker image, memory, init, or restart setting was modified; run 'fern down' to recreate", ErrSpecDrift)
 	}
 	bindings := info.HostConfig.PortBindings[nat.Port(workspacePort)]
 	if _, ok := info.Config.ExposedPorts[nat.Port(workspacePort)]; !ok || len(bindings) != 1 || !isLoopbackBinding(bindings[0].HostIP) {

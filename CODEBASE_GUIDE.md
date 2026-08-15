@@ -7,7 +7,11 @@ Read [ARCHITECTURE.md](./ARCHITECTURE.md) first for the concise model. Read [COD
 ## Repository Map
 
 ```text
-cmd/fern/main.go                     composition root and CLI
+cmd/fern/main.go                     CLI entrypoint and dispatch
+cmd/fern/up.go                       long-running service composition
+cmd/fern/commands.go                 lifecycle and diagnostic commands
+cmd/fern/attach.go                   OpenCode client attachment
+cmd/fern/helpers.go                  shared command plumbing
 
 internal/config/config.go            strict file decoding and normalization
 internal/registry/lock.go            host-local single-writer lease
@@ -29,32 +33,31 @@ Makefile                             development commands
 
 ## `cmd/fern`: Composition And Lifetime
 
-`cmd/fern/main.go` is the imperative shell. It is the only package that knows all implementations.
+The `cmd/fern` package is the imperative shell. `main.go` only dispatches; each command file composes the implementations it needs.
 
 ### `up`
 
 The startup order deliberately moves validation before effects:
 
-1. Select `fern.yaml` or an explicit `--config` path.
-2. Strictly decode YAML and reject unknown fields.
-3. Parse flag overrides.
-4. Expand required environment references.
-5. Normalize the repository path and memory bytes.
-6. Validate name, image, idle duration, repository, auth, and listen address.
-7. Bind the TCP proxy listener.
-8. Create the root signal context and `errgroup` service context.
-9. Acquire the workspace lease.
-10. Create Docker, watcher, manager, supervisor, and proxy.
-11. Ensure the workspace is healthy and its watcher generation is connected.
-12. Serve until signal or component error.
-13. Await HTTP shutdown, stop the watcher, await lifecycle work, close Docker, and release the lease.
+1. Parse flags and select `fern.yaml` or an explicit `--config` path.
+2. Strictly decode YAML and merge explicit flag overrides.
+3. Expand required environment references and normalize the repository path.
+4. Validate name, image, memory, idle duration, repository, auth, and listen address.
+5. Bind the TCP proxy listener.
+6. Create the root signal context and `errgroup` service context.
+7. Acquire the workspace lease.
+8. Create Docker, the stream controller, and the workspace manager.
+9. Ensure the workspace is healthy and its watcher generation is connected.
+10. Create the supervisor and proxy, then serve until signal or component error.
+11. Drain HTTP, join manager lifecycle work, stop the watcher, close Docker, and release the lease.
 
-Binding step 7 before Docker means an occupied address cannot leave unexpected compute running.
+Binding step 5 before Docker means an occupied address cannot leave unexpected compute running.
 
 ### Other commands
 
 | Command | Mutation | Lease |
 |---|---:|---:|
+| `attach` | launch local OpenCode client | not required |
 | `down` | remove Fern-owned container | required |
 | `resume` | start Fern-owned matching-spec container | required |
 | `status` | observe only | not required |
@@ -76,7 +79,9 @@ Lifecycle commands use signal-aware 70-second contexts instead of unbounded back
 - expands `$VAR` and `${VAR}`;
 - treats `$$` as an escaped literal dollar;
 - fails if a referenced environment variable is absent;
-- parses idle duration once.
+- parses the final selected idle duration.
+
+`LoadWorkspace` strictly reads only the workspace section for `resume`, so broken idle or proxy settings cannot block runtime recovery. `LoadClient` reads only name, proxy address, and authentication values for attach and event diagnostics.
 
 `Validate` checks all side-effect prerequisites.
 
@@ -101,7 +106,7 @@ Only `EWOULDBLOCK` and `EAGAIN` mean contention. Filesystem and metadata failure
 
 This lease protects Fern processes from each other. Docker labels separately protect foreign containers and volumes from Fern.
 
-`IntentStore` writes an atomic record under `~/.fern/state` before Fern stops a container. The record includes the immutable container ID. On later observation, an exited container is `paused` only when this exact ID has a Fern pause intent; an external clean exit is `failed`. Resume and destroy clear the record.
+`IntentStore` writes an atomic record under `~/.fern/state` before Fern stops a container. The record includes the immutable container ID and a pending/committed phase. An exited container is `paused` only with a committed intent, recoverable `provisioning` with a pending intent, and otherwise `failed`. Resume and destroy clear the record.
 
 ## `internal/runtime`: Mechanism Boundary
 
@@ -118,9 +123,10 @@ type Spec struct {
     RepoPath    string
     MemoryBytes int64
     Env         map[string]string
-    Auth        ServerAuth
 }
 ```
+
+`Spec.ServerAuth` derives authentication from the two OpenCode server variables in `Env`.
 
 `Observation` is mechanism reality:
 
@@ -175,13 +181,13 @@ Resume rejects:
 - failed/OOM containers;
 - desired-spec drift.
 
-It also compares actual Docker image, memory, init, configured environment, mounts, exposure, and port bindings against desired state so an out-of-band `docker update` cannot hide behind the label fingerprint.
+It also compares actual Docker image, memory, init, restart policy, configured environment, mounts, exposure, and port bindings against desired state so an out-of-band `docker update` cannot hide behind the label fingerprint.
 
 It handles a freezer-paused or stopped owned container, then re-resolves endpoint and health.
 
 ### Destroy
 
-Destroy verifies ownership, unfreezes if required, stops running/restarting compute, removes the container, and deliberately retains the labeled data volume.
+Destroy verifies ownership, unfreezes if required, stops running compute, removes the container, and deliberately retains the labeled data volume.
 
 ## `internal/runtime/health.go`: Readiness
 
@@ -276,20 +282,21 @@ This snapshot is intentionally separate from SSE:
 
 ### Shared wake
 
-`wakeMu` stores at most one `wakeCall`. Concurrent callers wait on its done channel. The operation is registered synchronously before its goroutine starts, derives from service context, and is joined by `Close`.
+`wakeMu` stores at most one `wakeCall`. Concurrent callers wait on its done channel. The operation is registered synchronously before its goroutine starts, derives from service context, and is joined by `Close`. If every caller leaves, the shared operation is canceled; a new live caller waits for that cleanup and retries with a fresh call.
 
 ### Request intent
 
-`RequestIntent` separates two independent facts:
+`RequestIntent` separates three independent facts:
 
 ```go
 type RequestIntent struct {
     Hold         bool
     MayStartWork bool
+    MayWake      bool
 }
 ```
 
-Held requests increment `inFlight` before wake and release after proxy completion. Work-starting requests also emit a policy observation that invalidates a previous idle boundary.
+Held requests increment `inFlight` before wake and release after proxy completion. Work-starting requests also emit a policy observation that invalidates a previous idle boundary. Event streams are non-waking: reconnects are rejected while compute is paused rather than immediately undoing the pause.
 
 ### Pause gate
 
@@ -311,12 +318,11 @@ Every running endpoint is handed to `StreamController`. A lifecycle transition f
 
 The proxy classifies requests:
 
-| Request | Hold | May start work |
-|---|---:|---:|
-| `/event`, `/global/event`, `/api/event` | no | no |
-| ordinary GET/HEAD/OPTIONS | yes | no |
-| non-read method | yes | yes |
-| WebSocket upgrade | yes | yes |
+| Request | Hold | May start work | May wake |
+|---|---:|---:|---:|
+| `/event`, `/global/event`, `/api/event` GET | no | no | no |
+| `/global/health`, `/session/status` GET/HEAD | yes | no | yes |
+| all other requests | yes | yes | yes |
 
 It acquires intent before wake, forwards the untouched method/headers/body, and releases after `ReverseProxy.ServeHTTP` returns.
 
@@ -364,8 +370,8 @@ root signal/component error
 service context canceled
 HTTP server drains
 supervisor exits
-stream stops
 manager rejects new wakes and joins current wake
+stream stops
 Docker closes
 lease releases
 ```
@@ -409,13 +415,13 @@ These invariants hold for traffic through the Fern proxy. Direct backend writes 
 
 | Package | Coverage |
 |---|---|
-| config | unit semantics, strict fields, missing env, config-relative paths |
+| config | unit semantics, strict projections, missing env, precedence, config-relative paths |
 | registry | actual subprocess contention and release on process exit |
-| runtime | authenticated health, fingerprints, and foreign container/volume refusal including create races |
-| workspace | shared create, error propagation, request gate, status gate, observer order and rollback |
+| runtime | authenticated health, fingerprints, pause-intent recovery, actual-spec drift, and foreign ownership |
+| workspace | shared wake, cancellation, retry, request gate, status gate, observer order and rollback |
 | watch | auth, multiline SSE, epochs, disconnect, request invalidation, reconnect recovery, status snapshot |
-| proxy | first-byte SSE flush and full-lifetime request lease |
-| CLI | short and long explicit config selectors |
+| proxy | request classification, first-byte SSE flush, and full-lifetime request lease |
+| CLI | attach URL/auth environment and explicit-name config bypass |
 
 Real Docker tests are recorded in [CODE_REVIEW.md](./CODE_REVIEW.md) and [IMPLEMENTATION.md](./IMPLEMENTATION.md).
 

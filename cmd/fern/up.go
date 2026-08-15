@@ -106,8 +106,14 @@ func runUp(args []string, log *slog.Logger) error {
 			return watch.AllSessionsIdle(ctx, ep, auth)
 		},
 		func() {
+			handled := make(chan struct{})
 			select {
-			case observations <- watch.Observation{Kind: watch.ObservationRequest}:
+			case observations <- watch.Observation{Kind: watch.ObservationRequest, Handled: handled}:
+			case <-serviceCtx.Done():
+				return
+			}
+			select {
+			case <-handled:
 			case <-serviceCtx.Done():
 			}
 		},

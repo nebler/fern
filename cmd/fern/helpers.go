@@ -56,17 +56,6 @@ func optionalFlag(flags *flag.FlagSet, name string, value *string) *string {
 	return value
 }
 
-func clientEnvironment(client config.Client) map[string]string {
-	env := make(map[string]string, 2)
-	if client.Username != "" {
-		env["OPENCODE_SERVER_USERNAME"] = client.Username
-	}
-	if client.Password != "" {
-		env["OPENCODE_SERVER_PASSWORD"] = client.Password
-	}
-	return env
-}
-
 func parseFlags(flags *flag.FlagSet, args []string) error {
 	if err := flags.Parse(args); err != nil {
 		return err
