@@ -18,6 +18,7 @@ func runAttach(args []string) error {
 	flags := flag.NewFlagSet("attach", flag.ContinueOnError)
 	configPath := flags.String("config", "fern.yaml", "configuration file")
 	listenAddress := flags.String("listen", "", "proxy listen address")
+	clientOrigin := flags.String("url", "", "explicit OpenCode server origin")
 	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
@@ -25,7 +26,7 @@ func runAttach(args []string) error {
 	if err != nil {
 		return err
 	}
-	target, err := attachURL(client.Listen)
+	target, err := attachTarget(optionalFlag(flags, "url", clientOrigin), client.Listen)
 	if err != nil {
 		return err
 	}
@@ -42,6 +43,37 @@ func runAttach(args []string) error {
 		return fmt.Errorf("opencode attach: %w", err)
 	}
 	return nil
+}
+
+func attachTarget(explicitOrigin *string, listenAddress string) (string, error) {
+	if explicitOrigin == nil {
+		return attachURL(listenAddress)
+	}
+
+	origin, err := url.Parse(*explicitOrigin)
+	if err != nil {
+		return "", fmt.Errorf("invalid attach URL %q: %w", *explicitOrigin, err)
+	}
+	if origin.Scheme != "http" && origin.Scheme != "https" {
+		return "", fmt.Errorf("invalid attach URL %q: scheme must be http or https", *explicitOrigin)
+	}
+	if origin.Host == "" || origin.Hostname() == "" || origin.Opaque != "" {
+		return "", fmt.Errorf("invalid attach URL %q: host is required", *explicitOrigin)
+	}
+	if origin.User != nil {
+		return "", fmt.Errorf("invalid attach URL %q: user information is not allowed", *explicitOrigin)
+	}
+	if strings.Contains(*explicitOrigin, "#") {
+		return "", fmt.Errorf("invalid attach URL %q: fragments are not allowed", *explicitOrigin)
+	}
+	if origin.RawQuery != "" || origin.ForceQuery {
+		return "", fmt.Errorf("invalid attach URL %q: query parameters are not allowed", *explicitOrigin)
+	}
+	if path := origin.EscapedPath(); path != "" && path != "/" {
+		return "", fmt.Errorf("invalid attach URL %q: path must be root", *explicitOrigin)
+	}
+
+	return (&url.URL{Scheme: origin.Scheme, Host: origin.Host}).String(), nil
 }
 
 func attachURL(address string) (string, error) {
