@@ -419,6 +419,20 @@ func Validate(config Config) error {
 	if err := ValidateWorkspace(config); err != nil {
 		return err
 	}
+	switch config.Workspace.OpenCode {
+	case OpenCodeV2:
+		if config.Workspace.Env["OPENCODE_PASSWORD"] == "" {
+			return errors.New("OPENCODE_PASSWORD is required for OpenCode V2")
+		}
+	case OpenCodeAuto:
+		if config.Workspace.Env["OPENCODE_SERVER_PASSWORD"] == "" || config.Workspace.Env["OPENCODE_PASSWORD"] == "" {
+			return errors.New("OPENCODE_SERVER_PASSWORD and OPENCODE_PASSWORD are required for OpenCode auto detection")
+		}
+	default:
+		if config.Workspace.Env["OPENCODE_SERVER_PASSWORD"] == "" {
+			return errors.New("OPENCODE_SERVER_PASSWORD is required for OpenCode V1")
+		}
+	}
 	if config.IdleAfter <= 0 {
 		return fmt.Errorf("idle duration must be positive")
 	}

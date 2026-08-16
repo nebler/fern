@@ -65,6 +65,12 @@ jobs:
           test "$(docker run --rm --entrypoint id '${{ matrix.tag }}' -g)" = "1001"
           docker run --rm --entrypoint "${{ matrix.executable }}" "${{ matrix.tag }}" --version
 
+      - name: Smoke test real V2 protocol
+        if: matrix.protocol == 'v2'
+        env:
+          FERN_V2_IMAGE: ${{ matrix.tag }}
+        run: ./scripts/test-opencode-v2.sh
+
   lifecycle:
     name: Docker lifecycle (${{ matrix.protocol }})
     runs-on: ubuntu-latest

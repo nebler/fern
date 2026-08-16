@@ -57,6 +57,8 @@ func TestAttachTargetRejectsInvalidExplicitOrigins(t *testing.T) {
 		"https://",
 		"https://:443",
 		"ftp://host.tailnet.ts.net",
+		"http://host.tailnet.ts.net",
+		"http://100.64.0.1:8080",
 		"https://user@host.tailnet.ts.net",
 		"https://user:secret@host.tailnet.ts.net",
 		"https://host.tailnet.ts.net#section",

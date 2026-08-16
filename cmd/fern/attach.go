@@ -85,6 +85,12 @@ func attachTarget(explicitOrigin *string, listenAddress string) (string, error) 
 	if origin.User != nil {
 		return "", fmt.Errorf("invalid attach URL %q: user information is not allowed", *explicitOrigin)
 	}
+	if origin.Scheme == "http" {
+		ip := net.ParseIP(origin.Hostname())
+		if ip == nil || !ip.IsLoopback() {
+			return "", fmt.Errorf("invalid attach URL %q: non-loopback origins require https", *explicitOrigin)
+		}
+	}
 	if strings.Contains(*explicitOrigin, "#") {
 		return "", fmt.Errorf("invalid attach URL %q: fragments are not allowed", *explicitOrigin)
 	}

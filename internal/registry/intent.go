@@ -38,6 +38,13 @@ func (s *IntentStore) write(workspace string, intent pauseIntent) error {
 	if err := os.MkdirAll(s.directory, 0o700); err != nil {
 		return fmt.Errorf("create pause intent directory: %w", err)
 	}
+	info, err := os.Lstat(s.directory)
+	if err != nil {
+		return fmt.Errorf("inspect pause intent directory: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("pause intent directory must be a real directory")
+	}
 	data, err := json.Marshal(intent)
 	if err != nil {
 		return fmt.Errorf("encode pause intent: %w", err)

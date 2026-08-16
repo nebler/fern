@@ -47,6 +47,7 @@ Kubernetes, setup snapshots, resume hooks, Fern-managed TLS/public ingress, and 
 ```bash
 docker build -t fern/opencode:dev images/opencode
 cp fern.example.yaml fern.yaml
+export OPENCODE_SERVER_PASSWORD="$(openssl rand -hex 32)"
 go run ./cmd/fern up
 # In another terminal:
 go run ./cmd/fern attach

@@ -15,6 +15,7 @@ type pauseRecoveryRuntime struct {
 	state    runtime.State
 	endpoint runtime.Endpoint
 	pauseErr error
+	running  bool
 	onPause  func()
 	ensureN  int
 	pauseN   int
@@ -45,9 +46,28 @@ func (f *pauseRecoveryRuntime) Status(context.Context, string) (runtime.Observat
 	defer f.mu.Unlock()
 	return runtime.Observation{
 		State:       f.state,
+		Running:     f.running,
 		Endpoint:    f.endpoint,
 		HasEndpoint: f.state == runtime.StateRunning,
 	}, nil
+}
+
+func TestPauseRefusesRunningProvisioningWorkspace(t *testing.T) {
+	t.Parallel()
+	fake := &pauseRecoveryRuntime{
+		state: runtime.StateProvisioning, running: true,
+		endpoint: runtime.Endpoint{Host: "127.0.0.1", Port: 4096},
+	}
+	manager := newTestManager(fake, nil, alwaysIdle)
+	manager.publishEndpoint(fake.endpoint)
+	if err := manager.Pause(context.Background()); err == nil {
+		t.Fatal("Pause stopped a running provisioning workspace without an idle snapshot")
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.pauseN != 0 {
+		t.Fatalf("runtime pause calls = %d, want 0", fake.pauseN)
+	}
 }
 
 func TestPauseAttemptInvalidatesEndpointAndReopensAdmission(t *testing.T) {

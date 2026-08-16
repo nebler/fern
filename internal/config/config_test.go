@@ -58,6 +58,35 @@ func TestValidateRequiresLoopbackListen(t *testing.T) {
 	}
 }
 
+func TestValidateRequiresProtocolAuthentication(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		protocol OpenCodeProtocol
+		env      map[string]string
+		wantErr  bool
+	}{
+		{name: "V1 missing", protocol: OpenCodeV1, wantErr: true},
+		{name: "V1 configured", protocol: OpenCodeV1, env: map[string]string{"OPENCODE_SERVER_PASSWORD": "secret"}},
+		{name: "V2 missing", protocol: OpenCodeV2, wantErr: true},
+		{name: "V2 configured", protocol: OpenCodeV2, env: map[string]string{"OPENCODE_PASSWORD": "secret"}},
+		{name: "auto requires both", protocol: OpenCodeAuto, env: map[string]string{"OPENCODE_SERVER_PASSWORD": "secret"}, wantErr: true},
+		{name: "auto configured", protocol: OpenCodeAuto, env: map[string]string{"OPENCODE_SERVER_PASSWORD": "secret", "OPENCODE_PASSWORD": "secret-v2"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			config := Default(t.TempDir())
+			config.Workspace.OpenCode = test.protocol
+			config.Workspace.Env = test.env
+			err := Validate(config)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestLoadOpenCodeProtocolForWorkspaceAndClients(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()

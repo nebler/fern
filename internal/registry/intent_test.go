@@ -2,6 +2,7 @@ package registry
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -43,6 +44,19 @@ func TestIntentStoreRecordsContainerIdentity(t *testing.T) {
 	status, err = store.PauseStatus("demo", "container-one")
 	if err != nil || status != runtime.PauseIntentNone {
 		t.Fatalf("pause intent remained after clear: status=%d err=%v", status, err)
+	}
+}
+
+func TestIntentStoreRejectsSymlinkDirectory(t *testing.T) {
+	t.Parallel()
+	target := t.TempDir()
+	directory := filepath.Join(t.TempDir(), "state")
+	if err := os.Symlink(target, directory); err != nil {
+		t.Fatal(err)
+	}
+	store := NewIntentStore(directory)
+	if err := store.BeginPause("demo", "container-one"); err == nil {
+		t.Fatal("intent store accepted a symlink directory")
 	}
 }
 

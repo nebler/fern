@@ -268,6 +268,9 @@ func (m *Manager) Pause(ctx context.Context) error {
 		return err
 	}
 	if observation.State == runtime.StateProvisioning {
+		if observation.Running || observation.Frozen {
+			return errors.New("workspace is still provisioning; refusing pause without an idle snapshot")
+		}
 		return m.pauseRuntime(ctx)
 	}
 	if observation.State != runtime.StateRunning {
