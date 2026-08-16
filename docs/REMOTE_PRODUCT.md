@@ -1,9 +1,9 @@
 # Remote Product Roadmap
 
-This document records the product capabilities Fern needs after its current
-remote-phone claim is validated. It is a roadmap, not an implemented-system
-contract. [ARCHITECTURE.md](./ARCHITECTURE.md) remains authoritative for current
-behavior.
+This document defines the end-to-end outcome Fern must support and records the
+gap between that outcome and the implemented lifecycle component. It is a
+roadmap, not an implemented-system contract. [ARCHITECTURE.md](./ARCHITECTURE.md)
+remains authoritative for current behavior.
 
 ## Product Position
 
@@ -27,27 +27,44 @@ Self-hosting, persistence, or hibernation alone are not differentiators. The
 potential differentiation is their combination with protocol-aware lifecycle
 safety, owner-controlled data, reliable remote delivery, and simple operations.
 
-## Current Validation Gate
+## Acceptance Outcome
 
-Before expanding scope, Fern must prove this exact flow with a real provider:
+The first credible product outcome is:
 
-1. Install the merged release on the target Linux host.
-2. Reach it from a laptop and phone through Tailscale Serve.
-3. Open a disposable repository with a short-lived, repository-scoped Git
-   credential.
-4. Start and steer a provider-backed OpenCode turn that creates a branch,
-   changes code, runs verification, commits, and pushes the branch.
-5. Confirm the remote branch and commit from another device.
-6. Disconnect while work continues.
-7. Observe a safe idle stop and ordinary-request wake.
-8. Reconnect to the same completed session and Git state.
-9. Reboot the host and recover the same workspace.
-10. Back up and restore the repository, Fern state, and OpenCode data.
+> From a supported phone client, authorize one repository, submit work, answer
+> any approval, and return to a tested draft pull request. Fern can then stop,
+> wake, reboot, continue through CI or review feedback, and restore onto a fresh
+> host without losing completed work.
 
-This is a product validation gate because it tests the complete remote path,
-client compatibility, provider behavior, lifecycle policy, and recovery claim.
-Failure may change the foundation or priority of every later feature. A local
-commit without remote delivery is insufficient evidence for the product claim.
+A pushed branch is an intermediate result. A correctly proxied HTTP response is
+not a durable task, and surviving files are not proof that the workflow can be
+recovered.
+
+## Acceptance Matrix
+
+The field rehearsal validates the existing lifecycle component. Product
+acceptance validates the user outcome. Neither has been completed.
+
+| ID | Requirement | Current status |
+| --- | --- | --- |
+| `FIELD-INSTALL` | Install exact Fern/OpenCode artifacts on Ubuntu with systemd and Tailscale | Not run; manual runbook only |
+| `FIELD-PHONE` | Use one named, supported phone client to connect, submit, steer, cancel, approve, and reconnect | Blocked; no supported phone path is defined |
+| `FIELD-PROVIDER` | Complete a real provider-backed turn after client disconnect | Not run; continuation semantics are upstream-dependent |
+| `FIELD-SLEEP` | Stop only after completed work and wake through the actual client sequence | Deterministic fixture passes; phone/provider path unproven |
+| `FIELD-REBOOT` | Reboot while running or paused and recover automatically | Blocked; a running container stopped by host shutdown is classified as failed |
+| `FIELD-RESTORE` | Restore all durable state onto a fresh host and resume | Blocked; backup recipe exists, complete restore does not |
+| `E2E-REPO` | Install a GitHub App on one selected repository and clone an exact base SHA | Blocked; host path must already exist |
+| `E2E-SETUP` | Run versioned project setup with credentials, logs, failure state, and caches | Blocked; no setup/resume contract |
+| `E2E-TASK` | Submit one idempotent phone task with durable status and cancellation | Blocked; Fern only proxies live requests |
+| `E2E-PR` | Commit with deterministic identity, push one Fern branch, and create one draft PR | Blocked; no Git credential or publication broker |
+| `E2E-APPROVAL` | Notify, inspect, answer, expire, and audit an OpenCode approval from the phone | Blocked; approvals only influence idle detection |
+| `E2E-OUTPUT` | Inspect diff, tests, logs, and selected artifacts from the phone | Blocked; no artifact surface |
+| `E2E-CI` | Correlate CI/review events to the PR head and run a bounded follow-up | Blocked; no GitHub event or polling integration |
+| `E2E-RECOVERY` | Preserve task, Git, PR, approval, and artifact state across process/host failure | Blocked; no Fern-owned task journal |
+
+Anything required by this matrix is P0 for the declared product. A narrow field
+rehearsal may still be useful before all P0 work exists, but passing it must not
+be described as product validation.
 
 ## Missing Capabilities
 
@@ -56,21 +73,26 @@ not a hostile multi-tenant platform.
 
 | Priority | Capability | Product requirement |
 | --- | --- | --- |
+| P0 | Reboot-safe lifecycle | Recover running and intentionally paused workspaces after Docker and host restart without misclassifying normal shutdown as failure. |
 | P0 | Supported phone/browser control | Show status, submit and steer work, cancel, approve, and reconnect reliably. |
 | P0 | Appliance installation | Provide guided initialization, preflight checks, system service setup, updates, and rollback. |
+| P0 | GitHub App and repository onboarding | Authorize selected repositories, clone exact source state, and refresh narrow credentials without placing them in the container. |
+| P0 | Git publication | Configure identity, allocate one branch, commit, push through a host broker, and create or update one draft PR. |
+| P0 | Project setup | Run deterministic setup/resume hooks with private dependencies, logs, timeouts, failure state, and persistent caches. |
 | P0 | Durable remote commands | Give every instruction an explicit queued, delivered, applied, completed, failed, or expired state. |
 | P0 | Notifications and approvals | Deliver questions, permission requests, completion, and failure to the user's phone. |
+| P0 | CI and review continuation | Reconcile exact PR head, checks, review comments, human edits, conflicts, and bounded follow-up attempts. |
+| P0 | Model and budget preflight | Validate provider access and enforce task runtime/token/cost limits before and during work. |
 | P0 | Automated backup and restore | Back up, checksum, verify, restore into a fresh workspace, and rehearse recovery automatically. |
-| P1 | Setup and resume hooks | Prepare repository dependencies and restart services without rebuilding the base image. |
-| P1 | Mobile-safe artifacts | View logs, screenshots, reports, videos, and generated files through authenticated links. |
+| P0 | Coordinated upgrades | Quiesce, back up, upgrade Fern/OpenCode, verify compatibility, and roll back. |
+| P0 | Mobile-safe results | View the diff, verification, logs, and selected generated artifacts through authenticated links. |
+| P0 | Device identity | Replace one shared Basic password with device pairing, revocation, and short-lived sessions. |
+| P0 | Credential boundaries | Broker Git credentials and separate setup, agent, publication, registry, and provider credentials. |
 | P1 | Private preview ports | Route declared application ports with authentication, wake, readiness, and expiry behavior. |
 | P1 | Terminal observation and takeover | Follow agent activity, transfer one exclusive write lease to a human, and hand control back safely. |
-| P1 | Git onboarding and delivery | Clone repositories, isolate worktrees, inspect diffs, commit, push, and create pull requests. |
 | P1 | Multiple workspaces | Create, list, route, stop, recover, and remove more than one repository workspace. |
-| P1 | Device identity | Replace one shared Basic password with device pairing, revocation, and short-lived sessions. |
 | P1 | Lifecycle observability | Explain wake latency, active blockers, failure/OOM state, runtime versions, and resource use. |
-| P2 | Secret and egress controls | Keep provider/Git credentials out of ordinary container environment variables and restrict destinations. |
-| P2 | Coordinated upgrades | Safely stop, back up, upgrade Fern/OpenCode, verify compatibility, and roll back. |
+| P1 | Egress controls | Restrict and audit package, Git, model, preview, and arbitrary network destinations. |
 
 Enterprise SSO, SCIM, Kubernetes, hostile multi-tenancy, multiplayer editing,
 multi-agent orchestration, and a general workflow builder are not required for a
@@ -137,23 +159,28 @@ products.
 
 A coherent first remote-product release should include:
 
-1. A supported headless Linux installation with `init`, `doctor`, update, and
-   explicit workspace state.
-2. A supported phone/browser control surface with reliable reconnect behavior.
-3. Durable commands, push notifications, and remote approvals.
-4. Authenticated artifacts and one declared private preview port.
-5. Automated backup, verification, and restore.
-6. Visible protocol-aware sleep blockers and measured wake behavior.
-7. A timeboxed whole-host-wake experiment.
+1. A supported headless Linux installation with `init`, `doctor`, safe update,
+   rollback, and reboot recovery.
+2. A supported phone/browser control surface with device pairing and durable
+   task submission.
+3. GitHub App onboarding for one selected repository.
+4. Versioned project setup with persistent caches and explicit failure state.
+5. Host-brokered publication to one Fern-owned branch and one draft PR.
+6. Phone notifications, remote approvals, diff/test/log/artifact review, and
+   bounded CI or review follow-up.
+7. Automated backup, fresh-host restore, and visible protocol-aware sleep
+   blockers.
 
 This release should still use OpenCode as the agent. It does not require Fern to
 own a model loop, add Temporal, host Git, or build multi-agent reasoning.
 
-## Work After The Phone Demo
+## Work Sequencing
 
-The successful phone demo removes the largest product-risk gate: it proves that
-the current architecture can deliver its basic remote promise. It does not make
-all roadmap work independent.
+The field phone rehearsal remains valuable, but it is not the single blocker
+after which all product work becomes safe. Before provisioning the host, fix or
+explicitly isolate the running-state reboot failure and select the exact phone
+client. The GitHub, task, and setup boundaries can be designed in parallel with
+that field work.
 
 ### Safe Parallel Tracks
 
@@ -162,10 +189,10 @@ worktrees with explicit contracts:
 
 | Track | Initial deliverable | Main ownership |
 | --- | --- | --- |
-| Appliance | `init`, `doctor`, installer, systemd automation, update checks | CLI, packaging, deployment |
-| Recovery | `backup`, `verify`, restore-to-new-workspace, automated rehearsal | volume/repository tooling |
-| Environment | setup/resume hooks and dedicated cache mounts | configuration and Docker runtime |
-| Product evidence | provider-backed end-to-end tests, wake SLO, lifecycle diagnostics | integration tests and observability |
+| Lifecycle | Reboot-safe Docker semantics, provider-backed field test, wake SLO | runtime and integration tests |
+| GitHub | App onboarding, host broker, branch push, draft PR | host control API and GitHub client |
+| Appliance/recovery | `init`, `doctor`, installer, backup, fresh-host restore, update rollback | CLI, packaging, deployment |
+| Environment | Setup/resume hooks, private dependency contract, cache mounts | configuration and Docker runtime |
 
 ### Work That Needs A Shared Design First
 
@@ -174,7 +201,7 @@ state, and an authenticated control API. Building them independently would
 create conflicting state models and duplicate routing logic:
 
 - durable command inbox, notifications, and approvals;
-- multiple workspaces and repository onboarding;
+- multiple workspaces and repository registry;
 - device pairing and authorization;
 - artifact and preview routing;
 - browser terminal and human/agent write ownership;
@@ -185,15 +212,15 @@ these can split into server, client, notification, and preview workstreams.
 
 ### Practical Parallelism Limit
 
-Immediately after the phone demo, four independent implementation tracks are
-reasonable. More parallel work would mostly collide in `config`, the Docker
-runtime, proxy routing, and the one-workspace composition root. Once a small
-multi-workspace control API exists, the work can fan out further.
+Four implementation tracks are reasonable after their boundaries are written.
+More parallel work would mostly collide in `config`, the Docker runtime, proxy
+routing, and the one-workspace composition root. Once a small control API and
+workspace registry exist, the work can fan out further.
 
-The next architectural decision after the demo is therefore not Temporal or
-multi-agent execution. It is whether Fern remains one supervised workspace with
-a better appliance experience, or becomes one daemon that owns a registry of
-workspaces and a remote control API.
+The next architectural decisions are therefore not Temporal or multi-agent
+execution. They are the durable task record, the host-side GitHub capability
+broker, and whether Fern becomes one daemon that owns a registry of workspaces
+and a remote control API.
 
 ## Sources
 

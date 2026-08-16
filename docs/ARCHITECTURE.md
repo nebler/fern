@@ -287,6 +287,7 @@ does not migrate OpenCode databases.
 | Condition | Result |
 | --- | --- |
 | OpenCode exits without committed intent | `failed`; operator inspects logs and runs `fern down` |
+| Host shutdown stops a running container | `failed` on boot because no Fern pause intent was committed |
 | OOM or dead container | `failed` |
 | Successful Fern stop | `paused`; next held request starts it |
 | Failed/unknown stop response | Pending intent is preserved and endpoint invalidated |
@@ -317,9 +318,12 @@ and run offline `fern down` before archiving repository and volume state.
 
 The checked-in systemd unit supervises `fern up`, runs with Docker-group access,
 and therefore does not create a privilege boundary from Docker. It has no
-`ExecStop` lifecycle mutation: stopping Fern leaves OpenCode running. Target-host
-reboot and Docker-restart behavior remains an explicit deployment acceptance
-task.
+`ExecStop` lifecycle mutation: stopping Fern leaves OpenCode running. If host
+shutdown then stops that running container, no Fern pause intent exists; the
+next boot classifies it as failed and requires manual `fern down` before
+recreation. Reboot recovery is therefore established only for containers that
+were already stopped through Fern's committed pause path, and still requires a
+target-host rehearsal.
 
 ## Assurance And Limits
 

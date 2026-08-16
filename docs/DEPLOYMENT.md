@@ -2,7 +2,7 @@
 
 This runbook defines a single-user Fern deployment using systemd, a local Docker daemon, and private Tailscale Serve. Fern stays on loopback. Tailscale terminates HTTPS and makes it available only inside the tailnet. **Do not enable Tailscale Funnel.** Fern does not provide TLS itself.
 
-The reference target is Ubuntu Server 24.04 LTS with systemd, Docker Engine, and Tailscale. The files and commands are source-reviewed examples; this repository does not claim that the complete install, remote access, reboot, backup, or restore sequence has been executed. Record those results separately during the target-host rehearsal.
+The reference target is Ubuntu Server 24.04 LTS with systemd, Docker Engine, and Tailscale. The files and commands are source-reviewed examples; this repository does not claim that the complete install, remote access, reboot, backup, or restore sequence has been executed. This runbook exercises Fern's lifecycle component, not a supported phone-to-PR product flow. Record results separately during the target-host rehearsal.
 
 The reference configuration deliberately uses OpenCode V1. V1 remains the
 recommended phone-test deployment. The pinned V2 beta is an explicit opt-in;
@@ -196,35 +196,43 @@ Fern rejects non-loopback listeners even when Basic authentication is configured
 
 ### Provider And Git Acceptance
 
-The first remote rehearsal must include Git delivery, not only a local edit. Use
-a disposable repository and a short-lived credential restricted to that one
-repository. Do not use an organization-wide token or allow the first test to
-push directly to the default branch.
+The product acceptance must include Git delivery, not only a local edit, but the
+current checkout cannot complete that acceptance without additional manual and
+unsafe credential configuration.
 
-Fern does not currently broker Git credentials. A credential supplied through
-`workspace.env` is visible inside the trusted container just like a provider
-key. For the initial single-user rehearsal, a short-lived fine-grained token is
-acceptable only when it is scoped to the disposable repository, stored in
-`/etc/fern/fern.env`, and revoked immediately after the test. A host-side Git
-broker or GitHub App integration is required before this becomes a product
-workflow.
+Fern does not currently broker Git credentials, configure a Git credential
+helper, set commit identity, install `gh`, or create pull requests. Merely adding
+a token to `/etc/fern/fern.env` and `workspace.env` does not make Git use it. Any
+credential forwarded there is also visible inside the trusted container just
+like a provider key.
 
-From the phone client, ask OpenCode to:
+Do not treat the following target sequence as executable until an explicit,
+reviewed temporary credential procedure or the host-side GitHub App broker in
+[GITHUB_INTEGRATION.md](./GITHUB_INTEGRATION.md) exists:
 
 1. Create a non-default branch with a unique rehearsal name.
 2. Make one small, reviewable change.
 3. Run the repository's relevant verification command.
 4. Commit the result with a descriptive message.
-5. Push that branch to the configured origin.
+5. Publish that commit through an allowed branch and create a draft pull
+   request.
 
-From a separate laptop or phone Git client, confirm that the remote branch and
-commit exist and that the default branch did not change. Then let the workspace
-pause, wake it through the Fern endpoint, and confirm that the OpenCode session,
-local checkout, branch, and commit remain intact.
+From a separate laptop or phone Git client, confirm that the remote branch,
+commit, and draft pull request exist and that the default branch did not change.
+Then let the workspace pause, wake it through the Fern endpoint, and confirm that
+the OpenCode session, local checkout, branch, commit, and publication record
+remain intact.
 
 ## 7. Reboot And Shutdown Checks
 
-Run these on the target host; they are acceptance steps, not claims of results:
+The current runtime has a known reboot limitation. If the host shuts down while
+the workspace container is running, Docker stops it without a Fern pause-intent
+record. On boot Fern classifies that exited container as failed and refuses to
+restart it automatically. A workspace already stopped through Fern's committed
+pause path should remain classifiable as paused.
+
+Back up first. Run these on the target host as failure-characterization steps,
+not as an expectation of successful recovery:
 
 ```bash
 sudo systemctl restart fern.service

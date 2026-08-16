@@ -27,10 +27,20 @@ The Docker implementation is functional:
 
 Kubernetes, setup snapshots, resume hooks, Fern-managed TLS/public ingress, and identity-aware authorization are not implemented yet.
 
+Fern is not yet an end-to-end remote coding-agent product. In particular, it
+does not currently provide a supported phone client, durable task submission,
+repository authorization, Git identity or credential brokerage, branch/PR
+publication, CI/review continuation, project setup hooks, complete fresh-host
+restore, or automatic recovery from a host reboot that stops a running
+workspace. See [docs/REMOTE_PRODUCT.md](./docs/REMOTE_PRODUCT.md) for the
+acceptance matrix and [docs/GITHUB_INTEGRATION.md](./docs/GITHUB_INTEGRATION.md)
+for the planned GitHub boundary.
+
 ## Documentation
 
-- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md): end-to-end system model, state, trust boundaries, and limitations.
-- [docs/REMOTE_PRODUCT.md](./docs/REMOTE_PRODUCT.md): competitive product gaps, possible differentiation, and post-demo roadmap.
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md): implemented system model, state, trust boundaries, and limitations.
+- [docs/REMOTE_PRODUCT.md](./docs/REMOTE_PRODUCT.md): end-to-end acceptance gaps, priorities, and product roadmap.
+- [docs/GITHUB_INTEGRATION.md](./docs/GITHUB_INTEGRATION.md): proposed host-side GitHub App and publication boundary.
 - [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md): supervised systemd and private Tailscale Serve deployment runbook.
 - [docs/OPENCODE_V2.md](./docs/OPENCODE_V2.md): pinned V2 beta configuration, protocol mapping, state isolation, and verification.
 - [integration/lifecycle/README.md](./integration/lifecycle/README.md): repeatable real-Docker lifecycle and timing harness.
@@ -186,7 +196,11 @@ This boundary matters because OpenCode reconstructs completed conversation state
 
 The guarantee assumes clients use the stable Fern proxy. Docker still publishes a loopback backend port for Fern's host process, but Fern does not advertise it. A same-host principal with Docker inspection access can bypass request admission and is already inside Fern's trusted-host boundary.
 
-## Non-Goals
+## Current Non-Goals
+
+These describe the implemented lifecycle component, not permanent product
+decisions. The remote-product acceptance may require separate control-plane
+services without changing the OpenCode lifecycle boundary.
 
 - OIDC workload identity issuer
 - Multiplayer or shared sessions
