@@ -57,6 +57,40 @@ func TestStreamDiscardsUnterminatedSSEFrame(t *testing.T) {
 	}
 }
 
+func TestStreamUsesV2PathEnvelopeAndAuth(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/event" {
+			http.NotFound(writer, request)
+			return
+		}
+		username, password, ok := request.BasicAuth()
+		if !ok || username != "opencode" || password != "v2-secret" {
+			http.Error(writer, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = writer.Write([]byte("data: {\"id\":\"evt_one\",\"type\":\"session.status\",\"data\":{\"sessionID\":\"ses_one\",\"status\":{\"type\":\"busy\"}}}\n\n"))
+	}))
+	defer server.Close()
+	events := make(chan Event, 1)
+	err := Stream(context.Background(), StreamOptions{
+		BaseURL: server.URL, Protocol: runtime.ProtocolV2,
+		Auth: runtime.ServerAuth{Protocol: runtime.ProtocolV2, V2Password: "v2-secret"},
+	}, events)
+	if err == nil {
+		t.Fatal("Stream returned nil after the server closed")
+	}
+	event := <-events
+	if event.ID != "evt_one" || string(event.Data) == "" {
+		t.Fatalf("event = %+v", event)
+	}
+	sessionID, status, ok := parseStatus(event)
+	if !ok || sessionID != "ses_one" || status != "busy" {
+		t.Fatalf("parseStatus = %q, %q, %t", sessionID, status, ok)
+	}
+}
+
 func TestDefaultStreamClientBoundsResponseHeaders(t *testing.T) {
 	t.Parallel()
 	transport, ok := defaultStreamClient.Transport.(*http.Transport)

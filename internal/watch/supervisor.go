@@ -189,8 +189,12 @@ func (model *activityModel) apply(observation Observation) timerAction {
 }
 
 func parseStatus(event Event) (sessionID, status string, ok bool) {
+	payload := event.Properties
+	if len(payload) == 0 {
+		payload = event.Data
+	}
 	var properties statusProperties
-	if err := json.Unmarshal(event.Properties, &properties); err != nil {
+	if err := json.Unmarshal(payload, &properties); err != nil {
 		return "", "", false
 	}
 	if properties.SessionID == "" || properties.Status.Type == "" {
