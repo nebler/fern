@@ -44,6 +44,97 @@ func TestValidateRejectsUnauthenticatedRemoteListen(t *testing.T) {
 	}
 }
 
+func TestValidateUsesProtocolSpecificProxyPassword(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		protocol OpenCodeProtocol
+		env      map[string]string
+		wantErr  bool
+	}{
+		{name: "v1 server password", protocol: OpenCodeV1, env: map[string]string{"OPENCODE_SERVER_PASSWORD": "secret"}},
+		{name: "v1 rejects V2 password", protocol: OpenCodeV1, env: map[string]string{"OPENCODE_PASSWORD": "secret"}, wantErr: true},
+		{name: "v2 password", protocol: OpenCodeV2, env: map[string]string{"OPENCODE_PASSWORD": "secret"}},
+		{name: "v2 rejects V1 password", protocol: OpenCodeV2, env: map[string]string{"OPENCODE_SERVER_PASSWORD": "secret"}, wantErr: true},
+		{name: "auto accepts V1 password", protocol: OpenCodeAuto, env: map[string]string{"OPENCODE_SERVER_PASSWORD": "secret"}},
+		{name: "auto accepts V2 password", protocol: OpenCodeAuto, env: map[string]string{"OPENCODE_PASSWORD": "secret"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			config := Default(t.TempDir())
+			config.Listen = "0.0.0.0:8080"
+			config.Workspace.OpenCode = test.protocol
+			config.Workspace.Env = test.env
+			err := Validate(config)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("Validate() error = %v, wantErr %t", err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadOpenCodeProtocolForWorkspaceAndClients(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "fern.yaml")
+	data := []byte("workspace:\n  opencode: V2\n  repo: .\n  env:\n    OPENCODE_PASSWORD: secret\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, directory, true, Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attach, err := LoadAttach(path, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := LoadEvents(path, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Workspace.OpenCode != OpenCodeV2 || attach.OpenCode != OpenCodeV2 || events.OpenCode != OpenCodeV2 {
+		t.Fatalf("protocols workspace=%q attach=%q events=%q", loaded.Workspace.OpenCode, attach.OpenCode, events.OpenCode)
+	}
+	if attach.Env["OPENCODE_PASSWORD"] != "secret" || events.Env["OPENCODE_PASSWORD"] != "secret" {
+		t.Fatal("V2 client projections did not load OPENCODE_PASSWORD")
+	}
+}
+
+func TestValidateRejectsUnknownOpenCodeProtocol(t *testing.T) {
+	t.Parallel()
+	config := Default(t.TempDir())
+	config.Workspace.OpenCode = "v3"
+	if err := ValidateWorkspace(config); err == nil {
+		t.Fatal("ValidateWorkspace accepted an unknown OpenCode protocol")
+	}
+}
+
+func TestLoadSelectsV2DefaultImageWithoutOverridingExplicitImage(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "fern.yaml")
+	if err := os.WriteFile(path, []byte("workspace:\n  opencode: v2\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path, directory, true, Overrides{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Workspace.Image != "fern/opencode-v2:dev" {
+		t.Fatalf("V2 default image = %q", loaded.Workspace.Image)
+	}
+	explicit := "custom/opencode:v2"
+	loaded, err = Load(path, directory, true, Overrides{Image: &explicit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Workspace.Image != explicit {
+		t.Fatalf("explicit V2 image = %q", loaded.Workspace.Image)
+	}
+}
+
 func TestValidateRejectsDynamicProxyPort(t *testing.T) {
 	t.Parallel()
 	config := Default(t.TempDir())

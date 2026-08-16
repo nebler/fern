@@ -19,12 +19,21 @@ import (
 
 var workspaceNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
 
+type OpenCodeProtocol string
+
+const (
+	OpenCodeV1   OpenCodeProtocol = "v1"
+	OpenCodeV2   OpenCodeProtocol = "v2"
+	OpenCodeAuto OpenCodeProtocol = "auto"
+)
+
 type Workspace struct {
-	Name   string
-	Image  string
-	Repo   string
-	Memory string
-	Env    map[string]string
+	Name     string
+	Image    string
+	Repo     string
+	Memory   string
+	OpenCode OpenCodeProtocol
+	Env      map[string]string
 }
 
 type Config struct {
@@ -38,22 +47,25 @@ type Overrides struct {
 	Image     *string
 	Repo      *string
 	Memory    *string
+	OpenCode  *string
 	IdleAfter *string
 	Listen    *string
 }
 
 type Client struct {
-	Name   string
-	Listen string
-	Env    map[string]string
+	Name     string
+	Listen   string
+	OpenCode OpenCodeProtocol
+	Env      map[string]string
 }
 
 type fileWorkspace struct {
-	Name   yaml.Node `yaml:"name"`
-	Image  yaml.Node `yaml:"image"`
-	Repo   yaml.Node `yaml:"repo"`
-	Memory yaml.Node `yaml:"memory"`
-	Env    yaml.Node `yaml:"env"`
+	Name     yaml.Node `yaml:"name"`
+	Image    yaml.Node `yaml:"image"`
+	Repo     yaml.Node `yaml:"repo"`
+	Memory   yaml.Node `yaml:"memory"`
+	OpenCode yaml.Node `yaml:"opencode"`
+	Env      yaml.Node `yaml:"env"`
 }
 
 type fileConfig struct {
@@ -72,6 +84,7 @@ func Default(repo string) Config {
 	config.Workspace.Image = "fern/opencode:dev"
 	config.Workspace.Repo = repo
 	config.Workspace.Memory = "8Gi"
+	config.Workspace.OpenCode = OpenCodeV1
 	config.Workspace.Env = make(map[string]string)
 	config.IdleAfter = 10 * time.Minute
 	config.Listen = "127.0.0.1:8080"
@@ -93,6 +106,7 @@ func LoadWorkspace(path, defaultRepo string, required bool, overrides Overrides)
 
 func load(path, defaultRepo string, required bool, overrides Overrides, workspaceOnly bool) (Config, error) {
 	config := Default(defaultRepo)
+	imageConfigured := overrides.Image != nil
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if !os.IsNotExist(err) || required {
@@ -128,6 +142,7 @@ func load(path, defaultRepo string, required bool, overrides Overrides, workspac
 		if err := applyFileWorkspace(&config.Workspace, file.Workspace, overrides); err != nil {
 			return Config{}, fmt.Errorf("parse workspace: %w", err)
 		}
+		imageConfigured = imageConfigured || file.Workspace.Image.Kind != 0
 	}
 	if config.Workspace.Env == nil {
 		config.Workspace.Env = make(map[string]string)
@@ -143,6 +158,12 @@ func load(path, defaultRepo string, required bool, overrides Overrides, workspac
 	}
 	if overrides.Memory != nil {
 		config.Workspace.Memory = *overrides.Memory
+	}
+	if overrides.OpenCode != nil {
+		config.Workspace.OpenCode = normalizeOpenCode(*overrides.OpenCode)
+	}
+	if config.Workspace.OpenCode == OpenCodeV2 && !imageConfigured {
+		config.Workspace.Image = "fern/opencode-v2:dev"
 	}
 	if overrides.IdleAfter != nil {
 		config.IdleAfter, err = time.ParseDuration(*overrides.IdleAfter)
@@ -183,7 +204,7 @@ func load(path, defaultRepo string, required bool, overrides Overrides, workspac
 }
 
 func LoadAttach(path string, required bool, listenOverride *string) (Client, error) {
-	client := Client{Name: "demo", Listen: "127.0.0.1:8080", Env: make(map[string]string)}
+	client := Client{Name: "demo", Listen: "127.0.0.1:8080", OpenCode: OpenCodeV1, Env: make(map[string]string)}
 	if listenOverride != nil {
 		client.Listen = *listenOverride
 	}
@@ -204,15 +225,18 @@ func LoadAttach(path string, required bool, listenOverride *string) (Client, err
 		}
 	}
 	if workspace, exists := sections["workspace"]; exists {
-		if err := loadClientAuth(workspace, client.Env); err != nil {
+		if err := loadClientWorkspace(workspace, &client); err != nil {
 			return Client{}, err
 		}
+	}
+	if !client.OpenCode.Valid() {
+		return Client{}, fmt.Errorf("invalid workspace OpenCode protocol %q (want v1, v2, or auto)", client.OpenCode)
 	}
 	return client, nil
 }
 
 func LoadEvents(path string, required bool, nameOverride *string) (Client, error) {
-	client := Client{Name: "demo", Env: make(map[string]string)}
+	client := Client{Name: "demo", OpenCode: OpenCodeV1, Env: make(map[string]string)}
 	if nameOverride != nil {
 		client.Name = *nameOverride
 	}
@@ -234,8 +258,18 @@ func LoadEvents(path string, required bool, nameOverride *string) (Client, error
 			return Client{}, fmt.Errorf("parse workspace.name: %w", err)
 		}
 	}
+	if protocol, exists := fields["opencode"]; exists {
+		value, err := decodeString(protocol)
+		if err != nil {
+			return Client{}, fmt.Errorf("parse workspace.opencode: %w", err)
+		}
+		client.OpenCode = normalizeOpenCode(value)
+	}
 	if err := loadAuthFields(fields, client.Env); err != nil {
 		return Client{}, err
+	}
+	if !client.OpenCode.Valid() {
+		return Client{}, fmt.Errorf("invalid workspace OpenCode protocol %q (want v1, v2, or auto)", client.OpenCode)
 	}
 	return client, nil
 }
@@ -255,12 +289,19 @@ func loadSections(path string, required bool) (map[string]yaml.Node, error) {
 	return sections, nil
 }
 
-func loadClientAuth(workspace yaml.Node, env map[string]string) error {
+func loadClientWorkspace(workspace yaml.Node, client *Client) error {
 	fields, err := decodeNodeMap(workspace)
 	if err != nil {
 		return fmt.Errorf("parse workspace: %w", err)
 	}
-	return loadAuthFields(fields, env)
+	if protocol, exists := fields["opencode"]; exists {
+		value, err := decodeString(protocol)
+		if err != nil {
+			return fmt.Errorf("parse workspace.opencode: %w", err)
+		}
+		client.OpenCode = normalizeOpenCode(value)
+	}
+	return loadAuthFields(fields, client.Env)
 }
 
 func loadAuthFields(workspace map[string]yaml.Node, env map[string]string) error {
@@ -272,7 +313,7 @@ func loadAuthFields(workspace map[string]yaml.Node, env map[string]string) error
 	if err != nil {
 		return fmt.Errorf("parse workspace.env: %w", err)
 	}
-	for _, key := range []string{"OPENCODE_SERVER_USERNAME", "OPENCODE_SERVER_PASSWORD"} {
+	for _, key := range []string{"OPENCODE_SERVER_USERNAME", "OPENCODE_SERVER_PASSWORD", "OPENCODE_PASSWORD"} {
 		node, exists := values[key]
 		if !exists {
 			continue
@@ -327,6 +368,13 @@ func applyFileWorkspace(workspace *Workspace, file fileWorkspace, overrides Over
 		}
 		*field.target = value
 	}
+	if overrides.OpenCode == nil && file.OpenCode.Kind != 0 {
+		value, err := decodeString(file.OpenCode)
+		if err != nil {
+			return fmt.Errorf("opencode: %w", err)
+		}
+		workspace.OpenCode = normalizeOpenCode(value)
+	}
 	if file.Env.Kind != 0 {
 		if err := file.Env.Decode(&workspace.Env); err != nil {
 			return fmt.Errorf("env: %w", err)
@@ -374,7 +422,7 @@ func Validate(config Config) error {
 	if config.IdleAfter <= 0 {
 		return fmt.Errorf("idle duration must be positive")
 	}
-	if err := validateListen(config.Listen, config.Workspace.Env["OPENCODE_SERVER_PASSWORD"] != ""); err != nil {
+	if err := validateListen(config.Listen, hasProxyPassword(config.Workspace)); err != nil {
 		return err
 	}
 	return nil
@@ -386,6 +434,9 @@ func ValidateWorkspace(config Config) error {
 	}
 	if strings.TrimSpace(config.Workspace.Image) == "" {
 		return fmt.Errorf("workspace image is required")
+	}
+	if !config.Workspace.OpenCode.Valid() {
+		return fmt.Errorf("invalid workspace OpenCode protocol %q (want v1, v2, or auto)", config.Workspace.OpenCode)
 	}
 	if _, err := ParseMemoryBytes(config.Workspace.Memory); err != nil {
 		return err
@@ -400,6 +451,9 @@ func ValidateWorkspace(config Config) error {
 	if password, exists := config.Workspace.Env["OPENCODE_SERVER_PASSWORD"]; exists && password == "" {
 		return fmt.Errorf("OPENCODE_SERVER_PASSWORD must not be explicitly empty")
 	}
+	if password, exists := config.Workspace.Env["OPENCODE_PASSWORD"]; exists && password == "" {
+		return fmt.Errorf("OPENCODE_PASSWORD must not be explicitly empty")
+	}
 	for key := range config.Workspace.Env {
 		if key == "" || strings.ContainsAny(key, "=\x00\r\n") {
 			return fmt.Errorf("invalid environment key %q", key)
@@ -411,6 +465,25 @@ func ValidateWorkspace(config Config) error {
 		}
 	}
 	return nil
+}
+
+func (protocol OpenCodeProtocol) Valid() bool {
+	return protocol == OpenCodeV1 || protocol == OpenCodeV2 || protocol == OpenCodeAuto
+}
+
+func normalizeOpenCode(value string) OpenCodeProtocol {
+	return OpenCodeProtocol(strings.ToLower(strings.TrimSpace(value)))
+}
+
+func hasProxyPassword(workspace Workspace) bool {
+	switch workspace.OpenCode {
+	case OpenCodeV2:
+		return workspace.Env["OPENCODE_PASSWORD"] != ""
+	case OpenCodeAuto:
+		return workspace.Env["OPENCODE_SERVER_PASSWORD"] != "" || workspace.Env["OPENCODE_PASSWORD"] != ""
+	default:
+		return workspace.Env["OPENCODE_SERVER_PASSWORD"] != ""
+	}
 }
 
 func ValidateWorkspaceName(name string) error {
