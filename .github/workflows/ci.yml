@@ -1,0 +1,95 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go:
+    name: Go checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Check formatting
+        run: test -z "$(gofmt -l .)"
+
+      - name: Run tests
+        run: GOTOOLCHAIN=local go test ./...
+
+      - name: Run race tests
+        run: GOTOOLCHAIN=local go test -race ./...
+
+      - name: Run vet
+        run: GOTOOLCHAIN=local go vet ./...
+
+      - name: Build fern
+        run: GOTOOLCHAIN=local go build ./cmd/fern
+
+  image:
+    name: Workspace image (${{ matrix.protocol }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - protocol: v1
+            context: images/opencode
+            tag: fern/opencode:ci
+            executable: opencode
+          - protocol: v2
+            context: images/opencode-v2
+            tag: fern/opencode-v2:ci
+            executable: opencode2
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Build workspace image
+        run: docker build -t "${{ matrix.tag }}" "${{ matrix.context }}"
+
+      - name: Verify workspace image identity
+        run: |
+          test "$(docker run --rm --entrypoint id '${{ matrix.tag }}' -u)" = "1001"
+          test "$(docker run --rm --entrypoint id '${{ matrix.tag }}' -g)" = "1001"
+          docker run --rm --entrypoint "${{ matrix.executable }}" "${{ matrix.tag }}" --version
+
+      - name: Smoke test real V2 protocol
+        if: matrix.protocol == 'v2'
+        env:
+          FERN_V2_IMAGE: ${{ matrix.tag }}
+        run: ./scripts/test-opencode-v2.sh
+
+  lifecycle:
+    name: Docker lifecycle (${{ matrix.protocol }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        protocol: [v1, v2]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run real Docker lifecycle harness
+        env:
+          FERN_LIFECYCLE_PROTOCOL: ${{ matrix.protocol }}
+        run: ./scripts/test-lifecycle.sh

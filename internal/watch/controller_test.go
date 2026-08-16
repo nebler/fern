@@ -94,6 +94,53 @@ func TestStreamControllerStopHonorsDeadlineBehindOperation(t *testing.T) {
 	}
 }
 
+func TestCanceledConnectionSetupClearsGeneration(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		writer.WriteHeader(http.StatusOK)
+		writer.(http.Flusher).Flush()
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+	controller := NewStreamController(context.Background(), StreamOptions{}, make(chan Observation), testLogger())
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := controller.Connect(ctx, server.URL); err == nil {
+		t.Fatal("Connect unexpectedly succeeded with blocked observation delivery")
+	}
+	controller.mu.Lock()
+	state := controller.state
+	controller.mu.Unlock()
+	if state.cancel != nil || state.connected || state.baseURL != "" {
+		t.Fatalf("canceled generation retained state: %+v", state)
+	}
+}
+
+func TestStreamControllerPreservesOnConnect(t *testing.T) {
+	t.Parallel()
+	server := eventServer(&atomic.Int32{})
+	defer server.Close()
+	called := make(chan struct{}, 1)
+	controller := NewStreamController(context.Background(), StreamOptions{OnConnect: func() { called <- struct{}{} }}, make(chan Observation, 4), testLogger())
+	defer stopController(t, controller)
+	if err := controller.Connect(context.Background(), server.URL); err != nil {
+		t.Fatal(err)
+	}
+	assertSignal(t, called, time.Second)
+}
+
+func TestMalformedStatusInvalidatesWithoutDisconnecting(t *testing.T) {
+	t.Parallel()
+	observation, ok := statusObservation(7, Event{Type: "session.status", Properties: []byte(`{}`)})
+	if !ok {
+		t.Fatal("statusObservation ignored malformed status")
+	}
+	if observation.Kind != ObservationInvalidated || observation.Epoch != 7 {
+		t.Fatalf("observation = %+v", observation)
+	}
+}
+
 func stopController(t *testing.T, controller *StreamController) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)

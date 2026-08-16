@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
-	"path"
 	"strings"
 	"time"
 
@@ -15,36 +14,53 @@ import (
 )
 
 type Waker interface {
-	AcquireRequest(context.Context, workspace.RequestIntent) (runtime.Endpoint, func(), error)
+	AcquireRequest(context.Context, workspace.RequestIntent) (workspace.RequestTarget, func(), error)
+	InvalidateEndpoint(workspace.RequestTarget)
 }
 
 type targetKey struct{}
 
-func New(waker Waker, log *slog.Logger) http.Handler {
+type proxyTarget struct {
+	url     *url.URL
+	request workspace.RequestTarget
+	intent  workspace.RequestIntent
+}
+
+func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
 	if waker == nil {
-		return http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		unavailable := http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 			http.Error(writer, "workspace manager unavailable", http.StatusServiceUnavailable)
 		})
+		return requireServerAuth(unavailable, auth)
 	}
 	if log == nil {
 		log = slog.Default()
 	}
 	reverseProxy := &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
-			target := request.In.Context().Value(targetKey{}).(*url.URL)
-			request.SetURL(target)
+			target := request.In.Context().Value(targetKey{}).(proxyTarget)
+			request.SetURL(target.url)
 			request.Out.Host = request.In.Host
 		},
 		FlushInterval: -1,
 		ErrorHandler: func(writer http.ResponseWriter, request *http.Request, err error) {
+			if target, ok := request.Context().Value(targetKey{}).(proxyTarget); ok {
+				// An SSE observer disconnect is not evidence that OpenCode failed. A
+				// canceled held request may instead be a frozen backend, so invalidate
+				// it and let the next request reconcile Docker state.
+				if request.Context().Err() == nil || target.intent != workspace.RequestObserve {
+					waker.InvalidateEndpoint(target.request)
+				}
+			}
 			log.Error("proxy error", "err", err, "path", request.URL.Path)
 			http.Error(writer, "upstream unavailable", http.StatusBadGateway)
 		},
 	}
 
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		start := time.Now()
-		ep, release, err := waker.AcquireRequest(request.Context(), requestIntent(request))
+		intent := requestIntentFor(auth.Protocol, request)
+		target, release, err := waker.AcquireRequest(request.Context(), intent)
 		if err != nil {
 			log.Error("wake failed", "err", err)
 			http.Error(writer, "failed to wake workspace", http.StatusServiceUnavailable)
@@ -54,31 +70,40 @@ func New(waker Waker, log *slog.Logger) http.Handler {
 		if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
 			log.Info("workspace ready", "wake_ms", elapsed.Milliseconds(), "path", request.URL.Path)
 		}
-		target, err := url.Parse(ep.URL())
+		targetURL, err := url.Parse(target.Endpoint.URL())
 		if err != nil {
 			http.Error(writer, "invalid workspace endpoint", http.StatusInternalServerError)
 			return
 		}
-		ctx := context.WithValue(request.Context(), targetKey{}, target)
+		ctx := context.WithValue(request.Context(), targetKey{}, proxyTarget{url: targetURL, request: target, intent: intent})
 		reverseProxy.ServeHTTP(writer, request.WithContext(ctx))
 	})
+	return requireServerAuth(handler, auth)
 }
 
 func requestIntent(request *http.Request) workspace.RequestIntent {
+	return requestIntentFor(runtime.ProtocolV1, request)
+}
+
+func requestIntentFor(protocol runtime.Protocol, request *http.Request) workspace.RequestIntent {
 	// Event streams are observation-only and intentionally survive until a
 	// pause disconnects them. Every other request, including WebSocket upgrades,
 	// holds an admission lease for its complete proxied lifetime.
-	cleanPath := path.Clean(request.URL.Path)
-	switch cleanPath {
-	case "/event", "/global/event", "/api/event":
-		return workspace.RequestIntent{}
-	}
 	upgrade := strings.EqualFold(request.Header.Get("Upgrade"), "websocket")
-	if !upgrade && (request.Method == http.MethodGet || request.Method == http.MethodHead) {
-		switch cleanPath {
-		case "/global/health", "/session/status":
-			return workspace.RequestIntent{Hold: true}
+	requestPath := request.URL.EscapedPath()
+	if request.Method == http.MethodGet && !upgrade {
+		v1 := protocol.Normalize() == runtime.ProtocolV1 || protocol.Normalize() == runtime.ProtocolAuto
+		v2 := protocol.Normalize() == runtime.ProtocolV2 || protocol.Normalize() == runtime.ProtocolAuto
+		if v1 && (requestPath == "/event" || requestPath == "/global/event") || v2 && requestPath == "/api/event" {
+			return workspace.RequestObserve
 		}
 	}
-	return workspace.RequestIntent{Hold: true, MayStartWork: true}
+	if !upgrade && (request.Method == http.MethodGet || request.Method == http.MethodHead) {
+		v1 := protocol.Normalize() == runtime.ProtocolV1 || protocol.Normalize() == runtime.ProtocolAuto
+		v2 := protocol.Normalize() == runtime.ProtocolV2 || protocol.Normalize() == runtime.ProtocolAuto
+		if v1 && (requestPath == "/global/health" || requestPath == "/session/status") || v2 && (requestPath == "/api/health" || requestPath == "/api/session/active") {
+			return workspace.RequestRead
+		}
+	}
+	return workspace.RequestWork
 }

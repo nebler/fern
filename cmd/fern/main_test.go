@@ -1,10 +1,14 @@
 package main
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
+
+	"github.com/nebler/fern/internal/config"
 )
 
 func TestAttachURLUsesReachableAddress(t *testing.T) {
@@ -33,8 +37,8 @@ func TestAttachURLUsesReachableAddress(t *testing.T) {
 func TestAttachEnvironmentReplacesAuthentication(t *testing.T) {
 	t.Parallel()
 	got := attachEnvironment(
-		[]string{"PATH=/bin", "OPENCODE_SERVER_USERNAME=old", "OPENCODE_SERVER_PASSWORD=old"},
-		map[string]string{"OPENCODE_SERVER_USERNAME": "agent", "OPENCODE_SERVER_PASSWORD": "secret"},
+		[]string{"PATH=/bin", "OPENCODE_SERVER_USERNAME=old", "OPENCODE_SERVER_PASSWORD=old", "OPENCODE_PASSWORD=old-v2"},
+		map[string]string{"OPENCODE_SERVER_USERNAME": "agent", "OPENCODE_SERVER_PASSWORD": "secret", "OPENCODE_PASSWORD": "secret-v2"},
 	)
 	for _, want := range []string{"PATH=/bin", "OPENCODE_SERVER_USERNAME=agent", "OPENCODE_SERVER_PASSWORD=secret"} {
 		if !slices.Contains(got, want) {
@@ -44,38 +48,63 @@ func TestAttachEnvironmentReplacesAuthentication(t *testing.T) {
 	if slices.Contains(got, "OPENCODE_SERVER_PASSWORD=old") {
 		t.Fatalf("environment retained old password: %v", got)
 	}
-}
-
-func TestConfigSelectionSupportsLongFlags(t *testing.T) {
-	t.Parallel()
-	tests := [][]string{
-		{"--config", "one.yaml"},
-		{"--config=one.yaml"},
-		{"-config", "one.yaml"},
-		{"-config=one.yaml"},
-	}
-	for _, args := range tests {
-		selection, err := configSelection(args)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if selection.path != "one.yaml" || !selection.required {
-			t.Fatalf("configSelection(%v) = %+v", args, selection)
-		}
+	if slices.Contains(got, "OPENCODE_PASSWORD=old-v2") || slices.Contains(got, "OPENCODE_PASSWORD=secret-v2") {
+		t.Fatalf("V1 environment retained a V2 password: %v", got)
 	}
 }
 
-func TestConfigSelectionRejectsDuplicatesAndIgnoresAfterSeparator(t *testing.T) {
+func TestV2AttachEnvironmentDropsV1Credentials(t *testing.T) {
 	t.Parallel()
-	if _, err := configSelection([]string{"--config", "one.yaml", "--config", "two.yaml"}); err == nil {
-		t.Fatal("duplicate config flags were accepted")
+	got := attachEnvironmentFor(config.OpenCodeV2,
+		[]string{"PATH=/bin", "OPENCODE_SERVER_USERNAME=old", "OPENCODE_SERVER_PASSWORD=old", "OPENCODE_PASSWORD=old-v2"},
+		map[string]string{"OPENCODE_SERVER_USERNAME": "agent", "OPENCODE_SERVER_PASSWORD": "v1", "OPENCODE_PASSWORD": "v2"},
+	)
+	if !slices.Contains(got, "OPENCODE_PASSWORD=v2") {
+		t.Fatalf("V2 environment = %v", got)
 	}
-	selection, err := configSelection([]string{"--", "--config", "ignored.yaml"})
-	if err != nil {
-		t.Fatal(err)
+	for _, value := range got {
+		if strings.HasPrefix(value, "OPENCODE_SERVER_") {
+			t.Fatalf("V2 environment retained a V1 credential: %v", got)
+		}
 	}
-	if selection.path != "fern.yaml" || selection.required {
-		t.Fatalf("selection after -- = %+v", selection)
+}
+
+func TestImplicitAuthenticationForwardingIsProtocolSpecific(t *testing.T) {
+	t.Setenv("OPENCODE_SERVER_USERNAME", "v1-user")
+	t.Setenv("OPENCODE_SERVER_PASSWORD", "v1-secret")
+	t.Setenv("OPENCODE_PASSWORD", "v2-secret")
+	tests := []struct {
+		protocol config.OpenCodeProtocol
+		want     []string
+		reject   []string
+	}{
+		{protocol: config.OpenCodeV1, want: []string{"OPENCODE_SERVER_USERNAME", "OPENCODE_SERVER_PASSWORD"}, reject: []string{"OPENCODE_PASSWORD"}},
+		{protocol: config.OpenCodeV2, want: []string{"OPENCODE_PASSWORD"}, reject: []string{"OPENCODE_SERVER_USERNAME", "OPENCODE_SERVER_PASSWORD"}},
+		{protocol: config.OpenCodeAuto, want: []string{"OPENCODE_SERVER_USERNAME", "OPENCODE_SERVER_PASSWORD", "OPENCODE_PASSWORD"}},
+	}
+	for _, test := range tests {
+		env := forwardedEnvironmentFor(test.protocol, nil)
+		for _, key := range test.want {
+			if env[key] == "" {
+				t.Fatalf("protocol %s did not forward %s", test.protocol, key)
+			}
+		}
+		for _, key := range test.reject {
+			if _, exists := env[key]; exists {
+				t.Fatalf("protocol %s unexpectedly forwarded %s", test.protocol, key)
+			}
+		}
+	}
+}
+
+func TestExplicitEmptyAuthenticationSuppressesHostValue(t *testing.T) {
+	t.Setenv("OPENCODE_SERVER_USERNAME", "host-user")
+	configured := forwardedEnvironment(map[string]string{"OPENCODE_SERVER_USERNAME": ""})
+	got := attachEnvironment([]string{"OPENCODE_SERVER_USERNAME=host-user"}, configured)
+	for _, value := range got {
+		if strings.HasPrefix(value, "OPENCODE_SERVER_USERNAME=") {
+			t.Fatalf("explicit empty username was replaced: %v", got)
+		}
 	}
 }
 
@@ -85,14 +114,42 @@ func TestExplicitNameBypassesBrokenUnrelatedConfig(t *testing.T) {
 	if err := os.WriteFile(path, []byte("workspace:\n  env:\n    TOKEN: ${MISSING_FOR_CLEANUP}\nunknown: true\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	name, flags, err := commandWorkspaceName("down", []string{"--config", path, "--name", "emergency"})
-	if err != nil {
-		t.Fatal(err)
-	}
+	flags, nameFlag, configPath := workspaceFlags("down")
 	if err := flags.Parse([]string{"--config", path, "--name", "emergency"}); err != nil {
 		t.Fatal(err)
 	}
-	if *name != "emergency" {
-		t.Fatalf("name = %q", *name)
+	name, err := workspaceName(flags, *nameFlag, *configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "emergency" {
+		t.Fatalf("name = %q", name)
+	}
+}
+
+func TestTrackedConnectionRemovesItselfOnClose(t *testing.T) {
+	t.Parallel()
+	tracker := newConnectionTracker()
+	left, right := net.Pipe()
+	defer right.Close()
+	tracked := &trackedConnection{Conn: left, tracker: tracker}
+	tracker.add(tracked)
+	if err := tracked.Close(); err != nil {
+		t.Fatal(err)
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	if len(tracker.conns) != 0 {
+		t.Fatalf("tracker retained %d closed connections", len(tracker.conns))
+	}
+}
+
+func TestResumeIsNotAStandaloneCommand(t *testing.T) {
+	t.Parallel()
+	if err := run([]string{"resume"}, nil); err == nil {
+		t.Fatal("standalone resume command unexpectedly remained available")
+	}
+	if strings.Contains(usageText, "resume") {
+		t.Fatalf("usage still advertises unsafe standalone resume: %s", usageText)
 	}
 }

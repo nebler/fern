@@ -2,10 +2,12 @@ package registry
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 )
 
@@ -54,4 +56,39 @@ func TestAcquireIsExclusiveAcrossProcesses(t *testing.T) {
 		t.Fatalf("Acquire after helper exit: %v", err)
 	}
 	defer lease.Release()
+}
+
+func TestAcquireRejectsSymlinkLockWithoutChangingTarget(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	victim := filepath.Join(t.TempDir(), "victim")
+	if err := os.WriteFile(victim, []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	lock := filepath.Join(directory, fmt.Sprintf("%x.lock", sha256.Sum256([]byte("demo"))))
+	if err := os.Symlink(victim, lock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Acquire(directory, "demo"); err == nil {
+		t.Fatal("Acquire accepted a symlink lock")
+	}
+	data, err := os.ReadFile(victim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "keep me" {
+		t.Fatalf("victim contents = %q", data)
+	}
+}
+
+func TestAcquireRejectsSymlinkDirectory(t *testing.T) {
+	t.Parallel()
+	target := t.TempDir()
+	directory := filepath.Join(t.TempDir(), "locks")
+	if err := os.Symlink(target, directory); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Acquire(directory, "demo"); err == nil {
+		t.Fatal("Acquire accepted a symlink directory")
+	}
 }

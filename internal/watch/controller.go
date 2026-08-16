@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"sync"
 	"time"
+
+	"github.com/nebler/fern/internal/runtime"
 )
 
 type ObservationKind string
@@ -16,6 +18,7 @@ const (
 	ObservationDisconnected ObservationKind = "disconnected"
 	ObservationStatus       ObservationKind = "status"
 	ObservationRequest      ObservationKind = "request"
+	ObservationInvalidated  ObservationKind = "invalidated"
 )
 
 type Observation struct {
@@ -24,11 +27,13 @@ type Observation struct {
 	SessionID string
 	Status    string
 	Err       string
+	Handled   chan struct{}
 }
 
 type streamState struct {
 	epoch     uint64
 	baseURL   string
+	protocol  runtime.Protocol
 	connected bool
 	cancel    context.CancelFunc
 	done      chan struct{}
@@ -60,6 +65,14 @@ func NewStreamController(parent context.Context, options StreamOptions, out chan
 
 // Connect returns only when this exact endpoint generation is connected now.
 func (c *StreamController) Connect(ctx context.Context, baseURL string) error {
+	return c.connect(ctx, baseURL, runtime.ProtocolV1, false)
+}
+
+func (c *StreamController) ConnectEndpoint(ctx context.Context, endpoint runtime.Endpoint) error {
+	return c.connect(ctx, endpoint.URL(), endpoint.Protocol.Normalize(), false)
+}
+
+func (c *StreamController) connect(ctx context.Context, baseURL string, protocol runtime.Protocol, force bool) error {
 	if err := c.acquire(ctx); err != nil {
 		return err
 	}
@@ -68,21 +81,21 @@ func (c *StreamController) Connect(ctx context.Context, baseURL string) error {
 	c.mu.Lock()
 	state := c.state
 	c.mu.Unlock()
-	if state.baseURL == baseURL && state.connected {
+	if !force && state.baseURL == baseURL && state.protocol == protocol && state.connected {
 		return nil
 	}
-	return c.replace(ctx, baseURL)
+	return c.replace(ctx, baseURL, protocol)
 }
 
 func (c *StreamController) Reconnect(ctx context.Context, baseURL string) error {
-	if err := c.acquire(ctx); err != nil {
-		return err
-	}
-	defer c.release()
-	return c.replace(ctx, baseURL)
+	return c.connect(ctx, baseURL, runtime.ProtocolV1, true)
 }
 
-func (c *StreamController) replace(ctx context.Context, baseURL string) error {
+func (c *StreamController) ReconnectEndpoint(ctx context.Context, endpoint runtime.Endpoint) error {
+	return c.connect(ctx, endpoint.URL(), endpoint.Protocol.Normalize(), true)
+}
+
+func (c *StreamController) replace(ctx context.Context, baseURL string, protocol runtime.Protocol) error {
 	if err := c.stopCurrent(ctx, true); err != nil {
 		return err
 	}
@@ -96,20 +109,15 @@ func (c *StreamController) replace(ctx context.Context, baseURL string) error {
 	done := make(chan struct{})
 	ready := make(chan struct{})
 	c.mu.Lock()
-	c.state = streamState{epoch: epoch, baseURL: baseURL, cancel: cancel, done: done, ready: ready}
+	c.state = streamState{epoch: epoch, baseURL: baseURL, protocol: protocol, cancel: cancel, done: done, ready: ready}
 	c.mu.Unlock()
-	go c.runGeneration(streamCtx, epoch, baseURL, ready, done)
+	go c.runGeneration(streamCtx, epoch, baseURL, protocol, ready, done)
 
 	if err := waitForConnection(ctx, ready); err != nil {
 		cancel()
-		if err := waitDone(ctx, done); err != nil {
-			return fmt.Errorf("stop failed activity stream: %w", err)
+		if stopErr := waitDoneAfterCancel(done); stopErr != nil {
+			return errors.Join(fmt.Errorf("connect activity stream: %w", err), fmt.Errorf("stop failed activity stream: %w", stopErr))
 		}
-		c.mu.Lock()
-		if c.state.epoch == epoch {
-			c.state = streamState{}
-		}
-		c.mu.Unlock()
 		return fmt.Errorf("connect activity stream: %w", err)
 	}
 	c.mu.Lock()
@@ -117,7 +125,7 @@ func (c *StreamController) replace(ctx context.Context, baseURL string) error {
 	c.mu.Unlock()
 	if !connected {
 		cancel()
-		if err := waitDone(ctx, done); err != nil {
+		if err := waitDoneAfterCancel(done); err != nil {
 			return fmt.Errorf("activity stream disconnected during connection setup: %w", err)
 		}
 		c.clearState(epoch)
@@ -126,8 +134,9 @@ func (c *StreamController) replace(ctx context.Context, baseURL string) error {
 	return nil
 }
 
-func (c *StreamController) runGeneration(ctx context.Context, epoch uint64, baseURL string, ready chan struct{}, done chan struct{}) {
+func (c *StreamController) runGeneration(ctx context.Context, epoch uint64, baseURL string, protocol runtime.Protocol, ready chan struct{}, done chan struct{}) {
 	defer close(done)
+	defer c.clearState(epoch)
 	backoff := 500 * time.Millisecond
 	var readyOnce sync.Once
 	for ctx.Err() == nil {
@@ -135,9 +144,14 @@ func (c *StreamController) runGeneration(ctx context.Context, epoch uint64, base
 		attemptCtx, attemptCancel := context.WithCancel(ctx)
 		options := c.options
 		options.BaseURL = baseURL
+		options.Protocol = protocol
+		onConnect := options.OnConnect
 		options.OnConnect = func() {
 			if !c.setConnected(epoch, true) {
 				return
+			}
+			if onConnect != nil {
+				onConnect()
 			}
 			if c.send(attemptCtx, Observation{Epoch: epoch, Kind: ObservationConnected}) {
 				readyOnce.Do(func() { close(ready) })
@@ -149,14 +163,7 @@ func (c *StreamController) runGeneration(ctx context.Context, epoch uint64, base
 		for {
 			select {
 			case event := <-events:
-				observation, ok, err := statusObservation(epoch, event)
-				if err != nil {
-					c.setConnected(epoch, false)
-					c.send(ctx, Observation{Epoch: epoch, Kind: ObservationDisconnected, Err: err.Error()})
-					attemptCancel()
-					waitStream(streamDone)
-					goto retry
-				}
+				observation, ok := statusObservation(epoch, event)
 				if ok {
 					c.send(ctx, observation)
 				}
@@ -267,18 +274,18 @@ func (c *StreamController) send(ctx context.Context, observation Observation) bo
 	}
 }
 
-func statusObservation(epoch uint64, event Event) (Observation, bool, error) {
+func statusObservation(epoch uint64, event Event) (Observation, bool) {
 	if event.Type != "session.status" {
-		return Observation{}, false, nil
+		return Observation{}, false
 	}
 	sessionID, status, ok := parseStatus(event)
 	if !ok {
-		return Observation{}, false, fmt.Errorf("malformed session.status event")
+		return Observation{Epoch: epoch, Kind: ObservationInvalidated, Err: "malformed session.status event"}, true
 	}
 	if status != "idle" && status != "busy" && status != "retry" {
-		return Observation{}, false, fmt.Errorf("unknown session status %q", status)
+		return Observation{Epoch: epoch, Kind: ObservationInvalidated, Err: fmt.Sprintf("unknown session status %q", status)}, true
 	}
-	return Observation{Epoch: epoch, Kind: ObservationStatus, SessionID: sessionID, Status: status}, true, nil
+	return Observation{Epoch: epoch, Kind: ObservationStatus, SessionID: sessionID, Status: status}, true
 }
 
 func waitForConnection(ctx context.Context, ready <-chan struct{}) error {
@@ -304,6 +311,12 @@ func waitDone(ctx context.Context, done <-chan struct{}) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func waitDoneAfterCancel(done <-chan struct{}) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return waitDone(ctx, done)
 }
 
 func waitStream(done <-chan error) {

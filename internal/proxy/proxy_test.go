@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -18,26 +19,72 @@ type staticWaker struct {
 	endpoint runtime.Endpoint
 	active   chan bool
 	released chan struct{}
+	invalid  chan workspace.RequestTarget
+}
+
+func (w staticWaker) InvalidateEndpoint(target workspace.RequestTarget) {
+	if w.invalid != nil {
+		w.invalid <- target
+	}
 }
 
 func TestRequestIntentDefaultsUnknownReadsToWorkStarting(t *testing.T) {
 	t.Parallel()
 	request := httptest.NewRequest(http.MethodGet, "/future/starts-work", nil)
 	intent := requestIntent(request)
-	if !intent.Hold || !intent.MayStartWork {
+	if intent != workspace.RequestWork {
 		t.Fatalf("unknown GET intent = %+v", intent)
 	}
 	request = httptest.NewRequest(http.MethodGet, "/event/", nil)
-	if intent := requestIntent(request); intent.Hold || intent.MayStartWork {
-		t.Fatalf("normalized event intent = %+v", intent)
+	if intent := requestIntent(request); intent != workspace.RequestWork {
+		t.Fatalf("noncanonical event intent = %+v", intent)
+	}
+	request = httptest.NewRequest(http.MethodPost, "/event", nil)
+	if intent := requestIntent(request); intent != workspace.RequestWork {
+		t.Fatalf("mutating event-path intent = %+v", intent)
+	}
+	request = httptest.NewRequest(http.MethodGet, "/event", nil)
+	request.Header.Set("Upgrade", "websocket")
+	if intent := requestIntent(request); intent != workspace.RequestWork {
+		t.Fatalf("upgraded event-path intent = %+v", intent)
 	}
 }
 
-func (w staticWaker) AcquireRequest(_ context.Context, intent workspace.RequestIntent) (runtime.Endpoint, func(), error) {
-	if w.active != nil {
-		w.active <- intent.Hold && intent.MayStartWork
+func TestRequestIntentUsesSelectedOpenCodeProtocol(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		protocol runtime.Protocol
+		method   string
+		path     string
+		want     workspace.RequestIntent
+	}{
+		{name: "V1 event", protocol: runtime.ProtocolV1, method: http.MethodGet, path: "/event", want: workspace.RequestObserve},
+		{name: "V1 health", protocol: runtime.ProtocolV1, method: http.MethodGet, path: "/global/health", want: workspace.RequestRead},
+		{name: "V1 treats V2 event as work", protocol: runtime.ProtocolV1, method: http.MethodGet, path: "/api/event", want: workspace.RequestWork},
+		{name: "V2 event", protocol: runtime.ProtocolV2, method: http.MethodGet, path: "/api/event", want: workspace.RequestObserve},
+		{name: "V2 health", protocol: runtime.ProtocolV2, method: http.MethodHead, path: "/api/health", want: workspace.RequestRead},
+		{name: "V2 active", protocol: runtime.ProtocolV2, method: http.MethodGet, path: "/api/session/active", want: workspace.RequestRead},
+		{name: "V2 treats V1 event as work", protocol: runtime.ProtocolV2, method: http.MethodGet, path: "/event", want: workspace.RequestWork},
+		{name: "auto accepts V1", protocol: runtime.ProtocolAuto, method: http.MethodGet, path: "/event", want: workspace.RequestObserve},
+		{name: "auto accepts V2", protocol: runtime.ProtocolAuto, method: http.MethodGet, path: "/api/event", want: workspace.RequestObserve},
 	}
-	return w.endpoint, func() {
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			request := httptest.NewRequest(test.method, test.path, nil)
+			if got := requestIntentFor(test.protocol, request); got != test.want {
+				t.Fatalf("requestIntentFor(%s, %s %s) = %v, want %v", test.protocol, test.method, test.path, got, test.want)
+			}
+		})
+	}
+}
+
+func (w staticWaker) AcquireRequest(_ context.Context, intent workspace.RequestIntent) (workspace.RequestTarget, func(), error) {
+	if w.active != nil {
+		w.active <- intent == workspace.RequestWork
+	}
+	return workspace.RequestTarget{Endpoint: w.endpoint, Generation: 1}, func() {
 		if w.released != nil {
 			close(w.released)
 		}
@@ -64,7 +111,7 @@ func TestProxyDoesNotBufferSSE(t *testing.T) {
 	defer upstream.Close()
 	upstreamURL := mustParseEndpoint(t, upstream.URL)
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	server := httptest.NewServer(New(staticWaker{endpoint: upstreamURL}, logger))
+	server := httptest.NewServer(New(staticWaker{endpoint: upstreamURL}, runtime.ServerAuth{}, logger))
 	defer server.Close()
 
 	client := &http.Client{Timeout: time.Second}
@@ -100,7 +147,7 @@ func TestProxyHoldsMutatingRequestLeaseUntilResponseEnds(t *testing.T) {
 	active := make(chan bool, 1)
 	released := make(chan struct{})
 	waker := staticWaker{endpoint: mustParseEndpoint(t, upstream.URL), active: active, released: released}
-	server := httptest.NewServer(New(waker, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	server := httptest.NewServer(New(waker, runtime.ServerAuth{}, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	defer server.Close()
 	done := make(chan error, 1)
 	go func() {
@@ -127,6 +174,77 @@ func TestProxyHoldsMutatingRequestLeaseUntilResponseEnds(t *testing.T) {
 	case <-released:
 	case <-time.After(time.Second):
 		t.Fatal("request lease was not released")
+	}
+}
+
+func TestProxyInvalidatesFailedEndpoint(t *testing.T) {
+	t.Parallel()
+	invalid := make(chan workspace.RequestTarget, 1)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoint := runtime.Endpoint{Host: "127.0.0.1", Port: listener.Addr().(*net.TCPAddr).Port}
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(New(staticWaker{endpoint: endpoint, invalid: invalid}, runtime.ServerAuth{}, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	defer server.Close()
+	response, err := http.Get(server.URL + "/global/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want %d", response.StatusCode, http.StatusBadGateway)
+	}
+	select {
+	case got := <-invalid:
+		if got.Endpoint != endpoint || got.Generation != 1 {
+			t.Fatalf("invalidated target = %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("failed endpoint was not invalidated")
+	}
+}
+
+func TestProxyClientCancellationDoesNotInvalidateEndpoint(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		close(started)
+		<-request.Context().Done()
+	}))
+	defer upstream.Close()
+	invalid := make(chan workspace.RequestTarget, 1)
+	server := httptest.NewServer(New(staticWaker{
+		endpoint: mustParseEndpoint(t, upstream.URL),
+		invalid:  invalid,
+	}, runtime.ServerAuth{}, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/event", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if response != nil {
+			response.Body.Close()
+		}
+		done <- err
+	}()
+	<-started
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("canceled request unexpectedly succeeded")
+	}
+	select {
+	case target := <-invalid:
+		t.Fatalf("client cancellation invalidated healthy target %+v", target)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
 
