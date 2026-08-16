@@ -39,46 +39,30 @@ jobs:
         run: GOTOOLCHAIN=local go build ./cmd/fern
 
   image:
-    name: Workspace image (${{ matrix.protocol }})
+    name: Workspace image
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        include:
-          - protocol: v1
-            context: images/opencode
-            tag: fern/opencode:ci
-            executable: opencode
-          - protocol: v2
-            context: images/opencode-v2
-            tag: fern/opencode-v2:ci
-            executable: opencode2
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
 
       - name: Build workspace image
-        run: docker build -t "${{ matrix.tag }}" "${{ matrix.context }}"
+        run: docker build -t fern/opencode:ci images/opencode
 
       - name: Verify workspace image identity
         run: |
-          test "$(docker run --rm --entrypoint id '${{ matrix.tag }}' -u)" = "1001"
-          test "$(docker run --rm --entrypoint id '${{ matrix.tag }}' -g)" = "1001"
-          docker run --rm --entrypoint "${{ matrix.executable }}" "${{ matrix.tag }}" --version
+          test "$(docker run --rm --entrypoint id fern/opencode:ci -u)" = "1001"
+          test "$(docker run --rm --entrypoint id fern/opencode:ci -g)" = "1001"
+          docker run --rm --entrypoint opencode2 fern/opencode:ci --version
 
-      - name: Smoke test real V2 protocol
-        if: matrix.protocol == 'v2'
+      - name: Smoke test real OpenCode
         env:
-          FERN_V2_IMAGE: ${{ matrix.tag }}
-        run: ./scripts/test-opencode-v2.sh
+          FERN_OPENCODE_IMAGE: fern/opencode:ci
+        run: ./scripts/test-opencode.sh
 
   lifecycle:
-    name: Docker lifecycle (${{ matrix.protocol }})
+    name: Docker lifecycle
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        protocol: [v1, v2]
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -90,6 +74,4 @@ jobs:
           cache: true
 
       - name: Run real Docker lifecycle harness
-        env:
-          FERN_LIFECYCLE_PROTOCOL: ${{ matrix.protocol }}
         run: ./scripts/test-lifecycle.sh

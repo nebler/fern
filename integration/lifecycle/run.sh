@@ -6,17 +6,9 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
 SAFE_ID=$(printf '%s' "$RUN_ID" | tr -cd 'A-Za-z0-9_.-')
 NAME="fern-it-$SAFE_ID"
 BLOCKER="fern-it-blocker-$SAFE_ID"
-PROTOCOL=${FERN_LIFECYCLE_PROTOCOL:-v1}
-[[ "$PROTOCOL" == "v1" || "$PROTOCOL" == "v2" ]] || { echo "FERN_LIFECYCLE_PROTOCOL must be v1 or v2" >&2; exit 1; }
-if [[ "$PROTOCOL" == "v2" ]]; then
-  VOLUME="fern-$NAME-v2-data"
-  HEALTH_PATH=/api/health
-  USERNAME=opencode
-else
-  VOLUME="fern-$NAME-data"
-  HEALTH_PATH=/global/health
-  USERNAME=lifecycle
-fi
+VOLUME="fern-$NAME-v2-data"
+HEALTH_PATH=/api/health
+USERNAME=opencode
 IMAGE=${FERN_LIFECYCLE_IMAGE:-"fern/lifecycle:$SAFE_ID"}
 ARTIFACTS=${FERN_LIFECYCLE_ARTIFACTS:-"$ROOT/integration/artifacts/$RUN_ID"}
 RUN_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fern-lifecycle.XXXXXX")
@@ -172,8 +164,6 @@ export XDG_CACHE_HOME="$RUN_ROOT/cache"
 export XDG_DATA_HOME="$RUN_ROOT/data"
 export GOCACHE="$RUN_ROOT/cache/go-build"
 export GOPATH="$RUN_ROOT/go"
-export OPENCODE_SERVER_USERNAME="$USERNAME"
-export OPENCODE_SERVER_PASSWORD="$PASSWORD"
 export OPENCODE_PASSWORD="$PASSWORD"
 unset ANTHROPIC_API_KEY OPENAI_API_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 
@@ -210,9 +200,6 @@ workspace:
   image: $IMAGE
   repo: $REPO_DIR
   memory: 128Mi
-  opencode: $PROTOCOL
-  env:
-    FERN_OPENCODE_PROTOCOL: $PROTOCOL
 idle:
   after: 2s
 proxy:
@@ -274,7 +261,7 @@ container_started_at() { docker inspect --format '{{.State.StartedAt}}' "$NAME";
 container_id() { docker inspect --format '{{.Id}}' "$NAME"; }
 endpoint() { docker port "$NAME" 4096/tcp | awk -F: 'NR==1 {print $NF}'; }
 
-note "protocol=$PROTOCOL scenario 1/13: create and become healthy"
+note "scenario 1/13: create and become healthy"
 start_fern
 wait_status running
 initial_id=$(container_id)
@@ -324,7 +311,7 @@ note "scenario 7/13: changed dynamic backend endpoint is discovered after stale 
 auth_curl --fail "$PROXY_URL$HEALTH_PATH" >/dev/null
 old_port=$(endpoint)
 docker rm -f "$NAME" >/dev/null
-docker run -d --name "$BLOCKER" --label "dev.fern.lifecycle=$RUN_ID" -e "FERN_OPENCODE_PROTOCOL=$PROTOCOL" -e "OPENCODE_SERVER_USERNAME=$USERNAME" -e "OPENCODE_SERVER_PASSWORD=$PASSWORD" -e "OPENCODE_PASSWORD=$PASSWORD" -p "127.0.0.1:$old_port:4096" "$IMAGE" >/dev/null
+docker run -d --name "$BLOCKER" --label "dev.fern.lifecycle=$RUN_ID" -e "OPENCODE_PASSWORD=$PASSWORD" -p "127.0.0.1:$old_port:4096" "$IMAGE" >/dev/null
 BLOCKER_STARTED=1
 first_code=$(http_code "$ARTIFACTS/stale-endpoint.body" --user "$USERNAME:$PASSWORD" --max-time 5 "$PROXY_URL$HEALTH_PATH" || true)
 [[ "$first_code" == 502 || "$first_code" == 503 || "$first_code" == 000 ]] || fail "stale endpoint did not fail safely (HTTP $first_code)"

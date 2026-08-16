@@ -2,12 +2,10 @@ workspace:
   name: demo
   # Replace SOURCE_COMMIT with the exact trusted Fern source commit used to build it.
   image: fern/opencode:SOURCE_COMMIT
-  opencode: v1
   repo: /srv/fern/workspace
   memory: 8Gi
   env:
-    OPENCODE_SERVER_USERNAME: ${OPENCODE_SERVER_USERNAME}
-    OPENCODE_SERVER_PASSWORD: ${OPENCODE_SERVER_PASSWORD}
+    OPENCODE_PASSWORD: ${OPENCODE_PASSWORD}
 idle:
   after: 10m
 proxy:
