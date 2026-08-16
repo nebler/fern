@@ -33,7 +33,6 @@ type Observation struct {
 type streamState struct {
 	epoch     uint64
 	baseURL   string
-	protocol  runtime.Protocol
 	connected bool
 	cancel    context.CancelFunc
 	done      chan struct{}
@@ -65,14 +64,14 @@ func NewStreamController(parent context.Context, options StreamOptions, out chan
 
 // Connect returns only when this exact endpoint generation is connected now.
 func (c *StreamController) Connect(ctx context.Context, baseURL string) error {
-	return c.connect(ctx, baseURL, runtime.ProtocolV1, false)
+	return c.connect(ctx, baseURL, false)
 }
 
 func (c *StreamController) ConnectEndpoint(ctx context.Context, endpoint runtime.Endpoint) error {
-	return c.connect(ctx, endpoint.URL(), endpoint.Protocol.Normalize(), false)
+	return c.connect(ctx, endpoint.URL(), false)
 }
 
-func (c *StreamController) connect(ctx context.Context, baseURL string, protocol runtime.Protocol, force bool) error {
+func (c *StreamController) connect(ctx context.Context, baseURL string, force bool) error {
 	if err := c.acquire(ctx); err != nil {
 		return err
 	}
@@ -81,21 +80,21 @@ func (c *StreamController) connect(ctx context.Context, baseURL string, protocol
 	c.mu.Lock()
 	state := c.state
 	c.mu.Unlock()
-	if !force && state.baseURL == baseURL && state.protocol == protocol && state.connected {
+	if !force && state.baseURL == baseURL && state.connected {
 		return nil
 	}
-	return c.replace(ctx, baseURL, protocol)
+	return c.replace(ctx, baseURL)
 }
 
 func (c *StreamController) Reconnect(ctx context.Context, baseURL string) error {
-	return c.connect(ctx, baseURL, runtime.ProtocolV1, true)
+	return c.connect(ctx, baseURL, true)
 }
 
 func (c *StreamController) ReconnectEndpoint(ctx context.Context, endpoint runtime.Endpoint) error {
-	return c.connect(ctx, endpoint.URL(), endpoint.Protocol.Normalize(), true)
+	return c.connect(ctx, endpoint.URL(), true)
 }
 
-func (c *StreamController) replace(ctx context.Context, baseURL string, protocol runtime.Protocol) error {
+func (c *StreamController) replace(ctx context.Context, baseURL string) error {
 	if err := c.stopCurrent(ctx, true); err != nil {
 		return err
 	}
@@ -109,9 +108,9 @@ func (c *StreamController) replace(ctx context.Context, baseURL string, protocol
 	done := make(chan struct{})
 	ready := make(chan struct{})
 	c.mu.Lock()
-	c.state = streamState{epoch: epoch, baseURL: baseURL, protocol: protocol, cancel: cancel, done: done, ready: ready}
+	c.state = streamState{epoch: epoch, baseURL: baseURL, cancel: cancel, done: done, ready: ready}
 	c.mu.Unlock()
-	go c.runGeneration(streamCtx, epoch, baseURL, protocol, ready, done)
+	go c.runGeneration(streamCtx, epoch, baseURL, ready, done)
 
 	if err := waitForConnection(ctx, ready); err != nil {
 		cancel()
@@ -134,7 +133,7 @@ func (c *StreamController) replace(ctx context.Context, baseURL string, protocol
 	return nil
 }
 
-func (c *StreamController) runGeneration(ctx context.Context, epoch uint64, baseURL string, protocol runtime.Protocol, ready chan struct{}, done chan struct{}) {
+func (c *StreamController) runGeneration(ctx context.Context, epoch uint64, baseURL string, ready chan struct{}, done chan struct{}) {
 	defer close(done)
 	defer c.clearState(epoch)
 	backoff := 500 * time.Millisecond
@@ -144,7 +143,6 @@ func (c *StreamController) runGeneration(ctx context.Context, epoch uint64, base
 		attemptCtx, attemptCancel := context.WithCancel(ctx)
 		options := c.options
 		options.BaseURL = baseURL
-		options.Protocol = protocol
 		onConnect := options.OnConnect
 		options.OnConnect = func() {
 			if !c.setConnected(epoch, true) {

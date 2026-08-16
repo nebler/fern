@@ -14,12 +14,12 @@ import (
 func TestWaitHealthyUsesBasicAuth(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path != "/global/health" {
+		if request.URL.Path != "/api/health" {
 			http.NotFound(writer, request)
 			return
 		}
 		username, password, ok := request.BasicAuth()
-		if !ok || username != "agent" || password != "secret" {
+		if !ok || username != "opencode" || password != "secret" {
 			http.Error(writer, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -27,7 +27,7 @@ func TestWaitHealthyUsesBasicAuth(t *testing.T) {
 	}))
 	defer server.Close()
 	endpoint := Endpoint{Host: "127.0.0.1", Port: server.Listener.Addr().(*net.TCPAddr).Port}
-	if err := WaitHealthy(context.Background(), endpoint, ServerAuth{Username: "agent", Password: "secret"}, time.Second); err != nil {
+	if err := WaitHealthy(context.Background(), endpoint, ServerAuth{Password: "secret"}, time.Second); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -59,7 +59,7 @@ func TestWaitHealthyReusesConnectionAfterUnhealthyResponse(t *testing.T) {
 	}
 }
 
-func TestWaitHealthyProtocolDetectsV2AndUsesV2Auth(t *testing.T) {
+func TestWaitHealthyURLUsesV2Auth(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/api/health" {
@@ -75,33 +75,8 @@ func TestWaitHealthyProtocolDetectsV2AndUsesV2Auth(t *testing.T) {
 	}))
 	defer server.Close()
 	endpoint := Endpoint{Host: "127.0.0.1", Port: server.Listener.Addr().(*net.TCPAddr).Port}
-	protocol, err := WaitHealthyProtocol(
-		context.Background(), endpoint,
-		ServerAuth{Protocol: ProtocolAuto, V2Password: "v2-secret"}, ProtocolAuto, time.Second,
-	)
-	if err != nil {
+	if err := WaitHealthy(context.Background(), endpoint, ServerAuth{Password: "v2-secret"}, time.Second); err != nil {
 		t.Fatal(err)
-	}
-	if protocol != ProtocolV2 {
-		t.Fatalf("detected protocol = %q, want v2", protocol)
-	}
-}
-
-func TestWaitHealthyProtocolRejectsAmbiguousAutoDetection(t *testing.T) {
-	t.Parallel()
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/api/health", "/global/health":
-			_, _ = writer.Write([]byte(`{"healthy":true}`))
-		default:
-			http.NotFound(writer, request)
-		}
-	}))
-	defer server.Close()
-	endpoint := Endpoint{Host: "127.0.0.1", Port: server.Listener.Addr().(*net.TCPAddr).Port}
-	_, err := WaitHealthyProtocol(context.Background(), endpoint, ServerAuth{}, ProtocolAuto, time.Second)
-	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
-		t.Fatalf("ambiguous auto detection error = %v", err)
 	}
 }
 
@@ -164,35 +139,10 @@ func TestSpecFingerprintIsStableAndDetectsChanges(t *testing.T) {
 	}
 }
 
-func TestProtocolChangesFingerprintAndDataVolume(t *testing.T) {
+func TestSpecUsesV2DataVolume(t *testing.T) {
 	t.Parallel()
-	v1 := Spec{Name: "demo", Image: "image:one", RepoPath: "/repo", MemoryBytes: 1024, Protocol: ProtocolV1}
-	v2 := v1
-	v2.Protocol = ProtocolV2
-	legacy := v1
-	legacy.Protocol = ""
-	v1Fingerprint, err := specFingerprint(v1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	v2Fingerprint, err := specFingerprint(v2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if v1Fingerprint == v2Fingerprint {
-		t.Fatal("protocol change did not change spec fingerprint")
-	}
-	legacyFingerprint, err := specFingerprint(legacy)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if legacyFingerprint != v1Fingerprint {
-		t.Fatal("explicit V1 changed the legacy spec fingerprint")
-	}
-	if got := specDataVolumeName(v1); got != "fern-demo-data" {
-		t.Fatalf("V1 data volume = %q", got)
-	}
-	if got := specDataVolumeName(v2); got != "fern-demo-v2-data" {
-		t.Fatalf("V2 data volume = %q", got)
+	spec := Spec{Name: "demo", Image: "image:one", RepoPath: "/repo", MemoryBytes: 1024}
+	if got := specDataVolumeName(spec); got != "fern-demo-v2-data" {
+		t.Fatalf("data volume = %q", got)
 	}
 }

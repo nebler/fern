@@ -23,7 +23,6 @@ type Event struct {
 type StreamOptions struct {
 	BaseURL   string
 	Auth      runtime.ServerAuth
-	Protocol  runtime.Protocol
 	Client    *http.Client
 	OnConnect func()
 }
@@ -37,16 +36,12 @@ var defaultStreamClient = func() *http.Client {
 // Stream parses complete SSE frames. Multiple data lines belong to one frame
 // and are joined according to the SSE specification before JSON decoding.
 func Stream(ctx context.Context, options StreamOptions, out chan<- Event) error {
-	path := "/event"
-	if options.Protocol.Normalize() == runtime.ProtocolV2 {
-		path = "/api/event"
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(options.BaseURL, "/")+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(options.BaseURL, "/")+"/api/event", nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "text/event-stream")
-	options.Auth.ApplyFor(req, options.Protocol.Normalize())
+	options.Auth.Apply(req)
 	client := options.Client
 	if client == nil {
 		client = defaultStreamClient

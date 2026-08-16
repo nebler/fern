@@ -27,7 +27,6 @@ func runUp(args []string, log *slog.Logger) error {
 	configPath := fs.String("config", "fern.yaml", "configuration file")
 	name := fs.String("name", "", "workspace name")
 	image := fs.String("image", "", "workspace image")
-	opencodeProtocol := fs.String("opencode", "", "OpenCode protocol (v1, v2, or auto)")
 	repo := fs.String("repo", "", "host repository path")
 	memory := fs.String("memory", "", "memory limit (for example 8Gi)")
 	idle := fs.String("idle", "", "idle duration before stopping")
@@ -42,13 +41,12 @@ func runUp(args []string, log *slog.Logger) error {
 	cfg, err := config.Load(*configPath, cwd, flagSet(fs, "config"), config.Overrides{
 		Name: optionalFlag(fs, "name", name), Image: optionalFlag(fs, "image", image),
 		Repo: optionalFlag(fs, "repo", repo), Memory: optionalFlag(fs, "memory", memory),
-		OpenCode:  optionalFlag(fs, "opencode", opencodeProtocol),
 		IdleAfter: optionalFlag(fs, "idle", idle), Listen: optionalFlag(fs, "listen", listenAddress),
 	})
 	if err != nil {
 		return err
 	}
-	cfg.Workspace.Env = forwardedEnvironmentFor(cfg.Workspace.OpenCode, cfg.Workspace.Env)
+	cfg.Workspace.Env = forwardedEnvironment(cfg.Workspace.Env)
 	if err := config.Validate(cfg); err != nil {
 		return err
 	}
@@ -58,7 +56,7 @@ func runUp(args []string, log *slog.Logger) error {
 	}
 	spec := runtime.Spec{
 		Name: cfg.Workspace.Name, Image: cfg.Workspace.Image, RepoPath: cfg.Workspace.Repo,
-		MemoryBytes: memoryBytes, Protocol: runtime.Protocol(cfg.Workspace.OpenCode), Env: cfg.Workspace.Env,
+		MemoryBytes: memoryBytes, Env: cfg.Workspace.Env,
 	}
 	auth := spec.ServerAuth()
 

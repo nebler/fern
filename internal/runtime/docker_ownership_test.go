@@ -110,8 +110,8 @@ func TestCreateRefusesForeignExistingVolumeWithoutMutation(t *testing.T) {
 		switch {
 		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/containers/demo/json"):
 			writeDockerNotFound(writer, "container")
-		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/volumes/fern-demo-data"):
-			writeJSON(writer, http.StatusOK, map[string]any{"Name": "fern-demo-data", "Labels": map[string]string{}})
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/volumes/fern-demo-v2-data"):
+			writeJSON(writer, http.StatusOK, map[string]any{"Name": "fern-demo-v2-data", "Labels": map[string]string{}})
 		default:
 			if request.Method != http.MethodGet {
 				mutations.Add(1)
@@ -137,10 +137,10 @@ func TestCreateVerifiesVolumeReturnedAfterCreateRace(t *testing.T) {
 		switch {
 		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/containers/demo/json"):
 			writeDockerNotFound(writer, "container")
-		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/volumes/fern-demo-data"):
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/volumes/fern-demo-v2-data"):
 			writeDockerNotFound(writer, "volume")
 		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/volumes/create"):
-			writeJSON(writer, http.StatusCreated, map[string]any{"Name": "fern-demo-data", "Labels": map[string]string{}})
+			writeJSON(writer, http.StatusCreated, map[string]any{"Name": "fern-demo-v2-data", "Labels": map[string]string{}})
 		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/containers/create"):
 			containerCreates.Add(1)
 			writeJSON(writer, http.StatusCreated, map[string]any{"Id": "should-not-exist"})
@@ -176,17 +176,17 @@ func TestFailedInitialCreateRemovesOnlyNewVolume(t *testing.T) {
 				switch {
 				case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/containers/demo/json"):
 					writeDockerNotFound(writer, "container")
-				case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/volumes/fern-demo-data"):
+				case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/volumes/fern-demo-v2-data"):
 					if test.volumeExists {
-						writeJSON(writer, http.StatusOK, map[string]any{"Name": "fern-demo-data", "Labels": map[string]string{managedLabel: "true", workspaceLabel: "demo"}})
+						writeJSON(writer, http.StatusOK, map[string]any{"Name": "fern-demo-v2-data", "Labels": map[string]string{managedLabel: "true", workspaceLabel: "demo"}})
 					} else {
 						writeDockerNotFound(writer, "volume")
 					}
 				case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/volumes/create"):
-					writeJSON(writer, http.StatusCreated, map[string]any{"Name": "fern-demo-data", "Labels": map[string]string{managedLabel: "true", workspaceLabel: "demo"}})
+					writeJSON(writer, http.StatusCreated, map[string]any{"Name": "fern-demo-v2-data", "Labels": map[string]string{managedLabel: "true", workspaceLabel: "demo"}})
 				case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/containers/create"):
 					writeJSON(writer, http.StatusInternalServerError, map[string]string{"message": "create failed"})
-				case request.Method == http.MethodDelete && strings.HasSuffix(request.URL.Path, "/volumes/fern-demo-data"):
+				case request.Method == http.MethodDelete && strings.HasSuffix(request.URL.Path, "/volumes/fern-demo-v2-data"):
 					volumeDrops.Add(1)
 					writer.WriteHeader(http.StatusNoContent)
 				default:
@@ -234,7 +234,7 @@ func TestVerifyActualSpecAllowsImageEnvironment(t *testing.T) {
 			},
 			"Mounts": []map[string]any{
 				{"Type": "bind", "Source": "/repo", "Destination": "/home/user/workspace", "RW": true},
-				{"Type": "volume", "Name": "fern-demo-data", "Destination": "/home/user/.local/share/opencode", "RW": true},
+				{"Type": "volume", "Name": "fern-demo-v2-data", "Destination": "/home/user/.local/share/opencode", "RW": true},
 			},
 			"State":           map[string]any{"Status": "running", "Running": true},
 			"NetworkSettings": map[string]any{"Ports": map[string]any{}},
@@ -448,7 +448,7 @@ func TestVerifyActualSpecRejectsExtraMountAndPrivileges(t *testing.T) {
 		Config: &container.Config{Image: "image:test", ExposedPorts: nat.PortSet{nat.Port(workspacePort): struct{}{}}},
 		Mounts: []container.MountPoint{
 			{Type: mount.TypeBind, Source: "/repo", Destination: "/home/user/workspace", RW: true},
-			{Type: mount.TypeVolume, Name: "fern-demo-data", Destination: "/home/user/.local/share/opencode", RW: true},
+			{Type: mount.TypeVolume, Name: "fern-demo-v2-data", Destination: "/home/user/.local/share/opencode", RW: true},
 		},
 	}
 	spec := ownershipTestSpec()
@@ -497,14 +497,14 @@ func TestEnsureRunningUsesOneInspectionForRunningContainer(t *testing.T) {
 				},
 				"Mounts": []map[string]any{
 					{"Type": "bind", "Source": spec.RepoPath, "Destination": "/home/user/workspace", "RW": true},
-					{"Type": "volume", "Name": dataVolumeName(spec.Name), "Destination": "/home/user/.local/share/opencode", "RW": true},
+					{"Type": "volume", "Name": specDataVolumeName(spec), "Destination": "/home/user/.local/share/opencode", "RW": true},
 				},
 				"State": map[string]any{"Status": "running", "Running": true},
 				"NetworkSettings": map[string]any{"Ports": nat.PortMap{
 					nat.Port(workspacePort): []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: strconv.Itoa(port)}},
 				}},
 			})
-		case request.URL.Path == "/global/health":
+		case request.URL.Path == "/api/health":
 			_, _ = writer.Write([]byte(`{"healthy":true}`))
 		default:
 			http.NotFound(writer, request)

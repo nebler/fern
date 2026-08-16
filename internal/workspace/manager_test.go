@@ -500,31 +500,6 @@ func TestAuthoritativeBusyStatusDefersPause(t *testing.T) {
 	}
 }
 
-func TestPausePreservesNegotiatedProtocolAcrossFreshStatus(t *testing.T) {
-	t.Parallel()
-	fake := newFakeRuntime(runtime.StateRunning)
-	fake.endpoint.Protocol = runtime.ProtocolV2
-	statusEndpoint := fake.endpoint
-	statusEndpoint.Protocol = ""
-	fake.statusEndpoint = &statusEndpoint
-	var checked runtime.Protocol
-	manager := NewManager(context.Background(), fake, runtime.Spec{
-		Name: "demo", Protocol: runtime.ProtocolAuto,
-	}, nil, func(_ context.Context, endpoint runtime.Endpoint) (bool, error) {
-		checked = endpoint.Protocol
-		return true, nil
-	}, nil)
-	if _, err := manager.EnsureRunning(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := manager.Pause(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if checked != runtime.ProtocolV2 {
-		t.Fatalf("authoritative check protocol = %q, want v2", checked)
-	}
-}
-
 func TestWakeAttachesObserverBeforeReturning(t *testing.T) {
 	t.Parallel()
 	fake := newFakeRuntime(runtime.StatePaused)

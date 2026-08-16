@@ -113,18 +113,14 @@ func runEvents(args []string, log *slog.Logger) error {
 	if observation.State != runtime.StateRunning || !observation.HasEndpoint {
 		return fmt.Errorf("workspace %q is %s; start it before reading events", client.Name, observation.State)
 	}
-	env := forwardedEnvironmentFor(client.OpenCode, client.Env)
-	auth := runtime.ServerAuth{
-		Protocol: runtime.Protocol(client.OpenCode), Username: env["OPENCODE_SERVER_USERNAME"],
-		Password: env["OPENCODE_SERVER_PASSWORD"], V2Password: env["OPENCODE_PASSWORD"],
-	}
-	protocol, err := runtime.WaitHealthyProtocol(ctx, observation.Endpoint, auth, runtime.Protocol(client.OpenCode), 60*time.Second)
-	if err != nil {
-		return fmt.Errorf("detect OpenCode protocol: %w", err)
+	env := forwardedEnvironment(client.Env)
+	auth := runtime.ServerAuth{Password: env["OPENCODE_PASSWORD"]}
+	if err := runtime.WaitHealthy(ctx, observation.Endpoint, auth, 60*time.Second); err != nil {
+		return fmt.Errorf("wait for OpenCode health: %w", err)
 	}
 	events := make(chan watch.Event, 128)
 	go watch.StreamForever(ctx, watch.StreamOptions{
-		BaseURL: observation.Endpoint.URL(), Protocol: protocol, Auth: auth,
+		BaseURL: observation.Endpoint.URL(), Auth: auth,
 	}, events, log)
 	last := time.Now()
 	for {

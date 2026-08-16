@@ -149,11 +149,9 @@ func (d *Docker) create(ctx context.Context, spec Spec) (endpoint Endpoint, resu
 	if !observation.HasEndpoint {
 		return Endpoint{}, d.rollbackStarted(spec.Name, created.ID, fmt.Errorf("workspace %q has no %s port binding", spec.Name, workspacePort))
 	}
-	protocol, err := WaitHealthyProtocol(ctx, observation.Endpoint, spec.ServerAuth(), spec.Protocol, healthTimeout)
-	if err != nil {
+	if err := WaitHealthy(ctx, observation.Endpoint, spec.ServerAuth(), healthTimeout); err != nil {
 		return Endpoint{}, d.rollbackStarted(spec.Name, created.ID, fmt.Errorf("container %q never became healthy: %w", spec.Name, err))
 	}
-	observation.Endpoint.Protocol = protocol
 	d.log.Info("state", "workspace", spec.Name, "from", StateProvisioning, "to", StateRunning, "elapsed_ms", time.Since(start).Milliseconds())
 	return observation.Endpoint, nil
 }
@@ -304,11 +302,9 @@ func (d *Docker) resumeObserved(ctx context.Context, spec Spec, inspection works
 	if !observation.HasEndpoint {
 		return Endpoint{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("workspace %q has no %s port binding", spec.Name, workspacePort))
 	}
-	protocol, err := WaitHealthyProtocol(ctx, observation.Endpoint, spec.ServerAuth(), spec.Protocol, healthTimeout)
-	if err != nil {
+	if err := WaitHealthy(ctx, observation.Endpoint, spec.ServerAuth(), healthTimeout); err != nil {
 		return Endpoint{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("workspace %q did not become healthy: %w", spec.Name, err))
 	}
-	observation.Endpoint.Protocol = protocol
 	if err := d.intents.Clear(spec.Name); err != nil {
 		return Endpoint{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("clear pause intent after resume: %w", err))
 	}
@@ -527,7 +523,6 @@ type fingerprintValue struct {
 	Init        bool
 	Port        string
 	DataVolume  string
-	Protocol    Protocol `json:",omitempty"`
 }
 
 func specFingerprint(spec Spec) (string, error) {
@@ -541,15 +536,7 @@ func specFingerprint(spec Spec) (string, error) {
 		Init:        true,
 		Port:        workspacePort,
 		DataVolume:  specDataVolumeName(spec),
-		Protocol:    fingerprintProtocol(spec.Protocol),
 	})
-}
-
-func fingerprintProtocol(protocol Protocol) Protocol {
-	if protocol.Normalize() == ProtocolV1 {
-		return ""
-	}
-	return protocol.Normalize()
 }
 
 func (d *Docker) verifyActualSpec(ctx context.Context, containerID string, spec Spec) error {
@@ -624,17 +611,6 @@ func fingerprint(value fingerprintValue) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func dataVolumeName(workspace string) string {
-	return "fern-" + workspace + "-data"
-}
-
 func specDataVolumeName(spec Spec) string {
-	switch spec.Protocol.Normalize() {
-	case ProtocolV2:
-		return "fern-" + spec.Name + "-v2-data"
-	case ProtocolAuto:
-		return "fern-" + spec.Name + "-auto-data"
-	default:
-		return dataVolumeName(spec.Name)
-	}
+	return "fern-" + spec.Name + "-v2-data"
 }

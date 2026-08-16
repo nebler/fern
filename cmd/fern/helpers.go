@@ -63,23 +63,11 @@ func optionalFlag(flags *flag.FlagSet, name string, value *string) *string {
 }
 
 func forwardedEnvironment(configured map[string]string) map[string]string {
-	return forwardedEnvironmentFor(config.OpenCodeV1, configured)
-}
-
-func forwardedEnvironmentFor(protocol config.OpenCodeProtocol, configured map[string]string) map[string]string {
 	env := make(map[string]string, len(configured)+5)
 	for key, value := range configured {
 		env[key] = value
 	}
-	keys := []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY"}
-	switch protocol {
-	case config.OpenCodeV2:
-		keys = append(keys, "OPENCODE_PASSWORD")
-	case config.OpenCodeAuto:
-		keys = append(keys, "OPENCODE_SERVER_USERNAME", "OPENCODE_SERVER_PASSWORD", "OPENCODE_PASSWORD")
-	default:
-		keys = append(keys, "OPENCODE_SERVER_USERNAME", "OPENCODE_SERVER_PASSWORD")
-	}
+	keys := []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_PASSWORD"}
 	for _, key := range keys {
 		if _, configured := env[key]; !configured {
 			if value := os.Getenv(key); value != "" {

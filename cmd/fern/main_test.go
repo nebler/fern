@@ -7,8 +7,6 @@ import (
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/nebler/fern/internal/config"
 )
 
 func TestAttachURLUsesReachableAddress(t *testing.T) {
@@ -37,73 +35,34 @@ func TestAttachURLUsesReachableAddress(t *testing.T) {
 func TestAttachEnvironmentReplacesAuthentication(t *testing.T) {
 	t.Parallel()
 	got := attachEnvironment(
-		[]string{"PATH=/bin", "OPENCODE_SERVER_USERNAME=old", "OPENCODE_SERVER_PASSWORD=old", "OPENCODE_PASSWORD=old-v2"},
-		map[string]string{"OPENCODE_SERVER_USERNAME": "agent", "OPENCODE_SERVER_PASSWORD": "secret", "OPENCODE_PASSWORD": "secret-v2"},
+		[]string{"PATH=/bin", "OPENCODE_PASSWORD=old"},
+		map[string]string{"OPENCODE_PASSWORD": "secret"},
 	)
-	for _, want := range []string{"PATH=/bin", "OPENCODE_SERVER_USERNAME=agent", "OPENCODE_SERVER_PASSWORD=secret"} {
+	for _, want := range []string{"PATH=/bin", "OPENCODE_PASSWORD=secret"} {
 		if !slices.Contains(got, want) {
 			t.Fatalf("environment %v does not contain %q", got, want)
 		}
 	}
-	if slices.Contains(got, "OPENCODE_SERVER_PASSWORD=old") {
+	if slices.Contains(got, "OPENCODE_PASSWORD=old") {
 		t.Fatalf("environment retained old password: %v", got)
 	}
-	if slices.Contains(got, "OPENCODE_PASSWORD=old-v2") || slices.Contains(got, "OPENCODE_PASSWORD=secret-v2") {
-		t.Fatalf("V1 environment retained a V2 password: %v", got)
-	}
 }
 
-func TestV2AttachEnvironmentDropsV1Credentials(t *testing.T) {
-	t.Parallel()
-	got := attachEnvironmentFor(config.OpenCodeV2,
-		[]string{"PATH=/bin", "OPENCODE_SERVER_USERNAME=old", "OPENCODE_SERVER_PASSWORD=old", "OPENCODE_PASSWORD=old-v2"},
-		map[string]string{"OPENCODE_SERVER_USERNAME": "agent", "OPENCODE_SERVER_PASSWORD": "v1", "OPENCODE_PASSWORD": "v2"},
-	)
-	if !slices.Contains(got, "OPENCODE_PASSWORD=v2") {
-		t.Fatalf("V2 environment = %v", got)
-	}
-	for _, value := range got {
-		if strings.HasPrefix(value, "OPENCODE_SERVER_") {
-			t.Fatalf("V2 environment retained a V1 credential: %v", got)
-		}
-	}
-}
-
-func TestImplicitAuthenticationForwardingIsProtocolSpecific(t *testing.T) {
-	t.Setenv("OPENCODE_SERVER_USERNAME", "v1-user")
-	t.Setenv("OPENCODE_SERVER_PASSWORD", "v1-secret")
+func TestImplicitAuthenticationForwardsOpenCodePassword(t *testing.T) {
 	t.Setenv("OPENCODE_PASSWORD", "v2-secret")
-	tests := []struct {
-		protocol config.OpenCodeProtocol
-		want     []string
-		reject   []string
-	}{
-		{protocol: config.OpenCodeV1, want: []string{"OPENCODE_SERVER_USERNAME", "OPENCODE_SERVER_PASSWORD"}, reject: []string{"OPENCODE_PASSWORD"}},
-		{protocol: config.OpenCodeV2, want: []string{"OPENCODE_PASSWORD"}, reject: []string{"OPENCODE_SERVER_USERNAME", "OPENCODE_SERVER_PASSWORD"}},
-		{protocol: config.OpenCodeAuto, want: []string{"OPENCODE_SERVER_USERNAME", "OPENCODE_SERVER_PASSWORD", "OPENCODE_PASSWORD"}},
-	}
-	for _, test := range tests {
-		env := forwardedEnvironmentFor(test.protocol, nil)
-		for _, key := range test.want {
-			if env[key] == "" {
-				t.Fatalf("protocol %s did not forward %s", test.protocol, key)
-			}
-		}
-		for _, key := range test.reject {
-			if _, exists := env[key]; exists {
-				t.Fatalf("protocol %s unexpectedly forwarded %s", test.protocol, key)
-			}
-		}
+	env := forwardedEnvironment(nil)
+	if env["OPENCODE_PASSWORD"] != "v2-secret" {
+		t.Fatalf("OPENCODE_PASSWORD = %q", env["OPENCODE_PASSWORD"])
 	}
 }
 
 func TestExplicitEmptyAuthenticationSuppressesHostValue(t *testing.T) {
-	t.Setenv("OPENCODE_SERVER_USERNAME", "host-user")
-	configured := forwardedEnvironment(map[string]string{"OPENCODE_SERVER_USERNAME": ""})
-	got := attachEnvironment([]string{"OPENCODE_SERVER_USERNAME=host-user"}, configured)
+	t.Setenv("OPENCODE_PASSWORD", "host-secret")
+	configured := forwardedEnvironment(map[string]string{"OPENCODE_PASSWORD": ""})
+	got := attachEnvironment([]string{"OPENCODE_PASSWORD=host-secret"}, configured)
 	for _, value := range got {
-		if strings.HasPrefix(value, "OPENCODE_SERVER_USERNAME=") {
-			t.Fatalf("explicit empty username was replaced: %v", got)
+		if strings.HasPrefix(value, "OPENCODE_PASSWORD=") {
+			t.Fatalf("explicit empty password was replaced: %v", got)
 		}
 	}
 }

@@ -3,8 +3,6 @@ package main
 import (
 	"slices"
 	"testing"
-
-	"github.com/nebler/fern/internal/config"
 )
 
 func TestAttachTargetAcceptsExplicitOrigins(t *testing.T) {
@@ -30,21 +28,11 @@ func TestAttachTargetAcceptsExplicitOrigins(t *testing.T) {
 	}
 }
 
-func TestAttachCommandUsesProtocolClient(t *testing.T) {
+func TestAttachCommandUsesV2Client(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		protocol   config.OpenCodeProtocol
-		executable string
-		args       []string
-	}{
-		{protocol: config.OpenCodeV1, executable: "opencode", args: []string{"attach", "https://fern.example"}},
-		{protocol: config.OpenCodeV2, executable: "opencode2", args: []string{"--server", "https://fern.example"}},
-	}
-	for _, test := range tests {
-		executable, args := attachCommand(test.protocol, "https://fern.example")
-		if executable != test.executable || !slices.Equal(args, test.args) {
-			t.Fatalf("attachCommand(%q) = %q %v, want %q %v", test.protocol, executable, args, test.executable, test.args)
-		}
+	executable, args := attachCommand("https://fern.example")
+	if executable != "opencode2" || !slices.Equal(args, []string{"--server", "https://fern.example"}) {
+		t.Fatalf("attachCommand() = %q %v", executable, args)
 	}
 }
 
@@ -102,18 +90,14 @@ func TestExplicitAttachOriginKeepsCredentialsInEnvironment(t *testing.T) {
 	}
 
 	environment := attachEnvironment(nil, map[string]string{
-		"OPENCODE_SERVER_USERNAME": "agent",
-		"OPENCODE_SERVER_PASSWORD": "secret",
+		"OPENCODE_PASSWORD": "secret",
 	})
-	for _, value := range []string{
-		"OPENCODE_SERVER_USERNAME=agent",
-		"OPENCODE_SERVER_PASSWORD=secret",
-	} {
+	for _, value := range []string{"OPENCODE_PASSWORD=secret"} {
 		if !slices.Contains(environment, value) {
 			t.Fatalf("environment %v does not contain %q", environment, value)
 		}
 	}
-	if target == "https://agent:secret@host.tailnet.ts.net" {
+	if target == "https://opencode:secret@host.tailnet.ts.net" {
 		t.Fatal("credentials were placed in attach URL")
 	}
 }

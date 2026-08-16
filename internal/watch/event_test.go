@@ -14,7 +14,7 @@ func TestStreamParsesSSEAndUsesBasicAuth(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		username, password, ok := request.BasicAuth()
-		if !ok || username != "agent" || password != "secret" {
+		if !ok || username != "opencode" || password != "secret" {
 			http.Error(writer, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -26,7 +26,7 @@ func TestStreamParsesSSEAndUsesBasicAuth(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	events := make(chan Event, 1)
-	err := Stream(ctx, StreamOptions{BaseURL: server.URL, Auth: runtime.ServerAuth{Username: "agent", Password: "secret"}}, events)
+	err := Stream(ctx, StreamOptions{BaseURL: server.URL, Auth: runtime.ServerAuth{Password: "secret"}}, events)
 	if err == nil {
 		t.Fatal("Stream returned nil after the server closed")
 	}
@@ -75,8 +75,7 @@ func TestStreamUsesV2PathEnvelopeAndAuth(t *testing.T) {
 	defer server.Close()
 	events := make(chan Event, 1)
 	err := Stream(context.Background(), StreamOptions{
-		BaseURL: server.URL, Protocol: runtime.ProtocolV2,
-		Auth: runtime.ServerAuth{Protocol: runtime.ProtocolV2, V2Password: "v2-secret"},
+		BaseURL: server.URL, Auth: runtime.ServerAuth{Password: "v2-secret"},
 	}, events)
 	if err == nil {
 		t.Fatal("Stream returned nil after the server closed")

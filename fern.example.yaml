@@ -1,7 +1,6 @@
 workspace:
   name: demo
   image: fern/opencode:dev
-  opencode: v1
   repo: .
   memory: 8Gi
   env: {}

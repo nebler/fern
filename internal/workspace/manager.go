@@ -280,17 +280,6 @@ func (m *Manager) Pause(ctx context.Context) error {
 	if !observation.HasEndpoint {
 		return errors.New("running workspace has no endpoint")
 	}
-	m.wakeMu.Lock()
-	if m.hasEndpoint && m.endpoint.Host == observation.Endpoint.Host && m.endpoint.Port == observation.Endpoint.Port {
-		observation.Endpoint.Protocol = m.endpoint.Protocol
-	}
-	m.wakeMu.Unlock()
-	if observation.Endpoint.Protocol == "" {
-		if m.spec.Protocol.Normalize() == runtime.ProtocolAuto {
-			return errors.New("running workspace protocol has not been negotiated")
-		}
-		observation.Endpoint.Protocol = m.spec.Protocol.Normalize()
-	}
 	if m.allIdle == nil {
 		return errors.New("authoritative idle checker is required")
 	}

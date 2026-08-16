@@ -9,23 +9,15 @@ import (
 )
 
 func requireServerAuth(next http.Handler, auth runtime.ServerAuth) http.Handler {
-	protocols := []runtime.Protocol{auth.Protocol.Normalize()}
-	if auth.Protocol.Normalize() == runtime.ProtocolAuto {
-		protocols = []runtime.Protocol{runtime.ProtocolV2, runtime.ProtocolV1}
-	}
 	type credentials struct {
 		username [sha256.Size]byte
 		password [sha256.Size]byte
 	}
-	allowed := make([]credentials, 0, len(protocols))
-	for _, protocol := range protocols {
-		username, password := auth.Credentials(protocol)
-		if password == "" {
-			continue
-		}
+	var allowed []credentials
+	if auth.Password != "" {
 		allowed = append(allowed, credentials{
-			username: sha256.Sum256([]byte(username)),
-			password: sha256.Sum256([]byte(password)),
+			username: sha256.Sum256([]byte("opencode")),
+			password: sha256.Sum256([]byte(auth.Password)),
 		})
 	}
 	if len(allowed) == 0 {

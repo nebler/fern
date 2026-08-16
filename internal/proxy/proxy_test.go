@@ -35,46 +35,40 @@ func TestRequestIntentDefaultsUnknownReadsToWorkStarting(t *testing.T) {
 	if intent != workspace.RequestWork {
 		t.Fatalf("unknown GET intent = %+v", intent)
 	}
-	request = httptest.NewRequest(http.MethodGet, "/event/", nil)
+	request = httptest.NewRequest(http.MethodGet, "/api/event/", nil)
 	if intent := requestIntent(request); intent != workspace.RequestWork {
 		t.Fatalf("noncanonical event intent = %+v", intent)
 	}
-	request = httptest.NewRequest(http.MethodPost, "/event", nil)
+	request = httptest.NewRequest(http.MethodPost, "/api/event", nil)
 	if intent := requestIntent(request); intent != workspace.RequestWork {
 		t.Fatalf("mutating event-path intent = %+v", intent)
 	}
-	request = httptest.NewRequest(http.MethodGet, "/event", nil)
+	request = httptest.NewRequest(http.MethodGet, "/api/event", nil)
 	request.Header.Set("Upgrade", "websocket")
 	if intent := requestIntent(request); intent != workspace.RequestWork {
 		t.Fatalf("upgraded event-path intent = %+v", intent)
 	}
 }
 
-func TestRequestIntentUsesSelectedOpenCodeProtocol(t *testing.T) {
+func TestRequestIntentUsesV2Routes(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		protocol runtime.Protocol
-		method   string
-		path     string
-		want     workspace.RequestIntent
+		name   string
+		method string
+		path   string
+		want   workspace.RequestIntent
 	}{
-		{name: "V1 event", protocol: runtime.ProtocolV1, method: http.MethodGet, path: "/event", want: workspace.RequestObserve},
-		{name: "V1 health", protocol: runtime.ProtocolV1, method: http.MethodGet, path: "/global/health", want: workspace.RequestRead},
-		{name: "V1 treats V2 event as work", protocol: runtime.ProtocolV1, method: http.MethodGet, path: "/api/event", want: workspace.RequestWork},
-		{name: "V2 event", protocol: runtime.ProtocolV2, method: http.MethodGet, path: "/api/event", want: workspace.RequestObserve},
-		{name: "V2 health", protocol: runtime.ProtocolV2, method: http.MethodHead, path: "/api/health", want: workspace.RequestRead},
-		{name: "V2 active", protocol: runtime.ProtocolV2, method: http.MethodGet, path: "/api/session/active", want: workspace.RequestRead},
-		{name: "V2 treats V1 event as work", protocol: runtime.ProtocolV2, method: http.MethodGet, path: "/event", want: workspace.RequestWork},
-		{name: "auto accepts V1", protocol: runtime.ProtocolAuto, method: http.MethodGet, path: "/event", want: workspace.RequestObserve},
-		{name: "auto accepts V2", protocol: runtime.ProtocolAuto, method: http.MethodGet, path: "/api/event", want: workspace.RequestObserve},
+		{name: "event", method: http.MethodGet, path: "/api/event", want: workspace.RequestObserve},
+		{name: "health", method: http.MethodHead, path: "/api/health", want: workspace.RequestRead},
+		{name: "active", method: http.MethodGet, path: "/api/session/active", want: workspace.RequestRead},
+		{name: "unknown route", method: http.MethodGet, path: "/future/read", want: workspace.RequestWork},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			request := httptest.NewRequest(test.method, test.path, nil)
-			if got := requestIntentFor(test.protocol, request); got != test.want {
-				t.Fatalf("requestIntentFor(%s, %s %s) = %v, want %v", test.protocol, test.method, test.path, got, test.want)
+			if got := requestIntent(request); got != test.want {
+				t.Fatalf("requestIntent(%s %s) = %v, want %v", test.method, test.path, got, test.want)
 			}
 		})
 	}
@@ -115,7 +109,7 @@ func TestProxyDoesNotBufferSSE(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{Timeout: time.Second}
-	response, err := client.Get(server.URL + "/event")
+	response, err := client.Get(server.URL + "/api/event")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,7 +184,7 @@ func TestProxyInvalidatesFailedEndpoint(t *testing.T) {
 	}
 	server := httptest.NewServer(New(staticWaker{endpoint: endpoint, invalid: invalid}, runtime.ServerAuth{}, slog.New(slog.NewTextHandler(io.Discard, nil))))
 	defer server.Close()
-	response, err := http.Get(server.URL + "/global/health")
+	response, err := http.Get(server.URL + "/api/health")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +218,7 @@ func TestProxyClientCancellationDoesNotInvalidateEndpoint(t *testing.T) {
 	defer server.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/event", nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/api/event", nil)
 	if err != nil {
 		t.Fatal(err)
 	}

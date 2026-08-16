@@ -15,18 +15,10 @@ import (
 var healthHTTPClient = &http.Client{Timeout: 2 * time.Second}
 
 func WaitHealthy(ctx context.Context, ep Endpoint, auth ServerAuth, timeout time.Duration) error {
-	_, err := WaitHealthyProtocol(ctx, ep, auth, auth.Protocol.Normalize(), timeout)
-	return err
+	return WaitHealthyURL(ctx, ep.URL(), auth, timeout)
 }
 
-func WaitHealthyProtocol(ctx context.Context, ep Endpoint, auth ServerAuth, requested Protocol, timeout time.Duration) (Protocol, error) {
-	return WaitHealthyURL(ctx, ep.URL(), auth, requested, timeout)
-}
-
-func WaitHealthyURL(ctx context.Context, baseURL string, auth ServerAuth, requested Protocol, timeout time.Duration) (Protocol, error) {
-	if err := requested.Validate(); err != nil {
-		return "", err
-	}
+func WaitHealthyURL(ctx context.Context, baseURL string, auth ServerAuth, timeout time.Duration) error {
 	parent := ctx
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	defer cancel()
@@ -34,50 +26,31 @@ func WaitHealthyURL(ctx context.Context, baseURL string, auth ServerAuth, reques
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
-	protocols := []Protocol{requested.Normalize()}
-	if requested.Normalize() == ProtocolAuto {
-		protocols = []Protocol{ProtocolV2, ProtocolV1}
-	}
 	var lastErr error
 	for {
-		var healthy []Protocol
-		var attemptErrors []error
-		for _, protocol := range protocols {
-			if err := checkHealth(ctx, baseURL, auth, protocol); err == nil {
-				healthy = append(healthy, protocol)
-			} else {
-				attemptErrors = append(attemptErrors, err)
-			}
+		if err := checkHealth(ctx, baseURL, auth); err == nil {
+			return nil
+		} else {
+			lastErr = err
 		}
-		if len(healthy) == 1 {
-			return healthy[0], nil
-		}
-		if len(healthy) > 1 {
-			return "", errors.New("OpenCode protocol detection is ambiguous; set workspace.opencode to v1 or v2")
-		}
-		lastErr = errors.Join(attemptErrors...)
 
 		select {
 		case <-ctx.Done():
 			if err := parent.Err(); err != nil {
-				return "", fmt.Errorf("health check canceled (last error: %v): %w", lastErr, err)
+				return fmt.Errorf("health check canceled (last error: %v): %w", lastErr, err)
 			}
-			return "", fmt.Errorf("health check timed out after %s (last error: %v): %w", timeout, lastErr, ctx.Err())
+			return fmt.Errorf("health check timed out after %s (last error: %v): %w", timeout, lastErr, ctx.Err())
 		case <-ticker.C:
 		}
 	}
 }
 
-func checkHealth(ctx context.Context, baseURL string, auth ServerAuth, protocol Protocol) error {
-	path := "/global/health"
-	if protocol.Normalize() == ProtocolV2 {
-		path = "/api/health"
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+path, nil)
+func checkHealth(ctx context.Context, baseURL string, auth ServerAuth) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/api/health", nil)
 	if err != nil {
 		return err
 	}
-	auth.ApplyFor(req, protocol)
+	auth.Apply(req)
 	resp, err := healthHTTPClient.Do(req)
 	if err != nil {
 		return err
@@ -86,30 +59,30 @@ func checkHealth(ctx context.Context, baseURL string, auth ServerAuth, protocol 
 	const maxHealthBytes = 64 << 10
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHealthBytes+1))
 	if err != nil {
-		return fmt.Errorf("read %s health: %w", protocol, err)
+		return fmt.Errorf("read health: %w", err)
 	}
 	if len(body) > maxHealthBytes {
-		return fmt.Errorf("decode %s health: response exceeds 64 KiB", protocol)
+		return fmt.Errorf("decode health: response exceeds 64 KiB")
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%s health returned status %d", protocol, resp.StatusCode)
+		return fmt.Errorf("health returned status %d", resp.StatusCode)
 	}
 	var health struct {
 		Healthy bool `json:"healthy"`
 	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	if err := decoder.Decode(&health); err != nil {
-		return fmt.Errorf("decode %s health: %w", protocol, err)
+		return fmt.Errorf("decode health: %w", err)
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		if err == nil {
-			return fmt.Errorf("decode %s health: multiple JSON values", protocol)
+			return fmt.Errorf("decode health: multiple JSON values")
 		}
-		return fmt.Errorf("decode %s health trailing data: %w", protocol, err)
+		return fmt.Errorf("decode health trailing data: %w", err)
 	}
 	if !health.Healthy {
-		return fmt.Errorf("%s health reported unhealthy", protocol)
+		return fmt.Errorf("health reported unhealthy")
 	}
 	return nil
 }

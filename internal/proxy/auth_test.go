@@ -49,17 +49,17 @@ func TestProxyRejectsInvalidBasicAuthBeforeWake(t *testing.T) {
 	}{
 		{name: "missing credentials"},
 		{name: "missing username", password: "secret"},
-		{name: "missing password", username: "agent"},
+		{name: "missing password", username: "opencode"},
 		{name: "wrong username", username: "other", password: "secret"},
-		{name: "wrong password", username: "agent", password: "other"},
+		{name: "wrong password", username: "opencode", password: "other"},
 		{name: "malformed header", header: "Basic not-base64"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			waker := &countingWaker{}
-			handler := New(waker, runtime.ServerAuth{Username: "agent", Password: "secret"}, testLogger())
-			request := httptest.NewRequest(http.MethodGet, "/global/health", nil)
+			handler := New(waker, runtime.ServerAuth{Password: "secret"}, testLogger())
+			request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 			if test.header != "" {
 				request.Header.Set("Authorization", test.header)
 			} else if test.username != "" || test.password != "" {
@@ -82,39 +82,15 @@ func TestProxyRejectsInvalidBasicAuthBeforeWake(t *testing.T) {
 	}
 }
 
-func TestProxyAuthenticatesV2AndAutoCredentialsBeforeWake(t *testing.T) {
+func TestProxyAuthenticatesCredentialsBeforeWake(t *testing.T) {
 	t.Parallel()
-	tests := []struct {
-		name     string
-		auth     runtime.ServerAuth
-		username string
-		password string
-	}{
-		{
-			name: "V2", auth: runtime.ServerAuth{Protocol: runtime.ProtocolV2, V2Password: "v2-secret"},
-			username: "opencode", password: "v2-secret",
-		},
-		{
-			name: "auto V1", auth: runtime.ServerAuth{Protocol: runtime.ProtocolAuto, Username: "agent", Password: "v1-secret", V2Password: "v2-secret"},
-			username: "agent", password: "v1-secret",
-		},
-		{
-			name: "auto V2", auth: runtime.ServerAuth{Protocol: runtime.ProtocolAuto, Username: "agent", Password: "v1-secret", V2Password: "v2-secret"},
-			username: "opencode", password: "v2-secret",
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			t.Parallel()
-			waker := &countingWaker{}
-			handler := New(waker, test.auth, testLogger())
-			request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
-			request.SetBasicAuth(test.username, test.password)
-			handler.ServeHTTP(httptest.NewRecorder(), request)
-			if waker.wakes.Load() != 1 {
-				t.Fatalf("valid %s credentials did not reach waker", test.name)
-			}
-		})
+	waker := &countingWaker{}
+	handler := New(waker, runtime.ServerAuth{Password: "secret"}, testLogger())
+	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request.SetBasicAuth("opencode", "secret")
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+	if waker.wakes.Load() != 1 {
+		t.Fatal("valid credentials did not reach waker")
 	}
 }
 
@@ -169,7 +145,7 @@ func TestProxyForwardsValidAuthForAllRequestKinds(t *testing.T) {
 	}))
 	defer upstream.Close()
 	waker := &countingWaker{endpoint: mustParseEndpoint(t, upstream.URL)}
-	handler := New(waker, runtime.ServerAuth{Username: "agent", Password: "secret"}, testLogger())
+	handler := New(waker, runtime.ServerAuth{Password: "secret"}, testLogger())
 
 	tests := []struct {
 		method  string
@@ -177,14 +153,14 @@ func TestProxyForwardsValidAuthForAllRequestKinds(t *testing.T) {
 		body    string
 		upgrade bool
 	}{
-		{method: http.MethodGet, path: "/event"},
-		{method: http.MethodGet, path: "/global/health"},
+		{method: http.MethodGet, path: "/api/event"},
+		{method: http.MethodGet, path: "/api/health"},
 		{method: http.MethodPost, path: "/session", body: "request body"},
 		{method: http.MethodGet, path: "/socket", upgrade: true},
 	}
 	for _, test := range tests {
 		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
-		request.SetBasicAuth("agent", "secret")
+		request.SetBasicAuth("opencode", "secret")
 		if test.upgrade {
 			request.Header.Set("Connection", "upgrade")
 			request.Header.Set("Upgrade", "websocket")
@@ -219,7 +195,7 @@ func TestProxyWithoutPasswordRemainsUnauthenticated(t *testing.T) {
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	defer upstream.Close()
-	for _, auth := range []runtime.ServerAuth{{}, {Username: "ignored"}} {
+	for _, auth := range []runtime.ServerAuth{{}, {Password: ""}} {
 		waker := &countingWaker{endpoint: mustParseEndpoint(t, upstream.URL)}
 		response := httptest.NewRecorder()
 		New(waker, auth, testLogger()).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/", nil))
@@ -242,7 +218,7 @@ func TestProxyConcurrentUnauthorizedRequestsNeverWake(t *testing.T) {
 	for i := 0; i < requestCount; i++ {
 		go func(i int) {
 			defer group.Done()
-			request := httptest.NewRequest(http.MethodGet, "/event", nil)
+			request := httptest.NewRequest(http.MethodGet, "/api/event", nil)
 			request.SetBasicAuth("opencode", fmt.Sprintf("wrong-%d", i))
 			response := httptest.NewRecorder()
 			handler.ServeHTTP(response, request)

@@ -17,37 +17,6 @@ import (
 var statusHTTPClient = &http.Client{Timeout: 2 * time.Second}
 
 func AllSessionsIdle(ctx context.Context, ep runtime.Endpoint, auth runtime.ServerAuth) (bool, error) {
-	protocol := ep.Protocol.Normalize()
-	if protocol == runtime.ProtocolV2 {
-		return v2AllActivityIdle(ctx, ep, auth)
-	}
-	path := "/session/status"
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(ep.URL(), "/")+path, nil)
-	if err != nil {
-		return false, err
-	}
-	auth.ApplyFor(req, protocol)
-	resp, err := statusHTTPClient.Do(req)
-	if err != nil {
-		return false, fmt.Errorf("query session status: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
-		return false, fmt.Errorf("query session status: %s", resp.Status)
-	}
-	const maxStatusBytes = 1 << 20
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxStatusBytes+1))
-	if err != nil {
-		return false, fmt.Errorf("read session status: %w", err)
-	}
-	if len(body) > maxStatusBytes {
-		return false, errors.New("decode session status: response exceeds 1 MiB")
-	}
-	return decodeV1Statuses(body)
-}
-
-func v2AllActivityIdle(ctx context.Context, ep runtime.Endpoint, auth runtime.ServerAuth) (bool, error) {
 	checks := []struct {
 		path   string
 		decode func([]byte) (bool, error)
@@ -59,7 +28,7 @@ func v2AllActivityIdle(ctx context.Context, ep runtime.Endpoint, auth runtime.Se
 		{path: "/api/form/request", decode: decodeV2PendingList},
 	}
 	for _, check := range checks {
-		body, err := getStatus(ctx, ep, auth, runtime.ProtocolV2, check.path)
+		body, err := getStatus(ctx, ep, auth, check.path)
 		if err != nil {
 			return false, err
 		}
@@ -71,12 +40,12 @@ func v2AllActivityIdle(ctx context.Context, ep runtime.Endpoint, auth runtime.Se
 	return true, nil
 }
 
-func getStatus(ctx context.Context, ep runtime.Endpoint, auth runtime.ServerAuth, protocol runtime.Protocol, path string) ([]byte, error) {
+func getStatus(ctx context.Context, ep runtime.Endpoint, auth runtime.ServerAuth, path string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(ep.URL(), "/")+path, nil)
 	if err != nil {
 		return nil, err
 	}
-	auth.ApplyFor(req, protocol)
+	auth.Apply(req)
 	resp, err := statusHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("query OpenCode activity %s: %w", path, err)
@@ -95,24 +64,6 @@ func getStatus(ctx context.Context, ep runtime.Endpoint, auth runtime.ServerAuth
 		return nil, fmt.Errorf("decode OpenCode activity %s: response exceeds 1 MiB", path)
 	}
 	return body, nil
-}
-
-func decodeV1Statuses(body []byte) (bool, error) {
-	var statuses map[string]struct {
-		Type string `json:"type"`
-	}
-	if err := decodeStatusJSON(body, &statuses); err != nil {
-		return false, err
-	}
-	if statuses == nil {
-		return false, fmt.Errorf("decode session status: expected object, got null")
-	}
-	for _, status := range statuses {
-		if status.Type != "idle" {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 func decodeV2Active(body []byte) (bool, error) {

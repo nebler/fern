@@ -59,7 +59,7 @@ func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
 
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		start := time.Now()
-		intent := requestIntentFor(auth.Protocol, request)
+		intent := requestIntent(request)
 		target, release, err := waker.AcquireRequest(request.Context(), intent)
 		if err != nil {
 			log.Error("wake failed", "err", err)
@@ -82,26 +82,18 @@ func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
 }
 
 func requestIntent(request *http.Request) workspace.RequestIntent {
-	return requestIntentFor(runtime.ProtocolV1, request)
-}
-
-func requestIntentFor(protocol runtime.Protocol, request *http.Request) workspace.RequestIntent {
 	// Event streams are observation-only and intentionally survive until a
 	// pause disconnects them. Every other request, including WebSocket upgrades,
 	// holds an admission lease for its complete proxied lifetime.
 	upgrade := strings.EqualFold(request.Header.Get("Upgrade"), "websocket")
 	requestPath := request.URL.EscapedPath()
 	if request.Method == http.MethodGet && !upgrade {
-		v1 := protocol.Normalize() == runtime.ProtocolV1 || protocol.Normalize() == runtime.ProtocolAuto
-		v2 := protocol.Normalize() == runtime.ProtocolV2 || protocol.Normalize() == runtime.ProtocolAuto
-		if v1 && (requestPath == "/event" || requestPath == "/global/event") || v2 && requestPath == "/api/event" {
+		if requestPath == "/api/event" {
 			return workspace.RequestObserve
 		}
 	}
 	if !upgrade && (request.Method == http.MethodGet || request.Method == http.MethodHead) {
-		v1 := protocol.Normalize() == runtime.ProtocolV1 || protocol.Normalize() == runtime.ProtocolAuto
-		v2 := protocol.Normalize() == runtime.ProtocolV2 || protocol.Normalize() == runtime.ProtocolAuto
-		if v1 && (requestPath == "/global/health" || requestPath == "/session/status") || v2 && (requestPath == "/api/health" || requestPath == "/api/session/active") {
+		if requestPath == "/api/health" || requestPath == "/api/session/active" {
 			return workspace.RequestRead
 		}
 	}
