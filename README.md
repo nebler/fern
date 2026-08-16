@@ -30,6 +30,7 @@ Kubernetes, setup snapshots, resume hooks, Fern-managed TLS/public ingress, and 
 ## Documentation
 
 - [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md): end-to-end system model, state, trust boundaries, and limitations.
+- [docs/REMOTE_PRODUCT.md](./docs/REMOTE_PRODUCT.md): competitive product gaps, possible differentiation, and post-demo roadmap.
 - [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md): supervised systemd and private Tailscale Serve deployment runbook.
 - [docs/OPENCODE_V2.md](./docs/OPENCODE_V2.md): pinned V2 beta configuration, protocol mapping, state isolation, and verification.
 - [integration/lifecycle/README.md](./integration/lifecycle/README.md): repeatable real-Docker lifecycle and timing harness.
