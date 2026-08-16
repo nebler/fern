@@ -2,6 +2,7 @@ workspace:
   name: demo
   # Replace SOURCE_COMMIT with the exact trusted Fern source commit used to build it.
   image: fern/opencode:SOURCE_COMMIT
+  opencode: v1
   repo: /srv/fern/workspace
   memory: 8Gi
   env:

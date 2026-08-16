@@ -22,6 +22,11 @@ The objective is to make the first phone experiment secure, reproducible, deploy
 
 Tasks `01` through `09` are represented by incremental commits. The worktree also contains pre-existing unrelated research documents; preserve them during later work.
 
+Experimental OpenCode V2 compatibility is now implemented separately from
+this original task split. Its strict lifecycle matrix and pinned-artifact smoke
+test pass locally; V1 remains the phone-entry default. See
+`docs/OPENCODE_V2.md`.
+
 ## Rules
 
 1. Run task `00` first and start every Wave 1 branch from that baseline commit.
@@ -138,6 +143,6 @@ CI is merged late so it evaluates the integrated tree, although it can be develo
 - broad `doctor --json`;
 - lifecycle ledger or quiescence seal;
 - previews, artifacts, receipts, and webhooks;
-- OpenCode V2 integration;
+- provider-backed V2 model-turn acceptance and V1-to-V2 data migration;
 - Kubernetes and multiple workspaces;
 - hosted control-plane features.

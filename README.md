@@ -35,6 +35,7 @@ Kubernetes, setup snapshots, resume hooks, ingress, and the credential proxy are
 - [ARCHITECTURE.md](./ARCHITECTURE.md): earlier concise architecture overview retained for context.
 - [IMPLEMENTATION.md](./IMPLEMENTATION.md): exact completion and verification record.
 - [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md): supervised systemd and private Tailscale Serve deployment runbook.
+- [docs/OPENCODE_V2.md](./docs/OPENCODE_V2.md): pinned V2 beta configuration, protocol mapping, state isolation, and verification.
 - [integration/lifecycle/README.md](./integration/lifecycle/README.md): repeatable real-Docker lifecycle and timing harness.
 - [DAY-1.md](./DAY-1.md): OpenCode persistence and turn-boundary research.
 - [AMP_PRODUCT_RESEARCH.md](./AMP_PRODUCT_RESEARCH.md): Amp comparison, applied-AI product direction, Grab alignment, and evidence-bound workspace proposal.
@@ -91,6 +92,7 @@ fern attach -url https://host.tailnet.ts.net
 - `OPENAI_API_KEY`
 - `OPENCODE_SERVER_USERNAME`
 - `OPENCODE_SERVER_PASSWORD`
+- `OPENCODE_PASSWORD`
 
 Additional environment values can be declared under `workspace.env` in `fern.yaml`. Values support required shell-style expansion such as `${SOME_KEY}`; startup fails if a referenced variable is missing. YAML fields are strict, so misspellings fail instead of silently using defaults.
 
@@ -122,6 +124,12 @@ Configuration precedence is flag, then YAML file, then default. `-config` or `--
 
 Changing the image, repository, memory, or environment of an existing container produces a spec-drift error. Run `fern down`, then `fern up`; the named session volume is retained.
 
+OpenCode V1 remains the default. To test the pinned V2 beta, build
+`images/opencode-v2`, set `workspace.opencode: v2`, and provide
+`OPENCODE_PASSWORD`. V2 uses the isolated `fern-<workspace>-v2-data` volume and
+`fern attach` launches `opencode2 --server <proxy-url>`. See
+[docs/OPENCODE_V2.md](./docs/OPENCODE_V2.md).
+
 `down` removes the container but deliberately retains the named OpenCode data volume. A later `up` recreates compute around the same durable session data. Remove that volume manually only when the session data is no longer needed:
 
 ```bash
@@ -137,6 +145,7 @@ make test-race
 make vet
 make build
 make image
+make image-v2
 ```
 
 CI runs formatting, ordinary and race tests, vet, binary build, and a separate
@@ -152,11 +161,13 @@ resources and retains redacted evidence on failure:
 
 ```bash
 ./scripts/test-lifecycle.sh
+FERN_LIFECYCLE_PROTOCOL=v2 ./scripts/test-lifecycle.sh
+FERN_V2_IMAGE=fern/opencode-v2:dev ./scripts/test-opencode-v2.sh
 ```
 
 ## Safety Boundary
 
-Fern stops only after a currently connected watcher epoch has reported busy followed by every active session becoming idle. A disconnect or a request that may start work invalidates that boundary. When the timer expires, Fern blocks new held requests and independently confirms `/session/status` is all idle before stopping. Retry is busy; unknown state leaves compute running.
+Fern stops only after a currently connected watcher epoch has reported busy followed by every active session becoming idle. A disconnect or a request that may start work invalidates that boundary. When the timer expires, Fern blocks new held requests and independently confirms the selected protocol's activity snapshots are all idle before stopping. V1 checks `/session/status`; V2 checks foreground sessions, shells, PTYs, permissions, and forms. Retry is busy; unknown state leaves compute running.
 
 This boundary matters because OpenCode reconstructs completed conversation state from SQLite, but active provider streams, tool execution, partial streamed fragments, and permission waiters live in process memory. Stopping mid-turn can silently abandon work. The source and crash-test evidence is in [DAY-1.md](./DAY-1.md).
 

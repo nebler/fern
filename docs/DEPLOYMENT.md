@@ -4,6 +4,12 @@ This runbook defines a single-user Fern deployment using systemd, a local Docker
 
 The reference target is Ubuntu Server 24.04 LTS with systemd, Docker Engine, and Tailscale. The files and commands are source-reviewed examples; this repository does not claim that the complete install, remote access, reboot, backup, or restore sequence has been executed. Record those results separately during the target-host rehearsal.
 
+The reference configuration deliberately uses OpenCode V1. V1 remains the
+recommended phone-test deployment. The pinned V2 beta is an explicit opt-in;
+follow [OPENCODE_V2.md](./OPENCODE_V2.md), use the separate V2 image and volume,
+and rerun its smoke tests on the target host before changing this runbook's
+examples.
+
 ## Trust And Access Model
 
 Fern gives the workspace container read/write access to the selected host repository and forwards provider credentials into it. OpenCode can run tools and modify that repository. Only use a repository whose code, hooks, configuration, and collaborators are trusted to receive those credentials and act as the host user. This is a dedicated trusted-user/trusted-repository deployment, not tenant isolation.
