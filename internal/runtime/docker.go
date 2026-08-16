@@ -74,7 +74,7 @@ func (d *Docker) Create(ctx context.Context, spec Spec) (Endpoint, error) {
 }
 
 func (d *Docker) create(ctx context.Context, spec Spec) (Endpoint, error) {
-	if err := d.ensureVolume(ctx, spec.Name); err != nil {
+	if err := d.ensureVolume(ctx, spec); err != nil {
 		return Endpoint{}, err
 	}
 	if err := d.intents.Clear(spec.Name); err != nil {
@@ -106,7 +106,7 @@ func (d *Docker) create(ctx context.Context, spec Spec) (Endpoint, error) {
 			Init:         &useInit,
 			Mounts: []mount.Mount{
 				{Type: mount.TypeBind, Source: spec.RepoPath, Target: "/home/user/workspace"},
-				{Type: mount.TypeVolume, Source: dataVolumeName(spec.Name), Target: "/home/user/.local/share/opencode"},
+				{Type: mount.TypeVolume, Source: specDataVolumeName(spec), Target: "/home/user/.local/share/opencode"},
 			},
 		},
 		&network.NetworkingConfig{},
@@ -132,9 +132,11 @@ func (d *Docker) create(ctx context.Context, spec Spec) (Endpoint, error) {
 	if !observation.HasEndpoint {
 		return Endpoint{}, d.rollbackStarted(spec.Name, created.ID, fmt.Errorf("workspace %q has no %s port binding", spec.Name, workspacePort))
 	}
-	if err := WaitHealthy(ctx, observation.Endpoint, spec.ServerAuth(), healthTimeout); err != nil {
+	protocol, err := WaitHealthyProtocol(ctx, observation.Endpoint, spec.ServerAuth(), spec.Protocol, healthTimeout)
+	if err != nil {
 		return Endpoint{}, d.rollbackStarted(spec.Name, created.ID, fmt.Errorf("container %q never became healthy: %w", spec.Name, err))
 	}
+	observation.Endpoint.Protocol = protocol
 	d.log.Info("state", "workspace", spec.Name, "from", StateProvisioning, "to", StateRunning, "elapsed_ms", time.Since(start).Milliseconds())
 	return observation.Endpoint, nil
 }
@@ -309,9 +311,11 @@ func (d *Docker) resumeObserved(ctx context.Context, spec Spec, inspection works
 	if !observation.HasEndpoint {
 		return Endpoint{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("workspace %q has no %s port binding", spec.Name, workspacePort))
 	}
-	if err := WaitHealthy(ctx, observation.Endpoint, spec.ServerAuth(), healthTimeout); err != nil {
+	protocol, err := WaitHealthyProtocol(ctx, observation.Endpoint, spec.ServerAuth(), spec.Protocol, healthTimeout)
+	if err != nil {
 		return Endpoint{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("workspace %q did not become healthy: %w", spec.Name, err))
 	}
+	observation.Endpoint.Protocol = protocol
 	if err := d.intents.Clear(spec.Name); err != nil {
 		return Endpoint{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("clear pause intent after resume: %w", err))
 	}
@@ -477,8 +481,9 @@ func (d *Docker) rollbackStarted(name, containerID string, cause error) error {
 	return errors.Join(cause, d.pauseObserved(cleanupCtx, name, observation))
 }
 
-func (d *Docker) ensureVolume(ctx context.Context, workspace string) error {
-	name := dataVolumeName(workspace)
+func (d *Docker) ensureVolume(ctx context.Context, spec Spec) error {
+	workspace := spec.Name
+	name := specDataVolumeName(spec)
 	existing, err := d.cli.VolumeInspect(ctx, name)
 	if err == nil {
 		if existing.Labels[managedLabel] != "true" || existing.Labels[workspaceLabel] != workspace {
@@ -526,6 +531,7 @@ type fingerprintValue struct {
 	Init        bool
 	Port        string
 	DataVolume  string
+	Protocol    Protocol `json:",omitempty"`
 }
 
 func specFingerprint(spec Spec) (string, error) {
@@ -538,8 +544,16 @@ func specFingerprint(spec Spec) (string, error) {
 		Env:         sortedEnv(spec.Env),
 		Init:        true,
 		Port:        workspacePort,
-		DataVolume:  dataVolumeName(spec.Name),
+		DataVolume:  specDataVolumeName(spec),
+		Protocol:    fingerprintProtocol(spec.Protocol),
 	})
+}
+
+func fingerprintProtocol(protocol Protocol) Protocol {
+	if protocol.Normalize() == ProtocolV1 {
+		return ""
+	}
+	return protocol.Normalize()
 }
 
 func (d *Docker) verifyActualSpec(ctx context.Context, containerID string, spec Spec) error {
@@ -593,7 +607,7 @@ func verifyActualSpec(info container.InspectResponse, spec Spec) error {
 			dataVolume = actualMount.Name
 		}
 	}
-	if len(info.Mounts) != 2 || repoCount != 1 || dataCount != 1 || filepath.Clean(repoPath) != filepath.Clean(spec.RepoPath) || dataVolume != dataVolumeName(spec.Name) {
+	if len(info.Mounts) != 2 || repoCount != 1 || dataCount != 1 || filepath.Clean(repoPath) != filepath.Clean(spec.RepoPath) || dataVolume != specDataVolumeName(spec) {
 		return fmt.Errorf("%w: repository or data mount was modified", ErrSpecDrift)
 	}
 	return nil
@@ -616,4 +630,15 @@ func fingerprint(value fingerprintValue) (string, error) {
 
 func dataVolumeName(workspace string) string {
 	return "fern-" + workspace + "-data"
+}
+
+func specDataVolumeName(spec Spec) string {
+	switch spec.Protocol.Normalize() {
+	case ProtocolV2:
+		return "fern-" + spec.Name + "-v2-data"
+	case ProtocolAuto:
+		return "fern-" + spec.Name + "-auto-data"
+	default:
+		return dataVolumeName(spec.Name)
+	}
 }

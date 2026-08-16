@@ -14,12 +14,16 @@ import (
 func TestWaitHealthyUsesBasicAuth(t *testing.T) {
 	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/global/health" {
+			http.NotFound(writer, request)
+			return
+		}
 		username, password, ok := request.BasicAuth()
 		if !ok || username != "agent" || password != "secret" {
 			http.Error(writer, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte(`{"healthy":true,"version":"1.18.16"}`))
 	}))
 	defer server.Close()
 	endpoint := Endpoint{Host: "127.0.0.1", Port: server.Listener.Addr().(*net.TCPAddr).Port}
@@ -37,7 +41,7 @@ func TestWaitHealthyReusesConnectionAfterUnhealthyResponse(t *testing.T) {
 			_, _ = writer.Write(make([]byte, 1024))
 			return
 		}
-		writer.WriteHeader(http.StatusOK)
+		_, _ = writer.Write([]byte(`{"healthy":true}`))
 	}))
 	server.Config.ConnState = func(_ net.Conn, state http.ConnState) {
 		if state == http.StateNew {
@@ -52,6 +56,70 @@ func TestWaitHealthyReusesConnectionAfterUnhealthyResponse(t *testing.T) {
 	}
 	if connections != 1 {
 		t.Fatalf("health checks used %d connections, want 1", connections)
+	}
+}
+
+func TestWaitHealthyProtocolDetectsV2AndUsesV2Auth(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/health" {
+			http.NotFound(writer, request)
+			return
+		}
+		username, password, ok := request.BasicAuth()
+		if !ok || username != "opencode" || password != "v2-secret" {
+			http.Error(writer, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_, _ = writer.Write([]byte(`{"healthy":true,"version":"2.0.0-beta"}`))
+	}))
+	defer server.Close()
+	endpoint := Endpoint{Host: "127.0.0.1", Port: server.Listener.Addr().(*net.TCPAddr).Port}
+	protocol, err := WaitHealthyProtocol(
+		context.Background(), endpoint,
+		ServerAuth{Protocol: ProtocolAuto, V2Password: "v2-secret"}, ProtocolAuto, time.Second,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if protocol != ProtocolV2 {
+		t.Fatalf("detected protocol = %q, want v2", protocol)
+	}
+}
+
+func TestWaitHealthyProtocolRejectsAmbiguousAutoDetection(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/api/health", "/global/health":
+			_, _ = writer.Write([]byte(`{"healthy":true}`))
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+	endpoint := Endpoint{Host: "127.0.0.1", Port: server.Listener.Addr().(*net.TCPAddr).Port}
+	_, err := WaitHealthyProtocol(context.Background(), endpoint, ServerAuth{}, ProtocolAuto, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous auto detection error = %v", err)
+	}
+}
+
+func TestWaitHealthyRejectsFalseOrMalformedHealth(t *testing.T) {
+	t.Parallel()
+	for _, body := range []string{`{"healthy":false}`, `{}`, `not-json`, `{"healthy":true} {}`} {
+		body := body
+		t.Run(body, func(t *testing.T) {
+			t.Parallel()
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				_, _ = writer.Write([]byte(body))
+			}))
+			defer server.Close()
+			endpoint := Endpoint{Host: "127.0.0.1", Port: server.Listener.Addr().(*net.TCPAddr).Port}
+			if err := WaitHealthy(context.Background(), endpoint, ServerAuth{}, 50*time.Millisecond); err == nil {
+				t.Fatal("invalid health response was accepted")
+			}
+		})
 	}
 }
 
@@ -93,5 +161,38 @@ func TestSpecFingerprintIsStableAndDetectsChanges(t *testing.T) {
 	changed, _ := specFingerprint(second)
 	if changed == left {
 		t.Fatal("image change did not change spec fingerprint")
+	}
+}
+
+func TestProtocolChangesFingerprintAndDataVolume(t *testing.T) {
+	t.Parallel()
+	v1 := Spec{Name: "demo", Image: "image:one", RepoPath: "/repo", MemoryBytes: 1024, Protocol: ProtocolV1}
+	v2 := v1
+	v2.Protocol = ProtocolV2
+	legacy := v1
+	legacy.Protocol = ""
+	v1Fingerprint, err := specFingerprint(v1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2Fingerprint, err := specFingerprint(v2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v1Fingerprint == v2Fingerprint {
+		t.Fatal("protocol change did not change spec fingerprint")
+	}
+	legacyFingerprint, err := specFingerprint(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyFingerprint != v1Fingerprint {
+		t.Fatal("explicit V1 changed the legacy spec fingerprint")
+	}
+	if got := specDataVolumeName(v1); got != "fern-demo-data" {
+		t.Fatalf("V1 data volume = %q", got)
+	}
+	if got := specDataVolumeName(v2); got != "fern-demo-v2-data" {
+		t.Fatalf("V2 data volume = %q", got)
 	}
 }

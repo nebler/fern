@@ -25,8 +25,10 @@ var (
 )
 
 type ServerAuth struct {
-	Username string
-	Password string
+	Protocol   Protocol
+	Username   string
+	Password   string
+	V2Password string
 }
 
 type IntentStore interface {
@@ -45,14 +47,26 @@ const (
 )
 
 func (a ServerAuth) Apply(req interface{ SetBasicAuth(string, string) }) {
-	if a.Password == "" {
+	a.ApplyFor(req, a.Protocol.Normalize())
+}
+
+func (a ServerAuth) ApplyFor(req interface{ SetBasicAuth(string, string) }, protocol Protocol) {
+	username, password := a.Credentials(protocol)
+	if password == "" {
 		return
+	}
+	req.SetBasicAuth(username, password)
+}
+
+func (a ServerAuth) Credentials(protocol Protocol) (string, string) {
+	if protocol.Normalize() == ProtocolV2 {
+		return "opencode", a.V2Password
 	}
 	username := a.Username
 	if username == "" {
 		username = "opencode"
 	}
-	req.SetBasicAuth(username, a.Password)
+	return username, a.Password
 }
 
 type Spec struct {
@@ -60,17 +74,24 @@ type Spec struct {
 	Image       string
 	RepoPath    string
 	MemoryBytes int64
+	Protocol    Protocol
 	Env         map[string]string
 }
 
 func (s Spec) ServerAuth() ServerAuth {
-	return ServerAuth{Username: s.Env["OPENCODE_SERVER_USERNAME"], Password: s.Env["OPENCODE_SERVER_PASSWORD"]}
+	return ServerAuth{
+		Protocol:   s.Protocol.Normalize(),
+		Username:   s.Env["OPENCODE_SERVER_USERNAME"],
+		Password:   s.Env["OPENCODE_SERVER_PASSWORD"],
+		V2Password: s.Env["OPENCODE_PASSWORD"],
+	}
 }
 
 // Endpoint is resolved after every start or resume. Callers must not persist it.
 type Endpoint struct {
-	Host string
-	Port int
+	Host     string
+	Port     int
+	Protocol Protocol
 }
 
 func (e Endpoint) URL() string {
@@ -80,6 +101,9 @@ func (e Endpoint) URL() string {
 func (s Spec) Validate() error {
 	if s.Name == "" || s.Image == "" || s.RepoPath == "" || s.MemoryBytes <= 0 {
 		return errors.New("name, image, repository path, and positive memory are required")
+	}
+	if err := s.Protocol.Validate(); err != nil {
+		return err
 	}
 	for key, value := range s.Env {
 		if key == "" || strings.ContainsAny(key, "=\x00\r\n") {

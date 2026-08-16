@@ -433,7 +433,7 @@ func TestEnsureRunningUsesOneInspectionForRunningContainer(t *testing.T) {
 				}},
 			})
 		case request.URL.Path == "/global/health":
-			writer.WriteHeader(http.StatusOK)
+			_, _ = writer.Write([]byte(`{"healthy":true}`))
 		default:
 			http.NotFound(writer, request)
 		}
