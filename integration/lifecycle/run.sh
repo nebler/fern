@@ -277,9 +277,11 @@ before_start=$(container_started_at)
 missing_code=$(http_code "$ARTIFACTS/missing-auth.body" "$PROXY_URL$HEALTH_PATH" || true)
 wrong_code=$(http_code "$ARTIFACTS/wrong-auth.body" --user "$USERNAME:wrong" "$PROXY_URL$HEALTH_PATH" || true)
 [[ "$missing_code" == 401 && "$wrong_code" == 401 ]] || fail "stopped auth expected 401/401, got $missing_code/$wrong_code; pre-wake auth capability is mandatory"
+auth_curl --fail "$PROXY_URL/fern/ready" | grep -q '"ready":true' || fail "Fern readiness was unavailable while compute was paused"
+auth_curl --fail "$PROXY_URL/fern/" | grep -q 'href="/"' || fail "Fern phone landing was unavailable while compute was paused"
 sleep 0.5
 wait_status paused 2
-[[ "$(container_started_at)" == "$before_start" ]] || fail "unauthorized request started compute"
+[[ "$(container_started_at)" == "$before_start" ]] || fail "authentication or Fern-owned routes started compute"
 
 note "scenario 4/13: concurrent authorized requests coalesce into one wake"
 starts_before=$(grep -c '"Action":"start"' "$EVENTS" || true)
