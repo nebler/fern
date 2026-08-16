@@ -15,7 +15,7 @@ The Docker implementation is functional:
 - rejects desired configuration drift instead of resuming stale compute;
 - tracks connected epochs and busy, retry, and idle state across all sessions;
 - invalidates idle eligibility on watcher loss or a request that may start work;
-- stops OpenCode only after zero held requests and an authenticated all-idle snapshot;
+- stops OpenCode only after zero held requests and authenticated all-idle checks;
 - rejects invalid Basic credentials before request admission or workspace wake;
 - wakes a stopped workspace when a request reaches the proxy;
 - coalesces concurrent wake requests into one Docker operation;
