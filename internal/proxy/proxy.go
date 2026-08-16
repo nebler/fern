@@ -23,6 +23,7 @@ type targetKey struct{}
 type proxyTarget struct {
 	url     *url.URL
 	request workspace.RequestTarget
+	intent  workspace.RequestIntent
 }
 
 func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
@@ -43,8 +44,11 @@ func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
 		},
 		FlushInterval: -1,
 		ErrorHandler: func(writer http.ResponseWriter, request *http.Request, err error) {
-			if request.Context().Err() == nil {
-				if target, ok := request.Context().Value(targetKey{}).(proxyTarget); ok {
+			if target, ok := request.Context().Value(targetKey{}).(proxyTarget); ok {
+				// An SSE observer disconnect is not evidence that OpenCode failed. A
+				// canceled held request may instead be a frozen backend, so invalidate
+				// it and let the next request reconcile Docker state.
+				if request.Context().Err() == nil || target.intent != workspace.RequestObserve {
 					waker.InvalidateEndpoint(target.request)
 				}
 			}
@@ -55,7 +59,8 @@ func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
 
 	handler := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		start := time.Now()
-		target, release, err := waker.AcquireRequest(request.Context(), requestIntentFor(auth.Protocol, request))
+		intent := requestIntentFor(auth.Protocol, request)
+		target, release, err := waker.AcquireRequest(request.Context(), intent)
 		if err != nil {
 			log.Error("wake failed", "err", err)
 			http.Error(writer, "failed to wake workspace", http.StatusServiceUnavailable)
@@ -70,7 +75,7 @@ func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
 			http.Error(writer, "invalid workspace endpoint", http.StatusInternalServerError)
 			return
 		}
-		ctx := context.WithValue(request.Context(), targetKey{}, proxyTarget{url: targetURL, request: target})
+		ctx := context.WithValue(request.Context(), targetKey{}, proxyTarget{url: targetURL, request: target, intent: intent})
 		reverseProxy.ServeHTTP(writer, request.WithContext(ctx))
 	})
 	return requireServerAuth(handler, auth)

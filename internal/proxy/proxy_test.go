@@ -224,7 +224,7 @@ func TestProxyClientCancellationDoesNotInvalidateEndpoint(t *testing.T) {
 	defer server.Close()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/global/health", nil)
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/event", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
