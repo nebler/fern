@@ -18,7 +18,7 @@ Membership in the `docker` group is effectively root access. This runbook assume
 
 ## 1. Install Host Dependencies
 
-Install Docker Engine from Docker's supported Ubuntu repository and Tailscale from Tailscale's supported Ubuntu repository, rather than an unreviewed convenience script. Follow the current vendor instructions:
+Install Git, Go 1.24 or newer, Docker Engine from Docker's supported Ubuntu repository, and Tailscale from Tailscale's supported Ubuntu repository, rather than an unreviewed convenience script. Follow the current vendor instructions:
 
 - <https://docs.docker.com/engine/install/ubuntu/>
 - <https://tailscale.com/kb/1031/install-linux>
@@ -84,22 +84,27 @@ Choose a reviewed commit, clone Fern as root-owned source, and verify that check
 ```bash
 export FERN_REPOSITORY=https://github.com/nebler/fern.git
 export FERN_COMMIT=REPLACE_WITH_FULL_COMMIT_SHA
+export FERN_VERSION=v0.1.0
 sudo git clone "$FERN_REPOSITORY" /opt/fern/src
 sudo git -C /opt/fern/src fetch --tags --force
 sudo git -C /opt/fern/src checkout --detach "$FERN_COMMIT"
 test "$(sudo git -C /opt/fern/src rev-parse HEAD)" = "$FERN_COMMIT"
 
 cd /opt/fern/src
-sudo env GOTOOLCHAIN=local go build -trimpath -o /usr/local/bin/fern ./cmd/fern
+sudo env GOTOOLCHAIN=local ./scripts/build-release.sh "$FERN_VERSION"
+ARCH=$(dpkg --print-architecture)
+case "$ARCH" in amd64|arm64) ;; *) echo "unsupported architecture: $ARCH" >&2; exit 1;; esac
+sudo install -o root -g root -m 0755 "dist/fern-${FERN_VERSION}-linux-${ARCH}" /usr/local/bin/fern
 sudo chown root:root /usr/local/bin/fern
 sudo chmod 0755 /usr/local/bin/fern
 sudo docker build --pull -t "fern/opencode:$FERN_COMMIT" images/opencode
 sudo docker image inspect "fern/opencode:$FERN_COMMIT" --format '{{.Id}} {{json .RepoDigests}}'
 test "$(sudo docker run --rm --entrypoint sh "fern/opencode:$FERN_COMMIT" -c 'id -u; id -g')" = "$(printf '1001\n1001')"
 sha256sum /usr/local/bin/fern
+/usr/local/bin/fern version
 ```
 
-This source build requires Go 1.24 or newer. Save the full commit, binary checksum, image ID, and any repository digest in the rehearsal record. A local image ID identifies the built image on this daemon; a registry digest is available only if the image is pushed to or pulled from a registry.
+The release script rejects a dirty checkout and embeds the requested version and full commit. Save the version output, binary checksum, image ID, and any repository digest in the rehearsal record. The local `fern/opencode:<commit>` tag is mutable; record and verify its image ID before each rollout. A registry digest is available only if the image is pushed to or pulled from a registry.
 
 ## 4. Install Configuration And Secrets
 
@@ -171,7 +176,7 @@ sudo systemctl status fern.service
 sudo journalctl -u fern.service --since today
 ```
 
-Do not run a second `fern up`, `fern down`, or `fern resume` while the service owns the workspace lease. Stop the service first for offline lifecycle commands.
+Do not run a second `fern up` or `fern down` while the service owns the workspace lease. Stop the service first for offline lifecycle commands.
 
 ## 6. Publish Privately With Tailscale Serve
 
@@ -187,7 +192,7 @@ Use the HTTPS tailnet URL printed by `tailscale serve status`. From another enro
 
 Tailscale Serve provides TLS and tailnet identity at the edge; its loopback hop to Fern is plain HTTP on the same host. **Do not run `tailscale funnel` or pass a Funnel flag.** Funnel is public internet exposure and is outside this deployment.
 
-Tailscale also permits direct tailnet publication by binding Fern to the host's Tailscale IP. That is a different topology: it is not loopback-only, exposes Fern's plain HTTP listener directly to permitted tailnet peers, and requires changing the unit/config whenever the address changes. This runbook intentionally does not use it. If Serve cannot be used, treat direct binding as a separately reviewed deployment, require the OpenCode password, bind only to `tailscale ip -4` rather than `0.0.0.0`, and use an `http://TAILSCALE_IP:PORT` URL because Fern itself has no TLS.
+Fern rejects non-loopback listeners even when Basic authentication is configured. If Tailscale Serve is unavailable, place another reviewed TLS reverse proxy on the same host rather than exposing Fern's plain HTTP listener.
 
 ## 7. Reboot And Shutdown Checks
 
@@ -208,7 +213,7 @@ systemctl is-enabled fern.service
 systemctl is-active fern.service
 sudo journalctl -b -u fern.service --no-pager
 sudo tailscale serve status
-sudo docker ps -a --filter name=fern-demo
+sudo docker ps -a --filter name=demo
 sudo docker volume inspect fern-demo-data
 ```
 
@@ -226,12 +231,14 @@ The container and local `fern/opencode:<commit>` image are replaceable compute, 
 
 ## Backup Before Destructive Tests
 
-Stop Fern first so the repository, session volume, and pause-intent state form a quiet snapshot. These commands use the already pinned Fern image rather than pulling an extra backup image.
+Stop Fern, then remove its compute container with the normal offline command so the repository and session volume form a quiet snapshot. `fern down` deliberately retains the data volume. These commands use the already pinned Fern image rather than pulling an extra backup image.
 
 ```bash
 export FERN_COMMIT=REPLACE_WITH_FULL_COMMIT_SHA
 export BACKUP_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 sudo systemctl stop fern.service
+sudo -H -u fern /usr/local/bin/fern down --config /etc/fern/fern.yaml
+test -z "$(sudo docker ps -aq --filter name='^/demo$')"
 sudo install -d -o root -g root -m 0700 "/var/backups/fern/$BACKUP_ID"
 sudo git -C /srv/fern/workspace status --short >"/tmp/fern-status-$BACKUP_ID"
 sudo tar -C /srv/fern -czf "/var/backups/fern/$BACKUP_ID/workspace.tar.gz" workspace
@@ -287,7 +294,7 @@ This uninstall retains `/etc/fern`, `/var/lib/fern`, `/srv/fern/workspace`, `/op
 ```bash
 sudo test -d /srv/fern/workspace -a -d /var/lib/fern/.fern
 sudo docker volume inspect fern-demo-data
-sudo docker ps -a --filter name=fern-demo
+sudo docker ps -a --filter name=demo
 ```
 
 ## Explicit Data Deletion
@@ -295,8 +302,8 @@ sudo docker ps -a --filter name=fern-demo
 Only after a verified backup and explicit approval, remove retained data. Stop and uninstall the unit first. The ordinary uninstall may already have removed the Fern binary, so remove the known container explicitly before its volume. Verify the names against the configuration and `docker inspect` first:
 
 ```bash
-sudo docker inspect fern-demo
-sudo docker rm -f fern-demo
+sudo docker inspect demo
+sudo docker rm -f demo
 sudo docker volume rm fern-demo-data
 sudo docker image rm "fern/opencode:REPLACE_WITH_FULL_COMMIT_SHA"
 sudo rm -rf /srv/fern/workspace /var/lib/fern/.fern /etc/fern /opt/fern/src

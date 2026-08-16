@@ -8,9 +8,9 @@ Self-hosted OpenCode workspaces that stop when idle and wake on the next ordinar
 
 The Docker implementation is functional:
 
-- creates an 8 GiB-limited OpenCode workspace from `fern/opencode:dev`;
+- creates a memory-limited, two-CPU, 512-PID OpenCode workspace from `fern/opencode:dev`;
 - bind-mounts the selected host repository into `/home/user/workspace`;
-- persists OpenCode sessions in the `fern-<workspace>-data` Docker volume;
+- persists OpenCode sessions in protocol-isolated named Docker volumes;
 - verifies Fern ownership before every container or volume mutation;
 - rejects desired configuration drift instead of resuming stale compute;
 - tracks connected epochs and busy, retry, and idle state across all sessions;
@@ -25,7 +25,7 @@ The Docker implementation is functional:
 - distinguishes failed/OOM compute from an intentional pause;
 - rejects remote Docker endpoints because mounts, loopback routing, locks, and intent are host-local.
 
-Kubernetes, setup snapshots, resume hooks, ingress, and the credential proxy are not implemented yet.
+Kubernetes, setup snapshots, resume hooks, Fern-managed TLS/public ingress, and identity-aware authorization are not implemented yet.
 
 ## Documentation
 
@@ -62,7 +62,6 @@ The command remains in the foreground because it owns the watcher, idle supervis
 
 ```text
 workspace: demo
-direct: http://127.0.0.1:49153
 proxy: http://127.0.0.1:8080
 ready in: 1.4s
 ```
@@ -102,7 +101,6 @@ Additional environment values can be declared under `workspace.env` in `fern.yam
 go run ./cmd/fern up
 go run ./cmd/fern attach
 go run ./cmd/fern status
-go run ./cmd/fern resume
 go run ./cmd/fern logs
 go run ./cmd/fern version
 go run ./cmd/fern debug events
@@ -114,6 +112,8 @@ Common flags override file configuration:
 ```bash
 go run ./cmd/fern up \
   -name demo \
+  -image fern/opencode:dev \
+  -opencode v1 \
   -repo /absolute/path/to/repository \
   -memory 8Gi \
   -idle 10m \
@@ -130,7 +130,7 @@ OpenCode V1 remains the default. To test the pinned V2 beta, build
 `fern attach` launches `opencode2 --server <proxy-url>`. See
 [docs/OPENCODE_V2.md](./docs/OPENCODE_V2.md).
 
-`down` removes the container but deliberately retains the named OpenCode data volume. A later `up` recreates compute around the same durable session data. Remove that volume manually only when the session data is no longer needed:
+`down` removes the container but deliberately retains the named OpenCode data volume. A later `up` recreates compute around the same durable session data. Volume names are `fern-<workspace>-data` for V1, `fern-<workspace>-v2-data` for V2, and `fern-<workspace>-auto-data` for auto detection. Remove only the volume for the configured protocol and only when its session data is no longer needed:
 
 ```bash
 docker volume rm fern-demo-data
@@ -148,8 +148,9 @@ make image
 make image-v2
 ```
 
-CI runs formatting, ordinary and race tests, vet, binary build, and a separate
-workspace-image build. Build versioned Linux binaries and checksums with:
+CI runs formatting, ordinary and race tests, vet, binary build, both workspace
+image builds, and the V1/V2 real-Docker lifecycle matrix. Build versioned Linux
+binaries and checksums from a clean working tree with:
 
 ```bash
 ./scripts/build-release.sh v0.1.0
@@ -171,7 +172,7 @@ Fern stops only after a currently connected watcher epoch has reported busy foll
 
 This boundary matters because OpenCode reconstructs completed conversation state from SQLite, but active provider streams, tool execution, partial streamed fragments, and permission waiters live in process memory. Stopping mid-turn can silently abandon work. The source and crash-test evidence is in [DAY-1.md](./DAY-1.md).
 
-The guarantee assumes clients use the stable Fern proxy. Direct writes to Docker's loopback backend port bypass request admission and are for diagnostics only.
+The guarantee assumes clients use the stable Fern proxy. Docker still publishes a loopback backend port for Fern's host process, but Fern does not advertise it. A same-host principal with Docker inspection access can bypass request admission and is already inside Fern's trusted-host boundary.
 
 ## Non-Goals
 
@@ -184,4 +185,4 @@ The guarantee assumes clients use the stable Fern proxy. Direct writes to Docker
 - Firecracker orchestration
 - Mid-turn crash recovery
 
-The proxy listens on loopback by default. Do not expose it beyond localhost without an external authentication layer such as Tailscale or an identity-aware proxy.
+The proxy accepts only numeric loopback listeners. Publish it through a private TLS edge such as Tailscale Serve; OpenCode Basic authentication remains defense in depth and is not a replacement for TLS.

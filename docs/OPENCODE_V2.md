@@ -27,8 +27,7 @@ for deployment because it catches an image/protocol mismatch before clients
 connect.
 
 When no image is configured, `v2` selects `fern/opencode-v2:dev`; V1 and auto
-retain the V1 default image. `fern up` and `fern resume` also accept
-`-opencode v1|v2|auto`.
+retain the V1 default image. `fern up` also accepts `-opencode v1|v2|auto`.
 
 ## Pinned Artifact
 
@@ -44,6 +43,10 @@ The image fixes `OPENCODE_DB` to
 `/home/user/.local/share/opencode/opencode-v2.db`, inside Fern's persistent
 volume. An upstream pin change requires rerunning the V2 smoke and lifecycle
 tests before deployment.
+
+All Fern workspace containers, including V2, are constrained by the configured
+memory limit plus fixed limits of two CPUs and 512 processes. Changing those
+runtime limits on an existing container is treated as specification drift.
 
 ## Protocol Mapping
 
