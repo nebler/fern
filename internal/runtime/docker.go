@@ -349,6 +349,9 @@ func (d *Docker) Destroy(ctx context.Context, name string) error {
 		return err
 	}
 	if observation.State == StateAbsent {
+		if err := d.intents.Clear(name); err != nil {
+			return fmt.Errorf("clear pause intent for absent workspace: %w", err)
+		}
 		return nil
 	}
 	if observation.Frozen {

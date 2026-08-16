@@ -569,6 +569,27 @@ func TestDestroyCreatedContainerDoesNotStopIt(t *testing.T) {
 	}
 }
 
+func TestDestroyAbsentWorkspaceClearsStaleIntent(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/containers/demo/json") {
+			writeDockerNotFound(writer, "container")
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	intents := &recordingIntentStore{status: PauseIntentPending}
+	docker := testDocker(t, server)
+	docker.intents = intents
+	if err := docker.Destroy(context.Background(), "demo"); err != nil {
+		t.Fatal(err)
+	}
+	if intents.status != PauseIntentNone || intents.clears.Load() != 1 {
+		t.Fatalf("intent status=%d clears=%d, want none and one clear", intents.status, intents.clears.Load())
+	}
+}
+
 func testDocker(t *testing.T, server *httptest.Server) *Docker {
 	t.Helper()
 	cli, err := client.NewClientWithOpts(
