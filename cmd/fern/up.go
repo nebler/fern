@@ -118,7 +118,7 @@ func runUp(args []string, log *slog.Logger) error {
 		},
 	)
 	start := time.Now()
-	ep, err := manager.EnsureRunning(serviceCtx)
+	_, err = manager.EnsureRunning(serviceCtx)
 	if err != nil {
 		return errors.Join(err, manager.Close(context.Background()))
 	}
@@ -157,7 +157,7 @@ func runUp(args []string, log *slog.Logger) error {
 		return nil
 	})
 
-	fmt.Printf("workspace: %s\ndirect: %s\nproxy: http://%s\nready in: %s\nattach: fern attach\n", spec.Name, ep.URL(), listener.Addr(), time.Since(start).Round(time.Millisecond))
+	fmt.Printf("workspace: %s\nproxy: http://%s\nready in: %s\nattach: fern attach\n", spec.Name, listener.Addr(), time.Since(start).Round(time.Millisecond))
 	log.Info("proxy listening", "address", listener.Addr(), "workspace", spec.Name)
 	err = group.Wait()
 	// The manager owns wake and rollback goroutines. Do not close Docker until

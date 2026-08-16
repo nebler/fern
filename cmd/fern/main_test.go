@@ -143,3 +143,13 @@ func TestTrackedConnectionRemovesItselfOnClose(t *testing.T) {
 		t.Fatalf("tracker retained %d closed connections", len(tracker.conns))
 	}
 }
+
+func TestResumeIsNotAStandaloneCommand(t *testing.T) {
+	t.Parallel()
+	if err := run([]string{"resume"}, nil); err == nil {
+		t.Fatal("standalone resume command unexpectedly remained available")
+	}
+	if strings.Contains(usageText, "resume") {
+		t.Fatalf("usage still advertises unsafe standalone resume: %s", usageText)
+	}
+}

@@ -30,42 +30,26 @@ func TestParseMemoryBytes(t *testing.T) {
 	}
 }
 
-func TestValidateRejectsUnauthenticatedRemoteListen(t *testing.T) {
-	t.Parallel()
-	directory := t.TempDir()
-	config := Default(directory)
-	config.Listen = "0.0.0.0:8080"
-	if err := Validate(config); err == nil {
-		t.Fatal("Validate accepted unauthenticated wildcard listener")
-	}
-	config.Workspace.Env["OPENCODE_SERVER_PASSWORD"] = "secret"
-	if err := Validate(config); err != nil {
-		t.Fatalf("authenticated listener rejected: %v", err)
-	}
-}
-
-func TestValidateUsesProtocolSpecificProxyPassword(t *testing.T) {
+func TestValidateRequiresLoopbackListen(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name     string
-		protocol OpenCodeProtocol
-		env      map[string]string
-		wantErr  bool
+		address string
+		wantErr bool
 	}{
-		{name: "v1 server password", protocol: OpenCodeV1, env: map[string]string{"OPENCODE_SERVER_PASSWORD": "secret"}},
-		{name: "v1 rejects V2 password", protocol: OpenCodeV1, env: map[string]string{"OPENCODE_PASSWORD": "secret"}, wantErr: true},
-		{name: "v2 password", protocol: OpenCodeV2, env: map[string]string{"OPENCODE_PASSWORD": "secret"}},
-		{name: "v2 rejects V1 password", protocol: OpenCodeV2, env: map[string]string{"OPENCODE_SERVER_PASSWORD": "secret"}, wantErr: true},
-		{name: "auto accepts V1 password", protocol: OpenCodeAuto, env: map[string]string{"OPENCODE_SERVER_PASSWORD": "secret"}},
-		{name: "auto accepts V2 password", protocol: OpenCodeAuto, env: map[string]string{"OPENCODE_PASSWORD": "secret"}},
+		{address: "127.0.0.1:8080"},
+		{address: "[::1]:8080"},
+		{address: "0.0.0.0:8080", wantErr: true},
+		{address: "[::]:8080", wantErr: true},
+		{address: "192.168.1.2:8080", wantErr: true},
+		{address: "100.64.0.1:8080", wantErr: true},
+		{address: "localhost:8080", wantErr: true},
 	}
 	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
+		t.Run(test.address, func(t *testing.T) {
 			t.Parallel()
 			config := Default(t.TempDir())
-			config.Listen = "0.0.0.0:8080"
-			config.Workspace.OpenCode = test.protocol
-			config.Workspace.Env = test.env
+			config.Listen = test.address
+			config.Workspace.Env["OPENCODE_SERVER_PASSWORD"] = "secret"
 			err := Validate(config)
 			if (err != nil) != test.wantErr {
 				t.Fatalf("Validate() error = %v, wantErr %t", err, test.wantErr)

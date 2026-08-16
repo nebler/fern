@@ -208,6 +208,46 @@ func TestProxyInvalidatesFailedEndpoint(t *testing.T) {
 	}
 }
 
+func TestProxyClientCancellationDoesNotInvalidateEndpoint(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		close(started)
+		<-request.Context().Done()
+	}))
+	defer upstream.Close()
+	invalid := make(chan workspace.RequestTarget, 1)
+	server := httptest.NewServer(New(staticWaker{
+		endpoint: mustParseEndpoint(t, upstream.URL),
+		invalid:  invalid,
+	}, runtime.ServerAuth{}, slog.New(slog.NewTextHandler(io.Discard, nil))))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/global/health", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		response, err := http.DefaultClient.Do(request)
+		if response != nil {
+			response.Body.Close()
+		}
+		done <- err
+	}()
+	<-started
+	cancel()
+	if err := <-done; err == nil {
+		t.Fatal("canceled request unexpectedly succeeded")
+	}
+	select {
+	case target := <-invalid:
+		t.Fatalf("client cancellation invalidated healthy target %+v", target)
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
 func mustParseEndpoint(t *testing.T, rawURL string) runtime.Endpoint {
 	t.Helper()
 	request, err := http.NewRequest(http.MethodGet, rawURL, nil)

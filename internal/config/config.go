@@ -422,7 +422,7 @@ func Validate(config Config) error {
 	if config.IdleAfter <= 0 {
 		return fmt.Errorf("idle duration must be positive")
 	}
-	if err := validateListen(config.Listen, hasProxyPassword(config.Workspace)); err != nil {
+	if err := validateListen(config.Listen); err != nil {
 		return err
 	}
 	return nil
@@ -475,17 +475,6 @@ func normalizeOpenCode(value string) OpenCodeProtocol {
 	return OpenCodeProtocol(strings.ToLower(strings.TrimSpace(value)))
 }
 
-func hasProxyPassword(workspace Workspace) bool {
-	switch workspace.OpenCode {
-	case OpenCodeV2:
-		return workspace.Env["OPENCODE_PASSWORD"] != ""
-	case OpenCodeAuto:
-		return workspace.Env["OPENCODE_SERVER_PASSWORD"] != "" || workspace.Env["OPENCODE_PASSWORD"] != ""
-	default:
-		return workspace.Env["OPENCODE_SERVER_PASSWORD"] != ""
-	}
-}
-
 func ValidateWorkspaceName(name string) error {
 	if !workspaceNamePattern.MatchString(name) {
 		return fmt.Errorf("invalid workspace name %q", name)
@@ -493,7 +482,7 @@ func ValidateWorkspaceName(name string) error {
 	return nil
 }
 
-func validateListen(address string, authenticated bool) error {
+func validateListen(address string) error {
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil {
 		return fmt.Errorf("invalid proxy listen address %q: %w", address, err)
@@ -502,15 +491,9 @@ func validateListen(address string, authenticated bool) error {
 	if err != nil || port <= 0 || port > 65535 {
 		return fmt.Errorf("invalid proxy port %q", portText)
 	}
-	if authenticated {
-		return nil
-	}
-	if host == "localhost" {
-		return nil
-	}
 	ip := net.ParseIP(host)
 	if ip == nil || !ip.IsLoopback() {
-		return errors.New("proxy may listen beyond loopback only when OPENCODE_SERVER_PASSWORD is configured")
+		return errors.New("proxy must listen on a loopback IP; publish it through a TLS reverse proxy such as Tailscale Serve")
 	}
 	return nil
 }

@@ -43,8 +43,10 @@ func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
 		},
 		FlushInterval: -1,
 		ErrorHandler: func(writer http.ResponseWriter, request *http.Request, err error) {
-			if target, ok := request.Context().Value(targetKey{}).(proxyTarget); ok {
-				waker.InvalidateEndpoint(target.request)
+			if request.Context().Err() == nil {
+				if target, ok := request.Context().Value(targetKey{}).(proxyTarget); ok {
+					waker.InvalidateEndpoint(target.request)
+				}
 			}
 			log.Error("proxy error", "err", err, "path", request.URL.Path)
 			http.Error(writer, "upstream unavailable", http.StatusBadGateway)

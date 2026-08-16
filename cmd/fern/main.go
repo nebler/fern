@@ -26,8 +26,6 @@ func run(args []string, log *slog.Logger) error {
 		return runAttach(args[1:])
 	case "down":
 		return runDown(args[1:], log)
-	case "resume":
-		return runResume(args[1:], log)
 	case "status":
 		return runStatus(args[1:], log)
 	case "logs":
@@ -47,4 +45,4 @@ func usage() error {
 	return errors.New("invalid command")
 }
 
-const usageText = "usage: fern <up|attach|down|resume|status|logs|version|debug events> [flags]"
+const usageText = "usage: fern <up|attach|down|status|logs|version|debug events> [flags]"

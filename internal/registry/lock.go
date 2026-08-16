@@ -18,10 +18,27 @@ func Acquire(directory, workspace string) (*Lease, error) {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return nil, fmt.Errorf("create lock directory: %w", err)
 	}
+	directoryInfo, err := os.Lstat(directory)
+	if err != nil {
+		return nil, fmt.Errorf("inspect lock directory: %w", err)
+	}
+	if !directoryInfo.IsDir() || directoryInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("lock directory must be a real directory")
+	}
 	path := filepath.Join(directory, fmt.Sprintf("%x.lock", sha256.Sum256([]byte(workspace))))
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open workspace lock: %w", err)
+	}
+	info, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, fmt.Errorf("inspect workspace lock: %w", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !info.Mode().IsRegular() || !ok || stat.Nlink != 1 {
+		file.Close()
+		return nil, errors.New("workspace lock must be a singly linked regular file")
 	}
 	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
