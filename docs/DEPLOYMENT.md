@@ -19,14 +19,36 @@ provider credentials into its container. Use only a dedicated trusted host,
 user, image, and repository. Docker-group membership is effectively root; this
 is not tenant isolation.
 
-The implementation currently uses OpenCode Basic auth with username `opencode`
-and `OPENCODE_PASSWORD`. Tailscale identity is the outer private-access
-boundary. Basic auth is defense in depth and does not replace TLS.
+The internal OpenCode credential uses username `opencode` and
+`OPENCODE_PASSWORD`. Tailscale identity is the outer private-access boundary.
+Basic auth is accepted for host diagnostics. For the phone demo, `fern doctor
+--phone` creates a five-minute pairing link; Fern exchanges it for a secure
+`HttpOnly` cookie and injects internal OpenCode auth. Pairing sessions are
+process-local and must be renewed after Fern restarts. Durable device grants,
+listing, revocation, and Fern administration are not implemented.
 
-The intended production gateway is not implemented: Fern will authenticate an
-`HttpOnly` device cookie, inject an internal OpenCode credential, and reserve
-`/fern/*` for pairing, administration, and GitHub callbacks. Do not assume
-pairing, cookie issuance, or Fern admin routes exist in this deployment.
+## Fast Field Demo
+
+For a source-checkout rehearsal before installing systemd:
+
+```bash
+make image
+go run ./cmd/fern init --repo /absolute/path/to/repository
+# Add ANTHROPIC_API_KEY or OPENAI_API_KEY to fern.env.
+go run ./cmd/fern up --config fern.yaml --env-file fern.env
+```
+
+In another terminal:
+
+```bash
+tailscale serve --bg http://127.0.0.1:8080
+go run ./cmd/fern doctor --config fern.yaml --env-file fern.env --phone
+```
+
+Scan the terminal QR within five minutes. It contains a short-lived pairing
+capability, not the OpenCode password. Successful diagnostics establish private
+transport and gateway readiness; they do not replace the real-phone acceptance
+steps below.
 
 ## 1. Install Host Dependencies
 

@@ -32,17 +32,17 @@ The current proxy uses OpenCode Basic authentication. It validates the request
 before waking compute and forwards the accepted credentials upstream. Use it
 only behind a private TLS edge.
 
-The production gateway design is not implemented yet. It will reserve
-`/fern/*` for Fern-owned device pairing, administration, and GitHub callbacks,
-authenticate a Fern-issued `HttpOnly` device cookie, and inject internal
-OpenCode credentials when proxying all other routes. Pairing and that cookie
-exchange do not exist today; `/fern/*` is a reserved namespace, not a current
-user interface.
+Fern now reserves `/fern/*` for its phone landing, readiness, and one-time
+pairing routes. A paired browser receives a process-local `HttpOnly` cookie;
+Fern injects the internal OpenCode credential when proxying every other route.
+Durable device grants, listing, revocation, administration, and GitHub callbacks
+are not implemented.
 
 Fern is not yet a complete remote coding product. It does not currently provide
-device pairing, durable task submission, notification delivery, repository
-authorization, Git credential brokerage, branch or PR publication, complete
-fresh-host restore, or automatic recovery after every host-reboot state.
+durable device identity, durable task submission, notification delivery,
+repository authorization, the planned GitHub App broker, complete fresh-host
+restore, or automatic recovery after every host-reboot state. Explicit host
+draft-PR publication is implemented as a constrained field-demo prototype.
 
 ## Documentation
 
@@ -50,7 +50,7 @@ fresh-host restore, or automatic recovery after every host-reboot state.
 - [OpenCode](./docs/OPENCODE.md): the V2 server contract, official web UI, persistence, and verification.
 - [Deployment](./docs/DEPLOYMENT.md): private systemd and Tailscale Serve runbook.
 - [Remote product](./docs/REMOTE_PRODUCT.md): end-to-end acceptance gaps and roadmap.
-- [GitHub integration](./docs/GITHUB_INTEGRATION.md): proposed host-side GitHub and publication boundary.
+- [GitHub integration](./docs/GITHUB_INTEGRATION.md): current host publication prototype and proposed GitHub App boundary.
 - [Lifecycle harness](./integration/lifecycle/README.md): real-Docker lifecycle test details.
 
 ## Requirements
@@ -58,23 +58,34 @@ fresh-host restore, or automatic recovery after every host-reboot state.
 - Go 1.24 or newer
 - a local Docker daemon with at least 8 GiB available; remote `DOCKER_HOST` endpoints are rejected
 - an API key supported by OpenCode, such as `ANTHROPIC_API_KEY`
-- a non-empty `OPENCODE_PASSWORD`
+- Tailscale on the host and phone for the private phone demo
+- GitHub CLI authentication for draft-PR publication
 
 ## Quick Start
 
 ```bash
 make image
-cp fern.example.yaml fern.yaml
-export OPENCODE_PASSWORD="$(openssl rand -hex 32)"
-go run ./cmd/fern up
+go run ./cmd/fern init --repo .
+# Add ANTHROPIC_API_KEY or OPENAI_API_KEY to fern.env.
+go run ./cmd/fern up --config fern.yaml --env-file fern.env
 ```
 
 Fern stays in the foreground because it owns the proxy, watcher, idle
 supervisor, and workspace lease. It prints the stable proxy origin, typically
 `http://127.0.0.1:8080`.
 
-Open that origin in a browser to use the official OpenCode web UI. Use the
-OpenCode Basic username `opencode` and the value of `OPENCODE_PASSWORD`.
+In another terminal, publish Fern privately and create a one-time phone pairing
+QR:
+
+```bash
+tailscale serve --bg http://127.0.0.1:8080
+go run ./cmd/fern doctor --config fern.yaml --env-file fern.env --phone
+```
+
+Scan the QR within five minutes. Fern exchanges its one-time code for a secure
+`HttpOnly` device cookie and opens the Fern landing page; tap **Open OpenCode**
+to enter the official UI without typing the generated Basic password. Pairing
+sessions currently live in the Fern process and must be renewed after restart.
 Clients must use the Fern origin rather than Docker's dynamic backend port so
 requests can wake compute and participate in pause admission.
 
@@ -98,7 +109,10 @@ YAML and command arguments.
 ## Commands
 
 ```bash
+go run ./cmd/fern init --repo .
+go run ./cmd/fern doctor --phone
 go run ./cmd/fern up
+go run ./cmd/fern github publish --title "Describe the change"
 go run ./cmd/fern attach
 go run ./cmd/fern status
 go run ./cmd/fern logs
@@ -112,6 +126,15 @@ retains OpenCode state. `status --json` emits stable machine-readable state;
 inspect its `state` field rather than treating a stopped or failed workspace as
 a command invocation failure.
 
+After OpenCode commits a clean change, `github publish` uses only the host's
+existing `gh` credential, pushes the exact `HEAD` commit to
+`fern/<workspace>/<operation>`, and creates or reuses one draft pull request. It
+rejects workflow changes, unsafe repository Git configuration, dirty trees,
+force pushes, arbitrary destinations, and GitHub credentials in workspace
+environment. To fence the mutable repository, stop `fern up`, run `fern down`,
+then publish as the same host user that runs Fern. This is a field-demo
+prototype, not GitHub App onboarding.
+
 Common overrides are:
 
 ```bash
@@ -124,9 +147,11 @@ go run ./cmd/fern up \
   -listen 127.0.0.1:8080
 ```
 
-Configuration precedence is flags, YAML, then defaults. Changing an existing
-container's image, repository, memory, or environment produces a spec-drift
-error. Run `fern down` and then `fern up`; `fern-<workspace>-v2-data` is retained.
+Configuration precedence is flags, YAML, then defaults. Values explicitly set
+in `workspace.env` override `--env-file`; selected process variables fill keys
+that remain absent. Changing an existing container's image, repository, memory,
+or environment produces a spec-drift error. Run `fern down` and then `fern up`;
+`fern-<workspace>-v2-data` is retained.
 Delete it only when its sessions and configuration are no longer needed:
 
 ```bash

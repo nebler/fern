@@ -1,7 +1,32 @@
 # GitHub Integration
 
-This document proposes Fern's GitHub authorization and publication boundary. It
-is not implemented behavior.
+This document defines Fern's GitHub authorization and publication boundary. A
+limited host-command prototype is implemented for the phone field demo; the
+GitHub App, container capability, durable journal, and onboarding design remain
+proposed.
+
+## Implemented Field Prototype
+
+After the agent commits a clean worktree, the host operator can run:
+
+```bash
+fern github publish --title "Describe the change"
+```
+
+The command validates a standard GitHub checkout, rejects dangerous local Git
+configuration, submodules, workflow changes, dirty state, unsupported refs, and
+non-GitHub origins. It obtains the existing host `gh` credential in memory,
+fetches the current base, requires `HEAD` to descend from it, pushes exactly
+`HEAD` without force to `fern/<workspace>/<operation>`, and creates or reuses a
+draft PR. Publication acquires the workspace lease and requires the container
+to be absent, so stop `fern up` and run `fern down` first. Run publication as
+the same host user that runs Fern. `FERN_GITHUB_TOKEN`, `GH_TOKEN`, and
+`GITHUB_TOKEN` are rejected from workspace environment so the obvious
+credential path into Docker is closed.
+
+This prototype uses the host user's broad `gh` credential and has no durable
+operation journal. It is suitable for an explicit field rehearsal, not the
+final least-privilege product boundary below.
 
 ## Decision
 

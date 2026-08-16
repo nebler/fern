@@ -46,12 +46,12 @@ browser or official OpenCode client
                  OpenCode data volume
 ```
 
-Today `/fern/*` has no implemented pairing or admin surface. The current proxy
-uses Basic auth and forwards OpenCode credentials. The production design will
-route `/fern/*` to Fern-owned device pairing, administration, and GitHub
-callbacks, authenticate a Fern `HttpOnly` device cookie, and inject internal
-OpenCode auth for proxied routes. Keep implemented and proposed behavior
-distinct.
+Fern now serves an authenticated landing page and readiness endpoint under
+`/fern/*`. A Basic-authenticated local request can mint a five-minute one-time
+pairing link; consuming it over private HTTPS creates a secure `HttpOnly` cookie
+and Fern injects internal OpenCode auth for proxied routes. Pairing state is
+process-local, so restart requires re-pairing. Device lists, durable grants,
+revocation, administration, and GitHub callbacks remain proposed.
 
 Fern is not a hostile-tenant sandbox. The service account can access Docker,
 the repository is writable by OpenCode, and provider credentials enter the
@@ -90,7 +90,10 @@ future Fern device credential.
 
 | Command | Role | Workspace lease |
 | --- | --- | --- |
+| `init` | Generate local demo config and protected secrets | None |
+| `doctor` | Check Docker, gateway, GitHub, Tailscale, and phone route | None |
 | `up` | Long-running supervisor and proxy | Exclusive writer |
+| `github publish` | Push exact committed `HEAD` and create/reuse one draft PR | None; explicit host prototype |
 | `down` | Remove compute and clear pause intent | Exclusive writer |
 | `status` | Inspect classified Docker state | Read-only |
 | `logs` | Stream Docker logs | Read-only |
@@ -102,6 +105,13 @@ future Fern device credential.
 cleanup remains possible when unrelated configuration is invalid. Normal
 clients use the proxy. `debug events` bypasses request admission and is not an
 application traffic path.
+
+`/fern/`, `/fern/ready`, and pairing routes are handled before workspace
+admission and do not wake compute. Every other route remains owned by OpenCode.
+The publication prototype requires the workspace lease and absent compute,
+obtains an existing `gh` token in host memory, never forwards it into Docker,
+and permits only a validated `github.com` origin and a Fern-owned branch. The
+intended in-process GitHub App broker and operation journal are not implemented.
 
 ## Desired And Observed State
 

@@ -19,9 +19,10 @@ OpenCode owns:
 - terminals, files, and diffs.
 
 Fern owns the container lifecycle, wake and pause admission, and the stable
-same-origin proxy. Future Fern services may add device delivery,
-notifications, publication, and recovery around OpenCode rather than copying
-its coding interface.
+same-origin proxy. Fern-owned `/fern/*` routes provide a small phone landing,
+gateway readiness, and one-time cookie pairing without copying the coding
+interface. Notifications, durable device administration, and recovery remain
+future services around OpenCode.
 
 ## Image And Configuration
 
@@ -64,6 +65,11 @@ Clients use Fern's stable origin for every OpenCode route, including `/`. Fern
 wakes stopped compute before forwarding ordinary UI and API requests, holds
 pause admission while relevant requests are active, streams responses, and
 preserves the origin expected by the official UI.
+
+`/fern/`, `/fern/ready`, `/fern/pair`, and `/fern/pair/new` are the only current
+Fern-owned HTTP routes. They do not acquire workspace admission or wake
+OpenCode. All other paths, including similar names such as `/fern-smoke`, are
+proxied unchanged.
 
 The lifecycle integration uses these V2 surfaces:
 
