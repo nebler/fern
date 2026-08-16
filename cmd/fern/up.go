@@ -25,6 +25,7 @@ import (
 func runUp(args []string, log *slog.Logger) error {
 	fs := newFlagSet("up", "Run the workspace supervisor and authenticated proxy.")
 	configPath := fs.String("config", "fern.yaml", "configuration file")
+	envPath := fs.String("env-file", "", "protected environment file")
 	name := fs.String("name", "", "workspace name")
 	image := fs.String("image", "", "workspace image")
 	repo := fs.String("repo", "", "host repository path")
@@ -45,6 +46,13 @@ func runUp(args []string, log *slog.Logger) error {
 	})
 	if err != nil {
 		return err
+	}
+	if *envPath != "" {
+		values, err := readEnvFile(*envPath)
+		if err != nil {
+			return err
+		}
+		cfg.Workspace.Env = mergeEnvironment(cfg.Workspace.Env, values)
 	}
 	cfg.Workspace.Env = forwardedEnvironment(cfg.Workspace.Env)
 	if err := config.Validate(cfg); err != nil {

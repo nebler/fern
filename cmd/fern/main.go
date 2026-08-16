@@ -35,6 +35,12 @@ func run(args []string, log *slog.Logger) error {
 	}
 	var err error
 	switch args[0] {
+	case "init":
+		err = runInit(args[1:])
+	case "doctor":
+		err = runDoctor(args[1:])
+	case "github":
+		err = runGitHub(args[1:])
 	case "up":
 		err = runUp(args[1:], log)
 	case "attach":

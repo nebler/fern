@@ -48,7 +48,7 @@ func runCLI(t *testing.T, args ...string) (string, string, int) {
 }
 
 func TestHelpFormsSucceed(t *testing.T) {
-	tests := [][]string{{"--help"}, {"-h"}, {"help"}, {"up", "--help"}, {"debug", "--help"}, {"help", "status"}, {"help", "debug", "events"}}
+	tests := [][]string{{"--help"}, {"-h"}, {"help"}, {"init", "--help"}, {"doctor", "--help"}, {"github", "--help"}, {"github", "publish", "--help"}, {"up", "--help"}, {"debug", "--help"}, {"help", "status"}, {"help", "debug", "events"}, {"help", "github", "publish"}}
 	for _, args := range tests {
 		stdout, stderr, code := runCLI(t, args...)
 		if code != 0 || stdout == "" || stderr != "" {

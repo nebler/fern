@@ -404,6 +404,10 @@ func ValidateWorkspace(config Config) error {
 		return fmt.Errorf("OPENCODE_PASSWORD must not be explicitly empty")
 	}
 	for key := range config.Workspace.Env {
+		switch key {
+		case "FERN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN":
+			return fmt.Errorf("%s is host-only and cannot be forwarded to the workspace", key)
+		}
 		if key == "" || strings.ContainsAny(key, "=\x00\r\n") {
 			return fmt.Errorf("invalid environment key %q", key)
 		}

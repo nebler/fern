@@ -53,12 +53,15 @@ func newFlagSet(command, description string) *flag.FlagSet {
 }
 
 var commandExamples = map[string]string{
-	"up":           "fern up --config /etc/fern/fern.yaml",
-	"attach":       "fern attach --url https://host.tailnet.ts.net",
-	"down":         "fern down --name demo",
-	"status":       "fern status --name demo --json",
-	"logs":         "fern logs --name demo --follow=false",
-	"debug events": "fern debug events --name demo",
+	"init":           "fern init --repo /path/to/repository",
+	"doctor":         "fern doctor --phone",
+	"github publish": "fern github publish --title 'Describe the change'",
+	"up":             "fern up --config /etc/fern/fern.yaml",
+	"attach":         "fern attach --url https://host.tailnet.ts.net",
+	"down":           "fern down --name demo",
+	"status":         "fern status --name demo --json",
+	"logs":           "fern logs --name demo --follow=false",
+	"debug events":   "fern debug events --name demo",
 }
 
 func parseFlags(flags *flag.FlagSet, args []string) error {
@@ -87,6 +90,9 @@ Usage:
   fern help [command]
 
 Commands:
+  init          Create a secure phone-demo configuration
+  doctor        Verify host and private phone-demo readiness
+  github        Publish committed work as a draft pull request
   up            Run the workspace supervisor and authenticated proxy
   attach        Open the official client through the Fern proxy
   status        Show the workspace runtime state
@@ -96,6 +102,7 @@ Commands:
   version       Print Fern version information
 
 Examples:
+  fern init --repo /path/to/repository
   fern up --config fern.yaml
   fern status --json
   fern attach
@@ -109,11 +116,15 @@ func runHelp(args []string, dispatch func([]string) error) error {
 		printTopLevelHelp(os.Stdout)
 		return nil
 	}
-	if len(args) == 1 && args[0] == "debug" {
-		fmt.Fprintln(os.Stdout, "Usage:\n  fern debug events [flags]")
+	if len(args) == 1 && (args[0] == "debug" || args[0] == "github") {
+		if args[0] == "debug" {
+			fmt.Fprintln(os.Stdout, "Usage:\n  fern debug events [flags]")
+		} else {
+			fmt.Fprintln(os.Stdout, "Usage:\n  fern github publish [flags]")
+		}
 		return nil
 	}
-	if len(args) > 2 || len(args) == 2 && (args[0] != "debug" || args[1] != "events") {
+	if len(args) > 2 || len(args) == 2 && !((args[0] == "debug" && args[1] == "events") || (args[0] == "github" && args[1] == "publish")) {
 		return invocationError{message: "usage: fern help [command]"}
 	}
 	helpArgs := append([]string(nil), args...)
@@ -133,7 +144,7 @@ func unknownCommand(args []string) error {
 }
 
 func suggestCommand(input string) string {
-	commands := []string{"up", "attach", "down", "status", "logs", "version", "debug events"}
+	commands := []string{"init", "doctor", "github publish", "up", "attach", "down", "status", "logs", "version", "debug events"}
 	best, distance := "", 3
 	for _, command := range commands {
 		if current := editDistance(input, command); current < distance {

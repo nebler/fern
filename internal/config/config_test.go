@@ -70,6 +70,22 @@ func TestValidateRequiresAuthentication(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsHostGitHubCredentials(t *testing.T) {
+	t.Parallel()
+	for _, key := range []string{"FERN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
+		key := key
+		t.Run(key, func(t *testing.T) {
+			t.Parallel()
+			value := Default(t.TempDir())
+			value.Workspace.Env["OPENCODE_PASSWORD"] = "secret"
+			value.Workspace.Env[key] = "must-stay-on-host"
+			if err := Validate(value); err == nil {
+				t.Fatalf("Validate accepted host-only %s", key)
+			}
+		})
+	}
+}
+
 func TestLoadPasswordForWorkspaceAndClients(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
