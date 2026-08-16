@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -130,9 +131,15 @@ func diagnose(configPath, envPath string, phone bool, explicitURL string) doctor
 		} else if err := checkReady(validated, cfg.Workspace.Env["OPENCODE_PASSWORD"]); err != nil {
 			add("phone", "fail", "private phone URL did not reach Fern", "Check Tailscale on both devices and the Serve mapping.")
 		} else {
-			report.PhoneURL = strings.TrimRight(validated, "/") + "/fern/"
-			add("tailscale", "pass", "private HTTPS route reaches Fern", "")
-			add("phone", "pass", "phone-demo transport is ready", "")
+			code, pairErr := issuePairingCode(localURL, cfg.Workspace.Env["OPENCODE_PASSWORD"])
+			if pairErr != nil {
+				add("pairing", "fail", "could not create a one-time phone pairing link", "Ensure the local Fern process is the current build.")
+			} else {
+				report.PhoneURL = strings.TrimRight(validated, "/") + "/fern/pair?code=" + url.QueryEscape(code)
+				add("tailscale", "pass", "private HTTPS route reaches Fern", "")
+				add("pairing", "pass", "one-time phone pairing link created", "")
+				add("phone", "pass", "phone-demo transport is ready", "")
+			}
 		}
 	}
 	return report
@@ -172,6 +179,34 @@ func checkReady(origin, password string) error {
 	return nil
 }
 
+func issuePairingCode(origin, password string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(origin, "/")+"/fern/pair/new", nil)
+	if err != nil {
+		return "", err
+	}
+	fernRuntime.ServerAuth{Password: password}.Apply(request)
+	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("pairing endpoint returned %s", response.Status)
+	}
+	var result struct {
+		Code string `json:"code"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<10)).Decode(&result); err != nil {
+		return "", err
+	}
+	if result.Code == "" {
+		return "", fmt.Errorf("pairing endpoint returned no code")
+	}
+	return result.Code, nil
+}
+
 var httpsOriginPattern = regexp.MustCompile(`https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?`)
 
 func discoverTailscaleURL() (string, error) {
@@ -206,7 +241,7 @@ func writeDoctorReport(writer io.Writer, report doctorReport, showQR bool) {
 	if report.PhoneURL == "" {
 		return
 	}
-	fmt.Fprintf(writer, "\nPhone URL: %s\n", report.PhoneURL)
+	fmt.Fprintf(writer, "\nOne-time phone URL (expires in 5 minutes):\n%s\n", report.PhoneURL)
 	if showQR {
 		_ = writeQR(writer, report.PhoneURL)
 	}

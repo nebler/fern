@@ -27,12 +27,13 @@ type proxyTarget struct {
 }
 
 func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
+	pairing := newPairingState()
 	var upstream http.Handler
 	if waker == nil {
 		upstream = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 			http.Error(writer, "workspace manager unavailable", http.StatusServiceUnavailable)
 		})
-		return requireServerAuth(gatewayHandler(upstream), auth)
+		return pairing.handler(gatewayHandler(upstream), auth)
 	}
 	if log == nil {
 		log = slog.Default()
@@ -79,7 +80,7 @@ func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
 		ctx := context.WithValue(request.Context(), targetKey{}, proxyTarget{url: targetURL, request: target, intent: intent})
 		reverseProxy.ServeHTTP(writer, request.WithContext(ctx))
 	})
-	return requireServerAuth(gatewayHandler(upstream), auth)
+	return pairing.handler(gatewayHandler(upstream), auth)
 }
 
 func requestIntent(request *http.Request) workspace.RequestIntent {
