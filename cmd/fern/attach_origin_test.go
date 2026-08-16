@@ -3,6 +3,8 @@ package main
 import (
 	"slices"
 	"testing"
+
+	"github.com/nebler/fern/internal/config"
 )
 
 func TestAttachTargetAcceptsExplicitOrigins(t *testing.T) {
@@ -25,6 +27,24 @@ func TestAttachTargetAcceptsExplicitOrigins(t *testing.T) {
 				t.Fatalf("attachTarget(%q) = %q, want %q", input, got, want)
 			}
 		})
+	}
+}
+
+func TestAttachCommandUsesProtocolClient(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		protocol   config.OpenCodeProtocol
+		executable string
+		args       []string
+	}{
+		{protocol: config.OpenCodeV1, executable: "opencode", args: []string{"attach", "https://fern.example"}},
+		{protocol: config.OpenCodeV2, executable: "opencode2", args: []string{"--server", "https://fern.example"}},
+	}
+	for _, test := range tests {
+		executable, args := attachCommand(test.protocol, "https://fern.example")
+		if executable != test.executable || !slices.Equal(args, test.args) {
+			t.Fatalf("attachCommand(%q) = %q %v, want %q %v", test.protocol, executable, args, test.executable, test.args)
+		}
 	}
 }
 

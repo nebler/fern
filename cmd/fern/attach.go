@@ -1,7 +1,7 @@
 package main
 
 import (
-	"errors"
+	"context"
 	"flag"
 	"fmt"
 	"net"
@@ -10,8 +10,10 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/nebler/fern/internal/config"
+	"github.com/nebler/fern/internal/runtime"
 )
 
 func runAttach(args []string) error {
@@ -30,19 +32,39 @@ func runAttach(args []string) error {
 	if err != nil {
 		return err
 	}
-	executable, err := exec.LookPath("opencode")
-	if err != nil {
-		return errors.New("opencode is not installed or not in PATH; install it from https://opencode.ai")
+	protocol := client.OpenCode
+	if protocol == config.OpenCodeAuto {
+		env := forwardedEnvironmentFor(client.OpenCode, client.Env)
+		detected, err := runtime.WaitHealthyURL(context.Background(), target, runtime.ServerAuth{
+			Protocol: runtime.ProtocolAuto, Username: env["OPENCODE_SERVER_USERNAME"],
+			Password: env["OPENCODE_SERVER_PASSWORD"], V2Password: env["OPENCODE_PASSWORD"],
+		}, runtime.ProtocolAuto, 60*time.Second)
+		if err != nil {
+			return fmt.Errorf("detect OpenCode protocol: %w", err)
+		}
+		protocol = config.OpenCodeProtocol(detected)
 	}
-	command := exec.Command(executable, "attach", target)
-	command.Env = attachEnvironment(os.Environ(), forwardedEnvironment(client.Env))
+	executableName, commandArgs := attachCommand(protocol, target)
+	executable, err := exec.LookPath(executableName)
+	if err != nil {
+		return fmt.Errorf("%s is not installed or not in PATH; install it from https://opencode.ai", executableName)
+	}
+	command := exec.Command(executable, commandArgs...)
+	command.Env = attachEnvironmentFor(protocol, os.Environ(), forwardedEnvironmentFor(protocol, client.Env))
 	command.Stdin = os.Stdin
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	if err := command.Run(); err != nil {
-		return fmt.Errorf("opencode attach: %w", err)
+		return fmt.Errorf("%s client: %w", executableName, err)
 	}
 	return nil
+}
+
+func attachCommand(protocol config.OpenCodeProtocol, target string) (string, []string) {
+	if protocol == config.OpenCodeV2 {
+		return "opencode2", []string{"--server", target}
+	}
+	return "opencode", []string{"attach", target}
 }
 
 func attachTarget(explicitOrigin *string, listenAddress string) (string, error) {
@@ -97,20 +119,36 @@ func attachURL(address string) (string, error) {
 }
 
 func attachEnvironment(base []string, configured map[string]string) []string {
+	return attachEnvironmentFor(config.OpenCodeV1, base, configured)
+}
+
+func attachEnvironmentFor(protocol config.OpenCodeProtocol, base []string, configured map[string]string) []string {
 	const username = "OPENCODE_SERVER_USERNAME"
 	const password = "OPENCODE_SERVER_PASSWORD"
-	result := make([]string, 0, len(base)+2)
+	const v2Password = "OPENCODE_PASSWORD"
+	result := make([]string, 0, len(base)+3)
 	for _, value := range base {
 		key, _, _ := strings.Cut(value, "=")
-		if key != username && key != password {
+		if key != username && key != password && key != v2Password {
 			result = append(result, value)
 		}
+	}
+	if protocol == config.OpenCodeV2 {
+		if value := configured[v2Password]; value != "" {
+			result = append(result, v2Password+"="+value)
+		}
+		return result
 	}
 	if value := configured[username]; value != "" {
 		result = append(result, username+"="+value)
 	}
 	if value := configured[password]; value != "" {
 		result = append(result, password+"="+value)
+	}
+	if protocol == config.OpenCodeAuto {
+		if value := configured[v2Password]; value != "" {
+			result = append(result, v2Password+"="+value)
+		}
 	}
 	return result
 }

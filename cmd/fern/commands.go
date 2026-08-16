@@ -44,6 +44,7 @@ func runResume(args []string, log *slog.Logger) error {
 	configPath := fs.String("config", "fern.yaml", "configuration file")
 	name := fs.String("name", "", "workspace name")
 	image := fs.String("image", "", "workspace image")
+	opencodeProtocol := fs.String("opencode", "", "OpenCode protocol (v1, v2, or auto)")
 	repo := fs.String("repo", "", "host repository path")
 	memory := fs.String("memory", "", "memory limit")
 	if err := parseFlags(fs, args); err != nil {
@@ -56,11 +57,12 @@ func runResume(args []string, log *slog.Logger) error {
 	cfg, err := config.LoadWorkspace(*configPath, cwd, flagSet(fs, "config"), config.Overrides{
 		Name: optionalFlag(fs, "name", name), Image: optionalFlag(fs, "image", image),
 		Repo: optionalFlag(fs, "repo", repo), Memory: optionalFlag(fs, "memory", memory),
+		OpenCode: optionalFlag(fs, "opencode", opencodeProtocol),
 	})
 	if err != nil {
 		return err
 	}
-	cfg.Workspace.Env = forwardedEnvironment(cfg.Workspace.Env)
+	cfg.Workspace.Env = forwardedEnvironmentFor(cfg.Workspace.OpenCode, cfg.Workspace.Env)
 	if err := config.ValidateWorkspace(cfg); err != nil {
 		return err
 	}
@@ -68,7 +70,10 @@ func runResume(args []string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	spec := runtime.Spec{Name: cfg.Workspace.Name, Image: cfg.Workspace.Image, RepoPath: cfg.Workspace.Repo, MemoryBytes: memoryBytes, Env: cfg.Workspace.Env}
+	spec := runtime.Spec{
+		Name: cfg.Workspace.Name, Image: cfg.Workspace.Image, RepoPath: cfg.Workspace.Repo,
+		MemoryBytes: memoryBytes, Protocol: runtime.Protocol(cfg.Workspace.OpenCode), Env: cfg.Workspace.Env,
+	}
 	ctx, cancel := commandContext()
 	defer cancel()
 	lease, err := acquireWorkspaceLease(spec.Name)
@@ -143,17 +148,30 @@ func runEvents(args []string, log *slog.Logger) error {
 	if observation.State != runtime.StateRunning || !observation.HasEndpoint {
 		return fmt.Errorf("workspace %q is %s; start it before reading events", client.Name, observation.State)
 	}
-	env := forwardedEnvironment(client.Env)
-	auth := runtime.ServerAuth{Username: env["OPENCODE_SERVER_USERNAME"], Password: env["OPENCODE_SERVER_PASSWORD"]}
+	env := forwardedEnvironmentFor(client.OpenCode, client.Env)
+	auth := runtime.ServerAuth{
+		Protocol: runtime.Protocol(client.OpenCode), Username: env["OPENCODE_SERVER_USERNAME"],
+		Password: env["OPENCODE_SERVER_PASSWORD"], V2Password: env["OPENCODE_PASSWORD"],
+	}
+	protocol, err := runtime.WaitHealthyProtocol(ctx, observation.Endpoint, auth, runtime.Protocol(client.OpenCode), 60*time.Second)
+	if err != nil {
+		return fmt.Errorf("detect OpenCode protocol: %w", err)
+	}
 	events := make(chan watch.Event, 128)
-	go watch.StreamForever(ctx, watch.StreamOptions{BaseURL: observation.Endpoint.URL(), Auth: auth}, events, log)
+	go watch.StreamForever(ctx, watch.StreamOptions{
+		BaseURL: observation.Endpoint.URL(), Protocol: protocol, Auth: auth,
+	}, events, log)
 	last := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case event := <-events:
-			properties := string(event.Properties)
+			payload := event.Properties
+			if len(payload) == 0 {
+				payload = event.Data
+			}
+			properties := string(payload)
 			if len(properties) > 160 {
 				properties = properties[:160] + "..."
 			}
