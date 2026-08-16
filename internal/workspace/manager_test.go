@@ -458,9 +458,12 @@ func TestRequestCannotCrossAuthoritativePauseCheck(t *testing.T) {
 	fake := newFakeRuntime(runtime.StateRunning)
 	idleStarted := make(chan struct{})
 	allowIdle := make(chan struct{})
+	var firstIdle sync.Once
 	manager := newTestManager(fake, nil, func(context.Context, runtime.Endpoint) (bool, error) {
-		close(idleStarted)
-		<-allowIdle
+		firstIdle.Do(func() {
+			close(idleStarted)
+			<-allowIdle
+		})
 		return true, nil
 	})
 	pauseDone := make(chan error, 1)
@@ -497,6 +500,27 @@ func TestAuthoritativeBusyStatusDefersPause(t *testing.T) {
 	manager := newTestManager(fake, nil, func(context.Context, runtime.Endpoint) (bool, error) { return false, nil })
 	if err := manager.Pause(context.Background()); !errors.Is(err, ErrSessionsActive) {
 		t.Fatalf("Pause error = %v, want ErrSessionsActive", err)
+	}
+}
+
+func TestActivityStartingBetweenSnapshotsDefersPause(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRuntime(runtime.StateRunning)
+	checks := 0
+	manager := newTestManager(fake, nil, func(context.Context, runtime.Endpoint) (bool, error) {
+		checks++
+		return checks == 1, nil
+	})
+	if err := manager.Pause(context.Background()); !errors.Is(err, ErrSessionsActive) {
+		t.Fatalf("Pause error = %v, want %v", err, ErrSessionsActive)
+	}
+	if checks != 2 {
+		t.Fatalf("idle checks = %d, want 2", checks)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.pauseN != 0 {
+		t.Fatalf("runtime pause calls = %d, want 0", fake.pauseN)
 	}
 }
 

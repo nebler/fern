@@ -283,12 +283,17 @@ func (m *Manager) Pause(ctx context.Context) error {
 	if m.allIdle == nil {
 		return errors.New("authoritative idle checker is required")
 	}
-	idle, err := m.allIdle(ctx, observation.Endpoint)
-	if err != nil {
-		return err
-	}
-	if !idle {
-		return ErrSessionsActive
+	// OpenCode exposes activity through separate endpoints rather than one
+	// atomic snapshot. Require two clean passes while admission remains closed
+	// so activity beginning during the first pass defers the stop.
+	for range 2 {
+		idle, err := m.allIdle(ctx, observation.Endpoint)
+		if err != nil {
+			return err
+		}
+		if !idle {
+			return ErrSessionsActive
+		}
 	}
 	return m.pauseRuntime(ctx)
 }
