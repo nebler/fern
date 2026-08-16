@@ -64,3 +64,26 @@ jobs:
           test "$(docker run --rm --entrypoint id '${{ matrix.tag }}' -u)" = "1001"
           test "$(docker run --rm --entrypoint id '${{ matrix.tag }}' -g)" = "1001"
           docker run --rm --entrypoint "${{ matrix.executable }}" "${{ matrix.tag }}" --version
+
+  lifecycle:
+    name: Docker lifecycle (${{ matrix.protocol }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        protocol: [v1, v2]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Run real Docker lifecycle harness
+        env:
+          FERN_LIFECYCLE_PROTOCOL: ${{ matrix.protocol }}
+        run: ./scripts/test-lifecycle.sh

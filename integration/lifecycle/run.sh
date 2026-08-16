@@ -132,11 +132,13 @@ cleanup() {
   trap - EXIT INT TERM
   if (( status != 0 )); then FAILED=1; fi
   capture_diagnostics
+  # Keep mode retains evidence and Docker state, never host listeners or helper
+  # processes that can interfere with later runs.
+  stop_fern || true
+  if [[ -n "$EVENTS_PID" ]]; then kill "$EVENTS_PID" 2>/dev/null || true; wait "$EVENTS_PID" 2>/dev/null || true; fi
   if [[ "$KEEP" == "1" ]]; then
     note "resources retained by request: home=$HOME_DIR container=$NAME volume=$VOLUME image=$IMAGE"
   else
-    stop_fern || true
-    if [[ -n "$EVENTS_PID" ]]; then kill "$EVENTS_PID" 2>/dev/null || true; wait "$EVENTS_PID" 2>/dev/null || true; fi
     docker rm -f "$BLOCKER" >/dev/null 2>&1 || true
     docker rm -f "$NAME" >/dev/null 2>&1 || true
     docker volume rm "$VOLUME" >/dev/null 2>&1 || true

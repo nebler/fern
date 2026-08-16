@@ -22,7 +22,8 @@ Useful environment variables:
 - `FERN_LIFECYCLE_IMAGE=image:tag` uses an existing simulator-compatible image.
 - `FERN_LIFECYCLE_ARTIFACTS=/path` selects the evidence directory.
 - `FERN_LIFECYCLE_KEEP_RESOURCES=1` retains the isolated HOME, container, volume,
-  image, and fixture after success or failure.
+  image, and fixture after success or failure. Fern and Docker event-monitor
+  host processes are still terminated.
 - `FERN_LIFECYCLE_WAKE_COUNT=10` controls measured wake repetitions; values below
   ten are rejected because ten is part of the harness contract.
 - `FERN_LIFECYCLE_PROTOCOL=v1|v2` selects the strict protocol fixture. V1 is the

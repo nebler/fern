@@ -26,6 +26,10 @@ case "$commit" in
 		exit 1
 		;;
 esac
+if [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+	printf 'error: release builds require a clean working tree\n' >&2
+	exit 1
+fi
 
 staging=$(mktemp -d "${TMPDIR:-/tmp}/fern-release.XXXXXX")
 backup=
@@ -41,7 +45,10 @@ cleanup() {
 	fi
 	exit "$status"
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 ldflags="-s -w -buildid= -X main.version=$version -X main.commit=$commit"
 for arch in amd64 arm64; do

@@ -20,6 +20,7 @@ BOOT_ID = f"{socket.gethostname()}-{time.time_ns()}"
 subscribers = set()
 subscribers_lock = threading.Lock()
 statuses = {}
+statuses_lock = threading.Lock()
 event_connections = 0
 last_event_connected_ns = 0
 
@@ -32,7 +33,8 @@ def authorized(header):
 
 
 def publish(session_id, status):
-    statuses[session_id] = {"type": status}
+    with statuses_lock:
+        statuses[session_id] = {"type": status}
     event = {
         "type": "session.status",
         "data" if PROTOCOL == "v2" else "properties": {"sessionID": session_id, "status": {"type": status}},
@@ -77,9 +79,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == ("/api/health" if PROTOCOL == "v2" else "/global/health"):
             self.json_response({"healthy": True, "version": "0.0.0-next-17444" if PROTOCOL == "v2" else "1.18.16", "boot_id": BOOT_ID})
         elif PROTOCOL == "v1" and parsed.path == "/session/status":
-            self.json_response(statuses)
+            with statuses_lock:
+                snapshot = dict(statuses)
+            self.json_response(snapshot)
         elif PROTOCOL == "v2" and parsed.path == "/api/session/active":
-            self.json_response({"data": {key: {"type": "running"} for key, value in statuses.items() if value["type"] != "idle"}})
+            with statuses_lock:
+                active = {key: {"type": "running"} for key, value in statuses.items() if value["type"] != "idle"}
+            self.json_response({"data": active})
         elif PROTOCOL == "v2" and parsed.path in ("/api/shell", "/api/pty", "/api/permission/request", "/api/form/request"):
             self.json_response({"data": []})
         elif parsed.path == "/control/identity":
