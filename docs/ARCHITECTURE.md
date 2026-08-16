@@ -1,7 +1,7 @@
 # Current Architecture
 
-**Authority:** current first-party code and tests as of 2026-08-16. Historical
-design and research documents are indexed in [DOCUMENTATION.md](./DOCUMENTATION.md).
+This document describes the implemented first-party system. Code and tests are
+authoritative if behavior changes.
 
 ## System Boundary
 

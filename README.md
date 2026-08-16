@@ -29,12 +29,10 @@ Kubernetes, setup snapshots, resume hooks, Fern-managed TLS/public ingress, and 
 
 ## Documentation
 
-- [docs/DOCUMENTATION.md](./docs/DOCUMENTATION.md): map of current, historical, and research documents.
-- [docs/ARCHITECTURE_CURRENT.md](./docs/ARCHITECTURE_CURRENT.md): current end-to-end system model, state, trust boundaries, and limitations.
+- [docs/ARCHITECTURE.md](./docs/ARCHITECTURE.md): end-to-end system model, state, trust boundaries, and limitations.
 - [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md): supervised systemd and private Tailscale Serve deployment runbook.
 - [docs/OPENCODE_V2.md](./docs/OPENCODE_V2.md): pinned V2 beta configuration, protocol mapping, state isolation, and verification.
 - [integration/lifecycle/README.md](./integration/lifecycle/README.md): repeatable real-Docker lifecycle and timing harness.
-- [todo/pre-phone/README.md](./todo/pre-phone/README.md): current delivery and external-evidence tracker.
 
 ## Requirements
 
@@ -166,7 +164,7 @@ FERN_V2_IMAGE=fern/opencode-v2:dev ./scripts/test-opencode-v2.sh
 
 Fern stops only after a currently connected watcher epoch has reported busy followed by every active session becoming idle. A disconnect or a request that may start work invalidates that boundary. When the timer expires, Fern blocks new held requests and independently confirms the selected protocol's activity snapshots are all idle before stopping. V1 checks `/session/status`; V2 checks foreground sessions, shells, PTYs, permissions, and forms. Retry is busy; unknown state leaves compute running.
 
-This boundary matters because OpenCode reconstructs completed conversation state from SQLite, but active provider streams, tool execution, partial streamed fragments, and permission waiters live in process memory. Stopping mid-turn can silently abandon work. The source and crash-test evidence is in [DAY-1.md](./DAY-1.md).
+This boundary matters because OpenCode reconstructs completed conversation state from SQLite, but active provider streams, tool execution, partial streamed fragments, and permission waiters live in process memory. Stopping mid-turn can silently abandon work, so Fern never claims mid-turn crash recovery.
 
 The guarantee assumes clients use the stable Fern proxy. Docker still publishes a loopback backend port for Fern's host process, but Fern does not advertise it. A same-host principal with Docker inspection access can bypass request admission and is already inside Fern's trusted-host boundary.
 
