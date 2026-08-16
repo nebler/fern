@@ -3,9 +3,12 @@
 `../../scripts/test-lifecycle.sh` runs the production Fern binary as a host
 process and exercises its Docker runtime through the stable HTTP proxy. The
 container image in this directory is a deterministic implementation of the
-small OpenCode protocol surface Fern consumes: health, Basic authentication,
-SSE `session.status`, and `/session/status`. It is not a provider emulator and
-does not claim to test model output.
+small OpenCode protocol surface Fern consumes. In V1 mode that is
+`/global/health`, `/event`, and `/session/status`; in V2 mode it is
+`/api/health`, `/api/event`, `/api/session/active`, and the shell, PTY,
+permission, and form activity snapshots. The modes are deliberately exclusive
+so a wrong protocol path fails. It is not a provider emulator and does not
+claim to test model output.
 
 The deterministic scenarios are mandatory. In particular, stopped-workspace
 authentication is capability-detected by behavior: missing or invalid
@@ -22,12 +25,21 @@ Useful environment variables:
   image, and fixture after success or failure.
 - `FERN_LIFECYCLE_WAKE_COUNT=10` controls measured wake repetitions; values below
   ten are rejected because ten is part of the harness contract.
+- `FERN_LIFECYCLE_PROTOCOL=v1|v2` selects the strict protocol fixture. V1 is the
+  default.
 
 Provider-backed scenarios are intentionally reported as not run. They require a
 real OpenCode image, credentials, provider availability, and model billing, and
 therefore cannot be deterministic or mandatory in this black-box suite. Run
 normal OpenCode smoke tests separately when those dependencies are explicitly
 available. The report distinguishes this from a mandatory skip.
+
+The pinned real V2 artifact has a separate smoke test:
+
+```bash
+make image-v2
+FERN_V2_IMAGE=fern/opencode-v2:dev ../../scripts/test-opencode-v2.sh
+```
 
 Evidence includes a scenario transcript, redacted Fern and container logs,
 Docker events/inspection/stats, host memory context, and wake timing TSV. Secrets

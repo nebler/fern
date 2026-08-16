@@ -6,7 +6,17 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-$RANDOM"
 SAFE_ID=$(printf '%s' "$RUN_ID" | tr -cd 'A-Za-z0-9_.-')
 NAME="fern-it-$SAFE_ID"
 BLOCKER="fern-it-blocker-$SAFE_ID"
-VOLUME="fern-$NAME-data"
+PROTOCOL=${FERN_LIFECYCLE_PROTOCOL:-v1}
+[[ "$PROTOCOL" == "v1" || "$PROTOCOL" == "v2" ]] || { echo "FERN_LIFECYCLE_PROTOCOL must be v1 or v2" >&2; exit 1; }
+if [[ "$PROTOCOL" == "v2" ]]; then
+  VOLUME="fern-$NAME-v2-data"
+  HEALTH_PATH=/api/health
+  USERNAME=opencode
+else
+  VOLUME="fern-$NAME-data"
+  HEALTH_PATH=/global/health
+  USERNAME=lifecycle
+fi
 IMAGE=${FERN_LIFECYCLE_IMAGE:-"fern/lifecycle:$SAFE_ID"}
 ARTIFACTS=${FERN_LIFECYCLE_ARTIFACTS:-"$ROOT/integration/artifacts/$RUN_ID"}
 RUN_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fern-lifecycle.XXXXXX")
@@ -19,7 +29,6 @@ TRANSCRIPT="$ARTIFACTS/transcript.log"
 EVENTS="$ARTIFACTS/docker-events.log"
 TIMINGS="$ARTIFACTS/wake-timings.tsv"
 PASSWORD="lifecycle-$SAFE_ID-secret"
-USERNAME="lifecycle"
 KEEP=${FERN_LIFECYCLE_KEEP_RESOURCES:-0}
 WAKE_COUNT=${FERN_LIFECYCLE_WAKE_COUNT:-10}
 FERN_BIN=${FERN_BIN:-}
@@ -163,6 +172,7 @@ export GOCACHE="$RUN_ROOT/cache/go-build"
 export GOPATH="$RUN_ROOT/go"
 export OPENCODE_SERVER_USERNAME="$USERNAME"
 export OPENCODE_SERVER_PASSWORD="$PASSWORD"
+export OPENCODE_PASSWORD="$PASSWORD"
 unset ANTHROPIC_API_KEY OPENAI_API_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 
 if [[ -n ${FERN_BIN:-} ]]; then
@@ -198,7 +208,9 @@ workspace:
   image: $IMAGE
   repo: $REPO_DIR
   memory: 128Mi
-  env: {}
+  opencode: $PROTOCOL
+  env:
+    FERN_OPENCODE_PROTOCOL: $PROTOCOL
 idle:
   after: 2s
 proxy:
@@ -230,7 +242,7 @@ wait_status() {
 wait_http() {
   local deadline=$((SECONDS + 70)) code
   while (( SECONDS < deadline )); do
-    code=$(http_code /dev/null --user "$USERNAME:$PASSWORD" "$PROXY_URL/global/health" 2>/dev/null || true)
+    code=$(http_code /dev/null --user "$USERNAME:$PASSWORD" "$PROXY_URL$HEALTH_PATH" 2>/dev/null || true)
     [[ "$code" == "200" ]] && return 0
     kill -0 "$FERN_PID" 2>/dev/null || fail "Fern exited before becoming ready"
     sleep 0.2
@@ -260,7 +272,7 @@ container_started_at() { docker inspect --format '{{.State.StartedAt}}' "$NAME";
 container_id() { docker inspect --format '{{.Id}}' "$NAME"; }
 endpoint() { docker port "$NAME" 4096/tcp | awk -F: 'NR==1 {print $NF}'; }
 
-note "scenario 1/13: create and become healthy"
+note "protocol=$PROTOCOL scenario 1/13: create and become healthy"
 start_fern
 wait_status running
 initial_id=$(container_id)
@@ -273,8 +285,8 @@ identity=$(auth_curl --fail "$PROXY_URL/control/identity")
 note "scenario 3/13: stopped requests reject missing/wrong credentials without wake"
 stop_by_idle
 before_start=$(container_started_at)
-missing_code=$(http_code "$ARTIFACTS/missing-auth.body" "$PROXY_URL/global/health" || true)
-wrong_code=$(http_code "$ARTIFACTS/wrong-auth.body" --user "$USERNAME:wrong" "$PROXY_URL/global/health" || true)
+missing_code=$(http_code "$ARTIFACTS/missing-auth.body" "$PROXY_URL$HEALTH_PATH" || true)
+wrong_code=$(http_code "$ARTIFACTS/wrong-auth.body" --user "$USERNAME:wrong" "$PROXY_URL$HEALTH_PATH" || true)
 [[ "$missing_code" == 401 && "$wrong_code" == 401 ]] || fail "stopped auth expected 401/401, got $missing_code/$wrong_code; pre-wake auth capability is mandatory"
 sleep 0.5
 wait_status paused 2
@@ -284,7 +296,7 @@ note "scenario 4/13: concurrent authorized requests coalesce into one wake"
 starts_before=$(grep -c '"Action":"start"' "$EVENTS" || true)
 pids=()
 for index in {1..12}; do
-  auth_curl --fail "$PROXY_URL/global/health" >"$ARTIFACTS/concurrent-$index.json" & pids+=("$!")
+  auth_curl --fail "$PROXY_URL$HEALTH_PATH" >"$ARTIFACTS/concurrent-$index.json" & pids+=("$!")
 done
 for pid in "${pids[@]}"; do wait "$pid" || fail "concurrent authorized request failed"; done
 sleep 0.3
@@ -295,7 +307,7 @@ note "scenario 5/13: busy-to-idle activity stops compute"
 stop_by_idle
 
 note "scenario 6/13: held request prevents stop"
-auth_curl --fail "$PROXY_URL/global/health" >/dev/null
+auth_curl --fail "$PROXY_URL$HEALTH_PATH" >/dev/null
 auth_curl --fail "$PROXY_URL/control/hold?seconds=4" >"$ARTIFACTS/held-request.json" &
 hold_pid=$!
 sleep 0.2
@@ -307,14 +319,14 @@ wait "$hold_pid" || fail "held request failed"
 wait_status paused 10
 
 note "scenario 7/13: changed dynamic backend endpoint is discovered after stale failure"
-auth_curl --fail "$PROXY_URL/global/health" >/dev/null
+auth_curl --fail "$PROXY_URL$HEALTH_PATH" >/dev/null
 old_port=$(endpoint)
 docker rm -f "$NAME" >/dev/null
-docker run -d --name "$BLOCKER" --label "dev.fern.lifecycle=$RUN_ID" -p "127.0.0.1:$old_port:4096" "$IMAGE" >/dev/null
+docker run -d --name "$BLOCKER" --label "dev.fern.lifecycle=$RUN_ID" -e "FERN_OPENCODE_PROTOCOL=$PROTOCOL" -e "OPENCODE_SERVER_USERNAME=$USERNAME" -e "OPENCODE_SERVER_PASSWORD=$PASSWORD" -e "OPENCODE_PASSWORD=$PASSWORD" -p "127.0.0.1:$old_port:4096" "$IMAGE" >/dev/null
 BLOCKER_STARTED=1
-first_code=$(http_code "$ARTIFACTS/stale-endpoint.body" --user "$USERNAME:$PASSWORD" --max-time 5 "$PROXY_URL/global/health" || true)
+first_code=$(http_code "$ARTIFACTS/stale-endpoint.body" --user "$USERNAME:$PASSWORD" --max-time 5 "$PROXY_URL$HEALTH_PATH" || true)
 [[ "$first_code" == 502 || "$first_code" == 503 || "$first_code" == 000 ]] || fail "stale endpoint did not fail safely (HTTP $first_code)"
-second_code=$(http_code "$ARTIFACTS/dynamic-endpoint.body" --user "$USERNAME:$PASSWORD" --max-time 70 "$PROXY_URL/global/health" || true)
+second_code=$(http_code "$ARTIFACTS/dynamic-endpoint.body" --user "$USERNAME:$PASSWORD" --max-time 70 "$PROXY_URL$HEALTH_PATH" || true)
 [[ "$second_code" == 200 ]] || fail "request after stale endpoint did not wake replacement (HTTP $second_code)"
 new_port=$(endpoint)
 [[ "$new_port" != "$old_port" ]] || fail "backend endpoint did not change while old port was occupied"
@@ -324,7 +336,7 @@ BLOCKER_STARTED=0
 note "scenario 8/13: repository and OpenCode data survive stop/start"
 auth_curl --fail --request POST --header 'Content-Type: application/json' --data "{\"marker\":\"$RUN_ID\"}" "$PROXY_URL/control/persist" >/dev/null
 stop_by_idle
-auth_curl --fail "$PROXY_URL/global/health" >/dev/null
+auth_curl --fail "$PROXY_URL$HEALTH_PATH" >/dev/null
 persisted=$(auth_curl --fail "$PROXY_URL/control/persist")
 [[ "$persisted" == *"$RUN_ID"* ]] || fail "OpenCode data did not survive stop/start"
 grep -q "$RUN_ID" "$REPO_DIR/container-state.json" || fail "container-written repository data did not survive stop/start"
@@ -345,7 +357,7 @@ for ((iteration=1; iteration<=WAKE_COUNT; iteration++)); do
   request_time=$(timestamp)
   timing_file="$RUN_ROOT/timing-$iteration"
   body_file="$RUN_ROOT/body-$iteration"
-  auth_curl --output "$body_file" --write-out '%{http_code}\t%{time_starttransfer}\t%{time_total}\n' "$PROXY_URL/global/health" >"$timing_file" &
+  auth_curl --output "$body_file" --write-out '%{http_code}\t%{time_starttransfer}\t%{time_total}\n' "$PROXY_URL$HEALTH_PATH" >"$timing_file" &
   wake_pid=$!
   start_observed="unobservable"
   for _ in {1..700}; do
@@ -384,15 +396,15 @@ start_fern
 
 note "scenario 12/13: SIGTERM shuts Fern down without host-process/listener leaks"
 stop_fern
-if curl --silent --max-time 1 "$PROXY_URL/global/health" >/dev/null 2>&1; then fail "proxy listener remained after SIGTERM"; fi
+if curl --silent --max-time 1 "$PROXY_URL$HEALTH_PATH" >/dev/null 2>&1; then fail "proxy listener remained after SIGTERM"; fi
 [[ -z "$FERN_PID" ]] || fail "Fern process remained after SIGTERM"
 start_fern
 
 note "scenario 13/13: externally paused compute follows stale-endpoint recovery path"
 docker pause "$NAME" >/dev/null
-paused_code=$(http_code "$ARTIFACTS/paused-endpoint.body" --user "$USERNAME:$PASSWORD" --max-time 3 "$PROXY_URL/global/health" || true)
+paused_code=$(http_code "$ARTIFACTS/paused-endpoint.body" --user "$USERNAME:$PASSWORD" --max-time 3 "$PROXY_URL$HEALTH_PATH" || true)
 [[ "$paused_code" == 502 || "$paused_code" == 503 || "$paused_code" == 000 ]] || fail "paused stale endpoint did not fail safely (HTTP $paused_code)"
-recovered_code=$(http_code "$ARTIFACTS/paused-recovery.body" --user "$USERNAME:$PASSWORD" --max-time 70 "$PROXY_URL/global/health" || true)
+recovered_code=$(http_code "$ARTIFACTS/paused-recovery.body" --user "$USERNAME:$PASSWORD" --max-time 70 "$PROXY_URL$HEALTH_PATH" || true)
 [[ "$recovered_code" == 200 ]] || fail "paused compute did not recover (HTTP $recovered_code)"
 wait_status running
 

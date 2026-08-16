@@ -12,8 +12,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 
-PASSWORD = os.environ.get("OPENCODE_SERVER_PASSWORD", "")
-USERNAME = os.environ.get("OPENCODE_SERVER_USERNAME", "opencode") or "opencode"
+PROTOCOL = os.environ.get("FERN_OPENCODE_PROTOCOL", "v1")
+PASSWORD = os.environ.get("OPENCODE_PASSWORD" if PROTOCOL == "v2" else "OPENCODE_SERVER_PASSWORD", "")
+USERNAME = "opencode" if PROTOCOL == "v2" else (os.environ.get("OPENCODE_SERVER_USERNAME", "opencode") or "opencode")
 STATE_PATH = "/home/user/.local/share/opencode/lifecycle-state.json"
 BOOT_ID = f"{socket.gethostname()}-{time.time_ns()}"
 subscribers = set()
@@ -34,7 +35,7 @@ def publish(session_id, status):
     statuses[session_id] = {"type": status}
     event = {
         "type": "session.status",
-        "properties": {"sessionID": session_id, "status": {"type": status}},
+        "data" if PROTOCOL == "v2" else "properties": {"sessionID": session_id, "status": {"type": status}},
     }
     frame = f"data: {json.dumps(event, separators=(',', ':'))}\n\n".encode()
     with subscribers_lock:
@@ -73,10 +74,14 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authenticate():
             return
         parsed = urlparse(self.path)
-        if parsed.path == "/global/health":
-            self.json_response({"healthy": True, "boot_id": BOOT_ID})
-        elif parsed.path == "/session/status":
+        if parsed.path == ("/api/health" if PROTOCOL == "v2" else "/global/health"):
+            self.json_response({"healthy": True, "version": "0.0.0-next-17444" if PROTOCOL == "v2" else "1.18.16", "boot_id": BOOT_ID})
+        elif PROTOCOL == "v1" and parsed.path == "/session/status":
             self.json_response(statuses)
+        elif PROTOCOL == "v2" and parsed.path == "/api/session/active":
+            self.json_response({"data": {key: {"type": "running"} for key, value in statuses.items() if value["type"] != "idle"}})
+        elif PROTOCOL == "v2" and parsed.path in ("/api/shell", "/api/pty", "/api/permission/request", "/api/form/request"):
+            self.json_response({"data": []})
         elif parsed.path == "/control/identity":
             self.json_response({
                 "boot_id": BOOT_ID,
@@ -95,7 +100,7 @@ class Handler(BaseHTTPRequestHandler):
             seconds = min(float(parse_qs(parsed.query).get("seconds", ["1"])[0]), 30.0)
             time.sleep(max(seconds, 0.0))
             self.json_response({"held_seconds": seconds})
-        elif parsed.path == "/event":
+        elif parsed.path == ("/api/event" if PROTOCOL == "v2" else "/event"):
             target = queue.Queue()
             with subscribers_lock:
                 subscribers.add(target)
@@ -108,6 +113,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "keep-alive")
                 self.end_headers()
+                if PROTOCOL == "v2":
+                    connected = {"id": f"evt-{time.time_ns()}", "type": "server.connected", "data": {}}
+                    self.wfile.write(f"data: {json.dumps(connected, separators=(',', ':'))}\n\n".encode())
                 self.wfile.write(b": connected\n\n")
                 self.wfile.flush()
                 while True:
