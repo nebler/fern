@@ -29,6 +29,8 @@ import (
 const (
 	workspacePort        = "4096/tcp"
 	healthTimeout        = 60 * time.Second
+	workspaceNanoCPUs    = int64(2_000_000_000)
+	workspacePIDs        = int64(512)
 	managedLabel         = "dev.fern.managed"
 	workspaceLabel       = "dev.fern.workspace"
 	specFingerprintLabel = "dev.fern.spec"
@@ -97,6 +99,7 @@ func (d *Docker) create(ctx context.Context, spec Spec) (endpoint Endpoint, resu
 	}
 	port := nat.Port(workspacePort)
 	useInit := true
+	pidsLimit := workspacePIDs
 	created, err := d.cli.ContainerCreate(
 		ctx,
 		&container.Config{
@@ -111,8 +114,10 @@ func (d *Docker) create(ctx context.Context, spec Spec) (endpoint Endpoint, resu
 		},
 		&container.HostConfig{
 			PortBindings: nat.PortMap{port: []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "0"}}},
-			Resources:    container.Resources{Memory: spec.MemoryBytes},
-			Init:         &useInit,
+			Resources: container.Resources{
+				Memory: spec.MemoryBytes, NanoCPUs: workspaceNanoCPUs, PidsLimit: &pidsLimit,
+			},
+			Init: &useInit,
 			Mounts: []mount.Mount{
 				{Type: mount.TypeBind, Source: spec.RepoPath, Target: "/home/user/workspace"},
 				{Type: mount.TypeVolume, Source: specDataVolumeName(spec), Target: "/home/user/.local/share/opencode"},
@@ -556,8 +561,8 @@ func verifyActualSpec(info container.InspectResponse, spec Spec) error {
 	if info.Config == nil || info.HostConfig == nil {
 		return fmt.Errorf("%w: Docker returned incomplete workspace configuration", ErrSpecDrift)
 	}
-	if info.Config.Image != spec.Image || info.HostConfig.Memory != spec.MemoryBytes || info.HostConfig.Init == nil || !*info.HostConfig.Init || !info.HostConfig.RestartPolicy.IsNone() {
-		return fmt.Errorf("%w: Docker image, memory, init, or restart setting was modified; run 'fern down' to recreate", ErrSpecDrift)
+	if info.Config.Image != spec.Image || info.HostConfig.Memory != spec.MemoryBytes || info.HostConfig.NanoCPUs != workspaceNanoCPUs || info.HostConfig.PidsLimit == nil || *info.HostConfig.PidsLimit != workspacePIDs || info.HostConfig.Init == nil || !*info.HostConfig.Init || !info.HostConfig.RestartPolicy.IsNone() {
+		return fmt.Errorf("%w: Docker image, memory, CPU, PID, init, or restart setting was modified; run 'fern down' to recreate", ErrSpecDrift)
 	}
 	if info.HostConfig.Privileged || info.HostConfig.ReadonlyRootfs || len(info.HostConfig.CapAdd) != 0 || len(info.HostConfig.Devices) != 0 || len(info.HostConfig.DeviceRequests) != 0 || len(info.HostConfig.SecurityOpt) != 0 {
 		return fmt.Errorf("%w: Docker privilege, capability, device, or security settings were modified; run 'fern down' to recreate", ErrSpecDrift)

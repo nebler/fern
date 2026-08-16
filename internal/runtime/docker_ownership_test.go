@@ -224,6 +224,8 @@ func TestVerifyActualSpecAllowsImageEnvironment(t *testing.T) {
 			},
 			"HostConfig": map[string]any{
 				"Memory":       1024,
+				"NanoCpus":     workspaceNanoCPUs,
+				"PidsLimit":    workspacePIDs,
 				"Init":         useInit,
 				"PortBindings": nat.PortMap{nat.Port(workspacePort): []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "49152"}}},
 				"RestartPolicy": map[string]any{
@@ -436,9 +438,10 @@ func TestPauseCreatedContainerRecordsCommittedIntent(t *testing.T) {
 func TestVerifyActualSpecRejectsExtraMountAndPrivileges(t *testing.T) {
 	t.Parallel()
 	useInit := true
+	pidsLimit := workspacePIDs
 	base := container.InspectResponse{
 		ContainerJSONBase: &container.ContainerJSONBase{HostConfig: &container.HostConfig{
-			Resources:    container.Resources{Memory: 1024},
+			Resources:    container.Resources{Memory: 1024, NanoCPUs: workspaceNanoCPUs, PidsLimit: &pidsLimit},
 			Init:         &useInit,
 			PortBindings: nat.PortMap{nat.Port(workspacePort): []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "49152"}}},
 		}},
@@ -457,6 +460,11 @@ func TestVerifyActualSpecRejectsExtraMountAndPrivileges(t *testing.T) {
 	base.HostConfig.Privileged = true
 	if err := verifyActualSpec(base, spec); !errors.Is(err, ErrSpecDrift) {
 		t.Fatalf("privileged error = %v, want ErrSpecDrift", err)
+	}
+	base.HostConfig.Privileged = false
+	base.HostConfig.NanoCPUs = 0
+	if err := verifyActualSpec(base, spec); !errors.Is(err, ErrSpecDrift) {
+		t.Fatalf("CPU limit error = %v, want ErrSpecDrift", err)
 	}
 }
 
@@ -483,7 +491,7 @@ func TestEnsureRunningUsesOneInspectionForRunningContainer(t *testing.T) {
 					"ExposedPorts": nat.PortSet{nat.Port(workspacePort): struct{}{}},
 				},
 				"HostConfig": map[string]any{
-					"Memory": spec.MemoryBytes, "Init": useInit,
+					"Memory": spec.MemoryBytes, "NanoCpus": workspaceNanoCPUs, "PidsLimit": workspacePIDs, "Init": useInit,
 					"PortBindings":  nat.PortMap{nat.Port(workspacePort): []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: strconv.Itoa(port)}}},
 					"RestartPolicy": map[string]any{"Name": "no"},
 				},
