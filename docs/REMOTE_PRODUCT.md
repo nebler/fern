@@ -33,16 +33,21 @@ Before expanding scope, Fern must prove this exact flow with a real provider:
 
 1. Install the merged release on the target Linux host.
 2. Reach it from a laptop and phone through Tailscale Serve.
-3. Start and steer a provider-backed OpenCode turn.
-4. Disconnect while work continues.
-5. Observe a safe idle stop and ordinary-request wake.
-6. Reconnect to the same completed session state.
-7. Reboot the host and recover the same workspace.
-8. Back up and restore the repository, Fern state, and OpenCode data.
+3. Open a disposable repository with a short-lived, repository-scoped Git
+   credential.
+4. Start and steer a provider-backed OpenCode turn that creates a branch,
+   changes code, runs verification, commits, and pushes the branch.
+5. Confirm the remote branch and commit from another device.
+6. Disconnect while work continues.
+7. Observe a safe idle stop and ordinary-request wake.
+8. Reconnect to the same completed session and Git state.
+9. Reboot the host and recover the same workspace.
+10. Back up and restore the repository, Fern state, and OpenCode data.
 
 This is a product validation gate because it tests the complete remote path,
 client compatibility, provider behavior, lifecycle policy, and recovery claim.
-Failure may change the foundation or priority of every later feature.
+Failure may change the foundation or priority of every later feature. A local
+commit without remote delivery is insufficient evidence for the product claim.
 
 ## Missing Capabilities
 

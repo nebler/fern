@@ -194,6 +194,34 @@ Tailscale Serve provides TLS and tailnet identity at the edge; its loopback hop 
 
 Fern rejects non-loopback listeners even when Basic authentication is configured. If Tailscale Serve is unavailable, place another reviewed TLS reverse proxy on the same host rather than exposing Fern's plain HTTP listener.
 
+### Provider And Git Acceptance
+
+The first remote rehearsal must include Git delivery, not only a local edit. Use
+a disposable repository and a short-lived credential restricted to that one
+repository. Do not use an organization-wide token or allow the first test to
+push directly to the default branch.
+
+Fern does not currently broker Git credentials. A credential supplied through
+`workspace.env` is visible inside the trusted container just like a provider
+key. For the initial single-user rehearsal, a short-lived fine-grained token is
+acceptable only when it is scoped to the disposable repository, stored in
+`/etc/fern/fern.env`, and revoked immediately after the test. A host-side Git
+broker or GitHub App integration is required before this becomes a product
+workflow.
+
+From the phone client, ask OpenCode to:
+
+1. Create a non-default branch with a unique rehearsal name.
+2. Make one small, reviewable change.
+3. Run the repository's relevant verification command.
+4. Commit the result with a descriptive message.
+5. Push that branch to the configured origin.
+
+From a separate laptop or phone Git client, confirm that the remote branch and
+commit exist and that the default branch did not change. Then let the workspace
+pause, wake it through the Fern endpoint, and confirm that the OpenCode session,
+local checkout, branch, and commit remain intact.
+
 ## 7. Reboot And Shutdown Checks
 
 Run these on the target host; they are acceptance steps, not claims of results:
