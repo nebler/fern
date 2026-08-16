@@ -82,6 +82,42 @@ func TestProxyRejectsInvalidBasicAuthBeforeWake(t *testing.T) {
 	}
 }
 
+func TestProxyAuthenticatesV2AndAutoCredentialsBeforeWake(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		auth     runtime.ServerAuth
+		username string
+		password string
+	}{
+		{
+			name: "V2", auth: runtime.ServerAuth{Protocol: runtime.ProtocolV2, V2Password: "v2-secret"},
+			username: "opencode", password: "v2-secret",
+		},
+		{
+			name: "auto V1", auth: runtime.ServerAuth{Protocol: runtime.ProtocolAuto, Username: "agent", Password: "v1-secret", V2Password: "v2-secret"},
+			username: "agent", password: "v1-secret",
+		},
+		{
+			name: "auto V2", auth: runtime.ServerAuth{Protocol: runtime.ProtocolAuto, Username: "agent", Password: "v1-secret", V2Password: "v2-secret"},
+			username: "opencode", password: "v2-secret",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			waker := &countingWaker{}
+			handler := New(waker, test.auth, testLogger())
+			request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+			request.SetBasicAuth(test.username, test.password)
+			handler.ServeHTTP(httptest.NewRecorder(), request)
+			if waker.wakes.Load() != 1 {
+				t.Fatalf("valid %s credentials did not reach waker", test.name)
+			}
+		})
+	}
+}
+
 func TestProxyUsesDefaultServerAuthUsername(t *testing.T) {
 	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {

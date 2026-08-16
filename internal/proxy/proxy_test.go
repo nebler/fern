@@ -50,6 +50,36 @@ func TestRequestIntentDefaultsUnknownReadsToWorkStarting(t *testing.T) {
 	}
 }
 
+func TestRequestIntentUsesSelectedOpenCodeProtocol(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		protocol runtime.Protocol
+		method   string
+		path     string
+		want     workspace.RequestIntent
+	}{
+		{name: "V1 event", protocol: runtime.ProtocolV1, method: http.MethodGet, path: "/event", want: workspace.RequestObserve},
+		{name: "V1 health", protocol: runtime.ProtocolV1, method: http.MethodGet, path: "/global/health", want: workspace.RequestRead},
+		{name: "V1 treats V2 event as work", protocol: runtime.ProtocolV1, method: http.MethodGet, path: "/api/event", want: workspace.RequestWork},
+		{name: "V2 event", protocol: runtime.ProtocolV2, method: http.MethodGet, path: "/api/event", want: workspace.RequestObserve},
+		{name: "V2 health", protocol: runtime.ProtocolV2, method: http.MethodHead, path: "/api/health", want: workspace.RequestRead},
+		{name: "V2 active", protocol: runtime.ProtocolV2, method: http.MethodGet, path: "/api/session/active", want: workspace.RequestRead},
+		{name: "V2 treats V1 event as work", protocol: runtime.ProtocolV2, method: http.MethodGet, path: "/event", want: workspace.RequestWork},
+		{name: "auto accepts V1", protocol: runtime.ProtocolAuto, method: http.MethodGet, path: "/event", want: workspace.RequestObserve},
+		{name: "auto accepts V2", protocol: runtime.ProtocolAuto, method: http.MethodGet, path: "/api/event", want: workspace.RequestObserve},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			request := httptest.NewRequest(test.method, test.path, nil)
+			if got := requestIntentFor(test.protocol, request); got != test.want {
+				t.Fatalf("requestIntentFor(%s, %s %s) = %v, want %v", test.protocol, test.method, test.path, got, test.want)
+			}
+		})
+	}
+}
+
 func (w staticWaker) AcquireRequest(_ context.Context, intent workspace.RequestIntent) (workspace.RequestTarget, func(), error) {
 	if w.active != nil {
 		w.active <- intent == workspace.RequestWork
