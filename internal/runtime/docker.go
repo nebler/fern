@@ -29,7 +29,6 @@ import (
 const (
 	workspacePort        = "4096/tcp"
 	healthTimeout        = 60 * time.Second
-	stopReconcileTimeout = 12 * time.Second
 	managedLabel         = "dev.fern.managed"
 	workspaceLabel       = "dev.fern.workspace"
 	specFingerprintLabel = "dev.fern.spec"
@@ -73,10 +72,20 @@ func (d *Docker) Create(ctx context.Context, spec Spec) (Endpoint, error) {
 	return d.create(ctx, spec)
 }
 
-func (d *Docker) create(ctx context.Context, spec Spec) (Endpoint, error) {
-	if err := d.ensureVolume(ctx, spec); err != nil {
+func (d *Docker) create(ctx context.Context, spec Spec) (endpoint Endpoint, resultErr error) {
+	createdVolume, err := d.ensureVolume(ctx, spec)
+	if err != nil {
 		return Endpoint{}, err
 	}
+	retainVolume := false
+	defer func() {
+		if !createdVolume || retainVolume {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		resultErr = errors.Join(resultErr, d.cli.VolumeRemove(cleanupCtx, specDataVolumeName(spec), false))
+	}()
 	if err := d.intents.Clear(spec.Name); err != nil {
 		return Endpoint{}, fmt.Errorf("clear stale pause intent: %w", err)
 	}
@@ -125,6 +134,9 @@ func (d *Docker) create(ctx context.Context, spec Spec) (Endpoint, error) {
 		removeErr := d.cli.ContainerRemove(cleanupCtx, created.ID, container.RemoveOptions{Force: true})
 		return Endpoint{}, errors.Join(cause, removeErr)
 	}
+	// Once OpenCode starts, retain its data even if health or observation setup
+	// later fails. Only a never-started initial workspace is safe to roll back.
+	retainVolume = true
 	observation, err := d.statusByReference(ctx, created.ID, spec.Name)
 	if err != nil {
 		return Endpoint{}, d.rollbackStarted(spec.Name, created.ID, err)
@@ -161,6 +173,9 @@ func (d *Docker) pauseObserved(ctx context.Context, name string, observation Obs
 		if err != nil {
 			return fmt.Errorf("read pause intent: %w", err)
 		}
+		if observation.DockerStatus != "created" {
+			return fmt.Errorf("pause %q has an unknown outcome: container stopped with pending pause intent", name)
+		}
 		if intent == PauseIntentNone {
 			if err := d.intents.BeginPause(name, observation.ContainerID); err != nil {
 				return fmt.Errorf("record pause intent: %w", err)
@@ -185,7 +200,7 @@ func (d *Docker) pauseObserved(ctx context.Context, name string, observation Obs
 	start := time.Now()
 	timeout := 10
 	if err := d.cli.ContainerStop(ctx, observation.ContainerID, container.StopOptions{Timeout: &timeout}); err != nil {
-		return d.reconcileStopError(name, observation.ContainerID, err)
+		return d.reconcileStopError(ctx, name, observation.ContainerID, err)
 	}
 	if err := d.intents.CommitPause(name, observation.ContainerID); err != nil {
 		return fmt.Errorf("commit pause intent: %w", err)
@@ -194,42 +209,15 @@ func (d *Docker) pauseObserved(ctx context.Context, name string, observation Obs
 	return nil
 }
 
-func (d *Docker) reconcileStopError(name, containerID string, stopErr error) error {
-	ctx, cancel := context.WithTimeout(context.Background(), stopReconcileTimeout)
-	defer cancel()
-	ticker := time.NewTicker(200 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		observation, err := d.statusByReference(ctx, containerID, name)
-		if err == nil && observation.State == StateProvisioning && !observation.Running {
-			if err := d.intents.CommitPause(name, containerID); err != nil {
-				return errors.Join(fmt.Errorf("pause %q has an unknown stop outcome: %w", name, stopErr), fmt.Errorf("commit reconciled pause intent: %w", err))
-			}
-			return nil
-		}
-		select {
-		case <-ticker.C:
-		case <-ctx.Done():
-			return d.finishStopReconciliation(name, containerID, stopErr)
-		}
-	}
-}
-
-func (d *Docker) finishStopReconciliation(name, containerID string, stopErr error) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+func (d *Docker) reconcileStopError(ctx context.Context, name, containerID string, stopErr error) error {
 	observation, inspectErr := d.statusByReference(ctx, containerID, name)
-	if inspectErr == nil && observation.State == StateProvisioning && !observation.Running {
-		if err := d.intents.CommitPause(name, containerID); err == nil {
-			return nil
-		} else {
-			return errors.Join(fmt.Errorf("pause %q has an unknown stop outcome: %w", name, stopErr), fmt.Errorf("commit reconciled pause intent: %w", err))
-		}
-	}
 	var clearErr error
 	if inspectErr == nil && observation.Running {
 		clearErr = d.intents.Clear(name)
 	}
+	// A failed Docker stop response cannot prove Fern caused a subsequently
+	// observed exit. Preserve pending intent rather than disguising a crash as
+	// an intentional pause.
 	return errors.Join(fmt.Errorf("pause %q has an unknown stop outcome: %w", name, stopErr), inspectErr, clearErr)
 }
 
@@ -481,18 +469,18 @@ func (d *Docker) rollbackStarted(name, containerID string, cause error) error {
 	return errors.Join(cause, d.pauseObserved(cleanupCtx, name, observation))
 }
 
-func (d *Docker) ensureVolume(ctx context.Context, spec Spec) error {
+func (d *Docker) ensureVolume(ctx context.Context, spec Spec) (bool, error) {
 	workspace := spec.Name
 	name := specDataVolumeName(spec)
 	existing, err := d.cli.VolumeInspect(ctx, name)
 	if err == nil {
 		if existing.Labels[managedLabel] != "true" || existing.Labels[workspaceLabel] != workspace {
-			return fmt.Errorf("%w: volume %q", ErrUnmanaged, name)
+			return false, fmt.Errorf("%w: volume %q", ErrUnmanaged, name)
 		}
-		return nil
+		return false, nil
 	}
 	if !errdefs.IsNotFound(err) {
-		return fmt.Errorf("inspect data volume %q: %w", name, err)
+		return false, fmt.Errorf("inspect data volume %q: %w", name, err)
 	}
 	created, err := d.cli.VolumeCreate(ctx, volume.CreateOptions{
 		Name: name,
@@ -502,14 +490,14 @@ func (d *Docker) ensureVolume(ctx context.Context, spec Spec) error {
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("create data volume %q: %w", name, err)
+		return false, fmt.Errorf("create data volume %q: %w", name, err)
 	}
 	// VolumeCreate is idempotent by name. Another actor can create the volume
 	// after our inspect, so the returned object must be treated as untrusted.
 	if created.Labels[managedLabel] != "true" || created.Labels[workspaceLabel] != workspace {
-		return fmt.Errorf("%w: volume %q", ErrUnmanaged, name)
+		return false, fmt.Errorf("%w: volume %q", ErrUnmanaged, name)
 	}
-	return nil
+	return true, nil
 }
 
 func sortedEnv(env map[string]string) []string {

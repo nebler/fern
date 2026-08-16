@@ -159,6 +159,52 @@ func TestCreateVerifiesVolumeReturnedAfterCreateRace(t *testing.T) {
 	}
 }
 
+func TestFailedInitialCreateRemovesOnlyNewVolume(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name           string
+		volumeExists   bool
+		wantVolumeDrop int32
+	}{
+		{name: "new volume", wantVolumeDrop: 1},
+		{name: "existing volume", volumeExists: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var volumeDrops atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				switch {
+				case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/containers/demo/json"):
+					writeDockerNotFound(writer, "container")
+				case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/volumes/fern-demo-data"):
+					if test.volumeExists {
+						writeJSON(writer, http.StatusOK, map[string]any{"Name": "fern-demo-data", "Labels": map[string]string{managedLabel: "true", workspaceLabel: "demo"}})
+					} else {
+						writeDockerNotFound(writer, "volume")
+					}
+				case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/volumes/create"):
+					writeJSON(writer, http.StatusCreated, map[string]any{"Name": "fern-demo-data", "Labels": map[string]string{managedLabel: "true", workspaceLabel: "demo"}})
+				case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/containers/create"):
+					writeJSON(writer, http.StatusInternalServerError, map[string]string{"message": "create failed"})
+				case request.Method == http.MethodDelete && strings.HasSuffix(request.URL.Path, "/volumes/fern-demo-data"):
+					volumeDrops.Add(1)
+					writer.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(writer, request)
+				}
+			}))
+			defer server.Close()
+
+			if _, err := testDocker(t, server).Create(context.Background(), ownershipTestSpec()); err == nil {
+				t.Fatal("Create unexpectedly succeeded")
+			}
+			if got := volumeDrops.Load(); got != test.wantVolumeDrop {
+				t.Fatalf("volume removals = %d, want %d", got, test.wantVolumeDrop)
+			}
+		})
+	}
+}
+
 func TestVerifyActualSpecAllowsImageEnvironment(t *testing.T) {
 	t.Parallel()
 	var restartPolicy atomic.Value
@@ -309,14 +355,12 @@ func TestPauseFailureReconciliation(t *testing.T) {
 			docker := testDocker(t, server)
 			docker.intents = intents
 			err := docker.Pause(context.Background(), "demo")
-			wantStatus := PauseIntentCommitted
-			if test.commitErr != nil {
-				wantStatus = PauseIntentPending
-				if err == nil {
-					t.Fatal("Pause succeeded despite commit failure")
-				}
-			} else if err != nil {
-				t.Fatalf("Pause did not reconcile delayed stop: %v", err)
+			wantStatus := PauseIntentPending
+			if test.stopStatus == http.StatusNoContent && test.commitErr == nil {
+				wantStatus = PauseIntentCommitted
+			}
+			if err == nil && wantStatus != PauseIntentCommitted {
+				t.Fatal("Pause succeeded despite unknown stop outcome")
 			}
 			if intents.status != wantStatus || intents.clears.Load() != 0 {
 				t.Fatalf("intent status=%d clears=%d", intents.status, intents.clears.Load())
@@ -334,7 +378,7 @@ func TestStopReconciliationPreservesIntentWhenInspectFails(t *testing.T) {
 	intents := &recordingIntentStore{status: PauseIntentPending}
 	docker := testDocker(t, server)
 	docker.intents = intents
-	err := docker.finishStopReconciliation("demo", "container-id", errors.New("stop failed"))
+	err := docker.reconcileStopError(context.Background(), "demo", "container-id", errors.New("stop failed"))
 	if err == nil {
 		t.Fatal("reconciliation unexpectedly succeeded")
 	}
@@ -343,16 +387,36 @@ func TestStopReconciliationPreservesIntentWhenInspectFails(t *testing.T) {
 	}
 }
 
-func TestPauseRetryCommitsPendingStoppedIntent(t *testing.T) {
+func TestPauseRetryPreservesPendingStoppedIntent(t *testing.T) {
 	t.Parallel()
 	intents := &recordingIntentStore{status: PauseIntentPending}
 	docker := &Docker{intents: intents}
 	observation := Observation{State: StateProvisioning, ContainerID: "container-id"}
-	if err := docker.pauseObserved(context.Background(), "demo", observation); err != nil {
-		t.Fatal(err)
+	if err := docker.pauseObserved(context.Background(), "demo", observation); err == nil {
+		t.Fatal("pause unexpectedly certified an unknown stopped container")
 	}
-	if intents.status != PauseIntentCommitted {
-		t.Fatalf("intent status = %d, want committed", intents.status)
+	if intents.status != PauseIntentPending {
+		t.Fatalf("intent status = %d, want pending", intents.status)
+	}
+}
+
+func TestStopReconciliationHonorsCallerCancellation(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+	intents := &recordingIntentStore{status: PauseIntentPending}
+	docker := testDocker(t, server)
+	docker.intents = intents
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := docker.reconcileStopError(ctx, "demo", "container-id", errors.New("stop failed"))
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("reconciliation error = %v, want context.Canceled", err)
+	}
+	if intents.status != PauseIntentPending {
+		t.Fatalf("intent status = %d, want pending", intents.status)
 	}
 }
 
