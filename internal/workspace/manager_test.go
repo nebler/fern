@@ -11,20 +11,21 @@ import (
 )
 
 type fakeRuntime struct {
-	mu          sync.Mutex
-	state       runtime.State
-	createN     int
-	ensureN     int
-	resumeN     int
-	pauseN      int
-	statusN     int
-	createWait  time.Duration
-	createErr   error
-	endpoint    runtime.Endpoint
-	pauseCtxErr error
-	createBlock chan struct{}
-	createStart chan struct{}
-	respectCtx  bool
+	mu             sync.Mutex
+	state          runtime.State
+	createN        int
+	ensureN        int
+	resumeN        int
+	pauseN         int
+	statusN        int
+	createWait     time.Duration
+	createErr      error
+	endpoint       runtime.Endpoint
+	statusEndpoint *runtime.Endpoint
+	pauseCtxErr    error
+	createBlock    chan struct{}
+	createStart    chan struct{}
+	respectCtx     bool
 }
 
 func newFakeRuntime(state runtime.State) *fakeRuntime {
@@ -196,9 +197,13 @@ func (f *fakeRuntime) Status(context.Context, string) (runtime.Observation, erro
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.statusN++
+	endpoint := f.endpoint
+	if f.statusEndpoint != nil {
+		endpoint = *f.statusEndpoint
+	}
 	return runtime.Observation{
 		State:       f.state,
-		Endpoint:    f.endpoint,
+		Endpoint:    endpoint,
 		HasEndpoint: f.state == runtime.StateRunning,
 	}, nil
 }
@@ -492,6 +497,31 @@ func TestAuthoritativeBusyStatusDefersPause(t *testing.T) {
 	manager := newTestManager(fake, nil, func(context.Context, runtime.Endpoint) (bool, error) { return false, nil })
 	if err := manager.Pause(context.Background()); !errors.Is(err, ErrSessionsActive) {
 		t.Fatalf("Pause error = %v, want ErrSessionsActive", err)
+	}
+}
+
+func TestPausePreservesNegotiatedProtocolAcrossFreshStatus(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRuntime(runtime.StateRunning)
+	fake.endpoint.Protocol = runtime.ProtocolV2
+	statusEndpoint := fake.endpoint
+	statusEndpoint.Protocol = ""
+	fake.statusEndpoint = &statusEndpoint
+	var checked runtime.Protocol
+	manager := NewManager(context.Background(), fake, runtime.Spec{
+		Name: "demo", Protocol: runtime.ProtocolAuto,
+	}, nil, func(_ context.Context, endpoint runtime.Endpoint) (bool, error) {
+		checked = endpoint.Protocol
+		return true, nil
+	}, nil)
+	if _, err := manager.EnsureRunning(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if checked != runtime.ProtocolV2 {
+		t.Fatalf("authoritative check protocol = %q, want v2", checked)
 	}
 }
 
