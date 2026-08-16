@@ -19,7 +19,8 @@ Set `OPENCODE_PASSWORD` in the host environment or a protected service
 environment file. V2 fixes the Basic-auth username to `opencode`. Do not put
 the password in YAML or a command argument.
 
-`workspace.opencode` accepts `v1`, `v2`, or `auto`. Auto probes authenticated
+`workspace.opencode` accepts `v1`, `v2`, or `auto`. Auto requires both V1 and V2
+passwords and probes authenticated
 `/api/health` and `/global/health`; exactly one contract must validate. It
 fails if neither validates or both validate. The detected protocol is scoped
 to the current backend endpoint generation. Explicit selection is preferred
@@ -73,6 +74,10 @@ Any active item, malformed response, unknown state, authentication failure, or
 unavailable endpoint leaves compute running. The extra shell check is required
 because a V2 shell command does not appear in `/api/session/active`.
 
+These five reads are a conservative sequence, not one atomic upstream snapshot.
+Fern blocks new held proxy requests while sampling and fails closed, but
+OpenCode internal state can transition between reads.
+
 ## State Isolation
 
 Fern never mounts the V1 data volume into V2. Changing protocol changes the
@@ -82,7 +87,10 @@ state. There is no automatic V1-to-V2 database migration.
 
 Back up the relevant named volume before any manual migration or upstream V2
 upgrade. An `auto` workspace uses `fern-<name>-auto-data`, also isolated from
-both explicit protocol volumes.
+both explicit protocol volumes. Do not reuse an auto workspace with a mutable
+image tag that can change between V1 and V2: detection occurs only after the
+shared auto volume is mounted. Explicit mode is required for strict V1/V2
+persistence isolation.
 
 ## Verification
 

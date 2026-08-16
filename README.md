@@ -80,7 +80,8 @@ Serve, pass the explicit root origin:
 fern attach -url https://host.tailnet.ts.net
 ```
 
-`fern up` forwards these host variables when present:
+`fern up` forwards these host variables when present. V1 requires
+`OPENCODE_SERVER_PASSWORD`; V2 requires `OPENCODE_PASSWORD`; auto requires both:
 
 - `ANTHROPIC_API_KEY`
 - `OPENAI_API_KEY`

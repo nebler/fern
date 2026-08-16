@@ -133,9 +133,13 @@ When the timer expires, the manager performs a second authoritative barrier:
 5. Query all protocol-specific activity surfaces with authentication.
 6. Stop only if every response is valid and idle.
 
-V1 uses `/session/status`. V2 requires all of `/api/session/active`,
-`/api/shell`, `/api/pty`, `/api/permission/request`, and `/api/form/request` to
-be idle. Any error or unknown state leaves compute running.
+V1 uses one `/session/status` response. V2 sequentially samples all of
+`/api/session/active`, `/api/shell`, `/api/pty`, `/api/permission/request`, and
+`/api/form/request`. OpenCode V2 does not expose one atomic aggregate snapshot,
+so these reads cannot prove that every surface described the same instant. Fern
+blocks new held proxy requests during the sequence and fails closed on any
+active, unknown, or unavailable response, but internal state can transition
+between reads.
 
 This protects requests using Fern's proxy. A same-host Docker administrator can
 discover the backend's loopback port and bypass admission; that principal is
@@ -151,9 +155,12 @@ already inside the trusted-host boundary.
 | Client | `opencode attach URL` | `opencode2 --server URL` |
 | Data volume | `fern-<name>-data` | `fern-<name>-v2-data` |
 
-`auto` probes both health contracts, requires exactly one to validate, and uses
-`fern-<name>-auto-data`. Explicit protocol selection is preferred because it
-catches image/protocol mismatches and keeps persistence intent clear.
+`auto` probes both health contracts, requires exactly one to validate, requires
+both protocol passwords, and uses `fern-<name>-auto-data`. Explicit protocol
+selection is preferred because it catches image/protocol mismatches and keeps
+persistence intent clear. Do not reuse an auto workspace with an image tag that
+can change between V1 and V2: detection occurs after the shared auto volume is
+mounted, so Fern cannot provide explicit-mode protocol isolation in that case.
 
 ## Container And Persistence Model
 
@@ -171,8 +178,9 @@ The next `fern up` recreates compute around that durable state. A newly created
 volume is rolled back if initial container creation never starts; once OpenCode
 has started, its data is retained even if later health setup fails.
 
-Protocol changes require container recreation and never mount one protocol's
-data into another. Fern does not migrate OpenCode databases.
+Explicit protocol changes require container recreation and never mount V1 data
+into V2 or vice versa. Auto mode has the mutable-image limitation above. Fern
+does not migrate OpenCode databases.
 
 ## Shutdown And Supervision
 
@@ -191,7 +199,8 @@ restart behavior remains an explicit deployment acceptance task.
 ## Assurance And Limits
 
 Unit, race, vet, formatting, image-build, and V1/V2 real-Docker lifecycle jobs
-are defined in CI. The local lifecycle harness covers creation, authentication
+are defined in CI. CI also runs the real pinned V2 protocol smoke. The local
+lifecycle harness covers creation, authentication
 before wake, concurrent wake, request/pause exclusion, endpoint replacement,
 persistence, clean-exit and OOM classification, shutdown, and frozen-container
 recovery. The real V2 smoke test covers the pinned beta artifact.
