@@ -17,6 +17,9 @@ func TestPairingCreatesCookieAndInjectsUpstreamAuth(t *testing.T) {
 			http.Error(writer, "missing injected auth", http.StatusUnauthorized)
 			return
 		}
+		if _, err := request.Cookie(deviceCookieName); err == nil {
+			t.Error("Fern device cookie reached OpenCode upstream")
+		}
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	defer upstream.Close()

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -13,11 +14,14 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/config"
+	fernRuntime "github.com/nebler/fern/internal/runtime"
 )
 
-var githubComponentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,62}$`)
+var githubComponentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
+var githubOwnerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}$`)
+var githubTokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
-func runGitHub(args []string) error {
+func runGitHub(args []string, log *slog.Logger) error {
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Fprintln(os.Stdout, "Publish committed work through host GitHub credentials.\n\nUsage:\n  fern github publish [flags]")
 		return nil
@@ -25,13 +29,13 @@ func runGitHub(args []string) error {
 	if len(args) == 0 || args[0] != "publish" {
 		return unknownCommand(append([]string{"github"}, args...))
 	}
-	return runGitHubPublish(args[1:])
+	return runGitHubPublish(args[1:], log)
 }
 
-func runGitHubPublish(args []string) error {
+func runGitHubPublish(args []string, log *slog.Logger) error {
 	flags := newFlagSet("github publish", "Push committed work to a Fern branch and open a draft pull request.")
 	configPath := flags.String("config", "fern.yaml", "configuration file")
-	operation := flags.String("operation", time.Now().UTC().Format("20060102-150405"), "publication identifier")
+	operation := flags.String("operation", "", "publication identifier (defaults to the commit prefix)")
 	base := flags.String("base", "", "base branch (defaults to repository default)")
 	title := flags.String("title", "", "draft pull request title")
 	body := flags.String("body", "Created from a private Fern workspace.", "draft pull request body")
@@ -41,9 +45,6 @@ func runGitHubPublish(args []string) error {
 	}
 	if strings.TrimSpace(*title) == "" || len(*title) > 256 {
 		return invocationError{message: "--title is required and must be at most 256 bytes"}
-	}
-	if !validGitHubComponent(*operation) {
-		return invocationError{message: "--operation must contain only letters, numbers, underscore, or hyphen"}
 	}
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -56,19 +57,40 @@ func runGitHubPublish(args []string) error {
 	if !validGitHubComponent(workspace.Workspace.Name) {
 		return fmt.Errorf("workspace name %q is not safe for a GitHub branch", workspace.Workspace.Name)
 	}
+	lease, err := acquireWorkspaceLease(workspace.Workspace.Name)
+	if err != nil {
+		return fmt.Errorf("publication requires exclusive workspace access: %w", err)
+	}
+	defer lease.Release()
+	docker, err := newDocker(log)
+	if err != nil {
+		return err
+	}
+	defer docker.Close()
+	statusCtx, statusCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	observation, err := docker.Status(statusCtx, workspace.Workspace.Name)
+	statusCancel()
+	if err != nil {
+		return fmt.Errorf("inspect workspace before publication: %w", err)
+	}
+	if observation.State != fernRuntime.StateAbsent {
+		return fmt.Errorf("publication requires removed compute; stop the service and run 'fern down' first (state: %s)", observation.State)
+	}
 	repository, err := inspectPublishRepository(workspace.Workspace.Repo)
 	if err != nil {
 		return err
 	}
+	if *operation == "" {
+		*operation = repository.Head[:12]
+	}
+	if !validGitHubComponent(*operation) {
+		return invocationError{message: "--operation must contain only letters, numbers, underscore, or hyphen"}
+	}
 	baseBranch := *base
-	if baseBranch != "" && !validGitHubComponent(baseBranch) {
-		return invocationError{message: "--base must be one simple branch component"}
+	if baseBranch != "" && !validGitBranch(baseBranch) {
+		return invocationError{message: "--base is not a safe branch name"}
 	}
 	branch := "fern/" + workspace.Workspace.Name + "/" + *operation
-	if *dryRun {
-		fmt.Printf("GitHub publication is valid\nrepository: %s\ncommit: %s\nbranch: %s\n", repository.Name, repository.Head, branch)
-		return nil
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	if err := runHostCommand(ctx, "", nil, "gh", "auth", "status", "--hostname", "github.com"); err != nil {
@@ -80,7 +102,7 @@ func runGitHubPublish(args []string) error {
 			return fmt.Errorf("read GitHub default branch: %w", err)
 		}
 		baseBranch = strings.TrimSpace(output)
-		if !validGitHubComponent(baseBranch) {
+		if !validGitBranch(baseBranch) {
 			return fmt.Errorf("GitHub returned unsupported default branch %q; pass --base", baseBranch)
 		}
 	}
@@ -89,7 +111,7 @@ func runGitHubPublish(args []string) error {
 		return fmt.Errorf("obtain host GitHub credential")
 	}
 	token = strings.TrimSpace(token)
-	if token == "" || strings.ContainsAny(token, " \t\r\n\x00") {
+	if len(token) < 20 || len(token) > 512 || !githubTokenPattern.MatchString(token) {
 		return fmt.Errorf("host GitHub credential is invalid")
 	}
 	defer func() { token = strings.Repeat("0", len(token)) }()
@@ -109,6 +131,10 @@ func runGitHubPublish(args []string) error {
 		if strings.HasPrefix(path, ".github/workflows/") {
 			return fmt.Errorf("workflow changes require a separate reviewed publication path: %s", path)
 		}
+	}
+	if *dryRun {
+		fmt.Printf("GitHub publication preflight passed\nrepository: %s\nbase: %s\ncommit: %s\nbranch: %s\n", repository.Name, baseBranch, repository.Head, branch)
+		return nil
 	}
 	gitArgs := secureGitArgs("push", canonical, repository.Head+":refs/heads/"+branch)
 	if err := runHostCommand(ctx, workspace.Workspace.Repo, gitEnv, "git", gitArgs...); err != nil {
@@ -182,8 +208,8 @@ func validateLocalGitConfig(output string) error {
 		if key == "" {
 			continue
 		}
-		dangerousPrefix := strings.HasPrefix(key, "url.") || strings.HasPrefix(key, "credential.") || strings.HasPrefix(key, "include.") || strings.HasPrefix(key, "http.") || strings.HasPrefix(key, "https.") || strings.HasPrefix(key, "filter.") || strings.HasPrefix(key, "diff.") || strings.HasPrefix(key, "merge.") || strings.HasPrefix(key, "submodule.") || strings.HasPrefix(key, "protocol.")
-		dangerousCore := key == "core.sshcommand" || key == "core.hookspath" || key == "core.gitproxy" || key == "core.fsmonitor" || key == "core.attributesfile" || key == "core.excludesfile"
+		dangerousPrefix := strings.HasPrefix(key, "url.") || strings.HasPrefix(key, "credential.") || strings.HasPrefix(key, "include.") || strings.HasPrefix(key, "http.") || strings.HasPrefix(key, "https.") || strings.HasPrefix(key, "filter.") || strings.HasPrefix(key, "diff.") || strings.HasPrefix(key, "merge.") || strings.HasPrefix(key, "submodule.") || strings.HasPrefix(key, "protocol.") || strings.HasPrefix(key, "uploadpack.") || strings.HasPrefix(key, "receive.") || strings.HasPrefix(key, "pack.")
+		dangerousCore := key == "core.sshcommand" || key == "core.hookspath" || key == "core.gitproxy" || key == "core.fsmonitor" || key == "core.attributesfile" || key == "core.excludesfile" || key == "core.alternaterefscommand"
 		if dangerousPrefix || dangerousCore || strings.HasPrefix(key, "remote.") && strings.HasSuffix(key, ".pushurl") {
 			return fmt.Errorf("repository Git configuration %q is unsafe for host publication", key)
 		}
@@ -213,14 +239,18 @@ func githubRepositoryName(remote string) (string, error) {
 	}
 	path = strings.TrimSuffix(path, ".git")
 	parts := strings.Split(path, "/")
-	if len(parts) != 2 || !validGitHubComponent(parts[0]) || !validGitHubComponent(parts[1]) {
+	if len(parts) != 2 || !githubOwnerPattern.MatchString(parts[0]) || !validGitHubComponent(parts[1]) {
 		return "", fmt.Errorf("origin must identify one GitHub OWNER/REPOSITORY")
 	}
 	return parts[0] + "/" + parts[1], nil
 }
 
 func validGitHubComponent(value string) bool {
-	return githubComponentPattern.MatchString(value) && !strings.Contains(value, "..") && !strings.HasSuffix(value, ".lock")
+	return githubComponentPattern.MatchString(value) && !strings.Contains(value, "..") && !strings.HasSuffix(value, ".lock") && !strings.HasSuffix(value, ".")
+}
+
+func validGitBranch(value string) bool {
+	return value != "" && len(value) <= 255 && !strings.HasPrefix(value, ".") && !strings.HasPrefix(value, "/") && !strings.HasSuffix(value, ".") && !strings.HasSuffix(value, "/") && !strings.HasSuffix(value, ".lock") && !strings.Contains(value, "..") && !strings.Contains(value, "//") && !strings.ContainsAny(value, " ~^:?*[\\\x00-\x1f\x7f")
 }
 
 func isHex(value string) bool {

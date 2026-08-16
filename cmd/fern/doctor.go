@@ -128,6 +128,8 @@ func diagnose(configPath, envPath string, phone bool, explicitURL string) doctor
 			add("tailscale", "fail", "no Tailscale Serve HTTPS origin was found", fmt.Sprintf("Run tailscale serve --bg http://%s, then retry; or pass --url.", cfg.Listen))
 		} else if validated, validateErr := attachTarget(&origin, cfg.Listen); validateErr != nil {
 			add("tailscale", "fail", validateErr.Error(), "Use a private HTTPS root origin.")
+		} else if localOrigin, localErr := localTailscaleOrigin(); localErr != nil || !strings.EqualFold(mustHostname(validated), mustHostname(localOrigin)) {
+			add("tailscale", "fail", "phone URL does not match this Tailscale host", "Use the HTTPS URL reported by tailscale serve status on this host.")
 		} else if err := checkReady(validated, cfg.Workspace.Env["OPENCODE_PASSWORD"]); err != nil {
 			add("phone", "fail", "private phone URL did not reach Fern", "Check Tailscale on both devices and the Serve mapping.")
 		} else {
@@ -143,6 +145,14 @@ func diagnose(configPath, envPath string, phone bool, explicitURL string) doctor
 		}
 	}
 	return report
+}
+
+func mustHostname(origin string) string {
+	parsed, err := url.Parse(origin)
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
 }
 
 func checkCommand(timeout time.Duration, name string, args ...string) error {
@@ -212,12 +222,43 @@ var httpsOriginPattern = regexp.MustCompile(`https://[A-Za-z0-9](?:[A-Za-z0-9.-]
 func discoverTailscaleURL() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	command := exec.CommandContext(ctx, "tailscale", "serve", "status", "--json")
+	command := exec.CommandContext(ctx, "tailscale", "serve", "status")
 	output, err := command.Output()
 	if err != nil {
 		return "", err
 	}
-	matches := httpsOriginPattern.FindAllString(string(output), -1)
+	return tailscaleOrigin(string(output))
+}
+
+func localTailscaleOrigin() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "tailscale", "status", "--json")
+	output, err := command.Output()
+	if err != nil {
+		return "", err
+	}
+	return tailscaleLocalOrigin(output)
+}
+
+func tailscaleLocalOrigin(output []byte) (string, error) {
+	var status struct {
+		Self struct {
+			DNSName string `json:"DNSName"`
+		} `json:"Self"`
+	}
+	if err := json.Unmarshal(output, &status); err != nil {
+		return "", err
+	}
+	host := strings.TrimSuffix(status.Self.DNSName, ".")
+	if host == "" || !strings.HasSuffix(strings.ToLower(host), ".ts.net") {
+		return "", fmt.Errorf("Tailscale did not report a private DNS name")
+	}
+	return "https://" + host, nil
+}
+
+func tailscaleOrigin(output string) (string, error) {
+	matches := httpsOriginPattern.FindAllString(output, -1)
 	unique := make(map[string]bool)
 	for _, match := range matches {
 		unique[match] = true
@@ -255,6 +296,7 @@ func writeQR(writer io.Writer, value string) error {
 	}
 	bitmap := code.Bitmap()
 	for row := 0; row < len(bitmap); row += 2 {
+		_, _ = io.WriteString(writer, "\x1b[30;47m")
 		for column := range bitmap[row] {
 			top := bitmap[row][column]
 			bottom := row+1 < len(bitmap) && bitmap[row+1][column]
@@ -269,7 +311,7 @@ func writeQR(writer io.Writer, value string) error {
 				_, _ = io.WriteString(writer, " ")
 			}
 		}
-		_, _ = io.WriteString(writer, "\n")
+		_, _ = io.WriteString(writer, "\x1b[0m\n")
 	}
 	return nil
 }

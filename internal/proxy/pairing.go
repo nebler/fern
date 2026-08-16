@@ -39,6 +39,7 @@ func (state *pairingState) handler(next http.Handler, auth runtime.ServerAuth) h
 		case request.URL.Path == "/fern/pair" && request.URL.EscapedPath() == "/fern/pair":
 			state.pair(writer, request)
 		case state.authenticated(request):
+			stripDeviceCookie(request)
 			if auth.Password != "" {
 				request.SetBasicAuth("opencode", auth.Password)
 			}
@@ -71,6 +72,7 @@ func (state *pairingState) issue(writer http.ResponseWriter, request *http.Reque
 }
 
 func (state *pairingState) pair(writer http.ResponseWriter, request *http.Request) {
+	setFernHeaders(writer.Header())
 	if request.Method != http.MethodGet {
 		writer.Header().Set("Allow", "GET")
 		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
@@ -102,7 +104,7 @@ func (state *pairingState) pair(writer http.ResponseWriter, request *http.Reques
 	}
 	http.SetCookie(writer, &http.Cookie{
 		Name: deviceCookieName, Value: session, Path: "/", MaxAge: 30 * 24 * 60 * 60,
-		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
 	})
 	http.Redirect(writer, request, "/fern/", http.StatusSeeOther)
 }
@@ -122,6 +124,16 @@ func (state *pairingState) authenticated(request *http.Request) bool {
 	}
 	state.mu.Unlock()
 	return valid
+}
+
+func stripDeviceCookie(request *http.Request) {
+	cookies := request.Cookies()
+	request.Header.Del("Cookie")
+	for _, cookie := range cookies {
+		if cookie.Name != deviceCookieName {
+			request.AddCookie(cookie)
+		}
+	}
 }
 
 func (state *pairingState) prune(now time.Time) {

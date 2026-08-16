@@ -40,7 +40,7 @@ func run(args []string, log *slog.Logger) error {
 	case "doctor":
 		err = runDoctor(args[1:])
 	case "github":
-		err = runGitHub(args[1:])
+		err = runGitHub(args[1:], log)
 	case "up":
 		err = runUp(args[1:], log)
 	case "attach":

@@ -87,7 +87,7 @@ func runInit(args []string) error {
 		_ = os.Remove(*configPath)
 		return err
 	}
-	fmt.Printf("Fern demo configuration created\n\nconfig: %s\nsecrets: %s\nrepository: %s\n\nNext:\n  1. Add a provider key to %s\n  2. Run: fern doctor --config %s --env-file %s\n  3. Run: fern up --config %s --env-file %s\n  4. Run: tailscale serve --bg http://%s\n", *configPath, *envPath, absRepo, *envPath, *configPath, *envPath, *configPath, *envPath, *listen)
+	fmt.Printf("Fern demo configuration created\n\nconfig: %s\nsecrets: %s\nrepository: %s\n\nNext:\n  1. Add a provider key to %s\n  2. Run: fern up --config %s --env-file %s\n  3. In another terminal: tailscale serve --bg http://%s\n  4. In that terminal: fern doctor --config %s --env-file %s --phone\n", *configPath, *envPath, absRepo, *envPath, *configPath, *envPath, *listen, *configPath, *envPath)
 	return nil
 }
 

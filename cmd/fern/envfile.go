@@ -8,6 +8,16 @@ import (
 )
 
 func readEnvFile(path string) (map[string]string, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect environment file %q: %w", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("environment file %q must be a regular file", path)
+	}
+	if info.Mode().Perm()&0o027 != 0 {
+		return nil, fmt.Errorf("environment file %q permissions %o expose secrets; use 0600 or 0640", path, info.Mode().Perm())
+	}
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("read environment file %q: %w", path, err)

@@ -66,6 +66,16 @@ func TestReadEnvFileRejectsMalformedInput(t *testing.T) {
 	}
 }
 
+func TestReadEnvFileRejectsExposedSecrets(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "fern.env")
+	if err := os.WriteFile(path, []byte("OPENCODE_PASSWORD=secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readEnvFile(path); err == nil || !strings.Contains(err.Error(), "permissions") {
+		t.Fatalf("exposed environment error = %v", err)
+	}
+}
+
 func TestWriteQRDoesNotExposeCredentials(t *testing.T) {
 	var output strings.Builder
 	value := "https://fern.example.ts.net/fern/"
@@ -74,5 +84,23 @@ func TestWriteQRDoesNotExposeCredentials(t *testing.T) {
 	}
 	if output.Len() == 0 || strings.Contains(output.String(), value) {
 		t.Fatal("QR output is empty or contains the literal URL")
+	}
+}
+
+func TestTailscaleOrigin(t *testing.T) {
+	t.Parallel()
+	output := "Available within your tailnet:\n\nhttps://fern-host.example.ts.net\n|-- / proxy http://127.0.0.1:8080\n"
+	if got, err := tailscaleOrigin(output); err != nil || got != "https://fern-host.example.ts.net" {
+		t.Fatalf("tailscale origin = %q, %v", got, err)
+	}
+	if _, err := tailscaleOrigin("https://one.ts.net https://two.ts.net"); err == nil {
+		t.Fatal("accepted ambiguous Tailscale origins")
+	}
+}
+
+func TestTailscaleLocalOrigin(t *testing.T) {
+	t.Parallel()
+	if got, err := tailscaleLocalOrigin([]byte(`{"Self":{"DNSName":"fern-host.example.ts.net."}}`)); err != nil || got != "https://fern-host.example.ts.net" {
+		t.Fatalf("local origin = %q, %v", got, err)
 	}
 }
