@@ -1,8 +1,10 @@
 # Fern Architecture Deep Dive
 
-**Code snapshot:** repository HEAD as inspected on 2026-08-15  
-**Purpose:** explain the current implementation from process startup through wake, proxying, activity tracking, pause, persistence, failure, and shutdown.  
-**Authority:** code is authoritative. This document distinguishes implemented behavior, tested behavior, assumptions, and known limitations.
+> **Document status:** Detailed V1 foundation snapshot inspected on 2026-08-15.
+> Later protocol negotiation, V2 support, loopback-only exposure, runtime limits,
+> and lifecycle fixes are not retrofitted throughout this document. Read
+> [docs/ARCHITECTURE_CURRENT.md](./docs/ARCHITECTURE_CURRENT.md) for the current
+> system and [docs/OPENCODE_V2.md](./docs/OPENCODE_V2.md) for the V2 contract.
 
 ## 1. The Shortest Accurate Mental Model
 

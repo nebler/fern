@@ -1,3 +1,7 @@
 # Day 1 Gate
 
+> **Research scope:** This gate summarizes the upstream source snapshot pinned
+> in [DAY-1.md](./DAY-1.md), not Fern's current V2 protocol contract. See
+> [docs/OPENCODE_V2.md](./docs/OPENCODE_V2.md).
+
 At the start of every V2 provider turn, OpenCode reloads the session, system-context epoch, and ordered projected history from SQLite; however, the active provider stream, buffered text/reasoning fragments, tool fibers, loop counters, and wake bookkeeping remain process memory and are not reconstructible after a crash. `SessionMessageTable.seq` is assigned at durable event commit time from a per-session aggregate sequence, is strictly increasing and unique within that session (though not necessarily contiguous between message rows), while `run` starts or joins a forced drain and `wake` asynchronously coalesces any number of notifications received during an active drain into one non-forced follow-up drain. Therefore a committed session survives process death without database corruption, but a hard kill mid-turn can lose live-only deltas and does not automatically restart provider work, so fern must pause only at a confirmed turn boundary and treat explicit post-crash recovery as separate future work.

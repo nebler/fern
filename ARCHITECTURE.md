@@ -2,7 +2,8 @@
 
 > **Document status (2026-08-15):** This concise overview is retained for
 > historical context but contains implementation details that are no longer
-> exact. Read [ARCHITECTURE_DEEP_DIVE.md](./ARCHITECTURE_DEEP_DIVE.md) for the
+> exact and predates V2/auto support. Read
+> [docs/ARCHITECTURE_CURRENT.md](./docs/ARCHITECTURE_CURRENT.md) for the
 > current source-verified architecture, call stacks, diagrams, trust boundaries,
 > failure paths, persistence model, and known limitations.
 

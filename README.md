@@ -29,18 +29,12 @@ Kubernetes, setup snapshots, resume hooks, Fern-managed TLS/public ingress, and 
 
 ## Documentation
 
-- [CODEBASE_GUIDE.md](./CODEBASE_GUIDE.md): detailed package map, lifecycle traces, state ownership, invariants, and the current-versus-simpler architecture.
-- [CODE_REVIEW.md](./CODE_REVIEW.md): historical foundation review and remediation record.
-- [ARCHITECTURE_DEEP_DIVE.md](./ARCHITECTURE_DEEP_DIVE.md): current source-verified system model, diagrams, call stacks, failure paths, and limitations.
-- [ARCHITECTURE.md](./ARCHITECTURE.md): earlier concise architecture overview retained for context.
-- [IMPLEMENTATION.md](./IMPLEMENTATION.md): exact completion and verification record.
+- [docs/DOCUMENTATION.md](./docs/DOCUMENTATION.md): map of current, historical, and research documents.
+- [docs/ARCHITECTURE_CURRENT.md](./docs/ARCHITECTURE_CURRENT.md): current end-to-end system model, state, trust boundaries, and limitations.
 - [docs/DEPLOYMENT.md](./docs/DEPLOYMENT.md): supervised systemd and private Tailscale Serve deployment runbook.
 - [docs/OPENCODE_V2.md](./docs/OPENCODE_V2.md): pinned V2 beta configuration, protocol mapping, state isolation, and verification.
 - [integration/lifecycle/README.md](./integration/lifecycle/README.md): repeatable real-Docker lifecycle and timing harness.
-- [DAY-1.md](./DAY-1.md): OpenCode persistence and turn-boundary research.
-- [AMP_PRODUCT_RESEARCH.md](./AMP_PRODUCT_RESEARCH.md): Amp comparison, applied-AI product direction, Grab alignment, and evidence-bound workspace proposal.
-- [ROADMAP.md](./ROADMAP.md): dated two-week delivery plan, implementation sequence, verification gates, and deferred scope.
-- [DEEP_RESEARCH_PROMPT.md](./DEEP_RESEARCH_PROMPT.md): source-driven prompt for independently challenging the Amp research, OpenCode seam, market, roadmap, product design, and Grab alignment.
+- [todo/pre-phone/README.md](./todo/pre-phone/README.md): current delivery and external-evidence tracker.
 
 ## Requirements
 

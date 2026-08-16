@@ -2,6 +2,10 @@
 
 This directory splits pre-phone work into commit-sized tasks that can be developed in separate Git worktrees or by separate agents without editing the same files.
 
+**Status authority:** This index is the current delivery and external-evidence
+tracker as of repository HEAD on 2026-08-16. Individual task files preserve the
+historical execution specifications even when their work is complete.
+
 The objective is to make the first phone experiment secure, reproducible, deployable, and measurable. It is not to finish every possible Fern feature.
 
 ## Current Status

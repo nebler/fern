@@ -1,6 +1,9 @@
 # Fern Build Plan (Historical)
 
-> This is the original planning document and contains pre-refactor sketches. It is retained as project history, not as the current API or architecture. Use [CODEBASE_GUIDE.md](./CODEBASE_GUIDE.md), [ARCHITECTURE.md](./ARCHITECTURE.md), and [IMPLEMENTATION.md](./IMPLEMENTATION.md) for the implemented foundation.
+> This is the original planning document and contains pre-refactor sketches. It
+> is retained as project history, not as the current API or architecture. Use
+> [docs/ARCHITECTURE_CURRENT.md](./docs/ARCHITECTURE_CURRENT.md) for the current
+> system and [docs/DOCUMENTATION.md](./docs/DOCUMENTATION.md) for the document map.
 
 **Self-hosted agent workspaces that sleep when idle and wake on request. Kubernetes-native, single-tenant, your cluster.**
 

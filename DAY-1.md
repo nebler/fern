@@ -1,5 +1,9 @@
 # Day 1: Can an OpenCode Session Survive Process Death?
 
+> **Research scope:** Pinned persistence research from 2026-08-12. References
+> to upstream V2 internals are not Fern's current V2 compatibility contract;
+> see [docs/OPENCODE_V2.md](./docs/OPENCODE_V2.md).
+
 ## Result first
 
 **Yes, the durable session survives a process crash. No, an in-progress provider turn does not resume automatically, and the newest streamed text can be lost.**

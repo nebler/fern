@@ -2,7 +2,13 @@
 
 Date: 2026-08-12
 
-## Current Foundation
+> **Document status:** Dated V1 foundation completion record. It predates the
+> current protocol abstraction, V2 support, release/deployment work, and later
+> lifecycle hardening. See [README.md](./README.md),
+> [docs/ARCHITECTURE_CURRENT.md](./docs/ARCHITECTURE_CURRENT.md), and
+> [docs/OPENCODE_V2.md](./docs/OPENCODE_V2.md).
+
+## V1 Foundation Snapshot
 
 Fern implements a safety-first Docker lifecycle for one OpenCode workspace.
 

@@ -2,14 +2,12 @@
 
 Date range: 2026-08-15 through 2026-08-29
 
-> **Implementation status (2026-08-15):** The focused pre-phone plan in
-> [`todo/pre-phone`](./todo/pre-phone/README.md) supersedes the sequencing in
-> this original roadmap. CI, pre-wake authentication, failed-pause endpoint
-> recovery, local-Docker enforcement, explicit attach origins, versioned binary
-> builds, a Docker lifecycle harness, and a supervised deployment runbook are
-> now implemented in the worktree. The full Docker harness passes locally;
-> target-host systemd/reboot validation, laptop rehearsal, and phone testing remain unrun.
-> Setup/resume hooks and broad `doctor --json` remain deferred.
+> **Document status (2026-08-16):** This body is the unrevised original plan.
+> Its sequencing and present-tense feature claims are historical. Use
+> [`todo/pre-phone`](./todo/pre-phone/README.md) for current delivery/evidence
+> status and [docs/OPENCODE_V2.md](./docs/OPENCODE_V2.md) for the V2 work that
+> landed after this plan. Setup/resume hooks and broad `doctor --json` remain
+> deferred.
 
 ## Outcome
 

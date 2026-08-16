@@ -8,7 +8,7 @@ Date: 2026-08-12
 > broader than the checked-in automated tests. Later implementation work added
 > pre-wake authentication, explicit local-Docker enforcement, and endpoint
 > invalidation after failed pause attempts. Read
-> [ARCHITECTURE_DEEP_DIVE.md](./ARCHITECTURE_DEEP_DIVE.md) for the current
+> [docs/ARCHITECTURE_CURRENT.md](./docs/ARCHITECTURE_CURRENT.md) for the current
 > source-verified system model and limitations.
 
 This document records the Go and Rich Hickey-style foundation review and the remediation completed immediately afterward. The upstream `opencode/` checkout was excluded from implementation review.

@@ -1,8 +1,9 @@
 # Fern Codebase Guide
 
-This is the detailed map of the current implementation: where each concept lives, who owns mutable state, and how a request moves through the system.
-
-Read [ARCHITECTURE_DEEP_DIVE.md](./ARCHITECTURE_DEEP_DIVE.md) first for the current system model. Read [CODE_REVIEW.md](./CODE_REVIEW.md) for the historical foundation review and remediation record.
+> **Document status:** This is a detailed V1 foundation snapshot, not the
+> current package map. Read [docs/ARCHITECTURE_CURRENT.md](./docs/ARCHITECTURE_CURRENT.md)
+> for the current system, [docs/OPENCODE_V2.md](./docs/OPENCODE_V2.md) for V2,
+> and [CODE_REVIEW.md](./CODE_REVIEW.md) for the historical remediation record.
 
 ## Repository Map
 
