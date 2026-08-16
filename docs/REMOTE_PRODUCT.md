@@ -7,11 +7,11 @@ remains authoritative for current behavior.
 
 ## Product Position
 
-Fern is currently a careful lifecycle wrapper around one self-hosted OpenCode
-workspace. Its strongest implemented behavior is not remote chat or agent
-orchestration. It is the ability to authenticate an ordinary request, wake
-stopped compute behind a stable endpoint, and stop it only after protocol-aware
-evidence says doing so is safe.
+Fern is currently a lifecycle and same-origin delivery wrapper around one
+self-hosted OpenCode workspace. The official OpenCode web UI is already served
+unchanged through Fern's stable origin. Fern's strongest implemented behavior
+is authenticating an ordinary request, waking stopped compute, and stopping it
+only after V2 activity evidence says doing so is safe.
 
 The remote-agent market already provides managed sandboxes, phone control,
 worktrees, schedules, webhooks, previews, collaboration, and hibernation. Cursor,
@@ -31,10 +31,10 @@ safety, owner-controlled data, reliable remote delivery, and simple operations.
 
 The first credible product outcome is:
 
-> From a supported phone client, authorize one repository, submit work, answer
-> any approval, and return to a tested draft pull request. Fern can then stop,
-> wake, reboot, continue through CI or review feedback, and restore onto a fresh
-> host without losing completed work.
+> From the official OpenCode UI on a supported phone browser, authorize one
+> repository, submit work, answer any approval, and return to a tested draft
+> pull request. Fern can then stop, wake, reboot, continue through CI or review
+> feedback, and restore onto a fresh host without losing completed work.
 
 A pushed branch is an intermediate result. A correctly proxied HTTP response is
 not a durable task, and surviving files are not proof that the workflow can be
@@ -48,7 +48,7 @@ acceptance validates the user outcome. Neither has been completed.
 | ID | Requirement | Current status |
 | --- | --- | --- |
 | `FIELD-INSTALL` | Install exact Fern/OpenCode artifacts on Ubuntu with systemd and Tailscale | Not run; manual runbook only |
-| `FIELD-PHONE` | Use one named, supported phone client to connect, submit, steer, cancel, approve, and reconnect | Blocked; no supported phone path is defined |
+| `FIELD-PHONE` | Use the official OpenCode UI on supported phone browsers to connect, submit, steer, cancel, approve, and reconnect | Blocked; the unchanged UI and proposed Fern device gateway have not passed real-phone acceptance |
 | `FIELD-PROVIDER` | Complete a real provider-backed turn after client disconnect | Not run; continuation semantics are upstream-dependent |
 | `FIELD-SLEEP` | Stop only after completed work and wake through the actual client sequence | Deterministic fixture passes; phone/provider path unproven |
 | `FIELD-REBOOT` | Reboot while running or paused and recover automatically | Blocked; a running container stopped by host shutdown is classified as failed |
@@ -74,7 +74,7 @@ not a hostile multi-tenant platform.
 | Priority | Capability | Product requirement |
 | --- | --- | --- |
 | P0 | Reboot-safe lifecycle | Recover running and intentionally paused workspaces after Docker and host restart without misclassifying normal shutdown as failure. |
-| P0 | Supported phone/browser control | Show status, submit and steer work, cancel, approve, and reconnect reliably. |
+| P0 | Official UI phone acceptance | Validate the unchanged OpenCode UI through Fern for submit, steer, cancel, approve, diff review, and reconnect. Build no second coding client. |
 | P0 | Appliance installation | Provide guided initialization, preflight checks, system service setup, updates, and rollback. |
 | P0 | GitHub App and repository onboarding | Authorize selected repositories, clone exact source state, and refresh narrow credentials without placing them in the container. |
 | P0 | Git publication | Configure identity, allocate one branch, commit, push through a host broker, and create or update one draft PR. |
@@ -122,9 +122,9 @@ permission request, form, held request, watcher loss, ambiguous status, or faile
 final check. This makes safe hibernation an inspectable contract rather than a
 generic inactivity timer.
 
-OpenCode is the first adapter. Other harnesses should be added only when they
-offer authoritative activity and quiescence APIs; process or CPU heuristics are
-not equivalent.
+OpenCode V2 is the sole supported execution and UI primitive. Adding other
+agent harnesses is outside this roadmap; process or CPU heuristics are not an
+acceptable substitute for authoritative activity and quiescence APIs.
 
 ### Exportable Agent Workstation
 
@@ -161,8 +161,8 @@ A coherent first remote-product release should include:
 
 1. A supported headless Linux installation with `init`, `doctor`, safe update,
    rollback, and reboot recovery.
-2. A supported phone/browser control surface with device pairing and durable
-   task submission.
+2. The official OpenCode web UI accepted on supported phone browsers, with
+   Fern-owned device pairing and durable shadow delivery records.
 3. GitHub App onboarding for one selected repository.
 4. Versioned project setup with persistent caches and explicit failure state.
 5. Host-brokered publication to one Fern-owned branch and one draft PR.
@@ -178,9 +178,9 @@ own a model loop, add Temporal, host Git, or build multi-agent reasoning.
 
 The field phone rehearsal remains valuable, but it is not the single blocker
 after which all product work becomes safe. Before provisioning the host, fix or
-explicitly isolate the running-state reboot failure and select the exact phone
-client. The GitHub, task, and setup boundaries can be designed in parallel with
-that field work.
+explicitly isolate the running-state reboot failure and define the official-UI
+phone acceptance matrix. The GitHub, task, and setup boundaries can be designed
+in parallel with that field work.
 
 ### Safe Parallel Tracks
 
@@ -204,11 +204,13 @@ create conflicting state models and duplicate routing logic:
 - multiple workspaces and repository registry;
 - device pairing and authorization;
 - artifact and preview routing;
-- browser terminal and human/agent write ownership;
+- official-UI deep links and human/agent write ownership;
 - event-triggered or whole-host wake.
 
-Define the smallest control-plane state and API for one workspace first. Then
-these can split into server, client, notification, and preview workstreams.
+Define the smallest control-plane state and API for one workspace first. Keep
+Fern-owned browser handlers under `/fern/*`; every coding-session route remains
+owned by the official OpenCode UI. Then the work can split into server,
+notification, publication, and preview workstreams.
 
 ### Practical Parallelism Limit
 

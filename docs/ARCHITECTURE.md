@@ -1,357 +1,260 @@
 # Fern Architecture
 
-This document describes the implemented first-party system. Code and tests are
-authoritative if behavior changes.
+This document separates the implemented lifecycle system from the proposed
+production gateway. Code and tests are authoritative when behavior changes.
 
 ## System Boundary
 
-Fern is one native Go process supervising one durable OpenCode workspace in one
-local Docker container. OpenCode owns coding sessions, provider calls, tools,
-and its client protocol. Docker owns process and network isolation. Fern owns:
+Fern is a native Go process supervising one durable OpenCode workspace in one
+local Docker container. OpenCode V2 is the only supported server contract.
 
-- strict desired configuration and ownership checks;
+OpenCode is authoritative for its complete web UI, sessions, configuration,
+providers, permissions and forms, terminals, files, diffs, tool execution, and
+client protocol. Its official web UI is served at the OpenCode server root and
+reaches it through Fern's same-origin reverse proxy. Fern does not build a
+coding PWA or consume or fork `@opencode-ai/app`.
+
+Fern currently owns:
+
+- strict desired configuration and Docker resource ownership checks;
 - one lifecycle writer per workspace;
 - a stable authenticated loopback proxy;
 - wake coalescing and request admission;
-- protocol-aware activity observation and conservative idle stop;
+- V2 activity observation and conservative idle stop;
 - classification of intentional stops versus failed compute.
 
-Fern is not a hostile-tenant sandbox. The service account can access Docker,
-the selected repository is writable by the container, and provider credentials
-enter that container. The host user, repository, image, and Docker daemon are
-inside one trust boundary.
+Fern is also the intended owner of future remote delivery, notifications,
+publication, and recovery. Those product services are not implied by the
+implemented lifecycle component.
 
 ```text
-remote client
-    |
-    | HTTPS and private identity (for example, Tailscale Serve)
-    v
-host TLS edge
-    |
-    | loopback HTTP
-    v
-Fern proxy  <---->  manager  <---->  Docker Engine
-    |                    |                 |
-    | dynamic loopback   | SSE/status      | container lifecycle
-    v                    v                 v
-OpenCode server in a constrained container
-    |
-    +-- bind-mounted repository
-    +-- protocol-specific persistent data volume
+browser or official OpenCode client
+             |
+             | HTTPS at a private edge
+             v
+       Fern proxy origin
+        |             |
+        | /fern/*     | all other paths
+        | reserved    | wake-aware same-origin proxy
+        v             v
+ future Fern UI     OpenCode V2 server
+ and callbacks        |          |
+                      |          +-- official web UI at /
+                      +-- APIs, SSE, and upgrades
+                              |
+                 repository bind mount
+                 OpenCode data volume
 ```
 
-Fern accepts only numeric loopback proxy listeners. OpenCode Basic auth is
-checked by Fern before request admission or wake. Remote access requires a
-separate private TLS edge; Basic auth alone is not transport security.
+Today `/fern/*` has no implemented pairing or admin surface. The current proxy
+uses Basic auth and forwards OpenCode credentials. The production design will
+route `/fern/*` to Fern-owned device pairing, administration, and GitHub
+callbacks, authenticate a Fern `HttpOnly` device cookie, and inject internal
+OpenCode auth for proxied routes. Keep implemented and proposed behavior
+distinct.
+
+Fern is not a hostile-tenant sandbox. The service account can access Docker,
+the repository is writable by OpenCode, and provider credentials enter the
+container. The host user, repository, image, and Docker daemon share one trust
+boundary.
 
 ## Composition And Startup
 
 `cmd/fern/up.go` is the composition root:
 
-1. Load defaults, strict YAML, and explicit flag overrides.
-2. Expand required environment references and validate the repository.
-3. Require a numeric loopback proxy address and bind it before Docker effects.
+1. Load defaults, strict YAML, environment references, and flag overrides.
+2. Validate the repository, limits, credentials, and numeric loopback listener.
+3. Bind the listener before Docker effects.
 4. Acquire the host-local workspace lease under `~/.fern/locks`.
-5. Create a local-Docker runtime backed by pause intents in `~/.fern/state`.
-6. Construct the stream controller, workspace manager, supervisor, and proxy.
-7. Ensure the container is running and healthy.
-8. Connect the activity stream before publishing the endpoint to requests.
-9. Start the idle supervisor and HTTP server in one cancellation group.
+5. Create the local-Docker runtime backed by pause intents in `~/.fern/state`.
+6. Construct the stream controller, manager, supervisor, and reverse proxy.
+7. Ensure the OpenCode container is running and healthy.
+8. Attach its activity stream before publishing the backend endpoint.
+9. Run the idle supervisor and HTTP server in one cancellation group.
 
-Only the default Docker endpoint or an absolute Unix-socket endpoint is
-accepted. Fern depends on host-local bind mounts, loopback port publication,
-file locks, and pause-intent state. This rejects ordinary TCP/SSH Docker
-endpoints, but a Unix socket that proxies elsewhere cannot be distinguished
-from a local daemon.
+Fern accepts only the default Docker endpoint or an absolute Unix socket. It
+depends on host-local bind mounts, loopback publication, locks, and pause-intent
+state. Ordinary TCP and SSH Docker endpoints are rejected.
 
-## Configuration And Command Paths
+## Configuration And Commands
 
-Configuration precedence is explicit flags, YAML, then defaults. The YAML
-decoder rejects unknown fields for `up`; repository paths in YAML are relative
-to the config file, while a relative `-repo` override is relative to the
-calling directory. Environment references are required, and the final
-environment is part of desired state. Rotating a provider key or OpenCode
-password therefore requires `fern down` followed by `fern up`; session storage
-is retained.
+Configuration precedence is flags, YAML, then defaults. YAML is strict;
+repository paths in YAML are relative to that file, while `-repo` is relative
+to the caller. Expanded environment is part of desired state. Rotating
+`OPENCODE_PASSWORD` or a provider key requires `fern down` and `fern up`, while
+the OpenCode data volume remains intact.
 
-Full startup validation requires an existing repository, positive memory and
-idle duration, numeric loopback listener, supported protocol, and the selected
-protocol's password. V1 requires `OPENCODE_SERVER_PASSWORD`, V2 requires
-`OPENCODE_PASSWORD`, and auto requires both.
-
-The command surface has different ownership rules:
+OpenCode's current Basic username is fixed to `opencode`; its password comes
+from `OPENCODE_PASSWORD`. This is the current upstream credential, not the
+future Fern device credential.
 
 | Command | Role | Workspace lease |
 | --- | --- | --- |
 | `up` | Long-running supervisor and proxy | Exclusive writer |
-| `down` | Stop/remove compute and clear pause intent | Exclusive writer |
-| `status` | Inspect classified Docker state as text or stable JSON | None; read-only |
-| `logs` | Stream Docker logs | None; read-only |
-| `debug events` | Inspect health and SSE directly on the backend | None; diagnostic bypass |
-| `attach` | Launch the protocol-specific official client | None; connects through proxy origin |
-| `version` | Print embedded release identity | None |
+| `down` | Remove compute and clear pause intent | Exclusive writer |
+| `status` | Inspect classified Docker state | Read-only |
+| `logs` | Stream Docker logs | Read-only |
+| `debug events` | Direct backend health/SSE diagnostic | Diagnostic bypass |
+| `attach` | Launch the official OpenCode terminal client through Fern | Read-only |
+| `version` | Print release identity | None |
 
-`down`, `status`, and `logs` intentionally load only the workspace name so
-incident cleanup still works when unrelated configuration is broken. `attach`
-and `debug events` load only their relevant projections. Explicit remote attach
-origins must be HTTPS; plaintext HTTP is accepted only for numeric loopback.
-`debug events` is observation-only but bypasses manager admission and endpoint
-generation ownership, so it is a diagnostic path rather than normal client
-traffic.
-
-The CLI treats malformed invocation as exit status 2 and operational failure as
-status 1. Help and version requests write to stdout and succeed. Normal errors
-are concise stderr diagnostics rather than structured service logs. A child
-launched by `attach` retains its nonzero exit status; interactive SIGINT or
-SIGTERM termination is treated as a clean user exit. `status --json` always
-emits the workspace, classified state, Docker status, process exit code, and OOM
-flag. Runtime states are data, so a successful status query exits zero even when
-the observed workspace is absent or failed.
+`down`, `status`, and `logs` load only the workspace identity so incident
+cleanup remains possible when unrelated configuration is invalid. Normal
+clients use the proxy. `debug events` bypasses request admission and is not an
+application traffic path.
 
 ## Desired And Observed State
 
-`runtime.Spec` contains the stable desired workspace name, image, repository,
-memory, OpenCode protocol, and environment. The Docker implementation adds
-fixed init, port, data-volume, CPU, and PID policy. A fingerprint is stored on
-the container. Initial startup and cache-miss wake/reconciliation verify the
-fingerprint plus selected actual Docker settings before publishing an endpoint.
+The runtime specification contains workspace name, image, repository, memory,
+and environment. Docker adds fixed init, port, volume, CPU, and PID policies.
+Fern records a fingerprint on the container and checks it plus the settings it
+depends on before reuse. Drift is rejected rather than silently adopted.
 
-Every mutable Docker resource must carry Fern's managed and workspace labels.
-Mutations use the inspected immutable container ID, not an unverified reusable
-name. Ownership is checked before every mutation. Full desired-state drift
-verification applies when creating or reusing compute; `Pause` and `Destroy`
-have no desired `Spec` and enforce ownership rather than full drift comparison.
-Actual verification covers the settings Fern depends on, not every Docker
-field or image-provided environment value.
-
-The observed lifecycle states are:
+Every mutable Docker resource has Fern-managed and workspace labels. Fern
+checks ownership before mutation and operates on inspected immutable container
+IDs rather than trusting reusable names.
 
 | State | Meaning |
 | --- | --- |
 | `absent` | No container exists. |
-| `provisioning` | Created/restarting compute or an unresolved pending stop. |
-| `running` | The process is running and not externally frozen. |
+| `provisioning` | Compute is being created/reconciled or a stop outcome is unresolved. |
+| `running` | OpenCode is running and not externally frozen. |
 | `paused` | Fern committed an intentional stop, or Docker reports a frozen process. |
-| `failed` | The process exited without a committed Fern pause, died, or was OOM-killed. |
+| `failed` | OpenCode exited without committed Fern intent, died, or was OOM-killed. |
 
-Fern writes a pending pause intent before asking a running container to stop
-and commits it only after a successful stop response. A Docker `created`
-container is the safe exception: because no process ran, Fern can directly
-commit it as paused. A failed stop response remains an unknown outcome; Fern
-does not relabel a concurrent crash as a safe pause. Pending intent is scoped
-to the exact container ID and is written with atomic rename and filesystem
-sync.
+Fern writes a pending pause intent before stopping a running container and
+commits it only after Docker reports success. The record is scoped to the exact
+container ID and atomically persisted. An ambiguous stop remains unresolved;
+Fern does not relabel a concurrent crash as a safe pause.
 
-## In-Process Ownership
+## Wake And Request Path
 
-The workspace manager combines three separate synchronization domains:
+The workspace manager separates endpoint/wake synchronization, lifecycle
+serialization, and request admission. Concurrent requests to stopped compute
+share one wake operation. Canceling one waiter does not cancel a wake still
+needed by others. Every published backend has a monotonically increasing
+generation so an old transport failure cannot invalidate a replacement.
 
-- `wakeMu` owns the cached endpoint, generation number, and one shared wake;
-- a lifecycle token serializes Docker ensure-running and pause operations;
-- `admissionMu` owns held-request count and the pause admission barrier.
+An endpoint is published only after authenticated health succeeds and the V2
+event stream is connected. A cached endpoint avoids a Docker inspection on
+every request. Transport failures invalidate that exact generation; reachable
+upstream HTTP errors do not.
 
-Concurrent cache-miss requests share one wake operation with a 90-second
-service-level deadline. Canceling one caller stops that caller waiting but does
-not cancel the shared wake needed by other callers. Endpoint publication gets a
-monotonic generation, and failures invalidate only the exact generation they
-used.
+The proxy classifies V2 routes conservatively:
 
-An endpoint is published only after health succeeds and its activity stream is
-connected. If Fern started stopped compute and observer setup then fails, it
-attempts to stop it again. Failure while attaching to compute that was already
-running does not stop that process.
-
-## Request Path
-
-The proxy classifies requests conservatively:
-
-| Intent | Examples | Wakes? | Holds pause admission? | Invalidates old idle evidence? |
+| Intent | Examples | Wakes? | Holds pause admission? | Invalidates idle evidence? |
 | --- | --- | --- | --- | --- |
-| Observe | selected protocol's SSE endpoint | No | No | No |
-| Read | selected health/status endpoints | Yes | Yes | No |
-| Work | every unknown, mutating, or upgraded request | Yes | Yes | Yes |
+| Observe | lifecycle SSE | No | No | No |
+| Read | health and activity reads | Yes | Yes | No |
+| Work | root UI, unknown, mutating, or upgraded requests | Yes | Yes | Yes |
 
-Unknown routes default to work because a future OpenCode GET endpoint may start
-execution. Basic credentials are validated before this classification reaches
-the manager.
+Treating unknown routes as work preserves compatibility with the full official
+OpenCode UI and future upstream routes. Exact escaped paths are used; trailing
+slashes, encoded variants, and upgrades fail toward the conservative class.
 
-For read and work requests, `workspace.Manager` acquires an admission lease and
-coalesces concurrent cache-miss wakes into one Docker operation. On a cache
-miss, it resolves health and attaches the exact endpoint generation's activity
-observer before forwarding. A cached endpoint is reused without per-request
-Docker inspection or health probing. External failure, freeze, or replacement
-is normally discovered by a transport failure, which invalidates that
-generation so the following request reconciles runtime state. Reachable
-upstream HTTP error responses do not invalidate the cache. The admission lease
-remains held until reverse proxying finishes.
+Current Basic credentials are checked before request admission or wake. The
+Authorization header is forwarded unchanged to OpenCode. Fern is presently an
+authentication gate, not a credential translation layer.
 
-Backend endpoint generations prevent a failed old request from clearing a
-newer endpoint. Transport failures and canceled held requests invalidate the
-generation so the next request reconciles Docker state. Cancellation of an
-observation-only SSE request does not invalidate healthy compute.
+The future gateway changes only this authentication edge. A Fern device cookie
+will be validated before lifecycle admission, Fern will inject a private
+OpenCode credential upstream, and `/fern/*` will be handled separately. The
+OpenCode origin and UI remain otherwise unchanged.
 
-Route classification uses exact escaped paths. Trailing slashes, encoded path
-variants, unknown GETs, and WebSocket upgrades default to work. Fern validates
-Basic credentials before admission and forwards the accepted Authorization
-header unchanged to OpenCode; it is an authentication gate, not a credential
-translation layer.
+## Activity And Idle Stop
 
-## Activity And Pause Protocol
+The stream controller assigns an epoch to each published backend generation.
+Connected, disconnected, status, malformed-status, and work-request events are
+serialized through the supervisor. Stale epochs cannot make new compute
+eligible to stop.
 
-The stream controller owns one monotonically increasing epoch per backend
-endpoint. Connected, disconnected, status, malformed-status, and work-request
-observations are serialized through the supervisor. Stale epochs cannot make a
-new endpoint eligible to stop.
+An epoch must report busy or retry and then drain all observed sessions to idle
+before the timer starts. Disconnects, unknown states, and requests that may
+start work cancel eligibility. Starting Fern against an already idle process
+does not itself arm a stop.
 
-The supervisor requires a connected epoch to report a busy or retry state and
-then drain all observed active sessions to idle. Disconnects, malformed or
-unknown status, and requests that may start work cancel eligibility. Merely
-starting Fern against an already idle process does not arm a stop timer.
+When the timer expires, the manager performs an authoritative barrier:
 
-One epoch represents one published backend generation, not one TCP connection.
-The stream controller reconnects to that endpoint with bounded exponential
-backoff after disconnect. A disconnect immediately cancels pause eligibility.
-If a pause attempt fails, the supervisor preserves the eligible boundary and
-retries after at most five seconds rather than requiring another turn.
-
-When the timer expires, the manager performs a second authoritative barrier:
-
-1. Reject pause if any held HTTP request is active.
+1. Refuse to stop while a held request exists.
 2. Block admission of new held requests.
-3. Serialize against wake and other lifecycle operations.
+3. Serialize with wake and lifecycle operations.
 4. Reinspect Docker and resolve the current endpoint.
-5. Query all protocol-specific activity surfaces with authentication.
-6. Stop only if every response is valid and idle.
+5. Authenticate and query V2 sessions, shells, PTYs, permissions, and forms.
+6. Repeat the complete activity query while admission remains closed.
+7. Stop only when every response in both passes is idle.
 
-V1 uses one `/session/status` response. V2 sequentially samples all of
-`/api/session/active`, `/api/shell`, `/api/pty`, `/api/permission/request`, and
-`/api/form/request`. OpenCode V2 does not expose one atomic aggregate snapshot,
-so these reads cannot prove that every surface described the same instant. Fern
-blocks new held proxy requests during the sequence and fails closed on any
-active, unknown, or unavailable response, but internal state can transition
-between reads.
+The activity reads are sequential, not an atomic OpenCode snapshot. The second
+pass catches activity that begins during the first pass. Fern blocks new held
+proxy requests throughout and fails closed on active, unknown, or unavailable
+results, but OpenCode can still transition internally between reads.
 
-This protects requests using Fern's proxy. A same-host Docker administrator can
-discover the backend's loopback port and bypass admission; that principal is
-already inside the trusted-host boundary.
+## Container And Persistence
 
-## OpenCode Protocols
+The workspace container has the configured memory limit, a two-CPU quota, a
+512-process limit, Docker init, no restart policy, one writable repository bind
+mount, one writable OpenCode data volume, and a dynamically assigned backend
+port published only on loopback.
 
-| Concern | V1 | V2 |
-| --- | --- | --- |
-| Health | `/global/health` | `/api/health` |
-| Lifecycle event stream | `/event` | `/api/event` |
-| Auth | configurable Basic username/password | username `opencode`, `OPENCODE_PASSWORD` |
-| Client | `opencode attach URL` | `opencode2 --server URL` |
-| Data volume | `fern-<name>-data` | `fern-<name>-v2-data` |
+The single image is built from `images/opencode/Dockerfile` and tagged
+`fern/opencode:dev` for development. The persistent volume is
+`fern-<workspace>-v2-data`, mounted at
+`/home/user/.local/share/opencode`. The image points `XDG_CONFIG_HOME` into that
+mount so OpenCode's global configuration survives with its database. `fern
+down` removes compute and pause intent but retains this volume. Fern does not
+own OpenCode's data format or perform database migrations.
 
-`auto` probes both health contracts, requires exactly one to validate, requires
-both protocol passwords, and uses `fern-<name>-auto-data`. Explicit protocol
-selection is preferred because it catches image/protocol mismatches and keeps
-persistence intent clear. Do not reuse an auto workspace with an image tag that
-can change between V1 and V2: detection occurs after the shared auto volume is
-mounted, so Fern cannot provide explicit-mode protocol isolation in that case.
-
-In auto mode, the watcher and final idle checker use the negotiated endpoint
-protocol, but proxy authentication and route classification remain configured
-as auto: Fern accepts either credential pair and recognizes both route sets.
-The original Authorization header is forwarded, so a credential for the
-non-selected protocol can pass Fern's gate and then receive an OpenCode 401.
-Explicit mode avoids this split ownership.
-
-## Container And Persistence Model
-
-The workspace container has:
-
-- the configured memory limit;
-- a two-CPU quota and 512-process limit;
-- Docker init enabled and no restart policy;
-- exactly one writable repository bind mount;
-- exactly one writable protocol-specific OpenCode data volume;
-- one dynamically assigned host port bound exclusively to loopback.
-
-`fern down` removes the container and pause intent but retains the data volume.
-The next `fern up` recreates compute around that durable state. A newly created
-volume is rolled back if initial container creation never starts; once OpenCode
-has started, its data is retained even if later health setup fails. The
-workspace lease prevents another Fern writer from racing volume creation, but
-the idempotent Docker volume API cannot prove whether an external Docker
-administrator won the inspect/create race.
-
-Explicit protocol changes require container recreation and never mount V1 data
-into V2 or vice versa. Auto mode has the mutable-image limitation above. Fern
-does not migrate OpenCode databases.
-
-## Failure And Recovery Semantics
+## Failure And Shutdown Semantics
 
 | Condition | Result |
 | --- | --- |
-| OpenCode exits without committed intent | `failed`; operator inspects logs and runs `fern down` |
-| Host shutdown stops a running container | `failed` on boot because no Fern pause intent was committed |
+| OpenCode exits without committed intent | `failed`; inspect logs and recreate explicitly |
+| Host shutdown stops running compute | `failed` if no Fern pause intent was committed |
 | OOM or dead container | `failed` |
-| Successful Fern stop | `paused`; next held request starts it |
-| Failed/unknown stop response | Pending intent is preserved and endpoint invalidated |
-| Pending intent on an exited container | `provisioning`; wake-to-reconcile is required |
-| Externally Docker-paused process | Classified `paused`; a held request unpauses and reconciles it |
-| Spec or selected actual-setting drift on reuse | Refused until `fern down` recreates compute |
-| Activity/status error | Pause deferred; compute remains running |
+| Successful Fern stop | `paused`; the next held request wakes it |
+| Failed or unknown stop | Pending intent retained and endpoint invalidated |
+| Activity query error | Stop deferred; compute remains running |
+| Desired-state drift | Reuse refused until explicit recreation |
 
-The pause safety guarantee applies only to requests using Fern's proxy and to
-the OpenCode activity surfaces available for the selected protocol. It does not
-recover live provider streams or tool state after process death.
+SIGTERM cancels proxy, supervisor, event observation, and wake work together.
+The HTTP server gets a bounded graceful shutdown, then Fern waits for its owned
+manager operations before closing Docker. Stopping Fern itself does not stop
+OpenCode, which allows service restart and reattachment but makes quiet backups
+an explicit `fern down` operation.
 
-## Shutdown And Supervision
+The checked-in systemd unit has no lifecycle-mutating `ExecStop`. If host
+shutdown kills running OpenCode before Fern commits pause intent, the next boot
+classifies it as failed and requires operator reconciliation. Complete reboot
+recovery is not yet implemented.
 
-SIGTERM cancels the shared service context, so proxy, supervisor, activity
-stream, and wake work begin cancellation concurrently. HTTP shutdown has a
-five-second graceful period and then closes tracked connections, including
-upgrades. After the service goroutines return, Fern waits for manager-owned
-requests, pause, lifecycle, and wake work; then it stops the stream controller
-and closes Docker. Manager close is intentionally unbounded inside Fern so the
-Docker client is not closed under an owned operation. The systemd unit provides
-the outer 120-second stop limit. Pause reconciliation itself uses the caller's
-context and cannot silently extend its deadline.
+## Authentication And Network Boundaries
 
-Stopping the Fern process does not stop OpenCode. This permits service restart
-to reattach to running compute, but operational backups must stop the service
-and run offline `fern down` before archiving repository and volume state.
+Fern accepts only numeric loopback proxy listeners. A separate private TLS edge
+such as Tailscale Serve is required for remote use. Basic auth is not transport
+security. Do not expose the current listener publicly.
 
-The checked-in systemd unit supervises `fern up`, runs with Docker-group access,
-and therefore does not create a privilege boundary from Docker. It has no
-`ExecStop` lifecycle mutation: stopping Fern leaves OpenCode running. If host
-shutdown then stops that running container, no Fern pause intent exists; the
-next boot classifies it as failed and requires manual `fern down` before
-recreation. Reboot recovery is therefore established only for containers that
-were already stopped through Fern's committed pause path, and still requires a
-target-host rehearsal.
+The planned production chain is:
+
+```text
+TLS edge -> Fern HttpOnly device-cookie auth -> lifecycle admission
+         -> injected internal OpenCode auth -> OpenCode UI/API
+```
+
+Pairing, cookie rotation/revocation, Fern admin handlers, and GitHub callbacks
+are future work. Until they exist, Tailscale identity plus current OpenCode
+Basic auth is the practical private-deployment boundary.
 
 ## Assurance And Limits
 
-Unit, race, vet, formatting, image-build, and V1/V2 Docker lifecycle jobs are
-defined in CI. Those lifecycle jobs use a deterministic protocol fixture in
-real Docker, not the OpenCode images. CI separately runs the real version-pinned
-V2 protocol smoke; there is no equivalent real V1 smoke job. The lifecycle
-harness covers creation, authentication
-before wake, concurrent wake, request/pause exclusion, endpoint replacement,
-persistence, clean-exit and OOM classification, shutdown, and frozen-container
-recovery. The real V2 smoke test covers the pinned beta artifact.
+CI is expected to run formatting, unit and race tests, vet, binary build, the
+single image build, the deterministic real-Docker lifecycle harness, and the
+pinned OpenCode smoke test. Relevant local commands are `make image`,
+`./scripts/test-lifecycle.sh`, and `./scripts/test-opencode.sh`.
 
-The V1 binary is checksum-pinned. V2 pins the base image and top-level npm
-package version, but does not check in an npm lockfile or complete transitive
-integrity closure; rebuilding it is therefore less reproducible than V1.
+Not established by checked-in evidence:
 
-Long-lived streaming is favored over aggressive connection limits. The HTTP
-server bounds request-header reads but has no Fern-level write or idle timeout,
-request-body limit, or connection-count quota. The SSE client bounds connection
-setup but has no post-connect heartbeat deadline; a silent open socket remains
-connected until the transport reports failure. These choices support SSE and
-upgraded connections under the trusted-single-user model, but they are not
-denial-of-service protection.
-
-Not yet established by checked-in evidence:
-
-- target-host systemd, reboot, Docker restart, backup, and restore rehearsal;
-- remote laptop and phone access through the intended tailnet;
-- provider-backed V2 model turns and upstream upgrade compatibility;
-- recovery of in-progress provider or tool work after process death;
+- production Fern device pairing and cookie authentication;
+- target-host reboot, Docker restart, backup, and restore rehearsal;
+- remote browser acceptance on intended laptop and phone devices;
+- provider-backed model turns across each supported provider;
+- recovery of in-progress provider streams or tool work after process death;
 - hostile multi-user or multi-tenant isolation.
