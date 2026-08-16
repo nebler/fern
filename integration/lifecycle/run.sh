@@ -279,9 +279,19 @@ wrong_code=$(http_code "$ARTIFACTS/wrong-auth.body" --user "$USERNAME:wrong" "$P
 [[ "$missing_code" == 401 && "$wrong_code" == 401 ]] || fail "stopped auth expected 401/401, got $missing_code/$wrong_code; pre-wake auth capability is mandatory"
 auth_curl --fail "$PROXY_URL/fern/ready" | grep -q '"ready":true' || fail "Fern readiness was unavailable while compute was paused"
 auth_curl --fail "$PROXY_URL/fern/" | grep -q 'href="/"' || fail "Fern phone landing was unavailable while compute was paused"
+pair_code=$(auth_curl --fail --request POST "$PROXY_URL/fern/pair/new" | jq -er '.code')
+curl --silent --show-error --dump-header "$ARTIFACTS/pairing.headers" --output /dev/null "$PROXY_URL/fern/pair?code=$pair_code"
+grep -Eqi '^set-cookie: fern_device=' "$ARTIFACTS/pairing.headers" \
+  && grep -Eqi '^set-cookie: .*HttpOnly' "$ARTIFACTS/pairing.headers" \
+  && grep -Eqi '^set-cookie: .*Secure' "$ARTIFACTS/pairing.headers" \
+  || fail "phone pairing did not issue a secure HttpOnly cookie"
 sleep 0.5
 wait_status paused 2
 [[ "$(container_started_at)" == "$before_start" ]] || fail "authentication or Fern-owned routes started compute"
+device_cookie=$(sed -nE 's/^Set-Cookie: fern_device=([^;]+).*/\1/p' "$ARTIFACTS/pairing.headers" | tr -d '\r')
+paired_identity=$(curl --silent --show-error --fail --header "Cookie: fern_device=$device_cookie" "$PROXY_URL/control/identity")
+[[ "$paired_identity" == *'"boot_id"'* ]] || fail "paired device cookie did not authenticate and wake through Fern"
+stop_by_idle
 
 note "scenario 4/13: concurrent authorized requests coalesce into one wake"
 starts_before=$(grep -c '"Action":"start"' "$EVENTS" || true)

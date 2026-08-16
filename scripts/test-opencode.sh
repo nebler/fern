@@ -8,6 +8,7 @@ VOLUME="fern-$NAME-v2-data"
 RUN_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fern-opencode-smoke.XXXXXX")
 REPO="$RUN_ROOT/repository"
 CONFIG="$RUN_ROOT/fern.yaml"
+ENV_FILE="$RUN_ROOT/fern.env"
 FERN_BIN=${FERN_BIN:-}
 IMAGE=${FERN_OPENCODE_IMAGE:-"fern/opencode:smoke-$RUN_ID"}
 PASSWORD="opencode-smoke-$RUN_ID"
@@ -69,11 +70,11 @@ idle:
 proxy:
   listen: 127.0.0.1:$PROXY_PORT
 EOF
-
-export OPENCODE_PASSWORD="$PASSWORD"
+printf 'OPENCODE_PASSWORD=%s\n' "$PASSWORD" >"$ENV_FILE"
+chmod 0600 "$ENV_FILE"
 
 start_fern() {
-  "$FERN_BIN" up -config "$CONFIG" >"$RUN_ROOT/fern.log" 2>&1 &
+  "$FERN_BIN" up -config "$CONFIG" -env-file "$ENV_FILE" >"$RUN_ROOT/fern.log" 2>&1 &
   FERN_PID=$!
   for _ in {1..350}; do
     if curl -fsS -u "opencode:$PASSWORD" "$PROXY_URL/api/health" >"$RUN_ROOT/health.json" 2>/dev/null; then
