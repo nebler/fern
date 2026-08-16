@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -19,7 +18,13 @@ import (
 )
 
 func workspaceFlags(command string) (*flag.FlagSet, *string, *string) {
-	flags := flag.NewFlagSet(command, flag.ContinueOnError)
+	descriptions := map[string]string{
+		"down":         "Remove workspace compute while retaining session data.",
+		"status":       "Show the workspace runtime state.",
+		"logs":         "Stream workspace container logs.",
+		"debug events": "Stream the backend activity events used by Fern.",
+	}
+	flags := newFlagSet(command, descriptions[command])
 	name := flags.String("name", "", "workspace name")
 	configPath := flags.String("config", "fern.yaml", "configuration file")
 	return flags, name, configPath
@@ -55,16 +60,6 @@ func optionalFlag(flags *flag.FlagSet, name string, value *string) *string {
 		return nil
 	}
 	return value
-}
-
-func parseFlags(flags *flag.FlagSet, args []string) error {
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if flags.NArg() != 0 {
-		return fmt.Errorf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
-	}
-	return nil
 }
 
 func forwardedEnvironment(configured map[string]string) map[string]string {

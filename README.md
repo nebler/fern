@@ -101,6 +101,23 @@ go run ./cmd/fern debug events
 go run ./cmd/fern down
 ```
 
+`fern --help`, `fern help <command>`, and `fern --version` provide the standard
+CLI entry points. Invocation errors exit with status 2; operational failures
+exit with status 1. `attach` preserves a nonzero OpenCode client exit status.
+Primary output is written to stdout and concise diagnostics to stderr.
+
+`status` defaults to one tab-delimited line. For automation, use its stable JSON
+object instead:
+
+```bash
+fern status --json
+```
+
+The object always contains `workspace`, `state`, `dockerStatus`, `exitCode`, and
+`oomKilled`. A successfully observed `absent`, `paused`, or `failed` workspace is
+still a successful status query; inspect `state` rather than relying on the
+process exit status.
+
 Common flags override file configuration:
 
 ```bash

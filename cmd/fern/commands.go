@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -40,6 +42,7 @@ func runDown(args []string, log *slog.Logger) error {
 
 func runStatus(args []string, log *slog.Logger) error {
 	fs, nameFlag, configPath := workspaceFlags("status")
+	jsonOutput := fs.Bool("json", false, "output a stable JSON object")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
@@ -58,12 +61,30 @@ func runStatus(args []string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if *jsonOutput {
+		return writeStatusJSON(os.Stdout, name, observation)
+	}
 	fmt.Printf("%s\t%s", name, observation.State)
 	if observation.State != runtime.StateAbsent {
 		fmt.Printf("\tdocker=%s exit=%d oom=%t", observation.DockerStatus, observation.ExitCode, observation.OOMKilled)
 	}
 	fmt.Println()
 	return nil
+}
+
+type statusJSON struct {
+	Workspace    string        `json:"workspace"`
+	State        runtime.State `json:"state"`
+	DockerStatus string        `json:"dockerStatus"`
+	ExitCode     int           `json:"exitCode"`
+	OOMKilled    bool          `json:"oomKilled"`
+}
+
+func writeStatusJSON(output io.Writer, workspace string, observation runtime.Observation) error {
+	return json.NewEncoder(output).Encode(statusJSON{
+		Workspace: workspace, State: observation.State, DockerStatus: observation.DockerStatus,
+		ExitCode: observation.ExitCode, OOMKilled: observation.OOMKilled,
+	})
 }
 
 func runEvents(args []string, log *slog.Logger) error {

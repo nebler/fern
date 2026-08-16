@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"flag"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/nebler/fern/internal/config"
@@ -17,7 +18,7 @@ import (
 )
 
 func runAttach(args []string) error {
-	flags := flag.NewFlagSet("attach", flag.ContinueOnError)
+	flags := newFlagSet("attach", "Open the official client through the Fern proxy.")
 	configPath := flags.String("config", "fern.yaml", "configuration file")
 	listenAddress := flags.String("listen", "", "proxy listen address")
 	clientOrigin := flags.String("url", "", "explicit OpenCode server origin")
@@ -55,6 +56,15 @@ func runAttach(args []string) error {
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	if err := command.Run(); err != nil {
+		var exitError *exec.ExitError
+		if errors.As(err, &exitError) {
+			if status, ok := exitError.Sys().(syscall.WaitStatus); ok && status.Signaled() && (status.Signal() == os.Interrupt || status.Signal() == syscall.SIGTERM) {
+				return nil
+			}
+			if code := exitError.ExitCode(); code > 0 {
+				return commandExitError{err: fmt.Errorf("%s client: %w", executableName, err), code: code}
+			}
+		}
 		return fmt.Errorf("%s client: %w", executableName, err)
 	}
 	return nil

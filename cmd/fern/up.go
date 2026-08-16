@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -24,7 +23,7 @@ import (
 )
 
 func runUp(args []string, log *slog.Logger) error {
-	fs := flag.NewFlagSet("up", flag.ContinueOnError)
+	fs := newFlagSet("up", "Run the workspace supervisor and authenticated proxy.")
 	configPath := fs.String("config", "fern.yaml", "configuration file")
 	name := fs.String("name", "", "workspace name")
 	image := fs.String("image", "", "workspace image")

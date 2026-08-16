@@ -85,7 +85,7 @@ The command surface has different ownership rules:
 | --- | --- | --- |
 | `up` | Long-running supervisor and proxy | Exclusive writer |
 | `down` | Stop/remove compute and clear pause intent | Exclusive writer |
-| `status` | Inspect classified Docker state | None; read-only |
+| `status` | Inspect classified Docker state as text or stable JSON | None; read-only |
 | `logs` | Stream Docker logs | None; read-only |
 | `debug events` | Inspect health and SSE directly on the backend | None; diagnostic bypass |
 | `attach` | Launch the protocol-specific official client | None; connects through proxy origin |
@@ -98,6 +98,15 @@ origins must be HTTPS; plaintext HTTP is accepted only for numeric loopback.
 `debug events` is observation-only but bypasses manager admission and endpoint
 generation ownership, so it is a diagnostic path rather than normal client
 traffic.
+
+The CLI treats malformed invocation as exit status 2 and operational failure as
+status 1. Help and version requests write to stdout and succeed. Normal errors
+are concise stderr diagnostics rather than structured service logs. A child
+launched by `attach` retains its nonzero exit status; interactive SIGINT or
+SIGTERM termination is treated as a clean user exit. `status --json` always
+emits the workspace, classified state, Docker status, process exit code, and OOM
+flag. Runtime states are data, so a successful status query exits zero even when
+the observed workspace is absent or failed.
 
 ## Desired And Observed State
 
