@@ -22,10 +22,9 @@ func AllSessionsIdle(ctx context.Context, ep runtime.Endpoint, auth runtime.Serv
 		decode func([]byte) (bool, error)
 	}{
 		{path: "/api/session/active", decode: decodeV2Active},
-		{path: "/api/shell", decode: decodeV2Shells},
 		{path: "/api/pty", decode: decodeV2PTYs},
 		{path: "/api/permission/request", decode: decodeV2PendingList},
-		{path: "/api/form/request", decode: decodeV2PendingList},
+		{path: "/api/question/request", decode: decodeV2PendingList},
 	}
 	for _, check := range checks {
 		body, err := getStatus(ctx, ep, auth, check.path)
@@ -81,27 +80,6 @@ func decodeV2Active(body []byte) (bool, error) {
 	for _, active := range response.Data {
 		if active.Type != "running" {
 			return false, fmt.Errorf("decode session status: unknown V2 active type %q", active.Type)
-		}
-		return false, nil
-	}
-	return true, nil
-}
-
-func decodeV2Shells(body []byte) (bool, error) {
-	var response struct {
-		Data []struct {
-			Status string `json:"status"`
-		} `json:"data"`
-	}
-	if err := decodeStatusJSON(body, &response); err != nil {
-		return false, err
-	}
-	if response.Data == nil {
-		return false, errors.New("decode shell activity: expected data array")
-	}
-	for _, shell := range response.Data {
-		if shell.Status != "running" {
-			return false, fmt.Errorf("decode shell activity: unknown status %q", shell.Status)
 		}
 		return false, nil
 	}

@@ -146,3 +146,31 @@ func TestPauseInvalidationDoesNotEraseNewerGeneration(t *testing.T) {
 		t.Fatalf("current target = %+v, want newer endpoint %+v after generation %d", current, newEndpoint, oldTarget.Generation)
 	}
 }
+
+func TestAcquirePausedHoldsAdmissionUntilRelease(t *testing.T) {
+	fake := &pauseRecoveryRuntime{
+		state: runtime.StateRunning, endpoint: runtime.Endpoint{Host: "127.0.0.1", Port: 4096},
+	}
+	manager := newTestManager(fake, nil, alwaysIdle)
+	manager.publishEndpoint(fake.endpoint)
+	releaseFence, err := manager.AcquirePaused(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if _, _, err := manager.AcquireRequest(ctx, RequestRead); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("request crossed held pause fence: %v", err)
+	}
+	releaseFence()
+	releaseFence()
+
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, releaseRequest, err := manager.AcquireRequest(ctx, RequestRead)
+	if err != nil {
+		t.Fatalf("request after fence release failed: %v", err)
+	}
+	releaseRequest()
+}

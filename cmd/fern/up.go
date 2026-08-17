@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/config"
+	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/proxy"
+	"github.com/nebler/fern/internal/publication"
 	"github.com/nebler/fern/internal/registry"
 	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/watch"
@@ -88,11 +90,23 @@ func runUp(args []string, log *slog.Logger) error {
 		return err
 	}
 	defer lease.Release()
+	controlDir, err := statePath("control")
+	if err != nil {
+		return err
+	}
+	publisher, err := publication.New(spec.Name, spec.RepoPath)
+	if err != nil {
+		return err
+	}
 	docker, err := newDocker(log)
 	if err != nil {
 		return err
 	}
 	defer docker.Close()
+	controlStore, err := control.Open(controlDir, spec.Name)
+	if err != nil {
+		return err
+	}
 
 	observations := make(chan watch.Observation, 64)
 	streamController := watch.NewStreamController(serviceCtx, watch.StreamOptions{Auth: auth}, observations, log)
@@ -132,7 +146,9 @@ func runUp(args []string, log *slog.Logger) error {
 	connections := newConnectionTracker()
 	trackedListener := connections.wrap(listener)
 	server := &http.Server{
-		Handler: proxy.New(manager, auth, log), ReadHeaderTimeout: 10 * time.Second,
+		Handler: proxy.NewWithControls(manager, auth, proxy.Controls{
+			Store: controlStore, Fencer: manager, Publisher: publisher,
+		}, log), ReadHeaderTimeout: 10 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return serviceCtx },
 	}
 	group.Go(func() error {

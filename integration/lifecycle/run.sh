@@ -154,7 +154,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 require_command() { command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"; }
-for command in docker curl go python3 sed awk grep date ps; do require_command "$command"; done
+for command in docker curl go python3 jq sed awk grep date ps; do require_command "$command"; done
 [[ "$WAKE_COUNT" =~ ^[0-9]+$ ]] && (( WAKE_COUNT >= 10 )) || fail "FERN_LIFECYCLE_WAKE_COUNT must be at least 10"
 docker info >/dev/null 2>"$ARTIFACTS/docker-info-error.log" || fail "Docker daemon is unavailable; see $ARTIFACTS/docker-info-error.log"
 
@@ -342,12 +342,24 @@ persisted=$(auth_curl --fail "$PROXY_URL/control/persist")
 [[ "$persisted" == *"$RUN_ID"* ]] || fail "OpenCode data did not survive stop/start"
 grep -q "$RUN_ID" "$REPO_DIR/container-state.json" || fail "container-written repository data did not survive stop/start"
 
-note "scenario 9/13: data volume survives destroy/recreate"
+note "scenario 9/13: OpenCode and Fern control state survive destroy/recreate"
+workflow_id=$(auth_curl --fail --request POST --header 'Content-Type: application/json' \
+  --data '{"title":"Lifecycle workflow","sessionId":"ses_lifecycle"}' \
+  "$PROXY_URL/fern/api/v1/workflows" | jq -er '.id')
 stop_fern
 run_transcript "$FERN_BIN" down -name "$NAME"
 [[ ! $(docker ps -aq --filter "name=^/${NAME}$") ]] || fail "down did not remove compute"
 docker volume inspect "$VOLUME" >/dev/null || fail "down removed the persistent data volume"
 start_fern
+curl --silent --show-error --fail --header "Cookie: fern_device=$device_cookie" \
+  "$PROXY_URL/fern/ready" | grep -q '"ready":true' \
+  || fail "paired device cookie did not survive Fern restart"
+curl --silent --show-error --fail --header "Cookie: fern_device=$device_cookie" \
+  "$PROXY_URL/fern/api/v1/devices" | jq -e 'length == 1' >/dev/null \
+  || fail "durable paired device was not listed after restart"
+curl --silent --show-error --fail --header "Cookie: fern_device=$device_cookie" \
+  "$PROXY_URL/fern/api/v1/workflows/$workflow_id" | jq -e --arg id "$workflow_id" '.id == $id and .sessionId == "ses_lifecycle"' >/dev/null \
+  || fail "durable workflow correlation did not survive Fern restart"
 persisted=$(auth_curl --fail "$PROXY_URL/control/persist")
 [[ "$persisted" == *"$RUN_ID"* ]] || fail "data volume content did not survive destroy/recreate"
 

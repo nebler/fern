@@ -249,20 +249,46 @@ func (m *Manager) acquireLifecycleForClose(ctx context.Context) error {
 }
 
 func (m *Manager) Pause(ctx context.Context) error {
+	release, err := m.AcquirePaused(ctx)
+	if err != nil {
+		return err
+	}
+	release()
+	return nil
+}
+
+// AcquirePaused stops compute and keeps request admission and lifecycle wake
+// serialization closed until release. It fences host-side repository changes
+// from all manager-controlled container writers.
+func (m *Manager) AcquirePaused(ctx context.Context) (func(), error) {
 	// Holding admission prevents a new request from entering between
 	// the authoritative status read and Docker stop.
 	if err := m.beginPause(ctx); err != nil {
-		return err
+		return nil, err
 	}
-	defer m.endPause()
 	if m.isClosing() {
-		return errors.New("workspace manager is shutting down")
+		m.endPause()
+		return nil, errors.New("workspace manager is shutting down")
 	}
 	if err := m.acquireLifecycle(ctx); err != nil {
-		return err
+		m.endPause()
+		return nil, err
 	}
-	defer m.releaseLifecycle()
+	if err := m.pauseWhileHeld(ctx); err != nil {
+		m.releaseLifecycle()
+		m.endPause()
+		return nil, err
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.releaseLifecycle()
+			m.endPause()
+		})
+	}, nil
+}
 
+func (m *Manager) pauseWhileHeld(ctx context.Context) error {
 	observation, err := m.runtime.Status(ctx, m.spec.Name)
 	if err != nil {
 		return err

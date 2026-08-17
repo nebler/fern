@@ -48,19 +48,19 @@ acceptance validates the user outcome. Neither has been completed.
 | ID | Requirement | Current status |
 | --- | --- | --- |
 | `FIELD-INSTALL` | Install exact Fern/OpenCode artifacts on Ubuntu with systemd and Tailscale | Partially implemented; `fern init` and `fern doctor --phone` cover local demo configuration and transport checks, while systemd appliance installation remains manual |
-| `FIELD-PHONE` | Use the official OpenCode UI on supported phone browsers to connect, submit, steer, cancel, approve, and reconnect | Ready for rehearsal through a one-time pairing QR and process-local device cookie; real-phone interaction is not yet accepted |
+| `FIELD-PHONE` | Use the official OpenCode UI on supported phone browsers to connect, submit, steer, cancel, approve, and reconnect | Ready for rehearsal through a one-time pairing QR and restart-safe device cookie; real-phone interaction is not yet accepted |
 | `FIELD-PROVIDER` | Complete a real provider-backed turn after client disconnect | Not run; continuation semantics are upstream-dependent |
 | `FIELD-SLEEP` | Stop only after completed work and wake through the actual client sequence | Deterministic fixture passes; phone/provider path unproven |
 | `FIELD-REBOOT` | Reboot while running or paused and recover automatically | Blocked; a running container stopped by host shutdown is classified as failed |
 | `FIELD-RESTORE` | Restore all durable state onto a fresh host and resume | Blocked; backup recipe exists, complete restore does not |
 | `E2E-REPO` | Install a GitHub App on one selected repository and clone an exact base SHA | Blocked; host path must already exist |
 | `E2E-SETUP` | Run versioned project setup with credentials, logs, failure state, and caches | Blocked; no setup/resume contract |
-| `E2E-TASK` | Submit one idempotent phone task with durable status and cancellation | Blocked; Fern only proxies live requests |
-| `E2E-PR` | Commit with deterministic identity, push one Fern branch, and create one draft PR | Prototype implemented as explicit host `fern github publish`; GitHub App credentials, deterministic commit identity, journal, and in-process broker remain blocked |
+| `E2E-TASK` | Submit one idempotent phone task with durable status and cancellation | Partially implemented; Fern durably associates workflows with OpenCode sessions, but prompt delivery and cancellation remain live OpenCode operations |
+| `E2E-PR` | Commit with deterministic identity, push one Fern branch, and create one draft PR | Host-credential prototype supports durable in-process publication and the standalone CLI; GitHub App credentials and deterministic commit identity remain blocked |
 | `E2E-APPROVAL` | Notify, inspect, answer, expire, and audit an OpenCode approval from the phone | Blocked; approvals only influence idle detection |
 | `E2E-OUTPUT` | Inspect diff, tests, logs, and selected artifacts from the phone | Blocked; no artifact surface |
 | `E2E-CI` | Correlate CI/review events to the PR head and run a bounded follow-up | Blocked; no GitHub event or polling integration |
-| `E2E-RECOVERY` | Preserve task, Git, PR, approval, and artifact state across process/host failure | Blocked; no Fern-owned task journal |
+| `E2E-RECOVERY` | Preserve task, Git, PR, approval, and artifact state across process/host failure | Partially implemented for devices, workflow/session correlations, and publication operations; delivery, approval, and artifact recovery remain blocked |
 
 Anything required by this matrix is P0 for the declared product. A narrow field
 rehearsal may still be useful before all P0 work exists, but passing it must not
@@ -86,7 +86,7 @@ not a hostile multi-tenant platform.
 | P0 | Automated backup and restore | Back up, checksum, verify, restore into a fresh workspace, and rehearse recovery automatically. |
 | P0 | Coordinated upgrades | Quiesce, back up, upgrade Fern/OpenCode, verify compatibility, and roll back. |
 | P0 | Mobile-safe results | View the diff, verification, logs, and selected generated artifacts through authenticated links. |
-| P0 | Device identity | Replace process-local one-time pairing with durable device identity, listing, revocation, expiry, and restart-safe sessions. |
+| P0 | Device identity | Extend implemented restart-safe device identity, listing, revocation, and expiry with production enrollment and recovery policy. |
 | P0 | Credential boundaries | Broker Git credentials and separate setup, agent, publication, registry, and provider credentials. |
 | P1 | Private preview ports | Route declared application ports with authentication, wake, readiness, and expiry behavior. |
 | P1 | Terminal observation and takeover | Follow agent activity, transfer one exclusive write lease to a human, and hand control back safely. |

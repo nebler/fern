@@ -49,9 +49,11 @@ browser or official OpenCode client
 Fern now serves an authenticated landing page and readiness endpoint under
 `/fern/*`. A Basic-authenticated local request can mint a five-minute one-time
 pairing link; consuming it over private HTTPS creates a secure `HttpOnly` cookie
-and Fern injects internal OpenCode auth for proxied routes. Pairing state is
-process-local, so restart requires re-pairing. Device lists, durable grants,
-revocation, administration, and GitHub callbacks remain proposed.
+and Fern injects internal OpenCode auth for proxied routes. Fern persists only a
+digest of the 30-day device token under `~/.fern/control`; device listing,
+expiry, revocation, workflow/session correlations, and publication operations
+survive process restart. Five-minute pairing codes remain intentionally
+process-local and single-use.
 
 Fern is not a hostile-tenant sandbox. The service account can access Docker,
 the repository is writable by OpenCode, and provider credentials enter the
@@ -66,11 +68,12 @@ boundary.
 2. Validate the repository, limits, credentials, and numeric loopback listener.
 3. Bind the listener before Docker effects.
 4. Acquire the host-local workspace lease under `~/.fern/locks`.
-5. Create the local-Docker runtime backed by pause intents in `~/.fern/state`.
-6. Construct the stream controller, manager, supervisor, and reverse proxy.
-7. Ensure the OpenCode container is running and healthy.
-8. Attach its activity stream before publishing the backend endpoint.
-9. Run the idle supervisor and HTTP server in one cancellation group.
+5. Open the versioned Fern control snapshot under `~/.fern/control`.
+6. Create the local-Docker runtime backed by pause intents in `~/.fern/state`.
+7. Construct the stream controller, manager, supervisor, and reverse proxy.
+8. Ensure the OpenCode container is running and healthy.
+9. Attach its activity stream before publishing the backend endpoint.
+10. Run the idle supervisor and HTTP server in one cancellation group.
 
 Fern accepts only the default Docker endpoint or an absolute Unix socket. It
 depends on host-local bind mounts, loopback publication, locks, and pause-intent
@@ -93,7 +96,7 @@ future Fern device credential.
 | `init` | Generate local demo config and protected secrets | None |
 | `doctor` | Check Docker, gateway, GitHub, Tailscale, and phone route | None |
 | `up` | Long-running supervisor and proxy | Exclusive writer |
-| `github publish` | Push exact committed `HEAD` and create/reuse one draft PR | None; explicit host prototype |
+| `github publish` | Push exact committed `HEAD` and create/reuse one draft PR | Exclusive; service must be stopped and compute absent |
 | `down` | Remove compute and clear pause intent | Exclusive writer |
 | `status` | Inspect classified Docker state | Read-only |
 | `logs` | Stream Docker logs | Read-only |
@@ -106,12 +109,15 @@ cleanup remains possible when unrelated configuration is invalid. Normal
 clients use the proxy. `debug events` bypasses request admission and is not an
 application traffic path.
 
-`/fern/`, `/fern/ready`, and pairing routes are handled before workspace
-admission and do not wake compute. Every other route remains owned by OpenCode.
-The publication prototype requires the workspace lease and absent compute,
-obtains an existing `gh` token in host memory, never forwards it into Docker,
-and permits only a validated `github.com` origin and a Fern-owned branch. The
-intended in-process GitHub App broker and operation journal are not implemented.
+All `/fern/*` routes are handled before workspace admission and do not wake
+compute. They expose Fern-owned device, workflow-correlation, and publication
+state; every coding route remains owned by OpenCode. In-process publication
+holds request admission and lifecycle wake serialization closed after stopping
+compute, records the exact commit and branch before push, obtains an existing
+`gh` token only in host memory, and permits only a validated `github.com` origin
+and Fern-owned branch. The standalone command instead acquires the workspace
+lease and requires absent compute. The intended GitHub App broker remains
+unimplemented.
 
 ## Desired And Observed State
 
@@ -189,7 +195,7 @@ When the timer expires, the manager performs an authoritative barrier:
 2. Block admission of new held requests.
 3. Serialize with wake and lifecycle operations.
 4. Reinspect Docker and resolve the current endpoint.
-5. Authenticate and query V2 sessions, shells, PTYs, permissions, and forms.
+5. Authenticate and query V2 active sessions, PTYs, permissions, and questions.
 6. Repeat the complete activity query while admission remains closed.
 7. Stop only when every response in both passes is idle.
 

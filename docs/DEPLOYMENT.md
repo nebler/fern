@@ -23,9 +23,9 @@ The internal OpenCode credential uses username `opencode` and
 `OPENCODE_PASSWORD`. Tailscale identity is the outer private-access boundary.
 Basic auth is accepted for host diagnostics. For the phone demo, `fern doctor
 --phone` creates a five-minute pairing link; Fern exchanges it for a secure
-`HttpOnly` cookie and injects internal OpenCode auth. Pairing sessions are
-process-local and must be renewed after Fern restarts. Durable device grants,
-listing, revocation, and Fern administration are not implemented.
+`HttpOnly` cookie and injects internal OpenCode auth. Hashed device grants,
+expiry, listing, revocation, workflow/session correlations, and publication
+operations survive Fern restarts under `/var/lib/fern/.fern/control`.
 
 ## Fast Field Demo
 
@@ -259,6 +259,8 @@ Durable state is split across:
 - `/srv/fern/workspace` for repository files and uncommitted work;
 - `fern-demo-v2-data` for OpenCode sessions and configuration;
 - `/var/lib/fern/.fern/state` for pause intents and `.fern/locks` for leases;
+- `/var/lib/fern/.fern/control` for hashed device grants, workflow/session
+  correlations, and publication operations;
 - `/etc/fern` for Fern configuration and secrets.
 
 For a quiet backup, stop the service and remove compute through Fern. `down`

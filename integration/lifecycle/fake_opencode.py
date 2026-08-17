@@ -81,7 +81,7 @@ class Handler(BaseHTTPRequestHandler):
             with statuses_lock:
                 active = {key: {"type": "running"} for key, value in statuses.items() if value["type"] != "idle"}
             self.json_response({"data": active})
-        elif parsed.path in ("/api/shell", "/api/pty", "/api/permission/request", "/api/form/request"):
+        elif parsed.path in ("/api/pty", "/api/permission/request", "/api/question/request"):
             self.json_response({"data": []})
         elif parsed.path == "/control/identity":
             self.json_response({

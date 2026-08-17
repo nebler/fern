@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/runtime"
 )
 
@@ -19,18 +20,26 @@ type pairingState struct {
 	codes    map[[sha256.Size]byte]time.Time
 	sessions map[[sha256.Size]byte]time.Time
 	now      func() time.Time
+	store    *control.Store
 }
 
-func newPairingState() *pairingState {
-	return &pairingState{
+func newPairingState(stores ...*control.Store) *pairingState {
+	state := &pairingState{
 		codes:    make(map[[sha256.Size]byte]time.Time),
 		sessions: make(map[[sha256.Size]byte]time.Time),
 		now:      time.Now,
 	}
+	if len(stores) != 0 {
+		state.store = stores[0]
+	}
+	return state
 }
 
 func (state *pairingState) handler(next http.Handler, auth runtime.ServerAuth) http.Handler {
-	basic := requireServerAuth(next, auth)
+	basic := requireServerAuth(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		stripDeviceCookie(request)
+		next.ServeHTTP(writer, request)
+	}), auth)
 	issue := requireServerAuth(http.HandlerFunc(state.issue), auth)
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch {
@@ -42,6 +51,8 @@ func (state *pairingState) handler(next http.Handler, auth runtime.ServerAuth) h
 			stripDeviceCookie(request)
 			if auth.Password != "" {
 				request.SetBasicAuth("opencode", auth.Password)
+			} else {
+				request.Header.Del("Authorization")
 			}
 			next.ServeHTTP(writer, request)
 		default:
@@ -83,28 +94,40 @@ func (state *pairingState) pair(writer http.ResponseWriter, request *http.Reques
 	now := state.now()
 	state.mu.Lock()
 	expires, valid := state.codes[hash]
-	if valid {
+	valid = valid && code != "" && now.Before(expires)
+	if !valid {
 		delete(state.codes, hash)
 	}
-	valid = valid && code != "" && now.Before(expires)
 	var session string
+	var pairErr error
 	if valid {
-		var err error
-		session, err = randomCredential()
-		valid = err == nil
+		session, pairErr = randomCredential()
+		valid = pairErr == nil
 		if valid {
-			state.sessions[sha256.Sum256([]byte(session))] = now.Add(30 * 24 * time.Hour)
+			if state.store == nil {
+				state.sessions[sha256.Sum256([]byte(session))] = now.Add(30 * 24 * time.Hour)
+			} else {
+				_, pairErr = state.store.AddDevice(session, request.URL.Query().Get("name"), now, now.Add(30*24*time.Hour))
+				valid = pairErr == nil
+			}
+			if valid {
+				delete(state.codes, hash)
+			}
 		}
 	}
 	state.prune(now)
 	state.mu.Unlock()
+	if pairErr != nil {
+		http.Error(writer, "pairing state unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	if !valid {
 		http.Error(writer, "pairing link is invalid or expired", http.StatusUnauthorized)
 		return
 	}
 	http.SetCookie(writer, &http.Cookie{
 		Name: deviceCookieName, Value: session, Path: "/", MaxAge: 30 * 24 * 60 * 60,
-		HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
+		Expires: now.Add(30 * 24 * time.Hour), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
 	})
 	http.Redirect(writer, request, "/fern/", http.StatusSeeOther)
 }
@@ -115,6 +138,10 @@ func (state *pairingState) authenticated(request *http.Request) bool {
 		return false
 	}
 	now := state.now()
+	if state.store != nil {
+		valid, err := state.store.AuthenticateDevice(cookie.Value, now)
+		return err == nil && valid
+	}
 	hash := sha256.Sum256([]byte(cookie.Value))
 	state.mu.Lock()
 	expires, valid := state.sessions[hash]

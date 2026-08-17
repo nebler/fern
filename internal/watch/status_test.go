@@ -38,7 +38,7 @@ func TestAllSessionsIdleUsesV2ActiveSessions(t *testing.T) {
 				switch request.URL.Path {
 				case "/api/session/active":
 					_, _ = writer.Write([]byte(test.body))
-				case "/api/shell", "/api/pty", "/api/permission/request", "/api/form/request":
+				case "/api/pty", "/api/permission/request", "/api/question/request":
 					_, _ = writer.Write([]byte(`{"data":[]}`))
 				default:
 					http.NotFound(writer, request)
@@ -67,10 +67,9 @@ func TestAllSessionsIdleV2BlocksEveryVolatileWorkClass(t *testing.T) {
 		body string
 	}{
 		{name: "foreground execution", path: "/api/session/active", body: `{"data":{"ses_one":{"type":"running"}}}`},
-		{name: "shell", path: "/api/shell", body: `{"data":[{"status":"running"}]}`},
 		{name: "PTY", path: "/api/pty", body: `{"data":[{"status":"running"}]}`},
 		{name: "permission", path: "/api/permission/request", body: `{"data":[{}]}`},
-		{name: "form", path: "/api/form/request", body: `{"data":[{}]}`},
+		{name: "question", path: "/api/question/request", body: `{"data":[{}]}`},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

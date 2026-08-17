@@ -15,14 +15,15 @@ OpenCode owns:
 - the browser and terminal UI;
 - sessions and OpenCode configuration;
 - provider setup and model interaction;
-- permission requests and forms;
+- permission requests and questions;
 - terminals, files, and diffs.
 
 Fern owns the container lifecycle, wake and pause admission, and the stable
-same-origin proxy. Fern-owned `/fern/*` routes provide a small phone landing,
-gateway readiness, and one-time cookie pairing without copying the coding
-interface. Notifications, durable device administration, and recovery remain
-future services around OpenCode.
+same-origin proxy. Fern-owned `/fern/*` routes provide the phone control page,
+gateway readiness, restart-safe device administration, workflow/session
+correlations, and constrained publication without copying the coding interface.
+Notifications and full delivery/recovery remain future services around
+OpenCode.
 
 ## Image And Configuration
 

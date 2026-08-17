@@ -2,8 +2,7 @@
 
 This document defines Fern's GitHub authorization and publication boundary. A
 limited host-command prototype is implemented for the phone field demo; the
-GitHub App, container capability, durable journal, and onboarding design remain
-proposed.
+GitHub App and onboarding design remain proposed.
 
 ## Implemented Field Prototype
 
@@ -24,9 +23,17 @@ the same host user that runs Fern. `FERN_GITHUB_TOKEN`, `GH_TOKEN`, and
 `GITHUB_TOKEN` are rejected from workspace environment so the obvious
 credential path into Docker is closed.
 
-This prototype uses the host user's broad `gh` credential and has no durable
-operation journal. It is suitable for an explicit field rehearsal, not the
-final least-privilege product boundary below.
+The authenticated Fern control page can perform the same operation without SSH.
+It records a workflow-associated publication request, stops idle compute while
+holding request admission and lifecycle wake serialization closed, records the
+exact repository/base/commit/branch before push, then records the draft PR URL
+or a retryable failure. Restarted retries must resolve to that exact repository
+state. The browser cannot supply repository paths, remotes, refspecs, or
+credentials.
+
+This prototype still uses the host user's broad `gh` credential. Its durable
+journal narrows and reconciles the effect but does not provide the final
+least-privilege product boundary below.
 
 ## Decision
 

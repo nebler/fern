@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/runtime"
 )
 
@@ -75,5 +78,102 @@ func TestPairingIssuanceRequiresBasicAuthWithoutWake(t *testing.T) {
 	New(waker, runtime.ServerAuth{Password: "secret"}, testLogger()).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/fern/pair/new", nil))
 	if response.Code != http.StatusUnauthorized || waker.wakes.Load() != 0 {
 		t.Fatalf("status=%d wakes=%d", response.Code, waker.wakes.Load())
+	}
+}
+
+func TestPairedDeviceSurvivesHandlerRestart(t *testing.T) {
+	t.Parallel()
+	directory := filepath.Join(t.TempDir(), "control")
+	store, err := control.Open(directory, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewWithControl(&countingWaker{}, runtime.ServerAuth{Password: "secret"}, store, testLogger())
+	issue := httptest.NewRequest(http.MethodPost, "/fern/pair/new", nil)
+	issue.SetBasicAuth("opencode", "secret")
+	issued := httptest.NewRecorder()
+	handler.ServeHTTP(issued, issue)
+	var payload struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(issued.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	paired := httptest.NewRecorder()
+	handler.ServeHTTP(paired, httptest.NewRequest(http.MethodGet, "/fern/pair?code="+payload.Code+"&name=Phone", nil))
+	cookie := paired.Result().Cookies()[0]
+
+	reopened, err := control.Open(directory, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := NewWithControl(nil, runtime.ServerAuth{Password: "secret"}, reopened, testLogger())
+	request := httptest.NewRequest(http.MethodGet, "/fern/ready", nil)
+	request.AddCookie(cookie)
+	response := httptest.NewRecorder()
+	restarted.ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("persisted device status = %d", response.Code)
+	}
+}
+
+func TestPairingStoreFailureLeavesCodeRetryable(t *testing.T) {
+	t.Parallel()
+	directory := filepath.Join(t.TempDir(), "control")
+	store, err := control.Open(directory, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewWithControl(nil, runtime.ServerAuth{Password: "secret"}, store, testLogger())
+	issue := httptest.NewRequest(http.MethodPost, "/fern/pair/new", nil)
+	issue.SetBasicAuth("opencode", "secret")
+	issued := httptest.NewRecorder()
+	handler.ServeHTTP(issued, issue)
+	var payload struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(issued.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(directory); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(directory, []byte("not a directory"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	failed := httptest.NewRecorder()
+	handler.ServeHTTP(failed, httptest.NewRequest(http.MethodGet, "/fern/pair?code="+payload.Code, nil))
+	if failed.Code != http.StatusServiceUnavailable {
+		t.Fatalf("failed pairing status=%d", failed.Code)
+	}
+	if err := os.Remove(directory); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	retried := httptest.NewRecorder()
+	handler.ServeHTTP(retried, httptest.NewRequest(http.MethodGet, "/fern/pair?code="+payload.Code, nil))
+	if retried.Code != http.StatusSeeOther || len(retried.Result().Cookies()) != 1 {
+		t.Fatalf("retried pairing status=%d cookies=%+v", retried.Code, retried.Result().Cookies())
+	}
+}
+
+func TestInvalidDeviceCookieIsStrippedOnBasicFallback(t *testing.T) {
+	t.Parallel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if _, err := request.Cookie(deviceCookieName); err == nil {
+			t.Error("invalid Fern device cookie reached OpenCode upstream")
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
+	request.AddCookie(&http.Cookie{Name: deviceCookieName, Value: "invalid"})
+	request.SetBasicAuth("opencode", "secret")
+	response := httptest.NewRecorder()
+	New(&countingWaker{endpoint: mustParseEndpoint(t, upstream.URL)}, runtime.ServerAuth{Password: "secret"}, testLogger()).ServeHTTP(response, request)
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("status=%d", response.Code)
 	}
 }

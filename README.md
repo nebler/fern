@@ -32,17 +32,16 @@ The current proxy uses OpenCode Basic authentication. It validates the request
 before waking compute and forwards the accepted credentials upstream. Use it
 only behind a private TLS edge.
 
-Fern now reserves `/fern/*` for its phone landing, readiness, and one-time
-pairing routes. A paired browser receives a process-local `HttpOnly` cookie;
-Fern injects the internal OpenCode credential when proxying every other route.
-Durable device grants, listing, revocation, administration, and GitHub callbacks
-are not implemented.
+Fern reserves `/fern/*` for its phone landing and control plane. A paired
+browser receives a restart-safe `HttpOnly` cookie; Fern stores only its digest,
+lists and revokes devices, records workflow-to-OpenCode-session associations,
+and injects the internal OpenCode credential only while proxying upstream.
 
 Fern is not yet a complete remote coding product. It does not currently provide
-durable device identity, durable task submission, notification delivery,
-repository authorization, the planned GitHub App broker, complete fresh-host
-restore, or automatic recovery after every host-reboot state. Explicit host
-draft-PR publication is implemented as a constrained field-demo prototype.
+durable prompt delivery or cancellation, notification delivery, repository
+onboarding, the planned GitHub App broker, complete fresh-host restore, or
+automatic recovery after every host-reboot state. Draft-PR publication is a
+constrained host-credential prototype with a durable operation record.
 
 ## Documentation
 
@@ -85,7 +84,8 @@ go run ./cmd/fern doctor --config fern.yaml --env-file fern.env --phone
 Scan the QR within five minutes. Fern exchanges its one-time code for a secure
 `HttpOnly` device cookie and opens the Fern landing page; tap **Open OpenCode**
 to enter the official UI without typing the generated Basic password. Pairing
-sessions currently live in the Fern process and must be renewed after restart.
+sessions survive Fern restarts for up to 30 days and can be listed or revoked at
+`/fern/`.
 Clients must use the Fern origin rather than Docker's dynamic backend port so
 requests can wake compute and participate in pause admission.
 
@@ -126,14 +126,15 @@ retains OpenCode state. `status --json` emits stable machine-readable state;
 inspect its `state` field rather than treating a stopped or failed workspace as
 a command invocation failure.
 
-After OpenCode commits a clean change, `github publish` uses only the host's
-existing `gh` credential, pushes the exact `HEAD` commit to
+After OpenCode commits a clean change, publication uses only the host's existing
+`gh` credential, pushes the exact `HEAD` commit to
 `fern/<workspace>/<operation>`, and creates or reuses one draft pull request. It
 rejects workflow changes, unsafe repository Git configuration, dirty trees,
 force pushes, arbitrary destinations, and GitHub credentials in workspace
-environment. To fence the mutable repository, stop `fern up`, run `fern down`,
-then publish as the same host user that runs Fern. This is a field-demo
-prototype, not GitHub App onboarding.
+environment. The Fern control page can publish tracked workflows while `fern
+up` holds a pause fence; the standalone CLI still requires stopping `fern up`,
+running `fern down`, and publishing as the Fern host user. This is not GitHub
+App onboarding.
 
 Common overrides are:
 
@@ -185,8 +186,8 @@ shasum -a 256 -c dist/SHA256SUMS
 Fern arms an idle timer only after a connected OpenCode event epoch reports
 work and all observed activity drains. Disconnects, unknown states, and requests
 that may start work invalidate that evidence. Before stopping, Fern blocks new
-held requests and checks the V2 activity surfaces for sessions, shells, PTYs,
-permissions, and forms. Any active, malformed, unauthorized, or unavailable
+held requests and checks the V2 activity surfaces for sessions, PTYs,
+permissions, and questions. Any active, malformed, unauthorized, or unavailable
 response leaves compute running.
 
 This protects traffic using Fern's proxy. A host or Docker administrator can

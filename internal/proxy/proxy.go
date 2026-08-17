@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nebler/fern/internal/control"
+	"github.com/nebler/fern/internal/publication"
 	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/workspace"
 )
@@ -16,6 +18,20 @@ import (
 type Waker interface {
 	AcquireRequest(context.Context, workspace.RequestIntent) (workspace.RequestTarget, func(), error)
 	InvalidateEndpoint(workspace.RequestTarget)
+}
+
+type RepositoryFencer interface {
+	AcquirePaused(context.Context) (func(), error)
+}
+
+type GitHubPublisher interface {
+	Publish(context.Context, publication.Request) (publication.Result, error)
+}
+
+type Controls struct {
+	Store     *control.Store
+	Fencer    RepositoryFencer
+	Publisher GitHubPublisher
 }
 
 type targetKey struct{}
@@ -27,13 +43,25 @@ type proxyTarget struct {
 }
 
 func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
-	pairing := newPairingState()
+	return newHandler(waker, auth, Controls{}, log)
+}
+
+func NewWithControl(waker Waker, auth runtime.ServerAuth, store *control.Store, log *slog.Logger) http.Handler {
+	return newHandler(waker, auth, Controls{Store: store}, log)
+}
+
+func NewWithControls(waker Waker, auth runtime.ServerAuth, controls Controls, log *slog.Logger) http.Handler {
+	return newHandler(waker, auth, controls, log)
+}
+
+func newHandler(waker Waker, auth runtime.ServerAuth, controls Controls, log *slog.Logger) http.Handler {
+	pairing := newPairingState(controls.Store)
 	var upstream http.Handler
 	if waker == nil {
 		upstream = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 			http.Error(writer, "workspace manager unavailable", http.StatusServiceUnavailable)
 		})
-		return pairing.handler(gatewayHandler(upstream), auth)
+		return pairing.handler(gatewayHandler(upstream, controls, auth.Password != ""), auth)
 	}
 	if log == nil {
 		log = slog.Default()
@@ -80,7 +108,7 @@ func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
 		ctx := context.WithValue(request.Context(), targetKey{}, proxyTarget{url: targetURL, request: target, intent: intent})
 		reverseProxy.ServeHTTP(writer, request.WithContext(ctx))
 	})
-	return pairing.handler(gatewayHandler(upstream), auth)
+	return pairing.handler(gatewayHandler(upstream, controls, auth.Password != ""), auth)
 }
 
 func requestIntent(request *http.Request) workspace.RequestIntent {
