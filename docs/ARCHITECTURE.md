@@ -206,10 +206,13 @@ results, but OpenCode can still transition internally between reads.
 
 ## Container And Persistence
 
-The workspace container has the configured memory limit, a two-CPU quota, a
-512-process limit, Docker init, no restart policy, one writable repository bind
-mount, one writable OpenCode data volume, and a dynamically assigned backend
-port published only on loopback.
+The workspace container is forced to UID/GID 1001 with all Linux capabilities
+dropped and `no-new-privileges`. It has the configured memory limit, a two-CPU
+quota, a 512-process limit, Docker init, no restart policy, one writable
+repository bind mount, one writable OpenCode data volume, and a dynamically
+assigned backend port published only on loopback. The Docker-visible spec
+fingerprint contains environment key names, not secret values; full container
+inspection still verifies exact values before reuse.
 
 The single image is built from `images/opencode/Dockerfile` and tagged
 `fern/opencode:dev` for development. The persistent volume is
@@ -224,23 +227,31 @@ own OpenCode's data format or perform database migrations.
 | Condition | Result |
 | --- | --- |
 | OpenCode exits without committed intent | `failed`; inspect logs and recreate explicitly |
-| Host shutdown stops running compute | `failed` if no Fern pause intent was committed |
+| Orderly Fern/service shutdown followed by Docker stop | Recovery intent makes the exited container resumable |
+| Docker stops running compute without orderly Fern shutdown | `failed` |
 | OOM or dead container | `failed` |
-| Successful Fern stop | `paused`; the next held request wakes it |
+| Fern restart while compute remains running | Running container is adopted and the shutdown recovery intent is cleared |
 | Failed or unknown stop | Pending intent retained and endpoint invalidated |
 | Activity query error | Stop deferred; compute remains running |
 | Desired-state drift | Reuse refused until explicit recreation |
 
-SIGTERM cancels proxy, supervisor, event observation, and wake work together.
+SIGINT or SIGTERM cancels proxy, supervisor, event observation, and wake work
+together, then records a container-specific recovery intent before releasing
+Docker. Docker must stop the container within that five-minute intent window,
+but the resulting stopped container remains recoverable after a longer offline
+period. Ordinary committed idle-pause intents remain durable until resume or
+explicit cleanup.
 The HTTP server gets a bounded graceful shutdown, then Fern waits for its owned
 manager operations before closing Docker. Stopping Fern itself does not stop
 OpenCode, which allows service restart and reattachment but makes quiet backups
 an explicit `fern down` operation.
 
-The checked-in systemd unit has no lifecycle-mutating `ExecStop`. If host
-shutdown kills running OpenCode before Fern commits pause intent, the next boot
-classifies it as failed and requires operator reconciliation. Complete reboot
-recovery is not yet implemented.
+The checked-in systemd unit has no lifecycle-mutating `ExecStop`. Its normal
+ordering stops Fern before Docker, allowing Fern to record the short-lived
+recovery intent.
+The deterministic lifecycle harness simulates this order and resumes the
+container. Abrupt power loss, forced Fern termination, Docker stopping first,
+and a real target-host reboot remain separate failure/acceptance cases.
 
 ## Authentication And Network Boundaries
 

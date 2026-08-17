@@ -9,8 +9,10 @@ Fern uses one V2 contract. The browser connects to Fern's origin and receives th
 OpenCode web UI already served at `/` by `opencode2 serve`. No custom Fern coding
 PWA is built or deployed.
 
-These are source-reviewed procedures, not evidence that a complete target-host
-install, reboot, backup, restore, or remote-device rehearsal has passed.
+Static unit checks, mobile-viewport browser automation, orderly-shutdown
+simulation, and an isolated checksum-verified destructive restore are automated.
+A complete target-host install, physical reboot, fresh-host restore, and
+remote-device rehearsal have not passed.
 
 ## Trust And Authentication
 
@@ -228,10 +230,13 @@ listener.
 
 ## 7. Reboot Characterization
 
-If the host stops a running container without a Fern pause-intent record, Fern
-classifies it as failed on boot rather than silently claiming a safe pause.
-Automatic recovery for that state is not implemented. Back up first and treat
-reboot testing as characterization:
+During SIGINT or SIGTERM shutdown, Fern records a container-specific recovery
+intent. Docker must stop that container within five minutes; the host may remain
+offline longer before Fern resumes it. The lifecycle harness simulates this
+ordering. If Docker stops first, Fern is killed forcibly, Docker shutdown starts
+after the intent window, or power is lost before the intent syncs, Fern still
+classifies the exit as failed. Back up first and treat a real reboot as
+target-host characterization:
 
 ```bash
 sudo systemctl restart fern.service
@@ -291,6 +296,47 @@ Repository and OpenCode archives may contain secrets; the configuration archive
 does contain service credentials. Encrypt and retain them according to host
 policy. Test restore into temporary paths and a temporary Docker volume rather
 than overwriting live state.
+
+The deterministic local rehearsal performs the archive, checksum verification,
+destruction, volume recreation, extraction, and authenticated state checks:
+
+```bash
+./scripts/test-lifecycle.sh
+```
+
+For an approved target-host restore, first verify the old host is disabled to
+avoid two writers, copy the completed backup to the new host, install the exact
+recorded Fern binary and image, and verify checksums before extracting anything:
+
+```bash
+cd "/var/backups/fern/$BACKUP_ID"
+sudo sha256sum -c SHA256SUMS
+sudo systemctl stop fern.service
+test ! -e /srv/fern/workspace
+test ! -e /var/lib/fern/.fern
+sudo tar -C /srv/fern -xzf workspace.tar.gz
+sudo tar -C /var/lib/fern -xzf fern-state.tar.gz
+sudo tar -C /etc -xzf config-and-secrets.tar.gz
+sudo docker volume create \
+  --label dev.fern.managed=true \
+  --label dev.fern.workspace=demo \
+  fern-demo-v2-data
+sudo docker run --rm --user 0:0 \
+  -v fern-demo-v2-data:/data \
+  -v "/var/backups/fern/$BACKUP_ID:/backup:ro" \
+  --entrypoint tar "fern/opencode:$FERN_COMMIT" \
+  -C /data -xzf /backup/opencode-data.tar.gz
+sudo chown -R fern:fern /srv/fern/workspace /var/lib/fern/.fern
+sudo chmod -R go-rwx /var/lib/fern/.fern /etc/fern
+sudo systemctl start fern.service
+sudo -H -u fern /usr/local/bin/fern doctor \
+  --config /etc/fern/fern.yaml \
+  --env-file /etc/fern/fern.env
+```
+
+This procedure is intentionally fail-closed on non-empty destinations. A real
+fresh-host rehearsal must additionally reauthorize Tailscale, GitHub, and any
+provider credentials and verify UID/GID ownership before it is accepted.
 
 ## Uninstall And Explicit Deletion
 

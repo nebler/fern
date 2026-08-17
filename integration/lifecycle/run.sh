@@ -61,6 +61,14 @@ fail() {
   return 1
 }
 
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$@"
+  else
+    shasum -a 256 "$@"
+  fi
+}
+
 record_command() {
   printf '%s COMMAND' "$(timestamp)" >>"$TRANSCRIPT"
   printf ' %q' "$@" | redact >>"$TRANSCRIPT"
@@ -154,7 +162,10 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 require_command() { command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"; }
-for command in docker curl go python3 jq sed awk grep date ps; do require_command "$command"; done
+for command in docker curl go python3 jq sed awk grep date ps tar; do require_command "$command"; done
+if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+  fail "missing required command: sha256sum or shasum"
+fi
 [[ "$WAKE_COUNT" =~ ^[0-9]+$ ]] && (( WAKE_COUNT >= 10 )) || fail "FERN_LIFECYCLE_WAKE_COUNT must be at least 10"
 docker info >/dev/null 2>"$ARTIFACTS/docker-info-error.log" || fail "Docker daemon is unavailable; see $ARTIFACTS/docker-info-error.log"
 
@@ -342,7 +353,7 @@ persisted=$(auth_curl --fail "$PROXY_URL/control/persist")
 [[ "$persisted" == *"$RUN_ID"* ]] || fail "OpenCode data did not survive stop/start"
 grep -q "$RUN_ID" "$REPO_DIR/container-state.json" || fail "container-written repository data did not survive stop/start"
 
-note "scenario 9/13: OpenCode and Fern control state survive destroy/recreate"
+note "scenario 9/13: isolated backup and destructive restore"
 workflow_id=$(auth_curl --fail --request POST --header 'Content-Type: application/json' \
   --data '{"title":"Lifecycle workflow","sessionId":"ses_lifecycle"}' \
   "$PROXY_URL/fern/api/v1/workflows" | jq -er '.id')
@@ -350,6 +361,36 @@ stop_fern
 run_transcript "$FERN_BIN" down -name "$NAME"
 [[ ! $(docker ps -aq --filter "name=^/${NAME}$") ]] || fail "down did not remove compute"
 docker volume inspect "$VOLUME" >/dev/null || fail "down removed the persistent data volume"
+
+BACKUP_DIR="$RUN_ROOT/backup"
+mkdir -p "$BACKUP_DIR"
+tar -C "$RUN_ROOT" -czf "$BACKUP_DIR/repository.tar.gz" repository
+tar -C "$HOME_DIR" -czf "$BACKUP_DIR/fern-control.tar.gz" .fern/control
+tar -C "$RUN_ROOT" -czf "$BACKUP_DIR/config.tar.gz" fern.yaml
+docker run --rm --user 0:0 --entrypoint sh \
+  -v "$VOLUME:/source:ro" -v "$BACKUP_DIR:/backup" "$IMAGE" \
+  -c 'tar -C /source -czf /backup/opencode-volume.tar.gz .'
+(cd "$BACKUP_DIR" && sha256 repository.tar.gz fern-control.tar.gz config.tar.gz opencode-volume.tar.gz >SHA256SUMS)
+while read -r expected archive; do
+  actual=$(sha256 "$BACKUP_DIR/$archive" | awk '{print $1}')
+  [[ "$actual" == "$expected" ]] || fail "backup checksum failed for $archive"
+done <"$BACKUP_DIR/SHA256SUMS"
+cp "$BACKUP_DIR/fern-control.tar.gz" "$BACKUP_DIR/corrupt.tar.gz"
+printf 'corrupt' >>"$BACKUP_DIR/corrupt.tar.gz"
+expected_control=$(awk '$2 == "fern-control.tar.gz" {print $1}' "$BACKUP_DIR/SHA256SUMS")
+[[ "$(sha256 "$BACKUP_DIR/corrupt.tar.gz" | awk '{print $1}')" != "$expected_control" ]] \
+  || fail "corrupt backup was not detected"
+
+rm -rf "$REPO_DIR" "$HOME_DIR/.fern" "$CONFIG"
+docker volume rm "$VOLUME" >/dev/null
+docker volume create --label dev.fern.managed=true --label "dev.fern.workspace=$NAME" "$VOLUME" >/dev/null
+tar -C "$RUN_ROOT" -xzf "$BACKUP_DIR/repository.tar.gz"
+tar -C "$HOME_DIR" -xzf "$BACKUP_DIR/fern-control.tar.gz"
+tar -C "$RUN_ROOT" -xzf "$BACKUP_DIR/config.tar.gz"
+docker run --rm --user 0:0 --entrypoint sh \
+  -v "$VOLUME:/target" -v "$BACKUP_DIR:/backup:ro" "$IMAGE" \
+  -c 'tar -C /target -xzf /backup/opencode-volume.tar.gz'
+
 start_fern
 curl --silent --show-error --fail --header "Cookie: fern_device=$device_cookie" \
   "$PROXY_URL/fern/ready" | grep -q '"ready":true' \
@@ -361,7 +402,8 @@ curl --silent --show-error --fail --header "Cookie: fern_device=$device_cookie" 
   "$PROXY_URL/fern/api/v1/workflows/$workflow_id" | jq -e --arg id "$workflow_id" '.id == $id and .sessionId == "ses_lifecycle"' >/dev/null \
   || fail "durable workflow correlation did not survive Fern restart"
 persisted=$(auth_curl --fail "$PROXY_URL/control/persist")
-[[ "$persisted" == *"$RUN_ID"* ]] || fail "data volume content did not survive destroy/recreate"
+[[ "$persisted" == *"$RUN_ID"* ]] || fail "OpenCode volume content did not survive destructive restore"
+grep -q "$RUN_ID" "$REPO_DIR/container-state.json" || fail "repository content did not survive destructive restore"
 
 note "measurement: $WAKE_COUNT stopped-to-ready wakes"
 printf 'iteration\trequest_time_utc\tcontainer_start_observed_utc\tdocker_started_at\thealth_ready_utc\twatcher_connected_ns\tfirst_upstream_byte_s\ttotal_s\tcontainer_id\tendpoint\tclassification\n' >"$TIMINGS"
@@ -411,7 +453,13 @@ note "scenario 12/13: SIGTERM shuts Fern down without host-process/listener leak
 stop_fern
 if curl --silent --max-time 1 "$PROXY_URL$HEALTH_PATH" >/dev/null 2>&1; then fail "proxy listener remained after SIGTERM"; fi
 [[ -z "$FERN_PID" ]] || fail "Fern process remained after SIGTERM"
+docker stop "$NAME" >/dev/null
+wait_status paused 5
+# Docker Desktop can retain the old dynamic port forwarding briefly after stop;
+# a host reboot naturally has a much larger separation before Fern restarts.
+sleep 1
 start_fern
+wait_status running 10
 
 note "scenario 13/13: externally paused compute follows stale-endpoint recovery path"
 docker pause "$NAME" >/dev/null

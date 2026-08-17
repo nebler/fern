@@ -1,4 +1,4 @@
-.PHONY: build format image test test-race vet
+.PHONY: build format image test test-browser test-race test-deployment vet
 
 build:
 	go build -o fern ./cmd/fern
@@ -14,6 +14,12 @@ test:
 
 test-race:
 	go test -race ./...
+
+test-browser:
+	./scripts/test-browser.sh
+
+test-deployment:
+	./scripts/test-deployment.sh
 
 vet:
 	go vet ./...

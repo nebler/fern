@@ -51,8 +51,8 @@ acceptance validates the user outcome. Neither has been completed.
 | `FIELD-PHONE` | Use the official OpenCode UI on supported phone browsers to connect, submit, steer, cancel, approve, and reconnect | Ready for rehearsal through a one-time pairing QR and restart-safe device cookie; real-phone interaction is not yet accepted |
 | `FIELD-PROVIDER` | Complete a real provider-backed turn after client disconnect | Not run; continuation semantics are upstream-dependent |
 | `FIELD-SLEEP` | Stop only after completed work and wake through the actual client sequence | Deterministic fixture passes; phone/provider path unproven |
-| `FIELD-REBOOT` | Reboot while running or paused and recover automatically | Blocked; a running container stopped by host shutdown is classified as failed |
-| `FIELD-RESTORE` | Restore all durable state onto a fresh host and resume | Blocked; backup recipe exists, complete restore does not |
+| `FIELD-REBOOT` | Reboot while running or paused and recover automatically | Partially implemented; orderly Fern shutdown followed by Docker stop resumes in the lifecycle harness, while abrupt loss and a real host reboot remain unaccepted |
+| `FIELD-RESTORE` | Restore all durable state onto a fresh host and resume | Partially implemented; isolated destructive repository, OpenCode-volume, control-state, and configuration restore passes, while fresh-host credentials and split-brain fencing remain blocked |
 | `E2E-REPO` | Install a GitHub App on one selected repository and clone an exact base SHA | Blocked; host path must already exist |
 | `E2E-SETUP` | Run versioned project setup with credentials, logs, failure state, and caches | Blocked; no setup/resume contract |
 | `E2E-TASK` | Submit one idempotent phone task with durable status and cancellation | Partially implemented; Fern durably associates workflows with OpenCode sessions, but prompt delivery and cancellation remain live OpenCode operations |
@@ -60,7 +60,7 @@ acceptance validates the user outcome. Neither has been completed.
 | `E2E-APPROVAL` | Notify, inspect, answer, expire, and audit an OpenCode approval from the phone | Blocked; approvals only influence idle detection |
 | `E2E-OUTPUT` | Inspect diff, tests, logs, and selected artifacts from the phone | Blocked; no artifact surface |
 | `E2E-CI` | Correlate CI/review events to the PR head and run a bounded follow-up | Blocked; no GitHub event or polling integration |
-| `E2E-RECOVERY` | Preserve task, Git, PR, approval, and artifact state across process/host failure | Partially implemented for devices, workflow/session correlations, and publication operations; delivery, approval, and artifact recovery remain blocked |
+| `E2E-RECOVERY` | Preserve task, Git, PR, approval, and artifact state across process/host failure | Partially implemented for devices, workflow/session correlations, startup publication reconciliation, orderly lifecycle recovery, and isolated restore; delivery, approval, and artifact recovery remain blocked |
 
 Anything required by this matrix is P0 for the declared product. A narrow field
 rehearsal may still be useful before all P0 work exists, but passing it must not

@@ -27,9 +27,12 @@ The authenticated Fern control page can perform the same operation without SSH.
 It records a workflow-associated publication request, stops idle compute while
 holding request admission and lifecycle wake serialization closed, records the
 exact repository/base/commit/branch before push, then records the draft PR URL
-or a retryable failure. Restarted retries must resolve to that exact repository
-state. The browser cannot supply repository paths, remotes, refspecs, or
-credentials.
+or a retryable failure. Daemon startup resumes `requested` and `pushing`
+operations once. Prepared recovery queries the recorded remote branch first,
+accepts only the exact SHA, rejects conflicts without force, and reconciles an
+exact draft PR after a lost creation response. PR lookup failure never falls
+through to creation. The browser cannot supply repository paths, remotes,
+refspecs, or credentials.
 
 This prototype still uses the host user's broad `gh` credential. Its durable
 journal narrows and reconciles the effect but does not provide the final

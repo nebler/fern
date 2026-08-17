@@ -40,7 +40,7 @@ and injects the internal OpenCode credential only while proxying upstream.
 Fern is not yet a complete remote coding product. It does not currently provide
 durable prompt delivery or cancellation, notification delivery, repository
 onboarding, the planned GitHub App broker, complete fresh-host restore, or
-automatic recovery after every host-reboot state. Draft-PR publication is a
+automatic recovery after abrupt host-power-loss states. Draft-PR publication is a
 constrained host-credential prototype with a durable operation record.
 
 ## Documentation
@@ -48,6 +48,7 @@ constrained host-credential prototype with a durable operation record.
 - [Architecture](./docs/ARCHITECTURE.md): implemented boundaries, lifecycle, proxy, and future gateway boundary.
 - [OpenCode](./docs/OPENCODE.md): the V2 server contract, official web UI, persistence, and verification.
 - [Deployment](./docs/DEPLOYMENT.md): private systemd and Tailscale Serve runbook.
+- [Phone field demo](./docs/FIELD_DEMO.md): exact preflight, phone sequence, evidence, abort, and cleanup checklist.
 - [Remote product](./docs/REMOTE_PRODUCT.md): end-to-end acceptance gaps and roadmap.
 - [GitHub integration](./docs/GITHUB_INTEGRATION.md): current host publication prototype and proposed GitHub App boundary.
 - [Lifecycle harness](./integration/lifecycle/README.md): real-Docker lifecycle test details.

@@ -38,6 +38,9 @@ jobs:
       - name: Build fern
         run: GOTOOLCHAIN=local go build ./cmd/fern
 
+      - name: Verify systemd deployment
+        run: ./scripts/test-deployment.sh
+
   image:
     name: Workspace image
     runs-on: ubuntu-latest
@@ -75,3 +78,36 @@ jobs:
 
       - name: Run real Docker lifecycle harness
         run: ./scripts/test-lifecycle.sh
+
+  browser:
+    name: Mobile browser control flow
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Playwright CLI and Chromium
+        run: |
+          npm install --global @playwright/cli@0.1.15
+          playwright-cli install-browser --with-deps chromium
+          playwright-cli install-browser --with-deps webkit
+
+      - name: Run Chromium mobile browser rehearsal
+        run: ./scripts/test-browser.sh
+
+      - name: Run WebKit mobile browser rehearsal
+        env:
+          FERN_BROWSER_ENGINE: webkit
+        run: ./scripts/test-browser.sh
