@@ -19,6 +19,7 @@ type pauseRecoveryRuntime struct {
 	onPause  func()
 	ensureN  int
 	pauseN   int
+	prepareN int
 }
 
 func (f *pauseRecoveryRuntime) EnsureRunning(context.Context, runtime.Spec) (runtime.Endpoint, bool, error) {
@@ -50,6 +51,13 @@ func (f *pauseRecoveryRuntime) Status(context.Context, string) (runtime.Observat
 		Endpoint:    f.endpoint,
 		HasEndpoint: f.state == runtime.StateRunning,
 	}, nil
+}
+
+func (f *pauseRecoveryRuntime) PrepareShutdown(context.Context, string) error {
+	f.mu.Lock()
+	f.prepareN++
+	f.mu.Unlock()
+	return nil
 }
 
 func TestPauseRefusesRunningProvisioningWorkspace(t *testing.T) {
@@ -173,4 +181,17 @@ func TestAcquirePausedHoldsAdmissionUntilRelease(t *testing.T) {
 		t.Fatalf("request after fence release failed: %v", err)
 	}
 	releaseRequest()
+}
+
+func TestClosePreparesOrderlyShutdownRecovery(t *testing.T) {
+	fake := &pauseRecoveryRuntime{state: runtime.StateRunning}
+	manager := newTestManager(fake, nil, alwaysIdle)
+	if err := manager.PrepareShutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if fake.prepareN != 1 {
+		t.Fatalf("shutdown preparations = %d, want 1", fake.prepareN)
+	}
 }

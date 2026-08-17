@@ -37,13 +37,14 @@ func runDoctor(args []string) error {
 	configPath := flags.String("config", "fern.yaml", "configuration file")
 	envPath := flags.String("env-file", "fern.env", "protected environment file")
 	phone := flags.Bool("phone", false, "require and verify a Tailscale HTTPS route")
+	fieldDemo := flags.Bool("field-demo", false, "require all locally verifiable field-demo prerequisites")
 	remoteURL := flags.String("url", "", "explicit private HTTPS origin")
 	jsonOutput := flags.Bool("json", false, "output a stable JSON report")
 	qr := flags.Bool("qr", true, "print a terminal QR code for a ready phone URL")
 	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
-	report := diagnose(*configPath, *envPath, *phone, *remoteURL)
+	report := diagnose(*configPath, *envPath, *phone || *fieldDemo, *fieldDemo, *remoteURL)
 	if *jsonOutput {
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetEscapeHTML(false)
@@ -54,12 +55,12 @@ func runDoctor(args []string) error {
 		writeDoctorReport(os.Stdout, report, *qr)
 	}
 	if !report.Ready {
-		return fmt.Errorf("phone demo is not ready; resolve failed checks above")
+		return fmt.Errorf("requested Fern readiness checks failed; resolve failed checks above")
 	}
 	return nil
 }
 
-func diagnose(configPath, envPath string, phone bool, explicitURL string) doctorReport {
+func diagnose(configPath, envPath string, phone, fieldDemo bool, explicitURL string) doctorReport {
 	report := doctorReport{Ready: true}
 	add := func(id, status, summary, remediation string) {
 		report.Checks = append(report.Checks, doctorCheck{ID: id, Status: status, Summary: summary, Remediation: remediation})
@@ -78,7 +79,7 @@ func diagnose(configPath, envPath string, phone bool, explicitURL string) doctor
 		add("config", "fail", err.Error(), "Run doctor from an accessible directory.")
 		return report
 	}
-	cfg, err := config.Load(configPath, cwd, true, config.Overrides{})
+	cfg, err := config.LoadWithEnvironment(configPath, cwd, true, config.Overrides{}, values)
 	if err != nil {
 		add("config", "fail", err.Error(), "Fix the strict Fern configuration.")
 		return report
@@ -107,9 +108,21 @@ func diagnose(configPath, envPath string, phone bool, explicitURL string) doctor
 		}
 	}
 	if err := checkCommand(5*time.Second, "gh", "auth", "status", "--hostname", "github.com"); err != nil {
-		add("github", "warn", "GitHub CLI is not authenticated", "Run gh auth login --hostname github.com before publishing a PR.")
+		status := "warn"
+		if fieldDemo {
+			status = "fail"
+		}
+		add("github", status, "GitHub CLI is not authenticated", "Run gh auth login --hostname github.com before publishing a PR.")
 	} else {
 		add("github", "pass", "GitHub CLI authentication is available on the host", "")
+	}
+	if fieldDemo {
+		if cfg.Workspace.Env["ANTHROPIC_API_KEY"] == "" && cfg.Workspace.Env["OPENAI_API_KEY"] == "" {
+			add("provider", "fail", "no supported provider credential is configured", "Add ANTHROPIC_API_KEY or OPENAI_API_KEY to the protected env file.")
+		} else {
+			add("provider", "pass", "a supported provider credential is configured", "")
+		}
+		add("live-checks", "warn", "provider execution and GitHub mutation are not run by doctor", "Run the opt-in provider and disposable-repository rehearsals before the phone demo.")
 	}
 	localURL, err := attachURL(cfg.Listen)
 	if err != nil {
@@ -120,14 +133,17 @@ func diagnose(configPath, envPath string, phone bool, explicitURL string) doctor
 		add("gateway", "pass", "local Fern gateway is serving", "")
 	}
 	if phone || explicitURL != "" {
+		servedOrigin, serveErr := discoverTailscaleURL(cfg.Listen)
 		origin := explicitURL
 		if origin == "" {
-			origin, err = discoverTailscaleURL()
+			origin = servedOrigin
 		}
-		if err != nil || origin == "" {
-			add("tailscale", "fail", "no Tailscale Serve HTTPS origin was found", fmt.Sprintf("Run tailscale serve --bg http://%s, then retry; or pass --url.", cfg.Listen))
+		if serveErr != nil || origin == "" {
+			add("tailscale", "fail", "no Tailscale Serve HTTPS origin was found", fmt.Sprintf("Run tailscale serve --bg http://%s, then retry.", cfg.Listen))
 		} else if validated, validateErr := attachTarget(&origin, cfg.Listen); validateErr != nil {
 			add("tailscale", "fail", validateErr.Error(), "Use a private HTTPS root origin.")
+		} else if !strings.EqualFold(strings.TrimRight(validated, "/"), strings.TrimRight(servedOrigin, "/")) {
+			add("tailscale", "fail", "explicit phone URL does not match the configured Tailscale Serve route", "Use the HTTPS origin whose root route proxies to Fern.")
 		} else if localOrigin, localErr := localTailscaleOrigin(); localErr != nil || !strings.EqualFold(mustHostname(validated), mustHostname(localOrigin)) {
 			add("tailscale", "fail", "phone URL does not match this Tailscale host", "Use the HTTPS URL reported by tailscale serve status on this host.")
 		} else if err := checkReady(validated, cfg.Workspace.Env["OPENCODE_PASSWORD"]); err != nil {
@@ -159,6 +175,7 @@ func checkCommand(timeout time.Duration, name string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, name, args...)
+	command.WaitDelay = time.Second
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	if err := command.Run(); err != nil {
@@ -217,23 +234,25 @@ func issuePairingCode(origin, password string) (string, error) {
 	return result.Code, nil
 }
 
-var httpsOriginPattern = regexp.MustCompile(`https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?`)
+var httpsOriginPattern = regexp.MustCompile(`https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?`)
 
-func discoverTailscaleURL() (string, error) {
+func discoverTailscaleURL(listen string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "tailscale", "serve", "status")
+	command.WaitDelay = time.Second
 	output, err := command.Output()
 	if err != nil {
 		return "", err
 	}
-	return tailscaleOrigin(string(output))
+	return tailscaleOriginForTarget(string(output), listen)
 }
 
 func localTailscaleOrigin() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "tailscale", "status", "--json")
+	command.WaitDelay = time.Second
 	output, err := command.Output()
 	if err != nil {
 		return "", err
@@ -243,18 +262,50 @@ func localTailscaleOrigin() (string, error) {
 
 func tailscaleLocalOrigin(output []byte) (string, error) {
 	var status struct {
-		Self struct {
+		BackendState string `json:"BackendState"`
+		Self         struct {
 			DNSName string `json:"DNSName"`
 		} `json:"Self"`
 	}
 	if err := json.Unmarshal(output, &status); err != nil {
 		return "", err
 	}
+	if status.BackendState != "Running" {
+		return "", fmt.Errorf("Tailscale backend is %q, not Running", status.BackendState)
+	}
 	host := strings.TrimSuffix(status.Self.DNSName, ".")
 	if host == "" || !strings.HasSuffix(strings.ToLower(host), ".ts.net") {
 		return "", fmt.Errorf("Tailscale did not report a private DNS name")
 	}
 	return "https://" + host, nil
+}
+
+func tailscaleOriginForTarget(output, listen string) (string, error) {
+	if strings.Contains(strings.ToLower(output), "funnel on") || strings.Contains(strings.ToLower(output), "available on the internet") {
+		return "", fmt.Errorf("Tailscale Funnel must be disabled")
+	}
+	want := "|-- / proxy http://" + listen
+	currentOrigin := ""
+	matches := make(map[string]bool)
+	for _, line := range strings.Split(output, "\n") {
+		if origin := httpsOriginPattern.FindString(line); origin != "" {
+			currentOrigin = origin
+			continue
+		}
+		if strings.TrimSpace(line) == want {
+			if currentOrigin == "" {
+				return "", fmt.Errorf("Tailscale Serve route has no HTTPS origin")
+			}
+			matches[currentOrigin] = true
+		}
+	}
+	if len(matches) != 1 {
+		return "", fmt.Errorf("expected one Tailscale HTTPS origin for http://%s, found %d", listen, len(matches))
+	}
+	for origin := range matches {
+		return origin, nil
+	}
+	return "", fmt.Errorf("Tailscale Serve root does not proxy http://%s", listen)
 }
 
 func tailscaleOrigin(output string) (string, error) {

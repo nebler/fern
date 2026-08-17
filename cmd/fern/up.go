@@ -41,19 +41,22 @@ func runUp(args []string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	cfg, err := config.Load(*configPath, cwd, flagSet(fs, "config"), config.Overrides{
-		Name: optionalFlag(fs, "name", name), Image: optionalFlag(fs, "image", image),
-		Repo: optionalFlag(fs, "repo", repo), Memory: optionalFlag(fs, "memory", memory),
-		IdleAfter: optionalFlag(fs, "idle", idle), Listen: optionalFlag(fs, "listen", listenAddress),
-	})
-	if err != nil {
-		return err
-	}
+	values := map[string]string(nil)
 	if *envPath != "" {
-		values, err := readEnvFile(*envPath)
+		values, err = readEnvFile(*envPath)
 		if err != nil {
 			return err
 		}
+	}
+	cfg, err := config.LoadWithEnvironment(*configPath, cwd, flagSet(fs, "config"), config.Overrides{
+		Name: optionalFlag(fs, "name", name), Image: optionalFlag(fs, "image", image),
+		Repo: optionalFlag(fs, "repo", repo), Memory: optionalFlag(fs, "memory", memory),
+		IdleAfter: optionalFlag(fs, "idle", idle), Listen: optionalFlag(fs, "listen", listenAddress),
+	}, values)
+	if err != nil {
+		return err
+	}
+	if values != nil {
 		cfg.Workspace.Env = mergeEnvironment(cfg.Workspace.Env, values)
 	}
 	cfg.Workspace.Env = forwardedEnvironment(cfg.Workspace.Env)
@@ -145,12 +148,14 @@ func runUp(args []string, log *slog.Logger) error {
 	supervisor := &watch.Supervisor{IdleAfter: cfg.IdleAfter, OnPause: manager.Pause, Log: log}
 	connections := newConnectionTracker()
 	trackedListener := connections.wrap(listener)
+	controls := proxy.Controls{
+		Store: controlStore, Fencer: manager, Publisher: publisher, ServiceContext: serviceCtx,
+	}
 	server := &http.Server{
-		Handler: proxy.NewWithControls(manager, auth, proxy.Controls{
-			Store: controlStore, Fencer: manager, Publisher: publisher,
-		}, log), ReadHeaderTimeout: 10 * time.Second,
+		Handler: proxy.NewWithControls(manager, auth, controls, log), ReadHeaderTimeout: 10 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return serviceCtx },
 	}
+	proxy.ReconcilePublications(serviceCtx, controls, log)
 	group.Go(func() error {
 		err := supervisor.Run(serviceCtx, observations)
 		if errors.Is(err, context.Canceled) {
@@ -181,6 +186,10 @@ func runUp(args []string, log *slog.Logger) error {
 	fmt.Printf("workspace: %s\nproxy: http://%s\nready in: %s\nattach: fern attach\n", spec.Name, listener.Addr(), time.Since(start).Round(time.Millisecond))
 	log.Info("proxy listening", "address", listener.Addr(), "workspace", spec.Name)
 	err = group.Wait()
+	var prepareErr error
+	if rootCtx.Err() != nil {
+		prepareErr = manager.PrepareShutdown(context.Background())
+	}
 	// The manager owns wake and rollback goroutines. Do not close Docker until
 	// that ownership has been handed back, even if shutdown takes longer.
 	managerErr := manager.Close(context.Background())
@@ -190,7 +199,7 @@ func runUp(args []string, log *slog.Logger) error {
 	if errors.Is(err, context.Canceled) {
 		err = nil
 	}
-	return errors.Join(err, managerErr, streamErr)
+	return errors.Join(err, prepareErr, managerErr, streamErr)
 }
 
 type connectionTracker struct {

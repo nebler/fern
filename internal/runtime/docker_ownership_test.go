@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
@@ -23,9 +24,10 @@ import (
 
 type memoryIntentStore struct{}
 
-func (memoryIntentStore) BeginPause(string, string) error  { return nil }
-func (memoryIntentStore) CommitPause(string, string) error { return nil }
-func (memoryIntentStore) PauseStatus(string, string) (PauseIntentStatus, error) {
+func (memoryIntentStore) BeginPause(string, string) error                { return nil }
+func (memoryIntentStore) CommitPause(string, string) error               { return nil }
+func (memoryIntentStore) CommitShutdown(string, string, time.Time) error { return nil }
+func (memoryIntentStore) PauseStatus(string, string, time.Time) (PauseIntentStatus, error) {
 	return PauseIntentNone, nil
 }
 func (memoryIntentStore) Clear(string) error { return nil }
@@ -51,7 +53,10 @@ func (s *recordingIntentStore) CommitPause(string, string) error {
 	s.status = PauseIntentCommitted
 	return nil
 }
-func (s *recordingIntentStore) PauseStatus(string, string) (PauseIntentStatus, error) {
+func (s *recordingIntentStore) CommitShutdown(workspace, containerID string, _ time.Time) error {
+	return s.CommitPause(workspace, containerID)
+}
+func (s *recordingIntentStore) PauseStatus(string, string, time.Time) (PauseIntentStatus, error) {
 	return s.status, nil
 }
 func (s *recordingIntentStore) Clear(string) error {
@@ -219,6 +224,7 @@ func TestVerifyActualSpecAllowsImageEnvironment(t *testing.T) {
 			"Id": "container-id",
 			"Config": map[string]any{
 				"Image":        "image:test",
+				"User":         "1001:1001",
 				"Env":          []string{"FERN=value", "PATH=/usr/local/bin", "IMAGE_VERSION=1"},
 				"ExposedPorts": nat.PortSet{nat.Port(workspacePort): struct{}{}},
 			},
@@ -231,6 +237,8 @@ func TestVerifyActualSpecAllowsImageEnvironment(t *testing.T) {
 				"RestartPolicy": map[string]any{
 					"Name": restartPolicy.Load().(string),
 				},
+				"CapDrop":     []string{"ALL"},
+				"SecurityOpt": []string{"no-new-privileges"},
 			},
 			"Mounts": []map[string]any{
 				{"Type": "bind", "Source": "/repo", "Destination": "/home/user/workspace", "RW": true},
@@ -443,9 +451,11 @@ func TestVerifyActualSpecRejectsExtraMountAndPrivileges(t *testing.T) {
 		ContainerJSONBase: &container.ContainerJSONBase{HostConfig: &container.HostConfig{
 			Resources:    container.Resources{Memory: 1024, NanoCPUs: workspaceNanoCPUs, PidsLimit: &pidsLimit},
 			Init:         &useInit,
+			CapDrop:      []string{"ALL"},
+			SecurityOpt:  []string{"no-new-privileges"},
 			PortBindings: nat.PortMap{nat.Port(workspacePort): []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "49152"}}},
 		}},
-		Config: &container.Config{Image: "image:test", ExposedPorts: nat.PortSet{nat.Port(workspacePort): struct{}{}}},
+		Config: &container.Config{Image: "image:test", User: "1001:1001", ExposedPorts: nat.PortSet{nat.Port(workspacePort): struct{}{}}},
 		Mounts: []container.MountPoint{
 			{Type: mount.TypeBind, Source: "/repo", Destination: "/home/user/workspace", RW: true},
 			{Type: mount.TypeVolume, Name: "fern-demo-v2-data", Destination: "/home/user/.local/share/opencode", RW: true},
@@ -486,7 +496,7 @@ func TestEnsureRunningUsesOneInspectionForRunningContainer(t *testing.T) {
 			writeJSON(writer, http.StatusOK, map[string]any{
 				"Id": "container-id",
 				"Config": map[string]any{
-					"Image": spec.Image, "Env": sortedEnv(spec.Env),
+					"Image": spec.Image, "User": "1001:1001", "Env": sortedEnv(spec.Env),
 					"Labels":       map[string]string{managedLabel: "true", workspaceLabel: spec.Name, specFingerprintLabel: fingerprint},
 					"ExposedPorts": nat.PortSet{nat.Port(workspacePort): struct{}{}},
 				},
@@ -494,6 +504,7 @@ func TestEnsureRunningUsesOneInspectionForRunningContainer(t *testing.T) {
 					"Memory": spec.MemoryBytes, "NanoCpus": workspaceNanoCPUs, "PidsLimit": workspacePIDs, "Init": useInit,
 					"PortBindings":  nat.PortMap{nat.Port(workspacePort): []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: strconv.Itoa(port)}}},
 					"RestartPolicy": map[string]any{"Name": "no"},
+					"CapDrop":       []string{"ALL"}, "SecurityOpt": []string{"no-new-privileges"},
 				},
 				"Mounts": []map[string]any{
 					{"Type": "bind", "Source": spec.RepoPath, "Destination": "/home/user/workspace", "RW": true},

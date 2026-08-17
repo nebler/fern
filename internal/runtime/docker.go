@@ -104,6 +104,7 @@ func (d *Docker) create(ctx context.Context, spec Spec) (endpoint Endpoint, resu
 		ctx,
 		&container.Config{
 			Image:        spec.Image,
+			User:         "1001:1001",
 			Env:          env,
 			ExposedPorts: nat.PortSet{port: struct{}{}},
 			Labels: map[string]string{
@@ -117,7 +118,9 @@ func (d *Docker) create(ctx context.Context, spec Spec) (endpoint Endpoint, resu
 			Resources: container.Resources{
 				Memory: spec.MemoryBytes, NanoCPUs: workspaceNanoCPUs, PidsLimit: &pidsLimit,
 			},
-			Init: &useInit,
+			Init:        &useInit,
+			CapDrop:     []string{"ALL"},
+			SecurityOpt: []string{"no-new-privileges"},
 			Mounts: []mount.Mount{
 				{Type: mount.TypeBind, Source: spec.RepoPath, Target: "/home/user/workspace"},
 				{Type: mount.TypeVolume, Source: specDataVolumeName(spec), Target: "/home/user/.local/share/opencode"},
@@ -164,6 +167,23 @@ func (d *Docker) Pause(ctx context.Context, name string) error {
 	return d.pauseObserved(ctx, name, observation)
 }
 
+// PrepareShutdown records that a managed running container may be stopped by
+// Docker after Fern exits during an orderly service or host shutdown. A normal
+// Fern restart clears this intent while adopting the still-running container.
+func (d *Docker) PrepareShutdown(ctx context.Context, name string) error {
+	observation, err := d.Status(ctx, name)
+	if err != nil {
+		return err
+	}
+	if !observation.Running || observation.ContainerID == "" || observation.State == StateFailed {
+		return nil
+	}
+	if err := d.intents.CommitShutdown(name, observation.ContainerID, time.Now().Add(5*time.Minute)); err != nil {
+		return fmt.Errorf("record orderly shutdown recovery intent: %w", err)
+	}
+	return nil
+}
+
 func (d *Docker) pauseObserved(ctx context.Context, name string, observation Observation) error {
 	if observation.State == StateAbsent {
 		return fmt.Errorf("pause %q: workspace is absent", name)
@@ -172,7 +192,7 @@ func (d *Docker) pauseObserved(ctx context.Context, name string, observation Obs
 		return fmt.Errorf("%w: %s exited with code %d (oom=%t)", ErrFailed, name, observation.ExitCode, observation.OOMKilled)
 	}
 	if !observation.Running && !observation.Frozen {
-		intent, err := d.intents.PauseStatus(name, observation.ContainerID)
+		intent, err := d.intents.PauseStatus(name, observation.ContainerID, time.Time{})
 		if err != nil {
 			return fmt.Errorf("read pause intent: %w", err)
 		}
@@ -429,7 +449,7 @@ func (d *Docker) inspectByReference(ctx context.Context, reference, workspace st
 	case info.State.Restarting:
 		observation.State = StateProvisioning
 	case info.State.Status == "created":
-		intent, err := d.intents.PauseStatus(workspace, info.ID)
+		intent, err := d.intents.PauseStatus(workspace, info.ID, time.Time{})
 		if err != nil {
 			return workspaceInspection{}, fmt.Errorf("read pause intent: %w", err)
 		}
@@ -441,12 +461,19 @@ func (d *Docker) inspectByReference(ctx context.Context, reference, workspace st
 	case info.State.OOMKilled || info.State.Dead:
 		observation.State = StateFailed
 	case info.State.Status == "exited":
-		intent, err := d.intents.PauseStatus(workspace, info.ID)
+		var stoppedAt time.Time
+		if info.State.FinishedAt != "" {
+			stoppedAt, err = time.Parse(time.RFC3339Nano, info.State.FinishedAt)
+			if err != nil {
+				return workspaceInspection{}, fmt.Errorf("parse container finish time: %w", err)
+			}
+		}
+		intent, err := d.intents.PauseStatus(workspace, info.ID, stoppedAt)
 		if err != nil {
 			return workspaceInspection{}, fmt.Errorf("read pause intent: %w", err)
 		}
 		switch intent {
-		case PauseIntentCommitted:
+		case PauseIntentCommitted, PauseIntentShutdown:
 			observation.State = StatePaused
 		case PauseIntentPending:
 			observation.State = StateProvisioning
@@ -513,6 +540,15 @@ func sortedEnv(env map[string]string) []string {
 	return result
 }
 
+func sortedEnvKeys(env map[string]string) []string {
+	result := make([]string, 0, len(env))
+	for key := range env {
+		result = append(result, key)
+	}
+	sort.Strings(result)
+	return result
+}
+
 type fingerprintValue struct {
 	Version     int
 	Name        string
@@ -532,7 +568,7 @@ func specFingerprint(spec Spec) (string, error) {
 		Image:       spec.Image,
 		RepoPath:    spec.RepoPath,
 		MemoryBytes: spec.MemoryBytes,
-		Env:         sortedEnv(spec.Env),
+		Env:         sortedEnvKeys(spec.Env),
 		Init:        true,
 		Port:        workspacePort,
 		DataVolume:  specDataVolumeName(spec),
@@ -551,10 +587,10 @@ func verifyActualSpec(info container.InspectResponse, spec Spec) error {
 	if info.Config == nil || info.HostConfig == nil {
 		return fmt.Errorf("%w: Docker returned incomplete workspace configuration", ErrSpecDrift)
 	}
-	if info.Config.Image != spec.Image || info.HostConfig.Memory != spec.MemoryBytes || info.HostConfig.NanoCPUs != workspaceNanoCPUs || info.HostConfig.PidsLimit == nil || *info.HostConfig.PidsLimit != workspacePIDs || info.HostConfig.Init == nil || !*info.HostConfig.Init || !info.HostConfig.RestartPolicy.IsNone() {
+	if info.Config.Image != spec.Image || info.Config.User != "1001:1001" || info.HostConfig.Memory != spec.MemoryBytes || info.HostConfig.NanoCPUs != workspaceNanoCPUs || info.HostConfig.PidsLimit == nil || *info.HostConfig.PidsLimit != workspacePIDs || info.HostConfig.Init == nil || !*info.HostConfig.Init || !info.HostConfig.RestartPolicy.IsNone() {
 		return fmt.Errorf("%w: Docker image, memory, CPU, PID, init, or restart setting was modified; run 'fern down' to recreate", ErrSpecDrift)
 	}
-	if info.HostConfig.Privileged || info.HostConfig.ReadonlyRootfs || len(info.HostConfig.CapAdd) != 0 || len(info.HostConfig.Devices) != 0 || len(info.HostConfig.DeviceRequests) != 0 || len(info.HostConfig.SecurityOpt) != 0 {
+	if info.HostConfig.Privileged || info.HostConfig.ReadonlyRootfs || len(info.HostConfig.CapAdd) != 0 || len(info.HostConfig.CapDrop) != 1 || info.HostConfig.CapDrop[0] != "ALL" || len(info.HostConfig.Devices) != 0 || len(info.HostConfig.DeviceRequests) != 0 || len(info.HostConfig.SecurityOpt) != 1 || info.HostConfig.SecurityOpt[0] != "no-new-privileges" {
 		return fmt.Errorf("%w: Docker privilege, capability, device, or security settings were modified; run 'fern down' to recreate", ErrSpecDrift)
 	}
 	bindings := info.HostConfig.PortBindings[nat.Port(workspacePort)]

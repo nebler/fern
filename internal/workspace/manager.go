@@ -377,6 +377,15 @@ func (m *Manager) Close(ctx context.Context) error {
 	}
 }
 
+func (m *Manager) PrepareShutdown(ctx context.Context) error {
+	if preparer, ok := m.runtime.(interface {
+		PrepareShutdown(context.Context, string) error
+	}); ok {
+		return preparer.PrepareShutdown(ctx, m.spec.Name)
+	}
+	return nil
+}
+
 func (m *Manager) acquireLifecycle(ctx context.Context) error {
 	select {
 	case <-m.lifecycle:

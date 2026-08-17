@@ -29,9 +29,10 @@ type GitHubPublisher interface {
 }
 
 type Controls struct {
-	Store     *control.Store
-	Fencer    RepositoryFencer
-	Publisher GitHubPublisher
+	Store          *control.Store
+	Fencer         RepositoryFencer
+	Publisher      GitHubPublisher
+	ServiceContext context.Context
 }
 
 type targetKey struct{}

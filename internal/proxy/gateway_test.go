@@ -51,6 +51,9 @@ func TestFernLandingLinksToOfficialUI(t *testing.T) {
 	if got := response.Header().Get("Content-Security-Policy"); got == "" {
 		t.Fatal("landing response has no content security policy")
 	}
+	if got := response.Header().Get("Referrer-Policy"); got != "same-origin" {
+		t.Fatalf("Referrer-Policy = %q, want same-origin for same-origin control forms", got)
+	}
 }
 
 func TestFernReadyWorksWithoutWorkspaceManager(t *testing.T) {

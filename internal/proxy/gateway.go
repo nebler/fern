@@ -24,7 +24,7 @@ h1{margin:24px 0 8px;font-size:36px;letter-spacing:-.04em}h2{margin:0 0 14px;fon
 .status{display:flex;align-items:center;gap:9px;margin:22px 0;color:#dcebd2;font-size:14px}.dot{width:9px;height:9px;border-radius:50%;background:#b9ef86;box-shadow:0 0 18px #b9ef86}
 a.primary,button{display:block;width:100%;margin-top:18px;padding:15px 18px;border:0;border-radius:15px;background:#b9ef86;color:#15200f;text-align:center;text-decoration:none;font:inherit;font-weight:750;cursor:pointer}
 small,.meta{display:block;margin-top:12px;color:#82917c;line-height:1.45;font-size:13px}ul{list-style:none;padding:0;margin:0}li{padding:13px 0;border-top:1px solid #344230}li:first-child{border-top:0}.title{font-weight:700}.badge{display:inline-block;margin-top:6px;padding:4px 8px;border-radius:99px;background:#2d3c28;color:#cce7ba;font-size:12px}
-form.grid{display:grid;gap:10px}input{width:100%;padding:13px 14px;border:1px solid #52664a;border-radius:13px;background:#10180e;color:#f3f7e9;font:inherit}button.danger{width:auto;margin:8px 0 0;padding:8px 11px;background:#472a26;color:#ffcbc2;font-size:13px}
+form.grid{display:grid;gap:10px}input{width:100%;min-height:48px;padding:13px 14px;border:1px solid #52664a;border-radius:13px;background:#10180e;color:#f3f7e9;font:inherit}button.danger{width:auto;min-height:44px;margin:8px 0 0;padding:8px 13px;background:#472a26;color:#ffcbc2;font-size:13px}
 </style>
 </head>
 <body><main>
@@ -103,6 +103,6 @@ func serveFern(writer http.ResponseWriter, request *http.Request, controls Contr
 func setFernHeaders(header http.Header) {
 	header.Set("Cache-Control", "no-store")
 	header.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
-	header.Set("Referrer-Policy", "no-referrer")
+	header.Set("Referrer-Policy", "same-origin")
 	header.Set("X-Content-Type-Options", "nosniff")
 }

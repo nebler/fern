@@ -137,6 +137,17 @@ func TestSpecFingerprintIsStableAndDetectsChanges(t *testing.T) {
 	if changed == left {
 		t.Fatal("image change did not change spec fingerprint")
 	}
+	second = first
+	second.Env = map[string]string{"A": "changed", "B": "changed"}
+	valueOnly, _ := specFingerprint(second)
+	if valueOnly != left {
+		t.Fatal("secret values changed the Docker-visible spec fingerprint")
+	}
+	second.Env["C"] = "3"
+	keyAdded, _ := specFingerprint(second)
+	if keyAdded == left {
+		t.Fatal("environment key change did not change spec fingerprint")
+	}
 }
 
 func TestSpecUsesV2DataVolume(t *testing.T) {

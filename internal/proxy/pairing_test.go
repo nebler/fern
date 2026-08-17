@@ -49,7 +49,7 @@ func TestPairingCreatesCookieAndInjectsUpstreamAuth(t *testing.T) {
 		t.Fatalf("pair status = %d", paired.Code)
 	}
 	cookies := paired.Result().Cookies()
-	if len(cookies) != 1 || cookies[0].Name != deviceCookieName || !cookies[0].HttpOnly || !cookies[0].Secure {
+	if len(cookies) != 1 || cookies[0].Name != deviceCookieName || !cookies[0].HttpOnly || !cookies[0].Secure || cookies[0].SameSite != http.SameSiteStrictMode || cookies[0].Path != "/" || cookies[0].Domain != "" || cookies[0].MaxAge <= 0 || cookies[0].Expires.IsZero() {
 		t.Fatalf("pairing cookies = %+v", cookies)
 	}
 

@@ -48,6 +48,17 @@ func TestAttachEnvironmentReplacesAuthentication(t *testing.T) {
 	}
 }
 
+func TestAttachEnvironmentDropsUnrelatedSecrets(t *testing.T) {
+	t.Parallel()
+	got := attachEnvironment([]string{
+		"PATH=/bin", "ANTHROPIC_API_KEY=anthropic", "OPENAI_API_KEY=openai",
+		"AWS_SECRET_ACCESS_KEY=aws", "GH_TOKEN=gh", "GITHUB_TOKEN=github", "ARBITRARY_SECRET=value",
+	}, map[string]string{"OPENCODE_PASSWORD": "secret"})
+	if len(got) != 2 || !slices.Contains(got, "PATH=/bin") || !slices.Contains(got, "OPENCODE_PASSWORD=secret") {
+		t.Fatalf("attach environment leaked or omitted values: %v", got)
+	}
+}
+
 func TestImplicitAuthenticationForwardsOpenCodePassword(t *testing.T) {
 	t.Setenv("OPENCODE_PASSWORD", "v2-secret")
 	env := forwardedEnvironment(nil)

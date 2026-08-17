@@ -118,10 +118,15 @@ func attachURL(address string) (string, error) {
 
 func attachEnvironment(base []string, configured map[string]string) []string {
 	const password = "OPENCODE_PASSWORD"
-	result := make([]string, 0, len(base)+1)
+	allowed := map[string]bool{
+		"COLORTERM": true, "HOME": true, "LANG": true, "LOGNAME": true,
+		"PATH": true, "SHELL": true, "TERM": true, "TMPDIR": true, "USER": true,
+		"XDG_CACHE_HOME": true, "XDG_CONFIG_HOME": true, "XDG_DATA_HOME": true,
+	}
+	result := make([]string, 0, len(allowed)+1)
 	for _, value := range base {
 		key, _, _ := strings.Cut(value, "=")
-		if key != password {
+		if allowed[key] || strings.HasPrefix(key, "LC_") {
 			result = append(result, value)
 		}
 	}

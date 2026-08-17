@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/nebler/fern/internal/runtime"
 )
@@ -20,6 +21,9 @@ type IntentStore struct {
 type pauseIntent struct {
 	ContainerID string `json:"containerID"`
 	Committed   bool   `json:"committed"`
+	Shutdown    bool   `json:"shutdown,omitempty"`
+	CreatedAt   string `json:"createdAt,omitempty"`
+	ExpiresAt   string `json:"expiresAt,omitempty"`
 }
 
 func NewIntentStore(directory string) *IntentStore {
@@ -32,6 +36,15 @@ func (s *IntentStore) BeginPause(workspace, containerID string) error {
 
 func (s *IntentStore) CommitPause(workspace, containerID string) error {
 	return s.write(workspace, pauseIntent{ContainerID: containerID, Committed: true})
+}
+
+func (s *IntentStore) CommitShutdown(workspace, containerID string, expiresAt time.Time) error {
+	createdAt := time.Now().UTC()
+	return s.write(workspace, pauseIntent{
+		ContainerID: containerID, Committed: true, Shutdown: true,
+		CreatedAt: createdAt.Format(time.RFC3339Nano),
+		ExpiresAt: expiresAt.UTC().Format(time.RFC3339Nano),
+	})
 }
 
 func (s *IntentStore) write(workspace string, intent pauseIntent) error {
@@ -81,7 +94,7 @@ func (s *IntentStore) write(workspace string, intent pauseIntent) error {
 	return errors.Join(wrapError("sync pause intent directory", err), wrapError("close pause intent directory", directory.Close()))
 }
 
-func (s *IntentStore) PauseStatus(workspace, containerID string) (runtime.PauseIntentStatus, error) {
+func (s *IntentStore) PauseStatus(workspace, containerID string, stoppedAt time.Time) (runtime.PauseIntentStatus, error) {
 	file, err := os.Open(s.path(workspace))
 	if errors.Is(err, os.ErrNotExist) {
 		return runtime.PauseIntentNone, nil
@@ -109,6 +122,20 @@ func (s *IntentStore) PauseStatus(workspace, containerID string) (runtime.PauseI
 	}
 	if intent.ContainerID != containerID {
 		return runtime.PauseIntentNone, nil
+	}
+	if intent.Shutdown {
+		createdAt, err := time.Parse(time.RFC3339Nano, intent.CreatedAt)
+		if err != nil {
+			return runtime.PauseIntentNone, fmt.Errorf("decode shutdown intent creation: %w", err)
+		}
+		expiresAt, err := time.Parse(time.RFC3339Nano, intent.ExpiresAt)
+		if err != nil {
+			return runtime.PauseIntentNone, fmt.Errorf("decode shutdown intent expiry: %w", err)
+		}
+		if stoppedAt.IsZero() || stoppedAt.Before(createdAt.Add(-5*time.Second)) || stoppedAt.After(expiresAt) {
+			return runtime.PauseIntentNone, nil
+		}
+		return runtime.PauseIntentShutdown, nil
 	}
 	if intent.Committed {
 		return runtime.PauseIntentCommitted, nil

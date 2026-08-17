@@ -15,6 +15,9 @@ SupplementaryGroups=docker
 WorkingDirectory=/var/lib/fern
 Environment=HOME=/var/lib/fern
 EnvironmentFile=/etc/fern/fern.env
+UMask=0077
+PrivateTmp=true
+NoNewPrivileges=true
 ExecStart=/usr/local/bin/fern up --config /etc/fern/fern.yaml --listen 127.0.0.1:8080
 Restart=on-failure
 RestartSec=10s

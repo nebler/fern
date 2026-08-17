@@ -96,11 +96,27 @@ func TestTailscaleOrigin(t *testing.T) {
 	if _, err := tailscaleOrigin("https://one.ts.net https://two.ts.net"); err == nil {
 		t.Fatal("accepted ambiguous Tailscale origins")
 	}
+	if got, err := tailscaleOriginForTarget(output, "127.0.0.1:8080"); err != nil || got != "https://fern-host.example.ts.net" {
+		t.Fatalf("targeted Tailscale origin = %q, %v", got, err)
+	}
+	if _, err := tailscaleOriginForTarget(output, "127.0.0.1:9090"); err == nil {
+		t.Fatal("accepted wrong Tailscale Serve target")
+	}
+	if _, err := tailscaleOriginForTarget(output+"Funnel on\n", "127.0.0.1:8080"); err == nil {
+		t.Fatal("accepted Tailscale Funnel")
+	}
+	multiple := "https://other.example.ts.net\n|-- / proxy http://127.0.0.1:9000\n\nhttps://fern-host.example.ts.net:8443\n|-- / proxy http://127.0.0.1:8080\n"
+	if got, err := tailscaleOriginForTarget(multiple, "127.0.0.1:8080"); err != nil || got != "https://fern-host.example.ts.net:8443" {
+		t.Fatalf("block-associated Tailscale origin = %q, %v", got, err)
+	}
 }
 
 func TestTailscaleLocalOrigin(t *testing.T) {
 	t.Parallel()
-	if got, err := tailscaleLocalOrigin([]byte(`{"Self":{"DNSName":"fern-host.example.ts.net."}}`)); err != nil || got != "https://fern-host.example.ts.net" {
+	if got, err := tailscaleLocalOrigin([]byte(`{"BackendState":"Running","Self":{"DNSName":"fern-host.example.ts.net."}}`)); err != nil || got != "https://fern-host.example.ts.net" {
 		t.Fatalf("local origin = %q, %v", got, err)
+	}
+	if _, err := tailscaleLocalOrigin([]byte(`{"BackendState":"NeedsLogin","Self":{"DNSName":"fern-host.example.ts.net."}}`)); err == nil {
+		t.Fatal("accepted inactive Tailscale backend")
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"net"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type State string
@@ -31,7 +32,8 @@ type ServerAuth struct {
 type IntentStore interface {
 	BeginPause(workspace, containerID string) error
 	CommitPause(workspace, containerID string) error
-	PauseStatus(workspace, containerID string) (PauseIntentStatus, error)
+	CommitShutdown(workspace, containerID string, expiresAt time.Time) error
+	PauseStatus(workspace, containerID string, stoppedAt time.Time) (PauseIntentStatus, error)
 	Clear(workspace string) error
 }
 
@@ -41,6 +43,7 @@ const (
 	PauseIntentNone PauseIntentStatus = iota
 	PauseIntentPending
 	PauseIntentCommitted
+	PauseIntentShutdown
 )
 
 func (a ServerAuth) Apply(req interface{ SetBasicAuth(string, string) }) {

@@ -3,6 +3,7 @@ package publication
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"os"
@@ -53,61 +54,9 @@ func New(workspace, repo string) (*Publisher, error) {
 }
 
 func (publisher *Publisher) Publish(ctx context.Context, request Request) (Result, error) {
-	if err := ValidateRequest(request); err != nil {
-		return Result{}, err
-	}
-	request.Title = strings.TrimSpace(request.Title)
-	repository, err := InspectRepository(ctx, publisher.repo)
+	prepared, err := publisher.Prepare(ctx, request)
 	if err != nil {
 		return Result{}, err
-	}
-	if request.Operation == "" {
-		request.Operation = repository.Head[:12]
-	}
-	if err := run(ctx, "", nil, "gh", "auth", "status", "--hostname", "github.com"); err != nil {
-		return Result{}, fmt.Errorf("GitHub authentication is unavailable; run 'gh auth login --hostname github.com'")
-	}
-	base := request.Base
-	if base == "" {
-		output, err := output(ctx, "", nil, "gh", "repo", "view", repository.Name, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name")
-		if err != nil {
-			return Result{}, fmt.Errorf("read GitHub default branch: %w", err)
-		}
-		base = strings.TrimSpace(output)
-		if !ValidBranch(base) {
-			return Result{}, fmt.Errorf("GitHub returned unsupported default branch %q", base)
-		}
-	}
-	token, err := output(ctx, "", nil, "gh", "auth", "token", "--hostname", "github.com")
-	if err != nil {
-		return Result{}, fmt.Errorf("obtain host GitHub credential")
-	}
-	token = strings.TrimSpace(token)
-	if len(token) < 20 || len(token) > 512 || !tokenPattern.MatchString(token) {
-		return Result{}, fmt.Errorf("host GitHub credential is invalid")
-	}
-	gitEnv := []string{"FERN_GITHUB_TOKEN=" + token, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull}
-	canonical := "https://github.com/" + repository.Name + ".git"
-	if err := run(ctx, publisher.repo, gitEnv, "git", secureGitArgs("fetch", "--no-tags", canonical, "refs/heads/"+base)...); err != nil {
-		return Result{}, fmt.Errorf("fetch GitHub base branch: %w", err)
-	}
-	if err := run(ctx, publisher.repo, nil, "git", "merge-base", "--is-ancestor", "FETCH_HEAD", repository.Head); err != nil {
-		return Result{}, fmt.Errorf("HEAD is not descended from the current GitHub base branch")
-	}
-	changed, err := output(ctx, publisher.repo, nil, "git", "diff", "--name-only", "FETCH_HEAD.."+repository.Head)
-	if err != nil {
-		return Result{}, fmt.Errorf("inspect publication changes: %w", err)
-	}
-	for _, path := range strings.Split(changed, "\n") {
-		if strings.HasPrefix(path, ".github/workflows/") {
-			return Result{}, fmt.Errorf("workflow changes require a separate reviewed publication path: %s", path)
-		}
-	}
-	prepared := Prepared{
-		Repository: repository.Name,
-		Base:       base,
-		Commit:     repository.Head,
-		Branch:     "fern/" + publisher.workspace + "/" + request.Operation,
 	}
 	if request.DryRun {
 		return Result{Prepared: prepared}, nil
@@ -117,20 +66,208 @@ func (publisher *Publisher) Publish(ctx context.Context, request Request) (Resul
 			return Result{}, fmt.Errorf("record publication intent: %w", err)
 		}
 	}
-	if err := run(ctx, publisher.repo, gitEnv, "git", secureGitArgs("push", canonical, repository.Head+":refs/heads/"+prepared.Branch)...); err != nil {
-		return Result{}, fmt.Errorf("push exact commit to %s: %w", prepared.Branch, err)
+	return publisher.PublishPrepared(ctx, prepared, request.Title, request.Body)
+}
+
+func (publisher *Publisher) Prepare(ctx context.Context, request Request) (Prepared, error) {
+	if err := ValidateRequest(request); err != nil {
+		return Prepared{}, err
+	}
+	request.Title = strings.TrimSpace(request.Title)
+	repository, err := InspectRepository(ctx, publisher.repo)
+	if err != nil {
+		return Prepared{}, err
+	}
+	if request.Operation == "" {
+		request.Operation = repository.Head[:12]
+	}
+	if err := run(ctx, "", nil, "gh", "auth", "status", "--hostname", "github.com"); err != nil {
+		return Prepared{}, fmt.Errorf("GitHub authentication is unavailable; run 'gh auth login --hostname github.com'")
+	}
+	base := request.Base
+	if base == "" {
+		output, err := output(ctx, "", nil, "gh", "repo", "view", repository.Name, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name")
+		if err != nil {
+			return Prepared{}, fmt.Errorf("read GitHub default branch: %w", err)
+		}
+		base = strings.TrimSpace(output)
+		if !ValidBranch(base) {
+			return Prepared{}, fmt.Errorf("GitHub returned unsupported default branch %q", base)
+		}
+	}
+	token, err := githubCredential(ctx)
+	if err != nil {
+		return Prepared{}, err
+	}
+	gitEnv := []string{"FERN_GITHUB_TOKEN=" + token, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull}
+	canonical := "https://github.com/" + repository.Name + ".git"
+	if err := run(ctx, publisher.repo, gitEnv, "git", secureGitArgs("fetch", "--no-tags", canonical, "refs/heads/"+base)...); err != nil {
+		return Prepared{}, fmt.Errorf("fetch GitHub base branch: %w", err)
+	}
+	if err := run(ctx, publisher.repo, nil, "git", "merge-base", "--is-ancestor", "FETCH_HEAD", repository.Head); err != nil {
+		return Prepared{}, fmt.Errorf("HEAD is not descended from the current GitHub base branch")
+	}
+	changed, err := output(ctx, publisher.repo, nil, "git", "diff", "--name-only", "FETCH_HEAD.."+repository.Head)
+	if err != nil {
+		return Prepared{}, fmt.Errorf("inspect publication changes: %w", err)
+	}
+	for _, path := range strings.Split(changed, "\n") {
+		if strings.HasPrefix(path, ".github/workflows/") {
+			return Prepared{}, fmt.Errorf("workflow changes require a separate reviewed publication path: %s", path)
+		}
+	}
+	return Prepared{
+		Repository: repository.Name,
+		Base:       base,
+		Commit:     repository.Head,
+		Branch:     "fern/" + publisher.workspace + "/" + request.Operation,
+	}, nil
+}
+
+func (publisher *Publisher) PublishPrepared(ctx context.Context, prepared Prepared, title, body string) (Result, error) {
+	if err := validatePrepared(prepared); err != nil {
+		return Result{}, err
+	}
+	if err := ValidateRequest(Request{Operation: strings.TrimPrefix(prepared.Branch, "fern/"+publisher.workspace+"/"), Base: prepared.Base, Title: title, Body: body}); err != nil {
+		return Result{}, err
+	}
+	if err := run(ctx, publisher.repo, nil, "git", "cat-file", "-e", prepared.Commit+"^{commit}"); err != nil {
+		return Result{}, fmt.Errorf("recorded publication commit is unavailable locally")
+	}
+	if err := run(ctx, "", nil, "gh", "auth", "status", "--hostname", "github.com"); err != nil {
+		return Result{}, fmt.Errorf("GitHub authentication is unavailable; run 'gh auth login --hostname github.com'")
+	}
+	token, err := githubCredential(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+	gitEnv := []string{"FERN_GITHUB_TOKEN=" + token, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull}
+	canonical := "https://github.com/" + prepared.Repository + ".git"
+	remoteCommit, err := remoteBranchCommit(ctx, publisher.repo, gitEnv, canonical, prepared.Branch)
+	if err != nil {
+		return Result{}, err
+	}
+	if remoteCommit != "" && remoteCommit != prepared.Commit {
+		return Result{}, fmt.Errorf("remote Fern branch conflicts with recorded commit")
+	}
+	if remoteCommit == "" {
+		pushErr := run(ctx, publisher.repo, gitEnv, "git", secureGitArgs("push", canonical, prepared.Commit+":refs/heads/"+prepared.Branch)...)
+		remoteCommit, err = remoteBranchCommit(ctx, publisher.repo, gitEnv, canonical, prepared.Branch)
+		if err != nil || remoteCommit != prepared.Commit {
+			if pushErr != nil {
+				return Result{}, fmt.Errorf("push exact commit to %s: %w", prepared.Branch, pushErr)
+			}
+			return Result{}, fmt.Errorf("remote Fern branch does not contain the recorded commit")
+		}
 	}
 	ghEnv := []string{"GH_TOKEN=" + token}
-	existing, _ := output(ctx, "", ghEnv, "gh", "pr", "list", "--repo", repository.Name, "--head", prepared.Branch, "--base", base, "--state", "open", "--json", "url", "--jq", ".[0].url")
-	prURL := strings.TrimSpace(existing)
-	if prURL == "" {
-		prURL, err = output(ctx, "", ghEnv, "gh", "pr", "create", "--draft", "--repo", repository.Name, "--head", prepared.Branch, "--base", base, "--title", request.Title, "--body", request.Body)
-		if err != nil {
-			return Result{}, fmt.Errorf("create draft pull request: %w", err)
+	prURL, found, err := findPullRequest(ctx, ghEnv, prepared)
+	if err != nil {
+		return Result{}, err
+	}
+	if !found {
+		created, createErr := output(ctx, "", ghEnv, "gh", "pr", "create", "--draft", "--repo", prepared.Repository, "--head", prepared.Branch, "--base", prepared.Base, "--title", strings.TrimSpace(title), "--body", body)
+		if createErr == nil {
+			prURL = strings.TrimSpace(created)
+			if err := validatePullURL(prURL, prepared.Repository); err != nil {
+				return Result{}, err
+			}
+		} else {
+			prURL, found, err = findPullRequest(ctx, ghEnv, prepared)
+			if err != nil || !found {
+				return Result{}, fmt.Errorf("create draft pull request: response was not reconciled")
+			}
 		}
-		prURL = strings.TrimSpace(prURL)
 	}
 	return Result{Prepared: prepared, URL: prURL}, nil
+}
+
+func githubCredential(ctx context.Context) (string, error) {
+	token, err := output(ctx, "", nil, "gh", "auth", "token", "--hostname", "github.com")
+	if err != nil {
+		return "", fmt.Errorf("obtain host GitHub credential")
+	}
+	token = strings.TrimSpace(token)
+	if len(token) < 20 || len(token) > 512 || !tokenPattern.MatchString(token) {
+		return "", fmt.Errorf("host GitHub credential is invalid")
+	}
+	return token, nil
+}
+
+func remoteBranchCommit(ctx context.Context, repo string, env []string, canonical, branch string) (string, error) {
+	value, err := output(ctx, repo, env, "git", secureGitArgs("ls-remote", "--heads", canonical, "refs/heads/"+branch)...)
+	if err != nil {
+		return "", fmt.Errorf("inspect remote Fern branch: %w", err)
+	}
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	fields := strings.Fields(value)
+	if len(fields) != 2 || len(fields[0]) != 40 || !isHex(fields[0]) || fields[1] != "refs/heads/"+branch {
+		return "", fmt.Errorf("GitHub returned an invalid remote branch response")
+	}
+	return fields[0], nil
+}
+
+func findPullRequest(ctx context.Context, env []string, prepared Prepared) (string, bool, error) {
+	value, err := output(ctx, "", env, "gh", "pr", "list", "--repo", prepared.Repository, "--head", prepared.Branch, "--base", prepared.Base, "--state", "all", "--limit", "20", "--json", "number,url,state,isDraft,headRefOid,headRefName,baseRefName")
+	if err != nil {
+		return "", false, fmt.Errorf("inspect existing pull request: %w", err)
+	}
+	var pulls []struct {
+		Number      int    `json:"number"`
+		URL         string `json:"url"`
+		State       string `json:"state"`
+		Draft       bool   `json:"isDraft"`
+		HeadOID     string `json:"headRefOid"`
+		HeadRefName string `json:"headRefName"`
+		BaseRefName string `json:"baseRefName"`
+	}
+	if err := json.Unmarshal([]byte(value), &pulls); err != nil {
+		return "", false, fmt.Errorf("decode existing pull request: %w", err)
+	}
+	for _, pull := range pulls {
+		if pull.HeadRefName != prepared.Branch || pull.BaseRefName != prepared.Base {
+			continue
+		}
+		if pull.HeadOID != prepared.Commit || pull.State != "OPEN" || !pull.Draft {
+			return "", false, fmt.Errorf("existing pull request conflicts with the recorded publication")
+		}
+		if pull.Number <= 0 {
+			return "", false, fmt.Errorf("GitHub returned an invalid pull request number")
+		}
+		if err := validatePullURL(pull.URL, prepared.Repository); err != nil {
+			return "", false, err
+		}
+		return pull.URL, true, nil
+	}
+	return "", false, nil
+}
+
+func validatePrepared(prepared Prepared) error {
+	if _, err := GitHubRepositoryName("https://github.com/" + prepared.Repository + ".git"); err != nil {
+		return err
+	}
+	if !ValidBranch(prepared.Base) {
+		return fmt.Errorf("recorded publication base is invalid")
+	}
+	if !ValidBranch(prepared.Branch) {
+		return fmt.Errorf("recorded publication branch is invalid")
+	}
+	if len(prepared.Commit) != 40 || !isHex(prepared.Commit) {
+		return fmt.Errorf("recorded publication commit is invalid")
+	}
+	return nil
+}
+
+func validatePullURL(value, repository string) error {
+	parsed, err := url.Parse(value)
+	wantPrefix := "/" + repository + "/pull/"
+	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Host, "github.com") || !strings.HasPrefix(parsed.Path, wantPrefix) || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return fmt.Errorf("GitHub returned an invalid pull request URL")
+	}
+	return nil
 }
 
 func ValidateRequest(request Request) error {
@@ -246,7 +383,15 @@ func ValidComponent(value string) bool {
 }
 
 func ValidBranch(value string) bool {
-	return value != "" && len(value) <= 255 && !strings.HasPrefix(value, ".") && !strings.HasPrefix(value, "/") && !strings.HasSuffix(value, ".") && !strings.HasSuffix(value, "/") && !strings.HasSuffix(value, ".lock") && !strings.Contains(value, "..") && !strings.Contains(value, "//") && !strings.ContainsAny(value, " ~^:?*[\\\x00-\x1f\x7f")
+	if value == "" || len(value) > 255 || strings.HasPrefix(value, ".") || strings.HasPrefix(value, "/") || strings.HasSuffix(value, ".") || strings.HasSuffix(value, "/") || strings.HasSuffix(value, ".lock") || strings.Contains(value, "..") || strings.Contains(value, "//") || strings.ContainsAny(value, " ~^:?*[\\") {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func isHex(value string) bool {

@@ -82,16 +82,28 @@ func Default(repo string) Config {
 // normalizing values. Invalid file values do not block a valid higher-priority
 // override.
 func Load(path, defaultRepo string, required bool, overrides Overrides) (Config, error) {
-	return load(path, defaultRepo, required, overrides, false)
+	return load(path, defaultRepo, required, overrides, false, os.LookupEnv)
+}
+
+// LoadWithEnvironment expands YAML references from explicit protected values
+// before falling back to the process environment.
+func LoadWithEnvironment(path, defaultRepo string, required bool, overrides Overrides, environment map[string]string) (Config, error) {
+	lookup := func(key string) (string, bool) {
+		if value, exists := environment[key]; exists {
+			return value, true
+		}
+		return os.LookupEnv(key)
+	}
+	return load(path, defaultRepo, required, overrides, false, lookup)
 }
 
 // LoadWorkspace ignores supervisor and proxy values that are irrelevant to an
 // explicit runtime resume, while keeping the workspace section strict.
 func LoadWorkspace(path, defaultRepo string, required bool, overrides Overrides) (Config, error) {
-	return load(path, defaultRepo, required, overrides, true)
+	return load(path, defaultRepo, required, overrides, true, os.LookupEnv)
 }
 
-func load(path, defaultRepo string, required bool, overrides Overrides, workspaceOnly bool) (Config, error) {
+func load(path, defaultRepo string, required bool, overrides Overrides, workspaceOnly bool, lookup func(string) (string, bool)) (Config, error) {
 	config := Default(defaultRepo)
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -154,7 +166,7 @@ func load(path, defaultRepo string, required bool, overrides Overrides, workspac
 		config.Listen = *overrides.Listen
 	}
 
-	repo, err := expandRequired(config.Workspace.Repo)
+	repo, err := expandRequired(config.Workspace.Repo, lookup)
 	if err != nil {
 		return Config{}, fmt.Errorf("expand workspace.repo: %w", err)
 	}
@@ -173,7 +185,7 @@ func load(path, defaultRepo string, required bool, overrides Overrides, workspac
 	}
 	config.Workspace.Repo = filepath.Clean(repo)
 	for key, value := range config.Workspace.Env {
-		expanded, err := expandRequired(value)
+		expanded, err := expandRequired(value, lookup)
 		if err != nil {
 			return Config{}, fmt.Errorf("expand workspace.env.%s: %w", key, err)
 		}
@@ -281,7 +293,7 @@ func loadAuthFields(workspace map[string]yaml.Node, env map[string]string) error
 		if err != nil {
 			return fmt.Errorf("parse %s: %w", key, err)
 		}
-		env[key], err = expandRequired(value)
+		env[key], err = expandRequired(value, os.LookupEnv)
 		if err != nil {
 			return fmt.Errorf("expand %s: %w", key, err)
 		}
@@ -511,12 +523,12 @@ func positiveInt(number, original string) (int64, error) {
 	return amount, nil
 }
 
-func expandRequired(value string) (string, error) {
+func expandRequired(value string, lookup func(string) (string, bool)) (string, error) {
 	const literalDollar = "\x00fern-dollar\x00"
 	value = strings.ReplaceAll(value, "$$", literalDollar)
 	var missing string
 	expanded := os.Expand(value, func(key string) string {
-		result, ok := os.LookupEnv(key)
+		result, ok := lookup(key)
 		if !ok && missing == "" {
 			missing = key
 		}

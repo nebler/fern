@@ -70,6 +70,28 @@ func TestValidateRequiresAuthentication(t *testing.T) {
 	}
 }
 
+func TestLoadWithEnvironmentExpandsProtectedValues(t *testing.T) {
+	directory := t.TempDir()
+	repository := filepath.Join(directory, "repository")
+	if err := os.Mkdir(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, "fern.yaml")
+	data := []byte("workspace:\n  repo: ${FERN_TEST_REPO}\n  env:\n    OPENCODE_PASSWORD: ${OPENCODE_PASSWORD}\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, err := LoadWithEnvironment(path, directory, true, Overrides{}, map[string]string{
+		"FERN_TEST_REPO": repository, "OPENCODE_PASSWORD": "protected-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if config.Workspace.Repo != repository || config.Workspace.Env["OPENCODE_PASSWORD"] != "protected-secret" {
+		t.Fatalf("loaded config = %+v", config)
+	}
+}
+
 func TestValidateRejectsHostGitHubCredentials(t *testing.T) {
 	t.Parallel()
 	for _, key := range []string{"FERN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {

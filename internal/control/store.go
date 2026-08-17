@@ -373,6 +373,9 @@ func (store *Store) PreparePublication(id, repository, base, branch, commit stri
 	if publication.Commit != "" && (publication.Commit != commit || publication.Branch != branch || publication.Repository != repository || publication.Base != base) {
 		return errors.New("publication retry resolved to different repository state")
 	}
+	if publication.State == "published" {
+		return nil
+	}
 	previous := publication
 	publication.State = "pushing"
 	publication.Repository = repository
@@ -397,6 +400,9 @@ func (store *Store) FinishPublication(id, pullURL, failure string, now time.Time
 	publication, exists := store.data.Publications[id]
 	if !exists {
 		return Publication{}, os.ErrNotExist
+	}
+	if publication.State == "published" {
+		return publication, nil
 	}
 	workflow, exists := store.data.Workflows[publication.WorkflowID]
 	if !exists {

@@ -115,3 +115,32 @@ func TestStoreRejectsUnknownStateFields(t *testing.T) {
 		t.Fatal("Open accepted unknown state field")
 	}
 }
+
+func TestPublishedPublicationCannotRegressToFailure(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "control"), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	workflow, err := store.CreateWorkflow("Demo", "ses_demo", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, _, err := store.RequestPublication(workflow.ID, Publication{ID: "pub-1", Operation: "operation", Title: "Demo"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PreparePublication(record.ID, "owner/repo", "main", "fern/demo/operation", "0123456789012345678901234567890123456789", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FinishPublication(record.ID, "https://github.com/owner/repo/pull/1", "", now); err != nil {
+		t.Fatal(err)
+	}
+	result, err := store.FinishPublication(record.ID, "", "stale worker failed", now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.State != "published" || result.PullURL == "" {
+		t.Fatalf("published state regressed: %+v", result)
+	}
+}
