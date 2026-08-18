@@ -281,6 +281,32 @@ func (d *Docker) EnsureRunning(ctx context.Context, spec Spec) (Endpoint, bool, 
 	}
 }
 
+// ReconcileStartup adopts existing running compute and repairs interrupted
+// provisioning without waking a paused workspace or creating an absent one.
+func (d *Docker) ReconcileStartup(ctx context.Context, spec Spec) (StartupResult, error) {
+	if err := spec.Validate(); err != nil {
+		return StartupResult{}, err
+	}
+	inspection, err := d.inspectByReference(ctx, spec.Name, spec.Name)
+	if err != nil {
+		return StartupResult{}, err
+	}
+	switch inspection.observation.State {
+	case StateAbsent, StatePaused:
+		return StartupResult{}, nil
+	case StateRunning:
+		ep, err := d.resumeObserved(ctx, spec, inspection)
+		return StartupResult{Endpoint: ep, Running: err == nil}, err
+	case StateProvisioning:
+		ep, err := d.resumeObserved(ctx, spec, inspection)
+		return StartupResult{Endpoint: ep, Running: err == nil, Transitioned: true}, err
+	case StateFailed:
+		return StartupResult{}, fmt.Errorf("%w: inspect logs and run 'fern down' before recreating", ErrFailed)
+	default:
+		return StartupResult{}, fmt.Errorf("unexpected workspace state %q", inspection.observation.State)
+	}
+}
+
 func (d *Docker) resumeObserved(ctx context.Context, spec Spec, inspection workspaceInspection) (Endpoint, error) {
 	observation := inspection.observation
 	if observation.State == StateAbsent {

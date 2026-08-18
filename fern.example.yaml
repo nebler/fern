@@ -4,6 +4,8 @@ workspace:
   repo: .
   memory: 8Gi
   env: {}
+control:
+  password: ${FERN_CONTROL_PASSWORD}
 idle:
   after: 10m
 proxy:

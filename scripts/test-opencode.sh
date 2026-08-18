@@ -69,8 +69,10 @@ idle:
   after: 1h
 proxy:
   listen: 127.0.0.1:$PROXY_PORT
+control:
+  password: \${FERN_CONTROL_PASSWORD}
 EOF
-printf 'OPENCODE_PASSWORD=%s\n' "$PASSWORD" >"$ENV_FILE"
+printf 'OPENCODE_PASSWORD=%s\nFERN_CONTROL_PASSWORD=%s\n' "$PASSWORD" "control-$PASSWORD" >"$ENV_FILE"
 chmod 0600 "$ENV_FILE"
 
 start_fern() {

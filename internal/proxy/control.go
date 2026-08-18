@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,7 +10,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/nebler/fern/internal/control"
@@ -174,7 +172,7 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 			http.Error(writer, err.Error(), http.StatusUnprocessableEntity)
 			return true
 		}
-		http.Redirect(writer, request, "/fern/", http.StatusSeeOther)
+		http.Redirect(writer, request, "/fern/control", http.StatusSeeOther)
 		return true
 	}
 	if strings.HasPrefix(path, "/fern/devices/") && strings.HasSuffix(path, "/revoke") && request.Method == http.MethodPost {
@@ -203,7 +201,7 @@ func publishWorkflow(writer http.ResponseWriter, request *http.Request, controls
 		http.Error(writer, "publication requires configured Fern authentication", http.StatusServiceUnavailable)
 		return
 	}
-	if controls.Store == nil || controls.Fencer == nil || controls.Publisher == nil {
+	if controls.Store == nil || controls.Publications == nil {
 		http.Error(writer, "publication unavailable", http.StatusServiceUnavailable)
 		return
 	}
@@ -264,18 +262,12 @@ func publishWorkflow(writer http.ResponseWriter, request *http.Request, controls
 			return
 		}
 	}
-	operationContext := request.Context()
-	if controls.ServiceContext != nil {
-		operationContext = controls.ServiceContext
-	}
-	ctx, cancel := context.WithTimeout(operationContext, 2*time.Minute)
-	defer cancel()
-	publicationRecord, err := executePublication(ctx, controls, publicationRecord)
+	publicationRecord, err := controls.Publications.Execute(request.Context(), publicationRecord.ID)
 	if err != nil {
 		status := http.StatusServiceUnavailable
 		if errors.Is(err, workspace.ErrRequestsActive) || errors.Is(err, workspace.ErrSessionsActive) {
 			status = http.StatusConflict
-		} else if errors.Is(err, errPublicationRunning) {
+		} else if errors.Is(err, publication.ErrRunning) {
 			status = http.StatusConflict
 		}
 		http.Error(writer, "publication is pending or failed and remains retryable", status)
@@ -284,98 +276,12 @@ func publishWorkflow(writer http.ResponseWriter, request *http.Request, controls
 	writePublicationResponse(writer, request, publicationRecord, jsonRequest)
 }
 
-var publicationExecutions sync.Map
-var errPublicationRunning = errors.New("publication is already executing")
-
-type publicationExecutionKey struct {
-	store *control.Store
-	id    string
-}
-
-type preparedGitHubPublisher interface {
-	PublishPrepared(context.Context, publication.Prepared, string, string) (publication.Result, error)
-}
-
-func executePublication(ctx context.Context, controls Controls, record control.Publication) (control.Publication, error) {
-	key := publicationExecutionKey{store: controls.Store, id: record.ID}
-	if _, loaded := publicationExecutions.LoadOrStore(key, struct{}{}); loaded {
-		return record, errPublicationRunning
-	}
-	defer publicationExecutions.Delete(key)
-	release, err := controls.Fencer.AcquirePaused(ctx)
-	if err != nil {
-		return record, err
-	}
-	defer release()
-	latest, exists := controls.Store.Publication(record.ID)
-	if !exists {
-		return record, os.ErrNotExist
-	}
-	if latest.State == "published" {
-		return latest, nil
-	}
-	record = latest
-	var result publication.Result
-	if record.Commit != "" {
-		if publisher, ok := controls.Publisher.(preparedGitHubPublisher); ok {
-			result, err = publisher.PublishPrepared(ctx, publication.Prepared{
-				Repository: record.Repository, Base: record.Base, Branch: record.Branch, Commit: record.Commit,
-			}, record.Title, record.Body)
-		} else {
-			result, err = controls.Publisher.Publish(ctx, publication.Request{
-				Operation: record.Operation, Base: record.Base, Title: record.Title, Body: record.Body,
-			})
-		}
-	} else {
-		result, err = controls.Publisher.Publish(ctx, publication.Request{
-			Operation: record.Operation,
-			Base:      record.Base,
-			Title:     record.Title,
-			Body:      record.Body,
-			BeforePush: func(prepared publication.Prepared) error {
-				return controls.Store.PreparePublication(record.ID, prepared.Repository, prepared.Base, prepared.Branch, prepared.Commit, time.Now())
-			},
-		})
-	}
-	if err != nil {
-		if ctx.Err() == nil {
-			if _, finishErr := controls.Store.FinishPublication(record.ID, "", "publication failed", time.Now()); finishErr != nil {
-				return record, errors.Join(err, finishErr)
-			}
-		}
-		return record, err
-	}
-	return controls.Store.FinishPublication(record.ID, result.URL, "", time.Now())
-}
-
-// ReconcilePublications resumes nonterminal durable publication operations once
-// during daemon startup. Further failures remain visible and explicitly
-// retryable from the control page rather than looping external effects.
-func ReconcilePublications(ctx context.Context, controls Controls, log interface{ Warn(string, ...any) }) {
-	if controls.Store == nil || controls.Fencer == nil || controls.Publisher == nil {
-		return
-	}
-	for _, record := range controls.Store.Publications() {
-		if record.State != "requested" && record.State != "pushing" {
-			continue
-		}
-		record := record
-		go func() {
-			operationCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-			defer cancel()
-			if _, err := executePublication(operationCtx, controls, record); err != nil && ctx.Err() == nil && log != nil {
-				log.Warn("publication startup reconciliation deferred", "publication", record.ID, "err", err)
-			}
-		}()
-	}
-}
-
 func writePublicationResponse(writer http.ResponseWriter, request *http.Request, publicationRecord control.Publication, jsonRequest bool) {
 	if jsonRequest {
 		writeJSON(writer, publicationRecord, nil)
 		return
 	}
-	http.Redirect(writer, request, "/fern/", http.StatusSeeOther)
+	http.Redirect(writer, request, "/fern/control", http.StatusSeeOther)
 }
 
 func decodeControlJSON(writer http.ResponseWriter, request *http.Request, target any) error {

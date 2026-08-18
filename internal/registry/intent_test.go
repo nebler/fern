@@ -89,3 +89,37 @@ func TestIntentStoreRejectsOversizedFile(t *testing.T) {
 		t.Fatal("oversized pause intent was accepted")
 	}
 }
+
+func TestIntentStoreRejectsLinkedOrExposedState(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name string
+		make func(string, string) error
+	}{
+		{name: "symlink", make: func(path, target string) error { return os.Symlink(target, path) }},
+		{name: "hard link", make: func(path, target string) error { return os.Link(target, path) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			directory := t.TempDir()
+			store := NewIntentStore(directory)
+			target := filepath.Join(directory, "target")
+			if err := os.WriteFile(target, []byte(`{"containerID":"container-one","committed":true}`), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := test.make(store.path("demo"), target); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.PauseStatus("demo", "container-one", time.Time{}); err == nil {
+				t.Fatal("accepted linked pause intent")
+			}
+		})
+	}
+	directory := t.TempDir()
+	store := NewIntentStore(directory)
+	if err := os.WriteFile(store.path("demo"), []byte(`{"containerID":"container-one","committed":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PauseStatus("demo", "container-one", time.Time{}); err == nil {
+		t.Fatal("accepted exposed pause intent")
+	}
+}

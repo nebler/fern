@@ -71,13 +71,14 @@ func serveFern(writer http.ResponseWriter, request *http.Request, controls Contr
 	switch {
 	case request.URL.Path == "/fern":
 		http.Redirect(writer, request, "/fern/", http.StatusPermanentRedirect)
-	case request.URL.Path == "/fern/" && request.URL.EscapedPath() == "/fern/":
+	case (request.URL.Path == "/fern/" || request.URL.Path == "/fern/control") && request.URL.EscapedPath() == request.URL.Path:
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if request.Method == http.MethodHead {
 			return
 		}
-		view := landingView{Control: controls.Store != nil, PublicationEnabled: publicationEnabled && controls.Fencer != nil && controls.Publisher != nil}
-		if controls.Store != nil {
+		controlPage := request.URL.Path == "/fern/control"
+		view := landingView{Control: controlPage && controls.Store != nil, PublicationEnabled: publicationEnabled && controls.Publications != nil}
+		if controlPage && controls.Store != nil {
 			var err error
 			view.Devices, err = controls.Store.Devices(time.Now())
 			if err != nil {

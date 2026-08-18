@@ -6,6 +6,8 @@ workspace:
   memory: 8Gi
   env:
     OPENCODE_PASSWORD: ${OPENCODE_PASSWORD}
+control:
+  password: ${FERN_CONTROL_PASSWORD}
 idle:
   after: 10m
 proxy:

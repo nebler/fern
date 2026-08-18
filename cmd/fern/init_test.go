@@ -33,8 +33,8 @@ func TestInitCreatesProtectedRunnableConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "OPENCODE_PASSWORD") {
-		t.Fatal("generated YAML contains the OpenCode password")
+	if strings.Contains(string(data), "OPENCODE_PASSWORD") || !strings.Contains(string(data), "${FERN_CONTROL_PASSWORD}") {
+		t.Fatal("generated YAML has an invalid credential reference")
 	}
 	values, err := readEnvFile(envPath)
 	if err != nil {
@@ -43,11 +43,14 @@ func TestInitCreatesProtectedRunnableConfiguration(t *testing.T) {
 	if len(values["OPENCODE_PASSWORD"]) != 64 {
 		t.Fatalf("password length = %d, want 64", len(values["OPENCODE_PASSWORD"]))
 	}
-	loaded, err := config.Load(configPath, directory, true, config.Overrides{})
+	if len(values["FERN_CONTROL_PASSWORD"]) != 64 || values["FERN_CONTROL_PASSWORD"] == values["OPENCODE_PASSWORD"] {
+		t.Fatal("generated control password is missing or not independent")
+	}
+	loaded, err := config.LoadWithEnvironment(configPath, directory, true, config.Overrides{}, values)
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded.Workspace.Env = mergeEnvironment(loaded.Workspace.Env, values)
+	loaded.Workspace.Env = mergeWorkspaceEnvironment(loaded.Workspace.Env, values)
 	if err := config.Validate(loaded); err != nil {
 		t.Fatalf("generated configuration is invalid: %v", err)
 	}
@@ -73,6 +76,23 @@ func TestReadEnvFileRejectsExposedSecrets(t *testing.T) {
 	}
 	if _, err := readEnvFile(path); err == nil || !strings.Contains(err.Error(), "permissions") {
 		t.Fatalf("exposed environment error = %v", err)
+	}
+}
+
+func TestWorkspaceEnvironmentForwardsOnlySupportedImplicitKeys(t *testing.T) {
+	t.Parallel()
+	values := map[string]string{
+		"OPENCODE_PASSWORD": "open-secret", "FERN_CONTROL_PASSWORD": "control-secret",
+		"ANTHROPIC_API_KEY": "provider-secret", "AWS_SECRET_ACCESS_KEY": "host-secret",
+	}
+	merged := mergeWorkspaceEnvironment(map[string]string{"EXPLICIT": "configured"}, values)
+	if merged["OPENCODE_PASSWORD"] != "open-secret" || merged["ANTHROPIC_API_KEY"] != "provider-secret" || merged["EXPLICIT"] != "configured" {
+		t.Fatalf("supported workspace environment missing: %+v", merged)
+	}
+	for _, key := range []string{"FERN_CONTROL_PASSWORD", "AWS_SECRET_ACCESS_KEY"} {
+		if _, exists := merged[key]; exists {
+			t.Fatalf("host-only %s entered workspace environment", key)
+		}
 	}
 }
 

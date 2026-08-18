@@ -35,6 +35,7 @@ const (
 
 type lifecycleRuntime interface {
 	EnsureRunning(context.Context, runtime.Spec) (runtime.Endpoint, bool, error)
+	ReconcileStartup(context.Context, runtime.Spec) (runtime.StartupResult, error)
 	Pause(context.Context, string) error
 	Status(context.Context, string) (runtime.Observation, error)
 }
@@ -138,6 +139,28 @@ func (m *Manager) EnsureRunning(ctx context.Context) (runtime.Endpoint, error) {
 	return target.Endpoint, err
 }
 
+// ReconcileStartup adopts compute that was running before service startup but
+// preserves absent and intentionally paused workspaces as dormant.
+func (m *Manager) ReconcileStartup(ctx context.Context) error {
+	if err := m.acquireLifecycle(ctx); err != nil {
+		return err
+	}
+	defer m.releaseLifecycle()
+	if m.isClosing() {
+		return errors.New("workspace manager is shutting down")
+	}
+	result, err := m.runtime.ReconcileStartup(ctx, m.spec)
+	if err != nil {
+		return err
+	}
+	if !result.Running {
+		m.clearEndpoint()
+		return nil
+	}
+	_, err = m.observeAndPublish(ctx, result.Endpoint, result.Transitioned)
+	return err
+}
+
 func (m *Manager) ensureTarget(ctx context.Context) (RequestTarget, error) {
 	m.wakeMu.Lock()
 	if m.closing {
@@ -212,6 +235,10 @@ func (m *Manager) ensureRunning(ctx context.Context) (RequestTarget, error) {
 	if err != nil {
 		return RequestTarget{}, err
 	}
+	return m.observeAndPublish(ctx, ep, transitioned)
+}
+
+func (m *Manager) observeAndPublish(ctx context.Context, ep runtime.Endpoint, transitioned bool) (RequestTarget, error) {
 	if m.observe != nil {
 		if err := m.observe(ctx, ep, transitioned); err != nil {
 			if transitioned {

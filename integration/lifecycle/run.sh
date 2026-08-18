@@ -176,6 +176,7 @@ export XDG_DATA_HOME="$RUN_ROOT/data"
 export GOCACHE="$RUN_ROOT/cache/go-build"
 export GOPATH="$RUN_ROOT/go"
 export OPENCODE_PASSWORD="$PASSWORD"
+export FERN_CONTROL_PASSWORD="control-$PASSWORD"
 unset ANTHROPIC_API_KEY OPENAI_API_KEY AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
 
 if [[ -n ${FERN_BIN:-} ]]; then
@@ -215,12 +216,15 @@ idle:
   after: 2s
 proxy:
   listen: 127.0.0.1:$PROXY_PORT
+control:
+  password: \${FERN_CONTROL_PASSWORD}
 EOF
 
 docker events --filter "container=$NAME" --format '{{json .}}' >"$EVENTS" 2>&1 &
 EVENTS_PID=$!
 
 auth_curl() { curl --silent --show-error --user "$USERNAME:$PASSWORD" "$@"; }
+control_curl() { curl --silent --show-error --user "fern:$FERN_CONTROL_PASSWORD" "$@"; }
 http_code() {
   local output=$1; shift
   curl --silent --show-error --output "$output" --write-out '%{http_code}' "$@"
@@ -251,11 +255,23 @@ wait_http() {
 }
 
 start_fern() {
+	start_fern_control
+	wait_http
+}
+
+start_fern_control() {
   printf '\n=== fern start %s ===\n' "$(timestamp)" >>"$FERN_RAW_LOG"
   record_command "$FERN_BIN" up -config "$CONFIG"
   "$FERN_BIN" up -config "$CONFIG" >>"$FERN_RAW_LOG" 2>&1 &
   FERN_PID=$!
-  wait_http
+	local deadline=$((SECONDS + 20)) code
+	while (( SECONDS < deadline )); do
+		code=$(http_code /dev/null --user "fern:$FERN_CONTROL_PASSWORD" "$PROXY_URL/fern/ready" 2>/dev/null || true)
+		[[ "$code" == "200" ]] && return 0
+		kill -0 "$FERN_PID" 2>/dev/null || fail "Fern exited before its control plane became ready"
+		sleep 0.2
+	done
+	fail "Fern control plane did not become ready"
 }
 
 activity() {
@@ -288,9 +304,9 @@ before_start=$(container_started_at)
 missing_code=$(http_code "$ARTIFACTS/missing-auth.body" "$PROXY_URL$HEALTH_PATH" || true)
 wrong_code=$(http_code "$ARTIFACTS/wrong-auth.body" --user "$USERNAME:wrong" "$PROXY_URL$HEALTH_PATH" || true)
 [[ "$missing_code" == 401 && "$wrong_code" == 401 ]] || fail "stopped auth expected 401/401, got $missing_code/$wrong_code; pre-wake auth capability is mandatory"
-auth_curl --fail "$PROXY_URL/fern/ready" | grep -q '"ready":true' || fail "Fern readiness was unavailable while compute was paused"
-auth_curl --fail "$PROXY_URL/fern/" | grep -q 'href="/"' || fail "Fern phone landing was unavailable while compute was paused"
-pair_code=$(auth_curl --fail --request POST "$PROXY_URL/fern/pair/new" | jq -er '.code')
+	control_curl --fail "$PROXY_URL/fern/ready" | grep -q '"ready":true' || fail "Fern readiness was unavailable while compute was paused"
+	auth_curl --fail "$PROXY_URL/fern/" | grep -q 'href="/"' || fail "Fern phone landing was unavailable while compute was paused"
+	pair_code=$(control_curl --fail --request POST "$PROXY_URL/fern/pair/new" | jq -er '.code')
 curl --silent --show-error --dump-header "$ARTIFACTS/pairing.headers" --output /dev/null "$PROXY_URL/fern/pair?code=$pair_code"
 grep -Eqi '^set-cookie: fern_device=' "$ARTIFACTS/pairing.headers" \
   && grep -Eqi '^set-cookie: .*HttpOnly' "$ARTIFACTS/pairing.headers" \
@@ -354,7 +370,7 @@ persisted=$(auth_curl --fail "$PROXY_URL/control/persist")
 grep -q "$RUN_ID" "$REPO_DIR/container-state.json" || fail "container-written repository data did not survive stop/start"
 
 note "scenario 9/13: isolated backup and destructive restore"
-workflow_id=$(auth_curl --fail --request POST --header 'Content-Type: application/json' \
+workflow_id=$(control_curl --fail --request POST --header 'Content-Type: application/json' \
   --data '{"title":"Lifecycle workflow","sessionId":"ses_lifecycle"}' \
   "$PROXY_URL/fern/api/v1/workflows" | jq -er '.id')
 stop_fern
@@ -395,11 +411,9 @@ start_fern
 curl --silent --show-error --fail --header "Cookie: fern_device=$device_cookie" \
   "$PROXY_URL/fern/ready" | grep -q '"ready":true' \
   || fail "paired device cookie did not survive Fern restart"
-curl --silent --show-error --fail --header "Cookie: fern_device=$device_cookie" \
-  "$PROXY_URL/fern/api/v1/devices" | jq -e 'length == 1' >/dev/null \
+control_curl --fail "$PROXY_URL/fern/api/v1/devices" | jq -e 'length == 1' >/dev/null \
   || fail "durable paired device was not listed after restart"
-curl --silent --show-error --fail --header "Cookie: fern_device=$device_cookie" \
-  "$PROXY_URL/fern/api/v1/workflows/$workflow_id" | jq -e --arg id "$workflow_id" '.id == $id and .sessionId == "ses_lifecycle"' >/dev/null \
+control_curl --fail "$PROXY_URL/fern/api/v1/workflows/$workflow_id" | jq -e --arg id "$workflow_id" '.id == $id and .sessionId == "ses_lifecycle"' >/dev/null \
   || fail "durable workflow correlation did not survive Fern restart"
 persisted=$(auth_curl --fail "$PROXY_URL/control/persist")
 [[ "$persisted" == *"$RUN_ID"* ]] || fail "OpenCode volume content did not survive destructive restore"
@@ -458,7 +472,9 @@ wait_status paused 5
 # Docker Desktop can retain the old dynamic port forwarding briefly after stop;
 # a host reboot naturally has a much larger separation before Fern restarts.
 sleep 1
-start_fern
+start_fern_control
+wait_status paused 10
+auth_curl --fail "$PROXY_URL$HEALTH_PATH" >/dev/null
 wait_status running 10
 
 note "scenario 13/13: externally paused compute follows stale-endpoint recovery path"

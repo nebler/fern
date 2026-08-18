@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 )
 
 var componentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
@@ -18,12 +19,10 @@ var ownerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}$`)
 var tokenPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 
 type Request struct {
-	Operation  string
-	Base       string
-	Title      string
-	Body       string
-	DryRun     bool
-	BeforePush func(Prepared) error
+	Operation string
+	Base      string
+	Title     string
+	Body      string
 }
 
 type Prepared struct {
@@ -41,6 +40,8 @@ type Result struct {
 type Publisher struct {
 	workspace string
 	repo      string
+	git       string
+	gh        string
 }
 
 func New(workspace, repo string) (*Publisher, error) {
@@ -50,23 +51,19 @@ func New(workspace, repo string) (*Publisher, error) {
 	if strings.TrimSpace(repo) == "" {
 		return nil, fmt.Errorf("repository path is required")
 	}
-	return &Publisher{workspace: workspace, repo: repo}, nil
-}
-
-func (publisher *Publisher) Publish(ctx context.Context, request Request) (Result, error) {
-	prepared, err := publisher.Prepare(ctx, request)
+	repo, err := canonicalPath(repo)
 	if err != nil {
-		return Result{}, err
+		return nil, fmt.Errorf("resolve repository path: %w", err)
 	}
-	if request.DryRun {
-		return Result{Prepared: prepared}, nil
+	git, err := trustedExecutable("git", repo)
+	if err != nil {
+		return nil, err
 	}
-	if request.BeforePush != nil {
-		if err := request.BeforePush(prepared); err != nil {
-			return Result{}, fmt.Errorf("record publication intent: %w", err)
-		}
+	gh, err := trustedExecutable("gh", repo)
+	if err != nil {
+		return nil, err
 	}
-	return publisher.PublishPrepared(ctx, prepared, request.Title, request.Body)
+	return &Publisher{workspace: workspace, repo: repo, git: git, gh: gh}, nil
 }
 
 func (publisher *Publisher) Prepare(ctx context.Context, request Request) (Prepared, error) {
@@ -74,19 +71,19 @@ func (publisher *Publisher) Prepare(ctx context.Context, request Request) (Prepa
 		return Prepared{}, err
 	}
 	request.Title = strings.TrimSpace(request.Title)
-	repository, err := InspectRepository(ctx, publisher.repo)
+	repository, err := inspectRepository(ctx, publisher.repo, publisher.git)
 	if err != nil {
 		return Prepared{}, err
 	}
 	if request.Operation == "" {
 		request.Operation = repository.Head[:12]
 	}
-	if err := run(ctx, "", nil, "gh", "auth", "status", "--hostname", "github.com"); err != nil {
+	if err := run(ctx, "", nil, publisher.gh, "auth", "status", "--hostname", "github.com"); err != nil {
 		return Prepared{}, fmt.Errorf("GitHub authentication is unavailable; run 'gh auth login --hostname github.com'")
 	}
 	base := request.Base
 	if base == "" {
-		output, err := output(ctx, "", nil, "gh", "repo", "view", repository.Name, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name")
+		output, err := output(ctx, "", nil, publisher.gh, "repo", "view", repository.Name, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name")
 		if err != nil {
 			return Prepared{}, fmt.Errorf("read GitHub default branch: %w", err)
 		}
@@ -95,26 +92,24 @@ func (publisher *Publisher) Prepare(ctx context.Context, request Request) (Prepa
 			return Prepared{}, fmt.Errorf("GitHub returned unsupported default branch %q", base)
 		}
 	}
-	token, err := githubCredential(ctx)
+	token, err := githubCredential(ctx, publisher.gh)
 	if err != nil {
 		return Prepared{}, err
 	}
 	gitEnv := []string{"FERN_GITHUB_TOKEN=" + token, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull}
 	canonical := "https://github.com/" + repository.Name + ".git"
-	if err := run(ctx, publisher.repo, gitEnv, "git", secureGitArgs("fetch", "--no-tags", canonical, "refs/heads/"+base)...); err != nil {
+	if err := run(ctx, publisher.repo, gitEnv, publisher.git, secureGitArgs("fetch", "--no-tags", canonical, "refs/heads/"+base)...); err != nil {
 		return Prepared{}, fmt.Errorf("fetch GitHub base branch: %w", err)
 	}
-	if err := run(ctx, publisher.repo, nil, "git", "merge-base", "--is-ancestor", "FETCH_HEAD", repository.Head); err != nil {
+	if err := run(ctx, publisher.repo, nil, publisher.git, "merge-base", "--is-ancestor", "FETCH_HEAD", repository.Head); err != nil {
 		return Prepared{}, fmt.Errorf("HEAD is not descended from the current GitHub base branch")
 	}
-	changed, err := output(ctx, publisher.repo, nil, "git", "diff", "--name-only", "FETCH_HEAD.."+repository.Head)
+	changed, err := output(ctx, publisher.repo, nil, publisher.git, "diff", "--name-only", "-z", "FETCH_HEAD.."+repository.Head)
 	if err != nil {
 		return Prepared{}, fmt.Errorf("inspect publication changes: %w", err)
 	}
-	for _, path := range strings.Split(changed, "\n") {
-		if strings.HasPrefix(path, ".github/workflows/") {
-			return Prepared{}, fmt.Errorf("workflow changes require a separate reviewed publication path: %s", path)
-		}
+	if err := validatePublicationPaths(changed); err != nil {
+		return Prepared{}, err
 	}
 	return Prepared{
 		Repository: repository.Name,
@@ -124,6 +119,15 @@ func (publisher *Publisher) Prepare(ctx context.Context, request Request) (Prepa
 	}, nil
 }
 
+func validatePublicationPaths(changed string) error {
+	for _, path := range strings.Split(changed, "\x00") {
+		if strings.HasPrefix(path, ".github/workflows/") {
+			return fmt.Errorf("workflow changes require a separate reviewed publication path: %q", path)
+		}
+	}
+	return nil
+}
+
 func (publisher *Publisher) PublishPrepared(ctx context.Context, prepared Prepared, title, body string) (Result, error) {
 	if err := validatePrepared(prepared); err != nil {
 		return Result{}, err
@@ -131,19 +135,19 @@ func (publisher *Publisher) PublishPrepared(ctx context.Context, prepared Prepar
 	if err := ValidateRequest(Request{Operation: strings.TrimPrefix(prepared.Branch, "fern/"+publisher.workspace+"/"), Base: prepared.Base, Title: title, Body: body}); err != nil {
 		return Result{}, err
 	}
-	if err := run(ctx, publisher.repo, nil, "git", "cat-file", "-e", prepared.Commit+"^{commit}"); err != nil {
+	if err := run(ctx, publisher.repo, nil, publisher.git, "cat-file", "-e", prepared.Commit+"^{commit}"); err != nil {
 		return Result{}, fmt.Errorf("recorded publication commit is unavailable locally")
 	}
-	if err := run(ctx, "", nil, "gh", "auth", "status", "--hostname", "github.com"); err != nil {
+	if err := run(ctx, "", nil, publisher.gh, "auth", "status", "--hostname", "github.com"); err != nil {
 		return Result{}, fmt.Errorf("GitHub authentication is unavailable; run 'gh auth login --hostname github.com'")
 	}
-	token, err := githubCredential(ctx)
+	token, err := githubCredential(ctx, publisher.gh)
 	if err != nil {
 		return Result{}, err
 	}
 	gitEnv := []string{"FERN_GITHUB_TOKEN=" + token, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull}
 	canonical := "https://github.com/" + prepared.Repository + ".git"
-	remoteCommit, err := remoteBranchCommit(ctx, publisher.repo, gitEnv, canonical, prepared.Branch)
+	remoteCommit, err := remoteBranchCommit(ctx, publisher.repo, gitEnv, publisher.git, canonical, prepared.Branch)
 	if err != nil {
 		return Result{}, err
 	}
@@ -151,8 +155,8 @@ func (publisher *Publisher) PublishPrepared(ctx context.Context, prepared Prepar
 		return Result{}, fmt.Errorf("remote Fern branch conflicts with recorded commit")
 	}
 	if remoteCommit == "" {
-		pushErr := run(ctx, publisher.repo, gitEnv, "git", secureGitArgs("push", canonical, prepared.Commit+":refs/heads/"+prepared.Branch)...)
-		remoteCommit, err = remoteBranchCommit(ctx, publisher.repo, gitEnv, canonical, prepared.Branch)
+		pushErr := run(ctx, publisher.repo, gitEnv, publisher.git, secureGitArgs("push", canonical, prepared.Commit+":refs/heads/"+prepared.Branch)...)
+		remoteCommit, err = remoteBranchCommit(ctx, publisher.repo, gitEnv, publisher.git, canonical, prepared.Branch)
 		if err != nil || remoteCommit != prepared.Commit {
 			if pushErr != nil {
 				return Result{}, fmt.Errorf("push exact commit to %s: %w", prepared.Branch, pushErr)
@@ -161,19 +165,19 @@ func (publisher *Publisher) PublishPrepared(ctx context.Context, prepared Prepar
 		}
 	}
 	ghEnv := []string{"GH_TOKEN=" + token}
-	prURL, found, err := findPullRequest(ctx, ghEnv, prepared)
+	prURL, found, err := findPullRequest(ctx, ghEnv, publisher.gh, prepared)
 	if err != nil {
 		return Result{}, err
 	}
 	if !found {
-		created, createErr := output(ctx, "", ghEnv, "gh", "pr", "create", "--draft", "--repo", prepared.Repository, "--head", prepared.Branch, "--base", prepared.Base, "--title", strings.TrimSpace(title), "--body", body)
+		created, createErr := output(ctx, "", ghEnv, publisher.gh, "pr", "create", "--draft", "--repo", prepared.Repository, "--head", prepared.Branch, "--base", prepared.Base, "--title", strings.TrimSpace(title), "--body", body)
 		if createErr == nil {
 			prURL = strings.TrimSpace(created)
 			if err := validatePullURL(prURL, prepared.Repository); err != nil {
 				return Result{}, err
 			}
 		} else {
-			prURL, found, err = findPullRequest(ctx, ghEnv, prepared)
+			prURL, found, err = findPullRequest(ctx, ghEnv, publisher.gh, prepared)
 			if err != nil || !found {
 				return Result{}, fmt.Errorf("create draft pull request: response was not reconciled")
 			}
@@ -182,8 +186,8 @@ func (publisher *Publisher) PublishPrepared(ctx context.Context, prepared Prepar
 	return Result{Prepared: prepared, URL: prURL}, nil
 }
 
-func githubCredential(ctx context.Context) (string, error) {
-	token, err := output(ctx, "", nil, "gh", "auth", "token", "--hostname", "github.com")
+func githubCredential(ctx context.Context, gh string) (string, error) {
+	token, err := output(ctx, "", nil, gh, "auth", "token", "--hostname", "github.com")
 	if err != nil {
 		return "", fmt.Errorf("obtain host GitHub credential")
 	}
@@ -194,8 +198,8 @@ func githubCredential(ctx context.Context) (string, error) {
 	return token, nil
 }
 
-func remoteBranchCommit(ctx context.Context, repo string, env []string, canonical, branch string) (string, error) {
-	value, err := output(ctx, repo, env, "git", secureGitArgs("ls-remote", "--heads", canonical, "refs/heads/"+branch)...)
+func remoteBranchCommit(ctx context.Context, repo string, env []string, git, canonical, branch string) (string, error) {
+	value, err := output(ctx, repo, env, git, secureGitArgs("ls-remote", "--heads", canonical, "refs/heads/"+branch)...)
 	if err != nil {
 		return "", fmt.Errorf("inspect remote Fern branch: %w", err)
 	}
@@ -210,8 +214,8 @@ func remoteBranchCommit(ctx context.Context, repo string, env []string, canonica
 	return fields[0], nil
 }
 
-func findPullRequest(ctx context.Context, env []string, prepared Prepared) (string, bool, error) {
-	value, err := output(ctx, "", env, "gh", "pr", "list", "--repo", prepared.Repository, "--head", prepared.Branch, "--base", prepared.Base, "--state", "all", "--limit", "20", "--json", "number,url,state,isDraft,headRefOid,headRefName,baseRefName")
+func findPullRequest(ctx context.Context, env []string, gh string, prepared Prepared) (string, bool, error) {
+	value, err := output(ctx, "", env, gh, "pr", "list", "--repo", prepared.Repository, "--head", prepared.Branch, "--base", prepared.Base, "--state", "all", "--limit", "20", "--json", "number,url,state,isDraft,headRefOid,headRefName,baseRefName")
 	if err != nil {
 		return "", false, fmt.Errorf("inspect existing pull request: %w", err)
 	}
@@ -293,6 +297,18 @@ type Repository struct {
 }
 
 func InspectRepository(ctx context.Context, path string) (Repository, error) {
+	repo, err := canonicalPath(path)
+	if err != nil {
+		return Repository{}, fmt.Errorf("resolve repository path: %w", err)
+	}
+	git, err := trustedExecutable("git", repo)
+	if err != nil {
+		return Repository{}, err
+	}
+	return inspectRepository(ctx, repo, git)
+}
+
+func inspectRepository(ctx context.Context, path, git string) (Repository, error) {
 	gitDirectory := filepath.Join(path, ".git")
 	info, err := os.Lstat(gitDirectory)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
@@ -301,21 +317,21 @@ func InspectRepository(ctx context.Context, path string) (Repository, error) {
 	if _, err := os.Stat(filepath.Join(path, ".gitmodules")); err == nil {
 		return Repository{}, fmt.Errorf("publishing repositories with submodules is not supported")
 	}
-	configOutput, err := output(ctx, path, nil, "git", "config", "--local", "--null", "--list")
+	configOutput, err := output(ctx, path, nil, git, "config", "--local", "--null", "--list")
 	if err != nil {
 		return Repository{}, fmt.Errorf("inspect local Git configuration: %w", err)
 	}
 	if err := ValidateLocalGitConfig(configOutput); err != nil {
 		return Repository{}, err
 	}
-	status, err := output(ctx, path, nil, "git", "status", "--porcelain=v1", "--untracked-files=all")
+	status, err := output(ctx, path, nil, git, "status", "--porcelain=v1", "--untracked-files=all")
 	if err != nil {
 		return Repository{}, fmt.Errorf("inspect worktree: %w", err)
 	}
 	if status != "" {
 		return Repository{}, fmt.Errorf("worktree must be clean; commit all intended changes before publishing")
 	}
-	head, err := output(ctx, path, nil, "git", "rev-parse", "--verify", "HEAD^{commit}")
+	head, err := output(ctx, path, nil, git, "rev-parse", "--verify", "HEAD^{commit}")
 	if err != nil {
 		return Repository{}, fmt.Errorf("resolve HEAD commit: %w", err)
 	}
@@ -323,7 +339,7 @@ func InspectRepository(ctx context.Context, path string) (Repository, error) {
 	if len(head) != 40 || !isHex(head) {
 		return Repository{}, fmt.Errorf("only SHA-1 Git repositories are supported")
 	}
-	origin, err := output(ctx, path, nil, "git", "remote", "get-url", "origin")
+	origin, err := output(ctx, path, nil, git, "remote", "get-url", "origin")
 	if err != nil {
 		return Repository{}, fmt.Errorf("read origin: %w", err)
 	}
@@ -408,14 +424,49 @@ func secureGitArgs(args ...string) []string {
 	return append(prefix, args...)
 }
 
+func canonicalPath(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.EvalSymlinks(absolute)
+}
+
+func trustedExecutable(name, repo string) (string, error) {
+	path, err := exec.LookPath(name)
+	if err != nil {
+		return "", fmt.Errorf("resolve trusted %s executable: %w", name, err)
+	}
+	path, err = canonicalPath(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve trusted %s executable: %w", name, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return "", fmt.Errorf("trusted %s executable must be an executable regular file", name)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return "", fmt.Errorf("trusted %s executable must not be group or world writable", name)
+	}
+	if relative, err := filepath.Rel(repo, path); err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("trusted %s executable must not be inside the repository", name)
+	}
+	return path, nil
+}
+
 func run(ctx context.Context, directory string, extraEnv []string, name string, args ...string) error {
-	command := exec.CommandContext(ctx, name, args...)
+	commandCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	command := exec.CommandContext(commandCtx, name, args...)
 	command.Dir = directory
 	command.Env = append(sanitizedEnvironment(), extraEnv...)
-	var stderr bytes.Buffer
+	stderr := &limitedBuffer{limit: 64 << 10, cancel: cancel}
 	command.Stdout = discard{}
-	command.Stderr = &stderr
+	command.Stderr = stderr
 	if err := command.Run(); err != nil {
+		if stderr.exceeded {
+			return fmt.Errorf("%s output exceeded limit", filepath.Base(name))
+		}
 		message := strings.TrimSpace(stderr.String())
 		if len(message) > 512 {
 			message = message[:512]
@@ -429,23 +480,29 @@ func run(ctx context.Context, directory string, extraEnv []string, name string, 
 }
 
 func output(ctx context.Context, directory string, extraEnv []string, name string, args ...string) (string, error) {
-	command := exec.CommandContext(ctx, name, args...)
+	commandCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	command := exec.CommandContext(commandCtx, name, args...)
 	command.Dir = directory
 	command.Env = append(sanitizedEnvironment(), extraEnv...)
-	var stdout bytes.Buffer
-	command.Stdout = &stdout
-	command.Stderr = discard{}
+	stdout := &limitedBuffer{limit: 1 << 20, cancel: cancel}
+	stderr := &limitedBuffer{limit: 64 << 10, cancel: cancel}
+	command.Stdout = stdout
+	command.Stderr = stderr
 	if err := command.Run(); err != nil {
-		return "", fmt.Errorf("%s failed", name)
+		if stdout.exceeded || stderr.exceeded {
+			return "", fmt.Errorf("%s output exceeded limit", filepath.Base(name))
+		}
+		return "", fmt.Errorf("%s failed", filepath.Base(name))
 	}
-	if stdout.Len() > 1<<20 {
-		return "", fmt.Errorf("%s output exceeded 1 MiB", name)
+	if stdout.exceeded || stderr.exceeded {
+		return "", fmt.Errorf("%s output exceeded limit", filepath.Base(name))
 	}
 	return strings.TrimSuffix(stdout.String(), "\n"), nil
 }
 
 func sanitizedEnvironment() []string {
-	allowed := []string{"HOME", "PATH", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "SSH_AUTH_SOCK", "LANG", "LC_ALL"}
+	allowed := []string{"HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "LANG", "LC_ALL"}
 	result := make([]string, 0, len(allowed))
 	for _, key := range allowed {
 		if value, ok := os.LookupEnv(key); ok {
@@ -458,3 +515,30 @@ func sanitizedEnvironment() []string {
 type discard struct{}
 
 func (discard) Write(data []byte) (int, error) { return len(data), nil }
+
+type limitedBuffer struct {
+	bytes.Buffer
+	limit    int
+	exceeded bool
+	cancel   context.CancelFunc
+	once     sync.Once
+}
+
+func (buffer *limitedBuffer) Write(data []byte) (int, error) {
+	available := buffer.limit - buffer.Len()
+	if available > 0 {
+		if available > len(data) {
+			available = len(data)
+		}
+		_, _ = buffer.Buffer.Write(data[:available])
+	}
+	if available < len(data) {
+		buffer.exceeded = true
+		if buffer.cancel != nil {
+			buffer.once.Do(buffer.cancel)
+		}
+	}
+	// Report the complete write so a noisy child cannot turn the bounded
+	// diagnostic capture into an os/exec pipe error or deadlock.
+	return len(data), nil
+}

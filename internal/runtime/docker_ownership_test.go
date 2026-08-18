@@ -478,7 +478,7 @@ func TestVerifyActualSpecRejectsExtraMountAndPrivileges(t *testing.T) {
 	}
 }
 
-func TestEnsureRunningUsesOneInspectionForRunningContainer(t *testing.T) {
+func TestReconcileStartupUsesOneInspectionForRunningContainer(t *testing.T) {
 	t.Parallel()
 	spec := ownershipTestSpec()
 	fingerprint, err := specFingerprint(spec)
@@ -524,15 +524,63 @@ func TestEnsureRunningUsesOneInspectionForRunningContainer(t *testing.T) {
 	server.Start()
 	defer server.Close()
 	docker := testDocker(t, server)
-	endpoint, transitioned, err := docker.EnsureRunning(context.Background(), spec)
+	result, err := docker.ReconcileStartup(context.Background(), spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if transitioned || endpoint.Port != server.Listener.Addr().(*net.TCPAddr).Port {
-		t.Fatalf("endpoint=%+v transitioned=%t", endpoint, transitioned)
+	if !result.Running || result.Transitioned || result.Endpoint.Port != server.Listener.Addr().(*net.TCPAddr).Port {
+		t.Fatalf("startup result = %+v", result)
 	}
 	if inspections.Load() != 1 {
 		t.Fatalf("container inspections = %d, want 1", inspections.Load())
+	}
+}
+
+func TestReconcileStartupLeavesAbsentAndPausedDormant(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		status string
+		absent bool
+	}{
+		{name: "absent", absent: true},
+		{name: "paused", status: "paused"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var inspections, mutations atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Method != http.MethodGet {
+					mutations.Add(1)
+				}
+				if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/containers/demo/json") {
+					inspections.Add(1)
+					if test.absent {
+						writeDockerNotFound(writer, "container")
+						return
+					}
+					writeJSON(writer, http.StatusOK, map[string]any{
+						"Id":              "container-id",
+						"Config":          map[string]any{"Labels": map[string]string{managedLabel: "true", workspaceLabel: "demo"}},
+						"State":           map[string]any{"Status": test.status, "Running": true, "Paused": true},
+						"NetworkSettings": map[string]any{"Ports": map[string]any{}},
+					})
+					return
+				}
+				http.NotFound(writer, request)
+			}))
+			defer server.Close()
+
+			result, err := testDocker(t, server).ReconcileStartup(context.Background(), ownershipTestSpec())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Running || result.Endpoint != (Endpoint{}) || result.Transitioned {
+				t.Fatalf("startup result = %+v, want dormant", result)
+			}
+			if inspections.Load() != 1 || mutations.Load() != 0 {
+				t.Fatalf("inspections=%d mutations=%d, want 1 and 0", inspections.Load(), mutations.Load())
+			}
+		})
 	}
 }
 

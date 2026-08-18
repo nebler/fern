@@ -15,6 +15,7 @@ type fakeRuntime struct {
 	state          runtime.State
 	createN        int
 	ensureN        int
+	startupN       int
 	resumeN        int
 	pauseN         int
 	statusN        int
@@ -169,6 +170,24 @@ func (f *fakeRuntime) EnsureRunning(ctx context.Context, spec runtime.Spec) (run
 	}
 }
 
+func (f *fakeRuntime) ReconcileStartup(ctx context.Context, spec runtime.Spec) (runtime.StartupResult, error) {
+	f.mu.Lock()
+	f.startupN++
+	state := f.state
+	f.mu.Unlock()
+	switch state {
+	case runtime.StateAbsent, runtime.StatePaused:
+		return runtime.StartupResult{}, nil
+	case runtime.StateRunning:
+		return runtime.StartupResult{Endpoint: f.endpoint, Running: true}, nil
+	case runtime.StateProvisioning:
+		ep, err := f.Resume(ctx, spec)
+		return runtime.StartupResult{Endpoint: ep, Running: err == nil, Transitioned: true}, err
+	default:
+		return runtime.StartupResult{}, runtime.ErrFailed
+	}
+}
+
 func TestNonWakingRequestDoesNotResumePausedWorkspace(t *testing.T) {
 	t.Parallel()
 	fake := newFakeRuntime(runtime.StatePaused)
@@ -180,6 +199,62 @@ func TestNonWakingRequestDoesNotResumePausedWorkspace(t *testing.T) {
 	defer fake.mu.Unlock()
 	if fake.ensureN != 0 || fake.resumeN != 0 {
 		t.Fatalf("non-waking request ensured=%d resumed=%d", fake.ensureN, fake.resumeN)
+	}
+}
+
+func TestReconcileStartupPreservesDormantWorkspace(t *testing.T) {
+	for _, state := range []runtime.State{runtime.StateAbsent, runtime.StatePaused} {
+		t.Run(string(state), func(t *testing.T) {
+			fake := newFakeRuntime(state)
+			observed := 0
+			manager := newTestManager(fake, func(context.Context, runtime.Endpoint, bool) error {
+				observed++
+				return nil
+			}, alwaysIdle)
+			if err := manager.ReconcileStartup(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err := manager.AcquireRequest(context.Background(), RequestObserve); !errors.Is(err, ErrNotRunning) {
+				t.Fatalf("dormant observation error = %v, want ErrNotRunning", err)
+			}
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			if fake.startupN != 1 || fake.ensureN != 0 || fake.resumeN != 0 || observed != 0 {
+				t.Fatalf("startup=%d ensure=%d resume=%d observed=%d", fake.startupN, fake.ensureN, fake.resumeN, observed)
+			}
+		})
+	}
+}
+
+func TestReconcileStartupObservesAndPublishesActiveWorkspace(t *testing.T) {
+	for _, test := range []struct {
+		state runtime.State
+		force bool
+	}{
+		{state: runtime.StateRunning},
+		{state: runtime.StateProvisioning, force: true},
+	} {
+		t.Run(string(test.state), func(t *testing.T) {
+			fake := newFakeRuntime(test.state)
+			observed := 0
+			manager := newTestManager(fake, func(_ context.Context, ep runtime.Endpoint, force bool) error {
+				observed++
+				if ep != fake.endpoint || force != test.force {
+					t.Fatalf("observer endpoint=%+v force=%t", ep, force)
+				}
+				return nil
+			}, alwaysIdle)
+			if err := manager.ReconcileStartup(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			target, _, err := manager.AcquireRequest(context.Background(), RequestObserve)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if target.Endpoint != fake.endpoint || target.Generation == 0 || observed != 1 {
+				t.Fatalf("target=%+v observed=%d", target, observed)
+			}
+		})
 	}
 }
 

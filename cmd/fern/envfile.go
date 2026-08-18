@@ -5,24 +5,30 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"syscall"
 )
 
 func readEnvFile(path string) (map[string]string, error) {
-	info, err := os.Lstat(path)
+	descriptor, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, fmt.Errorf("open environment file %q: %w", path, err)
+	}
+	file := os.NewFile(uintptr(descriptor), path)
+	if file == nil {
+		_ = syscall.Close(descriptor)
+		return nil, fmt.Errorf("open environment file %q", path)
+	}
+	defer file.Close()
+	info, err := file.Stat()
 	if err != nil {
 		return nil, fmt.Errorf("inspect environment file %q: %w", path, err)
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+	if !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("environment file %q must be a regular file", path)
 	}
 	if info.Mode().Perm()&0o027 != 0 {
 		return nil, fmt.Errorf("environment file %q permissions %o expose secrets; use 0600 or 0640", path, info.Mode().Perm())
 	}
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("read environment file %q: %w", path, err)
-	}
-	defer file.Close()
 	values := make(map[string]string)
 	scanner := bufio.NewScanner(file)
 	for line := 1; scanner.Scan(); line++ {
@@ -51,12 +57,16 @@ func readEnvFile(path string) (map[string]string, error) {
 	return values, nil
 }
 
-func mergeEnvironment(configured map[string]string, fileValues map[string]string) map[string]string {
+func mergeWorkspaceEnvironment(configured map[string]string, fileValues map[string]string) map[string]string {
 	merged := make(map[string]string, len(configured)+len(fileValues))
 	for key, value := range configured {
 		merged[key] = value
 	}
-	for key, value := range fileValues {
+	for _, key := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_PASSWORD"} {
+		value, present := fileValues[key]
+		if !present {
+			continue
+		}
 		if _, exists := merged[key]; !exists {
 			merged[key] = value
 		}

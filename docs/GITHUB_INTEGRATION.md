@@ -23,7 +23,9 @@ the same host user that runs Fern. `FERN_GITHUB_TOKEN`, `GH_TOKEN`, and
 `GITHUB_TOKEN` are rejected from workspace environment so the obvious
 credential path into Docker is closed.
 
-The authenticated Fern control page can perform the same operation without SSH.
+The operator-authenticated Fern control page can perform the same operation
+without SSH. It requires `fern:$FERN_CONTROL_PASSWORD`; OpenCode credentials and
+paired-device cookies have no publication authority.
 It records a workflow-associated publication request, stops idle compute while
 holding request admission and lifecycle wake serialization closed, records the
 exact repository/base/commit/branch before push, then records the draft PR URL

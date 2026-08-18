@@ -9,6 +9,7 @@ IMAGE=${FERN_BROWSER_IMAGE:-"fern/browser-smoke:$PORT"}
 SESSION="fern-browser-$PORT"
 URL="http://127.0.0.1:$PORT"
 PASSWORD="browser-$PORT-secret"
+CONTROL_PASSWORD="browser-$PORT-control-secret-control-secret"
 FERN_PID=""
 BUILT_IMAGE=0
 
@@ -48,13 +49,15 @@ idle:
   after: 30m
 proxy:
   listen: 127.0.0.1:$PORT
+control:
+  password: \${FERN_CONTROL_PASSWORD}
 EOF
 
 start_fern() {
-  HOME="$RUN_ROOT/home" OPENCODE_PASSWORD="$PASSWORD" "$RUN_ROOT/fern" up -config "$RUN_ROOT/fern.yaml" >>"$RUN_ROOT/fern.log" 2>&1 &
+  HOME="$RUN_ROOT/home" OPENCODE_PASSWORD="$PASSWORD" FERN_CONTROL_PASSWORD="$CONTROL_PASSWORD" "$RUN_ROOT/fern" up -config "$RUN_ROOT/fern.yaml" >>"$RUN_ROOT/fern.log" 2>&1 &
   FERN_PID=$!
   for _ in {1..350}; do
-    if curl -fsS --user "opencode:$PASSWORD" "$URL/fern/ready" >/dev/null 2>&1; then return; fi
+    if curl -fsS --user "fern:$CONTROL_PASSWORD" "$URL/fern/ready" >/dev/null 2>&1; then return; fi
     kill -0 "$FERN_PID" 2>/dev/null || { cat "$RUN_ROOT/fern.log" >&2; return 1; }
     sleep .2
   done
@@ -69,7 +72,7 @@ stop_fern() {
 }
 
 start_fern
-PAIR_CODE=$(curl -fsS --user "opencode:$PASSWORD" -X POST "$URL/fern/pair/new" | jq -er .code)
+PAIR_CODE=$(curl -fsS --user "fern:$CONTROL_PASSWORD" -X POST "$URL/fern/pair/new" | jq -er .code)
 if [[ -n ${FERN_BROWSER_ENGINE:-} ]]; then
   playwright-cli -s="$SESSION" open --browser="$FERN_BROWSER_ENGINE" "$URL/fern/pair?code=$PAIR_CODE&name=Automated%20Mobile%20Browser" >/dev/null
 else
@@ -82,12 +85,14 @@ playwright-cli -s="$SESSION" run-code "async page => {
   const device = cookies.find(cookie => cookie.name === 'fern_device');
   if (!device || !device.httpOnly || !device.secure || device.sameSite !== 'Strict' || device.path !== '/') throw new Error('invalid device cookie');
   if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('mobile horizontal overflow');
-  await page.getByRole('textbox', {name: 'Workflow title'}).fill('Automated mobile workflow');
-  await page.getByRole('textbox', {name: 'OpenCode session ID'}).fill('ses_browser_rehearsal');
-  await page.getByRole('button', {name: 'Track OpenCode session'}).click();
-  await page.getByText('Automated mobile workflow').waitFor();
-  if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('workflow caused mobile overflow');
+  if (await page.getByRole('textbox', {name: 'Workflow title'}).count()) throw new Error('paired device received Fern administration controls');
+  const denied = await page.request.get('$URL/fern/api/v1/devices');
+  if (denied.status() !== 401) throw new Error('paired cookie received Fern admin authority');
 }" >/dev/null
+
+curl -fsS --user "fern:$CONTROL_PASSWORD" -H 'Content-Type: application/json' \
+  -d '{"title":"Automated mobile workflow","sessionId":"ses_browser_rehearsal"}' \
+  "$URL/fern/api/v1/workflows" >/dev/null
 
 REPLAY_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' "$URL/fern/pair?code=$PAIR_CODE")
 [[ "$REPLAY_STATUS" == 401 ]] || { echo "pairing code replay returned $REPLAY_STATUS" >&2; exit 1; }
@@ -96,14 +101,15 @@ stop_fern
 start_fern
 playwright-cli -s="$SESSION" reload >/dev/null
 playwright-cli -s="$SESSION" run-code "async page => {
-  await page.getByText('Automated mobile workflow').waitFor();
-  await page.getByText('Automated Mobile Browser').waitFor();
-  const response = await page.request.get('$URL/fern/api/v1/workflows');
+  const response = await page.request.get('$URL/fern/ready');
   if (response.status() !== 200) throw new Error('device cookie did not survive Fern restart');
-  await page.getByRole('button', {name: 'Revoke'}).click();
-  await page.getByRole('heading', {name: 'Device revoked'}).waitFor();
+}" >/dev/null
+
+DEVICE_ID=$(curl -fsS --user "fern:$CONTROL_PASSWORD" "$URL/fern/api/v1/devices" | jq -er '.[0].id')
+curl -fsS --user "fern:$CONTROL_PASSWORD" -X DELETE "$URL/fern/api/v1/devices/$DEVICE_ID" >/dev/null
+playwright-cli -s="$SESSION" run-code "async page => {
   const revoked = await page.request.get('$URL/fern/ready');
   if (revoked.status() !== 401) throw new Error('revoked device still authenticates');
 }" >/dev/null
 
-printf 'Fern mobile browser rehearsal passed (390x844, restart, workflow, revocation)\n'
+printf 'Fern mobile browser rehearsal passed (390x844, scoped device, restart, admin revocation)\n'

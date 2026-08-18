@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/config"
-	fernRuntime "github.com/nebler/fern/internal/runtime"
 	qrcode "github.com/skip2/go-qrcode"
 )
 
@@ -84,7 +83,7 @@ func diagnose(configPath, envPath string, phone, fieldDemo bool, explicitURL str
 		add("config", "fail", err.Error(), "Fix the strict Fern configuration.")
 		return report
 	}
-	cfg.Workspace.Env = forwardedEnvironment(mergeEnvironment(cfg.Workspace.Env, values))
+	cfg.Workspace.Env = forwardedEnvironment(mergeWorkspaceEnvironment(cfg.Workspace.Env, values))
 	if err := config.Validate(cfg); err != nil {
 		add("config", "fail", err.Error(), "Fix the Fern configuration or secret file.")
 		return report
@@ -127,7 +126,7 @@ func diagnose(configPath, envPath string, phone, fieldDemo bool, explicitURL str
 	localURL, err := attachURL(cfg.Listen)
 	if err != nil {
 		add("gateway", "fail", err.Error(), "Fix proxy.listen.")
-	} else if err := checkReady(localURL, cfg.Workspace.Env["OPENCODE_PASSWORD"]); err != nil {
+	} else if err := checkReady(localURL, cfg.Control.Password); err != nil {
 		add("gateway", "fail", "local Fern gateway is not ready", "Start fern up with the same --config and --env-file.")
 	} else {
 		add("gateway", "pass", "local Fern gateway is serving", "")
@@ -146,10 +145,10 @@ func diagnose(configPath, envPath string, phone, fieldDemo bool, explicitURL str
 			add("tailscale", "fail", "explicit phone URL does not match the configured Tailscale Serve route", "Use the HTTPS origin whose root route proxies to Fern.")
 		} else if localOrigin, localErr := localTailscaleOrigin(); localErr != nil || !strings.EqualFold(mustHostname(validated), mustHostname(localOrigin)) {
 			add("tailscale", "fail", "phone URL does not match this Tailscale host", "Use the HTTPS URL reported by tailscale serve status on this host.")
-		} else if err := checkReady(validated, cfg.Workspace.Env["OPENCODE_PASSWORD"]); err != nil {
+		} else if err := checkReady(validated, cfg.Control.Password); err != nil {
 			add("phone", "fail", "private phone URL did not reach Fern", "Check Tailscale on both devices and the Serve mapping.")
 		} else {
-			code, pairErr := issuePairingCode(localURL, cfg.Workspace.Env["OPENCODE_PASSWORD"])
+			code, pairErr := issuePairingCode(localURL, cfg.Control.Password)
 			if pairErr != nil {
 				add("pairing", "fail", "could not create a one-time phone pairing link", "Ensure the local Fern process is the current build.")
 			} else {
@@ -194,7 +193,7 @@ func checkReady(origin, password string) error {
 	if err != nil {
 		return err
 	}
-	fernRuntime.ServerAuth{Password: password}.Apply(request)
+	request.SetBasicAuth("fern", password)
 	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
 	if err != nil {
 		return err
@@ -202,6 +201,13 @@ func checkReady(origin, password string) error {
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("Fern readiness returned %s", response.Status)
+	}
+	var readiness struct {
+		Ready bool `json:"ready"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 4<<10))
+	if err := decoder.Decode(&readiness); err != nil || !readiness.Ready {
+		return fmt.Errorf("Fern readiness returned an invalid response")
 	}
 	return nil
 }
@@ -213,7 +219,7 @@ func issuePairingCode(origin, password string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	fernRuntime.ServerAuth{Password: password}.Apply(request)
+	request.SetBasicAuth("fern", password)
 	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
 	if err != nil {
 		return "", err

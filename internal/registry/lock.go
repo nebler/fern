@@ -15,15 +15,8 @@ type Lease struct {
 }
 
 func Acquire(directory, workspace string) (*Lease, error) {
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return nil, fmt.Errorf("create lock directory: %w", err)
-	}
-	directoryInfo, err := os.Lstat(directory)
-	if err != nil {
-		return nil, fmt.Errorf("inspect lock directory: %w", err)
-	}
-	if !directoryInfo.IsDir() || directoryInfo.Mode()&os.ModeSymlink != 0 {
-		return nil, errors.New("lock directory must be a real directory")
+	if err := ensurePrivateDirectory(directory, "lock"); err != nil {
+		return nil, err
 	}
 	path := filepath.Join(directory, fmt.Sprintf("%x.lock", sha256.Sum256([]byte(workspace))))
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
@@ -77,6 +70,25 @@ func Acquire(directory, workspace string) (*Lease, error) {
 		return nil, fmt.Errorf("sync workspace lock metadata: %w", err)
 	}
 	return &Lease{file: file}, nil
+}
+
+func ensurePrivateDirectory(directory, purpose string) error {
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return fmt.Errorf("create %s directory: %w", purpose, err)
+	}
+	info, err := os.Lstat(directory)
+	if err != nil {
+		return fmt.Errorf("inspect %s directory: %w", purpose, err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s directory must be a private real directory", purpose)
+	}
+	if info.Mode().Perm()&0o077 != 0 {
+		if err := os.Chmod(directory, 0o700); err != nil {
+			return fmt.Errorf("make %s directory private: %w", purpose, err)
+		}
+	}
+	return nil
 }
 
 func (l *Lease) Release() error {

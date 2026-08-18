@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/nebler/fern/internal/runtime"
@@ -48,15 +49,8 @@ func (s *IntentStore) CommitShutdown(workspace, containerID string, expiresAt ti
 }
 
 func (s *IntentStore) write(workspace string, intent pauseIntent) error {
-	if err := os.MkdirAll(s.directory, 0o700); err != nil {
-		return fmt.Errorf("create pause intent directory: %w", err)
-	}
-	info, err := os.Lstat(s.directory)
-	if err != nil {
-		return fmt.Errorf("inspect pause intent directory: %w", err)
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("pause intent directory must be a real directory")
+	if err := ensurePrivateDirectory(s.directory, "pause intent"); err != nil {
+		return err
 	}
 	data, err := json.Marshal(intent)
 	if err != nil {
@@ -95,7 +89,7 @@ func (s *IntentStore) write(workspace string, intent pauseIntent) error {
 }
 
 func (s *IntentStore) PauseStatus(workspace, containerID string, stoppedAt time.Time) (runtime.PauseIntentStatus, error) {
-	file, err := os.Open(s.path(workspace))
+	file, err := os.OpenFile(s.path(workspace), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
 		return runtime.PauseIntentNone, nil
 	}
@@ -103,6 +97,14 @@ func (s *IntentStore) PauseStatus(workspace, containerID string, stoppedAt time.
 		return runtime.PauseIntentNone, fmt.Errorf("open pause intent: %w", err)
 	}
 	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return runtime.PauseIntentNone, fmt.Errorf("inspect pause intent: %w", err)
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !info.Mode().IsRegular() || !ok || stat.Nlink != 1 || info.Mode().Perm()&0o077 != 0 {
+		return runtime.PauseIntentNone, errors.New("pause intent must be a private singly linked regular file")
+	}
 	const maxIntentBytes = 4 << 10
 	data, err := io.ReadAll(io.LimitReader(file, maxIntentBytes+1))
 	if err != nil {

@@ -1,238 +1,164 @@
-# Remote Product Roadmap
+# Product Direction
 
-This document defines the end-to-end outcome Fern must support and records the
-gap between that outcome and the implemented lifecycle component. It is a
-roadmap, not an implemented-system contract. [ARCHITECTURE.md](./ARCHITECTURE.md)
-remains authoritative for current behavior.
+This document is authoritative for Fern's product direction. It describes
+planned boundaries, not implemented behavior. [ARCHITECTURE.md](./ARCHITECTURE.md)
+and the code remain authoritative for the current system.
 
-## Product Position
+## Direction
 
-Fern is currently a lifecycle and same-origin delivery wrapper around one
-self-hosted OpenCode workspace. The official OpenCode web UI is already served
-unchanged through Fern's stable origin. Fern's strongest implemented behavior
-is authenticating an ordinary request, waking stopped compute, and stopping it
-only after V2 activity evidence says doing so is safe.
+Fern should become a self-hosted control plane for durable remote coding tasks,
+using OpenCode as its first agent runtime.
 
-The remote-agent market already provides managed sandboxes, phone control,
-worktrees, schedules, webhooks, previews, collaboration, and hibernation. Cursor,
-Amp, T3 Code, Claude Code, Codex, Devin, Copilot, Replit, OpenHands, Coder, and
-Daytona each cover substantial parts of that surface.
+> Submit work remotely, disconnect, return to the same task, inspect an
+> attributable tested result, and publish it safely from a workspace that can
+> stop, wake, reboot, and recover.
 
-Fern should therefore aim at a narrower product:
+Fern should not become another model loop or rebuild OpenCode's coding UI.
+OpenCode remains authoritative for conversations, tools, permissions,
+questions, terminals, files, and diffs. Fern owns the durable journey around
+those capabilities.
 
-> A self-owned Linux coding-agent computer that can safely sleep, wake remotely,
-> survive failures, and remain fully recoverable.
+## Product Boundary
 
-Self-hosting, persistence, or hibernation alone are not differentiators. The
-potential differentiation is their combination with protocol-aware lifecycle
-safety, owner-controlled data, reliable remote delivery, and simple operations.
+| Concern | Authority |
+| --- | --- |
+| Task receipt, delivery state, attempts, and cancellation intent | Fern |
+| Conversation and tool execution | OpenCode |
+| Compute lifecycle and recovery | Fern runtime backend |
+| Repository content | Git and the workspace |
+| Verification and result provenance | Fern |
+| Push and pull request effects | Fern publication broker |
+| Repository authorization | GitHub App broker |
+| Infrastructure scheduling | Docker now; other backends later |
 
-## Acceptance Outcome
+The central product model should become:
 
-The first credible product outcome is:
+```text
+Workspace
+  contains Tasks
+    contain Attempts
+      map to OpenCode Sessions
+      produce Results
+      may produce Publications
+```
 
-> From the official OpenCode UI on a supported phone browser, authorize one
-> repository, submit work, answer any approval, and return to a tested draft
-> pull request. Fern can then stop, wake, reboot, continue through CI or review
-> feedback, and restore onto a fresh host without losing completed work.
+A Fern task is not a duplicate transcript. It is the durable record proving
+that Fern accepted an instruction, whether OpenCode received it, what attempt
+ran, whether cancellation was requested, and which exact result was verified
+or published.
 
-A pushed branch is an intermediate result. A correctly proxied HTTP response is
-not a durable task, and surviving files are not proof that the workflow can be
-recovered.
+## First Product Outcome
 
-## Acceptance Matrix
+From a supported phone browser, a user can:
 
-The field rehearsal validates the existing lifecycle component. Product
-acceptance validates the user outcome. Neither has been completed.
+1. Pair one device through a private TLS route.
+2. Submit one durable, idempotently accepted task and disconnect.
+3. Return to its current status and OpenCode session.
+4. Answer an approval or question.
+5. Inspect the changed files and verification tied to an exact commit.
+6. Publish one draft pull request through a narrow host-side credential.
+7. Stop, wake, restart, and restore without losing completed work.
 
-| ID | Requirement | Current status |
-| --- | --- | --- |
-| `FIELD-INSTALL` | Install exact Fern/OpenCode artifacts on Ubuntu with systemd and Tailscale | Partially implemented; `fern init` and `fern doctor --phone` cover local demo configuration and transport checks, while systemd appliance installation remains manual |
-| `FIELD-PHONE` | Use the official OpenCode UI on supported phone browsers to connect, submit, steer, cancel, approve, and reconnect | Ready for rehearsal through a one-time pairing QR and restart-safe device cookie; real-phone interaction is not yet accepted |
-| `FIELD-PROVIDER` | Complete a real provider-backed turn after client disconnect | Not run; continuation semantics are upstream-dependent |
-| `FIELD-SLEEP` | Stop only after completed work and wake through the actual client sequence | Deterministic fixture passes; phone/provider path unproven |
-| `FIELD-REBOOT` | Reboot while running or paused and recover automatically | Partially implemented; orderly Fern shutdown followed by Docker stop resumes in the lifecycle harness, while abrupt loss and a real host reboot remain unaccepted |
-| `FIELD-RESTORE` | Restore all durable state onto a fresh host and resume | Partially implemented; isolated destructive repository, OpenCode-volume, control-state, and configuration restore passes, while fresh-host credentials and split-brain fencing remain blocked |
-| `E2E-REPO` | Install a GitHub App on one selected repository and clone an exact base SHA | Blocked; host path must already exist |
-| `E2E-SETUP` | Run versioned project setup with credentials, logs, failure state, and caches | Blocked; no setup/resume contract |
-| `E2E-TASK` | Submit one idempotent phone task with durable status and cancellation | Partially implemented; Fern durably associates workflows with OpenCode sessions, but prompt delivery and cancellation remain live OpenCode operations |
-| `E2E-PR` | Commit with deterministic identity, push one Fern branch, and create one draft PR | Host-credential prototype supports durable in-process publication and the standalone CLI; GitHub App credentials and deterministic commit identity remain blocked |
-| `E2E-APPROVAL` | Notify, inspect, answer, expire, and audit an OpenCode approval from the phone | Blocked; approvals only influence idle detection |
-| `E2E-OUTPUT` | Inspect diff, tests, logs, and selected artifacts from the phone | Blocked; no artifact surface |
-| `E2E-CI` | Correlate CI/review events to the PR head and run a bounded follow-up | Blocked; no GitHub event or polling integration |
-| `E2E-RECOVERY` | Preserve task, Git, PR, approval, and artifact state across process/host failure | Partially implemented for devices, workflow/session correlations, startup publication reconciliation, orderly lifecycle recovery, and isolated restore; delivery, approval, and artifact recovery remain blocked |
+The current field demo validates only a constrained portion of this outcome.
+See [FIELD_DEMO.md](./FIELD_DEMO.md) for its exact claim.
 
-Anything required by this matrix is P0 for the declared product. A narrow field
-rehearsal may still be useful before all P0 work exists, but passing it must not
-be described as product validation.
+## Roadmap
 
-## Missing Capabilities
+### Before The Phone Demo
 
-The priorities below target a serious single-user or small trusted-team product,
-not a hostile multi-tenant platform.
+Do not add a new client, runtime, scheduler, or persistence model. Freeze scope,
+review and commit the hardening changes, pass every local gate, rehearse with a
+disposable repository and spend-limited credentials, then run the real-phone
+sequence and retain redacted evidence.
 
-| Priority | Capability | Product requirement |
-| --- | --- | --- |
-| P0 | Reboot-safe lifecycle | Recover running and intentionally paused workspaces after Docker and host restart without misclassifying normal shutdown as failure. |
-| P0 | Official UI phone acceptance | Validate the unchanged OpenCode UI through Fern for submit, steer, cancel, approve, diff review, and reconnect. Build no second coding client. |
-| P0 | Appliance installation | Provide guided initialization, preflight checks, system service setup, updates, and rollback. |
-| P0 | GitHub App and repository onboarding | Authorize selected repositories, clone exact source state, and refresh narrow credentials without placing them in the container. |
-| P0 | Git publication | Configure identity, allocate one branch, commit, push through a host broker, and create or update one draft PR. |
-| P0 | Project setup | Run deterministic setup/resume hooks with private dependencies, logs, timeouts, failure state, and persistent caches. |
-| P0 | Durable remote commands | Give every instruction an explicit queued, delivered, applied, completed, failed, or expired state. |
-| P0 | Notifications and approvals | Deliver questions, permission requests, completion, and failure to the user's phone. |
-| P0 | CI and review continuation | Reconcile exact PR head, checks, review comments, human edits, conflicts, and bounded follow-up attempts. |
-| P0 | Model and budget preflight | Validate provider access and enforce task runtime/token/cost limits before and during work. |
-| P0 | Automated backup and restore | Back up, checksum, verify, restore into a fresh workspace, and rehearse recovery automatically. |
-| P0 | Coordinated upgrades | Quiesce, back up, upgrade Fern/OpenCode, verify compatibility, and roll back. |
-| P0 | Mobile-safe results | View the diff, verification, logs, and selected generated artifacts through authenticated links. |
-| P0 | Device identity | Extend implemented restart-safe device identity, listing, revocation, and expiry with production enrollment and recovery policy. |
-| P0 | Credential boundaries | Broker Git credentials and separate setup, agent, publication, registry, and provider credentials. |
-| P1 | Private preview ports | Route declared application ports with authentication, wake, readiness, and expiry behavior. |
-| P1 | Terminal observation and takeover | Follow agent activity, transfer one exclusive write lease to a human, and hand control back safely. |
-| P1 | Multiple workspaces | Create, list, route, stop, recover, and remove more than one repository workspace. |
-| P1 | Lifecycle observability | Explain wake latency, active blockers, failure/OOM state, runtime versions, and resource use. |
-| P1 | Egress controls | Restrict and audit package, Git, model, preview, and arbitrary network destinations. |
+### Next: Durable Remote Tasks
 
-Enterprise SSO, SCIM, Kubernetes, hostile multi-tenancy, multiplayer editing,
-multi-agent orchestration, and a general workflow builder are not required for a
-credible personal product.
+1. Replace coarse workflow records with transactional task, attempt, receipt,
+   event, approval, result, and publication records.
+2. Persist a task before waking OpenCode or submitting its prompt.
+3. Add idempotent delivery, explicit ambiguous states, durable cancellation
+   intent, and startup reconciliation.
+4. Add a small Fern task inbox and reconnectable event cursor under `/fern/*`.
+5. Deep-link into the official OpenCode session instead of rebuilding its UI.
+6. Notify on input required, completion, failure, and publication readiness.
+7. Bind verification and publication to the same exact Git commit.
 
-## Credible White Space
+SQLite is sufficient for the first single-host task store. A distributed event
+platform is not required.
 
-No exhaustive market search can prove that no implementation exists. The
-following contracts were not found as complete, public capabilities in the major
-products reviewed.
+### Then: Product And Security Completion
 
-### Whole-Host Wake
+1. Add GitHub App repository onboarding and short-lived scoped credentials.
+2. Add versioned setup and resume hooks with bounded logs and failure states.
+3. Move provider and Git capabilities behind enforceable brokers where
+   practical, and add attributable egress controls.
+4. Automate backup, fresh-host restore, upgrade, rollback, and old-host fencing.
+5. Add private previews, mobile-safe artifacts, and bounded CI/review follow-up.
+6. Add a workspace registry only after one durable task journey is complete.
 
-Connected-machine products generally require the user's machine to remain awake.
-Fern could place a small wake coordinator outside the agent host, start a
-physical machine or cloud VM through Wake-on-LAN or a provider API, hold the
-original request, and forward it after Fern and OpenCode become ready.
+### Later: Execution Backends
 
-This extends scale-to-zero from one container to the complete agent computer. It
-requires an external always-on relay or LAN helper because Fern cannot receive a
-request while its own host is asleep.
+Docker remains the supported backend for the single-owner, trusted-host
+product. Before adding another backend, separate the workspace controller from
+Docker-specific status, endpoints, locks, storage, logs, and CLI operations.
 
-### Explainable Agent-Safe Sleep
+Kubernetes becomes useful for a workspace fleet, multi-node scheduling,
+distributed reconciliation, or a concrete enterprise deployment. It does not
+provide durable task semantics or strong tenant isolation by itself. A shared,
+hostile multi-tenant service also needs a sandbox runtime such as gVisor, Kata,
+or a microVM boundary, plus external identity, secrets, egress, and audit.
 
-Fern can expose why a workspace is not safe to stop: an active turn, shell, PTY,
-permission request, form, held request, watcher loss, ambiguous status, or failed
-final check. This makes safe hibernation an inspectable contract rather than a
-generic inactivity timer.
+For Grab, Fern should integrate its OpenCode-aware lifecycle and durable task
+coordination with a Palana-style Kubernetes platform. Grab's platform should
+continue to own pod scheduling, storage, ingress, workload identity, Vault,
+egress policy, and audit. Fern should not run its Docker-daemon model inside an
+agent pod.
 
-OpenCode V2 is the sole supported execution and UI primitive. Adding other
-agent harnesses is outside this roadmap; process or CPU heuristics are not an
-acceptable substitute for authoritative activity and quiescence APIs.
+## T3 Code Decision
 
-### Exportable Agent Workstation
+T3 Code is a useful benchmark for mobile clients, durable command receipts,
+event replay, terminals, files, Git views, and multi-provider orchestration. It
+is not a drop-in frontend for Fern. Adopting its server would make T3 the thread
+and application authority while Fern became its lifecycle supervisor.
 
-Fern can produce an owner-controlled bundle containing repository and
-uncommitted state, OpenCode data, environment definition, artifacts, checksums,
-and exact Fern/image versions. A restore command should recreate it on another
-host and verify the result.
+Fern may run a time-boxed, version-pinned T3 experiment against a Fern-managed
+OpenCode server. The experiment must prove OpenCode V2 compatibility, joint
+T3/OpenCode quiescence, crash recovery, Git checkpoint ordering, publication
+safety, and persistence. Do not fork T3, reproduce its private RPC contract, or
+make it a release dependency before those results exist.
 
-Git patches alone do not preserve a remote workstation. The export must also
-state what it cannot preserve, including in-progress provider streams, tool
-processes, and permission continuations.
+Fern can adopt T3-like interaction contracts without adopting T3's runtime:
 
-### Reliable Delivery To A Sleeping Host
+- stable task identity;
+- durable command receipts;
+- monotonic reconnect cursors;
+- explicit connection and execution states;
+- mobile task and result views;
+- deep links into the authoritative coding session.
 
-A remote instruction should retain one identity and visible state while the
-host is sleeping, rebooting, or temporarily unreachable. Submission must be
-idempotent, cancellation explicit, and the distinction between delivered and
-applied observable.
+## Not Now
 
-This is directly a remote-agent problem: an ordinary live WebSocket cannot prove
-that a phone command reached an intermittently available agent computer.
+- A second coding conversation UI.
+- Native Fern mobile applications.
+- Multiple agent-provider adapters.
+- Multi-agent orchestration or a general workflow builder.
+- Kubernetes as a requirement for the personal release.
+- Direct Firecracker fleet management.
+- Hostile multi-tenancy on ordinary shared-kernel Docker containers.
 
-### Private Wakeable Outputs
+## Success Criteria
 
-Authenticated artifact and preview URLs can wake the same private workspace and
-serve output without uploading it to a managed agent vendor or public artifact
-host. The distinctive scope is private, owner-operated, and able to use local
-dependencies; generic previews already exist in Amp, Cursor, Replit, and other
-products.
+Fern is closer to Amp when the task, rather than the HTTP connection or
+container, survives disconnects and lifecycle changes. The next release should
+be judged by one complete phone-to-tested-PR journey, not by the number of
+runtimes, schedulers, or infrastructure features it supports.
 
-## Recommended First Release
+## Research Sources
 
-A coherent first remote-product release should include:
-
-1. A supported headless Linux installation with `init`, `doctor`, safe update,
-   rollback, and reboot recovery.
-2. The official OpenCode web UI accepted on supported phone browsers, with
-   Fern-owned device pairing and durable shadow delivery records.
-3. GitHub App onboarding for one selected repository.
-4. Versioned project setup with persistent caches and explicit failure state.
-5. Host-brokered publication to one Fern-owned branch and one draft PR.
-6. Phone notifications, remote approvals, diff/test/log/artifact review, and
-   bounded CI or review follow-up.
-7. Automated backup, fresh-host restore, and visible protocol-aware sleep
-   blockers.
-
-This release should still use OpenCode as the agent. It does not require Fern to
-own a model loop, add Temporal, host Git, or build multi-agent reasoning.
-
-## Work Sequencing
-
-The field phone rehearsal remains valuable, but it is not the single blocker
-after which all product work becomes safe. Before provisioning the host, fix or
-explicitly isolate the running-state reboot failure and define the official-UI
-phone acceptance matrix. The GitHub, task, and setup boundaries can be designed
-in parallel with that field work.
-
-### Safe Parallel Tracks
-
-These tracks have limited overlap and can proceed concurrently in separate
-worktrees with explicit contracts:
-
-| Track | Initial deliverable | Main ownership |
-| --- | --- | --- |
-| Lifecycle | Reboot-safe Docker semantics, provider-backed field test, wake SLO | runtime and integration tests |
-| GitHub | App onboarding, host broker, branch push, draft PR | host control API and GitHub client |
-| Appliance/recovery | `init`, `doctor`, installer, backup, fresh-host restore, update rollback | CLI, packaging, deployment |
-| Environment | Setup/resume hooks, private dependency contract, cache mounts | configuration and Docker runtime |
-
-### Work That Needs A Shared Design First
-
-The following features all need stable workspace identity, persisted product
-state, and an authenticated control API. Building them independently would
-create conflicting state models and duplicate routing logic:
-
-- durable command inbox, notifications, and approvals;
-- multiple workspaces and repository registry;
-- device pairing and authorization;
-- artifact and preview routing;
-- official-UI deep links and human/agent write ownership;
-- event-triggered or whole-host wake.
-
-Define the smallest control-plane state and API for one workspace first. Keep
-Fern-owned browser handlers under `/fern/*`; every coding-session route remains
-owned by the official OpenCode UI. Then the work can split into server,
-notification, publication, and preview workstreams.
-
-### Practical Parallelism Limit
-
-Four implementation tracks are reasonable after their boundaries are written.
-More parallel work would mostly collide in `config`, the Docker runtime, proxy
-routing, and the one-workspace composition root. Once a small control API and
-workspace registry exist, the work can fan out further.
-
-The next architectural decisions are therefore not Temporal or multi-agent
-execution. They are the durable task record, the host-side GitHub capability
-broker, and whether Fern becomes one daemon that owns a registry of workspaces
-and a remote control API.
-
-## Sources
-
-- [Cursor Cloud Agents](https://cursor.com/docs/cloud-agent)
 - [Amp Orbs](https://ampcode.com/manual/orbs)
-- [T3 Code](https://github.com/pingdotgg/t3code)
-- [Claude Code Remote Control](https://docs.anthropic.com/en/docs/claude-code/remote-control)
-- [OpenAI Codex Remote](https://developers.openai.com/codex/remote)
-- [Devin session tools](https://docs.devin.ai/work-with-devin/devin-session-tools)
-- [Coder Agents](https://coder.com/docs/ai-coder/agents)
-- [OpenHands Enterprise](https://docs.openhands.dev/enterprise)
-- [Daytona persistence](https://www.daytona.io/docs/en/persistence/)
+- [T3 Code architecture](https://github.com/pingdotgg/t3code/blob/main/docs/internals/overview.md)
+- [T3 Code remote architecture](https://github.com/pingdotgg/t3code/blob/main/docs/internals/remote.md)
+- [Kubernetes multi-tenancy](https://kubernetes.io/docs/concepts/security/multi-tenancy/)
+- [Kubernetes RuntimeClass](https://kubernetes.io/docs/concepts/containers/runtime-class/)
 - [Grab Palana architecture](https://engineering.grab.com/part-2-palana-architecture)
+- [Firecracker](https://firecracker-microvm.github.io/)

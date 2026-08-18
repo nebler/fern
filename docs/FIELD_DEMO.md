@@ -4,6 +4,21 @@ This runbook validates the constrained Fern field-demo claim. It does not claim
 GitHub App onboarding, notification delivery, durable prompt/cancel semantics,
 hard provider budgets, hostile-host isolation, or fresh-host split-brain safety.
 
+## Before Demo Day
+
+1. Freeze product scope; do not add T3, Kubernetes, a new UI, or a new state
+   model before this rehearsal.
+2. Review and commit the complete hardening diff so the demonstrated source,
+   binary, and image have one recorded identity.
+3. Use distinct `OPENCODE_PASSWORD` and `FERN_CONTROL_PASSWORD` values, a
+   spend-limited provider key, and the intended GitHub account.
+4. Prepare one bounded prompt and a disposable or reviewed private repository
+   whose expected change and verification command are known in advance.
+5. Run the local gates and one complete dry run before using the presentation
+   phone or repository.
+6. Prepare evidence storage and cleanup commands; never improvise a repeated
+   publication after an ambiguous external result.
+
 ## Abort Conditions
 
 Do not begin phone testing if any local gate fails, the repository is not a

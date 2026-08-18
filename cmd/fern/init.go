@@ -33,16 +33,18 @@ func runInit(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve repository: %w", err)
 	}
-	password := make([]byte, 32)
+	password := make([]byte, 64)
 	if _, err := rand.Read(password); err != nil {
 		return fmt.Errorf("generate OpenCode password: %w", err)
 	}
-	secret := hex.EncodeToString(password)
+	openCodeSecret := hex.EncodeToString(password[:32])
+	controlSecret := hex.EncodeToString(password[32:])
 	values := config.Default(absRepo)
 	values.Workspace.Name = *name
 	values.Workspace.Image = *image
 	values.Workspace.Memory = *memory
-	values.Workspace.Env["OPENCODE_PASSWORD"] = secret
+	values.Workspace.Env["OPENCODE_PASSWORD"] = openCodeSecret
+	values.Control.Password = controlSecret
 	values.Listen = *listen
 	parsedIdle, err := time.ParseDuration(*idle)
 	if err != nil {
@@ -60,6 +62,9 @@ func runInit(args []string) error {
 			Memory string            `yaml:"memory"`
 			Env    map[string]string `yaml:"env"`
 		} `yaml:"workspace"`
+		Control struct {
+			Password string `yaml:"password"`
+		} `yaml:"control"`
 		Idle struct {
 			After string `yaml:"after"`
 		} `yaml:"idle"`
@@ -73,6 +78,7 @@ func runInit(args []string) error {
 	output.Workspace.Repo = values.Workspace.Repo
 	output.Workspace.Memory = values.Workspace.Memory
 	output.Workspace.Env = map[string]string{}
+	output.Control.Password = "${FERN_CONTROL_PASSWORD}"
 	output.Idle.After = values.IdleAfter.String()
 	output.Proxy.Listen = values.Listen
 	configData, err := yaml.Marshal(output)
@@ -82,7 +88,7 @@ func runInit(args []string) error {
 	if err := writeNewFile(*configPath, configData, 0o600); err != nil {
 		return err
 	}
-	envData := []byte("# Keep this file on the Fern host.\nOPENCODE_PASSWORD=" + secret + "\n# Add one provider key, for example:\n# ANTHROPIC_API_KEY=\n")
+	envData := []byte("# Keep this file on the Fern host.\nOPENCODE_PASSWORD=" + openCodeSecret + "\nFERN_CONTROL_PASSWORD=" + controlSecret + "\n# Add one provider key, for example:\n# ANTHROPIC_API_KEY=\n")
 	if err := writeNewFile(*envPath, envData, 0o600); err != nil {
 		_ = os.Remove(*configPath)
 		return err

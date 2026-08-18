@@ -57,7 +57,7 @@ func runUp(args []string, log *slog.Logger) error {
 		return err
 	}
 	if values != nil {
-		cfg.Workspace.Env = mergeEnvironment(cfg.Workspace.Env, values)
+		cfg.Workspace.Env = mergeWorkspaceEnvironment(cfg.Workspace.Env, values)
 	}
 	cfg.Workspace.Env = forwardedEnvironment(cfg.Workspace.Env)
 	if err := config.Validate(cfg); err != nil {
@@ -140,22 +140,28 @@ func runUp(args []string, log *slog.Logger) error {
 		},
 	)
 	start := time.Now()
-	_, err = manager.EnsureRunning(serviceCtx)
+	err = manager.ReconcileStartup(serviceCtx)
 	if err != nil {
-		return errors.Join(err, manager.Close(context.Background()))
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer closeCancel()
+		return errors.Join(err, manager.Close(closeCtx))
 	}
 
 	supervisor := &watch.Supervisor{IdleAfter: cfg.IdleAfter, OnPause: manager.Pause, Log: log}
 	connections := newConnectionTracker()
 	trackedListener := connections.wrap(listener)
 	controls := proxy.Controls{
-		Store: controlStore, Fencer: manager, Publisher: publisher, ServiceContext: serviceCtx,
+		Store: controlStore, ControlAuth: proxy.ControlAuth{Password: cfg.Control.Password},
 	}
+	publicationCoordinator := publication.NewCoordinator(serviceCtx, controlStore, manager, publisher)
+	controls.Publications = publicationCoordinator
 	server := &http.Server{
 		Handler: proxy.NewWithControls(manager, auth, controls, log), ReadHeaderTimeout: 10 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return serviceCtx },
 	}
-	proxy.ReconcilePublications(serviceCtx, controls, log)
+	if err := publicationCoordinator.Reconcile(); err != nil {
+		return err
+	}
 	group.Go(func() error {
 		err := supervisor.Run(serviceCtx, observations)
 		if errors.Is(err, context.Canceled) {
@@ -186,20 +192,27 @@ func runUp(args []string, log *slog.Logger) error {
 	fmt.Printf("workspace: %s\nproxy: http://%s\nready in: %s\nattach: fern attach\n", spec.Name, listener.Addr(), time.Since(start).Round(time.Millisecond))
 	log.Info("proxy listening", "address", listener.Addr(), "workspace", spec.Name)
 	err = group.Wait()
+	publicationCtx, publicationCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	publicationErr := publicationCoordinator.Close(publicationCtx)
+	publicationCancel()
 	var prepareErr error
 	if rootCtx.Err() != nil {
-		prepareErr = manager.PrepareShutdown(context.Background())
+		prepareCtx, prepareCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		prepareErr = manager.PrepareShutdown(prepareCtx)
+		prepareCancel()
 	}
 	// The manager owns wake and rollback goroutines. Do not close Docker until
 	// that ownership has been handed back, even if shutdown takes longer.
-	managerErr := manager.Close(context.Background())
+	managerCtx, managerCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	managerErr := manager.Close(managerCtx)
+	managerCancel()
 	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	streamErr := streamController.Stop(stopCtx)
 	cancel()
 	if errors.Is(err, context.Canceled) {
 		err = nil
 	}
-	return errors.Join(err, prepareErr, managerErr, streamErr)
+	return errors.Join(err, publicationErr, prepareErr, managerErr, streamErr)
 }
 
 type connectionTracker struct {

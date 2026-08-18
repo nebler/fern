@@ -71,6 +71,14 @@ type Endpoint struct {
 	Port int
 }
 
+// StartupResult distinguishes an adopted or reconciled running workspace from
+// one that should remain dormant until its first waking request.
+type StartupResult struct {
+	Endpoint     Endpoint
+	Running      bool
+	Transitioned bool
+}
+
 func (e Endpoint) URL() string {
 	return "http://" + net.JoinHostPort(e.Host, strconv.Itoa(e.Port))
 }

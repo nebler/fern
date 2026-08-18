@@ -17,6 +17,7 @@ import (
 func runAttach(args []string) error {
 	flags := newFlagSet("attach", "Open the official client through the Fern proxy.")
 	configPath := flags.String("config", "fern.yaml", "configuration file")
+	envPath := flags.String("env-file", "", "protected environment file")
 	listenAddress := flags.String("listen", "", "proxy listen address")
 	clientOrigin := flags.String("url", "", "explicit OpenCode server origin")
 	if err := parseFlags(flags, args); err != nil {
@@ -25,6 +26,13 @@ func runAttach(args []string) error {
 	client, err := config.LoadAttach(*configPath, flagSet(flags, "config"), optionalFlag(flags, "listen", listenAddress))
 	if err != nil {
 		return err
+	}
+	if *envPath != "" {
+		values, err := readEnvFile(*envPath)
+		if err != nil {
+			return err
+		}
+		client.Env = mergeWorkspaceEnvironment(client.Env, values)
 	}
 	target, err := attachTarget(optionalFlag(flags, "url", clientOrigin), client.Listen)
 	if err != nil {

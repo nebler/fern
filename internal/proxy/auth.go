@@ -8,34 +8,56 @@ import (
 	"github.com/nebler/fern/internal/runtime"
 )
 
-func requireServerAuth(next http.Handler, auth runtime.ServerAuth) http.Handler {
-	type credentials struct {
-		username [sha256.Size]byte
-		password [sha256.Size]byte
-	}
-	var allowed []credentials
+type ControlAuth struct {
+	Password string
+}
+
+func (auth ControlAuth) Apply(request interface{ SetBasicAuth(string, string) }) {
 	if auth.Password != "" {
-		allowed = append(allowed, credentials{
-			username: sha256.Sum256([]byte("opencode")),
-			password: sha256.Sum256([]byte(auth.Password)),
-		})
+		request.SetBasicAuth("fern", auth.Password)
 	}
-	if len(allowed) == 0 {
+}
+
+type basicAuthenticator struct {
+	username [sha256.Size]byte
+	password [sha256.Size]byte
+	realm    string
+	enabled  bool
+}
+
+func newBasicAuthenticator(username, password, realm string) basicAuthenticator {
+	return basicAuthenticator{
+		username: sha256.Sum256([]byte(username)),
+		password: sha256.Sum256([]byte(password)),
+		realm:    realm,
+		enabled:  password != "",
+	}
+}
+
+func (auth basicAuthenticator) valid(request *http.Request) bool {
+	if !auth.enabled {
+		return false
+	}
+	username, password, ok := request.BasicAuth()
+	gotUsername := sha256.Sum256([]byte(username))
+	gotPassword := sha256.Sum256([]byte(password))
+	return ok && subtle.ConstantTimeCompare(gotUsername[:], auth.username[:]) == 1 &&
+		subtle.ConstantTimeCompare(gotPassword[:], auth.password[:]) == 1
+}
+
+func (auth basicAuthenticator) reject(writer http.ResponseWriter) {
+	writer.Header().Set("WWW-Authenticate", `Basic realm="`+auth.realm+`"`)
+	http.Error(writer, "unauthorized", http.StatusUnauthorized)
+}
+
+func requireServerAuth(next http.Handler, auth runtime.ServerAuth) http.Handler {
+	allowed := newBasicAuthenticator("opencode", auth.Password, "opencode")
+	if !allowed.enabled {
 		return next
 	}
-
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		username, password, ok := request.BasicAuth()
-		gotUsername := sha256.Sum256([]byte(username))
-		gotPassword := sha256.Sum256([]byte(password))
-		valid := 0
-		for _, want := range allowed {
-			valid |= subtle.ConstantTimeCompare(gotUsername[:], want.username[:]) &
-				subtle.ConstantTimeCompare(gotPassword[:], want.password[:])
-		}
-		if !ok || valid != 1 {
-			writer.Header().Set("WWW-Authenticate", `Basic realm="opencode"`)
-			http.Error(writer, "unauthorized", http.StatusUnauthorized)
+		if !allowed.valid(request) {
+			allowed.reject(writer)
 			return
 		}
 		next.ServeHTTP(writer, request)

@@ -27,10 +27,10 @@ func TestPairingCreatesCookieAndInjectsUpstreamAuth(t *testing.T) {
 	}))
 	defer upstream.Close()
 	waker := &countingWaker{endpoint: mustParseEndpoint(t, upstream.URL)}
-	handler := New(waker, runtime.ServerAuth{Password: "secret"}, testLogger())
+	handler := NewWithControls(waker, runtime.ServerAuth{Password: "secret"}, Controls{ControlAuth: ControlAuth{Password: "control-secret"}}, testLogger())
 
 	issue := httptest.NewRequest(http.MethodPost, "/fern/pair/new", nil)
-	issue.SetBasicAuth("opencode", "secret")
+	issue.SetBasicAuth("fern", "control-secret")
 	issued := httptest.NewRecorder()
 	handler.ServeHTTP(issued, issue)
 	if issued.Code != http.StatusOK {
@@ -63,6 +63,13 @@ func TestPairingCreatesCookieAndInjectsUpstreamAuth(t *testing.T) {
 	if got := waker.wakes.Load(); got != 1 {
 		t.Fatalf("wake count = %d, want 1", got)
 	}
+	adminRequest := httptest.NewRequest(http.MethodGet, "/fern/api/v1/devices", nil)
+	adminRequest.AddCookie(cookies[0])
+	adminResponse := httptest.NewRecorder()
+	handler.ServeHTTP(adminResponse, adminRequest)
+	if adminResponse.Code != http.StatusUnauthorized {
+		t.Fatalf("paired device received admin status %d", adminResponse.Code)
+	}
 
 	replay := httptest.NewRecorder()
 	handler.ServeHTTP(replay, httptest.NewRequest(http.MethodGet, "/fern/pair?code="+payload.Code, nil))
@@ -75,7 +82,7 @@ func TestPairingIssuanceRequiresBasicAuthWithoutWake(t *testing.T) {
 	t.Parallel()
 	waker := &countingWaker{}
 	response := httptest.NewRecorder()
-	New(waker, runtime.ServerAuth{Password: "secret"}, testLogger()).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/fern/pair/new", nil))
+	NewWithControls(waker, runtime.ServerAuth{Password: "secret"}, Controls{ControlAuth: ControlAuth{Password: "control-secret"}}, testLogger()).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/fern/pair/new", nil))
 	if response.Code != http.StatusUnauthorized || waker.wakes.Load() != 0 {
 		t.Fatalf("status=%d wakes=%d", response.Code, waker.wakes.Load())
 	}
@@ -88,9 +95,9 @@ func TestPairedDeviceSurvivesHandlerRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := NewWithControl(&countingWaker{}, runtime.ServerAuth{Password: "secret"}, store, testLogger())
+	handler := NewWithControls(&countingWaker{}, runtime.ServerAuth{Password: "secret"}, Controls{Store: store, ControlAuth: ControlAuth{Password: "control-secret"}}, testLogger())
 	issue := httptest.NewRequest(http.MethodPost, "/fern/pair/new", nil)
-	issue.SetBasicAuth("opencode", "secret")
+	issue.SetBasicAuth("fern", "control-secret")
 	issued := httptest.NewRecorder()
 	handler.ServeHTTP(issued, issue)
 	var payload struct {
@@ -107,7 +114,7 @@ func TestPairedDeviceSurvivesHandlerRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restarted := NewWithControl(nil, runtime.ServerAuth{Password: "secret"}, reopened, testLogger())
+	restarted := NewWithControls(nil, runtime.ServerAuth{Password: "secret"}, Controls{Store: reopened, ControlAuth: ControlAuth{Password: "control-secret"}}, testLogger())
 	request := httptest.NewRequest(http.MethodGet, "/fern/ready", nil)
 	request.AddCookie(cookie)
 	response := httptest.NewRecorder()
@@ -124,9 +131,9 @@ func TestPairingStoreFailureLeavesCodeRetryable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler := NewWithControl(nil, runtime.ServerAuth{Password: "secret"}, store, testLogger())
+	handler := NewWithControls(nil, runtime.ServerAuth{Password: "secret"}, Controls{Store: store, ControlAuth: ControlAuth{Password: "control-secret"}}, testLogger())
 	issue := httptest.NewRequest(http.MethodPost, "/fern/pair/new", nil)
-	issue.SetBasicAuth("opencode", "secret")
+	issue.SetBasicAuth("fern", "control-secret")
 	issued := httptest.NewRecorder()
 	handler.ServeHTTP(issued, issue)
 	var payload struct {

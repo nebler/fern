@@ -71,15 +71,18 @@ func runGitHubPublish(args []string, log *slog.Logger) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	result, err := publisher.Publish(ctx, publication.Request{
-		Operation: *operation, Base: *base, Title: *title, Body: *body, DryRun: *dryRun,
-	})
+	request := publication.Request{Operation: *operation, Base: *base, Title: *title, Body: *body}
+	prepared, err := publisher.Prepare(ctx, request)
 	if err != nil {
 		return err
 	}
 	if *dryRun {
-		fmt.Printf("GitHub publication preflight passed\nrepository: %s\nbase: %s\ncommit: %s\nbranch: %s\n", result.Repository, result.Base, result.Commit, result.Branch)
+		fmt.Printf("GitHub publication preflight passed\nrepository: %s\nbase: %s\ncommit: %s\nbranch: %s\n", prepared.Repository, prepared.Base, prepared.Commit, prepared.Branch)
 		return nil
+	}
+	result, err := publisher.PublishPrepared(ctx, prepared, request.Title, request.Body)
+	if err != nil {
+		return err
 	}
 	fmt.Printf("Draft pull request ready\nrepository: %s\nbranch: %s\ncommit: %s\nurl: %s\n", result.Repository, result.Branch, result.Commit, result.URL)
 	return nil

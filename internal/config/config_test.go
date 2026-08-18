@@ -50,6 +50,7 @@ func TestValidateRequiresLoopbackListen(t *testing.T) {
 			config := Default(t.TempDir())
 			config.Listen = test.address
 			config.Workspace.Env["OPENCODE_PASSWORD"] = "secret"
+			config.Control.Password = "control-secret-control-secret-1234"
 			err := Validate(config)
 			if (err != nil) != test.wantErr {
 				t.Fatalf("Validate() error = %v, wantErr %t", err, test.wantErr)
@@ -65,8 +66,17 @@ func TestValidateRequiresAuthentication(t *testing.T) {
 		t.Fatal("Validate accepted missing OPENCODE_PASSWORD")
 	}
 	config.Workspace.Env["OPENCODE_PASSWORD"] = "secret"
+	config.Control.Password = "control-secret-control-secret-1234"
 	if err := Validate(config); err != nil {
 		t.Fatal(err)
+	}
+	config.Control.Password = "short-control-secret"
+	if err := Validate(config); err == nil {
+		t.Fatal("Validate accepted a short control password")
+	}
+	config.Control.Password = "secret"
+	if err := Validate(config); err == nil {
+		t.Fatal("Validate accepted identical OpenCode and control passwords")
 	}
 }
 
@@ -77,29 +87,30 @@ func TestLoadWithEnvironmentExpandsProtectedValues(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, "fern.yaml")
-	data := []byte("workspace:\n  repo: ${FERN_TEST_REPO}\n  env:\n    OPENCODE_PASSWORD: ${OPENCODE_PASSWORD}\n")
+	data := []byte("workspace:\n  repo: ${FERN_TEST_REPO}\n  env:\n    OPENCODE_PASSWORD: ${OPENCODE_PASSWORD}\ncontrol:\n  password: ${FERN_CONTROL_PASSWORD}\n")
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	config, err := LoadWithEnvironment(path, directory, true, Overrides{}, map[string]string{
-		"FERN_TEST_REPO": repository, "OPENCODE_PASSWORD": "protected-secret",
+		"FERN_TEST_REPO": repository, "OPENCODE_PASSWORD": "protected-secret", "FERN_CONTROL_PASSWORD": "control-secret-control-secret-1234",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Workspace.Repo != repository || config.Workspace.Env["OPENCODE_PASSWORD"] != "protected-secret" {
+	if config.Workspace.Repo != repository || config.Workspace.Env["OPENCODE_PASSWORD"] != "protected-secret" || config.Control.Password != "control-secret-control-secret-1234" {
 		t.Fatalf("loaded config = %+v", config)
 	}
 }
 
 func TestValidateRejectsHostGitHubCredentials(t *testing.T) {
 	t.Parallel()
-	for _, key := range []string{"FERN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
+	for _, key := range []string{"FERN_CONTROL_PASSWORD", "FERN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
 		key := key
 		t.Run(key, func(t *testing.T) {
 			t.Parallel()
 			value := Default(t.TempDir())
 			value.Workspace.Env["OPENCODE_PASSWORD"] = "secret"
+			value.Control.Password = "control-secret-control-secret-1234"
 			value.Workspace.Env[key] = "must-stay-on-host"
 			if err := Validate(value); err == nil {
 				t.Fatalf("Validate accepted host-only %s", key)

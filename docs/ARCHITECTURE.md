@@ -71,8 +71,9 @@ boundary.
 5. Open the versioned Fern control snapshot under `~/.fern/control`.
 6. Create the local-Docker runtime backed by pause intents in `~/.fern/state`.
 7. Construct the stream controller, manager, supervisor, and reverse proxy.
-8. Ensure the OpenCode container is running and healthy.
-9. Attach its activity stream before publishing the backend endpoint.
+8. Reconcile startup without creating or resuming absent/paused compute.
+9. Adopt running compute and attach its activity stream before publishing the
+   backend endpoint; otherwise wait for the first admitted OpenCode request.
 10. Run the idle supervisor and HTTP server in one cancellation group.
 
 Fern accepts only the default Docker endpoint or an absolute Unix socket. It
@@ -87,9 +88,10 @@ to the caller. Expanded environment is part of desired state. Rotating
 `OPENCODE_PASSWORD` or a provider key requires `fern down` and `fern up`, while
 the OpenCode data volume remains intact.
 
-OpenCode's current Basic username is fixed to `opencode`; its password comes
-from `OPENCODE_PASSWORD`. This is the current upstream credential, not the
-future Fern device credential.
+OpenCode's Basic username is `opencode`; its password comes from
+`OPENCODE_PASSWORD` and enters the container. Fern control routes use the
+distinct username `fern` and host-only `FERN_CONTROL_PASSWORD`. Paired device
+cookies grant OpenCode access only, not administration or publication.
 
 | Command | Role | Workspace lease |
 | --- | --- | --- |
@@ -110,8 +112,9 @@ clients use the proxy. `debug events` bypasses request admission and is not an
 application traffic path.
 
 All `/fern/*` routes are handled before workspace admission and do not wake
-compute. They expose Fern-owned device, workflow-correlation, and publication
-state; every coding route remains owned by OpenCode. In-process publication
+compute. `/fern/` is the paired-device landing page; `/fern/control` and control
+APIs require Fern control authentication. Every coding route remains owned by
+OpenCode. The lifecycle-owned publication coordinator
 holds request admission and lifecycle wake serialization closed after stopping
 compute, records the exact commit and branch before push, obtains an existing
 `gh` token only in host memory, and permits only a validated `github.com` origin
@@ -168,14 +171,10 @@ Treating unknown routes as work preserves compatibility with the full official
 OpenCode UI and future upstream routes. Exact escaped paths are used; trailing
 slashes, encoded variants, and upgrades fail toward the conservative class.
 
-Current Basic credentials are checked before request admission or wake. The
-Authorization header is forwarded unchanged to OpenCode. Fern is presently an
-authentication gate, not a credential translation layer.
-
-The future gateway changes only this authentication edge. A Fern device cookie
-will be validated before lifecycle admission, Fern will inject a private
-OpenCode credential upstream, and `/fern/*` will be handled separately. The
-OpenCode origin and UI remain otherwise unchanged.
+Credentials are checked before request admission or wake. OpenCode Basic auth
+is forwarded to OpenCode. A valid device cookie is stripped and translated to
+the internal OpenCode credential. Fern control credentials are stripped and
+are never accepted on OpenCode routes.
 
 ## Activity And Idle Stop
 
@@ -266,9 +265,9 @@ TLS edge -> Fern HttpOnly device-cookie auth -> lifecycle admission
          -> injected internal OpenCode auth -> OpenCode UI/API
 ```
 
-Pairing, cookie rotation/revocation, Fern admin handlers, and GitHub callbacks
-are future work. Until they exist, Tailscale identity plus current OpenCode
-Basic auth is the practical private-deployment boundary.
+Pairing, durable cookie digests, expiry, device revocation, and Fern control
+handlers are implemented. Pairing codes remain process-local and single-use.
+GitHub App credentials and callbacks remain future work.
 
 ## Assurance And Limits
 
@@ -279,7 +278,8 @@ pinned OpenCode smoke test. Relevant local commands are `make image`,
 
 Not established by checked-in evidence:
 
-- production Fern device pairing and cookie authentication;
+- production enrollment and account-recovery policy beyond current private
+  single-user pairing;
 - target-host reboot, Docker restart, backup, and restore rehearsal;
 - remote browser acceptance on intended laptop and phone devices;
 - provider-backed model turns across each supported provider;

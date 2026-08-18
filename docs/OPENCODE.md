@@ -67,10 +67,10 @@ wakes stopped compute before forwarding ordinary UI and API requests, holds
 pause admission while relevant requests are active, streams responses, and
 preserves the origin expected by the official UI.
 
-`/fern/`, `/fern/ready`, `/fern/pair`, and `/fern/pair/new` are the only current
-Fern-owned HTTP routes. They do not acquire workspace admission or wake
-OpenCode. All other paths, including similar names such as `/fern-smoke`, are
-proxied unchanged.
+Fern owns the complete `/fern/*` namespace for landing, readiness, pairing,
+device, workflow, and control routes. These routes do not acquire workspace
+admission or wake OpenCode. Paths outside that namespace, including similar
+names such as `/fern-smoke`, are proxied unchanged.
 
 The lifecycle integration uses these V2 surfaces:
 
@@ -93,24 +93,20 @@ samples all activity surfaces. The reads are conservative but are not one
 atomic OpenCode snapshot. Any active item, malformed response, unknown state,
 authentication failure, or unavailable endpoint leaves compute running.
 
-## Authentication Roadmap
+## Authentication Boundary
 
-The implementation currently requires Basic auth at Fern and OpenCode. Fern
-rejects invalid credentials before wake, then forwards the accepted
-Authorization header upstream.
+OpenCode traffic uses `opencode:$OPENCODE_PASSWORD`. Fern administration and
+pairing issuance use the distinct host-only
+`fern:$FERN_CONTROL_PASSWORD`. Invalid credentials are rejected before wake.
 
-The intended production gateway is different:
+Pairing issues a Fern device credential in an `HttpOnly`, `Secure` cookie. The
+gateway authenticates that cookie, removes it before proxying, and injects the
+internal OpenCode credential. Device cookies authorize OpenCode access only;
+they cannot access `/fern/control`, control APIs, publication, or pairing
+issuance. OpenCode continues serving every non-`/fern/*` UI and API route.
 
-- Fern-owned handlers live only under reserved `/fern/*` routes;
-- pairing issues a Fern device credential in an `HttpOnly`, `Secure` cookie;
-- the gateway authenticates that cookie before waking a workspace;
-- Fern injects internal OpenCode authentication on proxied OpenCode requests;
-- OpenCode continues serving every non-`/fern/*` UI and API route.
-
-That gateway, device pairing, cookie issuance, and admin UI are proposed, not
-implemented. Do not document current Basic auth as if it were the final device
-identity boundary, and do not expose the current listener directly to the
-internet.
+The loopback listener still requires a private TLS edge and must not be exposed
+directly to the internet.
 
 ## Persistence And Upgrades
 

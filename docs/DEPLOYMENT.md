@@ -21,13 +21,16 @@ provider credentials into its container. Use only a dedicated trusted host,
 user, image, and repository. Docker-group membership is effectively root; this
 is not tenant isolation.
 
-The internal OpenCode credential uses username `opencode` and
-`OPENCODE_PASSWORD`. Tailscale identity is the outer private-access boundary.
-Basic auth is accepted for host diagnostics. For the phone demo, `fern doctor
---phone` creates a five-minute pairing link; Fern exchanges it for a secure
-`HttpOnly` cookie and injects internal OpenCode auth. Hashed device grants,
-expiry, listing, revocation, workflow/session correlations, and publication
-operations survive Fern restarts under `/var/lib/fern/.fern/control`.
+The internal OpenCode credential uses `opencode:$OPENCODE_PASSWORD`. Fern
+administration and pairing issuance use the separate host-only
+`fern:$FERN_CONTROL_PASSWORD`; the values must differ and the control password
+must contain at least 32 characters. Tailscale identity is the
+outer private-access boundary. For the phone demo, `fern doctor --phone` creates
+a five-minute pairing link; Fern exchanges it for a secure `HttpOnly` cookie and
+injects internal OpenCode auth. The paired device cannot administer Fern or
+publish. Operators use `/fern/control` with Fern control authentication. Hashed
+device grants, expiry, workflow/session correlations, and publication records
+survive Fern restarts under `/var/lib/fern/.fern/control`.
 
 ## Fast Field Demo
 

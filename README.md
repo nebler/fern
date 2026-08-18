@@ -28,14 +28,17 @@ The Docker lifecycle and reverse proxy are functional:
 - intentional-stop, failure, and OOM classification;
 - a host-local lease preventing concurrent lifecycle writers.
 
-The current proxy uses OpenCode Basic authentication. It validates the request
-before waking compute and forwards the accepted credentials upstream. Use it
+OpenCode traffic uses `opencode:$OPENCODE_PASSWORD`; Fern administration uses
+the separate host-only `fern:$FERN_CONTROL_PASSWORD`. Both are validated before
+any wake. The control password never enters the workspace container. Use Fern
 only behind a private TLS edge.
 
 Fern reserves `/fern/*` for its phone landing and control plane. A paired
-browser receives a restart-safe `HttpOnly` cookie; Fern stores only its digest,
-lists and revokes devices, records workflow-to-OpenCode-session associations,
-and injects the internal OpenCode credential only while proxying upstream.
+browser receives a restart-safe `HttpOnly` cookie; Fern stores only its digest
+and injects the internal OpenCode credential only while proxying upstream. A
+paired device can use OpenCode but cannot issue pairings, administer devices,
+mutate workflows, or publish. Those operations require `/fern/control` and the
+host-only Fern control credential.
 
 Fern is not yet a complete remote coding product. It does not currently provide
 durable prompt delivery or cancellation, notification delivery, repository
@@ -45,13 +48,16 @@ constrained host-credential prototype with a durable operation record.
 
 ## Documentation
 
-- [Architecture](./docs/ARCHITECTURE.md): implemented boundaries, lifecycle, proxy, and future gateway boundary.
+- [Architecture](./docs/ARCHITECTURE.md): implemented authentication, lifecycle, proxy, publication, and persistence boundaries.
 - [OpenCode](./docs/OPENCODE.md): the V2 server contract, official web UI, persistence, and verification.
 - [Deployment](./docs/DEPLOYMENT.md): private systemd and Tailscale Serve runbook.
 - [Phone field demo](./docs/FIELD_DEMO.md): exact preflight, phone sequence, evidence, abort, and cleanup checklist.
-- [Remote product](./docs/REMOTE_PRODUCT.md): end-to-end acceptance gaps and roadmap.
+- [Product direction](./docs/REMOTE_PRODUCT.md): durable-task direction, boundaries, and sequencing.
 - [GitHub integration](./docs/GITHUB_INTEGRATION.md): current host publication prototype and proposed GitHub App boundary.
 - [Lifecycle harness](./integration/lifecycle/README.md): real-Docker lifecycle test details.
+
+The files under [`product-docs/`](./product-docs/) are historical audits, not
+current contracts.
 
 ## Requirements
 
@@ -85,8 +91,8 @@ go run ./cmd/fern doctor --config fern.yaml --env-file fern.env --phone
 Scan the QR within five minutes. Fern exchanges its one-time code for a secure
 `HttpOnly` device cookie and opens the Fern landing page; tap **Open OpenCode**
 to enter the official UI without typing the generated Basic password. Pairing
-sessions survive Fern restarts for up to 30 days and can be listed or revoked at
-`/fern/`.
+sessions survive Fern restarts for up to 30 days and can be listed or revoked by
+an operator at `/fern/control`.
 Clients must use the Fern origin rather than Docker's dynamic backend port so
 requests can wake compute and participate in pause admission.
 
@@ -97,15 +103,16 @@ curl --user "opencode:$OPENCODE_PASSWORD" http://127.0.0.1:8080/api/health
 curl --no-buffer --user "opencode:$OPENCODE_PASSWORD" http://127.0.0.1:8080/api/event
 ```
 
-`fern attach` remains available for the official OpenCode terminal client. It
-loads the configured proxy origin and credentials rather than connecting to the
-container directly. The browser UI needs no Fern-built frontend.
+`fern attach --env-file fern.env` remains available for the official OpenCode
+terminal client. It loads the configured proxy origin and OpenCode credential
+rather than connecting to the container directly. The browser UI needs no
+Fern-built frontend.
 
-Fern forwards supported provider variables from the host when present,
-including `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`. Additional values can be
-declared under `workspace.env` in `fern.yaml`; `${NAME}` references are required
-and startup fails if a referenced host variable is absent. Keep secrets out of
-YAML and command arguments.
+Fern implicitly forwards only `OPENCODE_PASSWORD` and supported provider
+variables such as `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`. Additional values
+must be declared under `workspace.env` in `fern.yaml`; `${NAME}` references
+resolve from the protected env file. `FERN_CONTROL_PASSWORD` and GitHub
+credentials are host-only and rejected from workspace configuration.
 
 ## Commands
 
@@ -122,7 +129,9 @@ go run ./cmd/fern debug events
 go run ./cmd/fern down
 ```
 
-`up` is the long-running supervisor. `down` removes compute but deliberately
+`up` is the long-running supervisor. Starting it preserves absent or
+intentionally paused compute; the first authenticated OpenCode request wakes or
+creates the workspace. `down` removes compute but deliberately
 retains OpenCode state. `status --json` emits stable machine-readable state;
 inspect its `state` field rather than treating a stopped or failed workspace as
 a command invocation failure.

@@ -30,6 +30,15 @@ func (f *pauseRecoveryRuntime) EnsureRunning(context.Context, runtime.Spec) (run
 	return f.endpoint, true, nil
 }
 
+func (f *pauseRecoveryRuntime) ReconcileStartup(context.Context, runtime.Spec) (runtime.StartupResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.state == runtime.StateAbsent || f.state == runtime.StatePaused {
+		return runtime.StartupResult{}, nil
+	}
+	return runtime.StartupResult{Endpoint: f.endpoint, Running: true, Transitioned: f.state == runtime.StateProvisioning}, nil
+}
+
 func (f *pauseRecoveryRuntime) Pause(context.Context, string) error {
 	f.mu.Lock()
 	f.pauseN++

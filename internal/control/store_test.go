@@ -144,3 +144,30 @@ func TestPublishedPublicationCannotRegressToFailure(t *testing.T) {
 		t.Fatalf("published state regressed: %+v", result)
 	}
 }
+
+func TestPreparePublicationRetryMustMatchDurableRecord(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "control"), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	workflow, err := store.CreateWorkflow("Demo", "ses_exact", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, _, err := store.RequestPublication(workflow.ID, Publication{ID: "pub-exact", Operation: "operation", Title: "Demo"}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	commit := "0123456789012345678901234567890123456789"
+	if err := store.PreparePublication(record.ID, "owner/repo", "main", "fern/demo/operation", commit, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PreparePublication(record.ID, "owner/repo", "main", "fern/demo/other", commit, now); err == nil {
+		t.Fatal("PreparePublication accepted a different retry tuple")
+	}
+	got, _ := store.Publication(record.ID)
+	if got.Branch != "fern/demo/operation" || got.Commit != commit {
+		t.Fatalf("durable prepared record changed: %+v", got)
+	}
+}

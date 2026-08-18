@@ -11,11 +11,12 @@ import (
 
 func TestPublishPreparedReconcilesLostPushAndPullRequestResponses(t *testing.T) {
 	directory := t.TempDir()
+	bin, repo := testCommandDirectories(t, directory)
 	remote := filepath.Join(directory, "remote")
 	pull := filepath.Join(directory, "pull.json")
 	log := filepath.Join(directory, "commands.log")
-	installFakeGitHubCommands(t, directory, remote, pull, log, true, true, false)
-	publisher, err := New("demo", directory)
+	installFakeGitHubCommands(t, bin, remote, pull, log, true, true, false)
+	publisher, err := New("demo", repo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,14 +41,15 @@ func TestPublishPreparedReconcilesLostPushAndPullRequestResponses(t *testing.T) 
 
 func TestPublishPreparedDoesNotCreateWhenLookupFails(t *testing.T) {
 	directory := t.TempDir()
+	bin, repo := testCommandDirectories(t, directory)
 	remote := filepath.Join(directory, "remote")
 	pull := filepath.Join(directory, "pull.json")
 	log := filepath.Join(directory, "commands.log")
-	installFakeGitHubCommands(t, directory, remote, pull, log, false, false, true)
+	installFakeGitHubCommands(t, bin, remote, pull, log, false, false, true)
 	if err := os.WriteFile(remote, []byte(strings.Repeat("a", 40)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	publisher, err := New("demo", directory)
+	publisher, err := New("demo", repo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,14 +70,15 @@ func TestPublishPreparedDoesNotCreateWhenLookupFails(t *testing.T) {
 
 func TestPublishPreparedRejectsConflictingRemoteBranch(t *testing.T) {
 	directory := t.TempDir()
+	bin, repo := testCommandDirectories(t, directory)
 	remote := filepath.Join(directory, "remote")
 	pull := filepath.Join(directory, "pull.json")
 	log := filepath.Join(directory, "commands.log")
-	installFakeGitHubCommands(t, directory, remote, pull, log, false, false, false)
+	installFakeGitHubCommands(t, bin, remote, pull, log, false, false, false)
 	if err := os.WriteFile(remote, []byte(strings.Repeat("b", 40)), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	publisher, err := New("demo", directory)
+	publisher, err := New("demo", repo)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,6 +100,65 @@ func TestValidBranchAllowsFernWorkspaceHyphen(t *testing.T) {
 			t.Fatalf("ValidBranch accepted %q", invalid)
 		}
 	}
+}
+
+func TestValidatePublicationPathsRejectsUnusualWorkflowFilename(t *testing.T) {
+	t.Parallel()
+	for _, path := range []string{
+		".github/workflows/ordinary.yml",
+		".github/workflows/evil\n.yml",
+		"README.md\x00.github/workflows/evil\t.yml",
+	} {
+		if err := validatePublicationPaths(path + "\x00"); err == nil {
+			t.Fatalf("validatePublicationPaths accepted %q", path)
+		}
+	}
+	if err := validatePublicationPaths("README.md\x00.github/actions/test/action.yml\x00"); err != nil {
+		t.Fatalf("validatePublicationPaths rejected safe paths: %v", err)
+	}
+}
+
+func TestNewRejectsRepositoryExecutable(t *testing.T) {
+	repo := t.TempDir()
+	for _, name := range []string{"git", "gh"} {
+		if err := os.WriteFile(filepath.Join(repo, name), []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", repo)
+	if _, err := New("demo", repo); err == nil || !strings.Contains(err.Error(), "inside the repository") {
+		t.Fatalf("New error = %v", err)
+	}
+}
+
+func TestNewRejectsWritableExecutable(t *testing.T) {
+	root := t.TempDir()
+	bin, repo := testCommandDirectories(t, root)
+	for _, name := range []string{"git", "gh"} {
+		path := filepath.Join(bin, name)
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0o722); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", bin)
+	if _, err := New("demo", repo); err == nil || !strings.Contains(err.Error(), "group or world writable") {
+		t.Fatalf("New error = %v", err)
+	}
+}
+
+func testCommandDirectories(t *testing.T, root string) (string, string) {
+	t.Helper()
+	bin, repo := filepath.Join(root, "bin"), filepath.Join(root, "repo")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(repo, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return bin, repo
 }
 
 func installFakeGitHubCommands(t *testing.T, directory, remote, pull, log string, losePush, loseCreate, failLookup bool) {

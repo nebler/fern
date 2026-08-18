@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/control"
-	"github.com/nebler/fern/internal/publication"
 	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/workspace"
 )
@@ -20,19 +19,14 @@ type Waker interface {
 	InvalidateEndpoint(workspace.RequestTarget)
 }
 
-type RepositoryFencer interface {
-	AcquirePaused(context.Context) (func(), error)
-}
-
-type GitHubPublisher interface {
-	Publish(context.Context, publication.Request) (publication.Result, error)
+type PublicationExecutor interface {
+	Execute(context.Context, string) (control.Publication, error)
 }
 
 type Controls struct {
-	Store          *control.Store
-	Fencer         RepositoryFencer
-	Publisher      GitHubPublisher
-	ServiceContext context.Context
+	Store        *control.Store
+	Publications PublicationExecutor
+	ControlAuth  ControlAuth
 }
 
 type targetKey struct{}
@@ -62,7 +56,7 @@ func newHandler(waker Waker, auth runtime.ServerAuth, controls Controls, log *sl
 		upstream = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 			http.Error(writer, "workspace manager unavailable", http.StatusServiceUnavailable)
 		})
-		return pairing.handler(gatewayHandler(upstream, controls, auth.Password != ""), auth)
+		return pairing.handler(gatewayHandler(upstream, controls, controls.ControlAuth.Password != ""), auth, controls.ControlAuth)
 	}
 	if log == nil {
 		log = slog.Default()
@@ -109,7 +103,7 @@ func newHandler(waker Waker, auth runtime.ServerAuth, controls Controls, log *sl
 		ctx := context.WithValue(request.Context(), targetKey{}, proxyTarget{url: targetURL, request: target, intent: intent})
 		reverseProxy.ServeHTTP(writer, request.WithContext(ctx))
 	})
-	return pairing.handler(gatewayHandler(upstream, controls, auth.Password != ""), auth)
+	return pairing.handler(gatewayHandler(upstream, controls, controls.ControlAuth.Password != ""), auth, controls.ControlAuth)
 }
 
 func requestIntent(request *http.Request) workspace.RequestIntent {

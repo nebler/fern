@@ -89,12 +89,20 @@ func writeStatusJSON(output io.Writer, workspace string, observation runtime.Obs
 
 func runEvents(args []string, log *slog.Logger) error {
 	fs, nameFlag, configPath := workspaceFlags("debug events")
+	envPath := fs.String("env-file", "", "protected environment file")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	client, err := config.LoadEvents(*configPath, flagSet(fs, "config"), optionalFlag(fs, "name", nameFlag))
 	if err != nil {
 		return err
+	}
+	if *envPath != "" {
+		values, err := readEnvFile(*envPath)
+		if err != nil {
+			return err
+		}
+		client.Env = mergeWorkspaceEnvironment(client.Env, values)
 	}
 	if err := config.ValidateWorkspaceName(client.Name); err != nil {
 		return err

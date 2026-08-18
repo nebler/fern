@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,18 +36,28 @@ func newPairingState(stores ...*control.Store) *pairingState {
 	return state
 }
 
-func (state *pairingState) handler(next http.Handler, auth runtime.ServerAuth) http.Handler {
-	basic := requireServerAuth(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		stripDeviceCookie(request)
-		next.ServeHTTP(writer, request)
-	}), auth)
-	issue := requireServerAuth(http.HandlerFunc(state.issue), auth)
+func (state *pairingState) handler(next http.Handler, auth runtime.ServerAuth, control ControlAuth) http.Handler {
+	upstreamAuth := newBasicAuthenticator("opencode", auth.Password, "opencode")
+	controlAuth := newBasicAuthenticator("fern", control.Password, "fern-control")
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch {
 		case request.URL.Path == "/fern/pair/new" && request.URL.EscapedPath() == "/fern/pair/new":
-			issue.ServeHTTP(writer, request)
+			if !controlAuth.valid(request) {
+				controlAuth.reject(writer)
+				return
+			}
+			request.Header.Del("Authorization")
+			state.issue(writer, request)
 		case request.URL.Path == "/fern/pair" && request.URL.EscapedPath() == "/fern/pair":
 			state.pair(writer, request)
+		case requiresControlAuth(request):
+			if !controlAuth.valid(request) {
+				controlAuth.reject(writer)
+				return
+			}
+			stripDeviceCookie(request)
+			request.Header.Del("Authorization")
+			next.ServeHTTP(writer, request)
 		case state.authenticated(request):
 			stripDeviceCookie(request)
 			if auth.Password != "" {
@@ -56,9 +67,40 @@ func (state *pairingState) handler(next http.Handler, auth runtime.ServerAuth) h
 			}
 			next.ServeHTTP(writer, request)
 		default:
-			basic.ServeHTTP(writer, request)
+			if isFernRoute(request) && controlAuth.valid(request) {
+				request.Header.Del("Authorization")
+				next.ServeHTTP(writer, request)
+				return
+			}
+			if !upstreamAuth.enabled {
+				stripDeviceCookie(request)
+				next.ServeHTTP(writer, request)
+				return
+			}
+			if !upstreamAuth.valid(request) {
+				upstreamAuth.reject(writer)
+				return
+			}
+			stripDeviceCookie(request)
+			next.ServeHTTP(writer, request)
 		}
 	})
+}
+
+func isFernRoute(request *http.Request) bool {
+	path := request.URL.Path
+	return path == "/fern" || path == "/fern/" || strings.HasPrefix(path, "/fern/")
+}
+
+func requiresControlAuth(request *http.Request) bool {
+	path := request.URL.Path
+	escaped := request.URL.EscapedPath()
+	if path != escaped {
+		return strings.HasPrefix(path, "/fern/api/") || strings.HasPrefix(path, "/fern/workflows") || strings.HasPrefix(path, "/fern/devices/") || strings.HasPrefix(path, "/fern/control")
+	}
+	return path == "/fern/control" || strings.HasPrefix(path, "/fern/control/") ||
+		strings.HasPrefix(path, "/fern/api/v1/") || path == "/fern/workflows" || strings.HasPrefix(path, "/fern/workflows/") ||
+		strings.HasPrefix(path, "/fern/devices/")
 }
 
 func (state *pairingState) issue(writer http.ResponseWriter, request *http.Request) {

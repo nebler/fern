@@ -69,6 +69,13 @@ type Publication struct {
 	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
+const (
+	PublicationRequested = "requested"
+	PublicationPrepared  = "pushing"
+	PublicationFailed    = "failed"
+	PublicationPublished = "published"
+)
+
 type diskState struct {
 	Version      int                    `json:"version"`
 	Workspace    string                 `json:"workspace"`
@@ -364,6 +371,9 @@ func (store *Store) RequestPublication(workflowID string, publication Publicatio
 }
 
 func (store *Store) PreparePublication(id, repository, base, branch, commit string, now time.Time) error {
+	if repository == "" || base == "" || branch == "" || commit == "" {
+		return errors.New("prepared publication repository, base, branch, and commit are required")
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	publication, exists := store.data.Publications[id]

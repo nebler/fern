@@ -4,9 +4,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/runtime"
 )
 
@@ -53,6 +55,57 @@ func TestFernLandingLinksToOfficialUI(t *testing.T) {
 	}
 	if got := response.Header().Get("Referrer-Policy"); got != "same-origin" {
 		t.Fatalf("Referrer-Policy = %q, want same-origin for same-origin control forms", got)
+	}
+}
+
+func TestPairedLandingDoesNotExposeControlSurface(t *testing.T) {
+	t.Parallel()
+	store, err := control.Open(filepath.Join(t.TempDir(), "control"), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/fern/", nil)
+	request.SetBasicAuth("opencode", "open-secret")
+	response := httptest.NewRecorder()
+	NewWithControls(nil, runtime.ServerAuth{Password: "open-secret"}, Controls{
+		Store: store, ControlAuth: ControlAuth{Password: "control-secret"},
+	}, testLogger()).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("landing status=%d", response.Code)
+	}
+	for _, forbidden := range []string{"Tracked work", "Paired devices", "Publish draft PR", "Revoke"} {
+		if strings.Contains(response.Body.String(), forbidden) {
+			t.Fatalf("paired landing exposed %q", forbidden)
+		}
+	}
+}
+
+func TestControlSurfaceRequiresDistinctCredential(t *testing.T) {
+	t.Parallel()
+	store, err := control.Open(filepath.Join(t.TempDir(), "control"), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := NewWithControls(nil, runtime.ServerAuth{Password: "open-secret"}, Controls{
+		Store: store, ControlAuth: ControlAuth{Password: "control-secret"},
+	}, testLogger())
+	for _, credentials := range [][2]string{{}, {"opencode", "open-secret"}, {"fern", "wrong"}} {
+		request := httptest.NewRequest(http.MethodGet, "/fern/control", nil)
+		if credentials[0] != "" {
+			request.SetBasicAuth(credentials[0], credentials[1])
+		}
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusUnauthorized {
+			t.Fatalf("credentials %q status=%d", credentials[0], response.Code)
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/fern/control", nil)
+	request.SetBasicAuth("fern", "control-secret")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Paired devices") {
+		t.Fatalf("control status=%d body=%q", response.Code, response.Body.String())
 	}
 }
 

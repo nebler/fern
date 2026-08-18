@@ -27,8 +27,13 @@ type Workspace struct {
 	Env    map[string]string
 }
 
+type Control struct {
+	Password string
+}
+
 type Config struct {
 	Workspace Workspace
+	Control   Control
 	IdleAfter time.Duration
 	Listen    string
 }
@@ -58,7 +63,10 @@ type fileWorkspace struct {
 
 type fileConfig struct {
 	Workspace fileWorkspace `yaml:"workspace"`
-	Idle      struct {
+	Control   struct {
+		Password yaml.Node `yaml:"password"`
+	} `yaml:"control"`
+	Idle struct {
 		After yaml.Node `yaml:"after"`
 	} `yaml:"idle"`
 	Proxy struct {
@@ -136,6 +144,12 @@ func load(path, defaultRepo string, required bool, overrides Overrides, workspac
 					return Config{}, fmt.Errorf("parse proxy.listen: %w", err)
 				}
 			}
+			if file.Control.Password.Kind != 0 {
+				config.Control.Password, err = decodeString(file.Control.Password)
+				if err != nil {
+					return Config{}, fmt.Errorf("parse control.password: %w", err)
+				}
+			}
 		}
 		if err := applyFileWorkspace(&config.Workspace, file.Workspace, overrides); err != nil {
 			return Config{}, fmt.Errorf("parse workspace: %w", err)
@@ -190,6 +204,12 @@ func load(path, defaultRepo string, required bool, overrides Overrides, workspac
 			return Config{}, fmt.Errorf("expand workspace.env.%s: %w", key, err)
 		}
 		config.Workspace.Env[key] = expanded
+	}
+	if !workspaceOnly {
+		config.Control.Password, err = expandRequired(config.Control.Password, lookup)
+		if err != nil {
+			return Config{}, fmt.Errorf("expand control.password: %w", err)
+		}
 	}
 	return config, nil
 }
@@ -386,6 +406,15 @@ func Validate(config Config) error {
 	if config.Workspace.Env["OPENCODE_PASSWORD"] == "" {
 		return errors.New("OPENCODE_PASSWORD is required")
 	}
+	if config.Control.Password == "" {
+		return errors.New("FERN_CONTROL_PASSWORD is required through control.password")
+	}
+	if len(config.Control.Password) < 32 {
+		return errors.New("FERN_CONTROL_PASSWORD must be at least 32 characters")
+	}
+	if config.Control.Password == config.Workspace.Env["OPENCODE_PASSWORD"] {
+		return errors.New("Fern control and OpenCode passwords must be different")
+	}
 	if config.IdleAfter <= 0 {
 		return fmt.Errorf("idle duration must be positive")
 	}
@@ -417,7 +446,7 @@ func ValidateWorkspace(config Config) error {
 	}
 	for key := range config.Workspace.Env {
 		switch key {
-		case "FERN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN":
+		case "FERN_CONTROL_PASSWORD", "FERN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN":
 			return fmt.Errorf("%s is host-only and cannot be forwarded to the workspace", key)
 		}
 		if key == "" || strings.ContainsAny(key, "=\x00\r\n") {
