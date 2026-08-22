@@ -93,17 +93,19 @@ func runEvents(args []string, log *slog.Logger) error {
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	client, err := config.LoadEvents(*configPath, flagSet(fs, "config"), optionalFlag(fs, "name", nameFlag))
-	if err != nil {
-		return err
-	}
+	var values map[string]string
 	if *envPath != "" {
-		values, err := readEnvFile(*envPath)
+		var err error
+		values, err = readEnvFile(*envPath)
 		if err != nil {
 			return err
 		}
-		client.Env = mergeWorkspaceEnvironment(client.Env, values)
 	}
+	client, err := config.LoadEventsWithEnvironment(*configPath, flagSet(fs, "config"), optionalFlag(fs, "name", nameFlag), environmentLookup(values))
+	if err != nil {
+		return err
+	}
+	client.Env = mergeWorkspaceEnvironment(client.Env, values)
 	if err := config.ValidateWorkspaceName(client.Name); err != nil {
 		return err
 	}

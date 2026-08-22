@@ -12,11 +12,8 @@ import (
 func TestAttachURLUsesReachableAddress(t *testing.T) {
 	t.Parallel()
 	tests := map[string]string{
-		"127.0.0.1:8080":  "http://127.0.0.1:8080",
-		"0.0.0.0:8080":    "http://127.0.0.1:8080",
-		":8080":           "http://127.0.0.1:8080",
-		"[::]:8080":       "http://[::1]:8080",
-		"100.64.0.1:8080": "http://100.64.0.1:8080",
+		"127.0.0.1:8080": "http://127.0.0.1:8080",
+		"[::1]:8080":     "http://[::1]:8080",
 	}
 	for input, want := range tests {
 		got, err := attachURL(input)
@@ -29,6 +26,11 @@ func TestAttachURLUsesReachableAddress(t *testing.T) {
 	}
 	if _, err := attachURL("127.0.0.1:0"); err == nil {
 		t.Fatal("attachURL accepted a dynamic port")
+	}
+	for _, address := range []string{"0.0.0.0:8080", ":8080", "[::]:8080", "100.64.0.1:8080", "localhost:8080"} {
+		if _, err := attachURL(address); err == nil {
+			t.Fatalf("attachURL accepted non-loopback address %q", address)
+		}
 	}
 }
 

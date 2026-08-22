@@ -35,6 +35,9 @@ func runGitHubPublish(args []string, log *slog.Logger) error {
 	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
+	if !*dryRun {
+		return invocationError{message: "standalone publication cannot safely provide durable persistence for GitHub effects; use the publication control on a configured running 'fern up' service"}
+	}
 	if strings.TrimSpace(*title) == "" || len(*title) > 256 {
 		return invocationError{message: "--title is required and must be at most 256 bytes"}
 	}
@@ -65,7 +68,12 @@ func runGitHubPublish(args []string, log *slog.Logger) error {
 	if observation.State != fernRuntime.StateAbsent {
 		return fmt.Errorf("publication requires removed compute; stop the service and run 'fern down' first (state: %s)", observation.State)
 	}
-	publisher, err := publication.New(workspace.Workspace.Name, workspace.Workspace.Repo)
+	if workspace.Workspace.GitHub == nil {
+		return fmt.Errorf("GitHub publication is disabled; configure workspace.github.repository.id and fullName")
+	}
+	publisher, err := publication.New(workspace.Workspace.Name, workspace.Workspace.Repo, publication.RepositoryBinding{
+		ID: workspace.Workspace.GitHub.Repository.ID, FullName: workspace.Workspace.GitHub.Repository.FullName,
+	})
 	if err != nil {
 		return err
 	}
@@ -76,15 +84,7 @@ func runGitHubPublish(args []string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	if *dryRun {
-		fmt.Printf("GitHub publication preflight passed\nrepository: %s\nbase: %s\ncommit: %s\nbranch: %s\n", prepared.Repository, prepared.Base, prepared.Commit, prepared.Branch)
-		return nil
-	}
-	result, err := publisher.PublishPrepared(ctx, prepared, request.Title, request.Body)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("Draft pull request ready\nrepository: %s\nbranch: %s\ncommit: %s\nurl: %s\n", result.Repository, result.Branch, result.Commit, result.URL)
+	fmt.Printf("GitHub publication preflight passed\nrepository: %s (%d)\nbase: %s at %s\ncommit: %s\nbranch: %s\n", prepared.RepositoryFullName, prepared.RepositoryID, prepared.BaseRef, prepared.BaseSHA, prepared.ResultCommit, prepared.Branch)
 	return nil
 }
 

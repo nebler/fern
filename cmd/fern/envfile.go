@@ -73,3 +73,12 @@ func mergeWorkspaceEnvironment(configured map[string]string, fileValues map[stri
 	}
 	return merged
 }
+
+func environmentLookup(fileValues map[string]string) func(string) (string, bool) {
+	return func(key string) (string, bool) {
+		if value, exists := fileValues[key]; exists {
+			return value, true
+		}
+		return os.LookupEnv(key)
+	}
+}

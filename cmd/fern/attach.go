@@ -18,22 +18,24 @@ func runAttach(args []string) error {
 	flags := newFlagSet("attach", "Open the official client through the Fern proxy.")
 	configPath := flags.String("config", "fern.yaml", "configuration file")
 	envPath := flags.String("env-file", "", "protected environment file")
-	listenAddress := flags.String("listen", "", "proxy listen address")
-	clientOrigin := flags.String("url", "", "explicit OpenCode server origin")
+	listenAddress := flags.String("listen", "", "operator proxy listen address")
+	clientOrigin := flags.String("url", "", "explicit loopback OpenCode server origin")
 	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
-	client, err := config.LoadAttach(*configPath, flagSet(flags, "config"), optionalFlag(flags, "listen", listenAddress))
-	if err != nil {
-		return err
-	}
+	var values map[string]string
 	if *envPath != "" {
-		values, err := readEnvFile(*envPath)
+		var err error
+		values, err = readEnvFile(*envPath)
 		if err != nil {
 			return err
 		}
-		client.Env = mergeWorkspaceEnvironment(client.Env, values)
 	}
+	client, err := config.LoadAttachWithEnvironment(*configPath, flagSet(flags, "config"), optionalFlag(flags, "listen", listenAddress), environmentLookup(values))
+	if err != nil {
+		return err
+	}
+	client.Env = mergeWorkspaceEnvironment(client.Env, values)
 	target, err := attachTarget(optionalFlag(flags, "url", clientOrigin), client.Listen)
 	if err != nil {
 		return err
@@ -85,11 +87,9 @@ func attachTarget(explicitOrigin *string, listenAddress string) (string, error) 
 	if origin.User != nil {
 		return "", fmt.Errorf("invalid attach URL %q: user information is not allowed", *explicitOrigin)
 	}
-	if origin.Scheme == "http" {
-		ip := net.ParseIP(origin.Hostname())
-		if ip == nil || !ip.IsLoopback() {
-			return "", fmt.Errorf("invalid attach URL %q: non-loopback origins require https", *explicitOrigin)
-		}
+	ip := net.ParseIP(origin.Hostname())
+	if ip == nil || !ip.IsLoopback() {
+		return "", fmt.Errorf("invalid attach URL %q: host must be a numeric loopback IP", *explicitOrigin)
 	}
 	if strings.Contains(*explicitOrigin, "#") {
 		return "", fmt.Errorf("invalid attach URL %q: fragments are not allowed", *explicitOrigin)
@@ -114,12 +114,8 @@ func attachURL(address string) (string, error) {
 		return "", fmt.Errorf("invalid proxy port %q", portText)
 	}
 	ip := net.ParseIP(host)
-	if host == "" || ip != nil && ip.IsUnspecified() {
-		if ip != nil && ip.To4() == nil {
-			host = "::1"
-		} else {
-			host = "127.0.0.1"
-		}
+	if ip == nil || !ip.IsLoopback() {
+		return "", fmt.Errorf("invalid operator listen address %q: host must be a numeric loopback IP", address)
 	}
 	return (&url.URL{Scheme: "http", Host: net.JoinHostPort(host, portText)}).String(), nil
 }

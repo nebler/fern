@@ -1,12 +1,21 @@
 package main
 
 import (
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestStandaloneGitHubMutationIsRejectedBeforeDependencies(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	err := runGitHubPublish([]string{"--title", "Must persist"}, slog.Default())
+	if err == nil || !strings.Contains(err.Error(), "durable") || !strings.Contains(err.Error(), "running") {
+		t.Fatalf("mutation rejection = %v", err)
+	}
+}
 
 func TestGitHubRepositoryName(t *testing.T) {
 	t.Parallel()

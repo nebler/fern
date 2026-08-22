@@ -36,6 +36,12 @@ func TestInitCreatesProtectedRunnableConfiguration(t *testing.T) {
 	if strings.Contains(string(data), "OPENCODE_PASSWORD") || !strings.Contains(string(data), "${FERN_CONTROL_PASSWORD}") {
 		t.Fatal("generated YAML has an invalid credential reference")
 	}
+	if !strings.Contains(string(data), "listen: 127.0.0.1:8080") || !strings.Contains(string(data), "operatorListen: 127.0.0.1:8081") {
+		t.Fatal("generated YAML does not contain distinct remote and operator listeners")
+	}
+	if strings.Contains(string(data), "remoteOrigin:") {
+		t.Fatal("local-only init unexpectedly emitted proxy.remoteOrigin")
+	}
 	values, err := readEnvFile(envPath)
 	if err != nil {
 		t.Fatal(err)
@@ -56,6 +62,35 @@ func TestInitCreatesProtectedRunnableConfiguration(t *testing.T) {
 	}
 	if err := runInit([]string{"--config", configPath, "--env-file", envPath, "--repo", repository}); err == nil || !strings.Contains(err.Error(), "refusing to overwrite") {
 		t.Fatalf("second init error = %v", err)
+	}
+}
+
+func TestInitConditionallyEmitsRemoteOriginAndGuidance(t *testing.T) {
+	directory := t.TempDir()
+	repository := filepath.Join(directory, "repo")
+	if err := os.Mkdir(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(directory, "fern.yaml")
+	envPath := filepath.Join(directory, "fern.env")
+	origin := "https://fern.example.ts.net"
+	if err := runInit([]string{"--config", configPath, "--env-file", envPath, "--repo", repository, "--remote-origin", origin}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "remoteOrigin: "+origin) {
+		t.Fatalf("generated YAML = %s", data)
+	}
+	remoteSteps := initNextSteps("fern.yaml", "fern.env", "127.0.0.1:8080", origin)
+	if !strings.Contains(remoteSteps, origin) || !strings.Contains(remoteSteps, "doctor") {
+		t.Fatalf("remote guidance = %q", remoteSteps)
+	}
+	localSteps := initNextSteps("fern.yaml", "fern.env", "127.0.0.1:8080", "")
+	if !strings.Contains(localSteps, "set proxy.remoteOrigin") || strings.Contains(localSteps, "doctor") {
+		t.Fatalf("local-only guidance = %q", localSteps)
 	}
 }
 

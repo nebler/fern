@@ -5,12 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -115,44 +117,58 @@ func diagnose(configPath, envPath string, phone, fieldDemo bool, explicitURL str
 	} else {
 		add("github", "pass", "GitHub CLI authentication is available on the host", "")
 	}
-	if fieldDemo {
-		if cfg.Workspace.Env["ANTHROPIC_API_KEY"] == "" && cfg.Workspace.Env["OPENAI_API_KEY"] == "" {
-			add("provider", "fail", "no supported provider credential is configured", "Add ANTHROPIC_API_KEY or OPENAI_API_KEY to the protected env file.")
-		} else {
-			add("provider", "pass", "a supported provider credential is configured", "")
-		}
-		add("live-checks", "warn", "provider execution and GitHub mutation are not run by doctor", "Run the opt-in provider and disposable-repository rehearsals before the phone demo.")
-	}
-	localURL, err := attachURL(cfg.Listen)
+	localURL, err := attachURL(cfg.OperatorListen)
 	if err != nil {
-		add("gateway", "fail", err.Error(), "Fix proxy.listen.")
+		add("gateway", "fail", err.Error(), "Fix proxy.operatorListen.")
+		if fieldDemo {
+			add("provider", "fail", "OpenCode provider availability could not be checked", "Fix proxy.operatorListen, start Fern, connect a provider in OpenCode, and retry.")
+		}
 	} else if err := checkReady(localURL, cfg.Control.Password); err != nil {
 		add("gateway", "fail", "local Fern gateway is not ready", "Start fern up with the same --config and --env-file.")
+		if fieldDemo {
+			add("provider", "fail", "OpenCode provider availability could not be checked", "Start Fern, connect a provider in the official OpenCode UI, and retry.")
+		}
 	} else {
 		add("gateway", "pass", "local Fern gateway is serving", "")
+		if fieldDemo {
+			count, providerErr := checkProviderConnection(localURL, cfg.Workspace.Env["OPENCODE_PASSWORD"])
+			if providerErr != nil {
+				add("provider", "fail", providerErr.Error(), "Connect any supported provider in the official OpenCode UI, then retry.")
+			} else {
+				add("provider", "pass", fmt.Sprintf("OpenCode reports %d active provider(s)", count), "")
+			}
+		}
+	}
+	if fieldDemo {
+		add("live-checks", "warn", "provider execution and GitHub mutation are not run by doctor", "Run the opt-in provider and disposable-repository rehearsals before the phone demo.")
 	}
 	if phone || explicitURL != "" {
-		servedOrigin, serveErr := discoverTailscaleURL(cfg.Listen)
-		origin := explicitURL
-		if origin == "" {
-			origin = servedOrigin
+		if cfg.RemoteOrigin == "" {
+			add("tailscale", "fail", "proxy.remoteOrigin is required for phone mode", "Set proxy.remoteOrigin to the exact canonical HTTPS root origin reported for this host, then retry.")
+			return report
 		}
-		if serveErr != nil || origin == "" {
+		if explicitURL != "" && explicitURL != cfg.RemoteOrigin {
+			add("tailscale", "fail", "--url does not exactly match proxy.remoteOrigin", "Remove --url or pass the exact configured canonical origin.")
+			return report
+		}
+		servedOrigin, serveErr := discoverTailscaleURL(cfg.Listen, cfg.OperatorListen)
+		if serveErr != nil || servedOrigin == "" {
 			add("tailscale", "fail", "no Tailscale Serve HTTPS origin was found", fmt.Sprintf("Run tailscale serve --bg http://%s, then retry.", cfg.Listen))
-		} else if validated, validateErr := attachTarget(&origin, cfg.Listen); validateErr != nil {
-			add("tailscale", "fail", validateErr.Error(), "Use a private HTTPS root origin.")
-		} else if !strings.EqualFold(strings.TrimRight(validated, "/"), strings.TrimRight(servedOrigin, "/")) {
-			add("tailscale", "fail", "explicit phone URL does not match the configured Tailscale Serve route", "Use the HTTPS origin whose root route proxies to Fern.")
-		} else if localOrigin, localErr := localTailscaleOrigin(); localErr != nil || !strings.EqualFold(mustHostname(validated), mustHostname(localOrigin)) {
-			add("tailscale", "fail", "phone URL does not match this Tailscale host", "Use the HTTPS URL reported by tailscale serve status on this host.")
-		} else if err := checkReady(validated, cfg.Control.Password); err != nil {
-			add("phone", "fail", "private phone URL did not reach Fern", "Check Tailscale on both devices and the Serve mapping.")
 		} else {
+			localOrigin, localErr := localTailscaleOrigin()
+			if topologyErr := validatePhoneTopology(cfg.RemoteOrigin, explicitURL, servedOrigin, localOrigin, localErr); topologyErr != nil {
+				add("tailscale", "fail", topologyErr.Error(), "Make proxy.remoteOrigin, the root Serve origin, and this host's tailnet HTTPS origin identical.")
+				return report
+			}
 			code, pairErr := issuePairingCode(localURL, cfg.Control.Password)
 			if pairErr != nil {
 				add("pairing", "fail", "could not create a one-time phone pairing link", "Ensure the local Fern process is the current build.")
+			} else if err := checkPairingPreview(cfg.RemoteOrigin, code); err != nil {
+				add("pairing", "fail", err.Error(), "Check that Tailscale Serve targets proxy.listen and Fern is current.")
+			} else if err := checkRemoteCredentialRejected(cfg.RemoteOrigin, cfg.Workspace.Env["OPENCODE_PASSWORD"]); err != nil {
+				add("phone", "fail", err.Error(), "Serve only proxy.listen; never proxy.operatorListen or the OpenCode backend.")
 			} else {
-				report.PhoneURL = strings.TrimRight(validated, "/") + "/fern/pair?code=" + url.QueryEscape(code)
+				report.PhoneURL = cfg.RemoteOrigin + "/fern/pair?code=" + url.QueryEscape(code)
 				add("tailscale", "pass", "private HTTPS route reaches Fern", "")
 				add("pairing", "pass", "one-time phone pairing link created", "")
 				add("phone", "pass", "phone-demo transport is ready", "")
@@ -162,12 +178,23 @@ func diagnose(configPath, envPath string, phone, fieldDemo bool, explicitURL str
 	return report
 }
 
-func mustHostname(origin string) string {
-	parsed, err := url.Parse(origin)
-	if err != nil {
-		return ""
+func validatePhoneTopology(configured, asserted, served, local string, localErr error) error {
+	if configured == "" {
+		return fmt.Errorf("proxy.remoteOrigin is required for phone mode")
 	}
-	return parsed.Hostname()
+	if asserted != "" && asserted != configured {
+		return fmt.Errorf("--url does not exactly match proxy.remoteOrigin")
+	}
+	if served != configured {
+		return fmt.Errorf("Tailscale Serve origin %q does not exactly match proxy.remoteOrigin %q", served, configured)
+	}
+	if localErr != nil {
+		return fmt.Errorf("discover this host's tailnet origin: %w", localErr)
+	}
+	if local != configured {
+		return fmt.Errorf("local tailnet origin %q does not exactly match proxy.remoteOrigin %q", local, configured)
+	}
+	return nil
 }
 
 func checkCommand(timeout time.Duration, name string, args ...string) error {
@@ -212,6 +239,43 @@ func checkReady(origin, password string) error {
 	return nil
 }
 
+func checkProviderConnection(origin, password string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/api/provider", nil)
+	if err != nil {
+		return 0, err
+	}
+	request.SetBasicAuth("opencode", password)
+	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	if err != nil {
+		return 0, fmt.Errorf("query OpenCode providers: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("OpenCode provider readiness returned %s", response.Status)
+	}
+	var result struct {
+		Data []struct {
+			ID       string `json:"id"`
+			Disabled bool   `json:"disabled"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
+		return 0, fmt.Errorf("OpenCode provider readiness returned an invalid response")
+	}
+	count := 0
+	for _, provider := range result.Data {
+		if provider.ID != "" && !provider.Disabled {
+			count++
+		}
+	}
+	if count == 0 {
+		return 0, fmt.Errorf("OpenCode has no active provider connection")
+	}
+	return count, nil
+}
+
 func issuePairingCode(origin, password string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -240,9 +304,65 @@ func issuePairingCode(origin, password string) (string, error) {
 	return result.Code, nil
 }
 
+func validatePhoneOrigin(origin string) (string, error) {
+	if origin == "" {
+		return "", fmt.Errorf("invalid phone URL %q: a private HTTPS origin is required", origin)
+	}
+	validated, err := config.ParseRemoteOrigin(origin)
+	if err != nil {
+		return "", fmt.Errorf("invalid phone URL %q: %w", origin, err)
+	}
+	return validated, nil
+}
+
+func checkPairingPreview(origin, code string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/fern/pair?code="+url.QueryEscape(code), nil)
+	if err != nil {
+		return err
+	}
+	request.Header.Set("User-Agent", "Fern-Doctor-Pairing-Scanner/1")
+	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	if err != nil {
+		return fmt.Errorf("pairing preview failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("pairing preview returned %s", response.Status)
+	}
+	if len(response.Cookies()) != 0 {
+		return fmt.Errorf("pairing preview unexpectedly set a cookie")
+	}
+	body, err := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	if err != nil || !strings.Contains(string(body), "Pair this phone?") {
+		return fmt.Errorf("pairing preview returned an invalid response")
+	}
+	return nil
+}
+
+func checkRemoteCredentialRejected(origin, password string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/api/health", nil)
+	if err != nil {
+		return err
+	}
+	request.SetBasicAuth("opencode", password)
+	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	if err != nil {
+		return fmt.Errorf("remote credential rejection check failed: %w", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized {
+		return fmt.Errorf("remote ingress accepted or mishandled the backend credential (%s)", response.Status)
+	}
+	return nil
+}
+
 var httpsOriginPattern = regexp.MustCompile(`https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?`)
 
-func discoverTailscaleURL(listen string) (string, error) {
+func discoverTailscaleURL(listen, operatorListen string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "tailscale", "serve", "status")
@@ -251,7 +371,7 @@ func discoverTailscaleURL(listen string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return tailscaleOriginForTarget(string(output), listen)
+	return tailscaleOriginForTopology(string(output), listen, operatorListen)
 }
 
 func localTailscaleOrigin() (string, error) {
@@ -312,6 +432,30 @@ func tailscaleOriginForTarget(output, listen string) (string, error) {
 		return origin, nil
 	}
 	return "", fmt.Errorf("Tailscale Serve root does not proxy http://%s", listen)
+}
+
+func tailscaleOriginForTopology(output, listen, operatorListen string) (string, error) {
+	for _, line := range strings.Split(output, "\n") {
+		_, target, found := strings.Cut(strings.TrimSpace(line), "proxy ")
+		if found && serveTargetUsesListener(strings.TrimSpace(target), operatorListen) {
+			return "", fmt.Errorf("Tailscale Serve exposes proxy.operatorListen; only proxy.listen may be served")
+		}
+	}
+	return tailscaleOriginForTarget(output, listen)
+}
+
+func serveTargetUsesListener(target, listener string) bool {
+	parsed, err := url.Parse(target)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	_, listenerPort, err := net.SplitHostPort(listener)
+	if err != nil {
+		return false
+	}
+	targetPort, targetErr := strconv.Atoi(parsed.Port())
+	configuredPort, listenerErr := strconv.Atoi(listenerPort)
+	return targetErr == nil && listenerErr == nil && targetPort == configuredPort
 }
 
 func tailscaleOrigin(output string) (string, error) {

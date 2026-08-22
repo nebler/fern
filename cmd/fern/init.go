@@ -22,7 +22,9 @@ func runInit(args []string) error {
 	repo := flags.String("repo", ".", "repository path")
 	memory := flags.String("memory", "8Gi", "workspace memory limit")
 	idle := flags.String("idle", "10m", "idle duration")
-	listen := flags.String("listen", "127.0.0.1:8080", "proxy listen address")
+	listen := flags.String("listen", "127.0.0.1:8080", "remote/device proxy listen address")
+	operatorListen := flags.String("operator-listen", "127.0.0.1:8081", "host/operator proxy listen address")
+	remoteOrigin := flags.String("remote-origin", "", "canonical private HTTPS root origin")
 	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
@@ -46,6 +48,8 @@ func runInit(args []string) error {
 	values.Workspace.Env["OPENCODE_PASSWORD"] = openCodeSecret
 	values.Control.Password = controlSecret
 	values.Listen = *listen
+	values.OperatorListen = *operatorListen
+	values.RemoteOrigin = *remoteOrigin
 	parsedIdle, err := time.ParseDuration(*idle)
 	if err != nil {
 		return err
@@ -69,7 +73,9 @@ func runInit(args []string) error {
 			After string `yaml:"after"`
 		} `yaml:"idle"`
 		Proxy struct {
-			Listen string `yaml:"listen"`
+			Listen         string `yaml:"listen"`
+			OperatorListen string `yaml:"operatorListen"`
+			RemoteOrigin   string `yaml:"remoteOrigin,omitempty"`
 		} `yaml:"proxy"`
 	}
 	var output initFile
@@ -81,6 +87,8 @@ func runInit(args []string) error {
 	output.Control.Password = "${FERN_CONTROL_PASSWORD}"
 	output.Idle.After = values.IdleAfter.String()
 	output.Proxy.Listen = values.Listen
+	output.Proxy.OperatorListen = values.OperatorListen
+	output.Proxy.RemoteOrigin = values.RemoteOrigin
 	configData, err := yaml.Marshal(output)
 	if err != nil {
 		return err
@@ -88,13 +96,21 @@ func runInit(args []string) error {
 	if err := writeNewFile(*configPath, configData, 0o600); err != nil {
 		return err
 	}
-	envData := []byte("# Keep this file on the Fern host.\nOPENCODE_PASSWORD=" + openCodeSecret + "\nFERN_CONTROL_PASSWORD=" + controlSecret + "\n# Add one provider key, for example:\n# ANTHROPIC_API_KEY=\n")
+	envData := []byte("# Keep this file on the Fern host.\nOPENCODE_PASSWORD=" + openCodeSecret + "\nFERN_CONTROL_PASSWORD=" + controlSecret + "\n")
 	if err := writeNewFile(*envPath, envData, 0o600); err != nil {
 		_ = os.Remove(*configPath)
 		return err
 	}
-	fmt.Printf("Fern demo configuration created\n\nconfig: %s\nsecrets: %s\nrepository: %s\n\nNext:\n  1. Add a provider key to %s\n  2. Run: fern up --config %s --env-file %s\n  3. In another terminal: tailscale serve --bg http://%s\n  4. In that terminal: fern doctor --config %s --env-file %s --phone\n", *configPath, *envPath, absRepo, *envPath, *configPath, *envPath, *listen, *configPath, *envPath)
+	fmt.Printf("Fern demo configuration created\n\nconfig: %s\nsecrets: %s\nrepository: %s\n\n%s", *configPath, *envPath, absRepo, initNextSteps(*configPath, *envPath, *listen, *remoteOrigin))
 	return nil
+}
+
+func initNextSteps(configPath, envPath, listen, remoteOrigin string) string {
+	steps := fmt.Sprintf("Next:\n  1. Run: fern up --config %s --env-file %s\n  2. In another terminal, run: fern attach --config %s --env-file %s\n  3. Use OpenCode's /connect flow to connect an account or provider\n", configPath, envPath, configPath, envPath)
+	if remoteOrigin == "" {
+		return steps + "  4. For phone mode, set proxy.remoteOrigin to the exact canonical HTTPS root origin, then configure Tailscale Serve for only proxy.listen.\n"
+	}
+	return steps + fmt.Sprintf("  4. Serve only the remote listener: tailscale serve --bg http://%s\n  5. Verify that Serve reports exactly %s, then run: fern doctor --config %s --env-file %s --phone\n", listen, remoteOrigin, configPath, envPath)
 }
 
 func writeNewFile(path string, data []byte, mode os.FileMode) error {

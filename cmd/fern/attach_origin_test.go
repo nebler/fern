@@ -8,10 +8,9 @@ import (
 func TestAttachTargetAcceptsExplicitOrigins(t *testing.T) {
 	t.Parallel()
 	tests := map[string]string{
-		"http://127.0.0.1:8080":           "http://127.0.0.1:8080",
-		"https://host.tailnet.ts.net":     "https://host.tailnet.ts.net",
-		"https://host.tailnet.ts.net/":    "https://host.tailnet.ts.net",
-		"HTTPS://host.tailnet.ts.net:443": "https://host.tailnet.ts.net:443",
+		"http://127.0.0.1:8080":  "http://127.0.0.1:8080",
+		"https://127.0.0.1:8443": "https://127.0.0.1:8443",
+		"http://[::1]:8081/":     "http://[::1]:8081",
 	}
 	for input, want := range tests {
 		input, want := input, want
@@ -47,6 +46,7 @@ func TestAttachTargetRejectsInvalidExplicitOrigins(t *testing.T) {
 		"ftp://host.tailnet.ts.net",
 		"http://host.tailnet.ts.net",
 		"http://100.64.0.1:8080",
+		"https://host.tailnet.ts.net",
 		"https://user@host.tailnet.ts.net",
 		"https://user:secret@host.tailnet.ts.net",
 		"https://host.tailnet.ts.net#section",
@@ -69,18 +69,14 @@ func TestAttachTargetRejectsInvalidExplicitOrigins(t *testing.T) {
 
 func TestAttachTargetFallsBackToListener(t *testing.T) {
 	t.Parallel()
-	got, err := attachTarget(nil, "0.0.0.0:8080")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != "http://127.0.0.1:8080" {
-		t.Fatalf("attachTarget(nil) = %q", got)
+	if _, err := attachTarget(nil, "0.0.0.0:8080"); err == nil {
+		t.Fatal("attach accepted a non-loopback listener")
 	}
 }
 
 func TestExplicitAttachOriginKeepsCredentialsInEnvironment(t *testing.T) {
 	t.Parallel()
-	origin := "https://host.tailnet.ts.net"
+	origin := "http://127.0.0.1:8081"
 	target, err := attachTarget(&origin, "127.0.0.1:8080")
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +93,7 @@ func TestExplicitAttachOriginKeepsCredentialsInEnvironment(t *testing.T) {
 			t.Fatalf("environment %v does not contain %q", environment, value)
 		}
 	}
-	if target == "https://opencode:secret@host.tailnet.ts.net" {
+	if target == "http://opencode:secret@127.0.0.1:8081" {
 		t.Fatal("credentials were placed in attach URL")
 	}
 }
