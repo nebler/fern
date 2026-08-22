@@ -3,9 +3,11 @@ package proxy
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -26,10 +28,31 @@ type PublicationExecutor interface {
 type Controls struct {
 	Store        *control.Store
 	Publications PublicationExecutor
+	Tasks        http.Handler
+	Onboarding   http.Handler
 	ControlAuth  ControlAuth
 }
 
+type Handlers struct {
+	Remote   http.Handler
+	Operator http.Handler
+}
+
 type targetKey struct{}
+type originKey struct{}
+
+type TrustedOrigins struct {
+	Remote   string
+	Operator string
+}
+
+type trustedOrigin struct {
+	raw       string
+	scheme    string
+	authority string
+	port      string
+	legacy    bool
+}
 
 type proxyTarget struct {
 	url     *url.URL
@@ -37,26 +60,117 @@ type proxyTarget struct {
 	intent  workspace.RequestIntent
 }
 
+// New returns the legacy combined test handler. Production startup must use
+// NewHandlers so backend Basic authentication is never enabled remotely.
 func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
-	return newHandler(waker, auth, Controls{}, log)
+	return legacyOriginHandler(newHandler(waker, auth, Controls{}, log))
 }
 
-func NewWithControl(waker Waker, auth runtime.ServerAuth, store *control.Store, log *slog.Logger) http.Handler {
-	return newHandler(waker, auth, Controls{Store: store}, log)
-}
-
+// NewWithControls returns the legacy combined test handler. Production startup
+// must use NewHandlers.
 func NewWithControls(waker Waker, auth runtime.ServerAuth, controls Controls, log *slog.Logger) http.Handler {
-	return newHandler(waker, auth, controls, log)
+	return legacyOriginHandler(newHandler(waker, auth, controls, log))
+}
+
+// NewHandlers builds the two production ingress surfaces around one reverse
+// proxy and one pairing-code state. The remote handler must be the only handler
+// exposed through the private TLS edge.
+func NewHandlers(waker Waker, auth runtime.ServerAuth, controls Controls, origins TrustedOrigins, log *slog.Logger) Handlers {
+	pairing := newPairingState(controls.Store)
+	upstream := newUpstreamHandler(waker, log)
+	remoteOrigin := parseTrustedOrigin(origins.Remote)
+	operatorOrigin := parseTrustedOrigin(origins.Operator)
+	if remoteOrigin.scheme == "http" && !trustedLoopbackOrigin(remoteOrigin) {
+		panic("invalid remote proxy origin")
+	}
+	if operatorOrigin.scheme != "http" || !trustedLoopbackOrigin(operatorOrigin) {
+		panic("invalid operator proxy origin")
+	}
+	return Handlers{
+		Remote: trustedOriginHandler(pairing.remoteHandler(gatewayHandler(upstream, Controls{
+			Tasks: controls.Tasks, Onboarding: controls.Onboarding,
+		}, false), auth), remoteOrigin),
+		Operator: trustedOriginHandler(pairing.operatorHandler(gatewayHandler(upstream, controls, controls.ControlAuth.Password != ""), auth, controls.ControlAuth), operatorOrigin),
+	}
+}
+
+func trustedOriginHandler(next http.Handler, origin trustedOrigin) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		ctx := context.WithValue(request.Context(), originKey{}, origin)
+		next.ServeHTTP(writer, request.WithContext(ctx))
+	})
+}
+
+// legacyOriginHandler preserves the concrete behavior of the non-production
+// combined constructors by deriving their origin from each test request.
+func legacyOriginHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		scheme := request.URL.Scheme
+		if scheme == "" {
+			scheme = "http"
+		}
+		host := request.Host
+		if host == "" {
+			host = request.URL.Host
+		}
+		origin := trustedOrigin{raw: scheme + "://" + host, scheme: scheme, authority: host, legacy: true}
+		if scheme == "https" {
+			origin.port = "443"
+		} else {
+			origin.port = "80"
+		}
+		if parsed, err := url.Parse(origin.raw); err == nil && parsed.Port() != "" {
+			origin.port = parsed.Port()
+		}
+		ctx := context.WithValue(request.Context(), originKey{}, origin)
+		next.ServeHTTP(writer, request.WithContext(ctx))
+	})
+}
+
+func parseTrustedOrigin(raw string) trustedOrigin {
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" {
+		panic("invalid trusted proxy origin")
+	}
+	port := parsed.Port()
+	if port != "" {
+		number, portErr := strconv.Atoi(port)
+		if portErr != nil || number < 1 || number > 65535 || port != strconv.Itoa(number) {
+			panic("invalid trusted proxy origin")
+		}
+	}
+	if port == "" {
+		if parsed.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	if parsed.Hostname() == "" || raw != parsed.Scheme+"://"+parsed.Host {
+		panic("invalid trusted proxy origin")
+	}
+	return trustedOrigin{raw: raw, scheme: parsed.Scheme, authority: parsed.Host, port: port}
+}
+
+func trustedLoopbackOrigin(origin trustedOrigin) bool {
+	ip := net.ParseIP(strings.Trim(origin.authority, "[]"))
+	if host, _, err := net.SplitHostPort(origin.authority); err == nil {
+		ip = net.ParseIP(host)
+	}
+	return ip != nil && ip.IsLoopback()
 }
 
 func newHandler(waker Waker, auth runtime.ServerAuth, controls Controls, log *slog.Logger) http.Handler {
 	pairing := newPairingState(controls.Store)
-	var upstream http.Handler
+	upstream := newUpstreamHandler(waker, log)
+	return pairing.handler(gatewayHandler(upstream, controls, controls.ControlAuth.Password != ""), auth, controls.ControlAuth)
+}
+
+func newUpstreamHandler(waker Waker, log *slog.Logger) http.Handler {
 	if waker == nil {
-		upstream = http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		return http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 			http.Error(writer, "workspace manager unavailable", http.StatusServiceUnavailable)
 		})
-		return pairing.handler(gatewayHandler(upstream, controls, controls.ControlAuth.Password != ""), auth, controls.ControlAuth)
 	}
 	if log == nil {
 		log = slog.Default()
@@ -64,10 +178,23 @@ func newHandler(waker Waker, auth runtime.ServerAuth, controls Controls, log *sl
 	reverseProxy := &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
 			target := request.In.Context().Value(targetKey{}).(proxyTarget)
+			origin := request.In.Context().Value(originKey{}).(trustedOrigin)
 			request.SetURL(target.url)
-			request.Out.Host = request.In.Host
+			for name := range request.Out.Header {
+				if strings.EqualFold(name, "Forwarded") || strings.HasPrefix(strings.ToLower(name), "x-forwarded-") {
+					delete(request.Out.Header, name)
+				}
+			}
+			request.Out.Host = origin.authority
+			request.Out.Header.Set("X-Forwarded-Host", origin.authority)
+			request.Out.Header.Set("X-Forwarded-Proto", origin.scheme)
+			request.Out.Header.Set("X-Forwarded-Port", origin.port)
 		},
 		FlushInterval: -1,
+		ModifyResponse: func(response *http.Response) error {
+			stripReservedSetCookies(response.Header)
+			return nil
+		},
 		ErrorHandler: func(writer http.ResponseWriter, request *http.Request, err error) {
 			if target, ok := request.Context().Value(targetKey{}).(proxyTarget); ok {
 				// An SSE observer disconnect is not evidence that OpenCode failed. A
@@ -82,7 +209,7 @@ func newHandler(waker Waker, auth runtime.ServerAuth, controls Controls, log *sl
 		},
 	}
 
-	upstream = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		start := time.Now()
 		intent := requestIntent(request)
 		target, release, err := waker.AcquireRequest(request.Context(), intent)
@@ -103,7 +230,30 @@ func newHandler(waker Waker, auth runtime.ServerAuth, controls Controls, log *sl
 		ctx := context.WithValue(request.Context(), targetKey{}, proxyTarget{url: targetURL, request: target, intent: intent})
 		reverseProxy.ServeHTTP(writer, request.WithContext(ctx))
 	})
-	return pairing.handler(gatewayHandler(upstream, controls, controls.ControlAuth.Password != ""), auth, controls.ControlAuth)
+}
+
+func stripReservedSetCookies(header http.Header) {
+	values := header.Values("Set-Cookie")
+	if len(values) == 0 {
+		return
+	}
+	header.Del("Set-Cookie")
+	for _, value := range values {
+		if containsReservedCookieAssignment(value) {
+			continue
+		}
+		header.Add("Set-Cookie", value)
+	}
+}
+
+func containsReservedCookieAssignment(value string) bool {
+	for _, segment := range strings.FieldsFunc(value, func(character rune) bool { return character == ';' || character == ',' }) {
+		name, _, valid := strings.Cut(strings.TrimSpace(segment), "=")
+		if valid && (name == deviceCookieName || name == "__Host-"+deviceCookieName) {
+			return true
+		}
+	}
+	return false
 }
 
 func requestIntent(request *http.Request) workspace.RequestIntent {

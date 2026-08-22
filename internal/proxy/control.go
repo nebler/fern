@@ -33,6 +33,14 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 		http.Error(writer, "cross-origin control request rejected", http.StatusForbidden)
 		return true
 	}
+	if isTaskAPIPath(path) {
+		if controls.Tasks == nil {
+			http.NotFound(writer, request)
+			return true
+		}
+		controls.Tasks.ServeHTTP(writer, request)
+		return true
+	}
 	if path == "/fern/api/v1/devices" {
 		if store == nil {
 			http.Error(writer, "control store unavailable", http.StatusServiceUnavailable)
@@ -60,7 +68,7 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 			http.NotFound(writer, request)
 			return true
 		}
-		if err := store.RevokeDevice(id); err != nil {
+		if err := revokeDevice(store, id, store.CancelDeviceRequests); err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				http.NotFound(writer, request)
 			} else {
@@ -185,7 +193,7 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 			http.NotFound(writer, request)
 			return true
 		}
-		if err := store.RevokeDevice(id); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := revokeDevice(store, id, store.CancelDeviceRequests); err != nil && !errors.Is(err, os.ErrNotExist) {
 			http.Error(writer, "control state unavailable", http.StatusServiceUnavailable)
 			return true
 		}
@@ -196,9 +204,21 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 	return false
 }
 
+func isTaskAPIPath(path string) bool {
+	return path == "/fern/api/v1/tasks" || path == "/fern/api/v1/events" || strings.HasPrefix(path, "/fern/api/v1/tasks/")
+}
+
+func revokeDevice(store *control.Store, id string, onRevoked func(string)) error {
+	if err := store.RevokeDevice(id); err != nil {
+		return err
+	}
+	onRevoked(id)
+	return nil
+}
+
 func publishWorkflow(writer http.ResponseWriter, request *http.Request, controls Controls, enabled bool, workflowID string, jsonRequest bool) {
 	if !enabled {
-		http.Error(writer, "publication requires configured Fern authentication", http.StatusServiceUnavailable)
+		http.Error(writer, "publication requires configured Fern authentication and GitHub repository binding", http.StatusServiceUnavailable)
 		return
 	}
 	if controls.Store == nil || controls.Publications == nil {
@@ -255,7 +275,7 @@ func publishWorkflow(writer http.ResponseWriter, request *http.Request, controls
 			return
 		}
 		publicationRecord, _, err = controls.Store.RequestPublication(workflowID, control.Publication{
-			ID: id, Operation: input.Operation, Base: input.Base, Title: input.Title, Body: input.Body,
+			ID: id, Operation: input.Operation, RequestedBaseRef: input.Base, Title: input.Title, Body: input.Body,
 		}, time.Now())
 		if err != nil {
 			http.Error(writer, "record publication request", http.StatusUnprocessableEntity)
@@ -320,9 +340,17 @@ func writeJSONStatus(writer http.ResponseWriter, status int, value any, err erro
 }
 
 func sameOrigin(request *http.Request) bool {
+	// Modern browsers provide Fetch Metadata even when Origin is omitted. A
+	// same-site sibling is not equivalent to this exact private Fern origin.
+	if site := request.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" {
+		return false
+	}
 	origin := request.Header.Get("Origin")
 	if origin == "" {
 		return true
+	}
+	if trusted, ok := request.Context().Value(originKey{}).(trustedOrigin); ok && !trusted.legacy {
+		return origin == trusted.raw
 	}
 	parsed, err := url.Parse(origin)
 	if err != nil || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
