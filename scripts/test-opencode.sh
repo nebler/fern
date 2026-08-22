@@ -118,9 +118,9 @@ pair_code=$(curl -fsS -u "fern:$CONTROL_PASSWORD" -X POST "$OPERATOR_URL/fern/pa
 curl -fsS "$REMOTE_URL/fern/pair?code=$pair_code" | grep -q 'Pair this phone?'
 curl -sS -D "$RUN_ROOT/pair.headers" -o /dev/null -H 'Content-Type: application/x-www-form-urlencoded' \
   --data-urlencode "code=$pair_code" --data-urlencode 'name=OpenCode smoke' "$REMOTE_URL/fern/pair"
-device_cookie=$(sed -nE 's/^Set-Cookie: fern_device=([^;]+).*/\1/p' "$RUN_ROOT/pair.headers" | tr -d '\r')
+device_cookie=$(sed -nE 's/^Set-Cookie: __Host-fern_device=([^;]+).*/\1/p' "$RUN_ROOT/pair.headers" | tr -d '\r')
 [[ -n "$device_cookie" ]]
-curl -fsS -H "Cookie: fern_device=$device_cookie" "$REMOTE_URL/" >/dev/null
+curl -fsS -H "Cookie: __Host-fern_device=$device_cookie" "$REMOTE_URL/" >/dev/null
 
 # Exercise the authenticated browser entry point, not just JSON APIs.
 curl -fsS -u "opencode:$PASSWORD" -D "$RUN_ROOT/root.headers" -o "$RUN_ROOT/root.html" "$OPERATOR_URL/"

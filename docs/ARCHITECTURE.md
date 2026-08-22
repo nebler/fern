@@ -437,7 +437,7 @@ opencode2 serve --hostname 0.0.0.0 --port 4096
 
 The supported OpenCode version is `0.0.0-next-17444`. The characterized
 development image identity is
-`sha256:839fd0bfffe57ec0b9095126ac682b0337f15a514dfaafdd9d18aa1bb86076ae`;
+`sha256:73688cd6f96ce3b236bb1c2d25607b03566a4ee92f0fedabeb06fd1a3e643c6c`;
 the contract harness verifies both version and digest.
 
 ### 9.2 Ownership And Drift

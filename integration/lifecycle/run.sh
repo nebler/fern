@@ -326,14 +326,14 @@ control_code=$(http_code "$ARTIFACTS/control-auth.body" --user "fern:$FERN_CONTR
 pair_preview_code=$(http_code "$ARTIFACTS/pairing-preview.body" --dump-header "$ARTIFACTS/pairing-preview.headers" "$REMOTE_URL/fern/pair?code=$pair_code")
 [[ "$pair_preview_code" == 200 ]] || fail "phone pairing preview returned HTTP $pair_preview_code"
 grep -q 'Pair this phone' "$ARTIFACTS/pairing-preview.body" || fail "phone pairing preview did not render confirmation"
-if grep -Eqi '^set-cookie: fern_device=' "$ARTIFACTS/pairing-preview.headers"; then
+if grep -Eqi '^set-cookie: (__Host-)?fern_device=' "$ARTIFACTS/pairing-preview.headers"; then
   fail "phone pairing preview consumed the code and issued a device cookie"
 fi
 pair_confirm_code=$(http_code /dev/null --dump-header "$ARTIFACTS/pairing.headers" \
   --header 'Content-Type: application/x-www-form-urlencoded' --data-urlencode "code=$pair_code" "$REMOTE_URL/fern/pair")
 [[ "$pair_confirm_code" == 303 ]] || fail "phone pairing confirmation returned HTTP $pair_confirm_code"
 grep -Eqi '^location: /fern/' "$ARTIFACTS/pairing.headers" || fail "phone pairing confirmation did not redirect to the Fern landing page"
-grep -Eqi '^set-cookie: fern_device=' "$ARTIFACTS/pairing.headers" \
+grep -Eqi '^set-cookie: __Host-fern_device=' "$ARTIFACTS/pairing.headers" \
   && grep -Eqi '^set-cookie: .*HttpOnly' "$ARTIFACTS/pairing.headers" \
   && grep -Eqi '^set-cookie: .*Secure' "$ARTIFACTS/pairing.headers" \
   || fail "phone pairing did not issue a secure HttpOnly cookie"
@@ -343,11 +343,11 @@ pair_replay_code=$(http_code /dev/null --header 'Content-Type: application/x-www
 sleep 0.5
 wait_status paused 2
 [[ "$(container_started_at)" == "$before_start" ]] || fail "authentication or Fern-owned routes started compute"
-device_cookie=$(sed -nE 's/^Set-Cookie: fern_device=([^;]+).*/\1/p' "$ARTIFACTS/pairing.headers" | tr -d '\r')
-paired_identity=$(curl --silent --show-error --fail --header "Cookie: fern_device=$device_cookie" "$REMOTE_URL/control/identity")
+device_cookie=$(sed -nE 's/^Set-Cookie: __Host-fern_device=([^;]+).*/\1/p' "$ARTIFACTS/pairing.headers" | tr -d '\r')
+paired_identity=$(curl --silent --show-error --fail --header "Cookie: __Host-fern_device=$device_cookie" "$REMOTE_URL/control/identity")
 [[ "$paired_identity" == *'"boot_id"'* ]] || fail "paired device cookie did not authenticate and wake through Fern"
 curl --silent --show-error --fail --dump-header "$ARTIFACTS/remote-forwarding.headers" \
-  --header "Cookie: fern_device=$device_cookie" --header 'Host: malicious.example:9999' \
+  --header "Cookie: __Host-fern_device=$device_cookie" --header 'Host: malicious.example:9999' \
   --header 'Forwarded: for=attacker;proto=http' --header 'X-Forwarded-For: attacker' \
   --header 'X-Forwarded-Host: malicious.example' --header 'X-Forwarded-Proto: http' \
   --header 'X-Forwarded-Port: 1' --header 'X-Forwarded-Evil: retained' \
@@ -383,17 +383,17 @@ stop_by_idle
 note "scenario 6/14: final phone work request restarts the full idle grace period"
 phone_session="phone-idle-$SAFE_ID"
 phone_marker="phone-state-$RUN_ID"
-curl --silent --show-error --fail --max-time 5 --header "Cookie: fern_device=$device_cookie" \
+curl --silent --show-error --fail --max-time 5 --header "Cookie: __Host-fern_device=$device_cookie" \
   --request POST --header 'Content-Type: application/json' \
   --data "{\"marker\":\"$phone_marker\",\"session\":\"$phone_session\"}" \
   "$REMOTE_URL/control/persist" >/dev/null
-curl --silent --show-error --fail --max-time 5 --header "Cookie: fern_device=$device_cookie" \
+curl --silent --show-error --fail --max-time 5 --header "Cookie: __Host-fern_device=$device_cookie" \
   --request POST "$REMOTE_URL/control/activity?session=$phone_session&delay=0.6" >/dev/null
 
 active_sessions='{}'
 activity_deadline=$((SECONDS + 5))
 while (( SECONDS < activity_deadline )); do
-  active_sessions=$(curl --silent --show-error --fail --max-time 2 --header "Cookie: fern_device=$device_cookie" \
+  active_sessions=$(curl --silent --show-error --fail --max-time 2 --header "Cookie: __Host-fern_device=$device_cookie" \
     "$REMOTE_URL/api/session/active")
   jq -e --arg session "$phone_session" '.data[$session].type == "running"' <<<"$active_sessions" >/dev/null && break
   sleep 0.05
@@ -403,7 +403,7 @@ jq -e --arg session "$phone_session" '.data[$session].type == "running"' <<<"$ac
 
 activity_deadline=$((SECONDS + 5))
 while (( SECONDS < activity_deadline )); do
-  active_sessions=$(curl --silent --show-error --fail --max-time 2 --header "Cookie: fern_device=$device_cookie" \
+  active_sessions=$(curl --silent --show-error --fail --max-time 2 --header "Cookie: __Host-fern_device=$device_cookie" \
     "$REMOTE_URL/api/session/active")
   jq -e --arg session "$phone_session" '.data[$session] == null' <<<"$active_sessions" >/dev/null && break
   sleep 0.05
@@ -417,7 +417,7 @@ sleep 1
 phone_container_id=$(container_id)
 phone_started_at=$(container_started_at)
 phone_request_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
-phone_identity=$(curl --silent --show-error --fail --max-time 5 --header "Cookie: fern_device=$device_cookie" \
+phone_identity=$(curl --silent --show-error --fail --max-time 5 --header "Cookie: __Host-fern_device=$device_cookie" \
   "$REMOTE_URL/control/identity")
 phone_boot_id=$(jq -er '.boot_id' <<<"$phone_identity")
 sleep 1.3
@@ -430,12 +430,12 @@ wait_status paused 5
 phone_pause_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
 (( phone_pause_ns - phone_request_ns >= 1900000000 )) \
   || fail "compute paused before the restarted 2-second grace period elapsed"
-phone_wake_identity=$(curl --silent --show-error --fail --max-time 70 --header "Cookie: fern_device=$device_cookie" \
+phone_wake_identity=$(curl --silent --show-error --fail --max-time 70 --header "Cookie: __Host-fern_device=$device_cookie" \
   "$REMOTE_URL/control/identity")
 [[ $(jq -er '.boot_id' <<<"$phone_wake_identity") != "$phone_boot_id" ]] \
   || fail "phone wake did not start a fresh backend process"
 [[ $(container_id) == "$phone_container_id" ]] || fail "phone wake replaced the lifecycle container"
-phone_state=$(curl --silent --show-error --fail --max-time 5 --header "Cookie: fern_device=$device_cookie" \
+phone_state=$(curl --silent --show-error --fail --max-time 5 --header "Cookie: __Host-fern_device=$device_cookie" \
   "$REMOTE_URL/control/persist")
 jq -e --arg marker "$phone_marker" --arg session "$phone_session" \
   '.marker == $marker and .session == $session' <<<"$phone_state" >/dev/null \
@@ -518,7 +518,7 @@ docker run --rm --user 0:0 --entrypoint sh \
   -c 'tar -C /target -xzf /backup/opencode-volume.tar.gz'
 
 start_fern
-curl --silent --show-error --fail --header "Cookie: fern_device=$device_cookie" \
+curl --silent --show-error --fail --header "Cookie: __Host-fern_device=$device_cookie" \
   "$REMOTE_URL/fern/" | grep -q 'href="/"' \
   || fail "paired device cookie did not survive Fern restart"
 control_curl --fail "$OPERATOR_URL/fern/api/v1/devices" | jq -e 'length == 1' >/dev/null \

@@ -21,7 +21,7 @@ from typing import Any, Callable
 
 
 PINNED_VERSION = "0.0.0-next-17444"
-PINNED_DIGEST = "sha256:839fd0bfffe57ec0b9095126ac682b0337f15a514dfaafdd9d18aa1bb86076ae"
+PINNED_DIGEST = "sha256:73688cd6f96ce3b236bb1c2d25607b03566a4ee92f0fedabeb06fd1a3e643c6c"
 IMAGE = os.environ.get("FERN_OPENCODE_IMAGE", "fern/opencode:dev")
 AUTH = "Basic " + base64.b64encode(b"opencode:contract-password").decode()
 

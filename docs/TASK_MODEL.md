@@ -555,7 +555,7 @@ cursor and never proves complete history.
 
 **OBSERVED CONTRACT OC-WIRE-1:** The top-level `text` prompt, inbox projection,
 and cursor-paginated message projection above are the selected profile for image
-digest `sha256:839fd0bfffe57ec0b9095126ac682b0337f15a514dfaafdd9d18aa1bb86076ae`,
+digest `sha256:73688cd6f96ce3b236bb1c2d25607b03566a4ee92f0fedabeb06fd1a3e643c6c`,
 which reports `0.0.0-next-17444`.
 
 **OBSERVED CONTRACT OC-LOG-1:** There is no usable durable event/log cursor in
