@@ -66,7 +66,7 @@ func TestStatusFailsClosed(t *testing.T) {
 func TestRepositoryRequiresExactIdentity(t *testing.T) {
 	executor := &fakeExecutor{output: []byte(`{"id":123,"fullName":"owner/repository"}`)}
 	client, _ := New(executor, "github.com")
-	repository, err := client.Repository(context.Background(), "owner/repository")
+	repository, err := client.Repository(context.Background(), 123, "owner/repository")
 	if err != nil || repository.ID != 123 {
 		t.Fatalf("repository=%+v err=%v", repository, err)
 	}
@@ -74,8 +74,12 @@ func TestRepositoryRequiresExactIdentity(t *testing.T) {
 		t.Fatalf("args = %q", executor.args)
 	}
 	executor.output = []byte(`{"id":123,"fullName":"other/repository"}`)
-	if _, err := client.Repository(context.Background(), "owner/repository"); !errors.Is(err, ErrRepository) {
+	if _, err := client.Repository(context.Background(), 123, "owner/repository"); !errors.Is(err, ErrRepository) {
 		t.Fatalf("mismatch error = %v", err)
+	}
+	executor.output = []byte(`{"id":124,"fullName":"owner/repository"}`)
+	if _, err := client.Repository(context.Background(), 123, "owner/repository"); !errors.Is(err, ErrRepository) {
+		t.Fatalf("ID mismatch error = %v", err)
 	}
 }
 
@@ -84,7 +88,7 @@ func TestOutputAndInputBounds(t *testing.T) {
 	if _, err := client.Status(context.Background()); !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("large output error = %v", err)
 	}
-	if _, err := client.Repository(context.Background(), "../escape"); !errors.Is(err, ErrRepository) {
+	if _, err := client.Repository(context.Background(), 123, "../escape"); !errors.Is(err, ErrRepository) {
 		t.Fatalf("invalid repository error = %v", err)
 	}
 	if _, err := New(&fakeExecutor{}, "enterprise.example"); err == nil {
@@ -97,7 +101,19 @@ func TestExecutorErrorsDoNotLeakCredentials(t *testing.T) {
 	if _, err := client.Status(context.Background()); !errors.Is(err, ErrUnavailable) || strings.Contains(err.Error(), "secret") {
 		t.Fatalf("status error = %v", err)
 	}
-	if _, err := client.Repository(context.Background(), "owner/repository"); !errors.Is(err, ErrRepository) || strings.Contains(err.Error(), "secret") {
+	if _, err := client.Repository(context.Background(), 123, "owner/repository"); !errors.Is(err, ErrUnavailable) || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("repository error = %v", err)
+	}
+}
+
+func TestProbePreservesCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	client, _ := New(&fakeExecutor{err: errors.New("command failed")}, "github.com")
+	if _, err := client.Status(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("status error = %v", err)
+	}
+	if _, err := client.Repository(ctx, 123, "owner/repository"); !errors.Is(err, context.Canceled) {
 		t.Fatalf("repository error = %v", err)
 	}
 }

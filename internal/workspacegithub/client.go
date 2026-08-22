@@ -51,6 +51,9 @@ func New(executor Executor, hostname string) (*Client, error) {
 func (c *Client) Status(ctx context.Context) (Status, error) {
 	output, err := c.executor.Run(ctx, "auth", "status", "--active", "--hostname", c.hostname, "--json", "hosts")
 	if err != nil {
+		if ctx.Err() != nil {
+			return Status{}, ctx.Err()
+		}
 		return Status{}, ErrUnavailable
 	}
 	var response struct {
@@ -80,9 +83,6 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 			continue
 		}
 		if entry.State != "success" {
-			if entry.State == "error" && entry.Login == "" {
-				return Status{}, ErrUnauthenticated
-			}
 			return Status{}, ErrUnavailable
 		}
 		if !validLogin(entry.Login) || entry.GitProtocol != "https" && entry.GitProtocol != "ssh" || selected != nil {
@@ -102,17 +102,23 @@ func (c *Client) Status(ctx context.Context) (Status, error) {
 	return *selected, nil
 }
 
-func (c *Client) Repository(ctx context.Context, fullName string) (Repository, error) {
-	if !validRepository(fullName) {
+func (c *Client) Repository(ctx context.Context, expectedID int64, fullName string) (Repository, error) {
+	if expectedID <= 0 || !validRepository(fullName) {
 		return Repository{}, ErrRepository
 	}
 	output, err := c.executor.Run(ctx, "api", "--hostname", c.hostname, "--method", "GET", "repos/"+fullName,
 		"--jq", `{id: .id, fullName: .full_name}`)
 	if err != nil {
-		return Repository{}, ErrRepository
+		if ctx.Err() != nil {
+			return Repository{}, ctx.Err()
+		}
+		return Repository{}, ErrUnavailable
 	}
 	var repository Repository
-	if err := decodeBounded(output, &repository); err != nil || repository.ID <= 0 || repository.FullName != fullName {
+	if err := decodeBounded(output, &repository); err != nil {
+		return Repository{}, ErrUnavailable
+	}
+	if repository.ID != expectedID || repository.FullName != fullName {
 		return Repository{}, ErrRepository
 	}
 	return repository, nil
