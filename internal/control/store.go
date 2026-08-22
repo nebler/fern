@@ -20,6 +20,7 @@ import (
 
 const schemaVersion = 1
 const maxControlStateBytes = 4 << 20
+const PublicationSchemaVersion = 1
 
 type Device struct {
 	ID        string    `json:"id"`
@@ -53,20 +54,58 @@ type Workflow struct {
 }
 
 type Publication struct {
-	ID         string    `json:"id"`
-	WorkflowID string    `json:"workflowId"`
-	State      string    `json:"state"`
-	Operation  string    `json:"operation"`
+	SchemaVersion      int                     `json:"schemaVersion,omitempty"`
+	ID                 string                  `json:"id"`
+	WorkflowID         string                  `json:"workflowId"`
+	State              string                  `json:"state"`
+	Operation          string                  `json:"operation"`
+	RequestedBaseRef   string                  `json:"requestedBaseRef,omitempty"`
+	Title              string                  `json:"title"`
+	Body               string                  `json:"body,omitempty"`
+	RepositoryID       int64                   `json:"repositoryId,omitempty"`
+	RepositoryFullName string                  `json:"repositoryFullName,omitempty"`
+	BaseSHA            string                  `json:"baseSha,omitempty"`
+	BaseRef            string                  `json:"baseRef,omitempty"`
+	ResultCommit       string                  `json:"resultCommit,omitempty"`
+	Branch             string                  `json:"branch,omitempty"`
+	PullRequest        *PullRequestObservation `json:"pullRequest,omitempty"`
+	// Legacy fields are retained only so old terminal records remain displayable.
 	Base       string    `json:"base,omitempty"`
-	Title      string    `json:"title"`
-	Body       string    `json:"body,omitempty"`
 	Repository string    `json:"repository,omitempty"`
-	Branch     string    `json:"branch,omitempty"`
 	Commit     string    `json:"commit,omitempty"`
 	PullURL    string    `json:"pullUrl,omitempty"`
 	Error      string    `json:"error,omitempty"`
 	CreatedAt  time.Time `json:"createdAt"`
 	UpdatedAt  time.Time `json:"updatedAt"`
+}
+
+type PreparedPublication struct {
+	RepositoryID       int64  `json:"repositoryId"`
+	RepositoryFullName string `json:"repositoryFullName"`
+	BaseSHA            string `json:"baseSha"`
+	BaseRef            string `json:"baseRef"`
+	ResultCommit       string `json:"resultCommit"`
+	Branch             string `json:"branch"`
+}
+
+type PullRequestRefObservation struct {
+	RepositoryID       int64  `json:"repositoryId"`
+	RepositoryFullName string `json:"repositoryFullName"`
+	RepositoryOwner    string `json:"repositoryOwner"`
+	RepositoryName     string `json:"repositoryName"`
+	Ref                string `json:"ref"`
+	SHA                string `json:"sha"`
+}
+
+type PullRequestObservation struct {
+	TargetRepositoryID       int64                     `json:"targetRepositoryId"`
+	TargetRepositoryFullName string                    `json:"targetRepositoryFullName"`
+	Number                   int64                     `json:"number"`
+	URL                      string                    `json:"url"`
+	State                    string                    `json:"state"`
+	Draft                    bool                      `json:"draft"`
+	Base                     PullRequestRefObservation `json:"base"`
+	Head                     PullRequestRefObservation `json:"head"`
 }
 
 const (
@@ -86,10 +125,12 @@ type diskState struct {
 }
 
 type Store struct {
-	mu        sync.Mutex
-	path      string
-	workspace string
-	data      diskState
+	mu                   sync.Mutex
+	path                 string
+	workspace            string
+	data                 diskState
+	activeDeviceRequests map[string]map[uint64]func()
+	nextDeviceRequestID  uint64
 }
 
 func Open(directory, workspace string) (*Store, error) {
@@ -100,7 +141,12 @@ func Open(directory, workspace string) (*Store, error) {
 		return nil, err
 	}
 	path := filepath.Join(directory, fmt.Sprintf("%x.json", sha256.Sum256([]byte(workspace))))
-	store := &Store{path: path, workspace: workspace, data: emptyState(workspace)}
+	store := &Store{
+		path:                 path,
+		workspace:            workspace,
+		data:                 emptyState(workspace),
+		activeDeviceRequests: make(map[string]map[uint64]func()),
+	}
 	if err := store.load(); err != nil {
 		return nil, err
 	}
@@ -148,15 +194,20 @@ func (store *Store) AddDevice(token, name string, now, expires time.Time) (Devic
 }
 
 func (store *Store) AuthenticateDevice(token string, now time.Time) (bool, error) {
+	_, valid, err := store.AuthenticateDeviceIdentity(token, now)
+	return valid, err
+}
+
+func (store *Store) AuthenticateDeviceIdentity(token string, now time.Time) (Device, bool, error) {
 	if token == "" {
-		return false, nil
+		return Device{}, false, nil
 	}
 	hash := tokenHash(token)
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	device, exists := store.data.Devices[hash]
 	if !exists {
-		return false, nil
+		return Device{}, false, nil
 	}
 	if !now.Before(device.ExpiresAt) {
 		delete(store.data.Devices, hash)
@@ -164,9 +215,9 @@ func (store *Store) AuthenticateDevice(token string, now time.Time) (bool, error
 			if rollbackWrite(err) {
 				store.data.Devices[hash] = device
 			}
-			return false, err
+			return Device{}, false, err
 		}
-		return false, nil
+		return Device{}, false, nil
 	}
 	if now.Sub(device.LastSeen) >= time.Hour {
 		previous := device
@@ -176,10 +227,56 @@ func (store *Store) AuthenticateDevice(token string, now time.Time) (bool, error
 			if rollbackWrite(err) {
 				store.data.Devices[hash] = previous
 			}
-			return false, err
+			return Device{}, false, err
 		}
 	}
-	return true, nil
+	return device, true, nil
+}
+
+// RegisterDeviceRequest fences admission against durable revocation. The
+// returned cleanup must be called when the admitted request completes.
+func (store *Store) RegisterDeviceRequest(deviceID string, cancel func()) (func(), bool) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	found := false
+	for _, device := range store.data.Devices {
+		if device.ID == deviceID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, false
+	}
+	store.nextDeviceRequestID++
+	requestID := store.nextDeviceRequestID
+	requests := store.activeDeviceRequests[deviceID]
+	if requests == nil {
+		requests = make(map[uint64]func())
+		store.activeDeviceRequests[deviceID] = requests
+	}
+	requests[requestID] = cancel
+	return func() {
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		requests := store.activeDeviceRequests[deviceID]
+		delete(requests, requestID)
+		if len(requests) == 0 {
+			delete(store.activeDeviceRequests, deviceID)
+		}
+	}, true
+}
+
+// CancelDeviceRequests is the in-memory callback run only after revocation has
+// been persisted. Cancellation callbacks are deliberately absent from diskState.
+func (store *Store) CancelDeviceRequests(deviceID string) {
+	store.mu.Lock()
+	requests := store.activeDeviceRequests[deviceID]
+	delete(store.activeDeviceRequests, deviceID)
+	store.mu.Unlock()
+	for _, cancel := range requests {
+		cancel()
+	}
 }
 
 func (store *Store) Devices(now time.Time) ([]Device, error) {
@@ -312,6 +409,9 @@ func (store *Store) PutPublication(publication Publication) error {
 	if publication.ID == "" || publication.WorkflowID == "" || publication.State == "" {
 		return errors.New("publication ID, workflow ID, and state are required")
 	}
+	if publication.SchemaVersion != 0 && (publication.SchemaVersion != PublicationSchemaVersion || !validCurrentPublication(publication)) {
+		return errors.New("publication has invalid durable proof")
+	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	previous, existed := store.data.Publications[publication.ID]
@@ -350,6 +450,11 @@ func (store *Store) RequestPublication(workflowID string, publication Publicatio
 		return Publication{}, false, errors.New("publication limit reached")
 	}
 	previousWorkflow := workflow
+	publication = Publication{
+		SchemaVersion: PublicationSchemaVersion,
+		ID:            publication.ID, Operation: publication.Operation, RequestedBaseRef: publication.RequestedBaseRef,
+		Title: publication.Title, Body: publication.Body,
+	}
 	publication.WorkflowID = workflowID
 	publication.State = "requested"
 	publication.CreatedAt = now.UTC()
@@ -370,9 +475,9 @@ func (store *Store) RequestPublication(workflowID string, publication Publicatio
 	return publication, true, nil
 }
 
-func (store *Store) PreparePublication(id, repository, base, branch, commit string, now time.Time) error {
-	if repository == "" || base == "" || branch == "" || commit == "" {
-		return errors.New("prepared publication repository, base, branch, and commit are required")
+func (store *Store) PreparePublication(id string, prepared PreparedPublication, now time.Time) error {
+	if err := validatePreparedPublication(prepared); err != nil {
+		return err
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -380,7 +485,11 @@ func (store *Store) PreparePublication(id, repository, base, branch, commit stri
 	if !exists {
 		return os.ErrNotExist
 	}
-	if publication.Commit != "" && (publication.Commit != commit || publication.Branch != branch || publication.Repository != repository || publication.Base != base) {
+	if publication.SchemaVersion != PublicationSchemaVersion {
+		return errors.New("legacy publication is read-only and requires operator review")
+	}
+	existing := preparedFromPublication(publication)
+	if publication.ResultCommit != "" && existing != prepared {
 		return errors.New("publication retry resolved to different repository state")
 	}
 	if publication.State == "published" {
@@ -388,10 +497,12 @@ func (store *Store) PreparePublication(id, repository, base, branch, commit stri
 	}
 	previous := publication
 	publication.State = "pushing"
-	publication.Repository = repository
-	publication.Base = base
-	publication.Branch = branch
-	publication.Commit = commit
+	publication.RepositoryID = prepared.RepositoryID
+	publication.RepositoryFullName = prepared.RepositoryFullName
+	publication.BaseSHA = prepared.BaseSHA
+	publication.BaseRef = prepared.BaseRef
+	publication.ResultCommit = prepared.ResultCommit
+	publication.Branch = prepared.Branch
 	publication.Error = ""
 	publication.UpdatedAt = now.UTC()
 	store.data.Publications[id] = publication
@@ -404,7 +515,7 @@ func (store *Store) PreparePublication(id, repository, base, branch, commit stri
 	return nil
 }
 
-func (store *Store) FinishPublication(id, pullURL, failure string, now time.Time) (Publication, error) {
+func (store *Store) FinishPublication(id string, pullRequest *PullRequestObservation, failure string, now time.Time) (Publication, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	publication, exists := store.data.Publications[id]
@@ -414,12 +525,25 @@ func (store *Store) FinishPublication(id, pullURL, failure string, now time.Time
 	if publication.State == "published" {
 		return publication, nil
 	}
+	if publication.SchemaVersion != PublicationSchemaVersion {
+		return Publication{}, errors.New("legacy publication is read-only and requires operator review")
+	}
+	if failure == "" {
+		if pullRequest == nil || !validPullRequestObservation(*pullRequest, preparedFromPublication(publication)) {
+			return Publication{}, errors.New("complete matching pull request proof is required for publication success")
+		}
+	} else if pullRequest != nil {
+		return Publication{}, errors.New("failed publication must not include pull request proof")
+	}
 	workflow, exists := store.data.Workflows[publication.WorkflowID]
 	if !exists {
 		return Publication{}, errors.New("publication references a missing workflow")
 	}
 	previousPublication, previousWorkflow := publication, workflow
-	publication.PullURL = pullURL
+	publication.PullRequest = pullRequest
+	if pullRequest != nil {
+		publication.PullURL = pullRequest.URL
+	}
 	publication.Error = failure
 	publication.UpdatedAt = now.UTC()
 	workflow.UpdatedAt = now.UTC()
@@ -441,6 +565,102 @@ func (store *Store) FinishPublication(id, pullURL, failure string, now time.Time
 		return Publication{}, err
 	}
 	return publication, nil
+}
+
+func preparedFromPublication(publication Publication) PreparedPublication {
+	return PreparedPublication{
+		RepositoryID: publication.RepositoryID, RepositoryFullName: publication.RepositoryFullName,
+		BaseSHA: publication.BaseSHA, BaseRef: publication.BaseRef,
+		ResultCommit: publication.ResultCommit, Branch: publication.Branch,
+	}
+}
+
+func validatePreparedPublication(prepared PreparedPublication) error {
+	if prepared.RepositoryID <= 0 || !validRepositoryFullName(prepared.RepositoryFullName) || !validGitRef(prepared.BaseRef) || !validGitRef(prepared.Branch) || prepared.BaseRef == prepared.Branch || !validSHA(prepared.BaseSHA) || !validSHA(prepared.ResultCommit) {
+		return errors.New("complete prepared publication tuple is required")
+	}
+	return nil
+}
+
+func validPullRequestObservation(observation PullRequestObservation, prepared PreparedPublication) bool {
+	owner, name, ok := splitRepositoryFullName(prepared.RepositoryFullName)
+	if !ok || observation.TargetRepositoryID != prepared.RepositoryID || observation.TargetRepositoryFullName != prepared.RepositoryFullName || observation.Number <= 0 || observation.State != "open" || !observation.Draft {
+		return false
+	}
+	wantURL := "https://github.com/" + prepared.RepositoryFullName + "/pull/" + fmt.Sprintf("%d", observation.Number)
+	if observation.URL != wantURL {
+		return false
+	}
+	return validPullRequestRef(observation.Base, prepared.RepositoryID, prepared.RepositoryFullName, owner, name, prepared.BaseRef, prepared.BaseSHA) &&
+		validPullRequestRef(observation.Head, prepared.RepositoryID, prepared.RepositoryFullName, owner, name, prepared.Branch, prepared.ResultCommit)
+}
+
+func validPullRequestRef(observation PullRequestRefObservation, repositoryID int64, fullName, owner, name, ref, sha string) bool {
+	return observation.RepositoryID == repositoryID && observation.RepositoryFullName == fullName && observation.RepositoryOwner == owner && observation.RepositoryName == name && observation.Ref == ref && observation.SHA == sha
+}
+
+func splitRepositoryFullName(fullName string) (string, string, bool) {
+	if strings.Count(fullName, "/") != 1 {
+		return "", "", false
+	}
+	owner, name, _ := strings.Cut(fullName, "/")
+	return owner, name, owner != "" && name != ""
+}
+
+func validRepositoryFullName(fullName string) bool {
+	if len(fullName) < 3 || len(fullName) > 140 || strings.Count(fullName, "/") != 1 {
+		return false
+	}
+	owner, name, _ := strings.Cut(fullName, "/")
+	if len(owner) == 0 || len(owner) > 39 || owner[0] == '-' || owner[len(owner)-1] == '-' || len(name) == 0 || len(name) > 100 || name == "." || name == ".." || strings.HasSuffix(strings.ToLower(name), ".git") {
+		return false
+	}
+	for index := range len(owner) {
+		character := owner[index]
+		if !asciiAlphaNumeric(character) && character != '-' {
+			return false
+		}
+	}
+	for index := range len(name) {
+		character := name[index]
+		if !asciiAlphaNumeric(character) && character != '.' && character != '_' && character != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func asciiAlphaNumeric(character byte) bool {
+	return character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9'
+}
+
+func validGitRef(value string) bool {
+	if value == "" || value == "@" || len(value) > 255 || strings.HasPrefix(value, "/") || strings.HasSuffix(value, ".") || strings.HasSuffix(value, "/") || strings.Contains(value, "..") || strings.Contains(value, "//") || strings.Contains(value, "@{") || strings.ContainsAny(value, " ~^:?*[\\") {
+		return false
+	}
+	for _, component := range strings.Split(value, "/") {
+		if component == "" || strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".lock") {
+			return false
+		}
+	}
+	for _, character := range value {
+		if character < 0x21 || character > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func validSHA(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' && character < 'a' || character > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 func (store *Store) Publication(id string) (Publication, bool) {
@@ -511,8 +731,42 @@ func (store *Store) load() error {
 		return fmt.Errorf("Fern control state belongs to workspace %q", state.Workspace)
 	}
 	initializeMaps(&state)
+	for id, publication := range state.Publications {
+		if publication.SchemaVersion == 0 {
+			continue
+		}
+		if publication.SchemaVersion != PublicationSchemaVersion || !validCurrentPublication(publication) {
+			return fmt.Errorf("publication %q has invalid durable proof", id)
+		}
+	}
 	store.data = state
 	return nil
+}
+
+func validCurrentPublication(publication Publication) bool {
+	if publication.ID == "" || publication.WorkflowID == "" || publication.Operation == "" || strings.TrimSpace(publication.Title) == "" {
+		return false
+	}
+	switch publication.State {
+	case PublicationRequested, PublicationPrepared, PublicationFailed, PublicationPublished:
+	default:
+		return false
+	}
+	prepared := preparedFromPublication(publication)
+	hasPrepared := publication.ResultCommit != ""
+	if hasPrepared != (publication.RepositoryID != 0 || publication.RepositoryFullName != "" || publication.BaseSHA != "" || publication.BaseRef != "" || publication.Branch != "") {
+		return false
+	}
+	if hasPrepared && validatePreparedPublication(prepared) != nil {
+		return false
+	}
+	if publication.State == PublicationRequested && hasPrepared || publication.State == PublicationPrepared && !hasPrepared {
+		return false
+	}
+	if publication.PullRequest != nil {
+		return publication.State == PublicationPublished && hasPrepared && publication.PullURL == publication.PullRequest.URL && validPullRequestObservation(*publication.PullRequest, prepared)
+	}
+	return publication.State != PublicationPublished && publication.PullURL == ""
 }
 
 func (store *Store) writeLocked() error {

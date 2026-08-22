@@ -18,8 +18,8 @@ var (
 type Store interface {
 	Publication(string) (control.Publication, bool)
 	Publications() []control.Publication
-	PreparePublication(id, repository, base, branch, commit string, now time.Time) error
-	FinishPublication(id, pullURL, failure string, now time.Time) (control.Publication, error)
+	PreparePublication(id string, prepared control.PreparedPublication, now time.Time) error
+	FinishPublication(id string, pullRequest *control.PullRequestObservation, failure string, now time.Time) (control.Publication, error)
 }
 
 type Fencer interface {
@@ -109,6 +109,12 @@ func (coordinator *Coordinator) execute(ctx context.Context, id string) (control
 	if !exists {
 		return control.Publication{}, os.ErrNotExist
 	}
+	if record.State == control.PublicationPublished {
+		return record, nil
+	}
+	if record.SchemaVersion != control.PublicationSchemaVersion {
+		return record, errors.New("legacy publication recovery is blocked and requires operator review")
+	}
 	release, err := coordinator.fencer.AcquirePaused(ctx)
 	if err != nil {
 		return record, err
@@ -121,21 +127,24 @@ func (coordinator *Coordinator) execute(ctx context.Context, id string) (control
 	if record.State == control.PublicationPublished {
 		return record, nil
 	}
+	if record.SchemaVersion != control.PublicationSchemaVersion {
+		return record, errors.New("legacy publication recovery is blocked and requires operator review")
+	}
 
-	prepared := Prepared{Repository: record.Repository, Base: record.Base, Branch: record.Branch, Commit: record.Commit}
-	if record.Commit == "" {
+	prepared := preparedFromControl(record)
+	if record.ResultCommit == "" {
 		prepared, err = coordinator.backend.Prepare(ctx, Request{
-			Operation: record.Operation, Base: record.Base, Title: record.Title, Body: record.Body,
+			Operation: record.Operation, Base: record.RequestedBaseRef, Title: record.Title, Body: record.Body,
 		})
 		if err == nil {
-			err = coordinator.store.PreparePublication(record.ID, prepared.Repository, prepared.Base, prepared.Branch, prepared.Commit, time.Now())
+			err = coordinator.store.PreparePublication(record.ID, preparedToControl(prepared), time.Now())
 		}
 		if err == nil {
 			record, exists = coordinator.store.Publication(id)
 			if !exists {
 				return control.Publication{}, os.ErrNotExist
 			}
-			prepared = Prepared{Repository: record.Repository, Base: record.Base, Branch: record.Branch, Commit: record.Commit}
+			prepared = preparedFromControl(record)
 		}
 	}
 	if err == nil {
@@ -145,11 +154,12 @@ func (coordinator *Coordinator) execute(ctx context.Context, id string) (control
 			err = errors.New("publication backend returned a different prepared target")
 		}
 		if err == nil {
-			return coordinator.store.FinishPublication(record.ID, result.URL, "", time.Now())
+			observation := pullRequestToControl(result.PullRequest)
+			return coordinator.store.FinishPublication(record.ID, &observation, "", time.Now())
 		}
 	}
 	if ctx.Err() == nil {
-		if _, finishErr := coordinator.store.FinishPublication(record.ID, "", "publication failed", time.Now()); finishErr != nil {
+		if _, finishErr := coordinator.store.FinishPublication(record.ID, nil, "publication failed", time.Now()); finishErr != nil {
 			return record, errors.Join(err, finishErr)
 		}
 	}
@@ -163,11 +173,46 @@ func (coordinator *Coordinator) Reconcile() error {
 		if record.State != control.PublicationRequested && record.State != control.PublicationPrepared {
 			continue
 		}
+		if record.SchemaVersion != control.PublicationSchemaVersion {
+			continue
+		}
 		if _, err := coordinator.start(record.ID); err != nil && !errors.Is(err, ErrRunning) {
 			return err
 		}
 	}
 	return nil
+}
+
+func preparedToControl(prepared Prepared) control.PreparedPublication {
+	return control.PreparedPublication{
+		RepositoryID: prepared.RepositoryID, RepositoryFullName: prepared.RepositoryFullName,
+		BaseSHA: prepared.BaseSHA, BaseRef: prepared.BaseRef,
+		ResultCommit: prepared.ResultCommit, Branch: prepared.Branch,
+	}
+}
+
+func preparedFromControl(record control.Publication) Prepared {
+	return Prepared{
+		RepositoryID: record.RepositoryID, RepositoryFullName: record.RepositoryFullName,
+		BaseSHA: record.BaseSHA, BaseRef: record.BaseRef,
+		ResultCommit: record.ResultCommit, Branch: record.Branch,
+	}
+}
+
+func pullRequestToControl(observation PullRequestObservation) control.PullRequestObservation {
+	return control.PullRequestObservation{
+		TargetRepositoryID: observation.TargetRepositoryID, TargetRepositoryFullName: observation.TargetRepositoryFullName,
+		Number: observation.Number, URL: observation.URL, State: observation.State, Draft: observation.Draft,
+		Base: pullRequestRefToControl(observation.Base), Head: pullRequestRefToControl(observation.Head),
+	}
+}
+
+func pullRequestRefToControl(observation PullRequestRefObservation) control.PullRequestRefObservation {
+	return control.PullRequestRefObservation{
+		RepositoryID: observation.RepositoryID, RepositoryFullName: observation.RepositoryFullName,
+		RepositoryOwner: observation.RepositoryOwner, RepositoryName: observation.RepositoryName,
+		Ref: observation.Ref, SHA: observation.SHA,
+	}
 }
 
 func (coordinator *Coordinator) Close(ctx context.Context) error {

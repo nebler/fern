@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -32,10 +33,12 @@ func TestStorePersistsDevicesAndWorkflows(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("request publication=%+v created=%t err=%v", publication, created, err)
 	}
-	if err := store.PreparePublication(publication.ID, "owner/repo", "main", "fern/demo/operation-1", "0123456789012345678901234567890123456789", now.Add(3*time.Hour)); err != nil {
+	prepared := testPreparedPublication("fern/demo/operation-1")
+	if err := store.PreparePublication(publication.ID, prepared, now.Add(3*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.FinishPublication(publication.ID, "https://github.com/owner/repo/pull/1", "", now.Add(4*time.Hour)); err != nil {
+	pull := testPullRequestObservation(prepared)
+	if _, err := store.FinishPublication(publication.ID, &pull, "", now.Add(4*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	stateBytes, err := os.ReadFile(filepath.Join(directory, tokenHash("demo")+".json"))
@@ -87,6 +90,28 @@ func TestStorePrunesExpiredDevice(t *testing.T) {
 	}
 }
 
+func TestStoreAuthenticationReturnsDurableDeviceIdentity(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "control"), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	want, err := store.AddDevice("device-secret", "Phone", now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, valid, err := store.AuthenticateDeviceIdentity("device-secret", now.Add(time.Minute))
+	if err != nil || !valid || got != want {
+		t.Fatalf("identity=%+v valid=%t err=%v, want %+v", got, valid, err, want)
+	}
+	if valid, err := store.AuthenticateDevice("device-secret", now.Add(time.Minute)); err != nil || !valid {
+		t.Fatalf("legacy authentication valid=%t err=%v", valid, err)
+	}
+	if got, valid, err := store.AuthenticateDeviceIdentity("wrong-secret", now); err != nil || valid || got != (Device{}) {
+		t.Fatalf("invalid identity=%+v valid=%t err=%v", got, valid, err)
+	}
+}
+
 func TestStoreRejectsSymlinkDirectory(t *testing.T) {
 	root := t.TempDir()
 	realDirectory := filepath.Join(root, "real")
@@ -130,13 +155,15 @@ func TestPublishedPublicationCannotRegressToFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PreparePublication(record.ID, "owner/repo", "main", "fern/demo/operation", "0123456789012345678901234567890123456789", now); err != nil {
+	prepared := testPreparedPublication("fern/demo/operation")
+	if err := store.PreparePublication(record.ID, prepared, now); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.FinishPublication(record.ID, "https://github.com/owner/repo/pull/1", "", now); err != nil {
+	pull := testPullRequestObservation(prepared)
+	if _, err := store.FinishPublication(record.ID, &pull, "", now); err != nil {
 		t.Fatal(err)
 	}
-	result, err := store.FinishPublication(record.ID, "", "stale worker failed", now.Add(time.Second))
+	result, err := store.FinishPublication(record.ID, nil, "stale worker failed", now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,15 +186,113 @@ func TestPreparePublicationRetryMustMatchDurableRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	commit := "0123456789012345678901234567890123456789"
-	if err := store.PreparePublication(record.ID, "owner/repo", "main", "fern/demo/operation", commit, now); err != nil {
+	prepared := testPreparedPublication("fern/demo/operation")
+	if err := store.PreparePublication(record.ID, prepared, now); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.PreparePublication(record.ID, "owner/repo", "main", "fern/demo/other", commit, now); err == nil {
+	different := prepared
+	different.Branch = "fern/demo/other"
+	if err := store.PreparePublication(record.ID, different, now); err == nil {
 		t.Fatal("PreparePublication accepted a different retry tuple")
 	}
 	got, _ := store.Publication(record.ID)
-	if got.Branch != "fern/demo/operation" || got.Commit != commit {
+	if got.Branch != "fern/demo/operation" || got.ResultCommit != prepared.ResultCommit {
 		t.Fatalf("durable prepared record changed: %+v", got)
+	}
+}
+
+func TestFinishPublicationRequiresEveryProofField(t *testing.T) {
+	mutations := map[string]func(*PullRequestObservation){
+		"target repository ID":      func(value *PullRequestObservation) { value.TargetRepositoryID++ },
+		"target full name":          func(value *PullRequestObservation) { value.TargetRepositoryFullName = "owner/other" },
+		"number":                    func(value *PullRequestObservation) { value.Number = 0 },
+		"URL":                       func(value *PullRequestObservation) { value.URL += "/files" },
+		"state":                     func(value *PullRequestObservation) { value.State = "closed" },
+		"draft":                     func(value *PullRequestObservation) { value.Draft = false },
+		"base repository ID":        func(value *PullRequestObservation) { value.Base.RepositoryID++ },
+		"base full name":            func(value *PullRequestObservation) { value.Base.RepositoryFullName = "owner/other" },
+		"base owner":                func(value *PullRequestObservation) { value.Base.RepositoryOwner = "other" },
+		"base name":                 func(value *PullRequestObservation) { value.Base.RepositoryName = "other" },
+		"base ref":                  func(value *PullRequestObservation) { value.Base.Ref = "other" },
+		"base SHA":                  func(value *PullRequestObservation) { value.Base.SHA = strings.Repeat("c", 40) },
+		"head repository ID":        func(value *PullRequestObservation) { value.Head.RepositoryID++ },
+		"head repository full name": func(value *PullRequestObservation) { value.Head.RepositoryFullName = "owner/other" },
+		"head repository owner":     func(value *PullRequestObservation) { value.Head.RepositoryOwner = "other" },
+		"head repository name":      func(value *PullRequestObservation) { value.Head.RepositoryName = "other" },
+		"head ref":                  func(value *PullRequestObservation) { value.Head.Ref = "other" },
+		"head SHA":                  func(value *PullRequestObservation) { value.Head.SHA = strings.Repeat("c", 40) },
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			store, err := Open(filepath.Join(t.TempDir(), "control"), "demo")
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			workflow, err := store.CreateWorkflow("Demo", "ses_"+strings.ReplaceAll(name, " ", "_"), now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			record, _, err := store.RequestPublication(workflow.ID, Publication{ID: "pub", Operation: "operation", Title: "Demo"}, now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared := testPreparedPublication("fern/demo/operation")
+			if err := store.PreparePublication(record.ID, prepared, now); err != nil {
+				t.Fatal(err)
+			}
+			pull := testPullRequestObservation(prepared)
+			mutate(&pull)
+			if _, err := store.FinishPublication(record.ID, &pull, "", now); err == nil {
+				t.Fatal("FinishPublication accepted mismatched proof")
+			}
+			got, _ := store.Publication(record.ID)
+			if got.State == PublicationPublished || got.PullRequest != nil {
+				t.Fatalf("mismatched proof was persisted: %+v", got)
+			}
+		})
+	}
+}
+
+func TestLegacyPublicationsRemainReadableWithoutMigration(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "control")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, tokenHash("demo")+".json")
+	data := `{"version":1,"workspace":"demo","devices":{},"workflows":{},"publications":{"terminal":{"id":"terminal","workflowId":"wf","state":"published","operation":"op","title":"old","pullUrl":"https://github.com/owner/repo/pull/1","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"},"flight":{"id":"flight","workflowId":"wf","state":"pushing","operation":"op","title":"old","repository":"owner/repo","base":"main","branch":"fern/demo/op","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}}}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(directory, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, _ := store.Publication("terminal")
+	flight, _ := store.Publication("flight")
+	if terminal.SchemaVersion != 0 || terminal.PullURL == "" || flight.SchemaVersion != 0 || flight.State != PublicationPrepared {
+		t.Fatalf("legacy records changed: terminal=%+v flight=%+v", terminal, flight)
+	}
+	unchanged, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(unchanged, []byte(data)) {
+		t.Fatalf("legacy load rewrote state: err=%v", err)
+	}
+}
+
+func testPreparedPublication(branch string) PreparedPublication {
+	return PreparedPublication{
+		RepositoryID: 123, RepositoryFullName: "owner/repo",
+		BaseSHA: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", BaseRef: "main",
+		ResultCommit: "0123456789012345678901234567890123456789", Branch: branch,
+	}
+}
+
+func testPullRequestObservation(prepared PreparedPublication) PullRequestObservation {
+	owner, name := "owner", "repo"
+	return PullRequestObservation{
+		TargetRepositoryID: prepared.RepositoryID, TargetRepositoryFullName: prepared.RepositoryFullName,
+		Number: 1, URL: "https://github.com/owner/repo/pull/1", State: "open", Draft: true,
+		Base: PullRequestRefObservation{RepositoryID: prepared.RepositoryID, RepositoryFullName: prepared.RepositoryFullName, RepositoryOwner: owner, RepositoryName: name, Ref: prepared.BaseRef, SHA: prepared.BaseSHA},
+		Head: PullRequestRefObservation{RepositoryID: prepared.RepositoryID, RepositoryFullName: prepared.RepositoryFullName, RepositoryOwner: owner, RepositoryName: name, Ref: prepared.Branch, SHA: prepared.ResultCommit},
 	}
 }
