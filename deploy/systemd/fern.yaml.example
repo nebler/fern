@@ -6,10 +6,44 @@ workspace:
   memory: 8Gi
   env:
     OPENCODE_PASSWORD: ${OPENCODE_PASSWORD}
+  # Publication remains disabled unless this exact numeric ID and case-sensitive
+  # canonical full name are configured together.
+  # github:
+  #   # installationId is required only when durable tasks are enabled.
+  #   # installationId: 987654321
+  #   repository:
+  #     id: 123456789
+  #     fullName: owner/repository
+# Durable tasks are disabled unless this complete policy and the GitHub App
+# installation ID above are explicitly configured. First-time App credentials
+# are created from the operator-only /fern/control onboarding link.
+# tasks:
+#   agent: build
+#   model:
+#     provider: replace-with-provider-id
+#     id: replace-with-model-id
+#   attemptTimeout: 30m
+#   leaseDuration: 2m
+#   budget:
+#     maxTurns: 100
+#   # Optional shell-free host verification policy.
+#   verification:
+#     checkName: repository-tests
+#     argv: [/usr/bin/make, test]
+#     workingDirectory: ""
+#     timeout: 15m
+#     environment:
+#       CI: "true"
+#     outputBytes: 65536
 control:
   password: ${FERN_CONTROL_PASSWORD}
 idle:
   after: 10m
 proxy:
-  # Tailscale Serve terminates tailnet TLS and proxies to this loopback listener.
+  # Tailscale Serve terminates tailnet TLS and proxies only to this listener.
   listen: 127.0.0.1:8080
+  # Host-only operator and attach surface. Never expose this with Tailscale Serve.
+  operatorListen: 127.0.0.1:8081
+  # REQUIRED: replace this parseable placeholder with this host's exact canonical
+  # Tailscale Serve HTTPS root origin before starting Fern.
+  remoteOrigin: https://replace-with-this-host.example.ts.net
