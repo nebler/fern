@@ -22,6 +22,13 @@ type pauseRecoveryRuntime struct {
 	prepareN int
 }
 
+func (f *pauseRecoveryRuntime) EnsureRunningObserved(ctx context.Context, spec runtime.Spec) (runtime.RunningResult, error) {
+	ep, transitioned, err := f.EnsureRunning(ctx, spec)
+	return runtime.RunningResult{Observation: runtime.Observation{
+		State: runtime.StateRunning, Running: true, Endpoint: ep, HasEndpoint: true, ImageID: testImageID,
+	}, Transitioned: transitioned}, err
+}
+
 func (f *pauseRecoveryRuntime) EnsureRunning(context.Context, runtime.Spec) (runtime.Endpoint, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -36,7 +43,7 @@ func (f *pauseRecoveryRuntime) ReconcileStartup(context.Context, runtime.Spec) (
 	if f.state == runtime.StateAbsent || f.state == runtime.StatePaused {
 		return runtime.StartupResult{}, nil
 	}
-	return runtime.StartupResult{Endpoint: f.endpoint, Running: true, Transitioned: f.state == runtime.StateProvisioning}, nil
+	return runtime.StartupResult{Endpoint: f.endpoint, ImageID: testImageID, Running: true, Transitioned: f.state == runtime.StateProvisioning}, nil
 }
 
 func (f *pauseRecoveryRuntime) Pause(context.Context, string) error {
@@ -56,6 +63,7 @@ func (f *pauseRecoveryRuntime) Status(context.Context, string) (runtime.Observat
 	defer f.mu.Unlock()
 	return runtime.Observation{
 		State:       f.state,
+		ImageID:     testImageID,
 		Running:     f.running,
 		Endpoint:    f.endpoint,
 		HasEndpoint: f.state == runtime.StateRunning,
@@ -76,7 +84,7 @@ func TestPauseRefusesRunningProvisioningWorkspace(t *testing.T) {
 		endpoint: runtime.Endpoint{Host: "127.0.0.1", Port: 4096},
 	}
 	manager := newTestManager(fake, nil, alwaysIdle)
-	manager.publishEndpoint(fake.endpoint)
+	manager.publishEndpoint(fake.endpoint, testImageID)
 	if err := manager.Pause(context.Background()); err == nil {
 		t.Fatal("Pause stopped a running provisioning workspace without an idle snapshot")
 	}
@@ -107,7 +115,7 @@ func TestPauseAttemptInvalidatesEndpointAndReopensAdmission(t *testing.T) {
 				pauseErr: test.err,
 			}
 			manager := newTestManager(fake, nil, alwaysIdle)
-			manager.publishEndpoint(fake.endpoint)
+			manager.publishEndpoint(fake.endpoint, testImageID)
 
 			err := manager.Pause(context.Background())
 			if err != test.err {
@@ -147,9 +155,9 @@ func TestPauseInvalidationDoesNotEraseNewerGeneration(t *testing.T) {
 		pauseErr: pauseErr,
 	}
 	manager := newTestManager(fake, nil, alwaysIdle)
-	oldTarget := manager.publishEndpoint(oldEndpoint)
+	oldTarget := manager.publishEndpoint(oldEndpoint, testImageID)
 	fake.onPause = func() {
-		manager.publishEndpoint(newEndpoint)
+		manager.publishEndpoint(newEndpoint, "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789")
 	}
 
 	if err := manager.Pause(context.Background()); err != pauseErr {
@@ -159,7 +167,7 @@ func TestPauseInvalidationDoesNotEraseNewerGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new endpoint was invalidated: %v", err)
 	}
-	if current.Endpoint != newEndpoint || current.Generation <= oldTarget.Generation {
+	if current.Endpoint != newEndpoint || current.ImageID == oldTarget.ImageID || current.Generation <= oldTarget.Generation {
 		t.Fatalf("current target = %+v, want newer endpoint %+v after generation %d", current, newEndpoint, oldTarget.Generation)
 	}
 }
@@ -169,7 +177,7 @@ func TestAcquirePausedHoldsAdmissionUntilRelease(t *testing.T) {
 		state: runtime.StateRunning, endpoint: runtime.Endpoint{Host: "127.0.0.1", Port: 4096},
 	}
 	manager := newTestManager(fake, nil, alwaysIdle)
-	manager.publishEndpoint(fake.endpoint)
+	manager.publishEndpoint(fake.endpoint, testImageID)
 	releaseFence, err := manager.AcquirePaused(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -190,6 +198,64 @@ func TestAcquirePausedHoldsAdmissionUntilRelease(t *testing.T) {
 		t.Fatalf("request after fence release failed: %v", err)
 	}
 	releaseRequest()
+}
+
+func TestAcquireQuiescedObservesTwiceThenRetainsFence(t *testing.T) {
+	fake := &pauseRecoveryRuntime{
+		state: runtime.StateRunning, running: true, endpoint: runtime.Endpoint{Host: "127.0.0.1", Port: 4096},
+	}
+	manager := newTestManager(fake, nil, alwaysIdle)
+	want := manager.publishEndpoint(fake.endpoint, testImageID)
+	observations := 0
+	releaseFence, err := manager.AcquireQuiesced(context.Background(), func(_ context.Context, target RequestTarget) error {
+		observations++
+		if target != want {
+			t.Fatalf("target = %+v, want %+v", target, want)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observations != 2 || fake.pauseN != 1 {
+		t.Fatalf("observations=%d pauses=%d", observations, fake.pauseN)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	if _, _, err := manager.AcquireRequest(ctx, RequestRead); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("request crossed quiesced fence: %v", err)
+	}
+	releaseFence()
+	releaseFence()
+	ctx, cancel = context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, releaseRequest, err := manager.AcquireRequest(ctx, RequestRead)
+	if err != nil {
+		t.Fatalf("request after quiesced fence release: %v", err)
+	}
+	releaseRequest()
+}
+
+func TestAcquireQuiescedFailureDoesNotStopAndReopensAdmission(t *testing.T) {
+	fake := &pauseRecoveryRuntime{
+		state: runtime.StateRunning, running: true, endpoint: runtime.Endpoint{Host: "127.0.0.1", Port: 4096},
+	}
+	manager := newTestManager(fake, nil, alwaysIdle)
+	manager.publishEndpoint(fake.endpoint, testImageID)
+	wantErr := errors.New("terminal observation inconclusive")
+	if _, err := manager.AcquireQuiesced(context.Background(), func(context.Context, RequestTarget) error { return wantErr }); !errors.Is(err, wantErr) {
+		t.Fatalf("observation error = %v", err)
+	}
+	if fake.pauseN != 0 {
+		t.Fatalf("pause calls = %d", fake.pauseN)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_, release, err := manager.AcquireRequest(ctx, RequestRead)
+	if err != nil {
+		t.Fatalf("request after failed observation: %v", err)
+	}
+	release()
 }
 
 func TestClosePreparesOrderlyShutdownRecovery(t *testing.T) {

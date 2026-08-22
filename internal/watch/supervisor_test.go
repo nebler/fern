@@ -48,7 +48,7 @@ func TestReduceActivityArmsOnlyOnActiveToIdleTransition(t *testing.T) {
 	}
 }
 
-func TestRequestInvalidatesPreviousIdleBoundary(t *testing.T) {
+func TestRequestAfterIdleRestartsRevalidationTimer(t *testing.T) {
 	t.Parallel()
 	model := activityModel{active: make(map[string]bool)}
 	model.apply(Observation{Epoch: 1, Kind: ObservationConnected})
@@ -58,20 +58,43 @@ func TestRequestInvalidatesPreviousIdleBoundary(t *testing.T) {
 		t.Fatalf("action = %v, want timerArm", action)
 	}
 	action = model.apply(Observation{Kind: ObservationRequest})
-	if action != timerCancel || model.seenBusy {
-		t.Fatalf("request did not invalidate boundary: model=%+v action=%v", model, action)
+	if action != timerArm || !model.seenBusy {
+		t.Fatalf("request did not preserve revalidation eligibility: model=%+v action=%v", model, action)
+	}
+}
+
+func TestRequestDoesNotCreateIdleEligibility(t *testing.T) {
+	t.Parallel()
+	model := activityModel{active: make(map[string]bool)}
+	model.apply(Observation{Epoch: 1, Kind: ObservationConnected})
+	if action := model.apply(Observation{Kind: ObservationRequest}); action != timerCancel || model.seenBusy {
+		t.Fatalf("request created eligibility without activity evidence: model=%+v action=%v", model, action)
+	}
+	model.apply(status(1, "one", "busy"))
+	if action := model.apply(Observation{Kind: ObservationRequest}); action != timerCancel || model.seenBusy {
+		t.Fatalf("request preserved eligibility while busy: model=%+v action=%v", model, action)
+	}
+	if action := model.apply(status(1, "one", "idle")); action != timerNone {
+		t.Fatalf("idle after invalidated busy observation armed timer: model=%+v action=%v", model, action)
 	}
 }
 
 func TestMalformedObservationInvalidatesPreviousIdleBoundary(t *testing.T) {
 	t.Parallel()
-	model := activityModel{active: make(map[string]bool)}
-	model.apply(Observation{Epoch: 1, Kind: ObservationConnected})
-	model.apply(status(1, "one", "busy"))
-	model.apply(status(1, "one", "idle"))
-	action := model.apply(Observation{Epoch: 1, Kind: ObservationInvalidated})
-	if action != timerCancel || model.seenBusy {
-		t.Fatalf("invalid observation did not clear eligibility: model=%+v action=%v", model, action)
+	invalid := []Observation{
+		{Epoch: 1, Kind: ObservationInvalidated},
+		{Epoch: 1, Kind: ObservationStatus, Status: "busy"},
+		{Epoch: 1, Kind: ObservationStatus, SessionID: "one", Status: "unknown"},
+	}
+	for _, observation := range invalid {
+		model := activityModel{active: make(map[string]bool)}
+		model.apply(Observation{Epoch: 1, Kind: ObservationConnected})
+		model.apply(status(1, "one", "busy"))
+		model.apply(status(1, "one", "idle"))
+		action := model.apply(observation)
+		if action != timerCancel || model.seenBusy {
+			t.Fatalf("invalid observation %+v did not clear eligibility: model=%+v action=%v", observation, model, action)
+		}
 	}
 }
 
@@ -138,7 +161,7 @@ func TestSupervisorDisconnectCancelsPause(t *testing.T) {
 	}
 }
 
-func TestSupervisorAcknowledgesRequestInvalidation(t *testing.T) {
+func TestSupervisorRevalidatesAfterRequestFollowingIdle(t *testing.T) {
 	t.Parallel()
 	observations := make(chan Observation, 8)
 	paused := make(chan struct{}, 1)
@@ -159,7 +182,7 @@ func TestSupervisorAcknowledgesRequestInvalidation(t *testing.T) {
 	handled := make(chan struct{})
 	observations <- Observation{Kind: ObservationRequest, Handled: handled}
 	assertSignal(t, handled, time.Second)
-	assertNoSignal(t, paused, 60*time.Millisecond)
+	assertSignal(t, paused, 200*time.Millisecond)
 }
 
 func status(epoch uint64, sessionID, value string) Observation {

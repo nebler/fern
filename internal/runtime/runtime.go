@@ -75,7 +75,15 @@ type Endpoint struct {
 // one that should remain dormant until its first waking request.
 type StartupResult struct {
 	Endpoint     Endpoint
+	ImageID      string
 	Running      bool
+	Transitioned bool
+}
+
+// RunningResult carries facts attested by the same inspection that completed
+// a wake. This keeps the endpoint and immutable image identity coherent.
+type RunningResult struct {
+	Observation  Observation
 	Transitioned bool
 }
 
@@ -103,6 +111,7 @@ func (s Spec) Validate() error {
 type Observation struct {
 	State           State
 	ContainerID     string
+	ImageID         string
 	DockerStatus    string
 	Running         bool
 	Frozen          bool

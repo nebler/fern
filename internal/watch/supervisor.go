@@ -143,10 +143,18 @@ func acknowledge(observation Observation) {
 // model, so state changes are explicit and cannot escape through shared values.
 func (model *activityModel) apply(observation Observation) timerAction {
 	switch observation.Kind {
-	case ObservationRequest, ObservationInvalidated:
-		// A request that may admit work invalidates the previous idle boundary.
-		// A fresh busy->idle transition is required even if the HTTP response
-		// returns before OpenCode begins provider execution.
+	case ObservationRequest:
+		// A request after observed idle invalidates the old deadline, but retain
+		// eligibility to retry through Manager's authoritative idle snapshots.
+		// Otherwise a final browser request can prevent pause forever because no
+		// subsequent session status transition is required from OpenCode.
+		if model.connected && model.seenBusy && len(model.active) == 0 {
+			return timerArm
+		}
+		model.seenBusy = false
+		clear(model.active)
+		return timerCancel
+	case ObservationInvalidated:
 		model.seenBusy = false
 		clear(model.active)
 		return timerCancel
@@ -172,6 +180,11 @@ func (model *activityModel) apply(observation Observation) timerAction {
 		if !model.connected || observation.Epoch != model.epoch {
 			return timerNone
 		}
+		if observation.SessionID == "" {
+			model.seenBusy = false
+			clear(model.active)
+			return timerCancel
+		}
 		switch observation.Status {
 		case "busy", "retry":
 			model.active[observation.SessionID] = true
@@ -183,6 +196,10 @@ func (model *activityModel) apply(observation Observation) timerAction {
 			if wasActive && model.seenBusy && len(model.active) == 0 {
 				return timerArm
 			}
+		default:
+			model.seenBusy = false
+			clear(model.active)
+			return timerCancel
 		}
 	}
 	return timerNone

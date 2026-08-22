@@ -60,6 +60,22 @@ func (d *Docker) Close() error {
 	return d.cli.Close()
 }
 
+// ResolveImageID reads Docker's immutable local image identity for a configured
+// reference without creating, starting, or mutating a container.
+func (d *Docker) ResolveImageID(ctx context.Context, reference string) (string, error) {
+	if d == nil || d.cli == nil || strings.TrimSpace(reference) != reference || reference == "" {
+		return "", fmt.Errorf("%w: image reference", ErrSpecDrift)
+	}
+	inspection, err := d.cli.ImageInspect(ctx, reference)
+	if err != nil {
+		return "", fmt.Errorf("inspect workspace image: %w", err)
+	}
+	if !ValidImageID(inspection.ID) {
+		return "", fmt.Errorf("%w: Docker returned a noncanonical image ID", ErrSpecDrift)
+	}
+	return inspection.ID, nil
+}
+
 func (d *Docker) Create(ctx context.Context, spec Spec) (Endpoint, error) {
 	if err := spec.Validate(); err != nil {
 		return Endpoint{}, err
@@ -71,13 +87,14 @@ func (d *Docker) Create(ctx context.Context, spec Spec) (Endpoint, error) {
 	if existing.State != StateAbsent {
 		return Endpoint{}, fmt.Errorf("create %q: workspace already exists", spec.Name)
 	}
-	return d.create(ctx, spec)
+	observation, err := d.create(ctx, spec)
+	return observation.Endpoint, err
 }
 
-func (d *Docker) create(ctx context.Context, spec Spec) (endpoint Endpoint, resultErr error) {
+func (d *Docker) create(ctx context.Context, spec Spec) (observation Observation, resultErr error) {
 	createdVolume, err := d.ensureVolume(ctx, spec)
 	if err != nil {
-		return Endpoint{}, err
+		return Observation{}, err
 	}
 	retainVolume := false
 	defer func() {
@@ -89,13 +106,13 @@ func (d *Docker) create(ctx context.Context, spec Spec) (endpoint Endpoint, resu
 		resultErr = errors.Join(resultErr, d.cli.VolumeRemove(cleanupCtx, specDataVolumeName(spec), false))
 	}()
 	if err := d.intents.Clear(spec.Name); err != nil {
-		return Endpoint{}, fmt.Errorf("clear stale pause intent: %w", err)
+		return Observation{}, fmt.Errorf("clear stale pause intent: %w", err)
 	}
 
 	env := sortedEnv(spec.Env)
 	fingerprint, err := specFingerprint(spec)
 	if err != nil {
-		return Endpoint{}, err
+		return Observation{}, err
 	}
 	port := nat.Port(workspacePort)
 	useInit := true
@@ -131,7 +148,7 @@ func (d *Docker) create(ctx context.Context, spec Spec) (endpoint Endpoint, resu
 		spec.Name,
 	)
 	if err != nil {
-		return Endpoint{}, fmt.Errorf("create container %q: %w", spec.Name, err)
+		return Observation{}, fmt.Errorf("create container %q: %w", spec.Name, err)
 	}
 
 	start := time.Now()
@@ -140,23 +157,26 @@ func (d *Docker) create(ctx context.Context, spec Spec) (endpoint Endpoint, resu
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		removeErr := d.cli.ContainerRemove(cleanupCtx, created.ID, container.RemoveOptions{Force: true})
-		return Endpoint{}, errors.Join(cause, removeErr)
+		return Observation{}, errors.Join(cause, removeErr)
 	}
 	// Once OpenCode starts, retain its data even if health or observation setup
 	// later fails. Only a never-started initial workspace is safe to roll back.
 	retainVolume = true
-	observation, err := d.statusByReference(ctx, created.ID, spec.Name)
+	observation, err = d.statusByReference(ctx, created.ID, spec.Name)
 	if err != nil {
-		return Endpoint{}, d.rollbackStarted(spec.Name, created.ID, err)
+		return Observation{}, d.rollbackStarted(spec.Name, created.ID, err)
+	}
+	if observation.State != StateRunning {
+		return Observation{}, d.rollbackStarted(spec.Name, created.ID, fmt.Errorf("workspace %q is %s after start", spec.Name, observation.State))
 	}
 	if !observation.HasEndpoint {
-		return Endpoint{}, d.rollbackStarted(spec.Name, created.ID, fmt.Errorf("workspace %q has no %s port binding", spec.Name, workspacePort))
+		return Observation{}, d.rollbackStarted(spec.Name, created.ID, fmt.Errorf("workspace %q has no %s port binding", spec.Name, workspacePort))
 	}
 	if err := WaitHealthy(ctx, observation.Endpoint, spec.ServerAuth(), healthTimeout); err != nil {
-		return Endpoint{}, d.rollbackStarted(spec.Name, created.ID, fmt.Errorf("container %q never became healthy: %w", spec.Name, err))
+		return Observation{}, d.rollbackStarted(spec.Name, created.ID, fmt.Errorf("container %q never became healthy: %w", spec.Name, err))
 	}
 	d.log.Info("state", "workspace", spec.Name, "from", StateProvisioning, "to", StateRunning, "elapsed_ms", time.Since(start).Milliseconds())
-	return observation.Endpoint, nil
+	return observation, nil
 }
 
 func (d *Docker) Pause(ctx context.Context, name string) error {
@@ -252,32 +272,40 @@ func (d *Docker) Resume(ctx context.Context, spec Spec) (Endpoint, error) {
 	if err != nil {
 		return Endpoint{}, err
 	}
-	return d.resumeObserved(ctx, spec, inspection)
+	observation, err := d.resumeObserved(ctx, spec, inspection)
+	return observation.Endpoint, err
 }
 
 func (d *Docker) EnsureRunning(ctx context.Context, spec Spec) (Endpoint, bool, error) {
+	result, err := d.EnsureRunningObserved(ctx, spec)
+	return result.Observation.Endpoint, result.Transitioned, err
+}
+
+// EnsureRunningObserved preserves the inspection that verified ownership,
+// actual configuration, running state, endpoint, and immutable image ID.
+func (d *Docker) EnsureRunningObserved(ctx context.Context, spec Spec) (RunningResult, error) {
 	if err := spec.Validate(); err != nil {
-		return Endpoint{}, false, err
+		return RunningResult{}, err
 	}
 	inspection, err := d.inspectByReference(ctx, spec.Name, spec.Name)
 	if err != nil {
-		return Endpoint{}, false, err
+		return RunningResult{}, err
 	}
 	observation := inspection.observation
 	switch observation.State {
 	case StateAbsent:
-		ep, err := d.create(ctx, spec)
-		return ep, true, err
+		observation, err := d.create(ctx, spec)
+		return RunningResult{Observation: observation, Transitioned: true}, err
 	case StatePaused, StateProvisioning:
-		ep, err := d.resumeObserved(ctx, spec, inspection)
-		return ep, true, err
+		observation, err := d.resumeObserved(ctx, spec, inspection)
+		return RunningResult{Observation: observation, Transitioned: true}, err
 	case StateRunning:
-		ep, err := d.resumeObserved(ctx, spec, inspection)
-		return ep, false, err
+		observation, err := d.resumeObserved(ctx, spec, inspection)
+		return RunningResult{Observation: observation}, err
 	case StateFailed:
-		return Endpoint{}, false, fmt.Errorf("%w: inspect logs and run 'fern down' before recreating", ErrFailed)
+		return RunningResult{}, fmt.Errorf("%w: inspect logs and run 'fern down' before recreating", ErrFailed)
 	default:
-		return Endpoint{}, false, fmt.Errorf("unexpected workspace state %q", observation.State)
+		return RunningResult{}, fmt.Errorf("unexpected workspace state %q", observation.State)
 	}
 }
 
@@ -295,11 +323,11 @@ func (d *Docker) ReconcileStartup(ctx context.Context, spec Spec) (StartupResult
 	case StateAbsent, StatePaused:
 		return StartupResult{}, nil
 	case StateRunning:
-		ep, err := d.resumeObserved(ctx, spec, inspection)
-		return StartupResult{Endpoint: ep, Running: err == nil}, err
+		observation, err := d.resumeObserved(ctx, spec, inspection)
+		return StartupResult{Endpoint: observation.Endpoint, ImageID: observation.ImageID, Running: err == nil}, err
 	case StateProvisioning:
-		ep, err := d.resumeObserved(ctx, spec, inspection)
-		return StartupResult{Endpoint: ep, Running: err == nil, Transitioned: true}, err
+		observation, err := d.resumeObserved(ctx, spec, inspection)
+		return StartupResult{Endpoint: observation.Endpoint, ImageID: observation.ImageID, Running: err == nil, Transitioned: true}, err
 	case StateFailed:
 		return StartupResult{}, fmt.Errorf("%w: inspect logs and run 'fern down' before recreating", ErrFailed)
 	default:
@@ -307,23 +335,23 @@ func (d *Docker) ReconcileStartup(ctx context.Context, spec Spec) (StartupResult
 	}
 }
 
-func (d *Docker) resumeObserved(ctx context.Context, spec Spec, inspection workspaceInspection) (Endpoint, error) {
+func (d *Docker) resumeObserved(ctx context.Context, spec Spec, inspection workspaceInspection) (Observation, error) {
 	observation := inspection.observation
 	if observation.State == StateAbsent {
-		return Endpoint{}, fmt.Errorf("resume %q: workspace is absent", spec.Name)
+		return Observation{}, fmt.Errorf("resume %q: workspace is absent", spec.Name)
 	}
 	wantFingerprint, err := specFingerprint(spec)
 	if err != nil {
-		return Endpoint{}, err
+		return Observation{}, err
 	}
 	if observation.SpecFingerprint != wantFingerprint {
-		return Endpoint{}, fmt.Errorf("%w: run 'fern down' before applying changed image, repository, memory, or environment", ErrSpecDrift)
+		return Observation{}, fmt.Errorf("%w: run 'fern down' before applying changed image, repository, memory, or environment", ErrSpecDrift)
 	}
 	if err := verifyActualSpec(inspection.info, spec); err != nil {
-		return Endpoint{}, err
+		return Observation{}, err
 	}
 	if observation.State == StateFailed {
-		return Endpoint{}, fmt.Errorf("%w: %s exited with code %d (oom=%t); inspect logs, then run 'fern down' to recreate", ErrFailed, spec.Name, observation.ExitCode, observation.OOMKilled)
+		return Observation{}, fmt.Errorf("%w: %s exited with code %d (oom=%t); inspect logs, then run 'fern down' to recreate", ErrFailed, spec.Name, observation.ExitCode, observation.OOMKilled)
 	}
 
 	start := time.Now()
@@ -332,32 +360,35 @@ func (d *Docker) resumeObserved(ctx context.Context, spec Spec, inspection works
 	containerID := observation.ContainerID
 	if observation.Frozen {
 		if err := d.cli.ContainerUnpause(ctx, observation.ContainerID); err != nil {
-			return Endpoint{}, d.rollbackStarted(spec.Name, containerID, fmt.Errorf("unpause %q: %w", spec.Name, err))
+			return Observation{}, d.rollbackStarted(spec.Name, containerID, fmt.Errorf("unpause %q: %w", spec.Name, err))
 		}
 	} else if !observation.Running {
 		if err := d.cli.ContainerStart(ctx, observation.ContainerID, container.StartOptions{}); err != nil {
-			return Endpoint{}, d.rollbackStarted(spec.Name, containerID, fmt.Errorf("start %q: %w", spec.Name, err))
+			return Observation{}, d.rollbackStarted(spec.Name, containerID, fmt.Errorf("start %q: %w", spec.Name, err))
 		}
 	}
 	if transitioned {
 		observation, err = d.statusByReference(ctx, containerID, spec.Name)
 		if err != nil {
-			return Endpoint{}, d.rollbackIfTransitioned(true, spec.Name, containerID, err)
+			return Observation{}, d.rollbackIfTransitioned(true, spec.Name, containerID, err)
 		}
 	}
+	if observation.State != StateRunning {
+		return Observation{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("workspace %q is %s after resume", spec.Name, observation.State))
+	}
 	if !observation.HasEndpoint {
-		return Endpoint{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("workspace %q has no %s port binding", spec.Name, workspacePort))
+		return Observation{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("workspace %q has no %s port binding", spec.Name, workspacePort))
 	}
 	if err := WaitHealthy(ctx, observation.Endpoint, spec.ServerAuth(), healthTimeout); err != nil {
-		return Endpoint{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("workspace %q did not become healthy: %w", spec.Name, err))
+		return Observation{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("workspace %q did not become healthy: %w", spec.Name, err))
 	}
 	if err := d.intents.Clear(spec.Name); err != nil {
-		return Endpoint{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("clear pause intent after resume: %w", err))
+		return Observation{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("clear pause intent after resume: %w", err))
 	}
 	if old != StateRunning {
 		d.log.Info("state", "workspace", spec.Name, "from", old, "to", StateRunning, "elapsed_ms", time.Since(start).Milliseconds())
 	}
-	return observation.Endpoint, nil
+	return observation, nil
 }
 
 func (d *Docker) StreamLogs(ctx context.Context, name string, follow bool, stdout, stderr io.Writer) error {
@@ -446,9 +477,13 @@ func (d *Docker) inspectByReference(ctx context.Context, reference, workspace st
 	if info.Config.Labels[managedLabel] != "true" || info.Config.Labels[workspaceLabel] != workspace {
 		return workspaceInspection{}, fmt.Errorf("%w: container %q", ErrUnmanaged, workspace)
 	}
+	if !ValidImageID(info.Image) {
+		return workspaceInspection{}, fmt.Errorf("%w: Docker returned an invalid actual image ID for container %q", ErrSpecDrift, workspace)
+	}
 
 	observation := Observation{
 		ContainerID:     info.ID,
+		ImageID:         info.Image,
 		DockerStatus:    info.State.Status,
 		Running:         info.State.Running,
 		Frozen:          info.State.Paused,
@@ -514,6 +549,19 @@ func (d *Docker) inspectByReference(ctx context.Context, reference, workspace st
 		return workspaceInspection{}, fmt.Errorf("unsupported Docker state %q for workspace %q", info.State.Status, workspace)
 	}
 	return workspaceInspection{observation: observation, info: info}, nil
+}
+
+// ValidImageID accepts only Docker's canonical immutable image identifier.
+func ValidImageID(imageID string) bool {
+	if len(imageID) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(imageID, "sha256:") {
+		return false
+	}
+	for _, char := range imageID[len("sha256:"):] {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func (d *Docker) rollbackStarted(name, containerID string, cause error) error {

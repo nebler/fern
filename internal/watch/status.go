@@ -22,8 +22,10 @@ func AllSessionsIdle(ctx context.Context, ep runtime.Endpoint, auth runtime.Serv
 		decode func([]byte) (bool, error)
 	}{
 		{path: "/api/session/active", decode: decodeV2Active},
+		{path: "/api/shell", decode: decodeV2PendingList},
 		{path: "/api/pty", decode: decodeV2PTYs},
 		{path: "/api/permission/request", decode: decodeV2PendingList},
+		{path: "/api/form/request", decode: decodeV2PendingList},
 		{path: "/api/question/request", decode: decodeV2PendingList},
 	}
 	for _, check := range checks {
@@ -78,7 +80,7 @@ func decodeV2Active(body []byte) (bool, error) {
 		return false, errors.New("decode session status: expected data object")
 	}
 	for _, active := range response.Data {
-		if active.Type != "running" {
+		if active.Type != "running" && active.Type != "busy" && active.Type != "retry" {
 			return false, fmt.Errorf("decode session status: unknown V2 active type %q", active.Type)
 		}
 		return false, nil

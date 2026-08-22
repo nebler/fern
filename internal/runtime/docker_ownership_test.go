@@ -22,6 +22,8 @@ import (
 	"github.com/docker/go-connections/nat"
 )
 
+const testImageID = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 type memoryIntentStore struct{}
 
 func (memoryIntentStore) BeginPause(string, string) error                { return nil }
@@ -37,6 +39,39 @@ type recordingIntentStore struct {
 	beginErr  error
 	commitErr error
 	clears    atomic.Int32
+}
+
+func TestResolveImageIDIsReadOnlyAndCanonical(t *testing.T) {
+	t.Parallel()
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		calls.Add(1)
+		if request.Method != http.MethodGet || request.URL.Path != "/v1.48/images/image:test/json" {
+			t.Errorf("request = %s %s", request.Method, request.URL.Path)
+		}
+		writeJSON(writer, http.StatusOK, map[string]any{"Id": testImageID})
+	}))
+	defer server.Close()
+	docker := testDocker(t, server)
+	imageID, err := docker.ResolveImageID(context.Background(), "image:test")
+	if err != nil || imageID != testImageID || calls.Load() != 1 {
+		t.Fatalf("image ID=%q calls=%d err=%v", imageID, calls.Load(), err)
+	}
+}
+
+func TestResolveImageIDRejectsInvalidReferenceAndDaemonIdentity(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writeJSON(writer, http.StatusOK, map[string]any{"Id": "image:test"})
+	}))
+	defer server.Close()
+	docker := testDocker(t, server)
+	if _, err := docker.ResolveImageID(context.Background(), " image:test"); !errors.Is(err, ErrSpecDrift) {
+		t.Fatalf("invalid reference error = %v", err)
+	}
+	if _, err := docker.ResolveImageID(context.Background(), "image:test"); !errors.Is(err, ErrSpecDrift) {
+		t.Fatalf("invalid daemon identity error = %v", err)
+	}
 }
 
 func (s *recordingIntentStore) BeginPause(string, string) error {
@@ -105,6 +140,92 @@ func TestLifecycleRefusesForeignContainerWithoutMutation(t *testing.T) {
 	}
 	if got := mutations.Load(); got != 0 {
 		t.Fatalf("foreign container received %d mutation requests", got)
+	}
+}
+
+func TestStatusAttestsActualImageIDForEveryOwnedState(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name   string
+		state  map[string]any
+		intent PauseIntentStatus
+		want   State
+	}{
+		{name: "running", state: map[string]any{"Status": "running", "Running": true}, want: StateRunning},
+		{name: "paused", state: map[string]any{"Status": "paused", "Running": true, "Paused": true}, want: StatePaused},
+		{name: "provisioning", state: map[string]any{"Status": "created"}, want: StateProvisioning},
+		{name: "failed", state: map[string]any{"Status": "dead", "Dead": true}, want: StateFailed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				if request.Method != http.MethodGet || !strings.HasSuffix(request.URL.Path, "/containers/demo/json") {
+					http.NotFound(writer, request)
+					return
+				}
+				writeJSON(writer, http.StatusOK, map[string]any{
+					"Id": "container-id", "Image": testImageID,
+					"Config": map[string]any{"Image": "registry.example/workspace:latest", "Labels": map[string]string{
+						managedLabel: "true", workspaceLabel: "demo",
+					}},
+					"State": test.state, "NetworkSettings": map[string]any{"Ports": map[string]any{}},
+				})
+			}))
+			defer server.Close()
+			docker := testDocker(t, server)
+			docker.intents = &recordingIntentStore{status: test.intent}
+			observation, err := docker.Status(context.Background(), "demo")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if observation.State != test.want || observation.ImageID != testImageID {
+				t.Fatalf("observation state=%s image=%q, want state=%s image=%q", observation.State, observation.ImageID, test.want, testImageID)
+			}
+			if observation.ImageID == "registry.example/workspace:latest" {
+				t.Fatal("actual image ID was confused with Config.Image")
+			}
+		})
+	}
+}
+
+func TestStatusRejectsMissingOrMalformedActualImageID(t *testing.T) {
+	t.Parallel()
+	for _, imageID := range []string{"", "image:test", "sha256:abc", "sha256:0123456789ABCDEF0123456789abcdef0123456789abcdef0123456789abcdef"} {
+		t.Run(imageID, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				writeJSON(writer, http.StatusOK, map[string]any{
+					"Id": "container-id", "Image": imageID,
+					"Config": map[string]any{"Image": "image:test", "Labels": map[string]string{
+						managedLabel: "true", workspaceLabel: "demo",
+					}},
+					"State":           map[string]any{"Status": "running", "Running": true},
+					"NetworkSettings": map[string]any{"Ports": map[string]any{}},
+				})
+			}))
+			defer server.Close()
+			observation, err := testDocker(t, server).Status(context.Background(), "demo")
+			if !errors.Is(err, ErrSpecDrift) {
+				t.Fatalf("Status error = %v, want ErrSpecDrift", err)
+			}
+			if observation != (Observation{}) {
+				t.Fatalf("unsafe inspection returned observation %+v", observation)
+			}
+		})
+	}
+}
+
+func TestStatusAbsentHasNoImageID(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writeDockerNotFound(writer, "container")
+	}))
+	defer server.Close()
+	observation, err := testDocker(t, server).Status(context.Background(), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if observation.State != StateAbsent || observation.ImageID != "" {
+		t.Fatalf("absent observation = %+v", observation)
 	}
 }
 
@@ -221,7 +342,8 @@ func TestVerifyActualSpecAllowsImageEnvironment(t *testing.T) {
 		}
 		useInit := true
 		writeJSON(writer, http.StatusOK, map[string]any{
-			"Id": "container-id",
+			"Id":    "container-id",
+			"Image": testImageID,
 			"Config": map[string]any{
 				"Image":        "image:test",
 				"User":         "1001:1001",
@@ -270,7 +392,8 @@ func TestExitedContainerWithPendingPauseIsRecoverable(t *testing.T) {
 			return
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{
-			"Id": "container-id",
+			"Id":    "container-id",
+			"Image": testImageID,
 			"Config": map[string]any{"Labels": map[string]string{
 				managedLabel: "true", workspaceLabel: "demo",
 			}},
@@ -299,7 +422,8 @@ func TestRunningContainerDoesNotMutatePauseIntent(t *testing.T) {
 			return
 		}
 		writeJSON(writer, http.StatusOK, map[string]any{
-			"Id": "container-id",
+			"Id":    "container-id",
+			"Image": testImageID,
 			"Config": map[string]any{"Labels": map[string]string{
 				managedLabel: "true", workspaceLabel: "demo",
 			}},
@@ -342,7 +466,8 @@ func TestPauseFailureReconciliation(t *testing.T) {
 						state = map[string]any{"Status": "exited", "Running": false}
 					}
 					writeJSON(writer, http.StatusOK, map[string]any{
-						"Id": "container-id",
+						"Id":    "container-id",
+						"Image": testImageID,
 						"Config": map[string]any{"Labels": map[string]string{
 							managedLabel: "true", workspaceLabel: "demo",
 						}},
@@ -494,7 +619,8 @@ func TestReconcileStartupUsesOneInspectionForRunningContainer(t *testing.T) {
 			useInit := true
 			port := server.Listener.Addr().(*net.TCPAddr).Port
 			writeJSON(writer, http.StatusOK, map[string]any{
-				"Id": "container-id",
+				"Id":    "container-id",
+				"Image": testImageID,
 				"Config": map[string]any{
 					"Image": spec.Image, "User": "1001:1001", "Env": sortedEnv(spec.Env),
 					"Labels":       map[string]string{managedLabel: "true", workspaceLabel: spec.Name, specFingerprintLabel: fingerprint},
@@ -531,6 +657,9 @@ func TestReconcileStartupUsesOneInspectionForRunningContainer(t *testing.T) {
 	if !result.Running || result.Transitioned || result.Endpoint.Port != server.Listener.Addr().(*net.TCPAddr).Port {
 		t.Fatalf("startup result = %+v", result)
 	}
+	if result.ImageID != testImageID {
+		t.Fatalf("startup image ID = %q, want %q", result.ImageID, testImageID)
+	}
 	if inspections.Load() != 1 {
 		t.Fatalf("container inspections = %d, want 1", inspections.Load())
 	}
@@ -560,6 +689,7 @@ func TestReconcileStartupLeavesAbsentAndPausedDormant(t *testing.T) {
 					}
 					writeJSON(writer, http.StatusOK, map[string]any{
 						"Id":              "container-id",
+						"Image":           testImageID,
 						"Config":          map[string]any{"Labels": map[string]string{managedLabel: "true", workspaceLabel: "demo"}},
 						"State":           map[string]any{"Status": test.status, "Running": true, "Paused": true},
 						"NetworkSettings": map[string]any{"Ports": map[string]any{}},
@@ -601,7 +731,8 @@ func TestDestroyCreatedContainerDoesNotStopIt(t *testing.T) {
 		switch {
 		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/containers/demo/json"):
 			writeJSON(writer, http.StatusOK, map[string]any{
-				"Id": "created-id",
+				"Id":    "created-id",
+				"Image": testImageID,
 				"Config": map[string]any{"Labels": map[string]string{
 					managedLabel: "true", workspaceLabel: "demo",
 				}},

@@ -7,18 +7,26 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
 
 func TestWaitHealthyUsesBasicAuth(t *testing.T) {
 	t.Parallel()
+	type credentials struct {
+		username string
+		password string
+		present  bool
+	}
+	requests := make(chan credentials, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/api/health" {
 			http.NotFound(writer, request)
 			return
 		}
 		username, password, ok := request.BasicAuth()
+		requests <- credentials{username: username, password: password, present: ok}
 		if !ok || username != "opencode" || password != "secret" {
 			http.Error(writer, "unauthorized", http.StatusUnauthorized)
 			return
@@ -29,6 +37,23 @@ func TestWaitHealthyUsesBasicAuth(t *testing.T) {
 	endpoint := Endpoint{Host: "127.0.0.1", Port: server.Listener.Addr().(*net.TCPAddr).Port}
 	if err := WaitHealthy(context.Background(), endpoint, ServerAuth{Password: "secret"}, time.Second); err != nil {
 		t.Fatal(err)
+	}
+	missing := <-requests
+	wrong := <-requests
+	correct := <-requests
+	if missing.present {
+		t.Fatalf("missing-credential probe sent credentials for %q", missing.username)
+	}
+	if !wrong.present || wrong.username != "opencode" || wrong.password == "secret" {
+		t.Fatalf("wrong-credential probe = {username: %q, present: %t, correct password: %t}", wrong.username, wrong.present, wrong.password == "secret")
+	}
+	if !correct.present || correct.username != "opencode" || correct.password != "secret" {
+		t.Fatalf("authenticated probe = {username: %q, present: %t, correct password: %t}", correct.username, correct.present, correct.password == "secret")
+	}
+	select {
+	case extra := <-requests:
+		t.Fatalf("unexpected extra health probe: %+v", extra)
+	default:
 	}
 }
 
@@ -80,6 +105,135 @@ func TestWaitHealthyURLUsesV2Auth(t *testing.T) {
 	}
 }
 
+func TestWaitHealthyFailsClosedWhenBackendAcceptsNegativeAuthProbe(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name          string
+		acceptedProbe int
+		status        int
+	}{
+		{name: "missing credentials with 200", acceptedProbe: 1, status: http.StatusOK},
+		{name: "missing credentials with other success", acceptedProbe: 1, status: http.StatusNoContent},
+		{name: "wrong credentials", acceptedProbe: 2, status: http.StatusOK},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				request := int(requests.Add(1))
+				if request == test.acceptedProbe {
+					writer.WriteHeader(test.status)
+					if test.status != http.StatusNoContent {
+						_, _ = writer.Write([]byte(`{"healthy":true}`))
+					}
+					return
+				}
+				http.Error(writer, "unauthorized", http.StatusUnauthorized)
+			}))
+			defer server.Close()
+
+			err := WaitHealthyURL(context.Background(), server.URL, ServerAuth{Password: "secret"}, time.Second)
+			if !errors.Is(err, errUnsafeHealthAuth) {
+				t.Fatalf("error = %v, want permanent unsafe-auth error", err)
+			}
+			if got := int(requests.Load()); got != test.acceptedProbe {
+				t.Fatalf("requests = %d, want immediate failure after %d", got, test.acceptedProbe)
+			}
+		})
+	}
+}
+
+func TestWaitHealthyRetriesTransientAuthStartupThenSucceeds(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		call := requests.Add(1)
+		if call == 1 {
+			http.Error(writer, "starting", http.StatusServiceUnavailable)
+			return
+		}
+		username, password, ok := request.BasicAuth()
+		if !ok || username != "opencode" || password != "secret" {
+			http.Error(writer, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_, _ = writer.Write([]byte(`{"healthy":true}`))
+	}))
+	defer server.Close()
+
+	if err := WaitHealthyURL(context.Background(), server.URL, ServerAuth{Password: "secret"}, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if got := requests.Load(); got != 4 {
+		t.Fatalf("requests = %d, want one transient probe followed by all three auth probes", got)
+	}
+}
+
+func TestHealthRequestsRejectRedirects(t *testing.T) {
+	t.Parallel()
+	var redirectedRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		redirectedRequests.Add(1)
+		_, _ = writer.Write([]byte(`{"healthy":true}`))
+	}))
+	defer target.Close()
+	redirect := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, target.URL+"/api/health", http.StatusTemporaryRedirect)
+	}))
+	defer redirect.Close()
+
+	status, _, err := requestHealth(context.Background(), redirect.URL, ServerAuth{Password: "redirect-secret"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != http.StatusTemporaryRedirect {
+		t.Fatalf("status = %d, want redirect response", status)
+	}
+	if got := redirectedRequests.Load(); got != 0 {
+		t.Fatalf("redirect target received %d requests", got)
+	}
+}
+
+func TestHealthResponseIsBoundedAndRedacted(t *testing.T) {
+	t.Parallel()
+	const responseSecret = "response-body-must-not-appear"
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte(strings.Repeat(responseSecret, maxHealthBytes/len(responseSecret)+2)))
+	}))
+	defer server.Close()
+
+	err := checkHealth(context.Background(), server.URL, ServerAuth{})
+	if err == nil || !strings.Contains(err.Error(), "exceeds 64 KiB") {
+		t.Fatalf("error = %v, want bounded-response error", err)
+	}
+	if strings.Contains(err.Error(), responseSecret) {
+		t.Fatalf("error disclosed response body: %v", err)
+	}
+}
+
+func TestUnsafeAuthErrorRedactsCredentialsAndResponse(t *testing.T) {
+	t.Parallel()
+	const password = "configured-password-must-not-appear"
+	const responseSecret = "unsafe-response-must-not-appear"
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			http.Error(writer, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		_, _ = writer.Write([]byte(responseSecret + password))
+	}))
+	defer server.Close()
+
+	err := WaitHealthyURL(context.Background(), server.URL, ServerAuth{Password: password}, time.Second)
+	if !errors.Is(err, errUnsafeHealthAuth) {
+		t.Fatalf("error = %v, want permanent unsafe-auth error", err)
+	}
+	if strings.Contains(err.Error(), password) || strings.Contains(err.Error(), responseSecret) {
+		t.Fatalf("error disclosed credentials or response body: %v", err)
+	}
+}
+
 func TestWaitHealthyRejectsFalseOrMalformedHealth(t *testing.T) {
 	t.Parallel()
 	for _, body := range []string{`{"healthy":false}`, `{}`, `not-json`, `{"healthy":true} {}`} {
@@ -107,6 +261,38 @@ func TestWaitHealthyReportsParentCancellation(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "timed out") {
 		t.Fatalf("cancellation reported as timeout: %v", err)
+	}
+}
+
+func TestWaitHealthyCancelsInFlightResponse(t *testing.T) {
+	t.Parallel()
+	started := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.WriteHeader(http.StatusOK)
+		writer.(http.Flusher).Flush()
+		close(started)
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		result <- WaitHealthyURL(ctx, server.URL, ServerAuth{}, time.Minute)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("health request did not reach server")
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("error = %v, want context cancellation", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("health check did not honor cancellation")
 	}
 }
 

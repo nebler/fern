@@ -22,6 +22,7 @@ type RequestObserver func()
 
 type RequestTarget struct {
 	Endpoint   runtime.Endpoint
+	ImageID    string
 	Generation uint64
 }
 
@@ -34,7 +35,7 @@ const (
 )
 
 type lifecycleRuntime interface {
-	EnsureRunning(context.Context, runtime.Spec) (runtime.Endpoint, bool, error)
+	EnsureRunningObserved(context.Context, runtime.Spec) (runtime.RunningResult, error)
 	ReconcileStartup(context.Context, runtime.Spec) (runtime.StartupResult, error)
 	Pause(context.Context, string) error
 	Status(context.Context, string) (runtime.Observation, error)
@@ -60,6 +61,7 @@ type Manager struct {
 	wakeMu               sync.Mutex
 	wake                 *wakeCall
 	endpoint             runtime.Endpoint
+	imageID              string
 	endpointGeneration   uint64
 	nextGeneration       uint64
 	hasEndpoint          bool
@@ -157,7 +159,14 @@ func (m *Manager) ReconcileStartup(ctx context.Context) error {
 		m.clearEndpoint()
 		return nil
 	}
-	_, err = m.observeAndPublish(ctx, result.Endpoint, result.Transitioned)
+	observation := runtime.Observation{
+		State:       runtime.StateRunning,
+		Running:     true,
+		Endpoint:    result.Endpoint,
+		HasEndpoint: result.Endpoint != (runtime.Endpoint{}),
+		ImageID:     result.ImageID,
+	}
+	_, err = m.observeAndPublish(ctx, observation, result.Transitioned)
 	return err
 }
 
@@ -168,7 +177,7 @@ func (m *Manager) ensureTarget(ctx context.Context) (RequestTarget, error) {
 		return RequestTarget{}, errors.New("workspace manager is shutting down")
 	}
 	if m.hasEndpoint {
-		target := RequestTarget{Endpoint: m.endpoint, Generation: m.endpointGeneration}
+		target := RequestTarget{Endpoint: m.endpoint, ImageID: m.imageID, Generation: m.endpointGeneration}
 		m.wakeMu.Unlock()
 		return target, nil
 	}
@@ -208,7 +217,7 @@ func (m *Manager) runningTarget() (RequestTarget, error) {
 	if !m.hasEndpoint {
 		return RequestTarget{}, ErrNotRunning
 	}
-	return RequestTarget{Endpoint: m.endpoint, Generation: m.endpointGeneration}, nil
+	return RequestTarget{Endpoint: m.endpoint, ImageID: m.imageID, Generation: m.endpointGeneration}, nil
 }
 
 // InvalidateEndpoint discards a failed endpoint without disturbing a newer
@@ -218,6 +227,7 @@ func (m *Manager) InvalidateEndpoint(target RequestTarget) {
 	defer m.wakeMu.Unlock()
 	if m.hasEndpoint && m.endpoint == target.Endpoint && m.endpointGeneration == target.Generation {
 		m.endpoint = runtime.Endpoint{}
+		m.imageID = ""
 		m.endpointGeneration = 0
 		m.hasEndpoint = false
 	}
@@ -231,16 +241,25 @@ func (m *Manager) ensureRunning(ctx context.Context) (RequestTarget, error) {
 	if m.isClosing() {
 		return RequestTarget{}, errors.New("workspace manager is shutting down")
 	}
-	ep, transitioned, err := m.runtime.EnsureRunning(ctx, m.spec)
+	result, err := m.runtime.EnsureRunningObserved(ctx, m.spec)
 	if err != nil {
 		return RequestTarget{}, err
 	}
-	return m.observeAndPublish(ctx, ep, transitioned)
+	return m.observeAndPublish(ctx, result.Observation, result.Transitioned)
 }
 
-func (m *Manager) observeAndPublish(ctx context.Context, ep runtime.Endpoint, transitioned bool) (RequestTarget, error) {
+func (m *Manager) observeAndPublish(ctx context.Context, observation runtime.Observation, transitioned bool) (RequestTarget, error) {
+	if observation.State != runtime.StateRunning || !observation.Running {
+		return RequestTarget{}, errors.New("runtime did not attest a running workspace")
+	}
+	if !observation.HasEndpoint || observation.Endpoint == (runtime.Endpoint{}) {
+		return RequestTarget{}, errors.New("running workspace has no attested endpoint")
+	}
+	if !runtime.ValidImageID(observation.ImageID) {
+		return RequestTarget{}, errors.New("running workspace has no valid actual image ID")
+	}
 	if m.observe != nil {
-		if err := m.observe(ctx, ep, transitioned); err != nil {
+		if err := m.observe(ctx, observation.Endpoint, transitioned); err != nil {
 			if transitioned {
 				cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				pauseErr := m.runtime.Pause(cleanupCtx, m.spec.Name)
@@ -250,20 +269,21 @@ func (m *Manager) observeAndPublish(ctx context.Context, ep runtime.Endpoint, tr
 			return RequestTarget{}, fmt.Errorf("attach activity observer: %w", err)
 		}
 	}
-	return m.publishEndpoint(ep), nil
+	return m.publishEndpoint(observation.Endpoint, observation.ImageID), nil
 }
 
-func (m *Manager) publishEndpoint(endpoint runtime.Endpoint) RequestTarget {
+func (m *Manager) publishEndpoint(endpoint runtime.Endpoint, imageID string) RequestTarget {
 	m.wakeMu.Lock()
 	defer m.wakeMu.Unlock()
 	if m.closing {
-		return RequestTarget{Endpoint: endpoint}
+		return RequestTarget{Endpoint: endpoint, ImageID: imageID}
 	}
 	m.nextGeneration++
 	m.endpoint = endpoint
+	m.imageID = imageID
 	m.endpointGeneration = m.nextGeneration
 	m.hasEndpoint = true
-	return RequestTarget{Endpoint: endpoint, Generation: m.endpointGeneration}
+	return RequestTarget{Endpoint: endpoint, ImageID: imageID, Generation: m.endpointGeneration}
 }
 
 func (m *Manager) acquireLifecycleForClose(ctx context.Context) error {
@@ -315,6 +335,69 @@ func (m *Manager) AcquirePaused(ctx context.Context) (func(), error) {
 	}, nil
 }
 
+// AcquireQuiesced closes request admission, performs two caller-owned exact
+// observations against one attested running target, stops compute, and retains
+// the lifecycle/repository fence until release. It is intended for result
+// capture that must synchronize final OpenCode evidence with host Git state.
+func (m *Manager) AcquireQuiesced(ctx context.Context, observe func(context.Context, RequestTarget) error) (func(), error) {
+	if observe == nil {
+		return nil, errors.New("quiesced observation is required")
+	}
+	if err := m.beginPause(ctx); err != nil {
+		return nil, err
+	}
+	fail := func(err error) (func(), error) {
+		m.endPause()
+		return nil, err
+	}
+	if m.isClosing() {
+		return fail(errors.New("workspace manager is shutting down"))
+	}
+	if err := m.acquireLifecycle(ctx); err != nil {
+		return fail(err)
+	}
+	failHeld := func(err error) (func(), error) {
+		m.releaseLifecycle()
+		return fail(err)
+	}
+	observation, err := m.runtime.Status(ctx, m.spec.Name)
+	if err != nil {
+		return failHeld(err)
+	}
+	if observation.State != runtime.StateRunning || !observation.HasEndpoint || !runtime.ValidImageID(observation.ImageID) {
+		return failHeld(errors.New("quiesced observation requires an attested running workspace"))
+	}
+	target, err := m.runningTarget()
+	if err != nil || target.Endpoint != observation.Endpoint || target.ImageID != observation.ImageID {
+		return failHeld(errors.New("quiesced target differs from current runtime observation"))
+	}
+	for range 2 {
+		if err := observe(ctx, target); err != nil {
+			return failHeld(err)
+		}
+		if m.allIdle == nil {
+			return failHeld(errors.New("authoritative idle checker is required"))
+		}
+		idle, err := m.allIdle(ctx, target.Endpoint)
+		if err != nil {
+			return failHeld(err)
+		}
+		if !idle {
+			return failHeld(ErrSessionsActive)
+		}
+	}
+	if err := m.pauseRuntime(ctx); err != nil {
+		return failHeld(err)
+	}
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			m.releaseLifecycle()
+			m.endPause()
+		})
+	}, nil
+}
+
 func (m *Manager) pauseWhileHeld(ctx context.Context) error {
 	observation, err := m.runtime.Status(ctx, m.spec.Name)
 	if err != nil {
@@ -353,7 +436,7 @@ func (m *Manager) pauseWhileHeld(ctx context.Context) error {
 
 func (m *Manager) pauseRuntime(ctx context.Context) error {
 	m.wakeMu.Lock()
-	target := RequestTarget{Endpoint: m.endpoint, Generation: m.endpointGeneration}
+	target := RequestTarget{Endpoint: m.endpoint, ImageID: m.imageID, Generation: m.endpointGeneration}
 	hasEndpoint := m.hasEndpoint
 	m.wakeMu.Unlock()
 
@@ -367,6 +450,10 @@ func (m *Manager) pauseRuntime(ctx context.Context) error {
 func (m *Manager) Close(ctx context.Context) error {
 	m.wakeMu.Lock()
 	m.closing = true
+	m.endpoint = runtime.Endpoint{}
+	m.imageID = ""
+	m.endpointGeneration = 0
+	m.hasEndpoint = false
 	wake := m.wake
 	m.wakeMu.Unlock()
 	m.admissionMu.Lock()
@@ -496,6 +583,7 @@ func (m *Manager) endPause() {
 func (m *Manager) clearEndpoint() {
 	m.wakeMu.Lock()
 	m.endpoint = runtime.Endpoint{}
+	m.imageID = ""
 	m.endpointGeneration = 0
 	m.hasEndpoint = false
 	m.wakeMu.Unlock()

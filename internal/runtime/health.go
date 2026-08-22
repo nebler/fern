@@ -12,7 +12,17 @@ import (
 	"time"
 )
 
-var healthHTTPClient = &http.Client{Timeout: 2 * time.Second}
+const maxHealthBytes = 64 << 10
+
+var (
+	errUnsafeHealthAuth = errors.New("backend authentication is not enforced")
+	healthHTTPClient    = &http.Client{
+		Timeout: 2 * time.Second,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+)
 
 func WaitHealthy(ctx context.Context, ep Endpoint, auth ServerAuth, timeout time.Duration) error {
 	return WaitHealthyURL(ctx, ep.URL(), auth, timeout)
@@ -32,6 +42,9 @@ func WaitHealthyURL(ctx context.Context, baseURL string, auth ServerAuth, timeou
 			return nil
 		} else {
 			lastErr = err
+			if errors.Is(err, errUnsafeHealthAuth) {
+				return err
+			}
 		}
 
 		select {
@@ -46,26 +59,26 @@ func WaitHealthyURL(ctx context.Context, baseURL string, auth ServerAuth, timeou
 }
 
 func checkHealth(ctx context.Context, baseURL string, auth ServerAuth) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/api/health", nil)
+	if auth.Password != "" {
+		if err := checkHealthAuthRejection(ctx, baseURL, ServerAuth{}, "missing"); err != nil {
+			return err
+		}
+
+		wrongPassword := "fern-health-check-invalid-password"
+		if wrongPassword == auth.Password {
+			wrongPassword += "-different"
+		}
+		if err := checkHealthAuthRejection(ctx, baseURL, ServerAuth{Password: wrongPassword}, "invalid"); err != nil {
+			return err
+		}
+	}
+
+	status, body, err := requestHealth(ctx, baseURL, auth)
 	if err != nil {
 		return err
 	}
-	auth.Apply(req)
-	resp, err := healthHTTPClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	const maxHealthBytes = 64 << 10
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHealthBytes+1))
-	if err != nil {
-		return fmt.Errorf("read health: %w", err)
-	}
-	if len(body) > maxHealthBytes {
-		return fmt.Errorf("decode health: response exceeds 64 KiB")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("health returned status %d", resp.StatusCode)
+	if status != http.StatusOK {
+		return fmt.Errorf("health returned status %d", status)
 	}
 	var health struct {
 		Healthy bool `json:"healthy"`
@@ -85,4 +98,39 @@ func checkHealth(ctx context.Context, baseURL string, auth ServerAuth) error {
 		return fmt.Errorf("health reported unhealthy")
 	}
 	return nil
+}
+
+func checkHealthAuthRejection(ctx context.Context, baseURL string, auth ServerAuth, probe string) error {
+	status, _, err := requestHealth(ctx, baseURL, auth)
+	if status >= 200 && status < 300 {
+		return fmt.Errorf("%w: %s-credential probe returned status %d", errUnsafeHealthAuth, probe, status)
+	}
+	if err != nil {
+		return fmt.Errorf("%s-credential probe failed: %w", probe, err)
+	}
+	if status != http.StatusUnauthorized {
+		return fmt.Errorf("%s-credential probe returned status %d", probe, status)
+	}
+	return nil
+}
+
+func requestHealth(ctx context.Context, baseURL string, auth ServerAuth) (int, []byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(baseURL, "/")+"/api/health", nil)
+	if err != nil {
+		return 0, nil, err
+	}
+	auth.Apply(req)
+	resp, err := healthHTTPClient.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHealthBytes+1))
+	if err != nil {
+		return resp.StatusCode, nil, fmt.Errorf("read health: %w", err)
+	}
+	if len(body) > maxHealthBytes {
+		return resp.StatusCode, nil, fmt.Errorf("decode health: response exceeds 64 KiB")
+	}
+	return resp.StatusCode, body, nil
 }

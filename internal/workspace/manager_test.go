@@ -10,6 +10,8 @@ import (
 	"github.com/nebler/fern/internal/runtime"
 )
 
+const testImageID = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 type fakeRuntime struct {
 	mu             sync.Mutex
 	state          runtime.State
@@ -22,7 +24,12 @@ type fakeRuntime struct {
 	createWait     time.Duration
 	createErr      error
 	endpoint       runtime.Endpoint
+	imageID        string
 	statusEndpoint *runtime.Endpoint
+	ensureResult   *runtime.RunningResult
+	ensureErr      error
+	startupResult  *runtime.StartupResult
+	startupErr     error
 	pauseCtxErr    error
 	createBlock    chan struct{}
 	createStart    chan struct{}
@@ -30,7 +37,7 @@ type fakeRuntime struct {
 }
 
 func newFakeRuntime(state runtime.State) *fakeRuntime {
-	return &fakeRuntime{state: state, endpoint: runtime.Endpoint{Host: "127.0.0.1", Port: 4096}}
+	return &fakeRuntime{state: state, endpoint: runtime.Endpoint{Host: "127.0.0.1", Port: 4096}, imageID: testImageID}
 }
 
 func (f *fakeRuntime) Create(ctx context.Context, _ runtime.Spec) (runtime.Endpoint, error) {
@@ -170,19 +177,51 @@ func (f *fakeRuntime) EnsureRunning(ctx context.Context, spec runtime.Spec) (run
 	}
 }
 
+func (f *fakeRuntime) EnsureRunningObserved(ctx context.Context, spec runtime.Spec) (runtime.RunningResult, error) {
+	f.mu.Lock()
+	if f.ensureResult != nil || f.ensureErr != nil {
+		f.ensureN++
+		result, err := runtime.RunningResult{}, f.ensureErr
+		if f.ensureResult != nil {
+			result = *f.ensureResult
+		}
+		f.mu.Unlock()
+		return result, err
+	}
+	f.mu.Unlock()
+	ep, transitioned, err := f.EnsureRunning(ctx, spec)
+	if err != nil {
+		return runtime.RunningResult{}, err
+	}
+	f.mu.Lock()
+	imageID := f.imageID
+	f.mu.Unlock()
+	return runtime.RunningResult{Observation: runtime.Observation{
+		State: runtime.StateRunning, Running: true, Endpoint: ep, HasEndpoint: true, ImageID: imageID,
+	}, Transitioned: transitioned}, nil
+}
+
 func (f *fakeRuntime) ReconcileStartup(ctx context.Context, spec runtime.Spec) (runtime.StartupResult, error) {
 	f.mu.Lock()
 	f.startupN++
+	if f.startupResult != nil || f.startupErr != nil {
+		result, err := runtime.StartupResult{}, f.startupErr
+		if f.startupResult != nil {
+			result = *f.startupResult
+		}
+		f.mu.Unlock()
+		return result, err
+	}
 	state := f.state
 	f.mu.Unlock()
 	switch state {
 	case runtime.StateAbsent, runtime.StatePaused:
 		return runtime.StartupResult{}, nil
 	case runtime.StateRunning:
-		return runtime.StartupResult{Endpoint: f.endpoint, Running: true}, nil
+		return runtime.StartupResult{Endpoint: f.endpoint, ImageID: f.imageID, Running: true}, nil
 	case runtime.StateProvisioning:
 		ep, err := f.Resume(ctx, spec)
-		return runtime.StartupResult{Endpoint: ep, Running: err == nil, Transitioned: true}, err
+		return runtime.StartupResult{Endpoint: ep, ImageID: f.imageID, Running: err == nil, Transitioned: true}, err
 	default:
 		return runtime.StartupResult{}, runtime.ErrFailed
 	}
@@ -251,8 +290,42 @@ func TestReconcileStartupObservesAndPublishesActiveWorkspace(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if target.Endpoint != fake.endpoint || target.Generation == 0 || observed != 1 {
+			if target.Endpoint != fake.endpoint || target.ImageID != testImageID || target.Generation == 0 || observed != 1 {
 				t.Fatalf("target=%+v observed=%d", target, observed)
+			}
+		})
+	}
+}
+
+func TestReconcileStartupRefusesUnattestedTarget(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name   string
+		result runtime.StartupResult
+		err    error
+	}{
+		{name: "inspection failure", err: errors.New("inspect unavailable")},
+		{name: "missing image", result: runtime.StartupResult{Endpoint: runtime.Endpoint{Host: "127.0.0.1", Port: 4096}, Running: true}},
+		{name: "malformed image", result: runtime.StartupResult{Endpoint: runtime.Endpoint{Host: "127.0.0.1", Port: 4096}, ImageID: "image:test", Running: true}},
+		{name: "missing endpoint", result: runtime.StartupResult{ImageID: testImageID, Running: true}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeRuntime(runtime.StateRunning)
+			fake.startupResult = &test.result
+			fake.startupErr = test.err
+			observed := 0
+			manager := newTestManager(fake, func(context.Context, runtime.Endpoint, bool) error {
+				observed++
+				return nil
+			}, alwaysIdle)
+			if err := manager.ReconcileStartup(context.Background()); err == nil {
+				t.Fatal("startup unexpectedly published an unattested target")
+			}
+			if observed != 0 {
+				t.Fatalf("observer called %d times", observed)
+			}
+			if _, _, err := manager.AcquireRequest(context.Background(), RequestObserve); !errors.Is(err, ErrNotRunning) {
+				t.Fatalf("unattested startup target was cached: %v", err)
 			}
 		})
 	}
@@ -278,6 +351,8 @@ func (f *fakeRuntime) Status(context.Context, string) (runtime.Observation, erro
 	}
 	return runtime.Observation{
 		State:       f.state,
+		ImageID:     f.imageID,
+		Running:     f.state == runtime.StateRunning,
 		Endpoint:    endpoint,
 		HasEndpoint: f.state == runtime.StateRunning,
 	}, nil
@@ -350,6 +425,36 @@ func TestConcurrentEnsureRunningCreatesOnce(t *testing.T) {
 	}
 }
 
+func TestCoalescedRequestsCarryOneStableAttestedTarget(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRuntime(runtime.StateAbsent)
+	fake.createBlock = make(chan struct{})
+	fake.createStart = make(chan struct{})
+	manager := newTestManager(fake, nil, alwaysIdle)
+	const callers = 12
+	targets := make(chan RequestTarget, callers)
+	errs := make(chan error, callers)
+	for range callers {
+		go func() {
+			target, release, err := manager.AcquireRequest(context.Background(), RequestRead)
+			release()
+			targets <- target
+			errs <- err
+		}()
+	}
+	<-fake.createStart
+	close(fake.createBlock)
+	for range callers {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+		target := <-targets
+		if target.Endpoint != fake.endpoint || target.ImageID != testImageID || target.Generation != 1 {
+			t.Fatalf("coalesced target = %+v", target)
+		}
+	}
+}
+
 func TestEnsureRunningPropagatesCreateFailure(t *testing.T) {
 	t.Parallel()
 	want := errors.New("create failed")
@@ -394,7 +499,7 @@ func TestSequentialRequestsReuseRunningEndpointUntilInvalidated(t *testing.T) {
 			t.Fatal(err)
 		}
 		release()
-		if target.Endpoint != fake.endpoint || target.Generation == 0 {
+		if target.Endpoint != fake.endpoint || target.ImageID != testImageID || target.Generation == 0 {
 			t.Fatalf("target = %+v, want endpoint %+v with generation", target, fake.endpoint)
 		}
 		if target.Generation != 1 {
@@ -433,6 +538,9 @@ func TestStaleFailureDoesNotInvalidateNewGeneration(t *testing.T) {
 	}
 	release()
 	manager.InvalidateEndpoint(first)
+	fake.mu.Lock()
+	fake.imageID = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	fake.mu.Unlock()
 	second, release, err := manager.AcquireRequest(context.Background(), RequestRead)
 	if err != nil {
 		t.Fatal(err)
@@ -441,13 +549,72 @@ func TestStaleFailureDoesNotInvalidateNewGeneration(t *testing.T) {
 	if second.Generation == first.Generation {
 		t.Fatalf("generation was not advanced: first=%+v second=%+v", first, second)
 	}
-	manager.InvalidateEndpoint(first)
+	if second.ImageID == first.ImageID {
+		t.Fatalf("replacement did not update image coherently: first=%+v second=%+v", first, second)
+	}
+	stale := first
+	stale.ImageID = second.ImageID
+	manager.InvalidateEndpoint(stale)
 	current, _, err := manager.AcquireRequest(context.Background(), RequestObserve)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if current != second {
 		t.Fatalf("stale failure invalidated new generation: current=%+v second=%+v", current, second)
+	}
+}
+
+func TestMutableConfiguredImageDoesNotReplaceActualImageAttestation(t *testing.T) {
+	t.Parallel()
+	fake := newFakeRuntime(runtime.StateRunning)
+	spec := runtime.Spec{Name: "demo", Image: "registry.example/workspace:latest"}
+	manager := NewManager(context.Background(), fake, spec, nil, alwaysIdle, nil)
+	target, release, err := manager.AcquireRequest(context.Background(), RequestRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if target.ImageID != fake.imageID || target.ImageID == spec.Image {
+		t.Fatalf("request target image = %q, actual=%q configured=%q", target.ImageID, fake.imageID, spec.Image)
+	}
+}
+
+func TestWakeRefusesUnattestedTargets(t *testing.T) {
+	t.Parallel()
+	ep := runtime.Endpoint{Host: "127.0.0.1", Port: 4096}
+	tests := []struct {
+		name        string
+		observation runtime.Observation
+		err         error
+	}{
+		{name: "status failure", err: errors.New("inspect unavailable")},
+		{name: "wrong state", observation: runtime.Observation{State: runtime.StatePaused, Running: true, Endpoint: ep, HasEndpoint: true, ImageID: testImageID}},
+		{name: "not running", observation: runtime.Observation{State: runtime.StateRunning, Endpoint: ep, HasEndpoint: true, ImageID: testImageID}},
+		{name: "endpoint mismatch", observation: runtime.Observation{State: runtime.StateRunning, Running: true, Endpoint: ep, ImageID: testImageID}},
+		{name: "missing endpoint", observation: runtime.Observation{State: runtime.StateRunning, Running: true, HasEndpoint: true, ImageID: testImageID}},
+		{name: "missing image", observation: runtime.Observation{State: runtime.StateRunning, Running: true, Endpoint: ep, HasEndpoint: true}},
+		{name: "malformed image", observation: runtime.Observation{State: runtime.StateRunning, Running: true, Endpoint: ep, HasEndpoint: true, ImageID: "image:test"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := newFakeRuntime(runtime.StateRunning)
+			fake.ensureResult = &runtime.RunningResult{Observation: test.observation}
+			fake.ensureErr = test.err
+			observed := 0
+			manager := newTestManager(fake, func(context.Context, runtime.Endpoint, bool) error {
+				observed++
+				return nil
+			}, alwaysIdle)
+			if _, _, err := manager.AcquireRequest(context.Background(), RequestRead); err == nil {
+				t.Fatal("wake unexpectedly published an unattested target")
+			}
+			if observed != 0 {
+				t.Fatalf("observer called %d times for unattested target", observed)
+			}
+			if _, _, err := manager.AcquireRequest(context.Background(), RequestObserve); !errors.Is(err, ErrNotRunning) {
+				t.Fatalf("unattested target was cached: %v", err)
+			}
+		})
 	}
 }
 
@@ -503,6 +670,11 @@ func TestPauseClearsCachedEndpoint(t *testing.T) {
 	}
 	if _, _, err := manager.AcquireRequest(context.Background(), RequestObserve); !errors.Is(err, ErrNotRunning) {
 		t.Fatalf("observation after pause error = %v, want ErrNotRunning", err)
+	}
+	manager.wakeMu.Lock()
+	defer manager.wakeMu.Unlock()
+	if manager.endpoint != (runtime.Endpoint{}) || manager.imageID != "" || manager.endpointGeneration != 0 || manager.hasEndpoint {
+		t.Fatalf("pause left cached target endpoint=%+v image=%q generation=%d", manager.endpoint, manager.imageID, manager.endpointGeneration)
 	}
 }
 
@@ -659,6 +831,11 @@ func TestCloseWaitsForActiveRequestAndRejectsNewWork(t *testing.T) {
 	}
 	if _, _, err := manager.AcquireRequest(context.Background(), RequestObserve); err == nil {
 		t.Fatal("manager accepted request after Close")
+	}
+	manager.wakeMu.Lock()
+	defer manager.wakeMu.Unlock()
+	if manager.endpoint != (runtime.Endpoint{}) || manager.imageID != "" || manager.endpointGeneration != 0 || manager.hasEndpoint {
+		t.Fatalf("close left cached target endpoint=%+v image=%q generation=%d", manager.endpoint, manager.imageID, manager.endpointGeneration)
 	}
 }
 
