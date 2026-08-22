@@ -21,9 +21,11 @@ OpenCode owns:
 Fern owns the container lifecycle, wake and pause admission, and the stable
 same-origin proxy. Fern-owned `/fern/*` routes provide the phone control page,
 gateway readiness, restart-safe device administration, workflow/session
-correlations, and constrained publication without copying the coding interface.
-Notifications and full delivery/recovery remain future services around
-OpenCode.
+correlations, durable task admission/delivery/cancellation, conservative
+execution observation, and constrained publication without copying the coding
+interface. Generic terminal-result classification and notifications remain
+future services because this pinned OpenCode profile exposes no closed durable
+terminal-success object.
 
 ## Image And Configuration
 
@@ -54,18 +56,34 @@ idle:
   after: 10m
 proxy:
   listen: 127.0.0.1:8080
+  operatorListen: 127.0.0.1:8081
 ```
+
+This is valid local-only configuration. Remote publication is unsupported until
+`proxy.remoteOrigin` is set to the exact canonical private HTTPS root, such as
+`https://fern-host.example.ts.net` without a trailing slash. Fern then pins the
+upstream `Host`, `X-Forwarded-Host`, `X-Forwarded-Proto`, and effective port to
+that origin while removing all client forwarding headers.
 
 Set `OPENCODE_PASSWORD` in the host or protected service environment. OpenCode's
 Basic-auth username is `opencode`. Do not put the password in YAML or command
-arguments. Provider credentials can be forwarded through `workspace.env`.
+arguments. Run `fern attach` and use the official client's `/connect` flow to
+connect an OpenCode account or another supported provider. The resulting
+OpenCode-managed state persists in the workspace volume and is exposed in the
+web UI. Provider environment credentials can also be forwarded through
+`workspace.env` when desired.
 
 ## Proxy Contract
 
-Clients use Fern's stable origin for every OpenCode route, including `/`. Fern
+Paired clients use Fern's stable remote origin for every OpenCode route,
+including `/`. The official local CLI uses the operator origin. Fern
 wakes stopped compute before forwarding ordinary UI and API requests, holds
 pause admission while relevant requests are active, streams responses, and
 preserves the origin expected by the official UI.
+
+The local fake tests cover this metadata and unchanged SSE flushing, but the
+exact pinned image still needs acceptance through real TLS for absolute links
+and redirects and through WSS for terminal/upgraded traffic.
 
 Fern owns the complete `/fern/*` namespace for landing, readiness, pairing,
 device, workflow, and control routes. These routes do not acquire workspace
@@ -84,6 +102,69 @@ The lifecycle integration uses these V2 surfaces:
 | Permission requests | `/api/permission/request` |
 | Forms | `/api/form/request` |
 
+The durable-task contract harness additionally pins these observed
+`0.0.0-next-17444` behaviors for image digest
+`sha256:839fd0bfffe57ec0b9095126ac682b0337f15a514dfaafdd9d18aa1bb86076ae`:
+
+- caller-selected session and top-level-text prompt IDs are preserved;
+- session creation and exact reads project the complete configured title, agent,
+  model provider/model ID, and working-directory tuple;
+- a response-lost prompt appears in the inbox, exact retry is stable, and a
+  conflicting retry returns `409`;
+- `/api/session/{id}/message` is finite, ordered, cursor-paginated, and
+  duplicate-free;
+- exact promoted caller-message reads preserve the caller ID, `user` type,
+  exact text, and positive creation time; `resume` remains an inbox-only field;
+- model questions use session forms and an answered form resumes once;
+- pending synthetic permissions disappear after both same-container process
+  restart and container replacement while their durable session persists;
+- an undelivered `resume:false` prompt survives process restart, can be deleted
+  without a message/provider projection, remains absent across replacement, and
+  permits exact-ID reuse with changed text after deletion;
+- interrupt before admission and after completed provider work is a `204` idle
+  no-op with no durable cancel latch or new interruption evidence;
+- an exact 65,536-byte `resume:false` prompt is admitted once without provider
+  execution, matching Fern's task-admission text limit;
+- `resume` is not persisted or idempotency-bound: replaying one pending ID/text
+  from `false` to `true` returns the same admission object and starts execution,
+  so Fern must never retry prompt mutation and cannot claim upstream resume
+  proof during reconciliation;
+- interrupt during exactly one marker-bearing fake-provider turn closes the
+  stream, empties the inbox, projects one caller message, and records the
+  interruption; a second idle interrupt changes neither state nor disconnects;
+- direct pending and answered forms are process-epoch state, and a lost
+  caller-selected form ID can be recreated with changed metadata and options;
+- exact prompt retry after container replacement does not duplicate the inbox,
+  message, or fake-provider turn, and interruption evidence survives;
+- global events are volatile, session history/event routes are absent, and the
+  experimental log is not a durable replay source.
+
+Pending and answered forms disappear across process epochs, and a model question
+may remain represented as a running but inactive tool after replacement. Fern
+must move that attempt to `recovery_required`, not reconstruct or auto-answer
+it. Direct permission approval and pending-permission epoch loss are proven.
+An actual model tool-generated permission is intentionally omitted; the harness
+does not execute a command to manufacture approval state. Permission decision
+and interruption races remain open. Run the zero-cost harness with:
+
+```bash
+python3 integration/opencode-contract/contract_harness.py
+```
+
+`internal/opencodeapi` implements this pinned loopback contract with required
+deadlines, bounded bodies, strict envelopes, redacted errors, exact identity and
+ownership checks, finite message-scan anomaly detection, and no automatic
+mutation retries. It is an adapter only; task transitions and form epoch-loss
+policy remain Fern coordinator responsibilities.
+
+Delivery reconciliation uses exact read-only projections. A session must match
+caller ID, title, agent, model provider/model ID, and working directory. A
+pending prompt must match ID, session owner, `user` type, `steer` delivery,
+payload text, and positive creation time. A promoted prompt must match ID,
+`user` type, text, and positive creation time. The adapter returns only closed
+states, reports `resume` as unobservable, never returns prompt text or raw
+objects, and rejects simultaneous inbox/history presence.
+
 Unknown routes are treated as potential work because OpenCode may add routes
 whose GET requests start execution. This also ensures root UI assets and
 upgraded connections pass through the same wake-aware path.
@@ -95,18 +176,24 @@ authentication failure, or unavailable endpoint leaves compute running.
 
 ## Authentication Boundary
 
-OpenCode traffic uses `opencode:$OPENCODE_PASSWORD`. Fern administration and
-pairing issuance use the distinct host-only
-`fern:$FERN_CONTROL_PASSWORD`. Invalid credentials are rejected before wake.
+The remote listener accepts only pairing capabilities and durable device
+cookies; it rejects both Basic credentials before wake. The loopback-only
+operator listener accepts `opencode:$OPENCODE_PASSWORD` for the official CLI and
+the distinct `fern:$FERN_CONTROL_PASSWORD` for administration and pairing
+issuance. Every admitted OpenCode request receives a newly generated backend
+Authorization header.
 
-Pairing issues a Fern device credential in an `HttpOnly`, `Secure` cookie. The
-gateway authenticates that cookie, removes it before proxying, and injects the
-internal OpenCode credential. Device cookies authorize OpenCode access only;
-they cannot access `/fern/control`, control APIs, publication, or pairing
-issuance. OpenCode continues serving every non-`/fern/*` UI and API route.
+Pairing GET renders a confirmation page without consuming the short-lived code;
+the confirmation POST issues a Fern device credential in an `HttpOnly`,
+`Secure` cookie. The gateway authenticates that cookie, removes it before
+proxying, and injects the internal OpenCode credential. Device cookies authorize
+OpenCode access only; they cannot access `/fern/control`, control APIs,
+publication, or pairing issuance. OpenCode continues serving every
+non-`/fern/*` UI and API route.
 
-The loopback listener still requires a private TLS edge and must not be exposed
-directly to the internet.
+Only the remote listener may be published through a private TLS edge. The
+operator listener must remain host-local and must never be a Serve target or be
+exposed to a LAN or the internet.
 
 ## Persistence And Upgrades
 

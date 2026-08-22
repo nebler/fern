@@ -16,21 +16,64 @@ remote-device rehearsal have not passed.
 
 ## Trust And Authentication
 
-Fern gives OpenCode read/write access to the selected repository and forwards
-provider credentials into its container. Use only a dedicated trusted host,
+Fern gives OpenCode read/write access to the selected repository. OpenCode
+owns provider connections; optional environment credentials are forwarded into
+its container. Use only a dedicated trusted host,
 user, image, and repository. Docker-group membership is effectively root; this
 is not tenant isolation.
 
-The internal OpenCode credential uses `opencode:$OPENCODE_PASSWORD`. Fern
+The internal OpenCode credential uses `opencode:$OPENCODE_PASSWORD` and is
+accepted only on the loopback operator listener for local CLI access. Fern
 administration and pairing issuance use the separate host-only
-`fern:$FERN_CONTROL_PASSWORD`; the values must differ and the control password
-must contain at least 32 characters. Tailscale identity is the
-outer private-access boundary. For the phone demo, `fern doctor --phone` creates
-a five-minute pairing link; Fern exchanges it for a secure `HttpOnly` cookie and
-injects internal OpenCode auth. The paired device cannot administer Fern or
-publish. Operators use `/fern/control` with Fern control authentication. Hashed
-device grants, expiry, workflow/session correlations, and publication records
-survive Fern restarts under `/var/lib/fern/.fern/control`.
+`fern:$FERN_CONTROL_PASSWORD` on that same operator listener; the values must
+differ and the control password must contain at least 32 characters. Both Basic
+credentials are rejected by the remote/device listener. Tailscale identity is
+the outer private-access boundary. For the phone demo, `fern doctor --phone` creates
+a five-minute pairing link. Its GET renders a confirmation page so scanner
+previews do not consume the code; the confirmation POST exchanges it for a
+secure `HttpOnly` cookie, and Fern injects internal OpenCode auth. The paired
+device cannot administer Fern or publish. Operators use the loopback operator
+origin's `/fern/control` with Fern control authentication. Hashed device grants, expiry, workflow/session
+correlations, and publication records survive Fern restarts under
+`/var/lib/fern/.fern/control`.
+
+Publication is optional and disabled when `workspace.github.repository` is
+absent; ordinary `fern up` then has no `gh` dependency. To enable the constrained
+host prototype, configure both `id` as GitHub's positive decimal repository ID
+and exact-case `fullName` as canonical `owner/repository`. Verify them from a
+trusted operator session, not from checkout `origin`. A configured publisher
+uses the host user's broad `gh` credential and therefore remains prototype-only.
+Use the running operator control coordinator for effects. Standalone
+`fern github publish` accepts `--dry-run` only and cannot mutate GitHub.
+
+Durable tasks use a separate GitHub App mode. Configure the positive
+`workspace.github.installationId` together with repository identity and the
+complete `tasks` policy. If App credentials do not exist yet, start Fern with the
+canonical remote HTTPS origin, open
+`http://127.0.0.1:8081/fern/control` using Fern control authentication, and choose
+**Connect GitHub App**. GitHub returns only to the exact private HTTPS callback;
+restart Fern after success. Existing credentials disable the setup route because
+credential backup and rotation are not implemented. App mode never starts the
+legacy host-`gh` publisher.
+
+Fern never guesses a verification command from repository files. To enable
+post-seal verification, configure `tasks.verification` with a lowercase check
+name, an argument array whose first value is an absolute host executable, an
+explicit repository-relative working directory, timeout, environment map, and
+output byte cap. The executable must be a regular executable file, not a
+script or symlink, and must satisfy Fern's immutable ownership and write-mode
+policy. No shell is inserted. Its resolved path must also remain outside the
+writable workspace repository. Fern binds executable content SHA-256 and fails
+closed if the file changes.
+Omitting this block leaves task delivery enabled but does not authorize any
+verification effect.
+
+The pinned OpenCode profile cannot automatically prove generic terminal
+success. Fern's explicit result coordinator requires an external authoritative
+observer to return matching exact-session success evidence twice while
+`AcquireQuiesced` is held; `fern up` does not currently construct such an
+observer. Do not operationally treat idle, inactive, or empty-inbox state as a
+completed task.
 
 ## Fast Field Demo
 
@@ -38,10 +81,23 @@ For a source-checkout rehearsal before installing systemd:
 
 ```bash
 make image
-go run ./cmd/fern init --repo /absolute/path/to/repository
-# Add ANTHROPIC_API_KEY or OPENAI_API_KEY to fern.env.
+go run ./cmd/fern init --repo /absolute/path/to/repository \
+  --remote-origin https://REPLACE-WITH-THIS-HOST.example.ts.net
 go run ./cmd/fern up --config fern.yaml --env-file fern.env
 ```
+
+In another terminal, open the official OpenCode client through Fern and use its
+`/connect` flow to connect an OpenCode account or any other provider supported
+by the pinned release:
+
+```bash
+go run ./cmd/fern attach --config fern.yaml --env-file fern.env
+```
+
+Replace the origin example with the exact HTTPS root that Tailscale assigns this
+host before starting Fern. The connection is owned by OpenCode and stored in its persistent volume. The
+web UI exposes the same provider state. Environment-key providers remain
+optional.
 
 In another terminal:
 
@@ -50,7 +106,8 @@ tailscale serve --bg http://127.0.0.1:8080
 go run ./cmd/fern doctor --config fern.yaml --env-file fern.env --phone
 ```
 
-Scan the terminal QR within five minutes. It contains a short-lived pairing
+Scan the terminal QR within five minutes in the intended browser and tap
+**Pair this phone** on the confirmation page. It contains a short-lived pairing
 capability, not the OpenCode password. Successful diagnostics establish private
 transport and gateway readiness; they do not replace the real-phone acceptance
 steps below.
@@ -148,11 +205,18 @@ sudo chown root:fern /etc/fern/fern.env /etc/fern/fern.yaml
 sudo chmod 0640 /etc/fern/fern.env /etc/fern/fern.yaml
 ```
 
-The protected environment file must contain a long random
-`OPENCODE_PASSWORD` and only the provider keys this workspace needs. OpenCode's
-username is `opencode`. Do not store these values in YAML, Git, command
-arguments, or the unit file. Root and Docker administrators can inspect
-container environment values.
+The protected environment file must contain distinct long random
+`OPENCODE_PASSWORD` and `FERN_CONTROL_PASSWORD` values plus only the provider
+keys this workspace needs. OpenCode's username is `opencode`. Do not store these
+values in YAML, Git, command arguments, or the unit file. Only the OpenCode
+password and explicitly selected provider values enter Docker; root and Docker
+administrators can inspect container environment values.
+
+The deployment example deliberately contains a parseable
+`https://replace-with-this-host.example.ts.net` placeholder. Replacing it with
+this host's exact lowercase Tailscale HTTPS root is mandatory. Do not add a
+trailing slash or explicit `:443`; Fern rejects noncanonical origins. The service
+must not be started with the placeholder.
 
 The workspace configuration selects the one image and repository; it has no
 protocol selector:
@@ -168,6 +232,8 @@ idle:
   after: 10m
 proxy:
   listen: 127.0.0.1:8080
+  operatorListen: 127.0.0.1:8081
+  remoteOrigin: https://replace-with-this-host.example.ts.net
 ```
 
 Validate access before starting:
@@ -176,7 +242,7 @@ Validate access before starting:
 sudo -u fern test -r /etc/fern/fern.env -a -r /etc/fern/fern.yaml
 sudo -u fern test -r /srv/fern/workspace/.git/config
 sudo -u fern docker image inspect "fern/opencode:$FERN_COMMIT" >/dev/null
-sudo ss -ltn '( sport = :8080 )'
+sudo ss -ltn '( sport = :8080 or sport = :8081 )'
 ```
 
 The final command should show no listener.
@@ -195,7 +261,7 @@ sudo journalctl -u fern.service -n 100 --no-pager
 The unit runs:
 
 ```text
-/usr/local/bin/fern up --config /etc/fern/fern.yaml --listen 127.0.0.1:8080
+/usr/local/bin/fern up --config /etc/fern/fern.yaml --listen 127.0.0.1:8080 --operator-listen 127.0.0.1:8081
 ```
 
 It allows Fern time to drain proxy and manager work on SIGTERM. Stopping the
@@ -203,16 +269,19 @@ service does not intentionally stop OpenCode; use the offline `fern down`
 procedure for a quiet lifecycle boundary. Do not run a second writer while the
 service holds the workspace lease.
 
-Verify the listener and V2 health route:
+Verify both listeners and the V2 health route through the operator surface:
 
 ```bash
-sudo ss -ltnp '( sport = :8080 )'
+sudo ss -ltnp '( sport = :8080 or sport = :8081 )'
 sudo bash -c 'set -a; source /etc/fern/fern.env; set +a; \
   curl --fail --user "opencode:$OPENCODE_PASSWORD" \
-  http://127.0.0.1:8080/api/health'
+  http://127.0.0.1:8081/api/health; \
+  test "$(curl -sS -o /dev/null -w "%{http_code}" \
+    --user "opencode:$OPENCODE_PASSWORD" \
+    http://127.0.0.1:8080/api/health)" = 401'
 ```
 
-`ss` must report `127.0.0.1:8080`, not a wildcard or LAN listener.
+`ss` must report both ports on `127.0.0.1`, never a wildcard or LAN listener.
 
 ## 6. Publish With Tailscale Serve
 
@@ -221,11 +290,23 @@ sudo tailscale serve --bg http://127.0.0.1:8080
 sudo tailscale serve status
 ```
 
-From another enrolled device on a different network, open the reported HTTPS
-URL. Authenticate as `opencode` with `OPENCODE_PASSWORD`; the root page must be
-the official OpenCode web UI. Exercise a session and confirm that UI assets,
-APIs, SSE, terminal traffic, and wake-after-idle all use the same Fern origin.
-A local health request alone does not establish remote browser acceptance.
+This command must target only port 8080. Never add port 8081 to Tailscale Serve.
+The root HTTPS origin printed by `tailscale serve status` must be byte-for-byte
+identical to `proxy.remoteOrigin`; `fern doctor --phone` also requires the same
+value from local Tailscale status. Run `fern doctor --phone` locally, scan its short-lived pairing link from another
+enrolled device on a different network, and complete the confirmation POST. The
+root page must then be the official OpenCode web UI without a Basic prompt.
+Exercise a session and confirm that UI assets, APIs, SSE, terminal traffic, and
+wake-after-idle all use the same Fern origin. Confirm the backend Basic
+credential receives `401` at the HTTPS origin. A local health request alone does
+not establish remote browser acceptance.
+
+The fake lifecycle and local browser tests exercise canonical HTTPS metadata
+over local HTTP transport. They do not prove that the pinned OpenCode image
+accepts real TLS absolute links or real WSS upgrades. Before release, verify the
+exact pinned image through the actual private TLS edge: absolute `Location` and
+`Link` values, UI navigation/assets, OAuth callbacks if used, SSE, and terminal
+WebSocket/WSS behavior must all remain on the configured origin.
 
 Do not run `tailscale funnel`. If Serve is unavailable, use another reviewed
 private TLS reverse proxy on the same host rather than exposing Fern's HTTP

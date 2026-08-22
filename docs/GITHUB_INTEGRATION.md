@@ -1,51 +1,135 @@
 # GitHub Integration
 
 This document defines Fern's GitHub authorization and publication boundary. A
-limited host-command prototype is implemented for the phone field demo; the
-GitHub App and onboarding design remain proposed.
+limited, effect-narrowed host prototype remains for the phone field demo and
+still uses the host user's broad `gh` credential. Separately,
+`internal/githubapp` implements repository-scoped App credentials and exact REST
+proofs, `internal/taskpublication` implements one-shot installation-token Git
+transport, and `fern up` mounts the Manifest onboarding coordinator. Durable
+task publication does not activate until its SQLite journal and verified-result
+coordinator are present.
+
+## Product Direction Decision
+
+As of 2026-08-22, Fern's target GitHub workflow is Amp-style: the workspace has
+an authenticated `gh` CLI, and the user explicitly chooses when to push or
+create a draft pull request. Fern must not infer publication intent from
+OpenCode becoming idle, a task appearing complete, or a clean commit existing.
+
+This supersedes the earlier product decision that all GitHub credentials must
+remain in a host-side GitHub App broker. The brokered App implementation remains
+the accurate description of current code and a useful security/reconciliation
+reference, but it is not the target user workflow. The two credential modes
+must not be silently combined.
+
+The authority contract is intentionally Amp-style: authenticated `gh` is
+unrestricted inside the trusted workspace, and an explicit request in the user's
+OpenCode prompt authorizes the agent to push or create a draft PR. Fern may add
+audited phone actions as conveniences, but cannot claim they are an exclusive
+publication gate while the same credential is available to OpenCode. Fern still
+must implement phone-usable authentication, persistent credential state,
+documented scopes, local logout and remote revocation, replacement, and backup
+policy. Until those pieces and their acceptance tests exist, authenticated
+workspace `gh` is a chosen direction, not implemented behavior.
 
 ## Implemented Field Prototype
 
-After the agent commits a clean worktree, the host operator can run:
+Publication is disabled unless the strict workspace configuration binds both the
+positive signed-64 GitHub repository ID and exact-case canonical full name:
 
-```bash
-fern github publish --title "Describe the change"
+```yaml
+workspace:
+  github:
+    repository:
+      id: 123456789
+      fullName: owner/repository
 ```
 
-The command validates a standard GitHub checkout, rejects dangerous local Git
-configuration, submodules, workflow changes, dirty state, unsupported refs, and
-non-GitHub origins. It obtains the existing host `gh` credential in memory,
-fetches the current base, requires `HEAD` to descend from it, pushes exactly
-`HEAD` without force to `fern/<workspace>/<operation>`, and creates or reuses a
-draft PR. Publication acquires the workspace lease and requires the container
-to be absent, so stop `fern up` and run `fern down` first. Run publication as
-the same host user that runs Fern. `FERN_GITHUB_TOKEN`, `GH_TOKEN`, and
-`GITHUB_TOKEN` are rejected from workspace environment so the obvious
-credential path into Docker is closed.
+Both values are required together. The owner is 1-39 ASCII alphanumeric or
+non-edge hyphen characters. The repository is 1-100 ASCII alphanumeric,
+period, underscore, or hyphen characters and cannot end in `.git`. The spelling
+is retained exactly. Browser and ordinary CLI flags cannot override this
+binding. Without it, `fern up` remains fully functional, does not resolve `gh`,
+and omits the publication control.
 
-The operator-authenticated Fern control page can perform the same operation
-without SSH. It requires `fern:$FERN_CONTROL_PASSWORD`; OpenCode credentials and
-paired-device cookies have no publication authority.
-It records a workflow-associated publication request, stops idle compute while
-holding request admission and lifecycle wake serialization closed, records the
-exact repository/base/commit/branch before push, then records the draft PR URL
-or a retryable failure. Daemon startup resumes `requested` and `pushing`
-operations once. Prepared recovery queries the recorded remote branch first,
-accepts only the exact SHA, rejects conflicts without force, and reconciles an
-exact draft PR after a lost creation response. PR lookup failure never falls
-through to creation. The browser cannot supply repository paths, remotes,
-refspecs, or credentials.
+Adding `workspace.github.installationId` selects the repository-scoped GitHub
+App lane and disables this legacy host-`gh` publisher entirely. The two
+credential modes are never active in the same `fern up` process.
+
+The operator-authenticated control page on the host-only listener owns the only
+mutation path. It requires `fern:$FERN_CONTROL_PASSWORD`;
+OpenCode credentials and paired-device cookies have no publication authority,
+Preparation first checks checkout `origin` against the configured full name as a
+diagnostic, then queries `GET /repositories/{id}` through `gh api` and requires
+exact ID, full name, owner, and name. Authority always comes from configuration,
+never `origin`. It fetches the base, immediately resolves `FETCH_HEAD^{commit}`,
+and uses that exact SHA for ancestry and diff policy.
+
+Before push, the coordinator durably records repository ID/full name, exact base
+ref/SHA, exact result commit, and Fern branch. Recovery uses only that complete
+tuple, revalidates the configured binding and numeric repository route, and
+refetches the configured base. Base movement is a conflict, never a rewrite.
+Remote branch absence permits one non-force exact-SHA push; an exact remote SHA
+is reusable, and any other SHA conflicts. A lost push response is resolved by
+the exact remote ref read.
+
+PR discovery uses REST with exact head and base. Zero candidates permit exactly
+one creation attempt; one candidate is re-read by exact number; multiple or
+conflicting candidates fail closed. A lost create response is reconciled by
+discovery and is never blindly retried. Success atomically persists the positive
+PR number, canonical URL, open/draft state, and complete target/base/head
+repository, ref, and SHA observation. Every field must match the durable tuple.
+
+`fern github publish --dry-run --title ...` retains preparation diagnostics.
+Non-dry-run standalone publication is rejected before Docker, GitHub, or Git
+effects because it cannot bypass durable coordinator persistence.
 
 This prototype still uses the host user's broad `gh` credential. Its durable
 journal narrows and reconciles the effect but does not provide the final
 least-privilege product boundary below.
 
-## Decision
+## Prototype Audit
 
-Fern should use a private GitHub App per appliance and keep all GitHub
-credentials in the host process. OpenCode may edit the working tree and create
-local commits, but it must not receive the App private key, an installation
-token, a personal access token, an SSH key, or a general GitHub API proxy.
+The current boundary is useful but must not be described as repository-scoped
+authorization:
+
+| Concern | Current state | Required state |
+| --- | --- | --- |
+| Agent credential exposure | OpenCode has no `gh` binary or GitHub token | Preserve this boundary |
+| Human authorization | Operator Basic auth at `/fern/control` | Attributable, explicit publication approval |
+| GitHub credential | Existing host-user `gh` token, potentially account-wide | Short-lived installation token for one selected repository |
+| Repository identity | Immutable configured numeric ID and full name, revalidated through REST; `origin` is diagnostic | GitHub App installation plus repository identity |
+| Destination | Normal preparation chooses `fern/<workspace>/<operation>` | Recovery independently enforces the same namespace |
+| Base | Base branch and exact fetched SHA are fixed, persisted, and revalidated before push | Bind the same tuple to task/result verification |
+| Result provenance | Current clean repository `HEAD` | Successful verification record tied to task, attempt, and commit |
+| Pull request proof | Exact-number REST re-read and complete proof are persisted | Preserve this proof with App credentials |
+
+### Release-Blocking Gaps
+
+1. A manually tracked OpenCode session is not evidence that the session
+   produced, tested, or approved the repository's current `HEAD`.
+2. The control page publishes immediately without showing the repository,
+   immutable base, commit, changed paths, verification, or actor. Paired-device
+   cookies intentionally have no publication authority.
+3. Trusted executable ownership and the broad host credential remain weaker
+   than the separately implemented repository-scoped App transport; this legacy
+   control flow is not automatically upgraded to that transport.
+
+### Immediate Hardening Gate
+
+Before any real GitHub mutation through this prototype, finish the task/result
+and verification binding, exercise restart reconciliation through the real
+control surface in an isolated disposable repository, and explicitly accept the
+broad host-token risk. The deterministic package fakes are the current safety
+gate; the former standalone live mutation script is disabled.
+
+## Current Brokered-App Design
+
+The current task-publication implementation uses a private GitHub App per
+appliance and keeps all GitHub credentials in the host process. OpenCode may
+edit the working tree and create local commits, but it does not receive the App
+private key, an installation token, a personal access token, an SSH key, or a
+general GitHub API proxy.
 
 The host exposes narrow capabilities:
 
@@ -61,9 +145,9 @@ It does not expose tokens, arbitrary repository URLs, arbitrary refs,
 force-push, merge, ref deletion, workflow updates, repository administration, or
 raw GitHub API access.
 
-## User Experience
+## Current App Onboarding
 
-The intended onboarding is:
+The brokered App onboarding design is:
 
 ```bash
 fern github connect
@@ -98,17 +182,18 @@ Fern host process
    - App private key
    - selected installation and repository IDs
    - branch policy and operation journal
+   - task/publication coordinator
    |
-   | narrow Unix-socket operations, no credentials
+   | host-side exact repository operations
+   | no credential crosses into workspace configuration
    v
-OpenCode container
-   - working tree and local Git objects
-   - request to publish one exact commit
+Workspace checkout <--- edited and committed by OpenCode container
 ```
 
-Any repository process can call a socket mounted into the container. Socket
-possession must therefore grant only the fixed workspace's narrow publication
-capability, never arbitrary GitHub authority.
+No container socket is required for the first host-coordinated task journey. If
+one is added later, any repository process can call it; socket possession must
+therefore grant only the fixed workspace's narrow publication capability, never
+arbitrary GitHub authority.
 
 ## Credentials
 
@@ -139,9 +224,12 @@ Repository CI remains authoritative.
 ## Host Broker
 
 The broker belongs in the existing `fern up` process because that process owns
-the workspace lease and repository path. A small client inside the image may
-request operations over a Unix socket mounted through a read-only socket
-directory.
+the workspace lease and repository path. Its first caller should be Fern's
+host-side task and publication coordinator. Do not add a container socket merely
+to reproduce the current control-page call path. If a concrete future workflow
+requires an in-container client, use a narrow Unix socket mounted through a
+read-only socket directory and treat possession as a fixed-workspace
+capability.
 
 Conceptual operations are:
 
@@ -211,19 +299,98 @@ tokens, so it must remain optional and explicit.
 
 ## Delivery Stages
 
-1. **Disposable field test:** use a short-lived, single-repository credential
-   only through an explicit reviewed procedure, then revoke it.
-2. **Broker prototype:** manually configure App ID, installation ID, repository
-   ID, and private key; implement host clone/fetch, Fern-branch push, and draft
-   PR creation.
-3. **Container capability:** add the narrow Unix socket and client, operation
-   journal, branch enforcement, redaction, and failure reconciliation tests.
-4. **Self-hosted onboarding:** add Manifest flow, selected-repository install,
-   permission verification, and host-side clone.
-5. **Long-running loop:** add fresh leases on wake, PR status polling, CI/review
-   continuation, bounded retries, and revocation handling.
-6. **Optional relay:** add durable public webhook ingress only when offline event
-   delivery is required.
+1. **Current broad-credential prototype:** retain the exact-commit journal and
+   reconciliation, but label it unsupported for normal repositories.
+2. **Prototype hardening:** close the repository-retargeting, recovered-branch,
+   immutable-base, repository-hardening, and post-create PR proof gaps above.
+3. **Task/result contract:** make publication consume a successful immutable
+   Result record rather than the repository's current `HEAD`.
+4. **App broker prototype:** manually configure App ID, installation ID,
+   repository ID, and private key; mint repository-scoped installation tokens
+   for host clone/fetch, Fern-branch push, and draft PR creation.
+5. **Self-hosted onboarding:** add Manifest flow, selected-repository install,
+   permission verification, revocation handling, and host-side clone.
+6. **Long-running loop:** add fresh credentials on wake, exact PR/CI status
+   polling, bounded retries, and review continuation.
+7. **Optional relay:** add durable public webhook ingress only when offline
+   event delivery is required.
+
+The following work can proceed in parallel, with explicit merge gates:
+
+| Track | Can start | Must join before |
+| --- | --- | --- |
+| Prototype safety fixes and negative tests | Now | Any further live GitHub mutation |
+| App JWT, installation-token, and secure-key-storage spike | Now, behind an internal interface | Repository onboarding or supported publication |
+| Durable task/result/publication schema | After OpenCode exact-ID contract characterization | Publication is bound to verified work |
+| Manifest and selected-repository onboarding | After the App broker proves manual configuration | First supported user onboarding |
+| Mobile publication review UX | Against a fixed Result/Publication API contract | Paired-phone publication is enabled |
+| CI/review polling and optional notifications | After exact PR identity is durable | Long-running follow-up claims |
+
+The App lane and durable-task lane should run concurrently once their shared
+publication contract fixes repository ID, base SHA, result commit, operation ID,
+and actor. The container capability and webhook relay are not on the first
+release critical path.
+
+The first App foundation now exists in `internal/githubapp`: standard-library
+RS256 JWT signing, immutable numeric installation/repository identity,
+separate installation-wide discovery and repository-scoped publication token
+requests, required permission and expiry
+checks, bounded responses, redirect refusal, redacted errors, validated
+PKCS#1/PKCS#8 RSA key parsing, bounded private-App Manifest generation, and
+at-most-once Manifest code conversion. `CredentialStore` supplies atomic
+host-only filesystem persistence with strict `0700`/`0600` and symlink checks;
+this is permission protection, not encryption at rest. `OnboardingStateStore`
+adds checksummed restart-safe, digest-only callback state with ten-minute expiry,
+bounded outstanding flows, exact local return-path binding, and atomic one-use
+consumption. `OnboardingHTTP` implements the Manifest coordinator
+at exact routes `/fern/github/app/setup` and `/fern/github/app/callback`. Setup
+accepts one local `return` path, persists state before returning an auto-submit
+form, and callback claims before its one authorized exchange, saves credentials
+before completion, and redirects only to that bound path. `fern up` mounts setup
+behind Fern Basic authentication on the loopback operator listener. The callback
+alone is reachable without a device cookie on the remote private HTTPS listener;
+its random one-use state is its authorization, and ambient Authorization/Cookie
+headers are removed before dispatch. Callback authority must match the canonical
+remote origin exactly. If task policy is configured before App credentials
+exist, an operator completes onboarding and restarts Fern to activate tasks.
+The route is not mounted once valid credentials exist; replacement remains
+disabled until backup and rotation have a complete recovery contract.
+After successful conversion, the callback redirects only to the exact validated
+loopback setup origin plus its persisted relative return path; it never exposes
+the operator control route on remote ingress.
+
+The state store persists only the state digest plus its non-secret flow binding.
+A callback whose state was still pending before a Fern restart can therefore
+recover its exact flow and complete normally without persisting the raw state.
+A crash after callback claim still cannot determine whether Manifest conversion
+or credential save took effect and never regains exchange authority. Every
+`reconcile_only` result fails closed as recovery-required and is quarantined;
+operators must inspect the host credential store and GitHub App settings before
+beginning a new flow. Installation/repository selection UI and durable selection,
+caching, revocation, encrypted backup, and key rotation remain. Configured
+repository identity is revalidated against GitHub at task-service startup. The
+Git transport itself now exists in
+`internal/taskpublication`: it uses a single-use private askpass credential
+file, exact commit refspecs, conditional force-with-lease, bounded full-output
+digests, and read-only reconciliation for lost push or pull-request responses.
+
+The package also now has a narrow repository/PR REST proof client. Every call
+uses a fresh repository-scoped installation token, refuses redirects and
+unbounded pagination, and validates numeric repository identity, canonical full
+name, PR number/URL/state/draft, and complete base/head repository/ref/SHA
+observations. Draft creation is attempted once; `internal/taskpublication`
+resolves a lost response by discovery and exact-number re-read without retrying
+the mutation.
+Fork head identity is preserved in observations so the coordinator can reject
+it rather than accidentally treating it as the configured target.
+
+`internal/taskpublicationcoord` now binds that transport to migration-3 journal
+phases. It commits push and PR-create authorization before each one-shot effect,
+uses read-only reconciliation after restart, and completes only from the exact
+remote branch and open-draft PR tuple. `fern up` reconciles publication journals
+before starting task API servers and then runs one workspace-scoped loop. No
+public API currently prepares a publication: adding one still requires a durable
+idempotent user receipt and explicit publication authorization.
 
 ## Sources
 

@@ -11,8 +11,11 @@ a browser is the primary client experience.
 Fern is V2-only. It does not build a coding PWA, fork or consume
 `@opencode-ai/app`, or reimplement OpenCode screens. OpenCode remains the
 authority for the UI, sessions, configuration, providers, permissions and
-forms, terminals, files, and diffs. Fern owns workspace lifecycle and is the
-future home of remote delivery, notifications, publication, and recovery.
+forms, terminals, files, and diffs. Fern owns workspace lifecycle, paired-device
+task admission, exact-once-attempted OpenCode delivery, cancellation,
+conservative recovery projections, result provenance, verification machinery,
+and repository-scoped GitHub App boundaries. Generic OpenCode terminal
+classification and notifications remain incomplete.
 
 ## Current Status
 
@@ -28,23 +31,36 @@ The Docker lifecycle and reverse proxy are functional:
 - intentional-stop, failure, and OOM classification;
 - a host-local lease preventing concurrent lifecycle writers.
 
-OpenCode traffic uses `opencode:$OPENCODE_PASSWORD`; Fern administration uses
-the separate host-only `fern:$FERN_CONTROL_PASSWORD`. Both are validated before
-any wake. The control password never enters the workspace container. Use Fern
-only behind a private TLS edge.
+Fern exposes two distinct loopback listeners. The remote listener accepts only
+pairing capabilities and durable device cookies and is the sole Tailscale Serve
+target. The operator listener accepts local `opencode:$OPENCODE_PASSWORD` for
+the official CLI and host-only `fern:$FERN_CONTROL_PASSWORD` for administration.
+Both Basic credentials are rejected remotely before wake, and Fern regenerates
+backend auth only after admission. The control password never enters the
+workspace container.
 
 Fern reserves `/fern/*` for its phone landing and control plane. A paired
 browser receives a restart-safe `HttpOnly` cookie; Fern stores only its digest
 and injects the internal OpenCode credential only while proxying upstream. A
 paired device can use OpenCode but cannot issue pairings, administer devices,
-mutate workflows, or publish. Those operations require `/fern/control` and the
-host-only Fern control credential.
+mutate workflows, or publish. Those operations require the operator listener's
+`/fern/control` and the host-only Fern control credential.
 
-Fern is not yet a complete remote coding product. It does not currently provide
-durable prompt delivery or cancellation, notification delivery, repository
-onboarding, the planned GitHub App broker, complete fresh-host restore, or
-automatic recovery after abrupt host-power-loss states. Draft-PR publication is a
-constrained host-credential prototype with a durable operation record.
+Fern is not yet a complete remote coding product. Durable prompt delivery,
+cancellation, App Manifest credential onboarding, and conservative execution
+observation are implemented. The pinned OpenCode API still cannot prove generic
+terminal success, so automatic result capture, verification, task publication,
+notification delivery, installation/repository selection, complete fresh-host
+restore, and abrupt-power-loss recovery remain incomplete. The old control-page
+draft-PR flow remains a separate constrained host-credential prototype.
+
+Fern's chosen GitHub direction is Amp-style unrestricted authenticated `gh`
+inside the trusted workspace. An explicit request in an OpenCode prompt may
+authorize the agent to push and create a draft PR; Fern does not claim that a
+separate phone button can exclusively gate publication when OpenCode has the
+same credential. The image and persistent workspace authentication needed for
+that workflow are not implemented yet; the GitHub App sections below describe
+the current brokered implementation.
 
 ## Documentation
 
@@ -53,8 +69,13 @@ constrained host-credential prototype with a durable operation record.
 - [Deployment](./docs/DEPLOYMENT.md): private systemd and Tailscale Serve runbook.
 - [Phone field demo](./docs/FIELD_DEMO.md): exact preflight, phone sequence, evidence, abort, and cleanup checklist.
 - [Product direction](./docs/REMOTE_PRODUCT.md): durable-task direction, boundaries, and sequencing.
-- [GitHub integration](./docs/GITHUB_INTEGRATION.md): current host publication prototype and proposed GitHub App boundary.
+- [Durable task model](./docs/TASK_MODEL.md): normative IDs, implemented persistence, state machines, reconciliation, and remaining fault gates.
+- [GitHub integration](./docs/GITHUB_INTEGRATION.md): legacy host prototype plus repository-scoped App onboarding and transport boundaries.
+- [Security boundary](./docs/SECURITY.md): current controls, release blockers, and parallel hardening tracks.
 - [Lifecycle harness](./integration/lifecycle/README.md): real-Docker lifecycle test details.
+- [OpenCode contract harness](./integration/opencode-contract/README.md): zero-cost exact-ID, restart, approval, and cancellation observations.
+- [Task UI prototype](./integration/task-ui/README.md): read-only mobile inbox/detail contract fixtures.
+- [Release harness](./integration/release/README.md): reproducibility, integrity, and deployment safety checks.
 
 The files under [`product-docs/`](./product-docs/) are historical audits, not
 current contracts.
@@ -63,22 +84,34 @@ current contracts.
 
 - Go 1.24 or newer
 - a local Docker daemon with at least 8 GiB available; remote `DOCKER_HOST` endpoints are rejected
-- an API key supported by OpenCode, such as `ANTHROPIC_API_KEY`
+- an account or provider connection supported by the pinned OpenCode release
 - Tailscale on the host and phone for the private phone demo
-- GitHub CLI authentication for draft-PR publication
+- GitHub CLI authentication when the optional draft-PR prototype is configured
 
 ## Quick Start
 
 ```bash
 make image
 go run ./cmd/fern init --repo .
-# Add ANTHROPIC_API_KEY or OPENAI_API_KEY to fern.env.
 go run ./cmd/fern up --config fern.yaml --env-file fern.env
 ```
 
-Fern stays in the foreground because it owns the proxy, watcher, idle
-supervisor, and workspace lease. It prints the stable proxy origin, typically
-`http://127.0.0.1:8080`.
+In another terminal, open the official OpenCode client and use its `/connect`
+flow to connect an OpenCode account or any other provider supported by the
+pinned release:
+
+```bash
+go run ./cmd/fern attach --config fern.yaml --env-file fern.env
+```
+
+This default is local-only. Before remote publication, set
+`proxy.remoteOrigin` in `fern.yaml` to this host's exact canonical Tailscale
+Serve HTTPS root, for example `https://fern-host.example.ts.net` with no slash
+or explicit `:443`, then restart Fern. Alternatively pass that value to
+`fern init --remote-origin`. Fern stays in the foreground because it owns both proxy listeners, the watcher,
+idle supervisor, and workspace lease. It prints the remote/device origin,
+typically `http://127.0.0.1:8080`, and operator origin, typically
+`http://127.0.0.1:8081`.
 
 In another terminal, publish Fern privately and create a one-time phone pairing
 QR:
@@ -88,19 +121,27 @@ tailscale serve --bg http://127.0.0.1:8080
 go run ./cmd/fern doctor --config fern.yaml --env-file fern.env --phone
 ```
 
-Scan the QR within five minutes. Fern exchanges its one-time code for a secure
-`HttpOnly` device cookie and opens the Fern landing page; tap **Open OpenCode**
-to enter the official UI without typing the generated Basic password. Pairing
-sessions survive Fern restarts for up to 30 days and can be listed or revoked by
-an operator at `/fern/control`.
+Phone and field-demo diagnostics fail unless the configured origin exactly
+equals both the root origin reported by `tailscale serve status` and this host's
+tailnet HTTPS origin. `doctor --url` is only an exact assertion; it is not an
+origin override. Only `proxy.listen` may be published.
+
+Scan the QR within five minutes in the browser that should retain access. The
+GET renders a confirmation page so scanner previews cannot consume the code;
+tap **Pair this phone** to exchange it for a secure `HttpOnly` device cookie.
+Fern opens the landing page; tap **Open OpenCode** to enter the official UI
+without typing the generated Basic password. Pairing sessions survive Fern
+restarts for up to 30 days and can be listed or revoked by an operator at
+`http://127.0.0.1:8081/fern/control`. Active requests are canceled on revoke or
+grant expiry.
 Clients must use the Fern origin rather than Docker's dynamic backend port so
 requests can wake compute and participate in pause admission.
 
 For diagnostics:
 
 ```bash
-curl --user "opencode:$OPENCODE_PASSWORD" http://127.0.0.1:8080/api/health
-curl --no-buffer --user "opencode:$OPENCODE_PASSWORD" http://127.0.0.1:8080/api/event
+curl --user "opencode:$OPENCODE_PASSWORD" http://127.0.0.1:8081/api/health
+curl --no-buffer --user "opencode:$OPENCODE_PASSWORD" http://127.0.0.1:8081/api/event
 ```
 
 `fern attach --env-file fern.env` remains available for the official OpenCode
@@ -108,8 +149,11 @@ terminal client. It loads the configured proxy origin and OpenCode credential
 rather than connecting to the container directly. The browser UI needs no
 Fern-built frontend.
 
-Fern implicitly forwards only `OPENCODE_PASSWORD` and supported provider
-variables such as `ANTHROPIC_API_KEY` and `OPENAI_API_KEY`. Additional values
+Connect accounts and providers through the official OpenCode `/connect` flow;
+OpenCode stores the connection in its persistent volume. The web UI exposes
+the same OpenCode-managed provider state. Fern also implicitly forwards
+`OPENCODE_PASSWORD` and optional provider variables such as
+`ANTHROPIC_API_KEY` and `OPENAI_API_KEY`. Additional values
 must be declared under `workspace.env` in `fern.yaml`; `${NAME}` references
 resolve from the protected env file. `FERN_CONTROL_PASSWORD` and GitHub
 credentials are host-only and rejected from workspace configuration.
@@ -120,7 +164,7 @@ credentials are host-only and rejected from workspace configuration.
 go run ./cmd/fern init --repo .
 go run ./cmd/fern doctor --phone
 go run ./cmd/fern up
-go run ./cmd/fern github publish --title "Describe the change"
+go run ./cmd/fern github publish --dry-run --title "Describe the change"
 go run ./cmd/fern attach
 go run ./cmd/fern status
 go run ./cmd/fern logs
@@ -136,15 +180,70 @@ retains OpenCode state. `status --json` emits stable machine-readable state;
 inspect its `state` field rather than treating a stopped or failed workspace as
 a command invocation failure.
 
-After OpenCode commits a clean change, publication uses only the host's existing
-`gh` credential, pushes the exact `HEAD` commit to
-`fern/<workspace>/<operation>`, and creates or reuses one draft pull request. It
-rejects workflow changes, unsafe repository Git configuration, dirty trees,
-force pushes, arbitrary destinations, and GitHub credentials in workspace
-environment. The Fern control page can publish tracked workflows while `fern
-up` holds a pause fence; the standalone CLI still requires stopping `fern up`,
-running `fern down`, and publishing as the Fern host user. This is not GitHub
-App onboarding.
+Draft-PR publication is disabled by default, and `fern up` does not resolve
+`gh` while it is disabled. To enable the host-credential prototype, configure
+both immutable values under the workspace; the ID is GitHub's positive numeric
+repository ID and the full name is exact-case canonical `owner/repository`:
+
+```yaml
+workspace:
+  github:
+    repository:
+      id: 123456789
+      fullName: owner/repository
+```
+
+Durable tasks remain disabled unless a complete execution policy and the
+repository's positive GitHub App installation ID are also configured. Provider
+and model IDs are always explicit:
+
+```yaml
+workspace:
+  env:
+    OPENCODE_PASSWORD: ${OPENCODE_PASSWORD}
+  github:
+    installationId: 987654321
+    repository:
+      id: 123456789
+      fullName: owner/repository
+tasks:
+  agent: build
+  model:
+    provider: replace-with-provider-id
+    id: replace-with-model-id
+  attemptTimeout: 30m
+  leaseDuration: 2m
+  budget:
+    maxTurns: 100
+  # Optional; no check is inferred when this block is absent.
+  verification:
+    checkName: repository-tests
+    argv: [/usr/bin/make, test]
+    workingDirectory: ""
+    timeout: 15m
+    environment:
+      CI: "true"
+    outputBytes: 65536
+```
+
+With `proxy.remoteOrigin` configured and no App credentials present, the
+operator-only `/fern/control` page starts GitHub's App Manifest flow. Fern
+validates configured installation/repository authority at task-service startup.
+The verification command is shell-free, host-owned policy and runs only after a
+sealed immutable result; the pinned OpenCode profile currently prevents Fern
+from classifying generic terminal success automatically. Fern includes an
+explicit quiesced result-sealing coordinator for a future authoritative success
+observer, but does not activate it from idle or inactive session state.
+
+When `installationId` is omitted, the separate operator-control prototype uses
+the host's existing `gh` credential. It verifies the configured numeric
+repository route, persists the exact base SHA/result commit/branch before
+mutation, pushes without force, and persists an exact re-read of one open draft
+pull request. Checkout `origin` is only a consistency diagnostic, never
+publication authority. `fern github publish --dry-run` retains preparation
+diagnostics, but standalone non-dry-run publication is rejected because it would
+bypass the durable coordinator. This broad host-token transport is
+prototype-only and is never initialized in GitHub App task mode.
 
 Common overrides are:
 
@@ -155,7 +254,8 @@ go run ./cmd/fern up \
   -repo /absolute/path/to/repository \
   -memory 8Gi \
   -idle 10m \
-  -listen 127.0.0.1:8080
+  -listen 127.0.0.1:8080 \
+  -operator-listen 127.0.0.1:8081
 ```
 
 Configuration precedence is flags, YAML, then defaults. Values explicitly set
@@ -180,11 +280,15 @@ make build
 make image
 ./scripts/test-lifecycle.sh
 FERN_OPENCODE_IMAGE=fern/opencode:dev ./scripts/test-opencode.sh
+PYTHONDONTWRITEBYTECODE=1 python3 integration/opencode-contract/contract_harness.py
+./integration/release/run.sh
+go test ./integration/task-ui
 ```
 
 CI runs formatting, unit and race tests, vet, the binary and image builds, the
-real-Docker lifecycle harness, and the pinned OpenCode smoke test. Build release
-binaries and checksums from a clean tree with:
+real-Docker lifecycle harness, pinned OpenCode smoke test, and reproducible
+release harness. Build release binaries, deployment assets, metadata, and
+checksums from a clean tree with:
 
 ```bash
 ./scripts/build-release.sh v0.1.0
@@ -205,6 +309,7 @@ discover the loopback backend and is already inside the trusted-host boundary.
 Fern cannot recover process-local provider streams or tool execution after a
 crash and does not claim mid-turn crash recovery.
 
-Publish the loopback proxy only through a private TLS edge such as Tailscale
-Serve. Current Basic auth is defense in depth, not transport security or the
-future Fern device identity model.
+Publish only the remote/device listener through a private TLS edge such as
+Tailscale Serve. Never publish the operator listener. The remote listener rejects
+both Basic credentials and relies on selective Fern device grants; Basic auth is
+not transport security.
