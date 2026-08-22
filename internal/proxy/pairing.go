@@ -21,7 +21,8 @@ import (
 )
 
 const (
-	deviceCookieName       = "fern_device"
+	deviceCookieName       = "__Host-fern_device"
+	legacyDeviceCookieName = "fern_device"
 	maxDeviceNameBytes     = 80
 	maxOutstandingPairings = 64
 )
@@ -50,21 +51,30 @@ type pairingPage struct {
 }
 
 type pairingState struct {
-	mu       sync.Mutex
-	codes    map[[sha256.Size]byte]time.Time
-	sessions map[[sha256.Size]byte]time.Time
-	now      func() time.Time
-	store    *control.Store
+	mu              sync.Mutex
+	codes           map[[sha256.Size]byte]time.Time
+	attempts        map[[sha256.Size]byte]pairingAttempt
+	invalidAttempts []time.Time
+	lastIssued      time.Time
+	lastSuccess     time.Time
+	sessions        map[[sha256.Size]byte]time.Time
+	now             func() time.Time
+	store           *control.Store
+	persistencePath string
+	persistenceErr  error
 }
 
 func newPairingState(stores ...*control.Store) *pairingState {
 	state := &pairingState{
 		codes:    make(map[[sha256.Size]byte]time.Time),
+		attempts: make(map[[sha256.Size]byte]pairingAttempt),
 		sessions: make(map[[sha256.Size]byte]time.Time),
 		now:      time.Now,
 	}
 	if len(stores) != 0 {
 		state.store = stores[0]
+		state.persistencePath = pairingPersistencePath(stores[0])
+		state.persistenceErr = state.loadPersisted()
 	}
 	return state
 }
@@ -92,8 +102,11 @@ func (state *pairingState) handler(next http.Handler, auth runtime.ServerAuth, c
 			request.Header.Del("Authorization")
 			next.ServeHTTP(writer, request)
 		default:
-			if device, valid := state.authenticatedDevice(request); valid {
-				if state.servePaired(writer, request, next, auth, device) {
+			if device, credential, valid := state.authenticatedDevice(request); valid {
+				if !state.authorizeDeviceMutation(writer, request, credential) {
+					return
+				}
+				if state.servePaired(writer, request, next, auth, device, credential) {
 					return
 				}
 			}
@@ -131,16 +144,23 @@ func (state *pairingState) remoteHandler(next http.Handler, auth runtime.ServerA
 			next.ServeHTTP(writer, request)
 			return
 		}
-		device, valid := state.authenticatedDevice(request)
+		device, credential, valid := state.authenticatedDevice(request)
 		if !valid {
 			http.Error(writer, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		if isFernRoute(request) && request.URL.Path != "/fern" && request.URL.Path != "/fern/" && !isTaskAPIPath(request.URL.Path) && !isTaskUIPath(request.URL.Path) {
+			if request.URL.Path == csrfTokenPath && request.URL.EscapedPath() == csrfTokenPath {
+				state.serveCSRFToken(writer, request, credential)
+				return
+			}
 			http.NotFound(writer, request)
 			return
 		}
-		state.servePaired(writer, request, next, auth, device)
+		if !state.authorizeDeviceMutation(writer, request, credential) {
+			return
+		}
+		state.servePaired(writer, request, next, auth, device, credential)
 	})
 }
 
@@ -149,6 +169,8 @@ func isTaskUIPath(path string) bool {
 }
 
 func (state *pairingState) operatorHandler(next http.Handler, auth runtime.ServerAuth, control ControlAuth) http.Handler {
+	// This loopback-only surface uses explicit Basic credentials rather than
+	// ambient browser cookies, so device CSRF tokens do not apply here.
 	upstreamAuth := newBasicAuthenticator("opencode", auth.Password, "opencode")
 	controlAuth := newBasicAuthenticator("fern", control.Password, "fern-control")
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -214,6 +236,17 @@ func (state *pairingState) issue(writer http.ResponseWriter, request *http.Reque
 	now := state.now()
 	state.mu.Lock()
 	state.prune(now)
+	if state.persistenceErr != nil {
+		state.mu.Unlock()
+		http.Error(writer, "pairing state unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if !state.lastIssued.IsZero() && now.Sub(state.lastIssued) < pairingIssueInterval {
+		state.mu.Unlock()
+		writer.Header().Set("Retry-After", "1")
+		http.Error(writer, "pairing code issuance is temporarily limited", http.StatusTooManyRequests)
+		return
+	}
 	if len(state.codes) >= maxOutstandingPairings {
 		state.mu.Unlock()
 		writer.Header().Set("Retry-After", "300")
@@ -226,11 +259,21 @@ func (state *pairingState) issue(writer http.ResponseWriter, request *http.Reque
 		http.Error(writer, "failed to create pairing code", http.StatusInternalServerError)
 		return
 	}
-	state.codes[sha256.Sum256([]byte(code))] = now.Add(5 * time.Minute)
+	digest := sha256.Sum256([]byte(code))
+	state.codes[digest] = now.Add(pairingCodeTTL)
+	previousIssued := state.lastIssued
+	state.lastIssued = now
+	if err := state.persistLocked(); err != nil {
+		delete(state.codes, digest)
+		state.lastIssued = previousIssued
+		state.mu.Unlock()
+		http.Error(writer, "pairing state unavailable", http.StatusServiceUnavailable)
+		return
+	}
 	state.mu.Unlock()
 	setFernHeaders(writer.Header())
 	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(map[string]string{"code": code, "expiresIn": "5m"})
+	_ = json.NewEncoder(writer).Encode(map[string]string{"code": code, "expiresIn": pairingCodeTTL.String()})
 }
 
 func (state *pairingState) pair(writer http.ResponseWriter, request *http.Request) {
@@ -252,20 +295,27 @@ func (state *pairingState) pair(writer http.ResponseWriter, request *http.Reques
 		name = request.PostFormValue("name")
 	}
 	name, validName := pairingDeviceName(name)
-	if !validName {
-		http.Error(writer, "invalid device name", http.StatusBadRequest)
-		return
-	}
 	hash := sha256.Sum256([]byte(code))
 	now := state.now()
 	state.mu.Lock()
+	if state.persistenceErr != nil {
+		state.mu.Unlock()
+		http.Error(writer, "pairing state unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	state.prune(now)
+	if len(state.invalidAttempts) >= maxGlobalPairingFailures {
+		state.mu.Unlock()
+		writer.Header().Set("Retry-After", "300")
+		http.Error(writer, "pairing attempts are temporarily limited", http.StatusTooManyRequests)
+		return
+	}
 	expires, valid := state.codes[hash]
 	valid = valid && code != "" && now.Before(expires)
-	if !valid {
-		delete(state.codes, hash)
+	if attempt := state.attempts[hash]; attempt.Count >= maxPairingCodeAttempts {
+		valid = false
 	}
-	if valid && request.Method == http.MethodGet {
-		state.prune(now)
+	if valid && validName && request.Method == http.MethodGet {
 		state.mu.Unlock()
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if err := pairingTemplate.Execute(writer, pairingPage{Code: code, Name: name}); err != nil {
@@ -273,36 +323,52 @@ func (state *pairingState) pair(writer http.ResponseWriter, request *http.Reques
 		}
 		return
 	}
-	var session string
-	var pairErr error
-	if valid {
-		session, pairErr = randomCredential()
-		valid = pairErr == nil
-		if valid {
-			if state.store == nil {
-				state.sessions[sha256.Sum256([]byte(session))] = now.Add(30 * 24 * time.Hour)
-			} else {
-				_, pairErr = state.store.AddDevice(session, name, now, now.Add(30*24*time.Hour))
-				valid = pairErr == nil
-			}
-			if valid {
-				delete(state.codes, hash)
-			}
+	if !valid || !validName {
+		state.recordInvalidLocked(hash, now)
+		if err := state.persistLocked(); err != nil {
+			state.mu.Unlock()
+			http.Error(writer, "pairing state unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		state.mu.Unlock()
+		if !validName {
+			http.Error(writer, "invalid device name", http.StatusBadRequest)
+			return
+		}
+		http.Error(writer, "pairing link is invalid or expired", http.StatusUnauthorized)
+		return
+	}
+	if !state.lastSuccess.IsZero() && now.Sub(state.lastSuccess) < pairingSuccessInterval {
+		state.mu.Unlock()
+		writer.Header().Set("Retry-After", "1")
+		http.Error(writer, "pairing is temporarily limited", http.StatusTooManyRequests)
+		return
+	}
+	session, pairErr := randomCredential()
+	if pairErr == nil {
+		// Consume the one-time code durably before creating a durable device
+		// grant. If a later effect fails, the operator issues a new code rather
+		// than risking reuse after a lost response.
+		delete(state.codes, hash)
+		delete(state.attempts, hash)
+		state.lastSuccess = now
+		pairErr = state.persistLocked()
+	}
+	if pairErr == nil {
+		if state.store == nil {
+			state.sessions[sha256.Sum256([]byte(session))] = now.Add(deviceCredentialTTL)
+		} else {
+			_, pairErr = state.store.AddDevice(session, name, now, now.Add(deviceCredentialTTL))
 		}
 	}
-	state.prune(now)
 	state.mu.Unlock()
 	if pairErr != nil {
 		http.Error(writer, "pairing state unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	if !valid {
-		http.Error(writer, "pairing link is invalid or expired", http.StatusUnauthorized)
-		return
-	}
 	http.SetCookie(writer, &http.Cookie{
-		Name: deviceCookieName, Value: session, Path: "/", MaxAge: 30 * 24 * 60 * 60,
-		Expires: now.Add(30 * 24 * time.Hour), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
+		Name: deviceCookieName, Value: session, Path: "/", MaxAge: int(deviceCredentialTTL.Seconds()),
+		Expires: now.Add(deviceCredentialTTL), HttpOnly: true, Secure: true, SameSite: http.SameSiteStrictMode,
 	})
 	http.Redirect(writer, request, "/fern/", http.StatusSeeOther)
 }
@@ -320,15 +386,15 @@ func pairingDeviceName(name string) (string, bool) {
 	return name, true
 }
 
-func (state *pairingState) authenticatedDevice(request *http.Request) (control.Device, bool) {
+func (state *pairingState) authenticatedDevice(request *http.Request) (control.Device, string, bool) {
 	cookie, err := request.Cookie(deviceCookieName)
 	if err != nil || cookie.Value == "" {
-		return control.Device{}, false
+		return control.Device{}, "", false
 	}
 	now := state.now()
 	if state.store != nil {
 		device, valid, err := state.store.AuthenticateDeviceIdentity(cookie.Value, now)
-		return device, err == nil && valid
+		return device, cookie.Value, err == nil && valid
 	}
 	hash := sha256.Sum256([]byte(cookie.Value))
 	state.mu.Lock()
@@ -338,10 +404,10 @@ func (state *pairingState) authenticatedDevice(request *http.Request) (control.D
 		valid = false
 	}
 	state.mu.Unlock()
-	return control.Device{}, valid
+	return control.Device{}, cookie.Value, valid
 }
 
-func (state *pairingState) servePaired(writer http.ResponseWriter, request *http.Request, next http.Handler, auth runtime.ServerAuth, device control.Device) bool {
+func (state *pairingState) servePaired(writer http.ResponseWriter, request *http.Request, next http.Handler, auth runtime.ServerAuth, device control.Device, credential string) bool {
 	if state.store != nil {
 		ctx, cancel := context.WithDeadline(request.Context(), device.ExpiresAt)
 		unregister, admitted := state.store.RegisterDeviceRequest(device.ID, cancel)
@@ -364,6 +430,7 @@ func (state *pairingState) servePaired(writer http.ResponseWriter, request *http
 		Type: task.ActorDevice, ID: device.ID, DisplayName: device.Name, CredentialID: device.ID,
 		Authentication: "fern_device_cookie", RequestID: requestID,
 	}
+	request = request.WithContext(context.WithValue(request.Context(), csrfCredentialKey{}, credential))
 	request = request.WithContext(taskapi.WithActor(request.Context(), actor))
 	stripAllCookies(request)
 	if isFernRoute(request) {
@@ -398,7 +465,7 @@ func stripDeviceCookie(request *http.Request) {
 	cookies := request.Cookies()
 	request.Header.Del("Cookie")
 	for _, cookie := range cookies {
-		if cookie.Name != deviceCookieName {
+		if cookie.Name != deviceCookieName && cookie.Name != legacyDeviceCookieName {
 			request.AddCookie(cookie)
 		}
 	}
@@ -415,6 +482,16 @@ func (state *pairingState) prune(now time.Time) {
 			delete(state.sessions, session)
 		}
 	}
+	for digest, attempt := range state.attempts {
+		if !now.Before(attempt.ExpiresAt) {
+			delete(state.attempts, digest)
+		}
+	}
+	first := 0
+	for first < len(state.invalidAttempts) && !now.Before(state.invalidAttempts[first].Add(pairingFailureWindow)) {
+		first++
+	}
+	state.invalidAttempts = append([]time.Time(nil), state.invalidAttempts[first:]...)
 }
 
 func randomCredential() (string, error) {

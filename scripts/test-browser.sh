@@ -83,7 +83,7 @@ PREVIEW_STATUS=$(curl -sS --dump-header "$RUN_ROOT/pair-preview.headers" --outpu
   "$REMOTE_URL/fern/pair?code=$PAIR_CODE")
 [[ "$PREVIEW_STATUS" == 200 ]] || { echo "pairing preview returned $PREVIEW_STATUS" >&2; exit 1; }
 grep -q 'Pair this phone' "$RUN_ROOT/pair-preview.html" || { echo "pairing preview did not render confirmation" >&2; exit 1; }
-if grep -Eqi '^set-cookie: fern_device=' "$RUN_ROOT/pair-preview.headers"; then
+if grep -Eqi '^set-cookie: (__Host-)?fern_device=' "$RUN_ROOT/pair-preview.headers"; then
   echo "pairing preview consumed the code and issued a device cookie" >&2
   exit 1
 fi
@@ -96,15 +96,16 @@ playwright-cli -s="$SESSION" resize 390 844 >/dev/null
 playwright-cli -s="$SESSION" run-code "async page => {
   if (!page.url().startsWith('$REMOTE_URL/fern/pair?')) throw new Error('pair preview URL failed: ' + page.url());
   if (!await page.getByRole('heading', {name: 'Pair this phone?'}).count()) throw new Error('pair confirmation was not rendered');
-  if ((await page.context().cookies()).some(cookie => cookie.name === 'fern_device')) throw new Error('pair preview issued a device cookie');
+  if ((await page.context().cookies()).some(cookie => cookie.name === '__Host-fern_device' || cookie.name === 'fern_device')) throw new Error('pair preview issued a device cookie');
   await Promise.all([
     page.waitForURL('$REMOTE_URL/fern/'),
     page.getByRole('button', {name: 'Pair this phone'}).click(),
   ]);
   if (page.url() !== '$REMOTE_URL/fern/') throw new Error('pair redirect failed: ' + page.url());
   const cookies = await page.context().cookies();
-  const device = cookies.find(cookie => cookie.name === 'fern_device');
+  const device = cookies.find(cookie => cookie.name === '__Host-fern_device');
   if (!device || !device.httpOnly || !device.secure || device.sameSite !== 'Strict' || device.path !== '/') throw new Error('invalid device cookie');
+  if (cookies.some(cookie => cookie.name === 'fern_device')) throw new Error('legacy device cookie was issued');
   if (await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)) throw new Error('mobile horizontal overflow');
   if (await page.getByRole('textbox', {name: 'Workflow title'}).count()) throw new Error('paired device received Fern administration controls');
   const denied = await page.request.get('$REMOTE_URL/fern/api/v1/devices');

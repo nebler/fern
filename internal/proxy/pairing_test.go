@@ -135,7 +135,7 @@ func TestPairedDeviceSurvivesHandlerRestart(t *testing.T) {
 	}
 }
 
-func TestPairingStoreFailureLeavesCodeRetryable(t *testing.T) {
+func TestPairingStoreFailureConsumesCodeFailClosed(t *testing.T) {
 	t.Parallel()
 	directory := filepath.Join(t.TempDir(), "control")
 	store, err := control.Open(directory, "demo")
@@ -153,7 +153,7 @@ func TestPairingStoreFailureLeavesCodeRetryable(t *testing.T) {
 	if err := json.Unmarshal(issued.Body.Bytes(), &payload); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(directory); err != nil {
+	if err := os.RemoveAll(directory); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(directory, []byte("not a directory"), 0o600); err != nil {
@@ -172,7 +172,7 @@ func TestPairingStoreFailureLeavesCodeRetryable(t *testing.T) {
 	}
 	retried := httptest.NewRecorder()
 	handler.ServeHTTP(retried, pairingRequest(payload.Code))
-	if retried.Code != http.StatusSeeOther || len(retried.Result().Cookies()) != 1 {
+	if retried.Code != http.StatusUnauthorized || len(retried.Result().Cookies()) != 0 {
 		t.Fatalf("retried pairing status=%d cookies=%+v", retried.Code, retried.Result().Cookies())
 	}
 }
@@ -462,6 +462,9 @@ func TestPairedRequestShapesInheritRevocableContext(t *testing.T) {
 			handler := newPairingState(store).handler(next, runtime.ServerAuth{Password: "secret"}, ControlAuth{})
 			request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
 			request.AddCookie(&http.Cookie{Name: deviceCookieName, Value: "device-token"})
+			if isMutation(request) {
+				request.Header.Set(csrfHeaderName, mintCSRFToken("device-token", request.Method, request.URL.EscapedPath(), time.Now().Add(csrfTokenTTL)))
+			}
 			if test.upgrade {
 				request.Header.Set("Connection", "Upgrade")
 				request.Header.Set("Upgrade", "websocket")

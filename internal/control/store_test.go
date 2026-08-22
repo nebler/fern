@@ -127,6 +127,23 @@ func TestStoreRejectsSymlinkDirectory(t *testing.T) {
 	}
 }
 
+func TestAuxiliaryStatePathStaysBesideControlState(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "control")
+	store, err := Open(directory, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := store.AuxiliaryStatePath("pairing")
+	if err != nil || path != store.path+".pairing" {
+		t.Fatalf("path=%q err=%v", path, err)
+	}
+	for _, name := range []string{"", "../escape", "Pairing", "pairing-state", strings.Repeat("a", 33)} {
+		if _, err := store.AuxiliaryStatePath(name); err == nil {
+			t.Fatalf("accepted auxiliary state name %q", name)
+		}
+	}
+}
+
 func TestStoreRejectsUnknownStateFields(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "control")
 	if err := os.Mkdir(directory, 0o700); err != nil {

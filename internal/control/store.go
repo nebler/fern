@@ -153,6 +153,23 @@ func Open(directory, workspace string) (*Store, error) {
 	return store, nil
 }
 
+// AuxiliaryStatePath returns a sibling path for a small subsystem-owned state
+// file. The closed name prevents callers from escaping the control directory.
+func (store *Store) AuxiliaryStatePath(name string) (string, error) {
+	if store == nil || store.path == "" {
+		return "", errors.New("control store is unavailable")
+	}
+	if name == "" || len(name) > 32 {
+		return "", errors.New("invalid auxiliary state name")
+	}
+	for _, character := range name {
+		if character < 'a' || character > 'z' {
+			return "", errors.New("invalid auxiliary state name")
+		}
+	}
+	return store.path + "." + name, nil
+}
+
 func (store *Store) AddDevice(token, name string, now, expires time.Time) (Device, error) {
 	if token == "" || !expires.After(now) {
 		return Device{}, errors.New("valid device token and expiry are required")

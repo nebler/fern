@@ -249,7 +249,7 @@ func stripReservedSetCookies(header http.Header) {
 func containsReservedCookieAssignment(value string) bool {
 	for _, segment := range strings.FieldsFunc(value, func(character rune) bool { return character == ';' || character == ',' }) {
 		name, _, valid := strings.Cut(strings.TrimSpace(segment), "=")
-		if valid && (name == deviceCookieName || name == "__Host-"+deviceCookieName) {
+		if valid && (name == deviceCookieName || name == legacyDeviceCookieName) {
 			return true
 		}
 	}
