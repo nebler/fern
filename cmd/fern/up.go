@@ -74,6 +74,7 @@ func runUp(args []string, log *slog.Logger) error {
 	spec := runtime.Spec{
 		Name: cfg.Workspace.Name, Image: cfg.Workspace.Image, RepoPath: cfg.Workspace.Repo,
 		MemoryBytes: memoryBytes, Env: cfg.Workspace.Env,
+		WorkspaceGH: cfg.Workspace.GitHub != nil && cfg.Workspace.GitHub.Mode == config.GitHubModeWorkspaceGH,
 	}
 	auth := spec.ServerAuth()
 
@@ -340,18 +341,13 @@ func newWorkspacePublisher(workspace config.Workspace) (*publication.Publisher, 
 	if workspace.GitHub == nil {
 		return nil, nil
 	}
-	// An installation binding selects the repository-scoped durable task lane.
-	// Never initialize the legacy host-gh publisher in that mode.
-	if workspace.GitHub.InstallationID > 0 {
+	// Explicit GitHub authority modes supersede the legacy host-user gh lane.
+	// Workspace gh runs inside the container; App credentials stay in the task
+	// broker. Neither mode may accidentally consume the host user's credential.
+	if workspace.GitHub.Mode == config.GitHubModeWorkspaceGH || workspace.GitHub.Mode == config.GitHubModeGitHubAppBroker {
 		return nil, nil
 	}
-	publisher, err := publication.New(workspace.Name, workspace.Repo, publication.RepositoryBinding{
-		ID: workspace.GitHub.Repository.ID, FullName: workspace.GitHub.Repository.FullName,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return publisher, nil
+	return nil, fmt.Errorf("unsupported GitHub authority mode %q", workspace.GitHub.Mode)
 }
 
 func trustedProxyOrigins(cfg config.Config) proxy.TrustedOrigins {
