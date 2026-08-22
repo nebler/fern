@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fern.invalid/schemas/transaction-manifest-v1.json",
+  "title": "Fern upgrade or rollback transaction manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "operation_id", "operation", "phase", "from_release", "to_release", "last_known_good", "compatibility", "backup", "rollback", "evidence"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "operation_id": {"type": "string", "minLength": 1},
+    "operation": {"enum": ["upgrade", "rollback"]},
+    "phase": {"enum": ["planned", "verified", "quiesced", "installed", "validated", "committed", "failed", "rolled-back"]},
+    "from_release": {"$ref": "#/$defs/release"},
+    "to_release": {"$ref": "#/$defs/release"},
+    "last_known_good": {"$ref": "#/$defs/release"},
+    "compatibility": {"$ref": "#/$defs/unsupported"},
+    "backup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "sqlite", "application_secrets"],
+      "properties": {
+        "status": {"const": "not-implemented"},
+        "sqlite": {"const": "PLACEHOLDER: SQLite backup support is not implemented"},
+        "application_secrets": {"const": "PLACEHOLDER: application-secret backup support is not implemented"}
+      }
+    },
+    "rollback": {"$ref": "#/$defs/unsupported"},
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundle_path", "sha256sums_path"],
+      "properties": {
+        "bundle_path": {"type": "string", "minLength": 1},
+        "sha256sums_path": {"type": "string", "minLength": 1}
+      }
+    }
+  },
+  "$defs": {
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "commit", "manifest_sha256"],
+      "properties": {
+        "version": {"type": "string", "minLength": 1},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "unsupported": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason"],
+      "properties": {
+        "status": {"const": "not-implemented"},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

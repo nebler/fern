@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "operation_id": "REPLACE_WITH_UNIQUE_OPERATION_ID",
+  "operation": "upgrade",
+  "phase": "planned",
+  "from_release": {
+    "version": "REPLACE_WITH_CURRENT_VERSION",
+    "commit": "0000000000000000000000000000000000000000",
+    "manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "to_release": {
+    "version": "REPLACE_WITH_TARGET_VERSION",
+    "commit": "0000000000000000000000000000000000000000",
+    "manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "last_known_good": {
+    "version": "REPLACE_WITH_LAST_KNOWN_GOOD_VERSION",
+    "commit": "0000000000000000000000000000000000000000",
+    "manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "compatibility": {
+    "status": "not-implemented",
+    "reason": "PLACEHOLDER: no state-schema compatibility or migration gate is implemented"
+  },
+  "backup": {
+    "status": "not-implemented",
+    "sqlite": "PLACEHOLDER: SQLite backup support is not implemented",
+    "application_secrets": "PLACEHOLDER: application-secret backup support is not implemented"
+  },
+  "rollback": {
+    "status": "not-implemented",
+    "reason": "PLACEHOLDER: this records intended shape only and is not an executable rollback claim"
+  },
+  "evidence": {
+    "bundle_path": "REPLACE_WITH_EVIDENCE_BUNDLE_PATH",
+    "sha256sums_path": "REPLACE_WITH_EVIDENCE_SHA256SUMS_PATH"
+  }
+}

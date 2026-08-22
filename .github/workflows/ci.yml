@@ -29,6 +29,9 @@ jobs:
       - name: Run tests
         run: GOTOOLCHAIN=local go test ./...
 
+      - name: Verify CGO-free task store
+        run: CGO_ENABLED=0 GOTOOLCHAIN=local go test ./internal/taskstore
+
       - name: Run race tests
         run: GOTOOLCHAIN=local go test -race ./...
 
@@ -40,6 +43,14 @@ jobs:
 
       - name: Verify systemd deployment
         run: ./scripts/test-deployment.sh
+
+      - name: Verify reproducible release artifacts
+        run: ./integration/release/run.sh
+
+      - name: Build and verify release candidate
+        run: |
+          ./scripts/build-release.sh v0.0.0-ci
+          shasum -a 256 -c dist/SHA256SUMS
 
   image:
     name: Workspace image

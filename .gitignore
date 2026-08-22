@@ -2,9 +2,13 @@
 /.fern/
 /dist/
 /opencode/
+/.playwright-cli/
 /experiment/fixture/
 *.db-shm
 *.db-wal
 fern.yaml
+/fern.env
 *.out
 *.test
+__pycache__/
+*.pyc

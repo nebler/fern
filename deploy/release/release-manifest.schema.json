@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fern.invalid/schemas/release-manifest-v1.json",
+  "title": "Fern release manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release", "build", "integrity", "artifacts", "deployment_files", "upgrade_rollback"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "commit", "source_date_epoch", "version_source"],
+      "properties": {
+        "version": {"type": "string", "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+"},
+        "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "source_date_epoch": {"type": "integer", "minimum": 1},
+        "version_source": {"const": "builder-argument"}
+      }
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["go_version", "cgo_enabled", "trimpath", "vcs_stamping"],
+      "properties": {
+        "go_version": {"type": "string", "pattern": "^go[0-9]"},
+        "cgo_enabled": {"const": false},
+        "trimpath": {"const": true},
+        "vcs_stamping": {"const": false}
+      }
+    },
+    "integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checksum_algorithm", "signature_status"],
+      "properties": {
+        "checksum_algorithm": {"const": "sha256"},
+        "signature_status": {"const": "not-generated"}
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 2,
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "deployment_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/file"}
+    },
+    "upgrade_rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["transaction_manifest", "support_status", "sqlite_backup", "application_secrets_backup"],
+      "properties": {
+        "transaction_manifest": {"type": "string"},
+        "support_status": {"const": "not-implemented"},
+        "sqlite_backup": {"const": "placeholder-only-not-implemented"},
+        "application_secrets_backup": {"const": "placeholder-only-not-implemented"}
+      }
+    }
+  },
+  "$defs": {
+    "file": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "os", "arch", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "os": {"const": "linux"},
+        "arch": {"enum": ["amd64", "arm64"]},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}
