@@ -68,6 +68,15 @@ jobs:
           test "$(docker run --rm --entrypoint id fern/opencode:ci -g)" = "1001"
           docker run --rm --entrypoint opencode2 fern/opencode:ci --version
 
+      - name: Verify workspace GitHub CLI
+        run: |
+          docker run --rm --entrypoint gh fern/opencode:ci --version | grep -q '^gh version 2\.98\.0 '
+          docker run --rm --network none --entrypoint sh fern/opencode:ci -c \
+            'test "$(id -u):$(id -g)" = 1001:1001 && test -w /home/user/.config/gh && test ! -e /home/user/.config/gh/hosts.yml && ! gh auth status >/dev/null 2>&1'
+          docker run --rm --network none --env GH_CONFIG_DIR=/home/user/.config/gh \
+            --mount type=volume,destination=/home/user/.config/gh \
+            --entrypoint sh fern/opencode:ci -c 'test -w "$GH_CONFIG_DIR" && touch "$GH_CONFIG_DIR/write-test"'
+
       - name: Smoke test real OpenCode
         env:
           FERN_OPENCODE_IMAGE: fern/opencode:ci

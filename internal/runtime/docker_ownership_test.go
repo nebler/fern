@@ -603,6 +603,149 @@ func TestVerifyActualSpecRejectsExtraMountAndPrivileges(t *testing.T) {
 	}
 }
 
+func TestVerifyActualSpecSeparatesWorkspaceGHMode(t *testing.T) {
+	t.Parallel()
+	useInit := true
+	pidsLimit := workspacePIDs
+	spec := ownershipTestSpec()
+	spec.WorkspaceGH = true
+	info := container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{HostConfig: &container.HostConfig{
+			Resources:    container.Resources{Memory: 1024, NanoCPUs: workspaceNanoCPUs, PidsLimit: &pidsLimit},
+			Init:         &useInit,
+			CapDrop:      []string{"ALL"},
+			SecurityOpt:  []string{"no-new-privileges"},
+			PortBindings: nat.PortMap{nat.Port(workspacePort): []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "49152"}}},
+		}},
+		Config: &container.Config{
+			Image: "image:test", User: "1001:1001",
+			Env:          []string{githubConfigEnv + "=" + githubConfigDir},
+			ExposedPorts: nat.PortSet{nat.Port(workspacePort): struct{}{}},
+		},
+		Mounts: []container.MountPoint{
+			{Type: mount.TypeBind, Source: "/repo", Destination: "/home/user/workspace", RW: true},
+			{Type: mount.TypeVolume, Name: "fern-demo-v2-data", Destination: "/home/user/.local/share/opencode", RW: true},
+			{Type: mount.TypeVolume, Name: "fern-demo-v1-gh-config", Destination: githubConfigDir, RW: true},
+		},
+	}
+	if err := verifyActualSpec(info, spec); err != nil {
+		t.Fatalf("valid workspace gh spec drifted: %v", err)
+	}
+	defaultSpec := spec
+	defaultSpec.WorkspaceGH = false
+	if err := verifyActualSpec(info, defaultSpec); !errors.Is(err, ErrSpecDrift) {
+		t.Fatalf("default mode with gh mount error = %v, want ErrSpecDrift", err)
+	}
+	withoutMount := info
+	withoutMount.Mounts = append([]container.MountPoint(nil), info.Mounts[:2]...)
+	if err := verifyActualSpec(withoutMount, defaultSpec); !errors.Is(err, ErrSpecDrift) {
+		t.Fatalf("default mode with gh environment error = %v, want ErrSpecDrift", err)
+	}
+	info.Mounts = info.Mounts[:2]
+	if err := verifyActualSpec(info, spec); !errors.Is(err, ErrSpecDrift) {
+		t.Fatalf("workspace gh mode without gh mount error = %v, want ErrSpecDrift", err)
+	}
+}
+
+func TestWorkspaceGHVolumePersistsAcrossRecreation(t *testing.T) {
+	t.Parallel()
+	var containerPresent bool
+	volumes := make(map[string]bool)
+	var containerCreates, volumeCreates, volumeDrops atomic.Int32
+	var creates []struct {
+		Env        []string
+		HostConfig struct {
+			Mounts []mount.Mount
+		}
+	}
+	server := httptest.NewUnstartedServer(nil)
+	server.Config.Handler = http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		path := request.URL.Path
+		switch {
+		case path == "/api/health":
+			_, _ = writer.Write([]byte(`{"healthy":true}`))
+		case request.Method == http.MethodGet && strings.Contains(path, "/containers/") && strings.HasSuffix(path, "/json"):
+			if !containerPresent {
+				writeDockerNotFound(writer, "container")
+				return
+			}
+			port := server.Listener.Addr().(*net.TCPAddr).Port
+			writeJSON(writer, http.StatusOK, map[string]any{
+				"Id": "container-id", "Image": testImageID,
+				"Config": map[string]any{"Labels": map[string]string{managedLabel: "true", workspaceLabel: "demo"}},
+				"State":  map[string]any{"Status": "running", "Running": true},
+				"NetworkSettings": map[string]any{"Ports": nat.PortMap{
+					nat.Port(workspacePort): []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: strconv.Itoa(port)}},
+				}},
+			})
+		case request.Method == http.MethodGet && strings.Contains(path, "/volumes/"):
+			name := path[strings.LastIndex(path, "/")+1:]
+			if !volumes[name] {
+				writeDockerNotFound(writer, "volume")
+				return
+			}
+			writeJSON(writer, http.StatusOK, map[string]any{"Name": name, "Labels": map[string]string{managedLabel: "true", workspaceLabel: "demo"}})
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/volumes/create"):
+			var body struct{ Name string }
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Errorf("decode volume create: %v", err)
+			}
+			volumes[body.Name] = true
+			volumeCreates.Add(1)
+			writeJSON(writer, http.StatusCreated, map[string]any{"Name": body.Name, "Labels": map[string]string{managedLabel: "true", workspaceLabel: "demo"}})
+		case request.Method == http.MethodPost && strings.HasSuffix(path, "/containers/create"):
+			var body struct {
+				Env        []string
+				HostConfig struct {
+					Mounts []mount.Mount
+				}
+			}
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Errorf("decode container create: %v", err)
+			}
+			creates = append(creates, body)
+			containerCreates.Add(1)
+			containerPresent = true
+			writeJSON(writer, http.StatusCreated, map[string]any{"Id": "container-id"})
+		case request.Method == http.MethodPost && (strings.HasSuffix(path, "/start") || strings.HasSuffix(path, "/stop")):
+			writer.WriteHeader(http.StatusNoContent)
+		case request.Method == http.MethodDelete && strings.Contains(path, "/containers/"):
+			containerPresent = false
+			writer.WriteHeader(http.StatusNoContent)
+		case request.Method == http.MethodDelete && strings.Contains(path, "/volumes/"):
+			volumeDrops.Add(1)
+			writer.WriteHeader(http.StatusNoContent)
+		default:
+			http.NotFound(writer, request)
+		}
+	})
+	server.Start()
+	defer server.Close()
+
+	docker := testDocker(t, server)
+	spec := ownershipTestSpec()
+	spec.WorkspaceGH = true
+	for attempt := 0; attempt < 2; attempt++ {
+		if _, err := docker.Create(context.Background(), spec); err != nil {
+			t.Fatalf("create attempt %d: %v", attempt+1, err)
+		}
+		if err := docker.Destroy(context.Background(), spec.Name); err != nil {
+			t.Fatalf("destroy attempt %d: %v", attempt+1, err)
+		}
+	}
+	if containerCreates.Load() != 2 || volumeCreates.Load() != 2 || volumeDrops.Load() != 0 {
+		t.Fatalf("container creates=%d volume creates=%d volume drops=%d", containerCreates.Load(), volumeCreates.Load(), volumeDrops.Load())
+	}
+	for index, create := range creates {
+		if !slices.Contains(create.Env, githubConfigEnv+"="+githubConfigDir) {
+			t.Fatalf("create %d environment = %v", index+1, create.Env)
+		}
+		if len(create.HostConfig.Mounts) != 3 || create.HostConfig.Mounts[2].Source != specGHVolumeName(spec) || create.HostConfig.Mounts[2].Target != githubConfigDir {
+			t.Fatalf("create %d mounts = %+v", index+1, create.HostConfig.Mounts)
+		}
+	}
+}
+
 func TestReconcileStartupUsesOneInspectionForRunningContainer(t *testing.T) {
 	t.Parallel()
 	spec := ownershipTestSpec()

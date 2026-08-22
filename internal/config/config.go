@@ -1016,7 +1016,7 @@ func ValidateWorkspace(config Config) error {
 	}
 	for key := range config.Workspace.Env {
 		switch key {
-		case "FERN_CONTROL_PASSWORD", "FERN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN":
+		case "FERN_CONTROL_PASSWORD", "FERN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR":
 			return fmt.Errorf("%s is host-only and cannot be forwarded to the workspace", key)
 		}
 		if key == "" || strings.ContainsAny(key, "=\x00\r\n") {

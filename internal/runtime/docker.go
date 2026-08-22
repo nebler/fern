@@ -28,6 +28,8 @@ import (
 
 const (
 	workspacePort        = "4096/tcp"
+	githubConfigDir      = "/home/user/.config/gh"
+	githubConfigEnv      = "GH_CONFIG_DIR"
 	healthTimeout        = 60 * time.Second
 	workspaceNanoCPUs    = int64(2_000_000_000)
 	workspacePIDs        = int64(512)
@@ -92,24 +94,32 @@ func (d *Docker) Create(ctx context.Context, spec Spec) (Endpoint, error) {
 }
 
 func (d *Docker) create(ctx context.Context, spec Spec) (observation Observation, resultErr error) {
-	createdVolume, err := d.ensureVolume(ctx, spec)
-	if err != nil {
-		return Observation{}, err
-	}
+	var createdVolumes []string
 	retainVolume := false
 	defer func() {
-		if !createdVolume || retainVolume {
+		if retainVolume {
 			return
 		}
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
-		resultErr = errors.Join(resultErr, d.cli.VolumeRemove(cleanupCtx, specDataVolumeName(spec), false))
+		for _, name := range createdVolumes {
+			resultErr = errors.Join(resultErr, d.cli.VolumeRemove(cleanupCtx, name, false))
+		}
 	}()
+	for _, name := range specVolumeNames(spec) {
+		created, err := d.ensureVolume(ctx, spec.Name, name)
+		if err != nil {
+			return Observation{}, err
+		}
+		if created {
+			createdVolumes = append(createdVolumes, name)
+		}
+	}
 	if err := d.intents.Clear(spec.Name); err != nil {
 		return Observation{}, fmt.Errorf("clear stale pause intent: %w", err)
 	}
 
-	env := sortedEnv(spec.Env)
+	env := sortedEnv(specEnvironment(spec))
 	fingerprint, err := specFingerprint(spec)
 	if err != nil {
 		return Observation{}, err
@@ -138,10 +148,7 @@ func (d *Docker) create(ctx context.Context, spec Spec) (observation Observation
 			Init:        &useInit,
 			CapDrop:     []string{"ALL"},
 			SecurityOpt: []string{"no-new-privileges"},
-			Mounts: []mount.Mount{
-				{Type: mount.TypeBind, Source: spec.RepoPath, Target: "/home/user/workspace"},
-				{Type: mount.TypeVolume, Source: specDataVolumeName(spec), Target: "/home/user/.local/share/opencode"},
-			},
+			Mounts:      specMounts(spec),
 		},
 		&network.NetworkingConfig{},
 		nil,
@@ -574,9 +581,7 @@ func (d *Docker) rollbackStarted(name, containerID string, cause error) error {
 	return errors.Join(cause, d.pauseObserved(cleanupCtx, name, observation))
 }
 
-func (d *Docker) ensureVolume(ctx context.Context, spec Spec) (bool, error) {
-	workspace := spec.Name
-	name := specDataVolumeName(spec)
+func (d *Docker) ensureVolume(ctx context.Context, workspace, name string) (bool, error) {
 	existing, err := d.cli.VolumeInspect(ctx, name)
 	if err == nil {
 		if existing.Labels[managedLabel] != "true" || existing.Labels[workspaceLabel] != workspace {
@@ -633,6 +638,8 @@ type fingerprintValue struct {
 	Init        bool
 	Port        string
 	DataVolume  string
+	WorkspaceGH bool   `json:",omitempty"`
+	GHVolume    string `json:",omitempty"`
 }
 
 func specFingerprint(spec Spec) (string, error) {
@@ -642,10 +649,12 @@ func specFingerprint(spec Spec) (string, error) {
 		Image:       spec.Image,
 		RepoPath:    spec.RepoPath,
 		MemoryBytes: spec.MemoryBytes,
-		Env:         sortedEnvKeys(spec.Env),
+		Env:         sortedEnvKeys(specEnvironment(spec)),
 		Init:        true,
 		Port:        workspacePort,
 		DataVolume:  specDataVolumeName(spec),
+		WorkspaceGH: spec.WorkspaceGH,
+		GHVolume:    specGHVolumeName(spec),
 	})
 }
 
@@ -676,14 +685,17 @@ func verifyActualSpec(info container.InspectResponse, spec Spec) error {
 		key, value, _ := strings.Cut(entry, "=")
 		actualEnv[key] = value
 	}
-	for key, value := range spec.Env {
+	for key, value := range specEnvironment(spec) {
 		actual, exists := actualEnv[key]
 		if !exists || actual != value {
 			return fmt.Errorf("%w: environment %s was modified", ErrSpecDrift, key)
 		}
 	}
-	var repoPath, dataVolume string
-	var repoCount, dataCount int
+	if _, exists := actualEnv[githubConfigEnv]; exists && !spec.WorkspaceGH {
+		return fmt.Errorf("%w: GitHub CLI environment is present outside workspace gh mode", ErrSpecDrift)
+	}
+	var repoPath, dataVolume, ghVolume string
+	var repoCount, dataCount, ghCount int
 	for _, actualMount := range info.Mounts {
 		switch actualMount.Destination {
 		case "/home/user/workspace":
@@ -698,10 +710,22 @@ func verifyActualSpec(info container.InspectResponse, spec Spec) error {
 				return fmt.Errorf("%w: data mount type or access was modified", ErrSpecDrift)
 			}
 			dataVolume = actualMount.Name
+		case githubConfigDir:
+			ghCount++
+			if actualMount.Type != mount.TypeVolume || !actualMount.RW {
+				return fmt.Errorf("%w: GitHub CLI config mount type or access was modified", ErrSpecDrift)
+			}
+			ghVolume = actualMount.Name
 		}
 	}
-	if len(info.Mounts) != 2 || repoCount != 1 || dataCount != 1 || filepath.Clean(repoPath) != filepath.Clean(spec.RepoPath) || dataVolume != specDataVolumeName(spec) {
-		return fmt.Errorf("%w: repository or data mount was modified", ErrSpecDrift)
+	wantMounts := 2
+	ghMountDrift := ghCount != 0
+	if spec.WorkspaceGH {
+		wantMounts++
+		ghMountDrift = ghCount != 1 || ghVolume != specGHVolumeName(spec)
+	}
+	if len(info.Mounts) != wantMounts || repoCount != 1 || dataCount != 1 || filepath.Clean(repoPath) != filepath.Clean(spec.RepoPath) || dataVolume != specDataVolumeName(spec) || ghMountDrift {
+		return fmt.Errorf("%w: repository, data, or GitHub CLI config mount was modified", ErrSpecDrift)
 	}
 	return nil
 }
@@ -723,4 +747,42 @@ func fingerprint(value fingerprintValue) (string, error) {
 
 func specDataVolumeName(spec Spec) string {
 	return "fern-" + spec.Name + "-v2-data"
+}
+
+func specGHVolumeName(spec Spec) string {
+	if !spec.WorkspaceGH {
+		return ""
+	}
+	return "fern-" + spec.Name + "-v1-gh-config"
+}
+
+func specVolumeNames(spec Spec) []string {
+	names := []string{specDataVolumeName(spec)}
+	if spec.WorkspaceGH {
+		names = append(names, specGHVolumeName(spec))
+	}
+	return names
+}
+
+func specEnvironment(spec Spec) map[string]string {
+	if !spec.WorkspaceGH {
+		return spec.Env
+	}
+	env := make(map[string]string, len(spec.Env)+1)
+	for key, value := range spec.Env {
+		env[key] = value
+	}
+	env[githubConfigEnv] = githubConfigDir
+	return env
+}
+
+func specMounts(spec Spec) []mount.Mount {
+	mounts := []mount.Mount{
+		{Type: mount.TypeBind, Source: spec.RepoPath, Target: "/home/user/workspace"},
+		{Type: mount.TypeVolume, Source: specDataVolumeName(spec), Target: "/home/user/.local/share/opencode"},
+	}
+	if spec.WorkspaceGH {
+		mounts = append(mounts, mount.Mount{Type: mount.TypeVolume, Source: specGHVolumeName(spec), Target: githubConfigDir})
+	}
+	return mounts
 }

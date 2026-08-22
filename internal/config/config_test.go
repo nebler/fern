@@ -1092,3 +1092,26 @@ func TestGitHubAuthorityModesAreExplicitAndClosed(t *testing.T) {
 		})
 	}
 }
+
+func TestWorkspaceGHTasksDoNotRequireInstallationID(t *testing.T) {
+	config := validTaskConfig(t)
+	config.Workspace.GitHub.Mode = GitHubModeWorkspaceGH
+	config.Workspace.GitHub.InstallationID = 0
+	if err := Validate(config); err != nil {
+		t.Fatalf("workspace-gh task configuration: %v", err)
+	}
+	config.Workspace.GitHub.InstallationID = 7
+	if err := Validate(config); err == nil {
+		t.Fatal("workspace-gh accepted an App installation ID")
+	}
+}
+
+func TestWorkspaceGHConfigDirectoryIsFernManaged(t *testing.T) {
+	config := validTaskConfig(t)
+	config.Workspace.GitHub.Mode = GitHubModeWorkspaceGH
+	config.Workspace.GitHub.InstallationID = 0
+	config.Workspace.Env["GH_CONFIG_DIR"] = "/tmp/gh"
+	if err := Validate(config); err == nil {
+		t.Fatal("configuration accepted caller-managed GH_CONFIG_DIR")
+	}
+}

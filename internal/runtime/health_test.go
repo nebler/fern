@@ -343,3 +343,47 @@ func TestSpecUsesV2DataVolume(t *testing.T) {
 		t.Fatalf("data volume = %q", got)
 	}
 }
+
+func TestWorkspaceGHModeIsExplicitAndFingerprintSeparated(t *testing.T) {
+	t.Parallel()
+	base := Spec{Name: "demo", Image: "image:one", RepoPath: "/repo", MemoryBytes: 1024}
+	baseFingerprint, err := specFingerprint(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := specEnvironment(base)[githubConfigEnv]; exists {
+		t.Fatal("default mode unexpectedly sets GH_CONFIG_DIR")
+	}
+	if got := len(specMounts(base)); got != 2 {
+		t.Fatalf("default mounts = %d, want 2", got)
+	}
+	if got := specGHVolumeName(base); got != "" {
+		t.Fatalf("default GitHub CLI volume = %q, want none", got)
+	}
+
+	workspaceGH := base
+	workspaceGH.WorkspaceGH = true
+	workspaceFingerprint, err := specFingerprint(workspaceGH)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspaceFingerprint == baseFingerprint {
+		t.Fatal("workspace gh mode did not change spec fingerprint")
+	}
+	if got := specEnvironment(workspaceGH)[githubConfigEnv]; got != githubConfigDir {
+		t.Fatalf("GH_CONFIG_DIR = %q, want %q", got, githubConfigDir)
+	}
+	mounts := specMounts(workspaceGH)
+	if len(mounts) != 3 || mounts[2].Source != "fern-demo-v1-gh-config" || mounts[2].Target != githubConfigDir {
+		t.Fatalf("workspace gh mounts = %+v", mounts)
+	}
+
+	workspaceGH.Env = map[string]string{githubConfigEnv: "/tmp/gh"}
+	if err := workspaceGH.Validate(); err == nil {
+		t.Fatal("workspace gh accepted a conflicting GH_CONFIG_DIR")
+	}
+	workspaceGH.Env = map[string]string{githubConfigEnv: githubConfigDir}
+	if err := workspaceGH.Validate(); err == nil {
+		t.Fatal("workspace gh accepted a caller-managed GH_CONFIG_DIR")
+	}
+}

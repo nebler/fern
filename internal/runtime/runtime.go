@@ -59,6 +59,7 @@ type Spec struct {
 	RepoPath    string
 	MemoryBytes int64
 	Env         map[string]string
+	WorkspaceGH bool
 }
 
 func (s Spec) ServerAuth() ServerAuth {
@@ -102,6 +103,9 @@ func (s Spec) Validate() error {
 		if strings.ContainsRune(value, '\x00') {
 			return fmt.Errorf("environment value %q contains NUL", key)
 		}
+	}
+	if _, exists := s.Env[githubConfigEnv]; exists {
+		return fmt.Errorf("%s is managed by Fern and cannot be configured", githubConfigEnv)
 	}
 	return nil
 }
