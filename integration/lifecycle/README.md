@@ -14,6 +14,20 @@ credentials must return `401` without a Docker start event. Older Fern builds
 without pre-wake proxy authentication fail that scenario; it is never skipped.
 No unstable auth/version/origin command-line flag is assumed.
 
+The phone lifecycle regression is also fully isolated. The simulator emits an
+authoritative busy-to-idle transition, then a paired-device browser request is
+made partway through the idle grace period. The harness requires compute to
+remain running past the original deadline, pause after the complete restarted
+grace period, and wake with the same container, repository, and persisted
+session marker.
+
+The fixture configures a synthetic canonical HTTPS `remoteOrigin` while requests
+still travel over local HTTP. A paired request supplies a malicious `Host`,
+`Forwarded`, and `X-Forwarded-*` set; the fake backend requires Fern's configured
+remote host/HTTPS/default port and checks absolute `Location`/`Link` generation.
+The paired operator assertion requires its canonical loopback HTTP tuple. This
+proves proxy metadata policy, not real TLS, WSS, or pinned-image behavior.
+
 Useful environment variables:
 
 - `FERN_BIN=/absolute/path/to/fern` uses an existing binary instead of building.

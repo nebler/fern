@@ -29,8 +29,11 @@ EVENTS_PID=""
 BUILT_IMAGE=0
 BLOCKER_STARTED=0
 FAILED=0
-PROXY_PORT=""
-PROXY_URL=""
+REMOTE_PORT=""
+OPERATOR_PORT=""
+REMOTE_URL=""
+OPERATOR_URL=""
+REMOTE_ORIGIN="https://remote.lifecycle.invalid"
 
 mkdir -p "$ARTIFACTS" "$HOME_DIR" "$REPO_DIR" "$RUN_ROOT/bin" \
   "$RUN_ROOT/cache" "$RUN_ROOT/config" "$RUN_ROOT/data"
@@ -93,7 +96,7 @@ capture_diagnostics() {
   note "capturing diagnostics"
   {
     printf 'run_id=%s\nworkspace=%s\ncontainer=%s\nvolume=%s\nimage=%s\nproxy=%s\n' \
-      "$RUN_ID" "$RUN_ROOT" "$NAME" "$VOLUME" "$IMAGE" "$PROXY_URL"
+      "$RUN_ID" "$RUN_ROOT" "$NAME" "$VOLUME" "$IMAGE" "$REMOTE_URL (remote), $OPERATOR_URL (operator)"
     printf 'provider_backed=NOT_RUN (non-deterministic credentials, network, and billing required)\n'
   } >"$ARTIFACTS/run.txt"
   docker container inspect "$NAME" 2>&1 | redact >"$ARTIFACTS/container-inspect.json"
@@ -195,7 +198,7 @@ else
   docker image inspect "$IMAGE" >/dev/null || fail "explicit lifecycle image does not exist: $IMAGE"
 fi
 
-PROXY_PORT=$(python3 - <<'PY'
+REMOTE_PORT=$(python3 - <<'PY'
 import socket
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
@@ -203,7 +206,16 @@ print(s.getsockname()[1])
 s.close()
 PY
 )
-PROXY_URL="http://127.0.0.1:$PROXY_PORT"
+OPERATOR_PORT=$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)
+REMOTE_URL="http://127.0.0.1:$REMOTE_PORT"
+OPERATOR_URL="http://127.0.0.1:$OPERATOR_PORT"
 printf 'fixture created by %s\n' "$RUN_ID" >"$REPO_DIR/fixture.txt"
 chmod 0777 "$REPO_DIR"
 cat >"$CONFIG" <<EOF
@@ -215,7 +227,9 @@ workspace:
 idle:
   after: 2s
 proxy:
-  listen: 127.0.0.1:$PROXY_PORT
+  listen: 127.0.0.1:$REMOTE_PORT
+  operatorListen: 127.0.0.1:$OPERATOR_PORT
+  remoteOrigin: $REMOTE_ORIGIN
 control:
   password: \${FERN_CONTROL_PASSWORD}
 EOF
@@ -246,7 +260,7 @@ wait_status() {
 wait_http() {
   local deadline=$((SECONDS + 70)) code
   while (( SECONDS < deadline )); do
-    code=$(http_code /dev/null --user "$USERNAME:$PASSWORD" "$PROXY_URL$HEALTH_PATH" 2>/dev/null || true)
+    code=$(http_code /dev/null --user "$USERNAME:$PASSWORD" "$OPERATOR_URL$HEALTH_PATH" 2>/dev/null || true)
     [[ "$code" == "200" ]] && return 0
     kill -0 "$FERN_PID" 2>/dev/null || fail "Fern exited before becoming ready"
     sleep 0.2
@@ -266,7 +280,7 @@ start_fern_control() {
   FERN_PID=$!
 	local deadline=$((SECONDS + 20)) code
 	while (( SECONDS < deadline )); do
-		code=$(http_code /dev/null --user "fern:$FERN_CONTROL_PASSWORD" "$PROXY_URL/fern/ready" 2>/dev/null || true)
+		code=$(http_code /dev/null --user "fern:$FERN_CONTROL_PASSWORD" "$OPERATOR_URL/fern/ready" 2>/dev/null || true)
 		[[ "$code" == "200" ]] && return 0
 		kill -0 "$FERN_PID" 2>/dev/null || fail "Fern exited before its control plane became ready"
 		sleep 0.2
@@ -276,7 +290,7 @@ start_fern_control() {
 
 activity() {
   local session=${1:-lifecycle}
-  auth_curl --fail --request POST "$PROXY_URL/control/activity?session=$session&delay=0.15" >/dev/null
+  auth_curl --fail --request POST "$OPERATOR_URL/control/activity?session=$session&delay=0.15" >/dev/null
 }
 
 stop_by_idle() {
@@ -288,55 +302,151 @@ container_started_at() { docker inspect --format '{{.State.StartedAt}}' "$NAME";
 container_id() { docker inspect --format '{{.Id}}' "$NAME"; }
 endpoint() { docker port "$NAME" 4096/tcp | awk -F: 'NR==1 {print $NF}'; }
 
-note "scenario 1/13: create and become healthy"
+note "scenario 1/14: create and become healthy"
 start_fern
 wait_status running
 initial_id=$(container_id)
 [[ -n "$initial_id" ]] || fail "created container has no ID"
 
-note "scenario 2/13: authorized request reaches the OpenCode protocol service"
-identity=$(auth_curl --fail "$PROXY_URL/control/identity")
+note "scenario 2/14: authorized request reaches the OpenCode protocol service"
+identity=$(auth_curl --fail "$OPERATOR_URL/control/identity")
 [[ "$identity" == *'"boot_id"'* ]] || fail "authorized response did not come from lifecycle service"
 
-note "scenario 3/13: stopped requests reject missing/wrong credentials without wake"
+note "scenario 3/14: stopped requests reject missing/wrong credentials without wake"
 stop_by_idle
 before_start=$(container_started_at)
-missing_code=$(http_code "$ARTIFACTS/missing-auth.body" "$PROXY_URL$HEALTH_PATH" || true)
-wrong_code=$(http_code "$ARTIFACTS/wrong-auth.body" --user "$USERNAME:wrong" "$PROXY_URL$HEALTH_PATH" || true)
-[[ "$missing_code" == 401 && "$wrong_code" == 401 ]] || fail "stopped auth expected 401/401, got $missing_code/$wrong_code; pre-wake auth capability is mandatory"
-	control_curl --fail "$PROXY_URL/fern/ready" | grep -q '"ready":true' || fail "Fern readiness was unavailable while compute was paused"
-	auth_curl --fail "$PROXY_URL/fern/" | grep -q 'href="/"' || fail "Fern phone landing was unavailable while compute was paused"
-	pair_code=$(control_curl --fail --request POST "$PROXY_URL/fern/pair/new" | jq -er '.code')
-curl --silent --show-error --dump-header "$ARTIFACTS/pairing.headers" --output /dev/null "$PROXY_URL/fern/pair?code=$pair_code"
+missing_code=$(http_code "$ARTIFACTS/missing-auth.body" "$REMOTE_URL$HEALTH_PATH" || true)
+wrong_code=$(http_code "$ARTIFACTS/wrong-auth.body" --user "$USERNAME:wrong" "$REMOTE_URL$HEALTH_PATH" || true)
+backend_code=$(http_code "$ARTIFACTS/backend-auth.body" --user "$USERNAME:$PASSWORD" "$REMOTE_URL$HEALTH_PATH" || true)
+control_code=$(http_code "$ARTIFACTS/control-auth.body" --user "fern:$FERN_CONTROL_PASSWORD" "$REMOTE_URL$HEALTH_PATH" || true)
+[[ "$missing_code" == 401 && "$wrong_code" == 401 && "$backend_code" == 401 && "$control_code" == 401 ]] \
+  || fail "remote auth expected 401/401/401/401, got $missing_code/$wrong_code/$backend_code/$control_code"
+	control_curl --fail "$OPERATOR_URL/fern/ready" | grep -q '"ready":true' || fail "Fern readiness was unavailable while compute was paused"
+	pair_code=$(control_curl --fail --request POST "$OPERATOR_URL/fern/pair/new" | jq -er '.code')
+pair_preview_code=$(http_code "$ARTIFACTS/pairing-preview.body" --dump-header "$ARTIFACTS/pairing-preview.headers" "$REMOTE_URL/fern/pair?code=$pair_code")
+[[ "$pair_preview_code" == 200 ]] || fail "phone pairing preview returned HTTP $pair_preview_code"
+grep -q 'Pair this phone' "$ARTIFACTS/pairing-preview.body" || fail "phone pairing preview did not render confirmation"
+if grep -Eqi '^set-cookie: fern_device=' "$ARTIFACTS/pairing-preview.headers"; then
+  fail "phone pairing preview consumed the code and issued a device cookie"
+fi
+pair_confirm_code=$(http_code /dev/null --dump-header "$ARTIFACTS/pairing.headers" \
+  --header 'Content-Type: application/x-www-form-urlencoded' --data-urlencode "code=$pair_code" "$REMOTE_URL/fern/pair")
+[[ "$pair_confirm_code" == 303 ]] || fail "phone pairing confirmation returned HTTP $pair_confirm_code"
+grep -Eqi '^location: /fern/' "$ARTIFACTS/pairing.headers" || fail "phone pairing confirmation did not redirect to the Fern landing page"
 grep -Eqi '^set-cookie: fern_device=' "$ARTIFACTS/pairing.headers" \
   && grep -Eqi '^set-cookie: .*HttpOnly' "$ARTIFACTS/pairing.headers" \
   && grep -Eqi '^set-cookie: .*Secure' "$ARTIFACTS/pairing.headers" \
   || fail "phone pairing did not issue a secure HttpOnly cookie"
+pair_replay_code=$(http_code /dev/null --header 'Content-Type: application/x-www-form-urlencoded' \
+  --data-urlencode "code=$pair_code" "$REMOTE_URL/fern/pair")
+[[ "$pair_replay_code" == 401 ]] || fail "phone pairing replay returned HTTP $pair_replay_code"
 sleep 0.5
 wait_status paused 2
 [[ "$(container_started_at)" == "$before_start" ]] || fail "authentication or Fern-owned routes started compute"
 device_cookie=$(sed -nE 's/^Set-Cookie: fern_device=([^;]+).*/\1/p' "$ARTIFACTS/pairing.headers" | tr -d '\r')
-paired_identity=$(curl --silent --show-error --fail --header "Cookie: fern_device=$device_cookie" "$PROXY_URL/control/identity")
+paired_identity=$(curl --silent --show-error --fail --header "Cookie: fern_device=$device_cookie" "$REMOTE_URL/control/identity")
 [[ "$paired_identity" == *'"boot_id"'* ]] || fail "paired device cookie did not authenticate and wake through Fern"
+curl --silent --show-error --fail --dump-header "$ARTIFACTS/remote-forwarding.headers" \
+  --header "Cookie: fern_device=$device_cookie" --header 'Host: malicious.example:9999' \
+  --header 'Forwarded: for=attacker;proto=http' --header 'X-Forwarded-For: attacker' \
+  --header 'X-Forwarded-Host: malicious.example' --header 'X-Forwarded-Proto: http' \
+  --header 'X-Forwarded-Port: 1' --header 'X-Forwarded-Evil: retained' \
+  "$REMOTE_URL/control/forwarding" >"$ARTIFACTS/remote-forwarding.json"
+jq -e --arg host "remote.lifecycle.invalid" \
+  '.host == $host and .x_forwarded_host == $host and .x_forwarded_proto == "https" and .x_forwarded_port == "443" and .forwarded == "" and .x_forwarded_for == "" and .x_forwarded_extension == ""' \
+  "$ARTIFACTS/remote-forwarding.json" >/dev/null || fail "paired remote request did not receive canonical forwarding metadata"
+grep -Eqi '^location: https://remote\.lifecycle\.invalid/generated-location' "$ARTIFACTS/remote-forwarding.headers" \
+  && grep -Eqi '^link: <https://remote\.lifecycle\.invalid/generated-link>' "$ARTIFACTS/remote-forwarding.headers" \
+  || fail "remote absolute response headers did not use the configured HTTPS origin"
+curl --silent --show-error --fail --user "$USERNAME:$PASSWORD" --header 'Host: malicious.example' \
+  --header 'Forwarded: for=attacker' --header 'X-Forwarded-Evil: retained' \
+  "$OPERATOR_URL/control/forwarding" >"$ARTIFACTS/operator-forwarding.json"
+jq -e --arg host "127.0.0.1:$OPERATOR_PORT" --arg port "$OPERATOR_PORT" \
+  '.host == $host and .x_forwarded_host == $host and .x_forwarded_proto == "http" and .x_forwarded_port == $port and .forwarded == "" and .x_forwarded_for == "" and .x_forwarded_extension == ""' \
+  "$ARTIFACTS/operator-forwarding.json" >/dev/null || fail "operator request did not receive canonical local forwarding metadata"
 stop_by_idle
 
-note "scenario 4/13: concurrent authorized requests coalesce into one wake"
+note "scenario 4/14: concurrent authorized requests coalesce into one wake"
 starts_before=$(grep -c '"Action":"start"' "$EVENTS" || true)
 pids=()
 for index in {1..12}; do
-  auth_curl --fail "$PROXY_URL$HEALTH_PATH" >"$ARTIFACTS/concurrent-$index.json" & pids+=("$!")
+  auth_curl --fail "$OPERATOR_URL$HEALTH_PATH" >"$ARTIFACTS/concurrent-$index.json" & pids+=("$!")
 done
 for pid in "${pids[@]}"; do wait "$pid" || fail "concurrent authorized request failed"; done
 sleep 0.3
 starts_after=$(grep -c '"Action":"start"' "$EVENTS" || true)
 (( starts_after - starts_before == 1 )) || fail "concurrent wake emitted $((starts_after - starts_before)) Docker start events, expected 1"
 
-note "scenario 5/13: busy-to-idle activity stops compute"
+note "scenario 5/14: busy-to-idle activity stops compute"
 stop_by_idle
 
-note "scenario 6/13: held request prevents stop"
-auth_curl --fail "$PROXY_URL$HEALTH_PATH" >/dev/null
-auth_curl --fail "$PROXY_URL/control/hold?seconds=4" >"$ARTIFACTS/held-request.json" &
+note "scenario 6/14: final phone work request restarts the full idle grace period"
+phone_session="phone-idle-$SAFE_ID"
+phone_marker="phone-state-$RUN_ID"
+curl --silent --show-error --fail --max-time 5 --header "Cookie: fern_device=$device_cookie" \
+  --request POST --header 'Content-Type: application/json' \
+  --data "{\"marker\":\"$phone_marker\",\"session\":\"$phone_session\"}" \
+  "$REMOTE_URL/control/persist" >/dev/null
+curl --silent --show-error --fail --max-time 5 --header "Cookie: fern_device=$device_cookie" \
+  --request POST "$REMOTE_URL/control/activity?session=$phone_session&delay=0.6" >/dev/null
+
+active_sessions='{}'
+activity_deadline=$((SECONDS + 5))
+while (( SECONDS < activity_deadline )); do
+  active_sessions=$(curl --silent --show-error --fail --max-time 2 --header "Cookie: fern_device=$device_cookie" \
+    "$REMOTE_URL/api/session/active")
+  jq -e --arg session "$phone_session" '.data[$session].type == "running"' <<<"$active_sessions" >/dev/null && break
+  sleep 0.05
+done
+jq -e --arg session "$phone_session" '.data[$session].type == "running"' <<<"$active_sessions" >/dev/null \
+  || fail "phone lifecycle session was not authoritatively observed busy"
+
+activity_deadline=$((SECONDS + 5))
+while (( SECONDS < activity_deadline )); do
+  active_sessions=$(curl --silent --show-error --fail --max-time 2 --header "Cookie: fern_device=$device_cookie" \
+    "$REMOTE_URL/api/session/active")
+  jq -e --arg session "$phone_session" '.data[$session] == null' <<<"$active_sessions" >/dev/null && break
+  sleep 0.05
+done
+jq -e --arg session "$phone_session" '.data[$session] == null' <<<"$active_sessions" >/dev/null \
+  || fail "phone lifecycle session was not authoritatively observed idle"
+
+# Spend part of the first grace period, then make the browser-like work request
+# whose observation must replace that deadline with a complete new grace period.
+sleep 1
+phone_container_id=$(container_id)
+phone_started_at=$(container_started_at)
+phone_request_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
+phone_identity=$(curl --silent --show-error --fail --max-time 5 --header "Cookie: fern_device=$device_cookie" \
+  "$REMOTE_URL/control/identity")
+phone_boot_id=$(jq -er '.boot_id' <<<"$phone_identity")
+sleep 1.3
+[[ $(docker inspect --format '{{.State.Running}}' "$NAME") == true ]] \
+  || fail "compute paused before the final phone request received a full restarted grace period"
+[[ $(container_started_at) == "$phone_started_at" ]] \
+  || fail "compute restarted while checking the final phone request grace period"
+
+wait_status paused 5
+phone_pause_ns=$(python3 -c 'import time; print(time.monotonic_ns())')
+(( phone_pause_ns - phone_request_ns >= 1900000000 )) \
+  || fail "compute paused before the restarted 2-second grace period elapsed"
+phone_wake_identity=$(curl --silent --show-error --fail --max-time 70 --header "Cookie: fern_device=$device_cookie" \
+  "$REMOTE_URL/control/identity")
+[[ $(jq -er '.boot_id' <<<"$phone_wake_identity") != "$phone_boot_id" ]] \
+  || fail "phone wake did not start a fresh backend process"
+[[ $(container_id) == "$phone_container_id" ]] || fail "phone wake replaced the lifecycle container"
+phone_state=$(curl --silent --show-error --fail --max-time 5 --header "Cookie: fern_device=$device_cookie" \
+  "$REMOTE_URL/control/persist")
+jq -e --arg marker "$phone_marker" --arg session "$phone_session" \
+  '.marker == $marker and .session == $session' <<<"$phone_state" >/dev/null \
+  || fail "phone wake did not preserve the OpenCode session state"
+jq -e --arg marker "$phone_marker" --arg session "$phone_session" \
+  '.marker == $marker and .session == $session' "$REPO_DIR/container-state.json" >/dev/null \
+  || fail "phone wake did not preserve the repository state"
+
+note "scenario 7/14: held request prevents stop"
+auth_curl --fail "$OPERATOR_URL$HEALTH_PATH" >/dev/null
+auth_curl --fail "$OPERATOR_URL/control/hold?seconds=4" >"$ARTIFACTS/held-request.json" &
 hold_pid=$!
 sleep 0.2
 activity held
@@ -346,33 +456,33 @@ running=$(docker inspect --format '{{.State.Running}}' "$NAME")
 wait "$hold_pid" || fail "held request failed"
 wait_status paused 10
 
-note "scenario 7/13: changed dynamic backend endpoint is discovered after stale failure"
-auth_curl --fail "$PROXY_URL$HEALTH_PATH" >/dev/null
+note "scenario 8/14: changed dynamic backend endpoint is discovered after stale failure"
+auth_curl --fail "$OPERATOR_URL$HEALTH_PATH" >/dev/null
 old_port=$(endpoint)
 docker rm -f "$NAME" >/dev/null
 docker run -d --name "$BLOCKER" --label "dev.fern.lifecycle=$RUN_ID" -e "OPENCODE_PASSWORD=$PASSWORD" -p "127.0.0.1:$old_port:4096" "$IMAGE" >/dev/null
 BLOCKER_STARTED=1
-first_code=$(http_code "$ARTIFACTS/stale-endpoint.body" --user "$USERNAME:$PASSWORD" --max-time 5 "$PROXY_URL$HEALTH_PATH" || true)
+first_code=$(http_code "$ARTIFACTS/stale-endpoint.body" --user "$USERNAME:$PASSWORD" --max-time 5 "$OPERATOR_URL$HEALTH_PATH" || true)
 [[ "$first_code" == 502 || "$first_code" == 503 || "$first_code" == 000 ]] || fail "stale endpoint did not fail safely (HTTP $first_code)"
-second_code=$(http_code "$ARTIFACTS/dynamic-endpoint.body" --user "$USERNAME:$PASSWORD" --max-time 70 "$PROXY_URL$HEALTH_PATH" || true)
+second_code=$(http_code "$ARTIFACTS/dynamic-endpoint.body" --user "$USERNAME:$PASSWORD" --max-time 70 "$OPERATOR_URL$HEALTH_PATH" || true)
 [[ "$second_code" == 200 ]] || fail "request after stale endpoint did not wake replacement (HTTP $second_code)"
 new_port=$(endpoint)
 [[ "$new_port" != "$old_port" ]] || fail "backend endpoint did not change while old port was occupied"
 docker rm -f "$BLOCKER" >/dev/null
 BLOCKER_STARTED=0
 
-note "scenario 8/13: repository and OpenCode data survive stop/start"
-auth_curl --fail --request POST --header 'Content-Type: application/json' --data "{\"marker\":\"$RUN_ID\"}" "$PROXY_URL/control/persist" >/dev/null
+note "scenario 9/14: repository and OpenCode data survive stop/start"
+auth_curl --fail --request POST --header 'Content-Type: application/json' --data "{\"marker\":\"$RUN_ID\"}" "$OPERATOR_URL/control/persist" >/dev/null
 stop_by_idle
-auth_curl --fail "$PROXY_URL$HEALTH_PATH" >/dev/null
-persisted=$(auth_curl --fail "$PROXY_URL/control/persist")
+auth_curl --fail "$OPERATOR_URL$HEALTH_PATH" >/dev/null
+persisted=$(auth_curl --fail "$OPERATOR_URL/control/persist")
 [[ "$persisted" == *"$RUN_ID"* ]] || fail "OpenCode data did not survive stop/start"
 grep -q "$RUN_ID" "$REPO_DIR/container-state.json" || fail "container-written repository data did not survive stop/start"
 
-note "scenario 9/13: isolated backup and destructive restore"
+note "scenario 10/14: isolated backup and destructive restore"
 workflow_id=$(control_curl --fail --request POST --header 'Content-Type: application/json' \
   --data '{"title":"Lifecycle workflow","sessionId":"ses_lifecycle"}' \
-  "$PROXY_URL/fern/api/v1/workflows" | jq -er '.id')
+  "$OPERATOR_URL/fern/api/v1/workflows" | jq -er '.id')
 stop_fern
 run_transcript "$FERN_BIN" down -name "$NAME"
 [[ ! $(docker ps -aq --filter "name=^/${NAME}$") ]] || fail "down did not remove compute"
@@ -409,13 +519,13 @@ docker run --rm --user 0:0 --entrypoint sh \
 
 start_fern
 curl --silent --show-error --fail --header "Cookie: fern_device=$device_cookie" \
-  "$PROXY_URL/fern/ready" | grep -q '"ready":true' \
+  "$REMOTE_URL/fern/" | grep -q 'href="/"' \
   || fail "paired device cookie did not survive Fern restart"
-control_curl --fail "$PROXY_URL/fern/api/v1/devices" | jq -e 'length == 1' >/dev/null \
+control_curl --fail "$OPERATOR_URL/fern/api/v1/devices" | jq -e 'length == 1' >/dev/null \
   || fail "durable paired device was not listed after restart"
-control_curl --fail "$PROXY_URL/fern/api/v1/workflows/$workflow_id" | jq -e --arg id "$workflow_id" '.id == $id and .sessionId == "ses_lifecycle"' >/dev/null \
+control_curl --fail "$OPERATOR_URL/fern/api/v1/workflows/$workflow_id" | jq -e --arg id "$workflow_id" '.id == $id and .sessionId == "ses_lifecycle"' >/dev/null \
   || fail "durable workflow correlation did not survive Fern restart"
-persisted=$(auth_curl --fail "$PROXY_URL/control/persist")
+persisted=$(auth_curl --fail "$OPERATOR_URL/control/persist")
 [[ "$persisted" == *"$RUN_ID"* ]] || fail "OpenCode volume content did not survive destructive restore"
 grep -q "$RUN_ID" "$REPO_DIR/container-state.json" || fail "repository content did not survive destructive restore"
 
@@ -426,7 +536,7 @@ for ((iteration=1; iteration<=WAKE_COUNT; iteration++)); do
   request_time=$(timestamp)
   timing_file="$RUN_ROOT/timing-$iteration"
   body_file="$RUN_ROOT/body-$iteration"
-  auth_curl --output "$body_file" --write-out '%{http_code}\t%{time_starttransfer}\t%{time_total}\n' "$PROXY_URL$HEALTH_PATH" >"$timing_file" &
+  auth_curl --output "$body_file" --write-out '%{http_code}\t%{time_starttransfer}\t%{time_total}\n' "$OPERATOR_URL$HEALTH_PATH" >"$timing_file" &
   wake_pid=$!
   start_observed="unobservable"
   for _ in {1..700}; do
@@ -447,25 +557,25 @@ for ((iteration=1; iteration<=WAKE_COUNT; iteration++)); do
     "$iteration" "$request_time" "$start_observed" "$started_at" "$health_ready" "$watcher_ns" "$first_byte" "$total" "$id" "$port" >>"$TIMINGS"
 done
 
-note "scenario 10/13: external clean exit is classified failed"
-auth_curl --fail --request POST "$PROXY_URL/control/exit" >/dev/null
+note "scenario 11/14: external clean exit is classified failed"
+auth_curl --fail --request POST "$OPERATOR_URL/control/exit" >/dev/null
 wait_status failed 10
 "$FERN_BIN" status -name "$NAME" | grep -q $'\tfailed\t.*exit=0 oom=false' || fail "clean exit was not classified failed"
 stop_fern
 run_transcript "$FERN_BIN" down -name "$NAME"
 start_fern
 
-note "scenario 11/13: OOM is classified failed"
-auth_curl --fail --request POST "$PROXY_URL/control/oom" >/dev/null
+note "scenario 12/14: OOM is classified failed"
+auth_curl --fail --request POST "$OPERATOR_URL/control/oom" >/dev/null
 wait_status failed 20
 "$FERN_BIN" status -name "$NAME" | grep -q $'\tfailed\t.*oom=true' || fail "reproducible cgroup OOM was not classified failed"
 stop_fern
 run_transcript "$FERN_BIN" down -name "$NAME"
 start_fern
 
-note "scenario 12/13: SIGTERM shuts Fern down without host-process/listener leaks"
+note "scenario 13/14: SIGTERM shuts Fern down without host-process/listener leaks"
 stop_fern
-if curl --silent --max-time 1 "$PROXY_URL$HEALTH_PATH" >/dev/null 2>&1; then fail "proxy listener remained after SIGTERM"; fi
+if curl --silent --max-time 1 "$REMOTE_URL$HEALTH_PATH" >/dev/null 2>&1 || curl --silent --max-time 1 "$OPERATOR_URL$HEALTH_PATH" >/dev/null 2>&1; then fail "a proxy listener remained after SIGTERM"; fi
 [[ -z "$FERN_PID" ]] || fail "Fern process remained after SIGTERM"
 docker stop "$NAME" >/dev/null
 wait_status paused 5
@@ -474,14 +584,14 @@ wait_status paused 5
 sleep 1
 start_fern_control
 wait_status paused 10
-auth_curl --fail "$PROXY_URL$HEALTH_PATH" >/dev/null
+auth_curl --fail "$OPERATOR_URL$HEALTH_PATH" >/dev/null
 wait_status running 10
 
-note "scenario 13/13: externally paused compute follows stale-endpoint recovery path"
+note "scenario 14/14: externally paused compute follows stale-endpoint recovery path"
 docker pause "$NAME" >/dev/null
-paused_code=$(http_code "$ARTIFACTS/paused-endpoint.body" --user "$USERNAME:$PASSWORD" --max-time 3 "$PROXY_URL$HEALTH_PATH" || true)
+paused_code=$(http_code "$ARTIFACTS/paused-endpoint.body" --user "$USERNAME:$PASSWORD" --max-time 3 "$OPERATOR_URL$HEALTH_PATH" || true)
 [[ "$paused_code" == 502 || "$paused_code" == 503 || "$paused_code" == 000 ]] || fail "paused stale endpoint did not fail safely (HTTP $paused_code)"
-recovered_code=$(http_code "$ARTIFACTS/paused-recovery.body" --user "$USERNAME:$PASSWORD" --max-time 70 "$PROXY_URL$HEALTH_PATH" || true)
+recovered_code=$(http_code "$ARTIFACTS/paused-recovery.body" --user "$USERNAME:$PASSWORD" --max-time 70 "$OPERATOR_URL$HEALTH_PATH" || true)
 [[ "$recovered_code" == 200 ]] || fail "paused compute did not recover (HTTP $recovered_code)"
 wait_status running
 
@@ -489,4 +599,4 @@ note "capturing active and stopped resource measurements"
 docker stats --no-stream "$NAME" | redact >"$ARTIFACTS/docker-stats-active.txt"
 stop_by_idle
 docker stats --no-stream "$NAME" | redact >"$ARTIFACTS/docker-stats-stopped.txt"
-note "all 13 deterministic scenarios passed; provider-backed scenarios NOT RUN by design"
+note "all 14 deterministic scenarios passed; provider-backed scenarios NOT RUN by design"

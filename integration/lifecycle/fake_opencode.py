@@ -81,7 +81,7 @@ class Handler(BaseHTTPRequestHandler):
             with statuses_lock:
                 active = {key: {"type": "running"} for key, value in statuses.items() if value["type"] != "idle"}
             self.json_response({"data": active})
-        elif parsed.path in ("/api/pty", "/api/permission/request", "/api/question/request"):
+        elif parsed.path in ("/api/shell", "/api/pty", "/api/permission/request", "/api/form/request", "/api/question/request"):
             self.json_response({"data": []})
         elif parsed.path == "/control/identity":
             self.json_response({
@@ -90,6 +90,26 @@ class Handler(BaseHTTPRequestHandler):
                 "last_event_connected_ns": last_event_connected_ns,
                 "now_ns": time.time_ns(),
             })
+        elif parsed.path == "/control/forwarding":
+            proto = self.headers.get("X-Forwarded-Proto", "")
+            host = self.headers.get("X-Forwarded-Host", "")
+            value = {
+                "host": self.headers.get("Host", ""),
+                "forwarded": self.headers.get("Forwarded", ""),
+                "x_forwarded_for": self.headers.get("X-Forwarded-For", ""),
+                "x_forwarded_host": host,
+                "x_forwarded_proto": proto,
+                "x_forwarded_port": self.headers.get("X-Forwarded-Port", ""),
+                "x_forwarded_extension": self.headers.get("X-Forwarded-Evil", ""),
+            }
+            body = json.dumps(value, separators=(",", ":")).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Location", f"{proto}://{host}/generated-location")
+            self.send_header("Link", f'<{proto}://{host}/generated-link>; rel="next"')
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif parsed.path == "/control/persist":
             try:
                 with open(STATE_PATH, "r", encoding="utf-8") as source:

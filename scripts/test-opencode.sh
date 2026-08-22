@@ -50,7 +50,7 @@ else
   [[ -x "$FERN_BIN" ]] || { echo "FERN_BIN is not executable: $FERN_BIN" >&2; exit 1; }
 fi
 
-PROXY_PORT=$(python3 - <<'PY'
+REMOTE_PORT=$(python3 - <<'PY'
 import socket
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
@@ -58,7 +58,17 @@ print(s.getsockname()[1])
 s.close()
 PY
 )
-PROXY_URL="http://127.0.0.1:$PROXY_PORT"
+OPERATOR_PORT=$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)
+REMOTE_URL="http://127.0.0.1:$REMOTE_PORT"
+OPERATOR_URL="http://127.0.0.1:$OPERATOR_PORT"
+CONTROL_PASSWORD="control-$PASSWORD"
 cat >"$CONFIG" <<EOF
 workspace:
   name: $NAME
@@ -68,18 +78,20 @@ workspace:
 idle:
   after: 1h
 proxy:
-  listen: 127.0.0.1:$PROXY_PORT
+  listen: 127.0.0.1:$REMOTE_PORT
+  operatorListen: 127.0.0.1:$OPERATOR_PORT
+  remoteOrigin: https://opencode-smoke.invalid
 control:
   password: \${FERN_CONTROL_PASSWORD}
 EOF
-printf 'OPENCODE_PASSWORD=%s\nFERN_CONTROL_PASSWORD=%s\n' "$PASSWORD" "control-$PASSWORD" >"$ENV_FILE"
+printf 'OPENCODE_PASSWORD=%s\nFERN_CONTROL_PASSWORD=%s\n' "$PASSWORD" "$CONTROL_PASSWORD" >"$ENV_FILE"
 chmod 0600 "$ENV_FILE"
 
 start_fern() {
   "$FERN_BIN" up -config "$CONFIG" -env-file "$ENV_FILE" >"$RUN_ROOT/fern.log" 2>&1 &
   FERN_PID=$!
   for _ in {1..350}; do
-    if curl -fsS -u "opencode:$PASSWORD" "$PROXY_URL/api/health" >"$RUN_ROOT/health.json" 2>/dev/null; then
+    if curl -fsS -u "opencode:$PASSWORD" "$OPERATOR_URL/api/health" >"$RUN_ROOT/health.json" 2>/dev/null; then
       return
     fi
     kill -0 "$FERN_PID" 2>/dev/null || { cat "$RUN_ROOT/fern.log" >&2; return 1; }
@@ -98,13 +110,23 @@ stop_fern() {
 start_fern
 initial_container_id=$(docker inspect --format '{{.Id}}' "$NAME")
 jq -e '.healthy == true and .version == "0.0.0-next-17444"' "$RUN_ROOT/health.json" >/dev/null
-[[ $(curl -sS -o /dev/null -w '%{http_code}' "$PROXY_URL/api/health") == 401 ]]
+[[ $(curl -sS -o /dev/null -w '%{http_code}' "$OPERATOR_URL/api/health") == 401 ]]
+[[ $(curl -sS -o /dev/null -w '%{http_code}' -u "opencode:$PASSWORD" "$REMOTE_URL/api/health") == 401 ]]
+[[ $(curl -sS -o /dev/null -w '%{http_code}' -u "fern:$CONTROL_PASSWORD" "$REMOTE_URL/api/health") == 401 ]]
+
+pair_code=$(curl -fsS -u "fern:$CONTROL_PASSWORD" -X POST "$OPERATOR_URL/fern/pair/new" | jq -er .code)
+curl -fsS "$REMOTE_URL/fern/pair?code=$pair_code" | grep -q 'Pair this phone?'
+curl -sS -D "$RUN_ROOT/pair.headers" -o /dev/null -H 'Content-Type: application/x-www-form-urlencoded' \
+  --data-urlencode "code=$pair_code" --data-urlencode 'name=OpenCode smoke' "$REMOTE_URL/fern/pair"
+device_cookie=$(sed -nE 's/^Set-Cookie: fern_device=([^;]+).*/\1/p' "$RUN_ROOT/pair.headers" | tr -d '\r')
+[[ -n "$device_cookie" ]]
+curl -fsS -H "Cookie: fern_device=$device_cookie" "$REMOTE_URL/" >/dev/null
 
 # Exercise the authenticated browser entry point, not just JSON APIs.
-curl -fsS -u "opencode:$PASSWORD" -D "$RUN_ROOT/root.headers" -o "$RUN_ROOT/root.html" "$PROXY_URL/"
+curl -fsS -u "opencode:$PASSWORD" -D "$RUN_ROOT/root.headers" -o "$RUN_ROOT/root.html" "$OPERATOR_URL/"
 grep -qi '^content-type: *text/html' "$RUN_ROOT/root.headers"
 grep -Eqi '<!doctype html|<html[ >]' "$RUN_ROOT/root.html"
-[[ $(curl -sS -o /dev/null -w '%{http_code}' "$PROXY_URL/") == 401 ]]
+[[ $(curl -sS -o /dev/null -w '%{http_code}' "$OPERATOR_URL/") == 401 ]]
 
 asset=$(python3 - "$RUN_ROOT/root.html" <<'PY'
 import re
@@ -119,29 +141,29 @@ PY
 )
 if [[ -n "$asset" ]]; then
   [[ "$asset" == /* ]] || asset="/${asset#./}"
-  curl -fsS -u "opencode:$PASSWORD" -o "$RUN_ROOT/ui-asset" "$PROXY_URL$asset"
+  curl -fsS -u "opencode:$PASSWORD" -o "$RUN_ROOT/ui-asset" "$OPERATOR_URL$asset"
   [[ -s "$RUN_ROOT/ui-asset" ]]
 else
   grep -Eqi '<(script|style)([ >])[^<]+' "$RUN_ROOT/root.html"
 fi
 
 curl -fsS -u "opencode:$PASSWORD" -D "$RUN_ROOT/spa.headers" \
-  -o "$RUN_ROOT/spa.html" "$PROXY_URL/fern-smoke/direct-navigation"
+  -o "$RUN_ROOT/spa.html" "$OPERATOR_URL/fern-smoke/direct-navigation"
 grep -qi '^content-type: *text/html' "$RUN_ROOT/spa.headers"
 grep -Eqi '<!doctype html|<html[ >]' "$RUN_ROOT/spa.html"
 
 set +e
-curl -sS -N --max-time 2 -u "opencode:$PASSWORD" "$PROXY_URL/api/event" >"$RUN_ROOT/events.txt"
+curl -sS -N --max-time 2 -u "opencode:$PASSWORD" "$OPERATOR_URL/api/event" >"$RUN_ROOT/events.txt"
 event_status=$?
 set -e
 [[ "$event_status" == 28 ]]
 grep -q '"type":"server.connected"' "$RUN_ROOT/events.txt"
 
-session=$(curl -fsS -u "opencode:$PASSWORD" -H 'Content-Type: application/json' -d '{}' "$PROXY_URL/api/session")
+session=$(curl -fsS -u "opencode:$PASSWORD" -H 'Content-Type: application/json' -d '{}' "$OPERATOR_URL/api/session")
 session_id=$(jq -er '.data.id' <<<"$session")
 curl -fsS -u "opencode:$PASSWORD" -H 'Content-Type: application/json' \
-  -d '{"command":"sleep 3","timeout":0,"metadata":{}}' "$PROXY_URL/api/shell" >/dev/null
-[[ $(curl -fsS -u "opencode:$PASSWORD" "$PROXY_URL/api/shell" | jq '.data | length') == 1 ]]
+  -d '{"command":"sleep 3","timeout":0,"metadata":{}}' "$OPERATOR_URL/api/shell" >/dev/null
+[[ $(curl -fsS -u "opencode:$PASSWORD" "$OPERATOR_URL/api/shell" | jq '.data | length') == 1 ]]
 docker exec "$NAME" test -s /home/user/.local/share/opencode/opencode.db
 docker exec "$NAME" sh -c 'mkdir -p "$XDG_CONFIG_HOME/opencode" && printf persisted >"$XDG_CONFIG_HOME/opencode/fern-smoke"'
 
@@ -159,7 +181,7 @@ start_fern
 [[ $(docker inspect --format '{{.Id}}' "$NAME") != "$initial_container_id" ]]
 docker exec "$NAME" test -s /home/user/.local/share/opencode/opencode.db
 docker exec "$NAME" sh -c 'test "$(cat "$XDG_CONFIG_HOME/opencode/fern-smoke")" = persisted'
-curl -fsS -u "opencode:$PASSWORD" "$PROXY_URL/api/session/$session_id" | jq -e ".data.id == \"$session_id\"" >/dev/null
+curl -fsS -u "opencode:$PASSWORD" "$OPERATOR_URL/api/session/$session_id" | jq -e ".data.id == \"$session_id\"" >/dev/null
 stop_fern
 
 echo "OpenCode smoke test passed: web UI, SPA fallback, auth, health, SSE, shell activity, recreation, session persistence, and config persistence"
