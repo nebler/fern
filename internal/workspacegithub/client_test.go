@@ -91,3 +91,13 @@ func TestOutputAndInputBounds(t *testing.T) {
 		t.Fatal("New accepted unsupported hostname")
 	}
 }
+
+func TestExecutorErrorsDoNotLeakCredentials(t *testing.T) {
+	client, _ := New(&fakeExecutor{err: errors.New("gho_secret-value")}, "github.com")
+	if _, err := client.Status(context.Background()); !errors.Is(err, ErrUnavailable) || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("status error = %v", err)
+	}
+	if _, err := client.Repository(context.Background(), "owner/repository"); !errors.Is(err, ErrRepository) || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("repository error = %v", err)
+	}
+}
