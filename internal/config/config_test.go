@@ -153,7 +153,7 @@ func TestLoadGitHubRepositoryBindingIsOptionalStrictAndRetained(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
 	path := filepath.Join(directory, "fern.yaml")
-	valid := "workspace:\n  repo: .\n  github:\n    repository:\n      id: 987654321\n      fullName: Owner-Name/repo.name\n"
+	valid := "workspace:\n  repo: .\n  github:\n    mode: workspace-gh\n    hostname: github.com\n    repository:\n      id: 987654321\n      fullName: Owner-Name/repo.name\n"
 	if err := os.WriteFile(path, []byte(valid), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -625,6 +625,8 @@ func TestLoadCompleteTaskPolicy(t *testing.T) {
   env:
     OPENCODE_PASSWORD: opencode-secret
   github:
+    mode: github-app-broker
+    hostname: github.com
     installationId: 123456
     repository:
       id: 987654321
@@ -928,7 +930,7 @@ func TestTaskConfigurationIsOptionalAndPublicationCompatible(t *testing.T) {
 	}
 	directory := t.TempDir()
 	path := filepath.Join(directory, "fern.yaml")
-	data := "workspace:\n  repo: .\n  env:\n    OPENCODE_PASSWORD: opencode-secret\n  github:\n    repository:\n      id: 123\n      fullName: owner/repository\ncontrol:\n  password: control-secret-control-secret-1234\n"
+	data := "workspace:\n  repo: .\n  env:\n    OPENCODE_PASSWORD: opencode-secret\n  github:\n    mode: workspace-gh\n    hostname: github.com\n    repository:\n      id: 123\n      fullName: owner/repository\ncontrol:\n  password: control-secret-control-secret-1234\n"
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -951,7 +953,7 @@ func TestLoadRejectsInvalidOptionalInstallationID(t *testing.T) {
 		t.Run(installationID, func(t *testing.T) {
 			t.Parallel()
 			path := filepath.Join(t.TempDir(), "fern.yaml")
-			data := "workspace:\n  repo: .\n  github:\n    installationId: " + installationID + "\n    repository:\n      id: 123\n      fullName: owner/repository\n"
+			data := "workspace:\n  repo: .\n  github:\n    mode: github-app-broker\n    hostname: github.com\n    installationId: " + installationID + "\n    repository:\n      id: 123\n      fullName: owner/repository\n"
 			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -971,6 +973,8 @@ func TestTaskPolicyDoesNotExpandEnvironmentOrCaptureSecrets(t *testing.T) {
   env:
     OPENCODE_PASSWORD: ${OPENCODE_PASSWORD}
   github:
+    mode: github-app-broker
+    hostname: github.com
     installationId: 1
     repository:
       id: 2
@@ -1039,6 +1043,8 @@ func validTaskConfig(t *testing.T) Config {
 	value.Workspace.Env["OPENCODE_PASSWORD"] = "opencode-secret"
 	value.Control.Password = "control-secret-control-secret-1234"
 	value.Workspace.GitHub = &WorkspaceGitHub{
+		Mode:           GitHubModeGitHubAppBroker,
+		Hostname:       "github.com",
 		InstallationID: 123,
 		Repository:     GitHubRepository{ID: 456, FullName: "owner/repository"},
 	}
@@ -1048,4 +1054,41 @@ func validTaskConfig(t *testing.T) Config {
 		Budget: TaskBudget{MaxTurns: 100},
 	}
 	return value
+}
+
+func TestGitHubAuthorityModesAreExplicitAndClosed(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name    string
+		github  string
+		wantErr bool
+	}{
+		{name: "workspace gh", github: "mode: workspace-gh\n    hostname: github.com\n", wantErr: false},
+		{name: "broker", github: "mode: github-app-broker\n    hostname: github.com\n    installationId: 7\n", wantErr: false},
+		{name: "implicit", github: "hostname: github.com\n", wantErr: true},
+		{name: "workspace gh installation", github: "mode: workspace-gh\n    hostname: github.com\n    installationId: 7\n", wantErr: true},
+		{name: "broker missing installation", github: "mode: github-app-broker\n    hostname: github.com\n", wantErr: true},
+		{name: "other host", github: "mode: workspace-gh\n    hostname: example.com\n", wantErr: true},
+		{name: "unknown mode", github: "mode: other\n    hostname: github.com\n", wantErr: true},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			path := filepath.Join(t.TempDir(), "fern.yaml")
+			data := "workspace:\n  repo: .\n  github:\n    " + test.github + "    repository:\n      id: 123\n      fullName: owner/repository\n"
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			loaded, err := Load(path, filepath.Dir(path), true, Overrides{})
+			if test.wantErr {
+				if err == nil {
+					t.Fatalf("Load accepted %s: %+v", test.name, loaded.Workspace.GitHub)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
 }

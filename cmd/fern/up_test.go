@@ -20,6 +20,8 @@ func TestGitHubAppBindingDoesNotResolveLegacyGitHubCLI(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	workspace := config.Default(t.TempDir()).Workspace
 	workspace.GitHub = &config.WorkspaceGitHub{
+		Mode:           config.GitHubModeGitHubAppBroker,
+		Hostname:       "github.com",
 		InstallationID: 7,
 		Repository:     config.GitHubRepository{ID: 123, FullName: "owner/repo"},
 	}

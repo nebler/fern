@@ -180,29 +180,30 @@ retains OpenCode state. `status --json` emits stable machine-readable state;
 inspect its `state` field rather than treating a stopped or failed workspace as
 a command invocation failure.
 
-Draft-PR publication is disabled by default, and `fern up` does not resolve
-`gh` while it is disabled. To enable the host-credential prototype, configure
-both immutable values under the workspace; the ID is GitHub's positive numeric
-repository ID and the full name is exact-case canonical `owner/repository`:
+Workspace GitHub access is disabled by default. To enable Amp-style `gh`, bind
+the workspace explicitly; the ID is GitHub's positive numeric repository ID and
+the full name is exact-case canonical `owner/repository`:
 
 ```yaml
 workspace:
   github:
+    mode: workspace-gh
+    hostname: github.com
     repository:
       id: 123456789
       fullName: owner/repository
 ```
 
-Durable tasks remain disabled unless a complete execution policy and the
-repository's positive GitHub App installation ID are also configured. Provider
-and model IDs are always explicit:
+Durable tasks remain disabled unless a complete execution policy and explicit
+GitHub authority are configured. Provider and model IDs are always explicit:
 
 ```yaml
 workspace:
   env:
     OPENCODE_PASSWORD: ${OPENCODE_PASSWORD}
   github:
-    installationId: 987654321
+    mode: workspace-gh
+    hostname: github.com
     repository:
       id: 123456789
       fullName: owner/repository

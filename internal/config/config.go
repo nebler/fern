@@ -26,7 +26,16 @@ type GitHubRepository struct {
 	FullName string
 }
 
+type GitHubMode string
+
+const (
+	GitHubModeWorkspaceGH     GitHubMode = "workspace-gh"
+	GitHubModeGitHubAppBroker GitHubMode = "github-app-broker"
+)
+
 type WorkspaceGitHub struct {
+	Mode           GitHubMode
+	Hostname       string
 	InstallationID int64
 	Repository     GitHubRepository
 }
@@ -104,6 +113,8 @@ type fileWorkspace struct {
 	Memory yaml.Node `yaml:"memory"`
 	Env    yaml.Node `yaml:"env"`
 	GitHub *struct {
+		Mode           yaml.Node `yaml:"mode"`
+		Hostname       yaml.Node `yaml:"hostname"`
 		InstallationID yaml.Node `yaml:"installationId"`
 		Repository     *struct {
 			ID       yaml.Node `yaml:"id"`
@@ -494,14 +505,34 @@ func applyFileWorkspace(workspace *Workspace, file fileWorkspace, overrides Over
 		if err := ValidateGitHubRepositoryFullName(fullName); err != nil {
 			return fmt.Errorf("github.repository.fullName: %w", err)
 		}
+		modeText, err := decodeString(file.GitHub.Mode)
+		if err != nil {
+			return fmt.Errorf("github.mode: %w", err)
+		}
+		mode := GitHubMode(modeText)
+		if mode != GitHubModeWorkspaceGH && mode != GitHubModeGitHubAppBroker {
+			return errors.New("github.mode must be workspace-gh or github-app-broker")
+		}
+		hostname := "github.com"
+		if file.GitHub.Hostname.Kind != 0 {
+			hostname, err = decodeString(file.GitHub.Hostname)
+			if err != nil {
+				return fmt.Errorf("github.hostname: %w", err)
+			}
+		}
+		if hostname != "github.com" {
+			return errors.New("github.hostname must be github.com")
+		}
 		var installationID int64
-		if file.GitHub.InstallationID.Kind != 0 {
+		if mode == GitHubModeGitHubAppBroker {
 			installationID, err = decodeCanonicalPositiveID(file.GitHub.InstallationID)
 			if err != nil {
 				return fmt.Errorf("github.installationId: %w", err)
 			}
+		} else if file.GitHub.InstallationID.Kind != 0 {
+			return errors.New("github.installationId is forbidden in workspace-gh mode")
 		}
-		workspace.GitHub = &WorkspaceGitHub{InstallationID: installationID, Repository: GitHubRepository{ID: id, FullName: fullName}}
+		workspace.GitHub = &WorkspaceGitHub{Mode: mode, Hostname: hostname, InstallationID: installationID, Repository: GitHubRepository{ID: id, FullName: fullName}}
 	}
 	return nil
 }
@@ -741,8 +772,8 @@ func validateTasks(config Config) error {
 	if config.Workspace.GitHub == nil {
 		return errors.New("workspace.github is required when tasks are configured")
 	}
-	if config.Workspace.GitHub.InstallationID <= 0 {
-		return errors.New("workspace.github.installationId must be positive when tasks are configured")
+	if config.Workspace.GitHub.Mode == GitHubModeGitHubAppBroker && config.Workspace.GitHub.InstallationID <= 0 {
+		return errors.New("workspace.github.installationId must be positive in github-app-broker mode")
 	}
 	if !validTaskText(config.Tasks.Agent, 1, 128) {
 		return errors.New("tasks.agent must be 1-128 bytes of valid text")
@@ -953,6 +984,19 @@ func ValidateWorkspace(config Config) error {
 		return err
 	}
 	if config.Workspace.GitHub != nil {
+		github := config.Workspace.GitHub
+		if github.Mode != GitHubModeWorkspaceGH && github.Mode != GitHubModeGitHubAppBroker {
+			return errors.New("workspace GitHub mode must be workspace-gh or github-app-broker")
+		}
+		if github.Hostname != "github.com" {
+			return errors.New("workspace GitHub hostname must be github.com")
+		}
+		if github.Mode == GitHubModeWorkspaceGH && github.InstallationID != 0 {
+			return errors.New("workspace GitHub installation ID is forbidden in workspace-gh mode")
+		}
+		if github.Mode == GitHubModeGitHubAppBroker && github.InstallationID <= 0 {
+			return errors.New("workspace GitHub installation ID must be positive in github-app-broker mode")
+		}
 		if config.Workspace.GitHub.Repository.ID <= 0 {
 			return errors.New("workspace GitHub repository ID must be positive")
 		}

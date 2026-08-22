@@ -4,16 +4,17 @@ workspace:
   repo: .
   memory: 8Gi
   env: {}
-  # Draft-PR publication is disabled until both immutable values are set.
+  # Workspace GitHub access is disabled unless this explicit binding is set.
   # github:
-  #   # installationId is required only when durable tasks are enabled.
-  #   # installationId: 987654321
+  #   mode: workspace-gh
+  #   hostname: github.com
   #   repository:
   #     id: 123456789
   #     fullName: owner/repository
-# Durable tasks are disabled unless this complete policy and the GitHub App
-# installation ID above are explicitly configured. With remoteOrigin set, first
-# create host credentials from the operator-only /fern/control onboarding link.
+# Durable tasks are disabled unless this complete policy and GitHub binding are
+# explicitly configured. `workspace-gh` uses persistent authentication inside
+# the workspace. `github-app-broker` additionally requires installationId and
+# host credentials created from the operator-only onboarding link.
 # tasks:
 #   agent: build
 #   model:

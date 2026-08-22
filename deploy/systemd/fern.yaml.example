@@ -6,17 +6,17 @@ workspace:
   memory: 8Gi
   env:
     OPENCODE_PASSWORD: ${OPENCODE_PASSWORD}
-  # Publication remains disabled unless this exact numeric ID and case-sensitive
-  # canonical full name are configured together.
+  # Workspace GitHub access remains disabled unless this explicit authority and
+  # case-sensitive repository identity are configured together.
   # github:
-  #   # installationId is required only when durable tasks are enabled.
-  #   # installationId: 987654321
+  #   mode: workspace-gh
+  #   hostname: github.com
   #   repository:
   #     id: 123456789
   #     fullName: owner/repository
-# Durable tasks are disabled unless this complete policy and the GitHub App
-# installation ID above are explicitly configured. First-time App credentials
-# are created from the operator-only /fern/control onboarding link.
+# Durable tasks are disabled unless this complete policy and GitHub binding are
+# explicitly configured. `github-app-broker` mode additionally requires an
+# installationId and operator-only App onboarding.
 # tasks:
 #   agent: build
 #   model:
