@@ -62,6 +62,7 @@ var commandExamples = map[string]string{
 	"status":         "fern status --name demo --json",
 	"logs":           "fern logs --name demo --follow=false",
 	"debug events":   "fern debug events --name demo",
+	"debug wake":     "fern debug wake --name demo",
 }
 
 func parseFlags(flags *flag.FlagSet, args []string) error {
@@ -99,6 +100,7 @@ Commands:
   logs          Stream workspace container logs
   down          Remove workspace compute while retaining session data
   debug events  Stream the backend activity events used by Fern
+  debug wake    Print the phase waterfall for one workspace wake
   version       Print Fern version information
 
 Examples:
@@ -118,13 +120,13 @@ func runHelp(args []string, dispatch func([]string) error) error {
 	}
 	if len(args) == 1 && (args[0] == "debug" || args[0] == "github") {
 		if args[0] == "debug" {
-			fmt.Fprintln(os.Stdout, "Usage:\n  fern debug events [flags]")
+			fmt.Fprintln(os.Stdout, "Usage:\n  fern debug events [flags]\n  fern debug wake [flags]")
 		} else {
 			fmt.Fprintln(os.Stdout, "Usage:\n  fern github publish [flags]")
 		}
 		return nil
 	}
-	if len(args) > 2 || len(args) == 2 && !((args[0] == "debug" && args[1] == "events") || (args[0] == "github" && args[1] == "publish")) {
+	if len(args) > 2 || len(args) == 2 && !((args[0] == "debug" && (args[1] == "events" || args[1] == "wake")) || (args[0] == "github" && args[1] == "publish")) {
 		return invocationError{message: "usage: fern help [command]"}
 	}
 	helpArgs := append([]string(nil), args...)
@@ -144,7 +146,7 @@ func unknownCommand(args []string) error {
 }
 
 func suggestCommand(input string) string {
-	commands := []string{"init", "doctor", "github publish", "up", "attach", "down", "status", "logs", "version", "debug events"}
+	commands := []string{"init", "doctor", "github publish", "up", "attach", "down", "status", "logs", "version", "debug events", "debug wake"}
 	best, distance := "", 3
 	for _, command := range commands {
 		if current := editDistance(input, command); current < distance {

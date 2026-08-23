@@ -3,17 +3,21 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/watch"
+	"github.com/nebler/fern/internal/workspace"
 )
 
 func runDown(args []string, log *slog.Logger) error {
@@ -152,7 +156,100 @@ func runEvents(args []string, log *slog.Logger) error {
 	}
 }
 
+// runDebugWake traces one workspace wake end to end through the running
+// supervisor's operator listener: admission lease, lifecycle token, Docker
+// mutation, health probe, and activity-observer attach. It requires the
+// operator control credential and never talks to Docker directly, so it always
+// measures the same path real client traffic takes.
+func runDebugWake(args []string, log *slog.Logger) error {
+	fs, nameFlag, configPath := workspaceFlags("debug wake")
+	envPath := fs.String("env-file", "", "protected environment file")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	var values map[string]string
+	if *envPath != "" {
+		var err error
+		values, err = readEnvFile(*envPath)
+		if err != nil {
+			return err
+		}
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+	cfg, err := config.LoadWithEnvironment(*configPath, cwd, true, config.Overrides{
+		Name: optionalFlag(fs, "name", nameFlag),
+	}, values)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := commandContext()
+	defer cancel()
+	wakeCtx, cancelWake := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancelWake()
+
+	endpoint := "http://" + cfg.OperatorListen + "/fern/api/v1/debug/wake-trace"
+	request, err := http.NewRequestWithContext(wakeCtx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return err
+	}
+	request.SetBasicAuth("fern", cfg.Control.Password)
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("reach the operator listener at %s: %w (is 'fern up' running?)", cfg.OperatorListen, err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	if err != nil {
+		return fmt.Errorf("read wake trace response: %w", err)
+	}
+	switch response.StatusCode {
+	case http.StatusOK:
+	case http.StatusUnauthorized:
+		return errors.New("operator listener rejected the fern control credential")
+	case http.StatusServiceUnavailable:
+		return errors.New("workspace wake failed; see the supervisor logs for the classified reason")
+	default:
+		return fmt.Errorf("wake trace returned %s: %s", response.Status, strings.TrimSpace(string(body)))
+	}
+	var trace workspace.WakeTrace
+	if err := json.Unmarshal(body, &trace); err != nil {
+		return fmt.Errorf("decode wake trace response: %w", err)
+	}
+	printWakeWaterfall(os.Stdout, trace)
+	log.Debug("wake trace completed", "workspace", trace.Workspace, "total_ms", trace.TotalMillis)
+	return nil
+}
+
+func printWakeWaterfall(output io.Writer, trace workspace.WakeTrace) {
+	fmt.Fprintf(output, "wake trace (%s)  total %dms  started %s\n",
+		trace.Workspace, trace.TotalMillis, trace.StartedAt.Format("15:04:05.000"))
+	widestName, widestOffset, longest := 0, 0, int64(1)
+	for _, span := range trace.Spans {
+		if len(span.Name) > widestName {
+			widestName = len(span.Name)
+		}
+		if digits := len(fmt.Sprint(span.OffsetMs)); digits > widestOffset {
+			widestOffset = digits
+		}
+		if span.Millis > longest {
+			longest = span.Millis
+		}
+	}
+	for _, span := range trace.Spans {
+		bars := int(float64(span.Millis) / float64(longest) * 24)
+		if bars == 0 {
+			bars = 1
+		}
+		fmt.Fprintf(output, "  %-*s +%*dms %6dms %s\n",
+			widestName, span.Name, widestOffset, span.OffsetMs, span.Millis, strings.Repeat("█", bars))
+	}
+}
+
 func runLogs(args []string, log *slog.Logger) error {
+
 	fs, nameFlag, configPath := workspaceFlags("logs")
 	follow := fs.Bool("follow", true, "follow log output")
 	if err := parseFlags(fs, args); err != nil {

@@ -59,11 +59,15 @@ func run(args []string, log *slog.Logger) error {
 		err = runVersion(args[1:], os.Stdout)
 	case "debug":
 		if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
-			fmt.Fprintln(os.Stdout, "Inspect Fern's backend activity inputs.\n\nUsage:\n  fern debug events [flags]")
+			fmt.Fprintln(os.Stdout, "Inspect Fern's backend activity inputs.\n\nUsage:\n  fern debug events [flags]\n  fern debug wake [flags]")
 			return nil
 		}
 		if len(args) > 1 && args[1] == "events" {
 			err = runEvents(args[2:], log)
+			break
+		}
+		if len(args) > 1 && args[1] == "wake" {
+			err = runDebugWake(args[2:], log)
 			break
 		}
 		return unknownCommand(args)
