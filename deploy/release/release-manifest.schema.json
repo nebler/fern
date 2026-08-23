@@ -51,12 +51,16 @@
     "upgrade_rollback": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["transaction_manifest", "support_status", "sqlite_backup", "application_secrets_backup"],
+      "required": ["transaction_manifest_schema", "transaction_example", "transaction_receipt", "host_utility", "support_status", "activation_model", "credential_policy", "volume_export_mode"],
       "properties": {
-        "transaction_manifest": {"type": "string"},
-        "support_status": {"const": "not-implemented"},
-        "sqlite_backup": {"const": "placeholder-only-not-implemented"},
-        "application_secrets_backup": {"const": "placeholder-only-not-implemented"}
+        "transaction_manifest_schema": {"const": "deploy/release/transaction-manifest.schema.json"},
+        "transaction_example": {"const": "deploy/release/transaction-manifest.example.json"},
+        "transaction_receipt": {"const": "generated-at-restore-target/TRANSACTION-MANIFEST.json"},
+        "host_utility": {"const": "scripts/fern-host-backup.py"},
+        "support_status": {"const": "deterministic-host-foundation"},
+        "activation_model": {"const": "staged-current-previous"},
+        "credential_policy": {"const": "exclude-and-reauthorize-or-external-recipient"},
+        "volume_export_mode": {"const": "explicit-pre-exported-directory"}
       }
     }
   },

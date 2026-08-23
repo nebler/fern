@@ -70,13 +70,16 @@ for arch in amd64 arm64; do
 		go build -trimpath -buildvcs=false -ldflags "$ldflags" -o "$staging/$name" ./cmd/fern
 done
 
-mkdir -p "$staging/deploy/systemd" "$staging/deploy/release"
+mkdir -p "$staging/deploy/systemd" "$staging/deploy/release" "$staging/scripts"
 cp deploy/systemd/fern.service deploy/systemd/fern.env.example deploy/systemd/fern.yaml.example \
 	"$staging/deploy/systemd/"
 cp deploy/release/release-manifest.schema.json \
+	deploy/release/backup-manifest.schema.json \
 	deploy/release/transaction-manifest.schema.json \
 	deploy/release/transaction-manifest.example.json \
 	"$staging/deploy/release/"
+cp scripts/fern-host-backup.py "$staging/scripts/"
+chmod 0755 "$staging/scripts/fern-host-backup.py"
 
 amd64_sha=$(shasum -a 256 "$staging/fern-${version}-linux-amd64" | awk '{print $1}')
 arm64_sha=$(shasum -a 256 "$staging/fern-${version}-linux-arm64" | awk '{print $1}')
@@ -84,8 +87,10 @@ service_sha=$(shasum -a 256 "$staging/deploy/systemd/fern.service" | awk '{print
 env_sha=$(shasum -a 256 "$staging/deploy/systemd/fern.env.example" | awk '{print $1}')
 config_sha=$(shasum -a 256 "$staging/deploy/systemd/fern.yaml.example" | awk '{print $1}')
 release_schema_sha=$(shasum -a 256 "$staging/deploy/release/release-manifest.schema.json" | awk '{print $1}')
+backup_schema_sha=$(shasum -a 256 "$staging/deploy/release/backup-manifest.schema.json" | awk '{print $1}')
 transaction_schema_sha=$(shasum -a 256 "$staging/deploy/release/transaction-manifest.schema.json" | awk '{print $1}')
 transaction_example_sha=$(shasum -a 256 "$staging/deploy/release/transaction-manifest.example.json" | awk '{print $1}')
+backup_utility_sha=$(shasum -a 256 "$staging/scripts/fern-host-backup.py" | awk '{print $1}')
 go_version=$(go env GOVERSION)
 
 cat >"$staging/RELEASE-MANIFEST.json" <<EOF
@@ -116,14 +121,20 @@ cat >"$staging/RELEASE-MANIFEST.json" <<EOF
     {"path": "deploy/systemd/fern.service", "sha256": "$service_sha"},
     {"path": "deploy/systemd/fern.yaml.example", "sha256": "$config_sha"},
     {"path": "deploy/release/release-manifest.schema.json", "sha256": "$release_schema_sha"},
+    {"path": "deploy/release/backup-manifest.schema.json", "sha256": "$backup_schema_sha"},
     {"path": "deploy/release/transaction-manifest.example.json", "sha256": "$transaction_example_sha"},
-    {"path": "deploy/release/transaction-manifest.schema.json", "sha256": "$transaction_schema_sha"}
+    {"path": "deploy/release/transaction-manifest.schema.json", "sha256": "$transaction_schema_sha"},
+    {"path": "scripts/fern-host-backup.py", "sha256": "$backup_utility_sha"}
   ],
   "upgrade_rollback": {
-    "transaction_manifest": "deploy/release/transaction-manifest.example.json",
-    "support_status": "not-implemented",
-    "sqlite_backup": "placeholder-only-not-implemented",
-    "application_secrets_backup": "placeholder-only-not-implemented"
+    "transaction_manifest_schema": "deploy/release/transaction-manifest.schema.json",
+    "transaction_example": "deploy/release/transaction-manifest.example.json",
+    "transaction_receipt": "generated-at-restore-target/TRANSACTION-MANIFEST.json",
+    "host_utility": "scripts/fern-host-backup.py",
+    "support_status": "deterministic-host-foundation",
+    "activation_model": "staged-current-previous",
+    "credential_policy": "exclude-and-reauthorize-or-external-recipient",
+    "volume_export_mode": "explicit-pre-exported-directory"
   }
 }
 EOF
@@ -138,6 +149,11 @@ EOF
 	sed 's#  #  dist/#' SHA256SUMS.local > SHA256SUMS
 	rm SHA256SUMS.local
 )
+
+if [ "$(git rev-parse --verify HEAD)" != "$commit" ] || [ -n "$(git status --porcelain --untracked-files=normal)" ]; then
+	printf 'error: source tree changed during release build\n' >&2
+	exit 1
+fi
 
 if [ -e dist ]; then
 	backup=".dist.backup.$$"

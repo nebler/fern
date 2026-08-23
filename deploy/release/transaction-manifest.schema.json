@@ -1,30 +1,48 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://fern.invalid/schemas/transaction-manifest-v1.json",
-  "title": "Fern upgrade or rollback transaction manifest",
+  "title": "Fern host backup, restore, and rollback transaction manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "operation_id", "operation", "phase", "from_release", "to_release", "last_known_good", "compatibility", "backup", "rollback", "evidence"],
+  "required": ["schema_version", "operation_id", "operation", "phase", "appliance_epoch", "generation", "backup", "activation", "rollback", "evidence"],
   "properties": {
     "schema_version": {"const": 1},
-    "operation_id": {"type": "string", "minLength": 1},
-    "operation": {"enum": ["upgrade", "rollback"]},
-    "phase": {"enum": ["planned", "verified", "quiesced", "installed", "validated", "committed", "failed", "rolled-back"]},
-    "from_release": {"$ref": "#/$defs/release"},
-    "to_release": {"$ref": "#/$defs/release"},
-    "last_known_good": {"$ref": "#/$defs/release"},
-    "compatibility": {"$ref": "#/$defs/unsupported"},
+    "operation_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "operation": {"enum": ["backup", "restore", "rollback"]},
+    "phase": {"enum": ["planned", "locked", "verified", "staged", "activated", "rolled-back", "failed"]},
+    "appliance_epoch": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "generation": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
     "backup": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["status", "sqlite", "application_secrets"],
+      "required": ["format", "manifest", "checksum_file", "credential_policy", "named_volumes"],
       "properties": {
-        "status": {"const": "not-implemented"},
-        "sqlite": {"const": "PLACEHOLDER: SQLite backup support is not implemented"},
-        "application_secrets": {"const": "PLACEHOLDER: application-secret backup support is not implemented"}
+        "format": {"const": "fern-host-backup-v1"},
+        "manifest": {"const": "BACKUP-MANIFEST.json"},
+        "checksum_file": {"const": "SHA256SUMS"},
+        "credential_policy": {"enum": ["exclude", "external"]},
+        "named_volumes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"}}
       }
     },
-    "rollback": {"$ref": "#/$defs/unsupported"},
+    "activation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "epoch_marker", "current_generation"],
+      "properties": {
+        "model": {"const": "staged-current-previous"},
+        "epoch_marker": {"const": ".fern-appliance-epoch"},
+        "current_generation": {"type": "string", "minLength": 1}
+      }
+    },
+    "rollback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "previous_generation"],
+      "properties": {
+        "available": {"type": "boolean"},
+        "previous_generation": {"type": ["string", "null"]}
+      }
+    },
     "evidence": {
       "type": "object",
       "additionalProperties": false,
@@ -35,25 +53,14 @@
       }
     }
   },
-  "$defs": {
-    "release": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["version", "commit", "manifest_sha256"],
-      "properties": {
-        "version": {"type": "string", "minLength": 1},
-        "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
-        "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-      }
+  "allOf": [
+    {
+      "if": {"properties": {"rollback": {"properties": {"available": {"const": false}}}}},
+      "then": {"properties": {"rollback": {"properties": {"previous_generation": {"type": "null"}}}}}
     },
-    "unsupported": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["status", "reason"],
-      "properties": {
-        "status": {"const": "not-implemented"},
-        "reason": {"type": "string", "minLength": 1}
-      }
+    {
+      "if": {"properties": {"rollback": {"properties": {"available": {"const": true}}}}},
+      "then": {"properties": {"rollback": {"properties": {"previous_generation": {"type": "string", "minLength": 1}}}}}
     }
-  }
+  ]
 }

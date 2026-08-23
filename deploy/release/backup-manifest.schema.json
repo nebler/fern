@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fern.invalid/schemas/backup-manifest-v1.json",
+  "title": "Fern deterministic host backup manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "generation", "source_appliance_epoch", "format", "components", "named_volumes", "credentials"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "generation": {"$ref": "#/$defs/id"},
+    "source_appliance_epoch": {"$ref": "#/$defs/id"},
+    "format": {"const": "fern-host-backup-v1"},
+    "components": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        {"$ref": "#/$defs/stateComponent"},
+        {"$ref": "#/$defs/configComponent"},
+        {"$ref": "#/$defs/repositoryComponent"}
+      ],
+      "items": false
+    },
+    "named_volumes": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/id"}},
+    "credentials": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["policy", "detected_entries", "workspace_gh", "general_archive_contains_detected_plaintext_credentials", "external"],
+      "properties": {
+        "policy": {"enum": ["exclude", "external"]},
+        "detected_entries": {"type": "integer", "minimum": 0},
+        "workspace_gh": {"enum": ["included-in-external-recipient", "excluded-reauthorize", "not-found"]},
+        "general_archive_contains_detected_plaintext_credentials": {"const": false},
+        "external": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/external"}]}
+      }
+    }
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "type", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "type": {"enum": ["directory", "file"]},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "archive", "sha256", "entries"],
+      "properties": {
+        "name": {"type": "string"},
+        "archive": {"type": "string"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "entries": {"type": "array", "items": {"$ref": "#/$defs/entry"}}
+      }
+    },
+    "stateComponent": {"allOf": [{"$ref": "#/$defs/component"}, {"properties": {"name": {"const": "state"}, "archive": {"const": "state.tar"}}}]},
+    "configComponent": {"allOf": [{"$ref": "#/$defs/component"}, {"properties": {"name": {"const": "config"}, "archive": {"const": "config.tar"}}}]},
+    "repositoryComponent": {"allOf": [{"$ref": "#/$defs/component"}, {"properties": {"name": {"const": "repository"}, "archive": {"const": "repository.tar"}}}]},
+    "external": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["file", "sha256", "entries"],
+      "properties": {
+        "file": {"const": "operator-supplied-external-recipient"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "entries": {"type": "array", "items": {"$ref": "#/$defs/entry"}}
+      }
+    }
+  }
+}

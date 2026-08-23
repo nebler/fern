@@ -37,24 +37,25 @@ origin's `/fern/control` with Fern control authentication. Hashed device grants,
 correlations, and publication records survive Fern restarts under
 `/var/lib/fern/.fern/control`.
 
-Publication is optional and disabled when `workspace.github.repository` is
-absent; ordinary `fern up` then has no `gh` dependency. To enable the constrained
-host prototype, configure both `id` as GitHub's positive decimal repository ID
-and exact-case `fullName` as canonical `owner/repository`. Verify them from a
-trusted operator session, not from checkout `origin`. A configured publisher
-uses the host user's broad `gh` credential and therefore remains prototype-only.
-Use the running operator control coordinator for effects. Standalone
-`fern github publish` accepts `--dry-run` only and cannot mutate GitHub.
+GitHub access is optional and disabled when `workspace.github` is absent.
+`mode: workspace-gh` installs `gh` in the workspace and mounts its dedicated
+persistent config volume at `/home/user/.config/gh`; it never reads the host
+user's credential. In the OpenCode terminal, authenticate, inspect, replace, or
+remove that credential with `gh auth login --hostname github.com`, `gh auth
+status --hostname github.com`, and `gh auth logout --hostname github.com`.
+Changes take effect on the next `gh` command without restarting Fern. Revoke a
+lost credential in GitHub's application settings as well as removing it from
+the workspace. The credential is unrestricted for the authenticated account;
+Fern does not enforce phone-only publication or repository-only token scope.
 
-Durable tasks use a separate GitHub App mode. Configure the positive
-`workspace.github.installationId` together with repository identity and the
-complete `tasks` policy. If App credentials do not exist yet, start Fern with the
-canonical remote HTTPS origin, open
+`mode: github-app-broker` retains the repository-scoped App implementation.
+Configure its positive `workspace.github.installationId` together with
+repository identity and the complete `tasks` policy. If App credentials do not
+exist yet, start Fern with the canonical remote HTTPS origin, open
 `http://127.0.0.1:8081/fern/control` using Fern control authentication, and choose
 **Connect GitHub App**. GitHub returns only to the exact private HTTPS callback;
 restart Fern after success. Existing credentials disable the setup route because
-credential backup and rotation are not implemented. App mode never starts the
-legacy host-`gh` publisher.
+rotation remains an operator procedure. The two authority modes cannot be mixed.
 
 Fern never guesses a verification command from repository files. To enable
 post-seal verification, configure `tasks.verification` with a lowercase check
@@ -69,11 +70,11 @@ Omitting this block leaves task delivery enabled but does not authorize any
 verification effect.
 
 The pinned OpenCode profile cannot automatically prove generic terminal
-success. Fern's explicit result coordinator requires an external authoritative
-observer to return matching exact-session success evidence twice while
-`AcquireQuiesced` is held; `fern up` does not currently construct such an
-observer. Do not operationally treat idle, inactive, or empty-inbox state as a
-completed task.
+success. Fern therefore exposes an explicit user seal action. It previews and
+revalidates an exact clean committed snapshot while the workspace is paused,
+records the device/operator authorization durably, and marks the attempt
+`superseded`, never `succeeded`. Idle, inactive, or empty-inbox state alone still
+cannot complete a task.
 
 ## Fast Field Demo
 
@@ -352,75 +353,153 @@ Durable state is split across:
   correlations, and publication operations;
 - `/etc/fern` for Fern configuration and secrets.
 
+`scripts/fern-host-backup.py` provides the host transaction foundation. It does
+not stop Fern, run Docker, or contact Tailscale or GitHub. The operator must
+establish a quiet boundary first. Every operation requires an operator-selected
+appliance epoch and obtains an exclusive directory lock. Initialize the epoch
+once per appliance; never copy its lock directory to a replacement appliance:
+
+```bash
+sudo install -d -o root -g root -m 0700 /var/lib/fern-backup-lock
+sudo /opt/fern/src/scripts/fern-host-backup.py init-epoch \
+  --lock-dir /var/lib/fern-backup-lock \
+  --epoch appliance-2026-08
+```
+
+The lock is a fail-closed `operator.lock` directory. A process exit removes its
+own lock. If power loss leaves it behind, verify that no operation is active and
+remove that exact directory manually; the utility never guesses that a lock is
+stale. Changing `appliance-epoch` is a replacement-appliance procedure, not a
+way to bypass an old lock.
+
 For a quiet backup, stop the service and remove compute through Fern. `down`
-retains the OpenCode volume:
+retains the OpenCode volume. Export each named volume into a dedicated empty
+directory and supply it explicitly; the utility never enumerates Docker:
 
 ```bash
 export FERN_COMMIT=REPLACE_WITH_FULL_COMMIT_SHA
-export BACKUP_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+export BACKUP_ID=fern-20260822-001
 sudo systemctl stop fern.service
 sudo -H -u fern /usr/local/bin/fern down --config /etc/fern/fern.yaml
 test -z "$(sudo docker ps -aq --filter name='^/demo$')"
-sudo install -d -o root -g root -m 0700 "/var/backups/fern/$BACKUP_ID"
-sudo tar -C /srv/fern -czf "/var/backups/fern/$BACKUP_ID/workspace.tar.gz" workspace
-sudo tar -C /var/lib/fern -czf "/var/backups/fern/$BACKUP_ID/fern-state.tar.gz" .fern
-sudo tar -C /etc -czf "/var/backups/fern/$BACKUP_ID/config-and-secrets.tar.gz" fern
+sudo test ! -e "/var/backups/fern/exports-$BACKUP_ID"
+sudo install -d -o root -g root -m 0700 "/var/backups/fern/exports-$BACKUP_ID/opencode"
 sudo docker run --rm \
   --user 0:0 \
   -v fern-demo-v2-data:/data:ro \
-  -v "/var/backups/fern/$BACKUP_ID:/backup" \
-  --entrypoint tar "fern/opencode:$FERN_COMMIT" \
-  -C /data -czf /backup/opencode-data.tar.gz .
-sudo sh -c "cd '/var/backups/fern/$BACKUP_ID' && sha256sum *.tar.gz > SHA256SUMS"
-sudo chmod -R go-rwx "/var/backups/fern/$BACKUP_ID"
+  -v "/var/backups/fern/exports-$BACKUP_ID/opencode:/export" \
+  --entrypoint sh "fern/opencode:$FERN_COMMIT" \
+  -c 'cp -a /data/. /export/'
+sudo /opt/fern/src/scripts/fern-host-backup.py backup \
+  --lock-dir /var/lib/fern-backup-lock \
+  --epoch appliance-2026-08 \
+  --generation "$BACKUP_ID" \
+  --output "/var/backups/fern/$BACKUP_ID" \
+  --state /var/lib/fern \
+  --config /etc/fern \
+  --repository /srv/fern/workspace \
+  --volume "fern-demo-v2-data=/var/backups/fern/exports-$BACKUP_ID/opencode" \
+  --credential-policy external \
+  --credential-output "/APPROVED-ENCRYPTED-OR-EXTERNAL-MEDIA/$BACKUP_ID.credentials.tar"
+sudo rm -rf "/var/backups/fern/exports-$BACKUP_ID"
 sudo systemctl start fern.service
 ```
 
-Repository and OpenCode archives may contain secrets; the configuration archive
-does contain service credentials. Encrypt and retain them according to host
-policy. Test restore into temporary paths and a temporary Docker volume rather
-than overwriting live state.
+The general bundle contains deterministic uncompressed tar payloads, a canonical
+manifest with a SHA-256 inventory for every file and directory entry, and
+`SHA256SUMS` for every bundle file. Known credential paths, including Fern env
+files, GitHub CLI state, GitHub App credentials, repository `.git/config`, key
+files, and auth files, are
+never written there. Opaque named-volume exports always require the separate
+external recipient. Its tar and adjacent checksum are mode `0600`; the path must
+be encrypted storage or approved external media. Path separation is not
+encryption. Repository files can contain arbitrarily named secrets that no host
+utility can identify semantically, so review the repository before approving
+backup custody.
 
-The deterministic local rehearsal performs the archive, checksum verification,
-destruction, volume recreation, extraction, and authenticated state checks:
+For a backup that deliberately omits detected credentials, use
+`--credential-policy exclude` without `--credential-output`, do not supply a
+volume, and plan to reauthorize GitHub, providers, and Fern service passwords.
+The manifest records whether workspace `gh` credentials were externally
+included, excluded for reauthorization, or not found. Backup rejects symlinks,
+special files, missing roots, opaque volumes under the exclusion policy,
+existing destinations, epoch mismatch, and concurrent operation.
+
+The deterministic local release rehearsal performs byte comparison, checksum
+verification, source destruction, staged restore, activation, rollback, crafted
+symlink/path-escape rejection, and old-epoch rejection without real Docker:
 
 ```bash
-./scripts/test-lifecycle.sh
+./integration/release/run.sh
 ```
 
-For an approved target-host restore, first verify the old host is disabled to
-avoid two writers, copy the completed backup to the new host, install the exact
-recorded Fern binary and image, and verify checksums before extracting anything:
+For an approved restore, first disable the old host to avoid two writers. On a
+replacement host initialize a new appliance epoch. Install the exact recorded
+Fern binary and image, place the general bundle and external recipient on local
+filesystems, and restore into a dedicated generation root:
 
 ```bash
-cd "/var/backups/fern/$BACKUP_ID"
-sudo sha256sum -c SHA256SUMS
 sudo systemctl stop fern.service
-test ! -e /srv/fern/workspace
-test ! -e /var/lib/fern/.fern
-sudo tar -C /srv/fern -xzf workspace.tar.gz
-sudo tar -C /var/lib/fern -xzf fern-state.tar.gz
-sudo tar -C /etc -xzf config-and-secrets.tar.gz
+sudo /opt/fern/src/scripts/fern-host-backup.py restore \
+  --lock-dir /var/lib/fern-backup-lock \
+  --epoch replacement-appliance-2026-08 \
+  --backup "/var/backups/fern/$BACKUP_ID" \
+  --credential-input "/APPROVED-ENCRYPTED-OR-EXTERNAL-MEDIA/$BACKUP_ID.credentials.tar" \
+  --target /var/lib/fern-restore-generations
+sudo test -f /var/lib/fern-restore-generations/current/.fern-appliance-epoch
+sudo test "$(cat /var/lib/fern-restore-generations/current/.fern-appliance-epoch)" = replacement-appliance-2026-08
+```
+
+Restore verifies both layers of checksums before writing, rejects links, special
+entries, duplicate names and absolute or `..` paths, writes a staging generation,
+then renames it to `current`. An existing `current` becomes `previous`; only one
+previous generation is retained. Because `/etc`, `/srv`, `/var/lib`, and Docker
+volumes are separate activation domains, the utility cannot atomically replace
+the live host layout. With the service stopped, inspect `current`, verify UID/GID
+policy, then install its `config`, `repository`, and `state` trees into empty live
+destinations and import `current/volumes/fern-demo-v2-data` into a newly created
+volume using the pinned image. Do not overlay an existing live tree or volume.
+The utility writes `TRANSACTION-MANIFEST.json` beside `current` after each
+successful restore or rollback; its active generation and rollback availability
+are observations from that completed operation, not a static release example.
+
+The volume creation/import step remains host-specific:
+
+```bash
+if sudo docker volume inspect fern-demo-v2-data >/dev/null 2>&1; then
+  echo 'refusing to merge restore into existing volume fern-demo-v2-data' >&2
+  exit 1
+fi
 sudo docker volume create \
   --label dev.fern.managed=true \
   --label dev.fern.workspace=demo \
   fern-demo-v2-data
 sudo docker run --rm --user 0:0 \
   -v fern-demo-v2-data:/data \
-  -v "/var/backups/fern/$BACKUP_ID:/backup:ro" \
-  --entrypoint tar "fern/opencode:$FERN_COMMIT" \
-  -C /data -xzf /backup/opencode-data.tar.gz
-sudo chown -R fern:fern /srv/fern/workspace /var/lib/fern/.fern
-sudo chmod -R go-rwx /var/lib/fern/.fern /etc/fern
+  -v /var/lib/fern-restore-generations/current/volumes/fern-demo-v2-data:/restore:ro \
+  --entrypoint sh "fern/opencode:$FERN_COMMIT" \
+  -c 'test -z "$(find /data -mindepth 1 -print -quit)" && cp -a /restore/. /data/'
 sudo systemctl start fern.service
 sudo -H -u fern /usr/local/bin/fern doctor \
   --config /etc/fern/fern.yaml \
   --env-file /etc/fern/fern.env
 ```
 
-This procedure is intentionally fail-closed on non-empty destinations. A real
-fresh-host rehearsal must additionally reauthorize Tailscale, GitHub, and any
-provider credentials and verify UID/GID ownership before it is accepted.
+Before live installation, rollback within the generation root is executable as:
+
+```bash
+sudo /opt/fern/src/scripts/fern-host-backup.py rollback \
+  --lock-dir /var/lib/fern-backup-lock \
+  --epoch replacement-appliance-2026-08 \
+  --target /var/lib/fern-restore-generations
+```
+
+Rollback swaps `current` and `previous` only when both carry the selected active
+epoch. It does not reverse a Docker import or live cross-filesystem copies. A
+physical-host rehearsal must additionally test service quiescence, free space,
+permissions and ownership, filesystem rename/crash behavior, Docker volume
+export/import, Tailscale reauthorization, GitHub/provider reauthorization when
+excluded, and authenticated application health before acceptance.
 
 ## Uninstall And Explicit Deletion
 

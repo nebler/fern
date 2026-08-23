@@ -1,38 +1,28 @@
 {
   "schema_version": 1,
-  "operation_id": "REPLACE_WITH_UNIQUE_OPERATION_ID",
-  "operation": "upgrade",
-  "phase": "planned",
-  "from_release": {
-    "version": "REPLACE_WITH_CURRENT_VERSION",
-    "commit": "0000000000000000000000000000000000000000",
-    "manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
-  },
-  "to_release": {
-    "version": "REPLACE_WITH_TARGET_VERSION",
-    "commit": "0000000000000000000000000000000000000000",
-    "manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
-  },
-  "last_known_good": {
-    "version": "REPLACE_WITH_LAST_KNOWN_GOOD_VERSION",
-    "commit": "0000000000000000000000000000000000000000",
-    "manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000"
-  },
-  "compatibility": {
-    "status": "not-implemented",
-    "reason": "PLACEHOLDER: no state-schema compatibility or migration gate is implemented"
-  },
+  "operation_id": "restore-20260822-001",
+  "operation": "restore",
+  "phase": "activated",
+  "appliance_epoch": "appliance-2026-08",
+  "generation": "fern-v1.2.3",
   "backup": {
-    "status": "not-implemented",
-    "sqlite": "PLACEHOLDER: SQLite backup support is not implemented",
-    "application_secrets": "PLACEHOLDER: application-secret backup support is not implemented"
+    "format": "fern-host-backup-v1",
+    "manifest": "BACKUP-MANIFEST.json",
+    "checksum_file": "SHA256SUMS",
+    "credential_policy": "external",
+    "named_volumes": ["fern-demo-v2-data"]
+  },
+  "activation": {
+    "model": "staged-current-previous",
+    "epoch_marker": ".fern-appliance-epoch",
+    "current_generation": "fern-v1.2.3"
   },
   "rollback": {
-    "status": "not-implemented",
-    "reason": "PLACEHOLDER: this records intended shape only and is not an executable rollback claim"
+    "available": true,
+    "previous_generation": "fern-v1.2.2"
   },
   "evidence": {
-    "bundle_path": "REPLACE_WITH_EVIDENCE_BUNDLE_PATH",
-    "sha256sums_path": "REPLACE_WITH_EVIDENCE_SHA256SUMS_PATH"
+    "bundle_path": "/var/backups/fern/fern-v1.2.3",
+    "sha256sums_path": "/var/backups/fern/fern-v1.2.3/SHA256SUMS"
   }
 }

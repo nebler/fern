@@ -15,7 +15,7 @@ mkdir -p "$EVIDENCE"
 
 FIXTURE="$TEMP/repository"
 mkdir -p "$FIXTURE/scripts" "$FIXTURE/cmd/fern" "$FIXTURE/deploy/systemd" "$FIXTURE/deploy/release"
-cp "$ROOT/scripts/build-release.sh" "$FIXTURE/scripts/"
+cp "$ROOT/scripts/build-release.sh" "$ROOT/scripts/fern-host-backup.py" "$FIXTURE/scripts/"
 cp "$ROOT/deploy/systemd/"* "$FIXTURE/deploy/systemd/"
 cp "$ROOT/deploy/release/"* "$FIXTURE/deploy/release/"
 cat >"$FIXTURE/go.mod" <<'EOF'
@@ -67,10 +67,14 @@ assert manifest["integrity"] == {
     "signature_status": "not-generated",
 }
 assert manifest["upgrade_rollback"] == {
-    "transaction_manifest": "deploy/release/transaction-manifest.example.json",
-    "support_status": "not-implemented",
-    "sqlite_backup": "placeholder-only-not-implemented",
-    "application_secrets_backup": "placeholder-only-not-implemented",
+    "transaction_manifest_schema": "deploy/release/transaction-manifest.schema.json",
+    "transaction_example": "deploy/release/transaction-manifest.example.json",
+    "transaction_receipt": "generated-at-restore-target/TRANSACTION-MANIFEST.json",
+    "host_utility": "scripts/fern-host-backup.py",
+    "support_status": "deterministic-host-foundation",
+    "activation_model": "staged-current-previous",
+    "credential_policy": "exclude-and-reauthorize-or-external-recipient",
+    "volume_export_mode": "explicit-pre-exported-directory",
 }
 for entry in manifest["artifacts"] + manifest["deployment_files"]:
     actual = hashlib.sha256((root / "dist" / entry["path"]).read_bytes()).hexdigest()
@@ -79,11 +83,10 @@ for entry in manifest["artifacts"] + manifest["deployment_files"]:
 for path in root.glob("deploy/release/*.json"):
     json.loads(path.read_text())
 transaction = json.loads((root / "deploy/release/transaction-manifest.example.json").read_text())
-assert transaction["compatibility"]["status"] == "not-implemented"
-assert transaction["backup"]["status"] == "not-implemented"
-assert transaction["backup"]["sqlite"].startswith("PLACEHOLDER:")
-assert transaction["backup"]["application_secrets"].startswith("PLACEHOLDER:")
-assert transaction["rollback"]["status"] == "not-implemented"
+assert transaction["backup"]["format"] == "fern-host-backup-v1"
+assert transaction["activation"]["model"] == "staged-current-previous"
+assert transaction["rollback"]["available"] is True
+assert "PLACEHOLDER" not in json.dumps(transaction)
 PY
 
 (
@@ -123,6 +126,210 @@ if (cd "$FIXTURE" && GOTOOLCHAIN=local ./scripts/build-release.sh latest) >"$TEM
 fi
 grep -q 'semantic version' "$TEMP/version-check.txt"
 
+BACKUP="$ROOT/scripts/fern-host-backup.py"
+HOST="$TEMP/host"
+LOCK="$HOST/lock"
+SOURCE="$HOST/source"
+mkdir -p "$SOURCE/state/.fern/control" "$SOURCE/state/.config/gh" \
+  "$SOURCE/state/.fern/github-app" "$SOURCE/config" "$SOURCE/repository/.git" "$SOURCE/volume/sessions"
+printf 'state-a\n' >"$SOURCE/state/.fern/control/state.db"
+printf 'oauth_token: secret-gh-token\n' >"$SOURCE/state/.config/gh/hosts.yml"
+printf '{"client_secret":"secret-app","private_key":"secret-private-key"}\n' >"$SOURCE/state/.fern/github-app/app-credentials.json"
+printf 'proxy: safe\n' >"$SOURCE/config/fern.yaml"
+printf 'OPENCODE_PASSWORD=secret\n' >"$SOURCE/config/fern.env"
+printf 'repository-a\n' >"$SOURCE/repository/work.txt"
+printf 'git-config\n' >"$SOURCE/repository/.git/config"
+printf 'volume-secret-a\n' >"$SOURCE/volume/sessions/auth.json"
+
+python3 "$BACKUP" init-epoch --lock-dir "$LOCK" --epoch appliance-A
+python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
+  --generation generation-a --output "$HOST/backup-a" \
+  --state "$SOURCE/state" --config "$SOURCE/config" --repository "$SOURCE/repository" \
+  --volume fern-demo-v2-data="$SOURCE/volume" --credential-policy external \
+  --credential-output "$HOST/credentials-a.tar"
+python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
+  --generation generation-a --output "$HOST/backup-a-copy" \
+  --state "$SOURCE/state" --config "$SOURCE/config" --repository "$SOURCE/repository" \
+  --volume fern-demo-v2-data="$SOURCE/volume" --credential-policy external \
+  --credential-output "$HOST/credentials-a-copy.tar"
+diff -r "$HOST/backup-a" "$HOST/backup-a-copy" >"$TEMP/backup-reproducibility.diff"
+cmp "$HOST/credentials-a.tar" "$HOST/credentials-a-copy.tar"
+
+python3 - "$HOST/backup-a/BACKUP-MANIFEST.json" <<'PY'
+import json, pathlib, sys
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert manifest["named_volumes"] == ["fern-demo-v2-data"]
+assert manifest["credentials"]["workspace_gh"] == "included-in-external-recipient"
+assert manifest["credentials"]["general_archive_contains_detected_plaintext_credentials"] is False
+assert manifest["credentials"]["external"]["sha256"]
+for component in manifest["components"]:
+    assert component["entries"]
+    assert all(entry["sha256"] for entry in component["entries"])
+PY
+! grep -R -a -q 'secret-gh-token\|secret-app\|secret-private-key\|OPENCODE_PASSWORD\|volume-secret' "$HOST/backup-a"
+grep -a -q 'secret-app' "$HOST/credentials-a.tar"
+
+mkdir -p "$HOST/hardlink-source/state" "$HOST/hardlink-source/config" "$HOST/hardlink-source/repository"
+printf 'linked-secret\n' >"$HOST/hardlink-source/state/credentials.json"
+ln "$HOST/hardlink-source/state/credentials.json" "$HOST/hardlink-source/repository/ordinary.txt"
+if python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
+  --generation hardlink --output "$HOST/hardlink-backup" \
+  --state "$HOST/hardlink-source/state" --config "$HOST/hardlink-source/config" \
+  --repository "$HOST/hardlink-source/repository" --credential-policy exclude \
+  >"$TEMP/hardlink-rejection.txt" 2>&1; then
+  printf 'error: backup accepted a hard-linked credential alias\n' >&2
+  exit 1
+fi
+grep -q 'hard-linked file rejected' "$TEMP/hardlink-rejection.txt"
+
+cp -R "$HOST/backup-a" "$HOST/tampered"
+printf 'corruption\n' >>"$HOST/tampered/state.tar"
+if python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
+  --backup "$HOST/tampered" --target "$HOST/tampered-target" \
+  --credential-input "$HOST/credentials-a.tar" >"$TEMP/backup-tamper.txt" 2>&1; then
+  printf 'error: restore accepted a checksum-tampered backup\n' >&2
+  exit 1
+fi
+grep -q 'checksum mismatch' "$TEMP/backup-tamper.txt"
+
+make_malicious_backup() {
+  local kind=$1 destination=$2
+  cp -R "$HOST/backup-a" "$destination"
+  python3 - "$destination" "$kind" <<'PY'
+import hashlib, io, json, pathlib, tarfile, sys
+root = pathlib.Path(sys.argv[1])
+kind = sys.argv[2]
+manifest_path = root / "BACKUP-MANIFEST.json"
+manifest = json.loads(manifest_path.read_text())
+component = next(item for item in manifest["components"] if item["name"] == "repository")
+entry = component["entries"][0]
+with tarfile.open(root / component["archive"], "w") as archive:
+    info = tarfile.TarInfo("../escaped" if kind == "escape" else entry["path"])
+    if kind == "symlink":
+        info.type = tarfile.SYMTYPE
+        info.linkname = "/etc/passwd"
+        archive.addfile(info)
+    else:
+        data = b"escape"
+        info.size = len(data)
+        archive.addfile(info, io.BytesIO(data))
+sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+component["sha256"] = sha(root / component["archive"])
+manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
+names = sorted(path.name for path in root.iterdir() if path.is_file() and path.name != "SHA256SUMS")
+(root / "SHA256SUMS").write_text("".join(f"{sha(root / name)}  {name}\n" for name in names))
+PY
+}
+
+make_malicious_backup symlink "$HOST/symlink-backup"
+if python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
+  --backup "$HOST/symlink-backup" --target "$HOST/symlink-target" \
+  --credential-input "$HOST/credentials-a.tar" >"$TEMP/symlink-rejection.txt" 2>&1; then
+  printf 'error: restore accepted a symlink archive entry\n' >&2
+  exit 1
+fi
+grep -q 'link or special archive entry rejected' "$TEMP/symlink-rejection.txt"
+
+make_malicious_backup escape "$HOST/escape-backup"
+if python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
+  --backup "$HOST/escape-backup" --target "$HOST/escape-target" \
+  --credential-input "$HOST/credentials-a.tar" >"$TEMP/escape-rejection.txt" 2>&1; then
+  printf 'error: restore accepted a path-escape archive entry\n' >&2
+  exit 1
+fi
+grep -q 'unsafe or duplicate archive path' "$TEMP/escape-rejection.txt"
+test ! -e "$HOST/escaped"
+
+rm -rf "$SOURCE"
+python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
+  --backup "$HOST/backup-a" --target "$HOST/restored" \
+  --credential-input "$HOST/credentials-a.tar"
+grep -qx 'repository-a' "$HOST/restored/current/repository/work.txt"
+grep -q 'secret-gh-token' "$HOST/restored/current/state/.config/gh/hosts.yml"
+grep -q 'volume-secret-a' "$HOST/restored/current/volumes/fern-demo-v2-data/sessions/auth.json"
+grep -qx 'appliance-A' "$HOST/restored/current/.fern-appliance-epoch"
+python3 - "$HOST/restored/TRANSACTION-MANIFEST.json" <<'PY'
+import json, pathlib, sys
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert manifest["operation"] == "restore"
+assert manifest["phase"] == "activated"
+assert manifest["generation"] == manifest["activation"]["current_generation"] == "generation-a"
+assert manifest["rollback"] == {"available": False, "previous_generation": None}
+PY
+
+SOURCE_B="$HOST/source-b"
+mkdir "$SOURCE_B"
+cp -R "$HOST/restored/current/state" "$HOST/restored/current/config" \
+  "$HOST/restored/current/repository" "$HOST/restored/current/volumes" "$SOURCE_B/"
+printf 'repository-b\n' >"$SOURCE_B/repository/work.txt"
+printf 'volume-secret-b\n' >"$SOURCE_B/volumes/fern-demo-v2-data/sessions/auth.json"
+python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
+  --generation generation-b --output "$HOST/backup-b" \
+  --state "$SOURCE_B/state" --config "$SOURCE_B/config" \
+  --repository "$SOURCE_B/repository" \
+  --volume fern-demo-v2-data="$SOURCE_B/volumes/fern-demo-v2-data" \
+  --credential-policy external --credential-output "$HOST/credentials-b.tar"
+python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
+  --backup "$HOST/backup-b" --target "$HOST/restored" \
+  --credential-input "$HOST/credentials-b.tar"
+grep -qx 'repository-b' "$HOST/restored/current/repository/work.txt"
+python3 "$BACKUP" rollback --lock-dir "$LOCK" --epoch appliance-A --target "$HOST/restored"
+grep -qx 'repository-a' "$HOST/restored/current/repository/work.txt"
+grep -qx 'generation-a' "$HOST/restored/current/.fern-generation"
+grep -q '"phase": "rolled-back"' "$HOST/restored/TRANSACTION-MANIFEST.json"
+
+if python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-old \
+  --backup "$HOST/backup-a" --target "$HOST/old-epoch-target" \
+  --credential-input "$HOST/credentials-a.tar" >"$TEMP/epoch-rejection.txt" 2>&1; then
+  printf 'error: restore accepted an old appliance epoch\n' >&2
+  exit 1
+fi
+grep -q 'appliance epoch mismatch' "$TEMP/epoch-rejection.txt"
+
+mkdir "$LOCK/operator.lock"
+if python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
+  --generation locked --output "$HOST/locked-backup" \
+  --state "$HOST/restored/current/state" --config "$HOST/restored/current/config" \
+  --repository "$HOST/restored/current/repository" --credential-policy exclude \
+  >"$TEMP/lock-rejection.txt" 2>&1; then
+  printf 'error: backup ignored the exclusive operator lock\n' >&2
+  exit 1
+fi
+rmdir "$LOCK/operator.lock"
+grep -q 'operator lock is already held' "$TEMP/lock-rejection.txt"
+
+python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
+  --generation generation-excluded --output "$HOST/backup-excluded" \
+  --state "$HOST/restored/current/state" --config "$HOST/restored/current/config" \
+  --repository "$HOST/restored/current/repository" --credential-policy exclude
+python3 - "$HOST/backup-excluded/BACKUP-MANIFEST.json" <<'PY'
+import json, pathlib, sys
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+assert manifest["credentials"]["policy"] == "exclude"
+assert manifest["credentials"]["workspace_gh"] == "excluded-reauthorize"
+assert manifest["credentials"]["external"] is None
+PY
+python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
+  --backup "$HOST/backup-excluded" --target "$HOST/excluded-restore"
+test ! -e "$HOST/excluded-restore/current/state/.config/gh/hosts.yml"
+test ! -e "$HOST/excluded-restore/current/config/fern.env"
+grep -qx 'repository-a' "$HOST/excluded-restore/current/repository/work.txt"
+
+NEW_LOCK="$HOST/replacement-lock"
+python3 "$BACKUP" init-epoch --lock-dir "$NEW_LOCK" --epoch appliance-B
+python3 "$BACKUP" restore --lock-dir "$NEW_LOCK" --epoch appliance-B \
+  --backup "$HOST/backup-a" --target "$HOST/replacement-restore" \
+  --credential-input "$HOST/credentials-a.tar"
+grep -qx 'appliance-B' "$HOST/replacement-restore/current/.fern-appliance-epoch"
+grep -qx 'appliance-A' "$HOST/replacement-restore/current/.fern-source-epoch"
+if python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
+  --backup "$HOST/backup-a" --target "$HOST/replacement-restore" \
+  --credential-input "$HOST/credentials-a.tar" >"$TEMP/target-epoch-rejection.txt" 2>&1; then
+  printf 'error: restore replaced a generation owned by another appliance epoch\n' >&2
+  exit 1
+fi
+grep -q 'generation is fenced by another appliance epoch' "$TEMP/target-epoch-rejection.txt"
+
 UNIT="$ROOT/deploy/systemd/fern.service"
 grep -qx 'User=fern' "$UNIT"
 grep -qx 'NoNewPrivileges=true' "$UNIT"
@@ -148,6 +355,12 @@ cp "$TEMP/RELEASE-MANIFEST.json" "$EVIDENCE/release-manifest.json"
 cp "$ROOT/deploy/release/transaction-manifest.example.json" "$EVIDENCE/transaction-manifest.example.json"
 cp "$TEMP/checksum-verification.txt" "$EVIDENCE/checksum-verification.txt"
 cp "$TEMP/tamper-check.txt" "$EVIDENCE/tamper-rejection.txt"
+cp "$TEMP/backup-tamper.txt" "$EVIDENCE/backup-tamper-rejection.txt"
+cp "$TEMP/symlink-rejection.txt" "$EVIDENCE/symlink-rejection.txt"
+cp "$TEMP/escape-rejection.txt" "$EVIDENCE/path-escape-rejection.txt"
+cp "$TEMP/epoch-rejection.txt" "$EVIDENCE/epoch-rejection.txt"
+cp "$TEMP/target-epoch-rejection.txt" "$EVIDENCE/target-epoch-rejection.txt"
+cp "$TEMP/hardlink-rejection.txt" "$EVIDENCE/hardlink-rejection.txt"
 cat >"$EVIDENCE/static-assertions.txt" <<'EOF'
 PASS systemd runs as fern with explicit hardening and distinct remote/operator loopback listeners
 PASS systemd contains no Docker/Tailscale destructive lifecycle command
@@ -155,6 +368,10 @@ PASS deployment assets contain no wildcard Fern listener
 PASS deployment assets identify only the remote loopback listener for Tailscale Serve
 PASS deployment configuration requires an exact HTTPS remote origin replacement
 PASS deployment runbook contains no executable Tailscale Funnel command
+PASS deterministic host backup segregates detected credentials and explicit named-volume exports
+PASS restore rejects checksum tampering, symlinks, path escapes, hardlinks, stale appliance epochs, and cross-epoch targets
+PASS destructive restore activation retains and rolls back to the previous generation
+PASS restore and rollback emit transaction manifests matching the active generation
 EOF
 cat >"$EVIDENCE/summary.json" <<EOF
 {
@@ -166,16 +383,20 @@ cat >"$EVIDENCE/summary.json" <<EOF
     "checksum_tamper_rejection": "passed",
     "dirty_tree_rejection": "passed",
     "semantic_version_rejection": "passed",
-    "static_systemd_tailscale_safety": "passed"
+    "static_systemd_tailscale_safety": "passed",
+    "deterministic_host_backup": "passed",
+    "credential_and_volume_segregation": "passed",
+    "restore_tamper_and_path_safety": "passed",
+    "destructive_restore_and_rollback": "passed",
+    "operator_lock_and_epoch_fencing": "passed"
   },
   "not_run": {
     "artifact_signing": "not generated; this bundle provides checksums, not authenticity",
     "ubuntu_systemd_host": "requires an explicit target host",
     "tailscale_mutation": "intentionally excluded from this static harness",
-    "docker_mutation": "intentionally excluded from this static harness",
-    "sqlite_backup": "not implemented; placeholder only",
-    "application_secrets_backup": "not implemented; placeholder only",
-    "upgrade_or_rollback": "manifest shape only; execution is not implemented"
+    "docker_mutation": "intentionally excluded; named volume fixtures are pre-exported directories",
+    "physical_host_atomicity": "rename activation is tested on one local filesystem; crash and filesystem behavior require target-host rehearsal",
+    "credential_encryption": "external recipient segregation is tested; encryption and custody are operator policy"
   }
 }
 EOF
