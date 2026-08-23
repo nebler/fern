@@ -426,7 +426,7 @@ func newFixture(t *testing.T) (*taskstore.Store, *Coordinator, *fakeOpenCode, *f
 	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
 	if err := store.CreateWorkspace(context.Background(), taskstore.Workspace{
 		ID: workspaceID, Name: "demo", State: taskstore.WorkspaceActive,
-		RepositoryPath: "/repo", InstallationID: 1, RepositoryID: 10,
+		RepositoryPath: "/repo", GitHubAuthority: taskstore.GitHubAuthorityAppBroker, InstallationID: 1, RepositoryID: 10,
 		RepositoryFullName: "owner/repo", ImageDigest: testImageID,
 		OpenCodeProtocol: "0.0.0-next-17444", RuntimeDesiredState: "running", CreatedAt: now,
 	}); err != nil {

@@ -14,6 +14,21 @@ type fakeExecutor struct {
 	args   []string
 }
 
+type scriptedExecutor struct {
+	outputs [][]byte
+	args    [][]string
+}
+
+func (executor *scriptedExecutor) Run(_ context.Context, arguments ...string) ([]byte, error) {
+	executor.args = append(executor.args, append([]string(nil), arguments...))
+	if len(executor.outputs) == 0 {
+		return nil, errors.New("unexpected call")
+	}
+	output := executor.outputs[0]
+	executor.outputs = executor.outputs[1:]
+	return append([]byte(nil), output...), nil
+}
+
 func (f *fakeExecutor) Run(_ context.Context, arguments ...string) ([]byte, error) {
 	f.args = append([]string(nil), arguments...)
 	return append([]byte(nil), f.output...), f.err
@@ -80,6 +95,36 @@ func TestRepositoryRequiresExactIdentity(t *testing.T) {
 	executor.output = []byte(`{"id":124,"fullName":"owner/repository"}`)
 	if _, err := client.Repository(context.Background(), 123, "owner/repository"); !errors.Is(err, ErrRepository) {
 		t.Fatalf("ID mismatch error = %v", err)
+	}
+}
+
+func TestBranchRequiresRepositoryAndExactRefIdentity(t *testing.T) {
+	executor := &scriptedExecutor{outputs: [][]byte{
+		[]byte(`{"id":123,"fullName":"owner/repository"}`),
+		[]byte(`{"name":"release/v1","sha":"0123456789abcdef0123456789abcdef01234567"}`),
+	}}
+	client, _ := New(executor, "github.com")
+	branch, err := client.Branch(context.Background(), 123, "owner/repository", "release/v1")
+	if err != nil || branch.Name != "release/v1" || branch.RepositoryID != 123 || branch.FullName != "owner/repository" {
+		t.Fatalf("branch=%+v err=%v", branch, err)
+	}
+	if len(executor.args) != 2 || strings.Join(executor.args[1], " ") !=
+		`api --hostname github.com --method GET repos/owner/repository/branches/release%2Fv1 --jq {name: .name, sha: .commit.sha}` {
+		t.Fatalf("args = %q", executor.args)
+	}
+
+	for _, output := range []string{
+		`{"name":"other","sha":"0123456789abcdef0123456789abcdef01234567"}`,
+		`{"name":"release/v1","sha":"bad"}`,
+	} {
+		executor := &scriptedExecutor{outputs: [][]byte{[]byte(`{"id":123,"fullName":"owner/repository"}`), []byte(output)}}
+		client, _ := New(executor, "github.com")
+		if _, err := client.Branch(context.Background(), 123, "owner/repository", "release/v1"); !errors.Is(err, ErrRepository) {
+			t.Fatalf("output=%s error=%v", output, err)
+		}
+	}
+	if _, err := client.Branch(context.Background(), 123, "owner/repository", "../main"); !errors.Is(err, ErrRepository) {
+		t.Fatalf("invalid ref error = %v", err)
 	}
 }
 

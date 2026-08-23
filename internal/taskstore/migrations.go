@@ -20,7 +20,23 @@ var migrations = []migration{
 	{version: 2, name: "execution_projection_and_results", sql: executionAndResultSchema},
 	{version: 3, name: "verification_and_publication_journals", sql: verificationAndPublicationSchema},
 	{version: 4, name: "user_authorized_snapshot_seals", sql: userAuthorizedSealSchema},
+	{version: 5, name: "explicit_workspace_github_authority", sql: explicitWorkspaceGitHubAuthoritySchema},
 }
+
+const explicitWorkspaceGitHubAuthoritySchema = `
+ALTER TABLE workspaces ADD COLUMN github_authority TEXT NOT NULL DEFAULT 'github-app-broker'
+CHECK(github_authority IN ('workspace-gh','github-app-broker'));
+CREATE TRIGGER workspaces_github_authority_insert BEFORE INSERT ON workspaces
+BEGIN
+  SELECT CASE WHEN NEW.github_authority='workspace-gh' AND NEW.installation_id<>1
+    THEN RAISE(ABORT, 'workspace gh legacy installation discriminator differs') END;
+END;
+CREATE TRIGGER workspaces_github_authority_update BEFORE UPDATE OF github_authority,installation_id ON workspaces
+BEGIN
+  SELECT CASE WHEN NEW.github_authority='workspace-gh' AND NEW.installation_id<>1
+    THEN RAISE(ABORT, 'workspace gh legacy installation discriminator differs') END;
+END;
+`
 
 const initialSchema = `
 CREATE TABLE schema_migrations (

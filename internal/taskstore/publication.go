@@ -176,7 +176,7 @@ func (s *Store) PreparePublication(ctx context.Context, p PreparePublicationPara
 	resultTuple := task.ResultTuple{RepositoryTuple: task.RepositoryTuple{RepositoryID: result.RepositoryID, BaseSHA: result.BaseSHA},
 		ResultCommit: result.ResultCommit, Outcome: result.Outcome, ManifestEntries: result.ManifestEntries, WorktreeClean: result.WorktreeClean}
 	verificationTuple := task.VerificationTuple{State: task.VerificationState(verification.State), VerifiedCommit: verification.VerifiedCommit}
-	if workspace.State != WorkspaceActive || owner.BaseRef != p.Tuple.BaseRef ||
+	if workspace.State != WorkspaceActive || workspace.GitHubAuthority != GitHubAuthorityAppBroker || owner.BaseRef != p.Tuple.BaseRef ||
 		p.Tuple.ValidateAgainst(workspace.RepositoryID, task.RepositoryTuple{RepositoryID: owner.RepositoryID, BaseSHA: owner.BaseSHA}, resultTuple, verificationTuple) != nil ||
 		p.Tuple.InstallationID != workspace.InstallationID || p.Tuple.RepositoryFullName != workspace.RepositoryFullName {
 		return PublicationRecord{}, fmt.Errorf("%w: publication tuple", ErrInvalidState)

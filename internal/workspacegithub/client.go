@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"strings"
 )
 
@@ -39,6 +40,13 @@ type Status struct {
 type Repository struct {
 	ID       int64  `json:"id"`
 	FullName string `json:"fullName"`
+}
+
+type Branch struct {
+	Name         string `json:"name"`
+	SHA          string `json:"sha"`
+	RepositoryID int64  `json:"repositoryId"`
+	FullName     string `json:"fullName"`
 }
 
 func New(executor Executor, hostname string) (*Client, error) {
@@ -122,6 +130,36 @@ func (c *Client) Repository(ctx context.Context, expectedID int64, fullName stri
 		return Repository{}, ErrRepository
 	}
 	return repository, nil
+}
+
+// Branch resolves one exact branch in the configured repository and rejects a
+// response that does not prove repository identity, branch name, and SHA-1.
+func (c *Client) Branch(ctx context.Context, expectedID int64, fullName, branch string) (Branch, error) {
+	if expectedID <= 0 || !validRepository(fullName) || !validGitRef(branch) {
+		return Branch{}, ErrRepository
+	}
+	if _, err := c.Repository(ctx, expectedID, fullName); err != nil {
+		return Branch{}, err
+	}
+	output, err := c.executor.Run(ctx, "api", "--hostname", c.hostname, "--method", "GET",
+		"repos/"+fullName+"/branches/"+url.PathEscape(branch), "--jq",
+		`{name: .name, sha: .commit.sha}`)
+	if err != nil {
+		if ctx.Err() != nil {
+			return Branch{}, ctx.Err()
+		}
+		return Branch{}, ErrUnavailable
+	}
+	var observed Branch
+	if err := decodeBounded(output, &observed); err != nil {
+		return Branch{}, ErrUnavailable
+	}
+	if observed.Name != branch || !validGitOID(observed.SHA) {
+		return Branch{}, ErrRepository
+	}
+	observed.RepositoryID = expectedID
+	observed.FullName = fullName
+	return observed, nil
 }
 
 func decodeBounded(output []byte, target any) error {

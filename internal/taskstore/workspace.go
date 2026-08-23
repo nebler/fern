@@ -14,9 +14,14 @@ import (
 )
 
 const workspaceSelect = `
-SELECT id,name,state,repository_path,installation_id,repository_id,repository_full_name,
+SELECT id,name,state,repository_path,github_authority,installation_id,repository_id,repository_full_name,
        image_digest,opencode_protocol,runtime_desired_state,reconciliation_epoch,revision,created_at,updated_at
 FROM workspaces`
+
+// Version 1 stored only positive App installation IDs. Migration 5 retains
+// that physical column for existing foreign keys and uses 1 only as the hidden
+// on-disk discriminator for a workspace-gh authority; callers always see 0.
+const workspaceGHDatabaseInstallationID = 1
 
 // EnsureWorkspace creates a workspace once or returns the existing exact
 // immutable binding with the same name. The candidate ID is ignored only when
@@ -67,7 +72,7 @@ func scanWorkspace(row rowScanner) (Workspace, error) {
 	var createdAt, updatedAt int64
 	err := row.Scan(
 		&workspace.ID, &workspace.Name, &workspace.State, &workspace.RepositoryPath,
-		&installationID, &repositoryID, &workspace.RepositoryFullName, &workspace.ImageDigest,
+		&workspace.GitHubAuthority, &installationID, &repositoryID, &workspace.RepositoryFullName, &workspace.ImageDigest,
 		&workspace.OpenCodeProtocol, &workspace.RuntimeDesiredState, &reconciliationEpoch,
 		&workspace.Revision, &createdAt, &updatedAt,
 	)
@@ -77,10 +82,14 @@ func scanWorkspace(row rowScanner) (Workspace, error) {
 	if err != nil {
 		return Workspace{}, fmt.Errorf("read workspace: %w", err)
 	}
-	if installationID <= 0 || repositoryID <= 0 || reconciliationEpoch < 0 || workspace.Revision < 1 || !workspace.State.valid() {
+	if repositoryID <= 0 || reconciliationEpoch < 0 || workspace.Revision < 1 || !workspace.State.valid() || !workspace.GitHubAuthority.valid() ||
+		(workspace.GitHubAuthority == GitHubAuthorityWorkspaceGH && installationID != workspaceGHDatabaseInstallationID) ||
+		(workspace.GitHubAuthority == GitHubAuthorityAppBroker && installationID <= 0) {
 		return Workspace{}, ErrCorruptStore
 	}
-	workspace.InstallationID = task.InstallationID(installationID)
+	if workspace.GitHubAuthority == GitHubAuthorityAppBroker {
+		workspace.InstallationID = task.InstallationID(installationID)
+	}
 	workspace.RepositoryID = task.RepositoryID(repositoryID)
 	workspace.ReconciliationEpoch = uint64(reconciliationEpoch)
 	workspace.CreatedAt = fromUnixMillis(createdAt)
@@ -90,7 +99,7 @@ func scanWorkspace(row rowScanner) (Workspace, error) {
 
 func sameWorkspaceBinding(existing, desired Workspace) bool {
 	return existing.Name == desired.Name && existing.State == desired.State &&
-		existing.RepositoryPath == desired.RepositoryPath && existing.InstallationID == desired.InstallationID &&
+		existing.RepositoryPath == desired.RepositoryPath && existing.GitHubAuthority == desired.GitHubAuthority && existing.InstallationID == desired.InstallationID &&
 		existing.RepositoryID == desired.RepositoryID && existing.RepositoryFullName == desired.RepositoryFullName &&
 		existing.ImageDigest == desired.ImageDigest && existing.OpenCodeProtocol == desired.OpenCodeProtocol &&
 		existing.RuntimeDesiredState == desired.RuntimeDesiredState && existing.ReconciliationEpoch == desired.ReconciliationEpoch
@@ -115,11 +124,11 @@ func (s *Store) CreateWorkspace(ctx context.Context, w Workspace) error {
 	}()
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO workspaces(
-    id,name,state,repository_path,installation_id,repository_id,
+    id,name,state,repository_path,github_authority,installation_id,repository_id,
     repository_full_name,image_digest,opencode_protocol,runtime_desired_state,
     reconciliation_epoch,revision,created_at,updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		w.ID, w.Name, w.State, w.RepositoryPath, w.InstallationID, w.RepositoryID,
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		w.ID, w.Name, w.State, w.RepositoryPath, w.GitHubAuthority, databaseInstallationID(w), w.RepositoryID,
 		w.RepositoryFullName, w.ImageDigest, w.OpenCodeProtocol, w.RuntimeDesiredState,
 		w.ReconciliationEpoch, 1, unixMillis(w.CreatedAt), unixMillis(w.CreatedAt))
 	if err != nil {
@@ -130,6 +139,13 @@ INSERT INTO workspaces(
 	}
 	committed = true
 	return nil
+}
+
+func databaseInstallationID(workspace Workspace) task.InstallationID {
+	if workspace.GitHubAuthority == GitHubAuthorityWorkspaceGH {
+		return workspaceGHDatabaseInstallationID
+	}
+	return workspace.InstallationID
 }
 
 func validateWorkspace(w Workspace) error {
@@ -147,7 +163,10 @@ func validateWorkspace(w Workspace) error {
 	if !filepath.IsAbs(w.RepositoryPath) || filepath.Clean(w.RepositoryPath) != w.RepositoryPath || len(w.RepositoryPath) > 4096 {
 		return fmt.Errorf("%w: canonical repository path", ErrInvalidInput)
 	}
-	if w.InstallationID == 0 || uint64(w.InstallationID) > math.MaxInt64 || w.RepositoryID == 0 || uint64(w.RepositoryID) > math.MaxInt64 || w.ReconciliationEpoch > math.MaxInt64 {
+	if !w.GitHubAuthority.valid() ||
+		(w.GitHubAuthority == GitHubAuthorityWorkspaceGH && w.InstallationID != 0) ||
+		(w.GitHubAuthority == GitHubAuthorityAppBroker && (w.InstallationID == 0 || uint64(w.InstallationID) > math.MaxInt64)) ||
+		w.RepositoryID == 0 || uint64(w.RepositoryID) > math.MaxInt64 || w.ReconciliationEpoch > math.MaxInt64 {
 		return fmt.Errorf("%w: SQLite integer range", ErrInvalidInput)
 	}
 	if err := validTimestamp(w.CreatedAt); err != nil {

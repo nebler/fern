@@ -29,6 +29,7 @@ import (
 	"github.com/nebler/fern/internal/taskverification"
 	"github.com/nebler/fern/internal/verification"
 	"github.com/nebler/fern/internal/workspace"
+	"github.com/nebler/fern/internal/workspacegithub"
 )
 
 const (
@@ -53,8 +54,8 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	if cfg.Tasks == nil {
 		return nil, nil
 	}
-	if cfg.Workspace.GitHub == nil || cfg.Workspace.GitHub.InstallationID <= 0 {
-		return nil, fmt.Errorf("task service requires a GitHub App installation binding")
+	if cfg.Workspace.GitHub == nil {
+		return nil, fmt.Errorf("task service requires an explicit GitHub authority")
 	}
 	inspectCtx, inspectCancel := context.WithTimeout(ctx, 15*time.Second)
 	imageID, err := docker.ResolveImageID(inspectCtx, cfg.Workspace.Image)
@@ -81,39 +82,72 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	}()
 
 	ids := task.NewSecureGenerator()
-	credentialsDirectory, err := statePath("github-app")
-	if err != nil {
-		return nil, err
-	}
-	credentialStore, err := githubapp.NewCredentialStore(credentialsDirectory)
-	if err != nil {
-		return nil, err
-	}
-	credentials, err := credentialStore.Load()
-	if err != nil {
-		return nil, fmt.Errorf("load GitHub App credentials for task service: %w", err)
-	}
-	signer, err := githubapp.NewJWTSigner(credentials.AppID(), credentials.PrivateKey())
-	if err != nil {
-		return nil, err
-	}
-	installationTokens, err := githubapp.NewClient(http.DefaultClient, signer)
-	if err != nil {
-		return nil, err
-	}
-	repositories, err := githubapp.NewRepositoryClient(http.DefaultClient, installationTokens, time.Now)
-	if err != nil {
-		return nil, err
-	}
-	identity, err := githubapp.NewRepositoryIdentity(cfg.Workspace.GitHub.InstallationID, cfg.Workspace.GitHub.Repository.ID)
-	if err != nil {
-		return nil, err
-	}
-	authorityContext, authorityCancel := context.WithTimeout(ctx, 15*time.Second)
-	_, err = repositories.RepositoryByID(authorityContext, identity, cfg.Workspace.GitHub.Repository.FullName)
-	authorityCancel()
-	if err != nil {
-		return nil, fmt.Errorf("validate configured GitHub App repository authority: %w", err)
+	var (
+		baseResolver       taskapi.BaseResolver
+		installationTokens githubapp.InstallationTokenSource
+		repositories       *githubapp.RepositoryClient
+		githubAuthority    taskstore.GitHubAuthority
+	)
+	switch cfg.Workspace.GitHub.Mode {
+	case config.GitHubModeGitHubAppBroker:
+		githubAuthority = taskstore.GitHubAuthorityAppBroker
+		credentialsDirectory, stateErr := statePath("github-app")
+		if stateErr != nil {
+			return nil, stateErr
+		}
+		credentialStore, credentialErr := githubapp.NewCredentialStore(credentialsDirectory)
+		if credentialErr != nil {
+			return nil, credentialErr
+		}
+		credentials, credentialErr := credentialStore.Load()
+		if credentialErr != nil {
+			return nil, fmt.Errorf("load GitHub App credentials for task service: %w", credentialErr)
+		}
+		signer, signerErr := githubapp.NewJWTSigner(credentials.AppID(), credentials.PrivateKey())
+		if signerErr != nil {
+			return nil, signerErr
+		}
+		installationTokens, err = githubapp.NewClient(http.DefaultClient, signer)
+		if err != nil {
+			return nil, err
+		}
+		repositories, err = githubapp.NewRepositoryClient(http.DefaultClient, installationTokens, time.Now)
+		if err != nil {
+			return nil, err
+		}
+		identity, identityErr := githubapp.NewRepositoryIdentity(cfg.Workspace.GitHub.InstallationID, cfg.Workspace.GitHub.Repository.ID)
+		if identityErr != nil {
+			return nil, identityErr
+		}
+		authorityContext, authorityCancel := context.WithTimeout(ctx, 15*time.Second)
+		_, err = repositories.RepositoryByID(authorityContext, identity, cfg.Workspace.GitHub.Repository.FullName)
+		authorityCancel()
+		if err != nil {
+			return nil, fmt.Errorf("validate configured GitHub App repository authority: %w", err)
+		}
+		baseResolver, err = taskapi.GitHubBaseResolver(repositories, identity, cfg.Workspace.GitHub.Repository.FullName, 15*time.Second)
+		if err != nil {
+			return nil, err
+		}
+	case config.GitHubModeWorkspaceGH:
+		githubAuthority = taskstore.GitHubAuthorityWorkspaceGH
+		executor, executorErr := workspacegithub.NewManagedExecutor(manager, docker, cfg.Workspace.Name, 15*time.Second)
+		if executorErr != nil {
+			return nil, executorErr
+		}
+		client, clientErr := workspacegithub.New(executor, cfg.Workspace.GitHub.Hostname)
+		if clientErr != nil {
+			return nil, clientErr
+		}
+		baseResolver = func(resolveContext context.Context, ref string) (task.GitOID, error) {
+			branch, resolveErr := client.Branch(resolveContext, cfg.Workspace.GitHub.Repository.ID, cfg.Workspace.GitHub.Repository.FullName, ref)
+			if resolveErr != nil {
+				return "", resolveErr
+			}
+			return task.ParseGitOID(branch.SHA)
+		}
+	default:
+		return nil, fmt.Errorf("task service requires a supported GitHub authority")
 	}
 	candidateID, err := ids.WorkspaceID()
 	if err != nil {
@@ -122,15 +156,11 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	durableWorkspace, err := store.EnsureWorkspace(ctx, taskstore.Workspace{
 		ID: candidateID, Name: cfg.Workspace.Name, State: taskstore.WorkspaceActive,
-		RepositoryPath: cfg.Workspace.Repo, InstallationID: task.InstallationID(cfg.Workspace.GitHub.InstallationID),
+		RepositoryPath: cfg.Workspace.Repo, GitHubAuthority: githubAuthority, InstallationID: task.InstallationID(cfg.Workspace.GitHub.InstallationID),
 		RepositoryID: task.RepositoryID(cfg.Workspace.GitHub.Repository.ID), RepositoryFullName: cfg.Workspace.GitHub.Repository.FullName,
 		ImageDigest: imageID, OpenCodeProtocol: taskOpenCodeProtocol, RuntimeDesiredState: "running",
 		ReconciliationEpoch: 1, CreatedAt: now,
 	})
-	if err != nil {
-		return nil, err
-	}
-	baseResolver, err := taskapi.GitHubBaseResolver(repositories, identity, cfg.Workspace.GitHub.Repository.FullName, 15*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -202,31 +232,34 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	if err != nil {
 		return nil, err
 	}
-	publicationTemp := filepath.Join(taskDirectory, cfg.Workspace.Name+"-publication")
-	if err := os.MkdirAll(publicationTemp, 0o700); err != nil {
-		return nil, fmt.Errorf("create task publication temporary directory: %w", err)
-	}
-	taskPublisher, err := taskpublication.New(taskpublication.Config{
-		RepositoryPath: cfg.Workspace.Repo, GitExecutable: "/usr/bin/git", TempRoot: publicationTemp,
-		Timeout: 2 * time.Minute, OutputLimit: 64 << 10, Now: time.Now,
-	}, installationTokens, repositories)
-	if err != nil {
-		return nil, err
-	}
-	publicationCoordinator, err := taskpublicationcoord.New(store, manager, taskPublisher, ids, taskpublicationcoord.Config{
-		WorkspaceID:      durableWorkspace.ID,
-		PullRequestBody:  "Created by Fern from an immutable result after the configured verification policy passed.",
-		OperationTimeout: 2 * time.Minute, PollInterval: time.Second,
-		Actor: task.ActorSnapshot{
-			Type: task.ActorSystem, ID: "task-publication", DisplayName: "Task publication coordinator",
-			CredentialID: "service-v1", Authentication: "internal", RequestID: workerID,
-		}, RecoveryActor: recoveryActor, Now: time.Now,
-		OnError: func(err error) {
-			log.Error("task publication reconciliation deferred", "err", err, "workspace", cfg.Workspace.Name)
-		},
-	})
-	if err != nil {
-		return nil, err
+	var publicationCoordinator *taskpublicationcoord.Coordinator
+	if cfg.Workspace.GitHub.Mode == config.GitHubModeGitHubAppBroker {
+		publicationTemp := filepath.Join(taskDirectory, cfg.Workspace.Name+"-publication")
+		if err := os.MkdirAll(publicationTemp, 0o700); err != nil {
+			return nil, fmt.Errorf("create task publication temporary directory: %w", err)
+		}
+		taskPublisher, publicationErr := taskpublication.New(taskpublication.Config{
+			RepositoryPath: cfg.Workspace.Repo, GitExecutable: "/usr/bin/git", TempRoot: publicationTemp,
+			Timeout: 2 * time.Minute, OutputLimit: 64 << 10, Now: time.Now,
+		}, installationTokens, repositories)
+		if publicationErr != nil {
+			return nil, publicationErr
+		}
+		publicationCoordinator, publicationErr = taskpublicationcoord.New(store, manager, taskPublisher, ids, taskpublicationcoord.Config{
+			WorkspaceID:      durableWorkspace.ID,
+			PullRequestBody:  "Created by Fern from an immutable result after the configured verification policy passed.",
+			OperationTimeout: 2 * time.Minute, PollInterval: time.Second,
+			Actor: task.ActorSnapshot{
+				Type: task.ActorSystem, ID: "task-publication", DisplayName: "Task publication coordinator",
+				CredentialID: "service-v1", Authentication: "internal", RequestID: workerID,
+			}, RecoveryActor: recoveryActor, Now: time.Now,
+			OnError: func(err error) {
+				log.Error("task publication reconciliation deferred", "err", err, "workspace", cfg.Workspace.Name)
+			},
+		})
+		if publicationErr != nil {
+			return nil, publicationErr
+		}
 	}
 	var verificationCoordinator *taskverification.Coordinator
 	if configured := cfg.Tasks.Verification; configured != nil {
@@ -341,7 +374,7 @@ func taskWorkerID() (string, error) {
 }
 
 func newGitHubOnboarding(cfg config.Config) (http.Handler, error) {
-	if cfg.RemoteOrigin == "" {
+	if cfg.RemoteOrigin == "" || cfg.Workspace.GitHub == nil || cfg.Workspace.GitHub.Mode != config.GitHubModeGitHubAppBroker {
 		return nil, nil
 	}
 	directory, err := statePath("github-app")

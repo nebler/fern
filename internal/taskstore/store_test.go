@@ -350,7 +350,7 @@ func TestMigrationDriftAndUnknownVersionFailClosed(t *testing.T) {
 			t.Fatal(err)
 		}
 		raw := openRaw(t, path)
-		if _, err := raw.Exec(`PRAGMA user_version=5`); err != nil {
+		if _, err := raw.Exec(`PRAGMA user_version=6`); err != nil {
 			t.Fatal(err)
 		}
 		_ = raw.Close()
@@ -536,7 +536,7 @@ func createTestWorkspace(t *testing.T, s *Store) {
 	t.Helper()
 	err := s.CreateWorkspace(context.Background(), Workspace{
 		ID: testWorkspaceID(), Name: "demo", State: WorkspaceActive,
-		RepositoryPath: "/srv/fern/workspaces/demo", InstallationID: 123, RepositoryID: 987654321,
+		RepositoryPath: "/srv/fern/workspaces/demo", GitHubAuthority: GitHubAuthorityAppBroker, InstallationID: 123, RepositoryID: 987654321,
 		RepositoryFullName: "owner/repository", ImageDigest: "sha256:image", OpenCodeProtocol: "v2",
 		RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: testTime,
 	})

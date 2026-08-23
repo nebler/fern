@@ -3,6 +3,7 @@ package taskstore
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -50,6 +51,7 @@ func TestEnsureWorkspaceRejectsEveryBindingDrift(t *testing.T) {
 	}{
 		{"state", func(value *Workspace) { value.State = WorkspaceMaintenance }},
 		{"path", func(value *Workspace) { value.RepositoryPath = "/srv/other" }},
+		{"GitHub authority", func(value *Workspace) { value.GitHubAuthority = GitHubAuthorityWorkspaceGH; value.InstallationID = 0 }},
 		{"installation", func(value *Workspace) { value.InstallationID++ }},
 		{"repository", func(value *Workspace) { value.RepositoryID++ }},
 		{"full name", func(value *Workspace) { value.RepositoryFullName = "owner/other" }},
@@ -94,6 +96,79 @@ func TestWorkspaceReadsValidateAndHideMissingRows(t *testing.T) {
 	}
 }
 
+func TestWorkspaceGHAuthorityUsesNoPublicInstallationID(t *testing.T) {
+	store := openTestStore(t, testDBPath(t))
+	defer store.Close()
+	desired := testWorkspaceBinding()
+	desired.GitHubAuthority = GitHubAuthorityWorkspaceGH
+	desired.InstallationID = 0
+	created, err := store.EnsureWorkspace(context.Background(), desired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.GitHubAuthority != GitHubAuthorityWorkspaceGH || created.InstallationID != 0 {
+		t.Fatalf("created = %+v", created)
+	}
+	var authority string
+	var storedInstallation int64
+	if err := store.db.QueryRow(`SELECT github_authority,installation_id FROM workspaces WHERE id=?`, desired.ID).Scan(&authority, &storedInstallation); err != nil {
+		t.Fatal(err)
+	}
+	if authority != string(GitHubAuthorityWorkspaceGH) || storedInstallation != workspaceGHDatabaseInstallationID {
+		t.Fatalf("stored authority=%q discriminator=%d", authority, storedInstallation)
+	}
+
+	invalid := testWorkspaceBinding()
+	invalid.GitHubAuthority = GitHubAuthorityWorkspaceGH
+	if err := store.CreateWorkspace(context.Background(), invalid); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("workspace-gh installation error = %v", err)
+	}
+	invalid = testWorkspaceBinding()
+	invalid.InstallationID = 0
+	if err := store.CreateWorkspace(context.Background(), invalid); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("App installation error = %v", err)
+	}
+}
+
+func TestMigrationFivePreservesExistingAppAuthority(t *testing.T) {
+	path := testDBPath(t)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = file.Close()
+	raw := openRaw(t, path)
+	for _, migration := range migrations[:4] {
+		if _, err := raw.Exec(migration.sql); err != nil {
+			t.Fatalf("install migration %d: %v", migration.version, err)
+		}
+		if _, err := raw.Exec(`INSERT INTO schema_migrations(version,name,checksum) VALUES(?,?,?)`, migration.version, migration.name, migrationChecksum(migration)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	desired := testWorkspaceBinding()
+	if _, err := raw.Exec(`INSERT INTO workspaces(id,name,state,repository_path,installation_id,repository_id,repository_full_name,image_digest,opencode_protocol,runtime_desired_state,reconciliation_epoch,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		desired.ID, desired.Name, desired.State, desired.RepositoryPath, desired.InstallationID, desired.RepositoryID,
+		desired.RepositoryFullName, desired.ImageDigest, desired.OpenCodeProtocol, desired.RuntimeDesiredState,
+		desired.ReconciliationEpoch, 1, desired.CreatedAt.UnixMilli(), desired.CreatedAt.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.Exec(`PRAGMA user_version=4`); err != nil {
+		t.Fatal(err)
+	}
+	_ = raw.Close()
+
+	store := openTestStore(t, path)
+	defer store.Close()
+	workspace, err := store.GetWorkspace(context.Background(), desired.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if workspace.GitHubAuthority != GitHubAuthorityAppBroker || workspace.InstallationID != desired.InstallationID {
+		t.Fatalf("migrated workspace = %+v", workspace)
+	}
+}
+
 func TestFindReceiptByIdempotencyIsReadOnlyAndExactScoped(t *testing.T) {
 	t.Parallel()
 	store := openTestStore(t, testDBPath(t))
@@ -118,7 +193,7 @@ func TestFindReceiptByIdempotencyIsReadOnlyAndExactScoped(t *testing.T) {
 func testWorkspaceBinding() Workspace {
 	return Workspace{
 		ID: testWorkspaceID(), Name: "demo", State: WorkspaceActive,
-		RepositoryPath: "/srv/fern/workspaces/demo", InstallationID: 123, RepositoryID: 987654321,
+		RepositoryPath: "/srv/fern/workspaces/demo", GitHubAuthority: GitHubAuthorityAppBroker, InstallationID: 123, RepositoryID: 987654321,
 		RepositoryFullName: "owner/repository", ImageDigest: "sha256:image", OpenCodeProtocol: "v2",
 		RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: testTime,
 	}

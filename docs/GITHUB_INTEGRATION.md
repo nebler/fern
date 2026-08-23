@@ -29,8 +29,11 @@ audited phone actions as conveniences, but cannot claim they are an exclusive
 publication gate while the same credential is available to OpenCode. Fern still
 must implement phone-usable authentication, persistent credential state,
 documented scopes, local logout and remote revocation, replacement, and backup
-policy. Until those pieces and their acceptance tests exist, authenticated
-workspace `gh` is a chosen direction, not implemented behavior.
+policy. Fern now installs checksum-pinned `gh`, persists its isolated config,
+executes token-free status/repository/branch probes through a bounded attested
+container boundary, and supports durable task admission in `workspace-gh` mode.
+Durable push and draft-PR phone commands are still pending; OpenCode can use the
+same unrestricted workspace credential directly.
 
 ## Implemented Field Prototype
 
@@ -52,9 +55,10 @@ is retained exactly. Browser and ordinary CLI flags cannot override this
 binding. Without it, `fern up` remains fully functional, does not resolve `gh`,
 and omits the publication control.
 
-Adding `workspace.github.installationId` selects the repository-scoped GitHub
-App lane and disables this legacy host-`gh` publisher entirely. The two
-credential modes are never active in the same `fern up` process.
+`mode: github-app-broker` with `workspace.github.installationId` selects the
+repository-scoped GitHub App lane. `mode: workspace-gh` forbids an installation
+ID and uses only the managed workspace credential. The two credential modes are
+never active in the same `fern up` process.
 
 The operator-authenticated control page on the host-only listener owns the only
 mutation path. It requires `fern:$FERN_CONTROL_PASSWORD`;

@@ -24,14 +24,14 @@ func TestTaskServicesAreExplicitlyDisabledWhenPolicyIsAbsent(t *testing.T) {
 	}
 }
 
-func TestTaskServicesRequireGitHubInstallationBeforeRuntimeAccess(t *testing.T) {
+func TestTaskServicesRequireExplicitGitHubAuthorityBeforeRuntimeAccess(t *testing.T) {
 	t.Parallel()
 	cfg := config.Config{Tasks: &config.TaskPolicy{
 		Agent: "build", Model: config.TaskModel{Provider: "test", ID: "test-model"},
 		AttemptTimeout: time.Hour, LeaseDuration: time.Minute, Budget: config.TaskBudget{MaxTurns: 10},
 	}}
 	if _, err := newTaskServices(context.Background(), cfg, nil, nil, structServerAuth(), slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
-		t.Fatal("task service accepted no GitHub installation")
+		t.Fatal("task service accepted no GitHub authority")
 	}
 }
 
@@ -71,7 +71,7 @@ func TestGitHubOnboardingRequiresRemoteHTTPSAndUsesOperatorSetupOrigin(t *testin
 	}
 	handler, err := newGitHubOnboarding(config.Config{
 		RemoteOrigin: "https://fern.example.ts.net", OperatorListen: "127.0.0.1:8081",
-		Workspace: config.Workspace{Name: "demo"},
+		Workspace: config.Workspace{Name: "demo", GitHub: &config.WorkspaceGitHub{Mode: config.GitHubModeGitHubAppBroker}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -82,6 +82,17 @@ func TestGitHubOnboardingRequiresRemoteHTTPSAndUsesOperatorSetupOrigin(t *testin
 	handler.ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("setup = %d %s", response.Code, response.Body.String())
+	}
+}
+
+func TestGitHubOnboardingIsDisabledForWorkspaceGH(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	handler, err := newGitHubOnboarding(config.Config{
+		RemoteOrigin: "https://fern.example.ts.net", OperatorListen: "127.0.0.1:8081",
+		Workspace: config.Workspace{Name: "demo", GitHub: &config.WorkspaceGitHub{Mode: config.GitHubModeWorkspaceGH}},
+	})
+	if err != nil || handler != nil {
+		t.Fatalf("workspace-gh onboarding = %v, %v", handler, err)
 	}
 }
 

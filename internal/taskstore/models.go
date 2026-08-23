@@ -8,6 +8,7 @@ import (
 )
 
 type WorkspaceState string
+type GitHubAuthority string
 
 const (
 	WorkspaceActive           WorkspaceState = "active"
@@ -15,6 +16,15 @@ const (
 	WorkspaceRecoveryRequired WorkspaceState = "recovery_required"
 	WorkspaceDisabled         WorkspaceState = "disabled"
 )
+
+const (
+	GitHubAuthorityWorkspaceGH GitHubAuthority = "workspace-gh"
+	GitHubAuthorityAppBroker   GitHubAuthority = "github-app-broker"
+)
+
+func (authority GitHubAuthority) valid() bool {
+	return authority == GitHubAuthorityWorkspaceGH || authority == GitHubAuthorityAppBroker
+}
 
 func (s WorkspaceState) valid() bool {
 	switch s {
@@ -32,6 +42,7 @@ type Workspace struct {
 	Name                string
 	State               WorkspaceState
 	RepositoryPath      string
+	GitHubAuthority     GitHubAuthority
 	InstallationID      task.InstallationID
 	RepositoryID        task.RepositoryID
 	RepositoryFullName  string

@@ -443,7 +443,7 @@ func TestDeliverySchemaRejectsInvalidClaimShapeAndEventWorkspace(t *testing.T) {
 
 	otherWorkspace := Workspace{
 		ID: task.WorkspaceID(testID("wsp_", 500)), Name: "other", State: WorkspaceActive,
-		RepositoryPath: "/srv/fern/workspaces/other", InstallationID: 124, RepositoryID: 987654322,
+		RepositoryPath: "/srv/fern/workspaces/other", GitHubAuthority: GitHubAuthorityAppBroker, InstallationID: 124, RepositoryID: 987654322,
 		RepositoryFullName: "owner/other", ImageDigest: "sha256:image", OpenCodeProtocol: "v2",
 		RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: testTime,
 	}

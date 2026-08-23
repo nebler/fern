@@ -124,9 +124,11 @@ hostile multi-tenant sandbox.
 - optionally, one legacy host-credential publication coordinator;
 - optionally, one GitHub App onboarding handler.
 
-The legacy publisher and GitHub App task publisher are separate modes. A
-positive `workspace.github.installationId` selects App mode and prevents the
-legacy host-`gh` publisher from being initialized.
+GitHub authority is explicit and durable. `mode: github-app-broker` requires a
+positive installation ID and constructs the App task publisher. `mode:
+workspace-gh` forbids an installation ID, constructs the bounded managed-`gh`
+executor for task base resolution, and does not construct the App publisher.
+The legacy host publisher remains separate from both task authority modes.
 
 ### 4.1 Startup Order
 
@@ -139,16 +141,17 @@ legacy host-`gh` publisher from being initialized.
 5. Bind both loopback listeners before any Docker side effect.
 6. Create the shared signal and errgroup context.
 7. Acquire the exclusive workspace lease under `$HOME/.fern/locks`.
-8. Select the legacy publisher only when App mode is absent.
+8. Select the legacy publisher only when no explicit task GitHub authority is configured.
 9. Open the local Docker client, pause-intent state, and legacy control store.
 10. Construct the stream controller and workspace manager.
 11. Reconcile existing Docker state without waking absent or paused compute.
-12. Construct GitHub App onboarding when a remote origin exists and credentials
-    do not.
-13. Construct task services when the task policy and App installation binding
-    exist.
-14. Validate App credentials and GitHub repository authority before persisting a
-    new durable workspace binding.
+12. Construct GitHub App onboarding only for App-broker mode when a remote
+    origin exists and credentials do not.
+13. Construct task services when the task policy and either explicit GitHub
+    authority mode exist.
+14. Validate App authority eagerly, or construct the managed workspace-`gh`
+    resolver for live token-free validation at task admission, before persisting
+    the explicit durable workspace authority binding.
 15. Construct the two policy-separated proxy handlers.
 16. Reconcile interrupted legacy publications.
 17. Drain available durable publication journal work before serving HTTP.
