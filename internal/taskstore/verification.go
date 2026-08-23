@@ -62,7 +62,8 @@ SELECT r.id FROM results r
 JOIN tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id
 JOIN attempts a ON a.id=r.attempt_id AND a.task_id=r.task_id AND a.workspace_id=r.workspace_id
 WHERE r.workspace_id=? AND r.state='sealed' AND t.current_attempt_id=a.id AND t.sealed_result_id=r.id AND
- t.state='completed' AND t.cancel_epoch=0 AND a.state='succeeded' AND a.sealed_result_id=r.id AND
+ t.state='completed' AND t.cancel_epoch=0 AND
+ (a.state='succeeded' OR (a.state='superseded' AND r.completion_authority='user_seal')) AND a.sealed_result_id=r.id AND
  NOT EXISTS (SELECT 1 FROM verifications v WHERE v.result_id=r.id)
 ORDER BY r.updated_at,r.id LIMIT 1`, workspaceID).Scan(&resultID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -99,7 +100,8 @@ SELECT v.id FROM verifications v
 JOIN results r ON r.id=v.result_id JOIN tasks t ON t.id=v.task_id JOIN attempts a ON a.id=v.attempt_id
 WHERE v.workspace_id=? AND v.state=? AND r.state='sealed' AND r.result_commit=v.verified_commit AND
  t.current_attempt_id=a.id AND t.sealed_result_id=r.id AND t.state='completed' AND t.cancel_epoch=0 AND
- a.state='succeeded' AND a.sealed_result_id=r.id ORDER BY v.updated_at,v.id LIMIT 1`, workspaceID, state).Scan(&id)
+ (a.state='succeeded' OR (a.state='superseded' AND r.completion_authority='user_seal')) AND
+ a.sealed_result_id=r.id ORDER BY v.updated_at,v.id LIMIT 1`, workspaceID, state).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return VerificationRecord{}, &NotFoundError{Kind: string(state) + " verification", ID: string(workspaceID)}
 	}

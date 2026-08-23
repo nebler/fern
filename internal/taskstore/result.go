@@ -19,10 +19,13 @@ const maxManifestEntries = 10000
 const resultSelect = `
 SELECT r.id,r.task_id,r.attempt_id,r.workspace_id,r.state,r.outcome,r.repository_id,r.base_sha,
        r.result_commit,r.tree_oid,r.worktree_clean,r.manifest_entries,r.manifest_sha256,
-       r.opencode_session_id,r.opencode_message_id,r.evidence_sha256,r.policy_version,
-       r.collected_at,r.sealed_at,r.sealed_event_id,r.completed_event_id,r.revision,r.created_at,r.updated_at,
-       a.actor_type,a.actor_id,a.display_name,a.credential_id,a.authentication,a.request_id
-FROM results r JOIN actor_snapshots a ON a.id=r.creator_actor_snapshot_id`
+	       r.opencode_session_id,r.opencode_message_id,r.evidence_sha256,r.policy_version,
+	       r.collected_at,r.sealed_at,r.sealed_event_id,r.completed_event_id,r.revision,r.created_at,r.updated_at,
+	       a.actor_type,a.actor_id,a.display_name,a.credential_id,a.authentication,a.request_id,
+	       r.completion_authority,r.seal_request_id,
+	       aa.actor_type,aa.actor_id,aa.display_name,aa.credential_id,aa.authentication,aa.request_id
+	FROM results r JOIN actor_snapshots a ON a.id=r.creator_actor_snapshot_id
+	LEFT JOIN actor_snapshots aa ON aa.id=r.authorizer_actor_snapshot_id`
 
 // FindSucceededUnsealedAttempt returns current successful execution whose task
 // is still eligible for result collection. SealResult rechecks every field.
@@ -73,6 +76,9 @@ func (s *Store) GetResultManifest(ctx context.Context, id task.ResultID) ([]Mani
 // SealResult atomically inserts one immutable result and manifest, binds it to
 // the exact current successful attempt, and completes the unfenced task.
 func (s *Store) SealResult(ctx context.Context, p SealResultParams) (_ SealedResult, err error) {
+	if p.CompletionAuthority == "" {
+		p.CompletionAuthority = SealAuthorityExecutionSuccess
+	}
 	manifest, err := validateSealResult(p)
 	if err != nil {
 		return SealedResult{}, err
@@ -158,11 +164,13 @@ VALUES(?,?,?,?,?,?,?,?,?,?)`, p.ResultID, i, entry.PathBase64, entry.ChangeKind,
 INSERT INTO results(
  id,task_id,attempt_id,workspace_id,state,outcome,repository_id,base_sha,result_commit,tree_oid,
  worktree_clean,manifest_entries,manifest_sha256,opencode_session_id,opencode_message_id,evidence_sha256,
- policy_version,collected_at,sealed_at,creator_actor_snapshot_id,sealed_event_id,completed_event_id,revision,created_at,updated_at
-) VALUES(?,?,?,?,'sealed',?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`,
+ policy_version,collected_at,sealed_at,creator_actor_snapshot_id,sealed_event_id,completed_event_id,revision,created_at,updated_at,
+ completion_authority,seal_request_id,authorizer_actor_snapshot_id
+) VALUES(?,?,?,?,'sealed',?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?)`,
 		p.ResultID, owner.ID, attempt.ID, owner.WorkspaceID, p.Outcome, p.RepositoryID, p.BaseSHA, p.ResultCommit, p.TreeOID,
 		len(p.Manifest), p.ManifestSHA256[:], p.OpenCodeSessionID, p.OpenCodeMessageID, p.EvidenceSHA256[:],
-		p.PolicyVersion, unixMillis(p.CollectedAt), sealedMS, actorID, resultEvent.ID, taskEvent.ID, sealedMS, sealedMS); err != nil {
+		p.PolicyVersion, unixMillis(p.CollectedAt), sealedMS, actorID, resultEvent.ID, taskEvent.ID, sealedMS, sealedMS,
+		p.CompletionAuthority, nil, nil); err != nil {
 		return SealedResult{}, fmt.Errorf("insert sealed result: %w", err)
 	}
 	update, err := tx.ExecContext(ctx, `
@@ -222,16 +230,20 @@ func scanResult(row rowScanner) (Result, error) {
 	var r Result
 	var repositoryID, clean, collectedAt, sealedAt, createdAt, updatedAt int64
 	var manifestHash, evidenceHash []byte
+	var sealRequestID sql.NullString
+	var authorizerType, authorizerID, authorizerDisplayName, authorizerCredentialID, authorizerAuthentication, authorizerRequestID sql.NullString
 	err := row.Scan(&r.ID, &r.TaskID, &r.AttemptID, &r.WorkspaceID, &r.State, &r.Outcome, &repositoryID, &r.BaseSHA,
 		&r.ResultCommit, &r.TreeOID, &clean, &r.ManifestEntries, &manifestHash, &r.OpenCodeSessionID, &r.OpenCodeMessageID,
 		&evidenceHash, &r.PolicyVersion, &collectedAt, &sealedAt, &r.SealedEventID, &r.CompletedEventID,
 		&r.Revision, &createdAt, &updatedAt, &r.Creator.Type, &r.Creator.ID, &r.Creator.DisplayName,
-		&r.Creator.CredentialID, &r.Creator.Authentication, &r.Creator.RequestID)
+		&r.Creator.CredentialID, &r.Creator.Authentication, &r.Creator.RequestID, &r.CompletionAuthority, &sealRequestID,
+		&authorizerType, &authorizerID, &authorizerDisplayName, &authorizerCredentialID, &authorizerAuthentication, &authorizerRequestID)
 	if err != nil {
 		return Result{}, err
 	}
 	if repositoryID <= 0 || clean != 1 || len(manifestHash) != 32 || len(evidenceHash) != 32 ||
-		r.State != task.ResultSealed || r.Revision != 1 {
+		r.State != task.ResultSealed || r.Revision != 1 ||
+		(r.CompletionAuthority != SealAuthorityExecutionSuccess && r.CompletionAuthority != SealAuthorityUser) {
 		return Result{}, ErrCorruptStore
 	}
 	r.RepositoryID = task.RepositoryID(repositoryID)
@@ -240,6 +252,22 @@ func scanResult(row rowScanner) (Result, error) {
 	copy(r.EvidenceSHA256[:], evidenceHash)
 	r.CollectedAt, r.SealedAt = fromUnixMillis(collectedAt), fromUnixMillis(sealedAt)
 	r.CreatedAt, r.UpdatedAt = fromUnixMillis(createdAt), fromUnixMillis(updatedAt)
+	if r.CompletionAuthority == SealAuthorityExecutionSuccess {
+		if sealRequestID.Valid || authorizerType.Valid {
+			return Result{}, ErrCorruptStore
+		}
+	} else {
+		if !sealRequestID.Valid || !authorizerType.Valid || !authorizerID.Valid || !authorizerCredentialID.Valid || !authorizerAuthentication.Valid || !authorizerRequestID.Valid {
+			return Result{}, ErrCorruptStore
+		}
+		r.SealRequestID = task.SealRequestID(sealRequestID.String)
+		authorizer := task.ActorSnapshot{Type: task.ActorType(authorizerType.String), ID: authorizerID.String, DisplayName: authorizerDisplayName.String,
+			CredentialID: authorizerCredentialID.String, Authentication: authorizerAuthentication.String, RequestID: authorizerRequestID.String}
+		if err := authorizer.Validate(); err != nil {
+			return Result{}, ErrCorruptStore
+		}
+		r.Authorizer = &authorizer
+	}
 	return r, nil
 }
 
@@ -281,6 +309,16 @@ func nullableInt64(v sql.NullInt64) *int64 {
 }
 
 func validateSealResult(p SealResultParams) ([]ManifestEntry, error) {
+	if p.CompletionAuthority == "" {
+		p.CompletionAuthority = SealAuthorityExecutionSuccess
+	}
+	if p.CompletionAuthority != SealAuthorityExecutionSuccess || p.SealRequestID != "" || p.Authorizer != nil {
+		return nil, fmt.Errorf("%w: completion authority", ErrInvalidInput)
+	}
+	return validateResultMaterial(p)
+}
+
+func validateResultMaterial(p SealResultParams) ([]ManifestEntry, error) {
 	if _, err := task.ParseResultID(string(p.ResultID)); err != nil {
 		return nil, fmt.Errorf("%w: result ID", ErrInvalidInput)
 	}
@@ -417,29 +455,32 @@ func resultSealPayload(p SealResultParams) (json.RawMessage, error) {
 		return nil, err
 	}
 	type proof struct {
-		ResultID                task.ResultID          `json:"resultId"`
-		TaskID                  task.TaskID            `json:"taskId"`
-		AttemptID               task.AttemptID         `json:"attemptId"`
-		ExpectedAttemptRevision int64                  `json:"expectedAttemptRevision"`
-		ExpectedTaskRevision    int64                  `json:"expectedTaskRevision"`
-		RepositoryID            task.RepositoryID      `json:"repositoryId"`
-		BaseSHA                 task.GitOID            `json:"baseSha"`
-		ResultCommit            task.GitOID            `json:"resultCommit"`
-		TreeOID                 task.GitOID            `json:"treeOid"`
-		Outcome                 task.ResultOutcome     `json:"outcome"`
-		Clean                   bool                   `json:"clean"`
-		ManifestEntries         int                    `json:"manifestEntries"`
-		ManifestSHA256          string                 `json:"manifestSha256"`
-		OpenCodeSessionID       task.OpenCodeSessionID `json:"opencodeSessionId"`
-		OpenCodeMessageID       task.OpenCodeMessageID `json:"opencodeMessageId"`
-		EvidenceSHA256          string                 `json:"evidenceSha256"`
-		PolicyVersion           string                 `json:"policyVersion"`
-		CollectedAtMillis       int64                  `json:"collectedAtMillis"`
+		ResultID                task.ResultID           `json:"resultId"`
+		TaskID                  task.TaskID             `json:"taskId"`
+		AttemptID               task.AttemptID          `json:"attemptId"`
+		ExpectedAttemptRevision int64                   `json:"expectedAttemptRevision"`
+		ExpectedTaskRevision    int64                   `json:"expectedTaskRevision"`
+		RepositoryID            task.RepositoryID       `json:"repositoryId"`
+		BaseSHA                 task.GitOID             `json:"baseSha"`
+		ResultCommit            task.GitOID             `json:"resultCommit"`
+		TreeOID                 task.GitOID             `json:"treeOid"`
+		Outcome                 task.ResultOutcome      `json:"outcome"`
+		Clean                   bool                    `json:"clean"`
+		ManifestEntries         int                     `json:"manifestEntries"`
+		ManifestSHA256          string                  `json:"manifestSha256"`
+		OpenCodeSessionID       task.OpenCodeSessionID  `json:"opencodeSessionId"`
+		OpenCodeMessageID       task.OpenCodeMessageID  `json:"opencodeMessageId"`
+		EvidenceSHA256          string                  `json:"evidenceSha256"`
+		PolicyVersion           string                  `json:"policyVersion"`
+		CollectedAtMillis       int64                   `json:"collectedAtMillis"`
+		CompletionAuthority     SealCompletionAuthority `json:"completionAuthority"`
+		SealRequestID           task.SealRequestID      `json:"sealRequestId,omitempty"`
 	}
 	encoded, err := json.Marshal(proof{p.ResultID, p.TaskID, p.AttemptID, p.ExpectedAttemptRevision, p.ExpectedTaskRevision,
 		p.RepositoryID, p.BaseSHA, p.ResultCommit, p.TreeOID, p.Outcome, p.WorktreeClean, len(p.Manifest),
 		"sha256:" + hex.EncodeToString(p.ManifestSHA256[:]), p.OpenCodeSessionID, p.OpenCodeMessageID,
-		"sha256:" + hex.EncodeToString(p.EvidenceSHA256[:]), p.PolicyVersion, unixMillis(p.CollectedAt)})
+		"sha256:" + hex.EncodeToString(p.EvidenceSHA256[:]), p.PolicyVersion, unixMillis(p.CollectedAt),
+		p.CompletionAuthority, p.SealRequestID})
 	if err != nil {
 		return nil, fmt.Errorf("encode result proof: %w", err)
 	}
@@ -489,6 +530,7 @@ func resultSealReplay(ctx context.Context, q interface {
 		result.EvidenceSHA256 != p.EvidenceSHA256 || result.PolicyVersion != p.PolicyVersion ||
 		!result.CollectedAt.Equal(p.CollectedAt) || !result.SealedAt.Equal(p.SealedAt) || result.Creator != p.Actor ||
 		result.SealedEventID != p.ResultEventID || result.CompletedEventID != p.TaskEventID ||
+		result.CompletionAuthority != p.CompletionAuthority ||
 		attempt.Revision != p.ExpectedAttemptRevision+1 || owner.Revision != p.ExpectedTaskRevision+1 ||
 		attempt.SealedResultID != result.ID || owner.SealedResultID != result.ID || owner.State != task.TaskCompleted ||
 		!bytes.Equal(encodedManifest, requestedManifest) || resultEvent.Type != "attempt.result_sealed" ||

@@ -147,31 +147,151 @@ type Attempt struct {
 }
 
 type Result struct {
-	ID                task.ResultID
-	TaskID            task.TaskID
-	AttemptID         task.AttemptID
-	WorkspaceID       task.WorkspaceID
-	State             task.ResultState
-	Outcome           task.ResultOutcome
-	RepositoryID      task.RepositoryID
-	BaseSHA           task.GitOID
-	ResultCommit      task.GitOID
-	TreeOID           task.GitOID
-	WorktreeClean     bool
-	ManifestEntries   int
-	ManifestSHA256    [32]byte
-	OpenCodeSessionID task.OpenCodeSessionID
-	OpenCodeMessageID task.OpenCodeMessageID
-	EvidenceSHA256    [32]byte
-	PolicyVersion     string
-	CollectedAt       time.Time
-	SealedAt          time.Time
-	Creator           task.ActorSnapshot
-	SealedEventID     task.EventID
-	CompletedEventID  task.EventID
-	Revision          int64
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID                  task.ResultID
+	TaskID              task.TaskID
+	AttemptID           task.AttemptID
+	WorkspaceID         task.WorkspaceID
+	State               task.ResultState
+	Outcome             task.ResultOutcome
+	RepositoryID        task.RepositoryID
+	BaseSHA             task.GitOID
+	ResultCommit        task.GitOID
+	TreeOID             task.GitOID
+	WorktreeClean       bool
+	ManifestEntries     int
+	ManifestSHA256      [32]byte
+	OpenCodeSessionID   task.OpenCodeSessionID
+	OpenCodeMessageID   task.OpenCodeMessageID
+	EvidenceSHA256      [32]byte
+	PolicyVersion       string
+	CollectedAt         time.Time
+	SealedAt            time.Time
+	Creator             task.ActorSnapshot
+	CompletionAuthority SealCompletionAuthority
+	SealRequestID       task.SealRequestID
+	Authorizer          *task.ActorSnapshot
+	SealedEventID       task.EventID
+	CompletedEventID    task.EventID
+	Revision            int64
+	CreatedAt           time.Time
+	UpdatedAt           time.Time
+}
+
+type SealCompletionAuthority string
+
+const (
+	SealAuthorityExecutionSuccess SealCompletionAuthority = "execution_success"
+	SealAuthorityUser             SealCompletionAuthority = "user_seal"
+)
+
+type SealRequestState string
+
+const (
+	SealRequestPending   SealRequestState = "pending"
+	SealRequestClaimed   SealRequestState = "claimed"
+	SealRequestCompleted SealRequestState = "completed"
+	SealRequestRejected  SealRequestState = "rejected"
+)
+
+// SealPreview is the exact mutable ownership snapshot an HTTP layer presents
+// before asking a user to authorize a committed repository snapshot.
+type SealPreview struct {
+	Workspace Workspace
+	Task      Task
+	Attempt   Attempt
+}
+
+// SealRequest is immutable authorization plus coordinator lease/completion
+// state. Expected* fields are the values the user actually approved.
+type SealRequest struct {
+	ID                        task.SealRequestID
+	ReceiptID                 task.ReceiptID
+	WorkspaceID               task.WorkspaceID
+	TaskID                    task.TaskID
+	AttemptID                 task.AttemptID
+	State                     SealRequestState
+	CompletionAuthority       SealCompletionAuthority
+	ExpectedWorkspaceRevision int64
+	ExpectedTaskRevision      int64
+	ExpectedAttemptRevision   int64
+	RepositoryID              task.RepositoryID
+	BaseSHA                   task.GitOID
+	ExpectedResultCommit      task.GitOID
+	ExpectedTreeOID           task.GitOID
+	ExpectedOutcome           task.ResultOutcome
+	ExpectedManifestEntries   int
+	ExpectedManifestSHA256    [32]byte
+	ExpectedWorktreeClean     bool
+	IdempotencyKey            task.IdempotencyKey
+	RequestHash               task.RequestHash
+	Authorizer                task.ActorSnapshot
+	ResultID                  task.ResultID
+	ResultEventID             task.EventID
+	TaskEventID               task.EventID
+	ClaimOwner                string
+	ClaimExpiresAt            *time.Time
+	ClaimRevision             int64
+	AcceptedAt                time.Time
+	CompletedAt               *time.Time
+	RejectedAt                *time.Time
+	RejectedReason            string
+}
+
+type SealAdmission struct {
+	Request  SealRequest
+	Receipt  Receipt
+	Preview  SealPreview
+	Replayed bool
+}
+
+type RequestSealParams struct {
+	SealRequestID             task.SealRequestID
+	ReceiptID                 task.ReceiptID
+	ResultID                  task.ResultID
+	ResultEventID             task.EventID
+	TaskEventID               task.EventID
+	TaskID                    task.TaskID
+	Claim                     task.IdempotencyClaim
+	ExpectedWorkspaceRevision int64
+	ExpectedTaskRevision      int64
+	ExpectedAttemptRevision   int64
+	RepositoryID              task.RepositoryID
+	BaseSHA                   task.GitOID
+	ExpectedResultCommit      task.GitOID
+	ExpectedTreeOID           task.GitOID
+	ExpectedOutcome           task.ResultOutcome
+	ExpectedManifestEntries   int
+	ExpectedManifestSHA256    [32]byte
+	ExpectedWorktreeClean     bool
+	APIContractVersion        string
+	AcceptedAt                time.Time
+}
+
+type ClaimSealRequestParams struct {
+	WorkspaceID    task.WorkspaceID
+	ClaimOwner     string
+	Now            time.Time
+	LeaseExpiresAt time.Time
+}
+
+type SealRequestWork struct {
+	Request SealRequest
+	Preview SealPreview
+}
+
+type RejectSealRequestParams struct {
+	SealRequestID         task.SealRequestID
+	ClaimOwner            string
+	ExpectedClaimRevision int64
+	Reason                string
+	RejectedAt            time.Time
+}
+
+type SealAuthorizedResultParams struct {
+	SealRequestID         task.SealRequestID
+	ClaimOwner            string
+	ExpectedClaimRevision int64
+	Result                SealResultParams
 }
 
 type ManifestEntry struct {
@@ -264,6 +384,9 @@ type SealResultParams struct {
 	CollectedAt             time.Time
 	SealedAt                time.Time
 	Actor                   task.ActorSnapshot
+	CompletionAuthority     SealCompletionAuthority
+	SealRequestID           task.SealRequestID
+	Authorizer              *task.ActorSnapshot
 }
 
 // DeliveryPhase is the last durably started delivery effect. It is monotonic:

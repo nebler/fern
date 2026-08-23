@@ -136,8 +136,10 @@ func journalSource(ctx context.Context, q queryRower, resultID task.ResultID, ex
 	if attempt.Revision != expectedAttemptRevision {
 		return Result{}, Task{}, Attempt{}, &StaleRevisionError{AttemptID: attempt.ID, Expected: expectedAttemptRevision, Actual: attempt.Revision}
 	}
+	validAttempt := attempt.State == task.AttemptSucceeded ||
+		(result.CompletionAuthority == SealAuthorityUser && attempt.State == task.AttemptSuperseded)
 	if result.State != task.ResultSealed || owner.CurrentAttemptID != attempt.ID || owner.SealedResultID != result.ID ||
-		owner.State != task.TaskCompleted || owner.CancelEpoch != 0 || attempt.State != task.AttemptSucceeded || attempt.SealedResultID != result.ID {
+		owner.State != task.TaskCompleted || owner.CancelEpoch != 0 || !validAttempt || attempt.SealedResultID != result.ID {
 		return Result{}, Task{}, Attempt{}, fmt.Errorf("%w: sealed result is not currently owned and unfenced", ErrInvalidState)
 	}
 	return result, owner, attempt, nil

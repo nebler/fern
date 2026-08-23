@@ -31,6 +31,16 @@ type AdmissionIDs struct {
 	OpenCodeMessageID OpenCodeMessageID
 }
 
+// SealRequestIDs is allocated before admitting a user-authorized seal so every
+// identity used after a restart is durable before collection starts.
+type SealRequestIDs struct {
+	SealRequestID SealRequestID
+	ReceiptID     ReceiptID
+	ResultID      ResultID
+	ResultEventID EventID
+	TaskEventID   EventID
+}
+
 func NewGenerator(random io.Reader, now func() time.Time) (*Generator, error) {
 	if random == nil || now == nil {
 		return nil, ErrIDGeneration
@@ -71,6 +81,27 @@ func (g *Generator) GenerateAdmissionIDs() (AdmissionIDs, error) {
 	return ids, nil
 }
 
+func (g *Generator) GenerateSealRequestIDs() (SealRequestIDs, error) {
+	var ids SealRequestIDs
+	var err error
+	if ids.SealRequestID, err = g.SealRequestID(); err != nil {
+		return SealRequestIDs{}, err
+	}
+	if ids.ReceiptID, err = g.ReceiptID(); err != nil {
+		return SealRequestIDs{}, err
+	}
+	if ids.ResultID, err = g.ResultID(); err != nil {
+		return SealRequestIDs{}, err
+	}
+	if ids.ResultEventID, err = g.EventID(); err != nil {
+		return SealRequestIDs{}, err
+	}
+	if ids.TaskEventID, err = g.EventID(); err != nil {
+		return SealRequestIDs{}, err
+	}
+	return ids, nil
+}
+
 func (g *Generator) WorkspaceID() (WorkspaceID, error) {
 	value, err := g.fernID("wsp_")
 	return WorkspaceID(value), err
@@ -99,6 +130,11 @@ func (g *Generator) EventID() (EventID, error) {
 func (g *Generator) ApprovalID() (ApprovalID, error) {
 	value, err := g.fernID("apr_")
 	return ApprovalID(value), err
+}
+
+func (g *Generator) SealRequestID() (SealRequestID, error) {
+	value, err := g.fernID("slr_")
+	return SealRequestID(value), err
 }
 
 func (g *Generator) ResultID() (ResultID, error) {

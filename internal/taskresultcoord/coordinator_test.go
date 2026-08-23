@@ -40,6 +40,48 @@ type fakeStore struct {
 	params taskstore.SealResultParams
 }
 
+type fakeAuthorizedStore struct {
+	*fakeStore
+	work            taskstore.SealRequestWork
+	claimErr        error
+	inspect         func(taskstore.SealRequestWork) taskstore.SealRequestWork
+	claims          int
+	inspects        int
+	rejections      int
+	authorizedSeals int
+	authorized      taskstore.SealAuthorizedResultParams
+}
+
+func (store *fakeAuthorizedStore) ClaimSealRequest(context.Context, taskstore.ClaimSealRequestParams) (taskstore.SealRequestWork, error) {
+	store.claims++
+	if store.claimErr != nil {
+		return taskstore.SealRequestWork{}, store.claimErr
+	}
+	return store.work, nil
+}
+
+func (store *fakeAuthorizedStore) InspectClaimedSealRequest(context.Context, task.SealRequestID, string, int64) (taskstore.SealRequestWork, error) {
+	store.inspects++
+	if store.inspect != nil {
+		return store.inspect(store.work), nil
+	}
+	return store.work, nil
+}
+
+func (store *fakeAuthorizedStore) RejectSealRequest(_ context.Context, p taskstore.RejectSealRequestParams) (taskstore.SealRequest, error) {
+	store.rejections++
+	request := store.work.Request
+	request.State = taskstore.SealRequestRejected
+	request.RejectedReason = p.Reason
+	return request, nil
+}
+
+func (store *fakeAuthorizedStore) SealAuthorizedResult(_ context.Context, p taskstore.SealAuthorizedResultParams) (taskstore.SealedResult, error) {
+	store.authorizedSeals++
+	store.authorized = p
+	return taskstore.SealedResult{}, nil
+}
+
 func (store *fakeStore) FindSucceededUnsealedAttempt(ctx context.Context, _ task.WorkspaceID) (taskstore.DeliveryWork, error) {
 	store.mu.Lock()
 	store.finds++
@@ -214,6 +256,106 @@ func TestRunOnceSuccessUsesExactProofAndRetainsFenceThroughSeal(t *testing.T) {
 	}
 	if collector.request.RepositoryPath != "/srv/fern/repository" || collector.request.Repository != (task.RepositoryTuple{RepositoryID: 42, BaseSHA: baseSHA}) {
 		t.Fatalf("unexpected collector request: %+v", collector.request)
+	}
+}
+
+func TestRunOnceUserSealUsesDurableAuthorizationWithoutSuccessObservation(t *testing.T) {
+	base := &fakeStore{}
+	store := &fakeAuthorizedStore{fakeStore: base, work: authorizedWork()}
+	fencer := &fakeFencer{}
+	observer := &fakeObserver{}
+	collector := &fakeCollector{}
+	ids := &fakeIDs{}
+	coordinator := newCoordinator(t, store, fencer, collector, observer, ids)
+	if err := coordinator.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if store.claims != 1 || store.inspects != 1 || store.authorizedSeals != 1 || store.seals != 0 ||
+		observer.calls != 0 || ids.resultCalls != 0 || ids.eventCalls != 0 || collector.calls != 1 {
+		t.Fatalf("calls claim=%d inspect=%d authorized=%d legacy=%d observe=%d ids=%d/%d collect=%d",
+			store.claims, store.inspects, store.authorizedSeals, store.seals, observer.calls, ids.resultCalls, ids.eventCalls, collector.calls)
+	}
+	params := store.authorized
+	if params.SealRequestID != store.work.Request.ID || params.Result.CompletionAuthority != taskstore.SealAuthorityUser ||
+		params.Result.ResultID != store.work.Request.ResultID || params.Result.ResultCommit != store.work.Request.ExpectedResultCommit ||
+		params.Result.Authorizer == nil || *params.Result.Authorizer != store.work.Request.Authorizer {
+		t.Fatalf("authorized params: %+v", params)
+	}
+	if collector.request.ExpectedSnapshot == nil || collector.request.ExpectedSnapshot.ResultCommit != store.work.Request.ExpectedResultCommit ||
+		collector.request.ExpectedSnapshot.ManifestSHA256 != store.work.Request.ExpectedManifestSHA256 {
+		t.Fatalf("collector was not constrained: %+v", collector.request)
+	}
+}
+
+func TestRunOnceUserSealRejectsChangedRevisionAndSnapshot(t *testing.T) {
+	t.Run("revision", func(t *testing.T) {
+		store := &fakeAuthorizedStore{fakeStore: &fakeStore{}, work: authorizedWork()}
+		store.inspect = func(work taskstore.SealRequestWork) taskstore.SealRequestWork {
+			work.Preview.Task.Revision++
+			return work
+		}
+		collector := &fakeCollector{}
+		coordinator := newCoordinator(t, store, &fakeFencer{}, collector, &fakeObserver{}, &fakeIDs{})
+		if err := coordinator.RunOnce(context.Background()); !errors.Is(err, ErrSelectionChanged) {
+			t.Fatalf("err=%v", err)
+		}
+		if store.rejections != 1 || store.authorizedSeals != 0 || collector.calls != 0 {
+			t.Fatalf("rejections=%d seals=%d collects=%d", store.rejections, store.authorizedSeals, collector.calls)
+		}
+	})
+	t.Run("head or manifest", func(t *testing.T) {
+		store := &fakeAuthorizedStore{fakeStore: &fakeStore{}, work: authorizedWork()}
+		collector := &fakeCollector{collect: func(_ context.Context, request taskresult.Request) (taskresult.Result, error) {
+			result := collectedResult(request)
+			result.Tuple.ResultCommit = task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+			return result, nil
+		}}
+		coordinator := newCoordinator(t, store, &fakeFencer{}, collector, &fakeObserver{}, &fakeIDs{})
+		if err := coordinator.RunOnce(context.Background()); !errors.Is(err, ErrCollectionFailed) {
+			t.Fatalf("err=%v", err)
+		}
+		if store.rejections != 1 || store.authorizedSeals != 0 {
+			t.Fatalf("rejections=%d seals=%d", store.rejections, store.authorizedSeals)
+		}
+	})
+}
+
+func TestRunOnceCleanIdleAndRestartDoNotCreateResultWithoutAuthorization(t *testing.T) {
+	base := &fakeStore{find: func(context.Context, int) (taskstore.DeliveryWork, error) {
+		return taskstore.DeliveryWork{}, taskstore.ErrNotFound
+	}}
+	store := &fakeAuthorizedStore{fakeStore: base, claimErr: taskstore.ErrNotFound}
+	collector := &fakeCollector{}
+	fencer := &fakeFencer{}
+	coordinator := newCoordinator(t, store, fencer, collector, &fakeObserver{}, &fakeIDs{})
+	for range 2 {
+		if err := coordinator.RunOnce(context.Background()); !errors.Is(err, ErrNoWork) {
+			t.Fatalf("err=%v", err)
+		}
+	}
+	if store.authorizedSeals != 0 || store.seals != 0 || collector.calls != 0 || fencer.calls != 0 {
+		t.Fatalf("seals=%d/%d collects=%d fences=%d", store.authorizedSeals, store.seals, collector.calls, fencer.calls)
+	}
+}
+
+func TestAuthorizedCoordinatorNeverFallsBackToSuccessDiscovery(t *testing.T) {
+	base := &fakeStore{find: func(context.Context, int) (taskstore.DeliveryWork, error) {
+		t.Fatal("authorized coordinator queried execution success")
+		return taskstore.DeliveryWork{}, nil
+	}}
+	store := &fakeAuthorizedStore{fakeStore: base, claimErr: taskstore.ErrNotFound}
+	coordinator, err := NewAuthorized(store, &fakeFencer{}, &fakeCollector{}, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.RunOnce(context.Background()); !errors.Is(err, ErrNoWork) {
+		t.Fatalf("RunOnce error = %v", err)
+	}
+}
+
+func TestNewAuthorizedRequiresAuthorizedStore(t *testing.T) {
+	if _, err := NewAuthorized(&fakeStore{}, &fakeFencer{}, &fakeCollector{}, testConfig()); !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("error = %v", err)
 	}
 }
 
@@ -568,6 +710,32 @@ func succeededWork() taskstore.DeliveryWork {
 		Attempt: taskstore.Attempt{
 			ID: attemptID, TaskID: taskID, WorkspaceID: workspaceID, State: task.AttemptSucceeded,
 			OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID, BaseSHA: baseSHA, Revision: 13,
+		},
+	}
+}
+
+func authorizedWork() taskstore.SealRequestWork {
+	expires := fixedTime.Add(time.Minute)
+	manifestHash := sha256.Sum256([]byte("[]"))
+	authorizer := task.ActorSnapshot{Type: task.ActorDevice, ID: "device-1", DisplayName: "Phone", CredentialID: "credential-1", Authentication: "cookie", RequestID: "seal-1"}
+	return taskstore.SealRequestWork{
+		Request: taskstore.SealRequest{
+			ID: task.SealRequestID("slr_01890a5d-ac00-7000-8000-000000000007"), ReceiptID: task.ReceiptID("rcp_01890a5d-ac00-7000-8000-000000000008"),
+			WorkspaceID: workspaceID, TaskID: taskID, AttemptID: attemptID, State: taskstore.SealRequestClaimed,
+			CompletionAuthority: taskstore.SealAuthorityUser, ExpectedWorkspaceRevision: 3, ExpectedTaskRevision: 11,
+			ExpectedAttemptRevision: 13, RepositoryID: 42, BaseSHA: baseSHA, ExpectedResultCommit: baseSHA,
+			ExpectedTreeOID: treeSHA, ExpectedOutcome: task.ResultNoChanges, ExpectedManifestEntries: 0,
+			ExpectedManifestSHA256: manifestHash, IdempotencyKey: "seal-once", Authorizer: authorizer,
+			ExpectedWorktreeClean: true,
+			ResultID:              resultID, ResultEventID: resultEvent, TaskEventID: taskEvent, ClaimOwner: "result-coordinator",
+			ClaimExpiresAt: &expires, ClaimRevision: 1, AcceptedAt: fixedTime.Add(-2 * time.Second),
+		},
+		Preview: taskstore.SealPreview{
+			Workspace: taskstore.Workspace{ID: workspaceID, State: taskstore.WorkspaceActive, RepositoryID: 42, Revision: 3},
+			Task: taskstore.Task{ID: taskID, WorkspaceID: workspaceID, RepositoryID: 42, BaseSHA: baseSHA, State: task.TaskRunning,
+				CurrentAttemptID: attemptID, Revision: 11},
+			Attempt: taskstore.Attempt{ID: attemptID, TaskID: taskID, WorkspaceID: workspaceID, State: task.AttemptRunning,
+				OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID, BaseSHA: baseSHA, Revision: 13},
 		},
 	}
 }

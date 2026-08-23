@@ -14,6 +14,7 @@ type (
 	ReceiptID              string
 	EventID                string
 	ApprovalID             string
+	SealRequestID          string
 	ResultID               string
 	VerificationID         string
 	PublicationID          string
@@ -63,6 +64,12 @@ func ParseApprovalID(v string) (ApprovalID, error) {
 		return "", err
 	}
 	return ApprovalID(v), nil
+}
+func ParseSealRequestID(v string) (SealRequestID, error) {
+	if err := validateFernID(v, "slr_"); err != nil {
+		return "", err
+	}
+	return SealRequestID(v), nil
 }
 func ParseResultID(v string) (ResultID, error) {
 	if err := validateFernID(v, "res_"); err != nil {

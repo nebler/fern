@@ -60,6 +60,13 @@ func TestGeneratorProducesEveryTypedID(t *testing.T) {
 			return err
 		},
 		func() error {
+			value, err := generator.SealRequestID()
+			if err == nil {
+				_, err = ParseSealRequestID(string(value))
+			}
+			return err
+		},
+		func() error {
 			value, err := generator.ResultID()
 			if err == nil {
 				_, err = ParseResultID(string(value))
@@ -140,6 +147,36 @@ func TestGenerateAdmissionIDsReturnsCompleteValidatedSet(t *testing.T) {
 	}
 	if ids.TaskEventID == ids.AttemptEventID {
 		t.Fatal("admission event IDs are equal")
+	}
+}
+
+func TestGenerateSealRequestIDsReturnsCompleteValidatedSet(t *testing.T) {
+	generator, err := NewGenerator(bytes.NewReader(make([]byte, 128)), func() time.Time { return time.UnixMilli(1_700_000_000_000) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := generator.GenerateSealRequestIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validations := []error{}
+	_, err = ParseSealRequestID(string(ids.SealRequestID))
+	validations = append(validations, err)
+	_, err = ParseReceiptID(string(ids.ReceiptID))
+	validations = append(validations, err)
+	_, err = ParseResultID(string(ids.ResultID))
+	validations = append(validations, err)
+	_, err = ParseEventID(string(ids.ResultEventID))
+	validations = append(validations, err)
+	_, err = ParseEventID(string(ids.TaskEventID))
+	validations = append(validations, err)
+	for _, validationErr := range validations {
+		if validationErr != nil {
+			t.Fatal(validationErr)
+		}
+	}
+	if ids.ResultEventID == ids.TaskEventID {
+		t.Fatal("seal event IDs are equal")
 	}
 }
 

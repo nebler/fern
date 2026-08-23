@@ -348,7 +348,7 @@ func TestMigrationThreeFromVersionTwo(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('journal_events','verifications','publications')`).Scan(&tables); err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 || tables != 3 {
+	if version != 4 || tables != 3 {
 		t.Fatalf("migration version=%d tables=%d", version, tables)
 	}
 }

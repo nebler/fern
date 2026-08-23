@@ -1,5 +1,5 @@
-// Package taskresultcoord seals results whose exact success identity was
-// already recorded by an external authoritative execution projector.
+// Package taskresultcoord seals exact repository snapshots from either an
+// external success authority or an explicit durable user authorization.
 package taskresultcoord
 
 import (
@@ -42,6 +42,13 @@ var (
 type Store interface {
 	FindSucceededUnsealedAttempt(context.Context, task.WorkspaceID) (taskstore.DeliveryWork, error)
 	SealResult(context.Context, taskstore.SealResultParams) (taskstore.SealedResult, error)
+}
+
+type authorizedStore interface {
+	ClaimSealRequest(context.Context, taskstore.ClaimSealRequestParams) (taskstore.SealRequestWork, error)
+	InspectClaimedSealRequest(context.Context, task.SealRequestID, string, int64) (taskstore.SealRequestWork, error)
+	RejectSealRequest(context.Context, taskstore.RejectSealRequestParams) (taskstore.SealRequest, error)
+	SealAuthorizedResult(context.Context, taskstore.SealAuthorizedResultParams) (taskstore.SealedResult, error)
 }
 
 type Fencer interface {
@@ -92,6 +99,7 @@ type Config struct {
 	PolicyVersion    string
 	OperationTimeout time.Duration
 	Actor            task.ActorSnapshot
+	ClaimOwner       string
 	Now              func() time.Time
 }
 
@@ -116,24 +124,52 @@ func New(store Store, fencer Fencer, collector Collector, observer Observer, ids
 	if store == nil || fencer == nil || collector == nil || observer == nil || ids == nil {
 		return nil, ErrInvalidConfig
 	}
-	if _, err := task.ParseWorkspaceID(string(config.WorkspaceID)); err != nil {
+	if err := validateConfig(&config); err != nil {
+		return nil, err
+	}
+	return &Coordinator{store: store, fencer: fencer, collector: collector, observer: observer, ids: ids, config: config}, nil
+}
+
+// NewAuthorized constructs a coordinator that consumes only explicit durable
+// user seal requests. It never discovers or infers execution success.
+func NewAuthorized(store Store, fencer Fencer, collector Collector, config Config) (*Coordinator, error) {
+	if store == nil || fencer == nil || collector == nil {
 		return nil, ErrInvalidConfig
+	}
+	if _, ok := store.(authorizedStore); !ok {
+		return nil, ErrInvalidConfig
+	}
+	if err := validateConfig(&config); err != nil {
+		return nil, err
+	}
+	return &Coordinator{store: store, fencer: fencer, collector: collector, config: config}, nil
+}
+
+func validateConfig(config *Config) error {
+	if _, err := task.ParseWorkspaceID(string(config.WorkspaceID)); err != nil {
+		return ErrInvalidConfig
 	}
 	if len(config.RepositoryPath) < 1 || len(config.RepositoryPath) > MaxRepositoryPathBytes ||
 		!filepath.IsAbs(config.RepositoryPath) || filepath.Clean(config.RepositoryPath) != config.RepositoryPath ||
 		strings.ContainsAny(config.RepositoryPath, "\x00\r\n") {
-		return nil, ErrInvalidConfig
+		return ErrInvalidConfig
 	}
 	if !validPolicyVersion(config.PolicyVersion) || config.OperationTimeout <= 0 || config.OperationTimeout > MaxOperationTimeout {
-		return nil, ErrInvalidConfig
+		return ErrInvalidConfig
 	}
 	if err := config.Actor.Validate(); err != nil || (config.Actor.Type != task.ActorSystem && config.Actor.Type != task.ActorRecovery) {
-		return nil, ErrInvalidConfig
+		return ErrInvalidConfig
+	}
+	if config.ClaimOwner == "" {
+		config.ClaimOwner = config.Actor.ID
+	}
+	if len(config.ClaimOwner) > 64 || !validPolicyVersion(config.ClaimOwner) {
+		return ErrInvalidConfig
 	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
-	return &Coordinator{store: store, fencer: fencer, collector: collector, observer: observer, ids: ids, config: config}, nil
+	return nil
 }
 
 // RunOnce seals at most one result. It does not poll, infer terminal success,
@@ -141,6 +177,25 @@ func New(store Store, fencer Fencer, collector Collector, observer Observer, ids
 func (coordinator *Coordinator) RunOnce(ctx context.Context) error {
 	coordinator.runMu.Lock()
 	defer coordinator.runMu.Unlock()
+	if store, ok := coordinator.store.(authorizedStore); ok {
+		now := coordinator.config.Now().UTC().Truncate(time.Millisecond)
+		if now.IsZero() || now.UnixMilli() < 0 {
+			return ErrInvalidConfig
+		}
+		work, claimErr := store.ClaimSealRequest(ctx, taskstore.ClaimSealRequestParams{
+			WorkspaceID: coordinator.config.WorkspaceID, ClaimOwner: coordinator.config.ClaimOwner,
+			Now: now, LeaseExpiresAt: now.Add(coordinator.config.OperationTimeout),
+		})
+		if claimErr == nil {
+			return coordinator.runAuthorized(ctx, store, work)
+		}
+		if !errors.Is(claimErr, taskstore.ErrNotFound) {
+			return claimErr
+		}
+	}
+	if coordinator.observer == nil {
+		return ErrNoWork
+	}
 
 	selected, err := coordinator.store.FindSucceededUnsealedAttempt(ctx, coordinator.config.WorkspaceID)
 	if errors.Is(err, taskstore.ErrNotFound) {
@@ -254,6 +309,153 @@ func (coordinator *Coordinator) RunOnce(ctx context.Context) error {
 		PolicyVersion: collected.PolicyVersion, CollectedAt: collected.CollectedAt, SealedAt: sealedAt, Actor: coordinator.config.Actor,
 	})
 	return err
+}
+
+func (coordinator *Coordinator) runAuthorized(ctx context.Context, store authorizedStore, selected taskstore.SealRequestWork) error {
+	operationContext, cancelOperation := context.WithTimeout(ctx, coordinator.config.OperationTimeout)
+	defer cancelOperation()
+	authorityDeadline, _ := operationContext.Deadline()
+
+	release, err := coordinator.fencer.AcquireQuiesced(operationContext, func(context.Context, workspace.RequestTarget) error { return nil })
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return classifiedError{kind: ErrFenceFailed, cause: err}
+	}
+	if release == nil {
+		return ErrFenceFailed
+	}
+	defer release()
+
+	current, err := store.InspectClaimedSealRequest(operationContext, selected.Request.ID, coordinator.config.ClaimOwner, selected.Request.ClaimRevision)
+	if err != nil {
+		return err
+	}
+	if !sameAuthorizedSelection(selected, current) {
+		coordinator.rejectAuthorized(ctx, store, selected.Request, "authorized_ownership_changed", authorityDeadline)
+		return ErrSelectionChanged
+	}
+	evidence, err := json.Marshal(struct {
+		Authority     taskstore.SealCompletionAuthority `json:"authority"`
+		SealRequestID task.SealRequestID                `json:"sealRequestId"`
+	}{taskstore.SealAuthorityUser, current.Request.ID})
+	if err != nil {
+		return ErrInvalidConfig
+	}
+	evidenceHash := sha256.Sum256(evidence)
+	expected := &taskresult.SnapshotExpectation{
+		ResultCommit: current.Request.ExpectedResultCommit, TreeOID: current.Request.ExpectedTreeOID,
+		ManifestEntries: current.Request.ExpectedManifestEntries, ManifestSHA256: current.Request.ExpectedManifestSHA256,
+	}
+	collected, err := coordinator.collector.Collect(operationContext, taskresult.Request{
+		RepositoryPath:    coordinator.config.RepositoryPath,
+		Repository:        task.RepositoryTuple{RepositoryID: current.Request.RepositoryID, BaseSHA: current.Request.BaseSHA},
+		OpenCodeSessionID: current.Preview.Attempt.OpenCodeSessionID, OpenCodeMessageID: current.Preview.Attempt.OpenCodeMessageID,
+		EvidencePayload: evidence, EvidenceSHA256: evidenceHash, PolicyVersion: coordinator.config.PolicyVersion,
+		ExpectedSnapshot: expected,
+	})
+	if err != nil {
+		coordinator.rejectAuthorized(ctx, store, current.Request, "authorized_snapshot_changed", authorityDeadline)
+		return classifiedError{kind: ErrCollectionFailed, cause: err}
+	}
+	if !validAuthorizedCollection(collected, current) {
+		coordinator.rejectAuthorized(ctx, store, current.Request, "authorized_snapshot_mismatch", authorityDeadline)
+		return ErrCollectionFailed
+	}
+	sealedAt := coordinator.config.Now().UTC().Truncate(time.Millisecond)
+	if sealedAt.IsZero() || sealedAt.UnixMilli() < 0 {
+		return ErrInvalidConfig
+	}
+	if sealedAt.Before(collected.CollectedAt) {
+		sealedAt = collected.CollectedAt
+	}
+	authorizer := current.Request.Authorizer
+	sealContext, cancelSeal := context.WithDeadline(context.WithoutCancel(ctx), authorityDeadline)
+	defer cancelSeal()
+	_, err = store.SealAuthorizedResult(sealContext, taskstore.SealAuthorizedResultParams{
+		SealRequestID: current.Request.ID, ClaimOwner: coordinator.config.ClaimOwner,
+		ExpectedClaimRevision: current.Request.ClaimRevision,
+		Result: taskstore.SealResultParams{
+			ResultID: current.Request.ResultID, TaskID: current.Request.TaskID, AttemptID: current.Request.AttemptID,
+			ExpectedAttemptRevision: current.Request.ExpectedAttemptRevision, ExpectedTaskRevision: current.Request.ExpectedTaskRevision,
+			ResultEventID: current.Request.ResultEventID, TaskEventID: current.Request.TaskEventID,
+			RepositoryID: current.Request.RepositoryID, BaseSHA: current.Request.BaseSHA,
+			ResultCommit: collected.Tuple.ResultCommit, TreeOID: collected.TreeOID, Outcome: collected.Tuple.Outcome,
+			WorktreeClean: collected.Tuple.WorktreeClean, Manifest: append([]taskstore.ManifestEntry(nil), collected.Manifest...),
+			ManifestSHA256: collected.ManifestSHA256, OpenCodeSessionID: collected.OpenCodeSessionID,
+			OpenCodeMessageID: collected.OpenCodeMessageID, EvidencePayload: append(json.RawMessage(nil), collected.EvidencePayload...),
+			EvidenceSHA256: collected.EvidenceSHA256, PolicyVersion: collected.PolicyVersion,
+			CollectedAt: collected.CollectedAt, SealedAt: sealedAt, Actor: coordinator.config.Actor,
+			CompletionAuthority: taskstore.SealAuthorityUser, SealRequestID: current.Request.ID, Authorizer: &authorizer,
+		},
+	})
+	return err
+}
+
+func (coordinator *Coordinator) rejectAuthorized(ctx context.Context, store authorizedStore, request taskstore.SealRequest, reason string, deadline time.Time) {
+	rejectContext, cancel := context.WithDeadline(context.WithoutCancel(ctx), deadline)
+	defer cancel()
+	rejectedAt := coordinator.config.Now().UTC().Truncate(time.Millisecond)
+	if rejectedAt.Before(request.AcceptedAt) {
+		rejectedAt = request.AcceptedAt
+	}
+	_, _ = store.RejectSealRequest(rejectContext, taskstore.RejectSealRequestParams{
+		SealRequestID: request.ID, ClaimOwner: coordinator.config.ClaimOwner, ExpectedClaimRevision: request.ClaimRevision,
+		Reason: reason, RejectedAt: rejectedAt,
+	})
+}
+
+func sameAuthorizedSelection(first, second taskstore.SealRequestWork) bool {
+	return first.Request.ID == second.Request.ID && first.Request.State == taskstore.SealRequestClaimed &&
+		second.Request.State == taskstore.SealRequestClaimed && first.Request.ClaimRevision == second.Request.ClaimRevision &&
+		sameSealRequest(first.Request, second.Request) && samePreview(first.Preview, second.Preview) && authorizedOwnershipCurrent(second)
+}
+
+func sameSealRequest(first, second taskstore.SealRequest) bool {
+	return first.ID == second.ID && first.ReceiptID == second.ReceiptID && first.WorkspaceID == second.WorkspaceID &&
+		first.TaskID == second.TaskID && first.AttemptID == second.AttemptID && first.State == second.State &&
+		first.CompletionAuthority == second.CompletionAuthority && first.ExpectedWorkspaceRevision == second.ExpectedWorkspaceRevision &&
+		first.ExpectedTaskRevision == second.ExpectedTaskRevision && first.ExpectedAttemptRevision == second.ExpectedAttemptRevision &&
+		first.RepositoryID == second.RepositoryID && first.BaseSHA == second.BaseSHA && first.ExpectedResultCommit == second.ExpectedResultCommit &&
+		first.ExpectedTreeOID == second.ExpectedTreeOID && first.ExpectedOutcome == second.ExpectedOutcome &&
+		first.ExpectedManifestEntries == second.ExpectedManifestEntries && first.ExpectedManifestSHA256 == second.ExpectedManifestSHA256 &&
+		first.ExpectedWorktreeClean == second.ExpectedWorktreeClean &&
+		first.IdempotencyKey == second.IdempotencyKey && first.RequestHash == second.RequestHash && first.Authorizer == second.Authorizer &&
+		first.ResultID == second.ResultID && first.ResultEventID == second.ResultEventID && first.TaskEventID == second.TaskEventID &&
+		first.ClaimOwner == second.ClaimOwner && first.ClaimRevision == second.ClaimRevision && first.AcceptedAt.Equal(second.AcceptedAt) &&
+		first.ClaimExpiresAt != nil && second.ClaimExpiresAt != nil && first.ClaimExpiresAt.Equal(*second.ClaimExpiresAt)
+}
+
+func samePreview(first, second taskstore.SealPreview) bool {
+	return first.Workspace.ID == second.Workspace.ID && first.Workspace.Revision == second.Workspace.Revision &&
+		first.Task.ID == second.Task.ID && first.Task.Revision == second.Task.Revision && first.Task.State == second.Task.State &&
+		first.Task.CancelEpoch == second.Task.CancelEpoch && first.Task.CurrentAttemptID == second.Task.CurrentAttemptID &&
+		first.Attempt.ID == second.Attempt.ID && first.Attempt.Revision == second.Attempt.Revision && first.Attempt.State == second.Attempt.State
+}
+
+func authorizedOwnershipCurrent(work taskstore.SealRequestWork) bool {
+	request, preview := work.Request, work.Preview
+	return preview.Workspace.State == taskstore.WorkspaceActive && request.WorkspaceID == preview.Workspace.ID &&
+		request.ExpectedWorkspaceRevision == preview.Workspace.Revision && request.TaskID == preview.Task.ID &&
+		request.ExpectedTaskRevision == preview.Task.Revision && request.AttemptID == preview.Attempt.ID &&
+		request.ExpectedAttemptRevision == preview.Attempt.Revision && preview.Task.CurrentAttemptID == preview.Attempt.ID &&
+		preview.Task.CancelEpoch == 0 && preview.Task.SealedResultID == "" && preview.Attempt.SealedResultID == "" &&
+		(preview.Task.State == task.TaskRunning || preview.Task.State == task.TaskInputRequired) &&
+		(preview.Attempt.State == task.AttemptAdmitted || preview.Attempt.State == task.AttemptRunning || preview.Attempt.State == task.AttemptInputRequired) &&
+		request.RepositoryID == preview.Task.RepositoryID && request.BaseSHA == preview.Task.BaseSHA && request.BaseSHA == preview.Attempt.BaseSHA
+}
+
+func validAuthorizedCollection(result taskresult.Result, work taskstore.SealRequestWork) bool {
+	request := work.Request
+	repository := task.RepositoryTuple{RepositoryID: request.RepositoryID, BaseSHA: request.BaseSHA}
+	return result.Tuple.ValidateAgainst(repository) == nil && result.Tuple.ResultCommit == request.ExpectedResultCommit &&
+		result.TreeOID == request.ExpectedTreeOID && result.Tuple.Outcome == request.ExpectedOutcome &&
+		result.Tuple.WorktreeClean == request.ExpectedWorktreeClean &&
+		result.Tuple.ManifestEntries == request.ExpectedManifestEntries && len(result.Manifest) == request.ExpectedManifestEntries &&
+		result.ManifestSHA256 == request.ExpectedManifestSHA256 && result.OpenCodeSessionID == work.Preview.Attempt.OpenCodeSessionID &&
+		result.OpenCodeMessageID == work.Preview.Attempt.OpenCodeMessageID && result.PolicyVersion != "" &&
+		!result.CollectedAt.IsZero() && result.CollectedAt.UnixMilli() >= request.AcceptedAt.UnixMilli()
 }
 
 func identityFor(work taskstore.DeliveryWork) SuccessIdentity {

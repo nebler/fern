@@ -55,6 +55,16 @@ type Request struct {
 	EvidencePayload   json.RawMessage
 	EvidenceSHA256    [32]byte
 	PolicyVersion     string
+	ExpectedSnapshot  *SnapshotExpectation
+}
+
+// SnapshotExpectation prevents a collector from returning a different clean
+// commit merely because HEAD changed after a user preview.
+type SnapshotExpectation struct {
+	ResultCommit    task.GitOID
+	TreeOID         task.GitOID
+	ManifestEntries int
+	ManifestSHA256  [32]byte
 }
 
 // Result contains exactly the values needed to construct the Git/evidence
@@ -158,6 +168,10 @@ func (c *Collector) Collect(ctx context.Context, request Request) (Result, error
 	if finalDigest != digest || !manifestsEqual(manifest, finalManifest) {
 		return Result{}, fmt.Errorf("%w: objects changed during collection", ErrRepositoryProof)
 	}
+	if expected := request.ExpectedSnapshot; expected != nil &&
+		(expected.ResultCommit != resultCommit || expected.TreeOID != treeOID || expected.ManifestEntries != len(manifest) || expected.ManifestSHA256 != digest) {
+		return Result{}, fmt.Errorf("%w: repository differs from authorized snapshot", ErrRepositoryProof)
+	}
 	if err := c.proveHeadAndClean(collectContext, repositoryPath, resultCommit); err != nil {
 		return Result{}, err
 	}
@@ -192,6 +206,14 @@ func validateRequest(request Request) error {
 	}
 	if err := validateEvidence(request.EvidencePayload, request.EvidenceSHA256); err != nil {
 		return err
+	}
+	if expected := request.ExpectedSnapshot; expected != nil {
+		if _, err := task.ParseGitOID(string(expected.ResultCommit)); err != nil {
+			return fmt.Errorf("%w: expected result commit", ErrInvalidRequest)
+		}
+		if _, err := task.ParseGitOID(string(expected.TreeOID)); err != nil || expected.ManifestEntries < 0 || expected.ManifestEntries > MaxManifestFiles {
+			return fmt.Errorf("%w: expected snapshot", ErrInvalidRequest)
+		}
 	}
 	return nil
 }

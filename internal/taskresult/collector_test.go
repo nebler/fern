@@ -70,6 +70,34 @@ func TestCollectNoChangesAndDoesNotMutate(t *testing.T) {
 	}
 }
 
+func TestCollectEnforcesAuthorizedHeadTreeAndManifest(t *testing.T) {
+	fixture := newFixture(t)
+	initial, err := fixture.collector.Collect(context.Background(), fixture.request())
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected := &SnapshotExpectation{ResultCommit: initial.Tuple.ResultCommit, TreeOID: initial.TreeOID,
+		ManifestEntries: initial.Tuple.ManifestEntries, ManifestSHA256: initial.ManifestSHA256}
+	request := fixture.request()
+	request.ExpectedSnapshot = expected
+	if _, err := fixture.collector.Collect(context.Background(), request); err != nil {
+		t.Fatalf("exact authorized snapshot: %v", err)
+	}
+	expected.ManifestSHA256 = [32]byte{}
+	if _, err := fixture.collector.Collect(context.Background(), request); !errors.Is(err, ErrRepositoryProof) {
+		t.Fatalf("changed manifest digest = %v", err)
+	}
+	expected.ManifestSHA256 = initial.ManifestSHA256
+	if err := os.WriteFile(filepath.Join(fixture.repo, "new.txt"), []byte("new\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGit(t, fixture.git, fixture.repo, "add", "new.txt")
+	runGit(t, fixture.git, fixture.repo, "commit", "-qm", "new head")
+	if _, err := fixture.collector.Collect(context.Background(), request); !errors.Is(err, ErrRepositoryProof) {
+		t.Fatalf("changed HEAD = %v", err)
+	}
+}
+
 func TestCollectChangedManifestCanonical(t *testing.T) {
 	fixture := newFixture(t)
 	if err := os.WriteFile(filepath.Join(fixture.repo, "modified.txt"), []byte{0, 1, 0xff, 3}, 0600); err != nil {

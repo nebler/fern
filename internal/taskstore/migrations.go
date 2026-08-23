@@ -19,6 +19,7 @@ var migrations = []migration{
 	{version: 1, name: "initial_task_store", sql: initialSchema},
 	{version: 2, name: "execution_projection_and_results", sql: executionAndResultSchema},
 	{version: 3, name: "verification_and_publication_journals", sql: verificationAndPublicationSchema},
+	{version: 4, name: "user_authorized_snapshot_seals", sql: userAuthorizedSealSchema},
 }
 
 const initialSchema = `
@@ -1031,6 +1032,318 @@ CREATE TRIGGER publications_update_integrity BEFORE UPDATE ON publications BEGIN
 END;
 CREATE TRIGGER publications_delete_guard BEFORE DELETE ON publications
 BEGIN SELECT RAISE(ABORT, 'publications are durable'); END;
+`
+
+const userAuthorizedSealSchema = `
+CREATE TABLE seal_requests (
+    id TEXT PRIMARY KEY CHECK(
+        length(id)=40 AND substr(id,1,4)='slr_' AND substr(id,13,1)='-' AND
+        substr(id,18,1)='-' AND substr(id,19,1)='7' AND substr(id,23,1)='-' AND
+        substr(id,24,1) IN ('8','9','a','b') AND substr(id,28,1)='-' AND
+        length(replace(substr(id,5),'-',''))=32 AND replace(substr(id,5),'-','') NOT GLOB '*[^0-9a-f]*'
+    ),
+    receipt_id TEXT NOT NULL UNIQUE REFERENCES receipts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    workspace_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    attempt_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('pending','claimed','completed','rejected')),
+    completion_authority TEXT NOT NULL CHECK(completion_authority='user_seal'),
+    expected_workspace_revision INTEGER NOT NULL CHECK(expected_workspace_revision>=1),
+    expected_task_revision INTEGER NOT NULL CHECK(expected_task_revision>=1),
+    expected_attempt_revision INTEGER NOT NULL CHECK(expected_attempt_revision>=1),
+    repository_id INTEGER NOT NULL CHECK(repository_id>0),
+    base_sha TEXT NOT NULL CHECK(length(base_sha)=40 AND base_sha NOT GLOB '*[^0-9a-f]*'),
+    expected_result_commit TEXT NOT NULL CHECK(length(expected_result_commit)=40 AND expected_result_commit NOT GLOB '*[^0-9a-f]*'),
+    expected_tree_oid TEXT NOT NULL CHECK(length(expected_tree_oid)=40 AND expected_tree_oid NOT GLOB '*[^0-9a-f]*'),
+    expected_outcome TEXT NOT NULL CHECK(expected_outcome IN ('changed','no_changes')),
+    expected_manifest_entries INTEGER NOT NULL CHECK(expected_manifest_entries>=0),
+    expected_manifest_sha256 BLOB NOT NULL CHECK(length(expected_manifest_sha256)=32),
+    expected_worktree_clean INTEGER NOT NULL CHECK(expected_worktree_clean=1),
+    idempotency_key TEXT NOT NULL CHECK(length(CAST(idempotency_key AS BLOB)) BETWEEN 1 AND 128),
+    request_hash BLOB NOT NULL CHECK(length(request_hash)=32),
+    authorizer_actor_snapshot_id INTEGER NOT NULL REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    result_id TEXT NOT NULL UNIQUE CHECK(
+      length(result_id)=40 AND substr(result_id,1,4)='res_' AND substr(result_id,13,1)='-' AND substr(result_id,18,1)='-' AND
+      substr(result_id,19,1)='7' AND substr(result_id,23,1)='-' AND substr(result_id,24,1) IN ('8','9','a','b') AND
+      substr(result_id,28,1)='-' AND length(replace(substr(result_id,5),'-',''))=32 AND replace(substr(result_id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
+    result_event_id TEXT NOT NULL UNIQUE CHECK(
+      length(result_event_id)=40 AND substr(result_event_id,1,4)='fev_' AND substr(result_event_id,13,1)='-' AND substr(result_event_id,18,1)='-' AND
+      substr(result_event_id,19,1)='7' AND substr(result_event_id,23,1)='-' AND substr(result_event_id,24,1) IN ('8','9','a','b') AND
+      substr(result_event_id,28,1)='-' AND length(replace(substr(result_event_id,5),'-',''))=32 AND replace(substr(result_event_id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
+    task_event_id TEXT NOT NULL UNIQUE CHECK(
+      length(task_event_id)=40 AND substr(task_event_id,1,4)='fev_' AND substr(task_event_id,13,1)='-' AND substr(task_event_id,18,1)='-' AND
+      substr(task_event_id,19,1)='7' AND substr(task_event_id,23,1)='-' AND substr(task_event_id,24,1) IN ('8','9','a','b') AND
+      substr(task_event_id,28,1)='-' AND length(replace(substr(task_event_id,5),'-',''))=32 AND
+      replace(substr(task_event_id,5),'-','') NOT GLOB '*[^0-9a-f]*' AND task_event_id<>result_event_id),
+    claim_owner TEXT CHECK(claim_owner IS NULL OR length(CAST(claim_owner AS BLOB)) BETWEEN 1 AND 64),
+    claim_expires_at INTEGER,
+    claim_revision INTEGER NOT NULL DEFAULT 0 CHECK(claim_revision>=0),
+    accepted_at INTEGER NOT NULL CHECK(accepted_at>=0),
+    completed_at INTEGER,
+    rejected_at INTEGER,
+    rejected_reason TEXT CHECK(rejected_reason IS NULL OR length(CAST(rejected_reason AS BLOB)) BETWEEN 1 AND 1000),
+    FOREIGN KEY(workspace_id,repository_id) REFERENCES workspaces(id,repository_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY(task_id,workspace_id) REFERENCES tasks(id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY(attempt_id,task_id,workspace_id) REFERENCES attempts(id,task_id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CHECK((expected_outcome='no_changes' AND expected_result_commit=base_sha AND expected_manifest_entries=0) OR
+          (expected_outcome='changed' AND expected_result_commit<>base_sha AND expected_manifest_entries>0)),
+    CHECK(
+      (state='pending' AND claim_owner IS NULL AND claim_expires_at IS NULL AND claim_revision=0 AND completed_at IS NULL AND rejected_at IS NULL AND rejected_reason IS NULL) OR
+      (state='claimed' AND claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_revision>=1 AND completed_at IS NULL AND rejected_at IS NULL AND rejected_reason IS NULL) OR
+      (state='completed' AND claim_owner IS NULL AND claim_expires_at IS NULL AND claim_revision>=1 AND completed_at IS NOT NULL AND rejected_at IS NULL AND rejected_reason IS NULL) OR
+      (state='rejected' AND claim_owner IS NULL AND claim_expires_at IS NULL AND claim_revision>=1 AND completed_at IS NULL AND rejected_at IS NOT NULL AND rejected_reason IS NOT NULL)
+    ),
+    CHECK(claim_expires_at IS NULL OR claim_expires_at>accepted_at),
+    CHECK(completed_at IS NULL OR completed_at>=accepted_at),
+    CHECK(rejected_at IS NULL OR rejected_at>=accepted_at)
+) STRICT;
+CREATE UNIQUE INDEX seal_requests_one_open_per_task ON seal_requests(task_id) WHERE state IN ('pending','claimed');
+CREATE INDEX seal_requests_work ON seal_requests(workspace_id,state,claim_expires_at,accepted_at,id);
+
+ALTER TABLE results ADD COLUMN completion_authority TEXT NOT NULL DEFAULT 'execution_success'
+  CHECK(completion_authority IN ('execution_success','user_seal'));
+ALTER TABLE results ADD COLUMN seal_request_id TEXT REFERENCES seal_requests(id) ON UPDATE RESTRICT ON DELETE RESTRICT;
+ALTER TABLE results ADD COLUMN authorizer_actor_snapshot_id INTEGER REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT;
+
+CREATE TRIGGER seal_requests_insert_integrity BEFORE INSERT ON seal_requests BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1 FROM receipts r JOIN actor_snapshots a ON a.id=NEW.authorizer_actor_snapshot_id
+    JOIN workspaces w ON w.id=NEW.workspace_id AND w.repository_id=NEW.repository_id
+    JOIN tasks t ON t.id=NEW.task_id AND t.workspace_id=NEW.workspace_id
+    JOIN attempts x ON x.id=NEW.attempt_id AND x.task_id=t.id AND x.workspace_id=t.workspace_id
+    WHERE r.id=NEW.receipt_id AND r.workspace_id=NEW.workspace_id AND r.command_kind='task.seal' AND
+      r.target_type='task' AND r.target_id=NEW.task_id AND r.idempotency_key=NEW.idempotency_key AND
+      r.request_hash=NEW.request_hash AND r.actor_snapshot_id=NEW.authorizer_actor_snapshot_id AND
+      r.accepted_at=NEW.accepted_at AND w.state='active' AND w.revision=NEW.expected_workspace_revision AND
+      t.current_attempt_id=x.id AND t.cancel_epoch=0 AND t.sealed_result_id IS NULL AND
+      t.state IN ('running','input_required') AND t.revision=NEW.expected_task_revision AND
+      t.base_sha=NEW.base_sha AND x.base_sha=NEW.base_sha AND x.sealed_result_id IS NULL AND
+      x.state IN ('admitted','running','input_required') AND x.revision=NEW.expected_attempt_revision
+  ) THEN RAISE(ABORT, 'seal request has no exact current authorization') END;
+END;
+CREATE TRIGGER seal_requests_immutable_tuple BEFORE UPDATE ON seal_requests WHEN
+  NEW.id<>OLD.id OR NEW.receipt_id<>OLD.receipt_id OR NEW.workspace_id<>OLD.workspace_id OR NEW.task_id<>OLD.task_id OR
+  NEW.attempt_id<>OLD.attempt_id OR NEW.completion_authority<>OLD.completion_authority OR
+  NEW.expected_workspace_revision<>OLD.expected_workspace_revision OR NEW.expected_task_revision<>OLD.expected_task_revision OR
+  NEW.expected_attempt_revision<>OLD.expected_attempt_revision OR NEW.repository_id<>OLD.repository_id OR
+  NEW.base_sha<>OLD.base_sha OR NEW.expected_result_commit<>OLD.expected_result_commit OR NEW.expected_tree_oid<>OLD.expected_tree_oid OR
+  NEW.expected_outcome<>OLD.expected_outcome OR NEW.expected_manifest_entries<>OLD.expected_manifest_entries OR
+  NEW.expected_manifest_sha256<>OLD.expected_manifest_sha256 OR NEW.expected_worktree_clean<>OLD.expected_worktree_clean OR
+  NEW.idempotency_key<>OLD.idempotency_key OR
+  NEW.request_hash<>OLD.request_hash OR NEW.authorizer_actor_snapshot_id<>OLD.authorizer_actor_snapshot_id OR
+  NEW.result_id<>OLD.result_id OR NEW.result_event_id<>OLD.result_event_id OR NEW.task_event_id<>OLD.task_event_id OR
+  NEW.accepted_at<>OLD.accepted_at
+BEGIN SELECT RAISE(ABORT, 'seal request authorization is immutable'); END;
+CREATE TRIGGER seal_requests_transition_integrity BEFORE UPDATE ON seal_requests BEGIN
+  SELECT CASE WHEN OLD.state IN ('completed','rejected') THEN RAISE(ABORT, 'terminal seal request is immutable') END;
+  SELECT CASE WHEN NOT (
+    (OLD.state='pending' AND NEW.state='claimed' AND NEW.claim_revision=1 AND NEW.claim_owner IS NOT NULL AND NEW.claim_expires_at IS NOT NULL) OR
+    (OLD.state='claimed' AND NEW.state='claimed' AND NEW.claim_revision=OLD.claim_revision+1 AND
+      NEW.claim_owner IS NOT NULL AND NEW.claim_expires_at IS NOT NULL AND NEW.claim_expires_at>OLD.claim_expires_at) OR
+    (OLD.state='claimed' AND NEW.state='rejected' AND NEW.claim_revision=OLD.claim_revision AND NEW.rejected_at IS NOT NULL AND NEW.rejected_reason IS NOT NULL) OR
+    (OLD.state='claimed' AND NEW.state='completed' AND NEW.claim_revision=OLD.claim_revision AND NEW.completed_at IS NOT NULL AND EXISTS (
+      SELECT 1 FROM results r JOIN tasks t ON t.id=OLD.task_id JOIN attempts a ON a.id=OLD.attempt_id
+      WHERE r.id=OLD.result_id AND r.seal_request_id=OLD.id AND r.completion_authority='user_seal' AND
+        t.sealed_result_id=r.id AND t.state='completed' AND a.sealed_result_id=r.id AND a.state='superseded'
+    ))
+  ) THEN RAISE(ABORT, 'invalid seal request transition') END;
+END;
+CREATE TRIGGER seal_requests_delete_guard BEFORE DELETE ON seal_requests
+BEGIN SELECT RAISE(ABORT, 'seal requests are durable'); END;
+
+DROP TRIGGER results_insert_integrity;
+DROP TRIGGER attempts_result_seal_integrity;
+DROP TRIGGER tasks_result_seal_integrity;
+
+CREATE TRIGGER results_insert_integrity BEFORE INSERT ON results BEGIN
+  SELECT CASE WHEN (SELECT count(*) FROM result_manifest m WHERE m.result_id=NEW.id)<>NEW.manifest_entries OR
+    (NEW.manifest_entries>0 AND ((SELECT min(ordinal) FROM result_manifest WHERE result_id=NEW.id)<>0 OR
+     (SELECT max(ordinal) FROM result_manifest WHERE result_id=NEW.id)<>NEW.manifest_entries-1))
+    THEN RAISE(ABORT, 'result manifest is incomplete') END;
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1 FROM tasks t JOIN attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id AND a.workspace_id=t.workspace_id
+    JOIN events ae ON ae.id=NEW.sealed_event_id AND ae.workspace_id=t.workspace_id AND ae.task_id=t.id AND ae.attempt_id=a.id AND ae.type='attempt.result_sealed'
+    JOIN events te ON te.id=NEW.completed_event_id AND te.workspace_id=t.workspace_id AND te.task_id=t.id AND te.attempt_id IS NULL AND
+      te.type='task.completed' AND te.occurred_at=ae.occurred_at AND te.actor_snapshot_id=ae.actor_snapshot_id AND te.payload=ae.payload AND te.cursor>ae.cursor
+    JOIN actor_snapshots creator ON creator.id=NEW.creator_actor_snapshot_id AND creator.id=ae.actor_snapshot_id AND creator.actor_type IN ('system','recovery')
+    WHERE t.id=NEW.task_id AND t.workspace_id=NEW.workspace_id AND t.repository_id=NEW.repository_id AND t.base_sha=NEW.base_sha AND
+      t.cancel_epoch=0 AND t.sealed_result_id IS NULL AND t.revision=json_extract(ae.payload,'$.expectedTaskRevision') AND
+      a.id=NEW.attempt_id AND a.sealed_result_id IS NULL AND a.revision=json_extract(ae.payload,'$.expectedAttemptRevision') AND
+      a.base_sha=NEW.base_sha AND a.opencode_session_id=NEW.opencode_session_id AND a.opencode_message_id=NEW.opencode_message_id AND
+      ae.occurred_at=NEW.sealed_at AND json_extract(ae.payload,'$.resultId')=NEW.id AND json_extract(ae.payload,'$.taskId')=NEW.task_id AND
+      json_extract(ae.payload,'$.attemptId')=NEW.attempt_id AND json_extract(ae.payload,'$.repositoryId')=NEW.repository_id AND
+      json_extract(ae.payload,'$.baseSha')=NEW.base_sha AND json_extract(ae.payload,'$.resultCommit')=NEW.result_commit AND
+      json_extract(ae.payload,'$.treeOid')=NEW.tree_oid AND json_extract(ae.payload,'$.outcome')=NEW.outcome AND
+      json_extract(ae.payload,'$.clean')=1 AND json_extract(ae.payload,'$.manifestEntries')=NEW.manifest_entries AND
+      json_extract(ae.payload,'$.opencodeSessionId')=NEW.opencode_session_id AND json_extract(ae.payload,'$.opencodeMessageId')=NEW.opencode_message_id AND
+      json_extract(ae.payload,'$.collectedAtMillis')=NEW.collected_at AND json_extract(ae.payload,'$.policyVersion')=NEW.policy_version AND
+      json_extract(ae.payload,'$.manifestSha256')='sha256:'||lower(hex(NEW.manifest_sha256)) AND
+      json_extract(ae.payload,'$.evidenceSha256')='sha256:'||lower(hex(NEW.evidence_sha256)) AND
+      json_extract(ae.payload,'$.completionAuthority')=NEW.completion_authority AND (
+        (NEW.completion_authority='execution_success' AND NEW.seal_request_id IS NULL AND NEW.authorizer_actor_snapshot_id IS NULL AND
+         t.state='running' AND a.state='succeeded') OR
+        (NEW.completion_authority='user_seal' AND t.state IN ('running','input_required') AND a.state IN ('admitted','running','input_required') AND EXISTS (
+          SELECT 1 FROM seal_requests q WHERE q.id=NEW.seal_request_id AND q.state='claimed' AND q.completion_authority='user_seal' AND
+            q.workspace_id=NEW.workspace_id AND q.task_id=NEW.task_id AND q.attempt_id=NEW.attempt_id AND q.result_id=NEW.id AND
+            q.result_event_id=NEW.sealed_event_id AND q.task_event_id=NEW.completed_event_id AND q.authorizer_actor_snapshot_id=NEW.authorizer_actor_snapshot_id AND
+            q.expected_task_revision=t.revision AND q.expected_attempt_revision=a.revision AND q.repository_id=NEW.repository_id AND q.base_sha=NEW.base_sha AND
+            q.expected_result_commit=NEW.result_commit AND q.expected_tree_oid=NEW.tree_oid AND q.expected_outcome=NEW.outcome AND
+            q.expected_manifest_entries=NEW.manifest_entries AND q.expected_manifest_sha256=NEW.manifest_sha256 AND
+            q.expected_worktree_clean=NEW.worktree_clean AND
+            json_extract(ae.payload,'$.sealRequestId')=q.id
+        ))
+      )
+  ) THEN RAISE(ABORT, 'sealed result has no exact current proof') END;
+END;
+
+CREATE TRIGGER attempts_result_seal_integrity BEFORE UPDATE OF sealed_result_id ON attempts
+WHEN OLD.sealed_result_id IS NULL AND NEW.sealed_result_id IS NOT NULL BEGIN
+  SELECT CASE WHEN NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR NOT EXISTS (
+    SELECT 1 FROM results r JOIN events e ON e.id=r.sealed_event_id WHERE r.id=NEW.sealed_result_id AND
+      r.task_id=OLD.task_id AND r.attempt_id=OLD.id AND r.workspace_id=OLD.workspace_id AND r.sealed_at=NEW.updated_at AND
+      json_extract(e.payload,'$.expectedAttemptRevision')=OLD.revision AND (
+        (r.completion_authority='execution_success' AND OLD.state='succeeded' AND NEW.state='succeeded') OR
+        (r.completion_authority='user_seal' AND OLD.state IN ('admitted','running','input_required') AND NEW.state='superseded')
+      )
+  ) THEN RAISE(ABORT, 'invalid attempt result seal') END;
+END;
+
+CREATE TRIGGER tasks_result_seal_integrity BEFORE UPDATE OF state,sealed_result_id ON tasks
+WHEN OLD.state<>'completed' AND NEW.state='completed' BEGIN
+  SELECT CASE WHEN OLD.cancel_epoch<>0 OR NEW.cancel_epoch<>0 OR OLD.sealed_result_id IS NOT NULL OR NEW.sealed_result_id IS NULL OR
+    NEW.terminal_reason IS NOT NULL OR NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR NOT EXISTS (
+      SELECT 1 FROM results r JOIN attempts a ON a.id=OLD.current_attempt_id AND a.task_id=OLD.id AND a.workspace_id=OLD.workspace_id
+      JOIN events ae ON ae.id=r.sealed_event_id JOIN events te ON te.id=r.completed_event_id
+      WHERE r.id=NEW.sealed_result_id AND r.task_id=OLD.id AND r.attempt_id=a.id AND r.workspace_id=OLD.workspace_id AND
+        a.sealed_result_id=r.id AND r.sealed_at=NEW.updated_at AND te.cursor=NEW.latest_event_cursor AND ae.cursor<te.cursor AND
+        json_extract(ae.payload,'$.expectedAttemptRevision')=a.revision-1 AND json_extract(ae.payload,'$.expectedTaskRevision')=OLD.revision AND (
+          (r.completion_authority='execution_success' AND OLD.state='running' AND a.state='succeeded') OR
+          (r.completion_authority='user_seal' AND OLD.state IN ('running','input_required') AND a.state='superseded')
+        )
+    ) THEN RAISE(ABORT, 'invalid completed task result seal') END;
+END;
+
+DROP TRIGGER verifications_insert_integrity;
+DROP TRIGGER verifications_update_integrity;
+CREATE TRIGGER verifications_insert_integrity BEFORE INSERT ON verifications BEGIN
+  SELECT CASE WHEN NEW.state<>'prepared' OR NEW.revision<>1 OR NEW.created_at<>NEW.updated_at OR NOT EXISTS (
+    SELECT 1 FROM results r JOIN tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id
+    JOIN attempts a ON a.id=r.attempt_id AND a.task_id=r.task_id AND a.workspace_id=r.workspace_id
+    JOIN journal_events e ON e.id=NEW.latest_event_id
+    JOIN actor_snapshots ea ON ea.id=e.actor_snapshot_id AND ea.actor_type IN ('system','recovery')
+    WHERE r.id=NEW.result_id AND r.task_id=NEW.task_id AND r.attempt_id=NEW.attempt_id AND r.workspace_id=NEW.workspace_id AND
+      r.state='sealed' AND r.result_commit=NEW.verified_commit AND t.current_attempt_id=a.id AND t.sealed_result_id=r.id AND
+      t.state='completed' AND t.cancel_epoch=0 AND
+      (a.state='succeeded' OR (a.state='superseded' AND r.completion_authority='user_seal')) AND a.sealed_result_id=r.id AND
+      e.entity_type='verification' AND e.entity_id=NEW.id AND e.type='verification.prepared' AND e.from_state IS NULL AND
+      e.to_state='prepared' AND e.entity_revision=1 AND e.workspace_id=NEW.workspace_id AND e.task_id=NEW.task_id AND
+      e.attempt_id=NEW.attempt_id AND e.result_id=NEW.result_id AND e.occurred_at=NEW.created_at AND
+      json_extract(e.payload,'$.detail.expectedTaskRevision')=t.revision AND
+      json_extract(e.payload,'$.detail.expectedAttemptRevision')=a.revision
+  ) THEN RAISE(ABORT, 'verification preparation has no exact current proof') END;
+END;
+CREATE TRIGGER verifications_update_integrity BEFORE UPDATE ON verifications BEGIN
+  SELECT CASE WHEN OLD.state IN ('succeeded','failed','recovery_required') THEN RAISE(ABORT, 'terminal verification is immutable') END;
+  SELECT CASE WHEN NEW.id<>OLD.id OR NEW.result_id<>OLD.result_id OR NEW.task_id<>OLD.task_id OR NEW.attempt_id<>OLD.attempt_id OR
+    NEW.workspace_id<>OLD.workspace_id OR NEW.policy_name<>OLD.policy_name OR NEW.policy_sha256<>OLD.policy_sha256 OR
+    NEW.verified_commit<>OLD.verified_commit OR NEW.working_directory<>OLD.working_directory OR NEW.timeout_millis<>OLD.timeout_millis OR
+    NEW.output_limit_bytes<>OLD.output_limit_bytes OR NEW.runner_name<>OLD.runner_name OR NEW.runner_version<>OLD.runner_version OR
+    NEW.image_digest<>OLD.image_digest OR NEW.environment_sha256<>OLD.environment_sha256 OR NEW.created_at<>OLD.created_at
+    THEN RAISE(ABORT, 'verification tuple is immutable') END;
+  SELECT CASE WHEN NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR NOT (
+    (OLD.state='prepared' AND NEW.state IN ('running','recovery_required')) OR
+    (OLD.state='running' AND NEW.state IN ('succeeded','failed','recovery_required'))
+  ) THEN RAISE(ABORT, 'invalid verification transition') END;
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1 FROM results r JOIN tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id
+    JOIN attempts a ON a.id=r.attempt_id AND a.task_id=r.task_id AND a.workspace_id=r.workspace_id
+    JOIN journal_events e ON e.id=NEW.latest_event_id
+    JOIN actor_snapshots ea ON ea.id=e.actor_snapshot_id AND ea.actor_type IN ('system','recovery')
+    WHERE r.id=NEW.result_id AND r.state='sealed' AND r.result_commit=NEW.verified_commit AND t.id=NEW.task_id AND
+      t.current_attempt_id=NEW.attempt_id AND t.sealed_result_id=r.id AND t.state='completed' AND t.cancel_epoch=0 AND
+      a.id=NEW.attempt_id AND (a.state='succeeded' OR (a.state='superseded' AND r.completion_authority='user_seal')) AND
+      a.sealed_result_id=r.id AND e.entity_type='verification' AND e.entity_id=NEW.id AND e.from_state=OLD.state AND e.to_state=NEW.state AND
+      e.entity_revision=NEW.revision AND e.workspace_id=NEW.workspace_id AND e.task_id=NEW.task_id AND
+      e.attempt_id=NEW.attempt_id AND e.result_id=NEW.result_id AND e.occurred_at=NEW.updated_at AND
+      json_extract(e.payload,'$.detail.expectedRevision')=OLD.revision AND
+      json_extract(e.payload,'$.detail.expectedTaskRevision')=t.revision AND
+      json_extract(e.payload,'$.detail.expectedAttemptRevision')=a.revision
+  ) THEN RAISE(ABORT, 'verification transition has no exact event or ownership') END;
+  SELECT CASE WHEN OLD.effect_attempt=1 AND NEW.effect_attempt<>1 THEN RAISE(ABORT, 'verification effect attempt regressed') END;
+  SELECT CASE WHEN OLD.state='prepared' AND NEW.state='running' AND EXISTS (
+    SELECT 1 FROM publications p WHERE p.workspace_id=OLD.workspace_id AND p.state='running' AND p.effect_phase IN ('push_started','pr_create_started')
+  ) THEN RAISE(ABORT, 'workspace already has an effecting publication') END;
+END;
+
+DROP TRIGGER publications_insert_integrity;
+DROP TRIGGER publications_update_integrity;
+CREATE TRIGGER publications_insert_integrity BEFORE INSERT ON publications BEGIN
+  SELECT CASE WHEN NEW.state<>'prepared' OR NEW.effect_phase<>'none' OR NEW.revision<>1 OR NEW.created_at<>NEW.updated_at OR NOT EXISTS (
+    SELECT 1 FROM results r JOIN tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id
+    JOIN attempts a ON a.id=r.attempt_id AND a.task_id=r.task_id AND a.workspace_id=r.workspace_id
+    JOIN workspaces w ON w.id=r.workspace_id AND w.repository_id=r.repository_id
+    JOIN verifications v ON v.id=NEW.verification_id AND v.result_id=r.id
+    JOIN journal_events e ON e.id=NEW.latest_event_id
+    WHERE r.id=NEW.result_id AND r.task_id=NEW.task_id AND r.attempt_id=NEW.attempt_id AND r.workspace_id=NEW.workspace_id AND
+      r.state='sealed' AND r.repository_id=NEW.repository_id AND r.base_sha=NEW.base_sha AND r.result_commit=NEW.result_commit AND
+      t.current_attempt_id=a.id AND t.sealed_result_id=r.id AND t.state='completed' AND t.cancel_epoch=0 AND
+      (a.state='succeeded' OR (a.state='superseded' AND r.completion_authority='user_seal')) AND a.sealed_result_id=r.id AND
+      v.state='succeeded' AND v.verified_commit=r.result_commit AND w.state='active' AND w.installation_id=NEW.installation_id AND
+      w.repository_full_name=NEW.repository_full_name AND NEW.branch='fern/'||w.name||'/'||NEW.operation_id AND
+      e.entity_type='publication' AND e.entity_id=NEW.id AND e.type='publication.prepared' AND e.from_state IS NULL AND
+      e.to_state='prepared' AND e.entity_revision=1 AND e.workspace_id=NEW.workspace_id AND e.task_id=NEW.task_id AND
+      e.attempt_id=NEW.attempt_id AND e.result_id=NEW.result_id AND e.occurred_at=NEW.created_at AND
+      e.actor_snapshot_id=NEW.requester_actor_snapshot_id AND
+      json_extract(e.payload,'$.detail.expectedTaskRevision')=t.revision AND
+      json_extract(e.payload,'$.detail.expectedAttemptRevision')=a.revision
+  ) THEN RAISE(ABORT, 'publication preparation has no exact current proof') END;
+END;
+CREATE TRIGGER publications_update_integrity BEFORE UPDATE ON publications BEGIN
+  SELECT CASE WHEN OLD.state IN ('published','recovery_required','failed','conflict') THEN RAISE(ABORT, 'terminal publication is immutable') END;
+  SELECT CASE WHEN NEW.id<>OLD.id OR NEW.operation_id<>OLD.operation_id OR NEW.result_id<>OLD.result_id OR
+    NEW.verification_id<>OLD.verification_id OR NEW.task_id<>OLD.task_id OR NEW.attempt_id<>OLD.attempt_id OR
+    NEW.workspace_id<>OLD.workspace_id OR NEW.installation_id<>OLD.installation_id OR NEW.repository_id<>OLD.repository_id OR
+    NEW.repository_full_name<>OLD.repository_full_name OR NEW.base_ref<>OLD.base_ref OR NEW.base_sha<>OLD.base_sha OR
+    NEW.result_commit<>OLD.result_commit OR NEW.branch<>OLD.branch OR NEW.expected_remote_old_sha IS NOT OLD.expected_remote_old_sha OR
+    NEW.broker_policy_version<>OLD.broker_policy_version OR NEW.broker_policy_sha256<>OLD.broker_policy_sha256 OR
+    NEW.requester_actor_snapshot_id<>OLD.requester_actor_snapshot_id OR NEW.created_at<>OLD.created_at
+    THEN RAISE(ABORT, 'publication tuple is immutable') END;
+  SELECT CASE WHEN NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR NOT EXISTS (
+    SELECT 1 FROM results r JOIN tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id
+    JOIN attempts a ON a.id=r.attempt_id AND a.task_id=r.task_id AND a.workspace_id=r.workspace_id
+    JOIN verifications v ON v.id=OLD.verification_id AND v.result_id=r.id
+    JOIN journal_events e ON e.id=NEW.latest_event_id
+    JOIN actor_snapshots ea ON ea.id=e.actor_snapshot_id AND ea.actor_type IN ('system','recovery')
+    WHERE r.id=OLD.result_id AND r.state='sealed' AND r.result_commit=OLD.result_commit AND t.id=OLD.task_id AND
+      t.current_attempt_id=OLD.attempt_id AND t.sealed_result_id=r.id AND t.state='completed' AND t.cancel_epoch=0 AND
+      a.id=OLD.attempt_id AND (a.state='succeeded' OR (a.state='superseded' AND r.completion_authority='user_seal')) AND
+      a.sealed_result_id=r.id AND v.state='succeeded' AND v.verified_commit=r.result_commit AND
+      e.entity_type='publication' AND e.entity_id=OLD.id AND e.from_state=OLD.state AND e.to_state=NEW.state AND
+      e.entity_revision=NEW.revision AND e.workspace_id=OLD.workspace_id AND e.task_id=OLD.task_id AND
+      e.attempt_id=OLD.attempt_id AND e.result_id=OLD.result_id AND e.occurred_at=NEW.updated_at AND
+      json_extract(e.payload,'$.detail.expectedRevision')=OLD.revision AND
+      json_extract(e.payload,'$.detail.expectedTaskRevision')=t.revision AND
+      json_extract(e.payload,'$.detail.expectedAttemptRevision')=a.revision
+  ) THEN RAISE(ABORT, 'publication transition has no exact event or ownership') END;
+  SELECT CASE WHEN NOT (
+    (NEW.effect_phase=OLD.effect_phase AND NEW.state IN ('uncertain','recovery_required','failed','conflict','published')) OR
+    (OLD.effect_phase='none' AND NEW.effect_phase='push_started' AND NEW.state='running') OR
+    (OLD.effect_phase='push_started' AND NEW.effect_phase='push_observed' AND NEW.state='running' AND NEW.observed_remote_sha=OLD.result_commit) OR
+    (OLD.effect_phase='push_observed' AND NEW.effect_phase='pr_create_started' AND NEW.state='running')
+  ) THEN RAISE(ABORT, 'publication effect phase regressed or skipped') END;
+  SELECT CASE WHEN OLD.effect_phase='none' AND NEW.effect_phase='push_started' AND EXISTS (
+    SELECT 1 FROM verifications v WHERE v.workspace_id=OLD.workspace_id AND v.state='running'
+  ) THEN RAISE(ABORT, 'workspace already has an effecting verification') END;
+  SELECT CASE WHEN NEW.state='published' AND NOT (
+    OLD.effect_phase IN ('push_observed','pr_create_started') AND NEW.observed_remote_sha=OLD.result_commit AND
+    NEW.pr_repository_id=OLD.repository_id AND NEW.pr_repository_full_name=OLD.repository_full_name AND NEW.pr_state='open' AND NEW.pr_draft=1 AND
+    NEW.pr_base_repository_id=OLD.repository_id AND NEW.pr_base_repository_full_name=OLD.repository_full_name AND
+    NEW.pr_base_ref=OLD.base_ref AND NEW.pr_base_sha=OLD.base_sha AND NEW.pr_head_repository_id=OLD.repository_id AND
+    NEW.pr_head_repository_full_name=OLD.repository_full_name AND NEW.pr_head_repository_owner||'/'||NEW.pr_head_repository_name=OLD.repository_full_name AND
+    NEW.pr_head_ref=OLD.branch AND NEW.pr_head_sha=OLD.result_commit AND
+    NEW.pr_url='https://github.com/'||OLD.repository_full_name||'/pull/'||CAST(NEW.pr_number AS TEXT)
+  ) THEN RAISE(ABORT, 'publication completion observation differs') END;
+END;
 `
 
 func (s *Store) initialize(ctx context.Context) error {

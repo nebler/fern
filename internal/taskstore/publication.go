@@ -61,7 +61,8 @@ SELECT p.id FROM publications p JOIN results r ON r.id=p.result_id JOIN tasks t 
 JOIN attempts a ON a.id=p.attempt_id JOIN verifications v ON v.id=p.verification_id
 WHERE p.workspace_id=? AND p.state IN ('prepared','running','uncertain') AND r.state='sealed' AND
  t.current_attempt_id=a.id AND t.sealed_result_id=r.id AND t.state='completed' AND t.cancel_epoch=0 AND
- a.state='succeeded' AND a.sealed_result_id=r.id AND v.state='succeeded' AND v.result_id=r.id AND
+ (a.state='succeeded' OR (a.state='superseded' AND r.completion_authority='user_seal')) AND
+ a.sealed_result_id=r.id AND v.state='succeeded' AND v.result_id=r.id AND
  v.verified_commit=r.result_commit ORDER BY p.updated_at,p.id LIMIT 1`, workspaceID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PublicationWork{}, &NotFoundError{Kind: "publication work", ID: string(workspaceID)}
@@ -118,7 +119,8 @@ func (s *Store) findPublication(ctx context.Context, workspaceID task.WorkspaceI
 SELECT p.id FROM publications p JOIN results r ON r.id=p.result_id JOIN tasks t ON t.id=p.task_id
 JOIN attempts a ON a.id=p.attempt_id JOIN verifications v ON v.id=p.verification_id
 WHERE p.workspace_id=? AND `+predicate+` AND r.state='sealed' AND t.current_attempt_id=a.id AND
- t.sealed_result_id=r.id AND t.state='completed' AND t.cancel_epoch=0 AND a.state='succeeded' AND a.sealed_result_id=r.id AND
+ t.sealed_result_id=r.id AND t.state='completed' AND t.cancel_epoch=0 AND
+ (a.state='succeeded' OR (a.state='superseded' AND r.completion_authority='user_seal')) AND a.sealed_result_id=r.id AND
  v.state='succeeded' AND v.result_id=r.id AND v.verified_commit=r.result_commit ORDER BY p.updated_at,p.id LIMIT 1`, workspaceID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PublicationRecord{}, &NotFoundError{Kind: kind, ID: string(workspaceID)}
