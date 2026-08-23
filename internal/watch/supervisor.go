@@ -123,7 +123,7 @@ func (s *Supervisor) Run(ctx context.Context, observations <-chan Observation) e
 			cancel()
 			if err != nil {
 				log.Warn("pause deferred", "err", err)
-				timer.Reset(minDuration(s.IdleAfter, 5*time.Second))
+				timer.Reset(min(s.IdleAfter, 5*time.Second))
 				armed = true
 				continue
 			}
@@ -227,11 +227,4 @@ func stopAndDrain(timer *time.Timer) {
 		default:
 		}
 	}
-}
-
-func minDuration(a, b time.Duration) time.Duration {
-	if a < b {
-		return a
-	}
-	return b
 }
