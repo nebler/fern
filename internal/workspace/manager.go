@@ -92,6 +92,8 @@ type Manager struct {
 	nextGeneration       uint64
 	hasEndpoint          bool
 	closing              bool
+	lastWake             WakeTrace
+	hasLastWake          bool
 	lifecycle            chan struct{}
 	admissionMu          sync.Mutex
 	pausing              bool
@@ -192,7 +194,7 @@ func (m *Manager) ReconcileStartup(ctx context.Context) error {
 		HasEndpoint: result.Endpoint != (runtime.Endpoint{}),
 		ImageID:     result.ImageID,
 	}
-	_, err = m.observeAndPublish(ctx, observation, result.Transitioned)
+	_, err = m.observeAndPublish(ctx, observation, result.Transitioned, nil)
 	return err
 }
 
@@ -224,14 +226,32 @@ func (m *Manager) ensureTarget(ctx context.Context) (RequestTarget, error) {
 
 func (m *Manager) runWake(call *wakeCall) {
 	wakeCtx, cancel := context.WithTimeout(m.serviceCtx, m.wakeOperationTimeout)
-	call.target, call.err = m.ensureRunning(wakeCtx)
+	collector := newTraceCollector(time.Now())
+	traceCtx := runtime.WithSpanRecorder(wakeCtx, collector.spanRecorder())
+	call.target, call.err = m.ensureRunning(traceCtx, collector)
 	cancel()
 	m.wakeMu.Lock()
 	if m.wake == call {
 		m.wake = nil
 	}
-	close(call.done)
+	trace := collector.finish(time.Now())
+	trace.Workspace = m.spec.Name
+	m.hasLastWake = true
+	m.lastWake = trace
 	m.wakeMu.Unlock()
+	close(call.done)
+}
+
+// LastWakeTrace returns the most recently completed coalesced wake. It reports
+// false before the first wake and after process start with an already-running
+// workspace (no wake occurred).
+func (m *Manager) LastWakeTrace() (WakeTrace, bool) {
+	m.wakeMu.Lock()
+	defer m.wakeMu.Unlock()
+	if !m.hasLastWake {
+		return WakeTrace{}, false
+	}
+	return m.lastWake, true
 }
 
 func (m *Manager) runningTarget() (RequestTarget, error) {
@@ -259,22 +279,26 @@ func (m *Manager) InvalidateEndpoint(target RequestTarget) {
 	}
 }
 
-func (m *Manager) ensureRunning(ctx context.Context) (RequestTarget, error) {
+func (m *Manager) ensureRunning(ctx context.Context, collector *traceCollector) (RequestTarget, error) {
+	tokenStart := time.Now()
 	if err := m.acquireLifecycle(ctx); err != nil {
 		return RequestTarget{}, err
 	}
+	collector.append("lifecycle_token", tokenStart)
 	defer m.releaseLifecycle()
 	if m.isClosing() {
 		return RequestTarget{}, ErrManagerClosed
 	}
+	runtimeStart := time.Now()
 	result, err := m.runtime.EnsureRunningObserved(ctx, m.spec)
+	collector.append("runtime_total", runtimeStart)
 	if err != nil {
 		return RequestTarget{}, err
 	}
-	return m.observeAndPublish(ctx, result.Observation, result.Transitioned)
+	return m.observeAndPublish(ctx, result.Observation, result.Transitioned, collector)
 }
 
-func (m *Manager) observeAndPublish(ctx context.Context, observation runtime.Observation, transitioned bool) (RequestTarget, error) {
+func (m *Manager) observeAndPublish(ctx context.Context, observation runtime.Observation, transitioned bool, collector *traceCollector) (RequestTarget, error) {
 	if observation.State != runtime.StateRunning || !observation.Running {
 		return RequestTarget{}, errors.New("runtime did not attest a running workspace")
 	}
@@ -285,7 +309,10 @@ func (m *Manager) observeAndPublish(ctx context.Context, observation runtime.Obs
 		return RequestTarget{}, errors.New("running workspace has no valid actual image ID")
 	}
 	if m.observe != nil {
-		if err := m.observe(ctx, observation.Endpoint, transitioned); err != nil {
+		attachStart := time.Now()
+		err := m.observe(ctx, observation.Endpoint, transitioned)
+		collector.append("observer_attach", attachStart)
+		if err != nil {
 			if transitioned {
 				cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 				pauseErr := m.runtime.Pause(cleanupCtx, m.spec.Name)
