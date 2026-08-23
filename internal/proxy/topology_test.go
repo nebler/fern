@@ -32,9 +32,12 @@ func TestHandlersSharePairingAndRegenerateRemoteBackendAuth(t *testing.T) {
 	}))
 	defer backend.Close()
 	waker := &countingWaker{endpoint: mustParseEndpoint(t, backend.URL)}
-	handlers := NewHandlers(waker, runtime.ServerAuth{Password: "backend-secret"}, Controls{
+	handlers, err := NewHandlers(waker, runtime.ServerAuth{Password: "backend-secret"}, Controls{
 		ControlAuth: ControlAuth{Password: "control-secret"},
 	}, TrustedOrigins{Remote: "https://fern.example.ts.net", Operator: "http://127.0.0.1:8081"}, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	issue := httptest.NewRequest(http.MethodPost, "/fern/pair/new", nil)
 	issue.SetBasicAuth("fern", "control-secret")
@@ -123,9 +126,12 @@ func TestOnboardingSetupIsOperatorAuthenticatedAndCallbackIsStateAuthenticated(t
 		}
 		writer.WriteHeader(http.StatusNoContent)
 	})
-	handlers := NewHandlers(nil, runtime.ServerAuth{Password: "backend-secret"}, Controls{
+	handlers, err := NewHandlers(nil, runtime.ServerAuth{Password: "backend-secret"}, Controls{
 		Onboarding: onboarding, ControlAuth: ControlAuth{Password: "control-secret"},
 	}, TrustedOrigins{Remote: "https://fern.example.ts.net", Operator: "http://127.0.0.1:8081"}, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	callback := httptest.NewRequest(http.MethodGet, "/fern/github/app/callback?code=x&state=y", nil)
 	callback.Header.Set("Cookie", "ambient=secret")
@@ -154,9 +160,12 @@ func TestOnboardingSetupIsOperatorAuthenticatedAndCallbackIsStateAuthenticated(t
 func TestRemoteRejectsBasicCredentialsAndControlRoutesBeforeWake(t *testing.T) {
 	t.Parallel()
 	waker := &countingWaker{}
-	handlers := NewHandlers(waker, runtime.ServerAuth{Password: "backend-secret"}, Controls{
+	handlers, err := NewHandlers(waker, runtime.ServerAuth{Password: "backend-secret"}, Controls{
 		ControlAuth: ControlAuth{Password: "control-secret"},
 	}, TrustedOrigins{Remote: "https://fern.example.ts.net", Operator: "http://127.0.0.1:8081"}, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, credentials := range [][2]string{{}, {"opencode", "backend-secret"}, {"fern", "control-secret"}} {
 		request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 		if credentials[0] != "" {
@@ -202,9 +211,12 @@ func TestTaskRoutesCarryServerOwnedDeviceAndOperatorActors(t *testing.T) {
 			Auth string         `json:"auth"`
 		}{actor.Type, actor.ID, actor.Authentication})
 	})
-	handlers := NewHandlers(nil, runtime.ServerAuth{Password: "backend-secret"}, Controls{
+	handlers, err := NewHandlers(nil, runtime.ServerAuth{Password: "backend-secret"}, Controls{
 		Store: store, Tasks: tasks, ControlAuth: ControlAuth{Password: "control-secret"},
 	}, TrustedOrigins{Remote: "https://fern.example.ts.net", Operator: "http://127.0.0.1:8081"}, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	issue := httptest.NewRequest(http.MethodPost, "/fern/pair/new", nil)
 	issue.SetBasicAuth("fern", "control-secret")
@@ -268,7 +280,10 @@ func TestOperatorRegeneratesCanonicalBackendAuth(t *testing.T) {
 		writer.WriteHeader(http.StatusNoContent)
 	}))
 	defer backend.Close()
-	handlers := NewHandlers(&countingWaker{endpoint: mustParseEndpoint(t, backend.URL)}, runtime.ServerAuth{Password: "backend-secret"}, Controls{}, TrustedOrigins{Remote: "https://fern.example.ts.net:8443", Operator: "http://127.0.0.1:8081"}, testLogger())
+	handlers, err := NewHandlers(&countingWaker{endpoint: mustParseEndpoint(t, backend.URL)}, runtime.ServerAuth{Password: "backend-secret"}, Controls{}, TrustedOrigins{Remote: "https://fern.example.ts.net:8443", Operator: "http://127.0.0.1:8081"}, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := httptest.NewRequest(http.MethodGet, "/api/health", nil)
 	request.Host = "spoofed.example"
 	request.Header.Set("Origin", "http://127.0.0.1:8081")
@@ -304,7 +319,12 @@ func TestTrustedOriginEffectivePorts(t *testing.T) {
 		{raw: "https://fern.example.ts.net:8443", port: "8443"},
 		{raw: "http://127.0.0.1:8081", port: "8081"},
 	} {
-		if got := parseTrustedOrigin(test.raw); got.port != test.port {
+		got, err := parseTrustedOrigin(test.raw)
+		if err != nil {
+			t.Errorf("parseTrustedOrigin(%q) returned unexpected error: %v", test.raw, err)
+			continue
+		}
+		if got.port != test.port {
 			t.Errorf("parseTrustedOrigin(%q).port = %q, want %q", test.raw, got.port, test.port)
 		}
 	}
@@ -318,13 +338,8 @@ func TestProductionHandlersRejectUntrustedOriginConfiguration(t *testing.T) {
 		{Remote: "https://fern.example", Operator: "https://127.0.0.1:8081"},
 		{Remote: "https://fern.example", Operator: "http://192.0.2.1:8081"},
 	} {
-		func() {
-			defer func() {
-				if recover() == nil {
-					t.Errorf("NewHandlers accepted origins %+v", origins)
-				}
-			}()
-			NewHandlers(nil, runtime.ServerAuth{Password: "secret"}, Controls{}, origins, testLogger())
-		}()
+		if _, err := NewHandlers(nil, runtime.ServerAuth{Password: "secret"}, Controls{}, origins, testLogger()); err == nil {
+			t.Errorf("NewHandlers accepted origins %+v", origins)
+		}
 	}
 }

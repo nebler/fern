@@ -250,9 +250,12 @@ func TestOperatorMutationUsesTrustedOriginNotClientHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	handlers := NewHandlers(nil, runtime.ServerAuth{Password: "backend-secret"}, Controls{
+	handlers, err := NewHandlers(nil, runtime.ServerAuth{Password: "backend-secret"}, Controls{
 		Store: store, ControlAuth: ControlAuth{Password: "control-secret"},
 	}, TrustedOrigins{Remote: "https://fern.example.ts.net", Operator: "http://127.0.0.1:8081"}, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
 	request := httptest.NewRequest(http.MethodPost, "/fern/api/v1/workflows", strings.NewReader(`{"title":"Trusted","sessionId":"ses_1"}`))
 	request.Host = "spoofed.example"
 	request.Header.Set("Origin", "http://127.0.0.1:8081")

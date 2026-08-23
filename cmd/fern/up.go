@@ -214,7 +214,10 @@ func runUp(args []string, log *slog.Logger) error {
 		return errors.Join(startupErr, publicationErr, managerErr)
 	}
 	origins := trustedProxyOrigins(cfg)
-	handlers := proxy.NewHandlers(manager, auth, controls, origins, log)
+	handlers, err := proxy.NewHandlers(manager, auth, controls, origins, log)
+	if err != nil {
+		return closeStartup(err)
+	}
 	remoteServer := &http.Server{
 		Handler: handlers.Remote, ReadHeaderTimeout: 10 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return serviceCtx },

@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -60,38 +62,32 @@ type proxyTarget struct {
 	intent  workspace.RequestIntent
 }
 
-// New returns the legacy combined test handler. Production startup must use
-// NewHandlers so backend Basic authentication is never enabled remotely.
-func New(waker Waker, auth runtime.ServerAuth, log *slog.Logger) http.Handler {
-	return legacyOriginHandler(newHandler(waker, auth, Controls{}, log))
-}
-
-// NewWithControls returns the legacy combined test handler. Production startup
-// must use NewHandlers.
-func NewWithControls(waker Waker, auth runtime.ServerAuth, controls Controls, log *slog.Logger) http.Handler {
-	return legacyOriginHandler(newHandler(waker, auth, controls, log))
-}
-
 // NewHandlers builds the two production ingress surfaces around one reverse
 // proxy and one pairing-code state. The remote handler must be the only handler
 // exposed through the private TLS edge.
-func NewHandlers(waker Waker, auth runtime.ServerAuth, controls Controls, origins TrustedOrigins, log *slog.Logger) Handlers {
+func NewHandlers(waker Waker, auth runtime.ServerAuth, controls Controls, origins TrustedOrigins, log *slog.Logger) (Handlers, error) {
 	pairing := newPairingState(controls.Store)
 	upstream := newUpstreamHandler(waker, log)
-	remoteOrigin := parseTrustedOrigin(origins.Remote)
-	operatorOrigin := parseTrustedOrigin(origins.Operator)
+	remoteOrigin, err := parseTrustedOrigin(origins.Remote)
+	if err != nil {
+		return Handlers{}, err
+	}
+	operatorOrigin, err := parseTrustedOrigin(origins.Operator)
+	if err != nil {
+		return Handlers{}, err
+	}
 	if remoteOrigin.scheme == "http" && !trustedLoopbackOrigin(remoteOrigin) {
-		panic("invalid remote proxy origin")
+		return Handlers{}, errors.New("invalid trusted proxy origin: remote listener must be loopback HTTP or HTTPS")
 	}
 	if operatorOrigin.scheme != "http" || !trustedLoopbackOrigin(operatorOrigin) {
-		panic("invalid operator proxy origin")
+		return Handlers{}, errors.New("invalid trusted proxy origin: operator listener must be loopback HTTP")
 	}
 	return Handlers{
 		Remote: trustedOriginHandler(pairing.remoteHandler(gatewayHandler(upstream, Controls{
 			Tasks: controls.Tasks, Onboarding: controls.Onboarding,
 		}, false), auth), remoteOrigin),
 		Operator: trustedOriginHandler(pairing.operatorHandler(gatewayHandler(upstream, controls, controls.ControlAuth.Password != ""), auth, controls.ControlAuth), operatorOrigin),
-	}
+	}, nil
 }
 
 func trustedOriginHandler(next http.Handler, origin trustedOrigin) http.Handler {
@@ -127,16 +123,28 @@ func legacyOriginHandler(next http.Handler) http.Handler {
 	})
 }
 
-func parseTrustedOrigin(raw string) trustedOrigin {
+func parseTrustedOrigin(raw string) (trustedOrigin, error) {
 	parsed, err := url.Parse(raw)
-	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil || parsed.Opaque != "" || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" {
-		panic("invalid trusted proxy origin")
+	if err != nil {
+		return trustedOrigin{}, fmt.Errorf("invalid trusted proxy origin %q: %w", raw, err)
+	}
+	if parsed.Scheme != "http" && parsed.Scheme != "https" {
+		return trustedOrigin{}, fmt.Errorf("invalid trusted proxy origin %q: scheme must be http or https", raw)
+	}
+	if parsed.Host == "" {
+		return trustedOrigin{}, fmt.Errorf("invalid trusted proxy origin %q: host is missing", raw)
+	}
+	if parsed.User != nil {
+		return trustedOrigin{}, fmt.Errorf("invalid trusted proxy origin %q: userinfo is not allowed", raw)
+	}
+	if parsed.Opaque != "" || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" {
+		return trustedOrigin{}, fmt.Errorf("invalid trusted proxy origin %q: path, query, and fragment are not allowed", raw)
 	}
 	port := parsed.Port()
 	if port != "" {
 		number, portErr := strconv.Atoi(port)
 		if portErr != nil || number < 1 || number > 65535 || port != strconv.Itoa(number) {
-			panic("invalid trusted proxy origin")
+			return trustedOrigin{}, fmt.Errorf("invalid trusted proxy origin %q: port %q is out of range", raw, port)
 		}
 	}
 	if port == "" {
@@ -147,9 +155,9 @@ func parseTrustedOrigin(raw string) trustedOrigin {
 		}
 	}
 	if parsed.Hostname() == "" || raw != parsed.Scheme+"://"+parsed.Host {
-		panic("invalid trusted proxy origin")
+		return trustedOrigin{}, fmt.Errorf("invalid trusted proxy origin %q: not in canonical scheme://host[:port] form", raw)
 	}
-	return trustedOrigin{raw: raw, scheme: parsed.Scheme, authority: parsed.Host, port: port}
+	return trustedOrigin{raw: raw, scheme: parsed.Scheme, authority: parsed.Host, port: port}, nil
 }
 
 func trustedLoopbackOrigin(origin trustedOrigin) bool {
@@ -168,6 +176,7 @@ func newHandler(waker Waker, auth runtime.ServerAuth, controls Controls, log *sl
 
 func newUpstreamHandler(waker Waker, log *slog.Logger) http.Handler {
 	if waker == nil {
+		// Test-only path; production constructors always supply a waker.
 		return http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 			http.Error(writer, "workspace manager unavailable", http.StatusServiceUnavailable)
 		})

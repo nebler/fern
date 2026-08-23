@@ -3,6 +3,7 @@ package proxy
 import (
 	"html/template"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/nebler/fern/internal/control"
@@ -53,7 +54,7 @@ func gatewayHandler(upstream http.Handler, controls Controls, publicationEnabled
 		serveFern(writer, request, controls, publicationEnabled)
 	})
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/fern" || request.URL.Path == "/fern/" || len(request.URL.Path) > len("/fern/") && request.URL.Path[:len("/fern/")] == "/fern/" {
+		if request.URL.Path == "/fern" || strings.HasPrefix(request.URL.Path, "/fern/") {
 			fern.ServeHTTP(writer, request)
 			return
 		}
