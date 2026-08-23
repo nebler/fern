@@ -23,6 +23,8 @@ import (
 	"github.com/nebler/fern/internal/taskexecution"
 	"github.com/nebler/fern/internal/taskpublication"
 	"github.com/nebler/fern/internal/taskpublicationcoord"
+	"github.com/nebler/fern/internal/taskresult"
+	"github.com/nebler/fern/internal/taskresultcoord"
 	"github.com/nebler/fern/internal/taskstore"
 	"github.com/nebler/fern/internal/taskverification"
 	"github.com/nebler/fern/internal/verification"
@@ -43,6 +45,8 @@ type taskServices struct {
 	execution    *taskexecution.Coordinator
 	verification *taskverification.Coordinator
 	publication  *taskpublicationcoord.Coordinator
+	result       *taskresultcoord.Coordinator
+	resultWake   chan struct{}
 }
 
 func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Docker, manager *workspace.Manager, auth runtime.ServerAuth, log *slog.Logger) (*taskServices, error) {
@@ -146,6 +150,31 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 		Type: task.ActorRecovery, ID: "task-recovery", DisplayName: "Task recovery coordinator",
 		CredentialID: "service-v1", Authentication: "internal", RequestID: workerID,
 	}
+	resultCollector, err := taskresult.New(taskresult.Config{
+		GitExecutable: verificationGitExecutable(), Timeout: time.Minute, OutputBytes: 64 << 20, Now: time.Now,
+	})
+	if err != nil {
+		return nil, err
+	}
+	resultActor := task.ActorSnapshot{
+		Type: task.ActorSystem, ID: "task-result", DisplayName: "Task result coordinator",
+		CredentialID: "service-v1", Authentication: "internal", RequestID: workerID,
+	}
+	resultCoordinator, err := taskresultcoord.NewAuthorized(store, manager, resultCollector, taskresultcoord.Config{
+		WorkspaceID: durableWorkspace.ID, RepositoryPath: cfg.Workspace.Repo, PolicyVersion: "fern.user-seal.v1",
+		OperationTimeout: 2 * time.Minute, Actor: resultActor, ClaimOwner: workerID, Now: time.Now,
+	})
+	if err != nil {
+		return nil, err
+	}
+	sealAuthorizer, err := taskresultcoord.NewAuthorizer(store, manager, resultCollector, taskresultcoord.AuthorizerConfig{
+		RepositoryPath: cfg.Workspace.Repo, PolicyVersion: "fern.user-seal.v1", OperationTimeout: 2 * time.Minute,
+	})
+	if err != nil {
+		return nil, err
+	}
+	resultWake := make(chan struct{}, 1)
+	resultWake <- struct{}{}
 	coordinator, err := taskdelivery.New(store, manager, clientFactory, ids, taskdelivery.Config{
 		WorkspaceID: durableWorkspace.ID, WorkerID: workerID, SessionDirectory: taskSessionDirectory,
 		LeaseDuration: cfg.Tasks.LeaseDuration, OperationTimeout: min(cfg.Tasks.LeaseDuration/2, 30*time.Second),
@@ -241,7 +270,12 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	handler, err := taskapi.New(taskapi.Config{
 		WorkspaceID: durableWorkspace.ID, RepositoryID: durableWorkspace.RepositoryID,
 		Store: store, Generator: ids, ActorResolver: taskapi.ContextActor, BaseResolver: baseResolver,
-		Wake: coordinator.Wake, Now: time.Now, AttemptTimeout: cfg.Tasks.AttemptTimeout,
+		SealAuthorizer: sealAuthorizer, Wake: coordinator.Wake, SealWake: func() {
+			select {
+			case resultWake <- struct{}{}:
+			default:
+			}
+		}, Now: time.Now, AttemptTimeout: cfg.Tasks.AttemptTimeout,
 		ObjectFormat: "sha1", APIContractVersion: taskAPIContractVersion,
 		ExecutionContractVersion: taskExecutionContractVersion, Agent: cfg.Tasks.Agent,
 		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID, BudgetSnapshot: budget,
@@ -253,7 +287,35 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	return &taskServices{
 		store: store, handler: handler, coordinator: coordinator,
 		execution: executionCoordinator, verification: verificationCoordinator, publication: publicationCoordinator,
+		result: resultCoordinator, resultWake: resultWake,
 	}, nil
+}
+
+func runTaskResultCoordinator(ctx context.Context, service *taskServices, log *slog.Logger, workspaceName string) error {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-service.resultWake:
+		case <-ticker.C:
+		}
+		for {
+			err := service.result.RunOnce(ctx)
+			if err == nil {
+				continue
+			}
+			if errors.Is(err, taskresultcoord.ErrNoWork) {
+				break
+			}
+			if errors.Is(err, context.Canceled) {
+				return err
+			}
+			log.Error("user-authorized result sealing deferred", "err", err, "workspace", workspaceName)
+			break
+		}
+	}
 }
 
 func verificationGitExecutable() string {

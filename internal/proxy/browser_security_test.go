@@ -166,8 +166,12 @@ func TestTaskPageContainsTokenAndScriptSendsHeader(t *testing.T) {
 	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), `name="_csrf" id="csrf" value=""`) || !strings.Contains(response.Body.String(), `name="_csrf"`) {
 		t.Fatalf("task form token status=%d body=%q", response.Code, response.Body.String())
 	}
-	if !strings.Contains(taskUIJS, "X-Fern-CSRF-Token") || !strings.Contains(taskUIJS, csrfTokenPath) {
+	if !strings.Contains(durableTaskUIJS, "X-Fern-CSRF-Token") || !strings.Contains(durableTaskUIJS, csrfTokenPath) {
 		t.Fatal("task JavaScript does not refresh and send the CSRF header")
+	}
+	if strings.Contains(durableTaskUIJS, "localStorage") || !strings.Contains(durableTaskUIJS, "/fern/api/v1/tasks?limit=100") ||
+		!strings.Contains(durableTaskUIJS, "/seal-preview") {
+		t.Fatal("task JavaScript does not use durable server listing and seal controls")
 	}
 }
 

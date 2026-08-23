@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -17,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/taskresultcoord"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -30,6 +32,7 @@ const (
 	maxReasonBytes     = 500
 	maxSubmitBodyBytes = 6*(maxPromptBytes+maxTitleBytes+maxBaseRefBytes) + 128
 	maxCancelBodyBytes = 6*maxReasonBytes + 32
+	maxSealBodyBytes   = 4096
 	defaultEventLimit  = 100
 	maxEventLimit      = 500
 )
@@ -49,7 +52,9 @@ type Store interface {
 	FindReceiptByIdempotency(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error)
 	GetTask(context.Context, task.TaskID) (taskstore.Task, error)
 	GetAttempt(context.Context, task.AttemptID) (taskstore.Attempt, error)
+	ListTasks(context.Context, task.WorkspaceID, int) ([]taskstore.TaskSnapshot, error)
 	RequestCancellation(context.Context, taskstore.RequestCancellationParams) (taskstore.Cancellation, error)
+	GetSealRequestByReceipt(context.Context, task.ReceiptID) (taskstore.SealRequest, error)
 	ListEvents(context.Context, task.WorkspaceID, task.Cursor, int) (taskstore.EventPage, error)
 }
 
@@ -84,6 +89,11 @@ func ContextActor(ctx context.Context) (task.ActorSnapshot, error) {
 // configured repository and workspace.
 type BaseResolver func(context.Context, string) (task.GitOID, error)
 
+type SealAuthorizer interface {
+	Preview(context.Context, task.TaskID) (taskresultcoord.SealSnapshot, error)
+	Request(context.Context, taskresultcoord.SealSnapshot, taskstore.RequestSealParams) (taskstore.SealAdmission, error)
+}
+
 // Config contains dependencies and all execution values clients are forbidden
 // from selecting. Wake must be nonblocking; Handler calls it after a fresh
 // command commits and never for an idempotency replay.
@@ -94,7 +104,9 @@ type Config struct {
 	Generator                *task.Generator
 	ActorResolver            ActorResolver
 	BaseResolver             BaseResolver
+	SealAuthorizer           SealAuthorizer
 	Wake                     func()
+	SealWake                 func()
 	Now                      func() time.Time
 	AttemptTimeout           time.Duration
 	ObjectFormat             string
@@ -164,11 +176,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	switch {
 	case r.URL.Path == submitPath:
-		if r.Method != http.MethodPost {
-			methodNotAllowed(w, http.MethodPost)
-			return
+		switch r.Method {
+		case http.MethodGet:
+			h.listTasks(w, r)
+		case http.MethodPost:
+			h.submit(w, r, actor)
+		default:
+			w.Header().Set("Allow", "GET, POST")
+			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "The method is not allowed for this resource.")
 		}
-		h.submit(w, r, actor)
 	case r.URL.Path == eventsPath:
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w, http.MethodGet)
@@ -180,6 +196,52 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "The requested resource was not found.")
 	}
+}
+
+func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
+	values := r.URL.Query()
+	for key, entries := range values {
+		if key != "limit" || len(entries) != 1 {
+			writeError(w, http.StatusBadRequest, "invalid_query", "The task query is not valid.")
+			return
+		}
+	}
+	limit := 100
+	if raw := values.Get("limit"); raw != "" {
+		if len(raw) > 1 && raw[0] == '0' {
+			writeError(w, http.StatusBadRequest, "invalid_query", "The task query is not valid.")
+			return
+		}
+		parsed, err := strconv.Atoi(raw)
+		if err != nil || parsed < 1 || parsed > taskstore.MaxTaskListLimit {
+			writeError(w, http.StatusBadRequest, "invalid_query", "The task query is not valid.")
+			return
+		}
+		limit = parsed
+	}
+	valuesOut, err := h.config.Store.ListTasks(r.Context(), h.config.WorkspaceID, limit)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	tasks := make([]struct {
+		Task    taskDTO    `json:"task"`
+		Attempt attemptDTO `json:"attempt"`
+	}, 0, len(valuesOut))
+	for _, value := range valuesOut {
+		if value.Task.WorkspaceID != h.config.WorkspaceID || value.Attempt.WorkspaceID != h.config.WorkspaceID ||
+			value.Attempt.TaskID != value.Task.ID || value.Attempt.ID != value.Task.CurrentAttemptID {
+			writeError(w, http.StatusInternalServerError, "internal_error", "The request could not be completed.")
+			return
+		}
+		tasks = append(tasks, struct {
+			Task    taskDTO    `json:"task"`
+			Attempt attemptDTO `json:"attempt"`
+		}{taskView(value.Task), attemptView(value.Attempt)})
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Tasks any `json:"tasks"`
+	}{tasks})
 }
 
 type submitInput struct {
@@ -332,7 +394,140 @@ func (h *Handler) taskRoute(w http.ResponseWriter, r *http.Request, actor task.A
 		h.cancel(w, r, actor, id)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "seal-preview" {
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		id, err := task.ParseTaskID(parts[0])
+		if err != nil || !noQuery(r) || h.config.SealAuthorizer == nil {
+			writeError(w, http.StatusNotFound, "not_found", "The requested resource was not found.")
+			return
+		}
+		h.sealPreview(w, r, id)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "seal" {
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, http.MethodPost)
+			return
+		}
+		id, err := task.ParseTaskID(parts[0])
+		if err != nil || h.config.SealAuthorizer == nil {
+			writeError(w, http.StatusNotFound, "not_found", "The requested resource was not found.")
+			return
+		}
+		h.seal(w, r, actor, id)
+		return
+	}
 	writeError(w, http.StatusNotFound, "not_found", "The requested resource was not found.")
+}
+
+type sealInput struct {
+	AttemptID         string
+	WorkspaceRevision int64
+	TaskRevision      int64
+	AttemptRevision   int64
+	ResultCommit      string
+	TreeOID           string
+	Outcome           string
+	ManifestEntries   int
+	ManifestSHA256    string
+	WorktreeClean     bool
+}
+
+func (h *Handler) sealPreview(w http.ResponseWriter, r *http.Request, id task.TaskID) {
+	snapshot, err := h.config.SealAuthorizer.Preview(r.Context(), id)
+	if err != nil {
+		writeSealError(w, r.Context(), err)
+		return
+	}
+	writeJSON(w, http.StatusOK, sealSnapshotView(snapshot))
+}
+
+func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
+	if !noQuery(r) || !exactJSONContentType(r) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "The request is not valid.")
+		return
+	}
+	key, ok := parseIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	var input sealInput
+	if err := decodeClosedObject(r.Body, maxSealBodyBytes, map[string]func(json.RawMessage) error{
+		"attemptId": stringField(&input.AttemptID), "workspaceRevision": int64Field(&input.WorkspaceRevision),
+		"taskRevision": int64Field(&input.TaskRevision), "attemptRevision": int64Field(&input.AttemptRevision),
+		"resultCommit": stringField(&input.ResultCommit), "treeOid": stringField(&input.TreeOID),
+		"outcome": stringField(&input.Outcome), "manifestEntries": intField(&input.ManifestEntries),
+		"manifestSha256": stringField(&input.ManifestSHA256), "worktreeClean": boolField(&input.WorktreeClean),
+	}); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "The JSON body is not valid.")
+		return
+	}
+	expected, valid := parseSealSnapshot(id, input)
+	if !valid {
+		writeError(w, http.StatusBadRequest, "invalid_snapshot", "The snapshot is not valid.")
+		return
+	}
+	claim := task.IdempotencyClaim{
+		Scope: task.IdempotencyScope{WorkspaceID: h.config.WorkspaceID, CommandKind: taskstore.SealTaskCommand},
+		Key:   key, RequestHash: sealHash(id, input), Actor: actor,
+	}
+	receipt, found, err := h.config.Store.FindReceiptByIdempotency(r.Context(), h.config.WorkspaceID, taskstore.SealTaskCommand, key)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if found {
+		existing := task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: receipt.WorkspaceID, CommandKind: receipt.CommandKind},
+			Key: receipt.IdempotencyKey, RequestHash: receipt.RequestHash, Actor: receipt.Actor}
+		disposition, classifyErr := task.ClassifyIdempotency(&existing, claim)
+		if classifyErr != nil {
+			writeError(w, http.StatusInternalServerError, "internal_error", "The request could not be completed.")
+			return
+		}
+		if disposition == task.IdempotencyOwnerMismatch {
+			writeStoreError(w, taskstore.ErrIdempotencyOwnerMismatch)
+			return
+		}
+		if disposition != task.IdempotencyReplay {
+			writeStoreError(w, taskstore.ErrIdempotencyConflict)
+			return
+		}
+		request, readErr := h.config.Store.GetSealRequestByReceipt(r.Context(), receipt.ID)
+		if readErr != nil {
+			writeStoreError(w, readErr)
+			return
+		}
+		w.Header().Set("Idempotency-Replayed", "true")
+		writeJSON(w, http.StatusAccepted, sealResponseFor(receipt, request))
+		return
+	}
+	ids, err := h.config.Generator.GenerateSealRequestIDs()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "The request could not be completed.")
+		return
+	}
+	now, _, ok := h.commandTimes(w)
+	if !ok {
+		return
+	}
+	result, err := h.config.SealAuthorizer.Request(r.Context(), expected, taskstore.RequestSealParams{
+		SealRequestID: ids.SealRequestID, ReceiptID: ids.ReceiptID, ResultID: ids.ResultID,
+		ResultEventID: ids.ResultEventID, TaskEventID: ids.TaskEventID, TaskID: id, Claim: claim,
+		APIContractVersion: h.config.APIContractVersion, AcceptedAt: now,
+	})
+	if err != nil {
+		writeSealError(w, r.Context(), err)
+		return
+	}
+	if result.Replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+	} else if h.config.SealWake != nil {
+		h.config.SealWake()
+	}
+	writeJSON(w, http.StatusAccepted, sealResponseFor(result.Receipt, result.Request))
 }
 
 func (h *Handler) getTask(w http.ResponseWriter, r *http.Request, id task.TaskID) {
@@ -497,6 +692,47 @@ func cancelHash(id task.TaskID, input cancelInput) task.RequestHash {
 	return commandHash(taskstore.CancelTaskCommand, projection)
 }
 
+func sealHash(id task.TaskID, input sealInput) task.RequestHash {
+	return commandHash(taskstore.SealTaskCommand, struct {
+		TaskID task.TaskID `json:"taskId"`
+		Input  sealInput   `json:"snapshot"`
+	}{id, input})
+}
+
+func parseSealSnapshot(id task.TaskID, input sealInput) (taskresultcoord.SealSnapshot, bool) {
+	attemptID, err := task.ParseAttemptID(input.AttemptID)
+	if err != nil || input.WorkspaceRevision < 1 || input.TaskRevision < 1 || input.AttemptRevision < 1 ||
+		input.ManifestEntries < 0 || !input.WorktreeClean {
+		return taskresultcoord.SealSnapshot{}, false
+	}
+	resultCommit, err := task.ParseGitOID(input.ResultCommit)
+	if err != nil {
+		return taskresultcoord.SealSnapshot{}, false
+	}
+	treeOID, err := task.ParseGitOID(input.TreeOID)
+	if err != nil {
+		return taskresultcoord.SealSnapshot{}, false
+	}
+	outcome := task.ResultOutcome(input.Outcome)
+	if outcome != task.ResultChanged && outcome != task.ResultNoChanges {
+		return taskresultcoord.SealSnapshot{}, false
+	}
+	if !strings.HasPrefix(input.ManifestSHA256, "sha256:") || len(input.ManifestSHA256) != len("sha256:")+sha256.Size*2 {
+		return taskresultcoord.SealSnapshot{}, false
+	}
+	rawHash, err := hex.DecodeString(strings.TrimPrefix(input.ManifestSHA256, "sha256:"))
+	if err != nil || strings.ToLower(input.ManifestSHA256) != input.ManifestSHA256 {
+		return taskresultcoord.SealSnapshot{}, false
+	}
+	var manifestHash [sha256.Size]byte
+	copy(manifestHash[:], rawHash)
+	return taskresultcoord.SealSnapshot{
+		WorkspaceRevision: input.WorkspaceRevision, TaskRevision: input.TaskRevision, AttemptRevision: input.AttemptRevision,
+		TaskID: id, AttemptID: attemptID, ResultCommit: resultCommit, TreeOID: treeOID, Outcome: outcome,
+		ManifestEntries: input.ManifestEntries, ManifestSHA256: manifestHash, WorktreeClean: true,
+	}, true
+}
+
 func commandHash(kind string, projection any) task.RequestHash {
 	canonical, err := json.Marshal(projection)
 	if err != nil {
@@ -544,6 +780,18 @@ func stringField(target *string) func(json.RawMessage) error {
 		}
 		return json.Unmarshal(raw, target)
 	}
+}
+
+func int64Field(target *int64) func(json.RawMessage) error {
+	return func(raw json.RawMessage) error { return json.Unmarshal(raw, target) }
+}
+
+func intField(target *int) func(json.RawMessage) error {
+	return func(raw json.RawMessage) error { return json.Unmarshal(raw, target) }
+}
+
+func boolField(target *bool) func(json.RawMessage) error {
+	return func(raw json.RawMessage) error { return json.Unmarshal(raw, target) }
 }
 
 func validUnicodeEscapes(raw []byte) bool {
@@ -724,6 +972,28 @@ type eventDTO struct {
 	OccurredAt time.Time      `json:"occurredAt"`
 }
 
+type sealSnapshotDTO struct {
+	AttemptID         task.AttemptID     `json:"attemptId"`
+	WorkspaceRevision int64              `json:"workspaceRevision"`
+	TaskRevision      int64              `json:"taskRevision"`
+	AttemptRevision   int64              `json:"attemptRevision"`
+	ResultCommit      task.GitOID        `json:"resultCommit"`
+	TreeOID           task.GitOID        `json:"treeOid"`
+	Outcome           task.ResultOutcome `json:"outcome"`
+	ManifestEntries   int                `json:"manifestEntries"`
+	ManifestSHA256    string             `json:"manifestSha256"`
+	WorktreeClean     bool               `json:"worktreeClean"`
+}
+
+func sealSnapshotView(value taskresultcoord.SealSnapshot) sealSnapshotDTO {
+	return sealSnapshotDTO{
+		AttemptID: value.AttemptID, WorkspaceRevision: value.WorkspaceRevision,
+		TaskRevision: value.TaskRevision, AttemptRevision: value.AttemptRevision, ResultCommit: value.ResultCommit,
+		TreeOID: value.TreeOID, Outcome: value.Outcome, ManifestEntries: value.ManifestEntries,
+		ManifestSHA256: "sha256:" + hex.EncodeToString(value.ManifestSHA256[:]), WorktreeClean: value.WorktreeClean,
+	}
+}
+
 func taskView(value taskstore.Task) taskDTO {
 	return taskDTO{
 		ID: value.ID, WorkspaceID: value.WorkspaceID, Title: value.Title, State: value.State,
@@ -787,6 +1057,18 @@ type cancelResponse struct {
 	Disposition taskstore.CancellationEffectDisposition `json:"effectDisposition"`
 }
 
+type sealResponse struct {
+	Receipt       receiptDTO                 `json:"receipt"`
+	SealRequestID task.SealRequestID         `json:"sealRequestId"`
+	TaskID        task.TaskID                `json:"taskId"`
+	AttemptID     task.AttemptID             `json:"attemptId"`
+	State         taskstore.SealRequestState `json:"state"`
+}
+
+func sealResponseFor(receipt taskstore.Receipt, request taskstore.SealRequest) sealResponse {
+	return sealResponse{receiptView(receipt), request.ID, request.TaskID, request.AttemptID, request.State}
+}
+
 func cancelResponseFor(value taskstore.Cancellation) cancelResponse {
 	var projection struct {
 		AttemptID   task.AttemptID                          `json:"attemptId"`
@@ -819,6 +1101,19 @@ func writeDependencyError(w http.ResponseWriter, ctx context.Context, code, mess
 		writeError(w, http.StatusRequestTimeout, "request_canceled", "The request was canceled.")
 	default:
 		writeError(w, http.StatusUnprocessableEntity, code, message)
+	}
+}
+
+func writeSealError(w http.ResponseWriter, ctx context.Context, err error) {
+	switch {
+	case errors.Is(err, taskresultcoord.ErrSelectionChanged), errors.Is(err, taskstore.ErrStaleRevision):
+		writeError(w, http.StatusConflict, "snapshot_changed", "The task or committed snapshot changed. Preview it again.")
+	case errors.Is(err, taskresultcoord.ErrFenceFailed):
+		writeDependencyError(w, ctx, "workspace_not_quiescent", "The workspace could not be quiesced.", err)
+	case errors.Is(err, taskresultcoord.ErrCollectionFailed):
+		writeDependencyError(w, ctx, "snapshot_unavailable", "A clean committed snapshot could not be collected.", err)
+	default:
+		writeStoreError(w, err)
 	}
 }
 

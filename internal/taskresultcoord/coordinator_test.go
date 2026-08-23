@@ -115,6 +115,15 @@ type fakeFencer struct {
 	onObserved   func(int)
 }
 
+func (fencer *fakeFencer) AcquirePaused(context.Context) (func(), error) {
+	fencer.mu.Lock()
+	fencer.calls++
+	fencer.held = true
+	fencer.mu.Unlock()
+	var once sync.Once
+	return func() { once.Do(fencer.release) }, nil
+}
+
 func (fencer *fakeFencer) AcquireQuiesced(ctx context.Context, observe func(context.Context, workspace.RequestTarget) error) (func(), error) {
 	fencer.mu.Lock()
 	fencer.calls++

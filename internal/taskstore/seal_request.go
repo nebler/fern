@@ -183,6 +183,13 @@ func (s *Store) GetSealRequest(ctx context.Context, id task.SealRequestID) (Seal
 	return getSealRequest(ctx, s.db, id)
 }
 
+func (s *Store) GetSealRequestByReceipt(ctx context.Context, id task.ReceiptID) (SealRequest, error) {
+	if _, err := task.ParseReceiptID(string(id)); err != nil {
+		return SealRequest{}, fmt.Errorf("%w: receipt ID", ErrInvalidInput)
+	}
+	return sealRequestByReceipt(ctx, s.db, id)
+}
+
 func (s *Store) ClaimSealRequest(ctx context.Context, p ClaimSealRequestParams) (_ SealRequestWork, err error) {
 	if _, parseErr := task.ParseWorkspaceID(string(p.WorkspaceID)); parseErr != nil || !validBoundedText(p.ClaimOwner, 1, 64) ||
 		validExactTimestamp(p.Now) != nil || validExactTimestamp(p.LeaseExpiresAt) != nil || !p.LeaseExpiresAt.After(p.Now) {

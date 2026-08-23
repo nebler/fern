@@ -519,6 +519,11 @@ type DeliveryWork struct {
 	Attempt Attempt
 }
 
+type TaskSnapshot struct {
+	Task    Task
+	Attempt Attempt
+}
+
 type DeliveryTransition struct {
 	Task         Task
 	Attempt      Attempt

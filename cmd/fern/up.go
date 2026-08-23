@@ -249,6 +249,13 @@ func runUp(args []string, log *slog.Logger) error {
 	})
 	if tasks != nil {
 		group.Go(func() error {
+			err := runTaskResultCoordinator(serviceCtx, tasks, log, cfg.Workspace.Name)
+			if errors.Is(err, context.Canceled) {
+				return nil
+			}
+			return err
+		})
+		group.Go(func() error {
 			err := tasks.coordinator.Run(serviceCtx)
 			if errors.Is(err, context.Canceled) {
 				return nil

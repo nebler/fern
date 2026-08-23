@@ -3,6 +3,7 @@ package taskapi
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/taskresultcoord"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -33,8 +35,37 @@ type fakeStore struct {
 	receipt func(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error)
 	get     func(context.Context, task.TaskID) (taskstore.Task, error)
 	attempt func(context.Context, task.AttemptID) (taskstore.Attempt, error)
+	list    func(context.Context, task.WorkspaceID, int) ([]taskstore.TaskSnapshot, error)
 	cancel  func(context.Context, taskstore.RequestCancellationParams) (taskstore.Cancellation, error)
+	seal    func(context.Context, task.ReceiptID) (taskstore.SealRequest, error)
 	events  func(context.Context, task.WorkspaceID, task.Cursor, int) (taskstore.EventPage, error)
+}
+
+func (s *fakeStore) ListTasks(ctx context.Context, workspace task.WorkspaceID, limit int) ([]taskstore.TaskSnapshot, error) {
+	if s.list == nil {
+		return []taskstore.TaskSnapshot{}, nil
+	}
+	return s.list(ctx, workspace, limit)
+}
+
+type fakeSealAuthorizer struct {
+	preview func(context.Context, task.TaskID) (taskresultcoord.SealSnapshot, error)
+	request func(context.Context, taskresultcoord.SealSnapshot, taskstore.RequestSealParams) (taskstore.SealAdmission, error)
+}
+
+func (a *fakeSealAuthorizer) Preview(ctx context.Context, id task.TaskID) (taskresultcoord.SealSnapshot, error) {
+	return a.preview(ctx, id)
+}
+
+func (a *fakeSealAuthorizer) Request(ctx context.Context, expected taskresultcoord.SealSnapshot, params taskstore.RequestSealParams) (taskstore.SealAdmission, error) {
+	return a.request(ctx, expected, params)
+}
+
+func (s *fakeStore) GetSealRequestByReceipt(ctx context.Context, id task.ReceiptID) (taskstore.SealRequest, error) {
+	if s.seal == nil {
+		return taskstore.SealRequest{}, errors.New("unexpected GetSealRequestByReceipt")
+	}
+	return s.seal(ctx, id)
 }
 
 func (s *fakeStore) FindReceiptByIdempotency(ctx context.Context, workspace task.WorkspaceID, kind string, key task.IdempotencyKey) (taskstore.Receipt, bool, error) {
@@ -182,7 +213,7 @@ func TestRoutesAndMethods(t *testing.T) {
 		method, path, allow string
 		status              int
 	}{
-		{http.MethodGet, submitPath, http.MethodPost, http.StatusMethodNotAllowed},
+		{http.MethodDelete, submitPath, "GET, POST", http.StatusMethodNotAllowed},
 		{http.MethodPost, eventsPath, http.MethodGet, http.StatusMethodNotAllowed},
 		{http.MethodPost, apiPrefix + string(testTask), http.MethodGet, http.StatusMethodNotAllowed},
 		{http.MethodGet, apiPrefix + string(testTask) + "/cancel", http.MethodPost, http.StatusMethodNotAllowed},
@@ -442,6 +473,38 @@ func TestGetTaskOwnershipAndRedaction(t *testing.T) {
 	}
 }
 
+func TestListTasksUsesDurableServerSnapshots(t *testing.T) {
+	store := &fakeStore{list: func(_ context.Context, workspace task.WorkspaceID, limit int) ([]taskstore.TaskSnapshot, error) {
+		if workspace != testWorkspace || limit != 25 {
+			t.Fatalf("list scope = %s/%d", workspace, limit)
+		}
+		return []taskstore.TaskSnapshot{{
+			Task: taskstore.Task{ID: testTask, WorkspaceID: testWorkspace, Title: "Durable task", State: task.TaskRunning,
+				RepositoryID: 987654321, BaseRef: "main", BaseSHA: testSHA, CurrentAttemptID: testAttempt,
+				Revision: 3, CreatedAt: testNow, UpdatedAt: testNow, Prompt: "secret prompt"},
+			Attempt: taskstore.Attempt{ID: testAttempt, TaskID: testTask, WorkspaceID: testWorkspace, Sequence: 1,
+				State: task.AttemptRunning, OpenCodeSessionID: "ses_0123456789abcdef0123456789abcdef",
+				Deadline: testNow.Add(time.Hour), Revision: 4, CreatedAt: testNow, UpdatedAt: testNow},
+		}}, nil
+	}}
+	handler := newTestHandler(t, testConfig(t, store))
+	response := request(handler, http.MethodGet, submitPath+"?limit=25", "", nil)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"title":"Durable task"`) ||
+		!strings.Contains(response.Body.String(), `"openCodePath":"/session/ses_0123456789abcdef0123456789abcdef"`) {
+		t.Fatalf("list = %d %s", response.Code, response.Body.String())
+	}
+	for _, secret := range []string{"secret prompt", "credential", "budget"} {
+		if strings.Contains(response.Body.String(), secret) {
+			t.Fatalf("list leaked %q: %s", secret, response.Body.String())
+		}
+	}
+	for _, query := range []string{"?limit=0", "?limit=201", "?limit=01", "?other=1", "?limit=1&limit=2"} {
+		if got := request(handler, http.MethodGet, submitPath+query, "", nil); got.Code != http.StatusBadRequest {
+			t.Fatalf("query %q status=%d", query, got.Code)
+		}
+	}
+}
+
 func TestEventsQueryAndSafeProjection(t *testing.T) {
 	store := &fakeStore{events: func(_ context.Context, workspace task.WorkspaceID, after task.Cursor, limit int) (taskstore.EventPage, error) {
 		if workspace != testWorkspace || after != 7 || limit != 25 {
@@ -524,6 +587,75 @@ func TestCancellationOptionalBodyReplayConflictAndStrictness(t *testing.T) {
 		response := request(handler, http.MethodPost, apiPrefix+string(testTask)+"/cancel", body, map[string]string{"Content-Type": "application/json", "Idempotency-Key": "other"})
 		if response.Code != http.StatusBadRequest {
 			t.Errorf("body %q status = %d", body, response.Code)
+		}
+	}
+}
+
+func TestSealPreviewAndExactAuthorization(t *testing.T) {
+	manifest := sha256.Sum256([]byte("[]"))
+	snapshot := taskresultcoord.SealSnapshot{
+		TaskID: testTask, AttemptID: testAttempt, WorkspaceRevision: 3, TaskRevision: 4, AttemptRevision: 5,
+		ResultCommit: testSHA, TreeOID: task.GitOID("1111111111111111111111111111111111111111"),
+		Outcome: task.ResultNoChanges, ManifestEntries: 0, ManifestSHA256: manifest, WorktreeClean: true,
+	}
+	var wakes atomic.Int64
+	authorizer := &fakeSealAuthorizer{
+		preview: func(_ context.Context, id task.TaskID) (taskresultcoord.SealSnapshot, error) {
+			if id != testTask {
+				t.Fatalf("preview task = %s", id)
+			}
+			return snapshot, nil
+		},
+		request: func(_ context.Context, expected taskresultcoord.SealSnapshot, params taskstore.RequestSealParams) (taskstore.SealAdmission, error) {
+			if expected != snapshot || params.TaskID != testTask || params.Claim.Actor != testActor() ||
+				params.Claim.Scope.CommandKind != taskstore.SealTaskCommand || params.AcceptedAt != testNow {
+				t.Fatalf("expected=%+v params=%+v", expected, params)
+			}
+			return taskstore.SealAdmission{
+				Request: taskstore.SealRequest{ID: params.SealRequestID, TaskID: testTask, AttemptID: testAttempt, State: taskstore.SealRequestPending},
+				Receipt: taskstore.Receipt{ID: params.ReceiptID, WorkspaceID: testWorkspace, CommandKind: taskstore.SealTaskCommand,
+					State: taskstore.ReceiptAccepted, AcceptedAt: testNow, TargetID: testTask},
+			}, nil
+		},
+	}
+	config := testConfig(t, &fakeStore{})
+	config.SealAuthorizer = authorizer
+	config.SealWake = func() { wakes.Add(1) }
+	handler := newTestHandler(t, config)
+	preview := request(handler, http.MethodGet, apiPrefix+string(testTask)+"/seal-preview", "", nil)
+	if preview.Code != http.StatusOK || !strings.Contains(preview.Body.String(), `"manifestSha256":"sha256:`) {
+		t.Fatalf("preview = %d %s", preview.Code, preview.Body.String())
+	}
+	body := strings.TrimSpace(preview.Body.String())
+	accepted := request(handler, http.MethodPost, apiPrefix+string(testTask)+"/seal", body, postHeaders())
+	if accepted.Code != http.StatusAccepted || wakes.Load() != 1 || !strings.Contains(accepted.Body.String(), `"state":"pending"`) {
+		t.Fatalf("accepted = %d %s wakes=%d", accepted.Code, accepted.Body.String(), wakes.Load())
+	}
+}
+
+func TestSealRejectsChangedSnapshotAndStrictInput(t *testing.T) {
+	manifest := sha256.Sum256([]byte("[]"))
+	snapshot := taskresultcoord.SealSnapshot{TaskID: testTask, AttemptID: testAttempt, WorkspaceRevision: 3, TaskRevision: 4,
+		AttemptRevision: 5, ResultCommit: testSHA, TreeOID: testSHA, Outcome: task.ResultNoChanges,
+		ManifestSHA256: manifest, WorktreeClean: true}
+	authorizer := &fakeSealAuthorizer{
+		preview: func(context.Context, task.TaskID) (taskresultcoord.SealSnapshot, error) { return snapshot, nil },
+		request: func(context.Context, taskresultcoord.SealSnapshot, taskstore.RequestSealParams) (taskstore.SealAdmission, error) {
+			return taskstore.SealAdmission{}, taskresultcoord.ErrSelectionChanged
+		},
+	}
+	config := testConfig(t, &fakeStore{})
+	config.SealAuthorizer = authorizer
+	handler := newTestHandler(t, config)
+	preview := request(handler, http.MethodGet, apiPrefix+string(testTask)+"/seal-preview", "", nil)
+	changed := request(handler, http.MethodPost, apiPrefix+string(testTask)+"/seal", strings.TrimSpace(preview.Body.String()), postHeaders())
+	if changed.Code != http.StatusConflict || !strings.Contains(changed.Body.String(), "snapshot_changed") {
+		t.Fatalf("changed = %d %s", changed.Code, changed.Body.String())
+	}
+	for _, body := range []string{"{}", `{"attemptId":"bad"}`, strings.ReplaceAll(strings.TrimSpace(preview.Body.String()), `"worktreeClean":true`, `"worktreeClean":false`)} {
+		response := request(handler, http.MethodPost, apiPrefix+string(testTask)+"/seal", body, postHeaders())
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("body %s status=%d response=%s", body, response.Code, response.Body.String())
 		}
 	}
 }
