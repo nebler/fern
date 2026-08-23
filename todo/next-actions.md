@@ -28,16 +28,13 @@ list.
       (admit → exactly-once delivery → seal → verify → draft PR).
 - [ ] **Record a 60–90s demo**: phone on cellular → scan QR → submit task → watch wake → PR
       link. GIF at top of README beats linked video.
-- [ ] **Pre-public cleanup (all mechanical, from code review P0/P1):**
-  - de-panic proxy origin validation (`NewHandlers` returns error; delete duplicated
-    `parseTrustedOrigin`, consume `config.ParseRemoteOrigin`) — H1;
-  - replace 8× inline `"workspace manager is shutting down"` with one sentinel (`ErrClosing`);
-  - add the Manager concurrency-invariant doc block (admissionMu→wakeMu order, lifecycle
-    token, generation semantics);
-  - move test-only `New`/`NewWithControls` into `_test.go`; drop the nil-waker branch;
-  - `minDuration` → builtin `min`; dedupe backoff into one `nextBackoff`;
-  - glossary comment: domain "pause" = docker stop, "Frozen" = freezer cgroup;
-  - add minimal `.golangci.yml` (govet, staticcheck, errcheck, ineffassign) to CI.
+- [x] **Pre-public cleanup — DONE 2026-08-23** (commits `69eba67`, `a31288f`, `5a8308f`,
+      `a6fcfc0`, `0a90066`): origin validation returns errors instead of panicking; legacy
+      constructors relocated behind tests; nil-waker path documented; `ErrManagerClosed`
+      sentinel replaces eight inline literals; Manager lock-ordering contract documented;
+      gh-exec failures keep wrapped causes; builtin `min`; glossary comment for domain
+      "pause" vs Docker "Frozen"; `.golangci.yml` + `make lint` added.
+      *(Backoff dedup finding dissolved on verification — code already shared one helper.)*
 
 ## Weekend 2 — The number (1 day of code + half a day measuring)
 

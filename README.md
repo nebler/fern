@@ -291,6 +291,7 @@ make format
 make test
 make test-race
 make vet
+make lint
 make build
 make image
 ./scripts/test-lifecycle.sh
