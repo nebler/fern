@@ -1,12 +1,80 @@
 # fern
 
-Self-hosted OpenCode workspaces that stop when idle and wake on the next HTTP
-request.
+> Self-hosted OpenCode workspaces that stop when idle and wake on the next HTTP
+> request — your Docker host, your tailnet, your keys.
 
-Fern runs on the host, supervises the pinned OpenCode server in Docker, observes OpenCode
-activity, and exposes a stable wake-aware reverse proxy. OpenCode serves its
-official, complete web UI at the server root, so opening Fern's proxy origin in
-a browser is the primary client experience.
+## Why
+
+Coding agents are chained to whichever machine started them: close the laptop
+and the work stops, and the "remote" alternatives mean renting someone else's
+sandbox. fern is a single Go binary that runs agent workspaces on hardware you
+own, puts an authenticated wake-aware reverse proxy in front of them, and makes
+the phone a first-class control surface — dispatch a task over cellular, get
+interrupted only when input is required, review and publish the result as a
+draft PR.
+
+## Demo
+
+> **Demo (recording pending):** 60–90s phone-on-cellular flow — scan pairing QR,
+> submit a durable task, watch the wake land, open the resulting draft PR. Will
+> be embedded here as an animated GIF rather than a linked video.
+
+<!-- Replace this block with ![fern phone demo](docs/demo.gif) once recorded.
+     Reviewers do not click through to videos; an inline GIF at screen one is
+     the unit that works. -->
+
+## Measured numbers
+
+| Metric | Value | Source |
+| --- | --- | --- |
+| Cold wake (stopped → healthy, proxied first byte) | ~2.8–3.1 s | 10-run lifecycle harness, `curl` `time_starttransfer` (`integration/lifecycle/artifacts/*/wake-timings.tsv`) |
+| Warm wake (pre-thawed freezer pool) | planned: < 100 ms | roadmap — `todo/next-actions.md` (not yet implemented; current pause is graceful stop) |
+| Traffic while idle | none — compute stopped | two-pass all-idle barrier (`internal/workspace`) |
+
+Every wake above ~100 ms is logged with its duration; the harness measures real
+Docker transitions against a deterministic fake OpenCode.
+
+## Architecture
+
+```text
+      phone / laptop (tailnet)                 local operator CLI
+               │  HTTPS via Tailscale Serve          │ loopback :8081
+               ▼                                     ▼
+    ┌─────────────────────────┐          ┌─────────────────────────┐
+    │  remote listener :8080  │          │ operator listener :8081 │
+    │  paired-device grants   │          │  Basic-auth policy      │
+    └───────────┬─────────────┘          └───────────┬─────────────┘
+                └──────────────┬─────────────────────┘
+                               ▼
+              request admission (observe / read / work)
+                               ▼
+       coalesced wake ──► docker resume or create ──► health + auth probes
+                               ▼
+             attested endpoint (loopback port, generation-stamped)
+                               ▼
+           opencode v2 serve — pinned image digest, unprivileged UID
+                               ▼
+      unbuffered SSE / streaming reverse proxy back to the client
+```
+
+The same ingress carries a durable task pipeline:
+
+```text
+phone submit ──► durable admission (idempotency receipt, caller-chosen IDs)
+                      │ wakes compute only after commit
+                      ▼
+        exact-once delivery ──► fail-closed execution observation
+                      ▼
+   user-authorized seal ──► fenced verification runner ──► journaled draft PR
+```
+
+| fern owns | OpenCode owns |
+| --- | --- |
+| workspace lifecycle, wake/pause safety, admission | sessions, prompts, tools, terminals |
+| durable task intent, receipts, cancellation fences | permissions, forms, provider calls |
+| result sealing, verification policy, publication journals | the official UI, files, diffs |
+
+## Scope
 
 Fern is V2-only. It does not build a coding PWA, fork or consume
 `@opencode-ai/app`, or reimplement OpenCode screens. OpenCode remains the
