@@ -222,6 +222,7 @@ func (d *Docker) create(ctx context.Context, spec Spec) (observation Observation
 	port := nat.Port(workspacePort)
 	useInit := true
 	pidsLimit := workspacePIDs
+	createStart := time.Now()
 	created, err := d.cli.ContainerCreate(
 		ctx,
 		&container.Config{
@@ -253,6 +254,8 @@ func (d *Docker) create(ctx context.Context, spec Spec) (observation Observation
 		return Observation{}, fmt.Errorf("create container %q: %w", spec.Name, err)
 	}
 
+	recordSpan(ctx, "docker_create", createStart)
+
 	start := time.Now()
 	if err := d.cli.ContainerStart(ctx, created.ID, container.StartOptions{}); err != nil {
 		cause := fmt.Errorf("start container %q: %w", spec.Name, err)
@@ -261,10 +264,13 @@ func (d *Docker) create(ctx context.Context, spec Spec) (observation Observation
 		removeErr := d.cli.ContainerRemove(cleanupCtx, created.ID, container.RemoveOptions{Force: true})
 		return Observation{}, errors.Join(cause, removeErr)
 	}
+	recordSpan(ctx, "docker_start", start)
 	// Once OpenCode starts, retain its data even if health or observation setup
 	// later fails. Only a never-started initial workspace is safe to roll back.
 	retainVolume = true
+	inspectStart := time.Now()
 	observation, err = d.statusByReference(ctx, created.ID, spec.Name)
+	recordSpan(ctx, "docker_inspect", inspectStart)
 	if err != nil {
 		return Observation{}, d.rollbackStarted(spec.Name, created.ID, err)
 	}
@@ -274,9 +280,12 @@ func (d *Docker) create(ctx context.Context, spec Spec) (observation Observation
 	if !observation.HasEndpoint {
 		return Observation{}, d.rollbackStarted(spec.Name, created.ID, fmt.Errorf("workspace %q has no %s port binding", spec.Name, workspacePort))
 	}
+	healthStart := time.Now()
 	if err := WaitHealthy(ctx, observation.Endpoint, spec.ServerAuth(), healthTimeout); err != nil {
+		recordSpan(ctx, "health_probe", healthStart)
 		return Observation{}, d.rollbackStarted(spec.Name, created.ID, fmt.Errorf("container %q never became healthy: %w", spec.Name, err))
 	}
+	recordSpan(ctx, "health_probe", healthStart)
 	d.log.Info("state", "workspace", spec.Name, "from", StateProvisioning, "to", StateRunning, "elapsed_ms", time.Since(start).Milliseconds())
 	return observation, nil
 }
@@ -470,13 +479,17 @@ func (d *Docker) resumeObserved(ctx context.Context, spec Spec, inspection works
 		if err := d.cli.ContainerUnpause(ctx, observation.ContainerID); err != nil {
 			return Observation{}, d.rollbackStarted(spec.Name, containerID, fmt.Errorf("unpause %q: %w", spec.Name, err))
 		}
+		recordSpan(ctx, "docker_unpause", start)
 	} else if !observation.Running {
 		if err := d.cli.ContainerStart(ctx, observation.ContainerID, container.StartOptions{}); err != nil {
 			return Observation{}, d.rollbackStarted(spec.Name, containerID, fmt.Errorf("start %q: %w", spec.Name, err))
 		}
+		recordSpan(ctx, "docker_start", start)
 	}
 	if transitioned {
+		inspectStart := time.Now()
 		observation, err = d.statusByReference(ctx, containerID, spec.Name)
+		recordSpan(ctx, "docker_inspect", inspectStart)
 		if err != nil {
 			return Observation{}, d.rollbackIfTransitioned(true, spec.Name, containerID, err)
 		}
@@ -487,9 +500,12 @@ func (d *Docker) resumeObserved(ctx context.Context, spec Spec, inspection works
 	if !observation.HasEndpoint {
 		return Observation{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("workspace %q has no %s port binding", spec.Name, workspacePort))
 	}
+	healthStart := time.Now()
 	if err := WaitHealthy(ctx, observation.Endpoint, spec.ServerAuth(), healthTimeout); err != nil {
+		recordSpan(ctx, "health_probe", healthStart)
 		return Observation{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("workspace %q did not become healthy: %w", spec.Name, err))
 	}
+	recordSpan(ctx, "health_probe", healthStart)
 	if err := d.intents.Clear(spec.Name); err != nil {
 		return Observation{}, d.rollbackIfTransitioned(transitioned, spec.Name, containerID, fmt.Errorf("clear pause intent after resume: %w", err))
 	}
