@@ -31,6 +31,10 @@ draft PR.
 | Warm wake (pre-thawed freezer pool) | planned: < 100 ms | roadmap — `todo/next-actions.md` (not yet implemented; current pause is graceful stop) |
 | Traffic while idle | none — compute stopped | two-pass all-idle barrier (`internal/workspace`) |
 
+`fern debug wake` prints a per-phase millisecond waterfall of the most recent
+wake (admission → lifecycle → Docker mutation → health probe → observer attach)
+against a running supervisor.
+
 Every wake above ~100 ms is logged with its duration; the harness measures real
 Docker transitions against a deterministic fake OpenCode.
 

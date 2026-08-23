@@ -1098,6 +1098,7 @@ Examples:
 | `fern status` | Inspect classified Docker state | Read-only |
 | `fern logs` | Stream Docker logs | Read-only |
 | `fern debug events` | Direct backend health/SSE diagnostic | Diagnostic bypass |
+| `fern debug wake` | Print the phase waterfall (admission, lifecycle token, Docker mutation, health probe, observer attach) for one wake through the operator listener | Operator-only diagnostic; requires the control credential and a running `fern up` |
 | `fern github publish --dry-run` | Legacy preparation diagnostics | No mutation |
 | `fern version` | Print embedded release identity | No workspace lease |
 

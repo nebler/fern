@@ -38,10 +38,13 @@ list.
 
 ## Weekend 2 — The number (1 day of code + half a day measuring)
 
+- [x] **`fern debug wake` shipped 2026-08-23** — per-phase waterfall served through the
+      operator listener (`POST /fern/api/v1/debug/wake-trace`): span plumbing in runtime,
+      trace recording on each coalesced wake, operator-only endpoint + CLI verb.
 - [ ] **Freezer pause behind `idle.mode: stop|freeze`** (classifier already understands frozen;
-      extend `pauseObserved`/`resumeObserved`). Keep the two-pass idle barrier unchanged.
-- [ ] **`fern wake --trace`** millisecond waterfall (proxy accept → thaw → health probe → first
-      byte); run the lifecycle harness ×10, put the real numbers in the README.
+      extend `pauseObserved`/`resumeObserved`). Keep the two-pass all-idle barrier unchanged.
+- [ ] **Run `fern debug wake` ×10 through the lifecycle harness**; put the real
+      before/after numbers in the README table.
 - [ ] **Answer the one open review question** (the only decision owed): unhealthy-start →
       committed pause intent (docker.go rollback path) — deliberate anti-crash-loop or bug?
       Pick: distinct intent flavor *or* documenting comment + harness expectation.
