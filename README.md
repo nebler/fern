@@ -194,6 +194,20 @@ workspace:
       fullName: owner/repository
 ```
 
+Authenticate and publish directly from the OpenCode terminal:
+
+```bash
+gh auth login --hostname github.com
+gh auth setup-git --hostname github.com
+git push --set-upstream origin HEAD
+gh pr create --draft --base main --fill
+```
+
+Fern persists only this workspace's `gh` config in its dedicated Docker volume.
+Run `gh auth status --hostname github.com` to inspect it and `gh auth logout
+--hostname github.com` to remove it. Fern does not wrap ordinary push or PR
+creation with a second publication API.
+
 Durable tasks remain disabled unless a complete execution policy and explicit
 GitHub authority are configured. Provider and model IDs are always explicit:
 

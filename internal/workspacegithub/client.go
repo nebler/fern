@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/url"
 	"strings"
@@ -16,9 +15,8 @@ import (
 const maxOutputBytes = 64 << 10
 
 var (
-	ErrUnauthenticated = errors.New("workspace GitHub authentication is required")
-	ErrUnavailable     = errors.New("workspace GitHub authentication could not be verified")
-	ErrRepository      = errors.New("configured GitHub repository is unavailable")
+	ErrUnavailable = errors.New("workspace GitHub authentication could not be verified")
+	ErrRepository  = errors.New("configured GitHub repository is unavailable")
 )
 
 type Executor interface {
@@ -28,13 +26,6 @@ type Executor interface {
 type Client struct {
 	executor Executor
 	hostname string
-}
-
-type Status struct {
-	Hostname    string
-	Login       string
-	Scopes      []string
-	GitProtocol string
 }
 
 type Repository struct {
@@ -54,60 +45,6 @@ func New(executor Executor, hostname string) (*Client, error) {
 		return nil, errors.New("workspace GitHub executor and github.com hostname are required")
 	}
 	return &Client{executor: executor, hostname: hostname}, nil
-}
-
-func (c *Client) Status(ctx context.Context) (Status, error) {
-	output, err := c.executor.Run(ctx, "auth", "status", "--active", "--hostname", c.hostname, "--json", "hosts")
-	if err != nil {
-		if ctx.Err() != nil {
-			return Status{}, ctx.Err()
-		}
-		return Status{}, ErrUnavailable
-	}
-	var response struct {
-		Hosts map[string][]struct {
-			State       string `json:"state"`
-			Active      bool   `json:"active"`
-			Host        string `json:"host"`
-			Login       string `json:"login"`
-			Scopes      string `json:"scopes"`
-			GitProtocol string `json:"gitProtocol"`
-			Token       string `json:"token"`
-		} `json:"hosts"`
-	}
-	if err := decodeBounded(output, &response); err != nil {
-		return Status{}, fmt.Errorf("%w: invalid gh status output", ErrUnavailable)
-	}
-	entries := response.Hosts[c.hostname]
-	if len(entries) == 0 {
-		return Status{}, ErrUnauthenticated
-	}
-	var selected *Status
-	for _, entry := range entries {
-		if entry.Token != "" || entry.Host != c.hostname || !entry.Active {
-			if entry.Token != "" {
-				return Status{}, fmt.Errorf("%w: gh exposed credential material", ErrUnavailable)
-			}
-			continue
-		}
-		if entry.State != "success" {
-			return Status{}, ErrUnavailable
-		}
-		if !validLogin(entry.Login) || entry.GitProtocol != "https" && entry.GitProtocol != "ssh" || selected != nil {
-			return Status{}, fmt.Errorf("%w: ambiguous gh account", ErrUnavailable)
-		}
-		status := Status{Hostname: c.hostname, Login: entry.Login, GitProtocol: entry.GitProtocol}
-		for _, scope := range strings.Split(entry.Scopes, ",") {
-			if scope = strings.TrimSpace(scope); scope != "" {
-				status.Scopes = append(status.Scopes, scope)
-			}
-		}
-		selected = &status
-	}
-	if selected == nil {
-		return Status{}, ErrUnauthenticated
-	}
-	return *selected, nil
 }
 
 func (c *Client) Repository(ctx context.Context, expectedID int64, fullName string) (Repository, error) {
@@ -197,6 +134,31 @@ func validRepository(value string) bool {
 	for _, character := range repository {
 		if character != '-' && character != '_' && character != '.' &&
 			(character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func validGitOID(value string) bool {
+	if len(value) != 40 || value != strings.ToLower(value) {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validGitRef(value string) bool {
+	if len(value) < 1 || len(value) > 255 || strings.HasPrefix(value, "/") || strings.HasSuffix(value, "/") ||
+		strings.Contains(value, "..") || strings.Contains(value, "//") || strings.Contains(value, "@{") || strings.HasSuffix(value, ".lock") {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x21 || character == 0x7f || strings.ContainsRune(`~^:?*[\`, character) {
 			return false
 		}
 	}

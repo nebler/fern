@@ -29,11 +29,11 @@ audited phone actions as conveniences, but cannot claim they are an exclusive
 publication gate while the same credential is available to OpenCode. Fern still
 must implement phone-usable authentication, persistent credential state,
 documented scopes, local logout and remote revocation, replacement, and backup
-policy. Fern now installs checksum-pinned `gh`, persists its isolated config,
-executes token-free status/repository/branch probes through a bounded attested
-container boundary, and supports durable task admission in `workspace-gh` mode.
-Durable push and draft-PR phone commands are still pending; OpenCode can use the
-same unrestricted workspace credential directly.
+policy. Fern installs checksum-pinned `gh`, persists its isolated config,
+executes the repository/base lookups needed by task admission through a bounded
+attested container boundary, and supports durable task admission in
+`workspace-gh` mode. Push and draft-PR creation remain ordinary workspace CLI
+commands rather than a parallel Fern GitHub API.
 
 ## Implemented Field Prototype
 
