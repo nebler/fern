@@ -192,6 +192,7 @@ func runUp(args []string, log *slog.Logger) error {
 	connections := newConnectionTracker()
 	controls := proxy.Controls{
 		Store: controlStore, Onboarding: onboarding, ControlAuth: proxy.ControlAuth{Password: cfg.Control.Password},
+		WakeTrace: proxy.NewWakeTraceHandler(manager, manager.LastWakeTrace, log),
 	}
 	if tasks != nil {
 		controls.Tasks = tasks.handler

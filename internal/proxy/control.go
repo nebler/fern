@@ -41,6 +41,20 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 		controls.Tasks.ServeHTTP(writer, request)
 		return true
 	}
+	if path == "/fern/api/v1/debug/wake-trace" {
+		// Operator-only diagnostic. The remote surface builds Controls without
+		// WakeTrace, so the route is absent there rather than exposed.
+		if controls.WakeTrace == nil {
+			http.NotFound(writer, request)
+			return true
+		}
+		if request.Method != http.MethodPost && request.Method != http.MethodGet {
+			methodNotAllowed(writer, "GET, POST")
+			return true
+		}
+		controls.WakeTrace.ServeHTTP(writer, request)
+		return true
+	}
 	if path == "/fern/api/v1/devices" {
 		if store == nil {
 			http.Error(writer, "control store unavailable", http.StatusServiceUnavailable)

@@ -32,6 +32,7 @@ type Controls struct {
 	Publications PublicationExecutor
 	Tasks        http.Handler
 	Onboarding   http.Handler
+	WakeTrace    http.Handler
 	ControlAuth  ControlAuth
 }
 
