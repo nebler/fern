@@ -78,7 +78,7 @@ func (d *Docker) Close() error {
 // ResolveImageID reads Docker's immutable local image identity for a configured
 // reference without creating, starting, or mutating a container.
 func (d *Docker) ResolveImageID(ctx context.Context, reference string) (string, error) {
-	if d == nil || d.cli == nil || strings.TrimSpace(reference) != reference || reference == "" {
+	if strings.TrimSpace(reference) != reference || reference == "" {
 		return "", fmt.Errorf("%w: image reference", ErrSpecDrift)
 	}
 	inspection, err := d.cli.ImageInspect(ctx, reference)
@@ -96,7 +96,7 @@ func (d *Docker) ResolveImageID(ctx context.Context, reference string) (string, 
 // lease until this method returns.
 func (d *Docker) ExecWorkspaceGH(ctx context.Context, workspace, expectedImageID string, arguments ...string) (CommandResult, error) {
 	deadline, ok := ctx.Deadline()
-	if d == nil || d.cli == nil || !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 5*time.Minute ||
+	if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 5*time.Minute ||
 		!ValidImageID(expectedImageID) || len(arguments) == 0 || len(arguments) > 64 {
 		return CommandResult{}, ErrCommandFailed
 	}
@@ -107,10 +107,10 @@ func (d *Docker) ExecWorkspaceGH(ctx context.Context, workspace, expectedImageID
 	}
 	inspection, err := d.inspectByReference(ctx, workspace, workspace)
 	if err != nil {
-		return CommandResult{}, ErrCommandFailed
+		return CommandResult{}, errors.Join(ErrCommandFailed, fmt.Errorf("inspect workspace %q: %w", workspace, err))
 	}
 	if inspection.observation.State != StateRunning || inspection.observation.ImageID != expectedImageID || inspection.observation.Frozen {
-		return CommandResult{}, ErrCommandFailed
+		return CommandResult{}, fmt.Errorf("%w: workspace %q is %s with image %s", ErrCommandFailed, workspace, inspection.observation.State, inspection.observation.ImageID)
 	}
 	seconds := int(time.Until(deadline) / time.Second)
 	if seconds < 1 {
@@ -121,12 +121,15 @@ func (d *Docker) ExecWorkspaceGH(ctx context.Context, workspace, expectedImageID
 	created, err := d.cli.ContainerExecCreate(ctx, inspection.observation.ContainerID, container.ExecOptions{
 		User: "1001:1001", AttachStdout: true, AttachStderr: true, WorkingDir: "/home/user/workspace", Cmd: command,
 	})
-	if err != nil || created.ID == "" {
-		return CommandResult{}, ErrCommandFailed
+	if err != nil {
+		return CommandResult{}, errors.Join(ErrCommandFailed, fmt.Errorf("create gh exec: %w", err))
+	}
+	if created.ID == "" {
+		return CommandResult{}, fmt.Errorf("%w: exec create returned no id", ErrCommandFailed)
 	}
 	attached, err := d.cli.ContainerExecAttach(ctx, created.ID, container.ExecAttachOptions{})
 	if err != nil {
-		return CommandResult{}, ErrCommandFailed
+		return CommandResult{}, errors.Join(ErrCommandFailed, fmt.Errorf("attach gh exec: %w", err))
 	}
 	defer attached.Close()
 	stdout, stderr := &boundedCommandBuffer{limit: 64 << 10}, &boundedCommandBuffer{limit: 64 << 10}
@@ -142,7 +145,7 @@ func (d *Docker) ExecWorkspaceGH(ctx context.Context, workspace, expectedImageID
 		return result, ctx.Err()
 	}
 	if copyErr != nil || inspectErr != nil || executed.Running || executed.ExitCode != 0 {
-		return result, ErrCommandFailed
+		return result, errors.Join(ErrCommandFailed, fmt.Errorf("gh exec outcome: copy=%v inspect=%v running=%t exit=%d", copyErr, inspectErr, executed.Running, executed.ExitCode))
 	}
 	return result, nil
 }
@@ -278,6 +281,12 @@ func (d *Docker) create(ctx context.Context, spec Spec) (observation Observation
 	return observation, nil
 }
 
+// Pause stops the container gracefully (docker stop after a 10s timeout) and
+// journals intent before and after, so a later exit classifies as paused
+// rather than failed. Note on vocabulary: domain "pause" here means stopped
+// compute explained by an intent. It is distinct from Docker's freezer pause,
+// which fern surfaces as the Frozen observation flag and treats as live
+// compute that must be thawed (ContainerUnpause) before stop or destroy.
 func (d *Docker) Pause(ctx context.Context, name string) error {
 	observation, err := d.Status(ctx, name)
 	if err != nil {
