@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -30,6 +31,7 @@ const (
 	workspacePort        = "4096/tcp"
 	githubConfigDir      = "/home/user/.config/gh"
 	githubConfigEnv      = "GH_CONFIG_DIR"
+	workspaceGHBinary    = "/usr/local/bin/gh"
 	healthTimeout        = 60 * time.Second
 	workspaceNanoCPUs    = int64(2_000_000_000)
 	workspacePIDs        = int64(512)
@@ -37,6 +39,17 @@ const (
 	workspaceLabel       = "dev.fern.workspace"
 	specFingerprintLabel = "dev.fern.spec"
 )
+
+var (
+	ErrCommandFailed      = errors.New("workspace command failed")
+	ErrCommandOutputLimit = errors.New("workspace command output exceeded limit")
+)
+
+type CommandResult struct {
+	Stdout   []byte
+	Stderr   []byte
+	ExitCode int
+}
 
 type Docker struct {
 	cli     *client.Client
@@ -77,6 +90,85 @@ func (d *Docker) ResolveImageID(ctx context.Context, reference string) (string, 
 	}
 	return inspection.ID, nil
 }
+
+// ExecWorkspaceGH executes the pinned gh binary in one attested managed
+// workspace. Callers must supply a deadline and retain their manager request
+// lease until this method returns.
+func (d *Docker) ExecWorkspaceGH(ctx context.Context, workspace, expectedImageID string, arguments ...string) (CommandResult, error) {
+	deadline, ok := ctx.Deadline()
+	if d == nil || d.cli == nil || !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 5*time.Minute ||
+		!ValidImageID(expectedImageID) || len(arguments) == 0 || len(arguments) > 64 {
+		return CommandResult{}, ErrCommandFailed
+	}
+	for _, argument := range arguments {
+		if len(argument) > 64<<10 || strings.ContainsRune(argument, 0) {
+			return CommandResult{}, ErrCommandFailed
+		}
+	}
+	inspection, err := d.inspectByReference(ctx, workspace, workspace)
+	if err != nil {
+		return CommandResult{}, ErrCommandFailed
+	}
+	if inspection.observation.State != StateRunning || inspection.observation.ImageID != expectedImageID || inspection.observation.Frozen {
+		return CommandResult{}, ErrCommandFailed
+	}
+	seconds := int(time.Until(deadline) / time.Second)
+	if seconds < 1 {
+		seconds = 1
+	}
+	command := []string{"/usr/bin/timeout", "--signal=KILL", "--kill-after=1s", strconv.Itoa(seconds) + "s", workspaceGHBinary}
+	command = append(command, arguments...)
+	created, err := d.cli.ContainerExecCreate(ctx, inspection.observation.ContainerID, container.ExecOptions{
+		User: "1001:1001", AttachStdout: true, AttachStderr: true, WorkingDir: "/home/user/workspace", Cmd: command,
+	})
+	if err != nil || created.ID == "" {
+		return CommandResult{}, ErrCommandFailed
+	}
+	attached, err := d.cli.ContainerExecAttach(ctx, created.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return CommandResult{}, ErrCommandFailed
+	}
+	defer attached.Close()
+	stdout, stderr := &boundedCommandBuffer{limit: 64 << 10}, &boundedCommandBuffer{limit: 64 << 10}
+	_, copyErr := stdcopy.StdCopy(stdout, stderr, attached.Reader)
+	inspectContext, cancelInspect := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancelInspect()
+	executed, inspectErr := d.cli.ContainerExecInspect(inspectContext, created.ID)
+	result := CommandResult{Stdout: stdout.Bytes(), Stderr: stderr.Bytes(), ExitCode: executed.ExitCode}
+	if stdout.exceeded || stderr.exceeded {
+		return result, ErrCommandOutputLimit
+	}
+	if ctx.Err() != nil {
+		return result, ctx.Err()
+	}
+	if copyErr != nil || inspectErr != nil || executed.Running || executed.ExitCode != 0 {
+		return result, ErrCommandFailed
+	}
+	return result, nil
+}
+
+type boundedCommandBuffer struct {
+	buffer   bytes.Buffer
+	limit    int
+	exceeded bool
+}
+
+func (b *boundedCommandBuffer) Write(value []byte) (int, error) {
+	remaining := b.limit - b.buffer.Len()
+	if remaining > 0 {
+		retained := value
+		if len(retained) > remaining {
+			retained = retained[:remaining]
+		}
+		_, _ = b.buffer.Write(retained)
+	}
+	if len(value) > remaining {
+		b.exceeded = true
+	}
+	return len(value), nil
+}
+
+func (b *boundedCommandBuffer) Bytes() []byte { return append([]byte(nil), b.buffer.Bytes()...) }
 
 func (d *Docker) Create(ctx context.Context, spec Spec) (Endpoint, error) {
 	if err := spec.Validate(); err != nil {

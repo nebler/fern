@@ -19,6 +19,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/docker/go-connections/nat"
 )
 
@@ -923,12 +924,128 @@ func TestDestroyAbsentWorkspaceClearsStaleIntent(t *testing.T) {
 	}
 }
 
+func TestExecWorkspaceGHAttestsContainerAndFixesExecutionIdentity(t *testing.T) {
+	t.Parallel()
+	var options container.ExecOptions
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/containers/demo/json"):
+			writeJSON(writer, http.StatusOK, map[string]any{
+				"Id": "container-id", "Image": testImageID,
+				"Config":          map[string]any{"Labels": map[string]string{managedLabel: "true", workspaceLabel: "demo"}},
+				"State":           map[string]any{"Status": "running", "Running": true},
+				"NetworkSettings": map[string]any{"Ports": map[string]any{}},
+			})
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/containers/container-id/exec"):
+			if err := json.NewDecoder(request.Body).Decode(&options); err != nil {
+				t.Errorf("decode exec options: %v", err)
+			}
+			writeJSON(writer, http.StatusCreated, map[string]any{"Id": "abcdef123456"})
+		case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/exec/abcdef123456/start"):
+			hijacker, ok := writer.(http.Hijacker)
+			if !ok {
+				t.Error("server does not support hijacking")
+				return
+			}
+			connection, buffered, err := hijacker.Hijack()
+			if err != nil {
+				t.Errorf("hijack: %v", err)
+				return
+			}
+			_, _ = buffered.WriteString("HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+			_ = buffered.Flush()
+			_, _ = stdcopy.NewStdWriter(connection, stdcopy.Stdout).Write([]byte("safe output\n"))
+			_, _ = stdcopy.NewStdWriter(connection, stdcopy.Stderr).Write([]byte("diagnostic\n"))
+			_ = connection.Close()
+		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/exec/abcdef123456/json"):
+			writeJSON(writer, http.StatusOK, map[string]any{"Running": false, "ExitCode": 0})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	result, err := testDockerHijack(t, server).ExecWorkspaceGH(ctx, "demo", testImageID, "api", "user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.Stdout) != "safe output\n" || string(result.Stderr) != "diagnostic\n" || result.ExitCode != 0 {
+		t.Fatalf("result = %+v", result)
+	}
+	if options.User != "1001:1001" || options.WorkingDir != "/home/user/workspace" || !options.AttachStdout || !options.AttachStderr {
+		t.Fatalf("exec options = %+v", options)
+	}
+	wantSuffix := []string{"/usr/bin/timeout", "--signal=KILL", "--kill-after=1s", "9s", workspaceGHBinary, "api", "user"}
+	if !slices.Equal(options.Cmd, wantSuffix) {
+		t.Fatalf("command = %q, want %q", options.Cmd, wantSuffix)
+	}
+}
+
+func TestExecWorkspaceGHRejectsUnattestedImageBeforeExec(t *testing.T) {
+	t.Parallel()
+	var mutations atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet {
+			mutations.Add(1)
+		}
+		if request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/containers/demo/json") {
+			writeJSON(writer, http.StatusOK, map[string]any{
+				"Id": "container-id", "Image": testImageID,
+				"Config":          map[string]any{"Labels": map[string]string{managedLabel: "true", workspaceLabel: "demo"}},
+				"State":           map[string]any{"Status": "running", "Running": true},
+				"NetworkSettings": map[string]any{"Ports": map[string]any{}},
+			})
+			return
+		}
+		http.NotFound(writer, request)
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	other := "sha256:1123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	if _, err := testDocker(t, server).ExecWorkspaceGH(ctx, "demo", other, "api", "user"); !errors.Is(err, ErrCommandFailed) {
+		t.Fatalf("error = %v", err)
+	}
+	if mutations.Load() != 0 {
+		t.Fatalf("unattested container received %d mutations", mutations.Load())
+	}
+}
+
+func TestBoundedCommandBufferRetainsPrefixAndReportsOverflow(t *testing.T) {
+	buffer := &boundedCommandBuffer{limit: 4}
+	if count, err := buffer.Write([]byte("abcdef")); err != nil || count != 6 {
+		t.Fatalf("write count=%d err=%v", count, err)
+	}
+	if string(buffer.Bytes()) != "abcd" || !buffer.exceeded {
+		t.Fatalf("buffer=%q exceeded=%v", buffer.Bytes(), buffer.exceeded)
+	}
+}
+
 func testDocker(t *testing.T, server *httptest.Server) *Docker {
 	t.Helper()
 	cli, err := client.NewClientWithOpts(
 		client.WithHost(server.URL),
 		client.WithVersion("1.48"),
 		client.WithHTTPClient(server.Client()),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cli.Close() })
+	return &Docker{
+		cli:     cli,
+		log:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		intents: memoryIntentStore{},
+	}
+}
+
+func testDockerHijack(t *testing.T, server *httptest.Server) *Docker {
+	t.Helper()
+	cli, err := client.NewClientWithOpts(
+		client.WithHost("tcp://"+strings.TrimPrefix(server.URL, "http://")),
+		client.WithVersion("1.48"),
 	)
 	if err != nil {
 		t.Fatal(err)
