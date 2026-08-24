@@ -19,6 +19,18 @@ const (
 	StateFailed       State = "failed"
 )
 
+// SuspendKind selects how a domain Pause halts workspace compute. Stop is the
+// default: a graceful docker stop, ~seconds to wake. Freeze uses Docker's
+// cgroup freezer: the OpenCode process stays resident, so wake is an unpause
+// measured in milliseconds — at the cost of retaining full resident memory
+// while suspended.
+type SuspendKind string
+
+const (
+	SuspendStop   SuspendKind = "stop"
+	SuspendFreeze SuspendKind = "freeze"
+)
+
 var (
 	ErrUnmanaged = errors.New("resource is not managed by fern")
 	ErrSpecDrift = errors.New("workspace configuration differs from the existing container")

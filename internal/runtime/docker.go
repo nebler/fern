@@ -55,11 +55,19 @@ type Docker struct {
 	cli     *client.Client
 	log     *slog.Logger
 	intents IntentStore
+	suspend SuspendKind
 }
 
-func NewDocker(log *slog.Logger, intents IntentStore) (*Docker, error) {
+func NewDocker(log *slog.Logger, intents IntentStore, suspend SuspendKind) (*Docker, error) {
 	if intents == nil {
 		return nil, errors.New("runtime intent store is required")
+	}
+	switch suspend {
+	case SuspendStop, SuspendFreeze:
+	case "":
+		suspend = SuspendStop
+	default:
+		return nil, fmt.Errorf("unsupported idle suspend mechanism %q", suspend)
 	}
 	if log == nil {
 		log = slog.Default()
@@ -68,7 +76,7 @@ func NewDocker(log *slog.Logger, intents IntentStore) (*Docker, error) {
 	if err != nil {
 		return nil, fmt.Errorf("create Docker client: %w", err)
 	}
-	return &Docker{cli: cli, log: log, intents: intents}, nil
+	return &Docker{cli: cli, log: log, intents: intents, suspend: suspend}, nil
 }
 
 func (d *Docker) Close() error {
@@ -290,12 +298,11 @@ func (d *Docker) create(ctx context.Context, spec Spec) (observation Observation
 	return observation, nil
 }
 
-// Pause stops the container gracefully (docker stop after a 10s timeout) and
-// journals intent before and after, so a later exit classifies as paused
-// rather than failed. Note on vocabulary: domain "pause" here means stopped
-// compute explained by an intent. It is distinct from Docker's freezer pause,
-// which fern surfaces as the Frozen observation flag and treats as live
-// compute that must be thawed (ContainerUnpause) before stop or destroy.
+// Pause suspends workspace compute according to the configured suspend
+// mechanism: a graceful docker stop (default) or a cgroup freezer pause.
+// Domain "pause" always means stopped-or-suspended compute explained by an
+// intent; it is distinct from Docker's freezer state alone, which fern
+// surfaces as the Frozen observation flag and thaws before mutating.
 func (d *Docker) Pause(ctx context.Context, name string) error {
 	observation, err := d.Status(ctx, name)
 	if err != nil {
@@ -352,6 +359,28 @@ func (d *Docker) pauseObserved(ctx context.Context, name string, observation Obs
 	if err := d.intents.BeginPause(name, observation.ContainerID); err != nil {
 		return fmt.Errorf("record pause intent: %w", err)
 	}
+	if d.suspend == SuspendFreeze {
+		// Freezer mode: suspend via the cgroup freezer. The process stays
+		// resident, so wake is an unpause rather than a boot. The intent
+		// journal still matters: frozen containers that later exit (host
+		// reboot, daemon restart) classify as paused instead of failed.
+		if observation.Frozen {
+			if err := d.intents.CommitPause(name, observation.ContainerID); err != nil {
+				return fmt.Errorf("commit pending pause intent: %w", err)
+			}
+			return nil
+		}
+		freezeStart := time.Now()
+		if err := d.cli.ContainerPause(ctx, observation.ContainerID); err != nil {
+			return d.reconcileFreezeError(ctx, name, observation.ContainerID, err)
+		}
+		if err := d.intents.CommitPause(name, observation.ContainerID); err != nil {
+			return fmt.Errorf("commit pause intent: %w", err)
+		}
+		d.log.Info("state", "workspace", name, "from", StateRunning, "to", StatePaused,
+			"mechanism", string(SuspendFreeze), "elapsed_ms", time.Since(freezeStart).Milliseconds())
+		return nil
+	}
 	if observation.Frozen {
 		if err := d.cli.ContainerUnpause(ctx, observation.ContainerID); err != nil {
 			return fmt.Errorf("unpause %q before stop: %w", name, err)
@@ -365,8 +394,25 @@ func (d *Docker) pauseObserved(ctx context.Context, name string, observation Obs
 	if err := d.intents.CommitPause(name, observation.ContainerID); err != nil {
 		return fmt.Errorf("commit pause intent: %w", err)
 	}
-	d.log.Info("state", "workspace", name, "from", StateRunning, "to", StatePaused, "elapsed_ms", time.Since(start).Milliseconds())
+	d.log.Info("state", "workspace", name, "from", StateRunning, "to", StatePaused,
+		"mechanism", string(d.suspend), "elapsed_ms", time.Since(start).Milliseconds())
 	return nil
+}
+
+// reconcileFreezeError resolves an errored freeze response against observed
+// reality: a container that is nonetheless frozen gets its intent committed,
+// one that is still live gets the pending intent cleared, and anything else
+// stays unresolved so classification never guesses.
+func (d *Docker) reconcileFreezeError(ctx context.Context, name, containerID string, pauseErr error) error {
+	observation, inspectErr := d.statusByReference(ctx, containerID, name)
+	var followupErr error
+	switch {
+	case inspectErr == nil && observation.Frozen:
+		followupErr = d.intents.CommitPause(name, containerID)
+	case inspectErr == nil && observation.Running && !observation.Frozen:
+		followupErr = d.intents.Clear(name)
+	}
+	return errors.Join(fmt.Errorf("pause %q has an unknown freeze outcome: %w", name, pauseErr), inspectErr, followupErr)
 }
 
 func (d *Docker) reconcileStopError(ctx context.Context, name, containerID string, stopErr error) error {
