@@ -41,10 +41,13 @@ list.
 - [x] **`fern debug wake` shipped 2026-08-23** — per-phase waterfall served through the
       operator listener (`POST /fern/api/v1/debug/wake-trace`): span plumbing in runtime,
       trace recording on each coalesced wake, operator-only endpoint + CLI verb.
-- [ ] **Freezer pause behind `idle.mode: stop|freeze`** (classifier already understands frozen;
-      extend `pauseObserved`/`resumeObserved`). Keep the two-pass all-idle barrier unchanged.
-- [ ] **Run `fern debug wake` ×10 through the lifecycle harness**; put the real
-      before/after numbers in the README table.
+- [x] **Freezer pause implemented 2026-08-24** — `idle.mode: stop|freeze` config
+      (+ `-idle-mode` flag), freeze branch in `pauseObserved` with its own
+      failure reconciler, intent journal retained in both modes (reboot-safe
+      classification), unit-tested against a mocked Docker API. Not yet
+      committed.
+- [ ] **Run `fern debug wake` ×10 through the lifecycle harness** with
+      `idle.mode: freeze`; put the real before/after numbers in the README table.
 - [ ] **Answer the one open review question** (the only decision owed): unhealthy-start →
       committed pause intent (docker.go rollback path) — deliberate anti-crash-loop or bug?
       Pick: distinct intent flavor *or* documenting comment + harness expectation.
