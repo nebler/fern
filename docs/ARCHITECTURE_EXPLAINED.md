@@ -370,9 +370,12 @@ raw state is ambiguous; fern resolves it against the intent store:
   roadmap behind `idle.mode`.
 
 The honest cost of the current stop-based pause: ~2.8–3.1 s cold wake, because
-OpenCode boots from zero. The planned freezer conversion swaps the mechanism
-(keep processes resident, thaw in milliseconds) without touching the state
-machine — the classifier already understands frozen-with-intent.
+OpenCode boots from zero. The freezer conversion (`idle.mode: freeze`)
+suspends via the cgroup freezer instead — processes stay resident, wake is an
+unpause measured in milliseconds, and the intent journal still applies (a
+frozen container that later exits — host reboot, daemon restart — classifies
+as paused rather than failed). The state machine needed no structural change:
+the classifier already understood frozen-with-intent.
 
 ---
 

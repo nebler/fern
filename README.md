@@ -28,7 +28,7 @@ draft PR.
 | Metric | Value | Source |
 | --- | --- | --- |
 | Cold wake (stopped → healthy, proxied first byte) | ~2.8–3.1 s | 10-run lifecycle harness, `curl` `time_starttransfer` (`integration/lifecycle/artifacts/*/wake-timings.tsv`) |
-| Warm wake (pre-thawed freezer pool) | planned: < 100 ms | roadmap — `todo/next-actions.md` (not yet implemented; current pause is graceful stop) |
+| Warm wake (`idle.mode: freeze`, pre-thawed) | implemented; measure with `fern debug wake` | cgroup-freezer pause behind the `idle.mode` config flag |
 | Traffic while idle | none — compute stopped | two-pass all-idle barrier (`internal/workspace`) |
 
 `fern debug wake` prints a per-phase millisecond waterfall of the most recent

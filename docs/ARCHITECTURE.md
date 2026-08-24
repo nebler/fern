@@ -210,6 +210,7 @@ Default values include:
 | Image | `fern/opencode:dev` |
 | Memory | `8Gi` |
 | Idle timeout | `10m` |
+| Idle suspend mechanism | `stop` (`freeze` uses the cgroup freezer) |
 | Remote listener | `127.0.0.1:8080` |
 | Operator listener | `127.0.0.1:8081` |
 
