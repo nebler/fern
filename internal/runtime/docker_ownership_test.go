@@ -956,6 +956,14 @@ func TestExecWorkspaceGHAttestsContainerAndFixesExecutionIdentity(t *testing.T) 
 			_ = buffered.Flush()
 			_, _ = stdcopy.NewStdWriter(connection, stdcopy.Stdout).Write([]byte("safe output\n"))
 			_, _ = stdcopy.NewStdWriter(connection, stdcopy.Stderr).Write([]byte("diagnostic\n"))
+			// Half-close so the client observes clean EOF after draining the
+			// frames. A full immediate close can deliver RST while the client
+			// is still reading, which intermittently fails StdCopy under
+			// race-detector scheduling.
+			if tcp, ok := connection.(*net.TCPConn); ok {
+				_ = tcp.CloseWrite()
+			}
+			time.Sleep(25 * time.Millisecond)
 			_ = connection.Close()
 		case request.Method == http.MethodGet && strings.HasSuffix(request.URL.Path, "/exec/abcdef123456/json"):
 			writeJSON(writer, http.StatusOK, map[string]any{"Running": false, "ExitCode": 0})
