@@ -37,6 +37,10 @@ control:
   password: ${FERN_CONTROL_PASSWORD}
 idle:
   after: 10m
+  # stop = graceful docker stop (default, ~seconds to wake).
+  # freeze = cgroup freezer: the process stays resident and wakes in
+  # milliseconds, at the cost of retaining resident memory while suspended.
+  mode: stop
 proxy:
   listen: 127.0.0.1:8080
   operatorListen: 127.0.0.1:8081

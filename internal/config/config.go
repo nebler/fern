@@ -80,10 +80,19 @@ type Control struct {
 	Password string
 }
 
+// Idle suspension mechanisms. Stop is a graceful docker stop; freeze uses the
+// cgroup freezer so the OpenCode process stays resident and wakes in
+// milliseconds.
+const (
+	IdleModeStop   = "stop"
+	IdleModeFreeze = "freeze"
+)
+
 type Config struct {
 	Workspace      Workspace
 	Control        Control
 	IdleAfter      time.Duration
+	IdleMode       string
 	Listen         string
 	OperatorListen string
 	RemoteOrigin   string
@@ -96,6 +105,7 @@ type Overrides struct {
 	Repo           *string
 	Memory         *string
 	IdleAfter      *string
+	IdleMode       *string
 	Listen         *string
 	OperatorListen *string
 }
@@ -131,6 +141,7 @@ type fileConfig struct {
 	} `yaml:"control"`
 	Idle struct {
 		After yaml.Node `yaml:"after"`
+		Mode  yaml.Node `yaml:"mode"`
 	} `yaml:"idle"`
 	Proxy struct {
 		Listen         yaml.Node `yaml:"listen"`
@@ -168,6 +179,7 @@ func Default(repo string) Config {
 	config.Workspace.Memory = "8Gi"
 	config.Workspace.Env = make(map[string]string)
 	config.IdleAfter = 10 * time.Minute
+	config.IdleMode = IdleModeStop
 	config.Listen = "127.0.0.1:8080"
 	config.OperatorListen = "127.0.0.1:8081"
 	return config
@@ -224,6 +236,13 @@ func load(path, defaultRepo string, required bool, overrides Overrides, workspac
 				if err != nil {
 					return Config{}, fmt.Errorf("parse idle.after: %w", err)
 				}
+			}
+			if overrides.IdleMode == nil && file.Idle.Mode.Kind != 0 {
+				value, err := decodeString(file.Idle.Mode)
+				if err != nil {
+					return Config{}, fmt.Errorf("parse idle.mode: %w", err)
+				}
+				config.IdleMode = value
 			}
 			if overrides.Listen == nil && file.Proxy.Listen.Kind != 0 {
 				config.Listen, err = decodeString(file.Proxy.Listen)
@@ -284,6 +303,9 @@ func load(path, defaultRepo string, required bool, overrides Overrides, workspac
 		if err != nil {
 			return Config{}, fmt.Errorf("parse idle duration: %w", err)
 		}
+	}
+	if overrides.IdleMode != nil {
+		config.IdleMode = *overrides.IdleMode
 	}
 	if overrides.Listen != nil {
 		config.Listen = *overrides.Listen
@@ -749,6 +771,11 @@ func Validate(config Config) error {
 	}
 	if config.IdleAfter <= 0 {
 		return fmt.Errorf("idle duration must be positive")
+	}
+	switch config.IdleMode {
+	case IdleModeStop, IdleModeFreeze:
+	default:
+		return fmt.Errorf("idle.mode must be %q or %q, got %q", IdleModeStop, IdleModeFreeze, config.IdleMode)
 	}
 	if err := validateListen("proxy.listen", config.Listen); err != nil {
 		return err
