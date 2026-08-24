@@ -87,6 +87,12 @@ func acquireWorkspaceLease(name string) (*registry.Lease, error) {
 }
 
 func newDocker(log *slog.Logger) (*runtime.Docker, error) {
+	return newDockerWithSuspend(log, runtime.SuspendStop)
+}
+
+// newDockerWithSuspend selects the idle suspension mechanism. Only the
+// supervisor (fern up) suspends compute; diagnostic commands use the default.
+func newDockerWithSuspend(log *slog.Logger, suspend runtime.SuspendKind) (*runtime.Docker, error) {
 	if err := validateDockerTopology(); err != nil {
 		return nil, err
 	}
@@ -94,7 +100,7 @@ func newDocker(log *slog.Logger) (*runtime.Docker, error) {
 	if err != nil {
 		return nil, err
 	}
-	return runtime.NewDocker(log, registry.NewIntentStore(stateDirectory))
+	return runtime.NewDocker(log, registry.NewIntentStore(stateDirectory), suspend)
 }
 
 func validateDockerTopology() error {

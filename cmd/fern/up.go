@@ -35,6 +35,7 @@ func runUp(args []string, log *slog.Logger) error {
 	repo := fs.String("repo", "", "host repository path")
 	memory := fs.String("memory", "", "memory limit (for example 8Gi)")
 	idle := fs.String("idle", "", "idle duration before stopping")
+	idleMode := fs.String("idle-mode", "", "idle suspension mechanism: stop or freeze")
 	listenAddress := fs.String("listen", "", "remote/device proxy listen address")
 	operatorListenAddress := fs.String("operator-listen", "", "host/operator proxy listen address")
 	if err := parseFlags(fs, args); err != nil {
@@ -54,7 +55,8 @@ func runUp(args []string, log *slog.Logger) error {
 	cfg, err := config.LoadWithEnvironment(*configPath, cwd, flagSet(fs, "config"), config.Overrides{
 		Name: optionalFlag(fs, "name", name), Image: optionalFlag(fs, "image", image),
 		Repo: optionalFlag(fs, "repo", repo), Memory: optionalFlag(fs, "memory", memory),
-		IdleAfter: optionalFlag(fs, "idle", idle), Listen: optionalFlag(fs, "listen", listenAddress),
+		IdleAfter: optionalFlag(fs, "idle", idle), IdleMode: optionalFlag(fs, "idle-mode", idleMode),
+		Listen:         optionalFlag(fs, "listen", listenAddress),
 		OperatorListen: optionalFlag(fs, "operator-listen", operatorListenAddress),
 	}, values)
 	if err != nil {
@@ -107,7 +109,7 @@ func runUp(args []string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	docker, err := newDocker(log)
+	docker, err := newDockerWithSuspend(log, runtime.SuspendKind(cfg.IdleMode))
 	if err != nil {
 		return err
 	}
@@ -319,8 +321,10 @@ func runUp(args []string, log *slog.Logger) error {
 		return nil
 	})
 
-	fmt.Printf("workspace: %s\nremote: %s\noperator: %s\nready in: %s\nattach: fern attach\n", spec.Name, origins.Remote, origins.Operator, time.Since(start).Round(time.Millisecond))
-	log.Info("proxy listeners ready", "remote_listener", remoteListener.Addr(), "remote_origin", origins.Remote, "operator", origins.Operator, "workspace", spec.Name)
+	fmt.Printf("workspace: %s\nremote: %s\noperator: %s\nidle: %s after %s\nready in: %s\nattach: fern attach\n",
+		spec.Name, origins.Remote, origins.Operator, cfg.IdleMode, cfg.IdleAfter, time.Since(start).Round(time.Millisecond))
+	log.Info("proxy listeners ready", "remote_listener", remoteListener.Addr(), "remote_origin", origins.Remote,
+		"operator", origins.Operator, "workspace", spec.Name, "idle_mode", cfg.IdleMode)
 	err = group.Wait()
 	var publicationErr error
 	if publicationCoordinator != nil {
