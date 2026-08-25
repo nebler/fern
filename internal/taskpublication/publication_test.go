@@ -150,6 +150,13 @@ func newHarness(t *testing.T, scriptMode string) testHarness {
 func installFakeGit(t *testing.T, path, branchFile, logPath, mode string) {
 	t.Helper()
 	script := fmt.Sprintf(`#!/bin/sh
+# Resolve a file mode portably: BSD stat first, then GNU stat. The fallback
+# must be exclusive because GNU stat -f <format> is filesystem mode: it fails
+# with exit 1 while still writing to stdout, which would pollute "$( ... )".
+file_mode() {
+  mode=$(stat -f '%%Lp' "$1" 2>/dev/null) && { printf '%%s\n' "$mode"; return; }
+  stat -c '%%a' "$1"
+}
 printf 'argv:' >> %s
 printf ' [%%s]' "$@" >> %s
 printf '\nenv:' >> %s
@@ -164,9 +171,9 @@ case " $* " in
     exit 0
     ;;
 esac
-[ "$(stat -f '%%Lp' "${GIT_ASKPASS%%/*}" 2>/dev/null || stat -c '%%a' "${GIT_ASKPASS%%/*}")" = 700 ] || exit 78
-[ "$(stat -f '%%Lp' "$GIT_ASKPASS" 2>/dev/null || stat -c '%%a' "$GIT_ASKPASS")" = 700 ] || exit 79
-[ "$(stat -f '%%Lp' "${GIT_ASKPASS%%/*}/credential" 2>/dev/null || stat -c '%%a' "${GIT_ASKPASS%%/*}/credential")" = 600 ] || exit 80
+[ "$(file_mode "${GIT_ASKPASS%%/*}")" = 700 ] || exit 78
+[ "$(file_mode "$GIT_ASKPASS")" = 700 ] || exit 79
+[ "$(file_mode "${GIT_ASKPASS%%/*}/credential")" = 600 ] || exit 80
 "$GIT_ASKPASS" "Username for 'https://github.com':" >/dev/null || exit 81
 password=$("$GIT_ASKPASS" "Password for 'https://github.com':") || exit 82
 [ "$password" = %s ] || exit 83

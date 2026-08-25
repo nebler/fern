@@ -239,6 +239,15 @@ EVENTS_PID=$!
 
 auth_curl() { curl --silent --show-error --user "$USERNAME:$PASSWORD" "$@"; }
 control_curl() { curl --silent --show-error --user "fern:$FERN_CONTROL_PASSWORD" "$@"; }
+# Phone mutations are CSRF-protected: mint a single-use token bound to this
+# device credential, the method, and the exact request path.
+device_csrf() {
+  local path=$1
+  curl --silent --show-error --fail --max-time 5 --get \
+    --data-urlencode 'method=POST' --data-urlencode "path=$path" \
+    --header "Cookie: __Host-fern_device=$device_cookie" \
+    "$REMOTE_URL/fern/api/v1/csrf" | jq -er '.token'
+}
 http_code() {
   local output=$1; shift
   curl --silent --show-error --output "$output" --write-out '%{http_code}' "$@"
@@ -384,10 +393,12 @@ note "scenario 6/14: final phone work request restarts the full idle grace perio
 phone_session="phone-idle-$SAFE_ID"
 phone_marker="phone-state-$RUN_ID"
 curl --silent --show-error --fail --max-time 5 --header "Cookie: __Host-fern_device=$device_cookie" \
+  --header "X-Fern-CSRF-Token: $(device_csrf /control/persist)" \
   --request POST --header 'Content-Type: application/json' \
   --data "{\"marker\":\"$phone_marker\",\"session\":\"$phone_session\"}" \
   "$REMOTE_URL/control/persist" >/dev/null
 curl --silent --show-error --fail --max-time 5 --header "Cookie: __Host-fern_device=$device_cookie" \
+  --header "X-Fern-CSRF-Token: $(device_csrf /control/activity)" \
   --request POST "$REMOTE_URL/control/activity?session=$phone_session&delay=0.6" >/dev/null
 
 active_sessions='{}'

@@ -220,9 +220,15 @@ func (publisher *Publisher) PushOnce(ctx context.Context, request Request) (Bran
 		return proof, err
 	}
 	proof.Push, err = publisher.push(operationContext, identity, request.Publication)
+	// The follow-up read reconciles possibly lost pushes, but a timeout has
+	// already exhausted the operation budget: the read context is expired by
+	// construction. Report the underlying push error, never the read's.
 	sha, exists, readErr := publisher.readBranch(operationContext, identity, request.Publication)
 	proof.Observation = BranchObservation{SHA: sha, Exists: exists}
 	if readErr != nil {
+		if err != nil {
+			return proof, err
+		}
 		return proof, readErr
 	}
 	if exists && sha == request.Publication.ResultCommit {
