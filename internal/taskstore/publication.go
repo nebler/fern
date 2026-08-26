@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -11,8 +12,10 @@ import (
 	"github.com/nebler/fern/internal/task"
 )
 
+const PublishResultCommand = "result.publish"
+
 const publicationSelect = `
-SELECT p.id,p.operation_id,p.result_id,p.verification_id,p.task_id,p.attempt_id,p.workspace_id,p.state,p.effect_phase,
+SELECT p.id,p.operation_id,p.admission_receipt_id,p.result_id,p.verification_id,p.task_id,p.attempt_id,p.workspace_id,p.state,p.effect_phase,
  p.installation_id,p.repository_id,p.repository_full_name,p.base_ref,p.base_sha,p.result_commit,p.branch,p.expected_remote_old_sha,
  p.broker_policy_version,p.broker_policy_sha256,p.observed_remote_sha,p.pr_number,p.pr_url,p.pr_state,p.pr_draft,
  p.pr_repository_id,p.pr_repository_full_name,p.pr_base_repository_id,p.pr_base_repository_full_name,p.pr_base_ref,p.pr_base_sha,
@@ -129,6 +132,242 @@ WHERE p.workspace_id=? AND `+predicate+` AND r.state='sealed' AND t.current_atte
 		return PublicationRecord{}, fmt.Errorf("find publication: %w", err)
 	}
 	return s.InspectPublication(ctx, id)
+}
+
+// AdmitPublication atomically claims a command receipt and prepares one
+// publication from current durable ownership. No tuple authority is accepted
+// from the caller and no external effect occurs in this transaction.
+func (s *Store) AdmitPublication(ctx context.Context, p AdmitPublicationParams) (_ PublicationAdmission, err error) {
+	if err := validateAdmitPublication(p); err != nil {
+		return PublicationAdmission{}, err
+	}
+	tx, release, err := s.beginWrite(ctx)
+	if err != nil {
+		return PublicationAdmission{}, fmt.Errorf("begin publication admission: %w", err)
+	}
+	defer release()
+	defer rollback(tx, &err)
+
+	existing, found, err := receiptByKey(ctx, tx, p.Claim.Scope.WorkspaceID, p.Claim.Scope.CommandKind, p.Claim.Key)
+	if err != nil {
+		return PublicationAdmission{}, err
+	}
+	if found {
+		existingClaim := task.IdempotencyClaim{
+			Scope: task.IdempotencyScope{WorkspaceID: existing.WorkspaceID, CommandKind: existing.CommandKind},
+			Key:   existing.IdempotencyKey, RequestHash: existing.RequestHash, Actor: existing.Actor,
+		}
+		disposition, classifyErr := task.ClassifyIdempotency(&existingClaim, p.Claim)
+		if classifyErr != nil {
+			return PublicationAdmission{}, fmt.Errorf("classify publication idempotency: %w", classifyErr)
+		}
+		switch disposition {
+		case task.IdempotencyReplay:
+			publication, getErr := publicationByAdmissionReceipt(ctx, tx, existing.ID)
+			if getErr != nil {
+				return PublicationAdmission{}, getErr
+			}
+			event, getErr := publicationAdmissionEvent(ctx, tx, publication.ID)
+			if getErr != nil {
+				return PublicationAdmission{}, getErr
+			}
+			if err := tx.Commit(); err != nil {
+				return PublicationAdmission{}, fmt.Errorf("finish publication admission replay: %w", err)
+			}
+			return PublicationAdmission{Publication: publication, Receipt: existing, Event: event, Replayed: true}, nil
+		case task.IdempotencyOwnerMismatch:
+			return PublicationAdmission{}, ErrIdempotencyOwnerMismatch
+		case task.IdempotencyConflict:
+			return PublicationAdmission{}, &ConflictError{ReceiptID: existing.ID, TargetID: existing.TargetID}
+		default:
+			return PublicationAdmission{}, fmt.Errorf("%w: unexpected publication idempotency disposition", ErrCorruptStore)
+		}
+	}
+
+	result, err := getResult(ctx, tx, p.ResultID)
+	if errors.Is(err, ErrNotFound) {
+		return PublicationAdmission{}, &NotFoundError{Kind: "result", ID: string(p.ResultID)}
+	}
+	if err != nil {
+		return PublicationAdmission{}, err
+	}
+	if result.WorkspaceID != p.Claim.Scope.WorkspaceID {
+		return PublicationAdmission{}, &NotFoundError{Kind: "result", ID: string(p.ResultID)}
+	}
+	owner, err := getTask(ctx, tx, result.TaskID)
+	if err != nil {
+		return PublicationAdmission{}, err
+	}
+	attempt, err := getAttempt(ctx, tx, result.AttemptID)
+	if err != nil {
+		return PublicationAdmission{}, err
+	}
+	workspace, err := scanWorkspace(tx.QueryRowContext(ctx, workspaceSelect+` WHERE id=?`, result.WorkspaceID))
+	if err != nil {
+		return PublicationAdmission{}, err
+	}
+	verification, err := getVerification(ctx, tx, p.VerificationID)
+	if errors.Is(err, ErrNotFound) {
+		return PublicationAdmission{}, fmt.Errorf("%w: expected verification", ErrInvalidState)
+	}
+	if err != nil {
+		return PublicationAdmission{}, err
+	}
+	validAttempt := attempt.State == task.AttemptSucceeded ||
+		(attempt.State == task.AttemptSuperseded && result.CompletionAuthority == SealAuthorityUser)
+	if workspace.State != WorkspaceActive || workspace.GitHubAuthority != GitHubAuthorityAppBroker ||
+		result.State != task.ResultSealed || result.Outcome != task.ResultChanged || result.ManifestEntries < 1 || !result.WorktreeClean ||
+		owner.ID != result.TaskID || owner.WorkspaceID != result.WorkspaceID || owner.RepositoryID != result.RepositoryID ||
+		owner.CurrentAttemptID != attempt.ID || owner.SealedResultID != result.ID || owner.State != task.TaskCompleted || owner.CancelEpoch != 0 ||
+		attempt.ID != result.AttemptID || attempt.TaskID != owner.ID || attempt.WorkspaceID != owner.WorkspaceID ||
+		attempt.SealedResultID != result.ID || !validAttempt ||
+		verification.ID != p.VerificationID || verification.ResultID != result.ID || verification.TaskID != owner.ID ||
+		verification.AttemptID != attempt.ID || verification.WorkspaceID != workspace.ID ||
+		verification.State != VerificationSucceeded || verification.VerifiedCommit != result.ResultCommit {
+		return PublicationAdmission{}, fmt.Errorf("%w: result is not eligible for publication", ErrInvalidState)
+	}
+	var publications int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM publications WHERE result_id=?`, result.ID).Scan(&publications); err != nil {
+		return PublicationAdmission{}, fmt.Errorf("inspect existing result publication: %w", err)
+	}
+	if publications != 0 {
+		return PublicationAdmission{}, fmt.Errorf("%w: result already has a publication", ErrInvalidState)
+	}
+
+	tuple := task.PublicationTuple{
+		OperationID: p.OperationID, InstallationID: workspace.InstallationID, RepositoryID: workspace.RepositoryID,
+		RepositoryFullName: workspace.RepositoryFullName, WorkspaceName: workspace.Name, BaseRef: owner.BaseRef,
+		BaseSHA: owner.BaseSHA, ResultCommit: result.ResultCommit, Branch: task.PublicationBranch(workspace.Name, p.OperationID),
+	}
+	resultTuple := task.ResultTuple{RepositoryTuple: task.RepositoryTuple{RepositoryID: result.RepositoryID, BaseSHA: result.BaseSHA},
+		ResultCommit: result.ResultCommit, Outcome: result.Outcome, ManifestEntries: result.ManifestEntries, WorktreeClean: result.WorktreeClean}
+	verificationTuple := task.VerificationTuple{State: task.VerificationState(verification.State), VerifiedCommit: verification.VerifiedCommit}
+	if tuple.ValidateAgainst(workspace.RepositoryID, task.RepositoryTuple{RepositoryID: owner.RepositoryID, BaseSHA: owner.BaseSHA}, resultTuple, verificationTuple) != nil {
+		return PublicationAdmission{}, fmt.Errorf("%w: derived publication tuple", ErrCorruptStore)
+	}
+
+	actorID, err := ensureActor(ctx, tx, p.Claim.Actor)
+	if err != nil {
+		return PublicationAdmission{}, err
+	}
+	response, err := json.Marshal(struct {
+		PublicationID  task.PublicationID  `json:"publicationId"`
+		ResultID       task.ResultID       `json:"resultId"`
+		VerificationID task.VerificationID `json:"verificationId"`
+	}{p.PublicationID, result.ID, verification.ID})
+	if err != nil {
+		return PublicationAdmission{}, fmt.Errorf("encode publication receipt projection: %w", err)
+	}
+	acceptedMS := unixMillis(p.AcceptedAt)
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO receipts(id,workspace_id,command_kind,state,idempotency_key,request_hash,actor_snapshot_id,
+ accepted_at,api_contract_version,target_type,target_id,response_status,response_projection)
+VALUES(?,?,?,'accepted',?,?,?,?,?,'task',?,202,?)`, p.ReceiptID, workspace.ID, PublishResultCommand,
+		p.Claim.Key, p.Claim.RequestHash[:], actorID, acceptedMS, p.APIContractVersion, owner.ID, string(response)); err != nil {
+		return PublicationAdmission{}, fmt.Errorf("insert publication receipt: %w", err)
+	}
+	evidence := json.RawMessage(`{"authority":"authenticated_http"}`)
+	evidenceHash := sha256.Sum256(evidence)
+	detail := struct {
+		ReceiptID               task.ReceiptID        `json:"receiptId"`
+		ResultID                task.ResultID         `json:"resultId"`
+		VerificationID          task.VerificationID   `json:"verificationId"`
+		Tuple                   task.PublicationTuple `json:"tuple"`
+		BrokerPolicyVersion     string                `json:"brokerPolicyVersion"`
+		BrokerPolicySHA256      string                `json:"brokerPolicySha256"`
+		ExpectedTaskRevision    int64                 `json:"expectedTaskRevision"`
+		ExpectedAttemptRevision int64                 `json:"expectedAttemptRevision"`
+	}{p.ReceiptID, result.ID, verification.ID, tuple, p.BrokerPolicyVersion, digestString(p.BrokerPolicySHA256), owner.Revision, attempt.Revision}
+	payload, err := journalPayload(detail, evidence, evidenceHash)
+	if err != nil {
+		return PublicationAdmission{}, err
+	}
+	event, err := insertJournalEvent(ctx, tx, p.EventID, "publication", string(p.PublicationID), "publication.prepared", "",
+		string(PublicationPrepared), 1, p.AcceptedAt, actorID, result, evidenceHash, payload)
+	if err != nil {
+		return PublicationAdmission{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `
+INSERT INTO publications(id,operation_id,admission_receipt_id,result_id,verification_id,task_id,attempt_id,workspace_id,state,effect_phase,
+ installation_id,repository_id,repository_full_name,base_ref,base_sha,result_commit,branch,expected_remote_old_sha,
+ broker_policy_version,broker_policy_sha256,latest_event_id,requester_actor_snapshot_id,revision,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,'prepared','none',?,?,?,?,?,?,?,NULL,?,?,?,?,1,?,?)`, p.PublicationID, p.OperationID, p.ReceiptID,
+		result.ID, verification.ID, owner.ID, attempt.ID, workspace.ID, tuple.InstallationID, tuple.RepositoryID,
+		tuple.RepositoryFullName, tuple.BaseRef, tuple.BaseSHA, tuple.ResultCommit, tuple.Branch,
+		p.BrokerPolicyVersion, p.BrokerPolicySHA256[:], event.ID, actorID, acceptedMS, acceptedMS); err != nil {
+		return PublicationAdmission{}, fmt.Errorf("insert admitted publication: %w", err)
+	}
+	publication, err := getPublication(ctx, tx, p.PublicationID)
+	if err != nil {
+		return PublicationAdmission{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return PublicationAdmission{}, fmt.Errorf("commit publication admission: %w", err)
+	}
+	receipt := Receipt{ID: p.ReceiptID, WorkspaceID: workspace.ID, CommandKind: PublishResultCommand, State: ReceiptAccepted,
+		IdempotencyKey: p.Claim.Key, RequestHash: p.Claim.RequestHash, Actor: p.Claim.Actor, AcceptedAt: fromUnixMillis(acceptedMS),
+		APIContractVersion: p.APIContractVersion, TargetType: "task", TargetID: owner.ID, ResponseStatus: 202, ResponseProjection: response}
+	return PublicationAdmission{Publication: publication, Receipt: receipt, Event: event}, nil
+}
+
+func publicationByAdmissionReceipt(ctx context.Context, q queryRower, receiptID task.ReceiptID) (Publication, error) {
+	var id task.PublicationID
+	if err := q.QueryRowContext(ctx, `SELECT id FROM publications WHERE admission_receipt_id=?`, receiptID).Scan(&id); errors.Is(err, sql.ErrNoRows) {
+		return Publication{}, ErrCorruptStore
+	} else if err != nil {
+		return Publication{}, fmt.Errorf("read receipt publication: %w", err)
+	}
+	publication, err := getPublication(ctx, q, id)
+	if err != nil || publication.AdmissionReceiptID != receiptID {
+		return Publication{}, fmt.Errorf("%w: publication receipt link", ErrCorruptStore)
+	}
+	return publication, nil
+}
+
+func publicationAdmissionEvent(ctx context.Context, q queryRower, id task.PublicationID) (JournalEvent, error) {
+	event, err := scanJournalEvent(q.QueryRowContext(ctx, journalEventSelect+`
+ WHERE e.entity_type='publication' AND e.entity_id=? AND e.entity_revision=1`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return JournalEvent{}, ErrCorruptStore
+	}
+	if err != nil {
+		return JournalEvent{}, fmt.Errorf("read publication admission event: %w", err)
+	}
+	if event.Type != "publication.prepared" || event.FromState != "" || event.ToState != string(PublicationPrepared) {
+		return JournalEvent{}, fmt.Errorf("%w: publication admission event", ErrCorruptStore)
+	}
+	return event, nil
+}
+
+func validateAdmitPublication(p AdmitPublicationParams) error {
+	if _, err := task.ParsePublicationID(string(p.PublicationID)); err != nil {
+		return fmt.Errorf("%w: publication ID", ErrInvalidInput)
+	}
+	if _, err := task.ParsePublicationOperationID(string(p.OperationID)); err != nil {
+		return fmt.Errorf("%w: publication operation ID", ErrInvalidInput)
+	}
+	if _, err := task.ParseReceiptID(string(p.ReceiptID)); err != nil {
+		return fmt.Errorf("%w: publication receipt ID", ErrInvalidInput)
+	}
+	if _, err := task.ParseEventID(string(p.EventID)); err != nil {
+		return fmt.Errorf("%w: publication event ID", ErrInvalidInput)
+	}
+	if _, err := task.ParseResultID(string(p.ResultID)); err != nil {
+		return fmt.Errorf("%w: result ID", ErrInvalidInput)
+	}
+	if _, err := task.ParseVerificationID(string(p.VerificationID)); err != nil {
+		return fmt.Errorf("%w: verification ID", ErrInvalidInput)
+	}
+	if err := p.Claim.Validate(); err != nil || p.Claim.Scope.CommandKind != PublishResultCommand {
+		return fmt.Errorf("%w: publication idempotency claim", ErrInvalidInput)
+	}
+	if !validBoundedText(p.BrokerPolicyVersion, 1, 128) || !validBoundedText(p.APIContractVersion, 1, 64) {
+		return fmt.Errorf("%w: publication policy or API contract", ErrInvalidInput)
+	}
+	if err := validExactTimestamp(p.AcceptedAt); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (s *Store) PreparePublication(ctx context.Context, p PreparePublicationParams) (_ PublicationRecord, err error) {
@@ -487,12 +726,12 @@ func getPublication(ctx context.Context, q queryRower, id task.PublicationID) (P
 func scanPublication(row rowScanner) (Publication, error) {
 	var p Publication
 	var installationID, repositoryID int64
-	var expectedOld, remote, reason sql.NullString
+	var admissionReceiptID, expectedOld, remote, reason sql.NullString
 	var policyHash []byte
 	var number, draft, prRepoID, baseRepoID, headRepoID sql.NullInt64
 	var url, state, prRepoName, baseRepoName, baseRef, baseSHA, headRepoName, headOwner, headName, headRef, headSHA sql.NullString
 	var created, updated int64
-	if err := row.Scan(&p.ID, &p.OperationID, &p.ResultID, &p.VerificationID, &p.TaskID, &p.AttemptID, &p.WorkspaceID,
+	if err := row.Scan(&p.ID, &p.OperationID, &admissionReceiptID, &p.ResultID, &p.VerificationID, &p.TaskID, &p.AttemptID, &p.WorkspaceID,
 		&p.State, &p.EffectPhase, &installationID, &repositoryID, &p.Tuple.RepositoryFullName, &p.Tuple.BaseRef, &p.Tuple.BaseSHA,
 		&p.Tuple.ResultCommit, &p.Tuple.Branch, &expectedOld, &p.BrokerPolicyVersion, &policyHash, &remote, &number, &url, &state,
 		&draft, &prRepoID, &prRepoName, &baseRepoID, &baseRepoName, &baseRef, &baseSHA, &headRepoID, &headRepoName, &headOwner,
@@ -504,6 +743,9 @@ func scanPublication(row rowScanner) (Publication, error) {
 		return Publication{}, ErrCorruptStore
 	}
 	p.Tuple.OperationID, p.Tuple.InstallationID, p.Tuple.RepositoryID = p.OperationID, task.InstallationID(installationID), task.RepositoryID(repositoryID)
+	if admissionReceiptID.Valid {
+		p.AdmissionReceiptID = task.ReceiptID(admissionReceiptID.String)
+	}
 	p.Tuple.ExpectedRemoteOldSHA = task.GitOID(expectedOld.String)
 	p.ObservedRemoteSHA, p.Reason = task.GitOID(remote.String), reason.String
 	copy(p.BrokerPolicySHA256[:], policyHash)

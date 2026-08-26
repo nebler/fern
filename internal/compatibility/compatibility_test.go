@@ -46,6 +46,9 @@ var baselineMigrationLedger = []migrationRecord{
 	{5, "explicit_workspace_github_authority", "675011d6037df1b806e78e0a98576c43a0594d6c21a3d54e9f10fb8c4017ec8d"},
 }
 
+var currentMigrationLedger = append(append([]migrationRecord(nil), baselineMigrationLedger...),
+	migrationRecord{6, "publication_admission_receipts", "c603db31832c8d4f239a5ef0c8c3958eff59b2f4388feb8a60361188a4922b7a"})
+
 func TestBaselineV1UpgradesWithoutSemanticLoss(t *testing.T) {
 	assertBaselineBytes(t)
 
@@ -138,7 +141,7 @@ func TestBaselineV1UpgradesWithoutSemanticLoss(t *testing.T) {
 	upgradedDB := openReadOnlyDB(t, databasePath)
 	defer upgradedDB.Close()
 	assertDatabaseHealth(t, upgradedDB)
-	assertSchemaVersionAndLedger(t, upgradedDB, 5, baselineMigrationLedger)
+	assertSchemaVersionAndLedger(t, upgradedDB, 6, currentMigrationLedger)
 
 	loadedConfig, err := config.Load(filepath.Join(copyRoot, "fern.yaml"), copyRoot, true, config.Overrides{})
 	if err != nil || loadedConfig.Tasks == nil || loadedConfig.Tasks.Budget.MaxTurns != 50 || loadedConfig.Workspace.GitHub == nil || loadedConfig.Workspace.GitHub.InstallationID != 123 {

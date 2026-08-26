@@ -21,7 +21,34 @@ var migrations = []migration{
 	{version: 3, name: "verification_and_publication_journals", sql: verificationAndPublicationSchema},
 	{version: 4, name: "user_authorized_snapshot_seals", sql: userAuthorizedSealSchema},
 	{version: 5, name: "explicit_workspace_github_authority", sql: explicitWorkspaceGitHubAuthoritySchema},
+	{version: 6, name: "publication_admission_receipts", sql: publicationAdmissionReceiptSchema},
 }
+
+const publicationAdmissionReceiptSchema = `
+ALTER TABLE publications ADD COLUMN admission_receipt_id TEXT
+  REFERENCES receipts(id) ON UPDATE RESTRICT ON DELETE RESTRICT;
+CREATE UNIQUE INDEX publications_admission_receipt ON publications(admission_receipt_id)
+  WHERE admission_receipt_id IS NOT NULL;
+
+CREATE TRIGGER publications_admission_receipt_insert BEFORE INSERT ON publications
+WHEN NEW.admission_receipt_id IS NOT NULL
+BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1 FROM receipts r
+    JOIN workspaces w ON w.id=NEW.workspace_id
+    WHERE r.id=NEW.admission_receipt_id AND r.workspace_id=NEW.workspace_id AND
+      r.command_kind='result.publish' AND r.state='accepted' AND r.target_type='task' AND r.target_id=NEW.task_id AND
+      r.actor_snapshot_id=NEW.requester_actor_snapshot_id AND r.accepted_at=NEW.created_at AND r.response_status=202 AND
+      json_extract(r.response_projection,'$.publicationId')=NEW.id AND
+      json_extract(r.response_projection,'$.resultId')=NEW.result_id AND
+      json_extract(r.response_projection,'$.verificationId')=NEW.verification_id AND
+      w.state='active' AND w.github_authority='github-app-broker'
+  ) THEN RAISE(ABORT, 'publication admission has no exact receipt') END;
+END;
+CREATE TRIGGER publications_admission_receipt_immutable BEFORE UPDATE OF admission_receipt_id ON publications
+WHEN NEW.admission_receipt_id IS NOT OLD.admission_receipt_id
+BEGIN SELECT RAISE(ABORT, 'publication admission receipt is immutable'); END;
+`
 
 const explicitWorkspaceGitHubAuthoritySchema = `
 ALTER TABLE workspaces ADD COLUMN github_authority TEXT NOT NULL DEFAULT 'github-app-broker'

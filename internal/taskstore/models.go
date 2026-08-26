@@ -831,6 +831,7 @@ const (
 type Publication struct {
 	ID                  task.PublicationID
 	OperationID         task.PublicationOperationID
+	AdmissionReceiptID  task.ReceiptID
 	ResultID            task.ResultID
 	VerificationID      task.VerificationID
 	TaskID              task.TaskID
@@ -853,6 +854,13 @@ type Publication struct {
 
 type PublicationRecord struct {
 	Publication Publication
+	Event       JournalEvent
+	Replayed    bool
+}
+
+type PublicationAdmission struct {
+	Publication Publication
+	Receipt     Receipt
 	Event       JournalEvent
 	Replayed    bool
 }
@@ -883,6 +891,20 @@ type PreparePublicationParams struct {
 	EvidencePayload         json.RawMessage
 	EvidenceSHA256          [32]byte
 	Actor                   task.ActorSnapshot
+}
+
+type AdmitPublicationParams struct {
+	PublicationID       task.PublicationID
+	OperationID         task.PublicationOperationID
+	ReceiptID           task.ReceiptID
+	EventID             task.EventID
+	ResultID            task.ResultID
+	VerificationID      task.VerificationID
+	Claim               task.IdempotencyClaim
+	BrokerPolicyVersion string
+	BrokerPolicySHA256  [32]byte
+	APIContractVersion  string
+	AcceptedAt          time.Time
 }
 
 type AdvancePublicationParams struct {
