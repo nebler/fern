@@ -254,6 +254,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 	}
 	status.Healthy(observability.ComponentRuntime)
 	status.Healthy(observability.ComponentSupervisor)
+	observedManager := &statusWaker{Waker: manager, status: status}
 	onboarding, err := newGitHubOnboarding(cfg)
 	if err != nil {
 		return nil, lifecycle.failStartup(err)
@@ -288,7 +289,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 	if tasks != nil {
 		controls.Tasks = tasks.handler
 	}
-	handlers, err := proxy.NewHandlers(manager, auth, controls, origins, log)
+	handlers, err := proxy.NewHandlers(observedManager, auth, controls, origins, log)
 	if err != nil {
 		return nil, abortAfterTasks(err)
 	}
@@ -307,12 +308,38 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 	}
 	return &upRuntime{
 		lifecycle: lifecycle, streamController: streamController,
-		supervisor:   &watch.Supervisor{IdleAfter: cfg.IdleAfter, OnPause: manager.Pause, Log: log},
+		supervisor: &watch.Supervisor{IdleAfter: cfg.IdleAfter, OnPause: func(ctx context.Context) error {
+			err := manager.Pause(ctx)
+			if err != nil {
+				status.Degraded(observability.ComponentRuntime, err)
+			} else {
+				status.Healthy(observability.ComponentRuntime)
+			}
+			return err
+		}, Log: log},
 		observations: observations, connections: connections,
 		remoteServer: remoteServer, operatorServer: operatorServer,
 		remoteListener: remoteListener, operatorListener: operatorListener,
 		origins: origins, tasks: tasks, status: status, start: start,
 	}, nil
+}
+
+// statusWaker observes lifecycle outcomes already required by admitted
+// requests. It never performs an extra runtime query, so sleeping remains a
+// healthy state and health reporting cannot wake compute.
+type statusWaker struct {
+	proxy.Waker
+	status *observability.Registry
+}
+
+func (waker *statusWaker) AcquireRequest(ctx context.Context, intent workspace.RequestIntent) (workspace.RequestTarget, func(), error) {
+	target, release, err := waker.Waker.AcquireRequest(ctx, intent)
+	if err == nil {
+		waker.status.Healthy(observability.ComponentRuntime)
+	} else if ctx.Err() == nil && !errors.Is(err, workspace.ErrManagerClosed) {
+		waker.status.Degraded(observability.ComponentRuntime, err)
+	}
+	return target, release, err
 }
 
 // requestObservation asks the activity stream for an immediate observation pass

@@ -1,11 +1,45 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"net"
 	"testing"
 
 	"github.com/nebler/fern/internal/config"
+	"github.com/nebler/fern/internal/observability"
+	"github.com/nebler/fern/internal/workspace"
 )
+
+type healthWaker struct {
+	err error
+}
+
+func (waker *healthWaker) AcquireRequest(context.Context, workspace.RequestIntent) (workspace.RequestTarget, func(), error) {
+	return workspace.RequestTarget{}, func() {}, waker.err
+}
+
+func (*healthWaker) InvalidateEndpoint(workspace.RequestTarget) {}
+
+func TestStatusWakerReportsTransientFailureAndRecovery(t *testing.T) {
+	status := observability.NewRegistry()
+	delegate := &healthWaker{err: errors.New("docker unavailable")}
+	waker := &statusWaker{Waker: delegate, status: status}
+	if _, release, err := waker.AcquireRequest(context.Background(), workspace.RequestRead); err == nil {
+		release()
+		t.Fatal("wake unexpectedly succeeded")
+	}
+	snapshot := status.Snapshot()
+	if snapshot.Components[0].State != observability.StateDegraded || !snapshot.Ready {
+		t.Fatalf("failed wake snapshot = %+v", snapshot)
+	}
+	delegate.err = nil
+	_, release, err := waker.AcquireRequest(context.Background(), workspace.RequestRead)
+	release()
+	if err != nil || status.Snapshot().Components[0].State != observability.StateHealthy {
+		t.Fatalf("recovered wake error=%v snapshot=%+v", err, status.Snapshot())
+	}
+}
 
 func TestTrustedProxyOriginsPreserveLocalCompatibility(t *testing.T) {
 	t.Parallel()
