@@ -364,10 +364,10 @@ func TestRunKillsBackgroundProcessFromSuccessfulGit(t *testing.T) {
 	runner, err := verification.NewRunner(verification.RunnerConfig{
 		GitExecutable: immutableTestExecutable,
 		GitTimeout:    5 * time.Second,
-		Environment: map[string]string{
+		Environment: withHelperCoverageEnvironment(map[string]string{
 			fakeGitExecutableEnvironment: fixture.git,
 			fakeGitMutationEnvironment:   mutation,
-		},
+		}),
 		Name: "fake-git", Version: "v1", ImageDigest: "sha256:fake-git",
 	})
 	if err != nil {
@@ -394,7 +394,7 @@ func TestRunPinsGitContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner, err := verification.NewRunner(verification.RunnerConfig{GitExecutable: fakeGit, GitTimeout: 5 * time.Second,
-		Environment: map[string]string{fakeGitExecutableEnvironment: fixture.git},
+		Environment: withHelperCoverageEnvironment(map[string]string{fakeGitExecutableEnvironment: fixture.git}),
 		Name:        "fake-git", Version: "v1", ImageDigest: "sha256:fake-git"})
 	if err != nil {
 		t.Fatal(err)
@@ -814,7 +814,7 @@ func TestHelperProcess(t *testing.T) {
 		}
 	case "background-escaped":
 		command := exec.Command(arguments[1], "-test.run=^TestHelperProcess$", "--", "fern-verification-helper", "escaped-output", arguments[2])
-		command.Env = os.Environ()
+		command.Env = helperProcessEnvironment()
 		command.Stdout = os.Stdout
 		command.Stderr = os.Stderr
 		if err := command.Start(); err != nil {
@@ -925,7 +925,7 @@ func newGitFixtureWithEnvironment(t *testing.T, environment map[string]string) *
 	runGit(t, git, repo, "add", "tracked.txt")
 	runGit(t, git, repo, "commit", "--quiet", "-m", "result")
 	result := task.GitOID(gitOutput(t, git, repo, "rev-parse", "HEAD"))
-	runner, err := verification.NewRunner(verification.RunnerConfig{GitExecutable: git, GitTimeout: 5 * time.Second, Environment: environment,
+	runner, err := verification.NewRunner(verification.RunnerConfig{GitExecutable: git, GitTimeout: 5 * time.Second, Environment: withHelperCoverageEnvironment(environment),
 		Name: "fern-verifier", Version: "v1", ImageDigest: "sha256:test-image"})
 	if err != nil {
 		t.Fatalf("NewRunner: %v", err)
@@ -990,6 +990,26 @@ func gitOutput(t *testing.T, git, repo string, arguments ...string) string {
 func helperPolicy(t *testing.T, action string, timeout time.Duration, outputBytes int) verification.Policy {
 	t.Helper()
 	return newPolicy(t, helperArgv(t, action), map[string]string{helperEnvironment: "1"}, "", timeout, outputBytes)
+}
+
+func helperProcessEnvironment() []string {
+	if coverageDirectory := os.Getenv("GOCOVERDIR"); coverageDirectory != "" {
+		return []string{"GOCOVERDIR=" + coverageDirectory}
+	}
+	return nil
+}
+
+func withHelperCoverageEnvironment(environment map[string]string) map[string]string {
+	coverageDirectory := os.Getenv("GOCOVERDIR")
+	if coverageDirectory == "" {
+		return environment
+	}
+	result := make(map[string]string, len(environment)+1)
+	for name, value := range environment {
+		result[name] = value
+	}
+	result["GOCOVERDIR"] = coverageDirectory
+	return result
 }
 
 func helperArgv(t *testing.T, arguments ...string) []string {
