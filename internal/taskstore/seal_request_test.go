@@ -55,6 +55,14 @@ func TestUserSealAdmissionReplayAndCompletionDoesNotClaimSuccess(t *testing.T) {
 		sealed.Task.State != task.TaskCompleted || sealed.Attempt.State == task.AttemptSucceeded {
 		t.Fatalf("authorized result: %+v", sealed)
 	}
+	// Treat the successful commit response as lost: only the durable request and
+	// the caller's original parameters remain after process restart.
+	path := s.Path()
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s = openTestStore(t, path)
+	t.Cleanup(func() { _ = s.Close() })
 	request, err := s.GetSealRequest(context.Background(), p.SealRequestID)
 	if err != nil || request.State != SealRequestCompleted || request.CompletedAt == nil || request.ClaimOwner != "" {
 		t.Fatalf("completed request: %+v, %v", request, err)

@@ -121,6 +121,21 @@ func TestCoordinatorCompletionAmbiguityPreservesAccounting(t *testing.T) {
 	}
 }
 
+func TestCoordinatorLostCompletionResponseAcceptsDurableTerminalState(t *testing.T) {
+	fixture := newCoordinatorFixture(t, verification.Result{Executed: true, ExitCode: 0, Success: true,
+		Stdout: verification.OutputEvidence{SHA256: sha256.Sum256(nil)},
+		Stderr: verification.OutputEvidence{SHA256: sha256.Sum256(nil)}}, nil)
+	fixture.store.completeAfterCommitError = errors.New("completion response lost")
+	if err := fixture.coordinator.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.runner.calls != 1 || fixture.store.completeCalls != 1 || fixture.store.recoverCalls != 0 ||
+		fixture.store.verification.State != taskstore.VerificationSucceeded || fixture.fencer.releases != 1 {
+		t.Fatalf("runs=%d completes=%d recovers=%d verification=%+v releases=%d", fixture.runner.calls,
+			fixture.store.completeCalls, fixture.store.recoverCalls, fixture.store.verification, fixture.fencer.releases)
+	}
+}
+
 func TestCoordinatorRepeatedAndConcurrentRunOnceRunsCommandOnce(t *testing.T) {
 	fixture := newCoordinatorFixture(t, verification.Result{Executed: true, ExitCode: 0, Success: true,
 		Stdout: verification.OutputEvidence{SHA256: sha256.Sum256(nil)}, Stderr: verification.OutputEvidence{SHA256: sha256.Sum256(nil)}}, nil)
@@ -374,25 +389,26 @@ func (r *fakeRunner) Run(_ context.Context, _ verification.Policy, _ verificatio
 }
 
 type fakeStore struct {
-	mu                      sync.Mutex
-	source                  taskstore.VerificationSource
-	verification            taskstore.Verification
-	prepareCalls            int
-	advanceCalls            int
-	completeCalls           int
-	recoverCalls            int
-	advanceError            error
-	advanceAfterCommitError error
-	completeError           error
-	recoverError            error
-	fencer                  *fakeFencer
-	advanceSawFence         bool
-	completeSawFence        bool
-	recoverSawFence         bool
-	taskReadSawFence        bool
-	attemptReadSawFence     bool
-	lastAdvance             taskstore.AdvanceVerificationParams
-	lastEvidence            json.RawMessage
+	mu                       sync.Mutex
+	source                   taskstore.VerificationSource
+	verification             taskstore.Verification
+	prepareCalls             int
+	advanceCalls             int
+	completeCalls            int
+	recoverCalls             int
+	advanceError             error
+	advanceAfterCommitError  error
+	completeError            error
+	completeAfterCommitError error
+	recoverError             error
+	fencer                   *fakeFencer
+	advanceSawFence          bool
+	completeSawFence         bool
+	recoverSawFence          bool
+	taskReadSawFence         bool
+	attemptReadSawFence      bool
+	lastAdvance              taskstore.AdvanceVerificationParams
+	lastEvidence             json.RawMessage
 }
 
 func (s *fakeStore) FindResultAwaitingVerification(context.Context, task.WorkspaceID) (taskstore.VerificationSource, error) {
@@ -496,7 +512,7 @@ func (s *fakeStore) CompleteVerification(_ context.Context, p taskstore.Complete
 	s.verification.Stdout, s.verification.Stderr, s.verification.Reason = &p.Stdout, &p.Stderr, p.Reason
 	s.verification.EndedAt, s.verification.UpdatedAt, s.verification.Revision = &p.EndedAt, p.EndedAt, s.verification.Revision+1
 	s.lastEvidence = append(s.lastEvidence[:0], p.EvidencePayload...)
-	return taskstore.VerificationRecord{Verification: s.verification}, nil
+	return taskstore.VerificationRecord{Verification: s.verification}, s.completeAfterCommitError
 }
 func (s *fakeStore) RecoverVerification(_ context.Context, p taskstore.RecoverVerificationParams) (taskstore.VerificationRecord, error) {
 	s.mu.Lock()

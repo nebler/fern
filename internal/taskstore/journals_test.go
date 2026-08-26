@@ -29,6 +29,7 @@ func TestVerificationAndPublicationJournalsEndToEnd(t *testing.T) {
 		verification.Event.Type != "verification.prepared" || verification.Verification.Revision != 1 {
 		t.Fatalf("prepared verification: %+v", verification)
 	}
+	s = reopenJournalStore(t, s)
 	prepared, err := s.FindPreparedVerification(context.Background(), testWorkspaceID())
 	if err != nil || prepared.Verification.ID != verification.Verification.ID {
 		t.Fatalf("find prepared verification: %+v, %v", prepared, err)
@@ -42,6 +43,11 @@ func TestVerificationAndPublicationJournalsEndToEnd(t *testing.T) {
 	})
 	if err != nil || running.Verification.State != VerificationRunning || running.Verification.EffectAttempt != 1 {
 		t.Fatalf("start verification: %+v, %v", running, err)
+	}
+	s = reopenJournalStore(t, s)
+	running, err = s.FindRunningVerification(context.Background(), testWorkspaceID())
+	if err != nil || running.Verification.State != VerificationRunning || running.Verification.EffectAttempt != 1 {
+		t.Fatalf("restarted running verification: %+v, %v", running, err)
 	}
 	emptyHash := sha256.Sum256(nil)
 	zeroOutput := VerificationOutput{SHA256: emptyHash}
@@ -57,11 +63,17 @@ func TestVerificationAndPublicationJournalsEndToEnd(t *testing.T) {
 		completed.Verification.Stdout.SHA256 != emptyHash || completed.Verification.EndedAt == nil {
 		t.Fatalf("complete verification: %+v, %v", completed, err)
 	}
+	s = reopenJournalStore(t, s)
+	completed, err = s.InspectVerification(context.Background(), completed.Verification.ID)
+	if err != nil || completed.Verification.State != VerificationSucceeded {
+		t.Fatalf("restarted completed verification: %+v, %v", completed, err)
+	}
 
 	publication := prepareJournalPublication(t, s, sealed, completed, 21000)
 	if publication.Publication.State != PublicationPrepared || publication.Publication.Tuple.ResultCommit != sealed.Result.ResultCommit {
 		t.Fatalf("prepared publication: %+v", publication)
 	}
+	s = reopenJournalStore(t, s)
 	work, err := s.FindPublicationWork(context.Background(), testWorkspaceID())
 	if err != nil || work.Publication.ID != publication.Publication.ID || work.Task.ID != sealed.Task.ID ||
 		work.Attempt.ID != sealed.Attempt.ID || work.Result.ID != sealed.Result.ID ||
@@ -70,8 +82,14 @@ func TestVerificationAndPublicationJournalsEndToEnd(t *testing.T) {
 		t.Fatalf("exact publication work: %+v, %v", work, err)
 	}
 	publication = advanceJournalPublication(t, s, sealed, publication, PublicationPhaseNone, PublicationPhasePushStarted, "", 21001)
+	s = reopenJournalStore(t, s)
+	assertPublicationPhase(t, s, publication.Publication.ID, PublicationPhasePushStarted)
 	publication = advanceJournalPublication(t, s, sealed, publication, PublicationPhasePushStarted, PublicationPhasePushObserved, sealed.Result.ResultCommit, 21002)
+	s = reopenJournalStore(t, s)
+	assertPublicationPhase(t, s, publication.Publication.ID, PublicationPhasePushObserved)
 	publication = advanceJournalPublication(t, s, sealed, publication, PublicationPhasePushObserved, PublicationPhasePRCreateStarted, "", 21003)
+	s = reopenJournalStore(t, s)
+	assertPublicationPhase(t, s, publication.Publication.ID, PublicationPhasePRCreateStarted)
 	observation := journalPublicationObservation(publication.Publication.Tuple)
 	publishedAt := publication.Publication.UpdatedAt.Add(time.Millisecond)
 	published, err := s.CompletePublication(context.Background(), CompletePublicationParams{
@@ -84,6 +102,12 @@ func TestVerificationAndPublicationJournalsEndToEnd(t *testing.T) {
 		published.Publication.Observation.PullRequest.Number != 42 || published.Publication.ObservedRemoteSHA != sealed.Result.ResultCommit {
 		t.Fatalf("complete publication: %+v, %v", published, err)
 	}
+	s = reopenJournalStore(t, s)
+	persisted, err := s.InspectPublication(context.Background(), published.Publication.ID)
+	if err != nil || persisted.Publication.State != PublicationPublished || persisted.Publication.Observation == nil ||
+		persisted.Publication.Observation.PullRequest.Number != 42 {
+		t.Fatalf("restarted publication: %+v, %v", persisted, err)
+	}
 	replay, err := s.CompletePublication(context.Background(), CompletePublicationParams{
 		PublicationID: publication.Publication.ID, ExpectedRevision: publication.Publication.Revision,
 		ExpectedTaskRevision: sealed.Task.Revision, ExpectedAttemptRevision: sealed.Attempt.Revision,
@@ -92,6 +116,25 @@ func TestVerificationAndPublicationJournalsEndToEnd(t *testing.T) {
 	})
 	if err != nil || !replay.Replayed {
 		t.Fatalf("publication replay: %+v, %v", replay, err)
+	}
+}
+
+func reopenJournalStore(t *testing.T, store *Store) *Store {
+	t.Helper()
+	path := store.Path()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened := openTestStore(t, path)
+	t.Cleanup(func() { _ = reopened.Close() })
+	return reopened
+}
+
+func assertPublicationPhase(t *testing.T, store *Store, id task.PublicationID, phase PublicationPhase) {
+	t.Helper()
+	record, err := store.InspectPublication(context.Background(), id)
+	if err != nil || record.Publication.EffectPhase != phase {
+		t.Fatalf("restarted publication phase = %s, want %s: %v", record.Publication.EffectPhase, phase, err)
 	}
 }
 

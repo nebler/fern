@@ -52,6 +52,7 @@ type fakeAuthorizedStore struct {
 	authorizedSeals  int
 	authorized       taskstore.SealAuthorizedResultParams
 	onAuthorizedSeal func()
+	authorizedErr    error
 }
 
 func (store *fakeAuthorizedStore) ClaimSealRequest(context.Context, taskstore.ClaimSealRequestParams) (taskstore.SealRequestWork, error) {
@@ -84,7 +85,7 @@ func (store *fakeAuthorizedStore) SealAuthorizedResult(_ context.Context, p task
 	if store.onAuthorizedSeal != nil {
 		store.onAuthorizedSeal()
 	}
-	return taskstore.SealedResult{}, nil
+	return taskstore.SealedResult{}, store.authorizedErr
 }
 
 func (store *fakeStore) FindSucceededUnsealedAttempt(ctx context.Context, _ task.WorkspaceID) (taskstore.DeliveryWork, error) {
@@ -305,6 +306,29 @@ func TestRunOnceUserSealUsesDurableAuthorizationWithoutSuccessObservation(t *tes
 	if collector.request.ExpectedSnapshot == nil || collector.request.ExpectedSnapshot.ResultCommit != store.work.Request.ExpectedResultCommit ||
 		collector.request.ExpectedSnapshot.ManifestSHA256 != store.work.Request.ExpectedManifestSHA256 {
 		t.Fatalf("collector was not constrained: %+v", collector.request)
+	}
+}
+
+func TestAuthorizedSealLostCommitResponseDoesNotRepeatCompletedWork(t *testing.T) {
+	store := &fakeAuthorizedStore{fakeStore: &fakeStore{}, work: authorizedWork(), authorizedErr: errors.New("commit response lost")}
+	coordinator, err := NewAuthorized(store, &fakeFencer{}, &fakeCollector{}, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.RunOnce(context.Background()); err == nil || err.Error() != "commit response lost" {
+		t.Fatalf("lost response error = %v", err)
+	}
+	if store.authorizedSeals != 1 {
+		t.Fatalf("seal calls = %d", store.authorizedSeals)
+	}
+	// A committed store no longer exposes the request after restart/retry. The
+	// coordinator must not fall back to execution-success discovery.
+	store.claimErr = taskstore.ErrNotFound
+	if err := coordinator.RunOnce(context.Background()); !errors.Is(err, ErrNoWork) {
+		t.Fatalf("retry error = %v", err)
+	}
+	if store.authorizedSeals != 1 || store.seals != 0 {
+		t.Fatalf("authorized seals=%d legacy seals=%d", store.authorizedSeals, store.seals)
 	}
 }
 
