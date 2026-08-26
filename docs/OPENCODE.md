@@ -22,10 +22,11 @@ Fern owns the container lifecycle, wake and pause admission, and the stable
 same-origin proxy. Fern-owned `/fern/*` routes provide the phone control page,
 gateway readiness, restart-safe device administration, workflow/session
 correlations, durable task admission/delivery/cancellation, conservative
-execution observation, and constrained publication without copying the coding
-interface. Generic terminal-result classification and notifications remain
-future services because this pinned OpenCode profile exposes no closed durable
-terminal-success object.
+execution observation, explicit snapshot sealing, verification, and
+receipt-backed App publication without copying the coding interface. Generic
+terminal-result classification, durable approval answers, and notifications
+remain future services because this pinned OpenCode profile exposes no closed
+durable terminal-success or restart-stable approval object.
 
 ## Image And Configuration
 
@@ -85,8 +86,9 @@ The local fake tests cover this metadata and unchanged SSE flushing, but the
 exact pinned image still needs acceptance through real TLS for absolute links
 and redirects and through WSS for terminal/upgraded traffic.
 
-Fern owns the complete `/fern/*` namespace for landing, readiness, pairing,
-device, workflow, and control routes. These routes do not acquire workspace
+Fern owns the complete `/fern/*` namespace for landing, liveness/readiness,
+telemetry, pairing, device, retired compatibility, task, and control routes.
+These routes do not acquire workspace
 admission or wake OpenCode. Paths outside that namespace, including similar
 names such as `/fern-smoke`, are proxied unchanged.
 
@@ -187,8 +189,10 @@ Pairing GET renders a confirmation page without consuming the short-lived code;
 the confirmation POST issues a Fern device credential in an `HttpOnly`,
 `Secure` cookie. The gateway authenticates that cookie, removes it before
 proxying, and injects the internal OpenCode credential. Device cookies authorize
-OpenCode access only; they cannot access `/fern/control`, control APIs,
-publication, or pairing issuance. OpenCode continues serving every
+OpenCode and Fern task access only; they cannot access `/fern/control`, device
+administration, retired host-publication routes, or pairing issuance. An
+eligible App publication request is a task API command with its own receipt,
+verification checks, and CSRF protection. OpenCode continues serving every
 non-`/fern/*` UI and API route.
 
 Only the remote listener may be published through a private TLS edge. The
@@ -202,6 +206,12 @@ exposed to a LAN or the internet.
 OpenCode sessions and global configuration. Back up the volume before changing the
 pinned OpenCode version. Fern does not transform or repair OpenCode's database;
 OpenCode remains the data-format authority.
+
+Fern's offline backup commands export and restore the managed OpenCode volume,
+but they do not transform its contents. The host task-store compatibility
+harness does not imply OpenCode database downgrade compatibility. Back up before
+changing the pinned image and restore the complete pre-change volume if rollback
+is required.
 
 Changing the image or environment changes Fern's desired-state fingerprint and
 requires container recreation. Use immutable image tags or recorded image

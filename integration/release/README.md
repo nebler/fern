@@ -18,5 +18,11 @@ rejection, destructive fresh restore, generated transaction receipts,
 previous-generation rollback, and source plus target epoch fencing.
 Docker volumes are represented by explicitly pre-exported fixture directories;
 the harness never invokes Docker or claims physical-host crash atomicity.
-The release manifest also marks signatures as not generated; SHA-256 checksums
-detect corruption but do not establish artifact authenticity.
+When run locally, the release manifest marks signatures/provenance as not
+generated; SHA-256 checksums detect corruption but do not establish artifact
+authenticity. The tag workflow separately requires a signed annotated tag,
+publishes a digest-bound multi-architecture image, generates an SPDX SBOM,
+creates GitHub provenance attestations, keylessly signs and attests the image,
+verifies those claims, and attests every release asset before creating a GitHub
+Release. The local harness does not emulate or claim those GitHub/Sigstore
+effects. See `docs/RELEASE_POLICY.md`.

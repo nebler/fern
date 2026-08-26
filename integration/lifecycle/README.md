@@ -21,6 +21,11 @@ remain running past the original deadline, pause after the complete restarted
 grace period, and wake with the same container, repository, and persisted
 session marker.
 
+Startup rollback scenarios distinguish a committed user/shutdown pause intent
+from a committed failed-start intent. A container Fern started but could not
+make healthy remains classified `failed`; it cannot later appear intentionally
+dormant merely because rollback stopped it.
+
 The fixture configures a synthetic canonical HTTPS `remoteOrigin` while requests
 still travel over local HTTP. A paired request supplies a malicious `Host`,
 `Forwarded`, and `X-Forwarded-*` set; the fake backend requires Fern's configured
@@ -58,3 +63,6 @@ are passed through the isolated process environment and are replaced in captured
 output. Successful runs clean only exact, uniquely named resources. Failed runs
 retain evidence by default but still clean Docker resources unless keep mode is
 explicitly enabled.
+
+This local Docker harness is not evidence of a physical host reboot, real
+private-edge TLS/WSS, replacement-host restore, or phone rehearsal.

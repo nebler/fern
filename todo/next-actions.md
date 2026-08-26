@@ -44,13 +44,12 @@ list.
 - [x] **Freezer pause implemented 2026-08-24** — `idle.mode: stop|freeze` config
       (+ `-idle-mode` flag), freeze branch in `pauseObserved` with its own
       failure reconciler, intent journal retained in both modes (reboot-safe
-      classification), unit-tested against a mocked Docker API. Not yet
-      committed.
+      classification), unit-tested against a mocked Docker API.
 - [ ] **Run `fern debug wake` ×10 through the lifecycle harness** with
       `idle.mode: freeze`; put the real before/after numbers in the README table.
-- [ ] **Answer the one open review question** (the only decision owed): unhealthy-start →
-      committed pause intent (docker.go rollback path) — deliberate anti-crash-loop or bug?
-      Pick: distinct intent flavor *or* documenting comment + harness expectation.
+- [x] **Classify unhealthy starts distinctly** — failed health/observer startup
+      rollback commits a `failedStart` intent, so a never-healthy container remains
+      `failed` rather than appearing intentionally paused.
 
 ## Weekend 3 — Apply + gateway skeleton
 

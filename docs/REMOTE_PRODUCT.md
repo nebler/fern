@@ -1,278 +1,184 @@
 # Product Direction
 
-This document is authoritative for Fern's product direction. It describes
-planned boundaries, not implemented behavior. [ARCHITECTURE.md](./ARCHITECTURE.md)
-and the code remain authoritative for the current system.
+This document owns Fern's product direction. [Architecture](./ARCHITECTURE.md)
+and code own current implementation behavior.
 
 ## Direction
 
-Fern should become a self-hosted control plane for durable remote coding tasks,
-using OpenCode as its first agent runtime.
+Fern is a self-hosted control plane for durable remote coding tasks, using
+OpenCode as its first agent runtime:
 
-> Submit work remotely, disconnect, return to the same task, inspect an
-> attributable tested result, and publish it safely from a workspace that can
-> stop, wake, reboot, and recover.
+> Submit work remotely, disconnect, return to the same task, authorize an exact
+> repository result, verify it under host policy, and publish it safely from a
+> workspace that can stop, wake, reboot, and recover.
 
 Fern should not become another model loop or rebuild OpenCode's coding UI.
-OpenCode remains authoritative for conversations, tools, permissions,
-questions, terminals, files, and diffs. Fern owns the durable journey around
-those capabilities.
+OpenCode remains authoritative for conversations, tools, process-epoch input,
+terminals, files, and diffs. Fern owns the durable journey around those
+capabilities.
 
 ## Product Boundary
 
 | Concern | Authority |
 | --- | --- |
-| Task receipt, delivery state, attempts, and cancellation intent | Fern |
-| Conversation and tool execution | OpenCode |
-| Compute lifecycle and recovery | Fern runtime backend |
+| Task receipt, delivery, attempts, cancellation | Fern SQLite |
+| Conversation and tool execution | Pinned OpenCode profile |
+| Compute lifecycle and recovery | Fern Docker runtime |
 | Repository content | Git and the workspace |
-| Verification and result provenance | Fern |
-| Push and pull request effects | OpenCode through workspace `gh`; optional audited Fern actions |
-| Repository authorization | User-authenticated workspace `gh` |
-| Infrastructure scheduling | Docker now; other backends later |
+| User-authorized result | Exact Fern seal request and Git evidence |
+| Automatic execution result | Future authoritative observer; inactivity is insufficient |
+| Verification | Host-owned Fern policy and exact commit proof |
+| App publication | Fern receipt/effect journal plus GitHub exact reads |
+| Direct workspace publication | Explicit user/prompt intent plus workspace `gh` |
+| Repository identity | Configured numeric GitHub identity, revalidated live |
 
-The workspace GitHub credential is intentionally available to OpenCode, matching
-the Amp workflow. Explicit prompt intent authorizes the agent to use it. Fern
-must not claim its own phone actions are an exclusive mutation gate; those
-actions can add durable receipts and reconciliation only for effects they own.
-The host-brokered GitHub App code remains current implementation, not target
-product authority.
+The two GitHub modes are explicit and mutually exclusive. `workspace-gh`
+matches the Amp-style workflow: trusted workspace code receives an authenticated
+`gh` CLI and direct effects are outside Fern's receipts. `github-app-broker`
+keeps credentials on the host and permits receipt-backed publication of one
+exact sealed and verified result. Fern must not describe its phone action as an
+exclusive publication gate in workspace-`gh` mode.
 
-The central product model should become:
+## Current Product Path
 
-```text
-Workspace
-  contains Tasks
-    contain Attempts
-      map to OpenCode Sessions
-      produce Results
-      may produce Publications
-```
+The implemented journey is:
 
-A Fern task is not a duplicate transcript. It is the durable record proving
-that Fern accepted an instruction, whether OpenCode received it, what attempt
-ran, whether cancellation was requested, and which exact result was verified
-or published.
+1. Pair a device through one canonical private HTTPS origin.
+2. Submit one task with a browser-persisted idempotency key and body.
+3. Commit task, attempt, receipt, actor, base SHA, and exact OpenCode IDs before
+   wake or delivery.
+4. Deliver through journaled phases and reconcile exact IDs without mutating a
+   prompt after ambiguity.
+5. Project only positive `running` or `input_required` evidence; never infer
+   generic completion.
+6. Preview and authorize one exact clean snapshot under `AcquirePaused`.
+7. Seal that snapshot as `user_seal`, mark the attempt `superseded`, and complete
+   the task without claiming OpenCode success.
+8. Optionally verify the exact commit with host-owned shell-free policy.
+9. In App mode, atomically admit one publication receipt and reconcile one exact
+   branch and draft PR through the paired API. The embedded task page currently
+   displays but does not initiate publication. In workspace-`gh` mode, use
+   ordinary explicit `git`/`gh`.
+10. Read coherent task, seal, result, verification, publication, and PR status
+    from the phone task page.
 
-## First Product Outcome
+Lifecycle, offline backup/rollback, encrypted GitHub credential custody,
+schema-4 to schema-6 compatibility fixtures, readiness telemetry, and an
+attested tag-release workflow support that journey.
 
-From a supported phone browser, a user can:
+## Evidence Boundary
 
-1. Pair one device through a private TLS route.
-2. Submit one durable, idempotently accepted task and disconnect.
-3. Return to its current status and OpenCode session.
-4. Answer an approval or question.
-5. Inspect the changed files and verification tied to an exact commit.
-6. Publish one draft pull request through an effect-narrowed host broker; the
-   supported release must replace the current broad host credential with a
-   repository-scoped GitHub App installation token.
-7. Stop, wake, restart, and restore without losing completed work.
+Checked-in automated evidence includes unit/race tests, deterministic browser
+and lifecycle harnesses, a zero-cost pinned OpenCode contract harness, release
+reproducibility, schema upgrade/byte-restore/upgrade, backup archive and
+operational recovery tests, and a synthetic self-test of the physical evidence
+recorder.
 
-The current field demo validates only a constrained portion of this outcome.
-See [FIELD_DEMO.md](./FIELD_DEMO.md) for its exact claim.
+It does not prove a physical Android or iOS rehearsal occurred. It also does not
+prove target Ubuntu/systemd boot, physical reboot, replacement-host restore,
+abrupt-power-loss behavior, real private TLS/WSS, physical stream/PTY revocation,
+independent tailnet ACL denial, provider-funded execution, or live
+organization-specific GitHub policy. Those require operator-controlled evidence
+tied to an exact build. See [Phone Field Demo](./FIELD_DEMO.md) and
+`integration/production-rehearsal/README.md`.
 
-## Current Evidence
+## Remaining Product Milestones
 
-The 2026-08-22 physical Android Chrome rehearsal materially reduced product
-risk. It demonstrated private phone reachability, explicit pairing, use of the
-official OpenCode UI, provider-backed edits/tests/local commits, reconnect after
-phone lock, Wi-Fi-to-cellular continuity, and continuity across an orderly Fern
-restart.
+### Physical Acceptance
 
-It did not complete release acceptance. Automatic idle pause failed, and
-permission/question handling, device revocation, and exact-SHA draft PR
-publication were not completed. The pairing harnesses and idle reducer were
-subsequently repaired with automated coverage, but physical pause/wake and one
-complete integrated evidence bundle remain open. Treat this as proof that the
-core phone interaction is viable, not proof of the durable-task or
-safe-publication product claims.
+Run and retain one complete source-host to replacement-host rehearsal:
 
-## Roadmap
+- exact release/source/image preflight;
+- physical reboot and service recovery;
+- verified offline backup;
+- old-host service and origin fence;
+- replacement-host restore and health;
+- real external TLS/WSS browser and terminal traffic;
+- physical phone task journey and revocation;
+- independent ACL-negative observation;
+- redacted final evidence review.
 
-`CP` marks the release critical path. `P` marks work that can proceed in
-parallel after the named contract or dependency is stable.
+The recorder validates supplied observations but does not perform these steps.
 
-### Phase 0: Restore Field-Demo Truth
+### Generic Completion
 
-| Track | Work | Exit criteria |
-| --- | --- | --- |
-| CP-0A Pairing gates (implemented) | Browser and lifecycle harnesses cover GET-confirm/POST-consume pairing, replay rejection, and restart survival | Re-run every local gate in `FIELD_DEMO.md` from one recorded integrated commit and image |
-| CP-0B Lifecycle (automated gate implemented) | A late request after proven idle restarts the grace timer; the 14-scenario lifecycle harness proves grace timing, fenced pause, wake, and preserved state | Physical completed work reaches paused compute and wakes to the same session |
-| CP-0C Runbook (partially implemented) | Paired-device/operator surfaces and revocation expectations are separated; pairing now preserves bounded self-asserted names | Every field step maps to one executable surface and expected result |
-| CP-0D Rehearsal | After the GitHub hardening gate, run one bounded provider task, isolated GitHub rehearsal, and physical-phone sequence with retained evidence | All field steps have timestamped pass/fail evidence and cleanup |
-| P-0E Browser matrix | Exercise the confirmation flow and unchanged OpenCode UI at phone viewport sizes | Supported browser routes load without auth loops or overflow |
+The pinned OpenCode profile has no durable generic terminal-success/failure
+object. Automatic observer-authorized sealing remains blocked until an exact,
+restart-safe primitive can provide two identical success observations inside
+`AcquireQuiesced`. Idle, empty inbox, process death, and volatile events remain
+invalid evidence.
 
-Do not claim release acceptance or run another live publication while these
-gates fail. Read-only contract work and isolated implementation can continue in
-parallel without changing the frozen field-demo artifact.
+### Durable Input And Notifications
 
-### Phase 1: Prove The OpenCode Contract
+Fern records `input_required` but has no durable approval table or phone answer
+API. It must not recreate vanished form/permission options after an OpenCode
+process epoch. A future design needs exact context hashes, actor receipts,
+delivery reconciliation, and restart semantics.
 
-1. **CP-1A (observed):** The exact pinned image preserves caller-selected
-   session/message IDs, response-loss admission, finite ordered messages, and
-   exact provider-turn deduplication across container replacement. Conflicting
-   retry remains closed; there is no usable durable event cursor.
-2. **CP-1B (partially observed):** Interrupt closes provider work and its durable
-   evidence survives replacement without resurrecting execution. Before-
-   admission and after-completion races remain open without a rollback claim.
-3. **P-1C (boundary observed):** Live permission approval and form answers work,
-   but pending and answered forms disappear on replacement. Form-backed input
-   therefore enters `recovery_required`; pending-permission restart remains open.
+Notifications, transactional outbox delivery, PR/CI polling, and review
+continuation are not implemented. Build them only after durable event and actor
+contracts are fixed; external events are hints and current state must be
+reconciled.
 
-Fern should persist deterministic OpenCode IDs and reconcile the pinned V2
-contract, not infer deduplication from transcript text.
+The paired App publication API is implemented, but the embedded phone task page
+has no publication button or persisted publication command. That UX must retain
+the exact idempotency key until acceptance, following the submission pattern.
 
-### Phase 2: Transactional Task Foundation
+### GitHub Onboarding And Credential Lifecycle
 
-1. **CP-2A (contract drafted):** `TASK_MODEL.md` defines Task, Attempt, Receipt,
-   Event, Approval, Result, Verification, and Publication state machines,
-   including `uncertain` and `recovery_required`; it now records the observed
-   top-level prompt/inbox/message profile and remaining restart assumptions.
-2. **CP-2B:** Replace coarse workflow truth with a versioned SQLite store using
-   foreign keys, WAL, bounded payloads, and explicit transaction boundaries.
-3. **CP-2C:** Persist task, attempt, idempotency key, prompt hash, and exact
-   OpenCode IDs before wake or delivery.
-4. **P-2D:** Freeze task list/detail, result, and reconnect-cursor API contracts
-   so phone UX can proceed independently.
+App discovery primitives exist, but installation/repository selection still
+requires operator configuration and first activation requires restart. Complete
+onboarding should present and persist an exact numeric selection without
+creating a mutable confused-deputy path.
 
-SQLite is sufficient for the first single-host store. Do not maintain the JSON
-workflow store and SQLite as competing task authorities.
+Age-encrypted export/import/rotation and local rollback are implemented. Fern
+cannot revoke superseded App keys or workspace OAuth tokens at GitHub. External
+revocation and proof remain an operator obligation. Import/rotation also
+requires an active prior generation for rollback and cannot bootstrap an empty
+credential store; onboarding/login or full host restore owns that case.
 
-### Phase 3: Durable Delivery And Reconciliation
+### Recovery Atomicity
 
-1. **CP-3A:** Wake OpenCode and submit exactly one persisted prompt ID.
-2. **CP-3B:** Re-scan finite inbox/message/form projections and persist exact
-   projected IDs. Volatile OpenCode events may trigger scans but are not a Fern
-   reconnect cursor.
-3. **CP-3C:** Reconcile every nonterminal task and ambiguous delivery before
-   accepting new effects after startup.
-4. **CP-3D:** Persist cancellation intent before interrupt and expose only the
-   state supported by upstream evidence.
+Offline restore and rollback are staged and retain a durable pre-restore
+generation, but filesystem roots and Docker volumes activate sequentially.
+Physical abrupt-power-loss characterization and explicit operator recovery from
+partially activated domains remain necessary. Online cross-store snapshots are
+not a current product claim.
 
-### Phase 4: Phone Task Journey
+### Operator Browser Boundary
 
-1. **CP-4A:** Add a scoped paired-device task inbox with durable receipt,
-   current status, and deep links into the authoritative OpenCode session.
-2. **CP-4B:** Persist input-required shadows and reconcile answers without
-   rebuilding OpenCode's permission/question UI.
-3. **P-4C:** Add a transactional notification outbox for input required,
-   completion, failure, and publication readiness.
-4. **P-4D:** Build mobile delivery adapters only after the outbox semantics are
-   stable.
+The operator listener stays host-only and is not a supported OpenCode browser
+origin. Exact origin and Fetch Metadata checks exist, but operator HTML forms do
+not have device-style per-request CSRF tokens. Keep controls CLI/host-local or
+add a control-only browser surface before broadening support.
 
-### Phase 5: Attributable Result And Publication
+## Sequencing
 
-1. **CP-5A:** Seal base SHA, candidate commit, dirty state, changed-file
-   manifest, task/attempt/session IDs, and event boundary into one Result.
-2. **CP-5B:** Run bounded approved verification and bind command, logs, exit
-   status, timestamps, and tool identity to that exact commit.
-3. **CP-5C:** Make publication consume a successful Result, not current `HEAD`,
-   and require verified commit, pushed branch, and draft PR head to match.
-4. **P-5D:** Present mobile-safe changed-file and verification summaries while
-   deep-linking full coding details to OpenCode.
-
-### Phase 6: Authorization And Recovery Completion
-
-1. Integrate repository-scoped GitHub App onboarding and short-lived
-   installation tokens from the parallel GitHub lane below.
-2. Add versioned setup/resume hooks with bounded logs and failure states.
-3. Automate backup, fresh-host restore, upgrade, rollback, and old-host fencing.
-4. Test paused, idle-running, active-task, and interrupted-publication reboots
-   on the target systemd host.
-5. Add private previews and bounded CI/review follow-up only after exact PR
-   identity is durable.
-
-### Parallel Workstreams
-
-| Workstream | Can start | Dependency and merge point |
-| --- | --- | --- |
-| Lifecycle and browser acceptance | Now | Independent release gate; must pass before any lifecycle claim |
-| OpenCode exact-ID/restart contract harness (profile complete) | Caller IDs, response-loss and provider-turn retry, finite messages, live approvals/forms, restart behavior, interrupt, and missing durable event APIs are recorded for one digest | Pending-permission restart, form recovery policy, and cancellation race extensions gate their respective claims |
-| GitHub prototype safety fixes (first tranche implemented) | Recovered branch, origin scheme, worktree/gitlink, URL, and post-create reconciliation tests now pass | Immutable repository identity, base SHA, full PR proof, and browser-control rehearsal still block live mutation |
-| GitHub App authentication/onboarding foundation (implemented, not integrated) | RS256 signing, scoped token client, key parsing, private Manifest conversion, and atomic permission-protected credential storage exist | Callback state, installation selection, encrypted backup/rotation, and publisher integration join after shared publication identity is fixed |
-| Task domain and admission store (implemented, not integrated) | Pure state machines plus CGO-free SQLite atomically persist task, prepared attempt, exact OpenCode IDs, receipt, and two events before effects | Delivery transitions, coordinator/HTTP wiring, backup/cutover, and form epoch recovery remain |
-| Phone inbox UI prototype (implemented, fixture-backed) | Mobile/detail and desktop split views cover durable states with strict links/CSP | Replace fixtures with read-only task APIs after persistence projections freeze |
-| Notification outbox | After task event vocabulary freezes | Delivery adapters proceed independently afterward |
-| Exact-commit verification runner (implemented, not integrated) | Clean pre/postflight, bounded hashed output, timeout/cancel, and mutation detection are covered | Policy persistence, sandboxing, artifact transactions, and publication eligibility wiring remain |
-| Release artifact foundation (implemented) | Deterministic metadata, checksums, packaged deployment assets, schemas, tamper/reproducibility harness, and CI exist | Signing, executable upgrade/rollback, and backup wait for stable SQLite/App state |
-| Backup tooling | After SQLite migrations stabilize | Joins fresh-host release gate |
-| GitHub onboarding UI | After manual App broker works | Joins first supported repository onboarding |
-| Control-plane security | Device-only remote ingress, host-only operator listener, backend credential rejection, canonical auth regeneration, strict external origin/forwarding, active revoke, expiry cancellation, and backend negative probes are implemented | Browser-safe control-only operator surface, CSRF, pinned-image real TLS/WSS, and real SSE/PTY revocation acceptance remain |
-| Backend authentication fail-closed gate (implemented) | Startup negative-probes missing and wrong credentials before accepting health | Exact packaged-image smoke must retain the `401` contract |
-
-Parallel execution must preserve one authority per contract:
-
-1. Freeze identifiers and transitions for Workspace, Task, Attempt, Result,
-   Verification, Publication, repository ID, base SHA, operation ID, and actor
-   before independent implementations consume them.
-2. Give one track ownership of SQLite migrations and state transitions. Other
-   tracks develop against contract fixtures rather than adding shadow stores.
-3. Keep the App broker behind an internal interface so credential work does not
-   depend on phone HTML or OpenCode delivery internals.
-4. Let phone UI use recorded API fixtures after contracts freeze; do not let UI
-   work invent task or publication states.
-5. Merge each track only through its contract and fault-injection tests. A green
-   package test without the cross-track invariant is not a merge gate.
-
-The critical path is:
+The critical path is now:
 
 ```text
-field-demo truth
-  -> pinned OpenCode exact-ID contract
-  -> transactional task model
-  -> persist before wake
-  -> idempotent delivery and event reconciliation
-  -> phone inbox and input-required flow
-  -> exact-commit result and verification
-  -> publication bound to that result
-  -> GitHub App repository authorization
-  -> restart, pause/wake, and restore acceptance
-  -> one retained phone-to-tested-draft-PR journey
+current durable phone-to-verified-App-PR path
+  -> one retained physical production rehearsal
+  -> generic terminal-success primitive or explicit continued user authority
+  -> durable input decisions
+  -> notification and PR/CI continuation
+  -> smoother GitHub selection and activation
 ```
 
-The GitHub App lane, phone UI, lifecycle repair, and notification design should
-run concurrently where shown, but all join the release gate. A workspace
-registry remains deferred until one complete durable task journey works.
+Physical evidence work can proceed in parallel with generic completion research,
+durable input design, and notification contracts. None may weaken current
+receipt, exact-identity, cancellation, result, verification, or publication
+fences.
 
-### Later: Execution Backends
+## Later Backends
 
-Docker remains the supported backend for the single-owner, trusted-host
-product. Before adding another backend, separate the workspace controller from
-Docker-specific status, endpoints, locks, storage, logs, and CLI operations.
-
-Kubernetes becomes useful for a workspace fleet, multi-node scheduling,
-distributed reconciliation, or a concrete enterprise deployment. It does not
-provide durable task semantics or strong tenant isolation by itself. A shared,
-hostile multi-tenant service also needs a sandbox runtime such as gVisor, Kata,
-or a microVM boundary, plus external identity, secrets, egress, and audit.
-
-For Grab, Fern should integrate its OpenCode-aware lifecycle and durable task
-coordination with a Palana-style Kubernetes platform. Grab's platform should
-continue to own pod scheduling, storage, ingress, workload identity, Vault,
-egress policy, and audit. Fern should not run its Docker-daemon model inside an
-agent pod.
-
-## T3 Code Decision
-
-T3 Code is a useful benchmark for mobile clients, durable command receipts,
-event replay, terminals, files, Git views, and multi-provider orchestration. It
-is not a drop-in frontend for Fern. Adopting its server would make T3 the thread
-and application authority while Fern became its lifecycle supervisor.
-
-Fern may run a time-boxed, version-pinned T3 experiment against a Fern-managed
-OpenCode server. The experiment must prove OpenCode V2 compatibility, joint
-T3/OpenCode quiescence, crash recovery, Git checkpoint ordering, publication
-safety, and persistence. Do not fork T3, reproduce its private RPC contract, or
-make it a release dependency before those results exist.
-
-Fern can adopt T3-like interaction contracts without adopting T3's runtime:
-
-- stable task identity;
-- durable command receipts;
-- monotonic reconnect cursors;
-- explicit connection and execution states;
-- mobile task and result views;
-- deep links into the authoritative coding session.
+Docker remains the supported single-owner backend. Before adding another,
+separate workspace policy from Docker-specific status, endpoint, storage, logs,
+and lifecycle operations. Kubernetes is useful only for a concrete fleet or
+multi-node deployment; it does not supply Fern's durable task semantics or
+hostile tenant isolation. A hostile shared service additionally needs workload
+identity, secret/egress policy, audit, and a sandbox such as gVisor, Kata, or a
+microVM boundary.
 
 ## Not Now
 
@@ -281,22 +187,12 @@ Fern can adopt T3-like interaction contracts without adopting T3's runtime:
 - Multiple agent-provider adapters.
 - Multi-agent orchestration or a general workflow builder.
 - Kubernetes as a requirement for the personal release.
-- Direct Firecracker fleet management.
-- Hostile multi-tenancy on ordinary shared-kernel Docker containers.
+- Hostile multi-tenancy on ordinary shared-kernel Docker.
 
 ## Success Criteria
 
-Fern is closer to Amp when the task, rather than the HTTP connection or
-container, survives disconnects and lifecycle changes. The next release should
-be judged by one complete phone-to-tested-PR journey, not by the number of
-runtimes, schedulers, or infrastructure features it supports.
-
-## Research Sources
-
-- [Amp Orbs](https://ampcode.com/manual/orbs)
-- [T3 Code architecture](https://github.com/pingdotgg/t3code/blob/main/docs/internals/overview.md)
-- [T3 Code remote architecture](https://github.com/pingdotgg/t3code/blob/main/docs/internals/remote.md)
-- [Kubernetes multi-tenancy](https://kubernetes.io/docs/concepts/security/multi-tenancy/)
-- [Kubernetes RuntimeClass](https://kubernetes.io/docs/concepts/containers/runtime-class/)
-- [Grab Palana architecture](https://engineering.grab.com/part-2-palana-architecture)
-- [Firecracker](https://firecracker-microvm.github.io/)
+Fern succeeds when the task and its exact evidence survive disconnects and
+lifecycle changes, not merely when an HTTP connection or container remains
+alive. The next acceptance milestone is one retained physical
+phone-to-tested-draft-PR and replacement-host recovery journey, with every
+external claim tied to redacted evidence and no inferred success.

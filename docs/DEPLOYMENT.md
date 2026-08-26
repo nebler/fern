@@ -1,122 +1,50 @@
 # Supervised Private Deployment
 
-This runbook describes a single-user Fern deployment on Ubuntu Server 24.04
-with systemd, a local Docker Engine, and private Tailscale Serve. Tailscale
-terminates HTTPS and forwards to Fern's loopback listener. Do not enable
-Tailscale Funnel.
+This runbook covers one trusted owner and workspace on Ubuntu Server 24.04 with
+systemd, local Docker Engine, and private Tailscale Serve. Fern and OpenCode are
+not hostile multi-user isolation. Docker-group membership is effectively root.
 
-Fern uses one V2 contract. The browser connects to Fern's origin and receives the official
-OpenCode web UI already served at `/` by `opencode2 serve`. No custom Fern coding
-PWA is built or deployed.
+Tailscale terminates HTTPS and forwards only Fern's remote listener. Never
+enable Funnel and never publish the operator listener.
 
-Static unit checks, mobile-viewport browser automation, orderly-shutdown
-simulation, and an isolated checksum-verified destructive restore are automated.
-A complete target-host install, physical reboot, fresh-host restore, and
-remote-device rehearsal have not passed.
+Automated gates cover static deployment policy, browser behavior, simulated
+orderly shutdown, schema upgrade/rollback fixtures, reproducible builds, and
+isolated backup/restore. The production rehearsal recorder self-tests with
+synthetic facts. No checked-in evidence proves a physical target-host install,
+reboot, replacement-host restore, real private TLS/WSS phone path, or independent
+ACL-negative exercise.
 
 ## Trust And Authentication
 
-Fern gives OpenCode read/write access to the selected repository. OpenCode
-owns provider connections; optional environment credentials are forwarded into
-its container. Use only a dedicated trusted host,
-user, image, and repository. Docker-group membership is effectively root; this
-is not tenant isolation.
+Fern gives OpenCode read/write access to the selected repository. OpenCode and
+repository code are inside the trusted workspace boundary and may access
+provider credentials intentionally forwarded there.
 
-The internal OpenCode credential uses `opencode:$OPENCODE_PASSWORD` and is
-accepted only on the loopback operator listener for local CLI access. Fern
-administration and pairing issuance use the separate host-only
-`fern:$FERN_CONTROL_PASSWORD` on that same operator listener; the values must
-differ and the control password must contain at least 32 characters. Both Basic
-credentials are rejected by the remote/device listener. Tailscale identity is
-the outer private-access boundary. For the phone demo, `fern doctor --phone` creates
-a five-minute pairing link. Its GET renders a confirmation page so scanner
-previews do not consume the code; the confirmation POST exchanges it for a
-secure `HttpOnly` cookie, and Fern injects internal OpenCode auth. The paired
-device cannot administer Fern or publish. Operators use the loopback operator
-origin's `/fern/control` with Fern control authentication. Hashed device grants, expiry, workflow/session
-correlations, and publication records survive Fern restarts under
-`/var/lib/fern/.fern/control`.
+The operator listener accepts two distinct Basic credentials:
 
-GitHub access is optional and disabled when `workspace.github` is absent.
-`mode: workspace-gh` installs `gh` in the workspace and mounts its dedicated
-persistent config volume at `/home/user/.config/gh`; it never reads the host
-user's credential. In the OpenCode terminal, authenticate, inspect, replace, or
-remove that credential with `gh auth login --hostname github.com`, `gh auth
-status --hostname github.com`, and `gh auth logout --hostname github.com`.
-Changes take effect on the next `gh` command without restarting Fern. Revoke a
-lost credential in GitHub's application settings as well as removing it from
-the workspace. The credential is unrestricted for the authenticated account;
-Fern does not enforce phone-only publication or repository-only token scope.
+- `opencode:$OPENCODE_PASSWORD` for the official local OpenCode CLI.
+- `fern:$FERN_CONTROL_PASSWORD` for host-only Fern administration.
 
-`mode: github-app-broker` retains the repository-scoped App implementation.
-Configure its positive `workspace.github.installationId` together with
-repository identity and the complete `tasks` policy. If App credentials do not
-exist yet, start Fern with the canonical remote HTTPS origin, open
-`http://127.0.0.1:8081/fern/control` using Fern control authentication, and choose
-**Connect GitHub App**. GitHub returns only to the exact private HTTPS callback;
-restart Fern after success. Existing credentials disable the setup route because
-rotation remains an operator procedure. The two authority modes cannot be mixed.
+The values must differ and the Fern control password must contain at least 32
+characters. Both credentials are rejected by remote ingress before wake. Paired
+phones receive a digest-backed, expiring, revocable device cookie and cannot
+access operator controls.
 
-Fern never guesses a verification command from repository files. To enable
-post-seal verification, configure `tasks.verification` with a lowercase check
-name, an argument array whose first value is an absolute host executable, an
-explicit repository-relative working directory, timeout, environment map, and
-output byte cap. The executable must be a regular executable file, not a
-script or symlink, and must satisfy Fern's immutable ownership and write-mode
-policy. No shell is inserted. Its resolved path must also remain outside the
-writable workspace repository. Fern binds executable content SHA-256 and fails
-closed if the file changes.
-Omitting this block leaves task delivery enabled but does not authorize any
-verification effect.
+GitHub is optional. `workspace-gh` stores `gh` state in a dedicated Docker
+volume available to trusted workspace code. `github-app-broker` keeps the App
+private key on the host and uses short-lived repository-scoped tokens. The modes
+are mutually exclusive. See [GitHub Integration](./GITHUB_INTEGRATION.md).
 
-The pinned OpenCode profile cannot automatically prove generic terminal
-success. Fern therefore exposes an explicit user seal action. It previews and
-revalidates an exact clean committed snapshot while the workspace is paused,
-records the device/operator authorization durably, and marks the attempt
-`superseded`, never `succeeded`. Idle, inactive, or empty-inbox state alone still
-cannot complete a task.
+The pinned OpenCode profile cannot prove generic terminal success. A user seal
+authorizes one exact clean repository snapshot under `AcquirePaused`; it marks
+the attempt `superseded`, not `succeeded`. Optional host-owned verification runs
+after sealing. App publication requires that exact sealed changed result and a
+successful verification of the same commit.
 
-## Fast Field Demo
+## 1. Install Dependencies
 
-For a source-checkout rehearsal before installing systemd:
-
-```bash
-make image
-go run ./cmd/fern init --repo /absolute/path/to/repository \
-  --remote-origin https://REPLACE-WITH-THIS-HOST.example.ts.net
-go run ./cmd/fern up --config fern.yaml --env-file fern.env
-```
-
-In another terminal, open the official OpenCode client through Fern and use its
-`/connect` flow to connect an OpenCode account or any other provider supported
-by the pinned release:
-
-```bash
-go run ./cmd/fern attach --config fern.yaml --env-file fern.env
-```
-
-Replace the origin example with the exact HTTPS root that Tailscale assigns this
-host before starting Fern. The connection is owned by OpenCode and stored in its persistent volume. The
-web UI exposes the same provider state. Environment-key providers remain
-optional.
-
-In another terminal:
-
-```bash
-tailscale serve --bg http://127.0.0.1:8080
-go run ./cmd/fern doctor --config fern.yaml --env-file fern.env --phone
-```
-
-Scan the terminal QR within five minutes in the intended browser and tap
-**Pair this phone** on the confirmation page. It contains a short-lived pairing
-capability, not the OpenCode password. Successful diagnostics establish private
-transport and gateway readiness; they do not replace the real-phone acceptance
-steps below.
-
-## 1. Install Host Dependencies
-
-Install Git, Go 1.24 or newer, Docker Engine, and Tailscale from their supported
-Ubuntu repositories:
+Install Git, Docker Engine, and Tailscale from their supported Ubuntu
+repositories. Building from source also requires the Go version in `go.mod`.
 
 - <https://docs.docker.com/engine/install/ubuntu/>
 - <https://tailscale.com/kb/1031/install-linux>
@@ -128,104 +56,92 @@ sudo docker version
 sudo tailscale status
 ```
 
-Review tailnet grants so only intended users and devices can reach this host.
-Fern itself remains on loopback and needs no inbound public firewall rule.
+Review tailnet grants so only intended principals can reach this host. Fern
+needs no public or LAN firewall listener.
 
-## 2. Create The Account And Paths
+## 2. Create Account And Paths
 
 | Purpose | Path |
 | --- | --- |
-| Trusted Fern source | `/opt/fern/src` |
+| Reviewed Fern source | `/opt/fern/src` |
 | Installed binary | `/usr/local/bin/fern` |
 | Configuration | `/etc/fern/fern.yaml` |
-| Secrets | `/etc/fern/fern.env` |
+| Protected environment | `/etc/fern/fern.env` |
 | Service home and Fern state | `/var/lib/fern` |
 | Workspace repository | `/srv/fern/workspace` |
 | Backups | `/var/backups/fern` |
 
-The service account uses UID/GID 1001 to match the workspace image. Choose a
-different coordinated ID in both places if it is already allocated.
+The default image and service account use UID/GID 1001.
 
 ```bash
-getent passwd 1001 && { echo 'UID 1001 is already allocated' >&2; exit 1; }
-getent group 1001 && { echo 'GID 1001 is already allocated' >&2; exit 1; }
+getent passwd 1001 && { echo 'UID 1001 already allocated' >&2; exit 1; }
+getent group 1001 && { echo 'GID 1001 already allocated' >&2; exit 1; }
 sudo groupadd --gid 1001 fern
-sudo useradd --uid 1001 --gid 1001 --home-dir /var/lib/fern --create-home --shell /usr/sbin/nologin fern
+sudo useradd --uid 1001 --gid 1001 --home-dir /var/lib/fern \
+  --create-home --shell /usr/sbin/nologin fern
 sudo usermod -aG docker fern
 sudo install -d -o root -g root -m 0755 /opt/fern
 sudo install -d -o root -g fern -m 0750 /etc/fern
 sudo install -d -o fern -g fern -m 0750 /var/lib/fern /srv/fern
-sudo install -d -o root -g root -m 0700 /var/backups/fern
-sudo -u fern git clone https://EXAMPLE.invalid/OWNER/TRUSTED-REPOSITORY.git /srv/fern/workspace
-sudo -u fern git -C /srv/fern/workspace status
+sudo install -d -o fern -g fern -m 0700 /var/backups/fern
+sudo -u fern git clone https://EXAMPLE.invalid/OWNER/REPOSITORY.git \
+  /srv/fern/workspace
 ```
 
-Keep Fern's source checkout and the repository controlled by OpenCode separate.
+Keep Fern source and the repository controlled by OpenCode separate.
 
-## 3. Build Exact Artifacts
+## 3. Select Artifacts
 
-Select a reviewed full commit rather than deploying a moving branch:
+Deploy a reviewed full commit, never a moving branch. A local source build emits
+reproducible Linux amd64/arm64 binaries and checksums from a clean tree, but local
+output is not signed or provenance-attested.
 
 ```bash
-export FERN_REPOSITORY=https://github.com/nebler/fern.git
 export FERN_COMMIT=REPLACE_WITH_FULL_COMMIT_SHA
 export FERN_VERSION=v0.1.0
-sudo git clone "$FERN_REPOSITORY" /opt/fern/src
-sudo git -C /opt/fern/src fetch --tags --force
+sudo git clone https://github.com/nebler/fern.git /opt/fern/src
 sudo git -C /opt/fern/src checkout --detach "$FERN_COMMIT"
 test "$(sudo git -C /opt/fern/src rev-parse HEAD)" = "$FERN_COMMIT"
-
 cd /opt/fern/src
 sudo env GOTOOLCHAIN=local ./scripts/build-release.sh "$FERN_VERSION"
 ARCH=$(dpkg --print-architecture)
-case "$ARCH" in amd64|arm64) ;; *) echo "unsupported architecture: $ARCH" >&2; exit 1;; esac
-sudo install -o root -g root -m 0755 "dist/fern-${FERN_VERSION}-linux-${ARCH}" /usr/local/bin/fern
+case "$ARCH" in amd64|arm64) ;; *) exit 1;; esac
+sudo install -o root -g root -m 0755 \
+  "dist/fern-${FERN_VERSION}-linux-${ARCH}" /usr/local/bin/fern
 sudo docker build --pull -t "fern/opencode:$FERN_COMMIT" images/opencode
-sudo docker image inspect "fern/opencode:$FERN_COMMIT" --format '{{.Id}} {{json .RepoDigests}}'
-test "$(sudo docker run --rm --entrypoint sh "fern/opencode:$FERN_COMMIT" -c 'id -u; id -g')" = "$(printf '1001\n1001')"
 sha256sum /usr/local/bin/fern
 /usr/local/bin/fern version
 ```
 
-Record the commit, Fern version output, binary checksum, image ID, and registry
-digest if one exists. A local tag is mutable; verify its image ID before each
-rollout. Before production, run `make image`, `./scripts/test-lifecycle.sh`, and
-`FERN_OPENCODE_IMAGE=fern/opencode:dev ./scripts/test-opencode.sh` on a suitable
-build host.
+For a tagged release, follow [Release Policy](./RELEASE_POLICY.md) and verify the
+published asset provenance, digest-bound image signature/provenance/SBOM
+attestation, release manifest, and checksums. No release or tag is claimed by
+this document.
 
-## 4. Install Configuration And Secrets
+## 4. Install Configuration
 
 ```bash
-cd /opt/fern/src
-sudo install -o root -g fern -m 0640 deploy/systemd/fern.yaml.example /etc/fern/fern.yaml
-sudo install -o root -g fern -m 0640 deploy/systemd/fern.env.example /etc/fern/fern.env
-sudo sed -i "s/SOURCE_COMMIT/$FERN_COMMIT/" /etc/fern/fern.yaml
-sudoedit /etc/fern/fern.env
+sudo install -o root -g fern -m 0640 \
+  deploy/systemd/fern.yaml.example /etc/fern/fern.yaml
+sudo install -o root -g fern -m 0640 \
+  deploy/systemd/fern.env.example /etc/fern/fern.env
 sudoedit /etc/fern/fern.yaml
-sudo chown root:fern /etc/fern/fern.env /etc/fern/fern.yaml
-sudo chmod 0640 /etc/fern/fern.env /etc/fern/fern.yaml
+sudoedit /etc/fern/fern.env
 ```
 
-The protected environment file must contain distinct long random
-`OPENCODE_PASSWORD` and `FERN_CONTROL_PASSWORD` values plus only the provider
-keys this workspace needs. OpenCode's username is `opencode`. Do not store these
-values in YAML, Git, command arguments, or the unit file. Only the OpenCode
-password and explicitly selected provider values enter Docker; root and Docker
-administrators can inspect container environment values.
+The env file contains distinct random `OPENCODE_PASSWORD` and
+`FERN_CONTROL_PASSWORD` values and only required provider keys. Do not place
+secrets in YAML, unit arguments, or Git. Root and Docker administrators can
+inspect credentials forwarded into the container.
 
-The deployment example deliberately contains a parseable
-`https://replace-with-this-host.example.ts.net` placeholder. Replacing it with
-this host's exact lowercase Tailscale HTTPS root is mandatory. Do not add a
-trailing slash or explicit `:443`; Fern rejects noncanonical origins. The service
-must not be started with the placeholder.
-
-The workspace configuration selects the one image and repository; it has no
-protocol selector:
+Set `proxy.remoteOrigin` to this host's exact lowercase Tailscale HTTPS root,
+without a path, trailing slash, or explicit `:443`. The parseable example value
+must be replaced before service start.
 
 ```yaml
 workspace:
   name: demo
-  image: fern/opencode:SOURCE_COMMIT
+  image: fern/opencode:REPLACE_WITH_FULL_COMMIT_SHA
   repo: /srv/fern/workspace
   memory: 8Gi
   env: {}
@@ -237,21 +153,16 @@ proxy:
   remoteOrigin: https://replace-with-this-host.example.ts.net
 ```
 
-Validate access before starting:
-
-```bash
-sudo -u fern test -r /etc/fern/fern.env -a -r /etc/fern/fern.yaml
-sudo -u fern test -r /srv/fern/workspace/.git/config
-sudo -u fern docker image inspect "fern/opencode:$FERN_COMMIT" >/dev/null
-sudo ss -ltn '( sport = :8080 or sport = :8081 )'
-```
-
-The final command should show no listener.
+If enabled, `tasks.verification` must contain a lowercase check name,
+shell-free argv beginning with an approved native host executable, relative
+working directory, timeout, explicit environment, and output limit. Fern never
+infers a verification command from the repository.
 
 ## 5. Install And Start systemd
 
 ```bash
-sudo install -o root -g root -m 0644 /opt/fern/src/deploy/systemd/fern.service /etc/systemd/system/fern.service
+sudo install -o root -g root -m 0644 deploy/systemd/fern.service \
+  /etc/systemd/system/fern.service
 sudo systemd-analyze verify /etc/systemd/system/fern.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now fern.service
@@ -259,287 +170,163 @@ sudo systemctl status fern.service
 sudo journalctl -u fern.service -n 100 --no-pager
 ```
 
-The unit runs:
+The checked-in unit runs as `fern`, loads `/etc/fern/fern.env`, applies
+`UMask=0077`, and grants Docker-group access. Do not run a second lifecycle or
+offline recovery writer while the service holds the workspace lease.
 
-```text
-/usr/local/bin/fern up --config /etc/fern/fern.yaml --listen 127.0.0.1:8080 --operator-listen 127.0.0.1:8081
-```
-
-It allows Fern time to drain proxy and manager work on SIGTERM. Stopping the
-service does not intentionally stop OpenCode; use the offline `fern down`
-procedure for a quiet lifecycle boundary. Do not run a second writer while the
-service holds the workspace lease.
-
-Verify both listeners and the V2 health route through the operator surface:
+Local supervision probes do not wake sleeping compute:
 
 ```bash
-sudo ss -ltnp '( sport = :8080 or sport = :8081 )'
-sudo bash -c 'set -a; source /etc/fern/fern.env; set +a; \
-  curl --fail --user "opencode:$OPENCODE_PASSWORD" \
-  http://127.0.0.1:8081/api/health; \
-  test "$(curl -sS -o /dev/null -w "%{http_code}" \
-    --user "opencode:$OPENCODE_PASSWORD" \
-    http://127.0.0.1:8080/api/health)" = 401'
+curl --fail http://127.0.0.1:8081/fern/live
+curl --fail http://127.0.0.1:8081/fern/ready
+curl --fail --user "fern:$FERN_CONTROL_PASSWORD" \
+  http://127.0.0.1:8081/fern/status
+curl --fail --user "fern:$FERN_CONTROL_PASSWORD" \
+  http://127.0.0.1:8081/fern/metrics
 ```
 
-`ss` must report both ports on `127.0.0.1`, never a wildcard or LAN listener.
+`/fern/live` reports process liveness. `/fern/ready` returns 503 when a fixed
+component is blocked or failed, while a transient `degraded` component remains
+ready. `/fern/status` and `/fern/metrics` require operator auth and contain only
+the fixed component registry, bounded counters, and no raw errors or dynamic
+labels. Sleeping compute is healthy.
 
-## 6. Publish With Tailscale Serve
+If unresolved retired publication records block readiness, stop the service,
+inspect state, and run `fern debug quarantine-publications`. The command marks
+records quarantined; it does not replay effects.
+
+## 6. Publish Only Remote Ingress
 
 ```bash
 sudo tailscale serve --bg http://127.0.0.1:8080
 sudo tailscale serve status
-```
-
-This command must target only port 8080. Never add port 8081 to Tailscale Serve.
-The root HTTPS origin printed by `tailscale serve status` must be byte-for-byte
-identical to `proxy.remoteOrigin`; `fern doctor --phone` also requires the same
-value from local Tailscale status. Run `fern doctor --phone` locally, scan its short-lived pairing link from another
-enrolled device on a different network, and complete the confirmation POST. The
-root page must then be the official OpenCode web UI without a Basic prompt.
-Exercise a session and confirm that UI assets, APIs, SSE, terminal traffic, and
-wake-after-idle all use the same Fern origin. Confirm the backend Basic
-credential receives `401` at the HTTPS origin. A local health request alone does
-not establish remote browser acceptance.
-
-The fake lifecycle and local browser tests exercise canonical HTTPS metadata
-over local HTTP transport. They do not prove that the pinned OpenCode image
-accepts real TLS absolute links or real WSS upgrades. Before release, verify the
-exact pinned image through the actual private TLS edge: absolute `Location` and
-`Link` values, UI navigation/assets, OAuth callbacks if used, SSE, and terminal
-WebSocket/WSS behavior must all remain on the configured origin.
-
-Do not run `tailscale funnel`. If Serve is unavailable, use another reviewed
-private TLS reverse proxy on the same host rather than exposing Fern's HTTP
-listener.
-
-## 7. Reboot Characterization
-
-During SIGINT or SIGTERM shutdown, Fern records a container-specific recovery
-intent. Docker must stop that container within five minutes; the host may remain
-offline longer before Fern resumes it. The lifecycle harness simulates this
-ordering. If Docker stops first, Fern is killed forcibly, Docker shutdown starts
-after the intent window, or power is lost before the intent syncs, Fern still
-classifies the exit as failed. Back up first and treat a real reboot as
-target-host characterization:
-
-```bash
-sudo systemctl restart fern.service
-sudo reboot
-```
-
-After reconnecting, record the result:
-
-```bash
-systemctl is-enabled fern.service
-systemctl is-active fern.service
-sudo journalctl -b -u fern.service --no-pager
-sudo tailscale serve status
-sudo docker ps -a --filter name=demo
-sudo docker volume inspect fern-demo-v2-data
-```
-
-Repeat authenticated local health and remote official-UI checks. Do not assume
-running work or process-local provider/tool state survives a reboot.
-
-## Data And Backup
-
-Durable state is split across:
-
-- `/srv/fern/workspace` for repository files and uncommitted work;
-- `fern-demo-v2-data` for OpenCode sessions and configuration;
-- `fern-demo-v1-gh-config` for workspace-`gh` credentials and CLI state when
-  that authority mode is enabled;
-- `/var/lib/fern/.fern/state` for pause intents and `.fern/locks` for leases;
-- `/var/lib/fern/.fern/control` for hashed device grants, workflow/session
-  correlations, and publication operations;
-- `/etc/fern` for Fern configuration and secrets.
-
-`scripts/fern-host-backup.py` provides the host transaction foundation. It does
-not stop Fern, run Docker, or contact Tailscale or GitHub. The operator must
-establish a quiet boundary first. Every operation requires an operator-selected
-appliance epoch and obtains an exclusive directory lock. Initialize the epoch
-once per appliance; never copy its lock directory to a replacement appliance:
-
-```bash
-sudo install -d -o root -g root -m 0700 /var/lib/fern-backup-lock
-sudo /opt/fern/src/scripts/fern-host-backup.py init-epoch \
-  --lock-dir /var/lib/fern-backup-lock \
-  --epoch appliance-2026-08
-```
-
-The lock is a fail-closed `operator.lock` directory. A process exit removes its
-own lock. If power loss leaves it behind, verify that no operation is active and
-remove that exact directory manually; the utility never guesses that a lock is
-stale. Changing `appliance-epoch` is a replacement-appliance procedure, not a
-way to bypass an old lock.
-
-For a quiet backup, stop the service and remove compute through Fern. `down`
-retains the OpenCode volume. Export each named volume into a dedicated empty
-directory and supply it explicitly; the utility never enumerates Docker:
-
-```bash
-export FERN_COMMIT=REPLACE_WITH_FULL_COMMIT_SHA
-export BACKUP_ID=fern-20260822-001
-sudo systemctl stop fern.service
-sudo -H -u fern /usr/local/bin/fern down --config /etc/fern/fern.yaml
-test -z "$(sudo docker ps -aq --filter name='^/demo$')"
-sudo test ! -e "/var/backups/fern/exports-$BACKUP_ID"
-sudo install -d -o root -g root -m 0700 "/var/backups/fern/exports-$BACKUP_ID/opencode"
-sudo docker run --rm \
-  --user 0:0 \
-  -v fern-demo-v2-data:/data:ro \
-  -v "/var/backups/fern/exports-$BACKUP_ID/opencode:/export" \
-  --entrypoint sh "fern/opencode:$FERN_COMMIT" \
-  -c 'cp -a /data/. /export/'
-sudo /opt/fern/src/scripts/fern-host-backup.py backup \
-  --lock-dir /var/lib/fern-backup-lock \
-  --epoch appliance-2026-08 \
-  --generation "$BACKUP_ID" \
-  --output "/var/backups/fern/$BACKUP_ID" \
-  --state /var/lib/fern \
-  --config /etc/fern \
-  --repository /srv/fern/workspace \
-  --volume "fern-demo-v2-data=/var/backups/fern/exports-$BACKUP_ID/opencode" \
-  --credential-policy external \
-  --credential-output "/APPROVED-ENCRYPTED-OR-EXTERNAL-MEDIA/$BACKUP_ID.credentials.tar"
-sudo rm -rf "/var/backups/fern/exports-$BACKUP_ID"
-sudo systemctl start fern.service
-```
-
-For workspace-`gh`, also export `fern-demo-v1-gh-config` into a second private
-directory and pass it as another opaque volume, for example
-`--volume "fern-demo-v1-gh-config=/var/backups/fern/exports-$BACKUP_ID/gh"`.
-Omitting it requires GitHub reauthentication after restore. App-broker
-credentials instead live under Fern state and are separated by the credential
-policy.
-
-The general bundle contains deterministic uncompressed tar payloads, a canonical
-manifest with a SHA-256 inventory for every file and directory entry, and
-`SHA256SUMS` for every bundle file. Known credential paths, including Fern env
-files, GitHub CLI state, GitHub App credentials, repository `.git/config`, key
-files, and auth files, are
-never written there. Opaque named-volume exports always require the separate
-external recipient. Its tar and adjacent checksum are mode `0600`; the path must
-be encrypted storage or approved external media. Path separation is not
-encryption. Repository files can contain arbitrarily named secrets that no host
-utility can identify semantically, so review the repository before approving
-backup custody.
-
-For a backup that deliberately omits detected credentials, use
-`--credential-policy exclude` without `--credential-output`, do not supply a
-volume, and plan to reauthorize GitHub, providers, and Fern service passwords.
-The manifest records whether workspace `gh` credentials were externally
-included, excluded for reauthorization, or not found. Backup rejects symlinks,
-special files, missing roots, opaque volumes under the exclusion policy,
-existing destinations, epoch mismatch, and concurrent operation.
-
-The deterministic local release rehearsal performs byte comparison, checksum
-verification, source destruction, staged restore, activation, rollback, crafted
-symlink/path-escape rejection, and old-epoch rejection without real Docker:
-
-```bash
-./integration/release/run.sh
-```
-
-For an approved restore, first disable the old host to avoid two writers. On a
-replacement host initialize a new appliance epoch. Install the exact recorded
-Fern binary and image, place the general bundle and external recipient on local
-filesystems, and restore into a dedicated generation root:
-
-```bash
-sudo systemctl stop fern.service
-sudo /opt/fern/src/scripts/fern-host-backup.py restore \
-  --lock-dir /var/lib/fern-backup-lock \
-  --epoch replacement-appliance-2026-08 \
-  --backup "/var/backups/fern/$BACKUP_ID" \
-  --credential-input "/APPROVED-ENCRYPTED-OR-EXTERNAL-MEDIA/$BACKUP_ID.credentials.tar" \
-  --target /var/lib/fern-restore-generations
-sudo test -f /var/lib/fern-restore-generations/current/.fern-appliance-epoch
-sudo test "$(cat /var/lib/fern-restore-generations/current/.fern-appliance-epoch)" = replacement-appliance-2026-08
-```
-
-Restore verifies both layers of checksums before writing, rejects links, special
-entries, duplicate names and absolute or `..` paths, writes a staging generation,
-then renames it to `current`. An existing `current` becomes `previous`; only one
-previous generation is retained. Because `/etc`, `/srv`, `/var/lib`, and Docker
-volumes are separate activation domains, the utility cannot atomically replace
-the live host layout. With the service stopped, inspect `current`, verify UID/GID
-policy, then install its `config`, `repository`, and `state` trees into empty live
-destinations and import `current/volumes/fern-demo-v2-data` into a newly created
-volume using the pinned image. Do not overlay an existing live tree or volume.
-The utility writes `TRANSACTION-MANIFEST.json` beside `current` after each
-successful restore or rollback; its active generation and rollback availability
-are observations from that completed operation, not a static release example.
-
-The volume creation/import step remains host-specific:
-
-```bash
-if sudo docker volume inspect fern-demo-v2-data >/dev/null 2>&1; then
-  echo 'refusing to merge restore into existing volume fern-demo-v2-data' >&2
-  exit 1
-fi
-sudo docker volume create \
-  --label dev.fern.managed=true \
-  --label dev.fern.workspace=demo \
-  fern-demo-v2-data
-sudo docker run --rm --user 0:0 \
-  -v fern-demo-v2-data:/data \
-  -v /var/lib/fern-restore-generations/current/volumes/fern-demo-v2-data:/restore:ro \
-  --entrypoint sh "fern/opencode:$FERN_COMMIT" \
-  -c 'test -z "$(find /data -mindepth 1 -print -quit)" && cp -a /restore/. /data/'
-sudo systemctl start fern.service
 sudo -H -u fern /usr/local/bin/fern doctor \
+  --config /etc/fern/fern.yaml --env-file /etc/fern/fern.env --phone
+```
+
+The Serve target must be port 8080 only. The reported root HTTPS origin must
+match `proxy.remoteOrigin` byte for byte. Scan the short-lived QR from the
+intended browser and explicitly confirm pairing. A scanner GET preview does not
+consume the code.
+
+Automated local tests emulate HTTPS metadata over HTTP; they do not prove real
+TLS redirects, WSS terminal traffic, OAuth callbacks, mobile sleep/wake, or
+physical revocation. Exercise those through the actual private edge and record
+redacted evidence before acceptance.
+
+## 7. Reboot And Physical Rehearsal
+
+On SIGINT/SIGTERM Fern writes a container-specific shutdown intent. Docker must
+stop that container inside the intent window for a later stopped observation to
+classify as planned. Power loss, delayed Docker shutdown, OOM, and unexplained
+exit remain failed. A container Fern started but could not make healthy records
+a distinct failed-start intent and also classifies failed.
+
+Use `integration/production-rehearsal` to record, not perform, source preflight,
+physical reboot, backup, source fence, replacement-host restore, TLS/WSS,
+physical phone, independent ACL-negative, and final checks. The recorder's
+self-test contains synthetic facts only and is not production evidence.
+
+## Backup And Restore
+
+Normal operators use the one-shot CLI, not the low-level archive script. Stop
+the service first. Each command acquires the offline workspace lease and keeps
+compute absent afterward.
+
+```bash
+sudo systemctl stop fern.service
+sudo -H -u fern /usr/local/bin/fern backup create \
+  --config /etc/fern/fern.yaml \
+  --env-file /etc/fern/fern.env \
+  --output /var/backups/fern/generation-a
+```
+
+Create destroys compute while retaining managed volumes, checkpoints SQLite,
+stages Fern state/config/repository, exports the exact configured managed
+volumes, and invokes the deterministic checksum/epoch archive utility. Detected
+credentials and every opaque volume export go to
+`generation-a.credentials.tar` by default. That file is mode `0600` but is not
+encrypted by Fern; place it on approved encrypted storage or external media.
+Repository files may contain secrets the utility cannot identify semantically.
+
+Restore first verifies and stages the archive, checks that its exact volume set
+matches configuration, and creates a durable pre-restore operational rollback
+generation containing filesystem paths and managed volumes. It then activates
+filesystem paths, validates SQLite, and replaces volumes through verified
+staging volumes.
+
+```bash
+sudo -H -u fern /usr/local/bin/fern backup restore \
+  --config /etc/fern/fern.yaml \
+  --env-file /etc/fern/fern.env \
+  --backup /var/backups/fern/generation-a
+```
+
+If post-restore validation fails:
+
+```bash
+sudo -H -u fern /usr/local/bin/fern backup rollback \
   --config /etc/fern/fern.yaml \
   --env-file /etc/fern/fern.env
 ```
 
-Before live installation, rollback within the generation root is executable as:
+Restore and rollback are not atomic across `/etc`, `/srv`, `/var/lib`, and the
+Docker volume store. Paths and volumes activate sequentially; in-process
+rollback is best effort. Abrupt power loss requires inspection and a physical
+rehearsal. The retained `recovery/operational-rollback` directory deliberately
+blocks another restore until the operator validates, archives, and explicitly
+removes it. Never let the old and replacement hosts serve the same workspace.
+
+## Credential Recovery
+
+Credential bundles are separate from full host backup. Export requires absent
+compute and one or more age X25519 recipients:
 
 ```bash
-sudo /opt/fern/src/scripts/fern-host-backup.py rollback \
-  --lock-dir /var/lib/fern-backup-lock \
-  --epoch replacement-appliance-2026-08 \
-  --target /var/lib/fern-restore-generations
+sudo systemctl stop fern.service
+sudo -H -u fern /usr/local/bin/fern down \
+  --config /etc/fern/fern.yaml
+sudo -H -u fern /usr/local/bin/fern credentials export \
+  --config /etc/fern/fern.yaml \
+  --env-file /etc/fern/fern.env \
+  --recipient age1REPLACE \
+  --output /secure/fern-github-credentials.age
 ```
 
-Rollback swaps `current` and `previous` only when both carry the selected active
-epoch. It does not reverse a Docker import or live cross-filesystem copies. A
-physical-host rehearsal must additionally test service quiescence, free space,
-permissions and ownership, filesystem rename/crash behavior, Docker volume
-export/import, Tailscale reauthorization, GitHub/provider reauthorization when
-excluded, and authenticated application health before acceptance.
+Import and rotation replace an active credential generation; they do not
+bootstrap an empty App store or missing workspace-`gh` volume. They decrypt in
+memory, require exact workspace/mode/hostname/
+installation/repository binding, validate candidate identity and permissions
+against GitHub, and write an encrypted prior-generation rollback before local
+replacement. Rotation requires `--acknowledge-external-revocation` because Fern
+cannot revoke the superseded key or token at GitHub. See
+[Credential Recovery](./CREDENTIAL_RECOVERY.md).
 
-## Uninstall And Explicit Deletion
+## Schema Upgrade And Rollback
 
-Uninstalling the service should preserve data:
+Current task-store schema is 6. `baseline-v1` is the first
+repository-established compatibility fixture at schema 4; it is not a
+historical release or tag. Before upgrade, create and verify an offline backup.
+
+`integration/upgrade/run.sh` verifies semantic schema-4 to schema-6 upgrade,
+restores the exact pre-upgrade bytes for rollback, and upgrades again. Production
+rollback likewise means restoring the verified pre-upgrade backup. Older code
+must not open a migrated database.
+
+## Uninstall
+
+Uninstall the service without deleting state:
 
 ```bash
-sudo tailscale serve status
-# On a host dedicated to this mapping only:
 sudo tailscale serve reset
 sudo systemctl disable --now fern.service
 sudo rm /etc/systemd/system/fern.service
 sudo systemctl daemon-reload
-sudo systemctl reset-failed fern.service
 sudo rm /usr/local/bin/fern
 sudo docker volume inspect fern-demo-v2-data
 ```
 
-This retains configuration, source, workspace files, Fern state, containers,
-images, and `fern-demo-v2-data`.
-
-Only after a verified backup and explicit approval, inspect and remove the exact
-resources:
-
-```bash
-sudo docker inspect demo
-sudo docker rm -f demo
-sudo docker volume rm fern-demo-v2-data
-sudo docker image rm "fern/opencode:REPLACE_WITH_FULL_COMMIT_SHA"
-sudo rm -rf /srv/fern/workspace /var/lib/fern/.fern /etc/fern /opt/fern/src
-sudo userdel fern
-```
-
-Do not run the deletion block as ordinary uninstall. Verify names against the
-deployed configuration; changing `workspace.name` changes resource names.
+This retains configuration, source, workspace, Fern state, containers, images,
+and managed volumes. Delete exact resources only after verified backup and
+explicit approval. Changing `workspace.name` changes resource names; never use a
+generic wildcard cleanup.

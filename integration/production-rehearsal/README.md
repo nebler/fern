@@ -97,3 +97,7 @@ Self-test uses temporary synthetic facts only. It tests phase ordering, durable
 resume, malformed evidence rejection, secret-like field rejection, the missing
 phase finalization gate, schema phase parity, and a complete valid rehearsal. It
 does not exercise or represent physical production infrastructure.
+
+No checked-in evidence bundle is implied by this harness. A release workflow
+running `self-test` proves only recorder behavior, never completion of the ten
+operator phases.

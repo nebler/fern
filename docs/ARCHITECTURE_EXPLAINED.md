@@ -49,13 +49,15 @@ local operator listener. Inbound traffic wakes the workspace when it is asleep
 and proxies through once it is healthy. When nothing has happened for a while,
 fern stops or freezes the container — but only after proving, twice, that
 nothing is active. On top of that lifecycle kernel sits a durable task pipeline:
-a paired phone submits a coding task, fern admits it into a SQLite journal, delivers
-it to OpenCode exactly once, observes it conservatively, seals the result only
-with explicit user authority, and optionally verifies it with a fenced host-side
-runner. The GitHub App publication reconciler is implemented, but no production
-command creates its initial publication record. In workspace-`gh` mode, users or
-the agent instead run ordinary `gh`/Git mutations directly. A paired phone can
-submit, list, inspect, cancel, and authorize snapshot sealing.
+a paired phone submits a coding task, fern admits it into a SQLite journal,
+delivers it to OpenCode with exact persisted identities, observes it
+conservatively, seals the result only with explicit user authority, and
+optionally verifies and publishes it through fenced host-side coordinators. In
+App-broker mode, publication admission is receipt-backed and consumes only an
+exact sealed result and successful verification. In workspace-`gh` mode, users
+or the agent instead run ordinary `gh`/Git mutations directly. A paired phone
+can submit, list, inspect, cancel, authorize snapshot sealing, and request
+eligible App publication.
 
 ---
 
@@ -280,11 +282,11 @@ through it.
 
 Two tiny stores: a **host-local lease** preventing two `fern up` processes from
 mutating the same workspace, and the **pause-intent store** — atomic-replace
-JSON files recording `BeginPause → CommitPause` (or shutdown intent with an
-expiry window), read back with paranoid hygiene (O_NOFOLLOW, hardlink count ==
-1, mode 0600, size caps). This store is what upgrades Docker's ambiguous
-"container exited" into fern's classifiable "paused (intentional)" versus
-"failed (unexplained)."
+JSON files recording `BeginPause -> CommitPause` (or shutdown/failed-start
+intent), read back with paranoid hygiene (O_NOFOLLOW, hardlink count == 1, mode
+0600, size caps). This store upgrades Docker's ambiguous "container exited"
+into fern's classifiable "paused (intentional)," "failed (unexplained)," or
+"failed (Fern started it but health never completed)."
 
 ### 5.6 `internal/config` — the bouncer
 
@@ -300,9 +302,9 @@ returned, never panicked.
 
 | | Legacy JSON control store | SQLite task store |
 | --- | --- | --- |
-| Holds | device grants, coarse workflows, legacy publications | tasks, attempts, receipts, events, results, manifests, verifications, publications, seal requests |
+| Holds | device grants, retired workflow/publication audit records | tasks, attempts, receipts, events, results, manifests, verifications, publications, seal requests |
 | Guarantees | atomic file replace + fsync | WAL, foreign keys, **trigger-enforced state machines**, migration checksums |
-| Fate | shrinking; unwired publisher lane | the durable heart |
+| Fate | compatibility/audit only; unresolved publications require offline quarantine | the durable heart, currently schema 6 |
 
 The task store deserves emphasis: transitions are enforced by SQL triggers —
 terminal states are immutable, revisions increment monotonically, cancellation
@@ -311,6 +313,11 @@ layer *cannot* produce an illegal transition even if it wants to. This is the
 database-as-state-machine pattern, and it is the reason the coordinators above
 it can be relatively simple: the store refuses what the code might mistakenly
 attempt.
+
+Schema 6 requires every effectable publication to reference its exact
+`result.publish` receipt. Rows migrated from an earlier schema retain a null
+receipt and are deliberately undiscoverable and update-rejected; migration does
+not synthesize authority that never existed.
 
 ---
 
@@ -352,6 +359,7 @@ raw state is ambiguous; fern resolves it against the intent store:
 | running, not paused | — | `running` |
 | paused (frozen) | — | `paused` (defensive; fern thaws before mutating) |
 | exited | committed pause / shutdown-in-window | `paused` |
+| exited | committed failed-start | `failed` |
 | exited | pending (crash mid-stop?) | `provisioning` — unresolved, retry carefully |
 | exited | none | `failed` |
 | OOM-killed / dead | — | `failed` |
@@ -393,8 +401,9 @@ and its SQLite storage. Fern consumes a characterized subset:
 
 - **Prompt admission is idempotent and durable.** `POST /api/session/{id}/prompt`
   accepts caller-chosen message IDs and returns the same receipt on duplicate
-  submission. This single property is what makes fern's exact-once delivery
-  possible: retries carry identical bytes and IDs, and conflicts are detectable.
+  submission. This property supports fern's exact-once-attempted delivery:
+  retries carry identical bytes and IDs, and conflicts are detectable without
+  claiming exactly-once provider or tool execution.
 - **The inbox** lists durably enqueued work and supports cancel — fern uses it
   to prove what is pending and to delete proven-undelivered items during
   cancellation.
@@ -482,26 +491,25 @@ compute is safely dormant.
    proven-undelivered inbox items.
 4. **Sealing.** A paired user previews one exact clean Git snapshot under a
    paused fence, then submits that same tuple with an idempotency key. The
-   durable request is revalidated and recollected before an immutable result is
-   written; the attempt becomes `superseded`, not falsely `succeeded`.
+   durable request is revalidated and recollected under `AcquirePaused` before
+   an immutable result is written; the attempt becomes `superseded`, not
+   falsely `succeeded`.
    Verification may then run — host-owned, shell-free, descriptor-pinned,
    process-group contained, with clean commit state proven before and after.
 5. **Publication forks by authority mode.** Workspace-`gh` users/agents may run
-   direct GitHub mutations, outside Fern's effect journal. App-broker transport
-   can safely reconcile `push_started → push_observed → pr_create_started →
-   published`, but no production API prepares its initial journal row.
-
-There is a current lifecycle defect between steps 4's halves: preview/request
-leaves compute paused, while asynchronous completion asks for a quiesced fence
-that currently requires an already-running target. A seal may wait for unrelated
-upstream traffic to wake the workspace; this needs a real-manager integration
-fix rather than documentation optimism.
+   direct GitHub mutations outside Fern's effect journal. App-broker clients can
+   POST the exact result and successful verification under an idempotency key;
+   one transaction derives and stores the immutable publication tuple, receipt,
+   actor, and event before the reconciler walks `push_started -> push_observed
+   -> pr_create_started -> published`.
 
 ### 8.4 Life of a crash
 
 Startup replays the world in order: listeners bound first (side-effect-free
 failure), lease acquired, Docker reconciled without waking dormant workspaces,
-interrupted provisioning repaired, publication journals drained before serving.
+interrupted provisioning repaired, and publication journals inspected before
+serving. A missing App credential blocks the GitHub task dependency in the
+readiness registry without taking process liveness down.
 Shutdown reverses it: graceful HTTP drain → force-close tracker → coordinators
 stop → shutdown intent recorded only on real signals → manager closed (its wake
 goroutines owned until done) → stream stopped → Docker client last, leaked
@@ -521,7 +529,7 @@ Fern's states, and who enforces them:
 | Verification | prepared → running → succeeded / failed / recovery_required | trigger immutability; rerun prohibited after ambiguity |
 | Publication | none → push_started → push_observed → pr_create_started → published | journal-fenced coordinator |
 | Seal request | pending → claimed → completed / rejected | immutable approved tuple + expiring claim revision |
-| Pause intent | none → pending → committed (or shutdown, expiring) | atomic intent files |
+| Pause intent | none -> pending -> committed pause/shutdown/failed-start | atomic intent files |
 
 Design rule: **illegal states are unrepresentable.** The database rejects
 terminal overrides and revision regressions; the intent files reject
@@ -566,7 +574,7 @@ on timeout, the client is intentionally leaked rather than raced.
 | Kind | Contents |
 | --- | --- |
 | Memory only | cached endpoint + generation, closing flags, admission counters, activity model, last wake trace |
-| Disk (fern-owned) | host lease; pause-intent files; JSON control store (devices/workflows/legacy pubs/operator credential ID); persisted pairing limiter; SQLite task journal; GitHub App credentials |
+| Disk (fern-owned) | host lease; lifecycle-intent files; JSON control store (devices/retired records/operator credential ID); persisted pairing limiter; SQLite task journal; GitHub App credentials; offline recovery generations |
 | Docker volumes | OpenCode data; optional persistent workspace-`gh` config and credentials |
 | Derived from Docker, never persisted | container existence/state, dynamic port, actual image ID, spec-fingerprint label |
 | Duplicated by design | cached endpoint vs inspect truth (generation-invalidated); desired-spec fingerprint vs recomputed (drift detector); JSON store vs task journal (documented compatibility split) |
@@ -596,10 +604,11 @@ persisted — it is re-derived and re-attested on every wake.
    private dirs, no symlinks, single hardlink, bounded sizes, atomic replace +
    fsync — cheap, filesystem-native resistance to casual tampering.
 
-Named residual risks are kept in `docs/SECURITY.md`: unencrypted App and
-workspace-`gh` credentials, trusted-workspace credential exposure, operator
-forms without device-style tokens, and incomplete physical acceptance — each
-tracked, none hidden.
+Named residual risks are kept in `docs/SECURITY.md`: credentials are unencrypted
+while active, workspace-`gh` exposes its credential to trusted workspace code,
+external revocation is manual, operator forms lack device-style tokens, and
+physical acceptance remains incomplete. Encrypted age bundles protect exported
+credential custody; they do not encrypt active stores.
 
 ---
 
@@ -627,32 +636,26 @@ survive a crash alongside it.
 
 Honest architecture includes its holes:
 
-1. **User-seal lifecycle** — preview/request leaves compute paused but the
-   asynchronous coordinator requires an already-running target. Completion can
-   stall until unrelated traffic wakes it. Preview is also a side-effecting GET.
-2. **Phone replay and status** — the UI creates a new idempotency key for every
-   invocation and exposes no coherent seal rejection, verification, or brokered
-   publication status after an accepted command.
-3. **Generic terminal-success observer** — unbuilt. Automatic completion still
+1. **Generic terminal-success observer** — unbuilt. Automatic completion still
    requires a future durable authoritative OpenCode primitive; idle, empty
    inbox, and volatile event history remain insufficient.
-4. **Brokered publication admission** — transport and reconciliation exist, but
-   no production API prepares the initial publication journal row.
-5. **Workspace-`gh` binding validation** — a new immutable binding may be stored
-   before the first live credential/repository check.
-6. **Failed-vs-paused conflation on unhealthy starts** — a container that starts
-   but never passes the health probe currently receives a *committed* pause
-   intent and presents as dormancy. Deliberate anti-crash-loop behavior or bug —
-   decision pending; fix is a distinct intent flavor or documented expectation.
-7. **Durable approvals** — no approvals table/API; permission answers die with
+2. **Durable approvals** — no approvals table/API; permission answers die with
    the process epoch.
-8. **Notifications** — absent entirely; the phone learns only by asking.
-9. **Multi-workspace** — singular by declaration throughout (one Manager, one
+3. **Notifications** — absent entirely; the phone learns only by asking.
+4. **Multi-workspace** — singular by declaration throughout (one Manager, one
    stream, one config shape). Honest simplicity, real ceiling.
-10. **Legacy publisher lane** — implemented, tested, wired out of production;
-   awaiting formal retirement or revival.
-11. **Physical acceptance** — real TLS/WSS behavior, reboot/restore drills,
-   tailnet ACL-negative tests remain operator-run exercises.
+5. **GitHub onboarding selection** — installation/repository discovery exists,
+   but selection and post-onboarding activation still require operator config
+   and restart.
+6. **Credential revocation** — local encrypted custody and rollback-safe
+   replacement exist; superseded keys/tokens still require external revocation.
+7. **Backup atomicity** — restore is staged and rollback-backed but cannot be
+   atomic across filesystem roots and Docker volumes, especially under power
+   loss.
+8. **Physical acceptance** — real TLS/WSS behavior, reboot/replacement-host
+   restore, physical revocation, and tailnet ACL-negative tests remain
+   operator-run exercises. The rehearsal harness records evidence but does not
+   perform or prove these operations by itself.
 
 ---
 
@@ -665,7 +668,8 @@ Honest architecture includes its holes:
 | **Generation** | Monotonic counter for attested backend endpoints (manager-level). |
 | **Epoch** | Monotonic counter for SSE connections (watcher-level). Stale either ⇒ ignored. |
 | **Seal** | Atomically bind immutable Git/OpenCode identity and Git evidence either to proven execution success or an exact user-authorized snapshot. |
-| **Quiesced fence** | Admission closed + lifecycle held + two clean observations + compute stopped, retained through evidence collection. |
+| **Paused fence** | Compute stopped/frozen under lifecycle exclusion, retained through user-authorized collection, verification, or publication. |
+| **Quiesced fence** | Admission closed + lifecycle held + two authoritative success observations + compute stopped, retained through observer-authorized evidence collection. |
 | **Intent** | Durable pre-effect record converting ambiguous external state into classified state. |
 | **Workspace-gh / App-broker** | The two GitHub authority modes: agent-owned `gh` in-container vs fern-brokered installation tokens. |
 | **Exact-once-attempted** | Delivery guarantee: retries reuse identical IDs/bytes; duplicates detectable, conflicts fatal. |
@@ -691,5 +695,8 @@ Honest architecture includes its holes:
 | Publication transport | `internal/taskpublication`, `internal/taskpublicationcoord` |
 | Workspace GitHub authority | `internal/workspacegithub`, `internal/runtime/exec.go` |
 | Shared validators | `internal/evidence`, `internal/gitref`, `internal/jsoncanon` |
-| Backup and restore | `scripts/fern-host-backup.py`, `integration/release/run.sh` |
+| Backup and restore | `cmd/fern/backup.go`, `internal/runtime/backup.go`, `scripts/fern-host-backup.py` |
+| Credential custody | `cmd/fern/credentials.go`, `internal/credentialbundle` |
+| Readiness and telemetry | `internal/observability`, `internal/proxy/topology.go` |
+| Compatibility and release | `integration/upgrade`, `integration/release`, `.github/workflows/release.yml` |
 | Contract characterization | `integration/opencode-contract/contract_harness.py` |

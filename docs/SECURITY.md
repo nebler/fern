@@ -27,15 +27,17 @@ provider credentials intentionally exposed there.
   proxying to OpenCode. Upstream responses cannot set either the current or
   reserved future Fern device-cookie name; unrelated `Set-Cookie` headers are
   left untouched.
-- Paired devices can use OpenCode but cannot access operator control or
-  publication routes.
+- Paired devices can use OpenCode and the durable task API, including eligible
+  receipt-backed App publication. They cannot access operator control or retired
+  host-credential publication routes.
 - Fern control credentials and common GitHub token variables are rejected from
   workspace configuration by key, by `${...}` source reference under an alias,
   and by post-expansion equality with the control credential.
 - The legacy host-credential publication package is not composed by `fern up`;
   effecting routes reject use and the standalone command is dry-run only.
-  Historical in-flight legacy records are not automatically reconciled or
-  quarantined.
+  Historical unresolved records block readiness until an operator stops Fern,
+  inspects them, and runs `fern debug quarantine-publications`; quarantine marks
+  them atomically and never replays an effect.
 - Fern-owned HTML uses a restrictive CSP and control mutations perform an
   Origin check against the canonical operator origin, not client `Host`.
   Fetch Metadata rejects same-site siblings and cross-site browser mutations.
@@ -53,6 +55,10 @@ provider credentials intentionally exposed there.
   returned evidence, and logs. The publication coordinator pauses workspace
   compute, revalidates the exact durable selection under that retained fence,
   and keeps it through every Git/GitHub call and store transition.
+- App publication admission accepts only an exact sealed result and successful
+  verification ID. One transaction derives the complete immutable tuple and
+  stores its actor, event, and `result.publish` receipt. Schema-6 workers cannot
+  discover or update migrated publication rows without such a receipt.
 - Verification commands come only from strict host configuration. Fern inserts
   no shell, rejects scripts, resolves native executables with symlink-refusing
   `openat` traversal, rejects unsafe writable parents/files and executables
@@ -70,6 +76,15 @@ provider credentials intentionally exposed there.
   ingresses Fern removes `Forwarded` and all `X-Forwarded-*` input, sets the
   upstream host/scheme/effective port from trusted configuration, and never
   generates `X-Forwarded-For`.
+- Offline credential export uses age X25519 encryption. Import and rotation
+  require absent compute and the workspace lease, validate the exact configured
+  GitHub identity and permissions live, and write an encrypted prior-generation
+  rollback before replacement. Active credential stores remain permission-
+  protected plaintext, and GitHub revocation remains external.
+- Offline backup creation destroys compute, checkpoints SQLite, exports the
+  exact managed volumes, verifies checksums, and separates detected credentials
+  and opaque volumes. Restore creates a durable pre-restore operational rollback
+  generation before sequential filesystem and volume activation.
 
 These controls are useful but do not complete the product boundary below.
 
@@ -78,7 +93,7 @@ workspace code and may carry account-wide authority. Direct Git/`gh` mutations
 have no Fern receipt or ambiguity reconciliation. This is not equivalent to a
 repository-scoped GitHub App installation token.
 
-## Release-Blocking Findings
+## Residual Findings
 
 ### Complete Browser-Safe Operator Separation
 
@@ -131,11 +146,14 @@ retain this proof in its black-box release gate.
    origins and cross-site Fetch Metadata rejection are already enforced.
 2. Treat tailnet ACLs and grants as a reviewed deployment gate. Do not infer a
    person from device name, source IP, or Git author.
-3. Rename the Fern device cookie into the `__Host-` namespace. Upstream
-   `Set-Cookie` attempts targeting both the current and future reserved names are
-   already removed while unrelated headers remain untouched.
-4. Add bounded issuance rate policy in addition to the outstanding pairing-code
+3. Add bounded issuance rate policy in addition to the outstanding pairing-code
    cap when the product supports more than one trusted operator.
+4. Require external revocation and verification of superseded App keys or
+   workspace OAuth tokens after local rotation; Fern cannot perform that GitHub
+   account action.
+5. Physically characterize abrupt power loss during sequential restore across
+   filesystem roots and Docker volumes. The local rollback path is not a claim
+   of cross-domain atomicity.
 
 ## Parallel Security Tracks
 
@@ -167,3 +185,8 @@ A supported release must prove:
 6. Every browser mutation has an attributable actor, exact-origin protection,
    CSRF defense, bounded input, durable intent, and an audit event.
 7. A tailnet principal outside the reviewed ACL cannot reach the Fern origin.
+
+No checked-in evidence proves the physical phone, private TLS/WSS, reboot,
+replacement-host restore, abrupt-power-loss, or independent ACL-negative steps.
+`integration/production-rehearsal` only records and validates operator-supplied
+redacted observations; its self-test is synthetic.

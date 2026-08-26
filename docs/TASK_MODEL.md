@@ -6,16 +6,17 @@ This document is the contract foundation for Fern-owned durable remote tasks.
 It is normative for the task store, coordinator, phone API, result service,
 verification runner, and publication broker. Implemented portions include task
 admission, delivery, cancellation, conservative post-admission execution
-observation, execution projection, and immutable result sealing. The observer
+observation, execution projection, immutable result sealing, verification,
+receipt-backed App publication admission, and publication reconciliation. The
+observer
 can prove running and live input states but cannot infer generic terminal success
 from this pinned OpenCode profile. `internal/taskresult` implements exact
 read-only Git collection. `internal/taskresultcoord` has both an external-
 observer sealing path and a production-composed user-authorized snapshot path;
 the latter records an idempotent exact preview, supersedes the attempt, and
 completes the task without claiming OpenCode success. No production observer can
-currently provide generic success proof. Remaining sections may still describe
-required future behavior and are explicitly distinguished from the implemented
-HTTP surface below.
+currently provide generic success proof. Future approval behavior is explicitly
+distinguished from the implemented HTTP surface below.
 The legacy control plane still has coarse
 `Workflow` and `Publication` records outside this task-store boundary.
 
@@ -31,9 +32,8 @@ here.
 The publication journal specifies only Fern-owned effects. In the chosen
 Amp-style target, OpenCode also has unrestricted authenticated workspace `gh`
 and may publish when explicitly requested in the prompt; those direct effects
-cannot be exclusively authorized or completely observed by Fern. Existing
-GitHub App invariants remain normative for the current broker mode until that
-mode is retired or explicitly retained.
+cannot be exclusively authorized or completely observed by Fern. GitHub App
+invariants are normative for the current broker mode.
 
 Normative language uses **MUST**, **MUST NOT**, **SHOULD**, and **MAY**. Sections
 marked **HARNESS ASSUMPTION** are not established facts. They MUST be proved
@@ -45,10 +45,10 @@ delivery worker or release claim depends on them.
 | Concern | Authority | Fern record |
 | --- | --- | --- |
 | Workspace configuration and lifecycle intent | Fern | `Workspace` |
-| Repository identity | GitHub numeric repository ID selected through the App installation | `Workspace.repository_id` |
+| Repository identity | GitHub numeric repository ID selected through configured App or workspace-`gh` authority | `Workspace.repository_id` |
 | Base content | Git commit object | `Task.base_sha` |
 | Task admission, idempotency, cancellation intent | Fern SQLite | `Receipt`, `Task`, `Event` |
-| Conversation and agent execution | OpenCode | exact IDs on `Attempt` and `Approval` |
+| Conversation and agent execution | OpenCode | exact IDs on `Attempt`; no durable approval row is currently composed |
 | Delivery reconciliation | OpenCode durable session log and finite projections, shadowed by Fern | `Attempt`, `Event` |
 | Working content | Git objects and worktree | sealed by `Result` |
 | Test claim | Fern verification runner | `Verification` |
@@ -88,6 +88,9 @@ The following invariants are unconditional:
    explicit recovery action restores proof.
 10. Fern provides at-least-once worker execution with idempotent reconciliation.
     It MUST NOT claim exactly-once provider, tool, Git, or GitHub execution.
+11. Every mutable App publication MUST reference the exact accepted
+    `result.publish` receipt that authorized it. A legacy publication without
+    that receipt is quarantined and grants no worker authority.
 
 ## Identifiers
 
@@ -248,10 +251,11 @@ constraints include `UNIQUE(attempt_id, upstream_kind, upstream_object_id)` when
 an upstream object ID exists. The same object ID with incompatible bytes enters
 `recovery_required`; there is no upstream aggregate sequence in this profile.
 
-### Approval
+### Approval (Target Contract)
 
-`Approval` is a Fern shadow of one OpenCode permission, question, or form. It
-contains:
+`Approval` is the target Fern shadow of one OpenCode permission, question, or
+form. The current schema has no approvals table and the current HTTP API has no
+decision route. It would contain:
 
 - `id`, `task_id`, `attempt_id`, kind (`permission`, `question`, or `form`),
   exact upstream request ID, exact session ID, and state;
@@ -416,7 +420,7 @@ permission reply value `reject`. A valid user choice of `reject` can reach
 | `running` | `succeeded`, `failed`, `recovery_required` |
 | `succeeded`, `failed`, `recovery_required` | none |
 
-Migration 3 implements one effecting verification attempt. Entering `running`
+Migration 3 introduced one effecting verification attempt. Entering `running`
 atomically changes `effect_attempt` from zero to one; it can never change again.
 A process loss or ambiguous runner observation therefore enters
 `recovery_required`, not `prepared` or `running`, and the command is never
@@ -769,8 +773,9 @@ a user-authorized snapshot. Repository reads occur outside the transaction, but
 the workspace lease prevents lifecycle, task, and publication mutation during
 capture.
 
-Migration 4 adds the production user-authorized branch. An eligible running or
-input-required task can be previewed under `AcquirePaused`; the exact commit,
+Migration 4 added the production user-authorized branch. An eligible running or
+input-required task is previewed by `POST .../seal-preview` under
+`AcquirePaused`; the exact commit,
 tree, outcome, manifest count/digest, clean flag, and workspace/task/attempt
 revisions are then submitted with an idempotency key. `RequestSeal` atomically
 stores the receipt, authorizer snapshot, stable result/event IDs, and immutable
@@ -780,11 +785,11 @@ marks the attempt `superseded`, completes the task, and completes the request.
 This authority means "accept this repository snapshot," not "OpenCode
 succeeded."
 
-The current composition has a known liveness defect: authorization leaves the
-workspace paused, while the asynchronous coordinator's `AcquireQuiesced`
-requires it already running. Completion can therefore wait for unrelated
-upstream traffic to wake compute. This is an implementation gap, not permission
-to weaken the exact-snapshot contract.
+The asynchronous authorized coordinator reacquires `AcquirePaused`, reselects
+the exact ownership tuple, and recollects the approved snapshot while compute
+remains unable to mutate it. This user-authorized fence is deliberately distinct
+from the external-observer path's `AcquireQuiesced`: only an authoritative
+observer needs running compute for two success observations before stopping it.
 
 The implemented result-store surface is:
 
@@ -845,7 +850,7 @@ commits `running`, then executes outside SQLite against the exact commit. Its
 completion transaction checks the result is unchanged, stores artifacts and
 digests, and records `succeeded`, `failed`, or an ambiguity state.
 
-Migration 3 exposes the following task-store boundary:
+Migration 3 introduced the following task-store boundary:
 
 - `PrepareVerification` binds a fresh verification ID to the immutable sealed
   result, exact successful current attempt/task ownership, exact policy name
@@ -925,14 +930,15 @@ sealed result, required successful verification, and cancellation fence; then
 inserts the immutable publication tuple, receipt, and event. The broker never
 derives this tuple from current checkout state.
 
-Before the first GitHub mutation, a transaction MUST persist `ready` with
+Before the first GitHub mutation, the admission transaction MUST persist
+`prepared` with
 operation ID, repository ID, base ref and SHA, branch, result commit, expected
 remote old SHA, actor, and broker policy version. Push and pull request calls
-occur outside SQLite. Every ambiguous response transitions to `uncertain` or
-`reconciling` before another mutation. Completion is committed only after an
+occur outside SQLite. Every ambiguous response transitions to `uncertain` and
+permits read reconciliation only. Completion is committed only after an
 authoritative query proves the exact repository/branch/base/head/draft tuple.
 
-Migration 3 exposes `PreparePublication`, `AdvancePublication`,
+Migration 3 introduced `PreparePublication`, `AdvancePublication`,
 `CompletePublication`, and `RecoverPublication`, plus
 `FindPreparedPublication`, `FindPublicationWork`,
 `FindUncertainPublication`, `GetPublication`, and `InspectPublication`.
@@ -966,7 +972,8 @@ reads the exact branch; `ReconcilePullRequest` is read-only exact discovery plus
 an exact-number read; and `CreatePullRequestOnce` invokes at most one create,
 then performs exact discovery and an exact-number read. The legacy
 `PublishOrReconcile` composition is not a coordinator authority boundary.
-`internal/taskpublicationcoord` consumes only already-prepared publications.
+`internal/taskpublicationcoord` consumes only receipt-backed prepared
+publications.
 It discovers work before pausing, acquires
 `workspace.Manager.AcquirePaused`, re-reads identical publication, task,
 attempt, result, and verification IDs/revisions, and retains the fence through
@@ -978,51 +985,49 @@ in particular, startup at `push_started` never pushes and startup at
 `pr_create_started` never creates. Transient or ambiguous observations remain
 `uncertain` and read-only; exact contradictions become `conflict` or
 `recovery_required`. No timeout or absent observation grants a mutation retry.
-`fern up` constructs the repository-scoped broker, drains journal reconciliation
-before serving either HTTP listener, and then starts one publication loop under
-the service context. No API currently prepares a publication: the missing
-admission boundary must add an idempotent user receipt and explicit authority
-before calling `PreparePublication`.
+`fern up` constructs the repository-scoped broker, inspects journal
+reconciliation before serving, and then starts one publication loop under the
+service context. `POST /fern/api/v1/results/{resultId}/publications` is the only
+production admission boundary. `AdmitPublication` atomically validates the
+authenticated actor, idempotency claim, active App authority, current ownership
+and cancellation fence, sealed changed result, exact successful verification,
+and absence of another publication before deriving the tuple and inserting its
+receipt, actor, journal event, and prepared publication.
+
+Migration 6 added `publications.admission_receipt_id`. Existing rows upgraded
+from schema 5 retain null rather than receiving synthetic authorization. SQL
+triggers reject updates to those rows and worker discovery requires a non-null
+receipt, so pre-admission publications are quarantined by construction.
 
 ## Startup Reconciliation
 
-Daemon startup opens control APIs read-only and rejects mutating requests with
-`503 reconciliation_in_progress` until this sequence completes:
+Startup acquires the workspace lease, reconciles Docker without waking planned
+dormant compute, opens and migrates SQLite with integrity/checksum validation,
+and constructs enabled coordinators before serving. Each coordinator recovers
+through its durable store boundary:
 
-1. Acquire the single-host workspace lease and migration lock. Validate SQLite
-   integrity, foreign keys, schema version, appliance epoch, and filesystem
-   ownership. Failure puts the workspace in `recovery_required` without waking
-   compute.
-2. Reconcile current runtime observation with durable lifecycle intent. A
-   planned paused workspace remains paused; startup MUST NOT wake it merely to
-   inspect task state.
-3. Fence expired worker leases. Move interrupted in-process states to
-   `uncertain`; use `recovery_required` when repository or runtime evidence is
-   contradictory.
-4. Reconcile publications first using GitHub read operations only. Query exact
-   remote branch and PR state before any retry. This prevents an old ambiguous
-   mutation from racing new work.
-5. Reconcile result and verification records against local Git objects and
-   artifacts without rerunning commands.
-6. For each nonterminal or ambiguous attempt, wake only if reconciliation needs
-   OpenCode. Read exact session/message/inbox state supported by the selected
-   profile, replay durable history/log after the stored sequence to its proved
-   finite marker, project pending approvals, and reconcile cancellation.
-7. Recompute task summary state from authoritative child observations, append
-   recovery events, and release only work whose invariants hold.
-8. Start volatile event subscriptions and workers. Enable mutating APIs.
+- expired delivery claims become uncertain before exact read reconciliation;
+- cancellation remains fenced until exact upstream proof permits
+  acknowledgment;
+- claimed user seals are reselected and recollected under `AcquirePaused`;
+- a `running` verification becomes terminal `recovery_required` and is never
+  rerun;
+- publication phases already at `push_started` or `pr_create_started` authorize
+  reads only, never another mutation;
+- schema-6 publication discovery excludes migrated rows without an admission
+  receipt.
 
-Reconciliation is bounded per workspace and resumes from durable cursors after
-another crash. It never creates a replacement attempt, retries a GitHub
-mutation, or clears `recovery_required` merely because a timeout elapsed.
+Missing App credentials keep process liveness available for onboarding while
+the fixed GitHub task dependency reports blocked and task routes remain omitted.
+No timeout clears `recovery_required` or grants mutation authority.
 
 ## Reconnect Cursor
 
-Phone clients consume Fern events, not the OpenCode volatile stream. The
+Phone clients consume Fern events, not the OpenCode volatile stream. The mounted
 contract is:
 
 ```http
-GET /fern/api/v1/workspaces/{workspaceId}/events?after=1842&limit=100
+GET /fern/api/v1/events?after=1842&limit=100
 ```
 
 ```json
@@ -1033,11 +1038,9 @@ GET /fern/api/v1/workspaces/{workspaceId}/events?after=1842&limit=100
       "cursor": "1843",
       "type": "attempt.admitted",
       "version": 1,
-      "workspaceId": "wsp_0198d34d-5e40-7c5a-8e3f-6bfad471ae12",
       "taskId": "tsk_0198d34d-6a50-75fb-b1f2-b4a14d70ec55",
       "attemptId": "att_0198d34d-6a50-75fb-b1f2-b4a14d70ec56",
-      "occurredAt": "2026-08-22T18:57:20.584Z",
-      "data": { "opencodeMessageId": "msg_26fc9098cfa84ca6a272d97b712e797f" }
+      "occurredAt": "2026-08-22T18:57:20.584Z"
     }
   ],
   "nextCursor": "1843",
@@ -1051,10 +1054,10 @@ ascending. `watermark` is captured when the query starts; `caughtUp` is true
 when the page reaches that watermark. An empty page returns `nextCursor` equal
 to `after`. Omitting `after` means `0` for initial synchronization.
 
-A later SSE endpoint MAY stream the same persisted event envelopes, but resume
-still uses this cursor contract. Retention MUST NOT silently create a gap. If a
-cursor predates retained history, return `410 cursor_expired` with
-`minimumCursor` and require a task-list/detail snapshot before resuming.
+Actor and payload are intentionally omitted because arbitrary durable payloads
+are not proven client-safe. The current page API does not implement retention or
+a `cursor_expired` response; task list/detail snapshots are the bounded current
+state projection.
 
 ## Cancellation Semantics
 
@@ -1079,9 +1082,10 @@ Cancellation is ordered by Fern's committed cancellation event cursor:
 - **Across restart:** `cancel_requested` is durable. Startup reconciles it before
   admitting any queued work or publication. It never assumes process death
   stopped the provider or tools.
-- **Publication cancellation:** before push, cancellation can reach `canceled`.
-  After a push or PR call may have happened, cancellation enters `reconciling`;
-  an exact existing branch/PR is recorded as `published`, not hidden or deleted.
+- **Publication cancellation:** task cancellation fences a publication whose
+  mutation has not started. After a push or PR call may have happened, the
+  publication journal continues read-only reconciliation; an exact existing
+  branch/PR is recorded as `published`, not hidden or deleted.
 
 No API state means "all cost stopped" unless the pinned adapter and provider
 evidence establish that stronger fact. The terminal `canceled` claim means no
@@ -1197,15 +1201,15 @@ server context, never a request body or forwarded client header. Background
 events retain the initiating actor where applicable and also record the system
 worker actor that performed the transition.
 
-Initial authorization is:
+Current mounted capability is:
 
 | Capability | Device | Operator | System/recovery | GitHub App |
 | --- | --- | --- | --- | --- |
 | List/read own workspace tasks and results | yes | yes | yes | no |
 | Submit and cancel a task | yes | yes | reconciliation only | no |
-| Answer a current approval | yes | yes | expiration/cancel only | no |
-| Request verification | no | yes | policy automation only | no |
-| Request publication | no | yes | reconcile existing only | no |
+| Answer a current approval | no | no | no durable approval API | no |
+| Request verification | no | no | configured policy automation only | no |
+| Request eligible App publication | yes | yes | reconcile existing only | no |
 | Push/query PR | no | no | call broker only | repository-scoped effect only |
 
 The current shared operator Basic credential can attribute an action only to a
@@ -1215,21 +1219,23 @@ Fern MUST NOT infer a person from device name, IP address, or Git commit author.
 
 ## Fern HTTP API V1
 
-The implemented surface is currently limited to task list/submit/read,
-cancellation, user-seal preview/request, and task event reads:
+The implemented surface includes task list/submit/read, cancellation, user-seal
+preview/request, App publication admission, and task event reads:
 
 ```text
 GET  /fern/api/v1/tasks?limit=<n>
 POST /fern/api/v1/tasks
 GET  /fern/api/v1/tasks/{taskId}
 POST /fern/api/v1/tasks/{taskId}/cancel
-GET  /fern/api/v1/tasks/{taskId}/seal-preview
+POST /fern/api/v1/tasks/{taskId}/seal-preview
 POST /fern/api/v1/tasks/{taskId}/seal
+POST /fern/api/v1/results/{resultId}/publications
 GET  /fern/api/v1/events?after=<cursor>&limit=<n>
 ```
 
-Approval, standalone result/verification, and publication endpoints later in
-this section are target contracts, not mounted routes.
+Approval and standalone verification endpoints later in this section are target
+contracts, not mounted routes. App publication admission is mounted when that
+authority mode and task policy are active.
 
 All endpoints are under `/fern/api/v1`, require private TLS and an actor resolved
 only from server-owned request context, reject unknown, duplicate, and
@@ -1274,35 +1280,12 @@ Idempotency-Key: phone-command-01892
 
 First acceptance and an idempotent replay both return `202` and the same stable
 acceptance projection. A replay additionally sets `Idempotency-Replayed: true`;
-it does not wake workers again:
-
-```json
-{
-  "receipt": {
-    "id": "rcp_0198d34d-6a50-75fb-b1f2-b4a14d70ec57",
-    "kind": "task.submit",
-    "state": "accepted",
-    "acceptedAt": "2026-08-22T18:57:11.565Z",
-    "targetId": "tsk_0198d34d-6a50-75fb-b1f2-b4a14d70ec55"
-  },
-  "task": {
-    "id": "tsk_0198d34d-6a50-75fb-b1f2-b4a14d70ec55",
-    "workspaceId": "wsp_0198d34d-5e40-7c5a-8e3f-6bfad471ae12",
-    "state": "queued",
-    "repositoryId": "987654321",
-    "baseRef": "main",
-    "baseSha": "0123456789abcdef0123456789abcdef01234567",
-    "currentAttemptId": "att_0198d34d-6a50-75fb-b1f2-b4a14d70ec56",
-    "revision": 1,
-    "createdAt": "2026-08-22T18:57:11.565Z",
-    "updatedAt": "2026-08-22T18:57:11.565Z",
-    "links": {
-      "self": "/fern/api/v1/tasks/tsk_0198d34d-6a50-75fb-b1f2-b4a14d70ec55",
-      "opencode": "/session/ses_8c41c724db7b4bb5974d11977ee67c92"
-    }
-  }
-}
-```
+it does not wake workers again. The response contains the bounded receipt and a
+stable queued task acceptance projection: task/workspace IDs, title, repository
+ID, base ref/SHA, current attempt ID, zero cancellation epoch, latest acceptance
+event cursor, revision 1, and receipt acceptance timestamps. It contains no
+prompt or OpenCode transcript. The acceptance projection does not advance when
+workers later mutate the task, so a replay remains byte-stable.
 
 Repository or base mismatch is `409 repository_mismatch` or
 `409 base_moved`; Fern returns the observed display identity/SHA only when the
@@ -1315,41 +1298,13 @@ GET /fern/api/v1/tasks?limit=50
 GET /fern/api/v1/tasks/{taskId}
 ```
 
-List response:
-
-```json
-{
-  "tasks": [
-    {
-      "id": "tsk_0198d34d-6a50-75fb-b1f2-b4a14d70ec55",
-      "title": "Fix signup",
-      "state": "running",
-      "repositoryId": "987654321",
-      "repositoryFullName": "owner/repository",
-      "baseSha": "0123456789abcdef0123456789abcdef01234567",
-      "currentAttemptId": "att_0198d34d-6a50-75fb-b1f2-b4a14d70ec56",
-      "pendingApprovalCount": 0,
-      "resultId": null,
-      "publication": null,
-      "revision": 3,
-      "createdAt": "2026-08-22T18:57:11.565Z",
-      "updatedAt": "2026-08-22T18:57:20.584Z",
-      "links": {
-        "self": "/fern/api/v1/tasks/tsk_0198d34d-6a50-75fb-b1f2-b4a14d70ec55",
-        "opencode": "/session/ses_8c41c724db7b4bb5974d11977ee67c92"
-      }
-    }
-  ],
-  "next": null
-}
-```
-
-`TaskSummary` includes ID, title, state, repository ID/display name, base SHA,
-current attempt ID, pending approval count, result ID, publication summary,
-revision, timestamps, and links. The detail response adds attempts, current
-approval summaries, cancellation facts, result summary, verification summaries,
-publication summaries, and latest event cursor. It does not copy the OpenCode
-transcript, tool output, or diff; links deep-link to the exact OpenCode session.
+The list response is `{"tasks":[...]}` with at most the requested number of
+current snapshots; there is no list cursor. List and detail use the same closed
+snapshot: task, exact current attempt with same-origin `openCodePath`, latest
+seal request or null, sealed result or null, ordered verification summaries,
+and current publication/PR summary or null. It omits prompts, OpenCode
+transcripts, event payloads, raw evidence, command output, credentials, and
+diffs.
 
 ### Cancel Task
 
@@ -1421,7 +1376,7 @@ The decision variant MUST match approval kind and the exact options/schema
 captured from OpenCode. Returns `202` with receipt and approval. Stale context is
 `409 stale_approval`; a settled approval is `409 approval_already_terminal`.
 
-### Read Result And Request Verification
+### Read Result And Request Verification (Target Contract)
 
 ```http
 GET /fern/api/v1/results/{resultId}
@@ -1447,44 +1402,38 @@ Idempotency-Key: publish-01892
 
 ```json
 {
-  "title": "Fix signup",
-  "body": "Summary safe for the draft pull request.",
   "expectedVerificationId": "ver_0198d34d-6a50-75fb-b1f2-b4a14d70ec5b"
 }
 ```
 
-`title` is at most 256 bytes and `body` at most 16 KiB. The actor cannot provide
-repository, base, branch, commit, operation ID, path, remote, or credential.
-Returns `202` with:
+The body is a closed object and the actor cannot provide title, body, repository,
+base, branch, commit, operation ID, path, remote, policy, or credential. Fern
+derives the complete tuple from configured App authority, the result, and the
+named successful verification. Returns `202` with:
 
 ```json
 {
   "receipt": {
     "id": "rcp_0198d34d-6a50-75fb-b1f2-b4a14d70ec5e",
-    "kind": "publication.request",
+    "kind": "result.publish",
     "state": "accepted",
     "acceptedAt": "2026-08-22T19:10:00.000Z",
     "targetId": "pub_0198d34d-6a50-75fb-b1f2-b4a14d70ec5c"
   },
   "publication": {
     "id": "pub_0198d34d-6a50-75fb-b1f2-b4a14d70ec5c",
-    "operationId": "op_0198d34d-6a50-75fb-b1f2-b4a14d70ec5d",
     "resultId": "res_0198d34d-6a50-75fb-b1f2-b4a14d70ec5a",
-    "state": "requested",
-    "repositoryId": "987654321",
-    "baseRef": "main",
-    "baseSha": "0123456789abcdef0123456789abcdef01234567",
-    "resultCommit": "89abcdef0123456789abcdef0123456789abcdef",
-    "branch": "fern/demo/op_0198d34d-6a50-75fb-b1f2-b4a14d70ec5d",
-    "revision": 1,
-    "pullRequest": null
+    "verificationId": "ver_0198d34d-6a50-75fb-b1f2-b4a14d70ec5b",
+    "state": "prepared",
+    "createdAt": "2026-08-22T19:10:00.000Z"
   }
 }
 ```
 
-Read with `GET /fern/api/v1/publications/{publicationId}`. Cancellation, if
-offered, is `POST .../{publicationId}/cancel` with its own idempotency key and
-the publication state semantics above.
+An exact same-key/body/actor replay returns the same projection and
+`Idempotency-Replayed: true`. Current publication state and the exact draft PR
+summary are read through task list/detail snapshots; there is no standalone
+publication read or cancellation route.
 
 ## GitHub App Broker Boundary
 
@@ -1538,9 +1487,13 @@ OpenCode internals.
 
 ## Mobile UI Boundary
 
-Mobile work may proceed from recorded fixtures for the exact Fern API and state
-vocabulary in this document. It owns presentation, pagination, reconnect,
-accessibility, and deep links, but MUST NOT:
+The production phone task page owns presentation, polling, accessibility, and
+deep links. Before task submission it stores one exact body and idempotency key
+under `fern.pending-task-submission.v1` in `localStorage`, reuses both after a
+lost response or reload, and removes them only after acceptance. It refuses to
+send if durable browser storage is unavailable. Cancellation and sealing use a
+fresh key for each explicit invocation; other clients must retain their keys to
+obtain the backend replay guarantee. Mobile work MUST NOT:
 
 - add task, attempt, approval, result, verification, or publication states;
 - infer completion from absence of live events;
