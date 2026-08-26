@@ -147,9 +147,18 @@ func loadUpSpec(opts upOptions) (config.Config, runtime.Spec, error) {
 // dockerLifecycle pairs the Docker client with manager shutdown bookkeeping.
 type dockerLifecycle struct {
 	docker         *runtime.Docker
-	manager        *workspace.Manager
+	manager        managerLifecycle
 	managerStarted bool
 	managerClosed  bool
+}
+
+type managerLifecycle interface {
+	Close(context.Context) error
+	PrepareShutdown(context.Context) error
+}
+
+type streamStopper interface {
+	Stop(context.Context) error
 }
 
 func newDockerLifecycle(log *slog.Logger, suspend runtime.SuspendKind) (*dockerLifecycle, error) {
@@ -198,7 +207,7 @@ func runWithTimeout(timeout time.Duration, operation func(context.Context) error
 // up after its own failures; runUp defers releases for a successful return.
 type upRuntime struct {
 	lifecycle        *dockerLifecycle
-	streamController *watch.StreamController
+	streamController streamStopper
 	supervisor       *watch.Supervisor
 	observations     chan watch.Observation
 	connections      *connectionTracker
@@ -370,7 +379,7 @@ func requestObservation(serviceCtx context.Context, observations chan<- watch.Ob
 
 // reconcileTaskPublication drains pending publication work once, before the
 // long-lived coordinators start, so served state is never stale.
-func reconcileTaskPublication(ctx context.Context, coordinator *taskpublicationcoord.Coordinator) error {
+func reconcileTaskPublication(ctx context.Context, coordinator interface{ RunOnce(context.Context) error }) error {
 	for {
 		err := coordinator.RunOnce(ctx)
 		if err == nil {

@@ -62,13 +62,28 @@ const (
 type taskServices struct {
 	store        *taskstore.Store
 	handler      http.Handler
-	coordinator  *taskdelivery.Coordinator
-	execution    *taskexecution.Coordinator
-	verification *taskverification.Coordinator
-	publication  *taskpublicationcoord.Coordinator
+	coordinator  taskDeliveryService
+	execution    taskRunService
+	verification taskRunService
+	publication  taskPublicationService
 	result       taskResultCoordinator
 	resultWake   chan struct{}
 	status       *observability.Registry
+}
+
+type taskRunService interface {
+	Run(context.Context) error
+}
+
+type taskDeliveryService interface {
+	taskRunService
+	Wake()
+}
+
+type taskPublicationService interface {
+	taskRunService
+	RunOnce(context.Context) error
+	Wake()
 }
 
 type taskResultCoordinator interface {

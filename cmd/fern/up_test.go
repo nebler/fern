@@ -3,12 +3,20 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"net"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/observability"
+	"github.com/nebler/fern/internal/taskpublicationcoord"
+	"github.com/nebler/fern/internal/taskresultcoord"
 	"github.com/nebler/fern/internal/workspace"
+	"golang.org/x/sync/errgroup"
 )
 
 type healthWaker struct {
@@ -78,4 +86,166 @@ func TestListenProxySurfacesReleasesRemoteWhenOperatorBindFails(t *testing.T) {
 		t.Fatalf("remote listener remained bound after operator failure: %v", err)
 	}
 	_ = rebound.Close()
+}
+
+type blockingTaskService struct {
+	started chan struct{}
+	once    sync.Once
+}
+
+func (service *blockingTaskService) Run(ctx context.Context) error {
+	service.once.Do(func() { close(service.started) })
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (*blockingTaskService) Wake() {}
+
+type idleResultService struct{}
+
+func (idleResultService) RunOnce(context.Context) error { return taskresultcoord.ErrNoWork }
+
+func TestTaskCoordinatorServiceMatrixStartsAndStopsAsOneOwner(t *testing.T) {
+	for _, test := range []struct {
+		name                      string
+		publication, verification bool
+	}{
+		{name: "required"},
+		{name: "verification", verification: true},
+		{name: "publication", publication: true},
+		{name: "full", publication: true, verification: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			group, serviceCtx := errgroup.WithContext(ctx)
+			services := make([]*blockingTaskService, 0, 4)
+			newService := func() *blockingTaskService {
+				service := &blockingTaskService{started: make(chan struct{})}
+				services = append(services, service)
+				return service
+			}
+			tasks := &taskServices{
+				coordinator: newService(), execution: newService(), result: idleResultService{},
+				resultWake: make(chan struct{}, 1), status: observability.NewRegistry(),
+			}
+			if test.publication {
+				tasks.publication = &publicationTaskService{blockingTaskService: newService()}
+			}
+			if test.verification {
+				tasks.verification = newService()
+			}
+			startTaskCoordinators(group, tasks, serviceCtx, slog.New(slog.NewTextHandler(io.Discard, nil)), "demo")
+			for _, service := range services {
+				select {
+				case <-service.started:
+				case <-time.After(time.Second):
+					t.Fatal("configured task service did not start")
+				}
+			}
+			cancel()
+			if err := group.Wait(); err != nil {
+				t.Fatalf("coordinator shutdown: %v", err)
+			}
+		})
+	}
+}
+
+type publicationTaskService struct{ *blockingTaskService }
+
+func (*publicationTaskService) RunOnce(context.Context) error { return taskpublicationcoord.ErrNoWork }
+
+type publicationStartupFixture struct {
+	results []error
+	calls   int
+}
+
+func (fixture *publicationStartupFixture) RunOnce(context.Context) error {
+	result := fixture.results[fixture.calls]
+	fixture.calls++
+	return result
+}
+
+func TestPublicationStartupReconciliationDrainsOnlyImmediatelyActionableWork(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		results []error
+		want    error
+	}{
+		{name: "drain", results: []error{nil, nil, taskpublicationcoord.ErrNoWork}},
+		{name: "read only pending", results: []error{taskpublicationcoord.ErrReconciliationPending}},
+		{name: "fatal", results: []error{errors.New("store unavailable")}, want: errors.New("store unavailable")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := &publicationStartupFixture{results: test.results}
+			err := reconcileTaskPublication(context.Background(), fixture)
+			if test.want == nil && err != nil || test.want != nil && (err == nil || err.Error() != test.want.Error()) {
+				t.Fatalf("startup reconciliation error = %v", err)
+			}
+			if fixture.calls != len(test.results) {
+				t.Fatalf("passes = %d, want %d", fixture.calls, len(test.results))
+			}
+		})
+	}
+}
+
+type orderedManagerLifecycle struct {
+	mu    sync.Mutex
+	order []string
+}
+
+func (manager *orderedManagerLifecycle) record(value string) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	manager.order = append(manager.order, value)
+}
+
+func (manager *orderedManagerLifecycle) PrepareShutdown(context.Context) error {
+	manager.record("prepare")
+	return nil
+}
+
+func (manager *orderedManagerLifecycle) Close(context.Context) error {
+	manager.record("manager-close")
+	return nil
+}
+
+type orderedStreamStopper struct{ manager *orderedManagerLifecycle }
+
+func (stream orderedStreamStopper) Stop(context.Context) error {
+	stream.manager.record("stream-stop")
+	return nil
+}
+
+func TestAwaitShutdownPreservesSignalOwnershipOrder(t *testing.T) {
+	for _, test := range []struct {
+		name, want string
+		signal     bool
+	}{
+		{name: "service failure", want: "manager-close,stream-stop"},
+		{name: "signal", signal: true, want: "prepare,manager-close,stream-stop"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rootCtx, cancel := context.WithCancel(context.Background())
+			group, _ := errgroup.WithContext(rootCtx)
+			if test.signal {
+				cancel()
+			} else {
+				defer cancel()
+			}
+			manager := &orderedManagerLifecycle{}
+			runtime := &upRuntime{
+				lifecycle:        &dockerLifecycle{manager: manager, managerStarted: true},
+				streamController: orderedStreamStopper{manager: manager},
+			}
+			if err := awaitShutdown(group, runtime, rootCtx); err != nil {
+				t.Fatal(err)
+			}
+			manager.mu.Lock()
+			got := strings.Join(manager.order, ",")
+			manager.mu.Unlock()
+			if got != test.want || !runtime.lifecycle.managerClosed {
+				t.Fatalf("shutdown order = %q, closed=%v", got, runtime.lifecycle.managerClosed)
+			}
+		})
+	}
 }
