@@ -348,6 +348,8 @@ Durable state is split across:
 
 - `/srv/fern/workspace` for repository files and uncommitted work;
 - `fern-demo-v2-data` for OpenCode sessions and configuration;
+- `fern-demo-v1-gh-config` for workspace-`gh` credentials and CLI state when
+  that authority mode is enabled;
 - `/var/lib/fern/.fern/state` for pause intents and `.fern/locks` for leases;
 - `/var/lib/fern/.fern/control` for hashed device grants, workflow/session
   correlations, and publication operations;
@@ -404,6 +406,13 @@ sudo /opt/fern/src/scripts/fern-host-backup.py backup \
 sudo rm -rf "/var/backups/fern/exports-$BACKUP_ID"
 sudo systemctl start fern.service
 ```
+
+For workspace-`gh`, also export `fern-demo-v1-gh-config` into a second private
+directory and pass it as another opaque volume, for example
+`--volume "fern-demo-v1-gh-config=/var/backups/fern/exports-$BACKUP_ID/gh"`.
+Omitting it requires GitHub reauthentication after restore. App-broker
+credentials instead live under Fern state and are separated by the credential
+policy.
 
 The general bundle contains deterministic uncompressed tar payloads, a canonical
 manifest with a SHA-256 inventory for every file and directory entry, and

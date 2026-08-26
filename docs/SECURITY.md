@@ -20,9 +20,10 @@ provider credentials intentionally exposed there.
 - Tailscale Funnel is outside the supported deployment.
 - Pairing uses a 256-bit five-minute capability. GET only previews; POST
   consumes the code and creates a digest-backed 30-day device grant.
-- Pairing codes are capped, device names are bounded and escaped, replay is
-  rejected, and durable device grants survive restart.
-- Device cookies are `Secure`, `HttpOnly`, `SameSite=Strict`, and stripped before
+- Pairing codes, issuance, successful exchanges, per-code attempts, and global
+  failures are bounded; limiter state and durable device grants survive restart.
+- Device cookies are named `__Host-fern_device`, are `Secure`, `HttpOnly`,
+  `SameSite=Strict`, path `/`, and domainless, and are stripped before
   proxying to OpenCode. Upstream responses cannot set either the current or
   reserved future Fern device-cookie name; unrelated `Set-Cookie` headers are
   left untouched.
@@ -31,15 +32,15 @@ provider credentials intentionally exposed there.
 - Fern control credentials and common GitHub token variables are rejected from
   workspace configuration by key, by `${...}` source reference under an alias,
   and by post-expansion equality with the control credential.
-- Host-credential publication is disabled unless a positive numeric GitHub
-  repository ID and exact-case canonical `owner/repository` are configured
-  together. The checkout origin cannot select authority. The durable journal
-  fixes repository identity, base ref/SHA, result commit, branch, and complete
-  final draft-PR proof before reporting success. Legacy effect-capable records
-  are not automatically retried.
+- The legacy host-credential publication package is not composed by `fern up`;
+  effecting routes reject use and the standalone command is dry-run only.
+  Historical in-flight legacy records are not automatically reconciled or
+  quarantined.
 - Fern-owned HTML uses a restrictive CSP and control mutations perform an
   Origin check against the canonical operator origin, not client `Host`.
   Fetch Metadata rejects same-site siblings and cross-site browser mutations.
+  Device-cookie mutations additionally require short-lived HMAC tokens bound to
+  credential, method, and route; explicit Basic-auth mutations are token-exempt.
 - The GitHub App setup route is operator-authenticated on loopback. Only its
   exact callback route is reachable without a device grant on remote ingress;
   callback authorization is a bounded random one-use state, authority must equal
@@ -72,11 +73,10 @@ provider credentials intentionally exposed there.
 
 These controls are useful but do not complete the product boundary below.
 
-The current publisher still obtains and transports the host user's potentially
-account-wide `gh` token to bounded host `git` and `gh api` subprocesses. Child
-environments and errors are sanitized, but this remains a prototype-only broad
-credential boundary. It is not equivalent to a repository-scoped GitHub App
-installation token.
+Workspace-`gh` intentionally makes the stored credential available to trusted
+workspace code and may carry account-wide authority. Direct Git/`gh` mutations
+have no Fern receipt or ambiguity reconciliation. This is not equivalent to a
+repository-scoped GitHub App installation token.
 
 ## Release-Blocking Findings
 
@@ -93,7 +93,7 @@ CLI. Loading the official OpenCode browser UI on that listener after entering
 operator Basic would recreate a same-origin confused-deputy risk. Treat it as a
 host CLI/control surface, not a supported OpenCode browser origin. A supported
 operator browser workflow still needs a control-only third logical surface or
-CLI-only controls plus CSRF/Fetch Metadata hardening.
+CLI-only controls, with an explicit token contract if browser support is added.
 
 ### Revoke Established Connections
 

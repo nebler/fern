@@ -22,9 +22,9 @@ The implementation has three distinct status classes:
 
 | Class | Capabilities |
 | --- | --- |
-| Production-wired | Configuration, two ingress policies, pairing, wake/pause, Docker ownership, task admission, delivery, cancellation, conservative execution observation, optional verification coordination, GitHub App onboarding, repository-scoped publication reconciliation |
-| Implemented but authority-gated | Store-level execution success/failure, explicit quiesced result coordinator, read-only Git result collection, immutable result sealing, durable publication preparation |
-| Not implemented end to end | Generic OpenCode terminal-result proof, durable remote approval answers, idempotent phone publication admission, notifications, GitHub installation-selection UI, credential backup/rotation |
+| Production-wired | Configuration, two ingress policies, pairing and device CSRF, wake/stop/freeze, Docker ownership, workspace `gh`, task listing/admission/delivery/cancellation, conservative execution observation, explicit user-authorized snapshot sealing, optional verification coordination, GitHub App onboarding, repository-scoped publication reconciliation |
+| Implemented but authority-gated | Store-level execution success/failure, observer-authorized terminal result sealing, durable publication preparation and transport |
+| Not implemented end to end | Generic OpenCode terminal-result proof, durable remote approval answers, idempotent phone publication admission, notifications, GitHub installation-selection UI, automated credential rotation and online transactional backup |
 
 The ordinary durable task path currently reaches this boundary:
 
@@ -33,21 +33,29 @@ phone submit
     |
     v
 durable admission -> exact OpenCode delivery -> running/input_required
-                                               |             |
-                                               |             +-> cancellation/recovery
+                                               |       |
+                                               |       +-> cancellation/recovery
                                                |
-                                               +-> generic terminal success is not provable
+                                               +-> explicit snapshot preview
+                                                        |
+                                                        v
+                                               idempotent user seal
+                                                        |
+                                                        v
+                                               immutable result -> optional verification
 ```
 
 Verification and durable publication coordinators are real and wired. They do
-not make upstream facts true: verification requires a sealed result, and
-publication requires an explicitly prepared publication. Ordinary production
-traffic currently creates neither.
+not make upstream facts true: a user seal authorizes one exact clean repository
+snapshot but does not assert that OpenCode completed successfully. Verification
+requires that sealed result. Brokered publication additionally requires an
+explicitly prepared publication, and no production API currently prepares one.
 
 The root blocker is the pinned OpenCode profile. It has no durable generic
 terminal-success object and no durable event cursor. An inactive session, empty
 inbox, idle status, or missing process-epoch form is not proof that work
-succeeded. Fern fails closed rather than turning absence into success.
+succeeded. Fern fails closed rather than turning absence into success; explicit
+user snapshot authorization is a separate completion authority.
 
 ## 2. Authority Model
 
@@ -64,7 +72,8 @@ Fern treats authority as a set of narrow, non-interchangeable sources:
 | Repository identity, refs and pull requests | GitHub numeric identities and authoritative API reads |
 | Verification command and environment | Host-owned Fern policy |
 | Verification outcome | One fenced Fern runner invocation |
-| Publication mutation authority | A committed durable publication phase |
+| App-broker publication mutation authority | A committed durable publication phase |
+| Workspace-`gh` mutation authority | The authenticated workspace credential plus explicit user/prompt intent; outside Fern's broker journal |
 | Device access | Digest-backed Fern device grant |
 | Operator access | Loopback listener plus Fern/OpenCode Basic credentials |
 
@@ -121,14 +130,18 @@ hostile multi-tenant sandbox.
 - one remote HTTP server and one operator HTTP server;
 - one legacy JSON control store;
 - optionally, one SQLite task store and task coordinator set;
-- optionally, one legacy host-credential publication coordinator;
+- with task services, one user-authorized result-sealing coordinator;
+- optionally, one verification coordinator and one App-broker publication coordinator;
 - optionally, one GitHub App onboarding handler.
 
 GitHub authority is explicit and durable. `mode: github-app-broker` requires a
 positive installation ID and constructs the App task publisher. `mode:
 workspace-gh` forbids an installation ID, constructs the bounded managed-`gh`
-executor for task base resolution, and does not construct the App publisher.
-The legacy host publisher remains separate from both task authority modes.
+executor for task base resolution, mounts a dedicated persistent `gh` config
+volume, and does not construct the App publisher. Push and pull-request commands
+in workspace-`gh` mode are ordinary user/agent actions outside Fern's brokered
+publication journal. The legacy host publisher package remains for diagnostics
+and compatibility tests but is not constructed by `fern up`.
 
 ### 4.1 Startup Order
 
@@ -141,25 +154,26 @@ The legacy host publisher remains separate from both task authority modes.
 5. Bind both loopback listeners before any Docker side effect.
 6. Create the shared signal and errgroup context.
 7. Acquire the exclusive workspace lease under `$HOME/.fern/locks`.
-8. Select the legacy publisher only when no explicit task GitHub authority is configured.
-9. Open the local Docker client, pause-intent state, and legacy control store.
-10. Construct the stream controller and workspace manager.
-11. Reconcile existing Docker state without waking absent or paused compute.
-12. Construct GitHub App onboarding only for App-broker mode when a remote
+8. Open the local Docker client, pause-intent state, and legacy control store.
+9. Construct the stream controller and workspace manager.
+10. Reconcile existing Docker state without waking absent or paused compute.
+11. Construct GitHub App onboarding only for App-broker mode when a remote
     origin exists and credentials do not.
-13. Construct task services when the task policy and either explicit GitHub
+12. Construct task services when the task policy and either explicit GitHub
     authority mode exist.
-14. Validate App authority eagerly, or construct the managed workspace-`gh`
-    resolver for live token-free validation at task admission, before persisting
-    the explicit durable workspace authority binding.
+13. Validate App authority eagerly, or construct the managed workspace-`gh`
+    resolver, then persist the explicit durable workspace authority binding.
+    Workspace-`gh` performs its first live credential/repository check later at
+    task admission.
+14. Construct user-seal services, delivery and execution coordinators, and any
+    configured verification or App-publication coordinator.
 15. Construct the two policy-separated proxy handlers.
-16. Reconcile interrupted legacy publications.
-17. Drain available durable publication journal work before serving HTTP.
-18. Start the supervisor, task loops, and both HTTP servers in one errgroup.
+16. Drain available App-publication journal work before serving HTTP.
+17. Start the supervisor, task loops, and both HTTP servers in one errgroup.
 
 Binding listeners first makes an invalid or occupied address a side-effect-free
 failure. The exclusive lease prevents a second lifecycle writer. Errors after
-manager startup close publication workers and the manager before returning.
+manager startup close the task store and manager before returning.
 
 If task policy is configured but App credentials are absent, Fern can still
 start the operator onboarding surface when `proxy.remoteOrigin` is configured.
@@ -173,12 +187,11 @@ A signal or service error cancels the shared context. Fern then:
 1. Gives both HTTP servers a bounded graceful shutdown window.
 2. Force-closes tracked connections if graceful shutdown fails.
 3. Waits for errgroup-owned servers and task coordinators.
-4. Closes the legacy publication coordinator.
-5. On an actual process signal, records a bounded Docker shutdown intent.
-6. Closes the workspace manager and waits for admitted requests, pauses, wakes,
+4. On an actual process signal, records a bounded Docker shutdown intent.
+5. Closes the workspace manager and waits for admitted requests, pauses, wakes,
    and rollback ownership.
-7. Stops the OpenCode activity stream.
-8. Closes the SQLite store and Docker client through deferred cleanup.
+6. Stops the OpenCode activity stream.
+7. Closes the SQLite store and Docker client through deferred cleanup.
 
 The manager closes before Docker because it owns wake and rollback goroutines.
 If bounded manager shutdown times out, Fern deliberately leaves the Docker
@@ -190,7 +203,9 @@ being misclassified as an unexplained crash.
 
 ## 5. Configuration And Secret Flow
 
-Configuration is defined in `internal/config/config.go`.
+Configuration types and defaults are defined in `internal/config/config.go`;
+strict loading, environment expansion, YAML decoding, and validation are split
+across `load.go`, `env.go`, `yamlnode.go`, and `validate.go`.
 
 ### 5.1 Precedence And Parsing
 
@@ -247,8 +262,9 @@ container recreation while preserving the OpenCode volume.
 ### 5.3 Task Policy
 
 Task mode requires an explicit agent, provider, model ID, attempt timeout, lease
-duration, turn budget, GitHub installation ID, numeric repository ID, and exact
-canonical repository full name.
+duration, turn budget, GitHub authority mode, numeric repository ID, and exact
+canonical repository full name. App-broker mode also requires a positive
+installation ID; workspace-`gh` mode forbids one and supports only `github.com`.
 
 Optional verification policy contains:
 
@@ -284,7 +300,7 @@ With a valid paired-device grant it accepts:
 - the official OpenCode UI and API;
 - `/fern/` and Fern readiness;
 - the task UI;
-- task submission, reads, cancellation, and event reads.
+- task listing, submission, reads, cancellation, snapshot sealing, and event reads.
 
 It rejects Fern Basic, OpenCode Basic, pairing issuance, operator controls,
 device administration, legacy workflows, and legacy publication. Credentials
@@ -320,16 +336,21 @@ configuration. It does not generate `X-Forwarded-For`. Browser `Origin` remains
 available for mutation checks.
 
 Fern-owned browser mutations use exact-origin and Fetch Metadata checks.
-Cross-site and same-site sibling requests fail closed. Per-form CSRF tokens are
-not implemented.
+Cross-site and same-site sibling requests fail closed. Cookie-authenticated
+device mutations additionally require a short-lived HMAC token bound to the
+device credential, method, and normalized route. Explicit Basic-auth mutations
+remain token-exempt and rely on their separate ingress and origin policy.
 
 ### 6.5 Pairing And Revocation
 
 Pairing codes contain 256 random bits and expire after five minutes. GET only
 previews; POST atomically consumes the code and creates a 30-day grant. Fern
-caps outstanding codes and stores only a SHA-256 device-token digest.
+caps outstanding codes, per-code attempts, global failures, issuance, and
+successful exchanges. Limiter state is persisted with bounded strict JSON so a
+restart does not reset abuse controls. Fern stores only code/token digests.
 
-Device cookies are `Secure`, `HttpOnly`, and `SameSite=Strict`. A successful
+Device cookies use the `__Host-fern_device` namespace and are `Secure`,
+`HttpOnly`, `SameSite=Strict`, path `/`, and domainless. A successful
 revocation is persisted before active request contexts for that device are
 canceled. Active request contexts also inherit the grant expiry deadline, so a
 stream cannot outlive its durable grant.
@@ -428,7 +449,9 @@ The workspace container uses:
 - no added devices;
 - no restart policy;
 - writable repository bind at `/home/user/workspace`;
-- writable OpenCode volume at `/home/user/.local/share/opencode`.
+- writable OpenCode volume at `/home/user/.local/share/opencode`;
+- in workspace-`gh` mode, a separate writable volume at
+  `/home/user/.config/gh` with Fern-managed `GH_CONFIG_DIR`.
 
 The root filesystem is writable. These controls reduce accidental privilege but
 do not make untrusted repository code a host-security sandbox.
@@ -442,7 +465,9 @@ opencode2 serve --hostname 0.0.0.0 --port 4096
 The supported OpenCode version is `0.0.0-next-17444`. The characterized
 development image identity is
 `sha256:73688cd6f96ce3b236bb1c2d25607b03566a4ee92f0fedabeb06fd1a3e643c6c`;
-the contract harness verifies both version and digest.
+the contract harness verifies both version and digest. The image also pins
+GitHub CLI `2.98.0`; workspace-`gh` execution uses only
+`/usr/local/bin/gh` through Fern's attested, bounded Docker exec path.
 
 ### 9.2 Ownership And Drift
 
@@ -500,7 +525,9 @@ Location:
 $HOME/.fern/control/<workspace-hash>.json
 ```
 
-It stores device grants, coarse workflows, and legacy publications. The store
+It stores device grants, a stable random operator credential identifier, coarse
+workflows, and legacy publications. A sibling auxiliary file persists bounded
+pairing limiter state. The store
 uses a private real directory, a private singly linked regular file, strict and
 bounded JSON, atomic temporary-file replacement, file and directory sync, a
 versioned schema, and a process-local mutex.
@@ -526,6 +553,8 @@ Current migrations are:
 1. `initial_task_store`
 2. `execution_projection_and_results`
 3. `verification_and_publication_journals`
+4. `user_authorized_snapshot_seals`
+5. `explicit_workspace_github_authority`
 
 Constraints and triggers enforce ownership, immutable tuples, event-backed
 transitions, revision increments, one effecting verification per workspace,
@@ -546,6 +575,7 @@ The task store contains:
 | Event | Ordered task/attempt audit projection |
 | Result | Immutable Git and OpenCode evidence tuple |
 | Manifest entry | Canonical changed-path/object evidence |
+| Seal request | Idempotent user authority for one exact previewed repository snapshot |
 | Verification | One exact policy/runner invocation journal |
 | Publication | One exact branch and draft-PR effect journal |
 
@@ -557,15 +587,19 @@ current identity, state, revision, cancellation, and ownership transactionally.
 Remote paired devices can use:
 
 ```text
+GET  /fern/api/v1/tasks?limit=<n>
 POST /fern/api/v1/tasks
 GET  /fern/api/v1/tasks/{taskId}
 POST /fern/api/v1/tasks/{taskId}/cancel
+GET  /fern/api/v1/tasks/{taskId}/seal-preview
+POST /fern/api/v1/tasks/{taskId}/seal
 GET  /fern/api/v1/events?after=<cursor>&limit=<n>
 ```
 
-Submission and cancellation require `Idempotency-Key`. Request bodies and
-responses are bounded and strict. The event route returns cursor-paginated JSON;
-it is not OpenCode's volatile SSE stream.
+Submission, cancellation, and sealing require `Idempotency-Key`. Request bodies
+and responses are bounded and strict. The event route returns cursor-paginated
+task/attempt JSON; it is not OpenCode's volatile SSE stream and does not include
+the separate verification/publication journal.
 
 Submission resolves the requested base ref through the configured numeric
 GitHub repository before admission. The client cannot choose image, object
@@ -583,10 +617,12 @@ One admission transaction creates:
 Wake notification occurs only after commit. A lost response can be replayed by
 the same idempotency key and request hash without creating a second task.
 
-The phone UI supports submission, exact reads, refresh, and cancellation. It
-stores up to 50 submitted task IDs in browser `localStorage`. There is no
-server-side task-list endpoint, so task discovery is device-local rather than a
-complete workspace queue browser.
+The phone UI supports server-backed task listing, submission, refresh,
+cancellation, exact-session links, snapshot preview, and explicit sealing. A
+seal authorizes one exact clean repository snapshot and does not claim OpenCode
+success. The current UI generates a fresh idempotency key for each invocation;
+it does not retain an in-flight key across a lost response, so retrying manually
+can create a second semantic submission despite the backend replay contract.
 
 ## 12. Task And Attempt State Machines
 
@@ -754,41 +790,47 @@ Paths are stored as canonical padded RFC 4648 base64 so arbitrary Git path bytes
 remain representable. Rename detection is disabled; a rename is a delete/add
 pair.
 
-`internal/taskresultcoord` is the explicit authority boundary between a durable
-succeeded attempt and the collector. It does not poll, record success, or expose
-any success-projection method. One `RunOnce` call:
+`internal/taskresultcoord` supports two deliberately separate completion
+authorities. Neither polls for or infers success.
 
-1. Selects an already-durable succeeded, unsealed attempt.
-2. Passes the complete task/attempt revision and OpenCode session/message
-   identity to an injected authoritative observer.
-3. Requires two valid, matching sanitized success observations inside
-   `AcquireQuiesced`.
-4. Re-selects and compares the complete identity under the retained fence.
-5. Collects the exact Git result using the observed evidence and policy digest.
-6. Generates one stable result/event ID set and calls `SealResult` once.
-7. Retains the fence until that transaction returns, including through bounded
-   commit cleanup after caller cancellation.
+### 14.1 User-Authorized Snapshot Sealing
 
-Observer errors are classified without rendering raw OpenCode output. Evidence
-must be a bounded JSON object with an exact SHA-256 and policy version; the
-collector additionally rejects sensitive evidence keys.
+This path is production-composed when task services are enabled:
 
-`taskstore.SealResult` atomically:
+1. `GET .../seal-preview` selects an eligible running or input-required task,
+   acquires `AcquirePaused`, rechecks ownership, and collects one exact clean Git
+   snapshot.
+2. `POST .../seal` requires the exact preview plus an idempotency key, repeats
+   collection under the paused fence, and atomically stores a receipt and
+   immutable `seal_requests` row.
+3. The result coordinator claims that row, acquires `AcquireQuiesced`, rechecks
+   every revision and expected object/digest, recollects the exact snapshot, and
+   calls `SealAuthorizedResult` once.
+4. The final transaction inserts the result and manifest, changes the attempt
+   to `superseded` rather than `succeeded`, completes the task, emits result/task
+   events, and completes the seal request.
 
-1. rechecks the exact successful current attempt and task revisions;
-2. rechecks repository/base and OpenCode session/message identity;
-3. inserts the immutable result and manifest;
-4. binds the result to task and attempt;
-5. advances the task to `completed`;
-6. emits ordered `attempt.result_sealed` and `task.completed` events.
+This is explicit authority for repository state, not evidence that OpenCode
+finished. There is a current lifecycle defect in the composition: preview and
+authorization leave compute paused, while the asynchronous coordinator's
+`AcquireQuiesced` requires it already running. A seal can therefore remain
+claimed until unrelated upstream traffic wakes the workspace and the lease is
+retried. The API/UI/store path is wired, but end-to-end liveness needs a
+real-manager integration fix and test.
 
-The transaction performs no Git or OpenCode read. Its caller must supply those
-facts while retaining `AcquireQuiesced` through commit.
+### 14.2 Observer-Authorized Execution Success
 
-No production OpenCode observer currently supplies generic terminal-success
-authority, and `fern up` intentionally does not construct this coordinator.
-Result collection therefore remains unreachable from ordinary inactive/idle
-observations even though the exact host-side sealing entry point exists.
+The second path accepts only an already-durable succeeded, unsealed attempt and
+an injected authoritative observer. It requires two valid matching success
+observations inside `AcquireQuiesced`, reselects the complete identity, collects
+Git evidence, and calls `SealResult` once while retaining the fence through
+bounded commit cleanup. Observer evidence must be bounded JSON with an exact
+SHA-256 and policy version; sensitive evidence keys are rejected.
+
+No production OpenCode observer supplies this generic terminal-success
+authority, so `fern up` constructs only the user-authorized variant. In both
+paths the sealing transaction performs no Git or OpenCode reads; its caller must
+supply those facts while retaining the relevant fence through commit.
 
 ## 15. Verification
 
@@ -879,8 +921,9 @@ After successful conversion the browser redirects to the exact validated
 loopback setup origin plus its persisted relative return path. The control page
 is never exposed on remote ingress.
 
-Once valid credentials exist, setup is not mounted. Replacement, backup, and
-rotation remain intentionally disabled until their recovery contract exists.
+Once valid credentials exist, setup is not mounted. Automated replacement and
+rotation remain disabled. The offline host backup flow can externalize the
+credential file, but it is not an online credential-lifecycle system.
 
 ### 16.2 Credential Storage
 
@@ -903,8 +946,8 @@ separate and non-interchangeable:
 - installation-wide discovery tokens for repository enumeration primitives;
 - repository-scoped installation tokens for one configured numeric repository.
 
-Task startup validates installation ID, numeric repository ID, and exact
-canonical full name through GitHub before persisting a new workspace binding.
+App-broker task startup validates installation ID, numeric repository ID, and
+exact canonical full name through GitHub before persisting a new workspace binding.
 Every repository/PR REST operation requests a fresh scoped token and validates
 permissions and expiry. Clients refuse redirects and bounded-response or
 pagination violations.
@@ -915,11 +958,14 @@ repository identity explicitly.
 
 ### 16.4 Chosen Product Direction
 
-The target product workflow, recorded in `docs/GITHUB_INTEGRATION.md`, is now
-Amp-style authenticated `gh` inside the workspace with explicit user-invoked
-push and draft-PR actions. This section and Section 17 continue to describe the
-current host-brokered GitHub App implementation. They are not claims that the
-chosen workspace-`gh` workflow is implemented.
+The chosen workflow, recorded in `docs/GITHUB_INTEGRATION.md`, is Amp-style
+authenticated `gh` inside the workspace with explicit user-invoked push and
+draft-PR actions. Its substrate is implemented: the image checksum-pins GitHub
+CLI 2.98.0, workspace-`gh` mode mounts a dedicated persistent config volume,
+and Fern can execute bounded, image-attested `gh api` reads for task base-ref
+resolution. Users authenticate and run ordinary `gh`/Git commands in the
+trusted workspace; Fern does not wrap those mutations in its App publication
+journal.
 
 In the chosen mode, prompt intent is the authorization and OpenCode may invoke
 `gh` directly. A Fern phone action cannot be an exclusive publication gate; it
@@ -927,16 +973,18 @@ can only provide additional durable audit and reconciliation for effects Fern
 itself performs.
 
 Moving authority into the workspace changes the credential boundary rather
-than merely changing the phone UI. It requires a pinned `gh` binary, durable
-authentication and revocation, explicit command authorization, repository and
-scope policy, mutation reconciliation, and updated image/security/release
-evidence. Automatic OpenCode terminal-result proof is not a prerequisite for an
-explicit user-authorized snapshot and draft-PR action.
+than merely changing the phone UI. The workspace can use whatever repository
+scope its stored `gh` credential has, and direct mutations have no Fern receipt
+or lost-response reconciliation. Fern's managed base resolver still validates
+numeric repository identity and exact full name. Unlike App mode, the first
+live workspace-`gh` repository check happens when a task resolves its base,
+after a new durable workspace binding may already have been created; correcting
+a mistaken immutable binding currently requires operator state recovery.
 
 ## 17. Durable GitHub App Publication
 
-Durable publication consumes only an exact successful result and verification
-tuple. It never publishes mutable current `HEAD`.
+Durable publication consumes only an exact sealed result and successful
+verification tuple. It never publishes mutable current `HEAD`.
 
 The immutable publication tuple binds:
 
@@ -999,12 +1047,14 @@ can safely call that method.
 
 ## 18. Legacy Host-Credential Publication
 
-The legacy operator path is a separate subsystem. It uses:
+The legacy host-credential subsystem remains implemented and tested but is not
+constructed by `fern up`; production leaves `proxy.Controls.Publications` nil,
+so effecting routes reject use. The retained package uses:
 
 - JSON `control.Workflow` and `control.Publication` records;
 - the host user's broad `gh` credential;
 - `workspace.Manager.AcquirePaused`;
-- operator-only `/fern/control` routes.
+- now-disabled operator `/fern/control` publication routes.
 
 It persists an exact preparation before mutation and re-reads one draft pull
 request before success. Checkout `origin` is a consistency diagnostic, not
@@ -1014,8 +1064,8 @@ account-wide.
 `fern github publish --dry-run` retains diagnostics. Standalone mutation is
 rejected because it would bypass the service-owned durable coordinator.
 
-App installation mode disables this entire legacy publisher. The two systems do
-not share a state machine or credential source.
+No GitHub authority mode enables this legacy publisher. It does not share a
+state machine or credential source with App publication.
 
 ## 19. Recovery Rules
 
@@ -1035,6 +1085,8 @@ Examples:
 | Lost task admission response | Same idempotency key/hash returns committed receipt |
 | Lost exact OpenCode prompt response | Exact ID/body read-reconciliation; no changed retry |
 | Expired delivery claim | Persist uncertain before takeover |
+| Lost user-seal response | Same idempotency key/hash returns the durable seal request |
+| Authorized snapshot changes before sealing | Reject that seal request; never substitute a new snapshot |
 | Fern restart during verification | Mark running verification recovery-required; do not rerun |
 | Lost push response | Read exact branch; do not push again |
 | Lost PR-create response | Discover and re-read exact PR; do not create again |
@@ -1054,7 +1106,8 @@ Examples:
 - Backend health includes negative authentication probes.
 - Device grants are digest-backed, expiring, revocable, and request-attributed.
 - Incoming forwarding authority and credentials are stripped and regenerated.
-- Browser mutations enforce exact origin and Fetch Metadata.
+- Browser mutations enforce exact origin and Fetch Metadata; device-cookie
+  mutations also require route-bound CSRF tokens.
 - Host state paths enforce ownership, type, link, and mode constraints.
 - Docker resources require exact labels, immutable IDs, and desired-state proof.
 - Task commands persist immutable actor snapshots and idempotency receipts.
@@ -1076,12 +1129,12 @@ Examples:
   boundary.
 - Tailscale supplies private reachability and ACL policy, not Fern user identity.
 - Operator HTML has no per-form CSRF token.
-- The device cookie is not yet in the `__Host-` namespace.
-- Pairing has an outstanding-code cap but no general issuance rate limiter.
 - The operator listener is not a supported OpenCode browser origin.
 - Real TLS/WSS and physical-phone PTY revocation are not accepted yet.
-- App credentials are unencrypted and have no Fern-managed backup or rotation.
-- The legacy host-`gh` publisher has broader authority than App mode.
+- App and workspace-`gh` credentials are unencrypted and have no automated
+  rotation or online transactional backup.
+- Workspace-`gh` credentials may have broader authority than App mode and are
+  intentionally available to trusted workspace code.
 - Verification process isolation does not protect the host from malicious
   operator-approved checks or trusted repository code.
 
@@ -1158,6 +1211,12 @@ Checked-in deterministic evidence covers lifecycle transitions, simulated
 orderly Docker shutdown, archive/checksum/restore, mobile viewport behavior,
 device revocation, reproducible release output, and static deployment policy.
 
+The offline host backup utility archives Fern state, configuration, repository
+state, and named OpenCode/workspace-`gh` volumes with checksums, separates
+credential custody, and exercises staged activation and rollback. This is a
+deterministic backup/restore foundation, not an online cross-store snapshot or a
+physical fresh-host acceptance result.
+
 It does not establish:
 
 - a complete fresh target-host install;
@@ -1165,7 +1224,7 @@ It does not establish:
 - real private-edge TLS/WSS behavior;
 - a provider-funded generic terminal task;
 - schema upgrade from every shipped release;
-- transactional backup of all SQLite and App secrets;
+- online transactional backup across SQLite, App secrets, and Docker volumes;
 - executable rollback;
 - artifact signing or provenance authenticity;
 - tailnet ACL denial from an independent principal.
@@ -1174,31 +1233,32 @@ It does not establish:
 
 The following are architectural gaps, not hidden implementation assumptions:
 
-1. **Workspace `gh` target:** the chosen Amp-style workflow is not implemented.
-   The image has no `gh`, no workspace GitHub authentication lifecycle exists,
-   and the current configuration rejects GitHub token variables from the
-   workspace.
-2. **Explicit snapshot/publication command:** there is no idempotent paired-phone
-   push or draft-PR command. Its semantics, actor receipt, repository/scope
-   checks, and lost-response reconciliation still need to be defined.
-3. **User-authorized result sealing:** the collector can seal only an already
-   succeeded attempt through an authoritative observer. There is no separate
-   path for a user to quiesce and seal the current clean committed state without
-   asserting that OpenCode completed successfully.
-4. **Generic terminal result:** the pinned OpenCode profile cannot durably prove
+1. **User-seal lifecycle liveness:** preview and authorization pause compute,
+   while asynchronous completion currently requires an already-running target.
+   The claimed request can stall until another upstream request wakes compute.
+   Preview is also a side-effecting GET, which is unsafe for prefetch/retry
+   semantics.
+2. **Generic terminal result:** the pinned OpenCode profile cannot durably prove
    generic terminal success/failure. Result sealing cannot be triggered by idle,
    inactivity, empty inbox, or missing process-epoch input.
-5. **Result coordinator reachability:** the explicit coordinator exists, but no
-   production observer can provide its externally authorized success evidence.
-6. **Current broker publication admission:** no idempotent phone command
+3. **Current broker publication admission:** no idempotent phone command
    prepares a durable publication, even after successful verification.
-7. **Durable approvals:** no approval table, phone approval API, or restart-safe
+4. **Client replay and status:** the phone UI does not retain idempotency keys
+   across lost responses, and task reads/events do not expose coherent seal,
+   verification, or publication status.
+5. **Durable approvals:** no approval table, phone approval API, or restart-safe
    option contract exists.
-8. **GitHub selection:** installation discovery primitives exist, but selection
+6. **Workspace-`gh` binding validation:** a new immutable durable binding is
+   persisted before the first live credential/repository check, so correcting a
+   mistaken binding requires operator state recovery.
+7. **GitHub selection:** installation discovery primitives exist, but selection
    UI and durable configuration update do not.
-9. **Credential lifecycle:** neither target workspace-`gh` credentials nor the
-   current App credentials have a complete backup, rotation, revocation, and
-   replacement-recovery contract.
+8. **Credential lifecycle:** offline backup foundations exist, but neither
+   workspace-`gh` nor App credentials have automated rotation, revocation, and
+   replacement-recovery contracts.
+9. **Unhealthy-start classification:** rollback after a failed health/observer
+   attach commits an ordinary pause intent, so a never-healthy start can later
+   appear intentionally dormant rather than failed.
 10. **Automatic post-onboarding activation:** Fern requires restart after first
    credential creation.
 11. **Notifications and review continuation:** PR/CI polling, phone notification,
@@ -1213,9 +1273,9 @@ The following are architectural gaps, not hidden implementation assumptions:
 | --- | --- |
 | Composition and shutdown | `cmd/fern/up.go` |
 | Task/App construction | `cmd/fern/tasks.go` |
-| Configuration | `internal/config/config.go` |
+| Configuration | `internal/config/config.go`, `load.go`, `env.go`, `yamlnode.go`, `validate.go` |
 | Remote/operator proxy | `internal/proxy/proxy.go`, `internal/proxy/gateway.go` |
-| Pairing and device auth | `internal/proxy/pairing.go`, `internal/control/store.go` |
+| Pairing, CSRF, and device auth | `internal/proxy/pairing.go`, `internal/proxy/browser_security.go`, `internal/control/store.go` |
 | Lifecycle manager | `internal/workspace/manager.go` |
 | Activity observation | `internal/watch/` |
 | Docker runtime | `internal/runtime/` |
@@ -1226,16 +1286,19 @@ The following are architectural gaps, not hidden implementation assumptions:
 | Delivery | `internal/taskdelivery/` |
 | Execution observation | `internal/taskexecution/` |
 | Result collection | `internal/taskresult/` |
-| Result sealing coordinator | `internal/taskresultcoord/` |
+| Result sealing and user authorization | `internal/taskresultcoord/`, `internal/taskstore/seal_request.go`, `internal/taskstore/authorized_result.go` |
 | Verification runner | `internal/verification/` |
 | Verification coordinator | `internal/taskverification/` |
 | GitHub App | `internal/githubapp/` |
+| Workspace GitHub CLI authority | `internal/workspacegithub/`, `internal/runtime/exec.go` |
+| Shared evidence/ref/JSON validation | `internal/evidence/`, `internal/gitref/`, `internal/jsoncanon/` |
 | Durable publication transport | `internal/taskpublication/` |
 | Durable publication coordinator | `internal/taskpublicationcoord/` |
 | Legacy publication | `internal/publication/` |
 | OpenCode contract tests | `integration/opencode-contract/` |
 | Lifecycle evidence | `integration/lifecycle/` |
 | Release evidence | `integration/release/` |
+| Host backup/restore | `scripts/fern-host-backup.py`, `integration/release/run.sh` |
 | Deployment | `deploy/systemd/`, `docs/DEPLOYMENT.md` |
 
 `docs/TASK_MODEL.md` is the normative task-state and transaction contract.

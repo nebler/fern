@@ -9,10 +9,13 @@ admission, delivery, cancellation, conservative post-admission execution
 observation, execution projection, and immutable result sealing. The observer
 can prove running and live input states but cannot infer generic terminal success
 from this pinned OpenCode profile. `internal/taskresult` implements exact
-read-only Git collection, and `internal/taskresultcoord` implements the explicit
-quiesced sealing entry point for a success proof supplied by an external
-authoritative observer. No production observer can currently provide that
-generic proof. Remaining sections may still describe required future behavior.
+read-only Git collection. `internal/taskresultcoord` has both an external-
+observer sealing path and a production-composed user-authorized snapshot path;
+the latter records an idempotent exact preview, supersedes the attempt, and
+completes the task without claiming OpenCode success. No production observer can
+currently provide generic success proof. Remaining sections may still describe
+required future behavior and are explicitly distinguished from the implemented
+HTTP surface below.
 The legacy control plane still has coarse
 `Workflow` and `Publication` records outside this task-store boundary.
 
@@ -760,10 +763,28 @@ authority.
 
 Result collection holds the workspace effect lease, captures repository facts,
 and revalidates them immediately before sealing in one transaction. The
-transaction inserts the immutable result and manifest, moves the successful
-attempt and task to terminal states, and appends events. Repository reads occur
-outside the transaction, but the workspace lease prevents lifecycle, task, and
-publication mutation during capture.
+transaction inserts the immutable result and manifest, completes the task, and
+either retains a proven successful attempt or supersedes the active attempt for
+a user-authorized snapshot. Repository reads occur outside the transaction, but
+the workspace lease prevents lifecycle, task, and publication mutation during
+capture.
+
+Migration 4 adds the production user-authorized branch. An eligible running or
+input-required task can be previewed under `AcquirePaused`; the exact commit,
+tree, outcome, manifest count/digest, clean flag, and workspace/task/attempt
+revisions are then submitted with an idempotency key. `RequestSeal` atomically
+stores the receipt, authorizer snapshot, stable result/event IDs, and immutable
+expected tuple. The authorized coordinator claims that row, recollects the exact
+snapshot under a retained fence, and `SealAuthorizedResult` inserts the result,
+marks the attempt `superseded`, completes the task, and completes the request.
+This authority means "accept this repository snapshot," not "OpenCode
+succeeded."
+
+The current composition has a known liveness defect: authorization leaves the
+workspace paused, while the asynchronous coordinator's `AcquireQuiesced`
+requires it already running. Completion can therefore wait for unrelated
+upstream traffic to wake compute. This is an implementation gap, not permission
+to weaken the exact-snapshot contract.
 
 The implemented result-store surface is:
 
@@ -808,14 +829,16 @@ exact OpenCode session/message and compute its digest. It then passes the exact
 current revisions returned by discovery. `SealResult` performs no repository or
 OpenCode read and MUST never be called using mutable current `HEAD` as authority.
 
-`internal/taskresultcoord` implements this caller boundary without inventing the
+The external-observer variant of `internal/taskresultcoord` implements this
+caller boundary without inventing the
 missing OpenCode fact. `RunOnce` selects only an already-durable succeeded
 attempt, requires an injected observer to return the same bounded exact-session
 success evidence on both `AcquireQuiesced` observations, reselects the identical
 task/attempt tuple under the retained fence, collects Git, and calls
 `SealResult` once before release. It exposes no polling or success-projection
-method. `fern up` does not construct it because the pinned profile has no
-production observer satisfying that contract.
+method. `fern up` does not construct that observer variant because the pinned
+profile has no production observer satisfying its contract; it does construct
+the user-authorized variant above.
 
 Verification request admission is one transaction. The runner claims and
 commits `running`, then executes outside SQLite against the exact commit. Its
@@ -1192,6 +1215,22 @@ Fern MUST NOT infer a person from device name, IP address, or Git commit author.
 
 ## Fern HTTP API V1
 
+The implemented surface is currently limited to task list/submit/read,
+cancellation, user-seal preview/request, and task event reads:
+
+```text
+GET  /fern/api/v1/tasks?limit=<n>
+POST /fern/api/v1/tasks
+GET  /fern/api/v1/tasks/{taskId}
+POST /fern/api/v1/tasks/{taskId}/cancel
+GET  /fern/api/v1/tasks/{taskId}/seal-preview
+POST /fern/api/v1/tasks/{taskId}/seal
+GET  /fern/api/v1/events?after=<cursor>&limit=<n>
+```
+
+Approval, standalone result/verification, and publication endpoints later in
+this section are target contracts, not mounted routes.
+
 All endpoints are under `/fern/api/v1`, require private TLS and an actor resolved
 only from server-owned request context, reject unknown, duplicate, and
 case-aliased JSON fields, reject trailing JSON data and invalid UTF-8, and accept
@@ -1272,7 +1311,7 @@ actor may read that workspace.
 ### List And Read Tasks
 
 ```http
-GET /fern/api/v1/workspaces/{workspaceId}/tasks?limit=50&before=<opaque>
+GET /fern/api/v1/tasks?limit=50
 GET /fern/api/v1/tasks/{taskId}
 ```
 

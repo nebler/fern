@@ -1,13 +1,14 @@
 # GitHub Integration
 
 This document defines Fern's GitHub authorization and publication boundary. A
-limited, effect-narrowed host prototype remains for the phone field demo and
-still uses the host user's broad `gh` credential. Separately,
+limited, effect-narrowed host prototype remains in code and tests but is not
+composed by `fern up`; its effecting routes reject use and only CLI dry-run
+diagnostics remain. Separately,
 `internal/githubapp` implements repository-scoped App credentials and exact REST
 proofs, `internal/taskpublication` implements one-shot installation-token Git
 transport, and `fern up` mounts the Manifest onboarding coordinator. Durable
-task publication does not activate until its SQLite journal and verified-result
-coordinator are present.
+task publication reconciliation is wired in App-broker mode, but no production
+API prepares the initial publication journal record.
 
 ## Product Direction Decision
 
@@ -35,7 +36,12 @@ attested container boundary, and supports durable task admission in
 `workspace-gh` mode. Push and draft-PR creation remain ordinary workspace CLI
 commands rather than a parallel Fern GitHub API.
 
-## Implemented Field Prototype
+## Retained Legacy Prototype (Unwired)
+
+The following boundary describes the retained host-credential implementation,
+not a currently reachable production mutation path. `fern up` does not supply a
+legacy publication executor. Existing in-flight records need explicit operator
+review; they are not resumed automatically.
 
 Publication is disabled unless the strict workspace configuration binds both the
 positive signed-64 GitHub repository ID and exact-case canonical full name:
@@ -60,8 +66,9 @@ repository-scoped GitHub App lane. `mode: workspace-gh` forbids an installation
 ID and uses only the managed workspace credential. The two credential modes are
 never active in the same `fern up` process.
 
-The operator-authenticated control page on the host-only listener owns the only
-mutation path. It requires `fern:$FERN_CONTROL_PASSWORD`;
+When this prototype was composed, the operator-authenticated control page on the
+host-only listener owned its mutation path and required
+`fern:$FERN_CONTROL_PASSWORD`;
 OpenCode credentials and paired-device cookies have no publication authority,
 Preparation first checks checkout `origin` against the configured full name as a
 diagnostic, then queries `GET /repositories/{id}` through `gh api` and requires
@@ -99,7 +106,7 @@ authorization:
 
 | Concern | Current state | Required state |
 | --- | --- | --- |
-| Agent credential exposure | OpenCode has no `gh` binary or GitHub token | Preserve this boundary |
+| Agent credential exposure | Legacy host transport withheld its token; current workspace-`gh` deliberately has a pinned binary and workspace credential | Keep the two authority modes explicit |
 | Human authorization | Operator Basic auth at `/fern/control` | Attributable, explicit publication approval |
 | GitHub credential | Existing host-user `gh` token, potentially account-wide | Short-lived installation token for one selected repository |
 | Repository identity | Immutable configured numeric ID and full name, revalidated through REST; `origin` is diagnostic | GitHub App installation plus repository identity |

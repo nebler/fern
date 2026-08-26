@@ -43,18 +43,19 @@ Three corollaries drive every boundary:
 ## 2. What Exists, In One Paragraph
 
 Fern is a single Go binary (`cmd/fern`) that supervises one ephemeral Docker
-workspace running `opencode serve`. It exposes two HTTP surfaces on loopback —
+workspace running `opencode2 serve`. It exposes two HTTP surfaces on loopback —
 a remote/device listener published privately through Tailscale Serve, and a
 local operator listener. Inbound traffic wakes the workspace when it is asleep
 and proxies through once it is healthy. When nothing has happened for a while,
-fern stops the container — but only after proving, twice, that nothing is
-active. On top of that lifecycle kernel sits a durable task pipeline: a phone
-(or CLI) submits a coding task, fern admits it into a SQLite journal, delivers
+fern stops or freezes the container — but only after proving, twice, that
+nothing is active. On top of that lifecycle kernel sits a durable task pipeline:
+a paired phone submits a coding task, fern admits it into a SQLite journal, delivers
 it to OpenCode exactly once, observes it conservatively, seals the result only
-with explicit user authority, optionally verifies it with a fenced host-side
-runner, and publishes it as a draft pull request through a journal-fenced
-GitHub App transport. A paired phone can do all of the submitting, watching,
-and sealing; a desktop can do the rest.
+with explicit user authority, and optionally verifies it with a fenced host-side
+runner. The GitHub App publication reconciler is implemented, but no production
+command creates its initial publication record. In workspace-`gh` mode, users or
+the agent instead run ordinary `gh`/Git mutations directly. A paired phone can
+submit, list, inspect, cancel, and authorize snapshot sealing.
 
 ---
 
@@ -132,19 +133,23 @@ meaningful.
 
 ## 5. The Modules And Their Contracts
 
-The dependency graph is strictly layered; there are no cycles:
+Go enforces an acyclic package graph. The useful architectural grouping is:
 
 ```text
-leaves:     config · control · task · runtime(Docker) · opencodeapi · githubapp
-layer 2:    registry→runtime   watch→runtime   workspace→runtime
-            publication→control   verification→task   taskstore→task
-layer 3:    proxy → {control,publication,runtime,task,taskapi,workspace}
-            taskapi → {githubapp,task,taskresultcoord,taskstore}
-            task{delivery,execution,resultcoord} → {runtime,task,taskstore,workspace}
-            taskverification → {task,taskstore,verification}
-            taskpublicationcoord → {githubapp,task,taskpublication,taskstore}
-root:       cmd/fern imports everything (composition root)
+shared leaves: evidence · gitref · jsoncanon · task
+host ports:    config · control · runtime(Docker) · registry · githubapp · opencodeapi
+policy kernel: workspace · watch · workspacegithub
+durable core:  taskstore · taskapi · taskresult · verification
+coordinators:  taskdelivery · taskexecution · taskresultcoord
+               taskverification · taskpublication · taskpublicationcoord
+ingress:       proxy
+root:          cmd/fern imports and composes the system
 ```
+
+The boundaries are intentionally not a perfectly horizontal stack. For example,
+`taskapi` depends on the result authorizer interface, and `proxy` embeds the task
+API. The important rule is that external effects are behind narrow interfaces
+and the composition root is the only place that selects production authority.
 
 ### 5.1 `internal/runtime` — the Docker port
 
@@ -263,10 +268,11 @@ Unknown routes default to **work**, so a future OpenCode endpoint can never
 silently bypass wake/idle semantics.
 
 Other responsibilities: pairing codes (256-bit, five-minute TTL, digest-stored)
-exchanged for 30-day `__Host-`-style device cookies; per-route CSRF tokens for
-cookie-authenticated mutations with Fetch-Metadata enforcement (Basic-auth
-mutations exempt); reserved-cookie stripping so OpenCode can never mint fern
-identity; and the reverse proxy itself running with `FlushInterval: -1` —
+exchanged for 30-day `__Host-fern_device` cookies; persisted issuance and
+attempt limits; per-route CSRF tokens for cookie-authenticated mutations with
+Fetch-Metadata enforcement (Basic-auth mutations exempt); reserved-cookie
+stripping so OpenCode can never mint fern identity; and the reverse proxy itself
+running with `FlushInterval: -1` —
 immediate flush, no response buffering — which is why SSE streams cleanly
 through it.
 
@@ -364,10 +370,10 @@ raw state is ambiguous; fern resolves it against the intent store:
   no published-on-0.0.0.0, ever.
 - **No compose/swarm/orchestration.** Single host, single workspace, one writer
   enforced by a filesystem lease.
-- **No `docker checkpoint`.** Broken upstream; fern's "pause" is graceful stop
-  + intent, with freezer support defensively handled (`Frozen` observations are
-  thawed before stop/destroy/resume) and true freezer-based waking on the
-  roadmap behind `idle.mode`.
+- **No `docker checkpoint`.** Fern's domain pause is a committed intent plus the
+  configured suspension effect: graceful stop in `idle.mode: stop`, or cgroup
+  freeze in `idle.mode: freeze`. Frozen observations are thawed before
+  stop/destroy transitions that require a running process.
 
 The honest cost of the current stop-based pause: ~2.8–3.1 s cold wake, because
 OpenCode boots from zero. The freezer conversion (`idle.mode: freeze`)
@@ -450,15 +456,16 @@ beginPause        — close admission; refuse if requests in flight
 acquireLifecycle  — exclusive mutation token
 pauseWhileHeld    — Status() → refuse provisioning; clear endpoint if already
                     stopped; else TWO all-idle passes over six surfaces
-pauseRuntime      — runtime.Pause: BeginPause intent → docker stop(10s)
-                    → CommitPause intent
-release           — reopen admission; next request pays a cold (soon: warm) wake
+pauseRuntime      — runtime.Pause: BeginPause intent → configured Docker stop
+                    or freeze effect → CommitPause intent
+release           — reopen admission; next request pays a cold start or thaw
 ```
 
-Failure at any step leaves intent pending or admission closed — the dangerous
-direction is always "stay up," never "die silently."
+Failure releases the in-process fences. An ambiguous external pause effect keeps
+its durable intent pending, so later classification refuses to guess whether
+compute is safely dormant.
 
-### 8.3 Life of a durable task (phone → draft PR)
+### 8.3 Life of a durable task (phone → sealed result)
 
 1. **Admission.** Phone POSTs with an `Idempotency-Key`; fern resolves the base
    ref through GitHub numeric authority, generates the OpenCode session/message
@@ -473,18 +480,22 @@ direction is always "stay up," never "die silently."
    `running`; live permission/form ⇒ `input_required`. Anything else stays
    open-ended. Cancellation commits a fence first, then interrupts or deletes
    proven-undelivered inbox items.
-4. **Sealing.** Success requires explicit authority. The seal path acquires the
-   quiesced fence, demands two matching clean observations, collects Git
-   evidence (exact tree, clean index, bounded manifest, SHA-256), and writes an
-   immutable result row. Verification may then run — host-owned, shell-free,
-   descriptor-pinned executable, process-group contained, clean-commit proven
-   before and after.
-5. **Publication.** Only a sealed+verified tuple enters the journal: bind
-   installation/repository/base SHA/result commit/operation ID, then
-   `push_started → push_observed → pr_create_started → published`. After
-   ambiguity, read-reconcile only — never mutate again. Credentials ride in
-   single-use askpass files; pushes are `--force-with-lease` against a persisted
-   expected SHA.
+4. **Sealing.** A paired user previews one exact clean Git snapshot under a
+   paused fence, then submits that same tuple with an idempotency key. The
+   durable request is revalidated and recollected before an immutable result is
+   written; the attempt becomes `superseded`, not falsely `succeeded`.
+   Verification may then run — host-owned, shell-free, descriptor-pinned,
+   process-group contained, with clean commit state proven before and after.
+5. **Publication forks by authority mode.** Workspace-`gh` users/agents may run
+   direct GitHub mutations, outside Fern's effect journal. App-broker transport
+   can safely reconcile `push_started → push_observed → pr_create_started →
+   published`, but no production API prepares its initial journal row.
+
+There is a current lifecycle defect between steps 4's halves: preview/request
+leaves compute paused, while asynchronous completion asks for a quiesced fence
+that currently requires an already-running target. A seal may wait for unrelated
+upstream traffic to wake the workspace; this needs a real-manager integration
+fix rather than documentation optimism.
 
 ### 8.4 Life of a crash
 
@@ -509,6 +520,7 @@ Fern's states, and who enforces them:
 | Attempt delivery phase | claimed → session_create_started → session_ready → prompt_started | monotonic journal columns |
 | Verification | prepared → running → succeeded / failed / recovery_required | trigger immutability; rerun prohibited after ambiguity |
 | Publication | none → push_started → push_observed → pr_create_started → published | journal-fenced coordinator |
+| Seal request | pending → claimed → completed / rejected | immutable approved tuple + expiring claim revision |
 | Pause intent | none → pending → committed (or shutdown, expiring) | atomic intent files |
 
 Design rule: **illegal states are unrepresentable.** The database rejects
@@ -532,7 +544,7 @@ Every long-lived goroutine has a named owner and a bounded lifetime:
 | Coalesced wake | Manager | done-channel; Close awaits it; 90 s budget |
 | Stream generation + per-attempt parser | StreamController | operations token serializes; done awaited |
 | Verification reaper | one runner invocation | process-group teardown |
-| Legacy publication worker | Coordinator (currently unwired) | Close(ctx) |
+| Legacy publication worker | No production goroutine; package retained but unwired | n/a |
 
 Locks: `wakeMu` and `admissionMu` in the Manager with a single legal nesting
 direction (admissionMu→wakeMu), documented on the type. Tokens: the lifecycle
@@ -553,8 +565,9 @@ on timeout, the client is intentionally leaked rather than raced.
 
 | Kind | Contents |
 | --- | --- |
-| Memory only | cached endpoint + generation, closing flags, admission counters, activity model, last wake trace, pairing rate-limit state |
-| Disk (fern-owned) | host lease; pause-intent files; JSON control store (devices/workflows/legacy pubs); SQLite task journal; GitHub App credentials |
+| Memory only | cached endpoint + generation, closing flags, admission counters, activity model, last wake trace |
+| Disk (fern-owned) | host lease; pause-intent files; JSON control store (devices/workflows/legacy pubs/operator credential ID); persisted pairing limiter; SQLite task journal; GitHub App credentials |
+| Docker volumes | OpenCode data; optional persistent workspace-`gh` config and credentials |
 | Derived from Docker, never persisted | container existence/state, dynamic port, actual image ID, spec-fingerprint label |
 | Duplicated by design | cached endpoint vs inspect truth (generation-invalidated); desired-spec fingerprint vs recomputed (drift detector); JSON store vs task journal (documented compatibility split) |
 
@@ -574,17 +587,19 @@ persisted — it is re-derived and re-attested on every wake.
    backend, not just a broken one.
 3. **Header hygiene.** Inbound forwarding chains stripped; outbound regenerated
    from trusted config; reserved cookie names stripped from upstream responses.
-4. **Narrow authority.** Numeric GitHub IDs over URLs; installation-scoped
-   short-lived tokens over account tokens; askpass files invisible in argv/logs/
-   evidence; verification commands host-owned and structurally incapable of
-   being chosen by clients.
+4. **Narrow authority.** Numeric GitHub IDs over URLs; in App mode,
+   repository-scoped short-lived tokens and askpass files invisible in argv,
+   logs, and evidence; in workspace-`gh` mode, an explicit trusted-workspace
+   credential boundary; verification commands host-owned and structurally
+   incapable of being chosen by clients.
 5. **Tamper-evident local state.** Intent files and control store enforce
    private dirs, no symlinks, single hardlink, bounded sizes, atomic replace +
    fsync — cheap, filesystem-native resistance to casual tampering.
 
-Named residual risks are kept in `docs/SECURITY.md`: broad host-gh prototype
-credentials, unencrypted App credentials, cookie namespace not yet `__Host-`,
-no general pairing rate limiter — each tracked, none hidden.
+Named residual risks are kept in `docs/SECURITY.md`: unencrypted App and
+workspace-`gh` credentials, trusted-workspace credential exposure, operator
+forms without device-style tokens, and incomplete physical acceptance — each
+tracked, none hidden.
 
 ---
 
@@ -612,24 +627,31 @@ survive a crash alongside it.
 
 Honest architecture includes its holes:
 
-1. **Generic terminal-success observer** — unbuilt; the pipeline stalls after
-   `input_required` without user sealing. Design target: polling adapter over
-   v2's cursor-replayable log/history, isolated behind an interface so eventual
-   upstream primitives (`wait`, Last-Event-ID replay — issue #38458) slot in.
-2. **Failed-vs-paused conflation on unhealthy starts** — a container that starts
+1. **User-seal lifecycle** — preview/request leaves compute paused but the
+   asynchronous coordinator requires an already-running target. Completion can
+   stall until unrelated traffic wakes it. Preview is also a side-effecting GET.
+2. **Phone replay and status** — the UI creates a new idempotency key for every
+   invocation and exposes no coherent seal rejection, verification, or brokered
+   publication status after an accepted command.
+3. **Generic terminal-success observer** — unbuilt. Automatic completion still
+   requires a future durable authoritative OpenCode primitive; idle, empty
+   inbox, and volatile event history remain insufficient.
+4. **Brokered publication admission** — transport and reconciliation exist, but
+   no production API prepares the initial publication journal row.
+5. **Workspace-`gh` binding validation** — a new immutable binding may be stored
+   before the first live credential/repository check.
+6. **Failed-vs-paused conflation on unhealthy starts** — a container that starts
    but never passes the health probe currently receives a *committed* pause
    intent and presents as dormancy. Deliberate anti-crash-loop behavior or bug —
    decision pending; fix is a distinct intent flavor or documented expectation.
-3. **Durable approvals** — no approvals table/API; permission answers die with
+7. **Durable approvals** — no approvals table/API; permission answers die with
    the process epoch.
-4. **Notifications** — absent entirely; the phone learns only by asking.
-5. **Multi-workspace** — singular by declaration throughout (one Manager, one
+8. **Notifications** — absent entirely; the phone learns only by asking.
+9. **Multi-workspace** — singular by declaration throughout (one Manager, one
    stream, one config shape). Honest simplicity, real ceiling.
-6. **Legacy publisher lane** — implemented, tested, wired out of production;
+10. **Legacy publisher lane** — implemented, tested, wired out of production;
    awaiting formal retirement or revival.
-7. **Fingerprint env values** — labels hash keys only (likely deliberate secret
-   hygiene); intent undocumented.
-8. **Physical acceptance** — real TLS/WSS behavior, reboot/restore drills,
+11. **Physical acceptance** — real TLS/WSS behavior, reboot/restore drills,
    tailnet ACL-negative tests remain operator-run exercises.
 
 ---
@@ -638,11 +660,11 @@ Honest architecture includes its holes:
 
 | Term | Meaning |
 | --- | --- |
-| **Pause** (domain) | Graceful `docker stop` with journalled intent. Not Docker's freezer pause. |
-| **Frozen** | Docker's freezer-cgroup pause, surfaced as an observation flag; thawed before mutation. |
+| **Pause** (domain) | Compute suspended under committed Fern intent, by graceful stop or configured cgroup freeze. |
+| **Frozen** | Docker's observed freezer-cgroup state; thawed before incompatible lifecycle mutations. |
 | **Generation** | Monotonic counter for attested backend endpoints (manager-level). |
 | **Epoch** | Monotonic counter for SSE connections (watcher-level). Stale either ⇒ ignored. |
-| **Seal** | Atomically bind immutable Git/OpenCode evidence to a succeeded attempt. Requires the quiesced fence. |
+| **Seal** | Atomically bind immutable Git/OpenCode identity and Git evidence either to proven execution success or an exact user-authorized snapshot. |
 | **Quiesced fence** | Admission closed + lifecycle held + two clean observations + compute stopped, retained through evidence collection. |
 | **Intent** | Durable pre-effect record converting ambiguous external state into classified state. |
 | **Workspace-gh / App-broker** | The two GitHub authority modes: agent-owned `gh` in-container vs fern-brokered installation tokens. |
@@ -656,15 +678,18 @@ Honest architecture includes its holes:
 | --- | --- |
 | Composition, wiring, shutdown order | `cmd/fern/up.go` |
 | Wake/admission/pause machinery | `internal/workspace/manager.go` |
-| Docker translation + classification | `internal/runtime/docker.go` (`inspectByReference`) |
-| Drift + volume + exec policy | `internal/runtime/docker.go` (`verifyActualSpec`, `ensureVolume`, `ExecWorkspaceGH`) |
+| Docker translation + classification | `internal/runtime/classification.go`, `lifecycle.go` |
+| Drift + volume + exec policy | `internal/runtime/spec.go`, `provision.go`, `exec.go` |
 | SSE parsing / epochs | `internal/watch/event.go`, `controller.go` |
 | Idle policy actor | `internal/watch/supervisor.go` (`apply` is the policy core) |
 | Ingress classification + security | `internal/proxy/proxy.go`, `pairing.go`, `browser_security.go` |
 | Control routes | `internal/proxy/control.go`, `gateway.go` |
 | Intent journal | `internal/registry/intent.go`, `lock.go` |
 | Task schema + triggers | `internal/taskstore/migrations.go` |
-| Delivery / execution / sealing | `internal/taskdelivery`, `internal/taskexecution`, `internal/taskresultcoord` |
+| Delivery / execution / sealing | `internal/taskdelivery`, `internal/taskexecution`, `internal/taskresultcoord`, `internal/taskstore/seal_request.go` |
 | Verification runner | `internal/verification` |
 | Publication transport | `internal/taskpublication`, `internal/taskpublicationcoord` |
+| Workspace GitHub authority | `internal/workspacegithub`, `internal/runtime/exec.go` |
+| Shared validators | `internal/evidence`, `internal/gitref`, `internal/jsoncanon` |
+| Backup and restore | `scripts/fern-host-backup.py`, `integration/release/run.sh` |
 | Contract characterization | `integration/opencode-contract/contract_harness.py` |
