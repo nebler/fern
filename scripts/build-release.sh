@@ -75,6 +75,8 @@ cp deploy/systemd/fern.service deploy/systemd/fern.env.example deploy/systemd/fe
 	"$staging/deploy/systemd/"
 cp deploy/release/release-manifest.schema.json \
 	deploy/release/backup-manifest.schema.json \
+	deploy/release/compatibility-manifest.json \
+	deploy/release/compatibility-manifest.schema.json \
 	deploy/release/transaction-manifest.schema.json \
 	deploy/release/transaction-manifest.example.json \
 	"$staging/deploy/release/"
@@ -88,6 +90,8 @@ env_sha=$(shasum -a 256 "$staging/deploy/systemd/fern.env.example" | awk '{print
 config_sha=$(shasum -a 256 "$staging/deploy/systemd/fern.yaml.example" | awk '{print $1}')
 release_schema_sha=$(shasum -a 256 "$staging/deploy/release/release-manifest.schema.json" | awk '{print $1}')
 backup_schema_sha=$(shasum -a 256 "$staging/deploy/release/backup-manifest.schema.json" | awk '{print $1}')
+compatibility_manifest_sha=$(shasum -a 256 "$staging/deploy/release/compatibility-manifest.json" | awk '{print $1}')
+compatibility_schema_sha=$(shasum -a 256 "$staging/deploy/release/compatibility-manifest.schema.json" | awk '{print $1}')
 transaction_schema_sha=$(shasum -a 256 "$staging/deploy/release/transaction-manifest.schema.json" | awk '{print $1}')
 transaction_example_sha=$(shasum -a 256 "$staging/deploy/release/transaction-manifest.example.json" | awk '{print $1}')
 backup_utility_sha=$(shasum -a 256 "$staging/scripts/fern-host-backup.py" | awk '{print $1}')
@@ -124,6 +128,8 @@ cat >"$staging/RELEASE-MANIFEST.json" <<EOF
     {"path": "deploy/systemd/fern.yaml.example", "sha256": "$config_sha"},
     {"path": "deploy/release/release-manifest.schema.json", "sha256": "$release_schema_sha"},
     {"path": "deploy/release/backup-manifest.schema.json", "sha256": "$backup_schema_sha"},
+    {"path": "deploy/release/compatibility-manifest.json", "sha256": "$compatibility_manifest_sha"},
+    {"path": "deploy/release/compatibility-manifest.schema.json", "sha256": "$compatibility_schema_sha"},
     {"path": "deploy/release/transaction-manifest.example.json", "sha256": "$transaction_example_sha"},
     {"path": "deploy/release/transaction-manifest.schema.json", "sha256": "$transaction_schema_sha"},
     {"path": "scripts/fern-host-backup.py", "sha256": "$backup_utility_sha"}
@@ -132,6 +138,9 @@ cat >"$staging/RELEASE-MANIFEST.json" <<EOF
     "transaction_manifest_schema": "deploy/release/transaction-manifest.schema.json",
     "transaction_example": "deploy/release/transaction-manifest.example.json",
     "transaction_receipt": "generated-at-restore-target/TRANSACTION-MANIFEST.json",
+    "compatibility_manifest": "deploy/release/compatibility-manifest.json",
+    "first_supported_baseline": "baseline-v1-repository-established-not-historical-release",
+    "upgrade_harness": "integration/upgrade/run.sh",
     "host_utility": "scripts/fern-host-backup.py",
     "support_status": "installed-cli-operational-recovery",
     "activation_model": "staged-filesystem-docker-best-effort-rollback",

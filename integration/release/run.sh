@@ -72,6 +72,9 @@ assert manifest["upgrade_rollback"] == {
     "transaction_manifest_schema": "deploy/release/transaction-manifest.schema.json",
     "transaction_example": "deploy/release/transaction-manifest.example.json",
     "transaction_receipt": "generated-at-restore-target/TRANSACTION-MANIFEST.json",
+    "compatibility_manifest": "deploy/release/compatibility-manifest.json",
+    "first_supported_baseline": "baseline-v1-repository-established-not-historical-release",
+    "upgrade_harness": "integration/upgrade/run.sh",
     "host_utility": "scripts/fern-host-backup.py",
     "support_status": "installed-cli-operational-recovery",
     "activation_model": "staged-filesystem-docker-best-effort-rollback",
@@ -84,6 +87,14 @@ for entry in manifest["artifacts"] + manifest["deployment_files"]:
 
 for path in root.glob("deploy/release/*.json"):
     json.loads(path.read_text())
+compatibility = json.loads((root / "deploy/release/compatibility-manifest.json").read_text())
+assert compatibility["schema_version"] == 1
+assert compatibility["first_supported_baseline"]["id"] == "baseline-v1"
+assert compatibility["first_supported_baseline"]["status"] == "repository-established"
+assert compatibility["first_supported_baseline"]["historical_release"] is False
+assert compatibility["first_supported_baseline"]["historical_tag"] is None
+assert compatibility["first_supported_baseline"]["task_store_schema"] == 4
+assert compatibility["current_release_schemas"]["task_store"] == 5
 transaction = json.loads((root / "deploy/release/transaction-manifest.example.json").read_text())
 assert transaction["backup"]["format"] == "fern-host-backup-v1"
 assert transaction["activation"]["model"] == "staged-current-previous"

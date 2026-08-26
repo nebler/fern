@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fern.invalid/schemas/compatibility-manifest-v1.json",
+  "title": "Fern durable schema compatibility manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["$schema", "schema_version", "first_supported_baseline", "current_release_schemas", "verification", "limitations"],
+  "properties": {
+    "$schema": {"const": "./compatibility-manifest.schema.json"},
+    "schema_version": {"const": 1},
+    "first_supported_baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "status", "source_commit", "historical_release", "historical_tag", "task_store_schema", "control_state_schema", "github_app_credentials_schema"],
+      "properties": {
+        "id": {"const": "baseline-v1"},
+        "status": {"const": "repository-established"},
+        "source_commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        "historical_release": {"const": false},
+        "historical_tag": {"type": "null"},
+        "task_store_schema": {"const": 4},
+        "control_state_schema": {"const": 1},
+        "github_app_credentials_schema": {"const": 1}
+      }
+    },
+    "current_release_schemas": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task_store", "control_state", "github_app_credentials"],
+      "properties": {
+        "task_store": {"const": 5},
+        "control_state": {"const": 1},
+        "github_app_credentials": {"const": 1}
+      }
+    },
+    "verification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixture_metadata", "fixture_metadata_sha256", "upgrade_harness", "rollback_prerequisite"],
+      "properties": {
+        "fixture_metadata": {"const": "internal/compatibility/testdata/baseline-v1/metadata.json"},
+        "fixture_metadata_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "upgrade_harness": {"const": "integration/upgrade/run.sh"},
+        "rollback_prerequisite": {"const": "verified-offline-pre-upgrade-backup"}
+      }
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 3,
+      "items": {"type": "string", "minLength": 1}
+    }
+  }
+}
