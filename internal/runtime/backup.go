@@ -314,6 +314,9 @@ func extractDockerArchive(stream io.Reader, destination string) error {
 			}
 			continue
 		}
+		if header.Typeflag == tar.TypeDir {
+			name = strings.TrimSuffix(name, "/")
+		}
 		clean := filepath.Clean(filepath.FromSlash(name))
 		if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || filepath.ToSlash(clean) != name {
 			return fmt.Errorf("unsafe Docker archive path %q", header.Name)

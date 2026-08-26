@@ -68,6 +68,8 @@ var commandExamples = map[string]string{
 	"debug events":                  "fern debug events --name demo",
 	"debug wake":                    "fern debug wake --name demo",
 	"debug quarantine-publications": "fern debug quarantine-publications --name demo",
+	"backup create":                 "fern backup create --output /srv/backups/fern-generation",
+	"backup restore":                "fern backup restore --backup /srv/backups/fern-generation",
 }
 
 func parseFlags(fs *flag.FlagSet, args []string) error {
