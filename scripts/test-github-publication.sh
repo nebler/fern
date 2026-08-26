@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-echo "Live standalone GitHub publication is disabled. Use deterministic package fakes; a future live rehearsal must drive the durable running control coordinator." >&2
+echo "Live standalone GitHub publication is retired. Use the durable task publication API served by fern up, or fern github publish --dry-run for local preflight." >&2
 exit 2

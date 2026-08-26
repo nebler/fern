@@ -8,203 +8,77 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/nebler/fern/internal/control"
-	"github.com/nebler/fern/internal/publication"
 	"github.com/nebler/fern/internal/runtime"
 )
 
-type fakePublicationExecutor struct {
-	store *control.Store
-	calls atomic.Int32
-	err   error
-}
-
-func (executor *fakePublicationExecutor) Execute(_ context.Context, id string) (control.Publication, error) {
-	executor.calls.Add(1)
-	record, _ := executor.store.Publication(id)
-	if executor.err != nil {
-		return record, executor.err
-	}
-	if record.ResultCommit == "" {
-		prepared := proxyPreparedPublication()
-		if err := executor.store.PreparePublication(id, prepared, time.Now()); err != nil {
-			return record, err
-		}
-	}
-	pull := proxyPullRequestObservation(proxyPreparedPublication())
-	return executor.store.FinishPublication(id, &pull, "", time.Now())
-}
-
-func TestControlWorkflowAndPublicationDoNotWakeWorkspace(t *testing.T) {
+func TestLegacyWorkflowAndPublicationRoutesAreAuthenticatedGoneWithoutMutation(t *testing.T) {
 	t.Parallel()
 	store, err := control.Open(filepath.Join(t.TempDir(), "control"), "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	workflow, err := store.CreateWorkflow("Fix signup", "ses_123", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
 	waker := &countingWaker{}
-	executor := &fakePublicationExecutor{store: store}
-	handler := NewWithControls(waker, runtime.ServerAuth{Password: "secret"}, Controls{
-		Store: store, Publications: executor, ControlAuth: ControlAuth{Password: "control-secret"},
-	}, testLogger())
-	request := httptest.NewRequest(http.MethodPost, "/fern/api/v1/workflows/"+workflow.ID+"/publish", strings.NewReader(`{"operation":"operation","title":"Fix signup"}`))
-	request.Header.Set("Content-Type", "application/json")
-	request.SetBasicAuth("fern", "control-secret")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusOK {
-		t.Fatalf("publication status=%d body=%q", response.Code, response.Body.String())
+	handler := NewWithControls(waker, runtime.ServerAuth{Password: "secret"}, Controls{Store: store, ControlAuth: ControlAuth{Password: "control-secret"}}, testLogger())
+	tests := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/fern/api/v1/workflows"},
+		{http.MethodPost, "/fern/api/v1/workflows"},
+		{http.MethodGet, "/fern/api/v1/workflows/workflow-1"},
+		{http.MethodPost, "/fern/api/v1/workflows/workflow-1/publish"},
+		{http.MethodGet, "/fern/api/v1/publications"},
+		{http.MethodPost, "/fern/workflows"},
+		{http.MethodPost, "/fern/workflows/workflow-1/publish"},
 	}
-	if waker.wakes.Load() != 0 || executor.calls.Load() != 1 {
-		t.Fatalf("wake=%d publications=%d", waker.wakes.Load(), executor.calls.Load())
+	for _, test := range tests {
+		request := httptest.NewRequest(test.method, test.path, strings.NewReader(`{"title":"must not persist"}`))
+		request.SetBasicAuth("fern", "control-secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusGone {
+			t.Errorf("%s %s status=%d body=%q", test.method, test.path, response.Code, response.Body.String())
+		}
 	}
-	updated, _ := store.Workflow(workflow.ID)
-	publicationRecord, exists := store.Publication(updated.PublicationID)
-	if !exists || updated.Status != control.WorkflowPublished || publicationRecord.State != "published" || publicationRecord.PullURL == "" {
-		t.Fatalf("workflow=%+v publication=%+v exists=%t", updated, publicationRecord, exists)
+	if len(store.Workflows()) != 0 || len(store.Publications()) != 0 || waker.wakes.Load() != 0 {
+		t.Fatalf("retired routes mutated or woke state: workflows=%d publications=%d wakes=%d", len(store.Workflows()), len(store.Publications()), waker.wakes.Load())
 	}
-}
-
-func TestControlPublicationRejectsCrossOriginBeforeFencing(t *testing.T) {
-	t.Parallel()
-	store, err := control.Open(filepath.Join(t.TempDir(), "control"), "demo")
-	if err != nil {
-		t.Fatal(err)
+	unauthenticated := httptest.NewRecorder()
+	handler.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, "/fern/api/v1/publications", nil))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated retired route status=%d", unauthenticated.Code)
 	}
-	workflow, err := store.CreateWorkflow("Fix signup", "ses_123", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	executor := &fakePublicationExecutor{store: store}
-	handler := NewWithControls(&countingWaker{}, runtime.ServerAuth{Password: "secret"}, Controls{
-		Store: store, Publications: executor, ControlAuth: ControlAuth{Password: "control-secret"},
-	}, testLogger())
-	request := httptest.NewRequest(http.MethodPost, "/fern/api/v1/workflows/"+workflow.ID+"/publish", strings.NewReader(`{}`))
-	request.Host = "fern.example"
-	request.Header.Set("Origin", "https://evil.example")
-	request.Header.Set("Content-Type", "application/json")
-	request.SetBasicAuth("fern", "control-secret")
-	response := httptest.NewRecorder()
-	handler.ServeHTTP(response, request)
-	if response.Code != http.StatusForbidden || executor.calls.Load() != 0 {
-		t.Fatalf("status=%d publications=%d", response.Code, executor.calls.Load())
+	for _, path := range []string{"/fern/api/v1/workflows/workflow-1/other", "/fern/api/v1/workflows//publish", "/fern/workflows/workflow-1", "/fern/api/v1/publications/one"} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.SetBasicAuth("fern", "control-secret")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Errorf("nearby non-route %s status=%d", path, response.Code)
+		}
 	}
 }
 
-func TestControlPublicationRequiresConfiguredAuthentication(t *testing.T) {
-	t.Parallel()
+func TestControlPageDoesNotRenderLegacyWorkflowOrPublicationUI(t *testing.T) {
 	store, err := control.Open(filepath.Join(t.TempDir(), "control"), "demo")
 	if err != nil {
-		t.Fatal(err)
-	}
-	workflow, err := store.CreateWorkflow("Fix signup", "ses_123", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	executor := &fakePublicationExecutor{store: store}
-	request := httptest.NewRequest(http.MethodPost, "/fern/api/v1/workflows/"+workflow.ID+"/publish", strings.NewReader(`{}`))
-	request.Header.Set("Content-Type", "application/json")
-	response := httptest.NewRecorder()
-	NewWithControls(&countingWaker{}, runtime.ServerAuth{}, Controls{Store: store, Publications: executor}, testLogger()).ServeHTTP(response, request)
-	if response.Code != http.StatusUnauthorized || executor.calls.Load() != 0 {
-		t.Fatalf("status=%d publications=%d", response.Code, executor.calls.Load())
-	}
-}
-
-func TestControlPublicationReportsBusyWorkspace(t *testing.T) {
-	t.Parallel()
-	store, err := control.Open(filepath.Join(t.TempDir(), "control"), "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	workflow, err := store.CreateWorkflow("Fix signup", "ses_123", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	executor := &fakePublicationExecutor{store: store, err: errors.New("busy")}
-	request := httptest.NewRequest(http.MethodPost, "/fern/api/v1/workflows/"+workflow.ID+"/publish", strings.NewReader(`{}`))
-	request.Header.Set("Content-Type", "application/json")
-	request.SetBasicAuth("fern", "control-secret")
-	response := httptest.NewRecorder()
-	NewWithControls(&countingWaker{}, runtime.ServerAuth{Password: "secret"}, Controls{Store: store, Publications: executor, ControlAuth: ControlAuth{Password: "control-secret"}}, testLogger()).ServeHTTP(response, request)
-	if response.Code != http.StatusServiceUnavailable || executor.calls.Load() != 1 {
-		t.Fatalf("status=%d publications=%d", response.Code, executor.calls.Load())
-	}
-}
-
-func TestInvalidPublicationDoesNotPoisonWorkflow(t *testing.T) {
-	t.Parallel()
-	store, err := control.Open(filepath.Join(t.TempDir(), "control"), "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	workflow, err := store.CreateWorkflow("Fix signup", "ses_123", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	executor := &fakePublicationExecutor{store: store}
-	request := httptest.NewRequest(http.MethodPost, "/fern/api/v1/workflows/"+workflow.ID+"/publish", strings.NewReader(`{"operation":"../unsafe"}`))
-	request.Header.Set("Content-Type", "application/json")
-	request.SetBasicAuth("fern", "control-secret")
-	response := httptest.NewRecorder()
-	NewWithControls(&countingWaker{}, runtime.ServerAuth{Password: "secret"}, Controls{Store: store, Publications: executor, ControlAuth: ControlAuth{Password: "control-secret"}}, testLogger()).ServeHTTP(response, request)
-	updated, _ := store.Workflow(workflow.ID)
-	if response.Code != http.StatusUnprocessableEntity || updated.PublicationID != "" || executor.calls.Load() != 0 {
-		t.Fatalf("status=%d workflow=%+v publications=%d", response.Code, updated, executor.calls.Load())
-	}
-}
-
-func TestFailedPublicationRemainsRetryableInControlPage(t *testing.T) {
-	t.Parallel()
-	store, err := control.Open(filepath.Join(t.TempDir(), "control"), "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	workflow, err := store.CreateWorkflow("Fix signup", "ses_123", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	publicationRecord, _, err := store.RequestPublication(workflow.ID, control.Publication{
-		ID: "publication-1", Operation: "operation", Title: "Fix signup",
-	}, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.FinishPublication(publicationRecord.ID, nil, "publication failed", time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/fern/control", nil)
 	request.SetBasicAuth("fern", "control-secret")
 	response := httptest.NewRecorder()
-	NewWithControls(nil, runtime.ServerAuth{Password: "secret"}, Controls{
-		Store: store, Publications: &fakePublicationExecutor{store: store}, ControlAuth: ControlAuth{Password: "control-secret"},
-	}, testLogger()).ServeHTTP(response, request)
-	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), "Retry publication") {
+	NewWithControls(nil, runtime.ServerAuth{Password: "secret"}, Controls{Store: store, ControlAuth: ControlAuth{Password: "control-secret"}}, testLogger()).ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
 	}
-}
-
-func proxyPreparedPublication() control.PreparedPublication {
-	return control.PreparedPublication{
-		RepositoryID: 123, RepositoryFullName: "owner/repo",
-		BaseSHA: strings.Repeat("b", 40), BaseRef: "main",
-		ResultCommit: strings.Repeat("a", 40), Branch: "fern/demo/operation",
-	}
-}
-
-func proxyPullRequestObservation(prepared control.PreparedPublication) control.PullRequestObservation {
-	return control.PullRequestObservation{
-		TargetRepositoryID: prepared.RepositoryID, TargetRepositoryFullName: prepared.RepositoryFullName,
-		Number: 1, URL: "https://github.com/owner/repo/pull/1", State: "open", Draft: true,
-		Base: control.PullRequestRefObservation{RepositoryID: prepared.RepositoryID, RepositoryFullName: prepared.RepositoryFullName, RepositoryOwner: "owner", RepositoryName: "repo", Ref: prepared.BaseRef, SHA: prepared.BaseSHA},
-		Head: control.PullRequestRefObservation{RepositoryID: prepared.RepositoryID, RepositoryFullName: prepared.RepositoryFullName, RepositoryOwner: "owner", RepositoryName: "repo", Ref: prepared.Branch, SHA: prepared.ResultCommit},
+	for _, retired := range []string{"Tracked work", "Track OpenCode session", "Publish draft PR", "Retry publication", "<h2>Publications</h2>"} {
+		if strings.Contains(response.Body.String(), retired) {
+			t.Errorf("control page retained %q", retired)
+		}
 	}
 }
 
@@ -250,66 +124,42 @@ func TestOperatorMutationUsesTrustedOriginNotClientHost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	now := time.Now()
+	trustedDevice, err := store.AddDevice("trusted", "Trusted", now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejectedDevice, err := store.AddDevice("rejected", "Rejected", now, now.Add(time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
 	handlers, err := NewHandlers(nil, runtime.ServerAuth{Password: "backend-secret"}, Controls{
 		Store: store, ControlAuth: ControlAuth{Password: "control-secret"},
 	}, TrustedOrigins{Remote: "https://fern.example.ts.net", Operator: "http://127.0.0.1:8081"}, testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodPost, "/fern/api/v1/workflows", strings.NewReader(`{"title":"Trusted","sessionId":"ses_1"}`))
+	request := httptest.NewRequest(http.MethodDelete, "/fern/api/v1/devices/"+trustedDevice.ID, nil)
 	request.Host = "spoofed.example"
 	request.Header.Set("Origin", "http://127.0.0.1:8081")
-	request.Header.Set("Content-Type", "application/json")
 	request.SetBasicAuth("fern", "control-secret")
 	response := httptest.NewRecorder()
 	handlers.Operator.ServeHTTP(response, request)
-	if response.Code != http.StatusCreated {
+	if response.Code != http.StatusNoContent {
 		t.Fatalf("trusted operator mutation status=%d body=%q", response.Code, response.Body.String())
 	}
 
-	request = httptest.NewRequest(http.MethodPost, "/fern/api/v1/workflows", strings.NewReader(`{"title":"Rejected","sessionId":"ses_2"}`))
+	request = httptest.NewRequest(http.MethodDelete, "/fern/api/v1/devices/"+rejectedDevice.ID, nil)
 	request.Host = "127.0.0.1:8081"
 	request.Header.Set("Origin", "http://spoofed.example")
-	request.Header.Set("Content-Type", "application/json")
 	request.SetBasicAuth("fern", "control-secret")
 	response = httptest.NewRecorder()
 	handlers.Operator.ServeHTTP(response, request)
 	if response.Code != http.StatusForbidden {
 		t.Fatalf("cross-origin operator mutation status=%d", response.Code)
 	}
-}
-
-func TestOversizedWorkflowFormDoesNotMutateState(t *testing.T) {
-	t.Parallel()
-	store, err := control.Open(filepath.Join(t.TempDir(), "control"), "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	body := "title=" + strings.Repeat("x", 20<<10) + "&sessionId=ses_demo"
-	request := httptest.NewRequest(http.MethodPost, "/fern/workflows", strings.NewReader(body))
-	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	request.SetBasicAuth("fern", "control-secret")
-	response := httptest.NewRecorder()
-	NewWithControls(nil, runtime.ServerAuth{Password: "secret"}, Controls{Store: store, ControlAuth: ControlAuth{Password: "control-secret"}}, testLogger()).ServeHTTP(response, request)
-	if response.Code != http.StatusRequestEntityTooLarge && response.Code != http.StatusBadRequest {
-		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
-	}
-	if workflows := store.Workflows(); len(workflows) != 0 {
-		t.Fatalf("oversized form created workflows: %+v", workflows)
-	}
-}
-
-func TestGeneratedPublicationOperationAlwaysStartsAlphanumeric(t *testing.T) {
-	t.Parallel()
-	for range 100 {
-		id, err := randomCredential()
-		if err != nil {
-			t.Fatal(err)
-		}
-		operation := "op-" + id[:13]
-		if err := publication.ValidateRequest(publication.Request{Operation: operation, Title: "Demo"}); err != nil {
-			t.Fatalf("generated operation %q failed validation: %v", operation, err)
-		}
+	if _, valid, err := store.AuthenticateDeviceIdentity("rejected", now); err != nil || !valid {
+		t.Fatalf("cross-origin mutation changed device: valid=%t err=%v", valid, err)
 	}
 }
 

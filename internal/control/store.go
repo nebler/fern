@@ -62,9 +62,8 @@ type Workflow struct {
 	Revision      uint64         `json:"revision"`
 }
 
-// Publication is the durable record of one publish-to-GitHub operation,
-// including its lifecycle state, prepared repository tuple, and pull request
-// proof. Legacy display-only fields are retained for old terminal records.
+// Publication is read-only audit evidence from the retired control-plane
+// publication path. Only explicit offline quarantine metadata may be added.
 type Publication struct {
 	SchemaVersion      int                     `json:"schemaVersion,omitempty"`
 	ID                 string                  `json:"id"`
@@ -81,7 +80,7 @@ type Publication struct {
 	ResultCommit       string                  `json:"resultCommit,omitempty"`
 	Branch             string                  `json:"branch,omitempty"`
 	PullRequest        *PullRequestObservation `json:"pullRequest,omitempty"`
-	// Legacy fields are retained only so old terminal records remain displayable.
+	// Legacy fields are retained so old terminal records remain audit-readable.
 	Base             string    `json:"base,omitempty"`
 	Repository       string    `json:"repository,omitempty"`
 	Commit           string    `json:"commit,omitempty"`
@@ -94,8 +93,8 @@ type Publication struct {
 	QuarantineReason string    `json:"quarantineReason,omitempty"`
 }
 
-// PreparedPublication is the resolved repository tuple recorded before any
-// push begins; publication retries must resolve to the same tuple.
+// PreparedPublication describes the resolved tuple validated while loading
+// versioned audit records.
 type PreparedPublication struct {
 	RepositoryID       int64  `json:"repositoryId"`
 	RepositoryFullName string `json:"repositoryFullName"`
@@ -366,39 +365,8 @@ func (store *Store) RevokeDevice(id string) error {
 	})
 }
 
-// CreateWorkflow durably tracks a new OpenCode session under a recorded
-// workflow, or returns the existing workflow already bound to that session.
-func (store *Store) CreateWorkflow(title, sessionID string, now time.Time) (Workflow, error) {
-	title, sessionID = strings.TrimSpace(title), strings.TrimSpace(sessionID)
-	if title == "" || len(title) > 200 || sessionID == "" || len(sessionID) > 200 {
-		return Workflow{}, errors.New("workflow title and OpenCode session ID are required and bounded")
-	}
-	id, err := randomID()
-	if err != nil {
-		return Workflow{}, err
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	for _, existing := range store.data.Workflows {
-		if existing.SessionID == sessionID {
-			if existing.Title != title {
-				return Workflow{}, errors.New("OpenCode session is already tracked with a different title")
-			}
-			return existing, nil
-		}
-	}
-	if len(store.data.Workflows) >= 256 {
-		return Workflow{}, errors.New("workflow limit reached")
-	}
-	workflow := Workflow{ID: id, Title: title, SessionID: sessionID, Status: WorkflowRecorded, CreatedAt: now.UTC(), UpdatedAt: now.UTC(), Revision: 1}
-	store.data.Workflows[id] = workflow
-	if err := store.commitLocked(func() { delete(store.data.Workflows, id) }); err != nil {
-		return Workflow{}, err
-	}
-	return workflow, nil
-}
-
-// Workflows snapshots every tracked workflow, most recently updated first.
+// Workflows snapshots the retired workflow audit records, most recently
+// updated first. No active control route exposes them.
 func (store *Store) Workflows() []Workflow {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -416,196 +384,6 @@ func (store *Store) Workflow(id string) (Workflow, bool) {
 	defer store.mu.Unlock()
 	workflow, exists := store.data.Workflows[id]
 	return workflow, exists
-}
-
-// UpdateWorkflow transitions a workflow's status and publication linkage.
-func (store *Store) UpdateWorkflow(id string, status WorkflowStatus, publicationID string, now time.Time) (Workflow, error) {
-	if !validWorkflowStatus(status) {
-		return Workflow{}, fmt.Errorf("invalid workflow status %q", status)
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	workflow, exists := store.data.Workflows[id]
-	if !exists {
-		return Workflow{}, os.ErrNotExist
-	}
-	previous := workflow
-	workflow.Status = status
-	workflow.PublicationID = publicationID
-	workflow.UpdatedAt = now.UTC()
-	workflow.Revision++
-	store.data.Workflows[id] = workflow
-	if err := store.commitLocked(func() { store.data.Workflows[id] = previous }); err != nil {
-		return Workflow{}, err
-	}
-	return workflow, nil
-}
-
-// PutPublication durably writes a complete publication record, replacing any
-// prior record with the same ID.
-func (store *Store) PutPublication(publication Publication) error {
-	if publication.ID == "" || publication.WorkflowID == "" || publication.State == "" {
-		return errors.New("publication ID, workflow ID, and state are required")
-	}
-	if publication.SchemaVersion != 0 && (publication.SchemaVersion != PublicationSchemaVersion || !validCurrentPublication(publication)) {
-		return errors.New("publication has invalid durable proof")
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	previous, existed := store.data.Publications[publication.ID]
-	store.data.Publications[publication.ID] = publication
-	err := store.commitLocked(func() {
-		if existed {
-			store.data.Publications[publication.ID] = previous
-		} else {
-			delete(store.data.Publications, publication.ID)
-		}
-	})
-	if err != nil {
-		return err
-	}
-	return nil
-}
-
-// RequestPublication durably binds a new publication request to a workflow. If
-// the workflow already references a publication it is returned unchanged with
-// created=false.
-func (store *Store) RequestPublication(workflowID string, publication Publication, now time.Time) (Publication, bool, error) {
-	if publication.ID == "" || publication.Operation == "" || strings.TrimSpace(publication.Title) == "" {
-		return Publication{}, false, errors.New("publication ID, operation, and title are required")
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	workflow, exists := store.data.Workflows[workflowID]
-	if !exists {
-		return Publication{}, false, os.ErrNotExist
-	}
-	if workflow.PublicationID != "" {
-		existing, exists := store.data.Publications[workflow.PublicationID]
-		if !exists {
-			return Publication{}, false, errors.New("workflow references a missing publication")
-		}
-		return existing, false, nil
-	}
-	if len(store.data.Publications) >= 256 {
-		return Publication{}, false, errors.New("publication limit reached")
-	}
-	previousWorkflow := workflow
-	publication = Publication{
-		SchemaVersion: PublicationSchemaVersion,
-		ID:            publication.ID, Operation: publication.Operation, RequestedBaseRef: publication.RequestedBaseRef,
-		Title: publication.Title, Body: publication.Body,
-	}
-	publication.WorkflowID = workflowID
-	publication.State = PublicationRequested
-	publication.CreatedAt = now.UTC()
-	publication.UpdatedAt = now.UTC()
-	workflow.Status = WorkflowPublicationRequested
-	workflow.PublicationID = publication.ID
-	workflow.UpdatedAt = now.UTC()
-	workflow.Revision++
-	store.data.Publications[publication.ID] = publication
-	store.data.Workflows[workflowID] = workflow
-	if err := store.commitLocked(func() {
-		delete(store.data.Publications, publication.ID)
-		store.data.Workflows[workflowID] = previousWorkflow
-	}); err != nil {
-		return Publication{}, false, err
-	}
-	return publication, true, nil
-}
-
-// PreparePublication records the resolved repository tuple before pushing,
-// rejecting retries that resolved to different repository state.
-func (store *Store) PreparePublication(id string, prepared PreparedPublication, now time.Time) error {
-	if err := validatePreparedPublication(prepared); err != nil {
-		return err
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	publication, exists := store.data.Publications[id]
-	if !exists {
-		return os.ErrNotExist
-	}
-	if publication.SchemaVersion != PublicationSchemaVersion {
-		return errors.New("legacy publication is read-only and requires operator review")
-	}
-	existing := preparedFromPublication(publication)
-	if publication.ResultCommit != "" && existing != prepared {
-		return errors.New("publication retry resolved to different repository state")
-	}
-	if publication.State == PublicationPublished {
-		return nil
-	}
-	previous := publication
-	publication.State = PublicationPrepared
-	publication.RepositoryID = prepared.RepositoryID
-	publication.RepositoryFullName = prepared.RepositoryFullName
-	publication.BaseSHA = prepared.BaseSHA
-	publication.BaseRef = prepared.BaseRef
-	publication.ResultCommit = prepared.ResultCommit
-	publication.Branch = prepared.Branch
-	publication.Error = ""
-	publication.UpdatedAt = now.UTC()
-	store.data.Publications[id] = publication
-	if err := store.commitLocked(func() { store.data.Publications[id] = previous }); err != nil {
-		return err
-	}
-	return nil
-}
-
-// FinishPublication durably closes a publication with either matching pull
-// request proof (success) or an error string (failure), advancing the owning
-// workflow's status to match.
-func (store *Store) FinishPublication(id string, pullRequest *PullRequestObservation, failure string, now time.Time) (Publication, error) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	publication, exists := store.data.Publications[id]
-	if !exists {
-		return Publication{}, os.ErrNotExist
-	}
-	if publication.State == PublicationPublished {
-		return publication, nil
-	}
-	if publication.SchemaVersion != PublicationSchemaVersion {
-		return Publication{}, errors.New("legacy publication is read-only and requires operator review")
-	}
-	if failure == "" {
-		if pullRequest == nil || !validPullRequestObservation(*pullRequest, preparedFromPublication(publication)) {
-			return Publication{}, errors.New("complete matching pull request proof is required for publication success")
-		}
-	} else if pullRequest != nil {
-		return Publication{}, errors.New("failed publication must not include pull request proof")
-	}
-	workflow, exists := store.data.Workflows[publication.WorkflowID]
-	if !exists {
-		return Publication{}, errors.New("publication references a missing workflow")
-	}
-	previousPublication, previousWorkflow := publication, workflow
-	publication.PullRequest = pullRequest
-	if pullRequest != nil {
-		publication.PullURL = pullRequest.URL
-	}
-	publication.Error = failure
-	publication.UpdatedAt = now.UTC()
-	workflow.UpdatedAt = now.UTC()
-	workflow.Revision++
-	if failure == "" {
-		publication.State = PublicationPublished
-		workflow.Status = WorkflowPublished
-	} else {
-		publication.State = PublicationFailed
-		workflow.Status = WorkflowFailed
-	}
-	store.data.Publications[id] = publication
-	store.data.Workflows[workflow.ID] = workflow
-	if err := store.commitLocked(func() {
-		store.data.Publications[id] = previousPublication
-		store.data.Workflows[workflow.ID] = previousWorkflow
-	}); err != nil {
-		return Publication{}, err
-	}
-	return publication, nil
 }
 
 func preparedFromPublication(publication Publication) PreparedPublication {
@@ -782,15 +560,6 @@ func unresolvedLegacyPublication(publication Publication) bool {
 	return publication.State == PublicationRequested || publication.State == PublicationPrepared || publication.State == PublicationFailed
 }
 
-func validWorkflowStatus(status WorkflowStatus) bool {
-	switch status {
-	case WorkflowRecorded, WorkflowWorking, WorkflowWaitingForApproval, WorkflowCompleted, WorkflowPublicationRequested, WorkflowPublished, WorkflowFailed:
-		return true
-	default:
-		return false
-	}
-}
-
 func (store *Store) load() error {
 	file, err := os.OpenFile(store.path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
@@ -874,7 +643,11 @@ func validCurrentPublication(publication Publication) bool {
 	if hasPrepared && validatePreparedPublication(prepared) != nil {
 		return false
 	}
-	if publication.State == PublicationRequested && hasPrepared || publication.State == PublicationPrepared && !hasPrepared || publication.State == PublicationQuarantined && publication.OriginalState == PublicationRequested && hasPrepared || publication.State == PublicationQuarantined && publication.OriginalState == PublicationPrepared && !hasPrepared {
+	effectiveState := publication.State
+	if effectiveState == PublicationQuarantined {
+		effectiveState = publication.OriginalState
+	}
+	if effectiveState == PublicationRequested && hasPrepared || effectiveState == PublicationPrepared && !hasPrepared {
 		return false
 	}
 	if publication.PullRequest != nil {
@@ -1011,14 +784,6 @@ func initializeMaps(state *diskState) {
 func tokenHash(token string) string {
 	sum := sha256.Sum256([]byte(token))
 	return hex.EncodeToString(sum[:])
-}
-
-func randomID() (string, error) {
-	value := make([]byte, 16)
-	if _, err := rand.Read(value); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(value), nil
 }
 
 // OperatorCredentialIDPrefix begins every operator credential identifier so

@@ -162,7 +162,7 @@ func TestTaskPageContainsTokenAndScriptSendsHeader(t *testing.T) {
 	request := httptest.NewRequest(http.MethodGet, "/fern/tasks", nil)
 	request = request.WithContext(context.WithValue(request.Context(), csrfCredentialKey{}, "device-token"))
 	response := httptest.NewRecorder()
-	serveFern(response, request, Controls{Tasks: http.NotFoundHandler()}, false)
+	serveFern(response, request, Controls{Tasks: http.NotFoundHandler()})
 	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), `name="_csrf" id="csrf" value=""`) || !strings.Contains(response.Body.String(), `name="_csrf"`) {
 		t.Fatalf("task form token status=%d body=%q", response.Code, response.Body.String())
 	}

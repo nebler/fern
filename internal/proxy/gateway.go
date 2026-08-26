@@ -31,27 +31,21 @@ form.grid{display:grid;gap:10px}input{width:100%;min-height:48px;padding:13px 14
 <body><main>
 <section class="hero"><div class="mark">F</div><h1>Your workspace is ready.</h1><p>OpenCode owns the coding session. Fern keeps remote identity and workflow delivery around it.</p><div class="status"><span class="dot"></span> Private gateway connected</div>{{if .TasksEnabled}}<a class="primary" href="/fern/tasks">Open task queue</a>{{else}}<a class="primary" href="/">Open OpenCode</a>{{end}}<small>Your OpenCode sessions and configuration persist while compute sleeps.</small></section>
 {{if .Control}}
-<section class="panel"><h2>Tracked work</h2>{{if .Workflows}}<ul>{{range .Workflows}}<li><div class="title">{{.Title}}</div><span class="badge">{{.Status}}</span><span class="meta">OpenCode session {{.SessionID}}</span>{{if and $.PublicationEnabled (ne .Status "published")}}<form method="post" action="/fern/workflows/{{.ID}}/publish"><button type="submit">{{if .PublicationID}}Retry publication{{else}}Publish draft PR{{end}}</button></form>{{end}}</li>{{end}}</ul>{{else}}<p>No OpenCode sessions are tracked by Fern yet.</p>{{end}}
-<form class="grid" method="post" action="/fern/workflows"><input name="title" maxlength="200" placeholder="Workflow title" required><input name="sessionId" maxlength="200" placeholder="OpenCode session ID" required><button type="submit">Track OpenCode session</button></form></section>
 {{if .OnboardingEnabled}}<section class="panel"><h2>GitHub App</h2><p>Create this host's private GitHub App credentials through GitHub's one-time manifest flow.</p><a class="primary" href="/fern/github/app/setup?return=%2Ffern%2Fcontrol%3Fconnected%3D1">Connect GitHub App</a><small>Restart Fern after a successful connection to activate durable tasks.</small></section>{{end}}
 <section class="panel"><h2>Paired devices</h2>{{if .Devices}}<ul>{{range .Devices}}<li><div class="title">{{.Name}}</div><span class="meta">Last seen {{.LastSeen.Format "2006-01-02 15:04 UTC"}}</span><form method="post" action="/fern/devices/{{.ID}}/revoke"><button class="danger" type="submit">Revoke</button></form></li>{{end}}</ul>{{else}}<p>No durable devices are paired.</p>{{end}}</section>
-{{if .Publications}}<section class="panel"><h2>Publications</h2><ul>{{range .Publications}}<li><div class="title">{{.Title}}</div><span class="badge">{{.State}}</span>{{if .PullURL}}<a class="meta" href="{{.PullURL}}">Open draft pull request</a>{{else if .ResultCommit}}<span class="meta">{{.Branch}} at {{.ResultCommit}}</span>{{else if .Commit}}<span class="meta">{{.Branch}} at {{.Commit}}</span>{{end}}</li>{{end}}</ul></section>{{end}}
 {{end}}
 </main></body></html>`))
 
 type landingView struct {
-	Control            bool
-	PublicationEnabled bool
-	Devices            []control.Device
-	Workflows          []control.Workflow
-	Publications       []control.Publication
-	TasksEnabled       bool
-	OnboardingEnabled  bool
+	Control           bool
+	Devices           []control.Device
+	TasksEnabled      bool
+	OnboardingEnabled bool
 }
 
-func gatewayHandler(upstream http.Handler, controls Controls, publicationEnabled bool) http.Handler {
+func gatewayHandler(upstream http.Handler, controls Controls) http.Handler {
 	fern := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		serveFern(writer, request, controls, publicationEnabled)
+		serveFern(writer, request, controls)
 	})
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/fern" || strings.HasPrefix(request.URL.Path, "/fern/") {
@@ -62,7 +56,7 @@ func gatewayHandler(upstream http.Handler, controls Controls, publicationEnabled
 	})
 }
 
-func serveFern(writer http.ResponseWriter, request *http.Request, controls Controls, publicationEnabled bool) {
+func serveFern(writer http.ResponseWriter, request *http.Request, controls Controls) {
 	setFernHeaders(writer.Header())
 	if controls.Onboarding != nil && (request.URL.Path == "/fern/github/app/setup" || request.URL.Path == "/fern/github/app/callback") {
 		if request.URL.Path == "/fern/github/app/setup" && !sameOrigin(request) {
@@ -75,7 +69,7 @@ func serveFern(writer http.ResponseWriter, request *http.Request, controls Contr
 	if controls.Tasks != nil && serveTaskUI(writer, request) {
 		return
 	}
-	if serveControlRoute(writer, request, controls, publicationEnabled) {
+	if serveControlRoute(writer, request, controls) {
 		return
 	}
 	if request.Method != http.MethodGet && request.Method != http.MethodHead {
@@ -93,7 +87,7 @@ func serveFern(writer http.ResponseWriter, request *http.Request, controls Contr
 		}
 		controlPage := request.URL.Path == "/fern/control"
 		view := landingView{
-			Control: controlPage && controls.Store != nil, PublicationEnabled: publicationEnabled && controls.Publications != nil,
+			Control:      controlPage && controls.Store != nil,
 			TasksEnabled: controls.Tasks != nil, OnboardingEnabled: controls.Onboarding != nil,
 		}
 		if controlPage && controls.Store != nil {
@@ -103,8 +97,6 @@ func serveFern(writer http.ResponseWriter, request *http.Request, controls Contr
 				writeUnavailable(writer, "control state")
 				return
 			}
-			view.Workflows = controls.Store.Workflows()
-			view.Publications = controls.Store.Publications()
 		}
 		if err := landingTemplate.Execute(writer, view); err != nil {
 			http.Error(writer, "render landing page", http.StatusInternalServerError)

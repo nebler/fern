@@ -26,25 +26,18 @@ type Waker interface {
 	InvalidateEndpoint(workspace.RequestTarget)
 }
 
-// PublicationExecutor runs a durable publication operation to completion and
-// returns its final control record.
-type PublicationExecutor interface {
-	Execute(context.Context, string) (control.Publication, error)
-}
-
 // Controls bundles the optional control-plane dependencies a gateway handler
 // may serve. A nil member disables its route.
 type Controls struct {
-	Store        *control.Store
-	Publications PublicationExecutor
-	Tasks        http.Handler
-	Onboarding   http.Handler
-	WakeTrace    http.Handler
-	Liveness     http.Handler
-	Readiness    http.Handler
-	Status       http.Handler
-	Metrics      http.Handler
-	ControlAuth  ControlAuth
+	Store       *control.Store
+	Tasks       http.Handler
+	Onboarding  http.Handler
+	WakeTrace   http.Handler
+	Liveness    http.Handler
+	Readiness   http.Handler
+	Status      http.Handler
+	Metrics     http.Handler
+	ControlAuth ControlAuth
 }
 
 // Handlers holds the two production ingress surfaces built by NewHandlers.
@@ -100,8 +93,8 @@ func NewHandlers(waker Waker, auth runtime.ServerAuth, controls Controls, origin
 	return Handlers{
 		Remote: trustedOriginHandler(pairing.remoteHandler(gatewayHandler(upstream, Controls{
 			Tasks: controls.Tasks, Onboarding: controls.Onboarding,
-		}, false), auth), remoteOrigin),
-		Operator: trustedOriginHandler(probeHandler(pairing.operatorHandler(gatewayHandler(upstream, controls, controls.ControlAuth.Password != ""), auth, controls.ControlAuth), controls), operatorOrigin),
+		}), auth), remoteOrigin),
+		Operator: trustedOriginHandler(probeHandler(pairing.operatorHandler(gatewayHandler(upstream, controls), auth, controls.ControlAuth), controls), operatorOrigin),
 	}, nil
 }
 
@@ -206,7 +199,7 @@ func trustedLoopbackOrigin(origin trustedOrigin) bool {
 func newHandler(waker Waker, auth runtime.ServerAuth, controls Controls, log *slog.Logger) http.Handler {
 	pairing := newPairingState(controls.Store)
 	upstream := newUpstreamHandler(waker, log)
-	return pairing.handler(gatewayHandler(upstream, controls, controls.ControlAuth.Password != ""), auth, controls.ControlAuth)
+	return pairing.handler(gatewayHandler(upstream, controls), auth, controls.ControlAuth)
 }
 
 func newUpstreamHandler(waker Waker, log *slog.Logger) http.Handler {

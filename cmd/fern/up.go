@@ -231,6 +231,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 	}
 	observations := make(chan watch.Observation, observationBufferSize)
 	status := observability.NewRegistry()
+	updateLegacyPublicationReadiness(status, controlStore)
 	streamController := watch.NewStreamController(serviceCtx, watch.StreamOptions{Auth: auth}, observations, log)
 	manager := workspace.NewManager(
 		serviceCtx,
@@ -322,6 +323,14 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 		remoteListener: remoteListener, operatorListener: operatorListener,
 		origins: origins, tasks: tasks, status: status, start: start,
 	}, nil
+}
+
+func updateLegacyPublicationReadiness(status *observability.Registry, store *control.Store) {
+	if store.HasUnquarantinedLegacyPublications() {
+		status.Failed(observability.ComponentLegacyPublication, errors.New("legacy control publications require offline quarantine"))
+		return
+	}
+	status.Healthy(observability.ComponentLegacyPublication)
 }
 
 // statusWaker observes lifecycle outcomes already required by admitted

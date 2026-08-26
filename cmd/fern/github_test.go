@@ -15,7 +15,7 @@ import (
 func TestStandaloneGitHubMutationIsRejectedBeforeDependencies(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	err := runGitHubPublish([]string{"--title", "Must persist"}, slog.Default())
-	if err == nil || !strings.Contains(err.Error(), "durable") || !strings.Contains(err.Error(), "running") {
+	if err == nil || !strings.Contains(err.Error(), "durable task publication API") || !strings.Contains(err.Error(), "--dry-run") {
 		t.Fatalf("mutation rejection = %v", err)
 	}
 }

@@ -8,13 +8,14 @@ import (
 type Component string
 
 const (
-	ComponentRuntime          Component = "runtime"
-	ComponentSupervisor       Component = "supervisor"
-	ComponentTaskDelivery     Component = "task-delivery"
-	ComponentTaskExecution    Component = "task-execution"
-	ComponentTaskResult       Component = "task-result"
-	ComponentTaskPublication  Component = "task-publication"
-	ComponentTaskVerification Component = "task-verification"
+	ComponentRuntime           Component = "runtime"
+	ComponentSupervisor        Component = "supervisor"
+	ComponentTaskDelivery      Component = "task-delivery"
+	ComponentTaskExecution     Component = "task-execution"
+	ComponentTaskResult        Component = "task-result"
+	ComponentTaskPublication   Component = "task-publication"
+	ComponentTaskVerification  Component = "task-verification"
+	ComponentLegacyPublication Component = "legacy-publication"
 )
 
 var components = [...]Component{
@@ -25,6 +26,7 @@ var components = [...]Component{
 	ComponentTaskResult,
 	ComponentTaskPublication,
 	ComponentTaskVerification,
+	ComponentLegacyPublication,
 }
 
 type State string

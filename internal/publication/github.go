@@ -42,34 +42,9 @@ type Prepared struct {
 	Branch             string `json:"branch"`
 }
 
-type Result struct {
-	Prepared
-	PullRequest PullRequestObservation `json:"pullRequest"`
-}
-
 type RepositoryBinding struct {
 	ID       int64
 	FullName string
-}
-
-type PullRequestRefObservation struct {
-	RepositoryID       int64  `json:"repositoryId"`
-	RepositoryFullName string `json:"repositoryFullName"`
-	RepositoryOwner    string `json:"repositoryOwner"`
-	RepositoryName     string `json:"repositoryName"`
-	Ref                string `json:"ref"`
-	SHA                string `json:"sha"`
-}
-
-type PullRequestObservation struct {
-	TargetRepositoryID       int64                     `json:"targetRepositoryId"`
-	TargetRepositoryFullName string                    `json:"targetRepositoryFullName"`
-	Number                   int64                     `json:"number"`
-	URL                      string                    `json:"url"`
-	State                    string                    `json:"state"`
-	Draft                    bool                      `json:"draft"`
-	Base                     PullRequestRefObservation `json:"base"`
-	Head                     PullRequestRefObservation `json:"head"`
 }
 
 type Publisher struct {
@@ -178,97 +153,6 @@ func validatePublicationPaths(changed string) error {
 	return nil
 }
 
-func (publisher *Publisher) PublishPrepared(ctx context.Context, prepared Prepared, title, body string) (Result, error) {
-	if err := validatePrepared(prepared, publisher.workspace); err != nil {
-		return Result{}, err
-	}
-	if prepared.RepositoryID != publisher.binding.ID || prepared.RepositoryFullName != publisher.binding.FullName {
-		return Result{}, fmt.Errorf("recorded publication repository does not match the configured binding")
-	}
-	if err := ValidateRequest(Request{Operation: strings.TrimPrefix(prepared.Branch, "fern/"+publisher.workspace+"/"), Base: prepared.BaseRef, Title: title, Body: body}); err != nil {
-		return Result{}, err
-	}
-	repository, err := inspectRepositoryName(ctx, publisher.repo, publisher.git)
-	if err != nil {
-		return Result{}, err
-	}
-	if repository != publisher.binding.FullName {
-		return Result{}, fmt.Errorf("checkout origin does not match the configured GitHub repository")
-	}
-	if err := run(ctx, publisher.repo, nil, publisher.git, "cat-file", "-e", prepared.ResultCommit+"^{commit}"); err != nil {
-		return Result{}, fmt.Errorf("recorded publication commit is unavailable locally")
-	}
-	tree, err := output(ctx, publisher.repo, nil, publisher.git, "ls-tree", "-r", "--full-tree", "-z", prepared.ResultCommit)
-	if err != nil {
-		return Result{}, fmt.Errorf("inspect recorded publication tree: %w", err)
-	}
-	if err := validateNoSubmodules(tree); err != nil {
-		return Result{}, err
-	}
-	token, err := githubCredential(ctx, publisher.gh)
-	if err != nil {
-		return Result{}, err
-	}
-	if _, err := publisher.inspectGitHubRepository(ctx, token); err != nil {
-		return Result{}, err
-	}
-	gitEnv := []string{"FERN_GITHUB_TOKEN=" + token, "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=" + os.DevNull}
-	canonical := "https://github.com/" + prepared.RepositoryFullName + ".git"
-	if err := run(ctx, publisher.repo, gitEnv, publisher.git, secureGitArgs("fetch", "--no-tags", canonical, "refs/heads/"+prepared.BaseRef)...); err != nil {
-		return Result{}, fmt.Errorf("revalidate GitHub base branch: %w", err)
-	}
-	baseSHA, resolveErr := output(ctx, publisher.repo, nil, publisher.git, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
-	if resolveErr != nil || strings.TrimSpace(baseSHA) != prepared.BaseSHA {
-		return Result{}, fmt.Errorf("GitHub base branch moved since publication was prepared")
-	}
-	remoteCommit, err := remoteBranchCommit(ctx, publisher.repo, gitEnv, publisher.git, canonical, prepared.Branch)
-	if err != nil {
-		return Result{}, err
-	}
-	if remoteCommit != "" && remoteCommit != prepared.ResultCommit {
-		return Result{}, fmt.Errorf("remote Fern branch conflicts with recorded commit")
-	}
-	if remoteCommit == "" {
-		pushErr := run(ctx, publisher.repo, gitEnv, publisher.git, secureGitArgs("push", canonical, prepared.ResultCommit+":refs/heads/"+prepared.Branch)...)
-		remoteCommit, err = remoteBranchCommit(ctx, publisher.repo, gitEnv, publisher.git, canonical, prepared.Branch)
-		if err != nil {
-			return Result{}, fmt.Errorf("reconcile remote Fern branch after push: %w", err)
-		}
-		if remoteCommit != prepared.ResultCommit {
-			if remoteCommit != "" {
-				return Result{}, fmt.Errorf("remote Fern branch conflicts with recorded commit")
-			}
-			if pushErr == nil {
-				return Result{}, fmt.Errorf("remote Fern branch does not contain the recorded commit")
-			}
-			return Result{}, fmt.Errorf("push exact commit to %s: %w", prepared.Branch, pushErr)
-		}
-	}
-	ghEnv := []string{"GH_TOKEN=" + token}
-	number, found, err := findPullRequest(ctx, ghEnv, publisher.gh, prepared)
-	if err != nil {
-		return Result{}, err
-	}
-	if !found {
-		createdNumber, createErr := createPullRequest(ctx, ghEnv, publisher.gh, prepared, strings.TrimSpace(title), body)
-		number, found, err = findPullRequest(ctx, ghEnv, publisher.gh, prepared)
-		if err != nil {
-			return Result{}, err
-		}
-		if !found {
-			return Result{}, fmt.Errorf("create draft pull request: response was not reconciled")
-		}
-		if createErr == nil && createdNumber != number {
-			return Result{}, fmt.Errorf("created pull request conflicts with discovery")
-		}
-	}
-	observation, err := getPullRequest(ctx, ghEnv, publisher.gh, prepared, number)
-	if err != nil {
-		return Result{}, err
-	}
-	return Result{Prepared: prepared, PullRequest: observation}, nil
-}
-
 func githubCredential(ctx context.Context, gh string) (string, error) {
 	token, err := output(ctx, "", nil, gh, "auth", "token", "--hostname", "github.com")
 	if err != nil {
@@ -281,52 +165,12 @@ func githubCredential(ctx context.Context, gh string) (string, error) {
 	return token, nil
 }
 
-func remoteBranchCommit(ctx context.Context, repo string, env []string, git, canonical, branch string) (string, error) {
-	value, err := output(ctx, repo, env, git, secureGitArgs("ls-remote", "--heads", canonical, "refs/heads/"+branch)...)
-	if err != nil {
-		return "", fmt.Errorf("inspect remote Fern branch: %w", err)
-	}
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return "", nil
-	}
-	fields := strings.Fields(value)
-	if len(fields) != 2 || len(fields[0]) != 40 || !gitref.ValidSHA1(fields[0]) || fields[1] != "refs/heads/"+branch {
-		return "", fmt.Errorf("GitHub returned an invalid remote branch response")
-	}
-	return fields[0], nil
-}
-
 type apiRepository struct {
 	ID            *int64  `json:"id"`
 	FullName      *string `json:"full_name"`
 	Name          *string `json:"name"`
 	DefaultBranch *string `json:"default_branch"`
 	Owner         *struct {
-		Login *string `json:"login"`
-	} `json:"owner"`
-}
-
-type apiPullRequest struct {
-	Number  *int64      `json:"number"`
-	HTMLURL *string     `json:"html_url"`
-	State   *string     `json:"state"`
-	Draft   *bool       `json:"draft"`
-	Base    *apiPullRef `json:"base"`
-	Head    *apiPullRef `json:"head"`
-}
-
-type apiPullRef struct {
-	Ref  *string      `json:"ref"`
-	SHA  *string      `json:"sha"`
-	Repo *apiPullRepo `json:"repo"`
-}
-
-type apiPullRepo struct {
-	ID       *int64  `json:"id"`
-	FullName *string `json:"full_name"`
-	Name     *string `json:"name"`
-	Owner    *struct {
 		Login *string `json:"login"`
 	} `json:"owner"`
 }
@@ -349,104 +193,6 @@ func (publisher *Publisher) inspectGitHubRepository(ctx context.Context, token s
 		return repositoryObservation{}, fmt.Errorf("GitHub repository identity does not match the configured binding")
 	}
 	return repositoryObservation{DefaultBranch: *response.DefaultBranch}, nil
-}
-
-func findPullRequest(ctx context.Context, env []string, gh string, prepared Prepared) (int64, bool, error) {
-	owner, _, _ := strings.Cut(prepared.RepositoryFullName, "/")
-	query := url.Values{}
-	query.Set("state", "open")
-	query.Set("base", prepared.BaseRef)
-	query.Set("head", owner+":"+prepared.Branch)
-	query.Set("per_page", "2")
-	endpoint := "repos/" + prepared.RepositoryFullName + "/pulls?" + query.Encode()
-	value, err := ghAPI(ctx, env, gh, "GET", endpoint, nil)
-	if err != nil {
-		return 0, false, fmt.Errorf("inspect existing pull request: %w", err)
-	}
-	var pulls *[]apiPullRequest
-	if err := decodeAPIJSON(value, &pulls); err != nil || pulls == nil {
-		return 0, false, fmt.Errorf("GitHub returned an invalid pull request discovery response")
-	}
-	if len(*pulls) > 1 {
-		return 0, false, fmt.Errorf("multiple GitHub pull requests match the recorded publication")
-	}
-	if len(*pulls) == 0 {
-		return 0, false, nil
-	}
-	pull := (*pulls)[0]
-	if pull.Number == nil || *pull.Number <= 0 || !validDiscoveryRef(pull.Base, prepared, false) || !validDiscoveryRef(pull.Head, prepared, true) {
-		return 0, false, fmt.Errorf("existing pull request conflicts with the recorded publication")
-	}
-	return *pull.Number, true, nil
-}
-
-func validDiscoveryRef(ref *apiPullRef, prepared Prepared, head bool) bool {
-	wantRef := prepared.BaseRef
-	wantSHA := prepared.BaseSHA
-	if head {
-		wantRef, wantSHA = prepared.Branch, prepared.ResultCommit
-	}
-	owner, name, _ := strings.Cut(prepared.RepositoryFullName, "/")
-	return ref != nil && ref.Ref != nil && *ref.Ref == wantRef && ref.SHA != nil && *ref.SHA == wantSHA && validAPIRepository(ref.Repo, prepared.RepositoryID, prepared.RepositoryFullName, owner, name)
-}
-
-func createPullRequest(ctx context.Context, env []string, gh string, prepared Prepared, title, body string) (int64, error) {
-	owner, _, _ := strings.Cut(prepared.RepositoryFullName, "/")
-	payload, err := json.Marshal(struct {
-		Title string `json:"title"`
-		Body  string `json:"body"`
-		Head  string `json:"head"`
-		Base  string `json:"base"`
-		Draft bool   `json:"draft"`
-	}{Title: title, Body: body, Head: owner + ":" + prepared.Branch, Base: prepared.BaseRef, Draft: true})
-	if err != nil {
-		return 0, fmt.Errorf("encode draft pull request")
-	}
-	value, err := ghAPI(ctx, env, gh, "POST", "repos/"+prepared.RepositoryFullName+"/pulls", payload)
-	if err != nil {
-		return 0, err
-	}
-	var response struct {
-		Number *int64 `json:"number"`
-	}
-	if err := decodeAPIJSON(value, &response); err != nil || response.Number == nil || *response.Number <= 0 {
-		return 0, fmt.Errorf("GitHub returned an invalid pull request creation response")
-	}
-	return *response.Number, nil
-}
-
-func getPullRequest(ctx context.Context, env []string, gh string, prepared Prepared, number int64) (PullRequestObservation, error) {
-	value, err := ghAPI(ctx, env, gh, "GET", "repos/"+prepared.RepositoryFullName+"/pulls/"+strconv.FormatInt(number, 10), nil)
-	if err != nil {
-		return PullRequestObservation{}, fmt.Errorf("read exact pull request: %w", err)
-	}
-	var pull apiPullRequest
-	if err := decodeAPIJSON(value, &pull); err != nil {
-		return PullRequestObservation{}, fmt.Errorf("GitHub returned an invalid pull request response")
-	}
-	if pull.Number == nil || *pull.Number != number || pull.HTMLURL == nil || pull.State == nil || *pull.State != "open" || pull.Draft == nil || !*pull.Draft || !validDiscoveryRef(pull.Base, prepared, false) || !validDiscoveryRef(pull.Head, prepared, true) {
-		return PullRequestObservation{}, fmt.Errorf("pull request proof conflicts with the recorded publication")
-	}
-	if err := validatePullURL(*pull.HTMLURL, prepared.RepositoryFullName); err != nil || *pull.HTMLURL != "https://github.com/"+prepared.RepositoryFullName+"/pull/"+strconv.FormatInt(number, 10) {
-		return PullRequestObservation{}, fmt.Errorf("GitHub returned an invalid pull request URL")
-	}
-	return PullRequestObservation{
-		TargetRepositoryID: prepared.RepositoryID, TargetRepositoryFullName: prepared.RepositoryFullName,
-		Number: number, URL: *pull.HTMLURL, State: *pull.State, Draft: *pull.Draft,
-		Base: makePullRefObservation(pull.Base), Head: makePullRefObservation(pull.Head),
-	}, nil
-}
-
-func validAPIRepository(repository *apiPullRepo, id int64, fullName, owner, name string) bool {
-	return repository != nil && repository.ID != nil && *repository.ID == id && repository.FullName != nil && *repository.FullName == fullName && repository.Owner != nil && repository.Owner.Login != nil && *repository.Owner.Login == owner && repository.Name != nil && *repository.Name == name
-}
-
-func makePullRefObservation(ref *apiPullRef) PullRequestRefObservation {
-	return PullRequestRefObservation{
-		RepositoryID: *ref.Repo.ID, RepositoryFullName: *ref.Repo.FullName,
-		RepositoryOwner: *ref.Repo.Owner.Login, RepositoryName: *ref.Repo.Name,
-		Ref: *ref.Ref, SHA: *ref.SHA,
-	}
 }
 
 func decodeAPIJSON(value string, destination any) error {
@@ -491,20 +237,6 @@ func validateRepositoryBinding(binding RepositoryBinding) error {
 	}
 	if gitref.ValidateOwnerRepo(binding.FullName) != nil {
 		return fmt.Errorf("configured GitHub repository full name is invalid")
-	}
-	return nil
-}
-
-func validatePullURL(value, repository string) error {
-	parsed, err := url.Parse(value)
-	wantPrefix := "/" + repository + "/pull/"
-	if err != nil || parsed.Scheme != "https" || parsed.User != nil || !strings.EqualFold(parsed.Host, "github.com") || parsed.Opaque != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || !strings.HasPrefix(parsed.Path, wantPrefix) {
-		return fmt.Errorf("GitHub returned an invalid pull request URL")
-	}
-	number := strings.TrimPrefix(parsed.Path, wantPrefix)
-	parsedNumber, err := strconv.Atoi(number)
-	if err != nil || parsedNumber <= 0 || strconv.Itoa(parsedNumber) != number {
-		return fmt.Errorf("GitHub returned an invalid pull request URL")
 	}
 	return nil
 }

@@ -57,16 +57,17 @@ func newFlagSet(command, description string) *flag.FlagSet {
 // a plain literal because deriving it from the command registry would create a
 // package initialization cycle.
 var commandExamples = map[string]string{
-	"init":           "fern init --repo /path/to/repository",
-	"doctor":         "fern doctor --phone",
-	"github publish": "fern github publish --title 'Describe the change'",
-	"up":             "fern up --config /etc/fern/fern.yaml",
-	"attach":         "fern attach --url https://host.tailnet.ts.net",
-	"down":           "fern down --name demo",
-	"status":         "fern status --name demo --json",
-	"logs":           "fern logs --name demo --follow=false",
-	"debug events":   "fern debug events --name demo",
-	"debug wake":     "fern debug wake --name demo",
+	"init":                          "fern init --repo /path/to/repository",
+	"doctor":                        "fern doctor --phone",
+	"github publish":                "fern github publish --title 'Describe the change'",
+	"up":                            "fern up --config /etc/fern/fern.yaml",
+	"attach":                        "fern attach --url https://host.tailnet.ts.net",
+	"down":                          "fern down --name demo",
+	"status":                        "fern status --name demo --json",
+	"logs":                          "fern logs --name demo --follow=false",
+	"debug events":                  "fern debug events --name demo",
+	"debug wake":                    "fern debug wake --name demo",
+	"debug quarantine-publications": "fern debug quarantine-publications --name demo",
 }
 
 func parseFlags(fs *flag.FlagSet, args []string) error {

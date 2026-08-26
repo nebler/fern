@@ -43,8 +43,8 @@ var commands = []command{
 		run: func(_ context.Context, args []string, _ *slog.Logger) error { return runDoctor(args) },
 	},
 	{
-		name: "github", summary: "Publish committed work as a draft pull request",
-		overview: "Publish committed work through host GitHub credentials.",
+		name: "github", summary: "Validate the retired standalone GitHub preflight",
+		overview: "Run the non-mutating legacy GitHub publication preflight.",
 		sub: []subcommand{{
 			name: "publish",
 			run:  func(_ context.Context, args []string, log *slog.Logger) error { return runGitHubPublish(args, log) },
@@ -72,7 +72,7 @@ var commands = []command{
 	},
 	{
 		name:     "debug",
-		overview: "Inspect Fern's backend activity inputs.",
+		overview: "Inspect Fern internals and run explicit offline repairs.",
 		sub: []subcommand{
 			{
 				name: "events", summary: "Stream the backend activity events used by Fern",
@@ -81,6 +81,12 @@ var commands = []command{
 			{
 				name: "wake", summary: "Print the phase waterfall for one workspace wake",
 				run: func(_ context.Context, args []string, log *slog.Logger) error { return runDebugWake(args, log) },
+			},
+			{
+				name: "quarantine-publications", summary: "Quarantine unresolved retired publication records",
+				run: func(_ context.Context, args []string, _ *slog.Logger) error {
+					return runLegacyPublicationQuarantine(args, os.Stdout)
+				},
 			},
 		},
 	},

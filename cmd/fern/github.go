@@ -15,7 +15,7 @@ import (
 )
 
 func runGitHubPublish(args []string, log *slog.Logger) error {
-	fs := newFlagSet("github publish", "Push committed work to a Fern branch and open a draft pull request.")
+	fs := newFlagSet("github publish", "Validate the retired standalone GitHub publication preflight.")
 	configPath := fs.String("config", "fern.yaml", "configuration file")
 	operation := fs.String("operation", "", "publication identifier (defaults to the commit prefix)")
 	base := fs.String("base", "", "base branch (defaults to repository default)")
@@ -26,7 +26,7 @@ func runGitHubPublish(args []string, log *slog.Logger) error {
 		return err
 	}
 	if !*dryRun {
-		return invocationError{message: "standalone publication cannot safely provide durable persistence for GitHub effects; use the publication control on a configured running 'fern up' service"}
+		return invocationError{message: "standalone GitHub mutation is retired; use the durable task publication API served by 'fern up', or pass --dry-run for local preflight"}
 	}
 	if strings.TrimSpace(*title) == "" || len(*title) > 256 {
 		return invocationError{message: "--title is required and must be at most 256 bytes"}

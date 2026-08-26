@@ -48,7 +48,7 @@ func runCLI(t *testing.T, args ...string) (string, string, int) {
 }
 
 func TestHelpFormsSucceed(t *testing.T) {
-	tests := [][]string{{"--help"}, {"-h"}, {"help"}, {"init", "--help"}, {"doctor", "--help"}, {"github", "--help"}, {"github", "publish", "--help"}, {"up", "--help"}, {"debug", "--help"}, {"debug", "wake", "--help"}, {"help", "status"}, {"help", "debug", "events"}, {"help", "debug", "wake"}, {"help", "github", "publish"}}
+	tests := [][]string{{"--help"}, {"-h"}, {"help"}, {"init", "--help"}, {"doctor", "--help"}, {"github", "--help"}, {"github", "publish", "--help"}, {"up", "--help"}, {"debug", "--help"}, {"debug", "wake", "--help"}, {"debug", "quarantine-publications", "--help"}, {"help", "status"}, {"help", "debug", "events"}, {"help", "debug", "wake"}, {"help", "debug", "quarantine-publications"}, {"help", "github", "publish"}}
 	for _, args := range tests {
 		stdout, stderr, code := runCLI(t, args...)
 		if code != 0 || stdout == "" || stderr != "" {
@@ -120,17 +120,18 @@ Usage:
   fern help [command]
 
 Commands:
-  init          Create a secure phone-demo configuration
-  doctor        Verify host and private phone-demo readiness
-  github        Publish committed work as a draft pull request
-  up            Run the workspace supervisor and authenticated proxy
-  attach        Open the official client through the Fern proxy
-  status        Show the workspace runtime state
-  logs          Stream workspace container logs
-  down          Remove workspace compute while retaining session data
-  debug events  Stream the backend activity events used by Fern
-  debug wake    Print the phase waterfall for one workspace wake
-  version       Print Fern version information
+  init                           Create a secure phone-demo configuration
+  doctor                         Verify host and private phone-demo readiness
+  github                         Validate the retired standalone GitHub preflight
+  up                             Run the workspace supervisor and authenticated proxy
+  attach                         Open the official client through the Fern proxy
+  status                         Show the workspace runtime state
+  logs                           Stream workspace container logs
+  down                           Remove workspace compute while retaining session data
+  debug events                   Stream the backend activity events used by Fern
+  debug wake                     Print the phase waterfall for one workspace wake
+  debug quarantine-publications  Quarantine unresolved retired publication records
+  version                        Print Fern version information
 
 Examples:
   fern init --repo /path/to/repository
@@ -150,12 +151,12 @@ func TestGroupedHelpIsDerivedUnchanged(t *testing.T) {
 	t.Parallel()
 	tests := map[string]struct{ overview, usage string }{
 		"github": {
-			overview: "Publish committed work through host GitHub credentials.",
+			overview: "Run the non-mutating legacy GitHub publication preflight.",
 			usage:    "Usage:\n  fern github publish [flags]",
 		},
 		"debug": {
-			overview: "Inspect Fern's backend activity inputs.",
-			usage:    "Usage:\n  fern debug events [flags]\n  fern debug wake [flags]",
+			overview: "Inspect Fern internals and run explicit offline repairs.",
+			usage:    "Usage:\n  fern debug events [flags]\n  fern debug wake [flags]\n  fern debug quarantine-publications [flags]",
 		},
 	}
 	for name, want := range tests {
