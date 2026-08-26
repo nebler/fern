@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"archive/tar"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -21,8 +22,9 @@ import (
 )
 
 const (
-	backupVolumeTarget = "/fern-backup-volume"
-	backupStageLabel   = "dev.fern.backup-stage"
+	backupVolumeTarget        = "/fern-backup-volume"
+	backupStageLabel          = "dev.fern.backup-stage"
+	maxCredentialArchiveBytes = 16 << 20
 )
 
 type volumeSnapshot struct {
@@ -33,6 +35,261 @@ type volumeSnapshot struct {
 // ManagedVolumeNames returns the canonical durable volumes expected by spec.
 func ManagedVolumeNames(spec Spec) []string {
 	return append([]string(nil), specVolumeNames(spec)...)
+}
+
+// ExportWorkspaceGH returns a bounded, validated Docker archive in memory. It
+// is intended to be fed directly into encrypted credential bundles.
+func (d *Docker) ExportWorkspaceGH(ctx context.Context, spec Spec) ([]byte, error) {
+	if err := spec.Validate(); err != nil {
+		return nil, err
+	}
+	if !spec.WorkspaceGH {
+		return nil, errors.New("workspace-gh credentials are not configured")
+	}
+	name := specGHVolumeName(spec)
+	if _, err := d.inspectManagedVolume(ctx, spec.Name, name); err != nil {
+		return nil, err
+	}
+	archive, err := d.readVolumeArchive(ctx, spec.Image, name)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := credentialArchiveInventory(archive); err != nil {
+		return nil, fmt.Errorf("validate workspace-gh credentials: %w", err)
+	}
+	return archive, nil
+}
+
+// ReplaceWorkspaceGH stages and verifies a credential archive before replacing
+// the canonical volume. Any activation failure restores the prior generation.
+func (d *Docker) ReplaceWorkspaceGH(ctx context.Context, spec Spec, archive []byte, generation string) (resultErr error) {
+	if err := spec.Validate(); err != nil {
+		return err
+	}
+	if !spec.WorkspaceGH || generation == "" || strings.ContainsAny(generation, " /\\\t\r\n") {
+		return errors.New("invalid workspace-gh credential replacement")
+	}
+	want, err := credentialArchiveInventory(archive)
+	if err != nil {
+		return fmt.Errorf("validate workspace-gh credential candidate: %w", err)
+	}
+	name := specGHVolumeName(spec)
+	prior, err := d.ExportWorkspaceGH(ctx, spec)
+	if err != nil {
+		return fmt.Errorf("snapshot workspace-gh rollback generation: %w", err)
+	}
+	stage := restoreStageVolumeName(spec.Name, name, generation)
+	if _, err := d.cli.VolumeInspect(ctx, stage); err == nil {
+		return fmt.Errorf("credential staging volume already exists: %s", stage)
+	} else if !errdefs.IsNotFound(err) {
+		return fmt.Errorf("inspect credential staging volume: %w", err)
+	}
+	created, err := d.cli.VolumeCreate(ctx, volume.CreateOptions{Name: stage, Labels: map[string]string{
+		managedLabel: labelTrue, workspaceLabel: spec.Name, backupStageLabel: generation,
+	}})
+	if err != nil {
+		return fmt.Errorf("create credential staging volume: %w", err)
+	}
+	if created.Name != stage || created.Labels[managedLabel] != labelTrue || created.Labels[workspaceLabel] != spec.Name || created.Labels[backupStageLabel] != generation {
+		return errors.New("credential staging volume failed ownership attestation")
+	}
+	defer func() {
+		cleanupCtx, cancel := detachedContext(ctx, cleanupTimeout)
+		defer cancel()
+		if err := d.cli.VolumeRemove(cleanupCtx, stage, false); err != nil && !errdefs.IsNotFound(err) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("remove credential staging volume: %w", err))
+		}
+	}()
+	if err := d.writeVolumeArchive(ctx, spec.Image, stage, archive); err != nil {
+		return err
+	}
+	staged, err := d.readVolumeArchive(ctx, spec.Image, stage)
+	if err != nil {
+		return err
+	}
+	if err := compareCredentialInventories(want, staged); err != nil {
+		return fmt.Errorf("verify credential staging volume: %w", err)
+	}
+	if err := d.cli.VolumeRemove(ctx, name, false); err != nil {
+		return fmt.Errorf("remove current workspace-gh volume: %w", err)
+	}
+	rollback := func(cause error) error {
+		rollbackCtx, cancel := detachedContext(ctx, cleanupTimeout)
+		defer cancel()
+		if err := d.cli.VolumeRemove(rollbackCtx, name, false); err != nil && !errdefs.IsNotFound(err) {
+			cause = errors.Join(cause, fmt.Errorf("rollback remove workspace-gh volume: %w", err))
+		}
+		if _, err := d.ensureVolume(rollbackCtx, spec.Name, name); err != nil {
+			return errors.Join(cause, fmt.Errorf("rollback create workspace-gh volume: %w", err))
+		}
+		if err := d.writeVolumeArchive(rollbackCtx, spec.Image, name, prior); err != nil {
+			return errors.Join(cause, fmt.Errorf("rollback populate workspace-gh volume: %w", err))
+		}
+		return cause
+	}
+	if _, err := d.ensureVolume(ctx, spec.Name, name); err != nil {
+		return rollback(err)
+	}
+	if err := d.writeVolumeArchive(ctx, spec.Image, name, staged); err != nil {
+		return rollback(err)
+	}
+	activated, err := d.readVolumeArchive(ctx, spec.Image, name)
+	if err != nil {
+		return rollback(err)
+	}
+	if err := compareCredentialInventories(want, activated); err != nil {
+		return rollback(fmt.Errorf("verify activated workspace-gh volume: %w", err))
+	}
+	return nil
+}
+
+func (d *Docker) readVolumeArchive(ctx context.Context, image, name string) (result []byte, resultErr error) {
+	created, err := d.cli.ContainerCreate(ctx, &container.Config{Image: image}, &container.HostConfig{Mounts: []mount.Mount{{
+		Type: mount.TypeVolume, Source: name, Target: backupVolumeTarget, ReadOnly: true,
+	}}}, &network.NetworkingConfig{}, nil, "")
+	if err != nil {
+		return nil, fmt.Errorf("create credential export helper: %w", err)
+	}
+	defer func() {
+		cleanupCtx, cancel := detachedContext(ctx, cleanupTimeout)
+		defer cancel()
+		if err := d.cli.ContainerRemove(cleanupCtx, created.ID, container.RemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("remove credential export helper: %w", err))
+		}
+	}()
+	stream, _, err := d.cli.CopyFromContainer(ctx, created.ID, backupVolumeTarget+"/.")
+	if err != nil {
+		return nil, fmt.Errorf("export credential volume: %w", err)
+	}
+	payload, readErr := io.ReadAll(io.LimitReader(stream, maxCredentialArchiveBytes+1))
+	closeErr := stream.Close()
+	if readErr != nil || closeErr != nil || len(payload) > maxCredentialArchiveBytes {
+		return nil, errors.New("credential volume archive is invalid or oversized")
+	}
+	return payload, nil
+}
+
+func (d *Docker) writeVolumeArchive(ctx context.Context, image, name string, archive []byte) (resultErr error) {
+	if len(archive) == 0 || len(archive) > maxCredentialArchiveBytes {
+		return errors.New("credential volume archive is invalid or oversized")
+	}
+	created, err := d.cli.ContainerCreate(ctx, &container.Config{Image: image}, &container.HostConfig{Mounts: []mount.Mount{{
+		Type: mount.TypeVolume, Source: name, Target: backupVolumeTarget,
+	}}}, &network.NetworkingConfig{}, nil, "")
+	if err != nil {
+		return fmt.Errorf("create credential import helper: %w", err)
+	}
+	defer func() {
+		cleanupCtx, cancel := detachedContext(ctx, cleanupTimeout)
+		defer cancel()
+		if err := d.cli.ContainerRemove(cleanupCtx, created.ID, container.RemoveOptions{Force: true}); err != nil && !errdefs.IsNotFound(err) {
+			resultErr = errors.Join(resultErr, fmt.Errorf("remove credential import helper: %w", err))
+		}
+	}()
+	if err := d.cli.CopyToContainer(ctx, created.ID, backupVolumeTarget, bytes.NewReader(archive), container.CopyToContainerOptions{}); err != nil {
+		return fmt.Errorf("import credential volume: %w", err)
+	}
+	return nil
+}
+
+func credentialArchiveInventory(payload []byte) (map[string]string, error) {
+	if len(payload) == 0 || len(payload) > maxCredentialArchiveBytes {
+		return nil, errors.New("credential archive is empty or oversized")
+	}
+	result := make(map[string]string)
+	reader := tar.NewReader(bytes.NewReader(payload))
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return nil, errors.New("credential archive is malformed")
+		}
+		name := strings.TrimPrefix(header.Name, "./")
+		name = strings.TrimSuffix(name, "/")
+		if name == "" || name == "." {
+			if header.Typeflag != tar.TypeDir {
+				return nil, errors.New("credential archive root is not a directory")
+			}
+			continue
+		}
+		clean := filepath.Clean(filepath.FromSlash(name))
+		if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || filepath.ToSlash(clean) != name {
+			return nil, errors.New("credential archive contains an unsafe path")
+		}
+		if _, duplicate := result[name]; duplicate {
+			return nil, errors.New("credential archive contains duplicate paths")
+		}
+		mode := os.FileMode(header.Mode)
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if mode.Perm()&0o022 != 0 {
+				return nil, errors.New("credential archive contains a writable shared directory")
+			}
+			result[name] = "d"
+		case tar.TypeReg, tar.TypeRegA:
+			if header.Size < 0 || header.Size > maxCredentialArchiveBytes || mode.Perm()&0o077 != 0 || mode.Perm()&0o111 != 0 {
+				return nil, errors.New("credential archive contains unsafe file permissions")
+			}
+			digest := sha256.New()
+			if _, err := io.CopyN(digest, reader, header.Size); err != nil {
+				return nil, errors.New("credential archive contains a truncated file")
+			}
+			result[name] = "f:" + hex.EncodeToString(digest.Sum(nil))
+		default:
+			return nil, errors.New("credential archive contains a link or special file")
+		}
+	}
+	if len(result) == 0 {
+		return nil, errors.New("credential archive is empty")
+	}
+	return result, nil
+}
+
+// WorkspaceGHFile reads one validated regular file from an in-memory archive.
+func WorkspaceGHFile(payload []byte, filename string) ([]byte, error) {
+	if _, err := credentialArchiveInventory(payload); err != nil || filename == "" || filepath.Base(filename) != filename {
+		return nil, errors.New("invalid workspace-gh credential archive")
+	}
+	reader := tar.NewReader(bytes.NewReader(payload))
+	for {
+		header, err := reader.Next()
+		if errors.Is(err, io.EOF) {
+			return nil, errors.New("workspace-gh credential file is missing")
+		}
+		if err != nil {
+			return nil, errors.New("invalid workspace-gh credential archive")
+		}
+		name := strings.TrimSuffix(strings.TrimPrefix(header.Name, "./"), "/")
+		if name != filename {
+			continue
+		}
+		if header.Typeflag != tar.TypeReg && header.Typeflag != tar.TypeRegA {
+			return nil, errors.New("workspace-gh credential file is not regular")
+		}
+		value, err := io.ReadAll(io.LimitReader(reader, maxCredentialArchiveBytes+1))
+		if err != nil || int64(len(value)) != header.Size {
+			return nil, errors.New("workspace-gh credential file is invalid")
+		}
+		return value, nil
+	}
+}
+
+func compareCredentialInventories(want map[string]string, archive []byte) error {
+	got, err := credentialArchiveInventory(archive)
+	if err != nil {
+		return err
+	}
+	if len(got) != len(want) {
+		return errors.New("credential archive entry count differs")
+	}
+	for name, value := range want {
+		if got[name] != value {
+			return errors.New("credential archive contents differ")
+		}
+	}
+	return nil
 }
 
 // ExportManagedVolumes copies every expected Fern-owned volume into a directory

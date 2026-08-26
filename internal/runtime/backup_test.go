@@ -141,6 +141,7 @@ func TestRestoreManagedVolumesStagesVerifiesAndReplacesCanonicalVolumes(t *testi
 	helpers := make(map[string]string)
 	var lock sync.Mutex
 	nextHelper := 0
+	failCanonicalImport := false
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		path := request.URL.Path
 		switch {
@@ -211,6 +212,15 @@ func TestRestoreManagedVolumesStagesVerifiesAndReplacesCanonicalVolumes(t *testi
 		case request.Method == http.MethodPut && strings.Contains(path, "/containers/") && strings.HasSuffix(path, "/archive"):
 			parts := strings.Split(path, "/")
 			id := parts[len(parts)-2]
+			lock.Lock()
+			target := helpers[id]
+			if failCanonicalImport && target == specGHVolumeName(spec) {
+				failCanonicalImport = false
+				lock.Unlock()
+				http.Error(writer, "injected canonical import failure", http.StatusInternalServerError)
+				return
+			}
+			lock.Unlock()
 			files := make(map[string][]byte)
 			archive := tar.NewReader(request.Body)
 			for {
@@ -258,14 +268,71 @@ func TestRestoreManagedVolumesStagesVerifiesAndReplacesCanonicalVolumes(t *testi
 	if err := testDocker(t, server).RestoreManagedVolumes(context.Background(), spec, sources, "generation-a"); err != nil {
 		t.Fatal(err)
 	}
+	docker := testDocker(t, server)
+	firstRotation := credentialTestArchive(t, map[string]string{"hosts.yml": "rotated-token"})
+	if err := docker.ReplaceWorkspaceGH(context.Background(), spec, firstRotation, "rotation-a"); err != nil {
+		t.Fatal(err)
+	}
+	lock.Lock()
+	failCanonicalImport = true
+	lock.Unlock()
+	failedRotation := credentialTestArchive(t, map[string]string{"hosts.yml": "must-not-stick"})
+	if err := docker.ReplaceWorkspaceGH(context.Background(), spec, failedRotation, "rotation-b"); err == nil {
+		t.Fatal("workspace-gh replacement accepted an activation failure")
+	}
 	lock.Lock()
 	defer lock.Unlock()
 	if len(volumes) != 2 || len(helpers) != 0 {
 		t.Fatalf("volume count=%d helper count=%d", len(volumes), len(helpers))
 	}
-	if string(volumes[specDataVolumeName(spec)].files["state"]) != "new-data" || string(volumes[specGHVolumeName(spec)].files["hosts.yml"]) != "new-token" {
+	if string(volumes[specDataVolumeName(spec)].files["state"]) != "new-data" || string(volumes[specGHVolumeName(spec)].files["hosts.yml"]) != "rotated-token" {
 		t.Fatalf("restored volumes = %+v", volumes)
 	}
+}
+
+func TestCredentialArchiveRejectsUnsafeCandidates(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name     string
+		typeflag byte
+		mode     int64
+	}{
+		{name: "public permissions", typeflag: tar.TypeReg, mode: 0o644},
+		{name: "executable", typeflag: tar.TypeReg, mode: 0o700},
+		{name: "symlink", typeflag: tar.TypeSymlink, mode: 0o600},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var buffer bytes.Buffer
+			writer := tar.NewWriter(&buffer)
+			if err := writer.WriteHeader(&tar.Header{Name: "hosts.yml", Typeflag: test.typeflag, Mode: test.mode, Size: 1, Linkname: "/etc/passwd"}); err != nil {
+				t.Fatal(err)
+			}
+			_, _ = writer.Write([]byte("x"))
+			_ = writer.Close()
+			if _, err := credentialArchiveInventory(buffer.Bytes()); err == nil {
+				t.Fatal("unsafe credential archive was accepted")
+			}
+		})
+	}
+}
+
+func credentialTestArchive(t *testing.T, files map[string]string) []byte {
+	t.Helper()
+	var buffer bytes.Buffer
+	writer := tar.NewWriter(&buffer)
+	for name, value := range files {
+		data := []byte(value)
+		if err := writer.WriteHeader(&tar.Header{Name: name, Typeflag: tar.TypeReg, Mode: 0o600, Size: int64(len(data))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := writer.Write(data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
 }
 
 func TestArchiveDirectoryAndExtractRoundTrip(t *testing.T) {
