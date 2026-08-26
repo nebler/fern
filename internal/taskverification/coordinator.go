@@ -55,6 +55,7 @@ type Config struct {
 	RecoveryActor  task.ActorSnapshot
 	Now            func() time.Time
 	OnError        func(error)
+	OnSuccess      func()
 }
 
 type Coordinator struct {
@@ -90,6 +91,9 @@ func New(store Store, fencer Fencer, runner Runner, policy verification.Policy, 
 	}
 	if config.OnError == nil {
 		config.OnError = func(error) {}
+	}
+	if config.OnSuccess == nil {
+		config.OnSuccess = func() {}
 	}
 	if err := config.Actor.Validate(); err != nil || config.Actor.Type != task.ActorSystem {
 		return nil, errors.New("valid system verification actor is required")
@@ -137,6 +141,7 @@ func (c *Coordinator) Run(ctx context.Context) error {
 		if failed {
 			delay = retry.Next()
 		} else {
+			c.config.OnSuccess()
 			retry.Reset()
 			delay = c.config.PollInterval
 		}

@@ -16,6 +16,7 @@ import (
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/githubapp"
+	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/proxy"
 	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/taskpublicationcoord"
@@ -207,6 +208,7 @@ type upRuntime struct {
 	operatorListener net.Listener
 	origins          proxy.TrustedOrigins
 	tasks            *taskServices
+	status           *observability.Registry
 	start            time.Time
 }
 
@@ -228,6 +230,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 		return nil, err
 	}
 	observations := make(chan watch.Observation, observationBufferSize)
+	status := observability.NewRegistry()
 	streamController := watch.NewStreamController(serviceCtx, watch.StreamOptions{Auth: auth}, observations, log)
 	manager := workspace.NewManager(
 		serviceCtx,
@@ -249,11 +252,13 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 	if err := manager.ReconcileStartup(serviceCtx); err != nil {
 		return nil, lifecycle.failStartup(err)
 	}
+	status.Healthy(observability.ComponentRuntime)
+	status.Healthy(observability.ComponentSupervisor)
 	onboarding, err := newGitHubOnboarding(cfg)
 	if err != nil {
 		return nil, lifecycle.failStartup(err)
 	}
-	tasks, err := newTaskServices(serviceCtx, cfg, lifecycle.docker, manager, auth, log)
+	tasks, err := newTaskServices(serviceCtx, cfg, lifecycle.docker, manager, auth, status, log)
 	if errors.Is(err, githubapp.ErrCredentialsNotFound) && onboarding != nil {
 		log.Warn("durable tasks await GitHub App onboarding and a Fern restart", "workspace", cfg.Workspace.Name)
 		tasks, err = nil, nil
@@ -304,7 +309,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 		observations: observations, connections: connections,
 		remoteServer: remoteServer, operatorServer: operatorServer,
 		remoteListener: remoteListener, operatorListener: operatorListener,
-		origins: origins, tasks: tasks, start: start,
+		origins: origins, tasks: tasks, status: status, start: start,
 	}, nil
 }
 
@@ -353,23 +358,36 @@ func goUntilCanceled(group *errgroup.Group, serviceCtx context.Context, service 
 }
 
 func startSupervisor(group *errgroup.Group, rt *upRuntime, serviceCtx context.Context) {
-	goUntilCanceled(group, serviceCtx, func(ctx context.Context) error {
+	goComponent(group, serviceCtx, rt.status, observability.ComponentSupervisor, func(ctx context.Context) error {
 		return rt.supervisor.Run(ctx, rt.observations)
 	})
 }
 
 func startTaskCoordinators(group *errgroup.Group, tasks *taskServices, serviceCtx context.Context, log *slog.Logger, workspaceName string) {
-	goUntilCanceled(group, serviceCtx, func(ctx context.Context) error {
+	goComponent(group, serviceCtx, tasks.status, observability.ComponentTaskResult, func(ctx context.Context) error {
 		return runTaskResultCoordinator(ctx, tasks, log, workspaceName)
 	})
-	goUntilCanceled(group, serviceCtx, tasks.coordinator.Run)
-	goUntilCanceled(group, serviceCtx, tasks.execution.Run)
+	goComponent(group, serviceCtx, tasks.status, observability.ComponentTaskDelivery, tasks.coordinator.Run)
+	goComponent(group, serviceCtx, tasks.status, observability.ComponentTaskExecution, tasks.execution.Run)
 	if tasks.publication != nil {
-		goUntilCanceled(group, serviceCtx, tasks.publication.Run)
+		goComponent(group, serviceCtx, tasks.status, observability.ComponentTaskPublication, tasks.publication.Run)
 	}
 	if tasks.verification != nil {
-		goUntilCanceled(group, serviceCtx, tasks.verification.Run)
+		goComponent(group, serviceCtx, tasks.status, observability.ComponentTaskVerification, tasks.verification.Run)
 	}
+}
+
+func goComponent(group *errgroup.Group, serviceCtx context.Context, status *observability.Registry, component observability.Component, service func(context.Context) error) {
+	group.Go(func() error {
+		err := service(serviceCtx)
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
+		if err != nil {
+			status.Failed(component, err)
+		}
+		return err
+	})
 }
 
 // startProxyServers serves both proxies until serviceCtx is canceled, then

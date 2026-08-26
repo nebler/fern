@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,12 +14,18 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/config"
+	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/runtime"
+	"github.com/nebler/fern/internal/taskstore"
 )
+
+type corruptResultCoordinator struct{}
+
+func (corruptResultCoordinator) RunOnce(context.Context) error { return taskstore.ErrCorruptStore }
 
 func TestTaskServicesAreExplicitlyDisabledWhenPolicyIsAbsent(t *testing.T) {
 	t.Parallel()
-	services, err := newTaskServices(context.Background(), config.Config{}, nil, nil, structServerAuth(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	services, err := newTaskServices(context.Background(), config.Config{}, nil, nil, structServerAuth(), observability.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil || services != nil {
 		t.Fatalf("services=%v err=%v", services, err)
 	}
@@ -30,8 +37,19 @@ func TestTaskServicesRequireExplicitGitHubAuthorityBeforeRuntimeAccess(t *testin
 		Agent: "build", Model: config.TaskModel{Provider: "test", ID: "test-model"},
 		AttemptTimeout: time.Hour, LeaseDuration: time.Minute, Budget: config.TaskBudget{MaxTurns: 10},
 	}}
-	if _, err := newTaskServices(context.Background(), cfg, nil, nil, structServerAuth(), slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
+	if _, err := newTaskServices(context.Background(), cfg, nil, nil, structServerAuth(), observability.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
 		t.Fatal("task service accepted no GitHub authority")
+	}
+}
+
+func TestTaskResultStoreCorruptionIsFatal(t *testing.T) {
+	service := &taskServices{
+		result: corruptResultCoordinator{}, resultWake: make(chan struct{}, 1), status: observability.NewRegistry(),
+	}
+	service.resultWake <- struct{}{}
+	err := runTaskResultCoordinator(context.Background(), service, slog.New(slog.NewTextHandler(io.Discard, nil)), "demo")
+	if !errors.Is(err, taskstore.ErrCorruptStore) {
+		t.Fatalf("result coordinator error = %v", err)
 	}
 }
 

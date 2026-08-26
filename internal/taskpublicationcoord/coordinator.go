@@ -56,6 +56,7 @@ type Config struct {
 	RecoveryActor    task.ActorSnapshot
 	Now              func() time.Time
 	OnError          func(error)
+	OnSuccess        func()
 }
 
 type Coordinator struct {
@@ -96,6 +97,9 @@ func New(store Store, fencer Fencer, publisher Publisher, ids *task.Generator, c
 	if config.OnError == nil {
 		config.OnError = func(error) {}
 	}
+	if config.OnSuccess == nil {
+		config.OnSuccess = func() {}
+	}
 	return &Coordinator{store: store, fencer: fencer, publisher: publisher, ids: ids, config: config, wake: make(chan struct{}, 1)}, nil
 }
 
@@ -132,6 +136,7 @@ func (coordinator *Coordinator) Run(ctx context.Context) error {
 		if failed {
 			delay = retry.Next()
 		} else {
+			coordinator.config.OnSuccess()
 			retry.Reset()
 			delay = coordinator.config.PollInterval
 		}

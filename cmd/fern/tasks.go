@@ -63,11 +63,16 @@ type taskServices struct {
 	execution    *taskexecution.Coordinator
 	verification *taskverification.Coordinator
 	publication  *taskpublicationcoord.Coordinator
-	result       *taskresultcoord.Coordinator
+	result       taskResultCoordinator
 	resultWake   chan struct{}
+	status       *observability.Registry
 }
 
-func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Docker, manager *workspace.Manager, auth runtime.ServerAuth, log *slog.Logger) (*taskServices, error) {
+type taskResultCoordinator interface {
+	RunOnce(context.Context) error
+}
+
+func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Docker, manager *workspace.Manager, auth runtime.ServerAuth, status *observability.Registry, log *slog.Logger) (*taskServices, error) {
 	if cfg.Tasks == nil {
 		return nil, nil
 	}
@@ -142,7 +147,11 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 		WorkspaceID: durableWorkspace.ID, WorkerID: workerID, SessionDirectory: taskSessionDirectory,
 		LeaseDuration: cfg.Tasks.LeaseDuration, OperationTimeout: min(cfg.Tasks.LeaseDuration/2, 30*time.Second),
 		PollInterval: taskPollInterval, Actor: deliveryActor, RecoveryActor: recoveryActor, Now: time.Now,
-		OnError: func(err error) { log.Error("task coordination deferred", "err", err, "workspace", cfg.Workspace.Name) },
+		OnError: func(err error) {
+			status.Degraded(observability.ComponentTaskDelivery, err)
+			log.Error("task coordination deferred", "err", err, "workspace", cfg.Workspace.Name)
+		},
+		OnSuccess: func() { status.Healthy(observability.ComponentTaskDelivery) },
 	})
 	if err != nil {
 		return nil, err
@@ -157,17 +166,19 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 		PollInterval: taskPollInterval, Actor: systemActor(workerID, "task-execution", "Task execution observer"),
 		RecoveryActor: recoveryActor, Now: time.Now,
 		OnError: func(err error) {
+			status.Degraded(observability.ComponentTaskExecution, err)
 			log.Error("task execution observation deferred", "err", err, "workspace", cfg.Workspace.Name)
 		},
+		OnSuccess: func() { status.Healthy(observability.ComponentTaskExecution) },
 	})
 	if err != nil {
 		return nil, err
 	}
-	publicationCoordinator, err := newPublicationCoordinator(ctx, taskDirectory, cfg, durableWorkspace.ID, workerID, authority, recoveryActor, store, manager, ids, log)
+	publicationCoordinator, err := newPublicationCoordinator(ctx, taskDirectory, cfg, durableWorkspace.ID, workerID, authority, recoveryActor, store, manager, ids, status, log)
 	if err != nil {
 		return nil, err
 	}
-	verificationCoordinator, err := newVerificationCoordinator(store, manager, ids, cfg, durableWorkspace.ID, imageID, workerID, recoveryActor, log)
+	verificationCoordinator, err := newVerificationCoordinator(store, manager, ids, cfg, durableWorkspace.ID, imageID, workerID, recoveryActor, status, log)
 	if err != nil {
 		return nil, err
 	}
@@ -194,10 +205,13 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 		return nil, err
 	}
 	closeOnError = false
+	status.Healthy(observability.ComponentTaskDelivery)
+	status.Healthy(observability.ComponentTaskExecution)
+	status.Healthy(observability.ComponentTaskResult)
 	return &taskServices{
 		store: store, handler: handler, coordinator: coordinator,
 		execution: executionCoordinator, verification: verificationCoordinator, publication: publicationCoordinator,
-		result: resultCoordinator, resultWake: resultWake,
+		result: resultCoordinator, resultWake: resultWake, status: status,
 	}, nil
 }
 
@@ -315,7 +329,7 @@ func newResultSealing(store *taskstore.Store, manager *workspace.Manager, cfg co
 // newPublicationCoordinator builds the App-broker reconciler that opens draft
 // pull requests from immutable verified results. It returns nil unless the
 // workspace delegates GitHub authority to the App broker.
-func newPublicationCoordinator(parent context.Context, taskDirectory string, cfg config.Config, workspaceID task.WorkspaceID, workerID string, authority *gitHubAuthority, recoveryActor task.ActorSnapshot, store *taskstore.Store, manager *workspace.Manager, ids *task.Generator, log *slog.Logger) (*taskpublicationcoord.Coordinator, error) {
+func newPublicationCoordinator(parent context.Context, taskDirectory string, cfg config.Config, workspaceID task.WorkspaceID, workerID string, authority *gitHubAuthority, recoveryActor task.ActorSnapshot, store *taskstore.Store, manager *workspace.Manager, ids *task.Generator, status *observability.Registry, log *slog.Logger) (*taskpublicationcoord.Coordinator, error) {
 	if cfg.Workspace.GitHub.Mode != config.GitHubModeGitHubAppBroker {
 		return nil, nil
 	}
@@ -337,18 +351,21 @@ func newPublicationCoordinator(parent context.Context, taskDirectory string, cfg
 		Actor:         systemActor(workerID, "task-publication", "Task publication coordinator"),
 		RecoveryActor: recoveryActor, Now: time.Now,
 		OnError: func(err error) {
+			status.Degraded(observability.ComponentTaskPublication, err)
 			log.Error("task publication reconciliation deferred", "err", err, "workspace", cfg.Workspace.Name)
 		},
+		OnSuccess: func() { status.Healthy(observability.ComponentTaskPublication) },
 	})
 	if err != nil {
 		return nil, err
 	}
+	status.Healthy(observability.ComponentTaskPublication)
 	return coordinator, nil
 }
 
 // newVerificationCoordinator builds the host-side verification coordinator when
 // a verification policy is configured; it returns nil otherwise.
-func newVerificationCoordinator(store *taskstore.Store, manager *workspace.Manager, ids *task.Generator, cfg config.Config, workspaceID task.WorkspaceID, imageID, workerID string, recoveryActor task.ActorSnapshot, log *slog.Logger) (*taskverification.Coordinator, error) {
+func newVerificationCoordinator(store *taskstore.Store, manager *workspace.Manager, ids *task.Generator, cfg config.Config, workspaceID task.WorkspaceID, imageID, workerID string, recoveryActor task.ActorSnapshot, status *observability.Registry, log *slog.Logger) (*taskverification.Coordinator, error) {
 	configured := cfg.Tasks.Verification
 	if configured == nil {
 		return nil, nil
@@ -376,11 +393,16 @@ func newVerificationCoordinator(store *taskstore.Store, manager *workspace.Manag
 		PollInterval: taskPollInterval, Deadline: configured.Timeout + taskOperationTimeout,
 		Actor:         systemActor(workerID, "task-verification", "Task verification coordinator"),
 		RecoveryActor: recoveryActor, Now: time.Now,
-		OnError: func(err error) { log.Error("task verification deferred", "err", err, "workspace", cfg.Workspace.Name) },
+		OnError: func(err error) {
+			status.Degraded(observability.ComponentTaskVerification, err)
+			log.Error("task verification deferred", "err", err, "workspace", cfg.Workspace.Name)
+		},
+		OnSuccess: func() { status.Healthy(observability.ComponentTaskVerification) },
 	})
 	if err != nil {
 		return nil, err
 	}
+	status.Healthy(observability.ComponentTaskVerification)
 	return coordinator, nil
 }
 
@@ -411,8 +433,10 @@ func runTaskResultCoordinator(ctx context.Context, service *taskServices, log *s
 			break
 		}
 		if failed {
+			service.status.Degraded(observability.ComponentTaskResult, errors.New("result sealing deferred"))
 			delay = retry.Next()
 		} else {
+			service.status.Healthy(observability.ComponentTaskResult)
 			retry.Reset()
 			delay = taskPollInterval
 		}

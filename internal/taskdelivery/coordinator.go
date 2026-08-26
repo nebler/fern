@@ -73,6 +73,7 @@ type Config struct {
 	RecoveryActor    task.ActorSnapshot
 	Now              func() time.Time
 	OnError          func(error)
+	OnSuccess        func()
 }
 
 type Coordinator struct {
@@ -110,6 +111,9 @@ func New(store Store, targets TargetAcquirer, clients ClientFactory, ids *task.G
 	}
 	if config.OnError == nil {
 		config.OnError = func(error) {}
+	}
+	if config.OnSuccess == nil {
+		config.OnSuccess = func() {}
 	}
 	if err := config.Actor.Validate(); err != nil || config.Actor.Type != task.ActorSystem {
 		return nil, errors.New("valid system delivery actor is required")
@@ -155,6 +159,7 @@ func (coordinator *Coordinator) Run(ctx context.Context) error {
 		if failed {
 			delay = retry.Next()
 		} else {
+			coordinator.config.OnSuccess()
 			retry.Reset()
 			delay = coordinator.config.PollInterval
 		}
