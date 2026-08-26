@@ -1,21 +1,22 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://fern.invalid/schemas/release-manifest-v1.json",
+  "$id": "https://fern.invalid/schemas/release-manifest-v2.json",
   "title": "Fern release manifest",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "release", "build", "integrity", "artifacts", "deployment_files", "upgrade_rollback"],
+  "required": ["schema_version", "release", "build", "integrity", "image", "distribution", "artifacts", "deployment_files", "upgrade_rollback"],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"const": 2},
     "release": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["version", "commit", "source_date_epoch", "version_source"],
+      "required": ["version", "commit", "source_date_epoch", "version_source", "verified_tag"],
       "properties": {
-        "version": {"type": "string", "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+"},
-        "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+        "version": {"$ref": "#/$defs/version"},
+        "commit": {"$ref": "#/$defs/commit"},
         "source_date_epoch": {"type": "integer", "minimum": 1},
-        "version_source": {"const": "builder-argument"}
+        "version_source": {"enum": ["builder-argument", "verified-annotated-tag"]},
+        "verified_tag": {"type": ["string", "null"], "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+"}
       }
     },
     "build": {
@@ -32,12 +33,23 @@
     "integrity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["checksum_algorithm", "signature_status", "provenance_status", "ci_attestations"],
+      "required": ["checksum_algorithm", "binary_signature_status", "asset_provenance_status"],
       "properties": {
         "checksum_algorithm": {"const": "sha256"},
-        "signature_status": {"const": "not-generated"},
-        "provenance_status": {"const": "not-generated-by-builder"},
-        "ci_attestations": {"const": "external-to-manifest"}
+        "binary_signature_status": {"const": "not-generated"},
+        "asset_provenance_status": {"enum": ["not-generated-local", "verified-github-attestation"]}
+      }
+    },
+    "image": {"$ref": "#/$defs/image"},
+    "distribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bundle_asset", "bundle_root", "bundle_checksum_file", "release_checksum_file"],
+      "properties": {
+        "bundle_asset": {"type": "string", "pattern": "^fern-v?[0-9].*-bundle\\.tar\\.gz$"},
+        "bundle_root": {"type": "string", "pattern": "^fern-v?[0-9]"},
+        "bundle_checksum_file": {"const": "SHA256SUMS"},
+        "release_checksum_file": {"const": "SHA256SUMS"}
       }
     },
     "artifacts": {
@@ -70,25 +82,83 @@
     }
   },
   "$defs": {
-    "file": {
+    "version": {"type": "string", "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "immutable-image": {"type": "string", "pattern": "^ghcr\\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$"},
+    "image": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "sha256"],
+      "required": ["repository", "publication_status", "digest", "reference", "sbom", "signature", "provenance"],
       "properties": {
-        "path": {"type": "string", "minLength": 1},
-        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-      }
+        "repository": {"type": "string", "pattern": "^(?:ghcr\\.io/[a-z0-9._/-]+|fern/opencode)$"},
+        "publication_status": {"enum": ["not-published-local", "published"]},
+        "digest": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
+        "reference": {"anyOf": [{"$ref": "#/$defs/immutable-image"}, {"type": "null"}]},
+        "sbom": {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "format", "asset", "sha256", "attestation_subject"],
+          "properties": {
+            "status": {"enum": ["not-generated-local", "generated-and-attested"]},
+            "format": {"enum": ["spdx-json", null]},
+            "asset": {"type": ["string", "null"], "pattern": "^[A-Za-z0-9._-]+\\.spdx\\.json$"},
+            "sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+            "attestation_subject": {"anyOf": [{"$ref": "#/$defs/immutable-image"}, {"type": "null"}]}
+          }
+        },
+        "signature": {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "subject", "certificate_identity", "oidc_issuer"],
+          "properties": {
+            "status": {"enum": ["not-generated-local", "verified-keyless"]},
+            "subject": {"anyOf": [{"$ref": "#/$defs/immutable-image"}, {"type": "null"}]},
+            "certificate_identity": {"type": ["string", "null"]},
+            "oidc_issuer": {"type": ["string", "null"], "format": "uri"}
+          }
+        },
+        "provenance": {
+          "type": "object", "additionalProperties": false,
+          "required": ["status", "subject", "predicate_type", "attestation_url"],
+          "properties": {
+            "status": {"enum": ["not-generated-local", "verified-github-attestation"]},
+            "subject": {"anyOf": [{"$ref": "#/$defs/immutable-image"}, {"type": "null"}]},
+            "predicate_type": {"type": ["string", "null"], "format": "uri"},
+            "attestation_url": {"type": ["string", "null"], "format": "uri"}
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"publication_status": {"const": "not-published-local"}}},
+          "then": {
+            "properties": {
+              "repository": {"const": "fern/opencode"}, "digest": {"type": "null"}, "reference": {"type": "null"},
+              "sbom": {"properties": {"status": {"const": "not-generated-local"}, "format": {"type": "null"}, "asset": {"type": "null"}, "sha256": {"type": "null"}, "attestation_subject": {"type": "null"}}},
+              "signature": {"properties": {"status": {"const": "not-generated-local"}, "subject": {"type": "null"}, "certificate_identity": {"type": "null"}, "oidc_issuer": {"type": "null"}}},
+              "provenance": {"properties": {"status": {"const": "not-generated-local"}, "subject": {"type": "null"}, "predicate_type": {"type": "null"}, "attestation_url": {"type": "null"}}}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"publication_status": {"const": "published"}}},
+          "then": {
+            "properties": {
+              "repository": {"pattern": "^ghcr\\.io/"}, "digest": {"$ref": "#/$defs/digest"}, "reference": {"$ref": "#/$defs/immutable-image"},
+              "sbom": {"properties": {"status": {"const": "generated-and-attested"}, "format": {"const": "spdx-json"}, "asset": {"type": "string"}, "sha256": {"type": "string"}, "attestation_subject": {"$ref": "#/$defs/immutable-image"}}},
+              "signature": {"properties": {"status": {"const": "verified-keyless"}, "subject": {"$ref": "#/$defs/immutable-image"}, "certificate_identity": {"type": "string", "minLength": 1}, "oidc_issuer": {"type": "string", "format": "uri"}}},
+              "provenance": {"properties": {"status": {"const": "verified-github-attestation"}, "subject": {"$ref": "#/$defs/immutable-image"}, "predicate_type": {"const": "https://slsa.dev/provenance/v1"}, "attestation_url": {"type": "string", "format": "uri"}}}
+            }
+          }
+        }
+      ]
+    },
+    "file": {
+      "type": "object", "additionalProperties": false, "required": ["path", "sha256"],
+      "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
     },
     "artifact": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["path", "os", "arch", "sha256"],
-      "properties": {
-        "path": {"type": "string", "minLength": 1},
-        "os": {"const": "linux"},
-        "arch": {"enum": ["amd64", "arm64"]},
-        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-      }
+      "type": "object", "additionalProperties": false, "required": ["path", "os", "arch", "sha256"],
+      "properties": {"path": {"type": "string", "minLength": 1}, "os": {"const": "linux"}, "arch": {"enum": ["amd64", "arm64"]}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}
     }
   }
 }

@@ -15,7 +15,8 @@ mkdir -p "$EVIDENCE"
 
 FIXTURE="$TEMP/repository"
 mkdir -p "$FIXTURE/scripts" "$FIXTURE/cmd/fern" "$FIXTURE/deploy/systemd" "$FIXTURE/deploy/release"
-cp "$ROOT/scripts/build-release.sh" "$ROOT/scripts/fern-host-backup.py" "$FIXTURE/scripts/"
+cp "$ROOT/scripts/build-release.sh" "$ROOT/scripts/create-release-bundle.py" \
+  "$ROOT/scripts/fern-host-backup.py" "$FIXTURE/scripts/"
 cp "$ROOT/deploy/systemd/"* "$FIXTURE/deploy/systemd/"
 cp "$ROOT/deploy/release/"* "$FIXTURE/deploy/release/"
 cat >"$FIXTURE/go.mod" <<'EOF'
@@ -46,7 +47,7 @@ FIXTURE_COMMIT=$(git -C "$FIXTURE" rev-parse HEAD)
 (
   cd "$FIXTURE"
   GOTOOLCHAIN=local ./scripts/build-release.sh v1.2.3
-  shasum -a 256 -c dist/SHA256SUMS >"$TEMP/checksum-verification.txt"
+  (cd dist && shasum -a 256 -c SHA256SUMS) >"$TEMP/checksum-verification.txt"
 )
 
 python3 - "$FIXTURE" "$FIXTURE_COMMIT" <<'PY'
@@ -54,19 +55,29 @@ import hashlib
 import json
 import pathlib
 import sys
+import tarfile
 
 root = pathlib.Path(sys.argv[1])
 commit = sys.argv[2]
 manifest = json.loads((root / "dist/RELEASE-MANIFEST.json").read_text())
-assert manifest["schema_version"] == 1
+assert manifest["schema_version"] == 2
 assert manifest["release"]["commit"] == commit
 assert manifest["release"]["source_date_epoch"] == 1767323045
 assert manifest["release"]["version_source"] == "builder-argument"
+assert manifest["release"]["verified_tag"] is None
 assert manifest["integrity"] == {
     "checksum_algorithm": "sha256",
-    "signature_status": "not-generated",
-    "provenance_status": "not-generated-by-builder",
-    "ci_attestations": "external-to-manifest",
+    "binary_signature_status": "not-generated",
+    "asset_provenance_status": "not-generated-local",
+}
+assert manifest["image"] == {
+    "repository": "fern/opencode",
+    "publication_status": "not-published-local",
+    "digest": None,
+    "reference": None,
+    "sbom": {"status": "not-generated-local", "format": None, "asset": None, "sha256": None, "attestation_subject": None},
+    "signature": {"status": "not-generated-local", "subject": None, "certificate_identity": None, "oidc_issuer": None},
+    "provenance": {"status": "not-generated-local", "subject": None, "predicate_type": None, "attestation_url": None},
 }
 assert manifest["upgrade_rollback"] == {
     "transaction_manifest_schema": "deploy/release/transaction-manifest.schema.json",
@@ -81,9 +92,22 @@ assert manifest["upgrade_rollback"] == {
     "credential_policy": "external-recipient-with-checksums",
     "volume_export_mode": "managed-docker-volume-staged-and-verified",
 }
+bundle = root / "dist" / manifest["distribution"]["bundle_asset"]
+extract = root / "extracted"
+with tarfile.open(bundle, "r:gz") as archive:
+    archive.extractall(extract, filter="data")
+bundle_root = extract / manifest["distribution"]["bundle_root"]
+assert json.loads((bundle_root / "RELEASE-MANIFEST.json").read_text()) == manifest
 for entry in manifest["artifacts"] + manifest["deployment_files"]:
-    actual = hashlib.sha256((root / "dist" / entry["path"]).read_bytes()).hexdigest()
+    actual = hashlib.sha256((bundle_root / entry["path"]).read_bytes()).hexdigest()
     assert actual == entry["sha256"], entry["path"]
+checksummed = {
+    line.split("  ", 1)[1]
+    for line in (root / "dist/SHA256SUMS").read_text().splitlines()
+}
+downloaded = {path.name for path in (root / "dist").iterdir() if path.name != "SHA256SUMS"}
+assert checksummed == downloaded
+assert all(path.is_file() for path in (root / "dist").iterdir())
 
 for path in root.glob("deploy/release/*.json"):
     json.loads(path.read_text())
@@ -120,8 +144,40 @@ git clone -q "$FIXTURE" "$SECOND_FIXTURE"
 ) >"$TEMP/second-build.sha256"
 diff -u "$TEMP/first-build.sha256" "$TEMP/second-build.sha256" >"$TEMP/reproducibility.diff"
 
+PUBLISHED_FIXTURE="$TEMP/repository-published"
+git clone -q "$FIXTURE" "$PUBLISHED_FIXTURE"
+printf '{"spdxVersion":"SPDX-2.3","packages":[{"name":"fern-opencode"}]}\n' >"$TEMP/image.spdx.json"
+(
+  cd "$PUBLISHED_FIXTURE"
+  FERN_VERIFIED_TAG=v1.2.3 \
+    FERN_IMAGE_REPOSITORY=ghcr.io/example/fern/opencode \
+    FERN_IMAGE_DIGEST="sha256:$(printf 'a%.0s' {1..64})" \
+    FERN_IMAGE_SBOM_PATH="$TEMP/image.spdx.json" \
+    FERN_IMAGE_PROVENANCE_URL=https://github.com/example/fern/attestations/123 \
+    FERN_IMAGE_CERTIFICATE_IDENTITY=https://github.com/example/fern/.github/workflows/release.yml@refs/tags/v1.2.3 \
+    FERN_IMAGE_OIDC_ISSUER=https://token.actions.githubusercontent.com \
+    GOTOOLCHAIN=local ./scripts/build-release.sh v1.2.3
+  (cd dist && shasum -a 256 -c SHA256SUMS)
+)
+python3 - "$PUBLISHED_FIXTURE/dist/RELEASE-MANIFEST.json" <<'PY'
+import json, pathlib, sys
+manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
+digest = "sha256:" + "a" * 64
+subject = "ghcr.io/example/fern/opencode@" + digest
+assert manifest["release"]["version_source"] == "verified-annotated-tag"
+assert manifest["release"]["verified_tag"] == "v1.2.3"
+assert manifest["image"]["digest"] == digest
+assert manifest["image"]["reference"] == subject
+assert manifest["image"]["sbom"]["status"] == "generated-and-attested"
+assert manifest["image"]["sbom"]["attestation_subject"] == subject
+assert manifest["image"]["signature"]["status"] == "verified-keyless"
+assert manifest["image"]["signature"]["subject"] == subject
+assert manifest["image"]["provenance"]["status"] == "verified-github-attestation"
+assert manifest["image"]["provenance"]["subject"] == subject
+PY
+
 printf '\ncorruption\n' >>"$SECOND_FIXTURE/dist/fern-v1.2.3-linux-amd64"
-if (cd "$SECOND_FIXTURE" && shasum -a 256 -c dist/SHA256SUMS) >"$TEMP/tamper-check.txt" 2>&1; then
+if (cd "$SECOND_FIXTURE/dist" && shasum -a 256 -c SHA256SUMS) >"$TEMP/tamper-check.txt" 2>&1; then
   printf 'error: checksum verification accepted a modified binary\n' >&2
   exit 1
 fi
