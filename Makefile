@@ -1,4 +1,4 @@
-.PHONY: build format image lint test test-browser test-race test-deployment vet
+.PHONY: build format image lint test test-browser test-critical test-race test-deployment vet
 
 build:
 	go build -o fern ./cmd/fern
@@ -20,6 +20,9 @@ test-race:
 
 test-browser:
 	./scripts/test-browser.sh
+
+test-critical:
+	./scripts/test-critical-coverage.sh
 
 test-deployment:
 	./scripts/test-deployment.sh

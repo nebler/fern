@@ -32,6 +32,9 @@ jobs:
       - name: Run verification tests with atomic coverage
         run: GOTOOLCHAIN=local go test -covermode=atomic -timeout=2m ./internal/verification
 
+      - name: Enforce critical coverage floors
+        run: ./scripts/test-critical-coverage.sh
+
       - name: Verify CGO-free task store
         run: CGO_ENABLED=0 GOTOOLCHAIN=local go test ./internal/taskstore
 
