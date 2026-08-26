@@ -39,6 +39,8 @@ type backupDocker interface {
 	Close() error
 }
 
+const operationalRollbackDirectory = "operational-rollback"
+
 var openBackupDocker = func(log *slog.Logger) (backupDocker, error) { return newDocker(log) }
 
 type backupOptions struct {
@@ -212,9 +214,22 @@ func runBackupRestore(args []string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	rollbackGeneration, err := newBackupGeneration()
+	if err != nil {
+		transaction.Cleanup()
+		return err
+	}
+	rollbackRoot, err := createOperationalRollback(ctx, docker, spec, *recoveryDirectory, rollbackGeneration, manifest.Generation, transaction.paths)
+	if err != nil {
+		transaction.Cleanup()
+		return err
+	}
 	if err := transaction.Activate(); err != nil {
 		transaction.Cleanup()
 		return err
+	}
+	if err := checkpointSQLiteTree(ctx, options.stateDirectory); err != nil {
+		return errors.Join(fmt.Errorf("validate restored filesystem generation: %w", err), transaction.Rollback())
 	}
 	volumeSources := make(map[string]string, len(wantVolumes))
 	for _, name := range wantVolumes {
@@ -226,7 +241,64 @@ func runBackupRestore(args []string, log *slog.Logger) error {
 	if err := transaction.Commit(); err != nil {
 		return fmt.Errorf("restored data is active but old filesystem generations need manual cleanup: %w", err)
 	}
-	fmt.Fprintf(os.Stdout, "restored operational generation %s; workspace compute remains offline\n", manifest.Generation)
+	fmt.Fprintf(os.Stdout, "restored operational generation %s; workspace compute remains offline\nrollback generation %s retained at %s; use 'fern backup rollback' if post-restore validation fails\n", manifest.Generation, rollbackGeneration, rollbackRoot)
+	return nil
+}
+
+func runBackupRollback(args []string, log *slog.Logger) error {
+	fs, options := backupFlags("backup rollback", "Activate the durable pre-restore generation after a failed restore validation.")
+	recoveryDirectory := fs.String("recovery-dir", "", "staged generation and durable rollback directory")
+	if err := parseFlags(fs, args); err != nil {
+		return err
+	}
+	if options.stateDirectory == "" {
+		return errors.New("cannot determine Fern state directory")
+	}
+	if *recoveryDirectory == "" {
+		*recoveryDirectory = filepath.Join(options.stateDirectory, "recovery")
+	}
+	cfg, spec, err := loadBackupSpec(*options)
+	if err != nil {
+		return err
+	}
+	rollbackRoot := filepath.Join(*recoveryDirectory, operationalRollbackDirectory)
+	manifest, paths, volumeSources, err := readOperationalRollback(rollbackRoot, options.stateDirectory, options.configPath, options.envPath, cfg.Workspace.Repo, fernruntime.ManagedVolumeNames(spec))
+	if err != nil {
+		return err
+	}
+	lease, err := registry.Acquire(filepath.Join(options.stateDirectory, "locks"), spec.Name)
+	if err != nil {
+		return fmt.Errorf("rollback requires the offline workspace lease: %w", err)
+	}
+	defer lease.Release()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	docker, err := openBackupDocker(log)
+	if err != nil {
+		return err
+	}
+	defer docker.Close()
+	if err := docker.Destroy(ctx, spec.Name); err != nil {
+		return fmt.Errorf("quiesce workspace compute: %w", err)
+	}
+	transaction, err := prepareFilesystemRestorePaths(paths, manifest.Generation)
+	if err != nil {
+		return err
+	}
+	if err := transaction.Activate(); err != nil {
+		transaction.Cleanup()
+		return err
+	}
+	if err := checkpointSQLiteTree(ctx, options.stateDirectory); err != nil {
+		return errors.Join(fmt.Errorf("validate rollback filesystem generation: %w", err), transaction.Rollback())
+	}
+	if err := docker.RestoreManagedVolumes(ctx, spec, volumeSources, manifest.Generation); err != nil {
+		return errors.Join(err, transaction.Rollback())
+	}
+	if err := transaction.Commit(); err != nil {
+		return fmt.Errorf("rollback data is active but replaced filesystem paths need manual cleanup: %w", err)
+	}
+	fmt.Fprintf(os.Stdout, "rolled back to durable operational generation %s; workspace compute remains offline\nrollback material retained at %s\n", manifest.Generation, rollbackRoot)
 	return nil
 }
 
@@ -246,6 +318,15 @@ func checkpointSQLiteTree(ctx context.Context, root string) error {
 	return filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
+		}
+		if info.IsDir() && path != root {
+			relative, err := filepath.Rel(root, path)
+			if err != nil {
+				return err
+			}
+			if excludedStateEntries[strings.Split(relative, string(filepath.Separator))[0]] {
+				return filepath.SkipDir
+			}
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("symlink rejected in Fern state: %s", path)
@@ -407,6 +488,19 @@ type restorePath struct {
 	source, target string
 }
 
+type operationalRollbackManifest struct {
+	SchemaVersion      int                       `json:"schema_version"`
+	Generation         string                    `json:"generation"`
+	RestoredGeneration string                    `json:"restored_generation"`
+	Paths              []operationalRollbackPath `json:"paths"`
+	NamedVolumes       []string                  `json:"named_volumes"`
+}
+
+type operationalRollbackPath struct {
+	Target    string `json:"target"`
+	HadTarget bool   `json:"had_target"`
+}
+
 type preparedRestorePath struct {
 	target, staged, prior string
 	hadTarget             bool
@@ -461,6 +555,10 @@ func prepareFilesystemRestore(current, stateDirectory, configPath, envPath, repo
 			}
 		}
 	}
+	return prepareFilesystemRestorePaths(paths, generation)
+}
+
+func prepareFilesystemRestorePaths(paths []restorePath, generation string) (*filesystemRestore, error) {
 	transaction := &filesystemRestore{}
 	for index, path := range paths {
 		item := preparedRestorePath{target: path.target}
@@ -484,6 +582,118 @@ func prepareFilesystemRestore(current, stateDirectory, configPath, envPath, repo
 		}
 	}
 	return transaction, nil
+}
+
+func createOperationalRollback(ctx context.Context, docker backupDocker, spec fernruntime.Spec, recoveryDirectory, generation, restoredGeneration string, paths []preparedRestorePath) (string, error) {
+	root := filepath.Join(recoveryDirectory, operationalRollbackDirectory)
+	staging := root + ".staged"
+	if pathExists(root) || pathExists(staging) {
+		return "", fmt.Errorf("durable operational rollback generation already exists at %s", root)
+	}
+	if err := os.Mkdir(staging, 0o700); err != nil {
+		return "", err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = os.RemoveAll(staging)
+		}
+	}()
+	filesystem := filepath.Join(staging, "filesystem")
+	volumes := filepath.Join(staging, "volumes")
+	if err := os.Mkdir(filesystem, 0o700); err != nil {
+		return "", err
+	}
+	if err := os.Mkdir(volumes, 0o700); err != nil {
+		return "", err
+	}
+	manifest := operationalRollbackManifest{SchemaVersion: 1, Generation: generation, RestoredGeneration: restoredGeneration}
+	for index, path := range paths {
+		item := operationalRollbackPath{Target: path.target, HadTarget: pathExists(path.target)}
+		manifest.Paths = append(manifest.Paths, item)
+		if item.HadTarget {
+			if err := copyPath(path.target, filepath.Join(filesystem, fmt.Sprintf("%d", index))); err != nil {
+				return "", fmt.Errorf("snapshot rollback path %s: %w", path.target, err)
+			}
+		}
+	}
+	volumeNames, err := docker.ExportManagedVolumes(ctx, spec, volumes)
+	if err != nil {
+		return "", fmt.Errorf("snapshot durable Docker rollback generation: %w", err)
+	}
+	manifest.NamedVolumes = volumeNames
+	encoded, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	encoded = append(encoded, '\n')
+	manifestPath := filepath.Join(staging, "ROLLBACK-MANIFEST.json")
+	file, err := os.OpenFile(manifestPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return "", err
+	}
+	if _, err := file.Write(encoded); err != nil {
+		_ = file.Close()
+		return "", err
+	}
+	if err := errors.Join(file.Sync(), file.Close()); err != nil {
+		return "", err
+	}
+	if err := os.Rename(staging, root); err != nil {
+		return "", err
+	}
+	committed = true
+	return root, nil
+}
+
+func readOperationalRollback(root, stateDirectory, configPath, envPath, repository string, wantVolumes []string) (operationalRollbackManifest, []restorePath, map[string]string, error) {
+	var manifest operationalRollbackManifest
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
+		return manifest, nil, nil, fmt.Errorf("durable operational rollback generation is unavailable or unsafe at %s", root)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "ROLLBACK-MANIFEST.json"))
+	if err != nil {
+		return manifest, nil, nil, err
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&manifest); err != nil || manifest.SchemaVersion != 1 || manifest.Generation == "" || manifest.RestoredGeneration == "" {
+		return manifest, nil, nil, errors.New("invalid durable operational rollback manifest")
+	}
+	configTarget, _ := filepath.Abs(configPath)
+	envTarget, _ := filepath.Abs(envPath)
+	repositoryTarget, _ := filepath.Abs(repository)
+	stateTarget, _ := filepath.Abs(stateDirectory)
+	if len(manifest.Paths) < 3 || manifest.Paths[0].Target != configTarget || manifest.Paths[1].Target != envTarget || manifest.Paths[2].Target != repositoryTarget || !slices.Equal(manifest.NamedVolumes, wantVolumes) {
+		return manifest, nil, nil, errors.New("rollback generation does not match the active Fern configuration")
+	}
+	paths := make([]restorePath, 0, len(manifest.Paths))
+	for index, item := range manifest.Paths {
+		if index >= 3 {
+			parent, err := filepath.Rel(stateTarget, item.Target)
+			if err != nil || parent == "." || filepath.Dir(parent) != "." || excludedStateEntries[filepath.Base(item.Target)] {
+				return manifest, nil, nil, errors.New("rollback manifest contains an invalid Fern state target")
+			}
+		}
+		source := ""
+		if item.HadTarget {
+			source = filepath.Join(root, "filesystem", fmt.Sprintf("%d", index))
+			if !pathExists(source) {
+				return manifest, nil, nil, errors.New("rollback filesystem generation is incomplete")
+			}
+		}
+		paths = append(paths, restorePath{source: source, target: item.Target})
+	}
+	volumeSources := make(map[string]string, len(wantVolumes))
+	for _, name := range wantVolumes {
+		source := filepath.Join(root, "volumes", name)
+		if !pathExists(source) {
+			return manifest, nil, nil, errors.New("rollback Docker generation is incomplete")
+		}
+		volumeSources[name] = source
+	}
+	return manifest, paths, volumeSources, nil
 }
 
 func (transaction *filesystemRestore) Activate() error {

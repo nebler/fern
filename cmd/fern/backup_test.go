@@ -134,6 +134,25 @@ func TestBackupCreateAndRestoreOperationalPaths(t *testing.T) {
 	if len(docker.restored) != 2 {
 		t.Fatalf("restored volume sources = %q", docker.restored)
 	}
+	rollbackRoot := filepath.Join(stateDirectory, "recovery", operationalRollbackDirectory)
+	if !pathExists(filepath.Join(rollbackRoot, "ROLLBACK-MANIFEST.json")) || !pathExists(filepath.Join(rollbackRoot, "volumes", "fern-demo-v2-data")) {
+		t.Fatal("restore did not retain durable filesystem and Docker rollback material")
+	}
+	if err := runBackupRollback([]string{
+		"--config", configPath, "--env-file", envPath, "--state-dir", stateDirectory,
+		"--recovery-dir", filepath.Join(stateDirectory, "recovery"),
+	}, log); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFixtureFile(t, filepath.Join(repository, "work.txt")); got != "changed\n" {
+		t.Fatalf("repository after durable rollback = %q", got)
+	}
+	if got := readFixtureFile(t, filepath.Join(stateDirectory, "tasks", "note")); got != "changed-state\n" {
+		t.Fatalf("state after durable rollback = %q", got)
+	}
+	if !pathExists(filepath.Join(rollbackRoot, "ROLLBACK-MANIFEST.json")) || len(docker.restored) != 2 {
+		t.Fatal("explicit rollback did not retain its restart-safe generation or restore Docker volumes")
+	}
 }
 
 func TestBackupCreateRefusesLiveWorkspaceLease(t *testing.T) {

@@ -72,10 +72,11 @@ var commands = []command{
 	},
 	{
 		name:     "backup",
-		overview: "Create and restore verified offline host backups.",
+		overview: "Create, restore, and roll back verified offline host backups.",
 		sub: []subcommand{
 			{name: "create", summary: "Quiesce the workspace and create a verified backup", run: func(_ context.Context, args []string, log *slog.Logger) error { return runBackupCreate(args, log) }},
 			{name: "restore", summary: "Stage, verify, and activate a backup", run: func(_ context.Context, args []string, log *slog.Logger) error { return runBackupRestore(args, log) }},
+			{name: "rollback", summary: "Activate the durable pre-restore generation", run: func(_ context.Context, args []string, log *slog.Logger) error { return runBackupRollback(args, log) }},
 		},
 	},
 	{

@@ -130,6 +130,7 @@ Commands:
   down                           Remove workspace compute while retaining session data
   backup create                  Quiesce the workspace and create a verified backup
   backup restore                 Stage, verify, and activate a backup
+  backup rollback                Activate the durable pre-restore generation
   credentials export             Export an age-encrypted credential bundle
   credentials import             Validate and activate encrypted credentials
   credentials rotate             Rotate credentials with an encrypted rollback
@@ -164,8 +165,8 @@ func TestGroupedHelpIsDerivedUnchanged(t *testing.T) {
 			usage:    "Usage:\n  fern debug events [flags]\n  fern debug wake [flags]\n  fern debug quarantine-publications [flags]",
 		},
 		"backup": {
-			overview: "Create and restore verified offline host backups.",
-			usage:    "Usage:\n  fern backup create [flags]\n  fern backup restore [flags]",
+			overview: "Create, restore, and roll back verified offline host backups.",
+			usage:    "Usage:\n  fern backup create [flags]\n  fern backup restore [flags]\n  fern backup rollback [flags]",
 		},
 		"credentials": {
 			overview: "Export, import, and rollback-safely rotate encrypted GitHub credentials.",

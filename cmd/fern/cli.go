@@ -70,6 +70,7 @@ var commandExamples = map[string]string{
 	"debug quarantine-publications": "fern debug quarantine-publications --name demo",
 	"backup create":                 "fern backup create --output /srv/backups/fern-generation",
 	"backup restore":                "fern backup restore --backup /srv/backups/fern-generation",
+	"backup rollback":               "fern backup rollback --recovery-dir /var/lib/fern/recovery",
 	"credentials export":            "fern credentials export --recipient age1... --output /srv/backups/credentials.age",
 	"credentials import":            "fern credentials import --identity /secure/identity.txt --input credentials.age",
 	"credentials rotate":            "fern credentials rotate --identity /secure/identity.txt --input next.age --acknowledge-external-revocation",
