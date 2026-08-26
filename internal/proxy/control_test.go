@@ -82,6 +82,20 @@ func TestControlPageDoesNotRenderLegacyWorkflowOrPublicationUI(t *testing.T) {
 	}
 }
 
+func TestResultPublicationRouteDispatchesToTaskAPI(t *testing.T) {
+	called := false
+	tasks := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		called = request.URL.Path == "/fern/api/v1/results/res_0198d34d-6a50-75fb-b1f2-b4a14d70ec59/publications"
+		writer.WriteHeader(http.StatusAccepted)
+	})
+	request := httptest.NewRequest(http.MethodPost, "/fern/api/v1/results/res_0198d34d-6a50-75fb-b1f2-b4a14d70ec59/publications", nil)
+	response := httptest.NewRecorder()
+	serveFern(response, request, Controls{Tasks: tasks})
+	if response.Code != http.StatusAccepted || !called {
+		t.Fatalf("result publication dispatch status=%d called=%t", response.Code, called)
+	}
+}
+
 func TestControlMutationOriginPolicy(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

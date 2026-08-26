@@ -23,18 +23,20 @@ import (
 )
 
 const (
-	submitPath         = "/fern/api/v1/tasks"
-	eventsPath         = "/fern/api/v1/events"
-	apiPrefix          = "/fern/api/v1/tasks/"
-	maxPromptBytes     = 64 * 1024
-	maxTitleBytes      = 200
-	maxBaseRefBytes    = 255
-	maxReasonBytes     = 500
-	maxSubmitBodyBytes = 6*(maxPromptBytes+maxTitleBytes+maxBaseRefBytes) + 128
-	maxCancelBodyBytes = 6*maxReasonBytes + 32
-	maxSealBodyBytes   = 4096
-	defaultEventLimit  = 100
-	maxEventLimit      = 500
+	submitPath          = "/fern/api/v1/tasks"
+	eventsPath          = "/fern/api/v1/events"
+	apiPrefix           = "/fern/api/v1/tasks/"
+	resultsPrefix       = "/fern/api/v1/results/"
+	maxPromptBytes      = 64 * 1024
+	maxTitleBytes       = 200
+	maxBaseRefBytes     = 255
+	maxReasonBytes      = 500
+	maxSubmitBodyBytes  = 6*(maxPromptBytes+maxTitleBytes+maxBaseRefBytes) + 128
+	maxCancelBodyBytes  = 6*maxReasonBytes + 32
+	maxSealBodyBytes    = 4096
+	maxPublishBodyBytes = 512
+	defaultEventLimit   = 100
+	maxEventLimit       = 500
 )
 
 var (
@@ -49,6 +51,7 @@ var (
 // Store is the complete persistence surface used by Handler.
 type Store interface {
 	AdmitTask(context.Context, taskstore.AdmitTaskParams) (taskstore.Admission, error)
+	AdmitPublication(context.Context, taskstore.AdmitPublicationParams) (taskstore.PublicationAdmission, error)
 	FindReceiptByIdempotency(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error)
 	GetTask(context.Context, task.TaskID) (taskstore.Task, error)
 	GetAttempt(context.Context, task.AttemptID) (taskstore.Attempt, error)
@@ -108,6 +111,9 @@ type Config struct {
 	SealAuthorizer           SealAuthorizer
 	Wake                     func()
 	SealWake                 func()
+	PublicationWake          func()
+	PublicationPolicyVersion string
+	PublicationPolicySHA256  [32]byte
 	Now                      func() time.Time
 	AttemptTimeout           time.Duration
 	ObjectFormat             string
@@ -147,6 +153,9 @@ func New(config Config) (*Handler, error) {
 	if len(config.BudgetSnapshot) == 0 || len(config.BudgetSnapshot) > 16*1024 || !json.Valid(config.BudgetSnapshot) {
 		return nil, errors.New("valid task API budget snapshot is required")
 	}
+	if config.PublicationWake != nil && (!validText(config.PublicationPolicyVersion, 1, 128) || config.PublicationPolicySHA256 == [32]byte{}) {
+		return nil, errors.New("valid task API publication policy is required")
+	}
 	config.BudgetSnapshot = append(json.RawMessage(nil), config.BudgetSnapshot...)
 	return &Handler{config: config}, nil
 }
@@ -155,6 +164,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if r.URL.EscapedPath() != r.URL.Path {
+		writeError(w, http.StatusNotFound, "not_found", "The requested resource was not found.")
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, resultsPrefix) && h.config.PublicationWake == nil {
 		writeError(w, http.StatusNotFound, "not_found", "The requested resource was not found.")
 		return
 	}
@@ -194,9 +207,87 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.events(w, r)
 	case strings.HasPrefix(r.URL.Path, apiPrefix):
 		h.taskRoute(w, r, actor)
+	case strings.HasPrefix(r.URL.Path, resultsPrefix):
+		h.resultRoute(w, r, actor)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "The requested resource was not found.")
 	}
+}
+
+type publicationInput struct {
+	ExpectedVerificationID string
+}
+
+func (h *Handler) resultRoute(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot) {
+	remainder := strings.TrimPrefix(r.URL.Path, resultsPrefix)
+	parts := strings.Split(remainder, "/")
+	if len(parts) != 2 || parts[1] != "publications" {
+		writeError(w, http.StatusNotFound, "not_found", "The requested resource was not found.")
+		return
+	}
+	resultID, err := task.ParseResultID(parts[0])
+	if err != nil {
+		writeError(w, http.StatusNotFound, "not_found", "The requested resource was not found.")
+		return
+	}
+	if r.Method != http.MethodPost {
+		methodNotAllowed(w, http.MethodPost)
+		return
+	}
+	if !noQuery(r) || !exactJSONContentType(r) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "The request is not valid.")
+		return
+	}
+	key, ok := parseIdempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	var input publicationInput
+	if err := decodeClosedObject(r.Body, maxPublishBodyBytes, map[string]func(json.RawMessage) error{
+		"expectedVerificationId": stringField(&input.ExpectedVerificationID),
+	}); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "The JSON body is not valid.")
+		return
+	}
+	verificationID, err := task.ParseVerificationID(input.ExpectedVerificationID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "The JSON body is not valid.")
+		return
+	}
+	ids, err := h.config.Generator.GeneratePublicationAdmissionIDs()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "The request could not be completed.")
+		return
+	}
+	now, _, ok := h.commandTimes(w)
+	if !ok {
+		return
+	}
+	claim := task.IdempotencyClaim{
+		Scope: task.IdempotencyScope{WorkspaceID: h.config.WorkspaceID, CommandKind: taskstore.PublishResultCommand},
+		Key:   key, RequestHash: publicationHash(resultID, verificationID), Actor: actor,
+	}
+	admission, err := h.config.Store.AdmitPublication(r.Context(), taskstore.AdmitPublicationParams{
+		PublicationID: ids.PublicationID, OperationID: ids.OperationID, ReceiptID: ids.ReceiptID, EventID: ids.EventID,
+		ResultID: resultID, VerificationID: verificationID, Claim: claim,
+		BrokerPolicyVersion: h.config.PublicationPolicyVersion, BrokerPolicySHA256: h.config.PublicationPolicySHA256,
+		APIContractVersion: h.config.APIContractVersion, AcceptedAt: now,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	response, valid := publicationResponseFor(admission)
+	if !valid {
+		writeError(w, http.StatusInternalServerError, "internal_error", "The request could not be completed.")
+		return
+	}
+	if admission.Replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+	} else {
+		h.config.PublicationWake()
+	}
+	writeJSON(w, http.StatusAccepted, response)
 }
 
 func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
@@ -691,6 +782,13 @@ func sealHash(id task.TaskID, input sealInput) task.RequestHash {
 	}{id, input})
 }
 
+func publicationHash(resultID task.ResultID, verificationID task.VerificationID) task.RequestHash {
+	return commandHash(taskstore.PublishResultCommand, struct {
+		ResultID               task.ResultID       `json:"resultId"`
+		ExpectedVerificationID task.VerificationID `json:"expectedVerificationId"`
+	}{resultID, verificationID})
+}
+
 func parseSealSnapshot(id task.TaskID, input sealInput) (taskresultcoord.SealSnapshot, bool) {
 	attemptID, err := task.ParseAttemptID(input.AttemptID)
 	if err != nil || input.WorkspaceRevision < 1 || input.TaskRevision < 1 || input.AttemptRevision < 1 ||
@@ -1179,6 +1277,46 @@ type sealResponse struct {
 	TaskID        task.TaskID                `json:"taskId"`
 	AttemptID     task.AttemptID             `json:"attemptId"`
 	State         taskstore.SealRequestState `json:"state"`
+}
+
+type publicationAdmissionDTO struct {
+	ID             task.PublicationID         `json:"id"`
+	ResultID       task.ResultID              `json:"resultId"`
+	VerificationID task.VerificationID        `json:"verificationId"`
+	State          taskstore.PublicationState `json:"state"`
+	CreatedAt      time.Time                  `json:"createdAt"`
+}
+
+type publicationResponse struct {
+	Receipt     receiptDTO              `json:"receipt"`
+	Publication publicationAdmissionDTO `json:"publication"`
+}
+
+func publicationResponseFor(value taskstore.PublicationAdmission) (publicationResponse, bool) {
+	var projection struct {
+		PublicationID  task.PublicationID  `json:"publicationId"`
+		ResultID       task.ResultID       `json:"resultId"`
+		VerificationID task.VerificationID `json:"verificationId"`
+	}
+	_ = json.Unmarshal(value.Receipt.ResponseProjection, &projection)
+	if _, err := task.ParsePublicationID(string(projection.PublicationID)); err != nil {
+		return publicationResponse{}, false
+	}
+	if _, err := task.ParseResultID(string(projection.ResultID)); err != nil {
+		return publicationResponse{}, false
+	}
+	if _, err := task.ParseVerificationID(string(projection.VerificationID)); err != nil {
+		return publicationResponse{}, false
+	}
+	if value.Receipt.CommandKind != taskstore.PublishResultCommand || value.Receipt.State != taskstore.ReceiptAccepted ||
+		projection.PublicationID != value.Publication.ID || projection.ResultID != value.Publication.ResultID ||
+		projection.VerificationID != value.Publication.VerificationID || value.Receipt.AcceptedAt.IsZero() {
+		return publicationResponse{}, false
+	}
+	return publicationResponse{Receipt: receiptView(value.Receipt), Publication: publicationAdmissionDTO{
+		ID: projection.PublicationID, ResultID: projection.ResultID, VerificationID: projection.VerificationID,
+		State: taskstore.PublicationPrepared, CreatedAt: value.Receipt.AcceptedAt,
+	}}, true
 }
 
 func sealResponseFor(receipt taskstore.Receipt, request taskstore.SealRequest) sealResponse {

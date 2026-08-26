@@ -138,6 +138,12 @@ func csrfMessage(expiry, method, route string) string {
 }
 
 func csrfRoute(path string) string {
+	if strings.HasPrefix(path, "/fern/api/v1/results/") && strings.HasSuffix(path, "/publications") {
+		id := strings.TrimSuffix(strings.TrimPrefix(path, "/fern/api/v1/results/"), "/publications")
+		if id != "" && !strings.Contains(id, "/") {
+			return "/fern/api/v1/results/:id/publications"
+		}
+	}
 	if strings.HasPrefix(path, "/fern/api/v1/tasks/") && strings.HasSuffix(path, "/cancel") {
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/fern/api/v1/tasks/"), "/cancel")
 		if id != "" && !strings.Contains(id, "/") {

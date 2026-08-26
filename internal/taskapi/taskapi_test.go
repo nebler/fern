@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,18 +21,21 @@ import (
 )
 
 const (
-	testWorkspace = task.WorkspaceID("wsp_0198d34d-5e40-7c5a-8e3f-6bfad471ae12")
-	testTask      = task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-b4a14d70ec55")
-	testAttempt   = task.AttemptID("att_0198d34d-6a50-75fb-b1f2-b4a14d70ec56")
-	testReceipt   = task.ReceiptID("rcp_0198d34d-6a50-75fb-b1f2-b4a14d70ec57")
-	testEvent     = task.EventID("fev_0198d34d-6a50-75fb-b1f2-b4a14d70ec58")
-	testSHA       = task.GitOID("0123456789abcdef0123456789abcdef01234567")
+	testWorkspace    = task.WorkspaceID("wsp_0198d34d-5e40-7c5a-8e3f-6bfad471ae12")
+	testTask         = task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-b4a14d70ec55")
+	testAttempt      = task.AttemptID("att_0198d34d-6a50-75fb-b1f2-b4a14d70ec56")
+	testReceipt      = task.ReceiptID("rcp_0198d34d-6a50-75fb-b1f2-b4a14d70ec57")
+	testEvent        = task.EventID("fev_0198d34d-6a50-75fb-b1f2-b4a14d70ec58")
+	testResult       = task.ResultID("res_0198d34d-6a50-75fb-b1f2-b4a14d70ec59")
+	testVerification = task.VerificationID("ver_0198d34d-6a50-75fb-b1f2-b4a14d70ec60")
+	testSHA          = task.GitOID("0123456789abcdef0123456789abcdef01234567")
 )
 
 var testNow = time.Date(2026, 8, 22, 18, 57, 11, 565000000, time.UTC)
 
 type fakeStore struct {
 	admit    func(context.Context, taskstore.AdmitTaskParams) (taskstore.Admission, error)
+	publish  func(context.Context, taskstore.AdmitPublicationParams) (taskstore.PublicationAdmission, error)
 	receipt  func(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error)
 	get      func(context.Context, task.TaskID) (taskstore.Task, error)
 	attempt  func(context.Context, task.AttemptID) (taskstore.Attempt, error)
@@ -40,6 +44,13 @@ type fakeStore struct {
 	cancel   func(context.Context, taskstore.RequestCancellationParams) (taskstore.Cancellation, error)
 	seal     func(context.Context, task.ReceiptID) (taskstore.SealRequest, error)
 	events   func(context.Context, task.WorkspaceID, task.Cursor, int) (taskstore.EventPage, error)
+}
+
+func (s *fakeStore) AdmitPublication(ctx context.Context, p taskstore.AdmitPublicationParams) (taskstore.PublicationAdmission, error) {
+	if s.publish == nil {
+		return taskstore.PublicationAdmission{}, errors.New("unexpected AdmitPublication")
+	}
+	return s.publish(ctx, p)
 }
 
 func (s *fakeStore) ListTasks(ctx context.Context, workspace task.WorkspaceID, limit int) ([]taskstore.TaskSnapshot, error) {
@@ -242,6 +253,121 @@ func TestRoutesAndMethods(t *testing.T) {
 		if response.Code != test.status || response.Header().Get("Allow") != test.allow {
 			t.Errorf("%s %s: status/allow = %d %q", test.method, test.path, response.Code, response.Header().Get("Allow"))
 		}
+	}
+}
+
+func TestPublicationRouteIsAbsentWithoutCoordinator(t *testing.T) {
+	var calls atomic.Int64
+	store := &fakeStore{publish: func(context.Context, taskstore.AdmitPublicationParams) (taskstore.PublicationAdmission, error) {
+		calls.Add(1)
+		return taskstore.PublicationAdmission{}, nil
+	}}
+	handler := newTestHandler(t, testConfig(t, store))
+	path := resultsPrefix + string(testResult) + "/publications"
+	for _, method := range []string{http.MethodPost, http.MethodGet} {
+		response := request(handler, method, path, `{"expectedVerificationId":"`+string(testVerification)+`"}`, postHeaders())
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("%s absent route = %d %s", method, response.Code, response.Body.String())
+		}
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("absent route called store %d times", calls.Load())
+	}
+}
+
+func TestPublicationAdmissionIsStrictStableAndServerAuthorized(t *testing.T) {
+	policyHash := sha256.Sum256([]byte("publication-policy"))
+	var mu sync.Mutex
+	var first *taskstore.PublicationAdmission
+	var firstClaim task.IdempotencyClaim
+	var calls, wakes atomic.Int64
+	store := &fakeStore{publish: func(_ context.Context, p taskstore.AdmitPublicationParams) (taskstore.PublicationAdmission, error) {
+		calls.Add(1)
+		if p.ResultID != testResult || p.VerificationID != testVerification || p.BrokerPolicyVersion != "publication.v1" ||
+			p.BrokerPolicySHA256 != policyHash || p.APIContractVersion != "fern.task.v1" || p.AcceptedAt != testNow ||
+			p.Claim.Scope.CommandKind != taskstore.PublishResultCommand || p.Claim.Actor != testActor() {
+			t.Fatalf("publication params = %+v", p)
+		}
+		if _, err := task.ParsePublicationID(string(p.PublicationID)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := task.ParsePublicationOperationID(string(p.OperationID)); err != nil {
+			t.Fatal(err)
+		}
+		mu.Lock()
+		defer mu.Unlock()
+		if first == nil {
+			projection, _ := json.Marshal(struct {
+				PublicationID  task.PublicationID  `json:"publicationId"`
+				ResultID       task.ResultID       `json:"resultId"`
+				VerificationID task.VerificationID `json:"verificationId"`
+			}{p.PublicationID, p.ResultID, p.VerificationID})
+			value := taskstore.PublicationAdmission{
+				Publication: taskstore.Publication{ID: p.PublicationID, OperationID: p.OperationID, ResultID: p.ResultID,
+					VerificationID: p.VerificationID, State: taskstore.PublicationPrepared, CreatedAt: p.AcceptedAt},
+				Receipt: taskstore.Receipt{ID: p.ReceiptID, WorkspaceID: testWorkspace, CommandKind: taskstore.PublishResultCommand,
+					State: taskstore.ReceiptAccepted, TargetID: testTask, AcceptedAt: p.AcceptedAt, ResponseProjection: projection},
+			}
+			first = &value
+			firstClaim = p.Claim
+			return value, nil
+		}
+		disposition, _ := task.ClassifyIdempotency(&firstClaim, p.Claim)
+		if disposition != task.IdempotencyReplay {
+			return taskstore.PublicationAdmission{}, taskstore.ErrIdempotencyConflict
+		}
+		value := *first
+		value.Replayed = true
+		value.Publication.State = taskstore.PublicationPublished
+		value.Publication.Tuple.Branch = "server-only-branch"
+		return value, nil
+	}}
+	config := testConfig(t, store)
+	config.PublicationWake = func() { wakes.Add(1) }
+	config.PublicationPolicyVersion = "publication.v1"
+	config.PublicationPolicySHA256 = policyHash
+	handler := newTestHandler(t, config)
+	path := resultsPrefix + string(testResult) + "/publications"
+	body := `{"expectedVerificationId":"` + string(testVerification) + `"}`
+	firstResponse := request(handler, http.MethodPost, path, body, postHeaders())
+	replay := request(handler, http.MethodPost, path, body, postHeaders())
+	if firstResponse.Code != http.StatusAccepted || replay.Code != http.StatusAccepted ||
+		firstResponse.Body.String() != replay.Body.String() || replay.Header().Get("Idempotency-Replayed") != "true" || wakes.Load() != 1 {
+		t.Fatalf("publication responses first=%d %s replay=%d %s wakes=%d", firstResponse.Code, firstResponse.Body.String(), replay.Code, replay.Body.String(), wakes.Load())
+	}
+	for _, forbidden := range []string{"operationId", "branch", "repository", "commit", "server-only-branch"} {
+		if strings.Contains(firstResponse.Body.String(), forbidden) {
+			t.Fatalf("publication response exposed %q: %s", forbidden, firstResponse.Body.String())
+		}
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("store calls = %d", calls.Load())
+	}
+
+	invalidBodies := []string{
+		`{}`,
+		`{"ExpectedVerificationId":"` + string(testVerification) + `"}`,
+		`{"expectedVerificationId":"` + string(testVerification) + `","branch":"attacker"}`,
+		`{"expectedVerificationId":"` + string(testVerification) + `","repository":"owner/other"}`,
+		`{"expectedVerificationId":"` + string(testVerification) + `","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}`,
+		`{"expectedVerificationId":"` + string(testVerification) + `","expectedVerificationId":"` + string(testVerification) + `"}`,
+		`null`,
+	}
+	for index, invalid := range invalidBodies {
+		headers := map[string]string{"Content-Type": "application/json", "Idempotency-Key": "invalid-" + strconv.Itoa(index)}
+		response := request(handler, http.MethodPost, path, invalid, headers)
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid publication body %q = %d %s", invalid, response.Code, response.Body.String())
+		}
+	}
+	if response := request(handler, http.MethodPost, path+"?branch=attacker", body, postHeaders()); response.Code != http.StatusBadRequest {
+		t.Fatalf("publication query = %d", response.Code)
+	}
+	if response := request(handler, http.MethodPost, path, body, map[string]string{"Content-Type": "application/json; charset=utf-8", "Idempotency-Key": "bad-type"}); response.Code != http.StatusBadRequest {
+		t.Fatalf("publication content type = %d", response.Code)
+	}
+	if response := request(handler, http.MethodGet, path, "", nil); response.Code != http.StatusMethodNotAllowed || response.Header().Get("Allow") != http.MethodPost {
+		t.Fatalf("publication GET = %d allow=%q", response.Code, response.Header().Get("Allow"))
 	}
 }
 

@@ -218,6 +218,19 @@ func TestNoWorkDoesNotAcquireFence(t *testing.T) {
 	}
 }
 
+func TestCoordinatorConsumesReceiptAdmittedPublication(t *testing.T) {
+	store, publisher, coordinator := testCoordinator(t, taskstore.PublicationPhaseNone)
+	store.work.Publication.AdmissionReceiptID = task.ReceiptID("rcp_0198d34d-5e40-7c5a-8e3f-6bfad471ae19")
+	publisher.push = taskpublication.BranchProof{Observation: exactBranch(), Push: taskpublication.GitEvidence{Attempted: true}}
+	if err := coordinator.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if store.work.Publication.EffectPhase != taskstore.PublicationPhasePushObserved || store.mutations != 2 || publisher.pushes != 1 {
+		t.Fatalf("admitted publication was not consumed: publication=%+v mutations=%d pushes=%d",
+			store.work.Publication, store.mutations, publisher.pushes)
+	}
+}
+
 func TestAcquireFailureIsSanitizedAndBlocksAllWork(t *testing.T) {
 	store, publisher, coordinator := testCoordinator(t, taskstore.PublicationPhaseNone)
 	cause := errors.New("pause failed secret-output-marker")

@@ -16,6 +16,7 @@ import (
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/runtime"
+	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -111,6 +112,15 @@ func TestGitHubOnboardingIsDisabledForWorkspaceGH(t *testing.T) {
 	})
 	if err != nil || handler != nil {
 		t.Fatalf("workspace-gh onboarding = %v, %v", handler, err)
+	}
+}
+
+func TestPublicationCoordinatorIsAbsentForWorkspaceGH(t *testing.T) {
+	coordinator, err := newPublicationCoordinator(context.Background(), "", config.Config{
+		Workspace: config.Workspace{GitHub: &config.WorkspaceGitHub{Mode: config.GitHubModeWorkspaceGH}},
+	}, "", "", nil, task.ActorSnapshot{}, nil, nil, nil, nil, nil)
+	if err != nil || coordinator != nil {
+		t.Fatalf("workspace-gh publication coordinator = %v, %v", coordinator, err)
 	}
 }
 

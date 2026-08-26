@@ -143,7 +143,8 @@ func retiredLegacyControlPath(path string) bool {
 }
 
 func isTaskAPIPath(path string) bool {
-	return path == "/fern/api/v1/tasks" || path == "/fern/api/v1/events" || strings.HasPrefix(path, "/fern/api/v1/tasks/")
+	return path == "/fern/api/v1/tasks" || path == "/fern/api/v1/events" || strings.HasPrefix(path, "/fern/api/v1/tasks/") ||
+		strings.HasPrefix(path, "/fern/api/v1/results/")
 }
 
 func revokeDevice(store *control.Store, id string, onRevoked func(string)) error {

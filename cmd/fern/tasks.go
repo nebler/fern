@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -34,10 +35,12 @@ import (
 )
 
 const (
-	taskAPIContractVersion       = "fern.task.v1"
-	taskExecutionContractVersion = "fern.execution.v1"
-	taskOpenCodeProtocol         = "0.0.0-next-17444"
-	taskSessionDirectory         = "/home/user/workspace"
+	taskAPIContractVersion         = "fern.task.v1"
+	taskExecutionContractVersion   = "fern.execution.v1"
+	taskOpenCodeProtocol           = "0.0.0-next-17444"
+	publicationBrokerPolicyVersion = "fern.github-app-publication.v1"
+	publicationBrokerPolicy        = "immutable changed result; current uncanceled owner; exact successful verification; derived repository, base, commit, and branch; draft pull request"
+	taskSessionDirectory           = "/home/user/workspace"
 
 	// taskServiceCredentialID identifies Fern's internal coordinators in task
 	// audit trails; every system actor authenticates with it.
@@ -178,6 +181,10 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	if err != nil {
 		return nil, err
 	}
+	var publicationWake func()
+	if publicationCoordinator != nil {
+		publicationWake = publicationCoordinator.Wake
+	}
 	verificationCoordinator, err := newVerificationCoordinator(store, manager, ids, cfg, durableWorkspace.ID, imageID, workerID, recoveryActor, status, log)
 	if err != nil {
 		return nil, err
@@ -196,7 +203,9 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 			case resultWake <- struct{}{}:
 			default:
 			}
-		}, Now: time.Now, AttemptTimeout: cfg.Tasks.AttemptTimeout,
+		}, PublicationWake: publicationWake, PublicationPolicyVersion: publicationBrokerPolicyVersion,
+		PublicationPolicySHA256: sha256.Sum256([]byte(publicationBrokerPolicy)),
+		Now:                     time.Now, AttemptTimeout: cfg.Tasks.AttemptTimeout,
 		ObjectFormat: "sha1", APIContractVersion: taskAPIContractVersion,
 		ExecutionContractVersion: taskExecutionContractVersion, Agent: cfg.Tasks.Agent,
 		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID, BudgetSnapshot: budget,

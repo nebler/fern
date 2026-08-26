@@ -49,6 +49,25 @@ func TestDeviceCSRFTokensAreCredentialMethodRouteAndExpiryBound(t *testing.T) {
 	}
 }
 
+func TestPublicationCSRFTokensNormalizeOnlyTheResultID(t *testing.T) {
+	now := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
+	credential := "device-a"
+	first := "/fern/api/v1/results/res_0198d34d-6a50-75fb-b1f2-b4a14d70ec59/publications"
+	second := "/fern/api/v1/results/res_0198d34d-6a50-75fb-b1f2-b4a14d70ec60/publications"
+	token := mintCSRFToken(credential, http.MethodPost, first, now.Add(time.Minute))
+	if !validCSRFToken(token, credential, http.MethodPost, second, now) {
+		t.Fatal("publication CSRF token did not normalize the dynamic result ID")
+	}
+	for _, path := range []string{
+		"/fern/api/v1/results/res_0198d34d-6a50-75fb-b1f2-b4a14d70ec60/other",
+		"/fern/api/v1/tasks/tsk_0198d34d-6a50-75fb-b1f2-b4a14d70ec60/cancel",
+	} {
+		if validCSRFToken(token, credential, http.MethodPost, path, now) {
+			t.Fatalf("publication CSRF token escaped to %s", path)
+		}
+	}
+}
+
 func TestDeviceMutationCSRFRejectsBeforeHandler(t *testing.T) {
 	t.Parallel()
 	now := time.Date(2026, time.August, 22, 12, 0, 0, 0, time.UTC)
