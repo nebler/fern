@@ -59,10 +59,10 @@
         "transaction_example": {"const": "deploy/release/transaction-manifest.example.json"},
         "transaction_receipt": {"const": "generated-at-restore-target/TRANSACTION-MANIFEST.json"},
         "host_utility": {"const": "scripts/fern-host-backup.py"},
-        "support_status": {"const": "deterministic-host-foundation"},
-        "activation_model": {"const": "staged-current-previous"},
-        "credential_policy": {"const": "exclude-and-reauthorize-or-external-recipient"},
-        "volume_export_mode": {"const": "explicit-pre-exported-directory"}
+        "support_status": {"const": "installed-cli-operational-recovery"},
+        "activation_model": {"const": "staged-filesystem-docker-best-effort-rollback"},
+        "credential_policy": {"const": "external-recipient-with-checksums"},
+        "volume_export_mode": {"const": "managed-docker-volume-staged-and-verified"}
       }
     }
   },

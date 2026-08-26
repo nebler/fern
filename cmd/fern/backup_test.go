@@ -92,6 +92,30 @@ func TestBackupCreateAndRestoreOperationalPaths(t *testing.T) {
 	if len(manifest.NamedVolumes) != 2 || manifest.Credentials.WorkspaceGH != "included-in-external-recipient" {
 		t.Fatalf("backup manifest = %+v", manifest)
 	}
+	tampered := filepath.Join(root, "tampered")
+	if err := copyPath(backup, tampered); err != nil {
+		t.Fatal(err)
+	}
+	stateArchive, err := os.OpenFile(filepath.Join(tampered, "state.tar"), os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stateArchive.WriteString("tamper"); err != nil {
+		t.Fatal(err)
+	}
+	if err := stateArchive.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := runBackupRestore([]string{
+		"--config", configPath, "--env-file", envPath, "--state-dir", stateDirectory,
+		"--backup", tampered, "--credential-input", backup + ".credentials.tar",
+		"--recovery-dir", filepath.Join(stateDirectory, "tamper-recovery"),
+	}, log); err == nil {
+		t.Fatal("restore accepted a checksum-tampered backup")
+	}
+	if docker.restored != nil {
+		t.Fatal("tampered backup reached Docker volume activation")
+	}
 
 	writeFixtureFile(t, filepath.Join(repository, "work.txt"), "changed\n")
 	writeFixtureFile(t, filepath.Join(stateDirectory, "tasks", "note"), "changed-state\n")

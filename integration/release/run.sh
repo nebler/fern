@@ -73,10 +73,10 @@ assert manifest["upgrade_rollback"] == {
     "transaction_example": "deploy/release/transaction-manifest.example.json",
     "transaction_receipt": "generated-at-restore-target/TRANSACTION-MANIFEST.json",
     "host_utility": "scripts/fern-host-backup.py",
-    "support_status": "deterministic-host-foundation",
-    "activation_model": "staged-current-previous",
-    "credential_policy": "exclude-and-reauthorize-or-external-recipient",
-    "volume_export_mode": "explicit-pre-exported-directory",
+    "support_status": "installed-cli-operational-recovery",
+    "activation_model": "staged-filesystem-docker-best-effort-rollback",
+    "credential_policy": "external-recipient-with-checksums",
+    "volume_export_mode": "managed-docker-volume-staged-and-verified",
 }
 for entry in manifest["artifacts"] + manifest["deployment_files"]:
     actual = hashlib.sha256((root / "dist" / entry["path"]).read_bytes()).hexdigest()

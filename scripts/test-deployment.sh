@@ -31,6 +31,9 @@ grep -q 'REQUIRED: replace' "$CONFIG"
 grep -q 'Never expose this with Tailscale Serve' "$CONFIG"
 
 GOTOOLCHAIN=local GOOS=linux GOARCH=amd64 go build -o "$TEMP/fern" "$ROOT/cmd/fern"
+strings "$TEMP/fern" >"$TEMP/fern.strings"
+grep -q 'Create and restore verified offline host backups.' "$TEMP/fern.strings"
+grep -q 'fern-host-backup-v1' "$TEMP/fern.strings"
 install -m 0640 "$CONFIG" "$TEMP/fern.yaml"
 install -m 0640 "$ENV_FILE" "$TEMP/fern.env"
 test "$(stat -c %a "$TEMP/fern.yaml" 2>/dev/null || stat -f %Lp "$TEMP/fern.yaml")" = 640
