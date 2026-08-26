@@ -50,6 +50,11 @@ jobs:
       - name: Verify reproducible release artifacts
         run: ./integration/release/run.sh
 
+      - name: Verify production rehearsal evidence harness
+        run: |
+          python3 -m json.tool deploy/release/production-rehearsal-evidence.schema.json >/dev/null
+          ./integration/production-rehearsal/run.sh self-test
+
       - name: Build and verify release candidate
         run: |
           ./scripts/build-release.sh v0.0.0-ci

@@ -1,0 +1,202 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fern.invalid/schemas/production-rehearsal-evidence-v1.json",
+  "title": "Fern redacted physical production rehearsal evidence",
+  "description": "Resumable operator evidence. Secret-like keys and values are additionally rejected by integration/production-rehearsal/run.sh.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "schema", "rehearsal_id", "operator_id", "created_at", "updated_at", "status", "phases"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "schema": {"const": "deploy/release/production-rehearsal-evidence.schema.json"},
+    "rehearsal_id": {"$ref": "#/$defs/id"},
+    "operator_id": {"$ref": "#/$defs/id"},
+    "created_at": {"$ref": "#/$defs/timestamp"},
+    "updated_at": {"$ref": "#/$defs/timestamp"},
+    "status": {"enum": ["in-progress", "finalized"]},
+    "phases": {
+      "type": "array",
+      "maxItems": 10,
+      "prefixItems": [
+        {"$ref": "#/$defs/source-preflight-phase"},
+        {"$ref": "#/$defs/pre-reboot-phase"},
+        {"$ref": "#/$defs/post-reboot-phase"},
+        {"$ref": "#/$defs/source-backup-phase"},
+        {"$ref": "#/$defs/source-fence-phase"},
+        {"$ref": "#/$defs/target-restore-phase"},
+        {"$ref": "#/$defs/tls-wss-phase"},
+        {"$ref": "#/$defs/phone-phase"},
+        {"$ref": "#/$defs/acl-negative-phase"},
+        {"$ref": "#/$defs/finalize-phase"}
+      ],
+      "items": false
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "finalized"}}},
+      "then": {"properties": {"phases": {"minItems": 10}}}
+    },
+    {
+      "if": {"properties": {"status": {"const": "in-progress"}}},
+      "then": {"properties": {"phases": {"maxItems": 9}}}
+    }
+  ],
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$"},
+    "boot-id": {"type": "string", "pattern": "^[A-Fa-f0-9-]{8,64}$"},
+    "timestamp": {"type": "string", "format": "date-time", "pattern": "Z$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "image-digest": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+    "commit": {"type": "string", "pattern": "^[0-9a-f]{40,64}$"},
+    "version": {"type": "string", "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"},
+    "origin": {"type": "string", "pattern": "^https://[a-z0-9.-]+\\.ts\\.net(?::[0-9]{1,5})?/?$"},
+    "confirmation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["operator_id", "confirmed_at", "statement"],
+      "properties": {
+        "operator_id": {"$ref": "#/$defs/id"},
+        "confirmed_at": {"$ref": "#/$defs/timestamp"},
+        "statement": {"type": "string", "pattern": "^CONFIRM (source-preflight|pre-reboot|post-reboot|source-backup|source-fence|target-restore|tls-wss|phone|acl-negative|finalize) [A-Za-z0-9][A-Za-z0-9._-]{0,127}$"}
+      }
+    },
+    "source-preflight-phase": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "completed_at", "operator_confirmation", "evidence"],
+      "properties": {"name": {"const": "source-preflight"}, "completed_at": {"$ref": "#/$defs/timestamp"}, "operator_confirmation": {"$ref": "#/$defs/confirmation"}, "evidence": {"$ref": "#/$defs/source-preflight"}}
+    },
+    "pre-reboot-phase": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "completed_at", "operator_confirmation", "evidence"],
+      "properties": {"name": {"const": "pre-reboot"}, "completed_at": {"$ref": "#/$defs/timestamp"}, "operator_confirmation": {"$ref": "#/$defs/confirmation"}, "evidence": {"$ref": "#/$defs/pre-reboot"}}
+    },
+    "post-reboot-phase": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "completed_at", "operator_confirmation", "evidence"],
+      "properties": {"name": {"const": "post-reboot"}, "completed_at": {"$ref": "#/$defs/timestamp"}, "operator_confirmation": {"$ref": "#/$defs/confirmation"}, "evidence": {"$ref": "#/$defs/post-reboot"}}
+    },
+    "source-backup-phase": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "completed_at", "operator_confirmation", "evidence"],
+      "properties": {"name": {"const": "source-backup"}, "completed_at": {"$ref": "#/$defs/timestamp"}, "operator_confirmation": {"$ref": "#/$defs/confirmation"}, "evidence": {"$ref": "#/$defs/source-backup"}}
+    },
+    "source-fence-phase": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "completed_at", "operator_confirmation", "evidence"],
+      "properties": {"name": {"const": "source-fence"}, "completed_at": {"$ref": "#/$defs/timestamp"}, "operator_confirmation": {"$ref": "#/$defs/confirmation"}, "evidence": {"$ref": "#/$defs/source-fence"}}
+    },
+    "target-restore-phase": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "completed_at", "operator_confirmation", "evidence"],
+      "properties": {"name": {"const": "target-restore"}, "completed_at": {"$ref": "#/$defs/timestamp"}, "operator_confirmation": {"$ref": "#/$defs/confirmation"}, "evidence": {"$ref": "#/$defs/target-restore"}}
+    },
+    "tls-wss-phase": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "completed_at", "operator_confirmation", "evidence"],
+      "properties": {"name": {"const": "tls-wss"}, "completed_at": {"$ref": "#/$defs/timestamp"}, "operator_confirmation": {"$ref": "#/$defs/confirmation"}, "evidence": {"$ref": "#/$defs/tls-wss"}}
+    },
+    "phone-phase": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "completed_at", "operator_confirmation", "evidence"],
+      "properties": {"name": {"const": "phone"}, "completed_at": {"$ref": "#/$defs/timestamp"}, "operator_confirmation": {"$ref": "#/$defs/confirmation"}, "evidence": {"$ref": "#/$defs/phone"}}
+    },
+    "acl-negative-phase": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "completed_at", "operator_confirmation", "evidence"],
+      "properties": {"name": {"const": "acl-negative"}, "completed_at": {"$ref": "#/$defs/timestamp"}, "operator_confirmation": {"$ref": "#/$defs/confirmation"}, "evidence": {"$ref": "#/$defs/acl-negative"}}
+    },
+    "finalize-phase": {
+      "type": "object", "additionalProperties": false,
+      "required": ["name", "completed_at", "operator_confirmation", "evidence"],
+      "properties": {"name": {"const": "finalize"}, "completed_at": {"$ref": "#/$defs/timestamp"}, "operator_confirmation": {"$ref": "#/$defs/confirmation"}, "evidence": {"$ref": "#/$defs/finalize"}}
+    },
+    "source-preflight": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed_at", "source_host_id", "source_boot_id", "release_version", "release_commit", "image_digest", "service_active", "origin"],
+      "properties": {
+        "observed_at": {"$ref": "#/$defs/timestamp"}, "source_host_id": {"$ref": "#/$defs/id"}, "source_boot_id": {"$ref": "#/$defs/boot-id"},
+        "release_version": {"$ref": "#/$defs/version"}, "release_commit": {"$ref": "#/$defs/commit"}, "image_digest": {"$ref": "#/$defs/image-digest"},
+        "service_active": {"const": true}, "origin": {"$ref": "#/$defs/origin"}
+      }
+    },
+    "pre-reboot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed_at", "source_host_id", "boot_id_before", "service_active", "reboot_requested"],
+      "properties": {
+        "observed_at": {"$ref": "#/$defs/timestamp"}, "source_host_id": {"$ref": "#/$defs/id"}, "boot_id_before": {"$ref": "#/$defs/boot-id"},
+        "service_active": {"const": true}, "reboot_requested": {"const": true}
+      }
+    },
+    "post-reboot": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed_at", "source_host_id", "boot_id_before", "boot_id_after", "boot_changed", "service_active"],
+      "properties": {
+        "observed_at": {"$ref": "#/$defs/timestamp"}, "source_host_id": {"$ref": "#/$defs/id"}, "boot_id_before": {"$ref": "#/$defs/boot-id"},
+        "boot_id_after": {"$ref": "#/$defs/boot-id"}, "boot_changed": {"const": true}, "service_active": {"const": true}
+      }
+    },
+    "source-backup": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed_at", "source_host_id", "source_boot_id", "backup_id", "backup_manifest_sha256", "backup_payload_sha256", "credential_policy", "verification_passed"],
+      "properties": {
+        "observed_at": {"$ref": "#/$defs/timestamp"}, "source_host_id": {"$ref": "#/$defs/id"}, "source_boot_id": {"$ref": "#/$defs/boot-id"},
+        "backup_id": {"$ref": "#/$defs/id"}, "backup_manifest_sha256": {"$ref": "#/$defs/sha256"}, "backup_payload_sha256": {"$ref": "#/$defs/sha256"},
+        "credential_policy": {"enum": ["exclude", "external"]}, "verification_passed": {"const": true}
+      }
+    },
+    "source-fence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed_at", "source_host_id", "source_boot_id", "fence_id", "service_active", "origin_disabled"],
+      "properties": {
+        "observed_at": {"$ref": "#/$defs/timestamp"}, "source_host_id": {"$ref": "#/$defs/id"}, "source_boot_id": {"$ref": "#/$defs/boot-id"},
+        "fence_id": {"$ref": "#/$defs/id"}, "service_active": {"const": false}, "origin_disabled": {"const": true}
+      }
+    },
+    "target-restore": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed_at", "target_host_id", "target_boot_id", "release_version", "release_commit", "image_digest", "backup_id", "backup_manifest_sha256", "restore_transaction_sha256", "service_active"],
+      "properties": {
+        "observed_at": {"$ref": "#/$defs/timestamp"}, "target_host_id": {"$ref": "#/$defs/id"}, "target_boot_id": {"$ref": "#/$defs/boot-id"},
+        "release_version": {"$ref": "#/$defs/version"}, "release_commit": {"$ref": "#/$defs/commit"}, "image_digest": {"$ref": "#/$defs/image-digest"},
+        "backup_id": {"$ref": "#/$defs/id"}, "backup_manifest_sha256": {"$ref": "#/$defs/sha256"}, "restore_transaction_sha256": {"$ref": "#/$defs/sha256"},
+        "service_active": {"const": true}
+      }
+    },
+    "tls-wss": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed_at", "origin", "observer_id", "tls_valid", "certificate_hostname_valid", "wss_connected"],
+      "properties": {
+        "observed_at": {"$ref": "#/$defs/timestamp"}, "origin": {"$ref": "#/$defs/origin"}, "observer_id": {"$ref": "#/$defs/id"},
+        "tls_valid": {"const": true}, "certificate_hostname_valid": {"const": true}, "wss_connected": {"const": true}
+      }
+    },
+    "phone": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed_at", "origin", "device_id", "device_platform", "network_path", "page_loaded", "wss_connected", "operator_action_passed"],
+      "properties": {
+        "observed_at": {"$ref": "#/$defs/timestamp"}, "origin": {"$ref": "#/$defs/origin"}, "device_id": {"$ref": "#/$defs/id"},
+        "device_platform": {"enum": ["android", "ios"]}, "network_path": {"enum": ["cellular", "external-wifi"]},
+        "page_loaded": {"const": true}, "wss_connected": {"const": true}, "operator_action_passed": {"const": true}
+      }
+    },
+    "acl-negative": {
+      "type": "object", "additionalProperties": false,
+      "required": ["revocation_recorded_at", "denial_observed_at", "origin", "revoked_device_id", "independent_observer_id", "control_device_id", "probe_network", "acl_denied", "denial_kind", "authorized_control_passed"],
+      "properties": {
+        "revocation_recorded_at": {"$ref": "#/$defs/timestamp"}, "denial_observed_at": {"$ref": "#/$defs/timestamp"}, "origin": {"$ref": "#/$defs/origin"},
+        "revoked_device_id": {"$ref": "#/$defs/id"}, "independent_observer_id": {"$ref": "#/$defs/id"}, "control_device_id": {"$ref": "#/$defs/id"},
+        "probe_network": {"enum": ["cellular", "external-wifi"]}, "acl_denied": {"const": true},
+        "denial_kind": {"enum": ["tailscale-acl-denied", "connection-refused", "timeout", "http-403"]}, "authorized_control_passed": {"const": true}
+      }
+    },
+    "finalize": {
+      "type": "object", "additionalProperties": false,
+      "required": ["observed_at", "reviewer_id", "redaction_reviewed", "evidence_complete", "source_remains_fenced", "target_service_active"],
+      "properties": {
+        "observed_at": {"$ref": "#/$defs/timestamp"}, "reviewer_id": {"$ref": "#/$defs/id"}, "redaction_reviewed": {"const": true},
+        "evidence_complete": {"const": true}, "source_remains_fenced": {"const": true}, "target_service_active": {"const": true}
+      }
+    }
+  }
+}
