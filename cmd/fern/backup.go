@@ -167,9 +167,11 @@ func runBackupRestore(args []string, log *slog.Logger) error {
 	if options.stateDirectory == "" {
 		return errors.New("cannot determine Fern state directory")
 	}
-	if *credentials == "" {
-		*credentials = *bundle + ".credentials.tar"
+	credentialInput, err := credentialInputForRestore(*bundle, *credentials)
+	if err != nil {
+		return err
 	}
+	*credentials = credentialInput
 	if *recoveryDirectory == "" {
 		*recoveryDirectory = filepath.Join(options.stateDirectory, "recovery")
 	}
@@ -197,7 +199,10 @@ func runBackupRestore(args []string, log *slog.Logger) error {
 		return err
 	}
 	toolArgs := []string{"restore", "--lock-dir", lockDirectory, "--epoch", epoch,
-		"--backup", *bundle, "--target", *recoveryDirectory, "--credential-input", *credentials}
+		"--backup", *bundle, "--target", *recoveryDirectory}
+	if *credentials != "" {
+		toolArgs = append(toolArgs, "--credential-input", *credentials)
+	}
 	if err := runBackupArchiveTool(ctx, options.archiveTool, toolArgs, os.Stdout, os.Stderr); err != nil {
 		return err
 	}
@@ -467,6 +472,27 @@ func runBackupArchiveTool(ctx context.Context, override string, args []string, s
 type stagedBackupManifest struct {
 	Generation   string   `json:"generation"`
 	NamedVolumes []string `json:"named_volumes"`
+	Credentials  struct {
+		Policy string `json:"policy"`
+	} `json:"credentials"`
+}
+
+func credentialInputForRestore(bundle, requested string) (string, error) {
+	manifest, err := readStagedBackupManifest(filepath.Join(bundle, "BACKUP-MANIFEST.json"))
+	if err != nil {
+		return "", fmt.Errorf("read backup credential policy: %w", err)
+	}
+	switch manifest.Credentials.Policy {
+	case "external":
+		if requested == "" {
+			requested = bundle + ".credentials.tar"
+		}
+		return requested, nil
+	case "exclude":
+		return requested, nil
+	default:
+		return "", errors.New("backup manifest has an invalid credential policy")
+	}
 }
 
 func readStagedBackupManifest(path string) (stagedBackupManifest, error) {
@@ -516,6 +542,9 @@ func prepareFilesystemRestore(current, stateDirectory, configPath, envPath, repo
 		{source: filepath.Join(current, "config", filepath.Base(configPath)), target: configPath},
 		{source: filepath.Join(current, "config", filepath.Base(envPath)), target: envPath},
 		{source: filepath.Join(current, "repository"), target: repository},
+	}
+	if _, err := os.Lstat(paths[1].source); os.IsNotExist(err) {
+		paths[1].source = ""
 	}
 	stagedState := filepath.Join(current, "state")
 	stateEntries, err := os.ReadDir(stagedState)

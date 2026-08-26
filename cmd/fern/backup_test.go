@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -115,6 +116,18 @@ func TestBackupCreateAndRestoreOperationalPaths(t *testing.T) {
 	}
 	if docker.restored != nil {
 		t.Fatal("tampered backup reached Docker volume activation")
+	}
+	excluded := filepath.Join(root, "excluded")
+	if err := copyPath(backup, excluded); err != nil {
+		t.Fatal(err)
+	}
+	rewriteBackupAsCredentialExcluded(t, excluded)
+	err = runBackupRestore([]string{
+		"--config", configPath, "--env-file", envPath, "--state-dir", stateDirectory,
+		"--backup", excluded, "--recovery-dir", filepath.Join(root, "excluded-recovery"),
+	}, log)
+	if err == nil || !strings.Contains(err.Error(), "was not staged") || strings.Contains(err.Error(), "host backup archive utility") {
+		t.Fatalf("excluded restore did not reach volume policy without an unauthorized credential input: %v", err)
 	}
 
 	writeFixtureFile(t, filepath.Join(repository, "work.txt"), "changed\n")
@@ -246,6 +259,33 @@ func TestEmbeddedBackupArchiveToolIsRunnable(t *testing.T) {
 	}
 }
 
+func TestRestoreCredentialInputFollowsBackupPolicy(t *testing.T) {
+	root := privateTestDirectory(t)
+	for _, test := range []struct {
+		name, policy, requested, want string
+	}{
+		{name: "external default", policy: "external"},
+		{name: "external explicit", policy: "external", requested: filepath.Join(root, "recipient.tar"), want: filepath.Join(root, "recipient.tar")},
+		{name: "exclude", policy: "exclude"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			bundle := filepath.Join(root, strings.ReplaceAll(test.name, " ", "-"))
+			if test.name == "external default" {
+				test.want = bundle + ".credentials.tar"
+			}
+			if err := os.Mkdir(bundle, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			manifest := fmt.Sprintf(`{"generation":"generation-a","named_volumes":[],"credentials":{"policy":%q}}`, test.policy)
+			writeFixtureFile(t, filepath.Join(bundle, "BACKUP-MANIFEST.json"), manifest)
+			got, err := credentialInputForRestore(bundle, test.requested)
+			if err != nil || got != test.want {
+				t.Fatalf("credential input = %q, error = %v, want %q", got, err, test.want)
+			}
+		})
+	}
+}
+
 func backupFixture(t *testing.T, root string) (configPath, envPath, stateDirectory, repository string) {
 	t.Helper()
 	repository = filepath.Join(root, "repository")
@@ -289,4 +329,37 @@ func readFixtureFile(t *testing.T, path string) string {
 		t.Fatal(err)
 	}
 	return string(data)
+}
+
+func rewriteBackupAsCredentialExcluded(t *testing.T, bundle string) {
+	t.Helper()
+	manifestPath := filepath.Join(bundle, "BACKUP-MANIFEST.json")
+	var manifest map[string]any
+	data, err := os.ReadFile(manifestPath)
+	if err != nil || json.Unmarshal(data, &manifest) != nil {
+		t.Fatal(err)
+	}
+	credentials := manifest["credentials"].(map[string]any)
+	credentials["policy"] = "exclude"
+	credentials["workspace_gh"] = "excluded-reauthorize"
+	credentials["external"] = nil
+	data, err = json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	sumsPath := filepath.Join(bundle, "SHA256SUMS")
+	sums := strings.Split(readFixtureFile(t, sumsPath), "\n")
+	for index, line := range sums {
+		if strings.HasSuffix(line, "  BACKUP-MANIFEST.json") {
+			sums[index] = fmt.Sprintf("%x  BACKUP-MANIFEST.json", sum)
+		}
+	}
+	if err := os.WriteFile(sumsPath, []byte(strings.Join(sums, "\n")), 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
