@@ -44,7 +44,7 @@ func (s *Store) InspectPublication(ctx context.Context, id task.PublicationID) (
 }
 
 func (s *Store) FindPreparedPublication(ctx context.Context, workspaceID task.WorkspaceID) (PublicationRecord, error) {
-	return s.findPublication(ctx, workspaceID, `p.state='prepared' AND p.effect_phase='none'`, "prepared publication")
+	return s.findPublication(ctx, workspaceID, `p.admission_receipt_id IS NOT NULL AND p.state='prepared' AND p.effect_phase='none'`, "prepared publication")
 }
 
 // FindPublicationWork returns mutation or read-only reconciliation work. The
@@ -62,7 +62,7 @@ func (s *Store) FindPublicationWork(ctx context.Context, workspaceID task.Worksp
 	err = tx.QueryRowContext(ctx, `
 SELECT p.id FROM publications p JOIN results r ON r.id=p.result_id JOIN tasks t ON t.id=p.task_id
 JOIN attempts a ON a.id=p.attempt_id JOIN verifications v ON v.id=p.verification_id
-WHERE p.workspace_id=? AND p.state IN ('prepared','running','uncertain') AND r.state='sealed' AND
+WHERE p.workspace_id=? AND p.admission_receipt_id IS NOT NULL AND p.state IN ('prepared','running','uncertain') AND r.state='sealed' AND
  t.current_attempt_id=a.id AND t.sealed_result_id=r.id AND t.state='completed' AND t.cancel_epoch=0 AND
  (a.state='succeeded' OR (a.state='superseded' AND r.completion_authority='user_seal')) AND
  a.sealed_result_id=r.id AND v.state='succeeded' AND v.result_id=r.id AND
@@ -110,7 +110,7 @@ WHERE p.workspace_id=? AND p.state IN ('prepared','running','uncertain') AND r.s
 }
 
 func (s *Store) FindUncertainPublication(ctx context.Context, workspaceID task.WorkspaceID) (PublicationRecord, error) {
-	return s.findPublication(ctx, workspaceID, `p.state='uncertain'`, "uncertain publication")
+	return s.findPublication(ctx, workspaceID, `p.admission_receipt_id IS NOT NULL AND p.state='uncertain'`, "uncertain publication")
 }
 
 func (s *Store) findPublication(ctx context.Context, workspaceID task.WorkspaceID, predicate, kind string) (PublicationRecord, error) {

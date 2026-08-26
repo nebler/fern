@@ -31,7 +31,6 @@ CREATE UNIQUE INDEX publications_admission_receipt ON publications(admission_rec
   WHERE admission_receipt_id IS NOT NULL;
 
 CREATE TRIGGER publications_admission_receipt_insert BEFORE INSERT ON publications
-WHEN NEW.admission_receipt_id IS NOT NULL
 BEGIN
   SELECT CASE WHEN NOT EXISTS (
     SELECT 1 FROM receipts r
@@ -48,6 +47,9 @@ END;
 CREATE TRIGGER publications_admission_receipt_immutable BEFORE UPDATE OF admission_receipt_id ON publications
 WHEN NEW.admission_receipt_id IS NOT OLD.admission_receipt_id
 BEGIN SELECT RAISE(ABORT, 'publication admission receipt is immutable'); END;
+CREATE TRIGGER publications_unreceipted_quarantine BEFORE UPDATE ON publications
+WHEN OLD.admission_receipt_id IS NULL
+BEGIN SELECT RAISE(ABORT, 'legacy unreceipted publication is quarantined'); END;
 `
 
 const explicitWorkspaceGitHubAuthoritySchema = `

@@ -400,6 +400,11 @@ func sealedJournalFixture(t *testing.T, n int) (*Store, SealedResult) {
 	t.Helper()
 	s, success := succeededTestAttempt(t, n)
 	p := testSealResult(success, n+10000)
+	p.Outcome = task.ResultChanged
+	p.ResultCommit = task.GitOID("1111111111111111111111111111111111111111")
+	mode, blob, size := "100644", "2222222222222222222222222222222222222222", int64(12)
+	p.Manifest = []ManifestEntry{{PathBase64: "Y2hhbmdlLnR4dA==", ChangeKind: "added", NewMode: &mode, NewBlobOID: &blob, NewSize: &size}}
+	p.ManifestSHA256 = manifestDigest(p.Manifest)
 	sealed, err := s.SealResult(context.Background(), p)
 	if err != nil {
 		t.Fatal(err)
@@ -432,22 +437,20 @@ func prepareJournalVerification(t *testing.T, s *Store, sealed SealedResult, n i
 
 func prepareJournalPublication(t *testing.T, s *Store, sealed SealedResult, verification VerificationRecord, n int) PublicationRecord {
 	t.Helper()
-	evidence := journalEvidence()
 	operationID := task.PublicationOperationID(testID("op_", n))
-	tuple := task.PublicationTuple{OperationID: operationID, InstallationID: 123, RepositoryID: sealed.Result.RepositoryID,
-		RepositoryFullName: "owner/repository", WorkspaceName: "demo", BaseRef: sealed.Task.BaseRef,
-		BaseSHA: sealed.Result.BaseSHA, ResultCommit: sealed.Result.ResultCommit, Branch: task.PublicationBranch("demo", operationID)}
-	p := PreparePublicationParams{PublicationID: task.PublicationID(testID("pub_", n)), ResultID: sealed.Result.ID,
-		VerificationID: verification.Verification.ID, ExpectedTaskRevision: sealed.Task.Revision,
-		ExpectedAttemptRevision: sealed.Attempt.Revision, EventID: testEventID(n), Tuple: tuple,
+	requestHash := sha256.Sum256([]byte("journal publication" + string(sealed.Result.ID)))
+	p := AdmitPublicationParams{PublicationID: task.PublicationID(testID("pub_", n)), OperationID: operationID,
+		ReceiptID: testReceiptID(n), EventID: testEventID(n), ResultID: sealed.Result.ID,
+		VerificationID: verification.Verification.ID,
+		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: sealed.Result.WorkspaceID, CommandKind: PublishResultCommand},
+			Key: task.IdempotencyKey(testID("publish-", n)), RequestHash: requestHash, Actor: testDeliveryActor()},
 		BrokerPolicyVersion: "github-v1", BrokerPolicySHA256: sha256.Sum256([]byte("broker-policy")),
-		PreparedAt: verification.Verification.UpdatedAt.Add(time.Millisecond), EvidencePayload: evidence,
-		EvidenceSHA256: sha256.Sum256(evidence), Actor: testDeliveryActor()}
-	got, err := s.PreparePublication(context.Background(), p)
+		APIContractVersion: "fern.task.v1", AcceptedAt: verification.Verification.UpdatedAt.Add(time.Millisecond)}
+	admitted, err := s.AdmitPublication(context.Background(), p)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return got
+	return PublicationRecord{Publication: admitted.Publication, Event: admitted.Event}
 }
 
 func advanceJournalPublication(t *testing.T, s *Store, sealed SealedResult, publication PublicationRecord, from, to PublicationPhase, remote task.GitOID, n int) PublicationRecord {

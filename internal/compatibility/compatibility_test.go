@@ -47,7 +47,7 @@ var baselineMigrationLedger = []migrationRecord{
 }
 
 var currentMigrationLedger = append(append([]migrationRecord(nil), baselineMigrationLedger...),
-	migrationRecord{6, "publication_admission_receipts", "c603db31832c8d4f239a5ef0c8c3958eff59b2f4388feb8a60361188a4922b7a"})
+	migrationRecord{6, "publication_admission_receipts", "6c54a44e10e025c2d82a1466b184c74ea8d2641530472aca02e79b4cdcd301ca"})
 
 func TestBaselineV1UpgradesWithoutSemanticLoss(t *testing.T) {
 	assertBaselineBytes(t)

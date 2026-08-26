@@ -25,7 +25,7 @@ var currentLedger = []migrationRecord{
 	{3, "verification_and_publication_journals", "88b52b43bf12184bc54e6ffde5f21ed98888ec42026164ec9f3becfeb37f46b6"},
 	{4, "user_authorized_snapshot_seals", "218ec52d97faf9a95c1790230e47c22cad37d9974b2e8d9a118fe3935ebbf03b"},
 	{5, "explicit_workspace_github_authority", "675011d6037df1b806e78e0a98576c43a0594d6c21a3d54e9f10fb8c4017ec8d"},
-	{6, "publication_admission_receipts", "c603db31832c8d4f239a5ef0c8c3958eff59b2f4388feb8a60361188a4922b7a"},
+	{6, "publication_admission_receipts", "6c54a44e10e025c2d82a1466b184c74ea8d2641530472aca02e79b4cdcd301ca"},
 }
 
 func main() {
