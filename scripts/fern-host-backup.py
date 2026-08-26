@@ -85,6 +85,9 @@ class OperatorLock:
 def credential_path(label, relative):
     parts = tuple(part.lower() for part in PurePosixPath(relative).parts)
     name = parts[-1] if parts else ""
+    if label.startswith("volume ") and label.removeprefix("volume ").endswith("-v1-gh-config"):
+        if name in {"hosts.yml", "hosts.yaml"} or "gh" in parts:
+            return "workspace-gh"
     if ".config" in parts and "gh" in parts:
         return "workspace-gh"
     if name == "hosts.yml" and "gh" in parts:
@@ -307,7 +310,10 @@ def backup(args):
             external_files.append((f"volumes/{name}", scanned[0], "volume-directory"))
             for relative, path in directories:
                 external_files.append((f"volumes/{name}/{relative}", path, "volume-directory"))
-            for relative, path, _kind in files + credentials:
+            for relative, path, kind in files + credentials:
+                if kind:
+                    credential_count += 1
+                    gh_found = gh_found or kind == "workspace-gh"
                 external_files.append((f"volumes/{name}/{relative}", path, "volume"))
 
         external = None

@@ -133,7 +133,8 @@ HOST="$TEMP/host"
 LOCK="$HOST/lock"
 SOURCE="$HOST/source"
 mkdir -p "$SOURCE/state/.fern/control" "$SOURCE/state/.config/gh" \
-  "$SOURCE/state/.fern/github-app" "$SOURCE/config" "$SOURCE/repository/.git" "$SOURCE/volume/sessions"
+  "$SOURCE/state/.fern/github-app" "$SOURCE/config" "$SOURCE/repository/.git" \
+  "$SOURCE/volume/sessions" "$SOURCE/gh-volume"
 printf 'state-a\n' >"$SOURCE/state/.fern/control/state.db"
 printf 'oauth_token: secret-gh-token\n' >"$SOURCE/state/.config/gh/hosts.yml"
 printf '{"client_secret":"secret-app","private_key":"secret-private-key"}\n' >"$SOURCE/state/.fern/github-app/app-credentials.json"
@@ -142,17 +143,20 @@ printf 'OPENCODE_PASSWORD=secret\n' >"$SOURCE/config/fern.env"
 printf 'repository-a\n' >"$SOURCE/repository/work.txt"
 printf 'git-config\n' >"$SOURCE/repository/.git/config"
 printf 'volume-secret-a\n' >"$SOURCE/volume/sessions/auth.json"
+printf 'oauth_token: volume-gh-token\n' >"$SOURCE/gh-volume/hosts.yml"
 
 python3 "$BACKUP" init-epoch --lock-dir "$LOCK" --epoch appliance-A
 python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
   --generation generation-a --output "$HOST/backup-a" \
   --state "$SOURCE/state" --config "$SOURCE/config" --repository "$SOURCE/repository" \
-  --volume fern-demo-v2-data="$SOURCE/volume" --credential-policy external \
+  --volume fern-demo-v2-data="$SOURCE/volume" \
+  --volume fern-demo-v1-gh-config="$SOURCE/gh-volume" --credential-policy external \
   --credential-output "$HOST/credentials-a.tar"
 python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
   --generation generation-a --output "$HOST/backup-a-copy" \
   --state "$SOURCE/state" --config "$SOURCE/config" --repository "$SOURCE/repository" \
-  --volume fern-demo-v2-data="$SOURCE/volume" --credential-policy external \
+  --volume fern-demo-v2-data="$SOURCE/volume" \
+  --volume fern-demo-v1-gh-config="$SOURCE/gh-volume" --credential-policy external \
   --credential-output "$HOST/credentials-a-copy.tar"
 diff -r "$HOST/backup-a" "$HOST/backup-a-copy" >"$TEMP/backup-reproducibility.diff"
 cmp "$HOST/credentials-a.tar" "$HOST/credentials-a-copy.tar"
@@ -160,16 +164,18 @@ cmp "$HOST/credentials-a.tar" "$HOST/credentials-a-copy.tar"
 python3 - "$HOST/backup-a/BACKUP-MANIFEST.json" <<'PY'
 import json, pathlib, sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert manifest["named_volumes"] == ["fern-demo-v2-data"]
+assert manifest["named_volumes"] == ["fern-demo-v2-data", "fern-demo-v1-gh-config"]
 assert manifest["credentials"]["workspace_gh"] == "included-in-external-recipient"
+assert manifest["credentials"]["detected_entries"] == 6
 assert manifest["credentials"]["general_archive_contains_detected_plaintext_credentials"] is False
 assert manifest["credentials"]["external"]["sha256"]
 for component in manifest["components"]:
     assert component["entries"]
     assert all(entry["sha256"] for entry in component["entries"])
 PY
-! grep -R -a -q 'secret-gh-token\|secret-app\|secret-private-key\|OPENCODE_PASSWORD\|volume-secret' "$HOST/backup-a"
+! grep -R -a -q 'secret-gh-token\|secret-app\|secret-private-key\|OPENCODE_PASSWORD\|volume-secret\|volume-gh-token' "$HOST/backup-a"
 grep -a -q 'secret-app' "$HOST/credentials-a.tar"
+grep -a -q 'volume-gh-token' "$HOST/credentials-a.tar"
 
 mkdir -p "$HOST/hardlink-source/state" "$HOST/hardlink-source/config" "$HOST/hardlink-source/repository"
 printf 'linked-secret\n' >"$HOST/hardlink-source/state/credentials.json"
@@ -249,6 +255,7 @@ python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
 grep -qx 'repository-a' "$HOST/restored/current/repository/work.txt"
 grep -q 'secret-gh-token' "$HOST/restored/current/state/.config/gh/hosts.yml"
 grep -q 'volume-secret-a' "$HOST/restored/current/volumes/fern-demo-v2-data/sessions/auth.json"
+grep -q 'volume-gh-token' "$HOST/restored/current/volumes/fern-demo-v1-gh-config/hosts.yml"
 grep -qx 'appliance-A' "$HOST/restored/current/.fern-appliance-epoch"
 python3 - "$HOST/restored/TRANSACTION-MANIFEST.json" <<'PY'
 import json, pathlib, sys
@@ -270,6 +277,7 @@ python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
   --state "$SOURCE_B/state" --config "$SOURCE_B/config" \
   --repository "$SOURCE_B/repository" \
   --volume fern-demo-v2-data="$SOURCE_B/volumes/fern-demo-v2-data" \
+  --volume fern-demo-v1-gh-config="$SOURCE_B/volumes/fern-demo-v1-gh-config" \
   --credential-policy external --credential-output "$HOST/credentials-b.tar"
 python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
   --backup "$HOST/backup-b" --target "$HOST/restored" \
