@@ -79,6 +79,19 @@ var commands = []command{
 		},
 	},
 	{
+		name:     "credentials",
+		overview: "Export, import, and rollback-safely rotate encrypted GitHub credentials.",
+		sub: []subcommand{
+			{name: "export", summary: "Export an age-encrypted credential bundle", run: func(_ context.Context, args []string, log *slog.Logger) error { return runCredentialExport(args, log) }},
+			{name: "import", summary: "Validate and activate encrypted credentials", run: func(_ context.Context, args []string, log *slog.Logger) error {
+				return runCredentialImport(args, log, false)
+			}},
+			{name: "rotate", summary: "Rotate credentials with an encrypted rollback", run: func(_ context.Context, args []string, log *slog.Logger) error {
+				return runCredentialImport(args, log, true)
+			}},
+		},
+	},
+	{
 		name:     "debug",
 		overview: "Inspect Fern internals and run explicit offline repairs.",
 		sub: []subcommand{

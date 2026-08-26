@@ -167,6 +167,17 @@ func LoadIdentities(paths []string) ([]age.Identity, error) {
 	return result, nil
 }
 
+// RecipientsForIdentities derives public rollback recipients where supported.
+func RecipientsForIdentities(identities []age.Identity) []age.Recipient {
+	var result []age.Recipient
+	for _, identity := range identities {
+		if value, ok := identity.(interface{ Recipient() *age.X25519Recipient }); ok {
+			result = append(result, value.Recipient())
+		}
+	}
+	return result
+}
+
 // WriteFile atomically creates an encrypted-only artifact with mode 0600.
 func WriteFile(path string, bundle Bundle, recipients []age.Recipient) error {
 	if path == "" {
@@ -243,7 +254,7 @@ func validate(bundle Bundle) error {
 	validAtom := func(value string) bool {
 		return value != "" && len(value) <= 512 && strings.TrimSpace(value) == value && !strings.ContainsAny(value, "\x00\r\n")
 	}
-	if bundle.Version != Version || !validAtom(bundle.Epoch) || bundle.CreatedAt.IsZero() || bundle.CreatedAt.Location() != time.UTC ||
+	if bundle.Version != Version || !validAtom(bundle.Epoch) || strings.ContainsAny(bundle.Epoch, " /\\\t\r\n") || bundle.CreatedAt.IsZero() || bundle.CreatedAt.Location() != time.UTC ||
 		!validAtom(bundle.Binding.Workspace) || !validAtom(bundle.Binding.Mode) || !validAtom(bundle.Binding.Hostname) ||
 		bundle.Binding.RepositoryID <= 0 || !validAtom(bundle.Binding.Repository) ||
 		(len(bundle.GitHubApp) == 0 && len(bundle.WorkspaceGH) == 0) || len(bundle.GitHubApp) > 256<<10 || len(bundle.WorkspaceGH) > 16<<20 {
