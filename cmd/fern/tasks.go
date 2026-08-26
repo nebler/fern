@@ -232,9 +232,17 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	status.Healthy(observability.ComponentTaskDelivery)
 	status.Healthy(observability.ComponentTaskExecution)
 	status.Healthy(observability.ComponentTaskResult)
+	var publicationService taskPublicationService
+	if publicationCoordinator != nil {
+		publicationService = publicationCoordinator
+	}
+	var verificationService taskRunService
+	if verificationCoordinator != nil {
+		verificationService = verificationCoordinator
+	}
 	return &taskServices{
 		store: store, handler: handler, coordinator: coordinator,
-		execution: executionCoordinator, verification: verificationCoordinator, publication: publicationCoordinator,
+		execution: executionCoordinator, verification: verificationService, publication: publicationService,
 		result: resultCoordinator, resultWake: resultWake, status: status,
 	}, nil
 }

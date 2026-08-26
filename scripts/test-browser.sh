@@ -47,6 +47,21 @@ workspace:
   image: $IMAGE
   repo: $RUN_ROOT/repository
   memory: 128Mi
+  github:
+    mode: workspace-gh
+    hostname: github.com
+    repository:
+      id: 123
+      fullName: fern/browser-fixture
+tasks:
+  agent: build
+  model:
+    provider: fixture
+    id: fixture-model
+  attemptTimeout: 30m
+  leaseDuration: 2m
+  budget:
+    maxTurns: 10
 idle:
   after: 30m
 proxy:
@@ -112,9 +127,46 @@ playwright-cli -s="$SESSION" run-code "async page => {
   if (denied.status() !== 404) throw new Error('paired cookie received Fern admin route');
 }" >/dev/null
 
-curl -fsS --user "fern:$CONTROL_PASSWORD" -H 'Content-Type: application/json' \
-  -d '{"title":"Automated mobile workflow","sessionId":"ses_browser_rehearsal"}' \
-  "$OPERATOR_URL/fern/api/v1/workflows" >/dev/null
+playwright-cli -s="$SESSION" run-code "async page => {
+  const posts = [];
+  await page.route('**/fern/api/v1/**', async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === '/fern/api/v1/csrf') {
+      await route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({token: 'browser-fixture-token'})});
+      return;
+    }
+    if (path === '/fern/api/v1/tasks' && request.method() === 'GET') {
+      await route.fulfill({status: 200, contentType: 'application/json', body: JSON.stringify({tasks: []})});
+      return;
+    }
+    if (path === '/fern/api/v1/tasks' && request.method() === 'POST') {
+      posts.push({key: request.headers()['idempotency-key'], body: request.postData()});
+      if (posts.length === 1) await route.abort('connectionreset');
+      else await route.fulfill({status: 201, contentType: 'application/json', body: '{}'});
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto('$REMOTE_URL/fern/tasks');
+  await page.getByLabel('Task title').fill('Lost response task');
+  await page.getByLabel('Instructions').fill('Use the exact durable command.');
+  await page.getByRole('button', {name: 'Queue task'}).click();
+  await page.waitForFunction(() => document.getElementById('notice').classList.contains('danger'));
+  if (posts.length !== 1) throw new Error('first task command count = ' + posts.length);
+  const raw = await page.evaluate(() => localStorage.getItem('fern.pending-task-submission.v1'));
+  if (!raw) throw new Error('lost-response task command was not persisted');
+  const persisted = JSON.parse(raw);
+  const expectedBody = JSON.stringify({title: 'Lost response task', prompt: 'Use the exact durable command.', baseRef: 'main'});
+  if (persisted.idempotencyKey !== posts[0].key || persisted.body !== expectedBody || posts[0].body !== expectedBody) {
+    throw new Error('first task command differs from persisted command');
+  }
+  await page.reload();
+  await page.waitForFunction(() => localStorage.getItem('fern.pending-task-submission.v1') === null);
+  if (posts.length !== 2 || posts[1].key !== persisted.idempotencyKey || posts[1].body !== persisted.body) {
+    throw new Error('retry did not reuse exact persisted task command: ' + JSON.stringify(posts));
+  }
+}" >/dev/null
 
 REPLAY_STATUS=$(curl -sS -o /dev/null -w '%{http_code}' -H 'Content-Type: application/x-www-form-urlencoded' \
   --data-urlencode "code=$PAIR_CODE" "$REMOTE_URL/fern/pair")
@@ -135,4 +187,4 @@ playwright-cli -s="$SESSION" run-code "async page => {
   if (revoked.status() !== 401) throw new Error('revoked device still authenticates');
 }" >/dev/null
 
-printf 'Fern mobile browser rehearsal passed (390x844, scoped device, restart, admin revocation)\n'
+printf 'Fern mobile browser rehearsal passed (390x844, scoped device, exact lost-response retry, restart, admin revocation)\n'
