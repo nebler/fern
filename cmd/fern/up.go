@@ -282,6 +282,8 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 	controls := proxy.Controls{
 		Store: controlStore, Onboarding: onboarding, ControlAuth: proxy.ControlAuth{Password: cfg.Control.Password},
 		WakeTrace: proxy.NewWakeTraceHandler(manager, manager.LastWakeTrace, log),
+		Liveness:  status.LivenessHandler(), Readiness: status.ReadinessHandler(),
+		Status: status.StatusHandler(), Metrics: status.MetricsHandler(),
 	}
 	if tasks != nil {
 		controls.Tasks = tasks.handler

@@ -55,6 +55,18 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 		controls.WakeTrace.ServeHTTP(writer, request)
 		return true
 	}
+	if path == "/fern/status" || path == "/fern/metrics" {
+		handler := controls.Status
+		if path == "/fern/metrics" {
+			handler = controls.Metrics
+		}
+		if handler == nil {
+			http.NotFound(writer, request)
+			return true
+		}
+		handler.ServeHTTP(writer, request)
+		return true
+	}
 	if path == "/fern/api/v1/devices" {
 		if store == nil {
 			writeUnavailable(writer, "control store")

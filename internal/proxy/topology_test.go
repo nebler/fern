@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/nebler/fern/internal/control"
+	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskapi"
@@ -32,8 +34,11 @@ func TestHandlersSharePairingAndRegenerateRemoteBackendAuth(t *testing.T) {
 	}))
 	defer backend.Close()
 	waker := &countingWaker{endpoint: mustParseEndpoint(t, backend.URL)}
+	status := observability.NewRegistry()
 	handlers, err := NewHandlers(waker, runtime.ServerAuth{Password: "backend-secret"}, Controls{
 		ControlAuth: ControlAuth{Password: "control-secret"},
+		Liveness:    status.LivenessHandler(), Readiness: status.ReadinessHandler(),
+		Status: status.StatusHandler(), Metrics: status.MetricsHandler(),
 	}, TrustedOrigins{Remote: "https://fern.example.ts.net", Operator: "http://127.0.0.1:8081"}, testLogger())
 	if err != nil {
 		t.Fatal(err)
@@ -104,7 +109,7 @@ func TestHandlersSharePairingAndRegenerateRemoteBackendAuth(t *testing.T) {
 			t.Fatalf("spoofed forwarding header survived as %q", name)
 		}
 	}
-	for _, path := range []string{"/fern/control", "/fern/ready", "/fern/pair/new", "/fern/api/v1/devices"} {
+	for _, path := range []string{"/fern/control", "/fern/live", "/fern/ready", "/fern/status", "/fern/metrics", "/fern/pair/new", "/fern/api/v1/devices"} {
 		deniedRequest := httptest.NewRequest(http.MethodGet, path, nil)
 		deniedRequest.AddCookie(confirmed.Result().Cookies()[0])
 		denied := httptest.NewRecorder()
@@ -115,6 +120,54 @@ func TestHandlersSharePairingAndRegenerateRemoteBackendAuth(t *testing.T) {
 	}
 	if got := waker.wakes.Load(); got != 1 {
 		t.Fatalf("denied Fern routes changed wake count to %d", got)
+	}
+}
+
+func TestOperatorHealthTopologyDoesNotWakeCompute(t *testing.T) {
+	t.Parallel()
+	status := observability.NewRegistry()
+	waker := &countingWaker{}
+	handlers, err := NewHandlers(waker, runtime.ServerAuth{Password: "backend-secret"}, Controls{
+		ControlAuth: ControlAuth{Password: "control-secret"},
+		Liveness:    status.LivenessHandler(), Readiness: status.ReadinessHandler(),
+		Status: status.StatusHandler(), Metrics: status.MetricsHandler(),
+	}, TrustedOrigins{Remote: "https://fern.example.ts.net", Operator: "http://127.0.0.1:8081"}, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, path := range []string{"/fern/live", "/fern/ready"} {
+		response := httptest.NewRecorder()
+		handlers.Operator.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		if response.Code != http.StatusOK {
+			t.Fatalf("operator probe %s = %d %s", path, response.Code, response.Body.String())
+		}
+	}
+	status.Failed(observability.ComponentRuntime, errors.New("runtime failed"))
+	live := httptest.NewRecorder()
+	handlers.Operator.ServeHTTP(live, httptest.NewRequest(http.MethodGet, "/fern/live", nil))
+	ready := httptest.NewRecorder()
+	handlers.Operator.ServeHTTP(ready, httptest.NewRequest(http.MethodGet, "/fern/ready", nil))
+	if live.Code != http.StatusOK || ready.Code != http.StatusServiceUnavailable {
+		t.Fatalf("failed probes live=%d ready=%d", live.Code, ready.Code)
+	}
+
+	for _, path := range []string{"/fern/status", "/fern/metrics"} {
+		unauthenticated := httptest.NewRecorder()
+		handlers.Operator.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, path, nil))
+		if unauthenticated.Code != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated operator detail %s = %d", path, unauthenticated.Code)
+		}
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.SetBasicAuth("fern", "control-secret")
+		authenticated := httptest.NewRecorder()
+		handlers.Operator.ServeHTTP(authenticated, request)
+		if authenticated.Code != http.StatusOK {
+			t.Fatalf("authenticated operator detail %s = %d %s", path, authenticated.Code, authenticated.Body.String())
+		}
+	}
+	if got := waker.wakes.Load(); got != 0 {
+		t.Fatalf("observability routes woke compute %d times", got)
 	}
 }
 

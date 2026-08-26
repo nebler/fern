@@ -109,7 +109,18 @@ func serveFern(writer http.ResponseWriter, request *http.Request, controls Contr
 		if err := landingTemplate.Execute(writer, view); err != nil {
 			http.Error(writer, "render landing page", http.StatusInternalServerError)
 		}
+	case request.URL.Path == "/fern/live" && request.URL.EscapedPath() == "/fern/live":
+		writer.Header().Set("Content-Type", "application/json")
+		if request.Method == http.MethodGet {
+			_, _ = writer.Write([]byte(`{"live":true}`))
+		}
 	case request.URL.Path == "/fern/ready" && request.URL.EscapedPath() == "/fern/ready":
+		if controls.Readiness != nil {
+			controls.Readiness.ServeHTTP(writer, request)
+			return
+		}
+		// The combined constructor is test-only. Production NewHandlers installs
+		// the registry-backed probe before authentication on the operator surface.
 		writer.Header().Set("Content-Type", "application/json")
 		if request.Method == http.MethodGet {
 			_, _ = writer.Write([]byte(`{"ready":true}`))

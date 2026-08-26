@@ -40,6 +40,10 @@ type Controls struct {
 	Tasks        http.Handler
 	Onboarding   http.Handler
 	WakeTrace    http.Handler
+	Liveness     http.Handler
+	Readiness    http.Handler
+	Status       http.Handler
+	Metrics      http.Handler
 	ControlAuth  ControlAuth
 }
 
@@ -97,8 +101,28 @@ func NewHandlers(waker Waker, auth runtime.ServerAuth, controls Controls, origin
 		Remote: trustedOriginHandler(pairing.remoteHandler(gatewayHandler(upstream, Controls{
 			Tasks: controls.Tasks, Onboarding: controls.Onboarding,
 		}, false), auth), remoteOrigin),
-		Operator: trustedOriginHandler(pairing.operatorHandler(gatewayHandler(upstream, controls, controls.ControlAuth.Password != ""), auth, controls.ControlAuth), operatorOrigin),
+		Operator: trustedOriginHandler(probeHandler(pairing.operatorHandler(gatewayHandler(upstream, controls, controls.ControlAuth.Password != ""), auth, controls.ControlAuth), controls), operatorOrigin),
 	}, nil
+}
+
+func probeHandler(next http.Handler, controls Controls) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.EscapedPath() == request.URL.Path {
+			switch request.URL.Path {
+			case "/fern/live":
+				if controls.Liveness != nil {
+					controls.Liveness.ServeHTTP(writer, request)
+					return
+				}
+			case "/fern/ready":
+				if controls.Readiness != nil {
+					controls.Readiness.ServeHTTP(writer, request)
+					return
+				}
+			}
+		}
+		next.ServeHTTP(writer, request)
+	})
 }
 
 func trustedOriginHandler(next http.Handler, origin trustedOrigin) http.Handler {
