@@ -1,0 +1,32 @@
+workspace:
+  name: demo
+  image: fern/opencode:baseline-v1
+  repo: ./repository
+  memory: 4Gi
+  env:
+    OPENCODE_PASSWORD: baseline-opencode-password
+  github:
+    mode: github-app-broker
+    hostname: github.com
+    installationId: 123
+    repository:
+      id: 987654321
+      fullName: owner/repository
+control:
+  password: baseline-control-password-32-bytes-minimum
+idle:
+  after: 15m
+  mode: stop
+proxy:
+  listen: 127.0.0.1:9080
+  operatorListen: 127.0.0.1:9081
+  remoteOrigin: https://fern-baseline.example.ts.net
+tasks:
+  agent: build
+  model:
+    provider: baseline-provider
+    id: baseline-model
+  attemptTimeout: 30m
+  leaseDuration: 2m
+  budget:
+    maxTurns: 50
