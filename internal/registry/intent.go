@@ -23,6 +23,7 @@ type pauseIntent struct {
 	ContainerID string `json:"containerID"`
 	Committed   bool   `json:"committed"`
 	Shutdown    bool   `json:"shutdown,omitempty"`
+	FailedStart bool   `json:"failedStart,omitempty"`
 	CreatedAt   string `json:"createdAt,omitempty"`
 	ExpiresAt   string `json:"expiresAt,omitempty"`
 }
@@ -37,6 +38,10 @@ func (s *IntentStore) BeginPause(workspace, containerID string) error {
 
 func (s *IntentStore) CommitPause(workspace, containerID string) error {
 	return s.write(workspace, pauseIntent{ContainerID: containerID, Committed: true})
+}
+
+func (s *IntentStore) CommitFailedStart(workspace, containerID string) error {
+	return s.write(workspace, pauseIntent{ContainerID: containerID, Committed: true, FailedStart: true})
 }
 
 func (s *IntentStore) CommitShutdown(workspace, containerID string, expiresAt time.Time) error {
@@ -129,6 +134,12 @@ func (s *IntentStore) PauseStatus(workspace, containerID string, stoppedAt time.
 	}
 	if intent.ContainerID != containerID {
 		return runtime.PauseIntentNone, nil
+	}
+	if intent.FailedStart && (!intent.Committed || intent.Shutdown || intent.CreatedAt != "" || intent.ExpiresAt != "") {
+		return runtime.PauseIntentNone, errors.New("decode failed-start intent: contradictory fields")
+	}
+	if intent.FailedStart {
+		return runtime.PauseIntentFailedStart, nil
 	}
 	if intent.Shutdown {
 		createdAt, err := time.Parse(time.RFC3339Nano, intent.CreatedAt)

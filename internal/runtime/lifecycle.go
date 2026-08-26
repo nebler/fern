@@ -41,6 +41,10 @@ func (d *Docker) PrepareShutdown(ctx context.Context, name string) error {
 }
 
 func (d *Docker) pauseObserved(ctx context.Context, name string, observation Observation) error {
+	return d.pauseObservedWithOutcome(ctx, name, observation, false)
+}
+
+func (d *Docker) pauseObservedWithOutcome(ctx context.Context, name string, observation Observation, failedStart bool) error {
 	if observation.State == StateAbsent {
 		return fmt.Errorf("pause %q: workspace is absent", name)
 	}
@@ -62,11 +66,20 @@ func (d *Docker) pauseObserved(ctx context.Context, name string, observation Obs
 			intent = PauseIntentPending
 		}
 		if intent == PauseIntentPending {
-			if err := d.intents.CommitPause(name, observation.ContainerID); err != nil {
+			if err := d.commitPauseOutcome(name, observation.ContainerID, failedStart); err != nil {
 				return fmt.Errorf("commit pending pause intent: %w", err)
 			}
 		}
 		return nil
+	}
+	if failedStart && observation.Frozen {
+		intent, err := d.intents.PauseStatus(name, observation.ContainerID, time.Time{})
+		if err != nil {
+			return fmt.Errorf("read pause intent: %w", err)
+		}
+		if intent == PauseIntentCommitted || intent == PauseIntentShutdown {
+			return nil
+		}
 	}
 	if err := d.intents.BeginPause(name, observation.ContainerID); err != nil {
 		return fmt.Errorf("record pause intent: %w", err)
@@ -77,7 +90,7 @@ func (d *Docker) pauseObserved(ctx context.Context, name string, observation Obs
 		// journal still matters: frozen containers that later exit (host
 		// reboot, daemon restart) classify as paused instead of failed.
 		if observation.Frozen {
-			if err := d.intents.CommitPause(name, observation.ContainerID); err != nil {
+			if err := d.commitPauseOutcome(name, observation.ContainerID, failedStart); err != nil {
 				return fmt.Errorf("commit pending pause intent: %w", err)
 			}
 			return nil
@@ -86,7 +99,7 @@ func (d *Docker) pauseObserved(ctx context.Context, name string, observation Obs
 		if err := d.cli.ContainerPause(ctx, observation.ContainerID); err != nil {
 			return d.reconcileFreezeError(ctx, name, observation.ContainerID, err)
 		}
-		if err := d.intents.CommitPause(name, observation.ContainerID); err != nil {
+		if err := d.commitPauseOutcome(name, observation.ContainerID, failedStart); err != nil {
 			return fmt.Errorf("commit pause intent: %w", err)
 		}
 		d.log.Info("state", "workspace", name, "from", StateRunning, "to", StatePaused,
@@ -103,12 +116,19 @@ func (d *Docker) pauseObserved(ctx context.Context, name string, observation Obs
 	if err := d.cli.ContainerStop(ctx, observation.ContainerID, container.StopOptions{Timeout: &timeout}); err != nil {
 		return d.reconcileStopError(ctx, name, observation.ContainerID, err)
 	}
-	if err := d.intents.CommitPause(name, observation.ContainerID); err != nil {
+	if err := d.commitPauseOutcome(name, observation.ContainerID, failedStart); err != nil {
 		return fmt.Errorf("commit pause intent: %w", err)
 	}
 	d.log.Info("state", "workspace", name, "from", StateRunning, "to", StatePaused,
 		"mechanism", string(d.suspend), "elapsed_ms", time.Since(start).Milliseconds())
 	return nil
+}
+
+func (d *Docker) commitPauseOutcome(name, containerID string, failedStart bool) error {
+	if failedStart {
+		return d.intents.CommitFailedStart(name, containerID)
+	}
+	return d.intents.CommitPause(name, containerID)
 }
 
 // reconcileFreezeError resolves an errored freeze response against observed
@@ -323,5 +343,5 @@ func (d *Docker) rollbackStarted(name, containerID string, cause error) error {
 	if err != nil {
 		return errors.Join(cause, err)
 	}
-	return errors.Join(cause, d.pauseObserved(cleanupCtx, name, observation))
+	return errors.Join(cause, d.pauseObservedWithOutcome(cleanupCtx, name, observation, true))
 }

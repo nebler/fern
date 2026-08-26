@@ -28,6 +28,11 @@ func (s *countingIntentStore) CommitPause(string, string) error {
 	return nil
 }
 
+func (s *countingIntentStore) CommitFailedStart(string, string) error {
+	s.commitN.Add(1)
+	return nil
+}
+
 func (s *countingIntentStore) CommitShutdown(string, string, time.Time) error { return nil }
 
 func (s *countingIntentStore) PauseStatus(string, string, time.Time) (PauseIntentStatus, error) {

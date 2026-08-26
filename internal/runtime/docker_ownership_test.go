@@ -29,6 +29,7 @@ type memoryIntentStore struct{}
 
 func (memoryIntentStore) BeginPause(string, string) error                { return nil }
 func (memoryIntentStore) CommitPause(string, string) error               { return nil }
+func (memoryIntentStore) CommitFailedStart(string, string) error         { return nil }
 func (memoryIntentStore) CommitShutdown(string, string, time.Time) error { return nil }
 func (memoryIntentStore) PauseStatus(string, string, time.Time) (PauseIntentStatus, error) {
 	return PauseIntentNone, nil
@@ -87,6 +88,13 @@ func (s *recordingIntentStore) CommitPause(string, string) error {
 		return s.commitErr
 	}
 	s.status = PauseIntentCommitted
+	return nil
+}
+func (s *recordingIntentStore) CommitFailedStart(string, string) error {
+	if s.commitErr != nil {
+		return s.commitErr
+	}
+	s.status = PauseIntentFailedStart
 	return nil
 }
 func (s *recordingIntentStore) CommitShutdown(workspace, containerID string, _ time.Time) error {
@@ -156,7 +164,10 @@ func TestStatusAttestsActualImageIDForEveryOwnedState(t *testing.T) {
 	}{
 		{name: "running", state: map[string]any{"Status": "running", "Running": true}, want: StateRunning},
 		{name: "paused", state: map[string]any{"Status": "paused", "Running": true, "Paused": true}, want: StatePaused},
+		{name: "failed start frozen", state: map[string]any{"Status": "paused", "Running": true, "Paused": true}, intent: PauseIntentFailedStart, want: StateFailed},
 		{name: "provisioning", state: map[string]any{"Status": "created"}, want: StateProvisioning},
+		{name: "failed start created", state: map[string]any{"Status": "created"}, intent: PauseIntentFailedStart, want: StateFailed},
+		{name: "failed start exited", state: map[string]any{"Status": "exited"}, intent: PauseIntentFailedStart, want: StateFailed},
 		{name: "failed", state: map[string]any{"Status": "dead", "Dead": true}, want: StateFailed},
 	}
 	for _, test := range tests {
@@ -575,6 +586,50 @@ func TestPauseCreatedContainerRecordsCommittedIntent(t *testing.T) {
 	}
 	if intents.status != PauseIntentCommitted {
 		t.Fatalf("intent status = %d, want committed", intents.status)
+	}
+}
+
+func TestFailedStartRollbackCommitsDistinctIntentForStopAndFreeze(t *testing.T) {
+	for _, suspend := range []SuspendKind{SuspendStop, SuspendFreeze} {
+		t.Run(string(suspend), func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				switch {
+				case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/stop"):
+					writer.WriteHeader(http.StatusNoContent)
+				case request.Method == http.MethodPost && strings.HasSuffix(request.URL.Path, "/pause"):
+					writer.WriteHeader(http.StatusNoContent)
+				default:
+					http.NotFound(writer, request)
+				}
+			}))
+			defer server.Close()
+			intents := &recordingIntentStore{}
+			docker := testDocker(t, server)
+			docker.suspend = suspend
+			docker.intents = intents
+			err := docker.pauseObservedWithOutcome(context.Background(), "demo", Observation{
+				State: StateRunning, Running: true, ContainerID: "container-id",
+			}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if intents.status != PauseIntentFailedStart {
+				t.Fatalf("intent = %d, want failed start", intents.status)
+			}
+		})
+	}
+}
+
+func TestFailedStartRollbackPreservesExistingFrozenPause(t *testing.T) {
+	intents := &recordingIntentStore{status: PauseIntentCommitted}
+	docker := &Docker{intents: intents, suspend: SuspendFreeze}
+	if err := docker.pauseObservedWithOutcome(context.Background(), "demo", Observation{
+		State: StatePaused, Running: true, Frozen: true, ContainerID: "container-id",
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	if intents.status != PauseIntentCommitted {
+		t.Fatalf("intent = %d, want original committed pause", intents.status)
 	}
 }
 

@@ -85,7 +85,9 @@ func (d *Docker) inspectByReference(ctx context.Context, reference, workspace st
 		if err != nil {
 			return workspaceInspection{}, fmt.Errorf("read pause intent: %w", err)
 		}
-		if intent == PauseIntentCommitted {
+		if intent == PauseIntentFailedStart {
+			observation.State = StateFailed
+		} else if intent == PauseIntentCommitted {
 			observation.State = StatePaused
 		} else {
 			observation.State = StateProvisioning
@@ -108,6 +110,8 @@ func (d *Docker) inspectByReference(ctx context.Context, reference, workspace st
 			return workspaceInspection{}, fmt.Errorf("read pause intent: %w", err)
 		}
 		switch intent {
+		case PauseIntentFailedStart:
+			observation.State = StateFailed
 		case PauseIntentCommitted, PauseIntentShutdown:
 			observation.State = StatePaused
 		case PauseIntentPending:
@@ -122,7 +126,15 @@ func (d *Docker) inspectByReference(ctx context.Context, reference, workspace st
 	case info.State.Running && !info.State.Paused:
 		observation.State = StateRunning
 	case info.State.Running && info.State.Paused:
-		observation.State = StatePaused
+		intent, err := d.intents.PauseStatus(workspace, info.ID, time.Time{})
+		if err != nil {
+			return workspaceInspection{}, fmt.Errorf("read pause intent: %w", err)
+		}
+		if intent == PauseIntentFailedStart {
+			observation.State = StateFailed
+		} else {
+			observation.State = StatePaused
+		}
 	default:
 		return workspaceInspection{}, fmt.Errorf("unsupported Docker state %q for workspace %q", info.State.Status, workspace)
 	}

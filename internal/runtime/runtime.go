@@ -59,6 +59,7 @@ type ServerAuth struct {
 type IntentStore interface {
 	BeginPause(workspace, containerID string) error
 	CommitPause(workspace, containerID string) error
+	CommitFailedStart(workspace, containerID string) error
 	CommitShutdown(workspace, containerID string, expiresAt time.Time) error
 	PauseStatus(workspace, containerID string, stoppedAt time.Time) (PauseIntentStatus, error)
 	Clear(workspace string) error
@@ -71,6 +72,7 @@ const (
 	PauseIntentPending
 	PauseIntentCommitted
 	PauseIntentShutdown
+	PauseIntentFailedStart
 )
 
 func (a ServerAuth) Apply(req interface{ SetBasicAuth(string, string) }) {

@@ -67,6 +67,39 @@ func TestShutdownIntentExpires(t *testing.T) {
 	}
 }
 
+func TestFailedStartIntentIsDistinctAndContainerBound(t *testing.T) {
+	store := NewIntentStore(t.TempDir())
+	if err := store.CommitFailedStart("demo", "container-one"); err != nil {
+		t.Fatal(err)
+	}
+	status, err := store.PauseStatus("demo", "container-one", time.Time{})
+	if err != nil || status != runtime.PauseIntentFailedStart {
+		t.Fatalf("failed-start intent: status=%d err=%v", status, err)
+	}
+	status, err = store.PauseStatus("demo", "container-two", time.Time{})
+	if err != nil || status != runtime.PauseIntentNone {
+		t.Fatalf("replacement container: status=%d err=%v", status, err)
+	}
+}
+
+func TestIntentStoreReadsLegacyPauseAndRejectsContradictoryFailedStart(t *testing.T) {
+	directory := t.TempDir()
+	store := NewIntentStore(directory)
+	if err := os.WriteFile(store.path("demo"), []byte(`{"containerID":"container-one","committed":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	status, err := store.PauseStatus("demo", "container-one", time.Time{})
+	if err != nil || status != runtime.PauseIntentCommitted {
+		t.Fatalf("legacy pause: status=%d err=%v", status, err)
+	}
+	if err := os.WriteFile(store.path("demo"), []byte(`{"containerID":"container-one","committed":true,"shutdown":true,"failedStart":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PauseStatus("demo", "container-one", time.Time{}); err == nil {
+		t.Fatal("contradictory failed-start intent was accepted")
+	}
+}
+
 func TestIntentStoreRejectsSymlinkDirectory(t *testing.T) {
 	t.Parallel()
 	target := t.TempDir()
