@@ -104,18 +104,20 @@ type Config struct {
 }
 
 type Coordinator struct {
-	store     Store
-	fencer    Fencer
-	collector Collector
-	observer  Observer
-	ids       IDGenerator
-	config    Config
-	runMu     sync.Mutex
+	store       Store
+	fencer      Fencer
+	pauseFencer PauseFencer
+	collector   Collector
+	observer    Observer
+	ids         IDGenerator
+	config      Config
+	runMu       sync.Mutex
 }
 
 var (
 	_ Store       = (*taskstore.Store)(nil)
 	_ Fencer      = (*workspace.Manager)(nil)
+	_ PauseFencer = (*workspace.Manager)(nil)
 	_ Collector   = (*taskresult.Collector)(nil)
 	_ IDGenerator = (*task.Generator)(nil)
 )
@@ -127,12 +129,19 @@ func New(store Store, fencer Fencer, collector Collector, observer Observer, ids
 	if err := validateConfig(&config); err != nil {
 		return nil, err
 	}
-	return &Coordinator{store: store, fencer: fencer, collector: collector, observer: observer, ids: ids, config: config}, nil
+	var pauseFencer PauseFencer
+	if _, ok := store.(authorizedStore); ok {
+		pauseFencer, ok = fencer.(PauseFencer)
+		if !ok {
+			return nil, ErrInvalidConfig
+		}
+	}
+	return &Coordinator{store: store, fencer: fencer, pauseFencer: pauseFencer, collector: collector, observer: observer, ids: ids, config: config}, nil
 }
 
 // NewAuthorized constructs a coordinator that consumes only explicit durable
 // user seal requests. It never discovers or infers execution success.
-func NewAuthorized(store Store, fencer Fencer, collector Collector, config Config) (*Coordinator, error) {
+func NewAuthorized(store Store, fencer PauseFencer, collector Collector, config Config) (*Coordinator, error) {
 	if store == nil || fencer == nil || collector == nil {
 		return nil, ErrInvalidConfig
 	}
@@ -142,7 +151,7 @@ func NewAuthorized(store Store, fencer Fencer, collector Collector, config Confi
 	if err := validateConfig(&config); err != nil {
 		return nil, err
 	}
-	return &Coordinator{store: store, fencer: fencer, collector: collector, config: config}, nil
+	return &Coordinator{store: store, pauseFencer: fencer, collector: collector, config: config}, nil
 }
 
 func validateConfig(config *Config) error {
@@ -316,7 +325,7 @@ func (coordinator *Coordinator) runAuthorized(ctx context.Context, store authori
 	defer cancelOperation()
 	authorityDeadline, _ := operationContext.Deadline()
 
-	release, err := coordinator.fencer.AcquireQuiesced(operationContext, func(context.Context, workspace.RequestTarget) error { return nil })
+	release, err := coordinator.pauseFencer.AcquirePaused(operationContext)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()

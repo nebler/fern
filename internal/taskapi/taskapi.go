@@ -395,8 +395,8 @@ func (h *Handler) taskRoute(w http.ResponseWriter, r *http.Request, actor task.A
 		return
 	}
 	if len(parts) == 2 && parts[1] == "seal-preview" {
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w, http.MethodGet)
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, http.MethodPost)
 			return
 		}
 		id, err := task.ParseTaskID(parts[0])
@@ -437,6 +437,14 @@ type sealInput struct {
 }
 
 func (h *Handler) sealPreview(w http.ResponseWriter, r *http.Request, id task.TaskID) {
+	if !noQuery(r) || !exactJSONContentType(r) {
+		writeError(w, http.StatusBadRequest, "invalid_request", "The request is not valid.")
+		return
+	}
+	if err := decodeClosedObject(r.Body, maxSealBodyBytes, map[string]func(json.RawMessage) error{}); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "The JSON body is not valid.")
+		return
+	}
 	snapshot, err := h.config.SealAuthorizer.Preview(r.Context(), id)
 	if err != nil {
 		writeSealError(w, r.Context(), err)

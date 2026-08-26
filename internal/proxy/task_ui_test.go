@@ -31,7 +31,8 @@ func TestTaskUIScriptAndMethodPolicy(t *testing.T) {
 	response := httptest.NewRecorder()
 	serveFern(response, httptest.NewRequest(http.MethodGet, "/fern/assets/tasks.js", nil), Controls{Tasks: http.NotFoundHandler()}, false)
 	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "text/javascript; charset=utf-8" ||
-		!strings.Contains(response.Body.String(), "Idempotency-Key") || !strings.Contains(response.Body.String(), "openCodePath") {
+		!strings.Contains(response.Body.String(), "Idempotency-Key") || !strings.Contains(response.Body.String(), "openCodePath") ||
+		!strings.Contains(response.Body.String(), "async function preview") || !strings.Contains(response.Body.String(), "method:'POST'") {
 		t.Fatalf("task script = %d %s", response.Code, response.Body.String())
 	}
 	response = httptest.NewRecorder()

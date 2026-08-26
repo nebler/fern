@@ -622,7 +622,7 @@ func TestSealPreviewAndExactAuthorization(t *testing.T) {
 	config.SealAuthorizer = authorizer
 	config.SealWake = func() { wakes.Add(1) }
 	handler := newTestHandler(t, config)
-	preview := request(handler, http.MethodGet, apiPrefix+string(testTask)+"/seal-preview", "", nil)
+	preview := request(handler, http.MethodPost, apiPrefix+string(testTask)+"/seal-preview", "{}", map[string]string{"Content-Type": "application/json"})
 	if preview.Code != http.StatusOK || !strings.Contains(preview.Body.String(), `"manifestSha256":"sha256:`) {
 		t.Fatalf("preview = %d %s", preview.Code, preview.Body.String())
 	}
@@ -630,6 +630,43 @@ func TestSealPreviewAndExactAuthorization(t *testing.T) {
 	accepted := request(handler, http.MethodPost, apiPrefix+string(testTask)+"/seal", body, postHeaders())
 	if accepted.Code != http.StatusAccepted || wakes.Load() != 1 || !strings.Contains(accepted.Body.String(), `"state":"pending"`) {
 		t.Fatalf("accepted = %d %s wakes=%d", accepted.Code, accepted.Body.String(), wakes.Load())
+	}
+}
+
+func TestSealPreviewRequiresExplicitEmptyPost(t *testing.T) {
+	var previews atomic.Int64
+	config := testConfig(t, &fakeStore{})
+	config.SealAuthorizer = &fakeSealAuthorizer{preview: func(context.Context, task.TaskID) (taskresultcoord.SealSnapshot, error) {
+		previews.Add(1)
+		return taskresultcoord.SealSnapshot{}, nil
+	}}
+	handler := newTestHandler(t, config)
+	path := apiPrefix + string(testTask) + "/seal-preview"
+
+	get := request(handler, http.MethodGet, path, "", nil)
+	if get.Code != http.StatusMethodNotAllowed || get.Header().Get("Allow") != http.MethodPost {
+		t.Fatalf("GET preview = %d allow=%q", get.Code, get.Header().Get("Allow"))
+	}
+	for _, test := range []struct {
+		name    string
+		path    string
+		body    string
+		headers map[string]string
+	}{
+		{name: "missing content type", path: path, body: "{}"},
+		{name: "unknown field", path: path, body: `{"unexpected":true}`, headers: map[string]string{"Content-Type": "application/json"}},
+		{name: "trailing JSON", path: path, body: "{}{}", headers: map[string]string{"Content-Type": "application/json"}},
+		{name: "query", path: path + "?wake=true", body: "{}", headers: map[string]string{"Content-Type": "application/json"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			response := request(handler, http.MethodPost, test.path, test.body, test.headers)
+			if response.Code < 400 {
+				t.Fatalf("preview = %d %s", response.Code, response.Body.String())
+			}
+		})
+	}
+	if previews.Load() != 0 {
+		t.Fatalf("invalid preview invoked authorizer %d times", previews.Load())
 	}
 }
 
@@ -647,7 +684,7 @@ func TestSealRejectsChangedSnapshotAndStrictInput(t *testing.T) {
 	config := testConfig(t, &fakeStore{})
 	config.SealAuthorizer = authorizer
 	handler := newTestHandler(t, config)
-	preview := request(handler, http.MethodGet, apiPrefix+string(testTask)+"/seal-preview", "", nil)
+	preview := request(handler, http.MethodPost, apiPrefix+string(testTask)+"/seal-preview", "{}", map[string]string{"Content-Type": "application/json"})
 	changed := request(handler, http.MethodPost, apiPrefix+string(testTask)+"/seal", strings.TrimSpace(preview.Body.String()), postHeaders())
 	if changed.Code != http.StatusConflict || !strings.Contains(changed.Body.String(), "snapshot_changed") {
 		t.Fatalf("changed = %d %s", changed.Code, changed.Body.String())

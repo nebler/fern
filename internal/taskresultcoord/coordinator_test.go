@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskresult"
 	"github.com/nebler/fern/internal/taskstore"
@@ -42,14 +43,15 @@ type fakeStore struct {
 
 type fakeAuthorizedStore struct {
 	*fakeStore
-	work            taskstore.SealRequestWork
-	claimErr        error
-	inspect         func(taskstore.SealRequestWork) taskstore.SealRequestWork
-	claims          int
-	inspects        int
-	rejections      int
-	authorizedSeals int
-	authorized      taskstore.SealAuthorizedResultParams
+	work             taskstore.SealRequestWork
+	claimErr         error
+	inspect          func(taskstore.SealRequestWork) taskstore.SealRequestWork
+	claims           int
+	inspects         int
+	rejections       int
+	authorizedSeals  int
+	authorized       taskstore.SealAuthorizedResultParams
+	onAuthorizedSeal func()
 }
 
 func (store *fakeAuthorizedStore) ClaimSealRequest(context.Context, taskstore.ClaimSealRequestParams) (taskstore.SealRequestWork, error) {
@@ -79,6 +81,9 @@ func (store *fakeAuthorizedStore) RejectSealRequest(_ context.Context, p tasksto
 func (store *fakeAuthorizedStore) SealAuthorizedResult(_ context.Context, p taskstore.SealAuthorizedResultParams) (taskstore.SealedResult, error) {
 	store.authorizedSeals++
 	store.authorized = p
+	if store.onAuthorizedSeal != nil {
+		store.onAuthorizedSeal()
+	}
 	return taskstore.SealedResult{}, nil
 }
 
@@ -107,17 +112,20 @@ func (store *fakeStore) SealResult(ctx context.Context, params taskstore.SealRes
 }
 
 type fakeFencer struct {
-	mu           sync.Mutex
-	calls        int
-	observations int
-	releases     int
-	held         bool
-	onObserved   func(int)
+	mu            sync.Mutex
+	calls         int
+	pausedCalls   int
+	quiescedCalls int
+	observations  int
+	releases      int
+	held          bool
+	onObserved    func(int)
 }
 
 func (fencer *fakeFencer) AcquirePaused(context.Context) (func(), error) {
 	fencer.mu.Lock()
 	fencer.calls++
+	fencer.pausedCalls++
 	fencer.held = true
 	fencer.mu.Unlock()
 	var once sync.Once
@@ -127,6 +135,7 @@ func (fencer *fakeFencer) AcquirePaused(context.Context) (func(), error) {
 func (fencer *fakeFencer) AcquireQuiesced(ctx context.Context, observe func(context.Context, workspace.RequestTarget) error) (func(), error) {
 	fencer.mu.Lock()
 	fencer.calls++
+	fencer.quiescedCalls++
 	fencer.held = true
 	fencer.mu.Unlock()
 	for index := 1; index <= 2; index++ {
@@ -284,6 +293,9 @@ func TestRunOnceUserSealUsesDurableAuthorizationWithoutSuccessObservation(t *tes
 		t.Fatalf("calls claim=%d inspect=%d authorized=%d legacy=%d observe=%d ids=%d/%d collect=%d",
 			store.claims, store.inspects, store.authorizedSeals, store.seals, observer.calls, ids.resultCalls, ids.eventCalls, collector.calls)
 	}
+	if fencer.pausedCalls != 1 || fencer.quiescedCalls != 0 || fencer.releases != 1 {
+		t.Fatalf("fences paused=%d quiesced=%d releases=%d", fencer.pausedCalls, fencer.quiescedCalls, fencer.releases)
+	}
 	params := store.authorized
 	if params.SealRequestID != store.work.Request.ID || params.Result.CompletionAuthority != taskstore.SealAuthorityUser ||
 		params.Result.ResultID != store.work.Request.ResultID || params.Result.ResultCommit != store.work.Request.ExpectedResultCommit ||
@@ -293,6 +305,84 @@ func TestRunOnceUserSealUsesDurableAuthorizationWithoutSuccessObservation(t *tes
 	if collector.request.ExpectedSnapshot == nil || collector.request.ExpectedSnapshot.ResultCommit != store.work.Request.ExpectedResultCommit ||
 		collector.request.ExpectedSnapshot.ManifestSHA256 != store.work.Request.ExpectedManifestSHA256 {
 		t.Fatalf("collector was not constrained: %+v", collector.request)
+	}
+}
+
+type managerRuntime struct {
+	mu       sync.Mutex
+	state    runtime.State
+	endpoint runtime.Endpoint
+	ensureN  int
+	pauseN   int
+}
+
+func (runtimeFake *managerRuntime) EnsureRunningObserved(context.Context, runtime.Spec) (runtime.RunningResult, error) {
+	runtimeFake.mu.Lock()
+	defer runtimeFake.mu.Unlock()
+	runtimeFake.ensureN++
+	runtimeFake.state = runtime.StateRunning
+	return runtime.RunningResult{Observation: runtime.Observation{
+		State: runtime.StateRunning, Running: true, Endpoint: runtimeFake.endpoint, HasEndpoint: true,
+		ImageID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}, Transitioned: true}, nil
+}
+
+func (runtimeFake *managerRuntime) ReconcileStartup(context.Context, runtime.Spec) (runtime.StartupResult, error) {
+	return runtime.StartupResult{}, nil
+}
+
+func (runtimeFake *managerRuntime) Pause(context.Context, string) error {
+	runtimeFake.mu.Lock()
+	defer runtimeFake.mu.Unlock()
+	runtimeFake.pauseN++
+	runtimeFake.state = runtime.StatePaused
+	return nil
+}
+
+func (runtimeFake *managerRuntime) Status(context.Context, string) (runtime.Observation, error) {
+	runtimeFake.mu.Lock()
+	defer runtimeFake.mu.Unlock()
+	return runtime.Observation{
+		State: runtimeFake.state, Running: runtimeFake.state == runtime.StateRunning,
+		Endpoint: runtimeFake.endpoint, HasEndpoint: runtimeFake.state == runtime.StateRunning,
+		ImageID: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+	}, nil
+}
+
+func TestAuthorizedSealCompletesThroughRealManagerWhileAlreadyPaused(t *testing.T) {
+	runtimeFake := &managerRuntime{state: runtime.StateAbsent, endpoint: runtime.Endpoint{Host: "127.0.0.1", Port: 4096}}
+	serviceContext, cancelService := context.WithCancel(context.Background())
+	defer cancelService()
+	manager := workspace.NewManager(serviceContext, runtimeFake, runtime.Spec{Name: "test"}, nil,
+		func(context.Context, runtime.Endpoint) (bool, error) { return true, nil }, nil)
+	_, releaseRequest, err := manager.AcquireRequest(context.Background(), workspace.RequestRead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseRequest()
+	if err := manager.Pause(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &fakeAuthorizedStore{fakeStore: &fakeStore{}, work: authorizedWork()}
+	store.onAuthorizedSeal = func() {
+		requestContext, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		if _, _, err := manager.AcquireRequest(requestContext, workspace.RequestRead); !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("request crossed result fence: %v", err)
+		}
+	}
+	coordinator, err := NewAuthorized(store, manager, &fakeCollector{}, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	runtimeFake.mu.Lock()
+	defer runtimeFake.mu.Unlock()
+	if runtimeFake.ensureN != 1 || runtimeFake.pauseN != 1 || runtimeFake.state != runtime.StatePaused || store.authorizedSeals != 1 {
+		t.Fatalf("ensure=%d pause=%d state=%s seals=%d", runtimeFake.ensureN, runtimeFake.pauseN, runtimeFake.state, store.authorizedSeals)
 	}
 }
 
@@ -365,6 +455,25 @@ func TestAuthorizedCoordinatorNeverFallsBackToSuccessDiscovery(t *testing.T) {
 func TestNewAuthorizedRequiresAuthorizedStore(t *testing.T) {
 	if _, err := NewAuthorized(&fakeStore{}, &fakeFencer{}, &fakeCollector{}, testConfig()); !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+type pausedOnlyFencer struct{ calls int }
+
+func (fencer *pausedOnlyFencer) AcquirePaused(context.Context) (func(), error) {
+	fencer.calls++
+	return func() {}, nil
+}
+
+func TestNewAuthorizedRequiresOnlyPausedFence(t *testing.T) {
+	store := &fakeAuthorizedStore{fakeStore: &fakeStore{}, claimErr: taskstore.ErrNotFound}
+	fencer := &pausedOnlyFencer{}
+	coordinator, err := NewAuthorized(store, fencer, &fakeCollector{}, testConfig())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := coordinator.RunOnce(context.Background()); !errors.Is(err, ErrNoWork) || fencer.calls != 0 {
+		t.Fatalf("RunOnce error=%v pause calls=%d", err, fencer.calls)
 	}
 }
 
