@@ -1,0 +1,148 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    name: Build, attest, and publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out tagged commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.ref }}
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Verify release identity
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+          test "$(git rev-list -n 1 "refs/tags/$RELEASE_TAG")" = "$RELEASE_COMMIT"
+
+      - name: Build release artifacts
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: ./scripts/build-release.sh "$RELEASE_TAG"
+
+      - name: Verify checksums and manifest identity
+        env:
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c dist/SHA256SUMS
+          python3 - "$RELEASE_TAG" "$RELEASE_COMMIT" <<'PY'
+          import json
+          import pathlib
+          import sys
+
+          manifest = json.loads(pathlib.Path("dist/RELEASE-MANIFEST.json").read_text())
+          assert manifest["release"]["version"] == sys.argv[1]
+          assert manifest["release"]["commit"] == sys.argv[2]
+          assert manifest["integrity"]["signature_status"] == "not-generated"
+          assert manifest["integrity"]["provenance_status"] == "not-generated-by-builder"
+          assert manifest["integrity"]["ci_attestations"] == "external-to-manifest"
+          PY
+
+      - name: Generate SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          path: dist
+          format: spdx-json
+          output-file: dist/fern-${{ github.ref_name }}.spdx.json
+          syft-version: v1.51.0
+          github-token: ""
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Verify and checksum SBOM
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          sbom="dist/fern-${RELEASE_TAG}.spdx.json"
+          jq -e '.spdxVersion | startswith("SPDX-")' "$sbom" >/dev/null
+          jq -e '.packages | length > 0' "$sbom" >/dev/null
+          shasum -a 256 "$sbom" >>dist/SHA256SUMS
+          shasum -a 256 -c dist/SHA256SUMS
+
+      - name: Attest release assets
+        id: provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
+        with:
+          subject-path: |
+            dist/fern-${{ github.ref_name }}-linux-amd64
+            dist/fern-${{ github.ref_name }}-linux-arm64
+            dist/fern-${{ github.ref_name }}.spdx.json
+            dist/RELEASE-MANIFEST.json
+            dist/SHA256SUMS
+
+      - name: Verify provenance before publication
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          assets=(
+            "dist/fern-${RELEASE_TAG}-linux-amd64"
+            "dist/fern-${RELEASE_TAG}-linux-arm64"
+            "dist/fern-${RELEASE_TAG}.spdx.json"
+            dist/RELEASE-MANIFEST.json
+            dist/SHA256SUMS
+          )
+          for asset in "${assets[@]}"; do
+            gh attestation verify "$asset" \
+              --bundle "$ATTESTATION_BUNDLE" \
+              --repo "$GITHUB_REPOSITORY" \
+              --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+              --source-ref "$GITHUB_REF" \
+              --source-digest "$RELEASE_COMMIT" \
+              --deny-self-hosted-runners
+          done
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          remote_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)
+          test "$remote_commit" = "$RELEASE_COMMIT"
+
+          release_flags=()
+          case "$RELEASE_TAG" in
+            *-*) release_flags+=(--prerelease) ;;
+          esac
+          gh release create "$RELEASE_TAG" \
+            "dist/fern-${RELEASE_TAG}-linux-amd64" \
+            "dist/fern-${RELEASE_TAG}-linux-arm64" \
+            "dist/fern-${RELEASE_TAG}.spdx.json" \
+            dist/RELEASE-MANIFEST.json \
+            dist/SHA256SUMS \
+            --verify-tag \
+            --target "$RELEASE_COMMIT" \
+            --title "$RELEASE_TAG" \
+            --generate-notes \
+            "${release_flags[@]}"

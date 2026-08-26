@@ -110,7 +110,9 @@ cat >"$staging/RELEASE-MANIFEST.json" <<EOF
   },
   "integrity": {
     "checksum_algorithm": "sha256",
-    "signature_status": "not-generated"
+    "signature_status": "not-generated",
+    "provenance_status": "not-generated-by-builder",
+    "ci_attestations": "external-to-manifest"
   },
   "artifacts": [
     {"path": "fern-${version}-linux-amd64", "os": "linux", "arch": "amd64", "sha256": "$amd64_sha"},

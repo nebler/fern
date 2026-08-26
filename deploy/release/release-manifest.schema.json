@@ -32,10 +32,12 @@
     "integrity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["checksum_algorithm", "signature_status"],
+      "required": ["checksum_algorithm", "signature_status", "provenance_status", "ci_attestations"],
       "properties": {
         "checksum_algorithm": {"const": "sha256"},
-        "signature_status": {"const": "not-generated"}
+        "signature_status": {"const": "not-generated"},
+        "provenance_status": {"const": "not-generated-by-builder"},
+        "ci_attestations": {"const": "external-to-manifest"}
       }
     },
     "artifacts": {
