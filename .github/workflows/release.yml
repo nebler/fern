@@ -6,112 +6,242 @@ on:
       - "v*"
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
 
 jobs:
-  release:
-    name: Build, attest, and publish
+  validate:
+    name: Validate exact tagged source
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
     steps:
-      - name: Check out tagged commit
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check out exact tagged commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.ref }}
+          ref: ${{ github.sha }}
 
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
         with:
           go-version-file: go.mod
           cache: true
 
-      - name: Verify release identity
+      - name: Verify signed annotated tag and source identity
         env:
-          RELEASE_COMMIT: ${{ github.sha }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          test "$GITHUB_REF" = "refs/tags/$RELEASE_TAG"
-          test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
-          test "$(git rev-list -n 1 "refs/tags/$RELEASE_TAG")" = "$RELEASE_COMMIT"
-
-      - name: Build release artifacts
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: ./scripts/build-release.sh "$RELEASE_TAG"
-
-      - name: Verify checksums and manifest identity
-        env:
-          RELEASE_COMMIT: ${{ github.sha }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          shasum -a 256 -c dist/SHA256SUMS
-          python3 - "$RELEASE_TAG" "$RELEASE_COMMIT" <<'PY'
-          import json
-          import pathlib
-          import sys
-
-          manifest = json.loads(pathlib.Path("dist/RELEASE-MANIFEST.json").read_text())
-          assert manifest["release"]["version"] == sys.argv[1]
-          assert manifest["release"]["commit"] == sys.argv[2]
-          assert manifest["integrity"]["signature_status"] == "not-generated"
-          assert manifest["integrity"]["provenance_status"] == "not-generated-by-builder"
-          assert manifest["integrity"]["ci_attestations"] == "external-to-manifest"
-          PY
-
-      - name: Generate SPDX SBOM
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
-        with:
-          path: dist
-          format: spdx-json
-          output-file: dist/fern-${{ github.ref_name }}.spdx.json
-          syft-version: v1.51.0
-          github-token: ""
-          upload-artifact: false
-          upload-release-assets: false
-
-      - name: Verify and checksum SBOM
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          sbom="dist/fern-${RELEASE_TAG}.spdx.json"
-          jq -e '.spdxVersion | startswith("SPDX-")' "$sbom" >/dev/null
-          jq -e '.packages | length > 0' "$sbom" >/dev/null
-          shasum -a 256 "$sbom" >>dist/SHA256SUMS
-          shasum -a 256 -c dist/SHA256SUMS
-
-      - name: Attest release assets
-        id: provenance
-        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a # v3.0.0
-        with:
-          subject-path: |
-            dist/fern-${{ github.ref_name }}-linux-amd64
-            dist/fern-${{ github.ref_name }}-linux-arm64
-            dist/fern-${{ github.ref_name }}.spdx.json
-            dist/RELEASE-MANIFEST.json
-            dist/SHA256SUMS
-
-      - name: Verify provenance before publication
-        env:
-          ATTESTATION_BUNDLE: ${{ steps.provenance.outputs.bundle-path }}
           GH_TOKEN: ${{ github.token }}
           RELEASE_COMMIT: ${{ github.sha }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          assets=(
-            "dist/fern-${RELEASE_TAG}-linux-amd64"
-            "dist/fern-${RELEASE_TAG}-linux-arm64"
-            "dist/fern-${RELEASE_TAG}.spdx.json"
-            dist/RELEASE-MANIFEST.json
-            dist/SHA256SUMS
-          )
-          for asset in "${assets[@]}"; do
+          ./scripts/verify-release-tag.sh
+
+      - name: Run source tests, race detector, vet, and critical coverage
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l .)"
+          GOTOOLCHAIN=local go test -race ./...
+          GOTOOLCHAIN=local go vet ./...
+          ./scripts/test-critical-coverage.sh
+          CGO_ENABLED=0 GOTOOLCHAIN=local go test ./internal/taskstore
+
+      - name: Run release, deployment, upgrade, and rehearsal gates
+        env:
+          FERN_RELEASE_ARTIFACTS: ${{ runner.temp }}/release-evidence
+        run: |
+          set -euo pipefail
+          ./scripts/test-deployment.sh
+          ./integration/release/run.sh
+          ./integration/upgrade/run.sh
+          python3 -m json.tool deploy/release/production-rehearsal-evidence.schema.json >/dev/null
+          ./integration/production-rehearsal/run.sh self-test
+          ./scripts/test-release-workflow.sh
+
+      - name: Build and smoke test production workspace image
+        env:
+          FERN_OPENCODE_IMAGE: fern/opencode:release-validation
+        run: |
+          set -euo pipefail
+          docker build --pull --tag "$FERN_OPENCODE_IMAGE" images/opencode
+          test "$(docker run --rm --entrypoint id "$FERN_OPENCODE_IMAGE" -u)" = 1001
+          test "$(docker run --rm --entrypoint id "$FERN_OPENCODE_IMAGE" -g)" = 1001
+          docker run --rm --entrypoint opencode2 "$FERN_OPENCODE_IMAGE" --version
+          ./scripts/test-opencode.sh
+
+      - name: Run Docker lifecycle integration gate
+        run: |
+          set -euo pipefail
+          ./scripts/test-lifecycle.sh
+
+  publish:
+    name: Publish digest-bound release
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      packages: write
+      id-token: write
+      attestations: write
+    steps:
+      - name: Check out exact validated commit
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Set up Go
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Reverify signed tag and prepare immutable identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ./scripts/verify-release-tag.sh
+          image_name="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fern/opencode"
+          workflow_identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF"
+          sbom_path="$RUNNER_TEMP/fern-${RELEASE_TAG}-opencode.spdx.json"
+          printf 'IMAGE_NAME=%s\n' "$image_name" >>"$GITHUB_ENV"
+          printf 'RELEASE_COMMIT=%s\n' "$RELEASE_COMMIT" >>"$GITHUB_ENV"
+          printf 'RELEASE_TAG=%s\n' "$RELEASE_TAG" >>"$GITHUB_ENV"
+          printf 'SBOM_PATH=%s\n' "$sbom_path" >>"$GITHUB_ENV"
+          printf 'WORKFLOW_IDENTITY=%s\n' "$workflow_identity" >>"$GITHUB_ENV"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
+
+      - name: Build and publish production image
+        id: image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: images/opencode
+          platforms: linux/amd64,linux/arm64
+          pull: true
+          push: true
+          provenance: false
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ env.RELEASE_TAG }}
+            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+
+      - name: Record immutable image digest
+        env:
+          BUILT_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$BUILT_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'IMAGE_DIGEST=%s\n' "$BUILT_IMAGE_DIGEST" >>"$GITHUB_ENV"
+          printf 'IMAGE_REFERENCE=%s@%s\n' "$IMAGE_NAME" "$BUILT_IMAGE_DIGEST" >>"$GITHUB_ENV"
+
+      - name: Generate image SPDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
+        with:
+          image: ${{ env.IMAGE_NAME }}@${{ env.IMAGE_DIGEST }}
+          format: spdx-json
+          output-file: ${{ env.SBOM_PATH }}
+          syft-version: v1.51.0
+          github-token: ""
+          upload-artifact: false
+          upload-release-assets: false
+
+      - name: Validate image SBOM
+        run: |
+          set -euo pipefail
+          jq -e '.spdxVersion | startswith("SPDX-")' "$SBOM_PATH" >/dev/null
+          jq -e '.packages | length > 0' "$SBOM_PATH" >/dev/null
+
+      - name: Attest image build provenance
+        id: image-provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-name: ${{ env.IMAGE_NAME }}
+          subject-digest: ${{ env.IMAGE_DIGEST }}
+          push-to-registry: true
+
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@d7543c93d881b35a8faa02e8e3605f69b7a1ce62
+        with:
+          cosign-release: v2.6.0
+
+      - name: Keylessly sign and attest immutable image
+        run: |
+          set -euo pipefail
+          cosign sign --yes "$IMAGE_REFERENCE"
+          cosign attest --yes --type spdxjson --predicate "$SBOM_PATH" "$IMAGE_REFERENCE"
+
+      - name: Verify image signature and attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cosign verify \
+            --certificate-identity "$WORKFLOW_IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$IMAGE_REFERENCE" >/dev/null
+          cosign verify-attestation \
+            --type spdxjson \
+            --certificate-identity "$WORKFLOW_IDENTITY" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$IMAGE_REFERENCE" >/dev/null
+          gh attestation verify "oci://$IMAGE_REFERENCE" \
+            --repo "$GITHUB_REPOSITORY" \
+            --signer-workflow "$GITHUB_REPOSITORY/.github/workflows/release.yml" \
+            --source-ref "$GITHUB_REF" \
+            --source-digest "$RELEASE_COMMIT" \
+            --deny-self-hosted-runners
+
+      - name: Build digest-bound release bundle
+        env:
+          FERN_IMAGE_CERTIFICATE_IDENTITY: ${{ env.WORKFLOW_IDENTITY }}
+          FERN_IMAGE_DIGEST: ${{ env.IMAGE_DIGEST }}
+          FERN_IMAGE_OIDC_ISSUER: https://token.actions.githubusercontent.com
+          FERN_IMAGE_PROVENANCE_URL: ${{ steps.image-provenance.outputs.attestation-url }}
+          FERN_IMAGE_REPOSITORY: ${{ env.IMAGE_NAME }}
+          FERN_IMAGE_SBOM_PATH: ${{ env.SBOM_PATH }}
+          FERN_VERIFIED_TAG: ${{ env.RELEASE_TAG }}
+        run: |
+          set -euo pipefail
+          ./scripts/build-release.sh "$RELEASE_TAG"
+          (cd dist && shasum -a 256 -c SHA256SUMS)
+          jq -e --arg commit "$RELEASE_COMMIT" --arg digest "$IMAGE_DIGEST" --arg image "$IMAGE_REFERENCE" \
+            '.release.commit == $commit and .release.verified_tag == .release.version and .image.digest == $digest and .image.reference == $image and .image.signature.status == "verified-keyless" and .image.provenance.status == "verified-github-attestation"' \
+            dist/RELEASE-MANIFEST.json >/dev/null
+
+      - name: Attest release assets
+        id: asset-provenance
+        uses: actions/attest-build-provenance@977bb373ede98d70efdf65b84cb5f73e068dcc2a
+        with:
+          subject-path: dist/*
+
+      - name: Verify release asset provenance
+        env:
+          ATTESTATION_BUNDLE: ${{ steps.asset-provenance.outputs.bundle-path }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for asset in dist/*; do
             gh attestation verify "$asset" \
               --bundle "$ATTESTATION_BUNDLE" \
               --repo "$GITHUB_REPOSITORY" \
@@ -123,26 +253,26 @@ jobs:
 
       - name: Publish GitHub Release
         env:
+          ASSET_PROVENANCE_URL: ${{ steps.asset-provenance.outputs.attestation-url }}
           GH_TOKEN: ${{ github.token }}
-          RELEASE_COMMIT: ${{ github.sha }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          IMAGE_PROVENANCE_URL: ${{ steps.image-provenance.outputs.attestation-url }}
         run: |
           set -euo pipefail
-          remote_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq .sha)
-          test "$remote_commit" = "$RELEASE_COMMIT"
-
+          ./scripts/verify-release-tag.sh
+          (cd dist && shasum -a 256 -c SHA256SUMS)
+          notes="$RUNNER_TEMP/release-notes.md"
+          {
+            printf 'Immutable production image: `%s`\n\n' "$IMAGE_REFERENCE"
+            printf 'Image provenance: %s\n\n' "$IMAGE_PROVENANCE_URL"
+            printf 'Release asset provenance: %s\n' "$ASSET_PROVENANCE_URL"
+          } >"$notes"
           release_flags=()
           case "$RELEASE_TAG" in
             *-*) release_flags+=(--prerelease) ;;
           esac
-          gh release create "$RELEASE_TAG" \
-            "dist/fern-${RELEASE_TAG}-linux-amd64" \
-            "dist/fern-${RELEASE_TAG}-linux-arm64" \
-            "dist/fern-${RELEASE_TAG}.spdx.json" \
-            dist/RELEASE-MANIFEST.json \
-            dist/SHA256SUMS \
+          gh release create "$RELEASE_TAG" dist/* \
             --verify-tag \
             --target "$RELEASE_COMMIT" \
             --title "$RELEASE_TAG" \
-            --generate-notes \
+            --notes-file "$notes" \
             "${release_flags[@]}"

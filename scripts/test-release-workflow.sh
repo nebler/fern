@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+TEMP=$(mktemp -d "${TMPDIR:-/tmp}/fern-release-workflow.XXXXXX")
+trap 'rm -rf "$TEMP"' EXIT
+
+python3 - "$ROOT/.github/workflows/release.yml" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+uses = re.findall(r"^\s*-?\s*uses:\s*([^\s#]+)", workflow, re.MULTILINE)
+assert uses, "release workflow has no actions"
+for action in uses:
+    assert re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action), f"action is not commit pinned: {action}"
+
+lines = workflow.splitlines()
+for index, line in enumerate(lines):
+    match = re.match(r"^(\s*)run:\s*\|\s*$", line)
+    if not match:
+        continue
+    indentation = len(match.group(1))
+    body = []
+    for candidate in lines[index + 1:]:
+        if candidate.strip() and len(candidate) - len(candidate.lstrip()) <= indentation:
+            break
+        body.append(candidate)
+    assert "${{" not in "\n".join(body), "GitHub expression interpolated directly into a shell script"
+
+required = [
+    "./scripts/verify-release-tag.sh",
+    "go test -race ./...",
+    "go vet ./...",
+    "./scripts/test-critical-coverage.sh",
+    "./scripts/test-deployment.sh",
+    "./integration/release/run.sh",
+    "./integration/upgrade/run.sh",
+    "./scripts/test-opencode.sh",
+    "./scripts/test-lifecycle.sh",
+    "docker/build-push-action@",
+    "cosign sign",
+    "cosign attest",
+    "cosign verify-attestation",
+    "gh attestation verify",
+    "push-to-registry: true",
+    'shasum -a 256 -c SHA256SUMS',
+]
+for value in required:
+    assert value in workflow, f"release workflow is missing required control: {value}"
+PY
+
+FIXTURE="$TEMP/repository"
+mkdir -p "$FIXTURE" "$TEMP/bin"
+git -C "$FIXTURE" init -q
+git -C "$FIXTURE" config user.name 'Fern release workflow test'
+git -C "$FIXTURE" config user.email 'release-workflow-test@fern.invalid'
+printf 'fixture\n' >"$FIXTURE/file"
+git -C "$FIXTURE" add file
+git -C "$FIXTURE" commit -qm fixture
+git -C "$FIXTURE" tag -a v1.2.3 -m v1.2.3
+COMMIT=$(git -C "$FIXTURE" rev-parse HEAD)
+TAG_OBJECT=$(git -C "$FIXTURE" rev-parse refs/tags/v1.2.3)
+
+cat >"$TEMP/bin/gh" <<'EOF'
+#!/usr/bin/env bash
+set -eu
+endpoint=${*: -1}
+case "$endpoint" in
+  */git/ref/tags/*)
+    if [[ ${MOCK_TAG_MODE:-valid} == lightweight ]]; then
+      printf '{"object":{"type":"commit","sha":"%s"}}\n' "$RELEASE_COMMIT"
+    else
+      printf '{"object":{"type":"tag","sha":"%s"}}\n' "$TAG_OBJECT"
+    fi
+    ;;
+  */git/tags/*)
+    verified=true
+    reason=valid
+    target=$RELEASE_COMMIT
+    [[ ${MOCK_TAG_MODE:-valid} != unverified ]] || { verified=false; reason=unsigned; }
+    [[ ${MOCK_TAG_MODE:-valid} != wrong-target ]] || target=$(printf '0%.0s' {1..40})
+    printf '{"verification":{"verified":%s,"reason":"%s"},"object":{"type":"commit","sha":"%s"}}\n' "$verified" "$reason" "$target"
+    ;;
+  *) exit 2 ;;
+esac
+EOF
+chmod 0755 "$TEMP/bin/gh"
+
+verify() {
+  (
+    cd "$FIXTURE"
+    PATH="$TEMP/bin:$PATH" TAG_OBJECT="$TAG_OBJECT" \
+      GITHUB_REPOSITORY=example/fern GITHUB_REF=refs/tags/v1.2.3 \
+      RELEASE_TAG=v1.2.3 RELEASE_COMMIT="$COMMIT" MOCK_TAG_MODE=${1:-valid} \
+      "$ROOT/scripts/verify-release-tag.sh"
+  )
+}
+
+verify valid >/dev/null
+for mode in lightweight unverified wrong-target; do
+  if verify "$mode" >"$TEMP/$mode.log" 2>&1; then
+    printf 'error: tag verification accepted %s fixture\n' "$mode" >&2
+    exit 1
+  fi
+done
+
+printf 'Release workflow static and verified-tag checks passed\n'
