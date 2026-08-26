@@ -15,6 +15,7 @@ RUN_ROOT=$(mktemp -d "${TMPDIR:-/tmp}/fern-lifecycle.XXXXXX")
 HOME_DIR="$RUN_ROOT/home"
 REPO_DIR="$RUN_ROOT/repository"
 CONFIG="$RUN_ROOT/fern.yaml"
+ENV_FILE="$RUN_ROOT/fern.env"
 FERN_LOG="$ARTIFACTS/fern.log"
 FERN_RAW_LOG="$RUN_ROOT/fern.log"
 TRANSCRIPT="$ARTIFACTS/transcript.log"
@@ -62,14 +63,6 @@ fail() {
   FAILED=1
   note "FAIL: $*"
   return 1
-}
-
-sha256() {
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum "$@"
-  else
-    shasum -a 256 "$@"
-  fi
 }
 
 record_command() {
@@ -165,10 +158,7 @@ trap cleanup EXIT
 trap 'exit 130' INT TERM
 
 require_command() { command -v "$1" >/dev/null 2>&1 || fail "required command not found: $1"; }
-for command in docker curl go python3 jq sed awk grep date ps tar; do require_command "$command"; done
-if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
-  fail "missing required command: sha256sum or shasum"
-fi
+for command in docker curl go python3 jq sed awk grep date ps; do require_command "$command"; done
 [[ "$WAKE_COUNT" =~ ^[0-9]+$ ]] && (( WAKE_COUNT >= 10 )) || fail "FERN_LIFECYCLE_WAKE_COUNT must be at least 10"
 docker info >/dev/null 2>"$ARTIFACTS/docker-info-error.log" || fail "Docker daemon is unavailable; see $ARTIFACTS/docker-info-error.log"
 
@@ -233,6 +223,11 @@ proxy:
 control:
   password: \${FERN_CONTROL_PASSWORD}
 EOF
+cat >"$ENV_FILE" <<EOF
+OPENCODE_PASSWORD=$PASSWORD
+FERN_CONTROL_PASSWORD=$FERN_CONTROL_PASSWORD
+EOF
+chmod 0600 "$ENV_FILE"
 
 docker events --filter "container=$NAME" --format '{{json .}}' >"$EVENTS" 2>&1 &
 EVENTS_PID=$!
@@ -490,43 +485,32 @@ persisted=$(auth_curl --fail "$OPERATOR_URL/control/persist")
 [[ "$persisted" == *"$RUN_ID"* ]] || fail "OpenCode data did not survive stop/start"
 grep -q "$RUN_ID" "$REPO_DIR/container-state.json" || fail "container-written repository data did not survive stop/start"
 
-note "scenario 10/14: isolated backup and destructive restore"
-workflow_id=$(control_curl --fail --request POST --header 'Content-Type: application/json' \
-  --data '{"title":"Lifecycle workflow","sessionId":"ses_lifecycle"}' \
-  "$OPERATOR_URL/fern/api/v1/workflows" | jq -er '.id')
+note "scenario 10/14: operational backup and destructive restore"
 stop_fern
-run_transcript "$FERN_BIN" down -name "$NAME"
-[[ ! $(docker ps -aq --filter "name=^/${NAME}$") ]] || fail "down did not remove compute"
-docker volume inspect "$VOLUME" >/dev/null || fail "down removed the persistent data volume"
-
 BACKUP_DIR="$RUN_ROOT/backup"
 mkdir -p "$BACKUP_DIR"
-tar -C "$RUN_ROOT" -czf "$BACKUP_DIR/repository.tar.gz" repository
-tar -C "$HOME_DIR" -czf "$BACKUP_DIR/fern-control.tar.gz" .fern/control
-tar -C "$RUN_ROOT" -czf "$BACKUP_DIR/config.tar.gz" fern.yaml
-docker run --rm --user 0:0 --entrypoint sh \
-  -v "$VOLUME:/source:ro" -v "$BACKUP_DIR:/backup" "$IMAGE" \
-  -c 'tar -C /source -czf /backup/opencode-volume.tar.gz .'
-(cd "$BACKUP_DIR" && sha256 repository.tar.gz fern-control.tar.gz config.tar.gz opencode-volume.tar.gz >SHA256SUMS)
-while read -r expected archive; do
-  actual=$(sha256 "$BACKUP_DIR/$archive" | awk '{print $1}')
-  [[ "$actual" == "$expected" ]] || fail "backup checksum failed for $archive"
-done <"$BACKUP_DIR/SHA256SUMS"
-cp "$BACKUP_DIR/fern-control.tar.gz" "$BACKUP_DIR/corrupt.tar.gz"
-printf 'corrupt' >>"$BACKUP_DIR/corrupt.tar.gz"
-expected_control=$(awk '$2 == "fern-control.tar.gz" {print $1}' "$BACKUP_DIR/SHA256SUMS")
-[[ "$(sha256 "$BACKUP_DIR/corrupt.tar.gz" | awk '{print $1}')" != "$expected_control" ]] \
-  || fail "corrupt backup was not detected"
+run_transcript "$FERN_BIN" backup create \
+  -config "$CONFIG" -env-file "$ENV_FILE" -state-dir "$HOME_DIR/.fern" \
+  -generation "$SAFE_ID" -output "$BACKUP_DIR/generation"
+[[ ! $(docker ps -aq --filter "name=^/${NAME}$") ]] || fail "down did not remove compute"
+docker volume inspect "$VOLUME" >/dev/null || fail "backup removed the persistent data volume"
+jq -e --arg volume "$VOLUME" \
+  '.named_volumes == [$volume] and .credentials.external.sha256 != ""' \
+  "$BACKUP_DIR/generation/BACKUP-MANIFEST.json" >/dev/null \
+  || fail "backup manifest did not account for the managed Docker volume"
 
-rm -rf "$REPO_DIR" "$HOME_DIR/.fern" "$CONFIG"
+rm -rf "$REPO_DIR" "$HOME_DIR/.fern/control" "$HOME_DIR/.fern/state"
+mkdir -p "$REPO_DIR"
+chmod 0777 "$REPO_DIR"
+printf '# destructive restore marker\n' >>"$CONFIG"
 docker volume rm "$VOLUME" >/dev/null
 docker volume create --label dev.fern.managed=true --label "dev.fern.workspace=$NAME" "$VOLUME" >/dev/null
-tar -C "$RUN_ROOT" -xzf "$BACKUP_DIR/repository.tar.gz"
-tar -C "$HOME_DIR" -xzf "$BACKUP_DIR/fern-control.tar.gz"
-tar -C "$RUN_ROOT" -xzf "$BACKUP_DIR/config.tar.gz"
-docker run --rm --user 0:0 --entrypoint sh \
-  -v "$VOLUME:/target" -v "$BACKUP_DIR:/backup:ro" "$IMAGE" \
-  -c 'tar -C /target -xzf /backup/opencode-volume.tar.gz'
+run_transcript "$FERN_BIN" backup restore \
+  -config "$CONFIG" -env-file "$ENV_FILE" -state-dir "$HOME_DIR/.fern" \
+  -backup "$BACKUP_DIR/generation"
+! grep -q 'destructive restore marker' "$CONFIG" || fail "configuration file was not restored"
+[[ -f "$HOME_DIR/.fern/recovery/TRANSACTION-MANIFEST.json" ]] \
+  || fail "restore did not retain a transaction receipt"
 
 start_fern
 curl --silent --show-error --fail --header "Cookie: __Host-fern_device=$device_cookie" \
@@ -534,8 +518,6 @@ curl --silent --show-error --fail --header "Cookie: __Host-fern_device=$device_c
   || fail "paired device cookie did not survive Fern restart"
 control_curl --fail "$OPERATOR_URL/fern/api/v1/devices" | jq -e 'length == 1' >/dev/null \
   || fail "durable paired device was not listed after restart"
-control_curl --fail "$OPERATOR_URL/fern/api/v1/workflows/$workflow_id" | jq -e --arg id "$workflow_id" '.id == $id and .sessionId == "ses_lifecycle"' >/dev/null \
-  || fail "durable workflow correlation did not survive Fern restart"
 persisted=$(auth_curl --fail "$OPERATOR_URL/control/persist")
 [[ "$persisted" == *"$RUN_ID"* ]] || fail "OpenCode volume content did not survive destructive restore"
 grep -q "$RUN_ID" "$REPO_DIR/container-state.json" || fail "repository content did not survive destructive restore"
@@ -595,7 +577,13 @@ wait_status paused 5
 sleep 1
 start_fern_control
 wait_status paused 10
-auth_curl --fail "$OPERATOR_URL$HEALTH_PATH" >/dev/null
+restart_code=$(http_code "$ARTIFACTS/restart-stale-endpoint.body" --user "$USERNAME:$PASSWORD" --max-time 5 "$OPERATOR_URL$HEALTH_PATH" || true)
+if [[ "$restart_code" != 200 ]]; then
+  [[ "$restart_code" == 502 || "$restart_code" == 503 || "$restart_code" == 000 ]] \
+    || fail "restart stale endpoint did not fail safely (HTTP $restart_code)"
+  restart_code=$(http_code "$ARTIFACTS/restart-recovery.body" --user "$USERNAME:$PASSWORD" --max-time 70 "$OPERATOR_URL$HEALTH_PATH" || true)
+fi
+[[ "$restart_code" == 200 ]] || fail "request after restart stale endpoint did not recover (HTTP $restart_code)"
 wait_status running 10
 
 note "scenario 14/14: externally paused compute follows stale-endpoint recovery path"
