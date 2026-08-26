@@ -28,7 +28,7 @@ var baselineFileChecksums = map[string]string{
 	"control/2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea.json": "a839bb61730c650b833999fd11550f6f677c267f2e67f1ffcb14f0d34cd03b65",
 	"fern.yaml":                       "125be67c7eb7f0312b75eeea116f9c8570d43caca8838995ac589bcb7fa46923",
 	"github-app/app-credentials.json": "9dc22f33803ba3b4a5e945ba18d3c695fd1b95a6f1ed6a0e0d5f47318afabe27",
-	"metadata.json":                   "f7c04a11735db8574b315e1bf4d3e2da64cc81c52f67a401ddd9a838a5254356",
+	"metadata.json":                   "e5e511c4e9ca2e81a4583610cb86ac2c80ac2c9ab835cbaacb7f48c3d577f896",
 	"task-store.sqlite":               "2fb2541a99396b40e99704184e5a49fe44b8e31485bc5e32c26c9c4e82a03a38",
 }
 
@@ -75,7 +75,8 @@ func TestBaselineV1UpgradesWithoutSemanticLoss(t *testing.T) {
 	if metadata.Baseline != "baseline-v1" || metadata.SupportStatus != "first-supported-baseline" || metadata.Provenance.Kind != "repository-established" || metadata.Provenance.HistoricalRelease || metadata.Provenance.HistoricalTag != nil {
 		t.Fatalf("baseline provenance overstates release history: %+v", metadata)
 	}
-	if metadata.Schemas.TaskStore.FixtureVersion != 4 || metadata.Schemas.TaskStore.UpgradeTargetVersion != 5 || metadata.Schemas.ControlState != 1 || metadata.Schemas.GitHubAppCredentials != 1 {
+	currentSchema := taskstore.CurrentSchemaVersion()
+	if metadata.Schemas.TaskStore.FixtureVersion != 4 || metadata.Schemas.TaskStore.UpgradeTargetVersion != currentSchema || metadata.Schemas.ControlState != 1 || metadata.Schemas.GitHubAppCredentials != 1 {
 		t.Fatalf("unexpected baseline schema versions: %+v", metadata.Schemas)
 	}
 	if !reflect.DeepEqual(metadata.Schemas.TaskStore.MigrationLedger, baselineMigrationLedger) {
@@ -141,7 +142,19 @@ func TestBaselineV1UpgradesWithoutSemanticLoss(t *testing.T) {
 	upgradedDB := openReadOnlyDB(t, databasePath)
 	defer upgradedDB.Close()
 	assertDatabaseHealth(t, upgradedDB)
-	assertSchemaVersionAndLedger(t, upgradedDB, 6, currentMigrationLedger)
+	assertSchemaVersionAndLedger(t, upgradedDB, currentSchema, currentMigrationLedger)
+	if len(currentMigrationLedger) != currentSchema {
+		t.Fatalf("compatibility ledger has %d migrations, task store has %d", len(currentMigrationLedger), currentSchema)
+	}
+	var compatibility struct {
+		CurrentReleaseSchemas struct {
+			TaskStore int `json:"task_store"`
+		} `json:"current_release_schemas"`
+	}
+	decodeJSONFile(t, filepath.Join("..", "..", "deploy", "release", "compatibility-manifest.json"), &compatibility)
+	if compatibility.CurrentReleaseSchemas.TaskStore != currentSchema {
+		t.Fatalf("compatibility manifest task store schema = %d, want %d", compatibility.CurrentReleaseSchemas.TaskStore, currentSchema)
+	}
 
 	loadedConfig, err := config.Load(filepath.Join(copyRoot, "fern.yaml"), copyRoot, true, config.Overrides{})
 	if err != nil || loadedConfig.Tasks == nil || loadedConfig.Tasks.Budget.MaxTurns != 50 || loadedConfig.Workspace.GitHub == nil || loadedConfig.Workspace.GitHub.InstallationID != 123 {

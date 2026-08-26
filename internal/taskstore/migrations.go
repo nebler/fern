@@ -24,6 +24,9 @@ var migrations = []migration{
 	{version: 6, name: "publication_admission_receipts", sql: publicationAdmissionReceiptSchema},
 }
 
+// CurrentSchemaVersion is the schema produced by all migrations in this build.
+func CurrentSchemaVersion() int { return len(migrations) }
+
 const publicationAdmissionReceiptSchema = `
 ALTER TABLE publications ADD COLUMN admission_receipt_id TEXT
   REFERENCES receipts(id) ON UPDATE RESTRICT ON DELETE RESTRICT;

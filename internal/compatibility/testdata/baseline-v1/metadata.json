@@ -12,7 +12,7 @@
   "schemas": {
     "task_store": {
       "fixture_version": 4,
-      "upgrade_target_version": 5,
+      "upgrade_target_version": 6,
       "migration_ledger": [
         {"version": 1, "name": "initial_task_store", "sha256": "3ff013a514506ce2b74258c04c831178c5e0273cb50173a5a06b381939151d3d"},
         {"version": 2, "name": "execution_projection_and_results", "sha256": "68cf5e97208957d894d02fbe5254ce2f4738348c6fd8b1d2f5b2548b1a15141b"},

@@ -39,7 +39,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "upgrade verification failed: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Println("task store upgraded to schema 6 with durable state intact")
+	fmt.Printf("task store upgraded to schema %d with durable state intact\n", len(currentLedger))
 }
 
 func migrateAndVerify(path string) error {

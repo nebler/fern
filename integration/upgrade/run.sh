@@ -27,6 +27,7 @@ assert metadata["baseline"] == compatibility["first_supported_baseline"]["id"]
 assert metadata["provenance"]["historical_release"] is False
 assert metadata["provenance"]["historical_tag"] is None
 assert metadata["schemas"]["task_store"]["fixture_version"] == 4
+assert metadata["schemas"]["task_store"]["upgrade_target_version"] == compatibility["current_release_schemas"]["task_store"]
 for relative, expected in metadata["files"].items():
     actual = hashlib.sha256((root / relative).read_bytes()).hexdigest()
     assert actual == expected, relative
