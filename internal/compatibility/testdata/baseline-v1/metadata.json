@@ -1,0 +1,45 @@
+{
+  "format_version": 1,
+  "baseline": "baseline-v1",
+  "support_status": "first-supported-baseline",
+  "provenance": {
+    "kind": "repository-established",
+    "source_commit": "511258d1dbf206e4c1d4ee7031664b25144875bc",
+    "historical_release": false,
+    "historical_tag": null,
+    "note": "Established from repository state because no historical release tags exist; this is not evidence that an earlier shipped release used these bytes."
+  },
+  "schemas": {
+    "task_store": {
+      "fixture_version": 4,
+      "upgrade_target_version": 5,
+      "migration_ledger": [
+        {"version": 1, "name": "initial_task_store", "sha256": "3ff013a514506ce2b74258c04c831178c5e0273cb50173a5a06b381939151d3d"},
+        {"version": 2, "name": "execution_projection_and_results", "sha256": "68cf5e97208957d894d02fbe5254ce2f4738348c6fd8b1d2f5b2548b1a15141b"},
+        {"version": 3, "name": "verification_and_publication_journals", "sha256": "88b52b43bf12184bc54e6ffde5f21ed98888ec42026164ec9f3becfeb37f46b6"},
+        {"version": 4, "name": "user_authorized_snapshot_seals", "sha256": "218ec52d97faf9a95c1790230e47c22cad37d9974b2e8d9a118fe3935ebbf03b"},
+        {"version": 5, "name": "explicit_workspace_github_authority", "sha256": "675011d6037df1b806e78e0a98576c43a0594d6c21a3d54e9f10fb8c4017ec8d"}
+      ]
+    },
+    "control_state": 1,
+    "github_app_credentials": 1
+  },
+  "files": {
+    "control/2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea.json": "a839bb61730c650b833999fd11550f6f677c267f2e67f1ffcb14f0d34cd03b65",
+    "fern.yaml": "125be67c7eb7f0312b75eeea116f9c8570d43caca8838995ac589bcb7fa46923",
+    "github-app/app-credentials.json": "9dc22f33803ba3b4a5e945ba18d3c695fd1b95a6f1ed6a0e0d5f47318afabe27",
+    "task-store.sqlite": "2fb2541a99396b40e99704184e5a49fe44b8e31485bc5e32c26c9c4e82a03a38"
+  },
+  "semantic_state": {
+    "workspace": "demo",
+    "workspace_id": "wsp_0198d34d-6a50-75fb-b1f2-000000000001",
+    "github_authority_after_upgrade": "github-app-broker",
+    "task_id": "tsk_0198d34d-6a50-75fb-b1f2-00000000002a",
+    "attempt_id": "att_0198d34d-6a50-75fb-b1f2-00000000002a",
+    "receipt_id": "rcp_0198d34d-6a50-75fb-b1f2-00000000002a",
+    "event_count": 2,
+    "control_workflow_id": "workflow-baseline",
+    "control_publication_id": "publication-baseline",
+    "github_app_id": 4242
+  }
+}
