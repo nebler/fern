@@ -43,6 +43,24 @@ func TestCredentialStoreCreatesPrivateDirectoryAndRoundTrips(t *testing.T) {
 	assertStoredCredentials(t, got, want)
 }
 
+func TestStoredCredentialCandidateRoundTripsInMemory(t *testing.T) {
+	t.Parallel()
+	want := testStoredCredentials(t, 123, "candidate")
+	payload, err := MarshalStoredCredentials(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ParseStoredCredentials(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertStoredCredentials(t, got, want)
+	payload = append(payload, []byte(`{"tamper":true}`)...)
+	if _, err := ParseStoredCredentials(payload); !errors.Is(err, ErrStoredCredentialsInvalid) {
+		t.Fatalf("tampered candidate error = %v", err)
+	}
+}
+
 func TestCredentialStoreRejectsUnsafePermissionsAndTypes(t *testing.T) {
 	t.Parallel()
 	t.Run("directory permissions", func(t *testing.T) {

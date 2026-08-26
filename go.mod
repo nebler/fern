@@ -3,6 +3,7 @@ module github.com/nebler/fern
 go 1.24.0
 
 require (
+	filippo.io/age v1.2.1
 	github.com/docker/docker v28.0.1+incompatible
 	github.com/docker/go-connections v0.5.0
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
@@ -32,6 +33,7 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	go.opentelemetry.io/otel/metric v1.31.0 // indirect
 	go.opentelemetry.io/otel/sdk v1.31.0 // indirect
+	golang.org/x/crypto v0.24.0 // indirect
 	golang.org/x/exp v0.0.0-20250620022241-b7579e27df2b // indirect
 	gotest.tools/v3 v3.5.2 // indirect
 	modernc.org/libc v1.66.10 // indirect

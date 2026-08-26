@@ -32,7 +32,6 @@ var (
 // with mode 0600, and refuses symlinks or less restrictive filesystem objects.
 //
 // This store provides filesystem-permission protection, not encryption at rest.
-// Credential backup and rotation are intentionally not implemented.
 type CredentialStore struct {
 	directory string
 }
@@ -75,20 +74,9 @@ func (store *CredentialStore) Save(credentials AppCredentials) error {
 		return ErrStoredCredentialsInvalid
 	}
 
-	payload, err := json.Marshal(storedCredentialFile{
-		Version:       credentialStoreVersion,
-		AppID:         credentials.appID,
-		ClientID:      credentials.clientID,
-		ClientSecret:  credentials.clientSecret,
-		WebhookSecret: credentials.webhookSecret,
-		PrivateKeyPEM: string(credentials.privateKeyPEM),
-	})
+	payload, err := MarshalStoredCredentials(credentials)
 	if err != nil {
-		return ErrStoredCredentialsInvalid
-	}
-	payload = append(payload, '\n')
-	if len(payload) > maxCredentialFileBytes {
-		return ErrStoredCredentialsInvalid
+		return err
 	}
 
 	directory, err := openCredentialDirectory(store.directory)
@@ -141,6 +129,30 @@ func (store *CredentialStore) Save(credentials AppCredentials) error {
 	return nil
 }
 
+// MarshalStoredCredentials returns the strict store representation for direct
+// encryption. Callers must not persist the returned plaintext.
+func MarshalStoredCredentials(credentials AppCredentials) ([]byte, error) {
+	if _, err := validateStoredCredentialValues(credentials.appID, credentials.clientID, credentials.clientSecret, credentials.webhookSecret, credentials.privateKeyPEM); err != nil {
+		return nil, ErrStoredCredentialsInvalid
+	}
+	payload, err := json.Marshal(storedCredentialFile{
+		Version:       credentialStoreVersion,
+		AppID:         credentials.appID,
+		ClientID:      credentials.clientID,
+		ClientSecret:  credentials.clientSecret,
+		WebhookSecret: credentials.webhookSecret,
+		PrivateKeyPEM: string(credentials.privateKeyPEM),
+	})
+	if err != nil {
+		return nil, ErrStoredCredentialsInvalid
+	}
+	payload = append(payload, '\n')
+	if len(payload) > maxCredentialFileBytes {
+		return nil, ErrStoredCredentialsInvalid
+	}
+	return payload, nil
+}
+
 // Load reads and validates the complete committed credential file.
 func (store *CredentialStore) Load() (AppCredentials, error) {
 	if store == nil || store.directory == "" {
@@ -177,6 +189,14 @@ func (store *CredentialStore) Load() (AppCredentials, error) {
 	if err != nil {
 		return AppCredentials{}, ErrCredentialStoreIO
 	}
+	if len(payload) > maxCredentialFileBytes {
+		return AppCredentials{}, ErrStoredCredentialsInvalid
+	}
+	return ParseStoredCredentials(payload)
+}
+
+// ParseStoredCredentials strictly validates a decrypted in-memory candidate.
+func ParseStoredCredentials(payload []byte) (AppCredentials, error) {
 	if len(payload) > maxCredentialFileBytes {
 		return AppCredentials{}, ErrStoredCredentialsInvalid
 	}
