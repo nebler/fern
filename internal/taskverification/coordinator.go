@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 	"github.com/nebler/fern/internal/verification"
@@ -119,21 +120,26 @@ func durableRunnerVersion(snapshot verification.RunnerSnapshot) string {
 }
 
 func (c *Coordinator) Run(ctx context.Context) error {
-	timer := time.NewTimer(0)
-	defer timer.Stop()
+	retry := observability.NewRetry(c.config.PollInterval, 30*time.Second)
+	var delay time.Duration
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timer.C:
+		if err := observability.Wait(ctx, nil, delay); err != nil {
+			return err
 		}
+		failed := false
 		if err := c.RunOnce(ctx); err != nil && !errors.Is(err, ErrNoWork) {
 			if errors.Is(err, taskstore.ErrCorruptStore) {
 				return err
 			}
 			c.config.OnError(err)
+			failed = true
 		}
-		timer.Reset(c.config.PollInterval)
+		if failed {
+			delay = retry.Next()
+		} else {
+			retry.Reset()
+			delay = c.config.PollInterval
+		}
 	}
 }
 

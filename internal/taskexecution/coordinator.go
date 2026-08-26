@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/opencodeapi"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
@@ -100,21 +101,26 @@ func New(store Store, targets TargetAcquirer, clients ClientFactory, ids *task.G
 }
 
 func (coordinator *Coordinator) Run(ctx context.Context) error {
-	timer := time.NewTimer(0)
-	defer timer.Stop()
+	retry := observability.NewRetry(coordinator.config.PollInterval, 30*time.Second)
+	var delay time.Duration
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-timer.C:
+		if err := observability.Wait(ctx, nil, delay); err != nil {
+			return err
 		}
+		failed := false
 		if err := coordinator.RunOnce(ctx); err != nil && !errors.Is(err, ErrNoWork) && !errors.Is(err, ErrObservationOpen) {
 			if errors.Is(err, taskstore.ErrCorruptStore) {
 				return err
 			}
 			coordinator.config.OnError(err)
+			failed = true
 		}
-		timer.Reset(coordinator.config.PollInterval)
+		if failed {
+			delay = retry.Next()
+		} else {
+			retry.Reset()
+			delay = coordinator.config.PollInterval
+		}
 	}
 }
 

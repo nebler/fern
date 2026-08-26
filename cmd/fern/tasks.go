@@ -16,6 +16,7 @@ import (
 
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/githubapp"
+	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskapi"
@@ -384,15 +385,13 @@ func newVerificationCoordinator(store *taskstore.Store, manager *workspace.Manag
 }
 
 func runTaskResultCoordinator(ctx context.Context, service *taskServices, log *slog.Logger, workspaceName string) error {
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
+	retry := observability.NewRetry(taskPollInterval, 30*time.Second)
+	var delay time.Duration
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-service.resultWake:
-		case <-ticker.C:
+		if err := observability.Wait(ctx, service.resultWake, delay); err != nil {
+			return err
 		}
+		failed := false
 		for {
 			err := service.result.RunOnce(ctx)
 			if err == nil {
@@ -404,8 +403,18 @@ func runTaskResultCoordinator(ctx context.Context, service *taskServices, log *s
 			if errors.Is(err, context.Canceled) {
 				return err
 			}
+			if errors.Is(err, taskstore.ErrCorruptStore) {
+				return err
+			}
 			log.Error("user-authorized result sealing deferred", "err", err, "workspace", workspaceName)
+			failed = true
 			break
+		}
+		if failed {
+			delay = retry.Next()
+		} else {
+			retry.Reset()
+			delay = taskPollInterval
 		}
 	}
 }
