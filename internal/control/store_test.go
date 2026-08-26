@@ -3,8 +3,10 @@ package control
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -341,6 +343,100 @@ func TestLegacyPublicationsRemainReadableWithoutMigration(t *testing.T) {
 	unchanged, err := os.ReadFile(path)
 	if err != nil || !bytes.Equal(unchanged, []byte(data)) {
 		t.Fatalf("legacy load rewrote state: err=%v", err)
+	}
+}
+
+func TestQuarantineLegacyPublicationsIsExplicitAtomicAndIdempotent(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "control")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	quarantinedAt := time.Date(2026, 8, 26, 12, 30, 0, 0, time.UTC)
+	alreadyQuarantined := Publication{
+		ID: "already", WorkflowID: "wf", State: PublicationQuarantined, Operation: "op", Title: "old",
+		OriginalState: PublicationFailed, QuarantinedAt: created.Add(time.Hour), QuarantineReason: LegacyPublicationQuarantineReason,
+		CreatedAt: created, UpdatedAt: created.Add(time.Hour),
+	}
+	published := Publication{
+		ID: "published", WorkflowID: "wf", State: PublicationPublished, Operation: "op", Title: "published",
+		PullURL: "https://github.com/owner/repo/pull/1", CreatedAt: created, UpdatedAt: created,
+	}
+	state := diskState{
+		Version: schemaVersion, Workspace: "demo", Devices: map[string]Device{}, Workflows: map[string]Workflow{},
+		Publications: map[string]Publication{
+			"legacy-requested":  {ID: "legacy-requested", WorkflowID: "wf", State: PublicationRequested, Operation: "one", Title: "one", CreatedAt: created, UpdatedAt: created},
+			"current-requested": {SchemaVersion: PublicationSchemaVersion, ID: "current-requested", WorkflowID: "wf", State: PublicationRequested, Operation: "two", Title: "two", CreatedAt: created, UpdatedAt: created},
+			"legacy-pushing":    {ID: "legacy-pushing", WorkflowID: "wf", State: PublicationPrepared, Operation: "three", Title: "three", Repository: "owner/repo", Base: "main", Branch: "fern/demo/three", Commit: strings.Repeat("a", 40), CreatedAt: created, UpdatedAt: created},
+			"legacy-failed":     {ID: "legacy-failed", WorkflowID: "wf", State: PublicationFailed, Operation: "four", Title: "four", Error: "old failure", CreatedAt: created, UpdatedAt: created},
+			"published":         published,
+			"already":           alreadyQuarantined,
+		},
+	}
+	data, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, tokenHash("demo")+".json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(directory, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !store.HasUnquarantinedLegacyPublications() {
+		t.Fatal("unresolved legacy publications were not detected")
+	}
+	changed, err := store.QuarantineLegacyPublications(quarantinedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed) != 4 {
+		t.Fatalf("quarantined %d records, want 4: %+v", len(changed), changed)
+	}
+	wantIDs := []string{"current-requested", "legacy-failed", "legacy-pushing", "legacy-requested"}
+	for index, publication := range changed {
+		if publication.ID != wantIDs[index] || publication.State != PublicationQuarantined || publication.OriginalState == "" || publication.QuarantinedAt != quarantinedAt || publication.QuarantineReason != LegacyPublicationQuarantineReason || publication.UpdatedAt != quarantinedAt {
+			t.Fatalf("quarantined[%d] = %+v", index, publication)
+		}
+	}
+	if store.HasUnquarantinedLegacyPublications() {
+		t.Fatal("quarantined records still block readiness")
+	}
+	gotPublished, _ := store.Publication("published")
+	gotAlready, _ := store.Publication("already")
+	if !reflect.DeepEqual(gotPublished, published) || !reflect.DeepEqual(gotAlready, alreadyQuarantined) {
+		t.Fatalf("terminal records changed: published=%+v already=%+v", gotPublished, gotAlready)
+	}
+	firstWrite, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed, err := store.QuarantineLegacyPublications(quarantinedAt.Add(time.Hour)); err != nil || len(changed) != 0 {
+		t.Fatalf("idempotent quarantine = %+v, %v", changed, err)
+	}
+	secondWrite, err := os.ReadFile(path)
+	if err != nil || !bytes.Equal(firstWrite, secondWrite) {
+		t.Fatalf("idempotent quarantine rewrote state: err=%v", err)
+	}
+	reopened, err := Open(directory, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current, _ := reopened.Publication("current-requested")
+	if current.SchemaVersion != PublicationSchemaVersion || current.State != PublicationQuarantined || current.OriginalState != PublicationRequested {
+		t.Fatalf("reopened current record = %+v", current)
+	}
+}
+
+func TestQuarantineLegacyPublicationsRejectsMissingTimestampWithoutMutation(t *testing.T) {
+	store, err := Open(filepath.Join(t.TempDir(), "control"), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.QuarantineLegacyPublications(time.Time{}); err == nil {
+		t.Fatal("quarantine accepted a zero timestamp")
 	}
 }
 

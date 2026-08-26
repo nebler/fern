@@ -82,13 +82,16 @@ type Publication struct {
 	Branch             string                  `json:"branch,omitempty"`
 	PullRequest        *PullRequestObservation `json:"pullRequest,omitempty"`
 	// Legacy fields are retained only so old terminal records remain displayable.
-	Base       string    `json:"base,omitempty"`
-	Repository string    `json:"repository,omitempty"`
-	Commit     string    `json:"commit,omitempty"`
-	PullURL    string    `json:"pullUrl,omitempty"`
-	Error      string    `json:"error,omitempty"`
-	CreatedAt  time.Time `json:"createdAt"`
-	UpdatedAt  time.Time `json:"updatedAt"`
+	Base             string    `json:"base,omitempty"`
+	Repository       string    `json:"repository,omitempty"`
+	Commit           string    `json:"commit,omitempty"`
+	PullURL          string    `json:"pullUrl,omitempty"`
+	Error            string    `json:"error,omitempty"`
+	CreatedAt        time.Time `json:"createdAt"`
+	UpdatedAt        time.Time `json:"updatedAt"`
+	OriginalState    string    `json:"originalState,omitempty"`
+	QuarantinedAt    time.Time `json:"quarantinedAt,omitempty"`
+	QuarantineReason string    `json:"quarantineReason,omitempty"`
 }
 
 // PreparedPublication is the resolved repository tuple recorded before any
@@ -128,10 +131,13 @@ type PullRequestObservation struct {
 
 // Publication lifecycle states persisted on every publication record.
 const (
-	PublicationRequested = "requested"
-	PublicationPrepared  = "pushing"
-	PublicationFailed    = "failed"
-	PublicationPublished = "published"
+	PublicationRequested   = "requested"
+	PublicationPrepared    = "pushing"
+	PublicationFailed      = "failed"
+	PublicationPublished   = "published"
+	PublicationQuarantined = "quarantined"
+
+	LegacyPublicationQuarantineReason = "legacy control publication retired; external effects were not resumed"
 )
 
 // diskState is the durable control file. The strict loader treats absent
@@ -719,6 +725,63 @@ func (store *Store) Publications() []Publication {
 	return result
 }
 
+// HasUnquarantinedLegacyPublications reports whether retired control-plane
+// publication work still needs an explicit offline operator decision.
+func (store *Store) HasUnquarantinedLegacyPublications() bool {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	for _, publication := range store.data.Publications {
+		if unresolvedLegacyPublication(publication) {
+			return true
+		}
+	}
+	return false
+}
+
+// QuarantineLegacyPublications atomically retires unresolved control-plane
+// publication records without attempting or inferring any external effect.
+// Published records are audit evidence and are never changed. Repeated calls
+// return no records and do not rewrite the state file.
+func (store *Store) QuarantineLegacyPublications(now time.Time) ([]Publication, error) {
+	if now.IsZero() {
+		return nil, errors.New("quarantine time is required")
+	}
+	now = now.UTC()
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	originals := make(map[string]Publication)
+	quarantined := make([]Publication, 0)
+	for id, publication := range store.data.Publications {
+		if !unresolvedLegacyPublication(publication) {
+			continue
+		}
+		originals[id] = publication
+		publication.OriginalState = publication.State
+		publication.State = PublicationQuarantined
+		publication.QuarantinedAt = now
+		publication.QuarantineReason = LegacyPublicationQuarantineReason
+		publication.UpdatedAt = now
+		store.data.Publications[id] = publication
+		quarantined = append(quarantined, publication)
+	}
+	if len(quarantined) == 0 {
+		return nil, nil
+	}
+	if err := store.commitLocked(func() {
+		for id, publication := range originals {
+			store.data.Publications[id] = publication
+		}
+	}); err != nil {
+		return nil, err
+	}
+	sort.Slice(quarantined, func(i, j int) bool { return quarantined[i].ID < quarantined[j].ID })
+	return quarantined, nil
+}
+
+func unresolvedLegacyPublication(publication Publication) bool {
+	return publication.State == PublicationRequested || publication.State == PublicationPrepared || publication.State == PublicationFailed
+}
+
 func validWorkflowStatus(status WorkflowStatus) bool {
 	switch status {
 	case WorkflowRecorded, WorkflowWorking, WorkflowWaitingForApproval, WorkflowCompleted, WorkflowPublicationRequested, WorkflowPublished, WorkflowFailed:
@@ -790,6 +853,16 @@ func validCurrentPublication(publication Publication) bool {
 	}
 	switch publication.State {
 	case PublicationRequested, PublicationPrepared, PublicationFailed, PublicationPublished:
+		if publication.OriginalState != "" || !publication.QuarantinedAt.IsZero() || publication.QuarantineReason != "" {
+			return false
+		}
+	case PublicationQuarantined:
+		if publication.OriginalState != PublicationRequested && publication.OriginalState != PublicationPrepared && publication.OriginalState != PublicationFailed {
+			return false
+		}
+		if publication.QuarantinedAt.IsZero() || publication.QuarantineReason != LegacyPublicationQuarantineReason {
+			return false
+		}
 	default:
 		return false
 	}
@@ -801,7 +874,7 @@ func validCurrentPublication(publication Publication) bool {
 	if hasPrepared && validatePreparedPublication(prepared) != nil {
 		return false
 	}
-	if publication.State == PublicationRequested && hasPrepared || publication.State == PublicationPrepared && !hasPrepared {
+	if publication.State == PublicationRequested && hasPrepared || publication.State == PublicationPrepared && !hasPrepared || publication.State == PublicationQuarantined && publication.OriginalState == PublicationRequested && hasPrepared || publication.State == PublicationQuarantined && publication.OriginalState == PublicationPrepared && !hasPrepared {
 		return false
 	}
 	if publication.PullRequest != nil {
