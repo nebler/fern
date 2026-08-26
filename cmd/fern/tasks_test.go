@@ -2,7 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"io"
 	"log/slog"
@@ -16,6 +20,7 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/config"
+	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/task"
@@ -45,6 +50,94 @@ func TestTaskServicesRequireExplicitGitHubAuthorityBeforeRuntimeAccess(t *testin
 	}}
 	if _, err := newTaskServices(context.Background(), cfg, nil, nil, structServerAuth(), observability.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
 		t.Fatal("task service accepted no GitHub authority")
+	}
+}
+
+func TestResolveGitHubAuthorityDefersRemoteValidationToOperations(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	installTaskAppCredentials(t)
+	github := &config.WorkspaceGitHub{
+		Mode: config.GitHubModeGitHubAppBroker, InstallationID: 123,
+		Repository: config.GitHubRepository{ID: 456, FullName: "owner/repository"},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	authority, err := resolveGitHubAuthority(github, nil, nil, "demo")
+	if err != nil {
+		t.Fatalf("composition used canceled remote context: %v", err)
+	}
+	if authority.kind != taskstore.GitHubAuthorityAppBroker || authority.baseResolver == nil || authority.repositories == nil {
+		t.Fatalf("authority = %+v", authority)
+	}
+	if _, err := authority.baseResolver(ctx, "main"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("runtime repository read error = %v", err)
+	}
+}
+
+func TestResolveGitHubAuthorityRejectsMalformedLocalCredentials(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	directory, err := statePath("github-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := githubapp.NewCredentialStore(directory); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, "app-credentials.json"), []byte(`{"version":1}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	github := &config.WorkspaceGitHub{
+		Mode: config.GitHubModeGitHubAppBroker, InstallationID: 123,
+		Repository: config.GitHubRepository{ID: 456, FullName: "owner/repository"},
+	}
+	if _, err := resolveGitHubAuthority(github, nil, nil, "demo"); !errors.Is(err, githubapp.ErrStoredCredentialsInvalid) || errors.Is(err, githubapp.ErrCredentialsNotFound) {
+		t.Fatalf("malformed credential error = %v", err)
+	}
+}
+
+func TestMissingAppCredentialsBlockTasksButKeepOnboardingAvailable(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]string{"Id": taskServiceTestImageID})
+	}))
+	defer server.Close()
+	t.Setenv("DOCKER_HOST", "tcp://"+strings.TrimPrefix(server.URL, "http://"))
+	t.Setenv("DOCKER_API_VERSION", "1.48")
+	docker, err := runtime.NewDocker(slog.New(slog.NewTextHandler(io.Discard, nil)), taskServiceIntentStore{}, runtime.SuspendStop)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer docker.Close()
+	cfg := config.Config{
+		RemoteOrigin: "https://fern.example.ts.net", OperatorListen: "127.0.0.1:8081",
+		Workspace: config.Workspace{Name: "blocked-tasks", Image: "image:test", Repo: t.TempDir(), GitHub: &config.WorkspaceGitHub{
+			Mode: config.GitHubModeGitHubAppBroker, InstallationID: 123,
+			Repository: config.GitHubRepository{ID: 456, FullName: "owner/repository"},
+		}},
+		Tasks: &config.TaskPolicy{Agent: "build", Model: config.TaskModel{Provider: "fixture", ID: "fixture-model"},
+			AttemptTimeout: time.Hour, LeaseDuration: time.Minute, Budget: config.TaskBudget{MaxTurns: 10}},
+	}
+	status := observability.NewRegistry()
+	services, err := newTaskServices(context.Background(), cfg, docker, nil, structServerAuth(), status, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if services != nil || !errors.Is(err, githubapp.ErrCredentialsNotFound) {
+		t.Fatalf("services=%v error=%v", services, err)
+	}
+	snapshot := status.Snapshot()
+	dependency := snapshot.Components[0]
+	foundDependency := false
+	for _, component := range snapshot.Components {
+		if component.Component == observability.ComponentGitHubTaskDependency {
+			dependency = component
+			foundDependency = true
+			break
+		}
+	}
+	if !foundDependency || snapshot.Ready || dependency.State != observability.StateBlocked || dependency.Ready {
+		t.Fatalf("missing credential snapshot = %+v", snapshot)
+	}
+	if onboarding, err := newGitHubOnboarding(cfg); err != nil || onboarding == nil {
+		t.Fatalf("onboarding=%v error=%v", onboarding, err)
 	}
 }
 
@@ -204,6 +297,41 @@ func TestPublicationCoordinatorIsAbsentForWorkspaceGH(t *testing.T) {
 	}, "", "", nil, task.ActorSnapshot{}, nil, nil, nil, nil, nil)
 	if err != nil || coordinator != nil {
 		t.Fatalf("workspace-gh publication coordinator = %v, %v", coordinator, err)
+	}
+}
+
+func installTaskAppCredentials(t *testing.T) {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateKey := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	payload, err := json.Marshal(struct {
+		Version       int    `json:"version"`
+		AppID         int64  `json:"app_id"`
+		ClientID      string `json:"client_id"`
+		ClientSecret  string `json:"client_secret"`
+		WebhookSecret string `json:"webhook_secret"`
+		PrivateKeyPEM string `json:"private_key_pem"`
+	}{1, 789, "client-id", "client-secret", "", string(privateKey)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	credentials, err := githubapp.ParseStoredCredentials(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory, err := statePath("github-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := githubapp.NewCredentialStore(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(credentials); err != nil {
+		t.Fatal(err)
 	}
 }
 

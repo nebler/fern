@@ -27,6 +27,12 @@ func TestRegistryIsFixedCardinalityAndSanitizesFailures(t *testing.T) {
 	if !registry.Snapshot().Ready {
 		t.Fatal("degraded component made service unready")
 	}
+	registry.Blocked(ComponentGitHubTaskDependency, errors.New(secret))
+	blocked := registry.Snapshot()
+	if blocked.Ready || blocked.Components[componentIndexForTest(ComponentGitHubTaskDependency)].State != StateBlocked {
+		t.Fatalf("blocked dependency snapshot = %+v", blocked)
+	}
+	registry.Healthy(ComponentGitHubTaskDependency)
 	registry.Failed(ComponentTaskDelivery, errors.New(secret))
 	if registry.Snapshot().Ready {
 		t.Fatal("failed component left service ready")
@@ -35,6 +41,11 @@ func TestRegistryIsFixedCardinalityAndSanitizesFailures(t *testing.T) {
 	if !registry.Snapshot().Ready {
 		t.Fatal("healthy recovery left service unready")
 	}
+}
+
+func componentIndexForTest(component Component) int {
+	index, _ := componentIndex(component)
+	return index
 }
 
 func TestRegistryConcurrentUpdatesAndSnapshots(t *testing.T) {

@@ -10,7 +10,15 @@ import (
 )
 
 type fakeReferenceReader struct {
-	read func(context.Context, githubapp.RepositoryIdentity, string, string) (githubapp.GitReferenceObservation, error)
+	repository func(context.Context, githubapp.RepositoryIdentity, string) (githubapp.RepositoryObservation, error)
+	read       func(context.Context, githubapp.RepositoryIdentity, string, string) (githubapp.GitReferenceObservation, error)
+}
+
+func (reader fakeReferenceReader) RepositoryByID(ctx context.Context, identity githubapp.RepositoryIdentity, fullName string) (githubapp.RepositoryObservation, error) {
+	if reader.repository == nil {
+		return githubapp.RepositoryObservation{}, nil
+	}
+	return reader.repository(ctx, identity, fullName)
 }
 
 func (reader fakeReferenceReader) BranchReference(ctx context.Context, identity githubapp.RepositoryIdentity, fullName, ref string) (githubapp.GitReferenceObservation, error) {
@@ -25,9 +33,19 @@ func TestGitHubBaseResolverUsesBoundedExactObservation(t *testing.T) {
 	}
 	// An observation can only be constructed by the GitHub client, so use a
 	// real client contract test for success and keep adapter failures closed.
-	reader := fakeReferenceReader{read: func(ctx context.Context, got githubapp.RepositoryIdentity, fullName, ref string) (githubapp.GitReferenceObservation, error) {
+	repositoryRead := false
+	reader := fakeReferenceReader{repository: func(ctx context.Context, got githubapp.RepositoryIdentity, fullName string) (githubapp.RepositoryObservation, error) {
+		if _, ok := ctx.Deadline(); !ok || got != identity || fullName != "owner/repo" {
+			t.Fatal("resolver did not preserve bounded repository authority")
+		}
+		repositoryRead = true
+		return githubapp.RepositoryObservation{}, nil
+	}, read: func(ctx context.Context, got githubapp.RepositoryIdentity, fullName, ref string) (githubapp.GitReferenceObservation, error) {
 		if _, ok := ctx.Deadline(); !ok || got != identity || fullName != "owner/repo" || ref != "main" {
 			t.Fatal("resolver did not preserve bounded authority")
+		}
+		if !repositoryRead {
+			t.Fatal("branch read preceded exact repository validation")
 		}
 		return githubapp.GitReferenceObservation{}, errors.New("unavailable")
 	}}

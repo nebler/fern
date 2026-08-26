@@ -124,7 +124,7 @@ func (coordinator *Coordinator) Run(ctx context.Context) error {
 			if err == nil {
 				continue
 			}
-			if !errors.Is(err, ErrNoWork) && !errors.Is(err, ErrReconciliationPending) {
+			if !errors.Is(err, ErrNoWork) {
 				if errors.Is(err, taskstore.ErrCorruptStore) {
 					return err
 				}

@@ -74,6 +74,14 @@ func (registry *Registry) MetricsHandler() http.Handler {
 			}
 			_, _ = fmt.Fprintf(writer, "fern_component_degraded{component=%q} %d\n", status.Component, value)
 		}
+		_, _ = fmt.Fprint(writer, "# HELP fern_component_blocked Whether a fixed Fern component is waiting for a required dependency.\n# TYPE fern_component_blocked gauge\n")
+		for _, status := range snapshot.Components {
+			value := 0
+			if status.State == StateBlocked {
+				value = 1
+			}
+			_, _ = fmt.Fprintf(writer, "fern_component_blocked{component=%q} %d\n", status.Component, value)
+		}
 		_, _ = fmt.Fprint(writer, "# HELP fern_component_failures_total Total observed failures for a fixed Fern component.\n# TYPE fern_component_failures_total counter\n")
 		for _, status := range snapshot.Components {
 			_, _ = fmt.Fprintf(writer, "fern_component_failures_total{component=%q} %d\n", status.Component, status.FailuresTotal)

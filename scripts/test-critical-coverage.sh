@@ -58,7 +58,6 @@ check_package internal/taskresultcoord 83
 check_package internal/taskstore 70
 
 check_function cmd/fern/tasks.go newTaskServices 65
-check_function cmd/fern/up.go reconcileTaskPublication 90
 check_function cmd/fern/up.go startTaskCoordinators 90
 check_function cmd/fern/up.go awaitShutdown 85
 check_function internal/taskdelivery/coordinator.go RunOnce 80

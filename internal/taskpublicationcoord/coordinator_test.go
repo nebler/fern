@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskpublication"
 	"github.com/nebler/fern/internal/taskstore"
@@ -524,6 +525,37 @@ func TestUncertainReconciliationRepeatsReadsOnlyAndEvidenceIsSanitized(t *testin
 		if bytes.Contains(payload, []byte("secret-output-marker")) {
 			t.Fatalf("error/output leaked to evidence: %s", payload)
 		}
+	}
+}
+
+func TestRunImmediatelyTracksPendingReconciliationAsDegraded(t *testing.T) {
+	store, publisher, coordinator := testCoordinator(t, taskstore.PublicationPhasePushStarted)
+	publisher.branchErr = errors.New("GitHub unavailable")
+	status := observability.NewRegistry()
+	ctx, cancel := context.WithCancel(context.Background())
+	coordinator.config.OnError = func(err error) {
+		status.Degraded(observability.ComponentTaskPublication, err)
+		cancel()
+	}
+	coordinator.config.OnSuccess = func() { status.Healthy(observability.ComponentTaskPublication) }
+
+	err := coordinator.Run(ctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("run error = %v", err)
+	}
+	snapshot := status.Snapshot()
+	publicationState := observability.StateDisabled
+	for _, component := range snapshot.Components {
+		if component.Component == observability.ComponentTaskPublication {
+			publicationState = component.State
+			break
+		}
+	}
+	if !snapshot.Ready || publicationState != observability.StateDegraded {
+		t.Fatalf("transient publication snapshot = %+v", snapshot)
+	}
+	if publisher.reconcileBranches != 2 || store.work.Publication.State != taskstore.PublicationUncertain {
+		t.Fatalf("reads=%d publication=%+v", publisher.reconcileBranches, store.work.Publication)
 	}
 }
 

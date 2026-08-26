@@ -19,7 +19,6 @@ import (
 	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/proxy"
 	"github.com/nebler/fern/internal/runtime"
-	"github.com/nebler/fern/internal/taskpublicationcoord"
 	"github.com/nebler/fern/internal/watch"
 	"github.com/nebler/fern/internal/workspace"
 	"golang.org/x/sync/errgroup"
@@ -311,11 +310,6 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 		Handler: handlers.Operator, ReadHeaderTimeout: 10 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return serviceCtx },
 	}
-	if tasks != nil && tasks.publication != nil {
-		if err := reconcileTaskPublication(serviceCtx, tasks.publication); err != nil {
-			return nil, abortAfterTasks(err)
-		}
-	}
 	return &upRuntime{
 		lifecycle: lifecycle, streamController: streamController,
 		supervisor: &watch.Supervisor{IdleAfter: cfg.IdleAfter, OnPause: func(ctx context.Context) error {
@@ -374,21 +368,6 @@ func requestObservation(serviceCtx context.Context, observations chan<- watch.Ob
 		case <-handled:
 		case <-serviceCtx.Done():
 		}
-	}
-}
-
-// reconcileTaskPublication drains pending publication work once, before the
-// long-lived coordinators start, so served state is never stale.
-func reconcileTaskPublication(ctx context.Context, coordinator interface{ RunOnce(context.Context) error }) error {
-	for {
-		err := coordinator.RunOnce(ctx)
-		if err == nil {
-			continue
-		}
-		if errors.Is(err, taskpublicationcoord.ErrNoWork) || errors.Is(err, taskpublicationcoord.ErrReconciliationPending) {
-			return nil
-		}
-		return err
 	}
 }
 

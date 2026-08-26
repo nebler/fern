@@ -10,6 +10,7 @@ import (
 )
 
 type GitHubReferenceReader interface {
+	RepositoryByID(context.Context, githubapp.RepositoryIdentity, string) (githubapp.RepositoryObservation, error)
 	BranchReference(context.Context, githubapp.RepositoryIdentity, string, string) (githubapp.GitReferenceObservation, error)
 }
 
@@ -22,6 +23,9 @@ func GitHubBaseResolver(reader GitHubReferenceReader, identity githubapp.Reposit
 	return func(parent context.Context, baseRef string) (task.GitOID, error) {
 		ctx, cancel := context.WithTimeout(parent, timeout)
 		defer cancel()
+		if _, err := reader.RepositoryByID(ctx, identity, fullName); err != nil {
+			return "", err
+		}
 		observation, err := reader.BranchReference(ctx, identity, fullName, baseRef)
 		if err != nil {
 			return "", err

@@ -8,14 +8,15 @@ import (
 type Component string
 
 const (
-	ComponentRuntime           Component = "runtime"
-	ComponentSupervisor        Component = "supervisor"
-	ComponentTaskDelivery      Component = "task-delivery"
-	ComponentTaskExecution     Component = "task-execution"
-	ComponentTaskResult        Component = "task-result"
-	ComponentTaskPublication   Component = "task-publication"
-	ComponentTaskVerification  Component = "task-verification"
-	ComponentLegacyPublication Component = "legacy-publication"
+	ComponentRuntime              Component = "runtime"
+	ComponentSupervisor           Component = "supervisor"
+	ComponentTaskDelivery         Component = "task-delivery"
+	ComponentTaskExecution        Component = "task-execution"
+	ComponentTaskResult           Component = "task-result"
+	ComponentTaskPublication      Component = "task-publication"
+	ComponentTaskVerification     Component = "task-verification"
+	ComponentGitHubTaskDependency Component = "github-task-dependency"
+	ComponentLegacyPublication    Component = "legacy-publication"
 )
 
 var components = [...]Component{
@@ -26,6 +27,7 @@ var components = [...]Component{
 	ComponentTaskResult,
 	ComponentTaskPublication,
 	ComponentTaskVerification,
+	ComponentGitHubTaskDependency,
 	ComponentLegacyPublication,
 }
 
@@ -35,6 +37,7 @@ const (
 	StateDisabled State = "disabled"
 	StateHealthy  State = "healthy"
 	StateDegraded State = "degraded"
+	StateBlocked  State = "blocked"
 	StateFailed   State = "failed"
 )
 
@@ -79,6 +82,10 @@ func (registry *Registry) Degraded(component Component, _ error) bool {
 	return registry.update(component, StateDegraded, nil)
 }
 
+func (registry *Registry) Blocked(component Component, _ error) bool {
+	return registry.update(component, StateBlocked, nil)
+}
+
 func (registry *Registry) Failed(component Component, _ error) bool {
 	return registry.update(component, StateFailed, nil)
 }
@@ -91,7 +98,7 @@ func (registry *Registry) update(component Component, state State, _ error) bool
 	registry.mu.Lock()
 	defer registry.mu.Unlock()
 	status := &registry.status[index]
-	if state == StateDegraded || state == StateFailed {
+	if state == StateDegraded || state == StateBlocked || state == StateFailed {
 		status.ConsecutiveFailures++
 		status.FailuresTotal++
 	} else {
@@ -100,6 +107,8 @@ func (registry *Registry) update(component Component, state State, _ error) bool
 	detail := ""
 	if state == StateDegraded {
 		detail = "transient operation failure"
+	} else if state == StateBlocked {
+		detail = "required dependency unavailable"
 	} else if state == StateFailed {
 		detail = "fatal component failure"
 	}
@@ -107,7 +116,7 @@ func (registry *Registry) update(component Component, state State, _ error) bool
 		status.LastTransition = registry.now().UTC()
 	}
 	status.State = state
-	status.Ready = state != StateFailed
+	status.Ready = state != StateBlocked && state != StateFailed
 	status.Detail = detail
 	return true
 }

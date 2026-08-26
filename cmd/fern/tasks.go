@@ -54,8 +54,7 @@ const (
 	// for a slow Git or GitHub round trip, short enough to retry meaningfully.
 	taskOperationTimeout = 2 * time.Minute
 
-	// taskInspectTimeout bounds metadata lookups (image inspection, GitHub
-	// authority validation) performed once during service assembly.
+	// taskInspectTimeout bounds local image inspection and runtime GitHub reads.
 	taskInspectTimeout = 15 * time.Second
 )
 
@@ -82,7 +81,6 @@ type taskDeliveryService interface {
 
 type taskPublicationService interface {
 	taskRunService
-	RunOnce(context.Context) error
 	Wake()
 }
 
@@ -123,10 +121,14 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	}()
 
 	ids := task.NewSecureGenerator()
-	authority, err := resolveGitHubAuthority(ctx, github, manager, docker, cfg.Workspace.Name)
+	authority, err := resolveGitHubAuthority(github, manager, docker, cfg.Workspace.Name)
 	if err != nil {
+		if errors.Is(err, githubapp.ErrCredentialsNotFound) {
+			status.Blocked(observability.ComponentGitHubTaskDependency, err)
+		}
 		return nil, err
 	}
+	status.Healthy(observability.ComponentGitHubTaskDependency)
 	candidateID, err := ids.WorkspaceID()
 	if err != nil {
 		return nil, err
@@ -255,9 +257,10 @@ type gitHubAuthority struct {
 	repositories       *githubapp.RepositoryClient
 }
 
-// resolveGitHubAuthority validates the configured GitHub authority up front so
-// misconfiguration surfaces before any durable state is written.
-func resolveGitHubAuthority(ctx context.Context, github *config.WorkspaceGitHub, manager *workspace.Manager, docker *runtime.Docker, workspaceName string) (*gitHubAuthority, error) {
+// resolveGitHubAuthority validates local authority material during composition.
+// Exact remote repository identity remains validated by task admission and
+// publication operations, where transient GitHub failures can be retried.
+func resolveGitHubAuthority(github *config.WorkspaceGitHub, manager *workspace.Manager, docker *runtime.Docker, workspaceName string) (*gitHubAuthority, error) {
 	switch github.Mode {
 	case config.GitHubModeGitHubAppBroker:
 		credentialsDirectory, err := statePath("github-app")
@@ -287,12 +290,6 @@ func resolveGitHubAuthority(ctx context.Context, github *config.WorkspaceGitHub,
 		identity, err := githubapp.NewRepositoryIdentity(github.InstallationID, github.Repository.ID)
 		if err != nil {
 			return nil, err
-		}
-		authorityContext, authorityCancel := context.WithTimeout(ctx, taskInspectTimeout)
-		_, err = repositories.RepositoryByID(authorityContext, identity, github.Repository.FullName)
-		authorityCancel()
-		if err != nil {
-			return nil, fmt.Errorf("validate configured GitHub App repository authority: %w", err)
 		}
 		baseResolver, err := taskapi.GitHubBaseResolver(repositories, identity, github.Repository.FullName, taskInspectTimeout)
 		if err != nil {

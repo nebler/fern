@@ -13,7 +13,6 @@ import (
 
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/observability"
-	"github.com/nebler/fern/internal/taskpublicationcoord"
 	"github.com/nebler/fern/internal/taskresultcoord"
 	"github.com/nebler/fern/internal/workspace"
 	"golang.org/x/sync/errgroup"
@@ -151,42 +150,6 @@ func TestTaskCoordinatorServiceMatrixStartsAndStopsAsOneOwner(t *testing.T) {
 }
 
 type publicationTaskService struct{ *blockingTaskService }
-
-func (*publicationTaskService) RunOnce(context.Context) error { return taskpublicationcoord.ErrNoWork }
-
-type publicationStartupFixture struct {
-	results []error
-	calls   int
-}
-
-func (fixture *publicationStartupFixture) RunOnce(context.Context) error {
-	result := fixture.results[fixture.calls]
-	fixture.calls++
-	return result
-}
-
-func TestPublicationStartupReconciliationDrainsOnlyImmediatelyActionableWork(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		results []error
-		want    error
-	}{
-		{name: "drain", results: []error{nil, nil, taskpublicationcoord.ErrNoWork}},
-		{name: "read only pending", results: []error{taskpublicationcoord.ErrReconciliationPending}},
-		{name: "fatal", results: []error{errors.New("store unavailable")}, want: errors.New("store unavailable")},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			fixture := &publicationStartupFixture{results: test.results}
-			err := reconcileTaskPublication(context.Background(), fixture)
-			if test.want == nil && err != nil || test.want != nil && (err == nil || err.Error() != test.want.Error()) {
-				t.Fatalf("startup reconciliation error = %v", err)
-			}
-			if fixture.calls != len(test.results) {
-				t.Fatalf("passes = %d, want %d", fixture.calls, len(test.results))
-			}
-		})
-	}
-}
 
 type orderedManagerLifecycle struct {
 	mu    sync.Mutex
