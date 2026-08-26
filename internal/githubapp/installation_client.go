@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nebler/fern/internal/gitref"
 )
 
 const (
@@ -454,8 +456,12 @@ func (client *InstallationClient) ListInstallationRepositories(ctx context.Conte
 // Both GitHub repository-selection modes are accepted and preserved for the
 // coordinator, which remains responsible for applying onboarding policy.
 func SelectRepository(installations []InstallationObservation, repositories []InstallationRepositoryObservation, installationID, repositoryID int64, fullName string) (RepositoryIdentity, SelectedRepositoryMetadata, error) {
-	owner, name, ok := splitCanonicalRepository(fullName)
-	if installationID <= 0 || repositoryID <= 0 || !ok {
+	owner, name, hasName := "", "", false
+	if gitref.ValidateOwnerRepo(fullName) == nil {
+		owner, name, _ = strings.Cut(fullName, "/")
+		hasName = true
+	}
+	if installationID <= 0 || repositoryID <= 0 || !hasName {
 		return RepositoryIdentity{}, SelectedRepositoryMetadata{}, ErrInvalidInstallationRequest
 	}
 
@@ -600,12 +606,12 @@ func (client *InstallationClient) validateNextLink(header, route string, page in
 		if !strings.HasPrefix(entry, "<") {
 			return false, ErrPaginationRefused
 		}
-		close := strings.IndexByte(entry, '>')
-		if close < 2 {
+		end := strings.IndexByte(entry, '>')
+		if end < 2 {
 			return false, ErrPaginationRefused
 		}
-		reference := entry[1:close]
-		parameters := strings.Split(entry[close+1:], ";")
+		reference := entry[1:end]
+		parameters := strings.Split(entry[end+1:], ";")
 		relations := ""
 		for _, parameter := range parameters {
 			parameter = strings.TrimSpace(parameter)
@@ -672,8 +678,11 @@ func makeInstallationRepositoryObservation(response installationRepositoryAPIRes
 	if response.ID == nil || *response.ID <= 0 || response.FullName == nil || response.Name == nil || response.Owner == nil || response.Owner.Login == nil || response.Owner.ID == nil || *response.Owner.ID <= 0 || response.Owner.Type == nil || response.Private == nil || response.Archived == nil || response.Disabled == nil || response.DefaultBranch == nil || response.Permissions == nil || !permissions.valid() {
 		return InstallationRepositoryObservation{}, false
 	}
-	owner, name, ok := splitCanonicalRepository(*response.FullName)
-	if !ok || owner != *response.Owner.Login || name != *response.Name || !validAccountType(*response.Owner.Type) || !validGitRef(*response.DefaultBranch) {
+	if gitref.ValidateOwnerRepo(*response.FullName) != nil {
+		return InstallationRepositoryObservation{}, false
+	}
+	owner, name, _ := strings.Cut(*response.FullName, "/")
+	if owner != *response.Owner.Login || name != *response.Name || !validAccountType(*response.Owner.Type) || gitref.ValidateRef(*response.DefaultBranch) != nil {
 		return InstallationRepositoryObservation{}, false
 	}
 	if !validRepositoryAPIPermissions(response.Permissions) {
@@ -702,13 +711,20 @@ func (observation InstallationObservation) valid() bool {
 }
 
 func (observation InstallationRepositoryObservation) valid() bool {
-	owner, name, ok := splitCanonicalRepository(observation.fullName)
-	return observation.installationID > 0 && observation.repositoryID > 0 && observation.ownerID > 0 && ok && owner == observation.ownerLogin && name == observation.name && validAccountType(observation.ownerType) && validGitRef(observation.defaultBranch) && observation.permissions.valid() && observation.canPull && observation.canPush
+	if gitref.ValidateOwnerRepo(observation.fullName) != nil {
+		return false
+	}
+	owner, name, _ := strings.Cut(observation.fullName, "/")
+	return observation.installationID > 0 && observation.repositoryID > 0 && observation.ownerID > 0 && owner == observation.ownerLogin && name == observation.name && validAccountType(observation.ownerType) && gitref.ValidateRef(observation.defaultBranch) == nil && observation.permissions.valid() && observation.canPull && observation.canPush
 }
 
 func validAccountLogin(login string) bool {
-	owner, _, ok := splitCanonicalRepository(login + "/repository")
-	return ok && owner == login
+	composite := login + "/repository"
+	if gitref.ValidateOwnerRepo(composite) != nil {
+		return false
+	}
+	owner, _, _ := strings.Cut(composite, "/")
+	return owner == login
 }
 
 func validAccountType(accountType string) bool {

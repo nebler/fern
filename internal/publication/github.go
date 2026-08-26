@@ -15,8 +15,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"unicode/utf8"
+
+	"github.com/nebler/fern/internal/gitref"
+	"github.com/nebler/fern/internal/jsoncanon"
 )
+
+const maxJSONDepth = 64
 
 var componentPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$`)
 var ownerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}$`)
@@ -127,7 +131,7 @@ func (publisher *Publisher) Prepare(ctx context.Context, request Request) (Prepa
 	base := request.Base
 	if base == "" {
 		base = remoteRepository.DefaultBranch
-		if !ValidBranch(base) {
+		if gitref.ValidateRef(base) != nil {
 			return Prepared{}, fmt.Errorf("GitHub returned unsupported default branch %q", base)
 		}
 	}
@@ -138,7 +142,7 @@ func (publisher *Publisher) Prepare(ctx context.Context, request Request) (Prepa
 	}
 	baseSHA, err := output(ctx, publisher.repo, nil, publisher.git, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
 	baseSHA = strings.TrimSpace(baseSHA)
-	if err != nil || !validSHA(baseSHA) {
+	if err != nil || !gitref.ValidSHA1(baseSHA) {
 		return Prepared{}, fmt.Errorf("resolve fetched GitHub base commit")
 	}
 	if err := run(ctx, publisher.repo, nil, publisher.git, "merge-base", "--is-ancestor", baseSHA, repository.Head); err != nil {
@@ -287,7 +291,7 @@ func remoteBranchCommit(ctx context.Context, repo string, env []string, git, can
 		return "", nil
 	}
 	fields := strings.Fields(value)
-	if len(fields) != 2 || len(fields[0]) != 40 || !isHex(fields[0]) || fields[1] != "refs/heads/"+branch {
+	if len(fields) != 2 || len(fields[0]) != 40 || !gitref.ValidSHA1(fields[0]) || fields[1] != "refs/heads/"+branch {
 		return "", fmt.Errorf("GitHub returned an invalid remote branch response")
 	}
 	return fields[0], nil
@@ -341,7 +345,7 @@ func (publisher *Publisher) inspectGitHubRepository(ctx context.Context, token s
 		return repositoryObservation{}, fmt.Errorf("GitHub returned an invalid repository response")
 	}
 	owner, name, _ := strings.Cut(publisher.binding.FullName, "/")
-	if response.ID == nil || *response.ID != publisher.binding.ID || response.FullName == nil || *response.FullName != publisher.binding.FullName || response.Owner == nil || response.Owner.Login == nil || *response.Owner.Login != owner || response.Name == nil || *response.Name != name || response.DefaultBranch == nil || !ValidBranch(*response.DefaultBranch) {
+	if response.ID == nil || *response.ID != publisher.binding.ID || response.FullName == nil || *response.FullName != publisher.binding.FullName || response.Owner == nil || response.Owner.Login == nil || *response.Owner.Login != owner || response.Name == nil || *response.Name != name || response.DefaultBranch == nil || gitref.ValidateRef(*response.DefaultBranch) != nil {
 		return repositoryObservation{}, fmt.Errorf("GitHub repository identity does not match the configured binding")
 	}
 	return repositoryObservation{DefaultBranch: *response.DefaultBranch}, nil
@@ -446,16 +450,8 @@ func makePullRefObservation(ref *apiPullRef) PullRequestRefObservation {
 }
 
 func decodeAPIJSON(value string, destination any) error {
-	if !utf8.ValidString(value) || len(value) == 0 {
-		return fmt.Errorf("invalid JSON encoding")
-	}
-	tokens := json.NewDecoder(strings.NewReader(value))
-	tokens.UseNumber()
-	if err := validateUniqueJSONValue(tokens, 0); err != nil {
+	if err := jsoncanon.Check([]byte(value), maxJSONDepth); err != nil {
 		return err
-	}
-	if token, err := tokens.Token(); err != io.EOF || token != nil {
-		return fmt.Errorf("invalid trailing JSON")
 	}
 	decoder := json.NewDecoder(strings.NewReader(value))
 	if err := decoder.Decode(destination); err != nil {
@@ -468,61 +464,11 @@ func decodeAPIJSON(value string, destination any) error {
 	return nil
 }
 
-func validateUniqueJSONValue(decoder *json.Decoder, depth int) error {
-	if depth > 64 {
-		return fmt.Errorf("JSON nesting exceeds limit")
-	}
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delimiter, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delimiter {
-	case '{':
-		keys := make(map[string]struct{})
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			key, ok := keyToken.(string)
-			if err != nil || !ok {
-				return fmt.Errorf("invalid JSON object key")
-			}
-			canonical := strings.ToLower(key)
-			if _, exists := keys[canonical]; exists {
-				return fmt.Errorf("duplicate JSON object key")
-			}
-			keys[canonical] = struct{}{}
-			if err := validateUniqueJSONValue(decoder, depth+1); err != nil {
-				return err
-			}
-		}
-		end, err := decoder.Token()
-		if err != nil || end != json.Delim('}') {
-			return fmt.Errorf("invalid JSON object")
-		}
-	case '[':
-		for decoder.More() {
-			if err := validateUniqueJSONValue(decoder, depth+1); err != nil {
-				return err
-			}
-		}
-		end, err := decoder.Token()
-		if err != nil || end != json.Delim(']') {
-			return fmt.Errorf("invalid JSON array")
-		}
-	default:
-		return fmt.Errorf("invalid JSON delimiter")
-	}
-	return nil
-}
-
 func validatePrepared(prepared Prepared, workspace string) error {
 	if err := validateRepositoryBinding(RepositoryBinding{ID: prepared.RepositoryID, FullName: prepared.RepositoryFullName}); err != nil {
 		return err
 	}
-	if !ValidBranch(prepared.BaseRef) {
+	if gitref.ValidateRef(prepared.BaseRef) != nil {
 		return fmt.Errorf("recorded publication base is invalid")
 	}
 	prefix := "fern/" + workspace + "/"
@@ -533,7 +479,7 @@ func validatePrepared(prepared Prepared, workspace string) error {
 	if prepared.Branch == prepared.BaseRef {
 		return fmt.Errorf("recorded publication branch must differ from its base")
 	}
-	if !validSHA(prepared.BaseSHA) || !validSHA(prepared.ResultCommit) {
+	if !gitref.ValidSHA1(prepared.BaseSHA) || !gitref.ValidSHA1(prepared.ResultCommit) {
 		return fmt.Errorf("recorded publication commits are invalid")
 	}
 	return nil
@@ -543,35 +489,10 @@ func validateRepositoryBinding(binding RepositoryBinding) error {
 	if binding.ID <= 0 {
 		return fmt.Errorf("configured GitHub repository ID must be positive")
 	}
-	if !validRepositoryFullName(binding.FullName) {
+	if gitref.ValidateOwnerRepo(binding.FullName) != nil {
 		return fmt.Errorf("configured GitHub repository full name is invalid")
 	}
 	return nil
-}
-
-func validRepositoryFullName(value string) bool {
-	if len(value) < 3 || len(value) > 140 || strings.Count(value, "/") != 1 {
-		return false
-	}
-	owner, repository, _ := strings.Cut(value, "/")
-	if len(owner) == 0 || len(owner) > 39 || owner[0] == '-' || owner[len(owner)-1] == '-' || len(repository) == 0 || len(repository) > 100 || repository == "." || repository == ".." || strings.HasSuffix(strings.ToLower(repository), ".git") {
-		return false
-	}
-	for index := range len(owner) {
-		if character := owner[index]; !asciiAlphaNumeric(character) && character != '-' {
-			return false
-		}
-	}
-	for index := range len(repository) {
-		if character := repository[index]; !asciiAlphaNumeric(character) && character != '.' && character != '_' && character != '-' {
-			return false
-		}
-	}
-	return true
-}
-
-func asciiAlphaNumeric(character byte) bool {
-	return character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9'
 }
 
 func validatePullURL(value, repository string) error {
@@ -599,7 +520,7 @@ func ValidateRequest(request Request) error {
 	if request.Operation != "" && !ValidComponent(request.Operation) {
 		return fmt.Errorf("operation is not safe for a GitHub branch")
 	}
-	if request.Base != "" && !ValidBranch(request.Base) {
+	if request.Base != "" && gitref.ValidateRef(request.Base) != nil {
 		return fmt.Errorf("base is not a safe branch name")
 	}
 	return nil
@@ -673,7 +594,7 @@ func inspectRepository(ctx context.Context, path, git string) (Repository, error
 		return Repository{}, fmt.Errorf("resolve HEAD commit: %w", err)
 	}
 	head = strings.TrimSpace(head)
-	if len(head) != 40 || !isHex(head) {
+	if len(head) != 40 || !gitref.ValidSHA1(head) {
 		return Repository{}, fmt.Errorf("only SHA-1 Git repositories are supported")
 	}
 	origin, err := output(ctx, path, nil, git, "remote", "get-url", "origin")
@@ -737,7 +658,7 @@ func GitHubRepositoryName(remote string) (string, error) {
 	path = strings.TrimSuffix(path, ".git")
 	parts := strings.Split(path, "/")
 	name := strings.Join(parts, "/")
-	if len(parts) != 2 || !validRepositoryFullName(name) {
+	if len(parts) != 2 || gitref.ValidateOwnerRepo(name) != nil {
 		return "", fmt.Errorf("origin must identify one GitHub OWNER/REPOSITORY")
 	}
 	return name, nil
@@ -745,36 +666,6 @@ func GitHubRepositoryName(remote string) (string, error) {
 
 func ValidComponent(value string) bool {
 	return componentPattern.MatchString(value) && !strings.Contains(value, "..") && !strings.HasSuffix(value, ".lock") && !strings.HasSuffix(value, ".")
-}
-
-func ValidBranch(value string) bool {
-	if value == "" || value == "@" || len(value) > 255 || strings.HasPrefix(value, "/") || strings.HasSuffix(value, ".") || strings.HasSuffix(value, "/") || strings.Contains(value, "..") || strings.Contains(value, "//") || strings.Contains(value, "@{") || strings.ContainsAny(value, " ~^:?*[\\") {
-		return false
-	}
-	for _, component := range strings.Split(value, "/") {
-		if component == "" || strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".lock") {
-			return false
-		}
-	}
-	for _, character := range value {
-		if character < 0x20 || character == 0x7f {
-			return false
-		}
-	}
-	return true
-}
-
-func isHex(value string) bool {
-	for _, character := range value {
-		if character < '0' || character > '9' && character < 'a' || character > 'f' {
-			return false
-		}
-	}
-	return true
-}
-
-func validSHA(value string) bool {
-	return len(value) == 40 && isHex(value)
 }
 
 func secureGitArgs(args ...string) []string {

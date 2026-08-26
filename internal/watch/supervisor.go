@@ -60,6 +60,28 @@ func (s *Supervisor) Run(ctx context.Context, observations <-chan Observation) e
 	armed := false
 	var idleSince time.Time
 
+	// handle applies one observation to the model, acts on the requested
+	// timer change, and acknowledges delivery. Both the primary select loop
+	// and the post-timer drain loop share it so neither can drift from the
+	// other's apply->switch->acknowledge->timer-arm discipline.
+	handle := func(observation Observation) {
+		action := model.apply(observation)
+		switch action {
+		case timerCancel:
+			if armed {
+				stopAndDrain(timer)
+				armed = false
+			}
+		case timerArm:
+			stopAndDrain(timer)
+			idleSince = time.Now()
+			timer.Reset(s.IdleAfter)
+			armed = true
+			log.Info("workspace idle, arming pause", "epoch", model.epoch, "after", s.IdleAfter)
+		}
+		acknowledge(observation)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -68,21 +90,7 @@ func (s *Supervisor) Run(ctx context.Context, observations <-chan Observation) e
 			if !ok {
 				return nil
 			}
-			action := model.apply(observation)
-			switch action {
-			case timerCancel:
-				if armed {
-					stopAndDrain(timer)
-					armed = false
-				}
-			case timerArm:
-				stopAndDrain(timer)
-				idleSince = time.Now()
-				timer.Reset(s.IdleAfter)
-				armed = true
-				log.Info("workspace idle, arming pause", "epoch", model.epoch, "after", s.IdleAfter)
-			}
-			acknowledge(observation)
+			handle(observation)
 		case <-timer.C:
 			armed = false
 			// Prefer already-queued observations over a simultaneously-ready
@@ -94,19 +102,7 @@ func (s *Supervisor) Run(ctx context.Context, observations <-chan Observation) e
 					if !ok {
 						return nil
 					}
-					action := model.apply(observation)
-					switch action {
-					case timerArm:
-						idleSince = time.Now()
-						timer.Reset(s.IdleAfter)
-						armed = true
-					case timerCancel:
-						if armed {
-							stopAndDrain(timer)
-							armed = false
-						}
-					}
-					acknowledge(observation)
+					handle(observation)
 				default:
 					break drain
 				}

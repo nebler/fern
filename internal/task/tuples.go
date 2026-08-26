@@ -7,6 +7,8 @@ import (
 	"strings"
 )
 
+// RepositoryTuple identifies the immutable repository/base pair a task is
+// bound to.
 type RepositoryTuple struct {
 	RepositoryID RepositoryID
 	BaseSHA      GitOID
@@ -22,6 +24,8 @@ func (t RepositoryTuple) Validate() error {
 	return nil
 }
 
+// ResultOutcome classifies a sealed result: changed work or an explicit
+// no-op against base.
 type ResultOutcome string
 
 const (
@@ -29,6 +33,8 @@ const (
 	ResultNoChanges ResultOutcome = "no_changes"
 )
 
+// ResultTuple is the sealed outcome of one attempt against its task's
+// repository pair.
 type ResultTuple struct {
 	RepositoryTuple
 	ResultCommit    GitOID
@@ -71,10 +77,16 @@ func (r ResultTuple) ValidateAgainst(task RepositoryTuple) error {
 	return nil
 }
 
+// VerificationTuple carries the verification facts publication must prove:
+// the persisted verification state (cast from taskstore) and the commit it
+// verified.
 type VerificationTuple struct {
 	State          VerificationState
 	VerifiedCommit GitOID
 }
+
+// PublicationTuple is the caller-declared intent for one publication
+// operation, pinned to one workspace, repository, base, and result commit.
 
 type PublicationTuple struct {
 	OperationID        PublicationOperationID
@@ -132,6 +144,8 @@ func PublicationBranch(workspaceName string, operationID PublicationOperationID)
 	return "fern/" + workspaceName + "/" + string(operationID)
 }
 
+// PullRequestObservation is the remote pull-request state observed from
+// GitHub before a publication may be declared published.
 type PullRequestObservation struct {
 	RepositoryID           RepositoryID
 	RepositoryFullName     string
@@ -151,6 +165,8 @@ type PullRequestObservation struct {
 	HeadSHA                GitOID
 }
 
+// PublicationObservation is the authoritative remote state (branch SHA and
+// pull request) that must exactly match the publication tuple.
 type PublicationObservation struct {
 	RemoteSHA   GitOID
 	PullRequest PullRequestObservation

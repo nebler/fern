@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -10,10 +11,12 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/nebler/fern/internal/config"
@@ -33,19 +36,33 @@ type doctorReport struct {
 	Checks   []doctorCheck `json:"checks"`
 }
 
+// diagnoseOptions selects which doctor readiness lanes run.
+type diagnoseOptions struct {
+	ConfigPath   string
+	EnvPath      string
+	ExplicitURL  string
+	RequirePhone bool
+	FieldDemo    bool
+}
+
 func runDoctor(args []string) error {
-	flags := newFlagSet("doctor", "Verify Fern and the private phone-demo path.")
-	configPath := flags.String("config", "fern.yaml", "configuration file")
-	envPath := flags.String("env-file", "fern.env", "protected environment file")
-	phone := flags.Bool("phone", false, "require and verify a Tailscale HTTPS route")
-	fieldDemo := flags.Bool("field-demo", false, "require all locally verifiable field-demo prerequisites")
-	remoteURL := flags.String("url", "", "explicit private HTTPS origin")
-	jsonOutput := flags.Bool("json", false, "output a stable JSON report")
-	qr := flags.Bool("qr", true, "print a terminal QR code for a ready phone URL")
-	if err := parseFlags(flags, args); err != nil {
+	fs := newFlagSet("doctor", "Verify Fern and the private phone-demo path.")
+	configPath := fs.String("config", "fern.yaml", "configuration file")
+	envPath := fs.String("env-file", "fern.env", "protected environment file")
+	phone := fs.Bool("phone", false, "require and verify a Tailscale HTTPS route")
+	fieldDemo := fs.Bool("field-demo", false, "require all locally verifiable field-demo prerequisites")
+	remoteURL := fs.String("url", "", "explicit private HTTPS origin")
+	jsonOutput := fs.Bool("json", false, "output a stable JSON report")
+	qr := fs.Bool("qr", true, "print a terminal QR code for a ready phone URL")
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	report := diagnose(*configPath, *envPath, *phone || *fieldDemo, *fieldDemo, *remoteURL)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	report := diagnose(ctx, diagnoseOptions{
+		ConfigPath: *configPath, EnvPath: *envPath, ExplicitURL: *remoteURL,
+		RequirePhone: *phone || *fieldDemo, FieldDemo: *fieldDemo,
+	})
 	if *jsonOutput {
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetEscapeHTML(false)
@@ -56,12 +73,14 @@ func runDoctor(args []string) error {
 		writeDoctorReport(os.Stdout, report, *qr)
 	}
 	if !report.Ready {
-		return fmt.Errorf("requested Fern readiness checks failed; resolve failed checks above")
+		return errors.New("requested Fern readiness checks failed; resolve failed checks above")
 	}
 	return nil
 }
 
-func diagnose(configPath, envPath string, phone, fieldDemo bool, explicitURL string) doctorReport {
+// diagnose runs the readiness checklist. Every probe derives its own bounded
+// context from ctx so Ctrl-C aborts long lanes such as phone-mode verification.
+func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 	report := doctorReport{Ready: true}
 	add := func(id, status, summary, remediation string) {
 		report.Checks = append(report.Checks, doctorCheck{ID: id, Status: status, Summary: summary, Remediation: remediation})
@@ -69,7 +88,9 @@ func diagnose(configPath, envPath string, phone, fieldDemo bool, explicitURL str
 			report.Ready = false
 		}
 	}
-	values, err := readEnvFile(envPath)
+	// Unlike up/attach, doctor treats the environment file as required, so it
+	// reads it directly instead of through the optional-file preamble.
+	values, err := readEnvFile(opts.EnvPath)
 	if err != nil {
 		add("secrets", "fail", err.Error(), "Run fern init or pass --env-file.")
 		return report
@@ -80,12 +101,12 @@ func diagnose(configPath, envPath string, phone, fieldDemo bool, explicitURL str
 		add("config", "fail", err.Error(), "Run doctor from an accessible directory.")
 		return report
 	}
-	cfg, err := config.LoadWithEnvironment(configPath, cwd, true, config.Overrides{}, values)
+	cfg, err := config.LoadWithEnvironment(opts.ConfigPath, cwd, true, config.Overrides{}, values)
 	if err != nil {
 		add("config", "fail", err.Error(), "Fix the strict Fern configuration.")
 		return report
 	}
-	cfg.Workspace.Env = forwardedEnvironment(mergeWorkspaceEnvironment(cfg.Workspace.Env, values))
+	cfg.Workspace.Env = finalizeWorkspaceEnvironment(cfg.Workspace.Env, values)
 	if err := config.Validate(cfg); err != nil {
 		add("config", "fail", err.Error(), "Fix the Fern configuration or secret file.")
 		return report
@@ -98,19 +119,19 @@ func diagnose(configPath, envPath string, phone, fieldDemo bool, explicitURL str
 	}
 	if err := validateDockerTopology(); err != nil {
 		add("docker", "fail", err.Error(), "Use the local Docker Unix socket.")
-	} else if err := checkCommand(5*time.Second, "docker", "info"); err != nil {
+	} else if err := checkCommand(ctx, 5*time.Second, "docker", "info"); err != nil {
 		add("docker", "fail", err.Error(), "Start Docker and grant this user access.")
 	} else {
 		add("docker", "pass", "local Docker daemon is reachable", "")
-		if err := checkCommand(5*time.Second, "docker", "image", "inspect", cfg.Workspace.Image); err != nil {
+		if err := checkCommand(ctx, 5*time.Second, "docker", "image", "inspect", cfg.Workspace.Image); err != nil {
 			add("image", "fail", "workspace image is unavailable", "Run make image or pull the configured image.")
 		} else {
 			add("image", "pass", "workspace image is available", "")
 		}
 	}
-	if err := checkCommand(5*time.Second, "gh", "auth", "status", "--hostname", "github.com"); err != nil {
+	if err := checkCommand(ctx, 5*time.Second, "gh", "auth", "status", "--hostname", "github.com"); err != nil {
 		status := "warn"
-		if fieldDemo {
+		if opts.FieldDemo {
 			status = "fail"
 		}
 		add("github", status, "GitHub CLI is not authenticated", "Run gh auth login --hostname github.com before publishing a PR.")
@@ -120,18 +141,18 @@ func diagnose(configPath, envPath string, phone, fieldDemo bool, explicitURL str
 	localURL, err := attachURL(cfg.OperatorListen)
 	if err != nil {
 		add("gateway", "fail", err.Error(), "Fix proxy.operatorListen.")
-		if fieldDemo {
+		if opts.FieldDemo {
 			add("provider", "fail", "OpenCode provider availability could not be checked", "Fix proxy.operatorListen, start Fern, connect a provider in OpenCode, and retry.")
 		}
-	} else if err := checkReady(localURL, cfg.Control.Password); err != nil {
+	} else if err := checkReady(ctx, localURL, cfg.Control.Password); err != nil {
 		add("gateway", "fail", "local Fern gateway is not ready", "Start fern up with the same --config and --env-file.")
-		if fieldDemo {
+		if opts.FieldDemo {
 			add("provider", "fail", "OpenCode provider availability could not be checked", "Start Fern, connect a provider in the official OpenCode UI, and retry.")
 		}
 	} else {
 		add("gateway", "pass", "local Fern gateway is serving", "")
-		if fieldDemo {
-			count, providerErr := checkProviderConnection(localURL, cfg.Workspace.Env["OPENCODE_PASSWORD"])
+		if opts.FieldDemo {
+			count, providerErr := checkProviderConnection(ctx, localURL, cfg.Workspace.Env["OPENCODE_PASSWORD"])
 			if providerErr != nil {
 				add("provider", "fail", providerErr.Error(), "Connect any supported provider in the official OpenCode UI, then retry.")
 			} else {
@@ -139,51 +160,61 @@ func diagnose(configPath, envPath string, phone, fieldDemo bool, explicitURL str
 			}
 		}
 	}
-	if fieldDemo {
+	if opts.FieldDemo {
 		add("live-checks", "warn", "provider execution and GitHub mutation are not run by doctor", "Run the opt-in provider and disposable-repository rehearsals before the phone demo.")
 	}
-	if phone || explicitURL != "" {
-		if cfg.RemoteOrigin == "" {
-			add("tailscale", "fail", "proxy.remoteOrigin is required for phone mode", "Set proxy.remoteOrigin to the exact canonical HTTPS root origin reported for this host, then retry.")
-			return report
-		}
-		if explicitURL != "" && explicitURL != cfg.RemoteOrigin {
-			add("tailscale", "fail", "--url does not exactly match proxy.remoteOrigin", "Remove --url or pass the exact configured canonical origin.")
-			return report
-		}
-		servedOrigin, serveErr := discoverTailscaleURL(cfg.Listen, cfg.OperatorListen)
-		if serveErr != nil || servedOrigin == "" {
-			add("tailscale", "fail", "no Tailscale Serve HTTPS origin was found", fmt.Sprintf("Run tailscale serve --bg http://%s, then retry.", cfg.Listen))
-		} else {
-			localOrigin, localErr := localTailscaleOrigin()
-			if topologyErr := validatePhoneTopology(cfg.RemoteOrigin, explicitURL, servedOrigin, localOrigin, localErr); topologyErr != nil {
-				add("tailscale", "fail", topologyErr.Error(), "Make proxy.remoteOrigin, the root Serve origin, and this host's tailnet HTTPS origin identical.")
-				return report
-			}
-			code, pairErr := issuePairingCode(localURL, cfg.Control.Password)
-			if pairErr != nil {
-				add("pairing", "fail", "could not create a one-time phone pairing link", "Ensure the local Fern process is the current build.")
-			} else if err := checkPairingPreview(cfg.RemoteOrigin, code); err != nil {
-				add("pairing", "fail", err.Error(), "Check that Tailscale Serve targets proxy.listen and Fern is current.")
-			} else if err := checkRemoteCredentialRejected(cfg.RemoteOrigin, cfg.Workspace.Env["OPENCODE_PASSWORD"]); err != nil {
-				add("phone", "fail", err.Error(), "Serve only proxy.listen; never proxy.operatorListen or the OpenCode backend.")
-			} else {
-				report.PhoneURL = cfg.RemoteOrigin + "/fern/pair?code=" + url.QueryEscape(code)
-				add("tailscale", "pass", "private HTTPS route reaches Fern", "")
-				add("pairing", "pass", "one-time phone pairing link created", "")
-				add("phone", "pass", "phone-demo transport is ready", "")
-			}
-		}
+	if opts.RequirePhone || opts.ExplicitURL != "" {
+		checkPhoneRoute(ctx, &report, add, opts, cfg, localURL)
 	}
 	return report
 }
 
+// checkPhoneRoute verifies the private Tailscale HTTPS path end to end and, on
+// success, records the one-time pairing URL on the report.
+func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, status, summary, remediation string), opts diagnoseOptions, cfg config.Config, localURL string) {
+	if cfg.RemoteOrigin == "" {
+		add("tailscale", "fail", "proxy.remoteOrigin is required for phone mode", "Set proxy.remoteOrigin to the exact canonical HTTPS root origin reported for this host, then retry.")
+		return
+	}
+	if opts.ExplicitURL != "" && opts.ExplicitURL != cfg.RemoteOrigin {
+		add("tailscale", "fail", "--url does not exactly match proxy.remoteOrigin", "Remove --url or pass the exact configured canonical origin.")
+		return
+	}
+	servedOrigin, serveErr := discoverTailscaleURL(ctx, cfg.Listen, cfg.OperatorListen)
+	if serveErr != nil || servedOrigin == "" {
+		add("tailscale", "fail", "no Tailscale Serve HTTPS origin was found", fmt.Sprintf("Run tailscale serve --bg http://%s, then retry.", cfg.Listen))
+		return
+	}
+	localOrigin, localErr := localTailscaleOrigin(ctx)
+	if topologyErr := validatePhoneTopology(cfg.RemoteOrigin, opts.ExplicitURL, servedOrigin, localOrigin, localErr); topologyErr != nil {
+		add("tailscale", "fail", topologyErr.Error(), "Make proxy.remoteOrigin, the root Serve origin, and this host's tailnet HTTPS origin identical.")
+		return
+	}
+	code, pairErr := issuePairingCode(ctx, localURL, cfg.Control.Password)
+	if pairErr != nil {
+		add("pairing", "fail", "could not create a one-time phone pairing link", "Ensure the local Fern process is the current build.")
+		return
+	}
+	if err := checkPairingPreview(ctx, cfg.RemoteOrigin, code); err != nil {
+		add("pairing", "fail", err.Error(), "Check that Tailscale Serve targets proxy.listen and Fern is current.")
+		return
+	}
+	if err := checkRemoteCredentialRejected(ctx, cfg.RemoteOrigin, cfg.Workspace.Env["OPENCODE_PASSWORD"]); err != nil {
+		add("phone", "fail", err.Error(), "Serve only proxy.listen; never proxy.operatorListen or the OpenCode backend.")
+		return
+	}
+	report.PhoneURL = cfg.RemoteOrigin + "/fern/pair?code=" + url.QueryEscape(code)
+	add("tailscale", "pass", "private HTTPS route reaches Fern", "")
+	add("pairing", "pass", "one-time phone pairing link created", "")
+	add("phone", "pass", "phone-demo transport is ready", "")
+}
+
 func validatePhoneTopology(configured, asserted, served, local string, localErr error) error {
 	if configured == "" {
-		return fmt.Errorf("proxy.remoteOrigin is required for phone mode")
+		return errors.New("proxy.remoteOrigin is required for phone mode")
 	}
 	if asserted != "" && asserted != configured {
-		return fmt.Errorf("--url does not exactly match proxy.remoteOrigin")
+		return errors.New("--url does not exactly match proxy.remoteOrigin")
 	}
 	if served != configured {
 		return fmt.Errorf("Tailscale Serve origin %q does not exactly match proxy.remoteOrigin %q", served, configured)
@@ -197,8 +228,8 @@ func validatePhoneTopology(configured, asserted, served, local string, localErr 
 	return nil
 }
 
-func checkCommand(timeout time.Duration, name string, args ...string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+func checkCommand(ctx context.Context, timeout time.Duration, name string, args ...string) error {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	command := exec.CommandContext(ctx, name, args...)
 	command.WaitDelay = time.Second
@@ -213,8 +244,8 @@ func checkCommand(timeout time.Duration, name string, args ...string) error {
 	return nil
 }
 
-func checkReady(origin, password string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func checkReady(ctx context.Context, origin, password string) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/fern/ready", nil)
 	if err != nil {
@@ -232,15 +263,17 @@ func checkReady(origin, password string) error {
 	var readiness struct {
 		Ready bool `json:"ready"`
 	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, 4<<10))
-	if err := decoder.Decode(&readiness); err != nil || !readiness.Ready {
-		return fmt.Errorf("Fern readiness returned an invalid response")
+	if err := json.NewDecoder(io.LimitReader(response.Body, 4<<10)).Decode(&readiness); err != nil {
+		return fmt.Errorf("decode Fern readiness response: %w", err)
+	}
+	if !readiness.Ready {
+		return errors.New("Fern readiness reported the workspace not ready")
 	}
 	return nil
 }
 
-func checkProviderConnection(origin, password string) (int, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func checkProviderConnection(ctx context.Context, origin, password string) (int, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/api/provider", nil)
 	if err != nil {
@@ -262,7 +295,7 @@ func checkProviderConnection(origin, password string) (int, error) {
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
-		return 0, fmt.Errorf("OpenCode provider readiness returned an invalid response")
+		return 0, errors.New("OpenCode provider readiness returned an invalid response")
 	}
 	count := 0
 	for _, provider := range result.Data {
@@ -271,13 +304,13 @@ func checkProviderConnection(origin, password string) (int, error) {
 		}
 	}
 	if count == 0 {
-		return 0, fmt.Errorf("OpenCode has no active provider connection")
+		return 0, errors.New("OpenCode has no active provider connection")
 	}
 	return count, nil
 }
 
-func issuePairingCode(origin, password string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func issuePairingCode(ctx context.Context, origin, password string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(origin, "/")+"/fern/pair/new", nil)
 	if err != nil {
@@ -299,24 +332,13 @@ func issuePairingCode(origin, password string) (string, error) {
 		return "", err
 	}
 	if result.Code == "" {
-		return "", fmt.Errorf("pairing endpoint returned no code")
+		return "", errors.New("pairing endpoint returned no code")
 	}
 	return result.Code, nil
 }
 
-func validatePhoneOrigin(origin string) (string, error) {
-	if origin == "" {
-		return "", fmt.Errorf("invalid phone URL %q: a private HTTPS origin is required", origin)
-	}
-	validated, err := config.ParseRemoteOrigin(origin)
-	if err != nil {
-		return "", fmt.Errorf("invalid phone URL %q: %w", origin, err)
-	}
-	return validated, nil
-}
-
-func checkPairingPreview(origin, code string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func checkPairingPreview(ctx context.Context, origin, code string) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/fern/pair?code="+url.QueryEscape(code), nil)
 	if err != nil {
@@ -332,17 +354,17 @@ func checkPairingPreview(origin, code string) error {
 		return fmt.Errorf("pairing preview returned %s", response.Status)
 	}
 	if len(response.Cookies()) != 0 {
-		return fmt.Errorf("pairing preview unexpectedly set a cookie")
+		return errors.New("pairing preview unexpectedly set a cookie")
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 	if err != nil || !strings.Contains(string(body), "Pair this phone?") {
-		return fmt.Errorf("pairing preview returned an invalid response")
+		return errors.New("pairing preview returned an invalid response")
 	}
 	return nil
 }
 
-func checkRemoteCredentialRejected(origin, password string) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func checkRemoteCredentialRejected(ctx context.Context, origin, password string) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/api/health", nil)
 	if err != nil {
@@ -362,8 +384,8 @@ func checkRemoteCredentialRejected(origin, password string) error {
 
 var httpsOriginPattern = regexp.MustCompile(`https://[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?(?::[0-9]{1,5})?`)
 
-func discoverTailscaleURL(listen, operatorListen string) (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func discoverTailscaleURL(ctx context.Context, listen, operatorListen string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "tailscale", "serve", "status")
 	command.WaitDelay = time.Second
@@ -374,8 +396,8 @@ func discoverTailscaleURL(listen, operatorListen string) (string, error) {
 	return tailscaleOriginForTopology(string(output), listen, operatorListen)
 }
 
-func localTailscaleOrigin() (string, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+func localTailscaleOrigin(ctx context.Context) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "tailscale", "status", "--json")
 	command.WaitDelay = time.Second
@@ -401,14 +423,14 @@ func tailscaleLocalOrigin(output []byte) (string, error) {
 	}
 	host := strings.TrimSuffix(status.Self.DNSName, ".")
 	if host == "" || !strings.HasSuffix(strings.ToLower(host), ".ts.net") {
-		return "", fmt.Errorf("Tailscale did not report a private DNS name")
+		return "", errors.New("Tailscale did not report a private DNS name")
 	}
 	return "https://" + host, nil
 }
 
 func tailscaleOriginForTarget(output, listen string) (string, error) {
 	if strings.Contains(strings.ToLower(output), "funnel on") || strings.Contains(strings.ToLower(output), "available on the internet") {
-		return "", fmt.Errorf("Tailscale Funnel must be disabled")
+		return "", errors.New("Tailscale Funnel must be disabled")
 	}
 	want := "|-- / proxy http://" + listen
 	currentOrigin := ""
@@ -420,7 +442,7 @@ func tailscaleOriginForTarget(output, listen string) (string, error) {
 		}
 		if strings.TrimSpace(line) == want {
 			if currentOrigin == "" {
-				return "", fmt.Errorf("Tailscale Serve route has no HTTPS origin")
+				return "", errors.New("Tailscale Serve route has no HTTPS origin")
 			}
 			matches[currentOrigin] = true
 		}
@@ -438,7 +460,7 @@ func tailscaleOriginForTopology(output, listen, operatorListen string) (string, 
 	for _, line := range strings.Split(output, "\n") {
 		_, target, found := strings.Cut(strings.TrimSpace(line), "proxy ")
 		if found && serveTargetUsesListener(strings.TrimSpace(target), operatorListen) {
-			return "", fmt.Errorf("Tailscale Serve exposes proxy.operatorListen; only proxy.listen may be served")
+			return "", errors.New("Tailscale Serve exposes proxy.operatorListen; only proxy.listen may be served")
 		}
 	}
 	return tailscaleOriginForTarget(output, listen)
@@ -456,21 +478,6 @@ func serveTargetUsesListener(target, listener string) bool {
 	targetPort, targetErr := strconv.Atoi(parsed.Port())
 	configuredPort, listenerErr := strconv.Atoi(listenerPort)
 	return targetErr == nil && listenerErr == nil && targetPort == configuredPort
-}
-
-func tailscaleOrigin(output string) (string, error) {
-	matches := httpsOriginPattern.FindAllString(output, -1)
-	unique := make(map[string]bool)
-	for _, match := range matches {
-		unique[match] = true
-	}
-	if len(unique) != 1 {
-		return "", fmt.Errorf("expected one Tailscale HTTPS origin, found %d", len(unique))
-	}
-	for origin := range unique {
-		return origin, nil
-	}
-	return "", fmt.Errorf("no Tailscale HTTPS origin")
 }
 
 func writeDoctorReport(writer io.Writer, report doctorReport, showQR bool) {

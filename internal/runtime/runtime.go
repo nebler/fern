@@ -31,11 +31,26 @@ const (
 	SuspendFreeze SuspendKind = "freeze"
 )
 
+// ShutdownIntentTTL is how long an orderly-shutdown recovery intent stays
+// trustworthy after runtime records it. The registry applies a small negative
+// skew against this expiry when classifying a stopped container, so the two
+// packages agree on the contract without registry importing a runtime clock:
+// see IntentStore.PauseStatus in internal/registry/intent.go.
+const ShutdownIntentTTL = 5 * time.Minute
+
 var (
 	ErrUnmanaged = errors.New("resource is not managed by fern")
 	ErrSpecDrift = errors.New("workspace configuration differs from the existing container")
 	ErrFailed    = errors.New("workspace process failed")
 )
+
+// CommandResult carries one completed workspace command.
+// stdout/stderr are best-effort partial output when the result carries an error.
+type CommandResult struct {
+	Stdout   []byte
+	Stderr   []byte
+	ExitCode int
+}
 
 type ServerAuth struct {
 	Password string
@@ -85,7 +100,8 @@ type Endpoint struct {
 }
 
 // StartupResult distinguishes an adopted or reconciled running workspace from
-// one that should remain dormant until its first waking request.
+// one that should remain dormant until its first waking request. On error the
+// result is the zero value; callers must not read fields alongside failures.
 type StartupResult struct {
 	Endpoint     Endpoint
 	ImageID      string
@@ -95,6 +111,8 @@ type StartupResult struct {
 
 // RunningResult carries facts attested by the same inspection that completed
 // a wake. This keeps the endpoint and immutable image identity coherent.
+// On error the result is the zero value; partial results never accompany a
+// failure.
 type RunningResult struct {
 	Observation  Observation
 	Transitioned bool

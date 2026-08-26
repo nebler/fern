@@ -37,34 +37,27 @@ const (
 
 var allAttemptStates = []AttemptState{AttemptPrepared, AttemptDelivering, AttemptAdmitted, AttemptRunning, AttemptInputRequired, AttemptCancelRequested, AttemptUncertain, AttemptRecoveryRequired, AttemptSucceeded, AttemptFailed, AttemptCanceled, AttemptSuperseded}
 
-type ApprovalState string
-
-const (
-	ApprovalPending          ApprovalState = "pending"
-	ApprovalDecisionRecorded ApprovalState = "decision_recorded"
-	ApprovalDelivering       ApprovalState = "delivering"
-	ApprovalUncertain        ApprovalState = "uncertain"
-	ApprovalRecoveryRequired ApprovalState = "recovery_required"
-	ApprovalApplied          ApprovalState = "applied"
-	ApprovalRejected         ApprovalState = "rejected"
-	ApprovalExpired          ApprovalState = "expired"
-	ApprovalCanceled         ApprovalState = "canceled"
-)
-
-var allApprovalStates = []ApprovalState{ApprovalPending, ApprovalDecisionRecorded, ApprovalDelivering, ApprovalUncertain, ApprovalRecoveryRequired, ApprovalApplied, ApprovalRejected, ApprovalExpired, ApprovalCanceled}
-
+// ResultState is the task-model view of result lifecycle values. Values
+// arrive as casts from taskstore's authoritative persisted lifecycle.
 type ResultState string
 
 const (
-	ResultCollecting       ResultState = "collecting"
-	ResultUncertain        ResultState = "uncertain"
-	ResultRecoveryRequired ResultState = "recovery_required"
-	ResultSealed           ResultState = "sealed"
-	ResultFailed           ResultState = "failed"
+	ResultSealed ResultState = "sealed"
+	ResultFailed ResultState = "failed"
 )
 
-var allResultStates = []ResultState{ResultCollecting, ResultUncertain, ResultRecoveryRequired, ResultSealed, ResultFailed}
+var allResultStates = []ResultState{ResultSealed, ResultFailed}
 
+// VerificationState is the task-model view of verification lifecycle values.
+// Values arrive as casts from taskstore's authoritative persisted lifecycle
+// (see VerificationTuple construction in internal/taskstore/publication.go and
+// the coordinator's tuple assembly in internal/taskpublicationcoord/
+// coordinator.go). taskstore owns the persisted state machines with an
+// overlapping-but-different value set; those conversions assume the overlap,
+// so any taskstore enum edit must be mirrored here.
+//
+// Current values: requested, running, cancel_requested, uncertain,
+// recovery_required, succeeded, failed, canceled.
 type VerificationState string
 
 const (
@@ -80,6 +73,17 @@ const (
 
 var allVerificationStates = []VerificationState{VerificationRequested, VerificationRunning, VerificationCancelRequested, VerificationUncertain, VerificationRecoveryRequired, VerificationSucceeded, VerificationFailed, VerificationCanceled}
 
+// PublicationState is the task-model view of publication lifecycle values.
+// Values arrive as casts from taskstore's authoritative persisted lifecycle
+// (see the tuple conversions in internal/taskstore/publication.go and
+// internal/taskpublicationcoord/coordinator.go). taskstore owns the persisted
+// state machine with an overlapping-but-different value set; those
+// conversions assume the overlap, so any taskstore enum edit must be mirrored
+// here.
+//
+// Current values: requested, preparing, ready, pushing, opening_pr,
+// reconciling, cancel_requested, uncertain, recovery_required, published,
+// failed, conflict, canceled.
 type PublicationState string
 
 const (
@@ -126,10 +130,6 @@ func (s AttemptState) Valid() bool { return validState(s, allAttemptStates) }
 func (s AttemptState) Terminal() bool {
 	return s == AttemptSucceeded || s == AttemptFailed || s == AttemptCanceled || s == AttemptSuperseded
 }
-func (s ApprovalState) Valid() bool { return validState(s, allApprovalStates) }
-func (s ApprovalState) Terminal() bool {
-	return s == ApprovalApplied || s == ApprovalRejected || s == ApprovalExpired || s == ApprovalCanceled
-}
 func (s ResultState) Valid() bool       { return validState(s, allResultStates) }
 func (s ResultState) Terminal() bool    { return s == ResultSealed || s == ResultFailed }
 func (s VerificationState) Valid() bool { return validState(s, allVerificationStates) }
@@ -152,24 +152,10 @@ var attemptTransitions = map[AttemptState][]AttemptState{
 	AttemptInputRequired: {AttemptRunning, AttemptCancelRequested, AttemptFailed, AttemptUncertain, AttemptRecoveryRequired}, AttemptCancelRequested: {AttemptCanceled, AttemptUncertain, AttemptRecoveryRequired},
 	AttemptUncertain: {AttemptPrepared, AttemptAdmitted, AttemptRunning, AttemptInputRequired, AttemptCancelRequested, AttemptSucceeded, AttemptFailed, AttemptCanceled, AttemptRecoveryRequired}, AttemptRecoveryRequired: {AttemptPrepared, AttemptAdmitted, AttemptRunning, AttemptCancelRequested, AttemptFailed, AttemptCanceled, AttemptSuperseded},
 }
-var approvalTransitions = map[ApprovalState][]ApprovalState{
-	ApprovalPending: {ApprovalDecisionRecorded, ApprovalExpired, ApprovalCanceled, ApprovalRecoveryRequired}, ApprovalDecisionRecorded: {ApprovalDelivering, ApprovalCanceled, ApprovalRecoveryRequired},
-	ApprovalDelivering: {ApprovalApplied, ApprovalRejected, ApprovalUncertain, ApprovalRecoveryRequired}, ApprovalUncertain: {ApprovalDelivering, ApprovalApplied, ApprovalRejected, ApprovalCanceled, ApprovalRecoveryRequired},
-	ApprovalRecoveryRequired: {ApprovalDelivering, ApprovalRejected, ApprovalCanceled},
-}
-var resultTransitions = map[ResultState][]ResultState{ResultCollecting: {ResultSealed, ResultFailed, ResultUncertain, ResultRecoveryRequired}, ResultUncertain: {ResultCollecting, ResultSealed, ResultFailed, ResultRecoveryRequired}, ResultRecoveryRequired: {ResultCollecting, ResultFailed}}
-var verificationTransitions = map[VerificationState][]VerificationState{
-	VerificationRequested: {VerificationRunning, VerificationCanceled, VerificationRecoveryRequired}, VerificationRunning: {VerificationSucceeded, VerificationFailed, VerificationCancelRequested, VerificationUncertain, VerificationRecoveryRequired},
-	VerificationCancelRequested: {VerificationCanceled, VerificationFailed, VerificationUncertain, VerificationRecoveryRequired}, VerificationUncertain: {VerificationRunning, VerificationSucceeded, VerificationFailed, VerificationCanceled, VerificationRecoveryRequired},
-	VerificationRecoveryRequired: {VerificationRequested, VerificationFailed, VerificationCanceled},
-}
-var publicationTransitions = map[PublicationState][]PublicationState{
-	PublicationRequested: {PublicationPreparing, PublicationCancelRequested, PublicationFailed, PublicationRecoveryRequired}, PublicationPreparing: {PublicationReady, PublicationFailed, PublicationConflict, PublicationUncertain, PublicationCancelRequested, PublicationRecoveryRequired},
-	PublicationReady: {PublicationPushing, PublicationCancelRequested, PublicationConflict, PublicationRecoveryRequired}, PublicationPushing: {PublicationOpeningPR, PublicationReconciling, PublicationFailed, PublicationConflict, PublicationUncertain, PublicationCancelRequested, PublicationRecoveryRequired},
-	PublicationOpeningPR: {PublicationReconciling, PublicationPublished, PublicationFailed, PublicationConflict, PublicationUncertain, PublicationCancelRequested, PublicationRecoveryRequired}, PublicationReconciling: {PublicationPushing, PublicationOpeningPR, PublicationPublished, PublicationFailed, PublicationConflict, PublicationCancelRequested, PublicationRecoveryRequired},
-	PublicationCancelRequested: {PublicationCanceled, PublicationReconciling, PublicationPublished, PublicationConflict, PublicationUncertain, PublicationRecoveryRequired}, PublicationUncertain: {PublicationReconciling, PublicationPublished, PublicationFailed, PublicationConflict, PublicationCanceled, PublicationRecoveryRequired},
-	PublicationRecoveryRequired: {PublicationReconciling, PublicationFailed, PublicationConflict, PublicationCanceled},
-}
+
+// The authoritative approval, result, verification, and publication state
+// machines live in taskstore behind SQL triggers; this package deliberately
+// carries only the value types it needs for tuples and casts.
 
 func AllowTaskTransition(from, to TaskState) error {
 	if !from.Valid() || !to.Valid() {
@@ -185,42 +171,6 @@ func AllowAttemptTransition(from, to AttemptState) error {
 		return ErrInvalidState
 	}
 	if !allowed(from, to, attemptTransitions) {
-		return transitionError(from, to)
-	}
-	return nil
-}
-func AllowApprovalTransition(from, to ApprovalState) error {
-	if !from.Valid() || !to.Valid() {
-		return ErrInvalidState
-	}
-	if !allowed(from, to, approvalTransitions) {
-		return transitionError(from, to)
-	}
-	return nil
-}
-func AllowResultTransition(from, to ResultState) error {
-	if !from.Valid() || !to.Valid() {
-		return ErrInvalidState
-	}
-	if !allowed(from, to, resultTransitions) {
-		return transitionError(from, to)
-	}
-	return nil
-}
-func AllowVerificationTransition(from, to VerificationState) error {
-	if !from.Valid() || !to.Valid() {
-		return ErrInvalidState
-	}
-	if !allowed(from, to, verificationTransitions) {
-		return transitionError(from, to)
-	}
-	return nil
-}
-func AllowPublicationTransition(from, to PublicationState) error {
-	if !from.Valid() || !to.Valid() {
-		return ErrInvalidState
-	}
-	if !allowed(from, to, publicationTransitions) {
 		return transitionError(from, to)
 	}
 	return nil

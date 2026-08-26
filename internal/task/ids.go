@@ -7,6 +7,12 @@ import (
 	"strings"
 )
 
+// Identity types for Fern domain entities. Fern IDs (WorkspaceID through
+// PublicationOperationID) are prefixed lowercase UUIDv7 strings, validated by
+// their Parse functions; Generator mints them. GitHub-derived numeric types
+// are bounded by SQLite's signed integer range via parsePositiveUint.
+// OpenCode IDs are prefixed 128-bit random hex strings minted outside Fern's
+// clock-ordering discipline.
 type (
 	WorkspaceID            string
 	TaskID                 string

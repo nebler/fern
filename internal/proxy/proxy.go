@@ -18,15 +18,22 @@ import (
 	"github.com/nebler/fern/internal/workspace"
 )
 
+// Waker reconciles Docker workspace state on demand: AcquireRequest wakes the
+// workspace and leases an endpoint for the request, and InvalidateEndpoint
+// drops a cached endpoint that misbehaved so the next request re-wakes.
 type Waker interface {
 	AcquireRequest(context.Context, workspace.RequestIntent) (workspace.RequestTarget, func(), error)
 	InvalidateEndpoint(workspace.RequestTarget)
 }
 
+// PublicationExecutor runs a durable publication operation to completion and
+// returns its final control record.
 type PublicationExecutor interface {
 	Execute(context.Context, string) (control.Publication, error)
 }
 
+// Controls bundles the optional control-plane dependencies a gateway handler
+// may serve. A nil member disables its route.
 type Controls struct {
 	Store        *control.Store
 	Publications PublicationExecutor
@@ -36,6 +43,7 @@ type Controls struct {
 	ControlAuth  ControlAuth
 }
 
+// Handlers holds the two production ingress surfaces built by NewHandlers.
 type Handlers struct {
 	Remote   http.Handler
 	Operator http.Handler
@@ -44,6 +52,8 @@ type Handlers struct {
 type targetKey struct{}
 type originKey struct{}
 
+// TrustedOrigins carries the canonical scheme://host origins of the two
+// listeners; both must parse strictly and remote must be HTTPS or loopback.
 type TrustedOrigins struct {
 	Remote   string
 	Operator string
@@ -187,8 +197,15 @@ func newUpstreamHandler(waker Waker, log *slog.Logger) http.Handler {
 	}
 	reverseProxy := &httputil.ReverseProxy{
 		Rewrite: func(request *httputil.ProxyRequest) {
-			target := request.In.Context().Value(targetKey{}).(proxyTarget)
-			origin := request.In.Context().Value(originKey{}).(trustedOrigin)
+			target, okTarget := request.In.Context().Value(targetKey{}).(proxyTarget)
+			origin, okOrigin := request.In.Context().Value(originKey{}).(trustedOrigin)
+			if !okTarget || !okOrigin {
+				// The upstream handler always installs the routing context.
+				// Without it the safest behavior is to forward the request
+				// untouched and let transport failures surface through
+				// ErrorHandler rather than panicking here.
+				return
+			}
 			request.SetURL(target.url)
 			for name := range request.Out.Header {
 				if strings.EqualFold(name, "Forwarded") || strings.HasPrefix(strings.ToLower(name), "x-forwarded-") {
@@ -266,6 +283,16 @@ func containsReservedCookieAssignment(value string) bool {
 	return false
 }
 
+// OpenCode V2 routes with special wake-intent semantics, per docs/OPENCODE.md:
+// the event stream is observation-only and survives pauses, while health checks
+// and foreground-session polls are read-only probes that must not hold a full
+// admission lease. Every other path, including WebSocket upgrades, is work.
+const (
+	opencodeEventPath         = "/api/event"
+	opencodeHealthPath        = "/api/health"
+	opencodeSessionActivePath = "/api/session/active"
+)
+
 func requestIntent(request *http.Request) workspace.RequestIntent {
 	// Event streams are observation-only and intentionally survive until a
 	// pause disconnects them. Every other request, including WebSocket upgrades,
@@ -273,12 +300,12 @@ func requestIntent(request *http.Request) workspace.RequestIntent {
 	upgrade := strings.EqualFold(request.Header.Get("Upgrade"), "websocket")
 	requestPath := request.URL.EscapedPath()
 	if request.Method == http.MethodGet && !upgrade {
-		if requestPath == "/api/event" {
+		if requestPath == opencodeEventPath {
 			return workspace.RequestObserve
 		}
 	}
 	if !upgrade && (request.Method == http.MethodGet || request.Method == http.MethodHead) {
-		if requestPath == "/api/health" || requestPath == "/api/session/active" {
+		if requestPath == opencodeHealthPath || requestPath == opencodeSessionActivePath {
 			return workspace.RequestRead
 		}
 	}

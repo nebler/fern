@@ -11,10 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/nebler/fern/internal/evidence"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 )
@@ -239,33 +239,10 @@ func validateEvidence(payload json.RawMessage, expected [32]byte) error {
 		return fmt.Errorf("%w: evidence digest", ErrInvalidRequest)
 	}
 	var decoded any
-	if json.Unmarshal(payload, &decoded) != nil || containsSensitiveEvidenceKey(decoded) {
+	if json.Unmarshal(payload, &decoded) != nil || evidence.ContainsSensitiveKey(decoded) {
 		return fmt.Errorf("%w: sensitive evidence", ErrInvalidRequest)
 	}
 	return nil
-}
-
-func containsSensitiveEvidenceKey(value any) bool {
-	switch value := value.(type) {
-	case map[string]any:
-		for key, child := range value {
-			normalized := strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.ToLower(key))
-			switch normalized {
-			case "prompt", "rawprompt", "credential", "credentials", "authorization", "token", "cookie", "setcookie", "body", "rawbody", "requestbody", "responsebody":
-				return true
-			}
-			if containsSensitiveEvidenceKey(child) {
-				return true
-			}
-		}
-	case []any:
-		for _, child := range value {
-			if containsSensitiveEvidenceKey(child) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func secureRepositoryPath(path string) (string, error) {

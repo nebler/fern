@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -54,7 +55,7 @@ func TestCheckProviderConnection(t *testing.T) {
 	}))
 	defer server.Close()
 
-	count, err := checkProviderConnection(server.URL, "secret")
+	count, err := checkProviderConnection(context.Background(), server.URL, "secret")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +76,7 @@ func TestPairingPreviewSendsNoAuthorizationAndDoesNotConsume(t *testing.T) {
 		_, _ = io.WriteString(writer, "<h1>Pair this phone?</h1>")
 	}))
 	defer server.Close()
-	if err := checkPairingPreview(server.URL, "pair-code"); err != nil {
+	if err := checkPairingPreview(context.Background(), server.URL, "pair-code"); err != nil {
 		t.Fatal(err)
 	}
 	if requests != 1 {
@@ -94,7 +95,7 @@ func TestCheckRemoteCredentialRequiresUnauthorized(t *testing.T) {
 		http.Error(writer, "unauthorized", http.StatusUnauthorized)
 	}))
 	defer server.Close()
-	if err := checkRemoteCredentialRejected(server.URL, "backend-secret"); err != nil {
+	if err := checkRemoteCredentialRejected(context.Background(), server.URL, "backend-secret"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -121,7 +122,7 @@ func TestCheckProviderConnectionRequiresActiveProvider(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if _, err := checkProviderConnection(server.URL, "secret"); err == nil {
+	if _, err := checkProviderConnection(context.Background(), server.URL, "secret"); err == nil {
 		t.Fatal("expected no active provider to fail")
 	}
 }

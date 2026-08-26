@@ -14,6 +14,9 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/nebler/fern/internal/gitref"
+	"github.com/nebler/fern/internal/jsoncanon"
 )
 
 const (
@@ -193,7 +196,7 @@ func (client *RepositoryClient) RepositoryByID(ctx context.Context, identity Rep
 		return RepositoryObservation{}, err
 	}
 	var decoded repositoryAPIResponse
-	if err := decodeGitHubJSON(payload, &decoded); err != nil || !validRepositoryResponse(decoded, identity.RepositoryID(), configuredFullName, owner, name) || !validGitRef(value(decoded.DefaultBranch)) {
+	if err := decodeGitHubJSON(payload, &decoded); err != nil || !validRepositoryResponse(decoded, identity.RepositoryID(), configuredFullName, owner, name) || gitref.ValidateRef(deref(decoded.DefaultBranch)) != nil {
 		return RepositoryObservation{}, ErrInvalidResponse
 	}
 	return RepositoryObservation{
@@ -211,7 +214,7 @@ func (client *RepositoryClient) BranchReference(ctx context.Context, identity Re
 	if _, _, err := validateRepositoryCall(ctx, identity, target); err != nil {
 		return GitReferenceObservation{}, err
 	}
-	if !validGitRef(branch) {
+	if gitref.ValidateRef(branch) != nil {
 		return GitReferenceObservation{}, ErrInvalidRepositoryRequest
 	}
 	qualified := "refs/heads/" + branch
@@ -228,7 +231,7 @@ func (client *RepositoryClient) BranchReference(ctx context.Context, identity Re
 	}
 	if err := decodeGitHubJSON(payload, &decoded); err != nil || decoded.Ref == nil || *decoded.Ref != qualified ||
 		decoded.Object == nil || decoded.Object.Type == nil || *decoded.Object.Type != "commit" ||
-		decoded.Object.SHA == nil || !validGitSHA1(*decoded.Object.SHA) {
+		decoded.Object.SHA == nil || !gitref.ValidSHA1(*decoded.Object.SHA) {
 		return GitReferenceObservation{}, ErrInvalidResponse
 	}
 	return GitReferenceObservation{identity: identity, ref: branch, sha: *decoded.Object.SHA}, nil
@@ -238,7 +241,7 @@ func (client *RepositoryClient) BranchReference(ctx context.Context, identity Re
 // refused, and two proven matches produce PullRequestAmbiguityError.
 func (client *RepositoryClient) FindOpenDraftPullRequests(ctx context.Context, identity RepositoryIdentity, target, base, head string) ([]PullRequestSummary, error) {
 	owner, _, err := validateRepositoryCall(ctx, identity, target)
-	if err != nil || !validGitRef(base) || !validGitRef(head) {
+	if err != nil || gitref.ValidateRef(base) != nil || gitref.ValidateRef(head) != nil {
 		return nil, firstError(err, ErrInvalidRepositoryRequest)
 	}
 	query := url.Values{}
@@ -274,7 +277,7 @@ func (client *RepositoryClient) FindOpenDraftPullRequests(ctx context.Context, i
 // ambiguous or lost response.
 func (client *RepositoryClient) CreateDraftPullRequest(ctx context.Context, identity RepositoryIdentity, target, base, head, title, body string) (int64, error) {
 	owner, _, err := validateRepositoryCall(ctx, identity, target)
-	if err != nil || !validGitRef(base) || !validGitRef(head) || !validPullTitle(title) || !validPullBody(body) {
+	if err != nil || gitref.ValidateRef(base) != nil || gitref.ValidateRef(head) != nil || !validPullTitle(title) || !validPullBody(body) {
 		return 0, firstError(err, ErrInvalidRepositoryRequest)
 	}
 	requestBody, err := json.Marshal(struct {
@@ -332,18 +335,6 @@ type repositoryAPIResponse struct {
 	Owner         *struct {
 		Login *string `json:"login"`
 	} `json:"owner"`
-}
-
-func validGitSHA1(value string) bool {
-	if len(value) != 40 || value != strings.ToLower(value) {
-		return false
-	}
-	for _, character := range []byte(value) {
-		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
-			return false
-		}
-	}
-	return true
 }
 
 type pullRequestAPIResponse struct {
@@ -451,54 +442,11 @@ func validateRepositoryCall(ctx context.Context, identity RepositoryIdentity, ta
 	if err := identity.validate(); err != nil {
 		return "", "", err
 	}
-	owner, name, ok := splitCanonicalRepository(target)
-	if !ok {
+	if gitref.ValidateOwnerRepo(target) != nil {
 		return "", "", ErrInvalidRepositoryRequest
 	}
-	return owner, name, nil
-}
-
-func splitCanonicalRepository(target string) (string, string, bool) {
-	if len(target) < 3 || len(target) > 140 || strings.Count(target, "/") != 1 || !asciiString(target) {
-		return "", "", false
-	}
 	owner, name, _ := strings.Cut(target, "/")
-	if len(owner) < 1 || len(owner) > 39 || len(name) < 1 || len(name) > 100 || strings.EqualFold(name, ".git") || strings.HasSuffix(strings.ToLower(name), ".git") {
-		return "", "", false
-	}
-	if owner[0] == '-' || owner[len(owner)-1] == '-' || name == "." || name == ".." {
-		return "", "", false
-	}
-	for i := range len(owner) {
-		char := owner[i]
-		if !asciiAlphaNumeric(char) && char != '-' {
-			return "", "", false
-		}
-	}
-	for i := range len(name) {
-		char := name[i]
-		if !asciiAlphaNumeric(char) && char != '-' && char != '_' && char != '.' {
-			return "", "", false
-		}
-	}
-	return owner, name, true
-}
-
-func validGitRef(ref string) bool {
-	if len(ref) == 0 || len(ref) > maxRepositoryRefBytes || !asciiString(ref) || ref == "@" || strings.HasPrefix(ref, "/") || strings.HasSuffix(ref, "/") || strings.HasSuffix(ref, ".") || strings.Contains(ref, "//") || strings.Contains(ref, "..") || strings.Contains(ref, "@{") || strings.ContainsAny(ref, " ~^:?*[\\") {
-		return false
-	}
-	for _, component := range strings.Split(ref, "/") {
-		if component == "" || strings.HasPrefix(component, ".") || strings.HasSuffix(strings.ToLower(component), ".lock") {
-			return false
-		}
-	}
-	for i := range len(ref) {
-		if ref[i] < 0x21 || ref[i] == 0x7f {
-			return false
-		}
-	}
-	return true
+	return owner, name, nil
 }
 
 func validPullTitle(title string) bool {
@@ -535,7 +483,7 @@ func validatePullRequestObservation(pull pullRequestAPIResponse, repositoryID in
 	if pull.Head.Repo == nil || pull.Head.Repo.FullName == nil {
 		return PullRequestObservation{}, false
 	}
-	if !validPullRef(pull.Base, repositoryID, target, value(pull.Base.Ref), true) || !validPullRef(pull.Head, 0, *pull.Head.Repo.FullName, value(pull.Head.Ref), true) {
+	if !validPullRef(pull.Base, repositoryID, target, deref(pull.Base.Ref), true) || !validPullRef(pull.Head, 0, *pull.Head.Repo.FullName, deref(pull.Head.Ref), true) {
 		return PullRequestObservation{}, false
 	}
 	base := makePullRefObservation(pull.Base)
@@ -553,17 +501,20 @@ func validatePullRequestObservation(pull pullRequestAPIResponse, repositoryID in
 }
 
 func validPullRef(ref *pullRequestRefAPIResponse, repositoryID int64, fullName, expectedRef string, requireSHA bool) bool {
-	if ref == nil || ref.Ref == nil || *ref.Ref != expectedRef || !validGitRef(*ref.Ref) || ref.Repo == nil || ref.Repo.ID == nil || *ref.Repo.ID <= 0 || ref.Repo.FullName == nil || *ref.Repo.FullName != fullName || ref.Repo.Name == nil || ref.Repo.Owner == nil || ref.Repo.Owner.Login == nil {
+	if ref == nil || ref.Ref == nil || *ref.Ref != expectedRef || gitref.ValidateRef(*ref.Ref) != nil || ref.Repo == nil || ref.Repo.ID == nil || *ref.Repo.ID <= 0 || ref.Repo.FullName == nil || *ref.Repo.FullName != fullName || ref.Repo.Name == nil || ref.Repo.Owner == nil || ref.Repo.Owner.Login == nil {
 		return false
 	}
 	if repositoryID > 0 && *ref.Repo.ID != repositoryID {
 		return false
 	}
-	owner, name, ok := splitCanonicalRepository(*ref.Repo.FullName)
-	if !ok || *ref.Repo.Owner.Login != owner || *ref.Repo.Name != name {
+	if gitref.ValidateOwnerRepo(*ref.Repo.FullName) != nil {
 		return false
 	}
-	if requireSHA && (ref.SHA == nil || !validGitSHA(*ref.SHA)) {
+	owner, name, _ := strings.Cut(*ref.Repo.FullName, "/")
+	if *ref.Repo.Owner.Login != owner || *ref.Repo.Name != name {
+		return false
+	}
+	if requireSHA && (ref.SHA == nil || !gitref.ValidSHA1(*ref.SHA)) {
 		return false
 	}
 	return true
@@ -578,18 +529,6 @@ func makePullRefObservation(ref *pullRequestRefAPIResponse) PullRequestRefObserv
 		ref:                *ref.Ref,
 		sha:                *ref.SHA,
 	}
-}
-
-func validGitSHA(sha string) bool {
-	if len(sha) != 40 {
-		return false
-	}
-	for i := range len(sha) {
-		if (sha[i] < '0' || sha[i] > '9') && (sha[i] < 'a' || sha[i] > 'f') {
-			return false
-		}
-	}
-	return true
 }
 
 func repositoryRoute(target string) string {
@@ -607,15 +546,7 @@ func validAPIBase(base string) bool {
 }
 
 func decodeGitHubJSON(payload []byte, destination any) error {
-	if len(payload) == 0 || !utf8.Valid(payload) {
-		return ErrInvalidResponse
-	}
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.UseNumber()
-	if err := validateJSONValue(decoder, 0); err != nil {
-		return ErrInvalidResponse
-	}
-	if _, err := decoder.Token(); err != io.EOF {
+	if err := jsoncanon.Check(payload, maxJSONDepth); err != nil {
 		return ErrInvalidResponse
 	}
 	if err := json.Unmarshal(payload, destination); err != nil {
@@ -624,60 +555,7 @@ func decodeGitHubJSON(payload []byte, destination any) error {
 	return nil
 }
 
-func validateJSONValue(decoder *json.Decoder, depth int) error {
-	if depth > maxJSONDepth {
-		return ErrInvalidResponse
-	}
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delimiter, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delimiter {
-	case '{':
-		keys := make(map[string]struct{})
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			if err != nil {
-				return err
-			}
-			key, ok := keyToken.(string)
-			if !ok {
-				return ErrInvalidResponse
-			}
-			canonicalKey := strings.ToLower(key)
-			if _, duplicate := keys[canonicalKey]; duplicate {
-				return ErrInvalidResponse
-			}
-			keys[canonicalKey] = struct{}{}
-			if err := validateJSONValue(decoder, depth+1); err != nil {
-				return err
-			}
-		}
-		end, err := decoder.Token()
-		if err != nil || end != json.Delim('}') {
-			return ErrInvalidResponse
-		}
-	case '[':
-		for decoder.More() {
-			if err := validateJSONValue(decoder, depth+1); err != nil {
-				return err
-			}
-		}
-		end, err := decoder.Token()
-		if err != nil || end != json.Delim(']') {
-			return ErrInvalidResponse
-		}
-	default:
-		return ErrInvalidResponse
-	}
-	return nil
-}
-
-func value[T comparable](pointer *T) T {
+func deref[T comparable](pointer *T) T {
 	if pointer == nil {
 		var zero T
 		return zero
@@ -692,20 +570,12 @@ func firstError(err, fallback error) error {
 	return fallback
 }
 
-func asciiString(value string) bool {
-	for i := range len(value) {
-		if value[i] < 0x21 || value[i] > 0x7e {
-			return false
-		}
-	}
-	return true
-}
-
-func asciiAlphaNumeric(char byte) bool {
-	return char >= 'a' && char <= 'z' || char >= 'A' && char <= 'Z' || char >= '0' && char <= '9'
-}
-
+// isNilInterface reports whether value is a nil interface or a typed nil
+// pointer, map, slice, channel, or function.
 func isNilInterface(value any) bool {
+	if value == nil {
+		return true
+	}
 	reflected := reflect.ValueOf(value)
 	switch reflected.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:

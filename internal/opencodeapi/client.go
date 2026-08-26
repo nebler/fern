@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/nebler/fern/internal/jsoncanon"
 )
 
 const (
@@ -22,6 +24,7 @@ const (
 	maxCredential    = 4096
 	maxPageLimit     = 500
 	maxScanPages     = 1000
+	maxJSONDepth     = 64
 )
 
 type Config struct {
@@ -531,66 +534,11 @@ func strictDecode(payload []byte, destination any) error {
 	return nil
 }
 
+// validateUniqueJSON delegates the canonical duplicate-key, depth, and
+// encoding scan to jsoncanon; any violation collapses to ErrInvalidResponse so
+// response details never leak into errors.
 func validateUniqueJSON(payload []byte) error {
-	if len(payload) == 0 || !utf8.Valid(payload) {
-		return ErrInvalidResponse
-	}
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.UseNumber()
-	if err := validateJSONToken(decoder, 0); err != nil {
-		return ErrInvalidResponse
-	}
-	if token, err := decoder.Token(); err != io.EOF || token != nil {
-		return ErrInvalidResponse
-	}
-	return nil
-}
-
-func validateJSONToken(decoder *json.Decoder, depth int) error {
-	if depth > 64 {
-		return ErrInvalidResponse
-	}
-	token, err := decoder.Token()
-	if err != nil {
-		return err
-	}
-	delimiter, ok := token.(json.Delim)
-	if !ok {
-		return nil
-	}
-	switch delimiter {
-	case '{':
-		keys := make(map[string]struct{})
-		for decoder.More() {
-			keyToken, err := decoder.Token()
-			key, ok := keyToken.(string)
-			if err != nil || !ok {
-				return ErrInvalidResponse
-			}
-			canonical := strings.ToLower(key)
-			if _, exists := keys[canonical]; exists {
-				return ErrInvalidResponse
-			}
-			keys[canonical] = struct{}{}
-			if err := validateJSONToken(decoder, depth+1); err != nil {
-				return err
-			}
-		}
-		end, err := decoder.Token()
-		if err != nil || end != json.Delim('}') {
-			return ErrInvalidResponse
-		}
-	case '[':
-		for decoder.More() {
-			if err := validateJSONToken(decoder, depth+1); err != nil {
-				return err
-			}
-		}
-		end, err := decoder.Token()
-		if err != nil || end != json.Delim(']') {
-			return ErrInvalidResponse
-		}
-	default:
+	if err := jsoncanon.Check(payload, maxJSONDepth); err != nil {
 		return ErrInvalidResponse
 	}
 	return nil

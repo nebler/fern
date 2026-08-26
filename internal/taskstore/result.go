@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/nebler/fern/internal/gitref"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -388,7 +389,7 @@ func validateManifest(input []ManifestEntry) ([]ManifestEntry, error) {
 	var previous []byte
 	for i, entry := range entries {
 		path, err := base64.StdEncoding.DecodeString(entry.PathBase64)
-		if err != nil || base64.StdEncoding.EncodeToString(path) != entry.PathBase64 || !validGitPath(path) {
+		if err != nil || base64.StdEncoding.EncodeToString(path) != entry.PathBase64 || !gitref.ValidPathBytes(path) {
 			return nil, fmt.Errorf("%w: manifest path %d", ErrInvalidInput, i)
 		}
 		if i > 0 && bytes.Compare(previous, path) >= 0 {
@@ -400,18 +401,6 @@ func validateManifest(input []ManifestEntry) ([]ManifestEntry, error) {
 		}
 	}
 	return entries, nil
-}
-
-func validGitPath(path []byte) bool {
-	if len(path) == 0 || len(path) > 4096 || path[0] == '/' || path[len(path)-1] == '/' || bytes.IndexByte(path, 0) >= 0 {
-		return false
-	}
-	for _, part := range bytes.Split(path, []byte{'/'}) {
-		if len(part) == 0 || bytes.Equal(part, []byte(".")) || bytes.Equal(part, []byte("..")) {
-			return false
-		}
-	}
-	return true
 }
 
 func validateManifestEntry(e ManifestEntry) error {

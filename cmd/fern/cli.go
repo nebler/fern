@@ -52,6 +52,10 @@ func newFlagSet(command, description string) *flag.FlagSet {
 	return flags
 }
 
+// commandExamples holds the Example line shown in each command's flag help,
+// keyed the way flag help addresses commands ("name" or "parent sub"). It stays
+// a plain literal because deriving it from the command registry would create a
+// package initialization cycle.
 var commandExamples = map[string]string{
 	"init":           "fern init --repo /path/to/repository",
 	"doctor":         "fern doctor --phone",
@@ -65,17 +69,17 @@ var commandExamples = map[string]string{
 	"debug wake":     "fern debug wake --name demo",
 }
 
-func parseFlags(flags *flag.FlagSet, args []string) error {
-	if err := flags.Parse(args); err != nil {
+func parseFlags(fs *flag.FlagSet, args []string) error {
+	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
-			flags.SetOutput(os.Stdout)
-			flags.Usage()
+			fs.SetOutput(os.Stdout)
+			fs.Usage()
 			return errHelpShown
 		}
 		return invocationError{message: err.Error()}
 	}
-	if flags.NArg() != 0 {
-		return invocationError{message: fmt.Sprintf("unexpected arguments: %s", strings.Join(flags.Args(), " "))}
+	if fs.NArg() != 0 {
+		return invocationError{message: fmt.Sprintf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
 	}
 	return nil
 }
@@ -84,49 +88,18 @@ func printTopLevelHelp(output io.Writer) {
 	fmt.Fprint(output, usageText)
 }
 
-const usageText = `Fern supervises one durable OpenCode workspace in Docker.
-
-Usage:
-  fern <command> [flags]
-  fern help [command]
-
-Commands:
-  init          Create a secure phone-demo configuration
-  doctor        Verify host and private phone-demo readiness
-  github        Publish committed work as a draft pull request
-  up            Run the workspace supervisor and authenticated proxy
-  attach        Open the official client through the Fern proxy
-  status        Show the workspace runtime state
-  logs          Stream workspace container logs
-  down          Remove workspace compute while retaining session data
-  debug events  Stream the backend activity events used by Fern
-  debug wake    Print the phase waterfall for one workspace wake
-  version       Print Fern version information
-
-Examples:
-  fern init --repo /path/to/repository
-  fern up --config fern.yaml
-  fern status --json
-  fern attach
-
-Run 'fern help <command>' for command flags.
-Documentation: https://github.com/nebler/fern
-`
-
 func runHelp(args []string, dispatch func([]string) error) error {
 	if len(args) == 0 {
 		printTopLevelHelp(os.Stdout)
 		return nil
 	}
-	if len(args) == 1 && (args[0] == "debug" || args[0] == "github") {
-		if args[0] == "debug" {
-			fmt.Fprintln(os.Stdout, "Usage:\n  fern debug events [flags]\n  fern debug wake [flags]")
-		} else {
-			fmt.Fprintln(os.Stdout, "Usage:\n  fern github publish [flags]")
+	if len(args) == 1 {
+		if entry := lookupCommand(args[0]); entry != nil && entry.run == nil && len(entry.sub) > 0 {
+			fmt.Fprintln(os.Stdout, subcommandUsage(entry))
+			return nil
 		}
-		return nil
 	}
-	if len(args) > 2 || len(args) == 2 && !((args[0] == "debug" && (args[1] == "events" || args[1] == "wake")) || (args[0] == "github" && args[1] == "publish")) {
+	if len(args) > 2 || (len(args) == 2 && lookupSubcommand(args[0], args[1]) == nil) {
 		return invocationError{message: "usage: fern help [command]"}
 	}
 	helpArgs := append([]string(nil), args...)
@@ -135,7 +108,11 @@ func runHelp(args []string, dispatch func([]string) error) error {
 
 func unknownCommand(args []string) error {
 	command := strings.Join(args, " ")
-	if len(args) > 1 && args[0] != "debug" {
+	// Collapse multi-word invocations to the parent command unless the parent
+	// is a namespace with several subcommands, where the sub name may be the
+	// real typo target.
+	entry := lookupCommand(args[0])
+	if len(args) > 1 && (entry == nil || len(entry.sub) <= 1) {
 		command = args[0]
 	}
 	message := fmt.Sprintf("unknown command %q", command)
@@ -145,12 +122,26 @@ func unknownCommand(args []string) error {
 	return invocationError{message: message}
 }
 
+// suggestionCandidates lists every directly runnable command and every
+// two-level "parent sub" pair, in registry order.
+func suggestionCandidates() []string {
+	names := make([]string, 0, 2*len(commands))
+	for _, entry := range commands {
+		if entry.run != nil {
+			names = append(names, entry.name)
+		}
+		for _, sub := range entry.sub {
+			names = append(names, entry.name+" "+sub.name)
+		}
+	}
+	return names
+}
+
 func suggestCommand(input string) string {
-	commands := []string{"init", "doctor", "github publish", "up", "attach", "down", "status", "logs", "version", "debug events", "debug wake"}
 	best, distance := "", 3
-	for _, command := range commands {
-		if current := editDistance(input, command); current < distance {
-			best, distance = command, current
+	for _, candidate := range suggestionCandidates() {
+		if current := editDistance(input, candidate); current < distance {
+			best, distance = candidate, current
 		}
 	}
 	return best

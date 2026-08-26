@@ -52,6 +52,11 @@ func (s *IntentStore) write(workspace string, intent pauseIntent) error {
 	if err := ensurePrivateDirectory(s.directory, "pause intent"); err != nil {
 		return err
 	}
+	// Reclaim temp files orphaned by a crashed earlier writer: they would
+	// otherwise accumulate forever because only rename or the deferred remove
+	// of the same write cleans them. Files younger than a minute are left
+	// alone; they may belong to a concurrent writer mid-rename.
+	s.reclaimStaleTemporaries()
 	data, err := json.Marshal(intent)
 	if err != nil {
 		return fmt.Errorf("encode pause intent: %w", err)
@@ -134,6 +139,11 @@ func (s *IntentStore) PauseStatus(workspace, containerID string, stoppedAt time.
 		if err != nil {
 			return runtime.PauseIntentNone, fmt.Errorf("decode shutdown intent expiry: %w", err)
 		}
+		// The -5s creation skew tolerates host clock jitter between the
+		// runtime writing the intent (with runtime.ShutdownIntentTTL expiry)
+		// and this classification reading it. The TTL itself is owned by
+		// internal/runtime; this package must not define its own competing
+		// lifetime for shutdown intents.
 		if stoppedAt.IsZero() || stoppedAt.Before(createdAt.Add(-5*time.Second)) || stoppedAt.After(expiresAt) {
 			return runtime.PauseIntentNone, nil
 		}
@@ -166,6 +176,23 @@ func wrapError(operation string, err error) error {
 		return nil
 	}
 	return fmt.Errorf("%s: %w", operation, err)
+}
+
+// reclaimStaleTemporaries removes ".pause-*.tmp" files older than one minute.
+// Every step is best-effort: reclaiming must never fail or delay an intent
+// write, and individual unreadable or undeletable leftovers are harmless.
+func (s *IntentStore) reclaimStaleTemporaries() {
+	stale, err := filepath.Glob(filepath.Join(s.directory, ".pause-*.tmp"))
+	if err != nil {
+		return
+	}
+	for _, candidate := range stale {
+		info, err := os.Stat(candidate)
+		if err != nil || time.Since(info.ModTime()) <= time.Minute {
+			continue
+		}
+		_ = os.Remove(candidate)
+	}
 }
 
 func (s *IntentStore) path(workspace string) string {

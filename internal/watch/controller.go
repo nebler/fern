@@ -21,13 +21,17 @@ const (
 	ObservationInvalidated  ObservationKind = "invalidated"
 )
 
+// Observation is one lifecycle-relevant activity fact for a workspace,
+// tagged with the epoch of the stream generation that produced it.
 type Observation struct {
 	Epoch     uint64
 	Kind      ObservationKind
 	SessionID string
 	Status    string
 	Err       string
-	Handled   chan struct{}
+	// Handled is closed exactly once by the supervisor after the observation
+	// is applied; producers must not close it.
+	Handled chan struct{}
 }
 
 type streamState struct {
@@ -41,6 +45,10 @@ type streamState struct {
 
 // StreamController owns one endpoint generation. Every activity observation
 // carries that generation so stale events cannot authorize a later pause.
+//
+// Concurrency: mu guards state and nextEpoch. operations is a capacity-1
+// token serializing connect/reconnect/stop against each other; it does not
+// stand in for the mutex, which runGeneration callbacks also take.
 type StreamController struct {
 	parent  context.Context
 	options StreamOptions
@@ -102,12 +110,12 @@ func (c *StreamController) replace(ctx context.Context, baseURL string) error {
 		return err
 	}
 
-	c.nextEpoch++
-	epoch := c.nextEpoch
 	streamCtx, cancel := context.WithCancel(c.parent)
 	done := make(chan struct{})
 	ready := make(chan struct{})
 	c.mu.Lock()
+	c.nextEpoch++
+	epoch := c.nextEpoch
 	c.state = streamState{epoch: epoch, baseURL: baseURL, cancel: cancel, done: done, ready: ready}
 	c.mu.Unlock()
 	go c.runGeneration(streamCtx, epoch, baseURL, ready, done)
@@ -136,53 +144,16 @@ func (c *StreamController) replace(ctx context.Context, baseURL string) error {
 func (c *StreamController) runGeneration(ctx context.Context, epoch uint64, baseURL string, ready chan struct{}, done chan struct{}) {
 	defer close(done)
 	defer c.clearState(epoch)
-	backoff := 500 * time.Millisecond
+	backoff := initialBackoff
 	var readyOnce sync.Once
 	for ctx.Err() == nil {
 		start := time.Now()
-		attemptCtx, attemptCancel := context.WithCancel(ctx)
-		options := c.options
-		options.BaseURL = baseURL
-		onConnect := options.OnConnect
-		options.OnConnect = func() {
-			if !c.setConnected(epoch, true) {
-				return
-			}
-			if onConnect != nil {
-				onConnect()
-			}
-			if c.send(attemptCtx, Observation{Epoch: epoch, Kind: ObservationConnected}) {
-				readyOnce.Do(func() { close(ready) })
-			}
+		c.streamEvents(ctx, epoch, baseURL, &readyOnce, ready)
+		if ctx.Err() != nil {
+			return
 		}
-		events := make(chan Event)
-		streamDone := make(chan error, 1)
-		go func() { streamDone <- Stream(attemptCtx, options, events) }()
-		for {
-			select {
-			case event := <-events:
-				observation, ok := statusObservation(epoch, event)
-				if ok {
-					c.send(ctx, observation)
-				}
-			case err := <-streamDone:
-				attemptCancel()
-				if ctx.Err() != nil {
-					return
-				}
-				c.setConnected(epoch, false)
-				c.send(ctx, Observation{Epoch: epoch, Kind: ObservationDisconnected, Err: err.Error()})
-				c.log.Warn("event stream ended", "epoch", epoch, "err", err, "connected_for", time.Since(start).Round(time.Millisecond))
-				goto retry
-			case <-ctx.Done():
-				attemptCancel()
-				waitStream(streamDone)
-				return
-			}
-		}
-	retry:
-		if time.Since(start) > 30*time.Second {
-			backoff = 500 * time.Millisecond
+		if time.Since(start) > maxBackoffReset {
+			backoff = initialBackoff
 		}
 		timer := time.NewTimer(backoff)
 		select {
@@ -192,6 +163,55 @@ func (c *StreamController) runGeneration(ctx context.Context, epoch uint64, base
 			return
 		}
 		backoff = nextBackoff(backoff)
+	}
+}
+
+// streamEvents runs one connection attempt: it streams session.status frames
+// as observations until the stream ends or ctx is canceled. On a stream end
+// while ctx is still live it publishes the disconnected observation for the
+// generation; the caller decides whether to reconnect. ready is closed once,
+// on the first successful connect of this generation.
+func (c *StreamController) streamEvents(ctx context.Context, epoch uint64, baseURL string, readyOnce *sync.Once, ready chan struct{}) {
+	start := time.Now()
+	attemptCtx, attemptCancel := context.WithCancel(ctx)
+	defer attemptCancel()
+	options := c.options
+	options.BaseURL = baseURL
+	onConnect := options.OnConnect
+	options.OnConnect = func() {
+		if !c.setConnected(epoch, true) {
+			return
+		}
+		if onConnect != nil {
+			onConnect()
+		}
+		if c.send(attemptCtx, Observation{Epoch: epoch, Kind: ObservationConnected}) {
+			readyOnce.Do(func() { close(ready) })
+		}
+	}
+	events := make(chan Event)
+	streamDone := make(chan error, 1)
+	go func() { streamDone <- Stream(attemptCtx, options, events) }()
+	for {
+		select {
+		case event := <-events:
+			if observation, ok := statusObservation(epoch, event); ok {
+				c.send(ctx, observation)
+			}
+		case err := <-streamDone:
+			attemptCancel()
+			if ctx.Err() != nil {
+				return
+			}
+			c.setConnected(epoch, false)
+			c.send(ctx, Observation{Epoch: epoch, Kind: ObservationDisconnected, Err: err.Error()})
+			c.log.Warn("event stream ended", "epoch", epoch, "err", err, "connected_for", time.Since(start).Round(time.Millisecond))
+			return
+		case <-ctx.Done():
+			attemptCancel()
+			waitStream(streamDone)
+			return
+		}
 	}
 }
 
@@ -290,7 +310,7 @@ func waitForConnection(ctx context.Context, ready <-chan struct{}) error {
 	if ready == nil {
 		return errors.New("activity stream is not running")
 	}
-	timer := time.NewTimer(10 * time.Second)
+	timer := time.NewTimer(connectTimeout)
 	defer timer.Stop()
 	select {
 	case <-ready:
@@ -298,7 +318,7 @@ func waitForConnection(ctx context.Context, ready <-chan struct{}) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-timer.C:
-		return errors.New("activity stream did not connect within 10s")
+		return fmt.Errorf("activity stream did not connect within %s", connectTimeout)
 	}
 }
 
@@ -312,11 +332,19 @@ func waitDone(ctx context.Context, done <-chan struct{}) error {
 }
 
 func waitDoneAfterCancel(done <-chan struct{}) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
 	defer cancel()
 	return waitDone(ctx, done)
 }
 
+// waitStream bounds the post-cancellation drain of a finished stream attempt
+// with the same window as waitDoneAfterCancel, so a wedged decoder cannot
+// stall generation teardown indefinitely.
 func waitStream(done <-chan error) {
-	<-done
+	ctx, cancel := context.WithTimeout(context.Background(), drainTimeout)
+	defer cancel()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
 }

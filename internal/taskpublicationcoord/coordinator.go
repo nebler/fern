@@ -346,6 +346,10 @@ func permanentFailure(err error) bool {
 		errors.Is(err, taskpublication.ErrGitFailed)
 }
 
+// stateForError maps publication errors into the publication recovery-state
+// vocabulary ("inconclusive", "conflict", "invalid", "unavailable"); it is
+// distinct from taskdelivery's deliveryStateForError, which only distinguishes
+// "conflict" and "unavailable".
 func stateForError(err error) string {
 	if err == nil {
 		return "inconclusive"

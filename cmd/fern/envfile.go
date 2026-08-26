@@ -43,7 +43,8 @@ func readEnvFile(path string) (map[string]string, error) {
 			return nil, fmt.Errorf("parse environment file %q line %d: expected NAME=value", path, line)
 		}
 		value = strings.TrimSpace(value)
-		if len(value) >= 2 && (value[0] == '\'' && value[len(value)-1] == '\'' || value[0] == '"' && value[len(value)-1] == '"') {
+		quoted := len(value) >= 2 && (value[0] == '\'' && value[len(value)-1] == '\'' || value[0] == '"' && value[len(value)-1] == '"')
+		if quoted {
 			value = value[1 : len(value)-1]
 		}
 		if strings.ContainsAny(value, "\x00\r\n") {
@@ -62,7 +63,7 @@ func mergeWorkspaceEnvironment(configured map[string]string, fileValues map[stri
 	for key, value := range configured {
 		merged[key] = value
 	}
-	for _, key := range []string{"ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENCODE_PASSWORD"} {
+	for _, key := range forwardedSecretKeys {
 		value, present := fileValues[key]
 		if !present {
 			continue

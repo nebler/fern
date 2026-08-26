@@ -9,7 +9,8 @@ import (
 	"errors"
 	"io"
 	"net/url"
-	"strings"
+
+	"github.com/nebler/fern/internal/gitref"
 )
 
 const maxOutputBytes = 64 << 10
@@ -72,7 +73,7 @@ func (c *Client) Repository(ctx context.Context, expectedID int64, fullName stri
 // Branch resolves one exact branch in the configured repository and rejects a
 // response that does not prove repository identity, branch name, and SHA-1.
 func (c *Client) Branch(ctx context.Context, expectedID int64, fullName, branch string) (Branch, error) {
-	if expectedID <= 0 || !validRepository(fullName) || !validGitRef(branch) {
+	if expectedID <= 0 || !validRepository(fullName) || gitref.ValidateRef(branch) != nil {
 		return Branch{}, ErrRepository
 	}
 	if _, err := c.Repository(ctx, expectedID, fullName); err != nil {
@@ -91,7 +92,7 @@ func (c *Client) Branch(ctx context.Context, expectedID int64, fullName, branch 
 	if err := decodeBounded(output, &observed); err != nil {
 		return Branch{}, ErrUnavailable
 	}
-	if observed.Name != branch || !validGitOID(observed.SHA) {
+	if observed.Name != branch || !gitref.ValidSHA1(observed.SHA) {
 		return Branch{}, ErrRepository
 	}
 	observed.RepositoryID = expectedID
@@ -114,53 +115,7 @@ func decodeBounded(output []byte, target any) error {
 	return nil
 }
 
-func validLogin(value string) bool {
-	if len(value) < 1 || len(value) > 100 || value[0] == '-' || value[len(value)-1] == '-' {
-		return false
-	}
-	for _, character := range value {
-		if character != '-' && (character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') {
-			return false
-		}
-	}
-	return true
-}
-
+// validRepository delegates to the canonical owner/repository validator.
 func validRepository(value string) bool {
-	owner, repository, found := strings.Cut(value, "/")
-	if !found || strings.Contains(repository, "/") || !validLogin(owner) || len(repository) < 1 || len(repository) > 100 || repository == "." || repository == ".." || strings.HasSuffix(strings.ToLower(repository), ".git") {
-		return false
-	}
-	for _, character := range repository {
-		if character != '-' && character != '_' && character != '.' &&
-			(character < 'a' || character > 'z') && (character < 'A' || character > 'Z') && (character < '0' || character > '9') {
-			return false
-		}
-	}
-	return true
-}
-
-func validGitOID(value string) bool {
-	if len(value) != 40 || value != strings.ToLower(value) {
-		return false
-	}
-	for _, character := range value {
-		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
-			return false
-		}
-	}
-	return true
-}
-
-func validGitRef(value string) bool {
-	if len(value) < 1 || len(value) > 255 || strings.HasPrefix(value, "/") || strings.HasSuffix(value, "/") ||
-		strings.Contains(value, "..") || strings.Contains(value, "//") || strings.Contains(value, "@{") || strings.HasSuffix(value, ".lock") {
-		return false
-	}
-	for _, character := range value {
-		if character < 0x21 || character == 0x7f || strings.ContainsRune(`~^:?*[\`, character) {
-			return false
-		}
-	}
-	return true
+	return gitref.ValidateOwnerRepo(value) == nil
 }

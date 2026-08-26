@@ -326,7 +326,7 @@ func TestRevocationCallbackRunsOnlyAfterSuccessfulPersistence(t *testing.T) {
 	}
 	callbackIDs := make(chan string, 2)
 	callback := func(id string) {
-		if valid, authErr := store.AuthenticateDevice("first", now); authErr != nil || valid {
+		if _, valid, authErr := store.AuthenticateDeviceIdentity("first", now); authErr != nil || valid {
 			t.Errorf("callback ran before durable removal: valid=%t err=%v", valid, authErr)
 		}
 		callbackIDs <- id

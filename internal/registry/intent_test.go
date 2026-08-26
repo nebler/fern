@@ -1,6 +1,7 @@
 package registry
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,6 +88,34 @@ func TestIntentStoreRejectsOversizedFile(t *testing.T) {
 	}
 	if _, err := store.PauseStatus("demo", "container-one", time.Time{}); err == nil {
 		t.Fatal("oversized pause intent was accepted")
+	}
+}
+
+func TestWriteReclaimsCrashOrphanedTemporaries(t *testing.T) {
+	directory := t.TempDir()
+	store := NewIntentStore(directory)
+
+	stale := filepath.Join(directory, ".pause-stale.tmp")
+	if err := os.WriteFile(stale, []byte("orphan"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatal(err)
+	}
+	fresh := filepath.Join(directory, ".pause-fresh.tmp")
+	if err := os.WriteFile(fresh, []byte("in flight"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.BeginPause("demo", "container-one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stale temporary survived a new write: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("fresh concurrent temporary was reclaimed: %v", err)
 	}
 }
 

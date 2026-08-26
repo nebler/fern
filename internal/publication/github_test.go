@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/nebler/fern/internal/gitref"
 )
 
 func TestPublishPreparedReconcilesLostPushAndPullRequestResponses(t *testing.T) {
@@ -343,12 +345,12 @@ func TestPullRequestDiscoveryRejectsMultipleAndNullResponses(t *testing.T) {
 
 func TestValidBranchAllowsFernWorkspaceHyphen(t *testing.T) {
 	t.Parallel()
-	if !ValidBranch("fern/github-test/operation") {
-		t.Fatal("ValidBranch rejected a generated branch containing a workspace hyphen")
+	if gitref.ValidateRef("fern/github-test/operation") != nil {
+		t.Fatal("canonical ref validation rejected a generated branch containing a workspace hyphen")
 	}
 	for _, invalid := range []string{"bad branch", "bad\x00branch", "bad..branch", "bad//branch", "bad.lock"} {
-		if ValidBranch(invalid) {
-			t.Fatalf("ValidBranch accepted %q", invalid)
+		if gitref.ValidateRef(invalid) == nil {
+			t.Fatalf("canonical ref validation accepted %q", invalid)
 		}
 	}
 }

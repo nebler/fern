@@ -23,10 +23,30 @@ const (
 	// defaultWakeTimeout bounds one coalesced wake: Docker start/resume, the
 	// 60s health budget, and activity-observer attach must all fit inside it.
 	defaultWakeTimeout = 90 * time.Second
+	// cleanupTimeout bounds best-effort observer-attach rollback after a
+	// failed wake. It mirrors runtime's cleanupTimeout for the same purpose.
+	cleanupTimeout = 15 * time.Second
 )
 
+// detachedContext derives a bounded context that survives caller cancellation
+// while retaining parent trace values, mirroring runtime.detachedContext for
+// post-failure cleanup on this side of the package boundary.
+func detachedContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(parent), timeout)
+}
+
+// EndpointObserver attaches proxy routing to a freshly attested endpoint. The
+// boolean reports whether the runtime just transitioned compute (created,
+// started, or resumed) rather than adopting an already-running workspace.
 type EndpointObserver func(context.Context, runtime.Endpoint, bool) error
+
+// IdleChecker authoritatively answers whether every OpenCode session served
+// by the endpoint is idle. A non-nil error defers pausing; only an explicit
+// true authorizes stopping compute.
 type IdleChecker func(context.Context, runtime.Endpoint) (bool, error)
+
+// RequestObserver notifies idle policy that a work-class request was admitted.
+// It must be cheap and non-blocking; it runs on the request admission path.
 type RequestObserver func()
 
 type RequestTarget struct {
@@ -38,16 +58,32 @@ type RequestTarget struct {
 type RequestIntent uint8
 
 const (
+	// RequestObserve admits metadata probes against an already-published
+	// endpoint without waking compute and without counting toward admission
+	// fencing.
 	RequestObserve RequestIntent = iota
+	// RequestRead wakes compute when necessary but never invalidates idle
+	// policy: reads do not count as activity for pause decisions.
 	RequestRead
+	// RequestWork wakes compute when necessary and marks activity, deferring
+	// automatic pause while work-class traffic is in flight.
 	RequestWork
 )
 
+// lifecycleRuntime is the subset of runtime.Docker the manager drives during
+// wake, startup reconciliation, pause, and status checks.
 type lifecycleRuntime interface {
 	EnsureRunningObserved(context.Context, runtime.Spec) (runtime.RunningResult, error)
 	ReconcileStartup(context.Context, runtime.Spec) (runtime.StartupResult, error)
 	Pause(context.Context, string) error
 	Status(context.Context, string) (runtime.Observation, error)
+}
+
+// ShutdownPreparer is implemented by runtimes that record an orderly-shutdown
+// recovery intent before Fern exits. Managers tolerate runtimes lacking the
+// capability; see Manager.PrepareShutdown.
+type ShutdownPreparer interface {
+	PrepareShutdown(context.Context, string) error
 }
 
 type wakeCall struct {
@@ -102,6 +138,13 @@ type Manager struct {
 	requestsDone         chan struct{}
 }
 
+// NewManager creates the lifecycle policy owner for exactly one workspace.
+// serviceCtx bounds the manager's lifetime and every internal wait; rt
+// performs Docker lifecycle transitions; observe attaches activity observers
+// to freshly attested endpoints (nil disables attachment); allIdle is the
+// authoritative session-idleness check consulted before any pause (required
+// by pausing managers); onRequest fires when work-class requests are admitted
+// (nil disables the notification).
 func NewManager(serviceCtx context.Context, rt lifecycleRuntime, spec runtime.Spec, observe EndpointObserver, allIdle IdleChecker, onRequest RequestObserver) *Manager {
 	manager := &Manager{
 		serviceCtx:           serviceCtx,
@@ -314,7 +357,7 @@ func (m *Manager) observeAndPublish(ctx context.Context, observation runtime.Obs
 		collector.append("observer_attach", attachStart)
 		if err != nil {
 			if transitioned {
-				cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+				cleanupCtx, cancel := detachedContext(ctx, cleanupTimeout)
 				pauseErr := m.runtime.Pause(cleanupCtx, m.spec.Name)
 				cancel()
 				return RequestTarget{}, errors.Join(fmt.Errorf("attach activity observer: %w", err), pauseErr)
@@ -544,10 +587,10 @@ func (m *Manager) Close(ctx context.Context) error {
 	}
 }
 
+// PrepareShutdown forwards to the runtime's orderly-shutdown hook when the
+// configured runtime implements ShutdownPreparer; otherwise it is a no-op.
 func (m *Manager) PrepareShutdown(ctx context.Context) error {
-	if preparer, ok := m.runtime.(interface {
-		PrepareShutdown(context.Context, string) error
-	}); ok {
+	if preparer, ok := m.runtime.(ShutdownPreparer); ok {
 		return preparer.PrepareShutdown(ctx, m.spec.Name)
 	}
 	return nil
@@ -564,8 +607,17 @@ func (m *Manager) acquireLifecycle(ctx context.Context) error {
 	}
 }
 
+// releaseLifecycle returns the capacity-1 lifecycle token. Every release path
+// holds the token, so the buffered send cannot block; if the channel already
+// holds a value, the token was released twice — a misuse that would silently
+// break mutual exclusion between wake, pause, quiesce, and Close — and is
+// fatal by design rather than allowed to corrupt serialization.
 func (m *Manager) releaseLifecycle() {
-	m.lifecycle <- struct{}{}
+	select {
+	case m.lifecycle <- struct{}{}:
+	default:
+		panic("lifecycle token released twice")
+	}
 }
 
 func (m *Manager) isClosing() bool {

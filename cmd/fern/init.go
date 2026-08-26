@@ -35,12 +35,14 @@ func runInit(args []string) error {
 	if err != nil {
 		return fmt.Errorf("resolve repository: %w", err)
 	}
-	password := make([]byte, 64)
-	if _, err := rand.Read(password); err != nil {
+	// seed is split into two independent 32-byte secrets: the first half
+	// becomes the OpenCode password, the second half the control password.
+	seed := make([]byte, 64)
+	if _, err := rand.Read(seed); err != nil {
 		return fmt.Errorf("generate OpenCode password: %w", err)
 	}
-	openCodeSecret := hex.EncodeToString(password[:32])
-	controlSecret := hex.EncodeToString(password[32:])
+	openCodeSecret := hex.EncodeToString(seed[:32])
+	controlSecret := hex.EncodeToString(seed[32:])
 	values := config.Default(absRepo)
 	values.Workspace.Name = *name
 	values.Workspace.Image = *image

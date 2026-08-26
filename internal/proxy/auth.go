@@ -4,18 +4,14 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"net/http"
-
-	"github.com/nebler/fern/internal/runtime"
 )
 
+// ControlAuth carries the operator-facing Fern control password shared by the
+// gateway surfaces that guard /fern routes.
 type ControlAuth struct {
+	// Password is the configured control password; empty disables control
+	// authentication.
 	Password string
-}
-
-func (auth ControlAuth) Apply(request interface{ SetBasicAuth(string, string) }) {
-	if auth.Password != "" {
-		request.SetBasicAuth("fern", auth.Password)
-	}
 }
 
 type basicAuthenticator struct {
@@ -48,18 +44,4 @@ func (auth basicAuthenticator) valid(request *http.Request) bool {
 func (auth basicAuthenticator) reject(writer http.ResponseWriter) {
 	writer.Header().Set("WWW-Authenticate", `Basic realm="`+auth.realm+`"`)
 	http.Error(writer, "unauthorized", http.StatusUnauthorized)
-}
-
-func requireServerAuth(next http.Handler, auth runtime.ServerAuth) http.Handler {
-	allowed := newBasicAuthenticator("opencode", auth.Password, "opencode")
-	if !allowed.enabled {
-		return next
-	}
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if !allowed.valid(request) {
-			allowed.reject(writer)
-			return
-		}
-		next.ServeHTTP(writer, request)
-	})
 }

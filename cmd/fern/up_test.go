@@ -7,52 +7,6 @@ import (
 	"github.com/nebler/fern/internal/config"
 )
 
-func TestMissingGitHubBindingDoesNotResolveGitHubCLI(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	workspace := config.Default(t.TempDir()).Workspace
-	publisher, err := newWorkspacePublisher(workspace)
-	if err != nil || publisher != nil {
-		t.Fatalf("publisher=%v err=%v", publisher, err)
-	}
-}
-
-func TestGitHubAppBindingDoesNotResolveLegacyGitHubCLI(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	workspace := config.Default(t.TempDir()).Workspace
-	workspace.GitHub = &config.WorkspaceGitHub{
-		Mode:           config.GitHubModeGitHubAppBroker,
-		Hostname:       "github.com",
-		InstallationID: 7,
-		Repository:     config.GitHubRepository{ID: 123, FullName: "owner/repo"},
-	}
-	publisher, err := newWorkspacePublisher(workspace)
-	if err != nil || publisher != nil {
-		t.Fatalf("publisher=%v err=%v", publisher, err)
-	}
-}
-
-func TestWorkspaceGHBindingDoesNotResolveHostGitHubCLI(t *testing.T) {
-	t.Setenv("PATH", t.TempDir())
-	workspace := config.Default(t.TempDir()).Workspace
-	workspace.GitHub = &config.WorkspaceGitHub{
-		Mode:       config.GitHubModeWorkspaceGH,
-		Hostname:   "github.com",
-		Repository: config.GitHubRepository{ID: 123, FullName: "owner/repo"},
-	}
-	publisher, err := newWorkspacePublisher(workspace)
-	if err != nil || publisher != nil {
-		t.Fatalf("publisher=%v err=%v", publisher, err)
-	}
-}
-
-func TestUnknownGitHubModeFailsClosed(t *testing.T) {
-	workspace := config.Default(t.TempDir()).Workspace
-	workspace.GitHub = &config.WorkspaceGitHub{Mode: "unknown"}
-	if _, err := newWorkspacePublisher(workspace); err == nil {
-		t.Fatal("unknown GitHub authority selected legacy publisher")
-	}
-}
-
 func TestTrustedProxyOriginsPreserveLocalCompatibility(t *testing.T) {
 	t.Parallel()
 	cfg := config.Default(t.TempDir())

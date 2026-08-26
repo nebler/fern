@@ -147,11 +147,6 @@ func (g *Generator) VerificationID() (VerificationID, error) {
 	return VerificationID(value), err
 }
 
-func (g *Generator) PublicationID() (PublicationID, error) {
-	value, err := g.fernID("pub_")
-	return PublicationID(value), err
-}
-
 func (g *Generator) PublicationOperationID() (PublicationOperationID, error) {
 	value, err := g.fernID("op_")
 	return PublicationOperationID(value), err

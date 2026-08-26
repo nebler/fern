@@ -38,6 +38,11 @@ BEGIN
 END;
 `
 
+// initialSchema carries the delivery lease bound enforced in SQL. The
+// attempts_delivery_resume_integrity trigger below caps a resumed claim with
+// `NEW.delivery_claim_expires_at > NEW.updated_at + 300000`; the literal
+// 300000 is milliseconds and MUST equal taskstore.maxDeliveryLease (5m)
+// declared in delivery.go. If one side changes, change both.
 const initialSchema = `
 CREATE TABLE schema_migrations (
     version INTEGER PRIMARY KEY,
@@ -1050,6 +1055,35 @@ CREATE TRIGGER publications_delete_guard BEFORE DELETE ON publications
 BEGIN SELECT RAISE(ABORT, 'publications are durable'); END;
 `
 
+// userAuthorizedSealSchema (migration 4) recreates triggers first created by
+// earlier migrations. Deltas versus those v3 versions, trigger by trigger:
+//
+//   - results_insert_integrity: same manifest/proof shape as v3 plus the
+//     completion-authority branch. The shared WHERE now also demands neither
+//     task nor attempt already sealed (v3 expressed that via t.state='running'
+//     /a.state='succeeded', which moved into the branches), requires event
+//     $.completionAuthority to equal NEW.completion_authority, keeps v3's
+//     running/succeeded states for 'execution_success' (which must carry no
+//     seal request or authorizer), and adds a 'user_seal' branch accepting
+//     task running/input_required with attempt admitted/running/input_required
+//     only when a claimed seal_requests row matches every expected field.
+//   - attempts_result_seal_integrity: v3 required succeeded→succeeded; v4
+//     branches on r.completion_authority — 'execution_success' keeps
+//     succeeded→succeeded, 'user_seal' admits admitted/running/input_required
+//     superseding to 'superseded'.
+//   - tasks_result_seal_integrity: v3 required OLD.state='running'; v4 moves
+//     that into the authority branch ('execution_success': running + attempt
+//     succeeded; 'user_seal': running/input_required + attempt superseded).
+//   - verifications_insert_integrity: only delta vs v3 is the widened attempt
+//     guard: a.state='succeeded' OR (a.state='superseded' AND
+//     r.completion_authority='user_seal').
+//   - verifications_update_integrity: identical widening inside the transition
+//     proof EXISTS clause; everything else matches v3 verbatim.
+//   - publications_insert_integrity: same single widening as the verification
+//     insert trigger.
+//   - publications_update_integrity: same single widening inside the
+//     transition proof EXISTS clause; effect-phase and completion-observation
+//     checks match v3 verbatim.
 const userAuthorizedSealSchema = `
 CREATE TABLE seal_requests (
     id TEXT PRIMARY KEY CHECK(

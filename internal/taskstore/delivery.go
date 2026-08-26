@@ -9,15 +9,19 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
+	"github.com/nebler/fern/internal/evidence"
 	"github.com/nebler/fern/internal/task"
 )
 
 const (
 	maxDeliveryEvidenceBytes = 16 * 1024
-	maxDeliveryLease         = 5 * time.Minute
+	// maxDeliveryLease is the Go-side delivery lease bound. The SQL mirror of
+	// this constant is the 300000-millisecond literal in the
+	// attempts_delivery_resume_integrity trigger predicate
+	// (migrations.go, initialSchema); they MUST stay equal.
+	maxDeliveryLease = 5 * time.Minute
 )
 
 // FindPreparedAttempt returns the next accepted task whose current attempt can
@@ -964,7 +968,7 @@ func validateDeliveryEvidence(payload json.RawMessage, expected [32]byte) error 
 		return fmt.Errorf("%w: delivery evidence hash", ErrInvalidInput)
 	}
 	var decoded any
-	if err := json.Unmarshal(payload, &decoded); err != nil || containsSensitiveEvidenceKey(decoded) {
+	if json.Unmarshal(payload, &decoded) != nil || evidence.ContainsSensitiveKey(decoded) {
 		return fmt.Errorf("%w: delivery evidence contains a sensitive raw field", ErrInvalidInput)
 	}
 	return nil
@@ -1035,27 +1039,4 @@ func deliveryResumePayload(attemptID task.AttemptID, attemptRevision, taskRevisi
 		return nil, fmt.Errorf("%w: encoded delivery resume payload", ErrCorruptStore)
 	}
 	return payload, nil
-}
-
-func containsSensitiveEvidenceKey(value any) bool {
-	switch value := value.(type) {
-	case map[string]any:
-		for key, child := range value {
-			normalized := strings.NewReplacer("_", "", "-", "", ".", "").Replace(strings.ToLower(key))
-			switch normalized {
-			case "prompt", "rawprompt", "credential", "credentials", "authorization", "token", "cookie", "setcookie", "body", "rawbody", "requestbody", "responsebody":
-				return true
-			}
-			if containsSensitiveEvidenceKey(child) {
-				return true
-			}
-		}
-	case []any:
-		for _, child := range value {
-			if containsSensitiveEvidenceKey(child) {
-				return true
-			}
-		}
-	}
-	return false
 }

@@ -57,7 +57,7 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 	}
 	if path == "/fern/api/v1/devices" {
 		if store == nil {
-			http.Error(writer, "control store unavailable", http.StatusServiceUnavailable)
+			writeUnavailable(writer, "control store")
 			return true
 		}
 		if request.Method != http.MethodGet {
@@ -70,7 +70,7 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 	}
 	if strings.HasPrefix(path, "/fern/api/v1/devices/") {
 		if store == nil {
-			http.Error(writer, "control store unavailable", http.StatusServiceUnavailable)
+			writeUnavailable(writer, "control store")
 			return true
 		}
 		if request.Method != http.MethodDelete {
@@ -86,7 +86,7 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 			if errors.Is(err, os.ErrNotExist) {
 				http.NotFound(writer, request)
 			} else {
-				http.Error(writer, "control state unavailable", http.StatusServiceUnavailable)
+				writeUnavailable(writer, "control state")
 			}
 			return true
 		}
@@ -95,7 +95,7 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 	}
 	if path == "/fern/api/v1/workflows" {
 		if store == nil {
-			http.Error(writer, "control store unavailable", http.StatusServiceUnavailable)
+			writeUnavailable(writer, "control store")
 			return true
 		}
 		switch request.Method {
@@ -115,6 +115,8 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 			}
 			workflow, err := store.CreateWorkflow(input.Title, input.SessionID, time.Now())
 			if err != nil {
+				// 422 validation feedback: this error text is user-facing by
+				// design and names the rejected workflow input.
 				http.Error(writer, err.Error(), http.StatusUnprocessableEntity)
 				return true
 			}
@@ -126,7 +128,7 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 	}
 	if path == "/fern/api/v1/publications" {
 		if store == nil {
-			http.Error(writer, "control store unavailable", http.StatusServiceUnavailable)
+			writeUnavailable(writer, "control store")
 			return true
 		}
 		if request.Method != http.MethodGet {
@@ -151,7 +153,7 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 	}
 	if strings.HasPrefix(path, "/fern/api/v1/workflows/") {
 		if store == nil {
-			http.Error(writer, "control store unavailable", http.StatusServiceUnavailable)
+			writeUnavailable(writer, "control store")
 			return true
 		}
 		if request.Method != http.MethodGet {
@@ -182,7 +184,7 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 	}
 	if path == "/fern/workflows" && request.Method == http.MethodPost {
 		if store == nil {
-			http.Error(writer, "control store unavailable", http.StatusServiceUnavailable)
+			writeUnavailable(writer, "control store")
 			return true
 		}
 		request.Body = http.MaxBytesReader(writer, request.Body, 16<<10)
@@ -191,6 +193,8 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 			return true
 		}
 		if _, err := store.CreateWorkflow(request.FormValue("title"), request.FormValue("sessionId"), time.Now()); err != nil {
+			// 422 validation feedback: this error text is user-facing by design
+			// and names the rejected workflow form.
 			http.Error(writer, err.Error(), http.StatusUnprocessableEntity)
 			return true
 		}
@@ -199,7 +203,7 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 	}
 	if strings.HasPrefix(path, "/fern/devices/") && strings.HasSuffix(path, "/revoke") && request.Method == http.MethodPost {
 		if store == nil {
-			http.Error(writer, "control store unavailable", http.StatusServiceUnavailable)
+			writeUnavailable(writer, "control store")
 			return true
 		}
 		id := strings.TrimSuffix(strings.TrimPrefix(path, "/fern/devices/"), "/revoke")
@@ -208,7 +212,7 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 			return true
 		}
 		if err := revokeDevice(store, id, store.CancelDeviceRequests); err != nil && !errors.Is(err, os.ErrNotExist) {
-			http.Error(writer, "control state unavailable", http.StatusServiceUnavailable)
+			writeUnavailable(writer, "control state")
 			return true
 		}
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -236,7 +240,7 @@ func publishWorkflow(writer http.ResponseWriter, request *http.Request, controls
 		return
 	}
 	if controls.Store == nil || controls.Publications == nil {
-		http.Error(writer, "publication unavailable", http.StatusServiceUnavailable)
+		writeUnavailable(writer, "publication")
 		return
 	}
 	workflow, exists := controls.Store.Workflow(workflowID)
@@ -254,10 +258,10 @@ func publishWorkflow(writer http.ResponseWriter, request *http.Request, controls
 	if workflow.PublicationID != "" {
 		publicationRecord, exists = controls.Store.Publication(workflow.PublicationID)
 		if !exists {
-			http.Error(writer, "publication state unavailable", http.StatusServiceUnavailable)
+			writeUnavailable(writer, "publication state")
 			return
 		}
-		if publicationRecord.State == "published" {
+		if publicationRecord.State == control.PublicationPublished {
 			writePublicationResponse(writer, request, publicationRecord, jsonRequest)
 			return
 		}
@@ -285,6 +289,8 @@ func publishWorkflow(writer http.ResponseWriter, request *http.Request, controls
 		if err := publication.ValidateRequest(publication.Request{
 			Operation: input.Operation, Base: input.Base, Title: input.Title, Body: input.Body,
 		}); err != nil {
+			// 422 validation feedback: this error text is user-facing by design
+			// and names the rejected publication request.
 			http.Error(writer, err.Error(), http.StatusUnprocessableEntity)
 			return
 		}
@@ -340,7 +346,7 @@ func writeJSON(writer http.ResponseWriter, value any, err error) {
 
 func writeJSONStatus(writer http.ResponseWriter, status int, value any, err error) {
 	if err != nil {
-		http.Error(writer, "control state unavailable", http.StatusServiceUnavailable)
+		writeUnavailable(writer, "control state")
 		return
 	}
 	writer.Header().Set("Content-Type", "application/json")
@@ -351,6 +357,13 @@ func writeJSONStatus(writer http.ResponseWriter, status int, value any, err erro
 	}
 	writer.WriteHeader(status)
 	_, _ = writer.Write(buffer.Bytes())
+}
+
+// writeUnavailable answers 503 with the single "<scope> unavailable" vocabulary
+// shared by every Fern gateway dependency failure, so clients and tests can
+// match one family of messages instead of per-route phrasings.
+func writeUnavailable(writer http.ResponseWriter, scope string) {
+	http.Error(writer, scope+" unavailable", http.StatusServiceUnavailable)
 }
 
 func sameOrigin(request *http.Request) bool {

@@ -10,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -108,7 +107,7 @@ func NewOnboardingHTTP(rootOrigin, appName string, states onboardingStatePersist
 func NewOnboardingHTTPWithSetupOrigin(rootOrigin, setupRootOrigin, appName string, states onboardingStatePersistence, exchanger manifestExchanger, credentials credentialPersistence, random io.Reader, now func() time.Time) (*OnboardingHTTP, error) {
 	origin, err := parseCanonicalRootOrigin(rootOrigin)
 	setupOrigin, setupErr := parseCanonicalSetupOrigin(setupRootOrigin)
-	if err != nil || setupErr != nil || nilDependency(states) || nilDependency(exchanger) || nilDependency(credentials) || nilDependency(random) || now == nil {
+	if err != nil || setupErr != nil || isNilInterface(states) || isNilInterface(exchanger) || isNilInterface(credentials) || isNilInterface(random) || now == nil {
 		return nil, ErrInvalidOnboardingHTTPConfiguration
 	}
 	manifest, err := GenerateAppManifest(appName, rootOrigin, rootOrigin+GitHubAppCallbackPath)
@@ -199,17 +198,16 @@ func (handler *OnboardingHTTP) setup(writer http.ResponseWriter, request *http.R
 }
 
 func (handler *OnboardingHTTP) callback(writer http.ResponseWriter, request *http.Request) {
-	values, ok := exactCallbackQuery(request.URL)
+	callbackCode, state, ok := exactCallbackQuery(request.URL)
 	if !ok {
 		onboardingBadRequest(writer)
 		return
 	}
-	codeValue, state := values[0], values[1]
 	if _, err := onboardingStateHash(state); err != nil {
 		onboardingBadRequest(writer)
 		return
 	}
-	code, err := NewManifestCode(codeValue)
+	code, err := NewManifestCode(callbackCode)
 	if err != nil {
 		onboardingBadRequest(writer)
 		return
@@ -261,7 +259,7 @@ func (handler *OnboardingHTTP) callback(writer http.ResponseWriter, request *htt
 			return
 		}
 	}
-	claim, err := handler.states.Claim(request.Context(), state, flow.binding, sha256.Sum256([]byte(codeValue)), flow.claimID, now)
+	claim, err := handler.states.Claim(request.Context(), state, flow.binding, sha256.Sum256([]byte(callbackCode)), flow.claimID, now)
 	if err != nil {
 		if errors.Is(err, ErrOnboardingStateRecoveryRequired) {
 			onboardingRecoveryRequired(writer)
@@ -391,19 +389,6 @@ func parseCanonicalRootOrigin(value string) (*url.URL, error) {
 	return parsed, nil
 }
 
-func nilDependency(value any) bool {
-	if value == nil {
-		return true
-	}
-	reflected := reflect.ValueOf(value)
-	switch reflected.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return reflected.IsNil()
-	default:
-		return false
-	}
-}
-
 func exactOnboardingQuery(target *url.URL, key string, maximum int) (string, bool) {
 	if target == nil || target.ForceQuery || target.RawQuery == "" || len(target.RawQuery) > maximum {
 		return "", false
@@ -423,17 +408,17 @@ func validOnboardingHTTPReturnPath(value string) bool {
 	return err == nil && parsed.RawPath == "" && parsed.EscapedPath() == parsed.Path
 }
 
-func exactCallbackQuery(target *url.URL) ([2]string, bool) {
-	var result [2]string
+// exactCallbackQuery extracts the two required callback parameters. The named
+// results make the positional contract explicit: code first, then state.
+func exactCallbackQuery(target *url.URL) (code, state string, ok bool) {
 	if target == nil || target.ForceQuery || target.RawQuery == "" || len(target.RawQuery) > maxOnboardingCallbackQueryBytes {
-		return result, false
+		return "", "", false
 	}
 	query, err := url.ParseQuery(target.RawQuery)
 	if err != nil || len(query) != 2 || len(query["code"]) != 1 || len(query["state"]) != 1 {
-		return result, false
+		return "", "", false
 	}
-	result[0], result[1] = query["code"][0], query["state"][0]
-	return result, true
+	return query["code"][0], query["state"][0], true
 }
 
 func setOnboardingHTTPHeaders(header http.Header) {

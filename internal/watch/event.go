@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,31 @@ import (
 	"github.com/nebler/fern/internal/runtime"
 )
 
+// Shared stream timing and framing budgets. Used by Stream/StreamForever and
+// by StreamController so reconnect behavior cannot drift between the two.
+const (
+	// initialBackoff is the first reconnect delay after a failed connection.
+	initialBackoff = 500 * time.Millisecond
+	// maxBackoffReset is the connected duration after which backoff resets to
+	// initialBackoff instead of continuing to grow.
+	maxBackoffReset = 30 * time.Second
+	// maxFrameBytes bounds one decoded SSE frame (all data lines joined).
+	maxFrameBytes = 4 << 20 // 4 MiB
+	// connectTimeout bounds a single connection setup attempt.
+	connectTimeout = 10 * time.Second
+	// drainTimeout bounds post-cancellation waits on goroutines already told
+	// to stop.
+	drainTimeout = 5 * time.Second
+)
+
+// errStreamClosed reports a clean server-side close of an otherwise healthy
+// event stream. StreamForever treats it as expected behavior (Info) rather
+// than a failure (Warn).
+var errStreamClosed = errors.New("event stream closed")
+
+// Event is one decoded SSE frame from the OpenCode event feed. Properties
+// carries the V1 envelope payload field and Data the V2 field; consumers
+// fall back between them per endpoint version.
 type Event struct {
 	ID         string          `json:"id,omitempty"`
 	Type       string          `json:"type"`
@@ -20,10 +46,17 @@ type Event struct {
 	Data       json.RawMessage `json:"data"`
 }
 
+// StreamOptions configures one event-stream connection.
 type StreamOptions struct {
-	BaseURL   string
-	Auth      runtime.ServerAuth
-	Client    *http.Client
+	// BaseURL is the OpenCode origin; /api/event is appended.
+	BaseURL string
+	// Auth carries optional basic-auth credentials.
+	Auth runtime.ServerAuth
+	// Client optionally overrides the HTTP client; nil selects a client with
+	// a bounded response-header timeout.
+	Client *http.Client
+	// OnConnect, when set, runs once per successful upgrade before frames
+	// are decoded.
 	OnConnect func()
 }
 
@@ -62,7 +95,7 @@ func Stream(ctx context.Context, options StreamOptions, out chan<- Event) error 
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	scanner.Buffer(make([]byte, 64*1024), maxFrameBytes)
 	var data []string
 	frameBytes := 0
 	emit := func() error {
@@ -100,8 +133,8 @@ func Stream(ctx context.Context, options StreamOptions, out chan<- Event) error 
 		if strings.HasPrefix(line, "data:") {
 			value := strings.TrimPrefix(strings.TrimPrefix(line, "data:"), " ")
 			frameBytes += len(value) + 1
-			if frameBytes > 4*1024*1024 {
-				return fmt.Errorf("SSE frame exceeds 4 MiB")
+			if frameBytes > maxFrameBytes {
+				return fmt.Errorf("SSE frame exceeds %d bytes", maxFrameBytes)
 			}
 			data = append(data, value)
 		}
@@ -109,25 +142,33 @@ func Stream(ctx context.Context, options StreamOptions, out chan<- Event) error 
 	if err := scanner.Err(); err != nil {
 		return err
 	}
-	return fmt.Errorf("event stream closed")
+	return errStreamClosed
 }
 
-// StreamForever is used by the diagnostic command. Lifecycle observation uses
-// StreamController, which also publishes connection epochs.
+// StreamForever reconnects Stream until ctx is done. Reconnect delay doubles
+// from initialBackoff up to a 15s cap and resets after any connection that
+// survived maxBackoffReset. A graceful peer close (errStreamClosed) logs at
+// Info; every other stream termination logs at Warn. It is used by the
+// diagnostic command; lifecycle observation uses StreamController, which also
+// publishes connection epochs.
 func StreamForever(ctx context.Context, options StreamOptions, out chan<- Event, log *slog.Logger) {
 	if log == nil {
 		log = slog.Default()
 	}
-	backoff := 500 * time.Millisecond
+	backoff := initialBackoff
 	for ctx.Err() == nil {
 		start := time.Now()
 		err := Stream(ctx, options, out)
 		if ctx.Err() != nil {
 			return
 		}
-		log.Warn("event stream ended", "err", err, "connected_for", time.Since(start).Round(time.Millisecond))
-		if time.Since(start) > 30*time.Second {
-			backoff = 500 * time.Millisecond
+		if errors.Is(err, errStreamClosed) {
+			log.Info("event stream closed", "connected_for", time.Since(start).Round(time.Millisecond))
+		} else {
+			log.Warn("event stream ended", "err", err, "connected_for", time.Since(start).Round(time.Millisecond))
+		}
+		if time.Since(start) > maxBackoffReset {
+			backoff = initialBackoff
 		}
 		timer := time.NewTimer(backoff)
 		select {

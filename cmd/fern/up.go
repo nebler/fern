@@ -17,8 +17,6 @@ import (
 	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/proxy"
-	"github.com/nebler/fern/internal/publication"
-	"github.com/nebler/fern/internal/registry"
 	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/taskpublicationcoord"
 	"github.com/nebler/fern/internal/watch"
@@ -26,57 +24,22 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+// observationBufferSize deep-queues workspace activity observations so the
+// manager can request immediate attention without blocking on the supervisor.
+const observationBufferSize = 64
+
+// managerCloseTimeout bounds each manager close attempt; manager-owned wake and
+// rollback goroutines get this long to hand back before resources are leaked.
+const managerCloseTimeout = 10 * time.Second
+
 func runUp(args []string, log *slog.Logger) error {
-	fs := newFlagSet("up", "Run the workspace supervisor and authenticated proxy.")
-	configPath := fs.String("config", "fern.yaml", "configuration file")
-	envPath := fs.String("env-file", "", "protected environment file")
-	name := fs.String("name", "", "workspace name")
-	image := fs.String("image", "", "workspace image")
-	repo := fs.String("repo", "", "host repository path")
-	memory := fs.String("memory", "", "memory limit (for example 8Gi)")
-	idle := fs.String("idle", "", "idle duration before stopping")
-	idleMode := fs.String("idle-mode", "", "idle suspension mechanism: stop or freeze")
-	listenAddress := fs.String("listen", "", "remote/device proxy listen address")
-	operatorListenAddress := fs.String("operator-listen", "", "host/operator proxy listen address")
-	if err := parseFlags(fs, args); err != nil {
-		return err
-	}
-	cwd, err := os.Getwd()
+	opts, err := parseUpFlags(args)
 	if err != nil {
 		return err
 	}
-	values := map[string]string(nil)
-	if *envPath != "" {
-		values, err = readEnvFile(*envPath)
-		if err != nil {
-			return err
-		}
-	}
-	cfg, err := config.LoadWithEnvironment(*configPath, cwd, flagSet(fs, "config"), config.Overrides{
-		Name: optionalFlag(fs, "name", name), Image: optionalFlag(fs, "image", image),
-		Repo: optionalFlag(fs, "repo", repo), Memory: optionalFlag(fs, "memory", memory),
-		IdleAfter: optionalFlag(fs, "idle", idle), IdleMode: optionalFlag(fs, "idle-mode", idleMode),
-		Listen:         optionalFlag(fs, "listen", listenAddress),
-		OperatorListen: optionalFlag(fs, "operator-listen", operatorListenAddress),
-	}, values)
+	cfg, spec, err := loadUpSpec(opts)
 	if err != nil {
 		return err
-	}
-	if values != nil {
-		cfg.Workspace.Env = mergeWorkspaceEnvironment(cfg.Workspace.Env, values)
-	}
-	cfg.Workspace.Env = forwardedEnvironment(cfg.Workspace.Env)
-	if err := config.Validate(cfg); err != nil {
-		return err
-	}
-	memoryBytes, err := config.ParseMemoryBytes(cfg.Workspace.Memory)
-	if err != nil {
-		return err
-	}
-	spec := runtime.Spec{
-		Name: cfg.Workspace.Name, Image: cfg.Workspace.Image, RepoPath: cfg.Workspace.Repo,
-		MemoryBytes: memoryBytes, Env: cfg.Workspace.Env,
-		WorkspaceGH: cfg.Workspace.GitHub != nil && cfg.Workspace.GitHub.Mode == config.GitHubModeWorkspaceGH,
 	}
 	auth := spec.ServerAuth()
 
@@ -92,46 +55,183 @@ func runUp(args []string, log *slog.Logger) error {
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 	group, serviceCtx := errgroup.WithContext(rootCtx)
-	lockDir, err := statePath("locks")
-	if err != nil {
-		return err
-	}
-	lease, err := registry.Acquire(lockDir, spec.Name)
+	lease, err := acquireWorkspaceLease(spec.Name)
 	if err != nil {
 		return err
 	}
 	defer lease.Release()
-	controlDir, err := statePath("control")
+
+	rt, err := assembleServices(serviceCtx, cfg, spec, auth, trustedProxyOrigins(cfg), remoteListener, operatorListener, log)
 	if err != nil {
 		return err
 	}
-	publisher, err := newWorkspacePublisher(cfg.Workspace)
-	if err != nil {
-		return err
-	}
-	docker, err := newDockerWithSuspend(log, runtime.SuspendKind(cfg.IdleMode))
-	if err != nil {
-		return err
-	}
-	managerStarted, managerClosed := false, false
-	defer func() {
-		// A timed-out Manager.Close means manager-owned wake or rollback work may
-		// still be using Docker. Leaking the client until process exit is safer
-		// than racing those goroutines with client shutdown.
-		if !managerStarted || managerClosed {
-			docker.Close()
-		}
-	}()
-	controlStore, err := control.Open(controlDir, spec.Name)
-	if err != nil {
-		return err
+	// Deferred releases execute in the historical teardown order: task store,
+	// guarded Docker close, lease, listeners, signal restoration.
+	defer rt.lifecycle.release()
+	if rt.tasks != nil {
+		defer rt.tasks.store.Close()
 	}
 
-	observations := make(chan watch.Observation, 64)
+	startSupervisor(group, rt, serviceCtx)
+	if rt.tasks != nil {
+		startTaskCoordinators(group, rt.tasks, serviceCtx, log, spec.Name)
+	}
+	startProxyServers(group, rt, serviceCtx, log)
+
+	fmt.Printf("workspace: %s\nremote: %s\noperator: %s\nidle: %s after %s\nready in: %s\nattach: fern attach\n",
+		spec.Name, rt.origins.Remote, rt.origins.Operator, cfg.IdleMode, cfg.IdleAfter, time.Since(rt.start).Round(time.Millisecond))
+	log.Info("proxy listeners ready", "remote_listener", remoteListener.Addr(), "remote_origin", rt.origins.Remote,
+		"operator", rt.origins.Operator, "workspace", spec.Name, "idle_mode", cfg.IdleMode)
+	return awaitShutdown(group, rt, rootCtx)
+}
+
+type upOptions struct {
+	configPath     string
+	envPath        string
+	configRequired bool
+	overrides      config.Overrides
+}
+
+func parseUpFlags(args []string) (upOptions, error) {
+	fs := newFlagSet("up", "Run the workspace supervisor and authenticated proxy.")
+	configPath := fs.String("config", "fern.yaml", "configuration file")
+	envPath := fs.String("env-file", "", "protected environment file")
+	name := fs.String("name", "", "workspace name")
+	image := fs.String("image", "", "workspace image")
+	repo := fs.String("repo", "", "host repository path")
+	memory := fs.String("memory", "", "memory limit (for example 8Gi)")
+	idle := fs.String("idle", "", "idle duration before stopping")
+	idleMode := fs.String("idle-mode", "", "idle suspension mechanism: stop or freeze")
+	listenAddress := fs.String("listen", "", "remote/device proxy listen address")
+	operatorListenAddress := fs.String("operator-listen", "", "host/operator proxy listen address")
+	if err := parseFlags(fs, args); err != nil {
+		return upOptions{}, err
+	}
+	return upOptions{
+		configPath:     *configPath,
+		envPath:        *envPath,
+		configRequired: flagProvided(fs, "config"),
+		overrides: config.Overrides{
+			Name: optionalFlag(fs, "name", name), Image: optionalFlag(fs, "image", image),
+			Repo: optionalFlag(fs, "repo", repo), Memory: optionalFlag(fs, "memory", memory),
+			IdleAfter: optionalFlag(fs, "idle", idle), IdleMode: optionalFlag(fs, "idle-mode", idleMode),
+			Listen:         optionalFlag(fs, "listen", listenAddress),
+			OperatorListen: optionalFlag(fs, "operator-listen", operatorListenAddress),
+		},
+	}, nil
+}
+
+// loadUpSpec loads configuration through the shared command preamble, validates
+// it, and derives the Docker runtime specification from the workspace section.
+func loadUpSpec(opts upOptions) (config.Config, runtime.Spec, error) {
+	cfg, _, err := loadCommandConfig(opts.configPath, opts.configRequired, opts.envPath, opts.overrides)
+	if err != nil {
+		return config.Config{}, runtime.Spec{}, err
+	}
+	if err := config.Validate(cfg); err != nil {
+		return config.Config{}, runtime.Spec{}, err
+	}
+	memoryBytes, err := config.ParseMemoryBytes(cfg.Workspace.Memory)
+	if err != nil {
+		return config.Config{}, runtime.Spec{}, err
+	}
+	spec := runtime.Spec{
+		Name: cfg.Workspace.Name, Image: cfg.Workspace.Image, RepoPath: cfg.Workspace.Repo,
+		MemoryBytes: memoryBytes, Env: cfg.Workspace.Env,
+		WorkspaceGH: cfg.Workspace.GitHub != nil && cfg.Workspace.GitHub.Mode == config.GitHubModeWorkspaceGH,
+	}
+	return cfg, spec, nil
+}
+
+// dockerLifecycle pairs the Docker client with manager shutdown bookkeeping.
+type dockerLifecycle struct {
+	docker         *runtime.Docker
+	manager        *workspace.Manager
+	managerStarted bool
+	managerClosed  bool
+}
+
+func newDockerLifecycle(log *slog.Logger, suspend runtime.SuspendKind) (*dockerLifecycle, error) {
+	docker, err := newDockerWithSuspend(log, suspend)
+	if err != nil {
+		return nil, err
+	}
+	return &dockerLifecycle{docker: docker}, nil
+}
+
+func (l *dockerLifecycle) closeManager(ctx context.Context) error {
+	err := l.manager.Close(ctx)
+	if err == nil {
+		l.managerClosed = true
+	}
+	return err
+}
+
+// release closes the Docker client unless a timed-out manager close means
+// manager-owned wake or rollback work may still be using it. Leaking the client
+// until process exit is safer than racing those goroutines with shutdown.
+func (l *dockerLifecycle) release() {
+	if !l.managerStarted || l.managerClosed {
+		l.docker.Close()
+	}
+}
+
+// failStartup joins a pre-serving startup error with the bounded manager close
+// and then applies the release rule, mirroring the deferred teardown that the
+// inline implementation performed for every failure after manager creation.
+func (l *dockerLifecycle) failStartup(startupErr error) error {
+	managerErr := runWithTimeout(managerCloseTimeout, l.closeManager)
+	l.release()
+	return errors.Join(startupErr, managerErr)
+}
+
+// runWithTimeout executes one shutdown step against a fresh background deadline
+// so steps remain bounded even though the signal context is already canceled.
+func runWithTimeout(timeout time.Duration, operation func(context.Context) error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	return operation(ctx)
+}
+
+// upRuntime bundles what 'fern up' keeps alive until shutdown. Assembly cleans
+// up after its own failures; runUp defers releases for a successful return.
+type upRuntime struct {
+	lifecycle        *dockerLifecycle
+	streamController *watch.StreamController
+	supervisor       *watch.Supervisor
+	observations     chan watch.Observation
+	connections      *connectionTracker
+	remoteServer     *http.Server
+	operatorServer   *http.Server
+	remoteListener   net.Listener
+	operatorListener net.Listener
+	origins          proxy.TrustedOrigins
+	tasks            *taskServices
+	start            time.Time
+}
+
+// assembleServices builds every coordinator, handler, and HTTP server the
+// supervisor needs before it starts serving, performing the same partial
+// teardown the inline version performed on failure.
+func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtime.Spec, auth runtime.ServerAuth, origins proxy.TrustedOrigins, remoteListener, operatorListener net.Listener, log *slog.Logger) (*upRuntime, error) {
+	controlDir, err := statePath("control")
+	if err != nil {
+		return nil, err
+	}
+	lifecycle, err := newDockerLifecycle(log, runtime.SuspendKind(cfg.IdleMode))
+	if err != nil {
+		return nil, err
+	}
+	controlStore, err := control.Open(controlDir, spec.Name)
+	if err != nil {
+		lifecycle.release()
+		return nil, err
+	}
+	observations := make(chan watch.Observation, observationBufferSize)
 	streamController := watch.NewStreamController(serviceCtx, watch.StreamOptions{Auth: auth}, observations, log)
 	manager := workspace.NewManager(
 		serviceCtx,
-		docker,
+		lifecycle.docker,
 		spec,
 		func(ctx context.Context, ep runtime.Endpoint, force bool) error {
 			if force {
@@ -142,55 +242,37 @@ func runUp(args []string, log *slog.Logger) error {
 		func(ctx context.Context, ep runtime.Endpoint) (bool, error) {
 			return watch.AllSessionsIdle(ctx, ep, auth)
 		},
-		func() {
-			handled := make(chan struct{})
-			select {
-			case observations <- watch.Observation{Kind: watch.ObservationRequest, Handled: handled}:
-			case <-serviceCtx.Done():
-				return
-			}
-			select {
-			case <-handled:
-			case <-serviceCtx.Done():
-			}
-		},
+		requestObservation(serviceCtx, observations),
 	)
-	managerStarted = true
-	closeManager := func(ctx context.Context) error {
-		err := manager.Close(ctx)
-		if err == nil {
-			managerClosed = true
-		}
-		return err
-	}
+	lifecycle.manager, lifecycle.managerStarted = manager, true
 	start := time.Now()
-	err = manager.ReconcileStartup(serviceCtx)
-	if err != nil {
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer closeCancel()
-		return errors.Join(err, closeManager(closeCtx))
+	if err := manager.ReconcileStartup(serviceCtx); err != nil {
+		return nil, lifecycle.failStartup(err)
 	}
 	onboarding, err := newGitHubOnboarding(cfg)
 	if err != nil {
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer closeCancel()
-		return errors.Join(err, closeManager(closeCtx))
+		return nil, lifecycle.failStartup(err)
 	}
-	tasks, err := newTaskServices(serviceCtx, cfg, docker, manager, auth, log)
+	tasks, err := newTaskServices(serviceCtx, cfg, lifecycle.docker, manager, auth, log)
 	if errors.Is(err, githubapp.ErrCredentialsNotFound) && onboarding != nil {
 		log.Warn("durable tasks await GitHub App onboarding and a Fern restart", "workspace", cfg.Workspace.Name)
 		tasks, err = nil, nil
 	}
 	if err != nil {
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer closeCancel()
-		return errors.Join(err, closeManager(closeCtx))
+		return nil, lifecycle.failStartup(err)
 	}
-	if tasks != nil {
-		defer tasks.store.Close()
+	// abortAfterTasks mirrors the historical post-task failure unwind, which
+	// closed the bounded manager first, then the task store, then applied the
+	// Docker release rule.
+	abortAfterTasks := func(startupErr error) error {
+		managerErr := runWithTimeout(managerCloseTimeout, lifecycle.closeManager)
+		if tasks != nil {
+			tasks.store.Close()
+		}
+		lifecycle.release()
+		return errors.Join(startupErr, managerErr)
 	}
 
-	supervisor := &watch.Supervisor{IdleAfter: cfg.IdleAfter, OnPause: manager.Pause, Log: log}
 	connections := newConnectionTracker()
 	controls := proxy.Controls{
 		Store: controlStore, Onboarding: onboarding, ControlAuth: proxy.ControlAuth{Password: cfg.Control.Password},
@@ -199,27 +281,9 @@ func runUp(args []string, log *slog.Logger) error {
 	if tasks != nil {
 		controls.Tasks = tasks.handler
 	}
-	var publicationCoordinator *publication.Coordinator
-	if publisher != nil {
-		publicationCoordinator = publication.NewCoordinator(serviceCtx, controlStore, manager, publisher)
-		controls.Publications = publicationCoordinator
-	}
-	closeStartup := func(startupErr error) error {
-		var publicationErr error
-		if publicationCoordinator != nil {
-			publicationCtx, publicationCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			publicationErr = publicationCoordinator.Close(publicationCtx)
-			publicationCancel()
-		}
-		managerCtx, managerCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		managerErr := closeManager(managerCtx)
-		managerCancel()
-		return errors.Join(startupErr, publicationErr, managerErr)
-	}
-	origins := trustedProxyOrigins(cfg)
 	handlers, err := proxy.NewHandlers(manager, auth, controls, origins, log)
 	if err != nil {
-		return closeStartup(err)
+		return nil, abortAfterTasks(err)
 	}
 	remoteServer := &http.Server{
 		Handler: handlers.Remote, ReadHeaderTimeout: 10 * time.Second,
@@ -229,78 +293,95 @@ func runUp(args []string, log *slog.Logger) error {
 		Handler: handlers.Operator, ReadHeaderTimeout: 10 * time.Second,
 		BaseContext: func(net.Listener) context.Context { return serviceCtx },
 	}
-	if publicationCoordinator != nil {
-		if err := publicationCoordinator.Reconcile(); err != nil {
-			return closeStartup(err)
-		}
-	}
 	if tasks != nil && tasks.publication != nil {
-		for {
-			err := tasks.publication.RunOnce(serviceCtx)
-			if err == nil {
-				continue
-			}
-			if errors.Is(err, taskpublicationcoord.ErrNoWork) || errors.Is(err, taskpublicationcoord.ErrReconciliationPending) {
-				break
-			}
-			return closeStartup(err)
+		if err := reconcileTaskPublication(serviceCtx, tasks.publication); err != nil {
+			return nil, abortAfterTasks(err)
 		}
 	}
+	return &upRuntime{
+		lifecycle: lifecycle, streamController: streamController,
+		supervisor:   &watch.Supervisor{IdleAfter: cfg.IdleAfter, OnPause: manager.Pause, Log: log},
+		observations: observations, connections: connections,
+		remoteServer: remoteServer, operatorServer: operatorServer,
+		remoteListener: remoteListener, operatorListener: operatorListener,
+		origins: origins, tasks: tasks, start: start,
+	}, nil
+}
+
+// requestObservation asks the activity stream for an immediate observation pass
+// and waits until the observation loop has handled the request or shutdown won.
+func requestObservation(serviceCtx context.Context, observations chan<- watch.Observation) func() {
+	return func() {
+		handled := make(chan struct{})
+		select {
+		case observations <- watch.Observation{Kind: watch.ObservationRequest, Handled: handled}:
+		case <-serviceCtx.Done():
+			return
+		}
+		select {
+		case <-handled:
+		case <-serviceCtx.Done():
+		}
+	}
+}
+
+// reconcileTaskPublication drains pending publication work once, before the
+// long-lived coordinators start, so served state is never stale.
+func reconcileTaskPublication(ctx context.Context, coordinator *taskpublicationcoord.Coordinator) error {
+	for {
+		err := coordinator.RunOnce(ctx)
+		if err == nil {
+			continue
+		}
+		if errors.Is(err, taskpublicationcoord.ErrNoWork) || errors.Is(err, taskpublicationcoord.ErrReconciliationPending) {
+			return nil
+		}
+		return err
+	}
+}
+
+// goUntilCanceled runs service on the errgroup, treating context cancellation
+// as a clean stop so shutdown does not surface spurious errors.
+func goUntilCanceled(group *errgroup.Group, serviceCtx context.Context, service func(context.Context) error) {
 	group.Go(func() error {
-		err := supervisor.Run(serviceCtx, observations)
+		err := service(serviceCtx)
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
 		return err
 	})
-	if tasks != nil {
-		group.Go(func() error {
-			err := runTaskResultCoordinator(serviceCtx, tasks, log, cfg.Workspace.Name)
-			if errors.Is(err, context.Canceled) {
-				return nil
-			}
-			return err
-		})
-		group.Go(func() error {
-			err := tasks.coordinator.Run(serviceCtx)
-			if errors.Is(err, context.Canceled) {
-				return nil
-			}
-			return err
-		})
-		group.Go(func() error {
-			err := tasks.execution.Run(serviceCtx)
-			if errors.Is(err, context.Canceled) {
-				return nil
-			}
-			return err
-		})
-		if tasks.publication != nil {
-			group.Go(func() error {
-				err := tasks.publication.Run(serviceCtx)
-				if errors.Is(err, context.Canceled) {
-					return nil
-				}
-				return err
-			})
-		}
-		if tasks.verification != nil {
-			group.Go(func() error {
-				err := tasks.verification.Run(serviceCtx)
-				if errors.Is(err, context.Canceled) {
-					return nil
-				}
-				return err
-			})
-		}
+}
+
+func startSupervisor(group *errgroup.Group, rt *upRuntime, serviceCtx context.Context) {
+	goUntilCanceled(group, serviceCtx, func(ctx context.Context) error {
+		return rt.supervisor.Run(ctx, rt.observations)
+	})
+}
+
+func startTaskCoordinators(group *errgroup.Group, tasks *taskServices, serviceCtx context.Context, log *slog.Logger, workspaceName string) {
+	goUntilCanceled(group, serviceCtx, func(ctx context.Context) error {
+		return runTaskResultCoordinator(ctx, tasks, log, workspaceName)
+	})
+	goUntilCanceled(group, serviceCtx, tasks.coordinator.Run)
+	goUntilCanceled(group, serviceCtx, tasks.execution.Run)
+	if tasks.publication != nil {
+		goUntilCanceled(group, serviceCtx, tasks.publication.Run)
 	}
+	if tasks.verification != nil {
+		goUntilCanceled(group, serviceCtx, tasks.verification.Run)
+	}
+}
+
+// startProxyServers serves both proxies until serviceCtx is canceled, then
+// attempts graceful shutdown with a forced-close fallback so hung clients
+// cannot stall exit past the shutdown deadline.
+func startProxyServers(group *errgroup.Group, rt *upRuntime, serviceCtx context.Context, log *slog.Logger) {
 	for _, serving := range []struct {
 		server   *http.Server
 		listener net.Listener
-	}{{remoteServer, remoteListener}, {operatorServer, operatorListener}} {
-		serving := serving
+	}{{rt.remoteServer, rt.remoteListener}, {rt.operatorServer, rt.operatorListener}} {
 		group.Go(func() error {
-			err := serving.server.Serve(connections.wrap(serving.listener))
+			err := serving.server.Serve(rt.connections.wrap(serving.listener))
 			if errors.Is(err, http.ErrServerClosed) {
 				return nil
 			}
@@ -311,58 +392,34 @@ func runUp(args []string, log *slog.Logger) error {
 		<-serviceCtx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		shutdownErr := errors.Join(remoteServer.Shutdown(shutdownCtx), operatorServer.Shutdown(shutdownCtx))
+		shutdownErr := errors.Join(rt.remoteServer.Shutdown(shutdownCtx), rt.operatorServer.Shutdown(shutdownCtx))
 		if shutdownErr != nil {
 			log.Warn("graceful proxy shutdown timed out; forcing connections closed", "err", shutdownErr)
-			connections.closeAll()
-			return errors.Join(shutdownErr, remoteServer.Close(), operatorServer.Close())
+			rt.connections.closeAll()
+			return errors.Join(shutdownErr, rt.remoteServer.Close(), rt.operatorServer.Close())
 		}
-		connections.closeAll()
+		rt.connections.closeAll()
 		return nil
 	})
+}
 
-	fmt.Printf("workspace: %s\nremote: %s\noperator: %s\nidle: %s after %s\nready in: %s\nattach: fern attach\n",
-		spec.Name, origins.Remote, origins.Operator, cfg.IdleMode, cfg.IdleAfter, time.Since(start).Round(time.Millisecond))
-	log.Info("proxy listeners ready", "remote_listener", remoteListener.Addr(), "remote_origin", origins.Remote,
-		"operator", origins.Operator, "workspace", spec.Name, "idle_mode", cfg.IdleMode)
-	err = group.Wait()
-	var publicationErr error
-	if publicationCoordinator != nil {
-		publicationCtx, publicationCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		publicationErr = publicationCoordinator.Close(publicationCtx)
-		publicationCancel()
-	}
+// awaitShutdown waits for every service goroutine and then unwinds in the
+// historical order: wake preparation when a signal ended the run, the manager
+// close that hands wake and rollback ownership back, and the activity stream.
+func awaitShutdown(group *errgroup.Group, rt *upRuntime, rootCtx context.Context) error {
+	err := group.Wait()
 	var prepareErr error
 	if rootCtx.Err() != nil {
-		prepareCtx, prepareCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		prepareErr = manager.PrepareShutdown(prepareCtx)
-		prepareCancel()
+		prepareErr = runWithTimeout(5*time.Second, rt.lifecycle.manager.PrepareShutdown)
 	}
 	// The manager owns wake and rollback goroutines. Do not close Docker until
 	// that ownership has been handed back, even if shutdown takes longer.
-	managerCtx, managerCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	managerErr := closeManager(managerCtx)
-	managerCancel()
-	stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	streamErr := streamController.Stop(stopCtx)
-	cancel()
+	managerErr := runWithTimeout(managerCloseTimeout, rt.lifecycle.closeManager)
+	stopErr := runWithTimeout(5*time.Second, rt.streamController.Stop)
 	if errors.Is(err, context.Canceled) {
 		err = nil
 	}
-	return errors.Join(err, publicationErr, prepareErr, managerErr, streamErr)
-}
-
-func newWorkspacePublisher(workspace config.Workspace) (*publication.Publisher, error) {
-	if workspace.GitHub == nil {
-		return nil, nil
-	}
-	// Explicit GitHub authority modes supersede the legacy host-user gh lane.
-	// Workspace gh runs inside the container; App credentials stay in the task
-	// broker. Neither mode may accidentally consume the host user's credential.
-	if workspace.GitHub.Mode == config.GitHubModeWorkspaceGH || workspace.GitHub.Mode == config.GitHubModeGitHubAppBroker {
-		return nil, nil
-	}
-	return nil, fmt.Errorf("unsupported GitHub authority mode %q", workspace.GitHub.Mode)
+	return errors.Join(err, prepareErr, managerErr, stopErr)
 }
 
 func trustedProxyOrigins(cfg config.Config) proxy.TrustedOrigins {

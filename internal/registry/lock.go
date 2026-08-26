@@ -10,16 +10,24 @@ import (
 	"syscall"
 )
 
+// Lease is an exclusive advisory lock on one workspace, held via a flock on a
+// private lock file that records the owning host and process.
 type Lease struct {
 	file *os.File
 }
 
+// Acquire takes the exclusive workspace lease in directory, creating and
+// locking its lock file if necessary. It fails if the lock is held (reporting
+// the recorded holder), if the path is not a singly linked regular private
+// file, or if holder metadata cannot be written durably. The returned Lease
+// must be released; Release is nil-safe.
 func Acquire(directory, workspace string) (*Lease, error) {
 	if err := ensurePrivateDirectory(directory, "lock"); err != nil {
 		return nil, err
 	}
 	path := filepath.Join(directory, fmt.Sprintf("%x.lock", sha256.Sum256([]byte(workspace))))
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0o600)
+	// LOCK_NB below makes contention fail fast, so O_NONBLOCK is unnecessary.
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open workspace lock: %w", err)
 	}
@@ -39,8 +47,11 @@ func Acquire(directory, workspace string) (*Lease, error) {
 			return nil, fmt.Errorf("lock workspace %q: %w", workspace, err)
 		}
 		_, _ = file.Seek(0, io.SeekStart)
-		data, _ := io.ReadAll(io.LimitReader(file, 4<<10))
+		data, readErr := io.ReadAll(io.LimitReader(file, 4<<10))
 		file.Close()
+		if readErr != nil {
+			return nil, fmt.Errorf("workspace %q lease file unreadable: %w", workspace, readErr)
+		}
 		holder := string(data)
 		if holder == "" {
 			holder = "an unknown process"

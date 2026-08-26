@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/nebler/fern/internal/gitref"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -239,7 +240,7 @@ func parseRawDiff(output []byte) ([]rawChange, error) {
 		path := append([]byte(nil), output[:pathEnd]...)
 		output = output[pathEnd+1:]
 		fields := bytes.Fields(header)
-		if len(fields) != 5 || len(fields[0]) != 7 || fields[0][0] != ':' || !validGitPath(path) {
+		if len(fields) != 5 || len(fields[0]) != 7 || fields[0][0] != ':' || !gitref.ValidPathBytes(path) {
 			return nil, ErrRepositoryProof
 		}
 		oldMode, newMode := string(fields[0][1:]), string(fields[1])
@@ -286,18 +287,6 @@ func parseRawDiff(output []byte) ([]rawChange, error) {
 }
 
 func validBlobMode(mode string) bool { return mode == "100644" || mode == "100755" || mode == "120000" }
-
-func validGitPath(path []byte) bool {
-	if len(path) == 0 || len(path) > 4096 || path[0] == '/' || path[len(path)-1] == '/' || bytes.IndexByte(path, 0) >= 0 {
-		return false
-	}
-	for _, component := range bytes.Split(path, []byte{'/'}) {
-		if len(component) == 0 || bytes.Equal(component, []byte(".")) || bytes.Equal(component, []byte("..")) {
-			return false
-		}
-	}
-	return true
-}
 
 func (c *Collector) blobSizes(ctx context.Context, repositoryPath string, changes []rawChange) (map[task.GitOID]int64, error) {
 	set := make(map[task.GitOID]struct{})

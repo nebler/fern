@@ -51,18 +51,33 @@ type pairingPage struct {
 }
 
 type pairingState struct {
-	mu              sync.Mutex
-	codes           map[[sha256.Size]byte]time.Time
-	attempts        map[[sha256.Size]byte]pairingAttempt
-	invalidAttempts []time.Time
-	lastIssued      time.Time
-	lastSuccess     time.Time
-	sessions        map[[sha256.Size]byte]time.Time
-	now             func() time.Time
-	store           *control.Store
-	persistencePath string
-	persistenceErr  error
+	mu                    sync.Mutex
+	codes                 map[[sha256.Size]byte]time.Time
+	attempts              map[[sha256.Size]byte]pairingAttempt
+	invalidAttempts       []time.Time
+	lastIssued            time.Time
+	lastSuccess           time.Time
+	sessions              map[[sha256.Size]byte]time.Time
+	now                   func() time.Time
+	store                 *control.Store
+	persistencePath       string
+	persistenceErr        error
+	operatorCredentialID  string
+	operatorCredentialErr error
 }
+
+// processOperatorCredentialID lazily mints one random credential identifier per
+// process. It backs pairing states built without a control store (tests): such
+// a state has nowhere durable to record the identifier, and deriving it from
+// the control password would put an offline brute-force oracle of that secret
+// into audit snapshots.
+var processOperatorCredentialID = sync.OnceValues(func() (string, error) {
+	value := make([]byte, 16)
+	if _, err := rand.Read(value); err != nil {
+		return "", err
+	}
+	return control.OperatorCredentialIDPrefix + base64.RawURLEncoding.EncodeToString(value), nil
+})
 
 func newPairingState(stores ...*control.Store) *pairingState {
 	state := &pairingState{
@@ -75,6 +90,15 @@ func newPairingState(stores ...*control.Store) *pairingState {
 		state.store = stores[0]
 		state.persistencePath = pairingPersistencePath(stores[0])
 		state.persistenceErr = state.loadPersisted()
+		if stores[0] != nil {
+			// Resolved once so every operator request in this process attributes
+			// itself with the same stable, persisted random identifier.
+			state.operatorCredentialID, state.operatorCredentialErr = stores[0].EnsureOperatorCredentialID()
+		} else {
+			state.operatorCredentialID, state.operatorCredentialErr = processOperatorCredentialID()
+		}
+	} else {
+		state.operatorCredentialID, state.operatorCredentialErr = processOperatorCredentialID()
 	}
 	return state
 }
@@ -185,7 +209,7 @@ func (state *pairingState) operatorHandler(next http.Handler, auth runtime.Serve
 			}
 			request.Header.Del("Authorization")
 			stripAllCookies(request)
-			actor, err := operatorActor(control.Password)
+			actor, err := state.operatorActor()
 			if err != nil {
 				http.Error(writer, "operator identity unavailable", http.StatusInternalServerError)
 				return
@@ -238,7 +262,7 @@ func (state *pairingState) issue(writer http.ResponseWriter, request *http.Reque
 	state.prune(now)
 	if state.persistenceErr != nil {
 		state.mu.Unlock()
-		http.Error(writer, "pairing state unavailable", http.StatusServiceUnavailable)
+		writeUnavailable(writer, "pairing state")
 		return
 	}
 	if !state.lastIssued.IsZero() && now.Sub(state.lastIssued) < pairingIssueInterval {
@@ -267,7 +291,7 @@ func (state *pairingState) issue(writer http.ResponseWriter, request *http.Reque
 		delete(state.codes, digest)
 		state.lastIssued = previousIssued
 		state.mu.Unlock()
-		http.Error(writer, "pairing state unavailable", http.StatusServiceUnavailable)
+		writeUnavailable(writer, "pairing state")
 		return
 	}
 	state.mu.Unlock()
@@ -300,7 +324,7 @@ func (state *pairingState) pair(writer http.ResponseWriter, request *http.Reques
 	state.mu.Lock()
 	if state.persistenceErr != nil {
 		state.mu.Unlock()
-		http.Error(writer, "pairing state unavailable", http.StatusServiceUnavailable)
+		writeUnavailable(writer, "pairing state")
 		return
 	}
 	state.prune(now)
@@ -327,7 +351,7 @@ func (state *pairingState) pair(writer http.ResponseWriter, request *http.Reques
 		state.recordInvalidLocked(hash, now)
 		if err := state.persistLocked(); err != nil {
 			state.mu.Unlock()
-			http.Error(writer, "pairing state unavailable", http.StatusServiceUnavailable)
+			writeUnavailable(writer, "pairing state")
 			return
 		}
 		state.mu.Unlock()
@@ -363,7 +387,7 @@ func (state *pairingState) pair(writer http.ResponseWriter, request *http.Reques
 	}
 	state.mu.Unlock()
 	if pairErr != nil {
-		http.Error(writer, "pairing state unavailable", http.StatusServiceUnavailable)
+		writeUnavailable(writer, "pairing state")
 		return
 	}
 	http.SetCookie(writer, &http.Cookie{
@@ -444,15 +468,21 @@ func (state *pairingState) servePaired(writer http.ResponseWriter, request *http
 	return true
 }
 
-func operatorActor(password string) (task.ActorSnapshot, error) {
+// operatorActor builds the audit identity stamped on loopback control-surface
+// requests. Its credential identifier is the stable random value persisted by
+// the control store — never anything derived from the control password — so no
+// offline brute-force oracle of that secret reaches durable snapshots.
+func (state *pairingState) operatorActor() (task.ActorSnapshot, error) {
+	if state.operatorCredentialErr != nil {
+		return task.ActorSnapshot{}, state.operatorCredentialErr
+	}
 	requestID, err := randomCredential()
 	if err != nil {
 		return task.ActorSnapshot{}, err
 	}
-	digest := sha256.Sum256([]byte(password))
 	return task.ActorSnapshot{
 		Type: task.ActorOperator, ID: "local-operator", DisplayName: "Local operator",
-		CredentialID:   "control-" + base64.RawURLEncoding.EncodeToString(digest[:12]),
+		CredentialID:   state.operatorCredentialID,
 		Authentication: "basic", RequestID: requestID,
 	}, nil
 }

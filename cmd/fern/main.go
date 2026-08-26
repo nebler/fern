@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,59 +24,44 @@ func run(args []string, log *slog.Logger) error {
 	if len(args) == 0 {
 		return invocationError{message: "a command is required"}
 	}
-	if args[0] == "-h" || args[0] == "--help" {
+	switch args[0] {
+	case "-h", "--help":
 		printTopLevelHelp(os.Stdout)
 		return nil
-	}
-	if args[0] == "--version" {
+	case "--version":
 		return runVersion(nil, os.Stdout)
-	}
-	if args[0] == "help" {
+	case "help":
 		return runHelp(args[1:], func(helpArgs []string) error { return run(helpArgs, log) })
 	}
-	var err error
-	switch args[0] {
-	case "init":
-		err = runInit(args[1:])
-	case "doctor":
-		err = runDoctor(args[1:])
-	case "github":
-		err = runGitHub(args[1:], log)
-	case "up":
-		err = runUp(args[1:], log)
-	case "attach":
-		err = runAttach(args[1:])
-	case "down":
-		err = runDown(args[1:], log)
-	case "status":
-		err = runStatus(args[1:], log)
-	case "logs":
-		err = runLogs(args[1:], log)
-	case "version":
-		if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
-			fmt.Fprintln(os.Stdout, "Print Fern version information.\n\nUsage:\n  fern version")
-			return nil
-		}
-		err = runVersion(args[1:], os.Stdout)
-	case "debug":
-		if len(args) == 2 && (args[1] == "-h" || args[1] == "--help") {
-			fmt.Fprintln(os.Stdout, "Inspect Fern's backend activity inputs.\n\nUsage:\n  fern debug events [flags]\n  fern debug wake [flags]")
-			return nil
-		}
-		if len(args) > 1 && args[1] == "events" {
-			err = runEvents(args[2:], log)
-			break
-		}
-		if len(args) > 1 && args[1] == "wake" {
-			err = runDebugWake(args[2:], log)
-			break
-		}
-		return unknownCommand(args)
-	default:
+	entry := lookupCommand(args[0])
+	if entry == nil {
 		return unknownCommand(args)
 	}
+	err := dispatchCommand(entry, args[1:], log)
 	if errors.Is(err, errHelpShown) {
 		return nil
 	}
 	return err
+}
+
+// dispatchCommand routes remaining arguments to a registry entry. Namespace
+// commands (debug, github) resolve their single subcommand level; version and
+// the namespaces render grouped help for -h because they do not parse flags.
+func dispatchCommand(entry *command, args []string, log *slog.Logger) error {
+	ctx := context.Background()
+	if entry.overview != "" && len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+		fmt.Fprintln(os.Stdout, groupedHelp(entry))
+		return nil
+	}
+	if entry.run != nil {
+		return entry.run(ctx, args, log)
+	}
+	if len(args) == 0 {
+		return unknownCommand([]string{entry.name})
+	}
+	sub := entry.subcommand(args[0])
+	if sub == nil {
+		return unknownCommand(append([]string{entry.name}, args...))
+	}
+	return sub.run(ctx, args[1:], log)
 }

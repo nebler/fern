@@ -2,6 +2,7 @@ package control
 
 import (
 	"bytes"
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -53,7 +54,7 @@ func TestStorePersistsDevicesAndWorkflows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if valid, err := reopened.AuthenticateDevice("device-secret", now.Add(time.Minute)); err != nil || !valid {
+	if valid, err := authenticateDevice(reopened, "device-secret", now.Add(time.Minute)); err != nil || !valid {
 		t.Fatalf("persisted authentication valid=%t err=%v", valid, err)
 	}
 	devices, err := reopened.Devices(now)
@@ -71,7 +72,7 @@ func TestStorePersistsDevicesAndWorkflows(t *testing.T) {
 	if err := reopened.RevokeDevice(device.ID); err != nil {
 		t.Fatal(err)
 	}
-	if valid, err := reopened.AuthenticateDevice("device-secret", now); err != nil || valid {
+	if valid, err := authenticateDevice(reopened, "device-secret", now); err != nil || valid {
 		t.Fatalf("revoked authentication valid=%t err=%v", valid, err)
 	}
 }
@@ -85,7 +86,7 @@ func TestStorePrunesExpiredDevice(t *testing.T) {
 	if _, err := store.AddDevice("expired", "old", now, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if valid, err := store.AuthenticateDevice("expired", now.Add(2*time.Minute)); err != nil || valid {
+	if valid, err := authenticateDevice(store, "expired", now.Add(2*time.Minute)); err != nil || valid {
 		t.Fatalf("expired authentication valid=%t err=%v", valid, err)
 	}
 }
@@ -104,11 +105,58 @@ func TestStoreAuthenticationReturnsDurableDeviceIdentity(t *testing.T) {
 	if err != nil || !valid || got != want {
 		t.Fatalf("identity=%+v valid=%t err=%v, want %+v", got, valid, err, want)
 	}
-	if valid, err := store.AuthenticateDevice("device-secret", now.Add(time.Minute)); err != nil || !valid {
+	if valid, err := authenticateDevice(store, "device-secret", now.Add(time.Minute)); err != nil || !valid {
 		t.Fatalf("legacy authentication valid=%t err=%v", valid, err)
 	}
 	if got, valid, err := store.AuthenticateDeviceIdentity("wrong-secret", now); err != nil || valid || got != (Device{}) {
 		t.Fatalf("invalid identity=%+v valid=%t err=%v", got, valid, err)
+	}
+}
+
+func TestEnsureOperatorCredentialIDIsStableRandomAndPersisted(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "control")
+	store, err := Open(directory, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.EnsureOperatorCredentialID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(first, "control-") || len(first) != len("control-")+base64.RawURLEncoding.EncodedLen(16) {
+		t.Fatalf("operator credential ID %q has unexpected format", first)
+	}
+	if again, err := store.EnsureOperatorCredentialID(); err != nil || again != first {
+		t.Fatalf("second call = %q, %v; want %q", again, err, first)
+	}
+	reopened, err := Open(directory, "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted, err := reopened.EnsureOperatorCredentialID(); err != nil || persisted != first {
+		t.Fatalf("persisted ID = %q, %v; want %q", persisted, err, first)
+	}
+	other, err := Open(filepath.Join(t.TempDir(), "control"), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if different, err := other.EnsureOperatorCredentialID(); err != nil || different == first {
+		t.Fatalf("independent store reused ID %q (%v)", different, err)
+	}
+}
+
+func TestLoadRejectsInvalidOperatorCredentialID(t *testing.T) {
+	directory := filepath.Join(t.TempDir(), "control")
+	if err := os.Mkdir(directory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(directory, tokenHash("demo")+".json")
+	data := `{"version":1,"workspace":"demo","operatorCredentialId":"control-not-base64","devices":{},"workflows":{},"publications":{}}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(directory, "demo"); err == nil {
+		t.Fatal("Open accepted an invalid operator credential ID")
 	}
 }
 

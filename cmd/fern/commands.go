@@ -91,21 +91,25 @@ func writeStatusJSON(output io.Writer, workspace string, observation runtime.Obs
 	})
 }
 
+// eventBufferSize deep-queues streamed backend events so a burst while the
+// printer is busy does not drop or stall the stream.
+const eventBufferSize = 128
+
+// statusDetailLimit caps each printed event payload so one huge event cannot
+// wash out the terminal.
+const statusDetailLimit = 160
+
 func runEvents(args []string, log *slog.Logger) error {
 	fs, nameFlag, configPath := workspaceFlags("debug events")
 	envPath := fs.String("env-file", "", "protected environment file")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	var values map[string]string
-	if *envPath != "" {
-		var err error
-		values, err = readEnvFile(*envPath)
-		if err != nil {
-			return err
-		}
+	values, err := readProtectedEnvironment(*envPath)
+	if err != nil {
+		return err
 	}
-	client, err := config.LoadEventsWithEnvironment(*configPath, flagSet(fs, "config"), optionalFlag(fs, "name", nameFlag), environmentLookup(values))
+	client, err := config.LoadEventsWithEnvironment(*configPath, flagProvided(fs, "config"), optionalFlag(fs, "name", nameFlag), environmentLookup(values))
 	if err != nil {
 		return err
 	}
@@ -132,7 +136,10 @@ func runEvents(args []string, log *slog.Logger) error {
 	if err := runtime.WaitHealthy(ctx, observation.Endpoint, auth, 60*time.Second); err != nil {
 		return fmt.Errorf("wait for OpenCode health: %w", err)
 	}
-	events := make(chan watch.Event, 128)
+	events := make(chan watch.Event, eventBufferSize)
+	// Intentionally untracked: StreamForever exits when ctx is canceled, and
+	// ctx cancellation is this command's only exit path, so an errgroup would
+	// never observe anything but that cancellation.
 	go watch.StreamForever(ctx, watch.StreamOptions{
 		BaseURL: observation.Endpoint.URL(), Auth: auth,
 	}, events, log)
@@ -147,8 +154,8 @@ func runEvents(args []string, log *slog.Logger) error {
 				payload = event.Data
 			}
 			properties := string(payload)
-			if len(properties) > 160 {
-				properties = properties[:160] + "..."
+			if len(properties) > statusDetailLimit {
+				properties = properties[:statusDetailLimit] + "..."
 			}
 			fmt.Printf("[%s] +%-8s %-28s %s\n", time.Now().Format("15:04:05.000"), time.Since(last).Round(time.Millisecond), event.Type, properties)
 			last = time.Now()
@@ -167,21 +174,9 @@ func runDebugWake(args []string, log *slog.Logger) error {
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	var values map[string]string
-	if *envPath != "" {
-		var err error
-		values, err = readEnvFile(*envPath)
-		if err != nil {
-			return err
-		}
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	cfg, err := config.LoadWithEnvironment(*configPath, cwd, true, config.Overrides{
+	cfg, _, err := loadCommandConfig(*configPath, true, *envPath, config.Overrides{
 		Name: optionalFlag(fs, "name", nameFlag),
-	}, values)
+	})
 	if err != nil {
 		return err
 	}
@@ -223,6 +218,10 @@ func runDebugWake(args []string, log *slog.Logger) error {
 	return nil
 }
 
+// wakeWaterfallWidth is the widest bar, in characters, of the debug wake span
+// waterfall; shorter spans scale down proportionally.
+const wakeWaterfallWidth = 24
+
 func printWakeWaterfall(output io.Writer, trace workspace.WakeTrace) {
 	fmt.Fprintf(output, "wake trace (%s)  total %dms  started %s\n",
 		trace.Workspace, trace.TotalMillis, trace.StartedAt.Format("15:04:05.000"))
@@ -239,7 +238,7 @@ func printWakeWaterfall(output io.Writer, trace workspace.WakeTrace) {
 		}
 	}
 	for _, span := range trace.Spans {
-		bars := int(float64(span.Millis) / float64(longest) * 24)
+		bars := int(float64(span.Millis) / float64(longest) * wakeWaterfallWidth)
 		if bars == 0 {
 			bars = 1
 		}

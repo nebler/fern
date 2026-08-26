@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -20,8 +21,13 @@ import (
 
 const schemaVersion = 1
 const maxControlStateBytes = 4 << 20
+
+// PublicationSchemaVersion is the durable-proof schema version required for
+// any publication record still allowed to change.
 const PublicationSchemaVersion = 1
 
+// Device is a paired browser credential. Only the SHA-256 hash of the bearer
+// token is ever stored; ID is that hash's leading bytes.
 type Device struct {
 	ID        string    `json:"id"`
 	Name      string    `json:"name"`
@@ -30,8 +36,10 @@ type Device struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
+// WorkflowStatus enumerates the durable lifecycle states of a tracked workflow.
 type WorkflowStatus string
 
+// Workflow lifecycle statuses persisted on every workflow record.
 const (
 	WorkflowRecorded             WorkflowStatus = "recorded"
 	WorkflowWorking              WorkflowStatus = "working"
@@ -42,6 +50,7 @@ const (
 	WorkflowFailed               WorkflowStatus = "failed"
 )
 
+// Workflow is an OpenCode session Fern tracks, with its publication linkage.
 type Workflow struct {
 	ID            string         `json:"id"`
 	Title         string         `json:"title"`
@@ -53,6 +62,9 @@ type Workflow struct {
 	Revision      uint64         `json:"revision"`
 }
 
+// Publication is the durable record of one publish-to-GitHub operation,
+// including its lifecycle state, prepared repository tuple, and pull request
+// proof. Legacy display-only fields are retained for old terminal records.
 type Publication struct {
 	SchemaVersion      int                     `json:"schemaVersion,omitempty"`
 	ID                 string                  `json:"id"`
@@ -79,6 +91,8 @@ type Publication struct {
 	UpdatedAt  time.Time `json:"updatedAt"`
 }
 
+// PreparedPublication is the resolved repository tuple recorded before any
+// push begins; publication retries must resolve to the same tuple.
 type PreparedPublication struct {
 	RepositoryID       int64  `json:"repositoryId"`
 	RepositoryFullName string `json:"repositoryFullName"`
@@ -88,6 +102,8 @@ type PreparedPublication struct {
 	Branch             string `json:"branch"`
 }
 
+// PullRequestRefObservation is the observed state of one ref (base or head) of
+// a published pull request.
 type PullRequestRefObservation struct {
 	RepositoryID       int64  `json:"repositoryId"`
 	RepositoryFullName string `json:"repositoryFullName"`
@@ -97,6 +113,8 @@ type PullRequestRefObservation struct {
 	SHA                string `json:"sha"`
 }
 
+// PullRequestObservation is the complete durable proof that a publication
+// produced one specific draft pull request.
 type PullRequestObservation struct {
 	TargetRepositoryID       int64                     `json:"targetRepositoryId"`
 	TargetRepositoryFullName string                    `json:"targetRepositoryFullName"`
@@ -108,6 +126,7 @@ type PullRequestObservation struct {
 	Head                     PullRequestRefObservation `json:"head"`
 }
 
+// Publication lifecycle states persisted on every publication record.
 const (
 	PublicationRequested = "requested"
 	PublicationPrepared  = "pushing"
@@ -115,15 +134,22 @@ const (
 	PublicationPublished = "published"
 )
 
+// diskState is the durable control file. The strict loader treats absent
+// optional fields as their zero value, so new fields must tolerate being empty
+// on load instead of forcing a format bump.
 type diskState struct {
-	Version      int                    `json:"version"`
-	Workspace    string                 `json:"workspace"`
-	Revision     uint64                 `json:"revision"`
-	Devices      map[string]Device      `json:"devices"`
-	Workflows    map[string]Workflow    `json:"workflows"`
-	Publications map[string]Publication `json:"publications"`
+	Version              int                    `json:"version"`
+	Workspace            string                 `json:"workspace"`
+	Revision             uint64                 `json:"revision"`
+	OperatorCredentialID string                 `json:"operatorCredentialId,omitempty"`
+	Devices              map[string]Device      `json:"devices"`
+	Workflows            map[string]Workflow    `json:"workflows"`
+	Publications         map[string]Publication `json:"publications"`
 }
 
+// Store is the durable control-plane state for one workspace: paired devices,
+// tracked workflows, and publication records, guarded by a mutex and an atomic
+// private-file write path.
 type Store struct {
 	mu                   sync.Mutex
 	path                 string
@@ -133,6 +159,9 @@ type Store struct {
 	nextDeviceRequestID  uint64
 }
 
+// Open loads (or initializes) the control state for workspace inside directory.
+// The directory and its state file must satisfy the private-file rules or Open
+// refuses to run.
 func Open(directory, workspace string) (*Store, error) {
 	if workspace == "" {
 		return nil, errors.New("workspace is required for control store")
@@ -170,6 +199,9 @@ func (store *Store) AuxiliaryStatePath(name string) (string, error) {
 	return store.path + "." + name, nil
 }
 
+// AddDevice durably registers a paired browser credential, pruning expired
+// devices before admitting against the 64-device cap. The raw token is never
+// persisted.
 func (store *Store) AddDevice(token, name string, now, expires time.Time) (Device, error) {
 	if token == "" || !expires.After(now) {
 		return Device{}, errors.New("valid device token and expiry are required")
@@ -187,34 +219,30 @@ func (store *Store) AddDevice(token, name string, now, expires time.Time) (Devic
 	defer store.mu.Unlock()
 	pruned := store.pruneLocked(now)
 	if len(store.data.Devices) >= 64 {
-		for hash, expired := range pruned {
-			store.data.Devices[hash] = expired
-		}
+		// No durable write follows this rejection, so memory must keep matching
+		// disk by resurrecting everything pruning removed.
+		store.restorePrunedLocked(pruned)
 		return Device{}, errors.New("device limit reached; revoke an existing device")
 	}
 	previous, existed := store.data.Devices[hash]
 	store.data.Devices[hash] = device
-	if err := store.writeLocked(); err != nil {
-		if rollbackWrite(err) {
-			for hash, expired := range pruned {
-				store.data.Devices[hash] = expired
-			}
-			if existed {
-				store.data.Devices[hash] = previous
-			} else {
-				delete(store.data.Devices, hash)
-			}
+	err := store.commitLocked(func() {
+		store.restorePrunedLocked(pruned)
+		if existed {
+			store.data.Devices[hash] = previous
+		} else {
+			delete(store.data.Devices, hash)
 		}
+	})
+	if err != nil {
 		return Device{}, err
 	}
 	return device, nil
 }
 
-func (store *Store) AuthenticateDevice(token string, now time.Time) (bool, error) {
-	_, valid, err := store.AuthenticateDeviceIdentity(token, now)
-	return valid, err
-}
-
+// AuthenticateDeviceIdentity validates a device bearer token and returns its
+// durable identity, pruning expired credentials and refreshing LastSeen at most
+// once an hour along the way.
 func (store *Store) AuthenticateDeviceIdentity(token string, now time.Time) (Device, bool, error) {
 	if token == "" {
 		return Device{}, false, nil
@@ -228,10 +256,7 @@ func (store *Store) AuthenticateDeviceIdentity(token string, now time.Time) (Dev
 	}
 	if !now.Before(device.ExpiresAt) {
 		delete(store.data.Devices, hash)
-		if err := store.writeLocked(); err != nil {
-			if rollbackWrite(err) {
-				store.data.Devices[hash] = device
-			}
+		if err := store.commitLocked(func() { store.data.Devices[hash] = device }); err != nil {
 			return Device{}, false, err
 		}
 		return Device{}, false, nil
@@ -240,10 +265,7 @@ func (store *Store) AuthenticateDeviceIdentity(token string, now time.Time) (Dev
 		previous := device
 		device.LastSeen = now.UTC()
 		store.data.Devices[hash] = device
-		if err := store.writeLocked(); err != nil {
-			if rollbackWrite(err) {
-				store.data.Devices[hash] = previous
-			}
+		if err := store.commitLocked(func() { store.data.Devices[hash] = previous }); err != nil {
 			return Device{}, false, err
 		}
 	}
@@ -296,17 +318,14 @@ func (store *Store) CancelDeviceRequests(deviceID string) {
 	}
 }
 
+// Devices lists every unexpired device oldest-first, durably persisting the
+// pruning of expired entries.
 func (store *Store) Devices(now time.Time) ([]Device, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	pruned := store.pruneLocked(now)
 	if len(pruned) != 0 {
-		if err := store.writeLocked(); err != nil {
-			if rollbackWrite(err) {
-				for hash, device := range pruned {
-					store.data.Devices[hash] = device
-				}
-			}
+		if err := store.commitLocked(func() { store.restorePrunedLocked(pruned) }); err != nil {
 			return nil, err
 		}
 	}
@@ -318,6 +337,7 @@ func (store *Store) Devices(now time.Time) ([]Device, error) {
 	return result, nil
 }
 
+// RevokeDevice durably removes every credential sharing the device ID.
 func (store *Store) RevokeDevice(id string) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -333,17 +353,15 @@ func (store *Store) RevokeDevice(id string) error {
 	if !found {
 		return os.ErrNotExist
 	}
-	if err := store.writeLocked(); err != nil {
-		if rollbackWrite(err) {
-			for hash, device := range removed {
-				store.data.Devices[hash] = device
-			}
+	return store.commitLocked(func() {
+		for hash, device := range removed {
+			store.data.Devices[hash] = device
 		}
-		return err
-	}
-	return nil
+	})
 }
 
+// CreateWorkflow durably tracks a new OpenCode session under a recorded
+// workflow, or returns the existing workflow already bound to that session.
 func (store *Store) CreateWorkflow(title, sessionID string, now time.Time) (Workflow, error) {
 	title, sessionID = strings.TrimSpace(title), strings.TrimSpace(sessionID)
 	if title == "" || len(title) > 200 || sessionID == "" || len(sessionID) > 200 {
@@ -353,7 +371,6 @@ func (store *Store) CreateWorkflow(title, sessionID string, now time.Time) (Work
 	if err != nil {
 		return Workflow{}, err
 	}
-	workflow := Workflow{ID: id, Title: title, SessionID: sessionID, Status: WorkflowWorking, CreatedAt: now.UTC(), UpdatedAt: now.UTC()}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	for _, existing := range store.data.Workflows {
@@ -367,18 +384,15 @@ func (store *Store) CreateWorkflow(title, sessionID string, now time.Time) (Work
 	if len(store.data.Workflows) >= 256 {
 		return Workflow{}, errors.New("workflow limit reached")
 	}
-	workflow.Status = WorkflowRecorded
-	workflow.Revision = 1
+	workflow := Workflow{ID: id, Title: title, SessionID: sessionID, Status: WorkflowRecorded, CreatedAt: now.UTC(), UpdatedAt: now.UTC(), Revision: 1}
 	store.data.Workflows[id] = workflow
-	if err := store.writeLocked(); err != nil {
-		if rollbackWrite(err) {
-			delete(store.data.Workflows, id)
-		}
+	if err := store.commitLocked(func() { delete(store.data.Workflows, id) }); err != nil {
 		return Workflow{}, err
 	}
 	return workflow, nil
 }
 
+// Workflows snapshots every tracked workflow, most recently updated first.
 func (store *Store) Workflows() []Workflow {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -390,6 +404,7 @@ func (store *Store) Workflows() []Workflow {
 	return result
 }
 
+// Workflow returns the tracked workflow with the given ID.
 func (store *Store) Workflow(id string) (Workflow, bool) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -397,6 +412,7 @@ func (store *Store) Workflow(id string) (Workflow, bool) {
 	return workflow, exists
 }
 
+// UpdateWorkflow transitions a workflow's status and publication linkage.
 func (store *Store) UpdateWorkflow(id string, status WorkflowStatus, publicationID string, now time.Time) (Workflow, error) {
 	if !validWorkflowStatus(status) {
 		return Workflow{}, fmt.Errorf("invalid workflow status %q", status)
@@ -413,15 +429,14 @@ func (store *Store) UpdateWorkflow(id string, status WorkflowStatus, publication
 	workflow.UpdatedAt = now.UTC()
 	workflow.Revision++
 	store.data.Workflows[id] = workflow
-	if err := store.writeLocked(); err != nil {
-		if rollbackWrite(err) {
-			store.data.Workflows[id] = previous
-		}
+	if err := store.commitLocked(func() { store.data.Workflows[id] = previous }); err != nil {
 		return Workflow{}, err
 	}
 	return workflow, nil
 }
 
+// PutPublication durably writes a complete publication record, replacing any
+// prior record with the same ID.
 func (store *Store) PutPublication(publication Publication) error {
 	if publication.ID == "" || publication.WorkflowID == "" || publication.State == "" {
 		return errors.New("publication ID, workflow ID, and state are required")
@@ -433,19 +448,22 @@ func (store *Store) PutPublication(publication Publication) error {
 	defer store.mu.Unlock()
 	previous, existed := store.data.Publications[publication.ID]
 	store.data.Publications[publication.ID] = publication
-	if err := store.writeLocked(); err != nil {
-		if rollbackWrite(err) {
-			if existed {
-				store.data.Publications[publication.ID] = previous
-			} else {
-				delete(store.data.Publications, publication.ID)
-			}
+	err := store.commitLocked(func() {
+		if existed {
+			store.data.Publications[publication.ID] = previous
+		} else {
+			delete(store.data.Publications, publication.ID)
 		}
+	})
+	if err != nil {
 		return err
 	}
 	return nil
 }
 
+// RequestPublication durably binds a new publication request to a workflow. If
+// the workflow already references a publication it is returned unchanged with
+// created=false.
 func (store *Store) RequestPublication(workflowID string, publication Publication, now time.Time) (Publication, bool, error) {
 	if publication.ID == "" || publication.Operation == "" || strings.TrimSpace(publication.Title) == "" {
 		return Publication{}, false, errors.New("publication ID, operation, and title are required")
@@ -473,7 +491,7 @@ func (store *Store) RequestPublication(workflowID string, publication Publicatio
 		Title: publication.Title, Body: publication.Body,
 	}
 	publication.WorkflowID = workflowID
-	publication.State = "requested"
+	publication.State = PublicationRequested
 	publication.CreatedAt = now.UTC()
 	publication.UpdatedAt = now.UTC()
 	workflow.Status = WorkflowPublicationRequested
@@ -482,16 +500,17 @@ func (store *Store) RequestPublication(workflowID string, publication Publicatio
 	workflow.Revision++
 	store.data.Publications[publication.ID] = publication
 	store.data.Workflows[workflowID] = workflow
-	if err := store.writeLocked(); err != nil {
-		if rollbackWrite(err) {
-			delete(store.data.Publications, publication.ID)
-			store.data.Workflows[workflowID] = previousWorkflow
-		}
+	if err := store.commitLocked(func() {
+		delete(store.data.Publications, publication.ID)
+		store.data.Workflows[workflowID] = previousWorkflow
+	}); err != nil {
 		return Publication{}, false, err
 	}
 	return publication, true, nil
 }
 
+// PreparePublication records the resolved repository tuple before pushing,
+// rejecting retries that resolved to different repository state.
 func (store *Store) PreparePublication(id string, prepared PreparedPublication, now time.Time) error {
 	if err := validatePreparedPublication(prepared); err != nil {
 		return err
@@ -509,11 +528,11 @@ func (store *Store) PreparePublication(id string, prepared PreparedPublication, 
 	if publication.ResultCommit != "" && existing != prepared {
 		return errors.New("publication retry resolved to different repository state")
 	}
-	if publication.State == "published" {
+	if publication.State == PublicationPublished {
 		return nil
 	}
 	previous := publication
-	publication.State = "pushing"
+	publication.State = PublicationPrepared
 	publication.RepositoryID = prepared.RepositoryID
 	publication.RepositoryFullName = prepared.RepositoryFullName
 	publication.BaseSHA = prepared.BaseSHA
@@ -523,15 +542,15 @@ func (store *Store) PreparePublication(id string, prepared PreparedPublication, 
 	publication.Error = ""
 	publication.UpdatedAt = now.UTC()
 	store.data.Publications[id] = publication
-	if err := store.writeLocked(); err != nil {
-		if rollbackWrite(err) {
-			store.data.Publications[id] = previous
-		}
+	if err := store.commitLocked(func() { store.data.Publications[id] = previous }); err != nil {
 		return err
 	}
 	return nil
 }
 
+// FinishPublication durably closes a publication with either matching pull
+// request proof (success) or an error string (failure), advancing the owning
+// workflow's status to match.
 func (store *Store) FinishPublication(id string, pullRequest *PullRequestObservation, failure string, now time.Time) (Publication, error) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -539,7 +558,7 @@ func (store *Store) FinishPublication(id string, pullRequest *PullRequestObserva
 	if !exists {
 		return Publication{}, os.ErrNotExist
 	}
-	if publication.State == "published" {
+	if publication.State == PublicationPublished {
 		return publication, nil
 	}
 	if publication.SchemaVersion != PublicationSchemaVersion {
@@ -566,19 +585,18 @@ func (store *Store) FinishPublication(id string, pullRequest *PullRequestObserva
 	workflow.UpdatedAt = now.UTC()
 	workflow.Revision++
 	if failure == "" {
-		publication.State = "published"
+		publication.State = PublicationPublished
 		workflow.Status = WorkflowPublished
 	} else {
-		publication.State = "failed"
+		publication.State = PublicationFailed
 		workflow.Status = WorkflowFailed
 	}
 	store.data.Publications[id] = publication
 	store.data.Workflows[workflow.ID] = workflow
-	if err := store.writeLocked(); err != nil {
-		if rollbackWrite(err) {
-			store.data.Publications[id] = previousPublication
-			store.data.Workflows[workflow.ID] = previousWorkflow
-		}
+	if err := store.commitLocked(func() {
+		store.data.Publications[id] = previousPublication
+		store.data.Workflows[workflow.ID] = previousWorkflow
+	}); err != nil {
 		return Publication{}, err
 	}
 	return publication, nil
@@ -680,6 +698,7 @@ func validSHA(value string) bool {
 	return true
 }
 
+// Publication returns the publication record with the given ID.
 func (store *Store) Publication(id string) (Publication, bool) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -687,6 +706,8 @@ func (store *Store) Publication(id string) (Publication, bool) {
 	return publication, exists
 }
 
+// Publications snapshots every publication record, most recently updated
+// first.
 func (store *Store) Publications() []Publication {
 	store.mu.Lock()
 	defer store.mu.Unlock()
@@ -747,6 +768,9 @@ func (store *Store) load() error {
 	if state.Workspace != store.workspace {
 		return fmt.Errorf("Fern control state belongs to workspace %q", state.Workspace)
 	}
+	if !validOperatorCredentialID(state.OperatorCredentialID) {
+		return errors.New("Fern control state has an invalid operator credential identifier")
+	}
 	initializeMaps(&state)
 	for id, publication := range state.Publications {
 		if publication.SchemaVersion == 0 {
@@ -784,6 +808,22 @@ func validCurrentPublication(publication Publication) bool {
 		return publication.State == PublicationPublished && hasPrepared && publication.PullURL == publication.PullRequest.URL && validPullRequestObservation(*publication.PullRequest, prepared)
 	}
 	return publication.State != PublicationPublished && publication.PullURL == ""
+}
+
+// commitLocked persists the in-memory mutation made under a held store lock.
+// On failure it invokes undo exactly when the durable outcome is known to still
+// match disk (see rollbackWrite), restoring the pre-mutation values. An
+// uncertain commit — the state file was replaced but the directory sync failed
+// — must NOT roll back: disk may already hold the new state, so reverting
+// memory would make memory diverge from disk.
+func (store *Store) commitLocked(undo func()) error {
+	if err := store.writeLocked(); err != nil {
+		if rollbackWrite(err) && undo != nil {
+			undo()
+		}
+		return err
+	}
+	return nil
 }
 
 func (store *Store) writeLocked() error {
@@ -856,6 +896,16 @@ func rollbackWrite(err error) bool {
 	return !errors.As(err, &uncertain)
 }
 
+// restorePrunedLocked resurrects devices that pruning removed but that no
+// successful write has persisted yet. Whenever a mutation fails before any
+// durable write, memory must keep matching disk exactly, so pruned entries
+// cannot simply vanish from the in-memory map.
+func (store *Store) restorePrunedLocked(pruned map[string]Device) {
+	for hash, device := range pruned {
+		store.data.Devices[hash] = device
+	}
+}
+
 func (store *Store) pruneLocked(now time.Time) map[string]Device {
 	pruned := make(map[string]Device)
 	for hash, device := range store.data.Devices {
@@ -896,6 +946,59 @@ func randomID() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(value), nil
+}
+
+// OperatorCredentialIDPrefix begins every operator credential identifier so
+// audit snapshots can distinguish control-surface credentials from device IDs.
+const OperatorCredentialIDPrefix = "control-"
+
+// NewOperatorCredentialID mints a fresh random operator credential identifier.
+// It carries no derived secret material, so persisting it in audit snapshots
+// creates no offline guessing opportunity.
+func NewOperatorCredentialID() (string, error) {
+	random := make([]byte, 16)
+	if _, err := rand.Read(random); err != nil {
+		return "", fmt.Errorf("generate Fern operator credential ID: %w", err)
+	}
+	return OperatorCredentialIDPrefix + base64.RawURLEncoding.EncodeToString(random), nil
+}
+
+// EnsureOperatorCredentialID returns the stable random identifier attributed to
+// control-password operators in audit snapshots, generating and durably
+// recording one on first use through the same atomic write path as every other
+// mutation. The identifier is pure randomness — never a derivation of the
+// control password — so durable audit records cannot become an offline
+// brute-force oracle for that secret. It is an identifier, not a secret.
+func (store *Store) EnsureOperatorCredentialID() (string, error) {
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	if id := store.data.OperatorCredentialID; id != "" {
+		return id, nil
+	}
+	generated, err := NewOperatorCredentialID()
+	if err != nil {
+		return "", err
+	}
+	store.data.OperatorCredentialID = generated
+	if err := store.commitLocked(func() { store.data.OperatorCredentialID = "" }); err != nil {
+		return "", err
+	}
+	return generated, nil
+}
+
+// validOperatorCredentialID accepts either the empty value — state files
+// written before the field existed load unchanged — or exactly the canonical
+// spelling produced by NewOperatorCredentialID.
+func validOperatorCredentialID(value string) bool {
+	if value == "" {
+		return true
+	}
+	suffix, ok := strings.CutPrefix(value, OperatorCredentialIDPrefix)
+	if !ok || len(suffix) != base64.RawURLEncoding.EncodedLen(16) {
+		return false
+	}
+	decoded, err := base64.RawURLEncoding.DecodeString(suffix)
+	return err == nil && len(decoded) == 16 && base64.RawURLEncoding.EncodeToString(decoded) == suffix
 }
 
 func ensureDirectory(directory string) error {

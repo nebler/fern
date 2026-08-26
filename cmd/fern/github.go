@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -13,26 +14,15 @@ import (
 	fernRuntime "github.com/nebler/fern/internal/runtime"
 )
 
-func runGitHub(args []string, log *slog.Logger) error {
-	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
-		fmt.Fprintln(os.Stdout, "Publish committed work through host GitHub credentials.\n\nUsage:\n  fern github publish [flags]")
-		return nil
-	}
-	if len(args) == 0 || args[0] != "publish" {
-		return unknownCommand(append([]string{"github"}, args...))
-	}
-	return runGitHubPublish(args[1:], log)
-}
-
 func runGitHubPublish(args []string, log *slog.Logger) error {
-	flags := newFlagSet("github publish", "Push committed work to a Fern branch and open a draft pull request.")
-	configPath := flags.String("config", "fern.yaml", "configuration file")
-	operation := flags.String("operation", "", "publication identifier (defaults to the commit prefix)")
-	base := flags.String("base", "", "base branch (defaults to repository default)")
-	title := flags.String("title", "", "draft pull request title")
-	body := flags.String("body", "Created from a private Fern workspace.", "draft pull request body")
-	dryRun := flags.Bool("dry-run", false, "validate without push or pull request creation")
-	if err := parseFlags(flags, args); err != nil {
+	fs := newFlagSet("github publish", "Push committed work to a Fern branch and open a draft pull request.")
+	configPath := fs.String("config", "fern.yaml", "configuration file")
+	operation := fs.String("operation", "", "publication identifier (defaults to the commit prefix)")
+	base := fs.String("base", "", "base branch (defaults to repository default)")
+	title := fs.String("title", "", "draft pull request title")
+	body := fs.String("body", "Created from a private Fern workspace.", "draft pull request body")
+	dryRun := fs.Bool("dry-run", false, "validate without push or pull request creation")
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if !*dryRun {
@@ -69,7 +59,7 @@ func runGitHubPublish(args []string, log *slog.Logger) error {
 		return fmt.Errorf("publication requires removed compute; stop the service and run 'fern down' first (state: %s)", observation.State)
 	}
 	if workspace.Workspace.GitHub == nil {
-		return fmt.Errorf("GitHub publication is disabled; configure workspace.github.repository.id and fullName")
+		return errors.New("GitHub publication is disabled; configure workspace.github.repository.id and fullName")
 	}
 	publisher, err := publication.New(workspace.Workspace.Name, workspace.Workspace.Repo, publication.RepositoryBinding{
 		ID: workspace.Workspace.GitHub.Repository.ID, FullName: workspace.Workspace.GitHub.Repository.FullName,
@@ -86,18 +76,4 @@ func runGitHubPublish(args []string, log *slog.Logger) error {
 	}
 	fmt.Printf("GitHub publication preflight passed\nrepository: %s (%d)\nbase: %s at %s\ncommit: %s\nbranch: %s\n", prepared.RepositoryFullName, prepared.RepositoryID, prepared.BaseRef, prepared.BaseSHA, prepared.ResultCommit, prepared.Branch)
 	return nil
-}
-
-type publishRepository = publication.Repository
-
-func inspectPublishRepository(path string) (publishRepository, error) {
-	return publication.InspectRepository(context.Background(), path)
-}
-
-func validateLocalGitConfig(config string) error {
-	return publication.ValidateLocalGitConfig(config)
-}
-
-func githubRepositoryName(remote string) (string, error) {
-	return publication.GitHubRepositoryName(remote)
 }

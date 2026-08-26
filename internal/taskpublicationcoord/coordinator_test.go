@@ -545,7 +545,9 @@ func testCoordinator(t *testing.T, phase taskstore.PublicationPhase) (*memorySto
 	attemptID, _ := ids.AttemptID()
 	resultID, _ := ids.ResultID()
 	verificationID, _ := ids.VerificationID()
-	publicationID, _ := ids.PublicationID()
+	// Generator.PublicationID was removed as dead production API; fabricate a
+	// canonical ID directly (version/variant nibbles must satisfy ParsePublicationID).
+	publicationID := task.PublicationID("pub_0198d34d-6a50-75fb-b1f2-000000000001")
 	operationID, _ := ids.PublicationOperationID()
 	state := taskstore.PublicationRunning
 	if phase == taskstore.PublicationPhaseNone {

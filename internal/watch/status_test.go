@@ -104,3 +104,36 @@ func TestAllSessionsIdleV2BlocksEveryVolatileWorkClass(t *testing.T) {
 		})
 	}
 }
+
+// TestDecodeV2ActiveValidatesEveryMapEntry pins the fail-closed scan: all
+// entries are validated and counted, so an unknown type errors no matter how
+// Go's randomized map iteration orders the entries.
+func TestDecodeV2ActiveValidatesEveryMapEntry(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name     string
+		body     string
+		wantIdle bool
+		wantErr  bool
+	}{
+		{name: "empty map is idle", body: `{"data":{}}`, wantIdle: true},
+		{name: "one running session blocks", body: `{"data":{"ses_one":{"type":"running"}}}`},
+		{name: "two running sessions block", body: `{"data":{"ses_one":{"type":"running"},"ses_two":{"type":"busy"}}}`},
+		{name: "mixed valid types block", body: `{"data":{"ses_one":{"type":"retry"},"ses_two":{"type":"running"},"ses_three":{"type":"busy"}}}`},
+		{name: "unknown type alone errors", body: `{"data":{"ses_one":{"type":"waiting"}}}`, wantErr: true},
+		{name: "unknown type beside a valid one errors", body: `{"data":{"ses_one":{"type":"running"},"ses_two":{"type":"waiting"}}}`, wantErr: true},
+		{name: "unknown type after two valid ones errors", body: `{"data":{"ses_one":{"type":"running"},"ses_two":{"type":"busy"},"ses_three":{"type":"compacted"}}}`, wantErr: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			const attempts = 50
+			for attempt := 0; attempt < attempts; attempt++ {
+				idle, err := decodeV2Active([]byte(test.body))
+				if (err != nil) != test.wantErr || idle != test.wantIdle {
+					t.Fatalf("attempt %d: idle=%t err=%v, want idle=%t wantErr=%t", attempt+1, idle, err, test.wantIdle, test.wantErr)
+				}
+			}
+		})
+	}
+}

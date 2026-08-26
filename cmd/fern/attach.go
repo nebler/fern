@@ -15,28 +15,24 @@ import (
 )
 
 func runAttach(args []string) error {
-	flags := newFlagSet("attach", "Open the official client through the Fern proxy.")
-	configPath := flags.String("config", "fern.yaml", "configuration file")
-	envPath := flags.String("env-file", "", "protected environment file")
-	listenAddress := flags.String("listen", "", "operator proxy listen address")
-	clientOrigin := flags.String("url", "", "explicit loopback OpenCode server origin")
-	if err := parseFlags(flags, args); err != nil {
+	fs := newFlagSet("attach", "Open the official client through the Fern proxy.")
+	configPath := fs.String("config", "fern.yaml", "configuration file")
+	envPath := fs.String("env-file", "", "protected environment file")
+	listenAddress := fs.String("listen", "", "operator proxy listen address")
+	clientOrigin := fs.String("url", "", "explicit loopback OpenCode server origin")
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	var values map[string]string
-	if *envPath != "" {
-		var err error
-		values, err = readEnvFile(*envPath)
-		if err != nil {
-			return err
-		}
+	values, err := readProtectedEnvironment(*envPath)
+	if err != nil {
+		return err
 	}
-	client, err := config.LoadAttachWithEnvironment(*configPath, flagSet(flags, "config"), optionalFlag(flags, "listen", listenAddress), environmentLookup(values))
+	client, err := config.LoadAttachWithEnvironment(*configPath, flagProvided(fs, "config"), optionalFlag(fs, "listen", listenAddress), environmentLookup(values))
 	if err != nil {
 		return err
 	}
 	client.Env = mergeWorkspaceEnvironment(client.Env, values)
-	target, err := attachTarget(optionalFlag(flags, "url", clientOrigin), client.Listen)
+	target, err := attachTarget(optionalFlag(fs, "url", clientOrigin), client.Listen)
 	if err != nil {
 		return err
 	}

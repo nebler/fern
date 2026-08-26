@@ -16,6 +16,11 @@ import (
 
 var statusHTTPClient = &http.Client{Timeout: 2 * time.Second}
 
+// AllSessionsIdle authoritatively reports whether the OpenCode server has no
+// active sessions, shells, PTYs, or pending requests. Probes run sequentially
+// against one endpoint: worst case is six probes at statusHTTPClient's 2s
+// timeout each (~12s) plus body reads, so callers must budget accordingly.
+// Any probe error fails closed (not idle).
 func AllSessionsIdle(ctx context.Context, ep runtime.Endpoint, auth runtime.ServerAuth) (bool, error) {
 	checks := []struct {
 		path   string
@@ -67,6 +72,10 @@ func getStatus(ctx context.Context, ep runtime.Endpoint, auth runtime.ServerAuth
 	return body, nil
 }
 
+// decodeV2Active reports whether no active OpenCode session exists. Every map
+// entry is validated before the count is decided: an unknown type fails closed
+// regardless of Go's randomized map iteration order, so an unknown entry can
+// never be skipped by an earlier return.
 func decodeV2Active(body []byte) (bool, error) {
 	var response struct {
 		Data map[string]struct {
@@ -79,13 +88,16 @@ func decodeV2Active(body []byte) (bool, error) {
 	if response.Data == nil {
 		return false, errors.New("decode session status: expected data object")
 	}
-	for _, active := range response.Data {
-		if active.Type != "running" && active.Type != "busy" && active.Type != "retry" {
-			return false, fmt.Errorf("decode session status: unknown V2 active type %q", active.Type)
+	active := 0
+	for _, entry := range response.Data {
+		switch entry.Type {
+		case "running", "busy", "retry":
+			active++
+		default:
+			return false, fmt.Errorf("decode session status: unknown V2 active type %q", entry.Type)
 		}
-		return false, nil
 	}
-	return true, nil
+	return active == 0, nil
 }
 
 func decodeV2PTYs(body []byte) (bool, error) {

@@ -81,13 +81,6 @@ func TestGeneratorProducesEveryTypedID(t *testing.T) {
 			return err
 		},
 		func() error {
-			value, err := generator.PublicationID()
-			if err == nil {
-				_, err = ParsePublicationID(string(value))
-			}
-			return err
-		},
-		func() error {
 			value, err := generator.PublicationOperationID()
 			if err == nil {
 				_, err = ParsePublicationOperationID(string(value))

@@ -127,9 +127,11 @@ func TestLifecycleRefusesForeignContainerWithoutMutation(t *testing.T) {
 		name string
 		run  func() error
 	}{
-		{"create", func() error { _, err := docker.Create(context.Background(), spec); return err }},
+		// Both EnsureRunningObserved arms (StateAbsent->create,
+		// StatePaused->resume) share this inspection gate, so one operation
+		// covers the former Create and Resume refusals.
+		{"ensure running", func() error { _, err := docker.EnsureRunningObserved(context.Background(), spec); return err }},
 		{"pause", func() error { return docker.Pause(context.Background(), spec.Name) }},
-		{"resume", func() error { _, err := docker.Resume(context.Background(), spec); return err }},
 		{"destroy", func() error { return docker.Destroy(context.Background(), spec.Name) }},
 	}
 	for _, operation := range operations {
@@ -249,7 +251,7 @@ func TestCreateRefusesForeignExistingVolumeWithoutMutation(t *testing.T) {
 	defer server.Close()
 
 	docker := testDocker(t, server)
-	if _, err := docker.Create(context.Background(), ownershipTestSpec()); !errors.Is(err, ErrUnmanaged) {
+	if _, err := docker.EnsureRunningObserved(context.Background(), ownershipTestSpec()); !errors.Is(err, ErrUnmanaged) {
 		t.Fatalf("error = %v, want ErrUnmanaged", err)
 	}
 	if got := mutations.Load(); got != 0 {
@@ -278,7 +280,7 @@ func TestCreateVerifiesVolumeReturnedAfterCreateRace(t *testing.T) {
 	defer server.Close()
 
 	docker := testDocker(t, server)
-	if _, err := docker.Create(context.Background(), ownershipTestSpec()); !errors.Is(err, ErrUnmanaged) {
+	if _, err := docker.EnsureRunningObserved(context.Background(), ownershipTestSpec()); !errors.Is(err, ErrUnmanaged) {
 		t.Fatalf("error = %v, want ErrUnmanaged", err)
 	}
 	if got := containerCreates.Load(); got != 0 {
@@ -322,8 +324,8 @@ func TestFailedInitialCreateRemovesOnlyNewVolume(t *testing.T) {
 			}))
 			defer server.Close()
 
-			if _, err := testDocker(t, server).Create(context.Background(), ownershipTestSpec()); err == nil {
-				t.Fatal("Create unexpectedly succeeded")
+			if _, err := testDocker(t, server).EnsureRunningObserved(context.Background(), ownershipTestSpec()); err == nil {
+				t.Fatal("EnsureRunningObserved unexpectedly succeeded")
 			}
 			if got := volumeDrops.Load(); got != test.wantVolumeDrop {
 				t.Fatalf("volume removals = %d, want %d", got, test.wantVolumeDrop)
@@ -376,11 +378,18 @@ func TestVerifyActualSpecAllowsImageEnvironment(t *testing.T) {
 	docker := testDocker(t, server)
 	spec := ownershipTestSpec()
 	spec.Env = map[string]string{"FERN": "value"}
-	if err := docker.verifyActualSpec(context.Background(), "container-id", spec); err != nil {
+	inspect := func() container.InspectResponse {
+		info, err := docker.cli.ContainerInspect(context.Background(), "container-id")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return info
+	}
+	if err := verifyActualSpec(inspect(), spec); err != nil {
 		t.Fatalf("image-provided environment caused drift: %v", err)
 	}
 	restartPolicy.Store("always")
-	if err := docker.verifyActualSpec(context.Background(), "container-id", spec); !errors.Is(err, ErrSpecDrift) {
+	if err := verifyActualSpec(inspect(), spec); !errors.Is(err, ErrSpecDrift) {
 		t.Fatalf("restart policy error = %v, want ErrSpecDrift", err)
 	}
 }
@@ -727,7 +736,7 @@ func TestWorkspaceGHVolumePersistsAcrossRecreation(t *testing.T) {
 	spec := ownershipTestSpec()
 	spec.WorkspaceGH = true
 	for attempt := 0; attempt < 2; attempt++ {
-		if _, err := docker.Create(context.Background(), spec); err != nil {
+		if _, err := docker.EnsureRunningObserved(context.Background(), spec); err != nil {
 			t.Fatalf("create attempt %d: %v", attempt+1, err)
 		}
 		if err := docker.Destroy(context.Background(), spec.Name); err != nil {

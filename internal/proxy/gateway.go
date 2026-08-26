@@ -100,7 +100,7 @@ func serveFern(writer http.ResponseWriter, request *http.Request, controls Contr
 			var err error
 			view.Devices, err = controls.Store.Devices(time.Now())
 			if err != nil {
-				http.Error(writer, "control state unavailable", http.StatusServiceUnavailable)
+				writeUnavailable(writer, "control state")
 				return
 			}
 			view.Workflows = controls.Store.Workflows()

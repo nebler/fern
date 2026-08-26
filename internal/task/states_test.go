@@ -31,51 +31,26 @@ func TestAttemptTransitions(t *testing.T) {
 	testTerminal(t, allAttemptStates, map[AttemptState]bool{AttemptSucceeded: true, AttemptFailed: true, AttemptCanceled: true, AttemptSuperseded: true}, func(s AttemptState) bool { return s.Terminal() })
 }
 
-func TestApprovalTransitions(t *testing.T) {
-	testTransitions(t, allApprovalStates, map[ApprovalState][]ApprovalState{
-		ApprovalPending:          {ApprovalDecisionRecorded, ApprovalExpired, ApprovalCanceled, ApprovalRecoveryRequired},
-		ApprovalDecisionRecorded: {ApprovalDelivering, ApprovalCanceled, ApprovalRecoveryRequired},
-		ApprovalDelivering:       {ApprovalApplied, ApprovalRejected, ApprovalUncertain, ApprovalRecoveryRequired},
-		ApprovalUncertain:        {ApprovalDelivering, ApprovalApplied, ApprovalRejected, ApprovalCanceled, ApprovalRecoveryRequired},
-		ApprovalRecoveryRequired: {ApprovalDelivering, ApprovalRejected, ApprovalCanceled},
-	}, AllowApprovalTransition)
-	testTerminal(t, allApprovalStates, map[ApprovalState]bool{ApprovalApplied: true, ApprovalRejected: true, ApprovalExpired: true, ApprovalCanceled: true}, func(s ApprovalState) bool { return s.Terminal() })
+func TestResultStateClassification(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		state    ResultState
+		valid    bool
+		terminal bool
+	}{
+		{ResultSealed, true, true},
+		{ResultFailed, true, true},
+		{ResultState("collecting"), false, false},
+	} {
+		if test.state.Valid() != test.valid || test.state.Terminal() != test.terminal {
+			t.Errorf("%s valid=%t terminal=%t", test.state, test.state.Valid(), test.state.Terminal())
+		}
+	}
 }
 
-func TestResultTransitions(t *testing.T) {
-	testTransitions(t, allResultStates, map[ResultState][]ResultState{
-		ResultCollecting:       {ResultSealed, ResultFailed, ResultUncertain, ResultRecoveryRequired},
-		ResultUncertain:        {ResultCollecting, ResultSealed, ResultFailed, ResultRecoveryRequired},
-		ResultRecoveryRequired: {ResultCollecting, ResultFailed},
-	}, AllowResultTransition)
-	testTerminal(t, allResultStates, map[ResultState]bool{ResultSealed: true, ResultFailed: true}, func(s ResultState) bool { return s.Terminal() })
-}
-
-func TestVerificationTransitions(t *testing.T) {
-	testTransitions(t, allVerificationStates, map[VerificationState][]VerificationState{
-		VerificationRequested:        {VerificationRunning, VerificationCanceled, VerificationRecoveryRequired},
-		VerificationRunning:          {VerificationSucceeded, VerificationFailed, VerificationCancelRequested, VerificationUncertain, VerificationRecoveryRequired},
-		VerificationCancelRequested:  {VerificationCanceled, VerificationFailed, VerificationUncertain, VerificationRecoveryRequired},
-		VerificationUncertain:        {VerificationRunning, VerificationSucceeded, VerificationFailed, VerificationCanceled, VerificationRecoveryRequired},
-		VerificationRecoveryRequired: {VerificationRequested, VerificationFailed, VerificationCanceled},
-	}, AllowVerificationTransition)
-	testTerminal(t, allVerificationStates, map[VerificationState]bool{VerificationSucceeded: true, VerificationFailed: true, VerificationCanceled: true}, func(s VerificationState) bool { return s.Terminal() })
-}
-
-func TestPublicationTransitions(t *testing.T) {
-	testTransitions(t, allPublicationStates, map[PublicationState][]PublicationState{
-		PublicationRequested:        {PublicationPreparing, PublicationCancelRequested, PublicationFailed, PublicationRecoveryRequired},
-		PublicationPreparing:        {PublicationReady, PublicationFailed, PublicationConflict, PublicationUncertain, PublicationCancelRequested, PublicationRecoveryRequired},
-		PublicationReady:            {PublicationPushing, PublicationCancelRequested, PublicationConflict, PublicationRecoveryRequired},
-		PublicationPushing:          {PublicationOpeningPR, PublicationReconciling, PublicationFailed, PublicationConflict, PublicationUncertain, PublicationCancelRequested, PublicationRecoveryRequired},
-		PublicationOpeningPR:        {PublicationReconciling, PublicationPublished, PublicationFailed, PublicationConflict, PublicationUncertain, PublicationCancelRequested, PublicationRecoveryRequired},
-		PublicationReconciling:      {PublicationPushing, PublicationOpeningPR, PublicationPublished, PublicationFailed, PublicationConflict, PublicationCancelRequested, PublicationRecoveryRequired},
-		PublicationCancelRequested:  {PublicationCanceled, PublicationReconciling, PublicationPublished, PublicationConflict, PublicationUncertain, PublicationRecoveryRequired},
-		PublicationUncertain:        {PublicationReconciling, PublicationPublished, PublicationFailed, PublicationConflict, PublicationCanceled, PublicationRecoveryRequired},
-		PublicationRecoveryRequired: {PublicationReconciling, PublicationFailed, PublicationConflict, PublicationCanceled},
-	}, AllowPublicationTransition)
-	testTerminal(t, allPublicationStates, map[PublicationState]bool{PublicationPublished: true, PublicationFailed: true, PublicationConflict: true, PublicationCanceled: true}, func(s PublicationState) bool { return s.Terminal() })
-}
+// The approval, result-transition, verification-transition, and
+// publication-transition machines live in taskstore behind SQL triggers and
+// are intentionally not modeled here.
 
 func testTransitions[T ~string](t *testing.T, states []T, want map[T][]T, allow func(T, T) error) {
 	t.Helper()

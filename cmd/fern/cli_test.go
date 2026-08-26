@@ -110,3 +110,68 @@ func TestExitCodeClassification(t *testing.T) {
 		t.Fatalf("runtime exit code = %d, want 1", got)
 	}
 }
+
+func TestUsageTextIsDerivedUnchanged(t *testing.T) {
+	t.Parallel()
+	const want = `Fern supervises one durable OpenCode workspace in Docker.
+
+Usage:
+  fern <command> [flags]
+  fern help [command]
+
+Commands:
+  init          Create a secure phone-demo configuration
+  doctor        Verify host and private phone-demo readiness
+  github        Publish committed work as a draft pull request
+  up            Run the workspace supervisor and authenticated proxy
+  attach        Open the official client through the Fern proxy
+  status        Show the workspace runtime state
+  logs          Stream workspace container logs
+  down          Remove workspace compute while retaining session data
+  debug events  Stream the backend activity events used by Fern
+  debug wake    Print the phase waterfall for one workspace wake
+  version       Print Fern version information
+
+Examples:
+  fern init --repo /path/to/repository
+  fern up --config fern.yaml
+  fern status --json
+  fern attach
+
+Run 'fern help <command>' for command flags.
+Documentation: https://github.com/nebler/fern
+`
+	if usageText != want {
+		t.Fatalf("derived usage text drifted:\n%s", usageText)
+	}
+}
+
+func TestGroupedHelpIsDerivedUnchanged(t *testing.T) {
+	t.Parallel()
+	tests := map[string]struct{ overview, usage string }{
+		"github": {
+			overview: "Publish committed work through host GitHub credentials.",
+			usage:    "Usage:\n  fern github publish [flags]",
+		},
+		"debug": {
+			overview: "Inspect Fern's backend activity inputs.",
+			usage:    "Usage:\n  fern debug events [flags]\n  fern debug wake [flags]",
+		},
+	}
+	for name, want := range tests {
+		entry := lookupCommand(name)
+		if entry == nil {
+			t.Fatalf("registry lost command %q", name)
+		}
+		if got := groupedHelp(entry); got != want.overview+"\n\n"+want.usage {
+			t.Fatalf("groupedHelp(%q) =\n%s", name, got)
+		}
+		if got := subcommandUsage(entry); got != want.usage {
+			t.Fatalf("subcommandUsage(%q) =\n%s\nwant\n%s", name, got, want.usage)
+		}
+	}
+	version := lookupCommand("version")
+	if got := groupedHelp(version); got != "Print Fern version information.\n\nUsage:\n  fern version" {
+		t.Fatalf("version grouped help = %s", got)
+	}
+}

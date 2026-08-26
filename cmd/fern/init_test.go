@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -140,6 +142,24 @@ func TestWriteQRDoesNotExposeCredentials(t *testing.T) {
 	if output.Len() == 0 || strings.Contains(output.String(), value) {
 		t.Fatal("QR output is empty or contains the literal URL")
 	}
+}
+
+// tailscaleOrigin extracts the single HTTPS origin advertised anywhere in a
+// `tailscale serve status` output. Only tests consume it directly; production
+// code uses the target- and topology-scoped variants below.
+func tailscaleOrigin(output string) (string, error) {
+	matches := httpsOriginPattern.FindAllString(output, -1)
+	unique := make(map[string]bool)
+	for _, match := range matches {
+		unique[match] = true
+	}
+	if len(unique) != 1 {
+		return "", fmt.Errorf("expected one Tailscale HTTPS origin, found %d", len(unique))
+	}
+	for origin := range unique {
+		return origin, nil
+	}
+	return "", errors.New("no Tailscale HTTPS origin")
 }
 
 func TestTailscaleOrigin(t *testing.T) {

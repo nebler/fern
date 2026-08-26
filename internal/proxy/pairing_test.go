@@ -17,6 +17,37 @@ import (
 	"github.com/nebler/fern/internal/runtime"
 )
 
+func TestOperatorActorUsesStableRandomCredentialIdentifier(t *testing.T) {
+	t.Parallel()
+	store, err := control.Open(filepath.Join(t.TempDir(), "control"), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := newPairingState(store).operatorActor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(first.CredentialID, "control-") {
+		t.Fatalf("operator credential ID %q lacks the control prefix", first.CredentialID)
+	}
+	second, err := newPairingState(store).operatorActor()
+	if err != nil || second.CredentialID != first.CredentialID {
+		t.Fatalf("credential ID not stable across states: %q vs %q (%v)", second.CredentialID, first.CredentialID, err)
+	}
+	other, err := control.Open(filepath.Join(t.TempDir(), "control"), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	third, err := newPairingState(other).operatorActor()
+	if err != nil || third.CredentialID == first.CredentialID {
+		t.Fatalf("independent stores shared credential ID %q (%v)", third.CredentialID, err)
+	}
+	storeless, err := newPairingState().operatorActor()
+	if err != nil || !strings.HasPrefix(storeless.CredentialID, "control-") {
+		t.Fatalf("storeless operator credential ID = %q, %v", storeless.CredentialID, err)
+	}
+}
+
 func TestPairingCreatesCookieAndInjectsUpstreamAuth(t *testing.T) {
 	t.Parallel()
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {

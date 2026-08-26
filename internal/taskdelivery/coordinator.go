@@ -416,7 +416,7 @@ func (coordinator *Coordinator) resumeAndDeliver(ctx context.Context, work tasks
 func (coordinator *Coordinator) deliver(ctx context.Context, work taskstore.DeliveryWork) error {
 	_, release, client, err := coordinator.acquireClient(ctx, work.Attempt)
 	if err != nil {
-		payload := evidence("runtime_attestation", stateForError(err), "unobserved", "unobserved")
+		payload := evidence("runtime_attestation", deliveryStateForError(err), "unobserved", "unobserved")
 		if errors.Is(err, ErrImageConflict) {
 			return coordinator.recordActiveRecovery(ctx, work, "runtime_image_conflict", payload)
 		}
@@ -437,7 +437,7 @@ func (coordinator *Coordinator) deliverWithClient(ctx context.Context, work task
 		_, effectErr := client.CreateOrReuseSession(requestCtx, coordinator.sessionRequest(work))
 		cancel()
 		if effectErr != nil {
-			return coordinator.recordActiveUncertain(ctx, work, "session_create_result_unknown", evidence("session_create", stateForError(effectErr), "unobserved", "unobservable"))
+			return coordinator.recordActiveUncertain(ctx, work, "session_create_result_unknown", evidence("session_create", deliveryStateForError(effectErr), "unobserved", "unobservable"))
 		}
 	}
 	if work.Attempt.DeliveryPhase == taskstore.DeliveryPhaseSessionCreateStarted {
@@ -457,7 +457,7 @@ func (coordinator *Coordinator) deliverWithClient(ctx context.Context, work task
 		_, effectErr := client.AdmitPrompt(requestCtx, string(work.Attempt.OpenCodeSessionID), coordinator.promptRequest(work))
 		cancel()
 		if effectErr != nil {
-			return coordinator.recordActiveUncertain(ctx, work, "prompt_result_unknown", evidence("prompt_submit", "exact", stateForError(effectErr), "unobservable"))
+			return coordinator.recordActiveUncertain(ctx, work, "prompt_result_unknown", evidence("prompt_submit", "exact", deliveryStateForError(effectErr), "unobservable"))
 		}
 	}
 	if work.Attempt.DeliveryPhase != taskstore.DeliveryPhasePromptStarted {
@@ -467,7 +467,7 @@ func (coordinator *Coordinator) deliverWithClient(ctx context.Context, work task
 	observation, err := client.ReconcilePrompt(requestCtx, string(work.Attempt.OpenCodeSessionID), coordinator.promptRequest(work))
 	cancel()
 	if err != nil {
-		return coordinator.recordActiveUncertain(ctx, work, "prompt_reconcile_unavailable", evidence("prompt_reconcile", "exact", stateForError(err), "unobservable"))
+		return coordinator.recordActiveUncertain(ctx, work, "prompt_reconcile_unavailable", evidence("prompt_reconcile", "exact", deliveryStateForError(err), "unobservable"))
 	}
 	payload := promptEvidence("prompt_reconcile", observation)
 	if !observation.Admitted() {
@@ -652,7 +652,9 @@ func promptObservationConflicts(observation opencodeapi.PromptObservation) bool 
 		observation.Session == opencodeapi.MatchAbsent
 }
 
-func stateForError(err error) string {
+// deliveryStateForError maps delivery-phase errors into the delivery evidence
+// vocabulary, which distinguishes only "conflict" and "unavailable".
+func deliveryStateForError(err error) string {
 	if errors.Is(err, opencodeapi.ErrConflict) || errors.Is(err, opencodeapi.ErrProtocolConflict) || errors.Is(err, ErrImageConflict) {
 		return "conflict"
 	}
