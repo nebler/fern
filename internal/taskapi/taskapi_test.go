@@ -31,14 +31,15 @@ const (
 var testNow = time.Date(2026, 8, 22, 18, 57, 11, 565000000, time.UTC)
 
 type fakeStore struct {
-	admit   func(context.Context, taskstore.AdmitTaskParams) (taskstore.Admission, error)
-	receipt func(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error)
-	get     func(context.Context, task.TaskID) (taskstore.Task, error)
-	attempt func(context.Context, task.AttemptID) (taskstore.Attempt, error)
-	list    func(context.Context, task.WorkspaceID, int) ([]taskstore.TaskSnapshot, error)
-	cancel  func(context.Context, taskstore.RequestCancellationParams) (taskstore.Cancellation, error)
-	seal    func(context.Context, task.ReceiptID) (taskstore.SealRequest, error)
-	events  func(context.Context, task.WorkspaceID, task.Cursor, int) (taskstore.EventPage, error)
+	admit    func(context.Context, taskstore.AdmitTaskParams) (taskstore.Admission, error)
+	receipt  func(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error)
+	get      func(context.Context, task.TaskID) (taskstore.Task, error)
+	attempt  func(context.Context, task.AttemptID) (taskstore.Attempt, error)
+	snapshot func(context.Context, task.WorkspaceID, task.TaskID) (taskstore.TaskSnapshot, error)
+	list     func(context.Context, task.WorkspaceID, int) ([]taskstore.TaskSnapshot, error)
+	cancel   func(context.Context, taskstore.RequestCancellationParams) (taskstore.Cancellation, error)
+	seal     func(context.Context, task.ReceiptID) (taskstore.SealRequest, error)
+	events   func(context.Context, task.WorkspaceID, task.Cursor, int) (taskstore.EventPage, error)
 }
 
 func (s *fakeStore) ListTasks(ctx context.Context, workspace task.WorkspaceID, limit int) ([]taskstore.TaskSnapshot, error) {
@@ -46,6 +47,21 @@ func (s *fakeStore) ListTasks(ctx context.Context, workspace task.WorkspaceID, l
 		return []taskstore.TaskSnapshot{}, nil
 	}
 	return s.list(ctx, workspace, limit)
+}
+
+func (s *fakeStore) GetTaskSnapshot(ctx context.Context, workspace task.WorkspaceID, id task.TaskID) (taskstore.TaskSnapshot, error) {
+	if s.snapshot != nil {
+		return s.snapshot(ctx, workspace, id)
+	}
+	owner, err := s.GetTask(ctx, id)
+	if err != nil {
+		return taskstore.TaskSnapshot{}, err
+	}
+	if owner.WorkspaceID != workspace {
+		return taskstore.TaskSnapshot{}, taskstore.ErrNotFound
+	}
+	attempt, err := s.GetAttempt(ctx, owner.CurrentAttemptID)
+	return taskstore.TaskSnapshot{Task: owner, Attempt: attempt, Verifications: []taskstore.Verification{}}, err
 }
 
 type fakeSealAuthorizer struct {
@@ -474,6 +490,10 @@ func TestGetTaskOwnershipAndRedaction(t *testing.T) {
 }
 
 func TestListTasksUsesDurableServerSnapshots(t *testing.T) {
+	resultID := task.ResultID("res_0198d34d-6a50-75fb-b1f2-b4a14d70ec60")
+	verificationID := task.VerificationID("ver_0198d34d-6a50-75fb-b1f2-b4a14d70ec61")
+	publicationID := task.PublicationID("pub_0198d34d-6a50-75fb-b1f2-b4a14d70ec62")
+	sealRequestID := task.SealRequestID("slr_0198d34d-6a50-75fb-b1f2-b4a14d70ec63")
 	store := &fakeStore{list: func(_ context.Context, workspace task.WorkspaceID, limit int) ([]taskstore.TaskSnapshot, error) {
 		if workspace != testWorkspace || limit != 25 {
 			t.Fatalf("list scope = %s/%d", workspace, limit)
@@ -481,16 +501,30 @@ func TestListTasksUsesDurableServerSnapshots(t *testing.T) {
 		return []taskstore.TaskSnapshot{{
 			Task: taskstore.Task{ID: testTask, WorkspaceID: testWorkspace, Title: "Durable task", State: task.TaskRunning,
 				RepositoryID: 987654321, BaseRef: "main", BaseSHA: testSHA, CurrentAttemptID: testAttempt,
-				Revision: 3, CreatedAt: testNow, UpdatedAt: testNow, Prompt: "secret prompt"},
+				SealedResultID: resultID, Revision: 3, CreatedAt: testNow, UpdatedAt: testNow, Prompt: "secret prompt"},
 			Attempt: taskstore.Attempt{ID: testAttempt, TaskID: testTask, WorkspaceID: testWorkspace, Sequence: 1,
 				State: task.AttemptRunning, OpenCodeSessionID: "ses_0123456789abcdef0123456789abcdef",
 				Deadline: testNow.Add(time.Hour), Revision: 4, CreatedAt: testNow, UpdatedAt: testNow},
+			SealRequest: &taskstore.SealRequest{ID: sealRequestID, WorkspaceID: testWorkspace, TaskID: testTask,
+				AttemptID: testAttempt, ResultID: resultID, State: taskstore.SealRequestCompleted, AcceptedAt: testNow},
+			Result: &taskstore.Result{ID: resultID, WorkspaceID: testWorkspace, TaskID: testTask, AttemptID: testAttempt,
+				State: task.ResultSealed, Outcome: task.ResultChanged, BaseSHA: testSHA, ResultCommit: testSHA, SealedAt: testNow},
+			Verifications: []taskstore.Verification{{ID: verificationID, ResultID: resultID, TaskID: testTask,
+				AttemptID: testAttempt, WorkspaceID: testWorkspace, State: taskstore.VerificationSucceeded,
+				PolicyName: "release", VerifiedCommit: testSHA, Outcome: "succeeded", Revision: 2, CreatedAt: testNow, UpdatedAt: testNow}},
+			Publication: &taskstore.Publication{ID: publicationID, OperationID: "op_0198d34d-6a50-75fb-b1f2-b4a14d70ec64",
+				ResultID: resultID, VerificationID: verificationID, TaskID: testTask, AttemptID: testAttempt,
+				WorkspaceID: testWorkspace, State: taskstore.PublicationPrepared, EffectPhase: taskstore.PublicationPhaseNone,
+				Tuple: task.PublicationTuple{Branch: "fern/demo/op", ResultCommit: testSHA}, Revision: 1, CreatedAt: testNow, UpdatedAt: testNow},
 		}}, nil
 	}}
 	handler := newTestHandler(t, testConfig(t, store))
 	response := request(handler, http.MethodGet, submitPath+"?limit=25", "", nil)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"title":"Durable task"`) ||
-		!strings.Contains(response.Body.String(), `"openCodePath":"/session/ses_0123456789abcdef0123456789abcdef"`) {
+		!strings.Contains(response.Body.String(), `"openCodePath":"/session/ses_0123456789abcdef0123456789abcdef"`) ||
+		!strings.Contains(response.Body.String(), `"sealRequest":{"id":"`+string(sealRequestID)) ||
+		!strings.Contains(response.Body.String(), `"verifications":[{"id":"`+string(verificationID)) ||
+		!strings.Contains(response.Body.String(), `"publication":{"id":"`+string(publicationID)) {
 		t.Fatalf("list = %d %s", response.Code, response.Body.String())
 	}
 	for _, secret := range []string{"secret prompt", "credential", "budget"} {

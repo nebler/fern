@@ -531,8 +531,12 @@ type DeliveryWork struct {
 }
 
 type TaskSnapshot struct {
-	Task    Task
-	Attempt Attempt
+	Task          Task
+	Attempt       Attempt
+	SealRequest   *SealRequest
+	Result        *Result
+	Verifications []Verification
+	Publication   *Publication
 }
 
 type DeliveryTransition struct {

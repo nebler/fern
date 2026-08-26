@@ -52,6 +52,7 @@ type Store interface {
 	FindReceiptByIdempotency(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error)
 	GetTask(context.Context, task.TaskID) (taskstore.Task, error)
 	GetAttempt(context.Context, task.AttemptID) (taskstore.Attempt, error)
+	GetTaskSnapshot(context.Context, task.WorkspaceID, task.TaskID) (taskstore.TaskSnapshot, error)
 	ListTasks(context.Context, task.WorkspaceID, int) ([]taskstore.TaskSnapshot, error)
 	RequestCancellation(context.Context, taskstore.RequestCancellationParams) (taskstore.Cancellation, error)
 	GetSealRequestByReceipt(context.Context, task.ReceiptID) (taskstore.SealRequest, error)
@@ -224,20 +225,14 @@ func (h *Handler) listTasks(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
-	tasks := make([]struct {
-		Task    taskDTO    `json:"task"`
-		Attempt attemptDTO `json:"attempt"`
-	}, 0, len(valuesOut))
+	tasks := make([]taskSnapshotDTO, 0, len(valuesOut))
 	for _, value := range valuesOut {
-		if value.Task.WorkspaceID != h.config.WorkspaceID || value.Attempt.WorkspaceID != h.config.WorkspaceID ||
-			value.Attempt.TaskID != value.Task.ID || value.Attempt.ID != value.Task.CurrentAttemptID {
+		view, valid := taskSnapshotView(value, h.config.WorkspaceID)
+		if !valid {
 			writeError(w, http.StatusInternalServerError, "internal_error", "The request could not be completed.")
 			return
 		}
-		tasks = append(tasks, struct {
-			Task    taskDTO    `json:"task"`
-			Attempt attemptDTO `json:"attempt"`
-		}{taskView(value.Task), attemptView(value.Attempt)})
+		tasks = append(tasks, view)
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Tasks any `json:"tasks"`
@@ -539,28 +534,17 @@ func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorS
 }
 
 func (h *Handler) getTask(w http.ResponseWriter, r *http.Request, id task.TaskID) {
-	owner, err := h.config.Store.GetTask(r.Context(), id)
+	snapshot, err := h.config.Store.GetTaskSnapshot(r.Context(), h.config.WorkspaceID, id)
 	if err != nil {
 		writeStoreError(w, err)
 		return
 	}
-	if owner.WorkspaceID != h.config.WorkspaceID {
-		writeError(w, http.StatusNotFound, "not_found", "The requested resource was not found.")
-		return
-	}
-	attempt, err := h.config.Store.GetAttempt(r.Context(), owner.CurrentAttemptID)
-	if err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	if attempt.WorkspaceID != h.config.WorkspaceID || attempt.TaskID != owner.ID || attempt.ID != owner.CurrentAttemptID {
+	view, valid := taskSnapshotView(snapshot, h.config.WorkspaceID)
+	if !valid {
 		writeError(w, http.StatusInternalServerError, "internal_error", "The request could not be completed.")
 		return
 	}
-	writeJSON(w, http.StatusOK, struct {
-		Task    taskDTO    `json:"task"`
-		Attempt attemptDTO `json:"attempt"`
-	}{taskView(owner), attemptView(attempt)})
+	writeJSON(w, http.StatusOK, view)
 }
 
 type cancelInput struct {
@@ -970,6 +954,70 @@ type attemptDTO struct {
 	UpdatedAt    time.Time         `json:"updatedAt"`
 }
 
+type taskSnapshotDTO struct {
+	Task          taskDTO           `json:"task"`
+	Attempt       attemptDTO        `json:"attempt"`
+	SealRequest   *sealRequestDTO   `json:"sealRequest"`
+	Result        *resultDTO        `json:"result"`
+	Verifications []verificationDTO `json:"verifications"`
+	Publication   *publicationDTO   `json:"publication"`
+}
+
+type sealRequestDTO struct {
+	ID          task.SealRequestID         `json:"id"`
+	State       taskstore.SealRequestState `json:"state"`
+	ResultID    task.ResultID              `json:"resultId"`
+	AcceptedAt  time.Time                  `json:"acceptedAt"`
+	CompletedAt *time.Time                 `json:"completedAt,omitempty"`
+	RejectedAt  *time.Time                 `json:"rejectedAt,omitempty"`
+}
+
+type resultDTO struct {
+	ID              task.ResultID      `json:"id"`
+	State           task.ResultState   `json:"state"`
+	Outcome         task.ResultOutcome `json:"outcome"`
+	BaseSHA         task.GitOID        `json:"baseSha"`
+	ResultCommit    task.GitOID        `json:"resultCommit"`
+	ManifestEntries int                `json:"manifestEntries"`
+	ManifestSHA256  string             `json:"manifestSha256"`
+	SealedAt        time.Time          `json:"sealedAt"`
+}
+
+type verificationDTO struct {
+	ID             task.VerificationID         `json:"id"`
+	ResultID       task.ResultID               `json:"resultId"`
+	State          taskstore.VerificationState `json:"state"`
+	PolicyName     string                      `json:"policyName"`
+	VerifiedCommit task.GitOID                 `json:"verifiedCommit"`
+	Outcome        string                      `json:"outcome,omitempty"`
+	StartedAt      *time.Time                  `json:"startedAt,omitempty"`
+	EndedAt        *time.Time                  `json:"endedAt,omitempty"`
+	Revision       int64                       `json:"revision"`
+	CreatedAt      time.Time                   `json:"createdAt"`
+	UpdatedAt      time.Time                   `json:"updatedAt"`
+}
+
+type publicationDTO struct {
+	ID             task.PublicationID          `json:"id"`
+	OperationID    task.PublicationOperationID `json:"operationId"`
+	ResultID       task.ResultID               `json:"resultId"`
+	VerificationID task.VerificationID         `json:"verificationId"`
+	State          taskstore.PublicationState  `json:"state"`
+	EffectPhase    taskstore.PublicationPhase  `json:"effectPhase"`
+	Branch         string                      `json:"branch"`
+	ResultCommit   task.GitOID                 `json:"resultCommit"`
+	PullRequest    *pullRequestDTO             `json:"pullRequest,omitempty"`
+	Revision       int64                       `json:"revision"`
+	CreatedAt      time.Time                   `json:"createdAt"`
+	UpdatedAt      time.Time                   `json:"updatedAt"`
+}
+
+type pullRequestDTO struct {
+	Number task.PullRequestNumber `json:"number"`
+	URL    string                 `json:"url"`
+	Draft  bool                   `json:"draft"`
+}
+
 type eventDTO struct {
 	ID         task.EventID   `json:"id"`
 	Cursor     task.Cursor    `json:"cursor"`
@@ -1018,6 +1066,66 @@ func attemptView(value taskstore.Attempt) attemptDTO {
 		Sequence: value.Sequence, State: value.State, Deadline: value.Deadline,
 		AdmittedAt: value.AdmittedAt, Revision: value.Revision, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 	}
+}
+
+func taskSnapshotView(value taskstore.TaskSnapshot, workspaceID task.WorkspaceID) (taskSnapshotDTO, bool) {
+	if value.Task.WorkspaceID != workspaceID || value.Attempt.WorkspaceID != workspaceID ||
+		value.Attempt.TaskID != value.Task.ID || value.Attempt.ID != value.Task.CurrentAttemptID {
+		return taskSnapshotDTO{}, false
+	}
+	view := taskSnapshotDTO{
+		Task: taskView(value.Task), Attempt: attemptView(value.Attempt), Verifications: make([]verificationDTO, 0, len(value.Verifications)),
+	}
+	if value.SealRequest != nil {
+		if value.SealRequest.WorkspaceID != workspaceID || value.SealRequest.TaskID != value.Task.ID || value.SealRequest.AttemptID != value.Attempt.ID {
+			return taskSnapshotDTO{}, false
+		}
+		view.SealRequest = &sealRequestDTO{
+			ID: value.SealRequest.ID, State: value.SealRequest.State, ResultID: value.SealRequest.ResultID,
+			AcceptedAt: value.SealRequest.AcceptedAt, CompletedAt: value.SealRequest.CompletedAt, RejectedAt: value.SealRequest.RejectedAt,
+		}
+	}
+	if value.Result != nil {
+		if value.Result.WorkspaceID != workspaceID || value.Result.TaskID != value.Task.ID || value.Result.AttemptID != value.Attempt.ID || value.Result.ID != value.Task.SealedResultID {
+			return taskSnapshotDTO{}, false
+		}
+		view.Result = &resultDTO{
+			ID: value.Result.ID, State: value.Result.State, Outcome: value.Result.Outcome, BaseSHA: value.Result.BaseSHA,
+			ResultCommit: value.Result.ResultCommit, ManifestEntries: value.Result.ManifestEntries,
+			ManifestSHA256: "sha256:" + hex.EncodeToString(value.Result.ManifestSHA256[:]), SealedAt: value.Result.SealedAt,
+		}
+	}
+	for _, verification := range value.Verifications {
+		if value.Result == nil || verification.WorkspaceID != workspaceID || verification.TaskID != value.Task.ID ||
+			verification.AttemptID != value.Attempt.ID || verification.ResultID != value.Result.ID {
+			return taskSnapshotDTO{}, false
+		}
+		view.Verifications = append(view.Verifications, verificationDTO{
+			ID: verification.ID, ResultID: verification.ResultID, State: verification.State, PolicyName: verification.PolicyName,
+			VerifiedCommit: verification.VerifiedCommit, Outcome: verification.Outcome, StartedAt: verification.StartedAt,
+			EndedAt: verification.EndedAt, Revision: verification.Revision, CreatedAt: verification.CreatedAt, UpdatedAt: verification.UpdatedAt,
+		})
+	}
+	if value.Publication != nil {
+		if value.Result == nil || value.Publication.WorkspaceID != workspaceID || value.Publication.TaskID != value.Task.ID ||
+			value.Publication.AttemptID != value.Attempt.ID || value.Publication.ResultID != value.Result.ID {
+			return taskSnapshotDTO{}, false
+		}
+		publication := &publicationDTO{
+			ID: value.Publication.ID, OperationID: value.Publication.OperationID, ResultID: value.Publication.ResultID,
+			VerificationID: value.Publication.VerificationID, State: value.Publication.State, EffectPhase: value.Publication.EffectPhase,
+			Branch: value.Publication.Tuple.Branch, ResultCommit: value.Publication.Tuple.ResultCommit,
+			Revision: value.Publication.Revision, CreatedAt: value.Publication.CreatedAt, UpdatedAt: value.Publication.UpdatedAt,
+		}
+		if value.Publication.Observation != nil {
+			publication.PullRequest = &pullRequestDTO{
+				Number: value.Publication.Observation.PullRequest.Number, URL: value.Publication.Observation.PullRequest.URL,
+				Draft: value.Publication.Observation.PullRequest.Draft,
+			}
+		}
+		view.Publication = publication
+	}
+	return view, true
 }
 
 func eventView(value taskstore.Event) eventDTO {
