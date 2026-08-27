@@ -129,6 +129,31 @@ func (store *CredentialStore) Save(credentials AppCredentials) error {
 	return nil
 }
 
+// Delete removes the committed generation and durably records its absence.
+// It is idempotent so a failed bootstrap can restore the empty-store state
+// whether Save failed before or after making the candidate visible.
+func (store *CredentialStore) Delete() error {
+	if store == nil || store.directory == "" {
+		return ErrCredentialStoreSecurity
+	}
+	directory, err := openCredentialDirectory(store.directory)
+	if err != nil {
+		return err
+	}
+	defer directory.Close()
+	exists, err := inspectCredentialEntry(int(directory.Fd()))
+	if err != nil || !exists {
+		return err
+	}
+	if err := unix.Unlinkat(int(directory.Fd()), credentialFileName, 0); err != nil {
+		return ErrCredentialStoreIO
+	}
+	if err := directory.Sync(); err != nil {
+		return ErrCredentialStoreIO
+	}
+	return nil
+}
+
 // MarshalStoredCredentials returns the strict store representation for direct
 // encryption. Callers must not persist the returned plaintext.
 func MarshalStoredCredentials(credentials AppCredentials) ([]byte, error) {

@@ -41,6 +41,15 @@ func TestCredentialStoreCreatesPrivateDirectoryAndRoundTrips(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertStoredCredentials(t, got, want)
+	if err := store.Delete(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(); !errors.Is(err, ErrCredentialsNotFound) {
+		t.Fatalf("load after delete error = %v", err)
+	}
 }
 
 func TestStoredCredentialCandidateRoundTripsInMemory(t *testing.T) {

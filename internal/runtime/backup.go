@@ -27,6 +27,8 @@ const (
 	maxCredentialArchiveBytes = 16 << 20
 )
 
+var ErrCredentialGenerationNotFound = errors.New("workspace-gh credential generation not found")
+
 type volumeSnapshot struct {
 	existed bool
 	path    string
@@ -48,6 +50,9 @@ func (d *Docker) ExportWorkspaceGH(ctx context.Context, spec Spec) ([]byte, erro
 	}
 	name := specGHVolumeName(spec)
 	if _, err := d.inspectManagedVolume(ctx, spec.Name, name); err != nil {
+		if errdefs.IsNotFound(err) {
+			return nil, ErrCredentialGenerationNotFound
+		}
 		return nil, err
 	}
 	archive, err := d.readVolumeArchive(ctx, spec.Image, name)
@@ -61,8 +66,9 @@ func (d *Docker) ExportWorkspaceGH(ctx context.Context, spec Spec) ([]byte, erro
 }
 
 // ReplaceWorkspaceGH stages and verifies a credential archive before replacing
-// the canonical volume. Any activation failure restores the prior generation.
-func (d *Docker) ReplaceWorkspaceGH(ctx context.Context, spec Spec, archive []byte, generation string) (resultErr error) {
+// the canonical volume. Any activation failure restores its prior state,
+// including absence during bootstrap.
+func (d *Docker) ReplaceWorkspaceGH(ctx context.Context, spec Spec, archive []byte, generation string, expectPrior bool) (resultErr error) {
 	if err := spec.Validate(); err != nil {
 		return err
 	}
@@ -75,8 +81,12 @@ func (d *Docker) ReplaceWorkspaceGH(ctx context.Context, spec Spec, archive []by
 	}
 	name := specGHVolumeName(spec)
 	prior, err := d.ExportWorkspaceGH(ctx, spec)
-	if err != nil {
+	priorExists := err == nil
+	if err != nil && !errors.Is(err, ErrCredentialGenerationNotFound) {
 		return fmt.Errorf("snapshot workspace-gh rollback generation: %w", err)
+	}
+	if priorExists != expectPrior {
+		return errors.New("workspace-gh credential generation changed before activation")
 	}
 	stage := restoreStageVolumeName(spec.Name, name, generation)
 	if _, err := d.cli.VolumeInspect(ctx, stage); err == nil {
@@ -110,8 +120,10 @@ func (d *Docker) ReplaceWorkspaceGH(ctx context.Context, spec Spec, archive []by
 	if err := compareCredentialInventories(want, staged); err != nil {
 		return fmt.Errorf("verify credential staging volume: %w", err)
 	}
-	if err := d.cli.VolumeRemove(ctx, name, false); err != nil {
-		return fmt.Errorf("remove current workspace-gh volume: %w", err)
+	if priorExists {
+		if err := d.cli.VolumeRemove(ctx, name, false); err != nil {
+			return fmt.Errorf("remove current workspace-gh volume: %w", err)
+		}
 	}
 	rollback := func(cause error) error {
 		rollbackCtx, cancel := detachedContext(ctx, cleanupTimeout)
@@ -119,11 +131,13 @@ func (d *Docker) ReplaceWorkspaceGH(ctx context.Context, spec Spec, archive []by
 		if err := d.cli.VolumeRemove(rollbackCtx, name, false); err != nil && !errdefs.IsNotFound(err) {
 			cause = errors.Join(cause, fmt.Errorf("rollback remove workspace-gh volume: %w", err))
 		}
-		if _, err := d.ensureVolume(rollbackCtx, spec.Name, name); err != nil {
-			return errors.Join(cause, fmt.Errorf("rollback create workspace-gh volume: %w", err))
-		}
-		if err := d.writeVolumeArchive(rollbackCtx, spec.Image, name, prior); err != nil {
-			return errors.Join(cause, fmt.Errorf("rollback populate workspace-gh volume: %w", err))
+		if priorExists {
+			if _, err := d.ensureVolume(rollbackCtx, spec.Name, name); err != nil {
+				return errors.Join(cause, fmt.Errorf("rollback create workspace-gh volume: %w", err))
+			}
+			if err := d.writeVolumeArchive(rollbackCtx, spec.Image, name, prior); err != nil {
+				return errors.Join(cause, fmt.Errorf("rollback populate workspace-gh volume: %w", err))
+			}
 		}
 		return cause
 	}

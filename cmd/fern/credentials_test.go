@@ -32,6 +32,7 @@ type fakeCredentialRuntime struct {
 	replacement []byte
 	replaces    int
 	onReplace   func()
+	replaceErr  error
 	closed      bool
 }
 
@@ -39,15 +40,18 @@ func (runtime *fakeCredentialRuntime) Status(context.Context, string) (fernrunti
 	return fernruntime.Observation{State: runtime.state}, nil
 }
 func (runtime *fakeCredentialRuntime) ExportWorkspaceGH(context.Context, fernruntime.Spec) ([]byte, error) {
+	if runtime.archive == nil {
+		return nil, fernruntime.ErrCredentialGenerationNotFound
+	}
 	return append([]byte(nil), runtime.archive...), nil
 }
-func (runtime *fakeCredentialRuntime) ReplaceWorkspaceGH(_ context.Context, _ fernruntime.Spec, archive []byte, _ string) error {
+func (runtime *fakeCredentialRuntime) ReplaceWorkspaceGH(_ context.Context, _ fernruntime.Spec, archive []byte, _ string, _ bool) error {
 	runtime.replaces++
 	runtime.replacement = append([]byte(nil), archive...)
 	if runtime.onReplace != nil {
 		runtime.onReplace()
 	}
-	return nil
+	return runtime.replaceErr
 }
 func (runtime *fakeCredentialRuntime) Close() error { runtime.closed = true; return nil }
 
@@ -102,7 +106,7 @@ func TestCredentialImportRejectsCandidateBeforeMutationAndSanitizes(t *testing.T
 	root := privateTestDirectory(t)
 	configPath, envPath, stateDirectory, _ := backupFixture(t, root)
 	identity := credentialTestIdentity(t, root)
-	runtime := &fakeCredentialRuntime{state: fernruntime.StateAbsent, archive: credentialHostsArchive(t, "old-workspace-token-value")}
+	runtime := &fakeCredentialRuntime{state: fernruntime.StateAbsent}
 	const secret = "validator-secret-must-not-leak"
 	restore := installCredentialTestHooks(t, runtime, func(context.Context, config.Config, *githubapp.AppCredentials, string) error {
 		return errors.New(secret)
@@ -117,6 +121,46 @@ func TestCredentialImportRejectsCandidateBeforeMutationAndSanitizes(t *testing.T
 	err := runCredentialImport([]string{"--config", configPath, "--env-file", envPath, "--state-dir", stateDirectory, "--input", input, "--identity", writeCredentialIdentity(t, root, identity), "--rollback-output", rollback}, testLogger(), false)
 	if err == nil || strings.Contains(err.Error(), secret) || runtime.replaces != 0 || pathExists(rollback) {
 		t.Fatalf("error=%v replaces=%d rollback=%t", err, runtime.replaces, pathExists(rollback))
+	}
+}
+
+func TestWorkspaceGHCredentialImportBootstrapsWithoutRollbackArtifact(t *testing.T) {
+	root := privateTestDirectory(t)
+	configPath, envPath, stateDirectory, _ := backupFixture(t, root)
+	identity := credentialTestIdentity(t, root)
+	runtime := &fakeCredentialRuntime{state: fernruntime.StateAbsent}
+	restore := installCredentialTestHooks(t, runtime, func(context.Context, config.Config, *githubapp.AppCredentials, string) error { return nil })
+	defer restore()
+	bundle := credentialTestBundle(t, "bootstrap", credentialHostsArchive(t, "candidate-workspace-token"))
+	input := filepath.Join(root, "candidate.age")
+	if err := credentialbundle.WriteFile(input, bundle, []age.Recipient{identity.Recipient()}); err != nil {
+		t.Fatal(err)
+	}
+	rollback := filepath.Join(root, "must-not-exist.age")
+	output, err := captureCredentialStdout(func() error {
+		return runCredentialImport([]string{"--config", configPath, "--env-file", envPath, "--state-dir", stateDirectory, "--input", input, "--identity", writeCredentialIdentity(t, root, identity), "--rollback-output", rollback}, testLogger(), false)
+	})
+	if err != nil || runtime.replaces != 1 || pathExists(rollback) || strings.Contains(output, "rollback") {
+		t.Fatalf("error=%v replaces=%d rollback=%t output=%q", err, runtime.replaces, pathExists(rollback), output)
+	}
+}
+
+func TestWorkspaceGHCredentialBootstrapActivationFailureLeavesAbsent(t *testing.T) {
+	root := privateTestDirectory(t)
+	configPath, envPath, stateDirectory, _ := backupFixture(t, root)
+	identity := credentialTestIdentity(t, root)
+	runtime := &fakeCredentialRuntime{state: fernruntime.StateAbsent, replaceErr: errors.New("injected activation failure")}
+	restore := installCredentialTestHooks(t, runtime, func(context.Context, config.Config, *githubapp.AppCredentials, string) error { return nil })
+	defer restore()
+	bundle := credentialTestBundle(t, "bootstrap-failure", credentialHostsArchive(t, "candidate-workspace-token"))
+	input := filepath.Join(root, "candidate.age")
+	if err := credentialbundle.WriteFile(input, bundle, []age.Recipient{identity.Recipient()}); err != nil {
+		t.Fatal(err)
+	}
+	rollback := filepath.Join(root, "must-not-exist.age")
+	err := runCredentialImport([]string{"--config", configPath, "--env-file", envPath, "--state-dir", stateDirectory, "--input", input, "--identity", writeCredentialIdentity(t, root, identity), "--rollback-output", rollback}, testLogger(), false)
+	if err == nil || !strings.Contains(err.Error(), "remains absent") || pathExists(rollback) || runtime.archive != nil {
+		t.Fatalf("error=%v rollback=%t archive=%d", err, pathExists(rollback), len(runtime.archive))
 	}
 }
 
@@ -203,6 +247,99 @@ func TestGitHubAppCredentialExportAndImport(t *testing.T) {
 	}
 }
 
+func TestGitHubAppCredentialImportBootstrapsEmptyStore(t *testing.T) {
+	root := privateTestDirectory(t)
+	configPath, envPath, stateDirectory, _ := appCredentialFixture(t, root)
+	identity := credentialTestIdentity(t, root)
+	runtime := &fakeCredentialRuntime{state: fernruntime.StateAbsent}
+	restore := installCredentialTestHooks(t, runtime, func(context.Context, config.Config, *githubapp.AppCredentials, string) error { return nil })
+	defer restore()
+	candidate := credentialTestApp(t, 741, "bootstrap-client-secret")
+	payload, err := githubapp.MarshalStoredCredentials(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := credentialTestBundle(t, "app-bootstrap", nil)
+	bundle.Binding.Mode = string(config.GitHubModeGitHubAppBroker)
+	bundle.Binding.AppID = 741
+	bundle.Binding.InstallationID = 91
+	bundle.GitHubApp = payload
+	input := filepath.Join(root, "app-candidate.age")
+	if err := credentialbundle.WriteFile(input, bundle, []age.Recipient{identity.Recipient()}); err != nil {
+		t.Fatal(err)
+	}
+	identityPath := writeCredentialIdentity(t, root, identity)
+	common := []string{"--config", configPath, "--env-file", envPath, "--state-dir", stateDirectory, "--input", input, "--identity", identityPath}
+	rollback := filepath.Join(root, "must-not-exist.age")
+	if err := runCredentialImport(append(common, "--rollback-output", rollback, "--acknowledge-external-revocation"), testLogger(), true); err == nil || !strings.Contains(err.Error(), "active prior") {
+		t.Fatalf("rotation without prior error = %v", err)
+	}
+	if err := runCredentialImport(append(common, "--rollback-output", rollback), testLogger(), false); err != nil {
+		t.Fatal(err)
+	}
+	store, err := githubapp.NewCredentialStore(filepath.Join(stateDirectory, "github-app"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	active, err := store.Load()
+	if err != nil || active.ClientSecret() != "bootstrap-client-secret" || pathExists(rollback) {
+		t.Fatalf("active=%v error=%v rollback=%t", active, err, pathExists(rollback))
+	}
+}
+
+type failingEmptyCredentialStore struct {
+	credentials *githubapp.AppCredentials
+}
+
+func (store *failingEmptyCredentialStore) Load() (githubapp.AppCredentials, error) {
+	if store.credentials == nil {
+		return githubapp.AppCredentials{}, githubapp.ErrCredentialsNotFound
+	}
+	return *store.credentials, nil
+}
+
+func (store *failingEmptyCredentialStore) Save(credentials githubapp.AppCredentials) error {
+	store.credentials = &credentials
+	return githubapp.ErrCredentialStoreIO
+}
+
+func (store *failingEmptyCredentialStore) Delete() error {
+	store.credentials = nil
+	return nil
+}
+
+func TestGitHubAppCredentialBootstrapSaveFailureRestoresEmptyStore(t *testing.T) {
+	root := privateTestDirectory(t)
+	configPath, envPath, stateDirectory, _ := appCredentialFixture(t, root)
+	identity := credentialTestIdentity(t, root)
+	runtime := &fakeCredentialRuntime{state: fernruntime.StateAbsent}
+	restore := installCredentialTestHooks(t, runtime, func(context.Context, config.Config, *githubapp.AppCredentials, string) error { return nil })
+	defer restore()
+	store := &failingEmptyCredentialStore{}
+	oldOpen := openAppCredentialStore
+	openAppCredentialStore = func(string) (appCredentialStore, error) { return store, nil }
+	defer func() { openAppCredentialStore = oldOpen }()
+	candidate := credentialTestApp(t, 741, "failed-bootstrap-secret")
+	payload, err := githubapp.MarshalStoredCredentials(candidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := credentialTestBundle(t, "app-bootstrap-failure", nil)
+	bundle.Binding.Mode = string(config.GitHubModeGitHubAppBroker)
+	bundle.Binding.AppID = 741
+	bundle.Binding.InstallationID = 91
+	bundle.GitHubApp = payload
+	input := filepath.Join(root, "app-candidate.age")
+	if err := credentialbundle.WriteFile(input, bundle, []age.Recipient{identity.Recipient()}); err != nil {
+		t.Fatal(err)
+	}
+	rollback := filepath.Join(root, "must-not-exist.age")
+	err = runCredentialImport([]string{"--config", configPath, "--env-file", envPath, "--state-dir", stateDirectory, "--input", input, "--identity", writeCredentialIdentity(t, root, identity), "--rollback-output", rollback}, testLogger(), false)
+	if err == nil || store.credentials != nil || pathExists(rollback) {
+		t.Fatalf("error=%v credentials=%v rollback=%t", err, store.credentials, pathExists(rollback))
+	}
+}
+
 func installCredentialTestHooks(t *testing.T, runtime credentialDocker, validator credentialCandidateValidator) func() {
 	t.Helper()
 	oldDocker, oldValidator := openCredentialDocker, validateCredentialCandidates
@@ -213,6 +350,21 @@ func installCredentialTestHooks(t *testing.T, runtime credentialDocker, validato
 	return func() {
 		openCredentialDocker, validateCredentialCandidates = oldDocker, oldValidator
 	}
+}
+
+func captureCredentialStdout(run func() error) (string, error) {
+	old := os.Stdout
+	reader, writer, pipeErr := os.Pipe()
+	if pipeErr != nil {
+		return "", pipeErr
+	}
+	os.Stdout = writer
+	defer func() { os.Stdout = old }()
+	err := run()
+	closeErr := writer.Close()
+	output, readErr := io.ReadAll(reader)
+	readErr = errors.Join(readErr, reader.Close())
+	return string(output), errors.Join(err, closeErr, readErr)
 }
 
 func credentialTestIdentity(t *testing.T, _ string) *age.X25519Identity {

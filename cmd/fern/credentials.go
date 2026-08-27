@@ -38,11 +38,21 @@ func (values *repeatedFlag) Set(value string) error {
 type credentialDocker interface {
 	Status(context.Context, string) (fernruntime.Observation, error)
 	ExportWorkspaceGH(context.Context, fernruntime.Spec) ([]byte, error)
-	ReplaceWorkspaceGH(context.Context, fernruntime.Spec, []byte, string) error
+	ReplaceWorkspaceGH(context.Context, fernruntime.Spec, []byte, string, bool) error
 	Close() error
 }
 
 var openCredentialDocker = func(log *slog.Logger) (credentialDocker, error) { return newDocker(log) }
+
+type appCredentialStore interface {
+	Load() (githubapp.AppCredentials, error)
+	Save(githubapp.AppCredentials) error
+	Delete() error
+}
+
+var openAppCredentialStore = func(directory string) (appCredentialStore, error) {
+	return githubapp.NewCredentialStore(directory)
+}
 
 type credentialCandidateValidator func(context.Context, config.Config, *githubapp.AppCredentials, string) error
 
@@ -141,7 +151,7 @@ func runCredentialImport(args []string, log *slog.Logger, rotation bool) error {
 			return err
 		}
 	}
-	if len(rollbackRecipients) == 0 {
+	if rotation && len(rollbackRecipients) == 0 {
 		return invocationError{message: "a --rollback-recipient is required for identities without a derivable X25519 recipient"}
 	}
 	if *rollbackOutput == "" {
@@ -158,11 +168,15 @@ func runCredentialImport(args []string, log *slog.Logger, rotation bool) error {
 	defer operation.close()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	if err := operation.activate(ctx, candidate, *rollbackOutput, rollbackRecipients); err != nil {
+	rollbackPath, err := operation.activate(ctx, candidate, rotation, *rollbackOutput, rollbackRecipients)
+	if err != nil {
 		return err
 	}
 	fingerprint, _ := candidate.Fingerprint()
-	fmt.Fprintf(os.Stdout, "activated credential generation %s\nfingerprint: sha256:%s\nencrypted rollback: %s\n", candidate.Epoch, fingerprint, *rollbackOutput)
+	fmt.Fprintf(os.Stdout, "activated credential generation %s\nfingerprint: sha256:%s\n", candidate.Epoch, fingerprint)
+	if rollbackPath != "" {
+		fmt.Fprintf(os.Stdout, "encrypted rollback: %s\n", rollbackPath)
+	}
 	if rotation {
 		fmt.Fprintln(os.Stdout, "external revocation required: revoke the superseded GitHub key or token after verification; Fern cannot automate revocation")
 	}
@@ -175,7 +189,7 @@ type credentialOperation struct {
 	spec    fernruntime.Spec
 	lease   *registry.Lease
 	docker  credentialDocker
-	store   *githubapp.CredentialStore
+	store   appCredentialStore
 }
 
 func openCredentialOperation(options credentialOptions, log *slog.Logger) (*credentialOperation, error) {
@@ -208,7 +222,7 @@ func openCredentialOperation(options credentialOptions, log *slog.Logger) (*cred
 		operation.close()
 		return nil, fmt.Errorf("credential operation requires absent compute; run 'fern down' first (state: %s)", observation.State)
 	}
-	store, err := githubapp.NewCredentialStore(filepath.Join(options.stateDirectory, "github-app"))
+	store, err := openAppCredentialStore(filepath.Join(options.stateDirectory, "github-app"))
 	if err != nil {
 		operation.close()
 		return nil, err
@@ -268,86 +282,113 @@ func (operation *credentialOperation) snapshot(ctx context.Context, generation s
 	return bundle, nil
 }
 
-func (operation *credentialOperation) activate(ctx context.Context, candidate credentialbundle.Bundle, rollbackPath string, recipients []age.Recipient) error {
+func (operation *credentialOperation) activate(ctx context.Context, candidate credentialbundle.Bundle, rotation bool, rollbackPath string, recipients []age.Recipient) (string, error) {
 	want, err := credentialBinding(operation.config)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if candidate.Binding.Workspace != want.Workspace || candidate.Binding.Mode != want.Mode || candidate.Binding.Hostname != want.Hostname ||
 		candidate.Binding.InstallationID != want.InstallationID || candidate.Binding.RepositoryID != want.RepositoryID || candidate.Binding.Repository != want.Repository {
-		return errors.New("credential bundle does not match the configured workspace and GitHub identity")
+		return "", errors.New("credential bundle does not match the configured workspace and GitHub identity")
 	}
 	var appCandidate *githubapp.AppCredentials
 	var ghToken string
 	switch operation.config.Workspace.GitHub.Mode {
 	case config.GitHubModeGitHubAppBroker:
 		if len(candidate.WorkspaceGH) != 0 || len(candidate.GitHubApp) == 0 {
-			return errors.New("credential bundle component does not match github-app-broker mode")
+			return "", errors.New("credential bundle component does not match github-app-broker mode")
 		}
 		parsed, err := githubapp.ParseStoredCredentials(candidate.GitHubApp)
 		if err != nil || parsed.AppID() != candidate.Binding.AppID {
-			return errors.New("GitHub App credential candidate is invalid")
+			return "", errors.New("GitHub App credential candidate is invalid")
 		}
 		if current, err := operation.store.Load(); err == nil && current.AppID() != parsed.AppID() {
-			return errors.New("GitHub App rotation cannot change the configured App identity")
+			return "", errors.New("GitHub App rotation cannot change the configured App identity")
 		} else if err != nil && !errors.Is(err, githubapp.ErrCredentialsNotFound) {
-			return err
+			return "", err
 		}
 		appCandidate = &parsed
 	case config.GitHubModeWorkspaceGH:
 		if len(candidate.GitHubApp) != 0 || len(candidate.WorkspaceGH) == 0 || candidate.Binding.AppID != 0 {
-			return errors.New("credential bundle component does not match workspace-gh mode")
+			return "", errors.New("credential bundle component does not match workspace-gh mode")
 		}
 		hosts, err := fernruntime.WorkspaceGHFile(candidate.WorkspaceGH, "hosts.yml")
 		if err != nil {
-			return err
+			return "", err
 		}
 		ghToken, err = parseWorkspaceGHToken(hosts, want.Hostname)
 		if err != nil {
-			return err
+			return "", err
 		}
 	}
 	validationCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	err = validateCredentialCandidates(validationCtx, operation.config, appCandidate, ghToken)
 	cancel()
 	if err != nil {
-		return errors.New("credential candidate failed live GitHub identity or permission validation")
+		return "", errors.New("credential candidate failed live GitHub identity or permission validation")
 	}
 	if err := operation.requireAbsent(ctx); err != nil {
-		return err
+		return "", err
 	}
 	rollbackGeneration, err := newBackupGeneration()
 	if err != nil {
-		return err
+		return "", err
 	}
 	rollback, err := operation.snapshot(ctx, rollbackGeneration)
-	if err != nil {
-		return fmt.Errorf("capture credential rollback generation: %w", err)
+	priorExists := err == nil
+	if err != nil && !errors.Is(err, githubapp.ErrCredentialsNotFound) && !errors.Is(err, fernruntime.ErrCredentialGenerationNotFound) {
+		return "", fmt.Errorf("capture credential rollback generation: %w", err)
 	}
-	if err := credentialbundle.WriteFile(rollbackPath, rollback, recipients); err != nil {
-		return fmt.Errorf("write encrypted credential rollback artifact: %w", err)
+	if rotation && !priorExists {
+		return "", errors.New("rotation requires an active prior credential generation")
+	}
+	if priorExists {
+		if len(recipients) == 0 {
+			return "", invocationError{message: "a --rollback-recipient is required for identities without a derivable X25519 recipient"}
+		}
+		if err := credentialbundle.WriteFile(rollbackPath, rollback, recipients); err != nil {
+			return "", fmt.Errorf("write encrypted credential rollback artifact: %w", err)
+		}
 	}
 	if err := operation.requireAbsent(ctx); err != nil {
-		return fmt.Errorf("%w; encrypted rollback retained at %s", err, rollbackPath)
+		if priorExists {
+			return "", fmt.Errorf("%w; encrypted rollback retained at %s", err, rollbackPath)
+		}
+		return "", err
 	}
 	if appCandidate != nil {
 		if err := operation.store.Save(*appCandidate); err != nil {
+			if !priorExists {
+				if rollbackErr := operation.store.Delete(); rollbackErr != nil {
+					return "", errors.New("GitHub App bootstrap and restoration of the empty store failed")
+				}
+				return "", errors.New("GitHub App bootstrap failed; the credential store remains empty")
+			}
 			prior, parseErr := githubapp.ParseStoredCredentials(rollback.GitHubApp)
 			if parseErr != nil {
-				return errors.New("GitHub App replacement failed; use the retained encrypted rollback artifact")
+				return "", errors.New("GitHub App replacement failed; use the retained encrypted rollback artifact")
 			}
 			rollbackErr := operation.store.Save(prior)
 			if rollbackErr != nil {
-				return errors.New("GitHub App replacement and automatic rollback failed; use the retained encrypted rollback artifact")
+				return "", errors.New("GitHub App replacement and automatic rollback failed; use the retained encrypted rollback artifact")
 			}
-			return errors.New("GitHub App replacement failed and the prior generation was restored")
+			return "", errors.New("GitHub App replacement failed and the prior generation was restored")
 		}
-		return nil
+		if priorExists {
+			return rollbackPath, nil
+		}
+		return "", nil
 	}
-	if err := operation.docker.ReplaceWorkspaceGH(ctx, operation.spec, candidate.WorkspaceGH, candidate.Epoch); err != nil {
-		return fmt.Errorf("replace workspace-gh credentials; rollback artifact retained at %s: %w", rollbackPath, err)
+	if err := operation.docker.ReplaceWorkspaceGH(ctx, operation.spec, candidate.WorkspaceGH, candidate.Epoch, priorExists); err != nil {
+		if priorExists {
+			return "", fmt.Errorf("replace workspace-gh credentials; rollback artifact retained at %s: %w", rollbackPath, err)
+		}
+		return "", fmt.Errorf("bootstrap workspace-gh credentials; volume remains absent: %w", err)
 	}
-	return nil
+	if priorExists {
+		return rollbackPath, nil
+	}
+	return "", nil
 }
 
 func credentialBinding(cfg config.Config) (credentialbundle.Binding, error) {

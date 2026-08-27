@@ -270,23 +270,41 @@ func TestRestoreManagedVolumesStagesVerifiesAndReplacesCanonicalVolumes(t *testi
 	}
 	docker := testDocker(t, server)
 	firstRotation := credentialTestArchive(t, map[string]string{"hosts.yml": "rotated-token"})
-	if err := docker.ReplaceWorkspaceGH(context.Background(), spec, firstRotation, "rotation-a"); err != nil {
+	if err := docker.ReplaceWorkspaceGH(context.Background(), spec, firstRotation, "rotation-a", true); err != nil {
 		t.Fatal(err)
 	}
 	lock.Lock()
 	failCanonicalImport = true
 	lock.Unlock()
 	failedRotation := credentialTestArchive(t, map[string]string{"hosts.yml": "must-not-stick"})
-	if err := docker.ReplaceWorkspaceGH(context.Background(), spec, failedRotation, "rotation-b"); err == nil {
+	if err := docker.ReplaceWorkspaceGH(context.Background(), spec, failedRotation, "rotation-b", true); err == nil {
 		t.Fatal("workspace-gh replacement accepted an activation failure")
 	}
 	lock.Lock()
-	defer lock.Unlock()
-	if len(volumes) != 2 || len(helpers) != 0 {
-		t.Fatalf("volume count=%d helper count=%d", len(volumes), len(helpers))
+	rotationOK := len(volumes) == 2 && len(helpers) == 0 && string(volumes[specDataVolumeName(spec)].files["state"]) == "new-data" && string(volumes[specGHVolumeName(spec)].files["hosts.yml"]) == "rotated-token"
+	delete(volumes, specGHVolumeName(spec))
+	failCanonicalImport = true
+	lock.Unlock()
+	if !rotationOK {
+		t.Fatalf("failed rotation rollback volumes = %+v helpers=%d", volumes, len(helpers))
 	}
-	if string(volumes[specDataVolumeName(spec)].files["state"]) != "new-data" || string(volumes[specGHVolumeName(spec)].files["hosts.yml"]) != "rotated-token" {
-		t.Fatalf("restored volumes = %+v", volumes)
+	bootstrap := credentialTestArchive(t, map[string]string{"hosts.yml": "bootstrap-token"})
+	if err := docker.ReplaceWorkspaceGH(context.Background(), spec, bootstrap, "bootstrap", false); err == nil {
+		t.Fatal("workspace-gh bootstrap accepted an activation failure")
+	}
+	lock.Lock()
+	failureLeftAbsent := volumes[specGHVolumeName(spec)] == nil && len(helpers) == 0
+	lock.Unlock()
+	if !failureLeftAbsent {
+		t.Fatal("failed bootstrap did not restore volume absence")
+	}
+	if err := docker.ReplaceWorkspaceGH(context.Background(), spec, bootstrap, "bootstrap-success", false); err != nil {
+		t.Fatal(err)
+	}
+	lock.Lock()
+	defer lock.Unlock()
+	if string(volumes[specGHVolumeName(spec)].files["hosts.yml"]) != "bootstrap-token" || len(helpers) != 0 {
+		t.Fatalf("bootstrap volume=%v helpers=%d", volumes[specGHVolumeName(spec)], len(helpers))
 	}
 }
 
