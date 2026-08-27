@@ -83,10 +83,11 @@ repository-scoped operation tokens are separate. Each REST or publication
 operation obtains a fresh token, validates repository identity, required
 permissions, and expiry, and refuses redirects or unbounded responses.
 
-Use `fern credentials export|import|rotate` for age-encrypted offline custody
-and rollback-safe local replacement. Rotation cannot revoke the superseded App
-key at GitHub; `--acknowledge-external-revocation` makes that obligation
-explicit. See [Credential Recovery](./CREDENTIAL_RECOVERY.md).
+Use `fern credentials export|import|rotate` for age-encrypted offline custody,
+first-generation import, and rollback-safe local replacement. Rotation cannot
+bootstrap or revoke the superseded App key at GitHub;
+`--acknowledge-external-revocation` makes that obligation explicit. See
+[Credential Recovery](./CREDENTIAL_RECOVERY.md).
 
 ## Publication Admission
 
@@ -183,8 +184,9 @@ continuation are not implemented. Do not enable Funnel solely for webhooks.
 
 - Active App and workspace-`gh` credentials are not encrypted at rest.
 - External key/token revocation is manual.
-- Encrypted import/rotation replaces an active generation and cannot bootstrap
-  an empty credential store or missing `gh` volume.
+- Encrypted import can bootstrap an empty credential store or missing `gh`
+  volume, but that first activation has no prior rollback generation. Rotation
+  requires a prior generation.
 - App installation/repository selection has no complete onboarding UI.
 - First credential activation after onboarding requires restart.
 - The embedded phone task page displays publication state but does not yet offer

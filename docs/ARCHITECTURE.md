@@ -385,11 +385,14 @@ until the operator has validated, archived, and explicitly removed it.
 `fern credentials export` creates an age-X25519 encrypted bundle for the active
 App key or workspace-`gh` volume. Import/rotate require absent compute and the
 offline lease, decrypt only in memory, bind candidates to exact workspace and
-GitHub identity, perform live GitHub identity/permission validation, write an
-encrypted rollback artifact before replacement, and automatically restore App
-credentials on a failed save. Rotation requires
-`--acknowledge-external-revocation`: Fern cannot revoke the superseded App key or
-OAuth token at GitHub. See `docs/CREDENTIAL_RECOVERY.md`.
+GitHub identity, and perform live GitHub identity/permission validation. Import
+can initialize an empty App store or absent workspace-`gh` volume; bootstrap
+creates no rollback artifact and activation failure restores absence.
+Replacement writes an encrypted rollback artifact first and automatically
+restores App credentials on a failed save. Rotation requires an active prior
+generation and `--acknowledge-external-revocation`: Fern cannot revoke the
+superseded App key or OAuth token at GitHub. See
+`docs/CREDENTIAL_RECOVERY.md`.
 
 ## Release And Evidence
 
@@ -456,11 +459,6 @@ TLS/WSS phone exercise, or ACL-negative rehearsal occurred.
    publication, and task snapshots expose its status, but the current embedded
    phone task page has no publication action. A client must call the API and
    retain its publication idempotency key.
-10. **Credential bootstrap:** encrypted import/rotation requires an active prior
-    generation so Fern can write rollback first. It cannot initialize an empty
-    App store or missing workspace-`gh` volume; use onboarding/login or a full
-    verified host restore.
-
 ## Source Map
 
 | Area | Source |

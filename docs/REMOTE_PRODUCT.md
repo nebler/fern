@@ -131,11 +131,12 @@ requires operator configuration and first activation requires restart. Complete
 onboarding should present and persist an exact numeric selection without
 creating a mutable confused-deputy path.
 
-Age-encrypted export/import/rotation and local rollback are implemented. Fern
-cannot revoke superseded App keys or workspace OAuth tokens at GitHub. External
-revocation and proof remain an operator obligation. Import/rotation also
-requires an active prior generation for rollback and cannot bootstrap an empty
-credential store; onboarding/login or full host restore owns that case.
+Age-encrypted export/import/rotation and local rollback are implemented. Import
+can bootstrap an empty App store or absent workspace-`gh` volume; the first
+activation has no prior rollback artifact, and failure restores absence. Rotate
+still requires an active prior generation. Fern cannot revoke superseded App
+keys or workspace OAuth tokens at GitHub, so external revocation and proof
+remain an operator obligation.
 
 ### Recovery Atomicity
 

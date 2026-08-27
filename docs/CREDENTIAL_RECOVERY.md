@@ -41,10 +41,9 @@ the encrypted bundle or in the general Fern backup.
 
 ## Import
 
-Import performs rollback-safe replacement with an already prepared bundle. It
-requires an active current credential because Fern must snapshot and encrypt the
-prior generation before replacement; it is not a bootstrap path for an empty
-host:
+Import validates and activates an already prepared bundle. With an active
+credential it performs rollback-safe replacement; with a valid empty App store
+or absent workspace-`gh` volume it bootstraps the first generation:
 
 ```bash
 fern credentials import \
@@ -55,28 +54,33 @@ fern credentials import \
   --rollback-output /secure/prior-generation.age
 ```
 
-Before replacement Fern:
+Before activation Fern:
 
 1. Decrypts the candidate in memory and validates its closed schema.
 2. Requires the complete binding to equal current configuration.
 3. Performs live GitHub identity, repository, and permission validation.
 4. Rechecks that compute is absent.
-5. Snapshots the active credential and writes an encrypted rollback artifact.
-6. Rechecks absence and activates the candidate.
+5. Detects whether an active credential generation exists.
+6. For replacement, snapshots it and writes an encrypted rollback artifact.
+7. Rechecks compute absence and activates the candidate.
 
 By default the rollback recipient is derived from the supplied X25519 identity.
-Use repeatable `--rollback-recipient` flags when the identity format does not
-provide one or custody policy requires different recipients.
+Use repeatable `--rollback-recipient` flags when replacing a generation and the
+identity format does not provide one, or when custody policy requires different
+recipients. Bootstrap has no prior generation, so Fern neither creates nor
+reports a rollback artifact.
 
-An App save failure automatically attempts to restore the prior App credential.
-A workspace-`gh` replacement failure retains the encrypted rollback artifact
-for explicit import. Do not delete that artifact until the new credential has
-passed operational validation.
+An App save failure automatically attempts to restore the prior App credential,
+or the empty store during bootstrap. Workspace-`gh` activation similarly
+restores the prior volume or its prior absence. A replacement failure retains
+the encrypted rollback artifact for explicit import. Do not delete that artifact
+until the new credential has passed operational validation.
 
 ## Rotate
 
-Rotation uses the same validation and rollback sequence but requires explicit
-acknowledgment of the external revocation obligation:
+Rotation uses the replacement validation and rollback sequence. Unlike import,
+it requires an active prior generation and explicit acknowledgment of the
+external revocation obligation:
 
 ```bash
 fern credentials rotate \
@@ -106,9 +110,9 @@ After local activation:
   intentionally available to trusted workspace code.
 - Fern does not manage age private identities.
 - Fern cannot revoke or prove revocation of GitHub credentials.
-- Import/rotation cannot initialize an empty credential store or missing
-  workspace-`gh` volume. Bootstrap through App onboarding or `gh auth login`, or
-  restore the complete verified host backup, before using replacement.
+- Import can bootstrap an empty credential store or missing workspace-`gh`
+  volume, but no rollback generation exists for that first activation. Rotation
+  deliberately cannot bootstrap.
 - Live validation depends on GitHub availability and organization policy.
 - Full host backup's separate credential tar is mode `0600` but not age-
   encrypted; it still requires encrypted external custody.

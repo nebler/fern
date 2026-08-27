@@ -293,13 +293,15 @@ sudo -H -u fern /usr/local/bin/fern credentials export \
   --output /secure/fern-github-credentials.age
 ```
 
-Import and rotation replace an active credential generation; they do not
-bootstrap an empty App store or missing workspace-`gh` volume. They decrypt in
-memory, require exact workspace/mode/hostname/
-installation/repository binding, validate candidate identity and permissions
-against GitHub, and write an encrypted prior-generation rollback before local
-replacement. Rotation requires `--acknowledge-external-revocation` because Fern
-cannot revoke the superseded key or token at GitHub. See
+Import decrypts in memory, requires exact workspace/mode/hostname/
+installation/repository binding, and validates candidate identity and
+permissions against GitHub. It can bootstrap a valid empty App store or absent
+workspace-`gh` volume; because no prior generation exists, bootstrap creates no
+rollback artifact and activation failure restores absence. When replacing an
+active generation, import writes an encrypted prior-generation rollback first.
+Rotation only replaces an active generation and requires
+`--acknowledge-external-revocation` because Fern cannot revoke the superseded
+key or token at GitHub. See
 [Credential Recovery](./CREDENTIAL_RECOVERY.md).
 
 ## Schema Upgrade And Rollback

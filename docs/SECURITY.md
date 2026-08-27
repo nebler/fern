@@ -79,8 +79,10 @@ provider credentials intentionally exposed there.
 - Offline credential export uses age X25519 encryption. Import and rotation
   require absent compute and the workspace lease, validate the exact configured
   GitHub identity and permissions live, and write an encrypted prior-generation
-  rollback before replacement. Active credential stores remain permission-
-  protected plaintext, and GitHub revocation remains external.
+  rollback before replacement. Import can bootstrap an absent generation
+  without a rollback artifact and restores absence on activation failure;
+  rotation requires a prior generation. Active credential stores remain
+  permission-protected plaintext, and GitHub revocation remains external.
 - Offline backup creation destroys compute, checkpoints SQLite, exports the
   exact managed volumes, verifies checksums, and separates detected credentials
   and opaque volumes. Restore creates a durable pre-restore operational rollback
