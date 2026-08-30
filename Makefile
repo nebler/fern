@@ -1,4 +1,4 @@
-.PHONY: build format image lint test test-browser test-critical test-race test-deployment vet
+.PHONY: build format image image-background lint test test-browser test-critical test-race test-deployment vet
 
 build:
 	go build -o fern ./cmd/fern
@@ -8,6 +8,9 @@ format:
 
 image:
 	docker build -t fern/opencode:dev images/opencode
+
+image-background:
+	docker build -t fern/opencode-background:dev images/opencode-background
 
 lint:
 	golangci-lint run

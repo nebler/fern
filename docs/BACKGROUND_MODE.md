@@ -2,7 +2,7 @@
 
 **Status:** proposed design for the active bounded experiment; not implemented
 
-**Updated:** 2026-08-30
+**Updated:** 2026-08-31
 **Implementation checklist:**
 [`todo/opencode-background-mode.md`](../todo/opencode-background-mode.md)
 
@@ -25,6 +25,24 @@ OpenCode Background Mode should let one trusted owner:
 The experiment is successful only if this native journey is repeatedly more
 useful than OpenHands custom ACP or a managed cloud agent. Engineering
 correctness is necessary but does not establish product value.
+
+### Current Qualification Boundary
+
+`images/opencode-background` now provides a separate official
+`opencode-ai@1.18.16` image, and
+`integration/opencode-background-contract` qualifies its public HTTP behavior
+with real Docker and a zero-cost local provider. This does not implement the
+disposable Docker provider, coordinator, routing, export, or cleanup design
+below. Persistent workspaces remain on the independent
+`fern/opencode:dev`/`0.0.0-next-17444` contract.
+
+The 1.18.16 qualification proves durable generated sessions and message history
+across container replacement, but it also records hard limitations: session IDs
+cannot be caller-selected, duplicate message IDs are not conflict-safe, SSE has
+no durable replay, active status is process-local and not completion authority,
+and unanswered questions are process-epoch state. A future coordinator must
+design around these observed properties rather than assume the stronger legacy
+contract applies.
 
 ### Required Properties
 
