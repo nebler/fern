@@ -25,7 +25,7 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 		return false
 	}
 	mutation := request.Method == http.MethodPost || request.Method == http.MethodDelete || request.Method == http.MethodPatch || request.Method == http.MethodPut
-	controlPath := strings.HasPrefix(path, "/fern/api/v1/") || strings.HasPrefix(path, "/fern/workflows") || strings.HasPrefix(path, "/fern/devices/")
+	controlPath := strings.HasPrefix(path, "/fern/api/v1/") || strings.HasPrefix(path, "/fern/api/plugin-auth/") || strings.HasPrefix(path, "/fern/workflows") || strings.HasPrefix(path, "/fern/devices/")
 	if mutation && controlPath && !sameOrigin(request) {
 		http.Error(writer, "cross-origin control request rejected", http.StatusForbidden)
 		return true

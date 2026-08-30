@@ -30,6 +30,24 @@ provider credentials intentionally exposed there.
 - Paired devices can use OpenCode and the durable task API, including eligible
   receipt-backed App publication. They cannot access operator control or retired
   host-credential publication routes.
+- OpenCode plugin authorization is a separate digest-only auxiliary state file.
+  Its unauthenticated remote surface is limited to device-flow start and poll;
+  approval or denial requires an existing paired device with the normal
+  exact-origin/CSRF checks, or the loopback operator credential. A device code
+  is 256 bits and becomes the bearer only after atomic approval. The independent
+  user code and every bearer remain absent from durable state, logs, and
+  administrative responses.
+- Plugin grants always carry exactly `run:create`, `run:read`, `run:stop`,
+  `run:open`, and `run:result`. They expire after 90 days, are individually
+  revocable, fence authentication against request registration, cancel active
+  requests only after durable revocation, and impose credential-expiry request
+  deadlines. They cannot authenticate OpenCode, device, general control, or
+  operator routes. The reserved `/fern/api/runs` namespace has no server-side
+  run handlers in this slice.
+- Plugin approval and denial honor request cancellation through the last safe
+  point before atomic rename. Once rename has succeeded, the transition may
+  already be durable; Fern completes directory sync and reports the commit
+  outcome rather than claiming cancellation rolled it back.
 - Fern control credentials and common GitHub token variables are rejected from
   workspace configuration by key, by `${...}` source reference under an alias,
   and by post-expansion equality with the control credential.
@@ -87,6 +105,12 @@ provider credentials intentionally exposed there.
   exact managed volumes, verifies checksums, and separates detected credentials
   and opaque volumes. Restore creates a durable pre-restore operational rollback
   generation before sequential filesystem and volume activation.
+- Restoring or rolling back control state can resurrect device and plugin
+  credentials revoked after the restored snapshot. Backups are credential-
+  bearing: operators must repeat revocation against restored Fern state and
+  rotate client-held bearers after rollback, while externally issued
+  credentials also require external revocation. A later local revocation cannot
+  alter an older backup generation.
 
 These controls are useful but do not complete the product boundary below.
 
@@ -131,6 +155,14 @@ loopback operator surface for local CLI compatibility. Remote ingress rejects
 it before wake and accepts selective device grants instead. Fern strips incoming
 Authorization and regenerates canonical backend Basic after successful
 admission. Browser/lifecycle/real-image harnesses cover this negative boundary.
+
+Plugin bearer credentials are a third, narrower credential class. Fern parses
+their `Authorization: Bearer <token>` spelling exactly, authenticates before
+reading a run request body or waking compute, strips Authorization and cookies,
+and installs an immutable `ActorOpenCode` snapshot identified by the plugin
+credential plus the fixed scope context.
+Only plugin self-revocation and the reserved `/fern/api/runs` path family pass
+that boundary.
 
 ### Provider Credentials Still Enter The Trusted Workspace
 

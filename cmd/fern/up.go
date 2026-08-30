@@ -17,6 +17,7 @@ import (
 	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/observability"
+	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/proxy"
 	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/watch"
@@ -237,6 +238,11 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 		lifecycle.release()
 		return nil, err
 	}
+	pluginAuthStore, err := openPluginAuthorizationStore(controlStore, spec.Name)
+	if err != nil {
+		lifecycle.release()
+		return nil, err
+	}
 	observations := make(chan watch.Observation, observationBufferSize)
 	status := observability.NewRegistry()
 	updateLegacyPublicationReadiness(status, controlStore)
@@ -291,8 +297,9 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 	connections := newConnectionTracker()
 	controls := proxy.Controls{
 		Store: controlStore, Onboarding: onboarding, ControlAuth: proxy.ControlAuth{Password: cfg.Control.Password},
-		WakeTrace: proxy.NewWakeTraceHandler(manager, manager.LastWakeTrace, log),
-		Liveness:  status.LivenessHandler(), Readiness: status.ReadinessHandler(),
+		PluginAuth: pluginAuthStore,
+		WakeTrace:  proxy.NewWakeTraceHandler(manager, manager.LastWakeTrace, log),
+		Liveness:   status.LivenessHandler(), Readiness: status.ReadinessHandler(),
 		Status: status.StatusHandler(), Metrics: status.MetricsHandler(),
 	}
 	if tasks != nil {
@@ -326,6 +333,10 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 		remoteListener: remoteListener, operatorListener: operatorListener,
 		origins: origins, tasks: tasks, status: status, start: start,
 	}, nil
+}
+
+func openPluginAuthorizationStore(store *control.Store, workspace string) (*pluginauth.Store, error) {
+	return pluginauth.Open(store, workspace)
 }
 
 func updateLegacyPublicationReadiness(status *observability.Registry, store *control.Store) {

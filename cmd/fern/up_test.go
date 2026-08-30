@@ -6,12 +6,15 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/nebler/fern/internal/config"
+	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/taskresultcoord"
 	"github.com/nebler/fern/internal/workspace"
@@ -59,6 +62,23 @@ func TestTrustedProxyOriginsPreserveLocalCompatibility(t *testing.T) {
 	origins = trustedProxyOrigins(cfg)
 	if origins.Remote != cfg.RemoteOrigin || origins.Operator != "http://127.0.0.1:8081" {
 		t.Fatalf("published origins = %+v", origins)
+	}
+}
+
+func TestPluginAuthorizationCorruptionFailsStartupAssembly(t *testing.T) {
+	controlStore, err := control.Open(filepath.Join(t.TempDir(), "control"), "demo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := controlStore.AuxiliaryStatePath("pluginauth")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"version":1,"authorizations":{}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openPluginAuthorizationStore(controlStore, "demo"); err == nil {
+		t.Fatal("startup accepted corrupt plugin authorization state")
 	}
 }
 

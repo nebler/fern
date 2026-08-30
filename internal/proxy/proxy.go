@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/control"
+	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/workspace"
 )
@@ -38,6 +39,7 @@ type Controls struct {
 	Status      http.Handler
 	Metrics     http.Handler
 	ControlAuth ControlAuth
+	PluginAuth  *pluginauth.Store
 }
 
 // Handlers holds the two production ingress surfaces built by NewHandlers.
@@ -75,6 +77,7 @@ type proxyTarget struct {
 // exposed through the private TLS edge.
 func NewHandlers(waker Waker, auth runtime.ServerAuth, controls Controls, origins TrustedOrigins, log *slog.Logger) (Handlers, error) {
 	pairing := newPairingState(controls.Store)
+	pluginAuth := newPluginAuthHTTP(controls.PluginAuth)
 	upstream := newUpstreamHandler(waker, log)
 	remoteOrigin, err := parseTrustedOrigin(origins.Remote)
 	if err != nil {
@@ -90,11 +93,13 @@ func NewHandlers(waker Waker, auth runtime.ServerAuth, controls Controls, origin
 	if operatorOrigin.scheme != "http" || !trustedLoopbackOrigin(operatorOrigin) {
 		return Handlers{}, errors.New("invalid trusted proxy origin: operator listener must be loopback HTTP")
 	}
+	remoteGateway := gatewayHandler(upstream, Controls{
+		Tasks: controls.Tasks, Onboarding: controls.Onboarding, PluginAuth: controls.PluginAuth,
+	})
+	operatorGateway := gatewayHandler(upstream, controls)
 	return Handlers{
-		Remote: trustedOriginHandler(pairing.remoteHandler(gatewayHandler(upstream, Controls{
-			Tasks: controls.Tasks, Onboarding: controls.Onboarding,
-		}), auth), remoteOrigin),
-		Operator: trustedOriginHandler(probeHandler(pairing.operatorHandler(gatewayHandler(upstream, controls), auth, controls.ControlAuth), controls), operatorOrigin),
+		Remote:   trustedOriginHandler(pluginAuth.remoteHandler(pairing.remoteHandler(remoteGateway, auth), remoteGateway), remoteOrigin),
+		Operator: trustedOriginHandler(pluginAuth.rejectBearerHandler(probeHandler(pairing.operatorHandler(operatorGateway, auth, controls.ControlAuth), controls)), operatorOrigin),
 	}, nil
 }
 
@@ -199,7 +204,8 @@ func trustedLoopbackOrigin(origin trustedOrigin) bool {
 func newHandler(waker Waker, auth runtime.ServerAuth, controls Controls, log *slog.Logger) http.Handler {
 	pairing := newPairingState(controls.Store)
 	upstream := newUpstreamHandler(waker, log)
-	return pairing.handler(gatewayHandler(upstream, controls), auth, controls.ControlAuth)
+	gateway := gatewayHandler(upstream, controls)
+	return newPluginAuthHTTP(controls.PluginAuth).remoteHandler(pairing.handler(gateway, auth, controls.ControlAuth), gateway)
 }
 
 func newUpstreamHandler(waker Waker, log *slog.Logger) http.Handler {

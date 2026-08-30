@@ -58,6 +58,9 @@ func gatewayHandler(upstream http.Handler, controls Controls) http.Handler {
 
 func serveFern(writer http.ResponseWriter, request *http.Request, controls Controls) {
 	setFernHeaders(writer.Header())
+	if controls.PluginAuth != nil && newPluginAuthHTTP(controls.PluginAuth).serveTrusted(writer, request) {
+		return
+	}
 	if controls.Onboarding != nil && (request.URL.Path == "/fern/github/app/setup" || request.URL.Path == "/fern/github/app/callback") {
 		if request.URL.Path == "/fern/github/app/setup" && !sameOrigin(request) {
 			http.Error(writer, "cross-origin onboarding request rejected", http.StatusForbidden)

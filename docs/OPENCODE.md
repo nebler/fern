@@ -92,6 +92,42 @@ These routes do not acquire workspace
 admission or wake OpenCode. Paths outside that namespace, including similar
 names such as `/fern-smoke`, are proxied unchanged.
 
+The following plugin-authorization routes are implemented independently of run
+execution:
+
+| Purpose | Method and route | Authority |
+| --- | --- | --- |
+| Begin setup | `POST /fern/api/plugin-auth/start` | Public remote route |
+| Poll setup | `POST /fern/api/plugin-auth/poll` | Public remote route with the device code |
+| Review setup | `GET /fern/plugin-auth/authorize?id=...&code=...` | Paired device only |
+| Approve | `POST /fern/api/plugin-auth/requests/:id/approve` | Paired device plus CSRF, or loopback operator |
+| Deny | `POST /fern/api/plugin-auth/requests/:id/deny` | Paired device plus CSRF, or loopback operator |
+| List grants | `GET /fern/api/plugin-auth/credentials` | Loopback operator only |
+| Revoke grant | `DELETE /fern/api/plugin-auth/credentials/:id` | Loopback operator only |
+| Revoke self | `POST /fern/api/plugin-auth/self/revoke` | That plugin bearer |
+
+All plugin-authorization JSON requests are strict and bounded. Setup expires
+after 10 minutes, starts are limited to one per second, polls to one per five
+seconds, and durable state caps authorization records, credentials, and invalid
+polls.
+Successful repeated polls return the same device code presented by the caller;
+Fern never persists plaintext device codes, user codes, or bearers. The fixed
+grant is valid for 90 days and has only `run:create`, `run:read`, `run:stop`,
+`run:open`, and `run:result`.
+
+Start returns `verification_uri` and `verification_uri_complete` rooted only in
+the configured trusted remote origin. The complete link opens a paired-device
+page showing the fixed OpenCode client and scopes. Its approve and deny buttons
+fetch an existing route-bound CSRF token and submit the strict JSON decision API.
+The page never receives or renders the device code or bearer.
+
+`/fern/api/runs` and its descendants are reserved for plugin bearers, but this
+authorization slice intentionally adds no Background Run handlers. A reserved
+`GET` therefore returns `404`, while `POST /fern/api/runs` reaches Fern's
+unimplemented route handling and returns `405`. Plugin bearers receive `404` on
+routes outside their allowlist and never fall through to the persistent OpenCode
+workspace.
+
 The lifecycle integration uses these V2 surfaces:
 
 | Purpose | Route |
@@ -202,6 +238,18 @@ non-`/fern/*` UI and API route.
 Only the remote listener may be published through a private TLS edge. The
 operator listener must remain host-local and must never be a Serve target or be
 exposed to a LAN or the internet.
+
+Plugin device-flow start and poll are the only additional unauthenticated remote
+routes. Approval reuses an already trusted device or operator boundary; it does
+not add OAuth clients, dynamic scopes, refresh tokens, or configuration fields.
+Each admitted plugin request receives a server-owned `ActorOpenCode` snapshot,
+fixed scope context, revocation registration, and credential-expiry deadline.
+
+Restoring or rolling back Fern control state can restore a previously revoked
+device or plugin credential. Treat backups as credential-bearing: after any
+rollback, repeat revocation against the restored Fern state and rotate any
+client-held bearer that may have survived. Revocation performed only after the
+restored snapshot cannot survive restoration.
 
 ## Persistence And Upgrades
 

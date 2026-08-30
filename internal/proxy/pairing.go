@@ -173,7 +173,7 @@ func (state *pairingState) remoteHandler(next http.Handler, auth runtime.ServerA
 			http.Error(writer, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if isFernRoute(request) && request.URL.Path != "/fern" && request.URL.Path != "/fern/" && !isTaskAPIPath(request.URL.Path) && !isTaskUIPath(request.URL.Path) {
+		if isFernRoute(request) && request.URL.Path != "/fern" && request.URL.Path != "/fern/" && !isTaskAPIPath(request.URL.Path) && !isTaskUIPath(request.URL.Path) && !isPluginPairedPath(request.URL.Path) {
 			if request.URL.Path == csrfTokenPath && request.URL.EscapedPath() == csrfTokenPath {
 				state.serveCSRFToken(writer, request, credential)
 				return
@@ -190,6 +190,17 @@ func (state *pairingState) remoteHandler(next http.Handler, auth runtime.ServerA
 
 func isTaskUIPath(path string) bool {
 	return path == "/fern/tasks" || path == "/fern/assets/tasks.js"
+}
+
+func isPluginPairedPath(path string) bool {
+	if path == pluginAuthorizePath {
+		return true
+	}
+	if suffix, found := strings.CutPrefix(path, "/fern/api/plugin-auth/requests/"); found {
+		parts := strings.Split(suffix, "/")
+		return len(parts) == 2 && parts[0] != "" && (parts[1] == "approve" || parts[1] == "deny")
+	}
+	return false
 }
 
 func (state *pairingState) operatorHandler(next http.Handler, auth runtime.ServerAuth, control ControlAuth) http.Handler {
@@ -248,7 +259,7 @@ func requiresControlAuth(request *http.Request) bool {
 	}
 	return path == "/fern/control" || strings.HasPrefix(path, "/fern/control/") ||
 		strings.HasPrefix(path, "/fern/api/v1/") || path == "/fern/workflows" || strings.HasPrefix(path, "/fern/workflows/") ||
-		strings.HasPrefix(path, "/fern/devices/")
+		strings.HasPrefix(path, "/fern/devices/") || path == "/fern/api/plugin-auth/credentials" || strings.HasPrefix(path, "/fern/api/plugin-auth/credentials/")
 }
 
 func (state *pairingState) issue(writer http.ResponseWriter, request *http.Request) {
