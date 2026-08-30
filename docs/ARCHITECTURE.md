@@ -27,7 +27,7 @@ Implemented production paths include:
 - an alternative trusted-workspace `gh` authority mode;
 - offline backup create/restore/rollback and encrypted GitHub credential
   export/import/rotation;
-- schema-6 compatibility gates and a tagged release workflow for attested
+- schema-7 compatibility gates and a tagged release workflow for attested
   assets and a signed, attested OCI image.
 
 The pinned OpenCode contract still has no generic durable terminal-success
@@ -226,7 +226,7 @@ and atomically marks unresolved records quarantined without replaying effects.
 
 The SQLite store at `$HOME/.fern/tasks/<workspace>.db` uses WAL, foreign keys,
 `synchronous=FULL`, `BEGIN IMMEDIATE`, integrity checks, and a checksummed
-migration ledger. Current schema is 6:
+migration ledger. Current schema is 7:
 
 1. `initial_task_store`
 2. `execution_projection_and_results`
@@ -234,6 +234,7 @@ migration ledger. Current schema is 6:
 4. `user_authorized_snapshot_seals`
 5. `explicit_workspace_github_authority`
 6. `publication_admission_receipts`
+7. `background_run_intents`
 
 Schema 6 requires each mutable publication to reference an exact
 `result.publish` receipt. Pre-schema-6 publication rows migrate with a null
@@ -242,7 +243,7 @@ updates are rejected.
 
 `baseline-v1` is the first supported repository-established compatibility
 fixture. It is schema 4 and explicitly is not evidence of a historical release
-or tag. `integration/upgrade/run.sh` verifies semantic upgrade to schema 6,
+or tag. `integration/upgrade/run.sh` verifies semantic upgrade to schema 7,
 restores the verified pre-upgrade bytes for rollback, and upgrades again.
 Rollback means restoring a pre-upgrade backup; older code must never open the
 migrated database.

@@ -156,7 +156,7 @@ receipt-backed publication.
 - [Lifecycle harness](./integration/lifecycle/README.md): real-Docker lifecycle test details.
 - [OpenCode contract harness](./integration/opencode-contract/README.md): zero-cost exact-ID, restart, approval, and cancellation observations.
 - [Task UI fixtures](./integration/task-ui/README.md): isolated read-only inbox/detail contract renderer.
-- [Upgrade harness](./integration/upgrade/README.md): schema-4 baseline, schema-6 upgrade, and byte-restore rollback contract.
+- [Upgrade harness](./integration/upgrade/README.md): schema-4 baseline, schema-7 upgrade, and byte-restore rollback contract.
 - [Release harness](./integration/release/README.md): reproducibility, integrity, and deployment safety checks.
 - [Production rehearsal](./integration/production-rehearsal/README.md): recorder for operator-supplied physical evidence; self-test is synthetic.
 

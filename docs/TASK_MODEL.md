@@ -388,10 +388,10 @@ states retain `prompt_started`. Ambiguity, recovery-required, failure, and
 cancellation preserve the last phase, including `none` when prepared work is
 canceled or expires before delivery.
 
-### Approval (Target Contract, Not Schema 6)
+### Approval (Target Contract, Not Schema 7)
 
 No approval/question/form table, delivery coordinator, or answer API is composed
-in the implemented schema-6 service. This state machine describes a future
+in the implemented schema-7 service. This state machine describes a future
 contract only.
 
 | State | Allowed next states |
@@ -1527,7 +1527,7 @@ an explicit contiguous schema range and refuses unknown newer versions.
 Migrations do not call OpenCode, GitHub, Docker, providers, or verification
 commands.
 
-`internal/taskstore` implements schema 6 with CGO-free SQLite, private path
+`internal/taskstore` implements schema 7 with CGO-free SQLite, private path
 checks, a checksum-pinned migration ledger, foreign keys, WAL with
 `synchronous=FULL`, receipt-backed task and publication admission, fenced
 coordinator journals, exact OpenCode IDs, results, verification, and
@@ -1541,7 +1541,7 @@ receipts/effects. They do not both own the same task entity. Offline backup and
 restore preserve both stores, task SQLite/WAL state, OpenCode data, Git objects,
 managed volumes, configuration, and the appliance epoch under one manifest.
 Rollback means restoring the verified pre-upgrade bytes; older binaries must
-not open a migrated schema-6 database. See [Deployment](./DEPLOYMENT.md) and the
+not open a migrated schema-7 database. See [Deployment](./DEPLOYMENT.md) and the
 `integration/upgrade` harness.
 
 ## Fault-Injection Acceptance

@@ -7,12 +7,12 @@ first repository-established baseline to the current schema.
 schema 4. It is a checked-in fixture established by the repository, not a
 historical release or tag. The harness verifies fixture metadata/checksums,
 copies the exact baseline into isolation, opens it with current code, validates
-the semantic schema-6 result, and checks that publication admission receipts and
-legacy-row quarantine behave as required.
+the semantic schema-7 result, and checks that publication admission receipts,
+legacy-row quarantine, and Background Run storage behave as required.
 
 It then restores the verified pre-upgrade bytes as the rollback operation and
 performs the upgrade again. Rollback therefore means restoring an offline backup
-created before migration. It does not make schema 6 readable by older code, and
+created before migration. It does not make schema 7 readable by older code, and
 it does not claim atomicity across host filesystems, Docker volumes, or external
 services.
 

@@ -309,11 +309,11 @@ key or token at GitHub. See
 
 ## Schema Upgrade And Rollback
 
-Current task-store schema is 6. `baseline-v1` is the first
+Current task-store schema is 7. `baseline-v1` is the first
 repository-established compatibility fixture at schema 4; it is not a
 historical release or tag. Before upgrade, create and verify an offline backup.
 
-`integration/upgrade/run.sh` verifies semantic schema-4 to schema-6 upgrade,
+`integration/upgrade/run.sh` verifies semantic schema-4 to schema-7 upgrade,
 restores the exact pre-upgrade bytes for rollback, and upgrades again. Production
 rollback likewise means restoring the verified pre-upgrade backup. Older code
 must not open a migrated database.
