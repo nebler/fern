@@ -22,7 +22,7 @@ cp "$ROOT/deploy/release/"* "$FIXTURE/deploy/release/"
 cat >"$FIXTURE/go.mod" <<'EOF'
 module example.invalid/release-fixture
 
-go 1.24.0
+go 1.27.0
 EOF
 cat >"$FIXTURE/cmd/fern/main.go" <<'EOF'
 package main
