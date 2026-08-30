@@ -141,6 +141,25 @@ describe("FernClient", () => {
     }).listRuns()
     controller.abort()
     await expect(canceled).rejects.toThrow("shutting down")
+
+    const hangingBody = ((_input: RequestInfo | URL, init?: RequestInit) =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream({
+            start(stream) {
+              stream.enqueue(new TextEncoder().encode('{"runs":'))
+              init?.signal?.addEventListener("abort", () => stream.error(new Error("aborted")), { once: true })
+            },
+          }),
+          { headers: { "Content-Type": "application/json" } },
+        ),
+      )) as typeof fetch
+    await expect(
+      new FernClient(endpoint, new InMemoryCredentialStore("secret"), {
+        fetch: hangingBody,
+        timeoutMs: 5,
+      }).listRuns(),
+    ).rejects.toThrow("timed out")
   })
 
   test("validates endpoint in the constructor and handles IPv6 localhost", () => {
@@ -157,6 +176,65 @@ describe("FernClient", () => {
       "not connected",
     )
     expect(() => client(server).requireRunID("x")).toThrow("valid Fern run ID")
+  })
+
+  test("forgets a rejected credential without replaying a mutation", async () => {
+    let requests = 0
+    const server = serve(() => {
+      requests++
+      return Response.json(
+        { error: "do not expose remote text" },
+        { status: 401, headers: { "WWW-Authenticate": 'Bearer realm="fern-plugin"' } },
+      )
+    })
+    const credentials = new InMemoryCredentialStore("secret")
+    const fern = new FernClient(new URL(server.url), credentials)
+    await expect(
+      fern.createRun({
+        instruction: "Fix it",
+        profile: "opencode-1.18.16",
+        git: gitContext(),
+        idempotencyKey: "one-attempt",
+      }),
+    ).rejects.toThrow("rejected its plugin credential")
+    expect(requests).toBe(1)
+    expect(await credentials.get()).toBeUndefined()
+  })
+
+  test("preserves non-Fern 401 credentials and the original auth error when deletion fails", async () => {
+    const unrelated = serve(() =>
+      Response.json({}, { status: 401, headers: { "WWW-Authenticate": 'Basic realm="operator"' } }),
+    )
+    const preserved = new InMemoryCredentialStore("secret")
+    await expect(new FernClient(new URL(unrelated.url), preserved).listRuns()).rejects.toMatchObject({
+      status: 401,
+      kind: "http",
+    })
+    expect(await preserved.get()).toBe("secret")
+
+    const fern = serve(() =>
+      Response.json({}, { status: 401, headers: { "WWW-Authenticate": 'Bearer realm="fern-plugin"' } }),
+    )
+    const failingDelete = {
+      get: async () => "secret",
+      set: async () => {},
+      delete: async () => {
+        throw new Error("keyring failure")
+      },
+    }
+    await expect(new FernClient(new URL(fern.url), failingDelete).listRuns()).rejects.toMatchObject({
+      status: 401,
+      kind: "authentication",
+      fernBearerChallenge: true,
+      message: "Fern rejected its plugin credential. Reconnect on the next explicit Fern action.",
+    })
+
+    const revokeCredentials = new InMemoryCredentialStore("secret")
+    await expect(new FernClient(new URL(fern.url), revokeCredentials).revokeSelf()).rejects.toMatchObject({
+      kind: "authentication",
+      fernBearerChallenge: true,
+    })
+    expect(await revokeCredentials.get()).toBe("secret")
   })
 })
 

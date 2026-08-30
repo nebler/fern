@@ -17,7 +17,7 @@
   "scripts": {
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "smoke": "bun -e 'import plugin from \"./src/tui.ts\"; if (plugin.id !== \"fern.opencode\" || typeof plugin.tui !== \"function\") process.exit(1)'",
+    "smoke": "bun test/smoke.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

@@ -1,5 +1,33 @@
-export { FernClient, FernClientError, RUN_STATES, parseEndpoint, type RunState } from "./client.js"
-export { InMemoryCredentialStore, type CredentialStore } from "./credentials.js"
+export {
+  OnboardingLatch,
+  DisconnectError,
+  disconnectFern,
+  pollForAuthorization,
+  revokeFern,
+  type PollOptions,
+  type RevokeOutcome,
+} from "./auth.js"
+export {
+  FernClient,
+  FernClientError,
+  PLUGIN_SCOPES,
+  RUN_STATES,
+  parseEndpoint,
+  type AuthorizationPoll,
+  type AuthorizationStart,
+  type FernClientErrorKind,
+  type RunState,
+} from "./client.js"
+export {
+  CREDENTIAL_ACCOUNT_ATTRIBUTE,
+  CREDENTIAL_SERVICE,
+  CredentialStoreError,
+  InMemoryCredentialStore,
+  OSCredentialStore,
+  type CredentialStore,
+  type SubprocessResult,
+  type SubprocessRunner,
+} from "./credentials.js"
 export {
   canonicalizeRemote,
   readGitContext,
@@ -7,7 +35,8 @@ export {
   requireRunnableGitContext,
   type GitContext,
 } from "./git.js"
-export { subprocessEnvironment } from "./process.js"
+export { runProcess, subprocessEnvironment, type ProcessResult } from "./process.js"
+export { ORIGIN_KV_KEY, configuredOrigin, parseOnboardingOrigin, persistOrigin, type OriginKV } from "./origin.js"
 export {
   CreateRunLatch,
   INSTRUCTION_MAX_LENGTH,

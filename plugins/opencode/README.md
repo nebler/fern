@@ -4,7 +4,7 @@ Repo-local OpenCode TUI plugin for Fern Background Runs.
 
 ## Status
 
-This is the first development slice, not a published or end-to-end production release. It targets the local OpenCode TUI plugin contract in `@opencode-ai/plugin` `1.18.16` and OpenTUI `0.4.5`. The referenced `specs/tui-plugins.md` is absent from this repository checkout; implementation follows `opencode/packages/plugin/src/tui.ts`.
+This is an unpublished development integration targeting the OpenCode TUI plugin contract in `@opencode-ai/plugin` `1.18.16` and OpenTUI `0.4.5`.
 
 Implemented:
 
@@ -16,16 +16,20 @@ Implemented:
 - Run creation rejects missing remotes, unborn repositories, ambiguous fetch URLs, dirty worktrees, and repository changes after confirmation.
 - Native confirmation precedes create and stop requests. Pending creates retain only a request digest and caller-generated idempotency key so a response-loss retry reuses the same key.
 - Create reports success only for a response containing both a valid `run_id` and `committed: true`.
-- The Fern endpoint is resolved only from `FERN_ENDPOINT` when the plugin loads and is never persisted or accepted from plugin configuration.
-- Credentials are behind `CredentialStore`; this slice supplies only `InMemoryCredentialStore`.
+- On the first explicit Fern action, the plugin asks for and validates a root HTTPS Fern origin. That non-secret canonical origin is stored in OpenCode KV storage. `FERN_ENDPOINT` remains an optional development override.
+- Device authorization uses Fern's fixed scopes, displays the one-time user code, opens the same-origin verification URL with a sanitized child environment, respects server polling intervals, and stops on denial, expiry, cancellation, or lifecycle shutdown.
+- Credentials are stored by canonical Fern origin in macOS Keychain (`security`) or Linux Secret Service (`secret-tool`). Unsupported, unavailable, locked, or failing keyrings refuse durable onboarding rather than writing plaintext. A persistence failure after approval triggers immediate best-effort self-revocation and reports any uncertain cleanup.
+- Public authorization start and poll requests never send a bearer. Auth responses, identities, token type, expiry, scopes, URLs, retry intervals, and body sizes are validated before use.
+- A 401 removes the invalid local credential only when `WWW-Authenticate` identifies Fern's plugin bearer realm, and never replays the operation. A later explicit Fern action starts onboarding.
+- Disconnect requests server-side self-revocation before one local deletion and distinguishes confirmed revocation, an already-ineffective grant, a definitive server failure, and ambiguous transport loss.
+- Keyring and browser subprocesses use fixed arguments, sanitized environments, bounded streamed output, lifecycle cancellation, and hard timeouts.
 - The plugin refuses to register commands unless the runtime reports exactly OpenCode `1.18.16`.
 
 Not implemented:
 
-- Fern onboarding, pairing, repository authorization checks, and host compatibility/readiness checks.
-- OS credential-store persistence. For development only, seed the process-local store with `FERN_TOKEN`. The plugin does not write this value to OpenCode storage, config, logs, or repository files.
-- Server-side credential revocation. `disconnect` only forgets the in-memory credential; an inherited `FERN_TOKEN` remains in the parent process environment and can seed a later plugin load.
-- The Fern Background Runs backend routes. The concrete client currently expects the spike contract under `/fern/api/runs`.
+- Repository authorization checks and host compatibility/readiness checks.
+- Windows durable credential storage.
+- The Fern Background Runs backend routes. Authentication routes are implemented, but the concrete run client still expects the developing contract under `/fern/api/runs`.
 - A published npm package or compatibility testing against an installed OpenCode binary.
 
 ## Development
@@ -39,7 +43,7 @@ bun test
 bun run smoke
 ```
 
-For a local development endpoint, use HTTPS except that `http://localhost` and `http://127.0.0.1` are accepted for a fake backend:
+For development only, `FERN_ENDPOINT` can override the persisted origin and `FERN_TOKEN` can seed a process-local `InMemoryCredentialStore`. The token remains inherited by the OpenCode parent process; the plugin never writes it to KV storage, configuration, logs, repository files, process arguments, or child environments. Localhost HTTP is accepted only through this development path:
 
 ```sh
 FERN_ENDPOINT=https://fern-host.example FERN_TOKEN=development-token opencode2 /path/to/repository
@@ -51,11 +55,14 @@ Load this source checkout through the OpenCode CLI plugin configuration using th
 opencode2 plugin add @fern/opencode@<published-version>
 ```
 
-That command is not currently usable because `@fern/opencode` has not been published and OS-backed onboarding is not wired.
+That command is not currently usable because `@fern/opencode` has not been published.
 
 ## HTTP Contract
 
-The concrete development client uses bearer authentication and JSON:
+The client uses JSON and a Fern plugin bearer after device authorization:
+
+- `POST /fern/api/plugin-auth/start` and `POST /fern/api/plugin-auth/poll` are public and never receive the bearer.
+- `POST /fern/api/plugin-auth/self/revoke` revokes the calling credential.
 
 - `POST /fern/api/runs` with `Idempotency-Key`; expects `{ "run_id": "...", "committed": true }`.
 - `GET /fern/api/runs` and `GET /fern/api/runs/:id`.
@@ -63,4 +70,4 @@ The concrete development client uses bearer authentication and JSON:
 - `POST /fern/api/runs/:id/open` with `Idempotency-Key`; the same-host capability URL is resolved fresh, passed only to the browser launcher, and never cached or displayed.
 - `GET /fern/api/runs/:id/result`.
 
-This contract is a client-side spike until the Fern backend implements and pins these routes.
+The authentication routes are implemented by Fern. The run routes remain a developing client/backend contract.
