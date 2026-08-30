@@ -17,20 +17,183 @@ The only active product hypothesis is:
 
 The order matters:
 
-1. Finish the Go 1.27 upgrade and validate the current baseline.
-2. Compare pinned OpenHands custom ACP with the official OpenCode experience.
-3. Pin and characterize one newer OpenCode V2 candidate.
-4. If the native difference survives, build one serial disposable Docker task
-   with a fresh clone, native task route, retained Git bundle, restart
-   reconciliation, runtime deletion, and clean reconstruction.
-5. Add concurrency of two, verification/publication adaptation, notification,
+1. Preserve the validated Go 1.27 baseline and current persistent workspace.
+2. Prove a documented OpenCode TUI plugin can provide `/fern`, first-use host
+   pairing, exact repository/base confirmation, and durable run submission.
+3. Compare pinned OpenHands custom ACP with the official OpenCode experience.
+4. Pin and characterize one newer OpenCode V2 candidate.
+5. If the native difference survives, build one serial disposable Docker
+   Background Run with a fresh clone, official OpenCode session endpoint,
+   retained Git bundle, restart reconciliation, runtime deletion, and clean
+   reconstruction.
+6. Add concurrency of two, verification/publication adaptation, notification,
    and retention only after serial fault gates pass.
-6. Dogfood at least six real tasks over two weeks and apply explicit kill gates.
+7. Dogfood at least six real runs over two weeks and apply explicit kill gates.
 
 The owner has completed the phone demo; physical Ubuntu, reboot, replacement-host,
 and release evidence remain separate production-acceptance work. This is not a
 plan to build another editor, generic agent platform, public sandbox service,
 Kubernetes platform, Gateway, or evaluation product.
+
+## Launch And Integration Decision
+
+The primary launch surface is OpenCode itself:
+
+> **Install the Fern OpenCode plugin, run `/fern`, and leave after Fern returns a
+> durable Background Run ID.**
+
+The plugin is a client of Fern, not the owner of execution. It may collect the
+current repository, exact `HEAD`, clean-worktree status, and prompt; show native
+OpenCode dialogs and status; and open the resulting session. Fern must commit
+the run before acknowledging submission and must continue without the plugin,
+TUI, or initiating device.
+
+Do not build against OpenCode's workspace-provider API for this launch. The
+legacy `experimental_workspace` plugin seam observed in OpenCode commit
+`39fb919` was replaced during the V2 workspace redesign. At upstream commit
+`583a1a2`, workspace providers are embedded host configuration rather than a
+documented ordinary-plugin extension, the home OpenCode process remains the
+session owner, and the public lifecycle surface is incomplete. That model may
+be reconsidered for an intentional always-on, fully remote OpenCode service,
+but it does not satisfy local-to-background handoff today.
+
+MCP and skills are secondary conveniences. A skill can explain when to use
+Fern, and an MCP tool can request a run from clients without a native plugin,
+but neither should be the primary effectful launch because model-mediated tool
+selection is not a reliable confirmation or authentication boundary. ACP is an
+execution/client protocol option, not the preferred way to add a launch action
+to the OpenCode TUI.
+
+### First-User Journey
+
+The first release has no Fern account sign-up. Onboarding pairs one OpenCode
+client with a Fern host that the trusted owner already operates. Host bootstrap
+remains explicit:
+
+```text
+fern init --repo /path/to/repository
+fern up --config fern.yaml
+fern doctor --phone
+```
+
+These existing commands establish the configured repository, service, private
+origin, and initial trusted-device path. Background Mode must add a compatibility
+check and scoped plugin authorization to that host; plugin installation must not
+silently provision infrastructure or register arbitrary repositories.
+
+The exact package name and command syntax must be pinned to the selected
+OpenCode release, but the intended journey is:
+
+```text
+# One-time installation
+opencode2 plugin add @fern/opencode@<pinned-version>
+
+# Normal use
+opencode2 /path/to/repository
+/fern Fix the cancellation race and add a regression test
+```
+
+If the plugin has no Fern credential, `/fern` starts setup instead of failing
+with a configuration-file instruction:
+
+1. Ask for or discover the private Fern HTTPS origin.
+2. Display a short-lived verification URL and user code.
+3. Require approval through an already trusted Fern operator or paired-device
+   channel.
+4. Store a revocable client credential outside `opencode.json`, scoped only to
+   create, read, stop, open, and fetch-result operations.
+5. Call Fern readiness and compatibility endpoints and show the exact host and
+   supported run profile before declaring setup complete.
+6. Match the local canonical Git remote to a repository already configured on
+   Fern. Repository registration and credential administration remain explicit
+   host-owner actions in the first release.
+
+The first launch confirmation should show:
+
+```text
+Run on Fern?
+
+Host          fern-home
+Repository    owner/repository
+Base          <exact commit OID>
+Working tree  clean
+Runtime       OpenCode <pinned profile>
+Prompt        Fix the cancellation race and add a regression test
+
+[ Run in background ]  [ Cancel ]
+```
+
+Initially reject a dirty or unresolved worktree. Fern must clone from the
+configured remote at the exact reachable base; it must not silently copy local
+files, infer a branch tip, or imply that the local conversation moved. A later
+conversation export/import experiment must be labeled a branch and separately
+prove its transcript and filesystem boundaries.
+
+After Fern durably accepts the request, the plugin records only safe local
+correlation data and shows:
+
+```text
+Background Run run_...
+State          Setting up
+OpenCode       Starting
+
+/fern runs
+/fern open run_...
+/fern stop run_...
+/fern result run_...
+```
+
+`open` must resolve the current authoritative endpoint from Fern instead of
+caching an attempt URL. Closing OpenCode immediately after acceptance must not
+affect provisioning, prompt admission, execution, retention, or cleanup.
+
+### Harness-Neutral Boundary
+
+Fern should be launch-surface independent without pretending all coding
+harnesses have the same session semantics. The stable outer request should be
+small:
+
+```text
+CreateBackgroundRun
+  repository identity
+  exact base commit
+  instruction
+  idempotency key
+  requested execution profile
+
+BackgroundRun
+  durable run ID
+  conservative state
+  attention state
+  harness-specific session locator, when live
+  retained Git result locator, when sealed
+```
+
+An OpenCode plugin, another harness plugin, a human CLI, or an MCP server may
+translate its local context into that request. All of them must receive the same
+durable run identity and use the same read, stop, open, and result operations.
+Authentication, repository authorization, admission, environment generations,
+writer fencing, and artifact retention remain Fern-owned.
+
+Execution is not generic in the first release. OpenCode-specific session IDs,
+prompt admission, questions, permissions, event recovery, and deep links belong
+to one pinned OpenCode execution profile behind the neutral run boundary. Do
+not create a universal harness interface, generic ACP layer, or lowest-common-
+denominator conversation model before a second real integration is accepted.
+
+A second harness becomes eligible only when owner use demonstrates a recurring
+need and its plugin or CLI can prove:
+
+- exact and idempotent admission;
+- continued execution after its initiating client exits;
+- restart-safe observation without mutation replay;
+- an authoritative live-session or log attachment story;
+- positive interruption and writer-inactivity evidence;
+- the same fenced Git result export and reconstruction contract.
+
+If those gates pass, extract the smallest shared execution-driver interface from
+the two working implementations. Until then, harness neutrality means a stable
+Fern run API plus thin launch adapters, not multiple implemented runtimes.
 
 ## Phase 0: Publish The Current Baseline
 
@@ -219,30 +382,57 @@ existing tool rather than building Labs.
 Follow the [executable TODO](../todo/opencode-background-mode.md). Keep the
 existing persistent Docker `workspace.Manager` semantically unchanged. Add a
 separate disposable Docker lane with one full clone, one OpenCode state volume,
-one pinned server, and one authenticated task route per attempt.
+one pinned server, and one authenticated official OpenCode endpoint per run.
+Reuse the existing single-origin proxy shape for the serial prototype; add
+per-run endpoint mapping only when concurrency of two requires it.
+
+### Phase 2A: Native Launch And Onboarding
+
+Before implementing disposable execution, build the OpenCode plugin against a
+fake or existing Fern endpoint and prove the launch contract independently:
+
+1. Install a version-pinned TUI plugin through OpenCode's documented package
+   mechanism.
+2. Register `/fern` and native run, list, open, stop, and result actions.
+3. Complete short-lived, explicitly approved device authorization without
+   storing a Fern bearer credential in OpenCode configuration.
+4. Read canonical repository identity, exact `HEAD`, and dirty state; reject
+   dirty or unreachable bases initially.
+5. Show the complete run confirmation before any remote allocation.
+6. Submit with a caller-generated idempotency key and render success only after
+   Fern returns a committed Background Run ID.
+7. Kill the TUI immediately and prove the accepted run remains visible and
+   controllable through Fern.
+
+This slice may use a fake execution backend. Its purpose is to establish the
+first-user journey and prevent Docker lifecycle work from dictating the client
+contract.
 
 ### Phase 2 Gates
 
-1. Prove that OpenHands custom ACP is materially worse for repeated owner work.
-2. Characterize prompt admission, execution evidence, session errors,
+1. Prove the `/fern` installation, pairing, repository match, confirmation, and
+   durable-acceptance journey against one exact OpenCode plugin API.
+2. Prove that OpenHands custom ACP is materially worse for repeated owner work.
+3. Characterize prompt admission, execution evidence, session errors,
    permissions, questions, cancellation, server loss, Fern restart, and exact
    native UI attachment for one pinned OpenCode release.
-3. Run one serial isolated Docker task from exact base commit to retained Git
+4. Run one serial isolated Docker task from exact base commit to retained Git
    bundle.
-4. Delete its container, state volume, and checkout, then reconstruct and verify
+5. Delete its container, state volume, and checkout, then reconstruct and verify
    the result from host-owned artifacts.
-5. Pass lost-response, restart, stale-generation, cancellation, interrupted
+6. Pass lost-response, restart, stale-generation, cancellation, interrupted
    export, disk, and cleanup fault gates without prompt replay.
-6. Run two same-repository attempts concurrently without writable sharing or
+7. Run two same-repository attempts concurrently without writable sharing or
    interference with the persistent workspace.
-7. Reuse Fern's exact-result verification and App publication only after
+8. Reuse Fern's exact-result verification and App publication only after
    artifact materialization is trusted.
-8. Add one durable notification destination only after dogfood proves attention
+9. Add one durable notification destination only after dogfood proves attention
    delivery is needed.
 
 The Docker profile remains a trusted-owner boundary. Do not add Kubernetes, a
-remote runner, multiple harnesses, warm pools, public previews, or shared
-multi-tenancy before these gates pass.
+remote runner, a second execution harness, warm pools, public previews, or
+shared multi-tenancy before these gates pass. Thin clients of the harness-neutral
+run API are allowed; they do not establish another supported execution profile.
 
 ### Phase 2 Exit Criteria
 

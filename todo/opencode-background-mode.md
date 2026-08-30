@@ -1,22 +1,59 @@
-# OpenCode Background Mode TODO
+# OpenCode Background Mode: Current TODO
 
 **Status:** active product experiment
 
 **Updated:** 2026-08-30
-**Scope:** one trusted owner, one always-on private Linux host, configured trusted
-repositories, and at most two concurrent disposable attempts
+**Scope:** one trusted owner, one private Fern host, configured trusted
+repositories, and at most two concurrent Background Runs
 
 ## Product Promise
 
-> Submit work to an always-on private host, leave, inspect or steer the exact
-> native OpenCode session from another device, and retain an exact recoverable
-> Git result after the runtime and checkout disappear.
+> Start a Background Run from OpenCode, leave the initiating device, reopen or
+> steer the exact remote OpenCode session elsewhere, and retain the exact Git
+> result after its disposable runtime is deleted.
 
-This checklist owns the active implementation sequence. Code and
-[Architecture](../docs/ARCHITECTURE.md) remain authoritative for shipped
-behavior. [Roadmap](../docs/ROADMAP.md) owns promotion and later-work gates.
-The [Background Mode Goal Design](../docs/BACKGROUND_MODE.md) defines the target
-components, data model, Go APIs, concurrency patterns, graphics, and demo.
+This is the executable checklist for current work. The
+[Roadmap](../docs/ROADMAP.md) owns sequencing and later gates. The
+[Background Mode design](../docs/BACKGROUND_MODE.md) owns the proposed data
+model, lifecycle, artifact, routing, and fault semantics. Code and
+[Architecture](../docs/ARCHITECTURE.md) remain authoritative for implemented
+behavior.
+
+## Product Language
+
+Use these terms in user-facing interfaces:
+
+- **Background Run:** one remote unit of work started by the user.
+- **OpenCode session:** the exact live native session for that run.
+- **Result:** the selected Git commit and retained reconstruction artifact.
+
+Keep task rows, attempts, generations, environments, routes, and export journals
+as implementation details. Two simultaneous pieces of work are two Background
+Runs, each with one current attempt. A retry or replacement creates another
+internal attempt generation; it does not silently replace the session a user has
+already opened.
+
+## Decisions Already Made
+
+- [x] OpenCode remains the first and only execution harness for this experiment.
+- [x] The primary launch surface is an OpenCode TUI plugin with `/fern`.
+- [x] Fern, not the plugin or initiating OpenCode process, owns durable run
+  admission and lifecycle.
+- [x] A run uses a fresh full clone, distinct OpenCode state, and one
+  authoritative remote OpenCode session.
+- [x] The legacy `experimental_workspace` plugin API is not a product
+  dependency.
+- [x] The current embedded V2 workspace-provider API is not the local-to-remote
+  handoff mechanism; it may be revisited only for a deliberate always-on remote
+  OpenCode home-server mode.
+- [x] MCP and skills are optional launch conveniences, not the primary effectful
+  confirmation or authentication boundary.
+- [x] Fern exposes a harness-neutral run boundary, but does not implement a
+  generic runtime framework before a second harness proves demand.
+- [x] Dirty local worktrees are rejected initially. Fern does not silently copy
+  local files or imply that a local conversation moved.
+- [x] Results use retained Git objects and must survive container, OpenCode
+  volume, and checkout deletion.
 
 ## Current Baseline
 
@@ -25,202 +62,321 @@ components, data model, Go APIs, concurrency patterns, graphics, and demo.
 - [x] Durable task admission commits Fern and exact OpenCode identities before
   delivery.
 - [x] Cancellation fences new Fern-owned effects.
-- [x] Explicit user sealing binds a clean Git result to one task and attempt.
+- [x] Explicit sealing binds a clean Git result to one task and attempt.
 - [x] Exact-result host verification and optional GitHub App publication exist.
-- [x] The private browser and phone flow has been demonstrated by the owner.
-- [x] Upgrade the repository and release fixture from Go 1.24 to Go 1.27.
-- [ ] The current implementation still has one persistent checkout, one
-  OpenCode state volume, and one effecting task at a time.
-- [ ] Exact Git object retention after checkout deletion is not implemented.
+- [x] The owner completed the private browser and phone demonstration.
+- [x] The repository and release fixture use Go 1.27.
+- [ ] Disposable per-run clones, volumes, containers, and endpoints do not
+  exist.
+- [ ] Multiple concurrent OpenCode workspaces do not exist.
+- [ ] Exact Git object retention after checkout deletion does not exist.
+- [ ] The `/fern` plugin and scoped plugin authentication do not exist.
 
-The Background Mode lane must be added beside the persistent
-`workspace.Manager`. Do not convert that manager into a generic scheduler or
-change its retention semantics during the experiment.
+Do not convert the persistent `workspace.Manager` into a scheduler or change its
+retention behavior. Add Background Runs as a separate disposable lane.
 
-## Phase 1: Prove The Native Difference
+## Work Order
 
-Complete this comparison before productizing a second execution lane.
+Complete these milestones in order:
 
-- [ ] Pin the exact OpenHands Agent Canvas, Agent Server, OpenCode, container,
-  and API schema identities used for comparison.
-- [ ] Run one supported OpenHands ACP agent as a control.
-- [ ] Run OpenCode through OpenHands custom ACP using the same repository, model,
-  task class, and host.
-- [ ] Compare Canvas and official OpenCode for conversation fidelity, settings,
-  skills, plugins, model selection, permissions, questions, files, terminal,
-  diffs, steering, and restart behavior.
-- [ ] Start two independent tasks and verify their checkout, state, credential,
-  cache, process, and port boundaries.
-- [ ] Disconnect the initiating client for at least ten minutes, reconnect from
-  another device, and measure time to truthful current state.
-- [ ] Restart Canvas and Agent Server separately and record what survives.
-- [ ] Delete the runtime/workspace and determine whether the exact useful Git
-  result remains independently reconstructable.
-- [ ] Record every capability for which native OpenCode is materially better,
-  equally good, or worse.
+1. Prove `/fern` installation, onboarding, and durable submission against a fake
+   or existing Fern endpoint.
+2. Complete the pinned OpenHands/native OpenCode comparison and select one exact
+   OpenCode V2 contract.
+3. Run one serial disposable Background Run end to end.
+4. Seal, retain, delete, and reconstruct its exact Git result.
+5. Pass restart, lost-response, cancellation, and cleanup fault gates.
+6. Run two isolated disposable OpenCode workspaces concurrently.
+7. Dogfood six real runs and apply the product kill gates.
 
-**Stop:** do not build the Fern lane if OpenHands custom ACP is satisfactory for
-real owner work and the official OpenCode UI adds no repeatedly used value.
+## 1. `/fern` And First-User Onboarding
 
-## Phase 2: Pin The OpenCode Contract
+The first release has no Fern account sign-up. One trusted owner first operates
+a private host:
 
-The production pin is not a proxy for a newer V2 build. Select one exact
-candidate and retain source/build identity with every observation.
+```text
+fern init --repo /path/to/repository
+fern up --config fern.yaml
+fern doctor --phone
+```
 
-- [ ] Verify server startup, health, authentication, and deterministic task URL
-  routing.
-- [ ] Verify exact caller-selected session and prompt IDs.
-- [ ] Verify prompt admission and read-only reconciliation after a lost response.
-- [ ] Verify inbox, message, event/log, question, form, permission, terminal, and
-  interrupt behavior.
-- [ ] Verify process restart and complete container replacement.
-- [ ] Characterize `/api/session/{sessionID}/wait`; treat unavailable, volatile,
-  or process-local behavior as non-authoritative.
-- [ ] Prove that Fern can reopen the same authoritative session in the official
-  UI rather than creating a second session.
-- [ ] Record every process-epoch fact that disappears and project uncertainty or
-  `recovery_required` when loss is positively detected.
+The intended OpenCode journey is:
+
+```text
+opencode2 plugin add @fern/opencode@<pinned-version>
+opencode2 /path/to/repository
+/fern Fix the cancellation race and add a regression test
+```
+
+### Plugin Spike
+
+- [ ] Pin one documented OpenCode TUI plugin API and compatible OpenCode version.
+- [ ] Package a minimal `@fern/opencode` TUI plugin.
+- [ ] Register `/fern` and native run, runs, open, stop, and result actions.
+- [ ] Let `/fern <instruction>` launch directly and `/fern` without arguments
+  open a native setup/run dialog.
+- [ ] Keep the plugin useful with both OpenCode's local service and an explicit
+  `--server` connection.
+- [ ] Use a fake Fern backend first so client UX does not depend on Docker work.
+
+### Authentication
+
+- [ ] Ask for or discover the private Fern HTTPS origin on first use.
+- [ ] Display a short-lived verification URL and user code.
+- [ ] Require approval through an existing trusted operator or paired-device
+  channel.
+- [ ] Issue a revocable credential scoped only to run create, read, stop, open,
+  and result access.
+- [ ] Keep the credential out of `opencode.json`, prompts, repository files,
+  logs, and plugin display state.
+- [ ] Add host compatibility and readiness checks before setup succeeds.
+- [ ] Support explicit disconnect and server-side credential revocation.
+
+### Repository Confirmation
+
+- [ ] Read the canonical Git remote, exact `HEAD`, branch display name, and dirty
+  state without asking the model.
+- [ ] Match the canonical remote to a repository explicitly configured on Fern.
+- [ ] Prove the exact base commit is reachable from Fern's configured remote.
+- [ ] Reject dirty, unborn, ambiguous, unconfigured, or unreachable repository
+  state with an actionable message.
+- [ ] Do not upload a patch, archive, or local untracked file in the first slice.
+
+### Launch Confirmation
+
+- [ ] Show host, repository, exact base OID, clean state, pinned OpenCode profile,
+  and complete instruction before allocating anything.
+- [ ] Generate an idempotency key before submission.
+- [ ] Show success only after Fern returns a committed Background Run ID.
+- [ ] Store only safe local correlation data; never cache an endpoint as
+  authority.
+- [ ] Resolve the current authoritative OpenCode endpoint from Fern on every
+  `open`.
+- [ ] Kill the TUI immediately after acceptance and prove the run remains
+  readable and stoppable.
+
+Example confirmation:
+
+```text
+Run on Fern?
+
+Host          fern-home
+Repository    owner/repository
+Base          bcd397b...
+Working tree  clean
+Runtime       OpenCode <pinned profile>
+Prompt        Fix the cancellation race and add a regression test
+
+[ Run in background ]  [ Cancel ]
+```
+
+## 2. Product And OpenCode Contract Gates
+
+### Native Value
+
+- [ ] Pin the exact OpenHands Agent Canvas, Agent Server, custom ACP adapter,
+  OpenCode, image, and API identities used for comparison.
+- [ ] Run the same real owner task through OpenHands custom ACP and official
+  OpenCode.
+- [ ] Compare conversation fidelity, configuration, skills, plugins, models,
+  permissions, questions, files, terminal, diffs, steering, reconnect, and
+  restart behavior.
+- [ ] Record which native OpenCode capabilities are repeatedly useful rather
+  than merely available.
+
+**Stop:** do not build the disposable lane if OpenHands is satisfactory and the
+official OpenCode experience adds no repeatedly used value.
+
+### Pinned OpenCode Contract
+
+- [ ] Select one exact newer OpenCode V2 source commit, package version, image
+  digest, and API schema.
+- [ ] Verify startup, health, authentication, and caller-selected session and
+  prompt IDs.
+- [ ] Verify prompt admission and exact read-only reconciliation after response
+  loss.
+- [ ] Verify event/history, questions, forms, permissions, terminals,
+  interruption, and deep links.
+- [ ] Verify the same authoritative session reopens instead of creating a
+  replacement.
+- [ ] Characterize process and container restart, including every volatile fact
+  that disappears.
+- [ ] Treat session wait or completion APIs as non-authoritative unless they pass
+  repeated restart tests.
 - [ ] Keep explicit user sealing unless a restart-safe positive terminal result
-  is proven twice under the collection fence.
+  is proven under the collection fence.
 
-**Stop:** reject the candidate if exact identity, restart reconciliation, or
-official UI attachment cannot be made reliable without replaying mutations.
+**Stop:** reject the candidate if Fern cannot reconcile exact identities or open
+the official session without replaying mutations.
 
-## Phase 3: Disposable Native Prototype
+## 3. One Serial Disposable Background Run
 
-Build throwaway product-test code first. Keep it local to one Docker daemon and
-one configured repository.
+### Durable Intent
 
-### Durable Identity
+- [ ] Commit run ID, internal attempt generation, repository identity, exact
+  base, instruction digest, image digest, clone/volume/container identities, and
+  OpenCode session/prompt IDs before external effects.
+- [ ] Give provision, prompt delivery, stop, export, and cleanup explicit started
+  phases before I/O.
+- [ ] Reconcile only by exact identifiers after restart or response loss.
+- [ ] Fence every writer and observer with the current attempt generation.
 
-- [ ] Add an environment/attempt record that commits before Docker or Git I/O:
-  task ID, attempt generation, repository identity, exact base commit, prompt
-  digest, image digest, checkout identity, state-volume identity, container
-  identity, port/route identity, and exact OpenCode session/prompt IDs.
-- [ ] Give every provisioning, prompt-delivery, stop, export, and cleanup effect
-  an explicit started phase before external I/O.
-- [ ] Make all reconciliation exact-ID reads; never allocate or replay because a
-  response was silent.
-- [ ] Fence every writer with the current attempt generation.
+### Disposable Environment
 
-### Environment Provider
-
-- [ ] Create a separate disposable Docker provider rather than extending
-  `workspace.Manager` into multi-workspace scheduling.
-- [ ] Resolve and verify the configured repository and exact base commit before
-  provisioning.
-- [ ] Create a full private clone per attempt. Do not use linked worktrees or a
-  shared writable Git common directory.
-- [ ] Create a distinct OpenCode state volume, container, host port, and runtime
-  credential per attempt.
-- [ ] Pin the OpenCode image by digest and run as the existing unprivileged UID.
+- [ ] Add a separate Docker provider for Background Runs.
+- [ ] Create one private full clone; do not use a linked worktree or shared
+  writable Git object directory.
+- [ ] Create a distinct OpenCode state volume, container, runtime credential,
+  and endpoint identity.
+- [ ] Pin the image by digest and run with the existing unprivileged UID/GID.
 - [ ] Bound CPU, memory, PIDs, disk admission, wall time, and retained logs.
-- [ ] Start one attempt serially before enabling concurrency.
-- [ ] Add a deterministic authenticated route from immutable task ID to that
-  attempt's official OpenCode UI.
-- [ ] Remove the route before deleting or replacing the exact runtime.
+- [ ] Reuse the current single-origin proxy shape while only one run can execute.
+- [ ] Remove access before deleting or replacing the exact runtime.
 
-### Observation And Control
+### Admission And Takeover
 
-- [ ] Project only conservative states: `queued`, `setting_up`, `working`,
+- [ ] Create or adopt the preselected OpenCode session ID exactly once.
+- [ ] Admit the preselected prompt ID exactly once.
+- [ ] Never resend a prompt because a request timed out or Fern restarted.
+- [ ] Project only conservative run states: `queued`, `setting_up`, `working`,
   `needs_you`, `canceling`, `uncertain`, `result_ready`, `failed`, and
   `cleanup_required`.
-- [ ] Do not map container health, process exit, stream EOF, idle, or an empty
-  inbox to task success.
-- [ ] Deep-link to the official OpenCode UI for inspection, steering,
-  permissions, questions, terminal, files, and diffs.
-- [ ] Make explicit stop durable before interrupting OpenCode or stopping the
-  container.
-- [ ] Keep `canceling` until exact writer inactivity is positively established.
-- [ ] On Fern restart, enumerate owned environments, attest identity, restore
-  routes and observers, and never resend an admitted prompt.
-- [ ] On unknown or mismatched identity, quarantine the environment and require
-  recovery instead of adopting or deleting it.
+- [ ] Do not infer success from idle, EOF, process exit, container health, or an
+  empty inbox.
+- [ ] Open the official OpenCode UI for inspection, questions, permissions,
+  steering, terminals, files, and diffs.
+- [ ] Disconnect every initiating client for at least ten minutes and reopen the
+  same session from another device.
+- [ ] Make stop durable before interruption and keep `canceling` until exact
+  writer inactivity is positively established.
 
-### Exact Result Retention
+## 4. Retain The Exact Result
 
-- [ ] Acquire an exclusive stop/seal fence before inspecting the repository.
-- [ ] Require the configured repository identity, exact base, supported object
-  format, and a clean worktree after creating the selected result commit.
-- [ ] Produce an immutable manifest containing base commit, result commit, tree,
-  changed paths/modes/blob IDs/sizes, image digest, attempt generation, OpenCode
-  IDs, terminal reason, and artifact digest.
-- [ ] Export a self-contained Git bundle that contains every object needed to
-  materialize the selected result from an empty clone.
+- [ ] Acquire an exclusive stop/seal fence before reading the repository.
+- [ ] Select or create one clean result commit based on the exact admitted base.
+- [ ] Create an immutable manifest containing repository, base, result commit,
+  tree, changed paths/modes/blob IDs/sizes, image digest, attempt generation,
+  OpenCode IDs, terminal reason, and artifact digest.
+- [ ] Export a self-contained Git bundle with every object required for clean
+  reconstruction.
 - [ ] Ingest the bundle and manifest atomically into host-owned retained storage
-  before marking the result ready.
-- [ ] Validate the bundle with `git bundle verify` and materialize it into a
-  clean independent checkout.
-- [ ] Run configured verification against the materialized exact commit, never
-  against the agent checkout.
-- [ ] Delete the container, state volume, and checkout, then repeat clean
-  materialization and compare the exact commit/tree/manifest.
-- [ ] Preserve partial useful work under an honest interrupted or failed result;
-  never label it completed automatically.
+  before reporting `result_ready`.
+- [ ] Run `git bundle verify` and materialize an independent clean checkout.
+- [ ] Run verification against the materialized commit, never the agent checkout.
+- [ ] Delete the container, OpenCode volume, and clone.
+- [ ] Materialize again from retained artifacts and compare the exact commit,
+  tree, and manifest.
+- [ ] Preserve useful interrupted work only with an explicit partial-result
+  label; never call it completed automatically.
 
-## Phase 4: Fault Gates
+## 5. Fault Gates For The Serial Run
 
-Automate these before treating the prototype as a durable lane.
-
-- [ ] Fern exits after environment intent commits but before Docker create.
+- [ ] Fern exits before and after each external mutation starts.
 - [ ] Docker create succeeds but its response is lost.
 - [ ] OpenCode session creation succeeds but its response is lost.
 - [ ] Prompt admission succeeds but its response is lost.
-- [ ] Fern restarts while the prompt is running.
-- [ ] OpenCode restarts while a question or permission is pending.
-- [ ] Container exits normally, fails, and is OOM-killed.
-- [ ] Cancellation races prompt delivery, model work, result sealing, and export.
-- [ ] A stale attempt tries to observe, seal, export, clean, verify, or publish.
-- [ ] Git bundle export is interrupted before and after host ingestion.
-- [ ] Cleanup is interrupted after each resource deletion.
+- [ ] Fern restarts while OpenCode is working or waiting for input.
+- [ ] OpenCode restarts while a permission or question is pending.
+- [ ] The container exits normally, fails, and is OOM-killed.
+- [ ] Cancellation races provisioning, admission, model work, seal, and export.
+- [ ] A stale attempt tries to observe, stop, seal, export, verify, clean, or
+  publish.
+- [ ] Export is interrupted before and after host artifact ingestion.
+- [ ] Cleanup is interrupted after each individual resource deletion.
 - [ ] Disk exhaustion occurs during clone, OpenCode state growth, and artifact
   ingestion.
-- [ ] Two attempts start from the same base and edit different files without any
-  writable checkout, OpenCode state, or route collision.
-- [ ] Runtime and checkout deletion still yields 100% clean reconstruction for
-  every accepted result.
+- [ ] Every accepted result reconstructs after runtime deletion.
 
-## Phase 5: Productize Only After Prototype Acceptance
+## 6. Two Concurrent OpenCode Workspaces
 
-- [ ] Implement serial durable provisioning and reconciliation first.
-- [ ] Add bounded queueing and explicit capacity/disk admission.
-- [ ] Add concurrency of two only after serial fault gates pass.
-- [ ] Add host-owned content-addressed artifact storage with retention and
-  garbage-collection reconciliation.
-- [ ] Adapt current verification to materialize exact attempt artifacts.
-- [ ] Adapt App publication to push only the verified materialized result; keep
-  workspace-`gh` outside Fern's brokered-effect guarantees.
-- [ ] Add one transactional notification outbox and one destination only after
-  background tasks demonstrate an attention need.
-- [ ] Add retention views and cleanup controls without building a replacement
-  conversation UI.
-- [ ] Add metrics for queue time, provisioning, prompt admission, reconnect,
-  native takeover, active duration, export, verification, cleanup, retained
-  bytes, recovery, and laptop-side repair.
-- [ ] Extend backup/restore to include environment authority and retained result
-  artifacts, then prove replacement-host materialization.
+Concurrency is introduced only after the serial lane passes its fault gates. The
+user sees two Background Runs; each run owns one current disposable OpenCode
+workspace and session.
 
-## Dogfood Gate
+### Isolation
 
-Run at least six real owner tasks over two weeks after the disposable prototype
-works. Include two concurrent pairs and at least one forced runtime failure.
+- [ ] Admit at most two active runs with explicit CPU, memory, PID, and disk
+  capacity checks.
+- [ ] Queue excess runs deterministically instead of overcommitting the host.
+- [ ] Give each run a distinct full clone, OpenCode state volume, container,
+  runtime credential, endpoint/port, session ID, prompt ID, and generation.
+- [ ] Prohibit writable repository, Git common-directory, OpenCode database,
+  credential, cache, terminal, or child-process sharing.
+- [ ] Start two runs from the same repository and base commit and prove their
+  changes remain independent.
 
-Record for every task:
+### Endpoint Mapping
+
+- [ ] Add endpoint mapping only now; do not make it a prerequisite for the
+  serial prototype.
+- [ ] Map each durable run to its exact current attempt generation and OpenCode
+  endpoint.
+- [ ] Re-resolve mapping on every open and reject stale generation links.
+- [ ] Preserve the official UI, API, SSE, and WSS behavior through private TLS.
+- [ ] Prove two tabs or devices can remain attached to different runs without
+  session, cookie, event, terminal, or port crossover.
+- [ ] Remove a run's mapping before stopping or deleting its runtime.
+- [ ] Never let a replacement attempt inherit an old endpoint grant.
+
+### Independent Lifecycle
+
+- [ ] Kill and restart run A without interrupting run B.
+- [ ] Stop or seal run A while run B continues writing.
+- [ ] Restart Fern and reconstruct both exact mappings without prompt replay.
+- [ ] Delete one runtime and reconstruct its result while the other remains live.
+- [ ] Seal and retain both results without artifact or publication mix-up.
+
+## 7. Harness-Neutral Fern Boundary
+
+Keep these operations independent of the launching client:
 
 ```text
-date and repository
-task class and exact base
-runtime: OpenHands | Fern persistent | Fern disposable
+create background run
+read/list background runs
+stop background run
+resolve live session
+read/materialize retained result
+```
+
+The create request contains repository identity, exact base commit, instruction,
+idempotency key, and requested execution profile. The response contains a
+durable run ID. Live session locators and retained results are resolved from that
+ID.
+
+- [ ] Make the human Fern CLI and OpenCode plugin use the same API semantics.
+- [ ] Allow a future harness plugin or MCP server to call the same durable API.
+- [ ] Keep authentication, repository authorization, capacity, lifecycle,
+  generations, writer fencing, and artifacts Fern-owned.
+- [ ] Keep OpenCode session IDs, event recovery, permissions, questions,
+  interruption, and deep-link handling in the pinned OpenCode profile.
+- [ ] Do not claim that conversations or live tool state transfer across
+  harnesses.
+- [ ] Do not add a second execution harness during this experiment.
+
+A second harness becomes eligible only after real demand and must independently
+prove exact admission, continuation after client exit, restart-safe observation,
+authoritative attachment or logs, positive interruption, writer inactivity, and
+the same retained Git result contract. Extract a shared runtime interface only
+from two working implementations.
+
+## 8. Dogfood Gate
+
+Run at least six real Background Runs over two weeks after the disposable lane
+works. Include two concurrent pairs and one forced runtime failure.
+
+Record for each run:
+
+```text
+repository and exact base
+instruction and run class
 submission and inspection devices
 background duration
-reconnect and native-UI-open latency
-why the native UI was opened
-question, permission, steering, or cancellation performed
-truthful state after reconnect/restart
+reconnect and native-session-open latency
+question, permission, steering, stop, or seal actions
+truthful state after reconnect and restart
 laptop or SSH repair required
 useful result produced
-manual seal acceptable
-bundle verified and reconstructed after deletion
+bundle verification and reconstruction after deletion
 verification and draft-PR outcome
 duplicate prompt, result, or publication
 setup/repair time and estimated time saved
@@ -229,46 +385,50 @@ failure notes
 
 Continue only if:
 
-- [ ] At least two genuine background-worthy tasks recur per week.
+- [ ] At least two genuinely background-worthy runs recur per week.
 - [ ] At least 60% produce useful work without laptop-side repair.
-- [ ] The official OpenCode UI is used meaningfully for at least 25% of tasks and
-  at least weekly.
+- [ ] The official OpenCode UI is used meaningfully at least weekly and for 25%
+  or more of runs.
 - [ ] Native OpenCode preserves at least two repeatedly used capabilities that
   OpenHands Canvas does not.
-- [ ] Every accepted result reconstructs after runtime and checkout deletion.
+- [ ] Every accepted result reconstructs after runtime and clone deletion.
 - [ ] Fern restart causes no accepted prompt loss or replay.
-- [ ] Two same-repository attempts never share writable state.
+- [ ] Two same-repository runs never share writable state or cross routes.
 - [ ] Setup and repair cost less time than delegation saves.
 - [ ] The owner prefers the complete journey to OpenHands ACP and one managed
   cloud-agent alternative.
 
-Stop or narrow if OpenHands is equivalent, native UI attachment is rarely used,
-manual sealing makes the workflow unattractive, ordinary pushed branches are
-always sufficient, or Kubernetes/new UI/generic-agent scope is needed to make
-the first useful demonstration.
+Stop or narrow if native attachment is rarely useful, manual sealing makes the
+workflow unattractive, pushed branches are always sufficient, or a generic
+agent platform is required to make the first demonstration useful.
 
 ## Explicitly Not Now
 
-- Kubernetes, k3s, or Agent Sandbox.
-- Remote runner pools or hosted multi-tenancy.
-- Generic ACP or multiple-agent abstractions.
-- A replacement OpenCode conversation UI.
-- A native mobile application.
-- Fern Gateway, provider routing, or model accounting.
-- Fern Labs, schedules, workflow automation, or previews.
-- Automatic success inferred from inactivity.
-
-Kubernetes becomes eligible only after a concrete second-node,
-customer-cluster, workload-identity, NetworkPolicy, RuntimeClass, or measured
-capacity requirement. Gateway becomes eligible only for credential custody,
-budgets, accounting, routing, fallback, or an explicit portfolio objective.
+- Kubernetes, k3s, Agent Sandbox, or remote worker pools.
+- Hosted multi-tenancy, public sign-up, organizations, billing, or RBAC.
+- A replacement OpenCode conversation, terminal, file, or diff UI.
+- OpenCode workspace-provider integration as the launch mechanism.
+- A second execution harness or generic ACP runtime layer.
+- Automatic session migration or dirty-worktree transfer.
+- Automatic success inferred from inactivity or disconnection.
+- Fern Gateway, model routing, accounting, Labs, schedules, or previews.
+- More than two concurrent Background Runs.
 
 ## Definition Of Done
 
-Background Mode is ready for one external installer only when one signed Fern
-release can be installed on clean Ubuntu, run two isolated attempts, survive
-Fern and OpenCode restarts without mutation replay, reopen each exact official
-OpenCode session, stop and fence each writer, retain and independently
-reconstruct every accepted Git result after deletion, verify and optionally
-publish the exact selected commit, enforce bounded cleanup, restore on a
-replacement host, and pass the dogfood gate above.
+The experiment is ready for one external installer only when:
+
+- `/fern` installs, pairs, confirms, and durably starts a run without exposing a
+  long-lived credential in OpenCode configuration;
+- the initiating OpenCode process and device can disappear immediately after
+  acceptance;
+- another device opens the exact authoritative remote OpenCode session;
+- two isolated runs can execute concurrently without writable or route sharing;
+- Fern and OpenCode restart without prompt replay or false completion;
+- stopping proves the exact writer is inactive;
+- every accepted result reconstructs from retained artifacts after deleting its
+  container, OpenCode volume, and clone;
+- verification and optional publication consume only the materialized exact
+  result;
+- normal use and cleanup require no Docker, filesystem, or database repair; and
+- the dogfood gates pass.
