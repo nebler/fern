@@ -1,8 +1,15 @@
 # Task Result Collector
 
 `taskresult.Collector` is a read-only host Git boundary. It is intended to run
-only after the coordinator has proved success for the persisted exact OpenCode
-session/message and while `workspace.Manager.AcquireQuiesced` remains held.
+under one of two explicit authorities:
+
+- an external observer has proved success for the persisted exact OpenCode
+  session/message while `workspace.Manager.AcquireQuiesced` remains held; or
+- a user has authorized one exact previewed snapshot while
+  `workspace.Manager.AcquirePaused` remains held.
+
+The user-authorized path supersedes the attempt and does not claim OpenCode
+success.
 
 ## Coordinator obligations
 
@@ -10,15 +17,16 @@ The coordinator MUST:
 
 1. Bind the configured canonical checkout path to the task's numeric GitHub
    repository ID. Git has no numeric GitHub repository identity to prove.
-2. Prove terminal success from a complete authoritative OpenCode scan for the
-   exact persisted session and message IDs. Volatile events are insufficient.
+2. Establish either authoritative terminal success or an exact durable user
+   seal request. Volatile events and idle state are insufficient.
 3. Supply a bounded sanitized evidence JSON object and its SHA-256. The
    collector rejects the same sensitive key classes and size bound as
    `taskstore.SealResult` but does not obtain OpenCode evidence itself.
-4. Acquire `workspace.Manager.AcquireQuiesced` before `Collect`, prevent every
-   non-Manager filesystem/Git writer, and retain that fence until
-   `taskstore.SealResult` commits with the exact returned values and current
-   discovered revisions.
+4. Acquire the authority-appropriate fence before `Collect`, prevent every
+   non-Manager filesystem/Git writer, and retain that fence until the matching
+   seal transaction commits with the exact returned values and current
+   revisions. Observer authority uses `AcquireQuiesced`; user authority uses
+   `AcquirePaused` and revalidates the previewed snapshot.
 5. Treat every collection failure, timeout, output bound, or concurrent change
    as an integrity failure. The collector never repairs, resets, stages, or
    commits repository state.

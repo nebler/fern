@@ -4,9 +4,9 @@
 process and exercises its Docker runtime through the stable HTTP proxy. The
 container image in this directory is a deterministic implementation of the
 small OpenCode V2 protocol surface Fern consumes: `/api/health`, `/api/event`,
-`/api/session/active`, and the shell, PTY, permission, and form activity
-snapshots. It is not a provider emulator and does not claim to test model
-output.
+`/api/session/active`, and the shell, PTY, permission, form, and question
+activity snapshots. It is not a provider emulator and does not claim to test
+model output.
 
 The deterministic scenarios are mandatory. In particular, stopped-workspace
 authentication is capability-detected by behavior: missing or invalid

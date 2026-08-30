@@ -98,7 +98,7 @@ go run ./cmd/fern doctor --config fern.yaml --env-file fern.env \
   --field-demo
 ```
 
-`--field-demo` checks local gateway behavior, exact Tailscale root mapping,
+`--field-demo` checks local remote-ingress behavior, exact Tailscale root mapping,
 disabled Funnel, configured GitHub authority, an active OpenCode provider, and
 remote rejection of backend Basic auth. It does not spend provider funds,
 mutate GitHub, or establish real browser/WSS acceptance.

@@ -17,6 +17,18 @@ OpenCode remains authoritative for conversations, tools, process-epoch input,
 terminals, files, and diffs. Fern owns the durable journey around those
 capabilities.
 
+The candidate next product mode is **OpenCode Background Mode**:
+
+> Submit work to an always-on private host, leave, inspect or steer the exact
+> native OpenCode session from another device, and retain an exact recoverable
+> Git result after the runtime disappears.
+
+This authorizes a bounded comparison and disposable-Docker experiment, not a
+generic Fern 2.0 platform. It proceeds only if native OpenCode is materially more
+useful than OpenHands custom ACP for repeated owner work. The ordered plan lives
+in [Fern Roadmap](./ROADMAP.md) and the concrete checklist lives in the
+[Background Mode TODO](../todo/opencode-background-mode.md).
+
 ## Product Boundary
 
 | Concern | Authority |
@@ -31,6 +43,8 @@ capabilities.
 | App publication | Fern receipt/effect journal plus GitHub exact reads |
 | Direct workspace publication | Explicit user/prompt intent plus workspace `gh` |
 | Repository identity | Configured numeric GitHub identity, revalidated live |
+| Model credential custody and metering | Conditional Fern Gateway; provider credentials currently may enter the trusted workspace |
+| Experiment definitions and evaluation | Conditional Fern Labs; no production experiment service is currently composed |
 
 The two GitHub modes are explicit and mutually exclusive. `workspace-gh`
 matches the Amp-style workflow: trusted workspace code receives an authenticated
@@ -100,6 +114,50 @@ Run and retain one complete source-host to replacement-host rehearsal:
 
 The recorder validates supplied observations but does not perform these steps.
 
+### OpenCode Background Mode
+
+Keep the current persistent workspace unchanged and add a separate per-attempt
+Docker lane only after the OpenHands comparison. Each attempt gets a full clone,
+OpenCode state volume, pinned server, immutable route, exact identities, explicit
+writer stop, Git bundle and manifest, runtime deletion, and clean independent
+reconstruction. Start serially and add concurrency of two only after restart,
+lost-response, cancellation, stale-generation, export, disk, and cleanup gates
+pass.
+
+The owner has already demonstrated the phone flow. Background execution,
+cross-device native takeover, exact result retention, and recurring owner use are
+the next product questions.
+
+### Conditional Gateway Credential And Measurement Boundary
+
+Provider keys can currently be forwarded into the trusted OpenCode workspace.
+If credential custody, cost, budget, routing, fallback, or portfolio goals become
+important, Fern may add a small host-side Gateway that proves one real OpenCode path with scoped
+tokens, host-held provider credentials, correct streaming, explicit model
+policy, usage/cost records, and cancellation. A universal translation layer,
+adaptive routing, and provider breadth are not prerequisites.
+
+The normal personal deployment should keep an in-process limiter and SQLite
+ledger. Redis, PostgreSQL, multiple replicas, and Kubernetes belong to a
+separate measured scale profile, not the default single-owner release.
+
+### Conditional Fern Labs
+
+Labs is not on the Background Mode critical path. Before implementing it, run the no-build evaluation gate in
+[Fern Roadmap](./ROADMAP.md) against a direct private-repository tool and an
+open-source runner. Labs is not a standalone product thesis until that test
+shows recurring value.
+
+If promoted, the first Labs release remains trusted, serial, and reproducible:
+a small set of versioned benchmark cases, two model/provider arms, a fresh
+checkout and OpenCode state per run, exact image/base identities, deterministic
+visible and hidden checks, hard-failure gates, and row-level reports. It does
+not accept arbitrary hostile repositories or claim public multi-tenancy.
+
+Labs should prefer mechanical evaluation over LLM judges. Where a judge is
+unavoidable, its model, prompt version, input digest, and output are part of the
+evaluation record and cannot override deterministic hard failures.
+
 ### Generic Completion
 
 The pinned OpenCode profile has no durable generic terminal-success/failure
@@ -157,19 +215,26 @@ add a control-only browser surface before broadening support.
 
 The critical path is now:
 
-```text
-current durable phone-to-verified-App-PR path
-  -> one retained physical production rehearsal
-  -> generic terminal-success primitive or explicit continued user authority
-  -> durable input decisions
-  -> notification and PR/CI continuation
-  -> smoother GitHub selection and activation
+```mermaid
+flowchart LR
+    Current["Current persistent Fern"] --> Go["Go 1.27 baseline"]
+    Go --> Compare["OpenHands vs native OpenCode"]
+    Compare -->|"native value survives"| Contract["Pinned OpenCode V2 contract"]
+    Compare -->|"equivalent"| Stop["Stop product expansion"]
+    Contract --> Prototype["Serial disposable Docker proof"]
+    Prototype --> Retain["Bundle, delete, reconstruct"]
+    Retain --> Faults["Restart and fault gates"]
+    Faults --> Concurrent["Concurrency of two"]
+    Concurrent --> Dogfood["Six real tasks over two weeks"]
+    Dogfood -->|"gates pass"| Productize["One reliable appliance"]
+    Dogfood -->|"gates fail"| Narrow["Keep personal appliance"]
 ```
 
-Physical evidence work can proceed in parallel with generic completion research,
-durable input design, and notification contracts. None may weaken current
-receipt, exact-identity, cancellation, result, verification, or publication
-fences.
+Generic completion, durable input, notification, onboarding, and publication UX
+remain valid gaps, but they are not prerequisites for the disposable proof. They
+should be promoted when Background Mode dogfood shows that they dominate failures. No
+future work may weaken current receipt, exact-identity, cancellation, result,
+verification, or publication fences.
 
 ## Later Backends
 
@@ -185,15 +250,21 @@ microVM boundary.
 
 - A second coding conversation UI.
 - Native Fern mobile applications.
-- Multiple agent-provider adapters.
 - Multi-agent orchestration or a general workflow builder.
 - Kubernetes as a requirement for the personal release.
+- Fern Gateway or Fern Labs on the Background Mode critical path.
 - Hostile multi-tenancy on ordinary shared-kernel Docker.
+- A public sandbox-as-a-service API.
+- A universal provider translation layer or more than two initial providers.
+- Adaptive model routing before Labs has enough real outcome data.
 
 ## Success Criteria
 
 Fern succeeds when the task and its exact evidence survive disconnects and
 lifecycle changes, not merely when an HTTP connection or container remains
-alive. The next acceptance milestone is one retained physical
-phone-to-tested-draft-PR and replacement-host recovery journey, with every
-external claim tied to redacted evidence and no inferred success.
+alive. The next product milestone is two isolated native OpenCode attempts that
+survive Fern restart without replay, can be inspected from another device, and
+produce Git results that reconstruct exactly after their runtimes and checkouts
+are deleted. Product expansion requires at least six real tasks over two weeks,
+repeated native-UI value, useful unattended yield, no cross-attempt writable
+sharing, and 100% reconstruction of accepted results.

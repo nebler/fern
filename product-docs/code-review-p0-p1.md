@@ -1,5 +1,9 @@
 # fern Code Review — Pass 0 + Pass 1
 
+> Historical review tied to commit `f8fc396`. See
+> [`product-docs/README.md`](./README.md) before using any finding as current
+> product or implementation guidance.
+
 **Date:** 2026-08-23 · **Commit:** `f8fc396` · **Scope:** orientation map + architecture/boundaries
 judgment. **No code was modified.** Passes 2–4 (idiom/tooling, performance, deslop) not yet run,
 pending go/no-go. Module: `github.com/nebler/fern`, Go 1.24. The vendored `opencode/` checkout

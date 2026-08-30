@@ -25,4 +25,4 @@ publishes a digest-bound multi-architecture image, generates an SPDX SBOM,
 creates GitHub provenance attestations, keylessly signs and attests the image,
 verifies those claims, and attests every release asset before creating a GitHub
 Release. The local harness does not emulate or claim those GitHub/Sigstore
-effects. See `docs/RELEASE_POLICY.md`.
+effects. See [`docs/RELEASE_POLICY.md`](../../docs/RELEASE_POLICY.md).

@@ -4,6 +4,9 @@ This runbook covers one trusted owner and workspace on Ubuntu Server 24.04 with
 systemd, local Docker Engine, and private Tailscale Serve. Fern and OpenCode are
 not hostile multi-user isolation. Docker-group membership is effectively root.
 
+[Fern Roadmap](./ROADMAP.md) owns sequencing and acceptance gates. This document
+owns the exact host runbook.
+
 Tailscale terminates HTTPS and forwards only Fern's remote listener. Never
 enable Funnel and never publish the operator listener.
 
@@ -314,6 +317,29 @@ historical release or tag. Before upgrade, create and verify an offline backup.
 restores the exact pre-upgrade bytes for rollback, and upgrades again. Production
 rollback likewise means restoring the verified pre-upgrade backup. Older code
 must not open a migrated database.
+
+For a release-to-release upgrade:
+
+1. Record the current binary version, source commit, image digest, configuration,
+   and task schema. Retain the previous verified binary and image digest.
+2. Verify the new release asset, checksums, provenance, image signature, image
+   provenance, and SBOM before stopping the service.
+3. Stop Fern and create the offline backup described above. Transfer its
+   credential archive and repository-bearing files only through approved
+   encrypted custody.
+4. Install the new binary under a temporary path, verify `fern version`, pull the
+   new image by digest, and update configuration without deleting the previous
+   binary or image.
+5. Atomically replace `/usr/local/bin/fern`, start the service, and verify
+   `fern status`, readiness, task snapshots, image identity, and one private
+   phone request before considering the upgrade accepted.
+6. If migration or acceptance fails, stop Fern, restore the verified pre-upgrade
+   backup, restore the previous binary and configuration/image identity, and
+   only then restart. Do not point the older binary at the migrated database.
+
+Keep the old host fenced during replacement-host activation. An upgrade is not
+complete until off-host backup custody and the rollback inputs are both
+verified.
 
 ## Uninstall
 

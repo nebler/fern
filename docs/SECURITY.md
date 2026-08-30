@@ -132,6 +132,20 @@ it before wake and accepts selective device grants instead. Fern strips incoming
 Authorization and regenerates canonical backend Basic after successful
 admission. Browser/lifecycle/real-image harnesses cover this negative boundary.
 
+### Provider Credentials Still Enter The Trusted Workspace
+
+`ANTHROPIC_API_KEY` and `OPENAI_API_KEY` may be forwarded into the OpenCode
+container. That is consistent with the current single-owner trusted-repository
+model, but it means agent tools and repository code can read and exfiltrate the
+provider credential. Fern does not currently provide proxy-only provider
+credentials, model-scoped tokens, model allowlists, request budgets, or a model
+audit ledger.
+
+Any future Fern Gateway would move provider custody to the host and give the
+workspace a scoped Fern credential. Until that is implemented and accepted,
+documentation must not claim Palana-style proxy-only secrets or workload
+identity. See [Fern Roadmap](./ROADMAP.md).
+
 ### Prove Backend Authentication Fails Closed
 
 Fern startup previously performed only a positive authenticated health check,

@@ -7,8 +7,12 @@ line numbers. Companion documents:
 
 - `docs/ARCHITECTURE.md` — the normative, implementation-derived contract
   (authoritative where they disagree).
+- `docs/REMOTE_PRODUCT.md` — the current product boundary and OpenCode
+  Background Mode hypothesis.
+- `docs/ROADMAP.md` — the ordered Background Mode experiment and conditional
+  later work.
 - `product-docs/code-review-p0-p1.md` — independent review of the spine.
-- `product-docs/r5–r7` — strategy and market context.
+- `product-docs/r1–r7` — historical research only; findings may be stale.
 
 ---
 
@@ -58,6 +62,11 @@ exact sealed result and successful verification. In workspace-`gh` mode, users
 or the agent instead run ordinary `gh`/Git mutations directly. A paired phone
 can submit, list, inspect, cancel, authorize snapshot sealing, and request
 eligible App publication.
+
+Fern Gateway and Fern Labs do not exist in the production composition. They are
+conditional later directions, not dependencies of OpenCode Background Mode.
+Keeping that distinction explicit prevents a future diagram from being mistaken
+for a current security or evaluation claim.
 
 ---
 
@@ -137,15 +146,26 @@ meaningful.
 
 Go enforces an acyclic package graph. The useful architectural grouping is:
 
-```text
-shared leaves: evidence · gitref · jsoncanon · task
-host ports:    config · control · runtime(Docker) · registry · githubapp · opencodeapi
-policy kernel: workspace · watch · workspacegithub
-durable core:  taskstore · taskapi · taskresult · verification
-coordinators:  taskdelivery · taskexecution · taskresultcoord
-               taskverification · taskpublication · taskpublicationcoord
-ingress:       proxy
-root:          cmd/fern imports and composes the system
+```mermaid
+flowchart BT
+    Leaves["Shared leaves<br/>evidence · gitref · jsoncanon · task"]
+    Ports["Host ports<br/>config · control · runtime · registry · githubapp · opencodeapi"]
+    Policy["Policy kernel<br/>workspace · watch · workspacegithub"]
+    Durable["Durable core<br/>taskstore · taskapi · taskresult · verification"]
+    Coords["Coordinators<br/>delivery · execution · result · verification · publication"]
+    Ingress["Ingress<br/>proxy"]
+    Root["Composition root<br/>cmd/fern"]
+
+    Ports --> Leaves
+    Policy --> Ports
+    Durable --> Leaves
+    Coords --> Durable
+    Coords --> Policy
+    Ingress --> Policy
+    Ingress --> Durable
+    Root --> Ingress
+    Root --> Coords
+    Root --> Ports
 ```
 
 The boundaries are intentionally not a perfectly horizontal stack. For example,
@@ -399,17 +419,19 @@ OpenCode v2 (pinned: `0.0.0-next-17444`, digest-verified in CI) supplies the
 agent loop, the UI, sessions/tools/files, provider calls, permissions/forms,
 and its SQLite storage. Fern consumes a characterized subset:
 
-- **Prompt admission is idempotent and durable.** `POST /api/session/{id}/prompt`
-  accepts caller-chosen message IDs and returns the same receipt on duplicate
-  submission. This property supports fern's exact-once-attempted delivery:
-  retries carry identical bytes and IDs, and conflicts are detectable without
-  claiming exactly-once provider or tool execution.
+- **Prompt admission preserves caller identity and is durably reconcilable.**
+  `POST /api/session/{id}/prompt` accepts caller-chosen message IDs, while exact
+  finite reads distinguish admitted, absent, and conflicting state. OpenCode's
+  exact duplicate behavior is characterized, but `resume` is not
+  idempotency-bound. Fern therefore commits `prompt_started` before the call and
+  never retries prompt mutation afterward; a lost response triggers read-only
+  reconciliation without claiming exactly-once provider or tool execution.
 - **The inbox** lists durably enqueued work and supports cancel — fern uses it
   to prove what is pending and to delete proven-undelivered items during
   cancellation.
 - **Everything else is characterized, not assumed.** The contract harness
   (`integration/opencode-contract`) pins the exact image digest and black-box
-  verifies thirteen properties per build: same-ID/same-body retry stability,
+  verifies the properties Fern relies on: same-ID/same-body retry stability,
   restart history survival, permission/form process-epoch scoping, interrupt
   semantics, max prompt size. Blocked properties are printed, not papered over.
 
@@ -623,9 +645,10 @@ Fern separates three evidentiary tiers:
   over 100 ms, classified failures with sanitized causes.
 - **Durable evidence** — the task journal: immutable actor snapshots, ordered
   event cursors, bounded sanitized JSON with SHA-256 digests, byte-count-not-
-  bytes output capture, stored unit prices beside computed costs (planned for
-  metering), manifests of exact object IDs. Sensitive payloads (prompts,
-  credentials, subprocess output) are excluded from evidence by construction.
+  bytes output capture, and manifests of exact object IDs. Sensitive payloads
+  (prompts, credentials, subprocess output) are excluded from evidence by
+  construction. Gateway pricing and cost records are planned and must not be
+  described as current task-journal evidence.
 
 The audit principle: a claim is only as strong as the journal entry that would
 survive a crash alongside it.
@@ -656,6 +679,11 @@ Honest architecture includes its holes:
    restore, physical revocation, and tailnet ACL-negative tests remain
    operator-run exercises. The rehearsal harness records evidence but does not
    perform or prove these operations by itself.
+9. **Provider credential boundary** — provider keys can enter trusted workspace
+   code; there is no model Gateway, scoped model identity, routing, metering,
+   budget enforcement, or provider trace.
+10. **Fern Labs** — there is no experiment definition, disposable benchmark
+    runner, evaluator, hidden-case contract, or model comparison report.
 
 ---
 
@@ -687,7 +715,7 @@ Honest architecture includes its holes:
 | SSE parsing / epochs | `internal/watch/event.go`, `controller.go` |
 | Idle policy actor | `internal/watch/supervisor.go` (`apply` is the policy core) |
 | Ingress classification + security | `internal/proxy/proxy.go`, `pairing.go`, `browser_security.go` |
-| Control routes | `internal/proxy/control.go`, `gateway.go` |
+| Remote-ingress and control routes | `internal/proxy/control.go`, `internal/proxy/gateway.go` (browser ingress, not the planned LLM Gateway) |
 | Intent journal | `internal/registry/intent.go`, `lock.go` |
 | Task schema + triggers | `internal/taskstore/migrations.go` |
 | Delivery / execution / sealing | `internal/taskdelivery`, `internal/taskexecution`, `internal/taskresultcoord`, `internal/taskstore/seal_request.go` |
@@ -697,6 +725,24 @@ Honest architecture includes its holes:
 | Shared validators | `internal/evidence`, `internal/gitref`, `internal/jsoncanon` |
 | Backup and restore | `cmd/fern/backup.go`, `internal/runtime/backup.go`, `scripts/fern-host-backup.py` |
 | Credential custody | `cmd/fern/credentials.go`, `internal/credentialbundle` |
-| Readiness and telemetry | `internal/observability`, `internal/proxy/topology.go` |
+| Readiness and telemetry | `internal/observability`, `internal/proxy/proxy.go`, `cmd/fern/up.go` |
 | Compatibility and release | `integration/upgrade`, `integration/release`, `.github/workflows/release.yml` |
 | Contract characterization | `integration/opencode-contract/contract_harness.py` |
+| Product direction and future work | `docs/REMOTE_PRODUCT.md`, `docs/ROADMAP.md` |
+
+---
+
+## 17. Conceptual Reading
+
+These external sources explain the patterns Fern uses or plans to adapt. They
+do not imply implementation or scale equivalence.
+
+- [Grab Palana Part 1](https://engineering.grab.com/palana-part-1-secure-platform-for-ai-agents) explains why autonomous agents should be treated as acting workloads with explicit identity, credentials, network, and lifecycle controls.
+- [Grab Palana Part 2](https://engineering.grab.com/part-2-palana-architecture) shows proxy-only credentials, layered network policy, external kill switches, and persistent-state/ephemeral-compute separation.
+- [Grab AI Gateway](https://engineering.grab.com/grab-ai-gateway) explains provider abstraction, shared capacity, cost attribution, auditing, and routing at a central model boundary.
+- [Grab Bench](https://engineering.grab.com/grab-bench-evaluating-ai) explains versioned task contracts, deterministic scoring, hidden cases, weak baselines, and row-level failure analysis.
+- [Tailscale Serve](https://tailscale.com/kb/1242/tailscale-serve) documents the private TLS edge used by Fern's remote listener.
+- [Docker security](https://docs.docker.com/engine/security/) explains the daemon and container boundary that Fern deliberately does not elevate into a hostile multi-tenant claim.
+
+The longer implementation-oriented reading list is maintained in
+[Fern Roadmap](./ROADMAP.md).

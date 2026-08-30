@@ -20,7 +20,7 @@ OpenCode owns:
 
 Fern owns the container lifecycle, wake and pause admission, and the stable
 same-origin proxy. Fern-owned `/fern/*` routes provide the phone control page,
-gateway readiness, restart-safe device administration, workflow/session
+remote-ingress readiness, restart-safe device administration, workflow/session
 correlations, durable task admission/delivery/cancellation, conservative
 execution observation, explicit snapshot sealing, verification, and
 receipt-backed App publication without copying the coding interface. Generic
@@ -103,6 +103,7 @@ The lifecycle integration uses these V2 surfaces:
 | PTYs | `/api/pty` |
 | Permission requests | `/api/permission/request` |
 | Forms | `/api/form/request` |
+| Questions | `/api/question/request` |
 
 The durable-task contract harness additionally pins these observed
 `0.0.0-next-17444` behaviors for image digest
@@ -142,9 +143,12 @@ The durable-task contract harness additionally pins these observed
   experimental log is not a durable replay source.
 
 Pending and answered forms disappear across process epochs, and a model question
-may remain represented as a running but inactive tool after replacement. Fern
-must move that attempt to `recovery_required`, not reconstruct or auto-answer
-it. Direct permission approval and pending-permission epoch loss are proven.
+may remain represented as a running but inactive tool after replacement. When
+Fern positively detects that epoch loss, it must move the attempt to
+`recovery_required`, not reconstruct or auto-answer it. The current observer
+cannot prove every epoch change, so inconclusive cases remain running or require
+operator recovery rather than fabricating loss. Direct permission approval and
+pending-permission epoch loss are proven by the pinned harness.
 An actual model tool-generated permission is intentionally omitted; the harness
 does not execute a command to manufacture approval state. Permission decision
 and interruption races remain open. Run the zero-cost harness with:
@@ -187,7 +191,7 @@ Authorization header.
 
 Pairing GET renders a confirmation page without consuming the short-lived code;
 the confirmation POST issues a Fern device credential in an `HttpOnly`,
-`Secure` cookie. The gateway authenticates that cookie, removes it before
+`Secure` cookie. The remote ingress authenticates that cookie, removes it before
 proxying, and injects the internal OpenCode credential. Device cookies authorize
 OpenCode and Fern task access only; they cannot access `/fern/control`, device
 administration, retired host-publication routes, or pairing issuance. An

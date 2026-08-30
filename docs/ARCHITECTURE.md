@@ -34,6 +34,11 @@ The pinned OpenCode contract still has no generic durable terminal-success
 fact. Fern never converts inactivity, an empty inbox, missing process-epoch
 input, or a disconnected event stream into success.
 
+Fern Gateway and Fern Labs are conditional and not implemented. No production
+code currently routes provider traffic, issues model-access tokens, meters model
+usage/cost, creates experiments, provisions benchmark runs, or scores them. See
+[Fern Roadmap](./ROADMAP.md) for that future boundary.
+
 ## Authority Model
 
 | Concern | Authority |
@@ -58,24 +63,22 @@ select an effect or outcome.
 
 ## Topology
 
-```text
-phone / private TLS edge                         local operator / CLI
-          |                                                |
-          v                                                v
-remote listener, loopback                         operator listener, loopback
-device cookie + CSRF                              Fern or OpenCode Basic auth
-          |                                                |
-          +---------------- Fern router -------------------+
-                                   |
-                      admission, wake, fixed telemetry
-                                   |
-                       dynamic loopback Docker port
-                                   |
-                    pinned OpenCode server, UID/GID 1001
-                         |                         |
-                repository bind mount      durable data volume
-                                                   |
-                                   optional workspace-gh volume
+```mermaid
+flowchart LR
+    Phone["Phone / laptop"] -->|"private HTTPS / WSS"| Edge["Tailscale Serve"]
+    Edge --> Remote["Remote listener<br/>device cookie + CSRF"]
+    Operator["Local operator / CLI"] --> Local["Operator listener<br/>Fern or OpenCode Basic"]
+    Remote --> Router["Fern router"]
+    Local --> Router
+    Router --> Admission["Request admission<br/>observe / read / work"]
+    Admission --> Manager["Workspace manager<br/>wake, pause, endpoint attestation"]
+    Manager --> Docker["Local Docker Engine"]
+    Docker --> OpenCode["Pinned OpenCode server<br/>UID/GID 1001"]
+    OpenCode --> Repo["Repository bind mount"]
+    OpenCode --> Data["Durable OpenCode volume"]
+    OpenCode -.->|"workspace-gh only"| GH["Persistent gh volume"]
+    Router --> Control["JSON control store"]
+    Router --> Tasks["SQLite task store"]
 ```
 
 Only the remote listener is a supported Tailscale Serve target. The operator
@@ -129,6 +132,10 @@ OpenCode Basic is `opencode:$OPENCODE_PASSWORD`; Fern operator Basic is
 and cannot equal a forwarded workspace value. Automatic environment forwarding
 is limited to `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `OPENCODE_PASSWORD`.
 Fern rejects control and common GitHub token names and aliases.
+
+Provider keys forwarded this way are readable by trusted workspace code. The
+conditional Gateway would replace that provider-key path with a scoped Fern credential
+and host-side provider custody; it is not part of the current composition.
 
 Task policy fixes the agent, provider/model, attempt timeout, delivery lease,
 turn budget, GitHub authority, and numeric repository identity. Verification is
@@ -242,26 +249,21 @@ migrated database.
 
 ## Durable Task Path
 
-```text
-paired submit
-    |
-    v
-receipt + task + attempt + exact OpenCode IDs (one transaction)
-    |
-    v
-delivery phases -> admitted -> running/input_required
-                                  |
-                    explicit POST seal-preview
-                                  |
-                    exact idempotent user seal
-                                  |
-                     immutable user-sealed result
-                                  |
-                       optional verification
-                                  |
-              receipt-backed App publication request
-                                  |
-                        branch + draft PR proof
+```mermaid
+flowchart TD
+    Submit["Paired task submission"] --> Admit["One transaction:<br/>receipt + task + attempt + exact OpenCode IDs"]
+    Admit --> Deliver["Journaled exact-ID delivery"]
+    Deliver --> Observe["Positive-only observation:<br/>running or input_required"]
+    Observe --> Preview["POST seal-preview<br/>pause and collect exact snapshot"]
+    Preview --> Seal["Idempotent user seal"]
+    Seal --> Result["Immutable user-sealed result<br/>attempt becomes superseded"]
+    Result --> Verify{"Verification configured?"}
+    Verify -->|"yes"| Check["Host-owned exact-commit verification"]
+    Verify -->|"no"| Complete["Completed result"]
+    Check -->|"success"| Complete
+    Check -->|"failure"| Failed["Failed verification"]
+    Complete -.->|"eligible App request"| Publish["Receipt-backed publication admission"]
+    Publish --> Proof["Exact branch and draft-PR proof"]
 ```
 
 The browser stores one pending submission body and idempotency key in
@@ -281,6 +283,34 @@ prompt_started` before corresponding effects. Exact IDs and bytes are
 read-reconciled. Prompt mutation is never retried after the start fence. The
 execution observer projects only `running`, `input_required`, deadline-driven
 cancellation, or `recovery_required`; it does not infer completion.
+
+## External Effect Pattern
+
+Delivery, verification, and App publication use the same core rule: persist
+authority and the mutation-start phase before crossing an external boundary.
+After a lost response, perform an exact read reconciliation; do not repeat the
+mutation merely because the response was lost.
+
+```mermaid
+sequenceDiagram
+    participant C as Coordinator
+    participant S as Durable store
+    participant E as External system
+
+    C->>S: Commit authority + mutation_started
+    S-->>C: Durable commit
+    C->>E: Perform one bounded mutation
+    alt Response observed
+        E-->>C: Result
+        C->>S: Commit observed result
+    else Response lost or Fern restarts
+        C->>S: Reload mutation_started
+        C->>E: Read exact remote identity
+        E-->>C: Matching, absent, or contradictory state
+        C->>S: Commit observation or recovery_required
+    end
+    Note over C,E: Never grant a second mutation from timeout or absence alone
+```
 
 ## Two Result Fences
 
@@ -459,6 +489,14 @@ TLS/WSS phone exercise, or ACL-negative rehearsal occurred.
    publication, and task snapshots expose its status, but the current embedded
    phone task page has no publication action. A client must call the API and
    retain its publication idempotency key.
+10. **Provider credential boundary:** provider credentials may still be
+    forwarded into trusted workspace code. No host-side LLM Gateway, scoped
+    model token, provider routing, rate/budget enforcement, usage/cost ledger,
+    or model trace exists.
+11. **Experiments and evaluation:** Fern has no experiment/case/arm/run model,
+    disposable benchmark-run provider, hidden evaluator, model comparison, or
+    row-level Labs report. These are future product work, not current claims.
+
 ## Source Map
 
 | Area | Source |
@@ -471,6 +509,7 @@ TLS/WSS phone exercise, or ACL-negative rehearsal occurred.
 | Verification/publication | `internal/taskverification/`, `internal/taskpublicationcoord/`, `internal/taskpublication/` |
 | Backup and credentials | `cmd/fern/backup.go`, `internal/runtime/backup.go`, `cmd/fern/credentials.go`, `internal/credentialbundle/` |
 | Compatibility/release | `integration/upgrade/`, `integration/release/`, `.github/workflows/release.yml` |
+| Future product and execution order | `docs/REMOTE_PRODUCT.md`, `docs/ROADMAP.md` |
 
 `docs/TASK_MODEL.md` owns detailed task semantics,
 `docs/GITHUB_INTEGRATION.md` owns GitHub authority, and `docs/SECURITY.md` owns

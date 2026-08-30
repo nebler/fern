@@ -5,13 +5,13 @@
 
 ## Why
 
-Coding agents are chained to whichever machine started them: close the laptop
-and the work stops, and the "remote" alternatives mean renting someone else's
-sandbox. fern is a single Go binary that runs agent workspaces on hardware you
-own, puts an authenticated wake-aware reverse proxy in front of them, and makes
-the phone a first-class control surface: dispatch a task over cellular, inspect
-input-required state, explicitly seal one exact repository snapshot, verify it,
-and in App mode request a receipt-backed draft PR.
+Remote and self-hosted coding agents are widely available. Fern tests a narrower
+OpenCode-native promise: run the real OpenCode on an always-on private host,
+leave, return to the exact session, and preserve an exact Git result even when
+the runtime is later removed. Today fern is a single Go binary around one
+persistent OpenCode workspace. It provides an authenticated wake-aware proxy,
+durable task admission, explicit result sealing, host verification, and optional
+receipt-backed App publication without replacing OpenCode's UI.
 
 ## Demo
 
@@ -29,7 +29,7 @@ and in App mode request a receipt-backed draft PR.
 | --- | --- | --- |
 | Cold wake (stopped -> healthy, proxied first byte) | ~2.8-3.1 s | historical local lifecycle measurement; rerun the harness for current evidence |
 | Warm wake (`idle.mode: freeze`, pre-thawed) | implemented; measure with `fern debug wake` | cgroup-freezer pause behind the `idle.mode` config flag |
-| Traffic while idle | none — compute stopped | two-pass all-idle barrier (`internal/workspace`) |
+| Traffic while idle | none - compute stopped or frozen | two-pass all-idle barrier (`internal/workspace`) |
 
 `fern debug wake` prints a per-phase millisecond waterfall of the most recent
 wake (admission → lifecycle → Docker mutation → health probe → observer attach)
@@ -40,25 +40,18 @@ Docker transitions against a deterministic fake OpenCode.
 
 ## Architecture
 
-```text
-      phone / laptop (tailnet)                 local operator CLI
-               │  HTTPS via Tailscale Serve          │ loopback :8081
-               ▼                                     ▼
-    ┌─────────────────────────┐          ┌─────────────────────────┐
-    │  remote listener :8080  │          │ operator listener :8081 │
-    │  paired-device grants   │          │  Basic-auth policy      │
-    └───────────┬─────────────┘          └───────────┬─────────────┘
-                └──────────────┬─────────────────────┘
-                               ▼
-              request admission (observe / read / work)
-                               ▼
-       coalesced wake ──► docker resume or create ──► health + auth probes
-                               ▼
-             attested endpoint (loopback port, generation-stamped)
-                               ▼
-           opencode v2 serve — pinned image digest, unprivileged UID
-                               ▼
-      unbuffered SSE / streaming reverse proxy back to the client
+```mermaid
+flowchart TD
+    Phone["Phone / laptop over Tailscale Serve"] --> Remote["Remote listener :8080<br/>paired-device policy"]
+    Operator["Local operator CLI"] --> Local["Operator listener :8081<br/>Basic-auth policy"]
+    Remote --> Router["Fern route and authentication policy"]
+    Local --> Router
+    Router -->|"/fern/*"| Control["Fern control, task, and telemetry handlers<br/>no workspace admission or wake"]
+    Router -->|"OpenCode paths"| Admission["Request admission<br/>observe / read / work"]
+    Admission --> Wake["Coalesced wake<br/>Docker resume or create"]
+    Wake --> Probe["Health, auth, and endpoint attestation"]
+    Probe --> OpenCode["Pinned OpenCode server<br/>unprivileged UID"]
+    OpenCode --> Stream["Unbuffered SSE / streaming proxy"]
 ```
 
 The same ingress carries a durable task pipeline:
@@ -97,7 +90,7 @@ The Docker lifecycle and reverse proxy are functional:
 - a writable repository mount at `/home/user/workspace`;
 - durable OpenCode state in `fern-<workspace>-v2-data`;
 - ownership and desired-state drift checks before lifecycle mutations;
-- authenticated activity observation and conservative idle stopping;
+- authenticated activity observation and conservative idle suspension;
 - request admission, concurrent wake coalescing, and same-origin proxying;
 - streaming SSE and upgraded connections without response buffering;
 - intentional-stop, failure, and OOM classification;
@@ -139,11 +132,22 @@ receipt-backed publication.
 
 ## Documentation
 
+- [Strategy and direction map](./docs/STRATEGY.md): current reality, candidate directions, owner doubts, product gates, rejected paths, and cross-agent decision context.
+- [Background Mode TODO](./todo/opencode-background-mode.md): active comparison, prototype, dogfood, acceptance, and kill checklist.
+- [Background Mode goal design](./docs/BACKGROUND_MODE.md): target architecture,
+  data model, Go and concurrency patterns, fault matrix, implementation slices,
+  graphics, and demo plan.
+- [Conditional Kubernetes architecture](./docs/TARGET_ARCHITECTURE.md): deferred k3s and Agent Sandbox backend proposal, not the current target.
+- [Personal task computers research](./research/fern-personal-task-computers-2026-08-30.md): Docker-first substrate analysis, reusable primitives, UX, security gates, and implementation sizing.
 - [Architecture](./docs/ARCHITECTURE.md): implemented authentication, lifecycle, proxy, publication, and persistence boundaries.
+- [Architecture explained](./docs/ARCHITECTURE_EXPLAINED.md): an implementation tour of the modules, fences, state machines, and design reasoning.
 - [OpenCode](./docs/OPENCODE.md): the V2 server contract, official web UI, persistence, and verification.
 - [Deployment](./docs/DEPLOYMENT.md): private systemd and Tailscale Serve runbook.
 - [Phone field demo](./docs/FIELD_DEMO.md): exact preflight, phone sequence, evidence, abort, and cleanup checklist.
-- [Product direction](./docs/REMOTE_PRODUCT.md): durable-task direction, boundaries, and sequencing.
+- [Product direction](./docs/REMOTE_PRODUCT.md): current boundary and the
+  OpenCode Background Mode product hypothesis.
+- [Next phase](./docs/ROADMAP.md): Background Mode sequence, acceptance gates,
+  and trigger-based later work.
 - [Durable task model](./docs/TASK_MODEL.md): normative IDs, implemented persistence, state machines, reconciliation, and remaining fault gates.
 - [GitHub integration](./docs/GITHUB_INTEGRATION.md): workspace `gh`, App onboarding, receipt-backed publication, and retired-state handling.
 - [Security boundary](./docs/SECURITY.md): current controls, residual findings, and external acceptance gates.
@@ -161,7 +165,7 @@ current contracts.
 
 ## Requirements
 
-- Go 1.24 or newer
+- Go 1.27 or newer
 - a local Docker daemon with at least 8 GiB available; remote `DOCKER_HOST` endpoints are rejected
 - an account or provider connection supported by the pinned OpenCode release
 - Tailscale on the host and phone for the private phone demo
@@ -334,15 +338,14 @@ and draft-PR tuple. The pinned OpenCode profile still prevents generic terminal
 success classification. Fern includes a separate quiesced result path for a
 future authoritative observer but never activates it from idle state.
 
-When `installationId` is omitted, the separate operator-control prototype uses
-the host's existing `gh` credential. It verifies the configured numeric
-repository route, persists the exact base SHA/result commit/branch before
-mutation, pushes without force, and persists an exact re-read of one open draft
-pull request. Checkout `origin` is only a consistency diagnostic, never
-publication authority. `fern github publish --dry-run` retains preparation
-diagnostics, but standalone non-dry-run publication is rejected because it would
-bypass the durable coordinator. This broad host-token transport is
-prototype-only and is never initialized in GitHub App task mode.
+The alternative `workspace-gh` mode mounts a dedicated authenticated `gh`
+configuration into the trusted workspace. User- or prompt-authorized `git` and
+`gh` effects in that mode are direct workspace mutations and are outside Fern's
+receipt journal. The two GitHub modes are explicit and mutually exclusive;
+omitting an App installation ID does not select a host-token mutation path.
+`fern github publish --dry-run` retains retired preparation diagnostics, but
+standalone non-dry-run publication is rejected because it would bypass the
+durable task coordinator.
 
 Common overrides are:
 
@@ -399,10 +402,10 @@ shasum -a 256 -c dist/SHA256SUMS
 
 Fern arms an idle timer only after a connected OpenCode event epoch reports
 work and all observed activity drains. Disconnects, unknown states, and requests
-that may start work invalidate that evidence. Before stopping, Fern blocks new
-held requests and checks the V2 activity surfaces for sessions, PTYs,
-permissions, and questions. Any active, malformed, unauthorized, or unavailable
-response leaves compute running.
+that may start work invalidate that evidence. Before stopping or freezing, Fern
+blocks new held requests and checks the V2 activity surfaces for sessions,
+shells, PTYs, permissions, forms, and questions. Any active, malformed,
+unauthorized, or unavailable response leaves compute running.
 
 This protects traffic using Fern's proxy. A host or Docker administrator can
 discover the loopback backend and is already inside the trusted-host boundary.

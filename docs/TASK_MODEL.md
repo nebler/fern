@@ -29,11 +29,11 @@ durable receipt, delivery shadow, attempts, cancellation intent, projected
 events, result provenance, verification, and publication journal described
 here.
 
-The publication journal specifies only Fern-owned effects. In the chosen
-Amp-style target, OpenCode also has unrestricted authenticated workspace `gh`
-and may publish when explicitly requested in the prompt; those direct effects
+The publication journal specifies only Fern-owned effects. In mutually
+exclusive `workspace-gh` mode, OpenCode has an authenticated workspace `gh` and
+may publish when explicitly requested in the prompt; those direct effects
 cannot be exclusively authorized or completely observed by Fern. GitHub App
-invariants are normative for the current broker mode.
+invariants are normative only for `github-app-broker` mode.
 
 Normative language uses **MUST**, **MUST NOT**, **SHOULD**, and **MAY**. Sections
 marked **HARNESS ASSUMPTION** are not established facts. They MUST be proved
@@ -350,7 +350,7 @@ record is updated or deleted to rewrite history.
 | --- | --- | --- |
 | `queued` | `running`, `cancel_requested`, `uncertain`, `recovery_required`, `failed` | Accepted durably; no execution is yet proven. |
 | `running` | `input_required`, `cancel_requested`, `completed`, `failed`, `uncertain`, `recovery_required` | Current attempt is admitted or executing. |
-| `input_required` | `running`, `cancel_requested`, `failed`, `uncertain`, `recovery_required` | At least one current approval is pending. |
+| `input_required` | `running`, `cancel_requested`, `completed`, `failed`, `uncertain`, `recovery_required` | At least one current approval is pending; explicit user sealing may complete the task without answering it. |
 | `cancel_requested` | `canceled`, `uncertain`, `recovery_required` | Durable Fern effect fence is active; upstream stop is not yet proven. |
 | `uncertain` | `queued`, `running`, `input_required`, `cancel_requested`, `completed`, `failed`, `canceled`, `recovery_required` | An ambiguous effect is being reconciled. |
 | `recovery_required` | `queued`, `running`, `cancel_requested`, `failed`, `canceled` | Explicit recovery action and evidence are required. |
@@ -364,9 +364,9 @@ record is updated or deleted to rewrite history.
 | --- | --- |
 | `prepared` | `delivering`, `cancel_requested`, `recovery_required`, `failed` |
 | `delivering` | `admitted`, `uncertain`, `cancel_requested`, `recovery_required`, `failed` |
-| `admitted` | `running`, `input_required`, `cancel_requested`, `succeeded`, `failed`, `uncertain`, `recovery_required` |
-| `running` | `input_required`, `cancel_requested`, `succeeded`, `failed`, `uncertain`, `recovery_required` |
-| `input_required` | `running`, `cancel_requested`, `failed`, `uncertain`, `recovery_required` |
+| `admitted` | `running`, `input_required`, `cancel_requested`, `succeeded`, `failed`, `uncertain`, `recovery_required`, `superseded` |
+| `running` | `input_required`, `cancel_requested`, `succeeded`, `failed`, `uncertain`, `recovery_required`, `superseded` |
+| `input_required` | `running`, `cancel_requested`, `failed`, `uncertain`, `recovery_required`, `superseded` |
 | `cancel_requested` | `canceled`, `uncertain`, `recovery_required` |
 | `uncertain` | `prepared`, `delivering`, `admitted`, `running`, `input_required`, `cancel_requested`, `succeeded`, `failed`, `canceled`, `recovery_required` |
 | `recovery_required` | `prepared`, `admitted`, `running`, `cancel_requested`, `failed`, `canceled`, `superseded` |
@@ -388,7 +388,11 @@ states retain `prompt_started`. Ambiguity, recovery-required, failure, and
 cancellation preserve the last phase, including `none` when prepared work is
 canceled or expires before delivery.
 
-### Approval
+### Approval (Target Contract, Not Schema 6)
+
+No approval/question/form table, delivery coordinator, or answer API is composed
+in the implemented schema-6 service. This state machine describes a future
+contract only.
 
 | State | Allowed next states |
 | --- | --- |
@@ -405,12 +409,14 @@ permission reply value `reject`. A valid user choice of `reject` can reach
 
 ### Result
 
+Schema 6 inserts an immutable Result directly in `sealed`; collection,
+uncertainty, and recovery are coordinator/request phases rather than mutable
+Result rows. A future disposable-artifact workflow may add a separate export
+journal, but it must not mutate a committed sealed Result.
+
 | State | Allowed next states |
 | --- | --- |
-| `collecting` | `sealed`, `failed`, `uncertain`, `recovery_required` |
-| `uncertain` | `collecting`, `sealed`, `failed`, `recovery_required` |
-| `recovery_required` | `collecting`, `failed` |
-| `sealed`, `failed` | none |
+| `sealed` | none |
 
 ### Verification
 
@@ -585,23 +591,26 @@ Pending and answered form state both disappear after container replacement. A
 pending question can remain durably represented as a `running` tool while the
 session is inactive, so any form-backed nonterminal attempt observed across an
 OpenCode epoch change enters `recovery_required`; Fern must not recreate or
-auto-answer the form. Pending-permission survival still requires a focused
-restart observation.
+auto-answer the form. Pending synthetic permissions also disappear after both a
+same-container process restart and container replacement while their durable
+session remains.
 
 **OBSERVED CONTRACT OC-CANCEL-1:** Interrupt returns `204`, closes provider work,
 removes active ownership, and records `Step interrupted`; this evidence survives
-container replacement without resurrecting execution. Deleting an undelivered
-inbox item and cancellation races before admission/after completion remain
-unproven.
+container replacement without resurrecting execution. An undelivered
+`resume:false` inbox item survives process restart, can be deleted without a
+message/provider projection, remains absent after replacement, and permits exact
+ID reuse. Interrupt before admission and after completed provider work is an
+idle `204` no-op; concurrent decision/interruption races remain open.
 
 The checked-in exact-image harness proves caller IDs, response-loss admission,
 finite message pagination, volatile event behavior, live permission/form
 behavior, provider-turn deduplication, and interrupt evidence across container
 replacement without a paid provider. It also establishes that form state is
-process-local and unsafe to reconstruct. Pending-permission restart,
-undelivered delete, and cancellation race cases remain. The harness must retain
-request, response, database, process-kill, and restart evidence for each release
-claim.
+process-local and unsafe to reconstruct, pending permissions are process-epoch
+state, and undelivered inbox deletion is restart-stable. Concurrent permission
+decision and interruption races remain open. The harness must retain request,
+response, database, process-kill, and restart evidence for each release claim.
 
 ## Transaction Boundaries
 
@@ -1069,11 +1078,12 @@ Cancellation is ordered by Fern's committed cancellation event cursor:
   `canceled` only after absence or durable inbox cancellation is proved.
 - **During execution:** Fern persists `cancel_requested`, fences result
   selection, verification, and publication, then calls interrupt with
-  `continue=false`. The UI continues to say "cancel requested" until durable log
-  and current activity prove interruption or absence.
+  `continue=false` when the exact session is active. The UI continues to say
+  "cancel requested" until exact prompt reconciliation and the active-session
+  projection prove no current execution.
 - **After Fern recorded `completed`:** cancel returns
-  `409 task_already_terminal`; the result remains valid. A separate publication
-  can still be declined or canceled.
+  `409 task_already_terminal`; the result remains valid. There is no separate
+  publication-cancellation API.
 - **Completion races an unseen cancellation:** if cancellation commits before
   Fern commits task completion, the cancellation fence wins for new Fern
   effects. Late upstream success is retained as evidence, but the task becomes
@@ -1082,10 +1092,6 @@ Cancellation is ordered by Fern's committed cancellation event cursor:
 - **Across restart:** `cancel_requested` is durable. Startup reconciles it before
   admitting any queued work or publication. It never assumes process death
   stopped the provider or tools.
-- **Publication cancellation:** task cancellation fences a publication whose
-  mutation has not started. After a push or PR call may have happened, the
-  publication journal continues read-only reconciliation; an exact existing
-  branch/PR is recorded as `published`, not hidden or deleted.
 
 No API state means "all cost stopped" unless the pinned adapter and provider
 evidence establish that stronger fact. The terminal `canceled` claim means no
@@ -1110,9 +1116,9 @@ immutable receipt disposition:
 | Persisted disposition | Required closed proof |
 | --- | --- |
 | `none_prepared` | The exact attempt was fenced while still prepared, retained delivery phase `none`, has no delivery claim, and no OpenCode session/message effect was durably started. No external call is made. |
-| `reconcile_delivery` | A complete bounded read-only reconciliation of the exact session and message IDs proves the retained delivery phase and current upstream state. If the exact message is proven undelivered, the coordinator performs at most one delete for that exact inbox item and then reads back absence/inactivity; if reconciliation proves admission instead, it performs at most one exact-session interrupt and reads back durable inactivity/terminal evidence. |
-| `interrupt` | The coordinator targets only the persisted exact session, performs at most one `continue=false` interrupt when still active, and then proves from authoritative finite projections and durable terminal/interruption evidence that no execution remains. Already inactive or terminal is a valid no-op only when that exact state is proven. |
-| `none_terminal` | The current exact attempt was already terminal when cancellation intent committed, no delivery or execution authority remains, and read-only reconciliation proves that no interrupt/delete is needed. The task fence still wins over later result selection. |
+| `reconcile_delivery` | The coordinator follows the retained delivery phase. Before prompt start, it proves the exact session is matching or absent and makes no prompt call. After `prompt_started`, it reconciles the exact session/message/inbox tuple. A proven undelivered item receives at most one delete followed by exact absence reads; an admitted item follows the active-session check described below. |
+| `interrupt` | The coordinator reconciles the persisted exact session/message/inbox tuple, lists active sessions, and targets only that exact session. If active, it performs at most one `continue=false` interrupt and requires that session to be absent from a second active-session projection before acknowledgment. If already inactive, interruption is a no-op. This proves no currently projected execution, not durable terminal success. |
+| `none_terminal` | The current exact attempt was already terminal when cancellation intent committed, so the coordinator acknowledges without an external call. The task fence still wins over later result selection. |
 
 Evidence MUST be a JSON object of at most 16 KiB and MUST contain only sanitized
 identifiers, states, counts, booleans, bounded error classes, and digests. It
@@ -1130,10 +1136,12 @@ elapsed time.
 
 Task admission requires all of the following:
 
-1. Workspace configuration names a GitHub App installation and immutable
-   numeric repository ID.
-2. Host-side Git validates the configured checkout against that ID without
-   trusting writable `origin` as authorization.
+1. Workspace configuration selects either `github-app-broker` or
+   `workspace-gh` authority and names an immutable numeric repository ID and
+   canonical full name. App mode also names its installation.
+2. The selected authority resolves the exact remote base and validates the
+   configured repository identity. Host-side Git validates the checkout and
+   never treats writable `origin` as authorization.
 3. `base_sha` exists as a commit, is the exact selected remote base at admission,
    uses the supported object format, and is persisted before work.
 4. The initial tree is clean with no untracked files, unsupported submodules,
@@ -1512,55 +1520,35 @@ changes require a contract change owned by the task-model/migration lane.
 
 ## Migration Authority
 
-The Fern state package is the sole owner of SQLite schema migrations and state
-transitions. Migrations use `PRAGMA user_version`, run under the workspace lease
-and an exclusive migration lock, and are transactional. A binary supports an
-explicit contiguous schema range and refuses unknown newer versions. Migrations
-do not call OpenCode, GitHub, Docker, providers, or verification commands.
+`internal/taskstore` is the sole owner of task SQLite schema migrations and
+state transitions. Migrations use `PRAGMA user_version`, run under the workspace
+lease and an exclusive migration lock, and are transactional. A binary supports
+an explicit contiguous schema range and refuses unknown newer versions.
+Migrations do not call OpenCode, GitHub, Docker, providers, or verification
+commands.
 
-`internal/taskstore` now implements the unshipped first schema and pre-effect
-admission/delivery journal with CGO-free SQLite: private path checks,
-checksum-pinned migration ledger, foreign keys, WAL with `synchronous=FULL`, and
-one admission transaction for task, sequence-1 prepared attempt, exact OpenCode
-IDs, receipt, `task.accepted`, and `attempt.prepared`. Replay returns that exact
-complete set; conflicts and late failures leave no partial rows. Delivery claims
-are owner/revision/expiry fenced, limited to five minutes and the attempt
-deadline, and journal admitted or ambiguous observations with bounded hashed
-evidence. The schema permits only one effecting attempt per workspace.
-`internal/task` supplies injectable concurrency-safe UUIDv7 and 128-bit OpenCode
-ID generation so all IDs can be allocated before admission. HTTP/coordinator
-wiring, backup, and the JSON cutover below remain unimplemented.
+`internal/taskstore` implements schema 6 with CGO-free SQLite, private path
+checks, a checksum-pinned migration ledger, foreign keys, WAL with
+`synchronous=FULL`, receipt-backed task and publication admission, fenced
+coordinator journals, exact OpenCode IDs, results, verification, and
+publication records. Admission and replay are wired through the production task
+API. Migration 6 quarantines unresolved unreceipted legacy publication rows so
+they grant no worker authority.
 
-The current JSON control store and SQLite MUST NOT be dual authorities. The
-one-time cutover is:
-
-1. Enter maintenance and stop current control/publication workers.
-2. Validate and privately back up the JSON file.
-3. Create and migrate SQLite in a temporary sibling file; import device grants.
-4. Import completed legacy workflows/publications into a read-only
-   `legacy_record` audit table. They MUST NOT be promoted to `Task`, `Result`, or
-   publication-eligible records because exact base SHA, result provenance,
-   actor, and verification are absent.
-5. Refuse cutover while a legacy publication is `requested` or `pushing`; it
-   must first be reconciled by the old coordinator or explicitly quarantined by
-   an operator.
-6. Run integrity and foreign-key checks, fsync the database and directory, then
-   atomically install SQLite and a cutover marker.
-7. Rename the JSON file to a read-only archival name. From that point all writes
-   go only to SQLite; startup refuses a missing/contradictory cutover marker
-   rather than selecting whichever store looks newer.
-
-Rollback may restore the whole pre-cutover backup only before any new-schema
-mutation. There is no reverse projection of durable tasks into coarse workflow
-JSON. Backup/restore tooling must preserve SQLite database/WAL state correctly,
-OpenCode data, Git objects, image digest, schema version, and appliance fencing
-epoch as one declared manifest.
+The JSON control store remains a separate compatibility authority for legacy
+control-plane records; SQLite is authoritative for Fern tasks and their
+receipts/effects. They do not both own the same task entity. Offline backup and
+restore preserve both stores, task SQLite/WAL state, OpenCode data, Git objects,
+managed volumes, configuration, and the appliance epoch under one manifest.
+Rollback means restoring the verified pre-upgrade bytes; older binaries must
+not open a migrated schema-6 database. See [Deployment](./DEPLOYMENT.md) and the
+`integration/upgrade` harness.
 
 ## Fault-Injection Acceptance
 
-The contract is accepted only when tests capture durable database rows, Fern
-events/cursors, exact upstream IDs, authoritative Git/GitHub observations, and
-user-visible state. Package tests alone are insufficient.
+Each implemented tranche is accepted only when tests capture durable database
+rows, Fern events/cursors, exact upstream IDs, authoritative Git/GitHub
+observations, and user-visible state. Package tests alone are insufficient.
 
 ### Admission And Delivery
 
@@ -1584,22 +1572,29 @@ user-visible state. Package tests alone are insufficient.
 
 ### Durable Log And Reconnect
 
-9. Disconnect volatile `/api/event` during every state transition. Durable-log
-   replay plus finite projections reconstruct the same Fern state.
-10. Kill OpenCode and recreate the container between durable log sequences.
-    `after` resumes exclusively with no gap or duplicate state transition.
-11. Inject duplicate event ID/sequence with identical bytes. Projection is
-    idempotent. Inject different bytes for the same identity; enter
-    `recovery_required`.
-12. Disconnect exactly between `log.synced` and follow subscription. No event is
-    missed under the proved cursor algorithm.
-13. Restart Fern after projecting events but before responding to the phone.
+9. Disconnect volatile `/api/event` during execution. Reconnection and finite
+   projections may recover positive current activity or input-required state,
+   but never infer terminal success from the gap.
+10. Kill OpenCode or replace the container while process-epoch permission,
+    question, or form input is pending. Fern enters `recovery_required` rather
+    than reconstructing or auto-answering the missing object.
+11. Return malformed, unauthorized, incomplete, or contradictory finite
+    projections. Fern keeps compute running and records no positive transition
+    that the projections do not prove.
+12. Disconnect between a finite scan and event subscription. A newly observed
+    positive state may be projected, but the volatile stream grants no durable
+    cursor and no absence-based transition.
+13. Restart Fern after committing Fern events but before responding to the phone.
     The phone's exclusive Fern cursor returns each persisted event once in
     order; duplicate retrieval is harmless.
-14. Request an expired Fern cursor. API returns `410 cursor_expired`; snapshot
-    plus new cursor converges without inventing task state.
+14. Request any valid old Fern cursor. Because retention and cursor expiry are
+    not implemented, the API pages persisted events up to its captured
+    watermark; snapshots remain the bounded current-state projection.
 
-### Approval And Cancellation
+### Target Approval And Implemented Cancellation
+
+Items 15-17 are future approval acceptance tests; no production approval table
+or decision route exists. Items 18-20 apply to current cancellation.
 
 15. Kill Fern after decision commit and before OpenCode reply. Restart delivers
     or reconciles the exact pending request once and preserves deciding actor.
@@ -1636,7 +1631,7 @@ user-visible state. Package tests alone are insufficient.
 
 ### Publication
 
-26. Kill after publication `ready` commit and before push. Startup uses the same
+26. Kill after publication `prepared` commit and before push. Startup uses the same
     immutable tuple and operation ID.
 27. Lose push response before and after GitHub updates the ref. Exact
     `ls-remote` reconciliation records one matching ref or a conflict; no force
@@ -1648,9 +1643,10 @@ user-visible state. Package tests alone are insufficient.
 30. Human-push a different commit, move/delete the Fern branch, close/merge the
     PR, or move the base. Fern records `conflict` and never overwrites remote
     state.
-31. Cancel before push, during ambiguous push, and after PR creation. Before
-    push no effect occurs; ambiguous/finished effects are reconciled and shown,
-    not deleted or mislabeled canceled.
+31. Race task cancellation against result selection and publication admission.
+    A committed task cancellation prevents new publication admission. Once a
+    publication mutation has started, ambiguous or finished effects are
+    reconciled and shown, not repeated, deleted, or mislabeled canceled.
 32. Revoke/rotate the installation during each stage. Fresh credentials are
     required; local result remains intact and publication blocks or reconciles
     read-only.
@@ -1664,35 +1660,35 @@ user-visible state. Package tests alone are insufficient.
     cancel-requested, verifying, and each publication state. Reconciliation
     completes before mutating APIs open and paused compute does not wake without
     need.
-35. Corrupt SQLite pages, foreign keys, WAL, lifecycle intent, or cutover marker.
-    Fern fails closed into recovery and preserves evidence for repair.
+35. Corrupt SQLite pages, foreign keys, WAL, lifecycle intent, migration ledger,
+    or backup manifest. Fern fails closed and preserves evidence for repair.
 36. Fill disk during receipt/event commit, projection reconciliation, artifact
     write, and migration. No external effect starts unless its intent transaction
     was durable; partial artifacts are not successful records.
-37. Crash at every JSON-to-SQLite cutover phase. Exactly one authority is chosen
-    by validated marker/state; in-flight legacy publication is never silently
-    imported as safe.
+37. Crash at every schema migration and legacy-publication quarantine boundary.
+    The migration transaction either commits one valid ledger/schema version or
+    rolls back; an unresolved unreceipted publication never gains authority.
 38. Restore onto a fresh host with expired credentials and a new appliance
     epoch. State remains inspectable, old-host effects are fenced, and all
     nonterminal operations re-preflight authorization and exact identities.
 
 ## Release Gates
 
-Implementation may begin on the SQLite schema, pure transition functions, Fern
-API fixtures, mobile UI, and GitHub broker interface from this document. The
-following remain hard gates:
+The current release gates are:
 
-- The OpenCode delivery worker cannot merge until all `OC-WIRE`, `OC-ID`,
-  `OC-LOG`, and `OC-DELIVERY` assumptions pass against the exact pinned image
-  digest.
-- Approval mutation cannot merge until `OC-APPROVAL-1` passes for permission,
-  question, and form variants across lost response and restart.
-- Cancellation cannot be described as acknowledged until `OC-CANCEL-1` passes;
-  provider rollback is outside the claim.
-- Supported publication requires numeric repository authorization, exact base
-  SHA persistence, sealed Result, successful exact-commit Verification, and
-  post-mutation exact PR proof. The current broad-host-credential prototype does
-  not satisfy this gate.
-- One migration/state-transition owner must approve schema and vocabulary
-  changes. Mobile and GitHub tracks consume fixtures and typed boundaries rather
-  than introducing shadow stores or states.
+- `OC-WIRE`, `OC-ID`, `OC-LOG`, `OC-DELIVERY`, and `OC-CANCEL` observations must
+  continue to pass against the exact pinned image digest. The release does not
+  reinterpret the missing durable log as a success signal or claim provider
+  rollback after interruption.
+- Generic automatic success remains blocked until an authoritative observer can
+  prove it. User-authorized sealing is a separate authority and records the
+  attempt as `superseded`, not `succeeded`.
+- Approval mutation remains future work. It cannot ship until permission,
+  question, and form decisions are restart-safe and lost-response reconcilable;
+  current process-epoch objects do not meet that gate.
+- App publication requires numeric repository authorization, exact base SHA,
+  one sealed changed Result, successful exact-commit Verification, a matching
+  admission receipt, and post-mutation exact branch/PR proof. Workspace-`gh`
+  effects remain explicitly outside Fern's receipt journal.
+- Schema and state vocabulary retain one owner. API and UI code consume typed
+  task-store transitions rather than introducing shadow stores or states.
