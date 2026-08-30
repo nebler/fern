@@ -28,7 +28,7 @@ func (s *Store) GetTaskSnapshot(ctx context.Context, workspaceID task.WorkspaceI
 		return TaskSnapshot{}, fmt.Errorf("begin task snapshot: %w", err)
 	}
 	defer tx.Rollback()
-	owner, err := getTask(ctx, tx, taskID)
+	owner, err := getLegacyTask(ctx, tx, taskID)
 	if err != nil {
 		return TaskSnapshot{}, err
 	}
@@ -54,7 +54,8 @@ func (s *Store) ListTasks(ctx context.Context, workspaceID task.WorkspaceID, lim
 		return nil, fmt.Errorf("begin task list: %w", err)
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, taskSelect+` WHERE t.workspace_id=? ORDER BY t.updated_at DESC,t.id DESC LIMIT ?`, workspaceID, limit)
+	rows, err := tx.QueryContext(ctx, taskSelect+` WHERE t.workspace_id=? AND NOT EXISTS
+(SELECT 1 FROM background_runs br WHERE br.task_id=t.id) ORDER BY t.updated_at DESC,t.id DESC LIMIT ?`, workspaceID, limit)
 	if err != nil {
 		return nil, fmt.Errorf("list tasks: %w", err)
 	}

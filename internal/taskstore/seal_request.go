@@ -205,6 +205,7 @@ func (s *Store) ClaimSealRequest(ctx context.Context, p ClaimSealRequestParams) 
 	err = tx.QueryRowContext(ctx, `
 SELECT id FROM seal_requests WHERE workspace_id=? AND
  (state='pending' OR (state='claimed' AND claim_expires_at<=?))
+ AND NOT EXISTS (SELECT 1 FROM background_runs br WHERE br.task_id=seal_requests.task_id)
 ORDER BY accepted_at,id LIMIT 1`, p.WorkspaceID, unixMillis(p.Now)).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return SealRequestWork{}, &NotFoundError{Kind: "pending seal request", ID: string(p.WorkspaceID)}

@@ -12,13 +12,13 @@
     "github_app_credentials_schema": 1
   },
   "current_release_schemas": {
-    "task_store": 6,
+    "task_store": 7,
     "control_state": 1,
     "github_app_credentials": 1
   },
   "verification": {
     "fixture_metadata": "internal/compatibility/testdata/baseline-v1/metadata.json",
-    "fixture_metadata_sha256": "e5e511c4e9ca2e81a4583610cb86ac2c80ac2c9ab835cbaacb7f48c3d577f896",
+    "fixture_metadata_sha256": "c4f191ce4e2bea4f81ef3755d6b30579b2bdc1c122d29124351e67f99e206a8e",
     "upgrade_harness": "integration/upgrade/run.sh",
     "rollback_prerequisite": "verified-offline-pre-upgrade-backup"
   },

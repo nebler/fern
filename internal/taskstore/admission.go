@@ -8,12 +8,17 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/url"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/nebler/fern/internal/task"
 )
 
-const SubmitTaskCommand = "task.submit"
+const (
+	SubmitTaskCommand          = "task.submit"
+	CreateBackgroundRunCommand = "run.create"
+)
 
 // AdmitTask atomically claims an idempotency key and creates the task,
 // sequence-1 attempt, receipt, and initial events. It performs no external
@@ -112,11 +117,19 @@ INSERT INTO attempts(
 		string(p.BudgetSnapshot), unixMillis(p.Deadline), acceptedMS, acceptedMS); err != nil {
 		return Admission{}, fmt.Errorf("insert attempt: %w", err)
 	}
-	response, err := json.Marshal(struct {
-		ReceiptID task.ReceiptID `json:"receiptId"`
-		TaskID    task.TaskID    `json:"taskId"`
-		AttemptID task.AttemptID `json:"attemptId"`
-	}{p.ReceiptID, p.TaskID, p.AttemptID})
+	var response []byte
+	if p.BackgroundRun != nil {
+		response, err = json.Marshal(struct {
+			RunID     task.TaskID `json:"run_id"`
+			Committed bool        `json:"committed"`
+		}{p.TaskID, true})
+	} else {
+		response, err = json.Marshal(struct {
+			ReceiptID task.ReceiptID `json:"receiptId"`
+			TaskID    task.TaskID    `json:"taskId"`
+			AttemptID task.AttemptID `json:"attemptId"`
+		}{p.ReceiptID, p.TaskID, p.AttemptID})
+	}
 	if err != nil {
 		return Admission{}, fmt.Errorf("encode receipt projection: %w", err)
 	}
@@ -128,6 +141,26 @@ INSERT INTO receipts(
 		p.ReceiptID, p.Claim.Scope.WorkspaceID, p.Claim.Scope.CommandKind, p.Claim.Key,
 		p.Claim.RequestHash[:], actorID, acceptedMS, p.APIContractVersion, p.TaskID, string(response)); err != nil {
 		return Admission{}, fmt.Errorf("insert receipt: %w", err)
+	}
+	if p.BackgroundRun != nil {
+		branch := any(nil)
+		if p.BackgroundRun.Branch != "" {
+			branch = p.BackgroundRun.Branch
+		}
+		if _, err := tx.ExecContext(ctx, `
+INSERT INTO background_runs(
+    task_id,attempt_id,workspace_id,generation,repository_id,repository_remote,base_oid,branch,
+    instruction_sha256,profile,profile_sha256,image_identity,clone_identity,volume_identity,
+    container_identity,endpoint_identity,opencode_session_id,opencode_message_id,state,effect_phase,
+    creator_actor_snapshot_id,revision,created_at,updated_at
+) VALUES(?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued','absent',?,1,?,?)`,
+			p.TaskID, p.AttemptID, p.Claim.Scope.WorkspaceID, p.RepositoryID, p.BackgroundRun.RepositoryRemote,
+			p.BaseSHA, branch, p.BackgroundRun.InstructionSHA256[:], p.BackgroundRun.Profile,
+			p.BackgroundRun.ProfileSHA256[:], imageDigest, p.BackgroundRun.CloneIdentity,
+			p.BackgroundRun.VolumeIdentity, p.BackgroundRun.ContainerIdentity, p.BackgroundRun.EndpointIdentity,
+			p.OpenCodeSessionID, p.OpenCodeMessageID, actorID, acceptedMS, acceptedMS); err != nil {
+			return Admission{}, fmt.Errorf("insert background run: %w", err)
+		}
 	}
 	taskPayload := []byte(`{}`)
 	result, err := tx.ExecContext(ctx, `
@@ -219,8 +252,18 @@ func validateAdmission(p AdmitTaskParams) error {
 	if _, err := task.ParseOpenCodeMessageID(string(p.OpenCodeMessageID)); err != nil {
 		return fmt.Errorf("%w: OpenCode message ID: %v", ErrInvalidInput, err)
 	}
-	if err := p.Claim.Validate(); err != nil || p.Claim.Scope.CommandKind != SubmitTaskCommand {
+	if err := p.Claim.Validate(); err != nil || (p.Claim.Scope.CommandKind != SubmitTaskCommand && p.Claim.Scope.CommandKind != CreateBackgroundRunCommand) ||
+		(p.Claim.Scope.CommandKind == CreateBackgroundRunCommand) != (p.BackgroundRun != nil) {
 		return fmt.Errorf("%w: idempotency claim: %v", ErrInvalidInput, err)
+	}
+	if p.BackgroundRun != nil && (!canonicalBackgroundRemote(p.BackgroundRun.RepositoryRemote) ||
+		(p.BackgroundRun.Branch != "" && !validBoundedText(p.BackgroundRun.Branch, 1, 255)) ||
+		!validBoundedText(p.BackgroundRun.Profile, 1, 128) || p.BackgroundRun.InstructionSHA256 != sha256.Sum256([]byte(p.Prompt)) ||
+		p.BackgroundRun.ProfileSHA256 != sha256.Sum256([]byte(p.BackgroundRun.Profile)) || p.Claim.Actor.Type != task.ActorOpenCode ||
+		!validBoundedText(p.BackgroundRun.CloneIdentity, 1, 256) ||
+		!validBoundedText(p.BackgroundRun.VolumeIdentity, 1, 256) || !validBoundedText(p.BackgroundRun.ContainerIdentity, 1, 256) ||
+		!validBoundedText(p.BackgroundRun.EndpointIdentity, 1, 256) || !canonicalBackgroundIdentities(p)) {
+		return fmt.Errorf("%w: background run intent", ErrInvalidInput)
 	}
 	if !validBoundedText(p.Title, 1, 200) || !utf8.ValidString(p.Prompt) || len(p.Prompt) < 1 || len(p.Prompt) > 64*1024 {
 		return fmt.Errorf("%w: title or prompt", ErrInvalidInput)
@@ -251,6 +294,21 @@ func validateAdmission(p AdmitTaskParams) error {
 		return fmt.Errorf("%w: attempt deadline", ErrInvalidInput)
 	}
 	return nil
+}
+
+func canonicalBackgroundRemote(value string) bool {
+	parsed, err := url.Parse(value)
+	return err == nil && parsed.Scheme == "https" && strings.EqualFold(parsed.Host, "github.com") && parsed.User == nil && parsed.RawQuery == "" &&
+		parsed.Fragment == "" && parsed.RawPath == "" && parsed.Path != "/" && !strings.HasSuffix(parsed.Path, "/") &&
+		!strings.HasSuffix(strings.ToLower(parsed.Path), ".git") && value == "https://"+strings.ToLower(parsed.Host)+parsed.EscapedPath()
+}
+
+func canonicalBackgroundIdentities(p AdmitTaskParams) bool {
+	compact := strings.ReplaceAll(strings.TrimPrefix(string(p.TaskID), "tsk_"), "-", "")
+	return p.BackgroundRun.CloneIdentity == "run-"+compact+"-g1-clone" &&
+		p.BackgroundRun.VolumeIdentity == "fern-run-"+compact+"-g1-opencode" &&
+		p.BackgroundRun.ContainerIdentity == "fern-run-"+compact+"-g1" &&
+		p.BackgroundRun.EndpointIdentity == "run-"+compact+"-g1-endpoint"
 }
 
 func ensureActor(ctx context.Context, tx *sql.Tx, actor task.ActorSnapshot) (int64, error) {

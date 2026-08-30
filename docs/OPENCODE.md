@@ -121,12 +121,17 @@ page showing the fixed OpenCode client and scopes. Its approve and deny buttons
 fetch an existing route-bound CSRF token and submit the strict JSON decision API.
 The page never receives or renders the device code or bearer.
 
-`/fern/api/runs` and its descendants are reserved for plugin bearers, but this
-authorization slice intentionally adds no Background Run handlers. A reserved
-`GET` therefore returns `404`, while `POST /fern/api/runs` reaches Fern's
-unimplemented route handling and returns `405`. Plugin bearers receive `404` on
-routes outside their allowlist and never fall through to the persistent OpenCode
-workspace.
+`POST/GET /fern/api/runs`, `GET /fern/api/runs/:id`, and the `stop`, `open`, and
+`result` descendants are reserved for plugin bearers. Admission commits an
+immutable task/attempt generation and disposable-environment intent before any
+effect. This build intentionally has no disposable Docker provider: accepted
+runs remain `queued`; stopping a queued run atomically records it, its task, and
+its attempt as `failed` with the honest `background_run_stopped_before_start`
+reason; and open/result return `not_ready`. The configured image still pins OpenCode
+`0.0.0-next-17444`, so creation from the plugin's `opencode-1.18.16` profile
+fails with `profile_unavailable` rather than claiming false compatibility.
+Plugin bearers receive `404` on routes outside their allowlist and never fall
+through to the persistent OpenCode workspace.
 
 The lifecycle integration uses these V2 surfaces:
 

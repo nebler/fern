@@ -251,7 +251,7 @@ func TestMigrationFourFromVersionThree(t *testing.T) {
 	_ = s.db.QueryRow(`PRAGMA user_version`).Scan(&version)
 	_ = s.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name='seal_requests'`).Scan(&tables)
 	_ = s.db.QueryRow(`SELECT count(*) FROM pragma_table_info('results') WHERE name IN ('completion_authority','seal_request_id','authorizer_actor_snapshot_id')`).Scan(&columns)
-	if version != 6 || tables != 1 || columns != 3 {
+	if version != CurrentSchemaVersion() || tables != 1 || columns != 3 {
 		t.Fatalf("migration version=%d tables=%d columns=%d", version, tables, columns)
 	}
 }

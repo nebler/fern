@@ -97,8 +97,16 @@ func TestPluginPublicOperatorAndSelfRevokeRoutes(t *testing.T) {
 		t.Fatal(err)
 	}
 	waker := &countingWaker{}
+	var runRequests atomic.Int64
+	runs := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if actor, err := taskapi.ContextActor(request.Context()); err != nil || actor.Type != task.ActorOpenCode {
+			t.Errorf("run actor = %+v, error = %v", actor, err)
+		}
+		runRequests.Add(1)
+		writer.WriteHeader(http.StatusNoContent)
+	})
 	handlers, err := NewHandlers(waker, runtime.ServerAuth{Password: "backend-secret"}, Controls{
-		Store: controlStore, PluginAuth: pluginStore, ControlAuth: ControlAuth{Password: "control-secret"},
+		Store: controlStore, PluginAuth: pluginStore, Runs: runs, ControlAuth: ControlAuth{Password: "control-secret"},
 	}, TrustedOrigins{Remote: "https://fern.example.ts.net", Operator: "http://127.0.0.1:8081"}, testLogger())
 	if err != nil {
 		t.Fatal(err)
@@ -171,7 +179,14 @@ func TestPluginPublicOperatorAndSelfRevokeRoutes(t *testing.T) {
 		t.Fatalf("rapid poll = %d retry=%q", rapidPollResponse.Code, rapidPollResponse.Header().Get("Retry-After"))
 	}
 
-	for _, path := range []string{"/fern/api/runs", "/api/health", "/fern/control"} {
+	requestRun := httptest.NewRequest(http.MethodGet, "/fern/api/runs", nil)
+	requestRun.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	runResponse := httptest.NewRecorder()
+	handlers.Remote.ServeHTTP(runResponse, requestRun)
+	if runResponse.Code != http.StatusNoContent {
+		t.Fatalf("implemented run route = %d", runResponse.Code)
+	}
+	for _, path := range []string{"/api/health", "/fern/control"} {
 		request := httptest.NewRequest(http.MethodGet, path, nil)
 		request.Header.Set("Authorization", "Bearer "+token.AccessToken)
 		response := httptest.NewRecorder()
@@ -184,8 +199,8 @@ func TestPluginPublicOperatorAndSelfRevokeRoutes(t *testing.T) {
 	unimplementedPost.Header.Set("Authorization", "Bearer "+token.AccessToken)
 	unimplementedPostResponse := httptest.NewRecorder()
 	handlers.Remote.ServeHTTP(unimplementedPostResponse, unimplementedPost)
-	if unimplementedPostResponse.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("unimplemented reserved POST = %d", unimplementedPostResponse.Code)
+	if unimplementedPostResponse.Code != http.StatusNoContent || runRequests.Load() != 2 {
+		t.Fatalf("implemented reserved POST = %d requests=%d", unimplementedPostResponse.Code, runRequests.Load())
 	}
 	if waker.wakes.Load() != 0 {
 		t.Fatalf("plugin auth routes woke persistent workspace %d times", waker.wakes.Load())

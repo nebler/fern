@@ -50,7 +50,7 @@ func (s *Store) GetTask(ctx context.Context, id task.TaskID) (Task, error) {
 	if _, err := task.ParseTaskID(string(id)); err != nil {
 		return Task{}, fmt.Errorf("%w: task ID", ErrInvalidInput)
 	}
-	return getTask(ctx, s.db, id)
+	return getLegacyTask(ctx, s.db, id)
 }
 
 type queryRower interface {
@@ -64,6 +64,17 @@ func getTask(ctx context.Context, q queryRower, id task.TaskID) (Task, error) {
 	}
 	if err != nil {
 		return Task{}, fmt.Errorf("read task: %w", err)
+	}
+	return t, nil
+}
+
+func getLegacyTask(ctx context.Context, q queryRower, id task.TaskID) (Task, error) {
+	t, err := scanTask(q.QueryRowContext(ctx, taskSelect+` WHERE t.id=? AND NOT EXISTS (SELECT 1 FROM background_runs br WHERE br.task_id=t.id)`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Task{}, ErrNotFound
+	}
+	if err != nil {
+		return Task{}, fmt.Errorf("read legacy task: %w", err)
 	}
 	return t, nil
 }
@@ -126,7 +137,7 @@ func (s *Store) GetAttempt(ctx context.Context, id task.AttemptID) (Attempt, err
 	if _, err := task.ParseAttemptID(string(id)); err != nil {
 		return Attempt{}, fmt.Errorf("%w: attempt ID", ErrInvalidInput)
 	}
-	return getAttempt(ctx, s.db, id)
+	return getLegacyAttempt(ctx, s.db, id)
 }
 
 func getAttempt(ctx context.Context, q queryRower, id task.AttemptID) (Attempt, error) {
@@ -136,6 +147,18 @@ func getAttempt(ctx context.Context, q queryRower, id task.AttemptID) (Attempt, 
 	}
 	if err != nil {
 		return Attempt{}, fmt.Errorf("read attempt: %w", err)
+	}
+	return a, nil
+}
+
+func getLegacyAttempt(ctx context.Context, q queryRower, id task.AttemptID) (Attempt, error) {
+	a, err := scanAttempt(q.QueryRowContext(ctx, attemptSelect+` WHERE id=? AND NOT EXISTS
+(SELECT 1 FROM background_runs br WHERE br.attempt_id=attempts.id)`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Attempt{}, ErrNotFound
+	}
+	if err != nil {
+		return Attempt{}, fmt.Errorf("read legacy attempt: %w", err)
 	}
 	return a, nil
 }
@@ -197,7 +220,7 @@ func (s *Store) GetReceipt(ctx context.Context, id task.ReceiptID) (Receipt, err
 	if _, err := task.ParseReceiptID(string(id)); err != nil {
 		return Receipt{}, fmt.Errorf("%w: receipt ID", ErrInvalidInput)
 	}
-	r, err := scanReceipt(s.db.QueryRowContext(ctx, receiptSelect+` WHERE r.id=?`, id))
+	r, err := scanReceipt(s.db.QueryRowContext(ctx, receiptSelect+` WHERE r.id=? AND r.command_kind NOT IN ('run.create','run.stop')`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Receipt{}, ErrNotFound
 	}
@@ -268,11 +291,13 @@ func (s *Store) ListEvents(ctx context.Context, workspaceID task.WorkspaceID, af
 		return EventPage{}, fmt.Errorf("%w: event limit", ErrInvalidInput)
 	}
 	var watermark task.Cursor
-	if err := s.db.QueryRowContext(ctx, `SELECT coalesce(max(cursor),0) FROM events WHERE workspace_id=?`, workspaceID).Scan(&watermark); err != nil {
+	if err := s.db.QueryRowContext(ctx, `SELECT coalesce(max(e.cursor),0) FROM events e WHERE e.workspace_id=? AND
+NOT EXISTS (SELECT 1 FROM background_runs br WHERE br.task_id=e.task_id)`, workspaceID).Scan(&watermark); err != nil {
 		return EventPage{}, fmt.Errorf("read event watermark: %w", err)
 	}
 	rows, err := s.db.QueryContext(ctx, eventSelect+`
 WHERE e.workspace_id=? AND e.cursor>? AND e.cursor<=?
+  AND NOT EXISTS (SELECT 1 FROM background_runs br WHERE br.task_id=e.task_id)
 ORDER BY e.cursor ASC LIMIT ?`, workspaceID, after, watermark, limit)
 	if err != nil {
 		return EventPage{}, fmt.Errorf("list events: %w", err)

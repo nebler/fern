@@ -23,8 +23,9 @@ func (s *Store) FindExecutionAttempt(ctx context.Context, workspaceID task.Works
 SELECT a.id
 FROM attempts a JOIN tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id
 WHERE a.workspace_id=? AND t.current_attempt_id=a.id AND t.cancel_epoch=0 AND
-      ((a.state IN ('admitted','running') AND t.state='running') OR
-       (a.state='input_required' AND t.state='input_required'))
+       ((a.state IN ('admitted','running') AND t.state='running') OR
+        (a.state='input_required' AND t.state='input_required'))
+  AND NOT EXISTS (SELECT 1 FROM background_runs r WHERE r.attempt_id=a.id)
 ORDER BY a.id LIMIT 1`, workspaceID).Scan(&attemptID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DeliveryWork{}, &NotFoundError{Kind: "execution attempt", ID: string(workspaceID)}
@@ -45,6 +46,11 @@ func (s *Store) InspectExecutionAttempt(ctx context.Context, attemptID task.Atte
 	}
 	if err != nil {
 		return DeliveryWork{}, err
+	}
+	if background, backgroundErr := backgroundAttemptExists(ctx, s.db, attempt.ID); backgroundErr != nil {
+		return DeliveryWork{}, backgroundErr
+	} else if background {
+		return DeliveryWork{}, &NotFoundError{Kind: "attempt", ID: string(attemptID)}
 	}
 	if attempt.State != task.AttemptAdmitted && attempt.State != task.AttemptRunning && attempt.State != task.AttemptInputRequired {
 		return DeliveryWork{}, &StateError{AttemptID: attempt.ID, State: attempt.State, Required: task.AttemptAdmitted}

@@ -39,6 +39,7 @@ func (s *Store) FindSucceededUnsealedAttempt(ctx context.Context, workspaceID ta
 SELECT a.id FROM attempts a JOIN tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id
 WHERE a.workspace_id=? AND a.state='succeeded' AND a.sealed_result_id IS NULL AND
       t.current_attempt_id=a.id AND t.state='running' AND t.cancel_epoch=0 AND t.sealed_result_id IS NULL
+      AND NOT EXISTS (SELECT 1 FROM background_runs br WHERE br.attempt_id=a.id)
 ORDER BY a.updated_at,a.id LIMIT 1`, workspaceID).Scan(&attemptID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DeliveryWork{}, &NotFoundError{Kind: "succeeded unsealed attempt", ID: string(workspaceID)}

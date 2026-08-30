@@ -66,7 +66,7 @@ func (s *Store) RequestCancellation(ctx context.Context, p RequestCancellationPa
 		}
 	}
 
-	owner, err := getTask(ctx, tx, p.TaskID)
+	owner, err := getLegacyTask(ctx, tx, p.TaskID)
 	if errors.Is(err, ErrNotFound) {
 		return Cancellation{}, &NotFoundError{Kind: "task", ID: string(p.TaskID)}
 	}
@@ -211,6 +211,7 @@ func (s *Store) FindPendingCancellation(ctx context.Context, workspaceID task.Wo
 	err := s.db.QueryRowContext(ctx, `
 SELECT id FROM tasks
 WHERE workspace_id=? AND state='cancel_requested' AND cancel_epoch=1
+  AND NOT EXISTS (SELECT 1 FROM background_runs br WHERE br.task_id=tasks.id)
 ORDER BY latest_event_cursor ASC LIMIT 1`, workspaceID).Scan(&taskID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Cancellation{}, &NotFoundError{Kind: "pending cancellation", ID: string(workspaceID)}
@@ -432,7 +433,7 @@ func validateCancellationAcknowledgment(p AcknowledgeCancellationParams) error {
 }
 
 func cancellationByTask(ctx context.Context, q queryRower, taskID task.TaskID) (Cancellation, error) {
-	owner, err := getTask(ctx, q, taskID)
+	owner, err := getLegacyTask(ctx, q, taskID)
 	if err != nil {
 		return Cancellation{}, err
 	}

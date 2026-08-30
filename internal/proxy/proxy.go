@@ -32,6 +32,7 @@ type Waker interface {
 type Controls struct {
 	Store       *control.Store
 	Tasks       http.Handler
+	Runs        http.Handler
 	Onboarding  http.Handler
 	WakeTrace   http.Handler
 	Liveness    http.Handler
@@ -94,7 +95,7 @@ func NewHandlers(waker Waker, auth runtime.ServerAuth, controls Controls, origin
 		return Handlers{}, errors.New("invalid trusted proxy origin: operator listener must be loopback HTTP")
 	}
 	remoteGateway := gatewayHandler(upstream, Controls{
-		Tasks: controls.Tasks, Onboarding: controls.Onboarding, PluginAuth: controls.PluginAuth,
+		Tasks: controls.Tasks, Runs: controls.Runs, Onboarding: controls.Onboarding, PluginAuth: controls.PluginAuth,
 	})
 	operatorGateway := gatewayHandler(upstream, controls)
 	return Handlers{

@@ -304,6 +304,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 	}
 	if tasks != nil {
 		controls.Tasks = tasks.handler
+		controls.Runs = tasks.runs
 	}
 	handlers, err := proxy.NewHandlers(observedManager, auth, controls, origins, log)
 	if err != nil {

@@ -460,6 +460,107 @@ type AdmitTaskParams struct {
 	Deadline                 time.Time
 	APIContractVersion       string
 	AcceptedAt               time.Time
+	BackgroundRun            *BackgroundRunIntent
+}
+
+type BackgroundRunState string
+type BackgroundRunEffectPhase string
+
+const (
+	BackgroundRunQueued          BackgroundRunState = "queued"
+	BackgroundRunSettingUp       BackgroundRunState = "setting_up"
+	BackgroundRunWorking         BackgroundRunState = "working"
+	BackgroundRunNeedsYou        BackgroundRunState = "needs_you"
+	BackgroundRunCanceling       BackgroundRunState = "canceling"
+	BackgroundRunUncertain       BackgroundRunState = "uncertain"
+	BackgroundRunResultReady     BackgroundRunState = "result_ready"
+	BackgroundRunFailed          BackgroundRunState = "failed"
+	BackgroundRunCleanupRequired BackgroundRunState = "cleanup_required"
+
+	BackgroundRunEffectAbsent           BackgroundRunEffectPhase = "absent"
+	BackgroundRunEffectProvisionStarted BackgroundRunEffectPhase = "provision_started"
+	BackgroundRunEffectPromptStarted    BackgroundRunEffectPhase = "prompt_started"
+	BackgroundRunEffectStopStarted      BackgroundRunEffectPhase = "stop_started"
+	BackgroundRunEffectExportStarted    BackgroundRunEffectPhase = "export_started"
+	BackgroundRunEffectCleanupStarted   BackgroundRunEffectPhase = "cleanup_started"
+)
+
+func (state BackgroundRunState) valid() bool {
+	switch state {
+	case BackgroundRunQueued, BackgroundRunSettingUp, BackgroundRunWorking, BackgroundRunNeedsYou,
+		BackgroundRunCanceling, BackgroundRunUncertain, BackgroundRunResultReady, BackgroundRunFailed,
+		BackgroundRunCleanupRequired:
+		return true
+	default:
+		return false
+	}
+}
+
+func (phase BackgroundRunEffectPhase) valid() bool {
+	switch phase {
+	case BackgroundRunEffectAbsent, BackgroundRunEffectProvisionStarted, BackgroundRunEffectPromptStarted,
+		BackgroundRunEffectStopStarted, BackgroundRunEffectExportStarted, BackgroundRunEffectCleanupStarted:
+		return true
+	default:
+		return false
+	}
+}
+
+// BackgroundRunIntent is the immutable environment selection committed with a
+// task admission. Mutable lifecycle fields live only on BackgroundRun.
+type BackgroundRunIntent struct {
+	RepositoryRemote, Branch, Profile                string
+	InstructionSHA256, ProfileSHA256                 [32]byte
+	CloneIdentity, VolumeIdentity, ContainerIdentity string
+	EndpointIdentity                                 string
+}
+
+type BackgroundRun struct {
+	TaskID            task.TaskID
+	AttemptID         task.AttemptID
+	WorkspaceID       task.WorkspaceID
+	Generation        int64
+	RepositoryID      task.RepositoryID
+	RepositoryRemote  string
+	BaseOID           task.GitOID
+	Branch            *string
+	InstructionSHA256 [32]byte
+	Profile           string
+	ProfileSHA256     [32]byte
+	ImageIdentity     string
+	CloneIdentity     string
+	VolumeIdentity    string
+	ContainerIdentity string
+	EndpointIdentity  string
+	OpenCodeSessionID task.OpenCodeSessionID
+	OpenCodeMessageID task.OpenCodeMessageID
+	State             BackgroundRunState
+	EffectPhase       BackgroundRunEffectPhase
+	CancelEpoch       uint64
+	StopReceiptID     task.ReceiptID
+	StopActor         *task.ActorSnapshot
+	StopRequestedAt   *time.Time
+	Creator           task.ActorSnapshot
+	Revision          int64
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+type StopBackgroundRunParams struct {
+	WorkspaceID        task.WorkspaceID
+	TaskID             task.TaskID
+	ReceiptID          task.ReceiptID
+	AttemptEventID     task.EventID
+	TaskEventID        task.EventID
+	Claim              task.IdempotencyClaim
+	APIContractVersion string
+	StoppedAt          time.Time
+}
+
+type BackgroundRunStop struct {
+	Run      BackgroundRun
+	Receipt  Receipt
+	Replayed bool
 }
 
 type Admission struct {

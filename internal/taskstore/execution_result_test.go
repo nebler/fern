@@ -384,7 +384,7 @@ func TestExecutionResultMigrationFromVersionOne(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT (SELECT count(*) FROM pragma_table_info('tasks') WHERE name='sealed_result_id') + (SELECT count(*) FROM pragma_table_info('attempts') WHERE name='sealed_result_id')`).Scan(&sealedColumns); err != nil {
 		t.Fatal(err)
 	}
-	if version != 6 || resultTables != 2 || sealedColumns != 2 {
+	if version != CurrentSchemaVersion() || resultTables != 2 || sealedColumns != 2 {
 		t.Fatalf("migration projection version=%d tables=%d columns=%d", version, resultTables, sealedColumns)
 	}
 }

@@ -92,7 +92,8 @@ func pendingVersionFivePublication(t *testing.T, n int, state PublicationState) 
 		}
 	}
 
-	if _, err := store.db.Exec(`DROP TRIGGER publications_admission_receipt_immutable;
+	if _, err := store.db.Exec(`DROP TABLE background_runs;
+DROP TRIGGER publications_admission_receipt_immutable;
 DROP TRIGGER publications_admission_receipt_insert;
 DROP TRIGGER publications_unreceipted_quarantine;
 DROP INDEX publications_admission_receipt;
@@ -101,7 +102,7 @@ ALTER TABLE publications DROP COLUMN admission_receipt_id;
 DELETE FROM receipts WHERE id=?;
 CREATE TRIGGER receipts_immutable_delete BEFORE DELETE ON receipts
 BEGIN SELECT RAISE(ABORT, 'receipts are immutable'); END;
-DELETE FROM schema_migrations WHERE version=6;
+DELETE FROM schema_migrations WHERE version IN (6,7);
 PRAGMA user_version=5`, admitted.Receipt.ID); err != nil {
 		t.Fatal(err)
 	}

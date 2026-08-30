@@ -38,6 +38,7 @@ FROM attempts a
 JOIN tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id
 JOIN events e ON e.task_id=t.id AND e.type='task.accepted'
 WHERE a.workspace_id=? AND a.state='prepared' AND t.state='queued' AND t.current_attempt_id=a.id
+  AND NOT EXISTS (SELECT 1 FROM background_runs r WHERE r.attempt_id=a.id)
 ORDER BY e.cursor ASC
 LIMIT 1`, workspaceID).Scan(&attemptID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -62,6 +63,7 @@ SELECT a.id
 FROM attempts a
 JOIN tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id
 WHERE a.workspace_id=? AND a.state='delivering' AND t.state='running' AND t.current_attempt_id=a.id
+  AND NOT EXISTS (SELECT 1 FROM background_runs r WHERE r.attempt_id=a.id)
 LIMIT 1`, workspaceID).Scan(&attemptID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return DeliveryWork{}, &NotFoundError{Kind: "delivering attempt", ID: string(workspaceID)}
@@ -86,6 +88,7 @@ FROM attempts a
 JOIN tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id
 WHERE a.workspace_id=? AND t.current_attempt_id=a.id AND
       ((a.state='delivering' AND t.state='running') OR (a.state='uncertain' AND t.state='uncertain'))
+  AND NOT EXISTS (SELECT 1 FROM background_runs r WHERE r.attempt_id=a.id)
 ORDER BY CASE a.state WHEN 'delivering' THEN 0 ELSE 1 END, a.id
 LIMIT 1`, workspaceID).Scan(&attemptID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -97,6 +100,11 @@ LIMIT 1`, workspaceID).Scan(&attemptID)
 	attempt, err := getAttempt(ctx, s.db, attemptID)
 	if err != nil {
 		return DeliveryWork{}, err
+	}
+	if background, backgroundErr := backgroundAttemptExists(ctx, s.db, attempt.ID); backgroundErr != nil {
+		return DeliveryWork{}, backgroundErr
+	} else if background {
+		return DeliveryWork{}, &NotFoundError{Kind: "attempt", ID: string(attemptID)}
 	}
 	owner, err := getTask(ctx, s.db, attempt.TaskID)
 	if err != nil {
@@ -117,6 +125,11 @@ func (s *Store) InspectDeliveryAttempt(ctx context.Context, attemptID task.Attem
 	}
 	if err != nil {
 		return DeliveryWork{}, err
+	}
+	if background, backgroundErr := backgroundAttemptExists(ctx, s.db, attempt.ID); backgroundErr != nil {
+		return DeliveryWork{}, backgroundErr
+	} else if background {
+		return DeliveryWork{}, &NotFoundError{Kind: "attempt", ID: string(attemptID)}
 	}
 	if attempt.State != task.AttemptPrepared && attempt.State != task.AttemptDelivering {
 		return DeliveryWork{}, &StateError{AttemptID: attempt.ID, State: attempt.State, Required: task.AttemptPrepared}
@@ -165,6 +178,7 @@ func (s *Store) ClaimPreparedAttempt(ctx context.Context, p ClaimPreparedAttempt
 SELECT id FROM attempts
 WHERE workspace_id=? AND id<>? AND state IN
 ('delivering','admitted','running','input_required','cancel_requested','uncertain','recovery_required')
+AND NOT EXISTS (SELECT 1 FROM background_runs r WHERE r.attempt_id=attempts.id)
 LIMIT 1`, attempt.WorkspaceID, attempt.ID).Scan(&busyAttempt)
 	if err == nil {
 		return DeliveryTransition{}, &WorkspaceBusyError{WorkspaceID: attempt.WorkspaceID, AttemptID: busyAttempt}
@@ -496,6 +510,7 @@ func (s *Store) ResumeUncertainPrePromptDelivery(ctx context.Context, p ResumeUn
 SELECT id FROM attempts
 WHERE workspace_id=? AND id<>? AND state IN
 ('delivering','admitted','running','input_required','cancel_requested','uncertain','recovery_required')
+AND NOT EXISTS (SELECT 1 FROM background_runs r WHERE r.attempt_id=attempts.id)
 LIMIT 1`, attempt.WorkspaceID, attempt.ID).Scan(&busyAttempt)
 	if err == nil {
 		return DeliveryTransition{}, &WorkspaceBusyError{WorkspaceID: attempt.WorkspaceID, AttemptID: busyAttempt}
@@ -757,6 +772,11 @@ func deliveryRows(ctx context.Context, tx *sql.Tx, attemptID task.AttemptID) (At
 	}
 	if err != nil {
 		return Attempt{}, Task{}, err
+	}
+	if background, backgroundErr := backgroundAttemptExists(ctx, tx, attempt.ID); backgroundErr != nil {
+		return Attempt{}, Task{}, backgroundErr
+	} else if background {
+		return Attempt{}, Task{}, &NotFoundError{Kind: "attempt", ID: string(attemptID)}
 	}
 	owner, err := getTask(ctx, tx, attempt.TaskID)
 	if err != nil {

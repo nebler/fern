@@ -22,10 +22,164 @@ var migrations = []migration{
 	{version: 4, name: "user_authorized_snapshot_seals", sql: userAuthorizedSealSchema},
 	{version: 5, name: "explicit_workspace_github_authority", sql: explicitWorkspaceGitHubAuthoritySchema},
 	{version: 6, name: "publication_admission_receipts", sql: publicationAdmissionReceiptSchema},
+	{version: 7, name: "background_run_intents", sql: backgroundRunIntentSchema},
 }
 
 // CurrentSchemaVersion is the schema produced by all migrations in this build.
 func CurrentSchemaVersion() int { return len(migrations) }
+
+const backgroundRunIntentSchema = `
+CREATE TABLE background_runs (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    attempt_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK(generation > 0),
+    repository_id INTEGER NOT NULL CHECK(repository_id > 0),
+    repository_remote TEXT NOT NULL CHECK(length(CAST(repository_remote AS BLOB)) BETWEEN 1 AND 2048),
+    base_oid TEXT NOT NULL CHECK(length(base_oid)=40 AND base_oid NOT GLOB '*[^0-9a-f]*'),
+    branch TEXT CHECK(branch IS NULL OR length(CAST(branch AS BLOB)) BETWEEN 1 AND 255),
+    instruction_sha256 BLOB NOT NULL CHECK(length(instruction_sha256)=32),
+    profile TEXT NOT NULL CHECK(profile='opencode-1.18.16'),
+    profile_sha256 BLOB NOT NULL CHECK(lower(hex(profile_sha256))='609bee2a2d5dce169c489fecd0d144c4a8a9b31552b5f16e688db1093732872a'),
+    image_identity TEXT NOT NULL CHECK(length(CAST(image_identity AS BLOB)) BETWEEN 1 AND 256),
+    clone_identity TEXT NOT NULL UNIQUE CHECK(length(CAST(clone_identity AS BLOB)) BETWEEN 1 AND 256),
+    volume_identity TEXT NOT NULL UNIQUE CHECK(length(CAST(volume_identity AS BLOB)) BETWEEN 1 AND 256),
+    container_identity TEXT NOT NULL UNIQUE CHECK(length(CAST(container_identity AS BLOB)) BETWEEN 1 AND 256),
+    endpoint_identity TEXT NOT NULL UNIQUE CHECK(length(CAST(endpoint_identity AS BLOB)) BETWEEN 1 AND 256),
+    opencode_session_id TEXT NOT NULL UNIQUE,
+    opencode_message_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('queued','setting_up','working','needs_you','canceling','uncertain','result_ready','failed','cleanup_required')),
+    effect_phase TEXT NOT NULL CHECK(effect_phase IN ('absent','provision_started','prompt_started','stop_started','export_started','cleanup_started')),
+    cancel_epoch INTEGER NOT NULL DEFAULT 0 CHECK(cancel_epoch IN (0,1)),
+    stop_receipt_id TEXT REFERENCES receipts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    stop_actor_snapshot_id INTEGER REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    stop_requested_at INTEGER,
+    creator_actor_snapshot_id INTEGER NOT NULL REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    revision INTEGER NOT NULL CHECK(revision >= 1),
+    created_at INTEGER NOT NULL CHECK(created_at >= 0),
+    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+    CHECK((cancel_epoch=0 AND stop_receipt_id IS NULL AND stop_actor_snapshot_id IS NULL AND stop_requested_at IS NULL AND state<>'canceling') OR
+          (cancel_epoch=1 AND stop_receipt_id IS NOT NULL AND stop_actor_snapshot_id IS NOT NULL AND stop_requested_at IS NOT NULL AND
+           state IN ('canceling','uncertain','result_ready','failed','cleanup_required'))),
+    CHECK(
+      (state='queued' AND effect_phase='absent') OR
+      (state='setting_up' AND effect_phase='provision_started') OR
+      (state IN ('working','needs_you') AND effect_phase='prompt_started') OR
+      (state='canceling' AND effect_phase='stop_started') OR
+      (state='uncertain' AND effect_phase IN ('provision_started','prompt_started','stop_started','export_started','cleanup_started')) OR
+      (state='result_ready' AND effect_phase IN ('export_started','cleanup_started')) OR
+      (state='failed') OR
+      (state='cleanup_required' AND effect_phase='cleanup_started')
+    ),
+    FOREIGN KEY(attempt_id,task_id,workspace_id) REFERENCES attempts(id,task_id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY(task_id,workspace_id) REFERENCES tasks(id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY(workspace_id,repository_id) REFERENCES workspaces(id,repository_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    UNIQUE(attempt_id),
+    UNIQUE(task_id,generation)
+) STRICT;
+CREATE INDEX background_runs_actor_list ON background_runs(creator_actor_snapshot_id,created_at DESC,task_id DESC);
+
+CREATE TRIGGER background_runs_insert_integrity BEFORE INSERT ON background_runs
+BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1 FROM attempts a
+    JOIN tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id
+    JOIN workspaces w ON w.id=NEW.workspace_id AND w.repository_id=NEW.repository_id AND
+                         NEW.repository_remote='https://github.com/'||w.repository_full_name
+    JOIN actor_snapshots actor ON actor.id=NEW.creator_actor_snapshot_id AND actor.id=t.actor_snapshot_id AND actor.actor_type='opencode'
+    JOIN receipts r ON r.workspace_id=NEW.workspace_id AND r.command_kind='run.create' AND r.state='accepted' AND r.target_type='task' AND
+                       r.target_id=NEW.task_id AND r.actor_snapshot_id=NEW.creator_actor_snapshot_id AND
+                       r.accepted_at=NEW.created_at AND r.response_status=202 AND
+                       json_extract(r.response_projection,'$.run_id')=NEW.task_id AND
+                       json_extract(r.response_projection,'$.committed')=1
+    WHERE a.id=NEW.attempt_id AND a.task_id=NEW.task_id AND a.workspace_id=NEW.workspace_id AND
+      a.sequence=NEW.generation AND a.base_sha=NEW.base_oid AND a.image_digest=NEW.image_identity AND
+      a.opencode_session_id=NEW.opencode_session_id AND a.opencode_message_id=NEW.opencode_message_id AND
+      a.state='prepared' AND t.state='queued' AND t.current_attempt_id=a.id AND t.repository_id=NEW.repository_id AND
+      a.prompt_sha256=NEW.instruction_sha256 AND t.prompt_sha256=NEW.instruction_sha256 AND
+      a.created_at=NEW.created_at AND t.created_at=NEW.created_at AND
+      NEW.clone_identity='run-'||replace(substr(NEW.task_id,5),'-','')||'-g'||NEW.generation||'-clone' AND
+      NEW.volume_identity='fern-run-'||replace(substr(NEW.task_id,5),'-','')||'-g'||NEW.generation||'-opencode' AND
+      NEW.container_identity='fern-run-'||replace(substr(NEW.task_id,5),'-','')||'-g'||NEW.generation AND
+      NEW.endpoint_identity='run-'||replace(substr(NEW.task_id,5),'-','')||'-g'||NEW.generation||'-endpoint'
+  ) THEN RAISE(ABORT, 'background run has no exact task attempt') END;
+END;
+
+CREATE TRIGGER background_runs_immutable_inputs BEFORE UPDATE ON background_runs
+WHEN NEW.task_id<>OLD.task_id OR NEW.attempt_id<>OLD.attempt_id OR NEW.workspace_id<>OLD.workspace_id OR
+     NEW.generation<>OLD.generation OR NEW.repository_id<>OLD.repository_id OR NEW.repository_remote<>OLD.repository_remote OR
+     NEW.base_oid<>OLD.base_oid OR NEW.branch IS NOT OLD.branch OR NEW.instruction_sha256<>OLD.instruction_sha256 OR
+     NEW.profile<>OLD.profile OR NEW.profile_sha256<>OLD.profile_sha256 OR NEW.image_identity<>OLD.image_identity OR
+     NEW.clone_identity<>OLD.clone_identity OR NEW.volume_identity<>OLD.volume_identity OR
+     NEW.container_identity<>OLD.container_identity OR NEW.endpoint_identity<>OLD.endpoint_identity OR
+     NEW.opencode_session_id<>OLD.opencode_session_id OR NEW.opencode_message_id<>OLD.opencode_message_id OR
+     NEW.creator_actor_snapshot_id<>OLD.creator_actor_snapshot_id OR NEW.created_at<>OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'background run inputs are immutable'); END;
+
+CREATE TRIGGER background_runs_transition BEFORE UPDATE OF state,effect_phase ON background_runs
+WHEN NEW.state<>OLD.state OR NEW.effect_phase<>OLD.effect_phase
+BEGIN
+  SELECT CASE WHEN NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR NOT (
+    (OLD.state=NEW.state) OR
+    (OLD.state='queued' AND NEW.state IN ('setting_up','failed')) OR
+    (OLD.state='setting_up' AND NEW.state IN ('working','needs_you','uncertain','canceling','failed','cleanup_required')) OR
+    (OLD.state='working' AND NEW.state IN ('needs_you','uncertain','canceling','result_ready','failed','cleanup_required')) OR
+    (OLD.state='needs_you' AND NEW.state IN ('working','uncertain','canceling','failed','cleanup_required')) OR
+    (OLD.state='uncertain' AND NEW.state IN ('setting_up','working','needs_you','canceling','result_ready','failed','cleanup_required')) OR
+    (OLD.state='canceling' AND NEW.state IN ('uncertain','result_ready','failed','cleanup_required')) OR
+    (OLD.state='failed' AND NEW.state='cleanup_required') OR
+    (OLD.state='cleanup_required' AND NEW.state IN ('failed','result_ready'))
+  ) THEN RAISE(ABORT, 'invalid background run state transition') END;
+  SELECT CASE WHEN NOT (
+    OLD.effect_phase=NEW.effect_phase OR
+    (OLD.effect_phase='absent' AND NEW.effect_phase='provision_started') OR
+    (OLD.effect_phase='provision_started' AND NEW.effect_phase IN ('prompt_started','stop_started','cleanup_started')) OR
+    (OLD.effect_phase='prompt_started' AND NEW.effect_phase IN ('stop_started','export_started','cleanup_started')) OR
+    (OLD.effect_phase='stop_started' AND NEW.effect_phase IN ('export_started','cleanup_started')) OR
+    (OLD.effect_phase='export_started' AND NEW.effect_phase='cleanup_started')
+  ) THEN RAISE(ABORT, 'invalid background run effect transition') END;
+END;
+
+CREATE TRIGGER background_runs_revision BEFORE UPDATE ON background_runs
+WHEN NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at
+BEGIN SELECT RAISE(ABORT, 'invalid background run revision'); END;
+
+CREATE TRIGGER background_runs_stop_integrity BEFORE UPDATE ON background_runs
+WHEN OLD.cancel_epoch=0 AND NEW.cancel_epoch=1
+BEGIN
+  SELECT CASE WHEN NEW.stop_requested_at<>NEW.updated_at OR NOT (
+    (OLD.state='queued' AND OLD.effect_phase='absent' AND NEW.state='failed' AND NEW.effect_phase='absent') OR
+    (OLD.state IN ('setting_up','working','needs_you','uncertain') AND
+     OLD.effect_phase IN ('provision_started','prompt_started') AND NEW.state='canceling' AND NEW.effect_phase='stop_started')
+  ) THEN RAISE(ABORT, 'invalid background run stop transition') END;
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1 FROM receipts r WHERE r.id=NEW.stop_receipt_id AND r.workspace_id=NEW.workspace_id AND r.state='accepted' AND
+      r.command_kind='run.stop' AND r.target_type='task' AND r.target_id=NEW.task_id AND
+      r.actor_snapshot_id=NEW.stop_actor_snapshot_id AND r.accepted_at=NEW.stop_requested_at AND r.response_status=202 AND
+      json_extract(r.response_projection,'$.run_id')=NEW.task_id AND
+      json_extract(r.response_projection,'$.state')=NEW.state
+  ) THEN RAISE(ABORT, 'background run stop has no exact receipt') END;
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1 FROM attempts a
+    JOIN tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id
+    JOIN events ae ON ae.attempt_id=a.id AND ae.type='attempt.failed' AND ae.occurred_at=NEW.stop_requested_at AND
+                      ae.actor_snapshot_id=NEW.stop_actor_snapshot_id
+    JOIN events te ON te.task_id=t.id AND te.attempt_id IS NULL AND te.type='task.failed' AND
+                      te.occurred_at=NEW.stop_requested_at AND te.actor_snapshot_id=ae.actor_snapshot_id AND
+                      te.payload=ae.payload AND te.cursor>ae.cursor AND te.cursor=t.latest_event_cursor
+    WHERE a.id=NEW.attempt_id AND a.task_id=NEW.task_id AND a.workspace_id=NEW.workspace_id AND
+      a.state='failed' AND a.terminal_reason='background_run_stopped_before_start' AND
+      t.state='failed' AND t.terminal_reason='background_run_stopped_before_start' AND
+      json_extract(ae.payload,'$.runId')=NEW.task_id AND
+      json_extract(ae.payload,'$.reason')='background_run_stopped_before_start'
+  ) AND OLD.state='queued' THEN RAISE(ABORT, 'background run stop has no exact terminal task attempt') END;
+END;
+
+CREATE TRIGGER background_runs_stop_fields_immutable BEFORE UPDATE ON background_runs
+WHEN OLD.cancel_epoch=1 AND (NEW.cancel_epoch<>OLD.cancel_epoch OR NEW.stop_receipt_id IS NOT OLD.stop_receipt_id OR
+  NEW.stop_actor_snapshot_id IS NOT OLD.stop_actor_snapshot_id OR NEW.stop_requested_at IS NOT OLD.stop_requested_at)
+BEGIN SELECT RAISE(ABORT, 'background run stop fields are immutable'); END;
+`
 
 const publicationAdmissionReceiptSchema = `
 ALTER TABLE publications ADD COLUMN admission_receipt_id TEXT

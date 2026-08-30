@@ -18,6 +18,7 @@ import (
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/observability"
+	"github.com/nebler/fern/internal/runapi"
 	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskapi"
@@ -61,6 +62,7 @@ const (
 type taskServices struct {
 	store        *taskstore.Store
 	handler      http.Handler
+	runs         http.Handler
 	coordinator  taskDeliveryService
 	execution    taskRunService
 	verification taskRunService
@@ -230,6 +232,29 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	if err != nil {
 		return nil, err
 	}
+	baseVerifier, err := runapi.NewGitBaseVerifier(cfg.Workspace.Repo, verificationGitExecutable(), taskInspectTimeout)
+	if err != nil {
+		return nil, err
+	}
+	hostname := github.Hostname
+	if hostname == "" {
+		hostname = "github.com"
+	}
+	availableProfile := ""
+	if taskOpenCodeProtocol == "1.18.16" {
+		availableProfile = runapi.PluginOpenCodeProfile
+	}
+	runs, err := runapi.New(runapi.Config{
+		WorkspaceID: durableWorkspace.ID, RepositoryID: durableWorkspace.RepositoryID,
+		RepositoryRemote: "https://" + hostname + "/" + github.Repository.FullName,
+		ImageIdentity:    imageID, OpenCodeProtocol: taskOpenCodeProtocol, AvailableProfile: availableProfile,
+		Store: store, Generator: ids, ActorResolver: taskapi.ContextActor, BaseVerifier: baseVerifier,
+		Now: time.Now, AttemptTimeout: cfg.Tasks.AttemptTimeout, Agent: cfg.Tasks.Agent,
+		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID, BudgetSnapshot: budget,
+	})
+	if err != nil {
+		return nil, err
+	}
 	closeOnError = false
 	status.Healthy(observability.ComponentTaskDelivery)
 	status.Healthy(observability.ComponentTaskExecution)
@@ -243,7 +268,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 		verificationService = verificationCoordinator
 	}
 	return &taskServices{
-		store: store, handler: handler, coordinator: coordinator,
+		store: store, handler: handler, runs: runs, coordinator: coordinator,
 		execution: executionCoordinator, verification: verificationService, publication: publicationService,
 		result: resultCoordinator, resultWake: resultWake, status: status,
 	}, nil
