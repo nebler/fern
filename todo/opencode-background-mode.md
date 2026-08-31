@@ -131,6 +131,47 @@ retention behavior. Add Background Runs as a separate disposable lane.
 - [ ] Dogfood six real runs, including two concurrent pairs and one forced
   runtime failure, before applying the product kill gates.
 
+## Parallel Execution Plan
+
+Use isolated branches or worktrees for every lane. One integrator owns shared
+state-machine files, compatibility fixtures, merge order, final documentation,
+and release verification. Lane agents do not update this checklist directly.
+
+| Lane | Scope | Exclusive ownership | Start gate | Merge gate |
+| --- | --- | --- | --- | --- |
+| A: result authority | Seal command, schema, claims, lifecycle, receipts, result projection | `internal/taskstore`, migration and compatibility fixtures | Immediate | Contract tests and upgrade checks pass |
+| B: artifact engine | Git commit selection, manifest, bundle, CAS ingestion, verification, materialization | New Background Run result package and its unit tests | Result contract types fixed | Deterministic artifact and reconstruction tests pass |
+| C: plugin | `/fern` setup, confirmation, create, runs, open, stop, and later result UX | Plugin package, fake backend, plugin tests | Immediate | Existing run API contract tests pass |
+| D: qualification | Runtime failures, cleanup interruption, private TLS/device evidence, release gates | Integration harnesses and deployment evidence | Immediate | Real harness and negative gates pass |
+| Integrator | Coordinator wiring, API composition, conflict resolution, docs, final gates | `internal/backgroundruncoord`, `internal/runapi`, `cmd/fern`, shared docs | Lanes A and B mergeable | Full unit, race, upgrade, release, and real Docker suites pass |
+
+### Merge Order
+
+1. Freeze and merge the retained-result contract and schema authority.
+2. Merge the artifact engine after it implements that exact contract.
+3. Wire seal, collection, retention, cleanup, reconstruction, and `/result` in
+   the coordinator and run API.
+4. Merge result fault injection and compatibility evidence.
+5. Merge the plugin after `/result` is stable; create, runs, open, and stop may
+   land earlier if independently useful.
+6. Complete physical private-TLS qualification and registry-digest promotion.
+7. Begin capacity-two scheduling and bounded per-run origins only after every
+   serial retained-result fault gate passes.
+
+### Conflict Rules
+
+- [ ] Only Lane A edits the active taskstore schema and migration checksums until
+  its merge gate passes.
+- [ ] Only the integrator edits coordinator phase dispatch while result authority
+  and artifact effects are being joined.
+- [ ] Capacity-two work does not modify the serial lifecycle before retained
+  result reconstruction is proven after runtime deletion.
+- [ ] Every lane rebases on the last merge gate before handoff and includes exact
+  verification commands and residual risks.
+- [ ] A Git-clean merge is insufficient: lifecycle ordering, idempotency,
+  ownership, credential redaction, and crash recovery must be reviewed again at
+  integration.
+
 ## Work Order
 
 Serial disposable execution, restart recovery, and private native-session
