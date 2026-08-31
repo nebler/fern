@@ -190,6 +190,24 @@ func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, sta
 		add("tailscale", "fail", topologyErr.Error(), "Make proxy.remoteOrigin, the root Serve origin, and this host's tailnet HTTPS origin identical.")
 		return
 	}
+	if cfg.Tasks != nil && cfg.Tasks.BackgroundRoute != nil {
+		routeOrigin, routeErr := discoverTailscaleURL(ctx, cfg.Tasks.BackgroundRoute.Listen, cfg.OperatorListen)
+		parsedRouteOrigin, _ := url.Parse(cfg.Tasks.BackgroundRoute.Origin)
+		if routeErr != nil || routeOrigin != cfg.Tasks.BackgroundRoute.Origin {
+			add("background-route", "fail", "the Background Run listener is not published at its exact configured private origin",
+				fmt.Sprintf("Run tailscale serve --https=%s --bg http://%s without changing any other listener.", parsedRouteOrigin.Port(), cfg.Tasks.BackgroundRoute.Listen))
+			return
+		}
+		if routeErr := checkBackgroundRouteSurface(ctx, "http://"+cfg.Tasks.BackgroundRoute.Listen); routeErr != nil {
+			add("background-route", "fail", "the local Background Run listener is not serving the dedicated paired-device boundary", "Start Fern with the configured Background Run listener, then retry.")
+			return
+		}
+		if routeErr := checkBackgroundRouteSurface(ctx, cfg.Tasks.BackgroundRoute.Origin); routeErr != nil {
+			add("background-route", "fail", "the private Background Run origin does not reach the dedicated paired-device boundary", "Check the exact Tailscale Serve port mapping and private TLS route, then retry.")
+			return
+		}
+		add("background-route", "pass", "private Background Run route reaches its exact loopback listener", "")
+	}
 	code, pairErr := issuePairingCode(ctx, localURL, cfg.Control.Password)
 	if pairErr != nil {
 		add("pairing", "fail", "could not create a one-time phone pairing link", "Ensure the local Fern process is the current build.")
@@ -207,6 +225,25 @@ func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, sta
 	add("tailscale", "pass", "private HTTPS route reaches Fern", "")
 	add("pairing", "pass", "one-time phone pairing link created", "")
 	add("phone", "pass", "phone-demo transport is ready", "")
+}
+
+func checkBackgroundRouteSurface(ctx context.Context, origin string) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/api/health", nil)
+	if err != nil {
+		return err
+	}
+	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusUnauthorized || response.Header.Get("Cache-Control") != "no-store" {
+		return fmt.Errorf("Background Run route returned %s without the dedicated no-store boundary", response.Status)
+	}
+	return nil
 }
 
 func validatePhoneTopology(configured, asserted, served, local string, localErr error) error {

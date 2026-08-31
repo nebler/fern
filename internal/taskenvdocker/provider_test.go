@@ -29,6 +29,12 @@ import (
 
 const testImageID = "sha256:f493fc1cf2ffb087ef9733eb7f6f14fc0ae0966392fe54ccf695633570c82a82"
 
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (roundTrip roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return roundTrip(request)
+}
+
 func TestCloneIsolationReconciliationUsageAndPrivateAuthority(t *testing.T) {
 	provider, _, run := testProvider(t)
 	first, err := provider.EnsureClone(context.Background(), run)
@@ -730,6 +736,45 @@ func TestContainerLostResponsesAttestationAndExactEpochFence(t *testing.T) {
 	}
 	if _, err := provider.StopContainer(context.Background(), run, runtime); !errors.Is(err, ErrIdentityMismatch) {
 		t.Fatalf("restarted same-container stop error=%v", err)
+	}
+}
+
+func TestBackgroundRouteTransportAttestsExactEpochBeforeForwarding(t *testing.T) {
+	provider, docker, run := preparedProvider(t)
+	created, err := provider.EnsureContainer(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := provider.StartContainer(context.Background(), run, created.ContainerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.ObservedContainerID = started.ContainerID
+	run.ObservedContainerStartedAt = started.ContainerStarted
+	run.RuntimeEpoch = started.RuntimeEpoch
+	run.HostPort = started.HostPort
+	var forwarded atomic.Int32
+	provider.http.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		forwarded.Add(1)
+		if username, password, ok := request.BasicAuth(); !ok || username != provider.config.BasicUsername || password != provider.password(run) {
+			t.Errorf("forwarded route credentials were not exact")
+		}
+		return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
+	})
+	digest, err := provider.validateRun(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/", nil)
+	managerTransport := &routeTransport{base: provider.http.Transport, provider: provider, run: run, digest: digest,
+		runtime: started.RuntimeIdentity(), hostPort: run.HostPort, username: provider.config.BasicUsername, password: provider.password(run)}
+	response, err := managerTransport.RoundTrip(request)
+	if err != nil || response.StatusCode != http.StatusNoContent || forwarded.Load() != 1 {
+		t.Fatalf("exact route response=%v forwarded=%d error=%v", response, forwarded.Load(), err)
+	}
+	docker.info.State.StartedAt = "2026-08-31T12:00:01.123456789Z"
+	if _, err := managerTransport.RoundTrip(request); !errors.Is(err, ErrIdentityMismatch) || forwarded.Load() != 1 {
+		t.Fatalf("replacement route forwarded=%d error=%v", forwarded.Load(), err)
 	}
 }
 

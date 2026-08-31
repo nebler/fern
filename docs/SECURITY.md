@@ -42,8 +42,9 @@ provider credentials intentionally exposed there.
   revocable, fence authentication against request registration, cancel active
   requests only after durable revocation, and impose credential-expiry request
   deadlines. They cannot authenticate OpenCode, device, general control, or
-  operator routes. The reserved `/fern/api/runs` namespace has no server-side
-  run handlers in this slice.
+  operator routes. The reserved `/fern/api/runs` namespace exposes only its
+  fixed scoped run operations. The disposable run origin exposes no Fern task,
+  plugin, pairing-issuance, or operator API.
 - Plugin approval and denial honor request cancellation through the last safe
   point before atomic rename. Once rename has succeeded, the transition may
   already be durable; Fern completes directory sync and reports the commit
@@ -61,6 +62,13 @@ provider credentials intentionally exposed there.
   Fetch Metadata rejects same-site siblings and cross-site browser mutations.
   Device-cookie mutations additionally require short-lived HMAC tokens bound to
   credential, method, and route; explicit Basic-auth mutations are token-exempt.
+- The dedicated Background Run origin reuses the durable host-only paired-device
+  cookie across HTTPS ports. Native OpenCode mutations and WebSocket handshakes
+  use strict configured Origin/Referer plus same-origin Fetch Metadata checks
+  instead of Fern-specific CSRF headers. Browser Authorization and all cookies
+  are removed before provider-owned run Basic auth is injected. Every newly
+  admitted upstream request re-attests the exact Docker process epoch and
+  published loopback port before that credential is used.
 - The GitHub App setup route is operator-authenticated on loopback. Only its
   exact callback route is reachable without a device grant on remote ingress;
   callback authorization is a bounded random one-use state, authority must equal

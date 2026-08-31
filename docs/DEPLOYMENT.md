@@ -202,20 +202,32 @@ records quarantined; it does not replay effects.
 
 ```bash
 sudo tailscale serve --bg http://127.0.0.1:8080
+# If configured, publish only the exact Background Run loopback listener too:
+sudo tailscale serve --https=8443 --bg http://127.0.0.1:8443
 sudo tailscale serve status
 sudo -H -u fern /usr/local/bin/fern doctor \
   --config /etc/fern/fern.yaml --env-file /etc/fern/fern.env --phone
 ```
 
-The Serve target must be port 8080 only. The reported root HTTPS origin must
-match `proxy.remoteOrigin` byte for byte. Scan the short-lived QR from the
-intended browser and explicitly confirm pairing. A scanner GET preview does not
-consume the code.
+The root Serve target must be port 8080 only. If Background Runs are configured,
+the only additional target is the exact numeric-loopback
+`tasks.backgroundRoute.listen`, published with
+`tailscale serve --https=<origin-port> --bg http://<listen>`. Its HTTPS hostname
+must equal `proxy.remoteOrigin`, and the explicit non-443 port must match
+`tasks.backgroundRoute.origin`. Never expose `proxy.operatorListen`, a Docker
+published run port, or any other listener. Fern binds and proxies the local run
+listener but never invokes or mutates Tailscale.
 
-Automated local tests emulate HTTPS metadata over HTTP; they do not prove real
-TLS redirects, WSS terminal traffic, OAuth callbacks, mobile sleep/wake, or
-physical revocation. Exercise those through the actual private edge and record
-redacted evidence before acceptance.
+The reported origins must match configuration byte for byte. Scan the
+short-lived QR from the intended browser and explicitly confirm pairing. A
+scanner GET preview does not consume the code.
+
+Local tests qualify root routing, exact forwarded-origin metadata, redirects,
+SSE flushing, WebSocket upgrade shape, and paired-device rejection through the
+loopback run listener. Actual Tailscale multi-port/private TLS behavior,
+installed-device acceptance, OAuth callbacks, mobile sleep/wake, and physical
+revocation remain external and unverified. Exercise those through the actual
+private edge and record redacted evidence before acceptance.
 
 ## 7. Reboot And Physical Rehearsal
 

@@ -8,11 +8,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -22,7 +24,9 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 	"github.com/nebler/fern/internal/backgroundopencode"
+	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/backgroundruncoord"
+	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskenvdocker"
 	"github.com/nebler/fern/internal/taskstore"
@@ -384,7 +388,7 @@ func run() (resultErr error) {
 	if err := runSerialCoordinator(ctx, temporary, repository, providerEndpoint, provider, cli, imageID, base); err != nil {
 		return err
 	}
-	fmt.Printf("PASS profile=%s image_id=%s session=exact prompt=admitted_promoted response_loss=after_effect active=positive interrupt=204 reconstruction=provider_client no_prompt_replay=true provider_calls=1 marker=exact serial_coordinator=complete fence_crash=uncertain_zero_post runtime_restart=uncertain\n", backgroundopencode.Profile, imageID)
+	fmt.Printf("PASS profile=%s image_id=%s session=exact prompt=admitted_promoted response_loss=after_effect active=positive interrupt=204 reconstruction=provider_client no_prompt_replay=true provider_calls=1 marker=exact serial_coordinator=complete route=paired_root_health open_replay=stable fence_crash=uncertain_zero_post runtime_restart=pre_reconcile_502_then_unbound_cleanup\n", backgroundopencode.Profile, imageID)
 	return nil
 }
 
@@ -403,6 +407,27 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	if err != nil {
 		return err
 	}
+	routeDirectory := filepath.Join(root, "serial-control")
+	if err := os.MkdirAll(routeDirectory, 0o700); err != nil {
+		return err
+	}
+	if err := os.Chmod(routeDirectory, 0o700); err != nil {
+		return err
+	}
+	controlStore, err := control.Open(routeDirectory, "serial-background")
+	if err != nil {
+		return err
+	}
+	deviceToken := "serial-paired-device-token"
+	deviceNow := time.Now()
+	if _, err := controlStore.AddDevice(deviceToken, "Serial harness", deviceNow, deviceNow.Add(time.Hour)); err != nil {
+		return err
+	}
+	route, routeURL, routeAddress, stopRoute, err := startSerialRoute(ctx, controlStore, "")
+	if err != nil {
+		return err
+	}
+	defer func() { _ = stopRoute() }()
 	now := time.Now().UTC().Truncate(time.Millisecond)
 	if _, err := store.EnsureWorkspace(ctx, taskstore.Workspace{
 		ID: workspaceID, Name: "serial-background", State: taskstore.WorkspaceActive, RepositoryPath: repository,
@@ -464,7 +489,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 		Profile: backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
 		OperationTimeout: 20 * time.Second, LeaseDuration: time.Minute, PollInterval: 100 * time.Millisecond,
 		HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000}, Now: time.Now,
-		HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: loss}, AfterPromptCall: func(error) { cancelOperation() },
+		HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: loss}, AfterPromptCall: func(error) { cancelOperation() }, Route: route,
 	}
 	coordinator, err := backgroundruncoord.New(store, provider, ids, config)
 	if err != nil {
@@ -493,6 +518,16 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	if err := store.Close(); err != nil {
 		return err
 	}
+	if err := stopRoute(); err != nil {
+		return err
+	}
+	route, routeURL, _, stopRoute, err = startSerialRoute(ctx, controlStore, routeAddress)
+	if err != nil {
+		return err
+	}
+	if status, routeErr := serialRouteStatus(routeURL, deviceToken, "/api/health"); routeErr != nil || status != http.StatusNotFound {
+		return fmt.Errorf("restarted unbound route status=%d error=%v", status, routeErr)
+	}
 	store, err = taskstore.Open(context.Background(), databasePath)
 	if err != nil {
 		return err
@@ -502,6 +537,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	config.SystemActor.RequestID = config.WorkerID
 	config.AfterPromptCall = nil
 	config.Now = func() time.Time { return time.Now().Add(2 * time.Minute) }
+	config.Route = route
 	coordinator, err = backgroundruncoord.New(store, provider, ids, config)
 	if err != nil {
 		return err
@@ -521,6 +557,12 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	}
 	if current.State != taskstore.BackgroundRunWorking || loss.calls.Load() != 1 {
 		return fmt.Errorf("serial read-only recovery state=%s prompt_calls=%d", current.State, loss.calls.Load())
+	}
+	if err := verifySerialRoute(routeURL, deviceToken); err != nil {
+		return err
+	}
+	if err := verifySerialOpenReplay(store, ids, current, actor, route, deviceToken); err != nil {
+		return err
 	}
 	if err := waitFor(ctx, "serial provider call", func() (bool, error) {
 		stats, readErr := readStats(providerEndpoint)
@@ -546,33 +588,16 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	if err := cli.ContainerStart(context.Background(), current.ObservedContainerID, container.StartOptions{}); err != nil {
 		return fmt.Errorf("serial runtime replacement start: %w", err)
 	}
+	if status, routeErr := serialRouteStatus(routeURL, deviceToken, "/api/health"); routeErr != nil || status != http.StatusBadGateway {
+		return fmt.Errorf("replacement reached route before reconciliation status=%d error=%v", status, routeErr)
+	}
 	observeErr := coordinator.RunOnce(context.Background())
 	current, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
-	if !errors.Is(observeErr, taskenvdocker.ErrIdentityMismatch) || err != nil || current.State != taskstore.BackgroundRunUncertain {
+	if !errors.Is(observeErr, taskenvdocker.ErrIdentityMismatch) || err != nil || current.State != taskstore.BackgroundRunCleanupRequired {
 		return fmt.Errorf("serial runtime replacement state=%s observe_error=%v read_error=%v", current.State, observeErr, err)
 	}
-	stopHash := sha256.Sum256([]byte("serial-stop"))
-	stopReceipt, err := ids.ReceiptID()
-	if err != nil {
-		return err
-	}
-	stopAttemptEvent, err := ids.EventID()
-	if err != nil {
-		return err
-	}
-	stopTaskEvent, err := ids.EventID()
-	if err != nil {
-		return err
-	}
-	stopped, err := store.StopBackgroundRun(context.Background(), taskstore.StopBackgroundRunParams{
-		WorkspaceID: workspaceID, TaskID: current.TaskID, ReceiptID: stopReceipt,
-		AttemptEventID: stopAttemptEvent, TaskEventID: stopTaskEvent,
-		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.StopBackgroundRunCommand},
-			Key: "serial-stop", RequestHash: stopHash, Actor: actor}, APIContractVersion: "fern.background-run.v1",
-		StoppedAt: time.Now().UTC().Truncate(time.Millisecond).Add(2 * time.Minute),
-	})
-	if err != nil || stopped.Run.State != taskstore.BackgroundRunCanceling {
-		return fmt.Errorf("serial durable stop=%+v error=%v", stopped.Run, err)
+	if status, routeErr := serialRouteStatus(routeURL, deviceToken, "/api/health"); routeErr != nil || status != http.StatusNotFound {
+		return fmt.Errorf("replacement inherited route status=%d error=%v", status, routeErr)
 	}
 	for step := 0; step < 20; step++ {
 		if err := coordinator.RunOnce(context.Background()); err != nil && !errors.Is(err, backgroundruncoord.ErrNoWork) {
@@ -586,7 +611,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 			break
 		}
 	}
-	if current.State != taskstore.BackgroundRunFailed || current.EffectPhase != taskstore.BackgroundRunEffectCleanupComplete || current.LastError != "user_stopped" {
+	if current.State != taskstore.BackgroundRunFailed || current.EffectPhase != taskstore.BackgroundRunEffectCleanupComplete || current.LastError != "runtime_unavailable" {
 		return fmt.Errorf("serial terminal run=%s/%s reason=%s", current.State, current.EffectPhase, current.LastError)
 	}
 	if _, err := cli.ContainerInspect(context.Background(), intent.ContainerIdentity); !client.IsErrNotFound(err) {
@@ -605,10 +630,10 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	defer database.Close()
 	var taskState, attemptState, taskReason, attemptReason string
 	if err := database.QueryRow(`SELECT t.state,a.state,t.terminal_reason,a.terminal_reason FROM tasks t JOIN attempts a ON a.id=t.current_attempt_id WHERE t.id=?`, current.TaskID).
-		Scan(&taskState, &attemptState, &taskReason, &attemptReason); err != nil || taskState != "failed" || attemptState != "failed" || taskReason != "user_stopped" || attemptReason != taskReason {
+		Scan(&taskState, &attemptState, &taskReason, &attemptReason); err != nil || taskState != "failed" || attemptState != "failed" || taskReason != "runtime_unavailable" || attemptReason != taskReason {
 		return fmt.Errorf("serial parent consistency task=%s attempt=%s reasons=%s/%s error=%v", taskState, attemptState, taskReason, attemptReason, err)
 	}
-	if err := runPreDispatchFenceScenario(ctx, root, provider, cli, ids, workspaceID, imageID, base); err != nil {
+	if err := runPreDispatchFenceScenario(ctx, root, provider, cli, ids, workspaceID, imageID, base, route); err != nil {
 		return err
 	}
 	labelled, err := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(
@@ -656,8 +681,111 @@ func privateBackgroundResidue(name string) bool {
 		strings.HasPrefix(name, ".clone-authority-") || strings.HasPrefix(name, ".clone-marker-stage-")
 }
 
+func startSerialRoute(parent context.Context, store *control.Store, address string) (*backgroundroute.Manager, string, string, func() error, error) {
+	if address == "" {
+		address = "127.0.0.1:0"
+	}
+	listener, err := net.Listen("tcp4", address)
+	if err != nil {
+		return nil, "", "", nil, err
+	}
+	manager, err := backgroundroute.New(listener, "https://fern.example.ts.net:8443", store)
+	if err != nil {
+		_ = listener.Close()
+		return nil, "", "", nil, err
+	}
+	ctx, cancel := context.WithCancel(parent)
+	done := make(chan error, 1)
+	go func() { done <- manager.Run(ctx) }()
+	var once sync.Once
+	var stopErr error
+	stop := func() error {
+		once.Do(func() {
+			cancel()
+			stopErr = <-done
+		})
+		return stopErr
+	}
+	bound := listener.Addr().String()
+	return manager, "http://" + bound, bound, stop, nil
+}
+
+func verifySerialRoute(origin, token string) error {
+	status, err := serialRouteStatus(origin, token, "/")
+	if err != nil || status != http.StatusOK {
+		return fmt.Errorf("paired official root status=%d error=%v", status, err)
+	}
+	status, err = serialRouteStatus(origin, token, "/api/health")
+	if err != nil || status != http.StatusOK {
+		return fmt.Errorf("paired authenticated health status=%d error=%v", status, err)
+	}
+	for name, credential := range map[string]string{"unpaired": "", "wrong": "wrong-device-token"} {
+		status, err = serialRouteStatus(origin, credential, "/api/health")
+		if err != nil || status != http.StatusUnauthorized {
+			return fmt.Errorf("%s route access status=%d error=%v", name, status, err)
+		}
+	}
+	return nil
+}
+
+func verifySerialOpenReplay(store *taskstore.Store, ids *task.Generator, run taskstore.BackgroundRun, actor task.ActorSnapshot, route *backgroundroute.Manager, forbiddenToken string) error {
+	origin, active := route.ActiveOrigin(run)
+	if !active {
+		return errors.New("serial open route was not exactly active")
+	}
+	trusted, err := backgroundopencode.ParseTrustedOrigin(origin)
+	if err != nil {
+		return err
+	}
+	deepLink, err := backgroundopencode.DeepLink(trusted, string(run.OpenCodeSessionID))
+	if err != nil {
+		return err
+	}
+	receipt, err := ids.ReceiptID()
+	if err != nil {
+		return err
+	}
+	hash := sha256.Sum256([]byte("serial-open:" + string(run.TaskID)))
+	params := taskstore.OpenBackgroundRunParams{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, ReceiptID: receipt,
+		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: run.WorkspaceID, CommandKind: taskstore.OpenBackgroundRunCommand},
+			Key: "serial-open", RequestHash: hash, Actor: actor}, URL: deepLink, APIContractVersion: "fern.background-run.v1",
+		OpenedAt: time.Now().UTC().Truncate(time.Millisecond).Add(2 * time.Minute)}
+	first, err := store.OpenBackgroundRun(context.Background(), params)
+	if err != nil {
+		return err
+	}
+	params.ReceiptID, err = ids.ReceiptID()
+	if err != nil {
+		return err
+	}
+	replay, err := store.OpenBackgroundRun(context.Background(), params)
+	if err != nil || !replay.Replayed || first.Receipt.ID != replay.Receipt.ID || string(first.Receipt.ResponseProjection) != string(replay.Receipt.ResponseProjection) ||
+		strings.Contains(string(replay.Receipt.ResponseProjection), forbiddenToken) {
+		return fmt.Errorf("serial open replay stable=%t receipt=%s/%s error=%v", replay.Replayed, first.Receipt.ID, replay.Receipt.ID, err)
+	}
+	return nil
+}
+
+func serialRouteStatus(origin, token, path string) (int, error) {
+	request, err := http.NewRequest(http.MethodGet, origin+path, nil)
+	if err != nil {
+		return 0, err
+	}
+	if token != "" {
+		request.AddCookie(&http.Cookie{Name: "__Host-fern_device", Value: token})
+	}
+	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Do(request)
+	if err != nil {
+		return 0, err
+	}
+	defer response.Body.Close()
+	_, readErr := io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
+	return response.StatusCode, readErr
+}
+
 func runPreDispatchFenceScenario(ctx context.Context, root string, provider *taskenvdocker.Provider, cli *client.Client,
-	ids *task.Generator, workspaceID task.WorkspaceID, imageID, base string) error {
+	ids *task.Generator, workspaceID task.WorkspaceID, imageID, base string, route *backgroundroute.Manager) error {
 	databasePath := filepath.Join(root, "fence-task-store.sqlite")
 	store, err := taskstore.Open(ctx, databasePath)
 	if err != nil {
@@ -715,7 +843,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 		Profile: backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
 		OperationTimeout: 20 * time.Second, LeaseDuration: time.Minute, PollInterval: 100 * time.Millisecond,
 		HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000},
-		Now:           func() time.Time { return time.Now().Add(2 * time.Minute) }, HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: transport},
+		Now:           func() time.Time { return time.Now().Add(2 * time.Minute) }, HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: transport}, Route: route,
 		AfterPromptFence: crash,
 	}
 	coordinator, err := backgroundruncoord.New(store, provider, ids, config)

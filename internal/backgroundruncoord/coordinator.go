@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/backgroundopencode"
+	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskenvdocker"
 	"github.com/nebler/fern/internal/taskstore"
@@ -36,6 +37,7 @@ type Config struct {
 	HistoryBounds     backgroundopencode.HistoryBounds
 	Now               func() time.Time
 	HTTPClient        *http.Client
+	Route             *backgroundroute.Manager
 	OnError           func(error)
 	OnSuccess         func()
 	AfterPromptFence  func()
@@ -52,7 +54,7 @@ type Coordinator struct {
 }
 
 func New(store *taskstore.Store, provider *taskenvdocker.Provider, ids *task.Generator, config Config) (*Coordinator, error) {
-	if store == nil || provider == nil || ids == nil || config.Now == nil || config.HTTPClient == nil ||
+	if store == nil || provider == nil || ids == nil || config.Now == nil || config.HTTPClient == nil || config.Route == nil ||
 		config.Profile != taskstore.BackgroundRunSourceProfile || config.ImageIdentity == "" || config.EnvironmentSHA256 == ([32]byte{}) || config.WorkerID == "" ||
 		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.OperationTimeout <= 0 ||
 		config.LeaseDuration <= config.OperationTimeout || config.LeaseDuration > 5*time.Minute || config.PollInterval <= 0 ||
@@ -194,12 +196,24 @@ func (c *Coordinator) process(ctx, parent context.Context, work taskstore.Backgr
 	case taskstore.BackgroundRunEffectHealthObserved:
 		return c.record(parent, work, `{"effect":"serial_runtime_ready","status":"exact"}`, c.store.RecordBackgroundRunReady)
 	case taskstore.BackgroundRunEffectReady:
+		if err := c.ensureRoute(ctx, run); err != nil {
+			return c.externalFailure(parent, work, err)
+		}
 		return c.reconcileSession(ctx, parent, work)
 	case taskstore.BackgroundRunEffectSessionObserved:
+		if err := c.ensureRoute(ctx, run); err != nil {
+			return c.externalFailure(parent, work, err)
+		}
 		return c.record(parent, work, `{"effect":"prompt_intent","status":"committed"}`, c.store.RecordBackgroundRunPromptIntent)
 	case taskstore.BackgroundRunEffectPromptIntent:
+		if err := c.ensureRoute(ctx, run); err != nil {
+			return c.externalFailure(parent, work, err)
+		}
 		return c.reconcilePrompt(ctx, parent, work)
 	case taskstore.BackgroundRunEffectPromptAdmitted:
+		if err := c.ensureRoute(ctx, run); err != nil {
+			return c.externalFailure(parent, work, err)
+		}
 		return c.observeWorking(ctx, parent, work)
 	case taskstore.BackgroundRunEffectStopIntent:
 		observation, _, err := c.provider.ProveWriterInactive(ctx, run)
@@ -208,8 +222,23 @@ func (c *Coordinator) process(ctx, parent context.Context, work taskstore.Backgr
 		}
 		return c.record(parent, work, observation.Evidence, c.store.RecordBackgroundRunWriterInactive)
 	case taskstore.BackgroundRunEffectWriterInactive:
-		return c.record(parent, work, `{"effect":"route_remove","status":"serial_route_absent"}`, c.store.RecordBackgroundRunRouteRemoved)
+		identity, err := c.routeIdentity(run)
+		if err != nil {
+			return c.cleanupFailure(parent, work, err)
+		}
+		removed, err := c.config.Route.Remove(ctx, identity)
+		if err != nil {
+			return c.cleanupFailure(parent, work, err)
+		}
+		return c.record(parent, work, removed, c.store.RecordBackgroundRunRouteRemoved)
 	case taskstore.BackgroundRunEffectRouteRemoved:
+		identity, identityErr := c.routeIdentity(run)
+		if identityErr != nil {
+			return c.cleanupFailure(parent, work, identityErr)
+		}
+		if err := c.config.Route.ConfirmRemoval(identity); err != nil {
+			return c.cleanupFailure(parent, work, err)
+		}
 		_, authority, err := c.provider.ProveWriterInactive(ctx, run)
 		if err != nil {
 			return c.cleanupFailure(parent, work, err)
@@ -430,6 +459,35 @@ func (c *Coordinator) client(ctx context.Context, run taskstore.BackgroundRun) (
 	return c.provider.OpenCodeClient(run, runtime, c.config.HTTPClient)
 }
 
+func (c *Coordinator) ensureRoute(ctx context.Context, run taskstore.BackgroundRun) error {
+	runtime, err := c.provider.CommittedRuntime(run)
+	if err != nil {
+		return err
+	}
+	if _, err := c.provider.Health(ctx, run, runtime); err != nil {
+		return err
+	}
+	target, err := c.provider.BackgroundRouteTarget(run, runtime)
+	if err != nil {
+		return err
+	}
+	_, err = c.config.Route.Activate(routeIdentity(run, runtime), target)
+	return err
+}
+
+func (c *Coordinator) routeIdentity(run taskstore.BackgroundRun) (backgroundroute.Identity, error) {
+	runtime, err := c.provider.CommittedRuntime(run)
+	if err != nil {
+		return backgroundroute.Identity{}, err
+	}
+	return routeIdentity(run, runtime), nil
+}
+
+func routeIdentity(run taskstore.BackgroundRun, runtime taskenvdocker.RuntimeIdentity) backgroundroute.Identity {
+	return backgroundroute.Identity{WorkspaceID: string(run.WorkspaceID), TaskID: string(run.TaskID), AttemptID: string(run.AttemptID),
+		Generation: run.Generation, RuntimeEpoch: run.RuntimeEpoch, ContainerID: runtime.ContainerID, StartedAt: runtime.StartedAt, RuntimeToken: runtime.Token}
+}
+
 func (c *Coordinator) externalFailure(ctx context.Context, work taskstore.BackgroundRunWork, external error) error {
 	if errors.Is(external, taskenvdocker.ErrIdentityMismatch) || errors.Is(external, taskenvdocker.ErrQuarantined) {
 		return errors.Join(external, c.cleanupRequired(ctx, work, "background resource identity mismatch"))
@@ -444,6 +502,11 @@ func (c *Coordinator) externalFailure(ctx context.Context, work taskstore.Backgr
 }
 
 func (c *Coordinator) cleanupRequired(ctx context.Context, work taskstore.BackgroundRunWork, reason string) error {
+	if identity, identityErr := c.routeIdentity(work.Run); identityErr == nil && c.config.Route.Active(identity) {
+		if _, removeErr := c.config.Route.Remove(ctx, identity); removeErr != nil {
+			return removeErr
+		}
+	}
 	mutation, cancel, now, err := c.effectContext(ctx, work, !cleanupPhase(work.Run.EffectPhase))
 	if err != nil {
 		return err

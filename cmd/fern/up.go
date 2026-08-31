@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/githubapp"
@@ -52,6 +53,13 @@ func runUp(args []string, log *slog.Logger) error {
 	}
 	defer remoteListener.Close()
 	defer operatorListener.Close()
+	backgroundListener, err := listenBackgroundRoute(cfg)
+	if err != nil {
+		return err
+	}
+	if backgroundListener != nil {
+		defer backgroundListener.Close()
+	}
 
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
@@ -62,7 +70,7 @@ func runUp(args []string, log *slog.Logger) error {
 	}
 	defer lease.Release()
 
-	rt, err := assembleServices(serviceCtx, cfg, spec, auth, trustedProxyOrigins(cfg), remoteListener, operatorListener, log)
+	rt, err := assembleServices(serviceCtx, cfg, spec, auth, trustedProxyOrigins(cfg), remoteListener, operatorListener, backgroundListener, log)
 	if err != nil {
 		return err
 	}
@@ -71,6 +79,9 @@ func runUp(args []string, log *slog.Logger) error {
 	defer rt.lifecycle.release()
 	if rt.tasks != nil {
 		defer rt.tasks.Close()
+	}
+	if rt.backgroundRoute != nil {
+		defer rt.backgroundRoute.Close()
 	}
 
 	startSupervisor(group, rt, serviceCtx)
@@ -215,6 +226,7 @@ type upRuntime struct {
 	operatorServer   *http.Server
 	remoteListener   net.Listener
 	operatorListener net.Listener
+	backgroundRoute  *backgroundroute.Manager
 	origins          proxy.TrustedOrigins
 	tasks            *taskServices
 	status           *observability.Registry
@@ -224,7 +236,7 @@ type upRuntime struct {
 // assembleServices builds every coordinator, handler, and HTTP server the
 // supervisor needs before it starts serving, performing the same partial
 // teardown the inline version performed on failure.
-func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtime.Spec, auth runtime.ServerAuth, origins proxy.TrustedOrigins, remoteListener, operatorListener net.Listener, log *slog.Logger) (*upRuntime, error) {
+func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtime.Spec, auth runtime.ServerAuth, origins proxy.TrustedOrigins, remoteListener, operatorListener, backgroundListener net.Listener, log *slog.Logger) (*upRuntime, error) {
 	controlDir, err := statePath("control")
 	if err != nil {
 		return nil, err
@@ -238,8 +250,25 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 		lifecycle.release()
 		return nil, err
 	}
+	var backgroundRoute *backgroundroute.Manager
+	if cfg.Tasks != nil && cfg.Tasks.BackgroundRoute != nil {
+		backgroundRoute, err = backgroundroute.New(backgroundListener, cfg.Tasks.BackgroundRoute.Origin, controlStore)
+		if err != nil {
+			lifecycle.release()
+			return nil, err
+		}
+	}
+	failStartup := func(startupErr error) error {
+		if backgroundRoute != nil {
+			startupErr = errors.Join(startupErr, backgroundRoute.Close())
+		}
+		return lifecycle.failStartup(startupErr)
+	}
 	pluginAuthStore, err := openPluginAuthorizationStore(controlStore, spec.Name)
 	if err != nil {
+		if backgroundRoute != nil {
+			err = errors.Join(err, backgroundRoute.Close())
+		}
 		lifecycle.release()
 		return nil, err
 	}
@@ -265,22 +294,22 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 	lifecycle.manager, lifecycle.managerStarted = manager, true
 	start := time.Now()
 	if err := manager.ReconcileStartup(serviceCtx); err != nil {
-		return nil, lifecycle.failStartup(err)
+		return nil, failStartup(err)
 	}
 	status.Healthy(observability.ComponentRuntime)
 	status.Healthy(observability.ComponentSupervisor)
 	observedManager := &statusWaker{Waker: manager, status: status}
 	onboarding, err := newGitHubOnboarding(cfg)
 	if err != nil {
-		return nil, lifecycle.failStartup(err)
+		return nil, failStartup(err)
 	}
-	tasks, err := newTaskServices(serviceCtx, cfg, lifecycle.docker, manager, auth, status, log)
+	tasks, err := newTaskServices(serviceCtx, cfg, lifecycle.docker, manager, backgroundRoute, auth, status, log)
 	if errors.Is(err, githubapp.ErrCredentialsNotFound) && onboarding != nil {
 		log.Warn("durable tasks await GitHub App onboarding and a Fern restart", "workspace", cfg.Workspace.Name)
 		tasks, err = nil, nil
 	}
 	if err != nil {
-		return nil, lifecycle.failStartup(err)
+		return nil, failStartup(err)
 	}
 	// abortAfterTasks mirrors the historical post-task failure unwind, which
 	// closed the bounded manager first, then the task store, then applied the
@@ -289,6 +318,9 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 		managerErr := runWithTimeout(managerCloseTimeout, lifecycle.closeManager)
 		if tasks != nil {
 			tasks.Close()
+		}
+		if backgroundRoute != nil {
+			startupErr = errors.Join(startupErr, backgroundRoute.Close())
 		}
 		lifecycle.release()
 		return errors.Join(startupErr, managerErr)
@@ -332,7 +364,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 		observations: observations, connections: connections,
 		remoteServer: remoteServer, operatorServer: operatorServer,
 		remoteListener: remoteListener, operatorListener: operatorListener,
-		origins: origins, tasks: tasks, status: status, start: start,
+		backgroundRoute: backgroundRoute, origins: origins, tasks: tasks, status: status, start: start,
 	}, nil
 }
 
@@ -435,6 +467,9 @@ func goComponent(group *errgroup.Group, serviceCtx context.Context, status *obse
 // attempts graceful shutdown with a forced-close fallback so hung clients
 // cannot stall exit past the shutdown deadline.
 func startProxyServers(group *errgroup.Group, rt *upRuntime, serviceCtx context.Context, log *slog.Logger) {
+	if rt.backgroundRoute != nil {
+		group.Go(func() error { return rt.backgroundRoute.Run(serviceCtx) })
+	}
 	for _, serving := range []struct {
 		server   *http.Server
 		listener net.Listener
@@ -460,6 +495,17 @@ func startProxyServers(group *errgroup.Group, rt *upRuntime, serviceCtx context.
 		rt.connections.closeAll()
 		return nil
 	})
+}
+
+func listenBackgroundRoute(cfg config.Config) (net.Listener, error) {
+	if cfg.Tasks == nil || cfg.Tasks.BackgroundRoute == nil {
+		return nil, nil
+	}
+	listener, err := net.Listen("tcp", cfg.Tasks.BackgroundRoute.Listen)
+	if err != nil {
+		return nil, fmt.Errorf("listen on background route %s: %w", cfg.Tasks.BackgroundRoute.Listen, err)
+	}
+	return listener, nil
 }
 
 // awaitShutdown waits for every service goroutine and then unwinds in the

@@ -2,7 +2,7 @@
 
 **Status:** active product experiment
 
-**Updated:** 2026-08-30
+**Updated:** 2026-08-31
 **Scope:** one trusted owner, one private Fern host, configured trusted
 repositories, and at most two concurrent Background Runs
 
@@ -62,32 +62,87 @@ already opened.
 - [x] Durable task admission commits Fern and exact OpenCode identities before
   delivery.
 - [x] Cancellation fences new Fern-owned effects.
-- [x] Explicit sealing binds a clean Git result to one task and attempt.
-- [x] Exact-result host verification and optional GitHub App publication exist.
-- [x] The owner completed the private browser and phone demonstration.
+- [x] Explicit sealing binds a clean Git result to one persistent-lane task and
+  attempt.
+- [x] Exact-result host verification and optional GitHub App publication exist
+  for the persistent lane.
+- [x] The owner completed the private browser and phone demonstration for the
+  persistent workspace.
 - [x] The repository and release fixture use Go 1.27.
-- [ ] Disposable per-run clones, volumes, containers, and endpoints do not
+- [x] The serial lane creates isolated per-run clones, volumes, containers,
+  runtime credentials, OpenCode sessions, and a fixed private route origin.
+- [x] Scoped plugin credentials and harness-neutral create, read, list, stop,
+  and open server operations exist.
+- [ ] Capacity remains one; multiple concurrent OpenCode workspaces do not
   exist.
-- [ ] Multiple concurrent OpenCode workspaces do not exist.
 - [ ] Exact Git object retention after checkout deletion does not exist.
-- [ ] The `/fern` plugin and scoped plugin authentication do not exist.
+- [ ] The packaged `/fern` plugin and retained-result action do not exist.
 
 Do not convert the persistent `workspace.Manager` into a scheduler or change its
 retention behavior. Add Background Runs as a separate disposable lane.
 
+## Immediate Next Todos
+
+### Retained Exact Result
+
+- [ ] Add the durable schema and migration for seal intent, writer-fence proof,
+  export journal, retained artifact identity, reconstruction state, and result
+  projection.
+- [ ] Add an explicit idempotent seal operation; do not infer completion from
+  idle state, silence, EOF, process exit, or container exit.
+- [ ] Positively prove the exact current writer inactive before reading Git
+  state, and reject stale attempt generations throughout collection.
+- [ ] Select or create one clean result commit rooted at the exact admitted base
+  without trusting agent-authored metadata as authority.
+- [ ] Build a self-contained Git bundle and immutable manifest containing the
+  exact repository, base, result commit, tree, changed object identities,
+  execution identity, and artifact digest.
+- [ ] Atomically ingest the bundle and manifest into a private host-owned
+  content-addressed store with bounded files, restrictive modes, fsync, and
+  digest verification.
+- [ ] Verify the bundle and independently materialize the exact result before
+  committing `result_ready` or deleting the container, volume, and clone.
+- [ ] Implement the scoped idempotent `/result` projection and reconstruction
+  path without exposing host paths, credentials, or mutable URLs.
+- [ ] Make verification and optional publication consume only the independently
+  materialized retained result.
+- [ ] Add crash and response-loss tests before and after every seal, export,
+  ingestion, result commit, cleanup, reconstruction, and publication boundary.
+
+### Capacity Two
+
+- [ ] Replace the serial fixed origin with a bounded configured private HTTPS
+  port set, while preserving one immutable listener/origin per active run.
+- [ ] Admit at most two active runs and queue excess work deterministically under
+  explicit CPU, memory, PID, disk-admission, and route capacity.
+- [ ] Prove two same-repository runs share no writable Git, OpenCode, credential,
+  endpoint, route, terminal, event, result, or cleanup state.
+- [ ] Restart Fern and independently reconstruct both exact runtime and route
+  bindings without replaying either prompt.
+
+### Installed Journey
+
+- [ ] Package the pinned `/fern` plugin with confirmation, scoped authorization,
+  create, runs, open, stop, and result actions over the existing run API.
+- [ ] Qualify actual Tailscale multi-port private TLS, browser cookie acceptance,
+  SSE, WSS, revocation, mobile sleep/wake, and cross-device native session use.
+- [ ] Promote the qualified OpenCode source image to an immutable registry
+  digest before external distribution.
+- [ ] Dogfood six real runs, including two concurrent pairs and one forced
+  runtime failure, before applying the product kill gates.
+
 ## Work Order
 
-Complete these milestones in order:
+Serial disposable execution, restart recovery, and private native-session
+routing are locally implemented. Complete the remaining milestones in this
+order:
 
-1. Prove `/fern` installation, onboarding, and durable submission against a fake
-   or existing Fern endpoint.
-2. Complete the pinned OpenHands/native OpenCode comparison and select one exact
-   OpenCode V2 contract.
-3. Run one serial disposable Background Run end to end.
-4. Seal, retain, delete, and reconstruct its exact Git result.
-5. Pass restart, lost-response, cancellation, and cleanup fault gates.
-6. Run two isolated disposable OpenCode workspaces concurrently.
-7. Dogfood six real runs and apply the product kill gates.
+1. Seal, retain, delete, and reconstruct one serial run's exact Git result.
+2. Pass the remaining restart, lost-response, cancellation, export, disk, and
+   cleanup fault gates.
+3. Run two isolated disposable OpenCode workspaces concurrently.
+4. Complete the installed `/fern` and physical cross-device journey.
+5. Dogfood six real runs and apply the product kill gates.
 
 ## 1. `/fern` And First-User Onboarding
 
@@ -230,8 +285,10 @@ the official session without replaying mutations.
   and endpoint identity.
 - [x] Pin the image by digest and run with the existing unprivileged UID/GID.
 - [x] Bound CPU, memory, PIDs, disk admission, wall time, and retained logs.
-- [ ] Reuse the current single-origin proxy shape while only one run can execute.
+- [x] Publish one fixed private HTTPS port origin while only one run can execute.
 - [x] Remove access before deleting or replacing the exact runtime.
+- [x] Re-attest the exact container process epoch and published port before each
+  proxied request and again after opening a new upstream connection.
 
 ### Admission And Takeover
 
@@ -243,8 +300,10 @@ the official session without replaying mutations.
   `cleanup_required`.
 - [x] Do not infer success from idle, EOF, process exit, container health, or an
   empty inbox.
-- [ ] Open the official OpenCode UI for inspection, questions, permissions,
-  steering, terminals, files, and diffs.
+- [x] Resolve the exact official OpenCode session deep link and preserve its
+  root-relative UI, API, SSE, and WSS behavior through the paired route.
+- [ ] Physically qualify inspection, questions, permissions, steering,
+  terminals, files, and diffs through the installed private HTTPS route.
 - [ ] Disconnect every initiating client for at least ten minutes and reopen the
   same session from another device.
 - [x] Make stop durable before interruption and keep `canceling` until exact
@@ -277,6 +336,8 @@ the official session without replaying mutations.
 - [x] Prompt admission succeeds but its response is lost.
 - [x] Fern restarts while OpenCode is working or waiting for input.
 - [x] OpenCode restarts while a permission or question is pending.
+- [x] A same-container process replacement is denied before coordinator
+  reconciliation and cannot inherit the routed Basic credential.
 - [ ] The container exits normally, fails, and is OOM-killed.
 - [ ] Cancellation races provisioning, admission, model work, seal, and export.
 - [x] A stale attempt tries to observe, stop, seal, export, verify, clean, or
@@ -307,8 +368,8 @@ workspace and session.
 
 ### Endpoint Mapping
 
-- [ ] Add endpoint mapping only now; do not make it a prerequisite for the
-  serial prototype.
+- [ ] Extend the serial fixed private origin to bounded per-run endpoint mapping
+  only when capacity two is introduced.
 - [ ] Map each durable run to its exact current attempt generation and OpenCode
   endpoint.
 - [ ] Re-resolve mapping on every open and reject stale generation links.
@@ -343,6 +404,10 @@ idempotency key, and requested execution profile. The response contains a
 durable run ID. Live session locators and retained results are resolved from that
 ID.
 
+- [x] Expose scoped create, read, list, stop, and open semantics without a
+  harness-specific runtime framework.
+- [ ] Add retained-result read and materialization semantics to complete the
+  harness-neutral boundary.
 - [ ] Make the human Fern CLI and OpenCode plugin use the same API semantics.
 - [ ] Allow a future harness plugin or MCP server to call the same durable API.
 - [ ] Keep authentication, repository authorization, capacity, lifecycle,

@@ -100,6 +100,30 @@ func TestCheckRemoteCredentialRequiresUnauthorized(t *testing.T) {
 	}
 }
 
+func TestCheckBackgroundRouteSurfaceRequiresDedicatedUnauthorizedBoundary(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/health" || request.Header.Get("Authorization") != "" || request.Header.Get("Cookie") != "" {
+			http.Error(writer, "unexpected request", http.StatusBadRequest)
+			return
+		}
+		writer.Header().Set("Cache-Control", "no-store")
+		http.Error(writer, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+	if err := checkBackgroundRouteSurface(context.Background(), server.URL); err != nil {
+		t.Fatal(err)
+	}
+
+	wrong := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		http.Error(writer, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer wrong.Close()
+	if err := checkBackgroundRouteSurface(context.Background(), wrong.URL); err == nil {
+		t.Fatal("route surface without no-store boundary was accepted")
+	}
+}
+
 func TestTailscaleTopologyRejectsOperatorListener(t *testing.T) {
 	t.Parallel()
 	for _, target := range []string{"http://127.0.0.1:8081", "http://localhost:8081", "http://[::1]:8081", "http://0.0.0.0:8081", "http://user@localhost:8081/path"} {
@@ -111,6 +135,18 @@ func TestTailscaleTopologyRejectsOperatorListener(t *testing.T) {
 	remoteOnly := "https://fern.example.ts.net\n|-- / proxy http://127.0.0.1:8080\n"
 	if got, err := tailscaleOriginForTopology(remoteOnly, "127.0.0.1:8080", "127.0.0.1:8081"); err != nil || got != "https://fern.example.ts.net" {
 		t.Fatalf("remote-only topology = %q, %v", got, err)
+	}
+}
+
+func TestTailscaleTopologyFindsExactBackgroundPortWithoutOperatorExposure(t *testing.T) {
+	t.Parallel()
+	output := "https://fern.example.ts.net\n|-- / proxy http://127.0.0.1:8080\n\nhttps://fern.example.ts.net:8443\n|-- / proxy http://127.0.0.1:9090\n"
+	if got, err := tailscaleOriginForTopology(output, "127.0.0.1:9090", "127.0.0.1:8081"); err != nil || got != "https://fern.example.ts.net:8443" {
+		t.Fatalf("background topology=%q error=%v", got, err)
+	}
+	output += "\nhttps://operator.example.ts.net:9443\n|-- / proxy http://127.0.0.1:8081\n"
+	if _, err := tailscaleOriginForTopology(output, "127.0.0.1:9090", "127.0.0.1:8081"); err == nil {
+		t.Fatal("background topology accepted operator listener exposure")
 	}
 }
 

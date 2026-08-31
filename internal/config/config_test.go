@@ -634,6 +634,8 @@ func TestLoadCompleteTaskPolicy(t *testing.T) {
       fullName: owner/repository
 control:
   password: control-secret-control-secret-1234
+proxy:
+  remoteOrigin: https://fern.example.ts.net
 tasks:
   agent: build
   model:
@@ -643,6 +645,9 @@ tasks:
   leaseDuration: 2m
   backgroundImage: fern/opencode-background-source:dev
   backgroundImageID: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  backgroundRoute:
+    listen: 127.0.0.1:8443
+    origin: https://fern.example.ts.net:8443
   budget:
     maxTurns: 100
 `
@@ -664,6 +669,7 @@ tasks:
 		AttemptTimeout: 30 * time.Minute, LeaseDuration: 2 * time.Minute,
 		Budget: TaskBudget{MaxTurns: 100}, BackgroundImage: "fern/opencode-background-source:dev", BackgroundEnvironment: map[string]string{},
 		BackgroundImageID: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		BackgroundRoute:   &BackgroundRoute{Listen: "127.0.0.1:8443", Origin: "https://fern.example.ts.net:8443"},
 	}
 	if !reflect.DeepEqual(*loaded.Tasks, want) {
 		t.Fatalf("tasks = %+v, want %+v", *loaded.Tasks, want)
@@ -844,6 +850,8 @@ func TestLoadRejectsMalformedOrOpenTaskPolicy(t *testing.T) {
 		"background_image_empty":   valid + "  backgroundImage: ''\n",
 		"background_id_empty":      valid + "  backgroundImageID: ''\n",
 		"background_image_unknown": valid + "  background_image: image:test\n",
+		"background_route_unknown": valid + "  backgroundRoute:\n    listen: 127.0.0.1:9090\n    origin: https://fern.example.ts.net:8443\n    extra: true\n",
+		"background_route_type":    valid + "  backgroundRoute: wrong\n",
 		"tasks_unknown":            valid + "  unknown: true\n",
 		"model_unknown":            strings.Replace(valid, "    id: gpt-5\n", "    id: gpt-5\n    unknown: true\n", 1),
 		"budget_unknown":           strings.Replace(valid, "    maxTurns: 100\n", "    maxTurns: 100\n    unknown: true\n", 1),
@@ -937,6 +945,55 @@ func TestValidateTaskPolicyAcceptsBoundaryValues(t *testing.T) {
 	maximum.Tasks.Budget.MaxTurns = 1000
 	if err := Validate(maximum); err != nil {
 		t.Fatalf("maximum policy: %v", err)
+	}
+}
+
+func TestValidateBackgroundRouteContract(t *testing.T) {
+	t.Parallel()
+	valid := func(t *testing.T) Config {
+		value := validTaskConfig(t)
+		value.RemoteOrigin = "https://fern.example.ts.net"
+		value.Tasks.BackgroundImage = "image:test"
+		value.Tasks.BackgroundImageID = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		value.Tasks.BackgroundRoute = &BackgroundRoute{Listen: "127.0.0.1:9090", Origin: "https://fern.example.ts.net:8443"}
+		return value
+	}
+	if err := Validate(valid(t)); err != nil {
+		t.Fatalf("valid background route: %v", err)
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{"missing", func(value *Config) { value.Tasks.BackgroundRoute = nil }},
+		{"without image", func(value *Config) { value.Tasks.BackgroundImage, value.Tasks.BackgroundImageID = "", "" }},
+		{"non-loopback", func(value *Config) { value.Tasks.BackgroundRoute.Listen = "0.0.0.0:9090" }},
+		{"remote missing", func(value *Config) { value.RemoteOrigin = "" }},
+		{"hostname mismatch", func(value *Config) { value.Tasks.BackgroundRoute.Origin = "https://other.example.ts.net:8443" }},
+		{"localhost origin", func(value *Config) {
+			value.RemoteOrigin = "https://localhost"
+			value.Tasks.BackgroundRoute.Origin = "https://localhost:8443"
+		}},
+		{"single-label origin", func(value *Config) {
+			value.RemoteOrigin = "https://fern"
+			value.Tasks.BackgroundRoute.Origin = "https://fern:8443"
+		}},
+		{"origin port missing", func(value *Config) { value.Tasks.BackgroundRoute.Origin = "https://fern.example.ts.net" }},
+		{"origin port 443", func(value *Config) { value.Tasks.BackgroundRoute.Origin = "https://fern.example.ts.net:443" }},
+		{"same remote port", func(value *Config) {
+			value.RemoteOrigin = "https://fern.example.ts.net:8443"
+			value.Tasks.BackgroundRoute.Origin = "https://fern.example.ts.net:8443"
+		}},
+		{"remote listener collision", func(value *Config) { value.Tasks.BackgroundRoute.Listen = value.Listen }},
+		{"operator listener collision", func(value *Config) { value.Tasks.BackgroundRoute.Listen = value.OperatorListen }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			value := valid(t)
+			test.mutate(&value)
+			if err := Validate(value); err == nil {
+				t.Fatal("invalid background route was accepted")
+			}
+		})
 	}
 }
 

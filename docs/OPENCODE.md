@@ -157,14 +157,20 @@ owned-pending observations produce `working` or `needs_you`; inactivity never
 means success. Stopping an active run proves writer inactivity and removes the
 container, volume, and clone in separately fenced phases. Stopping a queued run
 atomically records it, its task, and its attempt as `failed` with the honest
-`background_run_stopped_before_start` reason. Open and result still return
-`not_ready` because external session routing and retained Git artifacts are not
-implemented.
+`background_run_stopped_before_start` reason. `open` returns the stable pinned
+official session deep link only while the exact task/attempt/generation/runtime
+route is positively active. `result` still returns `not_ready` because retained
+Git artifacts are not implemented.
 
 `tasks.backgroundImage` and `tasks.backgroundImageID` are an optional pair with
 no default. `tasks.backgroundEnvironment` is the only configured environment
 copied into disposable runs; persistent `workspace.env` is never inherited. The
-image ID is a canonical `sha256:` local identity pinned by the operator. At
+image pair requires `tasks.backgroundRoute.listen` (an exact numeric-loopback
+address) and `tasks.backgroundRoute.origin` (the `proxy.remoteOrigin` hostname
+on a distinct explicit non-443 HTTPS port). The pre-bound listener is unbound
+until exact runtime health and readiness, reconstituted from durable identity
+after restart, and removed before container deletion. Fern does not configure
+Tailscale. The image ID is a canonical `sha256:` local identity pinned by the operator. At
 startup Fern uses read-only Docker inspection and requires that exact ID; exact OCI source,
 revision `39fb919a054190498f6d5b7985bde231f93ad7a6`, version, and Fern profile
 labels; user `1001:1001`; exact server argv; only exposed port `4096/tcp`; and no

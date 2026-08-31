@@ -10,6 +10,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -19,7 +20,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/config"
+	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/runtime"
@@ -37,7 +40,7 @@ func (corruptResultCoordinator) RunOnce(context.Context) error { return taskstor
 
 func TestTaskServicesAreExplicitlyDisabledWhenPolicyIsAbsent(t *testing.T) {
 	t.Parallel()
-	services, err := newTaskServices(context.Background(), config.Config{}, nil, nil, structServerAuth(), observability.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+	services, err := newTaskServices(context.Background(), config.Config{}, nil, nil, nil, structServerAuth(), observability.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil || services != nil {
 		t.Fatalf("services=%v err=%v", services, err)
 	}
@@ -69,7 +72,7 @@ func TestTaskServicesRequireExplicitGitHubAuthorityBeforeRuntimeAccess(t *testin
 		Agent: "build", Model: config.TaskModel{Provider: "test", ID: "test-model"},
 		AttemptTimeout: time.Hour, LeaseDuration: time.Minute, Budget: config.TaskBudget{MaxTurns: 10},
 	}}
-	if _, err := newTaskServices(context.Background(), cfg, nil, nil, structServerAuth(), observability.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
+	if _, err := newTaskServices(context.Background(), cfg, nil, nil, nil, structServerAuth(), observability.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
 		t.Fatal("task service accepted no GitHub authority")
 	}
 }
@@ -140,7 +143,7 @@ func TestMissingAppCredentialsBlockTasksButKeepOnboardingAvailable(t *testing.T)
 			AttemptTimeout: time.Hour, LeaseDuration: time.Minute, Budget: config.TaskBudget{MaxTurns: 10}},
 	}
 	status := observability.NewRegistry()
-	services, err := newTaskServices(context.Background(), cfg, docker, nil, structServerAuth(), status, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	services, err := newTaskServices(context.Background(), cfg, docker, nil, nil, structServerAuth(), status, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if services != nil || !errors.Is(err, githubapp.ErrCredentialsNotFound) {
 		t.Fatalf("services=%v error=%v", services, err)
 	}
@@ -244,7 +247,24 @@ func TestTaskServicesSuccessfulWorkspaceGHMatrix(t *testing.T) {
 				cfg.Tasks.Verification = &config.TaskVerificationPolicy{CheckName: "repository-tests", Argv: []string{"/bin/sh", "-c", "true"}, Timeout: time.Second, OutputBytes: 1024}
 			}
 			status := observability.NewRegistry()
-			services, err := newTaskServices(serviceCtx, cfg, docker, manager, structServerAuth(), status, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			listener, err := net.Listen("tcp4", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			controlDirectory := t.TempDir()
+			if err := os.Chmod(controlDirectory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			controlStore, err := control.Open(controlDirectory, cfg.Workspace.Name)
+			if err != nil {
+				t.Fatal(err)
+			}
+			route, err := backgroundroute.New(listener, "https://fern.example.ts.net:"+strings.TrimPrefix(listener.Addr().String(), "127.0.0.1:"), controlStore)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer route.Close()
+			services, err := newTaskServices(serviceCtx, cfg, docker, manager, route, structServerAuth(), status, slog.New(slog.NewTextHandler(io.Discard, nil)))
 			if err != nil {
 				t.Fatal(err)
 			}

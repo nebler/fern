@@ -43,6 +43,13 @@ type TaskBudget struct {
 	MaxTurns int
 }
 
+// BackgroundRoute is the fixed loopback ingress and private HTTPS origin used
+// only by the serial disposable Background Run lane.
+type BackgroundRoute struct {
+	Listen string
+	Origin string
+}
+
 // TaskVerificationPolicy describes the repository-defined check that must pass
 // before a task attempt counts as verified.
 type TaskVerificationPolicy struct {
@@ -64,6 +71,7 @@ type TaskPolicy struct {
 	Budget            TaskBudget
 	BackgroundImage   string
 	BackgroundImageID string
+	BackgroundRoute   *BackgroundRoute
 	// BackgroundEnvironment is the only configured environment copied into
 	// disposable Background Runs. Workspace.Env is never inherited.
 	BackgroundEnvironment map[string]string

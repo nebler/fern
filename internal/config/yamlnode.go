@@ -51,10 +51,14 @@ type fileTaskPolicy struct {
 		Provider yaml.Node `yaml:"provider"`
 		ID       yaml.Node `yaml:"id"`
 	} `yaml:"model"`
-	AttemptTimeout        yaml.Node         `yaml:"attemptTimeout"`
-	LeaseDuration         yaml.Node         `yaml:"leaseDuration"`
-	BackgroundImage       yaml.Node         `yaml:"backgroundImage"`
-	BackgroundImageID     yaml.Node         `yaml:"backgroundImageID"`
+	AttemptTimeout    yaml.Node `yaml:"attemptTimeout"`
+	LeaseDuration     yaml.Node `yaml:"leaseDuration"`
+	BackgroundImage   yaml.Node `yaml:"backgroundImage"`
+	BackgroundImageID yaml.Node `yaml:"backgroundImageID"`
+	BackgroundRoute   *struct {
+		Listen yaml.Node `yaml:"listen"`
+		Origin yaml.Node `yaml:"origin"`
+	} `yaml:"backgroundRoute"`
 	BackgroundEnvironment map[string]string `yaml:"backgroundEnvironment"`
 	Budget                *struct {
 		MaxTurns yaml.Node `yaml:"maxTurns"`
@@ -242,6 +246,17 @@ func parseTaskPolicy(node yaml.Node) (*TaskPolicy, error) {
 			}
 			return nil, fmt.Errorf("backgroundImageID: %w", err)
 		}
+	}
+	if file.BackgroundRoute != nil {
+		listen, listenErr := decodeRequiredTaskString(file.BackgroundRoute.Listen)
+		if listenErr != nil {
+			return nil, fmt.Errorf("backgroundRoute.listen: %w", listenErr)
+		}
+		origin, originErr := decodeRequiredTaskString(file.BackgroundRoute.Origin)
+		if originErr != nil {
+			return nil, fmt.Errorf("backgroundRoute.origin: %w", originErr)
+		}
+		policy.BackgroundRoute = &BackgroundRoute{Listen: listen, Origin: origin}
 	}
 	if file.Verification != nil {
 		checkName, err := decodeRequiredTaskString(file.Verification.CheckName)

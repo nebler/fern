@@ -19,6 +19,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/jsoncanon"
 	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/task"
@@ -41,6 +42,7 @@ type Store interface {
 	GetBackgroundRun(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRun, error)
 	ListBackgroundRuns(context.Context, task.WorkspaceID, task.ActorSnapshot, int) ([]taskstore.BackgroundRun, error)
 	StopBackgroundRun(context.Context, taskstore.StopBackgroundRunParams) (taskstore.BackgroundRunStop, error)
+	OpenBackgroundRun(context.Context, taskstore.OpenBackgroundRunParams) (taskstore.BackgroundRunOpen, error)
 }
 
 var _ Store = (*taskstore.Store)(nil)
@@ -52,6 +54,10 @@ type BaseVerifier interface {
 }
 
 type ActorResolver func(context.Context) (task.ActorSnapshot, error)
+
+type RouteResolver interface {
+	ActiveOrigin(taskstore.BackgroundRun) (string, bool)
+}
 
 type Config struct {
 	WorkspaceID                 task.WorkspaceID
@@ -71,6 +77,7 @@ type Config struct {
 	Model                       string
 	BudgetSnapshot              json.RawMessage
 	Wake                        func()
+	Route                       RouteResolver
 }
 
 type Handler struct{ config Config }
@@ -91,6 +98,9 @@ func New(config Config) (*Handler, error) {
 	if (config.AvailableProfile == PluginOpenCodeProfile) != (config.BackgroundImageIdentity != "") ||
 		(config.AvailableProfile != "" && config.AvailableProfile != PluginOpenCodeProfile) {
 		return nil, errors.New("qualified background image and profile must be configured together")
+	}
+	if (config.AvailableProfile == PluginOpenCodeProfile) != (config.Route != nil) {
+		return nil, errors.New("qualified background route and profile must be configured together")
 	}
 	config.BudgetSnapshot = append(json.RawMessage(nil), config.BudgetSnapshot...)
 	return &Handler{config: config}, nil
@@ -164,7 +174,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !h.requireScope(w, r, "run:open") {
 			return
 		}
-		h.notReady(w, r, actor, id, true)
+		h.open(w, r, actor, id)
 	case "result":
 		if r.Method != http.MethodGet {
 			methodNotAllowed(w, http.MethodGet)
@@ -452,6 +462,127 @@ func (h *Handler) replayStop(w http.ResponseWriter, r *http.Request, id task.Tas
 		State taskstore.BackgroundRunState `json:"state"`
 	}{id, committed.State})
 	return true
+}
+
+type openProjection struct {
+	RunID task.TaskID `json:"run_id"`
+	URL   string      `json:"url"`
+}
+
+func (h *Handler) open(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
+	if !validateEmptyMutation(w, r) {
+		return
+	}
+	key, ok := idempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	claim := task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: h.config.WorkspaceID, CommandKind: taskstore.OpenBackgroundRunCommand}, Key: key,
+		RequestHash: commandHash(taskstore.OpenBackgroundRunCommand, struct {
+			RunID task.TaskID `json:"run_id"`
+		}{id}), Actor: actor}
+	if h.replayOpen(w, r, id, claim) {
+		return
+	}
+	run, err := h.config.Store.GetBackgroundRun(r.Context(), h.config.WorkspaceID, id, claim.Actor)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	projection, ok := h.openProjection(run)
+	if !ok {
+		writeError(w, http.StatusConflict, "not_ready", "The disposable Background Run route is not ready.")
+		return
+	}
+	receiptID, err := h.config.Generator.ReceiptID()
+	if err != nil {
+		writeError(w, 500, "internal_error", "The run could not be opened.")
+		return
+	}
+	now := h.config.Now().UTC().Truncate(time.Millisecond)
+	result, err := h.config.Store.OpenBackgroundRun(r.Context(), taskstore.OpenBackgroundRunParams{WorkspaceID: h.config.WorkspaceID,
+		TaskID: id, ReceiptID: receiptID, Claim: claim, URL: projection.URL, APIContractVersion: APIContractVersion, OpenedAt: now})
+	if err != nil {
+		if errors.Is(err, taskstore.ErrInvalidState) {
+			writeError(w, http.StatusConflict, "not_ready", "The disposable Background Run route is not ready.")
+			return
+		}
+		writeStoreError(w, err)
+		return
+	}
+	if result.Replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+		if json.Unmarshal(result.Receipt.ResponseProjection, &projection) != nil {
+			writeError(w, 500, "internal_error", "The run could not be opened.")
+			return
+		}
+	}
+	if active, ready := h.openProjection(result.Run); !ready || active != projection {
+		writeError(w, http.StatusConflict, "not_ready", "The disposable Background Run route is not ready.")
+		return
+	}
+	writeJSON(w, http.StatusOK, projection)
+}
+
+func (h *Handler) replayOpen(w http.ResponseWriter, r *http.Request, id task.TaskID, claim task.IdempotencyClaim) bool {
+	receipt, found, err := h.config.Store.FindReceiptByIdempotency(r.Context(), h.config.WorkspaceID, taskstore.OpenBackgroundRunCommand, claim.Key)
+	if err != nil {
+		writeStoreError(w, err)
+		return true
+	}
+	if !found {
+		return false
+	}
+	disposition, err := task.ClassifyIdempotency(&task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: receipt.WorkspaceID, CommandKind: receipt.CommandKind}, Key: receipt.IdempotencyKey, RequestHash: receipt.RequestHash, Actor: receipt.Actor}, claim)
+	if err != nil {
+		writeError(w, 500, "internal_error", "The run could not be opened.")
+		return true
+	}
+	if disposition == task.IdempotencyOwnerMismatch {
+		writeError(w, 404, "not_found", "The requested run was not found.")
+		return true
+	}
+	if disposition != task.IdempotencyReplay || receipt.TargetID != id {
+		writeError(w, 409, "idempotency_conflict", "Idempotency-Key was already used for another request.")
+		return true
+	}
+	run, err := h.config.Store.GetBackgroundRun(r.Context(), h.config.WorkspaceID, id, claim.Actor)
+	if err != nil {
+		writeStoreError(w, err)
+		return true
+	}
+	expected, ready := h.openProjection(run)
+	var committed openProjection
+	if !ready || json.Unmarshal(receipt.ResponseProjection, &committed) != nil || committed != expected || committed.RunID != id {
+		writeError(w, http.StatusConflict, "not_ready", "The disposable Background Run route is not ready.")
+		return true
+	}
+	w.Header().Set("Idempotency-Replayed", "true")
+	writeJSON(w, http.StatusOK, committed)
+	return true
+}
+
+func (h *Handler) openProjection(run taskstore.BackgroundRun) (openProjection, bool) {
+	active := run.State == taskstore.BackgroundRunSettingUp || run.State == taskstore.BackgroundRunWorking ||
+		run.State == taskstore.BackgroundRunNeedsYou || run.State == taskstore.BackgroundRunUncertain
+	readyPhase := run.EffectPhase == taskstore.BackgroundRunEffectSessionObserved || run.EffectPhase == taskstore.BackgroundRunEffectPromptIntent ||
+		run.EffectPhase == taskstore.BackgroundRunEffectPromptAdmitted
+	if h.config.Route == nil || !active || !readyPhase || run.SessionObservedAt == nil || run.CancelEpoch != 0 {
+		return openProjection{}, false
+	}
+	origin, active := h.config.Route.ActiveOrigin(run)
+	if !active {
+		return openProjection{}, false
+	}
+	trusted, err := backgroundopencode.ParseTrustedOrigin(origin)
+	if err != nil {
+		return openProjection{}, false
+	}
+	deepLink, err := backgroundopencode.DeepLink(trusted, string(run.OpenCodeSessionID))
+	if err != nil {
+		return openProjection{}, false
+	}
+	return openProjection{RunID: run.TaskID, URL: deepLink}, true
 }
 
 func (h *Handler) notReady(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID, mutation bool) {

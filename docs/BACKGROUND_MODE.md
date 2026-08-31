@@ -1,6 +1,6 @@
 # OpenCode Background Mode Goal Design
 
-**Status:** serial provider/store/coordinator production path implemented; routing and result artifacts remain proposed
+**Status:** serial execution and private run routing implemented; result artifacts remain proposed
 
 **Updated:** 2026-08-31
 **Implementation checklist:**
@@ -61,7 +61,7 @@ prompt fence, periodically observes clone usage and positive OpenCode activity,
 and performs stop/cleanup finalization. A crash after the prompt fence but before
 HTTP dispatch cannot distinguish absence from an unobserved request: restart
 retains `uncertain`, performs read-only reconciliation, and sends no second POST.
-Routing and export remain unimplemented. Persistent workspaces,
+Private routing is implemented; retained Git export remains unimplemented. Persistent workspaces,
 `internal/opencodeapi`, and the plugin remain unchanged.
 
 Clone disk policy is admission plus repeated observed-byte monitoring, not a
@@ -80,6 +80,18 @@ labels, runtime user, command argv, exposed port, and absence of a baked server
 password. Registry-digest promotion remains required before external image
 distribution.
 
+That image pair also requires `tasks.backgroundRoute`: one fixed exact loopback
+listener and one exact private HTTPS origin using the `proxy.remoteOrigin`
+hostname on a distinct non-443 port. A concrete `internal/backgroundroute`
+manager owns the pre-bound HTTP server, paired-device authentication, exact
+forwarded-origin proxying, SSE/WebSocket behavior, and immutable
+task/attempt/generation/runtime binding. It returns no-store 404/503 while
+unbound, strips browser credentials before provider-owned Basic auth, and
+re-attests the exact Docker process epoch and published port before each
+upstream request. It removes the route before container deletion. The coordinator reconstructs an
+active binding after restart from committed runtime identity; listener reuse is
+fenced until route removal is durably observed.
+
 Admission also commits the SHA-256 identity of the exact explicit
 `tasks.backgroundEnvironment` map. A later image, model, or environment change
 cannot resume the old execution: recovery claims the run, moves it to cleanup,
@@ -97,8 +109,10 @@ side-effect free before and after replacement; and conflicting reuse returns
 process-epoch state. A hanging provider turn has durable admission and promotion
 but no durable step-start or settlement event before replacement, so execution
 loss remains uncertain and inactivity is not completion authority. Official
-deep-link routes serve the embedded SPA over HTTP, while browser, private TLS,
-external-origin, SSE/WSS, coordinator, and result-boundary acceptance remain
+deep-link routes, paired listener authentication, exact external-origin headers,
+SSE flushing, WebSocket upgrade shape, and coordinator route cleanup are locally
+qualified. Actual Tailscale multi-port/private TLS behavior and installed-device
+acceptance remain external and unverified. Result-boundary acceptance remains
 open.
 
 ### Required Properties

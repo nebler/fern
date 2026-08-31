@@ -633,6 +633,22 @@ type BackgroundRunStop struct {
 	Replayed bool
 }
 
+type OpenBackgroundRunParams struct {
+	WorkspaceID        task.WorkspaceID
+	TaskID             task.TaskID
+	ReceiptID          task.ReceiptID
+	Claim              task.IdempotencyClaim
+	URL                string
+	APIContractVersion string
+	OpenedAt           time.Time
+}
+
+type BackgroundRunOpen struct {
+	Run      BackgroundRun
+	Receipt  Receipt
+	Replayed bool
+}
+
 // BackgroundRunWork is the exact task-owned plaintext and attempt deadline
 // paired with a claimed run. Prompt is never copied into run evidence.
 type BackgroundRunWork struct {

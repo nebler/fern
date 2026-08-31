@@ -14,6 +14,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/gitref"
 )
 
@@ -107,6 +108,42 @@ func validateTasks(config Config) error {
 	}
 	if config.Tasks.BackgroundImageID != "" && !validCanonicalImageID(config.Tasks.BackgroundImageID) {
 		return errors.New("tasks.backgroundImageID must be a canonical sha256 image ID")
+	}
+	if config.Tasks.BackgroundImage == "" && config.Tasks.BackgroundRoute != nil {
+		return errors.New("tasks.backgroundRoute is forbidden without tasks.backgroundImage")
+	}
+	if config.Tasks.BackgroundImage != "" && config.Tasks.BackgroundRoute == nil {
+		return errors.New("tasks.backgroundRoute is required with tasks.backgroundImage")
+	}
+	if route := config.Tasks.BackgroundRoute; route != nil {
+		if err := validateListen("tasks.backgroundRoute.listen", route.Listen); err != nil {
+			return err
+		}
+		if sameListenPort(route.Listen, config.Listen) || sameListenPort(route.Listen, config.OperatorListen) {
+			return errors.New("tasks.backgroundRoute.listen must use a distinct port")
+		}
+		origin, err := ParseRemoteOrigin(route.Origin)
+		if err != nil {
+			return fmt.Errorf("invalid tasks.backgroundRoute.origin: %w", err)
+		}
+		if origin == "" {
+			return errors.New("invalid tasks.backgroundRoute.origin: a private HTTPS origin is required")
+		}
+		remote, err := url.Parse(config.RemoteOrigin)
+		if err != nil || config.RemoteOrigin == "" {
+			return errors.New("proxy.remoteOrigin is required with tasks.backgroundRoute")
+		}
+		parsed, _ := url.Parse(origin)
+		if _, err := backgroundopencode.ParseTrustedOrigin(origin); err != nil {
+			return errors.New("tasks.backgroundRoute.origin must be a canonical non-loopback private HTTPS origin supported by the pinned OpenCode UI")
+		}
+		remotePort := remote.Port()
+		if remotePort == "" {
+			remotePort = "443"
+		}
+		if parsed.Hostname() != remote.Hostname() || parsed.Port() == "" || parsed.Port() == "443" || parsed.Port() == remotePort {
+			return errors.New("tasks.backgroundRoute.origin must use the proxy.remoteOrigin hostname and an explicit non-443 port")
+		}
 	}
 	if len(config.Tasks.BackgroundEnvironment) > 64 {
 		return errors.New("tasks.backgroundEnvironment has too many entries")

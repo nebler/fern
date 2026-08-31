@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 	"github.com/nebler/fern/internal/backgroundopencode"
+	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -320,6 +322,106 @@ func (p *Provider) OpenCodeClient(run taskstore.BackgroundRun, runtime RuntimeId
 		Endpoint: "http://127.0.0.1:" + strconv.Itoa(run.HostPort), Username: p.config.BasicUsername,
 		Password: p.password(run), HTTPClient: httpClient,
 	})
+}
+
+// BackgroundRouteTarget derives the exact endpoint and an authenticated
+// transport without exposing the run password outside the provider.
+func (p *Provider) BackgroundRouteTarget(run taskstore.BackgroundRun, runtime RuntimeIdentity) (backgroundroute.Target, error) {
+	digest, err := p.validateRun(run)
+	if err != nil {
+		return backgroundroute.Target{}, err
+	}
+	if err := validateCommittedRuntime(runtime); err != nil || runtime.ContainerID != run.ObservedContainerID ||
+		runtime.StartedAt != run.ObservedContainerStartedAt || run.HostPort < 1 || run.HostPort > 65535 {
+		return backgroundroute.Target{}, errors.New("exact committed background runtime is required")
+	}
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return backgroundroute.Target{}, errors.New("standard background route transport is unavailable")
+	}
+	base = base.Clone()
+	if p.http.Transport != nil {
+		configured, ok := p.http.Transport.(*http.Transport)
+		if !ok {
+			return backgroundroute.Target{}, errors.New("background route requires a standard HTTP transport")
+		}
+		base = configured.Clone()
+	}
+	endpoint := "127.0.0.1:" + strconv.Itoa(run.HostPort)
+	transport := &routeTransport{
+		provider: p, run: run, digest: digest, runtime: runtime, hostPort: run.HostPort,
+		username: p.config.BasicUsername, password: p.password(run),
+	}
+	dial := base.DialContext
+	if dial == nil {
+		dialer := &net.Dialer{Timeout: p.config.DockerTimeout, KeepAlive: 30 * time.Second}
+		dial = dialer.DialContext
+	}
+	base.Proxy = nil
+	base.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		if network != "tcp" || address != endpoint {
+			return nil, errors.New("background route dial target is not exact")
+		}
+		connection, err := dial(ctx, network, address)
+		if err != nil {
+			return nil, err
+		}
+		if err := transport.attest(ctx); err != nil {
+			_ = connection.Close()
+			return nil, err
+		}
+		return connection, nil
+	}
+	transport.base = base
+	return backgroundroute.NewTarget("http://"+endpoint, transport)
+}
+
+type routeTransport struct {
+	base               http.RoundTripper
+	provider           *Provider
+	run                taskstore.BackgroundRun
+	digest             string
+	runtime            RuntimeIdentity
+	hostPort           int
+	username, password string
+}
+
+func (transport *routeTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if err := transport.attest(request.Context()); err != nil {
+		return nil, err
+	}
+	forward := request.Clone(request.Context())
+	forward.Header = request.Header.Clone()
+	forward.Header.Del("Authorization")
+	forward.Header.Del("Cookie")
+	forward.SetBasicAuth(transport.username, transport.password)
+	return transport.base.RoundTrip(forward)
+}
+
+func (transport *routeTransport) attest(ctx context.Context) error {
+	operation, cancel := operationContext(ctx, transport.provider.config.DockerTimeout)
+	defer cancel()
+	info, err := transport.provider.docker.ContainerInspect(operation, transport.run.ContainerIdentity)
+	if err != nil {
+		return err
+	}
+	if info.ID != transport.runtime.ContainerID {
+		return &IdentityError{Resource: "container", Identity: transport.run.ContainerIdentity, Reason: "named container ID differs from routed runtime"}
+	}
+	if err := transport.provider.attestContainer(transport.run, transport.digest, info, true); err != nil {
+		return &IdentityError{Resource: "container", Identity: transport.run.ContainerIdentity, Reason: err.Error()}
+	}
+	if err := requireRuntime(info, transport.runtime); err != nil {
+		return err
+	}
+	port, err := hostPort(info)
+	if err != nil {
+		return err
+	}
+	if port != transport.hostPort {
+		return &IdentityError{Resource: "endpoint", Identity: transport.run.EndpointIdentity, Reason: "published port differs from routed runtime"}
+	}
+	return nil
 }
 
 func cloneConfig(config Config) Config {

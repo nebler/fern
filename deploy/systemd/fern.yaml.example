@@ -24,6 +24,11 @@ workspace:
 #     id: replace-with-model-id
 #   attemptTimeout: 30m
 #   leaseDuration: 2m
+#   backgroundImage: fern/opencode-background-source:REPLACE_WITH_QUALIFIED_SOURCE_COMMIT
+#   backgroundImageID: sha256:REPLACE_WITH_64_LOWERCASE_HEX_DIGITS
+#   backgroundRoute:
+#     listen: 127.0.0.1:8443
+#     origin: https://replace-with-this-host.example.ts.net:8443
 #   budget:
 #     maxTurns: 100
 #   # Optional shell-free host verification policy.

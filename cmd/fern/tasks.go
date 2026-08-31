@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/backgroundopencode"
+	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/backgroundruncoord"
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/githubapp"
@@ -104,7 +105,7 @@ type taskResultCoordinator interface {
 	RunOnce(context.Context) error
 }
 
-func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Docker, manager *workspace.Manager, auth runtime.ServerAuth, status *observability.Registry, log *slog.Logger) (*taskServices, error) {
+func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Docker, manager *workspace.Manager, route *backgroundroute.Manager, auth runtime.ServerAuth, status *observability.Registry, log *slog.Logger) (*taskServices, error) {
 	if cfg.Tasks == nil {
 		return nil, nil
 	}
@@ -299,7 +300,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 			ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID,
 			OperationTimeout: min(cfg.Tasks.LeaseDuration/2, 30*time.Second), LeaseDuration: cfg.Tasks.LeaseDuration,
 			PollInterval: taskPollInterval, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 100, MaxPages: 100, MaxEvents: 10000},
-			Now: time.Now, HTTPClient: &http.Client{Timeout: min(cfg.Tasks.LeaseDuration/2, 30*time.Second)},
+			Now: time.Now, HTTPClient: &http.Client{Timeout: min(cfg.Tasks.LeaseDuration/2, 30*time.Second)}, Route: route,
 			OnError: func(err error) {
 				status.Degraded(observability.ComponentBackgroundRunSerial, err)
 				log.Error("background run coordination deferred", "err", err, "workspace", cfg.Workspace.Name)
@@ -319,6 +320,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 		Store: store, Generator: ids, ActorResolver: taskapi.ContextActor, BaseVerifier: baseVerifier,
 		Now: time.Now, AttemptTimeout: cfg.Tasks.AttemptTimeout, Agent: cfg.Tasks.Agent,
 		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID, BudgetSnapshot: budget,
+		Route: route,
 		Wake: func() {
 			if backgroundCoordinator != nil {
 				backgroundCoordinator.Wake()
