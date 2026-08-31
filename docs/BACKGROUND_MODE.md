@@ -1,6 +1,6 @@
 # OpenCode Background Mode Goal Design
 
-**Status:** proposed design for the active bounded experiment; not implemented
+**Status:** provider lifecycle slice implemented; coordinator and routing remain proposed
 
 **Updated:** 2026-08-31
 **Implementation checklist:**
@@ -36,11 +36,21 @@ correctness is necessary but does not establish product value.
 `integration/opencode-background-source-contract` qualifies its public HTTP
 behavior with real Docker and a zero-cost local provider. Package metadata at
 that commit also says `1.18.16`, but the source profile does not claim
-equivalence to the published package. Neither qualification implements the
-disposable Docker provider, coordinator, routing, export, or cleanup design
-below. Fern can qualify that source image and commit durable serial effect
-claims, but performs no Docker or prompt effects yet. Persistent workspaces and
-the plugin remain unchanged.
+equivalence to the published package. `internal/taskenvdocker` now implements
+the serial clone, volume, container, authenticated-health, stop, and separate
+cleanup effects for one schema-8 run. `integration/background-run-docker`
+qualifies that lifecycle against the operator-pinned local source image. No
+production coordinator or startup path invokes it yet; routing, prompt
+delivery, and export remain unimplemented. Persistent workspaces and the plugin
+remain unchanged.
+
+Clone disk policy is admission plus repeated observed-byte monitoring, not a
+kernel quota. The bind-mounted clone and Docker `local` state volume have no
+portable hard byte quota in this provider; Docker Desktop does not expose a
+per-local-volume quota or bounded usage reading through this lifecycle API.
+Host filesystem exhaustion therefore remains a residual operational risk that
+the future coordinator must monitor and stop conservatively. Container logs do
+retain Docker-enforced `max-size` and `max-file` bounds.
 
 The current dogfood configuration requires both `tasks.backgroundImage` and an
 operator-pinned canonical local `tasks.backgroundImageID`. Qualification is
