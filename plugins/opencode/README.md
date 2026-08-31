@@ -9,13 +9,13 @@ This is an unpublished development integration targeting the OpenCode TUI host c
 Implemented:
 
 - `/fern` opens a native action dialog. Slash arguments are intentionally unsupported by this OpenCode API.
-- Native `run`, `runs`, `open`, `stop`, `result`, and `disconnect` command-palette actions.
-- `runs`, `open`, `stop`, and `result` remain usable when the TUI connects with explicit `--server`.
+- Native `run`, `runs`, `open`, `stop`, `seal`, `result`, and `disconnect` command-palette actions. `/fern` opens the same action menu, including Seal.
+- `runs`, `open`, `stop`, `seal`, and `result` remain usable when the TUI connects with explicit `--server`.
 - `run` is local-service-only. It refuses explicit `--server` because TUI state paths belong to the server while Git subprocesses execute on the local TUI host. A server-side repository identity API is required before remote submission can be safe.
 - Fixed-argument Git subprocesses read the canonical remote, exact `HEAD`, branch, and complete dirty state.
 - Run creation rejects missing remotes, unborn repositories, ambiguous fetch URLs, dirty worktrees, and repository changes after confirmation.
 - Run creation confirms and submits Fern's qualified remote execution profile `source-39fb919a054190498f6d5b7985bde231f93ad7a6`; it is not derived from the local OpenCode TUI version.
-- Native confirmation precedes create and stop requests. Pending creates retain only a request digest and caller-generated idempotency key so a response-loss retry reuses the same key.
+- Native confirmation precedes create, stop, and irreversible seal requests. Seal stops the exact remote writer and retains its Git work. Each confirmed seal uses a fresh key and is never retried after ambiguous transport loss. Pending creates retain only a request digest and caller-generated idempotency key so a response-loss retry reuses the same key.
 - Create reports success only for a response containing both a valid `run_id` and `committed: true`.
 - On the first explicit Fern action, the plugin asks for and validates a root HTTPS Fern origin. That non-secret canonical origin is stored in OpenCode KV storage. `FERN_ENDPOINT` remains an optional development override.
 - Device authorization uses Fern's fixed scopes, displays the one-time user code, opens the same-origin verification URL with a sanitized child environment, respects server polling intervals, and stops on denial, expiry, cancellation, or lifecycle shutdown.
@@ -30,7 +30,7 @@ Not implemented:
 
 - Repository authorization checks and host compatibility/readiness checks.
 - Windows durable credential storage.
-- Retained result artifacts. Create, list, get, stop, and open routes are implemented; result requests remain `409 Conflict` until artifact retention lands.
+- Server deployment of the frozen seal and retained-result routes described below.
 - A published npm package. Registry installation cannot succeed until `@fern/opencode` is published.
 
 ## Development
@@ -73,7 +73,8 @@ The client uses JSON and a Fern plugin bearer after device authorization:
 - `POST /fern/api/runs` with `Idempotency-Key` and profile `source-39fb919a054190498f6d5b7985bde231f93ad7a6`; expects `{ "run_id": "...", "committed": true }`.
 - `GET /fern/api/runs` and `GET /fern/api/runs/:id`.
 - `POST /fern/api/runs/:id/stop` with `Idempotency-Key`.
+- `POST /fern/api/runs/:id/seal` with a fresh `Idempotency-Key` and exact body `{}`; expects committed seal identity and phase metadata. It reuses the `run:result` scope.
 - `POST /fern/api/runs/:id/open` with `Idempotency-Key`; the same-host capability URL is resolved fresh, passed only to the browser launcher, and never cached or displayed.
-- `GET /fern/api/runs/:id/result`.
+- `GET /fern/api/runs/:id/result`; returns immutable result commit/tree/manifest metadata, retained `git_bundle_v1` digests and size, retention verification/reconstruction facts, and cleanup completion. It contains no artifact URL or server path.
 
-The authentication routes and create, list, get, stop, and open run routes are implemented by Fern. The result route returns `409 Conflict` until retained result artifacts are available.
+Create, list, get, stop, and open are deployed. Seal and result require server alignment with this frozen retained-result contract; result returns `409 Conflict` until retention is complete.

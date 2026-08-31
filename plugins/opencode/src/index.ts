@@ -13,12 +13,15 @@ export {
   FernClient,
   FernClientError,
   PLUGIN_SCOPES,
+  RESULT_PHASES,
   RUN_STATES,
   parseEndpoint,
   type AuthorizationPoll,
   type AuthorizationStart,
   type FernClientErrorKind,
+  type ResultPhase,
   type RunState,
+  type SealRunResult,
 } from "./client.js"
 export {
   CREDENTIAL_ACCOUNT_ATTRIBUTE,
@@ -46,6 +49,7 @@ export {
   InMemoryPendingSubmissionStore,
   SUPPORTED_OPENCODE_VERSION,
   createRunWorkflow,
+  sealRunWorkflow,
   stopRunWorkflow,
   type PendingSubmissionStore,
 } from "./workflow.js"

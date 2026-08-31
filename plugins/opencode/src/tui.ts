@@ -9,6 +9,7 @@ import {
   INSTRUCTION_MAX_LENGTH,
   SUPPORTED_OPENCODE_VERSION,
   createRunWorkflow,
+  sealRunWorkflow,
   stopRunWorkflow,
   type PendingSubmissionStore,
   type RunConfirmation,
@@ -20,6 +21,7 @@ export type TuiPluginDependencies = {
     onboard: boolean,
   ) => Promise<{ client: FernClient; endpoint: URL; credentials: CredentialStore }>
   createRun?: typeof createRunWorkflow
+  sealRun?: typeof sealRunWorkflow
   stopRun?: typeof stopRunWorkflow
   openBrowser?: typeof openBrowser
 }
@@ -131,6 +133,12 @@ export function createTuiPlugin(dependencies: TuiPluginDependencies = {}): TuiPl
           stopRun(api, client, runID, dialog, dependencies.stopRun),
         )
       }
+      const seal = async () => {
+        const { client } = await connection()
+        return showPrompt(api, "Seal Fern run", "Run ID", (runID, dialog) =>
+          sealRun(api, client, runID, dialog, dependencies.sealRun),
+        )
+      }
       const result = async () => {
         const { client } = await connection()
         return showPrompt(api, "Fern run result", "Run ID", (runID) => showResult(api, client, runID))
@@ -190,6 +198,12 @@ export function createTuiPlugin(dependencies: TuiPluginDependencies = {}): TuiPl
                 onSelect: () => void handle(api, stop),
               },
               {
+                title: "Seal",
+                value: "seal",
+                description: "Stop the writer and retain immutable Git work",
+                onSelect: () => void handle(api, seal),
+              },
+              {
                 title: "Result",
                 value: "result",
                 description: "Read the retained result",
@@ -213,6 +227,7 @@ export function createTuiPlugin(dependencies: TuiPluginDependencies = {}): TuiPl
           command("fern.runs", "Fern: Runs", "List background runs", () => handle(api, runs)),
           command("fern.open", "Fern: Open", "Open a background run", () => handle(api, open)),
           command("fern.stop", "Fern: Stop", "Stop a background run", () => handle(api, stop)),
+          command("fern.seal", "Fern: Seal", "Seal a background run result", () => handle(api, seal)),
           command("fern.result", "Fern: Result", "Show a background run result", () => handle(api, result)),
           command("fern.disconnect", "Fern: Disconnect", "Revoke and forget the credential", () =>
             handle(api, disconnect),
@@ -454,6 +469,36 @@ async function stopRun(
   })
 }
 
+async function sealRun(
+  api: TuiPluginApi,
+  client: FernClient,
+  runID: string,
+  dialog: TuiDialogStack,
+  workflow: typeof sealRunWorkflow = sealRunWorkflow,
+) {
+  const sealed = await workflow({
+    client,
+    runID,
+    confirm: (id) =>
+      confirm(
+        api,
+        dialog,
+        `Seal Fern run ${id}?`,
+        "This is irreversible. The exact remote writer will stop, and its Git work will be retained as an immutable result.",
+      ),
+  })
+  if (!sealed) return
+  dialog.clear()
+  api.ui.toast({
+    variant: "success",
+    title: sealed.state === "result_ready" ? "Fern result already sealed" : "Fern seal committed",
+    message:
+      sealed.state === "result_ready"
+        ? `Run ${sealed.runID} already has a retained result.`
+        : `Run ${sealed.runID} is stopping its writer and retaining Git work.`,
+  })
+}
+
 async function showResult(api: TuiPluginApi, client: FernClient, runID: string) {
   const result = await client.getResult(runID.trim())
   await alert(api, api.ui.dialog, `Fern result ${result.runID}`, formatResult(result))
@@ -510,9 +555,23 @@ async function handle(api: TuiPluginApi, action: () => void | Promise<void>) {
 }
 
 function formatResult(result: RunResult) {
-  return [`State: ${result.state}`, result.resultCommit ? `Commit: ${result.resultCommit}` : undefined, result.summary]
-    .filter((line): line is string => Boolean(line))
-    .join("\n")
+  return [
+    `State: ${result.state}`,
+    `Result: ${result.result.id}`,
+    `Outcome: ${result.result.outcome}`,
+    `Repository: ${result.result.repository}`,
+    `Base: ${result.result.baseOID}`,
+    `Commit: ${result.result.resultCommit}`,
+    `Tree: ${result.result.treeOID}`,
+    `Manifest: ${result.result.manifestEntries} entries (${result.result.manifestSHA256})`,
+    `Artifact: ${result.artifact.id} (${result.artifact.format})`,
+    `Artifact SHA-256: ${result.artifact.sha256}`,
+    `Bundle SHA-256: ${result.artifact.bundleSHA256}`,
+    `Bundle size: ${result.artifact.bundleSize} bytes`,
+    `Retention verified: ${result.retention.verified ? "yes" : "no"}`,
+    `Reconstructable: ${result.retention.reconstructable ? "yes" : "no"}`,
+    `Cleanup complete: ${result.cleanup.complete ? "yes" : "no"}`,
+  ].join("\n")
 }
 
 function disconnectMessage(outcome: RevokeOutcome, developmentToken: boolean) {

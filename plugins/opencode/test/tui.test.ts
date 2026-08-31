@@ -50,12 +50,13 @@ describe("TUI compatibility", () => {
       "fern.runs",
       "fern.open",
       "fern.stop",
+      "fern.seal",
       "fern.result",
       "fern.disconnect",
     ])
   })
 
-  test("dispatches run, list, open, stop, and result actions", async () => {
+  test("dispatches run, list, open, stop, seal, and result actions", async () => {
     const fixture = actionAPI()
     const calls: string[] = []
     const client = {
@@ -73,7 +74,17 @@ describe("TUI compatibility", () => {
       },
       async getResult(runID: string) {
         calls.push(`result:${runID}`)
-        return { runID, state: "result_ready" as const, summary: "Ready result" }
+        return readyResult(runID)
+      },
+      async sealRun(runID: string, key: string) {
+        calls.push(`seal:${runID}:${key}`)
+        return {
+          runID,
+          state: "canceling" as const,
+          resultPhase: "seal_requested" as const,
+          sealRequestID: "slr_0198d34d-7007-7007-8007-000000000007",
+          committed: true as const,
+        }
       },
     } as unknown as FernClient
     const credentials = new InMemoryCredentialStore("secret")
@@ -131,13 +142,32 @@ describe("TUI compatibility", () => {
     fixture.confirm().onConfirm?.()
     await waitFor(() => calls.includes("stop-confirmed:true"))
 
+    await fixture.command("fern.seal").run()
+    fixture.prompt().onConfirm?.("run_seal")
+    await waitFor(() => fixture.currentTitle() === "Seal Fern run run_seal?", "seal confirmation")
+    expect(fixture.confirm().message).toBe(
+      "This is irreversible. The exact remote writer will stop, and its Git work will be retained as an immutable result.",
+    )
+    fixture.confirm().onConfirm?.()
+    await Bun.sleep(2)
+    expect(fixture.toasts().filter((toast) => toast.variant === "error")).toEqual([])
+    await waitFor(() => calls.some((call) => call.startsWith("seal:run_seal:")), "seal request")
+
+    await fixture.command("fern.seal").run()
+    fixture.prompt().onConfirm?.("run_canceled")
+    await waitFor(() => fixture.currentTitle() === "Seal Fern run run_canceled?", "seal cancellation")
+    fixture.confirm().onCancel?.()
+    await Bun.sleep(2)
+
     await fixture.command("fern.result").run()
     fixture.prompt().onConfirm?.("run_result")
     await waitFor(() => calls.includes("result:run_result"))
-    expect(fixture.current()).toMatchObject({
-      title: "Fern result run_result",
-      message: "State: result_ready\nReady result",
-    })
+    expect(fixture.current()).toMatchObject({ title: "Fern result run_result" })
+    expect(fixture.alert().message).toContain(`Commit: ${"b".repeat(40)}`)
+    expect(fixture.alert().message).toContain("Artifact: art_0198d34d-7008-7008-8008-000000000008 (git_bundle_v1)")
+    expect(fixture.alert().message).toContain("Retention verified: yes")
+    expect(fixture.alert().message).toContain("Cleanup complete: no")
+    expect(fixture.alert().message).not.toContain("URL")
     fixture.alert().onConfirm?.()
 
     expect(calls).toContain("run:Fix action routing:/worktree")
@@ -147,6 +177,10 @@ describe("TUI compatibility", () => {
     expect(calls).toContain("browser:/runs/run_open/capability")
     expect(calls).toContain("stop:run_stop")
     expect(calls).toContain("stop-confirmed:true")
+    expect(calls.filter((call) => call.startsWith("seal:"))).toHaveLength(1)
+    expect(calls.find((call) => call.startsWith("seal:run_seal:"))?.split(":")[2]).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    )
     expect(calls).toContain("result:run_result")
   })
 })
@@ -284,9 +318,10 @@ function actionAPI() {
   type Command = { name: string; run: () => void | Promise<void> }
   type Prompt = { title: string; onConfirm?: (value: string) => void }
   type Alert = { title: string; message: string; onConfirm?: () => void }
-  type Confirm = { title: string; onConfirm?: () => void }
+  type Confirm = { title: string; message: string; onConfirm?: () => void; onCancel?: () => void }
   let commands: Command[] = []
   let rendered: unknown
+  const toasts: Array<{ variant?: string; message?: string }> = []
   const dialog = {
     clear() {
       rendered = undefined
@@ -315,7 +350,7 @@ function actionAPI() {
       DialogSelect: (props: unknown) => props,
       DialogAlert: (props: unknown) => props,
       DialogConfirm: (props: unknown) => props,
-      toast: () => {},
+      toast: (toast: { variant?: string; message?: string }) => toasts.push(toast),
     },
   } as unknown as TuiPluginApi
   return {
@@ -330,15 +365,43 @@ function actionAPI() {
     prompt: () => rendered as Prompt,
     alert: () => rendered as Alert,
     confirm: () => rendered as Confirm,
+    toasts: () => toasts,
   }
 }
 
-async function waitFor(predicate: () => boolean) {
+function readyResult(runID: string) {
+  return {
+    runID,
+    state: "result_ready" as const,
+    result: {
+      id: "res_0198d34d-7007-7007-8007-000000000007",
+      outcome: "changed" as const,
+      repository: "https://github.com/fern/repo",
+      baseOID: "a".repeat(40),
+      resultCommit: "b".repeat(40),
+      treeOID: "c".repeat(40),
+      manifestEntries: 2,
+      manifestSHA256: "d".repeat(64),
+    },
+    artifact: {
+      id: "art_0198d34d-7008-7008-8008-000000000008",
+      format: "git_bundle_v1" as const,
+      sha256: "e".repeat(64),
+      bundleSHA256: "f".repeat(64),
+      bundleSize: 1234,
+      manifestSHA256: "d".repeat(64),
+    },
+    retention: { verified: true, reconstructable: true },
+    cleanup: { complete: false },
+  }
+}
+
+async function waitFor(predicate: () => boolean, action = "TUI action") {
   for (let attempt = 0; attempt < 100; attempt++) {
     if (predicate()) return
     await Bun.sleep(1)
   }
-  throw new Error("Timed out waiting for the TUI action.")
+  throw new Error(`Timed out waiting for ${action}.`)
 }
 
 function authorizationClient() {

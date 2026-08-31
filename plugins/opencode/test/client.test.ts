@@ -112,26 +112,122 @@ describe("FernClient", () => {
     })
   })
 
+  test("seals a run with exact empty JSON and committed authority", async () => {
+    const capture: { method?: string; path?: string; key?: string | null; body?: string } = {}
+    const server = serve(async (request) => {
+      capture.method = request.method
+      capture.path = new URL(request.url).pathname
+      capture.key = request.headers.get("idempotency-key")
+      capture.body = await request.text()
+      return Response.json(sealResponse())
+    })
+
+    await expect(client(server).sealRun("run_123", "seal-key")).resolves.toEqual({
+      runID: "run_123",
+      state: "canceling",
+      resultPhase: "seal_requested",
+      sealRequestID: "slr_0198d34d-7007-7007-8007-000000000007",
+      committed: true,
+    })
+    expect(capture).toEqual({
+      method: "POST",
+      path: "/fern/api/runs/run_123/seal",
+      key: "seal-key",
+      body: "{}",
+    })
+
+    const ready = serve(() => Response.json({ ...sealResponse(), state: "result_ready", result_phase: "ready" }))
+    await expect(client(ready).sealRun("run_123", "new-key")).resolves.toMatchObject({
+      state: "result_ready",
+      resultPhase: "ready",
+    })
+  })
+
+  test("rejects malformed seal authority", async () => {
+    const malformed = [
+      { ...sealResponse(), run_id: "run_other" },
+      { ...sealResponse(), committed: false },
+      { ...sealResponse(), seal_request_id: "slr_not-a-uuid" },
+      { ...sealResponse(), state: "working" },
+      { ...sealResponse(), result_phase: "exporting" },
+      { ...sealResponse(), state: "result_ready" },
+    ]
+    for (const response of malformed) {
+      const fern = new FernClient(new URL("http://127.0.0.1:1/"), new InMemoryCredentialStore("secret"), {
+        fetch: async () => Response.json(response),
+      })
+      await expect(fern.sealRun("run_123", "seal-key")).rejects.toThrow("invalid seal response")
+    }
+  })
+
+  test("does not replay a seal after ambiguous transport loss", async () => {
+    let requests = 0
+    const fern = new FernClient(new URL("http://127.0.0.1:1/"), new InMemoryCredentialStore("secret"), {
+      fetch: (async () => {
+        requests++
+        throw new Error("response lost")
+      }) as typeof fetch,
+    })
+    await expect(fern.sealRun("run_123", "one-shot-key")).rejects.toMatchObject({ kind: "transport" })
+    expect(requests).toBe(1)
+  })
+
   test("reads a ready retained result", async () => {
     const server = serve((request) => {
       expect(request.method).toBe("GET")
       expect(new URL(request.url).pathname).toBe("/fern/api/runs/run_123/result")
-      return Response.json({
-        run_id: "run_123",
-        state: "result_ready",
-        summary: "Fixed the race.",
-        result_commit: "c".repeat(40),
-        url: "https://fern.example/runs/run_123/result",
-      })
+      return Response.json(resultResponse())
     })
 
     await expect(client(server).getResult("run_123")).resolves.toEqual({
       runID: "run_123",
       state: "result_ready",
-      summary: "Fixed the race.",
-      resultCommit: "c".repeat(40),
-      url: "https://fern.example/runs/run_123/result",
+      result: {
+        id: "res_0198d34d-7007-7007-8007-000000000007",
+        outcome: "changed",
+        repository: "https://github.com/fern/repo",
+        baseOID: "a".repeat(40),
+        resultCommit: "b".repeat(40),
+        treeOID: "c".repeat(40),
+        manifestEntries: 2,
+        manifestSHA256: "d".repeat(64),
+      },
+      artifact: {
+        id: "art_0198d34d-7008-7008-8008-000000000008",
+        format: "git_bundle_v1",
+        sha256: "e".repeat(64),
+        bundleSHA256: "f".repeat(64),
+        bundleSize: 1234,
+        manifestSHA256: "d".repeat(64),
+      },
+      retention: { verified: true, reconstructable: true },
+      cleanup: { complete: false },
     })
+  })
+
+  test("fails closed on malformed retained result authority", async () => {
+    const malformed: unknown[] = [
+      { ...resultResponse(), state: "working" },
+      { ...resultResponse(), result: { ...resultResponse().result, id: "res_bad" } },
+      { ...resultResponse(), result: { ...resultResponse().result, repository: "https://github.com/fern/repo.git" } },
+      { ...resultResponse(), result: { ...resultResponse().result, result_commit: "B".repeat(40) } },
+      { ...resultResponse(), result: { ...resultResponse().result, manifest_entries: -1 } },
+      { ...resultResponse(), artifact: { ...resultResponse().artifact, format: "zip" } },
+      { ...resultResponse(), artifact: { ...resultResponse().artifact, bundle_sha256: "F".repeat(64) } },
+      { ...resultResponse(), artifact: { ...resultResponse().artifact, bundle_size: -1 } },
+      { ...resultResponse(), artifact: { ...resultResponse().artifact, manifest_sha256: "0".repeat(64) } },
+      { ...resultResponse(), retention: { verified: "yes", reconstructable: true } },
+      { ...resultResponse(), cleanup: { complete: null } },
+      { ...resultResponse(), artifact: { ...resultResponse().artifact, download_url: "https://fern.example/a" } },
+      { ...resultResponse(), result: { ...resultResponse().result, server_path: "/srv/result" } },
+      { run_id: "run_123", state: "result_ready", summary: "legacy", url: "https://fern.example/result" },
+    ]
+    for (const response of malformed) {
+      const fern = new FernClient(new URL("http://127.0.0.1:1/"), new InMemoryCredentialStore("secret"), {
+        fetch: async () => Response.json(response),
+      })
+      await expect(fern.getResult("run_123")).rejects.toThrow(FernClientError)
+    }
   })
 
   test("requires JSON, bounds bodies, and preserves malformed error status", async () => {
@@ -286,6 +382,45 @@ function gitContext() {
     head: "a".repeat(40),
     branch: "main",
     dirty: false,
+  }
+}
+
+function sealResponse() {
+  return {
+    run_id: "run_123",
+    state: "canceling",
+    result_phase: "seal_requested",
+    seal_request_id: "slr_0198d34d-7007-7007-8007-000000000007",
+    committed: true,
+  }
+}
+
+function resultResponse() {
+  return {
+    run_id: "run_123",
+    state: "result_ready",
+    result: {
+      id: "res_0198d34d-7007-7007-8007-000000000007",
+      outcome: "changed",
+      repository: "https://github.com/fern/repo",
+      base_oid: "a".repeat(40),
+      result_commit: "b".repeat(40),
+      tree_oid: "c".repeat(40),
+      manifest_entries: 2,
+      manifest_sha256: "d".repeat(64),
+      additive_server_field: "ignored",
+    },
+    artifact: {
+      id: "art_0198d34d-7008-7008-8008-000000000008",
+      format: "git_bundle_v1",
+      sha256: "e".repeat(64),
+      bundle_sha256: "f".repeat(64),
+      bundle_size: 1234,
+      manifest_sha256: "d".repeat(64),
+    },
+    retention: { verified: true, reconstructable: true },
+    cleanup: { complete: false },
+    additive_server_field: { ignored: true },
   }
 }
 

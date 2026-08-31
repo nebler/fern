@@ -76,7 +76,8 @@ export async function createRunWorkflow(input: {
   requireRunnableGitContext(current)
 
   const digest = await requestDigest({ instruction, profile: FERN_REMOTE_EXECUTION_PROFILE, git })
-  const idempotencyKey = (await input.pending.get(digest)) ?? (input.idempotencyKey ?? crypto.randomUUID)()
+  const idempotencyKey =
+    (await input.pending.get(digest)) ?? (input.idempotencyKey ? input.idempotencyKey() : crypto.randomUUID())
   await input.pending.set(digest, idempotencyKey)
   const runID = await input.client.createRun({
     instruction,
@@ -96,7 +97,18 @@ export async function stopRunWorkflow(input: {
 }) {
   const runID = input.client.requireRunID(input.runID.trim())
   if (!(await input.confirm(runID))) return undefined
-  return input.client.stopRun(runID, (input.idempotencyKey ?? crypto.randomUUID)())
+  return input.client.stopRun(runID, input.idempotencyKey ? input.idempotencyKey() : crypto.randomUUID())
+}
+
+export async function sealRunWorkflow(input: {
+  client: Pick<FernClient, "sealRun" | "requireRunID">
+  runID: string
+  confirm: (runID: string) => Promise<boolean>
+  idempotencyKey?: () => string
+}) {
+  const runID = input.client.requireRunID(input.runID.trim())
+  if (!(await input.confirm(runID))) return undefined
+  return input.client.sealRun(runID, input.idempotencyKey ? input.idempotencyKey() : crypto.randomUUID())
 }
 
 async function requestDigest(input: { instruction: string; profile: string; git: GitContext }) {

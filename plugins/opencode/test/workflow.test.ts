@@ -10,6 +10,7 @@ import {
   INSTRUCTION_MAX_LENGTH,
   InMemoryPendingSubmissionStore,
   createRunWorkflow,
+  sealRunWorkflow,
   type PendingSubmissionStore,
   stopRunWorkflow,
 } from "../src/workflow.js"
@@ -210,6 +211,74 @@ describe("createRunWorkflow", () => {
     } satisfies Pick<FernClient, "requireRunID" | "stopRun">
     await expect(
       stopRunWorkflow({
+        client,
+        runID: "x",
+        confirm: async () => {
+          confirmed = true
+          return true
+        },
+      }),
+    ).rejects.toThrow("invalid ID")
+    expect(confirmed).toBe(false)
+  })
+
+  test("validates, confirms, and sends a seal once with a fresh key", async () => {
+    const keys = ["seal-key-one", "seal-key-two"]
+    const sent: string[] = []
+    const client = {
+      requireRunID(value: string) {
+        return value
+      },
+      async sealRun(_runID: string, key: string) {
+        sent.push(key)
+        return {
+          runID: "run_123",
+          state: "canceling" as const,
+          resultPhase: "seal_requested" as const,
+          sealRequestID: "slr_0198d34d-7007-7007-8007-000000000007",
+          committed: true as const,
+        }
+      },
+    } satisfies Pick<FernClient, "requireRunID" | "sealRun">
+    const input = {
+      client,
+      runID: "  run_123  ",
+      confirm: async () => true,
+      idempotencyKey: () => keys.shift()!,
+    }
+
+    await sealRunWorkflow(input)
+    await sealRunWorkflow(input)
+    expect(sent).toEqual(["seal-key-one", "seal-key-two"])
+  })
+
+  test("does not seal when irreversible confirmation is canceled", async () => {
+    let sealed = false
+    const client = {
+      requireRunID(value: string) {
+        return value
+      },
+      async sealRun() {
+        sealed = true
+        throw new Error("unexpected")
+      },
+    } satisfies Pick<FernClient, "requireRunID" | "sealRun">
+    await expect(sealRunWorkflow({ client, runID: "run_123", confirm: async () => false })).resolves.toBeUndefined()
+    expect(sealed).toBe(false)
+  })
+
+  test("validates a seal run ID before irreversible confirmation", async () => {
+    let confirmed = false
+    const client = {
+      requireRunID() {
+        throw new Error("invalid ID")
+      },
+      async sealRun() {
+        throw new Error("unexpected")
+      },
+    } satisfies Pick<FernClient, "requireRunID" | "sealRun">
+    await expect(
+      sealRunWorkflow({
         client,
         runID: "x",
         confirm: async () => {

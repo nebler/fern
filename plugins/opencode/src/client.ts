@@ -29,12 +29,45 @@ export type Run = {
   branch?: string | null
 }
 
+export const RESULT_PHASES = ["seal_requested", "ready"] as const
+export type ResultPhase = (typeof RESULT_PHASES)[number]
+
+export type SealRunResult = {
+  runID: string
+  state: "canceling" | "result_ready"
+  resultPhase: ResultPhase
+  sealRequestID: string
+  committed: true
+}
+
 export type RunResult = {
   runID: string
-  state: RunState
-  summary?: string
-  resultCommit?: string
-  url?: string
+  state: "result_ready"
+  result: {
+    id: string
+    outcome: "changed" | "no_changes"
+    repository: string
+    baseOID: string
+    resultCommit: string
+    treeOID: string
+    manifestEntries: number
+    manifestSHA256: string
+  }
+  artifact: {
+    id: string
+    format: "git_bundle_v1"
+    sha256: string
+    bundleSHA256: string
+    bundleSize: number
+    manifestSHA256: string
+  }
+  retention: {
+    verified: boolean
+    reconstructable: boolean
+  }
+  cleanup: {
+    complete: boolean
+  }
 }
 
 export const PLUGIN_SCOPES = ["run:create", "run:read", "run:stop", "run:open", "run:result"] as const
@@ -269,6 +302,40 @@ export class FernClient {
     return parseState(response.state)
   }
 
+  async sealRun(runID: string, idempotencyKey: string): Promise<SealRunResult> {
+    const expected = this.requireRunID(runID)
+    const response = await this.#request(`/fern/api/runs/${encodeURIComponent(expected)}/seal`, {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: "{}",
+    })
+    if (
+      !isRecord(response) ||
+      response.run_id !== expected ||
+      response.committed !== true ||
+      !isFernID(response.seal_request_id, "slr_")
+    ) {
+      throw new FernClientError("Fern returned an invalid seal response.")
+    }
+    const state = response.state
+    const resultPhase = response.result_phase
+    if (
+      (state !== "canceling" && state !== "result_ready") ||
+      !isResultPhase(resultPhase) ||
+      (state === "canceling" && resultPhase !== "seal_requested") ||
+      (state === "result_ready" && resultPhase !== "ready")
+    ) {
+      throw new FernClientError("Fern returned an invalid seal response.")
+    }
+    return {
+      runID: expected,
+      state,
+      resultPhase,
+      sealRequestID: response.seal_request_id,
+      committed: true,
+    }
+  }
+
   async resolveOpen(runID: string, idempotencyKey: string) {
     const expected = this.requireRunID(runID)
     const response = await this.#request(`/fern/api/runs/${encodeURIComponent(expected)}/open`, {
@@ -296,14 +363,32 @@ export class FernClient {
   async getResult(runID: string): Promise<RunResult> {
     const expected = this.requireRunID(runID)
     const response = await this.#request(`/fern/api/runs/${encodeURIComponent(expected)}/result`)
-    if (!isRecord(response) || response.run_id !== expected)
+    if (
+      !isRecord(response) ||
+      response.run_id !== expected ||
+      response.state !== "result_ready" ||
+      !isRecord(response.result) ||
+      !isRecord(response.artifact) ||
+      !isRecord(response.retention) ||
+      !isRecord(response.cleanup) ||
+      hasLocatorField(response)
+    ) {
       throw new FernClientError("Fern returned an invalid run result.")
+    }
+    const result = parseResultAuthority(response.result)
+    const artifact = parseResultArtifact(response.artifact)
+    if (artifact.manifestSHA256 !== result.manifestSHA256) {
+      throw new FernClientError("Fern returned an inconsistent result manifest.")
+    }
+    const retention = parseBooleanProjection(response.retention, ["verified", "reconstructable"], "retention")
+    const cleanup = parseBooleanProjection(response.cleanup, ["complete"], "cleanup")
     return {
       runID: expected,
-      state: parseState(response.state),
-      summary: optionalString(response, "summary", 32_000),
-      resultCommit: optionalOID(response, "result_commit"),
-      url: optionalURL(response, "url"),
+      state: "result_ready",
+      result,
+      artifact,
+      retention: { verified: retention.verified!, reconstructable: retention.reconstructable! },
+      cleanup: { complete: cleanup.complete! },
     }
   }
 
@@ -483,6 +568,69 @@ function parseState(value: unknown): RunState {
   return value as RunState
 }
 
+function parseResultAuthority(value: Record<string, unknown>): RunResult["result"] {
+  if (
+    !isFernID(value.id, "res_") ||
+    (value.outcome !== "changed" && value.outcome !== "no_changes") ||
+    !isCanonicalGitHubRepository(value.repository) ||
+    !isSHA1(value.base_oid) ||
+    !isSHA1(value.result_commit) ||
+    !isSHA1(value.tree_oid) ||
+    !isIntegerIn(value.manifest_entries, 0, 1_000_000) ||
+    !isSHA256(value.manifest_sha256)
+  ) {
+    throw new FernClientError("Fern returned invalid immutable result metadata.")
+  }
+  if (
+    (value.outcome === "no_changes" && (value.result_commit !== value.base_oid || value.manifest_entries !== 0)) ||
+    (value.outcome === "changed" && (value.result_commit === value.base_oid || value.manifest_entries === 0))
+  ) {
+    throw new FernClientError("Fern returned inconsistent immutable result metadata.")
+  }
+  return {
+    id: value.id,
+    outcome: value.outcome,
+    repository: value.repository,
+    baseOID: value.base_oid,
+    resultCommit: value.result_commit,
+    treeOID: value.tree_oid,
+    manifestEntries: value.manifest_entries,
+    manifestSHA256: value.manifest_sha256,
+  }
+}
+
+function parseResultArtifact(value: Record<string, unknown>): RunResult["artifact"] {
+  if (
+    !isFernID(value.id, "art_") ||
+    value.format !== "git_bundle_v1" ||
+    !isSHA256(value.sha256) ||
+    !isSHA256(value.bundle_sha256) ||
+    !isIntegerIn(value.bundle_size, 0, 10 * 1024 * 1024 * 1024) ||
+    !isSHA256(value.manifest_sha256)
+  ) {
+    throw new FernClientError("Fern returned invalid retained artifact metadata.")
+  }
+  return {
+    id: value.id,
+    format: value.format,
+    sha256: value.sha256,
+    bundleSHA256: value.bundle_sha256,
+    bundleSize: value.bundle_size,
+    manifestSHA256: value.manifest_sha256,
+  }
+}
+
+function parseBooleanProjection<Value extends string>(
+  value: Record<string, unknown>,
+  keys: readonly Value[],
+  name: string,
+) {
+  for (const key of keys) {
+    if (typeof value[key] !== "boolean") throw new FernClientError(`Fern returned invalid ${name} metadata.`)
+  }
+  return value as Record<Value, boolean>
+}
+
 function optionalString(record: Record<string, unknown>, key: string, max = 4_096) {
   if (!(key in record)) return undefined
   if (typeof record[key] !== "string" || record[key].length > max) {
@@ -526,17 +674,6 @@ function optionalRepository(record: Record<string, unknown>, key: string) {
   return value
 }
 
-function optionalURL(record: Record<string, unknown>, key: string) {
-  const value = optionalString(record, key)
-  if (value === undefined) return undefined
-  const url = URL.parse(value)
-  const localHTTP = url?.protocol === "http:" && isLocalhost(url.hostname)
-  if (!url || (url.protocol !== "https:" && !localHTTP) || url.username || url.password) {
-    throw new FernClientError(`Fern returned an invalid ${key} field.`)
-  }
-  return value
-}
-
 async function readBounded(response: Response, limit: number) {
   if (!response.body) return ""
   const reader = response.body.getReader()
@@ -569,6 +706,52 @@ function isLocalhost(hostname: string) {
 
 function isID(value: unknown): value is string {
   return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{2,127}$/.test(value)
+}
+
+function isFernID(value: unknown, prefix: string): value is string {
+  return (
+    typeof value === "string" &&
+    new RegExp(`^${prefix}[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).test(value)
+  )
+}
+
+function isResultPhase(value: unknown): value is ResultPhase {
+  return typeof value === "string" && RESULT_PHASES.includes(value as ResultPhase)
+}
+
+function isSHA1(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{40}$/.test(value)
+}
+
+function isSHA256(value: unknown): value is string {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value)
+}
+
+function isCanonicalGitHubRepository(value: unknown): value is string {
+  if (typeof value !== "string") return false
+  const url = URL.parse(value)
+  if (
+    !url ||
+    url.protocol !== "https:" ||
+    url.hostname !== "github.com" ||
+    url.port ||
+    url.username ||
+    url.password ||
+    url.search ||
+    url.hash
+  ) {
+    return false
+  }
+  const match = /^\/([A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?)\/([A-Za-z0-9._-]{1,100})$/.exec(url.pathname)
+  return Boolean(match && !match[2].endsWith(".git") && url.href === value)
+}
+
+function hasLocatorField(value: unknown): boolean {
+  if (Array.isArray(value)) return value.some(hasLocatorField)
+  if (!isRecord(value)) return false
+  return Object.entries(value).some(
+    ([key, item]) => /(^|_)(url|uri|path|locator|storage_key)($|_)/.test(key) || hasLocatorField(item),
+  )
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
