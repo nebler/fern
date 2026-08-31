@@ -29,25 +29,34 @@ func (e *Engine) Store(ctx context.Context, staged StagedLocator) (Locator, erro
 	if err != nil || device != staged.device || inode != staged.inode {
 		return Locator{}, fmt.Errorf("%w: staged identity", ErrStorage)
 	}
-	if err := validateArtifactDirectory(staged.path); err != nil {
+	if err := normalizeStagedModes(staged.path); err != nil {
+		return Locator{}, err
+	}
+	if err := validateArtifactDirectory(staged.path, 0o600); err != nil {
 		return Locator{}, err
 	}
 	manifestBytes, err := readExactFile(filepath.Join(staged.path, manifestName), int64(e.outputBytes), 0o600)
 	if err != nil {
 		return Locator{}, err
 	}
-	if _, err := e.verifyArtifact(ctx, manifestBytes, filepath.Join(staged.path, bundleName), staged.digest); err != nil {
+	if _, err := e.verifyArtifact(ctx, manifestBytes, filepath.Join(staged.path, bundleName), 0o600, staged.digest); err != nil {
+		return Locator{}, err
+	}
+	if err := publishReadOnly(staged.path); err != nil {
 		return Locator{}, err
 	}
 	if err := syncDirectory(staged.path); err != nil {
+		_ = restoreStagedModes(staged.path)
 		return Locator{}, err
 	}
 	target := filepath.Join(e.casRoot, staged.digest.String())
 	if err := renameNoReplace(staged.path, target); err != nil {
 		if _, statErr := os.Lstat(target); statErr != nil {
+			_ = restoreStagedModes(staged.path)
 			return Locator{}, fmt.Errorf("%w: publish CAS object", ErrStorage)
 		}
 		if validateErr := e.validateStoredBytes(target, staged.digest, manifestBytes, filepath.Join(staged.path, bundleName)); validateErr != nil {
+			_ = restoreStagedModes(staged.path)
 			return Locator{}, validateErr
 		}
 		if removeErr := removeExactDirectory(staged.path, staged.device, staged.inode); removeErr != nil {
@@ -77,19 +86,19 @@ func (e *Engine) Discard(staged StagedLocator) error {
 }
 
 func (e *Engine) validateStoredBytes(target string, digest Digest, manifestBytes []byte, stagedBundle string) error {
-	if err := validateArtifactDirectory(target); err != nil {
+	if err := validateArtifactDirectory(target, 0o400); err != nil {
 		return err
 	}
-	storedManifest, err := readExactFile(filepath.Join(target, manifestName), int64(e.outputBytes), 0o600)
+	storedManifest, err := readExactFile(filepath.Join(target, manifestName), int64(e.outputBytes), 0o400)
 	if err != nil || !bytes.Equal(storedManifest, manifestBytes) || sha256Bytes(storedManifest) != digest {
 		return fmt.Errorf("%w: CAS manifest collision", ErrStorage)
 	}
-	left, err := openCheckedArtifactFile(filepath.Join(target, bundleName), 0o600)
+	left, err := openCheckedArtifactFile(filepath.Join(target, bundleName), 0o400)
 	if err != nil {
 		return err
 	}
 	defer left.Close()
-	right, _, err := openPrivateRead(stagedBundle, 0o600, true)
+	right, _, err := openPrivateRead(stagedBundle, 0o400, true)
 	if err != nil {
 		return err
 	}
@@ -110,14 +119,14 @@ func (e *Engine) Inspect(ctx context.Context, locator Locator) (Snapshot, error)
 		return Snapshot{}, ErrInvalidLocator
 	}
 	path := filepath.Join(e.casRoot, locator.digest.String())
-	if err := validateArtifactDirectory(path); err != nil {
+	if err := validateArtifactDirectory(path, 0o400); err != nil {
 		return Snapshot{}, err
 	}
-	manifestBytes, err := readExactFile(filepath.Join(path, manifestName), int64(e.outputBytes), 0o600)
+	manifestBytes, err := readExactFile(filepath.Join(path, manifestName), int64(e.outputBytes), 0o400)
 	if err != nil || sha256Bytes(manifestBytes) != locator.digest {
 		return Snapshot{}, fmt.Errorf("%w: manifest digest", ErrStorage)
 	}
-	manifest, err := e.verifyArtifact(ctx, manifestBytes, filepath.Join(path, bundleName), locator.digest)
+	manifest, err := e.verifyArtifact(ctx, manifestBytes, filepath.Join(path, bundleName), 0o400, locator.digest)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -158,7 +167,7 @@ func (e *Engine) Materialize(ctx context.Context, locator Locator) (*Checkout, e
 	}
 	bundle := filepath.Join(e.casRoot, locator.digest.String(), bundleName)
 	localBundle := filepath.Join(path, ".fern-artifact-bundle")
-	digest, size, err := copyPrivateBundle(bundle, localBundle, e.bundleBytes)
+	digest, size, err := copyPrivateBundle(bundle, localBundle, e.bundleBytes, 0o400)
 	if err != nil || digest != snapshot.BundleSHA256 || size != snapshot.BundleBytes {
 		return nil, fmt.Errorf("%w: bundle changed", ErrCheckout)
 	}
@@ -203,8 +212,8 @@ func (e *Engine) Materialize(ctx context.Context, locator Locator) (*Checkout, e
 	return &Checkout{engine: e, path: path, marker: token, device: device, inode: inode, markerDevice: markerDevice, markerInode: markerInode}, nil
 }
 
-func copyPrivateBundle(source, destination string, limit int64) (Digest, int64, error) {
-	input, info, err := openPrivateRead(source, 0o600, true)
+func copyPrivateBundle(source, destination string, limit int64, sourceMode os.FileMode) (Digest, int64, error) {
+	input, info, err := openPrivateRead(source, sourceMode, true)
 	if err != nil {
 		return Digest{}, 0, err
 	}
@@ -280,7 +289,7 @@ func directoryIdentity(path string) (uint64, uint64, error) {
 	return fileIdentity(info)
 }
 
-func validateArtifactDirectory(path string) error {
+func validateArtifactDirectory(path string, mode os.FileMode) error {
 	info, err := os.Lstat(path)
 	if err != nil || !safeDirectoryInfo(info) {
 		return fmt.Errorf("%w: CAS object directory", ErrStorage)
@@ -291,7 +300,7 @@ func validateArtifactDirectory(path string) error {
 		return fmt.Errorf("%w: CAS object contents", ErrStorage)
 	}
 	for _, name := range []string{manifestName, bundleName} {
-		file, err := openCheckedArtifactFile(filepath.Join(path, name), 0o600)
+		file, err := openCheckedArtifactFile(filepath.Join(path, name), mode)
 		if err != nil {
 			return err
 		}
@@ -300,6 +309,57 @@ func validateArtifactDirectory(path string) error {
 		}
 	}
 	return nil
+}
+
+func normalizeStagedModes(path string) error {
+	for _, name := range []string{manifestName, bundleName} {
+		filePath := filepath.Join(path, name)
+		info, err := os.Lstat(filePath)
+		if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: staged file", ErrStorage)
+		}
+		switch info.Mode().Perm() {
+		case 0o600:
+		case 0o400:
+			if err := changePrivateFileMode(filePath, 0o400, 0o600); err != nil {
+				return fmt.Errorf("%w: restore staged file mode", ErrStorage)
+			}
+		default:
+			return fmt.Errorf("%w: staged file mode", ErrStorage)
+		}
+	}
+	return syncDirectory(path)
+}
+
+func publishReadOnly(path string) error {
+	manifestPath := filepath.Join(path, manifestName)
+	bundlePath := filepath.Join(path, bundleName)
+	if err := changePrivateFileMode(manifestPath, 0o600, 0o400); err != nil {
+		return fmt.Errorf("%w: make manifest read-only", ErrStorage)
+	}
+	if err := changePrivateFileMode(bundlePath, 0o600, 0o400); err != nil {
+		_ = changePrivateFileMode(manifestPath, 0o400, 0o600)
+		return fmt.Errorf("%w: make bundle read-only", ErrStorage)
+	}
+	return nil
+}
+
+func restoreStagedModes(path string) error {
+	var result error
+	for _, name := range []string{manifestName, bundleName} {
+		filePath := filepath.Join(path, name)
+		info, err := os.Lstat(filePath)
+		if err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
+		if info.Mode().Perm() == 0o400 {
+			result = errors.Join(result, changePrivateFileMode(filePath, 0o400, 0o600))
+		} else if info.Mode().Perm() != 0o600 {
+			result = errors.Join(result, ErrStorage)
+		}
+	}
+	return errors.Join(result, syncDirectory(path))
 }
 
 func openCheckedArtifactFile(path string, mode os.FileMode) (*os.File, error) {

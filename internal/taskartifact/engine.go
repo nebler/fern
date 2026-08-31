@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -137,13 +138,25 @@ func (e *Engine) Snapshot(ctx context.Context, spec SnapshotSpec) (Snapshot, Sta
 	if (result == spec.Base) != (len(changes) == 0) {
 		return Snapshot{}, StagedLocator{}, fmt.Errorf("%w: inconsistent no-change result", ErrVerification)
 	}
+	_, changesDigest, err := canonicalChanges(changes)
+	if err != nil {
+		return Snapshot{}, StagedLocator{}, err
+	}
 	bundlePath := filepath.Join(stage, bundleName)
 	bundleDigest, bundleSize, err := e.createBundle(ctx, spec.Source.path, bundlePath, spec.Base, result)
 	if err != nil {
 		return Snapshot{}, StagedLocator{}, err
 	}
-	manifest := artifactManifest{Version: 1, Base: spec.Base, Result: result, Tree: treeOne, EpochSecond: spec.EpochSecond,
-		Changes: changes, BundleSHA256: bundleDigest, BundleBytes: bundleSize}
+	manifest := artifactManifest{
+		Version: 2, RepositoryID: spec.RepositoryID, WorkspaceID: spec.Source.WorkspaceID, TaskID: spec.Source.TaskID,
+		AttemptID: spec.Source.AttemptID, Generation: spec.Generation, SealRequestID: spec.SealRequestID,
+		ImageIdentity: spec.ImageIdentity, Profile: spec.Profile, ProfileSHA256: spec.ProfileSHA256,
+		EnvironmentSHA256: spec.EnvironmentSHA256, ResourceSpecVersion: spec.ResourceSpecVersion,
+		OpenCodeSessionID: spec.OpenCodeSessionID, OpenCodeMessageID: spec.OpenCodeMessageID,
+		SnapshotPolicyVersion: spec.SnapshotPolicyVersion, CompletionAuthority: CompletionUserSeal,
+		Base: spec.Base, Result: result, Tree: treeOne, EpochSecond: spec.EpochSecond,
+		Changes: changes, ChangesSHA256: changesDigest, BundleSHA256: bundleDigest, BundleBytes: bundleSize,
+	}
 	manifestBytes, manifestDigest, err := encodeManifest(manifest)
 	if err != nil {
 		return Snapshot{}, StagedLocator{}, err
@@ -157,7 +170,7 @@ func (e *Engine) Snapshot(ctx context.Context, spec SnapshotSpec) (Snapshot, Sta
 	if err := syncDirectory(stage); err != nil {
 		return Snapshot{}, StagedLocator{}, err
 	}
-	if _, err := e.verifyArtifact(ctx, manifestBytes, bundlePath, manifestDigest); err != nil {
+	if _, err := e.verifyArtifact(ctx, manifestBytes, bundlePath, 0o600, manifestDigest); err != nil {
 		return Snapshot{}, StagedLocator{}, err
 	}
 	finalTree, err := e.refreshCapturedTree(ctx, spec.Source.path, filepath.Join(stage, "index-two"))
@@ -196,6 +209,27 @@ func validateSpec(spec SnapshotSpec) error {
 	}
 	if _, err := task.ParseAttemptID(string(spec.Source.AttemptID)); err != nil {
 		return fmt.Errorf("%w: source", ErrInvalidSpec)
+	}
+	if _, err := task.ParseRepositoryID(strconv.FormatUint(uint64(spec.RepositoryID), 10)); err != nil {
+		return fmt.Errorf("%w: repository ID", ErrInvalidSpec)
+	}
+	if spec.Generation <= 0 || spec.Generation > maxGeneration {
+		return fmt.Errorf("%w: generation", ErrInvalidSpec)
+	}
+	if _, err := task.ParseSealRequestID(string(spec.SealRequestID)); err != nil {
+		return fmt.Errorf("%w: seal request ID", ErrInvalidSpec)
+	}
+	if !validImageIdentity(spec.ImageIdentity) || !validProfile(spec.Profile) || !validDigest(spec.ProfileSHA256) || !validDigest(spec.EnvironmentSHA256) {
+		return fmt.Errorf("%w: execution identity", ErrInvalidSpec)
+	}
+	if spec.ResourceSpecVersion != ResourceSpecVersion || spec.SnapshotPolicyVersion != SnapshotPolicyV1 {
+		return fmt.Errorf("%w: policy identity", ErrInvalidSpec)
+	}
+	if _, err := task.ParseOpenCodeSessionID(string(spec.OpenCodeSessionID)); err != nil {
+		return fmt.Errorf("%w: OpenCode session ID", ErrInvalidSpec)
+	}
+	if _, err := task.ParseOpenCodeMessageID(string(spec.OpenCodeMessageID)); err != nil {
+		return fmt.Errorf("%w: OpenCode message ID", ErrInvalidSpec)
 	}
 	if _, err := task.ParseGitOID(string(spec.Base)); err != nil || spec.EpochSecond < 0 || spec.EpochSecond > 253402300799 {
 		return fmt.Errorf("%w: base or epoch", ErrInvalidSpec)
@@ -248,8 +282,16 @@ func cloneChanges(entries []ChangeEntry) []ChangeEntry {
 }
 
 func snapshotFromManifest(manifest artifactManifest, digest Digest) Snapshot {
-	return Snapshot{Base: manifest.Base, Result: manifest.Result, Tree: manifest.Tree, EpochSecond: manifest.EpochSecond,
-		Changes: cloneChanges(manifest.Changes), ManifestSHA256: digest, BundleSHA256: manifest.BundleSHA256, BundleBytes: manifest.BundleBytes}
+	return Snapshot{
+		RepositoryID: manifest.RepositoryID, WorkspaceID: manifest.WorkspaceID, TaskID: manifest.TaskID, AttemptID: manifest.AttemptID,
+		Generation: manifest.Generation, SealRequestID: manifest.SealRequestID, ImageIdentity: manifest.ImageIdentity,
+		Profile: manifest.Profile, ProfileSHA256: manifest.ProfileSHA256, EnvironmentSHA256: manifest.EnvironmentSHA256,
+		ResourceSpecVersion: manifest.ResourceSpecVersion, OpenCodeSessionID: manifest.OpenCodeSessionID,
+		OpenCodeMessageID: manifest.OpenCodeMessageID, SnapshotPolicyVersion: manifest.SnapshotPolicyVersion,
+		CompletionAuthority: manifest.CompletionAuthority, Base: manifest.Base, Result: manifest.Result, Tree: manifest.Tree,
+		EpochSecond: manifest.EpochSecond, Changes: cloneChanges(manifest.Changes), ChangesSHA256: manifest.ChangesSHA256,
+		ManifestSHA256: digest, BundleSHA256: manifest.BundleSHA256, BundleBytes: manifest.BundleBytes,
+	}
 }
 
 type boundedBuffer struct {

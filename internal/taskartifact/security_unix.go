@@ -117,6 +117,24 @@ func openPrivateRead(path string, mode os.FileMode, singleLink bool) (*os.File, 
 	return file, info, nil
 }
 
+func changePrivateFileMode(path string, from, to os.FileMode) error {
+	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	file := os.NewFile(uintptr(fd), path)
+	defer file.Close()
+	var stat unix.Stat_t
+	if err := unix.Fstat(fd, &stat); err != nil || stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Uid != uint32(os.Geteuid()) ||
+		os.FileMode(stat.Mode&0o777) != from || stat.Nlink != 1 {
+		return errors.New("file mode transition source is unsafe")
+	}
+	if err := unix.Fchmod(fd, uint32(to)); err != nil {
+		return err
+	}
+	return file.Sync()
+}
+
 func syncDirectory(path string) error {
 	directory, err := os.Open(path)
 	if err != nil {

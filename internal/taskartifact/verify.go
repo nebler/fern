@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,7 +15,7 @@ const (
 	bundleResultRef = "refs/fern-artifact/result"
 )
 
-func (e *Engine) verifyArtifact(ctx context.Context, manifestBytes []byte, bundlePath string, expectedDigest Digest) (artifactManifest, error) {
+func (e *Engine) verifyArtifact(ctx context.Context, manifestBytes []byte, bundlePath string, fileMode os.FileMode, expectedDigest Digest) (artifactManifest, error) {
 	manifest, digest, err := decodeManifest(manifestBytes)
 	if err != nil || digest != expectedDigest || manifest.BundleBytes > e.bundleBytes || len(manifest.Changes) > e.manifestFiles {
 		return artifactManifest{}, fmt.Errorf("%w: manifest digest or bounds", ErrVerification)
@@ -29,7 +30,7 @@ func (e *Engine) verifyArtifact(ctx context.Context, manifestBytes []byte, bundl
 	}
 	defer removeExactDirectory(verifyRoot, verifyDevice, verifyInode)
 	verifiedBundle := filepath.Join(verifyRoot, bundleName)
-	bundleDigest, bundleSize, err := copyPrivateBundle(bundlePath, verifiedBundle, e.bundleBytes)
+	bundleDigest, bundleSize, err := copyPrivateBundle(bundlePath, verifiedBundle, e.bundleBytes, fileMode)
 	if err != nil || bundleDigest != manifest.BundleSHA256 || bundleSize != manifest.BundleBytes {
 		return artifactManifest{}, fmt.Errorf("%w: bundle digest", ErrVerification)
 	}
@@ -84,6 +85,10 @@ func (e *Engine) verifyArtifact(ctx context.Context, manifestBytes []byte, bundl
 	changes, err := e.buildChanges(ctx, repository, manifest.Base, manifest.Result)
 	if err != nil || !manifestsEqual(changes, manifest.Changes) {
 		return artifactManifest{}, fmt.Errorf("%w: rebuilt manifest", ErrVerification)
+	}
+	_, changesDigest, err := canonicalChanges(changes)
+	if err != nil || changesDigest != manifest.ChangesSHA256 {
+		return artifactManifest{}, fmt.Errorf("%w: rebuilt changes digest", ErrVerification)
 	}
 	return manifest, nil
 }
