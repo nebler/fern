@@ -20,6 +20,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -74,6 +75,7 @@ const (
 var (
 	ErrIdentityMismatch = errors.New("background run resource identity mismatch")
 	ErrQuarantined      = errors.New("background run resource quarantined")
+	ErrProviderClosed   = errors.New("background run Docker provider is closed")
 )
 
 // IdentityError means a pre-existing resource could not be proven to be the
@@ -136,10 +138,20 @@ type Provider struct {
 	docker      dockerAPI
 	ownedCLI    *client.Client
 	root        string
+	rootDevice  uint64
+	rootInode   uint64
 	hostKey     [32]byte
 	imageEnv    map[string]string
 	imageLabels map[string]string
 	http        *http.Client
+	lifecycle   *providerLifecycle
+}
+
+type providerLifecycle struct {
+	closeOnce sync.Once
+	closeErr  error
+	mu        sync.Mutex
+	closed    bool
 }
 
 // Observation is bounded canonical evidence suitable for taskstore evidence
@@ -168,29 +180,32 @@ type RuntimeIdentity struct {
 	Token       string
 }
 
-// CleanupAuthority is one of three explicit lifecycle proofs: NeverCreated,
-// an exact created-but-never-started ID, or a full committed process epoch.
-// Its zero value is invalid.
-type CleanupAuthority struct {
+// WriterFence is one of three explicit lifecycle proofs: NeverCreated, an
+// exact created-but-never-started ID, or a full committed process epoch. Its
+// zero value is invalid.
+type WriterFence struct {
 	NeverCreated bool
 	ContainerID  string
 	StartedAt    string
 	Token        string
 }
 
-func NeverCreatedAuthority() CleanupAuthority {
-	return CleanupAuthority{NeverCreated: true}
+// CleanupAuthority is the compatibility name for WriterFence.
+type CleanupAuthority = WriterFence
+
+func NeverCreatedAuthority() WriterFence {
+	return WriterFence{NeverCreated: true}
 }
 
-func CreatedContainerAuthority(containerID string) CleanupAuthority {
-	return CleanupAuthority{ContainerID: containerID}
+func CreatedContainerAuthority(containerID string) WriterFence {
+	return WriterFence{ContainerID: containerID}
 }
 
-func RuntimeCleanupAuthority(runtime RuntimeIdentity) CleanupAuthority {
-	return CleanupAuthority{ContainerID: runtime.ContainerID, StartedAt: runtime.StartedAt, Token: runtime.Token}
+func RuntimeCleanupAuthority(runtime RuntimeIdentity) WriterFence {
+	return WriterFence{ContainerID: runtime.ContainerID, StartedAt: runtime.StartedAt, Token: runtime.Token}
 }
 
-func (a CleanupAuthority) runtimeIdentity() RuntimeIdentity {
+func (a WriterFence) runtimeIdentity() RuntimeIdentity {
 	return RuntimeIdentity{ContainerID: a.ContainerID, StartedAt: a.StartedAt, Token: a.Token}
 }
 
@@ -241,6 +256,14 @@ func New(ctx context.Context, config Config, api dockerAPI) (*Provider, error) {
 	if err != nil {
 		return nil, err
 	}
+	rootInfo, err := os.Lstat(root)
+	if err != nil {
+		return nil, errors.New("inspect private background run root")
+	}
+	rootDevice, rootInode, err := fileIdentity(rootInfo)
+	if err != nil {
+		return nil, errors.New("identify private background run root")
+	}
 	var owned *client.Client
 	if api == nil {
 		owned, err = client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
@@ -279,14 +302,19 @@ func New(ctx context.Context, config Config, api dockerAPI) (*Provider, error) {
 		httpClient.Timeout = 2 * time.Second
 	}
 	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Provider{config: cloneConfig(config), docker: api, ownedCLI: owned, root: root, hostKey: hostKey, imageEnv: imageEnv, imageLabels: cloneMap(inspection.Config.Labels), http: httpClient}, nil
+	return &Provider{config: cloneConfig(config), docker: api, ownedCLI: owned, root: root, rootDevice: rootDevice, rootInode: rootInode, hostKey: hostKey, imageEnv: imageEnv, imageLabels: cloneMap(inspection.Config.Labels), http: httpClient, lifecycle: &providerLifecycle{}}, nil
 }
 
 func (p *Provider) Close() error {
-	if p.ownedCLI != nil {
-		return p.ownedCLI.Close()
-	}
-	return nil
+	p.lifecycle.closeOnce.Do(func() {
+		p.lifecycle.mu.Lock()
+		p.lifecycle.closed = true
+		p.lifecycle.mu.Unlock()
+		if p.ownedCLI != nil {
+			p.lifecycle.closeErr = p.ownedCLI.Close()
+		}
+	})
+	return p.lifecycle.closeErr
 }
 
 // CommittedRuntime reconstructs the provider's exact process identity from the

@@ -153,11 +153,16 @@ func (p *Provider) EnsureContainer(ctx context.Context, run taskstore.Background
 
 // StartContainer starts only an exactly attested created container and returns
 // its exact Docker process epoch.
-func (p *Provider) StartContainer(ctx context.Context, run taskstore.BackgroundRun, expectedID string) (Observation, error) {
+func (p *Provider) StartContainer(ctx context.Context, run taskstore.BackgroundRun, expectedID string) (_ Observation, resultErr error) {
 	digest, err := p.validateRun(run)
 	if err != nil {
 		return Observation{}, err
 	}
+	unlock, err := p.acquireCloneAuthority(ctx, run, digest)
+	if err != nil {
+		return Observation{}, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
 	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	if err != nil {
@@ -596,13 +601,13 @@ func (p *Provider) StopContainer(ctx context.Context, run taskstore.BackgroundRu
 	return Observation{Evidence: e, ContainerID: runtime.ContainerID, ContainerStarted: runtime.StartedAt, RuntimeToken: runtime.Token}, nil
 }
 
-// ProveWriterInactive resolves one explicit cleanup authority from exact
+// ProveWriterInactive resolves one explicit writer fence from exact
 // provider-owned labels. It never creates a resource and never deletes an
 // identity that was not fully attested.
-func (p *Provider) ProveWriterInactive(ctx context.Context, run taskstore.BackgroundRun) (Observation, CleanupAuthority, error) {
+func (p *Provider) ProveWriterInactive(ctx context.Context, run taskstore.BackgroundRun) (Observation, WriterFence, error) {
 	digest, err := p.cleanupDigest(run)
 	if err != nil {
-		return Observation{}, CleanupAuthority{}, err
+		return Observation{}, WriterFence{}, err
 	}
 	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
@@ -610,20 +615,20 @@ func (p *Provider) ProveWriterInactive(ctx context.Context, run taskstore.Backgr
 		listed, listErr := p.listRunContainers(operation, run, digest)
 		cancel()
 		if listErr != nil {
-			return Observation{}, CleanupAuthority{}, listErr
+			return Observation{}, WriterFence{}, listErr
 		}
 		if len(listed) != 0 {
-			return Observation{}, CleanupAuthority{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "exact-labeled run container exists under a noncanonical name"}
+			return Observation{}, WriterFence{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "exact-labeled run container exists under a noncanonical name"}
 		}
 		e, _ := makeEvidence(evidence{Effect: "writer_inactive", Identity: run.ContainerIdentity, Spec: digest, Status: "never_created"})
 		return Observation{Evidence: e}, NeverCreatedAuthority(), nil
 	}
 	cancel()
 	if err != nil {
-		return Observation{}, CleanupAuthority{}, err
+		return Observation{}, WriterFence{}, err
 	}
 	if err := p.attestContainerForCleanup(run, digest, info, info.State.Running); err != nil {
-		return Observation{}, CleanupAuthority{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
+		return Observation{}, WriterFence{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
 	}
 	if info.State.Status == "created" {
 		e, _ := makeEvidence(evidence{Effect: "writer_inactive", Identity: run.ContainerIdentity, Spec: digest, Status: "never_started", Container: info.ID})
@@ -631,7 +636,7 @@ func (p *Provider) ProveWriterInactive(ctx context.Context, run taskstore.Backgr
 	}
 	runtime, _, err := runtimeIdentity(info)
 	if err != nil {
-		return Observation{}, CleanupAuthority{}, err
+		return Observation{}, WriterFence{}, err
 	}
 	if info.State.Running {
 		observation, stopErr := p.StopContainer(ctx, run, runtime)

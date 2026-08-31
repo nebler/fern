@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -853,6 +854,235 @@ func TestCleanupAuthorityAlgebraAndRenamedNeverCreatedFence(t *testing.T) {
 	})
 }
 
+func TestAcquireExportSourceRejectsActiveAndReplacementWriters(t *testing.T) {
+	t.Run("created fence became active", func(t *testing.T) {
+		provider, _, run := preparedProvider(t)
+		created, err := provider.EnsureContainer(context.Background(), run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, fence, err := provider.ProveWriterInactive(context.Background(), run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := provider.StartContainer(context.Background(), run, created.ContainerID); err != nil {
+			t.Fatal(err)
+		}
+		if source, err := provider.AcquireExportSource(context.Background(), run, fence); source != nil || !errors.Is(err, ErrIdentityMismatch) {
+			t.Fatalf("active writer export source=%v error=%v", source, err)
+		}
+	})
+
+	t.Run("replacement process epoch", func(t *testing.T) {
+		provider, docker, run, fence := stoppedExportFixture(t)
+		docker.info.State.StartedAt = "2026-08-31T12:00:01.123456789Z"
+		if source, err := provider.AcquireExportSource(context.Background(), run, fence); source != nil || !errors.Is(err, ErrIdentityMismatch) {
+			t.Fatalf("replacement runtime export source=%v error=%v", source, err)
+		}
+	})
+
+	t.Run("renamed exact-labeled runtime", func(t *testing.T) {
+		provider, docker, run, fence := stoppedExportFixture(t)
+		docker.info.Name = "/replacement-exact-labeled-runtime"
+		if source, err := provider.AcquireExportSource(context.Background(), run, fence); source != nil || !errors.Is(err, ErrIdentityMismatch) {
+			t.Fatalf("renamed runtime export source=%v error=%v", source, err)
+		}
+	})
+}
+
+func TestAcquireExportSourceExactStoppedRuntimeAndFenceValidation(t *testing.T) {
+	provider, _, run, fence := stoppedExportFixture(t)
+	source, err := provider.AcquireExportSource(context.Background(), run, fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPath := filepath.Join(provider.root, run.CloneIdentity)
+	info, err := os.Lstat(wantPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	device, inode, err := fileIdentity(info)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if source.RepositoryPath() != wantPath || source.CloneIdentity() != run.CloneIdentity || source.Device() != device || source.Inode() != inode {
+		t.Fatalf("export identity path=%q clone=%q device=%d inode=%d", source.RepositoryPath(), source.CloneIdentity(), source.Device(), source.Inode())
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatalf("double close: %v", err)
+	}
+
+	staleRun := run
+	staleRun.OpenCodeMessageID = "msg_stale"
+	if source, err := provider.AcquireExportSource(context.Background(), staleRun, fence); source != nil || err == nil {
+		t.Fatalf("stale spec export source=%v error=%v", source, err)
+	}
+	staleGeneration := run
+	staleGeneration.Generation++
+	if source, err := provider.AcquireExportSource(context.Background(), staleGeneration, fence); source != nil || err == nil {
+		t.Fatalf("stale generation export source=%v error=%v", source, err)
+	}
+	invalidFence := fence
+	invalidFence.NeverCreated = true
+	if source, err := provider.AcquireExportSource(context.Background(), run, invalidFence); source != nil || err == nil {
+		t.Fatalf("mixed fence export source=%v error=%v", source, err)
+	}
+}
+
+func TestAcquireExportSourceReattestsMarkerAndCloneInode(t *testing.T) {
+	tests := []struct {
+		name    string
+		replace func(*testing.T, *Provider, taskstore.BackgroundRun)
+	}{
+		{
+			name: "marker",
+			replace: func(t *testing.T, provider *Provider, run taskstore.BackgroundRun) {
+				path := provider.cloneMarkerPath(run)
+				data, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				retained, err := os.Open(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Cleanup(func() { _ = retained.Close() })
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "clone inode",
+			replace: func(t *testing.T, provider *Provider, run taskstore.BackgroundRun) {
+				path := filepath.Join(provider.root, run.CloneIdentity)
+				retired := filepath.Join(provider.root, ".retired-export-clone")
+				if err := os.Rename(path, retired); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider, docker, run, fence := stoppedExportFixture(t)
+			inspectEntered := make(chan struct{})
+			inspectRelease := make(chan struct{})
+			docker.inspectHook = func() {
+				close(inspectEntered)
+				<-inspectRelease
+			}
+			type result struct {
+				source *ExportSource
+				err    error
+			}
+			resultCh := make(chan result, 1)
+			go func() {
+				source, err := provider.AcquireExportSource(context.Background(), run, fence)
+				resultCh <- result{source: source, err: err}
+			}()
+			<-inspectEntered
+			test.replace(t, provider, run)
+			close(inspectRelease)
+			got := <-resultCh
+			if got.source != nil || !errors.Is(got.err, ErrIdentityMismatch) {
+				t.Fatalf("replacement export source=%v error=%v", got.source, got.err)
+			}
+		})
+	}
+}
+
+func TestExportSourceSerializesCloneRemovalAndProviderClose(t *testing.T) {
+	provider, _, run, fence := stoppedExportFixture(t)
+	if _, err := provider.RemoveContainer(context.Background(), run, fence); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.RemoveVolume(context.Background(), run, fence); err != nil {
+		t.Fatal(err)
+	}
+	source, err := provider.AcquireExportSource(context.Background(), run, fence)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lockWait := &observedDoneContext{Context: context.Background(), observed: make(chan struct{})}
+	removeResult := make(chan error, 1)
+	go func() {
+		_, err := provider.RemoveClone(lockWait, run, fence)
+		removeResult <- err
+	}()
+	<-lockWait.observed
+	select {
+	case err := <-removeResult:
+		t.Fatalf("clone removal escaped export lease: %v", err)
+	default:
+	}
+	if err := source.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-removeResult; err != nil {
+		t.Fatalf("serialized clone removal: %v", err)
+	}
+
+	provider, _, run = testProvider(t)
+	if _, err := provider.EnsureClone(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	_, neverCreated, err := provider.ProveWriterInactive(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err = provider.AcquireExportSource(context.Background(), run, neverCreated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := provider.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if candidate, err := provider.AcquireExportSource(context.Background(), run, neverCreated); candidate != nil || !errors.Is(err, ErrProviderClosed) {
+		t.Fatalf("closed provider export source=%v error=%v", candidate, err)
+	}
+	if err := source.Close(); err != nil {
+		t.Fatalf("close lease after provider: %v", err)
+	}
+}
+
+func TestExportAuthorityErrorsAndEvidenceDoNotLeakSecretsOrPaths(t *testing.T) {
+	provider, docker, run := testProvider(t)
+	if _, err := provider.EnsureClone(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	observation, fence, err := provider.ProveWriterInactive(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := provider.password(run)
+	for _, forbidden := range []string{provider.root, provider.config.Repository, secret, provider.config.Environment["FERN_MODEL"]} {
+		if forbidden != "" && strings.Contains(observation.Evidence, forbidden) {
+			t.Fatalf("writer evidence leaked %q: %s", forbidden, observation.Evidence)
+		}
+	}
+	docker.inspectErr = errors.New("raw Docker diagnostics " + provider.root + " " + secret)
+	_, err = provider.AcquireExportSource(context.Background(), run, fence)
+	if err == nil {
+		t.Fatal("raw Docker error was accepted")
+	}
+	for _, forbidden := range []string{provider.root, provider.config.Repository, secret, provider.config.Environment["FERN_MODEL"], "raw Docker diagnostics"} {
+		if forbidden != "" && strings.Contains(err.Error(), forbidden) {
+			t.Fatalf("export error leaked %q: %v", forbidden, err)
+		}
+	}
+}
+
 func TestContainerDimensionMismatchFailsClosed(t *testing.T) {
 	provider, docker, run := preparedProvider(t)
 	if _, err := provider.EnsureContainer(context.Background(), run); err != nil {
@@ -1219,6 +1449,8 @@ type fakeDocker struct {
 	hostPort                                                        string
 	starts, stops, containerRemoves, volumeRemoves                  int
 	wantFreshRead, freshReads                                       int
+	inspectErr                                                      error
+	inspectHook                                                     func()
 }
 
 func newFakeDocker() *fakeDocker {
@@ -1272,10 +1504,47 @@ func (f *fakeDocker) ContainerInspect(ctx context.Context, identity string) (con
 	if err := f.observeReadContext(ctx); err != nil {
 		return container.InspectResponse{}, err
 	}
+	if f.inspectHook != nil {
+		f.inspectHook()
+	}
+	if f.inspectErr != nil {
+		return container.InspectResponse{}, f.inspectErr
+	}
 	if f.info.ContainerJSONBase == nil || (identity != f.info.ID && identity != strings.TrimPrefix(f.info.Name, "/")) {
 		return container.InspectResponse{}, errdefs.NotFound(errors.New("missing container"))
 	}
 	return f.info, nil
+}
+
+type observedDoneContext struct {
+	context.Context
+	observed chan struct{}
+	once     sync.Once
+}
+
+func (ctx *observedDoneContext) Done() <-chan struct{} {
+	ctx.once.Do(func() { close(ctx.observed) })
+	return ctx.Context.Done()
+}
+
+func stoppedExportFixture(t *testing.T) (*Provider, *fakeDocker, taskstore.BackgroundRun, WriterFence) {
+	t.Helper()
+	provider, docker, run := preparedProvider(t)
+	created, err := provider.EnsureContainer(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.StartContainer(context.Background(), run, created.ContainerID); err != nil {
+		t.Fatal(err)
+	}
+	_, fence, err := provider.ProveWriterInactive(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if docker.info.State == nil || docker.info.State.Running || docker.info.State.Status != "exited" {
+		t.Fatal("fixture writer did not stop")
+	}
+	return provider, docker, run, fence
 }
 
 func (f *fakeDocker) ContainerList(ctx context.Context, options container.ListOptions) ([]container.Summary, error) {
