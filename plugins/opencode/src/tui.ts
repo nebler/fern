@@ -14,184 +14,216 @@ import {
   type RunConfirmation,
 } from "./workflow.js"
 
-const plugin: TuiPluginModule = {
-  id: "fern.opencode",
-  async tui(api) {
-    if (api.app.version !== SUPPORTED_OPENCODE_VERSION) {
-      api.ui.toast({
-        variant: "error",
-        title: "Fern plugin disabled",
-        message: `Requires OpenCode ${SUPPORTED_OPENCODE_VERSION}; found ${api.app.version}.`,
-        duration: 10_000,
-      })
-      return
-    }
+export type TuiPluginDependencies = {
+  connection?: (
+    api: TuiPluginApi,
+    onboard: boolean,
+  ) => Promise<{ client: FernClient; endpoint: URL; credentials: CredentialStore }>
+  createRun?: typeof createRunWorkflow
+  stopRun?: typeof stopRunWorkflow
+  openBrowser?: typeof openBrowser
+}
 
-    let endpoint = configuredOrigin(api.kv)
-    let credentials: CredentialStore | undefined
-    const developmentToken = process.env.FERN_TOKEN
-    const pending: PendingSubmissionStore = {
-      async get(digest) {
-        return api.kv.get<Record<string, string>>("fern.pending-submissions", {})[digest]
-      },
-      async set(digest, idempotencyKey) {
-        api.kv.set("fern.pending-submissions", {
-          ...api.kv.get<Record<string, string>>("fern.pending-submissions", {}),
-          [digest]: idempotencyKey,
+export function createTuiPlugin(dependencies: TuiPluginDependencies = {}): TuiPluginModule {
+  return {
+    id: "fern.opencode",
+    async tui(api) {
+      if (api.app.version !== SUPPORTED_OPENCODE_VERSION) {
+        api.ui.toast({
+          variant: "error",
+          title: "Fern plugin disabled",
+          message: `Requires OpenCode ${SUPPORTED_OPENCODE_VERSION}; found ${api.app.version}.`,
+          duration: 10_000,
         })
-      },
-      async delete(digest) {
-        const next = { ...api.kv.get<Record<string, string>>("fern.pending-submissions", {}) }
-        delete next[digest]
-        api.kv.set("fern.pending-submissions", next)
-      },
-    }
-    const createLatch = new CreateRunLatch()
-    const onboardingLatch = new OnboardingLatch()
-    const connection = async (onboard = true) => {
-      if (!endpoint) {
-        const input = await promptValue(api, "Connect Fern", "Root HTTPS origin, for example https://fern.example")
-        if (input === undefined) throw new Error("Fern connection was canceled.")
-        endpoint = persistOrigin(api.kv, input)
+        return
       }
-      if (!credentials) {
-        credentials = developmentToken
-          ? new InMemoryCredentialStore(developmentToken)
-          : new OSCredentialStore(endpoint.href, { signal: api.lifecycle.signal })
+
+      let endpoint = configuredOrigin(api.kv)
+      let credentials: CredentialStore | undefined
+      const developmentToken = process.env.FERN_TOKEN
+      const pending: PendingSubmissionStore = {
+        async get(digest) {
+          return api.kv.get<Record<string, string>>("fern.pending-submissions", {})[digest]
+        },
+        async set(digest, idempotencyKey) {
+          api.kv.set("fern.pending-submissions", {
+            ...api.kv.get<Record<string, string>>("fern.pending-submissions", {}),
+            [digest]: idempotencyKey,
+          })
+        },
+        async delete(digest) {
+          const next = { ...api.kv.get<Record<string, string>>("fern.pending-submissions", {}) }
+          delete next[digest]
+          api.kv.set("fern.pending-submissions", next)
+        },
       }
-      const client = new FernClient(endpoint, credentials, { signal: api.lifecycle.signal })
-      if (!(await credentials.get()) && onboard) {
-        await onboardingLatch.run(() => authorize(api, endpoint!, client, credentials!))
+      const createLatch = new CreateRunLatch()
+      const onboardingLatch = new OnboardingLatch()
+      const connection = dependencies.connection
+        ? (onboard = true) => dependencies.connection!(api, onboard)
+        : async (onboard = true) => {
+            if (!endpoint) {
+              const input = await promptValue(
+                api,
+                "Connect Fern",
+                "Root HTTPS origin, for example https://fern.example",
+              )
+              if (input === undefined) throw new Error("Fern connection was canceled.")
+              endpoint = persistOrigin(api.kv, input)
+            }
+            if (!credentials) {
+              credentials = developmentToken
+                ? new InMemoryCredentialStore(developmentToken)
+                : new OSCredentialStore(endpoint.href, { signal: api.lifecycle.signal })
+            }
+            const client = new FernClient(endpoint, credentials, { signal: api.lifecycle.signal })
+            if (!(await credentials.get()) && onboard) {
+              await onboardingLatch.run(() => authorize(api, endpoint!, client, credentials!))
+            }
+            return { client, endpoint, credentials }
+          }
+      const run = async () => {
+        const connected = await connection()
+        return showPrompt(
+          api,
+          "Run on Fern",
+          `Instruction (${INSTRUCTION_MAX_LENGTH} characters maximum)`,
+          (instruction, dialog) =>
+            createLatch.run(() =>
+              submitRun(
+                api,
+                connected.client,
+                connected.endpoint.href,
+                pending,
+                instruction,
+                dialog,
+                dependencies.createRun,
+              ),
+            ),
+        )
       }
-      return { client, endpoint, credentials }
-    }
-    const run = async () => {
-      const connected = await connection()
-      return showPrompt(
-        api,
-        "Run on Fern",
-        `Instruction (${INSTRUCTION_MAX_LENGTH} characters maximum)`,
-        (instruction, dialog) =>
-          createLatch.run(() =>
-            submitRun(api, connected.client, connected.endpoint.href, pending, instruction, dialog),
-          ),
-      )
-    }
-    const runs = () =>
-      handle(api, async () => {
+      const runs = () =>
+        handle(api, async () => {
+          const { client } = await connection()
+          const items = await client.listRuns()
+          api.ui.dialog.setSize("xlarge")
+          api.ui.dialog.replace(() =>
+            api.ui.DialogSelect({
+              title: "Fern runs",
+              options: items.map((item) => ({
+                title: item.id,
+                value: item.id,
+                description: `${item.state}${item.repository ? ` - ${item.repository}` : ""}`,
+              })),
+              onSelect: (item) => void handle(api, () => showRun(api, client, String(item.value))),
+            }),
+          )
+        })
+      const open = async () => {
         const { client } = await connection()
-        const items = await client.listRuns()
+        return showPrompt(api, "Open Fern run", "Run ID", (runID) =>
+          openRun(api, client, runID, dependencies.openBrowser),
+        )
+      }
+      const stop = async () => {
+        const { client } = await connection()
+        return showPrompt(api, "Stop Fern run", "Run ID", (runID, dialog) =>
+          stopRun(api, client, runID, dialog, dependencies.stopRun),
+        )
+      }
+      const result = async () => {
+        const { client } = await connection()
+        return showPrompt(api, "Fern run result", "Run ID", (runID) => showResult(api, client, runID))
+      }
+      const disconnect = () =>
+        handle(api, async () => {
+          const connected = await connection(false)
+          if (!(await connected.credentials.get())) throw new Error("Fern has no local credential to disconnect.")
+          const approved = await confirm(
+            api,
+            api.ui.dialog,
+            "Disconnect Fern?",
+            "Revoke this plugin credential on Fern, then remove it from the operating system keyring?",
+          )
+          if (!approved) return
+          const outcome = await disconnectFern(connected.client, connected.credentials)
+          api.ui.toast({
+            variant:
+              outcome === "revoked" || outcome === "already_ineffective"
+                ? "success"
+                : outcome === "definitive_failure"
+                  ? "error"
+                  : "warning",
+            title: "Fern credential forgotten",
+            message: disconnectMessage(outcome, Boolean(developmentToken)),
+          })
+        })
+      const menu = async () => {
+        await connection()
         api.ui.dialog.setSize("xlarge")
         api.ui.dialog.replace(() =>
           api.ui.DialogSelect({
-            title: "Fern runs",
-            options: items.map((item) => ({
-              title: item.id,
-              value: item.id,
-              description: `${item.state}${item.repository ? ` - ${item.repository}` : ""}`,
-            })),
-            onSelect: (item) => void handle(api, () => showRun(api, client, String(item.value))),
+            title: "Fern",
+            options: [
+              {
+                title: "Run",
+                value: "run",
+                description: "Start a background run",
+                onSelect: () => void handle(api, run),
+              },
+              {
+                title: "Runs",
+                value: "runs",
+                description: "List background runs",
+                onSelect: () => void handle(api, runs),
+              },
+              {
+                title: "Open",
+                value: "open",
+                description: "Open the authoritative live run",
+                onSelect: () => void handle(api, open),
+              },
+              {
+                title: "Stop",
+                value: "stop",
+                description: "Request a durable stop",
+                onSelect: () => void handle(api, stop),
+              },
+              {
+                title: "Result",
+                value: "result",
+                description: "Read the retained result",
+                onSelect: () => void handle(api, result),
+              },
+              {
+                title: "Disconnect",
+                value: "disconnect",
+                description: "Revoke and forget this plugin credential",
+                onSelect: () => void handle(api, disconnect),
+              },
+            ],
           }),
         )
-      })
-    const open = async () => {
-      const { client } = await connection()
-      return showPrompt(api, "Open Fern run", "Run ID", (runID) => openRun(api, client, runID))
-    }
-    const stop = async () => {
-      const { client } = await connection()
-      return showPrompt(api, "Stop Fern run", "Run ID", (runID, dialog) => stopRun(api, client, runID, dialog))
-    }
-    const result = async () => {
-      const { client } = await connection()
-      return showPrompt(api, "Fern run result", "Run ID", (runID) => showResult(api, client, runID))
-    }
-    const disconnect = () =>
-      handle(api, async () => {
-        const connected = await connection(false)
-        if (!(await connected.credentials.get())) throw new Error("Fern has no local credential to disconnect.")
-        const approved = await confirm(
-          api,
-          api.ui.dialog,
-          "Disconnect Fern?",
-          "Revoke this plugin credential on Fern, then remove it from the operating system keyring?",
-        )
-        if (!approved) return
-        const outcome = await disconnectFern(connected.client, connected.credentials)
-        api.ui.toast({
-          variant:
-            outcome === "revoked" || outcome === "already_ineffective"
-              ? "success"
-              : outcome === "definitive_failure"
-                ? "error"
-                : "warning",
-          title: "Fern credential forgotten",
-          message: disconnectMessage(outcome, Boolean(developmentToken)),
-        })
-      })
-    const menu = async () => {
-      await connection()
-      api.ui.dialog.setSize("xlarge")
-      api.ui.dialog.replace(() =>
-        api.ui.DialogSelect({
-          title: "Fern",
-          options: [
-            {
-              title: "Run",
-              value: "run",
-              description: "Start a background run",
-              onSelect: () => void handle(api, run),
-            },
-            {
-              title: "Runs",
-              value: "runs",
-              description: "List background runs",
-              onSelect: () => void handle(api, runs),
-            },
-            {
-              title: "Open",
-              value: "open",
-              description: "Open the authoritative live run",
-              onSelect: () => void handle(api, open),
-            },
-            {
-              title: "Stop",
-              value: "stop",
-              description: "Request a durable stop",
-              onSelect: () => void handle(api, stop),
-            },
-            {
-              title: "Result",
-              value: "result",
-              description: "Read the retained result",
-              onSelect: () => void handle(api, result),
-            },
-            {
-              title: "Disconnect",
-              value: "disconnect",
-              description: "Revoke and forget this plugin credential",
-              onSelect: () => void handle(api, disconnect),
-            },
-          ],
-        }),
-      )
-    }
+      }
 
-    api.keymap.registerLayer({
-      commands: [
-        command("fern", "Fern", "Open Fern actions", () => handle(api, menu), "fern"),
-        command("fern.run", "Fern: Run", "Start a background run", () => handle(api, run)),
-        command("fern.runs", "Fern: Runs", "List background runs", () => handle(api, runs)),
-        command("fern.open", "Fern: Open", "Open a background run", () => handle(api, open)),
-        command("fern.stop", "Fern: Stop", "Stop a background run", () => handle(api, stop)),
-        command("fern.result", "Fern: Result", "Show a background run result", () => handle(api, result)),
-        command("fern.disconnect", "Fern: Disconnect", "Revoke and forget the credential", () =>
-          handle(api, disconnect),
-        ),
-      ],
-    })
-  },
+      api.keymap.registerLayer({
+        commands: [
+          command("fern", "Fern", "Open Fern actions", () => handle(api, menu), "fern"),
+          command("fern.run", "Fern: Run", "Start a background run", () => handle(api, run)),
+          command("fern.runs", "Fern: Runs", "List background runs", () => handle(api, runs)),
+          command("fern.open", "Fern: Open", "Open a background run", () => handle(api, open)),
+          command("fern.stop", "Fern: Stop", "Stop a background run", () => handle(api, stop)),
+          command("fern.result", "Fern: Result", "Show a background run result", () => handle(api, result)),
+          command("fern.disconnect", "Fern: Disconnect", "Revoke and forget the credential", () =>
+            handle(api, disconnect),
+          ),
+        ],
+      })
+    },
+  }
 }
+
+const plugin = createTuiPlugin()
 
 export default plugin
 
@@ -354,8 +386,9 @@ async function submitRun(
   pending: PendingSubmissionStore,
   instruction: string,
   dialog: TuiDialogStack,
+  workflow: typeof createRunWorkflow = createRunWorkflow,
 ) {
-  const runID = await createRunWorkflow({
+  const runID = await workflow({
     client,
     pending,
     directory: api.state.path.worktree || api.state.path.directory,
@@ -382,10 +415,10 @@ async function showRun(api: TuiPluginApi, client: FernClient, runID: string) {
   )
 }
 
-async function openRun(api: TuiPluginApi, client: FernClient, runID: string) {
+async function openRun(api: TuiPluginApi, client: FernClient, runID: string, launch: typeof openBrowser = openBrowser) {
   const expected = client.requireRunID(runID.trim())
   const url = await client.resolveOpen(expected, crypto.randomUUID())
-  await openBrowser(url, api.lifecycle.signal)
+  await launch(url, api.lifecycle.signal)
   api.ui.dialog.clear()
   api.ui.toast({
     variant: "success",
@@ -394,8 +427,14 @@ async function openRun(api: TuiPluginApi, client: FernClient, runID: string) {
   })
 }
 
-async function stopRun(api: TuiPluginApi, client: FernClient, runID: string, dialog: TuiDialogStack) {
-  const state = await stopRunWorkflow({
+async function stopRun(
+  api: TuiPluginApi,
+  client: FernClient,
+  runID: string,
+  dialog: TuiDialogStack,
+  workflow: typeof stopRunWorkflow = stopRunWorkflow,
+) {
+  const state = await workflow({
     client,
     runID,
     confirm: (id) =>

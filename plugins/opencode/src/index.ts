@@ -1,3 +1,5 @@
+export { default } from "./tui.js"
+export { createTuiPlugin, type TuiPluginDependencies } from "./tui.js"
 export {
   OnboardingLatch,
   DisconnectError,

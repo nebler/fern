@@ -93,6 +93,47 @@ describe("FernClient", () => {
     await expect(client(crossHost).resolveOpen("run_123", "open-key")).rejects.toThrow("unsafe open capability")
   })
 
+  test("stops a run with the caller idempotency key", async () => {
+    const capture: { method?: string; path?: string; key?: string | null; body?: string } = {}
+    const server = serve(async (request) => {
+      capture.method = request.method
+      capture.path = new URL(request.url).pathname
+      capture.key = request.headers.get("idempotency-key")
+      capture.body = await request.text()
+      return Response.json({ run_id: "run_123", state: "canceling" }, { status: 202 })
+    })
+
+    await expect(client(server).stopRun("run_123", "stop-key")).resolves.toBe("canceling")
+    expect(capture).toEqual({
+      method: "POST",
+      path: "/fern/api/runs/run_123/stop",
+      key: "stop-key",
+      body: "{}",
+    })
+  })
+
+  test("reads a ready retained result", async () => {
+    const server = serve((request) => {
+      expect(request.method).toBe("GET")
+      expect(new URL(request.url).pathname).toBe("/fern/api/runs/run_123/result")
+      return Response.json({
+        run_id: "run_123",
+        state: "result_ready",
+        summary: "Fixed the race.",
+        result_commit: "c".repeat(40),
+        url: "https://fern.example/runs/run_123/result",
+      })
+    })
+
+    await expect(client(server).getResult("run_123")).resolves.toEqual({
+      runID: "run_123",
+      state: "result_ready",
+      summary: "Fixed the race.",
+      resultCommit: "c".repeat(40),
+      url: "https://fern.example/runs/run_123/result",
+    })
+  })
+
   test("requires JSON, bounds bodies, and preserves malformed error status", async () => {
     const nonJSON = serve(() => new Response("ok", { headers: { "Content-Type": "text/plain" } }))
     await expect(client(nonJSON).listRuns()).rejects.toThrow("non-JSON")

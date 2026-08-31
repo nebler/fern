@@ -6,18 +6,29 @@
   "type": "module",
   "license": "MIT",
   "exports": {
-    ".": "./src/index.ts",
-    "./tui": "./src/tui.ts"
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./tui": {
+      "import": "./dist/tui.js",
+      "types": "./dist/tui.d.ts"
+    }
   },
   "files": [
-    "src",
+    "dist",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
+    "clean": "rm -rf dist",
+    "build": "bun run clean && tsc -p tsconfig.build.json",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
+    "pack": "npm pack --ignore-scripts",
+    "prepack": "bun run build",
     "smoke": "bun test/smoke.ts",
+    "smoke:cli": "bun test/cli-smoke.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

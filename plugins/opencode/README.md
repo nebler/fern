@@ -30,8 +30,8 @@ Not implemented:
 
 - Repository authorization checks and host compatibility/readiness checks.
 - Windows durable credential storage.
-- The Fern Background Runs backend routes. Authentication routes are implemented, but the concrete run client still expects the developing contract under `/fern/api/runs`.
-- A published npm package or compatibility testing against an installed OpenCode binary.
+- Retained result artifacts. Create, list, get, stop, and open routes are implemented; result requests remain `409 Conflict` until artifact retention lands.
+- A published npm package. Registry installation cannot succeed until `@fern/opencode` is published.
 
 ## Development
 
@@ -41,8 +41,13 @@ bun install
 bun run format:check
 bun run typecheck
 bun test
+bun run build
+bun run pack
 bun run smoke
+bun run smoke:cli
 ```
+
+`smoke` installs the packed archive into an isolated package tree and imports its compiled exports. `smoke:cli` additionally requires an installed `opencode` `1.18.16` binary and verifies that its plugin installer detects the extracted packed artifact as a TUI target without contacting a model provider.
 
 For development only, `FERN_ENDPOINT` can override the persisted origin and `FERN_TOKEN` can seed a process-local `InMemoryCredentialStore`. The token remains inherited by the OpenCode parent process; the plugin never writes it to KV storage, configuration, logs, repository files, process arguments, or child environments. Localhost HTTP is accepted only through this development path:
 
@@ -50,10 +55,10 @@ For development only, `FERN_ENDPOINT` can override the persisted origin and `FER
 FERN_ENDPOINT=https://fern-host.example FERN_TOKEN=development-token opencode2 /path/to/repository
 ```
 
-Load this source checkout through the OpenCode CLI plugin configuration using the package directory or a packed tarball. The intended eventual install command is:
+The pinned OpenCode CLI installs a published version with:
 
 ```sh
-opencode2 plugin add @fern/opencode@<published-version>
+opencode2 plugin @fern/opencode@<version>
 ```
 
 That command is not currently usable because `@fern/opencode` has not been published.
@@ -71,4 +76,4 @@ The client uses JSON and a Fern plugin bearer after device authorization:
 - `POST /fern/api/runs/:id/open` with `Idempotency-Key`; the same-host capability URL is resolved fresh, passed only to the browser launcher, and never cached or displayed.
 - `GET /fern/api/runs/:id/result`.
 
-The authentication routes are implemented by Fern. The run routes remain a developing client/backend contract.
+The authentication routes and create, list, get, stop, and open run routes are implemented by Fern. The result route returns `409 Conflict` until retained result artifacts are available.
