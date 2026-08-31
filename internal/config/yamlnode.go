@@ -51,9 +51,11 @@ type fileTaskPolicy struct {
 		Provider yaml.Node `yaml:"provider"`
 		ID       yaml.Node `yaml:"id"`
 	} `yaml:"model"`
-	AttemptTimeout yaml.Node `yaml:"attemptTimeout"`
-	LeaseDuration  yaml.Node `yaml:"leaseDuration"`
-	Budget         *struct {
+	AttemptTimeout    yaml.Node `yaml:"attemptTimeout"`
+	LeaseDuration     yaml.Node `yaml:"leaseDuration"`
+	BackgroundImage   yaml.Node `yaml:"backgroundImage"`
+	BackgroundImageID yaml.Node `yaml:"backgroundImageID"`
+	Budget            *struct {
 		MaxTurns yaml.Node `yaml:"maxTurns"`
 	} `yaml:"budget"`
 	Verification *struct {
@@ -220,6 +222,24 @@ func parseTaskPolicy(node yaml.Node) (*TaskPolicy, error) {
 		Agent: agent, Model: TaskModel{Provider: provider, ID: modelID},
 		AttemptTimeout: attemptTimeout, LeaseDuration: leaseDuration,
 		Budget: TaskBudget{MaxTurns: int(maxTurns)},
+	}
+	if !file.BackgroundImage.IsZero() {
+		policy.BackgroundImage, err = decodeRequiredTaskString(file.BackgroundImage)
+		if err != nil || policy.BackgroundImage == "" {
+			if err == nil {
+				err = errors.New("must be nonempty")
+			}
+			return nil, fmt.Errorf("backgroundImage: %w", err)
+		}
+	}
+	if !file.BackgroundImageID.IsZero() {
+		policy.BackgroundImageID, err = decodeRequiredTaskString(file.BackgroundImageID)
+		if err != nil || policy.BackgroundImageID == "" {
+			if err == nil {
+				err = errors.New("must be nonempty")
+			}
+			return nil, fmt.Errorf("backgroundImageID: %w", err)
+		}
 	}
 	if file.Verification != nil {
 		checkName, err := decodeRequiredTaskString(file.Verification.CheckName)

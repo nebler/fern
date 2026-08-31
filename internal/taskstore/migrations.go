@@ -23,10 +23,442 @@ var migrations = []migration{
 	{version: 5, name: "explicit_workspace_github_authority", sql: explicitWorkspaceGitHubAuthoritySchema},
 	{version: 6, name: "publication_admission_receipts", sql: publicationAdmissionReceiptSchema},
 	{version: 7, name: "background_run_intents", sql: backgroundRunIntentSchema},
+	{version: 8, name: "background_run_effect_claims", sql: backgroundRunEffectClaimSchema},
 }
 
 // CurrentSchemaVersion is the schema produced by all migrations in this build.
 func CurrentSchemaVersion() int { return len(migrations) }
+
+const backgroundRunEffectClaimSchema = `
+CREATE TEMP TABLE migration8_legacy_background_runs AS
+SELECT r.task_id,r.attempt_id,r.workspace_id,r.creator_actor_snapshot_id,r.state,r.effect_phase,r.cancel_epoch,
+       r.stop_receipt_id,r.stop_actor_snapshot_id,r.stop_requested_at,
+       CASE WHEN r.cancel_epoch=1 THEN r.stop_actor_snapshot_id ELSE r.creator_actor_snapshot_id END AS terminal_actor_snapshot_id,
+       max(r.updated_at,t.updated_at,a.updated_at) AS migration_at,
+       'fev_'||lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-7'||substr(lower(hex(randomblob(2))),2)||'-8'||substr(lower(hex(randomblob(2))),2)||'-'||lower(hex(randomblob(6))) AS attempt_event_id,
+       'fev_'||lower(hex(randomblob(4)))||'-'||lower(hex(randomblob(2)))||'-7'||substr(lower(hex(randomblob(2))),2)||'-9'||substr(lower(hex(randomblob(2))),2)||'-'||lower(hex(randomblob(6))) AS task_event_id
+FROM background_runs r
+JOIN tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id AND t.current_attempt_id=r.attempt_id
+JOIN attempts a ON a.id=r.attempt_id AND a.task_id=r.task_id AND a.workspace_id=r.workspace_id AND a.sequence=r.generation
+WHERE r.profile='opencode-1.18.16';
+
+CREATE TEMP TABLE migration8_stop_validation(valid INTEGER NOT NULL CHECK(valid=1));
+INSERT INTO migration8_stop_validation(valid)
+SELECT CASE WHEN EXISTS (
+  SELECT 1 FROM receipts receipt
+  WHERE receipt.id=m.stop_receipt_id AND receipt.workspace_id=m.workspace_id AND receipt.command_kind='run.stop' AND
+    receipt.state='accepted' AND receipt.target_type='task' AND receipt.target_id=m.task_id AND
+    receipt.actor_snapshot_id=m.stop_actor_snapshot_id AND receipt.accepted_at=m.stop_requested_at AND
+    receipt.response_status=202 AND json_extract(receipt.response_projection,'$.run_id')=m.task_id AND
+    json_extract(receipt.response_projection,'$.state') IN ('canceling','failed')
+) THEN 1 ELSE 0 END
+FROM migration8_legacy_background_runs m WHERE m.cancel_epoch=1;
+
+INSERT INTO events(id,workspace_id,task_id,attempt_id,entity_type,entity_id,type,version,occurred_at,actor_snapshot_id,payload)
+SELECT attempt_event_id,workspace_id,task_id,attempt_id,
+       'attempt',attempt_id,'attempt.failed',1,migration_at,terminal_actor_snapshot_id,
+       CASE WHEN cancel_epoch=1 THEN
+         json_object('runId',task_id,'reason','legacy_profile_unqualified','legacyState',state,'legacyEffectPhase',effect_phase,'stopReceiptId',stop_receipt_id)
+       ELSE json_object('runId',task_id,'reason','legacy_profile_unqualified','legacyState',state,'legacyEffectPhase',effect_phase) END
+FROM migration8_legacy_background_runs;
+
+INSERT INTO events(id,workspace_id,task_id,attempt_id,entity_type,entity_id,type,version,occurred_at,actor_snapshot_id,payload)
+SELECT task_event_id,workspace_id,task_id,NULL,
+       'task',task_id,'task.failed',1,migration_at,terminal_actor_snapshot_id,
+       CASE WHEN cancel_epoch=1 THEN
+         json_object('runId',task_id,'reason','legacy_profile_unqualified','legacyState',state,'legacyEffectPhase',effect_phase,'stopReceiptId',stop_receipt_id)
+       ELSE json_object('runId',task_id,'reason','legacy_profile_unqualified','legacyState',state,'legacyEffectPhase',effect_phase) END
+FROM migration8_legacy_background_runs;
+
+UPDATE attempts SET state='failed',terminal_reason='legacy_profile_unqualified',revision=revision+1,
+  updated_at=(SELECT migration_at FROM migration8_legacy_background_runs m WHERE m.attempt_id=attempts.id)
+WHERE id IN (SELECT attempt_id FROM migration8_legacy_background_runs);
+
+UPDATE tasks SET state='failed',terminal_reason='legacy_profile_unqualified',revision=revision+1,
+  latest_event_cursor=(SELECT e.cursor FROM migration8_legacy_background_runs m JOIN events e
+    ON e.id=m.task_event_id WHERE m.task_id=tasks.id),
+  updated_at=(SELECT migration_at FROM migration8_legacy_background_runs m WHERE m.task_id=tasks.id)
+WHERE id IN (SELECT task_id FROM migration8_legacy_background_runs);
+
+ALTER TABLE background_runs RENAME TO background_runs_v7;
+
+CREATE TABLE background_runs (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    attempt_id TEXT NOT NULL,
+    workspace_id TEXT NOT NULL,
+    generation INTEGER NOT NULL CHECK(generation > 0),
+    repository_id INTEGER NOT NULL CHECK(repository_id > 0),
+    repository_remote TEXT NOT NULL CHECK(length(CAST(repository_remote AS BLOB)) BETWEEN 1 AND 2048),
+    base_oid TEXT NOT NULL CHECK(length(base_oid)=40 AND base_oid NOT GLOB '*[^0-9a-f]*'),
+    branch TEXT CHECK(branch IS NULL OR length(CAST(branch AS BLOB)) BETWEEN 1 AND 255),
+    instruction_sha256 BLOB NOT NULL CHECK(length(instruction_sha256)=32),
+    profile TEXT NOT NULL CHECK(profile IN ('opencode-1.18.16','source-39fb919a054190498f6d5b7985bde231f93ad7a6')),
+    profile_sha256 BLOB NOT NULL CHECK(
+      (profile='opencode-1.18.16' AND lower(hex(profile_sha256))='609bee2a2d5dce169c489fecd0d144c4a8a9b31552b5f16e688db1093732872a') OR
+      (profile='source-39fb919a054190498f6d5b7985bde231f93ad7a6' AND lower(hex(profile_sha256))='2c879131c70fa0f5414261aa0d196dd3de2d590d88365ed7c7bd31d20d6cd2ab')
+    ),
+    image_identity TEXT NOT NULL CHECK(length(CAST(image_identity AS BLOB)) BETWEEN 1 AND 256),
+    clone_identity TEXT NOT NULL UNIQUE CHECK(length(CAST(clone_identity AS BLOB)) BETWEEN 1 AND 256),
+    volume_identity TEXT NOT NULL UNIQUE CHECK(length(CAST(volume_identity AS BLOB)) BETWEEN 1 AND 256),
+    container_identity TEXT NOT NULL UNIQUE CHECK(length(CAST(container_identity AS BLOB)) BETWEEN 1 AND 256),
+    endpoint_identity TEXT NOT NULL UNIQUE CHECK(length(CAST(endpoint_identity AS BLOB)) BETWEEN 1 AND 256),
+    opencode_session_id TEXT NOT NULL UNIQUE,
+    opencode_message_id TEXT NOT NULL,
+    state TEXT NOT NULL CHECK(state IN ('queued','setting_up','working','needs_you','canceling','uncertain','result_ready','failed','cleanup_required')),
+    effect_phase TEXT NOT NULL CHECK(effect_phase IN (
+      'absent','provision_intent','clone_observed','volume_observed','container_observed','health_observed','ready',
+      'session_observed','prompt_intent','prompt_admitted','stop_intent','writer_inactive','route_removed',
+      'container_removed','volume_removed','clone_removed','cleanup_complete','pre_effect_failed'
+    )),
+    cancel_epoch INTEGER NOT NULL DEFAULT 0 CHECK(cancel_epoch IN (0,1)),
+    stop_receipt_id TEXT REFERENCES receipts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    stop_actor_snapshot_id INTEGER REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    stop_requested_at INTEGER,
+    creator_actor_snapshot_id INTEGER NOT NULL REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    claim_owner TEXT CHECK(claim_owner IS NULL OR length(CAST(claim_owner AS BLOB)) BETWEEN 1 AND 128),
+    claim_expires_at INTEGER,
+    claim_generation INTEGER NOT NULL DEFAULT 0 CHECK(claim_generation >= 0),
+    clone_evidence TEXT CHECK(clone_evidence IS NULL OR length(CAST(clone_evidence AS BLOB)) BETWEEN 1 AND 4096),
+    volume_evidence TEXT CHECK(volume_evidence IS NULL OR length(CAST(volume_evidence AS BLOB)) BETWEEN 1 AND 4096),
+    observed_container_id TEXT CHECK(observed_container_id IS NULL OR length(CAST(observed_container_id AS BLOB)) BETWEEN 1 AND 128),
+    observed_container_started_at TEXT CHECK(observed_container_started_at IS NULL OR length(CAST(observed_container_started_at AS BLOB)) BETWEEN 1 AND 64),
+    runtime_epoch INTEGER CHECK(runtime_epoch IS NULL OR runtime_epoch > 0),
+    host_port INTEGER CHECK(host_port IS NULL OR host_port BETWEEN 1 AND 65535),
+    health_evidence TEXT CHECK(health_evidence IS NULL OR length(CAST(health_evidence AS BLOB)) BETWEEN 1 AND 4096),
+    ready_evidence TEXT CHECK(ready_evidence IS NULL OR length(CAST(ready_evidence AS BLOB)) BETWEEN 1 AND 4096),
+    session_evidence TEXT CHECK(session_evidence IS NULL OR length(CAST(session_evidence AS BLOB)) BETWEEN 1 AND 4096),
+    prompt_evidence TEXT CHECK(prompt_evidence IS NULL OR length(CAST(prompt_evidence AS BLOB)) BETWEEN 1 AND 4096),
+    writer_inactive_evidence TEXT CHECK(writer_inactive_evidence IS NULL OR length(CAST(writer_inactive_evidence AS BLOB)) BETWEEN 1 AND 4096),
+    route_removed_evidence TEXT CHECK(route_removed_evidence IS NULL OR length(CAST(route_removed_evidence AS BLOB)) BETWEEN 1 AND 4096),
+    container_removed_evidence TEXT CHECK(container_removed_evidence IS NULL OR length(CAST(container_removed_evidence AS BLOB)) BETWEEN 1 AND 4096),
+    volume_removed_evidence TEXT CHECK(volume_removed_evidence IS NULL OR length(CAST(volume_removed_evidence AS BLOB)) BETWEEN 1 AND 4096),
+    clone_removed_evidence TEXT CHECK(clone_removed_evidence IS NULL OR length(CAST(clone_removed_evidence AS BLOB)) BETWEEN 1 AND 4096),
+    last_evidence TEXT CHECK(last_evidence IS NULL OR length(CAST(last_evidence AS BLOB)) BETWEEN 1 AND 4096),
+    last_error TEXT CHECK(last_error IS NULL OR length(CAST(last_error AS BLOB)) BETWEEN 1 AND 4096),
+    provision_intent_at INTEGER,
+    clone_observed_at INTEGER,
+    volume_observed_at INTEGER,
+    container_observed_at INTEGER,
+    health_observed_at INTEGER,
+    ready_at INTEGER,
+    session_observed_at INTEGER,
+    prompt_intent_at INTEGER,
+    prompt_admitted_at INTEGER,
+    stop_intent_at INTEGER,
+    writer_inactive_at INTEGER,
+    route_removed_at INTEGER,
+    container_removed_at INTEGER,
+    volume_removed_at INTEGER,
+    clone_removed_at INTEGER,
+    cleanup_completed_at INTEGER,
+    cleanup_proof TEXT CHECK(cleanup_proof IS NULL OR length(CAST(cleanup_proof AS BLOB)) BETWEEN 1 AND 4096),
+    absence_proof TEXT CHECK(absence_proof IS NULL OR length(CAST(absence_proof AS BLOB)) BETWEEN 1 AND 4096),
+    revision INTEGER NOT NULL CHECK(revision >= 1),
+    created_at INTEGER NOT NULL CHECK(created_at >= 0),
+    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+    CHECK((claim_owner IS NULL AND claim_expires_at IS NULL) OR
+          (claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_generation > 0 AND claim_expires_at > updated_at AND claim_expires_at <= updated_at+300000)),
+    CHECK((cancel_epoch=0 AND stop_receipt_id IS NULL AND stop_actor_snapshot_id IS NULL AND stop_requested_at IS NULL AND state<>'canceling') OR
+          (cancel_epoch=1 AND stop_receipt_id IS NOT NULL AND stop_actor_snapshot_id IS NOT NULL AND stop_requested_at IS NOT NULL AND
+           state IN ('canceling','uncertain','result_ready','failed','cleanup_required'))),
+    CHECK(
+      (profile='source-39fb919a054190498f6d5b7985bde231f93ad7a6' AND (
+        (state='queued' AND effect_phase='absent') OR
+        (state='setting_up' AND effect_phase IN ('provision_intent','clone_observed','volume_observed','container_observed','health_observed','ready','session_observed')) OR
+        (state IN ('working','needs_you') AND effect_phase='prompt_admitted') OR
+        (state='uncertain' AND effect_phase IN ('provision_intent','clone_observed','volume_observed','container_observed','health_observed','ready','session_observed','prompt_intent','prompt_admitted','stop_intent')) OR
+        (state IN ('canceling','cleanup_required') AND effect_phase IN ('stop_intent','writer_inactive','route_removed','container_removed','volume_removed','clone_removed')) OR
+        (state='result_ready' AND effect_phase IN ('prompt_admitted','stop_intent','writer_inactive','route_removed','container_removed','volume_removed','clone_removed','cleanup_complete')) OR
+        (state='failed' AND effect_phase IN ('pre_effect_failed','cleanup_complete'))
+      )) OR
+      (profile='opencode-1.18.16' AND state='failed' AND effect_phase='cleanup_complete')
+    ),
+    CHECK((observed_container_id IS NULL AND observed_container_started_at IS NULL AND runtime_epoch IS NULL AND host_port IS NULL AND container_observed_at IS NULL) OR
+          (observed_container_id IS NOT NULL AND observed_container_started_at IS NOT NULL AND runtime_epoch IS NOT NULL AND host_port IS NOT NULL AND container_observed_at IS NOT NULL)),
+    CHECK(effect_phase NOT IN ('clone_observed','volume_observed','container_observed','health_observed','ready','session_observed','prompt_intent','prompt_admitted') OR
+          (clone_observed_at IS NOT NULL AND clone_evidence IS NOT NULL)),
+    CHECK(effect_phase NOT IN ('volume_observed','container_observed','health_observed','ready','session_observed','prompt_intent','prompt_admitted') OR
+          (volume_observed_at IS NOT NULL AND volume_evidence IS NOT NULL)),
+    CHECK(effect_phase NOT IN ('container_observed','health_observed','ready','session_observed','prompt_intent','prompt_admitted') OR observed_container_id IS NOT NULL),
+    CHECK(effect_phase NOT IN ('health_observed','ready','session_observed','prompt_intent','prompt_admitted') OR
+          (health_observed_at IS NOT NULL AND health_evidence IS NOT NULL)),
+    CHECK(effect_phase NOT IN ('ready','session_observed','prompt_intent','prompt_admitted') OR (ready_at IS NOT NULL AND ready_evidence IS NOT NULL)),
+    CHECK(effect_phase NOT IN ('session_observed','prompt_intent','prompt_admitted') OR (session_observed_at IS NOT NULL AND session_evidence IS NOT NULL)),
+    CHECK(effect_phase NOT IN ('prompt_intent','prompt_admitted') OR prompt_intent_at IS NOT NULL),
+    CHECK(effect_phase<>'prompt_admitted' OR (prompt_admitted_at IS NOT NULL AND prompt_evidence IS NOT NULL)),
+    CHECK(effect_phase NOT IN ('stop_intent','writer_inactive','route_removed','container_removed','volume_removed','clone_removed','cleanup_complete') OR stop_intent_at IS NOT NULL),
+    CHECK(effect_phase NOT IN ('writer_inactive','route_removed','container_removed','volume_removed','clone_removed','cleanup_complete') OR
+          (writer_inactive_at IS NOT NULL AND writer_inactive_evidence IS NOT NULL)),
+    CHECK(effect_phase NOT IN ('route_removed','container_removed','volume_removed','clone_removed','cleanup_complete') OR
+          (route_removed_at IS NOT NULL AND route_removed_evidence IS NOT NULL)),
+    CHECK(effect_phase NOT IN ('container_removed','volume_removed','clone_removed','cleanup_complete') OR
+          (container_removed_at IS NOT NULL AND container_removed_evidence IS NOT NULL)),
+    CHECK(effect_phase NOT IN ('volume_removed','clone_removed','cleanup_complete') OR
+          (volume_removed_at IS NOT NULL AND volume_removed_evidence IS NOT NULL)),
+    CHECK(effect_phase NOT IN ('clone_removed','cleanup_complete') OR (clone_removed_at IS NOT NULL AND clone_removed_evidence IS NOT NULL)),
+    CHECK((cleanup_completed_at IS NULL AND cleanup_proof IS NULL) OR
+          (cleanup_completed_at IS NOT NULL AND cleanup_proof IS NOT NULL AND effect_phase='cleanup_complete')),
+    CHECK((effect_phase='pre_effect_failed')=(absence_proof IS NOT NULL)),
+    CHECK((provision_intent_at IS NULL OR provision_intent_at BETWEEN created_at AND updated_at) AND
+          (clone_observed_at IS NULL OR clone_observed_at BETWEEN created_at AND updated_at) AND
+          (volume_observed_at IS NULL OR volume_observed_at BETWEEN created_at AND updated_at) AND
+          (container_observed_at IS NULL OR container_observed_at BETWEEN created_at AND updated_at) AND
+          (health_observed_at IS NULL OR health_observed_at BETWEEN created_at AND updated_at) AND
+          (ready_at IS NULL OR ready_at BETWEEN created_at AND updated_at) AND
+          (session_observed_at IS NULL OR session_observed_at BETWEEN created_at AND updated_at) AND
+          (prompt_intent_at IS NULL OR prompt_intent_at BETWEEN created_at AND updated_at) AND
+          (prompt_admitted_at IS NULL OR prompt_admitted_at BETWEEN created_at AND updated_at) AND
+          (stop_intent_at IS NULL OR stop_intent_at BETWEEN created_at AND updated_at) AND
+          (writer_inactive_at IS NULL OR writer_inactive_at BETWEEN created_at AND updated_at) AND
+          (route_removed_at IS NULL OR route_removed_at BETWEEN created_at AND updated_at) AND
+          (container_removed_at IS NULL OR container_removed_at BETWEEN created_at AND updated_at) AND
+          (volume_removed_at IS NULL OR volume_removed_at BETWEEN created_at AND updated_at) AND
+          (clone_removed_at IS NULL OR clone_removed_at BETWEEN created_at AND updated_at) AND
+          (cleanup_completed_at IS NULL OR cleanup_completed_at BETWEEN created_at AND updated_at)),
+    FOREIGN KEY(attempt_id,task_id,workspace_id) REFERENCES attempts(id,task_id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY(task_id,workspace_id) REFERENCES tasks(id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY(workspace_id,repository_id) REFERENCES workspaces(id,repository_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    UNIQUE(attempt_id),
+    UNIQUE(task_id,generation)
+) STRICT;
+
+INSERT INTO background_runs(
+  task_id,attempt_id,workspace_id,generation,repository_id,repository_remote,base_oid,branch,
+  instruction_sha256,profile,profile_sha256,image_identity,clone_identity,volume_identity,
+  container_identity,endpoint_identity,opencode_session_id,opencode_message_id,state,effect_phase,
+  cancel_epoch,stop_receipt_id,stop_actor_snapshot_id,stop_requested_at,creator_actor_snapshot_id,
+  writer_inactive_evidence,route_removed_evidence,container_removed_evidence,volume_removed_evidence,clone_removed_evidence,
+  last_evidence,last_error,stop_intent_at,writer_inactive_at,route_removed_at,container_removed_at,volume_removed_at,
+  clone_removed_at,cleanup_completed_at,cleanup_proof,revision,created_at,updated_at
+)
+SELECT r.task_id,r.attempt_id,r.workspace_id,r.generation,r.repository_id,r.repository_remote,r.base_oid,r.branch,
+  r.instruction_sha256,r.profile,r.profile_sha256,r.image_identity,r.clone_identity,r.volume_identity,
+  r.container_identity,r.endpoint_identity,r.opencode_session_id,r.opencode_message_id,
+  'failed','cleanup_complete',
+  r.cancel_epoch,r.stop_receipt_id,r.stop_actor_snapshot_id,r.stop_requested_at,r.creator_actor_snapshot_id,
+  'legacy_profile_unqualified:no_writer_created',
+  'legacy_profile_unqualified:no_route_created',
+  'legacy_profile_unqualified:no_container_created',
+  'legacy_profile_unqualified:no_volume_created',
+  'legacy_profile_unqualified:no_clone_created',
+  json_object('reason','legacy_profile_unqualified','legacyState',m.state,'legacyEffectPhase',m.effect_phase),
+  'legacy_profile_unqualified',
+  m.migration_at,m.migration_at,m.migration_at,m.migration_at,m.migration_at,m.migration_at,m.migration_at,
+  'legacy_profile_unqualified:no_schema_7_effect_provider',
+  r.revision+1,r.created_at,m.migration_at
+FROM background_runs_v7 r JOIN migration8_legacy_background_runs m ON m.task_id=r.task_id;
+DROP TABLE background_runs_v7;
+DROP TABLE migration8_legacy_background_runs;
+DROP TABLE migration8_stop_validation;
+
+CREATE INDEX background_runs_actor_list ON background_runs(creator_actor_snapshot_id,created_at DESC,task_id DESC);
+CREATE INDEX background_runs_claim_scan ON background_runs(workspace_id,state,claim_expires_at,created_at,task_id);
+CREATE UNIQUE INDEX background_runs_workspace_capacity_one ON background_runs(workspace_id)
+  WHERE profile='source-39fb919a054190498f6d5b7985bde231f93ad7a6' AND
+    effect_phase NOT IN ('absent','cleanup_complete','pre_effect_failed');
+
+CREATE TRIGGER background_runs_insert_integrity BEFORE INSERT ON background_runs
+BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1 FROM attempts a
+    JOIN tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id
+    JOIN workspaces w ON w.id=NEW.workspace_id AND w.repository_id=NEW.repository_id AND
+                         NEW.repository_remote='https://github.com/'||w.repository_full_name
+    JOIN actor_snapshots actor ON actor.id=NEW.creator_actor_snapshot_id AND actor.id=t.actor_snapshot_id AND actor.actor_type='opencode'
+    JOIN receipts r ON r.workspace_id=NEW.workspace_id AND r.command_kind='run.create' AND r.state='accepted' AND r.target_type='task' AND
+                       r.target_id=NEW.task_id AND r.actor_snapshot_id=NEW.creator_actor_snapshot_id AND
+                       r.accepted_at=NEW.created_at AND r.response_status=202 AND
+                       json_extract(r.response_projection,'$.run_id')=NEW.task_id AND json_extract(r.response_projection,'$.committed')=1
+    WHERE a.id=NEW.attempt_id AND a.task_id=NEW.task_id AND a.workspace_id=NEW.workspace_id AND
+      a.sequence=NEW.generation AND a.base_sha=NEW.base_oid AND a.image_digest=NEW.image_identity AND a.opencode_protocol=NEW.profile AND
+      a.opencode_session_id=NEW.opencode_session_id AND a.opencode_message_id=NEW.opencode_message_id AND
+      a.state='prepared' AND t.state='queued' AND t.current_attempt_id=a.id AND t.repository_id=NEW.repository_id AND
+      a.prompt_sha256=NEW.instruction_sha256 AND t.prompt_sha256=NEW.instruction_sha256 AND
+      a.created_at=NEW.created_at AND t.created_at=NEW.created_at AND
+      NEW.profile='source-39fb919a054190498f6d5b7985bde231f93ad7a6' AND NEW.state='queued' AND NEW.effect_phase='absent' AND
+      NEW.cancel_epoch=0 AND NEW.claim_owner IS NULL AND NEW.claim_expires_at IS NULL AND NEW.claim_generation=0 AND
+      NEW.clone_evidence IS NULL AND NEW.volume_evidence IS NULL AND NEW.observed_container_id IS NULL AND
+      NEW.observed_container_started_at IS NULL AND NEW.runtime_epoch IS NULL AND NEW.host_port IS NULL AND
+      NEW.health_evidence IS NULL AND NEW.ready_evidence IS NULL AND NEW.session_evidence IS NULL AND NEW.prompt_evidence IS NULL AND
+      NEW.writer_inactive_evidence IS NULL AND NEW.route_removed_evidence IS NULL AND NEW.container_removed_evidence IS NULL AND
+      NEW.volume_removed_evidence IS NULL AND NEW.clone_removed_evidence IS NULL AND NEW.last_evidence IS NULL AND NEW.last_error IS NULL AND
+      NEW.provision_intent_at IS NULL AND NEW.clone_observed_at IS NULL AND NEW.volume_observed_at IS NULL AND
+      NEW.container_observed_at IS NULL AND NEW.health_observed_at IS NULL AND NEW.ready_at IS NULL AND NEW.session_observed_at IS NULL AND
+      NEW.prompt_intent_at IS NULL AND NEW.prompt_admitted_at IS NULL AND NEW.stop_intent_at IS NULL AND NEW.writer_inactive_at IS NULL AND
+      NEW.route_removed_at IS NULL AND NEW.container_removed_at IS NULL AND NEW.volume_removed_at IS NULL AND NEW.clone_removed_at IS NULL AND
+      NEW.cleanup_completed_at IS NULL AND NEW.cleanup_proof IS NULL AND NEW.absence_proof IS NULL AND
+      NEW.revision=1 AND NEW.created_at=NEW.updated_at AND
+      NEW.clone_identity='run-'||replace(substr(NEW.task_id,5),'-','')||'-g'||NEW.generation||'-clone' AND
+      NEW.volume_identity='fern-run-'||replace(substr(NEW.task_id,5),'-','')||'-g'||NEW.generation||'-opencode' AND
+      NEW.container_identity='fern-run-'||replace(substr(NEW.task_id,5),'-','')||'-g'||NEW.generation AND
+      NEW.endpoint_identity='run-'||replace(substr(NEW.task_id,5),'-','')||'-g'||NEW.generation||'-endpoint'
+  ) THEN RAISE(ABORT, 'background run has no exact task attempt') END;
+END;
+
+CREATE TRIGGER background_runs_immutable_inputs BEFORE UPDATE ON background_runs
+WHEN NEW.task_id<>OLD.task_id OR NEW.attempt_id<>OLD.attempt_id OR NEW.workspace_id<>OLD.workspace_id OR
+     NEW.generation<>OLD.generation OR NEW.repository_id<>OLD.repository_id OR NEW.repository_remote<>OLD.repository_remote OR
+     NEW.base_oid<>OLD.base_oid OR NEW.branch IS NOT OLD.branch OR NEW.instruction_sha256<>OLD.instruction_sha256 OR
+     NEW.profile<>OLD.profile OR NEW.profile_sha256<>OLD.profile_sha256 OR NEW.image_identity<>OLD.image_identity OR
+     NEW.clone_identity<>OLD.clone_identity OR NEW.volume_identity<>OLD.volume_identity OR
+     NEW.container_identity<>OLD.container_identity OR NEW.endpoint_identity<>OLD.endpoint_identity OR
+     NEW.opencode_session_id<>OLD.opencode_session_id OR NEW.opencode_message_id<>OLD.opencode_message_id OR
+     NEW.creator_actor_snapshot_id<>OLD.creator_actor_snapshot_id OR NEW.created_at<>OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'background run inputs are immutable'); END;
+
+CREATE TRIGGER background_runs_exact_owner BEFORE UPDATE ON background_runs
+BEGIN
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1 FROM tasks t JOIN attempts a ON a.id=t.current_attempt_id
+    WHERE t.id=NEW.task_id AND t.workspace_id=NEW.workspace_id AND a.id=NEW.attempt_id AND
+      a.task_id=NEW.task_id AND a.workspace_id=NEW.workspace_id AND a.sequence=NEW.generation
+  ) THEN RAISE(ABORT, 'background run lost exact current attempt') END;
+END;
+
+CREATE TRIGGER background_runs_revision BEFORE UPDATE ON background_runs
+WHEN NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at
+BEGIN SELECT RAISE(ABORT, 'invalid background run revision'); END;
+
+CREATE TRIGGER background_runs_phase_transition BEFORE UPDATE OF effect_phase ON background_runs
+WHEN NEW.effect_phase<>OLD.effect_phase AND NOT (
+  (OLD.effect_phase='absent' AND NEW.effect_phase IN ('provision_intent','pre_effect_failed')) OR
+  (OLD.effect_phase='provision_intent' AND NEW.effect_phase IN ('clone_observed','stop_intent','pre_effect_failed')) OR
+  (OLD.effect_phase='clone_observed' AND NEW.effect_phase IN ('volume_observed','stop_intent')) OR
+  (OLD.effect_phase='volume_observed' AND NEW.effect_phase IN ('container_observed','stop_intent')) OR
+  (OLD.effect_phase='container_observed' AND NEW.effect_phase IN ('health_observed','stop_intent')) OR
+  (OLD.effect_phase='health_observed' AND NEW.effect_phase IN ('ready','stop_intent')) OR
+  (OLD.effect_phase='ready' AND NEW.effect_phase IN ('session_observed','stop_intent')) OR
+  (OLD.effect_phase='session_observed' AND NEW.effect_phase IN ('prompt_intent','stop_intent')) OR
+  (OLD.effect_phase='prompt_intent' AND NEW.effect_phase IN ('prompt_admitted','stop_intent')) OR
+  (OLD.effect_phase='prompt_admitted' AND NEW.effect_phase='stop_intent') OR
+  (OLD.effect_phase='stop_intent' AND NEW.effect_phase='writer_inactive') OR
+  (OLD.effect_phase='writer_inactive' AND NEW.effect_phase='route_removed') OR
+  (OLD.effect_phase='route_removed' AND NEW.effect_phase='container_removed') OR
+  (OLD.effect_phase='container_removed' AND NEW.effect_phase='volume_removed') OR
+  (OLD.effect_phase='volume_removed' AND NEW.effect_phase='clone_removed') OR
+  (OLD.effect_phase='clone_removed' AND NEW.effect_phase='cleanup_complete')
+)
+BEGIN SELECT RAISE(ABORT, 'invalid background run effect transition'); END;
+
+CREATE TRIGGER background_runs_state_transition BEFORE UPDATE OF state ON background_runs
+WHEN NEW.state<>OLD.state AND NOT (
+  (OLD.state='queued' AND NEW.state='setting_up' AND NEW.effect_phase='provision_intent') OR
+  (OLD.state='queued' AND NEW.state='failed' AND NEW.effect_phase='pre_effect_failed') OR
+  (OLD.state='setting_up' AND NEW.state='uncertain' AND
+    (NEW.effect_phase=OLD.effect_phase OR (OLD.effect_phase='session_observed' AND NEW.effect_phase='prompt_intent'))) OR
+  (OLD.state='uncertain' AND NEW.state='setting_up' AND NEW.effect_phase=OLD.effect_phase AND NEW.effect_phase IN
+    ('provision_intent','clone_observed','volume_observed','container_observed','health_observed','ready','session_observed')) OR
+  (OLD.state='uncertain' AND NEW.state='working' AND NEW.effect_phase='prompt_admitted') OR
+  (OLD.state='working' AND NEW.state='needs_you' AND NEW.effect_phase='prompt_admitted') OR
+  (OLD.state='needs_you' AND NEW.state='working' AND NEW.effect_phase='prompt_admitted') OR
+  (OLD.state IN ('working','needs_you') AND NEW.state='uncertain' AND NEW.effect_phase='prompt_admitted') OR
+  (OLD.state IN ('working','needs_you','uncertain') AND NEW.state='result_ready' AND NEW.effect_phase='prompt_admitted') OR
+  (OLD.state IN ('setting_up','working','needs_you','uncertain') AND NEW.state IN ('canceling','cleanup_required') AND NEW.effect_phase='stop_intent') OR
+  (OLD.state='canceling' AND NEW.state='cleanup_required' AND NEW.effect_phase=OLD.effect_phase) OR
+  (OLD.state IN ('canceling','cleanup_required') AND NEW.state='failed' AND NEW.effect_phase='cleanup_complete') OR
+  (OLD.state IN ('setting_up','uncertain') AND NEW.state='failed' AND NEW.effect_phase='pre_effect_failed')
+)
+BEGIN SELECT RAISE(ABORT, 'invalid background run state transition'); END;
+
+CREATE TRIGGER background_runs_terminal_immutable BEFORE UPDATE ON background_runs
+WHEN OLD.state='failed' OR (OLD.state='result_ready' AND (OLD.profile='opencode-1.18.16' OR OLD.effect_phase='cleanup_complete'))
+BEGIN SELECT RAISE(ABORT, 'terminal background run is immutable'); END;
+
+CREATE TRIGGER background_runs_claim_integrity BEFORE UPDATE ON background_runs
+BEGIN
+  SELECT CASE WHEN NEW.claim_generation<OLD.claim_generation OR NEW.claim_generation>OLD.claim_generation+1 OR
+    (NEW.claim_generation=OLD.claim_generation AND NEW.claim_owner IS NOT OLD.claim_owner AND NEW.claim_owner IS NOT NULL) OR
+    (NEW.claim_generation=OLD.claim_generation+1 AND (NEW.claim_owner IS NULL OR
+      (OLD.claim_owner IS NOT NULL AND OLD.claim_expires_at>NEW.updated_at))) OR
+    (NEW.claim_owner IS NOT NULL AND (NEW.state IN ('queued','failed') OR (NEW.state='result_ready' AND NEW.effect_phase='cleanup_complete')))
+    THEN RAISE(ABORT, 'invalid background run claim') END;
+END;
+
+CREATE TRIGGER background_runs_phase_timestamps_immutable BEFORE UPDATE ON background_runs
+WHEN (OLD.provision_intent_at IS NOT NULL AND NEW.provision_intent_at IS NOT OLD.provision_intent_at) OR
+     (OLD.clone_observed_at IS NOT NULL AND NEW.clone_observed_at IS NOT OLD.clone_observed_at) OR
+     (OLD.volume_observed_at IS NOT NULL AND NEW.volume_observed_at IS NOT OLD.volume_observed_at) OR
+     (OLD.container_observed_at IS NOT NULL AND NEW.container_observed_at IS NOT OLD.container_observed_at) OR
+     (OLD.health_observed_at IS NOT NULL AND NEW.health_observed_at IS NOT OLD.health_observed_at) OR
+     (OLD.ready_at IS NOT NULL AND NEW.ready_at IS NOT OLD.ready_at) OR
+     (OLD.session_observed_at IS NOT NULL AND NEW.session_observed_at IS NOT OLD.session_observed_at) OR
+     (OLD.prompt_intent_at IS NOT NULL AND NEW.prompt_intent_at IS NOT OLD.prompt_intent_at) OR
+     (OLD.prompt_admitted_at IS NOT NULL AND NEW.prompt_admitted_at IS NOT OLD.prompt_admitted_at) OR
+     (OLD.stop_intent_at IS NOT NULL AND NEW.stop_intent_at IS NOT OLD.stop_intent_at) OR
+     (OLD.writer_inactive_at IS NOT NULL AND NEW.writer_inactive_at IS NOT OLD.writer_inactive_at) OR
+     (OLD.route_removed_at IS NOT NULL AND NEW.route_removed_at IS NOT OLD.route_removed_at) OR
+     (OLD.container_removed_at IS NOT NULL AND NEW.container_removed_at IS NOT OLD.container_removed_at) OR
+     (OLD.volume_removed_at IS NOT NULL AND NEW.volume_removed_at IS NOT OLD.volume_removed_at) OR
+     (OLD.clone_removed_at IS NOT NULL AND NEW.clone_removed_at IS NOT OLD.clone_removed_at) OR
+     (OLD.cleanup_completed_at IS NOT NULL AND NEW.cleanup_completed_at IS NOT OLD.cleanup_completed_at)
+BEGIN SELECT RAISE(ABORT, 'background run phase timestamp is immutable'); END;
+
+CREATE TRIGGER background_runs_observation_immutable BEFORE UPDATE ON background_runs
+WHEN (OLD.observed_container_id IS NOT NULL AND (NEW.observed_container_id IS NOT OLD.observed_container_id OR
+      NEW.observed_container_started_at IS NOT OLD.observed_container_started_at OR NEW.runtime_epoch IS NOT OLD.runtime_epoch OR NEW.host_port IS NOT OLD.host_port)) OR
+     (OLD.clone_evidence IS NOT NULL AND NEW.clone_evidence IS NOT OLD.clone_evidence) OR
+     (OLD.volume_evidence IS NOT NULL AND NEW.volume_evidence IS NOT OLD.volume_evidence) OR
+     (OLD.health_evidence IS NOT NULL AND NEW.health_evidence IS NOT OLD.health_evidence) OR
+     (OLD.ready_evidence IS NOT NULL AND NEW.ready_evidence IS NOT OLD.ready_evidence) OR
+     (OLD.session_evidence IS NOT NULL AND NEW.session_evidence IS NOT OLD.session_evidence) OR
+     (OLD.prompt_evidence IS NOT NULL AND NEW.prompt_evidence IS NOT OLD.prompt_evidence) OR
+     (OLD.writer_inactive_evidence IS NOT NULL AND NEW.writer_inactive_evidence IS NOT OLD.writer_inactive_evidence) OR
+     (OLD.route_removed_evidence IS NOT NULL AND NEW.route_removed_evidence IS NOT OLD.route_removed_evidence) OR
+     (OLD.container_removed_evidence IS NOT NULL AND NEW.container_removed_evidence IS NOT OLD.container_removed_evidence) OR
+     (OLD.volume_removed_evidence IS NOT NULL AND NEW.volume_removed_evidence IS NOT OLD.volume_removed_evidence) OR
+     (OLD.clone_removed_evidence IS NOT NULL AND NEW.clone_removed_evidence IS NOT OLD.clone_removed_evidence) OR
+     (OLD.absence_proof IS NOT NULL AND NEW.absence_proof IS NOT OLD.absence_proof) OR
+     (OLD.cleanup_proof IS NOT NULL AND (NEW.cleanup_proof IS NOT OLD.cleanup_proof OR NEW.cleanup_completed_at IS NOT OLD.cleanup_completed_at))
+BEGIN SELECT RAISE(ABORT, 'background run resource proof is immutable'); END;
+
+CREATE TRIGGER background_runs_stop_integrity BEFORE UPDATE ON background_runs
+WHEN OLD.cancel_epoch=0 AND NEW.cancel_epoch=1
+BEGIN
+  SELECT CASE WHEN NEW.stop_requested_at<>NEW.updated_at OR NOT (
+    (OLD.state='queued' AND OLD.effect_phase='absent' AND NEW.state='failed' AND NEW.effect_phase='pre_effect_failed') OR
+    (OLD.state IN ('setting_up','working','needs_you','uncertain') AND NEW.state='canceling' AND NEW.effect_phase='stop_intent')
+  ) THEN RAISE(ABORT, 'invalid background run stop transition') END;
+  SELECT CASE WHEN NOT EXISTS (
+    SELECT 1 FROM receipts r WHERE r.id=NEW.stop_receipt_id AND r.workspace_id=NEW.workspace_id AND r.state='accepted' AND
+      r.command_kind='run.stop' AND r.target_type='task' AND r.target_id=NEW.task_id AND
+      r.actor_snapshot_id=NEW.stop_actor_snapshot_id AND r.accepted_at=NEW.stop_requested_at AND r.response_status=202 AND
+      json_extract(r.response_projection,'$.run_id')=NEW.task_id AND json_extract(r.response_projection,'$.state')=NEW.state
+  ) THEN RAISE(ABORT, 'background run stop has no exact receipt') END;
+  SELECT CASE WHEN OLD.state='queued' AND NOT EXISTS (
+    SELECT 1 FROM attempts a
+    JOIN tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id
+    JOIN events ae ON ae.attempt_id=a.id AND ae.type='attempt.failed' AND ae.occurred_at=NEW.stop_requested_at AND ae.actor_snapshot_id=NEW.stop_actor_snapshot_id
+    JOIN events te ON te.task_id=t.id AND te.attempt_id IS NULL AND te.type='task.failed' AND te.occurred_at=NEW.stop_requested_at AND
+                      te.actor_snapshot_id=ae.actor_snapshot_id AND te.payload=ae.payload AND te.cursor>ae.cursor AND te.cursor=t.latest_event_cursor
+    WHERE a.id=NEW.attempt_id AND a.state='failed' AND a.terminal_reason='background_run_stopped_before_start' AND
+      t.state='failed' AND t.terminal_reason='background_run_stopped_before_start' AND
+      json_extract(ae.payload,'$.runId')=NEW.task_id AND json_extract(ae.payload,'$.reason')='background_run_stopped_before_start'
+  ) THEN RAISE(ABORT, 'background run stop has no exact terminal task attempt') END;
+END;
+
+CREATE TRIGGER background_runs_stop_fields_immutable BEFORE UPDATE ON background_runs
+WHEN OLD.cancel_epoch=1 AND (NEW.cancel_epoch<>OLD.cancel_epoch OR NEW.stop_receipt_id IS NOT OLD.stop_receipt_id OR
+  NEW.stop_actor_snapshot_id IS NOT OLD.stop_actor_snapshot_id OR NEW.stop_requested_at IS NOT OLD.stop_requested_at)
+BEGIN SELECT RAISE(ABORT, 'background run stop fields are immutable'); END;
+
+CREATE TRIGGER background_runs_terminal_projection BEFORE UPDATE ON background_runs
+WHEN OLD.state<>'failed' AND NEW.state='failed' AND NEW.profile='source-39fb919a054190498f6d5b7985bde231f93ad7a6'
+BEGIN
+  SELECT CASE WHEN NEW.last_error IS NULL OR NOT EXISTS (
+    SELECT 1 FROM attempts a
+    JOIN tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id
+    JOIN events ae ON ae.attempt_id=a.id AND ae.type='attempt.failed' AND ae.occurred_at=NEW.updated_at
+    JOIN events te ON te.task_id=t.id AND te.attempt_id IS NULL AND te.type='task.failed' AND
+                      te.occurred_at=ae.occurred_at AND te.actor_snapshot_id=ae.actor_snapshot_id AND
+                      te.payload=ae.payload AND te.cursor>ae.cursor AND te.cursor=t.latest_event_cursor
+    WHERE a.id=NEW.attempt_id AND a.task_id=NEW.task_id AND a.workspace_id=NEW.workspace_id AND
+      a.state='failed' AND a.terminal_reason=NEW.last_error AND
+      t.state='failed' AND t.terminal_reason=NEW.last_error AND
+      json_extract(ae.payload,'$.runId')=NEW.task_id AND json_extract(ae.payload,'$.reason')=NEW.last_error AND
+      (NEW.cancel_epoch=0 OR json_extract(ae.payload,'$.stopReceiptId')=NEW.stop_receipt_id)
+  ) THEN RAISE(ABORT, 'background run terminal projection is incomplete') END;
+END;
+`
 
 const backgroundRunIntentSchema = `
 CREATE TABLE background_runs (

@@ -6,25 +6,31 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/docker/go-connections/nat"
 )
 
 const (
-	workspacePort        = "4096/tcp"
-	githubConfigDir      = "/home/user/.config/gh"
-	githubConfigEnv      = "GH_CONFIG_DIR"
-	workspaceGHBinary    = "/usr/local/bin/gh"
-	healthTimeout        = 60 * time.Second
-	workspaceNanoCPUs    = int64(2_000_000_000)
-	workspacePIDs        = int64(512)
-	managedLabel         = "dev.fern.managed"
-	workspaceLabel       = "dev.fern.workspace"
-	specFingerprintLabel = "dev.fern.spec"
+	workspacePort           = "4096/tcp"
+	githubConfigDir         = "/home/user/.config/gh"
+	githubConfigEnv         = "GH_CONFIG_DIR"
+	workspaceGHBinary       = "/usr/local/bin/gh"
+	healthTimeout           = 60 * time.Second
+	workspaceNanoCPUs       = int64(2_000_000_000)
+	workspacePIDs           = int64(512)
+	managedLabel            = "dev.fern.managed"
+	workspaceLabel          = "dev.fern.workspace"
+	specFingerprintLabel    = "dev.fern.spec"
+	backgroundRevisionLabel = "org.opencontainers.image.revision"
+	backgroundSourceLabel   = "org.opencontainers.image.source"
+	backgroundVersionLabel  = "org.opencontainers.image.version"
+	backgroundProfileLabel  = "ai.fern.opencode.profile"
 
 	// labelTrue is the value every managed-resource label must carry.
 	labelTrue = "true"
@@ -41,6 +47,13 @@ const (
 	// cleanupTimeout bounds best-effort rollback API calls issued after the
 	// caller's context has failed or can no longer be trusted.
 	cleanupTimeout = 15 * time.Second
+)
+
+const (
+	BackgroundOpenCodeRevision = "39fb919a054190498f6d5b7985bde231f93ad7a6"
+	BackgroundOpenCodeProfile  = "source-39fb919a054190498f6d5b7985bde231f93ad7a6"
+	BackgroundOpenCodeVersion  = "0.0.0-source-39fb919a054190498f6d5b7985bde231f93ad7a6"
+	BackgroundOpenCodeSource   = "https://github.com/anomalyco/opencode"
 )
 
 var (
@@ -96,6 +109,46 @@ func (d *Docker) ResolveImageID(ctx context.Context, reference string) (string, 
 		return "", fmt.Errorf("%w: Docker returned a noncanonical image ID", ErrSpecDrift)
 	}
 	return inspection.ID, nil
+}
+
+// ResolveBackgroundRunImageID qualifies the immutable source image without
+// creating, starting, or changing any Docker resource.
+func (d *Docker) ResolveBackgroundRunImageID(ctx context.Context, reference, expectedID string) (string, error) {
+	if strings.TrimSpace(reference) != reference || reference == "" || !ValidImageID(expectedID) {
+		return "", fmt.Errorf("%w: background image reference", ErrSpecDrift)
+	}
+	inspection, err := d.cli.ImageInspect(ctx, reference)
+	if err != nil {
+		return "", fmt.Errorf("inspect background run image: %w", err)
+	}
+	if inspection.ID != expectedID || inspection.Config == nil ||
+		inspection.Config.Labels[backgroundSourceLabel] != BackgroundOpenCodeSource ||
+		inspection.Config.Labels[backgroundRevisionLabel] != BackgroundOpenCodeRevision ||
+		inspection.Config.Labels[backgroundVersionLabel] != BackgroundOpenCodeVersion ||
+		inspection.Config.Labels[backgroundProfileLabel] != BackgroundOpenCodeProfile ||
+		inspection.Config.User != "1001:1001" ||
+		len(inspection.Config.Entrypoint) != 0 ||
+		!slices.Equal(inspection.Config.Cmd, []string{"opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"}) ||
+		!hasExactExposedPort(inspection.Config.ExposedPorts, "4096/tcp") ||
+		containsEnvironmentKey(inspection.Config.Env, "OPENCODE_SERVER_PASSWORD") {
+		return "", fmt.Errorf("%w: background image does not match the qualified source profile", ErrSpecDrift)
+	}
+	return inspection.ID, nil
+}
+
+func hasExactExposedPort(ports nat.PortSet, expected nat.Port) bool {
+	_, exists := ports[expected]
+	return exists && len(ports) == 1
+}
+
+func containsEnvironmentKey(environment []string, key string) bool {
+	prefix := key + "="
+	for _, value := range environment {
+		if value == key || strings.HasPrefix(value, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func (d *Docker) StreamLogs(ctx context.Context, name string, follow bool, stdout, stderr io.Writer) error {

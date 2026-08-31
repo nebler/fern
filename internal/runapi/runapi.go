@@ -27,7 +27,7 @@ import (
 
 const (
 	PathPrefix             = "/fern/api/runs"
-	PluginOpenCodeProfile  = "opencode-1.18.16"
+	PluginOpenCodeProfile  = taskstore.BackgroundRunSourceProfile
 	APIContractVersion     = "fern.background-run.v1"
 	maxCreateBodyBytes     = 32 << 10
 	maxEmptyBodyBytes      = 16
@@ -54,30 +54,29 @@ type BaseVerifier interface {
 type ActorResolver func(context.Context) (task.ActorSnapshot, error)
 
 type Config struct {
-	WorkspaceID      task.WorkspaceID
-	RepositoryID     task.RepositoryID
-	RepositoryRemote string
-	ImageIdentity    string
-	OpenCodeProtocol string
-	AvailableProfile string
-	Store            Store
-	Generator        *task.Generator
-	ActorResolver    ActorResolver
-	BaseVerifier     BaseVerifier
-	Now              func() time.Time
-	AttemptTimeout   time.Duration
-	Agent            string
-	ModelProvider    string
-	Model            string
-	BudgetSnapshot   json.RawMessage
+	WorkspaceID             task.WorkspaceID
+	RepositoryID            task.RepositoryID
+	RepositoryRemote        string
+	BackgroundImageIdentity string
+	AvailableProfile        string
+	Store                   Store
+	Generator               *task.Generator
+	ActorResolver           ActorResolver
+	BaseVerifier            BaseVerifier
+	Now                     func() time.Time
+	AttemptTimeout          time.Duration
+	Agent                   string
+	ModelProvider           string
+	Model                   string
+	BudgetSnapshot          json.RawMessage
 }
 
 type Handler struct{ config Config }
 
 func New(config Config) (*Handler, error) {
 	if config.Store == nil || config.Generator == nil || config.ActorResolver == nil || config.BaseVerifier == nil || config.Now == nil ||
-		config.AttemptTimeout <= 0 || config.RepositoryID == 0 || config.RepositoryRemote == "" || config.ImageIdentity == "" ||
-		config.OpenCodeProtocol == "" || config.Agent == "" || config.ModelProvider == "" || config.Model == "" ||
+		config.AttemptTimeout <= 0 || config.RepositoryID == 0 || config.RepositoryRemote == "" ||
+		config.Agent == "" || config.ModelProvider == "" || config.Model == "" ||
 		len(config.BudgetSnapshot) == 0 || !json.Valid(config.BudgetSnapshot) {
 		return nil, errors.New("valid background run API configuration is required")
 	}
@@ -86,6 +85,10 @@ func New(config Config) (*Handler, error) {
 	}
 	if !canonicalRepositoryRemote(config.RepositoryRemote) {
 		return nil, errors.New("canonical background run repository remote is required")
+	}
+	if (config.AvailableProfile == PluginOpenCodeProfile) != (config.BackgroundImageIdentity != "") ||
+		(config.AvailableProfile != "" && config.AvailableProfile != PluginOpenCodeProfile) {
+		return nil, errors.New("qualified background image and profile must be configured together")
 	}
 	config.BudgetSnapshot = append(json.RawMessage(nil), config.BudgetSnapshot...)
 	return &Handler{config: config}, nil
@@ -230,7 +233,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.Acto
 	}
 	if h.config.AvailableProfile != PluginOpenCodeProfile {
 		writeError(w, http.StatusServiceUnavailable, "profile_unavailable",
-			fmt.Sprintf("Profile %s requires OpenCode 1.18.16; configured image protocol is %s.", PluginOpenCodeProfile, h.config.OpenCodeProtocol))
+			fmt.Sprintf("Profile %s requires a configured image qualified for exact source commit 39fb919a054190498f6d5b7985bde231f93ad7a6.", PluginOpenCodeProfile))
 		return
 	}
 	if err := h.config.BaseVerifier.Verify(r.Context(), base); err != nil {
@@ -255,6 +258,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.Acto
 	compact := strings.ReplaceAll(strings.TrimPrefix(string(ids.TaskID), "tsk_"), "-", "")
 	intent := &taskstore.BackgroundRunIntent{RepositoryRemote: input.Repository, Branch: branch,
 		InstructionSHA256: sha256.Sum256([]byte(input.Instruction)), Profile: input.Profile, ProfileSHA256: profileHash,
+		ImageIdentity: h.config.BackgroundImageIdentity,
 		CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode",
 		ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint"}
 	admission, err := h.config.Store.AdmitTask(r.Context(), taskstore.AdmitTaskParams{
@@ -424,11 +428,20 @@ func (h *Handler) replayStop(w http.ResponseWriter, r *http.Request, id task.Tas
 		}
 		return true
 	}
+	var committed struct {
+		RunID task.TaskID                  `json:"run_id"`
+		State taskstore.BackgroundRunState `json:"state"`
+	}
+	if json.Unmarshal(receipt.ResponseProjection, &committed) != nil || committed.RunID != id ||
+		(committed.State != taskstore.BackgroundRunFailed && committed.State != taskstore.BackgroundRunCanceling) {
+		writeError(w, 500, "internal_error", "The run could not be stopped.")
+		return true
+	}
 	w.Header().Set("Idempotency-Replayed", "true")
 	writeJSON(w, http.StatusAccepted, struct {
 		RunID task.TaskID                  `json:"run_id"`
 		State taskstore.BackgroundRunState `json:"state"`
-	}{id, run.State})
+	}{id, committed.State})
 	return true
 }
 

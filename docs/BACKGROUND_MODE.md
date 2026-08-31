@@ -38,7 +38,16 @@ behavior with real Docker and a zero-cost local provider. Package metadata at
 that commit also says `1.18.16`, but the source profile does not claim
 equivalence to the published package. Neither qualification implements the
 disposable Docker provider, coordinator, routing, export, or cleanup design
-below. Persistent workspaces and the plugin profile remain unchanged.
+below. Fern can qualify that source image and commit durable serial effect
+claims, but performs no Docker or prompt effects yet. Persistent workspaces and
+the plugin remain unchanged.
+
+The current dogfood configuration requires both `tasks.backgroundImage` and an
+operator-pinned canonical local `tasks.backgroundImageID`. Qualification is
+read-only and verifies the exact image ID, source/revision/version/profile
+labels, runtime user, command argv, exposed port, and absence of a baked server
+password. Registry-digest promotion remains required before external image
+distribution.
 
 The published 1.18.16 qualification proves durable generated sessions and
 message history across replacement, but records hard limitations: Session IDs

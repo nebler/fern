@@ -76,6 +76,73 @@ func TestResolveImageIDRejectsInvalidReferenceAndDaemonIdentity(t *testing.T) {
 	}
 }
 
+func TestResolveBackgroundRunImageIDRequiresExactLabelsAndIsReadOnly(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name      string
+		mutate    func(map[string]any)
+		expected  string
+		wantError bool
+	}{
+		{name: "qualified"},
+		{name: "wrong image ID", expected: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", wantError: true},
+		{name: "wrong source", mutate: mutateBackgroundConfig("Labels", backgroundSourceLabel, "other"), wantError: true},
+		{name: "wrong revision", mutate: mutateBackgroundConfig("Labels", backgroundRevisionLabel, "other"), wantError: true},
+		{name: "wrong version", mutate: mutateBackgroundConfig("Labels", backgroundVersionLabel, "other"), wantError: true},
+		{name: "wrong profile", mutate: mutateBackgroundConfig("Labels", backgroundProfileLabel, "other"), wantError: true},
+		{name: "missing profile", mutate: func(config map[string]any) { delete(config["Labels"].(map[string]string), backgroundProfileLabel) }, wantError: true},
+		{name: "wrong user", mutate: func(config map[string]any) { config["User"] = "1001" }, wantError: true},
+		{name: "unexpected entrypoint", mutate: func(config map[string]any) { config["Entrypoint"] = []string{"docker-entrypoint.sh"} }, wantError: true},
+		{name: "wrong command", mutate: func(config map[string]any) { config["Cmd"] = []string{"opencode", "serve"} }, wantError: true},
+		{name: "missing port", mutate: func(config map[string]any) { config["ExposedPorts"] = map[string]any{} }, wantError: true},
+		{name: "extra port", mutate: func(config map[string]any) {
+			config["ExposedPorts"] = map[string]any{"4096/tcp": map[string]any{}, "8080/tcp": map[string]any{}}
+		}, wantError: true},
+		{name: "baked password", mutate: func(config map[string]any) { config["Env"] = []string{"OPENCODE_SERVER_PASSWORD=secret"} }, wantError: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+				calls.Add(1)
+				if request.Method != http.MethodGet || request.URL.Path != "/v1.48/images/background:test/json" {
+					t.Errorf("unexpected Docker effect request = %s %s", request.Method, request.URL.Path)
+				}
+				config := map[string]any{
+					"Labels": map[string]string{backgroundSourceLabel: BackgroundOpenCodeSource, backgroundRevisionLabel: BackgroundOpenCodeRevision, backgroundVersionLabel: BackgroundOpenCodeVersion, backgroundProfileLabel: BackgroundOpenCodeProfile},
+					"User":   "1001:1001", "Cmd": []string{"opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"},
+					"ExposedPorts": map[string]any{"4096/tcp": map[string]any{}}, "Env": []string{"XDG_DATA_HOME=/home/user/.local/share"},
+				}
+				if test.mutate != nil {
+					test.mutate(config)
+				}
+				writeJSON(writer, http.StatusOK, map[string]any{"Id": testImageID, "Config": config})
+			}))
+			defer server.Close()
+			expected := test.expected
+			if expected == "" {
+				expected = testImageID
+			}
+			imageID, err := testDocker(t, server).ResolveBackgroundRunImageID(context.Background(), "background:test", expected)
+			if test.wantError {
+				if !errors.Is(err, ErrSpecDrift) || imageID != "" {
+					t.Fatalf("image=%q error=%v", imageID, err)
+				}
+			} else if err != nil || imageID != testImageID {
+				t.Fatalf("image=%q error=%v", imageID, err)
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("inspect calls = %d", calls.Load())
+			}
+		})
+	}
+}
+
+func mutateBackgroundConfig(field, key, value string) func(map[string]any) {
+	return func(config map[string]any) {
+		config[field].(map[string]string)[key] = value
+	}
+}
+
 func (s *recordingIntentStore) BeginPause(string, string) error {
 	if s.beginErr != nil {
 		return s.beginErr

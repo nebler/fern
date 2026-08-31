@@ -1527,13 +1527,14 @@ an explicit contiguous schema range and refuses unknown newer versions.
 Migrations do not call OpenCode, GitHub, Docker, providers, or verification
 commands.
 
-`internal/taskstore` implements schema 7 with CGO-free SQLite, private path
+`internal/taskstore` implements schema 8 with CGO-free SQLite, private path
 checks, a checksum-pinned migration ledger, foreign keys, WAL with
 `synchronous=FULL`, receipt-backed task and publication admission, fenced
 coordinator journals, exact OpenCode IDs, results, verification, and
 publication records. Admission and replay are wired through the production task
 API. Migration 6 quarantines unresolved unreceipted legacy publication rows so
-they grant no worker authority.
+they grant no worker authority. Migration 8 similarly terminalizes unqualified
+schema-7 Background Runs before adding exact effect claims and cleanup proof.
 
 The JSON control store remains a separate compatibility authority for legacy
 control-plane records; SQLite is authoritative for Fern tasks and their
@@ -1541,7 +1542,7 @@ receipts/effects. They do not both own the same task entity. Offline backup and
 restore preserve both stores, task SQLite/WAL state, OpenCode data, Git objects,
 managed volumes, configuration, and the appliance epoch under one manifest.
 Rollback means restoring the verified pre-upgrade bytes; older binaries must
-not open a migrated schema-7 database. See [Deployment](./DEPLOYMENT.md) and the
+not open a migrated schema-8 database. See [Deployment](./DEPLOYMENT.md) and the
 `integration/upgrade` harness.
 
 ## Fault-Injection Acceptance

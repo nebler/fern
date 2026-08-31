@@ -124,7 +124,7 @@ func TestRunAPIRejectsRepositoryBaseProfileScopeAndMalformedHTTP(t *testing.T) {
 		t.Fatalf("unreachable=%d %s", got.Code, got.Body.String())
 	}
 	unavailable := newAPIFixture(t, "")
-	if got := unavailable.request(http.MethodPost, PathPrefix, validCreateBody("Work"), "profile-unavailable"); got.Code != http.StatusServiceUnavailable || !strings.Contains(got.Body.String(), "configured image protocol is 0.0.0-next-17444") {
+	if got := unavailable.request(http.MethodPost, PathPrefix, validCreateBody("Work"), "profile-unavailable"); got.Code != http.StatusServiceUnavailable || !strings.Contains(got.Body.String(), "requires a configured image qualified") {
 		t.Fatalf("unavailable=%d %s", got.Code, got.Body.String())
 	}
 	request := httptest.NewRequest(http.MethodGet, PathPrefix, nil)
@@ -313,7 +313,11 @@ func newAPIFixture(t *testing.T, available string) *apiFixture {
 }
 func (f *apiFixture) buildHandler(t *testing.T, available string) *Handler {
 	t.Helper()
-	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", ImageIdentity: "sha256:image", OpenCodeProtocol: "0.0.0-next-17444", AvailableProfile: available, Store: f.store, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, Now: func() time.Time { return time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC) }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", BudgetSnapshot: json.RawMessage(`{"turns":10}`)})
+	backgroundImage := ""
+	if available == PluginOpenCodeProfile {
+		backgroundImage = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	}
+	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, AvailableProfile: available, Store: f.store, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, Now: func() time.Time { return time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC) }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", BudgetSnapshot: json.RawMessage(`{"turns":10}`)})
 	if err != nil {
 		t.Fatal(err)
 	}

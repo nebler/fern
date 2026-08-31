@@ -29,6 +29,7 @@ import (
 )
 
 const taskServiceTestImageID = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+const taskServiceBackgroundImageID = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
 
 type corruptResultCoordinator struct{}
 
@@ -167,7 +168,26 @@ func (taskServiceRuntime) Status(context.Context, string) (runtime.Observation, 
 
 func TestTaskServicesSuccessfulWorkspaceGHMatrix(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodGet || request.URL.Path != "/v1.48/images/image:test/json" {
+		if request.Method != http.MethodGet {
+			t.Errorf("startup performed Docker effect %s %s", request.Method, request.URL.Path)
+			http.NotFound(writer, request)
+			return
+		}
+		if request.URL.Path == "/v1.48/images/background:test/json" {
+			writer.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(writer).Encode(map[string]any{"Id": taskServiceBackgroundImageID, "Config": map[string]any{
+				"Labels": map[string]string{
+					"org.opencontainers.image.source":   runtime.BackgroundOpenCodeSource,
+					"org.opencontainers.image.revision": runtime.BackgroundOpenCodeRevision,
+					"org.opencontainers.image.version":  runtime.BackgroundOpenCodeVersion,
+					"ai.fern.opencode.profile":          runtime.BackgroundOpenCodeProfile,
+				},
+				"User": "1001:1001", "Cmd": []string{"opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"},
+				"ExposedPorts": map[string]any{"4096/tcp": map[string]any{}}, "Env": []string{"XDG_DATA_HOME=/home/user/.local/share"},
+			}})
+			return
+		}
+		if request.URL.Path != "/v1.48/images/image:test/json" {
 			http.NotFound(writer, request)
 			return
 		}
@@ -195,7 +215,8 @@ func TestTaskServicesSuccessfulWorkspaceGHMatrix(t *testing.T) {
 				Workspace: config.Workspace{Name: map[bool]string{false: "tasks-basic", true: "tasks-verified"}[verification], Image: "image:test", Repo: repository,
 					GitHub: &config.WorkspaceGitHub{Mode: config.GitHubModeWorkspaceGH, Hostname: "github.com", Repository: config.GitHubRepository{ID: 123, FullName: "owner/repository"}}},
 				Tasks: &config.TaskPolicy{Agent: "build", Model: config.TaskModel{Provider: "fixture", ID: "fixture-model"},
-					AttemptTimeout: time.Hour, LeaseDuration: time.Minute, Budget: config.TaskBudget{MaxTurns: 10}},
+					AttemptTimeout: time.Hour, LeaseDuration: time.Minute, BackgroundImage: "background:test", BackgroundImageID: taskServiceBackgroundImageID,
+					Budget: config.TaskBudget{MaxTurns: 10}},
 			}
 			if verification {
 				cfg.Tasks.Verification = &config.TaskVerificationPolicy{CheckName: "repository-tests", Argv: []string{"/bin/sh", "-c", "true"}, Timeout: time.Second, OutputBytes: 1024}
@@ -208,6 +229,15 @@ func TestTaskServicesSuccessfulWorkspaceGHMatrix(t *testing.T) {
 			if services == nil || services.store == nil || services.handler == nil || services.coordinator == nil || services.execution == nil ||
 				services.result == nil || (services.verification != nil) != verification || services.publication != nil {
 				t.Fatalf("task service matrix = %+v", services)
+			}
+			qualified := false
+			for _, component := range status.Snapshot().Components {
+				if component.Component == observability.ComponentBackgroundRunProfile && component.State == observability.StateQualified && component.Ready {
+					qualified = true
+				}
+			}
+			if !qualified {
+				t.Fatalf("background source profile was not reported qualified: %+v", status.Snapshot())
 			}
 			if err := services.store.Close(); err != nil {
 				t.Fatal(err)

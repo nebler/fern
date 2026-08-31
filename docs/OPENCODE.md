@@ -5,7 +5,8 @@ There is no automatic protocol mode or cross-version state migration. A
 separate Background Run qualifications exist for the published OpenCode
 `1.18.16` package and for source commit
 `39fb919a054190498f6d5b7985bde231f93ad7a6`; neither is a second persistent
-workspace image and no disposable coordinator consumes either profile yet.
+workspace image. Fern can now qualify and durably admit the source profile, but
+this commit does not perform disposable Docker or prompt effects.
 
 ## Product Boundary
 
@@ -65,7 +66,7 @@ labels the final image with the source URL, revision, and commit-derived
 version. Although the checkout's package metadata says `1.18.16`, this profile
 does not claim equivalence to the published package. It is qualified separately
 by `integration/opencode-background-source-contract` and does not alter the
-persistent or plugin run profiles.
+persistent workspace profile.
 
 A minimal workspace configuration is:
 
@@ -150,12 +151,21 @@ immutable task/attempt generation and disposable-environment intent before any
 effect. This build intentionally has no disposable Docker provider: accepted
 runs remain `queued`; stopping a queued run atomically records it, its task, and
 its attempt as `failed` with the honest `background_run_stopped_before_start`
-reason; and open/result return `not_ready`. The configured persistent image
-still pins OpenCode `0.0.0-next-17444`, so creation from the plugin's
-`opencode-1.18.16` profile fails with `profile_unavailable` rather than claiming
-false compatibility. Neither separate qualification implements the missing
-disposable provider, and the source candidate is not admitted by the plugin
-profile.
+reason; and open/result return `not_ready`. `tasks.backgroundImage` and
+`tasks.backgroundImageID` are an optional pair with no default. The latter is a
+canonical `sha256:` local image ID pinned by the operator. At startup Fern uses
+read-only Docker inspection and requires that exact ID; exact OCI source,
+revision `39fb919a054190498f6d5b7985bde231f93ad7a6`, version, and Fern profile
+labels; user `1001:1001`; exact server argv; only exposed port `4096/tcp`; and no
+baked `OPENCODE_SERVER_PASSWORD`. Only then does observability report the
+profile as `qualified`. Both the Background Run and its attempt commit that
+qualified image ID and source profile as their execution identity; normal
+persistent attempts remain unchanged. The local ID pin is only the current
+single-host dogfood boundary. Externally distributed images still require
+promotion to a registry digest and independent verification. The run API
+accepts only the source-commit profile and returns `profile_unavailable` when
+the qualified image is absent. The plugin still uses the preceding profile
+until its following compatibility commit and is not changed here.
 Plugin bearers receive `404` on routes outside their allowlist and never fall
 through to the persistent OpenCode workspace.
 

@@ -226,7 +226,7 @@ and atomically marks unresolved records quarantined without replaying effects.
 
 The SQLite store at `$HOME/.fern/tasks/<workspace>.db` uses WAL, foreign keys,
 `synchronous=FULL`, `BEGIN IMMEDIATE`, integrity checks, and a checksummed
-migration ledger. Current schema is 7:
+migration ledger. Current schema is 8:
 
 1. `initial_task_store`
 2. `execution_projection_and_results`
@@ -235,15 +235,26 @@ migration ledger. Current schema is 7:
 5. `explicit_workspace_github_authority`
 6. `publication_admission_receipts`
 7. `background_run_intents`
+8. `background_run_effect_claims`
 
 Schema 6 requires each mutable publication to reference an exact
 `result.publish` receipt. Pre-schema-6 publication rows migrate with a null
 receipt and are quarantined by SQL triggers: workers do not discover them and
 updates are rejected.
 
+Schema 8 adds fenced, expiring Background Run effect claims; an exact closed
+provision, prompt, stop, and cleanup sequence; phase-specific observed evidence;
+and a workspace capacity-one constraint. Retained `result_ready` rows remain
+cleanup-eligible and release capacity only after cleanup proof. Migration
+atomically terminalizes every old-profile schema-7 row, including `failed` and
+`result_ready`, with an exact failed task/attempt/run projection,
+`legacy_profile_unqualified`, actor-attributed events, and proof that the
+unimplemented schema-7 effect provider created no resources. Original state and
+phase remain in evidence; stop metadata and exact receipt linkage are preserved.
+
 `baseline-v1` is the first supported repository-established compatibility
 fixture. It is schema 4 and explicitly is not evidence of a historical release
-or tag. `integration/upgrade/run.sh` verifies semantic upgrade to schema 7,
+or tag. `integration/upgrade/run.sh` verifies semantic upgrade to schema 8,
 restores the verified pre-upgrade bytes for rollback, and upgrades again.
 Rollback means restoring a pre-upgrade backup; older code must never open the
 migrated database.

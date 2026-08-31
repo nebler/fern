@@ -57,12 +57,14 @@ type TaskVerificationPolicy struct {
 // TaskPolicy is the complete durable-task configuration from the tasks section
 // of fern.yaml. It is optional.
 type TaskPolicy struct {
-	Agent          string
-	Model          TaskModel
-	AttemptTimeout time.Duration
-	LeaseDuration  time.Duration
-	Budget         TaskBudget
-	Verification   *TaskVerificationPolicy
+	Agent             string
+	Model             TaskModel
+	AttemptTimeout    time.Duration
+	LeaseDuration     time.Duration
+	Budget            TaskBudget
+	BackgroundImage   string
+	BackgroundImageID string
+	Verification      *TaskVerificationPolicy
 }
 
 // Workspace is the container image, repository, memory reservation, and

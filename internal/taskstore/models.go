@@ -466,6 +466,8 @@ type AdmitTaskParams struct {
 type BackgroundRunState string
 type BackgroundRunEffectPhase string
 
+const BackgroundRunSourceProfile = "source-39fb919a054190498f6d5b7985bde231f93ad7a6"
+
 const (
 	BackgroundRunQueued          BackgroundRunState = "queued"
 	BackgroundRunSettingUp       BackgroundRunState = "setting_up"
@@ -477,12 +479,29 @@ const (
 	BackgroundRunFailed          BackgroundRunState = "failed"
 	BackgroundRunCleanupRequired BackgroundRunState = "cleanup_required"
 
-	BackgroundRunEffectAbsent           BackgroundRunEffectPhase = "absent"
-	BackgroundRunEffectProvisionStarted BackgroundRunEffectPhase = "provision_started"
-	BackgroundRunEffectPromptStarted    BackgroundRunEffectPhase = "prompt_started"
-	BackgroundRunEffectStopStarted      BackgroundRunEffectPhase = "stop_started"
-	BackgroundRunEffectExportStarted    BackgroundRunEffectPhase = "export_started"
-	BackgroundRunEffectCleanupStarted   BackgroundRunEffectPhase = "cleanup_started"
+	BackgroundRunEffectAbsent                 BackgroundRunEffectPhase = "absent"
+	BackgroundRunEffectProvisionIntent        BackgroundRunEffectPhase = "provision_intent"
+	BackgroundRunEffectCloneObserved          BackgroundRunEffectPhase = "clone_observed"
+	BackgroundRunEffectVolumeObserved         BackgroundRunEffectPhase = "volume_observed"
+	BackgroundRunEffectContainerObserved      BackgroundRunEffectPhase = "container_observed"
+	BackgroundRunEffectHealthObserved         BackgroundRunEffectPhase = "health_observed"
+	BackgroundRunEffectReady                  BackgroundRunEffectPhase = "ready"
+	BackgroundRunEffectSessionObserved        BackgroundRunEffectPhase = "session_observed"
+	BackgroundRunEffectPromptIntent           BackgroundRunEffectPhase = "prompt_intent"
+	BackgroundRunEffectPromptAdmitted         BackgroundRunEffectPhase = "prompt_admitted"
+	BackgroundRunEffectStopIntent             BackgroundRunEffectPhase = "stop_intent"
+	BackgroundRunEffectWriterInactive         BackgroundRunEffectPhase = "writer_inactive"
+	BackgroundRunEffectRouteRemoved           BackgroundRunEffectPhase = "route_removed"
+	BackgroundRunEffectContainerRemoved       BackgroundRunEffectPhase = "container_removed"
+	BackgroundRunEffectVolumeRemoved          BackgroundRunEffectPhase = "volume_removed"
+	BackgroundRunEffectCloneRemoved           BackgroundRunEffectPhase = "clone_removed"
+	BackgroundRunEffectCleanupComplete        BackgroundRunEffectPhase = "cleanup_complete"
+	BackgroundRunEffectPreEffectFailed        BackgroundRunEffectPhase = "pre_effect_failed"
+	backgroundRunEffectLegacyProvisionStarted BackgroundRunEffectPhase = "provision_started"
+	backgroundRunEffectLegacyPromptStarted    BackgroundRunEffectPhase = "prompt_started"
+	backgroundRunEffectLegacyStopStarted      BackgroundRunEffectPhase = "stop_started"
+	backgroundRunEffectLegacyExportStarted    BackgroundRunEffectPhase = "export_started"
+	backgroundRunEffectLegacyCleanupStarted   BackgroundRunEffectPhase = "cleanup_started"
 )
 
 func (state BackgroundRunState) valid() bool {
@@ -498,8 +517,15 @@ func (state BackgroundRunState) valid() bool {
 
 func (phase BackgroundRunEffectPhase) valid() bool {
 	switch phase {
-	case BackgroundRunEffectAbsent, BackgroundRunEffectProvisionStarted, BackgroundRunEffectPromptStarted,
-		BackgroundRunEffectStopStarted, BackgroundRunEffectExportStarted, BackgroundRunEffectCleanupStarted:
+	case BackgroundRunEffectAbsent, BackgroundRunEffectProvisionIntent, BackgroundRunEffectCloneObserved,
+		BackgroundRunEffectVolumeObserved, BackgroundRunEffectContainerObserved, BackgroundRunEffectHealthObserved,
+		BackgroundRunEffectReady, BackgroundRunEffectSessionObserved, BackgroundRunEffectPromptIntent,
+		BackgroundRunEffectPromptAdmitted, BackgroundRunEffectStopIntent, BackgroundRunEffectWriterInactive,
+		BackgroundRunEffectRouteRemoved, BackgroundRunEffectContainerRemoved, BackgroundRunEffectVolumeRemoved,
+		BackgroundRunEffectCloneRemoved, BackgroundRunEffectCleanupComplete, BackgroundRunEffectPreEffectFailed:
+		return true
+	case backgroundRunEffectLegacyProvisionStarted, backgroundRunEffectLegacyPromptStarted,
+		backgroundRunEffectLegacyStopStarted, backgroundRunEffectLegacyExportStarted, backgroundRunEffectLegacyCleanupStarted:
 		return true
 	default:
 		return false
@@ -511,39 +537,78 @@ func (phase BackgroundRunEffectPhase) valid() bool {
 type BackgroundRunIntent struct {
 	RepositoryRemote, Branch, Profile                string
 	InstructionSHA256, ProfileSHA256                 [32]byte
+	ImageIdentity                                    string
 	CloneIdentity, VolumeIdentity, ContainerIdentity string
 	EndpointIdentity                                 string
 }
 
 type BackgroundRun struct {
-	TaskID            task.TaskID
-	AttemptID         task.AttemptID
-	WorkspaceID       task.WorkspaceID
-	Generation        int64
-	RepositoryID      task.RepositoryID
-	RepositoryRemote  string
-	BaseOID           task.GitOID
-	Branch            *string
-	InstructionSHA256 [32]byte
-	Profile           string
-	ProfileSHA256     [32]byte
-	ImageIdentity     string
-	CloneIdentity     string
-	VolumeIdentity    string
-	ContainerIdentity string
-	EndpointIdentity  string
-	OpenCodeSessionID task.OpenCodeSessionID
-	OpenCodeMessageID task.OpenCodeMessageID
-	State             BackgroundRunState
-	EffectPhase       BackgroundRunEffectPhase
-	CancelEpoch       uint64
-	StopReceiptID     task.ReceiptID
-	StopActor         *task.ActorSnapshot
-	StopRequestedAt   *time.Time
-	Creator           task.ActorSnapshot
-	Revision          int64
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	TaskID                     task.TaskID
+	AttemptID                  task.AttemptID
+	WorkspaceID                task.WorkspaceID
+	Generation                 int64
+	RepositoryID               task.RepositoryID
+	RepositoryRemote           string
+	BaseOID                    task.GitOID
+	Branch                     *string
+	InstructionSHA256          [32]byte
+	Profile                    string
+	ProfileSHA256              [32]byte
+	ImageIdentity              string
+	CloneIdentity              string
+	VolumeIdentity             string
+	ContainerIdentity          string
+	EndpointIdentity           string
+	OpenCodeSessionID          task.OpenCodeSessionID
+	OpenCodeMessageID          task.OpenCodeMessageID
+	State                      BackgroundRunState
+	EffectPhase                BackgroundRunEffectPhase
+	CancelEpoch                uint64
+	StopReceiptID              task.ReceiptID
+	StopActor                  *task.ActorSnapshot
+	StopRequestedAt            *time.Time
+	Creator                    task.ActorSnapshot
+	ClaimOwner                 string
+	ClaimExpiresAt             *time.Time
+	ClaimGeneration            int64
+	ObservedContainerID        string
+	ObservedContainerStartedAt string
+	RuntimeEpoch               int64
+	HostPort                   int
+	CloneEvidence              string
+	VolumeEvidence             string
+	HealthEvidence             string
+	ReadyEvidence              string
+	SessionEvidence            string
+	PromptEvidence             string
+	WriterInactiveEvidence     string
+	RouteRemovedEvidence       string
+	ContainerRemovedEvidence   string
+	VolumeRemovedEvidence      string
+	CloneRemovedEvidence       string
+	LastEvidence               string
+	LastError                  string
+	ProvisionIntentAt          *time.Time
+	CloneObservedAt            *time.Time
+	VolumeObservedAt           *time.Time
+	ContainerObservedAt        *time.Time
+	HealthObservedAt           *time.Time
+	ReadyAt                    *time.Time
+	SessionObservedAt          *time.Time
+	PromptIntentAt             *time.Time
+	PromptAdmittedAt           *time.Time
+	StopIntentAt               *time.Time
+	WriterInactiveAt           *time.Time
+	RouteRemovedAt             *time.Time
+	ContainerRemovedAt         *time.Time
+	VolumeRemovedAt            *time.Time
+	CloneRemovedAt             *time.Time
+	CleanupCompletedAt         *time.Time
+	CleanupProof               string
+	AbsenceProof               string
+	Revision                   int64
+	CreatedAt                  time.Time
+	UpdatedAt                  time.Time
 }
 
 type StopBackgroundRunParams struct {
@@ -561,6 +626,85 @@ type BackgroundRunStop struct {
 	Run      BackgroundRun
 	Receipt  Receipt
 	Replayed bool
+}
+
+type ClaimNextBackgroundRunParams struct {
+	WorkspaceID   task.WorkspaceID
+	ClaimOwner    string
+	Now           time.Time
+	LeaseDuration time.Duration
+	Profile       string
+	ImageIdentity string
+}
+
+type ClaimBackgroundRunParams struct {
+	WorkspaceID      task.WorkspaceID
+	TaskID           task.TaskID
+	AttemptID        task.AttemptID
+	Generation       int64
+	ExpectedRevision int64
+	ExpectedState    BackgroundRunState
+	ExpectedPhase    BackgroundRunEffectPhase
+	CancelEpoch      uint64
+	ClaimOwner       string
+	Now              time.Time
+	LeaseDuration    time.Duration
+	Profile          string
+	ImageIdentity    string
+}
+
+// BackgroundRunClaim identifies one exact, fenced mutation authority.
+type BackgroundRunClaim struct {
+	WorkspaceID      task.WorkspaceID
+	TaskID           task.TaskID
+	AttemptID        task.AttemptID
+	Generation       int64
+	ClaimOwner       string
+	ClaimGeneration  int64
+	ExpectedRevision int64
+	ExpectedState    BackgroundRunState
+	ExpectedPhase    BackgroundRunEffectPhase
+	CancelEpoch      uint64
+	Now              time.Time
+}
+
+type RenewBackgroundRunClaimParams struct {
+	BackgroundRunClaim
+	LeaseDuration time.Duration
+}
+
+type RecordBackgroundRunContainerObservedParams struct {
+	BackgroundRunClaim
+	ContainerID        string
+	ContainerStartedAt string
+	RuntimeEpoch       int64
+	HostPort           int
+	Evidence           string
+}
+
+type RecordBackgroundRunEvidenceParams struct {
+	BackgroundRunClaim
+	Evidence string
+}
+
+type FinalizeBackgroundRunFailureParams struct {
+	BackgroundRunClaim
+	AttemptEventID task.EventID
+	TaskEventID    task.EventID
+	Actor          task.ActorSnapshot
+	Reason         string
+	Evidence       string
+	CleanupProof   string
+}
+
+type CompleteBackgroundRunResultCleanupParams struct {
+	BackgroundRunClaim
+	CleanupProof string
+}
+
+type MarkBackgroundRunCleanupRequiredParams struct {
+	BackgroundRunClaim
+	Error string
 }
 
 type Admission struct {

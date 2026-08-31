@@ -17,6 +17,7 @@ const (
 	ComponentTaskVerification     Component = "task-verification"
 	ComponentGitHubTaskDependency Component = "github-task-dependency"
 	ComponentLegacyPublication    Component = "legacy-publication"
+	ComponentBackgroundRunProfile Component = "background-run-profile"
 )
 
 var components = [...]Component{
@@ -29,16 +30,18 @@ var components = [...]Component{
 	ComponentTaskVerification,
 	ComponentGitHubTaskDependency,
 	ComponentLegacyPublication,
+	ComponentBackgroundRunProfile,
 }
 
 type State string
 
 const (
-	StateDisabled State = "disabled"
-	StateHealthy  State = "healthy"
-	StateDegraded State = "degraded"
-	StateBlocked  State = "blocked"
-	StateFailed   State = "failed"
+	StateDisabled  State = "disabled"
+	StateHealthy   State = "healthy"
+	StateQualified State = "qualified"
+	StateDegraded  State = "degraded"
+	StateBlocked   State = "blocked"
+	StateFailed    State = "failed"
 )
 
 type ComponentStatus struct {
@@ -76,6 +79,10 @@ func NewRegistry() *Registry {
 
 func (registry *Registry) Healthy(component Component) bool {
 	return registry.update(component, StateHealthy, nil)
+}
+
+func (registry *Registry) Qualified(component Component) bool {
+	return registry.update(component, StateQualified, nil)
 }
 
 func (registry *Registry) Degraded(component Component, _ error) bool {

@@ -28,7 +28,7 @@ var baselineFileChecksums = map[string]string{
 	"control/2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea.json": "a839bb61730c650b833999fd11550f6f677c267f2e67f1ffcb14f0d34cd03b65",
 	"fern.yaml":                       "125be67c7eb7f0312b75eeea116f9c8570d43caca8838995ac589bcb7fa46923",
 	"github-app/app-credentials.json": "9dc22f33803ba3b4a5e945ba18d3c695fd1b95a6f1ed6a0e0d5f47318afabe27",
-	"metadata.json":                   "c4f191ce4e2bea4f81ef3755d6b30579b2bdc1c122d29124351e67f99e206a8e",
+	"metadata.json":                   "b7d9456649ba49bbacf6a4bc02a45e1ff08ea90d20675b7fb3279907b4696a43",
 	"task-store.sqlite":               "2fb2541a99396b40e99704184e5a49fe44b8e31485bc5e32c26c9c4e82a03a38",
 }
 
@@ -48,7 +48,8 @@ var baselineMigrationLedger = []migrationRecord{
 
 var currentMigrationLedger = append(append([]migrationRecord(nil), baselineMigrationLedger...),
 	migrationRecord{6, "publication_admission_receipts", "6c54a44e10e025c2d82a1466b184c74ea8d2641530472aca02e79b4cdcd301ca"},
-	migrationRecord{7, "background_run_intents", "14adb62969106f5c6a66d12ae4e43cc6c6d31fbafe71e0f7e708cc42c2aaba2a"})
+	migrationRecord{7, "background_run_intents", "14adb62969106f5c6a66d12ae4e43cc6c6d31fbafe71e0f7e708cc42c2aaba2a"},
+	migrationRecord{8, "background_run_effect_claims", "3488eb94b3bc0254b09ce5df70ed4ddc07b2b25505dfffa2fc57cbec0c2a6026"})
 
 func TestBaselineV1UpgradesWithoutSemanticLoss(t *testing.T) {
 	assertBaselineBytes(t)

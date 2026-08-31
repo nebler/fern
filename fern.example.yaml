@@ -22,6 +22,10 @@ workspace:
 #     id: replace-with-model-id
 #   attemptTimeout: 30m
 #   leaseDuration: 2m
+#   # Optional pair. Pins one local source image; external distribution still
+#   # requires promotion to a registry digest.
+#   backgroundImage: fern/opencode-background-source:dev
+#   backgroundImageID: sha256:replace-with-64-lowercase-hex-digits
 #   budget:
 #     maxTurns: 100
 #   # Optional. No verification command is inferred from repository contents.

@@ -640,6 +640,8 @@ tasks:
     id: gpt-5
   attemptTimeout: 30m
   leaseDuration: 2m
+  backgroundImage: fern/opencode-background-source:dev
+  backgroundImageID: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   budget:
     maxTurns: 100
 `
@@ -659,7 +661,8 @@ tasks:
 	want := TaskPolicy{
 		Agent: "build", Model: TaskModel{Provider: "openai", ID: "gpt-5"},
 		AttemptTimeout: 30 * time.Minute, LeaseDuration: 2 * time.Minute,
-		Budget: TaskBudget{MaxTurns: 100},
+		Budget: TaskBudget{MaxTurns: 100}, BackgroundImage: "fern/opencode-background-source:dev",
+		BackgroundImageID: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	}
 	if *loaded.Tasks != want {
 		t.Fatalf("tasks = %+v, want %+v", *loaded.Tasks, want)
@@ -837,6 +840,9 @@ func TestLoadRejectsMalformedOrOpenTaskPolicy(t *testing.T) {
 		"turns_zero":               strings.Replace(valid, "maxTurns: 100", "maxTurns: 0", 1),
 		"turns_negative":           strings.Replace(valid, "maxTurns: 100", "maxTurns: -1", 1),
 		"turns_noncanonical":       strings.Replace(valid, "maxTurns: 100", "maxTurns: 0100", 1),
+		"background_image_empty":   valid + "  backgroundImage: ''\n",
+		"background_id_empty":      valid + "  backgroundImageID: ''\n",
+		"background_image_unknown": valid + "  background_image: image:test\n",
 		"tasks_unknown":            valid + "  unknown: true\n",
 		"model_unknown":            strings.Replace(valid, "    id: gpt-5\n", "    id: gpt-5\n    unknown: true\n", 1),
 		"budget_unknown":           strings.Replace(valid, "    maxTurns: 100\n", "    maxTurns: 100\n    unknown: true\n", 1),
@@ -891,6 +897,16 @@ func TestValidateTaskPolicyBoundsAndDependencies(t *testing.T) {
 		{"turns_zero", func(value *Config) { value.Tasks.Budget.MaxTurns = 0 }},
 		{"turns_negative", func(value *Config) { value.Tasks.Budget.MaxTurns = -1 }},
 		{"turns_high", func(value *Config) { value.Tasks.Budget.MaxTurns = 1001 }},
+		{"background_image_unpaired", func(value *Config) { value.Tasks.BackgroundImage = "image:test" }},
+		{"background_id_unpaired", func(value *Config) {
+			value.Tasks.BackgroundImageID = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		}},
+		{"background_id_short", func(value *Config) {
+			value.Tasks.BackgroundImage, value.Tasks.BackgroundImageID = "image:test", "sha256:bbbb"
+		}},
+		{"background_id_uppercase", func(value *Config) {
+			value.Tasks.BackgroundImage, value.Tasks.BackgroundImageID = "image:test", "sha256:BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+		}},
 	}
 	for _, test := range tests {
 		test := test

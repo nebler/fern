@@ -99,6 +99,15 @@ func validateTasks(config Config) error {
 	if config.Tasks.Budget.MaxTurns < 1 || config.Tasks.Budget.MaxTurns > 1000 {
 		return errors.New("tasks.budget.maxTurns must be between 1 and 1000")
 	}
+	if config.Tasks.BackgroundImage != "" && (!validTaskText(config.Tasks.BackgroundImage, 1, 256) || strings.TrimSpace(config.Tasks.BackgroundImage) != config.Tasks.BackgroundImage) {
+		return errors.New("tasks.backgroundImage must be an exact nonempty image reference of at most 256 bytes")
+	}
+	if (config.Tasks.BackgroundImage == "") != (config.Tasks.BackgroundImageID == "") {
+		return errors.New("tasks.backgroundImage and tasks.backgroundImageID must be configured together")
+	}
+	if config.Tasks.BackgroundImageID != "" && !validCanonicalImageID(config.Tasks.BackgroundImageID) {
+		return errors.New("tasks.backgroundImageID must be a canonical sha256 image ID")
+	}
 	if verification := config.Tasks.Verification; verification != nil {
 		if !validPolicyName(verification.CheckName) {
 			return errors.New("tasks.verification.checkName must be 1-64 lowercase policy characters")
@@ -148,6 +157,18 @@ func validateTasks(config Config) error {
 		}
 	}
 	return nil
+}
+
+func validCanonicalImageID(value string) bool {
+	if len(value) != 71 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, character := range value[7:] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func pathWithin(parent, candidate string) bool {

@@ -240,14 +240,22 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	if hostname == "" {
 		hostname = "github.com"
 	}
-	availableProfile := ""
-	if taskOpenCodeProtocol == "1.18.16" {
+	availableProfile, backgroundImageID := "", ""
+	if cfg.Tasks.BackgroundImage != "" {
+		backgroundInspectCtx, backgroundInspectCancel := context.WithTimeout(ctx, taskInspectTimeout)
+		backgroundImageID, err = docker.ResolveBackgroundRunImageID(backgroundInspectCtx, cfg.Tasks.BackgroundImage, cfg.Tasks.BackgroundImageID)
+		backgroundInspectCancel()
+		if err != nil {
+			status.Blocked(observability.ComponentBackgroundRunProfile, err)
+			return nil, err
+		}
 		availableProfile = runapi.PluginOpenCodeProfile
+		status.Qualified(observability.ComponentBackgroundRunProfile)
 	}
 	runs, err := runapi.New(runapi.Config{
 		WorkspaceID: durableWorkspace.ID, RepositoryID: durableWorkspace.RepositoryID,
-		RepositoryRemote: "https://" + hostname + "/" + github.Repository.FullName,
-		ImageIdentity:    imageID, OpenCodeProtocol: taskOpenCodeProtocol, AvailableProfile: availableProfile,
+		RepositoryRemote:        "https://" + hostname + "/" + github.Repository.FullName,
+		BackgroundImageIdentity: backgroundImageID, AvailableProfile: availableProfile,
 		Store: store, Generator: ids, ActorResolver: taskapi.ContextActor, BaseVerifier: baseVerifier,
 		Now: time.Now, AttemptTimeout: cfg.Tasks.AttemptTimeout, Agent: cfg.Tasks.Agent,
 		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID, BudgetSnapshot: budget,

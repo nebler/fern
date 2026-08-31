@@ -95,6 +95,10 @@ func (s *Store) AdmitTask(ctx context.Context, p AdmitTaskParams) (_ Admission, 
 		return Admission{}, err
 	}
 	promptHash := sha256.Sum256([]byte(p.Prompt))
+	attemptImage, attemptProtocol := imageDigest, openCodeProtocol
+	if p.BackgroundRun != nil {
+		attemptImage, attemptProtocol = p.BackgroundRun.ImageIdentity, p.BackgroundRun.Profile
+	}
 	acceptedMS := unixMillis(p.AcceptedAt)
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO tasks(
@@ -113,7 +117,7 @@ INSERT INTO attempts(
     model_provider,model,budget_snapshot,deadline,revision,created_at,updated_at
 ) VALUES(?, ?, ?, 1, 'prepared', 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
 		p.AttemptID, p.TaskID, p.Claim.Scope.WorkspaceID, p.OpenCodeSessionID, p.OpenCodeMessageID, promptHash[:], p.BaseSHA,
-		imageDigest, openCodeProtocol, p.ExecutionContractVersion, p.Agent, p.ModelProvider, p.Model,
+		attemptImage, attemptProtocol, p.ExecutionContractVersion, p.Agent, p.ModelProvider, p.Model,
 		string(p.BudgetSnapshot), unixMillis(p.Deadline), acceptedMS, acceptedMS); err != nil {
 		return Admission{}, fmt.Errorf("insert attempt: %w", err)
 	}
@@ -156,7 +160,7 @@ INSERT INTO background_runs(
 ) VALUES(?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued','absent',?,1,?,?)`,
 			p.TaskID, p.AttemptID, p.Claim.Scope.WorkspaceID, p.RepositoryID, p.BackgroundRun.RepositoryRemote,
 			p.BaseSHA, branch, p.BackgroundRun.InstructionSHA256[:], p.BackgroundRun.Profile,
-			p.BackgroundRun.ProfileSHA256[:], imageDigest, p.BackgroundRun.CloneIdentity,
+			p.BackgroundRun.ProfileSHA256[:], p.BackgroundRun.ImageIdentity, p.BackgroundRun.CloneIdentity,
 			p.BackgroundRun.VolumeIdentity, p.BackgroundRun.ContainerIdentity, p.BackgroundRun.EndpointIdentity,
 			p.OpenCodeSessionID, p.OpenCodeMessageID, actorID, acceptedMS, acceptedMS); err != nil {
 			return Admission{}, fmt.Errorf("insert background run: %w", err)
@@ -206,7 +210,7 @@ INSERT INTO events(
 	storedAttempt := Attempt{
 		ID: p.AttemptID, TaskID: p.TaskID, WorkspaceID: p.Claim.Scope.WorkspaceID, Sequence: 1, State: task.AttemptPrepared, DeliveryPhase: DeliveryPhaseNone,
 		OpenCodeSessionID: p.OpenCodeSessionID, OpenCodeMessageID: p.OpenCodeMessageID,
-		PromptSHA256: promptHash, BaseSHA: p.BaseSHA, ImageDigest: imageDigest, OpenCodeProtocol: openCodeProtocol,
+		PromptSHA256: promptHash, BaseSHA: p.BaseSHA, ImageDigest: attemptImage, OpenCodeProtocol: attemptProtocol,
 		ExecutionContractVersion: p.ExecutionContractVersion, Agent: p.Agent, ModelProvider: p.ModelProvider,
 		Model: p.Model, BudgetSnapshot: append(json.RawMessage(nil), p.BudgetSnapshot...), Deadline: fromUnixMillis(unixMillis(p.Deadline)),
 		Revision: 1, CreatedAt: fromUnixMillis(acceptedMS), UpdatedAt: fromUnixMillis(acceptedMS),
@@ -258,9 +262,9 @@ func validateAdmission(p AdmitTaskParams) error {
 	}
 	if p.BackgroundRun != nil && (!canonicalBackgroundRemote(p.BackgroundRun.RepositoryRemote) ||
 		(p.BackgroundRun.Branch != "" && !validBoundedText(p.BackgroundRun.Branch, 1, 255)) ||
-		!validBoundedText(p.BackgroundRun.Profile, 1, 128) || p.BackgroundRun.InstructionSHA256 != sha256.Sum256([]byte(p.Prompt)) ||
+		p.BackgroundRun.Profile != BackgroundRunSourceProfile || p.BackgroundRun.InstructionSHA256 != sha256.Sum256([]byte(p.Prompt)) ||
 		p.BackgroundRun.ProfileSHA256 != sha256.Sum256([]byte(p.BackgroundRun.Profile)) || p.Claim.Actor.Type != task.ActorOpenCode ||
-		!validBoundedText(p.BackgroundRun.CloneIdentity, 1, 256) ||
+		!validBackgroundImageIdentity(p.BackgroundRun.ImageIdentity) || !validBoundedText(p.BackgroundRun.CloneIdentity, 1, 256) ||
 		!validBoundedText(p.BackgroundRun.VolumeIdentity, 1, 256) || !validBoundedText(p.BackgroundRun.ContainerIdentity, 1, 256) ||
 		!validBoundedText(p.BackgroundRun.EndpointIdentity, 1, 256) || !canonicalBackgroundIdentities(p)) {
 		return fmt.Errorf("%w: background run intent", ErrInvalidInput)
@@ -294,6 +298,18 @@ func validateAdmission(p AdmitTaskParams) error {
 		return fmt.Errorf("%w: attempt deadline", ErrInvalidInput)
 	}
 	return nil
+}
+
+func validBackgroundImageIdentity(value string) bool {
+	if len(value) != 71 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, character := range value[7:] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func canonicalBackgroundRemote(value string) bool {

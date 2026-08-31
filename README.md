@@ -315,6 +315,10 @@ tasks:
     id: replace-with-model-id
   attemptTimeout: 30m
   leaseDuration: 2m
+  # Optional pair. Enables source-qualified Background Run admission; it does
+  # not replace or mutate workspace.image. Pin the canonical local image ID.
+  backgroundImage: fern/opencode-background-source:dev
+  backgroundImageID: sha256:replace-with-64-lowercase-hex-digits
   budget:
     maxTurns: 100
   # Optional; no check is inferred when this block is absent.
@@ -327,6 +331,10 @@ tasks:
       CI: "true"
     outputBytes: 65536
 ```
+
+The local image ID pin is for the current single-host dogfood boundary. External
+distribution still requires promotion to a registry digest and independent
+verification of that digest.
 
 With `github-app-broker`, `proxy.remoteOrigin` configured, and no App credentials present, the
 operator-only `/fern/control` page starts GitHub's App Manifest flow. Fern
