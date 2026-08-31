@@ -96,6 +96,36 @@ jobs:
           FERN_OPENCODE_IMAGE: fern/opencode:ci
         run: ./scripts/test-opencode.sh
 
+  opencode-plugin:
+    name: OpenCode plugin package
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.3.14
+
+      - name: Verify packed plugin
+        working-directory: plugins/opencode
+        run: |
+          bun install --frozen-lockfile
+          bun run format:check
+          bun run typecheck
+          bun test
+          bun run build
+          bun run smoke
+
+      - name: Build official OpenCode compatibility image
+        run: docker build --tag fern/opencode-background:plugin-ci images/opencode-background
+
+      - name: Verify packed plugin with OpenCode 1.18.16
+        working-directory: plugins/opencode
+        run: ./test/docker-cli-smoke.sh fern/opencode-background:plugin-ci
+
   lifecycle:
     name: Docker lifecycle
     runs-on: ubuntu-latest

@@ -42,6 +42,9 @@ required = [
     "./scripts/test-opencode.sh",
     "./scripts/test-lifecycle.sh",
     "./integration/background-run-qualification/run.sh",
+    "bun install --frozen-lockfile",
+    "bun run smoke",
+    "./test/docker-cli-smoke.sh fern/opencode-background:plugin-release",
     "docker/build-push-action@",
     "cosign sign",
     "cosign attest",
@@ -59,6 +62,14 @@ assert qualification in validate, "Background Run qualification is not a release
 assert "opencode-background-source" not in publish, "release publishes an unpromoted Background Run source image"
 
 assert qualification in ci_workflow, "CI is missing authoritative Background Run qualification"
+assert "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6" in workflow, \
+    "release validation is missing commit-pinned Bun setup"
+assert "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6" in ci_workflow, \
+    "CI is missing commit-pinned Bun setup"
+assert "bun-version: 1.3.14" in workflow and "bun-version: 1.3.14" in ci_workflow, \
+    "plugin qualification must pin Bun 1.3.14"
+assert "./test/docker-cli-smoke.sh fern/opencode-background:plugin-ci" in ci_workflow, \
+    "CI is missing packed plugin compatibility against OpenCode 1.18.16"
 qualification_job = re.search(
     r"^  background-qualification:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)",
     ci_workflow,
