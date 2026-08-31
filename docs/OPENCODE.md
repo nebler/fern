@@ -2,9 +2,10 @@
 
 Fern's persistent workspace supports one current OpenCode V2 server contract.
 There is no automatic protocol mode or cross-version state migration. A
-separate Background Run qualification image exists for official OpenCode
-`1.18.16`; it is not a second persistent workspace image and no disposable
-coordinator consumes it yet.
+separate Background Run qualifications exist for the published OpenCode
+`1.18.16` package and for source commit
+`39fb919a054190498f6d5b7985bde231f93ad7a6`; neither is a second persistent
+workspace image and no disposable coordinator consumes either profile yet.
 
 ## Product Boundary
 
@@ -53,6 +54,18 @@ It installs official `opencode-ai@1.18.16` and is qualified only by
 `integration/opencode-background-contract`. It does not replace
 `fern/opencode:dev`, alter `fern-<workspace>-v2-data`, or make Background Run
 execution available.
+
+The distinct source candidate is `fern/opencode-background-source:dev`, defined
+by `images/opencode-background-source/Dockerfile` and built with
+`make image-background-source`. Its profile is
+`source-39fb919a054190498f6d5b7985bde231f93ad7a6`: the build fetches and verifies
+that exact full commit, installs with Bun `1.3.14` and the frozen repository
+lockfile, builds one native Linux binary with the official UI embedded, and
+labels the final image with the source URL, revision, and commit-derived
+version. Although the checkout's package metadata says `1.18.16`, this profile
+does not claim equivalence to the published package. It is qualified separately
+by `integration/opencode-background-source-contract` and does not alter the
+persistent or plugin run profiles.
 
 A minimal workspace configuration is:
 
@@ -140,8 +153,9 @@ its attempt as `failed` with the honest `background_run_stopped_before_start`
 reason; and open/result return `not_ready`. The configured persistent image
 still pins OpenCode `0.0.0-next-17444`, so creation from the plugin's
 `opencode-1.18.16` profile fails with `profile_unavailable` rather than claiming
-false compatibility. The separate 1.18.16 image contract does not implement the
-missing disposable provider.
+false compatibility. Neither separate qualification implements the missing
+disposable provider, and the source candidate is not admitted by the plugin
+profile.
 Plugin bearers receive `404` on routes outside their allowlist and never fall
 through to the persistent OpenCode workspace.
 
@@ -308,9 +322,23 @@ Qualify the separate zero-cost Background Run image contract with:
 
 ```bash
 python3 integration/opencode-background-contract/contract_harness.py
+python3 integration/opencode-background-source-contract/contract_harness.py
 ```
 
 That harness reports its captured local image ID and all blocked properties. In
 particular, official 1.18.16 ignores caller-selected Session IDs, has no durable
 SSE replay, and does not provide conflict-safe prompt retries; these limitations
 must not be confused with the stronger persistent `0.0.0-next-17444` contract.
+
+The source-commit harness captures the exact local image ID and passes that ID,
+not its mutable tag, to every container. For commit
+`39fb919a054190498f6d5b7985bde231f93ad7a6`, it proves caller-selected Session
+and prompt IDs, exact agent/model/location reconciliation, finite durable
+prompt-admission history, side-effect-free exact retry before and after
+container replacement, and HTTP `409` for conflicting reuse. Active execution
+and pending questions/permissions remain process-local. A hanging provider turn
+has durable admission and promotion but no durable step-start or settlement
+event before replacement, so its outcome is uncertain rather than complete.
+Deep-link checks cover embedded-UI HTTP fallback for official directory and
+server-scoped routes; browser navigation, private TLS, external origins, and WSS
+remain unqualified.

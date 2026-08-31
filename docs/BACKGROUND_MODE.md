@@ -28,21 +28,32 @@ correctness is necessary but does not establish product value.
 
 ### Current Qualification Boundary
 
-`images/opencode-background` now provides a separate official
-`opencode-ai@1.18.16` image, and
-`integration/opencode-background-contract` qualifies its public HTTP behavior
-with real Docker and a zero-cost local provider. This does not implement the
+`images/opencode-background` provides the separate published
+`opencode-ai@1.18.16` negative qualification. A distinct source candidate in
+`images/opencode-background-source` builds exact commit
+`39fb919a054190498f6d5b7985bde231f93ad7a6` as profile
+`source-39fb919a054190498f6d5b7985bde231f93ad7a6`, and
+`integration/opencode-background-source-contract` qualifies its public HTTP
+behavior with real Docker and a zero-cost local provider. Package metadata at
+that commit also says `1.18.16`, but the source profile does not claim
+equivalence to the published package. Neither qualification implements the
 disposable Docker provider, coordinator, routing, export, or cleanup design
-below. Persistent workspaces remain on the independent
-`fern/opencode:dev`/`0.0.0-next-17444` contract.
+below. Persistent workspaces and the plugin profile remain unchanged.
 
-The 1.18.16 qualification proves durable generated sessions and message history
-across container replacement, but it also records hard limitations: session IDs
-cannot be caller-selected, duplicate message IDs are not conflict-safe, SSE has
-no durable replay, active status is process-local and not completion authority,
-and unanswered questions are process-epoch state. A future coordinator must
-design around these observed properties rather than assume the stronger legacy
-contract applies.
+The published 1.18.16 qualification proves durable generated sessions and
+message history across replacement, but records hard limitations: Session IDs
+cannot be caller-selected and duplicate message IDs are not conflict-safe. The
+source candidate passes the required identity and retry gates: caller-selected
+Session and prompt IDs are preserved; agent, model, and location reconcile
+exactly; finite durable history records exact prompt admission; exact retry is
+side-effect free before and after replacement; and conflicting reuse returns
+`409`. Active execution and unanswered questions/permissions remain
+process-epoch state. A hanging provider turn has durable admission and promotion
+but no durable step-start or settlement event before replacement, so execution
+loss remains uncertain and inactivity is not completion authority. Official
+deep-link routes serve the embedded SPA over HTTP, while browser, private TLS,
+external-origin, SSE/WSS, coordinator, and result-boundary acceptance remain
+open.
 
 ### Required Properties
 
