@@ -253,6 +253,9 @@ func (c *Coordinator) process(ctx, parent context.Context, work taskstore.Backgr
 		if run.BackgroundSealRequestID != "" && run.ResultAuthorityPhase != "cleanup" {
 			return c.exportRetained(ctx, parent, work)
 		}
+		if run.ObservedContainerID == "" && run.ObservedContainerStartedAt == "" && run.RuntimeEpoch == 0 {
+			return c.record(parent, work, `{"effect":"route_remove","status":"never_bound"}`, c.store.RecordBackgroundRunRouteRemoved)
+		}
 		identity, err := c.routeIdentity(run)
 		if err != nil {
 			return c.cleanupFailure(parent, work, err)
@@ -263,12 +266,14 @@ func (c *Coordinator) process(ctx, parent context.Context, work taskstore.Backgr
 		}
 		return c.record(parent, work, removed, c.store.RecordBackgroundRunRouteRemoved)
 	case taskstore.BackgroundRunEffectRouteRemoved:
-		identity, identityErr := c.routeIdentity(run)
-		if identityErr != nil {
-			return c.cleanupFailure(parent, work, identityErr)
-		}
-		if err := c.config.Route.ConfirmRemoval(identity); err != nil {
-			return c.cleanupFailure(parent, work, err)
+		if run.ObservedContainerID != "" || run.ObservedContainerStartedAt != "" || run.RuntimeEpoch != 0 {
+			identity, identityErr := c.routeIdentity(run)
+			if identityErr != nil {
+				return c.cleanupFailure(parent, work, identityErr)
+			}
+			if err := c.config.Route.ConfirmRemoval(identity); err != nil {
+				return c.cleanupFailure(parent, work, err)
+			}
 		}
 		_, authority, err := c.provider.ProveWriterInactive(ctx, run)
 		if err != nil {
@@ -414,7 +419,11 @@ func (c *Coordinator) exportRetained(ctx, parent context.Context, work taskstore
 	fail := func(cause error) error {
 		claim := claimExport()
 		_, markErr := c.store.MarkBackgroundRunExportRecoveryRequired(context.WithoutCancel(parent), claim, "retained artifact export retry required")
-		return errors.Join(cause, markErr)
+		var releaseErr error
+		if markErr == nil {
+			_, releaseErr = c.store.ReleaseBackgroundRunClaimAfterExportFailure(context.WithoutCancel(parent), claim)
+		}
+		return errors.Join(cause, markErr, releaseErr)
 	}
 
 	locator, locatorErr := taskartifact.ParseLocator(export.CASLocator)

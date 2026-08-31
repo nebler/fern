@@ -185,17 +185,20 @@ func (coordinator *Coordinator) RunOnce(ctx context.Context) (resultErr error) {
 	}
 	work = current
 	request := publicationRequest(work, coordinator.config.PullRequestBody)
-	if coordinator.source != nil {
-		path, closeSource, sourceErr := coordinator.source.Acquire(ctx, work.Result)
-		if sourceErr != nil || closeSource == nil {
-			return errors.Join(taskstore.ErrCorruptStore, sourceErr)
-		}
-		defer func() { resultErr = errors.Join(resultErr, closeSource()) }()
-		request.RepositoryPath = path
-	}
 
 	switch work.Publication.EffectPhase {
 	case taskstore.PublicationPhaseNone:
+		if coordinator.source != nil {
+			path, closeSource, sourceErr := coordinator.source.Acquire(ctx, work.Result)
+			if sourceErr != nil {
+				return sourceErr
+			}
+			if closeSource == nil {
+				return taskstore.ErrCorruptStore
+			}
+			defer func() { resultErr = errors.Join(resultErr, closeSource()) }()
+			request.RepositoryPath = path
+		}
 		advanced, err := coordinator.advance(ctx, work, taskstore.PublicationPhaseNone, taskstore.PublicationPhasePushStarted, "push_authorized", "unobserved", "unobserved", "")
 		if err != nil {
 			return err

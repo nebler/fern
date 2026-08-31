@@ -34,7 +34,7 @@ const observationBufferSize = 64
 // rollback goroutines get this long to hand back before resources are leaked.
 const managerCloseTimeout = 10 * time.Second
 
-func runUp(args []string, log *slog.Logger) error {
+func runUp(args []string, log *slog.Logger) (resultErr error) {
 	opts, err := parseUpFlags(args)
 	if err != nil {
 		return err
@@ -78,10 +78,10 @@ func runUp(args []string, log *slog.Logger) error {
 	// guarded Docker close, lease, listeners, signal restoration.
 	defer rt.lifecycle.release()
 	if rt.tasks != nil {
-		defer rt.tasks.Close()
+		defer func() { resultErr = errors.Join(resultErr, rt.tasks.Close()) }()
 	}
 	if rt.backgroundRoute != nil {
-		defer rt.backgroundRoute.Close()
+		defer func() { resultErr = errors.Join(resultErr, rt.backgroundRoute.Close()) }()
 	}
 
 	startSupervisor(group, rt, serviceCtx)

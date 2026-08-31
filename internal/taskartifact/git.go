@@ -22,6 +22,7 @@ import (
 type sourceIdentity struct {
 	rootDevice, rootInode uint64
 	gitDevice, gitInode   uint64
+	head                  task.GitOID
 	indexDigest           Digest
 	indexSize             int64
 }
@@ -88,13 +89,19 @@ func (e *Engine) admitSource(ctx context.Context, repository string, base task.G
 		{[]string{"rev-parse", "--is-inside-work-tree"}, "true\n"},
 		{[]string{"rev-parse", "--is-shallow-repository"}, "false\n"},
 		{[]string{"rev-parse", "--show-object-format"}, "sha1\n"},
-		{[]string{"rev-parse", "--verify", "HEAD^{commit}"}, string(base) + "\n"},
 	}
 	for _, check := range checks {
 		output, err := e.gitOutput(ctx, repository, nil, nil, check.args...)
 		if err != nil || string(output) != check.want {
 			return identity, fmt.Errorf("%w: repository identity", ErrUnsafeSource)
 		}
+	}
+	identity.head, err = e.oid(ctx, repository, "HEAD^{commit}", nil)
+	if err != nil {
+		return identity, fmt.Errorf("%w: HEAD identity", ErrUnsafeSource)
+	}
+	if _, err := e.gitOutput(ctx, repository, nil, nil, "merge-base", "--is-ancestor", string(base), string(identity.head)); err != nil {
+		return identity, fmt.Errorf("%w: admitted base is not an ancestor of HEAD", ErrUnsafeSource)
 	}
 	replacements, err := e.gitOutput(ctx, repository, nil, nil, "for-each-ref", "--format=%(refname)", "refs/replace")
 	if err != nil || len(replacements) != 0 {
@@ -104,6 +111,9 @@ func (e *Engine) admitSource(ctx context.Context, repository string, base task.G
 		return identity, err
 	}
 	if err := e.proveTree(ctx, repository, base); err != nil {
+		return identity, err
+	}
+	if err := e.proveTree(ctx, repository, identity.head); err != nil {
 		return identity, err
 	}
 	identity.indexDigest, identity.indexSize, err = hashRegularFile(filepath.Join(gitDirectory, "index"), int64(e.outputBytes))
@@ -193,7 +203,7 @@ func (e *Engine) checkSourceIdentity(ctx context.Context, repository string, bas
 		return fmt.Errorf("%w: source identity changed", ErrUnsafeSource)
 	}
 	head, err := e.gitOutput(ctx, repository, nil, nil, "rev-parse", "--verify", "HEAD^{commit}")
-	if err != nil || string(head) != string(base)+"\n" {
+	if err != nil || string(head) != string(expected.head)+"\n" {
 		return fmt.Errorf("%w: HEAD changed", ErrUnsafeSource)
 	}
 	if err := e.proveArtifactRefsEmpty(ctx, repository); err != nil {
@@ -334,34 +344,37 @@ func (e *Engine) oid(ctx context.Context, repository, revision string, environme
 }
 
 func (e *Engine) createBundle(ctx context.Context, repository, destination string, base, result task.GitOID) (Digest, int64, error) {
-	baseRef, resultRef := bundleBaseRef, bundleResultRef
+	// Keep bundle refs in the engine-owned staging tree. Mutating source refs
+	// would make a host crash observable in, and potentially block, the retained
+	// run clone on recovery.
+	bundleRepository := filepath.Join(filepath.Dir(destination), "bundle-repository.git")
+	if err := os.Mkdir(bundleRepository, 0o700); err != nil {
+		return Digest{}, 0, err
+	}
+	bundleDevice, bundleInode, err := directoryIdentity(bundleRepository)
+	if err != nil {
+		return Digest{}, 0, err
+	}
+	if _, err := e.gitOutput(ctx, repository, nil, nil, "init", "--bare", "--object-format=sha1", bundleRepository); err != nil {
+		return Digest{}, 0, err
+	}
+	environment := []string{
+		"GIT_DIR=" + bundleRepository,
+		"GIT_OBJECT_DIRECTORY=" + filepath.Join(repository, ".git", "objects"),
+	}
 	zero := strings.Repeat("0", 40)
-	createdBase := false
-	defer func() {
-		if createdBase {
-			_, _ = e.gitOutput(context.Background(), repository, nil, nil, "update-ref", "-d", baseRef, string(base))
-		}
-	}()
-	if _, err := e.gitOutput(ctx, repository, nil, nil, "update-ref", baseRef, string(base), zero); err != nil {
+	if _, err := e.gitOutput(ctx, repository, environment, nil, "update-ref", bundleBaseRef, string(base), zero); err != nil {
 		return Digest{}, 0, err
 	}
-	createdBase = true
-	createdResult := false
-	defer func() {
-		if createdResult {
-			_, _ = e.gitOutput(context.Background(), repository, nil, nil, "update-ref", "-d", resultRef, string(result))
-		}
-	}()
-	if _, err := e.gitOutput(ctx, repository, nil, nil, "update-ref", resultRef, string(result), zero); err != nil {
+	if _, err := e.gitOutput(ctx, repository, environment, nil, "update-ref", bundleResultRef, string(result), zero); err != nil {
 		return Digest{}, 0, err
 	}
-	createdResult = true
 	file, err := openPrivateExclusive(destination)
 	if err != nil {
 		return Digest{}, 0, err
 	}
 	writer := &boundedHashWriter{file: file, hash: sha256.New(), limit: e.bundleBytes}
-	runErr := e.gitTo(ctx, repository, nil, nil, writer, "bundle", "create", "-", baseRef, resultRef)
+	runErr := e.gitTo(ctx, repository, environment, nil, writer, "bundle", "create", "-", bundleBaseRef, bundleResultRef)
 	syncErr := file.Sync()
 	closeErr := file.Close()
 	if runErr != nil || syncErr != nil || closeErr != nil {
@@ -370,14 +383,9 @@ func (e *Engine) createBundle(ctx context.Context, repository, destination strin
 	}
 	var digest Digest
 	copy(digest.value[:], writer.hash.Sum(nil))
-	if _, err := e.gitOutput(ctx, repository, nil, nil, "update-ref", "-d", resultRef, string(result)); err != nil {
-		return Digest{}, 0, fmt.Errorf("%w: clean result ref", ErrUnsafeSource)
+	if err := removeExactDirectory(bundleRepository, bundleDevice, bundleInode); err != nil {
+		return Digest{}, 0, err
 	}
-	createdResult = false
-	if _, err := e.gitOutput(ctx, repository, nil, nil, "update-ref", "-d", baseRef, string(base)); err != nil {
-		return Digest{}, 0, fmt.Errorf("%w: clean base ref", ErrUnsafeSource)
-	}
-	createdBase = false
 	return digest, writer.size, nil
 }
 

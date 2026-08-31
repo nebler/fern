@@ -1,6 +1,6 @@
 # OpenCode Background Mode Goal Design
 
-**Status:** serial execution and private run routing implemented; result artifacts remain proposed
+**Status:** serial execution, private run routing, and retained Git results implemented; capacity two remains proposed
 
 **Updated:** 2026-08-31
 **Implementation checklist:**
@@ -61,8 +61,14 @@ prompt fence, periodically observes clone usage and positive OpenCode activity,
 and performs stop/cleanup finalization. A crash after the prompt fence but before
 HTTP dispatch cannot distinguish absence from an unobserved request: restart
 retains `uncertain`, performs read-only reconciliation, and sends no second POST.
-Private routing is implemented; retained Git export remains unimplemented. Persistent workspaces,
-`internal/opencodeapi`, and the plugin remain unchanged.
+Private routing and explicit retained-result sealing are implemented. The
+coordinator proves the exact committed writer epoch inactive, snapshots through
+an inode-bound clone lease, installs a verified bundle in private CAS, proves a
+fresh clean materialization, atomically commits `result_ready`, and only then
+removes the route, container, volume, and clone. Verification and publication
+materialize fresh CAS checkouts rather than using the deleted run clone. The
+compiled plugin exposes confirmed seal and immutable result actions. Capacity
+remains one, and persistent workspaces remain a separate lane.
 
 Clone disk policy is admission plus repeated observed-byte monitoring, not a
 kernel quota. The bind-mounted clone and Docker `local` state volume have no

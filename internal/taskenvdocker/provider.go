@@ -122,6 +122,7 @@ type dockerAPI interface {
 	ImageInspect(context.Context, string, ...client.ImageInspectOption) (image.InspectResponse, error)
 	VolumeCreate(context.Context, volume.CreateOptions) (volume.Volume, error)
 	VolumeInspect(context.Context, string) (volume.Volume, error)
+	VolumeList(context.Context, volume.ListOptions) (volume.ListResponse, error)
 	VolumeRemove(context.Context, string, bool) error
 	ContainerCreate(context.Context, *container.Config, *container.HostConfig, *network.NetworkingConfig, *ocispec.Platform, string) (container.CreateResponse, error)
 	ContainerInspect(context.Context, string) (container.InspectResponse, error)
@@ -317,12 +318,16 @@ func (p *Provider) Close() error {
 	return p.lifecycle.closeErr
 }
 
-// CommittedRuntime reconstructs the provider's exact process identity from the
-// durable schema-8 observation without exposing or persisting credentials.
+// CommittedRuntime reconstructs the exact durable process identity without
+// requiring the current execution configuration to match the run being cleaned.
 func (p *Provider) CommittedRuntime(run taskstore.BackgroundRun) (RuntimeIdentity, error) {
-	if _, err := p.validateRun(run); err != nil {
+	if _, err := p.cleanupDigest(run); err != nil {
 		return RuntimeIdentity{}, err
 	}
+	return committedRuntimeFromRun(run)
+}
+
+func committedRuntimeFromRun(run taskstore.BackgroundRun) (RuntimeIdentity, error) {
 	started, err := time.Parse(time.RFC3339Nano, run.ObservedContainerStartedAt)
 	if err != nil || started.UnixNano() != run.RuntimeEpoch {
 		return RuntimeIdentity{}, errors.New("durable background runtime epoch is incomplete")

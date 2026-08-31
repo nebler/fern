@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,6 +47,25 @@ type apiFixture struct {
 type fixtureRoute struct {
 	active bool
 	origin string
+}
+
+type resultProjectionStore struct {
+	*taskstore.Store
+	run        taskstore.BackgroundRun
+	projection taskstore.BackgroundRunResultProjection
+	export     taskstore.BackgroundRunExport
+}
+
+func (store *resultProjectionStore) GetBackgroundRun(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRun, error) {
+	return store.run, nil
+}
+
+func (store *resultProjectionStore) GetBackgroundRunResult(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error) {
+	return store.projection, nil
+}
+
+func (store *resultProjectionStore) GetBackgroundRunExport(context.Context, task.ArtifactExportID) (taskstore.BackgroundRunExport, error) {
+	return store.export, nil
 }
 
 func (route *fixtureRoute) ActiveOrigin(taskstore.BackgroundRun) (string, bool) {
@@ -301,6 +321,63 @@ func TestRunAPISealIsStrictOwnedAndExactlyReplayable(t *testing.T) {
 	hidden := other.request(http.MethodPost, path, `{}`, "other-seal-key")
 	if hidden.Code != http.StatusNotFound {
 		t.Fatalf("foreign seal = %d", hidden.Code)
+	}
+}
+
+func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) {
+	fixture := newAPIFixture(t, PluginOpenCodeProfile)
+	ids := task.NewSecureGenerator()
+	runID, _ := ids.TaskID()
+	attemptID, _ := ids.AttemptID()
+	resultID, _ := ids.ResultID()
+	artifactID, _ := ids.RetainedArtifactID()
+	materializationID, _ := ids.MaterializationID()
+	exportID, _ := ids.ArtifactExportID()
+	changes := sha256.Sum256([]byte("changes"))
+	manifest := sha256.Sum256([]byte("artifact manifest"))
+	bundle := sha256.Sum256([]byte("bundle"))
+	run := taskstore.BackgroundRun{TaskID: runID, AttemptID: attemptID, WorkspaceID: testWorkspace,
+		RepositoryRemote: "https://github.com/owner/repository", State: taskstore.BackgroundRunResultReady,
+		EffectPhase: taskstore.BackgroundRunEffectCleanupComplete, RetainedResultID: resultID,
+		RetainedArtifactID: artifactID, MaterializationID: materializationID, ArtifactExportID: exportID}
+	projection := taskstore.BackgroundRunResultProjection{Run: run,
+		Result: taskstore.Result{ID: resultID, Outcome: task.ResultChanged, BaseSHA: testBase,
+			ResultCommit: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), TreeOID: task.GitOID("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+			ManifestEntries: 2, ManifestSHA256: changes},
+		Artifact:        taskstore.RetainedArtifact{ID: artifactID, ManifestSHA256: manifest, BundleSHA256: bundle, BundleBytes: 1234},
+		Materialization: taskstore.ArtifactMaterialization{ID: materializationID, State: taskstore.ArtifactMaterializationReady}}
+	store := &resultProjectionStore{Store: fixture.store, run: run, projection: projection}
+	fixture.handler.config.Store = store
+	response := fixture.request(http.MethodGet, PathPrefix+"/"+string(runID)+"/result", "", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("result=%d %s", response.Code, response.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	result := body["result"].(map[string]any)
+	artifact := body["artifact"].(map[string]any)
+	if result["manifest_sha256"] != fmt.Sprintf("%x", changes) || artifact["manifest_sha256"] != fmt.Sprintf("%x", manifest) ||
+		artifact["sha256"] != fmt.Sprintf("%x", manifest) || artifact["bundle_sha256"] != fmt.Sprintf("%x", bundle) ||
+		result["manifest_sha256"] == artifact["manifest_sha256"] {
+		t.Fatalf("digest authorities were conflated: %s", response.Body.String())
+	}
+	for _, forbidden := range []string{"locator", "cas_locator", "path", "storage_key", "container", "credential", "url"} {
+		if strings.Contains(strings.ToLower(response.Body.String()), forbidden) {
+			t.Fatalf("result exposed forbidden field %q: %s", forbidden, response.Body.String())
+		}
+	}
+	if cleanup := body["cleanup"].(map[string]any); cleanup["complete"] != true {
+		t.Fatalf("cleanup projection=%v", cleanup)
+	}
+
+	store.run.State = taskstore.BackgroundRunCleanupRequired
+	store.run.EffectPhase = taskstore.BackgroundRunEffectExporting
+	store.export = taskstore.BackgroundRunExport{State: taskstore.BackgroundRunExportRecoveryRequired}
+	recovery := fixture.request(http.MethodGet, PathPrefix+"/"+string(runID)+"/result", "", "")
+	if recovery.Code != http.StatusServiceUnavailable || !strings.Contains(recovery.Body.String(), "recovery_required") {
+		t.Fatalf("recovery result=%d %s", recovery.Code, recovery.Body.String())
 	}
 }
 

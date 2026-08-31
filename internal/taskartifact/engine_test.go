@@ -177,6 +177,59 @@ func TestNoChangeSnapshotReturnsBase(t *testing.T) {
 	}
 }
 
+func TestSnapshotRetainsCommittedAndDirtyChangesFromAdmittedBase(t *testing.T) {
+	engine, repository, base := testEngineRepository(t)
+	writeFile(t, filepath.Join(repository, "committed-result"), []byte("committed\n"), 0o644)
+	gitRun(t, repository, "add", "committed-result")
+	gitRun(t, repository, "commit", "-m", "agent commit")
+	head := strings.TrimSpace(gitCommand(t, repository, "rev-parse", "HEAD"))
+	if head == string(base) {
+		t.Fatal("agent commit did not advance HEAD")
+	}
+	writeFile(t, filepath.Join(repository, "dirty-result"), []byte("dirty\n"), 0o644)
+
+	snapshot, staged, err := engine.Snapshot(context.Background(), testSnapshotSpec(t, mustSource(t, repository), base, 43))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Result == base || len(snapshot.Changes) != 2 || strings.TrimSpace(gitCommand(t, repository, "rev-parse", "HEAD")) != head {
+		t.Fatalf("committed plus dirty snapshot = %+v source head=%s", snapshot, head)
+	}
+	locator, err := engine.Store(context.Background(), staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout, err := engine.Materialize(context.Background(), locator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer checkout.Close()
+	for name, want := range map[string]string{"committed-result": "committed\n", "dirty-result": "dirty\n"} {
+		got, readErr := os.ReadFile(filepath.Join(checkout.Path(), name))
+		if readErr != nil || string(got) != want {
+			t.Fatalf("materialized %s=%q error=%v", name, got, readErr)
+		}
+	}
+	if parent := strings.TrimSpace(gitCommand(t, checkout.Path(), "rev-parse", "HEAD^")); parent != string(base) {
+		t.Fatalf("retained result parent=%s want admitted base=%s", parent, base)
+	}
+	if refs := gitCommand(t, repository, "for-each-ref", "--format=%(refname)", "refs/fern-artifact"); refs != "" {
+		t.Fatalf("snapshot mutated source refs: %q", refs)
+	}
+}
+
+func TestSnapshotRejectsHeadOutsideAdmittedBase(t *testing.T) {
+	engine, repository, base := testEngineRepository(t)
+	gitRun(t, repository, "checkout", "--orphan", "unrelated")
+	gitRun(t, repository, "rm", "-rf", ".")
+	writeFile(t, filepath.Join(repository, "unrelated"), []byte("unrelated\n"), 0o644)
+	gitRun(t, repository, "add", "unrelated")
+	gitRun(t, repository, "commit", "-m", "unrelated root")
+	if _, _, err := engine.Snapshot(context.Background(), testSnapshotSpec(t, mustSource(t, repository), base, 44)); !errors.Is(err, ErrUnsafeSource) {
+		t.Fatalf("unrelated HEAD snapshot error=%v", err)
+	}
+}
+
 func TestManifestBindsExecutionIdentityAndCanonicalChanges(t *testing.T) {
 	engine, repository, base := testEngineRepository(t)
 	spec := testSnapshotSpec(t, mustSource(t, repository), base, 44)
@@ -662,10 +715,46 @@ func TestConfigurationAndCheckoutIdentity(t *testing.T) {
 	if err := checkout.Close(); err == nil {
 		t.Fatal("checkout marker attack accepted")
 	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatal("attacked checkout was removed")
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("attacked checkout was not safely removed: %v", err)
 	}
-	_ = os.RemoveAll(path)
+}
+
+func TestNewRemovesOnlyInterruptedEngineDirectories(t *testing.T) {
+	engine, _, _ := testEngineRepository(t)
+	for _, path := range []string{
+		filepath.Join(engine.casRoot, ".stage-interrupted"),
+		filepath.Join(engine.casRoot, ".remove-interrupted"),
+		filepath.Join(engine.workRoot, ".verify-interrupted"),
+		filepath.Join(engine.workRoot, "checkout-interrupted"),
+	} {
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(path, "residue"), []byte("x"), 0o400); err != nil {
+			t.Fatal(err)
+		}
+	}
+	committed := filepath.Join(engine.casRoot, strings.Repeat("a", 64))
+	if err := os.Mkdir(committed, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(Config{GitExecutable: engine.gitExecutable, CASRoot: engine.casRoot, WorkRoot: engine.workRoot}); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(engine.casRoot, ".stage-interrupted"),
+		filepath.Join(engine.casRoot, ".remove-interrupted"),
+		filepath.Join(engine.workRoot, ".verify-interrupted"),
+		filepath.Join(engine.workRoot, "checkout-interrupted"),
+	} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("interrupted directory remains at %s: %v", path, err)
+		}
+	}
+	if _, err := os.Lstat(committed); err != nil {
+		t.Fatalf("committed CAS directory was removed: %v", err)
+	}
 }
 
 func testEngineRepository(t *testing.T) (*Engine, string, task.GitOID) {

@@ -854,6 +854,42 @@ func TestCleanupAuthorityAlgebraAndRenamedNeverCreatedFence(t *testing.T) {
 	})
 }
 
+func TestCleanupRejectsRenamedExactLabeledVolume(t *testing.T) {
+	provider, docker, run := testProvider(t)
+	if _, err := provider.EnsureClone(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.EnsureVolume(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	item := docker.volumes[run.VolumeIdentity]
+	delete(docker.volumes, run.VolumeIdentity)
+	item.Name = "renamed-exact-labeled-volume"
+	docker.volumes[item.Name] = item
+	if _, err := provider.RemoveVolume(context.Background(), run, NeverCreatedAuthority()); !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("renamed exact-labeled volume was accepted: %v", err)
+	}
+	if _, err := provider.RemoveClone(context.Background(), run, NeverCreatedAuthority()); !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("clone cleanup ignored renamed exact-labeled volume: %v", err)
+	}
+}
+
+func TestFreshDockerReconciliationPreservesParentDeadline(t *testing.T) {
+	provider := &Provider{config: Config{DockerTimeout: time.Minute}}
+	deadline := time.Now().Add(5 * time.Second)
+	parent, cancelParent := context.WithDeadline(context.Background(), deadline)
+	cancelParent()
+	reconcile, cancel := provider.freshDockerContext(parent)
+	defer cancel()
+	got, ok := reconcile.Deadline()
+	if !ok || !got.Equal(deadline) {
+		t.Fatalf("reconciliation deadline=%v present=%v want=%v", got, ok, deadline)
+	}
+	if err := reconcile.Err(); err != nil {
+		t.Fatalf("response-loss reconciliation inherited cancellation before the claim deadline: %v", err)
+	}
+}
+
 func TestAcquireExportSourceRejectsActiveAndReplacementWriters(t *testing.T) {
 	t.Run("created fence became active", func(t *testing.T) {
 		provider, _, run := preparedProvider(t)
@@ -876,6 +912,9 @@ func TestAcquireExportSourceRejectsActiveAndReplacementWriters(t *testing.T) {
 	t.Run("replacement process epoch", func(t *testing.T) {
 		provider, docker, run, fence := stoppedExportFixture(t)
 		docker.info.State.StartedAt = "2026-08-31T12:00:01.123456789Z"
+		if _, _, err := provider.ProveWriterInactive(context.Background(), run); !errors.Is(err, ErrIdentityMismatch) {
+			t.Fatalf("replacement runtime writer fence error=%v", err)
+		}
 		if source, err := provider.AcquireExportSource(context.Background(), run, fence); source != nil || !errors.Is(err, ErrIdentityMismatch) {
 			t.Fatalf("replacement runtime export source=%v error=%v", source, err)
 		}
@@ -929,6 +968,25 @@ func TestAcquireExportSourceExactStoppedRuntimeAndFenceValidation(t *testing.T) 
 	invalidFence.NeverCreated = true
 	if source, err := provider.AcquireExportSource(context.Background(), run, invalidFence); source != nil || err == nil {
 		t.Fatalf("mixed fence export source=%v error=%v", source, err)
+	}
+}
+
+func TestWriterFenceReconcilesExactCommittedRuntimeAbsence(t *testing.T) {
+	provider, _, run, fence := stoppedExportFixture(t)
+	if _, err := provider.RemoveContainer(context.Background(), run, fence); err != nil {
+		t.Fatal(err)
+	}
+	observation, reconciled, err := provider.ProveWriterInactive(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reconciled != fence || !strings.Contains(observation.Evidence, "committed_runtime_absent") {
+		t.Fatalf("reconciled fence=%+v evidence=%s want=%+v", reconciled, observation.Evidence, fence)
+	}
+	if source, err := provider.AcquireExportSource(context.Background(), run, reconciled); err != nil || source == nil {
+		t.Fatalf("export after exact runtime absence source=%v error=%v", source, err)
+	} else if err := source.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -1293,6 +1351,9 @@ func TestCleanupSurvivesImageAndEnvironmentConfigurationRotation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	run.ObservedContainerID = started.ContainerID
+	run.ObservedContainerStartedAt = started.ContainerStarted
+	run.RuntimeEpoch = started.RuntimeEpoch
 
 	recovery := *provider
 	recovery.config = cloneConfig(provider.config)
@@ -1475,6 +1536,20 @@ func (f *fakeDocker) VolumeInspect(ctx context.Context, name string) (volume.Vol
 	return item, nil
 }
 
+func (f *fakeDocker) VolumeList(ctx context.Context, options volume.ListOptions) (volume.ListResponse, error) {
+	if err := f.observeReadContext(ctx); err != nil {
+		return volume.ListResponse{}, err
+	}
+	result := volume.ListResponse{}
+	for _, item := range f.volumes {
+		if options.Filters.MatchKVList("label", item.Labels) {
+			copy := item
+			result.Volumes = append(result.Volumes, &copy)
+		}
+	}
+	return result, nil
+}
+
 func (f *fakeDocker) VolumeCreate(ctx context.Context, o volume.CreateOptions) (volume.Volume, error) {
 	if err := ctx.Err(); err != nil {
 		return volume.Volume{}, err
@@ -1534,9 +1609,13 @@ func stoppedExportFixture(t *testing.T) (*Provider, *fakeDocker, taskstore.Backg
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := provider.StartContainer(context.Background(), run, created.ContainerID); err != nil {
+	started, err := provider.StartContainer(context.Background(), run, created.ContainerID)
+	if err != nil {
 		t.Fatal(err)
 	}
+	run.ObservedContainerID = started.ContainerID
+	run.ObservedContainerStartedAt = started.ContainerStarted
+	run.RuntimeEpoch = started.RuntimeEpoch
 	_, fence, err := provider.ProveWriterInactive(context.Background(), run)
 	if err != nil {
 		t.Fatal(err)

@@ -106,13 +106,39 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 
 	export, err := store.ClaimBackgroundRunExport(context.Background(), ClaimBackgroundRunExportParams{
 		ExportID: seal.ExportID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRevision: 1, ExpectedPhase: BackgroundRunExportPhasePrepared, ClaimOwner: "export-worker",
+		ExpectedRevision: 1, ExpectedPhase: BackgroundRunExportPhasePrepared, ClaimOwner: "export-dispatcher",
 		Now: writerAt.Add(time.Second), LeaseDuration: 2 * time.Minute,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	exportNow := writerAt.Add(2 * time.Second)
+	failureAt := writerAt.Add(2 * time.Second)
+	failureClaim := BackgroundRunExportClaim{ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID,
+		Generation: export.Generation, ExpectedRevision: export.Revision, ExpectedPhase: export.Phase,
+		ClaimOwner: export.ClaimOwner, ClaimGeneration: export.ClaimGeneration, Now: failureAt}
+	recovery, err := store.MarkBackgroundRunExportRecoveryRequired(context.Background(), failureClaim, "injected export interruption")
+	if err != nil {
+		t.Fatal(err)
+	}
+	released, err := store.ReleaseBackgroundRunClaimAfterExportFailure(context.Background(), failureClaim)
+	if err != nil || released.ClaimOwner != "" || released.ResultAuthorityPhase != "exporting" {
+		t.Fatalf("release failed export run claim = %+v, error=%v", released, err)
+	}
+	reclaimed, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{WorkspaceID: run.WorkspaceID,
+		ClaimOwner: "export-dispatcher", Now: failureAt.Add(time.Second), LeaseDuration: time.Minute,
+		Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity})
+	if err != nil || reclaimed.EffectPhase != BackgroundRunEffectExporting {
+		t.Fatalf("reclaim failed export run = %+v, error=%v", reclaimed, err)
+	}
+	export, err = store.ClaimBackgroundRunExport(context.Background(), ClaimBackgroundRunExportParams{
+		ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID, Generation: export.Generation,
+		ExpectedRevision: recovery.Revision, ExpectedPhase: recovery.Phase, ClaimOwner: "export-dispatcher",
+		Now: failureAt.Add(2 * time.Second), LeaseDuration: 2 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	exportNow := failureAt.Add(3 * time.Second)
 	exportClaim := func() BackgroundRunExportClaim {
 		return BackgroundRunExportClaim{ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID,
 			Generation: export.Generation, ExpectedRevision: export.Revision, ExpectedPhase: export.Phase,

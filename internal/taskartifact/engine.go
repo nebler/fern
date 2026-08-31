@@ -75,9 +75,47 @@ func New(config Config) (*Engine, error) {
 	if config.CASRoot == config.WorkRoot || pathContains(config.CASRoot, config.WorkRoot) || pathContains(config.WorkRoot, config.CASRoot) {
 		return nil, fmt.Errorf("%w: roots must be disjoint", ErrInvalidConfig)
 	}
+	if err := removeInterruptedDirectories(config.CASRoot, ".stage-", ".remove-"); err != nil {
+		return nil, fmt.Errorf("%w: reconcile CAS temporary state", ErrInvalidConfig)
+	}
+	if err := removeInterruptedDirectories(config.WorkRoot, ".verify-", "checkout-", ".remove-"); err != nil {
+		return nil, fmt.Errorf("%w: reconcile work temporary state", ErrInvalidConfig)
+	}
 	return &Engine{gitExecutable: config.GitExecutable, gitFile: gitInfo, casRoot: config.CASRoot, workRoot: config.WorkRoot,
 		timeout: config.CommandTimeout, outputBytes: config.OutputBytes, bundleBytes: config.BundleBytes,
 		manifestFiles: config.ManifestFiles, blobBytes: config.BlobBytes, checkouts: make(map[*Checkout]struct{})}, nil
+}
+
+func removeInterruptedDirectories(root string, prefixes ...string) error {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		matched := false
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(entry.Name(), prefix) {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		info, err := os.Lstat(path)
+		if err != nil || !safeDirectoryInfo(info) {
+			return ErrStorage
+		}
+		device, inode, err := fileIdentity(info)
+		if err != nil {
+			return err
+		}
+		if err := removeExactDirectory(path, device, inode); err != nil {
+			return err
+		}
+	}
+	return syncDirectory(root)
 }
 
 // Close removes all still-live engine checkouts after coordinators have

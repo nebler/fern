@@ -262,6 +262,33 @@ func TestCoordinatorUsesAndClosesSelectedPublicationSource(t *testing.T) {
 	}
 }
 
+func TestCoordinatorDoesNotMaterializeForRemoteOnlyRecovery(t *testing.T) {
+	tests := []struct {
+		name  string
+		phase taskstore.PublicationPhase
+		set   func(*fakePublisher)
+	}{
+		{"push reconcile", taskstore.PublicationPhasePushStarted, func(p *fakePublisher) { p.branch = exactBranch() }},
+		{"pull request reconcile", taskstore.PublicationPhasePRCreateStarted, func(p *fakePublisher) {
+			p.pull = taskpublication.PullRequestProof{Found: true, Observation: exactPull()}
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, publisher, coordinator := testCoordinator(t, test.phase)
+			source := &trackingPublicationSource{path: "/private/unavailable-retained-checkout"}
+			coordinator.source = source
+			test.set(publisher)
+			if err := coordinator.RunOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if source.acquires != 0 || source.closes != 0 {
+				t.Fatalf("remote-only recovery materialized source: acquires=%d closes=%d", source.acquires, source.closes)
+			}
+		})
+	}
+}
+
 func TestCoordinatorClosesPublicationSourceOnMutationAndCleanupFailures(t *testing.T) {
 	t.Run("mutation", func(t *testing.T) {
 		_, publisher, coordinator := testCoordinator(t, taskstore.PublicationPhaseNone)

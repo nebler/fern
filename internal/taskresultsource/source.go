@@ -55,11 +55,18 @@ func (r *Resolver) Acquire(ctx context.Context, result taskstore.Result) (string
 	if err != nil {
 		return "", nil, err
 	}
-	if artifact.ResultID != result.ID || artifact.TaskID != result.TaskID || artifact.AttemptID != result.AttemptID ||
+	if artifact.ID != result.RetainedArtifactID || artifact.ResultID != result.ID || artifact.ExportID != result.ArtifactExportID ||
+		artifact.MaterializationID != result.MaterializationID ||
+		artifact.WorkspaceID != result.WorkspaceID || artifact.TaskID != result.TaskID || artifact.AttemptID != result.AttemptID ||
 		artifact.BaseSHA != result.BaseSHA || artifact.ResultCommit != result.ResultCommit || artifact.TreeOID != result.TreeOID ||
+		artifact.OpenCodeSessionID != result.OpenCodeSessionID || artifact.OpenCodeMessageID != result.OpenCodeMessageID ||
 		artifact.ChangesSHA256 != result.ManifestSHA256 || artifact.ManifestSHA256 != locator.Digest().Bytes() ||
+		snapshot.RepositoryID != result.RepositoryID || snapshot.WorkspaceID != artifact.WorkspaceID || snapshot.TaskID != artifact.TaskID ||
+		snapshot.AttemptID != artifact.AttemptID || snapshot.Generation != artifact.Generation || snapshot.SealRequestID != artifact.SealRequestID ||
 		snapshot.Base != result.BaseSHA || snapshot.Result != result.ResultCommit || snapshot.Tree != result.TreeOID ||
-		snapshot.ChangesSHA256.Bytes() != result.ManifestSHA256 || snapshot.ManifestSHA256.Bytes() != artifact.ManifestSHA256 {
+		snapshot.OpenCodeSessionID != artifact.OpenCodeSessionID || snapshot.OpenCodeMessageID != artifact.OpenCodeMessageID ||
+		snapshot.ChangesSHA256.Bytes() != result.ManifestSHA256 || snapshot.ManifestSHA256.Bytes() != artifact.ManifestSHA256 ||
+		snapshot.BundleSHA256.Bytes() != artifact.BundleSHA256 || snapshot.BundleBytes != artifact.BundleBytes {
 		return "", nil, taskstore.ErrCorruptStore
 	}
 	checkout, err := r.artifact.Materialize(ctx, locator)

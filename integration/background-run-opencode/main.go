@@ -30,6 +30,7 @@ import (
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
+	"github.com/nebler/fern/internal/taskresultsource"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -440,7 +441,7 @@ func run() (resultErr error) {
 	if err := runSerialCoordinator(ctx, temporary, repository, providerEndpoint, provider, cli, imageID, base); err != nil {
 		return err
 	}
-	fmt.Printf("PASS profile=%s image_id=%s session=exact session_response_loss=after_effect session_posts=1 no_session_replay=true no_session_replacement=true prompt=admitted_promoted prompt_response_loss=after_effect active=positive interrupt=204 reconstruction=provider_client no_prompt_replay=true provider_calls=1 marker=exact serial_coordinator=complete retained_result=cas_reconstructed_twice route=paired_root_health open_replay=stable fence_crash=uncertain_zero_post runtime_restart=pre_reconcile_502_then_unbound_cleanup\n", backgroundopencode.Profile, imageID)
+	fmt.Printf("PASS profile=%s image_id=%s session=exact session_response_loss=after_effect session_posts=1 no_session_replay=true no_session_replacement=true prompt=admitted_promoted prompt_response_loss=after_effect active=positive interrupt=204 reconstruction=provider_client no_prompt_replay=true provider_calls=1 marker=exact serial_coordinator=complete retained_result=cas_reconstructed_twice route=paired_root_health open_replay=stable fence_crash=uncertain_zero_post runtime_restart=quarantined_then_operator_removed_cleanup\n", backgroundopencode.Profile, imageID)
 	return nil
 }
 
@@ -668,6 +669,21 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	if status, routeErr := serialRouteStatus(routeURL, deviceToken, "/api/health"); routeErr != nil || status != http.StatusNotFound {
 		return fmt.Errorf("replacement inherited route status=%d error=%v", status, routeErr)
 	}
+	replacement, err := cli.ContainerInspect(context.Background(), current.ObservedContainerID)
+	if err != nil || replacement.State == nil || !replacement.State.Running || replacement.State.StartedAt == current.ObservedContainerStartedAt {
+		startedAt := ""
+		if replacement.State != nil {
+			startedAt = replacement.State.StartedAt
+		}
+		return fmt.Errorf("replacement was not quarantined intact: running=%v started=%q durable=%q error=%v",
+			replacement.State != nil && replacement.State.Running, startedAt, current.ObservedContainerStartedAt, err)
+	}
+	if err := cli.ContainerStop(context.Background(), current.ObservedContainerID, container.StopOptions{Timeout: &stopSeconds}); err != nil {
+		return fmt.Errorf("operator stop quarantined replacement: %w", err)
+	}
+	if err := cli.ContainerRemove(context.Background(), current.ObservedContainerID, container.RemoveOptions{}); err != nil {
+		return fmt.Errorf("operator remove quarantined replacement: %w", err)
+	}
 	for step := 0; step < 20; step++ {
 		if err := coordinator.RunOnce(context.Background()); err != nil && !errors.Is(err, backgroundruncoord.ErrNoWork) {
 			return err
@@ -702,7 +718,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 		Scan(&taskState, &attemptState, &taskReason, &attemptReason); err != nil || taskState != "failed" || attemptState != "failed" || taskReason != "runtime_unavailable" || attemptReason != taskReason {
 		return fmt.Errorf("serial parent consistency task=%s attempt=%s reasons=%s/%s error=%v", taskState, attemptState, taskReason, attemptReason, err)
 	}
-	if err := runRetainedResultScenario(ctx, root, store, provider, artifact, ids, workspaceID, imageID, base, route); err != nil {
+	if err := runRetainedResultScenario(ctx, root, repository, store, provider, artifact, ids, workspaceID, imageID, base, route); err != nil {
 		return err
 	}
 	if err := runPreDispatchFenceScenario(ctx, root, provider, artifact, cli, ids, workspaceID, imageID, base, route); err != nil {
@@ -748,9 +764,17 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	return nil
 }
 
-func runRetainedResultScenario(ctx context.Context, root string, store *taskstore.Store, provider *taskenvdocker.Provider,
+func runRetainedResultScenario(ctx context.Context, root, repository string, store *taskstore.Store, provider *taskenvdocker.Provider,
 	artifact *taskartifact.Engine, ids *task.Generator, workspaceID task.WorkspaceID, imageID, base string, route *backgroundroute.Manager,
 ) error {
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		return err
+	}
+	gitPath, err = filepath.EvalSymlinks(gitPath)
+	if err != nil {
+		return err
+	}
 	now := time.Now().UTC().Truncate(time.Millisecond).Add(3 * time.Minute)
 	generated, err := ids.GenerateAdmissionIDs()
 	if err != nil {
@@ -813,7 +837,21 @@ func runRetainedResultScenario(ctx context.Context, root string, store *taskstor
 		return fmt.Errorf("retained run did not reach working: %s/%s", run.State, run.EffectPhase)
 	}
 	clonePath := filepath.Join(root, "state", "background-runs", intent.CloneIdentity)
-	if err := os.WriteFile(filepath.Join(clonePath, "retained-result.txt"), []byte("retained result\n"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(clonePath, "committed-result.txt"), []byte("committed result\n"), 0o600); err != nil {
+		return err
+	}
+	commit := exec.Command(gitPath, "-C", clonePath, "-c", "user.name=Fern Integration", "-c", "user.email=fern-integration@example.invalid",
+		"add", "--", "committed-result.txt")
+	if output, commitErr := commit.CombinedOutput(); commitErr != nil {
+		return fmt.Errorf("stage retained committed change: %w: %s", commitErr, output)
+	}
+	commit = exec.Command(gitPath, "-C", clonePath, "-c", "user.name=Fern Integration", "-c", "user.email=fern-integration@example.invalid",
+		"commit", "-m", "retained committed change")
+	commit.Env = append(os.Environ(), "GIT_AUTHOR_DATE=2026-08-31T12:00:00Z", "GIT_COMMITTER_DATE=2026-08-31T12:00:00Z")
+	if output, commitErr := commit.CombinedOutput(); commitErr != nil {
+		return fmt.Errorf("commit retained change: %w: %s", commitErr, output)
+	}
+	if err := os.WriteFile(filepath.Join(clonePath, "dirty-result.txt"), []byte("dirty result\n"), 0o600); err != nil {
 		return err
 	}
 	sealIDs, err := ids.GenerateBackgroundSealIDs()
@@ -872,6 +910,23 @@ func runRetainedResultScenario(ctx context.Context, root string, store *taskstor
 	if err != nil {
 		return err
 	}
+	resolver, err := taskresultsource.New(store, artifact, repository)
+	if err != nil {
+		return err
+	}
+	resolvedPath, closeResolved, err := resolver.Acquire(ctx, projection.Result)
+	if err != nil {
+		return fmt.Errorf("resolve retained result for downstream consumer: %w", err)
+	}
+	if resolvedPath == clonePath || closeResolved == nil {
+		if closeResolved != nil {
+			_ = closeResolved()
+		}
+		return errors.New("retained result resolver reused disposable authority")
+	}
+	if err := closeResolved(); err != nil {
+		return err
+	}
 	var previous string
 	for attempt := 0; attempt < 2; attempt++ {
 		checkout, materializeErr := artifact.Materialize(ctx, locator)
@@ -883,9 +938,13 @@ func runRetainedResultScenario(ctx context.Context, root string, store *taskstor
 			_ = checkout.Close()
 			return errors.New("retained materialization reused disposable authority")
 		}
-		if content, readErr := os.ReadFile(filepath.Join(path, "retained-result.txt")); readErr != nil || string(content) != "retained result\n" {
+		if content, readErr := os.ReadFile(filepath.Join(path, "committed-result.txt")); readErr != nil || string(content) != "committed result\n" {
 			_ = checkout.Close()
-			return fmt.Errorf("read retained materialization: %q %v", content, readErr)
+			return fmt.Errorf("read committed retained materialization: %q %v", content, readErr)
+		}
+		if content, readErr := os.ReadFile(filepath.Join(path, "dirty-result.txt")); readErr != nil || string(content) != "dirty result\n" {
+			_ = checkout.Close()
+			return fmt.Errorf("read dirty retained materialization: %q %v", content, readErr)
 		}
 		previous = path
 		if err := checkout.Close(); err != nil {

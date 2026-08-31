@@ -72,6 +72,8 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 	sealID, _ := ids.SealRequestID()
 	resultID, _ := ids.ResultID()
 	artifactID, _ := ids.RetainedArtifactID()
+	exportID, _ := ids.ArtifactExportID()
+	materializationID, _ := ids.MaterializationID()
 	source, err := taskartifact.NewSource(repository, workspaceID, taskID, attemptID)
 	if err != nil {
 		t.Fatal(err)
@@ -90,15 +92,59 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	artifact := taskstore.RetainedArtifact{ID: artifactID, ResultID: resultID, TaskID: taskID, AttemptID: attemptID,
+	artifact := taskstore.RetainedArtifact{ID: artifactID, SealRequestID: sealID, ExportID: exportID,
+		MaterializationID: materializationID, ResultID: resultID, WorkspaceID: workspaceID,
+		TaskID: taskID, AttemptID: attemptID, Generation: 1,
 		BaseSHA: snapshot.Base, ResultCommit: snapshot.Result, TreeOID: snapshot.Tree, ChangesSHA256: snapshot.ChangesSHA256.Bytes(),
-		ManifestSHA256: snapshot.ManifestSHA256.Bytes(), CASLocator: locator.String()}
-	result := taskstore.Result{ID: resultID, TaskID: taskID, AttemptID: attemptID, SourceKind: taskstore.ResultSourceRetainedArtifact,
-		RetainedArtifactID: artifactID, BaseSHA: snapshot.Base, ResultCommit: snapshot.Result, TreeOID: snapshot.Tree,
-		ManifestSHA256: snapshot.ChangesSHA256.Bytes()}
+		ManifestSHA256: snapshot.ManifestSHA256.Bytes(), CASLocator: locator.String(), BundleSHA256: snapshot.BundleSHA256.Bytes(),
+		BundleBytes: snapshot.BundleBytes, OpenCodeSessionID: snapshot.OpenCodeSessionID, OpenCodeMessageID: snapshot.OpenCodeMessageID}
+	result := taskstore.Result{ID: resultID, WorkspaceID: workspaceID, TaskID: taskID, AttemptID: attemptID, RepositoryID: 1,
+		SourceKind: taskstore.ResultSourceRetainedArtifact, RetainedArtifactID: artifactID, ArtifactExportID: exportID,
+		MaterializationID: materializationID, OpenCodeSessionID: snapshot.OpenCodeSessionID,
+		OpenCodeMessageID: snapshot.OpenCodeMessageID, BaseSHA: snapshot.Base, ResultCommit: snapshot.Result,
+		TreeOID: snapshot.Tree, ManifestSHA256: snapshot.ChangesSHA256.Bytes()}
 	resolver, err := New(artifactStore{artifact}, engine, repository)
 	if err != nil {
 		t.Fatal(err)
+	}
+	otherWorkspace, _ := ids.WorkspaceID()
+	otherSeal, _ := ids.SealRequestID()
+	otherArtifact, _ := ids.RetainedArtifactID()
+	otherExport, _ := ids.ArtifactExportID()
+	otherMaterialization, _ := ids.MaterializationID()
+	otherSession := mustSession(t, ids)
+	for _, test := range []struct {
+		name   string
+		mutate func(*taskstore.RetainedArtifact, *taskstore.Result)
+	}{
+		{"repository", func(_ *taskstore.RetainedArtifact, result *taskstore.Result) { result.RepositoryID++ }},
+		{"workspace", func(artifact *taskstore.RetainedArtifact, _ *taskstore.Result) { artifact.WorkspaceID = otherWorkspace }},
+		{"generation", func(artifact *taskstore.RetainedArtifact, _ *taskstore.Result) { artifact.Generation++ }},
+		{"seal", func(artifact *taskstore.RetainedArtifact, _ *taskstore.Result) { artifact.SealRequestID = otherSeal }},
+		{"artifact", func(_ *taskstore.RetainedArtifact, result *taskstore.Result) {
+			result.RetainedArtifactID = otherArtifact
+		}},
+		{"export", func(_ *taskstore.RetainedArtifact, result *taskstore.Result) { result.ArtifactExportID = otherExport }},
+		{"materialization", func(_ *taskstore.RetainedArtifact, result *taskstore.Result) {
+			result.MaterializationID = otherMaterialization
+		}},
+		{"bundle digest", func(artifact *taskstore.RetainedArtifact, _ *taskstore.Result) { artifact.BundleSHA256[0] ^= 0xff }},
+		{"bundle size", func(artifact *taskstore.RetainedArtifact, _ *taskstore.Result) { artifact.BundleBytes++ }},
+		{"session", func(artifact *taskstore.RetainedArtifact, _ *taskstore.Result) {
+			artifact.OpenCodeSessionID = otherSession
+		}},
+	} {
+		t.Run("rejects "+test.name+" mismatch", func(t *testing.T) {
+			changedArtifact, changedResult := artifact, result
+			test.mutate(&changedArtifact, &changedResult)
+			changedResolver, newErr := New(artifactStore{changedArtifact}, engine, repository)
+			if newErr != nil {
+				t.Fatal(newErr)
+			}
+			if path, closeSource, acquireErr := changedResolver.Acquire(context.Background(), changedResult); path != "" || closeSource != nil || acquireErr != taskstore.ErrCorruptStore {
+				t.Fatalf("mismatched authority path=%q close=%v error=%v", path, closeSource != nil, acquireErr)
+			}
+		})
 	}
 	first, closeFirst, err := resolver.Acquire(context.Background(), result)
 	if err != nil {

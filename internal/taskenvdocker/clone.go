@@ -914,7 +914,7 @@ func (p *Provider) RemoveClone(ctx context.Context, run taskstore.BackgroundRun,
 	if err := p.requireContainerAbsent(ctx, run, digest, authority); err != nil {
 		return Observation{}, err
 	}
-	if err := p.requireVolumeAbsent(ctx, run); err != nil {
+	if err := p.requireVolumeAbsent(ctx, run, digest); err != nil {
 		return Observation{}, err
 	}
 	path := filepath.Join(p.root, run.CloneIdentity)

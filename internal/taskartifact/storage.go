@@ -306,12 +306,13 @@ func (c *Checkout) Close() error {
 		return fmt.Errorf("%w: checkout path", ErrCheckout)
 	}
 	device, inode, _ := fileIdentity(info)
+	if device != c.device || inode != c.inode {
+		return fmt.Errorf("%w: checkout identity", ErrCheckout)
+	}
 	markerBytes, err := readExactFile(checkoutMarkerPath(c.path), 256, 0o600)
 	markerInfo, markerErr := os.Lstat(checkoutMarkerPath(c.path))
 	markerDevice, markerInode, _ := fileIdentity(markerInfo)
-	if err != nil || markerErr != nil || device != c.device || inode != c.inode || markerDevice != c.markerDevice || markerInode != c.markerInode || string(markerBytes) != c.marker+"\n" {
-		return fmt.Errorf("%w: checkout identity", ErrCheckout)
-	}
+	markerChanged := err != nil || markerErr != nil || markerDevice != c.markerDevice || markerInode != c.markerInode || string(markerBytes) != c.marker+"\n"
 	if err := removeExactDirectory(c.path, c.device, c.inode); err != nil {
 		return err
 	}
@@ -320,6 +321,9 @@ func (c *Checkout) Close() error {
 	c.engine.mu.Lock()
 	delete(c.engine.checkouts, c)
 	c.engine.mu.Unlock()
+	if markerChanged {
+		return fmt.Errorf("%w: checkout marker changed before cleanup", ErrCheckout)
+	}
 	return nil
 }
 

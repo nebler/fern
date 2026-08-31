@@ -75,10 +75,11 @@ already opened.
   and open server operations exist.
 - [ ] Capacity remains one; multiple concurrent OpenCode workspaces do not
   exist.
-- [ ] Exact Git object retention after checkout deletion does not exist.
+- [x] Exact Git object retention survives checkout deletion in the serial
+  qualification harness.
 - [x] A minimal compiled `/fern` plugin package is pack- and loader-qualified
   against OpenCode `1.18.16`; npm publication remains pending.
-- [ ] The retained-result server operation does not exist.
+- [x] Scoped explicit seal and immutable retained-result server operations exist.
 
 Do not convert the persistent `workspace.Manager` into a scheduler or change its
 retention behavior. Add Background Runs as a separate disposable lane.
@@ -87,26 +88,26 @@ retention behavior. Add Background Runs as a separate disposable lane.
 
 ### Retained Exact Result
 
-- [ ] Add the durable schema and migration for seal intent, writer-fence proof,
+- [x] Add the durable schema and migration for seal intent, writer-fence proof,
   export journal, retained artifact identity, reconstruction state, and result
   projection.
-- [ ] Add an explicit idempotent seal operation; do not infer completion from
+- [x] Add an explicit idempotent seal operation; do not infer completion from
   idle state, silence, EOF, process exit, or container exit.
-- [ ] Positively prove the exact current writer inactive before reading Git
+- [x] Positively prove the exact current writer inactive before reading Git
   state, and reject stale attempt generations throughout collection.
-- [ ] Select or create one clean result commit rooted at the exact admitted base
+- [x] Select or create one clean result commit rooted at the exact admitted base
   without trusting agent-authored metadata as authority.
-- [ ] Build a self-contained Git bundle and immutable manifest containing the
+- [x] Build a self-contained Git bundle and immutable manifest containing the
   exact repository, base, result commit, tree, changed object identities,
   execution identity, and artifact digest.
-- [ ] Atomically ingest the bundle and manifest into a private host-owned
+- [x] Atomically ingest the bundle and manifest into a private host-owned
   content-addressed store with bounded files, restrictive modes, fsync, and
   digest verification.
-- [ ] Verify the bundle and independently materialize the exact result before
+- [x] Verify the bundle and independently materialize the exact result before
   committing `result_ready` or deleting the container, volume, and clone.
-- [ ] Implement the scoped idempotent `/result` projection and reconstruction
+- [x] Implement the scoped idempotent `/result` projection and reconstruction
   path without exposing host paths, credentials, or mutable URLs.
-- [ ] Make verification and optional publication consume only the independently
+- [x] Make verification and optional publication consume only the independently
   materialized retained result.
 - [ ] Add crash and response-loss tests before and after every seal, export,
   ingestion, result commit, cleanup, reconstruction, and publication boundary.
@@ -125,8 +126,8 @@ retention behavior. Add Background Runs as a separate disposable lane.
 ### Installed Journey
 
 - [x] Package the pinned `/fern` plugin with confirmation, scoped authorization,
-  create, runs, open, stop, and result actions over the existing run API. The
-  result action remains unavailable until retained-result authority lands.
+  create, runs, open, stop, seal, and immutable result actions over the existing
+  run API.
 - [ ] Qualify actual Tailscale multi-port private TLS, browser cookie acceptance,
   SSE, WSS, revocation, mobile sleep/wake, and cross-device native session use.
 - [ ] Promote the qualified OpenCode source image to an immutable registry
@@ -317,7 +318,7 @@ the official session without replaying mutations.
 - [x] Commit run ID, internal attempt generation, repository identity, exact
   base, instruction digest, image digest, clone/volume/container identities, and
   OpenCode session/prompt IDs before external effects.
-- [ ] Give provision, prompt delivery, stop, export, and cleanup explicit started
+- [x] Give provision, prompt delivery, stop, export, and cleanup explicit started
   phases before I/O.
 - [x] Reconcile only by exact identifiers after restart or response loss.
 - [x] Fence every writer and observer with the current attempt generation.
@@ -357,19 +358,19 @@ the official session without replaying mutations.
 
 ## 4. Retain The Exact Result
 
-- [ ] Acquire an exclusive stop/seal fence before reading the repository.
-- [ ] Select or create one clean result commit based on the exact admitted base.
-- [ ] Create an immutable manifest containing repository, base, result commit,
+- [x] Acquire an exclusive stop/seal fence before reading the repository.
+- [x] Select or create one clean result commit based on the exact admitted base.
+- [x] Create an immutable manifest containing repository, base, result commit,
   tree, changed paths/modes/blob IDs/sizes, image digest, attempt generation,
   OpenCode IDs, terminal reason, and artifact digest.
-- [ ] Export a self-contained Git bundle with every object required for clean
+- [x] Export a self-contained Git bundle with every object required for clean
   reconstruction.
-- [ ] Ingest the bundle and manifest atomically into host-owned retained storage
+- [x] Ingest the bundle and manifest atomically into host-owned retained storage
   before reporting `result_ready`.
-- [ ] Run `git bundle verify` and materialize an independent clean checkout.
-- [ ] Run verification against the materialized commit, never the agent checkout.
-- [ ] Delete the container, OpenCode volume, and clone.
-- [ ] Materialize again from retained artifacts and compare the exact commit,
+- [x] Run `git bundle verify` and materialize an independent clean checkout.
+- [x] Run verification against the materialized commit, never the agent checkout.
+- [x] Delete the container, OpenCode volume, and clone.
+- [x] Materialize again from retained artifacts and compare the exact commit,
   tree, and manifest.
 - [ ] Preserve useful interrupted work only with an explicit partial-result
   label; never call it completed automatically.
@@ -392,7 +393,8 @@ the official session without replaying mutations.
 - [ ] Cleanup is interrupted after each individual resource deletion.
 - [ ] Disk exhaustion occurs during clone, OpenCode state growth, and artifact
   ingestion.
-- [ ] Every accepted result reconstructs after runtime deletion.
+- [x] The executable serial qualification reconstructs its accepted result twice
+  after route, runtime, volume, and clone deletion.
 
 ## 6. Two Concurrent OpenCode Workspaces
 
@@ -452,7 +454,7 @@ ID.
 
 - [x] Expose scoped create, read, list, stop, and open semantics without a
   harness-specific runtime framework.
-- [ ] Add retained-result read and materialization semantics to complete the
+- [x] Add retained-result read and materialization semantics to complete the
   harness-neutral boundary.
 - [ ] Make the human Fern CLI and OpenCode plugin use the same API semantics.
 - [ ] Allow a future harness plugin or MCP server to call the same durable API.
