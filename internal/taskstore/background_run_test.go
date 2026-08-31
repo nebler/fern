@@ -654,7 +654,7 @@ func TestBackgroundRunCleanupFailuresPreservePhaseAndPermitRetry(t *testing.T) {
 		BackgroundRunEffectVolumeRemoved,
 		BackgroundRunEffectCloneRemoved,
 	}
-	states := []BackgroundRunState{BackgroundRunCanceling, BackgroundRunCleanupRequired, BackgroundRunResultReady}
+	states := []BackgroundRunState{BackgroundRunCanceling, BackgroundRunCleanupRequired}
 	for stateIndex, state := range states {
 		for phaseIndex, phase := range phases {
 			t.Run(string(state)+"/"+string(phase), func(t *testing.T) {
@@ -698,16 +698,12 @@ func TestBackgroundRunCleanupFailuresPreservePhaseAndPermitRetry(t *testing.T) {
 	}
 }
 
-func TestBackgroundRunResultReadyCleanupReleasesCapacity(t *testing.T) {
+func TestBackgroundRunDiagnosticResultReadyIsRejected(t *testing.T) {
 	store := openTestStore(t, testDBPath(t))
 	t.Cleanup(func() { _ = store.Close() })
 	createTestWorkspace(t, store)
 	first := testBackgroundRunAdmission(2100, "result-cleanup-first")
-	second := testBackgroundRunAdmission(2101, "result-cleanup-second")
 	if _, err := store.AdmitTask(context.Background(), first); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.AdmitTask(context.Background(), second); err != nil {
 		t.Fatal(err)
 	}
 
@@ -716,51 +712,8 @@ func TestBackgroundRunResultReadyCleanupReleasesCapacity(t *testing.T) {
 	run, err := store.RecordBackgroundRunResultReady(context.Background(), RecordBackgroundRunEvidenceParams{
 		BackgroundRunClaim: claim, Evidence: "sealed result exact",
 	})
-	if err != nil || run.State != BackgroundRunResultReady || run.EffectPhase != BackgroundRunEffectPromptAdmitted {
-		t.Fatalf("result readiness = %+v, error = %v", run, err)
-	}
-	advanceBackgroundClaim(&claim, run)
-	claim.Now = claim.Now.Add(time.Second)
-	if _, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
-		WorkspaceID: testWorkspaceID(), ClaimOwner: "blocked-next", Now: claim.Now, LeaseDuration: time.Minute,
-		Profile: BackgroundRunSourceProfile, ImageIdentity: second.BackgroundRun.ImageIdentity,
-	}); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("uncleaned result released capacity: %v", err)
-	}
-	run, err = store.RequestBackgroundRunResultCleanup(context.Background(), RecordBackgroundRunEvidenceParams{
-		BackgroundRunClaim: claim, Evidence: "result retention permits cleanup",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	advanceBackgroundClaim(&claim, run)
-	for _, step := range []func(context.Context, RecordBackgroundRunEvidenceParams) (BackgroundRun, error){
-		store.RecordBackgroundRunWriterInactive,
-		store.RecordBackgroundRunRouteRemoved,
-		store.RecordBackgroundRunContainerRemoved,
-		store.RecordBackgroundRunVolumeRemoved,
-		store.RecordBackgroundRunCloneRemoved,
-	} {
-		claim.Now = claim.Now.Add(time.Second)
-		run, err = step(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunClaim: claim, Evidence: "exact cleanup observation"})
-		if err != nil {
-			t.Fatalf("result cleanup from %s: %v", claim.ExpectedPhase, err)
-		}
-		advanceBackgroundClaim(&claim, run)
-	}
-	claim.Now = claim.Now.Add(time.Second)
-	run, err = store.CompleteBackgroundRunResultCleanup(context.Background(), CompleteBackgroundRunResultCleanupParams{
-		BackgroundRunClaim: claim, CleanupProof: "route, container, volume, and clone absent",
-	})
-	if err != nil || run.State != BackgroundRunResultReady || run.EffectPhase != BackgroundRunEffectCleanupComplete || run.ClaimOwner != "" {
-		t.Fatalf("result cleanup completion = %+v, error = %v", run, err)
-	}
-	next, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
-		WorkspaceID: testWorkspaceID(), ClaimOwner: "next-after-result", Now: claim.Now.Add(time.Second), LeaseDuration: time.Minute,
-		Profile: BackgroundRunSourceProfile, ImageIdentity: second.BackgroundRun.ImageIdentity,
-	})
-	if err != nil || next.TaskID != second.TaskID {
-		t.Fatalf("capacity after result cleanup = %+v, error = %v", next, err)
+	if !errors.Is(err, ErrInvalidState) || run.TaskID != "" {
+		t.Fatalf("diagnostic readiness = %+v, error = %v", run, err)
 	}
 }
 

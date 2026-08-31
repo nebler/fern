@@ -22,6 +22,9 @@ type (
 	ApprovalID             string
 	SealRequestID          string
 	ResultID               string
+	ArtifactExportID       string
+	RetainedArtifactID     string
+	MaterializationID      string
 	VerificationID         string
 	PublicationID          string
 	PublicationOperationID string
@@ -82,6 +85,24 @@ func ParseResultID(v string) (ResultID, error) {
 		return "", err
 	}
 	return ResultID(v), nil
+}
+func ParseArtifactExportID(v string) (ArtifactExportID, error) {
+	if err := validateFernID(v, "exp_"); err != nil {
+		return "", err
+	}
+	return ArtifactExportID(v), nil
+}
+func ParseRetainedArtifactID(v string) (RetainedArtifactID, error) {
+	if err := validateFernID(v, "art_"); err != nil {
+		return "", err
+	}
+	return RetainedArtifactID(v), nil
+}
+func ParseMaterializationID(v string) (MaterializationID, error) {
+	if err := validateFernID(v, "mat_"); err != nil {
+		return "", err
+	}
+	return MaterializationID(v), nil
 }
 func ParseVerificationID(v string) (VerificationID, error) {
 	if err := validateFernID(v, "ver_"); err != nil {

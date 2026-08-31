@@ -39,7 +39,7 @@ func (s *Store) ClaimNextBackgroundRun(ctx context.Context, p ClaimNextBackgroun
 FROM background_runs r
 JOIN tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id AND t.current_attempt_id=r.attempt_id
 JOIN attempts a ON a.id=r.attempt_id AND a.task_id=r.task_id AND a.workspace_id=r.workspace_id AND a.sequence=r.generation
-WHERE r.workspace_id=? AND r.profile=? AND r.state<>'failed' AND
+WHERE r.workspace_id=? AND r.profile=? AND r.state<>'failed' AND r.background_seal_request_id IS NULL AND
 	NOT (r.state='result_ready' AND r.effect_phase='cleanup_complete') AND
   (r.claim_owner=? OR r.claim_owner IS NULL OR r.claim_expires_at<=?) AND
   ((r.state='queued' AND r.cancel_epoch=0 AND NOT EXISTS (
@@ -107,14 +107,21 @@ func (s *Store) claimExactBackgroundRun(ctx context.Context, p ClaimBackgroundRu
 	defer rollback(tx, &err)
 	now, expiry := unixMillis(p.Now), unixMillis(p.Now.Add(p.LeaseDuration))
 	states := "('setting_up','working','needs_you','uncertain','cleanup_required','result_ready')"
+	databaseState, databasePhase := p.ExpectedState, p.ExpectedPhase
+	if p.ExpectedState == BackgroundRunCanceling && p.ExpectedPhase == BackgroundRunEffectSealIntent {
+		databaseState, databasePhase = BackgroundRunCleanupRequired, BackgroundRunEffectStopIntent
+	}
+	if p.ExpectedState == BackgroundRunResultReady && p.ExpectedPhase == BackgroundRunEffectArtifactCommitted {
+		databaseState, databasePhase = BackgroundRunResultReady, BackgroundRunEffectWriterInactive
+	}
 	if stopping {
-		states = "('canceling')"
+		states = "('canceling','cleanup_required')"
 	}
 	query := `UPDATE background_runs SET claim_owner=?,claim_expires_at=?,claim_generation=claim_generation+1,
 revision=revision+1,updated_at=? WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND
 cancel_epoch=? AND profile=? AND image_identity=? AND state=? AND effect_phase=? AND state IN ` + states + ` AND (claim_owner IS NULL OR claim_expires_at<=?)`
 	result, err := tx.ExecContext(ctx, query, p.ClaimOwner, expiry, now, p.TaskID, p.AttemptID, p.WorkspaceID,
-		p.Generation, p.ExpectedRevision, p.CancelEpoch, p.Profile, p.ImageIdentity, p.ExpectedState, p.ExpectedPhase, now)
+		p.Generation, p.ExpectedRevision, p.CancelEpoch, p.Profile, p.ImageIdentity, databaseState, databasePhase, now)
 	if err != nil {
 		return BackgroundRun{}, fmt.Errorf("claim exact background run: %w", err)
 	}
@@ -385,13 +392,7 @@ claim_owner=? AND claim_generation=? AND claim_expires_at>?`, now, actorID, now,
 }
 
 func (s *Store) RecordBackgroundRunResultReady(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	if p.ExpectedPhase != BackgroundRunEffectPromptAdmitted ||
-		(p.ExpectedState != BackgroundRunWorking && p.ExpectedState != BackgroundRunNeedsYou && p.ExpectedState != BackgroundRunUncertain) ||
-		!validRequiredEvidence(p.Evidence) {
-		return BackgroundRun{}, fmt.Errorf("%w: background run result readiness", ErrInvalidInput)
-	}
-	return s.transitionClaimedRun(ctx, p.BackgroundRunClaim, BackgroundRunResultReady, BackgroundRunEffectPromptAdmitted,
-		`last_evidence=?`, []any{p.Evidence}, "record background run result readiness")
+	return BackgroundRun{}, fmt.Errorf("%w: retained result commit is the only result-ready authority", ErrInvalidState)
 }
 
 func (s *Store) RecordBackgroundRunWriterInactive(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
@@ -403,11 +404,43 @@ func (s *Store) RecordBackgroundRunWriterInactive(ctx context.Context, p RecordB
 }
 
 func (s *Store) RequestBackgroundRunResultCleanup(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	if p.ExpectedState != BackgroundRunResultReady || p.ExpectedPhase != BackgroundRunEffectPromptAdmitted || !validRequiredEvidence(p.Evidence) {
+	if p.ExpectedState != BackgroundRunResultReady || p.ExpectedPhase != BackgroundRunEffectArtifactCommitted || !validRequiredEvidence(p.Evidence) {
 		return BackgroundRun{}, fmt.Errorf("%w: background result cleanup intent", ErrInvalidInput)
 	}
-	return s.transitionClaimedRun(ctx, p.BackgroundRunClaim, BackgroundRunResultReady, BackgroundRunEffectStopIntent,
-		`stop_intent_at=?,last_evidence=?`, []any{unixMillis(p.Now), p.Evidence}, "request background result cleanup")
+	return s.updateClaimedRetainedRun(ctx, p.BackgroundRunClaim, `result_authority_phase='cleanup',last_evidence=?`, []any{p.Evidence}, "request background result cleanup")
+}
+
+func (s *Store) updateClaimedRetainedRun(ctx context.Context, claim BackgroundRunClaim, assignments string, args []any, operation string) (_ BackgroundRun, err error) {
+	if err := validateBackgroundRunClaim(claim); err != nil {
+		return BackgroundRun{}, err
+	}
+	tx, release, err := s.beginWrite(ctx)
+	if err != nil {
+		return BackgroundRun{}, err
+	}
+	defer release()
+	defer rollback(tx, &err)
+	query := `UPDATE background_runs SET ` + assignments + `,revision=revision+1,updated_at=?
+WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND claim_owner=? AND claim_generation=? AND
+claim_expires_at>? AND revision=? AND state='result_ready' AND effect_phase='writer_inactive' AND
+result_authority_phase='artifact_committed' AND cancel_epoch=0`
+	args = append(args, unixMillis(claim.Now), claim.TaskID, claim.AttemptID, claim.WorkspaceID, claim.Generation,
+		claim.ClaimOwner, claim.ClaimGeneration, unixMillis(claim.Now), claim.ExpectedRevision)
+	result, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return BackgroundRun{}, fmt.Errorf("%s: %w", operation, err)
+	}
+	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
+		return BackgroundRun{}, ErrInvalidState
+	}
+	run, err := readBackgroundRunExact(ctx, tx, claim.WorkspaceID, claim.TaskID)
+	if err != nil {
+		return BackgroundRun{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return BackgroundRun{}, err
+	}
+	return run, nil
 }
 
 func (s *Store) RecordBackgroundRunRouteRemoved(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
@@ -437,6 +470,9 @@ func (s *Store) recordBackgroundRunRemoval(ctx context.Context, p RecordBackgrou
 func (s *Store) MarkBackgroundRunCleanupRequired(ctx context.Context, p MarkBackgroundRunCleanupRequiredParams) (BackgroundRun, error) {
 	if !validBoundedText(p.Error, 1, 4096) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run cleanup failure", ErrInvalidInput)
+	}
+	if p.ExpectedState == BackgroundRunResultReady && p.ExpectedPhase == BackgroundRunEffectArtifactCommitted {
+		return s.updateClaimedRetainedRun(ctx, p.BackgroundRunClaim, `last_error=?,claim_owner=NULL,claim_expires_at=NULL`, []any{p.Error}, "retain failed background result cleanup")
 	}
 	if cleanupEffectPhase(p.ExpectedPhase) {
 		state := p.ExpectedState

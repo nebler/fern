@@ -74,6 +74,27 @@ func TestGeneratorProducesEveryTypedID(t *testing.T) {
 			return err
 		},
 		func() error {
+			value, err := generator.ArtifactExportID()
+			if err == nil {
+				_, err = ParseArtifactExportID(string(value))
+			}
+			return err
+		},
+		func() error {
+			value, err := generator.RetainedArtifactID()
+			if err == nil {
+				_, err = ParseRetainedArtifactID(string(value))
+			}
+			return err
+		},
+		func() error {
+			value, err := generator.MaterializationID()
+			if err == nil {
+				_, err = ParseMaterializationID(string(value))
+			}
+			return err
+		},
+		func() error {
 			value, err := generator.VerificationID()
 			if err == nil {
 				_, err = ParseVerificationID(string(value))
@@ -177,6 +198,42 @@ func TestGenerateSealRequestIDsReturnsCompleteValidatedSet(t *testing.T) {
 	}
 	if ids.ResultEventID == ids.TaskEventID {
 		t.Fatal("seal event IDs are equal")
+	}
+}
+
+func TestGenerateBackgroundSealIDsReturnsCompleteValidatedSet(t *testing.T) {
+	generator, err := NewGenerator(bytes.NewReader(make([]byte, 256)), func() time.Time { return time.UnixMilli(1_700_000_000_000) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	ids, err := generator.GenerateBackgroundSealIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	validations := []error{}
+	_, err = ParseSealRequestID(string(ids.SealRequestID))
+	validations = append(validations, err)
+	_, err = ParseReceiptID(string(ids.ReceiptID))
+	validations = append(validations, err)
+	_, err = ParseArtifactExportID(string(ids.ArtifactExportID))
+	validations = append(validations, err)
+	_, err = ParseRetainedArtifactID(string(ids.RetainedArtifactID))
+	validations = append(validations, err)
+	_, err = ParseMaterializationID(string(ids.MaterializationID))
+	validations = append(validations, err)
+	_, err = ParseResultID(string(ids.ResultID))
+	validations = append(validations, err)
+	_, err = ParseEventID(string(ids.ResultEventID))
+	validations = append(validations, err)
+	_, err = ParseEventID(string(ids.TaskEventID))
+	validations = append(validations, err)
+	for _, validationErr := range validations {
+		if validationErr != nil {
+			t.Fatal(validationErr)
+		}
+	}
+	if ids.ResultEventID == ids.TaskEventID {
+		t.Fatal("background seal event IDs are equal")
 	}
 }
 

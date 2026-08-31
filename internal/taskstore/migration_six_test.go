@@ -92,7 +92,23 @@ func pendingVersionFivePublication(t *testing.T, n int, state PublicationState) 
 		}
 	}
 
-	if _, err := store.db.Exec(`DROP TABLE background_runs;
+	if _, err := store.db.Exec(`DROP TRIGGER results_insert_integrity;
+DROP TRIGGER attempts_result_seal_integrity;
+DROP TRIGGER tasks_result_seal_integrity;
+DROP TABLE retained_artifacts;
+DROP TABLE background_run_writer_fences;
+DROP TABLE artifact_materializations;
+DROP TABLE background_run_exports;
+DROP TABLE background_run_seal_requests;
+DROP TABLE background_runs;
+DROP INDEX results_retained_artifact;
+ALTER TABLE results DROP COLUMN materialization_id;
+ALTER TABLE results DROP COLUMN artifact_export_id;
+ALTER TABLE results DROP COLUMN retained_artifact_id;
+ALTER TABLE results DROP COLUMN source_kind;
+CREATE TRIGGER results_insert_integrity BEFORE INSERT ON results BEGIN SELECT 1; END;
+CREATE TRIGGER attempts_result_seal_integrity BEFORE UPDATE OF sealed_result_id ON attempts BEGIN SELECT 1; END;
+CREATE TRIGGER tasks_result_seal_integrity BEFORE UPDATE OF state,sealed_result_id ON tasks BEGIN SELECT 1; END;
 DROP TRIGGER publications_admission_receipt_immutable;
 DROP TRIGGER publications_admission_receipt_insert;
 DROP TRIGGER publications_unreceipted_quarantine;
@@ -102,7 +118,7 @@ ALTER TABLE publications DROP COLUMN admission_receipt_id;
 DELETE FROM receipts WHERE id=?;
 CREATE TRIGGER receipts_immutable_delete BEFORE DELETE ON receipts
 BEGIN SELECT RAISE(ABORT, 'receipts are immutable'); END;
-DELETE FROM schema_migrations WHERE version IN (6,7,8,9);
+DELETE FROM schema_migrations WHERE version IN (6,7,8,9,10);
 PRAGMA user_version=5`, admitted.Receipt.ID); err != nil {
 		t.Fatal(err)
 	}

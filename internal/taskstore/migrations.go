@@ -25,10 +25,425 @@ var migrations = []migration{
 	{version: 7, name: "background_run_intents", sql: backgroundRunIntentSchema},
 	{version: 8, name: "background_run_effect_claims", sql: backgroundRunEffectClaimSchema},
 	{version: 9, name: "background_run_prompt_attempt_fence", sql: backgroundRunPromptAttemptFenceSchema},
+	{version: 10, name: "background_run_retained_result_authority", sql: backgroundRunRetainedResultAuthoritySchema},
 }
 
 // CurrentSchemaVersion is the schema produced by all migrations in this build.
 func CurrentSchemaVersion() int { return len(migrations) }
+
+const backgroundRunRetainedResultAuthoritySchema = `
+ALTER TABLE results ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'persistent_workspace'
+  CHECK(source_kind IN ('persistent_workspace','retained_artifact'));
+ALTER TABLE results ADD COLUMN retained_artifact_id TEXT;
+ALTER TABLE results ADD COLUMN artifact_export_id TEXT;
+ALTER TABLE results ADD COLUMN materialization_id TEXT;
+
+ALTER TABLE background_runs ADD COLUMN background_seal_request_id TEXT;
+ALTER TABLE background_runs ADD COLUMN artifact_export_id TEXT;
+ALTER TABLE background_runs ADD COLUMN retained_artifact_id TEXT;
+ALTER TABLE background_runs ADD COLUMN materialization_id TEXT;
+ALTER TABLE background_runs ADD COLUMN retained_result_id TEXT;
+ALTER TABLE background_runs ADD COLUMN result_authority_phase TEXT
+  CHECK(result_authority_phase IS NULL OR result_authority_phase IN
+    ('seal_intent','writer_inactive','exporting','artifact_committed','cleanup','legacy_result_not_retained'));
+
+-- Schema-9 result_ready was diagnostic state only. It is never promoted to a
+-- retained result. Keep live resources recoverable and use one stable reason.
+DROP TRIGGER background_runs_terminal_immutable;
+DROP TRIGGER background_runs_state_transition;
+DROP TRIGGER background_runs_phase_transition;
+DROP TRIGGER background_runs_phase_timestamps_immutable;
+DROP TRIGGER background_runs_observation_immutable;
+UPDATE background_runs SET
+  state='cleanup_required',
+  effect_phase=CASE WHEN effect_phase='prompt_admitted' THEN 'stop_intent'
+                    WHEN effect_phase='cleanup_complete' THEN 'clone_removed'
+                    ELSE effect_phase END,
+  stop_intent_at=CASE WHEN effect_phase='prompt_admitted' THEN COALESCE(stop_intent_at,updated_at) ELSE stop_intent_at END,
+  cleanup_completed_at=CASE WHEN effect_phase='cleanup_complete' THEN NULL ELSE cleanup_completed_at END,
+  cleanup_proof=CASE WHEN effect_phase='cleanup_complete' THEN NULL ELSE cleanup_proof END,
+  last_error='legacy_result_not_retained',result_authority_phase='legacy_result_not_retained',revision=revision+1
+WHERE state='result_ready';
+
+CREATE TABLE background_run_seal_requests (
+  id TEXT PRIMARY KEY CHECK(length(id)=40 AND substr(id,1,4)='slr_' AND substr(id,13,1)='-' AND substr(id,18,1)='-' AND substr(id,19,1)='7' AND substr(id,23,1)='-' AND substr(id,24,1) IN ('8','9','a','b') AND substr(id,28,1)='-' AND replace(substr(id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
+  receipt_id TEXT NOT NULL UNIQUE REFERENCES receipts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  workspace_id TEXT NOT NULL,
+  task_id TEXT NOT NULL UNIQUE,
+  attempt_id TEXT NOT NULL UNIQUE,
+  generation INTEGER NOT NULL CHECK(generation>0),
+  expected_run_revision INTEGER NOT NULL CHECK(expected_run_revision>0),
+  expected_task_revision INTEGER NOT NULL CHECK(expected_task_revision>0),
+  expected_attempt_revision INTEGER NOT NULL CHECK(expected_attempt_revision>0),
+  idempotency_key TEXT NOT NULL CHECK(length(CAST(idempotency_key AS BLOB)) BETWEEN 1 AND 128),
+  request_hash BLOB NOT NULL CHECK(length(request_hash)=32),
+  owner_actor_snapshot_id INTEGER NOT NULL REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  export_id TEXT NOT NULL UNIQUE CHECK(length(export_id)=40 AND substr(export_id,1,4)='exp_' AND substr(export_id,19,1)='7' AND substr(export_id,24,1) IN ('8','9','a','b') AND replace(substr(export_id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
+  artifact_id TEXT NOT NULL UNIQUE CHECK(length(artifact_id)=40 AND substr(artifact_id,1,4)='art_' AND substr(artifact_id,19,1)='7' AND substr(artifact_id,24,1) IN ('8','9','a','b') AND replace(substr(artifact_id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
+  materialization_id TEXT NOT NULL UNIQUE CHECK(length(materialization_id)=40 AND substr(materialization_id,1,4)='mat_' AND substr(materialization_id,19,1)='7' AND substr(materialization_id,24,1) IN ('8','9','a','b') AND replace(substr(materialization_id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
+  result_id TEXT NOT NULL UNIQUE CHECK(length(result_id)=40 AND substr(result_id,1,4)='res_' AND substr(result_id,19,1)='7' AND substr(result_id,24,1) IN ('8','9','a','b') AND replace(substr(result_id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
+  result_event_id TEXT NOT NULL UNIQUE CHECK(length(result_event_id)=40 AND substr(result_event_id,1,4)='fev_' AND substr(result_event_id,19,1)='7' AND replace(substr(result_event_id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
+  task_event_id TEXT NOT NULL UNIQUE CHECK(length(task_event_id)=40 AND substr(task_event_id,1,4)='fev_' AND substr(task_event_id,19,1)='7' AND replace(substr(task_event_id,5),'-','') NOT GLOB '*[^0-9a-f]*' AND task_event_id<>result_event_id),
+  commit_epoch_seconds INTEGER NOT NULL CHECK(commit_epoch_seconds>=0),
+  policy_version TEXT NOT NULL CHECK(length(CAST(policy_version AS BLOB)) BETWEEN 1 AND 128),
+  accepted_at INTEGER NOT NULL CHECK(accepted_at>=0),
+  FOREIGN KEY(task_id,workspace_id) REFERENCES tasks(id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  FOREIGN KEY(attempt_id,task_id,workspace_id) REFERENCES attempts(id,task_id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  UNIQUE(task_id,generation)
+) STRICT;
+
+CREATE TABLE background_run_exports (
+  id TEXT PRIMARY KEY CHECK(length(id)=40 AND substr(id,1,4)='exp_' AND substr(id,19,1)='7' AND substr(id,24,1) IN ('8','9','a','b') AND replace(substr(id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
+  seal_request_id TEXT NOT NULL UNIQUE REFERENCES background_run_seal_requests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  workspace_id TEXT NOT NULL,
+  task_id TEXT NOT NULL UNIQUE,
+  attempt_id TEXT NOT NULL UNIQUE,
+  generation INTEGER NOT NULL CHECK(generation>0),
+  artifact_id TEXT NOT NULL UNIQUE CHECK(length(artifact_id)=40 AND substr(artifact_id,1,4)='art_' AND substr(artifact_id,19,1)='7'),
+  materialization_id TEXT NOT NULL UNIQUE CHECK(length(materialization_id)=40 AND substr(materialization_id,1,4)='mat_' AND substr(materialization_id,19,1)='7'),
+  result_id TEXT NOT NULL UNIQUE CHECK(length(result_id)=40 AND substr(result_id,1,4)='res_' AND substr(result_id,19,1)='7'),
+  state TEXT NOT NULL CHECK(state IN ('prepared','running','recovery_required','completed')),
+  phase TEXT NOT NULL CHECK(phase IN ('prepared','snapshot_started','snapshot_selected','bundle_write_started','bundle_verified','cas_install_started','cas_installed','materialize_started','materialized','completed')),
+  claim_owner TEXT CHECK(claim_owner IS NULL OR length(CAST(claim_owner AS BLOB)) BETWEEN 1 AND 128),
+  claim_expires_at INTEGER,
+  claim_generation INTEGER NOT NULL DEFAULT 0 CHECK(claim_generation>=0),
+  repository_id INTEGER NOT NULL CHECK(repository_id>0),
+  base_sha TEXT NOT NULL CHECK(length(base_sha)=40 AND base_sha NOT GLOB '*[^0-9a-f]*'),
+  opencode_session_id TEXT NOT NULL CHECK(length(opencode_session_id)=36 AND substr(opencode_session_id,1,4)='ses_' AND substr(opencode_session_id,5) NOT GLOB '*[^0-9a-f]*'),
+  opencode_message_id TEXT NOT NULL CHECK(length(opencode_message_id)=36 AND substr(opencode_message_id,1,4)='msg_' AND substr(opencode_message_id,5) NOT GLOB '*[^0-9a-f]*'),
+  result_commit TEXT CHECK(result_commit IS NULL OR (length(result_commit)=40 AND result_commit NOT GLOB '*[^0-9a-f]*')),
+  tree_oid TEXT CHECK(tree_oid IS NULL OR (length(tree_oid)=40 AND tree_oid NOT GLOB '*[^0-9a-f]*')),
+  outcome TEXT CHECK(outcome IS NULL OR outcome IN ('changed','no_changes')),
+  result_manifest_json TEXT CHECK(result_manifest_json IS NULL OR (json_valid(result_manifest_json) AND length(CAST(result_manifest_json AS BLOB))<=4194304)),
+  result_manifest_entries INTEGER CHECK(result_manifest_entries IS NULL OR result_manifest_entries>=0),
+  result_manifest_sha256 BLOB CHECK(result_manifest_sha256 IS NULL OR length(result_manifest_sha256)=32),
+  artifact_manifest_json TEXT CHECK(artifact_manifest_json IS NULL OR (json_valid(artifact_manifest_json) AND json_type(artifact_manifest_json)='object' AND length(CAST(artifact_manifest_json AS BLOB))<=4194304)),
+  artifact_manifest_sha256 BLOB CHECK(artifact_manifest_sha256 IS NULL OR length(artifact_manifest_sha256)=32),
+  cas_locator TEXT CHECK(cas_locator IS NULL OR (length(cas_locator)=71 AND substr(cas_locator,1,7)='sha256:' AND substr(cas_locator,8) NOT GLOB '*[^0-9a-f]*')),
+  bundle_sha256 BLOB CHECK(bundle_sha256 IS NULL OR length(bundle_sha256)=32),
+  bundle_size INTEGER CHECK(bundle_size IS NULL OR bundle_size>=0),
+  collected_at INTEGER,
+  recovery_reason TEXT CHECK(recovery_reason IS NULL OR length(CAST(recovery_reason AS BLOB)) BETWEEN 1 AND 1000),
+  revision INTEGER NOT NULL CHECK(revision>=1),
+  created_at INTEGER NOT NULL CHECK(created_at>=0),
+  updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),
+  CHECK((claim_owner IS NULL AND claim_expires_at IS NULL) OR
+        (claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_generation>0 AND claim_expires_at>updated_at AND claim_expires_at<=updated_at+300000)),
+  CHECK((phase IN ('prepared','snapshot_started')) OR
+        (result_commit IS NOT NULL AND tree_oid IS NOT NULL AND outcome IS NOT NULL AND result_manifest_json IS NOT NULL AND
+         result_manifest_entries IS NOT NULL AND result_manifest_sha256 IS NOT NULL AND artifact_manifest_json IS NOT NULL AND
+         artifact_manifest_sha256 IS NOT NULL AND cas_locator='sha256:'||lower(hex(artifact_manifest_sha256)) AND collected_at IS NOT NULL)),
+  CHECK(phase NOT IN ('bundle_verified','cas_install_started','cas_installed','materialize_started','materialized','completed') OR
+        (bundle_sha256 IS NOT NULL AND bundle_size IS NOT NULL)),
+  FOREIGN KEY(task_id,workspace_id) REFERENCES tasks(id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  FOREIGN KEY(attempt_id,task_id,workspace_id) REFERENCES attempts(id,task_id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  FOREIGN KEY(workspace_id,repository_id) REFERENCES workspaces(id,repository_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  UNIQUE(task_id,generation)
+) STRICT;
+CREATE INDEX background_run_exports_work ON background_run_exports(workspace_id,state,claim_expires_at,created_at,id);
+
+CREATE TABLE artifact_materializations (
+  id TEXT PRIMARY KEY CHECK(length(id)=40 AND substr(id,1,4)='mat_' AND substr(id,19,1)='7' AND replace(substr(id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
+  seal_request_id TEXT NOT NULL UNIQUE REFERENCES background_run_seal_requests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  export_id TEXT NOT NULL UNIQUE REFERENCES background_run_exports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  artifact_id TEXT NOT NULL UNIQUE CHECK(length(artifact_id)=40 AND substr(artifact_id,1,4)='art_' AND substr(artifact_id,19,1)='7'),
+  result_id TEXT NOT NULL UNIQUE CHECK(length(result_id)=40 AND substr(result_id,1,4)='res_' AND substr(result_id,19,1)='7'),
+  state TEXT NOT NULL CHECK(state IN ('prepared','ready','recovery_required')),
+  result_commit TEXT,
+  tree_oid TEXT,
+  proof_sha256 BLOB CHECK(proof_sha256 IS NULL OR length(proof_sha256)=32),
+  recovery_reason TEXT CHECK(recovery_reason IS NULL OR length(CAST(recovery_reason AS BLOB)) BETWEEN 1 AND 1000),
+  revision INTEGER NOT NULL CHECK(revision>=1),
+  created_at INTEGER NOT NULL CHECK(created_at>=0),
+  updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),
+  CHECK((state='prepared' AND result_commit IS NULL AND tree_oid IS NULL AND proof_sha256 IS NULL AND recovery_reason IS NULL) OR
+        (state='ready' AND length(result_commit)=40 AND length(tree_oid)=40 AND proof_sha256 IS NOT NULL AND recovery_reason IS NULL) OR
+        (state='recovery_required' AND recovery_reason IS NOT NULL))
+) STRICT;
+
+CREATE TABLE background_run_writer_fences (
+  seal_request_id TEXT PRIMARY KEY REFERENCES background_run_seal_requests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  export_id TEXT NOT NULL UNIQUE REFERENCES background_run_exports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  task_id TEXT NOT NULL UNIQUE,
+  attempt_id TEXT NOT NULL UNIQUE,
+  generation INTEGER NOT NULL CHECK(generation>0),
+  kind TEXT NOT NULL CHECK(kind IN ('never_created','never_started','runtime_stopped')),
+  container_id TEXT,
+  container_started_at TEXT,
+  runtime_epoch INTEGER,
+  stopped_at INTEGER,
+  proof_sha256 BLOB NOT NULL CHECK(length(proof_sha256)=32),
+  recorded_at INTEGER NOT NULL CHECK(recorded_at>=0),
+  CHECK((kind='never_created' AND container_id IS NULL AND container_started_at IS NULL AND runtime_epoch IS NULL AND stopped_at IS NULL) OR
+        (kind='never_started' AND container_id IS NOT NULL AND container_started_at IS NULL AND runtime_epoch IS NULL AND stopped_at IS NULL) OR
+        (kind='runtime_stopped' AND container_id IS NOT NULL AND container_started_at IS NOT NULL AND runtime_epoch>0 AND stopped_at IS NOT NULL))
+) STRICT;
+
+CREATE TABLE retained_artifacts (
+  id TEXT PRIMARY KEY CHECK(length(id)=40 AND substr(id,1,4)='art_' AND substr(id,19,1)='7' AND replace(substr(id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
+  seal_request_id TEXT NOT NULL UNIQUE REFERENCES background_run_seal_requests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  export_id TEXT NOT NULL UNIQUE REFERENCES background_run_exports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  materialization_id TEXT NOT NULL UNIQUE REFERENCES artifact_materializations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  result_id TEXT NOT NULL UNIQUE,
+  workspace_id TEXT NOT NULL,
+  task_id TEXT NOT NULL UNIQUE,
+  attempt_id TEXT NOT NULL UNIQUE,
+  generation INTEGER NOT NULL CHECK(generation>0),
+  manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json) AND json_type(manifest_json)='object' AND length(CAST(manifest_json AS BLOB))<=4194304),
+  manifest_sha256 BLOB NOT NULL UNIQUE CHECK(length(manifest_sha256)=32),
+  changes_sha256 BLOB NOT NULL CHECK(length(changes_sha256)=32),
+  cas_locator TEXT NOT NULL CHECK(length(cas_locator)=71 AND cas_locator='sha256:'||lower(hex(manifest_sha256))),
+  bundle_sha256 BLOB NOT NULL CHECK(length(bundle_sha256)=32),
+  bundle_size INTEGER NOT NULL CHECK(bundle_size>=0),
+  base_sha TEXT NOT NULL CHECK(length(base_sha)=40 AND base_sha NOT GLOB '*[^0-9a-f]*'),
+  result_commit TEXT NOT NULL,
+  tree_oid TEXT NOT NULL,
+  opencode_session_id TEXT NOT NULL CHECK(length(opencode_session_id)=36 AND substr(opencode_session_id,1,4)='ses_'),
+  opencode_message_id TEXT NOT NULL CHECK(length(opencode_message_id)=36 AND substr(opencode_message_id,1,4)='msg_'),
+  committed_at INTEGER NOT NULL CHECK(committed_at>=0),
+  FOREIGN KEY(task_id,workspace_id) REFERENCES tasks(id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  FOREIGN KEY(attempt_id,task_id,workspace_id) REFERENCES attempts(id,task_id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  UNIQUE(task_id,generation)
+) STRICT;
+
+CREATE TRIGGER background_run_seal_requests_immutable_update BEFORE UPDATE ON background_run_seal_requests BEGIN SELECT RAISE(ABORT,'background run seal request is immutable'); END;
+CREATE TRIGGER background_run_seal_requests_immutable_delete BEFORE DELETE ON background_run_seal_requests BEGIN SELECT RAISE(ABORT,'background run seal request is durable'); END;
+CREATE TRIGGER background_run_writer_fences_immutable_update BEFORE UPDATE ON background_run_writer_fences BEGIN SELECT RAISE(ABORT,'writer fence is immutable'); END;
+CREATE TRIGGER background_run_writer_fences_immutable_delete BEFORE DELETE ON background_run_writer_fences BEGIN SELECT RAISE(ABORT,'writer fence is durable'); END;
+CREATE TRIGGER retained_artifacts_immutable_update BEFORE UPDATE ON retained_artifacts BEGIN SELECT RAISE(ABORT,'retained artifact is immutable'); END;
+CREATE TRIGGER retained_artifacts_immutable_delete BEFORE DELETE ON retained_artifacts BEGIN SELECT RAISE(ABORT,'retained artifact is durable'); END;
+
+CREATE TRIGGER background_run_exports_immutable_tuple BEFORE UPDATE ON background_run_exports WHEN
+  NEW.id<>OLD.id OR NEW.seal_request_id<>OLD.seal_request_id OR NEW.workspace_id<>OLD.workspace_id OR NEW.task_id<>OLD.task_id OR
+  NEW.attempt_id<>OLD.attempt_id OR NEW.generation<>OLD.generation OR NEW.artifact_id<>OLD.artifact_id OR
+  NEW.materialization_id<>OLD.materialization_id OR NEW.result_id<>OLD.result_id OR NEW.repository_id<>OLD.repository_id OR
+  NEW.base_sha<>OLD.base_sha OR NEW.opencode_session_id<>OLD.opencode_session_id OR NEW.opencode_message_id<>OLD.opencode_message_id OR NEW.created_at<>OLD.created_at OR
+  (OLD.result_commit IS NOT NULL AND (NEW.result_commit IS NOT OLD.result_commit OR NEW.tree_oid IS NOT OLD.tree_oid OR NEW.outcome IS NOT OLD.outcome OR
+   NEW.result_manifest_json IS NOT OLD.result_manifest_json OR NEW.result_manifest_entries IS NOT OLD.result_manifest_entries OR
+   NEW.result_manifest_sha256 IS NOT OLD.result_manifest_sha256 OR NEW.artifact_manifest_json IS NOT OLD.artifact_manifest_json OR
+   NEW.artifact_manifest_sha256 IS NOT OLD.artifact_manifest_sha256 OR NEW.cas_locator IS NOT OLD.cas_locator OR NEW.collected_at IS NOT OLD.collected_at)) OR
+  (OLD.bundle_sha256 IS NOT NULL AND (NEW.bundle_sha256 IS NOT OLD.bundle_sha256 OR NEW.bundle_size IS NOT OLD.bundle_size))
+BEGIN SELECT RAISE(ABORT,'background export tuple is immutable'); END;
+CREATE TRIGGER background_run_exports_revision BEFORE UPDATE ON background_run_exports WHEN
+  NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR NEW.claim_generation<OLD.claim_generation OR NEW.claim_generation>OLD.claim_generation+1
+BEGIN SELECT RAISE(ABORT,'invalid background export revision'); END;
+CREATE TRIGGER background_run_exports_phase BEFORE UPDATE OF phase ON background_run_exports WHEN NEW.phase<>OLD.phase AND NOT (
+  (OLD.phase='prepared' AND NEW.phase='snapshot_started') OR (OLD.phase='snapshot_started' AND NEW.phase='snapshot_selected') OR
+  (OLD.phase='snapshot_selected' AND NEW.phase='bundle_write_started') OR (OLD.phase='bundle_write_started' AND NEW.phase='bundle_verified') OR
+  (OLD.phase='bundle_verified' AND NEW.phase='cas_install_started') OR (OLD.phase='cas_install_started' AND NEW.phase='cas_installed') OR
+  (OLD.phase='cas_installed' AND NEW.phase='materialize_started') OR (OLD.phase='materialize_started' AND NEW.phase='materialized') OR
+  (OLD.phase='materialized' AND NEW.phase='completed'))
+BEGIN SELECT RAISE(ABORT,'invalid background export phase'); END;
+CREATE TRIGGER background_run_exports_state BEFORE UPDATE OF state ON background_run_exports WHEN NEW.state<>OLD.state AND NOT (
+  (OLD.state IN ('prepared','recovery_required') AND NEW.state='running') OR
+  (OLD.state='running' AND NEW.state='recovery_required') OR
+  (OLD.state='running' AND NEW.state='completed' AND NEW.phase='completed'))
+BEGIN SELECT RAISE(ABORT,'invalid background export state'); END;
+CREATE TRIGGER background_run_exports_terminal BEFORE UPDATE ON background_run_exports WHEN OLD.state='completed'
+BEGIN SELECT RAISE(ABORT,'completed background export is immutable'); END;
+CREATE TRIGGER background_run_exports_delete BEFORE DELETE ON background_run_exports BEGIN SELECT RAISE(ABORT,'background export is durable'); END;
+
+CREATE TRIGGER artifact_materializations_transition BEFORE UPDATE ON artifact_materializations BEGIN
+  SELECT CASE WHEN OLD.state<>'prepared' OR NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR
+    NEW.id<>OLD.id OR NEW.seal_request_id<>OLD.seal_request_id OR NEW.export_id<>OLD.export_id OR NEW.artifact_id<>OLD.artifact_id OR
+    NEW.result_id<>OLD.result_id OR NEW.created_at<>OLD.created_at OR NEW.state NOT IN ('ready','recovery_required')
+    THEN RAISE(ABORT,'invalid artifact materialization transition') END;
+END;
+CREATE TRIGGER artifact_materializations_delete BEFORE DELETE ON artifact_materializations BEGIN SELECT RAISE(ABORT,'artifact materialization is durable'); END;
+
+CREATE TRIGGER artifact_manifests_safe_insert BEFORE INSERT ON retained_artifacts WHEN EXISTS (
+  SELECT 1 FROM json_tree(NEW.manifest_json) WHERE
+    lower(COALESCE(key,'')) IN ('host_path','remote_url','prompt','environment','credential','credentials','cookie','cookies','authorization','actor_auth','opencode_output','raw_output') OR
+    (type='text' AND (value LIKE '/%' OR lower(value) LIKE 'http://%' OR lower(value) LIKE 'https://%' OR value GLOB '[A-Za-z]:\\*')))
+BEGIN SELECT RAISE(ABORT,'artifact manifest contains forbidden authority'); END;
+CREATE TRIGGER background_export_manifests_safe_update BEFORE UPDATE OF artifact_manifest_json ON background_run_exports
+WHEN NEW.artifact_manifest_json IS NOT NULL AND EXISTS (
+  SELECT 1 FROM json_tree(NEW.artifact_manifest_json) WHERE
+    lower(COALESCE(key,'')) IN ('host_path','remote_url','prompt','environment','credential','credentials','cookie','cookies','authorization','actor_auth','opencode_output','raw_output') OR
+    (type='text' AND (value LIKE '/%' OR lower(value) LIKE 'http://%' OR lower(value) LIKE 'https://%' OR value GLOB '[A-Za-z]:\\*')))
+BEGIN SELECT RAISE(ABORT,'background export manifest contains forbidden authority'); END;
+
+CREATE TRIGGER background_runs_retained_tuple_immutable BEFORE UPDATE ON background_runs WHEN OLD.background_seal_request_id IS NOT NULL AND (
+  NEW.background_seal_request_id IS NOT OLD.background_seal_request_id OR NEW.artifact_export_id IS NOT OLD.artifact_export_id OR
+  NEW.retained_artifact_id IS NOT OLD.retained_artifact_id OR NEW.materialization_id IS NOT OLD.materialization_id OR
+  NEW.retained_result_id IS NOT OLD.retained_result_id)
+BEGIN SELECT RAISE(ABORT,'background retained tuple is immutable'); END;
+CREATE TRIGGER background_runs_result_ready_authority BEFORE UPDATE OF state ON background_runs
+WHEN OLD.state<>'result_ready' AND NEW.state='result_ready' AND (NEW.result_authority_phase<>'artifact_committed' OR NEW.retained_result_id IS NULL OR
+  NEW.retained_artifact_id IS NULL OR NEW.artifact_export_id IS NULL OR NEW.materialization_id IS NULL OR NOT EXISTS (
+    SELECT 1 FROM results result JOIN retained_artifacts artifact ON artifact.id=NEW.retained_artifact_id
+    JOIN background_run_exports export ON export.id=NEW.artifact_export_id
+    JOIN artifact_materializations materialization ON materialization.id=NEW.materialization_id
+    WHERE result.id=NEW.retained_result_id AND result.source_kind='retained_artifact' AND result.retained_artifact_id=artifact.id AND
+      result.artifact_export_id=export.id AND result.materialization_id=materialization.id AND artifact.result_id=result.id AND
+      export.result_id=result.id AND materialization.result_id=result.id))
+BEGIN SELECT RAISE(ABORT,'background result_ready requires retained authority'); END;
+CREATE TRIGGER background_runs_retained_cleanup_gate BEFORE UPDATE OF effect_phase ON background_runs
+WHEN OLD.background_seal_request_id IS NOT NULL AND OLD.state='result_ready' AND OLD.effect_phase='writer_inactive' AND NEW.effect_phase='route_removed' AND
+  (OLD.result_authority_phase<>'cleanup' OR NOT EXISTS (
+    SELECT 1 FROM results result JOIN retained_artifacts artifact ON artifact.id=OLD.retained_artifact_id
+    JOIN background_run_exports export ON export.id=OLD.artifact_export_id
+    JOIN artifact_materializations materialization ON materialization.id=OLD.materialization_id
+    WHERE result.id=OLD.retained_result_id AND result.source_kind='retained_artifact' AND artifact.result_id=result.id AND
+      export.state='completed' AND export.phase='completed' AND export.result_id=result.id AND materialization.state='ready' AND materialization.result_id=result.id))
+BEGIN SELECT RAISE(ABORT,'retained cleanup has no exact committed tuple'); END;
+
+CREATE TRIGGER background_runs_phase_transition BEFORE UPDATE OF effect_phase ON background_runs
+WHEN NEW.effect_phase<>OLD.effect_phase AND NOT (
+  (OLD.effect_phase='absent' AND NEW.effect_phase IN ('provision_intent','pre_effect_failed')) OR
+  (OLD.effect_phase='provision_intent' AND NEW.effect_phase IN ('clone_observed','stop_intent','pre_effect_failed')) OR
+  (OLD.effect_phase='clone_observed' AND NEW.effect_phase IN ('volume_observed','stop_intent')) OR
+  (OLD.effect_phase='volume_observed' AND NEW.effect_phase IN ('container_observed','stop_intent')) OR
+  (OLD.effect_phase='container_observed' AND NEW.effect_phase IN ('health_observed','stop_intent')) OR
+  (OLD.effect_phase='health_observed' AND NEW.effect_phase IN ('ready','stop_intent')) OR
+  (OLD.effect_phase='ready' AND NEW.effect_phase IN ('session_observed','stop_intent')) OR
+  (OLD.effect_phase='session_observed' AND NEW.effect_phase IN ('prompt_intent','stop_intent')) OR
+  (OLD.effect_phase='prompt_intent' AND NEW.effect_phase IN ('prompt_admitted','stop_intent')) OR
+  (OLD.effect_phase='prompt_admitted' AND NEW.effect_phase='stop_intent') OR
+  (OLD.effect_phase='stop_intent' AND NEW.effect_phase='writer_inactive') OR
+  (OLD.effect_phase='writer_inactive' AND NEW.effect_phase='route_removed') OR
+  (OLD.effect_phase='route_removed' AND NEW.effect_phase='container_removed') OR
+  (OLD.effect_phase='container_removed' AND NEW.effect_phase='volume_removed') OR
+  (OLD.effect_phase='volume_removed' AND NEW.effect_phase='clone_removed') OR
+  (OLD.effect_phase='clone_removed' AND NEW.effect_phase='cleanup_complete'))
+BEGIN SELECT RAISE(ABORT,'invalid background run effect transition'); END;
+
+CREATE TRIGGER background_runs_state_transition BEFORE UPDATE OF state ON background_runs
+WHEN NEW.state<>OLD.state AND NOT (
+  (OLD.state='queued' AND NEW.state='setting_up' AND NEW.effect_phase='provision_intent') OR
+  (OLD.state='queued' AND NEW.state='failed' AND NEW.effect_phase='pre_effect_failed') OR
+  (OLD.state='setting_up' AND NEW.state='uncertain') OR
+  (OLD.state='uncertain' AND NEW.state='setting_up') OR
+  (OLD.state IN ('working','needs_you','uncertain') AND NEW.state IN ('working','needs_you','uncertain') AND NEW.effect_phase='prompt_admitted') OR
+  (OLD.state IN ('setting_up','working','needs_you','uncertain') AND NEW.state IN ('canceling','cleanup_required') AND NEW.effect_phase='stop_intent') OR
+  (OLD.state='canceling' AND NEW.state='cleanup_required') OR
+  (OLD.state IN ('canceling','cleanup_required') AND NEW.state='failed' AND NEW.effect_phase='cleanup_complete') OR
+  (OLD.state='cleanup_required' AND NEW.state='result_ready' AND NEW.effect_phase='writer_inactive' AND NEW.result_authority_phase='artifact_committed') OR
+  (OLD.state IN ('setting_up','uncertain') AND NEW.state='failed' AND NEW.effect_phase='pre_effect_failed'))
+BEGIN SELECT RAISE(ABORT,'invalid background run state transition'); END;
+
+CREATE TRIGGER background_runs_phase_timestamps_immutable BEFORE UPDATE ON background_runs WHEN
+ (OLD.provision_intent_at IS NOT NULL AND NEW.provision_intent_at IS NOT OLD.provision_intent_at) OR
+ (OLD.clone_observed_at IS NOT NULL AND NEW.clone_observed_at IS NOT OLD.clone_observed_at) OR
+ (OLD.volume_observed_at IS NOT NULL AND NEW.volume_observed_at IS NOT OLD.volume_observed_at) OR
+ (OLD.container_observed_at IS NOT NULL AND NEW.container_observed_at IS NOT OLD.container_observed_at) OR
+ (OLD.health_observed_at IS NOT NULL AND NEW.health_observed_at IS NOT OLD.health_observed_at) OR
+ (OLD.ready_at IS NOT NULL AND NEW.ready_at IS NOT OLD.ready_at) OR
+ (OLD.session_observed_at IS NOT NULL AND NEW.session_observed_at IS NOT OLD.session_observed_at) OR
+ (OLD.prompt_intent_at IS NOT NULL AND NEW.prompt_intent_at IS NOT OLD.prompt_intent_at) OR
+ (OLD.prompt_admitted_at IS NOT NULL AND NEW.prompt_admitted_at IS NOT OLD.prompt_admitted_at) OR
+ (OLD.stop_intent_at IS NOT NULL AND NEW.stop_intent_at IS NOT OLD.stop_intent_at) OR
+ (OLD.writer_inactive_at IS NOT NULL AND NEW.writer_inactive_at IS NOT OLD.writer_inactive_at) OR
+ (OLD.route_removed_at IS NOT NULL AND NEW.route_removed_at IS NOT OLD.route_removed_at) OR
+ (OLD.container_removed_at IS NOT NULL AND NEW.container_removed_at IS NOT OLD.container_removed_at) OR
+ (OLD.volume_removed_at IS NOT NULL AND NEW.volume_removed_at IS NOT OLD.volume_removed_at) OR
+ (OLD.clone_removed_at IS NOT NULL AND NEW.clone_removed_at IS NOT OLD.clone_removed_at) OR
+ (OLD.cleanup_completed_at IS NOT NULL AND NEW.cleanup_completed_at IS NOT OLD.cleanup_completed_at)
+BEGIN SELECT RAISE(ABORT,'background run phase timestamp is immutable'); END;
+CREATE TRIGGER background_runs_observation_immutable BEFORE UPDATE ON background_runs WHEN
+ (OLD.observed_container_id IS NOT NULL AND (NEW.observed_container_id IS NOT OLD.observed_container_id OR NEW.observed_container_started_at IS NOT OLD.observed_container_started_at OR NEW.runtime_epoch IS NOT OLD.runtime_epoch OR NEW.host_port IS NOT OLD.host_port)) OR
+ (OLD.clone_evidence IS NOT NULL AND NEW.clone_evidence IS NOT OLD.clone_evidence) OR (OLD.volume_evidence IS NOT NULL AND NEW.volume_evidence IS NOT OLD.volume_evidence) OR
+ (OLD.health_evidence IS NOT NULL AND NEW.health_evidence IS NOT OLD.health_evidence) OR (OLD.ready_evidence IS NOT NULL AND NEW.ready_evidence IS NOT OLD.ready_evidence) OR
+ (OLD.session_evidence IS NOT NULL AND NEW.session_evidence IS NOT OLD.session_evidence) OR (OLD.prompt_evidence IS NOT NULL AND NEW.prompt_evidence IS NOT OLD.prompt_evidence) OR
+ (OLD.writer_inactive_evidence IS NOT NULL AND NEW.writer_inactive_evidence IS NOT OLD.writer_inactive_evidence) OR
+ (OLD.route_removed_evidence IS NOT NULL AND NEW.route_removed_evidence IS NOT OLD.route_removed_evidence) OR
+ (OLD.container_removed_evidence IS NOT NULL AND NEW.container_removed_evidence IS NOT OLD.container_removed_evidence) OR
+ (OLD.volume_removed_evidence IS NOT NULL AND NEW.volume_removed_evidence IS NOT OLD.volume_removed_evidence) OR
+ (OLD.clone_removed_evidence IS NOT NULL AND NEW.clone_removed_evidence IS NOT OLD.clone_removed_evidence) OR
+ (OLD.absence_proof IS NOT NULL AND NEW.absence_proof IS NOT OLD.absence_proof) OR
+ (OLD.cleanup_proof IS NOT NULL AND (NEW.cleanup_proof IS NOT OLD.cleanup_proof OR NEW.cleanup_completed_at IS NOT OLD.cleanup_completed_at))
+BEGIN SELECT RAISE(ABORT,'background run resource proof is immutable'); END;
+CREATE TRIGGER background_runs_terminal_immutable BEFORE UPDATE ON background_runs
+WHEN OLD.state='failed' OR (OLD.state='result_ready' AND OLD.effect_phase='cleanup_complete')
+BEGIN SELECT RAISE(ABORT,'terminal background run is immutable'); END;
+
+DROP TRIGGER results_immutable_update;
+CREATE TRIGGER results_immutable_update BEFORE UPDATE ON results BEGIN SELECT RAISE(ABORT,'results are immutable'); END;
+CREATE INDEX results_retained_artifact ON results(retained_artifact_id) WHERE retained_artifact_id IS NOT NULL;
+
+DROP TRIGGER results_insert_integrity;
+DROP TRIGGER attempts_result_seal_integrity;
+DROP TRIGGER tasks_result_seal_integrity;
+
+CREATE TRIGGER results_insert_integrity BEFORE INSERT ON results BEGIN
+  SELECT CASE WHEN (SELECT count(*) FROM result_manifest m WHERE m.result_id=NEW.id)<>NEW.manifest_entries OR
+    (NEW.manifest_entries>0 AND ((SELECT min(ordinal) FROM result_manifest WHERE result_id=NEW.id)<>0 OR
+     (SELECT max(ordinal) FROM result_manifest WHERE result_id=NEW.id)<>NEW.manifest_entries-1))
+    THEN RAISE(ABORT,'result manifest is incomplete') END;
+  SELECT CASE WHEN NEW.source_kind='persistent_workspace' AND (
+    NEW.retained_artifact_id IS NOT NULL OR NEW.artifact_export_id IS NOT NULL OR NEW.materialization_id IS NOT NULL OR NOT EXISTS (
+      SELECT 1 FROM tasks t JOIN attempts a ON a.id=t.current_attempt_id AND a.task_id=t.id AND a.workspace_id=t.workspace_id
+      JOIN events ae ON ae.id=NEW.sealed_event_id AND ae.task_id=t.id AND ae.attempt_id=a.id AND ae.type='attempt.result_sealed'
+      JOIN events te ON te.id=NEW.completed_event_id AND te.task_id=t.id AND te.attempt_id IS NULL AND te.type='task.completed' AND
+        te.occurred_at=ae.occurred_at AND te.actor_snapshot_id=ae.actor_snapshot_id AND te.payload=ae.payload AND te.cursor>ae.cursor
+      JOIN actor_snapshots actor ON actor.id=NEW.creator_actor_snapshot_id AND actor.id=ae.actor_snapshot_id AND actor.actor_type IN ('system','recovery')
+      WHERE t.id=NEW.task_id AND t.workspace_id=NEW.workspace_id AND t.repository_id=NEW.repository_id AND t.base_sha=NEW.base_sha AND
+        t.cancel_epoch=0 AND t.sealed_result_id IS NULL AND t.revision=json_extract(ae.payload,'$.expectedTaskRevision') AND
+        a.id=NEW.attempt_id AND a.sealed_result_id IS NULL AND a.revision=json_extract(ae.payload,'$.expectedAttemptRevision') AND
+        a.base_sha=NEW.base_sha AND a.opencode_session_id=NEW.opencode_session_id AND a.opencode_message_id=NEW.opencode_message_id AND
+        ae.occurred_at=NEW.sealed_at AND json_extract(ae.payload,'$.resultId')=NEW.id AND json_extract(ae.payload,'$.resultCommit')=NEW.result_commit AND
+        json_extract(ae.payload,'$.treeOid')=NEW.tree_oid AND json_extract(ae.payload,'$.outcome')=NEW.outcome AND
+        json_extract(ae.payload,'$.manifestSha256')='sha256:'||lower(hex(NEW.manifest_sha256)) AND
+        ((NEW.completion_authority='execution_success' AND t.state='running' AND a.state='succeeded') OR
+         (NEW.completion_authority='user_seal' AND t.state IN ('running','input_required') AND a.state IN ('admitted','running','input_required') AND
+          NEW.seal_request_id IS NOT NULL AND NEW.authorizer_actor_snapshot_id IS NOT NULL))
+    )) THEN RAISE(ABORT,'persistent result has no exact current proof') END;
+  SELECT CASE WHEN NEW.source_kind='retained_artifact' AND (
+    NEW.retained_artifact_id IS NULL OR NEW.artifact_export_id IS NULL OR NEW.materialization_id IS NULL OR
+    NEW.completion_authority<>'execution_success' OR NEW.seal_request_id IS NOT NULL OR NEW.authorizer_actor_snapshot_id IS NOT NULL OR NOT EXISTS (
+      SELECT 1 FROM retained_artifacts artifact
+      JOIN background_run_exports export ON export.id=artifact.export_id
+      JOIN artifact_materializations materialization ON materialization.id=artifact.materialization_id
+      JOIN background_run_writer_fences fence ON fence.export_id=export.id
+      JOIN background_runs run ON run.task_id=artifact.task_id AND run.attempt_id=artifact.attempt_id AND run.generation=artifact.generation
+      JOIN tasks t ON t.id=artifact.task_id AND t.workspace_id=artifact.workspace_id
+      JOIN attempts a ON a.id=artifact.attempt_id AND a.task_id=t.id AND a.workspace_id=t.workspace_id
+      JOIN events ae ON ae.id=NEW.sealed_event_id AND ae.task_id=t.id AND ae.attempt_id=a.id AND ae.type='attempt.result_sealed'
+      JOIN events te ON te.id=NEW.completed_event_id AND te.task_id=t.id AND te.attempt_id IS NULL AND te.type='task.completed' AND
+        te.occurred_at=ae.occurred_at AND te.actor_snapshot_id=ae.actor_snapshot_id AND te.payload=ae.payload AND te.cursor>ae.cursor
+      JOIN actor_snapshots actor ON actor.id=NEW.creator_actor_snapshot_id AND actor.id=ae.actor_snapshot_id AND actor.actor_type IN ('system','recovery')
+      WHERE artifact.id=NEW.retained_artifact_id AND artifact.result_id=NEW.id AND artifact.export_id=NEW.artifact_export_id AND
+        artifact.materialization_id=NEW.materialization_id AND artifact.result_commit=NEW.result_commit AND artifact.tree_oid=NEW.tree_oid AND
+        artifact.changes_sha256=NEW.manifest_sha256 AND artifact.cas_locator='sha256:'||lower(hex(artifact.manifest_sha256)) AND
+        artifact.base_sha=NEW.base_sha AND artifact.opencode_session_id=NEW.opencode_session_id AND artifact.opencode_message_id=NEW.opencode_message_id AND
+        export.phase='materialized' AND export.state='running' AND export.result_id=NEW.id AND export.artifact_manifest_sha256=artifact.manifest_sha256 AND
+        export.result_manifest_sha256=artifact.changes_sha256 AND export.cas_locator=artifact.cas_locator AND
+        materialization.state='ready' AND materialization.result_id=NEW.id AND materialization.result_commit=NEW.result_commit AND materialization.tree_oid=NEW.tree_oid AND
+        run.state='cleanup_required' AND run.effect_phase='writer_inactive' AND run.result_authority_phase='exporting' AND
+        run.background_seal_request_id=artifact.seal_request_id AND run.artifact_export_id=artifact.export_id AND run.retained_artifact_id=artifact.id AND
+        run.materialization_id=artifact.materialization_id AND run.retained_result_id=NEW.id AND
+        t.state='queued' AND t.cancel_epoch=0 AND t.sealed_result_id IS NULL AND t.current_attempt_id=a.id AND
+        a.state='prepared' AND a.sealed_result_id IS NULL AND t.revision=json_extract(ae.payload,'$.expectedTaskRevision') AND
+        a.revision=json_extract(ae.payload,'$.expectedAttemptRevision') AND json_extract(ae.payload,'$.sourceKind')='retained_artifact'
+    )) THEN RAISE(ABORT,'retained result has no exact authority tuple') END;
+END;
+
+CREATE TRIGGER attempts_result_seal_integrity BEFORE UPDATE OF sealed_result_id ON attempts
+WHEN OLD.sealed_result_id IS NULL AND NEW.sealed_result_id IS NOT NULL BEGIN
+  SELECT CASE WHEN NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR NOT EXISTS (
+    SELECT 1 FROM results r JOIN events e ON e.id=r.sealed_event_id WHERE r.id=NEW.sealed_result_id AND
+      r.task_id=OLD.task_id AND r.attempt_id=OLD.id AND r.workspace_id=OLD.workspace_id AND r.sealed_at=NEW.updated_at AND
+      json_extract(e.payload,'$.expectedAttemptRevision')=OLD.revision AND (
+        (r.source_kind='retained_artifact' AND OLD.state='prepared' AND NEW.state='superseded') OR
+        (r.source_kind='persistent_workspace' AND r.completion_authority='execution_success' AND OLD.state='succeeded' AND NEW.state='succeeded') OR
+        (r.source_kind='persistent_workspace' AND r.completion_authority='user_seal' AND OLD.state IN ('admitted','running','input_required') AND NEW.state='superseded'))
+  ) THEN RAISE(ABORT,'invalid attempt result seal') END;
+END;
+
+CREATE TRIGGER tasks_result_seal_integrity BEFORE UPDATE OF state,sealed_result_id ON tasks
+WHEN OLD.state<>'completed' AND NEW.state='completed' BEGIN
+  SELECT CASE WHEN OLD.cancel_epoch<>0 OR NEW.cancel_epoch<>0 OR OLD.sealed_result_id IS NOT NULL OR NEW.sealed_result_id IS NULL OR
+    NEW.terminal_reason IS NOT NULL OR NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR NOT EXISTS (
+      SELECT 1 FROM results r JOIN attempts a ON a.id=OLD.current_attempt_id AND a.task_id=OLD.id AND a.workspace_id=OLD.workspace_id
+      JOIN events ae ON ae.id=r.sealed_event_id JOIN events te ON te.id=r.completed_event_id
+      WHERE r.id=NEW.sealed_result_id AND r.task_id=OLD.id AND r.attempt_id=a.id AND a.sealed_result_id=r.id AND
+        r.sealed_at=NEW.updated_at AND te.cursor=NEW.latest_event_cursor AND ae.cursor<te.cursor AND
+        json_extract(ae.payload,'$.expectedTaskRevision')=OLD.revision AND (
+          (r.source_kind='retained_artifact' AND OLD.state='queued' AND a.state='superseded') OR
+          (r.source_kind='persistent_workspace' AND OLD.state IN ('running','input_required')))
+    ) THEN RAISE(ABORT,'invalid completed task result seal') END;
+END;
+`
 
 const backgroundRunPromptAttemptFenceSchema = `
 ALTER TABLE background_runs ADD COLUMN prompt_request_attempted_at INTEGER

@@ -350,7 +350,7 @@ func TestMigrationDriftAndUnknownVersionFailClosed(t *testing.T) {
 			t.Fatal(err)
 		}
 		raw := openRaw(t, path)
-		if _, err := raw.Exec(`PRAGMA user_version=10`); err != nil {
+		if _, err := raw.Exec(`PRAGMA user_version=11`); err != nil {
 			t.Fatal(err)
 		}
 		_ = raw.Close()

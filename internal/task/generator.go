@@ -41,6 +41,20 @@ type SealRequestIDs struct {
 	TaskEventID   EventID
 }
 
+// BackgroundSealIDs is allocated before run.seal admission. Every identity
+// needed by export, retention, materialization, and result commit is therefore
+// durable before the first external effect starts.
+type BackgroundSealIDs struct {
+	SealRequestID      SealRequestID
+	ReceiptID          ReceiptID
+	ArtifactExportID   ArtifactExportID
+	RetainedArtifactID RetainedArtifactID
+	MaterializationID  MaterializationID
+	ResultID           ResultID
+	ResultEventID      EventID
+	TaskEventID        EventID
+}
+
 // PublicationAdmissionIDs is allocated before one atomic publication
 // admission. OperationID is the aggregate identity used to derive its branch.
 type PublicationAdmissionIDs struct {
@@ -111,6 +125,36 @@ func (g *Generator) GenerateSealRequestIDs() (SealRequestIDs, error) {
 	return ids, nil
 }
 
+func (g *Generator) GenerateBackgroundSealIDs() (BackgroundSealIDs, error) {
+	var ids BackgroundSealIDs
+	var err error
+	if ids.SealRequestID, err = g.SealRequestID(); err != nil {
+		return BackgroundSealIDs{}, err
+	}
+	if ids.ReceiptID, err = g.ReceiptID(); err != nil {
+		return BackgroundSealIDs{}, err
+	}
+	if ids.ArtifactExportID, err = g.ArtifactExportID(); err != nil {
+		return BackgroundSealIDs{}, err
+	}
+	if ids.RetainedArtifactID, err = g.RetainedArtifactID(); err != nil {
+		return BackgroundSealIDs{}, err
+	}
+	if ids.MaterializationID, err = g.MaterializationID(); err != nil {
+		return BackgroundSealIDs{}, err
+	}
+	if ids.ResultID, err = g.ResultID(); err != nil {
+		return BackgroundSealIDs{}, err
+	}
+	if ids.ResultEventID, err = g.EventID(); err != nil {
+		return BackgroundSealIDs{}, err
+	}
+	if ids.TaskEventID, err = g.EventID(); err != nil {
+		return BackgroundSealIDs{}, err
+	}
+	return ids, nil
+}
+
 func (g *Generator) GeneratePublicationAdmissionIDs() (PublicationAdmissionIDs, error) {
 	var ids PublicationAdmissionIDs
 	var err error
@@ -167,6 +211,21 @@ func (g *Generator) SealRequestID() (SealRequestID, error) {
 func (g *Generator) ResultID() (ResultID, error) {
 	value, err := g.fernID("res_")
 	return ResultID(value), err
+}
+
+func (g *Generator) ArtifactExportID() (ArtifactExportID, error) {
+	value, err := g.fernID("exp_")
+	return ArtifactExportID(value), err
+}
+
+func (g *Generator) RetainedArtifactID() (RetainedArtifactID, error) {
+	value, err := g.fernID("art_")
+	return RetainedArtifactID(value), err
+}
+
+func (g *Generator) MaterializationID() (MaterializationID, error) {
+	value, err := g.fernID("mat_")
+	return MaterializationID(value), err
 }
 
 func (g *Generator) VerificationID() (VerificationID, error) {

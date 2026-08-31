@@ -184,9 +184,20 @@ type Result struct {
 	SealedEventID       task.EventID
 	CompletedEventID    task.EventID
 	Revision            int64
+	SourceKind          ResultSourceKind
+	RetainedArtifactID  task.RetainedArtifactID
+	ArtifactExportID    task.ArtifactExportID
+	MaterializationID   task.MaterializationID
 	CreatedAt           time.Time
 	UpdatedAt           time.Time
 }
+
+type ResultSourceKind string
+
+const (
+	ResultSourcePersistentWorkspace ResultSourceKind = "persistent_workspace"
+	ResultSourceRetainedArtifact    ResultSourceKind = "retained_artifact"
+)
 
 type SealCompletionAuthority string
 
@@ -489,8 +500,11 @@ const (
 	BackgroundRunEffectSessionObserved        BackgroundRunEffectPhase = "session_observed"
 	BackgroundRunEffectPromptIntent           BackgroundRunEffectPhase = "prompt_intent"
 	BackgroundRunEffectPromptAdmitted         BackgroundRunEffectPhase = "prompt_admitted"
+	BackgroundRunEffectSealIntent             BackgroundRunEffectPhase = "seal_intent"
 	BackgroundRunEffectStopIntent             BackgroundRunEffectPhase = "stop_intent"
 	BackgroundRunEffectWriterInactive         BackgroundRunEffectPhase = "writer_inactive"
+	BackgroundRunEffectExporting              BackgroundRunEffectPhase = "exporting"
+	BackgroundRunEffectArtifactCommitted      BackgroundRunEffectPhase = "artifact_committed"
 	BackgroundRunEffectRouteRemoved           BackgroundRunEffectPhase = "route_removed"
 	BackgroundRunEffectContainerRemoved       BackgroundRunEffectPhase = "container_removed"
 	BackgroundRunEffectVolumeRemoved          BackgroundRunEffectPhase = "volume_removed"
@@ -520,7 +534,8 @@ func (phase BackgroundRunEffectPhase) valid() bool {
 	case BackgroundRunEffectAbsent, BackgroundRunEffectProvisionIntent, BackgroundRunEffectCloneObserved,
 		BackgroundRunEffectVolumeObserved, BackgroundRunEffectContainerObserved, BackgroundRunEffectHealthObserved,
 		BackgroundRunEffectReady, BackgroundRunEffectSessionObserved, BackgroundRunEffectPromptIntent,
-		BackgroundRunEffectPromptAdmitted, BackgroundRunEffectStopIntent, BackgroundRunEffectWriterInactive,
+		BackgroundRunEffectPromptAdmitted, BackgroundRunEffectSealIntent, BackgroundRunEffectStopIntent, BackgroundRunEffectWriterInactive,
+		BackgroundRunEffectExporting, BackgroundRunEffectArtifactCommitted,
 		BackgroundRunEffectRouteRemoved, BackgroundRunEffectContainerRemoved, BackgroundRunEffectVolumeRemoved,
 		BackgroundRunEffectCloneRemoved, BackgroundRunEffectCleanupComplete, BackgroundRunEffectPreEffectFailed:
 		return true
@@ -611,6 +626,12 @@ type BackgroundRun struct {
 	CleanupCompletedAt         *time.Time
 	CleanupProof               string
 	AbsenceProof               string
+	BackgroundSealRequestID    task.SealRequestID
+	ArtifactExportID           task.ArtifactExportID
+	RetainedArtifactID         task.RetainedArtifactID
+	MaterializationID          task.MaterializationID
+	RetainedResultID           task.ResultID
+	ResultAuthorityPhase       string
 	Revision                   int64
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time
