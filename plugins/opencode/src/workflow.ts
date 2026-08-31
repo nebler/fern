@@ -2,7 +2,7 @@ import type { FernClient } from "./client.js"
 import { readGitContext, requireLocalRunMode, requireRunnableGitContext, type GitContext } from "./git.js"
 
 export const SUPPORTED_OPENCODE_VERSION = "1.18.16"
-export const OPENCODE_PROFILE = `opencode-${SUPPORTED_OPENCODE_VERSION}`
+export const FERN_REMOTE_EXECUTION_PROFILE = "source-39fb919a054190498f6d5b7985bde231f93ad7a6"
 export const INSTRUCTION_MAX_LENGTH = 4_000
 
 export type RunConfirmation = {
@@ -66,7 +66,8 @@ export async function createRunWorkflow(input: {
   }
 
   const git = requireRunnableGitContext(await readGitContext(input.directory))
-  if (!(await input.confirm({ host: input.host, instruction, profile: OPENCODE_PROFILE, git }))) return undefined
+  if (!(await input.confirm({ host: input.host, instruction, profile: FERN_REMOTE_EXECUTION_PROFILE, git })))
+    return undefined
 
   const current = await readGitContext(input.directory)
   if (!sameGitContext(current, git)) {
@@ -74,10 +75,15 @@ export async function createRunWorkflow(input: {
   }
   requireRunnableGitContext(current)
 
-  const digest = await requestDigest({ instruction, profile: OPENCODE_PROFILE, git })
+  const digest = await requestDigest({ instruction, profile: FERN_REMOTE_EXECUTION_PROFILE, git })
   const idempotencyKey = (await input.pending.get(digest)) ?? (input.idempotencyKey ?? crypto.randomUUID)()
   await input.pending.set(digest, idempotencyKey)
-  const runID = await input.client.createRun({ instruction, profile: OPENCODE_PROFILE, git, idempotencyKey })
+  const runID = await input.client.createRun({
+    instruction,
+    profile: FERN_REMOTE_EXECUTION_PROFILE,
+    git,
+    idempotencyKey,
+  })
   await input.pending.delete(digest)
   return runID
 }

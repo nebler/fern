@@ -4,7 +4,7 @@ Repo-local OpenCode TUI plugin for Fern Background Runs.
 
 ## Status
 
-This is an unpublished development integration targeting the OpenCode TUI plugin contract in `@opencode-ai/plugin` `1.18.16` and OpenTUI `0.4.5`.
+This is an unpublished development integration targeting the OpenCode TUI host contract in `@opencode-ai/plugin` `1.18.16` and OpenTUI `0.4.5`. That host compatibility pin is separate from Fern's remote execution profile.
 
 Implemented:
 
@@ -14,6 +14,7 @@ Implemented:
 - `run` is local-service-only. It refuses explicit `--server` because TUI state paths belong to the server while Git subprocesses execute on the local TUI host. A server-side repository identity API is required before remote submission can be safe.
 - Fixed-argument Git subprocesses read the canonical remote, exact `HEAD`, branch, and complete dirty state.
 - Run creation rejects missing remotes, unborn repositories, ambiguous fetch URLs, dirty worktrees, and repository changes after confirmation.
+- Run creation confirms and submits Fern's qualified remote execution profile `source-39fb919a054190498f6d5b7985bde231f93ad7a6`; it is not derived from the local OpenCode TUI version.
 - Native confirmation precedes create and stop requests. Pending creates retain only a request digest and caller-generated idempotency key so a response-loss retry reuses the same key.
 - Create reports success only for a response containing both a valid `run_id` and `committed: true`.
 - On the first explicit Fern action, the plugin asks for and validates a root HTTPS Fern origin. That non-secret canonical origin is stored in OpenCode KV storage. `FERN_ENDPOINT` remains an optional development override.
@@ -64,7 +65,7 @@ The client uses JSON and a Fern plugin bearer after device authorization:
 - `POST /fern/api/plugin-auth/start` and `POST /fern/api/plugin-auth/poll` are public and never receive the bearer.
 - `POST /fern/api/plugin-auth/self/revoke` revokes the calling credential.
 
-- `POST /fern/api/runs` with `Idempotency-Key`; expects `{ "run_id": "...", "committed": true }`.
+- `POST /fern/api/runs` with `Idempotency-Key` and profile `source-39fb919a054190498f6d5b7985bde231f93ad7a6`; expects `{ "run_id": "...", "committed": true }`.
 - `GET /fern/api/runs` and `GET /fern/api/runs/:id`.
 - `POST /fern/api/runs/:id/stop` with `Idempotency-Key`.
 - `POST /fern/api/runs/:id/open` with `Idempotency-Key`; the same-host capability URL is resolved fresh, passed only to the browser launcher, and never cached or displayed.

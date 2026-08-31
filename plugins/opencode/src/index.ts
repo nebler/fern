@@ -39,9 +39,9 @@ export { runProcess, subprocessEnvironment, type ProcessResult } from "./process
 export { ORIGIN_KV_KEY, configuredOrigin, parseOnboardingOrigin, persistOrigin, type OriginKV } from "./origin.js"
 export {
   CreateRunLatch,
+  FERN_REMOTE_EXECUTION_PROFILE,
   INSTRUCTION_MAX_LENGTH,
   InMemoryPendingSubmissionStore,
-  OPENCODE_PROFILE,
   SUPPORTED_OPENCODE_VERSION,
   createRunWorkflow,
   stopRunWorkflow,

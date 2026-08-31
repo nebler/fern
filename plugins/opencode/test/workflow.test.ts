@@ -3,11 +3,14 @@ import { mkdtemp, rm } from "node:fs/promises"
 import { join } from "node:path"
 import { tmpdir } from "node:os"
 import type { FernClient } from "../src/client.js"
+import type { GitContext } from "../src/git.js"
 import {
   CreateRunLatch,
+  FERN_REMOTE_EXECUTION_PROFILE,
   INSTRUCTION_MAX_LENGTH,
   InMemoryPendingSubmissionStore,
   createRunWorkflow,
+  type PendingSubmissionStore,
   stopRunWorkflow,
 } from "../src/workflow.js"
 
@@ -21,18 +24,34 @@ describe("createRunWorkflow", () => {
   test("confirms clean exact Git state before creating with a caller key", async () => {
     const directory = await repository()
     const calls: string[] = []
+    const pendingDigests: string[] = []
+    let createdGit: GitContext | undefined
+    const pending = {
+      async get(digest) {
+        pendingDigests.push(`get:${digest}`)
+        return undefined
+      },
+      async set(digest) {
+        pendingDigests.push(`set:${digest}`)
+      },
+      async delete(digest) {
+        pendingDigests.push(`delete:${digest}`)
+      },
+    } satisfies PendingSubmissionStore
     const client = {
       async createRun(input) {
         calls.push("create")
         expect(input.idempotencyKey).toBe("workflow-key")
         expect(input.git.remote).toBe("https://github.com/fern/example")
+        expect(input.profile).toBe("source-39fb919a054190498f6d5b7985bde231f93ad7a6")
+        createdGit = input.git
         return "run_123"
       },
     } satisfies Pick<FernClient, "createRun">
 
     const runID = await createRunWorkflow({
       client,
-      pending: new InMemoryPendingSubmissionStore(),
+      pending,
       directory,
       host: "fern.example",
       instruction: "  Fix the race  ",
@@ -40,6 +59,7 @@ describe("createRunWorkflow", () => {
         calls.push("confirm")
         expect(input.git.dirty).toBe(false)
         expect(input.instruction).toBe("Fix the race")
+        expect(input.profile).toBe("source-39fb919a054190498f6d5b7985bde231f93ad7a6")
         return true
       },
       idempotencyKey: () => "workflow-key",
@@ -47,6 +67,14 @@ describe("createRunWorkflow", () => {
 
     expect(runID).toBe("run_123")
     expect(calls).toEqual(["confirm", "create"])
+    if (!createdGit) throw new Error("create was not called")
+    const digest = await createRequestDigest(
+      "Fix the race",
+      "source-39fb919a054190498f6d5b7985bde231f93ad7a6",
+      createdGit,
+    )
+    expect(pendingDigests).toEqual([`get:${digest}`, `set:${digest}`, `delete:${digest}`])
+    expect(FERN_REMOTE_EXECUTION_PROFILE).toBe("source-39fb919a054190498f6d5b7985bde231f93ad7a6")
   })
 
   test("does not create when confirmation is canceled", async () => {
@@ -212,4 +240,19 @@ async function git(directory: string, ...args: string[]) {
   })
   const [exit, stderr] = await Promise.all([process.exited, Bun.readableStreamToText(process.stderr)])
   if (exit !== 0) throw new Error(stderr)
+}
+
+async function createRequestDigest(instruction: string, profile: string, git: GitContext) {
+  const value = JSON.stringify({
+    instruction,
+    profile,
+    root: git.root,
+    repository: git.remote,
+    head: git.head,
+    branch: git.branch,
+    dirty: git.dirty,
+  })
+  return Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value))))
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("")
 }

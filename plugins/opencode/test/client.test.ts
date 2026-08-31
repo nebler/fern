@@ -23,7 +23,7 @@ describe("FernClient", () => {
     })
     const runID = await client(server).createRun({
       instruction: "Fix the race",
-      profile: "opencode-1.18.16",
+      profile: "source-39fb919a054190498f6d5b7985bde231f93ad7a6",
       git: gitContext(),
       idempotencyKey: "caller-key",
     })
@@ -36,7 +36,7 @@ describe("FernClient", () => {
       base_oid: "a".repeat(40),
       branch: "main",
       instruction: "Fix the race",
-      profile: "opencode-1.18.16",
+      profile: "source-39fb919a054190498f6d5b7985bde231f93ad7a6",
     })
   })
 
@@ -45,7 +45,7 @@ describe("FernClient", () => {
     await expect(
       client(server).createRun({
         instruction: "Fix it",
-        profile: "opencode-1.18.16",
+        profile: "source-39fb919a054190498f6d5b7985bde231f93ad7a6",
         git: gitContext(),
         idempotencyKey: "caller-key",
       }),
@@ -192,7 +192,7 @@ describe("FernClient", () => {
     await expect(
       fern.createRun({
         instruction: "Fix it",
-        profile: "opencode-1.18.16",
+        profile: "source-39fb919a054190498f6d5b7985bde231f93ad7a6",
         git: gitContext(),
         idempotencyKey: "one-attempt",
       }),
