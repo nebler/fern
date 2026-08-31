@@ -116,6 +116,29 @@ sha256sum /usr/local/bin/fern
 /usr/local/bin/fern version
 ```
 
+Before enabling Background Runs, run the authoritative source-profile suite and
+record the exact local image ID it reports:
+
+```bash
+./integration/background-run-qualification/run.sh
+BACKGROUND_IMAGE_ID=$(docker image inspect \
+  fern/opencode-background-source:dev --format '{{.Id}}')
+[[ "$BACKGROUND_IMAGE_ID" =~ ^sha256:[0-9a-f]{64}$ ]]
+BACKGROUND_SOURCE_COMMIT=39fb919a054190498f6d5b7985bde231f93ad7a6
+docker image tag "$BACKGROUND_IMAGE_ID" \
+  "fern/opencode-background-source:$BACKGROUND_SOURCE_COMMIT"
+test "$(docker image inspect \
+  "fern/opencode-background-source:$BACKGROUND_SOURCE_COMMIT" \
+  --format '{{.Id}}')" = "$BACKGROUND_IMAGE_ID"
+```
+
+Set `tasks.backgroundImage` to that exact source-commit tag and
+`tasks.backgroundImageID` to `$BACKGROUND_IMAGE_ID`. A local ID qualifies only
+those local bytes. This repository does not publish or promote the Background
+Run source image; deployment from a registry remains blocked until an immutable
+manifest is published, its registry digest is recorded, and the pulled image is
+qualified separately.
+
 For a tagged release, follow [Release Policy](./RELEASE_POLICY.md) and verify the
 published asset provenance, digest-bound image signature/provenance/SBOM
 attestation, release manifest, and checksums. No release or tag is claimed by
@@ -136,6 +159,13 @@ The env file contains distinct random `OPENCODE_PASSWORD` and
 `FERN_CONTROL_PASSWORD` values and only required provider keys. Do not place
 secrets in YAML, unit arguments, or Git. Root and Docker administrators can
 inspect credentials forwarded into the container.
+
+If Background Runs are enabled, replace every commented task placeholder as a
+complete policy. `tasks.backgroundRoute.listen` must be exact numeric loopback.
+Its origin must use the same private `.ts.net` hostname as
+`proxy.remoteOrigin`, with a distinct explicit non-443 port matching the
+listener, and `tasks.backgroundImageID` must be the explicit immutable local ID
+recorded by the qualification suite.
 
 Set `proxy.remoteOrigin` to this host's exact lowercase Tailscale HTTPS root,
 without a path, trailing slash, or explicit `:443`. The parseable example value

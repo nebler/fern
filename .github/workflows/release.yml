@@ -75,6 +75,11 @@ jobs:
           set -euo pipefail
           ./scripts/test-lifecycle.sh
 
+      - name: Qualify source Background Run image locally
+        run: |
+          set -euo pipefail
+          ./integration/background-run-qualification/run.sh
+
   publish:
     name: Publish digest-bound release
     needs: validate

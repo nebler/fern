@@ -1,4 +1,4 @@
-.PHONY: build format image image-background image-background-source lint test test-browser test-critical test-race test-deployment vet
+.PHONY: build format image image-background image-background-source lint test test-background-qualification test-browser test-critical test-race test-deployment vet
 
 build:
 	go build -o fern ./cmd/fern
@@ -20,6 +20,9 @@ lint:
 
 test:
 	go test ./...
+
+test-background-qualification:
+	./integration/background-run-qualification/run.sh
 
 test-race:
 	go test -race ./...

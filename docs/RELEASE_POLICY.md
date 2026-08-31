@@ -41,11 +41,17 @@ Before publication the workflow runs:
 - production rehearsal recorder self-test with synthetic facts;
 - release-workflow policy checks;
 - production image build, UID/GID and exact OpenCode smoke tests;
-- real Docker lifecycle integration.
+- real Docker lifecycle integration;
+- authoritative source Background Run qualification against one exact local
+  image ID, using only a zero-cost fake provider.
 
 The rehearsal self-test validates the recorder, not physical infrastructure.
 Physical reboot, replacement-host restore, real TLS/WSS phone behavior, and
 independent ACL denial remain external acceptance gates.
+
+The source Background Run candidate is built and qualified only inside
+validation. The checked-in release workflow does not publish or promote that
+image, and its local image ID is not a portable registry digest.
 
 ## Published Image
 

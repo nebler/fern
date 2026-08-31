@@ -5,12 +5,14 @@ ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 TEMP=$(mktemp -d "${TMPDIR:-/tmp}/fern-release-workflow.XXXXXX")
 trap 'rm -rf "$TEMP"' EXIT
 
-python3 - "$ROOT/.github/workflows/release.yml" <<'PY'
+python3 - "$ROOT/.github/workflows/release.yml" "$ROOT/.github/workflows/ci.yml" "$ROOT/Makefile" <<'PY'
 import pathlib
 import re
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text()
+ci_workflow = pathlib.Path(sys.argv[2]).read_text()
+makefile = pathlib.Path(sys.argv[3]).read_text()
 uses = re.findall(r"^\s*-?\s*uses:\s*([^\s#]+)", workflow, re.MULTILINE)
 assert uses, "release workflow has no actions"
 for action in uses:
@@ -39,6 +41,7 @@ required = [
     "./integration/upgrade/run.sh",
     "./scripts/test-opencode.sh",
     "./scripts/test-lifecycle.sh",
+    "./integration/background-run-qualification/run.sh",
     "docker/build-push-action@",
     "cosign sign",
     "cosign attest",
@@ -49,6 +52,25 @@ required = [
 ]
 for value in required:
     assert value in workflow, f"release workflow is missing required control: {value}"
+
+validate, publish = workflow.split("\n  publish:\n", 1)
+qualification = "./integration/background-run-qualification/run.sh"
+assert qualification in validate, "Background Run qualification is not a release validation gate"
+assert "opencode-background-source" not in publish, "release publishes an unpromoted Background Run source image"
+
+assert qualification in ci_workflow, "CI is missing authoritative Background Run qualification"
+qualification_job = re.search(
+    r"^  background-qualification:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)",
+    ci_workflow,
+    re.MULTILINE | re.DOTALL,
+)
+assert qualification_job, "CI is missing a dedicated Background Run qualification job"
+body = qualification_job.group("body")
+assert "runs-on: ubuntu-latest" in body, "Background Run qualification must run on Linux"
+timeout = re.search(r"timeout-minutes:\s*([0-9]+)", body)
+assert timeout and 1 <= int(timeout.group(1)) <= 45, "Background Run qualification must have a bounded timeout"
+assert re.search(r"^test-background-qualification:\n\t\./integration/background-run-qualification/run\.sh$", makefile, re.MULTILINE), \
+    "Makefile is missing the authoritative Background Run qualification target"
 PY
 
 FIXTURE="$TEMP/repository"

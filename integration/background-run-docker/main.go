@@ -17,8 +17,6 @@ import (
 	"github.com/nebler/fern/internal/taskstore"
 )
 
-const defaultImageID = "sha256:f493fc1cf2ffb087ef9733eb7f6f14fc0ae0966392fe54ccf695633570c82a82"
-
 func main() {
 	if err := run(); err != nil {
 		fmt.Fprintln(os.Stderr, "background-run-docker:", err)
@@ -31,7 +29,10 @@ func run() (resultErr error) {
 	defer cancel()
 	imageID := os.Getenv("FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE_ID")
 	if imageID == "" {
-		imageID = defaultImageID
+		return errors.New("FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE_ID is required; run integration/background-run-qualification/run.sh or export the exact local image ID")
+	}
+	if !canonicalImageID(imageID) {
+		return errors.New("FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE_ID must be canonical sha256:<64 lowercase hex>")
 	}
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
@@ -275,6 +276,18 @@ func run() (resultErr error) {
 	}
 	fmt.Printf("PASS image_id=%s container_id=%s endpoint=%s key_mode=0600 clone_isolated=true auth=missing_wrong_correct reconstruction=true restart_fenced=true cleanup=complete\n", imageID, created.ContainerID, started.Endpoint)
 	return nil
+}
+
+func canonicalImageID(value string) bool {
+	if len(value) != len("sha256:")+64 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, character := range value[len("sha256:"):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func git(directory, binary string, args ...string) error {

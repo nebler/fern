@@ -5,14 +5,16 @@ This harness exercises `internal/taskenvdocker` against the already-built
 make a paid model request, run the coordinator, or alter persistent workspace
 behavior.
 
-The default operator pin is
-`sha256:f493fc1cf2ffb087ef9733eb7f6f14fc0ae0966392fe54ccf695633570c82a82`.
-Override it only when intentionally qualifying another local build:
+Direct use requires the operator or orchestrator to provide the exact canonical
+local image ID:
 
 ```sh
 FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE_ID=sha256:... \
   integration/background-run-docker/run.sh
 ```
+
+Normally run `integration/background-run-qualification/run.sh`; it builds the
+candidate, captures the ID, and passes it to this harness.
 
 The harness proves clone isolation and quarantine, exact volume/container
 labels, runtime security and resource limits, authenticated V2 health,

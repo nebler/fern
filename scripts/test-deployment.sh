@@ -29,9 +29,55 @@ grep -Eq '^  remoteOrigin: https://[a-z0-9.-]+\.ts\.net(:[0-9]+)?$' "$CONFIG"
 ! grep -Eq '^  remoteOrigin: http://' "$CONFIG"
 grep -q 'REQUIRED: replace' "$CONFIG"
 grep -q 'Never expose this with Tailscale Serve' "$CONFIG"
-grep -q 'backgroundRoute:' "$CONFIG"
-grep -q 'tailscale serve --https=<origin-port> --bg http://<listen>' "$ROOT/docs/DEPLOYMENT.md"
-grep -q 'Never expose `proxy.operatorListen`' "$ROOT/docs/DEPLOYMENT.md"
+
+python3 - "$CONFIG" "$ROOT/docs/DEPLOYMENT.md" <<'PY'
+import ipaddress
+import pathlib
+import re
+import sys
+import urllib.parse
+
+config = pathlib.Path(sys.argv[1]).read_text()
+deployment = pathlib.Path(sys.argv[2]).read_text()
+
+def exact(pattern, source, message):
+    match = re.search(pattern, source, re.MULTILINE)
+    assert match, message
+    return match.group(1) if match.lastindex else match.group(0)
+
+exact(r'^#   backgroundImage: fern/opencode-background-source:REPLACE_WITH_QUALIFIED_SOURCE_COMMIT$', config,
+      'deployment example lacks an explicit source-commit Background Run image')
+exact(r'^#   backgroundImageID: sha256:REPLACE_WITH_64_LOWERCASE_HEX_DIGITS$', config,
+      'deployment example lacks an explicit immutable Background Run image ID')
+background_listen = exact(r'^#     listen: (\S+)$', config, 'Background Run listener is absent')
+background_origin = urllib.parse.urlsplit(exact(r'^#     origin: (\S+)$', config, 'Background Run origin is absent'))
+proxy_listen = exact(r'^  listen: (\S+)$', config, 'remote listener is absent')
+operator_listen = exact(r'^  operatorListen: (\S+)$', config, 'operator listener is absent')
+remote_origin = urllib.parse.urlsplit(exact(r'^  remoteOrigin: (\S+)$', config, 'remote origin is absent'))
+
+host, port = background_listen.rsplit(':', 1)
+assert ipaddress.ip_address(host).is_loopback and host == '127.0.0.1', 'Background Run listener must use exact numeric loopback'
+assert port.isdigit() and 1 <= int(port) <= 65535, 'Background Run listener port must be explicit'
+assert background_origin.scheme == 'https' and background_origin.hostname == remote_origin.hostname, \
+    'Background Run and root origins must use the same private hostname'
+assert remote_origin.scheme == 'https' and remote_origin.hostname.endswith('.ts.net') and remote_origin.port is None, \
+    'root origin must be canonical private HTTPS on implicit 443'
+assert background_origin.port == int(port) and background_origin.port != 443, \
+    'Background Run origin must use the listener\'s explicit non-443 port'
+assert background_listen not in (proxy_listen, operator_listen), 'Background Run listener must be distinct'
+
+serve_commands = set(re.findall(r'^sudo (tailscale serve (?:--bg|--https=)[^\n]+)$', deployment, re.MULTILINE))
+assert serve_commands == {
+    'tailscale serve --bg http://127.0.0.1:8080',
+    'tailscale serve --https=8443 --bg http://127.0.0.1:8443',
+}, f'unexpected Serve publication commands: {sorted(serve_commands)}'
+assert 'tailscale serve --https=<origin-port> --bg http://<listen>' in deployment, 'exact parameterized Serve guidance is absent'
+assert 'Never expose `proxy.operatorListen`, a Docker' in deployment, 'operator exposure prohibition is absent'
+assert not re.search(r'^\s*(?:sudo\s+)?tailscale\s+funnel\s+(?:on|--bg|https?://)', deployment, re.MULTILINE), \
+    'deployment docs enable Funnel'
+assert not re.search(r'^\s*(?:sudo\s+)?tailscale\s+serve[^\n]*(?:8081|operatorListen)', deployment, re.MULTILINE), \
+    'deployment docs publish the operator listener'
+PY
 
 GOTOOLCHAIN=local GOOS=linux GOARCH=amd64 go build -o "$TEMP/fern" "$ROOT/cmd/fern"
 strings "$TEMP/fern" >"$TEMP/fern.strings"

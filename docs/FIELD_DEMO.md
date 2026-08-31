@@ -72,13 +72,20 @@ go vet ./...
 ./integration/upgrade/run.sh
 ./integration/production-rehearsal/run.sh self-test
 ./scripts/test-lifecycle.sh
+./integration/background-run-qualification/run.sh
 FERN_OPENCODE_IMAGE=fern/opencode:dev ./scripts/test-opencode.sh
 ```
 
 The production rehearsal self-test uses synthetic facts. It validates the
 recorder and schema only. The lifecycle harness uses a deterministic fake
-OpenCode surface, and the OpenCode contract harness uses a local fake provider;
-neither is evidence of a paid provider turn or physical phone behavior.
+OpenCode surface, and the Background Run qualification uses a local zero-cost
+fake provider. Its exact image ID is local evidence, not registry publication;
+none of these gates is evidence of a paid provider turn or physical phone
+behavior.
+
+Record the exact source image ID emitted by the qualification suite before
+starting a Background Run. Do not substitute a tag or treat that local ID as a
+registry digest.
 
 ## Start
 
@@ -166,6 +173,7 @@ removed as unresolved cleanup.
 
 Real iOS Safari and Android Chrome, cellular/Wi-Fi transitions, Ubuntu systemd
 boot, physical reboot, replacement-host restore, abrupt power loss, private-edge
-TLS/WSS, provider billing/interruption, external credential revocation, and
-organization-specific GitHub rules remain external acceptance obligations until
-an operator records them against an exact build.
+TLS/WSS, Background Run registry publication/promotion, provider
+billing/interruption, external credential revocation, and organization-specific
+GitHub rules remain external acceptance obligations until an operator records
+them against an exact build.

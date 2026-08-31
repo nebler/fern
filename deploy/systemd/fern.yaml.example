@@ -24,6 +24,7 @@ workspace:
 #     id: replace-with-model-id
 #   attemptTimeout: 30m
 #   leaseDuration: 2m
+#   # Use the exact tag and local image ID emitted by the qualification suite.
 #   backgroundImage: fern/opencode-background-source:REPLACE_WITH_QUALIFIED_SOURCE_COMMIT
 #   backgroundImageID: sha256:REPLACE_WITH_64_LOWERCASE_HEX_DIGITS
 #   backgroundRoute:

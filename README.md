@@ -394,6 +394,7 @@ make lint
 make build
 make image
 ./scripts/test-lifecycle.sh
+make test-background-qualification
 FERN_OPENCODE_IMAGE=fern/opencode:dev ./scripts/test-opencode.sh
 PYTHONDONTWRITEBYTECODE=1 python3 integration/opencode-contract/contract_harness.py
 ./integration/release/run.sh
@@ -401,9 +402,11 @@ go test ./integration/task-ui
 ```
 
 CI runs formatting, unit and race tests, vet, the binary and image builds, the
-real-Docker lifecycle harness, pinned OpenCode smoke test, and reproducible
-release harness. Build release binaries, deployment assets, metadata, and
-checksums from a clean tree with:
+real-Docker lifecycle harness, authoritative local Background Run
+qualification, pinned OpenCode smoke test, and reproducible release harness.
+The Background Run suite uses a zero-cost fake provider and emits a build-local
+image ID; it does not publish or promote a registry image. Build release
+binaries, deployment assets, metadata, and checksums from a clean tree with:
 
 ```bash
 ./scripts/build-release.sh v0.1.0

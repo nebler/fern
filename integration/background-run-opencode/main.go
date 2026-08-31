@@ -33,9 +33,8 @@ import (
 )
 
 const (
-	defaultImageID = "sha256:f493fc1cf2ffb087ef9733eb7f6f14fc0ae0966392fe54ccf695633570c82a82"
-	imageTag       = "fern/opencode-background-source:dev"
-	providerPort   = nat.Port("4100/tcp")
+	imageTag     = "fern/opencode-background-source:dev"
+	providerPort = nat.Port("4100/tcp")
 )
 
 type providerStats struct {
@@ -93,7 +92,10 @@ func run() (resultErr error) {
 	defer cancel()
 	imageID := os.Getenv("FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE_ID")
 	if imageID == "" {
-		imageID = defaultImageID
+		return errors.New("FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE_ID is required; run integration/background-run-qualification/run.sh or export the exact local image ID")
+	}
+	if !canonicalImageID(imageID) {
+		return errors.New("FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE_ID must be canonical sha256:<64 lowercase hex>")
 	}
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
@@ -254,6 +256,41 @@ func run() (resultErr error) {
 	if err != nil {
 		return err
 	}
+	session := backgroundopencode.SessionSpec{ID: string(sessionID), Agent: "contract", ProviderID: "test", ModelID: "test-model", Directory: "/home/user/workspace"}
+	sessionTransport := http.DefaultTransport.(*http.Transport).Clone()
+	sessionLoss := &lostResponseTransport{base: sessionTransport, path: "/api/session"}
+	lostSessionClient, err := backgroundopencode.New(backgroundopencode.Config{
+		Endpoint: started.Endpoint, Username: username, Password: password,
+		HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: sessionLoss},
+	})
+	if err != nil {
+		return err
+	}
+	if err := lostSessionClient.CreateSessionOnce(ctx, session); !errors.Is(err, backgroundopencode.ErrTransport) {
+		return fmt.Errorf("lost session response was not transport ambiguity: %v", err)
+	}
+	if sessionLoss.calls.Load() != 1 || sessionLoss.lost.Load() != 1 {
+		return fmt.Errorf("lost session response calls=%d lost=%d", sessionLoss.calls.Load(), sessionLoss.lost.Load())
+	}
+	sessionTransport.CloseIdleConnections()
+	if err := provider.Close(); err != nil {
+		return err
+	}
+	initialProviderClosed = true
+	sessionProvider, err := taskenvdocker.New(ctx, config, nil)
+	if err != nil {
+		return err
+	}
+	provider = sessionProvider
+	sessionProviderClosed := false
+	defer func() {
+		if !sessionProviderClosed {
+			resultErr = errors.Join(resultErr, sessionProvider.Close())
+		}
+	}()
+	if _, err := provider.Health(ctx, run, runtime); err != nil {
+		return fmt.Errorf("session reconstructed provider health: %w", err)
+	}
 	oc, err := backgroundopencode.New(backgroundopencode.Config{
 		Endpoint: started.Endpoint, Username: username, Password: password,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second},
@@ -261,14 +298,10 @@ func run() (resultErr error) {
 	if err != nil {
 		return err
 	}
-	session := backgroundopencode.SessionSpec{ID: string(sessionID), Agent: "contract", ProviderID: "test", ModelID: "test-model", Directory: "/home/user/workspace"}
-	if err := oc.CreateSessionOnce(ctx, session); err != nil {
-		return err
-	}
 	if state, err := oc.ReconcileSession(ctx, session); err != nil {
-		return fmt.Errorf("session reconciliation: %w", err)
+		return fmt.Errorf("lost-response session reconciliation: %w", err)
 	} else if state != backgroundopencode.ReconcileExact {
-		return fmt.Errorf("session reconciliation state=%s", state)
+		return fmt.Errorf("lost-response session reconciliation state=%s", state)
 	}
 	probeSession := backgroundopencode.SessionSpec{ID: string(probeSessionID), Agent: "contract", ProviderID: "test", ModelID: "test-model", Directory: "/home/user/workspace"}
 	if err := oc.CreateSessionOnce(ctx, probeSession); err != nil {
@@ -307,7 +340,7 @@ func run() (resultErr error) {
 	if err := provider.Close(); err != nil {
 		return err
 	}
-	initialProviderClosed = true
+	sessionProviderClosed = true
 	nextProvider, err := taskenvdocker.New(ctx, config, nil)
 	if err != nil {
 		return err
@@ -388,8 +421,20 @@ func run() (resultErr error) {
 	if err := runSerialCoordinator(ctx, temporary, repository, providerEndpoint, provider, cli, imageID, base); err != nil {
 		return err
 	}
-	fmt.Printf("PASS profile=%s image_id=%s session=exact prompt=admitted_promoted response_loss=after_effect active=positive interrupt=204 reconstruction=provider_client no_prompt_replay=true provider_calls=1 marker=exact serial_coordinator=complete route=paired_root_health open_replay=stable fence_crash=uncertain_zero_post runtime_restart=pre_reconcile_502_then_unbound_cleanup\n", backgroundopencode.Profile, imageID)
+	fmt.Printf("PASS profile=%s image_id=%s session=exact session_response_loss=after_effect session_posts=1 no_session_replay=true no_session_replacement=true prompt=admitted_promoted prompt_response_loss=after_effect active=positive interrupt=204 reconstruction=provider_client no_prompt_replay=true provider_calls=1 marker=exact serial_coordinator=complete route=paired_root_health open_replay=stable fence_crash=uncertain_zero_post runtime_restart=pre_reconcile_502_then_unbound_cleanup\n", backgroundopencode.Profile, imageID)
 	return nil
+}
+
+func canonicalImageID(value string) bool {
+	if len(value) != len("sha256:")+64 || !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	for _, character := range value[len("sha256:"):] {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoint string, provider *taskenvdocker.Provider, cli *client.Client, imageID, base string) error {
