@@ -241,9 +241,17 @@ func TestBackgroundRunClaimsCapacityRecoveryAndActiveStop(t *testing.T) {
 	}); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("capacity-one competing claim = %v", err)
 	}
+	continued, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
+		WorkspaceID: testWorkspaceID(), ClaimOwner: "worker-a", Now: now.Add(time.Second), LeaseDuration: time.Minute,
+		Profile: BackgroundRunSourceProfile, ImageIdentity: first.BackgroundRun.ImageIdentity,
+	})
+	if err != nil || continued.TaskID != run.TaskID || continued.ClaimGeneration != run.ClaimGeneration || continued.Revision != run.Revision+1 {
+		t.Fatalf("same-owner claim continuation = %+v, error=%v", continued, err)
+	}
+	run = continued
 	claim := BackgroundRunClaim{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID,
 		Generation: run.Generation, ClaimOwner: run.ClaimOwner, ClaimGeneration: run.ClaimGeneration,
-		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, CancelEpoch: run.CancelEpoch, Now: now.Add(time.Second)}
+		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, CancelEpoch: run.CancelEpoch, Now: now.Add(2 * time.Second)}
 	advance := func(next BackgroundRun, at time.Time) {
 		run = next
 		claim.ExpectedRevision, claim.ExpectedState, claim.ExpectedPhase, claim.CancelEpoch, claim.Now = run.Revision, run.State, run.EffectPhase, run.CancelEpoch, at
@@ -446,7 +454,7 @@ func TestConcurrentBackgroundRunClaimHasOneWinner(t *testing.T) {
 	}
 }
 
-func TestBackgroundRunClaimRequiresExactProfileAndImage(t *testing.T) {
+func TestBackgroundRunClaimRequiresProfileButRecoversAcrossImageRotation(t *testing.T) {
 	store := openTestStore(t, testDBPath(t))
 	t.Cleanup(func() { _ = store.Close() })
 	createTestWorkspace(t, store)
@@ -466,24 +474,174 @@ func TestBackgroundRunClaimRequiresExactProfileAndImage(t *testing.T) {
 	}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("old profile claim = %v", err)
 	}
-	if _, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
+	claimed, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
 		WorkspaceID: testWorkspaceID(), ClaimOwner: "wrong-image", Now: now, LeaseDuration: time.Minute,
 		Profile: BackgroundRunSourceProfile, ImageIdentity: "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-	}); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("wrong image claim = %v", err)
-	}
-	claimed, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
-		WorkspaceID: testWorkspaceID(), ClaimOwner: "exact-image", Now: now, LeaseDuration: time.Minute,
-		Profile: BackgroundRunSourceProfile, ImageIdentity: second.BackgroundRun.ImageIdentity,
 	})
-	if err != nil || claimed.TaskID != second.TaskID || claimed.ImageIdentity != second.BackgroundRun.ImageIdentity {
-		t.Fatalf("exact image claim = %+v, error = %v", claimed, err)
+	if err != nil || claimed.TaskID != first.TaskID || claimed.ImageIdentity != first.BackgroundRun.ImageIdentity {
+		t.Fatalf("rotated image recovery claim = %+v, error = %v", claimed, err)
 	}
 	if _, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
-		WorkspaceID: testWorkspaceID(), ClaimOwner: "different-image", Now: now, LeaseDuration: time.Minute,
-		Profile: BackgroundRunSourceProfile, ImageIdentity: first.BackgroundRun.ImageIdentity,
+		WorkspaceID: testWorkspaceID(), ClaimOwner: "second-image", Now: now, LeaseDuration: time.Minute,
+		Profile: BackgroundRunSourceProfile, ImageIdentity: second.BackgroundRun.ImageIdentity,
 	}); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("different qualified image bypassed workspace capacity: %v", err)
+		t.Fatalf("second image bypassed workspace capacity: %v", err)
+	}
+}
+
+func TestBackgroundRunWorkProjectionAndPromptAttemptFenceSurviveRestart(t *testing.T) {
+	path := testDBPath(t)
+	store := openTestStore(t, path)
+	createTestWorkspace(t, store)
+	params := testBackgroundRunAdmission(2070, "prompt-fence")
+	if _, err := store.AdmitTask(context.Background(), params); err != nil {
+		t.Fatal(err)
+	}
+	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
+	run, claim := advanceBackgroundRunToPromptIntent(t, store, params.BackgroundRun.ImageIdentity, now)
+	work, err := store.ReadClaimedBackgroundRunWork(context.Background(), claim)
+	if err != nil || work.Prompt != params.Prompt || !work.Deadline.Equal(params.Deadline.Truncate(time.Millisecond)) || work.AttemptTimeout != time.Hour {
+		t.Fatalf("claimed work = %+v, error=%v", work, err)
+	}
+	if run.PromptRequestAttemptedAt != nil {
+		t.Fatal("prompt was attempted before the irreversible fence")
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openTestStore(t, path)
+	run, err = store.ClaimActiveBackgroundRun(context.Background(), ClaimBackgroundRunParams{
+		WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
+		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, CancelEpoch: run.CancelEpoch,
+		ClaimOwner: "prompt-takeover", Now: now.Add(3 * time.Minute), LeaseDuration: time.Minute,
+		Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim = backgroundRunClaim(run, now.Add(3*time.Minute))
+	run, err = store.RecordBackgroundRunPromptRequestAttempted(context.Background(), claim)
+	if err != nil || run.PromptRequestAttemptedAt == nil {
+		t.Fatalf("prompt attempt fence = %+v, error=%v", run, err)
+	}
+	advanceBackgroundClaim(&claim, run)
+	claim.Now = claim.Now.Add(time.Millisecond)
+	if _, err := store.RecordBackgroundRunPromptRequestAttempted(context.Background(), claim); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("second prompt attempt fence = %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openTestStore(t, path)
+	t.Cleanup(func() { _ = store.Close() })
+	persisted, err := store.GetBackgroundRun(context.Background(), run.WorkspaceID, run.TaskID, params.Claim.Actor)
+	if err != nil || persisted.PromptRequestAttemptedAt == nil || !persisted.PromptRequestAttemptedAt.Equal(*run.PromptRequestAttemptedAt) {
+		t.Fatalf("persisted attempt fence = %+v, error=%v", persisted, err)
+	}
+}
+
+func TestBackgroundRunSystemTimeoutHasNoPluginReceipt(t *testing.T) {
+	path := testDBPath(t)
+	store := openTestStore(t, path)
+	t.Cleanup(func() { _ = store.Close() })
+	createTestWorkspace(t, store)
+	params := testBackgroundRunAdmission(2080, "system-timeout")
+	if _, err := store.AdmitTask(context.Background(), params); err != nil {
+		t.Fatal(err)
+	}
+	now := params.Deadline.Truncate(time.Millisecond).Add(time.Millisecond)
+	work, err := store.ClaimNextBackgroundRunWork(context.Background(), ClaimNextBackgroundRunParams{
+		WorkspaceID: testWorkspaceID(), ClaimOwner: "timeout-worker", Now: now, LeaseDuration: time.Minute,
+		Profile: BackgroundRunSourceProfile, ImageIdentity: params.BackgroundRun.ImageIdentity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := testDeliveryActor()
+	actor.Type, actor.ID, actor.DisplayName = task.ActorSystem, "background-timeout", "Background timeout"
+	timedOut, err := store.RequestBackgroundRunTimeout(context.Background(), RequestBackgroundRunTimeoutParams{
+		BackgroundRunClaim: backgroundRunClaim(work.Run, now), AttemptEventID: testEventID(2081), TaskEventID: testEventID(2082), Actor: actor,
+	})
+	if err != nil || timedOut.State != BackgroundRunCleanupRequired || timedOut.EffectPhase != BackgroundRunEffectStopIntent ||
+		timedOut.TimeoutRequestedAt == nil || timedOut.CancelEpoch != 0 || timedOut.StopReceiptID != "" {
+		t.Fatalf("system timeout = %+v, error=%v", timedOut, err)
+	}
+	var events, receipts int
+	if err := store.db.QueryRow(`SELECT count(*) FROM events WHERE task_id=? AND type IN ('attempt.timeout_requested','task.timeout_requested') AND json_extract(payload,'$.reason')='attempt_timeout'`, timedOut.TaskID).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`SELECT count(*) FROM receipts WHERE target_id=? AND command_kind='run.stop'`, timedOut.TaskID).Scan(&receipts); err != nil {
+		t.Fatal(err)
+	}
+	if events != 2 || receipts != 0 || timedOut.TimeoutActor == nil || *timedOut.TimeoutActor != actor {
+		t.Fatalf("timeout evidence events=%d plugin receipts=%d", events, receipts)
+	}
+	var taskState, attemptState string
+	var latestCursor, taskRevision int64
+	if err := store.db.QueryRow(`SELECT t.state,a.state,t.latest_event_cursor,t.revision FROM tasks t
+JOIN attempts a ON a.id=t.current_attempt_id WHERE t.id=?`, timedOut.TaskID).Scan(&taskState, &attemptState, &latestCursor, &taskRevision); err != nil {
+		t.Fatal(err)
+	}
+	var timeoutTaskCursor int64
+	if err := store.db.QueryRow(`SELECT cursor FROM events WHERE task_id=? AND attempt_id IS NULL AND type='task.timeout_requested'`, timedOut.TaskID).Scan(&timeoutTaskCursor); err != nil {
+		t.Fatal(err)
+	}
+	if taskState != "queued" || attemptState != "prepared" || latestCursor != timeoutTaskCursor || taskRevision != 2 {
+		t.Fatalf("timeout parent before cleanup task=%s attempt=%s cursor=%d/%d revision=%d", taskState, attemptState, latestCursor, timeoutTaskCursor, taskRevision)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store = openTestStore(t, path)
+	claimed, err := store.ClaimActiveBackgroundRun(context.Background(), ClaimBackgroundRunParams{
+		WorkspaceID: timedOut.WorkspaceID, TaskID: timedOut.TaskID, AttemptID: timedOut.AttemptID, Generation: timedOut.Generation,
+		ExpectedRevision: timedOut.Revision, ExpectedState: timedOut.State, ExpectedPhase: timedOut.EffectPhase,
+		CancelEpoch: timedOut.CancelEpoch, ClaimOwner: "timeout-cleanup-restart", Now: now.Add(time.Second), LeaseDuration: 2 * time.Minute,
+		Profile: BackgroundRunSourceProfile, ImageIdentity: timedOut.ImageIdentity,
+	})
+	if err != nil || claimed.TimeoutActor == nil || *claimed.TimeoutActor != actor {
+		t.Fatalf("restarted timeout claim = %+v, error=%v", claimed, err)
+	}
+	cleanupClaim := backgroundRunClaim(claimed, now.Add(2*time.Second))
+	for _, step := range []func(context.Context, RecordBackgroundRunEvidenceParams) (BackgroundRun, error){
+		store.RecordBackgroundRunWriterInactive, store.RecordBackgroundRunRouteRemoved, store.RecordBackgroundRunContainerRemoved,
+		store.RecordBackgroundRunVolumeRemoved, store.RecordBackgroundRunCloneRemoved,
+	} {
+		claimed, err = step(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunClaim: cleanupClaim, Evidence: "exact timeout cleanup"})
+		if err != nil {
+			t.Fatalf("timeout cleanup from %s: %v", cleanupClaim.ExpectedPhase, err)
+		}
+		advanceBackgroundClaim(&cleanupClaim, claimed)
+		cleanupClaim.Now = cleanupClaim.Now.Add(time.Second)
+	}
+	wrongActor := actor
+	wrongActor.ID, wrongActor.RequestID = "different-timeout", "different-timeout"
+	if _, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
+		BackgroundRunClaim: cleanupClaim, AttemptEventID: testEventID(2083), TaskEventID: testEventID(2084), Actor: wrongActor,
+		Reason: "attempt_timeout", Evidence: "resources absent", CleanupProof: "exact timeout cleanup",
+	}); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("different timeout actor finalization = %v", err)
+	}
+	final, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
+		BackgroundRunClaim: cleanupClaim, AttemptEventID: testEventID(2085), TaskEventID: testEventID(2086), Actor: actor,
+		Reason: "attempt_timeout", Evidence: "resources absent", CleanupProof: "exact timeout cleanup",
+	})
+	if err != nil || final.State != BackgroundRunFailed || final.TimeoutActor == nil || *final.TimeoutActor != actor {
+		t.Fatalf("timeout finalization = %+v, error=%v", final, err)
+	}
+	var taskReason, attemptReason string
+	if err := store.db.QueryRow(`SELECT t.state,a.state,t.terminal_reason,a.terminal_reason FROM tasks t
+JOIN attempts a ON a.id=t.current_attempt_id WHERE t.id=?`, final.TaskID).Scan(&taskState, &attemptState, &taskReason, &attemptReason); err != nil {
+		t.Fatal(err)
+	}
+	var attributed int
+	if err := store.db.QueryRow(`SELECT count(*) FROM events terminal
+JOIN actor_snapshots actor ON actor.id=terminal.actor_snapshot_id
+WHERE terminal.task_id=? AND terminal.type IN ('attempt.failed','task.failed') AND actor.actor_id=?`, final.TaskID, actor.ID).Scan(&attributed); err != nil {
+		t.Fatal(err)
+	}
+	if taskState != "failed" || attemptState != "failed" || taskReason != "attempt_timeout" || attemptReason != taskReason || attributed != 2 {
+		t.Fatalf("timeout terminal parent task=%s attempt=%s reasons=%s/%s actor events=%d", taskState, attemptState, taskReason, attemptReason, attributed)
 	}
 }
 
@@ -774,6 +932,24 @@ func backgroundRunClaim(run BackgroundRun, now time.Time) BackgroundRunClaim {
 }
 
 func advanceBackgroundRunToPrompt(t *testing.T, store *Store, image string, now time.Time) (BackgroundRun, BackgroundRunClaim) {
+	run, claim := advanceBackgroundRunToPromptIntent(t, store, image, now)
+	var err error
+	run, err = store.RecordBackgroundRunPromptRequestAttempted(context.Background(), claim)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanceBackgroundClaim(&claim, run)
+	claim.Now = claim.Now.Add(time.Second)
+	run, err = store.RecordBackgroundRunPromptAdmitted(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunClaim: claim, Evidence: "prompt admitted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanceBackgroundClaim(&claim, run)
+	claim.Now = claim.Now.Add(time.Second)
+	return run, claim
+}
+
+func advanceBackgroundRunToPromptIntent(t *testing.T, store *Store, image string, now time.Time) (BackgroundRun, BackgroundRunClaim) {
 	t.Helper()
 	run, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
 		WorkspaceID: testWorkspaceID(), ClaimOwner: "result-worker", Now: now, LeaseDuration: 2 * time.Minute,
@@ -808,7 +984,6 @@ func advanceBackgroundRunToPrompt(t *testing.T, store *Store, image string, now 
 	evidenceStep(store.RecordBackgroundRunReady, "ready observed")
 	evidenceStep(store.RecordBackgroundRunSessionObserved, "session observed")
 	evidenceStep(store.RecordBackgroundRunPromptIntent, "prompt intent")
-	evidenceStep(store.RecordBackgroundRunPromptAdmitted, "prompt admitted")
 	return run, claim
 }
 
@@ -831,7 +1006,8 @@ func testBackgroundRunAdmission(n int, key string) AdmitTaskParams {
 	params.BackgroundRun = &BackgroundRunIntent{
 		RepositoryRemote: "https://github.com/owner/repository", Branch: "main",
 		InstructionSHA256: sha256.Sum256([]byte(params.Prompt)), Profile: "source-39fb919a054190498f6d5b7985bde231f93ad7a6",
-		ProfileSHA256: sha256.Sum256([]byte("source-39fb919a054190498f6d5b7985bde231f93ad7a6")), ImageIdentity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		ProfileSHA256: sha256.Sum256([]byte("source-39fb919a054190498f6d5b7985bde231f93ad7a6")), EnvironmentSHA256: sha256.Sum256([]byte("{}")),
+		ImageIdentity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode",
 		ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint",
 	}

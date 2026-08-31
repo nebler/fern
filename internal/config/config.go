@@ -64,7 +64,10 @@ type TaskPolicy struct {
 	Budget            TaskBudget
 	BackgroundImage   string
 	BackgroundImageID string
-	Verification      *TaskVerificationPolicy
+	// BackgroundEnvironment is the only configured environment copied into
+	// disposable Background Runs. Workspace.Env is never inherited.
+	BackgroundEnvironment map[string]string
+	Verification          *TaskVerificationPolicy
 }
 
 // Workspace is the container image, repository, memory reservation, and

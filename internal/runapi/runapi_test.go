@@ -2,6 +2,7 @@ package runapi
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -207,6 +208,48 @@ func TestRunAPIStopReplayDoesNotNeedFreshEntropyOrTime(t *testing.T) {
 	}
 }
 
+func TestRunAPIWakeFollowsDurableCreateAndStopCommitOnly(t *testing.T) {
+	fixture := newAPIFixture(t, PluginOpenCodeProfile)
+	var wakes atomic.Int64
+	fixture.handler.config.Wake = func() {
+		wakes.Add(1)
+		runs, err := fixture.store.ListBackgroundRuns(context.Background(), testWorkspace, fixture.actor, 10)
+		if err != nil || len(runs) != 1 {
+			t.Errorf("wake could not observe committed run: runs=%d error=%v", len(runs), err)
+		}
+	}
+	if got := fixture.request(http.MethodPost, PathPrefix, strings.Replace(validCreateBody("Work"), "owner/repository", "owner/other", 1), "invalid"); got.Code != http.StatusBadRequest || wakes.Load() != 0 {
+		t.Fatalf("invalid create status=%d wakes=%d", got.Code, wakes.Load())
+	}
+	created := fixture.request(http.MethodPost, PathPrefix, validCreateBody("Work"), "create-wake")
+	var response struct {
+		RunID task.TaskID `json:"run_id"`
+	}
+	if created.Code != http.StatusAccepted || json.Unmarshal(created.Body.Bytes(), &response) != nil || wakes.Load() != 1 {
+		t.Fatalf("create status=%d wakes=%d body=%s", created.Code, wakes.Load(), created.Body.String())
+	}
+	if replay := fixture.request(http.MethodPost, PathPrefix, validCreateBody("Work"), "create-wake"); replay.Code != http.StatusAccepted || wakes.Load() != 1 {
+		t.Fatalf("create replay status=%d wakes=%d", replay.Code, wakes.Load())
+	}
+	fixture.handler.config.Wake = func() {
+		wakes.Add(1)
+		run, err := fixture.store.GetBackgroundRun(context.Background(), testWorkspace, response.RunID, fixture.actor)
+		if err != nil || (run.State != taskstore.BackgroundRunCanceling && run.State != taskstore.BackgroundRunFailed) {
+			t.Errorf("stop wake could not observe committed state: run=%+v error=%v", run, err)
+		}
+	}
+	stopPath := PathPrefix + "/" + string(response.RunID) + "/stop"
+	if got := fixture.request(http.MethodPost, stopPath, `{"not":"empty"}`, "bad-stop"); got.Code != http.StatusBadRequest || wakes.Load() != 1 {
+		t.Fatalf("invalid stop status=%d wakes=%d", got.Code, wakes.Load())
+	}
+	if got := fixture.request(http.MethodPost, stopPath, "{}", "stop-wake"); got.Code != http.StatusAccepted || wakes.Load() != 2 {
+		t.Fatalf("stop status=%d wakes=%d body=%s", got.Code, wakes.Load(), got.Body.String())
+	}
+	if replay := fixture.request(http.MethodPost, stopPath, "{}", "stop-wake"); replay.Code != http.StatusAccepted || wakes.Load() != 2 {
+		t.Fatalf("stop replay status=%d wakes=%d", replay.Code, wakes.Load())
+	}
+}
+
 func TestGitBaseVerifierRequiresAllowedReachability(t *testing.T) {
 	repository := filepath.Join(t.TempDir(), "repo")
 	for _, args := range [][]string{{"init", repository}, {"-C", repository, "config", "user.email", "test@example.com"}, {"-C", repository, "config", "user.name", "Test"}} {
@@ -317,7 +360,7 @@ func (f *apiFixture) buildHandler(t *testing.T, available string) *Handler {
 	if available == PluginOpenCodeProfile {
 		backgroundImage = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	}
-	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, AvailableProfile: available, Store: f.store, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, Now: func() time.Time { return time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC) }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", BudgetSnapshot: json.RawMessage(`{"turns":10}`)})
+	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), AvailableProfile: available, Store: f.store, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, Now: func() time.Time { return time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC) }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", BudgetSnapshot: json.RawMessage(`{"turns":10}`)})
 	if err != nil {
 		t.Fatal(err)
 	}

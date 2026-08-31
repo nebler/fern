@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -56,7 +57,7 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return Observation{}, statErr
 	}
-	sourceBytes, err := treeSize(p.config.Repository)
+	sourceBytes, err := treeSize(ctx, p.config.Repository)
 	if err != nil {
 		return Observation{}, fmt.Errorf("predict clone source size: %w", err)
 	}
@@ -90,7 +91,7 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 		if err != nil {
 			return Observation{}, &IdentityError{Resource: "clone marker", Identity: run.CloneIdentity, Reason: err.Error()}
 		}
-		locations, unknown, err := p.findRecoverableClones(snapshot.marker)
+		locations, unknown, err := p.findRecoverableClones(ctx, snapshot.marker)
 		if err != nil {
 			return Observation{}, err
 		}
@@ -145,7 +146,7 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 	stageLive := true
 	defer func() {
 		if stageLive {
-			resultErr = errors.Join(resultErr, removeCreatedTree(p.root, stageRoot, stageInfo))
+			resultErr = errors.Join(resultErr, removeCreatedTree(ctx, p.root, stageRoot, stageInfo))
 		}
 	}()
 	stagedClone := filepath.Join(stageRoot, "clone")
@@ -266,6 +267,17 @@ func (p *Provider) readCloneMarker(run taskstore.BackgroundRun, digest string) (
 }
 
 func (p *Provider) readCloneMarkerSnapshot(run taskstore.BackgroundRun, digest string) (cloneMarkerSnapshot, error) {
+	snapshot, err := p.readCloneMarkerSnapshotUnbound(run)
+	if err != nil {
+		return cloneMarkerSnapshot{}, err
+	}
+	if snapshot.marker.Spec != digest {
+		return cloneMarkerSnapshot{}, errors.New("private clone authority resource digest does not match")
+	}
+	return snapshot, nil
+}
+
+func (p *Provider) readCloneMarkerSnapshotUnbound(run taskstore.BackgroundRun) (cloneMarkerSnapshot, error) {
 	path := p.cloneMarkerPath(run)
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 || info.Size() > maxEvidenceBytes {
@@ -283,7 +295,7 @@ func (p *Provider) readCloneMarkerSnapshot(run taskstore.BackgroundRun, digest s
 	if err := json.Unmarshal(data, &marker); err != nil || marker.Device == 0 || marker.Inode == 0 {
 		return cloneMarkerSnapshot{}, errors.New("private clone authority is malformed")
 	}
-	want, _ := json.Marshal(expectedCloneMarker(run, digest, marker.Device, marker.Inode))
+	want, _ := json.Marshal(expectedCloneMarker(run, marker.Spec, marker.Device, marker.Inode))
 	want = append(want, '\n')
 	if !bytes.Equal(data, want) {
 		return cloneMarkerSnapshot{}, errors.New("private clone authority does not match")
@@ -394,7 +406,7 @@ func (p *Provider) attestRepository(ctx context.Context, run taskstore.Backgroun
 			return 0, errors.New("clone HEAD is not detached")
 		}
 	}
-	size, err := treeSize(path)
+	size, err := treeSize(ctx, path)
 	if err != nil {
 		return 0, fmt.Errorf("observe clone disk use: %w", err)
 	}
@@ -489,7 +501,7 @@ func (p *Provider) attestSourceGitConfig(ctx context.Context, expectedRemote str
 		}
 		if key == "remote.origin.url" {
 			originURLs++
-			if value != expectedRemote {
+			if value != expectedRemote && value != expectedRemote+".git" {
 				return errors.New("configured source origin URL does not match the immutable run remote")
 			}
 		}
@@ -600,7 +612,10 @@ type cloneRecoveryLocation struct {
 	parent string
 }
 
-func (p *Provider) findRecoverableClones(marker cloneMarker) ([]cloneRecoveryLocation, bool, error) {
+func (p *Provider) findRecoverableClones(ctx context.Context, marker cloneMarker) ([]cloneRecoveryLocation, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, false, err
+	}
 	entries, err := os.ReadDir(p.root)
 	if err != nil {
 		return nil, false, err
@@ -608,6 +623,9 @@ func (p *Provider) findRecoverableClones(marker cloneMarker) ([]cloneRecoveryLoc
 	var locations []cloneRecoveryLocation
 	unknown := false
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
 		path := filepath.Join(p.root, entry.Name())
 		info, err := entry.Info()
 		if err != nil {
@@ -645,6 +663,9 @@ func (p *Provider) findRecoverableClones(marker cloneMarker) ([]cloneRecoveryLoc
 		known[location.path] = true
 	}
 	err = filepath.WalkDir(p.root, func(path string, entry fs.DirEntry, walkErr error) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if walkErr != nil {
 			return walkErr
 		}
@@ -734,9 +755,12 @@ func makeCloneWritable(root string) error {
 	})
 }
 
-func treeSize(root string) (int64, error) {
+func treeSize(ctx context.Context, root string) (int64, error) {
 	var total int64
 	err := filepath.WalkDir(root, func(_ string, entry fs.DirEntry, err error) error {
+		if contextErr := ctx.Err(); contextErr != nil {
+			return contextErr
+		}
 		if err != nil {
 			return err
 		}
@@ -752,7 +776,7 @@ func treeSize(root string) (int64, error) {
 	return total, err
 }
 
-func removeCreatedTree(root, path string, expected os.FileInfo) error {
+func removeCreatedTree(ctx context.Context, root, path string, expected os.FileInfo) error {
 	suffix, err := randomSuffix()
 	if err != nil {
 		return err
@@ -767,10 +791,83 @@ func removeCreatedTree(root, path string, expected os.FileInfo) error {
 	if err != nil || !os.SameFile(expected, got) {
 		return errors.New("quarantined clone tree is not the created inode")
 	}
-	if err := os.RemoveAll(quarantine); err != nil {
+	if err := removeCloneTree(ctx, root, quarantine); err != nil {
 		return err
 	}
 	return syncDirectory(root)
+}
+
+func removeCloneTree(ctx context.Context, rootPath, path string) (resultErr error) {
+	relative, err := filepath.Rel(rootPath, path)
+	if err != nil || relative == "." || !filepath.IsLocal(relative) {
+		return errors.New("clone deletion target is outside its private root")
+	}
+	root, err := os.OpenRoot(rootPath)
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, root.Close()) }()
+	return removeClonePath(ctx, root, relative)
+}
+
+func removeClonePath(ctx context.Context, root *os.Root, name string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	info, err := root.Lstat(name)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return root.Remove(name)
+	}
+	directory, err := root.Open(name)
+	if err != nil {
+		return err
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return errors.Join(err, directory.Close())
+		}
+		entries, readErr := directory.ReadDir(128)
+		for _, entry := range entries {
+			if err := ctx.Err(); err != nil {
+				return errors.Join(err, directory.Close())
+			}
+			child := filepath.Join(name, entry.Name())
+			childInfo, err := root.Lstat(child)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return errors.Join(err, directory.Close())
+			}
+			if childInfo.IsDir() && childInfo.Mode()&os.ModeSymlink == 0 {
+				err = removeClonePath(ctx, root, child)
+			} else {
+				err = root.Remove(child)
+			}
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return errors.Join(err, directory.Close())
+			}
+		}
+		if readErr != nil {
+			if !errors.Is(readErr, io.EOF) {
+				return errors.Join(readErr, directory.Close())
+			}
+			break
+		}
+	}
+	if err := directory.Close(); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return root.Remove(name)
 }
 
 // ObserveUsage returns bounded observed clone usage. This is monitoring
@@ -789,7 +886,7 @@ func (p *Provider) ObserveUsage(ctx context.Context, run taskstore.BackgroundRun
 	if err := p.attestCloneDeletion(run, digest, path); err != nil {
 		return UsageObservation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: err.Error()}
 	}
-	size, err := treeSize(path)
+	size, err := treeSize(ctx, path)
 	if err != nil {
 		return UsageObservation{}, fmt.Errorf("observe clone disk use: %w", err)
 	}
@@ -802,7 +899,7 @@ func (p *Provider) ObserveUsage(ctx context.Context, run taskstore.BackgroundRun
 
 // RemoveClone removes only an exactly attested clone after the exact runtime is absent.
 func (p *Provider) RemoveClone(ctx context.Context, run taskstore.BackgroundRun, authority CleanupAuthority) (_ Observation, resultErr error) {
-	digest, err := p.validateRun(run)
+	digest, err := p.cleanupDigest(run)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -817,12 +914,18 @@ func (p *Provider) RemoveClone(ctx context.Context, run taskstore.BackgroundRun,
 	if err := p.requireContainerAbsent(ctx, run, digest, authority); err != nil {
 		return Observation{}, err
 	}
+	if err := p.requireVolumeAbsent(ctx, run); err != nil {
+		return Observation{}, err
+	}
 	path := filepath.Join(p.root, run.CloneIdentity)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		if _, markerErr := os.Lstat(p.cloneMarkerPath(run)); markerErr == nil {
-			recovered, markerErr := p.finishMarkerBoundDeletion(run, digest)
+			recovered, markerErr := p.finishMarkerBoundDeletion(ctx, run, digest)
 			if markerErr != nil {
+				if errors.Is(markerErr, context.Canceled) || errors.Is(markerErr, context.DeadlineExceeded) {
+					return Observation{}, markerErr
+				}
 				return Observation{}, &IdentityError{Resource: "clone marker", Identity: run.CloneIdentity, Reason: markerErr.Error()}
 			}
 			status := "absent"
@@ -858,10 +961,10 @@ func (p *Provider) RemoveClone(ctx context.Context, run taskstore.BackgroundRun,
 	if err := p.attestCloneDeletion(run, digest, quarantine); err != nil {
 		return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "renamed clone failed re-attestation: " + err.Error()}
 	}
-	if err := os.RemoveAll(quarantine); err != nil {
+	if err := removeCloneTree(ctx, p.root, quarantine); err != nil {
 		return Observation{}, err
 	}
-	if _, err := p.finishMarkerBoundDeletion(run, digest); err != nil {
+	if _, err := p.finishMarkerBoundDeletion(ctx, run, digest); err != nil {
 		return Observation{}, err
 	}
 	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
@@ -871,13 +974,13 @@ func (p *Provider) RemoveClone(ctx context.Context, run taskstore.BackgroundRun,
 	return Observation{Evidence: e}, nil
 }
 
-func (p *Provider) finishMarkerBoundDeletion(run taskstore.BackgroundRun, digest string) (bool, error) {
+func (p *Provider) finishMarkerBoundDeletion(ctx context.Context, run taskstore.BackgroundRun, digest string) (bool, error) {
 	snapshot, err := p.readCloneMarkerSnapshot(run, digest)
 	if err != nil {
 		return false, err
 	}
 	marker := snapshot.marker
-	locations, unknown, err := p.findRecoverableClones(marker)
+	locations, unknown, err := p.findRecoverableClones(ctx, marker)
 	if err != nil {
 		return false, err
 	}
@@ -890,7 +993,7 @@ func (p *Provider) finishMarkerBoundDeletion(run taskstore.BackgroundRun, digest
 		if err := p.attestCloneMarker(run, digest, location.path); err != nil {
 			return false, err
 		}
-		if err := os.RemoveAll(location.path); err != nil {
+		if err := removeCloneTree(ctx, p.root, location.path); err != nil {
 			return false, err
 		}
 		if location.kind == cloneRecoveryStage {
@@ -898,13 +1001,16 @@ func (p *Provider) finishMarkerBoundDeletion(run taskstore.BackgroundRun, digest
 				return false, fmt.Errorf("remove recovered staging parent: %w", err)
 			}
 		}
-		locations, unknown, err = p.findRecoverableClones(marker)
+		locations, unknown, err = p.findRecoverableClones(ctx, marker)
 		if err != nil {
 			return false, err
 		}
 	}
 	if unknown || len(locations) != 0 {
 		return false, errors.New("marker-bound clone inode remains after deletion")
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
 	}
 	if err := p.removeExactCloneMarker(run, digest, snapshot, marker.Device, marker.Inode); err != nil {
 		return false, err
@@ -921,4 +1027,31 @@ func (p *Provider) attestCloneDeletion(run taskstore.BackgroundRun, digest, path
 		return errors.New("clone deletion target is not an exact directory")
 	}
 	return nil
+}
+
+func (p *Provider) acquireCloneAuthority(ctx context.Context, run taskstore.BackgroundRun, digest string) (func() error, error) {
+	unlock, present, err := p.acquireCloneAuthorityIfPresent(ctx, run, digest)
+	if err != nil {
+		return nil, err
+	}
+	if !present {
+		return nil, errors.Join(&IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "private clone authority is absent"}, unlock())
+	}
+	return unlock, nil
+}
+
+func (p *Provider) acquireCloneAuthorityIfPresent(ctx context.Context, run taskstore.BackgroundRun, digest string) (func() error, bool, error) {
+	unlock, err := p.acquireCloneLock(ctx, run.CloneIdentity)
+	if err != nil {
+		return nil, false, err
+	}
+	if _, err := os.Lstat(p.cloneMarkerPath(run)); errors.Is(err, os.ErrNotExist) {
+		return unlock, false, nil
+	} else if err != nil {
+		return nil, false, errors.Join(err, unlock())
+	}
+	if err := p.attestCloneDeletion(run, digest, filepath.Join(p.root, run.CloneIdentity)); err != nil {
+		return nil, false, errors.Join(&IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: err.Error()}, unlock())
+	}
+	return unlock, true, nil
 }

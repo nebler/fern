@@ -102,7 +102,7 @@ ALTER TABLE publications DROP COLUMN admission_receipt_id;
 DELETE FROM receipts WHERE id=?;
 CREATE TRIGGER receipts_immutable_delete BEFORE DELETE ON receipts
 BEGIN SELECT RAISE(ABORT, 'receipts are immutable'); END;
-DELETE FROM schema_migrations WHERE version IN (6,7,8);
+DELETE FROM schema_migrations WHERE version IN (6,7,8,9);
 PRAGMA user_version=5`, admitted.Receipt.ID); err != nil {
 		t.Fatal(err)
 	}

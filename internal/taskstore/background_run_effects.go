@@ -2,6 +2,7 @@ package taskstore
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -38,14 +39,14 @@ func (s *Store) ClaimNextBackgroundRun(ctx context.Context, p ClaimNextBackgroun
 FROM background_runs r
 JOIN tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id AND t.current_attempt_id=r.attempt_id
 JOIN attempts a ON a.id=r.attempt_id AND a.task_id=r.task_id AND a.workspace_id=r.workspace_id AND a.sequence=r.generation
-WHERE r.workspace_id=? AND r.profile=? AND r.image_identity=? AND r.state<>'failed' AND
+WHERE r.workspace_id=? AND r.profile=? AND r.state<>'failed' AND
 	NOT (r.state='result_ready' AND r.effect_phase='cleanup_complete') AND
-  (r.claim_owner IS NULL OR r.claim_expires_at<=?) AND
+  (r.claim_owner=? OR r.claim_owner IS NULL OR r.claim_expires_at<=?) AND
   ((r.state='queued' AND r.cancel_epoch=0 AND NOT EXISTS (
       SELECT 1 FROM background_runs active WHERE active.workspace_id=r.workspace_id AND active.profile=? AND
 		active.effect_phase NOT IN ('absent','cleanup_complete','pre_effect_failed')
 	    )) OR r.state IN ('setting_up','working','needs_you','uncertain','canceling','cleanup_required','result_ready'))
-ORDER BY CASE WHEN r.state='queued' THEN 1 ELSE 0 END,r.updated_at,r.task_id LIMIT 1`, p.WorkspaceID, p.Profile, p.ImageIdentity, now, p.Profile).
+ORDER BY CASE WHEN r.state='queued' THEN 1 ELSE 0 END,r.updated_at,r.task_id LIMIT 1`, p.WorkspaceID, p.Profile, p.ClaimOwner, now, p.Profile).
 		Scan(&taskID, &attemptID, &generation, &revision, &state, &phase, &cancelEpochValue)
 	if errors.Is(err, sql.ErrNoRows) {
 		return BackgroundRun{}, ErrNotFound
@@ -62,10 +63,10 @@ ORDER BY CASE WHEN r.state='queued' THEN 1 ELSE 0 END,r.updated_at,r.task_id LIM
 		provisionStarted = now
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE background_runs SET state=?,effect_phase=?,claim_owner=?,claim_expires_at=?,
-claim_generation=claim_generation+1,provision_intent_at=COALESCE(provision_intent_at,?),revision=revision+1,updated_at=?
+claim_generation=claim_generation+CASE WHEN claim_owner=? THEN 0 ELSE 1 END,provision_intent_at=COALESCE(provision_intent_at,?),revision=revision+1,updated_at=?
 WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND cancel_epoch=? AND
-(claim_owner IS NULL OR claim_expires_at<=?)`, newState, newPhase, p.ClaimOwner, expiry, provisionStarted, now,
-		taskID, attemptID, p.WorkspaceID, generation, revision, cancelEpoch, now)
+(claim_owner=? OR claim_owner IS NULL OR claim_expires_at<=?)`, newState, newPhase, p.ClaimOwner, expiry, p.ClaimOwner, provisionStarted, now,
+		taskID, attemptID, p.WorkspaceID, generation, revision, cancelEpoch, p.ClaimOwner, now)
 	if err != nil {
 		return BackgroundRun{}, fmt.Errorf("claim background run: %w", err)
 	}
@@ -147,6 +148,45 @@ r.claim_owner=? AND r.claim_generation=? AND r.claim_expires_at>?`, p.TaskID, p.
 	return run, nil
 }
 
+// ReadClaimedBackgroundRunWork returns task plaintext only after rechecking the
+// complete active run claim and digest binding.
+func (s *Store) ReadClaimedBackgroundRunWork(ctx context.Context, p BackgroundRunClaim) (BackgroundRunWork, error) {
+	run, err := s.ReadClaimedBackgroundRun(ctx, p)
+	if err != nil {
+		return BackgroundRunWork{}, err
+	}
+	return s.readBackgroundRunWork(ctx, run)
+}
+
+func (s *Store) ClaimNextBackgroundRunWork(ctx context.Context, p ClaimNextBackgroundRunParams) (BackgroundRunWork, error) {
+	run, err := s.ClaimNextBackgroundRun(ctx, p)
+	if err != nil {
+		return BackgroundRunWork{}, err
+	}
+	return s.ReadClaimedBackgroundRunWork(ctx, BackgroundRunClaim{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID,
+		AttemptID: run.AttemptID, Generation: run.Generation, ClaimOwner: run.ClaimOwner, ClaimGeneration: run.ClaimGeneration,
+		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, CancelEpoch: run.CancelEpoch, Now: p.Now})
+}
+
+func (s *Store) readBackgroundRunWork(ctx context.Context, run BackgroundRun) (BackgroundRunWork, error) {
+	owner, err := getTask(ctx, s.db, run.TaskID)
+	if err != nil {
+		return BackgroundRunWork{}, err
+	}
+	attempt, err := getAttempt(ctx, s.db, run.AttemptID)
+	if err != nil {
+		return BackgroundRunWork{}, err
+	}
+	digest := sha256.Sum256([]byte(owner.Prompt))
+	if owner.WorkspaceID != run.WorkspaceID || owner.CurrentAttemptID != attempt.ID || attempt.TaskID != run.TaskID ||
+		attempt.WorkspaceID != run.WorkspaceID || attempt.Sequence != run.Generation || digest != run.InstructionSHA256 ||
+		owner.PromptSHA256 != digest || attempt.PromptSHA256 != digest || !attempt.Deadline.After(attempt.CreatedAt) {
+		return BackgroundRunWork{}, ErrCorruptStore
+	}
+	return BackgroundRunWork{Run: run, Prompt: owner.Prompt, Deadline: attempt.Deadline, AttemptCreated: attempt.CreatedAt,
+		AttemptTimeout: attempt.Deadline.Sub(attempt.CreatedAt), Agent: attempt.Agent, ModelProvider: attempt.ModelProvider, Model: attempt.Model}, nil
+}
+
 func (s *Store) RenewBackgroundRunClaim(ctx context.Context, p RenewBackgroundRunClaimParams) (BackgroundRun, error) {
 	if err := validateBackgroundRunClaim(p.BackgroundRunClaim); err != nil || p.LeaseDuration <= 0 || p.LeaseDuration > maxBackgroundRunLease {
 		return BackgroundRun{}, fmt.Errorf("%w: background run claim renewal", ErrInvalidInput)
@@ -217,6 +257,22 @@ func (s *Store) RecordBackgroundRunPromptIntent(ctx context.Context, p RecordBac
 		`prompt_intent_at=?,last_evidence=?`, []any{unixMillis(p.Now), p.Evidence}, "record background run prompt intent")
 }
 
+// RecordBackgroundRunPromptRequestAttempted is the irreversible pre-I/O fence.
+// A takeover can observe it but no claimant can set or change it twice.
+func (s *Store) RecordBackgroundRunPromptRequestAttempted(ctx context.Context, p BackgroundRunClaim) (BackgroundRun, error) {
+	if p.ExpectedState != BackgroundRunUncertain || p.ExpectedPhase != BackgroundRunEffectPromptIntent {
+		return BackgroundRun{}, fmt.Errorf("%w: background run prompt request attempt", ErrInvalidInput)
+	}
+	current, err := s.ReadClaimedBackgroundRun(ctx, p)
+	if err != nil {
+		return BackgroundRun{}, err
+	}
+	if current.PromptRequestAttemptedAt != nil {
+		return BackgroundRun{}, ErrInvalidState
+	}
+	return s.updateClaimedRun(ctx, p, `prompt_request_attempted_at=?`, []any{unixMillis(p.Now)}, "record background run prompt request attempt")
+}
+
 func (s *Store) RecordBackgroundRunPromptAdmitted(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
 	if p.ExpectedPhase != BackgroundRunEffectPromptIntent || !validRequiredEvidence(p.Evidence) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run prompt admission", ErrInvalidInput)
@@ -231,6 +287,101 @@ func (s *Store) RecordBackgroundRunPromptUncertain(ctx context.Context, p Record
 	}
 	return s.transitionClaimedRun(ctx, p.BackgroundRunClaim, BackgroundRunUncertain, BackgroundRunEffectPromptIntent,
 		`last_evidence=?`, []any{p.Evidence}, "record uncertain background run prompt")
+}
+
+// RecordBackgroundRunWorkObservation records positive bounded evidence only.
+// Callers must not invoke it for an empty active/pending observation.
+func (s *Store) RecordBackgroundRunWorkObservation(ctx context.Context, p RecordBackgroundRunEvidenceParams, state BackgroundRunState) (BackgroundRun, error) {
+	if p.ExpectedPhase != BackgroundRunEffectPromptAdmitted ||
+		(p.ExpectedState != BackgroundRunWorking && p.ExpectedState != BackgroundRunNeedsYou && p.ExpectedState != BackgroundRunUncertain) ||
+		(state != BackgroundRunWorking && state != BackgroundRunNeedsYou && state != BackgroundRunUncertain) || !validRequiredEvidence(p.Evidence) {
+		return BackgroundRun{}, fmt.Errorf("%w: background run work observation", ErrInvalidInput)
+	}
+	return s.transitionClaimedRun(ctx, p.BackgroundRunClaim, state, BackgroundRunEffectPromptAdmitted,
+		`last_evidence=?`, []any{p.Evidence}, "record background run work observation")
+}
+
+// RequestBackgroundRunTimeout commits a system-owned stop without manufacturing
+// a plugin receipt. Parent terminalization remains coupled to cleanup finality.
+func (s *Store) RequestBackgroundRunTimeout(ctx context.Context, p RequestBackgroundRunTimeoutParams) (_ BackgroundRun, err error) {
+	if err := validateBackgroundRunClaim(p.BackgroundRunClaim); err != nil || p.Actor.Validate() != nil || p.Actor.Type != task.ActorSystem {
+		return BackgroundRun{}, fmt.Errorf("%w: background run timeout", ErrInvalidInput)
+	}
+	if _, parseErr := task.ParseEventID(string(p.AttemptEventID)); parseErr != nil {
+		return BackgroundRun{}, fmt.Errorf("%w: background run timeout attempt event", ErrInvalidInput)
+	}
+	if _, parseErr := task.ParseEventID(string(p.TaskEventID)); parseErr != nil || p.TaskEventID == p.AttemptEventID {
+		return BackgroundRun{}, fmt.Errorf("%w: background run timeout task event", ErrInvalidInput)
+	}
+	tx, release, err := s.beginWrite(ctx)
+	if err != nil {
+		return BackgroundRun{}, err
+	}
+	defer release()
+	defer rollback(tx, &err)
+	run, err := readBackgroundRunExact(ctx, tx, p.WorkspaceID, p.TaskID)
+	if err != nil {
+		return BackgroundRun{}, err
+	}
+	if run.AttemptID != p.AttemptID || run.Generation != p.Generation || run.Revision != p.ExpectedRevision ||
+		run.State != p.ExpectedState || run.EffectPhase != p.ExpectedPhase || run.CancelEpoch != 0 ||
+		run.ClaimOwner != p.ClaimOwner || run.ClaimGeneration != p.ClaimGeneration || run.ClaimExpiresAt == nil || !run.ClaimExpiresAt.After(p.Now) {
+		return BackgroundRun{}, ErrInvalidState
+	}
+	owner, err := getTask(ctx, tx, run.TaskID)
+	if err != nil {
+		return BackgroundRun{}, err
+	}
+	attempt, err := getAttempt(ctx, tx, run.AttemptID)
+	if err != nil {
+		return BackgroundRun{}, err
+	}
+	if p.Now.Before(attempt.Deadline) || owner.State != task.TaskQueued || attempt.State != task.AttemptPrepared {
+		return BackgroundRun{}, ErrInvalidState
+	}
+	actorID, err := ensureActor(ctx, tx, p.Actor)
+	if err != nil {
+		return BackgroundRun{}, err
+	}
+	now := unixMillis(p.Now)
+	payload := json.RawMessage(`{"reason":"attempt_timeout"}`)
+	attemptEvent, err := insertAttemptEvent(ctx, tx, p.AttemptEventID, attempt, "attempt.timeout_requested", now, actorID, payload)
+	if err != nil {
+		return BackgroundRun{}, err
+	}
+	taskEvent, err := insertTaskEvent(ctx, tx, p.TaskEventID, owner, "task.timeout_requested", now, actorID, payload)
+	if err != nil || attemptEvent.Cursor >= taskEvent.Cursor {
+		return BackgroundRun{}, fmt.Errorf("insert background run timeout events: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE tasks SET latest_event_cursor=?,revision=revision+1,updated_at=?
+WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND revision=?`, taskEvent.Cursor, now,
+		owner.ID, owner.WorkspaceID, attempt.ID, owner.Revision)
+	if err != nil {
+		return BackgroundRun{}, fmt.Errorf("project background run timeout event: %w", err)
+	}
+	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
+		return BackgroundRun{}, ErrInvalidState
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE background_runs SET state='cleanup_required',effect_phase='stop_intent',
+timeout_requested_at=?,timeout_actor_snapshot_id=?,stop_intent_at=COALESCE(stop_intent_at,?),last_error='attempt_timeout',
+claim_owner=NULL,claim_expires_at=NULL,revision=revision+1,updated_at=?
+WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND state=? AND effect_phase=? AND cancel_epoch=0 AND
+claim_owner=? AND claim_generation=? AND claim_expires_at>?`, now, actorID, now, now, run.TaskID, run.AttemptID, run.WorkspaceID,
+		run.Generation, run.Revision, run.State, run.EffectPhase, run.ClaimOwner, run.ClaimGeneration, now)
+	if err != nil {
+		return BackgroundRun{}, fmt.Errorf("request background run timeout: %w", err)
+	}
+	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
+		return BackgroundRun{}, ErrInvalidState
+	}
+	stored, err := readBackgroundRunExact(ctx, tx, run.WorkspaceID, run.TaskID)
+	if err != nil {
+		return BackgroundRun{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return BackgroundRun{}, err
+	}
+	return stored, nil
 }
 
 func (s *Store) RecordBackgroundRunResultReady(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
@@ -351,6 +502,11 @@ func (s *Store) FinalizeBackgroundRunFailure(ctx context.Context, p FinalizeBack
 	if owner.WorkspaceID != run.WorkspaceID || owner.CurrentAttemptID != attempt.ID || owner.State != task.TaskQueued ||
 		attempt.TaskID != owner.ID || attempt.WorkspaceID != owner.WorkspaceID || attempt.Sequence != run.Generation || attempt.State != task.AttemptPrepared {
 		return BackgroundRun{}, ErrInvalidState
+	}
+	if run.TimeoutRequestedAt != nil {
+		if run.TimeoutActor == nil || p.Actor != *run.TimeoutActor || p.Reason != "attempt_timeout" {
+			return BackgroundRun{}, ErrInvalidState
+		}
 	}
 	actorID, err := ensureActor(ctx, tx, p.Actor)
 	if err != nil {

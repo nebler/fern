@@ -18,6 +18,7 @@ const (
 	ComponentGitHubTaskDependency Component = "github-task-dependency"
 	ComponentLegacyPublication    Component = "legacy-publication"
 	ComponentBackgroundRunProfile Component = "background-run-profile"
+	ComponentBackgroundRunSerial  Component = "background-run-serial"
 )
 
 var components = [...]Component{
@@ -31,6 +32,7 @@ var components = [...]Component{
 	ComponentGitHubTaskDependency,
 	ComponentLegacyPublication,
 	ComponentBackgroundRunProfile,
+	ComponentBackgroundRunSerial,
 }
 
 type State string

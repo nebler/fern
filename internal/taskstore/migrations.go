@@ -24,10 +24,106 @@ var migrations = []migration{
 	{version: 6, name: "publication_admission_receipts", sql: publicationAdmissionReceiptSchema},
 	{version: 7, name: "background_run_intents", sql: backgroundRunIntentSchema},
 	{version: 8, name: "background_run_effect_claims", sql: backgroundRunEffectClaimSchema},
+	{version: 9, name: "background_run_prompt_attempt_fence", sql: backgroundRunPromptAttemptFenceSchema},
 }
 
 // CurrentSchemaVersion is the schema produced by all migrations in this build.
 func CurrentSchemaVersion() int { return len(migrations) }
+
+const backgroundRunPromptAttemptFenceSchema = `
+ALTER TABLE background_runs ADD COLUMN prompt_request_attempted_at INTEGER
+  CHECK(prompt_request_attempted_at IS NULL OR prompt_request_attempted_at BETWEEN created_at AND updated_at);
+ALTER TABLE background_runs ADD COLUMN timeout_requested_at INTEGER
+  CHECK(timeout_requested_at IS NULL OR timeout_requested_at BETWEEN created_at AND updated_at);
+ALTER TABLE background_runs ADD COLUMN timeout_actor_snapshot_id INTEGER
+  REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT;
+ALTER TABLE background_runs ADD COLUMN environment_sha256 BLOB
+  CHECK(environment_sha256 IS NULL OR (length(environment_sha256)=32 AND
+    lower(hex(environment_sha256))<>'0000000000000000000000000000000000000000000000000000000000000000'));
+ALTER TABLE background_runs ADD COLUMN resource_spec_version INTEGER
+  CHECK(resource_spec_version IS NULL OR resource_spec_version IN (8,9));
+
+-- Schema 8 could have committed prompt intent without the one-shot fence. Such
+-- rows are conservatively treated as already attempted and may only reconcile.
+-- Terminal schema-8 rows retain prompt metadata, so temporarily remove only the
+-- terminal-row guard while this transactional immutable-field backfill runs.
+DROP TRIGGER background_runs_terminal_immutable;
+UPDATE background_runs SET prompt_request_attempted_at=prompt_intent_at,
+  environment_sha256=X'44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a',
+  resource_spec_version=8,revision=revision+1;
+CREATE TRIGGER background_runs_terminal_immutable BEFORE UPDATE ON background_runs
+WHEN OLD.state='failed' OR (OLD.state='result_ready' AND (OLD.profile='opencode-1.18.16' OR OLD.effect_phase='cleanup_complete'))
+BEGIN SELECT RAISE(ABORT, 'terminal background run is immutable'); END;
+
+CREATE TRIGGER background_runs_v9_insert_fences BEFORE INSERT ON background_runs
+WHEN NEW.prompt_request_attempted_at IS NOT NULL OR NEW.timeout_requested_at IS NOT NULL OR NEW.timeout_actor_snapshot_id IS NOT NULL OR
+  NEW.environment_sha256 IS NULL OR NEW.resource_spec_version IS NOT 9
+BEGIN SELECT RAISE(ABORT, 'background run fences must start empty'); END;
+
+CREATE TRIGGER background_runs_environment_immutable BEFORE UPDATE ON background_runs
+WHEN NEW.environment_sha256 IS NOT OLD.environment_sha256 OR NEW.resource_spec_version IS NOT OLD.resource_spec_version
+BEGIN SELECT RAISE(ABORT, 'background run environment identity is immutable'); END;
+
+CREATE TRIGGER background_runs_prompt_attempt_fence BEFORE UPDATE ON background_runs
+WHEN NEW.prompt_request_attempted_at IS NOT OLD.prompt_request_attempted_at
+BEGIN
+  SELECT CASE WHEN OLD.prompt_request_attempted_at IS NOT NULL OR NEW.prompt_request_attempted_at IS NULL OR
+    OLD.state<>'uncertain' OR OLD.effect_phase<>'prompt_intent' OR OLD.cancel_epoch<>0 OR
+    NEW.state<>OLD.state OR NEW.effect_phase<>OLD.effect_phase OR NEW.cancel_epoch<>OLD.cancel_epoch OR
+    NEW.prompt_request_attempted_at<>NEW.updated_at
+    THEN RAISE(ABORT, 'invalid background run prompt attempt fence') END;
+END;
+
+CREATE TRIGGER background_runs_prompt_attempt_immutable BEFORE UPDATE ON background_runs
+WHEN OLD.prompt_request_attempted_at IS NOT NULL AND NEW.prompt_request_attempted_at IS NOT OLD.prompt_request_attempted_at
+BEGIN SELECT RAISE(ABORT, 'background run prompt attempt is immutable'); END;
+
+CREATE TRIGGER background_runs_prompt_admission_requires_attempt BEFORE UPDATE ON background_runs
+WHEN NEW.effect_phase='prompt_admitted' AND NEW.prompt_request_attempted_at IS NULL
+BEGIN SELECT RAISE(ABORT, 'background run prompt admission has no request attempt'); END;
+
+CREATE TRIGGER background_runs_timeout_integrity BEFORE UPDATE ON background_runs
+WHEN NEW.timeout_requested_at IS NOT OLD.timeout_requested_at OR NEW.timeout_actor_snapshot_id IS NOT OLD.timeout_actor_snapshot_id
+BEGIN
+  SELECT CASE WHEN OLD.timeout_requested_at IS NOT NULL OR OLD.timeout_actor_snapshot_id IS NOT NULL OR
+    NEW.timeout_requested_at IS NULL OR NEW.timeout_actor_snapshot_id IS NULL OR NEW.timeout_requested_at<>NEW.updated_at OR
+    OLD.cancel_epoch<>0 OR NEW.cancel_epoch<>0 OR NEW.stop_receipt_id IS NOT NULL OR
+    NEW.state<>'cleanup_required' OR NEW.effect_phase<>'stop_intent' OR
+    NOT EXISTS (SELECT 1 FROM actor_snapshots a
+      JOIN attempts attempt ON attempt.id=NEW.attempt_id AND attempt.task_id=NEW.task_id AND attempt.workspace_id=NEW.workspace_id
+      JOIN tasks task ON task.id=NEW.task_id AND task.workspace_id=NEW.workspace_id AND task.current_attempt_id=attempt.id
+      JOIN events ae ON ae.attempt_id=attempt.id AND ae.type='attempt.timeout_requested' AND ae.occurred_at=NEW.timeout_requested_at AND ae.actor_snapshot_id=a.id
+      JOIN events te ON te.task_id=task.id AND te.attempt_id IS NULL AND te.type='task.timeout_requested' AND te.occurred_at=ae.occurred_at AND
+        te.actor_snapshot_id=a.id AND te.payload=ae.payload AND te.cursor>ae.cursor AND te.cursor=task.latest_event_cursor
+      WHERE a.id=NEW.timeout_actor_snapshot_id AND a.actor_type='system' AND json_extract(ae.payload,'$.reason')='attempt_timeout')
+    THEN RAISE(ABORT, 'invalid background run system timeout') END;
+END;
+
+CREATE TRIGGER background_runs_timeout_immutable BEFORE UPDATE ON background_runs
+WHEN OLD.timeout_requested_at IS NOT NULL AND
+  (NEW.timeout_requested_at IS NOT OLD.timeout_requested_at OR NEW.timeout_actor_snapshot_id IS NOT OLD.timeout_actor_snapshot_id)
+BEGIN SELECT RAISE(ABORT, 'background run timeout is immutable'); END;
+
+DROP TRIGGER background_runs_state_transition;
+CREATE TRIGGER background_runs_state_transition BEFORE UPDATE OF state ON background_runs
+WHEN NEW.state<>OLD.state AND NOT (
+  (OLD.state='queued' AND NEW.state='setting_up' AND NEW.effect_phase='provision_intent') OR
+  (OLD.state='queued' AND NEW.state='failed' AND NEW.effect_phase='pre_effect_failed') OR
+  (OLD.state='setting_up' AND NEW.state='uncertain' AND
+    (NEW.effect_phase=OLD.effect_phase OR (OLD.effect_phase='session_observed' AND NEW.effect_phase='prompt_intent'))) OR
+  (OLD.state='uncertain' AND NEW.state='setting_up' AND NEW.effect_phase=OLD.effect_phase AND NEW.effect_phase IN
+    ('provision_intent','clone_observed','volume_observed','container_observed','health_observed','ready','session_observed')) OR
+  (OLD.state='uncertain' AND NEW.state IN ('working','needs_you') AND NEW.effect_phase='prompt_admitted') OR
+  (OLD.state IN ('working','needs_you','uncertain') AND NEW.state IN ('working','needs_you','uncertain') AND
+    NEW.effect_phase='prompt_admitted') OR
+  (OLD.state IN ('working','needs_you','uncertain') AND NEW.state='result_ready' AND NEW.effect_phase='prompt_admitted') OR
+  (OLD.state IN ('setting_up','working','needs_you','uncertain') AND NEW.state IN ('canceling','cleanup_required') AND NEW.effect_phase='stop_intent') OR
+  (OLD.state='canceling' AND NEW.state='cleanup_required' AND NEW.effect_phase=OLD.effect_phase) OR
+  (OLD.state IN ('canceling','cleanup_required') AND NEW.state='failed' AND NEW.effect_phase='cleanup_complete') OR
+  (OLD.state IN ('setting_up','uncertain') AND NEW.state='failed' AND NEW.effect_phase='pre_effect_failed')
+)
+BEGIN SELECT RAISE(ABORT, 'invalid background run state transition'); END;
+`
 
 const backgroundRunEffectClaimSchema = `
 CREATE TEMP TABLE migration8_legacy_background_runs AS

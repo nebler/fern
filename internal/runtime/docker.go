@@ -95,6 +95,11 @@ func (d *Docker) Close() error {
 	return d.cli.Close()
 }
 
+// BackgroundRunDockerClient shares the daemon transport while leaving resource
+// lifecycle and ownership policy to taskenvdocker. The provider does not own or
+// close this client.
+func (d *Docker) BackgroundRunDockerClient() *client.Client { return d.cli }
+
 // ResolveImageID reads Docker's immutable local image identity for a configured
 // reference without creating, starting, or mutating a container.
 func (d *Docker) ResolveImageID(ctx context.Context, reference string) (string, error) {

@@ -31,11 +31,16 @@ var (
 )
 
 // EnsureVolume creates or reconciles the exact labeled local OpenCode volume.
-func (p *Provider) EnsureVolume(ctx context.Context, run taskstore.BackgroundRun) (Observation, error) {
+func (p *Provider) EnsureVolume(ctx context.Context, run taskstore.BackgroundRun) (_ Observation, resultErr error) {
 	digest, err := p.validateRun(run)
 	if err != nil {
 		return Observation{}, err
 	}
+	unlock, err := p.acquireCloneAuthority(ctx, run, digest)
+	if err != nil {
+		return Observation{}, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
 	want := p.labels(run, digest)
 	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
 	existing, err := p.docker.VolumeInspect(operation, run.VolumeIdentity)
@@ -78,10 +83,24 @@ func (p *Provider) attestVolume(run taskstore.BackgroundRun, digest string, item
 
 // EnsureContainer creates the exact stopped container or reconciles a lost
 // create response. It never starts a container.
-func (p *Provider) EnsureContainer(ctx context.Context, run taskstore.BackgroundRun) (Observation, error) {
+func (p *Provider) EnsureContainer(ctx context.Context, run taskstore.BackgroundRun) (_ Observation, resultErr error) {
 	digest, err := p.validateRun(run)
 	if err != nil {
 		return Observation{}, err
+	}
+	unlock, err := p.acquireCloneAuthority(ctx, run, digest)
+	if err != nil {
+		return Observation{}, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
+	volumeOperation, volumeCancel := operationContext(ctx, p.config.DockerTimeout)
+	item, err := p.docker.VolumeInspect(volumeOperation, run.VolumeIdentity)
+	volumeCancel()
+	if err != nil {
+		return Observation{}, fmt.Errorf("inspect background run volume before container create: %w", err)
+	}
+	if err := p.attestVolume(run, digest, item); err != nil {
+		return Observation{}, &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: err.Error()}
 	}
 	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
@@ -187,11 +206,23 @@ func (p *Provider) StartContainer(ctx context.Context, run taskstore.BackgroundR
 }
 
 func (p *Provider) attestContainer(run taskstore.BackgroundRun, digest string, info container.InspectResponse, requireRunning bool) error {
+	return p.attestContainerMode(run, digest, info, requireRunning, true)
+}
+
+func (p *Provider) attestContainerForCleanup(run taskstore.BackgroundRun, digest string, info container.InspectResponse, requireRunning bool) error {
+	return p.attestContainerMode(run, digest, info, requireRunning, false)
+}
+
+func (p *Provider) attestContainerMode(run taskstore.BackgroundRun, digest string, info container.InspectResponse, requireRunning, enforceCurrentPolicy bool) error {
 	if info.ContainerJSONBase == nil || info.Config == nil || info.HostConfig == nil || info.State == nil || info.NetworkSettings == nil {
 		return errors.New("Docker returned incomplete container inspection")
 	}
 	c := info.Config
-	if info.ID == "" || info.Name != "/"+run.ContainerIdentity || info.Image != run.ImageIdentity || c.Image != run.ImageIdentity || c.User != containerUser || c.WorkingDir != workspaceTarget || !slices.Equal(c.Cmd, []string{"opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"}) || len(c.Entrypoint) != 0 || !equalMap(c.Labels, p.containerLabels(run, digest)) {
+	labelsMatch := equalMap(c.Labels, p.containerLabels(run, digest))
+	if !enforceCurrentPolicy {
+		labelsMatch = containsMap(c.Labels, p.labels(run, digest))
+	}
+	if info.ID == "" || info.Name != "/"+run.ContainerIdentity || info.Image != run.ImageIdentity || c.Image != run.ImageIdentity || c.User != containerUser || c.WorkingDir != workspaceTarget || !slices.Equal(c.Cmd, []string{"opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"}) || len(c.Entrypoint) != 0 || !labelsMatch {
 		return errors.New("container name, image, user, command, workdir, or labels differ")
 	}
 	if len(info.ID) < 12 || c.Hostname != info.ID[:12] || c.Domainname != "" {
@@ -206,13 +237,15 @@ func (p *Provider) attestContainer(run taskstore.BackgroundRun, digest string, i
 	if _, ok := c.ExposedPorts[serverPort]; !ok {
 		return errors.New("container exposed port differs")
 	}
-	wantEnv, err := parseEnvironment(p.expectedEnvironment(run))
-	if err != nil {
-		return err
-	}
-	gotEnv, err := parseEnvironment(c.Env)
-	if err != nil || !equalMap(gotEnv, wantEnv) {
-		return errors.New("container environment differs")
+	if enforceCurrentPolicy {
+		wantEnv, err := parseEnvironment(p.expectedEnvironment(run))
+		if err != nil {
+			return err
+		}
+		gotEnv, err := parseEnvironment(c.Env)
+		if err != nil || !equalMap(gotEnv, wantEnv) {
+			return errors.New("container environment differs")
+		}
 	}
 	h := info.HostConfig
 	if h.NetworkMode != "bridge" || h.IpcMode != "private" || h.CgroupnsMode != "private" || h.PidMode != "" || h.UTSMode != "" || h.UsernsMode != "" || h.Runtime != "runc" || h.ShmSize != 64<<20 || h.AutoRemove || h.Privileged || h.ReadonlyRootfs || h.PublishAllPorts || h.ContainerIDFile != "" || h.VolumeDriver != "" || h.Cgroup != "" || h.Isolation != "" || h.ConsoleSize != [2]uint{} {
@@ -221,17 +254,19 @@ func (p *Provider) attestContainer(run taskstore.BackgroundRun, digest string, i
 	if len(h.Binds) != 0 || len(h.VolumesFrom) != 0 || len(h.CapAdd) != 0 || !slices.Equal(h.CapDrop, []string{"ALL"}) || !slices.Equal(h.SecurityOpt, []string{"no-new-privileges"}) || len(h.DNS) != 0 || len(h.DNSOptions) != 0 || len(h.DNSSearch) != 0 || len(h.ExtraHosts) != 0 || len(h.GroupAdd) != 0 || len(h.Links) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.DeviceCgroupRules) != 0 || len(h.Ulimits) != 0 || len(h.Sysctls) != 0 || len(h.StorageOpt) != 0 || len(h.Tmpfs) != 0 || len(h.Annotations) != 0 {
 		return errors.New("container DNS, links, devices, capabilities, or mutable host options differ")
 	}
-	gotPIDs := int64(-1)
-	if h.PidsLimit != nil {
-		gotPIDs = *h.PidsLimit
-	}
-	if h.Memory != p.config.MemoryBytes || h.MemorySwap != p.config.MemoryBytes*2 || h.MemoryReservation != 0 || h.NanoCPUs != p.config.NanoCPUs || gotPIDs != p.config.PIDs || h.CPUShares != 0 || h.CPUPeriod != 0 || h.CPUQuota != 0 || h.CpusetCpus != "" || h.CpusetMems != "" || (h.OomKillDisable != nil && *h.OomKillDisable) || h.MemorySwappiness != nil || h.OomScoreAdj != 0 || h.Init == nil || !*h.Init || !h.RestartPolicy.IsNone() {
-		return fmt.Errorf("container resource, init, or restart limits differ (memory=%d swap=%d reservation=%d nano_cpus=%d pids=%d shares=%d period=%d quota=%d oom_disable=%t swappiness=%t oom_score=%d init=%t restart=%s)", h.Memory, h.MemorySwap, h.MemoryReservation, h.NanoCPUs, gotPIDs, h.CPUShares, h.CPUPeriod, h.CPUQuota, h.OomKillDisable != nil, h.MemorySwappiness != nil, h.OomScoreAdj, h.Init != nil && *h.Init, h.RestartPolicy.Name)
+	if enforceCurrentPolicy {
+		gotPIDs := int64(-1)
+		if h.PidsLimit != nil {
+			gotPIDs = *h.PidsLimit
+		}
+		if h.Memory != p.config.MemoryBytes || h.MemorySwap != p.config.MemoryBytes*2 || h.MemoryReservation != 0 || h.NanoCPUs != p.config.NanoCPUs || gotPIDs != p.config.PIDs || h.CPUShares != 0 || h.CPUPeriod != 0 || h.CPUQuota != 0 || h.CpusetCpus != "" || h.CpusetMems != "" || (h.OomKillDisable != nil && *h.OomKillDisable) || h.MemorySwappiness != nil || h.OomScoreAdj != 0 || h.Init == nil || !*h.Init || !h.RestartPolicy.IsNone() {
+			return fmt.Errorf("container resource, init, or restart limits differ (memory=%d swap=%d reservation=%d nano_cpus=%d pids=%d shares=%d period=%d quota=%d oom_disable=%t swappiness=%t oom_score=%d init=%t restart=%s)", h.Memory, h.MemorySwap, h.MemoryReservation, h.NanoCPUs, gotPIDs, h.CPUShares, h.CPUPeriod, h.CPUQuota, h.OomKillDisable != nil, h.MemorySwappiness != nil, h.OomScoreAdj, h.Init != nil && *h.Init, h.RestartPolicy.Name)
+		}
 	}
 	if h.CgroupParent != "" || h.BlkioWeight != 0 || len(h.BlkioWeightDevice) != 0 || len(h.BlkioDeviceReadBps) != 0 || len(h.BlkioDeviceWriteBps) != 0 || len(h.BlkioDeviceReadIOps) != 0 || len(h.BlkioDeviceWriteIOps) != 0 || h.CPURealtimePeriod != 0 || h.CPURealtimeRuntime != 0 || h.KernelMemory != 0 || h.KernelMemoryTCP != 0 || h.CPUCount != 0 || h.CPUPercent != 0 || h.IOMaximumIOps != 0 || h.IOMaximumBandwidth != 0 {
 		return errors.New("container secondary CPU, memory, block-I/O, or cgroup dimensions differ")
 	}
-	if h.LogConfig.Type != "json-file" || !equalMap(h.LogConfig.Config, map[string]string{"max-size": p.config.LogMaxSize, "max-file": strconv.Itoa(p.config.LogMaxFiles)}) || !slices.Equal(h.MaskedPaths, expectedMaskedPaths) || !slices.Equal(h.ReadonlyPaths, expectedReadonlyPaths) {
+	if (enforceCurrentPolicy && (h.LogConfig.Type != "json-file" || !equalMap(h.LogConfig.Config, map[string]string{"max-size": p.config.LogMaxSize, "max-file": strconv.Itoa(p.config.LogMaxFiles)}))) || !slices.Equal(h.MaskedPaths, expectedMaskedPaths) || !slices.Equal(h.ReadonlyPaths, expectedReadonlyPaths) {
 		return errors.New("container log or protected-path limits differ")
 	}
 	bindings := h.PortBindings[serverPort]
@@ -499,7 +534,7 @@ func (p *Provider) requestHealth(ctx context.Context, endpoint, user, password s
 // StopContainer attests the exact process epoch before stopping and returns
 // positive non-running writer-inactivity evidence.
 func (p *Provider) StopContainer(ctx context.Context, run taskstore.BackgroundRun, runtime RuntimeIdentity) (Observation, error) {
-	digest, err := p.validateRun(run)
+	digest, err := p.cleanupDigest(run)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -528,7 +563,7 @@ func (p *Provider) StopContainer(ctx context.Context, run taskstore.BackgroundRu
 		cancel()
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "container ID does not match stop authority"}
 	}
-	if err := p.attestContainer(run, digest, info, info.State.Running); err != nil {
+	if err := p.attestContainerForCleanup(run, digest, info, info.State.Running); err != nil {
 		cancel()
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
 	}
@@ -551,7 +586,7 @@ func (p *Provider) StopContainer(ctx context.Context, run taskstore.BackgroundRu
 	} else {
 		cancel()
 	}
-	if err := p.attestContainer(run, digest, info, false); err != nil {
+	if err := p.attestContainerForCleanup(run, digest, info, false); err != nil {
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "post-stop attestation failed: " + err.Error()}
 	}
 	if err := requireRuntime(info, runtime); err != nil {
@@ -561,9 +596,54 @@ func (p *Provider) StopContainer(ctx context.Context, run taskstore.BackgroundRu
 	return Observation{Evidence: e, ContainerID: runtime.ContainerID, ContainerStarted: runtime.StartedAt, RuntimeToken: runtime.Token}, nil
 }
 
+// ProveWriterInactive resolves one explicit cleanup authority from exact
+// provider-owned labels. It never creates a resource and never deletes an
+// identity that was not fully attested.
+func (p *Provider) ProveWriterInactive(ctx context.Context, run taskstore.BackgroundRun) (Observation, CleanupAuthority, error) {
+	digest, err := p.cleanupDigest(run)
+	if err != nil {
+		return Observation{}, CleanupAuthority{}, err
+	}
+	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
+	if errdefs.IsNotFound(err) {
+		listed, listErr := p.listRunContainers(operation, run, digest)
+		cancel()
+		if listErr != nil {
+			return Observation{}, CleanupAuthority{}, listErr
+		}
+		if len(listed) != 0 {
+			return Observation{}, CleanupAuthority{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "exact-labeled run container exists under a noncanonical name"}
+		}
+		e, _ := makeEvidence(evidence{Effect: "writer_inactive", Identity: run.ContainerIdentity, Spec: digest, Status: "never_created"})
+		return Observation{Evidence: e}, NeverCreatedAuthority(), nil
+	}
+	cancel()
+	if err != nil {
+		return Observation{}, CleanupAuthority{}, err
+	}
+	if err := p.attestContainerForCleanup(run, digest, info, info.State.Running); err != nil {
+		return Observation{}, CleanupAuthority{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
+	}
+	if info.State.Status == "created" {
+		e, _ := makeEvidence(evidence{Effect: "writer_inactive", Identity: run.ContainerIdentity, Spec: digest, Status: "never_started", Container: info.ID})
+		return Observation{Evidence: e, ContainerID: info.ID}, CreatedContainerAuthority(info.ID), nil
+	}
+	runtime, _, err := runtimeIdentity(info)
+	if err != nil {
+		return Observation{}, CleanupAuthority{}, err
+	}
+	if info.State.Running {
+		observation, stopErr := p.StopContainer(ctx, run, runtime)
+		return observation, RuntimeCleanupAuthority(runtime), stopErr
+	}
+	e, _ := makeEvidence(evidence{Effect: "writer_inactive", Identity: run.ContainerIdentity, Spec: digest, Status: "already_stopped", Container: info.ID, Started: runtime.StartedAt, Runtime: runtime.Token})
+	return Observation{Evidence: e, ContainerID: info.ID, ContainerStarted: runtime.StartedAt, RuntimeToken: runtime.Token}, RuntimeCleanupAuthority(runtime), nil
+}
+
 // RemoveContainer removes only the exact attested stopped runtime.
 func (p *Provider) RemoveContainer(ctx context.Context, run taskstore.BackgroundRun, authority CleanupAuthority) (Observation, error) {
-	digest, err := p.validateRun(run)
+	digest, err := p.cleanupDigest(run)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -602,7 +682,7 @@ func (p *Provider) RemoveContainer(ctx context.Context, run taskstore.Background
 		cancel()
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "container ID does not match removal authority"}
 	}
-	if err := p.attestContainer(run, digest, info, false); err != nil {
+	if err := p.attestContainerForCleanup(run, digest, info, false); err != nil {
 		cancel()
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
 	}
@@ -639,14 +719,19 @@ func (p *Provider) RemoveContainer(ctx context.Context, run taskstore.Background
 }
 
 // RemoveVolume removes only the exact attested volume after the exact runtime is absent.
-func (p *Provider) RemoveVolume(ctx context.Context, run taskstore.BackgroundRun, authority CleanupAuthority) (Observation, error) {
-	digest, err := p.validateRun(run)
+func (p *Provider) RemoveVolume(ctx context.Context, run taskstore.BackgroundRun, authority CleanupAuthority) (_ Observation, resultErr error) {
+	digest, err := p.cleanupDigest(run)
 	if err != nil {
 		return Observation{}, err
 	}
 	if _, err := validateCleanupAuthority(authority); err != nil {
 		return Observation{}, err
 	}
+	unlock, clonePresent, err := p.acquireCloneAuthorityIfPresent(ctx, run, digest)
+	if err != nil {
+		return Observation{}, err
+	}
+	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
 	if err := p.requireContainerAbsent(ctx, run, digest, authority); err != nil {
 		return Observation{}, err
 	}
@@ -660,6 +745,10 @@ func (p *Provider) RemoveVolume(ctx context.Context, run taskstore.BackgroundRun
 	if err != nil {
 		cancel()
 		return Observation{}, err
+	}
+	if !clonePresent {
+		cancel()
+		return Observation{}, &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: "volume exists without private clone authority"}
 	}
 	if err := p.attestVolume(run, digest, item); err != nil {
 		cancel()
@@ -698,6 +787,17 @@ func (p *Provider) requireContainerAbsent(ctx context.Context, run taskstore.Bac
 	}
 	if len(listed) != 0 {
 		return &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "exact-labeled run container still exists under another name"}
+	}
+	return nil
+}
+
+func (p *Provider) requireVolumeAbsent(ctx context.Context, run taskstore.BackgroundRun) error {
+	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	defer cancel()
+	if item, err := p.docker.VolumeInspect(operation, run.VolumeIdentity); err == nil {
+		return &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: "volume still exists before clone cleanup: " + item.Name}
+	} else if !errdefs.IsNotFound(err) {
+		return err
 	}
 	return nil
 }
@@ -744,6 +844,16 @@ func equalMap[K comparable, V comparable](left, right map[K]V) bool {
 	}
 	for key, value := range left {
 		if right[key] != value {
+			return false
+		}
+	}
+	return true
+}
+
+func containsMap[K comparable, V comparable](got, required map[K]V) bool {
+	for key, value := range required {
+		gotValue, exists := got[key]
+		if !exists || gotValue != value {
 			return false
 		}
 	}

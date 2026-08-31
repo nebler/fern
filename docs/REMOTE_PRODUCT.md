@@ -77,7 +77,7 @@ The implemented journey is:
     from the phone task page.
 
 Lifecycle, offline backup/rollback, encrypted GitHub credential custody,
-schema-4 to schema-7 compatibility fixtures, readiness telemetry, and an
+schema-4 to schema-9 compatibility fixtures, readiness telemetry, and an
 attested tag-release workflow support that journey.
 
 ## Evidence Boundary

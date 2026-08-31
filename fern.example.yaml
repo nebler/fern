@@ -26,6 +26,9 @@ workspace:
 #   # requires promotion to a registry digest.
 #   backgroundImage: fern/opencode-background-source:dev
 #   backgroundImageID: sha256:replace-with-64-lowercase-hex-digits
+#   # Optional and explicit. Disposable runs never inherit workspace.env.
+#   backgroundEnvironment:
+#     OPENAI_API_KEY: ${OPENAI_API_KEY}
 #   budget:
 #     maxTurns: 100
 #   # Optional. No verification command is inferred from repository contents.

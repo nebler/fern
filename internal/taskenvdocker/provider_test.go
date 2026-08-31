@@ -285,6 +285,126 @@ func TestCloneCrashRecoveryFinishesStageAndQuarantine(t *testing.T) {
 	})
 }
 
+func TestCloneFilesystemWorkHonorsCancellationAndRemainsRecoverable(t *testing.T) {
+	t.Run("tree sizing", func(t *testing.T) {
+		root := t.TempDir()
+		if err := os.WriteFile(filepath.Join(root, "data"), []byte("fixture"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		canceled, cancel := context.WithCancel(context.Background())
+		cancel()
+		for _, test := range []struct {
+			name string
+			ctx  context.Context
+			want error
+		}{
+			{"canceled", canceled, context.Canceled},
+			{"deadline", expiredContext(t), context.DeadlineExceeded},
+		} {
+			if _, err := treeSize(test.ctx, root); !errors.Is(err, test.want) {
+				t.Fatalf("%s tree size error = %v", test.name, err)
+			}
+		}
+	})
+
+	t.Run("rollback quarantine", func(t *testing.T) {
+		root := t.TempDir()
+		stage := filepath.Join(root, ".clone-stage-aaaaaaaaaaaa")
+		if err := os.Mkdir(stage, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(stage, "data"), []byte("retain"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		expected, err := os.Lstat(stage)
+		if err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if err := removeCreatedTree(ctx, root, stage, expected); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled rollback error = %v", err)
+		}
+		if _, err := os.Lstat(stage); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("rollback staging path remains: %v", err)
+		}
+		entries, err := os.ReadDir(root)
+		if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), ".clone-quarantine-") {
+			t.Fatalf("rollback quarantine entries=%v error=%v", entries, err)
+		}
+		quarantined, err := os.Lstat(filepath.Join(root, entries[0].Name()))
+		if err != nil || !os.SameFile(expected, quarantined) {
+			t.Fatalf("rollback quarantine changed inode: info=%v error=%v", quarantined, err)
+		}
+	})
+
+	t.Run("recursive deletion does not follow symlinks", func(t *testing.T) {
+		root := t.TempDir()
+		target := filepath.Join(root, "target")
+		outside := t.TempDir()
+		sentinel := filepath.Join(outside, "retain")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sentinel, []byte("retain"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(target, "outside")); err != nil {
+			t.Fatal(err)
+		}
+		if err := removeCloneTree(context.Background(), root, target); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("clone tree remains: %v", err)
+		}
+		if data, err := os.ReadFile(sentinel); err != nil || string(data) != "retain" {
+			t.Fatalf("recursive deletion followed symlink: data=%q error=%v", data, err)
+		}
+	})
+
+	t.Run("marker-bound quarantine retry", func(t *testing.T) {
+		provider, _, run := testProvider(t)
+		if _, err := provider.EnsureClone(context.Background(), run); err != nil {
+			t.Fatal(err)
+		}
+		digest, err := provider.validateRun(run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		canonical := filepath.Join(provider.root, run.CloneIdentity)
+		quarantine := filepath.Join(provider.root, ".clone-quarantine-cccccccccccc")
+		if err := os.Rename(canonical, quarantine); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		if _, err := provider.finishMarkerBoundDeletion(ctx, run, digest); !errors.Is(err, context.Canceled) {
+			t.Fatalf("canceled quarantine cleanup error = %v", err)
+		}
+		if _, err := os.Lstat(quarantine); err != nil {
+			t.Fatalf("canceled cleanup removed attested quarantine: %v", err)
+		}
+		recovered, err := provider.finishMarkerBoundDeletion(context.Background(), run, digest)
+		if err != nil || !recovered {
+			t.Fatalf("retry marker-bound cleanup: recovered=%t error=%v", recovered, err)
+		}
+		if _, err := os.Lstat(quarantine); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("retried cleanup left quarantine: %v", err)
+		}
+		if _, err := os.Lstat(provider.cloneMarkerPath(run)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("retried cleanup left marker: %v", err)
+		}
+	})
+}
+
+func expiredContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithDeadline(context.Background(), time.Unix(0, 0))
+	t.Cleanup(cancel)
+	return ctx
+}
+
 func TestConcurrentClonePublicationConvergesOnOneWinner(t *testing.T) {
 	provider, docker, run := testProvider(t)
 	other, err := New(context.Background(), provider.config, docker)
@@ -395,6 +515,13 @@ func TestStaleClonePublisherAndMarkerCleanupCannotReplaceWinner(t *testing.T) {
 }
 
 func TestSourceOriginMustBeOneExactFetchURL(t *testing.T) {
+	t.Run("canonical Git suffix", func(t *testing.T) {
+		provider, _, run := testProvider(t)
+		runGit(t, provider.config.GitExecutable, provider.config.Repository, "remote", "set-url", "origin", run.RepositoryRemote+".git")
+		if _, err := provider.EnsureClone(context.Background(), run); err != nil {
+			t.Fatalf("canonical GitHub .git suffix was rejected: %v", err)
+		}
+	})
 	for _, test := range []struct {
 		name   string
 		mutate func(*testing.T, *Provider)
@@ -493,6 +620,9 @@ func TestConcurrentRootInitializationAdoptsOneAtomicWinner(t *testing.T) {
 
 func TestVolumeAttestationAndLostCreateReconciliation(t *testing.T) {
 	provider, docker, run := testProvider(t)
+	if _, err := provider.EnsureClone(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
 	docker.loseVolumeCreateResponse = true
 	if _, err := provider.EnsureVolume(context.Background(), run); err != nil {
 		t.Fatalf("lost volume create response: %v", err)
@@ -511,6 +641,35 @@ func TestVolumeAttestationAndLostCreateReconciliation(t *testing.T) {
 	}
 }
 
+func TestProviderEnforcesCloneVolumeContainerLifetimeOrder(t *testing.T) {
+	provider, _, run := testProvider(t)
+	if _, err := provider.EnsureVolume(context.Background(), run); !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("volume without clone authority = %v", err)
+	}
+	if _, err := provider.EnsureClone(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.EnsureVolume(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	_, authority, err := provider.ProveWriterInactive(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.RemoveClone(context.Background(), run, authority); !errors.Is(err, ErrIdentityMismatch) {
+		t.Fatalf("clone removal while volume exists = %v", err)
+	}
+	if _, err := os.Lstat(provider.cloneMarkerPath(run)); err != nil {
+		t.Fatalf("clone authority disappeared before volume cleanup: %v", err)
+	}
+	if _, err := provider.RemoveVolume(context.Background(), run, authority); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.RemoveClone(context.Background(), run, authority); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestConstructorRejectsUnboundedOrUnsafePolicy(t *testing.T) {
 	provider, docker, _ := testProvider(t)
 	tests := []struct {
@@ -526,6 +685,7 @@ func TestConstructorRejectsUnboundedOrUnsafePolicy(t *testing.T) {
 		{"observed", func(c *Config) { c.CloneObservedLimitBytes = c.SourceSizeAdmissionBytes - 1 }},
 		{"logs", func(c *Config) { c.LogMaxSize = "2t" }},
 		{"reserved environment", func(c *Config) { c.Environment[passwordEnv] = "forbidden" }},
+		{"legacy OpenCode password", func(c *Config) { c.Environment["OPENCODE_PASSWORD"] = "forbidden" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -842,6 +1002,80 @@ func TestCleanupIsIdempotentAndDetectsRenamedContainer(t *testing.T) {
 	assertNoStagingTrees(t, provider.root)
 }
 
+func TestCleanupSurvivesImageAndEnvironmentConfigurationRotation(t *testing.T) {
+	provider, docker, run := testProvider(t)
+	if _, err := provider.EnsureClone(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.EnsureVolume(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	created, err := provider.EnsureContainer(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, err := provider.StartContainer(context.Background(), run, created.ContainerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	recovery := *provider
+	recovery.config = cloneConfig(provider.config)
+	recovery.config.ImageID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	recovery.config.Environment["FERN_MODEL"] = "rotated-model"
+	recovery.imageLabels = cloneMap(provider.imageLabels)
+	recovery.imageLabels["org.opencontainers.image.created"] = "2026-09-01T00:00:00Z"
+	if _, err := recovery.EnsureClone(context.Background(), run); err == nil {
+		t.Fatal("rotated execution configuration was allowed to resume the run")
+	}
+	observation, authority, err := recovery.ProveWriterInactive(context.Background(), run)
+	if err != nil || observation.RuntimeToken != started.RuntimeToken {
+		t.Fatalf("rotated cleanup stop = %+v, error=%v", observation, err)
+	}
+	if _, err := recovery.RemoveContainer(context.Background(), run, authority); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recovery.RemoveVolume(context.Background(), run, authority); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := recovery.RemoveClone(context.Background(), run, authority); err != nil {
+		t.Fatal(err)
+	}
+	if docker.containerRemoves != 1 || docker.volumeRemoves != 1 {
+		t.Fatalf("cleanup calls container=%d volume=%d", docker.containerRemoves, docker.volumeRemoves)
+	}
+}
+
+func TestMigratedSchemaEightRunUsesLegacyCleanupDigest(t *testing.T) {
+	provider, docker, run := testProvider(t)
+	run.ResourceSpecVersion = 8
+	run.EnvironmentSHA256 = EnvironmentSHA256(nil)
+	digest, err := provider.legacySpecDigest(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clonePath := filepath.Join(provider.root, run.CloneIdentity)
+	if err := os.Mkdir(clonePath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cloneInfo, err := os.Lstat(clonePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.writeCloneMarker(run, digest, cloneInfo); err != nil {
+		t.Fatal(err)
+	}
+	docker.volumes[run.VolumeIdentity] = volume.Volume{
+		Name: run.VolumeIdentity, Driver: "local", Scope: "local", Mountpoint: "/var/lib/docker/volumes/legacy/_data",
+		Labels: provider.labels(run, digest),
+	}
+	provider.config.Environment = map[string]string{"OPENAI_API_KEY": "rotated"}
+	provider.config.ImageReference = "fern/opencode-background-source:rotated"
+	if _, err := provider.RemoveVolume(context.Background(), run, NeverCreatedAuthority()); err != nil {
+		t.Fatalf("rotated legacy schema-8 volume cleanup: %v", err)
+	}
+}
+
 func TestLostContainerRemoveResponseReconcilesWithFreshReads(t *testing.T) {
 	provider, docker, run := preparedProvider(t)
 	created, err := provider.EnsureContainer(context.Background(), run)
@@ -919,7 +1153,7 @@ func testProvider(t *testing.T) (*Provider, *fakeDocker, taskstore.BackgroundRun
 	}
 	t.Cleanup(func() { _ = provider.Close() })
 	compact := "0198d34d6a5075fbb1f2000000000201"
-	run := taskstore.BackgroundRun{WorkspaceID: task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001"), TaskID: task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-000000000201"), AttemptID: task.AttemptID("att_0198d34d-6a50-75fb-b1f2-000000000301"), Generation: 1, RepositoryRemote: "https://github.com/fern-test/repository", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, ImageIdentity: testImageID, CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode", ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint", OpenCodeSessionID: "ses_test", OpenCodeMessageID: "msg_test"}
+	run := taskstore.BackgroundRun{WorkspaceID: task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001"), TaskID: task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-000000000201"), AttemptID: task.AttemptID("att_0198d34d-6a50-75fb-b1f2-000000000301"), Generation: 1, RepositoryRemote: "https://github.com/fern-test/repository", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: EnvironmentSHA256(config.Environment), ResourceSpecVersion: 9, ImageIdentity: testImageID, CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode", ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint", OpenCodeSessionID: "ses_test", OpenCodeMessageID: "msg_test"}
 	return provider, docker, run
 }
 

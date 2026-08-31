@@ -43,6 +43,26 @@ func TestTaskServicesAreExplicitlyDisabledWhenPolicyIsAbsent(t *testing.T) {
 	}
 }
 
+func TestBackgroundRunEnvironmentNeverInheritsWorkspaceCustody(t *testing.T) {
+	cfg := config.Config{
+		Workspace: config.Workspace{Env: map[string]string{
+			"OPENCODE_PASSWORD": "workspace-password", "OPENAI_API_KEY": "workspace-provider-key",
+		}},
+		Tasks: &config.TaskPolicy{BackgroundEnvironment: map[string]string{"OPENAI_API_KEY": "explicit-background-key"}},
+	}
+	got := backgroundRunEnvironment(cfg)
+	if len(got) != 1 || got["OPENAI_API_KEY"] != "explicit-background-key" {
+		t.Fatalf("background environment = %#v", got)
+	}
+	if _, exists := got["OPENCODE_PASSWORD"]; exists {
+		t.Fatal("workspace password crossed into disposable background environment")
+	}
+	got["OPENAI_API_KEY"] = "changed"
+	if cfg.Tasks.BackgroundEnvironment["OPENAI_API_KEY"] != "explicit-background-key" {
+		t.Fatal("production background environment was not copied")
+	}
+}
+
 func TestTaskServicesRequireExplicitGitHubAuthorityBeforeRuntimeAccess(t *testing.T) {
 	t.Parallel()
 	cfg := config.Config{Tasks: &config.TaskPolicy{
@@ -183,7 +203,9 @@ func TestTaskServicesSuccessfulWorkspaceGHMatrix(t *testing.T) {
 					"ai.fern.opencode.profile":          runtime.BackgroundOpenCodeProfile,
 				},
 				"User": "1001:1001", "Cmd": []string{"opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"},
-				"ExposedPorts": map[string]any{"4096/tcp": map[string]any{}}, "Env": []string{"XDG_DATA_HOME=/home/user/.local/share"},
+				"ExposedPorts": map[string]any{"4096/tcp": map[string]any{}}, "Volumes": map[string]any{
+					"/home/user/workspace": map[string]any{}, "/home/user/.local/share/opencode": map[string]any{},
+				}, "Env": []string{"XDG_DATA_HOME=/home/user/.local/share"},
 			}})
 			return
 		}
@@ -239,7 +261,10 @@ func TestTaskServicesSuccessfulWorkspaceGHMatrix(t *testing.T) {
 			if !qualified {
 				t.Fatalf("background source profile was not reported qualified: %+v", status.Snapshot())
 			}
-			if err := services.store.Close(); err != nil {
+			if services.background == nil || services.provider == nil {
+				t.Fatal("configured background run coordinator was not composed")
+			}
+			if err := services.Close(); err != nil {
 				t.Fatal(err)
 			}
 			if err := manager.Close(context.Background()); err != nil {

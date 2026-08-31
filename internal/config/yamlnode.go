@@ -51,11 +51,12 @@ type fileTaskPolicy struct {
 		Provider yaml.Node `yaml:"provider"`
 		ID       yaml.Node `yaml:"id"`
 	} `yaml:"model"`
-	AttemptTimeout    yaml.Node `yaml:"attemptTimeout"`
-	LeaseDuration     yaml.Node `yaml:"leaseDuration"`
-	BackgroundImage   yaml.Node `yaml:"backgroundImage"`
-	BackgroundImageID yaml.Node `yaml:"backgroundImageID"`
-	Budget            *struct {
+	AttemptTimeout        yaml.Node         `yaml:"attemptTimeout"`
+	LeaseDuration         yaml.Node         `yaml:"leaseDuration"`
+	BackgroundImage       yaml.Node         `yaml:"backgroundImage"`
+	BackgroundImageID     yaml.Node         `yaml:"backgroundImageID"`
+	BackgroundEnvironment map[string]string `yaml:"backgroundEnvironment"`
+	Budget                *struct {
 		MaxTurns yaml.Node `yaml:"maxTurns"`
 	} `yaml:"budget"`
 	Verification *struct {
@@ -221,7 +222,8 @@ func parseTaskPolicy(node yaml.Node) (*TaskPolicy, error) {
 	policy := &TaskPolicy{
 		Agent: agent, Model: TaskModel{Provider: provider, ID: modelID},
 		AttemptTimeout: attemptTimeout, LeaseDuration: leaseDuration,
-		Budget: TaskBudget{MaxTurns: int(maxTurns)},
+		Budget:                TaskBudget{MaxTurns: int(maxTurns)},
+		BackgroundEnvironment: cloneStrings(file.BackgroundEnvironment),
 	}
 	if !file.BackgroundImage.IsZero() {
 		policy.BackgroundImage, err = decodeRequiredTaskString(file.BackgroundImage)

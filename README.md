@@ -156,7 +156,7 @@ receipt-backed publication.
 - [Lifecycle harness](./integration/lifecycle/README.md): real-Docker lifecycle test details.
 - [OpenCode contract harness](./integration/opencode-contract/README.md): zero-cost exact-ID, restart, approval, and cancellation observations.
 - [Task UI fixtures](./integration/task-ui/README.md): isolated read-only inbox/detail contract renderer.
-- [Upgrade harness](./integration/upgrade/README.md): schema-4 baseline, schema-7 upgrade, and byte-restore rollback contract.
+- [Upgrade harness](./integration/upgrade/README.md): schema-4 baseline, schema-9 upgrade, and byte-restore rollback contract.
 - [Release harness](./integration/release/README.md): reproducibility, integrity, and deployment safety checks.
 - [Production rehearsal](./integration/production-rehearsal/README.md): recorder for operator-supplied physical evidence; self-test is synthetic.
 
@@ -319,6 +319,10 @@ tasks:
   # not replace or mutate workspace.image. Pin the canonical local image ID.
   backgroundImage: fern/opencode-background-source:dev
   backgroundImageID: sha256:replace-with-64-lowercase-hex-digits
+  # Optional explicit provider environment for disposable runs. workspace.env
+  # is never inherited.
+  backgroundEnvironment:
+    OPENAI_API_KEY: ${OPENAI_API_KEY}
   budget:
     maxTurns: 100
   # Optional; no check is inferred when this block is absent.

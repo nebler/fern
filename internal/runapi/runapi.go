@@ -54,21 +54,23 @@ type BaseVerifier interface {
 type ActorResolver func(context.Context) (task.ActorSnapshot, error)
 
 type Config struct {
-	WorkspaceID             task.WorkspaceID
-	RepositoryID            task.RepositoryID
-	RepositoryRemote        string
-	BackgroundImageIdentity string
-	AvailableProfile        string
-	Store                   Store
-	Generator               *task.Generator
-	ActorResolver           ActorResolver
-	BaseVerifier            BaseVerifier
-	Now                     func() time.Time
-	AttemptTimeout          time.Duration
-	Agent                   string
-	ModelProvider           string
-	Model                   string
-	BudgetSnapshot          json.RawMessage
+	WorkspaceID                 task.WorkspaceID
+	RepositoryID                task.RepositoryID
+	RepositoryRemote            string
+	BackgroundImageIdentity     string
+	BackgroundEnvironmentSHA256 [32]byte
+	AvailableProfile            string
+	Store                       Store
+	Generator                   *task.Generator
+	ActorResolver               ActorResolver
+	BaseVerifier                BaseVerifier
+	Now                         func() time.Time
+	AttemptTimeout              time.Duration
+	Agent                       string
+	ModelProvider               string
+	Model                       string
+	BudgetSnapshot              json.RawMessage
+	Wake                        func()
 }
 
 type Handler struct{ config Config }
@@ -76,7 +78,7 @@ type Handler struct{ config Config }
 func New(config Config) (*Handler, error) {
 	if config.Store == nil || config.Generator == nil || config.ActorResolver == nil || config.BaseVerifier == nil || config.Now == nil ||
 		config.AttemptTimeout <= 0 || config.RepositoryID == 0 || config.RepositoryRemote == "" ||
-		config.Agent == "" || config.ModelProvider == "" || config.Model == "" ||
+		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.BackgroundEnvironmentSHA256 == ([32]byte{}) ||
 		len(config.BudgetSnapshot) == 0 || !json.Valid(config.BudgetSnapshot) {
 		return nil, errors.New("valid background run API configuration is required")
 	}
@@ -258,8 +260,9 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.Acto
 	compact := strings.ReplaceAll(strings.TrimPrefix(string(ids.TaskID), "tsk_"), "-", "")
 	intent := &taskstore.BackgroundRunIntent{RepositoryRemote: input.Repository, Branch: branch,
 		InstructionSHA256: sha256.Sum256([]byte(input.Instruction)), Profile: input.Profile, ProfileSHA256: profileHash,
-		ImageIdentity: h.config.BackgroundImageIdentity,
-		CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode",
+		EnvironmentSHA256: h.config.BackgroundEnvironmentSHA256,
+		ImageIdentity:     h.config.BackgroundImageIdentity,
+		CloneIdentity:     "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode",
 		ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint"}
 	admission, err := h.config.Store.AdmitTask(r.Context(), taskstore.AdmitTaskParams{
 		TaskID: ids.TaskID, AttemptID: ids.AttemptID, ReceiptID: ids.ReceiptID, TaskEventID: ids.TaskEventID,
@@ -276,6 +279,9 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.Acto
 	}
 	if admission.Replayed {
 		w.Header().Set("Idempotency-Replayed", "true")
+	}
+	if h.config.Wake != nil {
+		h.config.Wake()
 	}
 	writeJSON(w, http.StatusAccepted, struct {
 		RunID     task.TaskID `json:"run_id"`
@@ -390,6 +396,9 @@ func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor task.ActorS
 	}
 	if result.Replayed {
 		w.Header().Set("Idempotency-Replayed", "true")
+	}
+	if h.config.Wake != nil {
+		h.config.Wake()
 	}
 	writeJSON(w, http.StatusAccepted, struct {
 		RunID task.TaskID                  `json:"run_id"`

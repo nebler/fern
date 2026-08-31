@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,10 +17,12 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 	"github.com/nebler/fern/internal/backgroundopencode"
+	"github.com/nebler/fern/internal/backgroundruncoord"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskenvdocker"
 	"github.com/nebler/fern/internal/taskstore"
@@ -43,13 +47,29 @@ type lostResponseTransport struct {
 	lost  atomic.Int32
 }
 
+type countingPromptTransport struct {
+	base  http.RoundTripper
+	path  string
+	calls atomic.Int32
+}
+
+func (t *countingPromptTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	if request.Method == http.MethodPost && request.URL.Path == t.path {
+		t.calls.Add(1)
+	}
+	return t.base.RoundTrip(request)
+}
+
 func (t *lostResponseTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	t.calls.Add(1)
 	response, err := t.base.RoundTrip(request)
 	if err != nil {
 		return nil, err
 	}
-	if request.Method != http.MethodPost || request.URL.Path != t.path || !t.lost.CompareAndSwap(0, 1) {
+	if request.Method != http.MethodPost || request.URL.Path != t.path {
+		return response, nil
+	}
+	t.calls.Add(1)
+	if !t.lost.CompareAndSwap(0, 1) {
 		return response, nil
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 1<<20))
@@ -177,7 +197,7 @@ func run() (resultErr error) {
 	run := taskstore.BackgroundRun{
 		WorkspaceID: workspaceID, TaskID: taskID, AttemptID: attemptID, Generation: 1,
 		RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: task.GitOID(base),
-		Profile: taskstore.BackgroundRunSourceProfile, ImageIdentity: imageID,
+		Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ResourceSpecVersion: 9, ImageIdentity: imageID,
 		CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode",
 		ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint",
 		OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID,
@@ -361,7 +381,437 @@ func run() (resultErr error) {
 	}
 	containerID = ""
 	runtime = taskenvdocker.RuntimeIdentity{}
-	fmt.Printf("PASS profile=%s image_id=%s session=exact prompt=admitted_promoted response_loss=after_effect active=positive interrupt=204 reconstruction=provider_client no_prompt_replay=true provider_calls=1 marker=exact\n", backgroundopencode.Profile, imageID)
+	if err := runSerialCoordinator(ctx, temporary, repository, providerEndpoint, provider, cli, imageID, base); err != nil {
+		return err
+	}
+	fmt.Printf("PASS profile=%s image_id=%s session=exact prompt=admitted_promoted response_loss=after_effect active=positive interrupt=204 reconstruction=provider_client no_prompt_replay=true provider_calls=1 marker=exact serial_coordinator=complete fence_crash=uncertain_zero_post runtime_restart=uncertain\n", backgroundopencode.Profile, imageID)
+	return nil
+}
+
+func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoint string, provider *taskenvdocker.Provider, cli *client.Client, imageID, base string) error {
+	statsBefore, err := readStats(providerEndpoint)
+	if err != nil {
+		return err
+	}
+	ids := task.NewSecureGenerator()
+	workspaceID, err := ids.WorkspaceID()
+	if err != nil {
+		return err
+	}
+	databasePath := filepath.Join(root, "serial-task-store.sqlite")
+	store, err := taskstore.Open(ctx, databasePath)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if _, err := store.EnsureWorkspace(ctx, taskstore.Workspace{
+		ID: workspaceID, Name: "serial-background", State: taskstore.WorkspaceActive, RepositoryPath: repository,
+		GitHubAuthority: taskstore.GitHubAuthorityAppBroker, InstallationID: 1, RepositoryID: 1,
+		RepositoryFullName: "fern-integration/background-run", ImageDigest: imageID, OpenCodeProtocol: backgroundopencode.Profile,
+		RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: now,
+	}); err != nil {
+		_ = store.Close()
+		return err
+	}
+	generated, err := ids.GenerateAdmissionIDs()
+	if err != nil {
+		_ = store.Close()
+		return err
+	}
+	prompt := "FERN_BACKGROUND_CLIENT_HANG"
+	actor := task.ActorSnapshot{Type: task.ActorOpenCode, ID: "serial-plugin", DisplayName: "Serial integration",
+		CredentialID: "serial-plugin", Authentication: "fern_plugin_bearer", RequestID: "serial-request"}
+	requestHash := sha256.Sum256([]byte("serial-run-create"))
+	compact := strings.ReplaceAll(strings.TrimPrefix(string(generated.TaskID), "tsk_"), "-", "")
+	intent := &taskstore.BackgroundRunIntent{
+		RepositoryRemote: "https://github.com/fern-integration/background-run", Branch: "main",
+		InstructionSHA256: sha256.Sum256([]byte(prompt)), Profile: backgroundopencode.Profile,
+		ProfileSHA256: sha256.Sum256([]byte(backgroundopencode.Profile)), EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: imageID,
+		CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode",
+		ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint",
+	}
+	admission, err := store.AdmitTask(ctx, taskstore.AdmitTaskParams{
+		TaskID: generated.TaskID, AttemptID: generated.AttemptID, ReceiptID: generated.ReceiptID,
+		TaskEventID: generated.TaskEventID, AttemptEventID: generated.AttemptEventID,
+		OpenCodeSessionID: generated.OpenCodeSessionID, OpenCodeMessageID: generated.OpenCodeMessageID,
+		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.CreateBackgroundRunCommand},
+			Key: "serial-create", RequestHash: requestHash, Actor: actor},
+		Title: "Serial Background Run", Prompt: prompt, RepositoryID: 1, BaseRef: "main", BaseSHA: task.GitOID(base),
+		ObjectFormat: "sha1", ExecutionContractVersion: "fern.background-run.v1", Agent: "contract",
+		ModelProvider: "test", Model: "test-model", BudgetSnapshot: json.RawMessage(`{"turns":10}`),
+		Deadline: now.Add(3 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: now, BackgroundRun: intent,
+	})
+	if err != nil {
+		_ = store.Close()
+		return err
+	}
+	clonePath := filepath.Join(root, "state", "background-runs", intent.CloneIdentity)
+	if admission.Task.ID == "" {
+		_ = store.Close()
+		return errors.New("serial admission did not return a durable run ID")
+	}
+	if _, err := os.Lstat(clonePath); !errors.Is(err, os.ErrNotExist) {
+		_ = store.Close()
+		return fmt.Errorf("serial effects preceded durable admission: %v", err)
+	}
+	baseTransport := http.DefaultTransport.(*http.Transport).Clone()
+	loss := &lostResponseTransport{base: baseTransport, path: "/api/session/" + string(generated.OpenCodeSessionID) + "/prompt"}
+	operationCtx, cancelOperation := context.WithCancel(ctx)
+	config := backgroundruncoord.Config{
+		WorkspaceID: workspaceID, WorkerID: "serial-worker-a",
+		SystemActor: task.ActorSnapshot{Type: task.ActorSystem, ID: "serial-coordinator", DisplayName: "Serial coordinator",
+			CredentialID: "service-v1", Authentication: "internal", RequestID: "serial-worker-a"},
+		Profile: backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
+		OperationTimeout: 20 * time.Second, LeaseDuration: time.Minute, PollInterval: 100 * time.Millisecond,
+		HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000}, Now: time.Now,
+		HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: loss}, AfterPromptCall: func(error) { cancelOperation() },
+	}
+	coordinator, err := backgroundruncoord.New(store, provider, ids, config)
+	if err != nil {
+		_ = store.Close()
+		return err
+	}
+	for step := 0; step < 20; step++ {
+		err = coordinator.RunOnce(operationCtx)
+		run, readErr := store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+		if readErr != nil {
+			_ = store.Close()
+			return readErr
+		}
+		if run.PromptRequestAttemptedAt != nil {
+			break
+		}
+		if err != nil {
+			_ = store.Close()
+			return err
+		}
+	}
+	if loss.calls.Load() != 1 || loss.lost.Load() != 1 {
+		_ = store.Close()
+		return fmt.Errorf("serial lost response calls=%d lost=%d", loss.calls.Load(), loss.lost.Load())
+	}
+	if err := store.Close(); err != nil {
+		return err
+	}
+	store, err = taskstore.Open(context.Background(), databasePath)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	config.WorkerID = "serial-worker-b"
+	config.SystemActor.RequestID = config.WorkerID
+	config.AfterPromptCall = nil
+	config.Now = func() time.Time { return time.Now().Add(2 * time.Minute) }
+	coordinator, err = backgroundruncoord.New(store, provider, ids, config)
+	if err != nil {
+		return err
+	}
+	var current taskstore.BackgroundRun
+	for step := 0; step < 10; step++ {
+		if err := coordinator.RunOnce(context.Background()); err != nil && !errors.Is(err, backgroundruncoord.ErrNoWork) {
+			return err
+		}
+		current, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+		if err != nil {
+			return err
+		}
+		if current.State == taskstore.BackgroundRunWorking {
+			break
+		}
+	}
+	if current.State != taskstore.BackgroundRunWorking || loss.calls.Load() != 1 {
+		return fmt.Errorf("serial read-only recovery state=%s prompt_calls=%d", current.State, loss.calls.Load())
+	}
+	if err := waitFor(ctx, "serial provider call", func() (bool, error) {
+		stats, readErr := readStats(providerEndpoint)
+		return readErr == nil && stats.Calls == statsBefore.Calls+1, readErr
+	}); err != nil {
+		return err
+	}
+	statsAfter, err := readStats(providerEndpoint)
+	if err != nil || statsAfter.Calls != statsBefore.Calls+1 {
+		return fmt.Errorf("serial provider calls before=%d after=%d error=%v", statsBefore.Calls, statsAfter.Calls, err)
+	}
+	if err := coordinator.RunOnce(context.Background()); err != nil {
+		return err
+	}
+	current, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+	if err != nil || current.State != taskstore.BackgroundRunWorking || !strings.Contains(current.LastEvidence, "positive_active") {
+		return fmt.Errorf("serial positive working observation state=%s evidence=%q error=%v", current.State, current.LastEvidence, err)
+	}
+	stopSeconds := 1
+	if err := cli.ContainerStop(context.Background(), current.ObservedContainerID, container.StopOptions{Timeout: &stopSeconds}); err != nil {
+		return fmt.Errorf("serial runtime replacement stop: %w", err)
+	}
+	if err := cli.ContainerStart(context.Background(), current.ObservedContainerID, container.StartOptions{}); err != nil {
+		return fmt.Errorf("serial runtime replacement start: %w", err)
+	}
+	observeErr := coordinator.RunOnce(context.Background())
+	current, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+	if !errors.Is(observeErr, taskenvdocker.ErrIdentityMismatch) || err != nil || current.State != taskstore.BackgroundRunUncertain {
+		return fmt.Errorf("serial runtime replacement state=%s observe_error=%v read_error=%v", current.State, observeErr, err)
+	}
+	stopHash := sha256.Sum256([]byte("serial-stop"))
+	stopReceipt, err := ids.ReceiptID()
+	if err != nil {
+		return err
+	}
+	stopAttemptEvent, err := ids.EventID()
+	if err != nil {
+		return err
+	}
+	stopTaskEvent, err := ids.EventID()
+	if err != nil {
+		return err
+	}
+	stopped, err := store.StopBackgroundRun(context.Background(), taskstore.StopBackgroundRunParams{
+		WorkspaceID: workspaceID, TaskID: current.TaskID, ReceiptID: stopReceipt,
+		AttemptEventID: stopAttemptEvent, TaskEventID: stopTaskEvent,
+		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.StopBackgroundRunCommand},
+			Key: "serial-stop", RequestHash: stopHash, Actor: actor}, APIContractVersion: "fern.background-run.v1",
+		StoppedAt: time.Now().UTC().Truncate(time.Millisecond).Add(2 * time.Minute),
+	})
+	if err != nil || stopped.Run.State != taskstore.BackgroundRunCanceling {
+		return fmt.Errorf("serial durable stop=%+v error=%v", stopped.Run, err)
+	}
+	for step := 0; step < 20; step++ {
+		if err := coordinator.RunOnce(context.Background()); err != nil && !errors.Is(err, backgroundruncoord.ErrNoWork) {
+			return err
+		}
+		current, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+		if err != nil {
+			return err
+		}
+		if current.State == taskstore.BackgroundRunFailed {
+			break
+		}
+	}
+	if current.State != taskstore.BackgroundRunFailed || current.EffectPhase != taskstore.BackgroundRunEffectCleanupComplete || current.LastError != "user_stopped" {
+		return fmt.Errorf("serial terminal run=%s/%s reason=%s", current.State, current.EffectPhase, current.LastError)
+	}
+	if _, err := cli.ContainerInspect(context.Background(), intent.ContainerIdentity); !client.IsErrNotFound(err) {
+		return fmt.Errorf("serial container residue: %v", err)
+	}
+	if _, err := cli.VolumeInspect(context.Background(), intent.VolumeIdentity); !client.IsErrNotFound(err) {
+		return fmt.Errorf("serial volume residue: %v", err)
+	}
+	if _, err := os.Lstat(clonePath); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("serial clone residue: %v", err)
+	}
+	database, err := sql.Open("sqlite", databasePath)
+	if err != nil {
+		return err
+	}
+	defer database.Close()
+	var taskState, attemptState, taskReason, attemptReason string
+	if err := database.QueryRow(`SELECT t.state,a.state,t.terminal_reason,a.terminal_reason FROM tasks t JOIN attempts a ON a.id=t.current_attempt_id WHERE t.id=?`, current.TaskID).
+		Scan(&taskState, &attemptState, &taskReason, &attemptReason); err != nil || taskState != "failed" || attemptState != "failed" || taskReason != "user_stopped" || attemptReason != taskReason {
+		return fmt.Errorf("serial parent consistency task=%s attempt=%s reasons=%s/%s error=%v", taskState, attemptState, taskReason, attemptReason, err)
+	}
+	if err := runPreDispatchFenceScenario(ctx, root, provider, cli, ids, workspaceID, imageID, base); err != nil {
+		return err
+	}
+	labelled, err := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(
+		filters.Arg("label", "dev.fern.background-run.managed=true"),
+		filters.Arg("label", "dev.fern.background-run.workspace="+string(workspaceID)),
+	)})
+	if err != nil || len(labelled) != 0 {
+		return fmt.Errorf("serial exact-label container residue count=%d error=%v", len(labelled), err)
+	}
+	backgroundRoot := filepath.Join(root, "state", "background-runs")
+	if err := filepath.WalkDir(backgroundRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		name := entry.Name()
+		if privateBackgroundResidue(name) {
+			return fmt.Errorf("private background root residue %s", path)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	gitPath, err := exec.LookPath("git")
+	if err != nil {
+		return err
+	}
+	gitPath, err = filepath.EvalSymlinks(gitPath)
+	if err != nil {
+		return err
+	}
+	remote, err := gitOutput(repository, gitPath, "remote", "get-url", "origin")
+	if err != nil || remote != "https://github.com/fern-integration/background-run" {
+		return fmt.Errorf("configured source repository changed remote=%q error=%v", remote, err)
+	}
+	configuredHead, err := gitOutput(repository, gitPath, "rev-parse", "HEAD")
+	if err != nil || configuredHead != base {
+		return fmt.Errorf("configured source repository changed head=%q want=%q error=%v", configuredHead, base, err)
+	}
+	baseTransport.CloseIdleConnections()
+	return nil
+}
+
+func privateBackgroundResidue(name string) bool {
+	return name == "fern-background-run.json" || strings.HasPrefix(name, ".clone-stage-") || strings.HasPrefix(name, ".clone-quarantine-") ||
+		strings.HasPrefix(name, ".clone-authority-") || strings.HasPrefix(name, ".clone-marker-stage-")
+}
+
+func runPreDispatchFenceScenario(ctx context.Context, root string, provider *taskenvdocker.Provider, cli *client.Client,
+	ids *task.Generator, workspaceID task.WorkspaceID, imageID, base string) error {
+	databasePath := filepath.Join(root, "fence-task-store.sqlite")
+	store, err := taskstore.Open(ctx, databasePath)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = store.Close() }()
+	acceptedAt := time.Now().UTC().Truncate(time.Millisecond).Add(2 * time.Minute)
+	if _, err := store.EnsureWorkspace(ctx, taskstore.Workspace{
+		ID: workspaceID, Name: "serial-background-fence", State: taskstore.WorkspaceActive,
+		RepositoryPath: filepath.Join(root, "repository"), GitHubAuthority: taskstore.GitHubAuthorityAppBroker,
+		InstallationID: 1, RepositoryID: 1, RepositoryFullName: "fern-integration/background-run",
+		ImageDigest: imageID, OpenCodeProtocol: backgroundopencode.Profile, RuntimeDesiredState: "running",
+		ReconciliationEpoch: 1, CreatedAt: acceptedAt,
+	}); err != nil {
+		return err
+	}
+	generated, err := ids.GenerateAdmissionIDs()
+	if err != nil {
+		return err
+	}
+	prompt := "FERN_BACKGROUND_MUST_NOT_DISPATCH"
+	actor := task.ActorSnapshot{Type: task.ActorOpenCode, ID: "serial-plugin", DisplayName: "Serial integration",
+		CredentialID: "serial-plugin", Authentication: "fern_plugin_bearer", RequestID: "serial-fence-crash"}
+	compact := strings.ReplaceAll(strings.TrimPrefix(string(generated.TaskID), "tsk_"), "-", "")
+	intent := &taskstore.BackgroundRunIntent{
+		RepositoryRemote: "https://github.com/fern-integration/background-run", Branch: "main",
+		InstructionSHA256: sha256.Sum256([]byte(prompt)), Profile: backgroundopencode.Profile,
+		ProfileSHA256: sha256.Sum256([]byte(backgroundopencode.Profile)), EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: imageID,
+		CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode",
+		ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint",
+	}
+	requestHash := sha256.Sum256([]byte("serial-fence-crash-create"))
+	admission, err := store.AdmitTask(ctx, taskstore.AdmitTaskParams{
+		TaskID: generated.TaskID, AttemptID: generated.AttemptID, ReceiptID: generated.ReceiptID,
+		TaskEventID: generated.TaskEventID, AttemptEventID: generated.AttemptEventID,
+		OpenCodeSessionID: generated.OpenCodeSessionID, OpenCodeMessageID: generated.OpenCodeMessageID,
+		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.CreateBackgroundRunCommand},
+			Key: "serial-fence-crash-create", RequestHash: requestHash, Actor: actor},
+		Title: "Serial pre-dispatch fence crash", Prompt: prompt, RepositoryID: 1, BaseRef: "main", BaseSHA: task.GitOID(base),
+		ObjectFormat: "sha1", ExecutionContractVersion: "fern.background-run.v1", Agent: "contract",
+		ModelProvider: "test", Model: "test-model", BudgetSnapshot: json.RawMessage(`{"turns":10}`),
+		Deadline: acceptedAt.Add(10 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: acceptedAt, BackgroundRun: intent,
+	})
+	if err != nil {
+		return err
+	}
+	baseTransport := http.DefaultTransport.(*http.Transport).Clone()
+	transport := &countingPromptTransport{base: baseTransport, path: "/api/session/" + string(generated.OpenCodeSessionID) + "/prompt"}
+	defer baseTransport.CloseIdleConnections()
+	crashCtx, crash := context.WithCancel(ctx)
+	config := backgroundruncoord.Config{
+		WorkspaceID: workspaceID, WorkerID: "serial-fence-worker-a",
+		SystemActor: task.ActorSnapshot{Type: task.ActorSystem, ID: "serial-coordinator", DisplayName: "Serial coordinator",
+			CredentialID: "service-v1", Authentication: "internal", RequestID: "serial-fence-worker-a"},
+		Profile: backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
+		OperationTimeout: 20 * time.Second, LeaseDuration: time.Minute, PollInterval: 100 * time.Millisecond,
+		HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000},
+		Now:           func() time.Time { return time.Now().Add(2 * time.Minute) }, HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: transport},
+		AfterPromptFence: crash,
+	}
+	coordinator, err := backgroundruncoord.New(store, provider, ids, config)
+	if err != nil {
+		return err
+	}
+	var fenced taskstore.BackgroundRun
+	for step := 0; step < 20; step++ {
+		runErr := coordinator.RunOnce(crashCtx)
+		fenced, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+		if err != nil {
+			return err
+		}
+		if fenced.PromptRequestAttemptedAt != nil {
+			if !errors.Is(runErr, context.Canceled) {
+				return fmt.Errorf("pre-dispatch fence crash error=%v", runErr)
+			}
+			break
+		}
+		if runErr != nil {
+			return runErr
+		}
+	}
+	if fenced.PromptRequestAttemptedAt == nil || transport.calls.Load() != 0 {
+		return fmt.Errorf("pre-dispatch fence durable=%t prompt_posts=%d", fenced.PromptRequestAttemptedAt != nil, transport.calls.Load())
+	}
+	if err := store.Close(); err != nil {
+		return err
+	}
+	store, err = taskstore.Open(context.Background(), databasePath)
+	if err != nil {
+		return err
+	}
+	config.WorkerID = "serial-fence-worker-b"
+	config.SystemActor.RequestID = config.WorkerID
+	config.Now = func() time.Time { return time.Now().Add(4 * time.Minute) }
+	config.AfterPromptFence = nil
+	coordinator, err = backgroundruncoord.New(store, provider, ids, config)
+	if err != nil {
+		return err
+	}
+	if err := coordinator.RunOnce(context.Background()); err != nil {
+		return fmt.Errorf("pre-dispatch restart reconciliation: %w", err)
+	}
+	fenced, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+	if err != nil || fenced.State != taskstore.BackgroundRunUncertain || fenced.EffectPhase != taskstore.BackgroundRunEffectPromptIntent ||
+		fenced.PromptRequestAttemptedAt == nil || transport.calls.Load() != 0 || !strings.Contains(fenced.LastEvidence, `"status":"absent"`) {
+		return fmt.Errorf("pre-dispatch restart run=%s/%s fenced=%t posts=%d error=%v", fenced.State, fenced.EffectPhase,
+			fenced.PromptRequestAttemptedAt != nil, transport.calls.Load(), err)
+	}
+	stopReceipt, err := ids.ReceiptID()
+	if err != nil {
+		return err
+	}
+	attemptEvent, err := ids.EventID()
+	if err != nil {
+		return err
+	}
+	taskEvent, err := ids.EventID()
+	if err != nil {
+		return err
+	}
+	stopHash := sha256.Sum256([]byte("serial-fence-crash-stop"))
+	if _, err := store.StopBackgroundRun(context.Background(), taskstore.StopBackgroundRunParams{
+		WorkspaceID: workspaceID, TaskID: fenced.TaskID, ReceiptID: stopReceipt, AttemptEventID: attemptEvent, TaskEventID: taskEvent,
+		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.StopBackgroundRunCommand},
+			Key: "serial-fence-crash-stop", RequestHash: stopHash, Actor: actor}, APIContractVersion: "fern.background-run.v1",
+		StoppedAt: time.Now().UTC().Truncate(time.Millisecond).Add(4 * time.Minute),
+	}); err != nil {
+		return err
+	}
+	for step := 0; step < 20; step++ {
+		if err := coordinator.RunOnce(context.Background()); err != nil && !errors.Is(err, backgroundruncoord.ErrNoWork) {
+			return err
+		}
+		fenced, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+		if err != nil {
+			return err
+		}
+		if fenced.State == taskstore.BackgroundRunFailed {
+			break
+		}
+	}
+	if fenced.State != taskstore.BackgroundRunFailed || transport.calls.Load() != 0 {
+		return fmt.Errorf("pre-dispatch cleanup state=%s posts=%d", fenced.State, transport.calls.Load())
+	}
+	if _, err := cli.ContainerInspect(context.Background(), intent.ContainerIdentity); !client.IsErrNotFound(err) {
+		return fmt.Errorf("pre-dispatch container residue: %v", err)
+	}
+	if _, err := cli.VolumeInspect(context.Background(), intent.VolumeIdentity); !client.IsErrNotFound(err) {
+		return fmt.Errorf("pre-dispatch volume residue: %v", err)
+	}
+	clonePath := filepath.Join(root, "state", "background-runs", intent.CloneIdentity)
+	if _, err := os.Lstat(clonePath); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("pre-dispatch clone residue: %v", err)
+	}
 	return nil
 }
 

@@ -388,10 +388,10 @@ states retain `prompt_started`. Ambiguity, recovery-required, failure, and
 cancellation preserve the last phase, including `none` when prepared work is
 canceled or expires before delivery.
 
-### Approval (Target Contract, Not Schema 7)
+### Approval (Target Contract, Not Schema 9)
 
 No approval/question/form table, delivery coordinator, or answer API is composed
-in the implemented schema-7 service. This state machine describes a future
+in the implemented schema-9 service. This state machine describes a future
 contract only.
 
 | State | Allowed next states |
@@ -1527,11 +1527,14 @@ an explicit contiguous schema range and refuses unknown newer versions.
 Migrations do not call OpenCode, GitHub, Docker, providers, or verification
 commands.
 
-`internal/taskstore` implements schema 8 with CGO-free SQLite, private path
+`internal/taskstore` implements schema 9 with CGO-free SQLite, private path
 checks, a checksum-pinned migration ledger, foreign keys, WAL with
 `synchronous=FULL`, receipt-backed task and publication admission, fenced
 coordinator journals, exact OpenCode IDs, results, verification, and
-publication records. Admission and replay are wired through the production task
+publication records. Background Run intent includes the exact disposable
+environment digest; schema-8 rows migrate conservatively as the empty explicit
+environment and retain resource-spec version 8 for cleanup-only attestation.
+Admission and replay are wired through the production task
 API. Migration 6 quarantines unresolved unreceipted legacy publication rows so
 they grant no worker authority. Migration 8 similarly terminalizes unqualified
 schema-7 Background Runs before adding exact effect claims and cleanup proof.
@@ -1542,7 +1545,7 @@ receipts/effects. They do not both own the same task entity. Offline backup and
 restore preserve both stores, task SQLite/WAL state, OpenCode data, Git objects,
 managed volumes, configuration, and the appliance epoch under one manifest.
 Rollback means restoring the verified pre-upgrade bytes; older binaries must
-not open a migrated schema-8 database. See [Deployment](./DEPLOYMENT.md) and the
+not open a migrated schema-9 database. See [Deployment](./DEPLOYMENT.md) and the
 `integration/upgrade` harness.
 
 ## Fault-Injection Acceptance

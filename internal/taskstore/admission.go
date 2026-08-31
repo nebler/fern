@@ -154,13 +154,13 @@ INSERT INTO receipts(
 		if _, err := tx.ExecContext(ctx, `
 INSERT INTO background_runs(
     task_id,attempt_id,workspace_id,generation,repository_id,repository_remote,base_oid,branch,
-    instruction_sha256,profile,profile_sha256,image_identity,clone_identity,volume_identity,
+    instruction_sha256,profile,profile_sha256,environment_sha256,resource_spec_version,image_identity,clone_identity,volume_identity,
     container_identity,endpoint_identity,opencode_session_id,opencode_message_id,state,effect_phase,
     creator_actor_snapshot_id,revision,created_at,updated_at
-) VALUES(?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued','absent',?,1,?,?)`,
+) VALUES(?,?,?,1,?,?,?,?,?,?,?,?,9,?,?,?,?,?,?,?,'queued','absent',?,1,?,?)`,
 			p.TaskID, p.AttemptID, p.Claim.Scope.WorkspaceID, p.RepositoryID, p.BackgroundRun.RepositoryRemote,
 			p.BaseSHA, branch, p.BackgroundRun.InstructionSHA256[:], p.BackgroundRun.Profile,
-			p.BackgroundRun.ProfileSHA256[:], p.BackgroundRun.ImageIdentity, p.BackgroundRun.CloneIdentity,
+			p.BackgroundRun.ProfileSHA256[:], p.BackgroundRun.EnvironmentSHA256[:], p.BackgroundRun.ImageIdentity, p.BackgroundRun.CloneIdentity,
 			p.BackgroundRun.VolumeIdentity, p.BackgroundRun.ContainerIdentity, p.BackgroundRun.EndpointIdentity,
 			p.OpenCodeSessionID, p.OpenCodeMessageID, actorID, acceptedMS, acceptedMS); err != nil {
 			return Admission{}, fmt.Errorf("insert background run: %w", err)
@@ -263,7 +263,7 @@ func validateAdmission(p AdmitTaskParams) error {
 	if p.BackgroundRun != nil && (!canonicalBackgroundRemote(p.BackgroundRun.RepositoryRemote) ||
 		(p.BackgroundRun.Branch != "" && !validBoundedText(p.BackgroundRun.Branch, 1, 255)) ||
 		p.BackgroundRun.Profile != BackgroundRunSourceProfile || p.BackgroundRun.InstructionSHA256 != sha256.Sum256([]byte(p.Prompt)) ||
-		p.BackgroundRun.ProfileSHA256 != sha256.Sum256([]byte(p.BackgroundRun.Profile)) || p.Claim.Actor.Type != task.ActorOpenCode ||
+		p.BackgroundRun.ProfileSHA256 != sha256.Sum256([]byte(p.BackgroundRun.Profile)) || p.BackgroundRun.EnvironmentSHA256 == ([32]byte{}) || p.Claim.Actor.Type != task.ActorOpenCode ||
 		!validBackgroundImageIdentity(p.BackgroundRun.ImageIdentity) || !validBoundedText(p.BackgroundRun.CloneIdentity, 1, 256) ||
 		!validBoundedText(p.BackgroundRun.VolumeIdentity, 1, 256) || !validBoundedText(p.BackgroundRun.ContainerIdentity, 1, 256) ||
 		!validBoundedText(p.BackgroundRun.EndpointIdentity, 1, 256) || !canonicalBackgroundIdentities(p)) {

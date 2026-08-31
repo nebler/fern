@@ -148,13 +148,24 @@ The page never receives or renders the device code or bearer.
 `POST/GET /fern/api/runs`, `GET /fern/api/runs/:id`, and the `stop`, `open`, and
 `result` descendants are reserved for plugin bearers. Admission commits an
 immutable task/attempt generation and disposable-environment intent before any
-effect. This build intentionally has no disposable Docker provider: accepted
-runs remain `queued`; stopping a queued run atomically records it, its task, and
-its attempt as `failed` with the honest `background_run_stopped_before_start`
-reason; and open/result return `not_ready`. `tasks.backgroundImage` and
-`tasks.backgroundImageID` are an optional pair with no default. The latter is a
-canonical `sha256:` local image ID pinned by the operator. At startup Fern uses
-read-only Docker inspection and requires that exact ID; exact OCI source,
+effect. When the qualified profile is configured, a production-wired serial
+coordinator creates an isolated full clone, OpenCode data volume, and bounded
+container, then reconciles the exact session and submits the prompt at most
+once. A durable pre-request fence prevents replay after restart; a crash between
+that fence and HTTP dispatch remains honestly `uncertain`. Positive active or
+owned-pending observations produce `working` or `needs_you`; inactivity never
+means success. Stopping an active run proves writer inactivity and removes the
+container, volume, and clone in separately fenced phases. Stopping a queued run
+atomically records it, its task, and its attempt as `failed` with the honest
+`background_run_stopped_before_start` reason. Open and result still return
+`not_ready` because external session routing and retained Git artifacts are not
+implemented.
+
+`tasks.backgroundImage` and `tasks.backgroundImageID` are an optional pair with
+no default. `tasks.backgroundEnvironment` is the only configured environment
+copied into disposable runs; persistent `workspace.env` is never inherited. The
+image ID is a canonical `sha256:` local identity pinned by the operator. At
+startup Fern uses read-only Docker inspection and requires that exact ID; exact OCI source,
 revision `39fb919a054190498f6d5b7985bde231f93ad7a6`, version, and Fern profile
 labels; user `1001:1001`; exact server argv; only exposed port `4096/tcp`; and no
 baked `OPENCODE_SERVER_PASSWORD`. Only then does observability report the
@@ -164,8 +175,8 @@ persistent attempts remain unchanged. The local ID pin is only the current
 single-host dogfood boundary. Externally distributed images still require
 promotion to a registry digest and independent verification. The run API
 accepts only the source-commit profile and returns `profile_unavailable` when
-the qualified image is absent. The plugin still uses the preceding profile
-until its following compatibility commit and is not changed here.
+the qualified image is absent. The plugin requires OpenCode host version
+`1.18.16` but requests this exact source-commit execution profile.
 Plugin bearers receive `404` on routes outside their allowlist and never fall
 through to the persistent OpenCode workspace.
 

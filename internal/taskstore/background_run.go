@@ -1,6 +1,7 @@
 package taskstore
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -15,21 +16,23 @@ const BackgroundRunStoppedBeforeStart = "background_run_stopped_before_start"
 
 const backgroundRunSelect = `
 SELECT r.task_id,r.attempt_id,r.workspace_id,r.generation,r.repository_id,r.repository_remote,r.base_oid,r.branch,
-       r.instruction_sha256,r.profile,r.profile_sha256,r.image_identity,r.clone_identity,r.volume_identity,
+       r.instruction_sha256,r.profile,r.profile_sha256,r.environment_sha256,r.resource_spec_version,r.image_identity,r.clone_identity,r.volume_identity,
        r.container_identity,r.endpoint_identity,r.opencode_session_id,r.opencode_message_id,r.state,r.effect_phase,
        r.cancel_epoch,r.stop_receipt_id,r.stop_requested_at,r.claim_owner,r.claim_expires_at,r.claim_generation,
 	       r.clone_evidence,r.volume_evidence,r.observed_container_id,r.observed_container_started_at,r.runtime_epoch,r.host_port,
 	       r.health_evidence,r.ready_evidence,r.session_evidence,r.prompt_evidence,r.writer_inactive_evidence,r.route_removed_evidence,
 	       r.container_removed_evidence,r.volume_removed_evidence,r.clone_removed_evidence,r.last_evidence,r.last_error,
 	       r.provision_intent_at,r.clone_observed_at,r.volume_observed_at,r.container_observed_at,r.health_observed_at,r.ready_at,
-	       r.session_observed_at,r.prompt_intent_at,r.prompt_admitted_at,r.stop_intent_at,r.writer_inactive_at,r.route_removed_at,
+	       r.session_observed_at,r.prompt_intent_at,r.prompt_request_attempted_at,r.prompt_admitted_at,r.timeout_requested_at,r.stop_intent_at,r.writer_inactive_at,r.route_removed_at,
 	       r.container_removed_at,r.volume_removed_at,r.clone_removed_at,r.cleanup_completed_at,r.cleanup_proof,r.absence_proof,
        r.revision,r.created_at,r.updated_at,
-       c.actor_type,c.actor_id,c.display_name,c.credential_id,c.authentication,c.request_id,
-       s.actor_type,s.actor_id,s.display_name,s.credential_id,s.authentication,s.request_id
+	       c.actor_type,c.actor_id,c.display_name,c.credential_id,c.authentication,c.request_id,
+	       s.actor_type,s.actor_id,s.display_name,s.credential_id,s.authentication,s.request_id,
+	       x.actor_type,x.actor_id,x.display_name,x.credential_id,x.authentication,x.request_id
 FROM background_runs r
 JOIN actor_snapshots c ON c.id=r.creator_actor_snapshot_id
-LEFT JOIN actor_snapshots s ON s.id=r.stop_actor_snapshot_id`
+LEFT JOIN actor_snapshots s ON s.id=r.stop_actor_snapshot_id
+LEFT JOIN actor_snapshots x ON x.id=r.timeout_actor_snapshot_id`
 
 func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID task.WorkspaceID, taskID task.TaskID, actor task.ActorSnapshot) (BackgroundRun, error) {
 	if _, err := task.ParseWorkspaceID(string(workspaceID)); err != nil {
@@ -308,13 +311,14 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	var containerRemovedEvidence, volumeRemovedEvidence, cloneRemovedEvidence, evidence, lastError, cleanupProof, absenceProof sql.NullString
 	var stopAt, claimExpiry, runtimeEpoch, hostPort sql.NullInt64
 	var provisionIntent, cloneObserved, volumeObserved, containerObserved, healthObserved, readyAt sql.NullInt64
-	var sessionObserved, promptIntent, promptAdmitted, stopIntent, writerInactive, routeRemoved sql.NullInt64
+	var sessionObserved, promptIntent, promptAttempted, promptAdmitted, timeoutRequested, stopIntent, writerInactive, routeRemoved sql.NullInt64
 	var containerRemoved, volumeRemoved, cloneRemoved, cleanupCompleted sql.NullInt64
-	var instructionHash, profileHash []byte
+	var instructionHash, profileHash, environmentHash []byte
 	var created, updated int64
 	var stopType, stopID, stopName, stopCredential, stopAuth, stopRequest sql.NullString
+	var timeoutType, timeoutID, timeoutName, timeoutCredential, timeoutAuth, timeoutRequest sql.NullString
 	err := row.Scan(&run.TaskID, &run.AttemptID, &run.WorkspaceID, &run.Generation, &repositoryID,
-		&run.RepositoryRemote, &run.BaseOID, &branch, &instructionHash, &run.Profile, &profileHash,
+		&run.RepositoryRemote, &run.BaseOID, &branch, &instructionHash, &run.Profile, &profileHash, &environmentHash, &run.ResourceSpecVersion,
 		&run.ImageIdentity, &run.CloneIdentity, &run.VolumeIdentity, &run.ContainerIdentity, &run.EndpointIdentity,
 		&run.OpenCodeSessionID, &run.OpenCodeMessageID, &run.State, &run.EffectPhase, &cancelEpoch,
 		&stopReceipt, &stopAt, &claimOwner, &claimExpiry, &run.ClaimGeneration,
@@ -322,20 +326,23 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 		&healthEvidence, &readyEvidence, &sessionEvidence, &promptEvidence, &writerEvidence, &routeEvidence,
 		&containerRemovedEvidence, &volumeRemovedEvidence, &cloneRemovedEvidence, &evidence, &lastError,
 		&provisionIntent, &cloneObserved, &volumeObserved, &containerObserved, &healthObserved, &readyAt,
-		&sessionObserved, &promptIntent, &promptAdmitted, &stopIntent, &writerInactive, &routeRemoved,
+		&sessionObserved, &promptIntent, &promptAttempted, &promptAdmitted, &timeoutRequested, &stopIntent, &writerInactive, &routeRemoved,
 		&containerRemoved, &volumeRemoved, &cloneRemoved, &cleanupCompleted, &cleanupProof, &absenceProof,
 		&run.Revision, &created, &updated,
 		&run.Creator.Type, &run.Creator.ID, &run.Creator.DisplayName, &run.Creator.CredentialID, &run.Creator.Authentication, &run.Creator.RequestID,
-		&stopType, &stopID, &stopName, &stopCredential, &stopAuth, &stopRequest)
+		&stopType, &stopID, &stopName, &stopCredential, &stopAuth, &stopRequest,
+		&timeoutType, &timeoutID, &timeoutName, &timeoutCredential, &timeoutAuth, &timeoutRequest)
 	if err != nil {
 		return BackgroundRun{}, err
 	}
-	if len(instructionHash) != 32 || len(profileHash) != 32 || repositoryID <= 0 || run.Generation <= 0 || cancelEpoch < 0 ||
+	if len(instructionHash) != 32 || len(profileHash) != 32 || len(environmentHash) != 32 || bytes.Equal(environmentHash, make([]byte, 32)) ||
+		(run.ResourceSpecVersion != 8 && run.ResourceSpecVersion != 9) || repositoryID <= 0 || run.Generation <= 0 || cancelEpoch < 0 ||
 		!run.State.valid() || !run.EffectPhase.valid() || !validBackgroundRunStatePhase(run.Profile, run.State, run.EffectPhase) || run.Creator.Validate() != nil || run.Creator.Type != task.ActorOpenCode {
 		return BackgroundRun{}, ErrCorruptStore
 	}
 	copy(run.InstructionSHA256[:], instructionHash)
 	copy(run.ProfileSHA256[:], profileHash)
+	copy(run.EnvironmentSHA256[:], environmentHash)
 	run.RepositoryID = task.RepositoryID(repositoryID)
 	run.CancelEpoch = uint64(cancelEpoch)
 	run.Branch = nullableString(branch)
@@ -367,7 +374,9 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	run.ReadyAt = nullableTime(readyAt)
 	run.SessionObservedAt = nullableTime(sessionObserved)
 	run.PromptIntentAt = nullableTime(promptIntent)
+	run.PromptRequestAttemptedAt = nullableTime(promptAttempted)
 	run.PromptAdmittedAt = nullableTime(promptAdmitted)
+	run.TimeoutRequestedAt = nullableTime(timeoutRequested)
 	run.StopIntentAt = nullableTime(stopIntent)
 	run.WriterInactiveAt = nullableTime(writerInactive)
 	run.RouteRemovedAt = nullableTime(routeRemoved)
@@ -389,6 +398,19 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 			return BackgroundRun{}, ErrCorruptStore
 		}
 		run.StopActor = &actor
+	}
+	if timeoutRequested.Valid {
+		if !timeoutType.Valid || !timeoutID.Valid || !timeoutCredential.Valid || !timeoutAuth.Valid || !timeoutRequest.Valid {
+			return BackgroundRun{}, ErrCorruptStore
+		}
+		actor := task.ActorSnapshot{Type: task.ActorType(timeoutType.String), ID: timeoutID.String, DisplayName: timeoutName.String,
+			CredentialID: timeoutCredential.String, Authentication: timeoutAuth.String, RequestID: timeoutRequest.String}
+		if actor.Validate() != nil || actor.Type != task.ActorSystem {
+			return BackgroundRun{}, ErrCorruptStore
+		}
+		run.TimeoutActor = &actor
+	} else if timeoutType.Valid || timeoutID.Valid || timeoutCredential.Valid || timeoutAuth.Valid || timeoutRequest.Valid {
+		return BackgroundRun{}, ErrCorruptStore
 	}
 	return run, nil
 }

@@ -112,13 +112,17 @@ assert all(path.is_file() for path in (root / "dist").iterdir())
 for path in root.glob("deploy/release/*.json"):
     json.loads(path.read_text())
 compatibility = json.loads((root / "deploy/release/compatibility-manifest.json").read_text())
+compatibility_schema = json.loads((root / "deploy/release/compatibility-manifest.schema.json").read_text())
 assert compatibility["schema_version"] == 1
 assert compatibility["first_supported_baseline"]["id"] == "baseline-v1"
 assert compatibility["first_supported_baseline"]["status"] == "repository-established"
 assert compatibility["first_supported_baseline"]["historical_release"] is False
 assert compatibility["first_supported_baseline"]["historical_tag"] is None
 assert compatibility["first_supported_baseline"]["task_store_schema"] == 4
-assert compatibility["current_release_schemas"]["task_store"] == 8
+assert compatibility["current_release_schemas"]["task_store"] == 9
+current_schema = compatibility_schema["properties"]["current_release_schemas"]
+assert current_schema["additionalProperties"] is False
+assert current_schema["properties"]["task_store"]["const"] == compatibility["current_release_schemas"]["task_store"]
 transaction = json.loads((root / "deploy/release/transaction-manifest.example.json").read_text())
 assert transaction["backup"]["format"] == "fern-host-backup-v1"
 assert transaction["activation"]["model"] == "staged-current-previous"

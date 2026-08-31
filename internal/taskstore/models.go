@@ -535,11 +535,11 @@ func (phase BackgroundRunEffectPhase) valid() bool {
 // BackgroundRunIntent is the immutable environment selection committed with a
 // task admission. Mutable lifecycle fields live only on BackgroundRun.
 type BackgroundRunIntent struct {
-	RepositoryRemote, Branch, Profile                string
-	InstructionSHA256, ProfileSHA256                 [32]byte
-	ImageIdentity                                    string
-	CloneIdentity, VolumeIdentity, ContainerIdentity string
-	EndpointIdentity                                 string
+	RepositoryRemote, Branch, Profile                   string
+	InstructionSHA256, ProfileSHA256, EnvironmentSHA256 [32]byte
+	ImageIdentity                                       string
+	CloneIdentity, VolumeIdentity, ContainerIdentity    string
+	EndpointIdentity                                    string
 }
 
 type BackgroundRun struct {
@@ -554,6 +554,8 @@ type BackgroundRun struct {
 	InstructionSHA256          [32]byte
 	Profile                    string
 	ProfileSHA256              [32]byte
+	EnvironmentSHA256          [32]byte
+	ResourceSpecVersion        int
 	ImageIdentity              string
 	CloneIdentity              string
 	VolumeIdentity             string
@@ -596,7 +598,10 @@ type BackgroundRun struct {
 	ReadyAt                    *time.Time
 	SessionObservedAt          *time.Time
 	PromptIntentAt             *time.Time
+	PromptRequestAttemptedAt   *time.Time
 	PromptAdmittedAt           *time.Time
+	TimeoutRequestedAt         *time.Time
+	TimeoutActor               *task.ActorSnapshot
 	StopIntentAt               *time.Time
 	WriterInactiveAt           *time.Time
 	RouteRemovedAt             *time.Time
@@ -626,6 +631,19 @@ type BackgroundRunStop struct {
 	Run      BackgroundRun
 	Receipt  Receipt
 	Replayed bool
+}
+
+// BackgroundRunWork is the exact task-owned plaintext and attempt deadline
+// paired with a claimed run. Prompt is never copied into run evidence.
+type BackgroundRunWork struct {
+	Run            BackgroundRun
+	Prompt         string
+	Deadline       time.Time
+	AttemptCreated time.Time
+	AttemptTimeout time.Duration
+	Agent          string
+	ModelProvider  string
+	Model          string
 }
 
 type ClaimNextBackgroundRunParams struct {
@@ -705,6 +723,13 @@ type CompleteBackgroundRunResultCleanupParams struct {
 type MarkBackgroundRunCleanupRequiredParams struct {
 	BackgroundRunClaim
 	Error string
+}
+
+type RequestBackgroundRunTimeoutParams struct {
+	BackgroundRunClaim
+	AttemptEventID task.EventID
+	TaskEventID    task.EventID
+	Actor          task.ActorSnapshot
 }
 
 type Admission struct {

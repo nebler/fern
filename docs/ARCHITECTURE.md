@@ -27,7 +27,7 @@ Implemented production paths include:
 - an alternative trusted-workspace `gh` authority mode;
 - offline backup create/restore/rollback and encrypted GitHub credential
   export/import/rotation;
-- schema-7 compatibility gates and a tagged release workflow for attested
+- schema-9 compatibility gates and a tagged release workflow for attested
   assets and a signed, attested OCI image.
 
 The pinned OpenCode contract still has no generic durable terminal-success
@@ -226,7 +226,7 @@ and atomically marks unresolved records quarantined without replaying effects.
 
 The SQLite store at `$HOME/.fern/tasks/<workspace>.db` uses WAL, foreign keys,
 `synchronous=FULL`, `BEGIN IMMEDIATE`, integrity checks, and a checksummed
-migration ledger. Current schema is 8:
+migration ledger. Current schema is 9:
 
 1. `initial_task_store`
 2. `execution_projection_and_results`
@@ -236,6 +236,7 @@ migration ledger. Current schema is 8:
 6. `publication_admission_receipts`
 7. `background_run_intents`
 8. `background_run_effect_claims`
+9. `background_run_prompt_attempt_fence`
 
 Schema 6 requires each mutable publication to reference an exact
 `result.publish` receipt. Pre-schema-6 publication rows migrate with a null
@@ -252,9 +253,18 @@ atomically terminalizes every old-profile schema-7 row, including `failed` and
 unimplemented schema-7 effect provider created no resources. Original state and
 phase remain in evidence; stop metadata and exact receipt linkage are preserved.
 
+Schema 9 adds the durable `prompt_request_attempted_at` one-shot fence, system
+timeout provenance, the exact disposable-environment digest, and an immutable
+resource-spec version. Schema-8 rows retain spec version 8 for cleanup-only
+attestation; `prompt_intent` and `prompt_admitted` rows are conservatively
+backfilled as already attempted. A crash after this fence but
+before HTTP dispatch is therefore intentionally `uncertain`: restart performs
+read-only reconciliation and never resends, even when no durable OpenCode prompt
+exists. This unavoidable ambiguity is the cost of at-most-once dispatch.
+
 `baseline-v1` is the first supported repository-established compatibility
 fixture. It is schema 4 and explicitly is not evidence of a historical release
-or tag. `integration/upgrade/run.sh` verifies semantic upgrade to schema 8,
+or tag. `integration/upgrade/run.sh` verifies semantic upgrade to schema 9,
 restores the verified pre-upgrade bytes for rollback, and upgrades again.
 Rollback means restoring a pre-upgrade backup; older code must never open the
 migrated database.

@@ -27,6 +27,7 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
+	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -215,6 +216,16 @@ type evidence struct {
 	Limit     int64  `json:"observed_limit_bytes,omitempty"`
 }
 
+// EnvironmentSHA256 identifies the exact explicitly configured disposable
+// environment without persisting its values in the task store.
+func EnvironmentSHA256(environment map[string]string) [sha256.Size]byte {
+	if environment == nil {
+		environment = map[string]string{}
+	}
+	encoded, _ := json.Marshal(environment)
+	return sha256.Sum256(encoded)
+}
+
 // New validates the complete policy, qualifies the immutable local image, and
 // atomically creates or loads the state-backed host key.
 func New(ctx context.Context, config Config, api dockerAPI) (*Provider, error) {
@@ -276,6 +287,41 @@ func (p *Provider) Close() error {
 	return nil
 }
 
+// CommittedRuntime reconstructs the provider's exact process identity from the
+// durable schema-8 observation without exposing or persisting credentials.
+func (p *Provider) CommittedRuntime(run taskstore.BackgroundRun) (RuntimeIdentity, error) {
+	if _, err := p.validateRun(run); err != nil {
+		return RuntimeIdentity{}, err
+	}
+	started, err := time.Parse(time.RFC3339Nano, run.ObservedContainerStartedAt)
+	if err != nil || started.UnixNano() != run.RuntimeEpoch {
+		return RuntimeIdentity{}, errors.New("durable background runtime epoch is incomplete")
+	}
+	runtime := RuntimeIdentity{ContainerID: run.ObservedContainerID, StartedAt: run.ObservedContainerStartedAt,
+		Token: runtimeToken(run.ObservedContainerID, run.ObservedContainerStartedAt)}
+	if err := validateCommittedRuntime(runtime); err != nil {
+		return RuntimeIdentity{}, err
+	}
+	return runtime, nil
+}
+
+// OpenCodeClient derives Basic credentials in memory and returns only the
+// profile-specific authenticated client. No capability or secret crosses the
+// provider boundary.
+func (p *Provider) OpenCodeClient(run taskstore.BackgroundRun, runtime RuntimeIdentity, httpClient *http.Client) (*backgroundopencode.Client, error) {
+	if _, err := p.validateRun(run); err != nil {
+		return nil, err
+	}
+	if err := validateCommittedRuntime(runtime); err != nil || runtime.ContainerID != run.ObservedContainerID ||
+		runtime.StartedAt != run.ObservedContainerStartedAt || run.HostPort < 1 || run.HostPort > 65535 {
+		return nil, errors.New("exact committed background runtime is required")
+	}
+	return backgroundopencode.New(backgroundopencode.Config{
+		Endpoint: "http://127.0.0.1:" + strconv.Itoa(run.HostPort), Username: p.config.BasicUsername,
+		Password: p.password(run), HTTPClient: httpClient,
+	})
+}
+
 func cloneConfig(config Config) Config {
 	config.Environment = cloneMap(config.Environment)
 	return config
@@ -308,7 +354,7 @@ func validateConfig(c Config) error {
 	totalEnvironment := 0
 	for key, value := range c.Environment {
 		totalEnvironment += len(key) + len(value)
-		if !validEnvKey(key) || len(key) > 128 || len(value) > 64<<10 || strings.IndexByte(value, 0) >= 0 || key == passwordEnv || key == usernameEnv {
+		if !validEnvKey(key) || len(key) > 128 || len(value) > 64<<10 || strings.IndexByte(value, 0) >= 0 || key == "OPENCODE_PASSWORD" || key == passwordEnv || key == usernameEnv {
 			return fmt.Errorf("invalid or reserved environment key %q", key)
 		}
 	}
@@ -353,13 +399,25 @@ func qualifyImage(got image.InspectResponse, want string) error {
 }
 
 func (p *Provider) validateRun(run taskstore.BackgroundRun) (string, error) {
+	digest, err := p.validateRunForCleanup(run)
+	if err != nil {
+		return "", err
+	}
+	if run.ResourceSpecVersion != 9 || run.ImageIdentity != p.config.ImageID || run.EnvironmentSHA256 != EnvironmentSHA256(p.config.Environment) {
+		return "", errors.New("background run execution configuration differs from immutable intent")
+	}
+	return digest, nil
+}
+
+func (p *Provider) validateRunForCleanup(run taskstore.BackgroundRun) (string, error) {
 	if _, err := task.ParseWorkspaceID(string(run.WorkspaceID)); err != nil {
 		return "", err
 	}
 	if _, err := task.ParseTaskID(string(run.TaskID)); err != nil {
 		return "", err
 	}
-	if _, err := task.ParseAttemptID(string(run.AttemptID)); err != nil || run.Generation <= 0 || run.ImageIdentity != p.config.ImageID || run.Profile != taskstore.BackgroundRunSourceProfile {
+	if _, err := task.ParseAttemptID(string(run.AttemptID)); err != nil || run.Generation <= 0 || !validImageID(run.ImageIdentity) ||
+		run.EnvironmentSHA256 == ([sha256.Size]byte{}) || (run.ResourceSpecVersion != 8 && run.ResourceSpecVersion != 9) || run.Profile != taskstore.BackgroundRunSourceProfile {
 		return "", errors.New("invalid immutable background run tuple")
 	}
 	if _, err := task.ParseGitOID(string(run.BaseOID)); err != nil {
@@ -376,12 +434,53 @@ func (p *Provider) validateRun(run taskstore.BackgroundRun) (string, error) {
 	return p.specDigest(run)
 }
 
+func (p *Provider) cleanupDigest(run taskstore.BackgroundRun) (string, error) {
+	digest, err := p.validateRunForCleanup(run)
+	if err != nil || run.ResourceSpecVersion != 8 {
+		return digest, err
+	}
+	if _, err := os.Lstat(p.cloneMarkerPath(run)); errors.Is(err, os.ErrNotExist) {
+		return digest, nil
+	} else if err != nil {
+		return "", err
+	}
+	snapshot, err := p.readCloneMarkerSnapshotUnbound(run)
+	if err != nil || !validSpecDigest(snapshot.marker.Spec) {
+		return "", errors.Join(errors.New("schema-8 clone authority has an invalid resource digest"), err)
+	}
+	return snapshot.marker.Spec, nil
+}
+
 func canonicalRemote(value string) bool {
 	parsed, err := url.Parse(value)
 	return err == nil && parsed.Scheme == "https" && strings.EqualFold(parsed.Host, "github.com") && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.RawPath == "" && parsed.Path != "/" && !strings.HasSuffix(parsed.Path, "/") && !strings.HasSuffix(strings.ToLower(parsed.Path), ".git") && value == "https://"+strings.ToLower(parsed.Host)+parsed.EscapedPath()
 }
 
 func (p *Provider) specDigest(run taskstore.BackgroundRun) (string, error) {
+	if run.ResourceSpecVersion == 8 {
+		return p.legacySpecDigest(run)
+	}
+	data, err := json.Marshal(struct {
+		Version                                                                                int `json:"version"`
+		Workspace, Task, Attempt                                                               string
+		Generation                                                                             int64
+		Image, Clone, Volume, Container, Endpoint, Base, Repository, Profile, Session, Message string
+		EnvironmentSHA256                                                                      string
+	}{
+		Version: 9, Workspace: string(run.WorkspaceID), Task: string(run.TaskID), Attempt: string(run.AttemptID), Generation: run.Generation,
+		Image: run.ImageIdentity, Clone: run.CloneIdentity, Volume: run.VolumeIdentity,
+		Container: run.ContainerIdentity, Endpoint: run.EndpointIdentity, Base: string(run.BaseOID), Repository: run.RepositoryRemote,
+		Profile: run.Profile, Session: string(run.OpenCodeSessionID), Message: string(run.OpenCodeMessageID),
+		EnvironmentSHA256: hex.EncodeToString(run.EnvironmentSHA256[:]),
+	})
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func (p *Provider) legacySpecDigest(run taskstore.BackgroundRun) (string, error) {
 	environment := make([]string, 0, len(p.config.Environment))
 	for key, value := range p.config.Environment {
 		environment = append(environment, key+"="+value)
@@ -475,6 +574,14 @@ func validImageID(value string) bool {
 	}
 	_, err := hex.DecodeString(value[7:])
 	return err == nil && strings.ToLower(value) == value
+}
+
+func validSpecDigest(value string) bool {
+	if len(value) != sha256.Size*2 || strings.ToLower(value) != value {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func validEnvKey(value string) bool {

@@ -28,7 +28,7 @@ var baselineFileChecksums = map[string]string{
 	"control/2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea.json": "a839bb61730c650b833999fd11550f6f677c267f2e67f1ffcb14f0d34cd03b65",
 	"fern.yaml":                       "125be67c7eb7f0312b75eeea116f9c8570d43caca8838995ac589bcb7fa46923",
 	"github-app/app-credentials.json": "9dc22f33803ba3b4a5e945ba18d3c695fd1b95a6f1ed6a0e0d5f47318afabe27",
-	"metadata.json":                   "b7d9456649ba49bbacf6a4bc02a45e1ff08ea90d20675b7fb3279907b4696a43",
+	"metadata.json":                   "34d1d485f3791baef9492b284ac80072b457b18df8c84ab8b57fec6c25e69558",
 	"task-store.sqlite":               "2fb2541a99396b40e99704184e5a49fe44b8e31485bc5e32c26c9c4e82a03a38",
 }
 
@@ -49,7 +49,8 @@ var baselineMigrationLedger = []migrationRecord{
 var currentMigrationLedger = append(append([]migrationRecord(nil), baselineMigrationLedger...),
 	migrationRecord{6, "publication_admission_receipts", "6c54a44e10e025c2d82a1466b184c74ea8d2641530472aca02e79b4cdcd301ca"},
 	migrationRecord{7, "background_run_intents", "14adb62969106f5c6a66d12ae4e43cc6c6d31fbafe71e0f7e708cc42c2aaba2a"},
-	migrationRecord{8, "background_run_effect_claims", "3488eb94b3bc0254b09ce5df70ed4ddc07b2b25505dfffa2fc57cbec0c2a6026"})
+	migrationRecord{8, "background_run_effect_claims", "3488eb94b3bc0254b09ce5df70ed4ddc07b2b25505dfffa2fc57cbec0c2a6026"},
+	migrationRecord{9, "background_run_prompt_attempt_fence", "33f4c13ca38615b7662066d6f27057f209962e89ea29d56d6183348e5da9c95d"})
 
 func TestBaselineV1UpgradesWithoutSemanticLoss(t *testing.T) {
 	assertBaselineBytes(t)
@@ -196,6 +197,37 @@ func TestBaselineV1UpgradesWithoutSemanticLoss(t *testing.T) {
 	}
 
 	assertBaselineBytes(t)
+}
+
+func TestCompatibilityManifestSchemaPinsCurrentTaskStore(t *testing.T) {
+	var schema struct {
+		Properties struct {
+			CurrentReleaseSchemas struct {
+				AdditionalProperties bool `json:"additionalProperties"`
+				Properties           struct {
+					TaskStore struct {
+						Const int `json:"const"`
+					} `json:"task_store"`
+				} `json:"properties"`
+			} `json:"current_release_schemas"`
+		} `json:"properties"`
+	}
+	var manifest struct {
+		CurrentReleaseSchemas struct {
+			TaskStore int `json:"task_store"`
+		} `json:"current_release_schemas"`
+	}
+	root := filepath.Join("..", "..", "deploy", "release")
+	decodeJSONFile(t, filepath.Join(root, "compatibility-manifest.schema.json"), &schema)
+	decodeJSONFile(t, filepath.Join(root, "compatibility-manifest.json"), &manifest)
+	want := taskstore.CurrentSchemaVersion()
+	if schema.Properties.CurrentReleaseSchemas.AdditionalProperties ||
+		schema.Properties.CurrentReleaseSchemas.Properties.TaskStore.Const != want ||
+		manifest.CurrentReleaseSchemas.TaskStore != want {
+		t.Fatalf("task-store schema alignment schema=%d manifest=%d current=%d additionalProperties=%t",
+			schema.Properties.CurrentReleaseSchemas.Properties.TaskStore.Const, manifest.CurrentReleaseSchemas.TaskStore,
+			want, schema.Properties.CurrentReleaseSchemas.AdditionalProperties)
+	}
 }
 
 func assertBaselineBytes(t *testing.T) {

@@ -42,7 +42,7 @@ func TestMigrationEightAcceptsEveryVersionSevenStatePhase(t *testing.T) {
 	store = openTestStore(t, path)
 	t.Cleanup(func() { _ = store.Close() })
 	var version int
-	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 8 {
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != CurrentSchemaVersion() {
 		t.Fatalf("migrated version = %d, error = %v", version, err)
 	}
 
@@ -71,7 +71,7 @@ FROM background_runs r JOIN tasks t ON t.id=r.task_id JOIN attempts a ON a.id=r.
 			container != legacyContainerIdentity(taskID) || endpoint != legacyEndpointIdentity(taskID) {
 			t.Fatalf("immutable legacy tuple changed for %s/%s", legacy.state, legacy.phase)
 		}
-		if state != BackgroundRunFailed || phase != BackgroundRunEffectCleanupComplete || runRevision != 2 ||
+		if state != BackgroundRunFailed || phase != BackgroundRunEffectCleanupComplete || runRevision != 3 ||
 			taskState != "failed" || attemptState != "failed" || taskRevision != 2 || attemptRevision != 2 ||
 			taskReason != "legacy_profile_unqualified" || attemptReason != taskReason ||
 			!cleanupProof.Valid || cleanupProof.String != "legacy_profile_unqualified:no_schema_7_effect_provider" {

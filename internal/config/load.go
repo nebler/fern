@@ -176,6 +176,26 @@ func load(path, defaultRepo string, required bool, overrides Overrides, workspac
 		if err != nil {
 			return Config{}, fmt.Errorf("expand control.password: %w", err)
 		}
+		if config.Tasks != nil {
+			for key, value := range config.Tasks.BackgroundEnvironment {
+				if secret := referencedHostOnlySecret(value); secret != "" {
+					return Config{}, fmt.Errorf("tasks.backgroundEnvironment.%s references host-only %s", key, secret)
+				}
+				expanded, expandErr := expandRequired(value, lookup)
+				if expandErr != nil {
+					return Config{}, fmt.Errorf("expand tasks.backgroundEnvironment.%s: %w", key, expandErr)
+				}
+				if secret := embeddedHostOnlySecret(expanded, lookup); secret != "" {
+					return Config{}, fmt.Errorf("tasks.backgroundEnvironment.%s contains host-only %s", key, secret)
+				}
+				workspacePassword := config.Workspace.Env["OPENCODE_PASSWORD"]
+				if (workspacePassword != "" && strings.Contains(expanded, workspacePassword)) ||
+					(config.Control.Password != "" && strings.Contains(expanded, config.Control.Password)) {
+					return Config{}, fmt.Errorf("tasks.backgroundEnvironment.%s contains a workspace or control password", key)
+				}
+				config.Tasks.BackgroundEnvironment[key] = expanded
+			}
+		}
 	}
 	return config, nil
 }

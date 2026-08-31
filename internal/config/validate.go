@@ -108,6 +108,29 @@ func validateTasks(config Config) error {
 	if config.Tasks.BackgroundImageID != "" && !validCanonicalImageID(config.Tasks.BackgroundImageID) {
 		return errors.New("tasks.backgroundImageID must be a canonical sha256 image ID")
 	}
+	if len(config.Tasks.BackgroundEnvironment) > 64 {
+		return errors.New("tasks.backgroundEnvironment has too many entries")
+	}
+	backgroundEnvironmentBytes := 0
+	workspacePassword := config.Workspace.Env["OPENCODE_PASSWORD"]
+	for name, value := range config.Tasks.BackgroundEnvironment {
+		backgroundEnvironmentBytes += len(name) + len(value) + 1
+		if !validEnvironmentName(name) || strings.IndexByte(value, 0) >= 0 {
+			return errors.New("tasks.backgroundEnvironment contains an invalid entry")
+		}
+		switch name {
+		case "FERN_CONTROL_PASSWORD", "FERN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "GH_CONFIG_DIR",
+			"OPENCODE_PASSWORD", "OPENCODE_SERVER_PASSWORD", "OPENCODE_SERVER_USERNAME":
+			return fmt.Errorf("tasks.backgroundEnvironment.%s is a reserved credential", name)
+		}
+		if (workspacePassword != "" && strings.Contains(value, workspacePassword)) ||
+			(config.Control.Password != "" && strings.Contains(value, config.Control.Password)) {
+			return fmt.Errorf("tasks.backgroundEnvironment.%s contains a workspace or control password", name)
+		}
+	}
+	if backgroundEnvironmentBytes > 32<<10 {
+		return errors.New("tasks.backgroundEnvironment exceeds 32768 bytes")
+	}
 	if verification := config.Tasks.Verification; verification != nil {
 		if !validPolicyName(verification.CheckName) {
 			return errors.New("tasks.verification.checkName must be 1-64 lowercase policy characters")

@@ -9,12 +9,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	goruntime "runtime"
 	"time"
 
+	"github.com/nebler/fern/internal/backgroundopencode"
+	"github.com/nebler/fern/internal/backgroundruncoord"
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/observability"
@@ -23,6 +26,7 @@ import (
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskapi"
 	"github.com/nebler/fern/internal/taskdelivery"
+	"github.com/nebler/fern/internal/taskenvdocker"
 	"github.com/nebler/fern/internal/taskexecution"
 	"github.com/nebler/fern/internal/taskpublication"
 	"github.com/nebler/fern/internal/taskpublicationcoord"
@@ -70,6 +74,16 @@ type taskServices struct {
 	result       taskResultCoordinator
 	resultWake   chan struct{}
 	status       *observability.Registry
+	background   taskDeliveryService
+	provider     *taskenvdocker.Provider
+}
+
+func (services *taskServices) Close() error {
+	var providerErr error
+	if services.provider != nil {
+		providerErr = services.provider.Close()
+	}
+	return errors.Join(providerErr, services.store.Close())
 }
 
 type taskRunService interface {
@@ -241,6 +255,8 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 		hostname = "github.com"
 	}
 	availableProfile, backgroundImageID := "", ""
+	var backgroundProvider *taskenvdocker.Provider
+	var backgroundCoordinator *backgroundruncoord.Coordinator
 	if cfg.Tasks.BackgroundImage != "" {
 		backgroundInspectCtx, backgroundInspectCancel := context.WithTimeout(ctx, taskInspectTimeout)
 		backgroundImageID, err = docker.ResolveBackgroundRunImageID(backgroundInspectCtx, cfg.Tasks.BackgroundImage, cfg.Tasks.BackgroundImageID)
@@ -251,16 +267,68 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 		}
 		availableProfile = runapi.PluginOpenCodeProfile
 		status.Qualified(observability.ComponentBackgroundRunProfile)
+		backgroundRoot := filepath.Join(taskDirectory, cfg.Workspace.Name+"-background")
+		if err := os.MkdirAll(backgroundRoot, 0o700); err != nil {
+			return nil, fmt.Errorf("create background run state root: %w", err)
+		}
+		backgroundRoot, err = filepath.EvalSymlinks(backgroundRoot)
+		if err != nil {
+			return nil, err
+		}
+		backgroundRepository, err := filepath.EvalSymlinks(cfg.Workspace.Repo)
+		if err != nil {
+			return nil, fmt.Errorf("resolve background run repository: %w", err)
+		}
+		// Serial profile policy: 1 GiB RAM, 2 CPU, 512 PIDs, 10 GiB source/clone
+		// admission, 20 GiB host free admission, 10 MiB x 3 logs, and 24h wall.
+		backgroundProvider, err = taskenvdocker.New(ctx, taskenvdocker.Config{
+			StateRoot: backgroundRoot, Repository: backgroundRepository, GitExecutable: verificationGitExecutable(),
+			ImageReference: cfg.Tasks.BackgroundImage, ImageID: backgroundImageID, MemoryBytes: 1 << 30,
+			NanoCPUs: 2_000_000_000, PIDs: 512, WallTimeout: 24 * time.Hour, GitTimeout: 2 * time.Minute,
+			DockerTimeout: 30 * time.Second, HealthTimeout: 30 * time.Second, GitOutputBytes: 1 << 20,
+			SourceSizeAdmissionBytes: 10 << 30, CloneObservedLimitBytes: 10 << 30, DiskFreeAdmissionBytes: 20 << 30,
+			LogMaxSize: "10m", LogMaxFiles: 3, StopGrace: 10 * time.Second, Environment: backgroundRunEnvironment(cfg),
+		}, docker.BackgroundRunDockerClient())
+		if err != nil {
+			status.Blocked(observability.ComponentBackgroundRunSerial, err)
+			return nil, err
+		}
+		backgroundCoordinator, err = backgroundruncoord.New(store, backgroundProvider, ids, backgroundruncoord.Config{
+			WorkspaceID: durableWorkspace.ID, WorkerID: workerID, SystemActor: systemActor(workerID, "background-run", "Background Run coordinator"),
+			Profile: availableProfile, ImageIdentity: backgroundImageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(backgroundRunEnvironment(cfg)), Agent: cfg.Tasks.Agent,
+			ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID,
+			OperationTimeout: min(cfg.Tasks.LeaseDuration/2, 30*time.Second), LeaseDuration: cfg.Tasks.LeaseDuration,
+			PollInterval: taskPollInterval, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 100, MaxPages: 100, MaxEvents: 10000},
+			Now: time.Now, HTTPClient: &http.Client{Timeout: min(cfg.Tasks.LeaseDuration/2, 30*time.Second)},
+			OnError: func(err error) {
+				status.Degraded(observability.ComponentBackgroundRunSerial, err)
+				log.Error("background run coordination deferred", "err", err, "workspace", cfg.Workspace.Name)
+			},
+			OnSuccess: func() { status.Healthy(observability.ComponentBackgroundRunSerial) },
+		})
+		if err != nil {
+			_ = backgroundProvider.Close()
+			return nil, err
+		}
+		status.Healthy(observability.ComponentBackgroundRunSerial)
 	}
 	runs, err := runapi.New(runapi.Config{
 		WorkspaceID: durableWorkspace.ID, RepositoryID: durableWorkspace.RepositoryID,
 		RepositoryRemote:        "https://" + hostname + "/" + github.Repository.FullName,
-		BackgroundImageIdentity: backgroundImageID, AvailableProfile: availableProfile,
+		BackgroundImageIdentity: backgroundImageID, BackgroundEnvironmentSHA256: taskenvdocker.EnvironmentSHA256(backgroundRunEnvironment(cfg)), AvailableProfile: availableProfile,
 		Store: store, Generator: ids, ActorResolver: taskapi.ContextActor, BaseVerifier: baseVerifier,
 		Now: time.Now, AttemptTimeout: cfg.Tasks.AttemptTimeout, Agent: cfg.Tasks.Agent,
 		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID, BudgetSnapshot: budget,
+		Wake: func() {
+			if backgroundCoordinator != nil {
+				backgroundCoordinator.Wake()
+			}
+		},
 	})
 	if err != nil {
+		if backgroundProvider != nil {
+			_ = backgroundProvider.Close()
+		}
 		return nil, err
 	}
 	closeOnError = false
@@ -279,7 +347,15 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 		store: store, handler: handler, runs: runs, coordinator: coordinator,
 		execution: executionCoordinator, verification: verificationService, publication: publicationService,
 		result: resultCoordinator, resultWake: resultWake, status: status,
+		background: backgroundCoordinator, provider: backgroundProvider,
 	}, nil
+}
+
+func backgroundRunEnvironment(cfg config.Config) map[string]string {
+	if cfg.Tasks == nil {
+		return nil
+	}
+	return maps.Clone(cfg.Tasks.BackgroundEnvironment)
 }
 
 // gitHubAuthority bundles how tasks authenticate to GitHub and resolve base refs.

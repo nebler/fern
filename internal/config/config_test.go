@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -661,10 +662,10 @@ tasks:
 	want := TaskPolicy{
 		Agent: "build", Model: TaskModel{Provider: "openai", ID: "gpt-5"},
 		AttemptTimeout: 30 * time.Minute, LeaseDuration: 2 * time.Minute,
-		Budget: TaskBudget{MaxTurns: 100}, BackgroundImage: "fern/opencode-background-source:dev",
+		Budget: TaskBudget{MaxTurns: 100}, BackgroundImage: "fern/opencode-background-source:dev", BackgroundEnvironment: map[string]string{},
 		BackgroundImageID: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 	}
-	if *loaded.Tasks != want {
+	if !reflect.DeepEqual(*loaded.Tasks, want) {
 		t.Fatalf("tasks = %+v, want %+v", *loaded.Tasks, want)
 	}
 	if err := Validate(loaded); err != nil {
@@ -1023,6 +1024,88 @@ tasks:
 	}
 	if loaded.Workspace.Env["OPENCODE_PASSWORD"] != "opencode-secret" || loaded.Control.Password != "control-secret-control-secret-1234" {
 		t.Fatal("credential fields were not expanded")
+	}
+}
+
+func TestBackgroundEnvironmentIsExplicitExpandedAndSeparated(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "fern.yaml")
+	data := `workspace:
+  repo: .
+  env:
+    OPENCODE_PASSWORD: ${OPENCODE_PASSWORD}
+    WORKSPACE_PROVIDER_KEY: workspace-only
+  github:
+    mode: github-app-broker
+    hostname: github.com
+    installationId: 1
+    repository:
+      id: 2
+      fullName: owner/repository
+control:
+  password: ${FERN_CONTROL_PASSWORD}
+tasks:
+  agent: build
+  model:
+    provider: openai
+    id: gpt-5
+  attemptTimeout: 30m
+  leaseDuration: 2m
+  backgroundEnvironment:
+    OPENAI_API_KEY: ${OPENAI_API_KEY}
+  budget:
+    maxTurns: 100
+`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadWithEnvironment(path, directory, true, Overrides{}, map[string]string{
+		"OPENCODE_PASSWORD": "workspace-password", "FERN_CONTROL_PASSWORD": "control-password-control-password-1234",
+		"OPENAI_API_KEY": "explicit-provider-key",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"OPENAI_API_KEY": "explicit-provider-key"}
+	if !reflect.DeepEqual(loaded.Tasks.BackgroundEnvironment, want) {
+		t.Fatalf("background environment = %#v, want %#v", loaded.Tasks.BackgroundEnvironment, want)
+	}
+	if _, exists := loaded.Tasks.BackgroundEnvironment["WORKSPACE_PROVIDER_KEY"]; exists {
+		t.Fatal("workspace environment crossed into disposable background environment")
+	}
+	if err := Validate(loaded); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBackgroundEnvironmentRejectsCredentialCustodyViolations(t *testing.T) {
+	base := Default(t.TempDir())
+	base.Workspace.Env["OPENCODE_PASSWORD"] = "workspace-password"
+	base.Control.Password = "control-password-control-password-1234"
+	base.Tasks = &TaskPolicy{Agent: "build", Model: TaskModel{Provider: "openai", ID: "gpt-5"}, AttemptTimeout: time.Hour,
+		LeaseDuration: time.Minute, Budget: TaskBudget{MaxTurns: 10}}
+	tests := map[string]map[string]string{
+		"legacy password":     {"OPENCODE_PASSWORD": "other"},
+		"server password":     {"OPENCODE_SERVER_PASSWORD": "other"},
+		"server username":     {"OPENCODE_SERVER_USERNAME": "other"},
+		"Fern credential":     {"FERN_CONTROL_PASSWORD": "other"},
+		"GitHub credential":   {"GITHUB_TOKEN": "other"},
+		"workspace embedding": {"MODEL_KEY": "prefix-workspace-password-suffix"},
+		"control embedding":   {"MODEL_KEY": "prefix-control-password-control-password-1234-suffix"},
+		"invalid name":        {"BAD-NAME": "value"},
+		"NUL value":           {"MODEL_KEY": "bad\x00value"},
+	}
+	for name, environment := range tests {
+		t.Run(name, func(t *testing.T) {
+			value := base
+			policy := *base.Tasks
+			policy.BackgroundEnvironment = environment
+			value.Tasks = &policy
+			if err := Validate(value); err == nil {
+				t.Fatal("unsafe background environment was accepted")
+			}
+		})
 	}
 }
 

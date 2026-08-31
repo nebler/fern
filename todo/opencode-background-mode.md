@@ -189,21 +189,21 @@ official OpenCode experience adds no repeatedly used value.
 
 ### Pinned OpenCode Contract
 
-- [ ] Select one exact newer OpenCode V2 source commit, package version, image
+- [x] Select one exact newer OpenCode V2 source commit, package version, image
   digest, and API schema.
-- [ ] Verify startup, health, authentication, and caller-selected session and
+- [x] Verify startup, health, authentication, and caller-selected session and
   prompt IDs.
-- [ ] Verify prompt admission and exact read-only reconciliation after response
+- [x] Verify prompt admission and exact read-only reconciliation after response
   loss.
 - [ ] Verify event/history, questions, forms, permissions, terminals,
   interruption, and deep links.
-- [ ] Verify the same authoritative session reopens instead of creating a
+- [x] Verify the same authoritative session reopens instead of creating a
   replacement.
-- [ ] Characterize process and container restart, including every volatile fact
+- [x] Characterize process and container restart, including every volatile fact
   that disappears.
-- [ ] Treat session wait or completion APIs as non-authoritative unless they pass
+- [x] Treat session wait or completion APIs as non-authoritative unless they pass
   repeated restart tests.
-- [ ] Keep explicit user sealing unless a restart-safe positive terminal result
+- [x] Keep explicit user sealing unless a restart-safe positive terminal result
   is proven under the collection fence.
 
 **Stop:** reject the candidate if Fern cannot reconcile exact identities or open
@@ -213,41 +213,41 @@ the official session without replaying mutations.
 
 ### Durable Intent
 
-- [ ] Commit run ID, internal attempt generation, repository identity, exact
+- [x] Commit run ID, internal attempt generation, repository identity, exact
   base, instruction digest, image digest, clone/volume/container identities, and
   OpenCode session/prompt IDs before external effects.
 - [ ] Give provision, prompt delivery, stop, export, and cleanup explicit started
   phases before I/O.
-- [ ] Reconcile only by exact identifiers after restart or response loss.
-- [ ] Fence every writer and observer with the current attempt generation.
+- [x] Reconcile only by exact identifiers after restart or response loss.
+- [x] Fence every writer and observer with the current attempt generation.
 
 ### Disposable Environment
 
-- [ ] Add a separate Docker provider for Background Runs.
-- [ ] Create one private full clone; do not use a linked worktree or shared
+- [x] Add a separate Docker provider for Background Runs.
+- [x] Create one private full clone; do not use a linked worktree or shared
   writable Git object directory.
-- [ ] Create a distinct OpenCode state volume, container, runtime credential,
+- [x] Create a distinct OpenCode state volume, container, runtime credential,
   and endpoint identity.
-- [ ] Pin the image by digest and run with the existing unprivileged UID/GID.
-- [ ] Bound CPU, memory, PIDs, disk admission, wall time, and retained logs.
+- [x] Pin the image by digest and run with the existing unprivileged UID/GID.
+- [x] Bound CPU, memory, PIDs, disk admission, wall time, and retained logs.
 - [ ] Reuse the current single-origin proxy shape while only one run can execute.
-- [ ] Remove access before deleting or replacing the exact runtime.
+- [x] Remove access before deleting or replacing the exact runtime.
 
 ### Admission And Takeover
 
-- [ ] Create or adopt the preselected OpenCode session ID exactly once.
-- [ ] Admit the preselected prompt ID exactly once.
-- [ ] Never resend a prompt because a request timed out or Fern restarted.
-- [ ] Project only conservative run states: `queued`, `setting_up`, `working`,
+- [x] Create or adopt the preselected OpenCode session ID exactly once.
+- [x] Admit the preselected prompt ID exactly once.
+- [x] Never resend a prompt because a request timed out or Fern restarted.
+- [x] Project only conservative run states: `queued`, `setting_up`, `working`,
   `needs_you`, `canceling`, `uncertain`, `result_ready`, `failed`, and
   `cleanup_required`.
-- [ ] Do not infer success from idle, EOF, process exit, container health, or an
+- [x] Do not infer success from idle, EOF, process exit, container health, or an
   empty inbox.
 - [ ] Open the official OpenCode UI for inspection, questions, permissions,
   steering, terminals, files, and diffs.
 - [ ] Disconnect every initiating client for at least ten minutes and reopen the
   same session from another device.
-- [ ] Make stop durable before interruption and keep `canceling` until exact
+- [x] Make stop durable before interruption and keep `canceling` until exact
   writer inactivity is positively established.
 
 ## 4. Retain The Exact Result
@@ -272,14 +272,14 @@ the official session without replaying mutations.
 ## 5. Fault Gates For The Serial Run
 
 - [ ] Fern exits before and after each external mutation starts.
-- [ ] Docker create succeeds but its response is lost.
+- [x] Docker create succeeds but its response is lost.
 - [ ] OpenCode session creation succeeds but its response is lost.
-- [ ] Prompt admission succeeds but its response is lost.
-- [ ] Fern restarts while OpenCode is working or waiting for input.
-- [ ] OpenCode restarts while a permission or question is pending.
+- [x] Prompt admission succeeds but its response is lost.
+- [x] Fern restarts while OpenCode is working or waiting for input.
+- [x] OpenCode restarts while a permission or question is pending.
 - [ ] The container exits normally, fails, and is OOM-killed.
 - [ ] Cancellation races provisioning, admission, model work, seal, and export.
-- [ ] A stale attempt tries to observe, stop, seal, export, verify, clean, or
+- [x] A stale attempt tries to observe, stop, seal, export, verify, clean, or
   publish.
 - [ ] Export is interrupted before and after host artifact ingestion.
 - [ ] Cleanup is interrupted after each individual resource deletion.

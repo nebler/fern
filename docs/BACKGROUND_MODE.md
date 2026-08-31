@@ -1,6 +1,6 @@
 # OpenCode Background Mode Goal Design
 
-**Status:** provider lifecycle and narrow source-profile HTTP client implemented; coordinator and routing remain proposed
+**Status:** serial provider/store/coordinator production path implemented; routing and result artifacts remain proposed
 
 **Updated:** 2026-08-31
 **Implementation checklist:**
@@ -38,7 +38,7 @@ behavior with real Docker and a zero-cost local provider. Package metadata at
 that commit also says `1.18.16`, but the source profile does not claim
 equivalence to the published package. `internal/taskenvdocker` now implements
 the serial clone, volume, container, authenticated-health, stop, and separate
-cleanup effects for one schema-8 run. `integration/background-run-docker`
+cleanup effects for one schema-9 run. `integration/background-run-docker`
 qualifies that lifecycle against the operator-pinned local source image.
 `internal/backgroundopencode` now implements the separate, deadline-required,
 loopback-only client for this exact source profile. Its writes are one-shot;
@@ -55,17 +55,22 @@ does not assert that another call cannot promote the prompt later.
 properties by discarding the real prompt response after the server effect, then
 proving admission/promotion, provider/client reconstruction, one exact provider
 request, and no prompt replay against the real image and a zero-cost local
-provider. No production coordinator or startup path invokes
-the client yet; routing, coordinated prompt delivery, and export remain
-unimplemented. Persistent workspaces, `internal/opencodeapi`, and the plugin
-remain unchanged.
+provider. The production-wired serial coordinator now claims one run at a time,
+reconciles exact external identities, dispatches behind a durable at-most-once
+prompt fence, periodically observes clone usage and positive OpenCode activity,
+and performs stop/cleanup finalization. A crash after the prompt fence but before
+HTTP dispatch cannot distinguish absence from an unobserved request: restart
+retains `uncertain`, performs read-only reconciliation, and sends no second POST.
+Routing and export remain unimplemented. Persistent workspaces,
+`internal/opencodeapi`, and the plugin remain unchanged.
 
 Clone disk policy is admission plus repeated observed-byte monitoring, not a
 kernel quota. The bind-mounted clone and Docker `local` state volume have no
 portable hard byte quota in this provider; Docker Desktop does not expose a
 per-local-volume quota or bounded usage reading through this lifecycle API.
-Host filesystem exhaustion therefore remains a residual operational risk that
-the future coordinator must monitor and stop conservatively. Container logs do
+Host filesystem exhaustion therefore remains a residual operational risk. The
+coordinator periodically monitors bounded clone usage and stops conservatively,
+but local-volume quota and usage remain unavailable. Container logs do
 retain Docker-enforced `max-size` and `max-file` bounds.
 
 The current dogfood configuration requires both `tasks.backgroundImage` and an
@@ -74,6 +79,12 @@ read-only and verifies the exact image ID, source/revision/version/profile
 labels, runtime user, command argv, exposed port, and absence of a baked server
 password. Registry-digest promotion remains required before external image
 distribution.
+
+Admission also commits the SHA-256 identity of the exact explicit
+`tasks.backgroundEnvironment` map. A later image, model, or environment change
+cannot resume the old execution: recovery claims the run, moves it to cleanup,
+and uses its persisted resource tuple to remove the old runtime. Environment
+values themselves do not enter the task database, evidence, or logs.
 
 The published 1.18.16 qualification proves durable generated sessions and
 message history across replacement, but records hard limitations: Session IDs

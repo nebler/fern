@@ -70,7 +70,7 @@ func runUp(args []string, log *slog.Logger) error {
 	// guarded Docker close, lease, listeners, signal restoration.
 	defer rt.lifecycle.release()
 	if rt.tasks != nil {
-		defer rt.tasks.store.Close()
+		defer rt.tasks.Close()
 	}
 
 	startSupervisor(group, rt, serviceCtx)
@@ -288,7 +288,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, spec runtim
 	abortAfterTasks := func(startupErr error) error {
 		managerErr := runWithTimeout(managerCloseTimeout, lifecycle.closeManager)
 		if tasks != nil {
-			tasks.store.Close()
+			tasks.Close()
 		}
 		lifecycle.release()
 		return errors.Join(startupErr, managerErr)
@@ -412,6 +412,9 @@ func startTaskCoordinators(group *errgroup.Group, tasks *taskServices, serviceCt
 	}
 	if tasks.verification != nil {
 		goComponent(group, serviceCtx, tasks.status, observability.ComponentTaskVerification, tasks.verification.Run)
+	}
+	if tasks.background != nil {
+		goComponent(group, serviceCtx, tasks.status, observability.ComponentBackgroundRunSerial, tasks.background.Run)
 	}
 }
 
