@@ -86,7 +86,7 @@ OpenCode release, but the intended journey is:
 
 ```text
 # One-time installation
-opencode2 plugin add @fern/opencode@<pinned-version>
+opencode2 plugin @fern/opencode@<pinned-version>
 
 # Normal use
 opencode2 /path/to/repository

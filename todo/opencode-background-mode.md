@@ -76,7 +76,9 @@ already opened.
 - [ ] Capacity remains one; multiple concurrent OpenCode workspaces do not
   exist.
 - [ ] Exact Git object retention after checkout deletion does not exist.
-- [ ] The packaged `/fern` plugin and retained-result action do not exist.
+- [x] A minimal compiled `/fern` plugin package is pack- and loader-qualified
+  against OpenCode `1.18.16`; npm publication remains pending.
+- [ ] The retained-result server operation does not exist.
 
 Do not convert the persistent `workspace.Manager` into a scheduler or change its
 retention behavior. Add Background Runs as a separate disposable lane.
@@ -122,8 +124,9 @@ retention behavior. Add Background Runs as a separate disposable lane.
 
 ### Installed Journey
 
-- [ ] Package the pinned `/fern` plugin with confirmation, scoped authorization,
-  create, runs, open, stop, and result actions over the existing run API.
+- [x] Package the pinned `/fern` plugin with confirmation, scoped authorization,
+  create, runs, open, stop, and result actions over the existing run API. The
+  result action remains unavailable until retained-result authority lands.
 - [ ] Qualify actual Tailscale multi-port private TLS, browser cookie acceptance,
   SSE, WSS, revocation, mobile sleep/wake, and cross-device native session use.
 - [ ] Promote the qualified OpenCode source image to an immutable registry
@@ -199,54 +202,56 @@ fern doctor --phone
 The intended OpenCode journey is:
 
 ```text
-opencode2 plugin add @fern/opencode@<pinned-version>
+opencode2 plugin @fern/opencode@<pinned-version>
 opencode2 /path/to/repository
 /fern Fix the cancellation race and add a regression test
 ```
 
 ### Plugin Spike
 
-- [ ] Pin one documented OpenCode TUI plugin API and compatible OpenCode version.
-- [ ] Package a minimal `@fern/opencode` TUI plugin.
-- [ ] Register `/fern` and native run, runs, open, stop, and result actions.
+- [x] Pin one documented OpenCode TUI plugin API and compatible OpenCode version.
+- [x] Package a minimal compiled `@fern/opencode` TUI plugin and qualify its
+  packed archive with the official OpenCode `1.18.16` loader.
+- [x] Register `/fern` and native run, runs, open, stop, and result actions.
 - [ ] Let `/fern <instruction>` launch directly and `/fern` without arguments
   open a native setup/run dialog.
-- [ ] Keep the plugin useful with both OpenCode's local service and an explicit
-  `--server` connection.
-- [ ] Use a fake Fern backend first so client UX does not depend on Docker work.
+- [x] Keep read, open, stop, and result actions useful with both OpenCode's local
+  service and an explicit `--server` connection. Create intentionally remains
+  local-service-only until repository identity is server-authoritative.
+- [x] Use a fake Fern backend first so client UX does not depend on Docker work.
 
 ### Authentication
 
-- [ ] Ask for or discover the private Fern HTTPS origin on first use.
-- [ ] Display a short-lived verification URL and user code.
-- [ ] Require approval through an existing trusted operator or paired-device
+- [x] Ask for the private Fern HTTPS origin on first use.
+- [x] Display a short-lived verification URL and user code.
+- [x] Require approval through an existing trusted operator or paired-device
   channel.
-- [ ] Issue a revocable credential scoped only to run create, read, stop, open,
+- [x] Issue a revocable credential scoped only to run create, read, stop, open,
   and result access.
-- [ ] Keep the credential out of `opencode.json`, prompts, repository files,
+- [x] Keep the credential out of `opencode.json`, prompts, repository files,
   logs, and plugin display state.
 - [ ] Add host compatibility and readiness checks before setup succeeds.
-- [ ] Support explicit disconnect and server-side credential revocation.
+- [x] Support explicit disconnect and server-side credential revocation.
 
 ### Repository Confirmation
 
-- [ ] Read the canonical Git remote, exact `HEAD`, branch display name, and dirty
+- [x] Read the canonical Git remote, exact `HEAD`, branch display name, and dirty
   state without asking the model.
 - [ ] Match the canonical remote to a repository explicitly configured on Fern.
 - [ ] Prove the exact base commit is reachable from Fern's configured remote.
-- [ ] Reject dirty, unborn, ambiguous, unconfigured, or unreachable repository
+- [x] Reject dirty, unborn, ambiguous, unconfigured, or unreachable repository
   state with an actionable message.
-- [ ] Do not upload a patch, archive, or local untracked file in the first slice.
+- [x] Do not upload a patch, archive, or local untracked file in the first slice.
 
 ### Launch Confirmation
 
-- [ ] Show host, repository, exact base OID, clean state, pinned OpenCode profile,
+- [x] Show host, repository, exact base OID, clean state, pinned OpenCode profile,
   and complete instruction before allocating anything.
-- [ ] Generate an idempotency key before submission.
-- [ ] Show success only after Fern returns a committed Background Run ID.
-- [ ] Store only safe local correlation data; never cache an endpoint as
+- [x] Generate an idempotency key before submission.
+- [x] Show success only after Fern returns a committed Background Run ID.
+- [x] Store only safe local correlation data; never cache an endpoint as
   authority.
-- [ ] Resolve the current authoritative OpenCode endpoint from Fern on every
+- [x] Resolve the current authoritative OpenCode endpoint from Fern on every
   `open`.
 - [ ] Kill the TUI immediately after acceptance and prove the run remains
   readable and stoppable.
@@ -373,7 +378,7 @@ the official session without replaying mutations.
 
 - [ ] Fern exits before and after each external mutation starts.
 - [x] Docker create succeeds but its response is lost.
-- [ ] OpenCode session creation succeeds but its response is lost.
+- [x] OpenCode session creation succeeds but its response is lost.
 - [x] Prompt admission succeeds but its response is lost.
 - [x] Fern restarts while OpenCode is working or waiting for input.
 - [x] OpenCode restarts while a permission or question is pending.
