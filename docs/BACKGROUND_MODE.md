@@ -1,6 +1,6 @@
 # OpenCode Background Mode Goal Design
 
-**Status:** provider lifecycle slice implemented; coordinator and routing remain proposed
+**Status:** provider lifecycle and narrow source-profile HTTP client implemented; coordinator and routing remain proposed
 
 **Updated:** 2026-08-31
 **Implementation checklist:**
@@ -39,9 +39,25 @@ that commit also says `1.18.16`, but the source profile does not claim
 equivalence to the published package. `internal/taskenvdocker` now implements
 the serial clone, volume, container, authenticated-health, stop, and separate
 cleanup effects for one schema-8 run. `integration/background-run-docker`
-qualifies that lifecycle against the operator-pinned local source image. No
-production coordinator or startup path invokes it yet; routing, prompt
-delivery, and export remain unimplemented. Persistent workspaces and the plugin
+qualifies that lifecycle against the operator-pinned local source image.
+`internal/backgroundopencode` now implements the separate, deadline-required,
+loopback-only client for this exact source profile. Its writes are one-shot;
+session and prompt reconciliation are read-only, and prompt reconciliation uses
+only finite advancing durable-history pages. Resuming delivery is exact only
+after one matching durable admission and one later matching version-1 promotion;
+admission alone is a distinct non-working observation. Active/question/permission
+reads are conservative process-local observations, and interrupt response loss
+stays ambiguous. A context already canceled before dispatch is returned directly,
+but cancellation, deadline, or transport failure after dispatch is sanitized
+transport ambiguity. `Resume=false` suppresses wake by that admission call; it
+does not assert that another call cannot promote the prompt later.
+`integration/background-run-opencode` qualifies those
+properties by discarding the real prompt response after the server effect, then
+proving admission/promotion, provider/client reconstruction, one exact provider
+request, and no prompt replay against the real image and a zero-cost local
+provider. No production coordinator or startup path invokes
+the client yet; routing, coordinated prompt delivery, and export remain
+unimplemented. Persistent workspaces, `internal/opencodeapi`, and the plugin
 remain unchanged.
 
 Clone disk policy is admission plus repeated observed-byte monitoring, not a
