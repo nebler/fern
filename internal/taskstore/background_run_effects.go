@@ -39,7 +39,7 @@ func (s *Store) ClaimNextBackgroundRun(ctx context.Context, p ClaimNextBackgroun
 FROM background_runs r
 JOIN tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id AND t.current_attempt_id=r.attempt_id
 JOIN attempts a ON a.id=r.attempt_id AND a.task_id=r.task_id AND a.workspace_id=r.workspace_id AND a.sequence=r.generation
-WHERE r.workspace_id=? AND r.profile=? AND r.state<>'failed' AND r.background_seal_request_id IS NULL AND
+WHERE r.workspace_id=? AND r.profile=? AND r.state<>'failed' AND
 	NOT (r.state='result_ready' AND r.effect_phase='cleanup_complete') AND
   (r.claim_owner=? OR r.claim_owner IS NULL OR r.claim_expires_at<=?) AND
   ((r.state='queued' AND r.cancel_epoch=0 AND NOT EXISTS (
@@ -142,10 +142,11 @@ func (s *Store) ReadClaimedBackgroundRun(ctx context.Context, p BackgroundRunCla
 	if err := validateBackgroundRunClaim(p); err != nil {
 		return BackgroundRun{}, err
 	}
+	databaseState, databasePhase := databaseBackgroundStatePhase(p.ExpectedState, p.ExpectedPhase)
 	run, err := scanBackgroundRun(s.db.QueryRowContext(ctx, backgroundRunSelect+`
 WHERE r.task_id=? AND r.attempt_id=? AND r.workspace_id=? AND r.generation=? AND r.revision=? AND r.state=? AND r.effect_phase=? AND r.cancel_epoch=? AND
 r.claim_owner=? AND r.claim_generation=? AND r.claim_expires_at>?`, p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation,
-		p.ExpectedRevision, p.ExpectedState, p.ExpectedPhase, p.CancelEpoch, p.ClaimOwner, p.ClaimGeneration, unixMillis(p.Now)))
+		p.ExpectedRevision, databaseState, databasePhase, p.CancelEpoch, p.ClaimOwner, p.ClaimGeneration, unixMillis(p.Now)))
 	if errors.Is(err, sql.ErrNoRows) {
 		return BackgroundRun{}, ErrInvalidState
 	}
@@ -645,11 +646,12 @@ func (s *Store) updateClaimedRun(ctx context.Context, claim BackgroundRunClaim, 
 	}
 	defer release()
 	defer rollback(tx, &err)
+	databaseState, databasePhase := databaseBackgroundStatePhase(claim.ExpectedState, claim.ExpectedPhase)
 	query := `UPDATE background_runs SET ` + assignments + `,revision=revision+1,updated_at=?
 WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND claim_owner=? AND claim_generation=? AND
 claim_expires_at>? AND revision=? AND state=? AND effect_phase=? AND cancel_epoch=?`
 	args = append(args, unixMillis(claim.Now), claim.TaskID, claim.AttemptID, claim.WorkspaceID, claim.Generation,
-		claim.ClaimOwner, claim.ClaimGeneration, unixMillis(claim.Now), claim.ExpectedRevision, claim.ExpectedState, claim.ExpectedPhase, claim.CancelEpoch)
+		claim.ClaimOwner, claim.ClaimGeneration, unixMillis(claim.Now), claim.ExpectedRevision, databaseState, databasePhase, claim.CancelEpoch)
 	result, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return BackgroundRun{}, fmt.Errorf("%s: %w", operation, err)
@@ -665,6 +667,21 @@ claim_expires_at>? AND revision=? AND state=? AND effect_phase=? AND cancel_epoc
 		return BackgroundRun{}, fmt.Errorf("commit %s: %w", operation, err)
 	}
 	return run, nil
+}
+
+func databaseBackgroundStatePhase(state BackgroundRunState, phase BackgroundRunEffectPhase) (BackgroundRunState, BackgroundRunEffectPhase) {
+	if state == BackgroundRunCanceling {
+		switch phase {
+		case BackgroundRunEffectSealIntent:
+			return BackgroundRunCleanupRequired, BackgroundRunEffectStopIntent
+		case BackgroundRunEffectExporting:
+			return BackgroundRunCleanupRequired, BackgroundRunEffectWriterInactive
+		}
+	}
+	if state == BackgroundRunResultReady && phase == BackgroundRunEffectArtifactCommitted {
+		return BackgroundRunResultReady, BackgroundRunEffectWriterInactive
+	}
+	return state, phase
 }
 
 func readBackgroundRunExact(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, taskID task.TaskID) (BackgroundRun, error) {

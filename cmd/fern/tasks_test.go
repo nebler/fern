@@ -369,7 +369,7 @@ func TestGitHubOnboardingIsDisabledForWorkspaceGH(t *testing.T) {
 func TestPublicationCoordinatorIsAbsentForWorkspaceGH(t *testing.T) {
 	coordinator, err := newPublicationCoordinator(context.Background(), "", config.Config{
 		Workspace: config.Workspace{GitHub: &config.WorkspaceGitHub{Mode: config.GitHubModeWorkspaceGH}},
-	}, "", "", nil, task.ActorSnapshot{}, nil, nil, nil, nil, nil)
+	}, "", "", nil, task.ActorSnapshot{}, nil, nil, nil, nil, nil, nil)
 	if err != nil || coordinator != nil {
 		t.Fatalf("workspace-gh publication coordinator = %v, %v", coordinator, err)
 	}

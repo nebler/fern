@@ -25,8 +25,7 @@ type Store interface {
 	FindRunningVerification(context.Context, task.WorkspaceID) (taskstore.VerificationRecord, error)
 	InspectVerification(context.Context, task.VerificationID) (taskstore.VerificationRecord, error)
 	GetResult(context.Context, task.ResultID) (taskstore.Result, error)
-	GetTask(context.Context, task.TaskID) (taskstore.Task, error)
-	GetAttempt(context.Context, task.AttemptID) (taskstore.Attempt, error)
+	GetResultOwners(context.Context, task.ResultID) (taskstore.Result, taskstore.Task, taskstore.Attempt, error)
 	PrepareVerification(context.Context, taskstore.PrepareVerificationParams) (taskstore.VerificationRecord, error)
 	AdvanceVerification(context.Context, taskstore.AdvanceVerificationParams) (taskstore.VerificationRecord, error)
 	CompleteVerification(context.Context, taskstore.CompleteVerificationParams) (taskstore.VerificationRecord, error)
@@ -46,6 +45,10 @@ type Fencer interface {
 	AcquirePaused(context.Context) (func(), error)
 }
 
+type ResultSource interface {
+	Acquire(context.Context, taskstore.Result) (string, func() error, error)
+}
+
 type Config struct {
 	WorkspaceID    task.WorkspaceID
 	RepositoryPath string
@@ -56,6 +59,7 @@ type Config struct {
 	Now            func() time.Time
 	OnError        func(error)
 	OnSuccess      func()
+	ResultSource   ResultSource
 }
 
 type Coordinator struct {
@@ -65,6 +69,7 @@ type Coordinator struct {
 	policy         verification.Policy
 	policySnapshot verification.PolicySnapshot
 	runnerSnapshot verification.RunnerSnapshot
+	source         ResultSource
 	ids            *task.Generator
 	config         Config
 	runMu          sync.Mutex
@@ -95,6 +100,9 @@ func New(store Store, fencer Fencer, runner Runner, policy verification.Policy, 
 	if config.OnSuccess == nil {
 		config.OnSuccess = func() {}
 	}
+	if config.ResultSource == nil {
+		config.ResultSource = persistentResultSource(config.RepositoryPath)
+	}
 	if err := config.Actor.Validate(); err != nil || config.Actor.Type != task.ActorSystem {
 		return nil, errors.New("valid system verification actor is required")
 	}
@@ -111,7 +119,7 @@ func New(store Store, fencer Fencer, runner Runner, policy verification.Policy, 
 	}
 	runnerSnapshot.Version = durableRunnerVersion(runnerSnapshot)
 	return &Coordinator{store: store, fencer: fencer, runner: runner, policy: policy, policySnapshot: policySnapshot,
-		runnerSnapshot: runnerSnapshot, ids: ids, config: config}, nil
+		runnerSnapshot: runnerSnapshot, source: config.ResultSource, ids: ids, config: config}, nil
 }
 
 func durableRunnerVersion(snapshot verification.RunnerSnapshot) string {
@@ -242,9 +250,20 @@ func (c *Coordinator) executePrepared(ctx context.Context, prepared taskstore.Ve
 		taskRow.SealedResultID != resultRow.ID || attempt.SealedResultID != resultRow.ID {
 		return c.recover(ctx, running.Verification, taskRow.Revision, attempt.Revision, "verification_result_integrity_failed", "integrity_failure", nil)
 	}
+	repository, closeSource, sourceErr := c.source.Acquire(ctx, resultRow)
+	if sourceErr != nil || closeSource == nil {
+		return c.recover(ctx, running.Verification, taskRow.Revision, attempt.Revision, "verification_result_source_failed", "integrity_failure", nil)
+	}
 	result, runErr := c.runner.Run(ctx, c.policy, verification.Request{RepositoryID: resultRow.RepositoryID,
-		BaseSHA: resultRow.BaseSHA, ResultCommit: resultRow.ResultCommit, RepositoryPath: c.config.RepositoryPath})
+		BaseSHA: resultRow.BaseSHA, ResultCommit: resultRow.ResultCommit, RepositoryPath: repository})
+	runErr = errors.Join(runErr, closeSource())
 	return c.recordResult(ctx, running.Verification, taskRow.Revision, attempt.Revision, result, runErr)
+}
+
+type persistentResultSource string
+
+func (path persistentResultSource) Acquire(context.Context, taskstore.Result) (string, func() error, error) {
+	return string(path), func() error { return nil }, nil
 }
 
 func (c *Coordinator) recordResult(ctx context.Context, v taskstore.Verification, taskRevision, attemptRevision int64, result verification.Result, runErr error) error {
@@ -384,12 +403,15 @@ func (c *Coordinator) resolveCompletionError(ctx context.Context, v taskstore.Ve
 }
 
 func (c *Coordinator) owners(ctx context.Context, v taskstore.Verification) (taskstore.Task, taskstore.Attempt, error) {
-	taskRow, err := c.store.GetTask(ctx, v.TaskID)
+	result, taskRow, attempt, err := c.store.GetResultOwners(ctx, v.ResultID)
 	if err != nil {
 		return taskstore.Task{}, taskstore.Attempt{}, err
 	}
-	attempt, err := c.store.GetAttempt(ctx, v.AttemptID)
-	return taskRow, attempt, err
+	if result.ID != v.ResultID || result.TaskID != v.TaskID || result.AttemptID != v.AttemptID ||
+		taskRow.ID != v.TaskID || attempt.ID != v.AttemptID || attempt.TaskID != taskRow.ID || taskRow.CurrentAttemptID != attempt.ID {
+		return taskstore.Task{}, taskstore.Attempt{}, taskstore.ErrCorruptStore
+	}
+	return taskRow, attempt, nil
 }
 
 func (c *Coordinator) matchesSnapshot(v taskstore.Verification) bool {

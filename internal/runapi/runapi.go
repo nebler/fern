@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -43,6 +44,10 @@ type Store interface {
 	ListBackgroundRuns(context.Context, task.WorkspaceID, task.ActorSnapshot, int) ([]taskstore.BackgroundRun, error)
 	StopBackgroundRun(context.Context, taskstore.StopBackgroundRunParams) (taskstore.BackgroundRunStop, error)
 	OpenBackgroundRun(context.Context, taskstore.OpenBackgroundRunParams) (taskstore.BackgroundRunOpen, error)
+	SealBackgroundRun(context.Context, taskstore.SealBackgroundRunParams) (taskstore.BackgroundRunSealAdmission, error)
+	GetBackgroundRunOwners(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.Task, taskstore.Attempt, error)
+	GetBackgroundRunExport(context.Context, task.ArtifactExportID) (taskstore.BackgroundRunExport, error)
+	GetBackgroundRunResult(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error)
 }
 
 var _ Store = (*taskstore.Store)(nil)
@@ -78,6 +83,7 @@ type Config struct {
 	BudgetSnapshot              json.RawMessage
 	Wake                        func()
 	Route                       RouteResolver
+	SealPolicyVersion           string
 }
 
 type Handler struct{ config Config }
@@ -88,6 +94,9 @@ func New(config Config) (*Handler, error) {
 		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.BackgroundEnvironmentSHA256 == ([32]byte{}) ||
 		len(config.BudgetSnapshot) == 0 || !json.Valid(config.BudgetSnapshot) {
 		return nil, errors.New("valid background run API configuration is required")
+	}
+	if !validText(config.SealPolicyVersion, 1, 128) {
+		return nil, errors.New("valid background seal policy is required")
 	}
 	if _, err := task.ParseWorkspaceID(string(config.WorkspaceID)); err != nil {
 		return nil, errors.New("valid background run workspace is required")
@@ -183,10 +192,167 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if !h.requireScope(w, r, "run:result") {
 			return
 		}
-		h.notReady(w, r, actor, id, false)
+		h.result(w, r, actor, id)
+	case "seal":
+		if r.Method != http.MethodPost {
+			methodNotAllowed(w, http.MethodPost)
+			return
+		}
+		if !h.requireScope(w, r, "run:result") {
+			return
+		}
+		h.seal(w, r, actor, id)
 	default:
 		writeError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
 	}
+}
+
+type sealProjection struct {
+	RunID         task.TaskID         `json:"run_id"`
+	State         BackgroundSealState `json:"state"`
+	ResultPhase   string              `json:"result_phase"`
+	SealRequestID task.SealRequestID  `json:"seal_request_id"`
+	Committed     bool                `json:"committed"`
+}
+
+type BackgroundSealState string
+
+func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
+	if !validateEmptyMutation(w, r) {
+		return
+	}
+	key, ok := idempotencyKey(w, r)
+	if !ok {
+		return
+	}
+	claim := task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: h.config.WorkspaceID, CommandKind: taskstore.SealBackgroundRunCommand},
+		Key: key, RequestHash: commandHash(taskstore.SealBackgroundRunCommand, struct {
+			RunID task.TaskID `json:"run_id"`
+		}{id}), Actor: actor}
+	run, err := h.config.Store.GetBackgroundRun(r.Context(), h.config.WorkspaceID, id, actor)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	owner, attempt, err := h.config.Store.GetBackgroundRunOwners(r.Context(), h.config.WorkspaceID, id, actor)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	ids, err := h.config.Generator.GenerateBackgroundSealIDs()
+	if err != nil {
+		writeError(w, 500, "internal_error", "The run could not be sealed.")
+		return
+	}
+	now := h.config.Now().UTC().Truncate(time.Millisecond)
+	admission, err := h.config.Store.SealBackgroundRun(r.Context(), taskstore.SealBackgroundRunParams{
+		WorkspaceID: h.config.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
+		ExpectedRunRevision: run.Revision, ExpectedTaskRevision: owner.Revision, ExpectedAttemptRevision: attempt.Revision,
+		SealRequestID: ids.SealRequestID, ReceiptID: ids.ReceiptID, ExportID: ids.ArtifactExportID,
+		ArtifactID: ids.RetainedArtifactID, MaterializationID: ids.MaterializationID, ResultID: ids.ResultID,
+		ResultEventID: ids.ResultEventID, TaskEventID: ids.TaskEventID, Claim: claim, CommitEpochSeconds: now.Unix(),
+		PolicyVersion: h.config.SealPolicyVersion, APIContractVersion: APIContractVersion, AcceptedAt: now,
+	})
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if admission.Replayed {
+		w.Header().Set("Idempotency-Replayed", "true")
+	}
+	state, phase := BackgroundSealState("canceling"), "seal_requested"
+	if admission.Run.State == taskstore.BackgroundRunResultReady {
+		state, phase = "result_ready", "ready"
+	}
+	if !admission.Replayed && h.config.Wake != nil {
+		h.config.Wake()
+	}
+	writeJSON(w, http.StatusAccepted, sealProjection{admission.Run.TaskID, state, phase, admission.Request.ID, true})
+}
+
+func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
+	if !noQuery(r) || !noBody(r) {
+		writeError(w, 400, "invalid_query", "This run operation does not accept query parameters.")
+		return
+	}
+	run, err := h.config.Store.GetBackgroundRun(r.Context(), h.config.WorkspaceID, id, actor)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if run.State != taskstore.BackgroundRunResultReady {
+		if run.ArtifactExportID != "" {
+			if export, exportErr := h.config.Store.GetBackgroundRunExport(r.Context(), run.ArtifactExportID); exportErr == nil && export.State == taskstore.BackgroundRunExportRecoveryRequired {
+				writeError(w, http.StatusServiceUnavailable, "recovery_required", "The retained result requires recovery.")
+				return
+			}
+		}
+		writeError(w, http.StatusConflict, "not_ready", "The retained result is not ready.")
+		return
+	}
+	projection, err := h.config.Store.GetBackgroundRunResult(r.Context(), h.config.WorkspaceID, id, actor)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	digest := func(value [32]byte) string { return hex.EncodeToString(value[:]) }
+	writeJSON(w, http.StatusOK, struct {
+		RunID  task.TaskID `json:"run_id"`
+		State  string      `json:"state"`
+		Result struct {
+			ID         task.ResultID      `json:"id"`
+			Outcome    task.ResultOutcome `json:"outcome"`
+			Repository string             `json:"repository"`
+			Base       task.GitOID        `json:"base_oid"`
+			Commit     task.GitOID        `json:"result_commit"`
+			Tree       task.GitOID        `json:"tree_oid"`
+			Entries    int                `json:"manifest_entries"`
+			Manifest   string             `json:"manifest_sha256"`
+		} `json:"result"`
+		Artifact struct {
+			ID         task.RetainedArtifactID `json:"id"`
+			Format     string                  `json:"format"`
+			SHA        string                  `json:"sha256"`
+			BundleSHA  string                  `json:"bundle_sha256"`
+			BundleSize int64                   `json:"bundle_size"`
+			Manifest   string                  `json:"manifest_sha256"`
+		} `json:"artifact"`
+		Retention struct {
+			Verified        bool `json:"verified"`
+			Reconstructable bool `json:"reconstructable"`
+		} `json:"retention"`
+		Cleanup struct {
+			Complete bool `json:"complete"`
+		} `json:"cleanup"`
+	}{RunID: id, State: "result_ready",
+		Result: struct {
+			ID         task.ResultID      `json:"id"`
+			Outcome    task.ResultOutcome `json:"outcome"`
+			Repository string             `json:"repository"`
+			Base       task.GitOID        `json:"base_oid"`
+			Commit     task.GitOID        `json:"result_commit"`
+			Tree       task.GitOID        `json:"tree_oid"`
+			Entries    int                `json:"manifest_entries"`
+			Manifest   string             `json:"manifest_sha256"`
+		}{
+			projection.Result.ID, projection.Result.Outcome, run.RepositoryRemote, projection.Result.BaseSHA, projection.Result.ResultCommit, projection.Result.TreeOID, projection.Result.ManifestEntries, digest(projection.Result.ManifestSHA256)},
+		Artifact: struct {
+			ID         task.RetainedArtifactID `json:"id"`
+			Format     string                  `json:"format"`
+			SHA        string                  `json:"sha256"`
+			BundleSHA  string                  `json:"bundle_sha256"`
+			BundleSize int64                   `json:"bundle_size"`
+			Manifest   string                  `json:"manifest_sha256"`
+		}{
+			projection.Artifact.ID, "git_bundle_v1", digest(projection.Artifact.ManifestSHA256), digest(projection.Artifact.BundleSHA256), projection.Artifact.BundleBytes, digest(projection.Artifact.ManifestSHA256)},
+		Retention: struct {
+			Verified        bool `json:"verified"`
+			Reconstructable bool `json:"reconstructable"`
+		}{true, true},
+		Cleanup: struct {
+			Complete bool `json:"complete"`
+		}{run.EffectPhase == taskstore.BackgroundRunEffectCleanupComplete},
+	})
 }
 
 func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) (task.ActorSnapshot, bool) {

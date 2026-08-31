@@ -27,7 +27,7 @@ Implemented production paths include:
 - an alternative trusted-workspace `gh` authority mode;
 - offline backup create/restore/rollback and encrypted GitHub credential
   export/import/rotation;
-- schema-9 compatibility gates and a tagged release workflow for attested
+- schema-10 compatibility gates and a tagged release workflow for attested
   assets and a signed, attested OCI image.
 
 The pinned OpenCode contract still has no generic durable terminal-success
@@ -264,7 +264,7 @@ exists. This unavoidable ambiguity is the cost of at-most-once dispatch.
 
 `baseline-v1` is the first supported repository-established compatibility
 fixture. It is schema 4 and explicitly is not evidence of a historical release
-or tag. `integration/upgrade/run.sh` verifies semantic upgrade to schema 9,
+or tag. `integration/upgrade/run.sh` verifies semantic upgrade to schema 10,
 restores the verified pre-upgrade bytes for rollback, and upgrades again.
 Rollback means restoring a pre-upgrade backup; older code must never open the
 migrated database.

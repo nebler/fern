@@ -3,6 +3,7 @@ package taskstore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -99,10 +100,25 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 		Manifest: export.ResultManifest, ManifestSHA256: export.ChangesSHA256, OpenCodeSessionID: run.OpenCodeSessionID,
 		OpenCodeMessageID: run.OpenCodeMessageID, EvidencePayload: p.EvidencePayload, EvidenceSHA256: p.EvidenceSHA256,
 		PolicyVersion: request.PolicyVersion, CollectedAt: *export.CollectedAt, SealedAt: p.SealedAt, Actor: p.Actor,
-		CompletionAuthority: SealAuthorityExecutionSuccess}
-	if _, err := validateResultMaterial(sealParams); err != nil {
+		CompletionAuthority: SealAuthorityUser}
+	// Persistent results hash the relational ManifestEntry JSON. Retained
+	// results instead preserve taskartifact's canonical ChangeEntry digest as
+	// the cross-layer authority, while validating the relational projection
+	// independently with the existing closed-schema validator.
+	validationParams := sealParams
+	encodedProjection, err := json.Marshal(sealParams.Manifest)
+	if err != nil {
 		return BackgroundRunRetainedResult{}, err
 	}
+	validationParams.ManifestSHA256 = sha256.Sum256(encodedProjection)
+	manifest, err := validateResultMaterial(validationParams)
+	if err != nil {
+		return BackgroundRunRetainedResult{}, err
+	}
+	if sealParams.ManifestSHA256 == ([32]byte{}) {
+		return BackgroundRunRetainedResult{}, fmt.Errorf("%w: retained changes digest", ErrInvalidInput)
+	}
+	sealParams.Manifest = manifest
 	payload, err := resultSealPayload(sealParams)
 	if err != nil {
 		return BackgroundRunRetainedResult{}, err
@@ -157,7 +173,7 @@ id,task_id,attempt_id,workspace_id,state,outcome,repository_id,base_sha,result_c
 manifest_entries,manifest_sha256,opencode_session_id,opencode_message_id,evidence_sha256,policy_version,collected_at,sealed_at,
 creator_actor_snapshot_id,sealed_event_id,completed_event_id,revision,created_at,updated_at,completion_authority,
 source_kind,retained_artifact_id,artifact_export_id,materialization_id)
-VALUES(?,?,?,?,'sealed',?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,1,?,?,'execution_success','retained_artifact',?,?,?)`,
+VALUES(?,?,?,?,'sealed',?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,1,?,?,'user_seal','retained_artifact',?,?,?)`,
 		p.ResultID, p.TaskID, p.AttemptID, export.WorkspaceID, export.Outcome, export.RepositoryID, export.BaseSHA,
 		export.ResultCommit, export.TreeOID, len(export.ResultManifest), export.ChangesSHA256[:], run.OpenCodeSessionID,
 		run.OpenCodeMessageID, p.EvidenceSHA256[:], request.PolicyVersion, unixMillis(*export.CollectedAt), sealedMS, actorID,

@@ -49,8 +49,8 @@ func (writer *digestWriter) evidence() OutputEvidence {
 	return OutputEvidence{Bytes: writer.bytes, HashedBytes: writer.bytes, SHA256: sum, Truncated: writer.bytes > writer.limit}
 }
 
-func (publisher *Publisher) proveLocalCommit(ctx context.Context, commit task.GitOID) error {
-	result := publisher.runGit(ctx, nil, "--no-pager", "--no-replace-objects", "-C", publisher.repositoryPath, "cat-file", "-e", string(commit)+"^{commit}")
+func (publisher *Publisher) proveLocalCommit(ctx context.Context, repositoryPath string, commit task.GitOID) error {
+	result := publisher.runGit(ctx, repositoryPath, nil, "--no-pager", "--no-replace-objects", "-C", repositoryPath, "cat-file", "-e", string(commit)+"^{commit}")
 	if result.err != nil {
 		if result.timedOut {
 			return ErrGitTimeout
@@ -60,7 +60,7 @@ func (publisher *Publisher) proveLocalCommit(ctx context.Context, commit task.Gi
 	return nil
 }
 
-func (publisher *Publisher) push(ctx context.Context, identity githubapp.RepositoryIdentity, publication task.PublicationTuple) (GitEvidence, error) {
+func (publisher *Publisher) push(ctx context.Context, repositoryPath string, identity githubapp.RepositoryIdentity, publication task.PublicationTuple) (GitEvidence, error) {
 	evidence := GitEvidence{Attempted: true, ExitCode: -1}
 	token, err := publisher.tokens.InstallationToken(ctx, identity)
 	if err != nil {
@@ -116,10 +116,10 @@ func (publisher *Publisher) push(ctx context.Context, identity githubapp.Reposit
 		"-c", "http.followRedirects=false",
 		"-c", "protocol.allow=never",
 		"-c", "protocol.https.allow=always",
-		"-C", publisher.repositoryPath,
+		"-C", repositoryPath,
 		"push", "--porcelain", "--no-verify", lease, remote, refspec,
 	}
-	result := publisher.runGit(ctx, environment, arguments...)
+	result := publisher.runGit(ctx, repositoryPath, environment, arguments...)
 	evidence.ExitCode = result.exitCode
 	evidence.TimedOut = result.timedOut
 	evidence.Stdout = result.stdout
@@ -154,13 +154,13 @@ type gitResult struct {
 	stderr   OutputEvidence
 }
 
-func (publisher *Publisher) runGit(ctx context.Context, environment []string, arguments ...string) gitResult {
+func (publisher *Publisher) runGit(ctx context.Context, repositoryPath string, environment []string, arguments ...string) gitResult {
 	commandContext, cancel := context.WithTimeout(ctx, publisher.timeout)
 	defer cancel()
 	stdout := newDigestWriter(publisher.outputLimit)
 	stderr := newDigestWriter(publisher.outputLimit)
 	command := exec.CommandContext(commandContext, publisher.gitExecutable, arguments...)
-	command.Dir = publisher.repositoryPath
+	command.Dir = repositoryPath
 	if environment == nil {
 		environment = []string{
 			"GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",

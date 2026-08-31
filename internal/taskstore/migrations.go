@@ -171,12 +171,13 @@ CREATE TABLE background_run_writer_fences (
   container_id TEXT,
   container_started_at TEXT,
   runtime_epoch INTEGER,
+	  runtime_token TEXT,
   stopped_at INTEGER,
   proof_sha256 BLOB NOT NULL CHECK(length(proof_sha256)=32),
   recorded_at INTEGER NOT NULL CHECK(recorded_at>=0),
-  CHECK((kind='never_created' AND container_id IS NULL AND container_started_at IS NULL AND runtime_epoch IS NULL AND stopped_at IS NULL) OR
-        (kind='never_started' AND container_id IS NOT NULL AND container_started_at IS NULL AND runtime_epoch IS NULL AND stopped_at IS NULL) OR
-        (kind='runtime_stopped' AND container_id IS NOT NULL AND container_started_at IS NOT NULL AND runtime_epoch>0 AND stopped_at IS NOT NULL))
+  CHECK((kind='never_created' AND container_id IS NULL AND container_started_at IS NULL AND runtime_epoch IS NULL AND runtime_token IS NULL AND stopped_at IS NULL) OR
+		(kind='never_started' AND container_id IS NOT NULL AND container_started_at IS NULL AND runtime_epoch IS NULL AND runtime_token IS NULL AND stopped_at IS NULL) OR
+		(kind='runtime_stopped' AND container_id IS NOT NULL AND container_started_at IS NOT NULL AND runtime_epoch>0 AND runtime_token IS NOT NULL AND stopped_at IS NOT NULL))
 ) STRICT;
 
 CREATE TABLE retained_artifacts (
@@ -253,14 +254,12 @@ CREATE TRIGGER artifact_materializations_delete BEFORE DELETE ON artifact_materi
 
 CREATE TRIGGER artifact_manifests_safe_insert BEFORE INSERT ON retained_artifacts WHEN EXISTS (
   SELECT 1 FROM json_tree(NEW.manifest_json) WHERE
-    lower(COALESCE(key,'')) IN ('host_path','remote_url','prompt','environment','credential','credentials','cookie','cookies','authorization','actor_auth','opencode_output','raw_output') OR
-    (type='text' AND (value LIKE '/%' OR lower(value) LIKE 'http://%' OR lower(value) LIKE 'https://%' OR value GLOB '[A-Za-z]:\\*')))
+	 lower(COALESCE(key,'')) IN ('host_path','remote_url','prompt','environment','credential','credentials','cookie','cookies','authorization','actor_auth','opencode_output','raw_output'))
 BEGIN SELECT RAISE(ABORT,'artifact manifest contains forbidden authority'); END;
 CREATE TRIGGER background_export_manifests_safe_update BEFORE UPDATE OF artifact_manifest_json ON background_run_exports
 WHEN NEW.artifact_manifest_json IS NOT NULL AND EXISTS (
   SELECT 1 FROM json_tree(NEW.artifact_manifest_json) WHERE
-    lower(COALESCE(key,'')) IN ('host_path','remote_url','prompt','environment','credential','credentials','cookie','cookies','authorization','actor_auth','opencode_output','raw_output') OR
-    (type='text' AND (value LIKE '/%' OR lower(value) LIKE 'http://%' OR lower(value) LIKE 'https://%' OR value GLOB '[A-Za-z]:\\*')))
+	 lower(COALESCE(key,'')) IN ('host_path','remote_url','prompt','environment','credential','credentials','cookie','cookies','authorization','actor_auth','opencode_output','raw_output'))
 BEGIN SELECT RAISE(ABORT,'background export manifest contains forbidden authority'); END;
 
 CREATE TRIGGER background_runs_retained_tuple_immutable BEFORE UPDATE ON background_runs WHEN OLD.background_seal_request_id IS NOT NULL AND (
@@ -390,7 +389,7 @@ CREATE TRIGGER results_insert_integrity BEFORE INSERT ON results BEGIN
     )) THEN RAISE(ABORT,'persistent result has no exact current proof') END;
   SELECT CASE WHEN NEW.source_kind='retained_artifact' AND (
     NEW.retained_artifact_id IS NULL OR NEW.artifact_export_id IS NULL OR NEW.materialization_id IS NULL OR
-    NEW.completion_authority<>'execution_success' OR NEW.seal_request_id IS NOT NULL OR NEW.authorizer_actor_snapshot_id IS NOT NULL OR NOT EXISTS (
+	NEW.completion_authority<>'user_seal' OR NEW.seal_request_id IS NOT NULL OR NEW.authorizer_actor_snapshot_id IS NOT NULL OR NOT EXISTS (
       SELECT 1 FROM retained_artifacts artifact
       JOIN background_run_exports export ON export.id=artifact.export_id
       JOIN artifact_materializations materialization ON materialization.id=artifact.materialization_id

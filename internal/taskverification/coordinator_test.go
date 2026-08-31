@@ -68,6 +68,45 @@ func TestCoordinatorResultMappingsAndOutputAccounting(t *testing.T) {
 	}
 }
 
+func TestCoordinatorUsesAndClosesSelectedResultSource(t *testing.T) {
+	tests := []struct {
+		name   string
+		result verification.Result
+		runErr error
+	}{
+		{"success", verification.Result{Executed: true, ExitCode: 0, Success: true}, nil},
+		{"failure", verification.Result{Executed: true, ExitCode: 1, Failure: verification.FailureCommand}, nil},
+		{"timeout", verification.Result{Executed: true, ExitCode: -1, TimedOut: true, Failure: verification.FailureTimeout}, nil},
+		{"runner error", verification.Result{Failure: verification.FailureStart}, verification.ErrExecution},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newCoordinatorFixture(t, test.result, test.runErr)
+			source := &trackingResultSource{path: filepath.Join(t.TempDir(), "retained-checkout")}
+			fixture.coordinator.source = source
+			if err := fixture.coordinator.RunOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if source.acquires != 1 || source.closes != 1 || fixture.runner.request.RepositoryPath != source.path {
+				t.Fatalf("acquires=%d closes=%d request=%+v", source.acquires, source.closes, fixture.runner.request)
+			}
+		})
+	}
+}
+
+func TestCoordinatorPropagatesResultSourceCloseFailure(t *testing.T) {
+	fixture := newCoordinatorFixture(t, verification.Result{Executed: true, ExitCode: 0, Success: true}, nil)
+	closeErr := errors.New("retained checkout cleanup failed")
+	source := &trackingResultSource{path: filepath.Join(t.TempDir(), "retained-checkout"), closeErr: closeErr}
+	fixture.coordinator.source = source
+	if err := fixture.coordinator.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fixture.store.verification.State != taskstore.VerificationRecoveryRequired || source.closes != 1 {
+		t.Fatalf("verification=%+v closes=%d", fixture.store.verification, source.closes)
+	}
+}
+
 func TestCoordinatorRestartNeverReruns(t *testing.T) {
 	fixture := newCoordinatorFixture(t, verification.Result{Executed: true, ExitCode: 0, Success: true}, nil)
 	fixture.store.installRunning(fixture)
@@ -375,17 +414,34 @@ type fakeRunner struct {
 	runErr   error
 	calls    int
 	sawFence bool
+	request  verification.Request
 }
 
 func (r *fakeRunner) Snapshot(verification.Policy) (verification.RunnerSnapshot, error) {
 	return r.snapshot, nil
 }
-func (r *fakeRunner) Run(_ context.Context, _ verification.Policy, _ verification.Request) (verification.Result, error) {
+func (r *fakeRunner) Run(_ context.Context, _ verification.Policy, request verification.Request) (verification.Result, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
 	r.sawFence = r.fencer.isHeld()
+	r.request = request
 	return r.result, r.runErr
+}
+
+type trackingResultSource struct {
+	path     string
+	closeErr error
+	acquires int
+	closes   int
+}
+
+func (source *trackingResultSource) Acquire(context.Context, taskstore.Result) (string, func() error, error) {
+	source.acquires++
+	return source.path, func() error {
+		source.closes++
+		return source.closeErr
+	}, nil
 }
 
 type fakeStore struct {
@@ -450,6 +506,16 @@ func (s *fakeStore) GetResult(_ context.Context, id task.ResultID) (taskstore.Re
 		return taskstore.Result{}, taskstore.ErrNotFound
 	}
 	return s.source.Result, nil
+}
+func (s *fakeStore) GetResultOwners(_ context.Context, id task.ResultID) (taskstore.Result, taskstore.Task, taskstore.Attempt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.taskReadSawFence = s.fencer.isHeld()
+	s.attemptReadSawFence = s.fencer.isHeld()
+	if s.source.Result.ID != id {
+		return taskstore.Result{}, taskstore.Task{}, taskstore.Attempt{}, taskstore.ErrNotFound
+	}
+	return s.source.Result, s.source.Task, s.source.Attempt, nil
 }
 func (s *fakeStore) GetTask(_ context.Context, id task.TaskID) (taskstore.Task, error) {
 	s.mu.Lock()

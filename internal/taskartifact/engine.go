@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nebler/fern/internal/task"
@@ -35,6 +36,9 @@ type Engine struct {
 	bundleBytes   int64
 	manifestFiles int
 	blobBytes     int64
+	mu            sync.Mutex
+	checkouts     map[*Checkout]struct{}
+	closed        bool
 }
 
 func New(config Config) (*Engine, error) {
@@ -73,7 +77,27 @@ func New(config Config) (*Engine, error) {
 	}
 	return &Engine{gitExecutable: config.GitExecutable, gitFile: gitInfo, casRoot: config.CASRoot, workRoot: config.WorkRoot,
 		timeout: config.CommandTimeout, outputBytes: config.OutputBytes, bundleBytes: config.BundleBytes,
-		manifestFiles: config.ManifestFiles, blobBytes: config.BlobBytes}, nil
+		manifestFiles: config.ManifestFiles, blobBytes: config.BlobBytes, checkouts: make(map[*Checkout]struct{})}, nil
+}
+
+// Close removes all still-live engine checkouts after coordinators have
+// stopped. CAS objects are immutable and remain installed.
+func (e *Engine) Close() error {
+	if e == nil {
+		return nil
+	}
+	e.mu.Lock()
+	e.closed = true
+	values := make([]*Checkout, 0, len(e.checkouts))
+	for checkout := range e.checkouts {
+		values = append(values, checkout)
+	}
+	e.mu.Unlock()
+	var result error
+	for _, checkout := range values {
+		result = errors.Join(result, checkout.Close())
+	}
+	return result
 }
 
 // Snapshot captures the final nonignored worktree state without changing the

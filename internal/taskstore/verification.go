@@ -22,6 +22,24 @@ SELECT id,result_id,task_id,attempt_id,workspace_id,state,policy_name,policy_sha
  reason,latest_event_id,revision,created_at,updated_at
 FROM verifications`
 
+// resultConsumerSourcePredicate admits ordinary workspace results only when no
+// Background Run owns the attempt, and retained results only when the exact
+// immutable CAS tuple has committed. Callers use aliases r, t, and a.
+const resultConsumerSourcePredicate = `(
+ (r.source_kind='persistent_workspace' AND NOT EXISTS (
+   SELECT 1 FROM background_runs br WHERE br.task_id=t.id AND br.attempt_id=a.id
+ )) OR
+ (r.source_kind='retained_artifact' AND EXISTS (
+   SELECT 1 FROM background_runs br
+   JOIN retained_artifacts ra ON ra.id=r.retained_artifact_id AND ra.result_id=r.id
+   JOIN background_run_exports be ON be.id=r.artifact_export_id AND be.result_id=r.id
+   JOIN artifact_materializations am ON am.id=r.materialization_id AND am.result_id=r.id
+   WHERE br.task_id=t.id AND br.attempt_id=a.id AND br.retained_result_id=r.id AND
+    br.retained_artifact_id=ra.id AND br.artifact_export_id=be.id AND br.materialization_id=am.id AND
+    br.state='result_ready' AND br.result_authority_phase IN ('artifact_committed','cleanup') AND
+    be.state='completed' AND be.phase='completed' AND am.state='ready'
+ )))`
+
 func (s *Store) GetVerification(ctx context.Context, id task.VerificationID) (Verification, error) {
 	if _, err := task.ParseVerificationID(string(id)); err != nil {
 		return Verification{}, fmt.Errorf("%w: verification ID", ErrInvalidInput)
@@ -64,7 +82,7 @@ JOIN attempts a ON a.id=r.attempt_id AND a.task_id=r.task_id AND a.workspace_id=
 WHERE r.workspace_id=? AND r.state='sealed' AND t.current_attempt_id=a.id AND t.sealed_result_id=r.id AND
  t.state='completed' AND t.cancel_epoch=0 AND
  (a.state='succeeded' OR (a.state='superseded' AND r.completion_authority='user_seal')) AND a.sealed_result_id=r.id AND
- NOT EXISTS (SELECT 1 FROM background_runs br WHERE br.attempt_id=a.id) AND
+ `+resultConsumerSourcePredicate+` AND
  NOT EXISTS (SELECT 1 FROM verifications v WHERE v.result_id=r.id)
 ORDER BY r.updated_at,r.id LIMIT 1`, workspaceID).Scan(&resultID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -102,7 +120,7 @@ JOIN results r ON r.id=v.result_id JOIN tasks t ON t.id=v.task_id JOIN attempts 
 WHERE v.workspace_id=? AND v.state=? AND r.state='sealed' AND r.result_commit=v.verified_commit AND
  t.current_attempt_id=a.id AND t.sealed_result_id=r.id AND t.state='completed' AND t.cancel_epoch=0 AND
  (a.state='succeeded' OR (a.state='superseded' AND r.completion_authority='user_seal')) AND
- a.sealed_result_id=r.id AND NOT EXISTS (SELECT 1 FROM background_runs br WHERE br.attempt_id=a.id)
+ a.sealed_result_id=r.id AND `+resultConsumerSourcePredicate+`
  ORDER BY v.updated_at,v.id LIMIT 1`, workspaceID, state).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return VerificationRecord{}, &NotFoundError{Kind: string(state) + " verification", ID: string(workspaceID)}
@@ -111,6 +129,40 @@ WHERE v.workspace_id=? AND v.state=? AND r.state='sealed' AND r.result_commit=v.
 		return VerificationRecord{}, fmt.Errorf("find verification: %w", err)
 	}
 	return s.InspectVerification(ctx, id)
+}
+
+// GetResultOwners returns the exact result/task/attempt ownership tuple for
+// journal coordinators, including retained Background Run results. Legacy task
+// API accessors remain intentionally hidden from Background Runs.
+func (s *Store) GetResultOwners(ctx context.Context, resultID task.ResultID) (_ Result, _ Task, _ Attempt, err error) {
+	if _, parseErr := task.ParseResultID(string(resultID)); parseErr != nil {
+		return Result{}, Task{}, Attempt{}, fmt.Errorf("%w: result ID", ErrInvalidInput)
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return Result{}, Task{}, Attempt{}, fmt.Errorf("begin result owners read: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := getResult(ctx, tx, resultID)
+	if err != nil {
+		return Result{}, Task{}, Attempt{}, err
+	}
+	owner, err := getTask(ctx, tx, result.TaskID)
+	if err != nil {
+		return Result{}, Task{}, Attempt{}, err
+	}
+	attempt, err := getAttempt(ctx, tx, result.AttemptID)
+	if err != nil {
+		return Result{}, Task{}, Attempt{}, err
+	}
+	result, owner, attempt, err = journalSource(ctx, tx, resultID, owner.Revision, attempt.Revision)
+	if err != nil {
+		return Result{}, Task{}, Attempt{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Result{}, Task{}, Attempt{}, fmt.Errorf("finish result owners read: %w", err)
+	}
+	return result, owner, attempt, nil
 }
 
 func (s *Store) PrepareVerification(ctx context.Context, p PrepareVerificationParams) (_ VerificationRecord, err error) {

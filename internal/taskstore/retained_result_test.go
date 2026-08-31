@@ -59,13 +59,12 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		t.Fatalf("stop after winning seal = %v", err)
 	}
 
-	claimedRun, err := store.ClaimBackgroundRunStop(context.Background(), ClaimBackgroundRunParams{
-		WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRevision: sealed.Run.Revision, ExpectedState: BackgroundRunCanceling, ExpectedPhase: BackgroundRunEffectSealIntent,
-		CancelEpoch: 0, ClaimOwner: "writer-fencer", Now: seal.AcceptedAt.Add(2 * time.Second), LeaseDuration: time.Minute,
+	claimedWork, err := store.ClaimNextBackgroundRunWork(context.Background(), ClaimNextBackgroundRunParams{
+		WorkspaceID: run.WorkspaceID, ClaimOwner: "writer-fencer", Now: seal.AcceptedAt.Add(2 * time.Second), LeaseDuration: time.Minute,
 		Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity,
 	})
-	if err != nil {
+	claimedRun := claimedWork.Run
+	if err != nil || claimedRun.State != BackgroundRunCanceling || claimedRun.EffectPhase != BackgroundRunEffectSealIntent {
 		t.Fatal(err)
 	}
 	writerAt := seal.AcceptedAt.Add(3 * time.Second)
@@ -80,22 +79,29 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		ContainerID        string                `json:"containerId,omitempty"`
 		ContainerStartedAt string                `json:"containerStartedAt,omitempty"`
 		RuntimeEpoch       int64                 `json:"runtimeEpoch,omitempty"`
+		RuntimeToken       string                `json:"runtimeToken,omitempty"`
 		StoppedAtMillis    *int64                `json:"stoppedAtMillis,omitempty"`
 	}{seal.SealRequestID, seal.ExportID, run.TaskID, run.AttemptID, run.Generation, WriterFenceRuntimeStopped,
-		run.ObservedContainerID, run.ObservedContainerStartedAt, run.RuntimeEpoch, nil}
+		run.ObservedContainerID, run.ObservedContainerStartedAt, run.RuntimeEpoch, "runtime-token", nil}
 	stoppedMillis := stoppedAt.UnixMilli()
 	writerProof.StoppedAtMillis = &stoppedMillis
 	encodedWriterProof, _ := json.Marshal(writerProof)
 	writerParams := RecordBackgroundRunWriterFenceParams{BackgroundRunClaim: backgroundRunClaim(claimedRun, writerAt),
 		SealRequestID: seal.SealRequestID, ExportID: seal.ExportID, Kind: WriterFenceRuntimeStopped,
 		ContainerID: run.ObservedContainerID, ContainerStartedAt: run.ObservedContainerStartedAt, RuntimeEpoch: run.RuntimeEpoch,
-		StoppedAt: &stoppedAt, ProofSHA256: sha256.Sum256(encodedWriterProof)}
+		RuntimeToken: "runtime-token", StoppedAt: &stoppedAt, ProofSHA256: sha256.Sum256(encodedWriterProof)}
 	writerInactive, err := store.RecordBackgroundRunWriterFence(context.Background(), writerParams)
 	if err != nil || writerInactive.EffectPhase != BackgroundRunEffectWriterInactive || writerInactive.ClaimOwner != "" {
 		t.Fatalf("writer fence = %+v, error=%v", writerInactive, err)
 	}
 	if _, err := store.RecordBackgroundRunWriterFence(context.Background(), writerParams); err != nil {
 		t.Fatalf("writer fence replay: %v", err)
+	}
+	writerClaim, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{WorkspaceID: run.WorkspaceID,
+		ClaimOwner: "export-dispatcher", Now: writerAt.Add(time.Millisecond), LeaseDuration: time.Minute,
+		Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity})
+	if err != nil || writerClaim.EffectPhase != BackgroundRunEffectWriterInactive {
+		t.Fatalf("writer-inactive production claim = %+v, error=%v", writerClaim, err)
 	}
 
 	export, err := store.ClaimBackgroundRunExport(context.Background(), ClaimBackgroundRunExportParams{
@@ -121,11 +127,16 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		exportNow = exportNow.Add(time.Second)
 	}
 	advance(store.RecordBackgroundRunSnapshotStarted)
-	resultManifestJSON := []byte(`[]`)
-	artifactManifest := json.RawMessage(`{"version":1,"entries":[]}`)
+	mode, blob, size := "100644", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", int64(12)
+	resultManifest := []ManifestEntry{{PathBase64: "Y2hhbmdlLnR4dA==", ChangeKind: "added", NewMode: &mode, NewBlobOID: &blob, NewSize: &size}}
+	resultManifestJSON, _ := json.Marshal(resultManifest)
+	resultCommit := task.GitOID("1111111111111111111111111111111111111111")
+	// /A== is standard Base64 for a non-UTF8 Git path prefix. It is artifact
+	// data, not host-path authority, and must survive both Go and SQL guards.
+	artifactManifest := json.RawMessage(`{"version":1,"changes":[{"path_base64":"/A=="}]}`)
 	if _, err := store.SelectBackgroundRunSnapshot(context.Background(), SelectBackgroundRunSnapshotParams{
-		BackgroundRunExportClaim: exportClaim(), ResultCommit: export.BaseSHA, TreeOID: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-		Outcome: task.ResultNoChanges, ResultManifest: []ManifestEntry{}, ChangesSHA256: sha256.Sum256(resultManifestJSON),
+		BackgroundRunExportClaim: exportClaim(), ResultCommit: resultCommit, TreeOID: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		Outcome: task.ResultChanged, ResultManifest: resultManifest, ChangesSHA256: sha256.Sum256(resultManifestJSON),
 		ArtifactManifest:       json.RawMessage(`{"host_path":"/private/work"}`),
 		ArtifactManifestSHA256: sha256.Sum256([]byte(`{"host_path":"/private/work"}`)),
 		OpenCodeSessionID:      run.OpenCodeSessionID, OpenCodeMessageID: run.OpenCodeMessageID, CollectedAt: exportNow,
@@ -133,8 +144,8 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		t.Fatalf("unsafe artifact manifest = %v", err)
 	}
 	export, err = store.SelectBackgroundRunSnapshot(context.Background(), SelectBackgroundRunSnapshotParams{
-		BackgroundRunExportClaim: exportClaim(), ResultCommit: export.BaseSHA, TreeOID: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-		Outcome: task.ResultNoChanges, ResultManifest: []ManifestEntry{}, ChangesSHA256: sha256.Sum256(resultManifestJSON),
+		BackgroundRunExportClaim: exportClaim(), ResultCommit: resultCommit, TreeOID: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		Outcome: task.ResultChanged, ResultManifest: resultManifest, ChangesSHA256: sha256.Sum256(resultManifestJSON),
 		ArtifactManifest: artifactManifest, ArtifactManifestSHA256: sha256.Sum256(artifactManifest),
 		OpenCodeSessionID: run.OpenCodeSessionID, OpenCodeMessageID: run.OpenCodeMessageID, CollectedAt: exportNow,
 	})
@@ -188,6 +199,42 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	if err != nil || !commitReplay.Replayed {
 		t.Fatalf("retained result replay = %+v, error=%v", commitReplay, err)
 	}
+	source, err := store.FindResultAwaitingVerification(context.Background(), run.WorkspaceID)
+	if err != nil || source.Result.ID != committed.Result.ID || source.Task.ID != committed.Task.ID || source.Attempt.ID != committed.Attempt.ID {
+		t.Fatalf("retained verification source = %+v, error=%v", source, err)
+	}
+	ownedResult, ownedTask, ownedAttempt, err := store.GetResultOwners(context.Background(), committed.Result.ID)
+	if err != nil || ownedResult.ID != committed.Result.ID || ownedTask.ID != committed.Task.ID || ownedAttempt.ID != committed.Attempt.ID {
+		t.Fatalf("retained result owners = %+v %+v %+v, error=%v", ownedResult, ownedTask, ownedAttempt, err)
+	}
+	verification := prepareJournalVerification(t, store, committed.SealedResult, 5200)
+	running, err := store.AdvanceVerification(context.Background(), AdvanceVerificationParams{
+		VerificationID: verification.Verification.ID, ExpectedRevision: verification.Verification.Revision,
+		ExpectedTaskRevision: committed.Task.Revision, ExpectedAttemptRevision: committed.Attempt.Revision,
+		EventID: testEventID(5201), StartedAt: verification.Verification.UpdatedAt.Add(time.Millisecond),
+		EvidencePayload: evidence, EvidenceSHA256: sha256.Sum256(evidence), Actor: testDeliveryActor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	emptyHash := sha256.Sum256(nil)
+	exit := 0
+	verified, err := store.CompleteVerification(context.Background(), CompleteVerificationParams{
+		VerificationID: running.Verification.ID, ExpectedRevision: running.Verification.Revision,
+		ExpectedTaskRevision: committed.Task.Revision, ExpectedAttemptRevision: committed.Attempt.Revision,
+		EventID: testEventID(5202), State: VerificationSucceeded, Outcome: "passed", ExitCode: &exit,
+		Stdout: VerificationOutput{SHA256: emptyHash}, Stderr: VerificationOutput{SHA256: emptyHash},
+		EndedAt: running.Verification.UpdatedAt.Add(time.Millisecond), EvidencePayload: evidence,
+		EvidenceSHA256: sha256.Sum256(evidence), Actor: testDeliveryActor(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	publication := prepareJournalPublication(t, store, committed.SealedResult, verified, 5210)
+	publicationWork, err := store.FindPublicationWork(context.Background(), run.WorkspaceID)
+	if err != nil || publicationWork.Publication.ID != publication.Publication.ID || publicationWork.Result.ID != committed.Result.ID {
+		t.Fatalf("retained publication work = %+v, error=%v", publicationWork, err)
+	}
 	if _, err := store.db.Exec(`UPDATE retained_artifacts SET bundle_size=bundle_size+1 WHERE id=?`, seal.ArtifactID); err == nil {
 		t.Fatal("retained artifact accepted raw mutation")
 	}
@@ -202,13 +249,12 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 route_removed_evidence='raw cleanup',revision=revision+1,updated_at=updated_at+1 WHERE task_id=?`, run.TaskID); err == nil {
 		t.Fatal("result-bearing cleanup bypassed committed tuple gate")
 	}
-	cleanupRun, err := store.ClaimActiveBackgroundRun(context.Background(), ClaimBackgroundRunParams{
-		WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRevision: committed.Run.Revision, ExpectedState: BackgroundRunResultReady, ExpectedPhase: BackgroundRunEffectArtifactCommitted,
-		CancelEpoch: 0, ClaimOwner: "result-cleaner", Now: exportNow.Add(time.Second), LeaseDuration: time.Minute,
+	cleanupWork, err := store.ClaimNextBackgroundRunWork(context.Background(), ClaimNextBackgroundRunParams{
+		WorkspaceID: run.WorkspaceID, ClaimOwner: "result-cleaner", Now: exportNow.Add(time.Second), LeaseDuration: time.Minute,
 		Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity,
 	})
-	if err != nil {
+	cleanupRun := cleanupWork.Run
+	if err != nil || cleanupRun.EffectPhase != BackgroundRunEffectArtifactCommitted {
 		t.Fatal(err)
 	}
 	cleanupClaim := backgroundRunClaim(cleanupRun, exportNow.Add(2*time.Second))
@@ -236,5 +282,22 @@ route_removed_evidence='raw cleanup',revision=revision+1,updated_at=updated_at+1
 	})
 	if err != nil || cleanupRun.EffectPhase != BackgroundRunEffectCleanupComplete {
 		t.Fatalf("retained cleanup completion = %+v, error=%v", cleanupRun, err)
+	}
+}
+
+func TestArtifactManifestSafetyRejectsAuthorityKeysNotBase64Values(t *testing.T) {
+	if !safeArtifactManifest(json.RawMessage(`{"changes":[{"path_base64":"/A=="}]}`)) {
+		t.Fatal("valid standard-Base64 value was treated as a host path")
+	}
+	for _, value := range []json.RawMessage{
+		json.RawMessage(`{"host_path":"/srv/private"}`),
+		json.RawMessage(`{"remote_url":"https://example.invalid/repository"}`),
+		json.RawMessage(`{"prompt":"secret"}`),
+		json.RawMessage(`{"environment":{"TOKEN":"secret"}}`),
+		json.RawMessage(`{"credential":"secret"}`),
+	} {
+		if safeArtifactManifest(value) {
+			t.Fatalf("forbidden artifact manifest accepted: %s", value)
+		}
 	}
 }

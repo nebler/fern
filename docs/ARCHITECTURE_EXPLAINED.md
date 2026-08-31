@@ -324,7 +324,7 @@ returned, never panicked.
 | --- | --- | --- |
 | Holds | device grants, retired workflow/publication audit records | tasks, attempts, receipts, events, results, manifests, verifications, publications, seal requests |
 | Guarantees | atomic file replace + fsync | WAL, foreign keys, **trigger-enforced state machines**, migration checksums |
-| Fate | compatibility/audit only; unresolved publications require offline quarantine | the durable heart, currently schema 9 |
+| Fate | compatibility/audit only; unresolved publications require offline quarantine | the durable heart, currently schema 10 |
 
 The task store deserves emphasis: transitions are enforced by SQL triggers —
 terminal states are immutable, revisions increment monotonically, cancellation

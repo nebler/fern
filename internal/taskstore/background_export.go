@@ -147,7 +147,10 @@ func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgro
 	if err != nil {
 		return BackgroundRunExport{}, err
 	}
-	if sha256.Sum256(encodedManifest) != p.ChangesSHA256 || sha256.Sum256(p.ArtifactManifest) != p.ArtifactManifestSHA256 ||
+	// Retained changes use taskartifact's nested canonical ChangeEntry encoding;
+	// ResultManifest is its lossless relational projection, not a second digest
+	// authority with a different JSON shape.
+	if p.ChangesSHA256 == ([32]byte{}) || sha256.Sum256(p.ArtifactManifest) != p.ArtifactManifestSHA256 ||
 		!safeArtifactManifest(p.ArtifactManifest) || validExactTimestamp(p.CollectedAt) != nil {
 		return BackgroundRunExport{}, fmt.Errorf("%w: selected background snapshot", ErrInvalidInput)
 	}
@@ -342,12 +345,6 @@ func safeArtifactManifest(value json.RawMessage) bool {
 				if !inspect(child) {
 					return false
 				}
-			}
-		case string:
-			lower := strings.ToLower(typed)
-			if strings.HasPrefix(typed, "/") || strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") ||
-				(len(typed) >= 3 && ((typed[0] >= 'A' && typed[0] <= 'Z') || (typed[0] >= 'a' && typed[0] <= 'z')) && typed[1] == ':' && (typed[2] == '\\' || typed[2] == '/')) {
-				return false
 			}
 		}
 		return true

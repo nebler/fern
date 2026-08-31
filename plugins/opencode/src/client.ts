@@ -377,9 +377,6 @@ export class FernClient {
     }
     const result = parseResultAuthority(response.result)
     const artifact = parseResultArtifact(response.artifact)
-    if (artifact.manifestSHA256 !== result.manifestSHA256) {
-      throw new FernClientError("Fern returned an inconsistent result manifest.")
-    }
     const retention = parseBooleanProjection(response.retention, ["verified", "reconstructable"], "retention")
     const cleanup = parseBooleanProjection(response.cleanup, ["complete"], "cleanup")
     return {

@@ -85,6 +85,46 @@ func (e *Engine) Discard(staged StagedLocator) error {
 	return removeExactDirectory(staged.path, staged.device, staged.inode)
 }
 
+// StagedManifest returns a byte-exact copy of the canonical engine manifest
+// after revalidating the opaque staged capability. It never exposes its path.
+func (e *Engine) StagedManifest(ctx context.Context, staged StagedLocator) ([]byte, Digest, error) {
+	if err := e.validateRoots(); err != nil {
+		return nil, Digest{}, err
+	}
+	if staged.engine != e || staged.path == "" || filepath.Dir(staged.path) != e.casRoot {
+		return nil, Digest{}, ErrInvalidLocator
+	}
+	info, err := os.Lstat(staged.path)
+	if err != nil || !safeDirectoryInfo(info) {
+		return nil, Digest{}, fmt.Errorf("%w: staged identity", ErrStorage)
+	}
+	device, inode, identityErr := fileIdentity(info)
+	if identityErr != nil || device != staged.device || inode != staged.inode {
+		return nil, Digest{}, fmt.Errorf("%w: staged identity", ErrStorage)
+	}
+	manifest, err := readExactFile(filepath.Join(staged.path, manifestName), int64(e.outputBytes), 0o600)
+	if err != nil {
+		return nil, Digest{}, err
+	}
+	if _, err := e.verifyArtifact(ctx, manifest, filepath.Join(staged.path, bundleName), 0o600, staged.digest); err != nil {
+		return nil, Digest{}, err
+	}
+	return append([]byte(nil), manifest...), staged.digest, nil
+}
+
+// StoredManifest returns byte-exact canonical manifest bytes after full CAS
+// and independent bundle verification.
+func (e *Engine) StoredManifest(ctx context.Context, locator Locator) ([]byte, Digest, error) {
+	if _, err := e.Inspect(ctx, locator); err != nil {
+		return nil, Digest{}, err
+	}
+	manifest, err := readExactFile(filepath.Join(e.casRoot, locator.digest.String(), manifestName), int64(e.outputBytes), 0o400)
+	if err != nil {
+		return nil, Digest{}, err
+	}
+	return append([]byte(nil), manifest...), locator.digest, nil
+}
+
 func (e *Engine) validateStoredBytes(target string, digest Digest, manifestBytes []byte, stagedBundle string) error {
 	if err := validateArtifactDirectory(target, 0o400); err != nil {
 		return err
@@ -208,8 +248,16 @@ func (e *Engine) Materialize(ctx context.Context, locator Locator) (*Checkout, e
 	if err := syncDirectory(filepath.Join(path, ".git")); err != nil {
 		return nil, err
 	}
+	checkout := &Checkout{engine: e, path: path, marker: token, device: device, inode: inode, markerDevice: markerDevice, markerInode: markerInode}
+	e.mu.Lock()
+	if e.closed {
+		e.mu.Unlock()
+		return nil, ErrCheckout
+	}
+	e.checkouts[checkout] = struct{}{}
+	e.mu.Unlock()
 	keep = true
-	return &Checkout{engine: e, path: path, marker: token, device: device, inode: inode, markerDevice: markerDevice, markerInode: markerInode}, nil
+	return checkout, nil
 }
 
 func copyPrivateBundle(source, destination string, limit int64, sourceMode os.FileMode) (Digest, int64, error) {
@@ -269,6 +317,9 @@ func (c *Checkout) Close() error {
 	}
 	c.closed = true
 	c.path = ""
+	c.engine.mu.Lock()
+	delete(c.engine.checkouts, c)
+	c.engine.mu.Unlock()
 	return nil
 }
 

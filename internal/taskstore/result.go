@@ -268,7 +268,11 @@ func scanResult(row rowScanner) (Result, error) {
 	} else if retainedArtifactID.Valid || artifactExportID.Valid || materializationID.Valid {
 		return Result{}, ErrCorruptStore
 	}
-	if r.CompletionAuthority == SealAuthorityExecutionSuccess {
+	if r.SourceKind == ResultSourceRetainedArtifact {
+		if r.CompletionAuthority != SealAuthorityUser || sealRequestID.Valid || authorizerType.Valid {
+			return Result{}, ErrCorruptStore
+		}
+	} else if r.CompletionAuthority == SealAuthorityExecutionSuccess {
 		if sealRequestID.Valid || authorizerType.Valid {
 			return Result{}, ErrCorruptStore
 		}

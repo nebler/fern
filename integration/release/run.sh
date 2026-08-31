@@ -119,7 +119,7 @@ assert compatibility["first_supported_baseline"]["status"] == "repository-establ
 assert compatibility["first_supported_baseline"]["historical_release"] is False
 assert compatibility["first_supported_baseline"]["historical_tag"] is None
 assert compatibility["first_supported_baseline"]["task_store_schema"] == 4
-assert compatibility["current_release_schemas"]["task_store"] == 9
+assert compatibility["current_release_schemas"]["task_store"] == 10
 current_schema = compatibility_schema["properties"]["current_release_schemas"]
 assert current_schema["additionalProperties"] is False
 assert current_schema["properties"]["task_store"]["const"] == compatibility["current_release_schemas"]["task_store"]

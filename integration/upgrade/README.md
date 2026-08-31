@@ -12,7 +12,7 @@ legacy-row quarantine, and Background Run storage behave as required.
 
 It then restores the verified pre-upgrade bytes as the rollback operation and
 performs the upgrade again. Rollback therefore means restoring an offline backup
-created before migration. It does not make schema 9 readable by older code, and
+created before migration. It does not make schema 10 readable by older code, and
 it does not claim atomicity across host filesystems, Docker volumes, or external
 services.
 

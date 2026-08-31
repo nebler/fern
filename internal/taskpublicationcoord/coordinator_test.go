@@ -167,44 +167,61 @@ type fakePublisher struct {
 	creates           int
 	fencer            *fakeFencer
 	callWithoutFence  int
+	request           taskpublication.Request
 }
 
-func (publisher *fakePublisher) ReconcileBranch(context.Context, taskpublication.Request) (taskpublication.BranchObservation, error) {
+func (publisher *fakePublisher) ReconcileBranch(_ context.Context, request taskpublication.Request) (taskpublication.BranchObservation, error) {
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()
-	publisher.recordCall()
+	publisher.recordCall(request)
 	publisher.reconcileBranches++
 	return publisher.branch, publisher.branchErr
 }
 
-func (publisher *fakePublisher) PushOnce(context.Context, taskpublication.Request) (taskpublication.BranchProof, error) {
+func (publisher *fakePublisher) PushOnce(_ context.Context, request taskpublication.Request) (taskpublication.BranchProof, error) {
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()
-	publisher.recordCall()
+	publisher.recordCall(request)
 	publisher.pushes++
 	return publisher.push, publisher.pushErr
 }
 
-func (publisher *fakePublisher) ReconcilePullRequest(context.Context, taskpublication.Request) (taskpublication.PullRequestProof, error) {
+func (publisher *fakePublisher) ReconcilePullRequest(_ context.Context, request taskpublication.Request) (taskpublication.PullRequestProof, error) {
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()
-	publisher.recordCall()
+	publisher.recordCall(request)
 	publisher.reconcilePulls++
 	return publisher.pull, publisher.pullErr
 }
 
-func (publisher *fakePublisher) CreatePullRequestOnce(context.Context, taskpublication.Request) (taskpublication.PullRequestProof, error) {
+func (publisher *fakePublisher) CreatePullRequestOnce(_ context.Context, request taskpublication.Request) (taskpublication.PullRequestProof, error) {
 	publisher.mu.Lock()
 	defer publisher.mu.Unlock()
-	publisher.recordCall()
+	publisher.recordCall(request)
 	publisher.creates++
 	return publisher.create, publisher.createErr
 }
 
-func (publisher *fakePublisher) recordCall() {
+func (publisher *fakePublisher) recordCall(request taskpublication.Request) {
+	publisher.request = request
 	if publisher.fencer != nil && !publisher.fencer.isHeld() {
 		publisher.callWithoutFence++
 	}
+}
+
+type trackingPublicationSource struct {
+	path     string
+	closeErr error
+	acquires int
+	closes   int
+}
+
+func (source *trackingPublicationSource) Acquire(context.Context, taskstore.Result) (string, func() error, error) {
+	source.acquires++
+	return source.path, func() error {
+		source.closes++
+		return source.closeErr
+	}, nil
 }
 
 func TestNoWorkDoesNotAcquireFence(t *testing.T) {
@@ -230,6 +247,47 @@ func TestCoordinatorConsumesReceiptAdmittedPublication(t *testing.T) {
 		t.Fatalf("admitted publication was not consumed: publication=%+v mutations=%d pushes=%d",
 			store.work.Publication, store.mutations, publisher.pushes)
 	}
+}
+
+func TestCoordinatorUsesAndClosesSelectedPublicationSource(t *testing.T) {
+	store, publisher, coordinator := testCoordinator(t, taskstore.PublicationPhaseNone)
+	source := &trackingPublicationSource{path: "/private/retained-checkout"}
+	coordinator.source = source
+	publisher.push = taskpublication.BranchProof{Observation: exactBranch(), Push: taskpublication.GitEvidence{Attempted: true}}
+	if err := coordinator.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if source.acquires != 1 || source.closes != 1 || publisher.request.RepositoryPath != source.path || store.mutations != 2 {
+		t.Fatalf("acquires=%d closes=%d request=%+v mutations=%d", source.acquires, source.closes, publisher.request, store.mutations)
+	}
+}
+
+func TestCoordinatorClosesPublicationSourceOnMutationAndCleanupFailures(t *testing.T) {
+	t.Run("mutation", func(t *testing.T) {
+		_, publisher, coordinator := testCoordinator(t, taskstore.PublicationPhaseNone)
+		source := &trackingPublicationSource{path: "/private/retained-checkout"}
+		coordinator.source = source
+		publisher.pushErr = taskpublication.ErrPushFailed
+		if err := coordinator.RunOnce(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if source.closes != 1 {
+			t.Fatalf("closes=%d", source.closes)
+		}
+	})
+	t.Run("close", func(t *testing.T) {
+		_, publisher, coordinator := testCoordinator(t, taskstore.PublicationPhaseNone)
+		closeErr := errors.New("retained checkout cleanup failed")
+		source := &trackingPublicationSource{path: "/private/retained-checkout", closeErr: closeErr}
+		coordinator.source = source
+		publisher.push = taskpublication.BranchProof{Observation: exactBranch(), Push: taskpublication.GitEvidence{Attempted: true}}
+		if err := coordinator.RunOnce(context.Background()); !errors.Is(err, closeErr) {
+			t.Fatalf("error=%v", err)
+		}
+		if source.closes != 1 {
+			t.Fatalf("closes=%d", source.closes)
+		}
+	})
 }
 
 func TestAcquireFailureIsSanitizedAndBlocksAllWork(t *testing.T) {

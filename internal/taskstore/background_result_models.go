@@ -183,6 +183,7 @@ type WriterFence struct {
 	ContainerID        string
 	ContainerStartedAt string
 	RuntimeEpoch       int64
+	RuntimeToken       string
 	StoppedAt          *time.Time
 	ProofSHA256        [32]byte
 	RecordedAt         time.Time
@@ -196,6 +197,7 @@ type RecordBackgroundRunWriterFenceParams struct {
 	ContainerID        string
 	ContainerStartedAt string
 	RuntimeEpoch       int64
+	RuntimeToken       string
 	StoppedAt          *time.Time
 	ProofSHA256        [32]byte
 }

@@ -38,7 +38,7 @@ behavior with real Docker and a zero-cost local provider. Package metadata at
 that commit also says `1.18.16`, but the source profile does not claim
 equivalence to the published package. `internal/taskenvdocker` now implements
 the serial clone, volume, container, authenticated-health, stop, and separate
-cleanup effects for one schema-9 run. `integration/background-run-docker`
+cleanup effects for one schema-10 run. `integration/background-run-docker`
 qualifies that lifecycle against the operator-pinned local source image.
 `internal/backgroundopencode` now implements the separate, deadline-required,
 loopback-only client for this exact source profile. Its writes are one-shot;
@@ -344,6 +344,32 @@ inserts the sealed Result, changed-file manifest, result-artifact reference, and
 task/attempt completion events together. A crash after CAS installation but
 before that transaction leaves an unreferenced object that garbage collection
 may safely remove after a grace period.
+
+The production journal uses `snapshot_started` as the durable umbrella
+authorization for `taskartifact.Engine.Snapshot`. That call creates the
+deterministic commit, bundle, and independent bundle verification together.
+Only after the selected commit/tree/changes digest and bundle digest/size are
+durable does the coordinator record `cas_install_started` and call `Store`.
+Recovery at that boundary first inspects the exact digest-derived CAS locator;
+if the `Store` response was lost, it observes the installed bytes rather than
+creating a second result, seal, or prompt.
+
+Four values remain deliberately distinct throughout storage and the API:
+
+- `result.manifest_sha256` is the canonical changed-file manifest digest.
+- `artifact.manifest_sha256` is the digest of the complete artifact manifest.
+- `artifact.sha256` identifies the CAS object and currently equals the complete
+  artifact-manifest digest.
+- `artifact.bundle_sha256` and `artifact.bundle_size` identify the independently
+  verified Git bundle; the internal `sha256:<artifact manifest digest>` locator
+  is never returned by the API.
+
+Verification and publication resolve `retained_artifact` results by that
+internal locator into a fresh detached, clean `taskartifact` checkout. Each
+consumer compares base, result commit, tree, and changes digest and always
+closes the checkout. Persistent workspace results continue to use the managed
+workspace repository. No post-result consumer falls back to a deleted
+Background Run clone.
 
 ### Artifact Manifest
 

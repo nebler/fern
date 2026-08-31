@@ -66,7 +66,7 @@ WHERE p.workspace_id=? AND p.admission_receipt_id IS NOT NULL AND p.state IN ('p
  t.current_attempt_id=a.id AND t.sealed_result_id=r.id AND t.state='completed' AND t.cancel_epoch=0 AND
  (a.state='succeeded' OR (a.state='superseded' AND r.completion_authority='user_seal')) AND
  a.sealed_result_id=r.id AND v.state='succeeded' AND v.result_id=r.id AND
- v.verified_commit=r.result_commit AND NOT EXISTS (SELECT 1 FROM background_runs br WHERE br.attempt_id=a.id)
+ v.verified_commit=r.result_commit AND `+resultConsumerSourcePredicate+`
  ORDER BY p.updated_at,p.id LIMIT 1`, workspaceID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PublicationWork{}, &NotFoundError{Kind: "publication work", ID: string(workspaceID)}
@@ -126,7 +126,7 @@ WHERE p.workspace_id=? AND `+predicate+` AND r.state='sealed' AND t.current_atte
  t.sealed_result_id=r.id AND t.state='completed' AND t.cancel_epoch=0 AND
  (a.state='succeeded' OR (a.state='superseded' AND r.completion_authority='user_seal')) AND a.sealed_result_id=r.id AND
  v.state='succeeded' AND v.result_id=r.id AND v.verified_commit=r.result_commit AND
- NOT EXISTS (SELECT 1 FROM background_runs br WHERE br.attempt_id=a.id) ORDER BY p.updated_at,p.id LIMIT 1`, workspaceID).Scan(&id)
+ `+resultConsumerSourcePredicate+` ORDER BY p.updated_at,p.id LIMIT 1`, workspaceID).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return PublicationRecord{}, &NotFoundError{Kind: kind, ID: string(workspaceID)}
 	}

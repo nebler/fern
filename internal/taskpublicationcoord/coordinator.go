@@ -47,6 +47,10 @@ type Publisher interface {
 	CreatePullRequestOnce(context.Context, taskpublication.Request) (taskpublication.PullRequestProof, error)
 }
 
+type ResultSource interface {
+	Acquire(context.Context, taskstore.Result) (string, func() error, error)
+}
+
 type Config struct {
 	WorkspaceID      task.WorkspaceID
 	PullRequestBody  string
@@ -57,12 +61,14 @@ type Config struct {
 	Now              func() time.Time
 	OnError          func(error)
 	OnSuccess        func()
+	ResultSource     ResultSource
 }
 
 type Coordinator struct {
 	store     Store
 	fencer    Fencer
 	publisher Publisher
+	source    ResultSource
 	ids       *task.Generator
 	config    Config
 	wake      chan struct{}
@@ -100,7 +106,7 @@ func New(store Store, fencer Fencer, publisher Publisher, ids *task.Generator, c
 	if config.OnSuccess == nil {
 		config.OnSuccess = func() {}
 	}
-	return &Coordinator{store: store, fencer: fencer, publisher: publisher, ids: ids, config: config, wake: make(chan struct{}, 1)}, nil
+	return &Coordinator{store: store, fencer: fencer, publisher: publisher, source: config.ResultSource, ids: ids, config: config, wake: make(chan struct{}, 1)}, nil
 }
 
 // Wake requests a publication pass without blocking the caller.
@@ -146,7 +152,7 @@ func (coordinator *Coordinator) Run(ctx context.Context) error {
 // RunOnce advances at most one selected publication. A phase found on entry is
 // reconciled read-only; a mutation occurs only immediately after this call has
 // durably committed its corresponding started phase.
-func (coordinator *Coordinator) RunOnce(ctx context.Context) error {
+func (coordinator *Coordinator) RunOnce(ctx context.Context) (resultErr error) {
 	coordinator.runMu.Lock()
 	defer coordinator.runMu.Unlock()
 	work, err := coordinator.store.FindPublicationWork(ctx, coordinator.config.WorkspaceID)
@@ -179,6 +185,14 @@ func (coordinator *Coordinator) RunOnce(ctx context.Context) error {
 	}
 	work = current
 	request := publicationRequest(work, coordinator.config.PullRequestBody)
+	if coordinator.source != nil {
+		path, closeSource, sourceErr := coordinator.source.Acquire(ctx, work.Result)
+		if sourceErr != nil || closeSource == nil {
+			return errors.Join(taskstore.ErrCorruptStore, sourceErr)
+		}
+		defer func() { resultErr = errors.Join(resultErr, closeSource()) }()
+		request.RepositoryPath = path
+	}
 
 	switch work.Publication.EffectPhase {
 	case taskstore.PublicationPhaseNone:

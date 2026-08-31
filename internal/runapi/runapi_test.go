@@ -40,6 +40,7 @@ type apiFixture struct {
 	verifier *countingVerifier
 	path     string
 	route    *fixtureRoute
+	now      time.Time
 }
 
 type fixtureRoute struct {
@@ -260,6 +261,49 @@ func TestRunAPIWakeFollowsDurableCreateAndStopCommitOnly(t *testing.T) {
 	}
 }
 
+func TestRunAPISealIsStrictOwnedAndExactlyReplayable(t *testing.T) {
+	fixture := newAPIFixture(t, PluginOpenCodeProfile)
+	created := fixture.request(http.MethodPost, PathPrefix, validCreateBody("seal this run"), "seal-create")
+	if created.Code != http.StatusAccepted {
+		t.Fatalf("create = %d: %s", created.Code, created.Body.String())
+	}
+	var admission struct {
+		RunID task.TaskID `json:"run_id"`
+	}
+	if json.Unmarshal(created.Body.Bytes(), &admission) != nil {
+		t.Fatal("decode create")
+	}
+	fixture.advanceToPrompt(t, admission.RunID)
+	path := PathPrefix + "/" + string(admission.RunID) + "/seal"
+	if read := fixture.request(http.MethodGet, PathPrefix+"/"+string(admission.RunID), "", ""); read.Code != http.StatusOK {
+		t.Fatalf("run before seal = %d: %s", read.Code, read.Body.String())
+	}
+	bad := fixture.request(http.MethodPost, path, `{"unexpected":true}`, "seal-key-bad")
+	if bad.Code != http.StatusBadRequest {
+		t.Fatalf("nonempty seal body = %d", bad.Code)
+	}
+	sealed := fixture.request(http.MethodPost, path, `{}`, "seal-key")
+	if sealed.Code != http.StatusAccepted {
+		t.Fatalf("seal = %d: %s", sealed.Code, sealed.Body.String())
+	}
+	var first sealProjection
+	if json.Unmarshal(sealed.Body.Bytes(), &first) != nil || first.RunID != admission.RunID || first.State != "canceling" ||
+		first.ResultPhase != "seal_requested" || first.SealRequestID == "" || !first.Committed {
+		t.Fatalf("seal projection = %+v", first)
+	}
+	replay := fixture.request(http.MethodPost, path, `{}`, "seal-key")
+	var second sealProjection
+	if replay.Code != http.StatusAccepted || replay.Header().Get("Idempotency-Replayed") != "true" ||
+		json.Unmarshal(replay.Body.Bytes(), &second) != nil || second != first {
+		t.Fatalf("seal replay = %d %+v headers=%v", replay.Code, second, replay.Header())
+	}
+	other := fixture.withActor(t, pluginActor("pc_other"))
+	hidden := other.request(http.MethodPost, path, `{}`, "other-seal-key")
+	if hidden.Code != http.StatusNotFound {
+		t.Fatalf("foreign seal = %d", hidden.Code)
+	}
+}
+
 func TestRunAPIOpenReadinessOwnershipIdempotencyAndStableReplay(t *testing.T) {
 	fixture := newAPIFixture(t, PluginOpenCodeProfile)
 	created := fixture.request(http.MethodPost, PathPrefix, validCreateBody("Open this run"), "create-open")
@@ -407,7 +451,7 @@ func newAPIFixture(t *testing.T, available string) *apiFixture {
 		t.Fatal(err)
 	}
 	fixture := &apiFixture{store: store, actor: pluginActor("pc_owner"), verifier: &countingVerifier{}, path: path,
-		route: &fixtureRoute{origin: "https://fern.example.ts.net:8443"}}
+		route: &fixtureRoute{origin: "https://fern.example.ts.net:8443"}, now: now}
 	t.Cleanup(func() { _ = store.Close() })
 	fixture.handler = fixture.buildHandler(t, available)
 	return fixture
@@ -422,7 +466,7 @@ func (f *apiFixture) buildHandler(t *testing.T, available string) *Handler {
 	if available == PluginOpenCodeProfile {
 		route = f.route
 	}
-	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), AvailableProfile: available, Store: f.store, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, Now: func() time.Time { return time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC) }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", BudgetSnapshot: json.RawMessage(`{"turns":10}`), Route: route})
+	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), AvailableProfile: available, Store: f.store, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, Now: func() time.Time { return f.now }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", BudgetSnapshot: json.RawMessage(`{"turns":10}`), Route: route, SealPolicyVersion: "fern.background-user-seal.v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -460,6 +504,31 @@ func (f *apiFixture) advanceToSession(t *testing.T, id task.TaskID) taskstore.Ba
 	next(f.store.RecordBackgroundRunHealthObserved)
 	next(f.store.RecordBackgroundRunReady)
 	next(f.store.RecordBackgroundRunSessionObserved)
+	f.now = now.Add(time.Second)
+	return run
+}
+
+func (f *apiFixture) advanceToPrompt(t *testing.T, id task.TaskID) taskstore.BackgroundRun {
+	run := f.advanceToSession(t, id)
+	now := run.UpdatedAt.Add(time.Millisecond)
+	var err error
+	run, err = f.store.RecordBackgroundRunPromptIntent(context.Background(), taskstore.RecordBackgroundRunEvidenceParams{
+		BackgroundRunClaim: openTestClaim(run, now), Evidence: `{"status":"committed"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Millisecond)
+	run, err = f.store.RecordBackgroundRunPromptRequestAttempted(context.Background(), openTestClaim(run, now))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Millisecond)
+	run, err = f.store.RecordBackgroundRunPromptAdmitted(context.Background(), taskstore.RecordBackgroundRunEvidenceParams{
+		BackgroundRunClaim: openTestClaim(run, now), Evidence: `{"status":"exact"}`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.now = now.Add(time.Second)
 	return run
 }
 

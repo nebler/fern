@@ -40,6 +40,7 @@ var (
 // Request contains immutable coordinator-owned values. Publisher validates the
 // complete tuple before reading GitHub or starting Git.
 type Request struct {
+	RepositoryPath      string
 	WorkspaceRepository task.RepositoryID
 	Task                task.RepositoryTuple
 	Result              task.ResultTuple
@@ -213,13 +214,17 @@ func (publisher *Publisher) PushOnce(ctx context.Context, request Request) (Bran
 	if err != nil {
 		return proof, err
 	}
-	if err := publisher.validateLocalGitConfig(operationContext); err != nil {
+	repositoryPath, err := publisher.requestRepositoryPath(request)
+	if err != nil {
 		return proof, err
 	}
-	if err := publisher.proveLocalCommit(operationContext, request.Publication.ResultCommit); err != nil {
+	if err := publisher.validateLocalGitConfig(operationContext, repositoryPath); err != nil {
 		return proof, err
 	}
-	proof.Push, err = publisher.push(operationContext, identity, request.Publication)
+	if err := publisher.proveLocalCommit(operationContext, repositoryPath, request.Publication.ResultCommit); err != nil {
+		return proof, err
+	}
+	proof.Push, err = publisher.push(operationContext, repositoryPath, identity, request.Publication)
 	// The follow-up read reconciles possibly lost pushes, but a timeout has
 	// already exhausted the operation budget: the read context is expired by
 	// construction. Report the underlying push error, never the read's.
@@ -337,7 +342,11 @@ func (publisher *Publisher) PublishOrReconcile(ctx context.Context, request Requ
 	}
 	validationContext, validationCancel := context.WithTimeout(ctx, publisher.timeout)
 	defer validationCancel()
-	if err := publisher.validateLocalGitConfig(validationContext); err != nil {
+	repositoryPath, pathErr := publisher.requestRepositoryPath(request)
+	if pathErr != nil {
+		return proof, pathErr
+	}
+	if err := publisher.validateLocalGitConfig(validationContext, repositoryPath); err != nil {
 		return proof, err
 	}
 	branch, err := publisher.ReconcileBranch(ctx, request)
@@ -371,16 +380,16 @@ func (publisher *Publisher) PublishOrReconcile(ctx context.Context, request Requ
 	return proof, nil
 }
 
-func (publisher *Publisher) validateLocalGitConfig(ctx context.Context) error {
+func (publisher *Publisher) validateLocalGitConfig(ctx context.Context, repositoryPath string) error {
 	commandContext, cancel := context.WithTimeout(ctx, publisher.timeout)
 	defer cancel()
 	var names bytes.Buffer
 	namesWriter := &boundedBuffer{buffer: &names, remaining: 64 << 10}
 	stderr := newDigestWriter(publisher.outputLimit)
 	command := exec.CommandContext(commandContext, publisher.gitExecutable,
-		"--no-pager", "--no-replace-objects", "-C", publisher.repositoryPath,
+		"--no-pager", "--no-replace-objects", "-C", repositoryPath,
 		"config", "--local", "--no-includes", "--name-only", "--null", "--list")
-	command.Dir = publisher.repositoryPath
+	command.Dir = repositoryPath
 	command.Env = []string{
 		"GIT_CONFIG_GLOBAL=" + os.DevNull, "GIT_CONFIG_NOSYSTEM=1", "GIT_TERMINAL_PROMPT=0",
 		"HOME=" + publisher.tempRoot, "LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin", "XDG_CONFIG_HOME=" + publisher.tempRoot,
@@ -407,6 +416,18 @@ func (publisher *Publisher) validateLocalGitConfig(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (publisher *Publisher) requestRepositoryPath(request Request) (string, error) {
+	path := request.RepositoryPath
+	if path == "" {
+		path = publisher.repositoryPath
+	}
+	resolved, err := secureDirectory(path, false)
+	if err != nil {
+		return "", ErrInvalidRequest
+	}
+	return resolved, nil
 }
 
 type boundedBuffer struct {

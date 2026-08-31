@@ -54,6 +54,21 @@ WHERE r.workspace_id=? AND r.task_id=? AND c.actor_type=? AND c.actor_id=? AND c
 	return run, nil
 }
 
+// GetBackgroundRunOwners returns the exact parent revisions only after the
+// same ownership-hiding check used by GetBackgroundRun.
+func (s *Store) GetBackgroundRunOwners(ctx context.Context, workspaceID task.WorkspaceID, taskID task.TaskID, actor task.ActorSnapshot) (Task, Attempt, error) {
+	run, err := s.GetBackgroundRun(ctx, workspaceID, taskID, actor)
+	if err != nil {
+		return Task{}, Attempt{}, err
+	}
+	owner, err := getTask(ctx, s.db, run.TaskID)
+	if err != nil {
+		return Task{}, Attempt{}, err
+	}
+	attempt, err := getAttempt(ctx, s.db, run.AttemptID)
+	return owner, attempt, err
+}
+
 const MaxBackgroundRunListLimit = 100
 
 // ListBackgroundRuns applies actor authority in SQL before its bound, so runs
@@ -398,9 +413,9 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	case "seal_intent":
 		run.State, run.EffectPhase = BackgroundRunCanceling, BackgroundRunEffectSealIntent
 	case "writer_inactive":
-		run.State, run.EffectPhase = BackgroundRunCanceling, BackgroundRunEffectWriterInactive
+		// The physical cleanup state is already explicit in the stored tuple.
 	case "exporting":
-		run.State, run.EffectPhase = BackgroundRunCanceling, BackgroundRunEffectExporting
+		run.EffectPhase = BackgroundRunEffectExporting
 	case "artifact_committed":
 		run.State, run.EffectPhase = BackgroundRunResultReady, BackgroundRunEffectArtifactCommitted
 	case "cleanup", "legacy_result_not_retained", "":
@@ -462,7 +477,7 @@ func validBackgroundRunStatePhase(profile string, state BackgroundRunState, phas
 	case BackgroundRunFailed:
 		return phase == BackgroundRunEffectPreEffectFailed || phase == BackgroundRunEffectCleanupComplete
 	case BackgroundRunCleanupRequired:
-		return cleanupEffectPhase(phase)
+		return cleanupEffectPhase(phase) || phase == BackgroundRunEffectExporting
 	default:
 		return false
 	}

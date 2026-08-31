@@ -190,7 +190,7 @@ describe("FernClient", () => {
         resultCommit: "b".repeat(40),
         treeOID: "c".repeat(40),
         manifestEntries: 2,
-        manifestSHA256: "d".repeat(64),
+        manifestSHA256: "1".repeat(64),
       },
       artifact: {
         id: "art_0198d34d-7008-7008-8008-000000000008",
@@ -215,7 +215,7 @@ describe("FernClient", () => {
       { ...resultResponse(), artifact: { ...resultResponse().artifact, format: "zip" } },
       { ...resultResponse(), artifact: { ...resultResponse().artifact, bundle_sha256: "F".repeat(64) } },
       { ...resultResponse(), artifact: { ...resultResponse().artifact, bundle_size: -1 } },
-      { ...resultResponse(), artifact: { ...resultResponse().artifact, manifest_sha256: "0".repeat(64) } },
+      { ...resultResponse(), artifact: { ...resultResponse().artifact, manifest_sha256: "invalid" } },
       { ...resultResponse(), retention: { verified: "yes", reconstructable: true } },
       { ...resultResponse(), cleanup: { complete: null } },
       { ...resultResponse(), artifact: { ...resultResponse().artifact, download_url: "https://fern.example/a" } },
@@ -407,7 +407,7 @@ function resultResponse() {
       result_commit: "b".repeat(40),
       tree_oid: "c".repeat(40),
       manifest_entries: 2,
-      manifest_sha256: "d".repeat(64),
+      manifest_sha256: "1".repeat(64),
       additive_server_field: "ignored",
     },
     artifact: {

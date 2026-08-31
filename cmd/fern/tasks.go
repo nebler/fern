@@ -26,6 +26,7 @@ import (
 	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskapi"
+	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskdelivery"
 	"github.com/nebler/fern/internal/taskenvdocker"
 	"github.com/nebler/fern/internal/taskexecution"
@@ -33,6 +34,7 @@ import (
 	"github.com/nebler/fern/internal/taskpublicationcoord"
 	"github.com/nebler/fern/internal/taskresult"
 	"github.com/nebler/fern/internal/taskresultcoord"
+	"github.com/nebler/fern/internal/taskresultsource"
 	"github.com/nebler/fern/internal/taskstore"
 	"github.com/nebler/fern/internal/taskverification"
 	"github.com/nebler/fern/internal/verification"
@@ -77,14 +79,19 @@ type taskServices struct {
 	status       *observability.Registry
 	background   taskDeliveryService
 	provider     *taskenvdocker.Provider
+	artifact     *taskartifact.Engine
 }
 
 func (services *taskServices) Close() error {
 	var providerErr error
+	var artifactErr error
+	if services.artifact != nil {
+		artifactErr = services.artifact.Close()
+	}
 	if services.provider != nil {
 		providerErr = services.provider.Close()
 	}
-	return errors.Join(providerErr, services.store.Close())
+	return errors.Join(artifactErr, providerErr, services.store.Close())
 }
 
 type taskRunService interface {
@@ -169,6 +176,55 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	if err != nil {
 		return nil, err
 	}
+	var artifactEngine *taskartifact.Engine
+	var backgroundProvider *taskenvdocker.Provider
+	defer func() {
+		if closeOnError {
+			if backgroundProvider != nil {
+				_ = backgroundProvider.Close()
+			}
+			if artifactEngine != nil {
+				_ = artifactEngine.Close()
+			}
+		}
+	}()
+	backgroundRoot := filepath.Join(taskDirectory, cfg.Workspace.Name+"-background")
+	if err := os.MkdirAll(backgroundRoot, 0o700); err != nil {
+		return nil, fmt.Errorf("create background run state root: %w", err)
+	}
+	backgroundRoot, err = filepath.EvalSymlinks(backgroundRoot)
+	if err != nil {
+		return nil, err
+	}
+	providerRoot := filepath.Join(backgroundRoot, "runtime")
+	casRoot, workRoot := filepath.Join(backgroundRoot, "artifact-cas"), filepath.Join(backgroundRoot, "artifact-work")
+	for _, root := range []string{providerRoot, casRoot, workRoot} {
+		if err := os.Mkdir(root, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return nil, fmt.Errorf("create background artifact state root: %w", err)
+		}
+	}
+	artifactEngine, err = taskartifact.New(taskartifact.Config{GitExecutable: verificationGitExecutable(), CASRoot: casRoot,
+		WorkRoot: workRoot, CommandTimeout: taskOperationTimeout})
+	if err != nil {
+		return nil, err
+	}
+	referenced, err := store.ReferencedArtifactManifestSHA256(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, digest := range referenced {
+		locator, parseErr := taskartifact.ParseLocator("sha256:" + hex.EncodeToString(digest[:]))
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		if _, inspectErr := artifactEngine.Inspect(ctx, locator); inspectErr != nil {
+			return nil, fmt.Errorf("reconcile retained artifact: %w", inspectErr)
+		}
+	}
+	resultSource, err := taskresultsource.New(store, artifactEngine, cfg.Workspace.Repo)
+	if err != nil {
+		return nil, err
+	}
 	deliveryActor := systemActor(workerID, "task-delivery", "Task delivery coordinator")
 	recoveryActor := systemActor(workerID, "task-recovery", "Task recovery coordinator")
 	recoveryActor.Type = task.ActorRecovery
@@ -211,7 +267,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	if err != nil {
 		return nil, err
 	}
-	publicationCoordinator, err := newPublicationCoordinator(ctx, taskDirectory, cfg, durableWorkspace.ID, workerID, authority, recoveryActor, store, manager, ids, status, log)
+	publicationCoordinator, err := newPublicationCoordinator(ctx, taskDirectory, cfg, durableWorkspace.ID, workerID, authority, recoveryActor, store, manager, resultSource, ids, status, log)
 	if err != nil {
 		return nil, err
 	}
@@ -219,7 +275,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	if publicationCoordinator != nil {
 		publicationWake = publicationCoordinator.Wake
 	}
-	verificationCoordinator, err := newVerificationCoordinator(store, manager, ids, cfg, durableWorkspace.ID, imageID, workerID, recoveryActor, status, log)
+	verificationCoordinator, err := newVerificationCoordinator(store, manager, resultSource, ids, cfg, durableWorkspace.ID, imageID, workerID, recoveryActor, status, log)
 	if err != nil {
 		return nil, err
 	}
@@ -256,7 +312,6 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 		hostname = "github.com"
 	}
 	availableProfile, backgroundImageID := "", ""
-	var backgroundProvider *taskenvdocker.Provider
 	var backgroundCoordinator *backgroundruncoord.Coordinator
 	if cfg.Tasks.BackgroundImage != "" {
 		backgroundInspectCtx, backgroundInspectCancel := context.WithTimeout(ctx, taskInspectTimeout)
@@ -268,14 +323,6 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 		}
 		availableProfile = runapi.PluginOpenCodeProfile
 		status.Qualified(observability.ComponentBackgroundRunProfile)
-		backgroundRoot := filepath.Join(taskDirectory, cfg.Workspace.Name+"-background")
-		if err := os.MkdirAll(backgroundRoot, 0o700); err != nil {
-			return nil, fmt.Errorf("create background run state root: %w", err)
-		}
-		backgroundRoot, err = filepath.EvalSymlinks(backgroundRoot)
-		if err != nil {
-			return nil, err
-		}
 		backgroundRepository, err := filepath.EvalSymlinks(cfg.Workspace.Repo)
 		if err != nil {
 			return nil, fmt.Errorf("resolve background run repository: %w", err)
@@ -283,7 +330,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 		// Serial profile policy: 1 GiB RAM, 2 CPU, 512 PIDs, 10 GiB source/clone
 		// admission, 20 GiB host free admission, 10 MiB x 3 logs, and 24h wall.
 		backgroundProvider, err = taskenvdocker.New(ctx, taskenvdocker.Config{
-			StateRoot: backgroundRoot, Repository: backgroundRepository, GitExecutable: verificationGitExecutable(),
+			StateRoot: providerRoot, Repository: backgroundRepository, GitExecutable: verificationGitExecutable(),
 			ImageReference: cfg.Tasks.BackgroundImage, ImageID: backgroundImageID, MemoryBytes: 1 << 30,
 			NanoCPUs: 2_000_000_000, PIDs: 512, WallTimeout: 24 * time.Hour, GitTimeout: 2 * time.Minute,
 			DockerTimeout: 30 * time.Second, HealthTimeout: 30 * time.Second, GitOutputBytes: 1 << 20,
@@ -294,7 +341,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 			status.Blocked(observability.ComponentBackgroundRunSerial, err)
 			return nil, err
 		}
-		backgroundCoordinator, err = backgroundruncoord.New(store, backgroundProvider, ids, backgroundruncoord.Config{
+		backgroundCoordinator, err = backgroundruncoord.New(store, backgroundProvider, artifactEngine, ids, backgroundruncoord.Config{
 			WorkspaceID: durableWorkspace.ID, WorkerID: workerID, SystemActor: systemActor(workerID, "background-run", "Background Run coordinator"),
 			Profile: availableProfile, ImageIdentity: backgroundImageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(backgroundRunEnvironment(cfg)), Agent: cfg.Tasks.Agent,
 			ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID,
@@ -308,10 +355,13 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 			OnSuccess: func() { status.Healthy(observability.ComponentBackgroundRunSerial) },
 		})
 		if err != nil {
-			_ = backgroundProvider.Close()
 			return nil, err
 		}
 		status.Healthy(observability.ComponentBackgroundRunSerial)
+	}
+	var runRoute runapi.RouteResolver
+	if availableProfile != "" {
+		runRoute = route
 	}
 	runs, err := runapi.New(runapi.Config{
 		WorkspaceID: durableWorkspace.ID, RepositoryID: durableWorkspace.RepositoryID,
@@ -320,7 +370,8 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 		Store: store, Generator: ids, ActorResolver: taskapi.ContextActor, BaseVerifier: baseVerifier,
 		Now: time.Now, AttemptTimeout: cfg.Tasks.AttemptTimeout, Agent: cfg.Tasks.Agent,
 		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID, BudgetSnapshot: budget,
-		Route: route,
+		Route:             runRoute,
+		SealPolicyVersion: "fern.background-user-seal.v1",
 		Wake: func() {
 			if backgroundCoordinator != nil {
 				backgroundCoordinator.Wake()
@@ -328,9 +379,6 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 		},
 	})
 	if err != nil {
-		if backgroundProvider != nil {
-			_ = backgroundProvider.Close()
-		}
 		return nil, err
 	}
 	closeOnError = false
@@ -345,11 +393,15 @@ func newTaskServices(ctx context.Context, cfg config.Config, docker *runtime.Doc
 	if verificationCoordinator != nil {
 		verificationService = verificationCoordinator
 	}
+	var backgroundService taskDeliveryService
+	if backgroundCoordinator != nil {
+		backgroundService = backgroundCoordinator
+	}
 	return &taskServices{
 		store: store, handler: handler, runs: runs, coordinator: coordinator,
 		execution: executionCoordinator, verification: verificationService, publication: publicationService,
 		result: resultCoordinator, resultWake: resultWake, status: status,
-		background: backgroundCoordinator, provider: backgroundProvider,
+		background: backgroundService, provider: backgroundProvider, artifact: artifactEngine,
 	}, nil
 }
 
@@ -469,7 +521,7 @@ func newResultSealing(store *taskstore.Store, manager *workspace.Manager, cfg co
 // newPublicationCoordinator builds the App-broker reconciler that opens draft
 // pull requests from immutable verified results. It returns nil unless the
 // workspace delegates GitHub authority to the App broker.
-func newPublicationCoordinator(parent context.Context, taskDirectory string, cfg config.Config, workspaceID task.WorkspaceID, workerID string, authority *gitHubAuthority, recoveryActor task.ActorSnapshot, store *taskstore.Store, manager *workspace.Manager, ids *task.Generator, status *observability.Registry, log *slog.Logger) (*taskpublicationcoord.Coordinator, error) {
+func newPublicationCoordinator(parent context.Context, taskDirectory string, cfg config.Config, workspaceID task.WorkspaceID, workerID string, authority *gitHubAuthority, recoveryActor task.ActorSnapshot, store *taskstore.Store, manager *workspace.Manager, source taskpublicationcoord.ResultSource, ids *task.Generator, status *observability.Registry, log *slog.Logger) (*taskpublicationcoord.Coordinator, error) {
 	if cfg.Workspace.GitHub.Mode != config.GitHubModeGitHubAppBroker {
 		return nil, nil
 	}
@@ -490,6 +542,7 @@ func newPublicationCoordinator(parent context.Context, taskDirectory string, cfg
 		OperationTimeout: taskOperationTimeout, PollInterval: taskPollInterval,
 		Actor:         systemActor(workerID, "task-publication", "Task publication coordinator"),
 		RecoveryActor: recoveryActor, Now: time.Now,
+		ResultSource: source,
 		OnError: func(err error) {
 			status.Degraded(observability.ComponentTaskPublication, err)
 			log.Error("task publication reconciliation deferred", "err", err, "workspace", cfg.Workspace.Name)
@@ -505,7 +558,7 @@ func newPublicationCoordinator(parent context.Context, taskDirectory string, cfg
 
 // newVerificationCoordinator builds the host-side verification coordinator when
 // a verification policy is configured; it returns nil otherwise.
-func newVerificationCoordinator(store *taskstore.Store, manager *workspace.Manager, ids *task.Generator, cfg config.Config, workspaceID task.WorkspaceID, imageID, workerID string, recoveryActor task.ActorSnapshot, status *observability.Registry, log *slog.Logger) (*taskverification.Coordinator, error) {
+func newVerificationCoordinator(store *taskstore.Store, manager *workspace.Manager, source taskverification.ResultSource, ids *task.Generator, cfg config.Config, workspaceID task.WorkspaceID, imageID, workerID string, recoveryActor task.ActorSnapshot, status *observability.Registry, log *slog.Logger) (*taskverification.Coordinator, error) {
 	configured := cfg.Tasks.Verification
 	if configured == nil {
 		return nil, nil
@@ -533,6 +586,7 @@ func newVerificationCoordinator(store *taskstore.Store, manager *workspace.Manag
 		PollInterval: taskPollInterval, Deadline: configured.Timeout + taskOperationTimeout,
 		Actor:         systemActor(workerID, "task-verification", "Task verification coordinator"),
 		RecoveryActor: recoveryActor, Now: time.Now,
+		ResultSource: source,
 		OnError: func(err error) {
 			status.Degraded(observability.ComponentTaskVerification, err)
 			log.Error("task verification deferred", "err", err, "workspace", cfg.Workspace.Name)

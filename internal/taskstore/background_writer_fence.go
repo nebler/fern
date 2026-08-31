@@ -78,9 +78,9 @@ func (s *Store) RecordBackgroundRunWriterFence(ctx context.Context, p RecordBack
 		runtime = p.RuntimeEpoch
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO background_run_writer_fences(
-seal_request_id,export_id,task_id,attempt_id,generation,kind,container_id,container_started_at,runtime_epoch,stopped_at,proof_sha256,recorded_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, p.SealRequestID, p.ExportID, p.TaskID, p.AttemptID, p.Generation, p.Kind,
-		containerID, started, runtime, stoppedAt, p.ProofSHA256[:], unixMillis(p.Now)); err != nil {
+seal_request_id,export_id,task_id,attempt_id,generation,kind,container_id,container_started_at,runtime_epoch,runtime_token,stopped_at,proof_sha256,recorded_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.SealRequestID, p.ExportID, p.TaskID, p.AttemptID, p.Generation, p.Kind,
+		containerID, started, runtime, nullableWriterToken(p.RuntimeToken), stoppedAt, p.ProofSHA256[:], unixMillis(p.Now)); err != nil {
 		return BackgroundRun{}, fmt.Errorf("insert writer fence: %w", err)
 	}
 	evidence := "writer_fence:sha256:" + hex.EncodeToString(p.ProofSHA256[:])
@@ -122,9 +122,11 @@ func WriterFenceProofDigest(p RecordBackgroundRunWriterFenceParams) ([32]byte, e
 		ContainerID        string                `json:"containerId,omitempty"`
 		ContainerStartedAt string                `json:"containerStartedAt,omitempty"`
 		RuntimeEpoch       int64                 `json:"runtimeEpoch,omitempty"`
+		RuntimeToken       string                `json:"runtimeToken,omitempty"`
 		StoppedAtMillis    *int64                `json:"stoppedAtMillis,omitempty"`
 	}{SealRequestID: p.SealRequestID, ExportID: p.ExportID, TaskID: p.TaskID, AttemptID: p.AttemptID,
-		Generation: p.Generation, Kind: p.Kind, ContainerID: p.ContainerID, ContainerStartedAt: p.ContainerStartedAt, RuntimeEpoch: p.RuntimeEpoch}
+		Generation: p.Generation, Kind: p.Kind, ContainerID: p.ContainerID, ContainerStartedAt: p.ContainerStartedAt, RuntimeEpoch: p.RuntimeEpoch,
+		RuntimeToken: p.RuntimeToken}
 	if p.StoppedAt != nil {
 		value := unixMillis(*p.StoppedAt)
 		proof.StoppedAtMillis = &value
@@ -136,12 +138,12 @@ func WriterFenceProofDigest(p RecordBackgroundRunWriterFenceParams) ([32]byte, e
 func validWriterFenceShape(p RecordBackgroundRunWriterFenceParams) bool {
 	switch p.Kind {
 	case WriterFenceNeverCreated:
-		return p.ContainerID == "" && p.ContainerStartedAt == "" && p.RuntimeEpoch == 0 && p.StoppedAt == nil
+		return p.ContainerID == "" && p.ContainerStartedAt == "" && p.RuntimeEpoch == 0 && p.RuntimeToken == "" && p.StoppedAt == nil
 	case WriterFenceNeverStarted:
-		return validBoundedText(p.ContainerID, 1, 128) && p.ContainerStartedAt == "" && p.RuntimeEpoch == 0 && p.StoppedAt == nil
+		return validBoundedText(p.ContainerID, 1, 128) && p.ContainerStartedAt == "" && p.RuntimeEpoch == 0 && p.RuntimeToken == "" && p.StoppedAt == nil
 	case WriterFenceRuntimeStopped:
 		return validBoundedText(p.ContainerID, 1, 128) && validBoundedText(p.ContainerStartedAt, 1, 64) && p.RuntimeEpoch > 0 &&
-			p.StoppedAt != nil && validExactTimestamp(*p.StoppedAt) == nil && !p.StoppedAt.After(p.Now)
+			validBoundedText(p.RuntimeToken, 1, 128) && p.StoppedAt != nil && validExactTimestamp(*p.StoppedAt) == nil && !p.StoppedAt.After(p.Now)
 	default:
 		return false
 	}
@@ -156,13 +158,13 @@ func (s *Store) GetBackgroundRunWriterFence(ctx context.Context, id task.SealReq
 
 func getWriterFence(ctx context.Context, q queryRower, id task.SealRequestID) (WriterFence, error) {
 	var value WriterFence
-	var containerID, started sql.NullString
+	var containerID, started, token sql.NullString
 	var runtime, stoppedAt, recordedAt sql.NullInt64
 	var proof []byte
 	err := q.QueryRowContext(ctx, `SELECT seal_request_id,export_id,task_id,attempt_id,generation,kind,container_id,
-container_started_at,runtime_epoch,stopped_at,proof_sha256,recorded_at FROM background_run_writer_fences WHERE seal_request_id=?`, id).
+container_started_at,runtime_epoch,runtime_token,stopped_at,proof_sha256,recorded_at FROM background_run_writer_fences WHERE seal_request_id=?`, id).
 		Scan(&value.SealRequestID, &value.ExportID, &value.TaskID, &value.AttemptID, &value.Generation, &value.Kind, &containerID,
-			&started, &runtime, &stoppedAt, &proof, &recordedAt)
+			&started, &runtime, &token, &stoppedAt, &proof, &recordedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return WriterFence{}, ErrNotFound
 	}
@@ -172,7 +174,7 @@ container_started_at,runtime_epoch,stopped_at,proof_sha256,recorded_at FROM back
 	if len(proof) != 32 {
 		return WriterFence{}, ErrCorruptStore
 	}
-	value.ContainerID, value.ContainerStartedAt, value.RuntimeEpoch = nullableText(containerID), nullableText(started), runtime.Int64
+	value.ContainerID, value.ContainerStartedAt, value.RuntimeEpoch, value.RuntimeToken = nullableText(containerID), nullableText(started), runtime.Int64, nullableText(token)
 	value.StoppedAt, value.RecordedAt = nullableTime(stoppedAt), fromUnixMillis(recordedAt.Int64)
 	copy(value.ProofSHA256[:], proof)
 	return value, nil
@@ -181,6 +183,13 @@ container_started_at,runtime_epoch,stopped_at,proof_sha256,recorded_at FROM back
 func writerFenceMatches(value WriterFence, p RecordBackgroundRunWriterFenceParams) bool {
 	return value.SealRequestID == p.SealRequestID && value.ExportID == p.ExportID && value.TaskID == p.TaskID &&
 		value.AttemptID == p.AttemptID && value.Generation == p.Generation && value.Kind == p.Kind && value.ContainerID == p.ContainerID &&
-		value.ContainerStartedAt == p.ContainerStartedAt && value.RuntimeEpoch == p.RuntimeEpoch && value.ProofSHA256 == p.ProofSHA256 &&
+		value.ContainerStartedAt == p.ContainerStartedAt && value.RuntimeEpoch == p.RuntimeEpoch && value.RuntimeToken == p.RuntimeToken && value.ProofSHA256 == p.ProofSHA256 &&
 		((value.StoppedAt == nil && p.StoppedAt == nil) || (value.StoppedAt != nil && p.StoppedAt != nil && value.StoppedAt.Equal(*p.StoppedAt)))
+}
+
+func nullableWriterToken(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
