@@ -60,7 +60,7 @@ RUN chmod 0755 /usr/local/bin/opencode \
     && test "$(opencode --version)" = "0.0.0-source-39fb919a054190498f6d5b7985bde231f93ad7a6"
 
 RUN groupadd --gid 1001 user && useradd --uid 1001 --gid 1001 -m -s /bin/bash user
-USER user
+USER 1001:1001
 WORKDIR /home/user
 
 ENV XDG_DATA_HOME=/home/user/.local/share \
@@ -71,4 +71,5 @@ VOLUME ["/home/user/workspace", "/home/user/.local/share/opencode"]
 WORKDIR /home/user/workspace
 
 EXPOSE 4096
+ENTRYPOINT []
 CMD ["opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"]

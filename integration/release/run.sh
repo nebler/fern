@@ -118,7 +118,7 @@ assert compatibility["first_supported_baseline"]["status"] == "repository-establ
 assert compatibility["first_supported_baseline"]["historical_release"] is False
 assert compatibility["first_supported_baseline"]["historical_tag"] is None
 assert compatibility["first_supported_baseline"]["task_store_schema"] == 4
-assert compatibility["current_release_schemas"]["task_store"] == 7
+assert compatibility["current_release_schemas"]["task_store"] == 8
 transaction = json.loads((root / "deploy/release/transaction-manifest.example.json").read_text())
 assert transaction["backup"]["format"] == "fern-host-backup-v1"
 assert transaction["activation"]["model"] == "staged-current-previous"
