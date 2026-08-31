@@ -10,7 +10,7 @@ import (
 )
 
 func TestEffectContextAllowsCleanupAfterAttemptDeadline(t *testing.T) {
-	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
+	now := time.Now().UTC()
 	expires := now.Add(time.Minute)
 	coordinator := &Coordinator{config: Config{Now: func() time.Time { return now }, OperationTimeout: 10 * time.Second}}
 	work := taskstore.BackgroundRunWork{
