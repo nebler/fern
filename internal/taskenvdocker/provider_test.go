@@ -1436,6 +1436,63 @@ func TestLostContainerRemoveResponseReconcilesWithFreshReads(t *testing.T) {
 	}
 }
 
+func TestShellContainersAreNetworklessCredentialFreeAndRoleScoped(t *testing.T) {
+	for _, tc := range []struct {
+		role     string
+		readOnly bool
+	}{
+		{ShellRoleInspector, true},
+		{ShellRoleHuman, false},
+	} {
+		t.Run(tc.role, func(t *testing.T) {
+			provider, docker, run := testProvider(t)
+			if _, err := provider.EnsureClone(context.Background(), run); err != nil {
+				t.Fatal(err)
+			}
+			created, err := provider.EnsureShellContainer(context.Background(), run, 2, tc.role)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !docker.createConfig.NetworkDisabled || docker.createHost.NetworkMode != "none" || len(docker.createHost.PortBindings) != 0 ||
+				len(docker.createHost.Mounts) != 1 || docker.createHost.Mounts[0].ReadOnly != tc.readOnly ||
+				slices.ContainsFunc(docker.createConfig.Env, func(value string) bool {
+					return strings.HasPrefix(value, passwordEnv+"=") || strings.HasPrefix(value, usernameEnv+"=") || strings.Contains(value, "API_KEY=")
+				}) {
+				t.Fatalf("unsafe %s shell config=%+v host=%+v", tc.role, docker.createConfig, docker.createHost)
+			}
+			started, err := provider.StartShellContainer(context.Background(), run, 2, tc.role, created.ContainerID)
+			if err != nil || started.RuntimeToken == "" {
+				t.Fatalf("start %s shell=%+v error=%v", tc.role, started, err)
+			}
+			if tc.role == ShellRoleInspector {
+				if _, err := provider.RemoveInspector(context.Background(), run, 2); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := provider.StopShellContainer(context.Background(), run, 2, tc.role, started.RuntimeIdentity()); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := provider.RemoveShellContainer(context.Background(), run, 2, tc.role, started.RuntimeIdentity()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if boundary, err := provider.ObserveGitBoundary(context.Background(), run); err != nil || !strings.Contains(boundary, `"schema":"fern.background-run.git-boundary.v1"`) {
+				t.Fatalf("Git boundary=%q error=%v", boundary, err)
+			}
+		})
+	}
+}
+
+func TestHumanShellCreationRequiresAllAgentWritersAbsent(t *testing.T) {
+	provider, _, run := preparedProvider(t)
+	if _, err := provider.EnsureContainer(context.Background(), run); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := provider.EnsureShellContainer(context.Background(), run, 2, ShellRoleHuman); !errors.Is(err, ErrQuarantined) {
+		t.Fatalf("human shell with agent writer error=%v", err)
+	}
+}
+
 func preparedProvider(t *testing.T) (*Provider, *fakeDocker, taskstore.BackgroundRun) {
 	t.Helper()
 	provider, docker, run := testProvider(t)
@@ -1495,7 +1552,7 @@ func testProvider(t *testing.T) (*Provider, *fakeDocker, taskstore.BackgroundRun
 }
 
 func qualifiedImage() image.InspectResponse {
-	return image.InspectResponse{ID: testImageID, Config: &container.Config{User: containerUser, Env: []string{"PATH=/usr/local/bin:/usr/bin", "XDG_DATA_HOME=/home/user/.local/share", "XDG_CONFIG_HOME=/home/user/.config"}, Cmd: []string{"opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"}, ExposedPorts: nat.PortSet{serverPort: struct{}{}}, Volumes: map[string]struct{}{workspaceTarget: {}, opencodeTarget: {}}, Labels: map[string]string{"org.opencontainers.image.source": expectedSource, "org.opencontainers.image.revision": expectedRevision, "org.opencontainers.image.version": expectedVersion, "ai.fern.opencode.profile": expectedProfile}}}
+	return image.InspectResponse{ID: testImageID, Config: &container.Config{User: containerUser, Env: []string{"PATH=/usr/local/bin:/usr/bin", "XDG_DATA_HOME=/home/user/.local/share", "XDG_CONFIG_HOME=/home/user/.config", "NODE_VERSION=22.23.2", "YARN_VERSION=1.22.22"}, Cmd: []string{"opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"}, ExposedPorts: nat.PortSet{serverPort: struct{}{}}, Volumes: map[string]struct{}{workspaceTarget: {}, opencodeTarget: {}}, Labels: map[string]string{"org.opencontainers.image.source": expectedSource, "org.opencontainers.image.revision": expectedRevision, "org.opencontainers.image.version": expectedVersion, "ai.fern.opencode.profile": expectedProfile}}}
 }
 
 const fakeContainerID = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
@@ -1641,17 +1698,47 @@ func (f *fakeDocker) ContainerCreate(ctx context.Context, c *container.Config, h
 	if err := ctx.Err(); err != nil {
 		return container.CreateResponse{}, err
 	}
+	merged := *c
+	imageConfig := qualifiedImage().Config
+	environment, _ := parseEnvironment(imageConfig.Env)
+	provided, _ := parseEnvironment(c.Env)
+	for key, value := range provided {
+		environment[key] = value
+	}
+	merged.Env = make([]string, 0, len(environment))
+	for key, value := range environment {
+		merged.Env = append(merged.Env, key+"="+value)
+	}
+	merged.Volumes = cloneMap(imageConfig.Volumes)
+	for key := range c.Volumes {
+		merged.Volumes[key] = struct{}{}
+	}
+	merged.ExposedPorts = cloneMap(imageConfig.ExposedPorts)
+	for key := range c.ExposedPorts {
+		merged.ExposedPorts[key] = struct{}{}
+	}
+	c = &merged
 	f.createConfig = c
 	f.createHost = h
 	c.Hostname = fakeContainerID[:12]
-	points := []container.MountPoint{
-		{Type: mount.TypeBind, Source: h.Mounts[0].Source, Destination: h.Mounts[0].Target, RW: true, Propagation: mount.PropagationRPrivate},
-		{Type: mount.TypeVolume, Name: h.Mounts[1].Source, Source: "/daemon-data/volumes/" + h.Mounts[1].Source + "/mount", Destination: h.Mounts[1].Target, Driver: "local", Mode: "daemon-default", RW: true},
+	points := make([]container.MountPoint, 0, len(h.Mounts))
+	for _, configured := range h.Mounts {
+		point := container.MountPoint{Type: configured.Type, Source: configured.Source, Destination: configured.Target, RW: !configured.ReadOnly}
+		if configured.Type == mount.TypeBind {
+			point.Propagation = mount.PropagationRPrivate
+		} else if configured.Type == mount.TypeVolume {
+			point.Name, point.Source, point.Driver, point.Mode = configured.Source, "/daemon-data/volumes/"+configured.Source+"/mount", "local", "daemon-default"
+		}
+		points = append(points, point)
+	}
+	networks := map[string]*network.EndpointSettings{}
+	if h.NetworkMode == "bridge" {
+		networks["bridge"] = &network.EndpointSettings{}
 	}
 	f.info = container.InspectResponse{
 		ContainerJSONBase: &container.ContainerJSONBase{ID: fakeContainerID, Name: "/" + name, Image: c.Image, HostConfig: h, State: &container.State{Status: "created"}},
 		Config:            c, Mounts: points,
-		NetworkSettings: &container.NetworkSettings{NetworkSettingsBase: container.NetworkSettingsBase{Ports: nat.PortMap{}}, Networks: map[string]*network.EndpointSettings{"bridge": {}}},
+		NetworkSettings: &container.NetworkSettings{NetworkSettingsBase: container.NetworkSettingsBase{Ports: nat.PortMap{}}, Networks: networks},
 	}
 	response := container.CreateResponse{ID: fakeContainerID}
 	if f.loseCreateResponse {
@@ -1670,7 +1757,9 @@ func (f *fakeDocker) ContainerStart(ctx context.Context, id string, _ container.
 	}
 	f.starts++
 	f.info.State = &container.State{Status: "running", Running: true, StartedAt: "2026-08-31T12:00:00.123456789Z"}
-	f.info.NetworkSettings.Ports = nat.PortMap{serverPort: []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: f.hostPort}}}
+	if f.info.HostConfig.NetworkMode == "bridge" {
+		f.info.NetworkSettings.Ports = nat.PortMap{serverPort: []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: f.hostPort}}}
+	}
 	if f.loseStartResponse {
 		f.wantFreshRead++
 		return context.DeadlineExceeded

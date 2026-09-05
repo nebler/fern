@@ -150,50 +150,53 @@ type BackgroundRun struct {
 	ObservedContainerID        string
 	ObservedContainerStartedAt string
 	RuntimeEpoch               int64
-	HostPort                   int
-	CloneEvidence              string
-	VolumeEvidence             string
-	HealthEvidence             string
-	ReadyEvidence              string
-	SessionEvidence            string
-	PromptEvidence             string
-	WriterInactiveEvidence     string
-	RouteRemovedEvidence       string
-	ContainerRemovedEvidence   string
-	VolumeRemovedEvidence      string
-	CloneRemovedEvidence       string
-	LastEvidence               string
-	LastError                  string
-	ProvisionIntentAt          *time.Time
-	CloneObservedAt            *time.Time
-	VolumeObservedAt           *time.Time
-	ContainerObservedAt        *time.Time
-	HealthObservedAt           *time.Time
-	ReadyAt                    *time.Time
-	SessionObservedAt          *time.Time
-	PromptIntentAt             *time.Time
-	PromptRequestAttemptedAt   *time.Time
-	PromptAdmittedAt           *time.Time
-	TimeoutRequestedAt         *time.Time
-	TimeoutActor               *task.ActorSnapshot
-	StopIntentAt               *time.Time
-	WriterInactiveAt           *time.Time
-	RouteRemovedAt             *time.Time
-	ContainerRemovedAt         *time.Time
-	VolumeRemovedAt            *time.Time
-	CloneRemovedAt             *time.Time
-	CleanupCompletedAt         *time.Time
-	CleanupProof               string
-	AbsenceProof               string
-	BackgroundSealRequestID    task.SealRequestID
-	ArtifactExportID           task.ArtifactExportID
-	RetainedArtifactID         task.RetainedArtifactID
-	MaterializationID          task.MaterializationID
-	RetainedResultID           task.ResultID
-	ResultAuthorityPhase       string
-	Revision                   int64
-	CreatedAt                  time.Time
-	UpdatedAt                  time.Time
+	// WriterGeneration is a joined ownership projection. It is not stored in
+	// background_runs and defaults to one for pre-takeover runtimes.
+	WriterGeneration         int64
+	HostPort                 int
+	CloneEvidence            string
+	VolumeEvidence           string
+	HealthEvidence           string
+	ReadyEvidence            string
+	SessionEvidence          string
+	PromptEvidence           string
+	WriterInactiveEvidence   string
+	RouteRemovedEvidence     string
+	ContainerRemovedEvidence string
+	VolumeRemovedEvidence    string
+	CloneRemovedEvidence     string
+	LastEvidence             string
+	LastError                string
+	ProvisionIntentAt        *time.Time
+	CloneObservedAt          *time.Time
+	VolumeObservedAt         *time.Time
+	ContainerObservedAt      *time.Time
+	HealthObservedAt         *time.Time
+	ReadyAt                  *time.Time
+	SessionObservedAt        *time.Time
+	PromptIntentAt           *time.Time
+	PromptRequestAttemptedAt *time.Time
+	PromptAdmittedAt         *time.Time
+	TimeoutRequestedAt       *time.Time
+	TimeoutActor             *task.ActorSnapshot
+	StopIntentAt             *time.Time
+	WriterInactiveAt         *time.Time
+	RouteRemovedAt           *time.Time
+	ContainerRemovedAt       *time.Time
+	VolumeRemovedAt          *time.Time
+	CloneRemovedAt           *time.Time
+	CleanupCompletedAt       *time.Time
+	CleanupProof             string
+	AbsenceProof             string
+	BackgroundSealRequestID  task.SealRequestID
+	ArtifactExportID         task.ArtifactExportID
+	RetainedArtifactID       task.RetainedArtifactID
+	MaterializationID        task.MaterializationID
+	RetainedResultID         task.ResultID
+	ResultAuthorityPhase     string
+	Revision                 int64
+	CreatedAt                time.Time
+	UpdatedAt                time.Time
 }
 
 type StopBackgroundRunParams struct {

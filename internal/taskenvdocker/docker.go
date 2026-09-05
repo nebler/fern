@@ -106,6 +106,15 @@ func (p *Provider) EnsureContainer(ctx context.Context, run taskstore.Background
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	status := "reconciled"
 	if errdefs.IsNotFound(err) {
+		writers, listErr := p.listWriterContainers(operation, run)
+		if listErr != nil {
+			cancel()
+			return Observation{}, listErr
+		}
+		if len(writers) != 0 {
+			cancel()
+			return Observation{}, &IdentityError{Resource: "writer", Identity: run.ContainerIdentity, Reason: "another run writer container still exists"}
+		}
 		useInit := true
 		pids := p.config.PIDs
 		environment := p.expectedEnvironment(run)
@@ -559,6 +568,15 @@ func (p *Provider) StopContainer(ctx context.Context, run taskstore.BackgroundRu
 		} else if !errdefs.IsNotFound(idErr) {
 			cancel()
 			return Observation{}, idErr
+		}
+		writers, listErr := p.listWriterContainers(operation, run)
+		if listErr != nil {
+			cancel()
+			return Observation{}, listErr
+		}
+		if len(writers) != 0 {
+			cancel()
+			return Observation{}, &IdentityError{Resource: "writer", Identity: run.ContainerIdentity, Reason: "another run writer container still exists"}
 		}
 		cancel()
 		e, _ := makeEvidence(evidence{Effect: "writer_inactive", Identity: run.ContainerIdentity, Spec: digest, Status: "absent", Container: runtime.ContainerID, Started: runtime.StartedAt, Runtime: runtime.Token})

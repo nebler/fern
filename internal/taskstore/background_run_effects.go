@@ -39,8 +39,11 @@ func (s *Store) ClaimNextBackgroundRun(ctx context.Context, p ClaimNextBackgroun
 FROM background_runs r
 JOIN tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id AND t.current_attempt_id=r.attempt_id
 JOIN attempts a ON a.id=r.attempt_id AND a.task_id=r.task_id AND a.workspace_id=r.workspace_id AND a.sequence=r.generation
+JOIN background_run_ownerships o ON o.task_id=r.task_id AND o.attempt_id=r.attempt_id AND o.workspace_id=r.workspace_id AND o.run_generation=r.generation
 WHERE r.workspace_id=? AND r.profile=? AND r.state<>'failed' AND
 	NOT (r.state='result_ready' AND r.effect_phase='cleanup_complete') AND
+	o.mode='agent_owned' AND
+	NOT EXISTS (SELECT 1 FROM background_run_controls c WHERE c.task_id=r.task_id AND c.state IN ('requested','attempted')) AND
   (r.claim_owner=? OR r.claim_owner IS NULL OR r.claim_expires_at<=?) AND
   ((r.state='queued' AND r.cancel_epoch=0 AND NOT EXISTS (
       SELECT 1 FROM background_runs active WHERE active.workspace_id=r.workspace_id AND active.profile=? AND

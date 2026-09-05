@@ -29,7 +29,7 @@ form.grid{display:grid;gap:10px}input{width:100%;min-height:48px;padding:13px 14
 </style>
 </head>
 <body><main>
-<section class="hero"><div class="mark">F</div><h1>Fern Background Runs</h1><p>Submit work from the OpenCode plugin, inspect the exact live session, then retain an immutable Git result.</p><div class="status"><span class="dot"></span> Private control plane connected</div><small>Run compute is disposable. Receipts, audit identity, and retained results are durable.</small></section>
+<section class="hero"><div class="mark">F</div><h1>Fern Background Runs</h1><p>Submit work from the OpenCode plugin, inspect the exact live session, then retain an immutable Git result.</p><div class="status"><span class="dot"></span> Private control plane connected</div>{{if .RunsEnabled}}<a class="primary" href="/fern/runs">Open run control deck</a>{{end}}<small>Run compute is disposable. Receipts, audit identity, and retained results are durable.</small></section>
 {{if .Control}}
 {{if .OnboardingEnabled}}<section class="panel"><h2>GitHub App</h2><p>Create this host's private GitHub App credentials through GitHub's one-time manifest flow.</p><a class="primary" href="/fern/github/app/setup?return=%2Ffern%2Fcontrol%3Fconnected%3D1">Connect GitHub App</a><small>After creation, install the App on the configured repository, set workspace.github.installationId from the installation URL, and restart Fern.</small></section>{{end}}
 <section class="panel"><h2>Paired devices</h2>{{if .Devices}}<ul>{{range .Devices}}<li><div class="title">{{.Name}}</div><span class="meta">Last seen {{.LastSeen.Format "2006-01-02 15:04 UTC"}}</span><form method="post" action="/fern/devices/{{.ID}}/revoke"><button class="danger" type="submit">Revoke</button></form></li>{{end}}</ul>{{else}}<p>No durable devices are paired.</p>{{end}}</section>
@@ -40,6 +40,7 @@ type landingView struct {
 	Control           bool
 	Devices           []control.Device
 	OnboardingEnabled bool
+	RunsEnabled       bool
 }
 
 func gatewayHandler(controls Controls) http.Handler {
@@ -82,7 +83,7 @@ func serveFern(writer http.ResponseWriter, request *http.Request, controls Contr
 			return
 		}
 		controlPage := request.URL.Path == "/fern/control"
-		view := landingView{Control: controlPage && controls.Store != nil, OnboardingEnabled: controls.Onboarding != nil}
+		view := landingView{Control: controlPage && controls.Store != nil, OnboardingEnabled: controls.Onboarding != nil, RunsEnabled: controls.RunControl != nil}
 		if controlPage && controls.Store != nil {
 			var err error
 			view.Devices, err = controls.Store.Devices(time.Now())

@@ -24,6 +24,8 @@ import (
 	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/resultapi"
 	"github.com/nebler/fern/internal/runapi"
+	"github.com/nebler/fern/internal/runcontrol"
+	"github.com/nebler/fern/internal/runterminal"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
@@ -58,6 +60,7 @@ type taskWakeService interface {
 type taskServices struct {
 	store        *taskstore.Store
 	runs         http.Handler
+	runControl   http.Handler
 	results      http.Handler
 	verification taskRunService
 	publication  taskRunService
@@ -179,7 +182,7 @@ func newTaskServices(ctx context.Context, cfg config.BackgroundConfig, route *ba
 		RepositoryFullName: github.Repository.FullName, ImageDigest: cfg.Tasks.BackgroundImageID,
 		OpenCodeProtocol: runapi.APIContractVersion, RuntimeDesiredState: "disposable", ReconciliationEpoch: 1, CreatedAt: now}
 	if existing, readErr := store.GetWorkspaceByName(ctx, cfg.Workspace.Name); readErr == nil {
-		// Preserve retired runtime metadata in schema-10 databases while still
+		// Preserve retired runtime metadata from upgraded databases while still
 		// checking every repository and GitHub authority field through EnsureWorkspace.
 		desired.ID, desired.ImageDigest, desired.OpenCodeProtocol = existing.ID, existing.ImageDigest, existing.OpenCodeProtocol
 		desired.RuntimeDesiredState, desired.ReconciliationEpoch, desired.CreatedAt = existing.RuntimeDesiredState, existing.ReconciliationEpoch, existing.CreatedAt
@@ -245,6 +248,17 @@ func newTaskServices(ctx context.Context, cfg config.BackgroundConfig, route *ba
 	if err != nil {
 		return nil, err
 	}
+	terminal, err := runterminal.New(coordinator)
+	if err != nil {
+		return nil, err
+	}
+	runControl, err := runcontrol.New(runcontrol.Config{
+		WorkspaceID: durableWorkspace.ID, Store: store, Controller: coordinator, Generator: ids,
+		Terminal: terminal, ActorResolver: task.ContextActor, Now: time.Now,
+	})
+	if err != nil {
+		return nil, err
+	}
 	results, err := resultapi.New(resultapi.Config{
 		WorkspaceID: durableWorkspace.ID, Store: store, Generator: ids, ActorResolver: task.ContextActor,
 		Wake: publication.Wake, Now: time.Now, PublicationPolicyVersion: publicationBrokerPolicyVersion,
@@ -256,7 +270,7 @@ func newTaskServices(ctx context.Context, cfg config.BackgroundConfig, route *ba
 	status.Qualified(observability.ComponentBackgroundRunProfile)
 	status.Healthy(observability.ComponentBackgroundRunSerial)
 	closeStore, closeArtifact, closeProvider = false, false, false
-	return &taskServices{store: store, runs: runs, results: results, verification: verificationCoordinator, publication: publication,
+	return &taskServices{store: store, runs: runs, runControl: runControl, results: results, verification: verificationCoordinator, publication: publication,
 		background: coordinator, provider: provider, artifact: artifact, status: status}, nil
 }
 

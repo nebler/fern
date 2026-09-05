@@ -408,7 +408,7 @@ func (p *Provider) BackgroundRouteTarget(run taskstore.BackgroundRun, runtime Ru
 		return connection, nil
 	}
 	transport.base = base
-	return backgroundroute.NewTarget("http://"+endpoint, transport)
+	return backgroundroute.NewReadOnlyTarget("http://"+endpoint, transport)
 }
 
 type routeTransport struct {

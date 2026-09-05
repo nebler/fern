@@ -51,6 +51,13 @@ WHERE r.workspace_id=? AND r.task_id=? AND c.actor_type=? AND c.actor_id=? AND c
 	if err != nil {
 		return BackgroundRun{}, fmt.Errorf("read background run: %w", err)
 	}
+	if ownership, ownershipErr := getBackgroundRunOwnership(ctx, s.db, workspaceID, taskID); ownershipErr == nil {
+		run.WriterGeneration = ownership.WriterGeneration
+		if ownership.Mode == BackgroundRunAgentOwned && ownership.ContainerIdentity == run.ContainerIdentity && ownership.ContainerID != "" {
+			run.ObservedContainerID, run.ObservedContainerStartedAt = ownership.ContainerID, ownership.ContainerStartedAt
+			run.RuntimeEpoch, run.HostPort = ownership.RuntimeEpoch, ownership.HostPort
+		}
+	}
 	return run, nil
 }
 
@@ -146,6 +153,20 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 	run, err := getBackgroundRunOwned(ctx, tx, p.WorkspaceID, p.TaskID, p.Claim.Actor)
 	if err != nil {
 		return BackgroundRunStop{}, err
+	}
+	ownership, err := getBackgroundRunOwnership(ctx, tx, p.WorkspaceID, p.TaskID)
+	if err != nil {
+		return BackgroundRunStop{}, err
+	}
+	if ownership.Mode != BackgroundRunAgentOwned || ownership.Phase != BackgroundRunOwnershipAgentActive {
+		return BackgroundRunStop{}, ErrInvalidState
+	}
+	var activeControls int
+	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM background_run_controls WHERE task_id=? AND state IN ('requested','attempted')`, run.TaskID).Scan(&activeControls); err != nil {
+		return BackgroundRunStop{}, err
+	}
+	if activeControls != 0 {
+		return BackgroundRunStop{}, ErrInvalidState
 	}
 	queuedStop := run.State == BackgroundRunQueued && run.EffectPhase == BackgroundRunEffectAbsent
 	activeStop := run.State == BackgroundRunSettingUp || run.State == BackgroundRunWorking || run.State == BackgroundRunNeedsYou || run.State == BackgroundRunUncertain

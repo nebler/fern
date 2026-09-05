@@ -336,6 +336,10 @@ func TestBackgroundRunClaimsCapacityRecoveryAndActiveStop(t *testing.T) {
 	if err != nil || final.State != BackgroundRunFailed || final.EffectPhase != BackgroundRunEffectCleanupComplete || final.ClaimOwner != "" {
 		t.Fatalf("active finalization = %+v, error = %v", final, err)
 	}
+	ownership, ownershipErr := store.GetBackgroundRunOwnership(context.Background(), final.WorkspaceID, final.TaskID)
+	if ownershipErr != nil || ownership.Mode != BackgroundRunOwnershipClosed || ownership.Phase != BackgroundRunOwnershipClosedPhase {
+		t.Fatalf("terminal ownership = %+v, error = %v", ownership, ownershipErr)
+	}
 	if err := store.db.QueryRow(`SELECT t.state,a.state,t.terminal_reason,a.terminal_reason FROM tasks t JOIN attempts a ON a.id=t.current_attempt_id WHERE t.id=?`, final.TaskID).
 		Scan(&taskState, &attemptState, new(string), new(string)); err != nil || taskState != "failed" || attemptState != "failed" {
 		t.Fatalf("final parent task=%q attempt=%q error=%v", taskState, attemptState, err)

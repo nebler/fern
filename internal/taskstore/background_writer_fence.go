@@ -56,10 +56,18 @@ func (s *Store) RecordBackgroundRunWriterFence(ctx context.Context, p RecordBack
 		run.ClaimExpiresAt == nil || !run.ClaimExpiresAt.After(p.Now) || run.BackgroundSealRequestID != p.SealRequestID || run.ArtifactExportID != p.ExportID {
 		return BackgroundRun{}, ErrLeaseConflict
 	}
-	if p.Kind == WriterFenceRuntimeStopped && (p.ContainerID != run.ObservedContainerID || p.ContainerStartedAt != run.ObservedContainerStartedAt || p.RuntimeEpoch != run.RuntimeEpoch) {
+	ownership, err := getBackgroundRunOwnership(ctx, tx, p.WorkspaceID, p.TaskID)
+	if err != nil || ownership.Mode != BackgroundRunAgentOwned || ownership.Phase != BackgroundRunOwnershipAgentActive {
 		return BackgroundRun{}, ErrInvalidState
 	}
-	if (p.Kind == WriterFenceNeverCreated || p.Kind == WriterFenceNeverStarted) && run.ObservedContainerID != "" {
+	expectedContainerID, expectedStartedAt, expectedRuntimeEpoch := run.ObservedContainerID, run.ObservedContainerStartedAt, run.RuntimeEpoch
+	if ownership.ContainerIdentity == run.ContainerIdentity && ownership.ContainerID != "" {
+		expectedContainerID, expectedStartedAt, expectedRuntimeEpoch = ownership.ContainerID, ownership.ContainerStartedAt, ownership.RuntimeEpoch
+	}
+	if p.Kind == WriterFenceRuntimeStopped && (p.ContainerID != expectedContainerID || p.ContainerStartedAt != expectedStartedAt || p.RuntimeEpoch != expectedRuntimeEpoch) {
+		return BackgroundRun{}, ErrInvalidState
+	}
+	if (p.Kind == WriterFenceNeverCreated || p.Kind == WriterFenceNeverStarted) && expectedContainerID != "" {
 		return BackgroundRun{}, ErrInvalidState
 	}
 	var stoppedAt any

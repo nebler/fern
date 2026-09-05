@@ -4,10 +4,12 @@ Fern runs disposable OpenCode jobs on your Docker host and retains exact Git
 results after their compute is removed.
 
 The primary interface is the `@fern/opencode` plugin. It submits a clean local
-Git revision to Fern, follows the run, opens the exact live OpenCode session for
-inspection and steering, stops it, or explicitly seals its work. Fern owns the
-durable receipt, runtime identity, writer fence, artifact, verification record,
-and GitHub App publication journal.
+Git revision to Fern, follows the run, opens the exact read-only live OpenCode
+session, stops it, or explicitly seals its work. Paired devices and the local
+operator can also inspect, interrupt, steer, or perform a cold writable
+takeover and handback through Fern's run-control deck. Fern owns the durable
+receipt, runtime identity, writer fence, artifact, verification record, and
+GitHub App publication journal.
 
 Fern does not maintain a persistent coding workspace and does not proxy a
 general-purpose OpenCode server.
@@ -120,21 +122,26 @@ credential digests server-side.
 
 ## Human Access
 
-`open` is inspection and steering, not a writable human takeover lease. The
-current OpenCode API can interrupt one session, but it cannot atomically fence
-all session, tool, shell-child, background-job, plugin, MCP, and PTY writers.
-Fern therefore does not claim safe writable takeover and will not expose one by
-combining `session.interrupt` with a writable route.
+The live OpenCode route is read-only: Fern permits `GET` and `HEAD` and rejects
+mutations and upgrades before they reach OpenCode. Paired devices and the local
+operator use `/fern/runs` for durable warm interrupt/steer controls and a
+networkless, credential-free read-only inspector terminal.
 
-The required ownership protocol and upstream writer-barrier contract are in
-`ARCHITECTURE.md`. Until that barrier exists, the safe choices are inspect and
-steer, stop, or seal.
+Writable access is a cold ownership transfer. Fern first closes and drains the
+agent route and inspector, stops and removes the exact agent process epoch, and
+deletes its disposable OpenCode volume. Only then does it start a networkless,
+credential-free PID 1 Bash container with the run clone mounted writable. On
+handback Fern drains and removes that human writer, captures a Git boundary,
+starts a fresh OpenCode volume/container/session, submits a re-read/resume
+prompt, and restores the read-only agent route under a higher writer generation.
+Ambiguous evidence leaves all routes closed.
 
 ## Durable State
 
 Fern keeps:
 
-- taskstore schema 10 records, receipts, claims, journals, and actor snapshots;
+- taskstore schema 11 records, receipts, claims, ownership transfers, control
+  journals, and actor snapshots;
 - paired-device and plugin authorization digests;
 - GitHub App credentials;
 - retained artifact CAS objects and materialized-result authority;
@@ -142,8 +149,9 @@ Fern keeps:
 - the host key used to identify disposable Docker resources.
 
 Run clones, artifact work directories, publication checkouts, containers, and
-volumes are disposable. Existing schema-10 `persistent_workspace` records stay
-readable for upgrades but cannot become new verification or publication work.
+volumes are disposable. Existing pre-schema-11 `persistent_workspace` records
+stay readable for upgrades but cannot become new verification or publication
+work.
 
 Offline backup and encrypted credential commands remain available:
 
@@ -202,4 +210,4 @@ bun test
 
 `ARCHITECTURE.md` is the detailed system contract: components, state machines,
 trust boundaries, evidence, recovery, deployment, backup, release gates, and
-the writable-takeover no-go condition.
+the cold writer-ownership transfer.

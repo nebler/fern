@@ -26,10 +26,154 @@ var migrations = []migration{
 	{version: 8, name: "background_run_effect_claims", sql: backgroundRunEffectClaimSchema},
 	{version: 9, name: "background_run_prompt_attempt_fence", sql: backgroundRunPromptAttemptFenceSchema},
 	{version: 10, name: "background_run_retained_result_authority", sql: backgroundRunRetainedResultAuthoritySchema},
+	{version: 11, name: "background_run_writer_ownership", sql: backgroundRunWriterOwnershipSchema},
 }
 
 // CurrentSchemaVersion is the schema produced by all migrations in this build.
 func CurrentSchemaVersion() int { return len(migrations) }
+
+const backgroundRunWriterOwnershipSchema = `
+CREATE TABLE background_run_ownerships (
+  task_id TEXT PRIMARY KEY REFERENCES background_runs(task_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  attempt_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  run_generation INTEGER NOT NULL CHECK(run_generation>0),
+  mode TEXT NOT NULL CHECK(mode IN ('agent_owned','takeover_requested','human_owned','handback_requested','uncertain','closed')),
+  phase TEXT NOT NULL CHECK(phase IN (
+    'agent_active','agent_route_removal','agent_stop','agent_remove','agent_volume_remove','human_create','human_start','human_active',
+    'human_route_removal','human_stop','human_remove','agent_volume_create','agent_create','agent_start','agent_health','agent_session',
+    'agent_prompt','uncertain','closed')),
+  writer_generation INTEGER NOT NULL CHECK(writer_generation>0),
+  container_identity TEXT CHECK(container_identity IS NULL OR length(CAST(container_identity AS BLOB)) BETWEEN 1 AND 256),
+  container_id TEXT CHECK(container_id IS NULL OR length(CAST(container_id AS BLOB)) BETWEEN 1 AND 128),
+  container_started_at TEXT CHECK(container_started_at IS NULL OR length(CAST(container_started_at AS BLOB)) BETWEEN 1 AND 64),
+  runtime_epoch INTEGER CHECK(runtime_epoch IS NULL OR runtime_epoch>0),
+  runtime_token TEXT CHECK(runtime_token IS NULL OR length(runtime_token)=64),
+  volume_identity TEXT CHECK(volume_identity IS NULL OR length(CAST(volume_identity AS BLOB)) BETWEEN 1 AND 256),
+  endpoint_identity TEXT CHECK(endpoint_identity IS NULL OR length(CAST(endpoint_identity AS BLOB)) BETWEEN 1 AND 256),
+  host_port INTEGER CHECK(host_port IS NULL OR host_port BETWEEN 1 AND 65535),
+  opencode_session_id TEXT,
+  opencode_message_id TEXT,
+  target_writer_generation INTEGER CHECK(target_writer_generation IS NULL OR target_writer_generation>=writer_generation),
+  target_container_identity TEXT CHECK(target_container_identity IS NULL OR length(CAST(target_container_identity AS BLOB)) BETWEEN 1 AND 256),
+  target_volume_identity TEXT CHECK(target_volume_identity IS NULL OR length(CAST(target_volume_identity AS BLOB)) BETWEEN 1 AND 256),
+  target_endpoint_identity TEXT CHECK(target_endpoint_identity IS NULL OR length(CAST(target_endpoint_identity AS BLOB)) BETWEEN 1 AND 256),
+  target_opencode_session_id TEXT,
+  target_opencode_message_id TEXT,
+  request_receipt_id TEXT REFERENCES receipts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  request_actor_snapshot_id INTEGER REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  requested_at INTEGER,
+  route_evidence TEXT CHECK(route_evidence IS NULL OR length(CAST(route_evidence AS BLOB)) BETWEEN 1 AND 4096),
+  writer_evidence TEXT CHECK(writer_evidence IS NULL OR length(CAST(writer_evidence AS BLOB)) BETWEEN 1 AND 4096),
+  resource_evidence TEXT CHECK(resource_evidence IS NULL OR length(CAST(resource_evidence AS BLOB)) BETWEEN 1 AND 4096),
+  git_evidence TEXT CHECK(git_evidence IS NULL OR length(CAST(git_evidence AS BLOB)) BETWEEN 1 AND 4096),
+  last_error TEXT CHECK(last_error IS NULL OR length(CAST(last_error AS BLOB)) BETWEEN 1 AND 4096),
+  claim_owner TEXT CHECK(claim_owner IS NULL OR length(CAST(claim_owner AS BLOB)) BETWEEN 1 AND 128),
+  claim_expires_at INTEGER,
+  claim_generation INTEGER NOT NULL DEFAULT 0 CHECK(claim_generation>=0),
+  revision INTEGER NOT NULL CHECK(revision>=1),
+  created_at INTEGER NOT NULL CHECK(created_at>=0),
+  updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),
+  CHECK((claim_owner IS NULL AND claim_expires_at IS NULL) OR
+        (claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_generation>0 AND claim_expires_at>updated_at AND claim_expires_at<=updated_at+300000)),
+  CHECK((request_receipt_id IS NULL AND request_actor_snapshot_id IS NULL AND requested_at IS NULL) OR
+        (request_receipt_id IS NOT NULL AND request_actor_snapshot_id IS NOT NULL AND requested_at IS NOT NULL)),
+  CHECK((container_id IS NULL AND container_started_at IS NULL AND runtime_epoch IS NULL AND runtime_token IS NULL) OR
+        (container_id IS NOT NULL AND container_started_at IS NOT NULL AND runtime_epoch IS NOT NULL AND runtime_token IS NOT NULL)),
+  CHECK((mode='agent_owned' AND phase='agent_active') OR
+        (mode='human_owned' AND phase='human_active') OR
+        (mode='takeover_requested' AND phase IN ('agent_route_removal','agent_stop','agent_remove','agent_volume_remove','human_create','human_start')) OR
+        (mode='handback_requested' AND phase IN ('human_route_removal','human_stop','human_remove','agent_volume_create','agent_create','agent_start','agent_health','agent_session','agent_prompt')) OR
+        (mode='uncertain' AND phase='uncertain') OR (mode='closed' AND phase='closed')),
+  FOREIGN KEY(attempt_id,task_id,workspace_id) REFERENCES attempts(id,task_id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  UNIQUE(task_id,run_generation)
+) STRICT;
+
+INSERT INTO background_run_ownerships(
+  task_id,attempt_id,workspace_id,run_generation,mode,phase,writer_generation,
+  container_identity,container_id,container_started_at,runtime_epoch,volume_identity,endpoint_identity,host_port,
+  opencode_session_id,opencode_message_id,revision,created_at,updated_at
+)
+SELECT task_id,attempt_id,workspace_id,generation,
+  CASE WHEN state IN ('failed','result_ready') AND effect_phase IN ('cleanup_complete','pre_effect_failed') THEN 'closed' ELSE 'agent_owned' END,
+  CASE WHEN state IN ('failed','result_ready') AND effect_phase IN ('cleanup_complete','pre_effect_failed') THEN 'closed' ELSE 'agent_active' END,
+  1,container_identity,NULL,NULL,NULL,volume_identity,endpoint_identity,NULL,
+  opencode_session_id,opencode_message_id,1,created_at,updated_at
+FROM background_runs;
+
+CREATE INDEX background_run_ownership_work ON background_run_ownerships(workspace_id,mode,claim_expires_at,updated_at,task_id);
+CREATE TRIGGER background_run_ownership_insert AFTER INSERT ON background_runs
+BEGIN
+  INSERT INTO background_run_ownerships(
+    task_id,attempt_id,workspace_id,run_generation,mode,phase,writer_generation,container_identity,volume_identity,
+    endpoint_identity,opencode_session_id,opencode_message_id,revision,created_at,updated_at)
+  VALUES(NEW.task_id,NEW.attempt_id,NEW.workspace_id,NEW.generation,'agent_owned','agent_active',1,NEW.container_identity,
+    NEW.volume_identity,NEW.endpoint_identity,NEW.opencode_session_id,NEW.opencode_message_id,1,NEW.created_at,NEW.updated_at);
+END;
+CREATE TRIGGER background_run_ownership_revision BEFORE UPDATE ON background_run_ownerships
+WHEN NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at
+BEGIN SELECT RAISE(ABORT, 'invalid background run ownership revision'); END;
+CREATE TRIGGER background_run_ownership_identity BEFORE UPDATE ON background_run_ownerships
+WHEN NEW.task_id<>OLD.task_id OR NEW.attempt_id<>OLD.attempt_id OR NEW.workspace_id<>OLD.workspace_id OR
+     NEW.run_generation<>OLD.run_generation OR NEW.created_at<>OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'background run ownership identity is immutable'); END;
+CREATE TRIGGER background_run_ownership_close AFTER UPDATE ON background_runs
+WHEN NEW.effect_phase IN ('cleanup_complete','pre_effect_failed') AND OLD.effect_phase<>NEW.effect_phase
+BEGIN
+  UPDATE background_run_ownerships SET mode='closed',phase='closed',claim_owner=NULL,claim_expires_at=NULL,
+    last_error=NULL,revision=revision+1,updated_at=NEW.updated_at
+  WHERE task_id=NEW.task_id AND mode='agent_owned' AND phase='agent_active';
+END;
+
+CREATE TABLE background_run_controls (
+  receipt_id TEXT PRIMARY KEY REFERENCES receipts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  task_id TEXT NOT NULL REFERENCES background_runs(task_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  attempt_id TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  run_generation INTEGER NOT NULL CHECK(run_generation>0),
+  command_kind TEXT NOT NULL CHECK(command_kind IN ('run.interrupt','run.steer')),
+  state TEXT NOT NULL CHECK(state IN ('requested','attempted','succeeded','uncertain','conflict')),
+  writer_generation INTEGER NOT NULL CHECK(writer_generation>0),
+  container_id TEXT NOT NULL CHECK(length(CAST(container_id AS BLOB)) BETWEEN 1 AND 128),
+  container_started_at TEXT NOT NULL CHECK(length(CAST(container_started_at AS BLOB)) BETWEEN 1 AND 64),
+  runtime_epoch INTEGER NOT NULL CHECK(runtime_epoch>0),
+  runtime_token TEXT NOT NULL CHECK(length(runtime_token)=64),
+  opencode_session_id TEXT NOT NULL,
+  opencode_message_id TEXT,
+  instruction TEXT,
+  attempted_at INTEGER,
+  completed_at INTEGER,
+  last_error TEXT CHECK(last_error IS NULL OR length(CAST(last_error AS BLOB)) BETWEEN 1 AND 4096),
+  claim_owner TEXT CHECK(claim_owner IS NULL OR length(CAST(claim_owner AS BLOB)) BETWEEN 1 AND 128),
+  claim_expires_at INTEGER,
+  claim_generation INTEGER NOT NULL DEFAULT 0 CHECK(claim_generation>=0),
+  revision INTEGER NOT NULL CHECK(revision>=1),
+  created_at INTEGER NOT NULL CHECK(created_at>=0),
+  updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),
+  CHECK((command_kind='run.interrupt' AND opencode_message_id IS NULL AND instruction IS NULL) OR
+        (command_kind='run.steer' AND opencode_message_id IS NOT NULL AND length(CAST(instruction AS BLOB)) BETWEEN 1 AND 16384)),
+  CHECK((state='requested' AND attempted_at IS NULL AND completed_at IS NULL) OR
+        (state='attempted' AND attempted_at IS NOT NULL AND completed_at IS NULL) OR
+        (state IN ('succeeded','uncertain','conflict') AND attempted_at IS NOT NULL AND completed_at IS NOT NULL)),
+  CHECK((claim_owner IS NULL AND claim_expires_at IS NULL) OR
+        (claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_generation>0 AND claim_expires_at>updated_at AND claim_expires_at<=updated_at+300000)),
+  FOREIGN KEY(attempt_id,task_id,workspace_id) REFERENCES attempts(id,task_id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT
+) STRICT;
+
+CREATE INDEX background_run_control_work ON background_run_controls(workspace_id,state,claim_expires_at,created_at,receipt_id);
+CREATE UNIQUE INDEX background_run_one_active_control ON background_run_controls(task_id) WHERE state IN ('requested','attempted');
+CREATE TRIGGER background_run_control_revision BEFORE UPDATE ON background_run_controls
+WHEN NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at
+BEGIN SELECT RAISE(ABORT, 'invalid background run control revision'); END;
+CREATE TRIGGER background_run_control_identity BEFORE UPDATE ON background_run_controls
+WHEN NEW.receipt_id<>OLD.receipt_id OR NEW.task_id<>OLD.task_id OR NEW.attempt_id<>OLD.attempt_id OR
+     NEW.workspace_id<>OLD.workspace_id OR NEW.run_generation<>OLD.run_generation OR NEW.command_kind<>OLD.command_kind OR
+     NEW.writer_generation<>OLD.writer_generation OR NEW.container_id<>OLD.container_id OR
+     NEW.container_started_at<>OLD.container_started_at OR NEW.runtime_epoch<>OLD.runtime_epoch OR NEW.runtime_token<>OLD.runtime_token OR
+     NEW.opencode_session_id<>OLD.opencode_session_id OR NEW.opencode_message_id IS NOT OLD.opencode_message_id OR
+     NEW.instruction IS NOT OLD.instruction OR NEW.created_at<>OLD.created_at
+BEGIN SELECT RAISE(ABORT, 'background run control identity is immutable'); END;
+`
 
 const backgroundRunRetainedResultAuthoritySchema = `
 ALTER TABLE results ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'persistent_workspace'

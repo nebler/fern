@@ -30,14 +30,16 @@ var (
 
 // Identity is the complete immutable route-to-process binding.
 type Identity struct {
-	WorkspaceID  string
-	TaskID       string
-	AttemptID    string
-	Generation   int64
-	RuntimeEpoch int64
-	ContainerID  string
-	StartedAt    string
-	RuntimeToken string
+	WorkspaceID      string
+	TaskID           string
+	AttemptID        string
+	Generation       int64
+	WriterGeneration int64
+	Role             string
+	RuntimeEpoch     int64
+	ContainerID      string
+	StartedAt        string
+	RuntimeToken     string
 }
 
 // Target is constructed by the qualified Docker provider. Its authenticated
@@ -45,11 +47,22 @@ type Identity struct {
 type Target struct {
 	endpoint  *url.URL
 	transport http.RoundTripper
+	readOnly  bool
 }
 
 // NewTarget is the narrow provider-facing constructor for an authenticated
 // exact-loopback proxy target.
 func NewTarget(endpoint string, transport http.RoundTripper) (Target, error) {
+	return newTarget(endpoint, transport, false)
+}
+
+// NewReadOnlyTarget constructs an agent-observation target. It rejects every
+// mutation and WebSocket upgrade before the request can reach OpenCode.
+func NewReadOnlyTarget(endpoint string, transport http.RoundTripper) (Target, error) {
+	return newTarget(endpoint, transport, true)
+}
+
+func newTarget(endpoint string, transport http.RoundTripper, readOnly bool) (Target, error) {
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.Path != "" || parsed.RawPath != "" ||
 		parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Hostname() != "127.0.0.1" || parsed.Port() == "" || transport == nil {
@@ -60,7 +73,7 @@ func NewTarget(endpoint string, transport http.RoundTripper) (Target, error) {
 		return Target{}, errors.New("canonical authenticated loopback background target is required")
 	}
 	copyURL := *parsed
-	return Target{endpoint: &copyURL, transport: transport}, nil
+	return Target{endpoint: &copyURL, transport: transport, readOnly: readOnly}, nil
 }
 
 type binding struct {
@@ -174,7 +187,7 @@ func (m *Manager) Activate(identity Identity, target Target) (string, error) {
 		return "", ErrFenced
 	}
 	if m.active != nil {
-		if m.active.identity != identity || m.active.target.endpoint.String() != target.endpoint.String() {
+		if m.active.identity != identity || m.active.target.endpoint.String() != target.endpoint.String() || m.active.target.readOnly != target.readOnly {
 			return "", ErrFenced
 		}
 		return routeEvidence("active", identity), nil
@@ -275,8 +288,12 @@ func (m *Manager) ActiveOrigin(run taskstore.BackgroundRun) (string, bool) {
 		return "", false
 	}
 	digest := sha256.Sum256([]byte(run.ObservedContainerID + "\x00" + run.ObservedContainerStartedAt))
+	writerGeneration := run.WriterGeneration
+	if writerGeneration < 1 {
+		writerGeneration = 1
+	}
 	identity := Identity{WorkspaceID: string(run.WorkspaceID), TaskID: string(run.TaskID), AttemptID: string(run.AttemptID),
-		Generation: run.Generation, RuntimeEpoch: run.RuntimeEpoch, ContainerID: run.ObservedContainerID,
+		Generation: run.Generation, WriterGeneration: writerGeneration, Role: "agent", RuntimeEpoch: run.RuntimeEpoch, ContainerID: run.ObservedContainerID,
 		StartedAt: run.ObservedContainerStartedAt, RuntimeToken: hex.EncodeToString(digest[:])}
 	if !m.Active(identity) {
 		return "", false
@@ -323,7 +340,7 @@ func (m *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 
 func (m *Manager) reverseProxy(current *binding) http.Handler {
 	origin := m.origin
-	return &httputil.ReverseProxy{
+	upstream := &httputil.ReverseProxy{
 		Transport: current.target.transport,
 		Rewrite: func(request *httputil.ProxyRequest) {
 			request.SetURL(current.target.endpoint)
@@ -348,6 +365,18 @@ func (m *Manager) reverseProxy(current *binding) http.Handler {
 			http.Error(writer, "upstream unavailable", http.StatusBadGateway)
 		},
 	}
+	if !current.target.readOnly {
+		return upstream
+	}
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if (request.Method != http.MethodGet && request.Method != http.MethodHead) || request.Header.Get("Upgrade") != "" {
+			writer.Header().Set("Cache-Control", "no-store")
+			writer.Header().Set("Allow", "GET, HEAD")
+			http.Error(writer, "agent route is read-only", http.StatusMethodNotAllowed)
+			return
+		}
+		upstream.ServeHTTP(writer, request)
+	})
 }
 
 func stripFernCookies(header http.Header) {
@@ -372,6 +401,7 @@ func stripFernCookies(header http.Header) {
 func validateIdentity(identity Identity) error {
 	token := sha256.Sum256([]byte(identity.ContainerID + "\x00" + identity.StartedAt))
 	if identity.WorkspaceID == "" || identity.TaskID == "" || identity.AttemptID == "" || identity.Generation <= 0 ||
+		identity.WriterGeneration <= 0 || (identity.Role != "agent" && identity.Role != "human") ||
 		identity.RuntimeEpoch <= 0 || identity.ContainerID == "" || identity.StartedAt == "" ||
 		identity.RuntimeToken != hex.EncodeToString(token[:]) {
 		return errors.New("complete route identity is required")
@@ -381,16 +411,18 @@ func validateIdentity(identity Identity) error {
 
 func routeEvidence(status string, identity Identity) string {
 	value, _ := json.Marshal(struct {
-		Effect       string `json:"effect"`
-		Status       string `json:"status"`
-		Task         string `json:"task"`
-		Attempt      string `json:"attempt"`
-		Generation   int64  `json:"generation"`
-		RuntimeEpoch int64  `json:"runtime_epoch"`
-	}{"background_route", status, identity.TaskID, identity.AttemptID, identity.Generation, identity.RuntimeEpoch})
+		Effect           string `json:"effect"`
+		Status           string `json:"status"`
+		Task             string `json:"task"`
+		Attempt          string `json:"attempt"`
+		Generation       int64  `json:"generation"`
+		WriterGeneration int64  `json:"writer_generation"`
+		Role             string `json:"role"`
+		RuntimeEpoch     int64  `json:"runtime_epoch"`
+	}{"background_route", status, identity.TaskID, identity.AttemptID, identity.Generation, identity.WriterGeneration, identity.Role, identity.RuntimeEpoch})
 	return string(value)
 }
 
 func (identity Identity) String() string {
-	return fmt.Sprintf("%s/%s/%s/g%d@%d", identity.WorkspaceID, identity.TaskID, identity.AttemptID, identity.Generation, identity.RuntimeEpoch)
+	return fmt.Sprintf("%s/%s/%s/g%d/w%d:%s@%d", identity.WorkspaceID, identity.TaskID, identity.AttemptID, identity.Generation, identity.WriterGeneration, identity.Role, identity.RuntimeEpoch)
 }

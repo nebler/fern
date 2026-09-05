@@ -18,6 +18,7 @@ import (
 type Controls struct {
 	Store       *control.Store
 	Runs        http.Handler
+	RunControl  http.Handler
 	Results     http.Handler
 	Onboarding  http.Handler
 	Liveness    http.Handler
@@ -70,7 +71,7 @@ func NewHandlers(controls Controls, origins TrustedOrigins) (Handlers, error) {
 	}
 	pairing := newPairingState(controls.Store)
 	pluginAuth := newPluginAuthHTTP(controls.PluginAuth)
-	remoteGateway := gatewayHandler(Controls{Store: controls.Store, Runs: controls.Runs, Results: controls.Results, Onboarding: controls.Onboarding, PluginAuth: controls.PluginAuth})
+	remoteGateway := gatewayHandler(Controls{Store: controls.Store, Runs: controls.Runs, RunControl: controls.RunControl, Results: controls.Results, Onboarding: controls.Onboarding, PluginAuth: controls.PluginAuth})
 	operatorGateway := gatewayHandler(controls)
 	return Handlers{
 		Remote:   trustedOriginHandler(pluginAuth.remoteHandler(pairing.remoteHandler(remoteGateway), remoteGateway), remoteOrigin),

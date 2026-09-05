@@ -28,7 +28,7 @@ var baselineFileChecksums = map[string]string{
 	"control/2a97516c354b68848cdbd8f54a226a0a55b21ed138e207ad6c5cbb9c00aa5aea.json": "a839bb61730c650b833999fd11550f6f677c267f2e67f1ffcb14f0d34cd03b65",
 	"fern.yaml":                       "125be67c7eb7f0312b75eeea116f9c8570d43caca8838995ac589bcb7fa46923",
 	"github-app/app-credentials.json": "9dc22f33803ba3b4a5e945ba18d3c695fd1b95a6f1ed6a0e0d5f47318afabe27",
-	"metadata.json":                   "bfac6fb58816f89271a55ecd67ae21a56335ee449cccdead49e294ad613ca215",
+	"metadata.json":                   "3a27a39e57d67ef9ada56e64114531b43ef813ef3bf0be0202c0f0678c39f337",
 	"task-store.sqlite":               "2fb2541a99396b40e99704184e5a49fe44b8e31485bc5e32c26c9c4e82a03a38",
 }
 
@@ -51,7 +51,8 @@ var currentMigrationLedger = append(append([]migrationRecord(nil), baselineMigra
 	migrationRecord{7, "background_run_intents", "14adb62969106f5c6a66d12ae4e43cc6c6d31fbafe71e0f7e708cc42c2aaba2a"},
 	migrationRecord{8, "background_run_effect_claims", "3488eb94b3bc0254b09ce5df70ed4ddc07b2b25505dfffa2fc57cbec0c2a6026"},
 	migrationRecord{9, "background_run_prompt_attempt_fence", "33f4c13ca38615b7662066d6f27057f209962e89ea29d56d6183348e5da9c95d"},
-	migrationRecord{10, "background_run_retained_result_authority", "0c65ee5610130d5767137190a6cf9ae145c078ce6738e86fcc1b522cefda8157"})
+	migrationRecord{10, "background_run_retained_result_authority", "0c65ee5610130d5767137190a6cf9ae145c078ce6738e86fcc1b522cefda8157"},
+	migrationRecord{11, "background_run_writer_ownership", "6bb52d2e8260ca0f18a57d0be3799a650e615a404ac44d47d1a9a80d94903d68"})
 
 func TestBaselineV1UpgradesWithoutSemanticLoss(t *testing.T) {
 	assertBaselineBytes(t)

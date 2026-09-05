@@ -126,6 +126,8 @@ func (state *pairingState) remoteHandler(next http.Handler) http.Handler {
 		}
 		if isFernRoute(request) && request.URL.Path != "/fern" && request.URL.Path != "/fern/" && request.URL.Path != csrfTokenPath &&
 			request.URL.Path != "/fern/api/runs" && !strings.HasPrefix(request.URL.Path, "/fern/api/runs/") &&
+			request.URL.Path != "/fern/api/v1/runs" && !strings.HasPrefix(request.URL.Path, "/fern/api/v1/runs/") &&
+			request.URL.Path != "/fern/runs" && !strings.HasPrefix(request.URL.Path, "/fern/runs/") &&
 			!strings.HasPrefix(request.URL.Path, "/fern/api/v1/results/") && !isPluginPairedPath(request.URL.Path) {
 			http.NotFound(writer, request)
 			return

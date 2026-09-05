@@ -179,12 +179,13 @@ func assembleServices(serviceCtx context.Context, cfg config.BackgroundConfig, o
 	unavailable := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "Background Runs await GitHub App onboarding", http.StatusServiceUnavailable)
 	}))
-	runs, results := unavailable, unavailable
+	runs, runControl, results := unavailable, unavailable, unavailable
 	if tasks != nil {
 		runs = tasks.runs
+		runControl = tasks.runControl
 		results = tasks.results
 	}
-	controls := proxy.Controls{Store: controlStore, Runs: runs, Results: results, Onboarding: onboarding,
+	controls := proxy.Controls{Store: controlStore, Runs: runs, RunControl: runControl, Results: results, Onboarding: onboarding,
 		ControlAuth: proxy.ControlAuth{Password: cfg.Control.Password}, PluginAuth: pluginAuthStore,
 		Liveness: status.LivenessHandler(), Readiness: status.ReadinessHandler(), Status: status.StatusHandler(), Metrics: status.MetricsHandler()}
 	handlers, err := proxy.NewHandlers(controls, origins)

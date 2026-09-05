@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -158,6 +159,65 @@ func TestManagerRemovalFencesRebindAndRuntimeMismatch(t *testing.T) {
 	if _, active := manager.ActiveOrigin(run); active {
 		t.Fatal("runtime epoch mismatch inherited route")
 	}
+	run.RuntimeEpoch = second.RuntimeEpoch
+	if _, err := manager.Remove(context.Background(), second); err != nil {
+		t.Fatal(err)
+	}
+	if err := manager.ConfirmRemoval(second); err != nil {
+		t.Fatal(err)
+	}
+	replacement := second
+	replacement.WriterGeneration = 3
+	if _, err := manager.Activate(replacement, target); err != nil {
+		t.Fatal(err)
+	}
+	run.WriterGeneration = 3
+	if _, active := manager.ActiveOrigin(run); !active {
+		t.Fatal("replacement writer generation was not active")
+	}
+}
+
+func TestManagerReadOnlyTargetBlocksMutationAndWebSocket(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	manager, origin, local, token := newTestManager(t)
+	target, err := NewReadOnlyTarget(upstream.URL, http.DefaultTransport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.Activate(testIdentity(1), target); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.DefaultClient.Do(pairedRequest(http.MethodGet, local+"/api/session", token, "", nil))
+	if err != nil || response.StatusCode != http.StatusNoContent {
+		t.Fatalf("read response=%v error=%v", response, err)
+	}
+	_ = response.Body.Close()
+	for _, request := range []*http.Request{
+		pairedRequest(http.MethodPost, local+"/api/session", token, origin, strings.NewReader(`{}`)),
+		pairedRequest(http.MethodGet, local+"/api/pty", token, origin, nil),
+		pairedRequest(http.MethodGet, local+"/api/other-upgrade", token, origin, nil),
+	} {
+		if request.URL.Path == "/api/pty" {
+			request.Header.Set("Upgrade", "websocket")
+			request.Header.Set("Connection", "Upgrade")
+		} else if request.URL.Path == "/api/other-upgrade" {
+			request.Header.Set("Upgrade", "other")
+			request.Header.Set("Connection", "Upgrade")
+		}
+		response, err := http.DefaultClient.Do(request)
+		if err != nil || response.StatusCode != http.StatusMethodNotAllowed || response.Header.Get("Allow") != "GET, HEAD" {
+			t.Fatalf("blocked response=%v error=%v", response, err)
+		}
+		_ = response.Body.Close()
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("read-only target forwarded %d requests, want one", calls.Load())
+	}
 }
 
 func newTestManager(t *testing.T) (*Manager, string, string, string) {
@@ -220,7 +280,7 @@ func testIdentity(generation int64) Identity {
 	container := strings.Repeat(string(rune('a'+generation)), 64)
 	digest := runtimeDigest(container, started.Format(time.RFC3339Nano))
 	return Identity{WorkspaceID: "wsp_0198d34d-6a50-75fb-b1f2-000000000001", TaskID: "tsk_0198d34d-6a50-75fb-b1f2-000000000201",
-		AttemptID: "att_0198d34d-6a50-75fb-b1f2-000000000301", Generation: generation, RuntimeEpoch: started.UnixNano(),
+		AttemptID: "att_0198d34d-6a50-75fb-b1f2-000000000301", Generation: generation, WriterGeneration: 1, Role: "agent", RuntimeEpoch: started.UnixNano(),
 		ContainerID: container, StartedAt: started.Format(time.RFC3339Nano), RuntimeToken: digest}
 }
 
