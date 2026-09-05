@@ -7,7 +7,7 @@ import (
 )
 
 func TestInitialSchemaIsTheOnlySupportedSchema(t *testing.T) {
-	const expectedChecksum = "d37b38566dc707d31885b883035a43d4ef5cc829415b2a64cb91701450b231fc"
+	const expectedChecksum = "97cd41f3a8bead5f77954878a64fd9e70d6d7a8128507e3dfaa10ac2949db274"
 	if CurrentSchemaVersion() != 1 || len(migrations) != 1 || migrations[0].version != 1 || migrations[0].name != "initial_task_store" {
 		t.Fatalf("schema version=%d migrations=%+v", CurrentSchemaVersion(), migrations)
 	}

@@ -10,7 +10,6 @@ require (
 	github.com/docker/go-connections v0.5.0
 	github.com/opencontainers/image-spec v1.1.1
 	github.com/skip2/go-qrcode v0.0.0-20200617195104-da1b6568686e
-	golang.org/x/net v0.30.0
 	golang.org/x/sync v0.16.0
 	golang.org/x/sys v0.36.0
 	gopkg.in/yaml.v3 v3.0.1

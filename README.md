@@ -3,13 +3,12 @@
 Fern runs disposable OpenCode jobs on your Docker host and retains exact Git
 results after their compute is removed.
 
-The primary interface is the `@fern/opencode` plugin. It submits a clean local
-Git revision to Fern, follows the run, opens the exact read-only live OpenCode
-session, stops it, or explicitly seals its work. Paired devices and the local
-operator can also inspect, interrupt, steer, or perform a cold writable
-takeover and handback through Fern's run-control deck. Fern owns the durable
-receipt, runtime identity, writer fence, artifact, verification record, and
-GitHub App publication journal.
+The primary submission interface is the `@fern/opencode` plugin. It submits a
+clean local Git revision to Fern, follows the run, stops it, or explicitly seals
+its work. Operators use `fern runs` and `fern attach` to connect the normal
+OpenCode TUI to the exact live server and session. Fern owns the durable
+receipt, runtime identity, artifact, verification record, and GitHub App
+publication journal.
 
 Fern does not maintain a persistent coding workspace and does not proxy a
 general-purpose OpenCode server.
@@ -41,7 +40,7 @@ epoch. Capacity is intentionally one run at a time.
 - a qualified `opencode-background-source` image
 - a GitHub App installation bound to one repository
 - private HTTPS origins for the control plane and live-run route
-- OpenCode `1.18.16` for the plugin
+- OpenCode `1.18.16` for the plugin and attachment
 
 Remote `DOCKER_HOST` endpoints are rejected. Fern expects host-local bind
 mounts, loopback routing, and coordination.
@@ -107,45 +106,56 @@ return `503`.
 
 ## Plugin
 
-The repo-local plugin supports native `run`, `runs`, `open`, `stop`, `seal`,
-`result`, and `disconnect` actions. See `plugins/opencode/README.md` for its
+The repo-local plugin supports native `run`, `runs`, `stop`, `seal`, `result`,
+and `disconnect` actions. See `plugins/opencode/README.md` for its
 installation, credential, and HTTP contract.
 
 The plugin authorizes against Fern with fixed scopes:
 
 ```text
-run:create run:read run:stop run:open run:result
+run:create run:read run:stop run:attach run:result
 ```
 
 Fern stores plugin credentials in the operating-system keyring and stores only
 credential digests server-side.
 
-## Human Access
+## Attach to a run
 
-The live OpenCode route is read-only: Fern permits `GET` and `HEAD` and rejects
-mutations and upgrades before they reach OpenCode. Paired devices and the local
-operator use `/fern/runs` for durable warm interrupt/steer controls and a
-networkless, credential-free read-only inspector terminal.
+List running sessions and attach the OpenCode V2 TUI:
 
-Writable access is a cold ownership transfer. Fern first closes the agent route,
-disconnects the inspector terminal, waits for request and terminal forwarding
-to exit, stops and removes the exact agent process epoch, and deletes its
-disposable OpenCode volume. Only then does it start a networkless,
-credential-free PID 1 Bash container with the run clone mounted writable. On
-handback Fern closes the browser WebSocket and Docker attach connection, waits
-for both forwarding goroutines to exit, and then stops and removes the human
-writer. It captures a Git boundary, starts a fresh OpenCode
-volume/container/session, submits a re-read/resume prompt, and restores the
-read-only agent route under a higher writer generation. Closing connections does
-not guarantee delivery of already-buffered terminal output. Ambiguous evidence
-leaves all routes closed.
+```sh
+fern runs
+fern runs --json
+fern attach                         # selects the only run or opens a picker
+fern attach tsk_...
+```
+
+Those forms run on the Fern host and read the local configuration and protected
+environment file. From another machine, use the private Fern origin:
+
+```sh
+fern runs --endpoint https://fern-host.example.ts.net
+fern attach --endpoint https://fern-host.example.ts.net tsk_...
+```
+
+Remote commands reuse the Fern plugin credential in the operating-system
+keyring, or `FERN_TOKEN` when explicitly supplied. An authenticated attach
+request returns a random two-hour capability held only in memory and bound to
+the current workspace, task, attempt, run generation, single-writer generation,
+container process epoch, and OpenCode session. `fern attach` passes it to
+`opencode attach <live-origin> --session <session-id> --pure` through the OpenCode
+authentication environment. Route removal, process replacement, expiry, or
+Fern shutdown revokes access. Fern permits the TUI's read traffic and exact
+session interactions while rejecting session creation/deletion, cross-session
+mutations, workspace management, credential management, and terminal upgrades.
+Attachment never replaces the OpenCode process or volume and never transfers
+filesystem ownership.
 
 ## Durable State
 
 Fern keeps:
 
-- taskstore schema 1 records, receipts, claims, ownership transfers, control
-  journals, and actor snapshots;
+- taskstore schema 1 records, receipts, claims, and actor snapshots;
 - paired-device and plugin authorization digests;
 - GitHub App credentials;
 - retained artifact CAS objects and materialized-result authority;
@@ -179,6 +189,8 @@ age-encrypted.
 fern init
 fern doctor
 fern up
+fern runs [--json]
+fern attach [run-id]
 fern backup create|restore|rollback
 fern credentials export|import|rotate
 fern debug quarantine-publications
@@ -212,5 +224,5 @@ bun test
 ## Documentation
 
 `ARCHITECTURE.md` is the detailed system contract: components, state machines,
-trust boundaries, evidence, recovery, deployment, backup, release gates, and
-the cold writer-ownership transfer.
+trust boundaries, evidence, recovery, deployment, attachment, backup, and
+release gates.

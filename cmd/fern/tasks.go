@@ -24,8 +24,7 @@ import (
 	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/resultapi"
 	"github.com/nebler/fern/internal/runapi"
-	"github.com/nebler/fern/internal/runcontrol"
-	"github.com/nebler/fern/internal/runterminal"
+	"github.com/nebler/fern/internal/runclientapi"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
@@ -60,7 +59,7 @@ type taskWakeService interface {
 type taskServices struct {
 	store        *taskstore.Store
 	runs         http.Handler
-	runControl   http.Handler
+	runClients   http.Handler
 	results      http.Handler
 	verification taskRunService
 	publication  taskRunService
@@ -182,8 +181,8 @@ func newTaskServices(ctx context.Context, cfg config.BackgroundConfig, route *ba
 		RepositoryFullName: github.Repository.FullName, ImageDigest: cfg.Tasks.BackgroundImageID,
 		OpenCodeProtocol: runapi.APIContractVersion, RuntimeDesiredState: "disposable", ReconciliationEpoch: 1, CreatedAt: now}
 	if existing, readErr := store.GetWorkspaceByName(ctx, cfg.Workspace.Name); readErr == nil {
-		// Preserve retired runtime metadata from upgraded databases while still
-		// checking every repository and GitHub authority field through EnsureWorkspace.
+		// Preserve the durable workspace identity while still checking every
+		// repository and GitHub authority field through EnsureWorkspace.
 		desired.ID, desired.ImageDigest, desired.OpenCodeProtocol = existing.ID, existing.ImageDigest, existing.OpenCodeProtocol
 		desired.RuntimeDesiredState, desired.ReconciliationEpoch, desired.CreatedAt = existing.RuntimeDesiredState, existing.ReconciliationEpoch, existing.CreatedAt
 	} else if !errors.Is(readErr, taskstore.ErrNotFound) {
@@ -242,20 +241,13 @@ func newTaskServices(ctx context.Context, cfg config.BackgroundConfig, route *ba
 		BackgroundEnvironmentSHA256: taskenvdocker.EnvironmentSHA256(backgroundRunEnvironment(cfg)),
 		AvailableProfile:            runapi.PluginOpenCodeProfile, Store: store, Generator: ids, ActorResolver: task.ContextActor,
 		BaseVerifier: baseVerifier, Now: time.Now, AttemptTimeout: cfg.Tasks.AttemptTimeout, Agent: cfg.Tasks.Agent,
-		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID, BudgetSnapshot: budget, Route: route, RetentionVerifier: resultSource,
+		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID, BudgetSnapshot: budget, RetentionVerifier: resultSource,
 		SealPolicyVersion: "fern.background-user-seal.v1", Wake: coordinator.Wake,
 	})
 	if err != nil {
 		return nil, err
 	}
-	terminal, err := runterminal.New(coordinator)
-	if err != nil {
-		return nil, err
-	}
-	runControl, err := runcontrol.New(runcontrol.Config{
-		WorkspaceID: durableWorkspace.ID, Store: store, Controller: coordinator, Generator: ids,
-		Terminal: terminal, ActorResolver: task.ContextActor, Now: time.Now,
-	})
+	runClients, err := runclientapi.New(runclientapi.Config{WorkspaceID: durableWorkspace.ID, Store: store, Route: route})
 	if err != nil {
 		return nil, err
 	}
@@ -270,7 +262,7 @@ func newTaskServices(ctx context.Context, cfg config.BackgroundConfig, route *ba
 	status.Qualified(observability.ComponentBackgroundRunProfile)
 	status.Healthy(observability.ComponentBackgroundRunSerial)
 	closeStore, closeArtifact, closeProvider = false, false, false
-	return &taskServices{store: store, runs: runs, runControl: runControl, results: results, verification: verificationCoordinator, publication: publication,
+	return &taskServices{store: store, runs: runs, runClients: runClients, results: results, verification: verificationCoordinator, publication: publication,
 		background: coordinator, provider: provider, artifact: artifact, status: status}, nil
 }
 

@@ -220,7 +220,7 @@ func (s *Store) GetReceipt(ctx context.Context, id task.ReceiptID) (Receipt, err
 	if _, err := task.ParseReceiptID(string(id)); err != nil {
 		return Receipt{}, fmt.Errorf("%w: receipt ID", ErrInvalidInput)
 	}
-	r, err := scanReceipt(s.db.QueryRowContext(ctx, receiptSelect+` WHERE r.id=? AND r.command_kind NOT IN ('run.create','run.stop','run.open')`, id))
+	r, err := scanReceipt(s.db.QueryRowContext(ctx, receiptSelect+` WHERE r.id=? AND r.command_kind NOT IN ('run.create','run.stop')`, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Receipt{}, ErrNotFound
 	}

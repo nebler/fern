@@ -48,7 +48,6 @@ describe("TUI compatibility", () => {
       "fern",
       "fern.run",
       "fern.runs",
-      "fern.open",
       "fern.stop",
       "fern.seal",
       "fern.result",
@@ -56,7 +55,7 @@ describe("TUI compatibility", () => {
     ])
   })
 
-  test("dispatches run, list, open, stop, seal, and result actions", async () => {
+  test("dispatches run, list, stop, seal, and result actions", async () => {
     const fixture = actionAPI()
     const calls: string[] = []
     const client = {
@@ -67,10 +66,6 @@ describe("TUI compatibility", () => {
       async listRuns() {
         calls.push("list")
         return [{ id: "run_list", state: "working" as const, repository: "https://github.com/fern/repo" }]
-      },
-      async resolveOpen(runID: string, key: string) {
-        calls.push(`open:${runID}:${key.length > 0}`)
-        return new URL("https://fern.example/runs/run_open/capability")
       },
       async getResult(runID: string) {
         calls.push(`result:${runID}`)
@@ -116,9 +111,6 @@ describe("TUI compatibility", () => {
         calls.push(`stop-confirmed:${approved}`)
         return approved ? "canceling" : undefined
       },
-      openBrowser: async (url) => {
-        calls.push(`browser:${url.pathname}`)
-      },
     })
 
     await actionPlugin.tui(fixture.api, undefined, {} as TuiPluginMeta)
@@ -131,10 +123,6 @@ describe("TUI compatibility", () => {
 
     await fixture.command("fern.runs").run()
     expect(fixture.current()).toMatchObject({ title: "Fern runs" })
-
-    await fixture.command("fern.open").run()
-    fixture.prompt().onConfirm?.("run_open")
-    await waitFor(() => calls.some((call) => call.startsWith("browser:")))
 
     await fixture.command("fern.stop").run()
     fixture.prompt().onConfirm?.("run_stop")
@@ -173,8 +161,6 @@ describe("TUI compatibility", () => {
     expect(calls).toContain("run:Fix action routing:/worktree")
     expect(calls).toContain("run-confirmed:true")
     expect(calls).toContain("list")
-    expect(calls).toContain("open:run_open:true")
-    expect(calls).toContain("browser:/runs/run_open/capability")
     expect(calls).toContain("stop:run_stop")
     expect(calls).toContain("stop-confirmed:true")
     expect(calls.filter((call) => call.startsWith("seal:"))).toHaveLength(1)

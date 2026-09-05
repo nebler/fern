@@ -47,6 +47,14 @@ var commands = []command{
 		run: func(_ context.Context, args []string, log *slog.Logger) error { return runUp(args, log) },
 	},
 	{
+		name: "runs", summary: "List Background Run sessions",
+		run: func(ctx context.Context, args []string, _ *slog.Logger) error { return runRuns(ctx, args) },
+	},
+	{
+		name: "attach", summary: "Attach the OpenCode TUI to a live run",
+		run: func(ctx context.Context, args []string, _ *slog.Logger) error { return runAttach(ctx, args) },
+	},
+	{
 		name:     "backup",
 		overview: "Create, restore, and roll back verified offline host backups.",
 		sub: []subcommand{
@@ -141,6 +149,8 @@ func subcommandUsage(entry *command) string {
 var usageExamples = []string{
 	"fern init --repo /path/to/repository --repository owner/repository --repository-id 123 --installation-id 456 --model-provider anthropic --model claude-sonnet-4-5",
 	"fern up --config fern.yaml --env-file fern.env",
+	"fern runs --endpoint https://fern-host.example.ts.net",
+	"fern attach --endpoint https://fern-host.example.ts.net tsk_...",
 }
 
 // buildUsageText derives top-level help from the registry so commands appear,

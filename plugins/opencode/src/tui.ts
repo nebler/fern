@@ -23,7 +23,6 @@ export type TuiPluginDependencies = {
   createRun?: typeof createRunWorkflow
   sealRun?: typeof sealRunWorkflow
   stopRun?: typeof stopRunWorkflow
-  openBrowser?: typeof openBrowser
 }
 
 export function createTuiPlugin(dependencies: TuiPluginDependencies = {}): TuiPluginModule {
@@ -121,12 +120,6 @@ export function createTuiPlugin(dependencies: TuiPluginDependencies = {}): TuiPl
             }),
           )
         })
-      const open = async () => {
-        const { client } = await connection()
-        return showPrompt(api, "Open Fern run", "Run ID", (runID) =>
-          openRun(api, client, runID, dependencies.openBrowser),
-        )
-      }
       const stop = async () => {
         const { client } = await connection()
         return showPrompt(api, "Stop Fern run", "Run ID", (runID, dialog) =>
@@ -186,12 +179,6 @@ export function createTuiPlugin(dependencies: TuiPluginDependencies = {}): TuiPl
                 onSelect: () => void handle(api, runs),
               },
               {
-                title: "Open",
-                value: "open",
-                description: "Open the authoritative live run",
-                onSelect: () => void handle(api, open),
-              },
-              {
                 title: "Stop",
                 value: "stop",
                 description: "Request a durable stop",
@@ -225,7 +212,6 @@ export function createTuiPlugin(dependencies: TuiPluginDependencies = {}): TuiPl
           command("fern", "Fern", "Open Fern actions", () => handle(api, menu), "fern"),
           command("fern.run", "Fern: Run", "Start a background run", () => handle(api, run)),
           command("fern.runs", "Fern: Runs", "List background runs", () => handle(api, runs)),
-          command("fern.open", "Fern: Open", "Open a background run", () => handle(api, open)),
           command("fern.stop", "Fern: Stop", "Stop a background run", () => handle(api, stop)),
           command("fern.seal", "Fern: Seal", "Seal a background run result", () => handle(api, seal)),
           command("fern.result", "Fern: Result", "Show a background run result", () => handle(api, result)),
@@ -428,18 +414,6 @@ async function showRun(api: TuiPluginApi, client: FernClient, runID: string) {
     `Fern run ${run.id}`,
     `State: ${run.state}\nRepository: ${run.repository ?? "unknown"}\nBase: ${run.head ?? "unknown"}`,
   )
-}
-
-async function openRun(api: TuiPluginApi, client: FernClient, runID: string, launch: typeof openBrowser = openBrowser) {
-  const expected = client.requireRunID(runID.trim())
-  const url = await client.resolveOpen(expected, crypto.randomUUID())
-  await launch(url, api.lifecycle.signal)
-  api.ui.dialog.clear()
-  api.ui.toast({
-    variant: "success",
-    title: "Fern run opened",
-    message: `Opened run ${expected}.`,
-  })
 }
 
 async function stopRun(

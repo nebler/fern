@@ -71,20 +71,6 @@ func (s *Store) AdmitBackgroundRunSeal(ctx context.Context, p SealBackgroundRunP
 	if err != nil {
 		return BackgroundRunSealAdmission{}, err
 	}
-	ownership, err := getBackgroundRunOwnership(ctx, tx, p.WorkspaceID, p.TaskID)
-	if err != nil {
-		return BackgroundRunSealAdmission{}, err
-	}
-	if ownership.Mode != BackgroundRunAgentOwned || ownership.Phase != BackgroundRunOwnershipAgentActive {
-		return BackgroundRunSealAdmission{}, ErrInvalidState
-	}
-	var activeControls int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM background_run_controls WHERE task_id=? AND state IN ('requested','attempted')`, run.TaskID).Scan(&activeControls); err != nil {
-		return BackgroundRunSealAdmission{}, err
-	}
-	if activeControls != 0 {
-		return BackgroundRunSealAdmission{}, ErrInvalidState
-	}
 	if run.AttemptID != p.AttemptID || run.Generation != p.Generation || run.Revision != p.ExpectedRunRevision ||
 		run.CancelEpoch != 0 || run.EffectPhase != BackgroundRunEffectPromptAdmitted ||
 		(run.State != BackgroundRunWorking && run.State != BackgroundRunNeedsYou && run.State != BackgroundRunUncertain) ||

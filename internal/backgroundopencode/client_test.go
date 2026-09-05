@@ -2,13 +2,11 @@ package backgroundopencode
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -656,23 +654,13 @@ func TestInterruptExactAndLostResponseAmbiguity(t *testing.T) {
 	})
 }
 
-func TestDeepLink(t *testing.T) {
+func TestTrustedOrigin(t *testing.T) {
 	origin, err := ParseTrustedOrigin("https://fern.example.test:8443")
 	if err != nil {
 		t.Fatal(err)
 	}
-	link, err := DeepLink(origin, testSession)
-	if err != nil {
-		t.Fatal(err)
-	}
-	encoded := base64.RawURLEncoding.EncodeToString([]byte("https://fern.example.test:8443"))
-	want := "https://fern.example.test:8443/server/" + encoded + "/session/" + testSession
-	if link != want {
-		t.Fatalf("link = %s", link)
-	}
-	parsed, _ := url.Parse(link)
-	if parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || strings.Contains(link, testSecret) {
-		t.Fatal("deep link contains a credential or capability")
+	if origin.value != "https://fern.example.test:8443" {
+		t.Fatalf("origin = %q", origin.value)
 	}
 	for _, raw := range []string{
 		"http://fern.example.test", "https://user:pw@fern.example.test", "https://fern.example.test/",
@@ -684,8 +672,5 @@ func TestDeepLink(t *testing.T) {
 		if _, err := ParseTrustedOrigin(raw); !errors.Is(err, ErrInvalidConfig) {
 			t.Errorf("origin %q error = %v", raw, err)
 		}
-	}
-	if _, err := DeepLink(origin, "ses_bad/path"); !errors.Is(err, ErrInvalidConfig) {
-		t.Fatalf("session error = %v", err)
 	}
 }

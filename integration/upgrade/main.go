@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentSchemaChecksum = "d37b38566dc707d31885b883035a43d4ef5cc829415b2a64cb91701450b231fc"
+const currentSchemaChecksum = "97cd41f3a8bead5f77954878a64fd9e70d6d7a8128507e3dfaa10ac2949db274"
 
 func main() {
 	databasePath := flag.String("database", "", "task database to initialize or verify")

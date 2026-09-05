@@ -26,7 +26,6 @@ import (
 	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/backgroundruncoord"
-	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
@@ -441,7 +440,7 @@ func run() (resultErr error) {
 	if err := runSerialCoordinator(ctx, temporary, repository, providerEndpoint, provider, cli, imageID, base); err != nil {
 		return err
 	}
-	fmt.Printf("PASS profile=%s image_id=%s session=exact session_response_loss=after_effect session_posts=1 no_session_replay=true no_session_replacement=true prompt=admitted_promoted prompt_response_loss=after_effect active=positive interrupt=204 reconstruction=provider_client no_prompt_replay=true provider_calls=1 marker=exact serial_coordinator=complete retained_result=cas_reconstructed_twice route=paired_root_health open_replay=stable fence_crash=uncertain_zero_post runtime_restart=quarantined_then_operator_removed_cleanup\n", backgroundopencode.Profile, imageID)
+	fmt.Printf("PASS profile=%s image_id=%s session=exact session_response_loss=after_effect session_posts=1 no_session_replay=true no_session_replacement=true prompt=admitted_promoted prompt_response_loss=after_effect active=positive interrupt=204 reconstruction=provider_client no_prompt_replay=true provider_calls=1 marker=exact serial_coordinator=complete retained_result=cas_reconstructed_twice route=exact_expiring_attachment fence_crash=uncertain_zero_post runtime_restart=quarantined_then_operator_removed_cleanup\n", backgroundopencode.Profile, imageID)
 	return nil
 }
 
@@ -477,23 +476,8 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	if err != nil {
 		return err
 	}
-	routeDirectory := filepath.Join(root, "serial-control")
-	if err := os.MkdirAll(routeDirectory, 0o700); err != nil {
-		return err
-	}
-	if err := os.Chmod(routeDirectory, 0o700); err != nil {
-		return err
-	}
-	controlStore, err := control.Open(routeDirectory, "serial-background")
-	if err != nil {
-		return err
-	}
-	deviceToken := "serial-paired-device-token"
-	deviceNow := time.Now()
-	if _, err := controlStore.AddDevice(deviceToken, "Serial harness", deviceNow, deviceNow.Add(time.Hour)); err != nil {
-		return err
-	}
-	route, routeURL, routeAddress, stopRoute, err := startSerialRoute(ctx, controlStore, "")
+	attachmentToken := "not-yet-issued"
+	route, routeURL, routeAddress, stopRoute, err := startSerialRoute(ctx, "")
 	if err != nil {
 		return err
 	}
@@ -591,11 +575,11 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	if err := stopRoute(); err != nil {
 		return err
 	}
-	route, routeURL, _, stopRoute, err = startSerialRoute(ctx, controlStore, routeAddress)
+	route, routeURL, _, stopRoute, err = startSerialRoute(ctx, routeAddress)
 	if err != nil {
 		return err
 	}
-	if status, routeErr := serialRouteStatus(routeURL, deviceToken, "/api/health"); routeErr != nil || status != http.StatusNotFound {
+	if status, routeErr := serialRouteStatus(routeURL, attachmentToken, "/api/health"); routeErr != nil || status != http.StatusNotFound {
 		return fmt.Errorf("restarted unbound route status=%d error=%v", status, routeErr)
 	}
 	store, err = taskstore.Open(context.Background(), databasePath)
@@ -628,10 +612,15 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	if current.State != taskstore.BackgroundRunWorking || loss.calls.Load() != 1 {
 		return fmt.Errorf("serial read-only recovery state=%s prompt_calls=%d", current.State, loss.calls.Load())
 	}
-	if err := verifySerialRoute(routeURL, deviceToken); err != nil {
+	attachment, active, err := route.IssueAttachment(current)
+	if err != nil || !active {
+		return fmt.Errorf("issue serial attachment active=%t error=%v", active, err)
+	}
+	attachmentToken = attachment.Password
+	if err := verifySerialRoute(routeURL, attachmentToken, string(current.OpenCodeSessionID)); err != nil {
 		return err
 	}
-	if err := verifySerialOpenReplay(store, ids, current, actor, route, deviceToken); err != nil {
+	if err := verifySerialAttachment(current, route); err != nil {
 		return err
 	}
 	if err := waitFor(ctx, "serial provider call", func() (bool, error) {
@@ -658,7 +647,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	if err := cli.ContainerStart(context.Background(), current.ObservedContainerID, container.StartOptions{}); err != nil {
 		return fmt.Errorf("serial runtime replacement start: %w", err)
 	}
-	if status, routeErr := serialRouteStatus(routeURL, deviceToken, "/api/health"); routeErr != nil || status != http.StatusBadGateway {
+	if status, routeErr := serialRouteStatus(routeURL, attachmentToken, "/api/health"); routeErr != nil || status != http.StatusBadGateway {
 		return fmt.Errorf("replacement reached route before reconciliation status=%d error=%v", status, routeErr)
 	}
 	observeErr := coordinator.RunOnce(context.Background())
@@ -666,7 +655,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	if !errors.Is(observeErr, taskenvdocker.ErrIdentityMismatch) || err != nil || current.State != taskstore.BackgroundRunCleanupRequired {
 		return fmt.Errorf("serial runtime replacement state=%s observe_error=%v read_error=%v", current.State, observeErr, err)
 	}
-	if status, routeErr := serialRouteStatus(routeURL, deviceToken, "/api/health"); routeErr != nil || status != http.StatusNotFound {
+	if status, routeErr := serialRouteStatus(routeURL, attachmentToken, "/api/health"); routeErr != nil || status != http.StatusNotFound {
 		return fmt.Errorf("replacement inherited route status=%d error=%v", status, routeErr)
 	}
 	replacement, err := cli.ContainerInspect(context.Background(), current.ObservedContainerID)
@@ -965,7 +954,7 @@ func privateBackgroundResidue(name string) bool {
 		strings.HasPrefix(name, ".clone-authority-") || strings.HasPrefix(name, ".clone-marker-stage-")
 }
 
-func startSerialRoute(parent context.Context, store *control.Store, address string) (*backgroundroute.Manager, string, string, func() error, error) {
+func startSerialRoute(parent context.Context, address string) (*backgroundroute.Manager, string, string, func() error, error) {
 	if address == "" {
 		address = "127.0.0.1:0"
 	}
@@ -973,7 +962,7 @@ func startSerialRoute(parent context.Context, store *control.Store, address stri
 	if err != nil {
 		return nil, "", "", nil, err
 	}
-	manager, err := backgroundroute.New(listener, "https://fern.example.ts.net:8443", store)
+	manager, err := backgroundroute.New(listener, "https://fern.example.ts.net:8443")
 	if err != nil {
 		_ = listener.Close()
 		return nil, "", "", nil, err
@@ -994,16 +983,26 @@ func startSerialRoute(parent context.Context, store *control.Store, address stri
 	return manager, "http://" + bound, bound, stop, nil
 }
 
-func verifySerialRoute(origin, token string) error {
+func verifySerialRoute(origin, token, sessionID string) error {
 	status, err := serialRouteStatus(origin, token, "/")
-	if err != nil || status != http.StatusOK {
-		return fmt.Errorf("paired official root status=%d error=%v", status, err)
+	if err != nil || status != http.StatusForbidden {
+		return fmt.Errorf("attached non-TUI root status=%d error=%v", status, err)
 	}
 	status, err = serialRouteStatus(origin, token, "/api/health")
 	if err != nil || status != http.StatusOK {
-		return fmt.Errorf("paired authenticated health status=%d error=%v", status, err)
+		return fmt.Errorf("attached authenticated health status=%d error=%v", status, err)
 	}
-	for name, credential := range map[string]string{"unpaired": "", "wrong": "wrong-device-token"} {
+	status, err = serialRouteStatus(origin, token, "/api/session/"+sessionID)
+	if err != nil || status != http.StatusOK {
+		return fmt.Errorf("attached exact session status=%d error=%v", status, err)
+	}
+	for name, path := range map[string]string{"other-session": "/api/session/ses_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "filesystem": "/api/fs/list"} {
+		status, err = serialRouteStatus(origin, token, path)
+		if err != nil || status != http.StatusForbidden {
+			return fmt.Errorf("%s attachment fence status=%d error=%v", name, status, err)
+		}
+	}
+	for name, credential := range map[string]string{"missing": "", "wrong": "wrong-operator-password"} {
 		status, err = serialRouteStatus(origin, credential, "/api/health")
 		if err != nil || status != http.StatusUnauthorized {
 			return fmt.Errorf("%s route access status=%d error=%v", name, status, err)
@@ -1012,40 +1011,13 @@ func verifySerialRoute(origin, token string) error {
 	return nil
 }
 
-func verifySerialOpenReplay(store *taskstore.Store, ids *task.Generator, run taskstore.BackgroundRun, actor task.ActorSnapshot, route *backgroundroute.Manager, forbiddenToken string) error {
+func verifySerialAttachment(run taskstore.BackgroundRun, route *backgroundroute.Manager) error {
 	origin, active := route.ActiveOrigin(run)
 	if !active {
-		return errors.New("serial open route was not exactly active")
+		return errors.New("serial attachment route was not exactly active")
 	}
-	trusted, err := backgroundopencode.ParseTrustedOrigin(origin)
-	if err != nil {
-		return err
-	}
-	deepLink, err := backgroundopencode.DeepLink(trusted, string(run.OpenCodeSessionID))
-	if err != nil {
-		return err
-	}
-	receipt, err := ids.ReceiptID()
-	if err != nil {
-		return err
-	}
-	hash := sha256.Sum256([]byte("serial-open:" + string(run.TaskID)))
-	params := taskstore.OpenBackgroundRunParams{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, ReceiptID: receipt,
-		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: run.WorkspaceID, CommandKind: taskstore.OpenBackgroundRunCommand},
-			Key: "serial-open", RequestHash: hash, Actor: actor}, URL: deepLink, APIContractVersion: "fern.background-run.v1",
-		OpenedAt: time.Now().UTC().Truncate(time.Millisecond).Add(2 * time.Minute)}
-	first, err := store.OpenBackgroundRun(context.Background(), params)
-	if err != nil {
-		return err
-	}
-	params.ReceiptID, err = ids.ReceiptID()
-	if err != nil {
-		return err
-	}
-	replay, err := store.OpenBackgroundRun(context.Background(), params)
-	if err != nil || !replay.Replayed || first.Receipt.ID != replay.Receipt.ID || string(first.Receipt.ResponseProjection) != string(replay.Receipt.ResponseProjection) ||
-		strings.Contains(string(replay.Receipt.ResponseProjection), forbiddenToken) {
-		return fmt.Errorf("serial open replay stable=%t receipt=%s/%s error=%v", replay.Replayed, first.Receipt.ID, replay.Receipt.ID, err)
+	if origin != "https://fern.example.ts.net:8443" || run.OpenCodeSessionID == "" {
+		return fmt.Errorf("serial attachment identity origin=%q session=%q", origin, run.OpenCodeSessionID)
 	}
 	return nil
 }
@@ -1056,7 +1028,7 @@ func serialRouteStatus(origin, token, path string) (int, error) {
 		return 0, err
 	}
 	if token != "" {
-		request.AddCookie(&http.Cookie{Name: "__Host-fern_device", Value: token})
+		request.SetBasicAuth(backgroundroute.AttachmentUsername, token)
 	}
 	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)

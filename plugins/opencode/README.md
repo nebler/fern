@@ -9,8 +9,8 @@ This integration targets the OpenCode TUI host contract in `@opencode-ai/plugin`
 Implemented:
 
 - `/fern` opens a native action dialog. Slash arguments are intentionally unsupported by this OpenCode API.
-- Native `run`, `runs`, `open`, `stop`, `seal`, `result`, and `disconnect` command-palette actions. `/fern` opens the same action menu, including Seal.
-- `runs`, `open`, `stop`, `seal`, and `result` remain usable when the TUI connects with explicit `--server`.
+- Native `run`, `runs`, `stop`, `seal`, `result`, and `disconnect` command-palette actions. `/fern` opens the same action menu, including Seal.
+- `runs`, `stop`, `seal`, and `result` remain usable when the TUI connects with explicit `--server`.
 - `run` is local-service-only. It refuses explicit `--server` because TUI state paths belong to the server while Git subprocesses execute on the local TUI host. A server-side repository identity API is required before remote submission can be safe.
 - Fixed-argument Git subprocesses read the canonical remote, exact `HEAD`, branch, and complete dirty state.
 - Run creation rejects missing remotes, unborn repositories, ambiguous fetch URLs, dirty worktrees, and repository changes after confirmation.
@@ -31,7 +31,7 @@ Not implemented:
 - Repository authorization checks and host compatibility/readiness checks.
 - Windows durable credential storage.
 - A published npm package. Registry installation cannot succeed until `@fern/opencode` is published.
-- Writable human takeover. `open` is inspection and steering because the pinned OpenCode API cannot atomically fence PTYs, tools, child processes, background jobs, plugins, and MCP writers. Fern will not represent `session.interrupt` as a writer-ownership transfer.
+- Live-run attachment inside the plugin. Operators use `fern attach`; the CLI mints an exact short-lived capability and starts the normal OpenCode V2 TUI.
 
 ## Development
 
@@ -74,7 +74,7 @@ The client uses JSON and a Fern plugin bearer after device authorization:
 - `GET /fern/api/runs` and `GET /fern/api/runs/:id`.
 - `POST /fern/api/runs/:id/stop` with `Idempotency-Key`.
 - `POST /fern/api/runs/:id/seal` with a fresh `Idempotency-Key` and exact body `{}`; expects committed seal identity and phase metadata. It reuses the `run:result` scope.
-- `POST /fern/api/runs/:id/open` with `Idempotency-Key`; the same-host capability URL is resolved fresh, passed only to the browser launcher, and never cached or displayed.
+- `GET /fern/api/v1/runs/:id/attach` uses `run:attach` and returns a short-lived capability to the `fern` CLI; the plugin does not invoke it. This terminal-client surface is separate from the plugin-only `/fern/api/runs` contract.
 - `GET /fern/api/runs/:id/result`; returns immutable result commit/tree/changes-manifest metadata, the distinct whole artifact-manifest digest, retained `git_bundle_v1` digest and size, retention verification/reconstruction facts, and cleanup completion. `artifact.sha256` currently equals the whole artifact-manifest digest; neither equals the changes digest by contract. It contains no artifact URL, CAS locator, storage key, or server path.
 
-Create, list, get, stop, open, seal, and result share the deployed contract. Result returns `409 Conflict` while retention is in progress and `503 Service Unavailable` when durable export recovery is required.
+Create, list, get, stop, attach, seal, and result share the deployed contract. Result returns `409 Conflict` while retention is in progress and `503 Service Unavailable` when durable export recovery is required.

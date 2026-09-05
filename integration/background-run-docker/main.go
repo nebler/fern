@@ -4,16 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskenvdocker"
@@ -122,17 +119,8 @@ func run() (resultErr error) {
 	defer func() { _ = provider.Close() }()
 	var containerID string
 	var runtime taskenvdocker.RuntimeIdentity
-	humanIdentity, err := taskenvdocker.ShellContainerIdentity(run, 2, taskenvdocker.ShellRoleHuman)
-	if err != nil {
-		return err
-	}
-	inspectorIdentity, err := taskenvdocker.ShellContainerIdentity(run, 1, taskenvdocker.ShellRoleInspector)
-	if err != nil {
-		return err
-	}
 	defer func() {
 		resultErr = errors.Join(resultErr, cleanupHarness(provider, cli, run, containerID, runtime, filepath.Join(state, "background-runs", run.CloneIdentity)))
-		resultErr = errors.Join(resultErr, rawRemoveContainer(cli, inspectorIdentity), rawRemoveContainer(cli, humanIdentity))
 	}()
 
 	otherTask, err := ids.TaskID()
@@ -238,25 +226,6 @@ func run() (resultErr error) {
 	if started.Endpoint == "" || started.HostPort == 0 {
 		return errors.New("real loopback endpoint is absent")
 	}
-	inspectorCreated, err := provider.EnsureShellContainer(ctx, run, 1, taskenvdocker.ShellRoleInspector)
-	if err != nil {
-		return fmt.Errorf("create real read-only inspector: %w", err)
-	}
-	inspectorStarted, err := provider.StartShellContainer(ctx, run, 1, taskenvdocker.ShellRoleInspector, inspectorCreated.ContainerID)
-	if err != nil {
-		return fmt.Errorf("start real read-only inspector: %w", err)
-	}
-	inspectorOutput, err := runShellCommand(ctx, provider, run, 1, taskenvdocker.ShellRoleInspector, inspectorStarted.RuntimeIdentity(),
-		"touch /home/user/workspace/inspector-must-not-write 2>/dev/null; printf 'INSPECTOR_RC=%s\\n' \"$?\"; exit\n")
-	if err != nil || !strings.Contains(inspectorOutput, "INSPECTOR_RC=1") {
-		return fmt.Errorf("read-only inspector write fence output=%q error=%v", inspectorOutput, err)
-	}
-	if _, err := os.Stat(filepath.Join(clonePath, "inspector-must-not-write")); !errors.Is(err, os.ErrNotExist) {
-		return errors.New("read-only inspector changed the clone")
-	}
-	if _, err := provider.RemoveInspector(ctx, run, 1); err != nil {
-		return fmt.Errorf("remove real inspector: %w", err)
-	}
 	if err := provider.Close(); err != nil {
 		return err
 	}
@@ -292,78 +261,7 @@ func run() (resultErr error) {
 	if _, err := provider.RemoveVolume(ctx, run, authority); err != nil {
 		return err
 	}
-	if boundary, err := provider.ObserveGitBoundary(ctx, run); err != nil || !strings.Contains(boundary, `"workspace_sha256"`) {
-		return fmt.Errorf("agent-to-human Git boundary=%q error=%v", boundary, err)
-	}
-	humanCreated, err := provider.EnsureShellContainer(ctx, run, 2, taskenvdocker.ShellRoleHuman)
-	if err != nil {
-		return fmt.Errorf("create real human writer: %w", err)
-	}
-	humanStarted, err := provider.StartShellContainer(ctx, run, 2, taskenvdocker.ShellRoleHuman, humanCreated.ContainerID)
-	if err != nil {
-		return fmt.Errorf("start real human writer: %w", err)
-	}
-	humanInfo, err := cli.ContainerInspect(ctx, humanStarted.ContainerID)
-	if err != nil {
-		return err
-	}
-	if !humanInfo.Config.NetworkDisabled || humanInfo.HostConfig.NetworkMode != "none" || len(humanInfo.NetworkSettings.Networks) != 0 ||
-		len(humanInfo.HostConfig.PortBindings) != 0 || !humanInfo.HostConfig.ReadonlyRootfs || humanInfo.Config.User != "1001:1001" ||
-		len(humanInfo.Mounts) != 1 || !hasExactShellMounts(humanInfo.Mounts, clonePath, false) || len(humanInfo.HostConfig.Tmpfs) != 2 ||
-		humanInfo.HostConfig.Tmpfs["/tmp"] != "rw,noexec,nosuid,nodev,size=67108864,mode=1777,uid=1001,gid=1001" ||
-		humanInfo.HostConfig.Tmpfs["/home/user/.local/share/opencode"] != "rw,noexec,nosuid,nodev,size=67108864,mode=0700,uid=1001,gid=1001" ||
-		slices.ContainsFunc(humanInfo.Config.Env, func(value string) bool {
-			upper := strings.ToUpper(value)
-			return strings.Contains(upper, "OPENCODE_SERVER_PASSWORD=") || strings.Contains(upper, "API_KEY=") || strings.Contains(upper, "TOKEN=")
-		}) {
-		return errors.New("real human shell network, credential, rootfs, or mount policy differs")
-	}
-	humanOutput, err := runShellCommand(ctx, provider, run, 2, taskenvdocker.ShellRoleHuman, humanStarted.RuntimeIdentity(),
-		"printf 'human-owned\\n' > /home/user/workspace/human-output.txt; printf 'HUMAN_WRITE_OK\\n'; exit\n")
-	if err != nil || !strings.Contains(humanOutput, "HUMAN_WRITE_OK") {
-		return fmt.Errorf("human writer output=%q error=%v", humanOutput, err)
-	}
-	if contents, err := os.ReadFile(filepath.Join(clonePath, "human-output.txt")); err != nil || string(contents) != "human-owned\n" {
-		return fmt.Errorf("human writer result=%q error=%v", contents, err)
-	}
-	if _, err := provider.StopShellContainer(ctx, run, 2, taskenvdocker.ShellRoleHuman, humanStarted.RuntimeIdentity()); err != nil {
-		return fmt.Errorf("stop real human writer: %w", err)
-	}
-	if _, err := provider.RemoveShellContainer(ctx, run, 2, taskenvdocker.ShellRoleHuman, humanStarted.RuntimeIdentity()); err != nil {
-		return fmt.Errorf("remove real human writer: %w", err)
-	}
-	if boundary, err := provider.ObserveGitBoundary(ctx, run); err != nil || !strings.Contains(boundary, `"workspace_sha256"`) {
-		return fmt.Errorf("human-to-agent Git boundary=%q error=%v", boundary, err)
-	}
-	if _, err := provider.EnsureVolume(ctx, run); err != nil {
-		return fmt.Errorf("create fresh handback volume: %w", err)
-	}
-	replacementCreated, err := provider.EnsureContainer(ctx, run)
-	if err != nil {
-		return fmt.Errorf("create fresh handback agent: %w", err)
-	}
-	replacementStarted, err := provider.StartContainer(ctx, run, replacementCreated.ContainerID)
-	if err != nil {
-		return fmt.Errorf("start fresh handback agent: %w", err)
-	}
-	if replacementStarted.ContainerID == runtime.ContainerID || replacementStarted.RuntimeToken == runtime.Token {
-		return errors.New("handback reused the destroyed agent runtime epoch")
-	}
-	runtime, containerID = replacementStarted.RuntimeIdentity(), replacementCreated.ContainerID
-	if _, err := provider.Health(ctx, run, runtime); err != nil {
-		return fmt.Errorf("fresh handback agent health: %w", err)
-	}
-	if stopped, err := provider.StopContainer(ctx, run, runtime); err != nil || !strings.Contains(stopped.Evidence, "writer_inactive") {
-		return fmt.Errorf("fresh handback agent stop evidence=%q error=%v", stopped.Evidence, err)
-	}
-	if _, err := provider.RemoveContainer(ctx, run, taskenvdocker.RuntimeCleanupAuthority(runtime)); err != nil {
-		return err
-	}
-	containerID = ""
-	if _, err := provider.RemoveVolume(ctx, run, taskenvdocker.RuntimeCleanupAuthority(runtime)); err != nil {
-		return err
-	}
-	if _, err := provider.RemoveClone(ctx, run, taskenvdocker.RuntimeCleanupAuthority(runtime)); err != nil {
+	if _, err := provider.RemoveClone(ctx, run, authority); err != nil {
 		return err
 	}
 	if _, err := cli.ContainerInspect(ctx, run.ContainerIdentity); !client.IsErrNotFound(err) {
@@ -375,35 +273,8 @@ func run() (resultErr error) {
 	if _, err := os.Stat(clonePath); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("clone remains after cleanup")
 	}
-	fmt.Printf("PASS image_id=%s container_id=%s endpoint=%s key_mode=0600 clone_isolated=true auth=missing_wrong_correct reconstruction=true restart_fenced=true inspector=readonly_networkless cold_takeover=human_writable_networkless handback=fresh_agent cleanup=complete\n", imageID, created.ContainerID, started.Endpoint)
+	fmt.Printf("PASS image_id=%s container_id=%s endpoint=%s key_mode=0600 clone_isolated=true auth=missing_wrong_correct reconstruction=true restart_fenced=true cleanup=complete\n", imageID, created.ContainerID, started.Endpoint)
 	return nil
-}
-
-func runShellCommand(ctx context.Context, provider *taskenvdocker.Provider, run taskstore.BackgroundRun, writerGeneration int64, role string, runtime taskenvdocker.RuntimeIdentity, command string) (string, error) {
-	terminal, err := provider.AttachShell(ctx, run, writerGeneration, role, runtime)
-	if err != nil {
-		return "", err
-	}
-	defer terminal.Close()
-	if _, err := terminal.Write([]byte(command)); err != nil {
-		return "", err
-	}
-	output, err := io.ReadAll(io.LimitReader(terminal, 1<<20))
-	return string(output), err
-}
-
-func hasExactShellMounts(mounts []container.MountPoint, clonePath string, readOnly bool) bool {
-	if len(mounts) != 1 {
-		return false
-	}
-	workspace := false
-	for _, item := range mounts {
-		switch item.Destination {
-		case "/home/user/workspace":
-			workspace = item.Type == mount.TypeBind && item.Source == clonePath && item.RW != readOnly
-		}
-	}
-	return workspace
 }
 
 func canonicalImageID(value string) bool {

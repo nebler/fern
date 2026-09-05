@@ -62,14 +62,14 @@ func TestResumeIsNotAStandaloneCommand(t *testing.T) {
 
 func TestPersistentWorkspaceCommandsAreNotRegistered(t *testing.T) {
 	t.Parallel()
-	for _, retired := range []string{"attach", "status", "logs", "down", "github"} {
+	for _, retired := range []string{"status", "logs", "down", "github"} {
 		for _, command := range commands {
 			if command.name == retired {
 				t.Fatalf("retired persistent workspace command %q is registered", retired)
 			}
 		}
 	}
-	for _, retained := range []string{"init", "doctor", "up", "backup", "credentials", "debug", "version"} {
+	for _, retained := range []string{"init", "doctor", "up", "runs", "attach", "backup", "credentials", "debug", "version"} {
 		found := false
 		for _, command := range commands {
 			found = found || command.name == retained

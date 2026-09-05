@@ -46,7 +46,7 @@ const (
 	credentialIDTag    = "pc_"
 )
 
-var fixedScopes = [...]string{"run:create", "run:read", "run:stop", "run:open", "run:result"}
+var fixedScopes = [...]string{"run:create", "run:read", "run:stop", "run:attach", "run:result"}
 
 // Scopes returns the complete and non-configurable plugin authority.
 func Scopes() []string {

@@ -6,7 +6,7 @@ import { InMemoryCredentialStore } from "../src/credentials.js"
 const deviceCode = "A".repeat(43)
 const authorizationID = `pa_${"A".repeat(22)}`
 const credentialID = `pc_${"A".repeat(22)}`
-const scopes = ["run:create", "run:read", "run:stop", "run:open", "run:result"]
+const scopes = ["run:create", "run:read", "run:stop", "run:attach", "run:result"]
 
 describe("plugin authorization client", () => {
   test("starts without bearer and validates the complete bounded identity", async () => {

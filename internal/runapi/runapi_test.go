@@ -51,13 +51,7 @@ type apiFixture struct {
 	verifier *countingVerifier
 	retained *retentionVerifier
 	path     string
-	route    *fixtureRoute
 	now      time.Time
-}
-
-type fixtureRoute struct {
-	active bool
-	origin string
 }
 
 type resultProjectionStore struct {
@@ -77,10 +71,6 @@ func (store *resultProjectionStore) GetBackgroundRunResult(context.Context, task
 
 func (store *resultProjectionStore) GetBackgroundRunExport(context.Context, task.ArtifactExportID) (taskstore.BackgroundRunExport, error) {
 	return store.export, nil
-}
-
-func (route *fixtureRoute) ActiveOrigin(taskstore.BackgroundRun) (string, bool) {
-	return route.origin, route.active
 }
 
 func TestRunAPIAdmissionReplayOwnershipStopAndRestart(t *testing.T) {
@@ -113,8 +103,13 @@ func TestRunAPIAdmissionReplayOwnershipStopAndRestart(t *testing.T) {
 	if otherList.Code != http.StatusOK || otherList.Body.String() != "{\"runs\":[]}\n" {
 		t.Fatalf("cross-credential list = %d %s", otherList.Code, otherList.Body.String())
 	}
-	for _, route := range []struct{ method, suffix string }{{http.MethodPost, "/open"}, {http.MethodGet, "/result"}} {
-		result := fixture.request(route.method, PathPrefix+"/"+response.RunID+route.suffix, map[bool]string{true: "{}", false: ""}[route.method == http.MethodPost], "open-key")
+	operator := fixture.withActor(t, task.ActorSnapshot{Type: task.ActorOperator, ID: "operator", DisplayName: "Operator",
+		CredentialID: "operator", Authentication: "basic", RequestID: "request"})
+	if got := operator.request(http.MethodGet, PathPrefix, "", ""); got.Code != http.StatusUnauthorized {
+		t.Fatalf("operator reached plugin-only run API = %d %s", got.Code, got.Body.String())
+	}
+	for _, route := range []struct{ method, suffix string }{{http.MethodGet, "/result"}} {
+		result := fixture.request(route.method, PathPrefix+"/"+response.RunID+route.suffix, "", "")
 		if result.Code != http.StatusConflict || !strings.Contains(result.Body.String(), "not_ready") {
 			t.Fatalf("%s = %d %s", route.suffix, result.Code, result.Body.String())
 		}
@@ -207,7 +202,7 @@ func TestRunAPIMutationsRequireBoundedEmptyObject(t *testing.T) {
 	if created.Code != http.StatusAccepted || json.Unmarshal(created.Body.Bytes(), &response) != nil {
 		t.Fatalf("create=%d %s", created.Code, created.Body.String())
 	}
-	for _, suffix := range []string{"/stop", "/open"} {
+	for _, suffix := range []string{"/stop"} {
 		for _, test := range []struct {
 			name, path, body, contentType string
 		}{
@@ -407,53 +402,6 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 	}
 }
 
-func TestRunAPIOpenReadinessOwnershipIdempotencyAndStableReplay(t *testing.T) {
-	fixture := newAPIFixture(t, PluginOpenCodeProfile)
-	created := fixture.request(http.MethodPost, PathPrefix, validCreateBody("Open this run"), "create-open")
-	var admitted struct {
-		RunID task.TaskID `json:"run_id"`
-	}
-	if created.Code != http.StatusAccepted || json.Unmarshal(created.Body.Bytes(), &admitted) != nil {
-		t.Fatalf("create=%d %s", created.Code, created.Body.String())
-	}
-	ready := fixture.advanceToSession(t, admitted.RunID)
-	path := PathPrefix + "/" + string(admitted.RunID) + "/open"
-	if notReady := fixture.request(http.MethodPost, path, "{}", "open-key"); notReady.Code != http.StatusConflict {
-		t.Fatalf("unbound open=%d %s", notReady.Code, notReady.Body.String())
-	}
-	fixture.route.active = true
-	opened := fixture.request(http.MethodPost, path, "{}", "open-key")
-	var projection openProjection
-	if opened.Code != http.StatusOK || json.Unmarshal(opened.Body.Bytes(), &projection) != nil || projection.RunID != admitted.RunID ||
-		!strings.HasPrefix(projection.URL, fixture.route.origin+"/server/") || !strings.HasSuffix(projection.URL, "/session/"+string(ready.OpenCodeSessionID)) {
-		t.Fatalf("open=%d %s", opened.Code, opened.Body.String())
-	}
-	firstBody := opened.Body.String()
-	fixture.handler.config.Now = func() time.Time { panic("open replay read time") }
-	replayed := fixture.request(http.MethodPost, path, "{}", "open-key")
-	if replayed.Code != http.StatusOK || replayed.Header().Get("Idempotency-Replayed") != "true" || replayed.Body.String() != firstBody {
-		t.Fatalf("replay=%d %s", replayed.Code, replayed.Body.String())
-	}
-	other := fixture.withActor(t, pluginActor("pc_other"))
-	other.route.active = true
-	if got := other.request(http.MethodPost, path, "{}", "open-key"); got.Code != http.StatusNotFound {
-		t.Fatalf("owner mismatch=%d %s", got.Code, got.Body.String())
-	}
-	fixture.route.active = false
-	if got := fixture.request(http.MethodPost, path, "{}", "open-key"); got.Code != http.StatusConflict {
-		t.Fatalf("inactive replay=%d %s", got.Code, got.Body.String())
-	}
-	fixture.route.active = true
-	fixture.handler.config.Now = func() time.Time { return time.Date(2026, 8, 31, 12, 0, 3, 0, time.UTC) }
-	stopPath := PathPrefix + "/" + string(admitted.RunID) + "/stop"
-	if stopped := fixture.request(http.MethodPost, stopPath, "{}", "stop-open"); stopped.Code != http.StatusAccepted {
-		t.Fatalf("stop=%d %s", stopped.Code, stopped.Body.String())
-	}
-	if got := fixture.request(http.MethodPost, path, "{}", "open-key"); got.Code != http.StatusConflict {
-		t.Fatalf("canceling active-route replay=%d %s", got.Code, got.Body.String())
-	}
-}
-
 func TestGitBaseVerifierRequiresAllowedReachability(t *testing.T) {
 	repository := filepath.Join(t.TempDir(), "repo")
 	for _, args := range [][]string{{"init", repository}, {"-C", repository, "config", "user.email", "test@example.com"}, {"-C", repository, "config", "user.name", "Test"}} {
@@ -553,8 +501,7 @@ func newAPIFixture(t *testing.T, available string) *apiFixture {
 	if err := store.CreateWorkspace(context.Background(), taskstore.Workspace{ID: testWorkspace, Name: "demo", State: taskstore.WorkspaceActive, RepositoryPath: "/srv/repo", GitHubAuthority: taskstore.GitHubAuthorityAppBroker, InstallationID: 1, RepositoryID: 99, RepositoryFullName: "owner/repository", ImageDigest: "sha256:image", OpenCodeProtocol: "0.0.0-next-17444", RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	fixture := &apiFixture{store: store, actor: pluginActor("pc_owner"), verifier: &countingVerifier{}, retained: &retentionVerifier{}, path: path,
-		route: &fixtureRoute{origin: "https://fern.example.ts.net:8443"}, now: now}
+	fixture := &apiFixture{store: store, actor: pluginActor("pc_owner"), verifier: &countingVerifier{}, retained: &retentionVerifier{}, path: path, now: now}
 	t.Cleanup(func() { _ = store.Close() })
 	fixture.handler = fixture.buildHandler(t, available)
 	return fixture
@@ -565,11 +512,7 @@ func (f *apiFixture) buildHandler(t *testing.T, available string) *Handler {
 	if available == PluginOpenCodeProfile {
 		backgroundImage = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	}
-	var route RouteResolver
-	if available == PluginOpenCodeProfile {
-		route = f.route
-	}
-	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), AvailableProfile: available, Store: f.store, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, RetentionVerifier: f.retained, Now: func() time.Time { return f.now }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", BudgetSnapshot: json.RawMessage(`{"turns":10}`), Route: route, SealPolicyVersion: "fern.background-user-seal.v1"})
+	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), AvailableProfile: available, Store: f.store, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, RetentionVerifier: f.retained, Now: func() time.Time { return f.now }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", BudgetSnapshot: json.RawMessage(`{"turns":10}`), SealPolicyVersion: "fern.background-user-seal.v1"})
 	if err != nil {
 		t.Fatal(err)
 	}

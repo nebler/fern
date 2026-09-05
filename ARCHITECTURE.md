@@ -17,12 +17,10 @@ Fern owns:
 
 - repository and GitHub App authority;
 - actor identity, pairing, plugin grants, and revocation;
-- idempotent task, stop, open, seal, intervention, ownership-transfer, and
-  publication admission;
+- idempotent task, stop, seal, and publication admission;
 - exact disposable resource identity and lifecycle;
 - run claims, revisions, cancellation epochs, and evidence;
-- read-only live-route capabilities and connection shutdown;
-- exact writer generations and cold human takeover/handback;
+- short-lived exact-session attachment capabilities and connection shutdown;
 - writer inactivity proof;
 - Git bundle export and local content-addressed storage;
 - verification and GitHub publication journals;
@@ -36,8 +34,8 @@ OpenCode owns:
 - file edits made while its disposable writer is active.
 
 Fern does not own a persistent OpenCode home, a persistent repository mount, a
-wake-on-request proxy, or an idle supervisor. Its browser surface is a bounded
-paired/operator run-control deck, not a general OpenCode or task-management UI.
+wake-on-request proxy, an idle supervisor, or a browser terminal. Operator
+interaction with a live run uses the normal OpenCode TUI.
 
 ## 3. Process Topology
 
@@ -52,7 +50,7 @@ paired/operator run-control deck, not a general OpenCode or task-management UI.
                               |                      |
                               +----------+-----------+
                                          v
-                    pairing / plugin auth / run-control APIs
+                      pairing / plugin auth / run APIs
                                          |
                        +-----------------+------------------+
                        |                 |                  |
@@ -131,7 +129,7 @@ Fern has three ingress actor classes:
 - paired device: restart-safe secure cookie whose digest is stored by Fern;
 - OpenCode plugin: device authorization followed by a fixed-scope bearer.
 
-The plugin scopes are `run:create`, `run:read`, `run:stop`, `run:open`, and
+The plugin scopes are `run:create`, `run:read`, `run:stop`, `run:attach`, and
 `run:result`. They are not configuration. Publication admission is reserved for
 paired/operator actors and is not a plugin bearer scope.
 
@@ -227,20 +225,25 @@ clone work has the same 30-second deadline as its Git operation.
 
 ## 10. Live Route
 
-`backgroundroute.Manager` maps one opaque capability to one exact authenticated
-runtime. The route is activated only after container health, endpoint identity,
-and OpenCode session identity are committed. `open` returns a fresh URL only
-while that exact route remains active.
+`backgroundroute.Manager` maps short-lived opaque capabilities to one exact
+authenticated runtime and OpenCode session. The route is activated only after
+container health, endpoint identity, and OpenCode session identity are
+committed. The run API can mint a random two-hour capability only while the
+complete workspace, task, attempt, run generation, single-writer generation,
+container ID, start time, runtime epoch, and session tuple remains active. Fern retains only the
+capability digest in process memory.
 
-The agent route admits only `GET` and `HEAD`; it rejects all mutations and all
-HTTP upgrades before OpenCode. Its identity includes workspace, task, attempt,
-run generation, writer generation, role, container ID, and runtime epoch. Human
-write access never reuses this route.
+The attached OpenCode TUI may read the dedicated server and interact with the
+exact session. The route rejects cross-session mutation, session creation and
+deletion, workspace and credential management, Fern control paths, and HTTP
+upgrades. The capability is supplied as OpenCode Basic authentication, never as
+a command argument. The underlying provider transport replaces it with the
+runtime's derived server credential.
 
 Removal is a fence:
 
 1. Remove target admission.
-2. Cancel and close admitted HTTP, SSE, and WebSocket traffic.
+2. Revoke every attachment capability and cancel admitted HTTP/SSE traffic.
 3. Wait for every admitted request-forwarding goroutine to exit.
 4. Return route-removal evidence.
 
@@ -305,59 +308,23 @@ phase. Push and pull-request mutations are each preceded by durable started
 phases and followed by exact GitHub observations. Lost responses become
 read-only reconciliation, never blind duplicate mutation.
 
-## 15. Intervention And Writer Ownership
+## 15. Terminal-Native Attachment
 
-Paired devices and the loopback operator can use `/fern/api/v1/runs` and
-`/fern/runs`. The plugin-only `/fern/api/runs` contract remains separate. Warm
-inspection uses a credential-free, networkless container with the clone mounted
-read-only. Interrupt and steer are durable control rows with idempotency receipts,
-claims, CAS revisions, and the exact agent writer generation/runtime tuple.
-Interrupt records its irreversible attempted boundary and becomes `uncertain`
-after a crash there; steering reuses one durable OpenCode message identity and
-reconciles history before dispatch. Stop, seal, and takeover cannot race an
-active warm command.
+`fern runs` queries `/fern/api/v1/runs` through either loopback operator Basic
+authentication or the existing remote plugin bearer. It shows running runs by
+default and has a stable `--json` projection for automation. Bare `fern attach`
+selects the only attachable run or presents an interactive picker; an exact task
+ID bypasses selection.
 
-Writable takeover is a cold writer-ownership transfer, not an OpenCode interrupt
-or route toggle:
-
-```text
-agent_owned W1
- -> takeover_requested (route removal, inspector removal, agent stop/removal,
-                         OpenCode volume removal, Git boundary)
- -> human_owned W2
- -> handback_requested (close browser WebSocket and Docker attach, wait for
-                         both forwarding goroutines, human stop/removal,
-                         Git boundary, fresh volume/container/session/resume prompt)
- -> agent_owned W3
- -> ...
-```
-
-`background_run_ownerships` is independent of the public run lifecycle. It
-stores mode, effect phase, current and target resource tuples, monotonically
-increasing writer generation, request receipt/actor, bounded evidence, claim,
-lease generation, and revision. Transitional modes publish no writer route.
-Every Docker mutation attests the exact labeled object and runtime epoch; a
-replacement or contradictory object fails closed.
-
-The human writer is the PID 1 Bash process in a dedicated container. It has no
-network, credentials, ports, or OpenCode state volume; it has a read-only root,
-bounded tmpfs state, dropped capabilities, `no-new-privileges`, and only the
-clone bind-mounted writable. Fern uses Docker attach, never Docker exec. The
-browser WebSocket is same-origin and tied to paired-device cancellation. Before
-handback, Fern closes the browser WebSocket and Docker attach connection and
-waits for both forwarding goroutines to exit; this does not guarantee delivery
-of bytes already buffered at disconnect. An expired attempt automatically
-begins handback so normal timeout processing can resume under an agent-owned
-generation.
-
-At each cold boundary Fern proves that all writer containers are absent, then
-records `HEAD`, status metadata, tracked diff bytes, and untracked-content object
-identities in bounded Git evidence. Handback creates a fresh OpenCode volume,
-container process, session, and deterministic re-read/resume prompt; no previous
-OpenCode process state is reused. Only after exact prompt reconciliation does
-Fern reactivate the read-only agent route and commit the new odd-numbered writer
-generation. Ambiguous identity or external outcomes move ownership to
-`uncertain` and leave routes closed for explicit repair.
+`GET /fern/api/v1/runs/:id/attach` is an operator/client control operation, not a
+plugin UI operation and not a browser deep link. It re-reads run ownership and
+route readiness, then asks `backgroundroute.Manager` for an in-memory capability
+bound to the active runtime and session. `fern attach` starts
+`opencode attach <origin> --session <session-id> --pure` with the capability in the
+OpenCode authentication environment. The existing OpenCode process remains the
+only writer and retains its volume, transcript, tools, permissions, and file
+ownership. Attachment adds a client; it does not replace the agent or transfer
+the clone to another container.
 
 ## 16. Recovery
 
@@ -434,17 +401,16 @@ generation when one exists.
 | --- | --- |
 | `cmd/fern` | CLI, composition, backup, credentials, process lifecycle |
 | `backgroundopencode` | pinned disposable OpenCode client and observations |
-| `backgroundroute` | exact live target capability, connection shutdown, and fencing |
+| `backgroundroute` | exact live target/session capabilities, request policy, shutdown, and fencing |
 | `backgroundruncoord` | serial run effect coordinator and recovery |
 | `config` | strict compatibility loader and production validator |
-| `control` | devices, pairing, legacy disposition, route state |
+| `control` | devices, pairing, and legacy disposition |
 | `credentialbundle` | age-encrypted GitHub credential bundles |
 | `githubapp` | onboarding, installation tokens, repository authority |
 | `pluginauth` | fixed-scope plugin device authorization and revocation |
 | `proxy` | remote/operator ingress and browser security |
 | `runapi` | plugin-authenticated run contract |
-| `runcontrol` | paired/operator control API and bounded HTML deck |
-| `runterminal` | same-origin WebSocket to exact Docker terminal attach |
+| `runclientapi` | operator/client discovery and attachment admission |
 | `resultapi` | paired/operator retained result and publication admission |
 | `task` | identifiers, actor snapshots, idempotency vocabulary |
 | `taskartifact` | deterministic Git bundle creation, CAS, materialization |
@@ -503,9 +469,8 @@ bun test
 ```
 
 Docker/release gates qualify the source-pinned Background Run image, serial run
-lifecycle, read-only inspector, cold human writer, fresh-runtime handback,
-artifact retention, fresh-schema initialization, deployment files,
-reproducibility, SBOM,
+lifecycle, exact-session attachment fencing, artifact retention, fresh-schema
+initialization, deployment files, reproducibility, SBOM,
 signatures, and provenance. Release publication must bind the image by registry
 digest; a local image ID is not portable registry authority. Each architecture
 is built as a candidate, the exact pushed digest is qualified under its target

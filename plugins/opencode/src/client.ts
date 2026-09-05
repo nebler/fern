@@ -70,7 +70,7 @@ export type RunResult = {
   }
 }
 
-export const PLUGIN_SCOPES = ["run:create", "run:read", "run:stop", "run:open", "run:result"] as const
+export const PLUGIN_SCOPES = ["run:create", "run:read", "run:stop", "run:attach", "run:result"] as const
 
 export type AuthorizationStart = {
   authorizationID: string
@@ -334,30 +334,6 @@ export class FernClient {
       sealRequestID: response.seal_request_id,
       committed: true,
     }
-  }
-
-  async resolveOpen(runID: string, idempotencyKey: string) {
-    const expected = this.requireRunID(runID)
-    const response = await this.#request(`/fern/api/runs/${encodeURIComponent(expected)}/open`, {
-      method: "POST",
-      headers: { "Idempotency-Key": idempotencyKey },
-      body: "{}",
-    })
-    if (!isRecord(response) || response.run_id !== expected || typeof response.url !== "string") {
-      throw new FernClientError("Fern returned an invalid open capability.")
-    }
-    const url = URL.parse(response.url)
-    const localHTTP = url?.protocol === "http:" && isLocalhost(url.hostname)
-    if (
-      !url ||
-      (url.protocol !== "https:" && !localHTTP) ||
-      url.username ||
-      url.password ||
-      url.hostname.toLowerCase() !== this.#endpoint.hostname.toLowerCase()
-    ) {
-      throw new FernClientError("Fern returned an unsafe open capability.")
-    }
-    return url
   }
 
   async getResult(runID: string): Promise<RunResult> {

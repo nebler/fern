@@ -42,7 +42,7 @@ func newFlagSet(command, description string) *flag.FlagSet {
 	flags.SetOutput(io.Discard)
 	flags.Usage = func() {
 		output := flags.Output()
-		fmt.Fprintf(output, "%s\n\nUsage:\n  fern %s [flags]\n", description, command)
+		fmt.Fprintf(output, "%s\n\nUsage:\n  fern %s [flags]%s\n", description, command, commandUsageSuffix[command])
 		fmt.Fprintln(output, "\nFlags:")
 		flags.PrintDefaults()
 		if example := commandExamples[command]; example != "" {
@@ -52,11 +52,15 @@ func newFlagSet(command, description string) *flag.FlagSet {
 	return flags
 }
 
+var commandUsageSuffix = map[string]string{"attach": " [run-id]"}
+
 // commandExamples holds the Example line shown in each command's flag help,
 // keyed the way flag help addresses commands ("name" or "parent sub"). It stays
 // a plain literal because deriving it from the command registry would create a
 // package initialization cycle.
 var commandExamples = map[string]string{
+	"runs":                          "fern runs --endpoint https://fern-host.example.ts.net",
+	"attach":                        "fern attach --endpoint https://fern-host.example.ts.net tsk_...",
 	"init":                          "fern init --repo /path/to/repository",
 	"doctor":                        "fern doctor --phone",
 	"up":                            "fern up --config /etc/fern/fern.yaml",
@@ -70,6 +74,16 @@ var commandExamples = map[string]string{
 }
 
 func parseFlags(fs *flag.FlagSet, args []string) error {
+	if err := parseFlagValues(fs, args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return invocationError{message: fmt.Sprintf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
+	}
+	return nil
+}
+
+func parseFlagValues(fs *flag.FlagSet, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			fs.SetOutput(os.Stdout)
@@ -77,9 +91,6 @@ func parseFlags(fs *flag.FlagSet, args []string) error {
 			return errHelpShown
 		}
 		return invocationError{message: err.Error()}
-	}
-	if fs.NArg() != 0 {
-		return invocationError{message: fmt.Sprintf("unexpected arguments: %s", strings.Join(fs.Args(), " "))}
 	}
 	return nil
 }

@@ -140,16 +140,16 @@ func assembleServices(serviceCtx context.Context, cfg config.BackgroundConfig, o
 	if err != nil {
 		return nil, err
 	}
-	route, err := backgroundroute.New(backgroundListener, cfg.Tasks.BackgroundRoute.Origin, controlStore)
+	pluginAuthStore, err := openPluginAuthorizationStore(controlStore, cfg.Workspace.Name)
+	if err != nil {
+		return nil, err
+	}
+	route, err := backgroundroute.New(backgroundListener, cfg.Tasks.BackgroundRoute.Origin)
 	if err != nil {
 		return nil, err
 	}
 	fail := func(cause error) (*upRuntime, error) {
 		return nil, errors.Join(cause, route.Close())
-	}
-	pluginAuthStore, err := openPluginAuthorizationStore(controlStore, cfg.Workspace.Name)
-	if err != nil {
-		return fail(err)
 	}
 	status := observability.NewRegistry()
 	updateLegacyPublicationReadiness(status, controlStore)
@@ -179,13 +179,13 @@ func assembleServices(serviceCtx context.Context, cfg config.BackgroundConfig, o
 	unavailable := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "Background Runs await GitHub App onboarding", http.StatusServiceUnavailable)
 	}))
-	runs, runControl, results := unavailable, unavailable, unavailable
+	runs, runClients, results := unavailable, unavailable, unavailable
 	if tasks != nil {
 		runs = tasks.runs
-		runControl = tasks.runControl
+		runClients = tasks.runClients
 		results = tasks.results
 	}
-	controls := proxy.Controls{Store: controlStore, Runs: runs, RunControl: runControl, Results: results, Onboarding: onboarding,
+	controls := proxy.Controls{Store: controlStore, Runs: runs, RunClients: runClients, Results: results, Onboarding: onboarding,
 		ControlAuth: proxy.ControlAuth{Password: cfg.Control.Password}, PluginAuth: pluginAuthStore,
 		Liveness: status.LivenessHandler(), Readiness: status.ReadinessHandler(), Status: status.StatusHandler(), Metrics: status.MetricsHandler()}
 	handlers, err := proxy.NewHandlers(controls, origins)

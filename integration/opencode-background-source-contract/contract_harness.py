@@ -347,18 +347,15 @@ class Harness:
         require(self.json_ok("GET", "/api/health") == {"healthy": True}, "V2 health changed")
         global_health = self.json_ok("GET", "/global/health")
         require(global_health == {"healthy": True, "version": VERSION}, f"version health changed: {global_health}")
-        for route in ("/", "/L2hvbWUvdXNlci93b3Jrc3BhY2U/session/ses_deep_link", "/server/aHR0cDovL2xvY2FsaG9zdDo0MDk2/session/ses_deep_link"):
-            status, html, headers = self.request("GET", route, headers={"Accept": "text/html"})
-            require(status == 200 and "<!doctype html" in html.lower(), f"embedded UI missing at {route}: {status}")
-            require("text/html" in headers.get("content-type", ""), f"UI content type changed at {route}")
         self.proven.extend([
             "missing and wrong Basic auth receive the typed UnauthorizedError 401 with the Basic challenge; correct auth succeeds",
             f"V2 /api/health is healthy and /global/health reports the commit-derived version {VERSION}",
-            "the embedded official UI serves root, legacy directory-session, and server-scoped session deep-link routes",
         ])
 
     def test_identity_retry_history_replacement(self) -> None:
         session_id, session = self.create_session("identity")
+        attach_session = self.json_ok("GET", f"/session/{session_id}")
+        require(attach_session["id"] == session_id, "stable attach client route did not resolve the V2-created session")
         message_id = f"msg_source_contract_retry_{self.run_id}"
         text = f"CONTRACT_ADMISSION_{self.run_id}"
         prompt = {"id": message_id, "prompt": {"text": text}, "delivery": "steer", "resume": False}
@@ -399,6 +396,7 @@ class Harness:
         require(self.history(session_id, 1) == before, "post-replacement retry duplicated history")
         require(self.provider_calls() == calls, "post-replacement resume=false retry called provider")
         self.proven.extend([
+            "the stable OpenCode attach client route resolves the exact caller-selected V2 session",
             "caller-selected Session ID is accepted; exact reads reconcile its agent, model provider/model ID, and location, and same-ID creation adopts without mutation",
             "caller-selected prompt ID and exact text/delivery are represented by one durable prompt-admitted event",
             "finite limit-bounded durable history is ordered and sufficient to reconcile admitted prompt identity",
@@ -522,7 +520,6 @@ class Harness:
             "question recovery: pending question state is process-local and cannot be answered after replacement",
             "automatic completion authority: active absence and stream loss are not proof of success",
             "durable provider-turn start: the hanging stream is active and reaches the provider, but history has no step-start event before settlement",
-            "browser navigation, private TLS, WSS, and external-origin behavior: deep-link qualification proves HTTP SPA fallback only",
         ])
 
     def run(self) -> None:

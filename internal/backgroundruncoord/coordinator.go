@@ -48,15 +48,13 @@ type Config struct {
 }
 
 type Coordinator struct {
-	store      *taskstore.Store
-	provider   *taskenvdocker.Provider
-	artifact   Artifact
-	ids        *task.Generator
-	config     Config
-	wake       chan struct{}
-	scan       sync.Mutex
-	terminalMu sync.Mutex
-	terminals  map[task.TaskID]*terminalSession
+	store    *taskstore.Store
+	provider *taskenvdocker.Provider
+	artifact Artifact
+	ids      *task.Generator
+	config   Config
+	wake     chan struct{}
+	scan     sync.Mutex
 }
 
 // Artifact is the narrow retained-result CAS boundary. StagedLocator and
@@ -83,7 +81,7 @@ func New(store *taskstore.Store, provider *taskenvdocker.Provider, artifact Arti
 	if _, err := task.ParseWorkspaceID(string(config.WorkspaceID)); err != nil {
 		return nil, errors.New("valid background run coordinator workspace is required")
 	}
-	return &Coordinator{store: store, provider: provider, artifact: artifact, ids: ids, config: config, wake: make(chan struct{}, 1), terminals: make(map[task.TaskID]*terminalSession)}, nil
+	return &Coordinator{store: store, provider: provider, artifact: artifact, ids: ids, config: config, wake: make(chan struct{}, 1)}, nil
 }
 
 func (c *Coordinator) Wake() {
@@ -135,36 +133,6 @@ func (c *Coordinator) RunOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	control, controlErr := c.store.ClaimNextBackgroundRunControl(ctx, taskstore.ClaimNextBackgroundRunControlParams{
-		WorkspaceID: c.config.WorkspaceID, ClaimOwner: c.config.WorkerID, Now: now, LeaseDuration: c.config.LeaseDuration,
-	})
-	if controlErr == nil {
-		work, readErr := c.store.ReadClaimedBackgroundRunControlWork(ctx, controlClaim(control, now))
-		if readErr != nil {
-			return readErr
-		}
-		operation, cancel := context.WithTimeout(ctx, c.config.OperationTimeout)
-		defer cancel()
-		return c.processControl(operation, ctx, work)
-	}
-	if !errors.Is(controlErr, taskstore.ErrNotFound) {
-		return controlErr
-	}
-	ownership, ownershipErr := c.store.ClaimNextBackgroundRunOwnership(ctx, taskstore.ClaimNextBackgroundRunOwnershipParams{
-		WorkspaceID: c.config.WorkspaceID, ClaimOwner: c.config.WorkerID, Now: now, LeaseDuration: c.config.LeaseDuration,
-	})
-	if ownershipErr == nil {
-		work, readErr := c.store.ReadClaimedBackgroundRunOwnershipWork(ctx, ownershipClaim(ownership, now))
-		if readErr != nil {
-			return readErr
-		}
-		operation, cancel := context.WithTimeout(ctx, c.config.OperationTimeout)
-		defer cancel()
-		return c.processOwnership(operation, ctx, work)
-	}
-	if !errors.Is(ownershipErr, taskstore.ErrNotFound) {
-		return ownershipErr
-	}
 	work, err := c.store.ClaimNextBackgroundRunWork(ctx, taskstore.ClaimNextBackgroundRunParams{
 		WorkspaceID: c.config.WorkspaceID, ClaimOwner: c.config.WorkerID, Now: now, LeaseDuration: c.config.LeaseDuration,
 		Profile: c.config.Profile, ImageIdentity: c.config.ImageIdentity,
@@ -175,11 +143,6 @@ func (c *Coordinator) RunOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	currentOwnership, err := c.store.GetBackgroundRunOwnership(ctx, work.Run.WorkspaceID, work.Run.TaskID)
-	if err != nil {
-		return err
-	}
-	work.Run = effectiveRun(work.Run, currentOwnership)
 	now, err = c.freshNow()
 	if err != nil {
 		return err
@@ -283,12 +246,6 @@ func (c *Coordinator) process(ctx, parent context.Context, work taskstore.Backgr
 	case taskstore.BackgroundRunEffectStopIntent:
 		observation, _, err := c.provider.ProveWriterInactive(ctx, run)
 		if err != nil {
-			return c.cleanupFailure(parent, work, err)
-		}
-		if err := c.disconnectTerminalAndWait(ctx, run.TaskID); err != nil {
-			return c.cleanupFailure(parent, work, err)
-		}
-		if _, err := c.provider.RemoveInspector(ctx, run, run.WriterGeneration); err != nil {
 			return c.cleanupFailure(parent, work, err)
 		}
 		return c.record(parent, work, observation.Evidence, c.store.RecordBackgroundRunWriterInactive)
@@ -858,12 +815,9 @@ func (c *Coordinator) routeIdentity(run taskstore.BackgroundRun) (backgroundrout
 }
 
 func routeIdentity(run taskstore.BackgroundRun, runtime taskenvdocker.RuntimeIdentity) backgroundroute.Identity {
-	writerGeneration := run.WriterGeneration
-	if writerGeneration < 1 {
-		writerGeneration = 1
-	}
 	return backgroundroute.Identity{WorkspaceID: string(run.WorkspaceID), TaskID: string(run.TaskID), AttemptID: string(run.AttemptID),
-		Generation: run.Generation, WriterGeneration: writerGeneration, Role: "agent", RuntimeEpoch: run.RuntimeEpoch, ContainerID: runtime.ContainerID, StartedAt: runtime.StartedAt, RuntimeToken: runtime.Token}
+		Generation: run.Generation, WriterGeneration: run.WriterGeneration, SessionID: string(run.OpenCodeSessionID), RuntimeEpoch: run.RuntimeEpoch,
+		ContainerID: runtime.ContainerID, StartedAt: runtime.StartedAt, RuntimeToken: runtime.Token}
 }
 
 func (c *Coordinator) externalFailure(ctx context.Context, work taskstore.BackgroundRunWork, external error) error {

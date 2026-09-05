@@ -72,27 +72,6 @@ describe("FernClient", () => {
     })
   })
 
-  test("opens with POST, idempotency, and a same-host capability without exposing cross-host URLs", async () => {
-    const capture: { method?: string; key?: string | null } = {}
-    const server = serve((request) => {
-      capture.method = request.method
-      capture.key = request.headers.get("idempotency-key")
-      const endpoint = new URL(server.url)
-      return Response.json({
-        run_id: "run_123",
-        url: `http://${endpoint.hostname}:${Number(endpoint.port) + 1}/capability/secret-value`,
-      })
-    })
-    const url = await client(server).resolveOpen("run_123", "open-key")
-    expect(url.pathname).toBe("/capability/secret-value")
-    expect(capture).toEqual({ method: "POST", key: "open-key" })
-
-    const crossHost = serve(() =>
-      Response.json({ run_id: "run_123", url: "https://evil.example/capability/secret-value" }),
-    )
-    await expect(client(crossHost).resolveOpen("run_123", "open-key")).rejects.toThrow("unsafe open capability")
-  })
-
   test("stops a run with the caller idempotency key", async () => {
     const capture: { method?: string; path?: string; key?: string | null; body?: string } = {}
     const server = serve(async (request) => {

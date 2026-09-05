@@ -1,15 +1,14 @@
 package backgroundopencode
 
 import (
-	"encoding/base64"
 	"net"
 	"net/url"
 	"strconv"
 	"strings"
 )
 
-// TrustedOrigin can only be constructed from a canonical credential-free HTTPS
-// origin selected by Fern's trusted routing configuration.
+// TrustedOrigin is a canonical credential-free HTTPS origin selected by
+// Fern's trusted routing configuration.
 type TrustedOrigin struct{ value string }
 
 func ParseTrustedOrigin(value string) (TrustedOrigin, error) {
@@ -62,14 +61,4 @@ func canonicalDNSName(host string) bool {
 		}
 	}
 	return !allNumeric
-}
-
-// DeepLink returns the official source-profile route. It contains no Basic
-// credential, route capability, query, or fragment.
-func DeepLink(origin TrustedOrigin, sessionID string) (string, error) {
-	if origin.value == "" || !validSessionID(sessionID) {
-		return "", ErrInvalidConfig
-	}
-	encoded := base64.RawURLEncoding.EncodeToString([]byte(origin.value))
-	return origin.value + "/server/" + encoded + "/session/" + url.PathEscape(sessionID), nil
 }

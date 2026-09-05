@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const taskStoreSchemaOneChecksum = "d37b38566dc707d31885b883035a43d4ef5cc829415b2a64cb91701450b231fc"
+const taskStoreSchemaOneChecksum = "97cd41f3a8bead5f77954878a64fd9e70d6d7a8128507e3dfaa10ac2949db274"
 
 func TestFreshTaskStoreIsSchemaOne(t *testing.T) {
 	directory := t.TempDir()
@@ -45,10 +45,10 @@ func TestFreshTaskStoreIsSchemaOne(t *testing.T) {
 	}
 	var requiredTables int
 	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN
-('background_runs','background_run_ownerships','background_run_controls','retained_artifacts','verifications','publications')`).Scan(&requiredTables); err != nil {
+('background_runs','retained_artifacts','verifications','publications')`).Scan(&requiredTables); err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 || version != taskstore.CurrentSchemaVersion() || entries != 1 || name != "initial_task_store" || checksum != taskStoreSchemaOneChecksum || integrity != "ok" || requiredTables != 6 {
+	if version != 1 || version != taskstore.CurrentSchemaVersion() || entries != 1 || name != "initial_task_store" || checksum != taskStoreSchemaOneChecksum || integrity != "ok" || requiredTables != 4 {
 		t.Fatalf("version=%d current=%d entries=%d name=%q checksum=%q integrity=%q required_tables=%d",
 			version, taskstore.CurrentSchemaVersion(), entries, name, checksum, integrity, requiredTables)
 	}

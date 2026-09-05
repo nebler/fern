@@ -15,7 +15,7 @@ const StopBackgroundRunCommand = "run.stop"
 const BackgroundRunStoppedBeforeStart = "background_run_stopped_before_start"
 
 const backgroundRunSelect = `
-SELECT r.task_id,r.attempt_id,r.workspace_id,r.generation,r.repository_id,r.repository_remote,r.base_oid,r.branch,
+SELECT r.task_id,r.attempt_id,r.workspace_id,r.generation,r.writer_generation,r.repository_id,r.repository_remote,r.base_oid,r.branch,
        r.instruction_sha256,r.profile,r.profile_sha256,r.environment_sha256,r.resource_spec_version,r.image_identity,r.clone_identity,r.volume_identity,
        r.container_identity,r.endpoint_identity,r.opencode_session_id,r.opencode_message_id,r.state,r.effect_phase,
        r.cancel_epoch,r.stop_receipt_id,r.stop_requested_at,r.claim_owner,r.claim_expires_at,r.claim_generation,
@@ -39,24 +39,21 @@ func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID task.Workspace
 	if _, err := task.ParseWorkspaceID(string(workspaceID)); err != nil {
 		return BackgroundRun{}, fmt.Errorf("%w: background run workspace", ErrInvalidInput)
 	}
-	if _, err := task.ParseTaskID(string(taskID)); err != nil || actor.Validate() != nil || actor.Type != task.ActorOpenCode {
+	if _, err := task.ParseTaskID(string(taskID)); err != nil || actor.Validate() != nil || !backgroundRunReader(actor.Type) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run identity", ErrInvalidInput)
 	}
-	run, err := scanBackgroundRun(s.db.QueryRowContext(ctx, backgroundRunSelect+`
-WHERE r.workspace_id=? AND r.task_id=? AND c.actor_type=? AND c.actor_id=? AND c.credential_id=? AND c.authentication=?`,
-		workspaceID, taskID, actor.Type, actor.ID, actor.CredentialID, actor.Authentication))
+	query := backgroundRunSelect + ` WHERE r.workspace_id=? AND r.task_id=?`
+	arguments := []any{workspaceID, taskID}
+	if actor.Type == task.ActorOpenCode {
+		query += ` AND c.actor_type=? AND c.actor_id=? AND c.credential_id=? AND c.authentication=?`
+		arguments = append(arguments, actor.Type, actor.ID, actor.CredentialID, actor.Authentication)
+	}
+	run, err := scanBackgroundRun(s.db.QueryRowContext(ctx, query, arguments...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return BackgroundRun{}, ErrNotFound
 	}
 	if err != nil {
 		return BackgroundRun{}, fmt.Errorf("read background run: %w", err)
-	}
-	if ownership, ownershipErr := getBackgroundRunOwnership(ctx, s.db, workspaceID, taskID); ownershipErr == nil {
-		run.WriterGeneration = ownership.WriterGeneration
-		if ownership.Mode == BackgroundRunAgentOwned && ownership.ContainerIdentity == run.ContainerIdentity && ownership.ContainerID != "" {
-			run.ObservedContainerID, run.ObservedContainerStartedAt = ownership.ContainerID, ownership.ContainerStartedAt
-			run.RuntimeEpoch, run.HostPort = ownership.RuntimeEpoch, ownership.HostPort
-		}
 	}
 	return run, nil
 }
@@ -78,15 +75,21 @@ func (s *Store) GetBackgroundRunOwners(ctx context.Context, workspaceID task.Wor
 
 const MaxBackgroundRunListLimit = 100
 
-// ListBackgroundRuns applies actor authority in SQL before its bound, so runs
-// owned by another plugin credential can neither consume nor escape the page.
+// ListBackgroundRuns applies plugin ownership in SQL before its bound. Trusted
+// operator/device actors receive the workspace-wide operator projection.
 func (s *Store) ListBackgroundRuns(ctx context.Context, workspaceID task.WorkspaceID, actor task.ActorSnapshot, limit int) ([]BackgroundRun, error) {
-	if _, err := task.ParseWorkspaceID(string(workspaceID)); err != nil || actor.Validate() != nil || actor.Type != task.ActorOpenCode || limit < 1 || limit > MaxBackgroundRunListLimit {
+	if _, err := task.ParseWorkspaceID(string(workspaceID)); err != nil || actor.Validate() != nil || !backgroundRunReader(actor.Type) || limit < 1 || limit > MaxBackgroundRunListLimit {
 		return nil, fmt.Errorf("%w: background run list", ErrInvalidInput)
 	}
-	rows, err := s.db.QueryContext(ctx, backgroundRunSelect+`
-WHERE r.workspace_id=? AND c.actor_type=? AND c.actor_id=? AND c.credential_id=? AND c.authentication=?
-ORDER BY r.created_at DESC,r.task_id DESC LIMIT ?`, workspaceID, actor.Type, actor.ID, actor.CredentialID, actor.Authentication, limit)
+	query := backgroundRunSelect + ` WHERE r.workspace_id=?`
+	arguments := []any{workspaceID}
+	if actor.Type == task.ActorOpenCode {
+		query += ` AND c.actor_type=? AND c.actor_id=? AND c.credential_id=? AND c.authentication=?`
+		arguments = append(arguments, actor.Type, actor.ID, actor.CredentialID, actor.Authentication)
+	}
+	query += ` ORDER BY r.created_at DESC,r.task_id DESC LIMIT ?`
+	arguments = append(arguments, limit)
+	rows, err := s.db.QueryContext(ctx, query, arguments...)
 	if err != nil {
 		return nil, fmt.Errorf("list background runs: %w", err)
 	}
@@ -103,6 +106,10 @@ ORDER BY r.created_at DESC,r.task_id DESC LIMIT ?`, workspaceID, actor.Type, act
 		return nil, fmt.Errorf("iterate background run list: %w", err)
 	}
 	return runs, nil
+}
+
+func backgroundRunReader(actorType task.ActorType) bool {
+	return actorType == task.ActorOpenCode || actorType == task.ActorDevice || actorType == task.ActorOperator
 }
 
 func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams) (_ BackgroundRunStop, err error) {
@@ -153,20 +160,6 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 	run, err := getBackgroundRunOwned(ctx, tx, p.WorkspaceID, p.TaskID, p.Claim.Actor)
 	if err != nil {
 		return BackgroundRunStop{}, err
-	}
-	ownership, err := getBackgroundRunOwnership(ctx, tx, p.WorkspaceID, p.TaskID)
-	if err != nil {
-		return BackgroundRunStop{}, err
-	}
-	if ownership.Mode != BackgroundRunAgentOwned || ownership.Phase != BackgroundRunOwnershipAgentActive {
-		return BackgroundRunStop{}, ErrInvalidState
-	}
-	var activeControls int
-	if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM background_run_controls WHERE task_id=? AND state IN ('requested','attempted')`, run.TaskID).Scan(&activeControls); err != nil {
-		return BackgroundRunStop{}, err
-	}
-	if activeControls != 0 {
-		return BackgroundRunStop{}, ErrInvalidState
 	}
 	queuedStop := run.State == BackgroundRunQueued && run.EffectPhase == BackgroundRunEffectAbsent
 	activeStop := run.State == BackgroundRunSettingUp || run.State == BackgroundRunWorking || run.State == BackgroundRunNeedsYou || run.State == BackgroundRunUncertain
@@ -355,7 +348,7 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	var created, updated int64
 	var stopType, stopID, stopName, stopCredential, stopAuth, stopRequest sql.NullString
 	var timeoutType, timeoutID, timeoutName, timeoutCredential, timeoutAuth, timeoutRequest sql.NullString
-	err := row.Scan(&run.TaskID, &run.AttemptID, &run.WorkspaceID, &run.Generation, &repositoryID,
+	err := row.Scan(&run.TaskID, &run.AttemptID, &run.WorkspaceID, &run.Generation, &run.WriterGeneration, &repositoryID,
 		&run.RepositoryRemote, &run.BaseOID, &branch, &instructionHash, &run.Profile, &profileHash, &environmentHash, &run.ResourceSpecVersion,
 		&run.ImageIdentity, &run.CloneIdentity, &run.VolumeIdentity, &run.ContainerIdentity, &run.EndpointIdentity,
 		&run.OpenCodeSessionID, &run.OpenCodeMessageID, &run.State, &run.EffectPhase, &cancelEpoch,
@@ -374,7 +367,7 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 		return BackgroundRun{}, err
 	}
 	if len(instructionHash) != 32 || len(profileHash) != 32 || len(environmentHash) != 32 || bytes.Equal(environmentHash, make([]byte, 32)) ||
-		(run.ResourceSpecVersion != 8 && run.ResourceSpecVersion != 9) || repositoryID <= 0 || run.Generation <= 0 || cancelEpoch < 0 ||
+		(run.ResourceSpecVersion != 8 && run.ResourceSpecVersion != 9) || repositoryID <= 0 || run.Generation <= 0 || run.WriterGeneration != 1 || cancelEpoch < 0 ||
 		!run.State.valid() || !run.EffectPhase.valid() || !validBackgroundRunStatePhase(run.Profile, run.State, run.EffectPhase) || run.Creator.Validate() != nil || run.Creator.Type != task.ActorOpenCode {
 		return BackgroundRun{}, ErrCorruptStore
 	}
