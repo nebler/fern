@@ -8,11 +8,6 @@ import (
 type Component string
 
 const (
-	ComponentRuntime              Component = "runtime"
-	ComponentSupervisor           Component = "supervisor"
-	ComponentTaskDelivery         Component = "task-delivery"
-	ComponentTaskExecution        Component = "task-execution"
-	ComponentTaskResult           Component = "task-result"
 	ComponentTaskPublication      Component = "task-publication"
 	ComponentTaskVerification     Component = "task-verification"
 	ComponentGitHubTaskDependency Component = "github-task-dependency"
@@ -22,11 +17,6 @@ const (
 )
 
 var components = [...]Component{
-	ComponentRuntime,
-	ComponentSupervisor,
-	ComponentTaskDelivery,
-	ComponentTaskExecution,
-	ComponentTaskResult,
 	ComponentTaskPublication,
 	ComponentTaskVerification,
 	ComponentGitHubTaskDependency,

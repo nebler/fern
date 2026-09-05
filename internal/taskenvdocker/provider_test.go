@@ -691,6 +691,7 @@ func TestConstructorRejectsUnboundedOrUnsafePolicy(t *testing.T) {
 		{"disk", func(c *Config) { c.DiskFreeAdmissionBytes = c.CloneObservedLimitBytes - 1 }},
 		{"observed", func(c *Config) { c.CloneObservedLimitBytes = c.SourceSizeAdmissionBytes - 1 }},
 		{"logs", func(c *Config) { c.LogMaxSize = "2t" }},
+		{"environment", func(c *Config) { c.Environment["MODEL_KEY"] = "forbidden" }},
 		{"reserved environment", func(c *Config) { c.Environment[passwordEnv] = "forbidden" }},
 		{"legacy OpenCode password", func(c *Config) { c.Environment["OPENCODE_PASSWORD"] = "forbidden" }},
 	}
@@ -1481,7 +1482,7 @@ func testProvider(t *testing.T) (*Provider, *fakeDocker, taskstore.BackgroundRun
 		GitTimeout: 30 * time.Second, DockerTimeout: 10 * time.Second, HealthTimeout: 3 * time.Second,
 		GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 64 << 20, CloneObservedLimitBytes: 64 << 20,
 		DiskFreeAdmissionBytes: 64 << 20, LogMaxSize: "1m", LogMaxFiles: 3, StopGrace: time.Second,
-		Environment: map[string]string{"FERN_MODEL_PROVIDER": "test", "FERN_MODEL": "test-model"},
+		Environment: map[string]string{},
 	}
 	provider, err := New(context.Background(), config, docker)
 	if err != nil {

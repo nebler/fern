@@ -19,7 +19,7 @@ func runLegacyPublicationQuarantine(args []string, output io.Writer) error {
 	if err != nil {
 		return err
 	}
-	lease, err := acquireWorkspaceLease(name)
+	lease, err := acquireHostLease(name)
 	if err != nil {
 		return fmt.Errorf("legacy publication quarantine requires fern up to be stopped: %w", err)
 	}

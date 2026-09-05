@@ -22,14 +22,9 @@ SELECT id,result_id,task_id,attempt_id,workspace_id,state,policy_name,policy_sha
  reason,latest_event_id,revision,created_at,updated_at
 FROM verifications`
 
-// resultConsumerSourcePredicate admits ordinary workspace results only when no
-// Background Run owns the attempt, and retained results only when the exact
-// immutable CAS tuple has committed. Callers use aliases r, t, and a.
-const resultConsumerSourcePredicate = `(
- (r.source_kind='persistent_workspace' AND NOT EXISTS (
-   SELECT 1 FROM background_runs br WHERE br.task_id=t.id AND br.attempt_id=a.id
- )) OR
- (r.source_kind='retained_artifact' AND EXISTS (
+// resultConsumerSourcePredicate admits only retained results whose immutable
+// CAS ownership tuple has committed. Callers use aliases r, t, and a.
+const resultConsumerSourcePredicate = `(r.source_kind='retained_artifact' AND EXISTS (
    SELECT 1 FROM background_runs br
    JOIN retained_artifacts ra ON ra.id=r.retained_artifact_id AND ra.result_id=r.id
    JOIN background_run_exports be ON be.id=r.artifact_export_id AND be.result_id=r.id
@@ -37,8 +32,8 @@ const resultConsumerSourcePredicate = `(
    WHERE br.task_id=t.id AND br.attempt_id=a.id AND br.retained_result_id=r.id AND
     br.retained_artifact_id=ra.id AND br.artifact_export_id=be.id AND br.materialization_id=am.id AND
     br.state='result_ready' AND br.result_authority_phase IN ('artifact_committed','cleanup') AND
-    be.state='completed' AND be.phase='completed' AND am.state='ready'
- )))`
+     be.state='completed' AND be.phase='completed' AND am.state='ready'
+  ))`
 
 func (s *Store) GetVerification(ctx context.Context, id task.VerificationID) (Verification, error) {
 	if _, err := task.ParseVerificationID(string(id)); err != nil {
@@ -163,6 +158,26 @@ func (s *Store) GetResultOwners(ctx context.Context, resultID task.ResultID) (_ 
 		return Result{}, Task{}, Attempt{}, fmt.Errorf("finish result owners read: %w", err)
 	}
 	return result, owner, attempt, nil
+}
+
+// HasRetainedResultAuthority reports whether the exact committed Background Run
+// and CAS ownership tuple authorizes this result for a new consumer effect.
+func (s *Store) HasRetainedResultAuthority(ctx context.Context, resultID task.ResultID) (bool, error) {
+	if _, err := task.ParseResultID(string(resultID)); err != nil {
+		return false, fmt.Errorf("%w: result ID", ErrInvalidInput)
+	}
+	var authorized int
+	err := s.db.QueryRowContext(ctx, `
+SELECT EXISTS(
+ SELECT 1 FROM results r
+ JOIN tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id
+ JOIN attempts a ON a.id=r.attempt_id AND a.task_id=r.task_id AND a.workspace_id=r.workspace_id
+ WHERE r.id=? AND `+resultConsumerSourcePredicate+`
+)`, resultID).Scan(&authorized)
+	if err != nil {
+		return false, fmt.Errorf("inspect retained result authority: %w", err)
+	}
+	return authorized == 1, nil
 }
 
 func (s *Store) PrepareVerification(ctx context.Context, p PrepareVerificationParams) (_ VerificationRecord, err error) {

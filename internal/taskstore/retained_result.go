@@ -93,7 +93,7 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 		return BackgroundRunRetainedResult{}, ErrInvalidInput
 	}
 
-	sealParams := SealResultParams{ResultID: p.ResultID, TaskID: p.TaskID, AttemptID: p.AttemptID,
+	sealParams := resultMaterial{ResultID: p.ResultID, TaskID: p.TaskID, AttemptID: p.AttemptID,
 		ExpectedAttemptRevision: request.ExpectedAttemptRevision, ExpectedTaskRevision: request.ExpectedTaskRevision,
 		ResultEventID: p.ResultEventID, TaskEventID: p.TaskEventID, RepositoryID: export.RepositoryID, BaseSHA: export.BaseSHA,
 		ResultCommit: export.ResultCommit, TreeOID: export.TreeOID, Outcome: export.Outcome, WorktreeClean: true,

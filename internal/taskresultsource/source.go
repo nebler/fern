@@ -5,8 +5,6 @@ package taskresultsource
 import (
 	"context"
 	"errors"
-	"path/filepath"
-	"strings"
 
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskartifact"
@@ -23,37 +21,57 @@ type Artifact interface {
 }
 
 type Resolver struct {
-	store      Store
-	artifact   Artifact
-	persistent string
+	store    Store
+	artifact Artifact
 }
 
-func New(store Store, artifact Artifact, persistent string) (*Resolver, error) {
-	if store == nil || artifact == nil || !filepath.IsAbs(persistent) || filepath.Clean(persistent) != persistent || strings.IndexByte(persistent, 0) >= 0 {
+func New(store Store, artifact Artifact) (*Resolver, error) {
+	if store == nil || artifact == nil {
 		return nil, errors.New("valid result source configuration is required")
 	}
-	return &Resolver{store: store, artifact: artifact, persistent: persistent}, nil
+	return &Resolver{store: store, artifact: artifact}, nil
 }
 
 // Acquire returns a fresh repository and an idempotent mandatory cleanup.
 func (r *Resolver) Acquire(ctx context.Context, result taskstore.Result) (string, func() error, error) {
-	if result.SourceKind == taskstore.ResultSourcePersistentWorkspace {
-		return r.persistent, func() error { return nil }, nil
+	locator, err := r.verify(ctx, result)
+	if err != nil {
+		return "", nil, err
 	}
-	if result.SourceKind != taskstore.ResultSourceRetainedArtifact {
+	checkout, err := r.artifact.Materialize(ctx, locator)
+	if err != nil {
+		return "", nil, err
+	}
+	path := checkout.Path()
+	if path == "" {
+		_ = checkout.Close()
 		return "", nil, taskstore.ErrCorruptStore
+	}
+	return path, checkout.Close, nil
+}
+
+// Verify freshly proves that the retained artifact is present, intact, and
+// bound to the complete durable result tuple.
+func (r *Resolver) Verify(ctx context.Context, result taskstore.Result) error {
+	_, err := r.verify(ctx, result)
+	return err
+}
+
+func (r *Resolver) verify(ctx context.Context, result taskstore.Result) (taskartifact.Locator, error) {
+	if result.SourceKind != taskstore.ResultSourceRetainedArtifact {
+		return taskartifact.Locator{}, taskstore.ErrCorruptStore
 	}
 	artifact, err := r.store.GetRetainedArtifact(ctx, result.RetainedArtifactID)
 	if err != nil {
-		return "", nil, err
+		return taskartifact.Locator{}, err
 	}
 	locator, err := taskartifact.ParseLocator(artifact.CASLocator)
 	if err != nil {
-		return "", nil, err
+		return taskartifact.Locator{}, err
 	}
 	snapshot, err := r.artifact.Inspect(ctx, locator)
 	if err != nil {
-		return "", nil, err
+		return taskartifact.Locator{}, err
 	}
 	if artifact.ID != result.RetainedArtifactID || artifact.ResultID != result.ID || artifact.ExportID != result.ArtifactExportID ||
 		artifact.MaterializationID != result.MaterializationID ||
@@ -67,16 +85,7 @@ func (r *Resolver) Acquire(ctx context.Context, result taskstore.Result) (string
 		snapshot.OpenCodeSessionID != artifact.OpenCodeSessionID || snapshot.OpenCodeMessageID != artifact.OpenCodeMessageID ||
 		snapshot.ChangesSHA256.Bytes() != result.ManifestSHA256 || snapshot.ManifestSHA256.Bytes() != artifact.ManifestSHA256 ||
 		snapshot.BundleSHA256.Bytes() != artifact.BundleSHA256 || snapshot.BundleBytes != artifact.BundleBytes {
-		return "", nil, taskstore.ErrCorruptStore
+		return taskartifact.Locator{}, taskstore.ErrCorruptStore
 	}
-	checkout, err := r.artifact.Materialize(ctx, locator)
-	if err != nil {
-		return "", nil, err
-	}
-	path := checkout.Path()
-	if path == "" {
-		_ = checkout.Close()
-		return "", nil, taskstore.ErrCorruptStore
-	}
-	return path, checkout.Close, nil
+	return locator, nil
 }

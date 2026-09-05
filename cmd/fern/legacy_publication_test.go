@@ -20,7 +20,7 @@ func TestLegacyPublicationQuarantineCommandRequiresLeaseAndIsIdempotent(t *testi
 	directory := filepath.Join(home, ".fern", "control")
 	writeLegacyControlFixture(t, directory, "demo")
 
-	lease, err := acquireWorkspaceLease("demo")
+	lease, err := acquireHostLease("demo")
 	if err != nil {
 		t.Fatal(err)
 	}

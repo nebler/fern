@@ -279,18 +279,20 @@ func TestCoordinatorRereadsOwnershipAfterFenceAcquisition(t *testing.T) {
 	}
 }
 
-func TestCoordinatorRequiresFencer(t *testing.T) {
+func TestCoordinatorRequiresSource(t *testing.T) {
 	fixture := newCoordinatorFixture(t, verification.Result{}, nil)
-	_, err := New(fixture.store, nil, fixture.runner, fixture.policy, fixture.coordinator.ids, fixture.coordinator.config)
+	config := fixture.coordinator.config
+	config.ResultSource = nil
+	_, err := New(fixture.store, fixture.runner, fixture.policy, fixture.coordinator.ids, config)
 	if err == nil {
-		t.Fatal("New accepted a nil fencer")
+		t.Fatal("New accepted a nil retained result source")
 	}
 }
 
 type coordinatorFixture struct {
 	coordinator *Coordinator
 	store       *fakeStore
-	fencer      *fakeFencer
+	fencer      *fakeSource
 	runner      *fakeRunner
 	policy      verification.Policy
 	now         time.Time
@@ -341,7 +343,7 @@ func newCoordinatorFixture(t *testing.T, result verification.Result, runErr erro
 	if err != nil {
 		t.Fatal(err)
 	}
-	fencer := &fakeFencer{}
+	fencer := &fakeSource{}
 	runner := &fakeRunner{fencer: fencer, result: result, runErr: runErr, snapshot: verification.RunnerSnapshot{Name: "fern-verifier", Version: "v1",
 		ImageDigest: "sha256:image", EnvironmentSHA256: sha256.Sum256([]byte("exact-environment"))}}
 	store := &fakeStore{source: taskstore.VerificationSource{
@@ -358,15 +360,15 @@ func newCoordinatorFixture(t *testing.T, result verification.Result, runErr erro
 		CredentialID: "service-v1", Authentication: "internal", RequestID: "worker-1"}
 	recovery := actor
 	recovery.Type, recovery.ID = task.ActorRecovery, "verification-recovery"
-	coordinator, err := New(store, fencer, runner, policy, ids, Config{WorkspaceID: workspaceID, RepositoryPath: filepath.Clean(t.TempDir()),
-		PollInterval: time.Millisecond, Deadline: time.Minute, Actor: actor, RecoveryActor: recovery, Now: func() time.Time { return now }})
+	coordinator, err := New(store, runner, policy, ids, Config{WorkspaceID: workspaceID,
+		PollInterval: time.Millisecond, Deadline: time.Minute, Actor: actor, RecoveryActor: recovery, ResultSource: fencer, Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return &coordinatorFixture{coordinator: coordinator, store: store, fencer: fencer, runner: runner, policy: policy, now: now}
 }
 
-type fakeFencer struct {
+type fakeSource struct {
 	mu         sync.Mutex
 	calls      int
 	releases   int
@@ -375,13 +377,13 @@ type fakeFencer struct {
 	onAcquire  func()
 }
 
-func (f *fakeFencer) AcquirePaused(context.Context) (func(), error) {
+func (f *fakeSource) Acquire(context.Context, taskstore.Result) (string, func() error, error) {
 	f.mu.Lock()
 	f.calls++
 	if f.acquireErr != nil {
 		err := f.acquireErr
 		f.mu.Unlock()
-		return nil, err
+		return "", nil, err
 	}
 	f.held = true
 	onAcquire := f.onAcquire
@@ -390,25 +392,32 @@ func (f *fakeFencer) AcquirePaused(context.Context) (func(), error) {
 		onAcquire()
 	}
 	var once sync.Once
-	return func() {
+	return filepath.Clean("/private/retained-checkout"), func() error {
 		once.Do(func() {
 			f.mu.Lock()
 			f.held = false
 			f.releases++
 			f.mu.Unlock()
 		})
+		return nil
 	}, nil
 }
 
-func (f *fakeFencer) isHeld() bool {
+func (f *fakeSource) isHeld() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.held
 }
 
+func (f *fakeSource) wasAcquired() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls > 0
+}
+
 type fakeRunner struct {
 	mu       sync.Mutex
-	fencer   *fakeFencer
+	fencer   *fakeSource
 	snapshot verification.RunnerSnapshot
 	result   verification.Result
 	runErr   error
@@ -457,7 +466,7 @@ type fakeStore struct {
 	completeError            error
 	completeAfterCommitError error
 	recoverError             error
-	fencer                   *fakeFencer
+	fencer                   *fakeSource
 	advanceSawFence          bool
 	completeSawFence         bool
 	recoverSawFence          bool
@@ -570,7 +579,7 @@ func (s *fakeStore) CompleteVerification(_ context.Context, p taskstore.Complete
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.completeCalls++
-	s.completeSawFence = s.fencer.isHeld()
+	s.completeSawFence = s.fencer.wasAcquired()
 	if s.completeError != nil {
 		return taskstore.VerificationRecord{}, s.completeError
 	}
@@ -584,7 +593,7 @@ func (s *fakeStore) RecoverVerification(_ context.Context, p taskstore.RecoverVe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.recoverCalls++
-	s.recoverSawFence = s.fencer.isHeld()
+	s.recoverSawFence = s.fencer.wasAcquired()
 	if s.recoverError != nil {
 		return taskstore.VerificationRecord{}, s.recoverError
 	}

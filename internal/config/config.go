@@ -72,8 +72,8 @@ type TaskPolicy struct {
 	BackgroundImage   string
 	BackgroundImageID string
 	BackgroundRoute   *BackgroundRoute
-	// BackgroundEnvironment is the only configured environment copied into
-	// disposable Background Runs. Workspace.Env is never inherited.
+	// BackgroundEnvironment remains decodable for configuration compatibility.
+	// The production profile rejects non-empty values until egress is brokered.
 	BackgroundEnvironment map[string]string
 	Verification          *TaskVerificationPolicy
 }
@@ -128,14 +128,6 @@ type Overrides struct {
 	IdleMode       *string
 	Listen         *string
 	OperatorListen *string
-}
-
-// Client is the narrow configuration projection consumed by attach and event
-// clients that talk to an already-running supervisor.
-type Client struct {
-	Name   string
-	Listen string
-	Env    map[string]string
 }
 
 // Default returns the built-in configuration for repo before any file or

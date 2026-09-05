@@ -4,7 +4,7 @@ Repo-local OpenCode TUI plugin for Fern Background Runs.
 
 ## Status
 
-This is an unpublished development integration targeting the OpenCode TUI host contract in `@opencode-ai/plugin` `1.18.16` and OpenTUI `0.4.5`. That host compatibility pin is separate from Fern's remote execution profile.
+This integration targets the OpenCode TUI host contract in `@opencode-ai/plugin` `1.18.16` and OpenTUI `0.4.5`. That host compatibility pin is separate from Fern's remote execution profile.
 
 Implemented:
 
@@ -30,8 +30,8 @@ Not implemented:
 
 - Repository authorization checks and host compatibility/readiness checks.
 - Windows durable credential storage.
-- Server deployment of the frozen seal and retained-result routes described below.
 - A published npm package. Registry installation cannot succeed until `@fern/opencode` is published.
+- Writable human takeover. `open` is inspection and steering because the pinned OpenCode API cannot atomically fence PTYs, tools, child processes, background jobs, plugins, and MCP writers. Fern will not represent `session.interrupt` as a writer-ownership transfer.
 
 ## Development
 

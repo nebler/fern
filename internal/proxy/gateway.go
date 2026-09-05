@@ -29,9 +29,9 @@ form.grid{display:grid;gap:10px}input{width:100%;min-height:48px;padding:13px 14
 </style>
 </head>
 <body><main>
-<section class="hero"><div class="mark">F</div><h1>Your workspace is ready.</h1><p>OpenCode owns the coding session. Fern keeps remote identity and workflow delivery around it.</p><div class="status"><span class="dot"></span> Private gateway connected</div>{{if .TasksEnabled}}<a class="primary" href="/fern/tasks">Open task queue</a>{{else}}<a class="primary" href="/">Open OpenCode</a>{{end}}<small>Your OpenCode sessions and configuration persist while compute sleeps.</small></section>
+<section class="hero"><div class="mark">F</div><h1>Fern Background Runs</h1><p>Submit work from the OpenCode plugin, inspect the exact live session, then retain an immutable Git result.</p><div class="status"><span class="dot"></span> Private control plane connected</div><small>Run compute is disposable. Receipts, audit identity, and retained results are durable.</small></section>
 {{if .Control}}
-{{if .OnboardingEnabled}}<section class="panel"><h2>GitHub App</h2><p>Create this host's private GitHub App credentials through GitHub's one-time manifest flow.</p><a class="primary" href="/fern/github/app/setup?return=%2Ffern%2Fcontrol%3Fconnected%3D1">Connect GitHub App</a><small>Restart Fern after a successful connection to activate durable tasks.</small></section>{{end}}
+{{if .OnboardingEnabled}}<section class="panel"><h2>GitHub App</h2><p>Create this host's private GitHub App credentials through GitHub's one-time manifest flow.</p><a class="primary" href="/fern/github/app/setup?return=%2Ffern%2Fcontrol%3Fconnected%3D1">Connect GitHub App</a><small>After creation, install the App on the configured repository, set workspace.github.installationId from the installation URL, and restart Fern.</small></section>{{end}}
 <section class="panel"><h2>Paired devices</h2>{{if .Devices}}<ul>{{range .Devices}}<li><div class="title">{{.Name}}</div><span class="meta">Last seen {{.LastSeen.Format "2006-01-02 15:04 UTC"}}</span><form method="post" action="/fern/devices/{{.ID}}/revoke"><button class="danger" type="submit">Revoke</button></form></li>{{end}}</ul>{{else}}<p>No durable devices are paired.</p>{{end}}</section>
 {{end}}
 </main></body></html>`))
@@ -39,20 +39,16 @@ form.grid{display:grid;gap:10px}input{width:100%;min-height:48px;padding:13px 14
 type landingView struct {
 	Control           bool
 	Devices           []control.Device
-	TasksEnabled      bool
 	OnboardingEnabled bool
 }
 
-func gatewayHandler(upstream http.Handler, controls Controls) http.Handler {
-	fern := http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		serveFern(writer, request, controls)
-	})
+func gatewayHandler(controls Controls) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/fern" || strings.HasPrefix(request.URL.Path, "/fern/") {
-			fern.ServeHTTP(writer, request)
+			serveFern(writer, request, controls)
 			return
 		}
-		upstream.ServeHTTP(writer, request)
+		http.NotFound(writer, request)
 	})
 }
 
@@ -67,9 +63,6 @@ func serveFern(writer http.ResponseWriter, request *http.Request, controls Contr
 			return
 		}
 		controls.Onboarding.ServeHTTP(writer, request)
-		return
-	}
-	if controls.Tasks != nil && serveTaskUI(writer, request) {
 		return
 	}
 	if serveControlRoute(writer, request, controls) {
@@ -89,10 +82,7 @@ func serveFern(writer http.ResponseWriter, request *http.Request, controls Contr
 			return
 		}
 		controlPage := request.URL.Path == "/fern/control"
-		view := landingView{
-			Control:      controlPage && controls.Store != nil,
-			TasksEnabled: controls.Tasks != nil, OnboardingEnabled: controls.Onboarding != nil,
-		}
+		view := landingView{Control: controlPage && controls.Store != nil, OnboardingEnabled: controls.Onboarding != nil}
 		if controlPage && controls.Store != nil {
 			var err error
 			view.Devices, err = controls.Store.Devices(time.Now())
@@ -114,8 +104,6 @@ func serveFern(writer http.ResponseWriter, request *http.Request, controls Contr
 			controls.Readiness.ServeHTTP(writer, request)
 			return
 		}
-		// The combined constructor is test-only. Production NewHandlers installs
-		// the registry-backed probe before authentication on the operator surface.
 		writer.Header().Set("Content-Type", "application/json")
 		if request.Method == http.MethodGet {
 			_, _ = writer.Write([]byte(`{"ready":true}`))

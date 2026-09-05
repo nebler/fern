@@ -2,14 +2,11 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,9 +16,7 @@ import (
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/credentialbundle"
 	"github.com/nebler/fern/internal/githubapp"
-	"github.com/nebler/fern/internal/registry"
-	fernruntime "github.com/nebler/fern/internal/runtime"
-	"gopkg.in/yaml.v3"
+	"github.com/nebler/fern/internal/hostlease"
 )
 
 type repeatedFlag []string
@@ -35,15 +30,6 @@ func (values *repeatedFlag) Set(value string) error {
 	return nil
 }
 
-type credentialDocker interface {
-	Status(context.Context, string) (fernruntime.Observation, error)
-	ExportWorkspaceGH(context.Context, fernruntime.Spec) ([]byte, error)
-	ReplaceWorkspaceGH(context.Context, fernruntime.Spec, []byte, string, bool) error
-	Close() error
-}
-
-var openCredentialDocker = func(log *slog.Logger) (credentialDocker, error) { return newDocker(log) }
-
 type appCredentialStore interface {
 	Load() (githubapp.AppCredentials, error)
 	Save(githubapp.AppCredentials) error
@@ -54,7 +40,7 @@ var openAppCredentialStore = func(directory string) (appCredentialStore, error) 
 	return githubapp.NewCredentialStore(directory)
 }
 
-type credentialCandidateValidator func(context.Context, config.Config, *githubapp.AppCredentials, string) error
+type credentialCandidateValidator func(context.Context, config.BackgroundConfig, *githubapp.AppCredentials) error
 
 var validateCredentialCandidates credentialCandidateValidator = liveCredentialValidator
 
@@ -185,10 +171,8 @@ func runCredentialImport(args []string, log *slog.Logger, rotation bool) error {
 
 type credentialOperation struct {
 	options credentialOptions
-	config  config.Config
-	spec    fernruntime.Spec
-	lease   *registry.Lease
-	docker  credentialDocker
+	config  config.BackgroundConfig
+	lease   *hostlease.Lease
 	store   appCredentialStore
 }
 
@@ -196,32 +180,15 @@ func openCredentialOperation(options credentialOptions, log *slog.Logger) (*cred
 	if options.stateDirectory == "" {
 		return nil, errors.New("cannot determine Fern state directory")
 	}
-	cfg, spec, err := loadBackupSpec(backupOptions{configPath: options.configPath, envPath: options.envPath, stateDirectory: options.stateDirectory})
+	cfg, err := loadBackgroundCommandConfig(options.configPath, true, options.envPath, config.BackgroundOverrides{})
 	if err != nil {
 		return nil, err
 	}
-	lease, err := registry.Acquire(filepath.Join(options.stateDirectory, "locks"), spec.Name)
+	lease, err := hostlease.Acquire(filepath.Join(options.stateDirectory, "locks"), cfg.Workspace.Name)
 	if err != nil {
-		return nil, fmt.Errorf("credential operation requires the offline workspace lease: %w", err)
+		return nil, fmt.Errorf("credential operation requires the offline Fern lease: %w", err)
 	}
-	operation := &credentialOperation{options: options, config: cfg, spec: spec, lease: lease}
-	docker, err := openCredentialDocker(log)
-	if err != nil {
-		operation.close()
-		return nil, err
-	}
-	operation.docker = docker
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel()
-	observation, err := docker.Status(ctx, spec.Name)
-	if err != nil {
-		operation.close()
-		return nil, fmt.Errorf("inspect workspace before credential operation: %w", err)
-	}
-	if observation.State != fernruntime.StateAbsent {
-		operation.close()
-		return nil, fmt.Errorf("credential operation requires absent compute; run 'fern down' first (state: %s)", observation.State)
-	}
+	operation := &credentialOperation{options: options, config: cfg, lease: lease}
 	store, err := openAppCredentialStore(filepath.Join(options.stateDirectory, "github-app"))
 	if err != nil {
 		operation.close()
@@ -235,23 +202,9 @@ func (operation *credentialOperation) close() {
 	if operation == nil {
 		return
 	}
-	if operation.docker != nil {
-		_ = operation.docker.Close()
-	}
 	if operation.lease != nil {
 		_ = operation.lease.Release()
 	}
-}
-
-func (operation *credentialOperation) requireAbsent(ctx context.Context) error {
-	observation, err := operation.docker.Status(ctx, operation.spec.Name)
-	if err != nil {
-		return errors.New("workspace state could not be verified before credential mutation")
-	}
-	if observation.State != fernruntime.StateAbsent {
-		return fmt.Errorf("credential mutation requires absent compute (state: %s)", observation.State)
-	}
-	return nil
 }
 
 func (operation *credentialOperation) snapshot(ctx context.Context, generation string) (credentialbundle.Bundle, error) {
@@ -260,25 +213,15 @@ func (operation *credentialOperation) snapshot(ctx context.Context, generation s
 		return credentialbundle.Bundle{}, err
 	}
 	bundle := credentialbundle.Bundle{Version: credentialbundle.Version, Epoch: generation, CreatedAt: time.Now().UTC(), Binding: binding}
-	switch operation.config.Workspace.GitHub.Mode {
-	case config.GitHubModeGitHubAppBroker:
-		credentials, err := operation.store.Load()
-		if err != nil {
-			return credentialbundle.Bundle{}, err
-		}
-		bundle.GitHubApp, err = githubapp.MarshalStoredCredentials(credentials)
-		if err != nil {
-			return credentialbundle.Bundle{}, err
-		}
-		bundle.Binding.AppID = credentials.AppID()
-	case config.GitHubModeWorkspaceGH:
-		bundle.WorkspaceGH, err = operation.docker.ExportWorkspaceGH(ctx, operation.spec)
-		if err != nil {
-			return credentialbundle.Bundle{}, err
-		}
-	default:
-		return credentialbundle.Bundle{}, errors.New("configured GitHub credential mode is unsupported")
+	credentials, err := operation.store.Load()
+	if err != nil {
+		return credentialbundle.Bundle{}, err
 	}
+	bundle.GitHubApp, err = githubapp.MarshalStoredCredentials(credentials)
+	if err != nil {
+		return credentialbundle.Bundle{}, err
+	}
+	bundle.Binding.AppID = credentials.AppID()
 	return bundle, nil
 }
 
@@ -291,44 +234,23 @@ func (operation *credentialOperation) activate(ctx context.Context, candidate cr
 		candidate.Binding.InstallationID != want.InstallationID || candidate.Binding.RepositoryID != want.RepositoryID || candidate.Binding.Repository != want.Repository {
 		return "", errors.New("credential bundle does not match the configured workspace and GitHub identity")
 	}
-	var appCandidate *githubapp.AppCredentials
-	var ghToken string
-	switch operation.config.Workspace.GitHub.Mode {
-	case config.GitHubModeGitHubAppBroker:
-		if len(candidate.WorkspaceGH) != 0 || len(candidate.GitHubApp) == 0 {
-			return "", errors.New("credential bundle component does not match github-app-broker mode")
-		}
-		parsed, err := githubapp.ParseStoredCredentials(candidate.GitHubApp)
-		if err != nil || parsed.AppID() != candidate.Binding.AppID {
-			return "", errors.New("GitHub App credential candidate is invalid")
-		}
-		if current, err := operation.store.Load(); err == nil && current.AppID() != parsed.AppID() {
-			return "", errors.New("GitHub App rotation cannot change the configured App identity")
-		} else if err != nil && !errors.Is(err, githubapp.ErrCredentialsNotFound) {
-			return "", err
-		}
-		appCandidate = &parsed
-	case config.GitHubModeWorkspaceGH:
-		if len(candidate.GitHubApp) != 0 || len(candidate.WorkspaceGH) == 0 || candidate.Binding.AppID != 0 {
-			return "", errors.New("credential bundle component does not match workspace-gh mode")
-		}
-		hosts, err := fernruntime.WorkspaceGHFile(candidate.WorkspaceGH, "hosts.yml")
-		if err != nil {
-			return "", err
-		}
-		ghToken, err = parseWorkspaceGHToken(hosts, want.Hostname)
-		if err != nil {
-			return "", err
-		}
+	if len(candidate.WorkspaceGH) != 0 || len(candidate.GitHubApp) == 0 {
+		return "", errors.New("credential bundle component does not match github-app-broker mode")
+	}
+	parsed, err := githubapp.ParseStoredCredentials(candidate.GitHubApp)
+	if err != nil || parsed.AppID() != candidate.Binding.AppID {
+		return "", errors.New("GitHub App credential candidate is invalid")
+	}
+	if current, err := operation.store.Load(); err == nil && current.AppID() != parsed.AppID() {
+		return "", errors.New("GitHub App rotation cannot change the configured App identity")
+	} else if err != nil && !errors.Is(err, githubapp.ErrCredentialsNotFound) {
+		return "", err
 	}
 	validationCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-	err = validateCredentialCandidates(validationCtx, operation.config, appCandidate, ghToken)
+	err = validateCredentialCandidates(validationCtx, operation.config, &parsed)
 	cancel()
 	if err != nil {
 		return "", errors.New("credential candidate failed live GitHub identity or permission validation")
-	}
-	if err := operation.requireAbsent(ctx); err != nil {
-		return "", err
 	}
 	rollbackGeneration, err := newBackupGeneration()
 	if err != nil {
@@ -336,7 +258,7 @@ func (operation *credentialOperation) activate(ctx context.Context, candidate cr
 	}
 	rollback, err := operation.snapshot(ctx, rollbackGeneration)
 	priorExists := err == nil
-	if err != nil && !errors.Is(err, githubapp.ErrCredentialsNotFound) && !errors.Is(err, fernruntime.ErrCredentialGenerationNotFound) {
+	if err != nil && !errors.Is(err, githubapp.ErrCredentialsNotFound) {
 		return "", fmt.Errorf("capture credential rollback generation: %w", err)
 	}
 	if rotation && !priorExists {
@@ -350,40 +272,22 @@ func (operation *credentialOperation) activate(ctx context.Context, candidate cr
 			return "", fmt.Errorf("write encrypted credential rollback artifact: %w", err)
 		}
 	}
-	if err := operation.requireAbsent(ctx); err != nil {
-		if priorExists {
-			return "", fmt.Errorf("%w; encrypted rollback retained at %s", err, rollbackPath)
-		}
-		return "", err
-	}
-	if appCandidate != nil {
-		if err := operation.store.Save(*appCandidate); err != nil {
-			if !priorExists {
-				if rollbackErr := operation.store.Delete(); rollbackErr != nil {
-					return "", errors.New("GitHub App bootstrap and restoration of the empty store failed")
-				}
-				return "", errors.New("GitHub App bootstrap failed; the credential store remains empty")
+	if err := operation.store.Save(parsed); err != nil {
+		if !priorExists {
+			if rollbackErr := operation.store.Delete(); rollbackErr != nil {
+				return "", errors.New("GitHub App bootstrap and restoration of the empty store failed")
 			}
-			prior, parseErr := githubapp.ParseStoredCredentials(rollback.GitHubApp)
-			if parseErr != nil {
-				return "", errors.New("GitHub App replacement failed; use the retained encrypted rollback artifact")
-			}
-			rollbackErr := operation.store.Save(prior)
-			if rollbackErr != nil {
-				return "", errors.New("GitHub App replacement and automatic rollback failed; use the retained encrypted rollback artifact")
-			}
-			return "", errors.New("GitHub App replacement failed and the prior generation was restored")
+			return "", errors.New("GitHub App bootstrap failed; the credential store remains empty")
 		}
-		if priorExists {
-			return rollbackPath, nil
+		prior, parseErr := githubapp.ParseStoredCredentials(rollback.GitHubApp)
+		if parseErr != nil {
+			return "", errors.New("GitHub App replacement failed; use the retained encrypted rollback artifact")
 		}
-		return "", nil
-	}
-	if err := operation.docker.ReplaceWorkspaceGH(ctx, operation.spec, candidate.WorkspaceGH, candidate.Epoch, priorExists); err != nil {
-		if priorExists {
-			return "", fmt.Errorf("replace workspace-gh credentials; rollback artifact retained at %s: %w", rollbackPath, err)
+		rollbackErr := operation.store.Save(prior)
+		if rollbackErr != nil {
+			return "", errors.New("GitHub App replacement and automatic rollback failed; use the retained encrypted rollback artifact")
 		}
-		return "", fmt.Errorf("bootstrap workspace-gh credentials; volume remains absent: %w", err)
+		return "", errors.New("GitHub App replacement failed and the prior generation was restored")
 	}
 	if priorExists {
 		return rollbackPath, nil
@@ -391,57 +295,19 @@ func (operation *credentialOperation) activate(ctx context.Context, candidate cr
 	return "", nil
 }
 
-func credentialBinding(cfg config.Config) (credentialbundle.Binding, error) {
-	if cfg.Workspace.GitHub == nil {
+func credentialBinding(cfg config.BackgroundConfig) (credentialbundle.Binding, error) {
+	github := cfg.Workspace.GitHub
+	if cfg.Workspace.Name == "" || github.InstallationID <= 0 || github.Repository.ID <= 0 || github.Repository.FullName == "" {
 		return credentialbundle.Binding{}, errors.New("GitHub credentials are not configured")
 	}
-	github := cfg.Workspace.GitHub
 	return credentialbundle.Binding{
-		Workspace: cfg.Workspace.Name, Mode: string(github.Mode), Hostname: github.Hostname,
+		Workspace: cfg.Workspace.Name, Mode: string(config.GitHubModeGitHubAppBroker), Hostname: "github.com",
 		InstallationID: github.InstallationID, RepositoryID: github.Repository.ID, Repository: github.Repository.FullName,
 	}, nil
 }
 
-type ghHostsFile map[string]struct {
-	User       string `yaml:"user"`
-	OAuthToken string `yaml:"oauth_token"`
-	Users      map[string]struct {
-		OAuthToken string `yaml:"oauth_token"`
-	} `yaml:"users"`
-}
-
-func parseWorkspaceGHToken(payload []byte, hostname string) (string, error) {
-	if len(payload) == 0 || len(payload) > 1<<20 {
-		return "", errors.New("workspace-gh hosts.yml is invalid")
-	}
-	var hosts ghHostsFile
-	decoder := yaml.NewDecoder(strings.NewReader(string(payload)))
-	if err := decoder.Decode(&hosts); err != nil || len(hosts) != 1 {
-		return "", errors.New("workspace-gh hosts.yml is invalid")
-	}
-	host, ok := hosts[hostname]
-	if !ok {
-		return "", errors.New("workspace-gh hosts.yml does not match the configured hostname")
-	}
-	token := host.OAuthToken
-	if host.User != "" {
-		user, ok := host.Users[host.User]
-		if !ok {
-			return "", errors.New("workspace-gh hosts.yml active user is missing")
-		}
-		token = user.OAuthToken
-	}
-	if len(token) < 20 || len(token) > 512 || strings.TrimSpace(token) != token || strings.ContainsAny(token, "\x00\r\n") {
-		return "", errors.New("workspace-gh token is invalid")
-	}
-	return token, nil
-}
-
-func liveCredentialValidator(ctx context.Context, cfg config.Config, app *githubapp.AppCredentials, ghToken string) error {
+func liveCredentialValidator(ctx context.Context, cfg config.BackgroundConfig, app *githubapp.AppCredentials) error {
 	github := cfg.Workspace.GitHub
-	if github == nil {
-		return errors.New("GitHub configuration is missing")
-	}
 	if app != nil {
 		signer, err := githubapp.NewJWTSigner(app.AppID(), app.PrivateKey())
 		if err != nil {
@@ -466,36 +332,5 @@ func liveCredentialValidator(ctx context.Context, cfg config.Config, app *github
 		_, _, err = githubapp.SelectRepository(installations, repositories, github.InstallationID, github.Repository.ID, github.Repository.FullName)
 		return err
 	}
-	if ghToken == "" {
-		return errors.New("workspace-gh token is missing")
-	}
-	endpoint := "https://api.github.com/repos/" + strings.ReplaceAll(url.PathEscape(github.Repository.FullName), "%2F", "/")
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
-	if err != nil {
-		return errors.New("construct GitHub repository validation request")
-	}
-	request.Header.Set("Authorization", "Bearer "+ghToken)
-	request.Header.Set("Accept", "application/vnd.github+json")
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return errors.New("GitHub repository validation request failed")
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
-		return fmt.Errorf("GitHub repository validation returned status %d", response.StatusCode)
-	}
-	var result struct {
-		ID          int64  `json:"id"`
-		FullName    string `json:"full_name"`
-		Permissions struct {
-			Pull bool `json:"pull"`
-			Push bool `json:"push"`
-		} `json:"permissions"`
-	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<10))
-	if err := decoder.Decode(&result); err != nil || result.ID != github.Repository.ID || result.FullName != github.Repository.FullName || !result.Permissions.Pull || !result.Permissions.Push {
-		return errors.New("workspace-gh credential does not match the configured repository identity or permissions")
-	}
-	return nil
+	return errors.New("GitHub App credential is missing")
 }

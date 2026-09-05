@@ -114,8 +114,10 @@ type Config struct {
 	LogMaxFiles              int
 	StopGrace                time.Duration
 	BasicUsername            string
-	Environment              map[string]string
-	HTTPClient               *http.Client
+	// Environment is retained for cleanup identity compatibility. New providers
+	// reject non-empty values because the worker has unrestricted bridge egress.
+	Environment map[string]string
+	HTTPClient  *http.Client
 }
 
 type dockerAPI interface {
@@ -463,6 +465,9 @@ func cloneConfig(config Config) Config {
 }
 
 func validateConfig(c Config) error {
+	if len(c.Environment) != 0 {
+		return errors.New("background run environment injection is unsupported without brokered egress")
+	}
 	for name, value := range map[string]string{"state root": c.StateRoot, "repository": c.Repository, "Git executable": c.GitExecutable} {
 		if value == "" || !filepath.IsAbs(value) || filepath.Clean(value) != value {
 			return fmt.Errorf("valid absolute %s is required", name)
@@ -485,16 +490,6 @@ func validateConfig(c Config) error {
 	}
 	if _, err := parseLogSize(c.LogMaxSize); err != nil {
 		return err
-	}
-	totalEnvironment := 0
-	for key, value := range c.Environment {
-		totalEnvironment += len(key) + len(value)
-		if !validEnvKey(key) || len(key) > 128 || len(value) > 64<<10 || strings.IndexByte(value, 0) >= 0 || key == "OPENCODE_PASSWORD" || key == passwordEnv || key == usernameEnv {
-			return fmt.Errorf("invalid or reserved environment key %q", key)
-		}
-	}
-	if totalEnvironment > 1<<20 {
-		return errors.New("configured environment exceeds 1 MiB")
 	}
 	for name, path := range map[string]string{"state root": c.StateRoot, "repository": c.Repository, "Git executable": c.GitExecutable} {
 		info, err := os.Lstat(path)

@@ -151,9 +151,11 @@ func applyFileWorkspace(workspace *Workspace, file fileWorkspace, overrides Over
 		}
 		var installationID int64
 		if mode == GitHubModeGitHubAppBroker {
-			installationID, err = decodeCanonicalPositiveID(file.GitHub.InstallationID)
-			if err != nil {
-				return fmt.Errorf("github.installationId: %w", err)
+			if !file.GitHub.InstallationID.IsZero() {
+				installationID, err = decodeCanonicalPositiveID(file.GitHub.InstallationID)
+				if err != nil {
+					return fmt.Errorf("github.installationId: %w", err)
+				}
 			}
 		} else if !file.GitHub.InstallationID.IsZero() {
 			return errors.New("github.installationId is forbidden in workspace-gh mode")

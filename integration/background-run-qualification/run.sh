@@ -6,14 +6,21 @@ cd "$ROOT"
 
 IMAGE=fern/opencode-background-source:dev
 SOURCE_CONTRACT=integration/opencode-background-source-contract/contract_harness.py
+BUILD=${FERN_OPENCODE_BACKGROUND_SOURCE_BUILD:-1}
 
-printf '==> Build and run source contract\n'
-(
-  unset FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE_ID
-  FERN_OPENCODE_BACKGROUND_SOURCE_BUILD=1 \
-    FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE="$IMAGE" \
-    python3 "$SOURCE_CONTRACT"
-)
+case "$BUILD" in
+  0) printf '==> Use prebuilt source image\n' ;;
+  1)
+    printf '==> Build and run source contract\n'
+    (
+      unset FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE_ID
+      FERN_OPENCODE_BACKGROUND_SOURCE_BUILD=1 \
+        FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE="$IMAGE" \
+        python3 "$SOURCE_CONTRACT"
+    )
+    ;;
+  *) printf 'error: FERN_OPENCODE_BACKGROUND_SOURCE_BUILD must be 0 or 1\n' >&2; exit 2 ;;
+esac
 
 IMAGE_ID=$(docker image inspect "$IMAGE" --format '{{.Id}}')
 case "$IMAGE_ID" in

@@ -64,17 +64,6 @@ jobs:
           ./integration/production-rehearsal/run.sh self-test
           ./scripts/test-release-workflow.sh
 
-      - name: Build and smoke test production workspace image
-        env:
-          FERN_OPENCODE_IMAGE: fern/opencode:release-validation
-        run: |
-          set -euo pipefail
-          docker build --pull --tag "$FERN_OPENCODE_IMAGE" images/opencode
-          test "$(docker run --rm --entrypoint id "$FERN_OPENCODE_IMAGE" -u)" = 1001
-          test "$(docker run --rm --entrypoint id "$FERN_OPENCODE_IMAGE" -g)" = 1001
-          docker run --rm --entrypoint opencode2 "$FERN_OPENCODE_IMAGE" --version
-          ./scripts/test-opencode.sh
-
       - name: Build and verify OpenCode plugin package
         working-directory: plugins/opencode
         run: |
@@ -87,11 +76,6 @@ jobs:
           bun run smoke
           docker build --tag fern/opencode-background:plugin-release ../../images/opencode-background
           ./test/docker-cli-smoke.sh fern/opencode-background:plugin-release
-
-      - name: Run Docker lifecycle integration gate
-        run: |
-          set -euo pipefail
-          ./scripts/test-lifecycle.sh
 
       - name: Qualify source Background Run image locally
         run: |
@@ -130,9 +114,9 @@ jobs:
         run: |
           set -euo pipefail
           ./scripts/verify-release-tag.sh
-          image_name="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fern/opencode"
+          image_name="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/fern/opencode-background-source"
           workflow_identity="https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yml@$GITHUB_REF"
-          sbom_path="$RUNNER_TEMP/fern-${RELEASE_TAG}-opencode.spdx.json"
+          sbom_path="$RUNNER_TEMP/fern-${RELEASE_TAG}-opencode-background-source.spdx.json"
           printf 'IMAGE_NAME=%s\n' "$image_name" >>"$GITHUB_ENV"
           printf 'RELEASE_COMMIT=%s\n' "$RELEASE_COMMIT" >>"$GITHUB_ENV"
           printf 'RELEASE_TAG=%s\n' "$RELEASE_TAG" >>"$GITHUB_ENV"
@@ -152,31 +136,66 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435
 
-      - name: Build and publish production image
-        id: image
+      - name: Build amd64 candidate source image
+        id: image-amd64
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
         with:
-          context: images/opencode
-          platforms: linux/amd64,linux/arm64
+          context: images/opencode-background-source
+          platforms: linux/amd64
           pull: true
           push: true
           provenance: false
-          tags: |
-            ${{ env.IMAGE_NAME }}:${{ env.RELEASE_TAG }}
-            ${{ env.IMAGE_NAME }}:sha-${{ github.sha }}
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.version=${{ github.ref_name }}
+          tags: ${{ env.IMAGE_NAME }}:candidate-${{ github.sha }}-amd64
 
-      - name: Record immutable image digest
+      - name: Build arm64 candidate source image
+        id: image-arm64
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: images/opencode-background-source
+          platforms: linux/arm64
+          pull: true
+          push: true
+          provenance: false
+          tags: ${{ env.IMAGE_NAME }}:candidate-${{ github.sha }}-arm64
+
+      - name: Qualify exact candidate images
         env:
-          BUILT_IMAGE_DIGEST: ${{ steps.image.outputs.digest }}
+          AMD64_IMAGE_DIGEST: ${{ steps.image-amd64.outputs.digest }}
+          ARM64_IMAGE_DIGEST: ${{ steps.image-arm64.outputs.digest }}
         run: |
           set -euo pipefail
-          [[ "$BUILT_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
-          printf 'IMAGE_DIGEST=%s\n' "$BUILT_IMAGE_DIGEST" >>"$GITHUB_ENV"
-          printf 'IMAGE_REFERENCE=%s@%s\n' "$IMAGE_NAME" "$BUILT_IMAGE_DIGEST" >>"$GITHUB_ENV"
+          for architecture in amd64 arm64; do
+            case "$architecture" in
+              amd64) digest="$AMD64_IMAGE_DIGEST" ;;
+              arm64) digest="$ARM64_IMAGE_DIGEST" ;;
+            esac
+            [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+            docker pull --platform "linux/$architecture" "$IMAGE_NAME@$digest"
+            docker tag "$IMAGE_NAME@$digest" fern/opencode-background-source:dev
+            FERN_OPENCODE_BACKGROUND_SOURCE_BUILD=0 ./integration/background-run-qualification/run.sh
+          done
+
+      - name: Promote only qualified candidate digests
+        env:
+          AMD64_IMAGE_DIGEST: ${{ steps.image-amd64.outputs.digest }}
+          ARM64_IMAGE_DIGEST: ${{ steps.image-arm64.outputs.digest }}
+        run: |
+          set -euo pipefail
+          docker buildx imagetools create \
+            --tag "$IMAGE_NAME:$RELEASE_TAG" \
+            --tag "$IMAGE_NAME:sha-$RELEASE_COMMIT" \
+            "$IMAGE_NAME@$AMD64_IMAGE_DIGEST" \
+            "$IMAGE_NAME@$ARM64_IMAGE_DIGEST"
+
+      - name: Record immutable image digest
+        run: |
+          set -euo pipefail
+          image_digest=$(docker buildx imagetools inspect "$IMAGE_NAME:$RELEASE_TAG" | awk '$1 == "Digest:" { print $2; exit }')
+          commit_digest=$(docker buildx imagetools inspect "$IMAGE_NAME:sha-$RELEASE_COMMIT" | awk '$1 == "Digest:" { print $2; exit }')
+          [[ "$image_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$commit_digest" = "$image_digest"
+          printf 'IMAGE_DIGEST=%s\n' "$image_digest" >>"$GITHUB_ENV"
+          printf 'IMAGE_REFERENCE=%s@%s\n' "$IMAGE_NAME" "$image_digest" >>"$GITHUB_ENV"
 
       - name: Generate image SPDX SBOM
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610
@@ -285,7 +304,7 @@ jobs:
           (cd dist && shasum -a 256 -c SHA256SUMS)
           notes="$RUNNER_TEMP/release-notes.md"
           {
-            printf 'Immutable production image: `%s`\n\n' "$IMAGE_REFERENCE"
+            printf 'Immutable Background Run source image: `%s`\n\n' "$IMAGE_REFERENCE"
             printf 'Image provenance: %s\n\n' "$IMAGE_PROVENANCE_URL"
             printf 'Release asset provenance: %s\n' "$ASSET_PROVENANCE_URL"
           } >"$notes"

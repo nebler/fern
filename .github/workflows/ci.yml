@@ -66,36 +66,6 @@ jobs:
           ./scripts/build-release.sh v0.0.0-ci
           (cd dist && shasum -a 256 -c SHA256SUMS)
 
-  image:
-    name: Workspace image
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-
-      - name: Build workspace image
-        run: docker build -t fern/opencode:ci images/opencode
-
-      - name: Verify workspace image identity
-        run: |
-          test "$(docker run --rm --entrypoint id fern/opencode:ci -u)" = "1001"
-          test "$(docker run --rm --entrypoint id fern/opencode:ci -g)" = "1001"
-          docker run --rm --entrypoint opencode2 fern/opencode:ci --version
-
-      - name: Verify workspace GitHub CLI
-        run: |
-          docker run --rm --entrypoint gh fern/opencode:ci --version | grep -q '^gh version 2\.98\.0 '
-          docker run --rm --network none --entrypoint sh fern/opencode:ci -c \
-            'test "$(id -u):$(id -g)" = 1001:1001 && test -w /home/user/.config/gh && test ! -e /home/user/.config/gh/hosts.yml && ! gh auth status >/dev/null 2>&1'
-          docker run --rm --network none --env GH_CONFIG_DIR=/home/user/.config/gh \
-            --mount type=volume,destination=/home/user/.config/gh \
-            --entrypoint sh fern/opencode:ci -c 'test -w "$GH_CONFIG_DIR" && touch "$GH_CONFIG_DIR/write-test"'
-
-      - name: Smoke test real OpenCode
-        env:
-          FERN_OPENCODE_IMAGE: fern/opencode:ci
-        run: ./scripts/test-opencode.sh
-
   opencode-plugin:
     name: OpenCode plugin package
     runs-on: ubuntu-latest
@@ -126,23 +96,6 @@ jobs:
         working-directory: plugins/opencode
         run: ./test/docker-cli-smoke.sh fern/opencode-background:plugin-ci
 
-  lifecycle:
-    name: Docker lifecycle
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-
-      - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Run real Docker lifecycle harness
-        run: ./scripts/test-lifecycle.sh
-
   background-qualification:
     name: Background Run qualification
     runs-on: ubuntu-latest
@@ -159,36 +112,3 @@ jobs:
 
       - name: Run authoritative local Background Run qualification
         run: ./integration/background-run-qualification/run.sh
-
-  browser:
-    name: Mobile browser control flow
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
-
-      - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Set up Node
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
-        with:
-          node-version: 22
-
-      - name: Install Playwright CLI and Chromium
-        run: |
-          npm install --global @playwright/cli@0.1.15
-          playwright-cli install-browser --with-deps chromium
-          playwright-cli install-browser --with-deps webkit
-
-      - name: Run Chromium mobile browser rehearsal
-        run: ./scripts/test-browser.sh
-
-      - name: Run WebKit mobile browser rehearsal
-        env:
-          FERN_BROWSER_ENGINE: webkit
-        run: ./scripts/test-browser.sh

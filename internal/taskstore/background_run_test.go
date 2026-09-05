@@ -18,7 +18,7 @@ func TestBackgroundRunAdmissionStopAndRestart(t *testing.T) {
 	store := openTestStore(t, path)
 	createTestWorkspace(t, store)
 	params := testBackgroundRunAdmission(1500, "run-create")
-	admission, err := store.AdmitTask(context.Background(), params)
+	admission, err := store.AdmitBackgroundRun(context.Background(), params)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -27,9 +27,6 @@ func TestBackgroundRunAdmissionStopAndRestart(t *testing.T) {
 		run.BaseOID != admission.Attempt.BaseSHA || run.ImageIdentity != params.BackgroundRun.ImageIdentity || run.ImageIdentity != admission.Attempt.ImageDigest ||
 		admission.Attempt.OpenCodeProtocol != BackgroundRunSourceProfile || run.State != BackgroundRunQueued || run.EffectPhase != "absent" {
 		t.Fatalf("background run = %+v, error = %v", run, err)
-	}
-	if _, err := store.FindPreparedAttempt(context.Background(), testWorkspaceID()); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("background run reached persistent delivery manager: %v", err)
 	}
 	stopHash := sha256.Sum256([]byte("stop"))
 	stopParams := StopBackgroundRunParams{WorkspaceID: testWorkspaceID(), TaskID: run.TaskID, ReceiptID: testReceiptID(1600),
@@ -73,12 +70,12 @@ func TestBackgroundRunAdmissionIsAtomicAndActorFiltered(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	createTestWorkspace(t, store)
 	first := testBackgroundRunAdmission(1700, "first-run")
-	if _, err := store.AdmitTask(context.Background(), first); err != nil {
+	if _, err := store.AdmitBackgroundRun(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
 	second := testBackgroundRunAdmission(1701, "second-run")
 	second.BackgroundRun.CloneIdentity = first.BackgroundRun.CloneIdentity
-	if _, err := store.AdmitTask(context.Background(), second); err == nil {
+	if _, err := store.AdmitBackgroundRun(context.Background(), second); err == nil {
 		t.Fatal("duplicate environment identity did not abort admission")
 	}
 	assertCounts(t, store, 1, 1, 1, 2)
@@ -100,54 +97,12 @@ func TestBackgroundRunAdmissionIsAtomicAndActorFiltered(t *testing.T) {
 	}
 }
 
-func TestBackgroundRunIsExcludedFromLegacyTaskDomain(t *testing.T) {
-	store := openTestStore(t, testDBPath(t))
-	t.Cleanup(func() { _ = store.Close() })
-	createTestWorkspace(t, store)
-	params := testBackgroundRunAdmission(1800, "legacy-isolation")
-	admission, err := store.AdmitTask(context.Background(), params)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if listed, err := store.ListTasks(context.Background(), testWorkspaceID(), 100); err != nil || len(listed) != 0 {
-		t.Fatalf("legacy task list = %+v, error = %v", listed, err)
-	}
-	if _, err := store.GetTask(context.Background(), admission.Task.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("legacy exact task read = %v", err)
-	}
-	if _, err := store.GetAttempt(context.Background(), admission.Attempt.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("legacy exact attempt read = %v", err)
-	}
-	if _, err := store.GetReceipt(context.Background(), admission.Receipt.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("legacy exact receipt read = %v", err)
-	}
-	if _, err := store.GetTaskSnapshot(context.Background(), testWorkspaceID(), admission.Task.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("legacy task snapshot = %v", err)
-	}
-	cancel := testCancellation(admission.Task.ID, 1810, "legacy-cancel", "stop")
-	if _, err := store.RequestCancellation(context.Background(), cancel); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("legacy cancellation = %v", err)
-	}
-	if _, err := store.InspectCancellation(context.Background(), admission.Task.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("legacy cancellation read = %v", err)
-	}
-	if _, err := store.FindPendingCancellation(context.Background(), testWorkspaceID()); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("pending cancellation = %v", err)
-	}
-	if _, err := store.InspectDeliveryAttempt(context.Background(), admission.Attempt.ID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("legacy delivery read = %v", err)
-	}
-	if page, err := store.ListEvents(context.Background(), testWorkspaceID(), 0, 100); err != nil || len(page.Events) != 0 || page.Watermark != 0 || !page.CaughtUp {
-		t.Fatalf("legacy event list = %+v, error = %v", page, err)
-	}
-}
-
 func TestBackgroundRunWorkspaceFenceAndLifecycleAlgebra(t *testing.T) {
 	store := openTestStore(t, testDBPath(t))
 	t.Cleanup(func() { _ = store.Close() })
 	createTestWorkspace(t, store)
 	params := testBackgroundRunAdmission(1900, "lifecycle")
-	admission, err := store.AdmitTask(context.Background(), params)
+	admission, err := store.AdmitBackgroundRun(context.Background(), params)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,13 +135,13 @@ func TestBackgroundRunWorkspaceFenceAndLifecycleAlgebra(t *testing.T) {
 func TestBackgroundRunAdmissionRejectsMismatchedIntentAtomically(t *testing.T) {
 	for _, test := range []struct {
 		name   string
-		mutate func(*AdmitTaskParams)
+		mutate func(*AdmitBackgroundRunParams)
 	}{
-		{"instruction hash", func(p *AdmitTaskParams) { p.BackgroundRun.InstructionSHA256 = [32]byte{} }},
-		{"profile hash", func(p *AdmitTaskParams) { p.BackgroundRun.ProfileSHA256 = [32]byte{} }},
-		{"creator actor", func(p *AdmitTaskParams) { p.Claim.Actor.Type = task.ActorOperator }},
-		{"environment identity", func(p *AdmitTaskParams) { p.BackgroundRun.ContainerIdentity += "-other" }},
-		{"noncanonical remote", func(p *AdmitTaskParams) { p.BackgroundRun.RepositoryRemote += ".git" }},
+		{"instruction hash", func(p *AdmitBackgroundRunParams) { p.BackgroundRun.InstructionSHA256 = [32]byte{} }},
+		{"profile hash", func(p *AdmitBackgroundRunParams) { p.BackgroundRun.ProfileSHA256 = [32]byte{} }},
+		{"creator actor", func(p *AdmitBackgroundRunParams) { p.Claim.Actor.Type = task.ActorOperator }},
+		{"environment identity", func(p *AdmitBackgroundRunParams) { p.BackgroundRun.ContainerIdentity += "-other" }},
+		{"noncanonical remote", func(p *AdmitBackgroundRunParams) { p.BackgroundRun.RepositoryRemote += ".git" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store := openTestStore(t, testDBPath(t))
@@ -194,7 +149,7 @@ func TestBackgroundRunAdmissionRejectsMismatchedIntentAtomically(t *testing.T) {
 			createTestWorkspace(t, store)
 			params := testBackgroundRunAdmission(1950, "invalid-"+test.name)
 			test.mutate(&params)
-			if _, err := store.AdmitTask(context.Background(), params); !errors.Is(err, ErrInvalidInput) {
+			if _, err := store.AdmitBackgroundRun(context.Background(), params); !errors.Is(err, ErrInvalidInput) {
 				t.Fatalf("admission error = %v", err)
 			}
 			assertCounts(t, store, 0, 0, 0, 0)
@@ -206,7 +161,7 @@ func TestBackgroundRunAdmissionRejectsMismatchedIntentAtomically(t *testing.T) {
 		createTestWorkspace(t, store)
 		params := testBackgroundRunAdmission(1960, "repository-binding")
 		params.BackgroundRun.RepositoryRemote = "https://github.com/other/repository"
-		if _, err := store.AdmitTask(context.Background(), params); err == nil {
+		if _, err := store.AdmitBackgroundRun(context.Background(), params); err == nil {
 			t.Fatal("workspace repository mismatch admitted")
 		}
 		assertCounts(t, store, 0, 0, 0, 0)
@@ -220,10 +175,10 @@ func TestBackgroundRunClaimsCapacityRecoveryAndActiveStop(t *testing.T) {
 	createTestWorkspace(t, store)
 	first := testBackgroundRunAdmission(1970, "claim-first")
 	second := testBackgroundRunAdmission(1971, "claim-second")
-	if _, err := store.AdmitTask(context.Background(), first); err != nil {
+	if _, err := store.AdmitBackgroundRun(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AdmitTask(context.Background(), second); err != nil {
+	if _, err := store.AdmitBackgroundRun(context.Background(), second); err != nil {
 		t.Fatal(err)
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
@@ -403,7 +358,7 @@ func TestConcurrentBackgroundRunClaimHasOneWinner(t *testing.T) {
 	createTestWorkspace(t, store)
 	for index := range 2 {
 		params := testBackgroundRunAdmission(2000+index, fmt.Sprintf("claim-race-%d", index))
-		if _, err := store.AdmitTask(context.Background(), params); err != nil {
+		if _, err := store.AdmitBackgroundRun(context.Background(), params); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -461,10 +416,10 @@ func TestBackgroundRunClaimRequiresProfileButRecoversAcrossImageRotation(t *test
 	first := testBackgroundRunAdmission(2050, "profile-image-first")
 	first.BackgroundRun.ImageIdentity = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	second := testBackgroundRunAdmission(2051, "profile-image-second")
-	if _, err := store.AdmitTask(context.Background(), first); err != nil {
+	if _, err := store.AdmitBackgroundRun(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AdmitTask(context.Background(), second); err != nil {
+	if _, err := store.AdmitBackgroundRun(context.Background(), second); err != nil {
 		t.Fatal(err)
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
@@ -494,7 +449,7 @@ func TestBackgroundRunWorkProjectionAndPromptAttemptFenceSurviveRestart(t *testi
 	store := openTestStore(t, path)
 	createTestWorkspace(t, store)
 	params := testBackgroundRunAdmission(2070, "prompt-fence")
-	if _, err := store.AdmitTask(context.Background(), params); err != nil {
+	if _, err := store.AdmitBackgroundRun(context.Background(), params); err != nil {
 		t.Fatal(err)
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
@@ -546,7 +501,7 @@ func TestBackgroundRunSystemTimeoutHasNoPluginReceipt(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	createTestWorkspace(t, store)
 	params := testBackgroundRunAdmission(2080, "system-timeout")
-	if _, err := store.AdmitTask(context.Background(), params); err != nil {
+	if _, err := store.AdmitBackgroundRun(context.Background(), params); err != nil {
 		t.Fatal(err)
 	}
 	now := params.Deadline.Truncate(time.Millisecond).Add(time.Millisecond)
@@ -664,7 +619,7 @@ func TestBackgroundRunCleanupFailuresPreservePhaseAndPermitRetry(t *testing.T) {
 				createTestWorkspace(t, store)
 				n := 2200 + stateIndex*100 + phaseIndex
 				params := testBackgroundRunAdmission(n, fmt.Sprintf("cleanup-failure-%s-%s", state, phase))
-				if _, err := store.AdmitTask(context.Background(), params); err != nil {
+				if _, err := store.AdmitBackgroundRun(context.Background(), params); err != nil {
 					t.Fatal(err)
 				}
 				now := testTime.Truncate(time.Millisecond).Add(time.Minute)
@@ -703,7 +658,7 @@ func TestBackgroundRunDiagnosticResultReadyIsRejected(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	createTestWorkspace(t, store)
 	first := testBackgroundRunAdmission(2100, "result-cleanup-first")
-	if _, err := store.AdmitTask(context.Background(), first); err != nil {
+	if _, err := store.AdmitBackgroundRun(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
 
@@ -723,10 +678,10 @@ func TestBackgroundRunPreEffectFailureRequiresAbsenceProofAndFinalizesParents(t 
 	createTestWorkspace(t, store)
 	first := testBackgroundRunAdmission(2150, "pre-effect-failure")
 	second := testBackgroundRunAdmission(2151, "after-pre-effect-failure")
-	if _, err := store.AdmitTask(context.Background(), first); err != nil {
+	if _, err := store.AdmitBackgroundRun(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.AdmitTask(context.Background(), second); err != nil {
+	if _, err := store.AdmitBackgroundRun(context.Background(), second); err != nil {
 		t.Fatal(err)
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
@@ -772,7 +727,7 @@ FROM tasks t JOIN attempts a ON a.id=t.current_attempt_id WHERE t.id=?`, final.T
 	}
 }
 
-func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitTaskParams, state BackgroundRunState, phase BackgroundRunEffectPhase, now time.Time, n int) (BackgroundRun, BackgroundRunClaim) {
+func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitBackgroundRunParams, state BackgroundRunState, phase BackgroundRunEffectPhase, now time.Time, n int) (BackgroundRun, BackgroundRunClaim) {
 	t.Helper()
 	run, claim := advanceBackgroundRunToPrompt(t, store, params.BackgroundRun.ImageIdentity, now)
 	var err error
@@ -947,14 +902,8 @@ func advanceBackgroundClaim(claim *BackgroundRunClaim, run BackgroundRun) {
 	claim.CancelEpoch = run.CancelEpoch
 }
 
-func testBackgroundRunAdmission(n int, key string) AdmitTaskParams {
+func testBackgroundRunAdmission(n int, key string) AdmitBackgroundRunParams {
 	params := testAdmission(n, key, "Run in the background")
-	params.Claim.Scope.CommandKind = CreateBackgroundRunCommand
-	params.Claim.Actor.Type = "opencode"
-	params.Claim.Actor.ID = "pc_owner"
-	params.Claim.Actor.CredentialID = "pc_owner"
-	params.Claim.Actor.Authentication = "fern_plugin_bearer"
-	params.Claim.RequestHash = sha256.Sum256([]byte(key))
 	compact := strings.ReplaceAll(strings.TrimPrefix(string(params.TaskID), "tsk_"), "-", "")
 	params.BackgroundRun = &BackgroundRunIntent{
 		RepositoryRemote: "https://github.com/owner/repository", Branch: "main",

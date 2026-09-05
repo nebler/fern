@@ -103,9 +103,12 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 		MaterializationID: materializationID, OpenCodeSessionID: snapshot.OpenCodeSessionID,
 		OpenCodeMessageID: snapshot.OpenCodeMessageID, BaseSHA: snapshot.Base, ResultCommit: snapshot.Result,
 		TreeOID: snapshot.Tree, ManifestSHA256: snapshot.ChangesSHA256.Bytes()}
-	resolver, err := New(artifactStore{artifact}, engine, repository)
+	resolver, err := New(artifactStore{artifact}, engine)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err := resolver.Verify(context.Background(), result); err != nil {
+		t.Fatalf("verify retained result: %v", err)
 	}
 	otherWorkspace, _ := ids.WorkspaceID()
 	otherSeal, _ := ids.SealRequestID()
@@ -137,12 +140,15 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 		t.Run("rejects "+test.name+" mismatch", func(t *testing.T) {
 			changedArtifact, changedResult := artifact, result
 			test.mutate(&changedArtifact, &changedResult)
-			changedResolver, newErr := New(artifactStore{changedArtifact}, engine, repository)
+			changedResolver, newErr := New(artifactStore{changedArtifact}, engine)
 			if newErr != nil {
 				t.Fatal(newErr)
 			}
 			if path, closeSource, acquireErr := changedResolver.Acquire(context.Background(), changedResult); path != "" || closeSource != nil || acquireErr != taskstore.ErrCorruptStore {
 				t.Fatalf("mismatched authority path=%q close=%v error=%v", path, closeSource != nil, acquireErr)
+			}
+			if verifyErr := changedResolver.Verify(context.Background(), changedResult); verifyErr != taskstore.ErrCorruptStore {
+				t.Fatalf("mismatched retention verification error=%v", verifyErr)
 			}
 		})
 	}

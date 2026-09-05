@@ -21,8 +21,7 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/config"
-	"github.com/nebler/fern/internal/registry"
-	fernruntime "github.com/nebler/fern/internal/runtime"
+	"github.com/nebler/fern/internal/hostlease"
 	backupscript "github.com/nebler/fern/scripts"
 	_ "modernc.org/sqlite"
 )
@@ -32,16 +31,7 @@ const (
 	defaultBackupEnv    = "/etc/fern/fern.env"
 )
 
-type backupDocker interface {
-	Destroy(context.Context, string) error
-	ExportManagedVolumes(context.Context, fernruntime.Spec, string) ([]string, error)
-	RestoreManagedVolumes(context.Context, fernruntime.Spec, map[string]string, string) error
-	Close() error
-}
-
 const operationalRollbackDirectory = "operational-rollback"
-
-var openBackupDocker = func(log *slog.Logger) (backupDocker, error) { return newDocker(log) }
 
 type backupOptions struct {
 	configPath, envPath, stateDirectory string
@@ -86,26 +76,18 @@ func runBackupCreate(args []string, log *slog.Logger) error {
 	if *credentials == "" {
 		*credentials = *output + ".credentials.tar"
 	}
-	cfg, spec, err := loadBackupSpec(*options)
+	cfg, name, err := loadBackupConfig(*options)
 	if err != nil {
 		return err
 	}
-	lease, err := registry.Acquire(filepath.Join(options.stateDirectory, "locks"), spec.Name)
+	lease, err := hostlease.Acquire(filepath.Join(options.stateDirectory, "locks"), name)
 	if err != nil {
-		return fmt.Errorf("backup requires the offline workspace lease: %w", err)
+		return fmt.Errorf("backup requires the offline Fern lease: %w", err)
 	}
 	defer lease.Release()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	docker, err := openBackupDocker(log)
-	if err != nil {
-		return err
-	}
-	defer docker.Close()
-	if err := docker.Destroy(ctx, spec.Name); err != nil {
-		return fmt.Errorf("quiesce workspace compute: %w", err)
-	}
 	if err := checkpointSQLiteTree(ctx, options.stateDirectory); err != nil {
 		return err
 	}
@@ -120,8 +102,7 @@ func runBackupCreate(args []string, log *slog.Logger) error {
 	}
 	stateSource := filepath.Join(staging, "state")
 	configSource := filepath.Join(staging, "config")
-	volumeSource := filepath.Join(staging, "volumes")
-	for _, path := range []string{stateSource, configSource, volumeSource} {
+	for _, path := range []string{stateSource, configSource} {
 		if err := os.Mkdir(path, 0o700); err != nil {
 			return err
 		}
@@ -132,10 +113,6 @@ func runBackupCreate(args []string, log *slog.Logger) error {
 	if err := stageConfig(options.configPath, options.envPath, configSource); err != nil {
 		return err
 	}
-	volumeNames, err := docker.ExportManagedVolumes(ctx, spec, volumeSource)
-	if err != nil {
-		return fmt.Errorf("export managed volumes: %w", err)
-	}
 	epoch, lockDirectory, err := ensureBackupEpoch(options.stateDirectory)
 	if err != nil {
 		return err
@@ -144,9 +121,6 @@ func runBackupCreate(args []string, log *slog.Logger) error {
 		"--generation", *generation, "--output", *output, "--state", stateSource,
 		"--config", configSource, "--repository", cfg.Workspace.Repo,
 		"--credential-policy", "external", "--credential-output", *credentials}
-	for _, name := range volumeNames {
-		toolArgs = append(toolArgs, "--volume", name+"="+filepath.Join(volumeSource, name))
-	}
 	if err := runBackupArchiveTool(ctx, options.archiveTool, toolArgs, os.Stdout, os.Stderr); err != nil {
 		return err
 	}
@@ -175,25 +149,17 @@ func runBackupRestore(args []string, log *slog.Logger) error {
 	if *recoveryDirectory == "" {
 		*recoveryDirectory = filepath.Join(options.stateDirectory, "recovery")
 	}
-	cfg, spec, err := loadBackupSpec(*options)
+	cfg, name, err := loadBackupConfig(*options)
 	if err != nil {
 		return err
 	}
-	lease, err := registry.Acquire(filepath.Join(options.stateDirectory, "locks"), spec.Name)
+	lease, err := hostlease.Acquire(filepath.Join(options.stateDirectory, "locks"), name)
 	if err != nil {
-		return fmt.Errorf("restore requires the offline workspace lease: %w", err)
+		return fmt.Errorf("restore requires the offline Fern lease: %w", err)
 	}
 	defer lease.Release()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	docker, err := openBackupDocker(log)
-	if err != nil {
-		return err
-	}
-	defer docker.Close()
-	if err := docker.Destroy(ctx, spec.Name); err != nil {
-		return fmt.Errorf("quiesce workspace compute: %w", err)
-	}
 	epoch, lockDirectory, err := ensureBackupEpoch(options.stateDirectory)
 	if err != nil {
 		return err
@@ -211,9 +177,8 @@ func runBackupRestore(args []string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	wantVolumes := fernruntime.ManagedVolumeNames(spec)
-	if !slices.Equal(manifest.NamedVolumes, wantVolumes) {
-		return fmt.Errorf("backup volumes %q do not match configured volumes %q", manifest.NamedVolumes, wantVolumes)
+	if len(manifest.NamedVolumes) != 0 {
+		return fmt.Errorf("backup contains retired persistent workspace volumes: %q", manifest.NamedVolumes)
 	}
 	transaction, err := prepareFilesystemRestore(current, options.stateDirectory, options.configPath, options.envPath, cfg.Workspace.Repo, manifest.Generation)
 	if err != nil {
@@ -224,7 +189,7 @@ func runBackupRestore(args []string, log *slog.Logger) error {
 		transaction.Cleanup()
 		return err
 	}
-	rollbackRoot, err := createOperationalRollback(ctx, docker, spec, *recoveryDirectory, rollbackGeneration, manifest.Generation, transaction.paths)
+	rollbackRoot, err := createOperationalRollback(*recoveryDirectory, rollbackGeneration, manifest.Generation, transaction.paths)
 	if err != nil {
 		transaction.Cleanup()
 		return err
@@ -236,17 +201,12 @@ func runBackupRestore(args []string, log *slog.Logger) error {
 	if err := checkpointSQLiteTree(ctx, options.stateDirectory); err != nil {
 		return errors.Join(fmt.Errorf("validate restored filesystem generation: %w", err), transaction.Rollback())
 	}
-	volumeSources := make(map[string]string, len(wantVolumes))
-	for _, name := range wantVolumes {
-		volumeSources[name] = filepath.Join(current, "volumes", name)
-	}
-	if err := docker.RestoreManagedVolumes(ctx, spec, volumeSources, manifest.Generation); err != nil {
-		return errors.Join(err, transaction.Rollback())
-	}
 	if err := transaction.Commit(); err != nil {
 		return fmt.Errorf("restored data is active but old filesystem generations need manual cleanup: %w", err)
 	}
-	fmt.Fprintf(os.Stdout, "restored operational generation %s; workspace compute remains offline\nrollback generation %s retained at %s; use 'fern backup rollback' if post-restore validation fails\n", manifest.Generation, rollbackGeneration, rollbackRoot)
+	if _, err := fmt.Fprintf(os.Stdout, "restored operational generation %s; Fern remains offline\nrollback generation %s retained at %s; use 'fern backup rollback' if post-restore validation fails\n", manifest.Generation, rollbackGeneration, rollbackRoot); err != nil {
+		return fmt.Errorf("report restored generation: %w", err)
+	}
 	return nil
 }
 
@@ -262,30 +222,22 @@ func runBackupRollback(args []string, log *slog.Logger) error {
 	if *recoveryDirectory == "" {
 		*recoveryDirectory = filepath.Join(options.stateDirectory, "recovery")
 	}
-	cfg, spec, err := loadBackupSpec(*options)
+	cfg, name, err := loadBackupConfig(*options)
 	if err != nil {
 		return err
 	}
 	rollbackRoot := filepath.Join(*recoveryDirectory, operationalRollbackDirectory)
-	manifest, paths, volumeSources, err := readOperationalRollback(rollbackRoot, options.stateDirectory, options.configPath, options.envPath, cfg.Workspace.Repo, fernruntime.ManagedVolumeNames(spec))
+	manifest, paths, _, err := readOperationalRollback(rollbackRoot, options.stateDirectory, options.configPath, options.envPath, cfg.Workspace.Repo, nil)
 	if err != nil {
 		return err
 	}
-	lease, err := registry.Acquire(filepath.Join(options.stateDirectory, "locks"), spec.Name)
+	lease, err := hostlease.Acquire(filepath.Join(options.stateDirectory, "locks"), name)
 	if err != nil {
-		return fmt.Errorf("rollback requires the offline workspace lease: %w", err)
+		return fmt.Errorf("rollback requires the offline Fern lease: %w", err)
 	}
 	defer lease.Release()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	docker, err := openBackupDocker(log)
-	if err != nil {
-		return err
-	}
-	defer docker.Close()
-	if err := docker.Destroy(ctx, spec.Name); err != nil {
-		return fmt.Errorf("quiesce workspace compute: %w", err)
-	}
 	transaction, err := prepareFilesystemRestorePaths(paths, manifest.Generation)
 	if err != nil {
 		return err
@@ -297,18 +249,24 @@ func runBackupRollback(args []string, log *slog.Logger) error {
 	if err := checkpointSQLiteTree(ctx, options.stateDirectory); err != nil {
 		return errors.Join(fmt.Errorf("validate rollback filesystem generation: %w", err), transaction.Rollback())
 	}
-	if err := docker.RestoreManagedVolumes(ctx, spec, volumeSources, manifest.Generation); err != nil {
-		return errors.Join(err, transaction.Rollback())
-	}
 	if err := transaction.Commit(); err != nil {
 		return fmt.Errorf("rollback data is active but replaced filesystem paths need manual cleanup: %w", err)
 	}
-	fmt.Fprintf(os.Stdout, "rolled back to durable operational generation %s; workspace compute remains offline\nrollback material retained at %s\n", manifest.Generation, rollbackRoot)
+	if _, err := fmt.Fprintf(os.Stdout, "rolled back to durable operational generation %s; Fern remains offline\nrollback material retained at %s\n", manifest.Generation, rollbackRoot); err != nil {
+		return fmt.Errorf("report rolled back generation: %w", err)
+	}
 	return nil
 }
 
-func loadBackupSpec(options backupOptions) (config.Config, fernruntime.Spec, error) {
-	return loadUpSpec(upOptions{configPath: options.configPath, envPath: options.envPath, configRequired: true})
+func loadBackupConfig(options backupOptions) (config.Config, string, error) {
+	cfg, _, err := loadCommandConfig(options.configPath, true, options.envPath, config.Overrides{})
+	if err != nil {
+		return config.Config{}, "", err
+	}
+	if err := config.ValidateWorkspace(cfg); err != nil {
+		return config.Config{}, "", err
+	}
+	return cfg, cfg.Workspace.Name, nil
 }
 
 func newBackupGeneration() (string, error) {
@@ -385,7 +343,48 @@ func stageFernState(source, destination string) error {
 		if excludedStateEntries[entry.Name()] {
 			continue
 		}
-		if err := copyPath(filepath.Join(source, entry.Name()), filepath.Join(destination, entry.Name())); err != nil {
+		if err := copyStatePath(filepath.Join(source, entry.Name()), filepath.Join(destination, entry.Name()), entry.Name()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copyStatePath(source, target, relative string) error {
+	base := filepath.Base(relative)
+	if base == "artifact-work" || strings.HasSuffix(base, "-publication") || strings.HasPrefix(base, ".clone-") {
+		return nil
+	}
+	if base == "runtime" && strings.Contains(filepath.ToSlash(relative), "-background/") {
+		info, err := os.Lstat(source)
+		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("invalid disposable runtime state: %s", source)
+		}
+		if err := os.Mkdir(target, info.Mode().Perm()); err != nil {
+			return err
+		}
+		return copyPath(filepath.Join(source, "host.key"), filepath.Join(target, "host.key"))
+	}
+	info, err := os.Lstat(source)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return copyPath(source, target)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("link or special backup source rejected: %s", source)
+	}
+	if err := os.Mkdir(target, info.Mode().Perm()); err != nil {
+		return err
+	}
+	entries, err := os.ReadDir(source)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		child := filepath.Join(relative, entry.Name())
+		if err := copyStatePath(filepath.Join(source, entry.Name()), filepath.Join(target, entry.Name()), child); err != nil {
 			return err
 		}
 	}
@@ -613,7 +612,7 @@ func prepareFilesystemRestorePaths(paths []restorePath, generation string) (*fil
 	return transaction, nil
 }
 
-func createOperationalRollback(ctx context.Context, docker backupDocker, spec fernruntime.Spec, recoveryDirectory, generation, restoredGeneration string, paths []preparedRestorePath) (string, error) {
+func createOperationalRollback(recoveryDirectory, generation, restoredGeneration string, paths []preparedRestorePath) (string, error) {
 	root := filepath.Join(recoveryDirectory, operationalRollbackDirectory)
 	staging := root + ".staged"
 	if pathExists(root) || pathExists(staging) {
@@ -629,11 +628,7 @@ func createOperationalRollback(ctx context.Context, docker backupDocker, spec fe
 		}
 	}()
 	filesystem := filepath.Join(staging, "filesystem")
-	volumes := filepath.Join(staging, "volumes")
 	if err := os.Mkdir(filesystem, 0o700); err != nil {
-		return "", err
-	}
-	if err := os.Mkdir(volumes, 0o700); err != nil {
 		return "", err
 	}
 	manifest := operationalRollbackManifest{SchemaVersion: 1, Generation: generation, RestoredGeneration: restoredGeneration}
@@ -646,11 +641,6 @@ func createOperationalRollback(ctx context.Context, docker backupDocker, spec fe
 			}
 		}
 	}
-	volumeNames, err := docker.ExportManagedVolumes(ctx, spec, volumes)
-	if err != nil {
-		return "", fmt.Errorf("snapshot durable Docker rollback generation: %w", err)
-	}
-	manifest.NamedVolumes = volumeNames
 	encoded, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return "", err

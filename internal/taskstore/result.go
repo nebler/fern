@@ -29,36 +29,6 @@ SELECT r.id,r.task_id,r.attempt_id,r.workspace_id,r.state,r.outcome,r.repository
 	FROM results r JOIN actor_snapshots a ON a.id=r.creator_actor_snapshot_id
 	LEFT JOIN actor_snapshots aa ON aa.id=r.authorizer_actor_snapshot_id`
 
-// FindSucceededUnsealedAttempt returns current successful execution whose task
-// is still eligible for result collection. SealResult rechecks every field.
-func (s *Store) FindSucceededUnsealedAttempt(ctx context.Context, workspaceID task.WorkspaceID) (DeliveryWork, error) {
-	if _, err := task.ParseWorkspaceID(string(workspaceID)); err != nil {
-		return DeliveryWork{}, fmt.Errorf("%w: workspace ID", ErrInvalidInput)
-	}
-	var attemptID task.AttemptID
-	err := s.db.QueryRowContext(ctx, `
-SELECT a.id FROM attempts a JOIN tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id
-WHERE a.workspace_id=? AND a.state='succeeded' AND a.sealed_result_id IS NULL AND
-      t.current_attempt_id=a.id AND t.state='running' AND t.cancel_epoch=0 AND t.sealed_result_id IS NULL
-      AND NOT EXISTS (SELECT 1 FROM background_runs br WHERE br.attempt_id=a.id)
-ORDER BY a.updated_at,a.id LIMIT 1`, workspaceID).Scan(&attemptID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return DeliveryWork{}, &NotFoundError{Kind: "succeeded unsealed attempt", ID: string(workspaceID)}
-	}
-	if err != nil {
-		return DeliveryWork{}, fmt.Errorf("find succeeded unsealed attempt: %w", err)
-	}
-	attempt, err := getAttempt(ctx, s.db, attemptID)
-	if err != nil {
-		return DeliveryWork{}, err
-	}
-	owner, err := getTask(ctx, s.db, attempt.TaskID)
-	if err != nil {
-		return DeliveryWork{}, err
-	}
-	return DeliveryWork{Task: owner, Attempt: attempt}, nil
-}
-
 func (s *Store) GetResult(ctx context.Context, id task.ResultID) (Result, error) {
 	if _, err := task.ParseResultID(string(id)); err != nil {
 		return Result{}, fmt.Errorf("%w: result ID", ErrInvalidInput)
@@ -74,148 +44,6 @@ func (s *Store) GetResultManifest(ctx context.Context, id task.ResultID) ([]Mani
 		return nil, err
 	}
 	return getResultManifest(ctx, s.db, id)
-}
-
-// SealResult atomically inserts one immutable result and manifest, binds it to
-// the exact current successful attempt, and completes the unfenced task.
-func (s *Store) SealResult(ctx context.Context, p SealResultParams) (_ SealedResult, err error) {
-	if p.CompletionAuthority == "" {
-		p.CompletionAuthority = SealAuthorityExecutionSuccess
-	}
-	manifest, err := validateSealResult(p)
-	if err != nil {
-		return SealedResult{}, err
-	}
-	p.Manifest = manifest
-	payload, err := resultSealPayload(p)
-	if err != nil {
-		return SealedResult{}, err
-	}
-
-	tx, release, err := s.beginWrite(ctx)
-	if err != nil {
-		return SealedResult{}, fmt.Errorf("begin result seal: %w", err)
-	}
-	defer release()
-	defer rollback(tx, &err)
-
-	storedResult, resultErr := getResult(ctx, tx, p.ResultID)
-	if resultErr == nil {
-		replay, replayErr := resultSealReplay(ctx, tx, storedResult, p, payload)
-		if replayErr != nil {
-			return SealedResult{}, replayErr
-		}
-		if err := tx.Commit(); err != nil {
-			return SealedResult{}, fmt.Errorf("finish result seal replay: %w", err)
-		}
-		replay.Replayed = true
-		return replay, nil
-	}
-	if !errors.Is(resultErr, ErrNotFound) {
-		return SealedResult{}, resultErr
-	}
-
-	attempt, owner, err := deliveryRows(ctx, tx, p.AttemptID)
-	if err != nil {
-		return SealedResult{}, err
-	}
-	if owner.ID != p.TaskID || owner.CurrentAttemptID != attempt.ID {
-		return SealedResult{}, fmt.Errorf("%w: result attempt is not current", ErrInvalidState)
-	}
-	if attempt.Revision != p.ExpectedAttemptRevision {
-		return SealedResult{}, &StaleRevisionError{AttemptID: attempt.ID, Expected: p.ExpectedAttemptRevision, Actual: attempt.Revision}
-	}
-	if owner.Revision != p.ExpectedTaskRevision {
-		return SealedResult{}, &StaleTaskRevisionError{TaskID: owner.ID, Expected: p.ExpectedTaskRevision, Actual: owner.Revision}
-	}
-	if attempt.State != task.AttemptSucceeded || owner.State != task.TaskRunning || owner.CancelEpoch != 0 ||
-		attempt.SealedResultID != "" || owner.SealedResultID != "" {
-		return SealedResult{}, fmt.Errorf("%w: result source is not successful and unsealed", ErrInvalidState)
-	}
-	if owner.RepositoryID != p.RepositoryID || owner.BaseSHA != p.BaseSHA || attempt.BaseSHA != p.BaseSHA {
-		return SealedResult{}, ErrRepositoryMismatch
-	}
-	if attempt.OpenCodeSessionID != p.OpenCodeSessionID || attempt.OpenCodeMessageID != p.OpenCodeMessageID {
-		return SealedResult{}, fmt.Errorf("%w: exact OpenCode identity differs", ErrInvalidState)
-	}
-	if p.CollectedAt.Before(attempt.UpdatedAt) || p.SealedAt.Before(p.CollectedAt) {
-		return SealedResult{}, fmt.Errorf("%w: result collection time", ErrInvalidInput)
-	}
-
-	actorID, err := ensureActor(ctx, tx, p.Actor)
-	if err != nil {
-		return SealedResult{}, err
-	}
-	sealedMS := unixMillis(p.SealedAt)
-	resultEvent, err := insertAttemptEvent(ctx, tx, p.ResultEventID, attempt, "attempt.result_sealed", sealedMS, actorID, payload)
-	if err != nil {
-		return SealedResult{}, err
-	}
-	taskEvent, err := insertTaskEvent(ctx, tx, p.TaskEventID, owner, "task.completed", sealedMS, actorID, payload)
-	if err != nil {
-		return SealedResult{}, err
-	}
-	for i, entry := range p.Manifest {
-		if _, err := tx.ExecContext(ctx, `
-INSERT INTO result_manifest(result_id,ordinal,path_base64,change_kind,old_mode,new_mode,old_blob_oid,new_blob_oid,old_size,new_size)
-VALUES(?,?,?,?,?,?,?,?,?,?)`, p.ResultID, i, entry.PathBase64, entry.ChangeKind, entry.OldMode, entry.NewMode,
-			entry.OldBlobOID, entry.NewBlobOID, entry.OldSize, entry.NewSize); err != nil {
-			return SealedResult{}, fmt.Errorf("insert result manifest entry %d: %w", i, err)
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `
-INSERT INTO results(
- id,task_id,attempt_id,workspace_id,state,outcome,repository_id,base_sha,result_commit,tree_oid,
- worktree_clean,manifest_entries,manifest_sha256,opencode_session_id,opencode_message_id,evidence_sha256,
- policy_version,collected_at,sealed_at,creator_actor_snapshot_id,sealed_event_id,completed_event_id,revision,created_at,updated_at,
- completion_authority,seal_request_id,authorizer_actor_snapshot_id
-) VALUES(?,?,?,?,'sealed',?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?)`,
-		p.ResultID, owner.ID, attempt.ID, owner.WorkspaceID, p.Outcome, p.RepositoryID, p.BaseSHA, p.ResultCommit, p.TreeOID,
-		len(p.Manifest), p.ManifestSHA256[:], p.OpenCodeSessionID, p.OpenCodeMessageID, p.EvidenceSHA256[:],
-		p.PolicyVersion, unixMillis(p.CollectedAt), sealedMS, actorID, resultEvent.ID, taskEvent.ID, sealedMS, sealedMS,
-		p.CompletionAuthority, nil, nil); err != nil {
-		return SealedResult{}, fmt.Errorf("insert sealed result: %w", err)
-	}
-	update, err := tx.ExecContext(ctx, `
-UPDATE attempts SET sealed_result_id=?,revision=revision+1,updated_at=?
-WHERE id=? AND task_id=? AND state='succeeded' AND sealed_result_id IS NULL AND revision=?`,
-		p.ResultID, sealedMS, attempt.ID, owner.ID, p.ExpectedAttemptRevision)
-	if err != nil {
-		return SealedResult{}, fmt.Errorf("bind result to attempt: %w", err)
-	}
-	if changed, changeErr := update.RowsAffected(); changeErr != nil || changed != 1 {
-		return SealedResult{}, fmt.Errorf("%w: result attempt changed", ErrInvalidState)
-	}
-	update, err = tx.ExecContext(ctx, `
-UPDATE tasks SET state='completed',sealed_result_id=?,latest_event_cursor=?,revision=revision+1,updated_at=?
-WHERE id=? AND state='running' AND cancel_epoch=0 AND current_attempt_id=? AND sealed_result_id IS NULL AND revision=?`,
-		p.ResultID, taskEvent.Cursor, sealedMS, owner.ID, attempt.ID, p.ExpectedTaskRevision)
-	if err != nil {
-		return SealedResult{}, fmt.Errorf("complete result task: %w", err)
-	}
-	if changed, changeErr := update.RowsAffected(); changeErr != nil || changed != 1 {
-		return SealedResult{}, fmt.Errorf("%w: result task changed", ErrInvalidState)
-	}
-
-	result, err := getResult(ctx, tx, p.ResultID)
-	if err != nil {
-		return SealedResult{}, err
-	}
-	storedAttempt, err := getAttempt(ctx, tx, attempt.ID)
-	if err != nil {
-		return SealedResult{}, err
-	}
-	storedTask, err := getTask(ctx, tx, owner.ID)
-	if err != nil {
-		return SealedResult{}, err
-	}
-	if resultEvent.Cursor >= taskEvent.Cursor || storedTask.LatestEventCursor != taskEvent.Cursor {
-		return SealedResult{}, fmt.Errorf("%w: result seal event ordering", ErrCorruptStore)
-	}
-	if err := tx.Commit(); err != nil {
-		return SealedResult{}, fmt.Errorf("commit result seal: %w", err)
-	}
-	return SealedResult{Result: result, Manifest: p.Manifest, Task: storedTask, Attempt: storedAttempt, ResultEvent: resultEvent, TaskEvent: taskEvent}, nil
 }
 
 func getResult(ctx context.Context, q queryRower, id task.ResultID) (Result, error) {
@@ -328,17 +156,7 @@ func nullableInt64(v sql.NullInt64) *int64 {
 	return &n
 }
 
-func validateSealResult(p SealResultParams) ([]ManifestEntry, error) {
-	if p.CompletionAuthority == "" {
-		p.CompletionAuthority = SealAuthorityExecutionSuccess
-	}
-	if p.CompletionAuthority != SealAuthorityExecutionSuccess || p.SealRequestID != "" || p.Authorizer != nil {
-		return nil, fmt.Errorf("%w: completion authority", ErrInvalidInput)
-	}
-	return validateResultMaterial(p)
-}
-
-func validateResultMaterial(p SealResultParams) ([]ManifestEntry, error) {
+func validateResultMaterial(p resultMaterial) ([]ManifestEntry, error) {
 	if _, err := task.ParseResultID(string(p.ResultID)); err != nil {
 		return nil, fmt.Errorf("%w: result ID", ErrInvalidInput)
 	}
@@ -457,7 +275,7 @@ func validateManifestEntry(e ManifestEntry) error {
 	return nil
 }
 
-func resultSealPayload(p SealResultParams) (json.RawMessage, error) {
+func resultSealPayload(p resultMaterial) (json.RawMessage, error) {
 	base, err := deliveryEvidencePayload("", p.EvidencePayload, p.EvidenceSHA256)
 	if err != nil {
 		return nil, err
@@ -482,13 +300,12 @@ func resultSealPayload(p SealResultParams) (json.RawMessage, error) {
 		PolicyVersion           string                  `json:"policyVersion"`
 		CollectedAtMillis       int64                   `json:"collectedAtMillis"`
 		CompletionAuthority     SealCompletionAuthority `json:"completionAuthority"`
-		SealRequestID           task.SealRequestID      `json:"sealRequestId,omitempty"`
 	}
 	encoded, err := json.Marshal(proof{p.ResultID, p.TaskID, p.AttemptID, p.ExpectedAttemptRevision, p.ExpectedTaskRevision,
 		p.RepositoryID, p.BaseSHA, p.ResultCommit, p.TreeOID, p.Outcome, p.WorktreeClean, len(p.Manifest),
 		"sha256:" + hex.EncodeToString(p.ManifestSHA256[:]), p.OpenCodeSessionID, p.OpenCodeMessageID,
 		"sha256:" + hex.EncodeToString(p.EvidenceSHA256[:]), p.PolicyVersion, unixMillis(p.CollectedAt),
-		p.CompletionAuthority, p.SealRequestID})
+		p.CompletionAuthority})
 	if err != nil {
 		return nil, fmt.Errorf("encode result proof: %w", err)
 	}
@@ -503,49 +320,4 @@ func resultSealPayload(p SealResultParams) (json.RawMessage, error) {
 	encoded = append(encoded, evidenceEnvelope["evidence"]...)
 	encoded = append(encoded, '}')
 	return encoded, nil
-}
-
-func resultSealReplay(ctx context.Context, q interface {
-	queryRower
-	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
-}, result Result, p SealResultParams, payload []byte) (SealedResult, error) {
-	owner, err := getTask(ctx, q, result.TaskID)
-	if err != nil {
-		return SealedResult{}, err
-	}
-	attempt, err := getAttempt(ctx, q, result.AttemptID)
-	if err != nil {
-		return SealedResult{}, err
-	}
-	manifest, err := getResultManifest(ctx, q, result.ID)
-	if err != nil {
-		return SealedResult{}, err
-	}
-	resultEvent, err := scanEvent(q.QueryRowContext(ctx, eventSelect+` WHERE e.id=?`, p.ResultEventID))
-	if err != nil {
-		return SealedResult{}, fmt.Errorf("%w: result seal replay event", ErrInvalidState)
-	}
-	taskEvent, err := scanEvent(q.QueryRowContext(ctx, eventSelect+` WHERE e.id=?`, p.TaskEventID))
-	if err != nil {
-		return SealedResult{}, fmt.Errorf("%w: result seal replay event", ErrInvalidState)
-	}
-	encodedManifest, _ := json.Marshal(manifest)
-	requestedManifest, _ := json.Marshal(p.Manifest)
-	if result.TaskID != p.TaskID || result.AttemptID != p.AttemptID || result.RepositoryID != p.RepositoryID ||
-		result.BaseSHA != p.BaseSHA || result.ResultCommit != p.ResultCommit || result.TreeOID != p.TreeOID ||
-		result.Outcome != p.Outcome || !result.WorktreeClean || result.ManifestSHA256 != p.ManifestSHA256 ||
-		result.OpenCodeSessionID != p.OpenCodeSessionID || result.OpenCodeMessageID != p.OpenCodeMessageID ||
-		result.EvidenceSHA256 != p.EvidenceSHA256 || result.PolicyVersion != p.PolicyVersion ||
-		!result.CollectedAt.Equal(p.CollectedAt) || !result.SealedAt.Equal(p.SealedAt) || result.Creator != p.Actor ||
-		result.SealedEventID != p.ResultEventID || result.CompletedEventID != p.TaskEventID ||
-		result.CompletionAuthority != p.CompletionAuthority ||
-		attempt.Revision != p.ExpectedAttemptRevision+1 || owner.Revision != p.ExpectedTaskRevision+1 ||
-		attempt.SealedResultID != result.ID || owner.SealedResultID != result.ID || owner.State != task.TaskCompleted ||
-		!bytes.Equal(encodedManifest, requestedManifest) || resultEvent.Type != "attempt.result_sealed" ||
-		taskEvent.Type != "task.completed" || resultEvent.Cursor >= taskEvent.Cursor || owner.LatestEventCursor != taskEvent.Cursor ||
-		resultEvent.Actor != p.Actor || taskEvent.Actor != p.Actor || !bytes.Equal(resultEvent.Payload, payload) ||
-		!bytes.Equal(taskEvent.Payload, payload) || !resultEvent.OccurredAt.Equal(p.SealedAt) || !taskEvent.OccurredAt.Equal(p.SealedAt) {
-		return SealedResult{}, fmt.Errorf("%w: result seal replay differs", ErrInvalidState)
-	}
-	return SealedResult{Result: result, Manifest: manifest, Task: owner, Attempt: attempt, ResultEvent: resultEvent, TaskEvent: taskEvent}, nil
 }

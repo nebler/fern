@@ -34,11 +34,22 @@ type countingVerifier struct {
 
 func (v *countingVerifier) Verify(context.Context, task.GitOID) error { v.calls.Add(1); return v.err }
 
+type retentionVerifier struct {
+	calls atomic.Int64
+	err   error
+}
+
+func (v *retentionVerifier) Verify(context.Context, taskstore.Result) error {
+	v.calls.Add(1)
+	return v.err
+}
+
 type apiFixture struct {
 	store    *taskstore.Store
 	handler  *Handler
 	actor    task.ActorSnapshot
 	verifier *countingVerifier
+	retained *retentionVerifier
 	path     string
 	route    *fixtureRoute
 	now      time.Time
@@ -371,6 +382,21 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 	if cleanup := body["cleanup"].(map[string]any); cleanup["complete"] != true {
 		t.Fatalf("cleanup projection=%v", cleanup)
 	}
+	if retention := body["retention"].(map[string]any); retention["verified"] != true || retention["reconstructable"] != true || fixture.retained.calls.Load() != 1 {
+		t.Fatalf("retention projection=%v calls=%d", retention, fixture.retained.calls.Load())
+	}
+	fixture.retained.err = errors.New("artifact missing")
+	missing := fixture.request(http.MethodGet, PathPrefix+"/"+string(runID)+"/result", "", "")
+	if missing.Code != http.StatusOK {
+		t.Fatalf("missing artifact result=%d %s", missing.Code, missing.Body.String())
+	}
+	var missingBody map[string]any
+	if json.Unmarshal(missing.Body.Bytes(), &missingBody) != nil {
+		t.Fatal("decode missing artifact result")
+	}
+	if retention := missingBody["retention"].(map[string]any); retention["verified"] != false || retention["reconstructable"] != false || fixture.retained.calls.Load() != 2 {
+		t.Fatalf("missing retention projection=%v calls=%d", retention, fixture.retained.calls.Load())
+	}
 
 	store.run.State = taskstore.BackgroundRunCleanupRequired
 	store.run.EffectPhase = taskstore.BackgroundRunEffectExporting
@@ -527,7 +553,7 @@ func newAPIFixture(t *testing.T, available string) *apiFixture {
 	if err := store.CreateWorkspace(context.Background(), taskstore.Workspace{ID: testWorkspace, Name: "demo", State: taskstore.WorkspaceActive, RepositoryPath: "/srv/repo", GitHubAuthority: taskstore.GitHubAuthorityAppBroker, InstallationID: 1, RepositoryID: 99, RepositoryFullName: "owner/repository", ImageDigest: "sha256:image", OpenCodeProtocol: "0.0.0-next-17444", RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	fixture := &apiFixture{store: store, actor: pluginActor("pc_owner"), verifier: &countingVerifier{}, path: path,
+	fixture := &apiFixture{store: store, actor: pluginActor("pc_owner"), verifier: &countingVerifier{}, retained: &retentionVerifier{}, path: path,
 		route: &fixtureRoute{origin: "https://fern.example.ts.net:8443"}, now: now}
 	t.Cleanup(func() { _ = store.Close() })
 	fixture.handler = fixture.buildHandler(t, available)
@@ -543,7 +569,7 @@ func (f *apiFixture) buildHandler(t *testing.T, available string) *Handler {
 	if available == PluginOpenCodeProfile {
 		route = f.route
 	}
-	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), AvailableProfile: available, Store: f.store, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, Now: func() time.Time { return f.now }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", BudgetSnapshot: json.RawMessage(`{"turns":10}`), Route: route, SealPolicyVersion: "fern.background-user-seal.v1"})
+	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), AvailableProfile: available, Store: f.store, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, RetentionVerifier: f.retained, Now: func() time.Time { return f.now }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", BudgetSnapshot: json.RawMessage(`{"turns":10}`), Route: route, SealPolicyVersion: "fern.background-user-seal.v1"})
 	if err != nil {
 		t.Fatal(err)
 	}

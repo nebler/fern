@@ -58,23 +58,6 @@ func readEnvFile(path string) (map[string]string, error) {
 	return values, nil
 }
 
-func mergeWorkspaceEnvironment(configured map[string]string, fileValues map[string]string) map[string]string {
-	merged := make(map[string]string, len(configured)+len(fileValues))
-	for key, value := range configured {
-		merged[key] = value
-	}
-	for _, key := range forwardedSecretKeys {
-		value, present := fileValues[key]
-		if !present {
-			continue
-		}
-		if _, exists := merged[key]; !exists {
-			merged[key] = value
-		}
-	}
-	return merged
-}
-
 func environmentLookup(fileValues map[string]string) func(string) (string, bool) {
 	return func(key string) (string, bool) {
 		if value, exists := fileValues[key]; exists {

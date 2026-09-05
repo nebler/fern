@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/nebler/fern/internal/task"
 )
@@ -321,12 +322,8 @@ func seedLegacyBackgroundRunsWithStopProjection(t *testing.T, store *Store, case
 		t.Fatal(err)
 	}
 	for index, legacy := range cases {
-		params := testAdmission(50000+index, fmt.Sprintf("legacy-task-%d", index), fmt.Sprintf("legacy prompt %d", index))
-		params.Claim.Actor = task.ActorSnapshot{Type: task.ActorOpenCode, ID: "pc_owner", DisplayName: "Owner", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "legacy-migration"}
-		admission, err := store.AdmitTask(context.Background(), params)
-		if err != nil {
-			t.Fatalf("admit legacy parent %s/%s: %v", legacy.state, legacy.phase, err)
-		}
+		actor := task.ActorSnapshot{Type: task.ActorOpenCode, ID: "pc_owner", DisplayName: "Owner", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "legacy-migration"}
+		admission := seedVersionSevenTaskParent(t, store, 50000+index, fmt.Sprintf("legacy-task-%d", index), fmt.Sprintf("legacy prompt %d", index), actor)
 		var actorID int64
 		if err := store.db.QueryRow(`SELECT actor_snapshot_id FROM tasks WHERE id=?`, admission.Task.ID).Scan(&actorID); err != nil {
 			t.Fatal(err)
@@ -373,6 +370,68 @@ VALUES(?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`,
 			t.Fatalf("insert legacy run %s/%s: %v", legacy.state, legacy.phase, err)
 		}
 	}
+}
+
+func seedVersionSevenTaskParent(t *testing.T, store *Store, n int, key, prompt string, actor task.ActorSnapshot) Admission {
+	t.Helper()
+	tx, err := store.db.BeginTx(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	actorID, err := ensureActor(context.Background(), tx, actor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	taskID, attemptID := testTaskID(n), testAttemptID(n)
+	receiptID, taskEventID, attemptEventID := testReceiptID(n), testEventID(n*2), testEventID(n*2+1)
+	promptHash, requestHash := sha256.Sum256([]byte(prompt)), sha256.Sum256([]byte(key))
+	accepted := testTime.Truncate(time.Millisecond)
+	if _, err := tx.Exec(`INSERT INTO tasks(
+id,workspace_id,title,prompt,prompt_sha256,repository_id,base_ref,base_sha,object_format,state,cancel_epoch,current_attempt_id,
+actor_snapshot_id,latest_event_cursor,revision,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,'queued',0,?,?,0,1,?,?)`, taskID, testWorkspaceID(), "Legacy task", prompt, promptHash[:],
+		task.RepositoryID(987654321), "main", task.GitOID("0123456789abcdef0123456789abcdef01234567"), "sha1", attemptID, actorID, accepted.UnixMilli(), accepted.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`INSERT INTO attempts(
+id,task_id,workspace_id,sequence,state,delivery_phase,opencode_session_id,opencode_message_id,prompt_sha256,base_sha,image_digest,
+opencode_protocol,execution_contract_version,agent,model_provider,model,budget_snapshot,deadline,revision,created_at,updated_at)
+VALUES(?,?,?,1,'prepared','none',?,?,?,?,?,?,?,?,?,?,?,?,1,?,?)`, attemptID, taskID, testWorkspaceID(), testSessionID(n), testMessageID(n),
+		promptHash[:], task.GitOID("0123456789abcdef0123456789abcdef01234567"), "sha256:image", "v2", "exec-v1", "build", "provider", "model-1",
+		`{"maxTokens":4096}`, accepted.Add(time.Hour).UnixMilli(), accepted.UnixMilli(), accepted.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	projection, _ := json.Marshal(map[string]any{"receiptId": receiptID, "taskId": taskID, "attemptId": attemptID})
+	if _, err := tx.Exec(`INSERT INTO receipts(id,workspace_id,command_kind,state,idempotency_key,request_hash,actor_snapshot_id,
+accepted_at,api_contract_version,target_type,target_id,response_status,response_projection)
+VALUES(?,?,?,'accepted',?,?,?,?,?,'task',?,202,?)`, receiptID, testWorkspaceID(), "task.submit", key, requestHash[:], actorID,
+		accepted.UnixMilli(), "v1", taskID, string(projection)); err != nil {
+		t.Fatal(err)
+	}
+	taskEvent, err := insertTaskStoreEvent(context.Background(), tx, taskEventID, testWorkspaceID(), taskID, "", "task", string(taskID), "task.accepted", accepted.UnixMilli(), actorID, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	attemptEvent, err := insertTaskStoreEvent(context.Background(), tx, attemptEventID, testWorkspaceID(), taskID, attemptID, "attempt", string(attemptID), "attempt.prepared", accepted.UnixMilli(), actorID, []byte(`{"sequence":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.Exec(`UPDATE tasks SET latest_event_cursor=? WHERE id=?`, attemptEvent.Cursor, taskID); err != nil {
+		t.Fatal(err)
+	}
+	owner, err := getTask(context.Background(), tx, taskID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := getAttempt(context.Background(), tx, attemptID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	return Admission{Task: owner, Attempt: attempt, TaskEvent: taskEvent, AttemptEvent: attemptEvent}
 }
 
 func legacyCloneIdentity(id task.TaskID) string {

@@ -17,7 +17,6 @@ import (
 	"github.com/nebler/fern/internal/jsoncanon"
 	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/task"
-	"github.com/nebler/fern/internal/taskapi"
 )
 
 const (
@@ -208,7 +207,7 @@ func (handler *pluginAuthHTTP) serveBearer(writer http.ResponseWriter, request *
 		CredentialID: credential.ID, Authentication: "fern_plugin_bearer", RequestID: requestID,
 	}
 	ctx = pluginauth.WithRequestAuthorization(ctx, credential)
-	ctx = taskapi.WithActor(ctx, actor)
+	ctx = task.WithActor(ctx, actor)
 	request = request.WithContext(ctx)
 	request.Header.Del("Authorization")
 	stripAllCookies(request)
@@ -240,7 +239,7 @@ func (handler *pluginAuthHTTP) serveBearer(writer http.ResponseWriter, request *
 		writer.WriteHeader(http.StatusNoContent)
 		return
 	}
-	if path == "/fern/api/runs" || strings.HasPrefix(path, "/fern/api/runs/") {
+	if path == "/fern/api/runs" || strings.HasPrefix(path, "/fern/api/runs/") || strings.HasPrefix(path, "/fern/api/v1/results/") {
 		next.ServeHTTP(writer, request)
 		return
 	}
@@ -259,7 +258,7 @@ func (handler *pluginAuthHTTP) serveTrusted(writer http.ResponseWriter, request 
 			methodNotAllowed(writer, "GET")
 			return true
 		}
-		actor, err := taskapi.ContextActor(request.Context())
+		actor, err := task.ContextActor(request.Context())
 		if err != nil || actor.Type != task.ActorDevice {
 			http.NotFound(writer, request)
 			return true
@@ -305,7 +304,7 @@ func (handler *pluginAuthHTTP) serveTrusted(writer http.ResponseWriter, request 
 			methodNotAllowed(writer, "POST")
 			return true
 		}
-		actor, err := taskapi.ContextActor(request.Context())
+		actor, err := task.ContextActor(request.Context())
 		if err != nil {
 			http.Error(writer, "trusted actor unavailable", http.StatusUnauthorized)
 			return true
@@ -350,7 +349,7 @@ func (handler *pluginAuthHTTP) serveTrusted(writer http.ResponseWriter, request 
 			methodNotAllowed(writer, "DELETE")
 			return true
 		}
-		actor, err := taskapi.ContextActor(request.Context())
+		actor, err := task.ContextActor(request.Context())
 		if err == nil {
 			err = handler.store.Revoke(id, actor, handler.now())
 		}

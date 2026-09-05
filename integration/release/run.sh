@@ -46,7 +46,7 @@ FIXTURE_COMMIT=$(git -C "$FIXTURE" rev-parse HEAD)
 
 (
   cd "$FIXTURE"
-  GOTOOLCHAIN=local ./scripts/build-release.sh v1.2.3
+  ./scripts/build-release.sh v1.2.3
   (cd dist && shasum -a 256 -c SHA256SUMS) >"$TEMP/checksum-verification.txt"
 )
 
@@ -71,7 +71,7 @@ assert manifest["integrity"] == {
     "asset_provenance_status": "not-generated-local",
 }
 assert manifest["image"] == {
-    "repository": "fern/opencode",
+    "repository": "fern/opencode-background-source",
     "publication_status": "not-published-local",
     "digest": None,
     "reference": None,
@@ -88,9 +88,9 @@ assert manifest["upgrade_rollback"] == {
     "upgrade_harness": "integration/upgrade/run.sh",
     "host_utility": "scripts/fern-host-backup.py",
     "support_status": "installed-cli-operational-recovery",
-    "activation_model": "staged-filesystem-docker-best-effort-rollback",
+    "activation_model": "staged-filesystem-rollback",
     "credential_policy": "external-recipient-with-checksums",
-    "volume_export_mode": "managed-docker-volume-staged-and-verified",
+    "volume_export_mode": "no-runtime-volumes",
 }
 bundle = root / "dist" / manifest["distribution"]["bundle_asset"]
 extract = root / "extracted"
@@ -140,7 +140,7 @@ SECOND_FIXTURE="$TEMP/repository-second"
 git clone -q "$FIXTURE" "$SECOND_FIXTURE"
 (
   cd "$SECOND_FIXTURE"
-  GOTOOLCHAIN=local ./scripts/build-release.sh v1.2.3
+  ./scripts/build-release.sh v1.2.3
 )
 (
   cd "$SECOND_FIXTURE/dist"
@@ -150,24 +150,24 @@ diff -u "$TEMP/first-build.sha256" "$TEMP/second-build.sha256" >"$TEMP/reproduci
 
 PUBLISHED_FIXTURE="$TEMP/repository-published"
 git clone -q "$FIXTURE" "$PUBLISHED_FIXTURE"
-printf '{"spdxVersion":"SPDX-2.3","packages":[{"name":"fern-opencode"}]}\n' >"$TEMP/image.spdx.json"
+printf '{"spdxVersion":"SPDX-2.3","packages":[{"name":"fern-opencode-background-source"}]}\n' >"$TEMP/image.spdx.json"
 (
   cd "$PUBLISHED_FIXTURE"
   FERN_VERIFIED_TAG=v1.2.3 \
-    FERN_IMAGE_REPOSITORY=ghcr.io/example/fern/opencode \
+    FERN_IMAGE_REPOSITORY=ghcr.io/example/fern/opencode-background-source \
     FERN_IMAGE_DIGEST="sha256:$(printf 'a%.0s' {1..64})" \
     FERN_IMAGE_SBOM_PATH="$TEMP/image.spdx.json" \
     FERN_IMAGE_PROVENANCE_URL=https://github.com/example/fern/attestations/123 \
     FERN_IMAGE_CERTIFICATE_IDENTITY=https://github.com/example/fern/.github/workflows/release.yml@refs/tags/v1.2.3 \
     FERN_IMAGE_OIDC_ISSUER=https://token.actions.githubusercontent.com \
-    GOTOOLCHAIN=local ./scripts/build-release.sh v1.2.3
+    ./scripts/build-release.sh v1.2.3
   (cd dist && shasum -a 256 -c SHA256SUMS)
 )
 python3 - "$PUBLISHED_FIXTURE/dist/RELEASE-MANIFEST.json" <<'PY'
 import json, pathlib, sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
 digest = "sha256:" + "a" * 64
-subject = "ghcr.io/example/fern/opencode@" + digest
+subject = "ghcr.io/example/fern/opencode-background-source@" + digest
 assert manifest["release"]["version_source"] == "verified-annotated-tag"
 assert manifest["release"]["verified_tag"] == "v1.2.3"
 assert manifest["image"]["digest"] == digest
@@ -187,13 +187,13 @@ if (cd "$SECOND_FIXTURE/dist" && shasum -a 256 -c SHA256SUMS) >"$TEMP/tamper-che
 fi
 
 printf '\n// dirty\n' >>"$FIXTURE/cmd/fern/main.go"
-if (cd "$FIXTURE" && GOTOOLCHAIN=local ./scripts/build-release.sh v1.2.4) >"$TEMP/dirty-check.txt" 2>&1; then
+if (cd "$FIXTURE" && ./scripts/build-release.sh v1.2.4) >"$TEMP/dirty-check.txt" 2>&1; then
   printf 'error: release build accepted a dirty tree\n' >&2
   exit 1
 fi
 grep -q 'clean working tree' "$TEMP/dirty-check.txt"
 git -C "$FIXTURE" restore cmd/fern/main.go
-if (cd "$FIXTURE" && GOTOOLCHAIN=local ./scripts/build-release.sh latest) >"$TEMP/version-check.txt" 2>&1; then
+if (cd "$FIXTURE" && ./scripts/build-release.sh latest) >"$TEMP/version-check.txt" 2>&1; then
   printf 'error: release build accepted a non-semantic version\n' >&2
   exit 1
 fi
@@ -204,8 +204,7 @@ HOST="$TEMP/host"
 LOCK="$HOST/lock"
 SOURCE="$HOST/source"
 mkdir -p "$SOURCE/state/.fern/control" "$SOURCE/state/.config/gh" \
-  "$SOURCE/state/.fern/github-app" "$SOURCE/config" "$SOURCE/repository/.git" \
-  "$SOURCE/volume/sessions" "$SOURCE/gh-volume"
+  "$SOURCE/state/.fern/github-app" "$SOURCE/config" "$SOURCE/repository/.git"
 printf 'state-a\n' >"$SOURCE/state/.fern/control/state.db"
 printf 'oauth_token: secret-gh-token\n' >"$SOURCE/state/.config/gh/hosts.yml"
 printf '{"client_secret":"secret-app","private_key":"secret-private-key"}\n' >"$SOURCE/state/.fern/github-app/app-credentials.json"
@@ -213,21 +212,17 @@ printf 'proxy: safe\n' >"$SOURCE/config/fern.yaml"
 printf 'OPENCODE_PASSWORD=secret\n' >"$SOURCE/config/fern.env"
 printf 'repository-a\n' >"$SOURCE/repository/work.txt"
 printf 'git-config\n' >"$SOURCE/repository/.git/config"
-printf 'volume-secret-a\n' >"$SOURCE/volume/sessions/auth.json"
-printf 'oauth_token: volume-gh-token\n' >"$SOURCE/gh-volume/hosts.yml"
 
 python3 "$BACKUP" init-epoch --lock-dir "$LOCK" --epoch appliance-A
 python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
   --generation generation-a --output "$HOST/backup-a" \
   --state "$SOURCE/state" --config "$SOURCE/config" --repository "$SOURCE/repository" \
-  --volume fern-demo-v2-data="$SOURCE/volume" \
-  --volume fern-demo-v1-gh-config="$SOURCE/gh-volume" --credential-policy external \
+  --credential-policy external \
   --credential-output "$HOST/credentials-a.tar"
 python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
   --generation generation-a --output "$HOST/backup-a-copy" \
   --state "$SOURCE/state" --config "$SOURCE/config" --repository "$SOURCE/repository" \
-  --volume fern-demo-v2-data="$SOURCE/volume" \
-  --volume fern-demo-v1-gh-config="$SOURCE/gh-volume" --credential-policy external \
+  --credential-policy external \
   --credential-output "$HOST/credentials-a-copy.tar"
 diff -r "$HOST/backup-a" "$HOST/backup-a-copy" >"$TEMP/backup-reproducibility.diff"
 cmp "$HOST/credentials-a.tar" "$HOST/credentials-a-copy.tar"
@@ -235,18 +230,17 @@ cmp "$HOST/credentials-a.tar" "$HOST/credentials-a-copy.tar"
 python3 - "$HOST/backup-a/BACKUP-MANIFEST.json" <<'PY'
 import json, pathlib, sys
 manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert manifest["named_volumes"] == ["fern-demo-v2-data", "fern-demo-v1-gh-config"]
+assert manifest["named_volumes"] == []
 assert manifest["credentials"]["workspace_gh"] == "included-in-external-recipient"
-assert manifest["credentials"]["detected_entries"] == 6
+assert manifest["credentials"]["detected_entries"] == 4
 assert manifest["credentials"]["general_archive_contains_detected_plaintext_credentials"] is False
 assert manifest["credentials"]["external"]["sha256"]
 for component in manifest["components"]:
     assert component["entries"]
     assert all(entry["sha256"] for entry in component["entries"])
 PY
-! grep -R -a -q 'secret-gh-token\|secret-app\|secret-private-key\|OPENCODE_PASSWORD\|volume-secret\|volume-gh-token' "$HOST/backup-a"
+! grep -R -a -q 'secret-gh-token\|secret-app\|secret-private-key\|OPENCODE_PASSWORD' "$HOST/backup-a"
 grep -a -q 'secret-app' "$HOST/credentials-a.tar"
-grep -a -q 'volume-gh-token' "$HOST/credentials-a.tar"
 
 mkdir -p "$HOST/hardlink-source/state" "$HOST/hardlink-source/config" "$HOST/hardlink-source/repository"
 printf 'linked-secret\n' >"$HOST/hardlink-source/state/credentials.json"
@@ -325,8 +319,6 @@ python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
   --credential-input "$HOST/credentials-a.tar"
 grep -qx 'repository-a' "$HOST/restored/current/repository/work.txt"
 grep -q 'secret-gh-token' "$HOST/restored/current/state/.config/gh/hosts.yml"
-grep -q 'volume-secret-a' "$HOST/restored/current/volumes/fern-demo-v2-data/sessions/auth.json"
-grep -q 'volume-gh-token' "$HOST/restored/current/volumes/fern-demo-v1-gh-config/hosts.yml"
 grep -qx 'appliance-A' "$HOST/restored/current/.fern-appliance-epoch"
 python3 - "$HOST/restored/TRANSACTION-MANIFEST.json" <<'PY'
 import json, pathlib, sys
@@ -340,15 +332,12 @@ PY
 SOURCE_B="$HOST/source-b"
 mkdir "$SOURCE_B"
 cp -R "$HOST/restored/current/state" "$HOST/restored/current/config" \
-  "$HOST/restored/current/repository" "$HOST/restored/current/volumes" "$SOURCE_B/"
+  "$HOST/restored/current/repository" "$SOURCE_B/"
 printf 'repository-b\n' >"$SOURCE_B/repository/work.txt"
-printf 'volume-secret-b\n' >"$SOURCE_B/volumes/fern-demo-v2-data/sessions/auth.json"
 python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
   --generation generation-b --output "$HOST/backup-b" \
   --state "$SOURCE_B/state" --config "$SOURCE_B/config" \
   --repository "$SOURCE_B/repository" \
-  --volume fern-demo-v2-data="$SOURCE_B/volumes/fern-demo-v2-data" \
-  --volume fern-demo-v1-gh-config="$SOURCE_B/volumes/fern-demo-v1-gh-config" \
   --credential-policy external --credential-output "$HOST/credentials-b.tar"
 python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
   --backup "$HOST/backup-b" --target "$HOST/restored" \
@@ -422,15 +411,11 @@ grep -qx 'RestrictSUIDSGID=true' "$UNIT"
 grep -qx 'LockPersonality=true' "$UNIT"
 grep -Eq '^ExecStart=.*--listen 127\.0\.0\.1:8080 --operator-listen 127\.0\.0\.1:8081$' "$UNIT"
 ! grep -Eiq 'Exec(Start|Stop).*\b(docker|tailscale)\b.*\b(rm|reset|funnel)\b' "$UNIT"
-grep -Eq '^[[:space:]]*(sudo[[:space:]]+)?tailscale[[:space:]]+serve[[:space:]]+--bg[[:space:]]+http://127\.0\.0\.1:8080' "$ROOT/docs/DEPLOYMENT.md"
-! grep -Eq '^[[:space:]]*(sudo[[:space:]]+)?tailscale[[:space:]]+funnel([[:space:]]|$)' "$ROOT/docs/DEPLOYMENT.md"
 ! grep -REn -- '--listen[[:space:]]+(0\.0\.0\.0|\[?::\]?)(:|[[:space:]])' "$ROOT/deploy"
 grep -qx '  listen: 127.0.0.1:8080' "$ROOT/deploy/systemd/fern.yaml.example"
 grep -qx '  operatorListen: 127.0.0.1:8081' "$ROOT/deploy/systemd/fern.yaml.example"
 grep -Eq '^  remoteOrigin: https://[a-z0-9.-]+\.ts\.net(:[0-9]+)?$' "$ROOT/deploy/systemd/fern.yaml.example"
 ! grep -Eq '^  remoteOrigin: http://' "$ROOT/deploy/systemd/fern.yaml.example"
-grep -q 'REQUIRED: replace' "$ROOT/deploy/systemd/fern.yaml.example"
-grep -q 'Never expose this with Tailscale Serve' "$ROOT/deploy/systemd/fern.yaml.example"
 
 cp "$TEMP/RELEASE-MANIFEST.json" "$EVIDENCE/release-manifest.json"
 cp "$ROOT/deploy/release/transaction-manifest.example.json" "$EVIDENCE/transaction-manifest.example.json"
@@ -446,10 +431,8 @@ cat >"$EVIDENCE/static-assertions.txt" <<'EOF'
 PASS systemd runs as fern with explicit hardening and distinct remote/operator loopback listeners
 PASS systemd contains no Docker/Tailscale destructive lifecycle command
 PASS deployment assets contain no wildcard Fern listener
-PASS deployment assets identify only the remote loopback listener for Tailscale Serve
 PASS deployment configuration requires an exact HTTPS remote origin replacement
-PASS deployment runbook contains no executable Tailscale Funnel command
-PASS deterministic host backup segregates detected credentials and explicit named-volume exports
+PASS deterministic host backup segregates detected credentials and excludes runtime volumes
 PASS restore rejects checksum tampering, symlinks, path escapes, hardlinks, stale appliance epochs, and cross-epoch targets
 PASS destructive restore activation retains and rolls back to the previous generation
 PASS restore and rollback emit transaction manifests matching the active generation
@@ -466,7 +449,7 @@ cat >"$EVIDENCE/summary.json" <<EOF
     "semantic_version_rejection": "passed",
     "static_systemd_tailscale_safety": "passed",
     "deterministic_host_backup": "passed",
-    "credential_and_volume_segregation": "passed",
+    "credential_segregation_and_no_runtime_volumes": "passed",
     "restore_tamper_and_path_safety": "passed",
     "destructive_restore_and_rollback": "passed",
     "operator_lock_and_epoch_fencing": "passed"
@@ -476,7 +459,7 @@ cat >"$EVIDENCE/summary.json" <<EOF
     "ci_provenance": "not generated by this local harness; GitHub attestations are external to the release manifest",
     "ubuntu_systemd_host": "requires an explicit target host",
     "tailscale_mutation": "intentionally excluded from this static harness",
-    "docker_mutation": "intentionally excluded; named volume fixtures are pre-exported directories",
+    "docker_mutation": "intentionally excluded; runtime volumes are not part of the backup contract",
     "physical_host_atomicity": "rename activation is tested on one local filesystem; crash and filesystem behavior require target-host rehearsal",
     "credential_encryption": "external recipient segregation is tested; encryption and custody are operator policy"
   }

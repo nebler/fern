@@ -25,7 +25,7 @@ func TestMigrationNineBackfillsSchemaEightPromptFences(t *testing.T) {
 			path := testDBPath(t)
 			store := openVersionEightBackgroundDatabase(t, path)
 			params := testBackgroundRunAdmission(test.n, "migration-nine-"+test.name)
-			if _, err := store.AdmitTask(context.Background(), params); err != nil {
+			if _, err := store.AdmitBackgroundRun(context.Background(), params); err != nil {
 				t.Fatal(err)
 			}
 			want := seedVersionEightPromptRun(t, store.db, params.TaskID, test.admitted, testTime.Add(time.Minute))
@@ -87,7 +87,7 @@ func TestMigrationNinePromptAdmissionTriggerRejectsMissingFence(t *testing.T) {
 	defer store.Close()
 	createTestWorkspace(t, store)
 	params := testBackgroundRunAdmission(2910, "migration-nine-trigger")
-	if _, err := store.AdmitTask(context.Background(), params); err != nil {
+	if _, err := store.AdmitBackgroundRun(context.Background(), params); err != nil {
 		t.Fatal(err)
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
@@ -103,7 +103,7 @@ func TestMigrationNineRollsBackAtomically(t *testing.T) {
 	path := testDBPath(t)
 	store := openVersionEightBackgroundDatabase(t, path)
 	params := testBackgroundRunAdmission(2920, "migration-nine-rollback")
-	if _, err := store.AdmitTask(context.Background(), params); err != nil {
+	if _, err := store.AdmitBackgroundRun(context.Background(), params); err != nil {
 		t.Fatal(err)
 	}
 	seedVersionEightPromptRun(t, store.db, params.TaskID, false, testTime.Add(time.Minute))

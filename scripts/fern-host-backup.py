@@ -85,9 +85,6 @@ class OperatorLock:
 def credential_path(label, relative):
     parts = tuple(part.lower() for part in PurePosixPath(relative).parts)
     name = parts[-1] if parts else ""
-    if label.startswith("volume ") and label.removeprefix("volume ").endswith("-v1-gh-config"):
-        if name in {"hosts.yml", "hosts.yaml"} or "gh" in parts:
-            return "workspace-gh"
     if ".config" in parts and "gh" in parts:
         return "workspace-gh"
     if name == "hosts.yml" and "gh" in parts:
@@ -245,21 +242,8 @@ def backup(args):
     )]
     roots = [item[0] for item in scans]
 
-    volumes = []
-    for specification in args.volume:
-        if "=" not in specification:
-            fail("volume must be NAME=EXPORTED_DIRECTORY")
-        name, raw_path = specification.split("=", 1)
-        valid_id(name, "volume name")
-        if any(existing[0] == name for existing in volumes):
-            fail(f"duplicate volume: {name}")
-        scanned = scan_tree(f"volume {name}", raw_path)
-        roots.append(scanned[0])
-        volumes.append((name, scanned))
     ensure_outside_sources(output, roots, "backup output")
     ensure_outside_sources(args.lock_dir, roots, "operator lock directory")
-    if volumes and args.credential_policy != "external":
-        fail("named volume exports require external credential handling because their contents are opaque")
 
     external_path = Path(args.credential_output).resolve(strict=False) if args.credential_output else None
     if args.credential_policy == "external" and external_path is None:
@@ -303,19 +287,6 @@ def backup(args):
                 if args.credential_policy == "external":
                     external_files.append((f"{label}/{relative}", path, kind))
 
-        volume_names = []
-        for name, scanned in volumes:
-            _root, directories, files, credentials = scanned
-            volume_names.append(name)
-            external_files.append((f"volumes/{name}", scanned[0], "volume-directory"))
-            for relative, path in directories:
-                external_files.append((f"volumes/{name}/{relative}", path, "volume-directory"))
-            for relative, path, kind in files + credentials:
-                if kind:
-                    credential_count += 1
-                    gh_found = gh_found or kind == "workspace-gh"
-                external_files.append((f"volumes/{name}/{relative}", path, "volume"))
-
         external = None
         if args.credential_policy == "external":
             descriptor, temporary = tempfile.mkstemp(prefix=f".{external_path.name}.", dir=external_path.parent)
@@ -323,10 +294,7 @@ def backup(args):
             temp_external = Path(temporary)
             entries = {}
             for relative, path, kind in external_files:
-                if kind == "volume-directory":
-                    entries[relative] = ("directory", path, None)
-                else:
-                    entries[relative] = ("file", path, digest(path))
+                entries[relative] = ("file", path, digest(path))
             external_inventory = write_tar(temp_external, entries)
             os.chmod(temp_external, 0o600)
             external_sha = digest(temp_external)
@@ -361,7 +329,7 @@ def backup(args):
             "source_appliance_epoch": args.epoch,
             "format": "fern-host-backup-v1",
             "components": components,
-            "named_volumes": volume_names,
+            "named_volumes": [],
             "credentials": {
                 "policy": args.credential_policy,
                 "detected_entries": credential_count,
@@ -716,7 +684,6 @@ def parser():
     create.add_argument("--state", required=True)
     create.add_argument("--config", required=True)
     create.add_argument("--repository", required=True)
-    create.add_argument("--volume", action="append", default=[])
     create.add_argument("--credential-policy", choices=("exclude", "external"), required=True)
     create.add_argument("--credential-output")
 

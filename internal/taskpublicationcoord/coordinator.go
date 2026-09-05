@@ -23,7 +23,7 @@ import (
 var (
 	ErrNoWork                = errors.New("no task publication work is available")
 	ErrReconciliationPending = errors.New("task publication reconciliation is not conclusive")
-	ErrFenceFailed           = errors.New("task publication fence acquisition failed")
+	ErrSourceFailed          = errors.New("retained publication source acquisition failed")
 	ErrSelectionChanged      = errors.New("task publication selection changed while fenced")
 )
 
@@ -32,10 +32,6 @@ type Store interface {
 	AdvancePublication(context.Context, taskstore.AdvancePublicationParams) (taskstore.PublicationRecord, error)
 	CompletePublication(context.Context, taskstore.CompletePublicationParams) (taskstore.PublicationRecord, error)
 	RecoverPublication(context.Context, taskstore.RecoverPublicationParams) (taskstore.PublicationRecord, error)
-}
-
-type Fencer interface {
-	AcquirePaused(context.Context) (func(), error)
 }
 
 // Publisher exposes one durable-effect boundary per call. Reconcile methods
@@ -66,7 +62,6 @@ type Config struct {
 
 type Coordinator struct {
 	store     Store
-	fencer    Fencer
 	publisher Publisher
 	source    ResultSource
 	ids       *task.Generator
@@ -75,8 +70,8 @@ type Coordinator struct {
 	runMu     sync.Mutex
 }
 
-func New(store Store, fencer Fencer, publisher Publisher, ids *task.Generator, config Config) (*Coordinator, error) {
-	if store == nil || fencer == nil || publisher == nil || ids == nil {
+func New(store Store, publisher Publisher, ids *task.Generator, config Config) (*Coordinator, error) {
+	if store == nil || publisher == nil || ids == nil || config.ResultSource == nil {
 		return nil, errors.New("task publication dependencies are required")
 	}
 	if _, err := task.ParseWorkspaceID(string(config.WorkspaceID)); err != nil {
@@ -106,7 +101,7 @@ func New(store Store, fencer Fencer, publisher Publisher, ids *task.Generator, c
 	if config.OnSuccess == nil {
 		config.OnSuccess = func() {}
 	}
-	return &Coordinator{store: store, fencer: fencer, publisher: publisher, source: config.ResultSource, ids: ids, config: config, wake: make(chan struct{}, 1)}, nil
+	return &Coordinator{store: store, publisher: publisher, source: config.ResultSource, ids: ids, config: config, wake: make(chan struct{}, 1)}, nil
 }
 
 // Wake requests a publication pass without blocking the caller.
@@ -162,17 +157,14 @@ func (coordinator *Coordinator) RunOnce(ctx context.Context) (resultErr error) {
 	if err != nil {
 		return err
 	}
-	operationContext, cancel := coordinator.operationContext(ctx)
-	release, err := coordinator.fencer.AcquirePaused(operationContext)
-	cancel()
-	if err != nil {
-		return classifiedError{kind: ErrFenceFailed, cause: err}
+	path, closeSource, sourceErr := coordinator.source.Acquire(ctx, work.Result)
+	if sourceErr != nil {
+		return classifiedError{kind: ErrSourceFailed, cause: sourceErr}
 	}
-	if release == nil {
-		return ErrFenceFailed
+	if closeSource == nil {
+		return ErrSourceFailed
 	}
-	defer release()
-
+	defer func() { resultErr = errors.Join(resultErr, closeSource()) }()
 	current, err := coordinator.store.FindPublicationWork(ctx, coordinator.config.WorkspaceID)
 	if errors.Is(err, taskstore.ErrNotFound) {
 		return classifiedError{kind: ErrSelectionChanged, cause: err}
@@ -185,20 +177,10 @@ func (coordinator *Coordinator) RunOnce(ctx context.Context) (resultErr error) {
 	}
 	work = current
 	request := publicationRequest(work, coordinator.config.PullRequestBody)
+	request.RepositoryPath = path
 
 	switch work.Publication.EffectPhase {
 	case taskstore.PublicationPhaseNone:
-		if coordinator.source != nil {
-			path, closeSource, sourceErr := coordinator.source.Acquire(ctx, work.Result)
-			if sourceErr != nil {
-				return sourceErr
-			}
-			if closeSource == nil {
-				return taskstore.ErrCorruptStore
-			}
-			defer func() { resultErr = errors.Join(resultErr, closeSource()) }()
-			request.RepositoryPath = path
-		}
 		advanced, err := coordinator.advance(ctx, work, taskstore.PublicationPhaseNone, taskstore.PublicationPhasePushStarted, "push_authorized", "unobserved", "unobserved", "")
 		if err != nil {
 			return err

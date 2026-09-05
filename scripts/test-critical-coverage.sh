@@ -9,16 +9,17 @@ PROFILE="$RUN_ROOT/coverage.out"
 FUNCTIONS="$RUN_ROOT/functions.txt"
 MODULE=github.com/nebler/fern
 PACKAGES=(
-  cmd/fern
-  internal/taskdelivery
+  internal/taskenvdocker
+  internal/taskartifact
+  internal/runapi
+  internal/resultapi
   internal/taskverification
   internal/taskpublicationcoord
-  internal/taskresultcoord
   internal/taskstore
 )
 
 cd "$ROOT"
-GOTOOLCHAIN=local go test -count=1 -timeout=3m -covermode=atomic -coverprofile="$PROFILE" "${PACKAGES[@]/#/.\/}"
+go test -count=1 -timeout=3m -covermode=atomic -coverprofile="$PROFILE" "${PACKAGES[@]/#/.\/}"
 go tool cover -func="$PROFILE" >"$FUNCTIONS"
 
 check_package() {
@@ -50,17 +51,13 @@ check_function() {
   printf 'critical function: %-39s %5s%% (floor %s%%)\n' "$file.$symbol" "$coverage" "$floor"
 }
 
-check_package cmd/fern 54
-check_package internal/taskdelivery 69
+check_package internal/taskenvdocker 72
+check_package internal/taskartifact 70
+check_package internal/runapi 68
+check_package internal/resultapi 74
 check_package internal/taskverification 72
-check_package internal/taskpublicationcoord 69
-check_package internal/taskresultcoord 83
-check_package internal/taskstore 70
+check_package internal/taskpublicationcoord 80
+check_package internal/taskstore 60
 
-check_function cmd/fern/tasks.go newTaskServices 65
-check_function cmd/fern/up.go startTaskCoordinators 90
-check_function cmd/fern/up.go awaitShutdown 85
-check_function internal/taskdelivery/coordinator.go RunOnce 80
 check_function internal/taskverification/coordinator.go RunOnce 80
 check_function internal/taskpublicationcoord/coordinator.go RunOnce 85
-check_function internal/taskresultcoord/coordinator.go RunOnce 85

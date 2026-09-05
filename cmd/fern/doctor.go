@@ -88,7 +88,7 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 			report.Ready = false
 		}
 	}
-	// Unlike up/attach, doctor treats the environment file as required, so it
+	// Unlike up, doctor treats the environment file as required, so it
 	// reads it directly instead of through the optional-file preamble.
 	values, err := readEnvFile(opts.EnvPath)
 	if err != nil {
@@ -101,19 +101,22 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 		add("config", "fail", err.Error(), "Run doctor from an accessible directory.")
 		return report
 	}
-	cfg, err := config.LoadWithEnvironment(opts.ConfigPath, cwd, true, config.Overrides{}, values)
+	cfg, err := config.LoadBackgroundWithEnvironment(opts.ConfigPath, cwd, true, config.BackgroundOverrides{}, values)
 	if err != nil {
 		add("config", "fail", err.Error(), "Fix the strict Fern configuration.")
 		return report
 	}
-	cfg.Workspace.Env = finalizeWorkspaceEnvironment(cfg.Workspace.Env, values)
-	if err := config.Validate(cfg); err != nil {
+	if err := config.ValidateBackgroundBootstrap(cfg); err != nil {
 		add("config", "fail", err.Error(), "Fix the Fern configuration or secret file.")
 		return report
 	}
 	add("config", "pass", "configuration is valid", "")
+	if cfg.Workspace.GitHub.InstallationID == 0 {
+		add("github", "fail", "GitHub App installation ID is not configured", "Complete App onboarding, install it on the configured repository, set workspace.github.installationId, and restart Fern.")
+		return report
+	}
 	if info, err := os.Stat(filepath.Join(cfg.Workspace.Repo, ".git")); err != nil || !info.IsDir() {
-		add("repository", "fail", "workspace is not a standard Git checkout", "Use a repository with a .git directory.")
+		add("repository", "fail", "repository is not a standard Git checkout", "Use a repository with a .git directory.")
 	} else {
 		add("repository", "pass", "Git repository is available", "")
 	}
@@ -123,45 +126,22 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 		add("docker", "fail", err.Error(), "Start Docker and grant this user access.")
 	} else {
 		add("docker", "pass", "local Docker daemon is reachable", "")
-		if err := checkCommand(ctx, 5*time.Second, "docker", "image", "inspect", cfg.Workspace.Image); err != nil {
-			add("image", "fail", "workspace image is unavailable", "Run make image or pull the configured image.")
+		if err := checkCommand(ctx, 5*time.Second, "docker", "image", "inspect", cfg.Tasks.BackgroundImage); err != nil {
+			add("image", "fail", "qualified Background Run image is unavailable", "Run make image-background-source or pull the configured image.")
 		} else {
-			add("image", "pass", "workspace image is available", "")
+			add("image", "pass", "Background Run image is available", "")
 		}
 	}
-	if err := checkCommand(ctx, 5*time.Second, "gh", "auth", "status", "--hostname", "github.com"); err != nil {
-		status := "warn"
-		if opts.FieldDemo {
-			status = "fail"
-		}
-		add("github", status, "GitHub CLI is not authenticated", "Run gh auth login --hostname github.com before publishing a PR.")
-	} else {
-		add("github", "pass", "GitHub CLI authentication is available on the host", "")
-	}
-	localURL, err := attachURL(cfg.OperatorListen)
+	localURL, err := loopbackURL(cfg.OperatorListen)
 	if err != nil {
 		add("gateway", "fail", err.Error(), "Fix proxy.operatorListen.")
-		if opts.FieldDemo {
-			add("provider", "fail", "OpenCode provider availability could not be checked", "Fix proxy.operatorListen, start Fern, connect a provider in OpenCode, and retry.")
-		}
 	} else if err := checkReady(ctx, localURL, cfg.Control.Password); err != nil {
 		add("gateway", "fail", "local Fern gateway is not ready", "Start fern up with the same --config and --env-file.")
-		if opts.FieldDemo {
-			add("provider", "fail", "OpenCode provider availability could not be checked", "Start Fern, connect a provider in the official OpenCode UI, and retry.")
-		}
 	} else {
 		add("gateway", "pass", "local Fern gateway is serving", "")
-		if opts.FieldDemo {
-			count, providerErr := checkProviderConnection(ctx, localURL, cfg.Workspace.Env["OPENCODE_PASSWORD"])
-			if providerErr != nil {
-				add("provider", "fail", providerErr.Error(), "Connect any supported provider in the official OpenCode UI, then retry.")
-			} else {
-				add("provider", "pass", fmt.Sprintf("OpenCode reports %d active provider(s)", count), "")
-			}
-		}
 	}
 	if opts.FieldDemo {
-		add("live-checks", "warn", "provider execution and GitHub mutation are not run by doctor", "Run the opt-in provider and disposable-repository rehearsals before the phone demo.")
+		add("live-checks", "warn", "model execution and GitHub mutation are not run by doctor", "Run the opt-in Background Run qualification before the phone demo.")
 	}
 	if opts.RequirePhone || opts.ExplicitURL != "" {
 		checkPhoneRoute(ctx, &report, add, opts, cfg, localURL)
@@ -171,7 +151,7 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 
 // checkPhoneRoute verifies the private Tailscale HTTPS path end to end and, on
 // success, records the one-time pairing URL on the report.
-func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, status, summary, remediation string), opts diagnoseOptions, cfg config.Config, localURL string) {
+func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, status, summary, remediation string), opts diagnoseOptions, cfg config.BackgroundConfig, localURL string) {
 	if cfg.RemoteOrigin == "" {
 		add("tailscale", "fail", "proxy.remoteOrigin is required for phone mode", "Set proxy.remoteOrigin to the exact canonical HTTPS root origin reported for this host, then retry.")
 		return
@@ -190,7 +170,7 @@ func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, sta
 		add("tailscale", "fail", topologyErr.Error(), "Make proxy.remoteOrigin, the root Serve origin, and this host's tailnet HTTPS origin identical.")
 		return
 	}
-	if cfg.Tasks != nil && cfg.Tasks.BackgroundRoute != nil {
+	if cfg.Tasks.BackgroundRoute != nil {
 		routeOrigin, routeErr := discoverTailscaleURL(ctx, cfg.Tasks.BackgroundRoute.Listen, cfg.OperatorListen)
 		parsedRouteOrigin, _ := url.Parse(cfg.Tasks.BackgroundRoute.Origin)
 		if routeErr != nil || routeOrigin != cfg.Tasks.BackgroundRoute.Origin {
@@ -215,10 +195,6 @@ func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, sta
 	}
 	if err := checkPairingPreview(ctx, cfg.RemoteOrigin, code); err != nil {
 		add("pairing", "fail", err.Error(), "Check that Tailscale Serve targets proxy.listen and Fern is current.")
-		return
-	}
-	if err := checkRemoteCredentialRejected(ctx, cfg.RemoteOrigin, cfg.Workspace.Env["OPENCODE_PASSWORD"]); err != nil {
-		add("phone", "fail", err.Error(), "Serve only proxy.listen; never proxy.operatorListen or the OpenCode backend.")
 		return
 	}
 	report.PhoneURL = cfg.RemoteOrigin + "/fern/pair?code=" + url.QueryEscape(code)
@@ -309,43 +285,6 @@ func checkReady(ctx context.Context, origin, password string) error {
 	return nil
 }
 
-func checkProviderConnection(ctx context.Context, origin, password string) (int, error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/api/provider", nil)
-	if err != nil {
-		return 0, err
-	}
-	request.SetBasicAuth("opencode", password)
-	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
-	if err != nil {
-		return 0, fmt.Errorf("query OpenCode providers: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("OpenCode provider readiness returned %s", response.Status)
-	}
-	var result struct {
-		Data []struct {
-			ID       string `json:"id"`
-			Disabled bool   `json:"disabled"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result); err != nil {
-		return 0, errors.New("OpenCode provider readiness returned an invalid response")
-	}
-	count := 0
-	for _, provider := range result.Data {
-		if provider.ID != "" && !provider.Disabled {
-			count++
-		}
-	}
-	if count == 0 {
-		return 0, errors.New("OpenCode has no active provider connection")
-	}
-	return count, nil
-}
-
 func issuePairingCode(ctx context.Context, origin, password string) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
@@ -396,25 +335,6 @@ func checkPairingPreview(ctx context.Context, origin, code string) error {
 	body, err := io.ReadAll(io.LimitReader(response.Body, 64<<10))
 	if err != nil || !strings.Contains(string(body), "Pair this phone?") {
 		return errors.New("pairing preview returned an invalid response")
-	}
-	return nil
-}
-
-func checkRemoteCredentialRejected(ctx context.Context, origin, password string) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/api/health", nil)
-	if err != nil {
-		return err
-	}
-	request.SetBasicAuth("opencode", password)
-	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
-	if err != nil {
-		return fmt.Errorf("remote credential rejection check failed: %w", err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusUnauthorized {
-		return fmt.Errorf("remote ingress accepted or mishandled the backend credential (%s)", response.Status)
 	}
 	return nil
 }

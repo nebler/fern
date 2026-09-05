@@ -43,7 +43,7 @@ func Validate(config Config) error {
 			return fmt.Errorf("workspace.env.%s duplicates the host-only Fern control credential", key)
 		}
 	}
-	if err := validateTasks(config); err != nil {
+	if err := validateTasks(config, false); err != nil {
 		return err
 	}
 	if config.IdleAfter <= 0 {
@@ -69,14 +69,90 @@ func Validate(config Config) error {
 	return nil
 }
 
-func validateTasks(config Config) error {
+// ValidateBackground enforces the production Background Run lane while the
+// general loader remains able to decode the first supported persistent schema.
+func ValidateBackground(config BackgroundConfig) error {
+	return validateBackground(config, false)
+}
+
+// ValidateBackgroundBootstrap accepts an omitted App installation ID so Fern
+// can expose only its onboarding control plane. It does not authorize task
+// composition; callers must still use ValidateBackground before execution.
+func ValidateBackgroundBootstrap(config BackgroundConfig) error {
+	return validateBackground(config, true)
+}
+
+func validateBackground(config BackgroundConfig, allowPendingInstallation bool) error {
+	if err := validateBackgroundWorkspace(config.Workspace); err != nil {
+		return err
+	}
+	if config.Control.Password == "" {
+		return errors.New("FERN_CONTROL_PASSWORD is required through control.password")
+	}
+	if len(config.Control.Password) < 32 {
+		return errors.New("FERN_CONTROL_PASSWORD must be at least 32 characters")
+	}
+	if config.Workspace.GitHub.InstallationID < 0 || !allowPendingInstallation && config.Workspace.GitHub.InstallationID == 0 {
+		return errors.New("background runs require github-app-broker with a positive installationId")
+	}
+	legacyValidationView := Config{
+		Workspace: Workspace{Name: config.Workspace.Name, Repo: config.Workspace.Repo, Env: map[string]string{}, GitHub: &WorkspaceGitHub{
+			Mode: GitHubModeGitHubAppBroker, Hostname: "github.com", InstallationID: config.Workspace.GitHub.InstallationID, Repository: config.Workspace.GitHub.Repository,
+		}},
+		Control: config.Control, Listen: config.Listen, OperatorListen: config.OperatorListen, RemoteOrigin: config.RemoteOrigin, Tasks: &config.Tasks,
+	}
+	if err := validateTasks(legacyValidationView, allowPendingInstallation); err != nil {
+		return err
+	}
+	if len(config.Tasks.BackgroundEnvironment) != 0 {
+		return errors.New("tasks.backgroundEnvironment is unsupported until provider credentials use brokered egress")
+	}
+	if config.Tasks.BackgroundImage == "" || config.Tasks.BackgroundImageID == "" || config.Tasks.BackgroundRoute == nil {
+		return errors.New("a qualified Background Run image and route are required")
+	}
+	if err := validateListen("proxy.listen", config.Listen); err != nil {
+		return err
+	}
+	if err := validateListen("proxy.operatorListen", config.OperatorListen); err != nil {
+		return err
+	}
+	if sameListenPort(config.Listen, config.OperatorListen) {
+		return errors.New("proxy.listen and proxy.operatorListen must use different ports")
+	}
+	if _, err := ParseRemoteOrigin(config.RemoteOrigin); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateBackgroundWorkspace(workspace BackgroundWorkspace) error {
+	if !workspaceNamePattern.MatchString(workspace.Name) {
+		return fmt.Errorf("invalid workspace name %q", workspace.Name)
+	}
+	if workspace.GitHub.Repository.ID <= 0 {
+		return errors.New("workspace GitHub repository ID must be positive")
+	}
+	if err := ValidateGitHubRepositoryFullName(workspace.GitHub.Repository.FullName); err != nil {
+		return fmt.Errorf("invalid workspace GitHub repository full name: %w", err)
+	}
+	stat, err := os.Stat(workspace.Repo)
+	if err != nil {
+		return fmt.Errorf("inspect repository path %q: %w", workspace.Repo, err)
+	}
+	if !stat.IsDir() {
+		return fmt.Errorf("repository path %q is not a directory", workspace.Repo)
+	}
+	return nil
+}
+
+func validateTasks(config Config, allowPendingInstallation bool) error {
 	if config.Tasks == nil {
 		return nil
 	}
 	if config.Workspace.GitHub == nil {
 		return errors.New("workspace.github is required when tasks are configured")
 	}
-	if config.Workspace.GitHub.Mode == GitHubModeGitHubAppBroker && config.Workspace.GitHub.InstallationID <= 0 {
+	if config.Workspace.GitHub.Mode == GitHubModeGitHubAppBroker && config.Workspace.GitHub.InstallationID <= 0 && !allowPendingInstallation {
 		return errors.New("workspace.github.installationId must be positive in github-app-broker mode")
 	}
 	if !validTaskText(config.Tasks.Agent, 1, 128) {
@@ -91,8 +167,8 @@ func validateTasks(config Config) error {
 	if config.Tasks.AttemptTimeout < time.Minute || config.Tasks.AttemptTimeout > 24*time.Hour {
 		return errors.New("tasks.attemptTimeout must be between 1m and 24h")
 	}
-	if config.Tasks.LeaseDuration <= 0 || config.Tasks.LeaseDuration > 5*time.Minute {
-		return errors.New("tasks.leaseDuration must be greater than zero and at most 5m")
+	if config.Tasks.LeaseDuration < time.Minute || config.Tasks.LeaseDuration > 5*time.Minute {
+		return errors.New("tasks.leaseDuration must be between 1m and 5m")
 	}
 	if config.Tasks.LeaseDuration > config.Tasks.AttemptTimeout {
 		return errors.New("tasks.leaseDuration must not exceed tasks.attemptTimeout")
@@ -380,8 +456,8 @@ func ValidateWorkspace(config Config) error {
 		if github.Mode == GitHubModeWorkspaceGH && github.InstallationID != 0 {
 			return errors.New("workspace GitHub installation ID is forbidden in workspace-gh mode")
 		}
-		if github.Mode == GitHubModeGitHubAppBroker && github.InstallationID <= 0 {
-			return errors.New("workspace GitHub installation ID must be positive in github-app-broker mode")
+		if github.Mode == GitHubModeGitHubAppBroker && github.InstallationID < 0 {
+			return errors.New("workspace GitHub installation ID cannot be negative in github-app-broker mode")
 		}
 		if config.Workspace.GitHub.Repository.ID <= 0 {
 			return errors.New("workspace GitHub repository ID must be positive")

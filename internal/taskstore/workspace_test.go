@@ -174,18 +174,18 @@ func TestFindReceiptByIdempotencyIsReadOnlyAndExactScoped(t *testing.T) {
 	store := openTestStore(t, testDBPath(t))
 	defer store.Close()
 	createTestWorkspace(t, store)
-	admission, err := store.AdmitTask(context.Background(), testAdmission(88, "receipt-lookup", "work"))
+	admission, err := store.AdmitBackgroundRun(context.Background(), testAdmission(88, "receipt-lookup", "work"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, found, err := store.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), SubmitTaskCommand, "receipt-lookup")
+	receipt, found, err := store.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateBackgroundRunCommand, "receipt-lookup")
 	if err != nil || !found || receipt.ID != admission.Receipt.ID {
 		t.Fatalf("receipt=%+v found=%t err=%v", receipt, found, err)
 	}
-	if _, found, err := store.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), SubmitTaskCommand, "other-key"); err != nil || found {
+	if _, found, err := store.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateBackgroundRunCommand, "other-key"); err != nil || found {
 		t.Fatalf("missing found=%t err=%v", found, err)
 	}
-	if _, _, err := store.FindReceiptByIdempotency(context.Background(), "bad", SubmitTaskCommand, "receipt-lookup"); !errors.Is(err, ErrInvalidInput) {
+	if _, _, err := store.FindReceiptByIdempotency(context.Background(), "bad", CreateBackgroundRunCommand, "receipt-lookup"); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("invalid scope error = %v", err)
 	}
 }

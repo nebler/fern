@@ -1,55 +1,38 @@
 workspace:
   name: demo
-  # Replace SOURCE_COMMIT with the exact trusted Fern source commit used to build it.
-  image: fern/opencode:SOURCE_COMMIT
-  repo: /srv/fern/workspace
-  memory: 8Gi
-  env:
-    OPENCODE_PASSWORD: ${OPENCODE_PASSWORD}
-  # Workspace GitHub access remains disabled unless this explicit authority and
-  # case-sensitive repository identity are configured together.
-  # github:
-  #   mode: workspace-gh
-  #   hostname: github.com
-  #   repository:
-  #     id: 123456789
-  #     fullName: owner/repository
-# Durable tasks are disabled unless this complete policy and GitHub binding are
-# explicitly configured. `github-app-broker` mode additionally requires an
-# installationId and operator-only App onboarding.
-# tasks:
-#   agent: build
-#   model:
-#     provider: replace-with-provider-id
-#     id: replace-with-model-id
-#   attemptTimeout: 30m
-#   leaseDuration: 2m
-#   # Use the exact tag and local image ID emitted by the qualification suite.
-#   backgroundImage: fern/opencode-background-source:REPLACE_WITH_QUALIFIED_SOURCE_COMMIT
-#   backgroundImageID: sha256:REPLACE_WITH_64_LOWERCASE_HEX_DIGITS
-#   backgroundRoute:
-#     listen: 127.0.0.1:8443
-#     origin: https://replace-with-this-host.example.ts.net:8443
-#   budget:
-#     maxTurns: 100
-#   # Optional shell-free host verification policy.
-#   verification:
-#     checkName: repository-tests
-#     argv: [/usr/bin/make, test]
-#     workingDirectory: ""
-#     timeout: 15m
-#     environment:
-#       CI: "true"
-#     outputBytes: 65536
+  repo: /srv/fern/repository
+  github:
+    mode: github-app-broker
+    hostname: github.com
+    installationId: 12345678
+    repository:
+      id: 123456789
+      fullName: owner/repository
+tasks:
+  agent: build
+  model:
+    provider: replace-with-provider-id
+    id: replace-with-model-id
+  attemptTimeout: 30m
+  leaseDuration: 2m
+  backgroundImage: ghcr.io/owner/fern/opencode-background-source@sha256:REPLACE_WITH_64_LOWERCASE_HEX_DIGITS
+  backgroundImageID: sha256:REPLACE_WITH_64_LOWERCASE_HEX_DIGITS
+  backgroundRoute:
+    listen: 127.0.0.1:8443
+    origin: https://replace-with-this-host.example.ts.net:8443
+  budget:
+    maxTurns: 100
+  verification:
+    checkName: repository-tests
+    argv: [/usr/bin/make, test]
+    workingDirectory: ""
+    timeout: 15m
+    environment:
+      CI: "true"
+    outputBytes: 65536
 control:
   password: ${FERN_CONTROL_PASSWORD}
-idle:
-  after: 10m
 proxy:
-  # Tailscale Serve terminates tailnet TLS and proxies only to this listener.
   listen: 127.0.0.1:8080
-  # Host-only operator and attach surface. Never expose this with Tailscale Serve.
   operatorListen: 127.0.0.1:8081
-  # REQUIRED: replace this parseable placeholder with this host's exact canonical
-  # Tailscale Serve HTTPS root origin before starting Fern.
   remoteOrigin: https://replace-with-this-host.example.ts.net

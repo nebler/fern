@@ -14,83 +14,108 @@ import (
 )
 
 func runInit(args []string) error {
-	flags := newFlagSet("init", "Create a secure single-workspace Fern demo configuration.")
+	flags := newFlagSet("init", "Create a Background Run host configuration.")
 	configPath := flags.String("config", "fern.yaml", "configuration destination")
 	envPath := flags.String("env-file", "fern.env", "protected environment destination")
-	name := flags.String("name", "demo", "workspace name")
-	image := flags.String("image", "fern/opencode:dev", "workspace image")
+	name := flags.String("name", "demo", "repository binding name")
 	repo := flags.String("repo", ".", "repository path")
-	memory := flags.String("memory", "8Gi", "workspace memory limit")
-	idle := flags.String("idle", "10m", "idle duration")
-	listen := flags.String("listen", "127.0.0.1:8080", "remote/device proxy listen address")
-	operatorListen := flags.String("operator-listen", "127.0.0.1:8081", "host/operator proxy listen address")
-	remoteOrigin := flags.String("remote-origin", "", "canonical private HTTPS root origin")
+	installationID := flags.Int64("installation-id", 0, "GitHub App installation ID")
+	repositoryID := flags.Int64("repository-id", 0, "GitHub repository ID")
+	repositoryName := flags.String("repository", "", "GitHub owner/repository")
+	modelProvider := flags.String("model-provider", "", "OpenCode model provider ID")
+	model := flags.String("model", "", "OpenCode model ID")
+	backgroundImage := flags.String("background-image", "fern/opencode-background-source:dev", "qualified Background Run image")
+	backgroundImageID := flags.String("background-image-id", "", "qualified local Background Run image ID")
+	listen := flags.String("listen", "127.0.0.1:8080", "remote/device control-plane listen address")
+	operatorListen := flags.String("operator-listen", "127.0.0.1:8081", "host/operator listen address")
+	backgroundListen := flags.String("background-listen", "127.0.0.1:8443", "live-run loopback listen address")
+	remoteOrigin := flags.String("remote-origin", "", "canonical private HTTPS control-plane origin")
+	backgroundOrigin := flags.String("background-origin", "", "canonical private HTTPS live-run origin")
 	if err := parseFlags(flags, args); err != nil {
 		return err
 	}
 	if *configPath == *envPath {
 		return invocationError{message: "configuration and environment destinations must differ"}
 	}
+	if *backgroundImageID == "" {
+		return invocationError{message: "-background-image-id is required; obtain it from docker image inspect after qualification"}
+	}
 	absRepo, err := filepath.Abs(*repo)
 	if err != nil {
 		return fmt.Errorf("resolve repository: %w", err)
 	}
-	// seed is split into two independent 32-byte secrets: the first half
-	// becomes the OpenCode password, the second half the control password.
-	seed := make([]byte, 64)
-	if _, err := rand.Read(seed); err != nil {
-		return fmt.Errorf("generate OpenCode password: %w", err)
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return fmt.Errorf("generate control password: %w", err)
 	}
-	openCodeSecret := hex.EncodeToString(seed[:32])
-	controlSecret := hex.EncodeToString(seed[32:])
-	values := config.Default(absRepo)
-	values.Workspace.Name = *name
-	values.Workspace.Image = *image
-	values.Workspace.Memory = *memory
-	values.Workspace.Env["OPENCODE_PASSWORD"] = openCodeSecret
-	values.Control.Password = controlSecret
-	values.Listen = *listen
-	values.OperatorListen = *operatorListen
-	values.RemoteOrigin = *remoteOrigin
-	parsedIdle, err := time.ParseDuration(*idle)
-	if err != nil {
-		return err
+	controlSecret := hex.EncodeToString(secret)
+	values := config.BackgroundConfig{
+		Workspace: config.BackgroundWorkspace{Name: *name, Repo: absRepo, GitHub: config.BackgroundGitHubApp{
+			InstallationID: *installationID, Repository: config.GitHubRepository{ID: *repositoryID, FullName: *repositoryName}}},
+		Control: config.Control{Password: controlSecret}, Listen: *listen, OperatorListen: *operatorListen, RemoteOrigin: *remoteOrigin,
+		Tasks: config.TaskPolicy{Agent: "build", Model: config.TaskModel{Provider: *modelProvider, ID: *model},
+			AttemptTimeout: 30 * time.Minute, LeaseDuration: 2 * time.Minute, Budget: config.TaskBudget{MaxTurns: 100},
+			BackgroundImage: *backgroundImage, BackgroundImageID: *backgroundImageID,
+			BackgroundRoute: &config.BackgroundRoute{Listen: *backgroundListen, Origin: *backgroundOrigin}, BackgroundEnvironment: map[string]string{}},
 	}
-	values.IdleAfter = parsedIdle
-	if err := config.Validate(values); err != nil {
+	if err := config.ValidateBackgroundBootstrap(values); err != nil {
 		return err
 	}
 	type initFile struct {
 		Workspace struct {
-			Name   string            `yaml:"name"`
-			Image  string            `yaml:"image"`
-			Repo   string            `yaml:"repo"`
-			Memory string            `yaml:"memory"`
-			Env    map[string]string `yaml:"env"`
+			Name   string `yaml:"name"`
+			Repo   string `yaml:"repo"`
+			GitHub struct {
+				Mode           config.GitHubMode `yaml:"mode"`
+				Hostname       string            `yaml:"hostname"`
+				InstallationID int64             `yaml:"installationId,omitempty"`
+				Repository     struct {
+					ID       int64  `yaml:"id"`
+					FullName string `yaml:"fullName"`
+				} `yaml:"repository"`
+			} `yaml:"github"`
 		} `yaml:"workspace"`
+		Tasks struct {
+			Agent string `yaml:"agent"`
+			Model struct {
+				Provider string `yaml:"provider"`
+				ID       string `yaml:"id"`
+			} `yaml:"model"`
+			AttemptTimeout    string `yaml:"attemptTimeout"`
+			LeaseDuration     string `yaml:"leaseDuration"`
+			BackgroundImage   string `yaml:"backgroundImage"`
+			BackgroundImageID string `yaml:"backgroundImageID"`
+			BackgroundRoute   struct {
+				Listen string `yaml:"listen"`
+				Origin string `yaml:"origin"`
+			} `yaml:"backgroundRoute"`
+			Budget struct {
+				MaxTurns int `yaml:"maxTurns"`
+			} `yaml:"budget"`
+		} `yaml:"tasks"`
 		Control struct {
 			Password string `yaml:"password"`
 		} `yaml:"control"`
-		Idle struct {
-			After string `yaml:"after"`
-		} `yaml:"idle"`
 		Proxy struct {
 			Listen         string `yaml:"listen"`
 			OperatorListen string `yaml:"operatorListen"`
-			RemoteOrigin   string `yaml:"remoteOrigin,omitempty"`
+			RemoteOrigin   string `yaml:"remoteOrigin"`
 		} `yaml:"proxy"`
 	}
 	var output initFile
-	output.Workspace.Name = values.Workspace.Name
-	output.Workspace.Image = values.Workspace.Image
-	output.Workspace.Repo = values.Workspace.Repo
-	output.Workspace.Memory = values.Workspace.Memory
-	output.Workspace.Env = map[string]string{}
+	output.Workspace.Name, output.Workspace.Repo = values.Workspace.Name, values.Workspace.Repo
+	output.Workspace.GitHub.Mode, output.Workspace.GitHub.Hostname = config.GitHubModeGitHubAppBroker, "github.com"
+	output.Workspace.GitHub.InstallationID = values.Workspace.GitHub.InstallationID
+	output.Workspace.GitHub.Repository.ID = values.Workspace.GitHub.Repository.ID
+	output.Workspace.GitHub.Repository.FullName = values.Workspace.GitHub.Repository.FullName
+	output.Tasks.Agent = values.Tasks.Agent
+	output.Tasks.Model.Provider, output.Tasks.Model.ID = values.Tasks.Model.Provider, values.Tasks.Model.ID
+	output.Tasks.AttemptTimeout, output.Tasks.LeaseDuration = values.Tasks.AttemptTimeout.String(), values.Tasks.LeaseDuration.String()
+	output.Tasks.BackgroundImage, output.Tasks.BackgroundImageID = values.Tasks.BackgroundImage, values.Tasks.BackgroundImageID
+	output.Tasks.BackgroundRoute.Listen, output.Tasks.BackgroundRoute.Origin = values.Tasks.BackgroundRoute.Listen, values.Tasks.BackgroundRoute.Origin
+	output.Tasks.Budget.MaxTurns = values.Tasks.Budget.MaxTurns
 	output.Control.Password = "${FERN_CONTROL_PASSWORD}"
-	output.Idle.After = values.IdleAfter.String()
-	output.Proxy.Listen = values.Listen
-	output.Proxy.OperatorListen = values.OperatorListen
-	output.Proxy.RemoteOrigin = values.RemoteOrigin
+	output.Proxy.Listen, output.Proxy.OperatorListen, output.Proxy.RemoteOrigin = values.Listen, values.OperatorListen, values.RemoteOrigin
 	configData, err := yaml.Marshal(output)
 	if err != nil {
 		return err
@@ -98,21 +123,19 @@ func runInit(args []string) error {
 	if err := writeNewFile(*configPath, configData, 0o600); err != nil {
 		return err
 	}
-	envData := []byte("# Keep this file on the Fern host.\nOPENCODE_PASSWORD=" + openCodeSecret + "\nFERN_CONTROL_PASSWORD=" + controlSecret + "\n")
-	if err := writeNewFile(*envPath, envData, 0o600); err != nil {
+	if err := writeNewFile(*envPath, []byte("# Keep this file on the Fern host.\nFERN_CONTROL_PASSWORD="+controlSecret+"\n"), 0o600); err != nil {
 		_ = os.Remove(*configPath)
 		return err
 	}
-	fmt.Printf("Fern demo configuration created\n\nconfig: %s\nsecrets: %s\nrepository: %s\n\n%s", *configPath, *envPath, absRepo, initNextSteps(*configPath, *envPath, *listen, *remoteOrigin))
-	return nil
-}
-
-func initNextSteps(configPath, envPath, listen, remoteOrigin string) string {
-	steps := fmt.Sprintf("Next:\n  1. Run: fern up --config %s --env-file %s\n  2. In another terminal, run: fern attach --config %s --env-file %s\n  3. Use OpenCode's /connect flow to connect an account or provider\n", configPath, envPath, configPath, envPath)
-	if remoteOrigin == "" {
-		return steps + "  4. For phone mode, set proxy.remoteOrigin to the exact canonical HTTPS root origin, then configure Tailscale Serve for only proxy.listen.\n"
+	fmt.Printf("Fern Background Run configuration created\n\nconfig: %s\nsecrets: %s\nrepository: %s\n\n", *configPath, *envPath, absRepo)
+	if *installationID == 0 {
+		fmt.Printf("Next:\n  1. Configure private TLS routing for %s and %s.\n  2. Run: fern up --config %s --env-file %s\n  3. Open http://%s/fern/control, create the GitHub App, and install it on %s.\n  4. Set workspace.github.installationId in %s from the GitHub installation URL, then restart Fern.\n",
+			*listen, *backgroundListen, *configPath, *envPath, *operatorListen, *repositoryName, *configPath)
+	} else {
+		fmt.Printf("Next:\n  1. Import the matching GitHub App credentials with fern credentials import.\n  2. Configure private TLS routing for %s and %s.\n  3. Run: fern up --config %s --env-file %s\n",
+			*listen, *backgroundListen, *configPath, *envPath)
 	}
-	return steps + fmt.Sprintf("  4. Serve only the remote listener: tailscale serve --bg http://%s\n  5. Verify that Serve reports exactly %s, then run: fern doctor --config %s --env-file %s --phone\n", listen, remoteOrigin, configPath, envPath)
+	return nil
 }
 
 func writeNewFile(path string, data []byte, mode os.FileMode) error {

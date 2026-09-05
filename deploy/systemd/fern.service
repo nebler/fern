@@ -1,6 +1,6 @@
 [Unit]
-Description=Fern supervised OpenCode workspace
-Documentation=file:/opt/fern/src/docs/DEPLOYMENT.md
+Description=Fern disposable Background Run control plane
+Documentation=file:/opt/fern/src/ARCHITECTURE.md
 Wants=network-online.target
 After=network-online.target docker.service
 Requires=docker.service
@@ -24,7 +24,7 @@ ProtectKernelModules=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
 LockPersonality=true
-ExecStart=/usr/local/bin/fern up --config /etc/fern/fern.yaml --listen 127.0.0.1:8080 --operator-listen 127.0.0.1:8081
+ExecStart=/usr/local/bin/fern up --config /etc/fern/fern.yaml --env-file /etc/fern/fern.env --listen 127.0.0.1:8080 --operator-listen 127.0.0.1:8081
 Restart=on-failure
 RestartSec=10s
 TimeoutStopSec=120s

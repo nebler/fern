@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/nebler/fern/internal/control"
-	"github.com/nebler/fern/internal/runtime"
 )
 
 // NewPairedBackgroundRunHandler applies only durable paired-device
@@ -37,7 +36,7 @@ func NewPairedBackgroundRunHandler(store *control.Store, origin string, next htt
 			http.Error(writer, "cross-origin run request rejected", http.StatusForbidden)
 			return
 		}
-		state.servePaired(writer, request, next, runtime.ServerAuth{}, device, credential)
+		state.servePaired(writer, request, next, device, credential)
 	})
 	return trustedOriginHandler(paired, trusted), nil
 }

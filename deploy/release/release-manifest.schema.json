@@ -75,9 +75,9 @@
         "upgrade_harness": {"const": "integration/upgrade/run.sh"},
         "host_utility": {"const": "scripts/fern-host-backup.py"},
         "support_status": {"const": "installed-cli-operational-recovery"},
-        "activation_model": {"const": "staged-filesystem-docker-best-effort-rollback"},
+        "activation_model": {"const": "staged-filesystem-rollback"},
         "credential_policy": {"const": "external-recipient-with-checksums"},
-        "volume_export_mode": {"const": "managed-docker-volume-staged-and-verified"}
+        "volume_export_mode": {"const": "no-runtime-volumes"}
       }
     }
   },
@@ -91,7 +91,7 @@
       "additionalProperties": false,
       "required": ["repository", "publication_status", "digest", "reference", "sbom", "signature", "provenance"],
       "properties": {
-        "repository": {"type": "string", "pattern": "^(?:ghcr\\.io/[a-z0-9._/-]+|fern/opencode)$"},
+        "repository": {"type": "string", "pattern": "^(?:ghcr\\.io/[a-z0-9._/-]+|fern/opencode-background-source)$"},
         "publication_status": {"enum": ["not-published-local", "published"]},
         "digest": {"anyOf": [{"$ref": "#/$defs/digest"}, {"type": "null"}]},
         "reference": {"anyOf": [{"$ref": "#/$defs/immutable-image"}, {"type": "null"}]},
@@ -132,7 +132,7 @@
           "if": {"properties": {"publication_status": {"const": "not-published-local"}}},
           "then": {
             "properties": {
-              "repository": {"const": "fern/opencode"}, "digest": {"type": "null"}, "reference": {"type": "null"},
+              "repository": {"const": "fern/opencode-background-source"}, "digest": {"type": "null"}, "reference": {"type": "null"},
               "sbom": {"properties": {"status": {"const": "not-generated-local"}, "format": {"type": "null"}, "asset": {"type": "null"}, "sha256": {"type": "null"}, "attestation_subject": {"type": "null"}}},
               "signature": {"properties": {"status": {"const": "not-generated-local"}, "subject": {"type": "null"}, "certificate_identity": {"type": "null"}, "oidc_issuer": {"type": "null"}}},
               "provenance": {"properties": {"status": {"const": "not-generated-local"}, "subject": {"type": "null"}, "predicate_type": {"type": "null"}, "attestation_url": {"type": "null"}}}

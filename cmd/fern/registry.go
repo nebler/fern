@@ -35,40 +35,16 @@ type command struct {
 // help dispatch, and typo suggestions.
 var commands = []command{
 	{
-		name: "init", summary: "Create a secure phone-demo configuration",
+		name: "init", summary: "Create a Background Run configuration",
 		run: func(_ context.Context, args []string, _ *slog.Logger) error { return runInit(args) },
 	},
 	{
-		name: "doctor", summary: "Verify host and private phone-demo readiness",
+		name: "doctor", summary: "Verify Background Run host readiness",
 		run: func(_ context.Context, args []string, _ *slog.Logger) error { return runDoctor(args) },
 	},
 	{
-		name: "github", summary: "Validate the retired standalone GitHub preflight",
-		overview: "Run the non-mutating legacy GitHub publication preflight.",
-		sub: []subcommand{{
-			name: "publish",
-			run:  func(_ context.Context, args []string, log *slog.Logger) error { return runGitHubPublish(args, log) },
-		}},
-	},
-	{
-		name: "up", summary: "Run the workspace supervisor and authenticated proxy",
+		name: "up", summary: "Run the Background Run control plane",
 		run: func(_ context.Context, args []string, log *slog.Logger) error { return runUp(args, log) },
-	},
-	{
-		name: "attach", summary: "Open the official client through the Fern proxy",
-		run: func(_ context.Context, args []string, _ *slog.Logger) error { return runAttach(args) },
-	},
-	{
-		name: "status", summary: "Show the workspace runtime state",
-		run: func(_ context.Context, args []string, log *slog.Logger) error { return runStatus(args, log) },
-	},
-	{
-		name: "logs", summary: "Stream workspace container logs",
-		run: func(_ context.Context, args []string, log *slog.Logger) error { return runLogs(args, log) },
-	},
-	{
-		name: "down", summary: "Remove workspace compute while retaining session data",
-		run: func(_ context.Context, args []string, log *slog.Logger) error { return runDown(args, log) },
 	},
 	{
 		name:     "backup",
@@ -96,14 +72,6 @@ var commands = []command{
 		name:     "debug",
 		overview: "Inspect Fern internals and run explicit offline repairs.",
 		sub: []subcommand{
-			{
-				name: "events", summary: "Stream the backend activity events used by Fern",
-				run: func(_ context.Context, args []string, log *slog.Logger) error { return runEvents(args, log) },
-			},
-			{
-				name: "wake", summary: "Print the phase waterfall for one workspace wake",
-				run: func(_ context.Context, args []string, log *slog.Logger) error { return runDebugWake(args, log) },
-			},
 			{
 				name: "quarantine-publications", summary: "Quarantine unresolved retired publication records",
 				run: func(_ context.Context, args []string, _ *slog.Logger) error {
@@ -171,10 +139,8 @@ func subcommandUsage(entry *command) string {
 
 // usageExamples are the curated top-level examples shown in 'fern --help'.
 var usageExamples = []string{
-	"fern init --repo /path/to/repository",
-	"fern up --config fern.yaml",
-	"fern status --json",
-	"fern attach",
+	"fern init --repo /path/to/repository --repository owner/repository --repository-id 123 --installation-id 456 --model-provider anthropic --model claude-sonnet-4-5",
+	"fern up --config fern.yaml --env-file fern.env",
 }
 
 // buildUsageText derives top-level help from the registry so commands appear,
@@ -202,7 +168,7 @@ func buildUsageText() string {
 		}
 	}
 	var builder strings.Builder
-	builder.WriteString("Fern supervises one durable OpenCode workspace in Docker.\n\nUsage:\n  fern <command> [flags]\n  fern help [command]\n\nCommands:\n")
+	builder.WriteString("Fern runs disposable OpenCode jobs with durable retained results.\n\nUsage:\n  fern <command> [flags]\n  fern help [command]\n\nCommands:\n")
 	for _, entry := range rows {
 		fmt.Fprintf(&builder, "  %-*s  %s\n", width, entry.name, entry.summary)
 	}

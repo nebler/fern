@@ -26,7 +26,7 @@ func TestReadinessAndLivenessHaveDistinctFailureSemantics(t *testing.T) {
 
 func TestMetricsAreOpenMetricsWithFixedComponentLabels(t *testing.T) {
 	registry := NewRegistry()
-	registry.Degraded(ComponentTaskExecution, errors.New("secret response"))
+	registry.Degraded(ComponentBackgroundRunSerial, errors.New("secret response"))
 	response := httptest.NewRecorder()
 	registry.MetricsHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/fern/metrics", nil))
 	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/openmetrics-text; version=1.0.0; charset=utf-8" {

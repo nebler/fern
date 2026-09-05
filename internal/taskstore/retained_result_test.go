@@ -17,7 +17,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	createTestWorkspace(t, store)
 	admission := testBackgroundRunAdmission(5100, "retained-result")
-	if _, err := store.AdmitTask(context.Background(), admission); err != nil {
+	if _, err := store.AdmitBackgroundRun(context.Background(), admission); err != nil {
 		t.Fatal(err)
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
@@ -225,9 +225,25 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	if err != nil || !commitReplay.Replayed {
 		t.Fatalf("retained result replay = %+v, error=%v", commitReplay, err)
 	}
+	readResult, err := store.GetResult(context.Background(), committed.Result.ID)
+	if err != nil || readResult.ID != committed.Result.ID || readResult.SourceKind != ResultSourceRetainedArtifact {
+		t.Fatalf("read result = %+v, error=%v", readResult, err)
+	}
+	readManifest, err := store.GetResultManifest(context.Background(), committed.Result.ID)
+	if err != nil || len(readManifest) != len(committed.Manifest) {
+		t.Fatalf("read result manifest = %+v, error=%v", readManifest, err)
+	}
+	readArtifact, err := store.GetRetainedArtifact(context.Background(), committed.Artifact.ID)
+	if err != nil || readArtifact.ID != committed.Artifact.ID {
+		t.Fatalf("read retained artifact = %+v, error=%v", readArtifact, err)
+	}
 	source, err := store.FindResultAwaitingVerification(context.Background(), run.WorkspaceID)
 	if err != nil || source.Result.ID != committed.Result.ID || source.Task.ID != committed.Task.ID || source.Attempt.ID != committed.Attempt.ID {
 		t.Fatalf("retained verification source = %+v, error=%v", source, err)
+	}
+	authorized, err := store.HasRetainedResultAuthority(context.Background(), committed.Result.ID)
+	if err != nil || !authorized {
+		t.Fatalf("retained result authority = %t, error=%v", authorized, err)
 	}
 	ownedResult, ownedTask, ownedAttempt, err := store.GetResultOwners(context.Background(), committed.Result.ID)
 	if err != nil || ownedResult.ID != committed.Result.ID || ownedTask.ID != committed.Task.ID || ownedAttempt.ID != committed.Attempt.ID {
@@ -308,6 +324,10 @@ route_removed_evidence='raw cleanup',revision=revision+1,updated_at=updated_at+1
 	})
 	if err != nil || cleanupRun.EffectPhase != BackgroundRunEffectCleanupComplete {
 		t.Fatalf("retained cleanup completion = %+v, error=%v", cleanupRun, err)
+	}
+	projection, err := store.GetBackgroundRunResult(context.Background(), run.WorkspaceID, run.TaskID, admission.Claim.Actor)
+	if err != nil || projection.Result.ID != committed.Result.ID || projection.Artifact.ID != committed.Artifact.ID || projection.Materialization.ID != committed.Materialization.ID {
+		t.Fatalf("background result projection = %+v, error=%v", projection, err)
 	}
 }
 

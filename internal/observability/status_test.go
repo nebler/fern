@@ -11,7 +11,7 @@ import (
 func TestRegistryIsFixedCardinalityAndSanitizesFailures(t *testing.T) {
 	registry := NewRegistry()
 	secret := "remote token must-not-escape\nsecond line"
-	if !registry.Degraded(ComponentTaskDelivery, errors.New(secret)) {
+	if !registry.Degraded(ComponentBackgroundRunSerial, errors.New(secret)) {
 		t.Fatal("known component update was rejected")
 	}
 	if registry.Failed(Component("attacker="+secret), errors.New(secret)) {
@@ -33,11 +33,11 @@ func TestRegistryIsFixedCardinalityAndSanitizesFailures(t *testing.T) {
 		t.Fatalf("blocked dependency snapshot = %+v", blocked)
 	}
 	registry.Healthy(ComponentGitHubTaskDependency)
-	registry.Failed(ComponentTaskDelivery, errors.New(secret))
+	registry.Failed(ComponentBackgroundRunSerial, errors.New(secret))
 	if registry.Snapshot().Ready {
 		t.Fatal("failed component left service ready")
 	}
-	registry.Healthy(ComponentTaskDelivery)
+	registry.Healthy(ComponentBackgroundRunSerial)
 	if !registry.Snapshot().Ready {
 		t.Fatal("healthy recovery left service unready")
 	}

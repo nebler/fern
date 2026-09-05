@@ -7,8 +7,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Load merges defaults, a strict YAML file, and explicit CLI overrides before
@@ -198,129 +196,6 @@ func load(path, defaultRepo string, required bool, overrides Overrides, workspac
 		}
 	}
 	return config, nil
-}
-
-// LoadAttach loads the attach-client projection of fern.yaml: the operator
-// listen address plus the forwarded authentication environment.
-func LoadAttach(path string, required bool, listenOverride *string) (Client, error) {
-	return LoadAttachWithEnvironment(path, required, listenOverride, os.LookupEnv)
-}
-
-// LoadAttachWithEnvironment expands the attach projection's references through
-// the supplied values before falling back to the process environment.
-func LoadAttachWithEnvironment(path string, required bool, listenOverride *string, lookup func(string) (string, bool)) (Client, error) {
-	client := Client{Name: "demo", Listen: "127.0.0.1:8081", Env: make(map[string]string)}
-	if listenOverride != nil {
-		client.Listen = *listenOverride
-	}
-	sections, err := loadSections(path, required)
-	if err != nil || sections == nil {
-		return client, err
-	}
-	if proxy, exists := sections["proxy"]; exists && listenOverride == nil {
-		fields, err := decodeNodeMap(proxy)
-		if err != nil {
-			return Client{}, fmt.Errorf("parse proxy: %w", err)
-		}
-		if listen, exists := fields["operatorListen"]; exists {
-			client.Listen, err = decodeString(listen)
-			if err != nil {
-				return Client{}, fmt.Errorf("parse proxy.operatorListen: %w", err)
-			}
-		}
-	}
-	if workspace, exists := sections["workspace"]; exists {
-		if err := loadClientWorkspace(workspace, &client, lookup); err != nil {
-			return Client{}, err
-		}
-	}
-	return client, nil
-}
-
-// LoadEvents loads the event-client projection of fern.yaml: the workspace name
-// plus the forwarded authentication environment.
-func LoadEvents(path string, required bool, nameOverride *string) (Client, error) {
-	return LoadEventsWithEnvironment(path, required, nameOverride, os.LookupEnv)
-}
-
-// LoadEventsWithEnvironment expands the event projection's references through
-// the supplied values before falling back to the process environment.
-func LoadEventsWithEnvironment(path string, required bool, nameOverride *string, lookup func(string) (string, bool)) (Client, error) {
-	client := Client{Name: "demo", Env: make(map[string]string)}
-	if nameOverride != nil {
-		client.Name = *nameOverride
-	}
-	sections, err := loadSections(path, required)
-	if err != nil || sections == nil {
-		return client, err
-	}
-	workspace, exists := sections["workspace"]
-	if !exists {
-		return client, nil
-	}
-	fields, err := decodeNodeMap(workspace)
-	if err != nil {
-		return Client{}, fmt.Errorf("parse workspace: %w", err)
-	}
-	if name, exists := fields["name"]; exists && nameOverride == nil {
-		client.Name, err = decodeString(name)
-		if err != nil {
-			return Client{}, fmt.Errorf("parse workspace.name: %w", err)
-		}
-	}
-	if err := loadAuthFields(fields, client.Env, lookup); err != nil {
-		return Client{}, err
-	}
-	return client, nil
-}
-
-func loadSections(path string, required bool) (map[string]yaml.Node, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) && !required {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("read config %q: %w", path, err)
-	}
-	var sections map[string]yaml.Node
-	if err := decode(data, &sections, false); err != nil {
-		return nil, fmt.Errorf("parse config %q: %w", path, err)
-	}
-	return sections, nil
-}
-
-func loadClientWorkspace(workspace yaml.Node, client *Client, lookup func(string) (string, bool)) error {
-	fields, err := decodeNodeMap(workspace)
-	if err != nil {
-		return fmt.Errorf("parse workspace: %w", err)
-	}
-	return loadAuthFields(fields, client.Env, lookup)
-}
-
-func loadAuthFields(workspace map[string]yaml.Node, env map[string]string, lookup func(string) (string, bool)) error {
-	envNode, exists := workspace["env"]
-	if !exists {
-		return nil
-	}
-	values, err := decodeNodeMap(envNode)
-	if err != nil {
-		return fmt.Errorf("parse workspace.env: %w", err)
-	}
-	for _, key := range []string{"OPENCODE_PASSWORD"} {
-		node, exists := values[key]
-		if !exists {
-			continue
-		}
-		value, err := decodeString(node)
-		if err != nil {
-			return fmt.Errorf("parse %s: %w", key, err)
-		}
-		env[key], err = expandRequired(value, lookup)
-		if err != nil {
-			return fmt.Errorf("expand %s: %w", key, err)
-		}
-	}
-	return nil
 }
 
 // LoadWorkspaceName is intentionally narrow so emergency status/down/logs can

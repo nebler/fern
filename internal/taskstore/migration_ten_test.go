@@ -24,7 +24,7 @@ func TestMigrationTenQuarantinesEveryLegacyResultReadyPhase(t *testing.T) {
 			path := testDBPath(t)
 			store := openVersionNineBackgroundDatabase(t, path)
 			params := testBackgroundRunAdmission(5300+index, "migration-ten-"+string(target))
-			if _, err := store.AdmitTask(context.Background(), params); err != nil {
+			if _, err := store.AdmitBackgroundRun(context.Background(), params); err != nil {
 				t.Fatal(err)
 			}
 			now := testTime.Truncate(time.Millisecond).Add(time.Minute)

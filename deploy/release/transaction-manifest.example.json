@@ -10,7 +10,7 @@
     "manifest": "BACKUP-MANIFEST.json",
     "checksum_file": "SHA256SUMS",
     "credential_policy": "external",
-    "named_volumes": ["fern-demo-v2-data"]
+    "named_volumes": []
   },
   "activation": {
     "model": "staged-current-previous",

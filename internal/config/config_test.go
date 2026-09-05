@@ -252,56 +252,6 @@ func TestValidateRejectsHostGitHubCredentials(t *testing.T) {
 	}
 }
 
-func TestLoadPasswordForWorkspaceAndClients(t *testing.T) {
-	t.Parallel()
-	directory := t.TempDir()
-	path := filepath.Join(directory, "fern.yaml")
-	data := []byte("workspace:\n  repo: .\n  env:\n    OPENCODE_PASSWORD: secret\n")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	loaded, err := Load(path, directory, true, Overrides{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	attach, err := LoadAttach(path, true, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	events, err := LoadEvents(path, true, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.Workspace.Env["OPENCODE_PASSWORD"] != "secret" || attach.Env["OPENCODE_PASSWORD"] != "secret" || events.Env["OPENCODE_PASSWORD"] != "secret" {
-		t.Fatal("client projections did not load OPENCODE_PASSWORD")
-	}
-}
-
-func TestClientProjectionsExpandFromCallerEnvironment(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "fern.yaml")
-	if err := os.WriteFile(path, []byte("workspace:\n  env:\n    OPENCODE_PASSWORD: ${OPENCODE_PASSWORD}\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	lookup := func(key string) (string, bool) {
-		if key == "OPENCODE_PASSWORD" {
-			return "env-file-secret", true
-		}
-		return "", false
-	}
-	attach, err := LoadAttachWithEnvironment(path, true, nil, lookup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	events, err := LoadEventsWithEnvironment(path, true, nil, lookup)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if attach.Env["OPENCODE_PASSWORD"] != "env-file-secret" || events.Env["OPENCODE_PASSWORD"] != "env-file-secret" {
-		t.Fatal("client projections did not use caller environment")
-	}
-}
-
 func TestLoadRejectsHostOnlySecretAliasedIntoWorkspace(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
@@ -476,63 +426,6 @@ func TestLoadWorkspaceRejectsDuplicateWorkspaceSections(t *testing.T) {
 	}
 	if _, err := LoadWorkspace(path, directory, true, Overrides{}); err == nil {
 		t.Fatal("LoadWorkspace accepted duplicate workspace sections")
-	}
-}
-
-func TestLoadAttachPreservesExplicitEmptyPassword(t *testing.T) {
-	t.Parallel()
-	directory := t.TempDir()
-	path := filepath.Join(directory, "fern.yaml")
-	if err := os.WriteFile(path, []byte("workspace:\n  env:\n    OPENCODE_PASSWORD: ''\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	client, err := LoadAttach(path, true, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	password, exists := client.Env["OPENCODE_PASSWORD"]
-	if !exists || password != "" {
-		t.Fatalf("explicit password was not preserved: value=%q exists=%t", password, exists)
-	}
-}
-
-func TestClientProjectionsIgnoreUnrelatedMalformedValues(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "fern.yaml")
-	data := []byte("workspace:\n  name: demo\n  env:\n    UNUSED:\n      nested: value\nproxy:\n  listen: [invalid]\n")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadEvents(path, true, nil); err != nil {
-		t.Fatalf("event projection parsed unrelated values: %v", err)
-	}
-	data = []byte("workspace:\n  name: [invalid]\n  env:\n    UNUSED:\n      nested: value\nproxy:\n  operatorListen: 127.0.0.1:9090\n")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	client, err := LoadAttach(path, true, nil)
-	if err != nil {
-		t.Fatalf("attach projection parsed unrelated values: %v", err)
-	}
-	if client.Listen != "127.0.0.1:9090" {
-		t.Fatalf("attach listen = %q", client.Listen)
-	}
-}
-
-func TestClientOverridesSkipInvalidRelevantYAML(t *testing.T) {
-	t.Parallel()
-	path := filepath.Join(t.TempDir(), "fern.yaml")
-	data := []byte("workspace:\n  name: [invalid]\nproxy:\n  listen: [invalid]\n")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	listen := "127.0.0.1:9090"
-	if _, err := LoadAttach(path, true, &listen); err != nil {
-		t.Fatalf("attach override did not skip invalid YAML: %v", err)
-	}
-	name := "demo"
-	if _, err := LoadEvents(path, true, &name); err != nil {
-		t.Fatalf("event override did not skip invalid YAML: %v", err)
 	}
 }
 
@@ -899,6 +792,7 @@ func TestValidateTaskPolicyBoundsAndDependencies(t *testing.T) {
 		{"attempt_long", func(value *Config) { value.Tasks.AttemptTimeout = 24*time.Hour + time.Nanosecond }},
 		{"lease_zero", func(value *Config) { value.Tasks.LeaseDuration = 0 }},
 		{"lease_negative", func(value *Config) { value.Tasks.LeaseDuration = -time.Second }},
+		{"lease_short", func(value *Config) { value.Tasks.LeaseDuration = time.Minute - time.Nanosecond }},
 		{"lease_long", func(value *Config) { value.Tasks.LeaseDuration = 5*time.Minute + time.Nanosecond }},
 		{"lease_after_timeout", func(value *Config) {
 			value.Tasks.AttemptTimeout, value.Tasks.LeaseDuration = time.Minute, 2*time.Minute
@@ -994,6 +888,27 @@ func TestValidateBackgroundRouteContract(t *testing.T) {
 				t.Fatal("invalid background route was accepted")
 			}
 		})
+	}
+}
+
+func TestBackgroundBootstrapCannotAuthorizeExecution(t *testing.T) {
+	t.Parallel()
+	value := validTaskConfig(t)
+	value.RemoteOrigin = "https://fern.example.ts.net"
+	value.Tasks.BackgroundImage = "image:test"
+	value.Tasks.BackgroundImageID = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	value.Tasks.BackgroundRoute = &BackgroundRoute{Listen: "127.0.0.1:9090", Origin: "https://fern.example.ts.net:8443"}
+	value.Workspace.GitHub.InstallationID = 0
+	projected, err := ProjectBackgroundBootstrap(value)
+	if err != nil {
+		t.Fatalf("pending onboarding configuration: %v", err)
+	}
+	if err := ValidateBackground(projected); err == nil {
+		t.Fatal("pending installation ID authorized Background Run execution")
+	}
+	value.Workspace.GitHub.InstallationID = -1
+	if _, err := ProjectBackgroundBootstrap(value); err == nil {
+		t.Fatal("negative installation ID was accepted for onboarding")
 	}
 }
 
@@ -1166,7 +1081,7 @@ func TestBackgroundEnvironmentRejectsCredentialCustodyViolations(t *testing.T) {
 	}
 }
 
-func TestExamplesRemainLoadableWithTasksDisabled(t *testing.T) {
+func TestExamplesDescribeBackgroundRunProductionShape(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		path        string
@@ -1186,8 +1101,10 @@ func TestExamplesRemainLoadableWithTasksDisabled(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if loaded.Tasks != nil {
-				t.Fatalf("example unexpectedly enables tasks: %+v", loaded.Tasks)
+			if loaded.Tasks == nil || loaded.Tasks.BackgroundImage == "" || loaded.Tasks.BackgroundImageID == "" ||
+				loaded.Tasks.BackgroundRoute == nil || loaded.Workspace.GitHub == nil ||
+				loaded.Workspace.GitHub.Mode != GitHubModeGitHubAppBroker || loaded.OperatorListen == "" {
+				t.Fatalf("example does not describe the Background Run production shape: %+v", loaded)
 			}
 		})
 	}
@@ -1223,7 +1140,7 @@ func TestGitHubAuthorityModesAreExplicitAndClosed(t *testing.T) {
 		{name: "broker", github: "mode: github-app-broker\n    hostname: github.com\n    installationId: 7\n", wantErr: false},
 		{name: "implicit", github: "hostname: github.com\n", wantErr: true},
 		{name: "workspace gh installation", github: "mode: workspace-gh\n    hostname: github.com\n    installationId: 7\n", wantErr: true},
-		{name: "broker missing installation", github: "mode: github-app-broker\n    hostname: github.com\n", wantErr: true},
+		{name: "broker pending installation", github: "mode: github-app-broker\n    hostname: github.com\n", wantErr: false},
 		{name: "other host", github: "mode: workspace-gh\n    hostname: example.com\n", wantErr: true},
 		{name: "unknown mode", github: "mode: other\n    hostname: github.com\n", wantErr: true},
 	} {

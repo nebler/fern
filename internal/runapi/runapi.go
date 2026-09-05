@@ -38,7 +38,7 @@ const (
 )
 
 type Store interface {
-	AdmitTask(context.Context, taskstore.AdmitTaskParams) (taskstore.Admission, error)
+	AdmitBackgroundRun(context.Context, taskstore.AdmitBackgroundRunParams) (taskstore.Admission, error)
 	FindReceiptByIdempotency(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error)
 	GetBackgroundRun(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRun, error)
 	ListBackgroundRuns(context.Context, task.WorkspaceID, task.ActorSnapshot, int) ([]taskstore.BackgroundRun, error)
@@ -64,6 +64,10 @@ type RouteResolver interface {
 	ActiveOrigin(taskstore.BackgroundRun) (string, bool)
 }
 
+type RetentionVerifier interface {
+	Verify(context.Context, taskstore.Result) error
+}
+
 type Config struct {
 	WorkspaceID                 task.WorkspaceID
 	RepositoryID                task.RepositoryID
@@ -83,13 +87,14 @@ type Config struct {
 	BudgetSnapshot              json.RawMessage
 	Wake                        func()
 	Route                       RouteResolver
+	RetentionVerifier           RetentionVerifier
 	SealPolicyVersion           string
 }
 
 type Handler struct{ config Config }
 
 func New(config Config) (*Handler, error) {
-	if config.Store == nil || config.Generator == nil || config.ActorResolver == nil || config.BaseVerifier == nil || config.Now == nil ||
+	if config.Store == nil || config.Generator == nil || config.ActorResolver == nil || config.BaseVerifier == nil || config.RetentionVerifier == nil || config.Now == nil ||
 		config.AttemptTimeout <= 0 || config.RepositoryID == 0 || config.RepositoryRemote == "" ||
 		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.BackgroundEnvironmentSHA256 == ([32]byte{}) ||
 		len(config.BudgetSnapshot) == 0 || !json.Valid(config.BudgetSnapshot) {
@@ -295,6 +300,7 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 		writeStoreError(w, err)
 		return
 	}
+	retained := h.config.RetentionVerifier.Verify(r.Context(), projection.Result) == nil
 	digest := func(value [32]byte) string { return hex.EncodeToString(value[:]) }
 	writeJSON(w, http.StatusOK, struct {
 		RunID  task.TaskID `json:"run_id"`
@@ -348,7 +354,7 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 		Retention: struct {
 			Verified        bool `json:"verified"`
 			Reconstructable bool `json:"reconstructable"`
-		}{true, true},
+		}{retained, retained},
 		Cleanup: struct {
 			Complete bool `json:"complete"`
 		}{run.EffectPhase == taskstore.BackgroundRunEffectCleanupComplete},
@@ -440,7 +446,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.Acto
 		ImageIdentity:     h.config.BackgroundImageIdentity,
 		CloneIdentity:     "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode",
 		ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint"}
-	admission, err := h.config.Store.AdmitTask(r.Context(), taskstore.AdmitTaskParams{
+	admission, err := h.config.Store.AdmitBackgroundRun(r.Context(), taskstore.AdmitBackgroundRunParams{
 		TaskID: ids.TaskID, AttemptID: ids.AttemptID, ReceiptID: ids.ReceiptID, TaskEventID: ids.TaskEventID,
 		AttemptEventID: ids.AttemptEventID, OpenCodeSessionID: ids.OpenCodeSessionID, OpenCodeMessageID: ids.OpenCodeMessageID,
 		Claim: claim, Title: "Background Run", Prompt: input.Instruction, RepositoryID: h.config.RepositoryID,

@@ -29,7 +29,7 @@ type memoryStore struct {
 	payloads          [][]byte
 	findCalls         int
 	find              func(int, taskstore.PublicationWork) (taskstore.PublicationWork, error)
-	fencer            *fakeFencer
+	fencer            *fakeSource
 	mutations         int
 	mutationsUnfenced int
 }
@@ -105,7 +105,7 @@ func (store *memoryStore) recordMutation() {
 	}
 }
 
-type fakeFencer struct {
+type fakeSource struct {
 	mu        sync.Mutex
 	held      bool
 	acquires  int
@@ -114,13 +114,13 @@ type fakeFencer struct {
 	onAcquire func()
 }
 
-func (fencer *fakeFencer) AcquirePaused(context.Context) (func(), error) {
+func (fencer *fakeSource) Acquire(context.Context, taskstore.Result) (string, func() error, error) {
 	fencer.mu.Lock()
 	fencer.acquires++
 	if fencer.err != nil {
 		err := fencer.err
 		fencer.mu.Unlock()
-		return nil, err
+		return "", nil, err
 	}
 	fencer.held = true
 	onAcquire := fencer.onAcquire
@@ -129,23 +129,24 @@ func (fencer *fakeFencer) AcquirePaused(context.Context) (func(), error) {
 		onAcquire()
 	}
 	var once sync.Once
-	return func() {
+	return "/private/retained-checkout", func() error {
 		once.Do(func() {
 			fencer.mu.Lock()
 			fencer.held = false
 			fencer.releases++
 			fencer.mu.Unlock()
 		})
+		return nil
 	}, nil
 }
 
-func (fencer *fakeFencer) isHeld() bool {
+func (fencer *fakeSource) isHeld() bool {
 	fencer.mu.Lock()
 	defer fencer.mu.Unlock()
 	return fencer.held
 }
 
-func (fencer *fakeFencer) counts() (int, int) {
+func (fencer *fakeSource) counts() (int, int) {
 	fencer.mu.Lock()
 	defer fencer.mu.Unlock()
 	return fencer.acquires, fencer.releases
@@ -165,7 +166,7 @@ type fakePublisher struct {
 	pushes            int
 	reconcilePulls    int
 	creates           int
-	fencer            *fakeFencer
+	fencer            *fakeSource
 	callWithoutFence  int
 	request           taskpublication.Request
 }
@@ -262,7 +263,7 @@ func TestCoordinatorUsesAndClosesSelectedPublicationSource(t *testing.T) {
 	}
 }
 
-func TestCoordinatorDoesNotMaterializeForRemoteOnlyRecovery(t *testing.T) {
+func TestCoordinatorReattestsSourceForRemoteRecovery(t *testing.T) {
 	tests := []struct {
 		name  string
 		phase taskstore.PublicationPhase
@@ -282,8 +283,8 @@ func TestCoordinatorDoesNotMaterializeForRemoteOnlyRecovery(t *testing.T) {
 			if err := coordinator.RunOnce(context.Background()); err != nil {
 				t.Fatal(err)
 			}
-			if source.acquires != 0 || source.closes != 0 {
-				t.Fatalf("remote-only recovery materialized source: acquires=%d closes=%d", source.acquires, source.closes)
+			if source.acquires != 1 || source.closes != 1 {
+				t.Fatalf("remote recovery did not reattest source: acquires=%d closes=%d", source.acquires, source.closes)
 			}
 		})
 	}
@@ -322,7 +323,7 @@ func TestAcquireFailureIsSanitizedAndBlocksAllWork(t *testing.T) {
 	cause := errors.New("pause failed secret-output-marker")
 	store.fencer.err = cause
 	err := coordinator.RunOnce(context.Background())
-	if !errors.Is(err, ErrFenceFailed) || !errors.Is(err, cause) {
+	if !errors.Is(err, ErrSourceFailed) || !errors.Is(err, cause) {
 		t.Fatalf("error = %v", err)
 	}
 	if strings.Contains(err.Error(), "secret-output-marker") {
@@ -471,10 +472,12 @@ func TestSelectionRaceAtFenceBlocksMutation(t *testing.T) {
 	}
 }
 
-func TestNewRequiresFencer(t *testing.T) {
+func TestNewRequiresSource(t *testing.T) {
 	store, publisher, coordinator := testCoordinator(t, taskstore.PublicationPhaseNone)
-	if _, err := New(store, nil, publisher, coordinator.ids, coordinator.config); err == nil {
-		t.Fatal("New accepted a nil fencer")
+	config := coordinator.config
+	config.ResultSource = nil
+	if _, err := New(store, publisher, coordinator.ids, config); err == nil {
+		t.Fatal("New accepted a nil retained result source")
 	}
 }
 
@@ -696,14 +699,14 @@ func testCoordinator(t *testing.T, phase taskstore.PublicationPhase) (*memorySto
 		Verification: taskstore.Verification{ID: verificationID, ResultID: resultID, TaskID: taskID, AttemptID: attemptID,
 			WorkspaceID: workspaceID, State: taskstore.VerificationSucceeded, VerifiedCommit: testResultSHA},
 	}
-	fencer := &fakeFencer{}
+	fencer := &fakeSource{}
 	store := &memoryStore{work: work, fencer: fencer}
 	publisher := &fakePublisher{fencer: fencer}
 	actor := task.ActorSnapshot{Type: task.ActorSystem, ID: "publication-worker", CredentialID: "host", Authentication: "internal", RequestID: "test"}
 	recovery := actor
 	recovery.Type = task.ActorRecovery
-	coordinator, err := New(store, fencer, publisher, ids, Config{WorkspaceID: workspaceID, OperationTimeout: time.Second,
-		PollInterval: time.Millisecond, Actor: actor, RecoveryActor: recovery, Now: func() time.Time { return now }})
+	coordinator, err := New(store, publisher, ids, Config{WorkspaceID: workspaceID, OperationTimeout: time.Second,
+		PollInterval: time.Millisecond, Actor: actor, RecoveryActor: recovery, ResultSource: fencer, Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}

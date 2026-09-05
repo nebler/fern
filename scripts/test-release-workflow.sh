@@ -39,8 +39,6 @@ required = [
     "./scripts/test-deployment.sh",
     "./integration/release/run.sh",
     "./integration/upgrade/run.sh",
-    "./scripts/test-opencode.sh",
-    "./scripts/test-lifecycle.sh",
     "./integration/background-run-qualification/run.sh",
     "bun install --frozen-lockfile",
     "bun run smoke",
@@ -59,7 +57,21 @@ for value in required:
 validate, publish = workflow.split("\n  publish:\n", 1)
 qualification = "./integration/background-run-qualification/run.sh"
 assert qualification in validate, "Background Run qualification is not a release validation gate"
-assert "opencode-background-source" not in publish, "release publishes an unpromoted Background Run source image"
+assert re.search(r"^\s+context: images/opencode-background-source$", publish, re.MULTILINE), \
+    "release does not publish the qualified Background Run source image"
+assert not re.search(r"^\s+context: images/opencode$", publish, re.MULTILINE), \
+    "release still publishes the retired persistent workspace image"
+assert "platforms: linux/amd64" in publish and "platforms: linux/arm64" in publish, \
+    "release does not build both source-image architectures independently"
+assert "candidate-${{ github.sha }}-amd64" in publish and "candidate-${{ github.sha }}-arm64" in publish, \
+    "release source images are not isolated as candidate artifacts"
+assert "FERN_OPENCODE_BACKGROUND_SOURCE_BUILD=0 ./integration/background-run-qualification/run.sh" in publish, \
+    "release does not qualify the exact pushed candidate digests"
+assert "docker buildx imagetools create" in publish, "release does not promote qualified candidate digests"
+assert publish.index("Qualify exact candidate images") < publish.index("Promote only qualified candidate digests"), \
+    "release promotes source images before qualification"
+assert "org.opencontainers.image.source=https://github.com/${{ github.repository }}" not in publish, \
+    "release overwrites the qualified upstream source identity"
 
 assert qualification in ci_workflow, "CI is missing authoritative Background Run qualification"
 assert "oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6" in workflow, \

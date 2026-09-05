@@ -15,9 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/nebler/fern/internal/control"
-	"github.com/nebler/fern/internal/runtime"
 	"github.com/nebler/fern/internal/task"
-	"github.com/nebler/fern/internal/taskapi"
 )
 
 const (
@@ -103,58 +101,7 @@ func newPairingState(stores ...*control.Store) *pairingState {
 	return state
 }
 
-func (state *pairingState) handler(next http.Handler, auth runtime.ServerAuth, control ControlAuth) http.Handler {
-	upstreamAuth := newBasicAuthenticator("opencode", auth.Password, "opencode")
-	controlAuth := newBasicAuthenticator("fern", control.Password, "fern-control")
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		switch {
-		case request.URL.Path == "/fern/pair/new" && request.URL.EscapedPath() == "/fern/pair/new":
-			if !controlAuth.valid(request) {
-				controlAuth.reject(writer)
-				return
-			}
-			request.Header.Del("Authorization")
-			state.issue(writer, request)
-		case request.URL.Path == "/fern/pair" && request.URL.EscapedPath() == "/fern/pair":
-			state.pair(writer, request)
-		case requiresControlAuth(request):
-			if !controlAuth.valid(request) {
-				controlAuth.reject(writer)
-				return
-			}
-			stripDeviceCookie(request)
-			request.Header.Del("Authorization")
-			next.ServeHTTP(writer, request)
-		default:
-			if device, credential, valid := state.authenticatedDevice(request); valid {
-				if !state.authorizeDeviceMutation(writer, request, credential) {
-					return
-				}
-				if state.servePaired(writer, request, next, auth, device, credential) {
-					return
-				}
-			}
-			if isFernRoute(request) && controlAuth.valid(request) {
-				request.Header.Del("Authorization")
-				next.ServeHTTP(writer, request)
-				return
-			}
-			if !upstreamAuth.enabled {
-				stripDeviceCookie(request)
-				next.ServeHTTP(writer, request)
-				return
-			}
-			if !upstreamAuth.valid(request) {
-				upstreamAuth.reject(writer)
-				return
-			}
-			stripDeviceCookie(request)
-			next.ServeHTTP(writer, request)
-		}
-	})
-}
-
-func (state *pairingState) remoteHandler(next http.Handler, auth runtime.ServerAuth) http.Handler {
+func (state *pairingState) remoteHandler(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.URL.Path == "/fern/pair" && request.URL.EscapedPath() == "/fern/pair" {
 			request.Header.Del("Authorization")
@@ -173,23 +120,21 @@ func (state *pairingState) remoteHandler(next http.Handler, auth runtime.ServerA
 			http.Error(writer, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if isFernRoute(request) && request.URL.Path != "/fern" && request.URL.Path != "/fern/" && !isTaskAPIPath(request.URL.Path) && !isTaskUIPath(request.URL.Path) && !isPluginPairedPath(request.URL.Path) {
-			if request.URL.Path == csrfTokenPath && request.URL.EscapedPath() == csrfTokenPath {
-				state.serveCSRFToken(writer, request, credential)
-				return
-			}
+		if request.URL.Path == csrfTokenPath && request.URL.EscapedPath() == csrfTokenPath {
+			state.serveCSRFToken(writer, request, credential)
+			return
+		}
+		if isFernRoute(request) && request.URL.Path != "/fern" && request.URL.Path != "/fern/" && request.URL.Path != csrfTokenPath &&
+			request.URL.Path != "/fern/api/runs" && !strings.HasPrefix(request.URL.Path, "/fern/api/runs/") &&
+			!strings.HasPrefix(request.URL.Path, "/fern/api/v1/results/") && !isPluginPairedPath(request.URL.Path) {
 			http.NotFound(writer, request)
 			return
 		}
 		if !state.authorizeDeviceMutation(writer, request, credential) {
 			return
 		}
-		state.servePaired(writer, request, next, auth, device, credential)
+		state.servePaired(writer, request, next, device, credential)
 	})
-}
-
-func isTaskUIPath(path string) bool {
-	return path == "/fern/tasks" || path == "/fern/assets/tasks.js"
 }
 
 func isPluginPairedPath(path string) bool {
@@ -203,10 +148,9 @@ func isPluginPairedPath(path string) bool {
 	return false
 }
 
-func (state *pairingState) operatorHandler(next http.Handler, auth runtime.ServerAuth, control ControlAuth) http.Handler {
+func (state *pairingState) operatorHandler(next http.Handler, control ControlAuth) http.Handler {
 	// This loopback-only surface uses explicit Basic credentials rather than
 	// ambient browser cookies, so device CSRF tokens do not apply here.
-	upstreamAuth := newBasicAuthenticator("opencode", auth.Password, "opencode")
 	controlAuth := newBasicAuthenticator("fern", control.Password, "fern-control")
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if isFernRoute(request) {
@@ -225,7 +169,7 @@ func (state *pairingState) operatorHandler(next http.Handler, auth runtime.Serve
 				http.Error(writer, "operator identity unavailable", http.StatusInternalServerError)
 				return
 			}
-			request = request.WithContext(taskapi.WithActor(request.Context(), actor))
+			request = request.WithContext(task.WithActor(request.Context(), actor))
 			if request.URL.Path == "/fern/pair/new" && request.URL.EscapedPath() == "/fern/pair/new" {
 				state.issue(writer, request)
 				return
@@ -233,16 +177,7 @@ func (state *pairingState) operatorHandler(next http.Handler, auth runtime.Serve
 			next.ServeHTTP(writer, request)
 			return
 		}
-		if !upstreamAuth.valid(request) {
-			upstreamAuth.reject(writer)
-			return
-		}
-		request.Header.Del("Authorization")
-		stripAllCookies(request)
-		if auth.Password != "" {
-			request.SetBasicAuth("opencode", auth.Password)
-		}
-		next.ServeHTTP(writer, request)
+		http.NotFound(writer, request)
 	})
 }
 
@@ -442,7 +377,7 @@ func (state *pairingState) authenticatedDevice(request *http.Request) (control.D
 	return control.Device{}, cookie.Value, valid
 }
 
-func (state *pairingState) servePaired(writer http.ResponseWriter, request *http.Request, next http.Handler, auth runtime.ServerAuth, device control.Device, credential string) bool {
+func (state *pairingState) servePaired(writer http.ResponseWriter, request *http.Request, next http.Handler, device control.Device, credential string) bool {
 	if state.store != nil {
 		ctx, cancel := context.WithDeadline(request.Context(), device.ExpiresAt)
 		unregister, admitted := state.store.RegisterDeviceRequest(device.ID, cancel)
@@ -466,15 +401,9 @@ func (state *pairingState) servePaired(writer http.ResponseWriter, request *http
 		Authentication: "fern_device_cookie", RequestID: requestID,
 	}
 	request = request.WithContext(context.WithValue(request.Context(), csrfCredentialKey{}, credential))
-	request = request.WithContext(taskapi.WithActor(request.Context(), actor))
+	request = request.WithContext(task.WithActor(request.Context(), actor))
 	stripAllCookies(request)
-	if isFernRoute(request) {
-		request.Header.Del("Authorization")
-	} else if auth.Password != "" {
-		request.SetBasicAuth("opencode", auth.Password)
-	} else {
-		request.Header.Del("Authorization")
-	}
+	request.Header.Del("Authorization")
 	next.ServeHTTP(writer, request)
 	return true
 }

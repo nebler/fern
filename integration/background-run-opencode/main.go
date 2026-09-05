@@ -525,7 +525,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 		CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode",
 		ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint",
 	}
-	admission, err := store.AdmitTask(ctx, taskstore.AdmitTaskParams{
+	admission, err := store.AdmitBackgroundRun(ctx, taskstore.AdmitBackgroundRunParams{
 		TaskID: generated.TaskID, AttemptID: generated.AttemptID, ReceiptID: generated.ReceiptID,
 		TaskEventID: generated.TaskEventID, AttemptEventID: generated.AttemptEventID,
 		OpenCodeSessionID: generated.OpenCodeSessionID, OpenCodeMessageID: generated.OpenCodeMessageID,
@@ -791,7 +791,7 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 		CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode",
 		ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint",
 	}
-	admission, err := store.AdmitTask(ctx, taskstore.AdmitTaskParams{
+	admission, err := store.AdmitBackgroundRun(ctx, taskstore.AdmitBackgroundRunParams{
 		TaskID: generated.TaskID, AttemptID: generated.AttemptID, ReceiptID: generated.ReceiptID,
 		TaskEventID: generated.TaskEventID, AttemptEventID: generated.AttemptEventID,
 		OpenCodeSessionID: generated.OpenCodeSessionID, OpenCodeMessageID: generated.OpenCodeMessageID,
@@ -910,7 +910,7 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 	if err != nil {
 		return err
 	}
-	resolver, err := taskresultsource.New(store, artifact, repository)
+	resolver, err := taskresultsource.New(store, artifact)
 	if err != nil {
 		return err
 	}
@@ -1102,7 +1102,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 		ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint",
 	}
 	requestHash := sha256.Sum256([]byte("serial-fence-crash-create"))
-	admission, err := store.AdmitTask(ctx, taskstore.AdmitTaskParams{
+	admission, err := store.AdmitBackgroundRun(ctx, taskstore.AdmitBackgroundRunParams{
 		TaskID: generated.TaskID, AttemptID: generated.AttemptID, ReceiptID: generated.ReceiptID,
 		TaskEventID: generated.TaskEventID, AttemptEventID: generated.AttemptEventID,
 		OpenCodeSessionID: generated.OpenCodeSessionID, OpenCodeMessageID: generated.OpenCodeMessageID,

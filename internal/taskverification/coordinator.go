@@ -6,8 +6,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"path/filepath"
-	"strings"
 	"sync"
 	"time"
 
@@ -39,32 +37,24 @@ type Runner interface {
 	Run(context.Context, verification.Policy, verification.Request) (verification.Result, error)
 }
 
-// Fencer pauses workspace compute and excludes repository writers until the
-// returned release function is called.
-type Fencer interface {
-	AcquirePaused(context.Context) (func(), error)
-}
-
 type ResultSource interface {
 	Acquire(context.Context, taskstore.Result) (string, func() error, error)
 }
 
 type Config struct {
-	WorkspaceID    task.WorkspaceID
-	RepositoryPath string
-	PollInterval   time.Duration
-	Deadline       time.Duration
-	Actor          task.ActorSnapshot
-	RecoveryActor  task.ActorSnapshot
-	Now            func() time.Time
-	OnError        func(error)
-	OnSuccess      func()
-	ResultSource   ResultSource
+	WorkspaceID   task.WorkspaceID
+	PollInterval  time.Duration
+	Deadline      time.Duration
+	Actor         task.ActorSnapshot
+	RecoveryActor task.ActorSnapshot
+	Now           func() time.Time
+	OnError       func(error)
+	OnSuccess     func()
+	ResultSource  ResultSource
 }
 
 type Coordinator struct {
 	store          Store
-	fencer         Fencer
 	runner         Runner
 	policy         verification.Policy
 	policySnapshot verification.PolicySnapshot
@@ -75,15 +65,12 @@ type Coordinator struct {
 	runMu          sync.Mutex
 }
 
-func New(store Store, fencer Fencer, runner Runner, policy verification.Policy, ids *task.Generator, config Config) (*Coordinator, error) {
-	if store == nil || fencer == nil || runner == nil || ids == nil {
+func New(store Store, runner Runner, policy verification.Policy, ids *task.Generator, config Config) (*Coordinator, error) {
+	if store == nil || runner == nil || ids == nil || config.ResultSource == nil {
 		return nil, errors.New("task verification dependencies are required")
 	}
 	if _, err := task.ParseWorkspaceID(string(config.WorkspaceID)); err != nil {
 		return nil, errors.New("valid task verification workspace is required")
-	}
-	if !filepath.IsAbs(config.RepositoryPath) || filepath.Clean(config.RepositoryPath) != config.RepositoryPath || strings.IndexByte(config.RepositoryPath, 0) >= 0 {
-		return nil, errors.New("absolute clean verification repository path is required")
 	}
 	if config.Deadline <= 0 || config.Deadline > 2*time.Hour {
 		return nil, errors.New("task verification deadline must be positive and at most two hours")
@@ -100,9 +87,6 @@ func New(store Store, fencer Fencer, runner Runner, policy verification.Policy, 
 	if config.OnSuccess == nil {
 		config.OnSuccess = func() {}
 	}
-	if config.ResultSource == nil {
-		config.ResultSource = persistentResultSource(config.RepositoryPath)
-	}
 	if err := config.Actor.Validate(); err != nil || config.Actor.Type != task.ActorSystem {
 		return nil, errors.New("valid system verification actor is required")
 	}
@@ -118,7 +102,7 @@ func New(store Store, fencer Fencer, runner Runner, policy verification.Policy, 
 		return nil, err
 	}
 	runnerSnapshot.Version = durableRunnerVersion(runnerSnapshot)
-	return &Coordinator{store: store, fencer: fencer, runner: runner, policy: policy, policySnapshot: policySnapshot,
+	return &Coordinator{store: store, runner: runner, policy: policy, policySnapshot: policySnapshot,
 		runnerSnapshot: runnerSnapshot, source: config.ResultSource, ids: ids, config: config}, nil
 }
 
@@ -208,17 +192,26 @@ func (c *Coordinator) prepare(ctx context.Context, source taskstore.Verification
 	})
 }
 
-func (c *Coordinator) executePrepared(ctx context.Context, prepared taskstore.VerificationRecord) error {
-	release, err := c.fencer.AcquirePaused(ctx)
+func (c *Coordinator) executePrepared(ctx context.Context, prepared taskstore.VerificationRecord) (resultErr error) {
+	v := prepared.Verification
+	selectedResult, err := c.store.GetResult(ctx, v.ResultID)
 	if err != nil {
 		return err
 	}
-	if release == nil {
-		return errors.New("task verification fence did not provide a release function")
+	repository, closeSource, sourceErr := c.source.Acquire(ctx, selectedResult)
+	if sourceErr != nil {
+		return sourceErr
 	}
-	defer release()
+	if closeSource == nil {
+		return taskstore.ErrCorruptStore
+	}
+	sourceOpen := true
+	defer func() {
+		if sourceOpen {
+			resultErr = errors.Join(resultErr, closeSource())
+		}
+	}()
 
-	v := prepared.Verification
 	taskRow, attempt, err := c.owners(ctx, v)
 	if err != nil {
 		return err
@@ -250,20 +243,15 @@ func (c *Coordinator) executePrepared(ctx context.Context, prepared taskstore.Ve
 		taskRow.SealedResultID != resultRow.ID || attempt.SealedResultID != resultRow.ID {
 		return c.recover(ctx, running.Verification, taskRow.Revision, attempt.Revision, "verification_result_integrity_failed", "integrity_failure", nil)
 	}
-	repository, closeSource, sourceErr := c.source.Acquire(ctx, resultRow)
-	if sourceErr != nil || closeSource == nil {
+	if resultRow.Revision != selectedResult.Revision || resultRow.ID != selectedResult.ID {
 		return c.recover(ctx, running.Verification, taskRow.Revision, attempt.Revision, "verification_result_source_failed", "integrity_failure", nil)
 	}
 	result, runErr := c.runner.Run(ctx, c.policy, verification.Request{RepositoryID: resultRow.RepositoryID,
 		BaseSHA: resultRow.BaseSHA, ResultCommit: resultRow.ResultCommit, RepositoryPath: repository})
-	runErr = errors.Join(runErr, closeSource())
+	closeErr := closeSource()
+	sourceOpen = false
+	runErr = errors.Join(runErr, closeErr)
 	return c.recordResult(ctx, running.Verification, taskRow.Revision, attempt.Revision, result, runErr)
-}
-
-type persistentResultSource string
-
-func (path persistentResultSource) Acquire(context.Context, taskstore.Result) (string, func() error, error) {
-	return string(path), func() error { return nil }, nil
 }
 
 func (c *Coordinator) recordResult(ctx context.Context, v taskstore.Verification, taskRevision, attemptRevision int64, result verification.Result, runErr error) error {

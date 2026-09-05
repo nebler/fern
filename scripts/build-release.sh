@@ -45,7 +45,7 @@ esac
 export SOURCE_DATE_EPOCH=$source_date_epoch
 
 verified_tag=${FERN_VERIFIED_TAG:-}
-image_repository=${FERN_IMAGE_REPOSITORY:-fern/opencode}
+image_repository=${FERN_IMAGE_REPOSITORY:-fern/opencode-background-source}
 image_digest=${FERN_IMAGE_DIGEST:-}
 image_sbom_path=${FERN_IMAGE_SBOM_PATH:-}
 image_provenance_url=${FERN_IMAGE_PROVENANCE_URL:-}
@@ -59,8 +59,8 @@ if [ -z "$image_digest" ]; then
 			exit 1
 		fi
 	done
-	[ "$image_repository" = fern/opencode ] || {
-		printf 'error: local release image repository must be fern/opencode\n' >&2
+	[ "$image_repository" = fern/opencode-background-source ] || {
+		printf 'error: local release image repository must be fern/opencode-background-source\n' >&2
 		exit 1
 	}
 	version_source=builder-argument
@@ -281,9 +281,9 @@ cat >"$payload/RELEASE-MANIFEST.json" <<EOF
     "upgrade_harness": "integration/upgrade/run.sh",
     "host_utility": "scripts/fern-host-backup.py",
     "support_status": "installed-cli-operational-recovery",
-    "activation_model": "staged-filesystem-docker-best-effort-rollback",
+    "activation_model": "staged-filesystem-rollback",
     "credential_policy": "external-recipient-with-checksums",
-    "volume_export_mode": "managed-docker-volume-staged-and-verified"
+    "volume_export_mode": "no-runtime-volumes"
   }
 }
 EOF

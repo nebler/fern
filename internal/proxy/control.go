@@ -34,14 +34,6 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 		http.Error(writer, "legacy workflow and publication control is retired", http.StatusGone)
 		return true
 	}
-	if isTaskAPIPath(path) {
-		if controls.Tasks == nil {
-			http.NotFound(writer, request)
-			return true
-		}
-		controls.Tasks.ServeHTTP(writer, request)
-		return true
-	}
 	if path == "/fern/api/runs" || strings.HasPrefix(path, "/fern/api/runs/") {
 		if controls.Runs == nil {
 			http.NotFound(writer, request)
@@ -50,18 +42,12 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 		controls.Runs.ServeHTTP(writer, request)
 		return true
 	}
-	if path == "/fern/api/v1/debug/wake-trace" {
-		// Operator-only diagnostic. The remote surface builds Controls without
-		// WakeTrace, so the route is absent there rather than exposed.
-		if controls.WakeTrace == nil {
+	if strings.HasPrefix(path, "/fern/api/v1/results/") {
+		if controls.Results == nil {
 			http.NotFound(writer, request)
 			return true
 		}
-		if request.Method != http.MethodPost && request.Method != http.MethodGet {
-			methodNotAllowed(writer, "GET, POST")
-			return true
-		}
-		controls.WakeTrace.ServeHTTP(writer, request)
+		controls.Results.ServeHTTP(writer, request)
 		return true
 	}
 	if path == "/fern/status" || path == "/fern/metrics" {
@@ -148,11 +134,6 @@ func retiredLegacyControlPath(path string) bool {
 		return len(parts) == 2 && parts[0] != "" && parts[1] == "publish"
 	}
 	return false
-}
-
-func isTaskAPIPath(path string) bool {
-	return path == "/fern/api/v1/tasks" || path == "/fern/api/v1/events" || strings.HasPrefix(path, "/fern/api/v1/tasks/") ||
-		strings.HasPrefix(path, "/fern/api/v1/results/")
 }
 
 func revokeDevice(store *control.Store, id string, onRevoked func(string)) error {

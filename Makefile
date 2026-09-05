@@ -1,13 +1,10 @@
-.PHONY: build format image image-background image-background-source lint test test-background-qualification test-browser test-critical test-race test-deployment vet
+.PHONY: build format image-background image-background-source lint test test-background-qualification test-critical test-race test-deployment vet
 
 build:
 	go build -o fern ./cmd/fern
 
 format:
 	gofmt -w cmd internal
-
-image:
-	docker build -t fern/opencode:dev images/opencode
 
 image-background:
 	docker build -t fern/opencode-background:dev images/opencode-background
@@ -26,9 +23,6 @@ test-background-qualification:
 
 test-race:
 	go test -race ./...
-
-test-browser:
-	./scripts/test-browser.sh
 
 test-critical:
 	./scripts/test-critical-coverage.sh
