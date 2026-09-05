@@ -13,6 +13,9 @@ The agent owns Git commits, pushes, and pull requests inside its disposable run.
 Fern does not maintain a persistent coding workspace and does not proxy a
 general-purpose OpenCode server.
 
+**Using Fern:** start with the [user guide](docs/usage.md) for current deployment
+prerequisites, client setup, and the run → attach → seal workflow.
+
 For implementation details, start with [the architecture](ARCHITECTURE.md) and
 the [Go package guide](docs/go-packages.md). The guide links every package README,
 the naming/maintainability review, and reproducible local performance results.
@@ -204,7 +207,8 @@ Fern keeps:
 
 Run clones, artifact work directories, containers, and
 volumes are disposable. This pre-release schema reset does not support older
-development taskstore databases; delete and recreate them.
+development taskstore databases. Preserve offline backups and initialize separate
+fresh state when required; do not delete existing state to bypass a startup error.
 
 Offline backup and encrypted credential commands remain available:
 
