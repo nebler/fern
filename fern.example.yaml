@@ -20,16 +20,6 @@ tasks:
   backgroundRoute:
     listen: 127.0.0.1:8443
     origin: https://this-host.example.ts.net:8443
-  budget:
-    maxTurns: 100
-  verification:
-    checkName: repository-tests
-    argv: [/usr/bin/make, test]
-    workingDirectory: ""
-    timeout: 15m
-    environment:
-      CI: "true"
-    outputBytes: 65536
 control:
   password: ${FERN_CONTROL_PASSWORD}
 proxy:

@@ -225,8 +225,11 @@ func resolveRunConnection(ctx context.Context, options runCLIOptions) (*runConne
 		}
 		return &runConnection{apiOrigin: origin, apiAuthorization: "Bearer " + token, client: client}, nil
 	}
-	cfg, err := loadBackgroundCommandConfig(options.configPath, options.configRequired, options.envPath, config.BackgroundOverrides{})
+	cfg, _, err := loadCommandConfig(options.configPath, options.configRequired, options.envPath, config.Overrides{})
 	if err != nil {
+		return nil, err
+	}
+	if err := config.ValidateBootstrap(cfg); err != nil {
 		return nil, err
 	}
 	api, err := loopbackURL(cfg.OperatorListen)

@@ -8,11 +8,14 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
 const StopBackgroundRunCommand = "run.stop"
 const BackgroundRunStoppedBeforeStart = "background_run_stopped_before_start"
+
+const backgroundRunResourceSpecVersion = run.ResourceSpecVersion
 
 const backgroundRunSelect = `
 SELECT r.task_id,r.attempt_id,r.workspace_id,r.generation,r.writer_generation,r.repository_id,r.repository_remote,r.base_oid,r.branch,
@@ -367,8 +370,8 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 		return BackgroundRun{}, err
 	}
 	if len(instructionHash) != 32 || len(profileHash) != 32 || len(environmentHash) != 32 || bytes.Equal(environmentHash, make([]byte, 32)) ||
-		(run.ResourceSpecVersion != 8 && run.ResourceSpecVersion != 9) || repositoryID <= 0 || run.Generation <= 0 || run.WriterGeneration != 1 || cancelEpoch < 0 ||
-		!run.State.valid() || !run.EffectPhase.valid() || !validBackgroundRunStatePhase(run.Profile, run.State, run.EffectPhase) || run.Creator.Validate() != nil || run.Creator.Type != task.ActorOpenCode {
+		run.ResourceSpecVersion != backgroundRunResourceSpecVersion || repositoryID <= 0 || run.Generation <= 0 || run.WriterGeneration != 1 || cancelEpoch < 0 ||
+		!validBackgroundRunStatePhase(run.Profile, run.State, run.EffectPhase) || run.Creator.Validate() != nil || run.Creator.Type != task.ActorOpenCode {
 		return BackgroundRun{}, ErrCorruptStore
 	}
 	copy(run.InstructionSHA256[:], instructionHash)
@@ -432,7 +435,7 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 		run.EffectPhase = BackgroundRunEffectExporting
 	case "artifact_committed":
 		run.State, run.EffectPhase = BackgroundRunResultReady, BackgroundRunEffectArtifactCommitted
-	case "cleanup", "legacy_result_not_retained", "":
+	case "cleanup", "":
 	default:
 		return BackgroundRun{}, ErrCorruptStore
 	}
@@ -466,40 +469,10 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 }
 
 func validBackgroundRunStatePhase(profile string, state BackgroundRunState, phase BackgroundRunEffectPhase) bool {
-	if profile == "opencode-1.18.16" {
-		return state == BackgroundRunFailed && phase == BackgroundRunEffectCleanupComplete
-	}
 	if profile != BackgroundRunSourceProfile {
 		return false
 	}
-	switch state {
-	case BackgroundRunQueued:
-		return phase == BackgroundRunEffectAbsent
-	case BackgroundRunSettingUp:
-		return phase == BackgroundRunEffectProvisionIntent || phase == BackgroundRunEffectCloneObserved || phase == BackgroundRunEffectVolumeObserved ||
-			phase == BackgroundRunEffectContainerObserved || phase == BackgroundRunEffectHealthObserved || phase == BackgroundRunEffectReady || phase == BackgroundRunEffectSessionObserved
-	case BackgroundRunWorking, BackgroundRunNeedsYou:
-		return phase == BackgroundRunEffectPromptAdmitted
-	case BackgroundRunCanceling:
-		return cleanupEffectPhase(phase) || phase == BackgroundRunEffectSealIntent || phase == BackgroundRunEffectExporting
-	case BackgroundRunUncertain:
-		return phase == BackgroundRunEffectProvisionIntent || phase == BackgroundRunEffectCloneObserved || phase == BackgroundRunEffectVolumeObserved ||
-			phase == BackgroundRunEffectContainerObserved || phase == BackgroundRunEffectHealthObserved || phase == BackgroundRunEffectReady ||
-			phase == BackgroundRunEffectSessionObserved || phase == BackgroundRunEffectPromptIntent || phase == BackgroundRunEffectPromptAdmitted || phase == BackgroundRunEffectStopIntent
-	case BackgroundRunResultReady:
-		return phase == BackgroundRunEffectArtifactCommitted || cleanupEffectPhase(phase) || phase == BackgroundRunEffectCleanupComplete
-	case BackgroundRunFailed:
-		return phase == BackgroundRunEffectPreEffectFailed || phase == BackgroundRunEffectCleanupComplete
-	case BackgroundRunCleanupRequired:
-		return cleanupEffectPhase(phase) || phase == BackgroundRunEffectExporting
-	default:
-		return false
-	}
-}
-
-func cleanupEffectPhase(phase BackgroundRunEffectPhase) bool {
-	return phase == BackgroundRunEffectStopIntent || phase == BackgroundRunEffectWriterInactive || phase == BackgroundRunEffectRouteRemoved ||
-		phase == BackgroundRunEffectContainerRemoved || phase == BackgroundRunEffectVolumeRemoved || phase == BackgroundRunEffectCloneRemoved
+	return run.Classify(run.State(state), run.Phase(phase)).Valid
 }
 
 func nullableText(value sql.NullString) string {

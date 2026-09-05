@@ -29,7 +29,7 @@ LEFT JOIN actor_snapshots ca ON ca.id=t.cancel_actor_snapshot_id`
 
 const attemptSelect = `
 SELECT id,task_id,workspace_id,sequence,state,delivery_phase,opencode_session_id,opencode_message_id,prompt_sha256,base_sha,
-       image_digest,opencode_protocol,execution_contract_version,agent,model_provider,model,budget_snapshot,
+       image_digest,opencode_protocol,execution_contract_version,agent,model_provider,model,
        deadline,delivery_claim_owner,delivery_claim_expires_at,delivery_started_at,admitted_at,
        opencode_log_aggregate_id,opencode_log_seq,cancellation_ack_at,recovery_reason,terminal_reason,
         sealed_result_id,revision,created_at,updated_at
@@ -46,13 +46,6 @@ SELECT e.id,e.cursor,e.workspace_id,e.task_id,e.attempt_id,e.entity_type,e.entit
        ` + actorColumns + `
 FROM events e JOIN actor_snapshots a ON a.id=e.actor_snapshot_id`
 
-func (s *Store) GetTask(ctx context.Context, id task.TaskID) (Task, error) {
-	if _, err := task.ParseTaskID(string(id)); err != nil {
-		return Task{}, fmt.Errorf("%w: task ID", ErrInvalidInput)
-	}
-	return getLegacyTask(ctx, s.db, id)
-}
-
 type queryRower interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
@@ -64,17 +57,6 @@ func getTask(ctx context.Context, q queryRower, id task.TaskID) (Task, error) {
 	}
 	if err != nil {
 		return Task{}, fmt.Errorf("read task: %w", err)
-	}
-	return t, nil
-}
-
-func getLegacyTask(ctx context.Context, q queryRower, id task.TaskID) (Task, error) {
-	t, err := scanTask(q.QueryRowContext(ctx, taskSelect+` WHERE t.id=? AND NOT EXISTS (SELECT 1 FROM background_runs br WHERE br.task_id=t.id)`, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return Task{}, ErrNotFound
-	}
-	if err != nil {
-		return Task{}, fmt.Errorf("read legacy task: %w", err)
 	}
 	return t, nil
 }
@@ -133,13 +115,6 @@ func scanTask(row rowScanner) (Task, error) {
 	return t, nil
 }
 
-func (s *Store) GetAttempt(ctx context.Context, id task.AttemptID) (Attempt, error) {
-	if _, err := task.ParseAttemptID(string(id)); err != nil {
-		return Attempt{}, fmt.Errorf("%w: attempt ID", ErrInvalidInput)
-	}
-	return getLegacyAttempt(ctx, s.db, id)
-}
-
 func getAttempt(ctx context.Context, q queryRower, id task.AttemptID) (Attempt, error) {
 	a, err := scanAttempt(q.QueryRowContext(ctx, attemptSelect+` WHERE id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -151,40 +126,26 @@ func getAttempt(ctx context.Context, q queryRower, id task.AttemptID) (Attempt, 
 	return a, nil
 }
 
-func getLegacyAttempt(ctx context.Context, q queryRower, id task.AttemptID) (Attempt, error) {
-	a, err := scanAttempt(q.QueryRowContext(ctx, attemptSelect+` WHERE id=? AND NOT EXISTS
-(SELECT 1 FROM background_runs br WHERE br.attempt_id=attempts.id)`, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return Attempt{}, ErrNotFound
-	}
-	if err != nil {
-		return Attempt{}, fmt.Errorf("read legacy attempt: %w", err)
-	}
-	return a, nil
-}
-
 func scanAttempt(row rowScanner) (Attempt, error) {
 	var a Attempt
 	var promptHash []byte
-	var budget string
 	var deadline, createdAt, updatedAt int64
 	var claimOwner, logAggregateID, recoveryReason, terminalReason, sealedResultID sql.NullString
 	var claimExpiresAt, deliveryStartedAt, admittedAt, cancellationAckAt sql.NullInt64
 	err := row.Scan(
 		&a.ID, &a.TaskID, &a.WorkspaceID, &a.Sequence, &a.State, &a.DeliveryPhase, &a.OpenCodeSessionID, &a.OpenCodeMessageID,
 		&promptHash, &a.BaseSHA, &a.ImageDigest, &a.OpenCodeProtocol, &a.ExecutionContractVersion,
-		&a.Agent, &a.ModelProvider, &a.Model, &budget, &deadline, &claimOwner, &claimExpiresAt,
+		&a.Agent, &a.ModelProvider, &a.Model, &deadline, &claimOwner, &claimExpiresAt,
 		&deliveryStartedAt, &admittedAt, &logAggregateID, &a.OpenCodeLogSeq, &cancellationAckAt,
 		&recoveryReason, &terminalReason, &sealedResultID, &a.Revision, &createdAt, &updatedAt,
 	)
 	if err != nil {
 		return Attempt{}, err
 	}
-	if len(promptHash) != len(a.PromptSHA256) || !json.Valid([]byte(budget)) || a.Sequence <= 0 || !a.State.Valid() || !a.DeliveryPhase.valid() {
+	if len(promptHash) != len(a.PromptSHA256) || a.Sequence <= 0 || !a.State.Valid() || !a.DeliveryPhase.valid() {
 		return Attempt{}, ErrCorruptStore
 	}
 	copy(a.PromptSHA256[:], promptHash)
-	a.BudgetSnapshot = json.RawMessage(budget)
 	a.Deadline, a.CreatedAt, a.UpdatedAt = fromUnixMillis(deadline), fromUnixMillis(createdAt), fromUnixMillis(updatedAt)
 	a.DeliveryClaimExpiresAt = nullableTime(claimExpiresAt)
 	a.DeliveryStartedAt = nullableTime(deliveryStartedAt)

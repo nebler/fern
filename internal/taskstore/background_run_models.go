@@ -1,9 +1,9 @@
 package taskstore
 
 import (
-	"encoding/json"
 	"time"
 
+	"github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -26,85 +26,52 @@ type AdmitBackgroundRunParams struct {
 	Agent                    string
 	ModelProvider            string
 	Model                    string
-	BudgetSnapshot           json.RawMessage
 	Deadline                 time.Time
 	APIContractVersion       string
 	AcceptedAt               time.Time
 	BackgroundRun            *BackgroundRunIntent
 }
 
-type BackgroundRunState string
-type BackgroundRunEffectPhase string
+// Compatibility names expose the domain vocabulary without maintaining a
+// second enum. SQL representation stays in Store.
+type BackgroundRunState = run.State
+type BackgroundRunEffectPhase = run.Phase
 
-const BackgroundRunSourceProfile = "source-39fb919a054190498f6d5b7985bde231f93ad7a6"
+const BackgroundRunSourceProfile = run.SourceProfile
 
 const (
-	BackgroundRunQueued          BackgroundRunState = "queued"
-	BackgroundRunSettingUp       BackgroundRunState = "setting_up"
-	BackgroundRunWorking         BackgroundRunState = "working"
-	BackgroundRunNeedsYou        BackgroundRunState = "needs_you"
-	BackgroundRunCanceling       BackgroundRunState = "canceling"
-	BackgroundRunUncertain       BackgroundRunState = "uncertain"
-	BackgroundRunResultReady     BackgroundRunState = "result_ready"
-	BackgroundRunFailed          BackgroundRunState = "failed"
-	BackgroundRunCleanupRequired BackgroundRunState = "cleanup_required"
+	BackgroundRunQueued          = run.Queued
+	BackgroundRunSettingUp       = run.SettingUp
+	BackgroundRunWorking         = run.Working
+	BackgroundRunNeedsYou        = run.NeedsYou
+	BackgroundRunCanceling       = run.Canceling
+	BackgroundRunUncertain       = run.Uncertain
+	BackgroundRunResultReady     = run.ResultReady
+	BackgroundRunFailed          = run.Failed
+	BackgroundRunCleanupRequired = run.CleanupRequired
 
-	BackgroundRunEffectAbsent                 BackgroundRunEffectPhase = "absent"
-	BackgroundRunEffectProvisionIntent        BackgroundRunEffectPhase = "provision_intent"
-	BackgroundRunEffectCloneObserved          BackgroundRunEffectPhase = "clone_observed"
-	BackgroundRunEffectVolumeObserved         BackgroundRunEffectPhase = "volume_observed"
-	BackgroundRunEffectContainerObserved      BackgroundRunEffectPhase = "container_observed"
-	BackgroundRunEffectHealthObserved         BackgroundRunEffectPhase = "health_observed"
-	BackgroundRunEffectReady                  BackgroundRunEffectPhase = "ready"
-	BackgroundRunEffectSessionObserved        BackgroundRunEffectPhase = "session_observed"
-	BackgroundRunEffectPromptIntent           BackgroundRunEffectPhase = "prompt_intent"
-	BackgroundRunEffectPromptAdmitted         BackgroundRunEffectPhase = "prompt_admitted"
-	BackgroundRunEffectSealIntent             BackgroundRunEffectPhase = "seal_intent"
-	BackgroundRunEffectStopIntent             BackgroundRunEffectPhase = "stop_intent"
-	BackgroundRunEffectWriterInactive         BackgroundRunEffectPhase = "writer_inactive"
-	BackgroundRunEffectExporting              BackgroundRunEffectPhase = "exporting"
-	BackgroundRunEffectArtifactCommitted      BackgroundRunEffectPhase = "artifact_committed"
-	BackgroundRunEffectRouteRemoved           BackgroundRunEffectPhase = "route_removed"
-	BackgroundRunEffectContainerRemoved       BackgroundRunEffectPhase = "container_removed"
-	BackgroundRunEffectVolumeRemoved          BackgroundRunEffectPhase = "volume_removed"
-	BackgroundRunEffectCloneRemoved           BackgroundRunEffectPhase = "clone_removed"
-	BackgroundRunEffectCleanupComplete        BackgroundRunEffectPhase = "cleanup_complete"
-	BackgroundRunEffectPreEffectFailed        BackgroundRunEffectPhase = "pre_effect_failed"
-	backgroundRunEffectLegacyProvisionStarted BackgroundRunEffectPhase = "provision_started"
-	backgroundRunEffectLegacyPromptStarted    BackgroundRunEffectPhase = "prompt_started"
-	backgroundRunEffectLegacyStopStarted      BackgroundRunEffectPhase = "stop_started"
-	backgroundRunEffectLegacyExportStarted    BackgroundRunEffectPhase = "export_started"
-	backgroundRunEffectLegacyCleanupStarted   BackgroundRunEffectPhase = "cleanup_started"
+	BackgroundRunEffectAbsent            = run.Absent
+	BackgroundRunEffectProvisionIntent   = run.ProvisionIntent
+	BackgroundRunEffectCloneObserved     = run.CloneObserved
+	BackgroundRunEffectVolumeObserved    = run.VolumeObserved
+	BackgroundRunEffectContainerObserved = run.ContainerObserved
+	BackgroundRunEffectHealthObserved    = run.HealthObserved
+	BackgroundRunEffectReady             = run.Ready
+	BackgroundRunEffectSessionObserved   = run.SessionObserved
+	BackgroundRunEffectPromptIntent      = run.PromptIntent
+	BackgroundRunEffectPromptAdmitted    = run.PromptAdmitted
+	BackgroundRunEffectSealIntent        = run.SealIntent
+	BackgroundRunEffectStopIntent        = run.StopIntent
+	BackgroundRunEffectWriterInactive    = run.WriterInactive
+	BackgroundRunEffectExporting         = run.Exporting
+	BackgroundRunEffectArtifactCommitted = run.ArtifactCommitted
+	BackgroundRunEffectRouteRemoved      = run.RouteRemoved
+	BackgroundRunEffectContainerRemoved  = run.ContainerRemoved
+	BackgroundRunEffectVolumeRemoved     = run.VolumeRemoved
+	BackgroundRunEffectCloneRemoved      = run.CloneRemoved
+	BackgroundRunEffectCleanupComplete   = run.CleanupComplete
+	BackgroundRunEffectPreEffectFailed   = run.PreEffectFailed
 )
-
-func (state BackgroundRunState) valid() bool {
-	switch state {
-	case BackgroundRunQueued, BackgroundRunSettingUp, BackgroundRunWorking, BackgroundRunNeedsYou,
-		BackgroundRunCanceling, BackgroundRunUncertain, BackgroundRunResultReady, BackgroundRunFailed,
-		BackgroundRunCleanupRequired:
-		return true
-	default:
-		return false
-	}
-}
-
-func (phase BackgroundRunEffectPhase) valid() bool {
-	switch phase {
-	case BackgroundRunEffectAbsent, BackgroundRunEffectProvisionIntent, BackgroundRunEffectCloneObserved,
-		BackgroundRunEffectVolumeObserved, BackgroundRunEffectContainerObserved, BackgroundRunEffectHealthObserved,
-		BackgroundRunEffectReady, BackgroundRunEffectSessionObserved, BackgroundRunEffectPromptIntent,
-		BackgroundRunEffectPromptAdmitted, BackgroundRunEffectSealIntent, BackgroundRunEffectStopIntent, BackgroundRunEffectWriterInactive,
-		BackgroundRunEffectExporting, BackgroundRunEffectArtifactCommitted,
-		BackgroundRunEffectRouteRemoved, BackgroundRunEffectContainerRemoved, BackgroundRunEffectVolumeRemoved,
-		BackgroundRunEffectCloneRemoved, BackgroundRunEffectCleanupComplete, BackgroundRunEffectPreEffectFailed:
-		return true
-	case backgroundRunEffectLegacyProvisionStarted, backgroundRunEffectLegacyPromptStarted,
-		backgroundRunEffectLegacyStopStarted, backgroundRunEffectLegacyExportStarted, backgroundRunEffectLegacyCleanupStarted:
-		return true
-	default:
-		return false
-	}
-}
 
 // BackgroundRunIntent is the immutable environment selection committed with a
 // task admission. Mutable lifecycle fields live only on BackgroundRun.

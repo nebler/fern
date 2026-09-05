@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +28,16 @@ func TestStorePersistsDevices(t *testing.T) {
 	}
 	if bytes.Contains(stateBytes, []byte("device-secret")) {
 		t.Fatal("control state persisted a raw device token")
+	}
+	var state map[string]json.RawMessage
+	if err := json.Unmarshal(stateBytes, &state); err != nil {
+		t.Fatal(err)
+	}
+	if string(state["version"]) != "2" || state["workflows"] != nil || state["publications"] != nil {
+		t.Fatalf("unexpected current schema: %s", stateBytes)
+	}
+	if !bytes.Contains(state["devices"], []byte(tokenHash("device-secret"))) {
+		t.Fatal("control state did not persist the device token hash")
 	}
 
 	reopened, err := Open(directory, "demo")
@@ -79,7 +88,7 @@ func TestStoreAuthenticationReturnsDurableDeviceIdentity(t *testing.T) {
 		t.Fatalf("identity=%+v valid=%t err=%v, want %+v", got, valid, err, want)
 	}
 	if valid, err := authenticateDevice(store, "device-secret", now.Add(time.Minute)); err != nil || !valid {
-		t.Fatalf("legacy authentication valid=%t err=%v", valid, err)
+		t.Fatalf("authentication valid=%t err=%v", valid, err)
 	}
 	if got, valid, err := store.AuthenticateDeviceIdentity("wrong-secret", now); err != nil || valid || got != (Device{}) {
 		t.Fatalf("invalid identity=%+v valid=%t err=%v", got, valid, err)
@@ -124,12 +133,12 @@ func TestLoadRejectsInvalidOperatorCredentialID(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, tokenHash("demo")+".json")
-	data := `{"version":1,"workspace":"demo","operatorCredentialId":"control-not-base64","devices":{},"workflows":{},"publications":{}}`
+	data := `{"version":2,"workspace":"demo","operatorCredentialId":"control-not-base64","devices":{}}`
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(directory, "demo"); err == nil {
-		t.Fatal("Open accepted an invalid operator credential ID")
+	if _, err := Open(directory, "demo"); err == nil || !strings.Contains(err.Error(), "invalid operator credential identifier") {
+		t.Fatalf("Open error = %v, want invalid operator credential identifier", err)
 	}
 }
 
@@ -171,154 +180,76 @@ func TestStoreRejectsUnknownStateFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, tokenHash("demo")+".json")
-	if err := os.WriteFile(path, []byte(`{"version":1,"devices":{},"workflows":{},"publications":{},"unknown":true}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"version":2,"workspace":"demo","devices":{},"unknown":true}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Open(directory, "demo"); err == nil {
-		t.Fatal("Open accepted unknown state field")
+	if _, err := Open(directory, "demo"); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("Open error = %v, want unknown state field", err)
 	}
 }
 
-func TestLegacyPublicationsRemainReadableWithoutMigration(t *testing.T) {
+func TestStoreRejectsUnsupportedStateWithoutMutation(t *testing.T) {
+	for _, data := range []string{
+		`{"version":1,"workspace":"demo","devices":{},"workflows":{},"publications":{}}`,
+		`{"version":1,"workspace":"demo","devices":{}}`,
+		`{"version":3,"workspace":"demo","devices":{}}`,
+		`{"workspace":"demo","devices":{}}`,
+	} {
+		t.Run(data, func(t *testing.T) {
+			directory := filepath.Join(t.TempDir(), "control")
+			if err := os.Mkdir(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(directory, tokenHash("demo")+".json")
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(directory, "demo"); err == nil || !strings.Contains(err.Error(), "unsupported Fern control state version") {
+				t.Fatalf("Open error = %v, want unsupported version", err)
+			}
+			unchanged, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(unchanged, []byte(data)) {
+				t.Fatalf("rejected load modified state: err=%v", err)
+			}
+		})
+	}
+}
+
+func TestStoreCurrentSchemaRejectsRetiredFields(t *testing.T) {
+	for _, field := range []string{"workflows", "publications"} {
+		t.Run(field, func(t *testing.T) {
+			directory := filepath.Join(t.TempDir(), "control")
+			if err := os.Mkdir(directory, 0o700); err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(directory, tokenHash("demo")+".json")
+			data := `{"version":2,"workspace":"demo","devices":{},"` + field + `":{}}`
+			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Open(directory, "demo"); err == nil || !strings.Contains(err.Error(), "unknown field") {
+				t.Fatalf("Open error = %v, want unknown field", err)
+			}
+			unchanged, err := os.ReadFile(path)
+			if err != nil || !bytes.Equal(unchanged, []byte(data)) {
+				t.Fatalf("rejected load modified state: err=%v", err)
+			}
+		})
+	}
+}
+
+func TestDeviceRevocationRollsBackKnownWriteFailure(t *testing.T) {
 	directory := filepath.Join(t.TempDir(), "control")
-	if err := os.Mkdir(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(directory, tokenHash("demo")+".json")
-	data := `{"version":1,"workspace":"demo","devices":{},"workflows":{},"publications":{"terminal":{"id":"terminal","workflowId":"wf","state":"published","operation":"op","title":"old","pullUrl":"https://github.com/owner/repo/pull/1","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"},"flight":{"id":"flight","workflowId":"wf","state":"pushing","operation":"op","title":"old","repository":"owner/repo","base":"main","branch":"fern/demo/op","commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"}}}`
-	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
-		t.Fatal(err)
-	}
 	store, err := Open(directory, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	terminal, _ := store.Publication("terminal")
-	flight, _ := store.Publication("flight")
-	if terminal.SchemaVersion != 0 || terminal.PullURL == "" || flight.SchemaVersion != 0 || flight.State != PublicationPrepared {
-		t.Fatalf("legacy records changed: terminal=%+v flight=%+v", terminal, flight)
-	}
-	unchanged, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(unchanged, []byte(data)) {
-		t.Fatalf("legacy load rewrote state: err=%v", err)
-	}
-}
-
-func TestQuarantineLegacyPublicationsIsExplicitAtomicAndIdempotent(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "control")
-	if err := os.Mkdir(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	created := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	quarantinedAt := time.Date(2026, 8, 26, 12, 30, 0, 0, time.UTC)
-	alreadyQuarantined := Publication{
-		ID: "already", WorkflowID: "wf", State: PublicationQuarantined, Operation: "op", Title: "old",
-		OriginalState: PublicationFailed, QuarantinedAt: created.Add(time.Hour), QuarantineReason: LegacyPublicationQuarantineReason,
-		CreatedAt: created, UpdatedAt: created.Add(time.Hour),
-	}
-	published := Publication{
-		ID: "published", WorkflowID: "wf", State: PublicationPublished, Operation: "op", Title: "published",
-		PullURL: "https://github.com/owner/repo/pull/1", CreatedAt: created, UpdatedAt: created,
-	}
-	state := diskState{
-		Version: schemaVersion, Workspace: "demo", Devices: map[string]Device{}, Workflows: map[string]Workflow{},
-		Publications: map[string]Publication{
-			"legacy-requested":  {ID: "legacy-requested", WorkflowID: "wf", State: PublicationRequested, Operation: "one", Title: "one", CreatedAt: created, UpdatedAt: created},
-			"current-requested": {SchemaVersion: PublicationSchemaVersion, ID: "current-requested", WorkflowID: "wf", State: PublicationRequested, Operation: "two", Title: "two", CreatedAt: created, UpdatedAt: created},
-			"legacy-pushing":    {ID: "legacy-pushing", WorkflowID: "wf", State: PublicationPrepared, Operation: "three", Title: "three", Repository: "owner/repo", Base: "main", Branch: "fern/demo/three", Commit: strings.Repeat("a", 40), CreatedAt: created, UpdatedAt: created},
-			"legacy-failed":     {ID: "legacy-failed", WorkflowID: "wf", State: PublicationFailed, Operation: "four", Title: "four", Error: "old failure", CreatedAt: created, UpdatedAt: created},
-			"published":         published,
-			"already":           alreadyQuarantined,
-		},
-	}
-	data, err := json.Marshal(state)
+	now := time.Now().UTC()
+	device, err := store.AddDevice("device-secret", "Phone", now, now.Add(time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	path := filepath.Join(directory, tokenHash("demo")+".json")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store, err := Open(directory, "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !store.HasUnquarantinedLegacyPublications() {
-		t.Fatal("unresolved legacy publications were not detected")
-	}
-	changed, err := store.QuarantineLegacyPublications(quarantinedAt)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(changed) != 4 {
-		t.Fatalf("quarantined %d records, want 4: %+v", len(changed), changed)
-	}
-	wantIDs := []string{"current-requested", "legacy-failed", "legacy-pushing", "legacy-requested"}
-	for index, publication := range changed {
-		if publication.ID != wantIDs[index] || publication.State != PublicationQuarantined || publication.OriginalState == "" || publication.QuarantinedAt != quarantinedAt || publication.QuarantineReason != LegacyPublicationQuarantineReason || publication.UpdatedAt != quarantinedAt {
-			t.Fatalf("quarantined[%d] = %+v", index, publication)
-		}
-	}
-	if store.HasUnquarantinedLegacyPublications() {
-		t.Fatal("quarantined records still block readiness")
-	}
-	gotPublished, _ := store.Publication("published")
-	gotAlready, _ := store.Publication("already")
-	if !reflect.DeepEqual(gotPublished, published) || !reflect.DeepEqual(gotAlready, alreadyQuarantined) {
-		t.Fatalf("terminal records changed: published=%+v already=%+v", gotPublished, gotAlready)
-	}
-	firstWrite, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if changed, err := store.QuarantineLegacyPublications(quarantinedAt.Add(time.Hour)); err != nil || len(changed) != 0 {
-		t.Fatalf("idempotent quarantine = %+v, %v", changed, err)
-	}
-	secondWrite, err := os.ReadFile(path)
-	if err != nil || !bytes.Equal(firstWrite, secondWrite) {
-		t.Fatalf("idempotent quarantine rewrote state: err=%v", err)
-	}
-	reopened, err := Open(directory, "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	current, _ := reopened.Publication("current-requested")
-	if current.SchemaVersion != PublicationSchemaVersion || current.State != PublicationQuarantined || current.OriginalState != PublicationRequested {
-		t.Fatalf("reopened current record = %+v", current)
-	}
-}
-
-func TestQuarantineLegacyPublicationsRejectsMissingTimestampWithoutMutation(t *testing.T) {
-	store, err := Open(filepath.Join(t.TempDir(), "control"), "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.QuarantineLegacyPublications(time.Time{}); err == nil {
-		t.Fatal("quarantine accepted a zero timestamp")
-	}
-}
-
-func TestQuarantineLegacyPublicationsRollsBackKnownWriteFailure(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "control")
-	if err := os.Mkdir(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Date(2026, 8, 26, 13, 0, 0, 0, time.UTC)
-	state := diskState{
-		Version: schemaVersion, Workspace: "demo", Devices: map[string]Device{}, Workflows: map[string]Workflow{},
-		Publications: map[string]Publication{"pending": {ID: "pending", WorkflowID: "wf", State: PublicationRequested, Operation: "op", Title: "Pending", CreatedAt: now, UpdatedAt: now}},
-	}
-	data, err := json.Marshal(state)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(directory, tokenHash("demo")+".json"), data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	store, err := Open(directory, "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
+	revision := store.data.Revision
 	moved := directory + "-moved"
 	if err := os.Rename(directory, moved); err != nil {
 		t.Fatal(err)
@@ -326,19 +257,20 @@ func TestQuarantineLegacyPublicationsRollsBackKnownWriteFailure(t *testing.T) {
 	if err := os.WriteFile(directory, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.QuarantineLegacyPublications(now.Add(time.Hour)); err == nil {
-		t.Fatal("quarantine unexpectedly persisted through unavailable directory")
+	if err := store.RevokeDevice(device.ID); err == nil {
+		t.Fatal("revocation unexpectedly persisted through unavailable directory")
 	}
-	pending, _ := store.Publication("pending")
-	if pending.State != PublicationRequested || pending.OriginalState != "" || !pending.QuarantinedAt.IsZero() {
-		t.Fatalf("failed quarantine changed memory: %+v", pending)
+	if store.data.Revision != revision {
+		t.Fatal("failed revocation changed revision")
+	}
+	if got, valid, err := store.AuthenticateDeviceIdentity("device-secret", now); err != nil || !valid || got != device {
+		t.Fatalf("failed revocation changed memory: device=%+v valid=%t err=%v", got, valid, err)
 	}
 	reopened, err := Open(moved, "demo")
 	if err != nil {
 		t.Fatal(err)
 	}
-	pending, _ = reopened.Publication("pending")
-	if pending.State != PublicationRequested {
-		t.Fatalf("failed quarantine changed disk: %+v", pending)
+	if got, valid, err := reopened.AuthenticateDeviceIdentity("device-secret", now); err != nil || !valid || got != device {
+		t.Fatalf("failed revocation changed disk: device=%+v valid=%t err=%v", got, valid, err)
 	}
 }

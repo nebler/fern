@@ -3,13 +3,10 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
-	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -22,29 +19,22 @@ import (
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/observability"
-	"github.com/nebler/fern/internal/resultapi"
 	"github.com/nebler/fern/internal/runapi"
 	"github.com/nebler/fern/internal/runclientapi"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
-	"github.com/nebler/fern/internal/taskpublication"
-	"github.com/nebler/fern/internal/taskpublicationcoord"
 	"github.com/nebler/fern/internal/taskresultsource"
 	"github.com/nebler/fern/internal/taskstore"
-	"github.com/nebler/fern/internal/taskverification"
-	"github.com/nebler/fern/internal/verification"
 )
 
 const (
-	publicationBrokerPolicyVersion = "fern.github-app-publication.v1"
-	publicationBrokerPolicy        = "immutable retained changed result; current uncanceled owner; exact successful verification; derived repository, base, commit, and branch; draft pull request"
-	taskServiceCredentialID        = "service-v1"
-	taskPollInterval               = time.Second
-	taskOperationTimeout           = 2 * time.Minute
-	taskInspectTimeout             = 15 * time.Second
-	backgroundCloneTimeout         = 30 * time.Second
-	backgroundCloneAdmissionBytes  = 128 << 20
+	taskServiceCredentialID       = "service-v1"
+	taskPollInterval              = time.Second
+	taskOperationTimeout          = 2 * time.Minute
+	taskInspectTimeout            = 15 * time.Second
+	backgroundCloneTimeout        = 30 * time.Second
+	backgroundCloneAdmissionBytes = 128 << 20
 )
 
 type taskRunService interface {
@@ -57,23 +47,20 @@ type taskWakeService interface {
 }
 
 type taskServices struct {
-	store        *taskstore.Store
-	runs         http.Handler
-	runClients   http.Handler
-	results      http.Handler
-	verification taskRunService
-	publication  taskRunService
-	background   taskWakeService
-	provider     *taskenvdocker.Provider
-	artifact     *taskartifact.Engine
-	status       *observability.Registry
+	store      *taskstore.Store
+	runs       http.Handler
+	runClients http.Handler
+	background taskWakeService
+	provider   *taskenvdocker.Provider
+	artifact   *taskartifact.Engine
+	status     *observability.Registry
 }
 
 func (services *taskServices) Close() error {
 	return errors.Join(services.artifact.Close(), services.provider.Close(), services.store.Close())
 }
 
-func newTaskServices(ctx context.Context, cfg config.BackgroundConfig, route *backgroundroute.Manager, status *observability.Registry, log *slog.Logger) (*taskServices, error) {
+func newTaskServices(ctx context.Context, cfg config.Config, route *backgroundroute.Manager, status *observability.Registry, log *slog.Logger) (*taskServices, error) {
 	if cfg.Tasks.BackgroundImage == "" || cfg.Tasks.BackgroundImageID == "" || route == nil {
 		return nil, errors.New("a qualified disposable Background Run profile is required")
 	}
@@ -123,7 +110,7 @@ func newTaskServices(ctx context.Context, cfg config.BackgroundConfig, route *ba
 			return nil, fmt.Errorf("create background state root: %w", err)
 		}
 	}
-	artifact, err := taskartifact.New(taskartifact.Config{GitExecutable: verificationGitExecutable(), CASRoot: casRoot,
+	artifact, err := taskartifact.New(taskartifact.Config{GitExecutable: gitExecutable(), CASRoot: casRoot,
 		WorkRoot: workRoot, CommandTimeout: taskOperationTimeout})
 	if err != nil {
 		return nil, err
@@ -148,28 +135,6 @@ func newTaskServices(ctx context.Context, cfg config.BackgroundConfig, route *ba
 		}
 	}
 
-	repository, err := filepath.EvalSymlinks(cfg.Workspace.Repo)
-	if err != nil {
-		return nil, fmt.Errorf("resolve Background Run repository: %w", err)
-	}
-	provider, err := taskenvdocker.New(ctx, taskenvdocker.Config{
-		StateRoot: providerRoot, Repository: repository, GitExecutable: verificationGitExecutable(),
-		ImageReference: cfg.Tasks.BackgroundImage, ImageID: cfg.Tasks.BackgroundImageID, MemoryBytes: 1 << 30,
-		NanoCPUs: 2_000_000_000, PIDs: 512, WallTimeout: 24 * time.Hour, GitTimeout: backgroundCloneTimeout,
-		DockerTimeout: 30 * time.Second, HealthTimeout: 30 * time.Second, GitOutputBytes: 1 << 20,
-		SourceSizeAdmissionBytes: backgroundCloneAdmissionBytes, CloneObservedLimitBytes: backgroundCloneAdmissionBytes, DiskFreeAdmissionBytes: 20 << 30,
-		LogMaxSize: "10m", LogMaxFiles: 3, StopGrace: 10 * time.Second, Environment: backgroundRunEnvironment(cfg),
-	}, nil)
-	if err != nil {
-		return nil, err
-	}
-	closeProvider := true
-	defer func() {
-		if closeProvider {
-			_ = provider.Close()
-		}
-	}()
-
 	candidateID, err := ids.WorkspaceID()
 	if err != nil {
 		return nil, err
@@ -192,31 +157,43 @@ func newTaskServices(ctx context.Context, cfg config.BackgroundConfig, route *ba
 	if err != nil {
 		return nil, err
 	}
+	githubIdentity, err := githubapp.NewRepositoryIdentity(int64(durableWorkspace.InstallationID), int64(durableWorkspace.RepositoryID))
+	if err != nil {
+		return nil, err
+	}
+	repository, err := filepath.EvalSymlinks(cfg.Workspace.Repo)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Background Run repository: %w", err)
+	}
+	provider, err := taskenvdocker.New(ctx, taskenvdocker.Config{
+		StateRoot: providerRoot, Repository: repository, GitExecutable: gitExecutable(),
+		GitHubTokens: authority.installationTokens, GitHubRepository: githubIdentity,
+		GitHubRepositoryFullName: durableWorkspace.RepositoryFullName,
+		ImageReference:           cfg.Tasks.BackgroundImage, ImageID: cfg.Tasks.BackgroundImageID, MemoryBytes: 1 << 30,
+		NanoCPUs: 2_000_000_000, PIDs: 512, WallTimeout: 24 * time.Hour, GitTimeout: backgroundCloneTimeout,
+		DockerTimeout: 30 * time.Second, HealthTimeout: 30 * time.Second, GitOutputBytes: 1 << 20,
+		SourceSizeAdmissionBytes: backgroundCloneAdmissionBytes, CloneObservedLimitBytes: backgroundCloneAdmissionBytes, DiskFreeAdmissionBytes: 20 << 30,
+		LogMaxSize: "10m", LogMaxFiles: 3, StopGrace: 10 * time.Second,
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	closeProvider := true
+	defer func() {
+		if closeProvider {
+			_ = provider.Close()
+		}
+	}()
+
 	resultSource, err := taskresultsource.New(store, artifact)
 	if err != nil {
 		return nil, err
 	}
 
-	recoveryActor := systemActor(workerID, "task-recovery", "Task recovery coordinator")
-	recoveryActor.Type = task.ActorRecovery
-	publication, err := newPublicationCoordinator(taskDirectory, cfg, durableWorkspace.ID, workerID, authority, recoveryActor, store, resultSource, ids, status, log)
-	if err != nil {
-		return nil, err
-	}
-	verificationCoordinator, err := newVerificationCoordinator(store, resultSource, ids, cfg, durableWorkspace.ID, cfg.Tasks.BackgroundImageID, workerID, recoveryActor, status, log)
-	if err != nil {
-		return nil, err
-	}
-	budget, err := json.Marshal(struct {
-		MaxTurns int `json:"maxTurns"`
-	}{cfg.Tasks.Budget.MaxTurns})
-	if err != nil {
-		return nil, err
-	}
 	coordinator, err := backgroundruncoord.New(store, provider, artifact, ids, backgroundruncoord.Config{
 		WorkspaceID: durableWorkspace.ID, WorkerID: workerID, SystemActor: systemActor(workerID, "background-run", "Background Run coordinator"),
 		Profile: runapi.PluginOpenCodeProfile, ImageIdentity: cfg.Tasks.BackgroundImageID,
-		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(backgroundRunEnvironment(cfg)), Agent: cfg.Tasks.Agent,
+		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: cfg.Tasks.Agent,
 		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID,
 		OperationTimeout: min(cfg.Tasks.LeaseDuration/2, backgroundCloneTimeout), LeaseDuration: cfg.Tasks.LeaseDuration,
 		PollInterval: taskPollInterval, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 100, MaxPages: 100, MaxEvents: 10000},
@@ -230,7 +207,7 @@ func newTaskServices(ctx context.Context, cfg config.BackgroundConfig, route *ba
 	if err != nil {
 		return nil, err
 	}
-	baseVerifier, err := runapi.NewGitBaseVerifier(cfg.Workspace.Repo, verificationGitExecutable(), taskInspectTimeout)
+	baseVerifier, err := runapi.NewGitBaseVerifier(cfg.Workspace.Repo, gitExecutable(), taskInspectTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -238,10 +215,10 @@ func newTaskServices(ctx context.Context, cfg config.BackgroundConfig, route *ba
 		WorkspaceID: durableWorkspace.ID, RepositoryID: durableWorkspace.RepositoryID,
 		RepositoryRemote:            "https://github.com/" + github.Repository.FullName,
 		BackgroundImageIdentity:     cfg.Tasks.BackgroundImageID,
-		BackgroundEnvironmentSHA256: taskenvdocker.EnvironmentSHA256(backgroundRunEnvironment(cfg)),
+		BackgroundEnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil),
 		AvailableProfile:            runapi.PluginOpenCodeProfile, Store: store, Generator: ids, ActorResolver: task.ContextActor,
 		BaseVerifier: baseVerifier, Now: time.Now, AttemptTimeout: cfg.Tasks.AttemptTimeout, Agent: cfg.Tasks.Agent,
-		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID, BudgetSnapshot: budget, RetentionVerifier: resultSource,
+		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID, RetentionVerifier: resultSource,
 		SealPolicyVersion: "fern.background-user-seal.v1", Wake: coordinator.Wake,
 	})
 	if err != nil {
@@ -251,31 +228,18 @@ func newTaskServices(ctx context.Context, cfg config.BackgroundConfig, route *ba
 	if err != nil {
 		return nil, err
 	}
-	results, err := resultapi.New(resultapi.Config{
-		WorkspaceID: durableWorkspace.ID, Store: store, Generator: ids, ActorResolver: task.ContextActor,
-		Wake: publication.Wake, Now: time.Now, PublicationPolicyVersion: publicationBrokerPolicyVersion,
-		PublicationPolicySHA256: sha256.Sum256([]byte(publicationBrokerPolicy)), APIContractVersion: resultapi.APIContractVersion,
-	})
-	if err != nil {
-		return nil, err
-	}
 	status.Qualified(observability.ComponentBackgroundRunProfile)
 	status.Healthy(observability.ComponentBackgroundRunSerial)
 	closeStore, closeArtifact, closeProvider = false, false, false
-	return &taskServices{store: store, runs: runs, runClients: runClients, results: results, verification: verificationCoordinator, publication: publication,
+	return &taskServices{store: store, runs: runs, runClients: runClients,
 		background: coordinator, provider: provider, artifact: artifact, status: status}, nil
-}
-
-func backgroundRunEnvironment(cfg config.BackgroundConfig) map[string]string {
-	return maps.Clone(cfg.Tasks.BackgroundEnvironment)
 }
 
 type gitHubAuthority struct {
 	installationTokens githubapp.InstallationTokenSource
-	repositories       *githubapp.RepositoryClient
 }
 
-func resolveGitHubAuthority(github config.BackgroundGitHubApp) (*gitHubAuthority, error) {
+func resolveGitHubAuthority(github config.GitHubApp) (*gitHubAuthority, error) {
 	directory, err := statePath("github-app")
 	if err != nil {
 		return nil, err
@@ -296,14 +260,10 @@ func resolveGitHubAuthority(github config.BackgroundGitHubApp) (*gitHubAuthority
 	if err != nil {
 		return nil, err
 	}
-	repositories, err := githubapp.NewRepositoryClient(http.DefaultClient, tokens, time.Now)
-	if err != nil {
-		return nil, err
-	}
 	if _, err := githubapp.NewRepositoryIdentity(github.InstallationID, github.Repository.ID); err != nil {
 		return nil, err
 	}
-	return &gitHubAuthority{installationTokens: tokens, repositories: repositories}, nil
+	return &gitHubAuthority{installationTokens: tokens}, nil
 }
 
 func systemActor(workerID, id, displayName string) task.ActorSnapshot {
@@ -311,71 +271,7 @@ func systemActor(workerID, id, displayName string) task.ActorSnapshot {
 		CredentialID: taskServiceCredentialID, Authentication: "internal", RequestID: workerID}
 }
 
-func newPublicationCoordinator(taskDirectory string, cfg config.BackgroundConfig, workspaceID task.WorkspaceID, workerID string,
-	authority *gitHubAuthority, recoveryActor task.ActorSnapshot, store *taskstore.Store, source taskpublicationcoord.ResultSource,
-	ids *task.Generator, status *observability.Registry, log *slog.Logger) (*taskpublicationcoord.Coordinator, error) {
-	publicationTemp := filepath.Join(taskDirectory, cfg.Workspace.Name+"-publication")
-	if err := os.MkdirAll(publicationTemp, 0o700); err != nil {
-		return nil, fmt.Errorf("create publication temporary directory: %w", err)
-	}
-	publisher, err := taskpublication.New(taskpublication.Config{RepositoryPath: cfg.Workspace.Repo,
-		GitExecutable: verificationGitExecutable(), TempRoot: publicationTemp, Timeout: taskOperationTimeout,
-		OutputLimit: 64 << 10, Now: time.Now}, authority.installationTokens, authority.repositories)
-	if err != nil {
-		return nil, err
-	}
-	coordinator, err := taskpublicationcoord.New(store, publisher, ids, taskpublicationcoord.Config{
-		WorkspaceID: workspaceID, PullRequestBody: "Created by Fern from an immutable result after verification passed.",
-		OperationTimeout: taskOperationTimeout, PollInterval: taskPollInterval,
-		Actor: systemActor(workerID, "task-publication", "Task publication coordinator"), RecoveryActor: recoveryActor,
-		Now: time.Now, ResultSource: source,
-		OnError: func(err error) {
-			status.Degraded(observability.ComponentTaskPublication, err)
-			log.Error("publication reconciliation deferred", "err", err, "repository", cfg.Workspace.Name)
-		}, OnSuccess: func() { status.Healthy(observability.ComponentTaskPublication) },
-	})
-	if err == nil {
-		status.Healthy(observability.ComponentTaskPublication)
-	}
-	return coordinator, err
-}
-
-func newVerificationCoordinator(store *taskstore.Store, source taskverification.ResultSource, ids *task.Generator,
-	cfg config.BackgroundConfig, workspaceID task.WorkspaceID, imageID, workerID string, recoveryActor task.ActorSnapshot,
-	status *observability.Registry, log *slog.Logger) (*taskverification.Coordinator, error) {
-	configured := cfg.Tasks.Verification
-	if configured == nil {
-		return nil, nil
-	}
-	policy, err := verification.NewPolicy(verification.PolicyConfig{CheckName: configured.CheckName, Argv: configured.Argv,
-		WorkingDirectory: configured.WorkingDirectory, Timeout: configured.Timeout, Environment: configured.Environment,
-		OutputBytes: configured.OutputBytes})
-	if err != nil {
-		return nil, err
-	}
-	runner, err := verification.NewRunner(verification.RunnerConfig{GitExecutable: verificationGitExecutable(), GitTimeout: 30 * time.Second,
-		Environment: map[string]string{"GIT_CONFIG_GLOBAL": os.DevNull, "GIT_CONFIG_NOSYSTEM": "1", "GIT_TERMINAL_PROMPT": "0",
-			"HOME": "/", "LANG": "C", "LC_ALL": "C", "PATH": "/usr/bin:/bin"},
-		Name: "fern-host", Version: version + "@" + commit, ImageDigest: imageID})
-	if err != nil {
-		return nil, err
-	}
-	coordinator, err := taskverification.New(store, runner, policy, ids, taskverification.Config{
-		WorkspaceID: workspaceID, PollInterval: taskPollInterval,
-		Deadline: configured.Timeout + taskOperationTimeout, Actor: systemActor(workerID, "task-verification", "Task verification coordinator"),
-		RecoveryActor: recoveryActor, Now: time.Now, ResultSource: source,
-		OnError: func(err error) {
-			status.Degraded(observability.ComponentTaskVerification, err)
-			log.Error("verification deferred", "err", err, "repository", cfg.Workspace.Name)
-		}, OnSuccess: func() { status.Healthy(observability.ComponentTaskVerification) },
-	})
-	if err == nil {
-		status.Healthy(observability.ComponentTaskVerification)
-	}
-	return coordinator, err
-}
-
-func verificationGitExecutable() string {
+func gitExecutable() string {
 	if goruntime.GOOS == "darwin" {
 		for _, candidate := range []string{"/Library/Developer/CommandLineTools/usr/bin/git", "/Applications/Xcode.app/Contents/Developer/usr/bin/git"} {
 			if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode()&0o111 != 0 {
@@ -394,7 +290,7 @@ func taskWorkerID() (string, error) {
 	return "worker-" + hex.EncodeToString(random[:]), nil
 }
 
-func newGitHubOnboarding(cfg config.BackgroundConfig) (http.Handler, error) {
+func newGitHubOnboarding(cfg config.Config) (http.Handler, error) {
 	if cfg.RemoteOrigin == "" {
 		return nil, nil
 	}

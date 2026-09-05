@@ -240,7 +240,7 @@ func (handler *pluginAuthHTTP) serveBearer(writer http.ResponseWriter, request *
 		return
 	}
 	if path == "/fern/api/runs" || strings.HasPrefix(path, "/fern/api/runs/") || path == "/fern/api/v1/runs" ||
-		strings.HasPrefix(path, "/fern/api/v1/runs/") || strings.HasPrefix(path, "/fern/api/v1/results/") {
+		strings.HasPrefix(path, "/fern/api/v1/runs/") {
 		next.ServeHTTP(writer, request)
 		return
 	}

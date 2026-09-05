@@ -7,7 +7,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	runidentity "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -332,15 +332,14 @@ func (m *Manager) ActiveOrigin(run taskstore.BackgroundRun) (string, bool) {
 }
 
 func identityFromRun(run taskstore.BackgroundRun) (Identity, bool) {
-	started, err := time.Parse(time.RFC3339Nano, run.ObservedContainerStartedAt)
-	if err != nil || started.UnixNano() != run.RuntimeEpoch {
+	runtime, err := runidentity.NewRuntime(run.ObservedContainerID, run.ObservedContainerStartedAt)
+	if err != nil || runtime.Epoch() != run.RuntimeEpoch {
 		return Identity{}, false
 	}
-	digest := sha256.Sum256([]byte(run.ObservedContainerID + "\x00" + run.ObservedContainerStartedAt))
 	identity := Identity{WorkspaceID: string(run.WorkspaceID), TaskID: string(run.TaskID), AttemptID: string(run.AttemptID),
 		Generation: run.Generation, WriterGeneration: run.WriterGeneration, SessionID: string(run.OpenCodeSessionID),
 		RuntimeEpoch: run.RuntimeEpoch, ContainerID: run.ObservedContainerID,
-		StartedAt: run.ObservedContainerStartedAt, RuntimeToken: hex.EncodeToString(digest[:])}
+		StartedAt: runtime.StartedAt(), RuntimeToken: runtime.Token()}
 	return identity, true
 }
 
@@ -526,10 +525,10 @@ func stripFernCookies(header http.Header) {
 }
 
 func validateIdentity(identity Identity) error {
-	token := sha256.Sum256([]byte(identity.ContainerID + "\x00" + identity.StartedAt))
+	runtime, err := runidentity.ParseRuntime(identity.ContainerID, identity.StartedAt, identity.RuntimeToken)
 	if identity.WorkspaceID == "" || identity.TaskID == "" || identity.AttemptID == "" || identity.Generation <= 0 || identity.WriterGeneration != 1 || identity.SessionID == "" ||
 		identity.RuntimeEpoch <= 0 || identity.ContainerID == "" || identity.StartedAt == "" ||
-		identity.RuntimeToken != hex.EncodeToString(token[:]) {
+		err != nil || runtime.Epoch() != identity.RuntimeEpoch {
 		return errors.New("complete route identity is required")
 	}
 	return nil

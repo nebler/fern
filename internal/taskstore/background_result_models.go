@@ -159,7 +159,7 @@ type SelectBackgroundRunSnapshotParams struct {
 	CollectedAt            time.Time
 }
 
-type VerifyBackgroundRunBundleParams struct {
+type RecordBackgroundRunBundleVerifiedParams struct {
 	BackgroundRunExportClaim
 	BundleSHA256 [32]byte
 	BundleBytes  int64

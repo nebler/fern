@@ -50,14 +50,6 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 		controls.RunClients.ServeHTTP(writer, request)
 		return true
 	}
-	if strings.HasPrefix(path, "/fern/api/v1/results/") {
-		if controls.Results == nil {
-			http.NotFound(writer, request)
-			return true
-		}
-		controls.Results.ServeHTTP(writer, request)
-		return true
-	}
 	if path == "/fern/status" || path == "/fern/metrics" {
 		handler := controls.Status
 		if path == "/fern/metrics" {

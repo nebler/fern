@@ -9,14 +9,14 @@ import (
 )
 
 // subcommand is a second-level command beneath a namespace command such as
-// debug or github.
+// backup or credentials.
 type subcommand struct {
 	name    string
 	summary string
 	run     func(ctx context.Context, args []string, log *slog.Logger) error
 }
 
-// command is one top-level fern command. Namespace commands (debug, github)
+// command is one top-level fern command. Namespace commands (backup, credentials)
 // carry subcommands instead of a run function; overview prefixes the grouped
 // help those namespaces (and flag-less version) print for -h. Usage rows follow
 // the historical layout: a command with a summary renders one row for itself; a
@@ -74,18 +74,6 @@ var commands = []command{
 			{name: "rotate", summary: "Rotate credentials with an encrypted rollback", run: func(_ context.Context, args []string, log *slog.Logger) error {
 				return runCredentialImport(args, log, true)
 			}},
-		},
-	},
-	{
-		name:     "debug",
-		overview: "Inspect Fern internals and run explicit offline repairs.",
-		sub: []subcommand{
-			{
-				name: "quarantine-publications", summary: "Quarantine unresolved retired publication records",
-				run: func(_ context.Context, args []string, _ *slog.Logger) error {
-					return runLegacyPublicationQuarantine(args, os.Stdout)
-				},
-			},
 		},
 	},
 	{

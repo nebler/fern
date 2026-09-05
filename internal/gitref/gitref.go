@@ -1,7 +1,7 @@
 // Package gitref is the single source of truth for validating Git references,
 // SHA-1 object IDs, GitHub owner/repository names, and repository-relative
 // paths. These validators guard security-sensitive boundaries such as GitHub
-// API routes, publication branch names, and result manifest paths, so packages
+// API routes, base branch names, and result manifest paths, so packages
 // must delegate here instead of keeping private copies whose rules can drift
 // apart over time.
 package gitref
@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-// maxRefBytes matches the 255-byte reference limit enforced by Git itself.
+// maxRefBytes is Fern's bound on accepted references, not Git's general limit.
 const maxRefBytes = 255
 
 var (
@@ -26,8 +26,7 @@ var (
 // most 255 bytes of printable ASCII, no leading '-', no control characters,
 // space, or '~^:?*[\', no '..' or '@{', no leading/trailing/embedded '//', no
 // component starting with '.', and no case-insensitive '.lock' component
-// suffix. It is the strictest union of the validators previously duplicated by
-// githubapp, publication, and workspacegithub.
+// suffix. These are Fern's deliberately restricted reference rules.
 func ValidateRef(ref string) error {
 	if len(ref) == 0 || len(ref) > maxRefBytes || !printableASCII(ref) || ref == "@" ||
 		strings.HasPrefix(ref, "-") || strings.HasPrefix(ref, "/") || strings.HasSuffix(ref, "/") ||
@@ -60,8 +59,7 @@ func ValidSHA1(sha string) bool {
 // exactly one '/', total length 3-140, owner 1-39 characters from
 // [A-Za-z0-9-] without leading/trailing '-', repository 1-100 characters from
 // [A-Za-z0-9._-], never '.' or '..', and never carrying a case-insensitive
-// '.git' suffix. It implements the strictest union of the rules previously
-// duplicated by githubapp, publication, and workspacegithub.
+// '.git' suffix.
 func ValidateOwnerRepo(fullName string) error {
 	if len(fullName) < 3 || len(fullName) > 140 || strings.Count(fullName, "/") != 1 || !printableASCII(fullName) {
 		return ErrInvalidOwnerRepo

@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -13,55 +12,21 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/nebler/fern/internal/gitref"
 	"github.com/nebler/fern/internal/jsoncanon"
 )
 
-const (
-	maxRepositoryRefBytes = 255
-	maxPullTitleBytes     = 256
-	maxPullBodyBytes      = 60 << 10
-	maxJSONDepth          = 64
-)
+const maxJSONDepth = 64
 
 var (
 	ErrInvalidRepositoryRequest = errors.New("invalid GitHub repository request")
 	ErrInvalidInstallationToken = errors.New("invalid GitHub installation token")
-	ErrPullRequestConflict      = errors.New("GitHub pull request conflicts with the requested publication")
 	ErrPaginationRefused        = errors.New("GitHub response requires unsupported pagination")
-	ErrAmbiguousPullRequests    = errors.New("multiple GitHub pull requests match the requested publication")
 )
 
-// PullRequestAmbiguityError reports a count only. It deliberately omits all
-// remote response data.
-type PullRequestAmbiguityError struct {
-	count int
-}
-
-func (err *PullRequestAmbiguityError) Error() string {
-	return fmt.Sprintf("multiple GitHub pull requests match the requested publication (count %d)", err.count)
-}
-
-func (err *PullRequestAmbiguityError) Is(target error) bool {
-	return target == ErrAmbiguousPullRequests
-}
-
-func (err *PullRequestAmbiguityError) Count() int {
-	if err == nil {
-		return 0
-	}
-	return err.count
-}
-
-func (err *PullRequestAmbiguityError) GoString() string {
-	return err.Error()
-}
-
-// RepositoryClient performs only the GitHub REST reads and draft pull request
-// creation needed to prove a publication. It is safe for concurrent use when
-// its dependencies are safe for concurrent use.
+// RepositoryClient reads and validates the configured GitHub repository identity.
+// It is safe for concurrent use when its dependencies are safe for concurrent use.
 type RepositoryClient struct {
 	httpClient  *http.Client
 	tokenSource InstallationTokenSource
@@ -86,7 +51,7 @@ func NewRepositoryClient(httpClient *http.Client, tokenSource InstallationTokenS
 }
 
 func (client *RepositoryClient) String() string {
-	return "GitHub repository publication client"
+	return "GitHub repository identity client"
 }
 
 func (client *RepositoryClient) GoString() string {
@@ -102,18 +67,6 @@ type RepositoryObservation struct {
 	defaultBranch string
 }
 
-// GitReferenceObservation is the exact immutable commit selected by one
-// repository branch reference at the time of admission.
-type GitReferenceObservation struct {
-	identity RepositoryIdentity
-	ref      string
-	sha      string
-}
-
-func (observation GitReferenceObservation) Identity() RepositoryIdentity { return observation.identity }
-func (observation GitReferenceObservation) Ref() string                  { return observation.ref }
-func (observation GitReferenceObservation) SHA() string                  { return observation.sha }
-
 func (observation RepositoryObservation) Identity() RepositoryIdentity { return observation.identity }
 func (observation RepositoryObservation) RepositoryID() int64 {
 	return observation.identity.RepositoryID()
@@ -122,67 +75,6 @@ func (observation RepositoryObservation) FullName() string      { return observa
 func (observation RepositoryObservation) Owner() string         { return observation.owner }
 func (observation RepositoryObservation) Name() string          { return observation.name }
 func (observation RepositoryObservation) DefaultBranch() string { return observation.defaultBranch }
-
-// PullRequestSummary contains only an identity-proven pull request number.
-type PullRequestSummary struct {
-	identity RepositoryIdentity
-	target   string
-	number   int64
-}
-
-func (summary PullRequestSummary) Identity() RepositoryIdentity { return summary.identity }
-func (summary PullRequestSummary) Target() string               { return summary.target }
-func (summary PullRequestSummary) Number() int64                { return summary.number }
-
-// PullRequestRefObservation is an immutable observation of one side of a pull
-// request. Head observations preserve fork repository identity.
-type PullRequestRefObservation struct {
-	repositoryID       int64
-	repositoryFullName string
-	repositoryOwner    string
-	repositoryName     string
-	ref                string
-	sha                string
-}
-
-func (observation PullRequestRefObservation) RepositoryID() int64 { return observation.repositoryID }
-func (observation PullRequestRefObservation) RepositoryFullName() string {
-	return observation.repositoryFullName
-}
-func (observation PullRequestRefObservation) RepositoryOwner() string {
-	return observation.repositoryOwner
-}
-func (observation PullRequestRefObservation) RepositoryName() string {
-	return observation.repositoryName
-}
-func (observation PullRequestRefObservation) Ref() string { return observation.ref }
-func (observation PullRequestRefObservation) SHA() string { return observation.sha }
-
-// PullRequestObservation is the complete remote tuple needed by a publication
-// coordinator to compare the PR with its persisted publication intent.
-type PullRequestObservation struct {
-	targetRepositoryID       int64
-	targetRepositoryFullName string
-	number                   int64
-	htmlURL                  string
-	state                    string
-	draft                    bool
-	base                     PullRequestRefObservation
-	head                     PullRequestRefObservation
-}
-
-func (observation PullRequestObservation) TargetRepositoryID() int64 {
-	return observation.targetRepositoryID
-}
-func (observation PullRequestObservation) TargetRepositoryFullName() string {
-	return observation.targetRepositoryFullName
-}
-func (observation PullRequestObservation) Number() int64                   { return observation.number }
-func (observation PullRequestObservation) HTMLURL() string                 { return observation.htmlURL }
-func (observation PullRequestObservation) State() string                   { return observation.state }
-func (observation PullRequestObservation) Draft() bool                     { return observation.draft }
-func (observation PullRequestObservation) Base() PullRequestRefObservation { return observation.base }
-func (observation PullRequestObservation) Head() PullRequestRefObservation { return observation.head }
 
 // RepositoryByID reads the stable numeric repository route and proves that its
 // response is exactly the configured owner/name target.
@@ -208,155 +100,12 @@ func (client *RepositoryClient) RepositoryByID(ctx context.Context, identity Rep
 	}, nil
 }
 
-// BranchReference reads one exact refs/heads reference and accepts only a
-// direct SHA-1 commit object owned by the configured repository identity.
-func (client *RepositoryClient) BranchReference(ctx context.Context, identity RepositoryIdentity, target, branch string) (GitReferenceObservation, error) {
-	if _, _, err := validateRepositoryCall(ctx, identity, target); err != nil {
-		return GitReferenceObservation{}, err
-	}
-	if gitref.ValidateRef(branch) != nil {
-		return GitReferenceObservation{}, ErrInvalidRepositoryRequest
-	}
-	qualified := "refs/heads/" + branch
-	payload, _, err := client.request(ctx, identity, http.MethodGet, repositoryRoute(target)+"git/ref/heads/"+url.PathEscape(branch), "", nil, http.StatusOK)
-	if err != nil {
-		return GitReferenceObservation{}, err
-	}
-	var decoded struct {
-		Ref    *string `json:"ref"`
-		Object *struct {
-			Type *string `json:"type"`
-			SHA  *string `json:"sha"`
-		} `json:"object"`
-	}
-	if err := decodeGitHubJSON(payload, &decoded); err != nil || decoded.Ref == nil || *decoded.Ref != qualified ||
-		decoded.Object == nil || decoded.Object.Type == nil || *decoded.Object.Type != "commit" ||
-		decoded.Object.SHA == nil || !gitref.ValidSHA1(*decoded.Object.SHA) {
-		return GitReferenceObservation{}, ErrInvalidResponse
-	}
-	return GitReferenceObservation{identity: identity, ref: branch, sha: *decoded.Object.SHA}, nil
-}
-
-// FindOpenDraftPullRequests uses one two-item page. A pagination link is
-// refused, and two proven matches produce PullRequestAmbiguityError.
-func (client *RepositoryClient) FindOpenDraftPullRequests(ctx context.Context, identity RepositoryIdentity, target, base, head string) ([]PullRequestSummary, error) {
-	owner, _, err := validateRepositoryCall(ctx, identity, target)
-	if err != nil || gitref.ValidateRef(base) != nil || gitref.ValidateRef(head) != nil {
-		return nil, firstError(err, ErrInvalidRepositoryRequest)
-	}
-	query := url.Values{}
-	query.Set("state", "open")
-	query.Set("base", base)
-	query.Set("head", owner+":"+head)
-	query.Set("per_page", "2")
-	payload, header, err := client.request(ctx, identity, http.MethodGet, repositoryRoute(target)+"pulls", query.Encode(), nil, http.StatusOK)
-	if err != nil {
-		return nil, err
-	}
-	if header.Get("Link") != "" {
-		return nil, ErrPaginationRefused
-	}
-	var decoded *[]pullRequestAPIResponse
-	if err := decodeGitHubJSON(payload, &decoded); err != nil || decoded == nil {
-		return nil, ErrInvalidResponse
-	}
-	summaries := make([]PullRequestSummary, 0, len(*decoded))
-	for _, pull := range *decoded {
-		if !validDiscoveryPull(pull, identity.RepositoryID(), target, base, head) {
-			return nil, ErrPullRequestConflict
-		}
-		summaries = append(summaries, PullRequestSummary{identity: identity, target: target, number: *pull.Number})
-	}
-	if len(summaries) > 1 {
-		return nil, &PullRequestAmbiguityError{count: len(summaries)}
-	}
-	return summaries, nil
-}
-
-// CreateDraftPullRequest performs exactly one POST and never retries an
-// ambiguous or lost response.
-func (client *RepositoryClient) CreateDraftPullRequest(ctx context.Context, identity RepositoryIdentity, target, base, head, title, body string) (int64, error) {
-	owner, _, err := validateRepositoryCall(ctx, identity, target)
-	if err != nil || gitref.ValidateRef(base) != nil || gitref.ValidateRef(head) != nil || !validPullTitle(title) || !validPullBody(body) {
-		return 0, firstError(err, ErrInvalidRepositoryRequest)
-	}
-	requestBody, err := json.Marshal(struct {
-		Title string `json:"title"`
-		Body  string `json:"body"`
-		Head  string `json:"head"`
-		Base  string `json:"base"`
-		Draft bool   `json:"draft"`
-	}{Title: title, Body: body, Head: owner + ":" + head, Base: base, Draft: true})
-	if err != nil {
-		return 0, ErrInvalidRepositoryRequest
-	}
-	payload, _, err := client.request(ctx, identity, http.MethodPost, repositoryRoute(target)+"pulls", "", requestBody, http.StatusCreated)
-	if err != nil {
-		return 0, err
-	}
-	var decoded struct {
-		Number *int64 `json:"number"`
-	}
-	if err := decodeGitHubJSON(payload, &decoded); err != nil || decoded.Number == nil || *decoded.Number <= 0 {
-		return 0, ErrInvalidResponse
-	}
-	return *decoded.Number, nil
-}
-
-// PullRequest re-reads one exact PR and returns the complete observed tuple.
-// Expected publication refs and SHAs are intentionally left to the coordinator.
-func (client *RepositoryClient) PullRequest(ctx context.Context, identity RepositoryIdentity, target string, number int64) (PullRequestObservation, error) {
-	if _, _, err := validateRepositoryCall(ctx, identity, target); err != nil {
-		return PullRequestObservation{}, err
-	}
-	if number <= 0 {
-		return PullRequestObservation{}, ErrInvalidRepositoryRequest
-	}
-	payload, _, err := client.request(ctx, identity, http.MethodGet, repositoryRoute(target)+"pulls/"+strconv.FormatInt(number, 10), "", nil, http.StatusOK)
-	if err != nil {
-		return PullRequestObservation{}, err
-	}
-	var decoded pullRequestAPIResponse
-	if err := decodeGitHubJSON(payload, &decoded); err != nil {
-		return PullRequestObservation{}, ErrInvalidResponse
-	}
-	observation, ok := validatePullRequestObservation(decoded, identity.RepositoryID(), target, number)
-	if !ok {
-		return PullRequestObservation{}, ErrInvalidResponse
-	}
-	return observation, nil
-}
-
 type repositoryAPIResponse struct {
 	ID            *int64  `json:"id"`
 	FullName      *string `json:"full_name"`
 	Name          *string `json:"name"`
 	DefaultBranch *string `json:"default_branch"`
 	Owner         *struct {
-		Login *string `json:"login"`
-	} `json:"owner"`
-}
-
-type pullRequestAPIResponse struct {
-	Number  *int64                     `json:"number"`
-	HTMLURL *string                    `json:"html_url"`
-	State   *string                    `json:"state"`
-	Draft   *bool                      `json:"draft"`
-	Base    *pullRequestRefAPIResponse `json:"base"`
-	Head    *pullRequestRefAPIResponse `json:"head"`
-}
-
-type pullRequestRefAPIResponse struct {
-	Ref  *string                     `json:"ref"`
-	SHA  *string                     `json:"sha"`
-	Repo *pullRequestRepoAPIResponse `json:"repo"`
-}
-
-type pullRequestRepoAPIResponse struct {
-	ID       *int64  `json:"id"`
-	FullName *string `json:"full_name"`
-	Name     *string `json:"name"`
-	Owner    *struct {
 		Login *string `json:"login"`
 	} `json:"owner"`
 }
@@ -449,95 +198,8 @@ func validateRepositoryCall(ctx context.Context, identity RepositoryIdentity, ta
 	return owner, name, nil
 }
 
-func validPullTitle(title string) bool {
-	if title == "" || len(title) > maxPullTitleBytes || !utf8.ValidString(title) || strings.TrimSpace(title) != title {
-		return false
-	}
-	for _, char := range title {
-		if char < 0x20 || char == 0x7f {
-			return false
-		}
-	}
-	return true
-}
-
-func validPullBody(body string) bool {
-	return len(body) <= maxPullBodyBytes && utf8.ValidString(body) && !strings.ContainsRune(body, 0)
-}
-
 func validRepositoryResponse(response repositoryAPIResponse, repositoryID int64, fullName, owner, name string) bool {
 	return response.ID != nil && *response.ID == repositoryID && response.FullName != nil && *response.FullName == fullName && response.Name != nil && *response.Name == name && response.Owner != nil && response.Owner.Login != nil && *response.Owner.Login == owner && response.DefaultBranch != nil
-}
-
-func validDiscoveryPull(pull pullRequestAPIResponse, repositoryID int64, target, base, head string) bool {
-	if pull.Number == nil || *pull.Number <= 0 || pull.State == nil || *pull.State != "open" || pull.Draft == nil || !*pull.Draft || pull.Base == nil || pull.Head == nil {
-		return false
-	}
-	return validPullRef(pull.Base, repositoryID, target, base, false) && validPullRef(pull.Head, repositoryID, target, head, false)
-}
-
-func validatePullRequestObservation(pull pullRequestAPIResponse, repositoryID int64, target string, number int64) (PullRequestObservation, bool) {
-	if pull.Number == nil || *pull.Number != number || pull.HTMLURL == nil || *pull.HTMLURL != canonicalPullURL(target, number) || pull.State == nil || (*pull.State != "open" && *pull.State != "closed") || pull.Draft == nil || pull.Base == nil || pull.Head == nil {
-		return PullRequestObservation{}, false
-	}
-	if pull.Head.Repo == nil || pull.Head.Repo.FullName == nil {
-		return PullRequestObservation{}, false
-	}
-	if !validPullRef(pull.Base, repositoryID, target, deref(pull.Base.Ref), true) || !validPullRef(pull.Head, 0, *pull.Head.Repo.FullName, deref(pull.Head.Ref), true) {
-		return PullRequestObservation{}, false
-	}
-	base := makePullRefObservation(pull.Base)
-	head := makePullRefObservation(pull.Head)
-	return PullRequestObservation{
-		targetRepositoryID:       repositoryID,
-		targetRepositoryFullName: target,
-		number:                   number,
-		htmlURL:                  *pull.HTMLURL,
-		state:                    *pull.State,
-		draft:                    *pull.Draft,
-		base:                     base,
-		head:                     head,
-	}, true
-}
-
-func validPullRef(ref *pullRequestRefAPIResponse, repositoryID int64, fullName, expectedRef string, requireSHA bool) bool {
-	if ref == nil || ref.Ref == nil || *ref.Ref != expectedRef || gitref.ValidateRef(*ref.Ref) != nil || ref.Repo == nil || ref.Repo.ID == nil || *ref.Repo.ID <= 0 || ref.Repo.FullName == nil || *ref.Repo.FullName != fullName || ref.Repo.Name == nil || ref.Repo.Owner == nil || ref.Repo.Owner.Login == nil {
-		return false
-	}
-	if repositoryID > 0 && *ref.Repo.ID != repositoryID {
-		return false
-	}
-	if gitref.ValidateOwnerRepo(*ref.Repo.FullName) != nil {
-		return false
-	}
-	owner, name, _ := strings.Cut(*ref.Repo.FullName, "/")
-	if *ref.Repo.Owner.Login != owner || *ref.Repo.Name != name {
-		return false
-	}
-	if requireSHA && (ref.SHA == nil || !gitref.ValidSHA1(*ref.SHA)) {
-		return false
-	}
-	return true
-}
-
-func makePullRefObservation(ref *pullRequestRefAPIResponse) PullRequestRefObservation {
-	return PullRequestRefObservation{
-		repositoryID:       *ref.Repo.ID,
-		repositoryFullName: *ref.Repo.FullName,
-		repositoryOwner:    *ref.Repo.Owner.Login,
-		repositoryName:     *ref.Repo.Name,
-		ref:                *ref.Ref,
-		sha:                *ref.SHA,
-	}
-}
-
-func repositoryRoute(target string) string {
-	owner, name, _ := strings.Cut(target, "/")
-	return "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(name) + "/"
-}
-
-func canonicalPullURL(target string, number int64) string {
-	return "https://github.com/" + target + "/pull/" + strconv.FormatInt(number, 10)
 }
 
 func validAPIBase(base string) bool {

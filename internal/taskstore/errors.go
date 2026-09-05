@@ -92,19 +92,6 @@ func (e *StaleTaskRevisionError) Error() string {
 
 func (e *StaleTaskRevisionError) Unwrap() error { return ErrStaleRevision }
 
-type StaleJournalRevisionError struct {
-	Kind     string
-	ID       string
-	Expected int64
-	Actual   int64
-}
-
-func (e *StaleJournalRevisionError) Error() string {
-	return fmt.Sprintf("%v: %s %s expected %d, actual %d", ErrStaleRevision, e.Kind, e.ID, e.Expected, e.Actual)
-}
-
-func (e *StaleJournalRevisionError) Unwrap() error { return ErrStaleRevision }
-
 type WorkspaceBusyError struct {
 	WorkspaceID task.WorkspaceID
 	AttemptID   task.AttemptID

@@ -10,6 +10,9 @@ import (
 
 func TestRegistryIsFixedCardinalityAndSanitizesFailures(t *testing.T) {
 	registry := NewRegistry()
+	if registry.Healthy(Component("task-publication")) {
+		t.Fatal("removed host publication component was accepted")
+	}
 	secret := "remote token must-not-escape\nsecond line"
 	if !registry.Degraded(ComponentBackgroundRunSerial, errors.New(secret)) {
 		t.Fatal("known component update was rejected")

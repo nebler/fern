@@ -40,7 +40,7 @@ var openAppCredentialStore = func(directory string) (appCredentialStore, error) 
 	return githubapp.NewCredentialStore(directory)
 }
 
-type credentialCandidateValidator func(context.Context, config.BackgroundConfig, *githubapp.AppCredentials) error
+type credentialCandidateValidator func(context.Context, config.Config, *githubapp.AppCredentials) error
 
 var validateCredentialCandidates credentialCandidateValidator = liveCredentialValidator
 
@@ -171,7 +171,7 @@ func runCredentialImport(args []string, log *slog.Logger, rotation bool) error {
 
 type credentialOperation struct {
 	options credentialOptions
-	config  config.BackgroundConfig
+	config  config.Config
 	lease   *hostlease.Lease
 	store   appCredentialStore
 }
@@ -180,8 +180,11 @@ func openCredentialOperation(options credentialOptions, log *slog.Logger) (*cred
 	if options.stateDirectory == "" {
 		return nil, errors.New("cannot determine Fern state directory")
 	}
-	cfg, err := loadBackgroundCommandConfig(options.configPath, true, options.envPath, config.BackgroundOverrides{})
+	cfg, _, err := loadCommandConfig(options.configPath, true, options.envPath, config.Overrides{})
 	if err != nil {
+		return nil, err
+	}
+	if err := config.ValidateBootstrap(cfg); err != nil {
 		return nil, err
 	}
 	lease, err := hostlease.Acquire(filepath.Join(options.stateDirectory, "locks"), cfg.Workspace.Name)
@@ -295,7 +298,7 @@ func (operation *credentialOperation) activate(ctx context.Context, candidate cr
 	return "", nil
 }
 
-func credentialBinding(cfg config.BackgroundConfig) (credentialbundle.Binding, error) {
+func credentialBinding(cfg config.Config) (credentialbundle.Binding, error) {
 	github := cfg.Workspace.GitHub
 	if cfg.Workspace.Name == "" || github.InstallationID <= 0 || github.Repository.ID <= 0 || github.Repository.FullName == "" {
 		return credentialbundle.Binding{}, errors.New("GitHub credentials are not configured")
@@ -306,7 +309,7 @@ func credentialBinding(cfg config.BackgroundConfig) (credentialbundle.Binding, e
 	}, nil
 }
 
-func liveCredentialValidator(ctx context.Context, cfg config.BackgroundConfig, app *githubapp.AppCredentials) error {
+func liveCredentialValidator(ctx context.Context, cfg config.Config, app *githubapp.AppCredentials) error {
 	github := cfg.Workspace.GitHub
 	if app != nil {
 		signer, err := githubapp.NewJWTSigner(app.AppID(), app.PrivateKey())

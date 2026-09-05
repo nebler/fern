@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -18,7 +19,7 @@ const (
 	MaxBundleBytes      = 512 << 20
 	MaxManifestFiles    = 100_000
 	MaxBlobBytes        = int64(2 << 30)
-	ResourceSpecVersion = 9
+	ResourceSpecVersion = run.ResourceSpecVersion
 	SnapshotPolicyV1    = "fern.taskartifact.snapshot.v1"
 	CompletionUserSeal  = "user_seal"
 
@@ -190,8 +191,8 @@ type StagedLocator struct {
 	digest Digest
 }
 
-// Locator is the only persistable CAS authority accepted by Inspect and
-// Materialize. ParseLocator is the external-data validation boundary.
+// Locator is the only persistable CAS authority accepted by Inspect, Acquire,
+// and Materialize. ParseLocator is the external-data validation boundary.
 type Locator struct {
 	digest Digest
 	valid  bool

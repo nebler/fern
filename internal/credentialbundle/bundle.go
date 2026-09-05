@@ -66,7 +66,8 @@ func (bundle Bundle) Fingerprint() (string, error) {
 func (Bundle) String() string          { return "encrypted credential bundle (contents redacted)" }
 func (bundle Bundle) GoString() string { return bundle.String() }
 
-// Encrypt serializes directly into an authenticated age stream.
+// Encrypt buffers the serialized plaintext in memory, then writes it through an
+// authenticated age stream. It does not write a plaintext file.
 func Encrypt(destination io.Writer, bundle Bundle, recipients []age.Recipient) error {
 	if destination == nil || len(recipients) == 0 {
 		return ErrEncryptBundle
@@ -178,7 +179,9 @@ func RecipientsForIdentities(identities []age.Identity) []age.Recipient {
 	return result
 }
 
-// WriteFile atomically creates an encrypted-only artifact with mode 0600.
+// WriteFile installs an encrypted-only mode-0600 artifact by atomic rename.
+// Its prior existence check is not a race-safe no-clobber guarantee; callers
+// must serialize writers to the destination in a trusted directory.
 func WriteFile(path string, bundle Bundle, recipients []age.Recipient) error {
 	if path == "" {
 		return ErrUnsafeFile

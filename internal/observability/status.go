@@ -8,19 +8,13 @@ import (
 type Component string
 
 const (
-	ComponentTaskPublication      Component = "task-publication"
-	ComponentTaskVerification     Component = "task-verification"
 	ComponentGitHubTaskDependency Component = "github-task-dependency"
-	ComponentLegacyPublication    Component = "legacy-publication"
 	ComponentBackgroundRunProfile Component = "background-run-profile"
 	ComponentBackgroundRunSerial  Component = "background-run-serial"
 )
 
 var components = [...]Component{
-	ComponentTaskPublication,
-	ComponentTaskVerification,
 	ComponentGitHubTaskDependency,
-	ComponentLegacyPublication,
 	ComponentBackgroundRunProfile,
 	ComponentBackgroundRunSerial,
 }

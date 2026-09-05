@@ -24,4 +24,4 @@ cp "$BACKUP/task-store.sqlite" "$CURRENT/task-store.sqlite"
 chmod 0600 "$CURRENT/task-store.sqlite"
 (cd "$ROOT" && go run ./integration/upgrade --database "$CURRENT/task-store.sqlite")
 
-printf 'Fern schema-1 initialization, reopen, and offline rollback checks passed\n'
+printf 'Fern current-schema initialization, reopen, and offline rollback checks passed\n'

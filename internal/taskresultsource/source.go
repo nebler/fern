@@ -17,7 +17,7 @@ type Store interface {
 
 type Artifact interface {
 	Inspect(context.Context, taskartifact.Locator) (taskartifact.Snapshot, error)
-	Materialize(context.Context, taskartifact.Locator) (*taskartifact.Checkout, error)
+	Acquire(context.Context, taskartifact.Locator) (taskartifact.Snapshot, *taskartifact.Checkout, error)
 }
 
 type Resolver struct {
@@ -34,18 +34,23 @@ func New(store Store, artifact Artifact) (*Resolver, error) {
 
 // Acquire returns a fresh repository and an idempotent mandatory cleanup.
 func (r *Resolver) Acquire(ctx context.Context, result taskstore.Result) (string, func() error, error) {
-	locator, err := r.verify(ctx, result)
+	artifact, locator, err := r.load(ctx, result)
 	if err != nil {
 		return "", nil, err
 	}
-	checkout, err := r.artifact.Materialize(ctx, locator)
+	snapshot, checkout, err := r.artifact.Acquire(ctx, locator)
 	if err != nil {
+		return "", nil, err
+	}
+	if err := verifyTuple(result, artifact, locator, snapshot); err != nil {
+		if closeErr := checkout.Close(); closeErr != nil {
+			return "", nil, errors.Join(err, closeErr)
+		}
 		return "", nil, err
 	}
 	path := checkout.Path()
 	if path == "" {
-		_ = checkout.Close()
-		return "", nil, taskstore.ErrCorruptStore
+		return "", nil, errors.Join(taskstore.ErrCorruptStore, checkout.Close())
 	}
 	return path, checkout.Close, nil
 }
@@ -53,26 +58,30 @@ func (r *Resolver) Acquire(ctx context.Context, result taskstore.Result) (string
 // Verify freshly proves that the retained artifact is present, intact, and
 // bound to the complete durable result tuple.
 func (r *Resolver) Verify(ctx context.Context, result taskstore.Result) error {
-	_, err := r.verify(ctx, result)
-	return err
-}
-
-func (r *Resolver) verify(ctx context.Context, result taskstore.Result) (taskartifact.Locator, error) {
-	if result.SourceKind != taskstore.ResultSourceRetainedArtifact {
-		return taskartifact.Locator{}, taskstore.ErrCorruptStore
-	}
-	artifact, err := r.store.GetRetainedArtifact(ctx, result.RetainedArtifactID)
+	artifact, locator, err := r.load(ctx, result)
 	if err != nil {
-		return taskartifact.Locator{}, err
-	}
-	locator, err := taskartifact.ParseLocator(artifact.CASLocator)
-	if err != nil {
-		return taskartifact.Locator{}, err
+		return err
 	}
 	snapshot, err := r.artifact.Inspect(ctx, locator)
 	if err != nil {
-		return taskartifact.Locator{}, err
+		return err
 	}
+	return verifyTuple(result, artifact, locator, snapshot)
+}
+
+func (r *Resolver) load(ctx context.Context, result taskstore.Result) (taskstore.RetainedArtifact, taskartifact.Locator, error) {
+	if result.SourceKind != taskstore.ResultSourceRetainedArtifact {
+		return taskstore.RetainedArtifact{}, taskartifact.Locator{}, taskstore.ErrCorruptStore
+	}
+	artifact, err := r.store.GetRetainedArtifact(ctx, result.RetainedArtifactID)
+	if err != nil {
+		return taskstore.RetainedArtifact{}, taskartifact.Locator{}, err
+	}
+	locator, err := taskartifact.ParseLocator(artifact.CASLocator)
+	return artifact, locator, err
+}
+
+func verifyTuple(result taskstore.Result, artifact taskstore.RetainedArtifact, locator taskartifact.Locator, snapshot taskartifact.Snapshot) error {
 	if artifact.ID != result.RetainedArtifactID || artifact.ResultID != result.ID || artifact.ExportID != result.ArtifactExportID ||
 		artifact.MaterializationID != result.MaterializationID ||
 		artifact.WorkspaceID != result.WorkspaceID || artifact.TaskID != result.TaskID || artifact.AttemptID != result.AttemptID ||
@@ -85,7 +94,7 @@ func (r *Resolver) verify(ctx context.Context, result taskstore.Result) (taskart
 		snapshot.OpenCodeSessionID != artifact.OpenCodeSessionID || snapshot.OpenCodeMessageID != artifact.OpenCodeMessageID ||
 		snapshot.ChangesSHA256.Bytes() != result.ManifestSHA256 || snapshot.ManifestSHA256.Bytes() != artifact.ManifestSHA256 ||
 		snapshot.BundleSHA256.Bytes() != artifact.BundleSHA256 || snapshot.BundleBytes != artifact.BundleBytes {
-		return taskartifact.Locator{}, taskstore.ErrCorruptStore
+		return taskstore.ErrCorruptStore
 	}
-	return locator, nil
+	return nil
 }

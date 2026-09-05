@@ -352,6 +352,8 @@ func stageFernState(source, destination string) error {
 
 func copyStatePath(source, target, relative string) error {
 	base := filepath.Base(relative)
+	// Keep excluding legacy host-publication scratch directories: upgrading
+	// must not turn abandoned disposable checkouts into durable backup state.
 	if base == "artifact-work" || strings.HasSuffix(base, "-publication") || strings.HasPrefix(base, ".clone-") {
 		return nil
 	}

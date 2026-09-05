@@ -18,12 +18,11 @@ const (
 )
 
 const (
-	GitHubAuthorityWorkspaceGH GitHubAuthority = "workspace-gh"
-	GitHubAuthorityAppBroker   GitHubAuthority = "github-app-broker"
+	GitHubAuthorityAppBroker GitHubAuthority = "github-app-broker"
 )
 
 func (authority GitHubAuthority) valid() bool {
-	return authority == GitHubAuthorityWorkspaceGH || authority == GitHubAuthorityAppBroker
+	return authority == GitHubAuthorityAppBroker
 }
 
 func (s WorkspaceState) valid() bool {
@@ -140,7 +139,6 @@ type Attempt struct {
 	Agent                    string
 	ModelProvider            string
 	Model                    string
-	BudgetSnapshot           json.RawMessage
 	Deadline                 time.Time
 	DeliveryClaimOwner       *string
 	DeliveryClaimExpiresAt   *time.Time
@@ -179,8 +177,6 @@ type Result struct {
 	SealedAt            time.Time
 	Creator             task.ActorSnapshot
 	CompletionAuthority SealCompletionAuthority
-	SealRequestID       task.SealRequestID
-	Authorizer          *task.ActorSnapshot
 	SealedEventID       task.EventID
 	CompletedEventID    task.EventID
 	Revision            int64
@@ -195,61 +191,14 @@ type Result struct {
 type ResultSourceKind string
 
 const (
-	ResultSourcePersistentWorkspace ResultSourceKind = "persistent_workspace"
-	ResultSourceRetainedArtifact    ResultSourceKind = "retained_artifact"
+	ResultSourceRetainedArtifact ResultSourceKind = "retained_artifact"
 )
 
 type SealCompletionAuthority string
 
 const (
-	SealAuthorityExecutionSuccess SealCompletionAuthority = "execution_success"
-	SealAuthorityUser             SealCompletionAuthority = "user_seal"
+	SealAuthorityUser SealCompletionAuthority = "user_seal"
 )
-
-type SealRequestState string
-
-const (
-	SealRequestPending   SealRequestState = "pending"
-	SealRequestClaimed   SealRequestState = "claimed"
-	SealRequestCompleted SealRequestState = "completed"
-	SealRequestRejected  SealRequestState = "rejected"
-)
-
-// SealRequest is immutable authorization plus coordinator lease/completion
-// state. Expected* fields are the values the user actually approved.
-type SealRequest struct {
-	ID                        task.SealRequestID
-	ReceiptID                 task.ReceiptID
-	WorkspaceID               task.WorkspaceID
-	TaskID                    task.TaskID
-	AttemptID                 task.AttemptID
-	State                     SealRequestState
-	CompletionAuthority       SealCompletionAuthority
-	ExpectedWorkspaceRevision int64
-	ExpectedTaskRevision      int64
-	ExpectedAttemptRevision   int64
-	RepositoryID              task.RepositoryID
-	BaseSHA                   task.GitOID
-	ExpectedResultCommit      task.GitOID
-	ExpectedTreeOID           task.GitOID
-	ExpectedOutcome           task.ResultOutcome
-	ExpectedManifestEntries   int
-	ExpectedManifestSHA256    [32]byte
-	ExpectedWorktreeClean     bool
-	IdempotencyKey            task.IdempotencyKey
-	RequestHash               task.RequestHash
-	Authorizer                task.ActorSnapshot
-	ResultID                  task.ResultID
-	ResultEventID             task.EventID
-	TaskEventID               task.EventID
-	ClaimOwner                string
-	ClaimExpiresAt            *time.Time
-	ClaimRevision             int64
-	AcceptedAt                time.Time
-	CompletedAt               *time.Time
-	RejectedAt                *time.Time
-	RejectedReason            string
-}
 
 type ManifestEntry struct {
 	PathBase64 string  `json:"pathBase64"`
@@ -270,15 +219,6 @@ type SealedResult struct {
 	ResultEvent Event
 	TaskEvent   Event
 	Replayed    bool
-}
-
-// VerificationSource is the exact current ownership tuple returned by
-// verification discovery. Discovery grants no authority to execute a command;
-// every write rechecks these revisions and identities transactionally.
-type VerificationSource struct {
-	Result  Result
-	Task    Task
-	Attempt Attempt
 }
 
 type resultMaterial struct {
@@ -350,288 +290,4 @@ type EventPage struct {
 	NextCursor task.Cursor
 	Watermark  task.Cursor
 	CaughtUp   bool
-}
-
-// JournalEvent is the immutable proof paired with one verification or
-// publication revision. Journal events are separate from the reconnect event
-// stream, which is deliberately closed to task/attempt IDs.
-type JournalEvent struct {
-	ID             task.EventID
-	WorkspaceID    task.WorkspaceID
-	TaskID         task.TaskID
-	AttemptID      task.AttemptID
-	ResultID       task.ResultID
-	EntityType     string
-	EntityID       string
-	Type           string
-	FromState      string
-	ToState        string
-	EntityRevision int64
-	OccurredAt     time.Time
-	Actor          task.ActorSnapshot
-	EvidenceSHA256 [32]byte
-	Payload        json.RawMessage
-}
-
-type VerificationState string
-
-const (
-	VerificationPrepared         VerificationState = "prepared"
-	VerificationRunning          VerificationState = "running"
-	VerificationSucceeded        VerificationState = "succeeded"
-	VerificationFailed           VerificationState = "failed"
-	VerificationRecoveryRequired VerificationState = "recovery_required"
-)
-
-type VerificationOutput struct {
-	ByteCount     int64
-	RetainedBytes int64
-	SHA256        [32]byte
-	Truncated     bool
-}
-
-type Verification struct {
-	ID                task.VerificationID
-	ResultID          task.ResultID
-	TaskID            task.TaskID
-	AttemptID         task.AttemptID
-	WorkspaceID       task.WorkspaceID
-	State             VerificationState
-	PolicyName        string
-	PolicySHA256      [32]byte
-	VerifiedCommit    task.GitOID
-	WorkingDirectory  string
-	Timeout           time.Duration
-	OutputLimitBytes  int64
-	RunnerName        string
-	RunnerVersion     string
-	ImageDigest       string
-	EnvironmentSHA256 [32]byte
-	EffectAttempt     int
-	StartedAt         *time.Time
-	EndedAt           *time.Time
-	Outcome           string
-	ExitCode          *int
-	Signal            string
-	Stdout            *VerificationOutput
-	Stderr            *VerificationOutput
-	Reason            string
-	LatestEventID     task.EventID
-	Revision          int64
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-}
-
-type VerificationRecord struct {
-	Verification Verification
-	Event        JournalEvent
-	Replayed     bool
-}
-
-type PrepareVerificationParams struct {
-	VerificationID          task.VerificationID
-	ResultID                task.ResultID
-	ExpectedTaskRevision    int64
-	ExpectedAttemptRevision int64
-	EventID                 task.EventID
-	PolicyName              string
-	PolicySHA256            [32]byte
-	VerifiedCommit          task.GitOID
-	WorkingDirectory        string
-	Timeout                 time.Duration
-	OutputLimitBytes        int64
-	RunnerName              string
-	RunnerVersion           string
-	ImageDigest             string
-	EnvironmentSHA256       [32]byte
-	PreparedAt              time.Time
-	EvidencePayload         json.RawMessage
-	EvidenceSHA256          [32]byte
-	Actor                   task.ActorSnapshot
-}
-
-type AdvanceVerificationParams struct {
-	VerificationID          task.VerificationID
-	ExpectedRevision        int64
-	ExpectedTaskRevision    int64
-	ExpectedAttemptRevision int64
-	EventID                 task.EventID
-	StartedAt               time.Time
-	EvidencePayload         json.RawMessage
-	EvidenceSHA256          [32]byte
-	Actor                   task.ActorSnapshot
-}
-
-type CompleteVerificationParams struct {
-	VerificationID          task.VerificationID
-	ExpectedRevision        int64
-	ExpectedTaskRevision    int64
-	ExpectedAttemptRevision int64
-	EventID                 task.EventID
-	State                   VerificationState
-	Outcome                 string
-	ExitCode                *int
-	Signal                  string
-	Stdout                  VerificationOutput
-	Stderr                  VerificationOutput
-	Reason                  string
-	EndedAt                 time.Time
-	EvidencePayload         json.RawMessage
-	EvidenceSHA256          [32]byte
-	Actor                   task.ActorSnapshot
-}
-
-type RecoverVerificationParams struct {
-	VerificationID          task.VerificationID
-	ExpectedRevision        int64
-	ExpectedTaskRevision    int64
-	ExpectedAttemptRevision int64
-	EventID                 task.EventID
-	Reason                  string
-	Outcome                 string
-	Stdout                  *VerificationOutput
-	Stderr                  *VerificationOutput
-	RecoveredAt             time.Time
-	EvidencePayload         json.RawMessage
-	EvidenceSHA256          [32]byte
-	Actor                   task.ActorSnapshot
-}
-
-type PublicationState string
-type PublicationPhase string
-
-const (
-	PublicationPrepared         PublicationState = "prepared"
-	PublicationRunning          PublicationState = "running"
-	PublicationUncertain        PublicationState = "uncertain"
-	PublicationRecoveryRequired PublicationState = "recovery_required"
-	PublicationPublished        PublicationState = "published"
-	PublicationFailed           PublicationState = "failed"
-	PublicationConflict         PublicationState = "conflict"
-
-	PublicationPhaseNone            PublicationPhase = "none"
-	PublicationPhasePushStarted     PublicationPhase = "push_started"
-	PublicationPhasePushObserved    PublicationPhase = "push_observed"
-	PublicationPhasePRCreateStarted PublicationPhase = "pr_create_started"
-)
-
-type Publication struct {
-	ID                  task.PublicationID
-	OperationID         task.PublicationOperationID
-	AdmissionReceiptID  task.ReceiptID
-	ResultID            task.ResultID
-	VerificationID      task.VerificationID
-	TaskID              task.TaskID
-	AttemptID           task.AttemptID
-	WorkspaceID         task.WorkspaceID
-	State               PublicationState
-	EffectPhase         PublicationPhase
-	Tuple               task.PublicationTuple
-	BrokerPolicyVersion string
-	BrokerPolicySHA256  [32]byte
-	ObservedRemoteSHA   task.GitOID
-	Observation         *task.PublicationObservation
-	Reason              string
-	LatestEventID       task.EventID
-	Requester           task.ActorSnapshot
-	Revision            int64
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
-}
-
-type PublicationRecord struct {
-	Publication Publication
-	Event       JournalEvent
-	Replayed    bool
-}
-
-type PublicationAdmission struct {
-	Publication Publication
-	Receipt     Receipt
-	Event       JournalEvent
-	Replayed    bool
-}
-
-// PublicationWork is one consistent source snapshot for durable publication.
-// Coordinators use these exact revisions and tuples rather than deriving them
-// from a checkout or from independent mutable reads.
-type PublicationWork struct {
-	Publication  Publication
-	Task         Task
-	Attempt      Attempt
-	Result       Result
-	Verification Verification
-	Event        JournalEvent
-}
-
-type PreparePublicationParams struct {
-	PublicationID           task.PublicationID
-	ResultID                task.ResultID
-	VerificationID          task.VerificationID
-	ExpectedTaskRevision    int64
-	ExpectedAttemptRevision int64
-	EventID                 task.EventID
-	Tuple                   task.PublicationTuple
-	BrokerPolicyVersion     string
-	BrokerPolicySHA256      [32]byte
-	PreparedAt              time.Time
-	EvidencePayload         json.RawMessage
-	EvidenceSHA256          [32]byte
-	Actor                   task.ActorSnapshot
-}
-
-type AdmitPublicationParams struct {
-	PublicationID       task.PublicationID
-	OperationID         task.PublicationOperationID
-	ReceiptID           task.ReceiptID
-	EventID             task.EventID
-	ResultID            task.ResultID
-	VerificationID      task.VerificationID
-	Claim               task.IdempotencyClaim
-	BrokerPolicyVersion string
-	BrokerPolicySHA256  [32]byte
-	APIContractVersion  string
-	AcceptedAt          time.Time
-}
-
-type AdvancePublicationParams struct {
-	PublicationID           task.PublicationID
-	ExpectedRevision        int64
-	ExpectedTaskRevision    int64
-	ExpectedAttemptRevision int64
-	From                    PublicationPhase
-	To                      PublicationPhase
-	ObservedRemoteSHA       task.GitOID
-	EventID                 task.EventID
-	AdvancedAt              time.Time
-	EvidencePayload         json.RawMessage
-	EvidenceSHA256          [32]byte
-	Actor                   task.ActorSnapshot
-}
-
-type CompletePublicationParams struct {
-	PublicationID           task.PublicationID
-	ExpectedRevision        int64
-	ExpectedTaskRevision    int64
-	ExpectedAttemptRevision int64
-	EventID                 task.EventID
-	Observation             task.PublicationObservation
-	CompletedAt             time.Time
-	EvidencePayload         json.RawMessage
-	EvidenceSHA256          [32]byte
-	Actor                   task.ActorSnapshot
-}
-
-type RecoverPublicationParams struct {
-	PublicationID           task.PublicationID
-	ExpectedRevision        int64
-	ExpectedTaskRevision    int64
-	ExpectedAttemptRevision int64
-	EventID                 task.EventID
-	State                   PublicationState
-	Reason                  string
-	RecoveredAt             time.Time
-	EvidencePayload         json.RawMessage
-	EvidenceSHA256          [32]byte
-	Actor                   task.ActorSnapshot
 }

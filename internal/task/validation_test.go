@@ -25,9 +25,6 @@ func TestFernIDParsers(t *testing.T) {
 		{"artifact export", "exp_", func(v string) error { _, err := ParseArtifactExportID(v); return err }},
 		{"retained artifact", "art_", func(v string) error { _, err := ParseRetainedArtifactID(v); return err }},
 		{"materialization", "mat_", func(v string) error { _, err := ParseMaterializationID(v); return err }},
-		{"verification", "ver_", func(v string) error { _, err := ParseVerificationID(v); return err }},
-		{"publication", "pub_", func(v string) error { _, err := ParsePublicationID(v); return err }},
-		{"operation", "op_", func(v string) error { _, err := ParsePublicationOperationID(v); return err }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -51,9 +48,6 @@ func TestExternalIDParsers(t *testing.T) {
 		}
 		if _, err := ParseInstallationID(v); err != nil {
 			t.Errorf("installation %q: %v", v, err)
-		}
-		if _, err := ParsePullRequestNumber(v); err != nil {
-			t.Errorf("PR %q: %v", v, err)
 		}
 	}
 	for _, v := range []string{"", "0", "01", "-1", "+1", "1.0", "9223372036854775808", "18446744073709551616"} {
@@ -82,7 +76,6 @@ func TestNumericIDsFitSQLiteInteger(t *testing.T) {
 	for _, parse := range []func(string) error{
 		func(value string) error { _, err := ParseRepositoryID(value); return err },
 		func(value string) error { _, err := ParseInstallationID(value); return err },
-		func(value string) error { _, err := ParsePullRequestNumber(value); return err },
 	} {
 		if err := parse("9223372036854775807"); err != nil {
 			t.Fatalf("maximum signed SQLite integer rejected: %v", err)

@@ -254,7 +254,7 @@ func validChange(entry ChangeEntry) bool {
 	}
 }
 
-func manifestsEqual(left, right []ChangeEntry) bool {
+func changesEqual(left, right []ChangeEntry) bool {
 	leftEncoded, _, leftErr := canonicalChanges(left)
 	rightEncoded, _, rightErr := canonicalChanges(right)
 	return leftErr == nil && rightErr == nil && bytes.Equal(leftEncoded, rightEncoded)

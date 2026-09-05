@@ -101,12 +101,12 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 		add("config", "fail", err.Error(), "Run doctor from an accessible directory.")
 		return report
 	}
-	cfg, err := config.LoadBackgroundWithEnvironment(opts.ConfigPath, cwd, true, config.BackgroundOverrides{}, values)
+	cfg, err := config.LoadWithEnvironment(opts.ConfigPath, cwd, true, config.Overrides{}, values)
 	if err != nil {
 		add("config", "fail", err.Error(), "Fix the strict Fern configuration.")
 		return report
 	}
-	if err := config.ValidateBackgroundBootstrap(cfg); err != nil {
+	if err := config.ValidateBootstrap(cfg); err != nil {
 		add("config", "fail", err.Error(), "Fix the Fern configuration or secret file.")
 		return report
 	}
@@ -151,7 +151,7 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 
 // checkPhoneRoute verifies the private Tailscale HTTPS path end to end and, on
 // success, records the one-time pairing URL on the report.
-func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, status, summary, remediation string), opts diagnoseOptions, cfg config.BackgroundConfig, localURL string) {
+func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, status, summary, remediation string), opts diagnoseOptions, cfg config.Config, localURL string) {
 	if cfg.RemoteOrigin == "" {
 		add("tailscale", "fail", "proxy.remoteOrigin is required for phone mode", "Set proxy.remoteOrigin to the exact canonical HTTPS root origin reported for this host, then retry.")
 		return

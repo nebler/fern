@@ -1,4 +1,6 @@
-// Package githubapp provides host-only GitHub App authentication primitives.
-// It deliberately does not expose a general GitHub API proxy or integrate with
-// workspace processes.
+// Package githubapp provides host-side GitHub App onboarding, credential storage,
+// repository discovery, and short-lived installation-token minting. App private
+// keys remain on the host; the Background Run provider delivers repository-scoped
+// installation tokens to containers. This package is not a general GitHub proxy
+// or a host-side pull request publisher.
 package githubapp

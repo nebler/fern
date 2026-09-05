@@ -31,45 +31,46 @@ import (
 	"github.com/docker/go-connections/nat"
 	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/backgroundroute"
+	"github.com/nebler/fern/internal/githubapp"
+	runidentity "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 const (
-	runRootName       = "background-runs"
-	hostKeyName       = "host.key"
-	serverPort        = nat.Port("4096/tcp")
-	workspaceTarget   = "/home/user/workspace"
-	opencodeTarget    = "/home/user/.local/share/opencode"
-	containerUser     = "1001:1001"
-	passwordEnv       = "OPENCODE_SERVER_PASSWORD"
-	usernameEnv       = "OPENCODE_SERVER_USERNAME"
-	managedLabel      = "dev.fern.background-run.managed"
-	workspaceLabel    = "dev.fern.background-run.workspace"
-	taskLabel         = "dev.fern.background-run.task"
-	attemptLabel      = "dev.fern.background-run.attempt"
-	generationLabel   = "dev.fern.background-run.generation"
-	imageLabel        = "dev.fern.background-run.image"
-	cloneLabel        = "dev.fern.background-run.clone"
-	volumeLabel       = "dev.fern.background-run.volume"
-	containerLabel    = "dev.fern.background-run.container"
-	endpointLabel     = "dev.fern.background-run.endpoint"
-	baseLabel         = "dev.fern.background-run.base"
-	repositoryLabel   = "dev.fern.background-run.repository"
-	profileLabel      = "dev.fern.background-run.profile"
-	sessionLabel      = "dev.fern.background-run.session"
-	messageLabel      = "dev.fern.background-run.message"
-	specLabel         = "dev.fern.background-run.spec"
-	markerName        = "fern-background-run.json"
-	passwordDomain    = "fern/background-run/basic-password/v1\x00"
-	environmentDomain = "fern/background-run/environment/v1\x00"
-	expectedSource    = "https://github.com/anomalyco/opencode"
-	expectedRevision  = "39fb919a054190498f6d5b7985bde231f93ad7a6"
-	expectedVersion   = "0.0.0-source-39fb919a054190498f6d5b7985bde231f93ad7a6"
-	expectedProfile   = "source-39fb919a054190498f6d5b7985bde231f93ad7a6"
-	maxEvidenceBytes  = 4096
-	maxHealthBytes    = 4096
+	runRootName      = "background-runs"
+	hostKeyName      = "host.key"
+	serverPort       = nat.Port("4096/tcp")
+	workspaceTarget  = "/home/user/workspace"
+	opencodeTarget   = "/home/user/.local/share/opencode"
+	containerUser    = "1001:1001"
+	passwordEnv      = "OPENCODE_SERVER_PASSWORD"
+	usernameEnv      = "OPENCODE_SERVER_USERNAME"
+	managedLabel     = "dev.fern.background-run.managed"
+	workspaceLabel   = "dev.fern.background-run.workspace"
+	taskLabel        = "dev.fern.background-run.task"
+	attemptLabel     = "dev.fern.background-run.attempt"
+	generationLabel  = "dev.fern.background-run.generation"
+	imageLabel       = "dev.fern.background-run.image"
+	cloneLabel       = "dev.fern.background-run.clone"
+	volumeLabel      = "dev.fern.background-run.volume"
+	containerLabel   = "dev.fern.background-run.container"
+	endpointLabel    = "dev.fern.background-run.endpoint"
+	baseLabel        = "dev.fern.background-run.base"
+	repositoryLabel  = "dev.fern.background-run.repository"
+	profileLabel     = "dev.fern.background-run.profile"
+	sessionLabel     = "dev.fern.background-run.session"
+	messageLabel     = "dev.fern.background-run.message"
+	specLabel        = "dev.fern.background-run.spec"
+	markerName       = "fern-background-run.json"
+	passwordDomain   = "fern/background-run/basic-password/v1\x00"
+	expectedSource   = "https://github.com/anomalyco/opencode"
+	expectedRevision = "39fb919a054190498f6d5b7985bde231f93ad7a6"
+	expectedVersion  = "0.0.0-source-39fb919a054190498f6d5b7985bde231f93ad7a6"
+	expectedProfile  = "source-39fb919a054190498f6d5b7985bde231f93ad7a6"
+	maxEvidenceBytes = 4096
+	maxHealthBytes   = 4096
 )
 
 var (
@@ -118,6 +119,11 @@ type Config struct {
 	// reject non-empty values because the worker has unrestricted bridge egress.
 	Environment map[string]string
 	HTTPClient  *http.Client
+	// GitHubTokens is nil only for hermetic no-GitHub tests/setup. Production
+	// supplies a repository-scoped App source and its exact configured identity.
+	GitHubTokens             githubapp.InstallationTokenSource
+	GitHubRepository         githubapp.RepositoryIdentity
+	GitHubRepositoryFullName string
 }
 
 type dockerAPI interface {
@@ -137,20 +143,23 @@ type dockerAPI interface {
 // Provider is safe to reconstruct: all credentials and resource expectations
 // derive from durable state and immutable run identity.
 type Provider struct {
-	config      Config
-	docker      dockerAPI
-	ownedCLI    *client.Client
-	root        string
-	rootDevice  uint64
-	rootInode   uint64
-	hostKey     [32]byte
-	imageEnv    map[string]string
-	imageLabels map[string]string
-	http        *http.Client
-	lifecycle   *providerLifecycle
+	config           Config
+	docker           dockerAPI
+	ownedCLI         *client.Client
+	root             string
+	rootDevice       uint64
+	rootInode        uint64
+	hostKey          [32]byte
+	imageEnv         map[string]string
+	imageLabels      map[string]string
+	http             *http.Client
+	lifecycle        *providerLifecycle
+	githubCredential githubCredentialLease
+	githubNow        func() time.Time
 }
 
 type providerLifecycle struct {
+	githubMu  sync.Mutex
 	closeOnce sync.Once
 	closeErr  error
 	mu        sync.Mutex
@@ -181,35 +190,6 @@ type RuntimeIdentity struct {
 	ContainerID string
 	StartedAt   string
 	Token       string
-}
-
-// WriterFence is one of three explicit lifecycle proofs: NeverCreated, an
-// exact created-but-never-started ID, or a full committed process epoch. Its
-// zero value is invalid.
-type WriterFence struct {
-	NeverCreated bool
-	ContainerID  string
-	StartedAt    string
-	Token        string
-}
-
-// CleanupAuthority is the compatibility name for WriterFence.
-type CleanupAuthority = WriterFence
-
-func NeverCreatedAuthority() WriterFence {
-	return WriterFence{NeverCreated: true}
-}
-
-func CreatedContainerAuthority(containerID string) WriterFence {
-	return WriterFence{ContainerID: containerID}
-}
-
-func RuntimeCleanupAuthority(runtime RuntimeIdentity) WriterFence {
-	return WriterFence{ContainerID: runtime.ContainerID, StartedAt: runtime.StartedAt, Token: runtime.Token}
-}
-
-func (a WriterFence) runtimeIdentity() RuntimeIdentity {
-	return RuntimeIdentity{ContainerID: a.ContainerID, StartedAt: a.StartedAt, Token: a.Token}
 }
 
 // UsageObservation is bounded monitoring evidence, not a filesystem quota.
@@ -330,16 +310,11 @@ func (p *Provider) CommittedRuntime(run taskstore.BackgroundRun) (RuntimeIdentit
 }
 
 func committedRuntimeFromRun(run taskstore.BackgroundRun) (RuntimeIdentity, error) {
-	started, err := time.Parse(time.RFC3339Nano, run.ObservedContainerStartedAt)
-	if err != nil || started.UnixNano() != run.RuntimeEpoch {
+	identity, err := runidentity.NewRuntime(run.ObservedContainerID, run.ObservedContainerStartedAt)
+	if err != nil || identity.Epoch() != run.RuntimeEpoch {
 		return RuntimeIdentity{}, errors.New("durable background runtime epoch is incomplete")
 	}
-	runtime := RuntimeIdentity{ContainerID: run.ObservedContainerID, StartedAt: run.ObservedContainerStartedAt,
-		Token: runtimeToken(run.ObservedContainerID, run.ObservedContainerStartedAt)}
-	if err := validateCommittedRuntime(runtime); err != nil {
-		return RuntimeIdentity{}, err
-	}
-	return runtime, nil
+	return runtimeFromIdentity(identity), nil
 }
 
 // OpenCodeClient derives Basic credentials in memory and returns only the
@@ -465,6 +440,12 @@ func cloneConfig(config Config) Config {
 }
 
 func validateConfig(c Config) error {
+	if c.GitHubTokens != nil {
+		identity, err := githubapp.NewRepositoryIdentity(c.GitHubRepository.InstallationID(), c.GitHubRepository.RepositoryID())
+		if err != nil || identity != c.GitHubRepository || !validGitHubRepositoryName(c.GitHubRepositoryFullName) {
+			return errors.New("exact GitHub App repository identity is required")
+		}
+	}
 	if len(c.Environment) != 0 {
 		return errors.New("background run environment injection is unsupported without brokered egress")
 	}
@@ -511,6 +492,9 @@ func validateConfig(c Config) error {
 }
 
 func qualifyImage(got image.InspectResponse, want string) error {
+	if got.Config == nil || got.Config.Labels["ai.fern.runtime.spec"] != strconv.Itoa(runidentity.ResourceSpecVersion) {
+		return errors.New("background image runtime credential profile is not qualified")
+	}
 	if got.ID != want || got.Config == nil || got.Config.User != containerUser || len(got.Config.Entrypoint) != 0 ||
 		!slices.Equal(got.Config.Cmd, []string{"opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"}) ||
 		len(got.Config.ExposedPorts) != 1 || !equalMap(got.Config.Volumes, map[string]struct{}{workspaceTarget: {}, opencodeTarget: {}}) {
@@ -533,7 +517,7 @@ func (p *Provider) validateRun(run taskstore.BackgroundRun) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if run.ResourceSpecVersion != 9 || run.ImageIdentity != p.config.ImageID || run.EnvironmentSHA256 != EnvironmentSHA256(p.config.Environment) {
+	if run.ResourceSpecVersion != runidentity.ResourceSpecVersion || run.ImageIdentity != p.config.ImageID || run.EnvironmentSHA256 != EnvironmentSHA256(p.config.Environment) {
 		return "", errors.New("background run execution configuration differs from immutable intent")
 	}
 	return digest, nil
@@ -547,15 +531,14 @@ func (p *Provider) validateRunForCleanup(run taskstore.BackgroundRun) (string, e
 		return "", err
 	}
 	if _, err := task.ParseAttemptID(string(run.AttemptID)); err != nil || run.Generation <= 0 || !validImageID(run.ImageIdentity) ||
-		run.EnvironmentSHA256 == ([sha256.Size]byte{}) || (run.ResourceSpecVersion != 8 && run.ResourceSpecVersion != 9) || run.Profile != taskstore.BackgroundRunSourceProfile {
+		run.EnvironmentSHA256 == ([sha256.Size]byte{}) || run.ResourceSpecVersion != runidentity.ResourceSpecVersion || run.Profile != taskstore.BackgroundRunSourceProfile {
 		return "", errors.New("invalid immutable background run tuple")
 	}
 	if _, err := task.ParseGitOID(string(run.BaseOID)); err != nil {
 		return "", err
 	}
-	compact := strings.ReplaceAll(strings.TrimPrefix(string(run.TaskID), "tsk_"), "-", "")
-	generation := strconv.FormatInt(run.Generation, 10)
-	if run.CloneIdentity != "run-"+compact+"-g"+generation+"-clone" || run.VolumeIdentity != "fern-run-"+compact+"-g"+generation+"-opencode" || run.ContainerIdentity != "fern-run-"+compact+"-g"+generation || run.EndpointIdentity != "run-"+compact+"-g"+generation+"-endpoint" {
+	resources, err := runidentity.NewResources(run.TaskID, run.Generation)
+	if err != nil || !resources.Matches(run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity) {
 		return "", errors.New("noncanonical background run resource identity")
 	}
 	if strings.ContainsAny(run.CloneIdentity+run.VolumeIdentity+run.ContainerIdentity, `/\\`) || !canonicalRemote(run.RepositoryRemote) || run.OpenCodeSessionID == "" || run.OpenCodeMessageID == "" {
@@ -565,20 +548,7 @@ func (p *Provider) validateRunForCleanup(run taskstore.BackgroundRun) (string, e
 }
 
 func (p *Provider) cleanupDigest(run taskstore.BackgroundRun) (string, error) {
-	digest, err := p.validateRunForCleanup(run)
-	if err != nil || run.ResourceSpecVersion != 8 {
-		return digest, err
-	}
-	if _, err := os.Lstat(p.cloneMarkerPath(run)); errors.Is(err, os.ErrNotExist) {
-		return digest, nil
-	} else if err != nil {
-		return "", err
-	}
-	snapshot, err := p.readCloneMarkerSnapshotUnbound(run)
-	if err != nil || !validSpecDigest(snapshot.marker.Spec) {
-		return "", errors.Join(errors.New("schema-8 clone authority has an invalid resource digest"), err)
-	}
-	return snapshot.marker.Spec, nil
+	return p.validateRunForCleanup(run)
 }
 
 func canonicalRemote(value string) bool {
@@ -587,8 +557,8 @@ func canonicalRemote(value string) bool {
 }
 
 func (p *Provider) specDigest(run taskstore.BackgroundRun) (string, error) {
-	if run.ResourceSpecVersion == 8 {
-		return p.legacySpecDigest(run)
+	if run.ResourceSpecVersion != runidentity.ResourceSpecVersion {
+		return "", errors.New("unsupported background run resource spec version")
 	}
 	data, err := json.Marshal(struct {
 		Version                                                                                int `json:"version"`
@@ -597,54 +567,11 @@ func (p *Provider) specDigest(run taskstore.BackgroundRun) (string, error) {
 		Image, Clone, Volume, Container, Endpoint, Base, Repository, Profile, Session, Message string
 		EnvironmentSHA256                                                                      string
 	}{
-		Version: 9, Workspace: string(run.WorkspaceID), Task: string(run.TaskID), Attempt: string(run.AttemptID), Generation: run.Generation,
+		Version: runidentity.ResourceSpecVersion, Workspace: string(run.WorkspaceID), Task: string(run.TaskID), Attempt: string(run.AttemptID), Generation: run.Generation,
 		Image: run.ImageIdentity, Clone: run.CloneIdentity, Volume: run.VolumeIdentity,
 		Container: run.ContainerIdentity, Endpoint: run.EndpointIdentity, Base: string(run.BaseOID), Repository: run.RepositoryRemote,
 		Profile: run.Profile, Session: string(run.OpenCodeSessionID), Message: string(run.OpenCodeMessageID),
 		EnvironmentSHA256: hex.EncodeToString(run.EnvironmentSHA256[:]),
-	})
-	if err != nil {
-		return "", err
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
-}
-
-func (p *Provider) legacySpecDigest(run taskstore.BackgroundRun) (string, error) {
-	environment := make([]string, 0, len(p.config.Environment))
-	for key, value := range p.config.Environment {
-		environment = append(environment, key+"="+value)
-	}
-	slices.Sort(environment)
-	environmentMAC := hmac.New(sha256.New, p.hostKey[:])
-	_, _ = environmentMAC.Write([]byte(environmentDomain))
-	for _, entry := range environment {
-		_, _ = environmentMAC.Write([]byte(strconv.Itoa(len(entry))))
-		_, _ = environmentMAC.Write([]byte{':'})
-		_, _ = environmentMAC.Write([]byte(entry))
-	}
-	data, err := json.Marshal(struct {
-		Version                                                                                   int `json:"version"`
-		Workspace, Task, Attempt                                                                  string
-		Generation                                                                                int64
-		ImageReference, Image, Clone, Volume, Container, Endpoint, Base, Repository, Profile      string
-		Session, Message, BasicUsername                                                           string
-		Memory, CPUs, PIDs, SourceSizeAdmission, CloneObservedLimit, DiskFreeAdmission, GitOutput int64
-		WallTimeout, GitTimeout, DockerTimeout, HealthTimeout, StopGrace                          int64
-		LogSize                                                                                   string
-		LogFiles                                                                                  int
-		EnvironmentMAC                                                                            string
-	}{
-		Version: 8, Workspace: string(run.WorkspaceID), Task: string(run.TaskID), Attempt: string(run.AttemptID), Generation: run.Generation,
-		ImageReference: p.config.ImageReference, Image: run.ImageIdentity, Clone: run.CloneIdentity, Volume: run.VolumeIdentity,
-		Container: run.ContainerIdentity, Endpoint: run.EndpointIdentity, Base: string(run.BaseOID), Repository: run.RepositoryRemote,
-		Profile: run.Profile, Session: string(run.OpenCodeSessionID), Message: string(run.OpenCodeMessageID), BasicUsername: p.config.BasicUsername,
-		Memory: p.config.MemoryBytes, CPUs: p.config.NanoCPUs, PIDs: p.config.PIDs, SourceSizeAdmission: p.config.SourceSizeAdmissionBytes,
-		CloneObservedLimit: p.config.CloneObservedLimitBytes, DiskFreeAdmission: p.config.DiskFreeAdmissionBytes,
-		GitOutput: p.config.GitOutputBytes, WallTimeout: int64(p.config.WallTimeout),
-		GitTimeout: int64(p.config.GitTimeout), DockerTimeout: int64(p.config.DockerTimeout), HealthTimeout: int64(p.config.HealthTimeout),
-		StopGrace: int64(p.config.StopGrace), LogSize: p.config.LogMaxSize, LogFiles: p.config.LogMaxFiles,
-		EnvironmentMAC: hex.EncodeToString(environmentMAC.Sum(nil)),
 	})
 	if err != nil {
 		return "", err
@@ -704,14 +631,6 @@ func validImageID(value string) bool {
 	}
 	_, err := hex.DecodeString(value[7:])
 	return err == nil && strings.ToLower(value) == value
-}
-
-func validSpecDigest(value string) bool {
-	if len(value) != sha256.Size*2 || strings.ToLower(value) != value {
-		return false
-	}
-	_, err := hex.DecodeString(value)
-	return err == nil
 }
 
 func validEnvKey(value string) bool {

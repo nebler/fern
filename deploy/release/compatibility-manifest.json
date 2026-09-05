@@ -3,8 +3,8 @@
   "schema_version": 1,
   "first_supported_baseline": null,
   "current_release_schemas": {
-    "task_store": 1,
-    "control_state": 1,
+    "task_store": 3,
+    "control_state": 2,
     "github_app_credentials": 1
   },
   "verification": {
@@ -13,8 +13,8 @@
     "rollback_prerequisite": "verified-offline-pre-upgrade-backup"
   },
   "limitations": [
-    "No historical taskstore schema is supported before the first release.",
-    "Existing development databases from before the schema reset must be deleted and recreated.",
+    "Only taskstore schema 3 and control-state schema 2 are supported; no historical migration is provided.",
+    "Pre-reset development state is rejected, never silently migrated or deleted. Preserve anything needed before explicitly starting with fresh state.",
     "The local harness does not claim host, container, or external-service transaction atomicity."
   ]
 }

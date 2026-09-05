@@ -176,10 +176,29 @@ func (e *Engine) Inspect(ctx context.Context, locator Locator) (Snapshot, error)
 // Materialize creates a fresh detached checkout under WorkRoot. The caller
 // controls neither its destination nor its Git administrative data.
 func (e *Engine) Materialize(ctx context.Context, locator Locator) (*Checkout, error) {
+	_, checkout, err := e.Acquire(ctx, locator)
+	return checkout, err
+}
+
+// Acquire freshly verifies an artifact once and returns its verified snapshot
+// and an owned detached checkout. The caller must Close the checkout. No
+// snapshot or checkout is returned on failure; materialization also validates
+// the copied source bundle against the freshly verified digest and size.
+func (e *Engine) Acquire(ctx context.Context, locator Locator) (Snapshot, *Checkout, error) {
 	snapshot, err := e.Inspect(ctx, locator)
 	if err != nil {
-		return nil, err
+		return Snapshot{}, nil, err
 	}
+	checkout, err := e.materializeVerified(ctx, locator, snapshot)
+	if err != nil {
+		return Snapshot{}, nil, err
+	}
+	return snapshot, checkout, nil
+}
+
+// materializeVerified is private so externally supplied snapshots cannot bypass
+// fresh verification. Keep the source-copy validation even after Inspect.
+func (e *Engine) materializeVerified(ctx context.Context, locator Locator, snapshot Snapshot) (*Checkout, error) {
 	path, err := e.makeTemp(e.workRoot, "checkout-")
 	if err != nil {
 		return nil, err

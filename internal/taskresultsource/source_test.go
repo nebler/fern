@@ -16,6 +16,25 @@ import (
 
 type artifactStore struct{ value taskstore.RetainedArtifact }
 
+type countingArtifact struct {
+	*taskartifact.Engine
+	inspects, acquisitions int
+	lastCheckout           *taskartifact.Checkout
+	lastPath               string
+}
+
+func (a *countingArtifact) Inspect(ctx context.Context, locator taskartifact.Locator) (taskartifact.Snapshot, error) {
+	a.inspects++
+	return a.Engine.Inspect(ctx, locator)
+}
+
+func (a *countingArtifact) Acquire(ctx context.Context, locator taskartifact.Locator) (taskartifact.Snapshot, *taskartifact.Checkout, error) {
+	a.acquisitions++
+	snapshot, checkout, err := a.Engine.Acquire(ctx, locator)
+	a.lastCheckout, a.lastPath = checkout, checkout.Path()
+	return snapshot, checkout, err
+}
+
 func (s artifactStore) GetRetainedArtifact(context.Context, task.RetainedArtifactID) (taskstore.RetainedArtifact, error) {
 	return s.value, nil
 }
@@ -103,12 +122,16 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 		MaterializationID: materializationID, OpenCodeSessionID: snapshot.OpenCodeSessionID,
 		OpenCodeMessageID: snapshot.OpenCodeMessageID, BaseSHA: snapshot.Base, ResultCommit: snapshot.Result,
 		TreeOID: snapshot.Tree, ManifestSHA256: snapshot.ChangesSHA256.Bytes()}
-	resolver, err := New(artifactStore{artifact}, engine)
+	counted := &countingArtifact{Engine: engine}
+	resolver, err := New(artifactStore{artifact}, counted)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := resolver.Verify(context.Background(), result); err != nil {
 		t.Fatalf("verify retained result: %v", err)
+	}
+	if counted.inspects != 1 || counted.acquisitions != 0 {
+		t.Fatalf("Verify calls: Inspect=%d Acquire=%d", counted.inspects, counted.acquisitions)
 	}
 	otherWorkspace, _ := ids.WorkspaceID()
 	otherSeal, _ := ids.SealRequestID()
@@ -140,7 +163,8 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 		t.Run("rejects "+test.name+" mismatch", func(t *testing.T) {
 			changedArtifact, changedResult := artifact, result
 			test.mutate(&changedArtifact, &changedResult)
-			changedResolver, newErr := New(artifactStore{changedArtifact}, engine)
+			changedEngine := &countingArtifact{Engine: engine}
+			changedResolver, newErr := New(artifactStore{changedArtifact}, changedEngine)
 			if newErr != nil {
 				t.Fatal(newErr)
 			}
@@ -150,11 +174,26 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 			if verifyErr := changedResolver.Verify(context.Background(), changedResult); verifyErr != taskstore.ErrCorruptStore {
 				t.Fatalf("mismatched retention verification error=%v", verifyErr)
 			}
+			if changedEngine.acquisitions != 1 || changedEngine.inspects != 1 {
+				t.Fatalf("unexpected calls: Acquire=%d Inspect=%d", changedEngine.acquisitions, changedEngine.inspects)
+			}
+			if changedEngine.lastPath == "" || changedEngine.lastCheckout.Path() != "" {
+				t.Fatal("tuple mismatch did not close the acquired checkout")
+			}
+			if _, err := os.Lstat(changedEngine.lastPath); !os.IsNotExist(err) {
+				t.Fatalf("mismatched checkout remains: %v", err)
+			}
+			if entries, err := os.ReadDir(work); err != nil || len(entries) != 0 {
+				t.Fatalf("tuple mismatch leaked work directories: %v, %v", entries, err)
+			}
 		})
 	}
 	first, closeFirst, err := resolver.Acquire(context.Background(), result)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if counted.acquisitions != 1 || counted.inspects != 1 {
+		t.Fatalf("Acquire must not independently Inspect: Acquire=%d Inspect=%d", counted.acquisitions, counted.inspects)
 	}
 	if err := os.WriteFile(filepath.Join(first, "dirty"), []byte("dirty"), 0o600); err != nil {
 		t.Fatal(err)

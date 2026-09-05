@@ -1,0 +1,42 @@
+#!/usr/local/bin/node
+const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const credentials = require('/usr/local/libexec/fern-github-credentials.cjs');
+
+const args = process.argv.slice(2);
+function fail(message) {
+  console.error(`gh: ${message}`);
+  process.exit(1);
+}
+
+// Authentication is owned by the harness, not personal gh configuration.
+let command = 0;
+while (command < args.length && args[command].startsWith('-')) {
+  const option = args[command++];
+  if (['--repo', '-R', '--hostname'].includes(option)) command++;
+}
+if (args[command] === 'auth') fail('authentication is managed by Fern; gh auth is disabled');
+const versionOnly = args.length === 1 && (args[0] === '--version' || args[0] === 'version');
+const token = credentials.token();
+if (!token && !versionOnly) fail('GitHub credentials are unavailable; ask the harness to refresh them');
+
+let config;
+try {
+  config = fs.mkdtempSync(`${credentials.directory}/fern-gh-config-`);
+  fs.chmodSync(config, 0o700);
+  const env = { ...process.env };
+  for (const key of ['GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN', 'GITHUB_ENTERPRISE_TOKEN', 'GH_DEBUG']) delete env[key];
+  Object.assign(env, {
+    GH_CONFIG_DIR: config, GH_HOST: 'github.com', GH_PROMPT_DISABLED: '1',
+    GH_PAGER: 'cat', GH_NO_UPDATE_NOTIFIER: '1', GH_NO_EXTENSION_UPDATE_NOTIFIER: '1',
+  });
+  if (token) env.GH_TOKEN = token;
+  const result = spawnSync('/usr/local/libexec/gh', args, { env, stdio: 'inherit' });
+  if (result.error) console.error('gh: could not start GitHub CLI');
+  process.exitCode = result.status ?? 1;
+} catch {
+  console.error('gh: private GitHub configuration is unavailable');
+  process.exitCode = 1;
+} finally {
+  if (config) fs.rmSync(config, { recursive: true, force: true });
+}

@@ -21,8 +21,8 @@ const (
 	maximumTokenLife    = 65 * time.Minute
 )
 
-// InstallationTokenSource is the narrow credential contract needed by a
-// future host-side Git transport or publication coordinator.
+// InstallationTokenSource issues credentials for host repository discovery and
+// private delivery to the exact agent runtime. It does not perform GitHub writes.
 type InstallationTokenSource interface {
 	InstallationToken(context.Context, RepositoryIdentity) (InstallationToken, error)
 }
@@ -52,7 +52,7 @@ func NewClient(httpClient *http.Client, appTokens AppTokenSource) (*Client, erro
 	}, nil
 }
 
-// InstallationToken is an opaque, immutable host credential. Value refuses to
+// InstallationToken is an opaque, immutable repository-scoped credential. Value refuses to
 // return credentials that are expired or too close to expiry.
 type InstallationToken struct {
 	value       string

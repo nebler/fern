@@ -76,7 +76,7 @@ type upOptions struct {
 	configPath     string
 	envPath        string
 	configRequired bool
-	overrides      config.BackgroundOverrides
+	overrides      config.Overrides
 }
 
 func parseUpFlags(args []string) (upOptions, error) {
@@ -91,17 +91,17 @@ func parseUpFlags(args []string) (upOptions, error) {
 		return upOptions{}, err
 	}
 	return upOptions{configPath: *configPath, envPath: *envPath, configRequired: flagProvided(fs, "config"),
-		overrides: config.BackgroundOverrides{Name: optionalFlag(fs, "name", name), Repo: optionalFlag(fs, "repo", repo),
+		overrides: config.Overrides{Name: optionalFlag(fs, "name", name), Repo: optionalFlag(fs, "repo", repo),
 			Listen: optionalFlag(fs, "listen", listenAddress), OperatorListen: optionalFlag(fs, "operator-listen", operatorListenAddress)}}, nil
 }
 
-func loadUpConfig(opts upOptions) (config.BackgroundConfig, error) {
-	cfg, err := loadBackgroundCommandConfig(opts.configPath, opts.configRequired, opts.envPath, opts.overrides)
+func loadUpConfig(opts upOptions) (config.Config, error) {
+	cfg, _, err := loadCommandConfig(opts.configPath, opts.configRequired, opts.envPath, opts.overrides)
 	if err != nil {
-		return config.BackgroundConfig{}, err
+		return config.Config{}, err
 	}
-	if err := config.ValidateBackgroundBootstrap(cfg); err != nil {
-		return config.BackgroundConfig{}, err
+	if err := config.ValidateBootstrap(cfg); err != nil {
+		return config.Config{}, err
 	}
 	return cfg, nil
 }
@@ -121,16 +121,18 @@ type upRuntime struct {
 
 func (runtime *upRuntime) Close() error {
 	var taskErr, routeErr error
-	if runtime.tasks != nil {
-		taskErr = runtime.tasks.Close()
-	}
+	// Fence attachment admission and close its connections before releasing
+	// the provider and durable stores that back the runtime.
 	if runtime.backgroundRoute != nil {
 		routeErr = runtime.backgroundRoute.Close()
+	}
+	if runtime.tasks != nil {
+		taskErr = runtime.tasks.Close()
 	}
 	return errors.Join(taskErr, routeErr)
 }
 
-func assembleServices(serviceCtx context.Context, cfg config.BackgroundConfig, origins proxy.TrustedOrigins,
+func assembleServices(serviceCtx context.Context, cfg config.Config, origins proxy.TrustedOrigins,
 	remoteListener, operatorListener, backgroundListener net.Listener, log *slog.Logger) (*upRuntime, error) {
 	controlDir, err := statePath("control")
 	if err != nil {
@@ -140,7 +142,7 @@ func assembleServices(serviceCtx context.Context, cfg config.BackgroundConfig, o
 	if err != nil {
 		return nil, err
 	}
-	pluginAuthStore, err := openPluginAuthorizationStore(controlStore, cfg.Workspace.Name)
+	pluginAuthStore, err := pluginauth.Open(controlStore, cfg.Workspace.Name)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +154,6 @@ func assembleServices(serviceCtx context.Context, cfg config.BackgroundConfig, o
 		return nil, errors.Join(cause, route.Close())
 	}
 	status := observability.NewRegistry()
-	updateLegacyPublicationReadiness(status, controlStore)
 	onboarding, err := newGitHubOnboarding(cfg)
 	if err != nil {
 		return fail(err)
@@ -163,7 +164,7 @@ func assembleServices(serviceCtx context.Context, cfg config.BackgroundConfig, o
 		status.Blocked(observability.ComponentGitHubTaskDependency, pending)
 		log.Warn("Background Runs await GitHub App installation binding and restart", "repository", cfg.Workspace.Name)
 	} else {
-		if err := config.ValidateBackground(cfg); err != nil {
+		if err := config.Validate(cfg); err != nil {
 			return fail(err)
 		}
 		tasks, err = newTaskServices(serviceCtx, cfg, route, status, log)
@@ -179,13 +180,12 @@ func assembleServices(serviceCtx context.Context, cfg config.BackgroundConfig, o
 	unavailable := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "Background Runs await GitHub App onboarding", http.StatusServiceUnavailable)
 	}))
-	runs, runClients, results := unavailable, unavailable, unavailable
+	runs, runClients := unavailable, unavailable
 	if tasks != nil {
 		runs = tasks.runs
 		runClients = tasks.runClients
-		results = tasks.results
 	}
-	controls := proxy.Controls{Store: controlStore, Runs: runs, RunClients: runClients, Results: results, Onboarding: onboarding,
+	controls := proxy.Controls{Store: controlStore, Runs: runs, RunClients: runClients, Onboarding: onboarding,
 		ControlAuth: proxy.ControlAuth{Password: cfg.Control.Password}, PluginAuth: pluginAuthStore,
 		Liveness: status.LivenessHandler(), Readiness: status.ReadinessHandler(), Status: status.StatusHandler(), Metrics: status.MetricsHandler()}
 	handlers, err := proxy.NewHandlers(controls, origins)
@@ -203,29 +203,11 @@ func assembleServices(serviceCtx context.Context, cfg config.BackgroundConfig, o
 		origins: origins, status: status, start: time.Now()}, nil
 }
 
-func openPluginAuthorizationStore(store *control.Store, workspace string) (*pluginauth.Store, error) {
-	return pluginauth.Open(store, workspace)
-}
-
-func updateLegacyPublicationReadiness(status *observability.Registry, store *control.Store) {
-	if store.HasUnquarantinedLegacyPublications() {
-		status.Failed(observability.ComponentLegacyPublication, errors.New("legacy control publications require offline quarantine"))
-		return
-	}
-	status.Healthy(observability.ComponentLegacyPublication)
-}
-
 func startTaskCoordinators(group *errgroup.Group, tasks *taskServices, serviceCtx context.Context) {
 	if tasks == nil {
 		return
 	}
 	goComponent(group, serviceCtx, tasks.status, observability.ComponentBackgroundRunSerial, tasks.background.Run)
-	if tasks.publication != nil {
-		goComponent(group, serviceCtx, tasks.status, observability.ComponentTaskPublication, tasks.publication.Run)
-	}
-	if tasks.verification != nil {
-		goComponent(group, serviceCtx, tasks.status, observability.ComponentTaskVerification, tasks.verification.Run)
-	}
 }
 
 func goComponent(group *errgroup.Group, serviceCtx context.Context, status *observability.Registry,
@@ -270,7 +252,7 @@ func startProxyServers(group *errgroup.Group, runtime *upRuntime, serviceCtx con
 	})
 }
 
-func listenBackgroundRoute(cfg config.BackgroundConfig) (net.Listener, error) {
+func listenBackgroundRoute(cfg config.Config) (net.Listener, error) {
 	listener, err := net.Listen("tcp", cfg.Tasks.BackgroundRoute.Listen)
 	if err != nil {
 		return nil, fmt.Errorf("listen on Background Run route %s: %w", cfg.Tasks.BackgroundRoute.Listen, err)
@@ -278,7 +260,7 @@ func listenBackgroundRoute(cfg config.BackgroundConfig) (net.Listener, error) {
 	return listener, nil
 }
 
-func trustedProxyOrigins(cfg config.BackgroundConfig) proxy.TrustedOrigins {
+func trustedProxyOrigins(cfg config.Config) proxy.TrustedOrigins {
 	remote := cfg.RemoteOrigin
 	if remote == "" {
 		remote = "http://" + cfg.Listen

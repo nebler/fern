@@ -167,8 +167,8 @@ func (p *Provider) requireExportWriterInactive(ctx context.Context, run taskstor
 	defer cancel()
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	if errdefs.IsNotFound(err) {
-		if fence.ContainerID != "" {
-			if _, idErr := p.docker.ContainerInspect(operation, fence.ContainerID); idErr == nil {
+		if fence.ContainerID() != "" {
+			if _, idErr := p.docker.ContainerInspect(operation, fence.ContainerID()); idErr == nil {
 				return exportIdentityError(run, "fenced container exists under another name")
 			} else if !errdefs.IsNotFound(idErr) {
 				return exportDockerError(ctx)
@@ -186,7 +186,7 @@ func (p *Provider) requireExportWriterInactive(ctx context.Context, run taskstor
 	if err != nil {
 		return exportDockerError(ctx)
 	}
-	if kind == cleanupNeverCreated || info.ID != fence.ContainerID {
+	if kind == WriterFenceNeverCreated || info.ID != fence.ContainerID() {
 		return exportIdentityError(run, "container does not match the writer fence")
 	}
 	if info.State == nil || info.State.Running || info.State.Paused || info.State.Restarting {
@@ -195,7 +195,7 @@ func (p *Provider) requireExportWriterInactive(ctx context.Context, run taskstor
 	if err := p.attestContainerForCleanup(run, digest, info, false); err != nil {
 		return exportIdentityError(run, "container attestation differs from the writer fence")
 	}
-	if kind == cleanupCreated {
+	if kind == WriterFenceCreatedNeverStarted {
 		if info.State.Status != "created" || info.State.StartedAt != "" {
 			return exportIdentityError(run, "created-container fence has a process epoch")
 		}

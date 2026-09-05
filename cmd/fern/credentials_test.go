@@ -8,12 +8,12 @@ import (
 
 func TestCredentialBindingUsesExactConfiguredGitHubIdentity(t *testing.T) {
 	t.Parallel()
-	var cfg config.BackgroundConfig
+	var cfg config.Config
 	if _, err := credentialBinding(cfg); err == nil {
 		t.Fatal("credential binding accepted missing GitHub authority")
 	}
 	cfg.Workspace.Name = "repository-a"
-	cfg.Workspace.GitHub = config.BackgroundGitHubApp{InstallationID: 123,
+	cfg.Workspace.GitHub = config.GitHubApp{InstallationID: 123,
 		Repository: config.GitHubRepository{ID: 456, FullName: "owner/repository"},
 	}
 	binding, err := credentialBinding(cfg)

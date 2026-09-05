@@ -36,32 +36,3 @@ func expandRequired(value string, lookup func(string) (string, bool)) (string, e
 	}
 	return restoreDollars(expanded), nil
 }
-
-// referencedHostOnlySecret reports the first host-only secret variable that
-// value references, or "" when none is referenced.
-func referencedHostOnlySecret(value string) string {
-	var found string
-	os.Expand(escapeDollars(value), func(key string) string {
-		if found != "" {
-			return ""
-		}
-		switch key {
-		case "FERN_CONTROL_PASSWORD", "FERN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN":
-			found = key
-		}
-		return ""
-	})
-	return found
-}
-
-// embeddedHostOnlySecret reports the first host-only secret whose live value
-// was pasted verbatim into value, or "" when none appears.
-func embeddedHostOnlySecret(value string, lookup func(string) (string, bool)) string {
-	for _, key := range []string{"FERN_CONTROL_PASSWORD", "FERN_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"} {
-		secret, exists := lookup(key)
-		if exists && len(secret) >= 16 && strings.Contains(value, secret) {
-			return key
-		}
-	}
-	return ""
-}

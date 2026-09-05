@@ -91,6 +91,7 @@ class Harness:
         require(labels.get("org.opencontainers.image.revision") == COMMIT, labels)
         require(labels.get("org.opencontainers.image.version") == VERSION, labels)
         require(labels.get("ai.fern.opencode.profile") == PROFILE, labels)
+        require(labels.get("ai.fern.runtime.spec") == "10", "source image must be rebuilt for runtime spec 10")
         require(
             inspected["Config"].get("Cmd") == ["opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"],
             f"server command changed: {inspected['Config'].get('Cmd')}",
@@ -111,6 +112,23 @@ class Harness:
             text=True,
         ).splitlines()
         require(runtime[0] == "1001:1001" and len(runtime) == 6, f"runtime identity/tools changed: {runtime}")
+        gh_version = subprocess.check_output(
+            ["docker", "run", "--rm", "--entrypoint", "gh", self.image_id, "--version"], text=True
+        )
+        require(gh_version.startswith("gh version 2.98.0 "), "pinned GitHub CLI version changed")
+        subprocess.run(
+            ["docker", "run", "--rm", "--entrypoint", "sh", self.image_id, "-ec",
+             "test -x /usr/local/libexec/gh; "
+             "test -x /usr/local/bin/fern-git-credential; "
+             "test -r /usr/local/libexec/fern-github-credentials.cjs; "
+             "test \"$(git config --system --get credential.useHttpPath)\" = true; "
+             "test \"$(git config --system --get credential.helper)\" = /usr/local/bin/fern-git-credential; "
+             "test -z \"$(printf 'protocol=https\\nhost=github.com\\npath=owner/repo\\n\\n' | "
+             "/usr/local/bin/fern-git-credential get)\"; "
+             "if gh repo view >/dev/null 2>/dev/null; then exit 1; fi"],
+            check=True,
+        )
+        self.proven.append("pinned gh 2.98.0 wrapper and repository-scoped Git helper exist in the final image and fail closed without credentials")
 
         self.repo.mkdir()
         self.data.mkdir()

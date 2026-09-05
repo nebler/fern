@@ -23,11 +23,9 @@ SELECT r.id,r.task_id,r.attempt_id,r.workspace_id,r.state,r.outcome,r.repository
 	       r.opencode_session_id,r.opencode_message_id,r.evidence_sha256,r.policy_version,
 	       r.collected_at,r.sealed_at,r.sealed_event_id,r.completed_event_id,r.revision,r.created_at,r.updated_at,
 	       a.actor_type,a.actor_id,a.display_name,a.credential_id,a.authentication,a.request_id,
-	       r.completion_authority,r.seal_request_id,
-	       aa.actor_type,aa.actor_id,aa.display_name,aa.credential_id,aa.authentication,aa.request_id,
+	       r.completion_authority,
 	       r.source_kind,r.retained_artifact_id,r.artifact_export_id,r.materialization_id
-	FROM results r JOIN actor_snapshots a ON a.id=r.creator_actor_snapshot_id
-	LEFT JOIN actor_snapshots aa ON aa.id=r.authorizer_actor_snapshot_id`
+	FROM results r JOIN actor_snapshots a ON a.id=r.creator_actor_snapshot_id`
 
 func (s *Store) GetResult(ctx context.Context, id task.ResultID) (Result, error) {
 	if _, err := task.ParseResultID(string(id)); err != nil {
@@ -61,23 +59,19 @@ func scanResult(row rowScanner) (Result, error) {
 	var r Result
 	var repositoryID, clean, collectedAt, sealedAt, createdAt, updatedAt int64
 	var manifestHash, evidenceHash []byte
-	var sealRequestID sql.NullString
 	var retainedArtifactID, artifactExportID, materializationID sql.NullString
-	var authorizerType, authorizerID, authorizerDisplayName, authorizerCredentialID, authorizerAuthentication, authorizerRequestID sql.NullString
 	err := row.Scan(&r.ID, &r.TaskID, &r.AttemptID, &r.WorkspaceID, &r.State, &r.Outcome, &repositoryID, &r.BaseSHA,
 		&r.ResultCommit, &r.TreeOID, &clean, &r.ManifestEntries, &manifestHash, &r.OpenCodeSessionID, &r.OpenCodeMessageID,
 		&evidenceHash, &r.PolicyVersion, &collectedAt, &sealedAt, &r.SealedEventID, &r.CompletedEventID,
 		&r.Revision, &createdAt, &updatedAt, &r.Creator.Type, &r.Creator.ID, &r.Creator.DisplayName,
-		&r.Creator.CredentialID, &r.Creator.Authentication, &r.Creator.RequestID, &r.CompletionAuthority, &sealRequestID,
-		&authorizerType, &authorizerID, &authorizerDisplayName, &authorizerCredentialID, &authorizerAuthentication, &authorizerRequestID,
+		&r.Creator.CredentialID, &r.Creator.Authentication, &r.Creator.RequestID, &r.CompletionAuthority,
 		&r.SourceKind, &retainedArtifactID, &artifactExportID, &materializationID)
 	if err != nil {
 		return Result{}, err
 	}
 	if repositoryID <= 0 || clean != 1 || len(manifestHash) != 32 || len(evidenceHash) != 32 ||
 		r.State != task.ResultSealed || r.Revision != 1 ||
-		(r.CompletionAuthority != SealAuthorityExecutionSuccess && r.CompletionAuthority != SealAuthorityUser) ||
-		(r.SourceKind != ResultSourcePersistentWorkspace && r.SourceKind != ResultSourceRetainedArtifact) {
+		r.CompletionAuthority != SealAuthorityUser || r.SourceKind != ResultSourceRetainedArtifact {
 		return Result{}, ErrCorruptStore
 	}
 	r.RepositoryID = task.RepositoryID(repositoryID)
@@ -86,36 +80,12 @@ func scanResult(row rowScanner) (Result, error) {
 	copy(r.EvidenceSHA256[:], evidenceHash)
 	r.CollectedAt, r.SealedAt = fromUnixMillis(collectedAt), fromUnixMillis(sealedAt)
 	r.CreatedAt, r.UpdatedAt = fromUnixMillis(createdAt), fromUnixMillis(updatedAt)
-	if r.SourceKind == ResultSourceRetainedArtifact {
-		if !retainedArtifactID.Valid || !artifactExportID.Valid || !materializationID.Valid {
-			return Result{}, ErrCorruptStore
-		}
-		r.RetainedArtifactID = task.RetainedArtifactID(retainedArtifactID.String)
-		r.ArtifactExportID = task.ArtifactExportID(artifactExportID.String)
-		r.MaterializationID = task.MaterializationID(materializationID.String)
-	} else if retainedArtifactID.Valid || artifactExportID.Valid || materializationID.Valid {
+	if !retainedArtifactID.Valid || !artifactExportID.Valid || !materializationID.Valid {
 		return Result{}, ErrCorruptStore
 	}
-	if r.SourceKind == ResultSourceRetainedArtifact {
-		if r.CompletionAuthority != SealAuthorityUser || sealRequestID.Valid || authorizerType.Valid {
-			return Result{}, ErrCorruptStore
-		}
-	} else if r.CompletionAuthority == SealAuthorityExecutionSuccess {
-		if sealRequestID.Valid || authorizerType.Valid {
-			return Result{}, ErrCorruptStore
-		}
-	} else {
-		if !sealRequestID.Valid || !authorizerType.Valid || !authorizerID.Valid || !authorizerCredentialID.Valid || !authorizerAuthentication.Valid || !authorizerRequestID.Valid {
-			return Result{}, ErrCorruptStore
-		}
-		r.SealRequestID = task.SealRequestID(sealRequestID.String)
-		authorizer := task.ActorSnapshot{Type: task.ActorType(authorizerType.String), ID: authorizerID.String, DisplayName: authorizerDisplayName.String,
-			CredentialID: authorizerCredentialID.String, Authentication: authorizerAuthentication.String, RequestID: authorizerRequestID.String}
-		if err := authorizer.Validate(); err != nil {
-			return Result{}, ErrCorruptStore
-		}
-		r.Authorizer = &authorizer
-	}
+	r.RetainedArtifactID = task.RetainedArtifactID(retainedArtifactID.String)
+	r.ArtifactExportID = task.ArtifactExportID(artifactExportID.String)
+	r.MaterializationID = task.MaterializationID(materializationID.String)
 	return r, nil
 }
 

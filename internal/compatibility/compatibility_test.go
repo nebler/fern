@@ -2,7 +2,9 @@ package compatibility_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -12,9 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const taskStoreSchemaOneChecksum = "97cd41f3a8bead5f77954878a64fd9e70d6d7a8128507e3dfaa10ac2949db274"
-
-func TestFreshTaskStoreIsSchemaOne(t *testing.T) {
+func TestFreshTaskStoreIsSchemaThree(t *testing.T) {
 	directory := t.TempDir()
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)
@@ -45,12 +45,24 @@ func TestFreshTaskStoreIsSchemaOne(t *testing.T) {
 	}
 	var requiredTables int
 	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN
-('background_runs','retained_artifacts','verifications','publications')`).Scan(&requiredTables); err != nil {
+('background_runs','retained_artifacts')`).Scan(&requiredTables); err != nil {
 		t.Fatal(err)
 	}
-	if version != 1 || version != taskstore.CurrentSchemaVersion() || entries != 1 || name != "initial_task_store" || checksum != taskStoreSchemaOneChecksum || integrity != "ok" || requiredTables != 4 {
+	digest, digestErr := hex.DecodeString(checksum)
+	if version != 3 || version != taskstore.CurrentSchemaVersion() || entries != 1 || name != "retained_result_task_store" || digestErr != nil || len(digest) != sha256.Size || integrity != "ok" || requiredTables != 2 {
 		t.Fatalf("version=%d current=%d entries=%d name=%q checksum=%q integrity=%q required_tables=%d",
 			version, taskstore.CurrentSchemaVersion(), entries, name, checksum, integrity, requiredTables)
+	}
+	var obsoleteTables, obsoleteColumns int
+	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type='table' AND
+(name='verifications' OR name LIKE '%publication%')`).Scan(&obsoleteTables); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.QueryRow(`SELECT count(*) FROM pragma_table_info('attempts') WHERE name='budget_snapshot'`).Scan(&obsoleteColumns); err != nil {
+		t.Fatal(err)
+	}
+	if obsoleteTables != 0 || obsoleteColumns != 0 {
+		t.Fatalf("fresh schema retains obsolete tables=%d columns=%d", obsoleteTables, obsoleteColumns)
 	}
 	rows, err := database.Query(`PRAGMA foreign_key_check`)
 	if err != nil {
@@ -59,6 +71,9 @@ func TestFreshTaskStoreIsSchemaOne(t *testing.T) {
 	defer rows.Close()
 	if rows.Next() {
 		t.Fatal("fresh schema has a foreign-key violation")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 }
 

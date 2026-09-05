@@ -16,6 +16,14 @@ import (
 	"github.com/nebler/fern/internal/task"
 )
 
+func TestLocalRunConnectionRejectsIncompleteConfiguration(t *testing.T) {
+	t.Parallel()
+	_, err := resolveRunConnection(t.Context(), runCLIOptions{configPath: filepath.Join(t.TempDir(), "missing.yaml")})
+	if err == nil {
+		t.Fatal("incomplete configuration authorized a local run connection")
+	}
+}
+
 func TestSelectAttachRunUsesBoundedNumberedSelection(t *testing.T) {
 	branch := "main"
 	runs := []runSummary{

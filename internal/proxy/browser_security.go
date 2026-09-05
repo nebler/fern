@@ -107,7 +107,7 @@ func validCSRFMethod(method string) bool {
 func mintCSRFToken(credential, method, path string, expires time.Time) string {
 	expiry := strconv.FormatInt(expires.Unix(), 10)
 	mac := hmac.New(sha256.New, []byte(credential))
-	_, _ = mac.Write([]byte(csrfMessage(expiry, method, csrfRoute(path))))
+	_, _ = mac.Write([]byte(csrfMessage(expiry, method, path)))
 	return expiry + "." + base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
@@ -129,28 +129,12 @@ func validCSRFToken(token, credential, method, path string, now time.Time) bool 
 		return false
 	}
 	mac := hmac.New(sha256.New, []byte(credential))
-	_, _ = mac.Write([]byte(csrfMessage(expiryText, method, csrfRoute(path))))
+	_, _ = mac.Write([]byte(csrfMessage(expiryText, method, path)))
 	return subtle.ConstantTimeCompare(provided, mac.Sum(nil)) == 1
 }
 
 func csrfMessage(expiry, method, route string) string {
 	return "fern-csrf-v1\n" + expiry + "\n" + method + "\n" + route
-}
-
-func csrfRoute(path string) string {
-	if strings.HasPrefix(path, "/fern/api/v1/results/") && strings.HasSuffix(path, "/publications") {
-		id := strings.TrimSuffix(strings.TrimPrefix(path, "/fern/api/v1/results/"), "/publications")
-		if id != "" && !strings.Contains(id, "/") {
-			return "/fern/api/v1/results/:id/publications"
-		}
-	}
-	if strings.HasPrefix(path, "/fern/api/v1/tasks/") && strings.HasSuffix(path, "/cancel") {
-		id := strings.TrimSuffix(strings.TrimPrefix(path, "/fern/api/v1/tasks/"), "/cancel")
-		if id != "" && !strings.Contains(id, "/") {
-			return "/fern/api/v1/tasks/:id/cancel"
-		}
-	}
-	return path
 }
 
 func (state *pairingState) recordInvalidLocked(digest [sha256.Size]byte, now time.Time) {

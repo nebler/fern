@@ -19,7 +19,6 @@ type Controls struct {
 	Store       *control.Store
 	Runs        http.Handler
 	RunClients  http.Handler
-	Results     http.Handler
 	Onboarding  http.Handler
 	Liveness    http.Handler
 	Readiness   http.Handler
@@ -52,8 +51,8 @@ type trustedOrigin struct {
 // NewHandlers builds the paired remote and Basic-authenticated loopback
 // control surfaces. Neither surface proxies to a persistent OpenCode runtime.
 func NewHandlers(controls Controls, origins TrustedOrigins) (Handlers, error) {
-	if controls.Store == nil || controls.PluginAuth == nil || controls.Runs == nil || controls.RunClients == nil || controls.Results == nil {
-		return Handlers{}, errors.New("control, plugin authorization, run, and result handlers are required")
+	if controls.Store == nil || controls.PluginAuth == nil || controls.Runs == nil || controls.RunClients == nil {
+		return Handlers{}, errors.New("control, plugin authorization, plugin run, and terminal run handlers are required")
 	}
 	remoteOrigin, err := parseTrustedOrigin(origins.Remote)
 	if err != nil {
@@ -71,7 +70,7 @@ func NewHandlers(controls Controls, origins TrustedOrigins) (Handlers, error) {
 	}
 	pairing := newPairingState(controls.Store)
 	pluginAuth := newPluginAuthHTTP(controls.PluginAuth)
-	remoteGateway := gatewayHandler(Controls{Store: controls.Store, Runs: controls.Runs, RunClients: controls.RunClients, Results: controls.Results, Onboarding: controls.Onboarding, PluginAuth: controls.PluginAuth})
+	remoteGateway := gatewayHandler(Controls{Store: controls.Store, Runs: controls.Runs, RunClients: controls.RunClients, Onboarding: controls.Onboarding, PluginAuth: controls.PluginAuth})
 	operatorGateway := gatewayHandler(controls)
 	return Handlers{
 		Remote:   trustedOriginHandler(pluginAuth.remoteHandler(pairing.remoteHandler(remoteGateway), remoteGateway), remoteOrigin),

@@ -95,27 +95,6 @@ func TestGeneratorProducesEveryTypedID(t *testing.T) {
 			return err
 		},
 		func() error {
-			value, err := generator.VerificationID()
-			if err == nil {
-				_, err = ParseVerificationID(string(value))
-			}
-			return err
-		},
-		func() error {
-			value, err := generator.PublicationID()
-			if err == nil {
-				_, err = ParsePublicationID(string(value))
-			}
-			return err
-		},
-		func() error {
-			value, err := generator.PublicationOperationID()
-			if err == nil {
-				_, err = ParsePublicationOperationID(string(value))
-			}
-			return err
-		},
-		func() error {
 			value, err := generator.OpenCodeSessionID()
 			if err == nil {
 				_, err = ParseOpenCodeSessionID(string(value))

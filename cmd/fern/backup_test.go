@@ -3,8 +3,44 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func TestBackupLoadsOnlyCurrentConfiguration(t *testing.T) {
+	t.Parallel()
+	directory := t.TempDir()
+	path := filepath.Join(directory, "fern.yaml")
+	envPath := filepath.Join(directory, "fern.env")
+	data, err := os.ReadFile("../../fern.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := strings.Replace(string(data), "/srv/fern/repository", directory, 1)
+	current = strings.Replace(current, "sha256:REPLACE_WITH_QUALIFIED_LOCAL_IMAGE_ID", "sha256:"+strings.Repeat("b", 64), 1)
+	if err := os.WriteFile(envPath, []byte("FERN_CONTROL_PASSWORD="+strings.Repeat("s", 32)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(current), 0600); err != nil {
+		t.Fatal(err)
+	}
+	options := backupOptions{configPath: path, envPath: envPath}
+	cfg, name, err := loadBackupConfig(options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if name != "demo" || cfg.Workspace.Repo != directory || cfg.Workspace.GitHub.Repository.ID != 123456789 || cfg.Control.Password != strings.Repeat("s", 32) {
+		t.Fatalf("backup configuration = %+v, %q", cfg, name)
+	}
+	for _, retired := range []string{"  image: retired\n", "  memory: 8Gi\n", "  env: {}\n"} {
+		if err := os.WriteFile(path, []byte(strings.Replace(current, "workspace:\n", "workspace:\n"+retired, 1)), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := loadBackupConfig(options); err == nil {
+			t.Fatalf("backup accepted retired setting %q", retired)
+		}
+	}
+}
 
 func TestStageFernStateRetainsAuthorityAndDropsDisposableWork(t *testing.T) {
 	source := filepath.Join(t.TempDir(), "state")

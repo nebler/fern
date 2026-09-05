@@ -12,6 +12,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	runidentity "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -110,11 +111,11 @@ INSERT INTO tasks(
 INSERT INTO attempts(
     id,task_id,workspace_id,sequence,state,delivery_phase,opencode_session_id,opencode_message_id,prompt_sha256,
     base_sha,image_digest,opencode_protocol,execution_contract_version,agent,
-    model_provider,model,budget_snapshot,deadline,revision,created_at,updated_at
-) VALUES(?, ?, ?, 1, 'prepared', 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+    model_provider,model,deadline,revision,created_at,updated_at
+) VALUES(?, ?, ?, 1, 'prepared', 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
 		p.AttemptID, p.TaskID, p.Claim.Scope.WorkspaceID, p.OpenCodeSessionID, p.OpenCodeMessageID, promptHash[:], p.BaseSHA,
 		attemptImage, attemptProtocol, p.ExecutionContractVersion, p.Agent, p.ModelProvider, p.Model,
-		string(p.BudgetSnapshot), unixMillis(p.Deadline), acceptedMS, acceptedMS); err != nil {
+		unixMillis(p.Deadline), acceptedMS, acceptedMS); err != nil {
 		return Admission{}, fmt.Errorf("insert attempt: %w", err)
 	}
 	response, err := json.Marshal(struct {
@@ -143,10 +144,10 @@ INSERT INTO background_runs(
     instruction_sha256,profile,profile_sha256,environment_sha256,resource_spec_version,image_identity,clone_identity,volume_identity,
     container_identity,endpoint_identity,opencode_session_id,opencode_message_id,state,effect_phase,
     creator_actor_snapshot_id,revision,created_at,updated_at
-) VALUES(?,?,?,1,?,?,?,?,?,?,?,?,9,?,?,?,?,?,?,?,'queued','absent',?,1,?,?)`,
+) VALUES(?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued','absent',?,1,?,?)`,
 		p.TaskID, p.AttemptID, p.Claim.Scope.WorkspaceID, p.RepositoryID, p.BackgroundRun.RepositoryRemote,
 		p.BaseSHA, branch, p.BackgroundRun.InstructionSHA256[:], p.BackgroundRun.Profile,
-		p.BackgroundRun.ProfileSHA256[:], p.BackgroundRun.EnvironmentSHA256[:], p.BackgroundRun.ImageIdentity, p.BackgroundRun.CloneIdentity,
+		p.BackgroundRun.ProfileSHA256[:], p.BackgroundRun.EnvironmentSHA256[:], backgroundRunResourceSpecVersion, p.BackgroundRun.ImageIdentity, p.BackgroundRun.CloneIdentity,
 		p.BackgroundRun.VolumeIdentity, p.BackgroundRun.ContainerIdentity, p.BackgroundRun.EndpointIdentity,
 		p.OpenCodeSessionID, p.OpenCodeMessageID, actorID, acceptedMS, acceptedMS); err != nil {
 		return Admission{}, fmt.Errorf("insert background run: %w", err)
@@ -197,7 +198,7 @@ INSERT INTO events(
 		OpenCodeSessionID: p.OpenCodeSessionID, OpenCodeMessageID: p.OpenCodeMessageID,
 		PromptSHA256: promptHash, BaseSHA: p.BaseSHA, ImageDigest: attemptImage, OpenCodeProtocol: attemptProtocol,
 		ExecutionContractVersion: p.ExecutionContractVersion, Agent: p.Agent, ModelProvider: p.ModelProvider,
-		Model: p.Model, BudgetSnapshot: append(json.RawMessage(nil), p.BudgetSnapshot...), Deadline: fromUnixMillis(unixMillis(p.Deadline)),
+		Model: p.Model, Deadline: fromUnixMillis(unixMillis(p.Deadline)),
 		Revision: 1, CreatedAt: fromUnixMillis(acceptedMS), UpdatedAt: fromUnixMillis(acceptedMS),
 	}
 	receipt := Receipt{
@@ -272,9 +273,6 @@ func validateAdmission(p AdmitBackgroundRunParams) error {
 		!validBoundedText(p.ModelProvider, 1, 128) || !validBoundedText(p.Model, 1, 256) {
 		return fmt.Errorf("%w: execution or model selection", ErrInvalidInput)
 	}
-	if len(p.BudgetSnapshot) < 1 || len(p.BudgetSnapshot) > 16*1024 || !json.Valid(p.BudgetSnapshot) {
-		return fmt.Errorf("%w: budget snapshot", ErrInvalidInput)
-	}
 	if err := validTimestamp(p.AcceptedAt); err != nil {
 		return err
 	}
@@ -304,11 +302,8 @@ func canonicalBackgroundRemote(value string) bool {
 }
 
 func canonicalBackgroundIdentities(p AdmitBackgroundRunParams) bool {
-	compact := strings.ReplaceAll(strings.TrimPrefix(string(p.TaskID), "tsk_"), "-", "")
-	return p.BackgroundRun.CloneIdentity == "run-"+compact+"-g1-clone" &&
-		p.BackgroundRun.VolumeIdentity == "fern-run-"+compact+"-g1-opencode" &&
-		p.BackgroundRun.ContainerIdentity == "fern-run-"+compact+"-g1" &&
-		p.BackgroundRun.EndpointIdentity == "run-"+compact+"-g1-endpoint"
+	resources, err := runidentity.NewResources(p.TaskID, 1)
+	return err == nil && resources.Matches(p.BackgroundRun.CloneIdentity, p.BackgroundRun.VolumeIdentity, p.BackgroundRun.ContainerIdentity, p.BackgroundRun.EndpointIdentity)
 }
 
 func ensureActor(ctx context.Context, tx *sql.Tx, actor task.ActorSnapshot) (int64, error) {

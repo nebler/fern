@@ -12,6 +12,8 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	"github.com/nebler/fern/internal/githubapp"
+	runidentity "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskenvdocker"
 	"github.com/nebler/fern/internal/taskstore"
@@ -39,7 +41,11 @@ func run() (resultErr error) {
 		return err
 	}
 	defer cli.Close()
-	image, err := cli.ImageInspect(ctx, "fern/opencode-background-source:dev")
+	imageReference := os.Getenv("FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE")
+	if imageReference == "" {
+		imageReference = "fern/opencode-background-source:dev"
+	}
+	image, err := cli.ImageInspect(ctx, imageReference)
 	if err != nil {
 		return fmt.Errorf("inspect already-built source image: %w", err)
 	}
@@ -110,8 +116,19 @@ func run() (resultErr error) {
 		return err
 	}
 	compact := strings.ReplaceAll(strings.TrimPrefix(string(taskID), "tsk_"), "-", "")
-	run := taskstore.BackgroundRun{WorkspaceID: workspaceID, TaskID: taskID, AttemptID: attemptID, Generation: 1, RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ResourceSpecVersion: 9, ImageIdentity: imageID, CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode", ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint", OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID}
-	config := taskenvdocker.Config{StateRoot: state, Repository: repository, GitExecutable: gitPath, ImageReference: "fern/opencode-background-source:dev", ImageID: imageID, MemoryBytes: 512 << 20, NanoCPUs: 2_000_000_000, PIDs: 512, WallTimeout: 2 * time.Minute, GitTimeout: 30 * time.Second, DockerTimeout: 20 * time.Second, HealthTimeout: 60 * time.Second, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 128 << 20, CloneObservedLimitBytes: 128 << 20, DiskFreeAdmissionBytes: 128 << 20, LogMaxSize: "1m", LogMaxFiles: 2, StopGrace: 3 * time.Second}
+	run := taskstore.BackgroundRun{WorkspaceID: workspaceID, TaskID: taskID, AttemptID: attemptID, Generation: 1, RepositoryID: 42, RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ResourceSpecVersion: runidentity.ResourceSpecVersion, ImageIdentity: imageID, CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode", ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint", OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID}
+	config := taskenvdocker.Config{StateRoot: state, Repository: repository, GitExecutable: gitPath, ImageReference: imageReference, ImageID: imageID, MemoryBytes: 512 << 20, NanoCPUs: 2_000_000_000, PIDs: 512, WallTimeout: 2 * time.Minute, GitTimeout: 30 * time.Second, DockerTimeout: 20 * time.Second, HealthTimeout: 60 * time.Second, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 128 << 20, CloneObservedLimitBytes: 128 << 20, DiskFreeAdmissionBytes: 128 << 20, LogMaxSize: "1m", LogMaxFiles: 2, StopGrace: 3 * time.Second}
+	githubFixture, err := newGitHubFixture()
+	if err != nil {
+		return err
+	}
+	defer githubFixture.server.Close()
+	config.GitHubTokens = githubFixture.source
+	config.GitHubRepository, err = githubapp.NewRepositoryIdentity(7, 42)
+	if err != nil {
+		return err
+	}
+	config.GitHubRepositoryFullName = "fern-integration/background-run"
 	provider, err := taskenvdocker.New(ctx, config, nil)
 	if err != nil {
 		return err
@@ -185,6 +202,28 @@ func run() (resultErr error) {
 		return err
 	}
 	runtime = started.RuntimeIdentity()
+	run.ObservedContainerID = runtime.ContainerID
+	run.ObservedContainerStartedAt = runtime.StartedAt
+	run.RuntimeEpoch = started.RuntimeEpoch
+	run.HostPort = started.HostPort
+	if _, code, err := privateExec(ctx, cli, containerID, "gh", "repo", "view"); err != nil || code == 0 {
+		return errors.New("unprovisioned gh wrapper did not fail closed")
+	}
+	if _, err := provider.Health(ctx, run, runtime); err != nil {
+		return err
+	}
+	if err := provider.RefreshGitHubCredentials(ctx, run); err != nil {
+		return err
+	}
+	if err := assertGitHubCredentials(ctx, cli, containerID, temporary, githubFixture, 1); err != nil {
+		return err
+	}
+	if err := provider.RefreshGitHubCredentials(ctx, run); err != nil {
+		return err
+	}
+	if githubFixture.calls.Load() != 1 {
+		return errors.New("healthy provider failed to cache GitHub credential lease")
+	}
 	execution, err := cli.ContainerExecCreate(ctx, containerID, container.ExecOptions{User: "1001:1001", WorkingDir: "/home/user/workspace", Cmd: []string{"touch", "container-uid-1001-write"}})
 	if err != nil {
 		return err
@@ -236,6 +275,12 @@ func run() (resultErr error) {
 	if _, err := provider.Health(ctx, run, runtime); err != nil {
 		return err
 	}
+	if err := provider.RefreshGitHubCredentials(ctx, run); err != nil {
+		return err
+	}
+	if err := assertGitHubCredentials(ctx, cli, containerID, temporary, githubFixture, 2); err != nil {
+		return err
+	}
 	if err := os.WriteFile(filepath.Join(clonePath, "agent-output.txt"), []byte("dirty result\n"), 0o666); err != nil {
 		return err
 	}
@@ -273,7 +318,7 @@ func run() (resultErr error) {
 	if _, err := os.Stat(clonePath); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("clone remains after cleanup")
 	}
-	fmt.Printf("PASS image_id=%s container_id=%s endpoint=%s key_mode=0600 clone_isolated=true auth=missing_wrong_correct reconstruction=true restart_fenced=true cleanup=complete\n", imageID, created.ContainerID, started.Endpoint)
+	fmt.Printf("PASS image_id=%s container_id=%s endpoint=%s key_mode=0600 clone_isolated=true auth=missing_wrong_correct github=scoped_private_rotated github_auth_guard=true credential_leaks=false reconstruction=true restart_fenced=true cleanup=complete\n", imageID, created.ContainerID, started.Endpoint)
 	return nil
 }
 

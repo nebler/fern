@@ -757,7 +757,7 @@ func TestNewRemovesOnlyInterruptedEngineDirectories(t *testing.T) {
 	}
 }
 
-func testEngineRepository(t *testing.T) (*Engine, string, task.GitOID) {
+func testEngineRepository(t testing.TB) (*Engine, string, task.GitOID) {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -807,7 +807,7 @@ func testEngineRepository(t *testing.T) (*Engine, string, task.GitOID) {
 	return engine, repository, base
 }
 
-func mustSource(t *testing.T, repository string) Source {
+func mustSource(t testing.TB, repository string) Source {
 	t.Helper()
 	source, err := NewSource(repository, testWorkspace, testTask, testAttempt)
 	if err != nil {
@@ -816,7 +816,7 @@ func mustSource(t *testing.T, repository string) Source {
 	return source
 }
 
-func testSnapshotSpec(t *testing.T, source Source, base task.GitOID, epoch int64) SnapshotSpec {
+func testSnapshotSpec(t testing.TB, source Source, base task.GitOID, epoch int64) SnapshotSpec {
 	t.Helper()
 	profileDigest, err := NewDigest(sha256.Sum256([]byte("opencode-test-profile")))
 	if err != nil {
@@ -839,12 +839,12 @@ func digestString(value string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(value)))
 }
 
-func gitRun(t *testing.T, repository string, arguments ...string) {
+func gitRun(t testing.TB, repository string, arguments ...string) {
 	t.Helper()
 	_ = gitCommand(t, repository, arguments...)
 }
 
-func gitCommand(t *testing.T, repository string, arguments ...string) string {
+func gitCommand(t testing.TB, repository string, arguments ...string) string {
 	t.Helper()
 	command := exec.Command("git", append([]string{"-C", repository}, arguments...)...)
 	command.Env = append(os.Environ(), "LC_ALL=C")
@@ -855,7 +855,7 @@ func gitCommand(t *testing.T, repository string, arguments ...string) string {
 	return string(output)
 }
 
-func writeFile(t *testing.T, path string, content []byte, mode os.FileMode) {
+func writeFile(t testing.TB, path string, content []byte, mode os.FileMode) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatal(err)

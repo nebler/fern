@@ -180,7 +180,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	}
 	exportNow = exportNow.Add(time.Second)
 	advance(store.RecordBackgroundRunBundleWriteStarted)
-	export, err = store.VerifyBackgroundRunBundle(context.Background(), VerifyBackgroundRunBundleParams{
+	export, err = store.RecordBackgroundRunBundleVerified(context.Background(), RecordBackgroundRunBundleVerifiedParams{
 		BackgroundRunExportClaim: exportClaim(), BundleSHA256: sha256.Sum256([]byte("bundle")), BundleBytes: 6,
 	})
 	if err != nil {
@@ -199,7 +199,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	exportNow = exportNow.Add(time.Second)
-	evidence := journalEvidence()
+	evidence := json.RawMessage(`{"authorityRead":true,"objects":1}`)
 	commit := CommitBackgroundRunRetainedResultParams{BackgroundRunExportClaim: exportClaim(),
 		MaterializationID: seal.MaterializationID, ArtifactID: seal.ArtifactID, ResultID: seal.ResultID,
 		ResultEventID: seal.ResultEventID, TaskEventID: seal.TaskEventID, EvidencePayload: evidence,
@@ -237,45 +237,9 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	if err != nil || readArtifact.ID != committed.Artifact.ID {
 		t.Fatalf("read retained artifact = %+v, error=%v", readArtifact, err)
 	}
-	source, err := store.FindResultAwaitingVerification(context.Background(), run.WorkspaceID)
-	if err != nil || source.Result.ID != committed.Result.ID || source.Task.ID != committed.Task.ID || source.Attempt.ID != committed.Attempt.ID {
-		t.Fatalf("retained verification source = %+v, error=%v", source, err)
-	}
 	authorized, err := store.HasRetainedResultAuthority(context.Background(), committed.Result.ID)
 	if err != nil || !authorized {
 		t.Fatalf("retained result authority = %t, error=%v", authorized, err)
-	}
-	ownedResult, ownedTask, ownedAttempt, err := store.GetResultOwners(context.Background(), committed.Result.ID)
-	if err != nil || ownedResult.ID != committed.Result.ID || ownedTask.ID != committed.Task.ID || ownedAttempt.ID != committed.Attempt.ID {
-		t.Fatalf("retained result owners = %+v %+v %+v, error=%v", ownedResult, ownedTask, ownedAttempt, err)
-	}
-	verification := prepareJournalVerification(t, store, committed.SealedResult, 5200)
-	running, err := store.AdvanceVerification(context.Background(), AdvanceVerificationParams{
-		VerificationID: verification.Verification.ID, ExpectedRevision: verification.Verification.Revision,
-		ExpectedTaskRevision: committed.Task.Revision, ExpectedAttemptRevision: committed.Attempt.Revision,
-		EventID: testEventID(5201), StartedAt: verification.Verification.UpdatedAt.Add(time.Millisecond),
-		EvidencePayload: evidence, EvidenceSHA256: sha256.Sum256(evidence), Actor: testDeliveryActor(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	emptyHash := sha256.Sum256(nil)
-	exit := 0
-	verified, err := store.CompleteVerification(context.Background(), CompleteVerificationParams{
-		VerificationID: running.Verification.ID, ExpectedRevision: running.Verification.Revision,
-		ExpectedTaskRevision: committed.Task.Revision, ExpectedAttemptRevision: committed.Attempt.Revision,
-		EventID: testEventID(5202), State: VerificationSucceeded, Outcome: "passed", ExitCode: &exit,
-		Stdout: VerificationOutput{SHA256: emptyHash}, Stderr: VerificationOutput{SHA256: emptyHash},
-		EndedAt: running.Verification.UpdatedAt.Add(time.Millisecond), EvidencePayload: evidence,
-		EvidenceSHA256: sha256.Sum256(evidence), Actor: testDeliveryActor(),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	publication := prepareJournalPublication(t, store, committed.SealedResult, verified, 5210)
-	publicationWork, err := store.FindPublicationWork(context.Background(), run.WorkspaceID)
-	if err != nil || publicationWork.Publication.ID != publication.Publication.ID || publicationWork.Result.ID != committed.Result.ID {
-		t.Fatalf("retained publication work = %+v, error=%v", publicationWork, err)
 	}
 	if _, err := store.db.Exec(`UPDATE retained_artifacts SET bundle_size=bundle_size+1 WHERE id=?`, seal.ArtifactID); err == nil {
 		t.Fatal("retained artifact accepted raw mutation")

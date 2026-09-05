@@ -36,6 +36,9 @@ func TestInitCreatesOnboardingOnlyConfigurationWithoutInstallationID(t *testing.
 	if strings.Contains(string(data), "installationId") {
 		t.Fatalf("pending installation ID was serialized:\n%s", data)
 	}
+	if strings.Contains(string(data), "budget") || strings.Contains(string(data), "maxTurns") || strings.Contains(string(data), "verification") {
+		t.Fatalf("generated configuration contains retired settings:\n%s", data)
+	}
 	environment, err := readEnvFile(envPath)
 	if err != nil {
 		t.Fatal(err)
@@ -44,14 +47,13 @@ func TestInitCreatesOnboardingOnlyConfigurationWithoutInstallationID(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Workspace.GitHub == nil || loaded.Workspace.GitHub.InstallationID != 0 {
+	if loaded.Workspace.GitHub.InstallationID != 0 {
 		t.Fatalf("pending GitHub binding = %+v", loaded.Workspace.GitHub)
 	}
-	projected, err := config.ProjectBackgroundBootstrap(loaded)
-	if err != nil {
+	if err := config.ValidateBootstrap(loaded); err != nil {
 		t.Fatalf("bootstrap validation: %v", err)
 	}
-	if err := config.ValidateBackground(projected); err == nil {
+	if err := config.Validate(loaded); err == nil {
 		t.Fatal("onboarding-only configuration authorized execution")
 	}
 	if _, err := loadUpConfig(upOptions{configPath: configPath, envPath: envPath, configRequired: true}); err != nil {

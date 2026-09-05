@@ -17,13 +17,13 @@ Fern owns:
 
 - repository and GitHub App authority;
 - actor identity, pairing, plugin grants, and revocation;
-- idempotent task, stop, seal, and publication admission;
+- idempotent task, stop, and seal admission;
 - exact disposable resource identity and lifecycle;
 - run claims, revisions, cancellation epochs, and evidence;
 - short-lived exact-session attachment capabilities and connection shutdown;
 - writer inactivity proof;
 - Git bundle export and local content-addressed storage;
-- verification and GitHub publication journals;
+- short-lived, repository-scoped GitHub credentials for the runtime;
 - backup, restore, credential rotation, and schema compatibility.
 
 OpenCode owns:
@@ -31,7 +31,8 @@ OpenCode owns:
 - model and provider execution;
 - the session transcript;
 - prompts, tools, permissions, questions, and UI;
-- file edits made while its disposable writer is active.
+- file edits made while its disposable writer is active;
+- repository checks, Git pushes, and pull-request creation requested by its goal.
 
 Fern does not own a persistent OpenCode home, a persistent repository mount, a
 wake-on-request proxy, an idle supervisor, or a browser terminal. Operator
@@ -54,7 +55,7 @@ interaction with a live run uses the normal OpenCode TUI.
                                          |
                        +-----------------+------------------+
                        |                 |                  |
-                   taskstore 1       run coordinator   GitHub App broker
+                   taskstore 3       run coordinator   GitHub App credentials
                        |                 |
                        |                 v
                        |         taskenvdocker provider
@@ -67,7 +68,8 @@ interaction with a live run uses the normal OpenCode TUI.
                                          |
                                   private TLS :8443
 
- retained artifact CAS -> verifier -> publication journal -> draft PR
+ agent + git/gh -> GitHub branch / draft PR
+ stopped writer -> retained artifact CAS (independent of publication)
 ```
 
 The three listeners are bound before Docker side effects. The remote listener
@@ -81,23 +83,23 @@ removes it and waits for admitted forwarding to exit before writer teardown.
 `fern up` performs this sequence:
 
 1. Strictly load YAML and protected environment values.
-2. Apply `config.ValidateBackgroundBootstrap`.
+2. Apply `config.ValidateBootstrap`.
 3. Bind remote, operator, and live-run listeners.
 4. Acquire the host-local repository-name lease.
 5. Open control and plugin-authorization state.
-6. Open taskstore schema 1.
+6. Open taskstore schema 3.
 7. If the installation ID is pending, block readiness and expose onboarding
    without composing task services.
-8. Otherwise apply strict `config.ValidateBackground` and resolve exact GitHub
+8. Otherwise apply strict `config.Validate` and resolve exact GitHub
    App repository authority.
 9. Qualify the exact Background Run image through Docker inspection.
 10. Open the artifact CAS and inspect every referenced artifact.
-11. Build run, verification, publication, route, and HTTP coordinators.
+11. Build run, route, and HTTP services with the scoped token source.
 12. Start all services under one cancellation errgroup.
 
 Fresh-host configuration may omit `workspace.github.installationId` only to
 bootstrap onboarding. Fern then exposes onboarding, blocks readiness, and
-returns `503` for run and result operations. After creating and installing the
+returns `503` for run operations. After creating and installing the
 App on the configured repository, the operator records the numeric installation
 ID from GitHub's installation URL and restarts Fern. Missing credentials follow
 the same blocked, onboarding-only path. Neither state can compose task services.
@@ -109,17 +111,17 @@ Production requires:
 - `workspace.name` and an absolute repository path;
 - `workspace.github.mode: github-app-broker`;
 - exact installation ID, repository ID, and canonical full name;
-- explicit agent, model provider, model ID, timeouts, and turn budget;
+- explicit agent, model provider, model ID, and timeouts;
 - exact Background Run image reference and canonical image ID;
-- explicit Background Run environment;
 - a loopback live-route listener and private HTTPS live origin;
 - remote and operator loopback listeners;
 - a control password of at least 32 characters.
 
-`workspace.image`, `workspace.memory`, `workspace.env`, `idle`, and
-`workspace-gh` remain parser and schema compatibility vocabulary. Production
-composition does not consume them. `OPENCODE_PASSWORD` is not forwarded; each
-disposable runtime receives a Fern-derived server credential.
+Retired persistent-workspace settings (`workspace.image`, `workspace.memory`,
+`workspace.env`, `idle`, and `workspace-gh`) are not supported. Arbitrary
+`tasks.backgroundEnvironment`, `tasks.budget`, and `tasks.verification` settings
+are rejected rather than accepted as unused configuration. `OPENCODE_PASSWORD`
+is not forwarded; each disposable runtime receives a Fern-derived credential.
 
 ## 6. Authentication And Actors
 
@@ -159,6 +161,13 @@ Admission atomically writes:
 The coordinator wakes only after commit. A repeated matching idempotency claim
 returns the original receipt. A changed hash conflicts. Another actor cannot
 probe the original claim.
+
+`runcommand` owns create, stop, and seal application operations: request policy,
+canonical idempotency hashing, replay interpretation, base verification, identity
+generation, admission coordination, and notification after fresh commits. Its
+inputs are separate from HTTP DTOs and its outputs contain accepted-command
+facts rather than raw store receipts. The HTTP handler owns routing,
+authentication/scopes, bounded decoding, error mapping, and response encoding.
 
 ## 8. Run State
 
@@ -203,6 +212,15 @@ started phase. Reconciliation reads are bounded. An ambiguous mutation is not
 blindly retried. Claims bind workspace, task, attempt, generation, revision,
 state, phase, cancellation epoch, profile, image, owner, and lease expiry.
 
+`run` owns lifecycle classification independently of persistence: valid
+state/phase combinations, attempt-deadline applicability, execution-selection
+requirements, and timeout eligibility. The coordinator dispatches concrete
+effects; it does not maintain a second list of phase categories. Taskstore keeps
+SQL representation and compatibility translation private and continues to
+enforce durable transitions transactionally. The existing storage-shaped run
+record remains a boundary representation; moving all of its fields into domain
+values is not yet complete.
+
 ## 9. Disposable Resource Identity
 
 `taskenvdocker.Provider` owns Docker policy. Every clone, volume, container,
@@ -219,7 +237,13 @@ run state and a private host key. Container inspection must match:
 Replacement or unowned resources are quarantined or rejected. The provider
 does not trust names alone.
 
-Resource-spec version is 9. The current lane is intentionally serial, with
+`run.Resources` owns canonical resource-name derivation and matching;
+`run.Runtime` owns exact timestamp and token interpretation. Both have private
+representations. These identity values are not inactivity proof: destructive
+provider operations still re-observe the exact resource before acting.
+
+Resource-spec version is 10. The image must carry `ai.fern.runtime.spec="10"`
+and the rotating GitHub credential helpers. The lane is intentionally serial, with
 capacity one. The qualified source and observed-clone envelope is 128 MiB, and
 clone work has the same 30-second deadline as its Git operation.
 
@@ -248,6 +272,18 @@ Removal is a fence:
 4. Return route-removal evidence.
 
 No persistent OpenCode path is forwarded by the remote or operator gateway.
+
+The attachment event stream owns its upstream body and filtering worker.
+Closing the returned stream closes upstream and waits for worker exit. The
+projection limit applies to each complete normalized SSE event, not merely to
+individual lines, so an unterminated multiline event cannot grow without bound.
+
+Attachment contract tests explicitly pin the qualified upstream commit. An
+upgrade must review route/method/query rejection, response envelopes, and SSE
+session filtering. The live serial harness also checks the actual session-list
+and active-session envelopes and denies unknown management writes and foreign
+session operations. The allow-list is intentionally manual, not generated from
+all endpoints exposed by upstream.
 
 ## 11. Observation And Stop
 
@@ -283,30 +319,51 @@ reconstructable. Every positive plugin API projection comes from a fresh CAS
 inspection and complete result/artifact/snapshot tuple check. Artifact locators
 and host paths are not returned through the plugin API.
 
-## 13. Verification
+Result consumption uses `taskartifact.Engine.Acquire` to perform one fresh full
+verification and return its snapshot together with an owned detached checkout.
+The result-source resolver checks that snapshot against the durable result and
+artifact binding, closing the checkout on mismatch. Materialization still
+checks the copied bundle against the verified digest and size; acquisition does
+not cache integrity observations across operations.
 
-Verification is optional explicit host policy. Fern never infers a command from
-the repository. The command is an argument vector, not a shell string, and runs
-against a newly materialized retained artifact.
+## 13. Repository Checks
 
-Only `retained_artifact` results can become new verification work. Historical
-`persistent_workspace` results remain readable but are excluded by the taskstore
-selection predicate. The verifier re-reads result ownership, acquires and
-inspects the CAS artifact, commits a started journal phase, runs the exact
-policy, accounts for bounded stdout/stderr, and records terminal evidence.
+Fern does not run repository test commands on the host or require a successful
+test record before publication. The agent's task or goal may include running
+checks in its runtime, and repository CI can assess the published draft PR.
+Agent-reported success is not independent verification and is not a publication
+credential. Fern's responsibility is exact result retention and safe delivery,
+not a second CI system.
 
-## 14. Publication
+Artifact verification remains mandatory: checking bundle bytes, Git objects,
+and result identity protects the work being delivered. It does not claim that
+the changes pass repository tests. There is no `tasks.verification` policy or
+`tasks.budget.maxTurns` configuration; attempt timeouts remain enforced.
 
-Publication requires a successful verification for the exact result commit.
-The paired/operator publication API accepts an idempotency key and expected
-verification ID; repository, base, result, installation, branch, and draft-PR
-tuple are derived from durable state.
+## 14. Harness-Owned GitHub Delivery
 
-The publication coordinator acquires and re-inspects a fresh CAS checkout on
-every pass, re-reads the selected revisions, and then advances one journal
-phase. Push and pull-request mutations are each preceded by durable started
-phases and followed by exact GitHub observations. Lost responses become
-read-only reconciliation, never blind duplicate mutation.
+The runtime image installs Git and GitHub CLI. The agent can run checks, push a
+branch, and open a draft PR as part of its task. Fern has no publication API,
+publication journal, or host-side Git push/PR coordinator. The harness owns
+remote mutation and reconciliation after ambiguous responses.
+
+Fern retains the GitHub App private key on the host and mints short-lived
+installation tokens restricted to the bound repository. Before admitting the
+prompt and during active execution, it refreshes runtime credentials in the
+private disposable OpenCode volume, outside the clone and retained artifact.
+Tokens are not written into Docker environment/configuration, taskstore,
+labels, command arguments, or logs. Git and gh read the current credential via
+image-installed helpers; no personal gh configuration is mounted.
+
+This grants the agent GitHub write authority for the bound repository. Fern
+does not treat the agent as unable to read or copy its own token; a malicious
+task can exfiltrate that authority until expiry. The helpers prevent accidental
+credential persistence, not deliberate misuse by code running as the agent.
+Fern
+does not guarantee exactly-once PR creation, test success, or equality between
+a PR commit and the later sealed artifact. The agent may edit files after a
+push; retention preserves that later work independently. Credential refresh
+does not authorize execution after cancellation and cannot block teardown.
 
 ## 15. Terminal-Native Attachment
 
@@ -339,9 +396,11 @@ process-local memory as authority. Recovery rules include:
 - preserve cleanup-required state until absence is proven;
 - wake coordinators only after durable admission commits.
 
-Taskstore schema version is 1. This pre-release reset has no supported
-predecessor schema: older development databases must be deleted and recreated.
-Future released schemas must add migrations rather than rewriting schema 1.
+Taskstore schema is 3 and control-state schema is 2. This pre-release reset has
+no supported predecessor: older development state is rejected, never silently
+migrated or deleted. Preserve anything needed before explicitly starting with
+fresh state. Current-version restart recovery and backup/restore remain
+supported; old execution contracts are not resumed.
 
 ## 17. Trust Boundaries
 
@@ -404,29 +463,53 @@ generation when one exists.
 | `backgroundroute` | exact live target/session capabilities, request policy, shutdown, and fencing |
 | `backgroundruncoord` | serial run effect coordinator and recovery |
 | `config` | strict compatibility loader and production validator |
-| `control` | devices, pairing, and legacy disposition |
+| `control` | devices and pairing |
 | `credentialbundle` | age-encrypted GitHub credential bundles |
 | `githubapp` | onboarding, installation tokens, repository authority |
 | `pluginauth` | fixed-scope plugin device authorization and revocation |
 | `proxy` | remote/operator ingress and browser security |
+| `run` | persistence-independent lifecycle policy and immutable resource/runtime identities |
 | `runapi` | plugin-authenticated run contract |
+| `runcommand` | transport-independent create/stop/seal policy, admission, replay, and post-commit notification |
 | `runclientapi` | operator/client discovery and attachment admission |
-| `resultapi` | paired/operator retained result and publication admission |
 | `task` | identifiers, actor snapshots, idempotency vocabulary |
 | `taskartifact` | deterministic Git bundle creation, CAS, materialization |
 | `taskenvdocker` | disposable Docker resources and writer proof |
-| `taskpublication` | stateless GitHub push and draft-PR effects |
-| `taskpublicationcoord` | durable publication effect journal |
-| `taskresultsource` | CAS-only result checkout authority |
-| `taskstore` | schema 1 durable authority and state machines |
-| `taskverification` | durable verification coordination |
-| `verification` | shell-free bounded host check runner |
+| `taskresultsource` | CAS-only result binding and verified checkout acquisition |
+| `taskstore` | schema 3 run/result authority and state machines |
 | `observability` | health, readiness, status, metrics, retry |
 | `hostlease` | exclusive host-local repository-binding lease |
 | `compatibility` | fresh-schema and release-manifest alignment |
 
-`gitref`, `jsoncanon`, and `evidence` are narrow shared validation utilities.
+`gitref` and `jsoncanon` are narrow shared validation utilities.
 Integration packages qualify Docker, OpenCode, upgrades, and releases.
+
+### Boundary decisions
+
+Package extraction follows ownership, not a generic layered template:
+
+For this one-host, capacity-one system, new packages and adapters are not the
+default way to improve a boundary. GitHub delivery belongs to the harness,
+not a separate host workflow. Ordinary store
+records may remain plain structs; introduce domain values only when they remove
+duplicated decisions or protect authority-bearing combinations. Keep the
+explicit coordinator and route allow-list rather than building workflow or
+policy frameworks.
+
+- `run` cannot import taskstore, Docker, HTTP, or coordinators. Storage keeps
+  compatibility names for its callers, but current run enum values and lifecycle
+  interpretation come from this domain owner.
+- `runcommand` owns create/stop/seal policy and idempotent acceptance. Private
+  hash projections preserve historical request bytes without making the HTTP
+  DTO or its JSON field order the public application interface.
+- Artifact integrity and retained-result authority remain separate. The engine
+  verifies bytes and materializes a checkout; the resolver establishes which
+  durable result those bytes belong to. Neither consumer supplies an unverified
+  snapshot to bypass fresh verification.
+
+SQL constraints, current-resource reinspection, and domain validation are
+independent protections at different boundaries. Consolidating meaning does
+not remove those protections or make historical observations permanently valid.
 
 ## 20. Deployment
 
@@ -446,8 +529,8 @@ group `docker`, `UMask=0077`, and the included hardening directives. Publish
 only `127.0.0.1:8080` and `127.0.0.1:8443` through private TLS. Keep
 `127.0.0.1:8081` host-only.
 
-Readiness fails for corrupt durable state, unresolved legacy publication
-authority, missing GitHub App credentials, or failed background components.
+Readiness fails for corrupt durable state, missing GitHub App credentials, or
+failed background components.
 Liveness reports only process availability.
 
 ## 21. Qualification And Release

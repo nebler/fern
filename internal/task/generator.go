@@ -55,15 +55,6 @@ type BackgroundSealIDs struct {
 	TaskEventID        EventID
 }
 
-// PublicationAdmissionIDs is allocated before one atomic publication
-// admission. OperationID is the aggregate identity used to derive its branch.
-type PublicationAdmissionIDs struct {
-	PublicationID PublicationID
-	OperationID   PublicationOperationID
-	ReceiptID     ReceiptID
-	EventID       EventID
-}
-
 func NewGenerator(random io.Reader, now func() time.Time) (*Generator, error) {
 	if random == nil || now == nil {
 		return nil, ErrIDGeneration
@@ -155,24 +146,6 @@ func (g *Generator) GenerateBackgroundSealIDs() (BackgroundSealIDs, error) {
 	return ids, nil
 }
 
-func (g *Generator) GeneratePublicationAdmissionIDs() (PublicationAdmissionIDs, error) {
-	var ids PublicationAdmissionIDs
-	var err error
-	if ids.PublicationID, err = g.PublicationID(); err != nil {
-		return PublicationAdmissionIDs{}, err
-	}
-	if ids.OperationID, err = g.PublicationOperationID(); err != nil {
-		return PublicationAdmissionIDs{}, err
-	}
-	if ids.ReceiptID, err = g.ReceiptID(); err != nil {
-		return PublicationAdmissionIDs{}, err
-	}
-	if ids.EventID, err = g.EventID(); err != nil {
-		return PublicationAdmissionIDs{}, err
-	}
-	return ids, nil
-}
-
 func (g *Generator) WorkspaceID() (WorkspaceID, error) {
 	value, err := g.fernID("wsp_")
 	return WorkspaceID(value), err
@@ -226,21 +199,6 @@ func (g *Generator) RetainedArtifactID() (RetainedArtifactID, error) {
 func (g *Generator) MaterializationID() (MaterializationID, error) {
 	value, err := g.fernID("mat_")
 	return MaterializationID(value), err
-}
-
-func (g *Generator) VerificationID() (VerificationID, error) {
-	value, err := g.fernID("ver_")
-	return VerificationID(value), err
-}
-
-func (g *Generator) PublicationID() (PublicationID, error) {
-	value, err := g.fernID("pub_")
-	return PublicationID(value), err
-}
-
-func (g *Generator) PublicationOperationID() (PublicationOperationID, error) {
-	value, err := g.fernID("op_")
-	return PublicationOperationID(value), err
 }
 
 func (g *Generator) OpenCodeSessionID() (OpenCodeSessionID, error) {

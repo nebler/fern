@@ -1,7 +1,6 @@
 package backgroundroute
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -64,7 +63,7 @@ var attachmentReadPaths = map[string]struct{}{
 func attachmentReadAllowed(path string, query url.Values, sessionID string) bool {
 	if path == "/file" || path == "/file/content" {
 		values := query["path"]
-		if len(values) != 1 || strings.Contains(values[0], "\\") || pathpkgEscapesWorkspace(values[0]) {
+		if len(values) != 1 || strings.Contains(values[0], "\\") || relativePathEscapesWorkspace(values[0]) {
 			return false
 		}
 	}
@@ -116,7 +115,7 @@ func attachmentWorkspaceSelectionAllowed(request *http.Request) bool {
 	return true
 }
 
-func pathpkgEscapesWorkspace(value string) bool {
+func relativePathEscapesWorkspace(value string) bool {
 	return path.IsAbs(value) || path.Clean(value) == ".." || strings.HasPrefix(path.Clean(value), "../")
 }
 
@@ -133,7 +132,7 @@ func filterAttachmentResponse(response *http.Response, sessionID string) error {
 	case "/session":
 		return filterJSONArrayResponse(response, sessionID)
 	case "/session/status":
-		return filterJSONObjectResponse(response, sessionID, false)
+		return filterJSONObjectResponse(response, sessionID)
 	case "/api/session":
 		return filterAPIDataResponse(response, sessionID, false)
 	case "/api/session/active":
@@ -179,7 +178,7 @@ func filterJSONArrayResponse(response *http.Response, sessionID string) error {
 	return nil
 }
 
-func filterJSONObjectResponse(response *http.Response, sessionID string, nested bool) error {
+func filterJSONObjectResponse(response *http.Response, sessionID string) error {
 	data, err := readProjection(response)
 	if err != nil {
 		return err
@@ -187,9 +186,6 @@ func filterJSONObjectResponse(response *http.Response, sessionID string, nested 
 	var values map[string]json.RawMessage
 	if err := json.Unmarshal(data, &values); err != nil {
 		return errors.New("invalid OpenCode session status")
-	}
-	if nested {
-		return errors.New("unexpected nested session projection")
 	}
 	for id := range values {
 		if id != sessionID {
@@ -253,46 +249,6 @@ func filterSessions(values []json.RawMessage, sessionID string) []json.RawMessag
 		}
 	}
 	return filtered
-}
-
-func filterAttachmentEvents(body io.ReadCloser, sessionID string) io.ReadCloser {
-	reader, writer := io.Pipe()
-	go func() {
-		defer body.Close()
-		scanner := bufio.NewScanner(body)
-		scanner.Buffer(make([]byte, 64<<10), maxAttachmentProjectionBytes)
-		var event bytes.Buffer
-		flush := func() error {
-			if event.Len() == 0 {
-				return nil
-			}
-			data := event.Bytes()
-			if attachmentEventAllowed(data, sessionID) {
-				if _, err := writer.Write(data); err != nil {
-					return err
-				}
-			}
-			event.Reset()
-			return nil
-		}
-		for scanner.Scan() {
-			line := scanner.Bytes()
-			event.Write(line)
-			event.WriteByte('\n')
-			if len(line) == 0 {
-				if err := flush(); err != nil {
-					_ = writer.CloseWithError(err)
-					return
-				}
-			}
-		}
-		if err := flush(); err != nil {
-			_ = writer.CloseWithError(err)
-			return
-		}
-		_ = writer.CloseWithError(scanner.Err())
-	}()
-	return reader
 }
 
 func attachmentEventAllowed(event []byte, sessionID string) bool {

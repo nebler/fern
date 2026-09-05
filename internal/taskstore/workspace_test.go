@@ -50,7 +50,6 @@ func TestEnsureWorkspaceRejectsEveryBindingDrift(t *testing.T) {
 	}{
 		{"state", func(value *Workspace) { value.State = WorkspaceMaintenance }},
 		{"path", func(value *Workspace) { value.RepositoryPath = "/srv/other" }},
-		{"GitHub authority", func(value *Workspace) { value.GitHubAuthority = GitHubAuthorityWorkspaceGH; value.InstallationID = 0 }},
 		{"installation", func(value *Workspace) { value.InstallationID++ }},
 		{"repository", func(value *Workspace) { value.RepositoryID++ }},
 		{"full name", func(value *Workspace) { value.RepositoryFullName = "owner/other" }},
@@ -95,17 +94,15 @@ func TestWorkspaceReadsValidateAndHideMissingRows(t *testing.T) {
 	}
 }
 
-func TestWorkspaceGHAuthorityUsesNoPublicInstallationID(t *testing.T) {
+func TestWorkspaceRequiresAppInstallationID(t *testing.T) {
 	store := openTestStore(t, testDBPath(t))
 	defer store.Close()
 	desired := testWorkspaceBinding()
-	desired.GitHubAuthority = GitHubAuthorityWorkspaceGH
-	desired.InstallationID = 0
 	created, err := store.EnsureWorkspace(context.Background(), desired)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if created.GitHubAuthority != GitHubAuthorityWorkspaceGH || created.InstallationID != 0 {
+	if created.GitHubAuthority != GitHubAuthorityAppBroker || created.InstallationID != desired.InstallationID {
 		t.Fatalf("created = %+v", created)
 	}
 	var authority string
@@ -113,14 +110,14 @@ func TestWorkspaceGHAuthorityUsesNoPublicInstallationID(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT github_authority,installation_id FROM workspaces WHERE id=?`, desired.ID).Scan(&authority, &storedInstallation); err != nil {
 		t.Fatal(err)
 	}
-	if authority != string(GitHubAuthorityWorkspaceGH) || storedInstallation != workspaceGHDatabaseInstallationID {
-		t.Fatalf("stored authority=%q discriminator=%d", authority, storedInstallation)
+	if authority != string(GitHubAuthorityAppBroker) || storedInstallation != int64(desired.InstallationID) {
+		t.Fatalf("stored authority=%q installation=%d", authority, storedInstallation)
 	}
 
 	invalid := testWorkspaceBinding()
-	invalid.GitHubAuthority = GitHubAuthorityWorkspaceGH
+	invalid.GitHubAuthority = "invalid"
 	if err := store.CreateWorkspace(context.Background(), invalid); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("workspace-gh installation error = %v", err)
+		t.Fatalf("invalid authority error = %v", err)
 	}
 	invalid = testWorkspaceBinding()
 	invalid.InstallationID = 0

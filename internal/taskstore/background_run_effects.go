@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"time"
 
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -333,6 +334,7 @@ func (s *Store) RequestBackgroundRunTimeout(ctx context.Context, p RequestBackgr
 	}
 	if run.AttemptID != p.AttemptID || run.Generation != p.Generation || run.Revision != p.ExpectedRevision ||
 		run.State != p.ExpectedState || run.EffectPhase != p.ExpectedPhase || run.CancelEpoch != 0 ||
+		run.TimeoutRequestedAt != nil || !rundomain.Classify(rundomain.State(run.State), rundomain.Phase(run.EffectPhase)).TimeoutEligible ||
 		run.ClaimOwner != p.ClaimOwner || run.ClaimGeneration != p.ClaimGeneration || run.ClaimExpiresAt == nil || !run.ClaimExpiresAt.After(p.Now) {
 		return BackgroundRun{}, ErrInvalidState
 	}
@@ -475,7 +477,8 @@ func (s *Store) MarkBackgroundRunCleanupRequired(ctx context.Context, p MarkBack
 	if p.ExpectedState == BackgroundRunResultReady && p.ExpectedPhase == BackgroundRunEffectArtifactCommitted {
 		return s.updateClaimedRetainedRun(ctx, p.BackgroundRunClaim, `last_error=?,claim_owner=NULL,claim_expires_at=NULL`, []any{p.Error}, "retain failed background result cleanup")
 	}
-	if cleanupEffectPhase(p.ExpectedPhase) {
+	lifecycle := rundomain.Classify(rundomain.State(p.ExpectedState), rundomain.Phase(p.ExpectedPhase))
+	if lifecycle.CleanupStep {
 		state := p.ExpectedState
 		if state == BackgroundRunCanceling {
 			state = BackgroundRunCleanupRequired
@@ -625,7 +628,7 @@ func (s *Store) CompleteBackgroundRunResultCleanup(ctx context.Context, p Comple
 }
 
 func (s *Store) transitionClaimedRun(ctx context.Context, claim BackgroundRunClaim, state BackgroundRunState, phase BackgroundRunEffectPhase, assignments string, args []any, operation string) (BackgroundRun, error) {
-	if err := validateBackgroundRunClaim(claim); err != nil || !state.valid() || !phase.valid() || !validBackgroundRunStatePhase(BackgroundRunSourceProfile, state, phase) {
+	if err := validateBackgroundRunClaim(claim); err != nil || !validBackgroundRunStatePhase(BackgroundRunSourceProfile, state, phase) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run transition", ErrInvalidInput)
 	}
 	if len(args) > 0 {
@@ -715,7 +718,7 @@ func validateBackgroundRunClaim(claim BackgroundRunClaim) error {
 		claim.ExpectedRevision <= 0 || claim.CancelEpoch > 1 || !validBoundedText(claim.ClaimOwner, 1, 128) || validExactTimestamp(claim.Now) != nil {
 		return fmt.Errorf("%w: background run claim fence", ErrInvalidInput)
 	}
-	if !claim.ExpectedState.valid() || !claim.ExpectedPhase.valid() || !validBackgroundRunStatePhase(BackgroundRunSourceProfile, claim.ExpectedState, claim.ExpectedPhase) {
+	if !validBackgroundRunStatePhase(BackgroundRunSourceProfile, claim.ExpectedState, claim.ExpectedPhase) {
 		return fmt.Errorf("%w: background run expected state", ErrInvalidInput)
 	}
 	return nil

@@ -26,6 +26,7 @@ import (
 	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/backgroundruncoord"
+	runidentity "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
@@ -34,9 +35,17 @@ import (
 )
 
 const (
-	imageTag     = "fern/opencode-background-source:dev"
 	providerPort = nat.Port("4100/tcp")
 )
+
+var imageTag = sourceImageReference()
+
+func sourceImageReference() string {
+	if value := os.Getenv("FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE"); value != "" {
+		return value
+	}
+	return "fern/opencode-background-source:dev"
+}
 
 func integrationArtifactEngine(root string) (*taskartifact.Engine, error) {
 	cas, work := filepath.Join(root, "cas"), filepath.Join(root, "work")
@@ -222,7 +231,7 @@ func run() (resultErr error) {
 	run := taskstore.BackgroundRun{
 		WorkspaceID: workspaceID, TaskID: taskID, AttemptID: attemptID, Generation: 1,
 		RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: task.GitOID(base),
-		Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ResourceSpecVersion: 9, ImageIdentity: imageID,
+		Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ResourceSpecVersion: runidentity.ResourceSpecVersion, ImageIdentity: imageID,
 		CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode",
 		ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint",
 		OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID,
@@ -517,7 +526,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 			Key: "serial-create", RequestHash: requestHash, Actor: actor},
 		Title: "Serial Background Run", Prompt: prompt, RepositoryID: 1, BaseRef: "main", BaseSHA: task.GitOID(base),
 		ObjectFormat: "sha1", ExecutionContractVersion: "fern.background-run.v1", Agent: "contract",
-		ModelProvider: "test", Model: "test-model", BudgetSnapshot: json.RawMessage(`{"turns":10}`),
+		ModelProvider: "test", Model: "test-model",
 		Deadline: now.Add(3 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: now, BackgroundRun: intent,
 	})
 	if err != nil {
@@ -617,7 +626,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 		return fmt.Errorf("issue serial attachment active=%t error=%v", active, err)
 	}
 	attachmentToken = attachment.Password
-	if err := verifySerialRoute(routeURL, attachmentToken, string(current.OpenCodeSessionID)); err != nil {
+	if err := verifySerialRoute(ctx, routeURL, attachmentToken, string(current.OpenCodeSessionID)); err != nil {
 		return err
 	}
 	if err := verifySerialAttachment(current, route); err != nil {
@@ -788,7 +797,7 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 			Key: "retained-create", RequestHash: sha256.Sum256([]byte("retained-create")), Actor: actor},
 		Title: "Retained Background Run", Prompt: prompt, RepositoryID: 1, BaseRef: "main", BaseSHA: task.GitOID(base),
 		ObjectFormat: "sha1", ExecutionContractVersion: "fern.background-run.v1", Agent: "contract",
-		ModelProvider: "test", Model: "test-model", BudgetSnapshot: json.RawMessage(`{"turns":10}`),
+		ModelProvider: "test", Model: "test-model",
 		Deadline: now.Add(3 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: now, BackgroundRun: intent,
 	})
 	if err != nil {
@@ -983,7 +992,7 @@ func startSerialRoute(parent context.Context, address string) (*backgroundroute.
 	return manager, "http://" + bound, bound, stop, nil
 }
 
-func verifySerialRoute(origin, token, sessionID string) error {
+func verifySerialRoute(ctx context.Context, origin, token, sessionID string) error {
 	status, err := serialRouteStatus(origin, token, "/")
 	if err != nil || status != http.StatusForbidden {
 		return fmt.Errorf("attached non-TUI root status=%d error=%v", status, err)
@@ -1007,6 +1016,12 @@ func verifySerialRoute(origin, token, sessionID string) error {
 		if err != nil || status != http.StatusUnauthorized {
 			return fmt.Errorf("%s route access status=%d error=%v", name, status, err)
 		}
+	}
+	if err := verifySerialAPIProjections(ctx, origin, token, sessionID); err != nil {
+		return err
+	}
+	if err := verifySerialDeniedMethods(ctx, origin, token, sessionID); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1082,7 +1097,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 			Key: "serial-fence-crash-create", RequestHash: requestHash, Actor: actor},
 		Title: "Serial pre-dispatch fence crash", Prompt: prompt, RepositoryID: 1, BaseRef: "main", BaseSHA: task.GitOID(base),
 		ObjectFormat: "sha1", ExecutionContractVersion: "fern.background-run.v1", Agent: "contract",
-		ModelProvider: "test", Model: "test-model", BudgetSnapshot: json.RawMessage(`{"turns":10}`),
+		ModelProvider: "test", Model: "test-model",
 		Deadline: acceptedAt.Add(10 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: acceptedAt, BackgroundRun: intent,
 	})
 	if err != nil {

@@ -3,9 +3,13 @@
 // It does not support the persistent workspace OpenCode contract.
 package backgroundopencode
 
-import "encoding/json"
+import (
+	"encoding/json"
 
-const Profile = "source-39fb919a054190498f6d5b7985bde231f93ad7a6"
+	"github.com/nebler/fern/internal/run"
+)
+
+const Profile = run.SourceProfile
 
 const (
 	maxRequestBytes  = 128 << 10

@@ -54,6 +54,15 @@ type apiFixture struct {
 	now      time.Time
 }
 
+func (fixture *apiFixture) rebuildCommands(t *testing.T) {
+	t.Helper()
+	commands, err := newCommands(fixture.handler.config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.handler.commands = commands
+}
+
 type resultProjectionStore struct {
 	*taskstore.Store
 	run        taskstore.BackgroundRun
@@ -71,6 +80,25 @@ func (store *resultProjectionStore) GetBackgroundRunResult(context.Context, task
 
 func (store *resultProjectionStore) GetBackgroundRunExport(context.Context, task.ArtifactExportID) (taskstore.BackgroundRunExport, error) {
 	return store.export, nil
+}
+
+func TestCreateMalformedJSONWritesOneError(t *testing.T) {
+	fixture := newAPIFixture(t, PluginOpenCodeProfile)
+	for _, body := range []string{`{`, `{"unknown":true}`, `{"repository":"a","repository":"b"}`, strings.Repeat(" ", maxCreateBodyBytes+1)} {
+		response := fixture.request(http.MethodPost, PathPrefix, body, "invalid-json-key")
+		var payload struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		// Unmarshal rejects concatenated JSON responses, unlike a single Decode.
+		if response.Code != http.StatusBadRequest || json.Unmarshal(response.Body.Bytes(), &payload) != nil || payload.Error.Code != "invalid_json" {
+			t.Fatalf("malformed body response = %d %s", response.Code, response.Body.String())
+		}
+	}
+	if fixture.verifier.calls.Load() != 0 {
+		t.Fatal("malformed request reached verifier")
+	}
 }
 
 func TestRunAPIAdmissionReplayOwnershipStopAndRestart(t *testing.T) {
@@ -240,6 +268,7 @@ func TestRunAPIStopReplayDoesNotNeedFreshEntropyOrTime(t *testing.T) {
 	}
 	fixture.handler.config.Generator = failedGenerator
 	fixture.handler.config.Now = func() time.Time { panic("stop replay read time") }
+	fixture.rebuildCommands(t)
 	if got := fixture.request(http.MethodPost, PathPrefix+"/"+response.RunID+"/stop", "{}", "stop"); got.Code != http.StatusAccepted || got.Header().Get("Idempotency-Replayed") != "true" {
 		t.Fatalf("replay=%d %s", got.Code, got.Body.String())
 	}
@@ -255,6 +284,7 @@ func TestRunAPIWakeFollowsDurableCreateAndStopCommitOnly(t *testing.T) {
 			t.Errorf("wake could not observe committed run: runs=%d error=%v", len(runs), err)
 		}
 	}
+	fixture.rebuildCommands(t)
 	if got := fixture.request(http.MethodPost, PathPrefix, strings.Replace(validCreateBody("Work"), "owner/repository", "owner/other", 1), "invalid"); got.Code != http.StatusBadRequest || wakes.Load() != 0 {
 		t.Fatalf("invalid create status=%d wakes=%d", got.Code, wakes.Load())
 	}
@@ -275,6 +305,7 @@ func TestRunAPIWakeFollowsDurableCreateAndStopCommitOnly(t *testing.T) {
 			t.Errorf("stop wake could not observe committed state: run=%+v error=%v", run, err)
 		}
 	}
+	fixture.rebuildCommands(t)
 	stopPath := PathPrefix + "/" + string(response.RunID) + "/stop"
 	if got := fixture.request(http.MethodPost, stopPath, `{"not":"empty"}`, "bad-stop"); got.Code != http.StatusBadRequest || wakes.Load() != 1 {
 		t.Fatalf("invalid stop status=%d wakes=%d", got.Code, wakes.Load())
@@ -512,7 +543,7 @@ func (f *apiFixture) buildHandler(t *testing.T, available string) *Handler {
 	if available == PluginOpenCodeProfile {
 		backgroundImage = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	}
-	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), AvailableProfile: available, Store: f.store, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, RetentionVerifier: f.retained, Now: func() time.Time { return f.now }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", BudgetSnapshot: json.RawMessage(`{"turns":10}`), SealPolicyVersion: "fern.background-user-seal.v1"})
+	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), AvailableProfile: available, Store: f.store, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, RetentionVerifier: f.retained, Now: func() time.Time { return f.now }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", SealPolicyVersion: "fern.background-user-seal.v1"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -16,8 +16,8 @@
       "additionalProperties": false,
       "required": ["task_store", "control_state", "github_app_credentials"],
       "properties": {
-        "task_store": {"const": 1},
-        "control_state": {"const": 1},
+        "task_store": {"const": 3},
+        "control_state": {"const": 2},
         "github_app_credentials": {"const": 1}
       }
     },

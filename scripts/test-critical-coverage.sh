@@ -9,12 +9,13 @@ PROFILE="$RUN_ROOT/coverage.out"
 FUNCTIONS="$RUN_ROOT/functions.txt"
 MODULE=github.com/nebler/fern
 PACKAGES=(
+  internal/run
+  internal/runcommand
+  internal/backgroundroute
+  internal/backgroundruncoord
   internal/taskenvdocker
   internal/taskartifact
   internal/runapi
-  internal/resultapi
-  internal/taskverification
-  internal/taskpublicationcoord
   internal/taskstore
 )
 
@@ -51,13 +52,14 @@ check_function() {
   printf 'critical function: %-39s %5s%% (floor %s%%)\n' "$file.$symbol" "$coverage" "$floor"
 }
 
+check_package internal/run 90
+check_package internal/runcommand 80
+check_package internal/backgroundroute 75
+check_package internal/backgroundruncoord 28
 check_package internal/taskenvdocker 72
 check_package internal/taskartifact 70
 check_package internal/runapi 68
-check_package internal/resultapi 74
-check_package internal/taskverification 72
-check_package internal/taskpublicationcoord 80
 check_package internal/taskstore 60
 
-check_function internal/taskverification/coordinator.go RunOnce 80
-check_function internal/taskpublicationcoord/coordinator.go RunOnce 85
+check_function internal/backgroundruncoord/coordinator.go supervise 95
+check_function internal/backgroundruncoord/coordinator.go RunOnce 85

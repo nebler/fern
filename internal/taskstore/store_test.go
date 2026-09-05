@@ -202,9 +202,9 @@ func TestAttemptIdentityAndSequenceConstraints(t *testing.T) {
 	_, err := s.db.Exec(`INSERT INTO attempts(
 id,task_id,workspace_id,sequence,state,opencode_session_id,opencode_message_id,prompt_sha256,base_sha,
 image_digest,opencode_protocol,execution_contract_version,agent,model_provider,model,
-budget_snapshot,deadline,revision,created_at,updated_at)
+deadline,revision,created_at,updated_at)
 SELECT ?,task_id,workspace_id,sequence,state,?,?,prompt_sha256,base_sha,image_digest,opencode_protocol,
-execution_contract_version,agent,model_provider,model,budget_snapshot,deadline,revision,created_at,updated_at
+execution_contract_version,agent,model_provider,model,deadline,revision,created_at,updated_at
 FROM attempts WHERE id=?`, testAttemptID(33), testSessionID(33), testMessageID(33), first.AttemptID)
 	if err == nil {
 		t.Fatal("duplicate task attempt sequence was accepted")
@@ -290,7 +290,6 @@ func TestAdmissionRejectsMalformedAttemptInputs(t *testing.T) {
 		{"agent", func(p *AdmitBackgroundRunParams) { p.Agent = "" }},
 		{"provider", func(p *AdmitBackgroundRunParams) { p.ModelProvider = "provider\nunsafe" }},
 		{"model", func(p *AdmitBackgroundRunParams) { p.Model = string(make([]byte, 257)) }},
-		{"budget", func(p *AdmitBackgroundRunParams) { p.BudgetSnapshot = []byte(`{"broken"`) }},
 		{"deadline", func(p *AdmitBackgroundRunParams) { p.Deadline = p.AcceptedAt }},
 	}
 	for i, tt := range tests {
@@ -313,7 +312,7 @@ func TestMigrationDriftAndUnknownVersionFailClosed(t *testing.T) {
 			t.Fatal(err)
 		}
 		raw := openRaw(t, path)
-		if _, err := raw.Exec(`UPDATE schema_migrations SET checksum=? WHERE version=1`, fmt.Sprintf("%064d", 1)); err != nil {
+		if _, err := raw.Exec(`UPDATE schema_migrations SET checksum=? WHERE version=?`, fmt.Sprintf("%064d", 1), CurrentSchemaVersion()); err != nil {
 			t.Fatal(err)
 		}
 		_ = raw.Close()
@@ -539,7 +538,7 @@ func testAdmission(n int, key, prompt string) AdmitBackgroundRunParams {
 		Title: "Task title", Prompt: prompt, RepositoryID: 987654321, BaseRef: "main",
 		BaseSHA: task.GitOID("0123456789abcdef0123456789abcdef01234567"), ObjectFormat: "sha1",
 		ExecutionContractVersion: "exec-v1", Agent: "build", ModelProvider: "provider", Model: "model-1",
-		BudgetSnapshot: []byte(`{"maxTokens":4096}`), Deadline: testTime.Add(time.Hour),
+		Deadline:           testTime.Add(time.Hour),
 		APIContractVersion: "v1", AcceptedAt: testTime,
 	}
 	compact := strings.ReplaceAll(strings.TrimPrefix(string(params.TaskID), "tsk_"), "-", "")

@@ -1,4 +1,4 @@
 // Package task defines the dependency-free domain contract for Fern durable
-// tasks. It deliberately contains no persistence, transport, ID generation, or
-// external-authority logic.
+// tasks, including secure ID generation. It contains no persistence, transport,
+// or external-authority logic.
 package task

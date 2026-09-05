@@ -7,11 +7,15 @@ The primary submission interface is the `@fern/opencode` plugin. It submits a
 clean local Git revision to Fern, follows the run, stops it, or explicitly seals
 its work. Operators use `fern runs` and `fern attach` to connect the normal
 OpenCode TUI to the exact live server and session. Fern owns the durable
-receipt, runtime identity, artifact, verification record, and GitHub App
-publication journal.
+receipt, runtime identity, retained artifact, and GitHub App token broker.
+The agent owns Git commits, pushes, and pull requests inside its disposable run.
 
 Fern does not maintain a persistent coding workspace and does not proxy a
 general-purpose OpenCode server.
+
+For implementation details, start with [the architecture](ARCHITECTURE.md) and
+the [Go package guide](docs/go-packages.md). The guide links every package README,
+the naming/maintainability review, and reproducible local performance results.
 
 ## Lifecycle
 
@@ -21,17 +25,25 @@ plugin create
     -> isolated clone + volume + container
     -> exact OpenCode session + prompt
     -> working / needs_you
+    -> agent commits, pushes, and opens a PR if requested
     -> user seal
     -> stop exact writer
     -> immutable Git bundle in local CAS
     -> remove route, container, volume, clone
-    -> optional verification
-    -> optional GitHub App draft PR
 ```
 
 Every run is bound to an exact repository ID, remote, base commit, image ID,
 execution profile, environment digest, session ID, message ID, and runtime
 epoch. Capacity is intentionally one run at a time.
+
+To publish work, include it in the goal or task, for example: “Implement the
+change, run the tests, commit it, push a branch, and use `gh pr create --draft`
+to open a pull request.” Fern supplies a repository-scoped, short-lived GitHub
+App installation token to the run and refreshes it while the run is active.
+The App private key stays on the host; it is never placed in the container.
+Git and `gh` use the run's credential helpers. There is no host publication
+coordinator or publication API, and Fern does not guarantee exactly-once PR
+creation. Sealing retains the Git result; it does not publish it.
 
 ## Requirements
 
@@ -81,6 +93,11 @@ source profile is
 `source-39fb919a054190498f6d5b7985bde231f93ad7a6`. Image IDs are
 architecture- and build-specific, so `init` requires the exact ID captured by
 qualification on that host.
+
+Rebuild and requalify the image even if you already have that published source
+tag: the run now requires the Git/`gh` credential helpers included by the current
+image build. Qualification requires the image label `ai.fern.runtime.spec="10"`;
+older images are not supported. Record the newly built image ID in configuration.
 
 Publish only the remote listener and live-run listener through a private TLS
 edge. Never publish the operator listener. The remote route must exist before
@@ -155,14 +172,13 @@ filesystem ownership.
 
 Fern keeps:
 
-- taskstore schema 1 records, receipts, claims, and actor snapshots;
+- taskstore schema 3 records, receipts, claims, and actor snapshots;
 - paired-device and plugin authorization digests;
 - GitHub App credentials;
 - retained artifact CAS objects and materialized-result authority;
-- verification and publication evidence;
 - the host key used to identify disposable Docker resources.
 
-Run clones, artifact work directories, publication checkouts, containers, and
+Run clones, artifact work directories, containers, and
 volumes are disposable. This pre-release schema reset does not support older
 development taskstore databases; delete and recreate them.
 
@@ -179,6 +195,7 @@ fern credentials import --identity identity.txt --input credentials.age
 The process must be stopped because these commands acquire Fern's repository
 lease. Backups include configuration, repository, durable state, retained CAS,
 and the disposable-runtime host key; they exclude run clones and scratch work.
+Legacy host-publication checkouts are still excluded from backups.
 Detected credentials are segregated into a separate backup artifact that must
 be protected as secret material. The dedicated `fern credentials` export is
 age-encrypted.
@@ -193,12 +210,8 @@ fern runs [--json]
 fern attach [run-id]
 fern backup create|restore|rollback
 fern credentials export|import|rotate
-fern debug quarantine-publications
 fern version
 ```
-
-`debug quarantine-publications` dispositions unresolved publication records
-under explicit operator control.
 
 ## Development
 

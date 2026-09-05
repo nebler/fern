@@ -59,18 +59,17 @@ var commandUsageSuffix = map[string]string{"attach": " [run-id]"}
 // a plain literal because deriving it from the command registry would create a
 // package initialization cycle.
 var commandExamples = map[string]string{
-	"runs":                          "fern runs --endpoint https://fern-host.example.ts.net",
-	"attach":                        "fern attach --endpoint https://fern-host.example.ts.net tsk_...",
-	"init":                          "fern init --repo /path/to/repository",
-	"doctor":                        "fern doctor --phone",
-	"up":                            "fern up --config /etc/fern/fern.yaml",
-	"debug quarantine-publications": "fern debug quarantine-publications --name demo",
-	"backup create":                 "fern backup create --output /srv/backups/fern-generation",
-	"backup restore":                "fern backup restore --backup /srv/backups/fern-generation",
-	"backup rollback":               "fern backup rollback --recovery-dir /var/lib/fern/recovery",
-	"credentials export":            "fern credentials export --recipient age1... --output /srv/backups/credentials.age",
-	"credentials import":            "fern credentials import --identity /secure/identity.txt --input credentials.age",
-	"credentials rotate":            "fern credentials rotate --identity /secure/identity.txt --input next.age --acknowledge-external-revocation",
+	"runs":               "fern runs --endpoint https://fern-host.example.ts.net",
+	"attach":             "fern attach --endpoint https://fern-host.example.ts.net tsk_...",
+	"init":               "fern init --repo /path/to/repository",
+	"doctor":             "fern doctor --phone",
+	"up":                 "fern up --config /etc/fern/fern.yaml",
+	"backup create":      "fern backup create --output /srv/backups/fern-generation",
+	"backup restore":     "fern backup restore --backup /srv/backups/fern-generation",
+	"backup rollback":    "fern backup rollback --recovery-dir /var/lib/fern/recovery",
+	"credentials export": "fern credentials export --recipient age1... --output /srv/backups/credentials.age",
+	"credentials import": "fern credentials import --identity /secure/identity.txt --input credentials.age",
+	"credentials rotate": "fern credentials rotate --identity /secure/identity.txt --input next.age --acknowledge-external-revocation",
 }
 
 func parseFlags(fs *flag.FlagSet, args []string) error {

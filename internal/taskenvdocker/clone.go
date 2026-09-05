@@ -267,17 +267,6 @@ func (p *Provider) readCloneMarker(run taskstore.BackgroundRun, digest string) (
 }
 
 func (p *Provider) readCloneMarkerSnapshot(run taskstore.BackgroundRun, digest string) (cloneMarkerSnapshot, error) {
-	snapshot, err := p.readCloneMarkerSnapshotUnbound(run)
-	if err != nil {
-		return cloneMarkerSnapshot{}, err
-	}
-	if snapshot.marker.Spec != digest {
-		return cloneMarkerSnapshot{}, errors.New("private clone authority resource digest does not match")
-	}
-	return snapshot, nil
-}
-
-func (p *Provider) readCloneMarkerSnapshotUnbound(run taskstore.BackgroundRun) (cloneMarkerSnapshot, error) {
 	path := p.cloneMarkerPath(run)
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 || info.Size() > maxEvidenceBytes {
@@ -295,7 +284,7 @@ func (p *Provider) readCloneMarkerSnapshotUnbound(run taskstore.BackgroundRun) (
 	if err := json.Unmarshal(data, &marker); err != nil || marker.Device == 0 || marker.Inode == 0 {
 		return cloneMarkerSnapshot{}, errors.New("private clone authority is malformed")
 	}
-	want, _ := json.Marshal(expectedCloneMarker(run, marker.Spec, marker.Device, marker.Inode))
+	want, _ := json.Marshal(expectedCloneMarker(run, digest, marker.Device, marker.Inode))
 	want = append(want, '\n')
 	if !bytes.Equal(data, want) {
 		return cloneMarkerSnapshot{}, errors.New("private clone authority does not match")
@@ -898,7 +887,7 @@ func (p *Provider) ObserveUsage(ctx context.Context, run taskstore.BackgroundRun
 }
 
 // RemoveClone removes only an exactly attested clone after the exact runtime is absent.
-func (p *Provider) RemoveClone(ctx context.Context, run taskstore.BackgroundRun, authority CleanupAuthority) (_ Observation, resultErr error) {
+func (p *Provider) RemoveClone(ctx context.Context, run taskstore.BackgroundRun, authority WriterFence) (_ Observation, resultErr error) {
 	digest, err := p.cleanupDigest(run)
 	if err != nil {
 		return Observation{}, err

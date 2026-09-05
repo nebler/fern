@@ -8,32 +8,28 @@ import (
 )
 
 // Identity types for Fern domain entities. Fern IDs (WorkspaceID through
-// PublicationOperationID) are prefixed lowercase UUIDv7 strings, validated by
+// MaterializationID) are prefixed lowercase UUIDv7 strings, validated by
 // their Parse functions; Generator mints them. GitHub-derived numeric types
 // are bounded by SQLite's signed integer range via parsePositiveUint.
 // OpenCode IDs are prefixed 128-bit random hex strings minted outside Fern's
 // clock-ordering discipline.
 type (
-	WorkspaceID            string
-	TaskID                 string
-	AttemptID              string
-	ReceiptID              string
-	EventID                string
-	ApprovalID             string
-	SealRequestID          string
-	ResultID               string
-	ArtifactExportID       string
-	RetainedArtifactID     string
-	MaterializationID      string
-	VerificationID         string
-	PublicationID          string
-	PublicationOperationID string
-	RepositoryID           uint64
-	InstallationID         uint64
-	PullRequestNumber      uint64
-	GitOID                 string
-	OpenCodeSessionID      string
-	OpenCodeMessageID      string
+	WorkspaceID        string
+	TaskID             string
+	AttemptID          string
+	ReceiptID          string
+	EventID            string
+	ApprovalID         string
+	SealRequestID      string
+	ResultID           string
+	ArtifactExportID   string
+	RetainedArtifactID string
+	MaterializationID  string
+	RepositoryID       uint64
+	InstallationID     uint64
+	GitOID             string
+	OpenCodeSessionID  string
+	OpenCodeMessageID  string
 )
 
 const maxSQLiteInteger = uint64(1<<63 - 1)
@@ -104,25 +100,6 @@ func ParseMaterializationID(v string) (MaterializationID, error) {
 	}
 	return MaterializationID(v), nil
 }
-func ParseVerificationID(v string) (VerificationID, error) {
-	if err := validateFernID(v, "ver_"); err != nil {
-		return "", err
-	}
-	return VerificationID(v), nil
-}
-func ParsePublicationID(v string) (PublicationID, error) {
-	if err := validateFernID(v, "pub_"); err != nil {
-		return "", err
-	}
-	return PublicationID(v), nil
-}
-func ParsePublicationOperationID(v string) (PublicationOperationID, error) {
-	if err := validateFernID(v, "op_"); err != nil {
-		return "", err
-	}
-	return PublicationOperationID(v), nil
-}
-
 func validateFernID(v, prefix string) error {
 	if len(v) > 64 || !strings.HasPrefix(v, prefix) {
 		return fmt.Errorf("%w: expected %s UUIDv7", ErrInvalidID, prefix)
@@ -156,14 +133,6 @@ func ParseInstallationID(v string) (InstallationID, error) {
 	}
 	return InstallationID(n), nil
 }
-func ParsePullRequestNumber(v string) (PullRequestNumber, error) {
-	n, err := parsePositiveUint(v)
-	if err != nil {
-		return 0, fmt.Errorf("%w: pull request number", ErrInvalidID)
-	}
-	return PullRequestNumber(n), nil
-}
-
 func parsePositiveUint(v string) (uint64, error) {
 	if v == "" || v[0] == '0' {
 		return 0, ErrInvalidID

@@ -4,7 +4,6 @@ package runapi
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,6 +21,8 @@ import (
 
 	"github.com/nebler/fern/internal/jsoncanon"
 	"github.com/nebler/fern/internal/pluginauth"
+	runidentity "github.com/nebler/fern/internal/run"
+	"github.com/nebler/fern/internal/runcommand"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 )
@@ -29,21 +30,15 @@ import (
 const (
 	PathPrefix             = "/fern/api/runs"
 	PluginOpenCodeProfile  = taskstore.BackgroundRunSourceProfile
-	APIContractVersion     = "fern.background-run.v1"
+	APIContractVersion     = runcommand.APIContractVersion
 	maxCreateBodyBytes     = 32 << 10
 	maxEmptyBodyBytes      = 16
-	maxInstructionRunes    = 4000
 	backgroundRunListLimit = 100
 )
 
 type Store interface {
-	AdmitBackgroundRun(context.Context, taskstore.AdmitBackgroundRunParams) (taskstore.Admission, error)
-	FindReceiptByIdempotency(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error)
-	GetBackgroundRun(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRun, error)
+	runcommand.Store
 	ListBackgroundRuns(context.Context, task.WorkspaceID, task.ActorSnapshot, int) ([]taskstore.BackgroundRun, error)
-	StopBackgroundRun(context.Context, taskstore.StopBackgroundRunParams) (taskstore.BackgroundRunStop, error)
-	SealBackgroundRun(context.Context, taskstore.SealBackgroundRunParams) (taskstore.BackgroundRunSealAdmission, error)
-	GetBackgroundRunOwners(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.Task, taskstore.Attempt, error)
 	GetBackgroundRunExport(context.Context, task.ArtifactExportID) (taskstore.BackgroundRunExport, error)
 	GetBackgroundRunResult(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error)
 }
@@ -52,9 +47,7 @@ var _ Store = (*taskstore.Store)(nil)
 
 // BaseVerifier proves an exact object is a commit reachable from the
 // configured checkout's HEAD or origin tracking refs. It performs no mutation.
-type BaseVerifier interface {
-	Verify(context.Context, task.GitOID) error
-}
+type BaseVerifier = runcommand.BaseVerifier
 
 type ActorResolver func(context.Context) (task.ActorSnapshot, error)
 
@@ -78,19 +71,20 @@ type Config struct {
 	Agent                       string
 	ModelProvider               string
 	Model                       string
-	BudgetSnapshot              json.RawMessage
 	Wake                        func()
 	RetentionVerifier           RetentionVerifier
 	SealPolicyVersion           string
 }
 
-type Handler struct{ config Config }
+type Handler struct {
+	config   Config
+	commands *runcommand.Service
+}
 
 func New(config Config) (*Handler, error) {
 	if config.Store == nil || config.Generator == nil || config.ActorResolver == nil || config.BaseVerifier == nil || config.RetentionVerifier == nil || config.Now == nil ||
 		config.AttemptTimeout <= 0 || config.RepositoryID == 0 || config.RepositoryRemote == "" ||
-		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.BackgroundEnvironmentSHA256 == ([32]byte{}) ||
-		len(config.BudgetSnapshot) == 0 || !json.Valid(config.BudgetSnapshot) {
+		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.BackgroundEnvironmentSHA256 == ([32]byte{}) {
 		return nil, errors.New("valid background run API configuration is required")
 	}
 	if !validText(config.SealPolicyVersion, 1, 128) {
@@ -106,8 +100,22 @@ func New(config Config) (*Handler, error) {
 		(config.AvailableProfile != "" && config.AvailableProfile != PluginOpenCodeProfile) {
 		return nil, errors.New("qualified background image and profile must be configured together")
 	}
-	config.BudgetSnapshot = append(json.RawMessage(nil), config.BudgetSnapshot...)
-	return &Handler{config: config}, nil
+	commands, err := newCommands(config)
+	if err != nil {
+		return nil, err
+	}
+	return &Handler{config: config, commands: commands}, nil
+}
+
+func newCommands(config Config) (*runcommand.Service, error) {
+	return runcommand.New(runcommand.Config{
+		WorkspaceID: config.WorkspaceID, RepositoryID: config.RepositoryID, RepositoryRemote: config.RepositoryRemote,
+		BackgroundImageIdentity: config.BackgroundImageIdentity, BackgroundEnvironmentSHA256: config.BackgroundEnvironmentSHA256,
+		AvailableProfile: config.AvailableProfile, Store: config.Store, Generator: config.Generator,
+		BaseVerifier: config.BaseVerifier, Now: config.Now, AttemptTimeout: config.AttemptTimeout,
+		Agent: config.Agent, ModelProvider: config.ModelProvider, Model: config.Model,
+		Wake: config.Wake, SealPolicyVersion: config.SealPolicyVersion,
+	})
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -194,14 +202,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type sealProjection struct {
-	RunID         task.TaskID         `json:"run_id"`
-	State         BackgroundSealState `json:"state"`
-	ResultPhase   string              `json:"result_phase"`
-	SealRequestID task.SealRequestID  `json:"seal_request_id"`
-	Committed     bool                `json:"committed"`
+	RunID         task.TaskID        `json:"run_id"`
+	State         runidentity.State  `json:"state"`
+	ResultPhase   string             `json:"result_phase"`
+	SealRequestID task.SealRequestID `json:"seal_request_id"`
+	Committed     bool               `json:"committed"`
 }
-
-type BackgroundSealState string
 
 func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
 	if !validateEmptyMutation(w, r) {
@@ -211,34 +217,7 @@ func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorS
 	if !ok {
 		return
 	}
-	claim := task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: h.config.WorkspaceID, CommandKind: taskstore.SealBackgroundRunCommand},
-		Key: key, RequestHash: commandHash(taskstore.SealBackgroundRunCommand, struct {
-			RunID task.TaskID `json:"run_id"`
-		}{id}), Actor: actor}
-	run, err := h.config.Store.GetBackgroundRun(r.Context(), h.config.WorkspaceID, id, actor)
-	if err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	owner, attempt, err := h.config.Store.GetBackgroundRunOwners(r.Context(), h.config.WorkspaceID, id, actor)
-	if err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	ids, err := h.config.Generator.GenerateBackgroundSealIDs()
-	if err != nil {
-		writeError(w, 500, "internal_error", "The run could not be sealed.")
-		return
-	}
-	now := h.config.Now().UTC().Truncate(time.Millisecond)
-	admission, err := h.config.Store.SealBackgroundRun(r.Context(), taskstore.SealBackgroundRunParams{
-		WorkspaceID: h.config.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRunRevision: run.Revision, ExpectedTaskRevision: owner.Revision, ExpectedAttemptRevision: attempt.Revision,
-		SealRequestID: ids.SealRequestID, ReceiptID: ids.ReceiptID, ExportID: ids.ArtifactExportID,
-		ArtifactID: ids.RetainedArtifactID, MaterializationID: ids.MaterializationID, ResultID: ids.ResultID,
-		ResultEventID: ids.ResultEventID, TaskEventID: ids.TaskEventID, Claim: claim, CommitEpochSeconds: now.Unix(),
-		PolicyVersion: h.config.SealPolicyVersion, APIContractVersion: APIContractVersion, AcceptedAt: now,
-	})
+	admission, err := h.commands.Seal(r.Context(), actor, key, id)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -246,14 +225,45 @@ func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorS
 	if admission.Replayed {
 		w.Header().Set("Idempotency-Replayed", "true")
 	}
-	state, phase := BackgroundSealState("canceling"), "seal_requested"
-	if admission.Run.State == taskstore.BackgroundRunResultReady {
-		state, phase = "result_ready", "ready"
-	}
-	if !admission.Replayed && h.config.Wake != nil {
-		h.config.Wake()
-	}
-	writeJSON(w, http.StatusAccepted, sealProjection{admission.Run.TaskID, state, phase, admission.Request.ID, true})
+	writeJSON(w, http.StatusAccepted, sealProjection{admission.RunID, admission.State, admission.ResultPhase, admission.SealRequestID, admission.Committed})
+}
+
+type resultResponse struct {
+	RunID     task.TaskID              `json:"run_id"`
+	State     string                   `json:"state"`
+	Result    retainedResultResponse   `json:"result"`
+	Artifact  retainedArtifactResponse `json:"artifact"`
+	Retention retentionResponse        `json:"retention"`
+	Cleanup   cleanupResponse          `json:"cleanup"`
+}
+
+type retainedResultResponse struct {
+	ID         task.ResultID      `json:"id"`
+	Outcome    task.ResultOutcome `json:"outcome"`
+	Repository string             `json:"repository"`
+	Base       task.GitOID        `json:"base_oid"`
+	Commit     task.GitOID        `json:"result_commit"`
+	Tree       task.GitOID        `json:"tree_oid"`
+	Entries    int                `json:"manifest_entries"`
+	Manifest   string             `json:"manifest_sha256"`
+}
+
+type retainedArtifactResponse struct {
+	ID         task.RetainedArtifactID `json:"id"`
+	Format     string                  `json:"format"`
+	SHA        string                  `json:"sha256"`
+	BundleSHA  string                  `json:"bundle_sha256"`
+	BundleSize int64                   `json:"bundle_size"`
+	Manifest   string                  `json:"manifest_sha256"`
+}
+
+type retentionResponse struct {
+	Verified        bool `json:"verified"`
+	Reconstructable bool `json:"reconstructable"`
+}
+
+type cleanupResponse struct {
+	Complete bool `json:"complete"`
 }
 
 func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
@@ -283,62 +293,13 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 	}
 	retained := h.config.RetentionVerifier.Verify(r.Context(), projection.Result) == nil
 	digest := func(value [32]byte) string { return hex.EncodeToString(value[:]) }
-	writeJSON(w, http.StatusOK, struct {
-		RunID  task.TaskID `json:"run_id"`
-		State  string      `json:"state"`
-		Result struct {
-			ID         task.ResultID      `json:"id"`
-			Outcome    task.ResultOutcome `json:"outcome"`
-			Repository string             `json:"repository"`
-			Base       task.GitOID        `json:"base_oid"`
-			Commit     task.GitOID        `json:"result_commit"`
-			Tree       task.GitOID        `json:"tree_oid"`
-			Entries    int                `json:"manifest_entries"`
-			Manifest   string             `json:"manifest_sha256"`
-		} `json:"result"`
-		Artifact struct {
-			ID         task.RetainedArtifactID `json:"id"`
-			Format     string                  `json:"format"`
-			SHA        string                  `json:"sha256"`
-			BundleSHA  string                  `json:"bundle_sha256"`
-			BundleSize int64                   `json:"bundle_size"`
-			Manifest   string                  `json:"manifest_sha256"`
-		} `json:"artifact"`
-		Retention struct {
-			Verified        bool `json:"verified"`
-			Reconstructable bool `json:"reconstructable"`
-		} `json:"retention"`
-		Cleanup struct {
-			Complete bool `json:"complete"`
-		} `json:"cleanup"`
-	}{RunID: id, State: "result_ready",
-		Result: struct {
-			ID         task.ResultID      `json:"id"`
-			Outcome    task.ResultOutcome `json:"outcome"`
-			Repository string             `json:"repository"`
-			Base       task.GitOID        `json:"base_oid"`
-			Commit     task.GitOID        `json:"result_commit"`
-			Tree       task.GitOID        `json:"tree_oid"`
-			Entries    int                `json:"manifest_entries"`
-			Manifest   string             `json:"manifest_sha256"`
-		}{
+	writeJSON(w, http.StatusOK, resultResponse{RunID: id, State: "result_ready",
+		Result: retainedResultResponse{
 			projection.Result.ID, projection.Result.Outcome, run.RepositoryRemote, projection.Result.BaseSHA, projection.Result.ResultCommit, projection.Result.TreeOID, projection.Result.ManifestEntries, digest(projection.Result.ManifestSHA256)},
-		Artifact: struct {
-			ID         task.RetainedArtifactID `json:"id"`
-			Format     string                  `json:"format"`
-			SHA        string                  `json:"sha256"`
-			BundleSHA  string                  `json:"bundle_sha256"`
-			BundleSize int64                   `json:"bundle_size"`
-			Manifest   string                  `json:"manifest_sha256"`
-		}{
+		Artifact: retainedArtifactResponse{
 			projection.Artifact.ID, "git_bundle_v1", digest(projection.Artifact.ManifestSHA256), digest(projection.Artifact.BundleSHA256), projection.Artifact.BundleBytes, digest(projection.Artifact.ManifestSHA256)},
-		Retention: struct {
-			Verified        bool `json:"verified"`
-			Reconstructable bool `json:"reconstructable"`
-		}{retained, retained},
-		Cleanup: struct {
-			Complete bool `json:"complete"`
-		}{run.EffectPhase == taskstore.BackgroundRunEffectCleanupComplete},
+		Retention: retentionResponse{retained, retained},
+		Cleanup:   cleanupResponse{run.EffectPhase == taskstore.BackgroundRunEffectCleanupComplete},
 	})
 }
 
@@ -370,6 +331,16 @@ type createInput struct {
 	Profile     string  `json:"profile"`
 }
 
+type createResponse struct {
+	RunID     task.TaskID `json:"run_id"`
+	Committed bool        `json:"committed"`
+}
+
+type stopResponse struct {
+	RunID task.TaskID       `json:"run_id"`
+	State runidentity.State `json:"state"`
+}
+
 func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot) {
 	if !noQuery(r) || !exactJSON(r) {
 		writeError(w, http.StatusBadRequest, "invalid_request", "The request is not valid.")
@@ -380,61 +351,12 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.Acto
 		return
 	}
 	var input createInput
-	if !decodeStrict(w, r, maxCreateBodyBytes, &input) || input.Repository != h.config.RepositoryRemote ||
-		!validInstruction(input.Instruction) ||
-		input.Profile != PluginOpenCodeProfile || (input.Branch != nil && !validText(*input.Branch, 1, 255)) {
-		writeError(w, http.StatusBadRequest, "invalid_run", "Repository, base, branch, instruction, or profile is not valid for this Fern workspace.")
+	if !decodeStrict(w, r, maxCreateBodyBytes, &input) {
 		return
 	}
-	base, err := task.ParseGitOID(input.BaseOID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_base", "base_oid must be an exact lowercase SHA-1 commit identity.")
-		return
-	}
-	requestHash := createHash(input)
-	claim := task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: h.config.WorkspaceID, CommandKind: taskstore.CreateBackgroundRunCommand}, Key: key, RequestHash: requestHash, Actor: actor}
-	if h.replayCreate(w, r, claim) {
-		return
-	}
-	if h.config.AvailableProfile != PluginOpenCodeProfile {
-		writeError(w, http.StatusServiceUnavailable, "profile_unavailable",
-			fmt.Sprintf("Profile %s requires a configured image qualified for exact source commit 39fb919a054190498f6d5b7985bde231f93ad7a6.", PluginOpenCodeProfile))
-		return
-	}
-	if err := h.config.BaseVerifier.Verify(r.Context(), base); err != nil {
-		writeError(w, http.StatusUnprocessableEntity, "base_unavailable", "base_oid is not an exact commit reachable from an allowed configured-repository ref.")
-		return
-	}
-	ids, err := h.config.Generator.GenerateAdmissionIDs()
-	if err != nil {
-		writeError(w, 500, "internal_error", "The run could not be committed.")
-		return
-	}
-	now := h.config.Now().UTC().Truncate(time.Millisecond)
-	if now.IsZero() || now.UnixMilli() < 0 {
-		writeError(w, 500, "internal_error", "The run could not be committed.")
-		return
-	}
-	branch := ""
-	if input.Branch != nil {
-		branch = *input.Branch
-	}
-	profileHash := sha256.Sum256([]byte(input.Profile))
-	compact := strings.ReplaceAll(strings.TrimPrefix(string(ids.TaskID), "tsk_"), "-", "")
-	intent := &taskstore.BackgroundRunIntent{RepositoryRemote: input.Repository, Branch: branch,
-		InstructionSHA256: sha256.Sum256([]byte(input.Instruction)), Profile: input.Profile, ProfileSHA256: profileHash,
-		EnvironmentSHA256: h.config.BackgroundEnvironmentSHA256,
-		ImageIdentity:     h.config.BackgroundImageIdentity,
-		CloneIdentity:     "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode",
-		ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint"}
-	admission, err := h.config.Store.AdmitBackgroundRun(r.Context(), taskstore.AdmitBackgroundRunParams{
-		TaskID: ids.TaskID, AttemptID: ids.AttemptID, ReceiptID: ids.ReceiptID, TaskEventID: ids.TaskEventID,
-		AttemptEventID: ids.AttemptEventID, OpenCodeSessionID: ids.OpenCodeSessionID, OpenCodeMessageID: ids.OpenCodeMessageID,
-		Claim: claim, Title: "Background Run", Prompt: input.Instruction, RepositoryID: h.config.RepositoryID,
-		BaseRef: displayBase(input), BaseSHA: base, ObjectFormat: "sha1", ExecutionContractVersion: APIContractVersion,
-		Agent: h.config.Agent, ModelProvider: h.config.ModelProvider, Model: h.config.Model,
-		BudgetSnapshot: h.config.BudgetSnapshot, Deadline: now.Add(h.config.AttemptTimeout), APIContractVersion: APIContractVersion,
-		AcceptedAt: now, BackgroundRun: intent,
+	admission, err := h.commands.Create(r.Context(), actor, key, runcommand.CreateInput{
+		Repository: input.Repository, BaseOID: input.BaseOID, Branch: input.Branch,
+		Instruction: input.Instruction, Profile: input.Profile,
 	})
 	if err != nil {
 		writeStoreError(w, err)
@@ -443,48 +365,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.Acto
 	if admission.Replayed {
 		w.Header().Set("Idempotency-Replayed", "true")
 	}
-	if h.config.Wake != nil {
-		h.config.Wake()
-	}
-	writeJSON(w, http.StatusAccepted, struct {
-		RunID     task.TaskID `json:"run_id"`
-		Committed bool        `json:"committed"`
-	}{admission.Task.ID, true})
-}
-
-func (h *Handler) replayCreate(w http.ResponseWriter, r *http.Request, claim task.IdempotencyClaim) bool {
-	receipt, found, err := h.config.Store.FindReceiptByIdempotency(r.Context(), h.config.WorkspaceID, taskstore.CreateBackgroundRunCommand, claim.Key)
-	if err != nil {
-		writeStoreError(w, err)
-		return true
-	}
-	if !found {
-		return false
-	}
-	disposition, err := task.ClassifyIdempotency(&task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: receipt.WorkspaceID, CommandKind: receipt.CommandKind}, Key: receipt.IdempotencyKey, RequestHash: receipt.RequestHash, Actor: receipt.Actor}, claim)
-	if err != nil {
-		writeError(w, 500, "internal_error", "The run could not be read.")
-		return true
-	}
-	if disposition == task.IdempotencyOwnerMismatch {
-		writeError(w, 404, "not_found", "The requested run was not found.")
-		return true
-	}
-	if disposition != task.IdempotencyReplay {
-		writeError(w, 409, "idempotency_conflict", "Idempotency-Key was already used for another request.")
-		return true
-	}
-	run, err := h.config.Store.GetBackgroundRun(r.Context(), h.config.WorkspaceID, receipt.TargetID, claim.Actor)
-	if err != nil {
-		writeStoreError(w, err)
-		return true
-	}
-	w.Header().Set("Idempotency-Replayed", "true")
-	writeJSON(w, http.StatusAccepted, struct {
-		RunID     task.TaskID `json:"run_id"`
-		Committed bool        `json:"committed"`
-	}{run.TaskID, true})
-	return true
+	writeJSON(w, http.StatusAccepted, createResponse{admission.RunID, admission.Committed})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot) {
@@ -527,32 +408,7 @@ func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor task.ActorS
 	if !ok {
 		return
 	}
-	claim := task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: h.config.WorkspaceID, CommandKind: taskstore.StopBackgroundRunCommand}, Key: key,
-		RequestHash: commandHash(taskstore.StopBackgroundRunCommand, struct {
-			RunID task.TaskID `json:"run_id"`
-		}{id}), Actor: actor}
-	if h.replayStop(w, r, id, claim) {
-		return
-	}
-	receiptID, err := h.config.Generator.ReceiptID()
-	if err != nil {
-		writeError(w, 500, "internal_error", "The run could not be stopped.")
-		return
-	}
-	attemptEventID, err := h.config.Generator.EventID()
-	if err != nil {
-		writeError(w, 500, "internal_error", "The run could not be stopped.")
-		return
-	}
-	taskEventID, err := h.config.Generator.EventID()
-	if err != nil {
-		writeError(w, 500, "internal_error", "The run could not be stopped.")
-		return
-	}
-	now := h.config.Now().UTC().Truncate(time.Millisecond)
-	result, err := h.config.Store.StopBackgroundRun(r.Context(), taskstore.StopBackgroundRunParams{WorkspaceID: h.config.WorkspaceID,
-		TaskID: id, ReceiptID: receiptID, AttemptEventID: attemptEventID, TaskEventID: taskEventID, Claim: claim,
-		APIContractVersion: APIContractVersion, StoppedAt: now})
+	result, err := h.commands.Stop(r.Context(), actor, key, id)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -560,81 +416,7 @@ func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor task.ActorS
 	if result.Replayed {
 		w.Header().Set("Idempotency-Replayed", "true")
 	}
-	if h.config.Wake != nil {
-		h.config.Wake()
-	}
-	writeJSON(w, http.StatusAccepted, struct {
-		RunID task.TaskID                  `json:"run_id"`
-		State taskstore.BackgroundRunState `json:"state"`
-	}{id, result.Run.State})
-}
-
-func (h *Handler) replayStop(w http.ResponseWriter, r *http.Request, id task.TaskID, claim task.IdempotencyClaim) bool {
-	receipt, found, err := h.config.Store.FindReceiptByIdempotency(r.Context(), h.config.WorkspaceID, taskstore.StopBackgroundRunCommand, claim.Key)
-	if err != nil {
-		writeStoreError(w, err)
-		return true
-	}
-	if !found {
-		return false
-	}
-	disposition, err := task.ClassifyIdempotency(&task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: receipt.WorkspaceID, CommandKind: receipt.CommandKind}, Key: receipt.IdempotencyKey, RequestHash: receipt.RequestHash, Actor: receipt.Actor}, claim)
-	if err != nil {
-		writeError(w, 500, "internal_error", "The run could not be stopped.")
-		return true
-	}
-	if disposition == task.IdempotencyOwnerMismatch {
-		writeError(w, 404, "not_found", "The requested run was not found.")
-		return true
-	}
-	if disposition != task.IdempotencyReplay || receipt.TargetID != id {
-		writeError(w, 409, "idempotency_conflict", "Idempotency-Key was already used for another request.")
-		return true
-	}
-	run, err := h.config.Store.GetBackgroundRun(r.Context(), h.config.WorkspaceID, id, claim.Actor)
-	if err != nil || run.StopReceiptID != receipt.ID {
-		if err != nil {
-			writeStoreError(w, err)
-		} else {
-			writeError(w, 500, "internal_error", "The run could not be stopped.")
-		}
-		return true
-	}
-	var committed struct {
-		RunID task.TaskID                  `json:"run_id"`
-		State taskstore.BackgroundRunState `json:"state"`
-	}
-	if json.Unmarshal(receipt.ResponseProjection, &committed) != nil || committed.RunID != id ||
-		(committed.State != taskstore.BackgroundRunFailed && committed.State != taskstore.BackgroundRunCanceling) {
-		writeError(w, 500, "internal_error", "The run could not be stopped.")
-		return true
-	}
-	w.Header().Set("Idempotency-Replayed", "true")
-	writeJSON(w, http.StatusAccepted, struct {
-		RunID task.TaskID                  `json:"run_id"`
-		State taskstore.BackgroundRunState `json:"state"`
-	}{id, committed.State})
-	return true
-}
-
-func (h *Handler) notReady(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID, mutation bool) {
-	if !noQuery(r) || (!mutation && !noBody(r)) {
-		writeError(w, 400, "invalid_query", "This run operation does not accept query parameters.")
-		return
-	}
-	if mutation {
-		if !validateEmptyMutation(w, r) {
-			return
-		}
-		if _, ok := idempotencyKey(w, r); !ok {
-			return
-		}
-	}
-	if _, err := h.config.Store.GetBackgroundRun(r.Context(), h.config.WorkspaceID, id, actor); err != nil {
-		writeStoreError(w, err)
-		return
-	}
-	writeError(w, http.StatusConflict, "not_ready", "The disposable Background Run environment is not available in this Fern build.")
+	writeJSON(w, http.StatusAccepted, stopResponse{result.RunID, result.State})
 }
 
 type runView struct {
@@ -648,21 +430,6 @@ type runView struct {
 func view(run taskstore.BackgroundRun) runView {
 	return runView{run.TaskID, run.State, run.RepositoryRemote, run.BaseOID, run.Branch}
 }
-func displayBase(input createInput) string {
-	if input.Branch != nil {
-		return *input.Branch
-	}
-	return input.BaseOID
-}
-
-func createHash(input createInput) task.RequestHash {
-	return commandHash(taskstore.CreateBackgroundRunCommand, input)
-}
-func commandHash(kind string, value any) task.RequestHash {
-	encoded, _ := json.Marshal(value)
-	return task.RequestHash(sha256.Sum256(append(append([]byte(kind), '\n'), encoded...)))
-}
-
 func decodeStrict(w http.ResponseWriter, r *http.Request, limit int64, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	payload, err := io.ReadAll(r.Body)
@@ -707,17 +474,6 @@ func validText(value string, min, max int) bool {
 	}
 	return true
 }
-func validInstruction(value string) bool {
-	if len(value) < 1 || len(value) > 16*1024 || utf8.RuneCountInString(value) > maxInstructionRunes || !utf8.ValidString(value) || strings.TrimSpace(value) == "" {
-		return false
-	}
-	for _, char := range value {
-		if unicode.IsControl(char) && char != '\n' && char != '\t' {
-			return false
-		}
-	}
-	return true
-}
 func validateEmptyMutation(w http.ResponseWriter, r *http.Request) bool {
 	if !noQuery(r) {
 		writeError(w, 400, "invalid_request", "This run operation does not accept query parameters.")
@@ -755,6 +511,16 @@ func methodNotAllowed(w http.ResponseWriter, method string) {
 }
 func writeStoreError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, runcommand.ErrInvalidCreate):
+		writeError(w, http.StatusBadRequest, "invalid_run", "Repository, base, branch, instruction, or profile is not valid for this Fern workspace.")
+	case errors.Is(err, runcommand.ErrInvalidBase):
+		writeError(w, http.StatusBadRequest, "invalid_base", "base_oid must be an exact lowercase SHA-1 commit identity.")
+	case errors.Is(err, runcommand.ErrProfileUnavailable):
+		writeError(w, http.StatusServiceUnavailable, "profile_unavailable", fmt.Sprintf("Profile %s requires a configured image qualified for exact source commit 39fb919a054190498f6d5b7985bde231f93ad7a6.", PluginOpenCodeProfile))
+	case errors.Is(err, runcommand.ErrBaseUnavailable):
+		writeError(w, http.StatusUnprocessableEntity, "base_unavailable", "base_oid is not an exact commit reachable from an allowed configured-repository ref.")
+	case errors.Is(err, runcommand.ErrReplayConflict):
+		writeError(w, http.StatusConflict, "idempotency_conflict", "Idempotency-Key was already used for another request.")
 	case errors.Is(err, taskstore.ErrNotFound):
 		writeError(w, 404, "not_found", "The requested run was not found.")
 	case errors.Is(err, taskstore.ErrIdempotencyConflict), errors.Is(err, taskstore.ErrInvalidState):

@@ -804,10 +804,10 @@ func TestExistingContainerFencesHostGitButNotFilesystemUsage(t *testing.T) {
 	}
 }
 
-func TestCleanupAuthorityAlgebraAndRenamedNeverCreatedFence(t *testing.T) {
+func TestWriterFenceAlgebraAndRenamedNeverCreatedFence(t *testing.T) {
 	t.Run("zero and mixed invalid", func(t *testing.T) {
 		provider, _, run := testProvider(t)
-		for _, authority := range []CleanupAuthority{{}, {NeverCreated: true, ContainerID: "unexpected"}, {ContainerID: "id", StartedAt: "time"}} {
+		for _, authority := range []WriterFence{{}, {kind: WriterFenceNeverCreated, containerID: "unexpected"}, {kind: WriterFenceStoppedRuntime, containerID: "id"}} {
 			if _, err := provider.RemoveClone(context.Background(), run, authority); err == nil {
 				t.Fatalf("invalid cleanup authority was accepted: %+v", authority)
 			}
@@ -966,7 +966,7 @@ func TestAcquireExportSourceExactStoppedRuntimeAndFenceValidation(t *testing.T) 
 		t.Fatalf("stale generation export source=%v error=%v", source, err)
 	}
 	invalidFence := fence
-	invalidFence.NeverCreated = true
+	invalidFence.kind = WriterFenceNeverCreated
 	if source, err := provider.AcquireExportSource(context.Background(), run, invalidFence); source != nil || err == nil {
 		t.Fatalf("mixed fence export source=%v error=%v", source, err)
 	}
@@ -1383,33 +1383,22 @@ func TestCleanupSurvivesImageAndEnvironmentConfigurationRotation(t *testing.T) {
 	}
 }
 
-func TestMigratedSchemaEightRunUsesLegacyCleanupDigest(t *testing.T) {
+func TestUnsupportedResourceSpecCannotExecuteOrCleanUp(t *testing.T) {
 	provider, docker, run := testProvider(t)
-	run.ResourceSpecVersion = 8
-	run.EnvironmentSHA256 = EnvironmentSHA256(nil)
-	digest, err := provider.legacySpecDigest(run)
-	if err != nil {
-		t.Fatal(err)
+	for _, version := range []int{0, 8, 9, 11} {
+		run.ResourceSpecVersion = version
+		if _, err := provider.specDigest(run); err == nil {
+			t.Fatalf("spec %d received a digest", version)
+		}
+		if _, err := provider.EnsureClone(context.Background(), run); err == nil {
+			t.Fatalf("spec %d was allowed to execute", version)
+		}
+		if _, err := provider.RemoveVolume(context.Background(), run, NeverCreatedAuthority()); err == nil {
+			t.Fatalf("spec %d was allowed to clean up", version)
+		}
 	}
-	clonePath := filepath.Join(provider.root, run.CloneIdentity)
-	if err := os.Mkdir(clonePath, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	cloneInfo, err := os.Lstat(clonePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := provider.writeCloneMarker(run, digest, cloneInfo); err != nil {
-		t.Fatal(err)
-	}
-	docker.volumes[run.VolumeIdentity] = volume.Volume{
-		Name: run.VolumeIdentity, Driver: "local", Scope: "local", Mountpoint: "/var/lib/docker/volumes/legacy/_data",
-		Labels: provider.labels(run, digest),
-	}
-	provider.config.Environment = map[string]string{"OPENAI_API_KEY": "rotated"}
-	provider.config.ImageReference = "fern/opencode-background-source:rotated"
-	if _, err := provider.RemoveVolume(context.Background(), run, NeverCreatedAuthority()); err != nil {
-		t.Fatalf("rotated legacy schema-8 volume cleanup: %v", err)
+	if docker.containerRemoves != 0 || docker.volumeRemoves != 0 {
+		t.Fatal("unsupported spec mutated Docker resources")
 	}
 }
 
@@ -1490,11 +1479,17 @@ func testProvider(t *testing.T) (*Provider, *fakeDocker, taskstore.BackgroundRun
 	}
 	t.Cleanup(func() { _ = provider.Close() })
 	compact := "0198d34d6a5075fbb1f2000000000201"
-	run := taskstore.BackgroundRun{WorkspaceID: task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001"), TaskID: task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-000000000201"), AttemptID: task.AttemptID("att_0198d34d-6a50-75fb-b1f2-000000000301"), Generation: 1, RepositoryRemote: "https://github.com/fern-test/repository", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: EnvironmentSHA256(config.Environment), ResourceSpecVersion: 9, ImageIdentity: testImageID, CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode", ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint", OpenCodeSessionID: "ses_test", OpenCodeMessageID: "msg_test"}
+	run := taskstore.BackgroundRun{WorkspaceID: task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001"), TaskID: task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-000000000201"), AttemptID: task.AttemptID("att_0198d34d-6a50-75fb-b1f2-000000000301"), Generation: 1, RepositoryRemote: "https://github.com/fern-test/repository", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: EnvironmentSHA256(config.Environment), ResourceSpecVersion: 10, ImageIdentity: testImageID, CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode", ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint", OpenCodeSessionID: "ses_test", OpenCodeMessageID: "msg_test"}
 	return provider, docker, run
 }
 
 func qualifiedImage() image.InspectResponse {
+	image := qualifiedRuntimeImage()
+	image.Config.Labels["ai.fern.runtime.spec"] = "10"
+	return image
+}
+
+func qualifiedRuntimeImage() image.InspectResponse {
 	return image.InspectResponse{ID: testImageID, Config: &container.Config{User: containerUser, Env: []string{"PATH=/usr/local/bin:/usr/bin", "XDG_DATA_HOME=/home/user/.local/share", "XDG_CONFIG_HOME=/home/user/.config"}, Cmd: []string{"opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"}, ExposedPorts: nat.PortSet{serverPort: struct{}{}}, Volumes: map[string]struct{}{workspaceTarget: {}, opencodeTarget: {}}, Labels: map[string]string{"org.opencontainers.image.source": expectedSource, "org.opencontainers.image.revision": expectedRevision, "org.opencontainers.image.version": expectedVersion, "ai.fern.opencode.profile": expectedProfile}}}
 }
 

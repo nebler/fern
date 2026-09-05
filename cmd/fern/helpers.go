@@ -28,29 +28,6 @@ func loopbackURL(address string) (string, error) {
 	return (&url.URL{Scheme: "http", Host: address}).String(), nil
 }
 
-func workspaceFlags(command string) (*flag.FlagSet, *string, *string) {
-	descriptions := map[string]string{"debug quarantine-publications": "Quarantine unresolved retired publication records."}
-	flags := newFlagSet(command, descriptions[command])
-	name := flags.String("name", "", "workspace name")
-	configPath := flags.String("config", "fern.yaml", "configuration file")
-	return flags, name, configPath
-}
-
-func workspaceName(flags *flag.FlagSet, explicitName, configPath string) (string, error) {
-	name := explicitName
-	if !flagProvided(flags, "name") {
-		var err error
-		name, err = config.LoadWorkspaceName(configPath, flagProvided(flags, "config"))
-		if err != nil {
-			return "", err
-		}
-	}
-	if err := config.ValidateWorkspaceName(name); err != nil {
-		return "", err
-	}
-	return name, nil
-}
-
 func flagProvided(fs *flag.FlagSet, name string) bool {
 	set := false
 	fs.Visit(func(flag *flag.Flag) {
@@ -94,18 +71,6 @@ func loadCommandConfig(configPath string, configRequired bool, envPath string, o
 		return config.Config{}, values, err
 	}
 	return cfg, values, nil
-}
-
-func loadBackgroundCommandConfig(configPath string, configRequired bool, envPath string, overrides config.BackgroundOverrides) (config.BackgroundConfig, error) {
-	values, err := readProtectedEnvironment(envPath)
-	if err != nil {
-		return config.BackgroundConfig{}, err
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return config.BackgroundConfig{}, err
-	}
-	return config.LoadBackgroundWithEnvironment(configPath, cwd, configRequired, overrides, values)
 }
 
 func acquireHostLease(name string) (*hostlease.Lease, error) {

@@ -12,8 +12,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const currentSchemaChecksum = "97cd41f3a8bead5f77954878a64fd9e70d6d7a8128507e3dfaa10ac2949db274"
-
 func main() {
 	databasePath := flag.String("database", "", "task database to initialize or verify")
 	flag.Parse()
@@ -57,7 +55,9 @@ func initializeAndVerify(path string) error {
 	if err := database.QueryRow(`PRAGMA integrity_check`).Scan(&integrity); err != nil {
 		return err
 	}
-	if version != 1 || version != taskstore.CurrentSchemaVersion() || entries != 1 || name != "initial_task_store" || checksum != currentSchemaChecksum || integrity != "ok" {
+	// Open already checks the ledger checksum against this binary's schema.
+	// Do not maintain a second copy of that checksum in the release harness.
+	if version != taskstore.CurrentSchemaVersion() || entries != 1 || name == "" || len(checksum) != 64 || integrity != "ok" {
 		return fmt.Errorf("version=%d current=%d entries=%d name=%q checksum=%q integrity=%q",
 			version, taskstore.CurrentSchemaVersion(), entries, name, checksum, integrity)
 	}

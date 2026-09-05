@@ -83,7 +83,7 @@ func (e *Engine) verifyArtifact(ctx context.Context, manifestBytes []byte, bundl
 		}
 	}
 	changes, err := e.buildChanges(ctx, repository, manifest.Base, manifest.Result)
-	if err != nil || !manifestsEqual(changes, manifest.Changes) {
+	if err != nil || !changesEqual(changes, manifest.Changes) {
 		return artifactManifest{}, fmt.Errorf("%w: rebuilt manifest", ErrVerification)
 	}
 	_, changesDigest, err := canonicalChanges(changes)

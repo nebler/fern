@@ -48,8 +48,7 @@ func TestResultStateClassification(t *testing.T) {
 	}
 }
 
-// The approval, result-transition, verification-transition, and
-// publication-transition machines live in taskstore behind SQL triggers and
+// The approval and result-transition machines live in taskstore behind SQL triggers and
 // are intentionally not modeled here.
 
 func testTransitions[T ~string](t *testing.T, states []T, want map[T][]T, allow func(T, T) error) {

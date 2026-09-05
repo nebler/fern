@@ -13,10 +13,7 @@ import (
 
 type fileWorkspace struct {
 	Name   yaml.Node `yaml:"name"`
-	Image  yaml.Node `yaml:"image"`
 	Repo   yaml.Node `yaml:"repo"`
-	Memory yaml.Node `yaml:"memory"`
-	Env    yaml.Node `yaml:"env"`
 	GitHub *struct {
 		Mode           yaml.Node `yaml:"mode"`
 		Hostname       yaml.Node `yaml:"hostname"`
@@ -34,10 +31,6 @@ type fileConfig struct {
 	Control   struct {
 		Password yaml.Node `yaml:"password"`
 	} `yaml:"control"`
-	Idle struct {
-		After yaml.Node `yaml:"after"`
-		Mode  yaml.Node `yaml:"mode"`
-	} `yaml:"idle"`
 	Proxy struct {
 		Listen         yaml.Node `yaml:"listen"`
 		OperatorListen yaml.Node `yaml:"operatorListen"`
@@ -59,34 +52,6 @@ type fileTaskPolicy struct {
 		Listen yaml.Node `yaml:"listen"`
 		Origin yaml.Node `yaml:"origin"`
 	} `yaml:"backgroundRoute"`
-	BackgroundEnvironment map[string]string `yaml:"backgroundEnvironment"`
-	Budget                *struct {
-		MaxTurns yaml.Node `yaml:"maxTurns"`
-	} `yaml:"budget"`
-	Verification *struct {
-		CheckName        yaml.Node         `yaml:"checkName"`
-		Argv             []string          `yaml:"argv"`
-		WorkingDirectory yaml.Node         `yaml:"workingDirectory"`
-		Timeout          yaml.Node         `yaml:"timeout"`
-		Environment      map[string]string `yaml:"environment"`
-		OutputBytes      yaml.Node         `yaml:"outputBytes"`
-	} `yaml:"verification"`
-}
-
-func decodeWorkspace(data []byte, workspace *fileWorkspace) error {
-	var sections map[string]yaml.Node
-	if err := decode(data, &sections, false); err != nil {
-		return err
-	}
-	section, exists := sections["workspace"]
-	if !exists {
-		return nil
-	}
-	data, err := yaml.Marshal(&section)
-	if err != nil {
-		return err
-	}
-	return decode(data, workspace, true)
 }
 
 func applyFileWorkspace(workspace *Workspace, file fileWorkspace, overrides Overrides) error {
@@ -97,76 +62,60 @@ func applyFileWorkspace(workspace *Workspace, file fileWorkspace, overrides Over
 		target   *string
 	}{
 		{"name", file.Name, overrides.Name, &workspace.Name},
-		{"image", file.Image, overrides.Image, &workspace.Image},
 		{"repo", file.Repo, overrides.Repo, &workspace.Repo},
-		{"memory", file.Memory, overrides.Memory, &workspace.Memory},
 	}
 	for _, field := range fields {
 		if field.override != nil || field.node.IsZero() {
 			continue
 		}
-		value, err := decodeString(field.node)
+		value, err := decodeRequiredTaskString(field.node)
 		if err != nil {
 			return fmt.Errorf("%s: %w", field.name, err)
 		}
 		*field.target = value
 	}
-	if !file.Env.IsZero() {
-		if err := file.Env.Decode(&workspace.Env); err != nil {
-			return fmt.Errorf("env: %w", err)
-		}
+	if file.GitHub == nil {
+		return errors.New("github is required")
 	}
-	if file.GitHub != nil {
-		if file.GitHub.Repository == nil {
-			return errors.New("github.repository is required when workspace.github is configured")
-		}
-		id, err := decodeCanonicalRepositoryID(file.GitHub.Repository.ID)
+	if file.GitHub.Repository == nil {
+		return errors.New("github.repository is required")
+	}
+	id, err := decodeCanonicalPositiveID(file.GitHub.Repository.ID)
+	if err != nil {
+		return fmt.Errorf("github.repository.id: %w", err)
+	}
+	fullName, err := decodeRequiredTaskString(file.GitHub.Repository.FullName)
+	if err != nil {
+		return fmt.Errorf("github.repository.fullName: %w", err)
+	}
+	if err := ValidateGitHubRepositoryFullName(fullName); err != nil {
+		return fmt.Errorf("github.repository.fullName: %w", err)
+	}
+	modeText, err := decodeRequiredTaskString(file.GitHub.Mode)
+	if err != nil {
+		return fmt.Errorf("github.mode: %w", err)
+	}
+	if modeText != GitHubModeGitHubAppBroker {
+		return errors.New("github.mode must be github-app-broker")
+	}
+	if !file.GitHub.Hostname.IsZero() {
+		hostname, err := decodeRequiredTaskString(file.GitHub.Hostname)
 		if err != nil {
-			return fmt.Errorf("github.repository.id: %w", err)
-		}
-		fullName, err := decodeString(file.GitHub.Repository.FullName)
-		if err != nil {
-			return fmt.Errorf("github.repository.fullName: %w", err)
-		}
-		if err := ValidateGitHubRepositoryFullName(fullName); err != nil {
-			return fmt.Errorf("github.repository.fullName: %w", err)
-		}
-		modeText, err := decodeString(file.GitHub.Mode)
-		if err != nil {
-			return fmt.Errorf("github.mode: %w", err)
-		}
-		mode := GitHubMode(modeText)
-		if mode != GitHubModeWorkspaceGH && mode != GitHubModeGitHubAppBroker {
-			return errors.New("github.mode must be workspace-gh or github-app-broker")
-		}
-		hostname := "github.com"
-		if !file.GitHub.Hostname.IsZero() {
-			hostname, err = decodeString(file.GitHub.Hostname)
-			if err != nil {
-				return fmt.Errorf("github.hostname: %w", err)
-			}
+			return fmt.Errorf("github.hostname: %w", err)
 		}
 		if hostname != "github.com" {
 			return errors.New("github.hostname must be github.com")
 		}
-		var installationID int64
-		if mode == GitHubModeGitHubAppBroker {
-			if !file.GitHub.InstallationID.IsZero() {
-				installationID, err = decodeCanonicalPositiveID(file.GitHub.InstallationID)
-				if err != nil {
-					return fmt.Errorf("github.installationId: %w", err)
-				}
-			}
-		} else if !file.GitHub.InstallationID.IsZero() {
-			return errors.New("github.installationId is forbidden in workspace-gh mode")
-		}
-		workspace.GitHub = &WorkspaceGitHub{Mode: mode, Hostname: hostname, InstallationID: installationID, Repository: GitHubRepository{ID: id, FullName: fullName}}
 	}
+	var installationID int64
+	if !file.GitHub.InstallationID.IsZero() {
+		installationID, err = decodeCanonicalPositiveID(file.GitHub.InstallationID)
+		if err != nil {
+			return fmt.Errorf("github.installationId: %w", err)
+		}
+	}
+	workspace.GitHub = GitHubApp{InstallationID: installationID, Repository: GitHubRepository{ID: id, FullName: fullName}}
 	return nil
-}
-
-func decodeCanonicalRepositoryID(node yaml.Node) (int64, error) {
-	return decodeCanonicalPositiveID(node)
 }
 
 func decodeCanonicalPositiveID(node yaml.Node) (int64, error) {
@@ -192,14 +141,11 @@ func parseTaskPolicy(node yaml.Node) (*TaskPolicy, error) {
 		return nil, err
 	}
 	var file fileTaskPolicy
-	if err := decode(data, &file, true); err != nil {
+	if err := decode(data, &file); err != nil {
 		return nil, err
 	}
 	if file.Model == nil {
 		return nil, errors.New("model is required")
-	}
-	if file.Budget == nil {
-		return nil, errors.New("budget is required")
 	}
 	agent, err := decodeRequiredTaskString(file.Agent)
 	if err != nil {
@@ -221,15 +167,9 @@ func parseTaskPolicy(node yaml.Node) (*TaskPolicy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("leaseDuration: %w", err)
 	}
-	maxTurns, err := decodeCanonicalPositiveID(file.Budget.MaxTurns)
-	if err != nil {
-		return nil, fmt.Errorf("budget.maxTurns: %w", err)
-	}
 	policy := &TaskPolicy{
 		Agent: agent, Model: TaskModel{Provider: provider, ID: modelID},
 		AttemptTimeout: attemptTimeout, LeaseDuration: leaseDuration,
-		Budget:                TaskBudget{MaxTurns: int(maxTurns)},
-		BackgroundEnvironment: cloneStrings(file.BackgroundEnvironment),
 	}
 	if !file.BackgroundImage.IsZero() {
 		policy.BackgroundImage, err = decodeRequiredTaskString(file.BackgroundImage)
@@ -260,41 +200,7 @@ func parseTaskPolicy(node yaml.Node) (*TaskPolicy, error) {
 		}
 		policy.BackgroundRoute = &BackgroundRoute{Listen: listen, Origin: origin}
 	}
-	if file.Verification != nil {
-		checkName, err := decodeRequiredTaskString(file.Verification.CheckName)
-		if err != nil {
-			return nil, fmt.Errorf("verification.checkName: %w", err)
-		}
-		workingDirectory, err := decodeRequiredTaskString(file.Verification.WorkingDirectory)
-		if err != nil {
-			return nil, fmt.Errorf("verification.workingDirectory: %w", err)
-		}
-		timeout, err := decodeTaskDuration(file.Verification.Timeout)
-		if err != nil {
-			return nil, fmt.Errorf("verification.timeout: %w", err)
-		}
-		outputBytes, err := decodeCanonicalPositiveID(file.Verification.OutputBytes)
-		if err != nil {
-			return nil, fmt.Errorf("verification.outputBytes: %w", err)
-		}
-		policy.Verification = &TaskVerificationPolicy{
-			CheckName: checkName, Argv: append([]string(nil), file.Verification.Argv...),
-			WorkingDirectory: workingDirectory, Timeout: timeout,
-			Environment: cloneStrings(file.Verification.Environment), OutputBytes: int(outputBytes),
-		}
-	}
 	return policy, nil
-}
-
-func cloneStrings(input map[string]string) map[string]string {
-	if input == nil {
-		return map[string]string{}
-	}
-	result := make(map[string]string, len(input))
-	for key, value := range input {
-		result[key] = value
-	}
-	return result
 }
 
 func decodeRequiredTaskString(node yaml.Node) (string, error) {
@@ -319,25 +225,9 @@ func decodeTaskDuration(node yaml.Node) (time.Duration, error) {
 	return duration, nil
 }
 
-func decodeNodeMap(node yaml.Node) (map[string]yaml.Node, error) {
-	var values map[string]yaml.Node
-	if err := node.Decode(&values); err != nil {
-		return nil, err
-	}
-	return values, nil
-}
-
-func decodeString(node yaml.Node) (string, error) {
-	var value string
-	if err := node.Decode(&value); err != nil {
-		return "", err
-	}
-	return value, nil
-}
-
-func decode(data []byte, target any, strict bool) error {
+func decode(data []byte, target any) error {
 	decoder := yaml.NewDecoder(bytes.NewReader(data))
-	decoder.KnownFields(strict)
+	decoder.KnownFields(true)
 	if err := decoder.Decode(target); err != nil {
 		return err
 	}

@@ -197,7 +197,9 @@ func (s *Store) RecordBackgroundRunBundleWriteStarted(ctx context.Context, claim
 	return s.advanceBackgroundExport(ctx, claim, BackgroundRunExportPhaseSnapshotSelected, BackgroundRunExportPhaseBundleWriteStarted, "", nil, nil)
 }
 
-func (s *Store) VerifyBackgroundRunBundle(ctx context.Context, p VerifyBackgroundRunBundleParams) (BackgroundRunExport, error) {
+// RecordBackgroundRunBundleVerified commits the caller's verified digest/size
+// evidence under the export claim. It does not read or verify bundle bytes.
+func (s *Store) RecordBackgroundRunBundleVerified(ctx context.Context, p RecordBackgroundRunBundleVerifiedParams) (BackgroundRunExport, error) {
 	if p.BundleSHA256 == ([32]byte{}) || p.BundleBytes < 0 {
 		return BackgroundRunExport{}, fmt.Errorf("%w: verified bundle", ErrInvalidInput)
 	}
@@ -206,10 +208,6 @@ func (s *Store) VerifyBackgroundRunBundle(ctx context.Context, p VerifyBackgroun
 	}
 	return s.advanceBackgroundExport(ctx, p.BackgroundRunExportClaim, BackgroundRunExportPhaseBundleWriteStarted,
 		BackgroundRunExportPhaseBundleVerified, `bundle_sha256=?,bundle_size=?`, []any{p.BundleSHA256[:], p.BundleBytes}, replay)
-}
-
-func (s *Store) RecordBackgroundRunBundleVerified(ctx context.Context, p VerifyBackgroundRunBundleParams) (BackgroundRunExport, error) {
-	return s.VerifyBackgroundRunBundle(ctx, p)
 }
 
 func (s *Store) RecordBackgroundRunCASInstallStarted(ctx context.Context, claim BackgroundRunExportClaim) (BackgroundRunExport, error) {

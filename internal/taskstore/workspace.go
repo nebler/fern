@@ -18,11 +18,6 @@ SELECT id,name,state,repository_path,github_authority,installation_id,repository
        image_digest,opencode_protocol,runtime_desired_state,reconciliation_epoch,revision,created_at,updated_at
 FROM workspaces`
 
-// The physical installation column stays positive for foreign-key integrity.
-// Value 1 is the hidden on-disk discriminator for workspace-gh authority;
-// callers always see 0.
-const workspaceGHDatabaseInstallationID = 1
-
 // EnsureWorkspace creates a workspace once or returns the existing exact
 // immutable binding with the same name. The candidate ID is ignored only when
 // every authority-bearing field already matches.
@@ -83,13 +78,10 @@ func scanWorkspace(row rowScanner) (Workspace, error) {
 		return Workspace{}, fmt.Errorf("read workspace: %w", err)
 	}
 	if repositoryID <= 0 || reconciliationEpoch < 0 || workspace.Revision < 1 || !workspace.State.valid() || !workspace.GitHubAuthority.valid() ||
-		(workspace.GitHubAuthority == GitHubAuthorityWorkspaceGH && installationID != workspaceGHDatabaseInstallationID) ||
-		(workspace.GitHubAuthority == GitHubAuthorityAppBroker && installationID <= 0) {
+		installationID <= 0 {
 		return Workspace{}, ErrCorruptStore
 	}
-	if workspace.GitHubAuthority == GitHubAuthorityAppBroker {
-		workspace.InstallationID = task.InstallationID(installationID)
-	}
+	workspace.InstallationID = task.InstallationID(installationID)
 	workspace.RepositoryID = task.RepositoryID(repositoryID)
 	workspace.ReconciliationEpoch = uint64(reconciliationEpoch)
 	workspace.CreatedAt = fromUnixMillis(createdAt)
@@ -128,7 +120,7 @@ INSERT INTO workspaces(
     repository_full_name,image_digest,opencode_protocol,runtime_desired_state,
     reconciliation_epoch,revision,created_at,updated_at
 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		w.ID, w.Name, w.State, w.RepositoryPath, w.GitHubAuthority, databaseInstallationID(w), w.RepositoryID,
+		w.ID, w.Name, w.State, w.RepositoryPath, w.GitHubAuthority, w.InstallationID, w.RepositoryID,
 		w.RepositoryFullName, w.ImageDigest, w.OpenCodeProtocol, w.RuntimeDesiredState,
 		w.ReconciliationEpoch, 1, unixMillis(w.CreatedAt), unixMillis(w.CreatedAt))
 	if err != nil {
@@ -139,13 +131,6 @@ INSERT INTO workspaces(
 	}
 	committed = true
 	return nil
-}
-
-func databaseInstallationID(workspace Workspace) task.InstallationID {
-	if workspace.GitHubAuthority == GitHubAuthorityWorkspaceGH {
-		return workspaceGHDatabaseInstallationID
-	}
-	return workspace.InstallationID
 }
 
 func validateWorkspace(w Workspace) error {
@@ -164,8 +149,7 @@ func validateWorkspace(w Workspace) error {
 		return fmt.Errorf("%w: canonical repository path", ErrInvalidInput)
 	}
 	if !w.GitHubAuthority.valid() ||
-		(w.GitHubAuthority == GitHubAuthorityWorkspaceGH && w.InstallationID != 0) ||
-		(w.GitHubAuthority == GitHubAuthorityAppBroker && (w.InstallationID == 0 || uint64(w.InstallationID) > math.MaxInt64)) ||
+		w.InstallationID == 0 || uint64(w.InstallationID) > math.MaxInt64 ||
 		w.RepositoryID == 0 || uint64(w.RepositoryID) > math.MaxInt64 || w.ReconciliationEpoch > math.MaxInt64 {
 		return fmt.Errorf("%w: SQLite integer range", ErrInvalidInput)
 	}

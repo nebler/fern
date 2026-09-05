@@ -19,12 +19,8 @@ import (
 	"time"
 )
 
-const schemaVersion = 1
+const schemaVersion = 2
 const maxControlStateBytes = 4 << 20
-
-// PublicationSchemaVersion is the durable-proof schema version required for
-// any publication record still allowed to change.
-const PublicationSchemaVersion = 1
 
 // Device is a paired browser credential. Only the SHA-256 hash of the bearer
 // token is ever stored; ID is that hash's leading bytes.
@@ -36,125 +32,18 @@ type Device struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
-// WorkflowStatus enumerates the durable lifecycle states of a tracked workflow.
-type WorkflowStatus string
-
-// Workflow lifecycle statuses persisted on every workflow record.
-const (
-	WorkflowRecorded             WorkflowStatus = "recorded"
-	WorkflowWorking              WorkflowStatus = "working"
-	WorkflowWaitingForApproval   WorkflowStatus = "waiting_for_approval"
-	WorkflowCompleted            WorkflowStatus = "completed"
-	WorkflowPublicationRequested WorkflowStatus = "publication_requested"
-	WorkflowPublished            WorkflowStatus = "published"
-	WorkflowFailed               WorkflowStatus = "failed"
-)
-
-// Workflow is an OpenCode session Fern tracks, with its publication linkage.
-type Workflow struct {
-	ID            string         `json:"id"`
-	Title         string         `json:"title"`
-	SessionID     string         `json:"sessionId"`
-	Status        WorkflowStatus `json:"status"`
-	PublicationID string         `json:"publicationId,omitempty"`
-	CreatedAt     time.Time      `json:"createdAt"`
-	UpdatedAt     time.Time      `json:"updatedAt"`
-	Revision      uint64         `json:"revision"`
-}
-
-// Publication is read-only audit evidence from the retired control-plane
-// publication path. Only explicit offline quarantine metadata may be added.
-type Publication struct {
-	SchemaVersion      int                     `json:"schemaVersion,omitempty"`
-	ID                 string                  `json:"id"`
-	WorkflowID         string                  `json:"workflowId"`
-	State              string                  `json:"state"`
-	Operation          string                  `json:"operation"`
-	RequestedBaseRef   string                  `json:"requestedBaseRef,omitempty"`
-	Title              string                  `json:"title"`
-	Body               string                  `json:"body,omitempty"`
-	RepositoryID       int64                   `json:"repositoryId,omitempty"`
-	RepositoryFullName string                  `json:"repositoryFullName,omitempty"`
-	BaseSHA            string                  `json:"baseSha,omitempty"`
-	BaseRef            string                  `json:"baseRef,omitempty"`
-	ResultCommit       string                  `json:"resultCommit,omitempty"`
-	Branch             string                  `json:"branch,omitempty"`
-	PullRequest        *PullRequestObservation `json:"pullRequest,omitempty"`
-	// Legacy fields are retained so old terminal records remain audit-readable.
-	Base             string    `json:"base,omitempty"`
-	Repository       string    `json:"repository,omitempty"`
-	Commit           string    `json:"commit,omitempty"`
-	PullURL          string    `json:"pullUrl,omitempty"`
-	Error            string    `json:"error,omitempty"`
-	CreatedAt        time.Time `json:"createdAt"`
-	UpdatedAt        time.Time `json:"updatedAt"`
-	OriginalState    string    `json:"originalState,omitempty"`
-	QuarantinedAt    time.Time `json:"quarantinedAt,omitempty"`
-	QuarantineReason string    `json:"quarantineReason,omitempty"`
-}
-
-// PreparedPublication describes the resolved tuple validated while loading
-// versioned audit records.
-type PreparedPublication struct {
-	RepositoryID       int64  `json:"repositoryId"`
-	RepositoryFullName string `json:"repositoryFullName"`
-	BaseSHA            string `json:"baseSha"`
-	BaseRef            string `json:"baseRef"`
-	ResultCommit       string `json:"resultCommit"`
-	Branch             string `json:"branch"`
-}
-
-// PullRequestRefObservation is the observed state of one ref (base or head) of
-// a published pull request.
-type PullRequestRefObservation struct {
-	RepositoryID       int64  `json:"repositoryId"`
-	RepositoryFullName string `json:"repositoryFullName"`
-	RepositoryOwner    string `json:"repositoryOwner"`
-	RepositoryName     string `json:"repositoryName"`
-	Ref                string `json:"ref"`
-	SHA                string `json:"sha"`
-}
-
-// PullRequestObservation is the complete durable proof that a publication
-// produced one specific draft pull request.
-type PullRequestObservation struct {
-	TargetRepositoryID       int64                     `json:"targetRepositoryId"`
-	TargetRepositoryFullName string                    `json:"targetRepositoryFullName"`
-	Number                   int64                     `json:"number"`
-	URL                      string                    `json:"url"`
-	State                    string                    `json:"state"`
-	Draft                    bool                      `json:"draft"`
-	Base                     PullRequestRefObservation `json:"base"`
-	Head                     PullRequestRefObservation `json:"head"`
-}
-
-// Publication lifecycle states persisted on every publication record.
-const (
-	PublicationRequested   = "requested"
-	PublicationPrepared    = "pushing"
-	PublicationFailed      = "failed"
-	PublicationPublished   = "published"
-	PublicationQuarantined = "quarantined"
-
-	LegacyPublicationQuarantineReason = "legacy control publication retired; external effects were not resumed"
-)
-
-// diskState is the durable control file. The strict loader treats absent
-// optional fields as their zero value, so new fields must tolerate being empty
-// on load instead of forcing a format bump.
+// diskState is the current durable control file. Historical schemas are rejected
+// without migration or mutation; unknown fields are not accepted.
 type diskState struct {
-	Version              int                    `json:"version"`
-	Workspace            string                 `json:"workspace"`
-	Revision             uint64                 `json:"revision"`
-	OperatorCredentialID string                 `json:"operatorCredentialId,omitempty"`
-	Devices              map[string]Device      `json:"devices"`
-	Workflows            map[string]Workflow    `json:"workflows"`
-	Publications         map[string]Publication `json:"publications"`
+	Version              int               `json:"version"`
+	Workspace            string            `json:"workspace"`
+	Revision             uint64            `json:"revision"`
+	OperatorCredentialID string            `json:"operatorCredentialId,omitempty"`
+	Devices              map[string]Device `json:"devices"`
 }
 
-// Store is the durable control-plane state for one workspace: paired devices,
-// tracked workflows, and publication records, guarded by a mutex and an atomic
-// private-file write path.
+// Store is the durable control-plane identity state for one workspace, guarded
+// by a mutex and an atomic private-file write path.
 type Store struct {
 	mu                   sync.Mutex
 	path                 string
@@ -188,7 +77,7 @@ func Open(directory, workspace string) (*Store, error) {
 }
 
 // AuxiliaryStatePath returns a sibling path for a small subsystem-owned state
-// file. The closed name prevents callers from escaping the control directory.
+// file. Restricted lowercase name syntax prevents escaping the control directory.
 func (store *Store) AuxiliaryStatePath(name string) (string, error) {
 	if store == nil || store.path == "" {
 		return "", errors.New("control store is unavailable")
@@ -246,7 +135,7 @@ func (store *Store) AddDevice(token, name string, now, expires time.Time) (Devic
 }
 
 // AuthenticateDeviceIdentity validates a device bearer token and returns its
-// durable identity, pruning expired credentials and refreshing LastSeen at most
+// durable identity, pruning the matched expired credential and refreshing LastSeen at most
 // once an hour along the way.
 func (store *Store) AuthenticateDeviceIdentity(token string, now time.Time) (Device, bool, error) {
 	if token == "" {
@@ -365,201 +254,6 @@ func (store *Store) RevokeDevice(id string) error {
 	})
 }
 
-// Workflows snapshots the retired workflow audit records, most recently
-// updated first. No active control route exposes them.
-func (store *Store) Workflows() []Workflow {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	result := make([]Workflow, 0, len(store.data.Workflows))
-	for _, workflow := range store.data.Workflows {
-		result = append(result, workflow)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].UpdatedAt.After(result[j].UpdatedAt) })
-	return result
-}
-
-// Workflow returns the tracked workflow with the given ID.
-func (store *Store) Workflow(id string) (Workflow, bool) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	workflow, exists := store.data.Workflows[id]
-	return workflow, exists
-}
-
-func preparedFromPublication(publication Publication) PreparedPublication {
-	return PreparedPublication{
-		RepositoryID: publication.RepositoryID, RepositoryFullName: publication.RepositoryFullName,
-		BaseSHA: publication.BaseSHA, BaseRef: publication.BaseRef,
-		ResultCommit: publication.ResultCommit, Branch: publication.Branch,
-	}
-}
-
-func validatePreparedPublication(prepared PreparedPublication) error {
-	if prepared.RepositoryID <= 0 || !validRepositoryFullName(prepared.RepositoryFullName) || !validGitRef(prepared.BaseRef) || !validGitRef(prepared.Branch) || prepared.BaseRef == prepared.Branch || !validSHA(prepared.BaseSHA) || !validSHA(prepared.ResultCommit) {
-		return errors.New("complete prepared publication tuple is required")
-	}
-	return nil
-}
-
-func validPullRequestObservation(observation PullRequestObservation, prepared PreparedPublication) bool {
-	owner, name, ok := splitRepositoryFullName(prepared.RepositoryFullName)
-	if !ok || observation.TargetRepositoryID != prepared.RepositoryID || observation.TargetRepositoryFullName != prepared.RepositoryFullName || observation.Number <= 0 || observation.State != "open" || !observation.Draft {
-		return false
-	}
-	wantURL := "https://github.com/" + prepared.RepositoryFullName + "/pull/" + fmt.Sprintf("%d", observation.Number)
-	if observation.URL != wantURL {
-		return false
-	}
-	return validPullRequestRef(observation.Base, prepared.RepositoryID, prepared.RepositoryFullName, owner, name, prepared.BaseRef, prepared.BaseSHA) &&
-		validPullRequestRef(observation.Head, prepared.RepositoryID, prepared.RepositoryFullName, owner, name, prepared.Branch, prepared.ResultCommit)
-}
-
-func validPullRequestRef(observation PullRequestRefObservation, repositoryID int64, fullName, owner, name, ref, sha string) bool {
-	return observation.RepositoryID == repositoryID && observation.RepositoryFullName == fullName && observation.RepositoryOwner == owner && observation.RepositoryName == name && observation.Ref == ref && observation.SHA == sha
-}
-
-func splitRepositoryFullName(fullName string) (string, string, bool) {
-	if strings.Count(fullName, "/") != 1 {
-		return "", "", false
-	}
-	owner, name, _ := strings.Cut(fullName, "/")
-	return owner, name, owner != "" && name != ""
-}
-
-func validRepositoryFullName(fullName string) bool {
-	if len(fullName) < 3 || len(fullName) > 140 || strings.Count(fullName, "/") != 1 {
-		return false
-	}
-	owner, name, _ := strings.Cut(fullName, "/")
-	if len(owner) == 0 || len(owner) > 39 || owner[0] == '-' || owner[len(owner)-1] == '-' || len(name) == 0 || len(name) > 100 || name == "." || name == ".." || strings.HasSuffix(strings.ToLower(name), ".git") {
-		return false
-	}
-	for index := range len(owner) {
-		character := owner[index]
-		if !asciiAlphaNumeric(character) && character != '-' {
-			return false
-		}
-	}
-	for index := range len(name) {
-		character := name[index]
-		if !asciiAlphaNumeric(character) && character != '.' && character != '_' && character != '-' {
-			return false
-		}
-	}
-	return true
-}
-
-func asciiAlphaNumeric(character byte) bool {
-	return character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9'
-}
-
-func validGitRef(value string) bool {
-	if value == "" || value == "@" || len(value) > 255 || strings.HasPrefix(value, "/") || strings.HasSuffix(value, ".") || strings.HasSuffix(value, "/") || strings.Contains(value, "..") || strings.Contains(value, "//") || strings.Contains(value, "@{") || strings.ContainsAny(value, " ~^:?*[\\") {
-		return false
-	}
-	for _, component := range strings.Split(value, "/") {
-		if component == "" || strings.HasPrefix(component, ".") || strings.HasSuffix(component, ".lock") {
-			return false
-		}
-	}
-	for _, character := range value {
-		if character < 0x21 || character > 0x7e {
-			return false
-		}
-	}
-	return true
-}
-
-func validSHA(value string) bool {
-	if len(value) != 40 {
-		return false
-	}
-	for _, character := range value {
-		if character < '0' || character > '9' && character < 'a' || character > 'f' {
-			return false
-		}
-	}
-	return true
-}
-
-// Publication returns the publication record with the given ID.
-func (store *Store) Publication(id string) (Publication, bool) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	publication, exists := store.data.Publications[id]
-	return publication, exists
-}
-
-// Publications snapshots every publication record, most recently updated
-// first.
-func (store *Store) Publications() []Publication {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	result := make([]Publication, 0, len(store.data.Publications))
-	for _, publication := range store.data.Publications {
-		result = append(result, publication)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].UpdatedAt.After(result[j].UpdatedAt) })
-	return result
-}
-
-// HasUnquarantinedLegacyPublications reports whether retired control-plane
-// publication work still needs an explicit offline operator decision.
-func (store *Store) HasUnquarantinedLegacyPublications() bool {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	for _, publication := range store.data.Publications {
-		if unresolvedLegacyPublication(publication) {
-			return true
-		}
-	}
-	return false
-}
-
-// QuarantineLegacyPublications atomically retires unresolved control-plane
-// publication records without attempting or inferring any external effect.
-// Published records are audit evidence and are never changed. Repeated calls
-// return no records and do not rewrite the state file.
-func (store *Store) QuarantineLegacyPublications(now time.Time) ([]Publication, error) {
-	if now.IsZero() {
-		return nil, errors.New("quarantine time is required")
-	}
-	now = now.UTC()
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	originals := make(map[string]Publication)
-	quarantined := make([]Publication, 0)
-	for id, publication := range store.data.Publications {
-		if !unresolvedLegacyPublication(publication) {
-			continue
-		}
-		originals[id] = publication
-		publication.OriginalState = publication.State
-		publication.State = PublicationQuarantined
-		publication.QuarantinedAt = now
-		publication.QuarantineReason = LegacyPublicationQuarantineReason
-		publication.UpdatedAt = now
-		store.data.Publications[id] = publication
-		quarantined = append(quarantined, publication)
-	}
-	if len(quarantined) == 0 {
-		return nil, nil
-	}
-	if err := store.commitLocked(func() {
-		for id, publication := range originals {
-			store.data.Publications[id] = publication
-		}
-	}); err != nil {
-		return nil, err
-	}
-	sort.Slice(quarantined, func(i, j int) bool { return quarantined[i].ID < quarantined[j].ID })
-	return quarantined, nil
-}
-
-func unresolvedLegacyPublication(publication Publication) bool {
-	return publication.State == PublicationRequested || publication.State == PublicationPrepared || publication.State == PublicationFailed
-}
-
 func (store *Store) load() error {
 	file, err := os.OpenFile(store.path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if errors.Is(err, os.ErrNotExist) {
@@ -584,6 +278,17 @@ func (store *Store) load() error {
 	if len(data) > maxControlStateBytes {
 		return errors.New("Fern control state exceeds 4 MiB")
 	}
+	// Read the version before strict decoding so historical files report the
+	// unsupported schema even when they contain removed fields.
+	var header struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &header); err != nil {
+		return fmt.Errorf("decode Fern control state: %w", err)
+	}
+	if header.Version != schemaVersion {
+		return fmt.Errorf("unsupported Fern control state version %d", header.Version)
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	var state diskState
@@ -594,9 +299,6 @@ func (store *Store) load() error {
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return errors.New("decode Fern control state: trailing data")
 	}
-	if state.Version != schemaVersion {
-		return fmt.Errorf("unsupported Fern control state version %d", state.Version)
-	}
 	if state.Workspace != store.workspace {
 		return fmt.Errorf("Fern control state belongs to workspace %q", state.Workspace)
 	}
@@ -604,56 +306,8 @@ func (store *Store) load() error {
 		return errors.New("Fern control state has an invalid operator credential identifier")
 	}
 	initializeMaps(&state)
-	for id, publication := range state.Publications {
-		if publication.SchemaVersion == 0 {
-			continue
-		}
-		if publication.SchemaVersion != PublicationSchemaVersion || !validCurrentPublication(publication) {
-			return fmt.Errorf("publication %q has invalid durable proof", id)
-		}
-	}
 	store.data = state
 	return nil
-}
-
-func validCurrentPublication(publication Publication) bool {
-	if publication.ID == "" || publication.WorkflowID == "" || publication.Operation == "" || strings.TrimSpace(publication.Title) == "" {
-		return false
-	}
-	switch publication.State {
-	case PublicationRequested, PublicationPrepared, PublicationFailed, PublicationPublished:
-		if publication.OriginalState != "" || !publication.QuarantinedAt.IsZero() || publication.QuarantineReason != "" {
-			return false
-		}
-	case PublicationQuarantined:
-		if publication.OriginalState != PublicationRequested && publication.OriginalState != PublicationPrepared && publication.OriginalState != PublicationFailed {
-			return false
-		}
-		if publication.QuarantinedAt.IsZero() || publication.QuarantineReason != LegacyPublicationQuarantineReason {
-			return false
-		}
-	default:
-		return false
-	}
-	prepared := preparedFromPublication(publication)
-	hasPrepared := publication.ResultCommit != ""
-	if hasPrepared != (publication.RepositoryID != 0 || publication.RepositoryFullName != "" || publication.BaseSHA != "" || publication.BaseRef != "" || publication.Branch != "") {
-		return false
-	}
-	if hasPrepared && validatePreparedPublication(prepared) != nil {
-		return false
-	}
-	effectiveState := publication.State
-	if effectiveState == PublicationQuarantined {
-		effectiveState = publication.OriginalState
-	}
-	if effectiveState == PublicationRequested && hasPrepared || effectiveState == PublicationPrepared && !hasPrepared {
-		return false
-	}
-	if publication.PullRequest != nil {
-		return publication.State == PublicationPublished && hasPrepared && publication.PullURL == publication.PullRequest.URL && validPullRequestObservation(*publication.PullRequest, prepared)
-	}
-	return publication.State != PublicationPublished && publication.PullURL == ""
 }
 
 // commitLocked persists the in-memory mutation made under a held store lock.
@@ -773,12 +427,6 @@ func initializeMaps(state *diskState) {
 	if state.Devices == nil {
 		state.Devices = make(map[string]Device)
 	}
-	if state.Workflows == nil {
-		state.Workflows = make(map[string]Workflow)
-	}
-	if state.Publications == nil {
-		state.Publications = make(map[string]Publication)
-	}
 }
 
 func tokenHash(token string) string {
@@ -824,8 +472,8 @@ func (store *Store) EnsureOperatorCredentialID() (string, error) {
 	return generated, nil
 }
 
-// validOperatorCredentialID accepts either the empty value — state files
-// written before the field existed load unchanged — or exactly the canonical
+// validOperatorCredentialID accepts either the empty value before the first
+// operator credential is issued, or exactly the canonical
 // spelling produced by NewOperatorCredentialID.
 func validOperatorCredentialID(value string) bool {
 	if value == "" {

@@ -31,7 +31,8 @@ FROM node:22.23.2-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9
 LABEL org.opencontainers.image.source="https://github.com/anomalyco/opencode" \
       org.opencontainers.image.revision="39fb919a054190498f6d5b7985bde231f93ad7a6" \
       org.opencontainers.image.version="0.0.0-source-39fb919a054190498f6d5b7985bde231f93ad7a6" \
-      ai.fern.opencode.profile="source-39fb919a054190498f6d5b7985bde231f93ad7a6"
+      ai.fern.opencode.profile="source-39fb919a054190498f6d5b7985bde231f93ad7a6" \
+      ai.fern.runtime.spec="10"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl git openssh-client ripgrep jq procps \
@@ -51,9 +52,18 @@ RUN set -eux; \
       "https://github.com/cli/cli/releases/download/v${GH_VERSION}/${gh_archive}"; \
     echo "${gh_sha256}  /tmp/${gh_archive}" | sha256sum --check --strict; \
     tar --extract --gzip --file "/tmp/${gh_archive}" --directory /tmp; \
-    install --mode 0755 "/tmp/gh_${GH_VERSION}_linux_${TARGETARCH}/bin/gh" /usr/local/bin/gh; \
+    install -d --mode 0755 /usr/local/libexec; \
+    install --mode 0755 "/tmp/gh_${GH_VERSION}_linux_${TARGETARCH}/bin/gh" /usr/local/libexec/gh; \
     rm --recursive --force "/tmp/${gh_archive}" "/tmp/gh_${GH_VERSION}_linux_${TARGETARCH}"; \
-    gh --version | grep --quiet "^gh version ${GH_VERSION} "
+    /usr/local/libexec/gh --version | grep --quiet "^gh version ${GH_VERSION} "
+
+COPY gh /usr/local/bin/gh
+COPY fern-git-credential /usr/local/bin/fern-git-credential
+COPY fern-github-credentials.cjs /usr/local/libexec/fern-github-credentials.cjs
+RUN chmod 0755 /usr/local/bin/gh /usr/local/bin/fern-git-credential \
+    && chmod 0644 /usr/local/libexec/fern-github-credentials.cjs \
+    && git config --system credential.useHttpPath true \
+    && git config --system credential.helper /usr/local/bin/fern-git-credential
 
 COPY --from=build /src/opencode /usr/local/bin/opencode
 RUN chmod 0755 /usr/local/bin/opencode \
@@ -64,8 +74,10 @@ USER 1001:1001
 WORKDIR /home/user
 
 ENV XDG_DATA_HOME=/home/user/.local/share \
-    XDG_CONFIG_HOME=/home/user/.config
-RUN mkdir -p /home/user/workspace /home/user/.local/share/opencode /home/user/.config/opencode /home/user/.config/gh
+    XDG_CONFIG_HOME=/home/user/.config \
+    GH_PROMPT_DISABLED=1 \
+    GIT_TERMINAL_PROMPT=0
+RUN mkdir -p /home/user/workspace /home/user/.local/share/opencode /home/user/.config/opencode
 
 VOLUME ["/home/user/workspace", "/home/user/.local/share/opencode"]
 WORKDIR /home/user/workspace

@@ -14,6 +14,7 @@ import (
 
 	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/backgroundroute"
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
@@ -92,6 +93,12 @@ func (c *Coordinator) Wake() {
 }
 
 func (c *Coordinator) Run(ctx context.Context) error {
+	return c.supervise(ctx, c.RunOnce)
+}
+
+// supervise owns the policy for scan outcomes: corruption terminates the
+// component, cancellation stops it, and transient failures may be retried.
+func (c *Coordinator) supervise(ctx context.Context, runOnce func(context.Context) error) error {
 	c.Wake()
 	ticker := time.NewTicker(c.config.PollInterval)
 	defer ticker.Stop()
@@ -102,7 +109,10 @@ func (c *Coordinator) Run(ctx context.Context) error {
 		case <-ticker.C:
 		case <-c.wake:
 		}
-		err := c.RunOnce(ctx)
+		err := runOnce(ctx)
+		if errors.Is(err, taskstore.ErrCorruptStore) {
+			return err
+		}
 		if errors.Is(err, ErrNoWork) {
 			if c.config.OnSuccess != nil {
 				c.config.OnSuccess()
@@ -124,8 +134,9 @@ func (c *Coordinator) Run(ctx context.Context) error {
 	}
 }
 
-// RunOnce performs at most one external lifecycle operation under one durable
-// claim. The process-local mutex makes concurrent wake and test scans serial.
+// RunOnce selects one run under a durable claim and processes its current phase.
+// A phase can require multiple external calls and evidence transitions. The
+// process-local mutex makes concurrent wake and test scans serial.
 func (c *Coordinator) RunOnce(ctx context.Context) error {
 	c.scan.Lock()
 	defer c.scan.Unlock()
@@ -147,16 +158,20 @@ func (c *Coordinator) RunOnce(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if work.Run.CancelEpoch == 0 && work.Run.TimeoutRequestedAt == nil && timeoutState(work.Run.State) &&
-		!now.Before(work.Deadline) && !cleanupPhase(work.Run.EffectPhase) {
+	lifecycle := classify(work.Run)
+	if !lifecycle.Valid {
+		return taskstore.ErrCorruptStore
+	}
+	if work.Run.CancelEpoch == 0 && work.Run.TimeoutRequestedAt == nil && lifecycle.TimeoutEligible &&
+		!now.Before(work.Deadline) {
 		return c.requestTimeout(ctx, work.Run)
 	}
-	configurationDiffers := work.Run.ResourceSpecVersion != 9 || work.Run.ImageIdentity != c.config.ImageIdentity || work.Run.EnvironmentSHA256 != c.config.EnvironmentSHA256 ||
+	configurationDiffers := work.Run.ResourceSpecVersion != rundomain.ResourceSpecVersion || work.Run.ImageIdentity != c.config.ImageIdentity || work.Run.EnvironmentSHA256 != c.config.EnvironmentSHA256 ||
 		work.Agent != c.config.Agent || work.ModelProvider != c.config.ModelProvider || work.Model != c.config.Model
-	if configurationDiffers && !cleanupPhase(work.Run.EffectPhase) {
+	if configurationDiffers && lifecycle.EnforceExecutionConfig {
 		return c.cleanupRequired(ctx, work, "configured execution identity differs")
 	}
-	operation, cancel, _, err := c.effectContext(ctx, work, !cleanupPhase(work.Run.EffectPhase))
+	operation, cancel, _, err := c.effectContext(ctx, work, lifecycle.EnforceAttemptDeadline)
 	if err != nil {
 		return err
 	}
@@ -166,6 +181,18 @@ func (c *Coordinator) RunOnce(ctx context.Context) error {
 
 func (c *Coordinator) process(ctx, parent context.Context, work taskstore.BackgroundRunWork) error {
 	run := work.Run
+	// Credentials are runtime inputs, never publication authority. Refresh only
+	// while execution is allowed; GitHub availability must not block teardown.
+	switch run.EffectPhase {
+	case taskstore.BackgroundRunEffectHealthObserved, taskstore.BackgroundRunEffectReady,
+		taskstore.BackgroundRunEffectSessionObserved, taskstore.BackgroundRunEffectPromptIntent,
+		taskstore.BackgroundRunEffectPromptAdmitted:
+		if run.CancelEpoch == 0 && run.TimeoutRequestedAt == nil {
+			if err := c.provider.RefreshGitHubCredentials(ctx, run); err != nil {
+				return c.externalFailure(parent, work, err)
+			}
+		}
+	}
 	switch run.EffectPhase {
 	case taskstore.BackgroundRunEffectSealIntent:
 		observation, providerFence, err := c.provider.ProveWriterInactive(ctx, run)
@@ -348,7 +375,7 @@ func (c *Coordinator) process(ctx, parent context.Context, work taskstore.Backgr
 		})
 		return err
 	default:
-		mutation, cancel, now, err := c.effectContext(parent, work, !cleanupPhase(run.EffectPhase))
+		mutation, cancel, now, err := c.effectContext(parent, work, classify(run).EnforceAttemptDeadline)
 		if err != nil {
 			return err
 		}
@@ -366,15 +393,17 @@ func (c *Coordinator) recordWriterFence(ctx context.Context, work taskstore.Back
 	}
 	params := taskstore.RecordBackgroundRunWriterFenceParams{BackgroundRunClaim: claim(run, now),
 		SealRequestID: run.BackgroundSealRequestID, ExportID: run.ArtifactExportID}
-	switch {
-	case provider.NeverCreated:
+	switch provider.Kind() {
+	case taskenvdocker.WriterFenceNeverCreated:
 		params.Kind = taskstore.WriterFenceNeverCreated
-	case provider.StartedAt == "":
-		params.Kind, params.ContainerID = taskstore.WriterFenceNeverStarted, provider.ContainerID
-	default:
-		params.Kind, params.ContainerID, params.ContainerStartedAt = taskstore.WriterFenceRuntimeStopped, provider.ContainerID, provider.StartedAt
-		params.RuntimeEpoch, params.RuntimeToken = run.RuntimeEpoch, provider.Token
+	case taskenvdocker.WriterFenceCreatedNeverStarted:
+		params.Kind, params.ContainerID = taskstore.WriterFenceNeverStarted, provider.ContainerID()
+	case taskenvdocker.WriterFenceStoppedRuntime:
+		params.Kind, params.ContainerID, params.ContainerStartedAt = taskstore.WriterFenceRuntimeStopped, provider.ContainerID(), provider.StartedAt()
+		params.RuntimeEpoch, params.RuntimeToken = run.RuntimeEpoch, provider.Token()
 		params.StoppedAt = &now
+	default:
+		return taskenvdocker.ErrIdentityMismatch
 	}
 	params.ProofSHA256, err = taskstore.WriterFenceProofDigest(params)
 	if err != nil {
@@ -508,7 +537,7 @@ func (c *Coordinator) exportRetained(ctx, parent context.Context, work taskstore
 			}
 		}
 		if export.Phase == taskstore.BackgroundRunExportPhaseBundleWriteStarted {
-			export, err = c.store.VerifyBackgroundRunBundle(parent, taskstore.VerifyBackgroundRunBundleParams{
+			export, err = c.store.RecordBackgroundRunBundleVerified(parent, taskstore.RecordBackgroundRunBundleVerifiedParams{
 				BackgroundRunExportClaim: claimExport(), BundleSHA256: snapshot.BundleSHA256.Bytes(), BundleBytes: snapshot.BundleBytes})
 			if err != nil {
 				return fail(err)
@@ -758,13 +787,7 @@ func (c *Coordinator) observeWorking(ctx, parent context.Context, work taskstore
 		recordErr := c.recordObservation(parent, work, `{"effect":"work_observe","status":"inconclusive"}`, taskstore.BackgroundRunUncertain)
 		return errors.Join(err, recordErr)
 	}
-	state := taskstore.BackgroundRunState("")
-	status := ""
-	if observation.Questions > 0 || observation.Permissions > 0 {
-		state, status = taskstore.BackgroundRunNeedsYou, "owned_pending"
-	} else if observation.Active {
-		state, status = taskstore.BackgroundRunWorking, "positive_active"
-	}
+	state, status := workObservation(observation.State)
 	if state == "" {
 		mutation, cancel, now, mutationErr := c.effectContext(parent, work, true)
 		if mutationErr != nil {
@@ -777,6 +800,19 @@ func (c *Coordinator) observeWorking(ctx, parent context.Context, work taskstore
 	value := fmt.Sprintf(`{"effect":"work_observe","status":%q,"questions":%d,"permissions":%d,"usage":%s}`,
 		status, observation.Questions, observation.Permissions, usage.Evidence)
 	return c.recordObservation(parent, work, value, state)
+}
+
+// The runtime owns pending-observation precedence. Counts remain evidence only;
+// unknown observations do not authorize a durable state change.
+func workObservation(state backgroundopencode.WorkState) (taskstore.BackgroundRunState, string) {
+	switch state {
+	case backgroundopencode.WorkNeedsYou:
+		return taskstore.BackgroundRunNeedsYou, "owned_pending"
+	case backgroundopencode.WorkWorking:
+		return taskstore.BackgroundRunWorking, "positive_active"
+	default:
+		return "", ""
+	}
 }
 
 func (c *Coordinator) client(ctx context.Context, run taskstore.BackgroundRun) (*backgroundopencode.Client, error) {
@@ -824,7 +860,7 @@ func (c *Coordinator) externalFailure(ctx context.Context, work taskstore.Backgr
 	if errors.Is(external, taskenvdocker.ErrIdentityMismatch) || errors.Is(external, taskenvdocker.ErrQuarantined) {
 		return errors.Join(external, c.cleanupRequired(ctx, work, "background resource identity mismatch"))
 	}
-	mutation, cancel, now, mutationErr := c.effectContext(ctx, work, !cleanupPhase(work.Run.EffectPhase))
+	mutation, cancel, now, mutationErr := c.effectContext(ctx, work, classify(work.Run).EnforceAttemptDeadline)
 	if mutationErr != nil {
 		return errors.Join(external, mutationErr)
 	}
@@ -839,7 +875,7 @@ func (c *Coordinator) cleanupRequired(ctx context.Context, work taskstore.Backgr
 			return removeErr
 		}
 	}
-	mutation, cancel, now, err := c.effectContext(ctx, work, !cleanupPhase(work.Run.EffectPhase))
+	mutation, cancel, now, err := c.effectContext(ctx, work, classify(work.Run).EnforceAttemptDeadline)
 	if err != nil {
 		return err
 	}
@@ -921,7 +957,7 @@ func (c *Coordinator) requestTimeout(ctx context.Context, run taskstore.Backgrou
 
 func (c *Coordinator) record(ctx context.Context, work taskstore.BackgroundRunWork, value string,
 	transition func(context.Context, taskstore.RecordBackgroundRunEvidenceParams) (taskstore.BackgroundRun, error)) error {
-	mutation, cancel, now, err := c.effectContext(ctx, work, !cleanupPhase(work.Run.EffectPhase))
+	mutation, cancel, now, err := c.effectContext(ctx, work, classify(work.Run).EnforceAttemptDeadline)
 	if err != nil {
 		return err
 	}
@@ -950,15 +986,6 @@ func evidence(run taskstore.BackgroundRun, now time.Time, value string) taskstor
 	return taskstore.RecordBackgroundRunEvidenceParams{BackgroundRunClaim: claim(run, now), Evidence: value}
 }
 
-func cleanupPhase(phase taskstore.BackgroundRunEffectPhase) bool {
-	return phase == taskstore.BackgroundRunEffectStopIntent || phase == taskstore.BackgroundRunEffectWriterInactive ||
-		phase == taskstore.BackgroundRunEffectSealIntent || phase == taskstore.BackgroundRunEffectExporting || phase == taskstore.BackgroundRunEffectArtifactCommitted ||
-		phase == taskstore.BackgroundRunEffectRouteRemoved || phase == taskstore.BackgroundRunEffectContainerRemoved ||
-		phase == taskstore.BackgroundRunEffectVolumeRemoved || phase == taskstore.BackgroundRunEffectCloneRemoved ||
-		phase == taskstore.BackgroundRunEffectCleanupComplete || phase == taskstore.BackgroundRunEffectPreEffectFailed
-}
-
-func timeoutState(state taskstore.BackgroundRunState) bool {
-	return state == taskstore.BackgroundRunSettingUp || state == taskstore.BackgroundRunWorking ||
-		state == taskstore.BackgroundRunNeedsYou || state == taskstore.BackgroundRunUncertain
+func classify(run taskstore.BackgroundRun) rundomain.Lifecycle {
+	return rundomain.Classify(rundomain.State(run.State), rundomain.Phase(run.EffectPhase))
 }
