@@ -21,7 +21,7 @@ Fern owns:
   publication admission;
 - exact disposable resource identity and lifecycle;
 - run claims, revisions, cancellation epochs, and evidence;
-- read-only live-route capabilities and draining;
+- read-only live-route capabilities and connection shutdown;
 - exact writer generations and cold human takeover/handback;
 - writer inactivity proof;
 - Git bundle export and local content-addressed storage;
@@ -76,7 +76,7 @@ The three listeners are bound before Docker side effects. The remote listener
 is the paired-device and plugin surface. The operator listener is loopback-only
 and protected by the Fern control password. The Background Run listener has no
 default target: `backgroundroute.Manager` binds one exact live runtime and
-removes and drains it before writer teardown.
+removes it and waits for admitted forwarding to exit before writer teardown.
 
 ## 4. Startup Composition
 
@@ -241,7 +241,7 @@ Removal is a fence:
 
 1. Remove target admission.
 2. Cancel and close admitted HTTP, SSE, and WebSocket traffic.
-3. Wait for target users to drain.
+3. Wait for every admitted request-forwarding goroutine to exit.
 4. Return route-removal evidence.
 
 No persistent OpenCode path is forwarded by the remote or operator gateway.
@@ -325,8 +325,9 @@ agent_owned W1
  -> takeover_requested (route removal, inspector removal, agent stop/removal,
                          OpenCode volume removal, Git boundary)
  -> human_owned W2
- -> handback_requested (terminal drain, human stop/removal, Git boundary,
-                         fresh volume/container/session/resume prompt)
+ -> handback_requested (close browser WebSocket and Docker attach, wait for
+                         both forwarding goroutines, human stop/removal,
+                         Git boundary, fresh volume/container/session/resume prompt)
  -> agent_owned W3
  -> ...
 ```
@@ -342,9 +343,12 @@ The human writer is the PID 1 Bash process in a dedicated container. It has no
 network, credentials, ports, or OpenCode state volume; it has a read-only root,
 bounded tmpfs state, dropped capabilities, `no-new-privileges`, and only the
 clone bind-mounted writable. Fern uses Docker attach, never Docker exec. The
-browser WebSocket is same-origin, tied to paired-device cancellation, and is
-drained before handback. An expired attempt automatically begins handback so
-normal timeout processing can resume under an agent-owned generation.
+browser WebSocket is same-origin and tied to paired-device cancellation. Before
+handback, Fern closes the browser WebSocket and Docker attach connection and
+waits for both forwarding goroutines to exit; this does not guarantee delivery
+of bytes already buffered at disconnect. An expired attempt automatically
+begins handback so normal timeout processing can resume under an agent-owned
+generation.
 
 At each cold boundary Fern proves that all writer containers are absent, then
 records `HEAD`, status metadata, tracked diff bytes, and untracked-content object
@@ -430,7 +434,7 @@ generation when one exists.
 | --- | --- |
 | `cmd/fern` | CLI, composition, backup, credentials, process lifecycle |
 | `backgroundopencode` | pinned disposable OpenCode client and observations |
-| `backgroundroute` | exact live target capability, drain, and fencing |
+| `backgroundroute` | exact live target capability, connection shutdown, and fencing |
 | `backgroundruncoord` | serial run effect coordinator and recovery |
 | `config` | strict compatibility loader and production validator |
 | `control` | devices, pairing, legacy disposition, route state |

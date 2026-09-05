@@ -39,7 +39,7 @@ func (c *Coordinator) processOwnership(ctx, parent context.Context, work tasksto
 	runtime := taskenvdocker.RuntimeIdentity{ContainerID: ownership.ContainerID, StartedAt: ownership.ContainerStartedAt, Token: ownership.RuntimeToken}
 	switch ownership.Phase {
 	case taskstore.BackgroundRunOwnershipAgentRouteRemoval:
-		if err := c.drainTerminal(ctx, run.TaskID); err != nil {
+		if err := c.disconnectTerminalAndWait(ctx, run.TaskID); err != nil {
 			return c.ownershipFailure(parent, work, err)
 		}
 		if _, err := c.provider.RemoveInspector(ctx, work.Run, ownership.WriterGeneration); err != nil {
@@ -112,16 +112,11 @@ func (c *Coordinator) processOwnership(ctx, parent context.Context, work tasksto
 			p.WriterEvidence = started.Evidence
 		})
 	case taskstore.BackgroundRunOwnershipHumanRouteRemoval:
-		if err := c.drainTerminal(ctx, run.TaskID); err != nil {
+		if err := c.disconnectTerminalAndWait(ctx, run.TaskID); err != nil {
 			return c.ownershipFailure(parent, work, err)
 		}
-		if c.config.DrainTerminal != nil {
-			if err := c.config.DrainTerminal(ctx, run.TaskID); err != nil {
-				return c.ownershipFailure(parent, work, err)
-			}
-		}
 		return c.advanceOwnership(parent, work, taskstore.BackgroundRunHandbackRequested, taskstore.BackgroundRunOwnershipHumanStop, func(p *taskstore.AdvanceBackgroundRunOwnershipParams) {
-			p.RouteEvidence = `{"effect":"terminal_route","status":"drained"}`
+			p.RouteEvidence = `{"effect":"terminal_connection","status":"disconnected"}`
 		})
 	case taskstore.BackgroundRunOwnershipHumanStop:
 		observation, err := c.provider.StopShellContainer(ctx, work.Run, ownership.WriterGeneration, taskenvdocker.ShellRoleHuman, runtime)

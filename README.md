@@ -127,14 +127,18 @@ mutations and upgrades before they reach OpenCode. Paired devices and the local
 operator use `/fern/runs` for durable warm interrupt/steer controls and a
 networkless, credential-free read-only inspector terminal.
 
-Writable access is a cold ownership transfer. Fern first closes and drains the
-agent route and inspector, stops and removes the exact agent process epoch, and
-deletes its disposable OpenCode volume. Only then does it start a networkless,
+Writable access is a cold ownership transfer. Fern first closes the agent route,
+disconnects the inspector terminal, waits for request and terminal forwarding
+to exit, stops and removes the exact agent process epoch, and deletes its
+disposable OpenCode volume. Only then does it start a networkless,
 credential-free PID 1 Bash container with the run clone mounted writable. On
-handback Fern drains and removes that human writer, captures a Git boundary,
-starts a fresh OpenCode volume/container/session, submits a re-read/resume
-prompt, and restores the read-only agent route under a higher writer generation.
-Ambiguous evidence leaves all routes closed.
+handback Fern closes the browser WebSocket and Docker attach connection, waits
+for both forwarding goroutines to exit, and then stops and removes the human
+writer. It captures a Git boundary, starts a fresh OpenCode
+volume/container/session, submits a re-read/resume prompt, and restores the
+read-only agent route under a higher writer generation. Closing connections does
+not guarantee delivery of already-buffered terminal output. Ambiguous evidence
+leaves all routes closed.
 
 ## Durable State
 

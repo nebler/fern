@@ -56,12 +56,22 @@ func (b *Bridge) Serve(w http.ResponseWriter, r *http.Request, run taskstore.Bac
 			_ = connection.Close()
 		})
 		defer stopContext()
-		done := make(chan struct{}, 2)
-		go func() { _, _ = io.Copy(connection, terminal); done <- struct{}{} }()
-		go func() { _, _ = io.Copy(terminal, connection); done <- struct{}{} }()
-		<-done
+		forwardAndWait(connection, terminal)
 	}}
 	server.ServeHTTP(w, r)
+}
+
+// forwardAndWait disconnects both sides as soon as either direction stops,
+// then waits for both forwarding goroutines. It does not promise delivery of
+// bytes buffered when the connection is closed.
+func forwardAndWait(browser, terminal io.ReadWriteCloser) {
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(browser, terminal); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(terminal, browser); done <- struct{}{} }()
+	<-done
+	_ = browser.Close()
+	_ = terminal.Close()
+	<-done
 }
 
 func sameOrigin(r *http.Request) bool {

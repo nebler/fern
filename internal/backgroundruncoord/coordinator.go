@@ -41,7 +41,6 @@ type Config struct {
 	Now               func() time.Time
 	HTTPClient        *http.Client
 	Route             *backgroundroute.Manager
-	DrainTerminal     func(context.Context, task.TaskID) error
 	OnError           func(error)
 	OnSuccess         func()
 	AfterPromptFence  func()
@@ -286,7 +285,7 @@ func (c *Coordinator) process(ctx, parent context.Context, work taskstore.Backgr
 		if err != nil {
 			return c.cleanupFailure(parent, work, err)
 		}
-		if err := c.drainTerminal(ctx, run.TaskID); err != nil {
+		if err := c.disconnectTerminalAndWait(ctx, run.TaskID); err != nil {
 			return c.cleanupFailure(parent, work, err)
 		}
 		if _, err := c.provider.RemoveInspector(ctx, run, run.WriterGeneration); err != nil {

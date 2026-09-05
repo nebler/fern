@@ -156,7 +156,7 @@ func (c *Coordinator) currentAgentOwnership(ctx context.Context, run taskstore.B
 	return current, nil
 }
 
-func (c *Coordinator) drainTerminal(ctx context.Context, taskID task.TaskID) error {
+func (c *Coordinator) disconnectTerminalAndWait(ctx context.Context, taskID task.TaskID) error {
 	c.terminalMu.Lock()
 	session := c.terminals[taskID]
 	c.terminalMu.Unlock()
