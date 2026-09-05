@@ -35,7 +35,16 @@ helpers are external executables.
 
 From the repository root, with the qualified image already present:
 
+Prerequisite: a disposable **native Linux** host and local Docker daemon sharing
+the same filesystem paths (Docker Desktop, including on Linux, is unsupported).
+An operator must provision an XFS directory with project-quota accounting and
+enforcement enabled, an inherited project ID, and nonzero hard **byte and inode**
+limits. Export that existing absolute directory as `FERN_RUNTIME_STORAGE_ROOT`.
+The provider verifies this contract; there is no integration bypass. The harness
+does not mount filesystems or administer quotas.
+
 ```sh
+export FERN_RUNTIME_STORAGE_ROOT=/operator/provisioned/fern-project
 export FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE=fern/opencode-background-source:dev
 export FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE_ID="$(docker image inspect "$FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE" --format '{{.Id}}')"
 sh integration/background-run-docker/run.sh
@@ -47,6 +56,16 @@ image. The Go harness checks the pin again and uses a three-minute overall
 deadline, with operation-specific bounds. It creates private temporary state
 and a fixture repository, and arranges cleanup of exact harness-owned resources.
 Cleanup errors contribute to failure rather than being treated as success.
+Each invocation creates a unique mode-0700 child beneath the quota root; its
+`state` child is passed as `Config.RuntimeStorageRoot`, inheriting the shared
+project budget for clones and local-bind-backed persistent OpenCode storage.
+Only this disposable tree is deleted, after compute cleanup and checks for
+remaining container/volume references. Ambiguous cleanup retains it for the
+operator; the provisioned parent is never deleted.
+
+No live Linux quota qualification has been performed on the current macOS
+development machine. Its expected unsupported-platform rejection is negative
+preflight evidence only, not a live runtime/storage qualification.
 
 ## Assertions
 

@@ -1465,6 +1465,9 @@ func testProvider(t *testing.T) (*Provider, *fakeDocker, taskstore.BackgroundRun
 	base := gitOutput(t, gitPath, repository, "rev-parse", "HEAD")
 	docker := newFakeDocker()
 	config := Config{
+		quotaCheck: func(string) (quotaIdentity, error) {
+			return quotaIdentity{Device: 1, Project: 1, Blocks: 1024, Inodes: 1024}, nil
+		},
 		StateRoot: state, Repository: repository, GitExecutable: gitPath,
 		ImageReference: "fern/opencode-background-source:dev", ImageID: testImageID,
 		MemoryBytes: 512 << 20, NanoCPUs: 2_000_000_000, PIDs: 512, WallTimeout: time.Minute,

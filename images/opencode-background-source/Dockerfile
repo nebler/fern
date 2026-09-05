@@ -1,11 +1,13 @@
 FROM oven/bun:1.3.14-debian@sha256:9dba1a1b43ce28c9d7931bfc4eb00feb63b0114720a0277a8f939ae4dfc9db6f AS build
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates g++ git make python3 \
+      ca-certificates g++ git gnupg make python3 \
     && rm -rf /var/lib/apt/lists/*
 
 ENV OPENCODE_SOURCE_COMMIT=39fb919a054190498f6d5b7985bde231f93ad7a6 \
     OPENCODE_SOURCE_VERSION=0.0.0-source-39fb919a054190498f6d5b7985bde231f93ad7a6
+
+COPY github-web-flow.asc verify-source-signature /usr/local/share/fern-source-verification/
 
 WORKDIR /src
 RUN set -eux; \
@@ -16,7 +18,9 @@ RUN set -eux; \
     git checkout --detach FETCH_HEAD; \
     test "$(git rev-parse HEAD)" = "${OPENCODE_SOURCE_COMMIT}"; \
     test "$(git rev-parse HEAD^{commit})" = "${OPENCODE_SOURCE_COMMIT}"; \
-    test "$(git status --porcelain)" = ""
+    test "$(git status --porcelain)" = ""; \
+    sh /usr/local/share/fern-source-verification/verify-source-signature \
+      /usr/local/share/fern-source-verification/github-web-flow.asc "${OPENCODE_SOURCE_COMMIT}"
 
 RUN bun install --frozen-lockfile
 RUN OPENCODE_CHANNEL=source OPENCODE_VERSION="${OPENCODE_SOURCE_VERSION}" \

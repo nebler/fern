@@ -106,6 +106,65 @@ func TestBackgroundRunAdmissionIsAtomicAndActorFiltered(t *testing.T) {
 	}
 }
 
+func TestBackgroundRunListLazyCapacityAndOwnership(t *testing.T) {
+	store := openTestStore(t, testDBPath(t))
+	t.Cleanup(func() { _ = store.Close() })
+	createTestWorkspace(t, store)
+	ctx := context.Background()
+	first := testBackgroundRunAdmission(1800, "list-first")
+	assertList := func(actor task.ActorSnapshot, limit, count, capacity int, want task.TaskID) {
+		t.Helper()
+		runs, err := store.ListBackgroundRuns(ctx, testWorkspaceID(), actor, limit)
+		if err != nil || runs == nil || len(runs) != count || cap(runs) != capacity {
+			t.Fatalf("list: len=%d cap=%d nil=%v err=%v", len(runs), cap(runs), runs == nil, err)
+		}
+		if count > 0 && runs[0].TaskID != want {
+			t.Fatalf("first task = %s, want %s", runs[0].TaskID, want)
+		}
+	}
+	assertList(first.Claim.Actor, MaxBackgroundRunListLimit, 0, 0, "")
+	if _, err := store.AdmitBackgroundRun(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	assertList(first.Claim.Actor, MaxBackgroundRunListLimit, 1, 1, first.TaskID)
+	assertList(first.Claim.Actor, 1, 1, 1, first.TaskID)
+	second := testBackgroundRunAdmission(1801, "list-second")
+	second.Claim.Actor.ID, second.Claim.Actor.CredentialID = "pc_other", "pc_other"
+	if _, err := store.AdmitBackgroundRun(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	// The newer foreign row must not consume the SQL limit before ownership.
+	assertList(first.Claim.Actor, 1, 1, 1, first.TaskID)
+	operator := task.ActorSnapshot{Type: task.ActorOperator, ID: "operator", DisplayName: "Operator",
+		CredentialID: "operator", Authentication: "basic", RequestID: "request"}
+	assertList(operator, 1, 1, 1, second.TaskID)
+	other := first.Claim.Actor
+	other.CredentialID = "pc_absent"
+	assertList(other, MaxBackgroundRunListLimit, 0, 0, "")
+	for i := 2; i <= MaxBackgroundRunListLimit; i++ {
+		p := testBackgroundRunAdmission(1800+i, fmt.Sprintf("list-owned-%d", i))
+		if _, err := store.AdmitBackgroundRun(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+		if i == 10 {
+			assertList(first.Claim.Actor, MaxBackgroundRunListLimit, 10, 16, p.TaskID)
+			assertList(first.Claim.Actor, 7, 7, 7, p.TaskID)
+		}
+		if i == MaxBackgroundRunListLimit {
+			assertList(first.Claim.Actor, MaxBackgroundRunListLimit, i, i, p.TaskID)
+		}
+	}
+	// Invalid bounds are rejected before SQL, even when the context is canceled.
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	for _, limit := range []int{-1, 0, MaxBackgroundRunListLimit + 1} {
+		runs, err := store.ListBackgroundRuns(canceled, testWorkspaceID(), first.Claim.Actor, limit)
+		if !errors.Is(err, ErrInvalidInput) || runs != nil {
+			t.Fatalf("invalid limit %d: runs=%v err=%v", limit, runs, err)
+		}
+	}
+}
+
 func TestBackgroundRunWorkspaceFenceAndLifecycleAlgebra(t *testing.T) {
 	store := openTestStore(t, testDBPath(t))
 	t.Cleanup(func() { _ = store.Close() })

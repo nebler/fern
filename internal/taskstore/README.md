@@ -178,22 +178,54 @@ phases, constraints, and existing lease-error text remain unchanged; this is
 not a schema or event-encoding migration. The `run.State` and `run.Phase` type
 aliases remain the shared policy boundary rather than duplicate store types.
 
-The wide background-run select scans evidence and attribution even for short
-list projections. It also grows a slice of wide `BackgroundRun` values from zero
-capacity. Reserving the bounded limit on the first successful row could avoid
-growth copies without allocating for empty lists, but would reserve excess
-capacity for sparse lists. Neither this allocation tradeoff nor narrower queries
-is introduced by the naming cleanup; use `OwnedList100` to measure a future
-change without altering public models or projections. Admission
+The wide background-run select still scans evidence and attribution even for
+short list projections; no narrower query or public model change is introduced.
+`ListBackgroundRuns` now explicitly doubles capacity when full, starting at one
+after the first successfully scanned row and capping growth at the validated
+limit (at most 100). This avoids runtime growth overshooting the query bound
+without eagerly reserving space for sparse lists. Empty results remain nonnil
+with zero capacity. SQL ownership filtering, ordering, and input validation are
+unchanged. Growth still copies existing rows; this is not a single-allocation
+list. Admission
 cost includes triggers/indexes and FULL WAL commits; claim selection includes
 recovery priority and capacity checks. Do not infer these costs from enum tests.
 
 `benchmark_test.go` measures fresh admission into a growing real database,
-same-owner recovery claims, owned get/list of 100 seeded runs, and receipt lookup.
+same-owner recovery claims, owned get/list of 100 seeded runs, receipt lookup,
+and sparse lists of 0, 1, or 10 rows requested with a limit of 100.
 Setup/migration is excluded. Fresh admission includes fixture parameter assembly
 but not secure ID generation; recovery is not first provisioning. Benchmarks are
 serial and retain production durability settings; they do not model contention,
 Docker, Git, or network latency.
+
+Focused capped-growth measurements on Apple M4 Pro, darwin/arm64,
+Go 1.27.0, `-cpu 1 -count 3 -benchmem` (median of three samples, original
+append growth → capped doubling):
+
+| Workload | ns/op | B/op | allocs/op |
+| --- | ---: | ---: | ---: |
+| `OwnedList100` | 1,167,755 → 1,136,957 | 958,330 → 900,985 | 16,029 → 16,029 |
+| `Rows0Limit100` | 178,763 → 187,497 | 10,544 → 10,544 | 121 → 121 |
+| `Rows1Limit100` | 191,584 → 196,076 | 17,945 → 17,945 | 281 → 281 |
+| `Rows10Limit100` | 274,205 → 280,805 | 109,253 → 109,253 | 1,716 → 1,716 |
+
+The full-list workload saves 57,345 allocated bytes (about 6.0%) with unchanged
+allocation count; its measured median time falls about 2.6%. Empty, single-row,
+and ten-row allocation totals are unchanged. Their median times rise about
+2–5%; timing differences are local observations, not statistical claims. The
+remaining wide SQL scan dominates allocation counts.
+
+An initial experiment reserved all 100 slots after the first row: it reduced
+full-list allocation to 750,066 B/op and 16,022 allocs/op, but raised single-row
+allocation from 17,945 to 131,485 B/op and ten-row allocation from 109,253 to
+187,720 B/op. Capped doubling deliberately gives up some full-list savings to
+avoid that sparse-list regression. Capacities grow 1, 2, 4, 8, 16, 32, 64, 100
+when the limit is 100; a ten-row result retains capacity 16, not 100. Reproduce
+all four workloads with:
+
+```sh
+go test ./internal/taskstore -run '^$' -bench '^BenchmarkBackgroundRun(Read|ListSparse)$/^(OwnedList100|Rows.*)$' -benchmem -cpu 1 -count 3
+```
 
 See the [central performance report](../../docs/performance.md) for the shared
 benchmark command, environment, and results. The focused commands below select

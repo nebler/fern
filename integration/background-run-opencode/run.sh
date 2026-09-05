@@ -1,6 +1,21 @@
 #!/bin/sh
 set -eu
 
+if [ "$(uname -s)" != Linux ]; then
+  printf '%s\n' 'error: unsupported platform: native Linux with enforced XFS project quotas is required; Docker Desktop is unsupported' >&2
+  exit 2
+fi
+case "${FERN_RUNTIME_STORAGE_ROOT:-}" in
+  /*) ;;
+  *) printf '%s\n' 'error: FERN_RUNTIME_STORAGE_ROOT must be an absolute operator-provisioned XFS project directory with inherited project ID and enforced nonzero hard byte and inode limits' >&2; exit 2 ;;
+esac
+DAEMON_OS="$(docker info --format '{{.OSType}} {{.OperatingSystem}} {{.Name}}')"
+case "$DAEMON_OS" in
+  *[Dd]esktop*|*[Dd]ESKTOP*) printf '%s\n' 'error: Docker Desktop is unsupported; use native Linux sharing the quota root' >&2; exit 2 ;;
+  linux\ *) ;;
+  *) printf '%s\n' 'error: a native Linux Docker daemon is required' >&2; exit 2 ;;
+esac
+
 IMAGE_ID="${FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE_ID:-}"
 export FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE="${FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE:-fern/opencode-background-source:dev}"
 if [ -z "$IMAGE_ID" ]; then

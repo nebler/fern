@@ -21,6 +21,7 @@ func benchmarkConfigFixture(b *testing.B) (string, string, []byte) {
       id: 456
       fullName: owner/repository
 tasks:
+  runtimeStorageRoot: /var/lib/fern-runtime
   agent: build
   model:
     provider: anthropic

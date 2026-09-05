@@ -43,6 +43,8 @@ type scanDocker struct {
 	creates         int
 }
 
+func (d *scanDocker) VerifyRuntimeStorage(string) error { return nil }
+
 func (d *scanDocker) ImageInspect(context.Context, string, ...client.ImageInspectOption) (image.InspectResponse, error) {
 	return image.InspectResponse{ID: scanImage, Config: &container.Config{
 		User: "1001:1001",

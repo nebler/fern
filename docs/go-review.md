@@ -80,10 +80,24 @@ opened no-follow descriptor, and decrypted JSON rejects duplicate keys. Bundle
 version **2** supports only GitHub App credentials; version 1 is explicitly
 rejected. The underlying GitHub credential schema remains unchanged.
 
+The next hardening pass bounded raw YAML input to 1 MiB and verified the exact
+OpenCode source commit against a vendored, fingerprint-pinned GitHub web-flow
+signing key before running dependency installation. That policy authenticates
+GitHub-signed commit content, not a separate maintainer approval or an identity
+independent of GitHub. The runtime image README records the trust anchor.
+
+The selected deployment contract is native Linux with operator-provisioned XFS
+project-quota storage, not Docker Desktop. Runtime storage qualification must
+fail closed; monitoring and free-space admission are not substitutes. Positive
+kernel-enforcement and disk-exhaustion qualification requires that Linux host.
+The local macOS checks establish unsupported-host rejection, not successful
+quota enforcement. Earlier Desktop lifecycle results below remain historical
+evidence for the earlier storage contract, not qualification of this new one.
+
 | Area | Finding | Recommendation |
 | --- | --- | --- |
 | `credentialbundle` | Plaintext serialization still uses memory buffers, and ancestor directories remain trusted. | Do not describe it as streaming serialization or protection against hostile same-user directory replacement. |
-| `config` | YAML file reading is unbounded and task parsing repeats marshaling/decoding; `decodeRequiredTaskString` also serves other config sections. | Document the startup-only scope. A file-size bound and a more general helper name are reasonable targeted follow-ups, not reasons for another config layer. |
+| `config` | Raw YAML reads are now bounded to 1 MiB; task parsing still repeats marshaling/decoding and `decodeRequiredTaskString` also serves other sections. | Keep the startup-only scope clear; the byte limit does not bound expanded environment values. |
 | `control` / `pluginauth` | Read-sounding authentication/list operations can update/prune persisted state; full-file serialization and fsync hold locks. | Keep those effects explicit in docs. Benchmark write/expiry paths separately from cached reads before changing locking. |
 | `githubapp` | `Client` means token minting, while other clients perform discovery. `AppCredentials.PrivateKey` exposes an RSA pointer. | A future focused `TokenClient` rename is clearer; do not claim deep immutability for returned pointers. |
 | `taskstore` | Wide row scans serve small list responses; list100 still allocates about 936 KiB. | Measure realistic polling pressure before introducing a second projection. The cleanup intentionally preserved the SQL and persisted evidence contracts. |

@@ -46,7 +46,11 @@ func (p *Provider) EnsureVolume(ctx context.Context, run taskstore.BackgroundRun
 	status := "reconciled"
 	if errdefs.IsNotFound(err) {
 		status = "created"
-		_, createErr := p.docker.VolumeCreate(operation, volume.CreateOptions{Name: run.VolumeIdentity, Driver: "local", Labels: want})
+		if err := p.prepareVolumeBacking(run); err != nil {
+			cancel()
+			return Observation{}, err
+		}
+		_, createErr := p.docker.VolumeCreate(operation, volume.CreateOptions{Name: run.VolumeIdentity, Driver: "local", Labels: want, DriverOpts: p.volumeOptions(run)})
 		cancel()
 		read, readCancel := p.freshDockerContext(ctx)
 		existing, err = p.docker.VolumeInspect(read, run.VolumeIdentity)
@@ -63,6 +67,9 @@ func (p *Provider) EnsureVolume(ctx context.Context, run taskstore.BackgroundRun
 	if err := p.attestVolume(run, digest, existing); err != nil {
 		return Observation{}, &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: err.Error()}
 	}
+	if err := p.attestExecutionVolume(run, existing); err != nil {
+		return Observation{}, err
+	}
 	e, _ := makeEvidence(evidence{Effect: "volume", Identity: run.VolumeIdentity, Spec: digest, Status: status})
 	return Observation{Evidence: e}, nil
 }
@@ -71,7 +78,7 @@ func (p *Provider) attestVolume(run taskstore.BackgroundRun, digest string, item
 	if item.Name != run.VolumeIdentity || !equalMap(item.Labels, p.labels(run, digest)) {
 		return errors.New("Docker name or labels do not match the immutable run")
 	}
-	if item.Driver != "local" || item.Scope != "local" || len(item.Options) != 0 || item.ClusterVolume != nil || len(item.Status) != 0 {
+	if item.Driver != "local" || item.Scope != "local" || (len(item.Options) != 0 && !equalMap(item.Options, p.volumeOptions(run))) || item.ClusterVolume != nil || len(item.Status) != 0 {
 		return errors.New("Docker volume is not an option-free local-scope local-driver volume")
 	}
 	if item.Mountpoint == "" || !filepath.IsAbs(item.Mountpoint) {
@@ -101,6 +108,9 @@ func (p *Provider) EnsureContainer(ctx context.Context, run taskstore.Background
 	if err := p.attestVolume(run, digest, item); err != nil {
 		return Observation{}, &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: err.Error()}
 	}
+	if err := p.attestExecutionVolume(run, item); err != nil {
+		return Observation{}, err
+	}
 	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	status := "reconciled"
@@ -117,7 +127,7 @@ func (p *Provider) EnsureContainer(ctx context.Context, run taskstore.Background
 			NetworkMode: "bridge", IpcMode: "private", CgroupnsMode: "private", Runtime: "runc", ShmSize: 64 << 20,
 			PortBindings: nat.PortMap{serverPort: []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "0"}}},
 			Resources:    container.Resources{Memory: p.config.MemoryBytes, MemorySwap: p.config.MemoryBytes * 2, NanoCPUs: p.config.NanoCPUs, PidsLimit: &pids},
-			Init:         &useInit, RestartPolicy: container.RestartPolicy{Name: "no"}, CapDrop: []string{"ALL"}, SecurityOpt: []string{"no-new-privileges"},
+			Init:         &useInit, RestartPolicy: container.RestartPolicy{Name: "no"}, CapDrop: []string{"ALL"}, SecurityOpt: workerSecurityOptions(), ReadonlyRootfs: true, Tmpfs: workerTmpfs(),
 			Mounts: []mount.Mount{
 				{Type: mount.TypeBind, Source: filepath.Join(p.root, run.CloneIdentity), Target: workspaceTarget},
 				{Type: mount.TypeVolume, Source: run.VolumeIdentity, Target: opencodeTarget},
@@ -162,6 +172,28 @@ func (p *Provider) StartContainer(ctx context.Context, run taskstore.BackgroundR
 		return Observation{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
+	volumeCtx, volumeCancel := operationContext(ctx, p.config.DockerTimeout)
+	storage, storageErr := p.docker.VolumeInspect(volumeCtx, run.VolumeIdentity)
+	volumeCancel()
+	if storageErr != nil {
+		return Observation{}, storageErr
+	}
+	if err := p.attestVolume(run, digest, storage); err != nil {
+		return Observation{}, err
+	}
+	if err := p.attestExecutionVolume(run, storage); err != nil {
+		return Observation{}, err
+	}
+	storageCtx, storageCancel := operationContext(ctx, p.config.DockerTimeout)
+	defer storageCancel()
+	if err := p.attestExecutionTree(storageCtx, filepath.Join(p.root, run.CloneIdentity)); err != nil {
+		return Observation{}, err
+	}
+	if len(storage.Options) != 0 {
+		if err := p.attestExecutionTree(storageCtx, p.volumeBackingPath(run)); err != nil {
+			return Observation{}, err
+		}
+	}
 	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	if err != nil {
@@ -252,11 +284,16 @@ func (p *Provider) attestContainerMode(run taskstore.BackgroundRun, digest strin
 		}
 	}
 	h := info.HostConfig
-	if h.NetworkMode != "bridge" || h.IpcMode != "private" || h.CgroupnsMode != "private" || h.PidMode != "" || h.UTSMode != "" || h.UsernsMode != "" || h.Runtime != "runc" || h.ShmSize != 64<<20 || h.AutoRemove || h.Privileged || h.ReadonlyRootfs || h.PublishAllPorts || h.ContainerIDFile != "" || h.VolumeDriver != "" || h.Cgroup != "" || h.Isolation != "" || h.ConsoleSize != [2]uint{} {
+	if h.NetworkMode != "bridge" || h.IpcMode != "private" || h.CgroupnsMode != "private" || h.PidMode != "" || h.UTSMode != "" || h.UsernsMode != "" || h.Runtime != "runc" || h.ShmSize != 64<<20 || h.AutoRemove || h.Privileged || h.PublishAllPorts || h.ContainerIDFile != "" || h.VolumeDriver != "" || h.Cgroup != "" || h.Isolation != "" || h.ConsoleSize != [2]uint{} {
 		return errors.New("container namespace, network, auto-remove, or security flags differ")
 	}
-	if len(h.Binds) != 0 || len(h.VolumesFrom) != 0 || len(h.CapAdd) != 0 || !slices.Equal(h.CapDrop, []string{"ALL"}) || !slices.Equal(h.SecurityOpt, []string{"no-new-privileges"}) || len(h.DNS) != 0 || len(h.DNSOptions) != 0 || len(h.DNSSearch) != 0 || len(h.ExtraHosts) != 0 || len(h.GroupAdd) != 0 || len(h.Links) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.DeviceCgroupRules) != 0 || len(h.Ulimits) != 0 || len(h.Sysctls) != 0 || len(h.StorageOpt) != 0 || len(h.Tmpfs) != 0 || len(h.Annotations) != 0 {
+	if len(h.Binds) != 0 || len(h.VolumesFrom) != 0 || len(h.CapAdd) != 0 || !slices.Equal(h.CapDrop, []string{"ALL"}) || len(h.DNS) != 0 || len(h.DNSOptions) != 0 || len(h.DNSSearch) != 0 || len(h.ExtraHosts) != 0 || len(h.GroupAdd) != 0 || len(h.Links) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.DeviceCgroupRules) != 0 || len(h.Ulimits) != 0 || len(h.Sysctls) != 0 || len(h.StorageOpt) != 0 || len(h.Annotations) != 0 {
 		return errors.New("container DNS, links, devices, capabilities, or mutable host options differ")
+	}
+	currentStorage := h.ReadonlyRootfs && equalMap(h.Tmpfs, workerTmpfs()) && slices.Equal(h.SecurityOpt, workerSecurityOptions())
+	legacyStorage := !h.ReadonlyRootfs && len(h.Tmpfs) == 0 && slices.Equal(h.SecurityOpt, []string{"no-new-privileges"})
+	if !currentStorage && (enforceCurrentPolicy || !legacyStorage) {
+		return errors.New("container writable storage or quota-protecting seccomp policy differs")
 	}
 	if enforceCurrentPolicy {
 		gotPIDs := int64(-1)
@@ -750,6 +787,11 @@ func (p *Provider) RemoveVolume(ctx context.Context, run taskstore.BackgroundRun
 		if len(listed) != 0 {
 			return Observation{}, &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: "exact-labeled run volume exists under a noncanonical name"}
 		}
+		if clonePresent {
+			if err := p.removeVolumeBacking(run); err != nil {
+				return Observation{}, err
+			}
+		}
 		e, _ := makeEvidence(evidence{Effect: "volume_remove", Identity: run.VolumeIdentity, Spec: digest, Status: "absent"})
 		return Observation{Evidence: e}, nil
 	}
@@ -776,6 +818,11 @@ func (p *Provider) RemoveVolume(ctx context.Context, run taskstore.BackgroundRun
 	listed, listErr := p.listRunVolumes(read, run, digest)
 	if listErr != nil || len(listed) != 0 {
 		return Observation{}, errors.Join(listErr, &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: "exact-labeled run volume remains after removal"})
+	}
+	if len(item.Options) != 0 {
+		if err := p.removeVolumeBacking(run); err != nil {
+			return Observation{}, fmt.Errorf("remove quota-backed volume contents: %w", err)
+		}
 	}
 	e, _ := makeEvidence(evidence{Effect: "volume_remove", Identity: run.VolumeIdentity, Spec: digest, Status: "removed"})
 	return Observation{Evidence: e}, nil

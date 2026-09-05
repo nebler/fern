@@ -32,6 +32,9 @@ jobs:
       - name: Test container GitHub credential helpers
         run: python3 integration/opencode-background-source-contract/test_github_helpers.py
 
+      - name: Test pinned source signature policy
+        run: python3 integration/opencode-background-source-contract/test_source_signature.py
+
       - name: Enforce critical coverage floors
         run: ./scripts/test-critical-coverage.sh
 

@@ -7,11 +7,32 @@ review, and performance considerations. These are source-reviewed diagrams,
 not exhaustive generated call graphs: interfaces, callbacks, HTTP dispatch, and
 platform-specific files make an exhaustive static diagram misleading.
 
-Start with [the product architecture](../ARCHITECTURE.md), then the composition
-root and the boundary relevant to your change. See [review findings](go-review.md)
+Start with the reading order below and keep [the architecture](../ARCHITECTURE.md)
+as a cross-reference. See [review findings](go-review.md)
 and [local performance measurements](performance.md) for the audit results.
 
 ## Runtime and application path
+
+### Suggested first reading order
+
+Do not start with the SQL store or Docker provider: they explain mechanisms before
+you know what those mechanisms are protecting. Read these in order:
+
+1. **[Root README](../README.md)** — what a run does and what Fern does not promise.
+2. **[`run`](../internal/run/README.md)** — lifecycle, resource names, and exact runtime identity.
+3. **[`runcommand`](../internal/runcommand/README.md)** — how create/stop/seal becomes durable intent.
+4. **[`backgroundruncoord`](../internal/backgroundruncoord/README.md)** — how intent becomes effects and how recovery works.
+5. **[`cmd/fern`](../cmd/fern/README.md)** — how those pieces are assembled and shut down.
+
+Then follow the boundary you care about:
+
+- **Persistence/recovery:** `taskstore` → `taskartifact` → `taskresultsource`.
+- **Runtime/resource limits:** `taskenvdocker` → `backgroundopencode`.
+- **Live steering:** `runclientapi` → `backgroundroute` → `proxy`.
+- **Credentials:** `githubapp` → `credentialbundle`; then the runtime image README.
+
+Use [ARCHITECTURE.md](../ARCHITECTURE.md) as the cross-reference, and read the
+performance/review reports after the lifecycle—not as the introduction.
 
 | Package | Responsibility |
 | --- | --- |

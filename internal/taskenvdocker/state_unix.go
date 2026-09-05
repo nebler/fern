@@ -15,6 +15,13 @@ import (
 )
 
 func prepareRoot(stateRoot string) (string, [32]byte, error) {
+	return prepareRootWithKey(stateRoot, nil)
+}
+
+// prepareRootWithKey retains the existing atomic root publication protocol.
+// Runtime roots use a copy of the durable state's authoritative key; they must
+// never silently create a second identity or accept a different existing key.
+func prepareRootWithKey(stateRoot string, authoritative *[32]byte) (string, [32]byte, error) {
 	var zero [32]byte
 	resolved, err := filepath.EvalSymlinks(stateRoot)
 	if err != nil || resolved != stateRoot {
@@ -23,6 +30,9 @@ func prepareRoot(stateRoot string) (string, [32]byte, error) {
 	root := filepath.Join(stateRoot, runRootName)
 	if _, err := os.Lstat(root); err == nil {
 		key, err := loadExistingRoot(root)
+		if err == nil && authoritative != nil && key != *authoritative {
+			return "", zero, errors.New("runtime host key differs from durable authoritative host key")
+		}
 		return root, key, err
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return "", zero, err
@@ -43,8 +53,12 @@ func prepareRoot(stateRoot string) (string, [32]byte, error) {
 		}
 	}()
 	var generated [32]byte
-	if _, err := io.ReadFull(rand.Reader, generated[:]); err != nil {
-		return "", zero, fmt.Errorf("generate background run host key: %w", err)
+	if authoritative != nil {
+		generated = *authoritative
+	} else {
+		if _, err := io.ReadFull(rand.Reader, generated[:]); err != nil {
+			return "", zero, fmt.Errorf("generate background run host key: %w", err)
+		}
 	}
 	if err := writeInitialHostKey(filepath.Join(staging, hostKeyName), generated); err != nil {
 		return "", zero, err
@@ -55,6 +69,9 @@ func prepareRoot(stateRoot string) (string, [32]byte, error) {
 	if err := renameNoReplace(staging, root); err != nil {
 		if _, statErr := os.Lstat(root); statErr == nil {
 			key, loadErr := loadExistingRoot(root)
+			if loadErr == nil && authoritative != nil && key != *authoritative {
+				return "", zero, errors.New("runtime host key differs from durable authoritative host key")
+			}
 			return root, key, loadErr
 		}
 		return "", zero, fmt.Errorf("publish staged background run root: %w", err)
@@ -64,6 +81,9 @@ func prepareRoot(stateRoot string) (string, [32]byte, error) {
 		return "", zero, err
 	}
 	committed, err := loadExistingRoot(root)
+	if err == nil && authoritative != nil && committed != *authoritative {
+		return "", zero, errors.New("runtime host key differs from durable authoritative host key")
+	}
 	return root, committed, err
 }
 

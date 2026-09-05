@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -45,6 +46,9 @@ func validateBackground(config Config, allowPendingInstallation bool) error {
 	}
 	if err := validateTasks(config); err != nil {
 		return err
+	}
+	if !allowPendingInstallation && config.Tasks.RuntimeStorageRoot == "" {
+		return errors.New("tasks.runtimeStorageRoot is required for execution; provision a Linux XFS project-quota root")
 	}
 	if config.Tasks.BackgroundImage == "" || config.Tasks.BackgroundImageID == "" || config.Tasks.BackgroundRoute == nil {
 		return errors.New("a qualified Background Run image and route are required")
@@ -88,6 +92,11 @@ func ValidateWorkspace(config Config) error {
 }
 
 func validateTasks(config Config) error {
+	if root := config.Tasks.RuntimeStorageRoot; root != "" {
+		if !validTaskText(root, 1, 4096) || !filepath.IsAbs(root) || filepath.Clean(root) != root || root == string(filepath.Separator) {
+			return errors.New("tasks.runtimeStorageRoot must be an absolute, cleaned, non-root path")
+		}
+	}
 	if !validTaskText(config.Tasks.Agent, 1, 128) {
 		return errors.New("tasks.agent must be 1-128 bytes of valid text")
 	}

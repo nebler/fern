@@ -95,7 +95,11 @@ func (e *IdentityError) Unwrap() error { return errors.Join(ErrIdentityMismatch,
 
 // Config contains server policy, not client-supplied run identities.
 type Config struct {
-	StateRoot                string
+	StateRoot string
+	// RuntimeStorageRoot is an operator-provisioned XFS project directory. It
+	// must not contain the durable task database. Empty permits cleanup only.
+	RuntimeStorageRoot       string
+	quotaCheck               func(string) (quotaIdentity, error) // hermetic package tests only
 	Repository               string
 	GitExecutable            string
 	ImageReference           string
@@ -229,6 +233,14 @@ func EnvironmentSHA256(environment map[string]string) [sha256.Size]byte {
 // New validates the complete policy, qualifies the immutable local image, and
 // atomically creates or loads the state-backed host key.
 func New(ctx context.Context, config Config, api dockerAPI) (*Provider, error) {
+	// A supplied Docker implementation is already a trusted attestation
+	// boundary. Hermetic cross-package fakes may attest storage through that
+	// same boundary; the production Docker client never implements this seam.
+	if verifier, ok := api.(interface{ VerifyRuntimeStorage(string) error }); ok {
+		config.quotaCheck = func(path string) (quotaIdentity, error) {
+			return quotaIdentity{Device: 1, Project: 1, Blocks: 1, Inodes: 1}, verifier.VerifyRuntimeStorage(path)
+		}
+	}
 	if config.BasicUsername == "" {
 		config.BasicUsername = "opencode"
 	}
@@ -238,6 +250,12 @@ func New(ctx context.Context, config Config, api dockerAPI) (*Provider, error) {
 	root, hostKey, err := prepareRoot(config.StateRoot)
 	if err != nil {
 		return nil, err
+	}
+	if config.RuntimeStorageRoot != "" {
+		root, _, err = prepareRootWithKey(config.RuntimeStorageRoot, &hostKey)
+		if err != nil {
+			return nil, err
+		}
 	}
 	rootInfo, err := os.Lstat(root)
 	if err != nil {
@@ -513,6 +531,9 @@ func qualifyImage(got image.InspectResponse, want string) error {
 }
 
 func (p *Provider) validateRun(run taskstore.BackgroundRun) (string, error) {
+	if err := p.admitStorage(); err != nil {
+		return "", err
+	}
 	digest, err := p.validateRunForCleanup(run)
 	if err != nil {
 		return "", err

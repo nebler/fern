@@ -39,8 +39,9 @@ type fileConfig struct {
 }
 
 type fileTaskPolicy struct {
-	Agent yaml.Node `yaml:"agent"`
-	Model *struct {
+	RuntimeStorageRoot yaml.Node `yaml:"runtimeStorageRoot"`
+	Agent              yaml.Node `yaml:"agent"`
+	Model              *struct {
 		Provider yaml.Node `yaml:"provider"`
 		ID       yaml.Node `yaml:"id"`
 	} `yaml:"model"`
@@ -170,6 +171,15 @@ func parseTaskPolicy(node yaml.Node) (*TaskPolicy, error) {
 	policy := &TaskPolicy{
 		Agent: agent, Model: TaskModel{Provider: provider, ID: modelID},
 		AttemptTimeout: attemptTimeout, LeaseDuration: leaseDuration,
+	}
+	if !file.RuntimeStorageRoot.IsZero() {
+		policy.RuntimeStorageRoot, err = decodeRequiredTaskString(file.RuntimeStorageRoot)
+		if err != nil || policy.RuntimeStorageRoot == "" {
+			if err == nil {
+				err = errors.New("must be nonempty")
+			}
+			return nil, fmt.Errorf("runtimeStorageRoot: %w", err)
+		}
 	}
 	if !file.BackgroundImage.IsZero() {
 		policy.BackgroundImage, err = decodeRequiredTaskString(file.BackgroundImage)

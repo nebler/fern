@@ -24,6 +24,7 @@ func runInit(args []string) error {
 	repositoryName := flags.String("repository", "", "GitHub owner/repository")
 	modelProvider := flags.String("model-provider", "", "OpenCode model provider ID")
 	model := flags.String("model", "", "OpenCode model ID")
+	runtimeStorageRoot := flags.String("runtime-storage-root", "/var/lib/fern-runtime", "operator-provisioned Linux XFS project-quota root (not created by init)")
 	backgroundImage := flags.String("background-image", "fern/opencode-background-source:dev", "qualified Background Run image")
 	backgroundImageID := flags.String("background-image-id", "", "qualified local Background Run image ID")
 	listen := flags.String("listen", "127.0.0.1:8080", "remote/device control-plane listen address")
@@ -54,7 +55,8 @@ func runInit(args []string) error {
 			InstallationID: *installationID, Repository: config.GitHubRepository{ID: *repositoryID, FullName: *repositoryName}}},
 		Control: config.Control{Password: controlSecret}, Listen: *listen, OperatorListen: *operatorListen, RemoteOrigin: *remoteOrigin,
 		Tasks: config.TaskPolicy{Agent: "build", Model: config.TaskModel{Provider: *modelProvider, ID: *model},
-			AttemptTimeout: 30 * time.Minute, LeaseDuration: 2 * time.Minute,
+			RuntimeStorageRoot: *runtimeStorageRoot,
+			AttemptTimeout:     30 * time.Minute, LeaseDuration: 2 * time.Minute,
 			BackgroundImage: *backgroundImage, BackgroundImageID: *backgroundImageID,
 			BackgroundRoute: &config.BackgroundRoute{Listen: *backgroundListen, Origin: *backgroundOrigin}},
 	}
@@ -76,8 +78,9 @@ func runInit(args []string) error {
 			} `yaml:"github"`
 		} `yaml:"workspace"`
 		Tasks struct {
-			Agent string `yaml:"agent"`
-			Model struct {
+			RuntimeStorageRoot string `yaml:"runtimeStorageRoot"`
+			Agent              string `yaml:"agent"`
+			Model              struct {
 				Provider string `yaml:"provider"`
 				ID       string `yaml:"id"`
 			} `yaml:"model"`
@@ -106,6 +109,7 @@ func runInit(args []string) error {
 	output.Workspace.GitHub.Repository.ID = values.Workspace.GitHub.Repository.ID
 	output.Workspace.GitHub.Repository.FullName = values.Workspace.GitHub.Repository.FullName
 	output.Tasks.Agent = values.Tasks.Agent
+	output.Tasks.RuntimeStorageRoot = values.Tasks.RuntimeStorageRoot
 	output.Tasks.Model.Provider, output.Tasks.Model.ID = values.Tasks.Model.Provider, values.Tasks.Model.ID
 	output.Tasks.AttemptTimeout, output.Tasks.LeaseDuration = values.Tasks.AttemptTimeout.String(), values.Tasks.LeaseDuration.String()
 	output.Tasks.BackgroundImage, output.Tasks.BackgroundImageID = values.Tasks.BackgroundImage, values.Tasks.BackgroundImageID
@@ -124,6 +128,7 @@ func runInit(args []string) error {
 		return err
 	}
 	fmt.Printf("Fern Background Run configuration created\n\nconfig: %s\nsecrets: %s\nrepository: %s\n\n", *configPath, *envPath, absRepo)
+	fmt.Printf("Before execution: provision %s on Linux XFS with enforced project quotas for both bytes and inodes, enclosing clone and state-volume directories. Keep durable DB/CAS storage outside this root and reserve host capacity. init does not create or configure quotas. Docker Desktop execution is unsupported.\n\n", *runtimeStorageRoot)
 	if *installationID == 0 {
 		fmt.Printf("Next:\n  1. Configure private TLS routing for %s and %s.\n  2. Run: fern up --config %s --env-file %s\n  3. Open http://%s/fern/control, create the GitHub App, and install it on %s.\n  4. Set workspace.github.installationId in %s from the GitHub installation URL, then restart Fern.\n",
 			*listen, *backgroundListen, *configPath, *envPath, *operatorListen, *repositoryName, *configPath)

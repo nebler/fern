@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -114,6 +115,13 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 	if cfg.Workspace.GitHub.InstallationID == 0 {
 		add("github", "fail", "GitHub App installation ID is not configured", "Complete App onboarding, install it on the configured repository, set workspace.github.installationId, and restart Fern.")
 		return report
+	}
+	if runtime.GOOS != "linux" {
+		add("runtime-storage", "fail", "execution requires native Linux; Docker Desktop is unsupported", "Use a native Linux Docker host with operator-provisioned XFS project quotas for bytes and inodes.")
+	} else if cfg.Tasks.RuntimeStorageRoot == "" {
+		add("runtime-storage", "fail", "tasks.runtimeStorageRoot is required for execution", "Provision an XFS project-quota root, separate from durable DB/CAS storage, and configure tasks.runtimeStorageRoot.")
+	} else {
+		add("runtime-storage", "warn", "path syntax only checked; doctor does not qualify quota enforcement or host reserve", "Provider startup must accept the native Linux XFS project-quota root; qualify byte and inode exhaustion and maintain host reserve before production. Docker Desktop is unsupported.")
 	}
 	if info, err := os.Stat(filepath.Join(cfg.Workspace.Repo, ".git")); err != nil || !info.IsDir() {
 		add("repository", "fail", "repository is not a standard Git checkout", "Use a repository with a .git directory.")

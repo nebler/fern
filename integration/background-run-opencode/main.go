@@ -116,6 +116,10 @@ func main() {
 }
 
 func run() (resultErr error) {
+	quotaRoot, err := runtimeStoragePrerequisite()
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	imageID := os.Getenv("FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE_ID")
@@ -130,18 +134,21 @@ func run() (resultErr error) {
 		return err
 	}
 	defer cli.Close()
+	if err := requireNativeLinuxDocker(ctx, cli); err != nil {
+		return err
+	}
 	image, err := cli.ImageInspect(ctx, imageTag)
 	if err != nil || image.ID != imageID {
 		return fmt.Errorf("operator-pinned image mismatch: inspect=%v local=%q want=%q", err, image.ID, imageID)
 	}
 
-	temporary, err := os.MkdirTemp("", "fern-background-run-opencode-")
+	temporary, err := os.MkdirTemp(quotaRoot, "fern-background-run-opencode-")
 	if err != nil {
 		return err
 	}
 	removeRoot := temporary
 	defer func() {
-		resultErr = errors.Join(resultErr, os.RemoveAll(removeRoot))
+		resultErr = errors.Join(resultErr, removeHarnessRoot(cli, removeRoot))
 		if _, err := os.Lstat(removeRoot); !errors.Is(err, os.ErrNotExist) {
 			resultErr = errors.Join(resultErr, fmt.Errorf("temporary root residue: %v", err))
 		}
@@ -237,7 +244,8 @@ func run() (resultErr error) {
 		OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID,
 	}
 	config := taskenvdocker.Config{
-		StateRoot: state, Repository: repository, GitExecutable: gitPath, ImageReference: imageTag, ImageID: imageID,
+		RuntimeStorageRoot: state,
+		StateRoot:          state, Repository: repository, GitExecutable: gitPath, ImageReference: imageTag, ImageID: imageID,
 		MemoryBytes: 512 << 20, NanoCPUs: 2_000_000_000, PIDs: 512, WallTimeout: 3 * time.Minute,
 		GitTimeout: 30 * time.Second, DockerTimeout: 20 * time.Second, HealthTimeout: 60 * time.Second,
 		GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 128 << 20, CloneObservedLimitBytes: 128 << 20,
@@ -1368,6 +1376,12 @@ func cleanupOpenCode(provider *taskenvdocker.Provider, cli *client.Client, run t
 		}
 		return err
 	})
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, checkErr := cli.ContainerInspect(checkCtx, run.ContainerIdentity)
+	checkCancel()
+	if !client.IsErrNotFound(checkErr) {
+		return errors.Join(result, fmt.Errorf("retain storage: container removal unconfirmed: %v", checkErr))
+	}
 	if provider != nil {
 		call("volume", func(ctx context.Context) error { _, err := provider.RemoveVolume(ctx, run, authority); return err })
 	}

@@ -79,7 +79,31 @@ Allocation columns use the median reported sample. Bytes are bytes, not KiB.
    Their local cost is small. Introducing duplicate atomic readiness state or
    a new authentication cache would add coordination without demonstrated need.
 
-No implementation was rewritten merely to make these microbenchmarks faster.
+No implementation was rewritten during the original baseline measurement pass.
+
+### Subsequent list allocation change
+
+The list now uses capped geometric backing-array growth, starting at one row
+and never reserving beyond the validated request limit. We rejected reserving
+all 100 rows up front: although it saved 21.7% for full lists, it increased a
+single-row result from 17,945 to 131,485 B/op.
+
+Original versus selected implementation, medians of three local samples using
+`-cpu=1 -count=3 -benchmem`:
+
+| Fixture | Original B/op | Current B/op | Current allocs/op |
+| --- | ---: | ---: | ---: |
+| 100 rows | 958,330 | 900,985 | 16,029 |
+| Empty, limit 100 | 10,544 | 10,544 | 121 |
+| 1 row, limit 100 | 17,945 | 17,945 | 281 |
+| 10 rows, limit 100 | 109,253 | 109,253 | 1,716 |
+
+The full-list reduction is **6.0%**, with no sparse-result allocation regression.
+Median full-list time was 1.137 ms versus 1.168 ms in the comparison run; sparse
+times varied upward by roughly 2–5%. These are not statistically established
+latency changes. The wide SQL projection and scanner remain the larger costs.
+The new fixtures are `BenchmarkBackgroundRunListSparse` (see the package tests
+for exact subtest names); run all taskstore benchmarks to reproduce the suite.
 
 ## What the fixtures measure
 

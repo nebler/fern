@@ -223,6 +223,20 @@ values is not yet complete.
 
 ## 9. Disposable Resource Identity
 
+Execution requires native Linux and a local Docker daemon; Docker Desktop is
+unsupported. `tasks.runtimeStorageRoot` names an operator-provisioned XFS
+project-quota root enclosing disposable clone and state-volume directories,
+separate from durable SQLite/CAS storage. Both byte and inode hard limits must
+be enforced, with project inheritance covering new files. Runtime storage is
+mandatory for execution but may be omitted during control-plane bootstrap.
+Configuration validation checks only absolute, cleaned, non-root path shape;
+the provider owns filesystem and quota enforcement checks and fails closed.
+Neither `init` nor `doctor` provisions quotas, changes host mounts, or certifies
+live exhaustion behavior. Operators must qualify byte/inode exhaustion and
+recovery on the target Linux host and maintain free-space/inode reserve for
+Docker images/logs and durable data outside the runtime quota. macOS tests do
+not establish Linux quota qualification.
+
 `taskenvdocker.Provider` owns Docker policy. Every clone, volume, container,
 endpoint, and runtime gets a deterministic Fern identity derived from immutable
 run state and a private host key. Container inspection must match:

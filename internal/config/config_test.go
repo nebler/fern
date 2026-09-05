@@ -20,6 +20,7 @@ const currentYAML = `workspace:
       fullName: owner/repository
 tasks:
   agent: build
+  runtimeStorageRoot: /var/lib/fern-runtime
   model:
     provider: openai
     id: gpt-5
@@ -65,6 +66,9 @@ func validConfig(t *testing.T) Config {
 func TestCurrentConfiguration(t *testing.T) {
 	t.Parallel()
 	cfg := validConfig(t)
+	if cfg.Tasks.RuntimeStorageRoot != "/var/lib/fern-runtime" {
+		t.Fatalf("runtime storage root = %q", cfg.Tasks.RuntimeStorageRoot)
+	}
 	if err := Validate(cfg); err != nil {
 		t.Fatal(err)
 	}

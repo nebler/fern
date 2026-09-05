@@ -3,10 +3,30 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 )
+
+// MaxConfigBytes bounds raw YAML before parsing or environment expansion.
+const MaxConfigBytes = 1 << 20
+
+func readConfig(path string) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, MaxConfigBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxConfigBytes {
+		return nil, errors.New("configuration exceeds 1 MiB limit")
+	}
+	return data, nil
+}
 
 // Load merges defaults, strict YAML, and explicit overrides, then expands
 // repository and control-password references from the process environment.
@@ -27,7 +47,7 @@ func LoadWithEnvironment(path, defaultRepo string, required bool, overrides Over
 
 func load(path, defaultRepo string, required bool, overrides Overrides, lookup func(string) (string, bool)) (Config, error) {
 	config := Default(defaultRepo)
-	data, err := os.ReadFile(path)
+	data, err := readConfig(path)
 	if err != nil {
 		if !os.IsNotExist(err) || required {
 			return Config{}, fmt.Errorf("read config %q: %w", path, err)

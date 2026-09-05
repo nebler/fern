@@ -86,6 +86,7 @@ administrative symlinks. Clone locking covers provider operations and export lea
 
 The source admission/disk-free and observed-clone limits are checks, not a kernel
 filesystem quota. `ObserveUsage` walks files; bytes can grow between observations.
+Execution additionally requires kernel-enforced storage as described below.
 Git operations have configured time/output limits and controlled environment.
 Clone recovery/deletion validates exact marker/path identity, including interrupted
 rename/deletion cases; ambiguous trees are quarantined, not recursively guessed away.
@@ -97,10 +98,98 @@ host key and immutable run identity; credentials do not enter observation eviden
 
 Policy checks include bridge networking, private IPC/cgroup namespace, memory/swap,
 CPU/PID limits, init, restart disabled, all capabilities dropped, and
-`no-new-privileges`. The root filesystem is writable; bridge egress is unrestricted.
-This is not an egress allowlist, read-only-root sandbox, or defense against a hostile
+`no-new-privileges`. The root filesystem is read-only. Explicit tmpfs mounts bound
+`/tmp` and `/home/user/.cache` to 256 MiB/65,536 inodes each and
+`/home/user/.config` and `/home/user/.local/state` to 16 MiB/4,096 inodes each;
+`/dev/shm` is 64 MiB.
+These memory-backed writes are also subject to container memory/swap limits.
+A fixed default-deny seccomp profile permits ordinary worker syscalls and a small
+terminal/pipe ioctl allowlist; it does **not** permit XFS project-ID/inheritance
+changes, unrestricted ioctl, io_uring, or unknown file-attribute APIs. Dropping
+capabilities alone does not prevent an inode owner from changing XFS project IDs.
+Bridge egress is unrestricted. This is not an egress allowlist or defense against a hostile
 Docker administrator. New nonempty host environment maps are rejected specifically
 because the worker has unrestricted egress; legacy digests remain useful for cleanup.
+
+### Required Linux quota storage
+
+`Config.RuntimeStorageRoot` is an existing, exact absolute operator-provisioned
+XFS project directory on Linux amd64/arm64, kernel 5.14 or newer. Docker Desktop,
+other operating systems/filesystems, remote Docker transports, missing quota-query
+permission, accounting-only quotas, project zero, missing project inheritance,
+unlimited byte/inode hard limits, and XFS realtime inheritance fail admission.
+Use the same-host Linux Docker daemon over its local Unix socket, with the same
+host path/mount namespace as Fern (no socket relay or remote daemon proxy).
+
+The operator must provision nonzero project ID and `PROJINHERIT` recursively,
+enable XFS project accounting **and enforcement**, and set both block and inode
+hard limits. Fern only reads `FSGETXATTR`, `Q_XGETQSTATV`, and `Q_XGETQUOTA` via
+`quotactl_fd`; it never mounts, assigns projects, changes quotas, or starts a
+privileged helper. **On stock Linux, reading a project quota with `Q_XGETQUOTA`
+requires `CAP_SYS_ADMIN` in the initial user namespace.** Owning the project
+directory, filesystem ACLs, `CAP_CHOWN`, or being a member of the Docker group
+does not grant that syscall permission. `Q_XGETQSTATV` alone is unprivileged but
+does not report the project's hard limits. Consequently the stock unprivileged
+`fern:fern` service **cannot execute this provider**. This implementation does
+not grant `CAP_SYS_ADMIN`, install a helper, or quietly replace the query with
+an unenforced assertion; deployment must explicitly resolve this privilege
+requirement before production execution. Granting that broad capability to the
+server needs a separate operator security decision, not a hidden service tweak.
+
+The server also needs permission to create its own directories. Volume leaves
+are server-owned mode 0777 beneath a
+server-owned private mode-0700 parent, so UID/GID 1001 can write through its leaf
+mount without granting Fern `CAP_CHOWN`. Host users cannot traverse that parent.
+Permission failure is fatal to
+execution, not silently replaced by polling or a disk-free check.
+
+One fixed shared project bounds all serial capacity-one runs, including retained
+failed runs. The authoritative host key remains at
+`StateRoot/background-runs/host.key`, outside the quota and in the existing
+durable backup location. `RuntimeStorageRoot/background-runs` holds clone
+authority and clone trees, plus a private copy of that same host key for root
+validation. Initialization atomically publishes that copy; reconstruction rejects
+an existing runtime root whose key differs from the durable authoritative key.
+Both key files remain mode 0600 under private mode-0700 roots. Named Docker volumes use the exact local-driver bind
+of `background-runs/opencode-volumes/<volume identity>`, under the same project.
+The parent remains private/server-owned; the worker sees only its leaf. Docker
+volume removal is followed by backing-tree deletion after the existing writer
+fence and container-absence checks. Operator provisioned storage must not be
+changed while workers run. Keep the durable task database and recovery exports
+outside this quota and reserve sufficient host space for them and bounded Docker
+logs; project exhaustion must not exhaust the durable recovery filesystem.
+Admission enforces different filesystem device IDs for `RuntimeStorageRoot`
+and durable `StateRoot`. Operators must also place recovery exports outside the
+runtime filesystem. Hard limits must be sized below runtime filesystem capacity
+with reserve for filesystem metadata and other writers: an arbitrarily large
+finite quota does not prevent ENOSPC. There is no admission calculation comparing
+remaining quota allowance to available blocks/inodes, and no protection against
+other host writers exhausting either filesystem. The guarantee is bounded
+worker project allocation, **not** universal host-free-space preservation.
+
+Admission occurs before clone, volume, container, or start effects. Construction
+and cleanup do not require quota availability. Legacy option-free volumes and
+writable-root containers remain cleanup-attestable, but cannot be newly adopted
+for execution. No resource-spec bump is needed. An empty runtime root selects the
+old `StateRoot/background-runs` **for cleanup only**. To recover old resources,
+retain that old root and durable host key; do not move existing clone trees to the new
+root (their path/inode authority would change). Drain legacy runs with the old
+cleanup configuration before selecting a new runtime root.
+
+Hermetic tests inject storage attestation privately or through an explicitly
+injected Docker fake's `VerifyRuntimeStorage(string) error` method. The production
+Docker client does not implement that method; there is no YAML/config bypass.
+The fixed seccomp/tmpfs profile and actual EDQUOT behavior require qualification
+on the provisioned Linux host; macOS tests are not live quota qualification.
+
+`FERN_STORAGE_POLICY_SMOKE_IMAGE=fern/opencode-background-source:signed go test
+./internal/taskenvdocker -run TestLiveWorkerStoragePolicy -count=1 -v` separately
+launches a disposable raw Docker container with the exact seccomp, read-only-root,
+and tmpfs policy. It checks authenticated health, unauthenticated rejection,
+session creation, a local Git commit, and gh version/missing-credential rejection.
+It removes only its generated container and volumes. Those managed smoke volumes
+are deliberately not quota-backed: this is neither an XFS/EDQUOT qualification
+nor a model/prompt or credentialed GitHub API contract test.
 
 Health and route transports re-attest runtime identity, not merely container name
 or port. A restarted process changes start-time/token/epoch identity and must not

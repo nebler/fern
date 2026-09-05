@@ -1,0 +1,38 @@
+#!/bin/sh
+# Build-only policy: GitHub web-flow, not an individual maintainer signature.
+set -eu
+expected=968479A1AFF927E37D1A566BB5690EEEBB952194
+test "$#" -eq 2 || { echo "usage: $0 KEY_FILE COMMIT" >&2; exit 1; }
+key=$1
+commit=$2
+export LC_ALL=C
+GNUPGHOME=$(mktemp -d)
+export GNUPGHOME
+trap 'rm -rf "$GNUPGHOME"' EXIT HUP INT TERM
+chmod 700 "$GNUPGHOME"
+printf '%s\n' 'no-auto-key-retrieve' 'auto-key-locate clear' > "$GNUPGHOME/gpg.conf"
+# Inspect before importing: reject extra primary keys, not just a matching UID
+# or short key ID. No user keyring or keyserver participates in this decision.
+gpg --batch --with-colons --import-options show-only --import "$key" > "$GNUPGHOME/keys"
+awk -F: -v expected="$expected" '
+  $1 == "pub" { primaries++; primary = 1; next }
+  $1 == "fpr" && primary { if ($10 != expected) bad = 1; primary = 0 }
+  END { exit !(primaries == 1 && !primary && !bad) }
+' "$GNUPGHOME/keys" || { echo 'unapproved source signing key' >&2; exit 1; }
+gpg --batch --import "$key"
+if ! git -c gpg.format=openpgp -c gpg.program=gpg -c gpg.openpgp.program=gpg \
+    verify-commit --raw "$commit" > "$GNUPGHOME/status" 2>&1; then
+  cat "$GNUPGHOME/status" >&2
+  echo 'source commit signature verification failed' >&2
+  exit 1
+fi
+cat "$GNUPGHOME/status" >&2
+# VALIDSIG fields: signer fingerprint, date, timestamp, expiry, version,
+# reserved, public-key algorithm, hash algorithm, class, primary fingerprint.
+awk -v expected="$expected" '
+  $1 == "[GNUPG:]" && $2 == "VALIDSIG" {
+    valid++; if (NF != 12 || $3 != expected || $12 != expected) bad = 1
+  }
+  END { exit !(valid == 1 && !bad) }
+' "$GNUPGHOME/status" || { echo 'unapproved source commit signature' >&2; exit 1; }
+echo "Verified GitHub web-flow signature: $expected ($commit)"

@@ -48,7 +48,8 @@ creation. Sealing retains the Git result; it does not publish it.
 ## Requirements
 
 - Go 1.27 or newer
-- local Docker over a Unix socket
+- native Linux with local Docker over a Unix socket (Docker Desktop execution is unsupported)
+- operator-provisioned XFS project quotas enforcing both byte and inode hard limits
 - a qualified `opencode-background-source` image
 - a GitHub App installation bound to one repository
 - private HTTPS origins for the control plane and live-run route
@@ -56,6 +57,28 @@ creation. Sealing retains the Git result; it does not publish it.
 
 Remote `DOCKER_HOST` endpoints are rejected. Fern expects host-local bind
 mounts, loopback routing, and coordination.
+
+Set `tasks.runtimeStorageRoot` to an absolute, cleaned, non-root path such as
+`/var/lib/fern-runtime`. This operator-provisioned XFS project root must enclose
+both disposable clones and state-volume directories. Keep durable SQLite/CAS
+storage outside it. Enable project-quota enforcement, assign the project with
+inheritance, and set hard limits for **both bytes and inodes** before execution.
+Plan and monitor host free-space/inode reserve separately, including Docker
+images, logs, and durable artifacts; a runtime quota is not a whole-host disk
+guarantee. Fern does not configure mounts or provision quotas automatically.
+Configuration validation checks path shape only; provider execution admission rejects
+unsupported or non-quota-backed execution. `doctor` reports its quota-check
+limitations rather than certifying enforcement.
+
+**Deployment blocker:** Linux requires `CAP_SYS_ADMIN` for the project-hard-limit
+query used here. The stock unprivileged service cannot execute this checker.
+No broad capability or privileged helper is installed automatically. Resolve the
+quota-query privilege arrangement explicitly before deployment; see
+[`taskenvdocker`'s storage contract](internal/taskenvdocker/README.md#required-linux-quota-storage).
+
+Qualify byte and inode exhaustion, recovery, and host reserve on the actual
+Linux deployment before production. macOS development tests are not live quota
+qualification, and Docker Desktop is not an execution fallback.
 
 The current Docker bridge is not a sandbox for hostile repository code.
 Repositories and the host network must be trusted. Background environment
@@ -79,6 +102,7 @@ run origin must have an explicit non-443 port.
 ```sh
 go run ./cmd/fern init \
   --repo /srv/fern/repository \
+  --runtime-storage-root /var/lib/fern-runtime \
   --repository owner/repository \
   --repository-id 123456789 \
   --model-provider replace-with-credential-free-provider \

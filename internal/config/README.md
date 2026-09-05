@@ -105,13 +105,24 @@ These naming alternatives are maintenance considerations, not additional APIs.
 
 ## Performance: static observations
 
-`Load` reads the entire file without an explicit byte cap and constructs a YAML
-tree. `parseTaskPolicy` performs an additional marshal/decode pass. Configuration
+Execution also requires `tasks.runtimeStorageRoot`: an absolute, cleaned,
+non-root path to operator-provisioned Linux quota-backed storage. Configuration
+validation checks syntax, not kernel enforcement. The Docker provider must
+establish the actual storage boundary before permitting execution. Bootstrap
+configuration may omit the path; there is no fallback to unbounded storage.
+The root must be separate from durable control state and retained artifacts.
+Drain and clean existing runs before changing runtime storage locations.
+
+`Load` reads at most `MaxConfigBytes + 1` bytes and rejects raw YAML over **1 MiB**
+before constructing a YAML tree. This bounds the read itself, not just an earlier
+file-size observation, so file growth cannot bypass the byte limit. It does not
+bound environment expansion or promise protection from blocking special files.
+`parseTaskPolicy` performs an additional marshal/decode pass. Configuration
 is a startup/CLI path, so this is not automatically a runtime bottleneck.
 `Validate` performs `os.Stat`, string checks, and repeated origin parsing; it
 does not invoke Git, Docker, DNS resolution, or GitHub.
 
-Consider a file-size bound for defensive loading before optimizing tree parsing.
+Boundary tests cover just-below, exact-limit, oversized, and optional missing files.
 Avoid caching validation across filesystem or configuration changes without a
 clear invalidation contract.
 

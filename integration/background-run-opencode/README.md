@@ -39,7 +39,16 @@ the pinned source image, and its Node/OpenCode runtime are external dependencies
 
 From the repository root, on a disposable Docker-capable host:
 
+This must be **native Linux** with a local Docker daemon sharing the host's
+filesystem paths; Docker Desktop (also on Linux) is unsupported. An operator
+must supply an existing absolute `FERN_RUNTIME_STORAGE_ROOT` on XFS with project
+quota accounting and enforcement enabled, inherited project ID, and nonzero
+hard **byte and inode** limits. The provider verifies the quota contract with no
+integration bypass. Neither this harness nor its wrapper mounts filesystems or
+administers quotas.
+
 ```sh
+export FERN_RUNTIME_STORAGE_ROOT=/operator/provisioned/fern-project
 export FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE=fern/opencode-background-source:dev
 export FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE_ID="$(docker image inspect "$FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE" --format '{{.Id}}')"
 sh integration/background-run-opencode/run.sh
@@ -50,8 +59,18 @@ tag/ID disagreement rather than pulling a replacement. The top-level scenario
 uses a four-minute context; individual network, health, clone, and cleanup
 operations also have bounds. The fake provider runs in a container, while Fern
 creates real disposable run containers and temporary repositories/state.
+Each invocation uses a unique private mode-0700 child of the quota root and
+passes its `state` directory as `Config.RuntimeStorageRoot`. Clones and persistent
+local-bind-backed OpenCode storage inherit the shared project budget. Cleanup
+deletes only that invocation's disposable tree after compute removals and checks
+for remaining container/volume references; ambiguous cleanup retains it for the
+operator, never deleting the provisioned parent.
 
 ## Evidence boundaries
+
+No live Linux quota qualification has been performed on the current macOS
+development machine. Expected rejection there establishes only negative
+unsupported-platform preflight behavior, not live runtime/storage qualification.
 
 The harness exercises real pinned-server authentication, session/prompt/history
 behavior, lost-response reconciliation, and serial restart/admission fencing.

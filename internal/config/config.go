@@ -34,13 +34,14 @@ type BackgroundRoute struct {
 }
 
 type TaskPolicy struct {
-	Agent             string
-	Model             TaskModel
-	AttemptTimeout    time.Duration
-	LeaseDuration     time.Duration
-	BackgroundImage   string
-	BackgroundImageID string
-	BackgroundRoute   *BackgroundRoute
+	RuntimeStorageRoot string
+	Agent              string
+	Model              TaskModel
+	AttemptTimeout     time.Duration
+	LeaseDuration      time.Duration
+	BackgroundImage    string
+	BackgroundImageID  string
+	BackgroundRoute    *BackgroundRoute
 }
 
 // Control contains only the host-side control-plane credential.

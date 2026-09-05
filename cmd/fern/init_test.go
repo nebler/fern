@@ -14,10 +14,12 @@ func TestInitCreatesOnboardingOnlyConfigurationWithoutInstallationID(t *testing.
 	directory := t.TempDir()
 	configPath := filepath.Join(directory, "fern.yaml")
 	envPath := filepath.Join(directory, "fern.env")
+	runtimeRoot := filepath.Join(directory, "operator-provisioned-runtime")
 	err := runInit([]string{
 		"--config", configPath,
 		"--env-file", envPath,
 		"--repo", directory,
+		"--runtime-storage-root", runtimeRoot,
 		"--repository", "owner/repository",
 		"--repository-id", "123",
 		"--model-provider", "anthropic",
@@ -49,6 +51,12 @@ func TestInitCreatesOnboardingOnlyConfigurationWithoutInstallationID(t *testing.
 	}
 	if loaded.Workspace.GitHub.InstallationID != 0 {
 		t.Fatalf("pending GitHub binding = %+v", loaded.Workspace.GitHub)
+	}
+	if loaded.Tasks.RuntimeStorageRoot != runtimeRoot {
+		t.Fatalf("runtime storage root = %q", loaded.Tasks.RuntimeStorageRoot)
+	}
+	if _, err := os.Stat(runtimeRoot); !os.IsNotExist(err) {
+		t.Fatalf("init must not provision runtime storage: %v", err)
 	}
 	if err := config.ValidateBootstrap(loaded); err != nil {
 		t.Fatalf("bootstrap validation: %v", err)

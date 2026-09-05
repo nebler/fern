@@ -27,6 +27,10 @@ func main() {
 }
 
 func run() (resultErr error) {
+	quotaRoot, err := runtimeStoragePrerequisite()
+	if err != nil {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 	imageID := os.Getenv("FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE_ID")
@@ -41,6 +45,9 @@ func run() (resultErr error) {
 		return err
 	}
 	defer cli.Close()
+	if err := requireNativeLinuxDocker(ctx, cli); err != nil {
+		return err
+	}
 	imageReference := os.Getenv("FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE")
 	if imageReference == "" {
 		imageReference = "fern/opencode-background-source:dev"
@@ -52,11 +59,11 @@ func run() (resultErr error) {
 	if image.ID != imageID {
 		return fmt.Errorf("operator-pinned image ID is %s, local tag resolves to %s", imageID, image.ID)
 	}
-	temporary, err := os.MkdirTemp("", "fern-background-run-docker-")
+	temporary, err := os.MkdirTemp(quotaRoot, "fern-background-run-docker-")
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(temporary)
+	defer func() { resultErr = errors.Join(resultErr, removeHarnessRoot(cli, temporary)) }()
 	temporary, err = filepath.EvalSymlinks(temporary)
 	if err != nil {
 		return err
@@ -119,6 +126,7 @@ func run() (resultErr error) {
 	run := taskstore.BackgroundRun{WorkspaceID: workspaceID, TaskID: taskID, AttemptID: attemptID, Generation: 1, RepositoryID: 42, RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ResourceSpecVersion: runidentity.ResourceSpecVersion, ImageIdentity: imageID, CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode", ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint", OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID}
 	config := taskenvdocker.Config{StateRoot: state, Repository: repository, GitExecutable: gitPath, ImageReference: imageReference, ImageID: imageID, MemoryBytes: 512 << 20, NanoCPUs: 2_000_000_000, PIDs: 512, WallTimeout: 2 * time.Minute, GitTimeout: 30 * time.Second, DockerTimeout: 20 * time.Second, HealthTimeout: 60 * time.Second, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 128 << 20, CloneObservedLimitBytes: 128 << 20, DiskFreeAdmissionBytes: 128 << 20, LogMaxSize: "1m", LogMaxFiles: 2, StopGrace: 3 * time.Second}
 	githubFixture, err := newGitHubFixture()
+	config.RuntimeStorageRoot = state
 	if err != nil {
 		return err
 	}
@@ -252,7 +260,13 @@ func run() (resultErr error) {
 	if err != nil {
 		return err
 	}
-	if info.Config.User != "1001:1001" || info.HostConfig.Memory != config.MemoryBytes || info.HostConfig.NanoCPUs != 2_000_000_000 || info.HostConfig.PidsLimit == nil || *info.HostConfig.PidsLimit != 512 || info.HostConfig.Init == nil || !*info.HostConfig.Init || !info.HostConfig.RestartPolicy.IsNone() || len(info.HostConfig.CapDrop) != 1 || info.HostConfig.CapDrop[0] != "ALL" || len(info.HostConfig.Devices) != 0 || len(info.HostConfig.DeviceRequests) != 0 || info.HostConfig.LogConfig.Config["max-size"] != "1m" || len(info.Mounts) != 2 {
+	persistentMounts := 0
+	for _, mounted := range info.Mounts {
+		if mounted.Type != "tmpfs" {
+			persistentMounts++
+		}
+	}
+	if info.Config.User != "1001:1001" || info.HostConfig.Memory != config.MemoryBytes || info.HostConfig.NanoCPUs != 2_000_000_000 || info.HostConfig.PidsLimit == nil || *info.HostConfig.PidsLimit != 512 || info.HostConfig.Init == nil || !*info.HostConfig.Init || !info.HostConfig.RestartPolicy.IsNone() || len(info.HostConfig.CapDrop) != 1 || info.HostConfig.CapDrop[0] != "ALL" || len(info.HostConfig.Devices) != 0 || len(info.HostConfig.DeviceRequests) != 0 || info.HostConfig.LogConfig.Config["max-size"] != "1m" || persistentMounts != 2 || !info.HostConfig.ReadonlyRootfs || len(info.HostConfig.Tmpfs) == 0 {
 		return errors.New("real container security, resources, logs, or mounts differ")
 	}
 	if info.Config.Labels["dev.fern.background-run.task"] != string(taskID) || info.Config.Labels["dev.fern.background-run.spec"] == "" {
@@ -261,6 +275,9 @@ func run() (resultErr error) {
 	volumeInfo, err := cli.VolumeInspect(ctx, run.VolumeIdentity)
 	if err != nil || volumeInfo.Labels["dev.fern.background-run.task"] != string(taskID) {
 		return errors.New("real volume immutable labels differ")
+	}
+	if volumeInfo.Driver != "local" || volumeInfo.Options["type"] != "none" || volumeInfo.Options["o"] != "bind" || !withinHarnessRoot(state, volumeInfo.Options["device"]) {
+		return errors.New("real volume is not local-bind-backed beneath the quota runtime storage root")
 	}
 	if started.Endpoint == "" || started.HostPort == 0 {
 		return errors.New("real loopback endpoint is absent")
@@ -418,6 +435,12 @@ func cleanupHarness(provider *taskenvdocker.Provider, cli *client.Client, run ta
 	call("raw exact-name container fallback", func(context.Context) error {
 		return rawRemoveContainer(cli, run.ContainerIdentity)
 	})
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	_, checkErr := cli.ContainerInspect(checkCtx, run.ContainerIdentity)
+	checkCancel()
+	if !client.IsErrNotFound(checkErr) {
+		return errors.Join(cleanupErr, fmt.Errorf("retain storage: container removal unconfirmed: %v", checkErr))
+	}
 	call("provider volume remove", func(ctx context.Context) error {
 		_, err := provider.RemoveVolume(ctx, run, authority)
 		return err

@@ -166,7 +166,8 @@ func newTaskServices(ctx context.Context, cfg config.Config, route *backgroundro
 		return nil, fmt.Errorf("resolve Background Run repository: %w", err)
 	}
 	provider, err := taskenvdocker.New(ctx, taskenvdocker.Config{
-		StateRoot: providerRoot, Repository: repository, GitExecutable: gitExecutable(),
+		RuntimeStorageRoot: cfg.Tasks.RuntimeStorageRoot,
+		StateRoot:          providerRoot, Repository: repository, GitExecutable: gitExecutable(),
 		GitHubTokens: authority.installationTokens, GitHubRepository: githubIdentity,
 		GitHubRepositoryFullName: durableWorkspace.RepositoryFullName,
 		ImageReference:           cfg.Tasks.BackgroundImage, ImageID: cfg.Tasks.BackgroundImageID, MemoryBytes: 1 << 30,

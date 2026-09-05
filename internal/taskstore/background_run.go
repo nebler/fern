@@ -103,6 +103,13 @@ func (s *Store) ListBackgroundRuns(ctx context.Context, workspaceID task.Workspa
 		if scanErr != nil {
 			return nil, fmt.Errorf("scan background run list: %w", scanErr)
 		}
+		if len(runs) == cap(runs) {
+			// Grow only after a successful scan, without exceeding the query bound.
+			// Starting at one avoids reserving excess space for sparse lists.
+			grown := make([]BackgroundRun, len(runs), min(limit, max(1, 2*cap(runs))))
+			copy(grown, runs)
+			runs = grown
+		}
 		runs = append(runs, run)
 	}
 	if err := rows.Err(); err != nil {

@@ -1,4 +1,51 @@
-# GitHub credential contract (runtime spec 10)
+# Source verification and GitHub credential contract (runtime spec 10)
+
+## Build-only source signature policy
+
+Before `bun install` or any source build script runs, the build stage checks out
+the exact pinned commit `39fb919a054190498f6d5b7985bde231f93ad7a6` and runs
+`verify-source-signature`. It requires a successful `git verify-commit --raw`
+and exactly one `VALIDSIG` whose full signing and primary fingerprints equal:
+
+```text
+968479A1AFF927E37D1A566BB5690EEEBB952194
+```
+
+This is the **GitHub web-flow** signing policy. It is not a maintainer signature
+policy and is not independent verification of GitHub. The key was retrieved
+from `https://github.com/web-flow.gpg`; `github-web-flow.asc` vendors only the
+above primary key (armored GPG export), excluding the older web-flow key.
+The verifier checks the complete primary fingerprint and rejects additional
+primary keys before importing into a fresh private keyring. Automatic key
+retrieval is disabled; no host keyring, ownertrust, short key ID, display name,
+or network-fetched key is accepted as authorization during verification.
+Missing, invalid, and unapproved signatures fail the build.
+
+Rotation requires a reviewed change to both the vendored key and the literal
+full fingerprint in the verifier. Confirm the replacement through GitHub's
+published signing-key information and your organization's trusted review
+process, inspect its primary fingerprint, and rerun the offline signature
+fixtures plus a real image build. Do not automatically accept keys advertised
+by an untrusted commit, or silently fall back to the previous key. Review key
+revocations explicitly: an offline vendored key does not discover new ones.
+
+This proves the pinned Git commit has a signature from the approved GitHub
+web-flow key. It does **not** prove individual author/maintainer approval,
+source safety, uncompromised GitHub infrastructure, dependency provenance,
+reproducible builds, or runtime artifact signatures. GnuPG, the public key, and
+the verifier are build-stage-only; the source commit/version/profile and runtime
+spec remain unchanged because this is build-time integrity, not a runtime change.
+
+Build and qualify a separate image without replacing harness/dev tags:
+
+```sh
+docker build --tag fern/opencode-background-source:signed images/opencode-background-source
+FERN_OPENCODE_BACKGROUND_SOURCE_IMAGE=fern/opencode-background-source:signed \
+FERN_OPENCODE_BACKGROUND_SOURCE_BUILD=0 \
+python3 integration/opencode-background-source-contract/contract_harness.py
+```
+
+## GitHub credential contract
 
 The harness supplies these files through the Docker API into the existing
 `/home/user/.local/share/opencode` private data volume, never the workspace:
@@ -37,7 +84,11 @@ credential use; they are not a sandbox against code running as UID 1001 (which
 can read its token directly). GitHub App installation permissions remain the
 authorization boundary. The harness owns pushes and PR creation.
 
-Offline tests (no Docker, network, or real credentials):
+Offline tests (no Docker, network, or real credentials; signature fixtures
+require local `git`, `gpg`, and `gpgconf`, otherwise they are skipped). Signature
+tests generate an ephemeral signing key and change only a temporary copy of the
+verifier to test successful verification; the production policy has no
+fingerprint override:
 
 ```sh
 python3 -m unittest discover -s integration/opencode-background-source-contract -p 'test_*.py' -v

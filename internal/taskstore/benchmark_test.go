@@ -76,6 +76,31 @@ func BenchmarkBackgroundRunClaimRecovery(b *testing.B) {
 	}
 }
 
+// Sparse lists still request the maximum bound, exposing growth-policy costs.
+// Empty lists must not reserve a backing array.
+func BenchmarkBackgroundRunListSparse(b *testing.B) {
+	for _, count := range []int{0, 1, 10} {
+		b.Run(fmt.Sprintf("Rows%dLimit100", count), func(b *testing.B) {
+			s := benchmarkStore(b)
+			ctx := context.Background()
+			p := testAdmission(1, "sparse-1", "Work")
+			for i := 1; i <= count; i++ {
+				if _, err := s.AdmitBackgroundRun(ctx, testAdmission(i, fmt.Sprintf("sparse-%d", i), "Work")); err != nil {
+					b.Fatal(err)
+				}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				runs, err := s.ListBackgroundRuns(ctx, testWorkspaceID(), p.Claim.Actor, MaxBackgroundRunListLimit)
+				if err != nil || runs == nil || len(runs) != count {
+					b.Fatalf("sparse list: count=%d nil=%v err=%v", len(runs), runs == nil, err)
+				}
+			}
+		})
+	}
+}
+
 func BenchmarkBackgroundRunRead(b *testing.B) {
 	s := benchmarkStore(b)
 	ctx := context.Background()
