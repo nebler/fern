@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nebler/fern/internal/jsoncanon"
 	"github.com/nebler/fern/internal/pluginauth"
+	"github.com/nebler/fern/internal/strictjson"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -376,7 +376,7 @@ func decodePluginAuthJSON(writer http.ResponseWriter, request *http.Request, val
 	}
 	request.Body = http.MaxBytesReader(writer, request.Body, maxPluginAuthBody)
 	payload, err := io.ReadAll(request.Body)
-	if err != nil || jsoncanon.Check(payload, 3) != nil {
+	if err != nil || strictjson.Check(payload, 3) != nil {
 		http.Error(writer, "invalid plugin authorization request", http.StatusBadRequest)
 		return false
 	}

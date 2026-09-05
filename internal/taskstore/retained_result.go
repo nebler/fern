@@ -257,7 +257,7 @@ func validateRetainedResultCommit(p CommitBackgroundRunRetainedResultParams) err
 	if p.Actor.Validate() != nil || (p.Actor.Type != task.ActorSystem && p.Actor.Type != task.ActorRecovery) || validExactTimestamp(p.SealedAt) != nil {
 		return fmt.Errorf("%w: retained result actor or time", ErrInvalidInput)
 	}
-	return validateDeliveryEvidence(p.EvidencePayload, p.EvidenceSHA256)
+	return validateRetainedResultEvidence(p.EvidencePayload, p.EvidenceSHA256)
 }
 
 func (s *Store) GetRetainedArtifact(ctx context.Context, id task.RetainedArtifactID) (RetainedArtifact, error) {
@@ -320,10 +320,6 @@ func (s *Store) ReferencedArtifactManifestSHA256(ctx context.Context) ([][32]byt
 		return nil, err
 	}
 	return values, nil
-}
-
-func (s *Store) ListReferencedArtifactManifestSHA256(ctx context.Context) ([][32]byte, error) {
-	return s.ReferencedArtifactManifestSHA256(ctx)
 }
 
 func retainedResultReplay(ctx context.Context, tx *sql.Tx, result Result, p CommitBackgroundRunRetainedResultParams) (BackgroundRunRetainedResult, error) {

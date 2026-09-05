@@ -7,6 +7,9 @@
   pure-Go modernc SQLite).
 - Source: uncommitted working tree based on `2a333f8`, after schema 3/resource-spec
   10 and the harness-owned GitHub handoff.
+- The original results used the package name `jsoncanon`, since renamed to
+  `strictjson` without parser changes. The reproduction command uses its current
+  path; these numbers are the original baseline, not a claimed cleanup speedup.
 - One package benchmark process at a time (`-p=1`), one Go scheduler processor
   (`-cpu=1`), three samples, one-second target per benchmark.
 - No Go race instrumentation, coverage instrumentation, concurrent test suite,
@@ -16,7 +19,7 @@
 ```sh
 go test -p=1 -run '^$' -bench . -benchmem -benchtime=1s -count=3 -cpu=1 \
   ./internal/config ./internal/control ./internal/githubapp \
-  ./internal/jsoncanon ./internal/observability ./internal/taskstore \
+  ./internal/strictjson ./internal/observability ./internal/taskstore \
   ./internal/backgroundroute ./internal/taskartifact
 ```
 
@@ -85,7 +88,7 @@ No implementation was rewritten merely to make these microbenchmarks faster.
 | `config` | Current YAML load/expansion, task policy decode, and validation as separate benchmarks | Config creation; no runtime startup or Docker |
 | `control` | Cached device authentication with 1 and 64 devices | No expiry/pruning or hourly LastSeen persistence/fsync |
 | `githubapp` | Strict decoding of a synthetic GitHub JSON response | HTTP/TLS, JWT signing, GitHub latency, token delivery |
-| `jsoncanon` | Valid and invalid strict JSON checking, including a late duplicate key | No JSON canonical serialization; this package does not implement it |
+| `strictjson` | Valid and invalid strict JSON checking, including a late duplicate key | No JSON canonical serialization; this package does not implement it |
 | `observability` | Ready/blocked snapshots and parallel-reader benchmark with `-cpu=1` | HTTP transport; parallel readers do not model multicore scaling in this run |
 | `taskstore` | Fresh admissions, same-owner claim recovery, owned reads/list100, receipt lookup | Database/workspace setup; admissions use fixture IDs, not secure entropy |
 | `backgroundroute` | Full pipe/worker SSE filter, drain and close, 50% owned/foreign events | Network, TLS, upstream backpressure and slow clients |

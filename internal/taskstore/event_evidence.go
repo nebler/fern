@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -15,30 +14,7 @@ import (
 	"github.com/nebler/fern/internal/task"
 )
 
-const maxDeliveryEvidenceBytes = 16 * 1024
-
-func deliveryRows(ctx context.Context, tx *sql.Tx, attemptID task.AttemptID) (Attempt, Task, error) {
-	attempt, err := getAttempt(ctx, tx, attemptID)
-	if errors.Is(err, ErrNotFound) {
-		return Attempt{}, Task{}, &NotFoundError{Kind: "attempt", ID: string(attemptID)}
-	}
-	if err != nil {
-		return Attempt{}, Task{}, err
-	}
-	if background, backgroundErr := backgroundAttemptExists(ctx, tx, attempt.ID); backgroundErr != nil {
-		return Attempt{}, Task{}, backgroundErr
-	} else if background {
-		return Attempt{}, Task{}, &NotFoundError{Kind: "attempt", ID: string(attemptID)}
-	}
-	owner, err := getTask(ctx, tx, attempt.TaskID)
-	if err != nil {
-		return Attempt{}, Task{}, err
-	}
-	if owner.WorkspaceID != attempt.WorkspaceID {
-		return Attempt{}, Task{}, fmt.Errorf("%w: attempt workspace ownership", ErrCorruptStore)
-	}
-	return attempt, owner, nil
-}
+const maxRetainedResultEvidenceBytes = 16 * 1024
 
 func insertAttemptEvent(ctx context.Context, tx *sql.Tx, id task.EventID, attempt Attempt, eventType string, occurredAt, actorID int64, payload []byte) (Event, error) {
 	return insertTaskStoreEvent(ctx, tx, id, attempt.WorkspaceID, attempt.TaskID, attempt.ID, "attempt", string(attempt.ID), eventType, occurredAt, actorID, payload)
@@ -93,9 +69,9 @@ func validExactTimestamp(value time.Time) error {
 	return nil
 }
 
-func validateDeliveryEvidence(payload json.RawMessage, expected [32]byte) error {
+func validateRetainedResultEvidence(payload json.RawMessage, expected [32]byte) error {
 	trimmed := bytes.TrimSpace(payload)
-	if len(payload) < 2 || len(payload) > maxDeliveryEvidenceBytes || !json.Valid(payload) || len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
+	if len(payload) < 2 || len(payload) > maxRetainedResultEvidenceBytes || !json.Valid(payload) || len(trimmed) < 2 || trimmed[0] != '{' || trimmed[len(trimmed)-1] != '}' {
 		return fmt.Errorf("%w: evidence must be a bounded JSON object", ErrInvalidInput)
 	}
 	if actual := sha256.Sum256(payload); actual != expected {
@@ -108,21 +84,12 @@ func validateDeliveryEvidence(payload json.RawMessage, expected [32]byte) error 
 	return nil
 }
 
-func deliveryEvidencePayload(reason string, evidence json.RawMessage, evidenceHash [32]byte) (json.RawMessage, error) {
-	if err := validateDeliveryEvidence(evidence, evidenceHash); err != nil {
+func retainedResultEvidencePayload(evidence json.RawMessage, evidenceHash [32]byte) (json.RawMessage, error) {
+	if err := validateRetainedResultEvidence(evidence, evidenceHash); err != nil {
 		return nil, err
 	}
 	var encoded bytes.Buffer
 	encoded.WriteByte('{')
-	if reason != "" {
-		reasonJSON, err := json.Marshal(reason)
-		if err != nil {
-			return nil, fmt.Errorf("encode evidence reason: %w", err)
-		}
-		encoded.WriteString(`"reason":`)
-		encoded.Write(reasonJSON)
-		encoded.WriteByte(',')
-	}
 	encoded.WriteString(`"evidence":`)
 	encoded.Write(evidence)
 	encoded.WriteString(`,"evidenceSha256":"sha256:`)

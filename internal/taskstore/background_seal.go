@@ -10,13 +10,9 @@ import (
 	"github.com/nebler/fern/internal/task"
 )
 
-func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams) (BackgroundRunSealAdmission, error) {
-	return s.AdmitBackgroundRunSeal(ctx, p)
-}
-
-// AdmitBackgroundRunSeal atomically wins against stop and timeout. Once input
+// SealBackgroundRun atomically wins against stop and timeout. Once input
 // validation has completed, caller cancellation cannot split its durable tuple.
-func (s *Store) AdmitBackgroundRunSeal(ctx context.Context, p SealBackgroundRunParams) (_ BackgroundRunSealAdmission, err error) {
+func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams) (_ BackgroundRunSealAdmission, err error) {
 	if err := validateBackgroundRunSeal(p); err != nil {
 		return BackgroundRunSealAdmission{}, err
 	}

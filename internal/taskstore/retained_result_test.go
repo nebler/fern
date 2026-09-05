@@ -203,7 +203,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	commit := CommitBackgroundRunRetainedResultParams{BackgroundRunExportClaim: exportClaim(),
 		MaterializationID: seal.MaterializationID, ArtifactID: seal.ArtifactID, ResultID: seal.ResultID,
 		ResultEventID: seal.ResultEventID, TaskEventID: seal.TaskEventID, EvidencePayload: evidence,
-		EvidenceSHA256: sha256.Sum256(evidence), Actor: testDeliveryActor(), SealedAt: exportNow,
+		EvidenceSHA256: sha256.Sum256(evidence), Actor: testSystemActor(), SealedAt: exportNow,
 	}
 	mismatch := commit
 	mismatch.ArtifactID = task.RetainedArtifactID(testID("art_", 5199))

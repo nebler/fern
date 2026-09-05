@@ -327,15 +327,6 @@ WHERE r.workspace_id=? AND r.task_id=? AND c.actor_type=? AND c.actor_id=? AND c
 	return run, nil
 }
 
-func backgroundAttemptExists(ctx context.Context, q queryRower, attemptID task.AttemptID) (bool, error) {
-	var exists int
-	err := q.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM background_runs WHERE attempt_id=?)`, attemptID).Scan(&exists)
-	if err != nil {
-		return false, fmt.Errorf("inspect background run ownership: %w", err)
-	}
-	return exists == 1, nil
-}
-
 func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	var run BackgroundRun
 	var repositoryID, cancelEpoch int64

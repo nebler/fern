@@ -166,7 +166,7 @@ func validateResultMaterial(p resultMaterial) ([]ManifestEntry, error) {
 	if err := p.Actor.Validate(); err != nil || (p.Actor.Type != task.ActorSystem && p.Actor.Type != task.ActorRecovery) {
 		return nil, fmt.Errorf("%w: result actor", ErrInvalidInput)
 	}
-	if err := validateDeliveryEvidence(p.EvidencePayload, p.EvidenceSHA256); err != nil {
+	if err := validateRetainedResultEvidence(p.EvidencePayload, p.EvidenceSHA256); err != nil {
 		return nil, err
 	}
 	manifest, err := validateManifest(p.Manifest)
@@ -246,7 +246,7 @@ func validateManifestEntry(e ManifestEntry) error {
 }
 
 func resultSealPayload(p resultMaterial) (json.RawMessage, error) {
-	base, err := deliveryEvidencePayload("", p.EvidencePayload, p.EvidenceSHA256)
+	base, err := retainedResultEvidencePayload(p.EvidencePayload, p.EvidenceSHA256)
 	if err != nil {
 		return nil, err
 	}

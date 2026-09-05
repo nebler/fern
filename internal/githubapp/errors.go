@@ -15,6 +15,7 @@ var (
 	ErrInvalidResponse         = errors.New("GitHub returned an invalid response")
 	ErrResponseTooLarge        = errors.New("GitHub response exceeds the size limit")
 	ErrTokenExpired            = errors.New("GitHub installation token is expired")
+	ErrPaginationRefused       = errors.New("GitHub response requires unsupported pagination")
 )
 
 // HTTPError reports only the response status. Response bodies may contain

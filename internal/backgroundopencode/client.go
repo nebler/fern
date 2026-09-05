@@ -17,7 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/nebler/fern/internal/jsoncanon"
+	"github.com/nebler/fern/internal/strictjson"
 )
 
 type Config struct {
@@ -72,7 +72,7 @@ func (c *Client) CreateSessionOnce(ctx context.Context, spec SessionSpec) error 
 	return validateSession(envelope.Data, spec, "create session")
 }
 
-func (c *Client) ReadSession(ctx context.Context, sessionID string) (sessionInfo, error) {
+func (c *Client) readSession(ctx context.Context, sessionID string) (sessionInfo, error) {
 	if !validSessionID(sessionID) {
 		return sessionInfo{}, ErrInvalidConfig
 	}
@@ -272,7 +272,7 @@ func exactJSONContentType(header http.Header) error {
 }
 
 func strictDecode(payload []byte, destination any, operation string) error {
-	if len(payload) == 0 || jsoncanon.Check(payload, maxJSONDepth) != nil {
+	if len(payload) == 0 || strictjson.Check(payload, maxJSONDepth) != nil {
 		return protocol(operation, "invalid JSON")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))

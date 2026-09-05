@@ -339,7 +339,7 @@ func TestBackgroundRunClaimsCapacityRecoveryAndActiveStop(t *testing.T) {
 	}
 	final, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
 		BackgroundRunClaim: cleanupClaim, AttemptEventID: testEventID(1990), TaskEventID: testEventID(1991),
-		Actor: testDeliveryActor(), Reason: "background_run_stopped", Evidence: "writer inactive and resources absent",
+		Actor: testSystemActor(), Reason: "background_run_stopped", Evidence: "writer inactive and resources absent",
 		CleanupProof: "route, container, volume, and clone absent",
 	})
 	if err != nil || final.State != BackgroundRunFailed || final.EffectPhase != BackgroundRunEffectCleanupComplete || final.ClaimOwner != "" {
@@ -521,7 +521,7 @@ func TestBackgroundRunSystemTimeoutHasNoPluginReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	actor := testDeliveryActor()
+	actor := testSystemActor()
 	actor.Type, actor.ID, actor.DisplayName = task.ActorSystem, "background-timeout", "Background timeout"
 	timedOut, err := store.RequestBackgroundRunTimeout(context.Background(), RequestBackgroundRunTimeoutParams{
 		BackgroundRunClaim: backgroundRunClaim(work.Run, now), AttemptEventID: testEventID(2081), TaskEventID: testEventID(2082), Actor: actor,
@@ -707,13 +707,13 @@ func TestBackgroundRunPreEffectFailureRequiresAbsenceProofAndFinalizesParents(t 
 		CancelEpoch: run.CancelEpoch, Now: now.Add(time.Second)}
 	if _, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
 		BackgroundRunClaim: claim, AttemptEventID: testEventID(2152), TaskEventID: testEventID(2153),
-		Actor: testDeliveryActor(), Reason: "background_image_unavailable", Evidence: "image inspect returned deterministic absence",
+		Actor: testSystemActor(), Reason: "background_image_unavailable", Evidence: "image inspect returned deterministic absence",
 	}); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("pre-effect failure without absence proof = %v", err)
 	}
 	final, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
 		BackgroundRunClaim: claim, AttemptEventID: testEventID(2152), TaskEventID: testEventID(2153),
-		Actor: testDeliveryActor(), Reason: "background_image_unavailable", Evidence: "image inspect returned deterministic absence",
+		Actor: testSystemActor(), Reason: "background_image_unavailable", Evidence: "image inspect returned deterministic absence",
 		CleanupProof: "clone, volume, container, and route were never created",
 	})
 	if err != nil || final.State != BackgroundRunFailed || final.EffectPhase != BackgroundRunEffectPreEffectFailed ||

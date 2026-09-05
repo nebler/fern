@@ -189,10 +189,6 @@ artifact_manifest_json=?,artifact_manifest_sha256=?,cas_locator=?,opencode_sessi
 			p.OpenCodeSessionID, p.OpenCodeMessageID, unixMillis(p.CollectedAt)}, replay)
 }
 
-func (s *Store) RecordBackgroundRunSnapshotSelected(ctx context.Context, p SelectBackgroundRunSnapshotParams) (BackgroundRunExport, error) {
-	return s.SelectBackgroundRunSnapshot(ctx, p)
-}
-
 func (s *Store) RecordBackgroundRunBundleWriteStarted(ctx context.Context, claim BackgroundRunExportClaim) (BackgroundRunExport, error) {
 	return s.advanceBackgroundExport(ctx, claim, BackgroundRunExportPhaseSnapshotSelected, BackgroundRunExportPhaseBundleWriteStarted, "", nil, nil)
 }
@@ -227,10 +223,6 @@ func (s *Store) MarkBackgroundRunExportRecoveryRequired(ctx context.Context, cla
 		return BackgroundRunExport{}, fmt.Errorf("%w: export recovery reason", ErrInvalidInput)
 	}
 	return s.updateBackgroundExport(ctx, claim, claim.ExpectedPhase, `state='recovery_required',recovery_reason=?,claim_owner=NULL,claim_expires_at=NULL`, []any{reason}, nil)
-}
-
-func (s *Store) RecordBackgroundRunExportRecoveryRequired(ctx context.Context, claim BackgroundRunExportClaim, reason string) (BackgroundRunExport, error) {
-	return s.MarkBackgroundRunExportRecoveryRequired(ctx, claim, reason)
 }
 
 // ReleaseBackgroundRunClaimAfterExportFailure releases the run claim bound to

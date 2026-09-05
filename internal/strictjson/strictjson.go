@@ -1,10 +1,10 @@
-// Package jsoncanon is the single source of truth for strictly scanning
+// Package strictjson is the single source of truth for strictly scanning
 // untrusted JSON payloads before they are decoded into application types.
 // Every remote or stored response that feeds a security-sensitive decoder is
 // checked here so duplicate object keys (compared case-insensitively, the way
 // downstream merge logic resolves them), excessive nesting, invalid UTF-8,
 // and trailing garbage are rejected exactly once and identically everywhere.
-package jsoncanon
+package strictjson
 
 import (
 	"bytes"

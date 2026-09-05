@@ -481,7 +481,7 @@ generation when one exists.
 | `hostlease` | exclusive host-local repository-binding lease |
 | `compatibility` | fresh-schema and release-manifest alignment |
 
-`gitref` and `jsoncanon` are narrow shared validation utilities.
+`gitref` and `strictjson` are narrow shared validation utilities.
 Integration packages qualify Docker, OpenCode, upgrades, and releases.
 
 ### Boundary decisions

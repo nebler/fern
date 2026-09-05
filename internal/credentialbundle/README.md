@@ -8,14 +8,16 @@ validation, not credential activation or live GitHub authorization.
 
 ## Data model
 
-`Bundle` version 1 records an epoch, UTC creation time, configuration `Binding`,
-and serialized credential candidates. `GitHubApp` is JSON and `WorkspaceGH` is a
-byte field. The latter remains in the format; its presence is not evidence of a
-second currently supported execution/configuration mode.
+`Bundle` version 2 records an epoch, UTC creation time, configuration `Binding`,
+and a required `GitHubApp` JSON credential candidate. The removed `workspace_gh`
+field is rejected. Version 1 bundles fail explicitly; export a new version 2
+bundle from the current credential store. No files are migrated or deleted.
+The underlying GitHub App credential JSON schema remains version 1.
 
 `Binding` includes workspace, mode, hostname, App/installation IDs, and numeric
 repository ID/full name. Validation requires basic nonempty bounded atoms and
-positive repository ID, not equality with the running host configuration.
+positive App, installation, and repository IDs, and mode `github-app-broker`,
+not equality with the running host configuration.
 The importing CLI is responsible for compatibility and activation decisions.
 
 ## Representative internal calls
@@ -51,7 +53,7 @@ graph LR
   token -->|"runtime provider delivery"| container["Background Run container"]
 ```
 
-There are no internal Fern package imports here. The CLI coordinates this format
+The shared strict JSON scanner checks duplicate keys and nesting. The CLI coordinates this format
 with `githubapp`; the bundle package itself does not call GitHub or Docker.
 The host App private key may be included in an encrypted export, but ordinary
 run delivery sends the short-lived installation token, not that private key.
@@ -60,14 +62,20 @@ run delivery sends the short-lived installation token, not that private key.
 
 - `ParseRecipients` accepts explicit X25519 recipient strings, trimming space.
 - `LoadIdentities` reads private regular files containing X25519 identity lines;
-  blank lines and comments are ignored.
+  blank lines and comments are ignored. On Darwin/Linux, it and `ReadFile` open
+  the leaf with no-follow/nonblocking flags and validate regular type and private
+  mode on the opened descriptor. Other platforms fail closed.
 - `RecipientsForIdentities` derives recipients only for supported identity
   implementations and silently skips others.
 - `Encrypt` requires a destination and at least one recipient.
 - `Decrypt` requires a source and at least one identity, authenticates the age
-  stream, rejects unknown JSON fields/trailing content, and validates the bundle.
-- `WriteFile` writes ciphertext to a mode-0600 temporary file, syncs it, renames
-  it, and syncs the containing directory.
+  stream, rejects duplicate keys (including nested/case variants), unknown JSON
+  fields/trailing content, and validates the bundle. JSON nesting is capped at 64.
+- `WriteFile` writes ciphertext to a mode-0600 temporary file in the destination
+  directory, syncs and closes it, hard-links it to an absent destination, unlinks
+  the temporary name, and syncs the directory. Concurrent destination creation
+  fails without replacing that destination. A post-install cleanup/sync failure
+  can return an error with the encrypted destination already installed.
 - `ReadFile` decrypts in memory; it does not materialize a plaintext file.
 
 `String` and `GoString` redact bundle contents. `Summary` returns epoch and a
@@ -84,7 +92,6 @@ proof across arbitrary alternate serializations.
 | Encrypted source reader | 32 MiB plus one byte |
 | One identity file | 64 KiB |
 | App credential JSON | 256 KiB |
-| Workspace credential bytes | 16 MiB |
 | Binding/epoch atoms | 512 bytes each |
 
 Encrypted framing overhead and the separately bounded plaintext matter at the
@@ -95,17 +102,17 @@ capped by this package.
 
 - `Encrypt` now explicitly documents its complete in-memory plaintext buffer;
   it is not streaming serialization, although no plaintext file is written.
-- `WriteFile` now documents atomic rename with a prior existence check, not
-  race-safe no-replace creation. Callers need serialized writers in a trusted
-  directory; stronger concurrent no-clobber semantics would need another primitive.
-- `ReadFile` and `LoadIdentities` use `Lstat` followed by `Open`; unlike descriptor
-  based no-follow checks, that is not a complete path-replacement race fence.
-- `Decrypt` is structurally strict but does not reject duplicate JSON keys via
-  `jsoncanon`, nor validate the opaque candidate against live GitHub authority.
+- Callers must use trusted private parent directories. Leaf no-follow and
+  descriptor checks do not fence ancestor replacement or defend against a hostile
+  same-UID process modifying an opened file. Hard-link installation requires a
+  filesystem supporting hard links; no overwrite-prone rename fallback is used.
+- `Decrypt` does not validate the opaque candidate against live GitHub authority.
 - `RecipientsForIdentities` is a filtering operation; document possible empty
   output rather than assuming every age identity has a public recipient.
 
-These limitations matter when choosing a trusted file and concurrency boundary.
+Artifact paths are explicitly supplied through `--output`/`--input`; identity
+paths through `--identity`. The CLI's active store is `<state-dir>/github-app`.
+Rollback defaults to `<input>.rollback-<generation>.age` unless overridden.
 
 ## Performance: static observations and measurement scope
 

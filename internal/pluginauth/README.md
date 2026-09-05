@@ -47,7 +47,7 @@ graph LR
   clientapi["internal/runclientapi"] -->|"imports; request authorization"| context
   store -->|"imports; auxiliary path"| control["internal/control"]
   store -->|"imports"| task["internal/task: actor snapshots"]
-  store -->|"imports"| jsoncanon["internal/jsoncanon"]
+  store -->|"imports"| strictjson["internal/strictjson"]
   store -->|"runtime persistence"| disk["private auxiliary JSON state"]
   proxy -->|"runtime authenticated calls"| handlers["run submission, attachment, result handlers"]
 ```

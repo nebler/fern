@@ -70,11 +70,18 @@ flowchart TD
   observe --> client
   prompt --> dispatch["promptDispatchAuthority"]
   observe --> state["workObservation"]
-  process --> route["ensureRoute / routeIdentity"]
+  process --> route["ensureRoute / validatedRouteIdentity"]
+  route --> tuple["makeRouteIdentity"]
   process --> retained["exportRetained"]
   process --> fence["recordWriterFence"]
-  retained --> match["snapshotMatchesExport / manifestEntries"]
-  retained --> proof["materializationProof"]
+  retained --> recover["recoverInstalledCAS: inspect before replay"]
+  retained --> install["snapshotAndInstall: owns staged artifact"]
+  install --> intent["recordBundleAndInstallIntent"]
+  install --> match["snapshotMatchesExport / manifestEntries"]
+  retained --> materialize["verifyMaterialization: owns checkout"]
+  materialize --> proof["materializationProof"]
+  retained --> commit["commitResult"]
+  retained --> retry["recoveryRequired"]
   process --> record["record / recordObservation"]
   record --> evidence["evidence / claim"]
   process --> failure["externalFailure / cleanupFailure / retainedFailure"]
@@ -118,19 +125,26 @@ tools own remote publication. There is no host publisher or publication coordina
 ## Retained export and teardown
 
 User sealing establishes a structured writer fence, then an export claim.
-`exportRetained` obtains the provider's exclusive clone lease, captures a snapshot,
-records selection and bundle verification, installs CAS, verifies materialization,
-and commits the retained result before cleanup. Staged and checkout paths are
-opaque process capabilities, not durable authority or fields stored in evidence.
+`exportRetained` owns the export attempt and, when a snapshot is needed, the
+provider's exclusive clone lease through materialization, commit, and recovery
+recording. `snapshotAndInstall` owns its staged capability and discards it unless
+CAS storage consumes it. `verifyMaterialization` closes its checkout before
+recording proof. Staged and checkout paths are opaque process capabilities, not
+durable authority or fields stored in evidence.
 
 The export replay path can recognize an already-installed matching CAS object.
 Otherwise a repeated snapshot must match durable selection. Every transition uses
-the export's current revision/phase claim; a failed durable write is not treated
-as successful merely because the filesystem effect happened.
+the export's current revision/phase claim. The attempt's `record` operation obtains
+a fresh validated timestamp and adopts only successful SQL results, retaining the
+last confirmed tuple on failure. A failed durable write is not treated as successful
+merely because the filesystem effect happened.
 
 Snapshot mismatch or export failure marks recovery required rather than accepting
-different content. Some recovery/commit writes use `context.WithoutCancel(parent)`;
-ordinary `effectContext` bounds must not be assumed to apply to every export write.
+different content. Recovery and final commit writes use
+`context.WithTimeout(context.WithoutCancel(parent), OperationTimeout)` so caller
+cancellation cannot interrupt them and detachment cannot make them unbounded.
+SQL still checks export claim authority; ordinary `effectContext` bounds must not
+be assumed to apply to every export write.
 Materialization proof reduces a verified checkout path to a clean-state bit and
 identity digest, not a host path or promise that a checkout remains live forever.
 
@@ -157,8 +171,8 @@ No internal package imports this coordinator to drive an independent execution l
   create/start and export paths can perform multiple effects.
 - `process` is broad but appropriate as the phase dispatcher; splitting its switch
   would be a design change, not a naming-only performance optimization.
-- Receiver `routeIdentity` validates committed runtime; free `routeIdentity` builds
-  the tuple. `validatedRouteIdentity`/`makeRouteIdentity` could clarify this distinction.
+- Receiver `validatedRouteIdentity` validates committed runtime; free
+  `makeRouteIdentity` only constructs the tuple from that runtime.
 - `materializationProof` is evidence derived after materialization, not a durable
   filesystem lease. Keep that limitation visible whenever the helper is reused.
 

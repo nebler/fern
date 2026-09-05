@@ -568,7 +568,7 @@ func testMessageID(n int) task.OpenCodeMessageID {
 
 func testResultID(n int) task.ResultID { return task.ResultID(testID("res_", n)) }
 
-func testDeliveryActor() task.ActorSnapshot {
+func testSystemActor() task.ActorSnapshot {
 	return task.ActorSnapshot{Type: task.ActorSystem, ID: "background-run-coordinator", DisplayName: "Background Run coordinator", CredentialID: "service-v1", Authentication: "internal", RequestID: "background-run-request"}
 }
 

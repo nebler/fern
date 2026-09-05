@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/control"
-	"github.com/nebler/fern/internal/jsoncanon"
+	"github.com/nebler/fern/internal/strictjson"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -583,7 +583,7 @@ func (store *Store) load() error {
 	if len(data) > maxStateBytes {
 		return errors.New("plugin authorization state exceeds 256 KiB")
 	}
-	if err := jsoncanon.Check(data, 8); err != nil {
+	if err := strictjson.Check(data, 8); err != nil {
 		return fmt.Errorf("decode plugin authorization state: %w", err)
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))

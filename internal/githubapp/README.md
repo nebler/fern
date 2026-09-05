@@ -49,7 +49,7 @@ graph LR
   provider["internal/taskenvdocker"] -->|"imports; InstallationTokenSource"| gh
   integration["integration/background-run-docker"] -->|"imports; test harness"| gh
   gh -->|"imports"| gitref["internal/gitref"]
-  gh -->|"imports"| jsoncanon["internal/jsoncanon"]
+  gh -->|"imports"| strictjson["internal/strictjson"]
   gh -->|"imports"| unix["golang.org/x/sys/unix"]
   gh -->|"runtime HTTPS"| github["GitHub.com API and manifest exchange"]
   gh -->|"runtime private-file I/O"| host["App credentials and onboarding claims"]
@@ -81,19 +81,15 @@ Clients copy the supplied `http.Client` and disable redirect following, but
 retain its underlying transport. Concurrency safety depends on dependencies.
 Remote bodies and secrets are omitted from the package's public error vocabulary.
 
-`RepositoryClient.RepositoryByID` remains a narrow numeric-ID/name/default-branch
-observation API with token validation and bounded response decoding. The current
-tree has no production caller of it; it is not part of the active bootstrap
-call path.
-
 ## Publication boundary
 
 This package has no branch/PR observation or creation APIs for a host publisher.
 Container-side GitHub operations are the current execution path.
 
-Shared `decodeGitHubJSON`, `validAPIBase`, `firstError`, `isNilInterface`, and
-`ErrPaginationRefused` remain because installation/onboarding code uses them.
-Repository identity response validation and its transport tests also remain.
+Shared `decodeGitHubJSON`, `validAPIBase`, `firstError`, and `isNilInterface`
+live in `http_helpers.go` for installation discovery/onboarding.
+`ErrPaginationRefused` guards discovery pagination. Discovery transport tests
+cover response validation, credential checks, redirects, and concurrency.
 
 ## Bounds and persistence
 
@@ -116,13 +112,13 @@ or multi-process database lock.
 
 ## Naming review
 
-- `Client` is specifically an installation-token minting client; a future
-  `TokenClient` name would distinguish it from the other HTTP clients.
+- `Client` is specifically an installation-token minting client; its name is
+  retained for existing callers.
 - `InstallationTokenSource` now documents container credential delivery rather
   than the removed host publisher. `InstallationToken` documents repository
   scope rather than implying it never enters compute. Only the App private key
   remains host-only.
-- `RepositoryObservation` proves an API response at observation time, not
+- `InstallationRepositoryObservation` proves an API response at observation time, not
   continued repository state or a Git result's correctness.
 - `AppCredentials.PrivateKey` returns the underlying RSA pointer; unlike
   `PrivateKeyPEM`, it is not a defensive copy. Avoid promising deep immutability.
@@ -130,7 +126,7 @@ or multi-process database lock.
 ## Performance: static versus measured
 
 Each token mint signs an RSA JWT, makes HTTP requests, buffers a bounded body,
-and decodes JSON. Repository reads obtain a token from their source each time.
+and decodes JSON. Discovery calls obtain fresh credentials from their sources.
 Discovery performs sequential pages; API latency/rate limits may dominate CPU.
 `decodeGitHubJSON` checks duplicate keys/depth and then unmarshals, so it traverses
 the payload twice. Token minting instead uses direct `json.Unmarshal`; do not
@@ -142,7 +138,7 @@ This is repeated work on a cold persistence path, not a measured hot spot.
 Onboarding persistence can serialize unrelated flows through its process-wide
 transaction gate. Any optimization must preserve claim/replay guarantees.
 
-`BenchmarkDecodeGitHubJSON` measures the production discovery JSON decoder with
+`BenchmarkDecodeGitHubJSON` measures the shared decoder in `http_helpers.go` with
 a representative installation response. It excludes HTTP, RSA, token minting,
 filesystem I/O, and selection validation. Allocations and input bytes are
 reported. See the [central performance report](../../docs/performance.md) for

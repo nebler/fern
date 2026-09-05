@@ -22,7 +22,7 @@ flowchart LR
   docker["taskenvdocker.Provider"] -->|"constructs authenticated client"| client
   client -->|"HTTP requests"| source["qualified OpenCode process"]
   config["config.Validate"] -->|"ParseTrustedOrigin"| origin["trusted origin parser"]
-  client -.->|"imports: JSON validation"| canon["jsoncanon"]
+  client -.->|"imports: JSON validation"| canon["strictjson"]
   client -.->|"imports: profile constant"| run["internal/run"]
 ```
 
@@ -35,7 +35,7 @@ These diagrams are representative, not exhaustive static callgraph analysis.
 | --- | --- |
 | `New` | Requires canonical HTTP loopback endpoint, credentials, and bounded HTTP client. |
 | `CreateSessionOnce` | At most one explicit POST; validates returned stable session tuple. |
-| `ReadSession` | Reads and validates one exact session identity. |
+| `readSession` (private) | Reads and validates one exact session identity for reconciliation. |
 | `AdmitPromptOnce` | At most one explicit POST; validates prompt admission and sequence semantics. |
 | `InterruptOnce` | One mutation; requires exactly empty 204 response. |
 | `ReconcileSession` | Read-only comparison against the caller-selected session tuple. |
@@ -64,8 +64,8 @@ flowchart TD
   json --> decode["strictDecode"]
   json --> status["classifyStatus"]
   empty --> status
-  decode --> check["jsoncanon.Check"]
-  reconcile["ReconcileSession"] --> read["ReadSession"]
+  decode --> check["strictjson.Check"]
+  reconcile["ReconcileSession"] --> read["readSession"]
   read --> json
   reconcile --> session
   history["ReconcilePrompt"] --> page["historyPage"]
@@ -85,7 +85,7 @@ flowchart TD
 - Encoded requests: 128 KiB; responses: 1 MiB, read with a one-byte overflow probe.
 - Prompt text: 64 KiB; IDs: 256 bytes; credentials: 4096 bytes.
 - Strict JSON validation: maximum depth 64, duplicate-key/canonical checks through
-  `jsoncanon`, unknown-field rejection, and no trailing JSON value.
+  `strictjson`, unknown-field rejection, and no trailing JSON value.
 - Content type must be exactly `application/json`, without parameters.
 - History page limit: at most 100; scan limits: at most 1000 pages and 10,000 events.
 - Active/question/permission collections: at most 1000 entries each, plus nested bounds.
@@ -108,7 +108,7 @@ Reconciliation and durable dispatch fencing belong to `backgroundruncoord` and
 
 ## Imports and callers
 
-Production internal imports are `jsoncanon` and `run`; standard-library dependencies
+Production internal imports are `strictjson` and `run`; standard-library dependencies
 provide HTTP, URL/IP parsing, JSON, deadlines, and UTF-8/numeric validation.
 There is no Docker, database, or GitHub client import.
 
@@ -124,9 +124,8 @@ An importer that uses a type or constant is not necessarily making an HTTP call.
   make mutation/replay risk visible and match the explicit implementation policy.
 - Keep `Reconcile*` versus `ObservePending`: durable identity evidence and
   process-local activity are intentionally different concepts.
-- `ReadSession` is exported but returns private `sessionInfo`; workable for inferred
-  values, but awkward for external interfaces. Consider making it private if it
-  remains solely a reconciliation helper, rather than exporting the entire wire model.
+- `readSession` is private: its only production consumer is reconciliation, and
+  the private wire model is not part of the caller-facing API.
 - `active`, `questions`, `permissions`, `json`, and `do` are locally understandable
   receiver helpers; `readActiveSessions`/`readQuestions` would improve isolated search
   results but are not necessary sweeping renames.

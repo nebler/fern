@@ -1,8 +1,8 @@
-# jsoncanon
+# strictjson
 
 See the [Go package map](../../docs/go-packages.md) and [maintenance review](../../docs/go-review.md).
 
-`jsoncanon` is Fern's strict JSON **validator**, not a canonical serializer or
+`strictjson` is Fern's strict JSON **validator**, not a canonical serializer or
 digest implementation. It rejects ambiguous input before a caller decodes it
 into security-sensitive application types. The package imports only Go's
 standard library; it performs no I/O beyond reading the supplied bytes.
@@ -42,11 +42,9 @@ delimiters are checked explicitly, followed by an EOF check at the root.
 
 ## Naming review
 
-`Check` accurately signals validation. The package name `jsoncanon` can suggest
-canonical output or hashing that does not exist. A future coordinated rename
-to a strict-validation name could improve discovery, but changing import paths
-solely for cosmetics is not warranted here. There is no digest benchmark because
-there is no digest operation in this package.
+`Check` signals validation. The package was renamed from `jsoncanon` to
+`strictjson` to avoid suggesting canonical output or hashing. There is no digest
+operation or compatibility wrapper for the old internal import path.
 
 ## Performance review and tests
 
@@ -62,4 +60,4 @@ report bytes processed and all cases report allocations. See the
 [central performance report](../../docs/performance.md) for commands and results.
 They measure local scanning, not HTTP, GitHub, OpenCode, or other external dependencies.
 
-Run correctness tests with `go test ./internal/jsoncanon` from the repository root.
+Run correctness tests with `go test ./internal/strictjson` from the repository root.

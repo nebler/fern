@@ -198,7 +198,11 @@ and the disposable-runtime host key; they exclude run clones and scratch work.
 Legacy host-publication checkouts are still excluded from backups.
 Detected credentials are segregated into a separate backup artifact that must
 be protected as secret material. The dedicated `fern credentials` export is
-age-encrypted.
+age-encrypted. Encrypted credential bundles use format **2**, accept only GitHub
+App credentials, and explicitly reject format 1. This does not change the
+underlying GitHub App credential-store schema. Re-export with the current binary
+while the source credentials are available; no automatic bundle migration is
+performed. Export never overwrites an existing destination.
 
 ## Commands
 

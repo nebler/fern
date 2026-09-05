@@ -123,10 +123,6 @@ WHERE id=? AND revision=? AND phase='materialize_started' AND claim_owner=? AND 
 	return stored, nil
 }
 
-func (s *Store) RecordBackgroundRunMaterialized(ctx context.Context, p RecordArtifactMaterializationReadyParams) (BackgroundRunExport, error) {
-	return s.RecordArtifactMaterializationReady(ctx, p)
-}
-
 func (s *Store) MarkArtifactMaterializationRecoveryRequired(ctx context.Context, id task.MaterializationID, expectedRevision int64, reason string, now time.Time) (ArtifactMaterialization, error) {
 	if _, err := task.ParseMaterializationID(string(id)); err != nil || expectedRevision <= 0 || !validBoundedText(reason, 1, 1000) || validExactTimestamp(now) != nil {
 		return ArtifactMaterialization{}, fmt.Errorf("%w: materialization recovery", ErrInvalidInput)

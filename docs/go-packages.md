@@ -42,7 +42,7 @@ and [local performance measurements](performance.md) for the audit results.
 | [`hostlease`](../internal/hostlease/README.md) | Host-local exclusive ownership |
 | [`observability`](../internal/observability/README.md) | Readiness, health, metrics and retry timing |
 | [`gitref`](../internal/gitref/README.md) | Git ref/repository name validation |
-| [`jsoncanon`](../internal/jsoncanon/README.md) | Strict JSON validation, duplicate-key and malformed-Unicode rejection |
+| [`strictjson`](../internal/strictjson/README.md) | Strict JSON validation, duplicate-key and malformed-Unicode rejection |
 | [`compatibility`](../internal/compatibility/README.md) | Test-only current schema/release-contract qualification |
 
 ## Qualification and embedded tools

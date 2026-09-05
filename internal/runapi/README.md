@@ -37,7 +37,7 @@ graph LR
 ```
 
 `cmd/fern` is the direct production importer and wires the handler into ingress.
-Direct internal imports are `jsoncanon`, `pluginauth`, `run`, `runcommand`,
+Direct internal imports are `strictjson`, `pluginauth`, `run`, `runcommand`,
 `task`, and `taskstore`. Other imports are standard library. Git is an external
 executable dependency of the optional concrete verifier, not a Go library.
 
@@ -63,7 +63,7 @@ filtering is still required; a scope does not grant access to another plugin's
 runs. Responses use no-store and nosniff headers.
 
 Create requires exactly `application/json`, one valid `Idempotency-Key`, no query,
-and at most 32 KiB. `jsoncanon.Check` checks JSON structure before decoding with
+and at most 32 KiB. `strictjson.Check` checks JSON structure before decoding with
 unknown fields disallowed. Stop/seal require a bounded empty JSON object, not an
 absent body. Instruction/branch semantic validation belongs to `runcommand`.
 

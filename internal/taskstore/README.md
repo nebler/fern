@@ -49,7 +49,7 @@ durable DTOs/proofs; their presence does not move external I/O into this store.
 | Area | Representative entrypoints |
 | --- | --- |
 | Lifetime and binding | `Open`, `Close`, `EnsureWorkspace`, `GetWorkspace` |
-| Admission and command receipts | `AdmitBackgroundRun`, `FindReceiptByIdempotency`, `StopBackgroundRun`, `AdmitBackgroundRunSeal` |
+| Admission and command receipts | `AdmitBackgroundRun`, `FindReceiptByIdempotency`, `StopBackgroundRun`, `SealBackgroundRun` |
 | Actor-scoped reads | `GetBackgroundRun`, `ListBackgroundRuns`, `GetBackgroundRunOwners`, `GetBackgroundRunResult` |
 | Effect authority | `ClaimNextBackgroundRunWork`, `ClaimActiveBackgroundRun`, `ReadClaimedBackgroundRun`, `RenewBackgroundRunClaim`, `ReleaseBackgroundRunClaim` |
 | Execution observations | `RecordBackgroundRunCloneObserved`, session/prompt observations, `RequestBackgroundRunTimeout` |
@@ -167,13 +167,24 @@ success. The composition root must stop users of the store before `Close`.
 `GetBackgroundRunOwners` is the background parent path. Bundle proof recording
 has one entrypoint, `RecordBackgroundRunBundleVerified`, whose comment makes
 clear that it records supplied evidence rather than reading/verifying bytes.
-Seal, snapshot, materialization, recovery,
-and referenced-manifest operations have forwarding aliases that increase search
-surface. `deliveryEvidencePayload` now also serves retained results. Broader
-renaming remains a follow-up rather than cosmetic cross-package churn.
+Seal admission has one entrypoint, `SealBackgroundRun`, used by `runcommand`.
+Snapshot selection, materialization, and export recovery use the coordinator's
+`SelectBackgroundRunSnapshot`, `RecordArtifactMaterializationReady`, and
+`MarkBackgroundRunExportRecoveryRequired` APIs. Artifact GC uses
+`ReferencedArtifactManifestSHA256`; unused forwarding names are removed.
+`retainedResultEvidencePayload` and `validateRetainedResultEvidence` describe
+retained-result evidence, not delivery. Persisted attempt delivery columns,
+phases, constraints, and existing lease-error text remain unchanged; this is
+not a schema or event-encoding migration. The `run.State` and `run.Phase` type
+aliases remain the shared policy boundary rather than duplicate store types.
 
 The wide background-run select scans evidence and attribution even for short
-list projections. Measure that cost before adding narrower queries. Admission
+list projections. It also grows a slice of wide `BackgroundRun` values from zero
+capacity. Reserving the bounded limit on the first successful row could avoid
+growth copies without allocating for empty lists, but would reserve excess
+capacity for sparse lists. Neither this allocation tradeoff nor narrower queries
+is introduced by the naming cleanup; use `OwnedList100` to measure a future
+change without altering public models or projections. Admission
 cost includes triggers/indexes and FULL WAL commits; claim selection includes
 recovery priority and capacity checks. Do not infer these costs from enum tests.
 

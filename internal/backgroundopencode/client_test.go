@@ -141,7 +141,7 @@ func TestStrictJSONAndEnvelope(t *testing.T) {
 				}
 				_, _ = io.WriteString(w, test.body)
 			}))
-			_, err := client.ReadSession(deadline(t), testSession)
+			_, err := client.readSession(deadline(t), testSession)
 			if !errors.Is(err, ErrProtocol) {
 				t.Fatalf("error = %v", err)
 			}
@@ -157,7 +157,7 @@ func TestResponseBodyBound(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, strings.Repeat("x", maxResponseBytes+1))
 	}))
-	_, err := client.ReadSession(deadline(t), testSession)
+	_, err := client.readSession(deadline(t), testSession)
 	if !errors.Is(err, ErrProtocol) {
 		t.Fatalf("error = %v", err)
 	}
@@ -224,7 +224,7 @@ func TestStatusRequiresQualifiedTypedErrorAuthority(t *testing.T) {
 			if test.conflict {
 				err = client.AdmitPromptOnce(deadline(t), testSession, PromptSpec{ID: testMessage, Text: "do it", Delivery: "steer"})
 			} else {
-				_, err = client.ReadSession(deadline(t), testSession)
+				_, err = client.readSession(deadline(t), testSession)
 			}
 			if !errors.Is(err, ErrProtocol) || errors.Is(err, ErrNotFound) || errors.Is(err, ErrConflict) {
 				t.Fatalf("error = %v", err)
@@ -512,17 +512,17 @@ func TestDeadlineCancellationAndRequirement(t *testing.T) {
 		close(started)
 		<-r.Context().Done()
 	}))
-	if _, err := client.ReadSession(context.Background(), testSession); !errors.Is(err, ErrDeadline) {
+	if _, err := client.readSession(context.Background(), testSession); !errors.Is(err, ErrDeadline) {
 		t.Fatalf("missing deadline error = %v", err)
 	}
 	canceled, cancelNow := context.WithCancel(deadline(t))
 	cancelNow()
-	if _, err := client.ReadSession(canceled, testSession); !errors.Is(err, context.Canceled) || errors.Is(err, ErrTransport) {
+	if _, err := client.readSession(canceled, testSession); !errors.Is(err, context.Canceled) || errors.Is(err, ErrTransport) {
 		t.Fatalf("cancellation error = %v", err)
 	}
 	expired, expireCancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
 	defer expireCancel()
-	if _, err := client.ReadSession(expired, testSession); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTransport) {
+	if _, err := client.readSession(expired, testSession); !errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTransport) {
 		t.Fatalf("pre-dispatch deadline error = %v", err)
 	}
 	if calls.Load() != 0 {
@@ -530,7 +530,7 @@ func TestDeadlineCancellationAndRequirement(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err := client.ReadSession(ctx, testSession)
+	_, err := client.readSession(ctx, testSession)
 	<-started
 	if !errors.Is(err, ErrTransport) || errors.Is(err, context.DeadlineExceeded) || errors.Unwrap(err) != nil || calls.Load() != 1 {
 		t.Fatalf("calls=%d deadline error=%v", calls.Load(), err)

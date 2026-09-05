@@ -52,7 +52,7 @@ graph LR
   proxy -->|"imports"| control["internal/control: schema 2 identities"]
   proxy -->|"imports"| plugin["internal/pluginauth: grants and request fence"]
   proxy -->|"imports"| task["internal/task: actor context"]
-  proxy -->|"imports"| jsoncanon["internal/jsoncanon"]
+  proxy -->|"imports"| strictjson["internal/strictjson"]
   browsers["paired browser / operator / plugin"] -->|"runtime HTTP"| proxy
   proxy -->|"runtime injected handlers, not imports"| api["runapi and runclientapi"]
   proxy -->|"runtime injected handler"| onboarding["githubapp.OnboardingHTTP"]

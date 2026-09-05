@@ -19,10 +19,10 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/nebler/fern/internal/jsoncanon"
 	"github.com/nebler/fern/internal/pluginauth"
 	runidentity "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/runcommand"
+	"github.com/nebler/fern/internal/strictjson"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 )
@@ -433,7 +433,7 @@ func view(run taskstore.BackgroundRun) runView {
 func decodeStrict(w http.ResponseWriter, r *http.Request, limit int64, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	payload, err := io.ReadAll(r.Body)
-	if err != nil || jsoncanon.Check(payload, 3) != nil {
+	if err != nil || strictjson.Check(payload, 3) != nil {
 		writeError(w, 400, "invalid_json", "The JSON body is not valid.")
 		return false
 	}
@@ -486,7 +486,7 @@ func validateEmptyMutation(w http.ResponseWriter, r *http.Request) bool {
 	var value struct{}
 	r.Body = http.MaxBytesReader(w, r.Body, maxEmptyBodyBytes)
 	payload, err := io.ReadAll(r.Body)
-	if err != nil || len(bytes.TrimSpace(payload)) < 2 || bytes.TrimSpace(payload)[0] != '{' || jsoncanon.Check(payload, 3) != nil {
+	if err != nil || len(bytes.TrimSpace(payload)) < 2 || bytes.TrimSpace(payload)[0] != '{' || strictjson.Check(payload, 3) != nil {
 		writeError(w, 400, "invalid_json", "The JSON body must be an empty object.")
 		return false
 	}

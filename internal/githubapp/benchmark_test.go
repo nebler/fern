@@ -2,8 +2,8 @@ package githubapp
 
 import "testing"
 
-// This exercises the production duplicate/depth checks and JSON decoder used
-// by discovery, without HTTP, token minting, or RSA key setup.
+// This exercises the shared http_helpers.go duplicate/depth checks and JSON
+// decoder used by discovery, without HTTP, token minting, or RSA key setup.
 func BenchmarkDecodeGitHubJSON(b *testing.B) {
 	payload := []byte(`{"id":123,"account":{"login":"owner","id":456,"type":"Organization"},"target_type":"Organization","repository_selection":"selected","permissions":{"contents":"write","pull_requests":"write","metadata":"read"},"suspended_at":null}`)
 	b.ReportAllocs()

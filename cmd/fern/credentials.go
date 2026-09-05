@@ -237,7 +237,7 @@ func (operation *credentialOperation) activate(ctx context.Context, candidate cr
 		candidate.Binding.InstallationID != want.InstallationID || candidate.Binding.RepositoryID != want.RepositoryID || candidate.Binding.Repository != want.Repository {
 		return "", errors.New("credential bundle does not match the configured workspace and GitHub identity")
 	}
-	if len(candidate.WorkspaceGH) != 0 || len(candidate.GitHubApp) == 0 {
+	if len(candidate.GitHubApp) == 0 {
 		return "", errors.New("credential bundle component does not match github-app-broker mode")
 	}
 	parsed, err := githubapp.ParseStoredCredentials(candidate.GitHubApp)
