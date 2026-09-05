@@ -1,30 +1,20 @@
 {
   "$schema": "./compatibility-manifest.schema.json",
   "schema_version": 1,
-  "first_supported_baseline": {
-    "id": "baseline-v1",
-    "status": "repository-established",
-    "source_commit": "511258d1dbf206e4c1d4ee7031664b25144875bc",
-    "historical_release": false,
-    "historical_tag": null,
-    "task_store_schema": 4,
-    "control_state_schema": 1,
-    "github_app_credentials_schema": 1
-  },
+  "first_supported_baseline": null,
   "current_release_schemas": {
-    "task_store": 11,
+    "task_store": 1,
     "control_state": 1,
     "github_app_credentials": 1
   },
   "verification": {
-    "fixture_metadata": "internal/compatibility/testdata/baseline-v1/metadata.json",
-    "fixture_metadata_sha256": "3a27a39e57d67ef9ada56e64114531b43ef813ef3bf0be0202c0f0678c39f337",
+    "fresh_schema_test": "internal/compatibility/compatibility_test.go",
     "upgrade_harness": "integration/upgrade/run.sh",
     "rollback_prerequisite": "verified-offline-pre-upgrade-backup"
   },
   "limitations": [
-    "No historical release tags exist, so baseline-v1 has no released-binary provenance.",
-    "Rollback restores pre-upgrade durable bytes; it does not make a migrated database readable by older code.",
+    "No historical taskstore schema is supported before the first release.",
+    "Existing development databases from before the schema reset must be deleted and recreated.",
     "The local harness does not claim host, container, or external-service transaction atomicity."
   ]
 }

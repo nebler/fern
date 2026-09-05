@@ -277,10 +277,10 @@ cat >"$payload/RELEASE-MANIFEST.json" <<EOF
     "transaction_example": "deploy/release/transaction-manifest.example.json",
     "transaction_receipt": "generated-at-restore-target/TRANSACTION-MANIFEST.json",
     "compatibility_manifest": "deploy/release/compatibility-manifest.json",
-    "first_supported_baseline": "baseline-v1-repository-established-not-historical-release",
+    "first_supported_baseline": null,
     "upgrade_harness": "integration/upgrade/run.sh",
     "host_utility": "scripts/fern-host-backup.py",
-    "support_status": "installed-cli-operational-recovery",
+    "support_status": "pre-release-schema-reset",
     "activation_model": "staged-filesystem-rollback",
     "credential_policy": "external-recipient-with-checksums",
     "volume_export_mode": "no-runtime-volumes"

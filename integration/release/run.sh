@@ -84,10 +84,10 @@ assert manifest["upgrade_rollback"] == {
     "transaction_example": "deploy/release/transaction-manifest.example.json",
     "transaction_receipt": "generated-at-restore-target/TRANSACTION-MANIFEST.json",
     "compatibility_manifest": "deploy/release/compatibility-manifest.json",
-    "first_supported_baseline": "baseline-v1-repository-established-not-historical-release",
+    "first_supported_baseline": None,
     "upgrade_harness": "integration/upgrade/run.sh",
     "host_utility": "scripts/fern-host-backup.py",
-    "support_status": "installed-cli-operational-recovery",
+    "support_status": "pre-release-schema-reset",
     "activation_model": "staged-filesystem-rollback",
     "credential_policy": "external-recipient-with-checksums",
     "volume_export_mode": "no-runtime-volumes",
@@ -114,12 +114,8 @@ for path in root.glob("deploy/release/*.json"):
 compatibility = json.loads((root / "deploy/release/compatibility-manifest.json").read_text())
 compatibility_schema = json.loads((root / "deploy/release/compatibility-manifest.schema.json").read_text())
 assert compatibility["schema_version"] == 1
-assert compatibility["first_supported_baseline"]["id"] == "baseline-v1"
-assert compatibility["first_supported_baseline"]["status"] == "repository-established"
-assert compatibility["first_supported_baseline"]["historical_release"] is False
-assert compatibility["first_supported_baseline"]["historical_tag"] is None
-assert compatibility["first_supported_baseline"]["task_store_schema"] == 4
-assert compatibility["current_release_schemas"]["task_store"] == 11
+assert compatibility["first_supported_baseline"] is None
+assert compatibility["current_release_schemas"]["task_store"] == 1
 current_schema = compatibility_schema["properties"]["current_release_schemas"]
 assert current_schema["additionalProperties"] is False
 assert current_schema["properties"]["task_store"]["const"] == compatibility["current_release_schemas"]["task_store"]

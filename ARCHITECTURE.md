@@ -56,7 +56,7 @@ paired/operator run-control deck, not a general OpenCode or task-management UI.
                                          |
                        +-----------------+------------------+
                        |                 |                  |
-                   taskstore 11      run coordinator   GitHub App broker
+                   taskstore 1       run coordinator   GitHub App broker
                        |                 |
                        |                 v
                        |         taskenvdocker provider
@@ -87,7 +87,7 @@ removes and drains it before writer teardown.
 3. Bind remote, operator, and live-run listeners.
 4. Acquire the host-local repository-name lease.
 5. Open control and plugin-authorization state.
-6. Open taskstore schema 11.
+6. Open taskstore schema 1.
 7. If the installation ID is pending, block readiness and expose onboarding
    without composing task services.
 8. Otherwise apply strict `config.ValidateBackground` and resolve exact GitHub
@@ -368,9 +368,9 @@ process-local memory as authority. Recovery rules include:
 - preserve cleanup-required state until absence is proven;
 - wake coordinators only after durable admission commits.
 
-Schema version is 11. Legacy phase names and columns remain decodable so
-the first supported baseline upgrades without byte or semantic reinterpretation.
-Legacy tasks are not silently converted into Background Runs.
+Taskstore schema version is 1. This pre-release reset has no supported
+predecessor schema: older development databases must be deleted and recreated.
+Future released schemas must add migrations rather than rewriting schema 1.
 
 ## 17. Trust Boundaries
 
@@ -448,12 +448,12 @@ generation when one exists.
 | `taskpublication` | stateless GitHub push and draft-PR effects |
 | `taskpublicationcoord` | durable publication effect journal |
 | `taskresultsource` | CAS-only result checkout authority |
-| `taskstore` | schema 11 durable authority and state machines |
+| `taskstore` | schema 1 durable authority and state machines |
 | `taskverification` | durable verification coordination |
 | `verification` | shell-free bounded host check runner |
 | `observability` | health, readiness, status, metrics, retry |
 | `hostlease` | exclusive host-local repository-binding lease |
-| `compatibility` | first-supported-baseline upgrade contract |
+| `compatibility` | fresh-schema and release-manifest alignment |
 
 `gitref`, `jsoncanon`, and `evidence` are narrow shared validation utilities.
 Integration packages qualify Docker, OpenCode, upgrades, and releases.
@@ -500,7 +500,8 @@ bun test
 
 Docker/release gates qualify the source-pinned Background Run image, serial run
 lifecycle, read-only inspector, cold human writer, fresh-runtime handback,
-artifact retention, upgrade baseline, deployment files, reproducibility, SBOM,
+artifact retention, fresh-schema initialization, deployment files,
+reproducibility, SBOM,
 signatures, and provenance. Release publication must bind the image by registry
 digest; a local image ID is not portable registry authority. Each architecture
 is built as a candidate, the exact pushed digest is qualified under its target

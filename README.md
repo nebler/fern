@@ -140,7 +140,7 @@ Ambiguous evidence leaves all routes closed.
 
 Fern keeps:
 
-- taskstore schema 11 records, receipts, claims, ownership transfers, control
+- taskstore schema 1 records, receipts, claims, ownership transfers, control
   journals, and actor snapshots;
 - paired-device and plugin authorization digests;
 - GitHub App credentials;
@@ -149,9 +149,8 @@ Fern keeps:
 - the host key used to identify disposable Docker resources.
 
 Run clones, artifact work directories, publication checkouts, containers, and
-volumes are disposable. Existing pre-schema-11 `persistent_workspace` records
-stay readable for upgrades but cannot become new verification or publication
-work.
+volumes are disposable. This pre-release schema reset does not support older
+development taskstore databases; delete and recreate them.
 
 Offline backup and encrypted credential commands remain available:
 
@@ -182,8 +181,8 @@ fern debug quarantine-publications
 fern version
 ```
 
-`debug quarantine-publications` is retained only to disposition unresolved
-publication records from the first supported schema baseline.
+`debug quarantine-publications` dispositions unresolved publication records
+under explicit operator control.
 
 ## Development
 

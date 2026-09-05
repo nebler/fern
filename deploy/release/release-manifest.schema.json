@@ -71,10 +71,10 @@
         "transaction_example": {"const": "deploy/release/transaction-manifest.example.json"},
         "transaction_receipt": {"const": "generated-at-restore-target/TRANSACTION-MANIFEST.json"},
         "compatibility_manifest": {"const": "deploy/release/compatibility-manifest.json"},
-        "first_supported_baseline": {"const": "baseline-v1-repository-established-not-historical-release"},
+        "first_supported_baseline": {"type": "null"},
         "upgrade_harness": {"const": "integration/upgrade/run.sh"},
         "host_utility": {"const": "scripts/fern-host-backup.py"},
-        "support_status": {"const": "installed-cli-operational-recovery"},
+        "support_status": {"const": "pre-release-schema-reset"},
         "activation_model": {"const": "staged-filesystem-rollback"},
         "credential_policy": {"const": "external-recipient-with-checksums"},
         "volume_export_mode": {"const": "no-runtime-volumes"}

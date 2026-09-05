@@ -18,9 +18,9 @@ SELECT id,name,state,repository_path,github_authority,installation_id,repository
        image_digest,opencode_protocol,runtime_desired_state,reconciliation_epoch,revision,created_at,updated_at
 FROM workspaces`
 
-// Version 1 stored only positive App installation IDs. Migration 5 retains
-// that physical column for existing foreign keys and uses 1 only as the hidden
-// on-disk discriminator for a workspace-gh authority; callers always see 0.
+// The physical installation column stays positive for foreign-key integrity.
+// Value 1 is the hidden on-disk discriminator for workspace-gh authority;
+// callers always see 0.
 const workspaceGHDatabaseInstallationID = 1
 
 // EnsureWorkspace creates a workspace once or returns the existing exact

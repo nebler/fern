@@ -3,55 +3,12 @@ package taskstore
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/json"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/nebler/fern/internal/task"
 )
-
-func TestMigrationThreeFromVersionTwo(t *testing.T) {
-	path := testDBPath(t)
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := file.Close(); err != nil {
-		t.Fatal(err)
-	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, migration := range migrations[:2] {
-		if _, err := db.Exec(migration.sql); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := db.Exec(`INSERT INTO schema_migrations(version,name,checksum) VALUES(?,?,?)`, migration.version, migration.name, migrationChecksum(migration)); err != nil {
-			t.Fatal(err)
-		}
-	}
-	if _, err := db.Exec(`PRAGMA user_version=2`); err != nil {
-		t.Fatal(err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatal(err)
-	}
-	store := openTestStore(t, path)
-	t.Cleanup(func() { _ = store.Close() })
-	var version, tables int
-	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.db.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN ('journal_events','verifications','publications')`).Scan(&tables); err != nil {
-		t.Fatal(err)
-	}
-	if version != CurrentSchemaVersion() || tables != 3 {
-		t.Fatalf("migration version=%d tables=%d", version, tables)
-	}
-}
 
 func prepareJournalVerification(t *testing.T, store *Store, sealed SealedResult, n int) VerificationRecord {
 	t.Helper()

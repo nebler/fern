@@ -354,7 +354,7 @@ type EventPage struct {
 
 // JournalEvent is the immutable proof paired with one verification or
 // publication revision. Journal events are separate from the reconnect event
-// stream, whose migration-1 schema is deliberately closed to task/attempt IDs.
+// stream, which is deliberately closed to task/attempt IDs.
 type JournalEvent struct {
 	ID             task.EventID
 	WorkspaceID    task.WorkspaceID
