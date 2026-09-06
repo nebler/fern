@@ -1,273 +1,190 @@
 # Fern
 
-Fern runs disposable OpenCode jobs on your Docker host and retains exact Git
-results after their compute is removed.
+Fern is a self-hosted Go control plane for engineers who want to run coding-agent jobs in disposable containers, steer them live, and retain a verified Git artifact after the workspace is removed.
 
-The primary submission interface is the `@fern/opencode` plugin. It submits a
-clean local Git revision to Fern, follows the run, stops it, or explicitly seals
-its work. Operators use `fern runs` and `fern attach` to connect the normal
-OpenCode TUI to the exact live server and session. Fern owns the durable
-receipt, runtime identity, retained artifact, and GitHub App token broker.
-The agent owns Git commits, pushes, and pull requests inside its disposable run.
+## Why it exists
 
-Fern does not maintain a persistent coding workspace and does not proxy a
-general-purpose OpenCode server.
+Coding-agent runs are long-lived processes that edit repositories, invoke tools,
+and handle credentials. They can lose a network response, outlive a client, or
+crash halfway through an operation. A message from the agent saying “done” does
+not establish which process wrote the result, whether the work survived, or
+whether retrying will repeat an external effect.
 
-**Using Fern:** start with the [user guide](docs/usage.md) for current deployment
-prerequisites, client setup, and the run → attach → seal workflow.
+Fern treats completion as a control-plane operation rather than an agent claim.
+Its job is to preserve intent, identify the exact writer, retain its work, and
+remove disposable compute safely. The agent remains responsible for the coding
+workflow: edits, tests, commits, pushes, and pull requests.
 
-For implementation details, start with [the architecture](ARCHITECTURE.md) and
-the [Go package guide](docs/go-packages.md). The guide links every package README,
-the naming/maintainability review, and reproducible local performance results.
+## What Fern does differently
 
-## Lifecycle
+- **Intent before effect.** SQLite records admission, claims, and lifecycle
+  transitions before the corresponding external mutations. Recovery reconciles
+  observed effects with durable intent. If evidence cannot establish what
+  happened, the run becomes uncertain rather than blindly replaying a prompt.
+- **Exact writer, exact result.** A run binds its repository revision, image,
+  session, and container process identity. Explicit sealing stops and fences
+  that writer, verifies the Git snapshot and bundle, commits retained-result
+  authority, then tears down the workspace. “Verified” means artifact integrity
+  and identity—not that repository tests passed.
+- **Scoped credential delivery.** A host-side GitHub App broker mints short-lived,
+  repository-scoped installation tokens and refreshes them in the run's private
+  storage. The App private key stays on the host. Git and `gh` read rotating
+  credentials without personal `gh` configuration or tokens in Docker config,
+  repository files, command arguments, or retained artifacts.
+- **Live inspection without a second writer.** `fern attach` opens the existing
+  exact OpenCode session through an expiring capability. You can inspect and
+  steer the work before deciding to seal it.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    Trigger["Trigger: OpenCode plugin"] --> Intent["Fern: durable intent"]
+    Intent --> Checkout["Exact Git revision checkout"]
+    subgraph Workspace["Isolated, disposable workspace"]
+        Checkout --> Container["Container: pinned OpenCode runtime"]
+        Container --> Agent["Agent execution"]
+    end
+    App["Host GitHub App broker"] -->|"short-lived repo token"| Container
+    Agent -->|"optional: agent runs git / gh"| PR["GitHub draft PR"]
+    Agent -->|"explicit Seal request"| Seal["Fence writer and verify Git artifact"]
+    Seal --> Retained["Durable sealed Git artifact"]
+    Seal --> Teardown["Container, volume, and clone teardown"]
+```
+
+**PR creation is not a post-seal Fern operation.** The agent may create a draft
+PR while running; sealing independently retains the final work. A previously
+pushed PR may therefore differ from the sealed artifact. Cancellation via Stop
+is also distinct from sealing: choose Seal when you want retention.
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the authority and recovery boundaries.
+
+## Quickstart
+
+### Build and inspect on a clean machine
+
+These commands target a fresh **Ubuntu 24.04 machine with sudo access and
+network access**. They install Git and Docker and build Fern with Go 1.27 inside
+a container, so no existing Go installation is required.
+
+```sh
+sudo apt-get update
+sudo apt-get install -y ca-certificates git docker.io
+sudo systemctl enable --now docker
+
+git clone https://github.com/nebler/fern.git
+cd fern
+sudo docker run --rm \
+  -e CGO_ENABLED=0 -v "$PWD:/src" -w /src \
+  golang:1.27 go build -o /src/fern ./cmd/fern
+
+./fern version
+./fern --help
+```
+
+To build the source-verified runtime image on that machine:
+
+```sh
+sudo docker build -t fern/opencode-background-source:local \
+  images/opencode-background-source
+sudo docker image inspect fern/opencode-background-source:local \
+  --format '{{.Id}}'
+```
+
+Record the image ID for host qualification and configuration. Building the image
+does not qualify the host or make a run ready to execute.
+
+### Execute a job: prerequisites still required
+
+**There is not yet an honest one-command, clean-machine execution quickstart.**
+The current execution contract requires:
+
+1. Native Linux amd64/arm64, kernel 5.14+, and a same-host Docker Unix socket.
+2. Operator-provisioned XFS project storage with enforced byte and inode hard
+   limits, separate from the durable-state filesystem, plus host-space reserve.
+3. Permission to query those project limits. Linux requires `CAP_SYS_ADMIN` for
+   the query used here; **the stock unprivileged service cannot execute it
+   unchanged**. Fern neither grants that capability nor installs a helper.
+4. A qualified image, a bound host Git repository, private HTTPS control and
+   attachment origins, and a repository-bound GitHub App installation.
+5. A usable credential-free model provider for the pinned runtime. Arbitrary
+   provider API-key environment injection is currently rejected. A GitHub token
+   does not supply model-provider authentication.
+
+Follow **[the usage guide](docs/usage.md)** for configuration, App onboarding,
+local plugin installation, and the daily workflow:
 
 ```text
-plugin create
-    -> durable admission
-    -> isolated clone + volume + container
-    -> exact OpenCode session + prompt
-    -> working / needs_you
-    -> agent commits, pushes, and opens a PR if requested
-    -> user seal
-    -> stop exact writer
-    -> immutable Git bundle in local CAS
-    -> remove route, container, volume, clone
+/fern → Run → inspect with fern attach → Seal → Result
 ```
 
-Every run is bound to an exact repository ID, remote, base commit, image ID,
-execution profile, environment digest, session ID, message ID, and runtime
-epoch. Capacity is intentionally one run at a time.
+The plugin targets OpenCode **1.18.16** and is not published to npm yet. It must
+be built and installed locally. There is no `fern run` CLI command; submission
+uses the plugin. See [the plugin README](plugins/opencode/README.md).
 
-To publish work, include it in the goal or task, for example: “Implement the
-change, run the tests, commit it, push a branch, and use `gh pr create --draft`
-to open a pull request.” Fern supplies a repository-scoped, short-lived GitHub
-App installation token to the run and refreshes it while the run is active.
-The App private key stays on the host; it is never placed in the container.
-Git and `gh` use the run's credential helpers. There is no host publication
-coordinator or publication API, and Fern does not guarantee exactly-once PR
-creation. Sealing retains the Git result; it does not publish it.
+## Engineering discipline
 
-## Requirements
+The repository carries checks for the properties this design depends on, not
+just successful agent output:
 
-- Go 1.27 or newer
-- native Linux with local Docker over a Unix socket (Docker Desktop execution is unsupported)
-- operator-provisioned XFS project quotas enforcing both byte and inode hard limits
-- a qualified `opencode-background-source` image
-- a GitHub App installation bound to one repository
-- private HTTPS origins for the control plane and live-run route
-- OpenCode `1.18.16` for the plugin and attachment
+- **Concurrency and static checks:** Go race detection, `go vet`, formatting,
+  package coverage floors, and function-level gates for critical coordinator
+  paths. These are release gates, not proof that every failure path is covered.
+- **Runtime qualification:** a digest/ID-bound image and exact source profile
+  are exercised against session identity, response loss, prompt replay,
+  attachment, writer replacement, and retained-result reconstruction. Local
+  image IDs are distinguished from published registry digests.
+- **Source authentication:** the image build verifies the pinned OpenCode commit
+  against a vendored GitHub web-flow signing key before dependency installation.
+  This authenticates GitHub-signed content, not independent maintainer approval.
+- **Reproducible packaging and signed release machinery:** release scripts use
+  source-derived timestamps, trimmed build paths, and deterministic packaging.
+  The release workflow verifies signed tags and binds assets/images to SPDX
+  SBOMs, build provenance, and verified Cosign signatures/attestations. These
+  controls make source and artifact claims inspectable; they are not a claim
+  that the complete image supply chain is bit-for-bit reproducible.
 
-Remote `DOCKER_HOST` endpoints are rejected. Fern expects host-local bind
-mounts, loopback routing, and coordination.
+Review the [release workflow](.github/workflows/release.yml),
+[coverage gates](scripts/test-critical-coverage.sh), and
+[local performance evidence](docs/performance.md). The machinery demonstrates
+engineering rigor; it does not erase the deployment and qualification gaps below.
 
-Set `tasks.runtimeStorageRoot` to an absolute, cleaned, non-root path such as
-`/var/lib/fern-runtime`. This operator-provisioned XFS project root must enclose
-both disposable clones and state-volume directories. Keep durable SQLite/CAS
-storage outside it. Enable project-quota enforcement, assign the project with
-inheritance, and set hard limits for **both bytes and inodes** before execution.
-Plan and monitor host free-space/inode reserve separately, including Docker
-images, logs, and durable artifacts; a runtime quota is not a whole-host disk
-guarantee. Fern does not configure mounts or provision quotas automatically.
-Configuration validation checks path shape only; provider execution admission rejects
-unsupported or non-quota-backed execution. `doctor` reports its quota-check
-limitations rather than certifying enforcement.
+## Known limitations
 
-**Deployment blocker:** Linux requires `CAP_SYS_ADMIN` for the project-hard-limit
-query used here. The stock unprivileged service cannot execute this checker.
-No broad capability or privileged helper is installed automatically. Resolve the
-quota-query privilege arrangement explicitly before deployment; see
-[`taskenvdocker`'s storage contract](internal/taskenvdocker/README.md#required-linux-quota-storage).
-
-Qualify byte and inode exhaustion, recovery, and host reserve on the actual
-Linux deployment before production. macOS development tests are not live quota
-qualification, and Docker Desktop is not an execution fallback.
-
-The current Docker bridge is not a sandbox for hostile repository code.
-Repositories and the host network must be trusted. Background environment
-injection, including provider API keys, is rejected until provider credentials
-can stay in a host-side broker behind restricted egress; credential-bearing
-remote providers are not supported by the current profile.
-
-## Configure
-
-Build the qualified source image:
-
-```sh
-make image-background-source
-make test-background-qualification
-BACKGROUND_IMAGE_ID=$(docker image inspect fern/opencode-background-source:dev --format '{{.Id}}')
-```
-
-Create configuration. The private origins must use the same hostname; the live
-run origin must have an explicit non-443 port.
-
-```sh
-go run ./cmd/fern init \
-  --repo /srv/fern/repository \
-  --runtime-storage-root /var/lib/fern-runtime \
-  --repository owner/repository \
-  --repository-id 123456789 \
-  --model-provider replace-with-credential-free-provider \
-  --model replace-with-model-id \
-  --background-image-id "$BACKGROUND_IMAGE_ID" \
-  --remote-origin https://fern-host.example.ts.net \
-  --background-origin https://fern-host.example.ts.net:8443
-```
-
-`fern.example.yaml` contains the complete production shape. The qualified
-source profile is
-`source-39fb919a054190498f6d5b7985bde231f93ad7a6`. Image IDs are
-architecture- and build-specific, so `init` requires the exact ID captured by
-qualification on that host.
-
-Rebuild and requalify the image even if you already have that published source
-tag: the run now requires the Git/`gh` credential helpers included by the current
-image build. Qualification requires the image label `ai.fern.runtime.spec="10"`;
-older images are not supported. Record the newly built image ID in configuration.
-
-Publish only the remote listener and live-run listener through a private TLS
-edge. Never publish the operator listener. The remote route must exist before
-GitHub can return the App Manifest callback.
-
-```sh
-tailscale serve --bg http://127.0.0.1:8080
-tailscale serve --bg --https=8443 http://127.0.0.1:8443
-```
-
-Start Fern in onboarding-only mode:
-
-```sh
-go run ./cmd/fern up --config fern.yaml --env-file fern.env
-```
-
-When no GitHub App credential is present, the operator control page exposes the
-App Manifest onboarding flow. Create the App, install it on only the configured
-repository, copy the numeric installation ID from GitHub's installation URL
-into `workspace.github.installationId`, and restart Fern. Until that positive
-ID and the credentials both exist, readiness is blocked and run/result requests
-return `503`.
-
-## Plugin
-
-The repo-local plugin supports native `run`, `runs`, `stop`, `seal`, `result`,
-and `disconnect` actions. See `plugins/opencode/README.md` for its
-installation, credential, and HTTP contract.
-
-The plugin authorizes against Fern with fixed scopes:
-
-```text
-run:create run:read run:stop run:attach run:result
-```
-
-Fern stores plugin credentials in the operating-system keyring and stores only
-credential digests server-side.
-
-## Attach to a run
-
-List running sessions and attach the OpenCode V2 TUI:
-
-```sh
-fern runs
-fern runs --json
-fern attach                         # selects the only run or opens a picker
-fern attach tsk_...
-```
-
-Those forms run on the Fern host and read the local configuration and protected
-environment file. From another machine, use the private Fern origin:
-
-```sh
-fern runs --endpoint https://fern-host.example.ts.net
-fern attach --endpoint https://fern-host.example.ts.net tsk_...
-```
-
-Remote commands reuse the Fern plugin credential in the operating-system
-keyring, or `FERN_TOKEN` when explicitly supplied. An authenticated attach
-request returns a random two-hour capability held only in memory and bound to
-the current workspace, task, attempt, run generation, single-writer generation,
-container process epoch, and OpenCode session. `fern attach` passes it to
-`opencode attach <live-origin> --session <session-id> --pure` through the OpenCode
-authentication environment. Route removal, process replacement, expiry, or
-Fern shutdown revokes access. Fern permits the TUI's read traffic and exact
-session interactions while rejecting session creation/deletion, cross-session
-mutations, workspace management, credential management, and terminal upgrades.
-Attachment never replaces the OpenCode process or volume and never transfers
-filesystem ownership.
-
-## Durable State
-
-Fern keeps:
-
-- taskstore schema 3 records, receipts, claims, and actor snapshots;
-- paired-device and plugin authorization digests;
-- GitHub App credentials;
-- retained artifact CAS objects and materialized-result authority;
-- the host key used to identify disposable Docker resources.
-
-Run clones, artifact work directories, containers, and
-volumes are disposable. This pre-release schema reset does not support older
-development taskstore databases. Preserve offline backups and initialize separate
-fresh state when required; do not delete existing state to bypass a startup error.
-
-Offline backup and encrypted credential commands remain available:
-
-```sh
-fern backup create --output /secure/fern-backup
-fern backup restore --backup /secure/fern-backup
-fern backup rollback --recovery-dir /var/lib/fern/recovery
-fern credentials export --recipient age1... --output credentials.age
-fern credentials import --identity identity.txt --input credentials.age
-```
-
-The process must be stopped because these commands acquire Fern's repository
-lease. Backups include configuration, repository, durable state, retained CAS,
-and the disposable-runtime host key; they exclude run clones and scratch work.
-Legacy host-publication checkouts are still excluded from backups.
-Detected credentials are segregated into a separate backup artifact that must
-be protected as secret material. The dedicated `fern credentials` export is
-age-encrypted. Encrypted credential bundles use format **2**, accept only GitHub
-App credentials, and explicitly reject format 1. This does not change the
-underlying GitHub App credential-store schema. Re-export with the current binary
-while the source credentials are available; no automatic bundle migration is
-performed. Export never overwrites an existing destination.
-
-## Commands
-
-```text
-fern init
-fern doctor
-fern up
-fern runs [--json]
-fern attach [run-id]
-fern backup create|restore|rollback
-fern credentials export|import|rotate
-fern version
-```
-
-## Development
-
-```sh
-make format
-make test
-make test-race
-make vet
-make build
-make test-background-qualification
-./integration/upgrade/run.sh
-./integration/release/run.sh
-
-cd plugins/opencode
-bun install --frozen-lockfile
-bun run format:check
-bun run typecheck
-bun test
-```
-
-`make lint` additionally requires `golangci-lint`.
+- **Pre-release deployment:** the quota-query privilege arrangement remains an
+  operator security decision. Actual XFS byte/inode exhaustion and recovery have
+  not been qualified on the local development host. The stock hosted release
+  runner is not provisioned with that storage boundary either; the full release
+  qualification path needs it. Docker Desktop is not an execution fallback.
+- **Capacity one:** Fern is a single-host runner, not a fleet scheduler.
+- **Trusted code and network:** bridge isolation is not a hostile-code sandbox.
+  An agent can misuse or exfiltrate its scoped GitHub token until expiry. Quotas
+  bound project allocation, not all other host writers or global free space.
+- **No authoritative publication or test result:** Fern does not guarantee
+  exactly-once PR creation, successful repository tests, or equality between a
+  PR and the later sealed artifact. The qualification suite does not mutate a
+  live GitHub repository; credential responses are synthetic.
+- **Upstream uncertainty remains explicit:** question recovery after replacement,
+  automatic completion authority, and durable provider-turn start remain
+  blocked/unproven in the OpenCode qualification contract.
+- **Client and result gaps:** submission refuses an explicit remote `--server`
+  TUI; the plugin is unpublished; result reads expose metadata, not an artifact
+  download URL or a `fern result download` command.
+- **Breaking development formats:** older state formats may be rejected without
+  migration. Preserve offline backups; do not delete state to bypass an error.
 
 ## Documentation
 
-`ARCHITECTURE.md` is the detailed system contract: components, state machines,
-trust boundaries, evidence, recovery, deployment, attachment, backup, and
-release gates.
+- **[Usage guide](docs/usage.md):** setup, run, attach, seal, results, and recovery.
+- **[Go package guide](docs/go-packages.md):** package READMEs and suggested reading order.
+- **[Architecture](ARCHITECTURE.md):** ownership, persistence, and effect boundaries.
+- **[Review findings](docs/go-review.md):** remaining maintenance and performance concerns.
+
+## License
+
+[MIT](LICENSE).
+
+### About the name
+
+*Fern* is German for “far away” or “distant”: work runs in a separate disposable
+workspace, and sealing brings back the verified Git artifact before removing it.
