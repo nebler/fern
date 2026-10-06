@@ -1,3 +1,0 @@
-integrity_check=ok
-journal_mode=wal
-synchronous=1
