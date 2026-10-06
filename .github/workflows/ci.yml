@@ -118,5 +118,18 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      - name: Provision XFS project-quota runtime storage
+        run: |
+          sudo apt-get install -y --no-install-recommends xfsprogs
+          truncate -s 4G "$RUNNER_TEMP/fern-runtime.img"
+          mkfs.xfs -q "$RUNNER_TEMP/fern-runtime.img"
+          sudo mkdir -p /mnt/fern-runtime
+          sudo mount -o loop,prjquota "$RUNNER_TEMP/fern-runtime.img" /mnt/fern-runtime
+          sudo mkdir /mnt/fern-runtime/project
+          sudo xfs_quota -x -c 'project -s -p /mnt/fern-runtime/project 4242' /mnt/fern-runtime
+          sudo xfs_quota -x -c 'limit -p bhard=3g ihard=200000 4242' /mnt/fern-runtime
+          echo "FERN_RUNTIME_STORAGE_ROOT=/mnt/fern-runtime/project" >> "$GITHUB_ENV"
+
+      # Reading XFS project hard limits (Q_XGETQUOTA) requires CAP_SYS_ADMIN.
       - name: Run authoritative local Background Run qualification
-        run: ./integration/background-run-qualification/run.sh
+        run: sudo --preserve-env env "PATH=$PATH" ./integration/background-run-qualification/run.sh
