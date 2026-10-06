@@ -66,3 +66,24 @@ func TestValidPath(t *testing.T) {
 		t.Fatal("ValidPathBytes disagrees with ValidPath")
 	}
 }
+
+func TestValidateGitHubRemote(t *testing.T) {
+	t.Parallel()
+	for _, remote := range []string{"https://github.com/owner/repository", "https://github.com/o/r", "https://github.com/owner/repo.name_x-1"} {
+		if err := ValidateGitHubRemote(remote); err != nil {
+			t.Errorf("ValidateGitHubRemote(%q) = %v, want nil", remote, err)
+		}
+	}
+	for _, remote := range []string{
+		"", "https://github.com/", "https://github.com/owner", "https://github.com/owner/", "https://github.com/owner/repo/",
+		"https://github.com/owner/repo.git", "https://github.com/owner/repo.GIT", "https://github.com/owner/repo/extra",
+		"http://github.com/owner/repo", "https://GitHub.com/owner/repo", "HTTPS://github.com/owner/repo",
+		"https://user@github.com/owner/repo", "https://github.com:443/owner/repo", "https://github.com/owner/repo?x=1",
+		"https://github.com/owner/repo#frag", "https://github.com/own%65r/repo", "https://github.com//owner/repo",
+		"https://example.com/owner/repo", "git@github.com:owner/repo", "https://github.com/owner/re po",
+	} {
+		if err := ValidateGitHubRemote(remote); err == nil {
+			t.Errorf("ValidateGitHubRemote(%q) accepted invalid remote", remote)
+		}
+	}
+}

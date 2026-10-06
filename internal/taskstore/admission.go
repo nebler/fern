@@ -8,10 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"net/url"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/nebler/fern/internal/gitref"
 	runidentity "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
@@ -245,7 +245,7 @@ func validateAdmission(p AdmitBackgroundRunParams) error {
 	if err := p.Claim.Validate(); err != nil || p.Claim.Scope.CommandKind != CreateBackgroundRunCommand || p.BackgroundRun == nil {
 		return fmt.Errorf("%w: idempotency claim: %v", ErrInvalidInput, err)
 	}
-	if !canonicalBackgroundRemote(p.BackgroundRun.RepositoryRemote) ||
+	if gitref.ValidateGitHubRemote(p.BackgroundRun.RepositoryRemote) != nil ||
 		(p.BackgroundRun.Branch != "" && !validBoundedText(p.BackgroundRun.Branch, 1, 255)) ||
 		p.BackgroundRun.Profile != BackgroundRunSourceProfile || p.BackgroundRun.InstructionSHA256 != sha256.Sum256([]byte(p.Prompt)) ||
 		p.BackgroundRun.ProfileSHA256 != sha256.Sum256([]byte(p.BackgroundRun.Profile)) || p.BackgroundRun.EnvironmentSHA256 == ([32]byte{}) || p.Claim.Actor.Type != task.ActorOpenCode ||
@@ -292,13 +292,6 @@ func validBackgroundImageIdentity(value string) bool {
 		}
 	}
 	return true
-}
-
-func canonicalBackgroundRemote(value string) bool {
-	parsed, err := url.Parse(value)
-	return err == nil && parsed.Scheme == "https" && strings.EqualFold(parsed.Host, "github.com") && parsed.User == nil && parsed.RawQuery == "" &&
-		parsed.Fragment == "" && parsed.RawPath == "" && parsed.Path != "/" && !strings.HasSuffix(parsed.Path, "/") &&
-		!strings.HasSuffix(strings.ToLower(parsed.Path), ".git") && value == "https://"+strings.ToLower(parsed.Host)+parsed.EscapedPath()
 }
 
 func canonicalBackgroundIdentities(p AdmitBackgroundRunParams) bool {

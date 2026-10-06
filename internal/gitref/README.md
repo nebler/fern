@@ -2,19 +2,20 @@
 
 See the [Go package map](../../docs/go-packages.md) and [maintenance review](../../docs/go-review.md).
 
-`gitref` centralizes Fern's Git reference, SHA-1, GitHub repository-name, and
-repository-relative path checks. It is a standard-library-only, synchronous
-validation package: it does not invoke Git or contact GitHub.
+`gitref` centralizes Fern's Git reference, SHA-1, GitHub repository-name,
+canonical GitHub remote URL, and repository-relative path checks. It is a
+standard-library-only, synchronous validation package: it does not invoke Git
+or contact GitHub.
 
 ## Place in the system
 
-Direct production callers are `config`, `githubapp`, `taskartifact`, and
-`taskstore`. Sharing these rules prevents API routing, artifact paths, and
+Direct production callers are `config`, `githubapp`, `runapi`, `taskartifact`,
+`taskenvdocker`, and `taskstore`. Sharing these rules prevents API routing, artifact paths, and
 configuration from quietly accepting different identifier languages.
 
 ```mermaid
 flowchart LR
-  callers["config / githubapp / taskartifact / taskstore"] -->|"validate boundary values"| refs["ValidateRef / ValidateOwnerRepo"]
+  callers["config / githubapp / runapi / taskartifact / taskenvdocker / taskstore"] -->|"validate boundary values"| refs["ValidateRef / ValidateOwnerRepo / ValidateGitHubRemote"]
   callers -->|"object and artifact identifiers"| values["ValidPath / ValidPathBytes"]
   refs -->|"reject non-printable bytes"| ascii["printableASCII"]
   refs -->|"component and suffix checks"| str["stdlib strings"]
@@ -32,13 +33,18 @@ flowchart LR
 - `ValidateOwnerRepo` requires one slash, an owner of 1–39 characters, and a
   repository name of 1–100 characters. It rejects `.`, `..`, and `.git` suffixes
   and applies the documented ASCII owner/repository character restrictions.
+- `ValidateGitHubRemote` accepts only `https://github.com/OWNER/REPOSITORY`
+  spelled exactly (lowercase scheme and host, no userinfo, port, query,
+  fragment, percent-encoding, trailing slash, or `.git` suffix) where the path
+  is a `ValidateOwnerRepo` full name. It is the single remote-identity check for
+  run admission, the run API, and the Docker run provider.
 - `ValidPath` rejects empty paths, NUL, absolute/trailing slash paths, and empty,
   `.` or `..` components, with a 4096-byte limit. It does not resolve symlinks,
   inspect the filesystem, or claim that backslashes are separators.
 - `ValidPathBytes` delegates through a string conversion.
 
-The error-returning validators expose `ErrInvalidRef` and
-`ErrInvalidOwnerRepo`; the remaining validators return booleans. Callers add
+The error-returning validators expose `ErrInvalidRef`, `ErrInvalidOwnerRepo`,
+and `ErrInvalidGitHubRemote`; the remaining validators return booleans. Callers add
 operation-specific context rather than copying these rules.
 
 ## Naming review

@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -32,6 +31,7 @@ import (
 	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/githubapp"
+	"github.com/nebler/fern/internal/gitref"
 	runidentity "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
@@ -562,7 +562,7 @@ func (p *Provider) validateRunForCleanup(run taskstore.BackgroundRun) (string, e
 	if err != nil || !resources.Matches(run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity) {
 		return "", errors.New("noncanonical background run resource identity")
 	}
-	if strings.ContainsAny(run.CloneIdentity+run.VolumeIdentity+run.ContainerIdentity, `/\\`) || !canonicalRemote(run.RepositoryRemote) || run.OpenCodeSessionID == "" || run.OpenCodeMessageID == "" {
+	if strings.ContainsAny(run.CloneIdentity+run.VolumeIdentity+run.ContainerIdentity, `/\\`) || gitref.ValidateGitHubRemote(run.RepositoryRemote) != nil || run.OpenCodeSessionID == "" || run.OpenCodeMessageID == "" {
 		return "", errors.New("incomplete background run identity")
 	}
 	return p.specDigest(run)
@@ -570,11 +570,6 @@ func (p *Provider) validateRunForCleanup(run taskstore.BackgroundRun) (string, e
 
 func (p *Provider) cleanupDigest(run taskstore.BackgroundRun) (string, error) {
 	return p.validateRunForCleanup(run)
-}
-
-func canonicalRemote(value string) bool {
-	parsed, err := url.Parse(value)
-	return err == nil && parsed.Scheme == "https" && strings.EqualFold(parsed.Host, "github.com") && parsed.User == nil && parsed.RawQuery == "" && parsed.Fragment == "" && parsed.RawPath == "" && parsed.Path != "/" && !strings.HasSuffix(parsed.Path, "/") && !strings.HasSuffix(strings.ToLower(parsed.Path), ".git") && value == "https://"+strings.ToLower(parsed.Host)+parsed.EscapedPath()
 }
 
 func (p *Provider) specDigest(run taskstore.BackgroundRun) (string, error) {

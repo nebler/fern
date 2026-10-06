@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,6 +18,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/nebler/fern/internal/gitref"
 	"github.com/nebler/fern/internal/pluginauth"
 	runidentity "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/runcommand"
@@ -93,7 +93,7 @@ func New(config Config) (*Handler, error) {
 	if _, err := task.ParseWorkspaceID(string(config.WorkspaceID)); err != nil {
 		return nil, errors.New("valid background run workspace is required")
 	}
-	if !canonicalRepositoryRemote(config.RepositoryRemote) {
+	if gitref.ValidateGitHubRemote(config.RepositoryRemote) != nil {
 		return nil, errors.New("canonical background run repository remote is required")
 	}
 	if (config.AvailableProfile == PluginOpenCodeProfile) != (config.BackgroundImageIdentity != "") ||
@@ -497,13 +497,6 @@ func validateEmptyMutation(w http.ResponseWriter, r *http.Request) bool {
 		return false
 	}
 	return true
-}
-func canonicalRepositoryRemote(value string) bool {
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.Scheme != "https" || !strings.EqualFold(parsed.Host, "github.com") || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.RawPath != "" || parsed.Path == "/" || strings.HasSuffix(parsed.Path, "/") || strings.HasSuffix(strings.ToLower(parsed.Path), ".git") {
-		return false
-	}
-	return value == "https://"+strings.ToLower(parsed.Host)+parsed.EscapedPath()
 }
 func methodNotAllowed(w http.ResponseWriter, method string) {
 	w.Header().Set("Allow", method)

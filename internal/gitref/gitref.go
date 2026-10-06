@@ -20,7 +20,13 @@ var (
 	// ErrInvalidOwnerRepo reports a value other than a canonical GitHub
 	// OWNER/REPOSITORY full name.
 	ErrInvalidOwnerRepo = errors.New("invalid GitHub owner/repository name")
+	// ErrInvalidGitHubRemote reports a value other than a canonical
+	// https://github.com/OWNER/REPOSITORY remote URL.
+	ErrInvalidGitHubRemote = errors.New("invalid canonical GitHub remote URL")
 )
+
+// githubRemotePrefix is the only accepted scheme and host spelling for remotes.
+const githubRemotePrefix = "https://github.com/"
 
 // ValidateRef enforces the canonical Git reference-name rules: non-empty and at
 // most 255 bytes of printable ASCII, no leading '-', no control characters,
@@ -67,6 +73,18 @@ func ValidateOwnerRepo(fullName string) error {
 		if !asciiAlphanumeric(character) && character != '-' && character != '_' && character != '.' {
 			return ErrInvalidOwnerRepo
 		}
+	}
+	return nil
+}
+
+// ValidateGitHubRemote accepts only the canonical remote URL
+// 'https://github.com/OWNER/REPOSITORY': lowercase scheme and host, no
+// userinfo, port, query, fragment, trailing slash, or '.git' suffix, and a path
+// that is exactly one ValidateOwnerRepo full name.
+func ValidateGitHubRemote(remote string) error {
+	fullName, ok := strings.CutPrefix(remote, githubRemotePrefix)
+	if !ok || ValidateOwnerRepo(fullName) != nil {
+		return ErrInvalidGitHubRemote
 	}
 	return nil
 }
