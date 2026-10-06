@@ -11,6 +11,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/nebler/fern/internal/githubapp"
+	"github.com/nebler/fern/internal/gitref"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -31,24 +32,6 @@ type githubCredentialLease struct {
 	digest, runtime string
 	repository      githubapp.RepositoryIdentity
 	expires         time.Time
-}
-
-func validGitHubRepositoryName(name string) bool {
-	parts := strings.Split(name, "/")
-	if len(parts) != 2 {
-		return false
-	}
-	for _, part := range parts {
-		if part == "" || part == "." || part == ".." || len(part) > 100 {
-			return false
-		}
-		for _, c := range part {
-			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_' || c == '.') {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // RefreshGitHubCredentials supplies the harness with a short-lived, one-repo
@@ -77,7 +60,7 @@ func (p *Provider) RefreshGitHubCredentials(ctx context.Context, run taskstore.B
 		return err
 	}
 	identity, err := githubapp.NewRepositoryIdentity(p.config.GitHubRepository.InstallationID(), int64(run.RepositoryID))
-	if err != nil || identity != p.config.GitHubRepository || !validGitHubRepositoryName(p.config.GitHubRepositoryFullName) || run.RepositoryRemote != "https://github.com/"+p.config.GitHubRepositoryFullName {
+	if err != nil || identity != p.config.GitHubRepository || gitref.ValidateOwnerRepo(p.config.GitHubRepositoryFullName) != nil || run.RepositoryRemote != "https://github.com/"+p.config.GitHubRepositoryFullName {
 		return errors.New("GitHub credential repository identity mismatch")
 	}
 	api, ok := p.docker.(githubCredentialDocker)

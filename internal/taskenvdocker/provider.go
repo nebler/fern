@@ -460,7 +460,7 @@ func cloneConfig(config Config) Config {
 func validateConfig(c Config) error {
 	if c.GitHubTokens != nil {
 		identity, err := githubapp.NewRepositoryIdentity(c.GitHubRepository.InstallationID(), c.GitHubRepository.RepositoryID())
-		if err != nil || identity != c.GitHubRepository || !validGitHubRepositoryName(c.GitHubRepositoryFullName) {
+		if err != nil || identity != c.GitHubRepository || gitref.ValidateOwnerRepo(c.GitHubRepositoryFullName) != nil {
 			return errors.New("exact GitHub App repository identity is required")
 		}
 	}
