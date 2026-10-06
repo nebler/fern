@@ -122,7 +122,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if r.URL.EscapedPath() != r.URL.Path {
-		writeError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
+		WriteError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
 		return
 	}
 	actor, ok := h.authorize(w, r)
@@ -143,18 +143,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.list(w, r, actor)
 		default:
 			w.Header().Set("Allow", "GET, POST")
-			writeError(w, http.StatusMethodNotAllowed, "method_not_allowed", "The method is not allowed for this resource.")
+			WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "The method is not allowed for this resource.")
 		}
 		return
 	}
 	if !strings.HasPrefix(r.URL.Path, PathPrefix+"/") {
-		writeError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
+		WriteError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
 		return
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, PathPrefix+"/"), "/")
 	id, err := task.ParseTaskID(parts[0])
 	if err != nil || len(parts) > 2 {
-		writeError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
+		WriteError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
 		return
 	}
 	if len(parts) == 1 {
@@ -197,7 +197,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		h.seal(w, r, actor, id)
 	default:
-		writeError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
+		WriteError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
 	}
 }
 
@@ -225,7 +225,7 @@ func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorS
 	if admission.Replayed {
 		w.Header().Set("Idempotency-Replayed", "true")
 	}
-	writeJSON(w, http.StatusAccepted, sealProjection{admission.RunID, admission.State, admission.ResultPhase, admission.SealRequestID, admission.Committed})
+	WriteJSON(w, http.StatusAccepted, sealProjection{admission.RunID, admission.State, admission.ResultPhase, admission.SealRequestID, admission.Committed})
 }
 
 type resultResponse struct {
@@ -268,7 +268,7 @@ type cleanupResponse struct {
 
 func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
 	if !noQuery(r) || !noBody(r) {
-		writeError(w, 400, "invalid_query", "This run operation does not accept query parameters.")
+		WriteError(w, http.StatusBadRequest, "invalid_query", "This run operation does not accept query parameters.")
 		return
 	}
 	run, err := h.config.Store.GetBackgroundRun(r.Context(), h.config.WorkspaceID, id, actor)
@@ -279,11 +279,11 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 	if run.State != taskstore.BackgroundRunResultReady {
 		if run.ArtifactExportID != "" {
 			if export, exportErr := h.config.Store.GetBackgroundRunExport(r.Context(), run.ArtifactExportID); exportErr == nil && export.State == taskstore.BackgroundRunExportRecoveryRequired {
-				writeError(w, http.StatusServiceUnavailable, "recovery_required", "The retained result requires recovery.")
+				WriteError(w, http.StatusServiceUnavailable, "recovery_required", "The retained result requires recovery.")
 				return
 			}
 		}
-		writeError(w, http.StatusConflict, "not_ready", "The retained result is not ready.")
+		WriteError(w, http.StatusConflict, "not_ready", "The retained result is not ready.")
 		return
 	}
 	projection, err := h.config.Store.GetBackgroundRunResult(r.Context(), h.config.WorkspaceID, id, actor)
@@ -293,7 +293,7 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 	}
 	retained := h.config.RetentionVerifier.Verify(r.Context(), projection.Result) == nil
 	digest := func(value [32]byte) string { return hex.EncodeToString(value[:]) }
-	writeJSON(w, http.StatusOK, resultResponse{RunID: id, State: "result_ready",
+	WriteJSON(w, http.StatusOK, resultResponse{RunID: id, State: "result_ready",
 		Result: retainedResultResponse{
 			projection.Result.ID, projection.Result.Outcome, run.RepositoryRemote, projection.Result.BaseSHA, projection.Result.ResultCommit, projection.Result.TreeOID, projection.Result.ManifestEntries, digest(projection.Result.ManifestSHA256)},
 		Artifact: retainedArtifactResponse{
@@ -308,7 +308,7 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) (task.ActorS
 	actor, err := h.config.ActorResolver(r.Context())
 	if err != nil || actor.Validate() != nil || !exists || actor.Type != task.ActorOpenCode || actor.ID != authorization.Credential.ID ||
 		actor.CredentialID != authorization.Credential.ID || actor.Authentication != "fern_plugin_bearer" {
-		writeError(w, http.StatusUnauthorized, "unauthenticated", "Plugin authentication is required.")
+		WriteError(w, http.StatusUnauthorized, "unauthenticated", "Plugin authentication is required.")
 		return task.ActorSnapshot{}, false
 	}
 	return actor, true
@@ -317,7 +317,7 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) (task.ActorS
 func (h *Handler) requireScope(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, scope string) bool {
 	authorization, ok := pluginauth.RequestAuthorizationFromContext(r.Context())
 	if actor.Type != task.ActorOpenCode || !ok || actor.ID != authorization.Credential.ID || !authorization.HasScope(scope) {
-		writeError(w, http.StatusForbidden, "forbidden", "The plugin credential lacks the required scope.")
+		WriteError(w, http.StatusForbidden, "forbidden", "The plugin credential lacks the required scope.")
 		return false
 	}
 	return true
@@ -343,7 +343,7 @@ type stopResponse struct {
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot) {
 	if !noQuery(r) || !exactJSON(r) {
-		writeError(w, http.StatusBadRequest, "invalid_request", "The request is not valid.")
+		WriteError(w, http.StatusBadRequest, "invalid_request", "The request is not valid.")
 		return
 	}
 	key, ok := idempotencyKey(w, r)
@@ -365,12 +365,12 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.Acto
 	if admission.Replayed {
 		w.Header().Set("Idempotency-Replayed", "true")
 	}
-	writeJSON(w, http.StatusAccepted, createResponse{admission.RunID, admission.Committed})
+	WriteJSON(w, http.StatusAccepted, createResponse{admission.RunID, admission.Committed})
 }
 
 func (h *Handler) list(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot) {
 	if !noQuery(r) || !noBody(r) {
-		writeError(w, 400, "invalid_query", "Run listing does not accept query parameters.")
+		WriteError(w, http.StatusBadRequest, "invalid_query", "Run listing does not accept query parameters.")
 		return
 	}
 	runs, err := h.config.Store.ListBackgroundRuns(r.Context(), h.config.WorkspaceID, actor, backgroundRunListLimit)
@@ -382,14 +382,14 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request, actor task.ActorS
 	for _, run := range runs {
 		views = append(views, view(run))
 	}
-	writeJSON(w, 200, struct {
+	WriteJSON(w, http.StatusOK, struct {
 		Runs []runView `json:"runs"`
 	}{views})
 }
 
 func (h *Handler) get(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
 	if !noQuery(r) || !noBody(r) {
-		writeError(w, 400, "invalid_query", "Run reads do not accept query parameters.")
+		WriteError(w, http.StatusBadRequest, "invalid_query", "Run reads do not accept query parameters.")
 		return
 	}
 	run, err := h.config.Store.GetBackgroundRun(r.Context(), h.config.WorkspaceID, id, actor)
@@ -397,7 +397,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, actor task.ActorSn
 		writeStoreError(w, err)
 		return
 	}
-	writeJSON(w, 200, view(run))
+	WriteJSON(w, http.StatusOK, view(run))
 }
 
 func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
@@ -416,7 +416,7 @@ func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor task.ActorS
 	if result.Replayed {
 		w.Header().Set("Idempotency-Replayed", "true")
 	}
-	writeJSON(w, http.StatusAccepted, stopResponse{result.RunID, result.State})
+	WriteJSON(w, http.StatusAccepted, stopResponse{result.RunID, result.State})
 }
 
 type runView struct {
@@ -434,13 +434,13 @@ func decodeStrict(w http.ResponseWriter, r *http.Request, limit int64, target an
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	payload, err := io.ReadAll(r.Body)
 	if err != nil || strictjson.Check(payload, 3) != nil {
-		writeError(w, 400, "invalid_json", "The JSON body is not valid.")
+		WriteError(w, http.StatusBadRequest, "invalid_json", "The JSON body is not valid.")
 		return false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(target); err != nil {
-		writeError(w, 400, "invalid_json", "The JSON body is not valid.")
+		WriteError(w, http.StatusBadRequest, "invalid_json", "The JSON body is not valid.")
 		return false
 	}
 	return true
@@ -448,12 +448,12 @@ func decodeStrict(w http.ResponseWriter, r *http.Request, limit int64, target an
 func idempotencyKey(w http.ResponseWriter, r *http.Request) (task.IdempotencyKey, bool) {
 	values := r.Header.Values("Idempotency-Key")
 	if len(values) != 1 {
-		writeError(w, 400, "invalid_idempotency_key", "A valid Idempotency-Key is required.")
+		WriteError(w, http.StatusBadRequest, "invalid_idempotency_key", "A valid Idempotency-Key is required.")
 		return "", false
 	}
 	key, err := task.ParseIdempotencyKey(values[0])
 	if err != nil {
-		writeError(w, 400, "invalid_idempotency_key", "A valid Idempotency-Key is required.")
+		WriteError(w, http.StatusBadRequest, "invalid_idempotency_key", "A valid Idempotency-Key is required.")
 		return "", false
 	}
 	return key, true
@@ -476,64 +476,66 @@ func validText(value string, min, max int) bool {
 }
 func validateEmptyMutation(w http.ResponseWriter, r *http.Request) bool {
 	if !noQuery(r) {
-		writeError(w, 400, "invalid_request", "This run operation does not accept query parameters.")
+		WriteError(w, http.StatusBadRequest, "invalid_request", "This run operation does not accept query parameters.")
 		return false
 	}
 	if !exactJSON(r) {
-		writeError(w, 400, "invalid_request", "Content-Type must be application/json.")
+		WriteError(w, http.StatusBadRequest, "invalid_request", "Content-Type must be application/json.")
 		return false
 	}
 	var value struct{}
 	r.Body = http.MaxBytesReader(w, r.Body, maxEmptyBodyBytes)
 	payload, err := io.ReadAll(r.Body)
 	if err != nil || len(bytes.TrimSpace(payload)) < 2 || bytes.TrimSpace(payload)[0] != '{' || strictjson.Check(payload, 3) != nil {
-		writeError(w, 400, "invalid_json", "The JSON body must be an empty object.")
+		WriteError(w, http.StatusBadRequest, "invalid_json", "The JSON body must be an empty object.")
 		return false
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&value); err != nil {
-		writeError(w, 400, "invalid_json", "The JSON body must be an empty object.")
+		WriteError(w, http.StatusBadRequest, "invalid_json", "The JSON body must be an empty object.")
 		return false
 	}
 	return true
 }
 func methodNotAllowed(w http.ResponseWriter, method string) {
 	w.Header().Set("Allow", method)
-	writeError(w, 405, "method_not_allowed", "The method is not allowed for this resource.")
+	WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "The method is not allowed for this resource.")
 }
 func writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, runcommand.ErrInvalidCreate):
-		writeError(w, http.StatusBadRequest, "invalid_run", "Repository, base, branch, instruction, or profile is not valid for this Fern workspace.")
+		WriteError(w, http.StatusBadRequest, "invalid_run", "Repository, base, branch, instruction, or profile is not valid for this Fern workspace.")
 	case errors.Is(err, runcommand.ErrInvalidBase):
-		writeError(w, http.StatusBadRequest, "invalid_base", "base_oid must be an exact lowercase SHA-1 commit identity.")
+		WriteError(w, http.StatusBadRequest, "invalid_base", "base_oid must be an exact lowercase SHA-1 commit identity.")
 	case errors.Is(err, runcommand.ErrProfileUnavailable):
-		writeError(w, http.StatusServiceUnavailable, "profile_unavailable", fmt.Sprintf("Profile %s requires a configured image qualified for exact source commit 39fb919a054190498f6d5b7985bde231f93ad7a6.", PluginOpenCodeProfile))
+		WriteError(w, http.StatusServiceUnavailable, "profile_unavailable", fmt.Sprintf("Profile %s requires a configured image qualified for exact source commit 39fb919a054190498f6d5b7985bde231f93ad7a6.", PluginOpenCodeProfile))
 	case errors.Is(err, runcommand.ErrBaseUnavailable):
-		writeError(w, http.StatusUnprocessableEntity, "base_unavailable", "base_oid is not an exact commit reachable from an allowed configured-repository ref.")
+		WriteError(w, http.StatusUnprocessableEntity, "base_unavailable", "base_oid is not an exact commit reachable from an allowed configured-repository ref.")
 	case errors.Is(err, runcommand.ErrReplayConflict):
-		writeError(w, http.StatusConflict, "idempotency_conflict", "Idempotency-Key was already used for another request.")
+		WriteError(w, http.StatusConflict, "idempotency_conflict", "Idempotency-Key was already used for another request.")
 	case errors.Is(err, taskstore.ErrNotFound):
-		writeError(w, 404, "not_found", "The requested run was not found.")
+		WriteError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
 	case errors.Is(err, taskstore.ErrIdempotencyConflict), errors.Is(err, taskstore.ErrInvalidState):
-		writeError(w, 409, "conflict", "The run command conflicts with durable state.")
+		WriteError(w, http.StatusConflict, "conflict", "The run command conflicts with durable state.")
 	default:
-		writeError(w, 500, "internal_error", "The run command could not be completed.")
+		WriteError(w, http.StatusInternalServerError, "internal_error", "The run command could not be completed.")
 	}
 }
-func writeError(w http.ResponseWriter, status int, code, message string) {
-	writeJSON(w, status, struct {
-		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}{Error: struct {
+
+// WriteError writes Fern's JSON error envelope {"error":{"code","message"}}.
+func WriteError(w http.ResponseWriter, status int, code, message string) {
+	type errorBody struct {
 		Code    string `json:"code"`
 		Message string `json:"message"`
-	}{code, message}})
+	}
+	WriteJSON(w, status, struct {
+		Error errorBody `json:"error"`
+	}{errorBody{code, message}})
 }
-func writeJSON(w http.ResponseWriter, status int, value any) {
+
+// WriteJSON writes value as a JSON response with the given status code.
+func WriteJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)

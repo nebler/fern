@@ -4,7 +4,6 @@ package runclientapi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/pluginauth"
+	"github.com/nebler/fern/internal/runapi"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 )
@@ -51,12 +51,12 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	writer.Header().Set("Cache-Control", "no-store")
 	writer.Header().Set("X-Content-Type-Options", "nosniff")
 	if request.URL.EscapedPath() != request.URL.Path || request.Method != http.MethodGet || request.URL.RawQuery != "" || !emptyBody(request) {
-		writeError(writer, http.StatusNotFound, "not_found", "The requested run client operation was not found.")
+		runapi.WriteError(writer, http.StatusNotFound, "not_found", "The requested run client operation was not found.")
 		return
 	}
 	actor, err := task.ContextActor(request.Context())
 	if err != nil || !clientActor(actor) {
-		writeError(writer, http.StatusUnauthorized, "unauthenticated", "Run client authentication is required.")
+		runapi.WriteError(writer, http.StatusUnauthorized, "unauthenticated", "Run client authentication is required.")
 		return
 	}
 	if request.URL.Path == PathPrefix {
@@ -69,13 +69,13 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 	suffix, found := strings.CutPrefix(request.URL.Path, PathPrefix+"/")
 	parts := strings.Split(suffix, "/")
 	if !found || len(parts) != 2 || parts[1] != "attach" {
-		writeError(writer, http.StatusNotFound, "not_found", "The requested run client operation was not found.")
+		runapi.WriteError(writer, http.StatusNotFound, "not_found", "The requested run client operation was not found.")
 		return
 	}
 	runID, err := task.ParseTaskID(parts[0])
 	if err != nil || !authorized(writer, request, actor, "run:attach") {
 		if err != nil {
-			writeError(writer, http.StatusNotFound, "not_found", "The requested run was not found.")
+			runapi.WriteError(writer, http.StatusNotFound, "not_found", "The requested run was not found.")
 		}
 		return
 	}
@@ -93,7 +93,7 @@ func authorized(writer http.ResponseWriter, request *http.Request, actor task.Ac
 	authorization, ok := pluginauth.RequestAuthorizationFromContext(request.Context())
 	if !ok || actor.ID != authorization.Credential.ID || actor.CredentialID != authorization.Credential.ID ||
 		actor.Authentication != "fern_plugin_bearer" || !authorization.HasScope(scope) {
-		writeError(writer, http.StatusForbidden, "forbidden", "The client credential lacks the required scope.")
+		runapi.WriteError(writer, http.StatusForbidden, "forbidden", "The client credential lacks the required scope.")
 		return false
 	}
 	return true
@@ -121,7 +121,7 @@ func (handler *Handler) list(writer http.ResponseWriter, request *http.Request, 
 		projection = append(projection, runProjection{ID: run.TaskID, State: run.State, Repository: run.RepositoryRemote,
 			Head: run.BaseOID, Branch: run.Branch, Attachable: attachable})
 	}
-	writeJSON(writer, http.StatusOK, struct {
+	runapi.WriteJSON(writer, http.StatusOK, struct {
 		Runs []runProjection `json:"runs"`
 	}{projection})
 }
@@ -142,19 +142,19 @@ func (handler *Handler) attach(writer http.ResponseWriter, request *http.Request
 		return
 	}
 	if !attachmentReady(run) {
-		writeError(writer, http.StatusConflict, "not_ready", "The OpenCode session is not ready for attachment.")
+		runapi.WriteError(writer, http.StatusConflict, "not_ready", "The OpenCode session is not ready for attachment.")
 		return
 	}
 	attachment, issued, err := handler.config.Route.IssueAttachment(run)
 	if err != nil {
-		writeError(writer, http.StatusServiceUnavailable, "unavailable", "The OpenCode attachment could not be issued.")
+		runapi.WriteError(writer, http.StatusServiceUnavailable, "unavailable", "The OpenCode attachment could not be issued.")
 		return
 	}
 	if !issued {
-		writeError(writer, http.StatusConflict, "not_ready", "The OpenCode session is not ready for attachment.")
+		runapi.WriteError(writer, http.StatusConflict, "not_ready", "The OpenCode session is not ready for attachment.")
 		return
 	}
-	writeJSON(writer, http.StatusOK, attachProjection{RunID: run.TaskID, URL: attachment.Origin, SessionID: run.OpenCodeSessionID,
+	runapi.WriteJSON(writer, http.StatusOK, attachProjection{RunID: run.TaskID, URL: attachment.Origin, SessionID: run.OpenCodeSessionID,
 		Username: attachment.Username, Password: attachment.Password, ExpiresAt: attachment.ExpiresAt})
 }
 
@@ -178,26 +178,8 @@ func emptyBody(request *http.Request) bool {
 func writeStoreError(writer http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, taskstore.ErrNotFound):
-		writeError(writer, http.StatusNotFound, "not_found", "The requested run was not found.")
+		runapi.WriteError(writer, http.StatusNotFound, "not_found", "The requested run was not found.")
 	default:
-		writeError(writer, http.StatusInternalServerError, "internal_error", "The run client operation failed.")
+		runapi.WriteError(writer, http.StatusInternalServerError, "internal_error", "The run client operation failed.")
 	}
-}
-
-func writeError(writer http.ResponseWriter, status int, code, message string) {
-	writeJSON(writer, status, struct {
-		Error struct {
-			Code    string `json:"code"`
-			Message string `json:"message"`
-		} `json:"error"`
-	}{Error: struct {
-		Code    string `json:"code"`
-		Message string `json:"message"`
-	}{code, message}})
-}
-
-func writeJSON(writer http.ResponseWriter, status int, value any) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(value)
 }

@@ -115,6 +115,9 @@ Commands disable replacement objects, lazy fetch, global/system Git config,
 interactive prompts, and optional locks; output buffers are capped at 64 KiB.
 The parent context plus verifier timeout bounds the subprocess work.
 
+`WriteJSON` and `WriteError` are exported so `runclientapi` encodes responses
+and the `{"error":{"code","message"}}` envelope identically.
+
 HTTP errors distinguish bad intent/JSON/key, unauthenticated/forbidden,
 not-found, conflicts, unavailable profile, unreachable base, and unexpected
 internal failure. Raw SQL/Git errors are not exposed. The handler starts no

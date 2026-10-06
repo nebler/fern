@@ -36,7 +36,8 @@ graph LR
 
 The direct production importer is `cmd/fern`, which composes handler, store,
 route manager, and ingress. Internal imports are `backgroundroute`, `pluginauth`,
-`task`, and `taskstore`; all other imports are standard library. There is no
+`runapi` (only for the shared `WriteJSON`/`WriteError` response helpers), `task`,
+and `taskstore`; all other imports are standard library. There is no
 third-party HTTP client or direct network request in this package.
 
 ## Entrypoints and authorization
@@ -98,7 +99,7 @@ graph LR
   G --> H["Store.GetBackgroundRun"]
   G --> I["attachmentReady"]
   G --> J["Route.IssueAttachment"]
-  G --> K["writeJSON credential projection after successful issuance"]
+  G --> K["runapi.WriteJSON credential projection after successful issuance"]
 ```
 
 ## Errors, lifetime, and review
