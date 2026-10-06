@@ -559,7 +559,7 @@ func (states *recordingOnboardingStates) Complete(ctx context.Context, claim Cal
 }
 
 func (states *recordingOnboardingStates) Quarantine(ctx context.Context, claim CallbackClaim, reason CallbackQuarantineReason, now time.Time) error {
-	states.events.add("quarantine:" + reason.String())
+	states.events.add("quarantine:" + string(reason))
 	return states.delegate.Quarantine(ctx, claim, reason, now)
 }
 

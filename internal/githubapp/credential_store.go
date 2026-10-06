@@ -48,14 +48,6 @@ func NewCredentialStore(directory string) (*CredentialStore, error) {
 	return &CredentialStore{directory: directory}, nil
 }
 
-func (store *CredentialStore) String() string {
-	return "GitHub App credential store"
-}
-
-func (store *CredentialStore) GoString() string {
-	return store.String()
-}
-
 // Save atomically replaces the stored credentials. Readers see either the
 // complete old or complete new file. Errors are static and never include
 // credential content.

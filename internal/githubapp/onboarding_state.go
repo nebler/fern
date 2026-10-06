@@ -54,14 +54,6 @@ type OnboardingFlowBinding struct {
 	ReturnPath string
 }
 
-func (binding OnboardingFlowBinding) String() string {
-	return "GitHub App onboarding flow binding"
-}
-
-func (binding OnboardingFlowBinding) GoString() string {
-	return binding.String()
-}
-
 // CallbackClaimDisposition tells the callback coordinator what it may do next.
 // Only CallbackClaimExchangeOnce authorizes a manifest exchange.
 type CallbackClaimDisposition string
@@ -70,19 +62,6 @@ const (
 	CallbackClaimExchangeOnce  CallbackClaimDisposition = "exchange_once"
 	CallbackClaimReconcileOnly CallbackClaimDisposition = "reconcile_only"
 )
-
-func (disposition CallbackClaimDisposition) String() string {
-	switch disposition {
-	case CallbackClaimExchangeOnce, CallbackClaimReconcileOnly:
-		return string(disposition)
-	default:
-		return "invalid_callback_claim_disposition"
-	}
-}
-
-func (disposition CallbackClaimDisposition) GoString() string {
-	return disposition.String()
-}
 
 // CallbackQuarantineReason is a bounded, non-sensitive reason for closing an
 // ambiguous callback claim.
@@ -93,17 +72,6 @@ const (
 	CallbackQuarantineReconcileAmbiguous CallbackQuarantineReason = "reconcile_ambiguous"
 	CallbackQuarantineCoordinatorAborted CallbackQuarantineReason = "coordinator_aborted"
 )
-
-func (reason CallbackQuarantineReason) String() string {
-	if validCallbackQuarantineReason(reason) {
-		return string(reason)
-	}
-	return "invalid_callback_quarantine_reason"
-}
-
-func (reason CallbackQuarantineReason) GoString() string {
-	return reason.String()
-}
 
 // CallbackClaim is an immutable value projection and completion fence.
 type CallbackClaim struct {
@@ -128,14 +96,6 @@ func (claim CallbackClaim) ClaimedAt() time.Time                  { return claim
 func (claim CallbackClaim) Disposition() CallbackClaimDisposition { return claim.disposition }
 func (claim CallbackClaim) Replayed() bool                        { return claim.replayed }
 
-func (claim CallbackClaim) String() string {
-	return "GitHub App onboarding callback claim"
-}
-
-func (claim CallbackClaim) GoString() string {
-	return claim.String()
-}
-
 // OnboardingStateStore persists bounded, one-use callback states in a
 // caller-owned private directory. Raw state, callback code, and claim ID values
 // are never persisted. Transactions are serialized per store; Fern opens one
@@ -157,14 +117,6 @@ func NewOnboardingStateStore(directory string) (*OnboardingStateStore, error) {
 		return nil, ErrOnboardingStateStoreIO
 	}
 	return &OnboardingStateStore{directory: directory, transaction: make(chan struct{}, 1)}, nil
-}
-
-func (store *OnboardingStateStore) String() string {
-	return "GitHub App onboarding state store"
-}
-
-func (store *OnboardingStateStore) GoString() string {
-	return store.String()
 }
 
 // Begin records a caller-generated, unpadded base64url state containing exactly

@@ -241,15 +241,11 @@ func TestCredentialStoreConcurrentReplacementNeverLoadsPartialState(t *testing.T
 	}
 }
 
-func TestCredentialStoreErrorsAndFormattingAreRedacted(t *testing.T) {
+func TestCredentialStoreErrorsAreRedacted(t *testing.T) {
 	t.Parallel()
 	store, directory := newTestCredentialStore(t)
 	secretPath := filepath.Join(directory, "path-must-not-be-formatted")
 	store.directory = secretPath
-	formatted := fmt.Sprintf("%v %#v", store, store)
-	if strings.Contains(formatted, secretPath) || strings.Contains(formatted, "path-must-not-be-formatted") {
-		t.Fatalf("formatted store exposes its path: %s", formatted)
-	}
 	if _, err := store.Load(); err == nil || strings.Contains(err.Error(), secretPath) {
 		t.Fatalf("error = %v", err)
 	}

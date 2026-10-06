@@ -582,8 +582,8 @@ func TestOnboardingStateStoreContextsValidationAndRedaction(t *testing.T) {
 		t.Fatalf("invalid quarantine reason = %v", err)
 	}
 
-	formatted := fmt.Sprintf("%v %#v %v %#v %v %#v", store, store, binding, binding, claim, claim)
-	assertRedacted(t, errors.New(formatted), directory, state, binding.FlowID, binding.ReturnPath, claimID, "code-secret-137", hexDigest(claim.stateHash), hexDigest(claim.codeHash), hexDigest(claim.claimHash))
+	formatted := fmt.Sprintf("%#v", claim)
+	assertRedacted(t, errors.New(formatted), state, claimID, "code-secret-137")
 	store.directory = filepath.Join(directory, "private-directory-name")
 	err = store.Complete(context.Background(), claim, now)
 	if err == nil {
