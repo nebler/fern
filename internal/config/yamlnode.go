@@ -46,7 +46,6 @@ type fileTaskPolicy struct {
 		ID       yaml.Node `yaml:"id"`
 	} `yaml:"model"`
 	AttemptTimeout    yaml.Node `yaml:"attemptTimeout"`
-	LeaseDuration     yaml.Node `yaml:"leaseDuration"`
 	BackgroundImage   yaml.Node `yaml:"backgroundImage"`
 	BackgroundImageID yaml.Node `yaml:"backgroundImageID"`
 	BackgroundRoute   *struct {
@@ -164,13 +163,9 @@ func parseTaskPolicy(node yaml.Node) (*TaskPolicy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("attemptTimeout: %w", err)
 	}
-	leaseDuration, err := decodeTaskDuration(file.LeaseDuration)
-	if err != nil {
-		return nil, fmt.Errorf("leaseDuration: %w", err)
-	}
 	policy := &TaskPolicy{
 		Agent: agent, Model: TaskModel{Provider: provider, ID: modelID},
-		AttemptTimeout: attemptTimeout, LeaseDuration: leaseDuration,
+		AttemptTimeout: attemptTimeout,
 	}
 	if !file.RuntimeStorageRoot.IsZero() {
 		policy.RuntimeStorageRoot, err = decodeRequiredTaskString(file.RuntimeStorageRoot)

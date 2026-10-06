@@ -109,12 +109,6 @@ func validateTasks(config Config) error {
 	if config.Tasks.AttemptTimeout < time.Minute || config.Tasks.AttemptTimeout > 24*time.Hour {
 		return errors.New("tasks.attemptTimeout must be between 1m and 24h")
 	}
-	if config.Tasks.LeaseDuration < time.Minute || config.Tasks.LeaseDuration > 5*time.Minute {
-		return errors.New("tasks.leaseDuration must be between 1m and 5m")
-	}
-	if config.Tasks.LeaseDuration > config.Tasks.AttemptTimeout {
-		return errors.New("tasks.leaseDuration must not exceed tasks.attemptTimeout")
-	}
 	if config.Tasks.BackgroundImage != "" && (!validTaskText(config.Tasks.BackgroundImage, 1, 256) || strings.TrimSpace(config.Tasks.BackgroundImage) != config.Tasks.BackgroundImage) {
 		return errors.New("tasks.backgroundImage must be an exact nonempty image reference of at most 256 bytes")
 	}

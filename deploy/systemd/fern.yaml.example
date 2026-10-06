@@ -16,7 +16,6 @@ tasks:
     provider: replace-with-provider-id
     id: replace-with-model-id
   attemptTimeout: 30m
-  leaseDuration: 2m
   backgroundImage: ghcr.io/owner/fern/opencode-background-source@sha256:REPLACE_WITH_64_LOWERCASE_HEX_DIGITS
   backgroundImageID: sha256:REPLACE_WITH_64_LOWERCASE_HEX_DIGITS
   backgroundRoute:

@@ -37,7 +37,6 @@ type TaskPolicy struct {
 	Agent              string
 	Model              TaskModel
 	AttemptTimeout     time.Duration
-	LeaseDuration      time.Duration
 	BackgroundImage    string
 	BackgroundImageID  string
 	BackgroundRoute    *BackgroundRoute
