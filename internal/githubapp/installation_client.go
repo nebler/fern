@@ -481,11 +481,11 @@ func (client *InstallationClient) getPage(ctx context.Context, credential, route
 		return nil, "", ErrRequestFailed
 	}
 	defer response.Body.Close()
-	payload, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	payload, err := io.ReadAll(io.LimitReader(response.Body, maxListPageBytes+1))
 	if err != nil {
 		return nil, "", ErrRequestFailed
 	}
-	if len(payload) > maxResponseBytes {
+	if len(payload) > maxListPageBytes {
 		return nil, "", ErrResponseTooLarge
 	}
 	if response.StatusCode != http.StatusOK {

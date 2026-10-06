@@ -12,8 +12,11 @@ import (
 )
 
 const (
-	githubAPIBase       = "https://api.github.com"
-	maxResponseBytes    = 64 << 10
+	githubAPIBase    = "https://api.github.com"
+	maxResponseBytes = 64 << 10
+	// maxListPageBytes bounds one per_page=100 list response. Real GitHub
+	// repository objects are roughly 5-6 KiB each, so a full page is ~600 KiB.
+	maxListPageBytes    = 2 << 20
 	maxAppTokenBytes    = 8 << 10
 	maxAccessTokenBytes = 512
 	minAccessTokenBytes = 20

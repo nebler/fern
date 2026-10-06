@@ -224,6 +224,37 @@ func TestInstallationClientRejectsDiscoveryTokenIdentityExpiryAndPermissions(t *
 	}
 }
 
+func TestInstallationClientAcceptsFullPageOfRealisticallySizedRepositories(t *testing.T) {
+	t.Parallel()
+	now := installationTestNow()
+	// Real GitHub repository objects carry ~80 URL and metadata fields
+	// (~5-6 KiB each); a full per_page=100 page is far larger than token
+	// responses.
+	padding := `,"description":"` + strings.Repeat("d", 5500) + `"`
+	repositories := make([]string, 0, installationPageSize)
+	for index := range installationPageSize {
+		object := repositoryInstallationJSON(int64(1000+index), 1001, fmt.Sprintf("fern-inc/repo-%d", index), false, false)
+		repositories = append(repositories, strings.TrimSuffix(object, "}")+padding+"}")
+	}
+	body := `{"total_count":` + strconv.Itoa(installationPageSize) + `,"repositories":[` + strings.Join(repositories, ",") + `]}`
+	if len(body) <= 500<<10 {
+		t.Fatalf("fixture too small: %d bytes", len(body))
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(writer, body)
+	}))
+	defer server.Close()
+	client := newInstallationTestClient(t, server.Client(), server.URL, &installationAppSource{token: installationTestAppToken}, installationTestDiscoverySource(t, now, 101), now)
+
+	listed, err := client.ListInstallationRepositories(installationTestContext(t), 101)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != installationPageSize {
+		t.Fatalf("repositories = %d, want %d", len(listed), installationPageSize)
+	}
+}
+
 func TestInstallationClientRejectsMalformedDuplicateOversizedAndUnsafePagination(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -239,7 +270,7 @@ func TestInstallationClientRejectsMalformedDuplicateOversizedAndUnsafePagination
 		{name: "trailing", body: []byte(`[] {}`)},
 		{name: "missing required", body: []byte(`[{"id":101,"account":null,"target_type":"Organization","repository_selection":"selected"}]`)},
 		{name: "unsafe value", body: []byte(`[` + installationJSON(101, 1001, "fern-inc", "Bot", "selected") + `]`)},
-		{name: "oversized", body: []byte(strings.Repeat("x", maxResponseBytes+1)), want: ErrResponseTooLarge},
+		{name: "oversized", body: []byte(strings.Repeat("x", maxListPageBytes+1)), want: ErrResponseTooLarge},
 		{name: "cross origin next", body: []byte(`[]`), link: func(string) string {
 			return `<https://attacker.invalid/app/installations?per_page=100&page=2>; rel="next"`
 		}, want: ErrPaginationRefused},
