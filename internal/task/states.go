@@ -2,38 +2,27 @@ package task
 
 type TaskState string
 
+// Task states are the parent-record projection of a background run: queued
+// until the run is sealed (completed) or terminalized without a result (failed).
 const (
-	TaskQueued           TaskState = "queued"
-	TaskRunning          TaskState = "running"
-	TaskInputRequired    TaskState = "input_required"
-	TaskCancelRequested  TaskState = "cancel_requested"
-	TaskUncertain        TaskState = "uncertain"
-	TaskRecoveryRequired TaskState = "recovery_required"
-	TaskCompleted        TaskState = "completed"
-	TaskFailed           TaskState = "failed"
-	TaskCanceled         TaskState = "canceled"
+	TaskQueued    TaskState = "queued"
+	TaskFailed    TaskState = "failed"
+	TaskCompleted TaskState = "completed"
 )
 
-var allTaskStates = []TaskState{TaskQueued, TaskRunning, TaskInputRequired, TaskCancelRequested, TaskUncertain, TaskRecoveryRequired, TaskCompleted, TaskFailed, TaskCanceled}
+var allTaskStates = []TaskState{TaskQueued, TaskFailed, TaskCompleted}
 
 type AttemptState string
 
+// Attempt states: the single attempt stays prepared while the background run
+// executes, then becomes superseded by a sealed result or failed.
 const (
-	AttemptPrepared         AttemptState = "prepared"
-	AttemptDelivering       AttemptState = "delivering"
-	AttemptAdmitted         AttemptState = "admitted"
-	AttemptRunning          AttemptState = "running"
-	AttemptInputRequired    AttemptState = "input_required"
-	AttemptCancelRequested  AttemptState = "cancel_requested"
-	AttemptUncertain        AttemptState = "uncertain"
-	AttemptRecoveryRequired AttemptState = "recovery_required"
-	AttemptSucceeded        AttemptState = "succeeded"
-	AttemptFailed           AttemptState = "failed"
-	AttemptCanceled         AttemptState = "canceled"
-	AttemptSuperseded       AttemptState = "superseded"
+	AttemptPrepared   AttemptState = "prepared"
+	AttemptFailed     AttemptState = "failed"
+	AttemptSuperseded AttemptState = "superseded"
 )
 
-var allAttemptStates = []AttemptState{AttemptPrepared, AttemptDelivering, AttemptAdmitted, AttemptRunning, AttemptInputRequired, AttemptCancelRequested, AttemptUncertain, AttemptRecoveryRequired, AttemptSucceeded, AttemptFailed, AttemptCanceled, AttemptSuperseded}
+var allAttemptStates = []AttemptState{AttemptPrepared, AttemptFailed, AttemptSuperseded}
 
 // ResultState is the task-model view of result lifecycle values. Values
 // arrive as casts from taskstore's authoritative persisted lifecycle.

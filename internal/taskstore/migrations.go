@@ -89,7 +89,7 @@ CREATE TABLE tasks (
     base_ref TEXT NOT NULL CHECK(length(CAST(base_ref AS BLOB)) BETWEEN 1 AND 255),
     base_sha TEXT NOT NULL CHECK(length(base_sha) = 40 AND base_sha NOT GLOB '*[^0-9a-f]*'),
     object_format TEXT NOT NULL CHECK(object_format = 'sha1'),
-    state TEXT NOT NULL CHECK(state IN ('queued','running','input_required','cancel_requested','uncertain','recovery_required','completed','failed','canceled')),
+    state TEXT NOT NULL CHECK(state IN ('queued','failed','completed')),
     terminal_reason TEXT CHECK(terminal_reason IS NULL OR length(CAST(terminal_reason AS BLOB)) BETWEEN 1 AND 1000),
     current_attempt_id TEXT NOT NULL,
     actor_snapshot_id INTEGER NOT NULL REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -118,7 +118,7 @@ CREATE TABLE attempts (
     task_id TEXT NOT NULL REFERENCES tasks(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     workspace_id TEXT NOT NULL,
     sequence INTEGER NOT NULL CHECK(sequence > 0),
-    state TEXT NOT NULL CHECK(state IN ('prepared','delivering','admitted','running','input_required','cancel_requested','uncertain','recovery_required','succeeded','failed','canceled','superseded')),
+    state TEXT NOT NULL CHECK(state IN ('prepared','failed','superseded')),
     opencode_session_id TEXT NOT NULL CHECK(
         length(opencode_session_id) = 36 AND substr(opencode_session_id,1,4) = 'ses_' AND
         substr(opencode_session_id,5) NOT GLOB '*[^0-9a-f]*'
@@ -150,9 +150,6 @@ CREATE TABLE attempts (
 ) STRICT;
 
 CREATE INDEX attempts_task_state ON attempts(task_id, state);
-
-CREATE UNIQUE INDEX attempts_one_effecting_per_workspace ON attempts(workspace_id)
-WHERE state IN ('delivering','admitted','running','input_required','cancel_requested','uncertain','recovery_required');
 
 CREATE TRIGGER attempts_immutable_inputs BEFORE UPDATE ON attempts
 WHEN NEW.id <> OLD.id OR NEW.task_id <> OLD.task_id OR NEW.workspace_id <> OLD.workspace_id OR NEW.sequence <> OLD.sequence OR
