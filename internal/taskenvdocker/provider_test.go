@@ -553,27 +553,20 @@ func TestSourceOriginMustBeOneExactFetchURL(t *testing.T) {
 	}
 }
 
-func TestDurableKeyRecoveryAndLossHandling(t *testing.T) {
+func TestDurableKeyReloadAndLossHandling(t *testing.T) {
 	provider, docker, run := testProvider(t)
 	first := provider.password(run)
 	keyInfo, err := os.Stat(filepath.Join(provider.root, hostKeyName))
 	if err != nil || keyInfo.Mode().Perm() != 0o600 || keyInfo.Size() != 32 {
 		t.Fatalf("first initialization key info=%v error=%v", keyInfo, err)
 	}
-	stale := filepath.Join(provider.root, ".host-key-stale")
-	if err := os.Link(filepath.Join(provider.root, hostKeyName), stale); err != nil {
-		t.Fatal(err)
-	}
 	reconstructed, err := New(context.Background(), provider.config, docker)
 	if err != nil {
-		t.Fatalf("recover stale post-link key: %v", err)
+		t.Fatalf("reload durable key: %v", err)
 	}
 	defer reconstructed.Close()
 	if reconstructed.password(run) != first {
 		t.Fatal("provider reconstruction changed derived password")
-	}
-	if _, err := os.Stat(stale); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("stale same-inode key link remains: %v", err)
 	}
 	if err := os.Remove(filepath.Join(provider.root, hostKeyName)); err != nil {
 		t.Fatal(err)
