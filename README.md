@@ -17,7 +17,7 @@ workflow: edits, tests, commits, pushes, and pull requests.
 
 ## What Fern does differently
 
-- **Intent before effect.** SQLite records admission, claims, and lifecycle
+- **Intent before effect.** SQLite records admission and lifecycle
   transitions before the corresponding external mutations. Recovery reconciles
   observed effects with durable intent. If evidence cannot establish what
   happened, the run becomes uncertain rather than blindly replaying a prompt.

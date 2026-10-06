@@ -19,7 +19,7 @@ Fern owns:
 - actor identity, pairing, plugin grants, and revocation;
 - idempotent task, stop, and seal admission;
 - exact disposable resource identity and lifecycle;
-- run claims, revisions, cancellation epochs, and evidence;
+- run revisions, stop receipts, and evidence;
 - short-lived exact-session attachment capabilities and connection shutdown;
 - writer inactivity proof;
 - Git bundle export and local content-addressed storage;
@@ -228,8 +228,10 @@ absent
 
 External mutations happen only after the corresponding durable intent or
 started phase. Reconciliation reads are bounded. An ambiguous mutation is not
-blindly retried. Claims bind workspace, task, attempt, generation, revision,
-state, phase, cancellation epoch, profile, image, owner, and lease expiry.
+blindly retried. There are no per-run claims or leases: `fern up`'s host lease
+admits one coordinator per workspace, and every transition is a compare-and-swap
+on the run's (or export's) workspace, task, attempt, generation, revision,
+state, and phase, so a write prepared before a concurrent stop or seal fails.
 
 `run` owns lifecycle classification independently of persistence: valid
 state/phase combinations, attempt-deadline applicability, execution-selection

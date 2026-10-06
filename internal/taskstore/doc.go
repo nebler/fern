@@ -1,5 +1,5 @@
 // Package taskstore owns Fern's durable SQLite task state: workspaces,
-// background-run admission, claims, effect observations, sealing, exports,
+// background-run admission, effect observations, sealing, exports,
 // materialization, and retained results. It commits related records and their
 // fences together so HTTP handlers and effect providers never coordinate SQL.
 //
@@ -14,12 +14,14 @@
 // Docker, Git, OpenCode, or GitHub, and recorded bundle proofs are supplied
 // evidence, not a filesystem read.
 //
-// Effect mutations compare the full claim tuple (generation, revision,
-// state/phase, cancel epoch, owner, claim generation, expiry) in SQL and
-// require exactly one affected row. A partial unique index permits at most one
-// effecting background run per workspace. Prompt intent is durable before
-// dispatch, and the prompt-request fence is one-way so a replacement claimant
-// cannot silently resend a prompt. Only the retained-result commit establishes
+// There are no per-run claims or leases: the host lease admits one coordinator
+// per workspace, and the only other writer is the in-process stop/seal API.
+// Effect mutations compare a BackgroundRunRef or BackgroundRunExportRef
+// (generation, revision, state/phase) in SQL and require exactly one affected
+// row, so a write prepared before a concurrent stop or seal fails. A partial
+// unique index permits at most one effecting background run per workspace.
+// Prompt intent is durable before dispatch, and the prompt-request fence is
+// one-way so a restarted coordinator cannot silently resend a prompt. Only the retained-result commit establishes
 // result_ready. Transition order is enforced by these Go compare-and-swap
 // updates plus table CHECKs; SQL triggers only guard immutability of recorded
 // authority, revision progression, the prompt fence, and cleanup gating.

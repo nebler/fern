@@ -5,8 +5,8 @@
 //
 // Classify is a policy query, not a transition engine: it reports whether a
 // state/phase pair is valid, enforces the attempt deadline and execution
-// configuration, is timeout-eligible, or is a retryable cleanup step. Claims,
-// revisions, evidence, and persistence belong to callers. Recovery, sealing,
+// configuration, is timeout-eligible, or is a retryable cleanup step.
+// Revisions, evidence, and persistence belong to callers. Recovery, sealing,
 // export, and cleanup may outlive the attempt deadline, and ResultReady does
 // not mean cleanup is complete.
 //
