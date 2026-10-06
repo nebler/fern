@@ -87,7 +87,7 @@ removes it and waits for admitted forwarding to exit before writer teardown.
 3. Bind remote, operator, and live-run listeners.
 4. Acquire the host-local repository-name lease.
 5. Open control and plugin-authorization state.
-6. Open taskstore schema 3.
+6. Open taskstore schema 4.
 7. If the installation ID is pending, block readiness and expose onboarding
    without composing task services.
 8. Otherwise apply strict `config.Validate` and resolve exact GitHub
@@ -490,7 +490,7 @@ generation when one exists.
 | `taskartifact` | deterministic Git bundle creation, CAS, materialization |
 | `taskenvdocker` | disposable Docker resources and writer proof |
 | `taskresultsource` | CAS-only result binding and verified checkout acquisition |
-| `taskstore` | schema 3 run/result authority and state machines |
+| `taskstore` | schema 4 run/result authority and state machines |
 | `observability` | health, readiness, status, metrics, retry |
 | `hostlease` | exclusive host-local repository-binding lease |
 | `compatibility` | fresh-schema and release-manifest alignment |

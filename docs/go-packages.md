@@ -43,7 +43,7 @@ performance/review reports after the lifecycle—not as the introduction.
 | [`runcommand`](../internal/runcommand/README.md) | Create/stop/seal intent, admission, replay and notification |
 | [`run`](../internal/run/README.md) | Lifecycle classification and resource/runtime identities |
 | [`task`](../internal/task/README.md) | Typed identifiers, actors, immutable result vocabulary |
-| [`taskstore`](../internal/taskstore/README.md) | SQLite schema 3, durable run/result authority and fencing |
+| [`taskstore`](../internal/taskstore/README.md) | SQLite schema 4, durable run/result authority and fencing |
 | [`backgroundruncoord`](../internal/backgroundruncoord/README.md) | Capacity-one effect coordination and recovery |
 | [`taskenvdocker`](../internal/taskenvdocker/README.md) | Resource-spec 10 Docker lifecycle and scoped GitHub credential delivery |
 | [`backgroundopencode`](../internal/backgroundopencode/README.md) | Pinned OpenCode session/prompt observation protocol |

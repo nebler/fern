@@ -4,7 +4,7 @@ See the [Go package map](../../docs/go-packages.md) and [maintenance review](../
 
 Despite the historical directory name, this `main` package does **not** migrate
 an old supported release. Fern currently declares no first supported baseline.
-The harness validates initialization/reopen of task-store schema **3** and an
+The harness validates initialization/reopen of task-store schema **4** and an
 offline byte-restoration exercise. It must not be cited as historical upgrade
 compatibility or cross-service transactional rollback evidence.
 

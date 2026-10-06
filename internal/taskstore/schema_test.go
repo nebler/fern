@@ -11,7 +11,7 @@ import (
 )
 
 func TestPredecessorSchemasRejectedWithoutMutation(t *testing.T) {
-	for _, version := range []int{1, 2} {
+	for _, version := range []int{1, 2, 3} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
 			path := testDBPath(t)
 			raw := openRaw(t, path)
@@ -49,12 +49,12 @@ func TestPredecessorSchemasRejectedWithoutMutation(t *testing.T) {
 }
 
 func TestInitialSchemaIsTheOnlySupportedSchema(t *testing.T) {
-	const expectedChecksum = "d762ec0b27a6c20405255bcfb3ad3a4226151306a992eea9e8083db408699c00"
-	if CurrentSchemaVersion() != 3 || len(migrations) != 1 || migrations[0].version != 3 || migrations[0].name != "retained_result_task_store" {
+	const expectedChecksum = "6ddd2333728255b1f148db7e2f81014d3f7ae80bf1f0488e507d88e10a47068b"
+	if CurrentSchemaVersion() != 4 || len(migrations) != 1 || migrations[0].version != 4 || migrations[0].name != "retained_result_task_store" {
 		t.Fatalf("schema version=%d migration count=%d", CurrentSchemaVersion(), len(migrations))
 	}
 	if checksum := migrationChecksum(migrations[0]); checksum != expectedChecksum {
-		t.Fatalf("schema-3 checksum=%q, want %q", checksum, expectedChecksum)
+		t.Fatalf("schema checksum=%q, want %q", checksum, expectedChecksum)
 	}
 	store := openTestStore(t, testDBPath(t))
 	defer store.Close()
@@ -66,7 +66,7 @@ func TestInitialSchemaIsTheOnlySupportedSchema(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT count(*),name,checksum FROM schema_migrations`).Scan(&entries, &name, &checksum); err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 || entries != 1 || name != migrations[0].name || checksum != expectedChecksum {
+	if version != CurrentSchemaVersion() || entries != 1 || name != migrations[0].name || checksum != expectedChecksum {
 		t.Fatalf("version=%d entries=%d name=%q checksum=%q", version, entries, name, checksum)
 	}
 }

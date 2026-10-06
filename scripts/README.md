@@ -54,7 +54,7 @@ build is not a harmless compile command in an actively edited working tree.
 
 ## Current state and safety boundaries
 
-The compatibility manifest declares task-store schema **3**, control-state schema
+The compatibility manifest declares task-store schema **4**, control-state schema
 **2**, credential schema **1**, and no supported historical baseline. Runtime
 resource spec **10** is a separate container identity contract. Release metadata
 describes a pre-release reset, offline backup prerequisite, staged-filesystem

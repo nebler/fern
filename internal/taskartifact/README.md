@@ -22,7 +22,7 @@ flowchart LR
 
 Solid edges are selected runtime calls; dotted edges identify imports.
 Diagrams are representative, not exhaustive static callgraph analysis.
-Taskstore schema 3 binds retained results to the engine's digest/locator metadata;
+Taskstore schema 4 binds retained results to the engine's digest/locator metadata;
 this package does not import taskstore or determine durable result ownership.
 The provider's writer fence and clone lease precede snapshot capture externally.
 

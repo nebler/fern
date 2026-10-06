@@ -29,7 +29,7 @@ flowchart LR
 The fresh-store test creates a private temporary directory, initializes through
 the production store, closes it, then independently inspects SQLite. It expects:
 
-- Task schema **3**, also equal to `taskstore.CurrentSchemaVersion()`.
+- Task schema **4**, also equal to `taskstore.CurrentSchemaVersion()`.
 - One migration entry named `retained_result_task_store` and a SHA-256-shaped
   hexadecimal checksum.
 - `integrity_check` equal to `ok` and no foreign-key violations.

@@ -17,7 +17,7 @@ flowchart LR
   provider -->|"InstallationToken"| issuer["githubapp repository-scoped issuer"]
   provider -->|"New authenticated client"| oc["backgroundopencode"]
   provider -->|"NewTarget / RoundTripper"| route["backgroundroute"]
-  provider -.->|"imports: durable run data, not store writes"| store["taskstore: schema 3"]
+  provider -.->|"imports: durable run data, not store writes"| store["taskstore: schema 4"]
   provider -.->|"imports: runtime identity / spec 10"| run["internal/run"]
   docker -->|"private volume token files"| agent["OpenCode agent Git and gh tools"]
   agent -->|"agent-owned publication"| github["configured GitHub repository"]

@@ -11,7 +11,7 @@ artifact effects. It intentionally does not provide a generic executor framework
 ```mermaid
 flowchart LR
   cli["cmd/fern task services"] -->|"New / Run / Wake"| coord["Coordinator"]
-  coord -->|"claim and record transitions"| store["taskstore: schema 3"]
+  coord -->|"claim and record transitions"| store["taskstore: schema 4"]
   coord -->|"provision / attest / cleanup / credentials"| docker["taskenvdocker"]
   coord -->|"reconcile and observe"| oc["backgroundopencode"]
   coord -->|"activate and drain"| route["backgroundroute"]

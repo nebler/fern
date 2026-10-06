@@ -18,7 +18,7 @@ identities without depending on each other's implementation.
 - Result tuples describe changed work or an explicit no-op against a base.
   They do not prove Git object existence, ancestry, or retained bundle integrity.
 
-The current store is schema 3 and admits resource spec 10 runs. Those versions
+The current store is schema 4 and admits resource spec 10 runs. Those versions
 are owned by `taskstore` and `run`, not this package. Workspace authority is
 GitHub App broker only. Actor types are attribution vocabulary, not alternative
 credential-provider configuration. There is no publication or verification-job

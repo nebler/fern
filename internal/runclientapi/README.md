@@ -16,7 +16,7 @@ not provision a runtime, proxy the attached session itself, or decide a run's
 durable transitions. Ingress must authenticate and install `task.ActorSnapshot`
 before invoking it.
 
-Current durable state is schema 3 with resource spec 10 execution and App-broker
+Current durable state is schema 4 with resource spec 10 execution and App-broker
 GitHub authority only. These versions/policies belong to storage and composition,
 not this transport. No publication or verification-job subsystem is exposed.
 Attachment to an agent that can push Git work is separate from retained-result

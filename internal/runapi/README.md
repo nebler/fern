@@ -21,7 +21,7 @@ their identity to ingress credential authorization, and checks operation scopes.
 `runclientapi` separately supports trusted operator/device discovery and attachment.
 Neither handler is an alternative authentication middleware.
 
-The current system uses schema 3, resource spec 10, and GitHub App broker
+The current system uses schema 4, resource spec 10, and GitHub App broker
 workspace authority only. The qualified source profile is
 `source-39fb919a054190498f6d5b7985bde231f93ad7a6`; the API contract is
 `fern.background-run.v1`. There is no publication or verification-job subsystem.

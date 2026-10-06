@@ -9,8 +9,8 @@ than asking HTTP handlers or external-effect providers to coordinate SQL.
 
 ## Current model and boundary
 
-- **Schema 3** is one complete pre-release schema, not a migration chain from
-  development schemas 1 or 2. `Open` rejects incompatible versions; it does not
+- **Schema 4** is one complete pre-release schema, not a migration chain from
+  development schemas 1 to 3. `Open` rejects incompatible versions; it does not
   upgrade them or delete data. Re-creation is an explicit operator decision.
 - Workspace GitHub authority accepts only `github-app-broker` and a positive
   installation/repository binding.

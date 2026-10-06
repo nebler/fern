@@ -17,7 +17,7 @@ and persistence belong to callers.
 The current execution contract is resource spec **10**, with source profile
 `source-39fb919a054190498f6d5b7985bde231f93ad7a6`. Recognizing an older provider
 resource is not permission to start it under the current contract. The durable
-store is schema 3. Workspace GitHub authority is App broker only; neither
+store is schema 4. Workspace GitHub authority is App broker only; neither
 credentials nor publication are owned here. Retained result integrity is not
 a verification-job subsystem and does not certify agent pushes.
 

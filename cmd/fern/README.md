@@ -8,7 +8,7 @@ and process lifetime. Durable state transitions, Docker ownership, artifact
 retention, and HTTP authorization remain in their respective internal packages.
 
 The current model uses one configuration (`fern.yaml`, optionally supplemented
-by a protected environment file), task-store schema **3**, control-state schema
+by a protected environment file), task-store schema **4**, control-state schema
 **2**, and runtime resource spec **10**. There is no host publisher or host
 verification coordinator. The container harness owns Git/PR work; Fern refreshes
 repository-scoped GitHub credentials and retains sealed results independently of

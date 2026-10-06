@@ -49,7 +49,7 @@ func TestFreshTaskStoreIsSchemaThree(t *testing.T) {
 		t.Fatal(err)
 	}
 	digest, digestErr := hex.DecodeString(checksum)
-	if version != 3 || version != taskstore.CurrentSchemaVersion() || entries != 1 || name != "retained_result_task_store" || digestErr != nil || len(digest) != sha256.Size || integrity != "ok" || requiredTables != 2 {
+	if version != 4 || version != taskstore.CurrentSchemaVersion() || entries != 1 || name != "retained_result_task_store" || digestErr != nil || len(digest) != sha256.Size || integrity != "ok" || requiredTables != 2 {
 		t.Fatalf("version=%d current=%d entries=%d name=%q checksum=%q integrity=%q required_tables=%d",
 			version, taskstore.CurrentSchemaVersion(), entries, name, checksum, integrity, requiredTables)
 	}

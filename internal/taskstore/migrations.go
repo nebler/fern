@@ -16,7 +16,7 @@ type migration struct {
 }
 
 var migrations = []migration{
-	{version: 3, name: "retained_result_task_store", sql: initialSchema},
+	{version: 4, name: "retained_result_task_store", sql: initialSchema},
 }
 
 // CurrentSchemaVersion is the schema produced by all migrations in this build.
@@ -582,69 +582,6 @@ CREATE TABLE result_manifest (
 ) STRICT;
 
 CREATE INDEX results_workspace_sealed ON results(workspace_id, sealed_at, id);
-
-CREATE TRIGGER attempts_execution_projection_integrity BEFORE UPDATE OF state ON attempts
-WHEN OLD.state IN ('admitted','running','input_required') AND NEW.state <> OLD.state AND
-     NEW.state IN ('running','input_required','recovery_required','failed','succeeded')
-BEGIN
-    SELECT CASE WHEN NOT (
-        (OLD.state='admitted' AND NEW.state IN ('running','input_required','recovery_required','failed','succeeded')) OR
-        (OLD.state='running' AND NEW.state IN ('input_required','recovery_required','failed','succeeded')) OR
-        (OLD.state='input_required' AND NEW.state IN ('running','recovery_required','failed'))
-    ) THEN RAISE(ABORT, 'invalid execution projection transition') END;
-    SELECT CASE WHEN NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR
-                          NEW.delivery_claim_owner IS NOT NULL OR NEW.delivery_claim_expires_at IS NOT NULL OR
-                          NEW.delivery_phase<>'prompt_started' OR NEW.admitted_at IS NULL OR
-                          (NEW.state='recovery_required')<>(NEW.recovery_reason IS NOT NULL) OR
-                          (NEW.state='failed')<>(NEW.terminal_reason IS NOT NULL)
-        THEN RAISE(ABORT, 'invalid execution projection shape') END;
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1 FROM tasks t
-        JOIN events ae ON ae.workspace_id=t.workspace_id AND ae.task_id=t.id AND ae.attempt_id=OLD.id AND
-                          ae.entity_type='attempt' AND ae.entity_id=OLD.id AND ae.type='attempt.'||NEW.state AND
-                          ae.occurred_at=NEW.updated_at
-        JOIN events te ON te.workspace_id=t.workspace_id AND te.task_id=t.id AND te.attempt_id IS NULL AND
-                          te.entity_type='task' AND te.entity_id=t.id AND te.occurred_at=ae.occurred_at AND
-                          te.actor_snapshot_id=ae.actor_snapshot_id AND te.payload=ae.payload AND te.cursor>ae.cursor
-        JOIN actor_snapshots actor ON actor.id=ae.actor_snapshot_id AND actor.actor_type IN ('system','recovery')
-        WHERE t.id=OLD.task_id AND t.workspace_id=OLD.workspace_id AND t.current_attempt_id=OLD.id AND
-              t.cancel_epoch=0 AND t.state=CASE OLD.state WHEN 'input_required' THEN 'input_required' ELSE 'running' END AND
-              te.type=CASE NEW.state WHEN 'succeeded' THEN 'task.execution_succeeded' ELSE 'task.'||NEW.state END AND
-              json_extract(ae.payload,'$.taskId')=t.id AND json_extract(ae.payload,'$.attemptId')=OLD.id AND
-              json_extract(ae.payload,'$.expectedAttemptRevision')=OLD.revision AND
-              json_extract(ae.payload,'$.expectedTaskRevision')=t.revision AND
-              json_extract(ae.payload,'$.from')=OLD.state AND json_extract(ae.payload,'$.to')=NEW.state AND
-              json_extract(ae.payload,'$.opencodeSessionId')=OLD.opencode_session_id AND
-              json_extract(ae.payload,'$.opencodeMessageId')=OLD.opencode_message_id AND
-              json_type(ae.payload,'$.evidence')='object' AND
-              length(json_extract(ae.payload,'$.evidenceSha256'))=71 AND
-              substr(json_extract(ae.payload,'$.evidenceSha256'),1,7)='sha256:' AND
-              substr(json_extract(ae.payload,'$.evidenceSha256'),8) NOT GLOB '*[^0-9a-f]*'
-    ) THEN RAISE(ABORT, 'execution projection has no exact events') END;
-END;
-
-CREATE TRIGGER tasks_execution_projection_integrity BEFORE UPDATE OF state ON tasks
-WHEN OLD.state IN ('running','input_required') AND NEW.state <> OLD.state AND NEW.state IN ('running','input_required','recovery_required','failed') AND
-     EXISTS (SELECT 1 FROM events e WHERE e.task_id=OLD.id AND e.attempt_id=OLD.current_attempt_id AND
-             e.type='attempt.'||NEW.state AND e.occurred_at=NEW.updated_at)
-BEGIN
-    SELECT CASE WHEN NEW.cancel_epoch<>0 OR NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR
-                          (NEW.state='failed')<>(NEW.terminal_reason IS NOT NULL)
-        THEN RAISE(ABORT, 'invalid task execution projection shape') END;
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1 FROM attempts a
-        JOIN events ae ON ae.workspace_id=OLD.workspace_id AND ae.task_id=OLD.id AND ae.attempt_id=a.id AND
-                          ae.type='attempt.'||a.state AND ae.occurred_at=NEW.updated_at
-        JOIN events te ON te.workspace_id=OLD.workspace_id AND te.task_id=OLD.id AND te.attempt_id IS NULL AND
-                          te.type='task.'||NEW.state AND te.occurred_at=ae.occurred_at AND
-                          te.actor_snapshot_id=ae.actor_snapshot_id AND te.payload=ae.payload AND
-                          te.cursor>ae.cursor AND te.cursor=NEW.latest_event_cursor
-        WHERE a.id=OLD.current_attempt_id AND a.task_id=OLD.id AND a.workspace_id=OLD.workspace_id AND
-              a.state=CASE NEW.state WHEN 'input_required' THEN 'input_required' WHEN 'recovery_required' THEN 'recovery_required' WHEN 'failed' THEN 'failed' ELSE 'running' END AND
-              json_extract(ae.payload,'$.expectedAttemptRevision')=a.revision-1 AND
-              json_extract(ae.payload,'$.expectedTaskRevision')=OLD.revision
-    ) THEN RAISE(ABORT, 'task execution projection has no exact attempt') END;
-END;
 
 CREATE TRIGGER results_immutable_delete BEFORE DELETE ON results
 BEGIN SELECT RAISE(ABORT, 'results are immutable'); END;
