@@ -186,28 +186,6 @@ func (InstallationRepositoryObservation) String() string {
 }
 func (observation InstallationRepositoryObservation) GoString() string { return observation.String() }
 
-// SelectedRepositoryMetadata is an immutable, coordinator-proven repository
-// snapshot. repositorySelection records GitHub's explicit selected/all value;
-// this package does not infer policy from it.
-type SelectedRepositoryMetadata struct {
-	installationID      int64
-	repositoryID        int64
-	fullName            string
-	ownerLogin          string
-	ownerID             int64
-	ownerType           string
-	name                string
-	private             bool
-	archived            bool
-	disabled            bool
-	defaultBranch       string
-	repositorySelection string
-	permissions         InstallationDiscoveryPermissions
-}
-
-func (SelectedRepositoryMetadata) String() string            { return "selected GitHub repository metadata" }
-func (metadata SelectedRepositoryMetadata) GoString() string { return metadata.String() }
-
 type installationAPIResponse struct {
 	ID                  *int64  `json:"id"`
 	TargetType          *string `json:"target_type"`
@@ -391,16 +369,16 @@ func (client *InstallationClient) ListInstallationRepositories(ctx context.Conte
 }
 
 // SelectRepository proves the requested installation and repository tuples.
-// Both GitHub repository-selection modes are accepted and preserved for the
-// coordinator, which remains responsible for applying onboarding policy.
-func SelectRepository(installations []InstallationObservation, repositories []InstallationRepositoryObservation, installationID, repositoryID int64, fullName string) (RepositoryIdentity, SelectedRepositoryMetadata, error) {
+// Both GitHub repository-selection modes are accepted; onboarding policy is
+// applied by the caller.
+func SelectRepository(installations []InstallationObservation, repositories []InstallationRepositoryObservation, installationID, repositoryID int64, fullName string) error {
 	owner, name, hasName := "", "", false
 	if gitref.ValidateOwnerRepo(fullName) == nil {
 		owner, name, _ = strings.Cut(fullName, "/")
 		hasName = true
 	}
 	if installationID <= 0 || repositoryID <= 0 || !hasName {
-		return RepositoryIdentity{}, SelectedRepositoryMetadata{}, ErrInvalidInstallationRequest
+		return ErrInvalidInstallationRequest
 	}
 
 	var installation InstallationObservation
@@ -457,25 +435,7 @@ func SelectRepository(installations []InstallationObservation, repositories []In
 	if repositoryMatches != 1 || repository.archived || repository.disabled || repository.ownerLogin != owner || repository.name != name || repository.ownerID != installation.accountID || repository.ownerLogin != installation.accountLogin || repository.ownerType != installation.accountType {
 		return selectionFailure()
 	}
-	identity, err := NewRepositoryIdentity(installationID, repositoryID)
-	if err != nil {
-		return RepositoryIdentity{}, SelectedRepositoryMetadata{}, ErrInvalidInstallationRequest
-	}
-	return identity, SelectedRepositoryMetadata{
-		installationID:      installationID,
-		repositoryID:        repositoryID,
-		fullName:            repository.fullName,
-		ownerLogin:          repository.ownerLogin,
-		ownerID:             repository.ownerID,
-		ownerType:           repository.ownerType,
-		name:                repository.name,
-		private:             repository.private,
-		archived:            repository.archived,
-		disabled:            repository.disabled,
-		defaultBranch:       repository.defaultBranch,
-		repositorySelection: installation.repositorySelection,
-		permissions:         repository.permissions,
-	}, nil
+	return nil
 }
 
 func (client *InstallationClient) validate() error {
@@ -737,6 +697,6 @@ func discoveryPermissionError(permissions InstallationDiscoveryPermissions) erro
 	return nil
 }
 
-func selectionFailure() (RepositoryIdentity, SelectedRepositoryMetadata, error) {
-	return RepositoryIdentity{}, SelectedRepositoryMetadata{}, &RepositorySelectionError{}
+func selectionFailure() error {
+	return &RepositorySelectionError{}
 }

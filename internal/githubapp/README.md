@@ -34,7 +34,7 @@ graph LR
   mint --> permissions["ValidateRepositoryPermissions"]
   discover["InstallationClient list methods"] --> page["getPage"]
   discover --> decode["decodeGitHubJSON"]
-  select["SelectRepository"] --> identity["NewRepositoryIdentity"]
+  select["SelectRepository"] --> selectionErr["RepositorySelectionError"]
 ```
 
 Calls depend on branch outcomes: only an exchange-authorized claim may exchange
@@ -70,7 +70,7 @@ proxy as `http.Handler`; `proxy` does not import this package directly.
 - `Client.InstallationToken` requests a one-repository token and validates
   returned permissions/lifetime. It mints on every call, without a token cache.
 - `ListAppInstallations` and `ListInstallationRepositories` perform bounded,
-  validated pagination. `SelectRepository` validates matching observed authority.
+  validated pagination. `SelectRepository` validates matching observed authority and returns only an error.
 - `CredentialStore` provides private-file protection, not encryption at rest.
   Encrypted export is composed separately through `credentialbundle`.
 - `ManifestCode` copies share atomic consumption state. Durable callback claims

@@ -345,12 +345,8 @@ func TestSelectRepositoryProvesExactTupleForSelectedAndAll(t *testing.T) {
 	for _, selection := range []string{"selected", "all"} {
 		installation := InstallationObservation{installationID: 101, accountLogin: "fern-inc", accountID: 1001, accountType: "Organization", targetType: "Organization", repositorySelection: selection}
 		repository := InstallationRepositoryObservation{installationID: 101, repositoryID: 201, fullName: "fern-inc/widget", ownerLogin: "fern-inc", ownerID: 1001, ownerType: "Organization", name: "widget", private: true, defaultBranch: "main", permissions: permissions, canPull: true, canPush: true}
-		identity, metadata, err := SelectRepository([]InstallationObservation{installation}, []InstallationRepositoryObservation{repository}, 101, 201, "fern-inc/widget")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if identity.InstallationID() != 101 || identity.RepositoryID() != 201 || metadata.installationID != 101 || metadata.repositoryID != 201 || metadata.fullName != "fern-inc/widget" || metadata.ownerLogin != "fern-inc" || metadata.ownerID != 1001 || metadata.ownerType != "Organization" || metadata.name != "widget" || !metadata.private || metadata.defaultBranch != "main" || metadata.repositorySelection != selection || metadata.permissions != permissions {
-			t.Fatalf("identity = %#v, metadata = %#v", identity, metadata)
+		if err := SelectRepository([]InstallationObservation{installation}, []InstallationRepositoryObservation{repository}, 101, 201, "fern-inc/widget"); err != nil {
+			t.Fatalf("%s: %v", selection, err)
 		}
 	}
 }
@@ -383,7 +379,7 @@ func TestSelectRepositoryRejectsMismatchArchivedDisabledPermissionsAndAmbiguity(
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			_, _, err := SelectRepository(test.installations, test.repositories, 101, test.id, test.fullName)
+			err := SelectRepository(test.installations, test.repositories, 101, test.id, test.fullName)
 			if !errors.Is(err, test.want) {
 				t.Fatalf("error = %v, want %v", err, test.want)
 			}
@@ -402,7 +398,6 @@ func TestInstallationTypesRedactStringAndGoString(t *testing.T) {
 		InstallationDiscoveryToken{value: secret, installationID: 1},
 		InstallationObservation{accountLogin: secret},
 		InstallationRepositoryObservation{fullName: secret, ownerLogin: secret},
-		SelectedRepositoryMetadata{fullName: secret, ownerLogin: secret},
 		&InstallationConflictError{count: 2},
 		&RepositorySelectionError{},
 	}

@@ -332,8 +332,7 @@ func liveCredentialValidator(ctx context.Context, cfg config.Config, app *github
 		if err != nil {
 			return err
 		}
-		_, _, err = githubapp.SelectRepository(installations, repositories, github.InstallationID, github.Repository.ID, github.Repository.FullName)
-		return err
+		return githubapp.SelectRepository(installations, repositories, github.InstallationID, github.Repository.ID, github.Repository.FullName)
 	}
 	return errors.New("GitHub App credential is missing")
 }
