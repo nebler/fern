@@ -492,44 +492,6 @@ CREATE UNIQUE INDEX background_runs_workspace_capacity_one ON background_runs(wo
   WHERE profile='source-39fb919a054190498f6d5b7985bde231f93ad7a6' AND
     effect_phase NOT IN ('absent','cleanup_complete','pre_effect_failed');
 
-CREATE TRIGGER background_runs_insert_integrity BEFORE INSERT ON background_runs
-BEGIN
-  SELECT CASE WHEN NOT EXISTS (
-    SELECT 1 FROM attempts a
-    JOIN tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id
-    JOIN workspaces w ON w.id=NEW.workspace_id AND w.repository_id=NEW.repository_id AND
-                         NEW.repository_remote='https://github.com/'||w.repository_full_name
-    JOIN actor_snapshots actor ON actor.id=NEW.creator_actor_snapshot_id AND actor.id=t.actor_snapshot_id AND actor.actor_type='opencode'
-    JOIN receipts r ON r.workspace_id=NEW.workspace_id AND r.command_kind='run.create' AND r.state='accepted' AND r.target_type='task' AND
-                       r.target_id=NEW.task_id AND r.actor_snapshot_id=NEW.creator_actor_snapshot_id AND
-                       r.accepted_at=NEW.created_at AND r.response_status=202 AND
-                       json_extract(r.response_projection,'$.run_id')=NEW.task_id AND json_extract(r.response_projection,'$.committed')=1
-    WHERE a.id=NEW.attempt_id AND a.task_id=NEW.task_id AND a.workspace_id=NEW.workspace_id AND
-      a.sequence=NEW.generation AND a.base_sha=NEW.base_oid AND a.image_digest=NEW.image_identity AND a.opencode_protocol=NEW.profile AND
-      a.opencode_session_id=NEW.opencode_session_id AND a.opencode_message_id=NEW.opencode_message_id AND
-      a.state='prepared' AND t.state='queued' AND t.current_attempt_id=a.id AND t.repository_id=NEW.repository_id AND
-      a.prompt_sha256=NEW.instruction_sha256 AND t.prompt_sha256=NEW.instruction_sha256 AND
-      a.created_at=NEW.created_at AND t.created_at=NEW.created_at AND
-      NEW.profile='source-39fb919a054190498f6d5b7985bde231f93ad7a6' AND NEW.state='queued' AND NEW.effect_phase='absent' AND
-      NEW.cancel_epoch=0 AND NEW.claim_owner IS NULL AND NEW.claim_expires_at IS NULL AND NEW.claim_generation=0 AND
-      NEW.clone_evidence IS NULL AND NEW.volume_evidence IS NULL AND NEW.observed_container_id IS NULL AND
-      NEW.observed_container_started_at IS NULL AND NEW.runtime_epoch IS NULL AND NEW.host_port IS NULL AND
-      NEW.health_evidence IS NULL AND NEW.ready_evidence IS NULL AND NEW.session_evidence IS NULL AND NEW.prompt_evidence IS NULL AND
-      NEW.writer_inactive_evidence IS NULL AND NEW.route_removed_evidence IS NULL AND NEW.container_removed_evidence IS NULL AND
-      NEW.volume_removed_evidence IS NULL AND NEW.clone_removed_evidence IS NULL AND NEW.last_evidence IS NULL AND NEW.last_error IS NULL AND
-      NEW.provision_intent_at IS NULL AND NEW.clone_observed_at IS NULL AND NEW.volume_observed_at IS NULL AND
-      NEW.container_observed_at IS NULL AND NEW.health_observed_at IS NULL AND NEW.ready_at IS NULL AND NEW.session_observed_at IS NULL AND
-      NEW.prompt_intent_at IS NULL AND NEW.prompt_admitted_at IS NULL AND NEW.stop_intent_at IS NULL AND NEW.writer_inactive_at IS NULL AND
-      NEW.route_removed_at IS NULL AND NEW.container_removed_at IS NULL AND NEW.volume_removed_at IS NULL AND NEW.clone_removed_at IS NULL AND
-      NEW.cleanup_completed_at IS NULL AND NEW.cleanup_proof IS NULL AND NEW.absence_proof IS NULL AND
-      NEW.revision=1 AND NEW.created_at=NEW.updated_at AND
-      NEW.clone_identity='run-'||replace(substr(NEW.task_id,5),'-','')||'-g'||NEW.generation||'-clone' AND
-      NEW.volume_identity='fern-run-'||replace(substr(NEW.task_id,5),'-','')||'-g'||NEW.generation||'-opencode' AND
-      NEW.container_identity='fern-run-'||replace(substr(NEW.task_id,5),'-','')||'-g'||NEW.generation AND
-      NEW.endpoint_identity='run-'||replace(substr(NEW.task_id,5),'-','')||'-g'||NEW.generation||'-endpoint'
-  ) THEN RAISE(ABORT, 'background run has no exact task attempt') END;
-END;
-
 CREATE TRIGGER background_runs_immutable_inputs BEFORE UPDATE ON background_runs
 WHEN NEW.task_id<>OLD.task_id OR NEW.attempt_id<>OLD.attempt_id OR NEW.workspace_id<>OLD.workspace_id OR
      NEW.generation<>OLD.generation OR NEW.writer_generation<>OLD.writer_generation OR NEW.repository_id<>OLD.repository_id OR NEW.repository_remote<>OLD.repository_remote OR
@@ -540,15 +502,6 @@ WHEN NEW.task_id<>OLD.task_id OR NEW.attempt_id<>OLD.attempt_id OR NEW.workspace
      NEW.opencode_session_id<>OLD.opencode_session_id OR NEW.opencode_message_id<>OLD.opencode_message_id OR
      NEW.creator_actor_snapshot_id<>OLD.creator_actor_snapshot_id OR NEW.created_at<>OLD.created_at
 BEGIN SELECT RAISE(ABORT, 'background run inputs are immutable'); END;
-
-CREATE TRIGGER background_runs_exact_owner BEFORE UPDATE ON background_runs
-BEGIN
-  SELECT CASE WHEN NOT EXISTS (
-    SELECT 1 FROM tasks t JOIN attempts a ON a.id=t.current_attempt_id
-    WHERE t.id=NEW.task_id AND t.workspace_id=NEW.workspace_id AND a.id=NEW.attempt_id AND
-      a.task_id=NEW.task_id AND a.workspace_id=NEW.workspace_id AND a.sequence=NEW.generation
-  ) THEN RAISE(ABORT, 'background run lost exact current attempt') END;
-END;
 
 CREATE TRIGGER background_runs_revision BEFORE UPDATE ON background_runs
 WHEN NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at
@@ -564,53 +517,10 @@ BEGIN
     THEN RAISE(ABORT, 'invalid background run claim') END;
 END;
 
-CREATE TRIGGER background_runs_stop_integrity BEFORE UPDATE ON background_runs
-WHEN OLD.cancel_epoch=0 AND NEW.cancel_epoch=1
-BEGIN
-  SELECT CASE WHEN NEW.stop_requested_at<>NEW.updated_at OR NOT (
-    (OLD.state='queued' AND OLD.effect_phase='absent' AND NEW.state='failed' AND NEW.effect_phase='pre_effect_failed') OR
-    (OLD.state IN ('setting_up','working','needs_you','uncertain') AND NEW.state='canceling' AND NEW.effect_phase='stop_intent')
-  ) THEN RAISE(ABORT, 'invalid background run stop transition') END;
-  SELECT CASE WHEN NOT EXISTS (
-    SELECT 1 FROM receipts r WHERE r.id=NEW.stop_receipt_id AND r.workspace_id=NEW.workspace_id AND r.state='accepted' AND
-      r.command_kind='run.stop' AND r.target_type='task' AND r.target_id=NEW.task_id AND
-      r.actor_snapshot_id=NEW.stop_actor_snapshot_id AND r.accepted_at=NEW.stop_requested_at AND r.response_status=202 AND
-      json_extract(r.response_projection,'$.run_id')=NEW.task_id AND json_extract(r.response_projection,'$.state')=NEW.state
-  ) THEN RAISE(ABORT, 'background run stop has no exact receipt') END;
-  SELECT CASE WHEN OLD.state='queued' AND NOT EXISTS (
-    SELECT 1 FROM attempts a
-    JOIN tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id
-    JOIN events ae ON ae.attempt_id=a.id AND ae.type='attempt.failed' AND ae.occurred_at=NEW.stop_requested_at AND ae.actor_snapshot_id=NEW.stop_actor_snapshot_id
-    JOIN events te ON te.task_id=t.id AND te.attempt_id IS NULL AND te.type='task.failed' AND te.occurred_at=NEW.stop_requested_at AND
-                      te.actor_snapshot_id=ae.actor_snapshot_id AND te.payload=ae.payload AND te.cursor>ae.cursor AND te.cursor=t.latest_event_cursor
-    WHERE a.id=NEW.attempt_id AND a.state='failed' AND a.terminal_reason='background_run_stopped_before_start' AND
-      t.state='failed' AND t.terminal_reason='background_run_stopped_before_start' AND
-      json_extract(ae.payload,'$.runId')=NEW.task_id AND json_extract(ae.payload,'$.reason')='background_run_stopped_before_start'
-  ) THEN RAISE(ABORT, 'background run stop has no exact terminal task attempt') END;
-END;
-
 CREATE TRIGGER background_runs_stop_fields_immutable BEFORE UPDATE ON background_runs
 WHEN OLD.cancel_epoch=1 AND (NEW.cancel_epoch<>OLD.cancel_epoch OR NEW.stop_receipt_id IS NOT OLD.stop_receipt_id OR
   NEW.stop_actor_snapshot_id IS NOT OLD.stop_actor_snapshot_id OR NEW.stop_requested_at IS NOT OLD.stop_requested_at)
 BEGIN SELECT RAISE(ABORT, 'background run stop fields are immutable'); END;
-
-CREATE TRIGGER background_runs_terminal_projection BEFORE UPDATE ON background_runs
-WHEN OLD.state<>'failed' AND NEW.state='failed' AND NEW.profile='source-39fb919a054190498f6d5b7985bde231f93ad7a6'
-BEGIN
-  SELECT CASE WHEN NEW.last_error IS NULL OR NOT EXISTS (
-    SELECT 1 FROM attempts a
-    JOIN tasks t ON t.id=a.task_id AND t.workspace_id=a.workspace_id
-    JOIN events ae ON ae.attempt_id=a.id AND ae.type='attempt.failed' AND ae.occurred_at=NEW.updated_at
-    JOIN events te ON te.task_id=t.id AND te.attempt_id IS NULL AND te.type='task.failed' AND
-                      te.occurred_at=ae.occurred_at AND te.actor_snapshot_id=ae.actor_snapshot_id AND
-                      te.payload=ae.payload AND te.cursor>ae.cursor AND te.cursor=t.latest_event_cursor
-    WHERE a.id=NEW.attempt_id AND a.task_id=NEW.task_id AND a.workspace_id=NEW.workspace_id AND
-      a.state='failed' AND a.terminal_reason=NEW.last_error AND
-      t.state='failed' AND t.terminal_reason=NEW.last_error AND
-      json_extract(ae.payload,'$.runId')=NEW.task_id AND json_extract(ae.payload,'$.reason')=NEW.last_error AND
-      (NEW.cancel_epoch=0 OR json_extract(ae.payload,'$.stopReceiptId')=NEW.stop_receipt_id)
-  ) THEN RAISE(ABORT, 'background run terminal projection is incomplete') END;
-END;
 
 CREATE TRIGGER background_runs_v9_insert_fences BEFORE INSERT ON background_runs
 WHEN NEW.prompt_request_attempted_at IS NOT NULL OR NEW.timeout_requested_at IS NOT NULL OR NEW.timeout_actor_snapshot_id IS NOT NULL OR
@@ -638,23 +548,6 @@ BEGIN SELECT RAISE(ABORT, 'background run prompt attempt is immutable'); END;
 CREATE TRIGGER background_runs_prompt_admission_requires_attempt BEFORE UPDATE ON background_runs
 WHEN NEW.effect_phase='prompt_admitted' AND NEW.prompt_request_attempted_at IS NULL
 BEGIN SELECT RAISE(ABORT, 'background run prompt admission has no request attempt'); END;
-
-CREATE TRIGGER background_runs_timeout_integrity BEFORE UPDATE ON background_runs
-WHEN NEW.timeout_requested_at IS NOT OLD.timeout_requested_at OR NEW.timeout_actor_snapshot_id IS NOT OLD.timeout_actor_snapshot_id
-BEGIN
-  SELECT CASE WHEN OLD.timeout_requested_at IS NOT NULL OR OLD.timeout_actor_snapshot_id IS NOT NULL OR
-    NEW.timeout_requested_at IS NULL OR NEW.timeout_actor_snapshot_id IS NULL OR NEW.timeout_requested_at<>NEW.updated_at OR
-    OLD.cancel_epoch<>0 OR NEW.cancel_epoch<>0 OR NEW.stop_receipt_id IS NOT NULL OR
-    NEW.state<>'cleanup_required' OR NEW.effect_phase<>'stop_intent' OR
-    NOT EXISTS (SELECT 1 FROM actor_snapshots a
-      JOIN attempts attempt ON attempt.id=NEW.attempt_id AND attempt.task_id=NEW.task_id AND attempt.workspace_id=NEW.workspace_id
-      JOIN tasks task ON task.id=NEW.task_id AND task.workspace_id=NEW.workspace_id AND task.current_attempt_id=attempt.id
-      JOIN events ae ON ae.attempt_id=attempt.id AND ae.type='attempt.timeout_requested' AND ae.occurred_at=NEW.timeout_requested_at AND ae.actor_snapshot_id=a.id
-      JOIN events te ON te.task_id=task.id AND te.attempt_id IS NULL AND te.type='task.timeout_requested' AND te.occurred_at=ae.occurred_at AND
-        te.actor_snapshot_id=a.id AND te.payload=ae.payload AND te.cursor>ae.cursor AND te.cursor=task.latest_event_cursor
-      WHERE a.id=NEW.timeout_actor_snapshot_id AND a.actor_type='system' AND json_extract(ae.payload,'$.reason')='attempt_timeout')
-    THEN RAISE(ABORT, 'invalid background run system timeout') END;
-END;
 
 CREATE TRIGGER background_runs_timeout_immutable BEFORE UPDATE ON background_runs
 WHEN OLD.timeout_requested_at IS NOT NULL AND
@@ -877,17 +770,6 @@ CREATE TRIGGER background_runs_retained_tuple_immutable BEFORE UPDATE ON backgro
   NEW.retained_result_id IS NOT OLD.retained_result_id)
 BEGIN SELECT RAISE(ABORT,'background retained tuple is immutable'); END;
 
-CREATE TRIGGER background_runs_result_ready_authority BEFORE UPDATE OF state ON background_runs
-WHEN OLD.state<>'result_ready' AND NEW.state='result_ready' AND (NEW.result_authority_phase<>'artifact_committed' OR NEW.retained_result_id IS NULL OR
-  NEW.retained_artifact_id IS NULL OR NEW.artifact_export_id IS NULL OR NEW.materialization_id IS NULL OR NOT EXISTS (
-    SELECT 1 FROM results result JOIN retained_artifacts artifact ON artifact.id=NEW.retained_artifact_id
-    JOIN background_run_exports export ON export.id=NEW.artifact_export_id
-    JOIN artifact_materializations materialization ON materialization.id=NEW.materialization_id
-    WHERE result.id=NEW.retained_result_id AND result.source_kind='retained_artifact' AND result.retained_artifact_id=artifact.id AND
-      result.artifact_export_id=export.id AND result.materialization_id=materialization.id AND artifact.result_id=result.id AND
-      export.result_id=result.id AND materialization.result_id=result.id))
-BEGIN SELECT RAISE(ABORT,'background result_ready requires retained authority'); END;
-
 CREATE TRIGGER background_runs_retained_cleanup_gate BEFORE UPDATE OF effect_phase ON background_runs
 WHEN OLD.background_seal_request_id IS NOT NULL AND OLD.state='result_ready' AND OLD.effect_phase='writer_inactive' AND NEW.effect_phase='route_removed' AND
   (OLD.result_authority_phase<>'cleanup' OR NOT EXISTS (
@@ -972,64 +854,6 @@ BEGIN SELECT RAISE(ABORT,'terminal background run is immutable'); END;
 CREATE TRIGGER results_immutable_update BEFORE UPDATE ON results BEGIN SELECT RAISE(ABORT,'results are immutable'); END;
 
 CREATE INDEX results_retained_artifact ON results(retained_artifact_id) WHERE retained_artifact_id IS NOT NULL;
-
-CREATE TRIGGER results_insert_integrity BEFORE INSERT ON results BEGIN
-  SELECT CASE WHEN (SELECT count(*) FROM result_manifest m WHERE m.result_id=NEW.id)<>NEW.manifest_entries OR
-    (NEW.manifest_entries>0 AND ((SELECT min(ordinal) FROM result_manifest WHERE result_id=NEW.id)<>0 OR
-     (SELECT max(ordinal) FROM result_manifest WHERE result_id=NEW.id)<>NEW.manifest_entries-1))
-    THEN RAISE(ABORT,'result manifest is incomplete') END;
-  SELECT CASE WHEN NEW.source_kind='retained_artifact' AND (
-    NEW.retained_artifact_id IS NULL OR NEW.artifact_export_id IS NULL OR NEW.materialization_id IS NULL OR
-	NEW.completion_authority<>'user_seal' OR NOT EXISTS (
-      SELECT 1 FROM retained_artifacts artifact
-      JOIN background_run_exports export ON export.id=artifact.export_id
-      JOIN artifact_materializations materialization ON materialization.id=artifact.materialization_id
-      JOIN background_run_writer_fences fence ON fence.export_id=export.id
-      JOIN background_runs run ON run.task_id=artifact.task_id AND run.attempt_id=artifact.attempt_id AND run.generation=artifact.generation
-      JOIN tasks t ON t.id=artifact.task_id AND t.workspace_id=artifact.workspace_id
-      JOIN attempts a ON a.id=artifact.attempt_id AND a.task_id=t.id AND a.workspace_id=t.workspace_id
-      JOIN events ae ON ae.id=NEW.sealed_event_id AND ae.task_id=t.id AND ae.attempt_id=a.id AND ae.type='attempt.result_sealed'
-      JOIN events te ON te.id=NEW.completed_event_id AND te.task_id=t.id AND te.attempt_id IS NULL AND te.type='task.completed' AND
-        te.occurred_at=ae.occurred_at AND te.actor_snapshot_id=ae.actor_snapshot_id AND te.payload=ae.payload AND te.cursor>ae.cursor
-      JOIN actor_snapshots actor ON actor.id=NEW.creator_actor_snapshot_id AND actor.id=ae.actor_snapshot_id AND actor.actor_type IN ('system','recovery')
-      WHERE artifact.id=NEW.retained_artifact_id AND artifact.result_id=NEW.id AND artifact.export_id=NEW.artifact_export_id AND
-        artifact.materialization_id=NEW.materialization_id AND artifact.result_commit=NEW.result_commit AND artifact.tree_oid=NEW.tree_oid AND
-        artifact.changes_sha256=NEW.manifest_sha256 AND artifact.cas_locator='sha256:'||lower(hex(artifact.manifest_sha256)) AND
-        artifact.base_sha=NEW.base_sha AND artifact.opencode_session_id=NEW.opencode_session_id AND artifact.opencode_message_id=NEW.opencode_message_id AND
-        export.phase='materialized' AND export.state='running' AND export.result_id=NEW.id AND export.artifact_manifest_sha256=artifact.manifest_sha256 AND
-        export.result_manifest_sha256=artifact.changes_sha256 AND export.cas_locator=artifact.cas_locator AND
-        materialization.state='ready' AND materialization.result_id=NEW.id AND materialization.result_commit=NEW.result_commit AND materialization.tree_oid=NEW.tree_oid AND
-        run.state='cleanup_required' AND run.effect_phase='writer_inactive' AND run.result_authority_phase='exporting' AND
-        run.background_seal_request_id=artifact.seal_request_id AND run.artifact_export_id=artifact.export_id AND run.retained_artifact_id=artifact.id AND
-        run.materialization_id=artifact.materialization_id AND run.retained_result_id=NEW.id AND
-        t.state='queued' AND t.sealed_result_id IS NULL AND t.current_attempt_id=a.id AND
-        a.state='prepared' AND a.sealed_result_id IS NULL AND t.revision=json_extract(ae.payload,'$.expectedTaskRevision') AND
-        a.revision=json_extract(ae.payload,'$.expectedAttemptRevision') AND json_extract(ae.payload,'$.sourceKind')='retained_artifact'
-    )) THEN RAISE(ABORT,'retained result has no exact authority tuple') END;
-END;
-
-CREATE TRIGGER attempts_result_seal_integrity BEFORE UPDATE OF sealed_result_id ON attempts
-WHEN OLD.sealed_result_id IS NULL AND NEW.sealed_result_id IS NOT NULL BEGIN
-  SELECT CASE WHEN NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR NOT EXISTS (
-    SELECT 1 FROM results r JOIN events e ON e.id=r.sealed_event_id WHERE r.id=NEW.sealed_result_id AND
-      r.task_id=OLD.task_id AND r.attempt_id=OLD.id AND r.workspace_id=OLD.workspace_id AND r.sealed_at=NEW.updated_at AND
-      json_extract(e.payload,'$.expectedAttemptRevision')=OLD.revision AND (
-        (r.source_kind='retained_artifact' AND OLD.state='prepared' AND NEW.state='superseded'))
-  ) THEN RAISE(ABORT,'invalid attempt result seal') END;
-END;
-
-CREATE TRIGGER tasks_result_seal_integrity BEFORE UPDATE OF state,sealed_result_id ON tasks
-WHEN OLD.state<>'completed' AND NEW.state='completed' BEGIN
-  SELECT CASE WHEN OLD.sealed_result_id IS NOT NULL OR NEW.sealed_result_id IS NULL OR
-    NEW.terminal_reason IS NOT NULL OR NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR NOT EXISTS (
-      SELECT 1 FROM results r JOIN attempts a ON a.id=OLD.current_attempt_id AND a.task_id=OLD.id AND a.workspace_id=OLD.workspace_id
-      JOIN events ae ON ae.id=r.sealed_event_id JOIN events te ON te.id=r.completed_event_id
-      WHERE r.id=NEW.sealed_result_id AND r.task_id=OLD.id AND r.attempt_id=a.id AND a.sealed_result_id=r.id AND
-        r.sealed_at=NEW.updated_at AND te.cursor=NEW.latest_event_cursor AND ae.cursor<te.cursor AND
-        json_extract(ae.payload,'$.expectedTaskRevision')=OLD.revision AND (
-          (r.source_kind='retained_artifact' AND OLD.state='queued' AND a.state='superseded'))
-    ) THEN RAISE(ABORT,'invalid completed task result seal') END;
-END;
 `
 
 func (s *Store) initialize(ctx context.Context) error {
