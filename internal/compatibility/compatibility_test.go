@@ -1,3 +1,13 @@
+// Package compatibility_test is a test-only release-contract check, not a
+// runtime compatibility library. It verifies that a freshly opened task store
+// and the checked-in release manifest and schema under deploy/ agree on the
+// current pre-release task store schema. integration/upgrade/run.sh runs it
+// before its initialization/reopen/restore exercise.
+//
+// There is no supported historical migration baseline: old development state
+// is rejected by the owning stores (taskstore.Open), not upgraded here. The
+// manifest test checks selected fields only; it is not full JSON Schema
+// validation.
 package compatibility_test
 
 import (
@@ -14,7 +24,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestFreshTaskStoreIsSchemaThree(t *testing.T) {
+func TestFreshTaskStoreIsCurrentSchema(t *testing.T) {
 	directory := t.TempDir()
 	if err := os.Chmod(directory, 0o700); err != nil {
 		t.Fatal(err)

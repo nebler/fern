@@ -1,9 +1,3 @@
-// Package gitref is the single source of truth for validating Git references,
-// SHA-1 object IDs, GitHub owner/repository names, and repository-relative
-// paths. These validators guard security-sensitive boundaries such as GitHub
-// API routes, base branch names, and result manifest paths, so packages
-// must delegate here instead of keeping private copies whose rules can drift
-// apart over time.
 package gitref
 
 import (

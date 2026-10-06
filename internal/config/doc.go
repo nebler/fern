@@ -1,0 +1,18 @@
+// Package config loads and validates Fern's single current Background Run
+// configuration shape. It merges defaults, one strict YAML document (at most
+// MaxConfigBytes), and explicitly set CLI overrides. Obsolete or unknown fields
+// are rejected rather than translated; there is no legacy execution shape.
+//
+// Loading does not validate: callers choose ValidateWorkspace (offline shape and
+// directory check), ValidateBootstrap (permits a pending App installation), or
+// Validate (requires an installed execution binding). None of them contact
+// GitHub, Docker, Git, or DNS, so a valid Config is not evidence that the
+// repository, image, installation, or runtime storage quota actually exist;
+// those are established by the components that use them.
+//
+// Only the repository path and control password undergo environment expansion
+// ($$ escapes a dollar; an unset variable is an error). A file-supplied relative
+// repository resolves against the config file's directory. The configuration
+// binds GitHub installation and repository IDs but never holds the App private
+// key.
+package config

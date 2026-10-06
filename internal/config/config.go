@@ -1,4 +1,3 @@
-// Package config loads and validates Fern's current Background Run configuration.
 package config
 
 import "time"
