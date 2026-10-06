@@ -236,8 +236,7 @@ func validateManifestEntry(e ManifestEntry) error {
 }
 
 func resultSealPayload(p resultMaterial) (json.RawMessage, error) {
-	base, err := retainedResultEvidencePayload(p.EvidencePayload, p.EvidenceSHA256)
-	if err != nil {
+	if err := validateRetainedResultEvidence(p.EvidencePayload, p.EvidenceSHA256); err != nil {
 		return nil, err
 	}
 	type proof struct {
@@ -260,24 +259,17 @@ func resultSealPayload(p resultMaterial) (json.RawMessage, error) {
 		PolicyVersion           string                  `json:"policyVersion"`
 		CollectedAtMillis       int64                   `json:"collectedAtMillis"`
 		CompletionAuthority     SealCompletionAuthority `json:"completionAuthority"`
+		// Evidence carries the exact sanitized evidence object alongside its
+		// digest in the same canonical payload.
+		Evidence json.RawMessage `json:"evidence"`
 	}
 	encoded, err := json.Marshal(proof{p.ResultID, p.TaskID, p.AttemptID, p.ExpectedAttemptRevision, p.ExpectedTaskRevision,
 		p.RepositoryID, p.BaseSHA, p.ResultCommit, p.TreeOID, p.Outcome, p.WorktreeClean, len(p.Manifest),
 		"sha256:" + hex.EncodeToString(p.ManifestSHA256[:]), p.OpenCodeSessionID, p.OpenCodeMessageID,
 		"sha256:" + hex.EncodeToString(p.EvidenceSHA256[:]), p.PolicyVersion, unixMillis(p.CollectedAt),
-		p.CompletionAuthority})
+		p.CompletionAuthority, p.EvidencePayload})
 	if err != nil {
 		return nil, fmt.Errorf("encode result proof: %w", err)
 	}
-	// Replace the proof's digest-only evidence field with the exact sanitized
-	// evidence object while retaining the digest in the same canonical payload.
-	encoded = encoded[:len(encoded)-1]
-	encoded = append(encoded, `,"evidence":`...)
-	var evidenceEnvelope map[string]json.RawMessage
-	if err := json.Unmarshal(base, &evidenceEnvelope); err != nil {
-		return nil, fmt.Errorf("%w: result evidence envelope", ErrCorruptStore)
-	}
-	encoded = append(encoded, evidenceEnvelope["evidence"]...)
-	encoded = append(encoded, '}')
 	return encoded, nil
 }
