@@ -17,7 +17,7 @@ import (
 // provisioning slot. It is a plain read: the host lease admits one coordinator
 // per workspace, and every later mutation is a revision compare-and-swap.
 func (s *Store) NextBackgroundRun(ctx context.Context, workspaceID task.WorkspaceID, profile string) (BackgroundRun, error) {
-	if _, err := task.ParseWorkspaceID(string(workspaceID)); err != nil || profile != BackgroundRunSourceProfile {
+	if profile != BackgroundRunSourceProfile {
 		return BackgroundRun{}, fmt.Errorf("%w: next background run", ErrInvalidInput)
 	}
 	run, err := scanBackgroundRun(s.db.QueryRowContext(ctx, backgroundRunSelect+`
@@ -132,15 +132,9 @@ func (s *Store) RecordBackgroundRunWorkObservation(ctx context.Context, p Record
 // RequestBackgroundRunTimeout commits a system-owned stop without manufacturing
 // a plugin receipt. Parent terminalization remains coupled to cleanup finality.
 func (s *Store) RequestBackgroundRunTimeout(ctx context.Context, p RequestBackgroundRunTimeoutParams) (_ BackgroundRun, err error) {
-	if err := validateBackgroundRunRef(p.BackgroundRunRef); err != nil || p.Actor.Validate() != nil || p.Actor.Type != task.ActorSystem ||
+	if p.Actor.Type != task.ActorSystem || p.TaskEventID == p.AttemptEventID ||
 		!rundomain.Classify(rundomain.State(p.ExpectedState), rundomain.Phase(p.ExpectedPhase)).TimeoutEligible {
 		return BackgroundRun{}, fmt.Errorf("%w: background run timeout", ErrInvalidInput)
-	}
-	if _, parseErr := task.ParseEventID(string(p.AttemptEventID)); parseErr != nil {
-		return BackgroundRun{}, fmt.Errorf("%w: background run timeout attempt event", ErrInvalidInput)
-	}
-	if _, parseErr := task.ParseEventID(string(p.TaskEventID)); parseErr != nil || p.TaskEventID == p.AttemptEventID {
-		return BackgroundRun{}, fmt.Errorf("%w: background run timeout task event", ErrInvalidInput)
 	}
 	tx, release, err := s.beginWrite(ctx)
 	if err != nil {
@@ -227,17 +221,9 @@ func (s *Store) MarkBackgroundRunCleanupRequired(ctx context.Context, p MarkBack
 // parent task/attempt once the caller proved every resource absent. It performs
 // no external I/O.
 func (s *Store) FinalizeBackgroundRunFailure(ctx context.Context, p FinalizeBackgroundRunFailureParams) (_ BackgroundRun, err error) {
-	if err := validateBackgroundRunRef(p.BackgroundRunRef); err != nil || p.ExpectedPhase != BackgroundRunEffectCleaning ||
-		(p.ExpectedState != BackgroundRunCanceling && p.ExpectedState != BackgroundRunCleanupRequired) ||
-		!validBoundedText(p.Reason, 1, 1000) || !validRequiredEvidence(p.Evidence) || !validRequiredEvidence(p.CleanupProof) ||
-		p.Actor.Validate() != nil || p.AttemptEventID == p.TaskEventID {
+	if p.ExpectedPhase != BackgroundRunEffectCleaning ||
+		(p.ExpectedState != BackgroundRunCanceling && p.ExpectedState != BackgroundRunCleanupRequired) || p.AttemptEventID == p.TaskEventID {
 		return BackgroundRun{}, fmt.Errorf("%w: background run finalization", ErrInvalidInput)
-	}
-	if _, parseErr := task.ParseEventID(string(p.AttemptEventID)); parseErr != nil {
-		return BackgroundRun{}, fmt.Errorf("%w: attempt event", ErrInvalidInput)
-	}
-	if _, parseErr := task.ParseEventID(string(p.TaskEventID)); parseErr != nil {
-		return BackgroundRun{}, fmt.Errorf("%w: task event", ErrInvalidInput)
 	}
 	tx, release, err := s.beginWrite(ctx)
 	if err != nil {
@@ -399,16 +385,6 @@ func readBackgroundRunExact(ctx context.Context, q queryRower, workspaceID task.
 }
 
 func validateBackgroundRunRef(ref BackgroundRunRef) error {
-	if _, err := task.ParseWorkspaceID(string(ref.WorkspaceID)); err != nil {
-		return fmt.Errorf("%w: background run workspace", ErrInvalidInput)
-	}
-	if _, err := task.ParseTaskID(string(ref.TaskID)); err != nil {
-		return fmt.Errorf("%w: background run task", ErrInvalidInput)
-	}
-	if _, err := task.ParseAttemptID(string(ref.AttemptID)); err != nil || ref.Generation <= 0 ||
-		ref.ExpectedRevision <= 0 || validExactTimestamp(ref.Now) != nil {
-		return fmt.Errorf("%w: background run revision", ErrInvalidInput)
-	}
 	if !validBackgroundRunStatePhase(BackgroundRunSourceProfile, ref.ExpectedState, ref.ExpectedPhase) {
 		return fmt.Errorf("%w: background run expected state", ErrInvalidInput)
 	}

@@ -104,12 +104,8 @@ func TestCreateCommitReplayAndIdentity(t *testing.T) {
 	}
 	// Literal v1 encoding protects field order, null branch, escaping, and whitespace.
 	wantHash := sha256.Sum256([]byte(taskstore.CreateBackgroundRunCommand + "\n" + `{"repository":"https://github.com/owner/repository","base_oid":"0123456789abcdef0123456789abcdef01234567","branch":null,"instruction":"Work\n\t\u003cexact bytes\u003e ","profile":"` + input.Profile + `"}`))
-	if store.admit.Claim.RequestHash != task.RequestHash(wantHash) || store.admit.Prompt != input.Instruction || store.admit.BackgroundRun.InstructionSHA256 != sha256.Sum256([]byte(input.Instruction)) {
+	if store.admit.Claim.RequestHash != task.RequestHash(wantHash) || store.admit.Prompt != input.Instruction {
 		t.Fatal("create bytes changed")
-	}
-	resources, _ := run.NewResources(accepted.RunID, 1)
-	if store.admit.BackgroundRun.CloneIdentity != resources.Clone() || store.admit.BackgroundRun.EndpointIdentity != resources.Endpoint() {
-		t.Fatal("resource derivation changed")
 	}
 	store.found = true
 	base.err = errors.New("base gone")

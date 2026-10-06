@@ -75,40 +75,9 @@ func TestIdempotencyClassification(t *testing.T) {
 			if tt.mutate != nil {
 				tt.mutate(&incoming)
 			}
-			got, err := ClassifyIdempotency(tt.existing, incoming)
-			if err != nil || got != tt.want {
-				t.Fatalf("got %v, %v; want %v", got, err, tt.want)
+			if got := ClassifyIdempotency(tt.existing, incoming); got != tt.want {
+				t.Fatalf("got %v; want %v", got, tt.want)
 			}
 		})
 	}
-}
-
-func TestImmutableTuples(t *testing.T) {
-	baseSHA := GitOID(strings.Repeat("1", 40))
-	resultSHA := GitOID(strings.Repeat("2", 40))
-	repository := RepositoryTuple{RepositoryID: 42, BaseSHA: baseSHA}
-	changed := ResultTuple{RepositoryTuple: repository, ResultCommit: resultSHA, Outcome: ResultChanged, ManifestEntries: 1, WorktreeClean: true}
-	if err := changed.ValidateAgainst(repository); err != nil {
-		t.Fatal(err)
-	}
-	noChanges := ResultTuple{RepositoryTuple: repository, ResultCommit: baseSHA, Outcome: ResultNoChanges, WorktreeClean: true}
-	if err := noChanges.ValidateAgainst(repository); err != nil {
-		t.Fatal(err)
-	}
-	invalidResults := []ResultTuple{changed, changed, changed, changed, noChanges}
-	invalidResults[0].RepositoryID++
-	invalidResults[1].ResultCommit = baseSHA
-	invalidResults[2].ManifestEntries = 0
-	invalidResults[3].WorktreeClean = false
-	invalidResults[4].ManifestEntries = 1
-	for _, r := range invalidResults {
-		if !errors.Is(r.ValidateAgainst(repository), ErrInvalidTuple) {
-			t.Errorf("invalid result accepted: %+v", r)
-		}
-	}
-	overflowRepository := RepositoryTuple{RepositoryID: RepositoryID(maxSQLiteInteger + 1), BaseSHA: baseSHA}
-	if !errors.Is(overflowRepository.Validate(), ErrInvalidTuple) {
-		t.Error("repository identity exceeding SQLite INTEGER was accepted")
-	}
-
 }

@@ -22,6 +22,14 @@ import (
 
 const APIContractVersion = "fern.background-run.v1"
 
+// maxPromptBytes and maxPromptRunes bound a background run instruction. The
+// HTTP boundary is the only check; the schema's 64 KiB CHECK is a storage
+// backstop.
+const (
+	maxPromptBytes = 16 << 10
+	maxPromptRunes = 4000
+)
+
 var (
 	errProfileUnavailable = errors.New("background profile unavailable")
 	errBaseUnavailable    = errors.New("background base unavailable")
@@ -88,10 +96,8 @@ func (s *service) replay(ctx context.Context, claim task.IdempotencyClaim) (task
 	if err != nil || !found {
 		return receipt, found, err
 	}
-	disposition, err := task.ClassifyIdempotency(&task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: receipt.WorkspaceID, CommandKind: receipt.CommandKind}, Key: receipt.IdempotencyKey, RequestHash: receipt.RequestHash, Actor: receipt.Actor}, claim)
-	if err != nil {
-		return receipt, true, err
-	}
+	existing := receipt.Claim()
+	disposition := task.ClassifyIdempotency(&existing, claim)
 	if disposition == task.IdempotencyOwnerMismatch {
 		return receipt, true, taskstore.ErrNotFound
 	}
@@ -158,14 +164,8 @@ func (s *service) Create(ctx context.Context, actor task.ActorSnapshot, key task
 	if input.Branch != nil {
 		branch, baseRef = *input.Branch, *input.Branch
 	}
-	resources, err := run.NewResources(ids.TaskID, 1)
-	if err != nil {
-		return zero, err
-	}
-	intent := &taskstore.BackgroundRunIntent{RepositoryRemote: input.Repository, Branch: branch,
-		InstructionSHA256: sha256.Sum256([]byte(input.Instruction)), Profile: input.Profile, ProfileSHA256: sha256.Sum256([]byte(input.Profile)),
-		EnvironmentSHA256: s.config.BackgroundEnvironmentSHA256, ImageIdentity: s.config.BackgroundImageIdentity,
-		CloneIdentity: resources.Clone(), VolumeIdentity: resources.Volume(), ContainerIdentity: resources.Container(), EndpointIdentity: resources.Endpoint()}
+	intent := &taskstore.BackgroundRunIntent{RepositoryRemote: input.Repository, Branch: branch, Profile: input.Profile,
+		EnvironmentSHA256: s.config.BackgroundEnvironmentSHA256, ImageIdentity: s.config.BackgroundImageIdentity}
 	admission, err := s.config.Store.AdmitBackgroundRun(ctx, taskstore.AdmitBackgroundRunParams{
 		TaskID: ids.TaskID, AttemptID: ids.AttemptID, ReceiptID: ids.ReceiptID, TaskEventID: ids.TaskEventID,
 		AttemptEventID: ids.AttemptEventID, OpenCodeSessionID: ids.OpenCodeSessionID, OpenCodeMessageID: ids.OpenCodeMessageID,
@@ -183,7 +183,7 @@ func (s *service) Create(ctx context.Context, actor task.ActorSnapshot, key task
 }
 
 func validInstruction(value string) bool {
-	if len(value) < 1 || len(value) > taskstore.MaxPromptBytes || utf8.RuneCountInString(value) > taskstore.MaxPromptRunes || !utf8.ValidString(value) || strings.TrimSpace(value) == "" {
+	if len(value) < 1 || len(value) > maxPromptBytes || utf8.RuneCountInString(value) > maxPromptRunes || !utf8.ValidString(value) || strings.TrimSpace(value) == "" {
 		return false
 	}
 	for _, char := range value {

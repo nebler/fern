@@ -48,9 +48,6 @@ func (s *Store) EnsureWorkspace(ctx context.Context, desired Workspace) (Workspa
 }
 
 func (s *Store) GetWorkspace(ctx context.Context, id task.WorkspaceID) (Workspace, error) {
-	if _, err := task.ParseWorkspaceID(string(id)); err != nil {
-		return Workspace{}, fmt.Errorf("%w: workspace ID", ErrInvalidInput)
-	}
 	return scanWorkspace(s.db.QueryRowContext(ctx, workspaceSelect+` WHERE id=?`, id))
 }
 
@@ -76,10 +73,6 @@ func scanWorkspace(row rowScanner) (Workspace, error) {
 	}
 	if err != nil {
 		return Workspace{}, fmt.Errorf("read workspace: %w", err)
-	}
-	if repositoryID <= 0 || reconciliationEpoch < 0 || workspace.Revision < 1 || !workspace.State.valid() || !workspace.GitHubAuthority.valid() ||
-		installationID <= 0 {
-		return Workspace{}, ErrCorruptStore
 	}
 	workspace.InstallationID = task.InstallationID(installationID)
 	workspace.RepositoryID = task.RepositoryID(repositoryID)

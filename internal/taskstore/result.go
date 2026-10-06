@@ -3,7 +3,6 @@ package taskstore
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
@@ -28,9 +27,6 @@ SELECT r.id,r.task_id,r.attempt_id,r.workspace_id,r.state,r.outcome,r.repository
 	FROM results r JOIN actor_snapshots a ON a.id=r.creator_actor_snapshot_id`
 
 func (s *Store) GetResult(ctx context.Context, id task.ResultID) (Result, error) {
-	if _, err := task.ParseResultID(string(id)); err != nil {
-		return Result{}, fmt.Errorf("%w: result ID", ErrInvalidInput)
-	}
 	return getResult(ctx, s.db, id)
 }
 
@@ -59,20 +55,12 @@ func scanResult(row rowScanner) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	if repositoryID <= 0 || clean != 1 || len(manifestHash) != 32 || len(evidenceHash) != 32 ||
-		r.State != task.ResultSealed || r.Revision != 1 ||
-		r.CompletionAuthority != SealAuthorityUser || r.SourceKind != ResultSourceRetainedArtifact {
-		return Result{}, ErrCorruptStore
-	}
 	r.RepositoryID = task.RepositoryID(repositoryID)
 	r.WorktreeClean = true
 	copy(r.ManifestSHA256[:], manifestHash)
 	copy(r.EvidenceSHA256[:], evidenceHash)
 	r.CollectedAt, r.SealedAt = fromUnixMillis(collectedAt), fromUnixMillis(sealedAt)
 	r.CreatedAt, r.UpdatedAt = fromUnixMillis(createdAt), fromUnixMillis(updatedAt)
-	if !retainedArtifactID.Valid || !artifactExportID.Valid || !materializationID.Valid {
-		return Result{}, ErrCorruptStore
-	}
 	r.RetainedArtifactID = task.RetainedArtifactID(retainedArtifactID.String)
 	r.ArtifactExportID = task.ArtifactExportID(artifactExportID.String)
 	r.MaterializationID = task.MaterializationID(materializationID.String)
@@ -114,68 +102,6 @@ func nullableInt64(v sql.NullInt64) *int64 {
 	}
 	n := v.Int64
 	return &n
-}
-
-func validateResultMaterial(p resultMaterial) ([]ManifestEntry, error) {
-	if _, err := task.ParseResultID(string(p.ResultID)); err != nil {
-		return nil, fmt.Errorf("%w: result ID", ErrInvalidInput)
-	}
-	if _, err := task.ParseTaskID(string(p.TaskID)); err != nil {
-		return nil, fmt.Errorf("%w: task ID", ErrInvalidInput)
-	}
-	if err := validateAttemptAndEvents(p.AttemptID, p.ResultEventID, p.TaskEventID); err != nil {
-		return nil, err
-	}
-	if p.ExpectedAttemptRevision < 1 || p.ExpectedTaskRevision < 1 {
-		return nil, fmt.Errorf("%w: result revisions", ErrInvalidInput)
-	}
-	if _, err := task.ParseGitOID(string(p.BaseSHA)); err != nil {
-		return nil, fmt.Errorf("%w: base SHA", ErrInvalidInput)
-	}
-	if _, err := task.ParseGitOID(string(p.ResultCommit)); err != nil {
-		return nil, fmt.Errorf("%w: result commit", ErrInvalidInput)
-	}
-	if _, err := task.ParseGitOID(string(p.TreeOID)); err != nil {
-		return nil, fmt.Errorf("%w: tree OID", ErrInvalidInput)
-	}
-	if _, err := task.ParseOpenCodeSessionID(string(p.OpenCodeSessionID)); err != nil {
-		return nil, fmt.Errorf("%w: OpenCode session ID", ErrInvalidInput)
-	}
-	if _, err := task.ParseOpenCodeMessageID(string(p.OpenCodeMessageID)); err != nil {
-		return nil, fmt.Errorf("%w: OpenCode message ID", ErrInvalidInput)
-	}
-	if p.RepositoryID == 0 || !p.WorktreeClean || !validBoundedText(p.PolicyVersion, 1, 128) {
-		return nil, fmt.Errorf("%w: repository, cleanliness, or policy", ErrInvalidInput)
-	}
-	if err := validExactTimestamp(p.CollectedAt); err != nil {
-		return nil, err
-	}
-	if err := validExactTimestamp(p.SealedAt); err != nil || p.SealedAt.Before(p.CollectedAt) {
-		return nil, fmt.Errorf("%w: seal timestamp", ErrInvalidInput)
-	}
-	if err := p.Actor.Validate(); err != nil || (p.Actor.Type != task.ActorSystem && p.Actor.Type != task.ActorRecovery) {
-		return nil, fmt.Errorf("%w: result actor", ErrInvalidInput)
-	}
-	if err := validateRetainedResultEvidence(p.EvidencePayload, p.EvidenceSHA256); err != nil {
-		return nil, err
-	}
-	manifest, err := validateManifest(p.Manifest)
-	if err != nil {
-		return nil, err
-	}
-	encoded, err := json.Marshal(manifest)
-	if err != nil {
-		return nil, fmt.Errorf("encode result manifest: %w", err)
-	}
-	if sha256.Sum256(encoded) != p.ManifestSHA256 {
-		return nil, fmt.Errorf("%w: manifest digest", ErrInvalidInput)
-	}
-	tuple := task.ResultTuple{RepositoryTuple: task.RepositoryTuple{RepositoryID: p.RepositoryID, BaseSHA: p.BaseSHA},
-		ResultCommit: p.ResultCommit, Outcome: p.Outcome, ManifestEntries: len(manifest), WorktreeClean: p.WorktreeClean}
-	if err := tuple.ValidateAgainst(task.RepositoryTuple{RepositoryID: p.RepositoryID, BaseSHA: p.BaseSHA}); err != nil {
-		return nil, fmt.Errorf("%w: result tuple: %v", ErrInvalidInput, err)
-	}
-	return manifest, nil
 }
 
 func validateManifest(input []ManifestEntry) ([]ManifestEntry, error) {

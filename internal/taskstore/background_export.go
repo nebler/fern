@@ -21,9 +21,6 @@ artifact_manifest_sha256,cas_locator,bundle_sha256,bundle_size,collected_at,reco
 FROM background_run_exports`
 
 func (s *Store) GetBackgroundRunExport(ctx context.Context, id task.ArtifactExportID) (BackgroundRunExport, error) {
-	if _, err := task.ParseArtifactExportID(string(id)); err != nil {
-		return BackgroundRunExport{}, fmt.Errorf("%w: background export", ErrInvalidInput)
-	}
 	return getBackgroundRunExport(ctx, s.db, id)
 }
 
@@ -48,9 +45,6 @@ func scanBackgroundRunExport(row rowScanner) (BackgroundRunExport, error) {
 	if err != nil {
 		return BackgroundRunExport{}, fmt.Errorf("read background export: %w", err)
 	}
-	if repositoryID <= 0 || value.Generation <= 0 || value.Revision <= 0 {
-		return BackgroundRunExport{}, ErrCorruptStore
-	}
 	value.RepositoryID = task.RepositoryID(repositoryID)
 	value.ResultCommit, value.TreeOID, value.Outcome = task.GitOID(nullableText(resultCommit)), task.GitOID(nullableText(treeOID)), task.ResultOutcome(nullableText(outcome))
 	value.RecoveryReason = nullableText(recoveryReason)
@@ -58,28 +52,15 @@ func scanBackgroundRunExport(row rowScanner) (BackgroundRunExport, error) {
 	value.CollectedAt = nullableTime(collectedAt)
 	value.CreatedAt, value.UpdatedAt = fromUnixMillis(createdAt), fromUnixMillis(updatedAt)
 	if resultManifestJSON.Valid {
-		if err := json.Unmarshal([]byte(resultManifestJSON.String), &value.ResultManifest); err != nil || len(resultManifestHash) != 32 || int64(len(value.ResultManifest)) != resultEntries.Int64 {
+		if err := json.Unmarshal([]byte(resultManifestJSON.String), &value.ResultManifest); err != nil {
 			return BackgroundRunExport{}, ErrCorruptStore
 		}
 		copy(value.ChangesSHA256[:], resultManifestHash)
 	}
-	if artifactManifestJSON.Valid {
-		if len(artifactManifestHash) != 32 {
-			return BackgroundRunExport{}, ErrCorruptStore
-		}
-		value.ArtifactManifest = json.RawMessage(artifactManifestJSON.String)
-		copy(value.ArtifactManifestSHA256[:], artifactManifestHash)
-		value.CASLocator = nullableText(casLocator)
-		if value.CASLocator != "sha256:"+hex.EncodeToString(value.ArtifactManifestSHA256[:]) {
-			return BackgroundRunExport{}, ErrCorruptStore
-		}
-	}
-	if bundleHash != nil {
-		if len(bundleHash) != 32 || !bundleSize.Valid {
-			return BackgroundRunExport{}, ErrCorruptStore
-		}
-		copy(value.BundleSHA256[:], bundleHash)
-	}
+	value.ArtifactManifest = json.RawMessage(artifactManifestJSON.String)
+	copy(value.ArtifactManifestSHA256[:], artifactManifestHash)
+	value.CASLocator = nullableText(casLocator)
+	copy(value.BundleSHA256[:], bundleHash)
 	return value, nil
 }
 
@@ -102,18 +83,6 @@ func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgro
 		!safeArtifactManifest(p.ArtifactManifest) || validExactTimestamp(p.CollectedAt) != nil ||
 		p.BundleSHA256 == ([32]byte{}) || p.BundleBytes < 0 {
 		return BackgroundRunExport{}, fmt.Errorf("%w: selected background snapshot", ErrInvalidInput)
-	}
-	if _, err := task.ParseGitOID(string(p.ResultCommit)); err != nil {
-		return BackgroundRunExport{}, fmt.Errorf("%w: result commit", ErrInvalidInput)
-	}
-	if _, err := task.ParseGitOID(string(p.TreeOID)); err != nil {
-		return BackgroundRunExport{}, fmt.Errorf("%w: result tree", ErrInvalidInput)
-	}
-	if _, err := task.ParseOpenCodeSessionID(string(p.OpenCodeSessionID)); err != nil {
-		return BackgroundRunExport{}, fmt.Errorf("%w: snapshot OpenCode session", ErrInvalidInput)
-	}
-	if _, err := task.ParseOpenCodeMessageID(string(p.OpenCodeMessageID)); err != nil {
-		return BackgroundRunExport{}, fmt.Errorf("%w: snapshot OpenCode message", ErrInvalidInput)
 	}
 	if (p.Outcome != task.ResultChanged && p.Outcome != task.ResultNoChanges) || (p.Outcome == task.ResultChanged && len(manifest) == 0) ||
 		(p.Outcome == task.ResultNoChanges && len(manifest) != 0) || p.ResultCommit == "" {
@@ -160,9 +129,6 @@ func (s *Store) advanceBackgroundExport(ctx context.Context, ref BackgroundRunEx
 
 func (s *Store) updateBackgroundExport(ctx context.Context, ref BackgroundRunExportRef, to BackgroundRunExportPhase,
 	assignments string, args []any, replay func(BackgroundRunExport) bool) (_ BackgroundRunExport, err error) {
-	if err := validateExportRef(ref); err != nil {
-		return BackgroundRunExport{}, err
-	}
 	tx, release, err := s.beginWrite(ctx)
 	if err != nil {
 		return BackgroundRunExport{}, err
@@ -204,20 +170,6 @@ WHERE id=? AND task_id=? AND attempt_id=? AND generation=? AND revision=? AND ph
 		return BackgroundRunExport{}, err
 	}
 	return stored, nil
-}
-
-func validateExportRef(p BackgroundRunExportRef) error {
-	if _, err := task.ParseArtifactExportID(string(p.ExportID)); err != nil {
-		return fmt.Errorf("%w: export ID", ErrInvalidInput)
-	}
-	if _, err := task.ParseTaskID(string(p.TaskID)); err != nil {
-		return fmt.Errorf("%w: export task", ErrInvalidInput)
-	}
-	if _, err := task.ParseAttemptID(string(p.AttemptID)); err != nil || p.Generation <= 0 || p.ExpectedRevision <= 0 ||
-		validExactTimestamp(p.Now) != nil {
-		return fmt.Errorf("%w: export revision", ErrInvalidInput)
-	}
-	return nil
 }
 
 func safeArtifactManifest(value json.RawMessage) bool {

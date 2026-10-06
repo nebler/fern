@@ -1,7 +1,6 @@
 package taskstore
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -34,11 +33,8 @@ LEFT JOIN actor_snapshots s ON s.id=r.stop_actor_snapshot_id
 LEFT JOIN actor_snapshots x ON x.id=r.timeout_actor_snapshot_id`
 
 func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID task.WorkspaceID, taskID task.TaskID, actor task.ActorSnapshot) (BackgroundRun, error) {
-	if _, err := task.ParseWorkspaceID(string(workspaceID)); err != nil {
-		return BackgroundRun{}, fmt.Errorf("%w: background run workspace", ErrInvalidInput)
-	}
-	if _, err := task.ParseTaskID(string(taskID)); err != nil || actor.Validate() != nil || !backgroundRunReader(actor.Type) {
-		return BackgroundRun{}, fmt.Errorf("%w: background run identity", ErrInvalidInput)
+	if !backgroundRunReader(actor.Type) {
+		return BackgroundRun{}, fmt.Errorf("%w: background run reader", ErrInvalidInput)
 	}
 	query := backgroundRunSelect + ` WHERE r.workspace_id=? AND r.task_id=?`
 	arguments := []any{workspaceID, taskID}
@@ -90,7 +86,7 @@ const MaxBackgroundRunListLimit = 100
 // ListBackgroundRuns applies plugin ownership in SQL before its bound. Trusted
 // operator/device actors receive the workspace-wide operator projection.
 func (s *Store) ListBackgroundRuns(ctx context.Context, workspaceID task.WorkspaceID, actor task.ActorSnapshot, limit int) ([]BackgroundRun, error) {
-	if _, err := task.ParseWorkspaceID(string(workspaceID)); err != nil || actor.Validate() != nil || !backgroundRunReader(actor.Type) || limit < 1 || limit > MaxBackgroundRunListLimit {
+	if !backgroundRunReader(actor.Type) || limit < 1 || limit > MaxBackgroundRunListLimit {
 		return nil, fmt.Errorf("%w: background run list", ErrInvalidInput)
 	}
 	query := backgroundRunSelect + ` WHERE r.workspace_id=?`
@@ -147,14 +143,7 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 		return BackgroundRunStop{}, err
 	}
 	if found {
-		disposition, classifyErr := task.ClassifyIdempotency(&task.IdempotencyClaim{
-			Scope: task.IdempotencyScope{WorkspaceID: existing.WorkspaceID, CommandKind: existing.CommandKind},
-			Key:   existing.IdempotencyKey, RequestHash: existing.RequestHash, Actor: existing.Actor,
-		}, p.Claim)
-		if classifyErr != nil {
-			return BackgroundRunStop{}, classifyErr
-		}
-		switch disposition {
+		switch existing.classify(p.Claim) {
 		case task.IdempotencyReplay:
 			if existing.TargetID != p.TaskID {
 				return BackgroundRunStop{}, ErrIdempotencyConflict
@@ -305,28 +294,11 @@ WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND state='
 }
 
 func validateBackgroundRunStop(p StopBackgroundRunParams) error {
-	if _, err := task.ParseWorkspaceID(string(p.WorkspaceID)); err != nil || p.WorkspaceID != p.Claim.Scope.WorkspaceID {
-		return fmt.Errorf("%w: run workspace", ErrInvalidInput)
-	}
-	if _, err := task.ParseTaskID(string(p.TaskID)); err != nil {
-		return fmt.Errorf("%w: run ID", ErrInvalidInput)
-	}
-	if _, err := task.ParseReceiptID(string(p.ReceiptID)); err != nil {
-		return fmt.Errorf("%w: receipt ID", ErrInvalidInput)
-	}
-	if _, err := task.ParseEventID(string(p.AttemptEventID)); err != nil {
-		return fmt.Errorf("%w: attempt event ID", ErrInvalidInput)
-	}
-	if _, err := task.ParseEventID(string(p.TaskEventID)); err != nil || p.TaskEventID == p.AttemptEventID {
-		return fmt.Errorf("%w: task event ID", ErrInvalidInput)
-	}
-	if err := p.Claim.Validate(); err != nil || p.Claim.Scope.CommandKind != StopBackgroundRunCommand || p.Claim.Actor.Type != task.ActorOpenCode {
+	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != StopBackgroundRunCommand || p.Claim.Actor.Type != task.ActorOpenCode ||
+		p.AttemptEventID == p.TaskEventID {
 		return fmt.Errorf("%w: run stop claim", ErrInvalidInput)
 	}
-	if !validBoundedText(p.APIContractVersion, 1, 64) {
-		return fmt.Errorf("%w: API contract version", ErrInvalidInput)
-	}
-	return validExactTimestamp(p.StoppedAt)
+	return nil
 }
 
 func getBackgroundRunOwned(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, taskID task.TaskID, actor task.ActorSnapshot) (BackgroundRun, error) {
@@ -365,11 +337,6 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	if err != nil {
 		return BackgroundRun{}, err
 	}
-	if len(instructionHash) != 32 || len(profileHash) != 32 || len(environmentHash) != 32 || bytes.Equal(environmentHash, make([]byte, 32)) ||
-		run.ResourceSpecVersion != backgroundRunResourceSpecVersion || repositoryID <= 0 || run.Generation <= 0 || run.WriterGeneration != 1 ||
-		!validBackgroundRunStatePhase(run.Profile, run.State, run.EffectPhase) || run.Creator.Validate() != nil || run.Creator.Type != task.ActorOpenCode {
-		return BackgroundRun{}, ErrCorruptStore
-	}
 	copy(run.InstructionSHA256[:], instructionHash)
 	copy(run.ProfileSHA256[:], profileHash)
 	copy(run.EnvironmentSHA256[:], environmentHash)
@@ -390,31 +357,16 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	run.RetainedArtifactID = task.RetainedArtifactID(nullableText(retainedArtifactID))
 	run.MaterializationID = task.MaterializationID(nullableText(materializationID))
 	run.RetainedResultID = task.ResultID(nullableText(retainedResultID))
+	// Schema CHECKs keep the stop and timeout groups all-or-nothing.
 	if stopReceipt.Valid {
-		if !stopAt.Valid || !stopType.Valid || !stopID.Valid || !stopCredential.Valid || !stopAuth.Valid || !stopRequest.Valid {
-			return BackgroundRun{}, ErrCorruptStore
-		}
 		run.StopReceiptID = task.ReceiptID(stopReceipt.String)
 		run.StopRequestedAt = nullableTime(stopAt)
-		actor := task.ActorSnapshot{Type: task.ActorType(stopType.String), ID: stopID.String, DisplayName: stopName.String,
+		run.StopActor = &task.ActorSnapshot{Type: task.ActorType(stopType.String), ID: stopID.String, DisplayName: stopName.String,
 			CredentialID: stopCredential.String, Authentication: stopAuth.String, RequestID: stopRequest.String}
-		if actor.Validate() != nil {
-			return BackgroundRun{}, ErrCorruptStore
-		}
-		run.StopActor = &actor
 	}
 	if timeoutRequested.Valid {
-		if !timeoutType.Valid || !timeoutID.Valid || !timeoutCredential.Valid || !timeoutAuth.Valid || !timeoutRequest.Valid {
-			return BackgroundRun{}, ErrCorruptStore
-		}
-		actor := task.ActorSnapshot{Type: task.ActorType(timeoutType.String), ID: timeoutID.String, DisplayName: timeoutName.String,
+		run.TimeoutActor = &task.ActorSnapshot{Type: task.ActorType(timeoutType.String), ID: timeoutID.String, DisplayName: timeoutName.String,
 			CredentialID: timeoutCredential.String, Authentication: timeoutAuth.String, RequestID: timeoutRequest.String}
-		if actor.Validate() != nil || actor.Type != task.ActorSystem {
-			return BackgroundRun{}, ErrCorruptStore
-		}
-		run.TimeoutActor = &actor
-	} else if timeoutType.Valid || timeoutID.Valid || timeoutCredential.Valid || timeoutAuth.Valid || timeoutRequest.Valid {
-		return BackgroundRun{}, ErrCorruptStore
 	}
 	return run, nil
 }

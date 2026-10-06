@@ -5,10 +5,10 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
-	"strings"
 	"testing"
 	"time"
 
+	runidentity "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -26,6 +26,11 @@ func TestBackgroundRunAdmissionStopAndRestart(t *testing.T) {
 		run.BaseOID != admission.Attempt.BaseSHA || run.ImageIdentity != params.BackgroundRun.ImageIdentity || run.ImageIdentity != admission.Attempt.ImageDigest ||
 		admission.Attempt.OpenCodeProtocol != BackgroundRunSourceProfile || run.State != BackgroundRunQueued || run.EffectPhase != "absent" {
 		t.Fatalf("background run = %+v, error = %v", run, err)
+	}
+	resources, _ := runidentity.NewResources(run.TaskID, 1)
+	if !resources.Matches(run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity) ||
+		run.InstructionSHA256 != sha256.Sum256([]byte(params.Prompt)) || run.ProfileSHA256 != sha256.Sum256([]byte(run.Profile)) {
+		t.Fatalf("admission did not derive run identities: %+v", run)
 	}
 	stopHash := sha256.Sum256([]byte("stop"))
 	stopParams := StopBackgroundRunParams{WorkspaceID: testWorkspaceID(), TaskID: run.TaskID, ReceiptID: testReceiptID(1600),
@@ -73,9 +78,9 @@ func TestBackgroundRunAdmissionIsAtomicAndActorFiltered(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := testBackgroundRunAdmission(1701, "second-run")
-	second.BackgroundRun.CloneIdentity = first.BackgroundRun.CloneIdentity
+	second.OpenCodeSessionID = first.OpenCodeSessionID
 	if _, err := store.AdmitBackgroundRun(context.Background(), second); err == nil {
-		t.Fatal("duplicate environment identity did not abort admission")
+		t.Fatal("duplicate session identity did not abort admission")
 	}
 	assertCounts(t, store, 1, 1, 1, 2)
 	var runs int
@@ -209,11 +214,8 @@ func TestBackgroundRunAdmissionRejectsMismatchedIntentAtomically(t *testing.T) {
 		name   string
 		mutate func(*AdmitBackgroundRunParams)
 	}{
-		{"instruction hash", func(p *AdmitBackgroundRunParams) { p.BackgroundRun.InstructionSHA256 = [32]byte{} }},
-		{"profile hash", func(p *AdmitBackgroundRunParams) { p.BackgroundRun.ProfileSHA256 = [32]byte{} }},
+		{"profile", func(p *AdmitBackgroundRunParams) { p.BackgroundRun.Profile = "other" }},
 		{"creator actor", func(p *AdmitBackgroundRunParams) { p.Claim.Actor.Type = task.ActorOperator }},
-		{"environment identity", func(p *AdmitBackgroundRunParams) { p.BackgroundRun.ContainerIdentity += "-other" }},
-		{"noncanonical remote", func(p *AdmitBackgroundRunParams) { p.BackgroundRun.RepositoryRemote += ".git" }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store := openTestStore(t, testDBPath(t))
@@ -665,14 +667,9 @@ func advanceBackgroundRef(ref *BackgroundRunRef, run BackgroundRun) {
 
 func testBackgroundRunAdmission(n int, key string) AdmitBackgroundRunParams {
 	params := testAdmission(n, key, "Run in the background")
-	compact := strings.ReplaceAll(strings.TrimPrefix(string(params.TaskID), "tsk_"), "-", "")
 	params.BackgroundRun = &BackgroundRunIntent{
-		RepositoryRemote: "https://github.com/owner/repository", Branch: "main",
-		InstructionSHA256: sha256.Sum256([]byte(params.Prompt)), Profile: "source-39fb919a054190498f6d5b7985bde231f93ad7a6",
-		ProfileSHA256: sha256.Sum256([]byte("source-39fb919a054190498f6d5b7985bde231f93ad7a6")), EnvironmentSHA256: sha256.Sum256([]byte("{}")),
+		RepositoryRemote: "https://github.com/owner/repository", Branch: "main", Profile: "source-39fb919a054190498f6d5b7985bde231f93ad7a6", EnvironmentSHA256: sha256.Sum256([]byte("{}")),
 		ImageIdentity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode",
-		ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint",
 	}
 	return params
 }

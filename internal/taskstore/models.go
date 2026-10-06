@@ -72,6 +72,17 @@ type Receipt struct {
 
 const ReceiptAccepted = "accepted"
 
+// Claim is the idempotency claim this receipt accepted.
+func (r Receipt) Claim() task.IdempotencyClaim {
+	return task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: r.WorkspaceID, CommandKind: r.CommandKind},
+		Key: r.IdempotencyKey, RequestHash: r.RequestHash, Actor: r.Actor}
+}
+
+func (r Receipt) classify(incoming task.IdempotencyClaim) task.IdempotencyDisposition {
+	claim := r.Claim()
+	return task.ClassifyIdempotency(&claim, incoming)
+}
+
 type Task struct {
 	ID                task.TaskID
 	WorkspaceID       task.WorkspaceID

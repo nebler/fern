@@ -48,19 +48,6 @@ VALUES(?,?,?,?,?,?,?,1,?,?,?)`, id, workspaceID, taskID, attemptValue, entityTyp
 	return event, nil
 }
 
-func validateAttemptAndEvents(attemptID task.AttemptID, attemptEventID, taskEventID task.EventID) error {
-	if _, err := task.ParseAttemptID(string(attemptID)); err != nil {
-		return fmt.Errorf("%w: attempt ID", ErrInvalidInput)
-	}
-	if _, err := task.ParseEventID(string(attemptEventID)); err != nil {
-		return fmt.Errorf("%w: attempt event ID", ErrInvalidInput)
-	}
-	if _, err := task.ParseEventID(string(taskEventID)); err != nil || attemptEventID == taskEventID {
-		return fmt.Errorf("%w: task event ID", ErrInvalidInput)
-	}
-	return nil
-}
-
 func validExactTimestamp(value time.Time) error {
 	if err := validTimestamp(value); err != nil || !value.Equal(fromUnixMillis(unixMillis(value))) {
 		return fmt.Errorf("%w: timestamp must be exact Unix milliseconds", ErrInvalidInput)

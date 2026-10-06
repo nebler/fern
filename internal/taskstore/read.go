@@ -71,9 +71,6 @@ func scanTask(row rowScanner) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
-	if len(promptHash) != len(t.PromptSHA256) || repositoryID <= 0 {
-		return Task{}, ErrCorruptStore
-	}
 	copy(t.PromptSHA256[:], promptHash)
 	t.RepositoryID = task.RepositoryID(repositoryID)
 	t.TerminalReason = nullableString(terminalReason)
@@ -109,9 +106,6 @@ func scanAttempt(row rowScanner) (Attempt, error) {
 	if err != nil {
 		return Attempt{}, err
 	}
-	if len(promptHash) != len(a.PromptSHA256) || a.Sequence <= 0 || !a.State.Valid() {
-		return Attempt{}, ErrCorruptStore
-	}
 	copy(a.PromptSHA256[:], promptHash)
 	a.Deadline, a.CreatedAt, a.UpdatedAt = fromUnixMillis(deadline), fromUnixMillis(createdAt), fromUnixMillis(updatedAt)
 	a.TerminalReason = nullableString(terminalReason)
@@ -141,15 +135,6 @@ func nullableTime(v sql.NullInt64) *time.Time {
 // workspace/kind/key scope. Ownership and request-hash classification remains
 // in the command transition that consumes this read.
 func (s *Store) FindReceiptByIdempotency(ctx context.Context, workspaceID task.WorkspaceID, commandKind string, key task.IdempotencyKey) (Receipt, bool, error) {
-	if _, err := task.ParseWorkspaceID(string(workspaceID)); err != nil {
-		return Receipt{}, false, fmt.Errorf("%w: workspace ID", ErrInvalidInput)
-	}
-	if (task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: commandKind}).Validate() != nil {
-		return Receipt{}, false, fmt.Errorf("%w: command kind", ErrInvalidInput)
-	}
-	if _, err := task.ParseIdempotencyKey(string(key)); err != nil {
-		return Receipt{}, false, fmt.Errorf("%w: idempotency key", ErrInvalidInput)
-	}
 	receipt, err := scanReceipt(s.db.QueryRowContext(ctx, receiptSelect+` WHERE r.workspace_id=? AND r.command_kind=? AND r.idempotency_key=?`, workspaceID, commandKind, key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return Receipt{}, false, nil
@@ -172,9 +157,6 @@ func scanReceipt(row rowScanner) (Receipt, error) {
 	)
 	if err != nil {
 		return Receipt{}, err
-	}
-	if len(requestHash) != len(r.RequestHash) || !json.Valid([]byte(response)) {
-		return Receipt{}, ErrCorruptStore
 	}
 	copy(r.RequestHash[:], requestHash)
 	r.AcceptedAt = fromUnixMillis(acceptedAt)
@@ -220,9 +202,6 @@ func scanEvent(row rowScanner) (Event, error) {
 	}
 	if attemptID.Valid {
 		e.AttemptID = task.AttemptID(attemptID.String)
-	}
-	if err := e.Cursor.ValidateEvent(); err != nil || !json.Valid([]byte(payload)) {
-		return Event{}, ErrCorruptStore
 	}
 	e.OccurredAt = fromUnixMillis(occurredAt)
 	e.Payload = json.RawMessage(payload)

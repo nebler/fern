@@ -7,25 +7,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
-	"strings"
-	"unicode/utf8"
 
-	"github.com/nebler/fern/internal/gitref"
 	runidentity "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
-const (
-	CreateBackgroundRunCommand = "run.create"
-
-	// MaxPromptBytes and MaxPromptRunes bound a background run instruction.
-	// The run API rejects longer instructions; admission re-checks the same
-	// limits so the store never persists a prompt the API would refuse. The
-	// schema's 64 KiB CHECK is only a storage backstop.
-	MaxPromptBytes = 16 << 10
-	MaxPromptRunes = 4000
-)
+const CreateBackgroundRunCommand = "run.create"
 
 // AdmitBackgroundRun atomically claims an idempotency key and creates the
 // Background Run's task, sequence-1 attempt, receipt, and initial events. It
@@ -46,15 +33,7 @@ func (s *Store) AdmitBackgroundRun(ctx context.Context, p AdmitBackgroundRunPara
 		return Admission{}, err
 	}
 	if found {
-		existingClaim := task.IdempotencyClaim{
-			Scope: task.IdempotencyScope{WorkspaceID: existing.WorkspaceID, CommandKind: existing.CommandKind},
-			Key:   existing.IdempotencyKey, RequestHash: existing.RequestHash, Actor: existing.Actor,
-		}
-		disposition, classifyErr := task.ClassifyIdempotency(&existingClaim, p.Claim)
-		if classifyErr != nil {
-			return Admission{}, fmt.Errorf("classify idempotency: %w", classifyErr)
-		}
-		switch disposition {
+		switch existing.classify(p.Claim) {
 		case task.IdempotencyReplay:
 			storedTask, getErr := getTask(ctx, tx, existing.TargetID)
 			if getErr != nil {
@@ -145,6 +124,11 @@ INSERT INTO receipts(
 	if p.BackgroundRun.Branch != "" {
 		branch = p.BackgroundRun.Branch
 	}
+	resources, err := runidentity.NewResources(p.TaskID, 1)
+	if err != nil {
+		return Admission{}, fmt.Errorf("%w: run resources: %v", ErrInvalidInput, err)
+	}
+	profileHash := sha256.Sum256([]byte(p.BackgroundRun.Profile))
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO background_runs(
     task_id,attempt_id,workspace_id,generation,repository_id,repository_remote,base_oid,branch,
@@ -153,9 +137,9 @@ INSERT INTO background_runs(
     creator_actor_snapshot_id,revision,created_at,updated_at
 ) VALUES(?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued','absent',?,1,?,?)`,
 		p.TaskID, p.AttemptID, p.Claim.Scope.WorkspaceID, p.RepositoryID, p.BackgroundRun.RepositoryRemote,
-		p.BaseSHA, branch, p.BackgroundRun.InstructionSHA256[:], p.BackgroundRun.Profile,
-		p.BackgroundRun.ProfileSHA256[:], p.BackgroundRun.EnvironmentSHA256[:], backgroundRunResourceSpecVersion, p.BackgroundRun.ImageIdentity, p.BackgroundRun.CloneIdentity,
-		p.BackgroundRun.VolumeIdentity, p.BackgroundRun.ContainerIdentity, p.BackgroundRun.EndpointIdentity,
+		p.BaseSHA, branch, promptHash[:], p.BackgroundRun.Profile,
+		profileHash[:], p.BackgroundRun.EnvironmentSHA256[:], backgroundRunResourceSpecVersion, p.BackgroundRun.ImageIdentity, resources.Clone(),
+		resources.Volume(), resources.Container(), resources.Endpoint(),
 		p.OpenCodeSessionID, p.OpenCodeMessageID, actorID, acceptedMS, acceptedMS); err != nil {
 		return Admission{}, fmt.Errorf("insert background run: %w", err)
 	}
@@ -227,84 +211,15 @@ INSERT INTO events(
 	return Admission{Task: storedTask, Attempt: storedAttempt, Receipt: receipt, TaskEvent: taskEvent, AttemptEvent: attemptEvent}, nil
 }
 
+// validateAdmission checks only command authority. IDs, the prompt, and the
+// environment selection come from Fern itself (runapi validated the HTTP
+// input); schema CHECKs bound what is persisted.
 func validateAdmission(p AdmitBackgroundRunParams) error {
-	if _, err := task.ParseTaskID(string(p.TaskID)); err != nil {
-		return fmt.Errorf("%w: task ID: %v", ErrInvalidInput, err)
-	}
-	if _, err := task.ParseAttemptID(string(p.AttemptID)); err != nil {
-		return fmt.Errorf("%w: attempt ID: %v", ErrInvalidInput, err)
-	}
-	if _, err := task.ParseReceiptID(string(p.ReceiptID)); err != nil {
-		return fmt.Errorf("%w: receipt ID: %v", ErrInvalidInput, err)
-	}
-	if _, err := task.ParseEventID(string(p.TaskEventID)); err != nil {
-		return fmt.Errorf("%w: task event ID: %v", ErrInvalidInput, err)
-	}
-	if _, err := task.ParseEventID(string(p.AttemptEventID)); err != nil || p.AttemptEventID == p.TaskEventID {
-		return fmt.Errorf("%w: attempt event ID: %v", ErrInvalidInput, err)
-	}
-	if _, err := task.ParseOpenCodeSessionID(string(p.OpenCodeSessionID)); err != nil {
-		return fmt.Errorf("%w: OpenCode session ID: %v", ErrInvalidInput, err)
-	}
-	if _, err := task.ParseOpenCodeMessageID(string(p.OpenCodeMessageID)); err != nil {
-		return fmt.Errorf("%w: OpenCode message ID: %v", ErrInvalidInput, err)
-	}
-	if err := p.Claim.Validate(); err != nil || p.Claim.Scope.CommandKind != CreateBackgroundRunCommand || p.BackgroundRun == nil {
-		return fmt.Errorf("%w: idempotency claim: %v", ErrInvalidInput, err)
-	}
-	if gitref.ValidateGitHubRemote(p.BackgroundRun.RepositoryRemote) != nil ||
-		(p.BackgroundRun.Branch != "" && !validBoundedText(p.BackgroundRun.Branch, 1, 255)) ||
-		p.BackgroundRun.Profile != BackgroundRunSourceProfile || p.BackgroundRun.InstructionSHA256 != sha256.Sum256([]byte(p.Prompt)) ||
-		p.BackgroundRun.ProfileSHA256 != sha256.Sum256([]byte(p.BackgroundRun.Profile)) || p.BackgroundRun.EnvironmentSHA256 == ([32]byte{}) || p.Claim.Actor.Type != task.ActorOpenCode ||
-		!validBackgroundImageIdentity(p.BackgroundRun.ImageIdentity) || !validBoundedText(p.BackgroundRun.CloneIdentity, 1, 256) ||
-		!validBoundedText(p.BackgroundRun.VolumeIdentity, 1, 256) || !validBoundedText(p.BackgroundRun.ContainerIdentity, 1, 256) ||
-		!validBoundedText(p.BackgroundRun.EndpointIdentity, 1, 256) || !canonicalBackgroundIdentities(p) {
-		return fmt.Errorf("%w: background run intent", ErrInvalidInput)
-	}
-	if !validBoundedText(p.Title, 1, 200) || !utf8.ValidString(p.Prompt) || len(p.Prompt) < 1 || len(p.Prompt) > MaxPromptBytes ||
-		utf8.RuneCountInString(p.Prompt) > MaxPromptRunes {
-		return fmt.Errorf("%w: title or prompt", ErrInvalidInput)
-	}
-	if p.RepositoryID == 0 || uint64(p.RepositoryID) > math.MaxInt64 {
-		return fmt.Errorf("%w: repository ID", ErrInvalidInput)
-	}
-	if !validBoundedText(p.BaseRef, 1, 255) {
-		return fmt.Errorf("%w: base ref", ErrInvalidInput)
-	}
-	if _, err := task.ParseGitOID(string(p.BaseSHA)); err != nil {
-		return fmt.Errorf("%w: base SHA: %v", ErrInvalidInput, err)
-	}
-	if p.ObjectFormat != "sha1" || !validBoundedText(p.APIContractVersion, 1, 64) {
-		return fmt.Errorf("%w: object or API contract version", ErrInvalidInput)
-	}
-	if !validBoundedText(p.ExecutionContractVersion, 1, 128) || !validBoundedText(p.Agent, 1, 128) ||
-		!validBoundedText(p.ModelProvider, 1, 128) || !validBoundedText(p.Model, 1, 256) {
-		return fmt.Errorf("%w: execution or model selection", ErrInvalidInput)
-	}
-	if err := validTimestamp(p.AcceptedAt); err != nil {
-		return err
-	}
-	if err := validTimestamp(p.Deadline); err != nil || unixMillis(p.Deadline) <= unixMillis(p.AcceptedAt) {
-		return fmt.Errorf("%w: attempt deadline", ErrInvalidInput)
+	if p.Claim.Scope.CommandKind != CreateBackgroundRunCommand || p.Claim.Actor.Type != task.ActorOpenCode || p.BackgroundRun == nil ||
+		p.BackgroundRun.Profile != BackgroundRunSourceProfile {
+		return fmt.Errorf("%w: background run admission", ErrInvalidInput)
 	}
 	return nil
-}
-
-func validBackgroundImageIdentity(value string) bool {
-	if len(value) != 71 || !strings.HasPrefix(value, "sha256:") {
-		return false
-	}
-	for _, character := range value[7:] {
-		if (character < '0' || character > '9') && (character < 'a' || character > 'f') {
-			return false
-		}
-	}
-	return true
-}
-
-func canonicalBackgroundIdentities(p AdmitBackgroundRunParams) bool {
-	resources, err := runidentity.NewResources(p.TaskID, 1)
-	return err == nil && resources.Matches(p.BackgroundRun.CloneIdentity, p.BackgroundRun.VolumeIdentity, p.BackgroundRun.ContainerIdentity, p.BackgroundRun.EndpointIdentity)
 }
 
 func ensureActor(ctx context.Context, tx *sql.Tx, actor task.ActorSnapshot) (int64, error) {

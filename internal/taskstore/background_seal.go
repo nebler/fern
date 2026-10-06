@@ -29,14 +29,7 @@ func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams
 		return BackgroundRunSealAdmission{}, err
 	}
 	if found {
-		disposition, classifyErr := task.ClassifyIdempotency(&task.IdempotencyClaim{
-			Scope: task.IdempotencyScope{WorkspaceID: existing.WorkspaceID, CommandKind: existing.CommandKind},
-			Key:   existing.IdempotencyKey, RequestHash: existing.RequestHash, Actor: existing.Actor,
-		}, p.Claim)
-		if classifyErr != nil {
-			return BackgroundRunSealAdmission{}, classifyErr
-		}
-		switch disposition {
+		switch existing.classify(p.Claim) {
 		case task.IdempotencyOwnerMismatch:
 			return BackgroundRunSealAdmission{}, ErrNotFound
 		case task.IdempotencyConflict:
@@ -169,51 +162,14 @@ state IN ('working','needs_you','uncertain') AND effect_phase='admitted' AND sto
 }
 
 func validateBackgroundRunSeal(p SealBackgroundRunParams) error {
-	if _, err := task.ParseWorkspaceID(string(p.WorkspaceID)); err != nil || p.WorkspaceID != p.Claim.Scope.WorkspaceID {
-		return fmt.Errorf("%w: background seal workspace", ErrInvalidInput)
-	}
-	if _, err := task.ParseTaskID(string(p.TaskID)); err != nil {
-		return fmt.Errorf("%w: background seal task", ErrInvalidInput)
-	}
-	if _, err := task.ParseAttemptID(string(p.AttemptID)); err != nil {
-		return fmt.Errorf("%w: background seal attempt", ErrInvalidInput)
-	}
-	if _, err := task.ParseSealRequestID(string(p.SealRequestID)); err != nil {
-		return fmt.Errorf("%w: background seal request", ErrInvalidInput)
-	}
-	if _, err := task.ParseReceiptID(string(p.ReceiptID)); err != nil {
-		return fmt.Errorf("%w: background seal receipt", ErrInvalidInput)
-	}
-	if _, err := task.ParseArtifactExportID(string(p.ExportID)); err != nil {
-		return fmt.Errorf("%w: background export", ErrInvalidInput)
-	}
-	if _, err := task.ParseRetainedArtifactID(string(p.ArtifactID)); err != nil {
-		return fmt.Errorf("%w: retained artifact", ErrInvalidInput)
-	}
-	if _, err := task.ParseMaterializationID(string(p.MaterializationID)); err != nil {
-		return fmt.Errorf("%w: materialization", ErrInvalidInput)
-	}
-	if _, err := task.ParseResultID(string(p.ResultID)); err != nil {
-		return fmt.Errorf("%w: retained result", ErrInvalidInput)
-	}
-	if _, err := task.ParseEventID(string(p.ResultEventID)); err != nil {
-		return fmt.Errorf("%w: result event", ErrInvalidInput)
-	}
-	if _, err := task.ParseEventID(string(p.TaskEventID)); err != nil || p.TaskEventID == p.ResultEventID {
-		return fmt.Errorf("%w: task event", ErrInvalidInput)
-	}
-	if p.Generation <= 0 || p.ExpectedRunRevision <= 0 || p.ExpectedTaskRevision <= 0 || p.ExpectedAttemptRevision <= 0 ||
-		p.CommitEpochSeconds < 0 || !validBoundedText(p.PolicyVersion, 1, 128) || !validBoundedText(p.APIContractVersion, 1, 64) ||
-		p.Claim.Validate() != nil || p.Claim.Scope.CommandKind != SealBackgroundRunCommand || p.Claim.Actor.Type != task.ActorOpenCode {
+	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != SealBackgroundRunCommand ||
+		p.Claim.Actor.Type != task.ActorOpenCode || p.TaskEventID == p.ResultEventID {
 		return fmt.Errorf("%w: background seal authority", ErrInvalidInput)
 	}
-	return validExactTimestamp(p.AcceptedAt)
+	return nil
 }
 
 func (s *Store) GetBackgroundRunSealRequest(ctx context.Context, id task.SealRequestID) (BackgroundRunSealRequest, error) {
-	if _, err := task.ParseSealRequestID(string(id)); err != nil {
-		return BackgroundRunSealRequest{}, fmt.Errorf("%w: background seal request", ErrInvalidInput)
-	}
 	return getBackgroundRunSealRequest(ctx, s.db, id)
 }
 
@@ -245,9 +201,6 @@ func scanBackgroundRunSealRequest(row rowScanner) (BackgroundRunSealRequest, err
 	}
 	if err != nil {
 		return BackgroundRunSealRequest{}, fmt.Errorf("read background seal request: %w", err)
-	}
-	if len(requestHash) != 32 || request.Owner.Validate() != nil || request.Owner.Type != task.ActorOpenCode {
-		return BackgroundRunSealRequest{}, ErrCorruptStore
 	}
 	copy(request.RequestHash[:], requestHash)
 	request.AcceptedAt = fromUnixMillis(accepted)

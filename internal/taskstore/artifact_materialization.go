@@ -10,9 +10,6 @@ import (
 )
 
 func (s *Store) GetArtifactMaterialization(ctx context.Context, id task.MaterializationID) (ArtifactMaterialization, error) {
-	if _, err := task.ParseMaterializationID(string(id)); err != nil {
-		return ArtifactMaterialization{}, fmt.Errorf("%w: materialization", ErrInvalidInput)
-	}
 	return getArtifactMaterialization(ctx, s.db, id)
 }
 
@@ -33,11 +30,6 @@ proof_sha256,revision,created_at,updated_at FROM artifact_materializations WHERE
 	}
 	value.ResultCommit, value.TreeOID = task.GitOID(nullableText(resultCommit)), task.GitOID(nullableText(treeOID))
 	value.CreatedAt, value.UpdatedAt = fromUnixMillis(createdAt), fromUnixMillis(updatedAt)
-	if value.State == ArtifactMaterializationReady {
-		if len(proof) != 32 {
-			return ArtifactMaterialization{}, ErrCorruptStore
-		}
-		copy(value.ProofSHA256[:], proof)
-	}
+	copy(value.ProofSHA256[:], proof)
 	return value, nil
 }

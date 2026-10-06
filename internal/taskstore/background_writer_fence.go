@@ -15,15 +15,8 @@ import (
 // RecordBackgroundRunWriterFence durably proves, once per seal, that the exact
 // writer no longer runs. Export reads only under this fence.
 func (s *Store) RecordBackgroundRunWriterFence(ctx context.Context, p RecordBackgroundRunWriterFenceParams) (_ BackgroundRun, err error) {
-	if err := validateBackgroundRunRef(p.BackgroundRunRef); err != nil || p.ExpectedState != BackgroundRunCanceling ||
-		p.ExpectedPhase != BackgroundRunEffectSealing {
+	if p.ExpectedState != BackgroundRunCanceling || p.ExpectedPhase != BackgroundRunEffectSealing {
 		return BackgroundRun{}, fmt.Errorf("%w: writer fence revision", ErrInvalidInput)
-	}
-	if _, parseErr := task.ParseSealRequestID(string(p.SealRequestID)); parseErr != nil {
-		return BackgroundRun{}, fmt.Errorf("%w: writer fence seal", ErrInvalidInput)
-	}
-	if _, parseErr := task.ParseArtifactExportID(string(p.ExportID)); parseErr != nil {
-		return BackgroundRun{}, fmt.Errorf("%w: writer fence export", ErrInvalidInput)
 	}
 	if !validWriterFenceShape(p) {
 		return BackgroundRun{}, fmt.Errorf("%w: writer fence proof", ErrInvalidInput)
@@ -147,9 +140,6 @@ func validWriterFenceShape(p RecordBackgroundRunWriterFenceParams) bool {
 }
 
 func (s *Store) GetBackgroundRunWriterFence(ctx context.Context, id task.SealRequestID) (WriterFence, error) {
-	if _, err := task.ParseSealRequestID(string(id)); err != nil {
-		return WriterFence{}, fmt.Errorf("%w: writer fence", ErrInvalidInput)
-	}
 	return getWriterFence(ctx, s.db, id)
 }
 
@@ -167,9 +157,6 @@ container_started_at,runtime_epoch,runtime_token,stopped_at,proof_sha256,recorde
 	}
 	if err != nil {
 		return WriterFence{}, fmt.Errorf("read writer fence: %w", err)
-	}
-	if len(proof) != 32 {
-		return WriterFence{}, ErrCorruptStore
 	}
 	value.ContainerID, value.ContainerStartedAt, value.RuntimeEpoch, value.RuntimeToken = nullableText(containerID), nullableText(started), runtime.Int64, nullableText(token)
 	value.StoppedAt, value.RecordedAt = nullableTime(stoppedAt), fromUnixMillis(recordedAt.Int64)

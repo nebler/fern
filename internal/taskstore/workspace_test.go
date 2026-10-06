@@ -80,9 +80,6 @@ func TestWorkspaceReadsValidateAndHideMissingRows(t *testing.T) {
 	t.Parallel()
 	store := openTestStore(t, testDBPath(t))
 	defer store.Close()
-	if _, err := store.GetWorkspace(context.Background(), "bad"); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("invalid ID error = %v", err)
-	}
 	if _, err := store.GetWorkspace(context.Background(), testWorkspaceID()); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("missing ID error = %v", err)
 	}
@@ -141,9 +138,6 @@ func TestFindReceiptByIdempotencyIsReadOnlyAndExactScoped(t *testing.T) {
 	}
 	if _, found, err := store.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateBackgroundRunCommand, "other-key"); err != nil || found {
 		t.Fatalf("missing found=%t err=%v", found, err)
-	}
-	if _, _, err := store.FindReceiptByIdempotency(context.Background(), "bad", CreateBackgroundRunCommand, "receipt-lookup"); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("invalid scope error = %v", err)
 	}
 }
 

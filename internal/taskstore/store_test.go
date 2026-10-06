@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -269,7 +268,7 @@ FROM events WHERE id=?`, testEventID(100), first.Task.ID, second.Attempt.ID, sec
 	}
 }
 
-func TestAdmissionRejectsMalformedAttemptInputs(t *testing.T) {
+func TestSchemaRejectsMalformedAttemptInputs(t *testing.T) {
 	s := openTestStore(t, testDBPath(t))
 	t.Cleanup(func() { _ = s.Close() })
 	createTestWorkspace(t, s)
@@ -285,10 +284,8 @@ func TestAdmissionRejectsMalformedAttemptInputs(t *testing.T) {
 			p.OpenCodeSessionID = task.OpenCodeSessionID("ses_ABCDEF0123456789abcdef0123456789")
 		}},
 		{"message prefix", func(p *AdmitBackgroundRunParams) { p.OpenCodeMessageID = "msg_bad" }},
-		{"title control", func(p *AdmitBackgroundRunParams) { p.Title = "bad\ntitle" }},
 		{"execution contract", func(p *AdmitBackgroundRunParams) { p.ExecutionContractVersion = "" }},
 		{"agent", func(p *AdmitBackgroundRunParams) { p.Agent = "" }},
-		{"provider", func(p *AdmitBackgroundRunParams) { p.ModelProvider = "provider\nunsafe" }},
 		{"model", func(p *AdmitBackgroundRunParams) { p.Model = string(make([]byte, 257)) }},
 		{"deadline", func(p *AdmitBackgroundRunParams) { p.Deadline = p.AcceptedAt }},
 	}
@@ -296,8 +293,9 @@ func TestAdmissionRejectsMalformedAttemptInputs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			p := testAdmission(60+i, "invalid-"+fmt.Sprint(i), "Invalid")
 			tt.mutate(&p)
-			if _, err := s.AdmitBackgroundRun(context.Background(), p); !errors.Is(err, ErrInvalidInput) {
-				t.Fatalf("admission error = %v", err)
+			// Fern generates these values; schema CHECKs are the backstop.
+			if _, err := s.AdmitBackgroundRun(context.Background(), p); err == nil {
+				t.Fatal("malformed admission was accepted")
 			}
 		})
 	}
@@ -538,13 +536,10 @@ func testAdmission(n int, key, prompt string) AdmitBackgroundRunParams {
 		Deadline:           testTime.Add(time.Hour),
 		APIContractVersion: "v1", AcceptedAt: testTime,
 	}
-	compact := strings.ReplaceAll(strings.TrimPrefix(string(params.TaskID), "tsk_"), "-", "")
 	params.BackgroundRun = &BackgroundRunIntent{
-		RepositoryRemote: "https://github.com/owner/repository", Branch: "main", InstructionSHA256: sha256.Sum256([]byte(prompt)),
-		Profile: BackgroundRunSourceProfile, ProfileSHA256: sha256.Sum256([]byte(BackgroundRunSourceProfile)), EnvironmentSHA256: sha256.Sum256([]byte("{}")),
+		RepositoryRemote: "https://github.com/owner/repository", Branch: "main",
+		Profile: BackgroundRunSourceProfile, EnvironmentSHA256: sha256.Sum256([]byte("{}")),
 		ImageIdentity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-		CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode",
-		ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint",
 	}
 	return params
 }

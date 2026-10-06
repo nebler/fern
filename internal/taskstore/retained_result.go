@@ -3,9 +3,7 @@ package taskstore
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -78,12 +76,6 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 		run.BackgroundSealRequestID != request.ID || run.MaterializationID != p.MaterializationID || run.RetainedResultID != p.ResultID {
 		return BackgroundRunRetainedResult{}, ErrInvalidState
 	}
-	if export.Outcome == task.ResultNoChanges && (export.ResultCommit != export.BaseSHA || len(export.ResultManifest) != 0) {
-		return BackgroundRunRetainedResult{}, ErrInvalidState
-	}
-	if export.Outcome == task.ResultChanged && (export.ResultCommit == export.BaseSHA || len(export.ResultManifest) == 0) {
-		return BackgroundRunRetainedResult{}, ErrInvalidState
-	}
 	if export.CollectedAt == nil || p.SealedAt.Before(*export.CollectedAt) || p.SealedAt.Before(request.AcceptedAt) {
 		return BackgroundRunRetainedResult{}, ErrInvalidInput
 	}
@@ -96,24 +88,8 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 		OpenCodeMessageID: run.OpenCodeMessageID, EvidencePayload: p.EvidencePayload, EvidenceSHA256: p.EvidenceSHA256,
 		PolicyVersion: request.PolicyVersion, CollectedAt: *export.CollectedAt, SealedAt: p.SealedAt, Actor: p.Actor,
 		CompletionAuthority: SealAuthorityUser}
-	// Persistent results hash the relational ManifestEntry JSON. Retained
-	// results instead preserve taskartifact's canonical ChangeEntry digest as
-	// the cross-layer authority, while validating the relational projection
-	// independently with the existing closed-schema validator.
-	validationParams := sealParams
-	encodedProjection, err := json.Marshal(sealParams.Manifest)
-	if err != nil {
-		return BackgroundRunRetainedResult{}, err
-	}
-	validationParams.ManifestSHA256 = sha256.Sum256(encodedProjection)
-	manifest, err := validateResultMaterial(validationParams)
-	if err != nil {
-		return BackgroundRunRetainedResult{}, err
-	}
-	if sealParams.ManifestSHA256 == ([32]byte{}) {
-		return BackgroundRunRetainedResult{}, fmt.Errorf("%w: retained changes digest", ErrInvalidInput)
-	}
-	sealParams.Manifest = manifest
+	// The manifest was validated when the snapshot was selected; the retained
+	// changes digest is taskartifact's canonical ChangeEntry digest.
 	payload, err := resultSealPayload(sealParams)
 	if err != nil {
 		return BackgroundRunRetainedResult{}, err
@@ -243,35 +219,14 @@ state='canceling' AND effect_phase='sealing' AND artifact_export_id=? AND retain
 }
 
 func validateRetainedResultCommit(p CommitBackgroundRunRetainedResultParams) error {
-	if err := validateExportRef(p.BackgroundRunExportRef); err != nil || p.ExpectedPhase != BackgroundRunExportPhaseSelected ||
-		p.MaterializationProof == ([32]byte{}) {
-		return fmt.Errorf("%w: retained result export revision", ErrInvalidInput)
-	}
-	if _, err := task.ParseMaterializationID(string(p.MaterializationID)); err != nil {
-		return fmt.Errorf("%w: materialization", ErrInvalidInput)
-	}
-	if _, err := task.ParseRetainedArtifactID(string(p.ArtifactID)); err != nil {
-		return fmt.Errorf("%w: retained artifact", ErrInvalidInput)
-	}
-	if _, err := task.ParseResultID(string(p.ResultID)); err != nil {
-		return fmt.Errorf("%w: retained result", ErrInvalidInput)
-	}
-	if _, err := task.ParseEventID(string(p.ResultEventID)); err != nil {
-		return fmt.Errorf("%w: result event", ErrInvalidInput)
-	}
-	if _, err := task.ParseEventID(string(p.TaskEventID)); err != nil || p.TaskEventID == p.ResultEventID {
-		return fmt.Errorf("%w: task event", ErrInvalidInput)
-	}
-	if p.Actor.Validate() != nil || (p.Actor.Type != task.ActorSystem && p.Actor.Type != task.ActorRecovery) || validExactTimestamp(p.SealedAt) != nil {
-		return fmt.Errorf("%w: retained result actor or time", ErrInvalidInput)
+	if p.ExpectedPhase != BackgroundRunExportPhaseSelected || p.TaskEventID == p.ResultEventID ||
+		(p.Actor.Type != task.ActorSystem && p.Actor.Type != task.ActorRecovery) {
+		return fmt.Errorf("%w: retained result commit", ErrInvalidInput)
 	}
 	return validateRetainedResultEvidence(p.EvidencePayload, p.EvidenceSHA256)
 }
 
 func (s *Store) GetRetainedArtifact(ctx context.Context, id task.RetainedArtifactID) (RetainedArtifact, error) {
-	if _, err := task.ParseRetainedArtifactID(string(id)); err != nil {
-		return RetainedArtifact{}, fmt.Errorf("%w: retained artifact", ErrInvalidInput)
-	}
 	return getRetainedArtifact(ctx, s.db, id)
 }
 
@@ -294,16 +249,10 @@ opencode_session_id,opencode_message_id,committed_at FROM retained_artifacts WHE
 		return RetainedArtifact{}, fmt.Errorf("read retained artifact: %w", err)
 	}
 	value.Manifest = json.RawMessage(manifest)
-	if len(manifestHash) != 32 || len(changesHash) != 32 || len(bundleHash) != 32 || !safeArtifactManifest(value.Manifest) {
-		return RetainedArtifact{}, ErrCorruptStore
-	}
 	copy(value.ManifestSHA256[:], manifestHash)
 	copy(value.ChangesSHA256[:], changesHash)
 	copy(value.BundleSHA256[:], bundleHash)
 	value.CASLocator = casLocator
-	if value.CASLocator != "sha256:"+hex.EncodeToString(value.ManifestSHA256[:]) {
-		return RetainedArtifact{}, ErrCorruptStore
-	}
 	value.CommittedAt = fromUnixMillis(committedAt)
 	return value, nil
 }
@@ -317,8 +266,8 @@ func (s *Store) ReferencedArtifactManifestSHA256(ctx context.Context) ([][32]byt
 	values := make([][32]byte, 0)
 	for rows.Next() {
 		var raw []byte
-		if err := rows.Scan(&raw); err != nil || len(raw) != 32 {
-			return nil, ErrCorruptStore
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
 		}
 		var value [32]byte
 		copy(value[:], raw)

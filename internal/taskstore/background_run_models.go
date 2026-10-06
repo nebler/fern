@@ -60,13 +60,13 @@ const (
 )
 
 // BackgroundRunIntent is the immutable environment selection committed with a
-// task admission. Mutable lifecycle fields live only on BackgroundRun.
+// task admission. The store derives the instruction and profile digests and
+// the canonical resource identities itself. Mutable lifecycle fields live only
+// on BackgroundRun.
 type BackgroundRunIntent struct {
-	RepositoryRemote, Branch, Profile                   string
-	InstructionSHA256, ProfileSHA256, EnvironmentSHA256 [32]byte
-	ImageIdentity                                       string
-	CloneIdentity, VolumeIdentity, ContainerIdentity    string
-	EndpointIdentity                                    string
+	RepositoryRemote, Branch, Profile string
+	EnvironmentSHA256                 [32]byte
+	ImageIdentity                     string
 }
 
 type BackgroundRun struct {
