@@ -129,8 +129,10 @@ func runBackupRestore(args []string, _ *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	_, err = fmt.Fprintf(os.Stdout, "restored backup of %q created %s; Fern remains stopped\nreplaced state, if any, is kept as %s.previous; 'fern backup rollback' swaps it back\n",
-		manifest.Workspace, manifest.CreatedAt.Format(time.RFC3339), options.stateDirectory)
+	if _, err := fmt.Fprintf(os.Stdout, "restored backup of %q created %s; Fern remains stopped\n", manifest.Workspace, manifest.CreatedAt.Format(time.RFC3339)); err != nil || !*replace {
+		return err
+	}
+	_, err = fmt.Fprintf(os.Stdout, "replaced state is kept as %s.previous; 'fern backup rollback' swaps it back\n", options.stateDirectory)
 	return err
 }
 
