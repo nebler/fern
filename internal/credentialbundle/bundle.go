@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"filippo.io/age"
+	"github.com/nebler/fern/internal/atomicfile"
 	"github.com/nebler/fern/internal/strictjson"
 )
 
@@ -145,17 +146,12 @@ func ParseRecipients(values []string) ([]age.Recipient, error) {
 	return result, nil
 }
 
-// LoadIdentities reads private X25519 identities from private, regular files.
+// LoadIdentities reads X25519 identities from regular files.
 func LoadIdentities(paths []string) ([]age.Identity, error) {
 	var result []age.Identity
 	for _, path := range paths {
-		file, err := openPrivateFile(path)
+		payload, err := atomicfile.Read(path, maxIdentityBytes)
 		if err != nil {
-			return nil, ErrUnsafeFile
-		}
-		payload, readErr := io.ReadAll(io.LimitReader(file, maxIdentityBytes+1))
-		closeErr := file.Close()
-		if readErr != nil || closeErr != nil || len(payload) > maxIdentityBytes {
 			return nil, ErrUnsafeFile
 		}
 		for _, line := range strings.Split(string(payload), "\n") {
@@ -238,19 +234,11 @@ func WriteFile(path string, bundle Bundle, recipients []age.Recipient) error {
 
 // ReadFile decrypts an encrypted artifact without writing plaintext to disk.
 func ReadFile(path string, identities []age.Identity) (Bundle, error) {
-	file, err := openPrivateFile(path)
+	ciphertext, err := atomicfile.Read(path, maxBundleBytes)
 	if err != nil {
 		return Bundle{}, ErrUnsafeFile
 	}
-	bundle, decryptErr := Decrypt(file, identities)
-	closeErr := file.Close()
-	if decryptErr != nil {
-		return Bundle{}, decryptErr
-	}
-	if closeErr != nil {
-		return Bundle{}, ErrUnsafeFile
-	}
-	return bundle, nil
+	return Decrypt(bytes.NewReader(ciphertext), identities)
 }
 
 func marshal(bundle Bundle) ([]byte, error) {

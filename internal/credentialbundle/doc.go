@@ -12,9 +12,8 @@
 // the whole payload. WriteFile installs ciphertext by hard-linking a synced
 // private temp file to an absent destination, so it never replaces an existing
 // file; a late cleanup or directory-sync error may still leave the destination
-// installed. Leaf files are opened no-follow and checked for private mode on
-// Darwin/Linux; other platforms fail closed. Callers must supply trusted parent
-// directories.
+// installed. Bundle and identity files are read as size-bounded regular files
+// with atomicfile.Read; callers must supply trusted paths.
 //
 // Fingerprint hashes the canonical JSON serialization, not the ciphertext; it
 // is not a MAC or an access credential. The exported App private key never

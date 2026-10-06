@@ -74,7 +74,7 @@ func TestBundleFilesAreEncryptedPrivateAndExclusive(t *testing.T) {
 	}
 }
 
-func TestLoadIdentitiesRequiresPrivateValidFiles(t *testing.T) {
+func TestLoadIdentitiesReadsValidFiles(t *testing.T) {
 	t.Parallel()
 	identity, err := age.GenerateX25519Identity()
 	if err != nil {
@@ -87,11 +87,8 @@ func TestLoadIdentitiesRequiresPrivateValidFiles(t *testing.T) {
 	if identities, err := LoadIdentities([]string{path}); err != nil || len(identities) != 1 {
 		t.Fatalf("identities = %d, error = %v", len(identities), err)
 	}
-	if err := os.Chmod(path, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := LoadIdentities([]string{path}); !errors.Is(err, ErrUnsafeFile) {
-		t.Fatalf("public identity file error = %v", err)
+	if _, err := LoadIdentities([]string{path + "-missing"}); !errors.Is(err, ErrUnsafeFile) {
+		t.Fatalf("missing identity file error = %v", err)
 	}
 }
 
