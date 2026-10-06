@@ -605,14 +605,16 @@ claim_expires_at>? AND revision=? AND state=? AND effect_phase=? AND cancel_epoc
 	return run, nil
 }
 
+// databaseBackgroundStatePhase maps the in-memory tuple projected by
+// scanBackgroundRun from result_authority_phase back to the stored tuple.
 func databaseBackgroundStatePhase(state BackgroundRunState, phase BackgroundRunEffectPhase) (BackgroundRunState, BackgroundRunEffectPhase) {
-	if state == BackgroundRunCanceling {
-		switch phase {
-		case BackgroundRunEffectSealIntent:
-			return BackgroundRunCleanupRequired, BackgroundRunEffectStopIntent
-		case BackgroundRunEffectExporting:
-			return BackgroundRunCleanupRequired, BackgroundRunEffectWriterInactive
-		}
+	if state == BackgroundRunCanceling && phase == BackgroundRunEffectSealIntent {
+		return BackgroundRunCleanupRequired, BackgroundRunEffectStopIntent
+	}
+	// Exporting projects only the phase, so the reachable in-memory tuple is
+	// (cleanup_required, exporting); the stored state stays cleanup_required.
+	if (state == BackgroundRunCleanupRequired || state == BackgroundRunCanceling) && phase == BackgroundRunEffectExporting {
+		return BackgroundRunCleanupRequired, BackgroundRunEffectWriterInactive
 	}
 	if state == BackgroundRunResultReady && phase == BackgroundRunEffectArtifactCommitted {
 		return BackgroundRunResultReady, BackgroundRunEffectWriterInactive

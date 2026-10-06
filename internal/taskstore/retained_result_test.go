@@ -130,6 +130,19 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	if err != nil || reclaimed.EffectPhase != BackgroundRunEffectExporting {
 		t.Fatalf("reclaim failed export run = %+v, error=%v", reclaimed, err)
 	}
+	// The coordinator releases an exporting run claim after a retained
+	// failure; the in-memory (cleanup_required, exporting) tuple must map to
+	// its stored phase.
+	releasedExporting, err := store.ReleaseBackgroundRunClaim(context.Background(), backgroundRunClaim(reclaimed, failureAt.Add(1100*time.Millisecond)))
+	if err != nil || releasedExporting.ClaimOwner != "" || releasedExporting.EffectPhase != BackgroundRunEffectExporting {
+		t.Fatalf("release exporting run claim = %+v, error=%v", releasedExporting, err)
+	}
+	reclaimed, err = store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{WorkspaceID: run.WorkspaceID,
+		ClaimOwner: "export-dispatcher", Now: failureAt.Add(1200 * time.Millisecond), LeaseDuration: time.Minute,
+		Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity})
+	if err != nil || reclaimed.EffectPhase != BackgroundRunEffectExporting {
+		t.Fatalf("reclaim released export run = %+v, error=%v", reclaimed, err)
+	}
 	export, err = store.ClaimBackgroundRunExport(context.Background(), ClaimBackgroundRunExportParams{
 		ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID, Generation: export.Generation,
 		ExpectedRevision: recovery.Revision, ExpectedPhase: recovery.Phase, ClaimOwner: "export-dispatcher",
