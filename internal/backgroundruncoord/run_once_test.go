@@ -47,6 +47,7 @@ type scanDocker struct {
 	creates         int
 	info            *container.InspectResponse
 	afterStart      func()
+	createErr       error
 }
 
 func (d *scanDocker) VerifyRuntimeStorage(string) error { return nil }
@@ -128,6 +129,9 @@ const scanContainerID = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1
 
 func (d *scanDocker) ContainerCreate(_ context.Context, c *container.Config, h *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {
 	d.calls = append(d.calls, "container.create")
+	if d.createErr != nil {
+		return container.CreateResponse{}, d.createErr
+	}
 	c.Hostname = scanContainerID[:12]
 	d.info = &container.InspectResponse{
 		ContainerJSONBase: &container.ContainerJSONBase{ID: scanContainerID, Name: "/" + name, Image: c.Image, HostConfig: h, State: &container.State{Status: "created"}},
@@ -331,6 +335,32 @@ func TestRunSupervisesRealScans(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestRunAdvancesSeveralPhasesWithoutWaitingForTicks(t *testing.T) {
+	f := newScanFixture(t) // PollInterval is one hour.
+	f.admit(t)
+	failure := errors.New("Docker container create unavailable")
+	f.d.createErr = failure
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	successes := 0
+	f.c.config.OnSuccess = func() { successes++ }
+	f.c.config.OnError = func(err error) {
+		if !errors.Is(err, failure) {
+			t.Errorf("unexpected scan error: %v", err)
+		}
+		cancel()
+	}
+	if err := f.c.Run(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run: %v", err)
+	}
+	if ctx.Err() != context.Canceled {
+		t.Fatal("run did not reach the container step before the test timeout")
+	}
+	if r := f.run(t); r.EffectPhase != taskstore.BackgroundRunEffectVolumeObserved || successes != 2 {
+		t.Fatalf("phase=%s successes=%d", r.EffectPhase, successes)
 	}
 }
 

@@ -40,7 +40,7 @@ func TestRunReturnsCorruptStoreWithoutDegrading(t *testing.T) {
 				OnError:      func(error) { degraded++; cancel() },
 				OnSuccess:    func() { succeeded++ },
 			}}
-			got := coordinator.supervise(ctx, func(context.Context) error { scans++; return err })
+			got := coordinator.supervise(ctx, func(context.Context) (bool, error) { scans++; return false, err })
 			if !errors.Is(got, taskstore.ErrCorruptStore) || scans != 1 || degraded != 0 || succeeded != 0 {
 				t.Fatalf("Run = %v, scans=%d degraded=%d succeeded=%d", got, scans, degraded, succeeded)
 			}
@@ -68,14 +68,36 @@ func TestRunClassifiesTransientAndSuccessfulScans(t *testing.T) {
 				OnError:      func(error) { degraded++ },
 				OnSuccess:    func() { succeeded++ },
 			}}
-			err := coordinator.supervise(ctx, func(context.Context) error {
+			err := coordinator.supervise(ctx, func(context.Context) (bool, error) {
 				cancel()
-				return tt.scanErr
+				return false, tt.scanErr
 			})
 			if !errors.Is(err, context.Canceled) || degraded != tt.degraded || succeeded != tt.succeeded {
 				t.Fatalf("run = %v, degraded=%d succeeded=%d", err, degraded, succeeded)
 			}
 		})
+	}
+}
+
+func TestSuperviseRunsAgainImmediatelyOnlyAfterProgress(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	scans := 0
+	coordinator := &Coordinator{wake: make(chan struct{}, 1), config: Config{PollInterval: time.Hour}}
+	// Three progressing scans, then a steady one; with an hour-long tick the
+	// fifth scan would only happen on a tick or wake.
+	err := coordinator.supervise(ctx, func(context.Context) (bool, error) {
+		scans++
+		if scans == 5 {
+			t.Error("supervisor re-ran after a scan without progress")
+		}
+		if scans == 4 {
+			go func() { time.Sleep(50 * time.Millisecond); cancel() }()
+		}
+		return scans < 4, nil
+	})
+	if !errors.Is(err, context.Canceled) || scans != 4 {
+		t.Fatalf("supervise = %v, scans=%d", err, scans)
 	}
 }
 

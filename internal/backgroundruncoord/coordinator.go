@@ -91,23 +91,33 @@ func (c *Coordinator) Wake() {
 }
 
 func (c *Coordinator) Run(ctx context.Context) error {
-	return c.supervise(ctx, c.RunOnce)
+	return c.supervise(ctx, c.step)
 }
 
 // supervise owns the policy for scan outcomes: corruption terminates the
 // component, cancellation stops it, and transient failures may be retried.
-func (c *Coordinator) supervise(ctx context.Context, runOnce func(context.Context) error) error {
+// A scan that advanced its run's lifecycle runs again immediately; idle,
+// failed, and steady-state scans wait for the next tick or wake.
+func (c *Coordinator) supervise(ctx context.Context, step func(context.Context) (bool, error)) error {
 	c.Wake()
 	ticker := time.NewTicker(c.config.PollInterval)
 	defer ticker.Stop()
+	progressed := false
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-		case <-c.wake:
+		if progressed {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+		} else {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-ticker.C:
+			case <-c.wake:
+			}
 		}
-		err := runOnce(ctx)
+		var err error
+		progressed, err = step(ctx)
 		if errors.Is(err, taskstore.ErrCorruptStore) {
 			return err
 		}
@@ -136,52 +146,71 @@ func (c *Coordinator) supervise(ctx context.Context, runOnce func(context.Contex
 // A phase can require multiple external calls and evidence transitions. The
 // process-local mutex makes concurrent wake and test scans serial.
 func (c *Coordinator) RunOnce(ctx context.Context) error {
+	_, err := c.step(ctx)
+	return err
+}
+
+// step runs one scan and reports whether it advanced the claimed run's durable
+// lifecycle. Observation of a working run, released claims, and repeated
+// uncertain reconciliation do not count as progress, so the supervisor cannot
+// busy-loop on them.
+func (c *Coordinator) step(ctx context.Context) (bool, error) {
 	c.scan.Lock()
 	defer c.scan.Unlock()
+	work, err := c.runOnce(ctx)
+	if err != nil {
+		return false, err
+	}
+	state, phase, readErr := c.store.ReadBackgroundRunLifecycle(ctx, work.Run.WorkspaceID, work.Run.TaskID)
+	if readErr != nil {
+		return false, nil
+	}
+	// A working run's state may change on observation without new work for
+	// the coordinator; only a phase change counts there.
+	stateProgress := state != work.Run.State && work.Run.EffectPhase != taskstore.BackgroundRunEffectPromptAdmitted
+	return phase != work.Run.EffectPhase || stateProgress, nil
+}
+
+func (c *Coordinator) runOnce(ctx context.Context) (taskstore.BackgroundRunWork, error) {
 	now, err := c.freshNow()
 	if err != nil {
-		return err
+		return taskstore.BackgroundRunWork{}, err
 	}
 	work, err := c.store.ClaimNextBackgroundRunWork(ctx, taskstore.ClaimNextBackgroundRunParams{
 		WorkspaceID: c.config.WorkspaceID, ClaimOwner: c.config.WorkerID, Now: now, LeaseDuration: c.config.LeaseDuration,
 		Profile: c.config.Profile, ImageIdentity: c.config.ImageIdentity,
 	})
 	if errors.Is(err, taskstore.ErrNotFound) {
-		return ErrNoWork
+		return work, ErrNoWork
 	}
 	if err != nil {
-		return err
+		return work, err
 	}
 	now, err = c.freshNow()
 	if err != nil {
-		return err
+		return work, err
 	}
 	lifecycle := classify(work.Run)
 	if !lifecycle.Valid {
-		return taskstore.ErrCorruptStore
+		return work, taskstore.ErrCorruptStore
 	}
 	if work.Run.CancelEpoch == 0 && work.Run.TimeoutRequestedAt == nil && lifecycle.TimeoutEligible &&
 		!now.Before(work.Deadline) {
-		return c.requestTimeout(ctx, work.Run)
+		return work, c.requestTimeout(ctx, work.Run)
 	}
 	configurationDiffers := work.Run.ResourceSpecVersion != rundomain.ResourceSpecVersion || work.Run.ImageIdentity != c.config.ImageIdentity || work.Run.EnvironmentSHA256 != c.config.EnvironmentSHA256 ||
 		work.Agent != c.config.Agent || work.ModelProvider != c.config.ModelProvider || work.Model != c.config.Model
 	if configurationDiffers && lifecycle.EnforceExecutionConfig {
-		return c.cleanupRequired(ctx, work, "configured execution identity differs")
+		return work, c.cleanupRequired(ctx, work, "configured execution identity differs")
 	}
 	operation, cancel, _, err := c.effectContext(ctx, work, lifecycle.EnforceAttemptDeadline)
 	if err != nil {
-		return err
+		return work, err
 	}
 	defer cancel()
-	return c.process(operation, ctx, work)
+	return work, c.process(operation, ctx, work)
 }
 
-// process performs one effect step. operation (from effectContext) is bounded
-// by OperationTimeout, the claim lease, and possibly the attempt deadline, and
-// drives external effects; parent is the RunOnce context, from which durable
-// outcomes get a fresh effectContext even after operation has expired.
-// The helpers below take the same (operation, parent) pair.
 func (c *Coordinator) process(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
 	run := work.Run
 	// Credentials are runtime inputs, never publication authority. Refresh only
