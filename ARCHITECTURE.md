@@ -134,6 +134,25 @@ Fern has three ingress actor classes:
 The plugin scopes are `run:create`, `run:read`, `run:stop`, `run:attach`, and
 `run:result`. They are not configuration.
 
+Each control listener has one route table in `internal/proxy/routes.go`, the
+complete access policy for that listener. A request authenticates as the realm
+of the credential it carries (bearer, device cookie, or Basic), never by path; a
+route that does not admit that realm answers 404. Unlisted paths are 404 and
+other methods 405, before authentication. Percent-encoded paths are rejected.
+Authenticated mutations require the same origin, and device mutations also
+require a CSRF token bound to the method and exact path.
+
+| Listener | Routes | Realm |
+| --- | --- | --- |
+| remote | `POST /fern/api/plugin-auth/{start,poll}`, `GET\|POST /fern/pair`, `GET /fern/github/app/callback` | public |
+| remote | `GET /fern/`, `GET /fern/api/v1/csrf`, `GET /fern/plugin-auth/authorize`, `POST /fern/api/plugin-auth/requests/:id/{approve,deny}` | device |
+| remote | `/fern/api/runs` (runapi), `GET /fern/api/v1/runs[/:id/attach]`, `POST /fern/api/plugin-auth/self/revoke` | plugin |
+| operator | `GET /fern/live`, `GET /fern/ready` | public |
+| operator | status, metrics, landing, control page, `POST /fern/pair/new`, device and plugin credential administration, plugin approval, `GET /fern/api/v1/runs[/:id/attach]`, GitHub App setup/callback | operator |
+
+The live route listener (`backgroundroute`, `:8443`) is separate: it admits only
+attachment capabilities and applies the OpenCode allow-list in `policy.go`.
+
 Ingress installs a validated `task.ActorSnapshot` in request context. Inner API
 packages do not derive identity from client-controlled headers or bodies.
 Receipts bind actor, command kind, workspace, idempotency key, and canonical
