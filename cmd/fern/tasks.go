@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -84,10 +85,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, route *backgroundro
 	}()
 
 	ids := task.NewSecureGenerator()
-	workerID, err := taskWorkerID()
-	if err != nil {
-		return nil, err
-	}
+	workerID := taskWorkerID(cfg.Workspace.Name)
 	authority, err := resolveGitHubAuthority(github)
 	if err != nil {
 		return nil, err
@@ -283,12 +281,13 @@ func gitExecutable() string {
 	return "/usr/bin/git"
 }
 
-func taskWorkerID() (string, error) {
-	var random [12]byte
-	if _, err := rand.Read(random[:]); err != nil {
-		return "", fmt.Errorf("create task worker identity: %w", err)
-	}
-	return "worker-" + hex.EncodeToString(random[:]), nil
+// taskWorkerID is stable per workspace so a restarted process reclaims its own
+// in-flight run and export claims immediately instead of waiting for their
+// leases to expire. This is safe because task services run only under the
+// workspace's exclusive host lease: at most one live process holds this ID.
+func taskWorkerID(workspace string) string {
+	digest := sha256.Sum256([]byte("fern/task-worker/v1\x00" + workspace))
+	return "worker-" + hex.EncodeToString(digest[:12])
 }
 
 func newGitHubOnboarding(cfg config.Config) (http.Handler, error) {
