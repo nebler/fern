@@ -85,6 +85,10 @@ func scanBackgroundRunExport(row rowScanner) (BackgroundRunExport, error) {
 	return value, nil
 }
 
+// ClaimBackgroundRunExport claims an export for one owner. The same owner may
+// re-claim its own unexpired export (for example after recording recovery
+// failed) like it may re-claim its own run; the claim generation still
+// increments, fencing the earlier attempt's tuple.
 func (s *Store) ClaimBackgroundRunExport(ctx context.Context, p ClaimBackgroundRunExportParams) (_ BackgroundRunExport, err error) {
 	if err := validateExportClaimRequest(p); err != nil {
 		return BackgroundRunExport{}, err
@@ -99,8 +103,8 @@ func (s *Store) ClaimBackgroundRunExport(ctx context.Context, p ClaimBackgroundR
 	result, err := tx.ExecContext(ctx, `UPDATE background_run_exports SET state='running',claim_owner=?,claim_expires_at=?,
 claim_generation=claim_generation+1,recovery_reason=NULL,revision=revision+1,updated_at=? WHERE id=? AND task_id=? AND attempt_id=? AND
 generation=? AND revision=? AND phase=? AND state IN ('prepared','running','recovery_required') AND
-(claim_owner IS NULL OR claim_expires_at<=?)`, p.ClaimOwner, expiry, now, p.ExportID, p.TaskID, p.AttemptID, p.Generation,
-		p.ExpectedRevision, p.ExpectedPhase, now)
+(claim_owner=? OR claim_owner IS NULL OR claim_expires_at<=?)`, p.ClaimOwner, expiry, now, p.ExportID, p.TaskID, p.AttemptID, p.Generation,
+		p.ExpectedRevision, p.ExpectedPhase, p.ClaimOwner, now)
 	if err != nil {
 		return BackgroundRunExport{}, fmt.Errorf("claim background export: %w", err)
 	}

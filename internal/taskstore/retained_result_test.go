@@ -112,6 +112,25 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// If recording export recovery fails, the same owner must be able to
+	// re-claim its unexpired export rather than wait for lease expiry; other
+	// owners remain fenced out.
+	if _, err := store.ClaimBackgroundRunExport(context.Background(), ClaimBackgroundRunExportParams{
+		ExportID: export.ID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
+		ExpectedRevision: export.Revision, ExpectedPhase: export.Phase, ClaimOwner: "other-dispatcher",
+		Now: writerAt.Add(1500 * time.Millisecond), LeaseDuration: 2 * time.Minute,
+	}); !errors.Is(err, ErrLeaseConflict) {
+		t.Fatalf("foreign export re-claim = %v", err)
+	}
+	firstGeneration := export.ClaimGeneration
+	export, err = store.ClaimBackgroundRunExport(context.Background(), ClaimBackgroundRunExportParams{
+		ExportID: export.ID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
+		ExpectedRevision: export.Revision, ExpectedPhase: export.Phase, ClaimOwner: "export-dispatcher",
+		Now: writerAt.Add(1500 * time.Millisecond), LeaseDuration: 2 * time.Minute,
+	})
+	if err != nil || export.ClaimGeneration != firstGeneration+1 {
+		t.Fatalf("same-owner export re-claim = %+v, error=%v", export, err)
+	}
 	failureAt := writerAt.Add(2 * time.Second)
 	failureClaim := BackgroundRunExportClaim{ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID,
 		Generation: export.Generation, ExpectedRevision: export.Revision, ExpectedPhase: export.Phase,
