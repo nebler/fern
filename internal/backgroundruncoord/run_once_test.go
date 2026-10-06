@@ -18,6 +18,8 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/mount"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
@@ -27,6 +29,7 @@ import (
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskenvdocker"
 	"github.com/nebler/fern/internal/taskstore"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 const scanImage = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -41,6 +44,8 @@ type scanDocker struct {
 	containerErr    error
 	afterVolumeRead func()
 	creates         int
+	info            *container.InspectResponse
+	afterStart      func()
 }
 
 func (d *scanDocker) VerifyRuntimeStorage(string) error { return nil }
@@ -100,16 +105,59 @@ func (d *scanDocker) VolumeList(_ context.Context, options volume.ListOptions) (
 	}
 	return result, nil
 }
-func (d *scanDocker) ContainerInspect(context.Context, string) (container.InspectResponse, error) {
+func (d *scanDocker) ContainerInspect(_ context.Context, identity string) (container.InspectResponse, error) {
 	d.calls = append(d.calls, "container.inspect")
 	if d.containerErr != nil {
 		return container.InspectResponse{}, d.containerErr
 	}
-	return container.InspectResponse{}, errdefs.NotFound(errors.New("absent"))
+	if d.info == nil || (identity != d.info.ID && identity != strings.TrimPrefix(d.info.Name, "/")) {
+		return container.InspectResponse{}, errdefs.NotFound(errors.New("absent"))
+	}
+	return *d.info, nil
 }
-func (d *scanDocker) ContainerList(context.Context, container.ListOptions) ([]container.Summary, error) {
+func (d *scanDocker) ContainerList(_ context.Context, options container.ListOptions) ([]container.Summary, error) {
 	d.calls = append(d.calls, "container.list")
-	return nil, nil
+	if d.info == nil || !options.Filters.MatchKVList("label", d.info.Config.Labels) {
+		return nil, nil
+	}
+	return []container.Summary{{ID: d.info.ID, Names: []string{d.info.Name}, Labels: d.info.Config.Labels, State: d.info.State.Status}}, nil
+}
+
+const scanContainerID = "abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
+
+func (d *scanDocker) ContainerCreate(_ context.Context, c *container.Config, h *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {
+	d.calls = append(d.calls, "container.create")
+	c.Hostname = scanContainerID[:12]
+	d.info = &container.InspectResponse{
+		ContainerJSONBase: &container.ContainerJSONBase{ID: scanContainerID, Name: "/" + name, Image: c.Image, HostConfig: h, State: &container.State{Status: "created"}},
+		Config:            c,
+		Mounts: []container.MountPoint{
+			{Type: mount.TypeBind, Source: h.Mounts[0].Source, Destination: h.Mounts[0].Target, RW: true, Propagation: mount.PropagationRPrivate},
+			{Type: mount.TypeVolume, Name: h.Mounts[1].Source, Source: "/daemon/volume", Destination: h.Mounts[1].Target, Driver: "local", RW: true},
+		},
+		NetworkSettings: &container.NetworkSettings{NetworkSettingsBase: container.NetworkSettingsBase{Ports: nat.PortMap{}}, Networks: map[string]*network.EndpointSettings{"bridge": {}}},
+	}
+	return container.CreateResponse{ID: scanContainerID}, nil
+}
+func (d *scanDocker) ContainerStart(context.Context, string, container.StartOptions) error {
+	d.calls = append(d.calls, "container.start")
+	d.info.State = &container.State{Status: "running", Running: true, StartedAt: "2026-08-31T12:00:00.123456789Z"}
+	d.info.NetworkSettings.Ports = nat.PortMap{"4096/tcp": []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "49152"}}}
+	if d.afterStart != nil {
+		d.afterStart()
+	}
+	return nil
+}
+func (d *scanDocker) ContainerStop(context.Context, string, container.StopOptions) error {
+	d.calls = append(d.calls, "container.stop")
+	d.info.State.Running = false
+	d.info.State.Status = "exited"
+	return nil
+}
+func (d *scanDocker) ContainerRemove(context.Context, string, container.RemoveOptions) error {
+	d.calls = append(d.calls, "container.remove")
+	d.info = nil
+	return nil
 }
 
 type unusedArtifact struct{ Artifact }
@@ -421,6 +469,68 @@ func TestRunOnceVolumeFailureAndLostObservationRecover(t *testing.T) {
 			f.scan(t, taskstore.BackgroundRunEffectVolumeObserved)
 			if f.d.creates != 1 {
 				t.Fatalf("replay created %d volumes", f.d.creates)
+			}
+		})
+	}
+}
+
+func (f *scanFixture) stop(t *testing.T) {
+	t.Helper()
+	stopClaim := f.params.Claim
+	stopClaim.Scope.CommandKind = taskstore.StopBackgroundRunCommand
+	stopClaim.Key = "stop"
+	stopClaim.RequestHash = sha256.Sum256([]byte("stop"))
+	if _, err := f.c.store.StopBackgroundRun(context.Background(), taskstore.StopBackgroundRunParams{WorkspaceID: f.c.config.WorkspaceID, TaskID: f.params.TaskID, ReceiptID: "rcp_0198d34d-6a50-75fb-b1f2-000000000010", AttemptEventID: "fev_0198d34d-6a50-75fb-b1f2-000000000011", TaskEventID: "fev_0198d34d-6a50-75fb-b1f2-000000000012", Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A started container whose runtime was never recorded (a stop committed
+// between start and record, or Fern crashed there and the container exited)
+// must still be cleaned up instead of leaving the run active forever.
+func TestRunOnceCleansUpStartedContainerWithUnrecordedRuntime(t *testing.T) {
+	for _, mode := range []string{"stop races record", "crash then exit"} {
+		t.Run(mode, func(t *testing.T) {
+			f := newScanFixture(t)
+			f.admit(t)
+			f.scan(t, taskstore.BackgroundRunEffectCloneObserved)
+			f.scan(t, taskstore.BackgroundRunEffectVolumeObserved)
+			if mode == "stop races record" {
+				f.d.afterStart = func() { f.stop(t) }
+				if err := f.c.RunOnce(context.Background()); err == nil {
+					t.Fatal("runtime record succeeded after a committed stop")
+				}
+			} else {
+				run := f.run(t)
+				created, err := f.c.provider.EnsureContainer(context.Background(), run)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := f.c.provider.StartContainer(context.Background(), run, created.ContainerID); err != nil {
+					t.Fatal(err)
+				}
+				f.d.info.State.Running = false
+				f.d.info.State.Status = "exited"
+				if err := f.c.RunOnce(context.Background()); !errors.Is(err, taskenvdocker.ErrRuntimeExited) {
+					t.Fatalf("exited container error=%v", err)
+				}
+			}
+			r := f.run(t)
+			if (r.State != taskstore.BackgroundRunCleanupRequired && r.State != taskstore.BackgroundRunCanceling) || r.EffectPhase != taskstore.BackgroundRunEffectStopIntent || r.ObservedContainerID != "" {
+				t.Fatalf("run not in cleanup with unrecorded runtime: %+v", r)
+			}
+			f.now = f.now.Add(2 * time.Minute)
+			for _, phase := range []taskstore.BackgroundRunEffectPhase{taskstore.BackgroundRunEffectWriterInactive, taskstore.BackgroundRunEffectRouteRemoved, taskstore.BackgroundRunEffectContainerRemoved, taskstore.BackgroundRunEffectVolumeRemoved, taskstore.BackgroundRunEffectCloneRemoved} {
+				f.scan(t, phase)
+			}
+			if err := f.c.RunOnce(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if r := f.run(t); r.State != taskstore.BackgroundRunFailed {
+				t.Fatalf("terminal state: %+v", r)
+			}
+			if f.d.info != nil || f.d.item != nil {
+				t.Fatal("container or volume survived cleanup")
 			}
 		})
 	}

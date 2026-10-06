@@ -925,6 +925,48 @@ func TestAcquireExportSourceRejectsActiveAndReplacementWriters(t *testing.T) {
 	})
 }
 
+func TestWriterFenceAdoptsAttestedRuntimeThatWasNeverRecorded(t *testing.T) {
+	for _, mode := range []string{"running", "exited"} {
+		t.Run(mode, func(t *testing.T) {
+			// A stop committed (or Fern crashed) between StartContainer and
+			// recording the runtime, so the run has no committed runtime.
+			provider, docker, run := preparedProvider(t)
+			created, err := provider.EnsureContainer(context.Background(), run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			started, err := provider.StartContainer(context.Background(), run, created.ContainerID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if mode == "exited" {
+				docker.info.State.Running = false
+				docker.info.State.Status = "exited"
+				if _, err := provider.StartContainer(context.Background(), run, created.ContainerID); !errors.Is(err, ErrRuntimeExited) {
+					t.Fatalf("restart of exited container error=%v", err)
+				}
+			}
+			observation, fence, err := provider.ProveWriterInactive(context.Background(), run)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := RuntimeCleanupAuthority(started.RuntimeIdentity())
+			if fence != want || observation.ContainerID != started.ContainerID || docker.info.State.Running {
+				t.Fatalf("fence=%+v want=%+v observation=%+v running=%t", fence, want, observation, docker.info.State.Running)
+			}
+			if (mode == "running") != (docker.stops == 1) {
+				t.Fatalf("stops=%d", docker.stops)
+			}
+			if _, err := provider.RemoveContainer(context.Background(), run, fence); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := provider.RemoveVolume(context.Background(), run, fence); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
 func TestAcquireExportSourceExactStoppedRuntimeAndFenceValidation(t *testing.T) {
 	provider, _, run, fence := stoppedExportFixture(t)
 	source, err := provider.AcquireExportSource(context.Background(), run, fence)

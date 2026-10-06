@@ -212,7 +212,7 @@ func (p *Provider) StartContainer(ctx context.Context, run taskstore.BackgroundR
 	if !info.State.Running {
 		if info.State.Status != "created" {
 			cancel()
-			return Observation{}, fmt.Errorf("container is %s and may not be restarted", info.State.Status)
+			return Observation{}, fmt.Errorf("container is %s: %w", info.State.Status, ErrRuntimeExited)
 		}
 		status = "started"
 		startErr := p.docker.ContainerStart(operation, expectedID, container.StartOptions{})
@@ -659,9 +659,17 @@ func (p *Provider) ProveWriterInactive(ctx context.Context, run taskstore.Backgr
 	if err != nil {
 		return Observation{}, WriterFence{}, err
 	}
-	committed, committedErr := committedRuntimeFromRun(run)
-	if committedErr != nil || requireRuntime(info, committed) != nil || runtime != committed {
-		return Observation{}, WriterFence{}, &IdentityError{Resource: "runtime", Identity: run.ContainerIdentity, Reason: "container ID or exact start epoch differs from committed observation"}
+	// A stop or timeout can commit between StartContainer and recording its
+	// runtime, or Fern can crash there. The exactly attested container under
+	// this run's canonical name is then this run's only possible writer, so
+	// adopt its observed runtime as cleanup authority instead of failing
+	// forever. Any partially committed identity still requires an exact match.
+	uncommitted := run.ObservedContainerID == "" && run.ObservedContainerStartedAt == "" && run.RuntimeEpoch == 0
+	if !uncommitted {
+		committed, committedErr := committedRuntimeFromRun(run)
+		if committedErr != nil || requireRuntime(info, committed) != nil || runtime != committed {
+			return Observation{}, WriterFence{}, &IdentityError{Resource: "runtime", Identity: run.ContainerIdentity, Reason: "container ID or exact start epoch differs from committed observation"}
+		}
 	}
 	if info.State.Running {
 		observation, stopErr := p.StopContainer(ctx, run, runtime)

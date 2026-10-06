@@ -961,6 +961,9 @@ func (c *Coordinator) externalFailure(ctx context.Context, work taskstore.Backgr
 	if errors.Is(external, taskenvdocker.ErrIdentityMismatch) || errors.Is(external, taskenvdocker.ErrQuarantined) {
 		return errors.Join(external, c.cleanupRequired(ctx, work, "background resource identity mismatch"))
 	}
+	if errors.Is(external, taskenvdocker.ErrRuntimeExited) {
+		return errors.Join(external, c.cleanupRequired(ctx, work, "background container exited before its runtime was recorded"))
+	}
 	mutation, cancel, now, mutationErr := c.effectContext(ctx, work, classify(work.Run).EnforceAttemptDeadline)
 	if mutationErr != nil {
 		return errors.Join(external, mutationErr)

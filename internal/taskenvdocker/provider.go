@@ -74,6 +74,10 @@ var (
 	ErrIdentityMismatch = errors.New("background run resource identity mismatch")
 	ErrQuarantined      = errors.New("background run resource quarantined")
 	ErrProviderClosed   = errors.New("background run Docker provider is closed")
+	// ErrRuntimeExited means the run's container already started and exited
+	// before its runtime was recorded. It must not be restarted; callers move
+	// the run to cleanup, which adopts the attested runtime.
+	ErrRuntimeExited = errors.New("background run container exited before its runtime was recorded and may not be restarted")
 )
 
 // IdentityError means a pre-existing resource could not be proven to be the
