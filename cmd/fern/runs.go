@@ -257,7 +257,7 @@ func parseFernClientOrigin(raw string) (*url.URL, error) {
 
 func (connection *runConnection) list(ctx context.Context) ([]runSummary, error) {
 	var response runListResponse
-	if err := connection.get(ctx, "/fern/api/v1/runs", &response); err != nil {
+	if err := connection.get(ctx, "/fern/api/runs", &response); err != nil {
 		return nil, err
 	}
 	for _, run := range response.Runs {
@@ -273,7 +273,7 @@ func (connection *runConnection) list(ctx context.Context) ([]runSummary, error)
 
 func (connection *runConnection) attach(ctx context.Context, runID task.TaskID) (runAttachResponse, error) {
 	var response runAttachResponse
-	if err := connection.get(ctx, "/fern/api/v1/runs/"+url.PathEscape(string(runID))+"/attach", &response); err != nil {
+	if err := connection.get(ctx, "/fern/api/runs/"+url.PathEscape(string(runID))+"/attach", &response); err != nil {
 		return runAttachResponse{}, err
 	}
 	now := time.Now()

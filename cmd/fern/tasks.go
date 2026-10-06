@@ -20,7 +20,6 @@ import (
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/runapi"
-	"github.com/nebler/fern/internal/runclientapi"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
@@ -49,7 +48,6 @@ type taskWakeService interface {
 type taskServices struct {
 	store      *taskstore.Store
 	runs       http.Handler
-	runClients http.Handler
 	background taskWakeService
 	provider   *taskenvdocker.Provider
 	artifact   *taskartifact.Engine
@@ -221,14 +219,10 @@ func newTaskServices(ctx context.Context, cfg config.Config, route *backgroundro
 	if err != nil {
 		return nil, err
 	}
-	runClients, err := runclientapi.New(runclientapi.Config{WorkspaceID: durableWorkspace.ID, Store: store, Route: route})
-	if err != nil {
-		return nil, err
-	}
 	status.Qualified(observability.ComponentBackgroundRunProfile)
 	status.Healthy(observability.ComponentBackgroundRunSerial)
 	closeStore, closeArtifact, closeProvider = false, false, false
-	return &taskServices{store: store, runs: runs, runClients: runClients,
+	return &taskServices{store: store, runs: runs,
 		background: coordinator, provider: provider, artifact: artifact, status: status}, nil
 }
 

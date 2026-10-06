@@ -97,7 +97,7 @@ func newRouteFixture(t *testing.T) *routeFixture {
 	}
 	fixture.handlers, err = NewHandlers(Controls{
 		Store: store, PluginAuth: plugins, ControlAuth: ControlAuth{Password: testPassword},
-		Runs: stub("runs"), RunClients: stub("run-clients"), Onboarding: stub("onboarding"),
+		Runs: stub("runs"), Onboarding: stub("onboarding"),
 		Liveness: stub("live"), Readiness: stub("ready"), Status: stub("status"), Metrics: stub("metrics"),
 	}, TrustedOrigins{Remote: testRemoteOrigin, Operator: testOperatorOrigin})
 	if err != nil {
@@ -191,7 +191,7 @@ func TestRouteTable(t *testing.T) {
 		{R, "GET", "/fern/api/runs", cookie, false, "", 404, "", ""},
 		{R, "POST", "/fern/api/runs", withCSRF, false, "", 404, "", ""},
 		{R, "GET", "/fern/api/runs/%61bc", cookie, false, "", 404, "", ""},
-		{R, "GET", "/fern/api/v1/runs", cookie, false, "", 404, "", ""},
+		{R, "GET", "/fern/api/runs/run/attach", cookie, false, "", 404, "", ""},
 		{R, "GET", "/fern/api/v1/devices", cookie, false, "", 404, "", ""},
 		{R, "GET", "/fern/api/plugin-auth/credentials", cookie, false, "", 404, "", ""},
 		{R, "GET", "/fern/github/app/setup", cookie, false, "", 404, "", ""},
@@ -208,8 +208,8 @@ func TestRouteTable(t *testing.T) {
 		{R, "GET", "/fern/api/runs", bearer, false, "", 200, "runs", ""},
 		{R, "POST", "/fern/api/runs/run/stop", bearer, false, "", 200, "runs", ""},
 		{R, "POST", "/fern/api/runs", bearer, true, "", 403, "", ""},
-		{R, "GET", "/fern/api/v1/runs", bearer, false, "", 200, "run-clients", ""},
-		{R, "GET", "/fern/api/v1/runs/run/attach", bearer, false, "", 200, "run-clients", ""},
+		{R, "GET", "/fern/api/runs/run/attach", bearer, false, "", 200, "runs", ""},
+		{R, "GET", "/fern/api/v1/runs", bearer, false, "", 404, "", ""},
 		{R, "POST", "/fern/api/plugin-auth/self/revoke", bearer, false, "", 204, "", ""},
 		{R, "GET", "/fern/api/plugin-auth/self/revoke", bearer, false, "", 405, "", "Allow: POST"},
 		{R, "POST", "/fern/api/plugin-auth/self/revoke", withCSRF, false, "", 404, "", ""},
@@ -255,9 +255,14 @@ func TestRouteTable(t *testing.T) {
 		{O, "GET", "/fern/plugin-auth/authorize?id={auth}&code={code}", basic, false, "", 404, "", ""},
 
 		// Operator: run APIs and onboarding.
-		{O, "GET", "/fern/api/runs", basic, false, "", 404, "", ""},
-		{O, "GET", "/fern/api/v1/runs", basic, false, "", 200, "run-clients", ""},
-		{O, "GET", "/fern/api/v1/runs/run/attach", basic, false, "", 200, "run-clients", ""},
+		{O, "GET", "/fern/api/runs", basic, false, "", 200, "runs", ""},
+		{O, "GET", "/fern/api/runs/run", basic, false, "", 200, "runs", ""},
+		{O, "GET", "/fern/api/runs/run/attach", basic, false, "", 200, "runs", ""},
+		{O, "GET", "/fern/api/runs", anon, false, "", 401, "", ""},
+		{O, "POST", "/fern/api/runs", basic, false, "{}", 405, "", "Allow: GET, HEAD"},
+		{O, "POST", "/fern/api/runs/run/stop", basic, false, "{}", 404, "", ""},
+		{O, "GET", "/fern/api/runs/run/result", basic, false, "", 404, "", ""},
+		{O, "GET", "/fern/api/v1/runs", basic, false, "", 404, "", ""},
 		{O, "GET", "/fern/github/app/setup", basic, false, "", 200, "onboarding", ""},
 		{O, "GET", "/fern/github/app/setup", basic, true, "", 403, "", ""},
 		{O, "GET", "/fern/github/app/callback", basic, false, "", 200, "onboarding", ""},

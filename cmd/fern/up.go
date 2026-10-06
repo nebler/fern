@@ -180,12 +180,11 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 	unavailable := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		http.Error(w, "Background Runs await GitHub App onboarding", http.StatusServiceUnavailable)
 	}))
-	runs, runClients := unavailable, unavailable
+	runs := unavailable
 	if tasks != nil {
 		runs = tasks.runs
-		runClients = tasks.runClients
 	}
-	controls := proxy.Controls{Store: controlStore, Runs: runs, RunClients: runClients, Onboarding: onboarding,
+	controls := proxy.Controls{Store: controlStore, Runs: runs, Onboarding: onboarding,
 		ControlAuth: proxy.ControlAuth{Password: cfg.Control.Password}, PluginAuth: pluginAuthStore,
 		Liveness: status.LivenessHandler(), Readiness: status.ReadinessHandler(), Status: status.StatusHandler(), Metrics: status.MetricsHandler()}
 	handlers, err := proxy.NewHandlers(controls, origins)

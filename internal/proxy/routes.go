@@ -24,7 +24,7 @@ const (
 // listed is 404, a listed path with another method is 405, and every listed
 // route names the realms that may reach it.
 func NewHandlers(controls Controls, origins TrustedOrigins) (Handlers, error) {
-	if controls.Store == nil || controls.PluginAuth == nil || controls.Runs == nil || controls.RunClients == nil ||
+	if controls.Store == nil || controls.PluginAuth == nil || controls.Runs == nil ||
 		controls.Liveness == nil || controls.Readiness == nil || controls.Status == nil || controls.Metrics == nil {
 		return Handlers{}, errors.New("control, plugin authorization, run, and probe handlers are required")
 	}
@@ -76,8 +76,7 @@ func NewHandlers(controls Controls, origins TrustedOrigins) (Handlers, error) {
 	remote.handle("POST /fern/api/runs/{id}/stop", plugin, controls.Runs.ServeHTTP)
 	remote.handle("GET /fern/api/runs/{id}/result", plugin, controls.Runs.ServeHTTP)
 	remote.handle("POST /fern/api/runs/{id}/seal", plugin, controls.Runs.ServeHTTP)
-	remote.handle("GET /fern/api/v1/runs", plugin, controls.RunClients.ServeHTTP)
-	remote.handle("GET /fern/api/v1/runs/{id}/attach", plugin, controls.RunClients.ServeHTTP)
+	remote.handle("GET /fern/api/runs/{id}/attach", plugin, controls.Runs.ServeHTTP)
 
 	ops := newRouter(operatorAuth.authenticate)
 	ops.handle("GET /fern/live", public, controls.Liveness.ServeHTTP)
@@ -95,8 +94,9 @@ func NewHandlers(controls Controls, origins TrustedOrigins) (Handlers, error) {
 	ops.handle("DELETE /fern/api/plugin-auth/credentials/{id}", operator, plugins.revokeCredential)
 	ops.handle("POST /fern/api/plugin-auth/requests/{id}/approve", operator, plugins.decide(true))
 	ops.handle("POST /fern/api/plugin-auth/requests/{id}/deny", operator, plugins.decide(false))
-	ops.handle("GET /fern/api/v1/runs", operator, controls.RunClients.ServeHTTP)
-	ops.handle("GET /fern/api/v1/runs/{id}/attach", operator, controls.RunClients.ServeHTTP)
+	ops.handle("GET /fern/api/runs", operator, controls.Runs.ServeHTTP)
+	ops.handle("GET /fern/api/runs/{id}", operator, controls.Runs.ServeHTTP)
+	ops.handle("GET /fern/api/runs/{id}/attach", operator, controls.Runs.ServeHTTP)
 
 	if controls.Onboarding != nil {
 		// The callback is a cross-site redirect from GitHub, so it carries no

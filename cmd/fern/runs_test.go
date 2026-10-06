@@ -143,10 +143,10 @@ func TestRemoteConnectionUsesSeparateClientAPIAndValidatesAttachment(t *testing.
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		switch request.URL.Path {
-		case "/fern/api/v1/runs":
+		case "/fern/api/runs":
 			_ = json.NewEncoder(writer).Encode(runListResponse{Runs: []runSummary{{ID: runID, State: "working", Repository: "owner/repository",
 				Head: strings.Repeat("a", 40), Attachable: true}}})
-		case "/fern/api/v1/runs/" + string(runID) + "/attach":
+		case "/fern/api/runs/" + string(runID) + "/attach":
 			_ = json.NewEncoder(writer).Encode(runAttachResponse{RunID: runID, URL: "https://127.0.0.1:8443",
 				SessionID: task.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef"), Username: "opencode",
 				Password: token, ExpiresAt: time.Now().Add(time.Hour)})
