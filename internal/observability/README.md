@@ -2,11 +2,10 @@
 
 See the [Go package map](../../docs/go-packages.md) and [maintenance review](../../docs/go-review.md).
 
-`observability` provides bounded in-process readiness state, HTTP probe/metrics
-handlers, and reusable retry scheduling. Current production imports come from
+`observability` provides bounded in-process readiness state
+and HTTP probe/metrics handlers. Current production imports come from
 `cmd/fern`, which creates the registry, updates service states, and mounts the
-handlers through `proxy`. The retry helpers are available but are not currently
-wired into another production package by a direct import.
+handlers through `proxy`.
 
 ## Dependencies and representative paths
 
@@ -17,8 +16,6 @@ flowchart LR
   proxy["proxy mounts supplied handlers"] -->|"HTTP GET or HEAD"| handlers["ReadinessHandler / StatusHandler / MetricsHandler"]
   handlers -->|"read-lock and copy"| snapshot["Registry.Snapshot"]
   handlers -->|"encode bounded response"| std["stdlib net/http / encoding/json / fmt"]
-  retry["NewRetry -> Retry.Next / Reset"] -->|"equal jitter"| random["stdlib math/rand/v2"]
-  wait["Wait(ctx, wake, delay)"] -->|"cancel, wake, or timer"| timer["stdlib context / time"]
 ```
 
 No third-party Go dependency or telemetry backend is required. State lives in
@@ -45,19 +42,10 @@ Handlers accept GET/HEAD only. Liveness is always true while the handler serves;
 readiness returns 503 when any slot is unready. Status returns the full snapshot,
 and metrics emit fixed-label OpenMetrics text. All set `Cache-Control: no-store`.
 
-## Retry helpers
-
-`Retry` belongs to one goroutine. `Next` doubles a capped ceiling and chooses an
-equal-jitter delay in its upper half; `Reset` clears failure history. `Wait`
-responds to context cancellation, an optional wake channel, or a timer. A
-nonpositive delay checks cancellation and otherwise returns immediately.
-
 ## Naming and performance review
 
 `Registry` and `Snapshot` fit their role. `Qualified` means ready profile
-qualification, not generic health. The broader `observability` name also holds
-retry mechanics; moving those helpers would be an organizational choice, not a
-demonstrated optimization.
+qualification, not generic health.
 
 Snapshot work is bounded by three components, with one copied-slice allocation.
 The readiness handler currently copies the full snapshot to read one boolean.

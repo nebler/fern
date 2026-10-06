@@ -399,14 +399,6 @@ func runtimeIdentity(info container.InspectResponse) (RuntimeIdentity, int64, er
 	return runtimeFromIdentity(identity), identity.Epoch(), nil
 }
 
-func runtimeToken(containerID, startedAt string) string {
-	identity, err := runidentity.NewRuntime(containerID, startedAt)
-	if err != nil {
-		return ""
-	}
-	return identity.Token()
-}
-
 func runtimeFromIdentity(identity runidentity.Runtime) RuntimeIdentity {
 	return RuntimeIdentity{ContainerID: identity.ContainerID(), StartedAt: identity.StartedAt(), Token: identity.Token()}
 }
