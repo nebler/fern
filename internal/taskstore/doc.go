@@ -16,18 +16,16 @@
 //
 // There are no per-run claims or leases: the host lease admits one coordinator
 // per workspace, and the only other writer is the in-process stop/seal API.
-// Effect mutations compare a BackgroundRunRef or BackgroundRunExportRef
-// (generation, revision, state/phase) in SQL and require exactly one affected
+// Effect mutations compare a BackgroundRunRef (revision, state/phase) in SQL and require exactly one affected
 // row, so a write prepared before a concurrent stop or seal fails. A partial
 // unique index permits at most one effecting background run per workspace.
 //
 // A run stores only what inspection cannot re-derive: its phase, the committed
 // runtime identity (stop and cleanup authority), the one-way prompt-request
 // fence that ends provisioning before dispatch, stop/timeout/seal admission,
-// the writer fence, the selected export tuple, and the terminal cleanup proof.
-// Only the retained-result commit establishes result_ready, and it does so in
-// the same transaction that completes the export and marks the materialization
-// ready. Transition order is enforced by these Go compare-and-swap updates plus
+// the writer fence, and the terminal cleanup proof. The selected snapshot is
+// the run's results row; only sealing that row establishes result_ready, in the
+// same transaction that releases the run to cleaning. Transition order is enforced by these Go compare-and-swap updates plus
 // table CHECKs; triggers guard immutability of recorded authority, revision
 // progression, and that a sealed run keeps its resources until its result
 // commits and no run becomes terminal without cleaning.

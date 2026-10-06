@@ -105,7 +105,7 @@ describe("FernClient", () => {
       runID: "run_123",
       state: "canceling",
       resultPhase: "seal_requested",
-      sealRequestID: "slr_0198d34d-7007-7007-8007-000000000007",
+      resultID: "res_0198d34d-7007-7007-8007-000000000007",
       committed: true,
     })
     expect(capture).toEqual({
@@ -126,7 +126,7 @@ describe("FernClient", () => {
     const malformed = [
       { ...sealResponse(), run_id: "run_other" },
       { ...sealResponse(), committed: false },
-      { ...sealResponse(), seal_request_id: "slr_not-a-uuid" },
+      { ...sealResponse(), result_id: "res_not-a-uuid" },
       { ...sealResponse(), state: "working" },
       { ...sealResponse(), result_phase: "exporting" },
       { ...sealResponse(), state: "result_ready" },
@@ -172,7 +172,6 @@ describe("FernClient", () => {
         manifestSHA256: "1".repeat(64),
       },
       artifact: {
-        id: "art_0198d34d-7008-7008-8008-000000000008",
         format: "git_bundle_v1",
         sha256: "e".repeat(64),
         bundleSHA256: "f".repeat(64),
@@ -369,7 +368,7 @@ function sealResponse() {
     run_id: "run_123",
     state: "canceling",
     result_phase: "seal_requested",
-    seal_request_id: "slr_0198d34d-7007-7007-8007-000000000007",
+    result_id: "res_0198d34d-7007-7007-8007-000000000007",
     committed: true,
   }
 }
@@ -390,7 +389,6 @@ function resultResponse() {
       additive_server_field: "ignored",
     },
     artifact: {
-      id: "art_0198d34d-7008-7008-8008-000000000008",
       format: "git_bundle_v1",
       sha256: "e".repeat(64),
       bundle_sha256: "f".repeat(64),

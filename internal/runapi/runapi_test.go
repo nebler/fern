@@ -38,7 +38,7 @@ type retentionVerifier struct {
 	err   error
 }
 
-func (v *retentionVerifier) Verify(context.Context, taskstore.Result) error {
+func (v *retentionVerifier) Verify(context.Context, taskstore.BackgroundRunResultProjection) error {
 	v.calls.Add(1)
 	return v.err
 }
@@ -78,7 +78,6 @@ type resultProjectionStore struct {
 	*taskstore.Store
 	run        taskstore.BackgroundRun
 	projection taskstore.BackgroundRunResultProjection
-	export     taskstore.BackgroundRunExport
 }
 
 func (store *resultProjectionStore) GetBackgroundRun(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRun, error) {
@@ -87,10 +86,6 @@ func (store *resultProjectionStore) GetBackgroundRun(context.Context, task.Works
 
 func (store *resultProjectionStore) GetBackgroundRunResult(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error) {
 	return store.projection, nil
-}
-
-func (store *resultProjectionStore) GetBackgroundRunExport(context.Context, task.ArtifactExportID) (taskstore.BackgroundRunExport, error) {
-	return store.export, nil
 }
 
 func TestCreateMalformedJSONWritesOneError(t *testing.T) {
@@ -372,7 +367,7 @@ func TestRunAPISealIsStrictOwnedAndExactlyReplayable(t *testing.T) {
 	}
 	var first sealProjection
 	if json.Unmarshal(sealed.Body.Bytes(), &first) != nil || first.RunID != admission.RunID || first.State != "canceling" ||
-		first.ResultPhase != "seal_requested" || first.SealRequestID == "" || !first.Committed {
+		first.ResultPhase != "seal_requested" || first.ResultID == "" || !first.Committed {
 		t.Fatalf("seal projection = %+v", first)
 	}
 	replay := fixture.request(http.MethodPost, path, `{}`, "seal-key")
@@ -392,24 +387,17 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 	fixture := newAPIFixture(t, PluginOpenCodeProfile)
 	ids := task.NewSecureGenerator()
 	runID, _ := ids.TaskID()
-	attemptID, _ := ids.AttemptID()
 	resultID, _ := ids.ResultID()
-	artifactID, _ := ids.RetainedArtifactID()
-	materializationID, _ := ids.MaterializationID()
-	exportID, _ := ids.ArtifactExportID()
 	changes := sha256.Sum256([]byte("changes"))
 	manifest := sha256.Sum256([]byte("artifact manifest"))
 	bundle := sha256.Sum256([]byte("bundle"))
-	run := taskstore.BackgroundRun{TaskID: runID, AttemptID: attemptID, WorkspaceID: testWorkspace,
+	run := taskstore.BackgroundRun{TaskID: runID, WorkspaceID: testWorkspace,
 		RepositoryRemote: "https://github.com/owner/repository", State: taskstore.BackgroundRunResultReady,
-		EffectPhase: taskstore.BackgroundRunEffectCleanupComplete, RetainedResultID: resultID,
-		RetainedArtifactID: artifactID, MaterializationID: materializationID, ArtifactExportID: exportID}
+		EffectPhase: taskstore.BackgroundRunEffectCleanupComplete, Seal: &taskstore.Seal{ResultID: resultID}}
 	projection := taskstore.BackgroundRunResultProjection{Run: run,
-		Result: taskstore.Result{ID: resultID, Outcome: task.ResultChanged, BaseSHA: testBase,
+		Result: taskstore.Result{ID: resultID, TaskID: runID, State: taskstore.ResultSealed, Outcome: task.ResultChanged, BaseSHA: testBase,
 			ResultCommit: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), TreeOID: task.GitOID("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
-			ManifestEntries: 2, ManifestSHA256: changes},
-		Artifact:        taskstore.RetainedArtifact{ID: artifactID, ManifestSHA256: manifest, BundleSHA256: bundle, BundleBytes: 1234},
-		Materialization: taskstore.ArtifactMaterialization{ID: materializationID, State: taskstore.ArtifactMaterializationReady}}
+			ChangeCount: 2, ChangesSHA256: changes, ManifestSHA256: manifest, BundleSHA256: bundle, BundleBytes: 1234}}
 	store := &resultProjectionStore{Store: fixture.store, run: run, projection: projection}
 	fixture.handler.config.Store = store
 	response := fixture.request(http.MethodGet, PathPrefix+"/"+string(runID)+"/result", "", "")
@@ -455,7 +443,7 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 		t.Fatalf("cached retention projection=%v calls=%d", got, fixture.retained.calls.Load())
 	}
 	// A different bundle digest is a different tuple; failures are not cached.
-	store.projection.Artifact.BundleSHA256 = sha256.Sum256([]byte("other bundle"))
+	store.projection.Result.BundleSHA256 = sha256.Sum256([]byte("other bundle"))
 	fixture.retained.err = errors.New("artifact missing")
 	for want := int64(2); want <= 3; want++ {
 		if got := retention(); got["verified"] != false || got["reconstructable"] != false || fixture.retained.calls.Load() != want {
@@ -469,7 +457,7 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 
 	store.run.State = taskstore.BackgroundRunCanceling
 	store.run.EffectPhase = taskstore.BackgroundRunEffectSealing
-	store.export = taskstore.BackgroundRunExport{RecoveryReason: "retained artifact export retry required"}
+	store.run.LastError = "retained artifact export retry required"
 	recovery := fixture.request(http.MethodGet, PathPrefix+"/"+string(runID)+"/result", "", "")
 	if recovery.Code != http.StatusServiceUnavailable || !strings.Contains(recovery.Body.String(), "recovery_required") {
 		t.Fatalf("recovery result=%d %s", recovery.Code, recovery.Body.String())

@@ -38,9 +38,7 @@ type Store interface {
 	GetBackgroundRun(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRun, error)
 	StopBackgroundRun(context.Context, taskstore.StopBackgroundRunParams) (taskstore.BackgroundRunStop, error)
 	SealBackgroundRun(context.Context, taskstore.SealBackgroundRunParams) (taskstore.BackgroundRunSealAdmission, error)
-	GetBackgroundRunOwners(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.Task, taskstore.Attempt, error)
 	ListBackgroundRuns(context.Context, task.WorkspaceID, task.ActorSnapshot, int) ([]taskstore.BackgroundRun, error)
-	GetBackgroundRunExport(context.Context, task.ArtifactExportID) (taskstore.BackgroundRunExport, error)
 	GetBackgroundRunResult(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error)
 }
 
@@ -55,7 +53,7 @@ type Route interface {
 type ActorResolver func(context.Context) (task.ActorSnapshot, error)
 
 type RetentionVerifier interface {
-	Verify(context.Context, taskstore.Result) error
+	Verify(context.Context, taskstore.BackgroundRunResultProjection) error
 }
 
 type Config struct {
@@ -85,15 +83,14 @@ type Handler struct {
 	commands *service
 	// retained caches successful retention verifications for the process
 	// lifetime. Retained artifacts are content-addressed and immutable, so a
-	// verified (result, artifact, bundle digest) tuple stays verified; failures
+	// verified (result, bundle digest) tuple stays verified; failures
 	// are never cached.
 	retained sync.Map // map[retainedKey]struct{}
 }
 
 type retainedKey struct {
-	result   task.ResultID
-	artifact task.RetainedArtifactID
-	bundle   [32]byte
+	result task.ResultID
+	bundle [32]byte
 }
 
 func New(config Config) (*Handler, error) {
@@ -211,11 +208,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type sealProjection struct {
-	RunID         task.TaskID        `json:"run_id"`
-	State         runidentity.State  `json:"state"`
-	ResultPhase   string             `json:"result_phase"`
-	SealRequestID task.SealRequestID `json:"seal_request_id"`
-	Committed     bool               `json:"committed"`
+	RunID       task.TaskID       `json:"run_id"`
+	State       runidentity.State `json:"state"`
+	ResultPhase string            `json:"result_phase"`
+	ResultID    task.ResultID     `json:"result_id"`
+	Committed   bool              `json:"committed"`
 }
 
 func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
@@ -234,7 +231,7 @@ func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorS
 	if admission.Replayed {
 		w.Header().Set("Idempotency-Replayed", "true")
 	}
-	WriteJSON(w, http.StatusAccepted, sealProjection{admission.RunID, admission.State, admission.ResultPhase, admission.SealRequestID, admission.Committed})
+	WriteJSON(w, http.StatusAccepted, sealProjection{admission.RunID, admission.State, admission.ResultPhase, admission.ResultID, admission.Committed})
 }
 
 type resultResponse struct {
@@ -258,12 +255,11 @@ type retainedResultResponse struct {
 }
 
 type retainedArtifactResponse struct {
-	ID         task.RetainedArtifactID `json:"id"`
-	Format     string                  `json:"format"`
-	SHA        string                  `json:"sha256"`
-	BundleSHA  string                  `json:"bundle_sha256"`
-	BundleSize int64                   `json:"bundle_size"`
-	Manifest   string                  `json:"manifest_sha256"`
+	Format     string `json:"format"`
+	SHA        string `json:"sha256"`
+	BundleSHA  string `json:"bundle_sha256"`
+	BundleSize int64  `json:"bundle_size"`
+	Manifest   string `json:"manifest_sha256"`
 }
 
 type retentionResponse struct {
@@ -286,11 +282,10 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 		return
 	}
 	if run.State != taskstore.BackgroundRunResultReady {
-		if run.ArtifactExportID != "" {
-			if export, exportErr := h.config.Store.GetBackgroundRunExport(r.Context(), run.ArtifactExportID); exportErr == nil && export.RecoveryReason != "" {
-				WriteError(w, http.StatusServiceUnavailable, "recovery_required", "The retained result requires recovery.")
-				return
-			}
+		// A sealing run records its last failed export pass as last_error.
+		if run.EffectPhase == taskstore.BackgroundRunEffectSealing && run.LastError != "" {
+			WriteError(w, http.StatusServiceUnavailable, "recovery_required", "The retained result requires recovery.")
+			return
 		}
 		WriteError(w, http.StatusConflict, "not_ready", "The retained result is not ready.")
 		return
@@ -304,9 +299,9 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 	digest := func(value [32]byte) string { return hex.EncodeToString(value[:]) }
 	WriteJSON(w, http.StatusOK, resultResponse{RunID: id, State: "result_ready",
 		Result: retainedResultResponse{
-			projection.Result.ID, projection.Result.Outcome, run.RepositoryRemote, projection.Result.BaseSHA, projection.Result.ResultCommit, projection.Result.TreeOID, projection.Result.ManifestEntries, digest(projection.Result.ManifestSHA256)},
+			projection.Result.ID, projection.Result.Outcome, run.RepositoryRemote, projection.Result.BaseSHA, projection.Result.ResultCommit, projection.Result.TreeOID, projection.Result.ChangeCount, digest(projection.Result.ChangesSHA256)},
 		Artifact: retainedArtifactResponse{
-			projection.Artifact.ID, "git_bundle_v1", digest(projection.Artifact.ManifestSHA256), digest(projection.Artifact.BundleSHA256), projection.Artifact.BundleBytes, digest(projection.Artifact.ManifestSHA256)},
+			"git_bundle_v1", digest(projection.Result.ManifestSHA256), digest(projection.Result.BundleSHA256), projection.Result.BundleBytes, digest(projection.Result.ManifestSHA256)},
 		Retention: retentionResponse{retained, retained},
 		Cleanup:   cleanupResponse{run.EffectPhase == taskstore.BackgroundRunEffectCleanupComplete},
 	})
@@ -315,11 +310,11 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 // verifyRetained runs the full retention verification (bundle copy, unbundle,
 // fsck) once per immutable retained tuple instead of on every result read.
 func (h *Handler) verifyRetained(ctx context.Context, projection taskstore.BackgroundRunResultProjection) bool {
-	key := retainedKey{result: projection.Result.ID, artifact: projection.Artifact.ID, bundle: projection.Artifact.BundleSHA256}
+	key := retainedKey{result: projection.Result.ID, bundle: projection.Result.BundleSHA256}
 	if _, ok := h.retained.Load(key); ok {
 		return true
 	}
-	if h.config.RetentionVerifier.Verify(ctx, projection.Result) != nil {
+	if h.config.RetentionVerifier.Verify(ctx, projection) != nil {
 		return false
 	}
 	h.retained.Store(key, struct{}{})

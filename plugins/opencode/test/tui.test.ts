@@ -77,7 +77,7 @@ describe("TUI compatibility", () => {
           runID,
           state: "canceling" as const,
           resultPhase: "seal_requested" as const,
-          sealRequestID: "slr_0198d34d-7007-7007-8007-000000000007",
+          resultID: "res_0198d34d-7007-7007-8007-000000000007",
           committed: true as const,
         }
       },
@@ -152,7 +152,7 @@ describe("TUI compatibility", () => {
     await waitFor(() => calls.includes("result:run_result"))
     expect(fixture.current()).toMatchObject({ title: "Fern result run_result" })
     expect(fixture.alert().message).toContain(`Commit: ${"b".repeat(40)}`)
-    expect(fixture.alert().message).toContain("Artifact: art_0198d34d-7008-7008-8008-000000000008 (git_bundle_v1)")
+    expect(fixture.alert().message).toContain("Artifact: git_bundle_v1")
     expect(fixture.alert().message).toContain("Retention verified: yes")
     expect(fixture.alert().message).toContain("Cleanup complete: no")
     expect(fixture.alert().message).not.toContain("URL")
@@ -370,7 +370,6 @@ function readyResult(runID: string) {
       manifestSHA256: "d".repeat(64),
     },
     artifact: {
-      id: "art_0198d34d-7008-7008-8008-000000000008",
       format: "git_bundle_v1" as const,
       sha256: "e".repeat(64),
       bundleSHA256: "f".repeat(64),

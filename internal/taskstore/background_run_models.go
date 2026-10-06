@@ -103,11 +103,8 @@ type BackgroundRun struct {
 	PromptRequestAttemptedAt   *time.Time
 	TimeoutRequestedAt         *time.Time
 	CleanupProof               string
-	BackgroundSealRequestID    task.SealRequestID
-	ArtifactExportID           task.ArtifactExportID
-	RetainedArtifactID         task.RetainedArtifactID
-	MaterializationID          task.MaterializationID
-	RetainedResultID           task.ResultID
+	Seal                       *Seal
+	WriterFence                *WriterFence
 	Revision                   int64
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time

@@ -69,7 +69,7 @@ type sealAcceptance struct {
 	RunID               task.TaskID
 	State               run.State
 	ResultPhase         string
-	SealRequestID       task.SealRequestID
+	ResultID            task.ResultID
 	Committed, Replayed bool
 }
 
@@ -278,22 +278,19 @@ func (s *service) Seal(ctx context.Context, actor task.ActorSnapshot, key task.I
 	if err != nil {
 		return zero, err
 	}
-	owner, attempt, err := s.config.Store.GetBackgroundRunOwners(ctx, s.config.WorkspaceID, id, actor)
+	receiptID, err := s.config.Generator.ReceiptID()
 	if err != nil {
 		return zero, err
 	}
-	ids, err := s.config.Generator.GenerateBackgroundSealIDs()
+	resultID, err := s.config.Generator.ResultID()
 	if err != nil {
 		return zero, err
 	}
 	now := s.config.Now().UTC().Truncate(time.Millisecond)
 	admission, err := s.config.Store.SealBackgroundRun(ctx, taskstore.SealBackgroundRunParams{
-		WorkspaceID: s.config.WorkspaceID, TaskID: current.TaskID, AttemptID: current.AttemptID, Generation: current.Generation,
-		ExpectedRunRevision: current.Revision, ExpectedTaskRevision: owner.Revision, ExpectedAttemptRevision: attempt.Revision,
-		SealRequestID: ids.SealRequestID, ReceiptID: ids.ReceiptID, ExportID: ids.ArtifactExportID,
-		ArtifactID: ids.RetainedArtifactID, MaterializationID: ids.MaterializationID, ResultID: ids.ResultID,
-		Claim: claim, CommitEpochSeconds: now.Unix(),
-		PolicyVersion: s.config.SealPolicyVersion, APIContractVersion: APIContractVersion, AcceptedAt: now,
+		WorkspaceID: s.config.WorkspaceID, TaskID: current.TaskID, ExpectedRunRevision: current.Revision,
+		ReceiptID: receiptID, ResultID: resultID, Claim: claim, PolicyVersion: s.config.SealPolicyVersion,
+		APIContractVersion: APIContractVersion, AcceptedAt: now,
 	})
 	if err != nil {
 		return zero, err
@@ -303,5 +300,5 @@ func (s *service) Seal(ctx context.Context, actor task.ActorSnapshot, key task.I
 		state, phase = run.ResultReady, "ready"
 	}
 	s.notify(admission.Replayed)
-	return sealAcceptance{admission.Run.TaskID, state, phase, admission.Request.ID, true, admission.Replayed}, nil
+	return sealAcceptance{admission.Run.TaskID, state, phase, admission.Run.Seal.ResultID, true, admission.Replayed}, nil
 }

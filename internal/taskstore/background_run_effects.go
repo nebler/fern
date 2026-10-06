@@ -269,6 +269,17 @@ func (s *Store) updateRun(ctx context.Context, ref BackgroundRunRef, assignments
 	}
 	defer release()
 	defer rollback(tx, &err)
+	run, err := updateRunTx(ctx, tx, ref, assignments, args, operation, predicates...)
+	if err != nil {
+		return BackgroundRun{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return BackgroundRun{}, fmt.Errorf("commit %s: %w", operation, err)
+	}
+	return run, nil
+}
+
+func updateRunTx(ctx context.Context, tx *sql.Tx, ref BackgroundRunRef, assignments string, args []any, operation string, predicates ...string) (BackgroundRun, error) {
 	query := `UPDATE background_runs SET ` + assignments + `,revision=revision+1,updated_at=?
 WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND state=? AND effect_phase=?`
 	for _, predicate := range predicates {
@@ -283,14 +294,7 @@ WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revisio
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRun{}, ErrInvalidState
 	}
-	run, err := readBackgroundRunExact(ctx, tx, ref.WorkspaceID, ref.TaskID)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return BackgroundRun{}, fmt.Errorf("commit %s: %w", operation, err)
-	}
-	return run, nil
+	return readBackgroundRunExact(ctx, tx, ref.WorkspaceID, ref.TaskID)
 }
 
 func readBackgroundRunExact(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, taskID task.TaskID) (BackgroundRun, error) {

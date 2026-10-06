@@ -29,18 +29,6 @@ type AdmissionIDs struct {
 	OpenCodeMessageID OpenCodeMessageID
 }
 
-// BackgroundSealIDs is allocated before run.seal admission. Every identity
-// needed by export, retention, materialization, and result commit is therefore
-// durable before the first external effect starts.
-type BackgroundSealIDs struct {
-	SealRequestID      SealRequestID
-	ReceiptID          ReceiptID
-	ArtifactExportID   ArtifactExportID
-	RetainedArtifactID RetainedArtifactID
-	MaterializationID  MaterializationID
-	ResultID           ResultID
-}
-
 func NewGenerator(random io.Reader, now func() time.Time) (*Generator, error) {
 	if random == nil || now == nil {
 		return nil, ErrIDGeneration
@@ -75,30 +63,6 @@ func (g *Generator) GenerateAdmissionIDs() (AdmissionIDs, error) {
 	return ids, nil
 }
 
-func (g *Generator) GenerateBackgroundSealIDs() (BackgroundSealIDs, error) {
-	var ids BackgroundSealIDs
-	var err error
-	if ids.SealRequestID, err = g.SealRequestID(); err != nil {
-		return BackgroundSealIDs{}, err
-	}
-	if ids.ReceiptID, err = g.ReceiptID(); err != nil {
-		return BackgroundSealIDs{}, err
-	}
-	if ids.ArtifactExportID, err = g.ArtifactExportID(); err != nil {
-		return BackgroundSealIDs{}, err
-	}
-	if ids.RetainedArtifactID, err = g.RetainedArtifactID(); err != nil {
-		return BackgroundSealIDs{}, err
-	}
-	if ids.MaterializationID, err = g.MaterializationID(); err != nil {
-		return BackgroundSealIDs{}, err
-	}
-	if ids.ResultID, err = g.ResultID(); err != nil {
-		return BackgroundSealIDs{}, err
-	}
-	return ids, nil
-}
-
 func (g *Generator) WorkspaceID() (WorkspaceID, error) {
 	value, err := g.fernID("wsp_")
 	return WorkspaceID(value), err
@@ -119,29 +83,9 @@ func (g *Generator) ReceiptID() (ReceiptID, error) {
 	return ReceiptID(value), err
 }
 
-func (g *Generator) SealRequestID() (SealRequestID, error) {
-	value, err := g.fernID("slr_")
-	return SealRequestID(value), err
-}
-
 func (g *Generator) ResultID() (ResultID, error) {
 	value, err := g.fernID("res_")
 	return ResultID(value), err
-}
-
-func (g *Generator) ArtifactExportID() (ArtifactExportID, error) {
-	value, err := g.fernID("exp_")
-	return ArtifactExportID(value), err
-}
-
-func (g *Generator) RetainedArtifactID() (RetainedArtifactID, error) {
-	value, err := g.fernID("art_")
-	return RetainedArtifactID(value), err
-}
-
-func (g *Generator) MaterializationID() (MaterializationID, error) {
-	value, err := g.fernID("mat_")
-	return MaterializationID(value), err
 }
 
 func (g *Generator) OpenCodeSessionID() (OpenCodeSessionID, error) {

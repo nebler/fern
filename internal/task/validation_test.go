@@ -18,9 +18,6 @@ func TestFernIDParsers(t *testing.T) {
 		{"attempt", "att_", func(v string) error { _, err := ParseAttemptID(v); return err }},
 		{"receipt", "rcp_", func(v string) error { _, err := ParseReceiptID(v); return err }},
 		{"result", "res_", func(v string) error { _, err := ParseResultID(v); return err }},
-		{"artifact export", "exp_", func(v string) error { _, err := ParseArtifactExportID(v); return err }},
-		{"retained artifact", "art_", func(v string) error { _, err := ParseRetainedArtifactID(v); return err }},
-		{"materialization", "mat_", func(v string) error { _, err := ParseMaterializationID(v); return err }},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

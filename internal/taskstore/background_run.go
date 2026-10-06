@@ -22,8 +22,9 @@ SELECT r.task_id,r.attempt_id,r.workspace_id,r.generation,r.writer_generation,r.
        r.container_identity,r.endpoint_identity,r.opencode_session_id,r.opencode_message_id,r.state,r.effect_phase,
        r.stop_receipt_id,r.stop_requested_at,r.observed_container_id,r.observed_container_started_at,r.runtime_epoch,r.host_port,
        r.last_evidence,r.last_error,r.prompt_request_attempted_at,r.timeout_requested_at,r.cleanup_proof,
-       r.revision,r.created_at,r.updated_at,r.background_seal_request_id,r.artifact_export_id,r.retained_artifact_id,
-       r.materialization_id,r.retained_result_id,r.creator_actor
+       r.revision,r.created_at,r.updated_at,r.seal_receipt_id,r.seal_requested_at,r.seal_policy_version,r.result_id,
+       r.writer_fence_kind,r.writer_fence_container_id,r.writer_fence_started_at,r.writer_fence_token,r.writer_fence_stopped_at,
+       r.creator_actor
 FROM background_runs r`
 
 func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID task.WorkspaceID, taskID task.TaskID, actor task.ActorSnapshot) (BackgroundRun, error) {
@@ -287,8 +288,8 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	var run BackgroundRun
 	var repositoryID int64
 	var branch, stopReceipt, containerID, containerStarted, evidence, lastError, cleanupProof sql.NullString
-	var sealRequestID, artifactExportID, retainedArtifactID, materializationID, retainedResultID sql.NullString
-	var stopAt, runtimeEpoch, hostPort, promptAttempted, timeoutRequested sql.NullInt64
+	var sealReceipt, sealPolicy, resultID, fenceKind, fenceContainer, fenceStarted, fenceToken sql.NullString
+	var stopAt, runtimeEpoch, hostPort, promptAttempted, timeoutRequested, sealRequested, fenceStopped sql.NullInt64
 	var instructionHash, profileHash, environmentHash []byte
 	var created, updated int64
 	var creator string
@@ -298,8 +299,8 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 		&run.OpenCodeSessionID, &run.OpenCodeMessageID, &run.State, &run.EffectPhase,
 		&stopReceipt, &stopAt, &containerID, &containerStarted, &runtimeEpoch, &hostPort,
 		&evidence, &lastError, &promptAttempted, &timeoutRequested, &cleanupProof,
-		&run.Revision, &created, &updated, &sealRequestID, &artifactExportID, &retainedArtifactID, &materializationID, &retainedResultID,
-		&creator)
+		&run.Revision, &created, &updated, &sealReceipt, &sealRequested, &sealPolicy, &resultID,
+		&fenceKind, &fenceContainer, &fenceStarted, &fenceToken, &fenceStopped, &creator)
 	if err != nil {
 		return BackgroundRun{}, err
 	}
@@ -318,11 +319,15 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	run.PromptRequestAttemptedAt = nullableTime(promptAttempted)
 	run.TimeoutRequestedAt = nullableTime(timeoutRequested)
 	run.CleanupProof = nullableText(cleanupProof)
-	run.BackgroundSealRequestID = task.SealRequestID(nullableText(sealRequestID))
-	run.ArtifactExportID = task.ArtifactExportID(nullableText(artifactExportID))
-	run.RetainedArtifactID = task.RetainedArtifactID(nullableText(retainedArtifactID))
-	run.MaterializationID = task.MaterializationID(nullableText(materializationID))
-	run.RetainedResultID = task.ResultID(nullableText(retainedResultID))
+	// Schema CHECKs keep the seal and writer-fence column groups all-or-nothing.
+	if sealReceipt.Valid {
+		run.Seal = &Seal{ReceiptID: task.ReceiptID(sealReceipt.String), ResultID: task.ResultID(resultID.String),
+			RequestedAt: fromUnixMillis(sealRequested.Int64), PolicyVersion: sealPolicy.String}
+	}
+	if fenceKind.Valid {
+		run.WriterFence = &WriterFence{Kind: WriterFenceKind(fenceKind.String), ContainerID: nullableText(fenceContainer),
+			ContainerStartedAt: nullableText(fenceStarted), RuntimeToken: nullableText(fenceToken), StoppedAt: nullableTime(fenceStopped)}
+	}
 	run.StopReceiptID = task.ReceiptID(nullableText(stopReceipt))
 	run.StopRequestedAt = nullableTime(stopAt)
 	run.Creator, err = decodeActor(creator)

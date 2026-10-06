@@ -4,14 +4,9 @@ import (
 	"context"
 	"errors"
 
-	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskstore"
 )
-
-type Store interface {
-	GetRetainedArtifact(context.Context, task.RetainedArtifactID) (taskstore.RetainedArtifact, error)
-}
 
 type Artifact interface {
 	Inspect(context.Context, taskartifact.Locator) (taskartifact.Snapshot, error)
@@ -19,20 +14,19 @@ type Artifact interface {
 }
 
 type Resolver struct {
-	store    Store
 	artifact Artifact
 }
 
-func New(store Store, artifact Artifact) (*Resolver, error) {
-	if store == nil || artifact == nil {
+func New(artifact Artifact) (*Resolver, error) {
+	if artifact == nil {
 		return nil, errors.New("valid result source configuration is required")
 	}
-	return &Resolver{store: store, artifact: artifact}, nil
+	return &Resolver{artifact: artifact}, nil
 }
 
 // Acquire returns a fresh repository and an idempotent mandatory cleanup.
-func (r *Resolver) Acquire(ctx context.Context, result taskstore.Result) (string, func() error, error) {
-	artifact, locator, err := r.load(ctx, result)
+func (r *Resolver) Acquire(ctx context.Context, projection taskstore.BackgroundRunResultProjection) (string, func() error, error) {
+	locator, err := taskartifact.ParseLocator(projection.Result.CASLocator())
 	if err != nil {
 		return "", nil, err
 	}
@@ -40,7 +34,7 @@ func (r *Resolver) Acquire(ctx context.Context, result taskstore.Result) (string
 	if err != nil {
 		return "", nil, err
 	}
-	if err := verifyTuple(result, artifact, locator, snapshot); err != nil {
+	if err := verifyTuple(projection, snapshot); err != nil {
 		if closeErr := checkout.Close(); closeErr != nil {
 			return "", nil, errors.Join(err, closeErr)
 		}
@@ -54,9 +48,9 @@ func (r *Resolver) Acquire(ctx context.Context, result taskstore.Result) (string
 }
 
 // Verify freshly proves that the retained artifact is present, intact, and
-// bound to the complete durable result tuple.
-func (r *Resolver) Verify(ctx context.Context, result taskstore.Result) error {
-	artifact, locator, err := r.load(ctx, result)
+// bound to the complete durable run and result.
+func (r *Resolver) Verify(ctx context.Context, projection taskstore.BackgroundRunResultProjection) error {
+	locator, err := taskartifact.ParseLocator(projection.Result.CASLocator())
 	if err != nil {
 		return err
 	}
@@ -64,34 +58,18 @@ func (r *Resolver) Verify(ctx context.Context, result taskstore.Result) error {
 	if err != nil {
 		return err
 	}
-	return verifyTuple(result, artifact, locator, snapshot)
+	return verifyTuple(projection, snapshot)
 }
 
-func (r *Resolver) load(ctx context.Context, result taskstore.Result) (taskstore.RetainedArtifact, taskartifact.Locator, error) {
-	if result.SourceKind != taskstore.ResultSourceRetainedArtifact {
-		return taskstore.RetainedArtifact{}, taskartifact.Locator{}, taskstore.ErrCorruptStore
-	}
-	artifact, err := r.store.GetRetainedArtifact(ctx, result.RetainedArtifactID)
-	if err != nil {
-		return taskstore.RetainedArtifact{}, taskartifact.Locator{}, err
-	}
-	locator, err := taskartifact.ParseLocator(artifact.CASLocator)
-	return artifact, locator, err
-}
-
-func verifyTuple(result taskstore.Result, artifact taskstore.RetainedArtifact, locator taskartifact.Locator, snapshot taskartifact.Snapshot) error {
-	if artifact.ID != result.RetainedArtifactID || artifact.ResultID != result.ID || artifact.ExportID != result.ArtifactExportID ||
-		artifact.MaterializationID != result.MaterializationID ||
-		artifact.WorkspaceID != result.WorkspaceID || artifact.TaskID != result.TaskID || artifact.AttemptID != result.AttemptID ||
-		artifact.BaseSHA != result.BaseSHA || artifact.ResultCommit != result.ResultCommit || artifact.TreeOID != result.TreeOID ||
-		artifact.OpenCodeSessionID != result.OpenCodeSessionID || artifact.OpenCodeMessageID != result.OpenCodeMessageID ||
-		artifact.ChangesSHA256 != result.ManifestSHA256 || artifact.ManifestSHA256 != locator.Digest().Bytes() ||
-		snapshot.RepositoryID != result.RepositoryID || snapshot.WorkspaceID != artifact.WorkspaceID || snapshot.TaskID != artifact.TaskID ||
-		snapshot.ResultID != artifact.ResultID ||
-		snapshot.Base != result.BaseSHA || snapshot.Result != result.ResultCommit || snapshot.Tree != result.TreeOID ||
-		snapshot.OpenCodeSessionID != artifact.OpenCodeSessionID || snapshot.OpenCodeMessageID != artifact.OpenCodeMessageID ||
-		snapshot.ChangesSHA256.Bytes() != result.ManifestSHA256 || snapshot.ManifestSHA256.Bytes() != artifact.ManifestSHA256 ||
-		snapshot.BundleSHA256.Bytes() != artifact.BundleSHA256 || snapshot.BundleBytes != artifact.BundleBytes {
+func verifyTuple(projection taskstore.BackgroundRunResultProjection, snapshot taskartifact.Snapshot) error {
+	run, result := projection.Run, projection.Result
+	if result.State != taskstore.ResultSealed || result.TaskID != run.TaskID || run.Seal == nil || run.Seal.ResultID != result.ID ||
+		snapshot.RepositoryID != run.RepositoryID || snapshot.WorkspaceID != run.WorkspaceID || snapshot.TaskID != run.TaskID ||
+		snapshot.ResultID != result.ID || snapshot.OpenCodeSessionID != run.OpenCodeSessionID || snapshot.OpenCodeMessageID != run.OpenCodeMessageID ||
+		snapshot.Base != result.BaseSHA || snapshot.Base != run.BaseOID || snapshot.Result != result.ResultCommit || snapshot.Tree != result.TreeOID ||
+		snapshot.ChangesSHA256.Bytes() != result.ChangesSHA256 || len(snapshot.Changes) != result.ChangeCount ||
+		snapshot.ManifestSHA256.Bytes() != result.ManifestSHA256 ||
+		snapshot.BundleSHA256.Bytes() != result.BundleSHA256 || snapshot.BundleBytes != result.BundleBytes {
 		return taskstore.ErrCorruptStore
 	}
 	return nil

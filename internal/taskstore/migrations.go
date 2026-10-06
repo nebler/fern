@@ -172,93 +172,6 @@ BEGIN SELECT RAISE(ABORT, 'receipts are immutable'); END;
 CREATE TRIGGER receipts_immutable_delete BEFORE DELETE ON receipts
 BEGIN SELECT RAISE(ABORT, 'receipts are immutable'); END;
 
-CREATE UNIQUE INDEX attempts_result_ownership ON attempts(id, sealed_result_id);
-
-CREATE UNIQUE INDEX tasks_result_ownership ON tasks(id, sealed_result_id);
-
-CREATE TABLE results (
-    id TEXT PRIMARY KEY CHECK(
-        length(id) = 40 AND substr(id,1,4) = 'res_' AND
-        substr(id,13,1) = '-' AND substr(id,18,1) = '-' AND substr(id,19,1) = '7' AND
-        substr(id,23,1) = '-' AND substr(id,24,1) IN ('8','9','a','b') AND substr(id,28,1) = '-' AND
-        length(replace(substr(id,5),'-','')) = 32 AND
-        replace(substr(id,5),'-','') NOT GLOB '*[^0-9a-f]*'
-    ),
-    task_id TEXT NOT NULL,
-    attempt_id TEXT NOT NULL,
-    workspace_id TEXT NOT NULL,
-    state TEXT NOT NULL CHECK(state = 'sealed'),
-    outcome TEXT NOT NULL CHECK(outcome IN ('changed','no_changes')),
-    repository_id INTEGER NOT NULL CHECK(repository_id > 0),
-    base_sha TEXT NOT NULL CHECK(length(base_sha) = 40 AND base_sha NOT GLOB '*[^0-9a-f]*'),
-    result_commit TEXT NOT NULL CHECK(length(result_commit) = 40 AND result_commit NOT GLOB '*[^0-9a-f]*'),
-    tree_oid TEXT NOT NULL CHECK(length(tree_oid) = 40 AND tree_oid NOT GLOB '*[^0-9a-f]*'),
-    worktree_clean INTEGER NOT NULL CHECK(worktree_clean = 1),
-    manifest_entries INTEGER NOT NULL CHECK(manifest_entries >= 0),
-    manifest_sha256 BLOB NOT NULL CHECK(length(manifest_sha256) = 32),
-    opencode_session_id TEXT NOT NULL CHECK(
-        length(opencode_session_id) = 36 AND substr(opencode_session_id,1,4) = 'ses_' AND
-        substr(opencode_session_id,5) NOT GLOB '*[^0-9a-f]*'
-    ),
-    opencode_message_id TEXT NOT NULL CHECK(
-        length(opencode_message_id) = 36 AND substr(opencode_message_id,1,4) = 'msg_' AND
-        substr(opencode_message_id,5) NOT GLOB '*[^0-9a-f]*'
-    ),
-    policy_version TEXT NOT NULL CHECK(length(CAST(policy_version AS BLOB)) BETWEEN 1 AND 128),
-    collected_at INTEGER NOT NULL CHECK(collected_at >= 0),
-    sealed_at INTEGER NOT NULL CHECK(sealed_at >= collected_at),
-    revision INTEGER NOT NULL CHECK(revision = 1),
-    created_at INTEGER NOT NULL CHECK(created_at = sealed_at),
-    updated_at INTEGER NOT NULL CHECK(updated_at = sealed_at), completion_authority TEXT NOT NULL DEFAULT 'user_seal'
-  CHECK(completion_authority='user_seal'), source_kind TEXT NOT NULL DEFAULT 'retained_artifact'
-  CHECK(source_kind='retained_artifact'), retained_artifact_id TEXT NOT NULL, artifact_export_id TEXT NOT NULL, materialization_id TEXT NOT NULL,
-    CHECK((outcome='no_changes' AND result_commit=base_sha AND manifest_entries=0) OR
-          (outcome='changed' AND result_commit<>base_sha AND manifest_entries>0)),
-    FOREIGN KEY(task_id, workspace_id) REFERENCES tasks(id, workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    FOREIGN KEY(attempt_id, task_id, workspace_id) REFERENCES attempts(id, task_id, workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    FOREIGN KEY(workspace_id, repository_id) REFERENCES workspaces(id, repository_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    FOREIGN KEY(task_id, id) REFERENCES tasks(id, sealed_result_id) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY(attempt_id, id) REFERENCES attempts(id, sealed_result_id) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-    UNIQUE(task_id),
-    UNIQUE(attempt_id),
-    UNIQUE(id, task_id, attempt_id)
-) STRICT;
-
-CREATE TABLE result_manifest (
-    result_id TEXT NOT NULL,
-    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
-    path_base64 TEXT NOT NULL CHECK(length(CAST(path_base64 AS BLOB)) BETWEEN 4 AND 5464),
-    change_kind TEXT NOT NULL CHECK(change_kind IN ('added','modified','deleted')),
-    old_mode TEXT CHECK(old_mode IS NULL OR old_mode IN ('100644','100755','120000')),
-    new_mode TEXT CHECK(new_mode IS NULL OR new_mode IN ('100644','100755','120000')),
-    old_blob_oid TEXT CHECK(old_blob_oid IS NULL OR (length(old_blob_oid)=40 AND old_blob_oid NOT GLOB '*[^0-9a-f]*')),
-    new_blob_oid TEXT CHECK(new_blob_oid IS NULL OR (length(new_blob_oid)=40 AND new_blob_oid NOT GLOB '*[^0-9a-f]*')),
-    old_size INTEGER CHECK(old_size IS NULL OR old_size >= 0),
-    new_size INTEGER CHECK(new_size IS NULL OR new_size >= 0),
-    CHECK(
-        (change_kind='added' AND old_mode IS NULL AND old_blob_oid IS NULL AND old_size IS NULL AND
-                             new_mode IS NOT NULL AND new_blob_oid IS NOT NULL AND new_size IS NOT NULL) OR
-        (change_kind='deleted' AND new_mode IS NULL AND new_blob_oid IS NULL AND new_size IS NULL AND
-                               old_mode IS NOT NULL AND old_blob_oid IS NOT NULL AND old_size IS NOT NULL) OR
-        (change_kind='modified' AND old_mode IS NOT NULL AND old_blob_oid IS NOT NULL AND old_size IS NOT NULL AND
-                                new_mode IS NOT NULL AND new_blob_oid IS NOT NULL AND new_size IS NOT NULL)
-    ),
-    PRIMARY KEY(result_id, ordinal),
-    UNIQUE(result_id, path_base64),
-    FOREIGN KEY(result_id) REFERENCES results(id) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED
-) STRICT;
-
-CREATE INDEX results_workspace_sealed ON results(workspace_id, sealed_at, id);
-
-CREATE TRIGGER results_immutable_delete BEFORE DELETE ON results
-BEGIN SELECT RAISE(ABORT, 'results are immutable'); END;
-
-CREATE TRIGGER result_manifest_immutable_update BEFORE UPDATE ON result_manifest
-BEGIN SELECT RAISE(ABORT, 'result manifest is immutable'); END;
-
-CREATE TRIGGER result_manifest_immutable_delete BEFORE DELETE ON result_manifest
-BEGIN SELECT RAISE(ABORT, 'result manifest is immutable'); END;
-
 CREATE TRIGGER attempts_result_seal_immutable BEFORE UPDATE ON attempts
 WHEN OLD.sealed_result_id IS NOT NULL AND NEW.sealed_result_id IS NOT OLD.sealed_result_id
 BEGIN SELECT RAISE(ABORT, 'attempt result seal is immutable'); END;
@@ -303,11 +216,16 @@ CREATE TABLE background_runs (
     runtime_epoch INTEGER CHECK(runtime_epoch IS NULL OR runtime_epoch > 0),
     host_port INTEGER CHECK(host_port IS NULL OR host_port BETWEEN 1 AND 65535),
     prompt_request_attempted_at INTEGER CHECK(prompt_request_attempted_at IS NULL OR prompt_request_attempted_at BETWEEN created_at AND updated_at),
-    background_seal_request_id TEXT,
-    artifact_export_id TEXT,
-    retained_artifact_id TEXT,
-    materialization_id TEXT,
-    retained_result_id TEXT,
+    seal_receipt_id TEXT REFERENCES receipts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    seal_requested_at INTEGER,
+    seal_policy_version TEXT CHECK(seal_policy_version IS NULL OR length(CAST(seal_policy_version AS BLOB)) BETWEEN 1 AND 128),
+    result_id TEXT CHECK(result_id IS NULL OR (length(result_id)=40 AND substr(result_id,1,4)='res_' AND substr(result_id,19,1)='7' AND
+      replace(substr(result_id,5),'-','') NOT GLOB '*[^0-9a-f]*')),
+    writer_fence_kind TEXT CHECK(writer_fence_kind IS NULL OR writer_fence_kind IN ('never_created','never_started','runtime_stopped')),
+    writer_fence_container_id TEXT,
+    writer_fence_started_at TEXT,
+    writer_fence_token TEXT CHECK(writer_fence_token IS NULL OR length(CAST(writer_fence_token AS BLOB)) BETWEEN 1 AND 128),
+    writer_fence_stopped_at INTEGER,
     last_evidence TEXT CHECK(last_evidence IS NULL OR length(CAST(last_evidence AS BLOB)) BETWEEN 1 AND 4096),
     last_error TEXT CHECK(last_error IS NULL OR length(CAST(last_error AS BLOB)) BETWEEN 1 AND 4096),
     cleanup_proof TEXT CHECK(cleanup_proof IS NULL OR length(CAST(cleanup_proof AS BLOB)) BETWEEN 1 AND 4096),
@@ -330,16 +248,23 @@ CREATE TABLE background_runs (
     CHECK((observed_container_id IS NULL AND observed_container_started_at IS NULL AND runtime_epoch IS NULL AND host_port IS NULL) OR
           (observed_container_id IS NOT NULL AND observed_container_started_at IS NOT NULL AND runtime_epoch IS NOT NULL AND host_port IS NOT NULL)),
     CHECK(effect_phase NOT IN ('prompt_pending','admitted') OR (observed_container_id IS NOT NULL AND prompt_request_attempted_at IS NOT NULL)),
-    CHECK((background_seal_request_id IS NULL AND artifact_export_id IS NULL AND retained_artifact_id IS NULL AND materialization_id IS NULL AND retained_result_id IS NULL) OR
-          (background_seal_request_id IS NOT NULL AND artifact_export_id IS NOT NULL AND retained_artifact_id IS NOT NULL AND materialization_id IS NOT NULL AND retained_result_id IS NOT NULL)),
-    CHECK(effect_phase<>'sealing' OR background_seal_request_id IS NOT NULL),
-    CHECK(state<>'result_ready' OR background_seal_request_id IS NOT NULL),
+    CHECK((seal_receipt_id IS NULL AND seal_requested_at IS NULL AND seal_policy_version IS NULL AND result_id IS NULL) OR
+          (seal_receipt_id IS NOT NULL AND seal_requested_at IS NOT NULL AND seal_policy_version IS NOT NULL AND result_id IS NOT NULL)),
+    CHECK(effect_phase<>'sealing' OR seal_receipt_id IS NOT NULL),
+    CHECK(state<>'result_ready' OR seal_receipt_id IS NOT NULL),
+    CHECK(writer_fence_kind IS NULL OR seal_receipt_id IS NOT NULL),
+    CHECK((writer_fence_kind IS NULL AND writer_fence_container_id IS NULL AND writer_fence_started_at IS NULL AND writer_fence_token IS NULL AND writer_fence_stopped_at IS NULL) OR
+          (writer_fence_kind='never_created' AND writer_fence_container_id IS NULL AND writer_fence_started_at IS NULL AND writer_fence_token IS NULL AND writer_fence_stopped_at IS NULL) OR
+          (writer_fence_kind='never_started' AND writer_fence_container_id IS NOT NULL AND writer_fence_started_at IS NULL AND writer_fence_token IS NULL AND writer_fence_stopped_at IS NULL) OR
+          (writer_fence_kind='runtime_stopped' AND writer_fence_container_id=observed_container_id AND writer_fence_started_at=observed_container_started_at AND
+           writer_fence_token IS NOT NULL AND writer_fence_stopped_at IS NOT NULL)),
     CHECK((effect_phase='cleanup_complete')=(cleanup_proof IS NOT NULL)),
     FOREIGN KEY(attempt_id,task_id,workspace_id) REFERENCES attempts(id,task_id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY(task_id,workspace_id) REFERENCES tasks(id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY(workspace_id,repository_id) REFERENCES workspaces(id,repository_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     UNIQUE(attempt_id),
-    UNIQUE(task_id,generation)
+    UNIQUE(task_id,generation),
+    UNIQUE(result_id)
 ) STRICT;
 
 CREATE INDEX background_runs_workspace_created ON background_runs(workspace_id,created_at DESC,task_id DESC);
@@ -381,196 +306,21 @@ CREATE TRIGGER background_runs_timeout_immutable BEFORE UPDATE ON background_run
 WHEN OLD.timeout_requested_at IS NOT NULL AND NEW.timeout_requested_at IS NOT OLD.timeout_requested_at
 BEGIN SELECT RAISE(ABORT, 'background run timeout is immutable'); END;
 
-CREATE TABLE background_run_seal_requests (
-  id TEXT PRIMARY KEY CHECK(length(id)=40 AND substr(id,1,4)='slr_' AND substr(id,13,1)='-' AND substr(id,18,1)='-' AND substr(id,19,1)='7' AND substr(id,23,1)='-' AND substr(id,24,1) IN ('8','9','a','b') AND substr(id,28,1)='-' AND replace(substr(id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
-  receipt_id TEXT NOT NULL UNIQUE REFERENCES receipts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  workspace_id TEXT NOT NULL,
-  task_id TEXT NOT NULL UNIQUE,
-  attempt_id TEXT NOT NULL UNIQUE,
-  generation INTEGER NOT NULL CHECK(generation>0),
-  expected_run_revision INTEGER NOT NULL CHECK(expected_run_revision>0),
-  expected_task_revision INTEGER NOT NULL CHECK(expected_task_revision>0),
-  expected_attempt_revision INTEGER NOT NULL CHECK(expected_attempt_revision>0),
-  idempotency_key TEXT NOT NULL CHECK(length(CAST(idempotency_key AS BLOB)) BETWEEN 1 AND 128),
-  request_hash BLOB NOT NULL CHECK(length(request_hash)=32),
-  export_id TEXT NOT NULL UNIQUE CHECK(length(export_id)=40 AND substr(export_id,1,4)='exp_' AND substr(export_id,19,1)='7' AND substr(export_id,24,1) IN ('8','9','a','b') AND replace(substr(export_id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
-  artifact_id TEXT NOT NULL UNIQUE CHECK(length(artifact_id)=40 AND substr(artifact_id,1,4)='art_' AND substr(artifact_id,19,1)='7' AND substr(artifact_id,24,1) IN ('8','9','a','b') AND replace(substr(artifact_id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
-  materialization_id TEXT NOT NULL UNIQUE CHECK(length(materialization_id)=40 AND substr(materialization_id,1,4)='mat_' AND substr(materialization_id,19,1)='7' AND substr(materialization_id,24,1) IN ('8','9','a','b') AND replace(substr(materialization_id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
-  result_id TEXT NOT NULL UNIQUE CHECK(length(result_id)=40 AND substr(result_id,1,4)='res_' AND substr(result_id,19,1)='7' AND substr(result_id,24,1) IN ('8','9','a','b') AND replace(substr(result_id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
-  commit_epoch_seconds INTEGER NOT NULL CHECK(commit_epoch_seconds>=0),
-  policy_version TEXT NOT NULL CHECK(length(CAST(policy_version AS BLOB)) BETWEEN 1 AND 128),
-  accepted_at INTEGER NOT NULL CHECK(accepted_at>=0),
-  FOREIGN KEY(task_id,workspace_id) REFERENCES tasks(id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  FOREIGN KEY(attempt_id,task_id,workspace_id) REFERENCES attempts(id,task_id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  UNIQUE(task_id,generation)
-) STRICT;
+CREATE TRIGGER background_runs_seal_immutable BEFORE UPDATE ON background_runs WHEN OLD.seal_receipt_id IS NOT NULL AND (
+  NEW.seal_receipt_id IS NOT OLD.seal_receipt_id OR NEW.seal_requested_at IS NOT OLD.seal_requested_at OR
+  NEW.seal_policy_version IS NOT OLD.seal_policy_version OR NEW.result_id IS NOT OLD.result_id)
+BEGIN SELECT RAISE(ABORT,'background run seal is immutable'); END;
 
-CREATE TABLE background_run_exports (
-  id TEXT PRIMARY KEY CHECK(length(id)=40 AND substr(id,1,4)='exp_' AND substr(id,19,1)='7' AND substr(id,24,1) IN ('8','9','a','b') AND replace(substr(id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
-  seal_request_id TEXT NOT NULL UNIQUE REFERENCES background_run_seal_requests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  workspace_id TEXT NOT NULL,
-  task_id TEXT NOT NULL UNIQUE,
-  attempt_id TEXT NOT NULL UNIQUE,
-  generation INTEGER NOT NULL CHECK(generation>0),
-  artifact_id TEXT NOT NULL UNIQUE CHECK(length(artifact_id)=40 AND substr(artifact_id,1,4)='art_' AND substr(artifact_id,19,1)='7'),
-  materialization_id TEXT NOT NULL UNIQUE CHECK(length(materialization_id)=40 AND substr(materialization_id,1,4)='mat_' AND substr(materialization_id,19,1)='7'),
-  result_id TEXT NOT NULL UNIQUE CHECK(length(result_id)=40 AND substr(result_id,1,4)='res_' AND substr(result_id,19,1)='7'),
-  phase TEXT NOT NULL CHECK(phase IN ('prepared','selected','committed')),
-  repository_id INTEGER NOT NULL CHECK(repository_id>0),
-  base_sha TEXT NOT NULL CHECK(length(base_sha)=40 AND base_sha NOT GLOB '*[^0-9a-f]*'),
-  opencode_session_id TEXT NOT NULL CHECK(length(opencode_session_id)=36 AND substr(opencode_session_id,1,4)='ses_' AND substr(opencode_session_id,5) NOT GLOB '*[^0-9a-f]*'),
-  opencode_message_id TEXT NOT NULL CHECK(length(opencode_message_id)=36 AND substr(opencode_message_id,1,4)='msg_' AND substr(opencode_message_id,5) NOT GLOB '*[^0-9a-f]*'),
-  result_commit TEXT CHECK(result_commit IS NULL OR (length(result_commit)=40 AND result_commit NOT GLOB '*[^0-9a-f]*')),
-  tree_oid TEXT CHECK(tree_oid IS NULL OR (length(tree_oid)=40 AND tree_oid NOT GLOB '*[^0-9a-f]*')),
-  outcome TEXT CHECK(outcome IS NULL OR outcome IN ('changed','no_changes')),
-  result_manifest_json TEXT CHECK(result_manifest_json IS NULL OR (json_valid(result_manifest_json) AND length(CAST(result_manifest_json AS BLOB))<=4194304)),
-  result_manifest_entries INTEGER CHECK(result_manifest_entries IS NULL OR result_manifest_entries>=0),
-  result_manifest_sha256 BLOB CHECK(result_manifest_sha256 IS NULL OR length(result_manifest_sha256)=32),
-  artifact_manifest_json TEXT CHECK(artifact_manifest_json IS NULL OR (json_valid(artifact_manifest_json) AND json_type(artifact_manifest_json)='object' AND length(CAST(artifact_manifest_json AS BLOB))<=4194304)),
-  artifact_manifest_sha256 BLOB CHECK(artifact_manifest_sha256 IS NULL OR length(artifact_manifest_sha256)=32),
-  cas_locator TEXT CHECK(cas_locator IS NULL OR (length(cas_locator)=71 AND substr(cas_locator,1,7)='sha256:' AND substr(cas_locator,8) NOT GLOB '*[^0-9a-f]*')),
-  bundle_sha256 BLOB CHECK(bundle_sha256 IS NULL OR length(bundle_sha256)=32),
-  bundle_size INTEGER CHECK(bundle_size IS NULL OR bundle_size>=0),
-  collected_at INTEGER,
-  recovery_reason TEXT CHECK(recovery_reason IS NULL OR length(CAST(recovery_reason AS BLOB)) BETWEEN 1 AND 1000),
-  revision INTEGER NOT NULL CHECK(revision>=1),
-  created_at INTEGER NOT NULL CHECK(created_at>=0),
-  updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),
-  CHECK(phase='prepared' OR
-        (result_commit IS NOT NULL AND tree_oid IS NOT NULL AND outcome IS NOT NULL AND result_manifest_json IS NOT NULL AND
-         result_manifest_entries IS NOT NULL AND result_manifest_sha256 IS NOT NULL AND artifact_manifest_json IS NOT NULL AND
-         artifact_manifest_sha256 IS NOT NULL AND cas_locator='sha256:'||lower(hex(artifact_manifest_sha256)) AND
-         bundle_sha256 IS NOT NULL AND bundle_size IS NOT NULL AND collected_at IS NOT NULL)),
-  FOREIGN KEY(task_id,workspace_id) REFERENCES tasks(id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  FOREIGN KEY(attempt_id,task_id,workspace_id) REFERENCES attempts(id,task_id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  FOREIGN KEY(workspace_id,repository_id) REFERENCES workspaces(id,repository_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  UNIQUE(task_id,generation)
-) STRICT;
-
-CREATE TABLE artifact_materializations (
-  id TEXT PRIMARY KEY CHECK(length(id)=40 AND substr(id,1,4)='mat_' AND substr(id,19,1)='7' AND replace(substr(id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
-  seal_request_id TEXT NOT NULL UNIQUE REFERENCES background_run_seal_requests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  export_id TEXT NOT NULL UNIQUE REFERENCES background_run_exports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  artifact_id TEXT NOT NULL UNIQUE CHECK(length(artifact_id)=40 AND substr(artifact_id,1,4)='art_' AND substr(artifact_id,19,1)='7'),
-  result_id TEXT NOT NULL UNIQUE CHECK(length(result_id)=40 AND substr(result_id,1,4)='res_' AND substr(result_id,19,1)='7'),
-  state TEXT NOT NULL CHECK(state IN ('prepared','ready')),
-  result_commit TEXT,
-  tree_oid TEXT,
-  proof_sha256 BLOB CHECK(proof_sha256 IS NULL OR length(proof_sha256)=32),
-  revision INTEGER NOT NULL CHECK(revision>=1),
-  created_at INTEGER NOT NULL CHECK(created_at>=0),
-  updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),
-  CHECK((state='prepared' AND result_commit IS NULL AND tree_oid IS NULL AND proof_sha256 IS NULL) OR
-        (state='ready' AND length(result_commit)=40 AND length(tree_oid)=40 AND proof_sha256 IS NOT NULL))
-) STRICT;
-
-CREATE TABLE background_run_writer_fences (
-  seal_request_id TEXT PRIMARY KEY REFERENCES background_run_seal_requests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  export_id TEXT NOT NULL UNIQUE REFERENCES background_run_exports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  task_id TEXT NOT NULL UNIQUE,
-  attempt_id TEXT NOT NULL UNIQUE,
-  generation INTEGER NOT NULL CHECK(generation>0),
-  kind TEXT NOT NULL CHECK(kind IN ('never_created','never_started','runtime_stopped')),
-  container_id TEXT,
-  container_started_at TEXT,
-  runtime_epoch INTEGER,
-	  runtime_token TEXT,
-  stopped_at INTEGER,
-  proof_sha256 BLOB NOT NULL CHECK(length(proof_sha256)=32),
-  recorded_at INTEGER NOT NULL CHECK(recorded_at>=0),
-  CHECK((kind='never_created' AND container_id IS NULL AND container_started_at IS NULL AND runtime_epoch IS NULL AND runtime_token IS NULL AND stopped_at IS NULL) OR
-		(kind='never_started' AND container_id IS NOT NULL AND container_started_at IS NULL AND runtime_epoch IS NULL AND runtime_token IS NULL AND stopped_at IS NULL) OR
-		(kind='runtime_stopped' AND container_id IS NOT NULL AND container_started_at IS NOT NULL AND runtime_epoch>0 AND runtime_token IS NOT NULL AND stopped_at IS NOT NULL))
-) STRICT;
-
-CREATE TABLE retained_artifacts (
-  id TEXT PRIMARY KEY CHECK(length(id)=40 AND substr(id,1,4)='art_' AND substr(id,19,1)='7' AND replace(substr(id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
-  seal_request_id TEXT NOT NULL UNIQUE REFERENCES background_run_seal_requests(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  export_id TEXT NOT NULL UNIQUE REFERENCES background_run_exports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  materialization_id TEXT NOT NULL UNIQUE REFERENCES artifact_materializations(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  result_id TEXT NOT NULL UNIQUE,
-  workspace_id TEXT NOT NULL,
-  task_id TEXT NOT NULL UNIQUE,
-  attempt_id TEXT NOT NULL UNIQUE,
-  generation INTEGER NOT NULL CHECK(generation>0),
-  manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json) AND json_type(manifest_json)='object' AND length(CAST(manifest_json AS BLOB))<=4194304),
-  manifest_sha256 BLOB NOT NULL UNIQUE CHECK(length(manifest_sha256)=32),
-  changes_sha256 BLOB NOT NULL CHECK(length(changes_sha256)=32),
-  cas_locator TEXT NOT NULL CHECK(length(cas_locator)=71 AND cas_locator='sha256:'||lower(hex(manifest_sha256))),
-  bundle_sha256 BLOB NOT NULL CHECK(length(bundle_sha256)=32),
-  bundle_size INTEGER NOT NULL CHECK(bundle_size>=0),
-  base_sha TEXT NOT NULL CHECK(length(base_sha)=40 AND base_sha NOT GLOB '*[^0-9a-f]*'),
-  result_commit TEXT NOT NULL,
-  tree_oid TEXT NOT NULL,
-  opencode_session_id TEXT NOT NULL CHECK(length(opencode_session_id)=36 AND substr(opencode_session_id,1,4)='ses_'),
-  opencode_message_id TEXT NOT NULL CHECK(length(opencode_message_id)=36 AND substr(opencode_message_id,1,4)='msg_'),
-  committed_at INTEGER NOT NULL CHECK(committed_at>=0),
-  FOREIGN KEY(task_id,workspace_id) REFERENCES tasks(id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  FOREIGN KEY(attempt_id,task_id,workspace_id) REFERENCES attempts(id,task_id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-  UNIQUE(task_id,generation)
-) STRICT;
-
-CREATE TRIGGER background_run_seal_requests_immutable_update BEFORE UPDATE ON background_run_seal_requests BEGIN SELECT RAISE(ABORT,'background run seal request is immutable'); END;
-
-CREATE TRIGGER background_run_seal_requests_immutable_delete BEFORE DELETE ON background_run_seal_requests BEGIN SELECT RAISE(ABORT,'background run seal request is durable'); END;
-
-CREATE TRIGGER background_run_writer_fences_immutable_update BEFORE UPDATE ON background_run_writer_fences BEGIN SELECT RAISE(ABORT,'writer fence is immutable'); END;
-
-CREATE TRIGGER background_run_writer_fences_immutable_delete BEFORE DELETE ON background_run_writer_fences BEGIN SELECT RAISE(ABORT,'writer fence is durable'); END;
-
-CREATE TRIGGER retained_artifacts_immutable_update BEFORE UPDATE ON retained_artifacts BEGIN SELECT RAISE(ABORT,'retained artifact is immutable'); END;
-
-CREATE TRIGGER retained_artifacts_immutable_delete BEFORE DELETE ON retained_artifacts BEGIN SELECT RAISE(ABORT,'retained artifact is durable'); END;
-
-CREATE TRIGGER background_run_exports_immutable_tuple BEFORE UPDATE ON background_run_exports WHEN
-  NEW.id<>OLD.id OR NEW.seal_request_id<>OLD.seal_request_id OR NEW.workspace_id<>OLD.workspace_id OR NEW.task_id<>OLD.task_id OR
-  NEW.attempt_id<>OLD.attempt_id OR NEW.generation<>OLD.generation OR NEW.artifact_id<>OLD.artifact_id OR
-  NEW.materialization_id<>OLD.materialization_id OR NEW.result_id<>OLD.result_id OR NEW.repository_id<>OLD.repository_id OR
-  NEW.base_sha<>OLD.base_sha OR NEW.opencode_session_id<>OLD.opencode_session_id OR NEW.opencode_message_id<>OLD.opencode_message_id OR NEW.created_at<>OLD.created_at OR
-  (OLD.result_commit IS NOT NULL AND (NEW.result_commit IS NOT OLD.result_commit OR NEW.tree_oid IS NOT OLD.tree_oid OR NEW.outcome IS NOT OLD.outcome OR
-   NEW.result_manifest_json IS NOT OLD.result_manifest_json OR NEW.result_manifest_entries IS NOT OLD.result_manifest_entries OR
-   NEW.result_manifest_sha256 IS NOT OLD.result_manifest_sha256 OR NEW.artifact_manifest_json IS NOT OLD.artifact_manifest_json OR
-   NEW.artifact_manifest_sha256 IS NOT OLD.artifact_manifest_sha256 OR NEW.cas_locator IS NOT OLD.cas_locator OR NEW.collected_at IS NOT OLD.collected_at)) OR
-  (OLD.bundle_sha256 IS NOT NULL AND (NEW.bundle_sha256 IS NOT OLD.bundle_sha256 OR NEW.bundle_size IS NOT OLD.bundle_size))
-BEGIN SELECT RAISE(ABORT,'background export tuple is immutable'); END;
-
-CREATE TRIGGER background_run_exports_revision BEFORE UPDATE ON background_run_exports WHEN
-  NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at
-BEGIN SELECT RAISE(ABORT,'invalid background export revision'); END;
-
-CREATE TRIGGER background_run_exports_terminal BEFORE UPDATE ON background_run_exports WHEN OLD.phase='committed'
-BEGIN SELECT RAISE(ABORT,'committed background export is immutable'); END;
-
-CREATE TRIGGER background_run_exports_delete BEFORE DELETE ON background_run_exports BEGIN SELECT RAISE(ABORT,'background export is durable'); END;
-
-CREATE TRIGGER artifact_materializations_transition BEFORE UPDATE ON artifact_materializations BEGIN
-  SELECT CASE WHEN OLD.state<>'prepared' OR NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR
-    NEW.id<>OLD.id OR NEW.seal_request_id<>OLD.seal_request_id OR NEW.export_id<>OLD.export_id OR NEW.artifact_id<>OLD.artifact_id OR
-    NEW.result_id<>OLD.result_id OR NEW.created_at<>OLD.created_at OR NEW.state<>'ready'
-    THEN RAISE(ABORT,'invalid artifact materialization transition') END;
-END;
-
-CREATE TRIGGER artifact_materializations_delete BEFORE DELETE ON artifact_materializations BEGIN SELECT RAISE(ABORT,'artifact materialization is durable'); END;
-
-CREATE TRIGGER artifact_manifests_safe_insert BEFORE INSERT ON retained_artifacts WHEN EXISTS (
-  SELECT 1 FROM json_tree(NEW.manifest_json) WHERE
-	 lower(COALESCE(key,'')) IN ('host_path','remote_url','prompt','environment','credential','credentials','cookie','cookies','authorization','actor_auth','opencode_output','raw_output'))
-BEGIN SELECT RAISE(ABORT,'artifact manifest contains forbidden authority'); END;
-
-CREATE TRIGGER background_runs_retained_tuple_immutable BEFORE UPDATE ON background_runs WHEN OLD.background_seal_request_id IS NOT NULL AND (
-  NEW.background_seal_request_id IS NOT OLD.background_seal_request_id OR NEW.artifact_export_id IS NOT OLD.artifact_export_id OR
-  NEW.retained_artifact_id IS NOT OLD.retained_artifact_id OR NEW.materialization_id IS NOT OLD.materialization_id OR
-  NEW.retained_result_id IS NOT OLD.retained_result_id)
-BEGIN SELECT RAISE(ABORT,'background retained tuple is immutable'); END;
+CREATE TRIGGER background_runs_writer_fence_immutable BEFORE UPDATE ON background_runs WHEN OLD.writer_fence_kind IS NOT NULL AND (
+  NEW.writer_fence_kind IS NOT OLD.writer_fence_kind OR NEW.writer_fence_container_id IS NOT OLD.writer_fence_container_id OR
+  NEW.writer_fence_started_at IS NOT OLD.writer_fence_started_at OR NEW.writer_fence_token IS NOT OLD.writer_fence_token OR
+  NEW.writer_fence_stopped_at IS NOT OLD.writer_fence_stopped_at)
+BEGIN SELECT RAISE(ABORT,'writer fence is immutable'); END;
 
 CREATE TRIGGER background_runs_seal_retains_resources BEFORE UPDATE OF effect_phase ON background_runs
 WHEN OLD.effect_phase='sealing' AND NEW.effect_phase<>'sealing' AND NOT EXISTS (
-    SELECT 1 FROM results result JOIN retained_artifacts artifact ON artifact.id=OLD.retained_artifact_id
-    JOIN background_run_exports export ON export.id=OLD.artifact_export_id
-    JOIN artifact_materializations materialization ON materialization.id=OLD.materialization_id
-    WHERE result.id=OLD.retained_result_id AND result.source_kind='retained_artifact' AND artifact.result_id=result.id AND
-      export.phase='committed' AND export.result_id=result.id AND materialization.state='ready' AND materialization.result_id=result.id)
-BEGIN SELECT RAISE(ABORT,'sealed run has no exact committed result'); END;
+    SELECT 1 FROM results result WHERE result.id=OLD.result_id AND result.task_id=OLD.task_id AND result.state='sealed')
+BEGIN SELECT RAISE(ABORT,'sealed run has no committed result'); END;
 
 CREATE TRIGGER background_runs_runtime_immutable BEFORE UPDATE ON background_runs WHEN
  OLD.observed_container_id IS NOT NULL AND (NEW.observed_container_id IS NOT OLD.observed_container_id OR
@@ -585,9 +335,38 @@ CREATE TRIGGER background_runs_terminal_after_cleanup BEFORE UPDATE OF effect_ph
 WHEN NEW.effect_phase='cleanup_complete' AND OLD.effect_phase NOT IN ('absent','cleaning')
 BEGIN SELECT RAISE(ABORT,'background run resources were not cleaned'); END;
 
-CREATE TRIGGER results_immutable_update BEFORE UPDATE ON results BEGIN SELECT RAISE(ABORT,'results are immutable'); END;
+CREATE TABLE results (
+  id TEXT PRIMARY KEY CHECK(length(id)=40 AND substr(id,1,4)='res_' AND substr(id,13,1)='-' AND substr(id,18,1)='-' AND substr(id,19,1)='7' AND
+    substr(id,23,1)='-' AND substr(id,24,1) IN ('8','9','a','b') AND substr(id,28,1)='-' AND replace(substr(id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
+  task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+  state TEXT NOT NULL CHECK(state IN ('selected','sealed')),
+  outcome TEXT NOT NULL CHECK(outcome IN ('changed','no_changes')),
+  base_sha TEXT NOT NULL CHECK(length(base_sha)=40 AND base_sha NOT GLOB '*[^0-9a-f]*'),
+  result_commit TEXT NOT NULL CHECK(length(result_commit)=40 AND result_commit NOT GLOB '*[^0-9a-f]*'),
+  tree_oid TEXT NOT NULL CHECK(length(tree_oid)=40 AND tree_oid NOT GLOB '*[^0-9a-f]*'),
+  change_count INTEGER NOT NULL CHECK(change_count>=0),
+  changes_sha256 BLOB NOT NULL CHECK(length(changes_sha256)=32),
+  manifest_json TEXT NOT NULL CHECK(json_valid(manifest_json) AND json_type(manifest_json)='object' AND length(CAST(manifest_json AS BLOB))<=4194304),
+  manifest_sha256 BLOB NOT NULL UNIQUE CHECK(length(manifest_sha256)=32),
+  bundle_sha256 BLOB NOT NULL CHECK(length(bundle_sha256)=32),
+  bundle_size INTEGER NOT NULL CHECK(bundle_size>=0),
+  collected_at INTEGER NOT NULL CHECK(collected_at>=0),
+  materialization_sha256 BLOB CHECK(materialization_sha256 IS NULL OR length(materialization_sha256)=32),
+  sealed_at INTEGER,
+  CHECK((state='selected' AND materialization_sha256 IS NULL AND sealed_at IS NULL) OR
+        (state='sealed' AND materialization_sha256 IS NOT NULL AND sealed_at>=collected_at)),
+  CHECK((outcome='no_changes' AND result_commit=base_sha AND change_count=0) OR
+        (outcome='changed' AND result_commit<>base_sha AND change_count>0))
+) STRICT;
 
-CREATE INDEX results_retained_artifact ON results(retained_artifact_id) WHERE retained_artifact_id IS NOT NULL;
+CREATE TRIGGER results_seal_once BEFORE UPDATE ON results WHEN OLD.state<>'selected' OR NEW.state<>'sealed' OR
+  NEW.id<>OLD.id OR NEW.task_id<>OLD.task_id OR NEW.outcome<>OLD.outcome OR NEW.base_sha<>OLD.base_sha OR
+  NEW.result_commit<>OLD.result_commit OR NEW.tree_oid<>OLD.tree_oid OR NEW.change_count<>OLD.change_count OR
+  NEW.changes_sha256<>OLD.changes_sha256 OR NEW.manifest_json<>OLD.manifest_json OR NEW.manifest_sha256<>OLD.manifest_sha256 OR
+  NEW.bundle_sha256<>OLD.bundle_sha256 OR NEW.bundle_size<>OLD.bundle_size OR NEW.collected_at<>OLD.collected_at
+BEGIN SELECT RAISE(ABORT,'result is immutable'); END;
+
+CREATE TRIGGER results_durable BEFORE DELETE ON results BEGIN SELECT RAISE(ABORT,'result is durable'); END;
 `
 
 func (s *Store) initialize(ctx context.Context) error {

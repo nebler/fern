@@ -64,15 +64,13 @@ func (s *commandStore) StopBackgroundRun(_ context.Context, p taskstore.StopBack
 	s.receipt.ResponseProjection = json.RawMessage(`{"run_id":"` + string(p.TaskID) + `","state":"canceling"}`)
 	return taskstore.BackgroundRunStop{Run: s.current, Receipt: s.receipt, Replayed: s.race}, nil
 }
-func (s *commandStore) GetBackgroundRunOwners(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.Task, taskstore.Attempt, error) {
-	return taskstore.Task{Revision: 7}, taskstore.Attempt{Revision: 9}, nil
-}
 func (s *commandStore) SealBackgroundRun(_ context.Context, p taskstore.SealBackgroundRunParams) (taskstore.BackgroundRunSealAdmission, error) {
 	s.seal = p
 	if s.err != nil {
 		return taskstore.BackgroundRunSealAdmission{}, s.err
 	}
 	s.committed = true
+	s.current.Seal = &taskstore.Seal{ReceiptID: p.ReceiptID, ResultID: p.ResultID}
 	return taskstore.BackgroundRunSealAdmission{Run: s.current, Replayed: s.race}, nil
 }
 
@@ -180,7 +178,7 @@ func TestCommitRaceReplayAndFailureDoNotWake(t *testing.T) {
 					}
 				case "seal":
 					_, err = s.Seal(context.Background(), actor, "key", ids.TaskID)
-					if store.seal.ExpectedRunRevision != 5 || store.seal.ExpectedTaskRevision != 7 || store.seal.ExpectedAttemptRevision != 9 || store.seal.PolicyVersion != "seal.v1" || store.seal.AcceptedAt.Nanosecond() != 123000000 {
+					if store.seal.ExpectedRunRevision != 5 || store.seal.ResultID == "" || store.seal.PolicyVersion != "seal.v1" || store.seal.AcceptedAt.Nanosecond() != 123000000 {
 						t.Fatalf("seal assembly=%+v", store.seal)
 					}
 				}

@@ -28,9 +28,9 @@
 // GitHub credentials are refreshed only during execution and never gate
 // teardown; remote publication is the agent's own action, and there is no host
 // publisher. Sealing records a writer fence once, then exports under it: the
-// selected snapshot tuple is durable, and CAS install and materialization are
-// re-derived and checked against it until the retained result commits.
-// Snapshot mismatch records an export recovery reason rather than accepting
+// selected result is durable, and CAS install and materialization are
+// re-derived and checked against it until the result is sealed. Snapshot
+// mismatch records the run's last error for a retry rather than accepting
 // different content. A run becomes terminal only once every resource is proven
 // absent. The coordinator does not close its dependencies; composition stops
 // it first.

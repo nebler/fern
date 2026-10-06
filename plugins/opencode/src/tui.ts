@@ -538,7 +538,7 @@ function formatResult(result: RunResult) {
     `Commit: ${result.result.resultCommit}`,
     `Tree: ${result.result.treeOID}`,
     `Manifest: ${result.result.manifestEntries} entries (${result.result.manifestSHA256})`,
-    `Artifact: ${result.artifact.id} (${result.artifact.format})`,
+    `Artifact: ${result.artifact.format}`,
     `Artifact SHA-256: ${result.artifact.sha256}`,
     `Bundle SHA-256: ${result.artifact.bundleSHA256}`,
     `Bundle size: ${result.artifact.bundleSize} bytes`,

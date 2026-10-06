@@ -247,19 +247,16 @@ func (c *Coordinator) process(operation, parent context.Context, work taskstore.
 // under it. The run stays sealing, retaining every resource, until the
 // retained result commits.
 func (c *Coordinator) seal(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
-	_, err := c.store.GetBackgroundRunWriterFence(parent, work.Run.BackgroundSealRequestID)
-	if errors.Is(err, taskstore.ErrNotFound) {
-		_, providerFence, proveErr := c.provider.ProveWriterInactive(operation, work.Run)
-		if proveErr != nil {
-			return fmt.Errorf("prove retained writer inactivity: %w", proveErr)
+	if work.Run.WriterFence == nil {
+		_, providerFence, err := c.provider.ProveWriterInactive(operation, work.Run)
+		if err != nil {
+			return fmt.Errorf("prove retained writer inactivity: %w", err)
 		}
 		if work.Run, err = c.recordWriterFence(parent, work, providerFence); err != nil {
 			return fmt.Errorf("record retained writer fence: %w", err)
 		}
-	} else if err != nil {
-		return err
 	}
-	return c.exportRetained(operation, parent, work)
+	return c.exportRetained(operation, parent, work.Run)
 }
 
 // clean reconciles teardown in one pass: drain the route, stop the exact
@@ -298,7 +295,7 @@ func (c *Coordinator) clean(operation, parent context.Context, work taskstore.Ba
 
 func (c *Coordinator) terminalize(parent context.Context, work taskstore.BackgroundRunWork) error {
 	run := work.Run
-	if run.BackgroundSealRequestID != "" {
+	if run.Seal != nil {
 		mutation, cancel, now, err := c.effectContext(parent, work, false)
 		if err != nil {
 			return err
@@ -334,8 +331,7 @@ func (c *Coordinator) recordWriterFence(ctx context.Context, work taskstore.Back
 	if err != nil {
 		return run, err
 	}
-	params := taskstore.RecordBackgroundRunWriterFenceParams{BackgroundRunRef: ref(run, now),
-		SealRequestID: run.BackgroundSealRequestID, ExportID: run.ArtifactExportID}
+	params := taskstore.RecordBackgroundRunWriterFenceParams{BackgroundRunRef: ref(run, now)}
 	switch provider.Kind() {
 	case taskenvdocker.WriterFenceNeverCreated:
 		params.Kind = taskstore.WriterFenceNeverCreated
@@ -343,14 +339,9 @@ func (c *Coordinator) recordWriterFence(ctx context.Context, work taskstore.Back
 		params.Kind, params.ContainerID = taskstore.WriterFenceNeverStarted, provider.ContainerID()
 	case taskenvdocker.WriterFenceStoppedRuntime:
 		params.Kind, params.ContainerID, params.ContainerStartedAt = taskstore.WriterFenceRuntimeStopped, provider.ContainerID(), provider.StartedAt()
-		params.RuntimeEpoch, params.RuntimeToken = run.RuntimeEpoch, provider.Token()
-		params.StoppedAt = &now
+		params.RuntimeToken, params.StoppedAt = provider.Token(), &now
 	default:
 		return run, taskenvdocker.ErrIdentityMismatch
-	}
-	params.ProofSHA256, err = taskstore.WriterFenceProofDigest(params)
-	if err != nil {
-		return run, err
 	}
 	mutation, cancel, _, err := c.effectContext(ctx, work, false)
 	if err != nil {
@@ -364,42 +355,41 @@ func (c *Coordinator) recordWriterFence(ctx context.Context, work taskstore.Back
 // durable step before the commit: the snapshot is deterministic from the
 // stopped clone, CAS installation is content-addressed, and materialization is
 // a verification, so a pass interrupted anywhere re-derives and re-checks them
-// against the selected tuple.
-func (c *Coordinator) exportRetained(operation, parent context.Context, work taskstore.BackgroundRunWork) (resultErr error) {
-	run := work.Run
-	export, err := c.store.GetBackgroundRunExport(parent, run.ArtifactExportID)
-	if err != nil {
+// against the selected result.
+func (c *Coordinator) exportRetained(operation, parent context.Context, run taskstore.BackgroundRun) error {
+	attempt := retainedExportAttempt{coordinator: c, run: run}
+	selected, err := c.store.GetResult(parent, run.Seal.ResultID)
+	switch {
+	case err == nil:
+		attempt.selected = &selected
+	case !errors.Is(err, taskstore.ErrNotFound):
 		return err
 	}
-	attempt := retainedExportAttempt{coordinator: c, export: export}
-	if err := attempt.reconcile(operation, parent, run); err != nil {
+	if err := attempt.reconcile(operation, parent); err != nil {
 		return attempt.recoveryRequired(parent, err)
 	}
 	return nil
 }
 
-// retainedExportAttempt owns only the last successfully recorded export tuple.
-// SQL remains the authority for revision and phase.
+// retainedExportAttempt owns the sealing run revision this pass read and the
+// selected result, if any. SQL remains the authority for both.
 type retainedExportAttempt struct {
 	coordinator *Coordinator
-	export      taskstore.BackgroundRunExport
+	run         taskstore.BackgroundRun
+	selected    *taskstore.Result
 }
 
-func (a *retainedExportAttempt) reconcile(operation, parent context.Context, run taskstore.BackgroundRun) (resultErr error) {
+func (a *retainedExportAttempt) reconcile(operation, parent context.Context) (resultErr error) {
 	c := a.coordinator
 	if !a.installed(operation) {
-		fence, err := c.store.GetBackgroundRunWriterFence(parent, run.BackgroundSealRequestID)
-		if err != nil {
-			return err
-		}
-		source, err := c.provider.AcquireExportSource(operation, run, providerFence(fence))
+		source, err := c.provider.AcquireExportSource(operation, a.run, providerFence(*a.run.WriterFence))
 		if err != nil {
 			return err
 		}
 		// Keep the exclusive clone lease through materialization and commit, not
 		// merely through the Git snapshot. No checkout or staged path escapes.
 		defer func() { resultErr = errors.Join(resultErr, source.Close()) }()
-		if err := a.snapshotAndInstall(operation, parent, run, source.RepositoryPath()); err != nil {
+		if err := a.snapshotAndInstall(operation, parent, source.RepositoryPath()); err != nil {
 			return err
 		}
 	}
@@ -407,40 +397,21 @@ func (a *retainedExportAttempt) reconcile(operation, parent context.Context, run
 	if err != nil {
 		return err
 	}
-	return a.commitResult(parent, run, proof)
+	return a.commitResult(parent, proof)
 }
 
-// installed reports whether CAS already holds exactly the selected tuple, so a
-// lost install response needs no new clone lease. It is read-only.
+// installed reports whether CAS already holds exactly the selected result, so
+// a lost install response needs no new clone lease. It is read-only.
 func (a *retainedExportAttempt) installed(operation context.Context) bool {
-	if a.export.Phase != taskstore.BackgroundRunExportPhaseSelected {
+	if a.selected == nil {
 		return false
 	}
-	locator, err := taskartifact.ParseLocator(a.export.CASLocator)
+	locator, err := taskartifact.ParseLocator(a.selected.CASLocator())
 	if err != nil {
 		return false
 	}
 	snapshot, err := a.coordinator.artifact.Inspect(operation, locator)
-	return err == nil && snapshotMatchesExport(snapshot, a.export)
-}
-
-func exportRef(export taskstore.BackgroundRunExport, now time.Time) taskstore.BackgroundRunExportRef {
-	return taskstore.BackgroundRunExportRef{ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID,
-		Generation: export.Generation, ExpectedRevision: export.Revision, ExpectedPhase: export.Phase, Now: now}
-}
-
-// record refreshes the clock immediately before a SQL transition and adopts its
-// returned tuple only on success. A failed write must not erase recovery authority.
-func (a *retainedExportAttempt) record(write func(taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error)) error {
-	now, err := a.coordinator.freshNow()
-	if err != nil {
-		return err
-	}
-	next, err := write(exportRef(a.export, now))
-	if err == nil {
-		a.export = next
-	}
-	return err
+	return err == nil && snapshotMatches(snapshot, a.run, *a.selected)
 }
 
 func (a *retainedExportAttempt) recoveryRequired(parent context.Context, cause error) error {
@@ -453,18 +424,14 @@ func (a *retainedExportAttempt) recoveryRequired(parent context.Context, cause e
 	// does not grant an unbounded write or bypass the store's revision check.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), c.config.OperationTimeout)
 	defer cancel()
-	_, markErr := c.store.MarkBackgroundRunExportRecoveryRequired(ctx, exportRef(a.export, now), "retained artifact export retry required")
+	_, markErr := c.store.MarkBackgroundRunExportRecoveryRequired(ctx, ref(a.run, now), "retained artifact export retry required")
 	return errors.Join(cause, markErr)
 }
 
-// snapshotAndInstall snapshots the fenced clone, selects the tuple on first
+// snapshotAndInstall snapshots the fenced clone, selects the result on first
 // export (or proves a replay identical to the selection), and installs it.
-func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Context, run taskstore.BackgroundRun, repositoryPath string) (resultErr error) {
-	c := a.coordinator
-	request, requestErr := c.store.GetBackgroundRunSealRequest(parent, run.BackgroundSealRequestID)
-	if requestErr != nil {
-		return requestErr
-	}
+func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Context, repositoryPath string) (resultErr error) {
+	c, run := a.coordinator, a.run
 	artifactSource, sourceSpecErr := taskartifact.NewSource(repositoryPath, run.WorkspaceID, run.TaskID)
 	profileDigest, profileErr := taskartifact.NewDigest(run.ProfileSHA256)
 	environmentDigest, environmentErr := taskartifact.NewDigest(run.EnvironmentSHA256)
@@ -472,10 +439,10 @@ func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Con
 		return errors.Join(sourceSpecErr, profileErr, environmentErr)
 	}
 	snapshot, staged, snapshotErr := c.artifact.Snapshot(operation, taskartifact.SnapshotSpec{
-		Source: artifactSource, RepositoryID: run.RepositoryID, ResultID: run.RetainedResultID,
+		Source: artifactSource, RepositoryID: run.RepositoryID, ResultID: run.Seal.ResultID,
 		ImageIdentity: run.ImageIdentity, Profile: run.Profile, ProfileSHA256: profileDigest, EnvironmentSHA256: environmentDigest,
 		ResourceSpecVersion: taskartifact.ResourceSpecVersion, OpenCodeSessionID: run.OpenCodeSessionID, OpenCodeMessageID: run.OpenCodeMessageID,
-		SnapshotPolicyVersion: taskartifact.SnapshotPolicyV1, Base: run.BaseOID, EpochSecond: request.CommitEpochSeconds,
+		SnapshotPolicyVersion: taskartifact.SnapshotPolicyV1, Base: run.BaseOID, EpochSecond: run.Seal.CommitEpochSeconds(),
 	})
 	if snapshotErr != nil {
 		return snapshotErr
@@ -486,7 +453,7 @@ func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Con
 			resultErr = errors.Join(resultErr, c.artifact.Discard(staged))
 		}
 	}()
-	if a.export.Phase == taskstore.BackgroundRunExportPhasePrepared {
+	if a.selected == nil {
 		manifestBytes, manifestDigest, manifestErr := c.artifact.StagedManifest(operation, staged)
 		if manifestErr != nil {
 			return manifestErr
@@ -495,22 +462,18 @@ func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Con
 		if err != nil {
 			return err
 		}
-		outcome := task.ResultChanged
-		if snapshot.Result == snapshot.Base {
-			outcome = task.ResultNoChanges
-		}
-		if err := a.record(func(ref taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error) {
-			return c.store.SelectBackgroundRunSnapshot(parent, taskstore.SelectBackgroundRunSnapshotParams{
-				BackgroundRunExportRef: ref, ResultCommit: snapshot.Result, TreeOID: snapshot.Tree, Outcome: outcome,
-				ResultManifest: manifestEntries(snapshot.Changes), ChangesSHA256: snapshot.ChangesSHA256.Bytes(), ArtifactManifest: manifestBytes,
-				ArtifactManifestSHA256: manifestDigest.Bytes(), BundleSHA256: snapshot.BundleSHA256.Bytes(), BundleBytes: snapshot.BundleBytes,
-				OpenCodeSessionID: snapshot.OpenCodeSessionID, OpenCodeMessageID: snapshot.OpenCodeMessageID, CollectedAt: collectedAt,
-			})
-		}); err != nil {
+		selected, err := c.store.SelectBackgroundRunSnapshot(parent, taskstore.SelectBackgroundRunSnapshotParams{
+			BackgroundRunRef: ref(run, collectedAt), ResultCommit: snapshot.Result, TreeOID: snapshot.Tree,
+			ChangeCount: len(snapshot.Changes), ChangesSHA256: snapshot.ChangesSHA256.Bytes(), ArtifactManifest: manifestBytes,
+			ArtifactManifestSHA256: manifestDigest.Bytes(), BundleSHA256: snapshot.BundleSHA256.Bytes(), BundleBytes: snapshot.BundleBytes,
+			CollectedAt: collectedAt,
+		})
+		if err != nil {
 			return err
 		}
+		a.selected = &selected
 	}
-	if !snapshotMatchesExport(snapshot, a.export) {
+	if !snapshotMatches(snapshot, run, *a.selected) {
 		return errors.New("retained snapshot differs from durable selection")
 	}
 	locator, err := c.artifact.Store(operation, staged)
@@ -519,7 +482,7 @@ func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Con
 	}
 	stored = true
 	inspected, inspectErr := c.artifact.Inspect(operation, locator)
-	if inspectErr != nil || !snapshotMatchesExport(inspected, a.export) || locator.String() != a.export.CASLocator {
+	if inspectErr != nil || !snapshotMatches(inspected, run, *a.selected) || locator.String() != a.selected.CASLocator() {
 		return errors.Join(inspectErr, errors.New("installed retained artifact differs from durable selection"))
 	}
 	return nil
@@ -528,7 +491,7 @@ func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Con
 // materialize proves the installed artifact checks out to the selected commit
 // and tree, closing the checkout before the proof is used.
 func (a *retainedExportAttempt) materialize(operation context.Context) ([32]byte, error) {
-	locator, err := taskartifact.ParseLocator(a.export.CASLocator)
+	locator, err := taskartifact.ParseLocator(a.selected.CASLocator())
 	if err != nil {
 		return [32]byte{}, err
 	}
@@ -536,12 +499,12 @@ func (a *retainedExportAttempt) materialize(operation context.Context) ([32]byte
 	if err != nil {
 		return [32]byte{}, err
 	}
-	proof := materializationProof(a.export, checkout.Path())
+	proof := materializationProof(*a.selected, checkout.Path())
 	return proof, checkout.Close()
 }
 
-func (a *retainedExportAttempt) commitResult(parent context.Context, run taskstore.BackgroundRun, proof [32]byte) error {
-	c, export := a.coordinator, a.export
+func (a *retainedExportAttempt) commitResult(parent context.Context, proof [32]byte) error {
+	c := a.coordinator
 	sealedAt, timeErr := c.freshNow()
 	if timeErr != nil {
 		return timeErr
@@ -549,8 +512,7 @@ func (a *retainedExportAttempt) commitResult(parent context.Context, run tasksto
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), c.config.OperationTimeout)
 	defer cancel()
 	_, err := c.store.CommitBackgroundRunRetainedResult(ctx, taskstore.CommitBackgroundRunRetainedResultParams{
-		BackgroundRunExportRef: exportRef(export, sealedAt), MaterializationID: export.MaterializationID, MaterializationProof: proof,
-		ArtifactID: export.ArtifactID, ResultID: export.ResultID, SealedAt: sealedAt,
+		BackgroundRunRef: ref(a.run, sealedAt), MaterializationProof: proof,
 	})
 	return err
 }
@@ -566,31 +528,17 @@ func providerFence(value taskstore.WriterFence) taskenvdocker.WriterFence {
 	}
 }
 
-func manifestEntries(changes []taskartifact.ChangeEntry) []taskstore.ManifestEntry {
-	result := make([]taskstore.ManifestEntry, len(changes))
-	for i, change := range changes {
-		result[i] = taskstore.ManifestEntry{PathBase64: change.PathBase64, ChangeKind: change.Kind}
-		if change.Old != nil {
-			mode, oid, size := change.Old.Mode, string(change.Old.BlobOID), change.Old.Size
-			result[i].OldMode, result[i].OldBlobOID, result[i].OldSize = &mode, &oid, &size
-		}
-		if change.New != nil {
-			mode, oid, size := change.New.Mode, string(change.New.BlobOID), change.New.Size
-			result[i].NewMode, result[i].NewBlobOID, result[i].NewSize = &mode, &oid, &size
-		}
-	}
-	return result
+// snapshotMatches binds a snapshot to the sealing run's identities and the
+// durable selection.
+func snapshotMatches(snapshot taskartifact.Snapshot, run taskstore.BackgroundRun, selected taskstore.Result) bool {
+	return snapshot.RepositoryID == run.RepositoryID && snapshot.WorkspaceID == run.WorkspaceID && snapshot.TaskID == run.TaskID &&
+		snapshot.ResultID == selected.ID && snapshot.OpenCodeSessionID == run.OpenCodeSessionID && snapshot.OpenCodeMessageID == run.OpenCodeMessageID &&
+		snapshot.Base == selected.BaseSHA && snapshot.Result == selected.ResultCommit && snapshot.Tree == selected.TreeOID &&
+		snapshot.ChangesSHA256.Bytes() == selected.ChangesSHA256 && snapshot.ManifestSHA256.Bytes() == selected.ManifestSHA256 &&
+		snapshot.BundleSHA256.Bytes() == selected.BundleSHA256 && snapshot.BundleBytes == selected.BundleBytes
 }
 
-func snapshotMatchesExport(snapshot taskartifact.Snapshot, export taskstore.BackgroundRunExport) bool {
-	bundleMatches := snapshot.BundleSHA256.Bytes() == export.BundleSHA256 && snapshot.BundleBytes == export.BundleBytes
-	return snapshot.RepositoryID == export.RepositoryID && snapshot.WorkspaceID == export.WorkspaceID && snapshot.TaskID == export.TaskID &&
-		snapshot.ResultID == export.ResultID &&
-		snapshot.Base == export.BaseSHA && snapshot.Result == export.ResultCommit && snapshot.Tree == export.TreeOID &&
-		snapshot.ChangesSHA256.Bytes() == export.ChangesSHA256 && snapshot.ManifestSHA256.Bytes() == export.ArtifactManifestSHA256 && bundleMatches
-}
-
-func materializationProof(export taskstore.BackgroundRunExport, path string) [32]byte {
+func materializationProof(selected taskstore.Result, path string) [32]byte {
 	// Path is deliberately reduced to an observation bit; host paths never enter
 	// durable evidence. Engine.Materialize already proves detached clean state.
 	payload, _ := json.Marshal(struct {
@@ -599,7 +547,7 @@ func materializationProof(export taskstore.BackgroundRunExport, path string) [32
 		Commit  task.GitOID `json:"commit"`
 		Tree    task.GitOID `json:"tree"`
 		Clean   bool        `json:"clean"`
-	}{"fern.taskartifact.materialization.v1", export.CASLocator, export.ResultCommit, export.TreeOID, path != ""})
+	}{"fern.taskartifact.materialization.v1", selected.CASLocator(), selected.ResultCommit, selected.TreeOID, path != ""})
 	return sha256.Sum256(payload)
 }
 

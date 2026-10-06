@@ -223,11 +223,11 @@ cleaning drains the route, stops the exact writer, and removes container,
 volume, and clone in one pass. A pass cut short is simply repeated. The durable
 records inside a phase are the started runtime identity (container ID, start
 time, epoch, port), the prompt-request fence, stop/timeout/seal admission, the
-writer fence, the selected export tuple, and the terminal cleanup proof. There
-are no per-run claims or leases: `fern up`'s host lease admits one coordinator
-per workspace, and every transition is a compare-and-swap on the run's (or
-export's) workspace, task, attempt, generation, revision, state, and phase, so
-a write prepared before a concurrent stop or seal fails.
+writer fence, the selected result, and the terminal cleanup proof. There are no
+per-run claims or leases: `fern up`'s host lease admits one coordinator per
+workspace, and every transition is a compare-and-swap on the run's workspace,
+ID, revision, state, and phase, so a write prepared before a concurrent stop or
+seal fails.
 
 `run` owns lifecycle classification independently of persistence: valid
 state/phase combinations, whether a phase is executing (bound by the attempt
@@ -336,40 +336,43 @@ can no longer be stopped or timed out.
 
 ## 12. Seal And Retention
 
-Seal is explicit and irreversible. Its receipt commits the seal request,
-artifact export ID, materialization ID, retained artifact ID, and result ID
-before teardown. The export is `prepared -> selected -> committed`; each
-sealing pass, after the writer fence:
+Seal is explicit and irreversible. Its receipt and the run's seal columns
+(receipt, result ID, request time, policy version) commit together before any
+teardown. Each sealing pass then:
 
-1. Unless CAS already holds exactly the selected tuple, acquires the stopped
+1. Unless the run already records one, proves the exact writer stopped and
+   records the writer fence on the run.
+2. Unless CAS already holds exactly the selected result, acquires the stopped
    source clone under its identity lock, captures committed, staged, unstaged,
    and untracked changes without mutating the source, and builds a
-   `git_bundle_v1` object and canonical manifest.
-2. On the first pass, durably selects that tuple (commit, tree, manifests,
-   bundle digest); on later passes, requires the deterministic re-snapshot to
-   equal it.
-3. Installs it under `artifact-cas/sha256:<manifest digest>` and re-inspects it.
-4. Materializes a detached checkout and proves its base, result commit, and
+   `git_bundle_v1` object and canonical manifest bound to the run and result
+   ID.
+3. On the first pass, inserts the `results` row in state `selected` (commit,
+   tree, change digest, the canonical manifest stored whole, bundle digest); on
+   later passes, requires the deterministic re-snapshot to equal it.
+4. Installs it under `artifact-cas/sha256:<manifest digest>` and re-inspects it.
+5. Materializes a detached checkout and proves its base, result commit, and
    tree.
-5. Commits the retained-artifact/result tuple, the export, and the
-   materialization proof in one transaction, which moves the run to
-   `result_ready`/`cleaning`.
+6. Seals the result row with the materialization proof and moves the run to
+   `result_ready`/`cleaning` in one transaction.
 
-A failed pass records an export recovery reason and is retried. A trigger keeps
-a sealed run, and so its resources, in `sealing` until that commit exists.
-Cleaning then deletes route, container, volume, and clone.
+A failed pass records `last_error` on the sealing run and is retried. A
+trigger keeps a sealed run, and so its resources, in `sealing` until its
+result row is sealed; a selected row's tuple is immutable and a sealed row is
+immutable and undeletable. Cleaning then deletes route, container, volume, and
+clone.
 
 The result remains available only when retention is verified and
 reconstructable. Every positive plugin API projection comes from a fresh CAS
-inspection and complete result/artifact/snapshot tuple check. Artifact locators
-and host paths are not returned through the plugin API.
+inspection checked against the complete run and result tuple. Artifact
+locators and host paths are not returned through the plugin API.
 
 Result consumption uses `taskartifact.Engine.Acquire` to perform one fresh full
 verification and return its snapshot together with an owned detached checkout.
-The result-source resolver checks that snapshot against the durable result and
-artifact binding, closing the checkout on mismatch. Materialization still
-checks the copied bundle against the verified digest and size; acquisition does
-not cache integrity observations across operations.
+The result-source resolver checks that snapshot against the durable run and
+result, closing the checkout on mismatch. Materialization still checks the
+copied bundle against the verified digest and size; acquisition does not cache
+integrity observations across operations.
 
 ## 13. Repository Checks
 
@@ -441,7 +444,7 @@ process-local memory as authority. Recovery rules include:
 - stop only the exact committed writer epoch, or an unrecorded one that
   attests as this run's;
 - export only under the recorded writer fence, and only content equal to the
-  selected tuple;
+  selected result;
 - reject result consumption when any artifact tuple field differs;
 - keep resources until absence is proven, and a sealed run's until its result
   commits;

@@ -844,35 +844,28 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 	if err := os.WriteFile(filepath.Join(clonePath, "dirty-result.txt"), []byte("dirty result\n"), 0o600); err != nil {
 		return err
 	}
-	sealIDs, err := ids.GenerateBackgroundSealIDs()
+	sealReceipt, err := ids.ReceiptID()
 	if err != nil {
 		return err
 	}
-	owner, attempt, err := store.GetBackgroundRunOwners(ctx, workspaceID, run.TaskID, actor)
+	resultID, err := ids.ResultID()
 	if err != nil {
 		return err
 	}
 	sealAt := config.Now().UTC().Truncate(time.Millisecond)
-	seal, err := store.SealBackgroundRun(ctx, taskstore.SealBackgroundRunParams{
-		WorkspaceID: workspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRunRevision: run.Revision, ExpectedTaskRevision: owner.Revision, ExpectedAttemptRevision: attempt.Revision,
-		SealRequestID: sealIDs.SealRequestID, ReceiptID: sealIDs.ReceiptID, ExportID: sealIDs.ArtifactExportID,
-		ArtifactID: sealIDs.RetainedArtifactID, MaterializationID: sealIDs.MaterializationID, ResultID: sealIDs.ResultID,
+	if _, err := store.SealBackgroundRun(ctx, taskstore.SealBackgroundRunParams{
+		WorkspaceID: workspaceID, TaskID: run.TaskID, ExpectedRunRevision: run.Revision, ReceiptID: sealReceipt, ResultID: resultID,
 		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.SealBackgroundRunCommand},
 			Key: "retained-seal", RequestHash: sha256.Sum256([]byte("retained-seal")), Actor: actor},
-		CommitEpochSeconds: sealAt.Unix(), PolicyVersion: "fern.background-user-seal.v1",
-		APIContractVersion: "fern.background-run.v1", AcceptedAt: sealAt,
-	})
-	if err != nil {
+		PolicyVersion: "fern.background-user-seal.v1", APIContractVersion: "fern.background-run.v1", AcceptedAt: sealAt,
+	}); err != nil {
 		return err
 	}
 	for step := 0; step < 25; step++ {
 		runErr := coordinator.RunOnce(ctx)
 		if runErr != nil && !errors.Is(runErr, backgroundruncoord.ErrNoWork) {
 			current, _ := store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
-			export, _ := store.GetBackgroundRunExport(context.Background(), seal.Request.ExportID)
-			return fmt.Errorf("retain result at run=%s/%s export=%s revision=%d: %w",
-				current.State, current.EffectPhase, export.Phase, export.Revision, runErr)
+			return fmt.Errorf("retain result at run=%s/%s revision=%d: %w", current.State, current.EffectPhase, current.Revision, runErr)
 		}
 		run, err = store.GetBackgroundRun(ctx, workspaceID, admission.Task.ID, actor)
 		if err != nil {
@@ -883,27 +876,24 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 		}
 	}
 	if run.State != taskstore.BackgroundRunResultReady || run.EffectPhase != taskstore.BackgroundRunEffectCleanupComplete {
-		export, _ := store.GetBackgroundRunExport(ctx, seal.Request.ExportID)
-		return fmt.Errorf("retained result incomplete: run=%s/%s export=%s reason=%s", run.State, run.EffectPhase, export.Phase, export.RecoveryReason)
+		return fmt.Errorf("retained result incomplete: run=%s/%s reason=%s", run.State, run.EffectPhase, run.LastError)
 	}
 	projection, err := store.GetBackgroundRunResult(ctx, workspaceID, admission.Task.ID, actor)
 	if err != nil {
 		return err
 	}
-	if projection.Result.ID != seal.Request.ResultID || projection.Result.Outcome != task.ResultChanged ||
-		projection.Artifact.ResultCommit != projection.Result.ResultCommit || projection.Artifact.TreeOID != projection.Result.TreeOID ||
-		projection.Artifact.ChangesSHA256 != projection.Result.ManifestSHA256 {
+	if projection.Result.ID != resultID || projection.Result.Outcome != task.ResultChanged || projection.Result.State != taskstore.ResultSealed {
 		return fmt.Errorf("retained result tuple mismatch: %+v", projection)
 	}
-	locator, err := taskartifact.ParseLocator(projection.Artifact.CASLocator)
+	locator, err := taskartifact.ParseLocator(projection.Result.CASLocator())
 	if err != nil {
 		return err
 	}
-	resolver, err := taskresultsource.New(store, artifact)
+	resolver, err := taskresultsource.New(artifact)
 	if err != nil {
 		return err
 	}
-	resolvedPath, closeResolved, err := resolver.Acquire(ctx, projection.Result)
+	resolvedPath, closeResolved, err := resolver.Acquire(ctx, projection)
 	if err != nil {
 		return fmt.Errorf("resolve retained result for downstream consumer: %w", err)
 	}

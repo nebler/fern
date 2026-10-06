@@ -55,7 +55,7 @@ func TestFreshTaskStoreIsCurrentSchema(t *testing.T) {
 	}
 	var requiredTables int
 	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN
-('background_runs','retained_artifacts')`).Scan(&requiredTables); err != nil {
+('background_runs','results')`).Scan(&requiredTables); err != nil {
 		t.Fatal(err)
 	}
 	digest, digestErr := hex.DecodeString(checksum)

@@ -235,7 +235,7 @@ describe("createRunWorkflow", () => {
           runID: "run_123",
           state: "canceling" as const,
           resultPhase: "seal_requested" as const,
-          sealRequestID: "slr_0198d34d-7007-7007-8007-000000000007",
+          resultID: "res_0198d34d-7007-7007-8007-000000000007",
           committed: true as const,
         }
       },

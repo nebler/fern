@@ -46,37 +46,9 @@ func TestGeneratorProducesEveryTypedID(t *testing.T) {
 			return err
 		},
 		func() error {
-			value, err := generator.SealRequestID()
-			if err == nil {
-				_, err = ParseSealRequestID(string(value))
-			}
-			return err
-		},
-		func() error {
 			value, err := generator.ResultID()
 			if err == nil {
 				_, err = ParseResultID(string(value))
-			}
-			return err
-		},
-		func() error {
-			value, err := generator.ArtifactExportID()
-			if err == nil {
-				_, err = ParseArtifactExportID(string(value))
-			}
-			return err
-		},
-		func() error {
-			value, err := generator.RetainedArtifactID()
-			if err == nil {
-				_, err = ParseRetainedArtifactID(string(value))
-			}
-			return err
-		},
-		func() error {
-			value, err := generator.MaterializationID()
-			if err == nil {
-				_, err = ParseMaterializationID(string(value))
 			}
 			return err
 		},
@@ -125,35 +97,6 @@ func TestGenerateAdmissionIDsReturnsCompleteValidatedSet(t *testing.T) {
 	for index, validationErr := range checks {
 		if validationErr != nil {
 			t.Fatalf("admission ID %d: %v", index, validationErr)
-		}
-	}
-}
-
-func TestGenerateBackgroundSealIDsReturnsCompleteValidatedSet(t *testing.T) {
-	generator, err := NewGenerator(bytes.NewReader(make([]byte, 256)), func() time.Time { return time.UnixMilli(1_700_000_000_000) })
-	if err != nil {
-		t.Fatal(err)
-	}
-	ids, err := generator.GenerateBackgroundSealIDs()
-	if err != nil {
-		t.Fatal(err)
-	}
-	validations := []error{}
-	_, err = ParseSealRequestID(string(ids.SealRequestID))
-	validations = append(validations, err)
-	_, err = ParseReceiptID(string(ids.ReceiptID))
-	validations = append(validations, err)
-	_, err = ParseArtifactExportID(string(ids.ArtifactExportID))
-	validations = append(validations, err)
-	_, err = ParseRetainedArtifactID(string(ids.RetainedArtifactID))
-	validations = append(validations, err)
-	_, err = ParseMaterializationID(string(ids.MaterializationID))
-	validations = append(validations, err)
-	_, err = ParseResultID(string(ids.ResultID))
-	validations = append(validations, err)
-	for _, validationErr := range validations {
-		if validationErr != nil {
-			t.Fatal(validationErr)
 		}
 	}
 }

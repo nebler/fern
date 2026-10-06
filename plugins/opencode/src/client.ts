@@ -36,7 +36,7 @@ export type SealRunResult = {
   runID: string
   state: "canceling" | "result_ready"
   resultPhase: ResultPhase
-  sealRequestID: string
+  resultID: string
   committed: true
 }
 
@@ -54,7 +54,6 @@ export type RunResult = {
     manifestSHA256: string
   }
   artifact: {
-    id: string
     format: "git_bundle_v1"
     sha256: string
     bundleSHA256: string
@@ -313,7 +312,7 @@ export class FernClient {
       !isRecord(response) ||
       response.run_id !== expected ||
       response.committed !== true ||
-      !isFernID(response.seal_request_id, "slr_")
+      !isFernID(response.result_id, "res_")
     ) {
       throw new FernClientError("Fern returned an invalid seal response.")
     }
@@ -331,7 +330,7 @@ export class FernClient {
       runID: expected,
       state,
       resultPhase,
-      sealRequestID: response.seal_request_id,
+      resultID: response.result_id,
       committed: true,
     }
   }
@@ -574,7 +573,6 @@ function parseResultAuthority(value: Record<string, unknown>): RunResult["result
 
 function parseResultArtifact(value: Record<string, unknown>): RunResult["artifact"] {
   if (
-    !isFernID(value.id, "art_") ||
     value.format !== "git_bundle_v1" ||
     !isSHA256(value.sha256) ||
     !isSHA256(value.bundle_sha256) ||
@@ -584,7 +582,6 @@ function parseResultArtifact(value: Record<string, unknown>): RunResult["artifac
     throw new FernClientError("Fern returned invalid retained artifact metadata.")
   }
   return {
-    id: value.id,
     format: value.format,
     sha256: value.sha256,
     bundleSHA256: value.bundle_sha256,

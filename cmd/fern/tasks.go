@@ -179,7 +179,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, route *backgroundro
 		}
 	}()
 
-	resultSource, err := taskresultsource.New(store, artifact)
+	resultSource, err := taskresultsource.New(artifact)
 	if err != nil {
 		return nil, err
 	}
