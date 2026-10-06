@@ -490,7 +490,7 @@ func writeStoreError(w http.ResponseWriter, err error) {
 	case errors.Is(err, errInvalidBase):
 		WriteError(w, http.StatusBadRequest, "invalid_base", "base_oid must be an exact lowercase SHA-1 commit identity.")
 	case errors.Is(err, errProfileUnavailable):
-		WriteError(w, http.StatusServiceUnavailable, "profile_unavailable", fmt.Sprintf("Profile %s requires a configured image qualified for exact source commit 39fb919a054190498f6d5b7985bde231f93ad7a6.", PluginOpenCodeProfile))
+		WriteError(w, http.StatusServiceUnavailable, "profile_unavailable", fmt.Sprintf("Profile %s is unavailable: no background image qualified for it is configured.", PluginOpenCodeProfile))
 	case errors.Is(err, errBaseUnavailable):
 		WriteError(w, http.StatusUnprocessableEntity, "base_unavailable", "base_oid is not an exact commit reachable from an allowed configured-repository ref.")
 	case errors.Is(err, errReplayConflict):

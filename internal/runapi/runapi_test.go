@@ -184,7 +184,7 @@ func TestRunAPIRejectsRepositoryBaseProfileScopeAndMalformedHTTP(t *testing.T) {
 		t.Fatalf("unreachable=%d %s", got.Code, got.Body.String())
 	}
 	unavailable := newAPIFixture(t, "")
-	if got := unavailable.request(http.MethodPost, PathPrefix, validCreateBody("Work"), "profile-unavailable"); got.Code != http.StatusServiceUnavailable || !strings.Contains(got.Body.String(), "requires a configured image qualified") {
+	if got := unavailable.request(http.MethodPost, PathPrefix, validCreateBody("Work"), "profile-unavailable"); got.Code != http.StatusServiceUnavailable || !strings.Contains(got.Body.String(), "Profile "+PluginOpenCodeProfile+" is unavailable") {
 		t.Fatalf("unavailable=%d %s", got.Code, got.Body.String())
 	}
 	request := httptest.NewRequest(http.MethodGet, PathPrefix, nil)
