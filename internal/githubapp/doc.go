@@ -15,7 +15,8 @@
 // The onboarding callback exchanges a one-time manifest code at most once:
 // durable claims fence restarts and replays, credentials are saved before the
 // claim completes, and ambiguous outcomes are quarantined rather than retried.
-// The onboarding transaction gate is process-wide, not a multi-process lock.
+// Onboarding transactions are serialized per OnboardingStateStore, not across
+// processes.
 // CredentialStore provides private-file protection, not encryption at rest;
 // encrypted export is credentialbundle's job. Clients disable redirects, and
 // public errors never include response bodies or secrets.

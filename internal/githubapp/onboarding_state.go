@@ -9,23 +9,21 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
-	"golang.org/x/sys/unix"
+	"github.com/nebler/fern/internal/atomicfile"
 )
 
 const (
 	onboardingStateStoreVersion      = 2
 	onboardingStateFileName          = "onboarding-states-v2.json"
-	onboardingStateTempStem          = ".onboarding-states-v2-"
 	maxOnboardingStateFileBytes      = 128 << 10
 	maxOnboardingStates              = 64
 	maxOnboardingActiveStates        = 16
@@ -50,9 +48,6 @@ var (
 	ErrOnboardingStateLimit            = errors.New("too many outstanding GitHub App onboarding requests")
 	ErrOnboardingStateRejected         = errors.New("GitHub App onboarding state was rejected")
 	ErrOnboardingStateRecoveryRequired = errors.New("GitHub App onboarding state requires reconciliation")
-
-	onboardingStateTransaction  = make(chan struct{}, 1)
-	onboardingStateTempSequence atomic.Uint64
 )
 
 // OnboardingFlowBinding ties an onboarding state to one local flow and one
@@ -146,9 +141,11 @@ func (claim CallbackClaim) GoString() string {
 
 // OnboardingStateStore persists bounded, one-use callback states in a
 // caller-owned private directory. Raw state, callback code, and claim ID values
-// are never persisted.
+// are never persisted. Transactions are serialized per store; Fern opens one
+// store per process.
 type OnboardingStateStore struct {
-	directory string
+	directory   string
+	transaction chan struct{}
 }
 
 // NewOnboardingStateStore creates or validates the private state directory.
@@ -156,17 +153,13 @@ func NewOnboardingStateStore(directory string) (*OnboardingStateStore, error) {
 	if directory == "" {
 		return nil, ErrOnboardingStateStoreSecurity
 	}
-	if err := os.MkdirAll(directory, 0o700); err != nil {
+	if err := atomicfile.PrivateDir(directory); err != nil {
+		if errors.Is(err, atomicfile.ErrUnsafeDir) {
+			return nil, ErrOnboardingStateStoreSecurity
+		}
 		return nil, ErrOnboardingStateStoreIO
 	}
-	directoryHandle, err := openOnboardingStateDirectory(directory)
-	if err != nil {
-		return nil, err
-	}
-	if err := directoryHandle.Close(); err != nil {
-		return nil, ErrOnboardingStateStoreIO
-	}
-	return &OnboardingStateStore{directory: directory}, nil
+	return &OnboardingStateStore{directory: directory, transaction: make(chan struct{}, 1)}, nil
 }
 
 func (store *OnboardingStateStore) String() string {
@@ -192,23 +185,18 @@ func (store *OnboardingStateStore) Begin(ctx context.Context, state string, bind
 		return ErrOnboardingStateStoreSecurity
 	}
 
-	if err := lockOnboardingStateTransaction(ctx); err != nil {
+	if err := store.lock(ctx); err != nil {
 		return err
 	}
-	defer unlockOnboardingStateTransaction()
+	defer store.unlock()
 
-	directory, err := openOnboardingStateDirectory(store.directory)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	entries, _, err := readOnboardingStates(int(directory.Fd()))
+	entries, _, err := store.read()
 	if err != nil {
 		return err
 	}
 	entries, pruned := pruneOnboardingStates(entries, now)
 	if pruned {
-		if err := writeOnboardingStates(ctx, directory, entries); err != nil {
+		if err := store.write(ctx, entries); err != nil {
 			return err
 		}
 	}
@@ -235,7 +223,7 @@ func (store *OnboardingStateStore) Begin(ctx context.Context, state string, bind
 		issuedAt:   now,
 		expiresAt:  expiresAt,
 	})
-	return writeOnboardingStates(ctx, directory, entries)
+	return store.write(ctx, entries)
 }
 
 // ResolvePending returns the persisted binding for an unclaimed live state.
@@ -251,16 +239,11 @@ func (store *OnboardingStateStore) ResolvePending(ctx context.Context, state str
 	if store == nil || store.directory == "" {
 		return OnboardingFlowBinding{}, time.Time{}, ErrOnboardingStateStoreSecurity
 	}
-	if err := lockOnboardingStateTransaction(ctx); err != nil {
+	if err := store.lock(ctx); err != nil {
 		return OnboardingFlowBinding{}, time.Time{}, err
 	}
-	defer unlockOnboardingStateTransaction()
-	directory, err := openOnboardingStateDirectory(store.directory)
-	if err != nil {
-		return OnboardingFlowBinding{}, time.Time{}, err
-	}
-	defer directory.Close()
-	entries, exists, err := readOnboardingStates(int(directory.Fd()))
+	defer store.unlock()
+	entries, exists, err := store.read()
 	if err != nil {
 		return OnboardingFlowBinding{}, time.Time{}, err
 	}
@@ -269,7 +252,7 @@ func (store *OnboardingStateStore) ResolvePending(ctx context.Context, state str
 	}
 	entries, pruned := pruneOnboardingStates(entries, now)
 	if pruned {
-		if err := writeOnboardingStates(ctx, directory, entries); err != nil {
+		if err := store.write(ctx, entries); err != nil {
 			return OnboardingFlowBinding{}, time.Time{}, err
 		}
 	}
@@ -306,17 +289,12 @@ func (store *OnboardingStateStore) Claim(ctx context.Context, state string, bind
 	}
 	claimHash := sha256.Sum256([]byte(claimID))
 
-	if err := lockOnboardingStateTransaction(ctx); err != nil {
+	if err := store.lock(ctx); err != nil {
 		return zero, err
 	}
-	defer unlockOnboardingStateTransaction()
+	defer store.unlock()
 
-	directory, err := openOnboardingStateDirectory(store.directory)
-	if err != nil {
-		return zero, err
-	}
-	defer directory.Close()
-	entries, exists, err := readOnboardingStates(int(directory.Fd()))
+	entries, exists, err := store.read()
 	if err != nil {
 		return zero, err
 	}
@@ -325,7 +303,7 @@ func (store *OnboardingStateStore) Claim(ctx context.Context, state string, bind
 	}
 	entries, pruned := pruneOnboardingStates(entries, now)
 	if pruned {
-		if err := writeOnboardingStates(ctx, directory, entries); err != nil {
+		if err := store.write(ctx, entries); err != nil {
 			return zero, err
 		}
 	}
@@ -352,7 +330,7 @@ func (store *OnboardingStateStore) Claim(ctx context.Context, state string, bind
 		entry.codeHash = callbackCodeDigest
 		entry.claimHash = claimHash
 		entry.claimedAt = now
-		if err := writeOnboardingStates(ctx, directory, entries); err != nil {
+		if err := store.write(ctx, entries); err != nil {
 			return zero, err
 		}
 		return entry.claim(CallbackClaimExchangeOnce, false), nil
@@ -400,17 +378,12 @@ func (store *OnboardingStateStore) closeClaim(ctx context.Context, claim Callbac
 	if store == nil || store.directory == "" {
 		return ErrOnboardingStateStoreSecurity
 	}
-	if err := lockOnboardingStateTransaction(ctx); err != nil {
+	if err := store.lock(ctx); err != nil {
 		return err
 	}
-	defer unlockOnboardingStateTransaction()
+	defer store.unlock()
 
-	directory, err := openOnboardingStateDirectory(store.directory)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	entries, exists, err := readOnboardingStates(int(directory.Fd()))
+	entries, exists, err := store.read()
 	if err != nil {
 		return err
 	}
@@ -419,7 +392,7 @@ func (store *OnboardingStateStore) closeClaim(ctx context.Context, claim Callbac
 	}
 	entries, pruned := pruneOnboardingStates(entries, now)
 	if pruned {
-		if err := writeOnboardingStates(ctx, directory, entries); err != nil {
+		if err := store.write(ctx, entries); err != nil {
 			return err
 		}
 	}
@@ -465,7 +438,7 @@ func (store *OnboardingStateStore) closeClaim(ctx context.Context, claim Callbac
 		entry.status = onboardingStateStatusQuarantined
 		entry.quarantineReason = reason
 	}
-	return writeOnboardingStates(ctx, directory, entries)
+	return store.write(ctx, entries)
 }
 
 type onboardingStateEntry struct {
@@ -548,17 +521,18 @@ func contextError(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func lockOnboardingStateTransaction(ctx context.Context) error {
+// lock acquires the store's transaction slot, giving up if ctx ends first.
+func (store *OnboardingStateStore) lock(ctx context.Context) error {
 	select {
-	case onboardingStateTransaction <- struct{}{}:
+	case store.transaction <- struct{}{}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 }
 
-func unlockOnboardingStateTransaction() {
-	<-onboardingStateTransaction
+func (store *OnboardingStateStore) unlock() {
+	<-store.transaction
 }
 
 func onboardingStateHash(state string) ([sha256.Size]byte, error) {
@@ -679,83 +653,19 @@ func pruneOnboardingStates(entries []onboardingStateEntry, now time.Time) ([]onb
 	return kept, changed
 }
 
-func openOnboardingStateDirectory(path string) (*os.File, error) {
-	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		if errors.Is(err, unix.ELOOP) || errors.Is(err, unix.ENOTDIR) {
-			return nil, ErrOnboardingStateStoreSecurity
-		}
-		return nil, ErrOnboardingStateStoreIO
-	}
-	handle := os.NewFile(uintptr(fd), "GitHub App onboarding state directory")
-	if handle == nil {
-		unix.Close(fd)
-		return nil, ErrOnboardingStateStoreIO
-	}
-	info, err := handle.Stat()
-	var stat unix.Stat_t
-	if err != nil || unix.Fstat(fd, &stat) != nil {
-		handle.Close()
-		return nil, ErrOnboardingStateStoreIO
-	}
-	if !info.IsDir() || info.Mode().Perm() != 0o700 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || stat.Uid != uint32(unix.Geteuid()) {
-		handle.Close()
-		return nil, ErrOnboardingStateStoreSecurity
-	}
-	return handle, nil
+func (store *OnboardingStateStore) path() string {
+	return filepath.Join(store.directory, onboardingStateFileName)
 }
 
-func inspectOnboardingStateEntry(directoryFD int) (bool, error) {
-	var stat unix.Stat_t
-	err := unix.Fstatat(directoryFD, onboardingStateFileName, &stat, unix.AT_SYMLINK_NOFOLLOW)
-	if errors.Is(err, unix.ENOENT) {
-		return false, nil
-	}
-	if err != nil {
-		return false, ErrOnboardingStateStoreIO
-	}
-	if stat.Mode&unix.S_IFMT != unix.S_IFREG || stat.Mode&0o7777 != 0o600 || stat.Nlink != 1 || stat.Uid != uint32(unix.Geteuid()) {
-		return false, ErrOnboardingStateStoreSecurity
-	}
-	return true, nil
-}
-
-func requirePrivateOnboardingStateFile(file *os.File) error {
-	info, err := file.Stat()
-	var stat unix.Stat_t
-	if err != nil || unix.Fstat(int(file.Fd()), &stat) != nil {
-		return ErrOnboardingStateStoreIO
-	}
-	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 || info.Mode()&(os.ModeSetuid|os.ModeSetgid|os.ModeSticky) != 0 || stat.Nlink > 1 || stat.Uid != uint32(unix.Geteuid()) {
-		return ErrOnboardingStateStoreSecurity
-	}
-	return nil
-}
-
-func readOnboardingStates(directoryFD int) ([]onboardingStateEntry, bool, error) {
-	exists, err := inspectOnboardingStateEntry(directoryFD)
-	if err != nil || !exists {
-		return nil, exists, err
-	}
-	fd, err := unix.Openat(directoryFD, onboardingStateFileName, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
-	if err != nil {
-		return nil, false, ErrOnboardingStateStoreIO
-	}
-	file := os.NewFile(uintptr(fd), onboardingStateFileName)
-	if file == nil {
-		unix.Close(fd)
-		return nil, false, ErrOnboardingStateStoreIO
-	}
-	defer file.Close()
-	if err := requirePrivateOnboardingStateFile(file); err != nil {
-		return nil, false, err
-	}
-	payload, err := io.ReadAll(io.LimitReader(file, maxOnboardingStateFileBytes+1))
-	if err != nil {
-		return nil, false, ErrOnboardingStateStoreIO
-	}
-	if len(payload) > maxOnboardingStateFileBytes {
+func (store *OnboardingStateStore) read() ([]onboardingStateEntry, bool, error) {
+	payload, err := atomicfile.Read(store.path(), maxOnboardingStateFileBytes)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil, false, nil
+	case errors.Is(err, atomicfile.ErrTooLarge):
 		return nil, false, ErrOnboardingStateStoreInvalid
+	case err != nil:
+		return nil, false, ErrOnboardingStateStoreIO
 	}
 	entries, err := decodeOnboardingStateFile(payload)
 	if err != nil {
@@ -764,7 +674,7 @@ func readOnboardingStates(directoryFD int) ([]onboardingStateEntry, bool, error)
 	return entries, true, nil
 }
 
-func writeOnboardingStates(ctx context.Context, directory *os.File, entries []onboardingStateEntry) error {
+func (store *OnboardingStateStore) write(ctx context.Context, entries []onboardingStateEntry) error {
 	payload, err := encodeOnboardingStateFile(entries)
 	if err != nil || len(payload) > maxOnboardingStateFileBytes {
 		return ErrOnboardingStateStoreInvalid
@@ -772,67 +682,10 @@ func writeOnboardingStates(ctx context.Context, directory *os.File, entries []on
 	if err := contextError(ctx); err != nil {
 		return err
 	}
-	if _, err := inspectOnboardingStateEntry(int(directory.Fd())); err != nil {
-		return err
-	}
-	temporary, temporaryName, err := createOnboardingStateTemporary(int(directory.Fd()))
-	if err != nil {
-		return err
-	}
-	defer unix.Unlinkat(int(directory.Fd()), temporaryName, 0)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return ErrOnboardingStateStoreIO
-	}
-	if err := requirePrivateOnboardingStateFile(temporary); err != nil {
-		temporary.Close()
-		return err
-	}
-	if written, err := temporary.Write(payload); err != nil || written != len(payload) {
-		temporary.Close()
-		return ErrOnboardingStateStoreIO
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return ErrOnboardingStateStoreIO
-	}
-	if err := temporary.Close(); err != nil {
-		return ErrOnboardingStateStoreIO
-	}
-	if err := contextError(ctx); err != nil {
-		return err
-	}
-	if _, err := inspectOnboardingStateEntry(int(directory.Fd())); err != nil {
-		return err
-	}
-	if err := unix.Renameat(int(directory.Fd()), temporaryName, int(directory.Fd()), onboardingStateFileName); err != nil {
-		return ErrOnboardingStateStoreIO
-	}
-	if err := directory.Sync(); err != nil {
+	if err := atomicfile.Write(store.path(), payload, 0o600); err != nil {
 		return ErrOnboardingStateStoreIO
 	}
 	return nil
-}
-
-func createOnboardingStateTemporary(directoryFD int) (*os.File, string, error) {
-	for range 100 {
-		sequence := onboardingStateTempSequence.Add(1)
-		name := fmt.Sprintf("%s%d-%d.tmp", onboardingStateTempStem, os.Getpid(), sequence)
-		fd, err := unix.Openat(directoryFD, name, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0o600)
-		if errors.Is(err, unix.EEXIST) {
-			continue
-		}
-		if err != nil {
-			return nil, "", ErrOnboardingStateStoreIO
-		}
-		file := os.NewFile(uintptr(fd), name)
-		if file == nil {
-			unix.Close(fd)
-			return nil, "", ErrOnboardingStateStoreIO
-		}
-		return file, name, nil
-	}
-	return nil, "", ErrOnboardingStateStoreIO
 }
 
 func encodeOnboardingStateFile(entries []onboardingStateEntry) ([]byte, error) {

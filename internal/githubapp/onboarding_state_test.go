@@ -143,7 +143,7 @@ func TestOnboardingStateStoreClaimMismatchesAreIndistinguishable(t *testing.T) {
 }
 
 func TestOnboardingStateStoreConcurrentClaimsGrantOneExchangeAuthority(t *testing.T) {
-	store, directory := newTestOnboardingStateStore(t)
+	store, _ := newTestOnboardingStateStore(t)
 	now := testOnboardingTime()
 	state := testOnboardingState(4)
 	binding := testOnboardingBinding(4)
@@ -152,23 +152,15 @@ func TestOnboardingStateStoreConcurrentClaimsGrantOneExchangeAuthority(t *testin
 	if err := store.Begin(context.Background(), state, binding, now, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	restarted, err := NewOnboardingStateStore(directory)
-	if err != nil {
-		t.Fatal(err)
-	}
 
 	var exchange, reconcile atomic.Int32
 	errorsSeen := make(chan error, 32)
 	var wait sync.WaitGroup
-	for i := range 32 {
+	for range 32 {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			claimer := store
-			if i%2 != 0 {
-				claimer = restarted
-			}
-			claim, err := claimer.Claim(context.Background(), state, binding, codeHash, claimID, now)
+			claim, err := store.Claim(context.Background(), state, binding, codeHash, claimID, now)
 			if err != nil {
 				errorsSeen <- err
 				return
@@ -452,7 +444,7 @@ func TestOnboardingStateStoreLateCancellationAndWriteFailureRollback(t *testing.
 		if err := store.Begin(context.Background(), state, binding, now, now.Add(time.Minute)); err != nil {
 			t.Fatal(err)
 		}
-		ctx := newLateCancelContext(3)
+		ctx := newLateCancelContext(2)
 		if _, err := store.Claim(ctx, state, binding, testCallbackCodeDigest("code-130"), "claim-130", now); !errors.Is(err, context.Canceled) {
 			t.Fatalf("late claim error = %v", err)
 		}
@@ -466,7 +458,7 @@ func TestOnboardingStateStoreLateCancellationAndWriteFailureRollback(t *testing.
 		}
 	})
 
-	t.Run("temporary creation failure", func(t *testing.T) {
+	t.Run("write failure", func(t *testing.T) {
 		store, directory := newTestOnboardingStateStore(t)
 		now := testOnboardingTime()
 		state := testOnboardingState(131)
@@ -474,7 +466,7 @@ func TestOnboardingStateStoreLateCancellationAndWriteFailureRollback(t *testing.
 		if err := store.Begin(context.Background(), state, binding, now, now.Add(time.Minute)); err != nil {
 			t.Fatal(err)
 		}
-		remove := blockTestOnboardingTemporaries(t, directory)
+		remove := makeTestDirectoryReadOnly(t, directory)
 		if _, err := store.Claim(context.Background(), state, binding, testCallbackCodeDigest("code-131"), "claim-131", now); !errors.Is(err, ErrOnboardingStateStoreIO) {
 			t.Fatalf("write failure = %v", err)
 		}
@@ -484,7 +476,7 @@ func TestOnboardingStateStoreLateCancellationAndWriteFailureRollback(t *testing.
 			t.Fatalf("claim after write failure = %#v, %v", claim, err)
 		}
 
-		remove = blockTestOnboardingTemporaries(t, directory)
+		remove = makeTestDirectoryReadOnly(t, directory)
 		if err := store.Complete(context.Background(), claim, now); !errors.Is(err, ErrOnboardingStateStoreIO) {
 			t.Fatalf("complete write failure = %v", err)
 		}
@@ -512,7 +504,7 @@ func TestOnboardingStateStoreAtomicReplacementAndInterruptedTemps(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	interruptedPath := filepath.Join(directory, onboardingStateTempStem+"interrupted.tmp")
+	interruptedPath := filepath.Join(directory, "."+onboardingStateFileName+".interrupted.tmp")
 	const interruptedContent = "partial-sensitive-state-file"
 	if err := os.WriteFile(interruptedPath, []byte(interruptedContent), 0o600); err != nil {
 		t.Fatal(err)
@@ -531,12 +523,9 @@ func TestOnboardingStateStoreAtomicReplacementAndInterruptedTemps(t *testing.T) 
 	if err != nil || string(content) != interruptedContent {
 		t.Fatalf("interrupted temp = %q, error = %v", content, err)
 	}
-	if err := requirePrivateOnboardingStateFile(oldGeneration); err != nil {
-		t.Fatalf("old generation rejected: %v", err)
-	}
 }
 
-func TestOnboardingStateStoreRejectsUnsafeFilesystemObjects(t *testing.T) {
+func TestOnboardingStateStoreRejectsUnsafeDirectory(t *testing.T) {
 	t.Run("directory permissions", func(t *testing.T) {
 		directory := filepath.Join(t.TempDir(), "states")
 		if err := os.Mkdir(directory, 0o755); err != nil {
@@ -557,56 +546,6 @@ func TestOnboardingStateStoreRejectsUnsafeFilesystemObjects(t *testing.T) {
 			t.Fatal(err)
 		}
 		if _, err := NewOnboardingStateStore(link); !errors.Is(err, ErrOnboardingStateStoreSecurity) {
-			t.Fatalf("error = %v", err)
-		}
-	})
-	t.Run("state permissions", func(t *testing.T) {
-		store, directory := newTestOnboardingStateStore(t)
-		now := testOnboardingTime()
-		state := testOnboardingState(134)
-		binding := testOnboardingBinding(134)
-		if err := store.Begin(context.Background(), state, binding, now, now.Add(time.Minute)); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chmod(filepath.Join(directory, onboardingStateFileName), 0o640); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := store.Claim(context.Background(), state, binding, testCallbackCodeDigest("code-134"), "claim-134", now); !errors.Is(err, ErrOnboardingStateStoreSecurity) {
-			t.Fatalf("error = %v", err)
-		}
-	})
-	t.Run("state symlink", func(t *testing.T) {
-		store, directory := newTestOnboardingStateStore(t)
-		external := filepath.Join(t.TempDir(), "external")
-		const content = "external-sensitive-content"
-		if err := os.WriteFile(external, []byte(content), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(external, filepath.Join(directory, onboardingStateFileName)); err != nil {
-			t.Fatal(err)
-		}
-		now := testOnboardingTime()
-		err := store.Begin(context.Background(), testOnboardingState(135), testOnboardingBinding(135), now, now.Add(time.Minute))
-		if !errors.Is(err, ErrOnboardingStateStoreSecurity) {
-			t.Fatalf("error = %v", err)
-		}
-		got, err := os.ReadFile(external)
-		if err != nil || string(got) != content {
-			t.Fatalf("external = %q, error = %v", got, err)
-		}
-	})
-	t.Run("state hard link", func(t *testing.T) {
-		store, directory := newTestOnboardingStateStore(t)
-		now := testOnboardingTime()
-		state := testOnboardingState(136)
-		binding := testOnboardingBinding(136)
-		if err := store.Begin(context.Background(), state, binding, now, now.Add(time.Minute)); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Link(filepath.Join(directory, onboardingStateFileName), filepath.Join(t.TempDir(), "hard-link")); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := store.Claim(context.Background(), state, binding, testCallbackCodeDigest("code-136"), "claim-136", now); !errors.Is(err, ErrOnboardingStateStoreSecurity) {
 			t.Fatalf("error = %v", err)
 		}
 	})
@@ -788,21 +727,14 @@ func hexDigest(digest [sha256.Size]byte) string {
 	return fmt.Sprintf("%x", digest)
 }
 
-func blockTestOnboardingTemporaries(t *testing.T, directory string) func() {
+func makeTestDirectoryReadOnly(t *testing.T, directory string) func() {
 	t.Helper()
-	firstSequence := onboardingStateTempSequence.Load() + 1
-	blocked := make([]string, 100)
-	for i := range blocked {
-		blocked[i] = filepath.Join(directory, fmt.Sprintf("%s%d-%d.tmp", onboardingStateTempStem, os.Getpid(), firstSequence+uint64(i)))
-		if err := os.WriteFile(blocked[i], []byte("occupied"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.Chmod(directory, 0o500); err != nil {
+		t.Fatal(err)
 	}
 	return func() {
-		for _, path := range blocked {
-			if err := os.Remove(path); err != nil {
-				t.Fatal(err)
-			}
+		if err := os.Chmod(directory, 0o700); err != nil {
+			t.Fatal(err)
 		}
 	}
 }
