@@ -35,7 +35,7 @@ func TestBackgroundRunAdmissionStopAndRestart(t *testing.T) {
 	stopParams.Claim.Key = "run-stop"
 	stopParams.Claim.RequestHash = stopHash
 	stopped, err := store.StopBackgroundRun(context.Background(), stopParams)
-	if err != nil || stopped.Run.State != BackgroundRunFailed || stopped.Run.CancelEpoch != 1 || stopped.Run.StopReceiptID != stopParams.ReceiptID {
+	if err != nil || stopped.Run.State != BackgroundRunFailed || stopped.Run.StopReceiptID == "" || stopped.Run.StopReceiptID != stopParams.ReceiptID {
 		t.Fatalf("stop = %+v, error = %v", stopped, err)
 	}
 	replay, err := store.StopBackgroundRun(context.Background(), stopParams)
@@ -267,10 +267,10 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 		t.Fatalf("stale revision mutated run: %v", err)
 	}
 	ref := BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID,
-		Generation: run.Generation, ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, CancelEpoch: run.CancelEpoch, Now: now.Add(2 * time.Second)}
+		Generation: run.Generation, ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now.Add(2 * time.Second)}
 	advance := func(next BackgroundRun, at time.Time) {
 		run = next
-		ref.ExpectedRevision, ref.ExpectedState, ref.ExpectedPhase, ref.CancelEpoch, ref.Now = run.Revision, run.State, run.EffectPhase, run.CancelEpoch, at
+		ref.ExpectedRevision, ref.ExpectedState, ref.ExpectedPhase, ref.Now = run.Revision, run.State, run.EffectPhase, at
 	}
 	run, err = store.RecordBackgroundRunCloneObserved(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref, Evidence: "clone exact"})
 	if err != nil {
@@ -328,7 +328,7 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 	stop.Claim.RequestHash = sha256.Sum256([]byte("active-stop"))
 	stopped, err := store.StopBackgroundRun(context.Background(), stop)
 	if err != nil || stopped.Run.State != BackgroundRunCanceling || stopped.Run.EffectPhase != BackgroundRunEffectStopIntent ||
-		stopped.Run.Revision != run.Revision+1 || stopped.Run.CancelEpoch != 1 {
+		stopped.Run.Revision != run.Revision+1 || stopped.Run.StopReceiptID == "" {
 		t.Fatalf("active stop = %+v, error = %v", stopped, err)
 	}
 	if replay, replayErr := store.StopBackgroundRun(context.Background(), stop); replayErr != nil || !replay.Replayed || replay.Receipt.ID != stopped.Receipt.ID || string(replay.Receipt.ResponseProjection) != string(stopped.Receipt.ResponseProjection) {
@@ -340,22 +340,21 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 	}
 
 	stopRun, err := startNextBackgroundRun(context.Background(), store, stop.StoppedAt.Add(time.Second))
-	if err != nil || stopRun.TaskID != stopped.Run.TaskID || stopRun.State != BackgroundRunCanceling || stopRun.CancelEpoch != 1 {
+	if err != nil || stopRun.TaskID != stopped.Run.TaskID || stopRun.State != BackgroundRunCanceling || stopRun.StopReceiptID == "" {
 		t.Fatalf("stopped next run = %+v, error = %v", stopRun, err)
 	}
 	// A coordinator that read the run before the stop committed holds a stale
 	// revision; the compare-and-swap rejects its write.
 	stale := BackgroundRunRef{WorkspaceID: stopRun.WorkspaceID, TaskID: stopRun.TaskID, AttemptID: stopRun.AttemptID,
 		Generation: stopRun.Generation, ExpectedRevision: run.Revision,
-		ExpectedState: stopRun.State, ExpectedPhase: stopRun.EffectPhase, CancelEpoch: stopRun.CancelEpoch, Now: stop.StoppedAt.Add(2 * time.Second)}
+		ExpectedState: stopRun.State, ExpectedPhase: stopRun.EffectPhase, Now: stop.StoppedAt.Add(2 * time.Second)}
 	if _, err := store.RecordBackgroundRunWriterInactive(context.Background(), RecordBackgroundRunEvidenceParams{
 		BackgroundRunRef: stale, Evidence: "stale writer observation",
 	}); !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("stale revision mutated run: %v", err)
 	}
 	cleanupRef := BackgroundRunRef{WorkspaceID: stopRun.WorkspaceID, TaskID: stopRun.TaskID, AttemptID: stopRun.AttemptID,
-		Generation: stopRun.Generation, ExpectedRevision: stopRun.Revision, ExpectedState: stopRun.State, ExpectedPhase: stopRun.EffectPhase,
-		CancelEpoch: stopRun.CancelEpoch, Now: stop.StoppedAt.Add(2 * time.Second)}
+		Generation: stopRun.Generation, ExpectedRevision: stopRun.Revision, ExpectedState: stopRun.State, ExpectedPhase: stopRun.EffectPhase, Now: stop.StoppedAt.Add(2 * time.Second)}
 	advanceCleanup := func(next BackgroundRun) {
 		cleanupRef.ExpectedRevision, cleanupRef.ExpectedState, cleanupRef.ExpectedPhase = next.Revision, next.State, next.EffectPhase
 		cleanupRef.Now = cleanupRef.Now.Add(time.Second)
@@ -487,7 +486,7 @@ func TestBackgroundRunSystemTimeoutHasNoPluginReceipt(t *testing.T) {
 		BackgroundRunRef: backgroundRunRef(work.Run, now), AttemptEventID: testEventID(2081), TaskEventID: testEventID(2082), Actor: actor,
 	})
 	if err != nil || timedOut.State != BackgroundRunCleanupRequired || timedOut.EffectPhase != BackgroundRunEffectStopIntent ||
-		timedOut.TimeoutRequestedAt == nil || timedOut.CancelEpoch != 0 || timedOut.StopReceiptID != "" {
+		timedOut.TimeoutRequestedAt == nil || timedOut.StopReceiptID != "" {
 		t.Fatalf("system timeout = %+v, error=%v", timedOut, err)
 	}
 	var events, receipts int
@@ -630,8 +629,7 @@ func TestBackgroundRunPreEffectFailureRequiresAbsenceProofAndFinalizesParents(t 
 		t.Fatal(err)
 	}
 	ref := BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID,
-		Generation: run.Generation, ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase,
-		CancelEpoch: run.CancelEpoch, Now: now.Add(time.Second)}
+		Generation: run.Generation, ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now.Add(time.Second)}
 	if _, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
 		BackgroundRunRef: ref, AttemptEventID: testEventID(2152), TaskEventID: testEventID(2153),
 		Actor: testSystemActor(), Reason: "background_image_unavailable", Evidence: "image inspect returned deterministic absence",
@@ -740,7 +738,7 @@ func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitBackgro
 func backgroundRunRef(run BackgroundRun, now time.Time) BackgroundRunRef {
 	return BackgroundRunRef{
 		WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, CancelEpoch: run.CancelEpoch, Now: now,
+		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now,
 	}
 }
 
@@ -785,7 +783,7 @@ func advanceBackgroundRunToPromptIntent(t *testing.T, store *Store, image string
 		t.Fatal(err)
 	}
 	ref := BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID,
-		Generation: run.Generation, ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, CancelEpoch: run.CancelEpoch, Now: now.Add(time.Second)}
+		Generation: run.Generation, ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now.Add(time.Second)}
 	evidenceStep := func(step func(context.Context, RecordBackgroundRunEvidenceParams) (BackgroundRun, error), evidence string) {
 		run, err = step(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref, Evidence: evidence})
 		if err != nil {
@@ -816,7 +814,6 @@ func advanceBackgroundRef(ref *BackgroundRunRef, run BackgroundRun) {
 	ref.ExpectedRevision = run.Revision
 	ref.ExpectedState = run.State
 	ref.ExpectedPhase = run.EffectPhase
-	ref.CancelEpoch = run.CancelEpoch
 }
 
 func testBackgroundRunAdmission(n int, key string) AdmitBackgroundRunParams {

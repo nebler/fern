@@ -107,7 +107,6 @@ type BackgroundRun struct {
 	OpenCodeMessageID          task.OpenCodeMessageID
 	State                      BackgroundRunState
 	EffectPhase                BackgroundRunEffectPhase
-	CancelEpoch                uint64
 	StopReceiptID              task.ReceiptID
 	StopActor                  *task.ActorSnapshot
 	StopRequestedAt            *time.Time
@@ -203,7 +202,6 @@ type BackgroundRunRef struct {
 	ExpectedRevision int64
 	ExpectedState    BackgroundRunState
 	ExpectedPhase    BackgroundRunEffectPhase
-	CancelEpoch      uint64
 	Now              time.Time
 }
 

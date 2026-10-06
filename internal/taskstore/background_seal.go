@@ -68,7 +68,7 @@ func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams
 		return BackgroundRunSealAdmission{}, err
 	}
 	if run.AttemptID != p.AttemptID || run.Generation != p.Generation || run.Revision != p.ExpectedRunRevision ||
-		run.CancelEpoch != 0 || run.EffectPhase != BackgroundRunEffectPromptAdmitted ||
+		run.EffectPhase != BackgroundRunEffectPromptAdmitted ||
 		(run.State != BackgroundRunWorking && run.State != BackgroundRunNeedsYou && run.State != BackgroundRunUncertain) ||
 		run.BackgroundSealRequestID != "" || run.TimeoutRequestedAt != nil || run.StopReceiptID != "" {
 		return BackgroundRunSealAdmission{}, ErrInvalidState
@@ -137,7 +137,7 @@ VALUES(?,?,?,?,?,'prepared',1,?,?)`, p.MaterializationID, p.SealRequestID, p.Exp
 stop_intent_at=COALESCE(stop_intent_at,?),background_seal_request_id=?,artifact_export_id=?,retained_artifact_id=?,
 materialization_id=?,retained_result_id=?,result_authority_phase='seal_intent',
 revision=revision+1,updated_at=? WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND
-state IN ('working','needs_you','uncertain') AND effect_phase='prompt_admitted' AND cancel_epoch=0 AND stop_receipt_id IS NULL AND timeout_requested_at IS NULL`,
+state IN ('working','needs_you','uncertain') AND effect_phase='prompt_admitted' AND stop_receipt_id IS NULL AND timeout_requested_at IS NULL`,
 		now, p.SealRequestID, p.ExportID, p.ArtifactID, p.MaterializationID, p.ResultID, now,
 		p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedRunRevision)
 	if err != nil {

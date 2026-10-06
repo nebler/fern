@@ -14,7 +14,7 @@ import (
 
 func (s *Store) RecordBackgroundRunWriterFence(ctx context.Context, p RecordBackgroundRunWriterFenceParams) (_ BackgroundRun, err error) {
 	if err := validateBackgroundRunRef(p.BackgroundRunRef); err != nil || p.ExpectedState != BackgroundRunCanceling ||
-		p.ExpectedPhase != BackgroundRunEffectSealIntent || p.CancelEpoch != 0 {
+		p.ExpectedPhase != BackgroundRunEffectSealIntent {
 		return BackgroundRun{}, fmt.Errorf("%w: writer fence revision", ErrInvalidInput)
 	}
 	if _, parseErr := task.ParseSealRequestID(string(p.SealRequestID)); parseErr != nil {

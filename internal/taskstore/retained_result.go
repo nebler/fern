@@ -77,7 +77,7 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 		fence.ExportID != p.ExportID || fence.TaskID != p.TaskID || fence.AttemptID != p.AttemptID || fence.Generation != p.Generation ||
 		run.ResultAuthorityPhase != "exporting" || run.EffectPhase != BackgroundRunEffectExporting || run.BackgroundSealRequestID != request.ID ||
 		run.ArtifactExportID != p.ExportID || run.RetainedArtifactID != p.ArtifactID || run.MaterializationID != p.MaterializationID ||
-		run.RetainedResultID != p.ResultID || run.CancelEpoch != 0 || owner.Revision != request.ExpectedTaskRevision ||
+		run.RetainedResultID != p.ResultID || owner.Revision != request.ExpectedTaskRevision ||
 		attempt.Revision != request.ExpectedAttemptRevision || owner.State != task.TaskQueued || owner.SealedResultID != "" ||
 		owner.CurrentAttemptID != attempt.ID || attempt.State != task.AttemptPrepared || attempt.SealedResultID != "" {
 		return BackgroundRunRetainedResult{}, ErrInvalidState

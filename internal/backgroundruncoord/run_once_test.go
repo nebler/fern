@@ -576,7 +576,7 @@ func TestRunOnceStopCleanupFailureRecoveryPastDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	r = f.run(t)
-	if r.State != taskstore.BackgroundRunFailed || r.CancelEpoch != 1 || r.TimeoutRequestedAt != nil {
+	if r.State != taskstore.BackgroundRunFailed || r.StopReceiptID == "" || r.TimeoutRequestedAt != nil {
 		t.Fatalf("terminal state: %+v", r)
 	}
 	if f.d.item != nil {

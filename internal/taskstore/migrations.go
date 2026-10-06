@@ -363,7 +363,6 @@ CREATE TABLE background_runs (
       'session_observed','prompt_intent','prompt_admitted','stop_intent','writer_inactive','route_removed',
       'container_removed','volume_removed','clone_removed','cleanup_complete','pre_effect_failed'
     )),
-    cancel_epoch INTEGER NOT NULL DEFAULT 0 CHECK(cancel_epoch IN (0,1)),
     stop_receipt_id TEXT REFERENCES receipts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     stop_actor_snapshot_id INTEGER REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     stop_requested_at INTEGER,
@@ -414,8 +413,8 @@ CREATE TABLE background_runs (
   CHECK(resource_spec_version=10), background_seal_request_id TEXT, artifact_export_id TEXT, retained_artifact_id TEXT, materialization_id TEXT, retained_result_id TEXT, result_authority_phase TEXT
   CHECK(result_authority_phase IS NULL OR result_authority_phase IN
     ('seal_intent','writer_inactive','exporting','artifact_committed','cleanup')),
-    CHECK((cancel_epoch=0 AND stop_receipt_id IS NULL AND stop_actor_snapshot_id IS NULL AND stop_requested_at IS NULL AND state<>'canceling') OR
-          (cancel_epoch=1 AND stop_receipt_id IS NOT NULL AND stop_actor_snapshot_id IS NOT NULL AND stop_requested_at IS NOT NULL AND
+    CHECK((stop_receipt_id IS NULL AND stop_actor_snapshot_id IS NULL AND stop_requested_at IS NULL AND state<>'canceling') OR
+          (stop_receipt_id IS NOT NULL AND stop_actor_snapshot_id IS NOT NULL AND stop_requested_at IS NOT NULL AND
            state IN ('canceling','uncertain','result_ready','failed','cleanup_required'))),
     CHECK(
         (state='queued' AND effect_phase='absent') OR
@@ -499,7 +498,7 @@ WHEN NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at
 BEGIN SELECT RAISE(ABORT, 'invalid background run revision'); END;
 
 CREATE TRIGGER background_runs_stop_fields_immutable BEFORE UPDATE ON background_runs
-WHEN OLD.cancel_epoch=1 AND (NEW.cancel_epoch<>OLD.cancel_epoch OR NEW.stop_receipt_id IS NOT OLD.stop_receipt_id OR
+WHEN OLD.stop_receipt_id IS NOT NULL AND (NEW.stop_receipt_id IS NOT OLD.stop_receipt_id OR
   NEW.stop_actor_snapshot_id IS NOT OLD.stop_actor_snapshot_id OR NEW.stop_requested_at IS NOT OLD.stop_requested_at)
 BEGIN SELECT RAISE(ABORT, 'background run stop fields are immutable'); END;
 

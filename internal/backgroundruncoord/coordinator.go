@@ -199,7 +199,7 @@ func (c *Coordinator) runOnce(ctx context.Context) (taskstore.BackgroundRunWork,
 	if !lifecycle.Valid {
 		return work, taskstore.ErrCorruptStore
 	}
-	if work.Run.CancelEpoch == 0 && work.Run.TimeoutRequestedAt == nil && lifecycle.TimeoutEligible &&
+	if work.Run.StopReceiptID == "" && work.Run.TimeoutRequestedAt == nil && lifecycle.TimeoutEligible &&
 		!now.Before(work.Deadline) {
 		return work, c.requestTimeout(ctx, work.Run)
 	}
@@ -224,7 +224,7 @@ func (c *Coordinator) process(operation, parent context.Context, work taskstore.
 	case taskstore.BackgroundRunEffectHealthObserved, taskstore.BackgroundRunEffectReady,
 		taskstore.BackgroundRunEffectSessionObserved, taskstore.BackgroundRunEffectPromptIntent,
 		taskstore.BackgroundRunEffectPromptAdmitted:
-		if run.CancelEpoch == 0 && run.TimeoutRequestedAt == nil {
+		if run.StopReceiptID == "" && run.TimeoutRequestedAt == nil {
 			if err := c.provider.RefreshGitHubCredentials(operation, run); err != nil {
 				return c.externalFailure(parent, work, err)
 			}
@@ -390,7 +390,7 @@ func (c *Coordinator) process(operation, parent context.Context, work taskstore.
 		reason := "runtime_unavailable"
 		if run.TimeoutRequestedAt != nil {
 			reason = "attempt_timeout"
-		} else if run.CancelEpoch == 1 {
+		} else if run.StopReceiptID != "" {
 			reason = "user_stopped"
 		}
 		mutation, cancel, now, err := c.effectContext(parent, work, false)
@@ -1074,8 +1074,7 @@ func (c *Coordinator) recordObservation(ctx context.Context, work taskstore.Back
 // ref pins the revision this scan read; every write is a compare-and-swap on it.
 func ref(run taskstore.BackgroundRun, now time.Time) taskstore.BackgroundRunRef {
 	return taskstore.BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID,
-		Generation: run.Generation, ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase,
-		CancelEpoch: run.CancelEpoch, Now: now}
+		Generation: run.Generation, ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now}
 }
 
 func evidence(run taskstore.BackgroundRun, now time.Time, value string) taskstore.RecordBackgroundRunEvidenceParams {

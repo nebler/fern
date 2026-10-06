@@ -538,7 +538,7 @@ func (f *apiFixture) advanceToPrompt(t *testing.T, id task.TaskID) taskstore.Bac
 
 func openTestRef(run taskstore.BackgroundRun, now time.Time) taskstore.BackgroundRunRef {
 	return taskstore.BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, CancelEpoch: run.CancelEpoch, Now: now}
+		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now}
 }
 func (f *apiFixture) withActor(t *testing.T, actor task.ActorSnapshot) *apiFixture {
 	clone := *f

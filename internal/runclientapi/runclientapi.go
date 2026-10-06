@@ -162,7 +162,7 @@ func attachmentReady(run taskstore.BackgroundRun) bool {
 		run.State == taskstore.BackgroundRunNeedsYou || run.State == taskstore.BackgroundRunUncertain
 	ready := run.EffectPhase == taskstore.BackgroundRunEffectSessionObserved || run.EffectPhase == taskstore.BackgroundRunEffectPromptIntent ||
 		run.EffectPhase == taskstore.BackgroundRunEffectPromptAdmitted
-	return active && ready && run.SessionObservedAt != nil && run.CancelEpoch == 0
+	return active && ready && run.SessionObservedAt != nil && run.StopReceiptID == ""
 }
 
 func emptyBody(request *http.Request) bool {

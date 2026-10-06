@@ -21,7 +21,7 @@ const backgroundRunSelect = `
 SELECT r.task_id,r.attempt_id,r.workspace_id,r.generation,r.writer_generation,r.repository_id,r.repository_remote,r.base_oid,r.branch,
        r.instruction_sha256,r.profile,r.profile_sha256,r.environment_sha256,r.resource_spec_version,r.image_identity,r.clone_identity,r.volume_identity,
        r.container_identity,r.endpoint_identity,r.opencode_session_id,r.opencode_message_id,r.state,r.effect_phase,
-       r.cancel_epoch,r.stop_receipt_id,r.stop_requested_at,
+       r.stop_receipt_id,r.stop_requested_at,
 	       r.clone_evidence,r.volume_evidence,r.observed_container_id,r.observed_container_started_at,r.runtime_epoch,r.host_port,
 	       r.health_evidence,r.ready_evidence,r.session_evidence,r.prompt_evidence,r.writer_inactive_evidence,r.route_removed_evidence,
 	       r.container_removed_evidence,r.volume_removed_evidence,r.clone_removed_evidence,r.last_evidence,r.last_error,
@@ -187,7 +187,7 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 	}
 	queuedStop := run.State == BackgroundRunQueued && run.EffectPhase == BackgroundRunEffectAbsent
 	activeStop := run.State == BackgroundRunSettingUp || run.State == BackgroundRunWorking || run.State == BackgroundRunNeedsYou || run.State == BackgroundRunUncertain
-	if run.CancelEpoch != 0 || (!queuedStop && !activeStop) {
+	if run.StopReceiptID != "" || (!queuedStop && !activeStop) {
 		return BackgroundRunStop{}, ErrInvalidState
 	}
 	owner, err := getTask(ctx, tx, run.TaskID)
@@ -224,10 +224,10 @@ VALUES(?,?,?,'accepted',?,?,?,?,?,'task',?,202,?)`, p.ReceiptID, run.WorkspaceID
 		return BackgroundRunStop{}, fmt.Errorf("insert background run stop receipt: %w", err)
 	}
 	if activeStop {
-		result, updateErr := tx.ExecContext(ctx, `UPDATE background_runs SET state='canceling',effect_phase='stop_intent',cancel_epoch=1,
+		result, updateErr := tx.ExecContext(ctx, `UPDATE background_runs SET state='canceling',effect_phase='stop_intent',
 stop_receipt_id=?,stop_actor_snapshot_id=?,stop_requested_at=?,stop_intent_at=?,
 revision=revision+1,updated_at=?
-WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND cancel_epoch=0 AND revision=? AND
+WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND stop_receipt_id IS NULL AND revision=? AND
 state IN ('setting_up','working','needs_you','uncertain')`, p.ReceiptID, actorID, now, now, now,
 			run.TaskID, run.AttemptID, run.WorkspaceID, run.Generation, run.Revision)
 		if updateErr != nil {
@@ -286,9 +286,9 @@ WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND re
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRunStop{}, ErrInvalidState
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE background_runs SET state='failed',effect_phase='pre_effect_failed',cancel_epoch=1,
+	result, err = tx.ExecContext(ctx, `UPDATE background_runs SET state='failed',effect_phase='pre_effect_failed',
 stop_receipt_id=?,stop_actor_snapshot_id=?,stop_requested_at=?,absence_proof='queued:no_effect_claim',last_error=?,revision=revision+1,updated_at=?
-WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND state='queued' AND effect_phase='absent' AND cancel_epoch=0 AND revision=?`,
+WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND state='queued' AND effect_phase='absent' AND stop_receipt_id IS NULL AND revision=?`,
 		p.ReceiptID, actorID, now, BackgroundRunStoppedBeforeStart, now, run.TaskID, run.AttemptID, run.WorkspaceID, run.Generation, run.Revision)
 	if err != nil {
 		return BackgroundRunStop{}, fmt.Errorf("fence background run stop: %w", err)
@@ -350,7 +350,7 @@ WHERE r.workspace_id=? AND r.task_id=? AND c.actor_type=? AND c.actor_id=? AND c
 
 func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	var run BackgroundRun
-	var repositoryID, cancelEpoch int64
+	var repositoryID int64
 	var branch, stopReceipt, cloneEvidence, volumeEvidence, containerID, containerStarted sql.NullString
 	var healthEvidence, readyEvidence, sessionEvidence, promptEvidence, writerEvidence, routeEvidence sql.NullString
 	var containerRemovedEvidence, volumeRemovedEvidence, cloneRemovedEvidence, evidence, lastError, cleanupProof, absenceProof sql.NullString
@@ -366,7 +366,7 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	err := row.Scan(&run.TaskID, &run.AttemptID, &run.WorkspaceID, &run.Generation, &run.WriterGeneration, &repositoryID,
 		&run.RepositoryRemote, &run.BaseOID, &branch, &instructionHash, &run.Profile, &profileHash, &environmentHash, &run.ResourceSpecVersion,
 		&run.ImageIdentity, &run.CloneIdentity, &run.VolumeIdentity, &run.ContainerIdentity, &run.EndpointIdentity,
-		&run.OpenCodeSessionID, &run.OpenCodeMessageID, &run.State, &run.EffectPhase, &cancelEpoch,
+		&run.OpenCodeSessionID, &run.OpenCodeMessageID, &run.State, &run.EffectPhase,
 		&stopReceipt, &stopAt,
 		&cloneEvidence, &volumeEvidence, &containerID, &containerStarted, &runtimeEpoch, &hostPort,
 		&healthEvidence, &readyEvidence, &sessionEvidence, &promptEvidence, &writerEvidence, &routeEvidence,
@@ -382,7 +382,7 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 		return BackgroundRun{}, err
 	}
 	if len(instructionHash) != 32 || len(profileHash) != 32 || len(environmentHash) != 32 || bytes.Equal(environmentHash, make([]byte, 32)) ||
-		run.ResourceSpecVersion != backgroundRunResourceSpecVersion || repositoryID <= 0 || run.Generation <= 0 || run.WriterGeneration != 1 || cancelEpoch < 0 ||
+		run.ResourceSpecVersion != backgroundRunResourceSpecVersion || repositoryID <= 0 || run.Generation <= 0 || run.WriterGeneration != 1 ||
 		!validBackgroundRunStatePhase(run.Profile, run.State, run.EffectPhase) || run.Creator.Validate() != nil || run.Creator.Type != task.ActorOpenCode {
 		return BackgroundRun{}, ErrCorruptStore
 	}
@@ -390,7 +390,6 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	copy(run.ProfileSHA256[:], profileHash)
 	copy(run.EnvironmentSHA256[:], environmentHash)
 	run.RepositoryID = task.RepositoryID(repositoryID)
-	run.CancelEpoch = uint64(cancelEpoch)
 	run.Branch = nullableString(branch)
 	run.CreatedAt, run.UpdatedAt = fromUnixMillis(created), fromUnixMillis(updated)
 	run.ObservedContainerID = nullableText(containerID)
@@ -449,8 +448,8 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	default:
 		return BackgroundRun{}, ErrCorruptStore
 	}
-	if cancelEpoch == 1 {
-		if !stopReceipt.Valid || !stopAt.Valid || !stopType.Valid || !stopID.Valid || !stopCredential.Valid || !stopAuth.Valid || !stopRequest.Valid {
+	if stopReceipt.Valid {
+		if !stopAt.Valid || !stopType.Valid || !stopID.Valid || !stopCredential.Valid || !stopAuth.Valid || !stopRequest.Valid {
 			return BackgroundRun{}, ErrCorruptStore
 		}
 		run.StopReceiptID = task.ReceiptID(stopReceipt.String)
