@@ -74,7 +74,7 @@ The client uses JSON and a Fern plugin bearer after device authorization:
 - `GET /fern/api/runs` and `GET /fern/api/runs/:id`.
 - `POST /fern/api/runs/:id/stop` with `Idempotency-Key`.
 - `POST /fern/api/runs/:id/seal` with a fresh `Idempotency-Key` and exact body `{}`; expects committed seal identity and phase metadata. It reuses the `run:result` scope.
-- `GET /fern/api/v1/runs/:id/attach` uses `run:attach` and returns a short-lived capability to the `fern` CLI; the plugin does not invoke it. This terminal-client surface is separate from the plugin-only `/fern/api/runs` contract.
+- `GET /fern/api/runs/:id/attach` uses `run:attach` and returns a short-lived capability to the `fern` CLI; the plugin does not invoke it. List and get also report an advisory `attachable` flag.
 - `GET /fern/api/runs/:id/result`; returns immutable result commit/tree/changes-manifest metadata, the distinct whole artifact-manifest digest, retained `git_bundle_v1` digest and size, retention verification/reconstruction facts, and cleanup completion. `artifact.sha256` currently equals the whole artifact-manifest digest; neither equals the changes digest by contract. It contains no artifact URL, CAS locator, storage key, or server path.
 
 Create, list, get, stop, attach, seal, and result share the deployed contract. Result returns `409 Conflict` while retention is in progress and `503 Service Unavailable` when durable export recovery is required.

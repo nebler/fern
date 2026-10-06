@@ -146,9 +146,9 @@ require a CSRF token bound to the method and exact path.
 | --- | --- | --- |
 | remote | `POST /fern/api/plugin-auth/{start,poll}`, `GET\|POST /fern/pair`, `GET /fern/github/app/callback` | public |
 | remote | `GET /fern/`, `GET /fern/api/v1/csrf`, `GET /fern/plugin-auth/authorize`, `POST /fern/api/plugin-auth/requests/:id/{approve,deny}` | device |
-| remote | `/fern/api/runs` (runapi), `GET /fern/api/v1/runs[/:id/attach]`, `POST /fern/api/plugin-auth/self/revoke` | plugin |
+| remote | `/fern/api/runs` (runapi, including `GET /fern/api/runs/:id/attach`), `POST /fern/api/plugin-auth/self/revoke` | plugin |
 | operator | `GET /fern/live`, `GET /fern/ready` | public |
-| operator | status, metrics, landing, control page, `POST /fern/pair/new`, device and plugin credential administration, plugin approval, `GET /fern/api/v1/runs[/:id/attach]`, GitHub App setup/callback | operator |
+| operator | status, metrics, landing, control page, `POST /fern/pair/new`, device and plugin credential administration, plugin approval, `GET /fern/api/runs[/:id[/attach]]` (runapi, workspace-wide, read and attach only), GitHub App setup/callback | operator |
 
 The live route listener (`backgroundroute`, `:8443`) is separate: it admits only
 attachment capabilities and applies the OpenCode allow-list in `policy.go`.
@@ -402,13 +402,13 @@ does not authorize execution after cancellation and cannot block teardown.
 
 ## 15. Terminal-Native Attachment
 
-`fern runs` queries `/fern/api/v1/runs` through either loopback operator Basic
+`fern runs` queries `/fern/api/runs` through either loopback operator Basic
 authentication or the existing remote plugin bearer. It shows running runs by
 default and has a stable `--json` projection for automation. Bare `fern attach`
 selects the only attachable run or presents an interactive picker; an exact task
 ID bypasses selection.
 
-`GET /fern/api/v1/runs/:id/attach` is an operator/client control operation, not a
+`GET /fern/api/runs/:id/attach` is an operator/client control operation, not a
 plugin UI operation and not a browser deep link. It re-reads run ownership and
 route readiness, then asks `backgroundroute.Manager` for an in-memory capability
 bound to the active runtime and session. `fern attach` starts
@@ -503,7 +503,7 @@ ownership boundaries.
 | Package | Responsibility |
 | --- | --- |
 | `internal/run` | persistence-independent lifecycle policy and immutable resource/runtime identities |
-| `internal/runapi` | plugin-authenticated run HTTP contract plus create/stop/seal policy, admission, replay, and post-commit notification |
+| `internal/runapi` | run HTTP contract (plugin bearer; operator for list/get/attach), attachment admission, plus create/stop/seal policy, admission, replay, and post-commit notification |
 | `internal/backgroundruncoord` | serial run effect coordinator and recovery |
 | `cmd/fern` | CLI, composition, backup, credentials, process lifecycle |
 | `internal/task` | identifiers, actor snapshots, idempotency vocabulary |
@@ -512,7 +512,6 @@ ownership boundaries.
 | `internal/taskresultsource` | CAS-only result binding and verified checkout acquisition |
 | `internal/taskenvdocker` | disposable Docker resources, writer proof, container GitHub credential delivery |
 | `internal/backgroundopencode` | pinned disposable OpenCode client and observations |
-| `internal/runclientapi` | operator/client discovery and attachment admission |
 | `internal/backgroundroute` | exact live target/session capabilities, request policy, shutdown, and fencing |
 | `internal/proxy` | remote/operator ingress, pairing, and browser security |
 | `internal/control` | durable device identities and operator credential ID |
