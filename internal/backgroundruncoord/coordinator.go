@@ -179,7 +179,12 @@ func (c *Coordinator) RunOnce(ctx context.Context) error {
 	return c.process(operation, ctx, work)
 }
 
-func (c *Coordinator) process(ctx, parent context.Context, work taskstore.BackgroundRunWork) error {
+// process performs one effect step. operation (from effectContext) is bounded
+// by OperationTimeout, the claim lease, and possibly the attempt deadline, and
+// drives external effects; parent is the RunOnce context, from which durable
+// outcomes get a fresh effectContext even after operation has expired.
+// The helpers below take the same (operation, parent) pair.
+func (c *Coordinator) process(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
 	run := work.Run
 	// Credentials are runtime inputs, never publication authority. Refresh only
 	// while execution is allowed; GitHub availability must not block teardown.
@@ -188,14 +193,14 @@ func (c *Coordinator) process(ctx, parent context.Context, work taskstore.Backgr
 		taskstore.BackgroundRunEffectSessionObserved, taskstore.BackgroundRunEffectPromptIntent,
 		taskstore.BackgroundRunEffectPromptAdmitted:
 		if run.CancelEpoch == 0 && run.TimeoutRequestedAt == nil {
-			if err := c.provider.RefreshGitHubCredentials(ctx, run); err != nil {
+			if err := c.provider.RefreshGitHubCredentials(operation, run); err != nil {
 				return c.externalFailure(parent, work, err)
 			}
 		}
 	}
 	switch run.EffectPhase {
 	case taskstore.BackgroundRunEffectSealIntent:
-		observation, providerFence, err := c.provider.ProveWriterInactive(ctx, run)
+		observation, providerFence, err := c.provider.ProveWriterInactive(operation, run)
 		if err != nil {
 			return c.retainedFailure(parent, work, fmt.Errorf("prove retained writer inactivity: %w", err))
 		}
@@ -204,27 +209,27 @@ func (c *Coordinator) process(ctx, parent context.Context, work taskstore.Backgr
 		}
 		return nil
 	case taskstore.BackgroundRunEffectExporting:
-		return c.exportRetained(ctx, parent, work)
+		return c.exportRetained(operation, parent, work)
 	case taskstore.BackgroundRunEffectArtifactCommitted:
 		return c.record(parent, work, `{"effect":"retained_cleanup_intent","status":"committed"}`, c.store.RequestBackgroundRunResultCleanup)
 	case taskstore.BackgroundRunEffectProvisionIntent:
-		observation, err := c.provider.EnsureClone(ctx, run)
+		observation, err := c.provider.EnsureClone(operation, run)
 		if err != nil {
 			return c.externalFailure(parent, work, err)
 		}
 		return c.record(parent, work, observation.Evidence, c.store.RecordBackgroundRunCloneObserved)
 	case taskstore.BackgroundRunEffectCloneObserved:
-		observation, err := c.provider.EnsureVolume(ctx, run)
+		observation, err := c.provider.EnsureVolume(operation, run)
 		if err != nil {
 			return c.externalFailure(parent, work, err)
 		}
 		return c.record(parent, work, observation.Evidence, c.store.RecordBackgroundRunVolumeObserved)
 	case taskstore.BackgroundRunEffectVolumeObserved:
-		created, err := c.provider.EnsureContainer(ctx, run)
+		created, err := c.provider.EnsureContainer(operation, run)
 		if err != nil {
 			return c.externalFailure(parent, work, err)
 		}
-		started, err := c.provider.StartContainer(ctx, run, created.ContainerID)
+		started, err := c.provider.StartContainer(operation, run, created.ContainerID)
 		if err != nil {
 			return c.externalFailure(parent, work, err)
 		}
@@ -243,7 +248,7 @@ func (c *Coordinator) process(ctx, parent context.Context, work taskstore.Backgr
 		if err != nil {
 			return c.cleanupRequired(parent, work, "committed runtime identity invalid")
 		}
-		observation, err := c.provider.Health(ctx, run, runtime)
+		observation, err := c.provider.Health(operation, run, runtime)
 		if err != nil {
 			return c.externalFailure(parent, work, err)
 		}
@@ -251,34 +256,34 @@ func (c *Coordinator) process(ctx, parent context.Context, work taskstore.Backgr
 	case taskstore.BackgroundRunEffectHealthObserved:
 		return c.record(parent, work, `{"effect":"serial_runtime_ready","status":"exact"}`, c.store.RecordBackgroundRunReady)
 	case taskstore.BackgroundRunEffectReady:
-		if err := c.ensureRoute(ctx, run); err != nil {
+		if err := c.ensureRoute(operation, run); err != nil {
 			return c.externalFailure(parent, work, err)
 		}
-		return c.reconcileSession(ctx, parent, work)
+		return c.reconcileSession(operation, parent, work)
 	case taskstore.BackgroundRunEffectSessionObserved:
-		if err := c.ensureRoute(ctx, run); err != nil {
+		if err := c.ensureRoute(operation, run); err != nil {
 			return c.externalFailure(parent, work, err)
 		}
 		return c.record(parent, work, `{"effect":"prompt_intent","status":"committed"}`, c.store.RecordBackgroundRunPromptIntent)
 	case taskstore.BackgroundRunEffectPromptIntent:
-		if err := c.ensureRoute(ctx, run); err != nil {
+		if err := c.ensureRoute(operation, run); err != nil {
 			return c.externalFailure(parent, work, err)
 		}
-		return c.reconcilePrompt(ctx, parent, work)
+		return c.reconcilePrompt(operation, parent, work)
 	case taskstore.BackgroundRunEffectPromptAdmitted:
-		if err := c.ensureRoute(ctx, run); err != nil {
+		if err := c.ensureRoute(operation, run); err != nil {
 			return c.externalFailure(parent, work, err)
 		}
-		return c.observeWorking(ctx, parent, work)
+		return c.observeWorking(operation, parent, work)
 	case taskstore.BackgroundRunEffectStopIntent:
-		observation, _, err := c.provider.ProveWriterInactive(ctx, run)
+		observation, _, err := c.provider.ProveWriterInactive(operation, run)
 		if err != nil {
 			return c.cleanupFailure(parent, work, err)
 		}
 		return c.record(parent, work, observation.Evidence, c.store.RecordBackgroundRunWriterInactive)
 	case taskstore.BackgroundRunEffectWriterInactive:
 		if run.BackgroundSealRequestID != "" && run.ResultAuthorityPhase != "cleanup" {
-			return c.exportRetained(ctx, parent, work)
+			return c.exportRetained(operation, parent, work)
 		}
 		if run.ObservedContainerID == "" && run.ObservedContainerStartedAt == "" && run.RuntimeEpoch == 0 {
 			return c.record(parent, work, `{"effect":"route_remove","status":"never_bound"}`, c.store.RecordBackgroundRunRouteRemoved)
@@ -287,7 +292,7 @@ func (c *Coordinator) process(ctx, parent context.Context, work taskstore.Backgr
 		if err != nil {
 			return c.cleanupFailure(parent, work, err)
 		}
-		removed, err := c.config.Route.Remove(ctx, identity)
+		removed, err := c.config.Route.Remove(operation, identity)
 		if err != nil {
 			return c.cleanupFailure(parent, work, err)
 		}
@@ -302,31 +307,31 @@ func (c *Coordinator) process(ctx, parent context.Context, work taskstore.Backgr
 				return c.cleanupFailure(parent, work, err)
 			}
 		}
-		_, authority, err := c.provider.ProveWriterInactive(ctx, run)
+		_, authority, err := c.provider.ProveWriterInactive(operation, run)
 		if err != nil {
 			return c.cleanupFailure(parent, work, err)
 		}
-		observation, err := c.provider.RemoveContainer(ctx, run, authority)
+		observation, err := c.provider.RemoveContainer(operation, run, authority)
 		if err != nil {
 			return c.cleanupFailure(parent, work, err)
 		}
 		return c.record(parent, work, observation.Evidence, c.store.RecordBackgroundRunContainerRemoved)
 	case taskstore.BackgroundRunEffectContainerRemoved:
-		_, authority, err := c.provider.ProveWriterInactive(ctx, run)
+		_, authority, err := c.provider.ProveWriterInactive(operation, run)
 		if err != nil {
 			return c.cleanupFailure(parent, work, err)
 		}
-		observation, err := c.provider.RemoveVolume(ctx, run, authority)
+		observation, err := c.provider.RemoveVolume(operation, run, authority)
 		if err != nil {
 			return c.cleanupFailure(parent, work, err)
 		}
 		return c.record(parent, work, observation.Evidence, c.store.RecordBackgroundRunVolumeRemoved)
 	case taskstore.BackgroundRunEffectVolumeRemoved:
-		_, authority, err := c.provider.ProveWriterInactive(ctx, run)
+		_, authority, err := c.provider.ProveWriterInactive(operation, run)
 		if err != nil {
 			return c.cleanupFailure(parent, work, err)
 		}
-		observation, err := c.provider.RemoveClone(ctx, run, authority)
+		observation, err := c.provider.RemoveClone(operation, run, authority)
 		if err != nil {
 			return c.cleanupFailure(parent, work, err)
 		}
@@ -422,7 +427,7 @@ func (c *Coordinator) recordWriterFence(ctx context.Context, work taskstore.Back
 	return nil
 }
 
-func (c *Coordinator) exportRetained(ctx, parent context.Context, work taskstore.BackgroundRunWork) (resultErr error) {
+func (c *Coordinator) exportRetained(operation, parent context.Context, work taskstore.BackgroundRunWork) (resultErr error) {
 	run := work.Run
 	export, err := c.store.GetBackgroundRunExport(parent, run.ArtifactExportID)
 	if err != nil {
@@ -440,7 +445,7 @@ func (c *Coordinator) exportRetained(ctx, parent context.Context, work taskstore
 		return c.retainedFailure(parent, work, fmt.Errorf("claim retained export: %w", err))
 	}
 	attempt := retainedExportAttempt{coordinator: c, export: export, collectedAt: now}
-	if err := attempt.recoverInstalledCAS(ctx, parent); err != nil {
+	if err := attempt.recoverInstalledCAS(operation, parent); err != nil {
 		return attempt.recoveryRequired(parent, err)
 	}
 	if needsRetainedSnapshot(attempt.export.Phase) {
@@ -448,18 +453,18 @@ func (c *Coordinator) exportRetained(ctx, parent context.Context, work taskstore
 		if fenceErr != nil {
 			return attempt.recoveryRequired(parent, fenceErr)
 		}
-		source, sourceErr := c.provider.AcquireExportSource(ctx, run, providerFence(fence))
+		source, sourceErr := c.provider.AcquireExportSource(operation, run, providerFence(fence))
 		if sourceErr != nil {
 			return attempt.recoveryRequired(parent, sourceErr)
 		}
 		// Keep the exclusive clone lease through materialization and commit, not
 		// merely through the Git snapshot. No checkout or staged path escapes.
 		defer func() { resultErr = errors.Join(resultErr, source.Close()) }()
-		if err := attempt.snapshotAndInstall(ctx, parent, run, source.RepositoryPath()); err != nil {
+		if err := attempt.snapshotAndInstall(operation, parent, run, source.RepositoryPath()); err != nil {
 			return attempt.recoveryRequired(parent, err)
 		}
 	}
-	if err := attempt.verifyMaterialization(ctx, parent); err != nil {
+	if err := attempt.verifyMaterialization(operation, parent); err != nil {
 		return attempt.recoveryRequired(parent, err)
 	}
 	if err := attempt.commitResult(parent, run); err != nil {
@@ -530,7 +535,7 @@ func needsRetainedSnapshot(phase taskstore.BackgroundRunExportPhase) bool {
 
 // recoverInstalledCAS is read-only at the artifact boundary. A lost install
 // response needs no new clone lease when CAS already proves the selected tuple.
-func (a *retainedExportAttempt) recoverInstalledCAS(ctx, parent context.Context) error {
+func (a *retainedExportAttempt) recoverInstalledCAS(operation, parent context.Context) error {
 	if a.export.Phase != taskstore.BackgroundRunExportPhaseCASInstallStarted {
 		return nil
 	}
@@ -539,7 +544,7 @@ func (a *retainedExportAttempt) recoverInstalledCAS(ctx, parent context.Context)
 		return nil // Replay under the writer fence instead.
 	}
 	c := a.coordinator
-	snapshot, err := c.artifact.Inspect(ctx, locator)
+	snapshot, err := c.artifact.Inspect(operation, locator)
 	if err != nil || !snapshotMatchesExport(snapshot, a.export) {
 		return nil
 	}
@@ -548,7 +553,7 @@ func (a *retainedExportAttempt) recoverInstalledCAS(ctx, parent context.Context)
 	})
 }
 
-func (a *retainedExportAttempt) snapshotAndInstall(ctx, parent context.Context, run taskstore.BackgroundRun, repositoryPath string) (resultErr error) {
+func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Context, run taskstore.BackgroundRun, repositoryPath string) (resultErr error) {
 	c := a.coordinator
 	if a.export.Phase == taskstore.BackgroundRunExportPhasePrepared {
 		if err := a.record(func(claim taskstore.BackgroundRunExportClaim) (taskstore.BackgroundRunExport, error) {
@@ -567,7 +572,7 @@ func (a *retainedExportAttempt) snapshotAndInstall(ctx, parent context.Context, 
 	if sourceSpecErr != nil || profileErr != nil || environmentErr != nil {
 		return errors.Join(sourceSpecErr, profileErr, environmentErr)
 	}
-	snapshot, staged, snapshotErr := c.artifact.Snapshot(ctx, taskartifact.SnapshotSpec{
+	snapshot, staged, snapshotErr := c.artifact.Snapshot(operation, taskartifact.SnapshotSpec{
 		Source: artifactSource, RepositoryID: run.RepositoryID, Generation: run.Generation, SealRequestID: run.BackgroundSealRequestID,
 		ImageIdentity: run.ImageIdentity, Profile: run.Profile, ProfileSHA256: profileDigest, EnvironmentSHA256: environmentDigest,
 		ResourceSpecVersion: taskartifact.ResourceSpecVersion, OpenCodeSessionID: run.OpenCodeSessionID, OpenCodeMessageID: run.OpenCodeMessageID,
@@ -582,7 +587,7 @@ func (a *retainedExportAttempt) snapshotAndInstall(ctx, parent context.Context, 
 			resultErr = errors.Join(resultErr, c.artifact.Discard(staged))
 		}
 	}()
-	manifestBytes, manifestDigest, manifestErr := c.artifact.StagedManifest(ctx, staged)
+	manifestBytes, manifestDigest, manifestErr := c.artifact.StagedManifest(operation, staged)
 	if manifestErr != nil {
 		return manifestErr
 	}
@@ -608,12 +613,12 @@ func (a *retainedExportAttempt) snapshotAndInstall(ctx, parent context.Context, 
 	if err := a.recordBundleAndInstallIntent(parent, snapshot); err != nil {
 		return err
 	}
-	locator, err := c.artifact.Store(ctx, staged)
+	locator, err := c.artifact.Store(operation, staged)
 	if err != nil {
 		return err
 	}
 	stored = true
-	inspected, inspectErr := c.artifact.Inspect(ctx, locator)
+	inspected, inspectErr := c.artifact.Inspect(operation, locator)
 	if inspectErr != nil || !snapshotMatchesExport(inspected, a.export) || locator.String() != a.export.CASLocator {
 		return errors.Join(inspectErr, errors.New("installed retained artifact differs from durable selection"))
 	}
@@ -650,7 +655,7 @@ func (a *retainedExportAttempt) recordBundleAndInstallIntent(parent context.Cont
 }
 
 // verifyMaterialization owns the checkout and closes it before recording proof.
-func (a *retainedExportAttempt) verifyMaterialization(ctx, parent context.Context) error {
+func (a *retainedExportAttempt) verifyMaterialization(operation, parent context.Context) error {
 	c := a.coordinator
 	locator, err := taskartifact.ParseLocator(a.export.CASLocator)
 	if err != nil {
@@ -664,7 +669,7 @@ func (a *retainedExportAttempt) verifyMaterialization(ctx, parent context.Contex
 		}
 	}
 	if a.export.Phase == taskstore.BackgroundRunExportPhaseMaterializeStarted {
-		checkout, materializeErr := c.artifact.Materialize(ctx, locator)
+		checkout, materializeErr := c.artifact.Materialize(operation, locator)
 		if materializeErr != nil {
 			return materializeErr
 		}
@@ -772,18 +777,18 @@ func (c *Coordinator) retainedFailure(ctx context.Context, work taskstore.Backgr
 	return errors.Join(external, releaseErr)
 }
 
-func (c *Coordinator) reconcileSession(ctx, parent context.Context, work taskstore.BackgroundRunWork) error {
+func (c *Coordinator) reconcileSession(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
 	run := work.Run
-	client, err := c.client(ctx, run)
+	client, err := c.client(operation, run)
 	if err != nil {
 		return c.externalFailure(parent, work, err)
 	}
 	spec := backgroundopencode.SessionSpec{ID: string(run.OpenCodeSessionID), Agent: c.config.Agent,
 		ProviderID: c.config.ModelProvider, ModelID: c.config.Model, Directory: sessionDirectory}
-	state, err := client.ReconcileSession(ctx, spec)
+	state, err := client.ReconcileSession(operation, spec)
 	if err == nil && state == backgroundopencode.ReconcileAbsent {
-		createErr := client.CreateSessionOnce(ctx, spec)
-		state, err = client.ReconcileSession(ctx, spec)
+		createErr := client.CreateSessionOnce(operation, spec)
+		state, err = client.ReconcileSession(operation, spec)
 		if err == nil && state == backgroundopencode.ReconcileAbsent {
 			if createErr == nil {
 				return c.cleanupRequired(parent, work, "OpenCode session disappeared after creation")
@@ -809,9 +814,9 @@ func (c *Coordinator) reconcileSession(ctx, parent context.Context, work tasksto
 	return c.record(parent, work, `{"effect":"session_reconcile","status":"exact"}`, c.store.RecordBackgroundRunSessionObserved)
 }
 
-func (c *Coordinator) reconcilePrompt(ctx, parent context.Context, work taskstore.BackgroundRunWork) error {
+func (c *Coordinator) reconcilePrompt(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
 	run := work.Run
-	client, err := c.client(ctx, run)
+	client, err := c.client(operation, run)
 	if err != nil {
 		recordErr := c.record(parent, work, `{"effect":"prompt_reconcile","status":"runtime_unavailable"}`, c.store.RecordBackgroundRunPromptUncertain)
 		return errors.Join(err, recordErr)
@@ -834,7 +839,7 @@ func (c *Coordinator) reconcilePrompt(ctx, parent context.Context, work taskstor
 		if c.config.AfterPromptFence != nil {
 			c.config.AfterPromptFence()
 		}
-		if err := ctx.Err(); err != nil {
+		if err := operation.Err(); err != nil {
 			return err
 		}
 		dispatchErr := c.promptDispatchAuthority(work)
@@ -844,7 +849,7 @@ func (c *Coordinator) reconcilePrompt(ctx, parent context.Context, work taskstor
 		if dispatchErr != nil {
 			return dispatchErr
 		}
-		callErr := client.AdmitPromptOnce(ctx, string(run.OpenCodeSessionID), spec)
+		callErr := client.AdmitPromptOnce(operation, string(run.OpenCodeSessionID), spec)
 		if c.config.AfterPromptCall != nil {
 			c.config.AfterPromptCall(callErr)
 		}
@@ -868,21 +873,21 @@ func (c *Coordinator) reconcilePrompt(ctx, parent context.Context, work taskstor
 	return c.record(parent, work, fmt.Sprintf(`{"effect":"prompt_reconcile","status":%q}`, status), c.store.RecordBackgroundRunPromptUncertain)
 }
 
-func (c *Coordinator) observeWorking(ctx, parent context.Context, work taskstore.BackgroundRunWork) error {
+func (c *Coordinator) observeWorking(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
 	run := work.Run
-	usage, err := c.provider.ObserveUsage(ctx, run)
+	usage, err := c.provider.ObserveUsage(operation, run)
 	if err != nil {
 		if errors.Is(err, taskenvdocker.ErrIdentityMismatch) || errors.Is(err, taskenvdocker.ErrQuarantined) {
 			return errors.Join(err, c.cleanupRequired(parent, work, "background usage limit or identity mismatch"))
 		}
 		return c.externalFailure(parent, work, err)
 	}
-	client, err := c.client(ctx, run)
+	client, err := c.client(operation, run)
 	if err != nil {
 		recordErr := c.recordObservation(parent, work, `{"effect":"work_observe","status":"runtime_unavailable"}`, taskstore.BackgroundRunUncertain)
 		return errors.Join(err, recordErr)
 	}
-	observation, err := client.ObservePending(ctx, string(run.OpenCodeSessionID))
+	observation, err := client.ObservePending(operation, string(run.OpenCodeSessionID))
 	if err != nil {
 		recordErr := c.recordObservation(parent, work, `{"effect":"work_observe","status":"inconclusive"}`, taskstore.BackgroundRunUncertain)
 		return errors.Join(err, recordErr)
