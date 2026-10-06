@@ -499,6 +499,7 @@ ownership boundaries.
 | `internal/observability` | health, readiness, status, metrics |
 | `internal/gitref` | shared Git ref, GitHub name/remote, and path validation |
 | `internal/strictjson` | strict JSON validation before typed decoding |
+| `internal/atomicfile` | atomic replace and bounded read of files in Fern's private state directories |
 | `internal/compatibility` | test-only fresh-schema and release-manifest alignment |
 | `scripts` | embedded Python host backup tool ([README](scripts/README.md)) |
 
