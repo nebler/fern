@@ -103,13 +103,11 @@ func TestSuperviseRunsAgainImmediatelyOnlyAfterProgress(t *testing.T) {
 
 func TestEffectContextAllowsCleanupAfterAttemptDeadline(t *testing.T) {
 	now := time.Now().UTC()
-	expires := now.Add(time.Minute)
 	coordinator := &Coordinator{config: Config{Now: func() time.Time { return now }, OperationTimeout: 10 * time.Second}}
 	work := taskstore.BackgroundRunWork{
 		Run: taskstore.BackgroundRun{
-			State:          taskstore.BackgroundRunCanceling,
-			EffectPhase:    taskstore.BackgroundRunEffectStopIntent,
-			ClaimExpiresAt: &expires,
+			State:       taskstore.BackgroundRunCanceling,
+			EffectPhase: taskstore.BackgroundRunEffectStopIntent,
 		},
 		Deadline: now.Add(-time.Second),
 	}
@@ -131,26 +129,31 @@ func TestEffectContextAllowsCleanupAfterAttemptDeadline(t *testing.T) {
 	}
 }
 
-func TestEffectContextRejectsExpiredClaimAndPromptDeadline(t *testing.T) {
+func TestEffectContextBoundsEffectsAndPromptDeadline(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
-	expires := now.Add(time.Second)
 	deadline := now.Add(2 * time.Second)
 	coordinator := &Coordinator{config: Config{Now: func() time.Time { return now }, OperationTimeout: 10 * time.Second}}
-	work := taskstore.BackgroundRunWork{Run: taskstore.BackgroundRun{ClaimExpiresAt: &expires}, Deadline: deadline}
+	work := taskstore.BackgroundRunWork{Deadline: deadline}
 
-	now = expires
-	if _, cancel, _, err := coordinator.effectContext(context.Background(), work, false); !errors.Is(err, context.DeadlineExceeded) {
-		if cancel != nil {
-			cancel()
-		}
-		t.Fatalf("expired claim context = %v", err)
+	ctx, cancel, _, err := coordinator.effectContext(context.Background(), work, false)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := coordinator.promptDispatchAuthority(work); !errors.Is(err, taskstore.ErrInvalidState) {
-		t.Fatalf("expired claim prompt authority = %v", err)
+	if bound, ok := ctx.Deadline(); !ok || !bound.Equal(now.Add(10*time.Second)) {
+		t.Fatalf("effect deadline = %v, %v", bound, ok)
 	}
-
-	expires = deadline.Add(time.Minute)
-	work.Run.ClaimExpiresAt = &expires
+	cancel()
+	ctx, cancel, _, err = coordinator.effectContext(context.Background(), work, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound, ok := ctx.Deadline(); !ok || !bound.Equal(deadline) {
+		t.Fatalf("attempt-bounded effect deadline = %v, %v", bound, ok)
+	}
+	cancel()
+	if err := coordinator.promptDispatchAuthority(work); err != nil {
+		t.Fatalf("prompt authority before deadline = %v", err)
+	}
 	now = deadline
 	if err := coordinator.promptDispatchAuthority(work); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("expired prompt deadline authority = %v", err)

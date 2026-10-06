@@ -112,9 +112,6 @@ type BackgroundRun struct {
 	StopActor                  *task.ActorSnapshot
 	StopRequestedAt            *time.Time
 	Creator                    task.ActorSnapshot
-	ClaimOwner                 string
-	ClaimExpiresAt             *time.Time
-	ClaimGeneration            int64
 	ObservedContainerID        string
 	ObservedContainerStartedAt string
 	RuntimeEpoch               int64
@@ -182,7 +179,7 @@ type BackgroundRunStop struct {
 }
 
 // BackgroundRunWork is the exact task-owned plaintext and attempt deadline
-// paired with a claimed run. Prompt is never copied into run evidence.
+// paired with the next runnable run. Prompt is never copied into run evidence.
 type BackgroundRunWork struct {
 	Run            BackgroundRun
 	Prompt         string
@@ -194,23 +191,15 @@ type BackgroundRunWork struct {
 	Model          string
 }
 
-type ClaimNextBackgroundRunParams struct {
-	WorkspaceID   task.WorkspaceID
-	ClaimOwner    string
-	Now           time.Time
-	LeaseDuration time.Duration
-	Profile       string
-	ImageIdentity string
-}
-
-// BackgroundRunClaim identifies one exact, fenced mutation authority.
-type BackgroundRunClaim struct {
+// BackgroundRunRef pins one exact run revision. Every coordinator mutation is
+// a compare-and-swap on it: fern up's host lease admits one coordinator per
+// workspace, and the in-process stop/seal API bumps the same revision, so a
+// stale ref fails instead of overwriting a concurrent transition.
+type BackgroundRunRef struct {
 	WorkspaceID      task.WorkspaceID
 	TaskID           task.TaskID
 	AttemptID        task.AttemptID
 	Generation       int64
-	ClaimOwner       string
-	ClaimGeneration  int64
 	ExpectedRevision int64
 	ExpectedState    BackgroundRunState
 	ExpectedPhase    BackgroundRunEffectPhase
@@ -219,7 +208,7 @@ type BackgroundRunClaim struct {
 }
 
 type RecordBackgroundRunContainerObservedParams struct {
-	BackgroundRunClaim
+	BackgroundRunRef
 	ContainerID        string
 	ContainerStartedAt string
 	RuntimeEpoch       int64
@@ -228,12 +217,12 @@ type RecordBackgroundRunContainerObservedParams struct {
 }
 
 type RecordBackgroundRunEvidenceParams struct {
-	BackgroundRunClaim
+	BackgroundRunRef
 	Evidence string
 }
 
 type FinalizeBackgroundRunFailureParams struct {
-	BackgroundRunClaim
+	BackgroundRunRef
 	AttemptEventID task.EventID
 	TaskEventID    task.EventID
 	Actor          task.ActorSnapshot
@@ -243,17 +232,17 @@ type FinalizeBackgroundRunFailureParams struct {
 }
 
 type CompleteBackgroundRunResultCleanupParams struct {
-	BackgroundRunClaim
+	BackgroundRunRef
 	CleanupProof string
 }
 
 type MarkBackgroundRunCleanupRequiredParams struct {
-	BackgroundRunClaim
+	BackgroundRunRef
 	Error string
 }
 
 type RequestBackgroundRunTimeoutParams struct {
-	BackgroundRunClaim
+	BackgroundRunRef
 	AttemptEventID task.EventID
 	TaskEventID    task.EventID
 	Actor          task.ActorSnapshot

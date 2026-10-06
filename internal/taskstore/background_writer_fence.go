@@ -13,9 +13,9 @@ import (
 )
 
 func (s *Store) RecordBackgroundRunWriterFence(ctx context.Context, p RecordBackgroundRunWriterFenceParams) (_ BackgroundRun, err error) {
-	if err := validateBackgroundRunClaim(p.BackgroundRunClaim); err != nil || p.ExpectedState != BackgroundRunCanceling ||
+	if err := validateBackgroundRunRef(p.BackgroundRunRef); err != nil || p.ExpectedState != BackgroundRunCanceling ||
 		p.ExpectedPhase != BackgroundRunEffectSealIntent || p.CancelEpoch != 0 {
-		return BackgroundRun{}, fmt.Errorf("%w: writer fence claim", ErrInvalidInput)
+		return BackgroundRun{}, fmt.Errorf("%w: writer fence revision", ErrInvalidInput)
 	}
 	if _, parseErr := task.ParseSealRequestID(string(p.SealRequestID)); parseErr != nil {
 		return BackgroundRun{}, fmt.Errorf("%w: writer fence seal", ErrInvalidInput)
@@ -52,9 +52,8 @@ func (s *Store) RecordBackgroundRunWriterFence(ctx context.Context, p RecordBack
 		return BackgroundRun{}, ErrInvalidState
 	}
 	if run.AttemptID != p.AttemptID || run.Generation != p.Generation || run.Revision != p.ExpectedRevision ||
-		run.EffectPhase != BackgroundRunEffectSealIntent || run.ClaimOwner != p.ClaimOwner || run.ClaimGeneration != p.ClaimGeneration ||
-		run.ClaimExpiresAt == nil || !run.ClaimExpiresAt.After(p.Now) || run.BackgroundSealRequestID != p.SealRequestID || run.ArtifactExportID != p.ExportID {
-		return BackgroundRun{}, ErrLeaseConflict
+		run.EffectPhase != BackgroundRunEffectSealIntent || run.BackgroundSealRequestID != p.SealRequestID || run.ArtifactExportID != p.ExportID {
+		return BackgroundRun{}, ErrInvalidState
 	}
 	if p.Kind == WriterFenceRuntimeStopped && (p.ContainerID != run.ObservedContainerID || p.ContainerStartedAt != run.ObservedContainerStartedAt || p.RuntimeEpoch != run.RuntimeEpoch) {
 		return BackgroundRun{}, ErrInvalidState
@@ -85,16 +84,15 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.SealRequestID, p.ExportID, p.TaskID, p.Att
 	}
 	evidence := "writer_fence:sha256:" + hex.EncodeToString(p.ProofSHA256[:])
 	result, err := tx.ExecContext(ctx, `UPDATE background_runs SET effect_phase='writer_inactive',writer_inactive_at=?,
-writer_inactive_evidence=?,last_evidence=?,result_authority_phase='writer_inactive',claim_owner=NULL,claim_expires_at=NULL,revision=revision+1,updated_at=?
+writer_inactive_evidence=?,last_evidence=?,result_authority_phase='writer_inactive',revision=revision+1,updated_at=?
 WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND state='cleanup_required' AND
-effect_phase='stop_intent' AND result_authority_phase='seal_intent' AND claim_owner=? AND claim_generation=? AND claim_expires_at>?`,
-		unixMillis(p.Now), evidence, evidence, unixMillis(p.Now), p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation,
-		p.ExpectedRevision, p.ClaimOwner, p.ClaimGeneration, unixMillis(p.Now))
+effect_phase='stop_intent' AND result_authority_phase='seal_intent'`,
+		unixMillis(p.Now), evidence, evidence, unixMillis(p.Now), p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedRevision)
 	if err != nil {
 		return BackgroundRun{}, fmt.Errorf("record writer inactivity: %w", err)
 	}
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRun{}, ErrLeaseConflict
+		return BackgroundRun{}, ErrInvalidState
 	}
 	stored, err := readBackgroundRunExact(ctx, tx, p.WorkspaceID, p.TaskID)
 	if err != nil {

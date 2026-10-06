@@ -68,8 +68,7 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 		return BackgroundRunRetainedResult{}, err
 	}
 	if export.TaskID != p.TaskID || export.AttemptID != p.AttemptID || export.Generation != p.Generation || export.Revision != p.ExpectedRevision ||
-		export.Phase != BackgroundRunExportPhaseMaterialized || export.State != BackgroundRunExportRunning || export.ClaimOwner != p.ClaimOwner ||
-		export.ClaimGeneration != p.ClaimGeneration || export.ClaimExpiresAt == nil || !export.ClaimExpiresAt.After(p.Now) ||
+		export.Phase != BackgroundRunExportPhaseMaterialized || export.State != BackgroundRunExportRunning ||
 		export.ArtifactID != p.ArtifactID || export.MaterializationID != p.MaterializationID || export.ResultID != p.ResultID ||
 		request.ArtifactID != p.ArtifactID || request.MaterializationID != p.MaterializationID || request.ResultID != p.ResultID ||
 		request.ResultEventID != p.ResultEventID || request.TaskEventID != p.TaskEventID || request.ExportID != p.ExportID ||
@@ -199,7 +198,7 @@ WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND se
 		return BackgroundRunRetainedResult{}, ErrInvalidState
 	}
 	result, err = tx.ExecContext(ctx, `UPDATE background_runs SET state='result_ready',result_authority_phase='artifact_committed',
-claim_owner=NULL,claim_expires_at=NULL,revision=revision+1,updated_at=? WHERE task_id=? AND attempt_id=? AND generation=? AND
+revision=revision+1,updated_at=? WHERE task_id=? AND attempt_id=? AND generation=? AND
 state='cleanup_required' AND effect_phase='writer_inactive' AND result_authority_phase='exporting' AND artifact_export_id=? AND retained_artifact_id=?`,
 		sealedMS, p.TaskID, p.AttemptID, p.Generation, p.ExportID, p.ArtifactID)
 	if err != nil {
@@ -208,14 +207,13 @@ state='cleanup_required' AND effect_phase='writer_inactive' AND result_authority
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRunRetainedResult{}, ErrInvalidState
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE background_run_exports SET state='completed',phase='completed',claim_owner=NULL,
-claim_expires_at=NULL,revision=revision+1,updated_at=? WHERE id=? AND revision=? AND phase='materialized' AND state='running' AND
-claim_owner=? AND claim_generation=? AND claim_expires_at>?`, sealedMS, p.ExportID, p.ExpectedRevision, p.ClaimOwner, p.ClaimGeneration, unixMillis(p.Now))
+	result, err = tx.ExecContext(ctx, `UPDATE background_run_exports SET state='completed',phase='completed',
+revision=revision+1,updated_at=? WHERE id=? AND revision=? AND phase='materialized' AND state='running'`, sealedMS, p.ExportID, p.ExpectedRevision)
 	if err != nil {
 		return BackgroundRunRetainedResult{}, err
 	}
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRunRetainedResult{}, ErrLeaseConflict
+		return BackgroundRunRetainedResult{}, ErrInvalidState
 	}
 
 	storedResult, err := getResult(ctx, tx, p.ResultID)
@@ -236,8 +234,8 @@ claim_owner=? AND claim_generation=? AND claim_expires_at>?`, sealedMS, p.Export
 }
 
 func validateRetainedResultCommit(p CommitBackgroundRunRetainedResultParams) error {
-	if err := validateExportClaim(p.BackgroundRunExportClaim); err != nil || p.ExpectedPhase != BackgroundRunExportPhaseMaterialized {
-		return fmt.Errorf("%w: retained result export claim", ErrInvalidInput)
+	if err := validateExportRef(p.BackgroundRunExportRef); err != nil || p.ExpectedPhase != BackgroundRunExportPhaseMaterialized {
+		return fmt.Errorf("%w: retained result export revision", ErrInvalidInput)
 	}
 	if _, err := task.ParseMaterializationID(string(p.MaterializationID)); err != nil {
 		return fmt.Errorf("%w: materialization", ErrInvalidInput)

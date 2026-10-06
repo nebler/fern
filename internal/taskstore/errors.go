@@ -19,7 +19,6 @@ var (
 	ErrIdempotencyConflict      = errors.New("idempotency key conflict")
 	ErrIdempotencyOwnerMismatch = errors.New("idempotency key owner mismatch")
 	ErrInvalidState             = errors.New("invalid task store state")
-	ErrLeaseConflict            = errors.New("delivery lease conflict")
 	ErrStaleRevision            = errors.New("stale task store revision")
 )
 

@@ -44,7 +44,7 @@ proof_sha256,recovery_reason,revision,created_at,updated_at FROM artifact_materi
 }
 
 func (s *Store) RecordArtifactMaterializationReady(ctx context.Context, p RecordArtifactMaterializationReadyParams) (_ BackgroundRunExport, err error) {
-	if err := validateExportClaim(p.BackgroundRunExportClaim); err != nil || p.ExpectedPhase != BackgroundRunExportPhaseMaterializeStarted ||
+	if err := validateExportRef(p.BackgroundRunExportRef); err != nil || p.ExpectedPhase != BackgroundRunExportPhaseMaterializeStarted ||
 		p.ProofSHA256 == ([32]byte{}) {
 		return BackgroundRunExport{}, fmt.Errorf("%w: artifact materialization proof", ErrInvalidInput)
 	}
@@ -86,12 +86,11 @@ func (s *Store) RecordArtifactMaterializationReady(ctx context.Context, p Record
 		return export, nil
 	}
 	if export.TaskID != p.TaskID || export.AttemptID != p.AttemptID || export.Generation != p.Generation ||
-		export.Revision != p.ExpectedRevision || export.Phase != p.ExpectedPhase || export.ClaimOwner != p.ClaimOwner ||
-		export.ClaimGeneration != p.ClaimGeneration || export.ClaimExpiresAt == nil || !export.ClaimExpiresAt.After(p.Now) ||
+		export.Revision != p.ExpectedRevision || export.Phase != p.ExpectedPhase || export.State != BackgroundRunExportRunning ||
 		export.MaterializationID != p.MaterializationID || export.ArtifactID != p.ArtifactID || export.ResultID != p.ResultID ||
 		export.ResultCommit != p.ResultCommit || export.TreeOID != p.TreeOID || materialization.State != ArtifactMaterializationPrepared ||
 		materialization.ExportID != export.ID || materialization.ArtifactID != export.ArtifactID || materialization.ResultID != export.ResultID {
-		return BackgroundRunExport{}, ErrLeaseConflict
+		return BackgroundRunExport{}, ErrInvalidState
 	}
 	now := unixMillis(p.Now)
 	result, err := tx.ExecContext(ctx, `UPDATE artifact_materializations SET state='ready',result_commit=?,tree_oid=?,proof_sha256=?,
@@ -104,13 +103,12 @@ revision=revision+1,updated_at=? WHERE id=? AND export_id=? AND artifact_id=? AN
 		return BackgroundRunExport{}, ErrInvalidState
 	}
 	result, err = tx.ExecContext(ctx, `UPDATE background_run_exports SET phase='materialized',revision=revision+1,updated_at=?
-WHERE id=? AND revision=? AND phase='materialize_started' AND claim_owner=? AND claim_generation=? AND claim_expires_at>?`,
-		now, p.ExportID, p.ExpectedRevision, p.ClaimOwner, p.ClaimGeneration, now)
+WHERE id=? AND revision=? AND phase='materialize_started' AND state='running'`, now, p.ExportID, p.ExpectedRevision)
 	if err != nil {
 		return BackgroundRunExport{}, fmt.Errorf("complete artifact materialization: %w", err)
 	}
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRunExport{}, ErrLeaseConflict
+		return BackgroundRunExport{}, ErrInvalidState
 	}
 	stored, err := getBackgroundRunExport(ctx, tx, p.ExportID)
 	if err != nil {

@@ -135,7 +135,7 @@ VALUES(?,?,?,?,?,'prepared',1,?,?)`, p.MaterializationID, p.SealRequestID, p.Exp
 	}
 	update, err := tx.ExecContext(ctx, `UPDATE background_runs SET state='cleanup_required',effect_phase='stop_intent',
 stop_intent_at=COALESCE(stop_intent_at,?),background_seal_request_id=?,artifact_export_id=?,retained_artifact_id=?,
-materialization_id=?,retained_result_id=?,result_authority_phase='seal_intent',claim_owner=NULL,claim_expires_at=NULL,
+materialization_id=?,retained_result_id=?,result_authority_phase='seal_intent',
 revision=revision+1,updated_at=? WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND
 state IN ('working','needs_you','uncertain') AND effect_phase='prompt_admitted' AND cancel_epoch=0 AND stop_receipt_id IS NULL AND timeout_requested_at IS NULL`,
 		now, p.SealRequestID, p.ExportID, p.ArtifactID, p.MaterializationID, p.ResultID, now,

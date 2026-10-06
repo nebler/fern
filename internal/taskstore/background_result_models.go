@@ -97,9 +97,6 @@ type BackgroundRunExport struct {
 	ResultID               task.ResultID
 	State                  BackgroundRunExportState
 	Phase                  BackgroundRunExportPhase
-	ClaimOwner             string
-	ClaimExpiresAt         *time.Time
-	ClaimGeneration        int64
 	RepositoryID           task.RepositoryID
 	BaseSHA                task.GitOID
 	OpenCodeSessionID      task.OpenCodeSessionID
@@ -121,32 +118,20 @@ type BackgroundRunExport struct {
 	UpdatedAt              time.Time
 }
 
-type ClaimBackgroundRunExportParams struct {
+// BackgroundRunExportRef pins one exact export revision and phase; export
+// transitions are compare-and-swap on it, like BackgroundRunRef for runs.
+type BackgroundRunExportRef struct {
 	ExportID         task.ArtifactExportID
 	TaskID           task.TaskID
 	AttemptID        task.AttemptID
 	Generation       int64
 	ExpectedRevision int64
 	ExpectedPhase    BackgroundRunExportPhase
-	ClaimOwner       string
-	Now              time.Time
-	LeaseDuration    time.Duration
-}
-
-type BackgroundRunExportClaim struct {
-	ExportID         task.ArtifactExportID
-	TaskID           task.TaskID
-	AttemptID        task.AttemptID
-	Generation       int64
-	ExpectedRevision int64
-	ExpectedPhase    BackgroundRunExportPhase
-	ClaimOwner       string
-	ClaimGeneration  int64
 	Now              time.Time
 }
 
 type SelectBackgroundRunSnapshotParams struct {
-	BackgroundRunExportClaim
+	BackgroundRunExportRef
 	ResultCommit           task.GitOID
 	TreeOID                task.GitOID
 	Outcome                task.ResultOutcome
@@ -160,7 +145,7 @@ type SelectBackgroundRunSnapshotParams struct {
 }
 
 type RecordBackgroundRunBundleVerifiedParams struct {
-	BackgroundRunExportClaim
+	BackgroundRunExportRef
 	BundleSHA256 [32]byte
 	BundleBytes  int64
 }
@@ -190,7 +175,7 @@ type WriterFence struct {
 }
 
 type RecordBackgroundRunWriterFenceParams struct {
-	BackgroundRunClaim
+	BackgroundRunRef
 	SealRequestID      task.SealRequestID
 	ExportID           task.ArtifactExportID
 	Kind               WriterFenceKind
@@ -227,7 +212,7 @@ type ArtifactMaterialization struct {
 }
 
 type RecordArtifactMaterializationReadyParams struct {
-	BackgroundRunExportClaim
+	BackgroundRunExportRef
 	MaterializationID task.MaterializationID
 	ArtifactID        task.RetainedArtifactID
 	ResultID          task.ResultID
@@ -261,7 +246,7 @@ type RetainedArtifact struct {
 }
 
 type CommitBackgroundRunRetainedResultParams struct {
-	BackgroundRunExportClaim
+	BackgroundRunExportRef
 	MaterializationID task.MaterializationID
 	ArtifactID        task.RetainedArtifactID
 	ResultID          task.ResultID

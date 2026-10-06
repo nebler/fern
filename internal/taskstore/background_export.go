@@ -15,7 +15,7 @@ import (
 )
 
 const backgroundRunExportSelect = `SELECT id,seal_request_id,workspace_id,task_id,attempt_id,generation,artifact_id,
-materialization_id,result_id,state,phase,claim_owner,claim_expires_at,claim_generation,repository_id,base_sha,opencode_session_id,opencode_message_id,
+materialization_id,result_id,state,phase,repository_id,base_sha,opencode_session_id,opencode_message_id,
 result_commit,tree_oid,outcome,result_manifest_json,result_manifest_entries,result_manifest_sha256,artifact_manifest_json,
 artifact_manifest_sha256,cas_locator,bundle_sha256,bundle_size,collected_at,recovery_reason,revision,created_at,updated_at
 FROM background_run_exports`
@@ -33,13 +33,13 @@ func getBackgroundRunExport(ctx context.Context, q queryRower, id task.ArtifactE
 
 func scanBackgroundRunExport(row rowScanner) (BackgroundRunExport, error) {
 	var value BackgroundRunExport
-	var claimOwner, resultCommit, treeOID, outcome, resultManifestJSON, artifactManifestJSON, casLocator, recoveryReason sql.NullString
-	var claimExpires, resultEntries, bundleSize, collectedAt sql.NullInt64
+	var resultCommit, treeOID, outcome, resultManifestJSON, artifactManifestJSON, casLocator, recoveryReason sql.NullString
+	var resultEntries, bundleSize, collectedAt sql.NullInt64
 	var resultManifestHash, artifactManifestHash, bundleHash []byte
 	var repositoryID, createdAt, updatedAt int64
 	err := row.Scan(&value.ID, &value.SealRequestID, &value.WorkspaceID, &value.TaskID, &value.AttemptID, &value.Generation,
-		&value.ArtifactID, &value.MaterializationID, &value.ResultID, &value.State, &value.Phase, &claimOwner, &claimExpires,
-		&value.ClaimGeneration, &repositoryID, &value.BaseSHA, &value.OpenCodeSessionID, &value.OpenCodeMessageID, &resultCommit, &treeOID, &outcome, &resultManifestJSON,
+		&value.ArtifactID, &value.MaterializationID, &value.ResultID, &value.State, &value.Phase,
+		&repositoryID, &value.BaseSHA, &value.OpenCodeSessionID, &value.OpenCodeMessageID, &resultCommit, &treeOID, &outcome, &resultManifestJSON,
 		&resultEntries, &resultManifestHash, &artifactManifestJSON, &artifactManifestHash, &casLocator, &bundleHash, &bundleSize,
 		&collectedAt, &recoveryReason, &value.Revision, &createdAt, &updatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -52,8 +52,6 @@ func scanBackgroundRunExport(row rowScanner) (BackgroundRunExport, error) {
 		return BackgroundRunExport{}, ErrCorruptStore
 	}
 	value.RepositoryID = task.RepositoryID(repositoryID)
-	value.ClaimOwner = nullableText(claimOwner)
-	value.ClaimExpiresAt = nullableTime(claimExpires)
 	value.ResultCommit, value.TreeOID, value.Outcome = task.GitOID(nullableText(resultCommit)), task.GitOID(nullableText(treeOID)), task.ResultOutcome(nullableText(outcome))
 	value.RecoveryReason = nullableText(recoveryReason)
 	value.BundleBytes = bundleSize.Int64
@@ -85,12 +83,11 @@ func scanBackgroundRunExport(row rowScanner) (BackgroundRunExport, error) {
 	return value, nil
 }
 
-// ClaimBackgroundRunExport claims an export for one owner. The same owner may
-// re-claim its own unexpired export (for example after recording recovery
-// failed) like it may re-claim its own run; the claim generation still
-// increments, fencing the earlier attempt's tuple.
-func (s *Store) ClaimBackgroundRunExport(ctx context.Context, p ClaimBackgroundRunExportParams) (_ BackgroundRunExport, err error) {
-	if err := validateExportClaimRequest(p); err != nil {
+// StartBackgroundRunExport moves a prepared or recovery-required export to
+// running and projects the run into exporting. Restarting a running export is
+// allowed: the coordinator replays durable phases after a crash.
+func (s *Store) StartBackgroundRunExport(ctx context.Context, ref BackgroundRunExportRef) (_ BackgroundRunExport, err error) {
+	if err := validateExportRef(ref); err != nil {
 		return BackgroundRunExport{}, err
 	}
 	tx, release, err := s.beginWrite(ctx)
@@ -99,27 +96,25 @@ func (s *Store) ClaimBackgroundRunExport(ctx context.Context, p ClaimBackgroundR
 	}
 	defer release()
 	defer rollback(tx, &err)
-	now, expiry := unixMillis(p.Now), unixMillis(p.Now.Add(p.LeaseDuration))
-	result, err := tx.ExecContext(ctx, `UPDATE background_run_exports SET state='running',claim_owner=?,claim_expires_at=?,
-claim_generation=claim_generation+1,recovery_reason=NULL,revision=revision+1,updated_at=? WHERE id=? AND task_id=? AND attempt_id=? AND
-generation=? AND revision=? AND phase=? AND state IN ('prepared','running','recovery_required') AND
-(claim_owner=? OR claim_owner IS NULL OR claim_expires_at<=?)`, p.ClaimOwner, expiry, now, p.ExportID, p.TaskID, p.AttemptID, p.Generation,
-		p.ExpectedRevision, p.ExpectedPhase, p.ClaimOwner, now)
+	now := unixMillis(ref.Now)
+	result, err := tx.ExecContext(ctx, `UPDATE background_run_exports SET state='running',recovery_reason=NULL,revision=revision+1,updated_at=?
+WHERE id=? AND task_id=? AND attempt_id=? AND generation=? AND revision=? AND phase=? AND state IN ('prepared','running','recovery_required')`,
+		now, ref.ExportID, ref.TaskID, ref.AttemptID, ref.Generation, ref.ExpectedRevision, ref.ExpectedPhase)
 	if err != nil {
-		return BackgroundRunExport{}, fmt.Errorf("claim background export: %w", err)
+		return BackgroundRunExport{}, fmt.Errorf("start background export: %w", err)
 	}
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRunExport{}, ErrLeaseConflict
+		return BackgroundRunExport{}, ErrInvalidState
 	}
-	export, err := getBackgroundRunExport(ctx, tx, p.ExportID)
+	export, err := getBackgroundRunExport(ctx, tx, ref.ExportID)
 	if err != nil {
 		return BackgroundRunExport{}, err
 	}
 	projection, err := tx.ExecContext(ctx, `UPDATE background_runs SET result_authority_phase='exporting',revision=revision+1,updated_at=?
-WHERE task_id=? AND attempt_id=? AND generation=? AND artifact_export_id=? AND result_authority_phase IN ('writer_inactive','exporting') AND
-claim_owner=? AND claim_expires_at>?`, now, p.TaskID, p.AttemptID, p.Generation, p.ExportID, p.ClaimOwner, now)
+WHERE task_id=? AND attempt_id=? AND generation=? AND artifact_export_id=? AND result_authority_phase IN ('writer_inactive','exporting')`,
+		now, ref.TaskID, ref.AttemptID, ref.Generation, ref.ExportID)
 	if err != nil {
-		return BackgroundRunExport{}, fmt.Errorf("project background export claim: %w", err)
+		return BackgroundRunExport{}, fmt.Errorf("project background export start: %w", err)
 	}
 	if changed, changeErr := projection.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRunExport{}, ErrInvalidState
@@ -130,8 +125,8 @@ claim_owner=? AND claim_expires_at>?`, now, p.TaskID, p.AttemptID, p.Generation,
 	return export, nil
 }
 
-func (s *Store) RecordBackgroundRunSnapshotStarted(ctx context.Context, claim BackgroundRunExportClaim) (BackgroundRunExport, error) {
-	return s.advanceBackgroundExport(ctx, claim, BackgroundRunExportPhasePrepared, BackgroundRunExportPhaseSnapshotStarted, "", nil, nil)
+func (s *Store) RecordBackgroundRunSnapshotStarted(ctx context.Context, ref BackgroundRunExportRef) (BackgroundRunExport, error) {
+	return s.advanceBackgroundExport(ctx, ref, BackgroundRunExportPhasePrepared, BackgroundRunExportPhaseSnapshotStarted, "", nil, nil)
 }
 
 func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgroundRunSnapshotParams) (BackgroundRunExport, error) {
@@ -176,7 +171,7 @@ func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgro
 			value.ArtifactManifestSHA256 == p.ArtifactManifestSHA256 && bytes.Equal(value.ArtifactManifest, p.ArtifactManifest) &&
 			value.CollectedAt != nil && value.CollectedAt.Equal(p.CollectedAt)
 	}
-	return s.advanceBackgroundExport(ctx, p.BackgroundRunExportClaim, BackgroundRunExportPhaseSnapshotStarted,
+	return s.advanceBackgroundExport(ctx, p.BackgroundRunExportRef, BackgroundRunExportPhaseSnapshotStarted,
 		BackgroundRunExportPhaseSnapshotSelected,
 		`result_commit=?,tree_oid=?,outcome=?,result_manifest_json=?,result_manifest_entries=?,result_manifest_sha256=?,
 artifact_manifest_json=?,artifact_manifest_sha256=?,cas_locator=?,opencode_session_id=?,opencode_message_id=?,collected_at=?`,
@@ -185,12 +180,12 @@ artifact_manifest_json=?,artifact_manifest_sha256=?,cas_locator=?,opencode_sessi
 			p.OpenCodeSessionID, p.OpenCodeMessageID, unixMillis(p.CollectedAt)}, replay)
 }
 
-func (s *Store) RecordBackgroundRunBundleWriteStarted(ctx context.Context, claim BackgroundRunExportClaim) (BackgroundRunExport, error) {
-	return s.advanceBackgroundExport(ctx, claim, BackgroundRunExportPhaseSnapshotSelected, BackgroundRunExportPhaseBundleWriteStarted, "", nil, nil)
+func (s *Store) RecordBackgroundRunBundleWriteStarted(ctx context.Context, ref BackgroundRunExportRef) (BackgroundRunExport, error) {
+	return s.advanceBackgroundExport(ctx, ref, BackgroundRunExportPhaseSnapshotSelected, BackgroundRunExportPhaseBundleWriteStarted, "", nil, nil)
 }
 
 // RecordBackgroundRunBundleVerified commits the caller's verified digest/size
-// evidence under the export claim. It does not read or verify bundle bytes.
+// evidence at the export revision. It does not read or verify bundle bytes.
 func (s *Store) RecordBackgroundRunBundleVerified(ctx context.Context, p RecordBackgroundRunBundleVerifiedParams) (BackgroundRunExport, error) {
 	if p.BundleSHA256 == ([32]byte{}) || p.BundleBytes < 0 {
 		return BackgroundRunExport{}, fmt.Errorf("%w: verified bundle", ErrInvalidInput)
@@ -198,81 +193,43 @@ func (s *Store) RecordBackgroundRunBundleVerified(ctx context.Context, p RecordB
 	replay := func(value BackgroundRunExport) bool {
 		return value.BundleSHA256 == p.BundleSHA256 && value.BundleBytes == p.BundleBytes
 	}
-	return s.advanceBackgroundExport(ctx, p.BackgroundRunExportClaim, BackgroundRunExportPhaseBundleWriteStarted,
+	return s.advanceBackgroundExport(ctx, p.BackgroundRunExportRef, BackgroundRunExportPhaseBundleWriteStarted,
 		BackgroundRunExportPhaseBundleVerified, `bundle_sha256=?,bundle_size=?`, []any{p.BundleSHA256[:], p.BundleBytes}, replay)
 }
 
-func (s *Store) RecordBackgroundRunCASInstallStarted(ctx context.Context, claim BackgroundRunExportClaim) (BackgroundRunExport, error) {
-	return s.advanceBackgroundExport(ctx, claim, BackgroundRunExportPhaseBundleVerified, BackgroundRunExportPhaseCASInstallStarted, "", nil, nil)
+func (s *Store) RecordBackgroundRunCASInstallStarted(ctx context.Context, ref BackgroundRunExportRef) (BackgroundRunExport, error) {
+	return s.advanceBackgroundExport(ctx, ref, BackgroundRunExportPhaseBundleVerified, BackgroundRunExportPhaseCASInstallStarted, "", nil, nil)
 }
 
-func (s *Store) RecordBackgroundRunCASInstalled(ctx context.Context, claim BackgroundRunExportClaim) (BackgroundRunExport, error) {
-	return s.advanceBackgroundExport(ctx, claim, BackgroundRunExportPhaseCASInstallStarted, BackgroundRunExportPhaseCASInstalled, "", nil, nil)
+func (s *Store) RecordBackgroundRunCASInstalled(ctx context.Context, ref BackgroundRunExportRef) (BackgroundRunExport, error) {
+	return s.advanceBackgroundExport(ctx, ref, BackgroundRunExportPhaseCASInstallStarted, BackgroundRunExportPhaseCASInstalled, "", nil, nil)
 }
 
-func (s *Store) RecordBackgroundRunMaterializeStarted(ctx context.Context, claim BackgroundRunExportClaim) (BackgroundRunExport, error) {
-	return s.advanceBackgroundExport(ctx, claim, BackgroundRunExportPhaseCASInstalled, BackgroundRunExportPhaseMaterializeStarted, "", nil, nil)
+func (s *Store) RecordBackgroundRunMaterializeStarted(ctx context.Context, ref BackgroundRunExportRef) (BackgroundRunExport, error) {
+	return s.advanceBackgroundExport(ctx, ref, BackgroundRunExportPhaseCASInstalled, BackgroundRunExportPhaseMaterializeStarted, "", nil, nil)
 }
 
-func (s *Store) MarkBackgroundRunExportRecoveryRequired(ctx context.Context, claim BackgroundRunExportClaim, reason string) (BackgroundRunExport, error) {
+func (s *Store) MarkBackgroundRunExportRecoveryRequired(ctx context.Context, ref BackgroundRunExportRef, reason string) (BackgroundRunExport, error) {
 	if !validBoundedText(reason, 1, 1000) {
 		return BackgroundRunExport{}, fmt.Errorf("%w: export recovery reason", ErrInvalidInput)
 	}
-	return s.updateBackgroundExport(ctx, claim, claim.ExpectedPhase, `state='recovery_required',recovery_reason=?,claim_owner=NULL,claim_expires_at=NULL`, []any{reason}, nil)
+	replay := func(value BackgroundRunExport) bool {
+		return value.State == BackgroundRunExportRecoveryRequired && value.RecoveryReason == reason
+	}
+	return s.updateBackgroundExport(ctx, ref, ref.ExpectedPhase, `state='recovery_required',recovery_reason=?`, []any{reason}, replay)
 }
 
-// ReleaseBackgroundRunClaimAfterExportFailure releases the run claim bound to
-// an export that this exact export generation just moved to recovery_required.
-func (s *Store) ReleaseBackgroundRunClaimAfterExportFailure(ctx context.Context, claim BackgroundRunExportClaim) (_ BackgroundRun, err error) {
-	if err := validateExportClaim(claim); err != nil {
-		return BackgroundRun{}, err
-	}
-	tx, release, err := s.beginWrite(ctx)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	defer release()
-	defer rollback(tx, &err)
-	export, err := getBackgroundRunExport(ctx, tx, claim.ExportID)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	if export.TaskID != claim.TaskID || export.AttemptID != claim.AttemptID || export.Generation != claim.Generation ||
-		export.State != BackgroundRunExportRecoveryRequired || export.Phase != claim.ExpectedPhase || export.Revision != claim.ExpectedRevision+1 ||
-		export.ClaimGeneration != claim.ClaimGeneration || export.ClaimOwner != "" {
-		return BackgroundRun{}, ErrLeaseConflict
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE background_runs SET claim_owner=NULL,claim_expires_at=NULL,revision=revision+1,updated_at=?
-WHERE task_id=? AND attempt_id=? AND generation=? AND artifact_export_id=? AND result_authority_phase='exporting' AND
-claim_owner=? AND claim_expires_at>?`, unixMillis(claim.Now), claim.TaskID, claim.AttemptID, claim.Generation, claim.ExportID,
-		claim.ClaimOwner, unixMillis(claim.Now))
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRun{}, ErrLeaseConflict
-	}
-	run, err := readBackgroundRunExact(ctx, tx, export.WorkspaceID, claim.TaskID)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return BackgroundRun{}, err
-	}
-	return run, nil
-}
-
-func (s *Store) advanceBackgroundExport(ctx context.Context, claim BackgroundRunExportClaim, from, to BackgroundRunExportPhase,
+func (s *Store) advanceBackgroundExport(ctx context.Context, ref BackgroundRunExportRef, from, to BackgroundRunExportPhase,
 	assignments string, args []any, replay func(BackgroundRunExport) bool) (BackgroundRunExport, error) {
-	if claim.ExpectedPhase != from {
+	if ref.ExpectedPhase != from {
 		return BackgroundRunExport{}, fmt.Errorf("%w: background export phase", ErrInvalidInput)
 	}
-	return s.updateBackgroundExport(ctx, claim, to, assignments, args, replay)
+	return s.updateBackgroundExport(ctx, ref, to, assignments, args, replay)
 }
 
-func (s *Store) updateBackgroundExport(ctx context.Context, claim BackgroundRunExportClaim, to BackgroundRunExportPhase,
+func (s *Store) updateBackgroundExport(ctx context.Context, ref BackgroundRunExportRef, to BackgroundRunExportPhase,
 	assignments string, args []any, replay func(BackgroundRunExport) bool) (_ BackgroundRunExport, err error) {
-	if err := validateExportClaim(claim); err != nil {
+	if err := validateExportRef(ref); err != nil {
 		return BackgroundRunExport{}, err
 	}
 	tx, release, err := s.beginWrite(ctx)
@@ -281,22 +238,20 @@ func (s *Store) updateBackgroundExport(ctx context.Context, claim BackgroundRunE
 	}
 	defer release()
 	defer rollback(tx, &err)
-	current, err := getBackgroundRunExport(ctx, tx, claim.ExportID)
+	current, err := getBackgroundRunExport(ctx, tx, ref.ExportID)
 	if err != nil {
 		return BackgroundRunExport{}, err
 	}
-	if current.TaskID == claim.TaskID && current.AttemptID == claim.AttemptID && current.Generation == claim.Generation &&
-		current.Phase == to && current.Revision == claim.ExpectedRevision+1 && current.ClaimOwner == claim.ClaimOwner &&
-		current.ClaimGeneration == claim.ClaimGeneration && (replay == nil || replay(current)) {
+	if current.TaskID == ref.TaskID && current.AttemptID == ref.AttemptID && current.Generation == ref.Generation &&
+		current.Phase == to && current.Revision == ref.ExpectedRevision+1 && (replay == nil || replay(current)) {
 		if err := tx.Commit(); err != nil {
 			return BackgroundRunExport{}, err
 		}
 		return current, nil
 	}
-	if current.TaskID != claim.TaskID || current.AttemptID != claim.AttemptID || current.Generation != claim.Generation ||
-		current.Revision != claim.ExpectedRevision || current.Phase != claim.ExpectedPhase || current.ClaimOwner != claim.ClaimOwner ||
-		current.ClaimGeneration != claim.ClaimGeneration || current.ClaimExpiresAt == nil || !current.ClaimExpiresAt.After(claim.Now) {
-		return BackgroundRunExport{}, ErrLeaseConflict
+	if current.TaskID != ref.TaskID || current.AttemptID != ref.AttemptID || current.Generation != ref.Generation ||
+		current.Revision != ref.ExpectedRevision || current.Phase != ref.ExpectedPhase {
+		return BackgroundRunExport{}, ErrInvalidState
 	}
 	set := `phase=?,`
 	values := []any{to}
@@ -304,17 +259,17 @@ func (s *Store) updateBackgroundExport(ctx context.Context, claim BackgroundRunE
 		set += assignments + `,`
 		values = append(values, args...)
 	}
-	values = append(values, unixMillis(claim.Now), claim.ExportID, claim.TaskID, claim.AttemptID, claim.Generation,
-		claim.ExpectedRevision, claim.ExpectedPhase, claim.ClaimOwner, claim.ClaimGeneration, unixMillis(claim.Now))
+	values = append(values, unixMillis(ref.Now), ref.ExportID, ref.TaskID, ref.AttemptID, ref.Generation,
+		ref.ExpectedRevision, ref.ExpectedPhase)
 	result, err := tx.ExecContext(ctx, `UPDATE background_run_exports SET `+set+`revision=revision+1,updated_at=?
-WHERE id=? AND task_id=? AND attempt_id=? AND generation=? AND revision=? AND phase=? AND claim_owner=? AND claim_generation=? AND claim_expires_at>?`, values...)
+WHERE id=? AND task_id=? AND attempt_id=? AND generation=? AND revision=? AND phase=? AND state='running'`, values...)
 	if err != nil {
 		return BackgroundRunExport{}, fmt.Errorf("advance background export: %w", err)
 	}
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRunExport{}, ErrLeaseConflict
+		return BackgroundRunExport{}, ErrInvalidState
 	}
-	stored, err := getBackgroundRunExport(ctx, tx, claim.ExportID)
+	stored, err := getBackgroundRunExport(ctx, tx, ref.ExportID)
 	if err != nil {
 		return BackgroundRunExport{}, err
 	}
@@ -324,16 +279,7 @@ WHERE id=? AND task_id=? AND attempt_id=? AND generation=? AND revision=? AND ph
 	return stored, nil
 }
 
-func validateExportClaimRequest(p ClaimBackgroundRunExportParams) error {
-	if p.LeaseDuration <= 0 || p.LeaseDuration > maxBackgroundRunLease || unixMillis(p.Now.Add(p.LeaseDuration)) <= unixMillis(p.Now) {
-		return fmt.Errorf("%w: background export lease", ErrInvalidInput)
-	}
-	return validateExportClaim(BackgroundRunExportClaim{ExportID: p.ExportID, TaskID: p.TaskID, AttemptID: p.AttemptID,
-		Generation: p.Generation, ExpectedRevision: p.ExpectedRevision, ExpectedPhase: p.ExpectedPhase, ClaimOwner: p.ClaimOwner,
-		ClaimGeneration: 1, Now: p.Now})
-}
-
-func validateExportClaim(p BackgroundRunExportClaim) error {
+func validateExportRef(p BackgroundRunExportRef) error {
 	if _, err := task.ParseArtifactExportID(string(p.ExportID)); err != nil {
 		return fmt.Errorf("%w: export ID", ErrInvalidInput)
 	}
@@ -341,8 +287,8 @@ func validateExportClaim(p BackgroundRunExportClaim) error {
 		return fmt.Errorf("%w: export task", ErrInvalidInput)
 	}
 	if _, err := task.ParseAttemptID(string(p.AttemptID)); err != nil || p.Generation <= 0 || p.ExpectedRevision <= 0 ||
-		p.ClaimGeneration <= 0 || !validBoundedText(p.ClaimOwner, 1, 128) || validExactTimestamp(p.Now) != nil {
-		return fmt.Errorf("%w: export claim", ErrInvalidInput)
+		validExactTimestamp(p.Now) != nil {
+		return fmt.Errorf("%w: export revision", ErrInvalidInput)
 	}
 	return nil
 }

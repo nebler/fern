@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -85,7 +84,6 @@ func newTaskServices(ctx context.Context, cfg config.Config, route *backgroundro
 	}()
 
 	ids := task.NewSecureGenerator()
-	workerID := taskWorkerID(cfg.Workspace.Name)
 	authority, err := resolveGitHubAuthority(github)
 	if err != nil {
 		return nil, err
@@ -190,13 +188,13 @@ func newTaskServices(ctx context.Context, cfg config.Config, route *backgroundro
 	}
 
 	coordinator, err := backgroundruncoord.New(store, provider, artifact, ids, backgroundruncoord.Config{
-		WorkspaceID: durableWorkspace.ID, WorkerID: workerID, SystemActor: systemActor(workerID, "background-run", "Background Run coordinator"),
+		WorkspaceID: durableWorkspace.ID, SystemActor: systemActor("background-run", "Background Run coordinator"),
 		Profile: runapi.PluginOpenCodeProfile, ImageIdentity: cfg.Tasks.BackgroundImageID,
 		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: cfg.Tasks.Agent,
 		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID,
-		OperationTimeout: min(cfg.Tasks.LeaseDuration/2, backgroundCloneTimeout), LeaseDuration: cfg.Tasks.LeaseDuration,
-		PollInterval: taskPollInterval, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 100, MaxPages: 100, MaxEvents: 10000},
-		Now: time.Now, HTTPClient: &http.Client{Timeout: min(cfg.Tasks.LeaseDuration/2, 30*time.Second)}, Route: route,
+		OperationTimeout: backgroundCloneTimeout,
+		PollInterval:     taskPollInterval, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 100, MaxPages: 100, MaxEvents: 10000},
+		Now: time.Now, HTTPClient: &http.Client{Timeout: backgroundCloneTimeout}, Route: route,
 		OnError: func(err error) {
 			status.Degraded(observability.ComponentBackgroundRunSerial, err)
 			log.Error("Background Run coordination deferred", "err", err, "repository", cfg.Workspace.Name)
@@ -265,9 +263,9 @@ func resolveGitHubAuthority(github config.GitHubApp) (*gitHubAuthority, error) {
 	return &gitHubAuthority{installationTokens: tokens}, nil
 }
 
-func systemActor(workerID, id, displayName string) task.ActorSnapshot {
+func systemActor(id, displayName string) task.ActorSnapshot {
 	return task.ActorSnapshot{Type: task.ActorSystem, ID: id, DisplayName: displayName,
-		CredentialID: taskServiceCredentialID, Authentication: "internal", RequestID: workerID}
+		CredentialID: taskServiceCredentialID, Authentication: "internal", RequestID: id}
 }
 
 func gitExecutable() string {
@@ -279,15 +277,6 @@ func gitExecutable() string {
 		}
 	}
 	return "/usr/bin/git"
-}
-
-// taskWorkerID is stable per workspace so a restarted process reclaims its own
-// in-flight run and export claims immediately instead of waiting for their
-// leases to expire. This is safe because task services run only under the
-// workspace's exclusive host lease: at most one live process holds this ID.
-func taskWorkerID(workspace string) string {
-	digest := sha256.Sum256([]byte("fern/task-worker/v1\x00" + workspace))
-	return "worker-" + hex.EncodeToString(digest[:12])
 }
 
 func newGitHubOnboarding(cfg config.Config) (http.Handler, error) {

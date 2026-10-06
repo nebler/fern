@@ -21,7 +21,7 @@ const backgroundRunSelect = `
 SELECT r.task_id,r.attempt_id,r.workspace_id,r.generation,r.writer_generation,r.repository_id,r.repository_remote,r.base_oid,r.branch,
        r.instruction_sha256,r.profile,r.profile_sha256,r.environment_sha256,r.resource_spec_version,r.image_identity,r.clone_identity,r.volume_identity,
        r.container_identity,r.endpoint_identity,r.opencode_session_id,r.opencode_message_id,r.state,r.effect_phase,
-       r.cancel_epoch,r.stop_receipt_id,r.stop_requested_at,r.claim_owner,r.claim_expires_at,r.claim_generation,
+       r.cancel_epoch,r.stop_receipt_id,r.stop_requested_at,
 	       r.clone_evidence,r.volume_evidence,r.observed_container_id,r.observed_container_started_at,r.runtime_epoch,r.host_port,
 	       r.health_evidence,r.ready_evidence,r.session_evidence,r.prompt_evidence,r.writer_inactive_evidence,r.route_removed_evidence,
 	       r.container_removed_evidence,r.volume_removed_evidence,r.clone_removed_evidence,r.last_evidence,r.last_error,
@@ -225,7 +225,7 @@ VALUES(?,?,?,'accepted',?,?,?,?,?,'task',?,202,?)`, p.ReceiptID, run.WorkspaceID
 	}
 	if activeStop {
 		result, updateErr := tx.ExecContext(ctx, `UPDATE background_runs SET state='canceling',effect_phase='stop_intent',cancel_epoch=1,
-stop_receipt_id=?,stop_actor_snapshot_id=?,stop_requested_at=?,stop_intent_at=?,claim_owner=NULL,claim_expires_at=NULL,
+stop_receipt_id=?,stop_actor_snapshot_id=?,stop_requested_at=?,stop_intent_at=?,
 revision=revision+1,updated_at=?
 WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND cancel_epoch=0 AND revision=? AND
 state IN ('setting_up','working','needs_you','uncertain')`, p.ReceiptID, actorID, now, now, now,
@@ -351,11 +351,11 @@ WHERE r.workspace_id=? AND r.task_id=? AND c.actor_type=? AND c.actor_id=? AND c
 func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	var run BackgroundRun
 	var repositoryID, cancelEpoch int64
-	var branch, stopReceipt, claimOwner, cloneEvidence, volumeEvidence, containerID, containerStarted sql.NullString
+	var branch, stopReceipt, cloneEvidence, volumeEvidence, containerID, containerStarted sql.NullString
 	var healthEvidence, readyEvidence, sessionEvidence, promptEvidence, writerEvidence, routeEvidence sql.NullString
 	var containerRemovedEvidence, volumeRemovedEvidence, cloneRemovedEvidence, evidence, lastError, cleanupProof, absenceProof sql.NullString
 	var sealRequestID, artifactExportID, retainedArtifactID, materializationID, retainedResultID, resultAuthorityPhase sql.NullString
-	var stopAt, claimExpiry, runtimeEpoch, hostPort sql.NullInt64
+	var stopAt, runtimeEpoch, hostPort sql.NullInt64
 	var provisionIntent, cloneObserved, volumeObserved, containerObserved, healthObserved, readyAt sql.NullInt64
 	var sessionObserved, promptIntent, promptAttempted, promptAdmitted, timeoutRequested, stopIntent, writerInactive, routeRemoved sql.NullInt64
 	var containerRemoved, volumeRemoved, cloneRemoved, cleanupCompleted sql.NullInt64
@@ -367,7 +367,7 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 		&run.RepositoryRemote, &run.BaseOID, &branch, &instructionHash, &run.Profile, &profileHash, &environmentHash, &run.ResourceSpecVersion,
 		&run.ImageIdentity, &run.CloneIdentity, &run.VolumeIdentity, &run.ContainerIdentity, &run.EndpointIdentity,
 		&run.OpenCodeSessionID, &run.OpenCodeMessageID, &run.State, &run.EffectPhase, &cancelEpoch,
-		&stopReceipt, &stopAt, &claimOwner, &claimExpiry, &run.ClaimGeneration,
+		&stopReceipt, &stopAt,
 		&cloneEvidence, &volumeEvidence, &containerID, &containerStarted, &runtimeEpoch, &hostPort,
 		&healthEvidence, &readyEvidence, &sessionEvidence, &promptEvidence, &writerEvidence, &routeEvidence,
 		&containerRemovedEvidence, &volumeRemovedEvidence, &cloneRemovedEvidence, &evidence, &lastError,
@@ -393,8 +393,6 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	run.CancelEpoch = uint64(cancelEpoch)
 	run.Branch = nullableString(branch)
 	run.CreatedAt, run.UpdatedAt = fromUnixMillis(created), fromUnixMillis(updated)
-	run.ClaimOwner = nullableText(claimOwner)
-	run.ClaimExpiresAt = nullableTime(claimExpiry)
 	run.ObservedContainerID = nullableText(containerID)
 	run.ObservedContainerStartedAt = nullableText(containerStarted)
 	run.RuntimeEpoch = runtimeEpoch.Int64

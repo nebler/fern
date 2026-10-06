@@ -48,30 +48,25 @@ func BenchmarkBackgroundRunAdmissionFresh(b *testing.B) {
 	}
 }
 
-// Recovery reacquires the existing provisioning run with the same owner. It
-// measures the selection/update/scan/commit path, not first provisioning or I/O.
-func BenchmarkBackgroundRunClaimRecovery(b *testing.B) {
+// Recovery reselects the existing provisioning run. It measures the
+// selection/scan path, not first provisioning or I/O.
+func BenchmarkNextBackgroundRunRecovery(b *testing.B) {
 	s := benchmarkStore(b)
 	ctx := context.Background()
 	p := testAdmission(1, "claim", "Work")
 	if _, err := s.AdmitBackgroundRun(ctx, p); err != nil {
 		b.Fatal(err)
 	}
-	claim := ClaimNextBackgroundRunParams{
-		WorkspaceID: testWorkspaceID(), ClaimOwner: "benchmark-worker",
-		Now: testTime.Truncate(time.Millisecond), LeaseDuration: time.Minute,
-		Profile: BackgroundRunSourceProfile, ImageIdentity: p.BackgroundRun.ImageIdentity,
-	}
-	initial, err := s.ClaimNextBackgroundRun(ctx, claim)
+	initial, err := startNextBackgroundRun(ctx, s, testTime.Truncate(time.Millisecond))
 	if err != nil {
 		b.Fatal(err)
 	}
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		current, err := s.ClaimNextBackgroundRun(ctx, claim)
-		if err != nil || current.TaskID != p.TaskID || current.Revision != initial.Revision+int64(i)+1 {
-			b.Fatalf("recovery claim: revision=%d err=%v", current.Revision, err)
+		current, err := s.NextBackgroundRun(ctx, testWorkspaceID(), BackgroundRunSourceProfile)
+		if err != nil || current.TaskID != p.TaskID || current.Revision != initial.Revision {
+			b.Fatalf("recovery read: revision=%d err=%v", current.Revision, err)
 		}
 	}
 }

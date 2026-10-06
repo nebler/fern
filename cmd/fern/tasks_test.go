@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"strings"
 	"testing"
 
 	"github.com/nebler/fern/internal/config"
@@ -62,12 +61,5 @@ func TestGitHubAuthorityRequiresHostAppCredentialsAndProvidesTokens(t *testing.T
 	github.InstallationID, github.Repository.ID = 123, 0
 	if _, err := resolveGitHubAuthority(github); !errors.Is(err, githubapp.ErrInvalidIdentity) {
 		t.Fatalf("unbound repository accepted: %v", err)
-	}
-}
-
-func TestTaskWorkerIDIsStablePerWorkspace(t *testing.T) {
-	first, restarted, other := taskWorkerID("demo"), taskWorkerID("demo"), taskWorkerID("other")
-	if first != restarted || first == other || !strings.HasPrefix(first, "worker-") || len(first) != len("worker-")+24 {
-		t.Fatalf("worker IDs first=%q restarted=%q other=%q", first, restarted, other)
 	}
 }

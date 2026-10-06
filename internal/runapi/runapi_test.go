@@ -479,16 +479,17 @@ func (f *apiFixture) buildHandler(t *testing.T, available string) *Handler {
 func (f *apiFixture) advanceToSession(t *testing.T, id task.TaskID) taskstore.BackgroundRun {
 	t.Helper()
 	now := time.Date(2026, 8, 31, 12, 0, 1, 0, time.UTC)
-	work, err := f.store.ClaimNextBackgroundRunWork(context.Background(), taskstore.ClaimNextBackgroundRunParams{WorkspaceID: testWorkspace,
-		ClaimOwner: "test-worker", Now: now, LeaseDuration: time.Minute, Profile: PluginOpenCodeProfile,
-		ImageIdentity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"})
-	if err != nil || work.Run.TaskID != id {
-		t.Fatalf("claim run=%+v error=%v", work.Run, err)
+	queued, err := f.store.NextBackgroundRun(context.Background(), testWorkspace, PluginOpenCodeProfile)
+	if err != nil || queued.TaskID != id {
+		t.Fatalf("next run=%+v error=%v", queued, err)
 	}
-	run := work.Run
+	run, err := f.store.StartBackgroundRunProvisioning(context.Background(), openTestRef(queued, now))
+	if err != nil {
+		t.Fatalf("start run=%+v error=%v", run, err)
+	}
 	next := func(transition func(context.Context, taskstore.RecordBackgroundRunEvidenceParams) (taskstore.BackgroundRun, error)) {
 		now = now.Add(time.Millisecond)
-		run, err = transition(context.Background(), taskstore.RecordBackgroundRunEvidenceParams{BackgroundRunClaim: openTestClaim(run, now), Evidence: `{"status":"exact"}`})
+		run, err = transition(context.Background(), taskstore.RecordBackgroundRunEvidenceParams{BackgroundRunRef: openTestRef(run, now), Evidence: `{"status":"exact"}`})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -498,7 +499,7 @@ func (f *apiFixture) advanceToSession(t *testing.T, id task.TaskID) taskstore.Ba
 	started := time.Date(2026, 8, 31, 12, 0, 2, 123456789, time.UTC)
 	now = now.Add(time.Millisecond)
 	run, err = f.store.RecordBackgroundRunContainerObserved(context.Background(), taskstore.RecordBackgroundRunContainerObservedParams{
-		BackgroundRunClaim: openTestClaim(run, now), ContainerID: strings.Repeat("a", 64), ContainerStartedAt: started.Format(time.RFC3339Nano),
+		BackgroundRunRef: openTestRef(run, now), ContainerID: strings.Repeat("a", 64), ContainerStartedAt: started.Format(time.RFC3339Nano),
 		RuntimeEpoch: started.UnixNano(), HostPort: 49152, Evidence: `{"status":"exact"}`,
 	})
 	if err != nil {
@@ -516,18 +517,18 @@ func (f *apiFixture) advanceToPrompt(t *testing.T, id task.TaskID) taskstore.Bac
 	now := run.UpdatedAt.Add(time.Millisecond)
 	var err error
 	run, err = f.store.RecordBackgroundRunPromptIntent(context.Background(), taskstore.RecordBackgroundRunEvidenceParams{
-		BackgroundRunClaim: openTestClaim(run, now), Evidence: `{"status":"committed"}`})
+		BackgroundRunRef: openTestRef(run, now), Evidence: `{"status":"committed"}`})
 	if err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Millisecond)
-	run, err = f.store.RecordBackgroundRunPromptRequestAttempted(context.Background(), openTestClaim(run, now))
+	run, err = f.store.RecordBackgroundRunPromptRequestAttempted(context.Background(), openTestRef(run, now))
 	if err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Millisecond)
 	run, err = f.store.RecordBackgroundRunPromptAdmitted(context.Background(), taskstore.RecordBackgroundRunEvidenceParams{
-		BackgroundRunClaim: openTestClaim(run, now), Evidence: `{"status":"exact"}`})
+		BackgroundRunRef: openTestRef(run, now), Evidence: `{"status":"exact"}`})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -535,10 +536,9 @@ func (f *apiFixture) advanceToPrompt(t *testing.T, id task.TaskID) taskstore.Bac
 	return run
 }
 
-func openTestClaim(run taskstore.BackgroundRun, now time.Time) taskstore.BackgroundRunClaim {
-	return taskstore.BackgroundRunClaim{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ClaimOwner: run.ClaimOwner, ClaimGeneration: run.ClaimGeneration, ExpectedRevision: run.Revision, ExpectedState: run.State,
-		ExpectedPhase: run.EffectPhase, CancelEpoch: run.CancelEpoch, Now: now}
+func openTestRef(run taskstore.BackgroundRun, now time.Time) taskstore.BackgroundRunRef {
+	return taskstore.BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
+		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, CancelEpoch: run.CancelEpoch, Now: now}
 }
 func (f *apiFixture) withActor(t *testing.T, actor task.ActorSnapshot) *apiFixture {
 	clone := *f

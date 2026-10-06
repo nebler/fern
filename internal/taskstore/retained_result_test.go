@@ -59,12 +59,9 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		t.Fatalf("stop after winning seal = %v", err)
 	}
 
-	claimedWork, err := store.ClaimNextBackgroundRunWork(context.Background(), ClaimNextBackgroundRunParams{
-		WorkspaceID: run.WorkspaceID, ClaimOwner: "writer-fencer", Now: seal.AcceptedAt.Add(2 * time.Second), LeaseDuration: time.Minute,
-		Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity,
-	})
-	claimedRun := claimedWork.Run
-	if err != nil || claimedRun.State != BackgroundRunCanceling || claimedRun.EffectPhase != BackgroundRunEffectSealIntent {
+	sealedWork, err := startNextBackgroundRunWork(context.Background(), store, seal.AcceptedAt.Add(2*time.Second))
+	sealedRun := sealedWork.Run
+	if err != nil || sealedRun.State != BackgroundRunCanceling || sealedRun.EffectPhase != BackgroundRunEffectSealIntent {
 		t.Fatal(err)
 	}
 	writerAt := seal.AcceptedAt.Add(3 * time.Second)
@@ -86,101 +83,87 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	stoppedMillis := stoppedAt.UnixMilli()
 	writerProof.StoppedAtMillis = &stoppedMillis
 	encodedWriterProof, _ := json.Marshal(writerProof)
-	writerParams := RecordBackgroundRunWriterFenceParams{BackgroundRunClaim: backgroundRunClaim(claimedRun, writerAt),
+	writerParams := RecordBackgroundRunWriterFenceParams{BackgroundRunRef: backgroundRunRef(sealedRun, writerAt),
 		SealRequestID: seal.SealRequestID, ExportID: seal.ExportID, Kind: WriterFenceRuntimeStopped,
 		ContainerID: run.ObservedContainerID, ContainerStartedAt: run.ObservedContainerStartedAt, RuntimeEpoch: run.RuntimeEpoch,
 		RuntimeToken: "runtime-token", StoppedAt: &stoppedAt, ProofSHA256: sha256.Sum256(encodedWriterProof)}
 	writerInactive, err := store.RecordBackgroundRunWriterFence(context.Background(), writerParams)
-	if err != nil || writerInactive.EffectPhase != BackgroundRunEffectWriterInactive || writerInactive.ClaimOwner != "" {
+	if err != nil || writerInactive.EffectPhase != BackgroundRunEffectWriterInactive {
 		t.Fatalf("writer fence = %+v, error=%v", writerInactive, err)
 	}
 	if _, err := store.RecordBackgroundRunWriterFence(context.Background(), writerParams); err != nil {
 		t.Fatalf("writer fence replay: %v", err)
 	}
-	writerClaim, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{WorkspaceID: run.WorkspaceID,
-		ClaimOwner: "export-dispatcher", Now: writerAt.Add(time.Millisecond), LeaseDuration: time.Minute,
-		Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity})
-	if err != nil || writerClaim.EffectPhase != BackgroundRunEffectWriterInactive {
-		t.Fatalf("writer-inactive production claim = %+v, error=%v", writerClaim, err)
+	writerRun, err := startNextBackgroundRun(context.Background(), store, writerAt.Add(time.Millisecond))
+	if err != nil || writerRun.EffectPhase != BackgroundRunEffectWriterInactive {
+		t.Fatalf("writer-inactive production claim = %+v, error=%v", writerRun, err)
 	}
 
-	export, err := store.ClaimBackgroundRunExport(context.Background(), ClaimBackgroundRunExportParams{
+	export, err := store.StartBackgroundRunExport(context.Background(), BackgroundRunExportRef{
 		ExportID: seal.ExportID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRevision: 1, ExpectedPhase: BackgroundRunExportPhasePrepared, ClaimOwner: "export-dispatcher",
-		Now: writerAt.Add(time.Second), LeaseDuration: 2 * time.Minute,
+		ExpectedRevision: 1, ExpectedPhase: BackgroundRunExportPhasePrepared,
+		Now: writerAt.Add(time.Second),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// If recording export recovery fails, the same owner must be able to
-	// re-claim its unexpired export rather than wait for lease expiry; other
-	// owners remain fenced out.
-	if _, err := store.ClaimBackgroundRunExport(context.Background(), ClaimBackgroundRunExportParams{
+	// A stale export revision is rejected; restarting a running export at its
+	// current revision is allowed so a restarted coordinator can replay.
+	if _, err := store.StartBackgroundRunExport(context.Background(), BackgroundRunExportRef{
 		ExportID: export.ID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRevision: export.Revision, ExpectedPhase: export.Phase, ClaimOwner: "other-dispatcher",
-		Now: writerAt.Add(1500 * time.Millisecond), LeaseDuration: 2 * time.Minute,
-	}); !errors.Is(err, ErrLeaseConflict) {
-		t.Fatalf("foreign export re-claim = %v", err)
+		ExpectedRevision: export.Revision - 1, ExpectedPhase: export.Phase,
+		Now: writerAt.Add(1500 * time.Millisecond),
+	}); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("stale export start = %v", err)
 	}
-	firstGeneration := export.ClaimGeneration
-	export, err = store.ClaimBackgroundRunExport(context.Background(), ClaimBackgroundRunExportParams{
+	restartedRevision := export.Revision
+	export, err = store.StartBackgroundRunExport(context.Background(), BackgroundRunExportRef{
 		ExportID: export.ID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRevision: export.Revision, ExpectedPhase: export.Phase, ClaimOwner: "export-dispatcher",
-		Now: writerAt.Add(1500 * time.Millisecond), LeaseDuration: 2 * time.Minute,
+		ExpectedRevision: export.Revision, ExpectedPhase: export.Phase,
+		Now: writerAt.Add(1500 * time.Millisecond),
 	})
-	if err != nil || export.ClaimGeneration != firstGeneration+1 {
-		t.Fatalf("same-owner export re-claim = %+v, error=%v", export, err)
+	if err != nil || export.State != BackgroundRunExportRunning || export.Revision != restartedRevision+1 {
+		t.Fatalf("restarted export = %+v, error=%v", export, err)
 	}
 	failureAt := writerAt.Add(2 * time.Second)
-	failureClaim := BackgroundRunExportClaim{ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID,
+	failureRef := BackgroundRunExportRef{ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID,
 		Generation: export.Generation, ExpectedRevision: export.Revision, ExpectedPhase: export.Phase,
-		ClaimOwner: export.ClaimOwner, ClaimGeneration: export.ClaimGeneration, Now: failureAt}
-	recovery, err := store.MarkBackgroundRunExportRecoveryRequired(context.Background(), failureClaim, "injected export interruption")
-	if err != nil {
-		t.Fatal(err)
+		Now: failureAt}
+	recovery, err := store.MarkBackgroundRunExportRecoveryRequired(context.Background(), failureRef, "injected export interruption")
+	if err != nil || recovery.State != BackgroundRunExportRecoveryRequired {
+		t.Fatalf("export recovery = %+v, error=%v", recovery, err)
 	}
-	released, err := store.ReleaseBackgroundRunClaimAfterExportFailure(context.Background(), failureClaim)
-	if err != nil || released.ClaimOwner != "" || released.ResultAuthorityPhase != "exporting" {
-		t.Fatalf("release failed export run claim = %+v, error=%v", released, err)
+	if replayed, err := store.MarkBackgroundRunExportRecoveryRequired(context.Background(), failureRef, "injected export interruption"); err != nil || replayed.Revision != recovery.Revision {
+		t.Fatalf("export recovery replay = %+v, error=%v", replayed, err)
 	}
-	reclaimed, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{WorkspaceID: run.WorkspaceID,
-		ClaimOwner: "export-dispatcher", Now: failureAt.Add(time.Second), LeaseDuration: time.Minute,
-		Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity})
-	if err != nil || reclaimed.EffectPhase != BackgroundRunEffectExporting {
-		t.Fatalf("reclaim failed export run = %+v, error=%v", reclaimed, err)
+	if _, err := store.RecordBackgroundRunSnapshotStarted(context.Background(), BackgroundRunExportRef{ExportID: recovery.ID,
+		TaskID: recovery.TaskID, AttemptID: recovery.AttemptID, Generation: recovery.Generation, ExpectedRevision: recovery.Revision,
+		ExpectedPhase: recovery.Phase, Now: failureAt}); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("recovery-required export advanced before restart: %v", err)
 	}
-	// The coordinator releases an exporting run claim after a retained
-	// failure; the in-memory (cleanup_required, exporting) tuple must map to
-	// its stored phase.
-	releasedExporting, err := store.ReleaseBackgroundRunClaim(context.Background(), backgroundRunClaim(reclaimed, failureAt.Add(1100*time.Millisecond)))
-	if err != nil || releasedExporting.ClaimOwner != "" || releasedExporting.EffectPhase != BackgroundRunEffectExporting {
-		t.Fatalf("release exporting run claim = %+v, error=%v", releasedExporting, err)
+	reselected, err := startNextBackgroundRun(context.Background(), store, failureAt.Add(time.Second))
+	if err != nil || reselected.EffectPhase != BackgroundRunEffectExporting {
+		t.Fatalf("reselect failed export run = %+v, error=%v", reselected, err)
 	}
-	reclaimed, err = store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{WorkspaceID: run.WorkspaceID,
-		ClaimOwner: "export-dispatcher", Now: failureAt.Add(1200 * time.Millisecond), LeaseDuration: time.Minute,
-		Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity})
-	if err != nil || reclaimed.EffectPhase != BackgroundRunEffectExporting {
-		t.Fatalf("reclaim released export run = %+v, error=%v", reclaimed, err)
-	}
-	export, err = store.ClaimBackgroundRunExport(context.Background(), ClaimBackgroundRunExportParams{
+	export, err = store.StartBackgroundRunExport(context.Background(), BackgroundRunExportRef{
 		ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID, Generation: export.Generation,
-		ExpectedRevision: recovery.Revision, ExpectedPhase: recovery.Phase, ClaimOwner: "export-dispatcher",
-		Now: failureAt.Add(2 * time.Second), LeaseDuration: 2 * time.Minute,
+		ExpectedRevision: recovery.Revision, ExpectedPhase: recovery.Phase,
+		Now: failureAt.Add(2 * time.Second),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	exportNow := failureAt.Add(3 * time.Second)
-	exportClaim := func() BackgroundRunExportClaim {
-		return BackgroundRunExportClaim{ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID,
+	exportRef := func() BackgroundRunExportRef {
+		return BackgroundRunExportRef{ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID,
 			Generation: export.Generation, ExpectedRevision: export.Revision, ExpectedPhase: export.Phase,
-			ClaimOwner: export.ClaimOwner, ClaimGeneration: export.ClaimGeneration, Now: exportNow}
+			Now: exportNow}
 	}
-	advance := func(call func(context.Context, BackgroundRunExportClaim) (BackgroundRunExport, error)) {
+	advance := func(call func(context.Context, BackgroundRunExportRef) (BackgroundRunExport, error)) {
 		var stepErr error
-		export, stepErr = call(context.Background(), exportClaim())
+		export, stepErr = call(context.Background(), exportRef())
 		if stepErr != nil {
-			t.Fatalf("advance export from %s: %v", exportClaim().ExpectedPhase, stepErr)
+			t.Fatalf("advance export from %s: %v", exportRef().ExpectedPhase, stepErr)
 		}
 		exportNow = exportNow.Add(time.Second)
 	}
@@ -193,7 +176,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	// data, not host-path authority, and must survive both Go and SQL guards.
 	artifactManifest := json.RawMessage(`{"version":1,"changes":[{"path_base64":"/A=="}]}`)
 	if _, err := store.SelectBackgroundRunSnapshot(context.Background(), SelectBackgroundRunSnapshotParams{
-		BackgroundRunExportClaim: exportClaim(), ResultCommit: resultCommit, TreeOID: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		BackgroundRunExportRef: exportRef(), ResultCommit: resultCommit, TreeOID: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
 		Outcome: task.ResultChanged, ResultManifest: resultManifest, ChangesSHA256: sha256.Sum256(resultManifestJSON),
 		ArtifactManifest:       json.RawMessage(`{"host_path":"/private/work"}`),
 		ArtifactManifestSHA256: sha256.Sum256([]byte(`{"host_path":"/private/work"}`)),
@@ -202,7 +185,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		t.Fatalf("unsafe artifact manifest = %v", err)
 	}
 	export, err = store.SelectBackgroundRunSnapshot(context.Background(), SelectBackgroundRunSnapshotParams{
-		BackgroundRunExportClaim: exportClaim(), ResultCommit: resultCommit, TreeOID: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		BackgroundRunExportRef: exportRef(), ResultCommit: resultCommit, TreeOID: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
 		Outcome: task.ResultChanged, ResultManifest: resultManifest, ChangesSHA256: sha256.Sum256(resultManifestJSON),
 		ArtifactManifest: artifactManifest, ArtifactManifestSHA256: sha256.Sum256(artifactManifest),
 		OpenCodeSessionID: run.OpenCodeSessionID, OpenCodeMessageID: run.OpenCodeMessageID, CollectedAt: exportNow,
@@ -213,7 +196,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	exportNow = exportNow.Add(time.Second)
 	advance(store.RecordBackgroundRunBundleWriteStarted)
 	export, err = store.RecordBackgroundRunBundleVerified(context.Background(), RecordBackgroundRunBundleVerifiedParams{
-		BackgroundRunExportClaim: exportClaim(), BundleSHA256: sha256.Sum256([]byte("bundle")), BundleBytes: 6,
+		BackgroundRunExportRef: exportRef(), BundleSHA256: sha256.Sum256([]byte("bundle")), BundleBytes: 6,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -224,7 +207,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	advance(store.RecordBackgroundRunMaterializeStarted)
 	materialProof := sha256.Sum256([]byte("acceptance materialization"))
 	export, err = store.RecordArtifactMaterializationReady(context.Background(), RecordArtifactMaterializationReadyParams{
-		BackgroundRunExportClaim: exportClaim(), MaterializationID: seal.MaterializationID, ArtifactID: seal.ArtifactID,
+		BackgroundRunExportRef: exportRef(), MaterializationID: seal.MaterializationID, ArtifactID: seal.ArtifactID,
 		ResultID: seal.ResultID, ResultCommit: export.ResultCommit, TreeOID: export.TreeOID, ProofSHA256: materialProof,
 	})
 	if err != nil {
@@ -232,7 +215,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	}
 	exportNow = exportNow.Add(time.Second)
 	evidence := json.RawMessage(`{"authorityRead":true,"objects":1}`)
-	commit := CommitBackgroundRunRetainedResultParams{BackgroundRunExportClaim: exportClaim(),
+	commit := CommitBackgroundRunRetainedResultParams{BackgroundRunExportRef: exportRef(),
 		MaterializationID: seal.MaterializationID, ArtifactID: seal.ArtifactID, ResultID: seal.ResultID,
 		ResultEventID: seal.ResultEventID, TaskEventID: seal.TaskEventID, EvidencePayload: evidence,
 		EvidenceSHA256: sha256.Sum256(evidence), Actor: testSystemActor(), SealedAt: exportNow,
@@ -279,36 +262,33 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 route_removed_evidence='raw cleanup',revision=revision+1,updated_at=updated_at+1 WHERE task_id=?`, run.TaskID); err == nil {
 		t.Fatal("result-bearing cleanup bypassed committed tuple gate")
 	}
-	cleanupWork, err := store.ClaimNextBackgroundRunWork(context.Background(), ClaimNextBackgroundRunParams{
-		WorkspaceID: run.WorkspaceID, ClaimOwner: "result-cleaner", Now: exportNow.Add(time.Second), LeaseDuration: time.Minute,
-		Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity,
-	})
+	cleanupWork, err := startNextBackgroundRunWork(context.Background(), store, exportNow.Add(time.Second))
 	cleanupRun := cleanupWork.Run
 	if err != nil || cleanupRun.EffectPhase != BackgroundRunEffectArtifactCommitted {
 		t.Fatal(err)
 	}
-	cleanupClaim := backgroundRunClaim(cleanupRun, exportNow.Add(2*time.Second))
+	cleanupRef := backgroundRunRef(cleanupRun, exportNow.Add(2*time.Second))
 	cleanupRun, err = store.RequestBackgroundRunResultCleanup(context.Background(), RecordBackgroundRunEvidenceParams{
-		BackgroundRunClaim: cleanupClaim, Evidence: "retained tuple accepted",
+		BackgroundRunRef: cleanupRef, Evidence: "retained tuple accepted",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	advanceBackgroundClaim(&cleanupClaim, cleanupRun)
+	advanceBackgroundRef(&cleanupRef, cleanupRun)
 	for _, step := range []func(context.Context, RecordBackgroundRunEvidenceParams) (BackgroundRun, error){
 		store.RecordBackgroundRunRouteRemoved, store.RecordBackgroundRunContainerRemoved,
 		store.RecordBackgroundRunVolumeRemoved, store.RecordBackgroundRunCloneRemoved,
 	} {
-		cleanupClaim.Now = cleanupClaim.Now.Add(time.Second)
-		cleanupRun, err = step(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunClaim: cleanupClaim, Evidence: "resource absent"})
+		cleanupRef.Now = cleanupRef.Now.Add(time.Second)
+		cleanupRun, err = step(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: cleanupRef, Evidence: "resource absent"})
 		if err != nil {
-			t.Fatalf("retained cleanup from %s: %v", cleanupClaim.ExpectedPhase, err)
+			t.Fatalf("retained cleanup from %s: %v", cleanupRef.ExpectedPhase, err)
 		}
-		advanceBackgroundClaim(&cleanupClaim, cleanupRun)
+		advanceBackgroundRef(&cleanupRef, cleanupRun)
 	}
-	cleanupClaim.Now = cleanupClaim.Now.Add(time.Second)
+	cleanupRef.Now = cleanupRef.Now.Add(time.Second)
 	cleanupRun, err = store.CompleteBackgroundRunResultCleanup(context.Background(), CompleteBackgroundRunResultCleanupParams{
-		BackgroundRunClaim: cleanupClaim, CleanupProof: "all resources absent",
+		BackgroundRunRef: cleanupRef, CleanupProof: "all resources absent",
 	})
 	if err != nil || cleanupRun.EffectPhase != BackgroundRunEffectCleanupComplete {
 		t.Fatalf("retained cleanup completion = %+v, error=%v", cleanupRun, err)

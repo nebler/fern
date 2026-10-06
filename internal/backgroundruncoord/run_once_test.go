@@ -243,7 +243,7 @@ func newScanFixture(t *testing.T) *scanFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.c, err = New(store, provider, unusedArtifact{}, ids, Config{WorkspaceID: workspace, WorkerID: "worker", SystemActor: task.ActorSnapshot{Type: task.ActorSystem, ID: "coordinator", DisplayName: "Coordinator", CredentialID: "service", Authentication: "internal", RequestID: "scan"}, Profile: taskstore.BackgroundRunSourceProfile, ImageIdentity: scanImage, EnvironmentSHA256: f.params.BackgroundRun.EnvironmentSHA256, Agent: "build", ModelProvider: "provider", Model: "model", OperationTimeout: 30 * time.Second, LeaseDuration: time.Minute, PollInterval: time.Hour, Now: func() time.Time { return f.now }, HTTPClient: &http.Client{Timeout: time.Second}, Route: route, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 10, MaxPages: 10, MaxEvents: 100}})
+	f.c, err = New(store, provider, unusedArtifact{}, ids, Config{WorkspaceID: workspace, SystemActor: task.ActorSnapshot{Type: task.ActorSystem, ID: "coordinator", DisplayName: "Coordinator", CredentialID: "service", Authentication: "internal", RequestID: "scan"}, Profile: taskstore.BackgroundRunSourceProfile, ImageIdentity: scanImage, EnvironmentSHA256: f.params.BackgroundRun.EnvironmentSHA256, Agent: "build", ModelProvider: "provider", Model: "model", OperationTimeout: 30 * time.Second, PollInterval: time.Hour, Now: func() time.Time { return f.now }, HTTPClient: &http.Client{Timeout: time.Second}, Route: route, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 10, MaxPages: 10, MaxEvents: 100}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -323,7 +323,7 @@ func TestRunSupervisesRealScans(t *testing.T) {
 				if successes != 0 || failures != 1 {
 					t.Fatalf("callbacks success=%d failure=%d", successes, failures)
 				}
-				if r := f.run(t); r.EffectPhase != taskstore.BackgroundRunEffectCloneObserved || r.ClaimOwner != "" {
+				if r := f.run(t); r.EffectPhase != taskstore.BackgroundRunEffectCloneObserved {
 					t.Fatalf("failure not recoverable: %+v", r)
 				}
 			} else if successes != 1 || failures != 0 {
@@ -364,49 +364,28 @@ func TestRunAdvancesSeveralPhasesWithoutWaitingForTicks(t *testing.T) {
 	}
 }
 
-func TestRunOnceDeadlineAndExpiredClaimBeforeEffect(t *testing.T) {
-	for _, expiry := range []string{"attempt", "claim"} {
-		t.Run(expiry, func(t *testing.T) {
-			f := newScanFixture(t)
-			if expiry == "attempt" {
-				f.params.Deadline = f.now.Add(time.Second)
-			}
-			f.admit(t)
-			calls := 0
-			f.c.config.Now = func() time.Time {
-				calls++
-				if calls == 2 {
-					if expiry == "attempt" {
-						f.now = f.params.Deadline
-					} else {
-						f.now = f.now.Add(f.c.config.LeaseDuration)
-					}
-				}
-				return f.now
-			}
-			err := f.c.RunOnce(context.Background())
-			r := f.run(t)
-			if expiry == "attempt" {
-				if err != nil || r.TimeoutRequestedAt == nil || r.EffectPhase != taskstore.BackgroundRunEffectStopIntent {
-					t.Fatalf("timeout: %+v %v", r, err)
-				}
-			} else if !errors.Is(err, context.DeadlineExceeded) || r.EffectPhase != taskstore.BackgroundRunEffectProvisionIntent {
-				t.Fatalf("claim: %+v %v", r, err)
-			}
-			if len(f.d.calls) != 0 {
-				t.Fatal(f.d.calls)
-			}
-			if _, err := os.Stat(filepath.Join(f.root, "background-runs", r.CloneIdentity)); !errors.Is(err, os.ErrNotExist) {
-				t.Fatalf("clone effect occurred: %v", err)
-			}
-			if expiry == "claim" {
-				f.c.config.WorkerID = "takeover"
-				f.scan(t, taskstore.BackgroundRunEffectCloneObserved)
-				if recovered := f.run(t); recovered.ClaimGeneration <= r.ClaimGeneration {
-					t.Fatal("expired claim was not fenced by a new generation")
-				}
-			}
-		})
+func TestRunOnceAttemptDeadlineBeforeEffect(t *testing.T) {
+	f := newScanFixture(t)
+	f.params.Deadline = f.now.Add(time.Second)
+	f.admit(t)
+	calls := 0
+	f.c.config.Now = func() time.Time {
+		calls++
+		if calls == 2 {
+			f.now = f.params.Deadline
+		}
+		return f.now
+	}
+	err := f.c.RunOnce(context.Background())
+	r := f.run(t)
+	if err != nil || r.TimeoutRequestedAt == nil || r.EffectPhase != taskstore.BackgroundRunEffectStopIntent {
+		t.Fatalf("timeout: %+v %v", r, err)
+	}
+	if len(f.d.calls) != 0 {
+		t.Fatal(f.d.calls)
+	}
+	if _, err := os.Stat(filepath.Join(f.root, "background-runs", r.CloneIdentity)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("clone effect occurred: %v", err)
 	}
 }
 
@@ -418,7 +397,7 @@ func TestRunOnceExecutionMismatchSelectsCleanupWithoutProvisioning(t *testing.T)
 		t.Fatal(err)
 	}
 	r := f.run(t)
-	if r.State != taskstore.BackgroundRunCleanupRequired || r.ClaimOwner != "" {
+	if r.State != taskstore.BackgroundRunCleanupRequired {
 		t.Fatalf("mismatch not durable: %+v", r)
 	}
 	if len(f.d.calls) != 0 {
@@ -430,7 +409,7 @@ func TestRunOnceExecutionMismatchSelectsCleanupWithoutProvisioning(t *testing.T)
 	f.scan(t, taskstore.BackgroundRunEffectWriterInactive)
 }
 
-func TestRunOnceCancellationAfterClaimLeavesRecoverableIntent(t *testing.T) {
+func TestRunOnceCancellationAfterProvisioningIntentLeavesRecoverableIntent(t *testing.T) {
 	f := newScanFixture(t)
 	f.admit(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -444,17 +423,15 @@ func TestRunOnceCancellationAfterClaimLeavesRecoverableIntent(t *testing.T) {
 		return f.now
 	}
 	if err := f.c.RunOnce(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("canceled claimed scan: %v", err)
+		t.Fatalf("canceled scan: %v", err)
 	}
 	r := f.run(t)
-	if r.EffectPhase != taskstore.BackgroundRunEffectProvisionIntent || r.ClaimOwner != "worker" {
+	if r.EffectPhase != taskstore.BackgroundRunEffectProvisionIntent {
 		t.Fatalf("lost recovery intent: %+v", r)
 	}
 	if len(f.d.calls) != 0 {
 		t.Fatalf("canceled scan called Docker: %v", f.d.calls)
 	}
-	f.now = f.now.Add(2 * time.Minute)
-	f.c.config.WorkerID = "replacement"
 	f.scan(t, taskstore.BackgroundRunEffectCloneObserved)
 }
 
@@ -482,9 +459,6 @@ func TestRunOnceVolumeFailureAndLostObservationRecover(t *testing.T) {
 			if r.EffectPhase != taskstore.BackgroundRunEffectCloneObserved {
 				t.Fatalf("advanced after failure: %+v", r)
 			}
-			if mode == "effect failure" && r.ClaimOwner != "" {
-				t.Fatal("transient failure did not release claim")
-			}
 			if mode == "observation canceled" && (f.d.item == nil || f.d.creates != 1) {
 				t.Fatal("volume effect did not succeed")
 			}
@@ -495,8 +469,6 @@ func TestRunOnceVolumeFailureAndLostObservationRecover(t *testing.T) {
 			}
 			f.d.inspectErr = nil
 			f.d.afterVolumeRead = nil
-			f.c.config.WorkerID = "replacement"
-			f.now = f.now.Add(2 * time.Minute)
 			f.scan(t, taskstore.BackgroundRunEffectVolumeObserved)
 			if f.d.creates != 1 {
 				t.Fatalf("replay created %d volumes", f.d.creates)
@@ -590,14 +562,13 @@ func TestRunOnceStopCleanupFailureRecoveryPastDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := f.run(t)
-	if r.EffectPhase != taskstore.BackgroundRunEffectStopIntent || r.State != taskstore.BackgroundRunCleanupRequired || r.ClaimOwner != "" {
+	if r.EffectPhase != taskstore.BackgroundRunEffectStopIntent || r.State != taskstore.BackgroundRunCleanupRequired {
 		t.Fatalf("not recoverable: %+v", r)
 	}
 	if f.d.item == nil {
 		t.Fatal("volume removed before writer proof")
 	}
 	f.d.containerErr = nil
-	f.c.config.WorkerID = "recovery"
 	for _, phase := range []taskstore.BackgroundRunEffectPhase{taskstore.BackgroundRunEffectWriterInactive, taskstore.BackgroundRunEffectRouteRemoved, taskstore.BackgroundRunEffectContainerRemoved, taskstore.BackgroundRunEffectVolumeRemoved, taskstore.BackgroundRunEffectCloneRemoved} {
 		f.scan(t, phase)
 	}
@@ -664,8 +635,7 @@ func TestCleanupRequiredBoundsRouteDrain(t *testing.T) {
 	<-transport.entered
 
 	f.now = time.Now().UTC()
-	expires := f.now.Add(200 * time.Millisecond)
-	run.ClaimExpiresAt = &expires
+	f.c.config.OperationTimeout = 200 * time.Millisecond
 	done := make(chan error, 1)
 	go func() {
 		done <- f.c.cleanupRequired(context.Background(), taskstore.BackgroundRunWork{Run: run}, "test cleanup")

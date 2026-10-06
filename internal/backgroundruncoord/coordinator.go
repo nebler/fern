@@ -25,7 +25,6 @@ const sessionDirectory = "/home/user/workspace"
 
 type Config struct {
 	WorkspaceID       task.WorkspaceID
-	WorkerID          string
 	SystemActor       task.ActorSnapshot
 	Profile           string
 	ImageIdentity     string
@@ -34,7 +33,6 @@ type Config struct {
 	ModelProvider     string
 	Model             string
 	OperationTimeout  time.Duration
-	LeaseDuration     time.Duration
 	PollInterval      time.Duration
 	HistoryBounds     backgroundopencode.HistoryBounds
 	Now               func() time.Time
@@ -69,9 +67,9 @@ type Artifact interface {
 
 func New(store *taskstore.Store, provider *taskenvdocker.Provider, artifact Artifact, ids *task.Generator, config Config) (*Coordinator, error) {
 	if store == nil || provider == nil || artifact == nil || ids == nil || config.Now == nil || config.HTTPClient == nil || config.Route == nil ||
-		config.Profile != taskstore.BackgroundRunSourceProfile || config.ImageIdentity == "" || config.EnvironmentSHA256 == ([32]byte{}) || config.WorkerID == "" ||
+		config.Profile != taskstore.BackgroundRunSourceProfile || config.ImageIdentity == "" || config.EnvironmentSHA256 == ([32]byte{}) ||
 		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.OperationTimeout <= 0 ||
-		config.LeaseDuration <= config.OperationTimeout || config.LeaseDuration > 5*time.Minute || config.PollInterval <= 0 ||
+		config.OperationTimeout > 5*time.Minute || config.PollInterval <= 0 ||
 		config.HTTPClient.Timeout <= 0 || config.HTTPClient.Timeout > config.OperationTimeout || config.SystemActor.Validate() != nil ||
 		config.SystemActor.Type != task.ActorSystem || config.HistoryBounds.PageLimit < 1 || config.HistoryBounds.MaxPages < 1 ||
 		config.HistoryBounds.MaxEvents < 1 {
@@ -142,16 +140,17 @@ func (c *Coordinator) supervise(ctx context.Context, step func(context.Context) 
 	}
 }
 
-// RunOnce selects one run under a durable claim and processes its current phase.
-// A phase can require multiple external calls and evidence transitions. The
-// process-local mutex makes concurrent wake and test scans serial.
+// RunOnce selects the next run and processes its current phase. A phase can
+// require multiple external calls and evidence transitions, each a revision
+// compare-and-swap. The process-local mutex makes concurrent wake and test
+// scans serial; fern up's host lease makes this the workspace's only coordinator.
 func (c *Coordinator) RunOnce(ctx context.Context) error {
 	_, err := c.step(ctx)
 	return err
 }
 
-// step runs one scan and reports whether it advanced the claimed run's durable
-// lifecycle. Observation of a working run, released claims, and repeated
+// step runs one scan and reports whether it advanced the selected run's durable
+// lifecycle. Observation of a working run, deferred retries, and repeated
 // uncertain reconciliation do not count as progress, so the supervisor cannot
 // busy-loop on them.
 func (c *Coordinator) step(ctx context.Context) (bool, error) {
@@ -176,15 +175,21 @@ func (c *Coordinator) runOnce(ctx context.Context) (taskstore.BackgroundRunWork,
 	if err != nil {
 		return taskstore.BackgroundRunWork{}, err
 	}
-	work, err := c.store.ClaimNextBackgroundRunWork(ctx, taskstore.ClaimNextBackgroundRunParams{
-		WorkspaceID: c.config.WorkspaceID, ClaimOwner: c.config.WorkerID, Now: now, LeaseDuration: c.config.LeaseDuration,
-		Profile: c.config.Profile, ImageIdentity: c.config.ImageIdentity,
-	})
+	work, err := c.store.NextBackgroundRunWork(ctx, c.config.WorkspaceID, c.config.Profile)
 	if errors.Is(err, taskstore.ErrNotFound) {
 		return work, ErrNoWork
 	}
 	if err != nil {
 		return work, err
+	}
+	if work.Run.State == taskstore.BackgroundRunQueued {
+		// Consume the provisioning slot before any external effect.
+		queued := work.Run
+		work.Run, err = c.store.StartBackgroundRunProvisioning(ctx, ref(queued, now))
+		if err != nil {
+			work.Run = queued
+			return work, err
+		}
 	}
 	now, err = c.freshNow()
 	if err != nil {
@@ -229,7 +234,7 @@ func (c *Coordinator) process(operation, parent context.Context, work taskstore.
 	case taskstore.BackgroundRunEffectSealIntent:
 		_, providerFence, err := c.provider.ProveWriterInactive(operation, run)
 		if err != nil {
-			return c.retainedFailure(parent, work, fmt.Errorf("prove retained writer inactivity: %w", err))
+			return fmt.Errorf("prove retained writer inactivity: %w", err)
 		}
 		if err := c.recordWriterFence(parent, work, providerFence); err != nil {
 			return fmt.Errorf("record retained writer fence: %w", err)
@@ -266,7 +271,7 @@ func (c *Coordinator) process(operation, parent context.Context, work taskstore.
 		}
 		defer cancel()
 		_, err = c.store.RecordBackgroundRunContainerObserved(mutation, taskstore.RecordBackgroundRunContainerObservedParams{
-			BackgroundRunClaim: claim(run, now), ContainerID: started.ContainerID, ContainerStartedAt: started.ContainerStarted,
+			BackgroundRunRef: ref(run, now), ContainerID: started.ContainerID, ContainerStartedAt: started.ContainerStarted,
 			RuntimeEpoch: started.RuntimeEpoch, HostPort: started.HostPort, Evidence: started.Evidence,
 		})
 		return err
@@ -371,7 +376,7 @@ func (c *Coordinator) process(operation, parent context.Context, work taskstore.
 			}
 			defer cancel()
 			_, err = c.store.CompleteBackgroundRunResultCleanup(mutation, taskstore.CompleteBackgroundRunResultCleanupParams{
-				BackgroundRunClaim: claim(run, now), CleanupProof: `{"route":"absent","container":"absent","volume":"absent","clone":"absent"}`})
+				BackgroundRunRef: ref(run, now), CleanupProof: `{"route":"absent","container":"absent","volume":"absent","clone":"absent"}`})
 			return err
 		}
 		attemptEvent, err := c.ids.EventID()
@@ -401,19 +406,13 @@ func (c *Coordinator) process(operation, parent context.Context, work taskstore.
 			actor = *run.TimeoutActor
 		}
 		_, err = c.store.FinalizeBackgroundRunFailure(mutation, taskstore.FinalizeBackgroundRunFailureParams{
-			BackgroundRunClaim: claim(run, now), AttemptEventID: attemptEvent, TaskEventID: taskEvent, Actor: actor,
+			BackgroundRunRef: ref(run, now), AttemptEventID: attemptEvent, TaskEventID: taskEvent, Actor: actor,
 			Reason: reason, Evidence: `{"effect":"terminalize","status":"resources_absent"}`,
 			CleanupProof: `{"route":"serial_absent","container":"absent","volume":"absent","clone":"absent"}`,
 		})
 		return err
 	default:
-		mutation, cancel, now, err := c.effectContext(parent, work, classify(run).EnforceAttemptDeadline)
-		if err != nil {
-			return err
-		}
-		defer cancel()
-		_, err = c.store.ReleaseBackgroundRunClaim(mutation, claim(run, now))
-		return err
+		return nil
 	}
 }
 
@@ -425,7 +424,7 @@ func (c *Coordinator) recordWriterFence(ctx context.Context, work taskstore.Back
 	if err != nil {
 		return err
 	}
-	params := taskstore.RecordBackgroundRunWriterFenceParams{BackgroundRunClaim: claim(run, now),
+	params := taskstore.RecordBackgroundRunWriterFenceParams{BackgroundRunRef: ref(run, now),
 		SealRequestID: run.BackgroundSealRequestID, ExportID: run.ArtifactExportID}
 	switch provider.Kind() {
 	case taskenvdocker.WriterFenceNeverCreated:
@@ -456,18 +455,18 @@ func (c *Coordinator) exportRetained(operation, parent context.Context, work tas
 	run := work.Run
 	export, err := c.store.GetBackgroundRunExport(parent, run.ArtifactExportID)
 	if err != nil {
-		return c.retainedFailure(parent, work, err)
+		return err
 	}
 	now, err := c.freshNow()
 	if err != nil {
 		return err
 	}
-	export, err = c.store.ClaimBackgroundRunExport(parent, taskstore.ClaimBackgroundRunExportParams{
+	export, err = c.store.StartBackgroundRunExport(parent, taskstore.BackgroundRunExportRef{
 		ExportID: export.ID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRevision: export.Revision, ExpectedPhase: export.Phase, ClaimOwner: c.config.WorkerID, Now: now, LeaseDuration: c.config.LeaseDuration,
+		ExpectedRevision: export.Revision, ExpectedPhase: export.Phase, Now: now,
 	})
 	if err != nil {
-		return c.retainedFailure(parent, work, fmt.Errorf("claim retained export: %w", err))
+		return fmt.Errorf("start retained export: %w", err)
 	}
 	attempt := retainedExportAttempt{coordinator: c, export: export, collectedAt: now}
 	if err := attempt.recoverInstalledCAS(operation, parent); err != nil {
@@ -499,27 +498,26 @@ func (c *Coordinator) exportRetained(operation, parent context.Context, work tas
 }
 
 // retainedExportAttempt owns only the last successfully recorded export tuple.
-// SQL remains the authority for revision, phase, owner, generation and lease.
+// SQL remains the authority for revision and phase.
 type retainedExportAttempt struct {
 	coordinator *Coordinator
 	export      taskstore.BackgroundRunExport
 	collectedAt time.Time
 }
 
-func exportClaim(export taskstore.BackgroundRunExport, now time.Time) taskstore.BackgroundRunExportClaim {
-	return taskstore.BackgroundRunExportClaim{ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID,
-		Generation: export.Generation, ExpectedRevision: export.Revision, ExpectedPhase: export.Phase,
-		ClaimOwner: export.ClaimOwner, ClaimGeneration: export.ClaimGeneration, Now: now}
+func exportRef(export taskstore.BackgroundRunExport, now time.Time) taskstore.BackgroundRunExportRef {
+	return taskstore.BackgroundRunExportRef{ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID,
+		Generation: export.Generation, ExpectedRevision: export.Revision, ExpectedPhase: export.Phase, Now: now}
 }
 
 // record refreshes the clock immediately before a SQL transition and adopts its
 // returned tuple only on success. A failed write must not erase recovery authority.
-func (a *retainedExportAttempt) record(write func(taskstore.BackgroundRunExportClaim) (taskstore.BackgroundRunExport, error)) error {
+func (a *retainedExportAttempt) record(write func(taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error)) error {
 	now, err := a.coordinator.freshNow()
 	if err != nil {
 		return err
 	}
-	next, err := write(exportClaim(a.export, now))
+	next, err := write(exportRef(a.export, now))
 	if err == nil {
 		a.export = next
 	}
@@ -533,18 +531,11 @@ func (a *retainedExportAttempt) recoveryRequired(parent context.Context, cause e
 		return errors.Join(cause, err)
 	}
 	// Cancellation must not interrupt recording an ambiguous effect. Detachment
-	// does not grant an unbounded write or bypass the store's export lease checks.
+	// does not grant an unbounded write or bypass the store's revision check.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), c.config.OperationTimeout)
 	defer cancel()
-	claim := exportClaim(a.export, now)
-	_, markErr := c.store.MarkBackgroundRunExportRecoveryRequired(ctx, claim, "retained artifact export retry required")
-	var releaseErr error
-	if markErr == nil {
-		// The release API deliberately takes the pre-recovery tuple and checks
-		// the recovery row at ExpectedRevision+1, not the returned cleared claim.
-		_, releaseErr = c.store.ReleaseBackgroundRunClaimAfterExportFailure(ctx, claim)
-	}
-	return errors.Join(cause, markErr, releaseErr)
+	_, markErr := c.store.MarkBackgroundRunExportRecoveryRequired(ctx, exportRef(a.export, now), "retained artifact export retry required")
+	return errors.Join(cause, markErr)
 }
 
 func needsRetainedSnapshot(phase taskstore.BackgroundRunExportPhase) bool {
@@ -573,16 +564,16 @@ func (a *retainedExportAttempt) recoverInstalledCAS(operation, parent context.Co
 	if err != nil || !snapshotMatchesExport(snapshot, a.export) {
 		return nil
 	}
-	return a.record(func(claim taskstore.BackgroundRunExportClaim) (taskstore.BackgroundRunExport, error) {
-		return c.store.RecordBackgroundRunCASInstalled(parent, claim)
+	return a.record(func(ref taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error) {
+		return c.store.RecordBackgroundRunCASInstalled(parent, ref)
 	})
 }
 
 func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Context, run taskstore.BackgroundRun, repositoryPath string) (resultErr error) {
 	c := a.coordinator
 	if a.export.Phase == taskstore.BackgroundRunExportPhasePrepared {
-		if err := a.record(func(claim taskstore.BackgroundRunExportClaim) (taskstore.BackgroundRunExport, error) {
-			return c.store.RecordBackgroundRunSnapshotStarted(parent, claim)
+		if err := a.record(func(ref taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error) {
+			return c.store.RecordBackgroundRunSnapshotStarted(parent, ref)
 		}); err != nil {
 			return err
 		}
@@ -621,9 +612,9 @@ func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Con
 		if snapshot.Result == snapshot.Base {
 			outcome = task.ResultNoChanges
 		}
-		err := a.record(func(claim taskstore.BackgroundRunExportClaim) (taskstore.BackgroundRunExport, error) {
+		err := a.record(func(ref taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error) {
 			return c.store.SelectBackgroundRunSnapshot(parent, taskstore.SelectBackgroundRunSnapshotParams{
-				BackgroundRunExportClaim: claim, ResultCommit: snapshot.Result, TreeOID: snapshot.Tree, Outcome: outcome,
+				BackgroundRunExportRef: ref, ResultCommit: snapshot.Result, TreeOID: snapshot.Tree, Outcome: outcome,
 				ResultManifest: manifestEntries(snapshot.Changes), ChangesSHA256: snapshot.ChangesSHA256.Bytes(), ArtifactManifest: manifestBytes,
 				ArtifactManifestSHA256: manifestDigest.Bytes(), OpenCodeSessionID: snapshot.OpenCodeSessionID,
 				OpenCodeMessageID: snapshot.OpenCodeMessageID, CollectedAt: a.collectedAt,
@@ -647,33 +638,33 @@ func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Con
 	if inspectErr != nil || !snapshotMatchesExport(inspected, a.export) || locator.String() != a.export.CASLocator {
 		return errors.Join(inspectErr, errors.New("installed retained artifact differs from durable selection"))
 	}
-	return a.record(func(claim taskstore.BackgroundRunExportClaim) (taskstore.BackgroundRunExport, error) {
-		return c.store.RecordBackgroundRunCASInstalled(parent, claim)
+	return a.record(func(ref taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error) {
+		return c.store.RecordBackgroundRunCASInstalled(parent, ref)
 	})
 }
 
 // recordBundleAndInstallIntent records verified bundle evidence before allowing
-// CAS mutation. Replays skip already-durable steps, never their SQL claim checks.
+// CAS mutation. Replays skip already-durable steps, never their SQL revision checks.
 func (a *retainedExportAttempt) recordBundleAndInstallIntent(parent context.Context, snapshot taskartifact.Snapshot) error {
 	c := a.coordinator
 	if a.export.Phase == taskstore.BackgroundRunExportPhaseSnapshotSelected {
-		if err := a.record(func(claim taskstore.BackgroundRunExportClaim) (taskstore.BackgroundRunExport, error) {
-			return c.store.RecordBackgroundRunBundleWriteStarted(parent, claim)
+		if err := a.record(func(ref taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error) {
+			return c.store.RecordBackgroundRunBundleWriteStarted(parent, ref)
 		}); err != nil {
 			return err
 		}
 	}
 	if a.export.Phase == taskstore.BackgroundRunExportPhaseBundleWriteStarted {
-		if err := a.record(func(claim taskstore.BackgroundRunExportClaim) (taskstore.BackgroundRunExport, error) {
+		if err := a.record(func(ref taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error) {
 			return c.store.RecordBackgroundRunBundleVerified(parent, taskstore.RecordBackgroundRunBundleVerifiedParams{
-				BackgroundRunExportClaim: claim, BundleSHA256: snapshot.BundleSHA256.Bytes(), BundleBytes: snapshot.BundleBytes})
+				BackgroundRunExportRef: ref, BundleSHA256: snapshot.BundleSHA256.Bytes(), BundleBytes: snapshot.BundleBytes})
 		}); err != nil {
 			return err
 		}
 	}
 	if a.export.Phase == taskstore.BackgroundRunExportPhaseBundleVerified {
-		return a.record(func(claim taskstore.BackgroundRunExportClaim) (taskstore.BackgroundRunExport, error) {
-			return c.store.RecordBackgroundRunCASInstallStarted(parent, claim)
+		return a.record(func(ref taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error) {
+			return c.store.RecordBackgroundRunCASInstallStarted(parent, ref)
 		})
 	}
 	return nil
@@ -687,8 +678,8 @@ func (a *retainedExportAttempt) verifyMaterialization(operation, parent context.
 		return err
 	}
 	if a.export.Phase == taskstore.BackgroundRunExportPhaseCASInstalled {
-		if err := a.record(func(claim taskstore.BackgroundRunExportClaim) (taskstore.BackgroundRunExport, error) {
-			return c.store.RecordBackgroundRunMaterializeStarted(parent, claim)
+		if err := a.record(func(ref taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error) {
+			return c.store.RecordBackgroundRunMaterializeStarted(parent, ref)
 		}); err != nil {
 			return err
 		}
@@ -704,10 +695,10 @@ func (a *retainedExportAttempt) verifyMaterialization(operation, parent context.
 		if closeErr != nil {
 			return closeErr
 		}
-		return a.record(func(claim taskstore.BackgroundRunExportClaim) (taskstore.BackgroundRunExport, error) {
+		return a.record(func(ref taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error) {
 			export := a.export
 			return c.store.RecordArtifactMaterializationReady(parent, taskstore.RecordArtifactMaterializationReadyParams{
-				BackgroundRunExportClaim: claim, MaterializationID: export.MaterializationID, ArtifactID: export.ArtifactID,
+				BackgroundRunExportRef: ref, MaterializationID: export.MaterializationID, ArtifactID: export.ArtifactID,
 				ResultID: export.ResultID, ResultCommit: export.ResultCommit, TreeOID: export.TreeOID, ProofSHA256: proof})
 		})
 	}
@@ -733,7 +724,7 @@ func (a *retainedExportAttempt) commitResult(parent context.Context, run tasksto
 			return err
 		}
 		_, err = c.store.CommitBackgroundRunRetainedResult(ctx, taskstore.CommitBackgroundRunRetainedResultParams{
-			BackgroundRunExportClaim: exportClaim(export, now), MaterializationID: export.MaterializationID, ArtifactID: export.ArtifactID,
+			BackgroundRunExportRef: exportRef(export, now), MaterializationID: export.MaterializationID, ArtifactID: export.ArtifactID,
 			ResultID: export.ResultID, ResultEventID: request.ResultEventID, TaskEventID: request.TaskEventID,
 			EvidencePayload: evidence, EvidenceSHA256: sha256.Sum256(evidence), Actor: c.config.SystemActor, SealedAt: sealedAt,
 		})
@@ -792,16 +783,6 @@ func materializationProof(export taskstore.BackgroundRunExport, path string) [32
 	return sha256.Sum256(payload)
 }
 
-func (c *Coordinator) retainedFailure(ctx context.Context, work taskstore.BackgroundRunWork, external error) error {
-	mutation, cancel, now, err := c.effectContext(ctx, work, false)
-	if err != nil {
-		return errors.Join(external, err)
-	}
-	defer cancel()
-	_, releaseErr := c.store.ReleaseBackgroundRunClaim(mutation, claim(work.Run, now))
-	return errors.Join(external, releaseErr)
-}
-
 func (c *Coordinator) reconcileSession(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
 	run := work.Run
 	client, err := c.client(operation, run)
@@ -828,13 +809,7 @@ func (c *Coordinator) reconcileSession(operation, parent context.Context, work t
 		return c.cleanupRequired(parent, work, "OpenCode session identity conflict")
 	}
 	if state != backgroundopencode.ReconcileExact {
-		mutation, cancel, now, mutationErr := c.effectContext(parent, work, true)
-		if mutationErr != nil {
-			return mutationErr
-		}
-		defer cancel()
-		_, releaseErr := c.store.ReleaseBackgroundRunClaim(mutation, claim(run, now))
-		return releaseErr
+		return nil
 	}
 	return c.record(parent, work, `{"effect":"session_reconcile","status":"exact"}`, c.store.RecordBackgroundRunSessionObserved)
 }
@@ -856,7 +831,7 @@ func (c *Coordinator) reconcilePrompt(operation, parent context.Context, work ta
 		if !now.Before(work.Deadline) {
 			return c.requestTimeout(parent, run)
 		}
-		run, err = c.store.RecordBackgroundRunPromptRequestAttempted(mutation, claim(run, now))
+		run, err = c.store.RecordBackgroundRunPromptRequestAttempted(mutation, ref(run, now))
 		if err != nil {
 			return err
 		}
@@ -919,13 +894,7 @@ func (c *Coordinator) observeWorking(operation, parent context.Context, work tas
 	}
 	state, status := workObservation(observation.State)
 	if state == "" {
-		mutation, cancel, now, mutationErr := c.effectContext(parent, work, true)
-		if mutationErr != nil {
-			return mutationErr
-		}
-		defer cancel()
-		_, err = c.store.ReleaseBackgroundRunClaim(mutation, claim(run, now))
-		return err
+		return nil
 	}
 	value := fmt.Sprintf(`{"effect":"work_observe","status":%q,"questions":%d,"permissions":%d,"usage":%s}`,
 		status, observation.Questions, observation.Permissions, usage.Evidence)
@@ -993,13 +962,7 @@ func (c *Coordinator) externalFailure(ctx context.Context, work taskstore.Backgr
 	if errors.Is(external, taskenvdocker.ErrRuntimeExited) {
 		return errors.Join(external, c.cleanupRequired(ctx, work, "background container exited before its runtime was recorded"))
 	}
-	mutation, cancel, now, mutationErr := c.effectContext(ctx, work, classify(work.Run).EnforceAttemptDeadline)
-	if mutationErr != nil {
-		return errors.Join(external, mutationErr)
-	}
-	defer cancel()
-	_, releaseErr := c.store.ReleaseBackgroundRunClaim(mutation, claim(work.Run, now))
-	return errors.Join(external, releaseErr)
+	return external
 }
 
 func (c *Coordinator) cleanupRequired(ctx context.Context, work taskstore.BackgroundRunWork, reason string) error {
@@ -1022,7 +985,7 @@ func (c *Coordinator) cleanupRequired(ctx context.Context, work taskstore.Backgr
 	}
 	defer cancel()
 	_, err = c.store.MarkBackgroundRunCleanupRequired(mutation, taskstore.MarkBackgroundRunCleanupRequiredParams{
-		BackgroundRunClaim: claim(work.Run, now), Error: reason,
+		BackgroundRunRef: ref(work.Run, now), Error: reason,
 	})
 	return err
 }
@@ -1047,9 +1010,6 @@ func (c *Coordinator) promptDispatchAuthority(work taskstore.BackgroundRunWork) 
 	if !now.Before(work.Deadline) {
 		return context.DeadlineExceeded
 	}
-	if work.Run.ClaimExpiresAt == nil || !work.Run.ClaimExpiresAt.After(now) {
-		return taskstore.ErrInvalidState
-	}
 	return nil
 }
 
@@ -1058,13 +1018,7 @@ func (c *Coordinator) effectContext(parent context.Context, work taskstore.Backg
 	if err != nil {
 		return nil, nil, time.Time{}, err
 	}
-	if work.Run.ClaimExpiresAt == nil {
-		return nil, nil, time.Time{}, taskstore.ErrInvalidState
-	}
 	deadline := now.Add(c.config.OperationTimeout)
-	if work.Run.ClaimExpiresAt.Before(deadline) {
-		deadline = *work.Run.ClaimExpiresAt
-	}
 	if enforceAttemptDeadline && work.Deadline.Before(deadline) {
 		deadline = work.Deadline
 	}
@@ -1091,7 +1045,7 @@ func (c *Coordinator) requestTimeout(ctx context.Context, run taskstore.Backgrou
 	}
 	defer cancel()
 	_, err = c.store.RequestBackgroundRunTimeout(mutation, taskstore.RequestBackgroundRunTimeoutParams{
-		BackgroundRunClaim: claim(run, now), AttemptEventID: attemptEvent, TaskEventID: taskEvent, Actor: c.config.SystemActor,
+		BackgroundRunRef: ref(run, now), AttemptEventID: attemptEvent, TaskEventID: taskEvent, Actor: c.config.SystemActor,
 	})
 	return err
 }
@@ -1117,14 +1071,15 @@ func (c *Coordinator) recordObservation(ctx context.Context, work taskstore.Back
 	return err
 }
 
-func claim(run taskstore.BackgroundRun, now time.Time) taskstore.BackgroundRunClaim {
-	return taskstore.BackgroundRunClaim{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID,
-		Generation: run.Generation, ClaimOwner: run.ClaimOwner, ClaimGeneration: run.ClaimGeneration, ExpectedRevision: run.Revision,
-		ExpectedState: run.State, ExpectedPhase: run.EffectPhase, CancelEpoch: run.CancelEpoch, Now: now}
+// ref pins the revision this scan read; every write is a compare-and-swap on it.
+func ref(run taskstore.BackgroundRun, now time.Time) taskstore.BackgroundRunRef {
+	return taskstore.BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID,
+		Generation: run.Generation, ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase,
+		CancelEpoch: run.CancelEpoch, Now: now}
 }
 
 func evidence(run taskstore.BackgroundRun, now time.Time, value string) taskstore.RecordBackgroundRunEvidenceParams {
-	return taskstore.RecordBackgroundRunEvidenceParams{BackgroundRunClaim: claim(run, now), Evidence: value}
+	return taskstore.RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref(run, now), Evidence: value}
 }
 
 func classify(run taskstore.BackgroundRun) rundomain.Lifecycle {

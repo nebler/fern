@@ -16,7 +16,7 @@ type migration struct {
 }
 
 var migrations = []migration{
-	{version: 4, name: "retained_result_task_store", sql: initialSchema},
+	{version: 5, name: "retained_result_task_store", sql: initialSchema},
 }
 
 // CurrentSchemaVersion is the schema produced by all migrations in this build.
@@ -368,9 +368,6 @@ CREATE TABLE background_runs (
     stop_actor_snapshot_id INTEGER REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     stop_requested_at INTEGER,
     creator_actor_snapshot_id INTEGER NOT NULL REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    claim_owner TEXT CHECK(claim_owner IS NULL OR length(CAST(claim_owner AS BLOB)) BETWEEN 1 AND 128),
-    claim_expires_at INTEGER,
-    claim_generation INTEGER NOT NULL DEFAULT 0 CHECK(claim_generation >= 0),
     clone_evidence TEXT CHECK(clone_evidence IS NULL OR length(CAST(clone_evidence AS BLOB)) BETWEEN 1 AND 4096),
     volume_evidence TEXT CHECK(volume_evidence IS NULL OR length(CAST(volume_evidence AS BLOB)) BETWEEN 1 AND 4096),
     observed_container_id TEXT CHECK(observed_container_id IS NULL OR length(CAST(observed_container_id AS BLOB)) BETWEEN 1 AND 128),
@@ -417,8 +414,6 @@ CREATE TABLE background_runs (
   CHECK(resource_spec_version=10), background_seal_request_id TEXT, artifact_export_id TEXT, retained_artifact_id TEXT, materialization_id TEXT, retained_result_id TEXT, result_authority_phase TEXT
   CHECK(result_authority_phase IS NULL OR result_authority_phase IN
     ('seal_intent','writer_inactive','exporting','artifact_committed','cleanup')),
-    CHECK((claim_owner IS NULL AND claim_expires_at IS NULL) OR
-          (claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_generation > 0 AND claim_expires_at > updated_at AND claim_expires_at <= updated_at+300000)),
     CHECK((cancel_epoch=0 AND stop_receipt_id IS NULL AND stop_actor_snapshot_id IS NULL AND stop_requested_at IS NULL AND state<>'canceling') OR
           (cancel_epoch=1 AND stop_receipt_id IS NOT NULL AND stop_actor_snapshot_id IS NOT NULL AND stop_requested_at IS NOT NULL AND
            state IN ('canceling','uncertain','result_ready','failed','cleanup_required'))),
@@ -482,7 +477,7 @@ CREATE TABLE background_runs (
 
 CREATE INDEX background_runs_actor_list ON background_runs(creator_actor_snapshot_id,created_at DESC,task_id DESC);
 
-CREATE INDEX background_runs_claim_scan ON background_runs(workspace_id,state,claim_expires_at,created_at,task_id);
+CREATE INDEX background_runs_next ON background_runs(workspace_id,state,updated_at,task_id);
 
 CREATE UNIQUE INDEX background_runs_workspace_capacity_one ON background_runs(workspace_id)
   WHERE profile='source-39fb919a054190498f6d5b7985bde231f93ad7a6' AND
@@ -564,9 +559,6 @@ CREATE TABLE background_run_exports (
   result_id TEXT NOT NULL UNIQUE CHECK(length(result_id)=40 AND substr(result_id,1,4)='res_' AND substr(result_id,19,1)='7'),
   state TEXT NOT NULL CHECK(state IN ('prepared','running','recovery_required','completed')),
   phase TEXT NOT NULL CHECK(phase IN ('prepared','snapshot_started','snapshot_selected','bundle_write_started','bundle_verified','cas_install_started','cas_installed','materialize_started','materialized','completed')),
-  claim_owner TEXT CHECK(claim_owner IS NULL OR length(CAST(claim_owner AS BLOB)) BETWEEN 1 AND 128),
-  claim_expires_at INTEGER,
-  claim_generation INTEGER NOT NULL DEFAULT 0 CHECK(claim_generation>=0),
   repository_id INTEGER NOT NULL CHECK(repository_id>0),
   base_sha TEXT NOT NULL CHECK(length(base_sha)=40 AND base_sha NOT GLOB '*[^0-9a-f]*'),
   opencode_session_id TEXT NOT NULL CHECK(length(opencode_session_id)=36 AND substr(opencode_session_id,1,4)='ses_' AND substr(opencode_session_id,5) NOT GLOB '*[^0-9a-f]*'),
@@ -587,8 +579,6 @@ CREATE TABLE background_run_exports (
   revision INTEGER NOT NULL CHECK(revision>=1),
   created_at INTEGER NOT NULL CHECK(created_at>=0),
   updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),
-  CHECK((claim_owner IS NULL AND claim_expires_at IS NULL) OR
-        (claim_owner IS NOT NULL AND claim_expires_at IS NOT NULL AND claim_generation>0 AND claim_expires_at>updated_at AND claim_expires_at<=updated_at+300000)),
   CHECK((phase IN ('prepared','snapshot_started')) OR
         (result_commit IS NOT NULL AND tree_oid IS NOT NULL AND outcome IS NOT NULL AND result_manifest_json IS NOT NULL AND
          result_manifest_entries IS NOT NULL AND result_manifest_sha256 IS NOT NULL AND artifact_manifest_json IS NOT NULL AND
@@ -600,8 +590,6 @@ CREATE TABLE background_run_exports (
   FOREIGN KEY(workspace_id,repository_id) REFERENCES workspaces(id,repository_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   UNIQUE(task_id,generation)
 ) STRICT;
-
-CREATE INDEX background_run_exports_work ON background_run_exports(workspace_id,state,claim_expires_at,created_at,id);
 
 CREATE TABLE artifact_materializations (
   id TEXT PRIMARY KEY CHECK(length(id)=40 AND substr(id,1,4)='mat_' AND substr(id,19,1)='7' AND replace(substr(id,5),'-','') NOT GLOB '*[^0-9a-f]*'),
@@ -693,7 +681,7 @@ CREATE TRIGGER background_run_exports_immutable_tuple BEFORE UPDATE ON backgroun
 BEGIN SELECT RAISE(ABORT,'background export tuple is immutable'); END;
 
 CREATE TRIGGER background_run_exports_revision BEFORE UPDATE ON background_run_exports WHEN
-  NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR NEW.claim_generation<OLD.claim_generation OR NEW.claim_generation>OLD.claim_generation+1
+  NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at
 BEGIN SELECT RAISE(ABORT,'invalid background export revision'); END;
 
 CREATE TRIGGER background_run_exports_terminal BEFORE UPDATE ON background_run_exports WHEN OLD.state='completed'

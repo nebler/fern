@@ -13,27 +13,26 @@ import (
 	"github.com/nebler/fern/internal/taskstore"
 )
 
-func TestExportTransitionKeepsLastConfirmedClaim(t *testing.T) {
+func TestExportTransitionKeepsLastConfirmedRevision(t *testing.T) {
 	now := time.Date(2026, 9, 5, 12, 0, 0, 123456789, time.UTC)
 	a := retainedExportAttempt{coordinator: &Coordinator{config: Config{Now: func() time.Time { return now }}}, export: taskstore.BackgroundRunExport{
 		ID: "export", TaskID: "task", AttemptID: "attempt", Generation: 3, Revision: 7,
-		Phase: taskstore.BackgroundRunExportPhaseSnapshotSelected, ClaimOwner: "worker", ClaimGeneration: 5,
+		Phase: taskstore.BackgroundRunExportPhaseSnapshotSelected,
 	}}
-	want := taskstore.BackgroundRunExportClaim{ExportID: "export", TaskID: "task", AttemptID: "attempt", Generation: 3,
-		ExpectedRevision: 7, ExpectedPhase: taskstore.BackgroundRunExportPhaseSnapshotSelected,
-		ClaimOwner: "worker", ClaimGeneration: 5, Now: now.Truncate(time.Millisecond)}
+	want := taskstore.BackgroundRunExportRef{ExportID: "export", TaskID: "task", AttemptID: "attempt", Generation: 3,
+		ExpectedRevision: 7, ExpectedPhase: taskstore.BackgroundRunExportPhaseSnapshotSelected, Now: now.Truncate(time.Millisecond)}
 	failure := errors.New("SQL response failed")
-	err := a.record(func(got taskstore.BackgroundRunExportClaim) (taskstore.BackgroundRunExport, error) {
+	err := a.record(func(got taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error) {
 		if got != want {
-			t.Fatalf("claim = %+v, want %+v", got, want)
+			t.Fatalf("ref = %+v, want %+v", got, want)
 		}
 		return taskstore.BackgroundRunExport{}, failure
 	})
-	if !errors.Is(err, failure) || exportClaim(a.export, want.Now) != want {
+	if !errors.Is(err, failure) || exportRef(a.export, want.Now) != want {
 		t.Fatalf("failed transition lost authority: %+v, %v", a.export, err)
 	}
 	now = now.Add(time.Second)
-	err = a.record(func(got taskstore.BackgroundRunExportClaim) (taskstore.BackgroundRunExport, error) {
+	err = a.record(func(got taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error) {
 		if !got.Now.Equal(now.Truncate(time.Millisecond)) {
 			t.Fatal("transition reused old clock")
 		}
@@ -46,7 +45,7 @@ func TestExportTransitionKeepsLastConfirmedClaim(t *testing.T) {
 		t.Fatalf("successful transition not adopted: %+v, %v", a.export, err)
 	}
 	now = time.Time{}
-	err = a.record(func(taskstore.BackgroundRunExportClaim) (taskstore.BackgroundRunExport, error) {
+	err = a.record(func(taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error) {
 		t.Fatal("invalid clock reached SQL")
 		return taskstore.BackgroundRunExport{}, nil
 	})

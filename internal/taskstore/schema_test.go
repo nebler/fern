@@ -11,7 +11,7 @@ import (
 )
 
 func TestPredecessorSchemasRejectedWithoutMutation(t *testing.T) {
-	for _, version := range []int{1, 2, 3} {
+	for _, version := range []int{1, 2, 3, 4} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
 			path := testDBPath(t)
 			raw := openRaw(t, path)
@@ -49,8 +49,8 @@ func TestPredecessorSchemasRejectedWithoutMutation(t *testing.T) {
 }
 
 func TestInitialSchemaIsTheOnlySupportedSchema(t *testing.T) {
-	const expectedChecksum = "08c9a0ee1061a8eca715cb9b876999da50f43e875aef686bab06d9d7a3c69715"
-	if CurrentSchemaVersion() != 4 || len(migrations) != 1 || migrations[0].version != 4 || migrations[0].name != "retained_result_task_store" {
+	const expectedChecksum = "ca9a65b7ce93868b1e3e4e0e06c18edc75e450531a64d76d379ce5a8329e6c0b"
+	if CurrentSchemaVersion() != 5 || len(migrations) != 1 || migrations[0].version != 5 || migrations[0].name != "retained_result_task_store" {
 		t.Fatalf("schema version=%d migration count=%d", CurrentSchemaVersion(), len(migrations))
 	}
 	if checksum := migrationChecksum(migrations[0]); checksum != expectedChecksum {

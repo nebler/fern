@@ -554,11 +554,11 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	loss := &lostResponseTransport{base: baseTransport, path: "/api/session/" + string(generated.OpenCodeSessionID) + "/prompt"}
 	operationCtx, cancelOperation := context.WithCancel(ctx)
 	config := backgroundruncoord.Config{
-		WorkspaceID: workspaceID, WorkerID: "serial-worker-a",
+		WorkspaceID: workspaceID,
 		SystemActor: task.ActorSnapshot{Type: task.ActorSystem, ID: "serial-coordinator", DisplayName: "Serial coordinator",
 			CredentialID: "service-v1", Authentication: "internal", RequestID: "serial-worker-a"},
 		Profile: backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
-		OperationTimeout: 20 * time.Second, LeaseDuration: time.Minute, PollInterval: 100 * time.Millisecond,
+		OperationTimeout: 20 * time.Second, PollInterval: 100 * time.Millisecond,
 		HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000}, Now: time.Now,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: loss}, AfterPromptCall: func(error) { cancelOperation() }, Route: route,
 	}
@@ -604,8 +604,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 		return err
 	}
 	defer store.Close()
-	config.WorkerID = "serial-worker-b"
-	config.SystemActor.RequestID = config.WorkerID
+	config.SystemActor.RequestID = "serial-worker-b"
 	config.AfterPromptCall = nil
 	config.Now = func() time.Time { return time.Now().Add(2 * time.Minute) }
 	config.Route = route
@@ -812,12 +811,12 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 		return err
 	}
 	config := backgroundruncoord.Config{
-		WorkspaceID: workspaceID, WorkerID: "retained-worker",
+		WorkspaceID: workspaceID,
 		SystemActor: task.ActorSnapshot{Type: task.ActorSystem, ID: "retained-coordinator", DisplayName: "Retained coordinator",
 			CredentialID: "service-v1", Authentication: "internal", RequestID: "retained-worker"},
 		Profile: backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil),
 		Agent: "contract", ModelProvider: "test", Model: "test-model", OperationTimeout: 30 * time.Second,
-		LeaseDuration: time.Minute, PollInterval: 100 * time.Millisecond,
+		PollInterval:  100 * time.Millisecond,
 		HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000},
 		Now:           func() time.Time { return time.Now().Add(3 * time.Minute) }, HTTPClient: &http.Client{Timeout: 10 * time.Second}, Route: route,
 	}
@@ -1116,11 +1115,11 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 	defer baseTransport.CloseIdleConnections()
 	crashCtx, crash := context.WithCancel(ctx)
 	config := backgroundruncoord.Config{
-		WorkspaceID: workspaceID, WorkerID: "serial-fence-worker-a",
+		WorkspaceID: workspaceID,
 		SystemActor: task.ActorSnapshot{Type: task.ActorSystem, ID: "serial-coordinator", DisplayName: "Serial coordinator",
 			CredentialID: "service-v1", Authentication: "internal", RequestID: "serial-fence-worker-a"},
 		Profile: backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
-		OperationTimeout: 20 * time.Second, LeaseDuration: time.Minute, PollInterval: 100 * time.Millisecond,
+		OperationTimeout: 20 * time.Second, PollInterval: 100 * time.Millisecond,
 		HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000},
 		Now:           func() time.Time { return time.Now().Add(2 * time.Minute) }, HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: transport}, Route: route,
 		AfterPromptFence: crash,
@@ -1156,8 +1155,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 	if err != nil {
 		return err
 	}
-	config.WorkerID = "serial-fence-worker-b"
-	config.SystemActor.RequestID = config.WorkerID
+	config.SystemActor.RequestID = "serial-fence-worker-b"
 	config.Now = func() time.Time { return time.Now().Add(4 * time.Minute) }
 	config.AfterPromptFence = nil
 	coordinator, err = backgroundruncoord.New(store, provider, artifact, ids, config)
