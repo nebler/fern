@@ -177,7 +177,8 @@ func (s *Store) RecordBackgroundRunWorkObservation(ctx context.Context, p Record
 // RequestBackgroundRunTimeout commits a system-owned stop without manufacturing
 // a plugin receipt. Parent terminalization remains coupled to cleanup finality.
 func (s *Store) RequestBackgroundRunTimeout(ctx context.Context, p RequestBackgroundRunTimeoutParams) (_ BackgroundRun, err error) {
-	if err := validateBackgroundRunRef(p.BackgroundRunRef); err != nil || p.Actor.Validate() != nil || p.Actor.Type != task.ActorSystem {
+	if err := validateBackgroundRunRef(p.BackgroundRunRef); err != nil || p.Actor.Validate() != nil || p.Actor.Type != task.ActorSystem ||
+		!rundomain.Classify(rundomain.State(p.ExpectedState), rundomain.Phase(p.ExpectedPhase)).TimeoutEligible {
 		return BackgroundRun{}, fmt.Errorf("%w: background run timeout", ErrInvalidInput)
 	}
 	if _, parseErr := task.ParseEventID(string(p.AttemptEventID)); parseErr != nil {
@@ -192,24 +193,15 @@ func (s *Store) RequestBackgroundRunTimeout(ctx context.Context, p RequestBackgr
 	}
 	defer release()
 	defer rollback(tx, &err)
-	run, err := readBackgroundRunExact(ctx, tx, p.WorkspaceID, p.TaskID)
+	owner, err := getTask(ctx, tx, p.TaskID)
 	if err != nil {
 		return BackgroundRun{}, err
 	}
-	if run.AttemptID != p.AttemptID || run.Generation != p.Generation || run.Revision != p.ExpectedRevision ||
-		run.State != p.ExpectedState || run.EffectPhase != p.ExpectedPhase ||
-		run.TimeoutRequestedAt != nil || !rundomain.Classify(rundomain.State(run.State), rundomain.Phase(run.EffectPhase)).TimeoutEligible {
-		return BackgroundRun{}, ErrInvalidState
-	}
-	owner, err := getTask(ctx, tx, run.TaskID)
+	attempt, err := getAttempt(ctx, tx, p.AttemptID)
 	if err != nil {
 		return BackgroundRun{}, err
 	}
-	attempt, err := getAttempt(ctx, tx, run.AttemptID)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	if p.Now.Before(attempt.Deadline) || owner.State != task.TaskQueued || attempt.State != task.AttemptPrepared {
+	if p.Now.Before(attempt.Deadline) || attempt.State != task.AttemptPrepared {
 		return BackgroundRun{}, ErrInvalidState
 	}
 	actorID, err := ensureActor(ctx, tx, p.Actor)
@@ -238,15 +230,16 @@ WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND re
 	result, err = tx.ExecContext(ctx, `UPDATE background_runs SET state='cleanup_required',effect_phase='stop_intent',
 timeout_requested_at=?,timeout_actor_snapshot_id=?,stop_intent_at=COALESCE(stop_intent_at,?),last_error='attempt_timeout',
 revision=revision+1,updated_at=?
-WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND state=? AND effect_phase=?`,
-		now, actorID, now, now, run.TaskID, run.AttemptID, run.WorkspaceID, run.Generation, run.Revision, run.State, run.EffectPhase)
+WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND state=? AND effect_phase=? AND
+timeout_requested_at IS NULL`, now, actorID, now, now, p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedRevision,
+		p.ExpectedState, p.ExpectedPhase)
 	if err != nil {
 		return BackgroundRun{}, fmt.Errorf("request background run timeout: %w", err)
 	}
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRun{}, ErrInvalidState
 	}
-	stored, err := readBackgroundRunExact(ctx, tx, run.WorkspaceID, run.TaskID)
+	stored, err := readBackgroundRunExact(ctx, tx, p.WorkspaceID, p.TaskID)
 	if err != nil {
 		return BackgroundRun{}, err
 	}
@@ -378,24 +371,21 @@ func (s *Store) FinalizeBackgroundRunFailure(ctx context.Context, p FinalizeBack
 	defer release()
 	defer rollback(tx, &err)
 
+	// The final UPDATE pins the run revision, so the stop receipt and timeout
+	// actor read here are the ones the transition commits against.
 	run, err := readBackgroundRunExact(ctx, tx, p.WorkspaceID, p.TaskID)
 	if err != nil {
 		return BackgroundRun{}, err
-	}
-	if run.AttemptID != p.AttemptID || run.Generation != p.Generation || run.Revision != p.ExpectedRevision ||
-		run.State != p.ExpectedState || run.EffectPhase != p.ExpectedPhase {
-		return BackgroundRun{}, ErrInvalidState
 	}
 	owner, err := getTask(ctx, tx, run.TaskID)
 	if err != nil {
 		return BackgroundRun{}, err
 	}
-	attempt, err := getAttempt(ctx, tx, run.AttemptID)
+	attempt, err := getAttempt(ctx, tx, p.AttemptID)
 	if err != nil {
 		return BackgroundRun{}, err
 	}
-	if owner.WorkspaceID != run.WorkspaceID || owner.CurrentAttemptID != attempt.ID || owner.State != task.TaskQueued ||
-		attempt.TaskID != owner.ID || attempt.WorkspaceID != owner.WorkspaceID || attempt.Sequence != run.Generation || attempt.State != task.AttemptPrepared {
+	if owner.WorkspaceID != run.WorkspaceID || attempt.TaskID != owner.ID || attempt.WorkspaceID != owner.WorkspaceID || attempt.Sequence != p.Generation {
 		return BackgroundRun{}, ErrInvalidState
 	}
 	if run.TimeoutRequestedAt != nil {
@@ -454,7 +444,7 @@ WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND re
 	}
 	query := `UPDATE background_runs SET ` + assignments + `,revision=revision+1,updated_at=?
 WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND state=? AND effect_phase=? AND revision=?`
-	args = append(args, now, run.TaskID, run.AttemptID, run.WorkspaceID, run.Generation, p.ExpectedState, p.ExpectedPhase,
+	args = append(args, now, p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedState, p.ExpectedPhase,
 		p.ExpectedRevision)
 	result, err = tx.ExecContext(ctx, query, args...)
 	if err != nil {

@@ -85,11 +85,11 @@ func (s *Store) RecordArtifactMaterializationReady(ctx context.Context, p Record
 		}
 		return export, nil
 	}
-	if export.TaskID != p.TaskID || export.AttemptID != p.AttemptID || export.Generation != p.Generation ||
-		export.Revision != p.ExpectedRevision || export.Phase != p.ExpectedPhase || export.State != BackgroundRunExportRunning ||
-		export.MaterializationID != p.MaterializationID || export.ArtifactID != p.ArtifactID || export.ResultID != p.ResultID ||
-		export.ResultCommit != p.ResultCommit || export.TreeOID != p.TreeOID || materialization.State != ArtifactMaterializationPrepared ||
-		materialization.ExportID != export.ID || materialization.ArtifactID != export.ArtifactID || materialization.ResultID != export.ResultID {
+	// Both UPDATEs below pin their rows (export revision and phase,
+	// materialization state and identity); only the export's selected tuple
+	// needs comparing here.
+	if export.MaterializationID != p.MaterializationID || export.ArtifactID != p.ArtifactID || export.ResultID != p.ResultID ||
+		export.ResultCommit != p.ResultCommit || export.TreeOID != p.TreeOID {
 		return BackgroundRunExport{}, ErrInvalidState
 	}
 	now := unixMillis(p.Now)
@@ -103,7 +103,8 @@ revision=revision+1,updated_at=? WHERE id=? AND export_id=? AND artifact_id=? AN
 		return BackgroundRunExport{}, ErrInvalidState
 	}
 	result, err = tx.ExecContext(ctx, `UPDATE background_run_exports SET phase='materialized',revision=revision+1,updated_at=?
-WHERE id=? AND revision=? AND phase='materialize_started' AND state='running'`, now, p.ExportID, p.ExpectedRevision)
+WHERE id=? AND task_id=? AND attempt_id=? AND generation=? AND revision=? AND phase='materialize_started' AND state='running'`,
+		now, p.ExportID, p.TaskID, p.AttemptID, p.Generation, p.ExpectedRevision)
 	if err != nil {
 		return BackgroundRunExport{}, fmt.Errorf("complete artifact materialization: %w", err)
 	}

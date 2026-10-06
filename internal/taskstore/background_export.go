@@ -249,10 +249,6 @@ func (s *Store) updateBackgroundExport(ctx context.Context, ref BackgroundRunExp
 		}
 		return current, nil
 	}
-	if current.TaskID != ref.TaskID || current.AttemptID != ref.AttemptID || current.Generation != ref.Generation ||
-		current.Revision != ref.ExpectedRevision || current.Phase != ref.ExpectedPhase {
-		return BackgroundRunExport{}, ErrInvalidState
-	}
 	set := `phase=?,`
 	values := []any{to}
 	if assignments != "" {

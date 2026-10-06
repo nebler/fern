@@ -482,6 +482,13 @@ func TestBackgroundRunSystemTimeoutHasNoPluginReceipt(t *testing.T) {
 	}
 	actor := testSystemActor()
 	actor.Type, actor.ID, actor.DisplayName = task.ActorSystem, "background-timeout", "Background timeout"
+	stale := backgroundRunRef(work.Run, now)
+	stale.ExpectedRevision--
+	if _, err := store.RequestBackgroundRunTimeout(context.Background(), RequestBackgroundRunTimeoutParams{
+		BackgroundRunRef: stale, AttemptEventID: testEventID(2081), TaskEventID: testEventID(2082), Actor: actor,
+	}); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("stale timeout = %v", err)
+	}
 	timedOut, err := store.RequestBackgroundRunTimeout(context.Background(), RequestBackgroundRunTimeoutParams{
 		BackgroundRunRef: backgroundRunRef(work.Run, now), AttemptEventID: testEventID(2081), TaskEventID: testEventID(2082), Actor: actor,
 	})

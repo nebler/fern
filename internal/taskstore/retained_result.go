@@ -67,19 +67,16 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 	if err != nil {
 		return BackgroundRunRetainedResult{}, err
 	}
-	if export.TaskID != p.TaskID || export.AttemptID != p.AttemptID || export.Generation != p.Generation || export.Revision != p.ExpectedRevision ||
-		export.Phase != BackgroundRunExportPhaseMaterialized || export.State != BackgroundRunExportRunning ||
+	// The task, attempt, run and export UPDATEs below pin revision, state and
+	// phase; this check covers only the cross-row tuple they do not.
+	if export.TaskID != p.TaskID || export.AttemptID != p.AttemptID || export.Generation != p.Generation ||
 		export.ArtifactID != p.ArtifactID || export.MaterializationID != p.MaterializationID || export.ResultID != p.ResultID ||
 		request.ArtifactID != p.ArtifactID || request.MaterializationID != p.MaterializationID || request.ResultID != p.ResultID ||
 		request.ResultEventID != p.ResultEventID || request.TaskEventID != p.TaskEventID || request.ExportID != p.ExportID ||
 		materialization.State != ArtifactMaterializationReady || materialization.ExportID != p.ExportID || materialization.ArtifactID != p.ArtifactID ||
 		materialization.ResultID != p.ResultID || materialization.ResultCommit != export.ResultCommit || materialization.TreeOID != export.TreeOID ||
 		fence.ExportID != p.ExportID || fence.TaskID != p.TaskID || fence.AttemptID != p.AttemptID || fence.Generation != p.Generation ||
-		run.ResultAuthorityPhase != "exporting" || run.EffectPhase != BackgroundRunEffectExporting || run.BackgroundSealRequestID != request.ID ||
-		run.ArtifactExportID != p.ExportID || run.RetainedArtifactID != p.ArtifactID || run.MaterializationID != p.MaterializationID ||
-		run.RetainedResultID != p.ResultID || owner.Revision != request.ExpectedTaskRevision ||
-		attempt.Revision != request.ExpectedAttemptRevision || owner.State != task.TaskQueued || owner.SealedResultID != "" ||
-		owner.CurrentAttemptID != attempt.ID || attempt.State != task.AttemptPrepared || attempt.SealedResultID != "" {
+		run.BackgroundSealRequestID != request.ID || run.MaterializationID != p.MaterializationID || run.RetainedResultID != p.ResultID {
 		return BackgroundRunRetainedResult{}, ErrInvalidState
 	}
 	if export.Outcome == task.ResultNoChanges && (export.ResultCommit != export.BaseSHA || len(export.ResultManifest) != 0) {

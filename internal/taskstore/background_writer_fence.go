@@ -51,10 +51,6 @@ func (s *Store) RecordBackgroundRunWriterFence(ctx context.Context, p RecordBack
 		}
 		return BackgroundRun{}, ErrInvalidState
 	}
-	if run.AttemptID != p.AttemptID || run.Generation != p.Generation || run.Revision != p.ExpectedRevision ||
-		run.EffectPhase != BackgroundRunEffectSealIntent || run.BackgroundSealRequestID != p.SealRequestID || run.ArtifactExportID != p.ExportID {
-		return BackgroundRun{}, ErrInvalidState
-	}
 	if p.Kind == WriterFenceRuntimeStopped && (p.ContainerID != run.ObservedContainerID || p.ContainerStartedAt != run.ObservedContainerStartedAt || p.RuntimeEpoch != run.RuntimeEpoch) {
 		return BackgroundRun{}, ErrInvalidState
 	}
@@ -86,8 +82,9 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.SealRequestID, p.ExportID, p.TaskID, p.Att
 	result, err := tx.ExecContext(ctx, `UPDATE background_runs SET effect_phase='writer_inactive',writer_inactive_at=?,
 writer_inactive_evidence=?,last_evidence=?,result_authority_phase='writer_inactive',revision=revision+1,updated_at=?
 WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND state='cleanup_required' AND
-effect_phase='stop_intent' AND result_authority_phase='seal_intent'`,
-		unixMillis(p.Now), evidence, evidence, unixMillis(p.Now), p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedRevision)
+effect_phase='stop_intent' AND result_authority_phase='seal_intent' AND background_seal_request_id=? AND artifact_export_id=?`,
+		unixMillis(p.Now), evidence, evidence, unixMillis(p.Now), p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedRevision,
+		p.SealRequestID, p.ExportID)
 	if err != nil {
 		return BackgroundRun{}, fmt.Errorf("record writer inactivity: %w", err)
 	}
