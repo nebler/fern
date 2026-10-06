@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"html/template"
 	"net/http"
 	"strings"
 	"sync"
@@ -24,23 +23,10 @@ const (
 	maxOutstandingPairings = 64
 )
 
-var pairingTemplate = template.Must(template.New("pairing").Parse(`<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-<meta name="color-scheme" content="dark">
-<title>Pair with Fern</title>
-<style>
-:root{font-family:ui-rounded,"SF Pro Rounded","Avenir Next",system-ui,sans-serif;color:#f3f7e9;background:#11180f}
-*{box-sizing:border-box}body{display:grid;min-height:100dvh;margin:0;padding:24px 18px;background:radial-gradient(circle at 15% 0,#314829 0,transparent 42%),#11180f}
-main{width:min(100%,520px);margin:auto;padding:28px;border:1px solid #52664a;border-radius:26px;background:#182116e8;box-shadow:0 24px 80px #0005}
-.mark{display:grid;place-items:center;width:54px;height:54px;border-radius:18px;background:#b9ef86;color:#162210;font-size:28px;font-weight:800;transform:rotate(-3deg)}
+var pairingTemplate = newPage("pairing", "Pair with Fern", dialogCSS+`
 h1{margin:24px 0 8px;font-size:34px;letter-spacing:-.04em}p{margin:0;color:#bdcbb5;font-size:16px;line-height:1.55}
-label{display:block;margin-top:24px;color:#dce8d3;font-size:14px;font-weight:700}input[type=text]{display:block;width:100%;margin-top:8px;padding:13px 14px;border:1px solid #52664a;border-radius:13px;background:#11180f;color:#f3f7e9;font:inherit}button{display:block;width:100%;margin-top:24px;padding:15px 18px;border:0;border-radius:15px;background:#b9ef86;color:#15200f;font:inherit;font-weight:750;cursor:pointer}
-</style>
-</head>
-<body><main><div class="mark">F</div><h1>Pair this phone?</h1><p>This gives this browser private access to your Fern workspace for 30 days.</p><form method="post" action="/fern/pair"><input type="hidden" name="code" value="{{.Code}}"><label for="device-name">Device name</label><input id="device-name" type="text" name="name" value="{{.Name}}" maxlength="80" autocomplete="nickname"><button type="submit">Pair this phone</button></form></main></body></html>`))
+label{display:block;margin-top:24px;color:#dce8d3;font-size:14px;font-weight:700}input[type=text]{display:block;width:100%;margin-top:8px;padding:13px 14px;border:1px solid #52664a;border-radius:13px;background:#11180f;color:#f3f7e9;font:inherit}button{display:block;width:100%;margin-top:24px;padding:15px 18px;border:0;border-radius:15px;background:#b9ef86;color:#15200f;font:inherit;font-weight:750;cursor:pointer}`,
+	`<main><div class="mark">F</div><h1>Pair this phone?</h1><p>This gives this browser private access to your Fern workspace for 30 days.</p><form method="post" action="/fern/pair"><input type="hidden" name="code" value="{{.Code}}"><label for="device-name">Device name</label><input id="device-name" type="text" name="name" value="{{.Name}}" maxlength="80" autocomplete="nickname"><button type="submit">Pair this phone</button></form></main>`)
 
 type pairingPage struct {
 	Code string

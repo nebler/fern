@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -12,6 +11,10 @@ import (
 
 	"github.com/nebler/fern/internal/control"
 )
+
+var deviceRevokedTemplate = newPage("device-revoked", "Device revoked", dialogCSS+`
+h1{margin:24px 0 8px;font-size:34px;letter-spacing:-.04em}p{margin:0;color:#bdcbb5;font-size:16px;line-height:1.55}`,
+	`<main><div class="mark">F</div><h1>Device revoked</h1><p>This browser may now be closed.</p></main>`)
 
 func serveControlRoute(writer http.ResponseWriter, request *http.Request, controls Controls) bool {
 	store := controls.Store
@@ -110,7 +113,7 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 			return true
 		}
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(writer, `<!doctype html><html lang="en"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Device revoked</title><body><main><h1>Device revoked</h1><p>This browser may now be closed.</p></main></body></html>`)
+		_ = deviceRevokedTemplate.Execute(writer, nil)
 		return true
 	}
 	return false
