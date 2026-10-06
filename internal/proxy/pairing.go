@@ -351,13 +351,17 @@ func (state *pairingState) authenticatedDevice(request *http.Request) (control.D
 	return control.Device{}, cookie.Value, valid
 }
 
-func (state *pairingState) servePaired(writer http.ResponseWriter, request *http.Request, next http.Handler, device control.Device, credential string) bool {
+// servePaired dispatches an authenticated device request. A device revoked
+// between authentication and request registration is rejected as
+// unauthenticated.
+func (state *pairingState) servePaired(writer http.ResponseWriter, request *http.Request, next http.Handler, device control.Device, credential string) {
 	if state.store != nil {
 		ctx, cancel := context.WithDeadline(request.Context(), device.ExpiresAt)
 		unregister, admitted := state.store.RegisterDeviceRequest(device.ID, cancel)
 		if !admitted {
 			cancel()
-			return false
+			http.Error(writer, "unauthorized", http.StatusUnauthorized)
+			return
 		}
 		defer func() {
 			unregister()
@@ -368,7 +372,7 @@ func (state *pairingState) servePaired(writer http.ResponseWriter, request *http
 	requestID, err := randomCredential()
 	if err != nil {
 		http.Error(writer, "device identity unavailable", http.StatusInternalServerError)
-		return true
+		return
 	}
 	actor := task.ActorSnapshot{
 		Type: task.ActorDevice, ID: device.ID, DisplayName: device.Name, CredentialID: device.ID,
@@ -379,7 +383,6 @@ func (state *pairingState) servePaired(writer http.ResponseWriter, request *http
 	stripAllCookies(request)
 	request.Header.Del("Authorization")
 	next.ServeHTTP(writer, request)
-	return true
 }
 
 // operatorActor builds the audit identity stamped on loopback control-surface
