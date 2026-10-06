@@ -50,8 +50,7 @@ Docker/OpenCode integration programs. There are no third-party dependencies.
 | `ActorSnapshot.Validate`, `SameAuthority` | Check bounded attribution and compare stable authority |
 | `WithActor`, `ContextActor` | Carry already-authenticated ingress identity |
 | `ClassifyIdempotency` | Distinguish first use, independence, replay, conflict, and owner mismatch |
-| `ParseAfterCursor`, `Cursor.MarshalJSON` | Handle exclusive event cursors without JSON-number precision loss |
-| `AllowTaskTransition`, `AllowAttemptTransition` | Validate domain transition pairs without persisting them |
+| `ParseCursorWire`, `Cursor.MarshalJSON` | Handle exclusive event cursors without JSON-number precision loss |
 | `ResultTuple.ValidateAgainst` | Check repository/base, clean-worktree, and changed/no-change invariants |
 
 Typed string casts alone do not validate input. Boundary callers must use parsers.

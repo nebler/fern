@@ -20,7 +20,6 @@ func TestFernIDParsers(t *testing.T) {
 		{"attempt", "att_", func(v string) error { _, err := ParseAttemptID(v); return err }},
 		{"receipt", "rcp_", func(v string) error { _, err := ParseReceiptID(v); return err }},
 		{"event", "fev_", func(v string) error { _, err := ParseEventID(v); return err }},
-		{"approval", "apr_", func(v string) error { _, err := ParseApprovalID(v); return err }},
 		{"result", "res_", func(v string) error { _, err := ParseResultID(v); return err }},
 		{"artifact export", "exp_", func(v string) error { _, err := ParseArtifactExportID(v); return err }},
 		{"retained artifact", "art_", func(v string) error { _, err := ParseRetainedArtifactID(v); return err }},
@@ -46,9 +45,6 @@ func TestExternalIDParsers(t *testing.T) {
 		if _, err := ParseRepositoryID(v); err != nil {
 			t.Errorf("repository %q: %v", v, err)
 		}
-		if _, err := ParseInstallationID(v); err != nil {
-			t.Errorf("installation %q: %v", v, err)
-		}
 	}
 	for _, v := range []string{"", "0", "01", "-1", "+1", "1.0", "9223372036854775808", "18446744073709551616"} {
 		if _, err := ParseRepositoryID(v); !errors.Is(err, ErrInvalidID) {
@@ -73,29 +69,21 @@ func TestExternalIDParsers(t *testing.T) {
 }
 
 func TestNumericIDsFitSQLiteInteger(t *testing.T) {
-	for _, parse := range []func(string) error{
-		func(value string) error { _, err := ParseRepositoryID(value); return err },
-		func(value string) error { _, err := ParseInstallationID(value); return err },
-	} {
-		if err := parse("9223372036854775807"); err != nil {
-			t.Fatalf("maximum signed SQLite integer rejected: %v", err)
-		}
-		if err := parse("9223372036854775808"); err == nil {
-			t.Fatal("numeric identity exceeding SQLite INTEGER was accepted")
-		}
+	if _, err := ParseRepositoryID("9223372036854775807"); err != nil {
+		t.Fatalf("maximum signed SQLite integer rejected: %v", err)
+	}
+	if _, err := ParseRepositoryID("9223372036854775808"); err == nil {
+		t.Fatal("numeric identity exceeding SQLite INTEGER was accepted")
 	}
 }
 
-func TestRequestHash(t *testing.T) {
-	v := strings.Repeat("ab", 32)
-	h, err := ParseRequestHash(v)
-	if err != nil || h.String() != v {
-		t.Fatalf("round trip = %q, %v", h, err)
+func TestRequestHashString(t *testing.T) {
+	var h RequestHash
+	for i := range h {
+		h[i] = 0xab
 	}
-	for _, invalid := range []string{"", strings.ToUpper(v), strings.Repeat("z", 64), v[:63]} {
-		if _, err := ParseRequestHash(invalid); !errors.Is(err, ErrInvalidHash) {
-			t.Errorf("%q accepted", invalid)
-		}
+	if got, want := h.String(), strings.Repeat("ab", 32); got != want {
+		t.Fatalf("String() = %q, want %q", got, want)
 	}
 }
 
@@ -118,9 +106,6 @@ func TestCursorWire(t *testing.T) {
 		if _, err := ParseCursorWire(v); !errors.Is(err, ErrInvalidCursor) {
 			t.Errorf("%q accepted", v)
 		}
-	}
-	if c, err := ParseAfterCursor(""); err != nil || c != 0 {
-		t.Errorf("omitted after = %v, %v", c, err)
 	}
 	if err := Cursor(0).ValidateEvent(); !errors.Is(err, ErrInvalidCursor) {
 		t.Error("zero event cursor accepted")

@@ -43,14 +43,6 @@ func ParseCursorWire(v string) (Cursor, error) {
 	return Cursor(n), nil
 }
 
-// ParseAfterCursor treats an omitted query value as the initial cursor.
-func ParseAfterCursor(v string) (Cursor, error) {
-	if v == "" {
-		return 0, nil
-	}
-	return ParseCursorWire(v)
-}
-
 func (c Cursor) MarshalJSON() ([]byte, error) {
 	if err := c.Validate(); err != nil {
 		return nil, err

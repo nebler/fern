@@ -19,7 +19,6 @@ type (
 	AttemptID          string
 	ReceiptID          string
 	EventID            string
-	ApprovalID         string
 	SealRequestID      string
 	ResultID           string
 	ArtifactExportID   string
@@ -63,12 +62,6 @@ func ParseEventID(v string) (EventID, error) {
 		return "", err
 	}
 	return EventID(v), nil
-}
-func ParseApprovalID(v string) (ApprovalID, error) {
-	if err := validateFernID(v, "apr_"); err != nil {
-		return "", err
-	}
-	return ApprovalID(v), nil
 }
 func ParseSealRequestID(v string) (SealRequestID, error) {
 	if err := validateFernID(v, "slr_"); err != nil {
@@ -125,13 +118,6 @@ func ParseRepositoryID(v string) (RepositoryID, error) {
 		return 0, fmt.Errorf("%w: repository ID", ErrInvalidID)
 	}
 	return RepositoryID(n), nil
-}
-func ParseInstallationID(v string) (InstallationID, error) {
-	n, err := parsePositiveUint(v)
-	if err != nil {
-		return 0, fmt.Errorf("%w: installation ID", ErrInvalidID)
-	}
-	return InstallationID(n), nil
 }
 func parsePositiveUint(v string) (uint64, error) {
 	if v == "" || v[0] == '0' {

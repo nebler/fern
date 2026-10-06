@@ -31,16 +31,6 @@ type AdmissionIDs struct {
 	OpenCodeMessageID OpenCodeMessageID
 }
 
-// SealRequestIDs is allocated before admitting a user-authorized seal so every
-// identity used after a restart is durable before collection starts.
-type SealRequestIDs struct {
-	SealRequestID SealRequestID
-	ReceiptID     ReceiptID
-	ResultID      ResultID
-	ResultEventID EventID
-	TaskEventID   EventID
-}
-
 // BackgroundSealIDs is allocated before run.seal admission. Every identity
 // needed by export, retention, materialization, and result commit is therefore
 // durable before the first external effect starts.
@@ -91,27 +81,6 @@ func (g *Generator) GenerateAdmissionIDs() (AdmissionIDs, error) {
 	}
 	if ids.OpenCodeMessageID, err = g.OpenCodeMessageID(); err != nil {
 		return AdmissionIDs{}, err
-	}
-	return ids, nil
-}
-
-func (g *Generator) GenerateSealRequestIDs() (SealRequestIDs, error) {
-	var ids SealRequestIDs
-	var err error
-	if ids.SealRequestID, err = g.SealRequestID(); err != nil {
-		return SealRequestIDs{}, err
-	}
-	if ids.ReceiptID, err = g.ReceiptID(); err != nil {
-		return SealRequestIDs{}, err
-	}
-	if ids.ResultID, err = g.ResultID(); err != nil {
-		return SealRequestIDs{}, err
-	}
-	if ids.ResultEventID, err = g.EventID(); err != nil {
-		return SealRequestIDs{}, err
-	}
-	if ids.TaskEventID, err = g.EventID(); err != nil {
-		return SealRequestIDs{}, err
 	}
 	return ids, nil
 }
@@ -169,11 +138,6 @@ func (g *Generator) ReceiptID() (ReceiptID, error) {
 func (g *Generator) EventID() (EventID, error) {
 	value, err := g.fernID("fev_")
 	return EventID(value), err
-}
-
-func (g *Generator) ApprovalID() (ApprovalID, error) {
-	value, err := g.fernID("apr_")
-	return ApprovalID(value), err
 }
 
 func (g *Generator) SealRequestID() (SealRequestID, error) {

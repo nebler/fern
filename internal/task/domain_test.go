@@ -52,8 +52,7 @@ func TestIdempotencyKeyValidation(t *testing.T) {
 }
 
 func TestIdempotencyClassification(t *testing.T) {
-	h1, _ := ParseRequestHash(strings.Repeat("11", 32))
-	h2, _ := ParseRequestHash(strings.Repeat("22", 32))
+	h1, h2 := RequestHash{1}, RequestHash{2}
 	base := IdempotencyClaim{Scope: IdempotencyScope{WorkspaceID: WorkspaceID("wsp_" + validUUID), CommandKind: "task.submit"}, Key: "key", RequestHash: h1, Actor: validActor()}
 	tests := []struct {
 		name     string
