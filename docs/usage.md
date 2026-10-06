@@ -306,17 +306,31 @@ independently certify repository test success. Review the PR and CI yourself.
 
 Seal any work you want to preserve, wait for result/cleanup completion, then stop
 the foreground Fern server normally. Offline backup/credential commands require
-Fern to be stopped because they acquire the repository lease:
+Fern to be stopped because they take the host leases:
 
 ```sh
-./fern backup create --output /secure/fern-backup
+./fern backup create --recipient age1... --output /secure/fern.backup
 ./fern credentials export --recipient age1... --output /secure/credentials.age
 ```
 
-Replace `age1...` with a real recipient. Protect backup artifacts as secret
-material. Credential bundles use format 2 and do not overwrite an existing
-destination. Existing older database/bundle formats may be rejected: preserve
-backups rather than deleting files to make startup succeed.
+Replace `age1...` with a real recipient. The backup is one age-encrypted file
+holding the Fern state directory (task database snapshot, control/plugin auth
+state, GitHub App credentials, retained artifacts, host key), the configuration,
+and the protected environment file; nothing is written in plaintext. Run clones,
+artifact scratch, locks, and containers are not included.
+
+To restore, verify and swap a backup into place with the matching identity:
+
+```sh
+./fern backup restore --identity /secure/identity.txt --input /secure/fern.backup
+```
+
+Restore refuses to overwrite existing state or configuration unless you pass
+`--replace`; the replaced state directory and files are then kept next to the
+originals with a `.previous` suffix, and `fern backup rollback` swaps them back.
+Credential bundles use format 2 and do not overwrite an existing destination.
+Existing older database/bundle formats may be rejected: preserve backups rather
+than deleting files to make startup succeed.
 
 ## Where to read next
 

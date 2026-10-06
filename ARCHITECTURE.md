@@ -448,19 +448,23 @@ are therefore not supported by this profile.
 
 ## 18. Backup And Credentials
 
-Backup is offline under the same repository-name lease used by `fern up`.
-Before staging, Fern checkpoints and integrity-checks every SQLite database.
-The backup contains non-secret configuration, host repository, control and
-plugin auth state, taskstore, compatibility ledgers, retained CAS objects, and
-the disposable-resource host key. The archive tool segregates protected
-environment and detected credential files into its external credential
-artifact instead of the main generation.
+Backup is offline: `fern backup` takes the workspace lease used by `fern up`
+and every other lease file in the state directory. `fern backup create` writes
+one age-encrypted gzip tar containing the state directory, the configuration,
+and the protected environment file, plus a manifest with a sha256 for every
+file. SQLite databases are captured with `VACUUM INTO` and integrity-checked.
+Locks, SQLite sidecars, run clones and markers, and artifact work directories
+are excluded; of the runtime root only the disposable-resource host key is kept.
+Containers and volumes are never part of a backup.
 
-It excludes lock/recovery scratch, run clones, clone quarantine and stage
-directories, artifact work directories, publication checkouts, containers, and
-volumes. A restored startup inspects every taskstore-referenced CAS object before
-serving work. Operational restore keeps a durable pre-restore generation for
-explicit rollback.
+`fern backup restore` decrypts into a staging directory next to the state
+directory, rejects anything but regular files under `state/` and `config/`,
+requires every checksum to match the manifest, and integrity-checks restored
+databases before activating anything. Activation is a short sequence of renames
+with undo: the held lease directory moves into the staged state, the live state
+and configuration files become `*.previous`, and the staged copies take their
+place. `fern backup rollback` swaps `*.previous` back. A restored startup
+inspects every taskstore-referenced CAS object before serving work.
 
 GitHub App credentials can be exported and rotated as bounded age-encrypted
 bundles. Binding includes Fern name, mode, host, App ID, installation ID,
@@ -501,7 +505,6 @@ ownership boundaries.
 | `internal/strictjson` | strict JSON validation before typed decoding |
 | `internal/atomicfile` | atomic replace and bounded read of files in Fern's private state directories |
 | `internal/compatibility` | test-only fresh-schema and release-manifest alignment |
-| `scripts` | embedded Python host backup tool ([README](scripts/README.md)) |
 
 Integration packages under `integration/` qualify Docker, OpenCode, upgrades,
 and releases; each has its own README.
