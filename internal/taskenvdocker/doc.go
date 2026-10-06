@@ -4,12 +4,17 @@
 // credential delivery. It never schedules work or writes taskstore state; it
 // imports taskstore only for record types.
 //
-// Resources are created or positively attested, never adopted by name.
-// Failure to prove identity yields an IdentityError (ErrIdentityMismatch and
-// ErrQuarantined) that needs operator attention, not permission to delete a
-// similarly named object. Health and route transports re-attest the exact
-// runtime (container ID plus start time), so a restarted process never inherits
-// prior authority. Destructive removal requires an explicit WriterFence, and
+// Every resource has a deterministic identity, and each Ensure*/Remove* call
+// inspects before it acts, so callers can repeat any step to reconcile.
+// Resources are created or attested, never adopted by name alone: a container
+// must carry its canonical name, the qualified image, and Fern's ownership and
+// spec-digest labels; its remaining configuration is Fern's own create request
+// and is not re-checked. Failure to prove identity yields an IdentityError
+// (ErrIdentityMismatch and ErrQuarantined) that needs operator attention, not
+// permission to delete a similarly named object. Health, route dials,
+// credential writes, stop, and removal also require the exact runtime
+// (container ID plus start time), so a restarted process never inherits prior
+// authority. Destructive removal requires an explicit WriterFence, and
 // ProveWriterInactive may stop a container. AcquireExportSource holds the
 // exclusive clone lock after a fresh inactivity proof; its Close must be called
 // and does not remove the clone.

@@ -195,52 +195,46 @@ The public run state is:
 ```text
 queued -> setting_up -> working <-> needs_you
    |          |             |
-   +----------+-------------+-> canceling
+   +----------+-------------+-> canceling (stopping or sealing)
                               -> uncertain
                               -> result_ready
                               -> failed
                               -> cleanup_required
 ```
 
-The durable effect phase is more precise:
+The coordinator is an observe-and-act loop. Clones, volumes, containers,
+routes, and sessions have deterministic identities, so each pass re-inspects
+them and acts only where they differ from the run's intent; the durable phase
+records only what inspection cannot re-derive:
 
 ```text
-absent
- -> provision_intent
- -> clone_observed
- -> volume_observed
- -> container_observed
- -> health_observed
- -> ready
- -> session_observed
- -> prompt_intent
- -> prompt_admitted
- -> seal_intent or stop_intent
- -> writer_inactive
- -> exporting                  (seal only)
- -> artifact_committed         (seal only)
- -> route_removed
- -> container_removed
- -> volume_removed
- -> clone_removed
+absent            queued; no effect started
+ -> provisioning  clone, volume, container, start, health, route, session
+ -> prompt_pending  one-way prompt fence set; dispatched at most once
+ -> admitted      prompt confirmed in the session; work observed
+ -> sealing       (seal) writer fence, then export; resources retained
+ -> cleaning      (stop, timeout, failure, or committed result) teardown
  -> cleanup_complete
 ```
 
-External mutations happen only after the corresponding durable intent or
-started phase. Reconciliation reads are bounded. An ambiguous mutation is not
-blindly retried. There are no per-run claims or leases: `fern up`'s host lease
-admits one coordinator per workspace, and every transition is a compare-and-swap
-on the run's (or export's) workspace, task, attempt, generation, revision,
-state, and phase, so a write prepared before a concurrent stop or seal fails.
+A pass reconciles its phase until it is blocked, stable, or the operation
+deadline expires: provisioning reaches the prompt fence in one pass, and
+cleaning drains the route, stops the exact writer, and removes container,
+volume, and clone in one pass. A pass cut short is simply repeated. The durable
+records inside a phase are the started runtime identity (container ID, start
+time, epoch, port), the prompt-request fence, stop/timeout/seal admission, the
+writer fence, the selected export tuple, and the terminal cleanup proof. There
+are no per-run claims or leases: `fern up`'s host lease admits one coordinator
+per workspace, and every transition is a compare-and-swap on the run's (or
+export's) workspace, task, attempt, generation, revision, state, and phase, so
+a write prepared before a concurrent stop or seal fails.
 
 `run` owns lifecycle classification independently of persistence: valid
-state/phase combinations, attempt-deadline applicability, execution-selection
-requirements, and timeout eligibility. The coordinator dispatches concrete
-effects; it does not maintain a second list of phase categories. Taskstore keeps
-SQL representation and compatibility translation private and continues to
-enforce durable transitions transactionally. The existing storage-shaped run
-record remains a boundary representation; moving all of its fields into domain
-values is not yet complete.
+state/phase combinations, whether a phase is executing (bound by the attempt
+deadline and the configured execution identity), and timeout eligibility. The
+coordinator dispatches concrete effects; it does not maintain a second list of
+phase categories. Taskstore keeps SQL representation private and enforces
+durable transitions transactionally.
 
 ## 9. Disposable Resource Identity
 
@@ -260,17 +254,18 @@ not establish Linux quota qualification.
 
 `taskenvdocker.Provider` owns Docker policy. Every clone, volume, container,
 endpoint, and runtime gets a deterministic Fern identity derived from immutable
-run state and a private host key. Container inspection must match:
-
-- exact container ID and start timestamp;
-- runtime epoch and token;
-- qualified image ID;
-- labels, mounts, resource limits, environment digest, user, and network mode;
-- loopback published port;
-- repository and run identities.
+run state and a private host key, and every provider step inspects before it
+creates or removes. A container is this run's only if it has the canonical
+name, the qualified image ID, and Fern's ownership and spec-digest labels (the
+digest binds the run, repository, image, and environment identities); its
+other settings are Fern's own create request and are not re-checked. Health,
+route dials, credential writes, stop, and removal additionally require the
+exact committed runtime (container ID and start timestamp, hence epoch and
+token) and, where used, the loopback published port.
 
 Replacement or unowned resources are quarantined or rejected. The provider
-does not trust names alone.
+does not trust names alone. Host Git inspection of a clone happens only while
+no run container exists, because the agent can write the clone.
 
 `run.Resources` owns canonical resource-name derivation and matching;
 `run.Runtime` owns exact timestamp and token interpretation. Both have private
@@ -285,9 +280,9 @@ clone work has the same 30-second deadline as its Git operation.
 ## 10. Live Route
 
 `backgroundroute.Manager` maps short-lived opaque capabilities to one exact
-authenticated runtime and OpenCode session. The route is activated only after
-container health, endpoint identity, and OpenCode session identity are
-committed. The run API can mint a random two-hour capability only while the
+authenticated runtime and OpenCode session. The route is activated only for a
+committed runtime that has just passed authenticated health; attachment is
+offered once provisioning has reconciled the session and fenced the prompt. The run API can mint a random two-hour capability only while the
 complete workspace, task, attempt, run generation, single-writer generation,
 container ID, start time, runtime epoch, and session tuple remains active. Fern retains only the
 capability digest in process memory.
@@ -327,27 +322,42 @@ surfaces plus Docker usage. Positive activity yields `working`; pending human
 input yields `needs_you`. Missing or contradictory ownership evidence yields
 `uncertain`, not success.
 
-Stop, timeout, and seal all converge on the exact writer fence. Fern stops the
-committed container process epoch and then proves that it is non-running. A
-replacement container or changed identity invalidates the proof. Cleanup and
-artifact export require the same positive inactivity evidence.
+Stop, timeout, and seal all converge on the exact writer. Fern stops the
+committed container process epoch and then proves that it is non-running; a
+container that started but whose runtime was never recorded is adopted for
+cleanup only after it attests as this run's. A replacement container or changed
+identity invalidates the proof. Cleanup re-proves inactivity on every pass;
+seal records it once as a durable writer fence, and export reads only under it.
+
+Stop and seal race atomically: each is a compare-and-swap on the admitted
+run's revision, so exactly one wins. A stopped run moves to `cleaning`; a
+sealed run moves to `sealing` (state `canceling`, not `cleanup_required`) and
+can no longer be stopped or timed out.
 
 ## 12. Seal And Retention
 
 Seal is explicit and irreversible. Its receipt commits the seal request,
 artifact export ID, materialization ID, retained artifact ID, and result ID
-before teardown.
+before teardown. The export is `prepared -> selected -> committed`; each
+sealing pass, after the writer fence:
 
-After writer inactivity:
+1. Unless CAS already holds exactly the selected tuple, acquires the stopped
+   source clone under its identity lock, captures committed, staged, unstaged,
+   and untracked changes without mutating the source, and builds a
+   `git_bundle_v1` object and canonical manifest.
+2. On the first pass, durably selects that tuple (commit, tree, manifests,
+   bundle digest); on later passes, requires the deterministic re-snapshot to
+   equal it.
+3. Installs it under `artifact-cas/sha256:<manifest digest>` and re-inspects it.
+4. Materializes a detached checkout and proves its base, result commit, and
+   tree.
+5. Commits the retained-artifact/result tuple, the export, and the
+   materialization proof in one transaction, which moves the run to
+   `result_ready`/`cleaning`.
 
-1. Acquire the stopped source clone under its identity lock.
-2. Capture committed, staged, unstaged, and untracked changes without mutating
-   the source.
-3. Build and verify a `git_bundle_v1` object and canonical manifest.
-4. Install it under `artifact-cas/sha256:<manifest digest>`.
-5. Materialize a detached checkout and prove its base, result commit, and tree.
-6. Commit the complete retained-artifact/result tuple in one transaction.
-7. Delete route, container, volume, and clone.
+A failed pass records an export recovery reason and is retried. A trigger keeps
+a sealed run, and so its resources, in `sealing` until that commit exists.
+Cleaning then deletes route, container, volume, and clone.
 
 The result remains available only when retention is verified and
 reconstructable. Every positive plugin API projection comes from a fresh CAS
@@ -420,15 +430,21 @@ the clone to another container.
 
 ## 16. Recovery
 
-Fern reconstructs work from taskstore phases after restart. It never treats
+Recovery is the ordinary reconcile pass: after a restart the coordinator
+resumes the stored phase and re-inspects derived resources. It never treats
 process-local memory as authority. Recovery rules include:
 
-- retry an external mutation only when evidence proves it was not attempted;
-- reconcile started phases with read-only observations;
+- repeat an effect only when it is idempotent by inspection (deterministic
+  names, spec labels, content addressing); never repeat a prompt POST once its
+  fence is durable, and reconcile it against bounded history instead;
 - retain `uncertain` when exact outcome cannot be proven;
-- stop only the exact committed writer epoch;
+- stop only the exact committed writer epoch, or an unrecorded one that
+  attests as this run's;
+- export only under the recorded writer fence, and only content equal to the
+  selected tuple;
 - reject result consumption when any artifact tuple field differs;
-- preserve cleanup-required state until absence is proven;
+- keep resources until absence is proven, and a sealed run's until its result
+  commits;
 - wake coordinators only after durable admission commits.
 
 Taskstore schema is 6 and control-state schema is 2. This pre-release reset has

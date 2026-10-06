@@ -3,12 +3,13 @@
 // runtime identity. Docker providers, routing, the coordinator, and taskstore
 // share this policy without depending on each other or on SQLite.
 //
-// Classify is a policy query, not a transition engine: it reports whether a
-// state/phase pair is valid, enforces the attempt deadline and execution
-// configuration, is timeout-eligible, or is a retryable cleanup step.
-// Revisions, evidence, and persistence belong to callers. Recovery, sealing,
-// export, and cleanup may outlive the attempt deadline, and ResultReady does
-// not mean cleanup is complete.
+// Phases are the durable steps of a reconcile loop, not a record of each
+// effect: absent, provisioning, prompt_pending, admitted, sealing, cleaning,
+// cleanup_complete. Classify is a policy query, not a transition engine: it
+// reports whether a state/phase pair is valid, executing (bound by the attempt
+// deadline and execution configuration), or timeout-eligible. Revisions,
+// evidence, and persistence belong to callers. Sealing and cleanup outlive the
+// attempt deadline, and ResultReady does not mean cleanup is complete.
 //
 // ResourceSpecVersion and SourceProfile pin the current execution contract;
 // recognizing an older provider resource is not permission to start it.

@@ -5,26 +5,33 @@
 // per-run claim or lease. fern up's host lease makes it the workspace's only
 // coordinator.
 //
-// taskstore owns transition legality; the coordinator records provider
-// observations only as revision compare-and-swaps, and a filesystem or Docker
-// effect is never treated as done until its durable write succeeds. RunOnce
-// processes the next run's current phase, which may involve several external
-// effects. Effects are bounded by the operation timeout (at most five minutes)
-// and, where policy requires, the attempt deadline. Recovery and final result writes ignore caller cancellation but
-// remain bounded by the operation timeout.
+// It is an observe-and-act loop. RunOnce reconciles the next run's current
+// phase in one pass: provisioning ensures clone, volume, container, start,
+// health, route, and session, then fences and dispatches the prompt; cleaning
+// drains the route, stops the exact writer, and removes container, volume, and
+// clone. Each step inspects deterministic resources before acting, so a pass
+// cut short by failure, crash, or the operation deadline is simply repeated.
+// taskstore owns transition legality, and every durable write is a revision
+// compare-and-swap. Passes are bounded by the operation timeout (at most five
+// minutes) and, while executing, the attempt deadline. Recovery and final
+// result writes ignore caller cancellation but remain bounded by the operation
+// timeout.
 //
-// Prompt dispatch is never blindly replayed: durable intent and the one-way
-// prompt-request fence are committed before the single admission call, and any
-// outcome other than confirmed admission is recorded as uncertain. Unknown
-// working observations record nothing rather than inferring idle or success.
-// Changed execution configuration requests cleanup instead of adopting it.
+// The few non-reconcilable effects keep durable records. The started runtime
+// is recorded before anything uses it. The one-way prompt-request fence is
+// committed before the single admission call; afterwards the prompt is only
+// reconciled against bounded history, and anything short of confirmed
+// admission is recorded as uncertain. Unknown working observations record
+// nothing rather than inferring idle or success. Changed execution
+// configuration requests cleanup instead of adopting it.
 //
 // GitHub credentials are refreshed only during execution and never gate
 // teardown; remote publication is the agent's own action, and there is no host
-// publisher. Snapshot mismatch marks export recovery required rather than
-// accepting different content. Teardown proves writer inactivity and drains
-// the route before removing container, volume, and clone, and only positive
-// absence evidence permits terminal cleanup. This is a sequence of recoverable
-// ordered effects, not an atomic transaction. The coordinator does not close
-// its dependencies; composition stops it first.
+// publisher. Sealing records a writer fence once, then exports under it: the
+// selected snapshot tuple is durable, and CAS install and materialization are
+// re-derived and checked against it until the retained result commits.
+// Snapshot mismatch records an export recovery reason rather than accepting
+// different content. A run becomes terminal only once every resource is proven
+// absent. The coordinator does not close its dependencies; composition stops
+// it first.
 package backgroundruncoord
