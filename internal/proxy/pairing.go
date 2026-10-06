@@ -34,145 +34,26 @@ type pairingPage struct {
 }
 
 type pairingState struct {
-	mu                    sync.Mutex
-	codes                 map[[sha256.Size]byte]time.Time
-	attempts              map[[sha256.Size]byte]pairingAttempt
-	invalidAttempts       []time.Time
-	lastIssued            time.Time
-	lastSuccess           time.Time
-	sessions              map[[sha256.Size]byte]time.Time
-	now                   func() time.Time
-	store                 *control.Store
-	operatorCredentialID  string
-	operatorCredentialErr error
+	mu              sync.Mutex
+	codes           map[[sha256.Size]byte]time.Time
+	attempts        map[[sha256.Size]byte]pairingAttempt
+	invalidAttempts []time.Time
+	lastIssued      time.Time
+	lastSuccess     time.Time
+	now             func() time.Time
+	store           *control.Store
 }
 
-// processOperatorCredentialID lazily mints one random credential identifier per
-// process. It backs pairing states built without a control store (tests): such
-// a state has nowhere durable to record the identifier, and deriving it from
-// the control password would put an offline brute-force oracle of that secret
-// into audit snapshots.
-var processOperatorCredentialID = sync.OnceValues(func() (string, error) {
-	value := make([]byte, 16)
-	if _, err := rand.Read(value); err != nil {
-		return "", err
-	}
-	return control.OperatorCredentialIDPrefix + base64.RawURLEncoding.EncodeToString(value), nil
-})
-
-func newPairingState(stores ...*control.Store) *pairingState {
-	state := &pairingState{
+func newPairingState(store *control.Store) *pairingState {
+	return &pairingState{
 		codes:    make(map[[sha256.Size]byte]time.Time),
 		attempts: make(map[[sha256.Size]byte]pairingAttempt),
-		sessions: make(map[[sha256.Size]byte]time.Time),
 		now:      time.Now,
+		store:    store,
 	}
-	if len(stores) != 0 {
-		state.store = stores[0]
-		if stores[0] != nil {
-			// Resolved once so every operator request in this process attributes
-			// itself with the same stable, persisted random identifier.
-			state.operatorCredentialID, state.operatorCredentialErr = stores[0].EnsureOperatorCredentialID()
-		} else {
-			state.operatorCredentialID, state.operatorCredentialErr = processOperatorCredentialID()
-		}
-	} else {
-		state.operatorCredentialID, state.operatorCredentialErr = processOperatorCredentialID()
-	}
-	return state
 }
 
-func (state *pairingState) remoteHandler(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/fern/pair" && request.URL.EscapedPath() == "/fern/pair" {
-			request.Header.Del("Authorization")
-			request.Header.Del("Cookie")
-			state.pair(writer, request)
-			return
-		}
-		if request.URL.Path == "/fern/github/app/callback" && request.URL.EscapedPath() == request.URL.Path {
-			request.Header.Del("Authorization")
-			request.Header.Del("Cookie")
-			next.ServeHTTP(writer, request)
-			return
-		}
-		device, credential, valid := state.authenticatedDevice(request)
-		if !valid {
-			http.Error(writer, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		if request.URL.Path == csrfTokenPath && request.URL.EscapedPath() == csrfTokenPath {
-			state.serveCSRFToken(writer, request, credential)
-			return
-		}
-		if isFernRoute(request) && request.URL.Path != "/fern" && request.URL.Path != "/fern/" && request.URL.Path != csrfTokenPath &&
-			request.URL.Path != "/fern/api/runs" && !strings.HasPrefix(request.URL.Path, "/fern/api/runs/") &&
-			!isPluginPairedPath(request.URL.Path) {
-			http.NotFound(writer, request)
-			return
-		}
-		if !state.authorizeDeviceMutation(writer, request, credential) {
-			return
-		}
-		state.servePaired(writer, request, next, device, credential)
-	})
-}
-
-func isPluginPairedPath(path string) bool {
-	if path == pluginAuthorizePath {
-		return true
-	}
-	if suffix, found := strings.CutPrefix(path, "/fern/api/plugin-auth/requests/"); found {
-		parts := strings.Split(suffix, "/")
-		return len(parts) == 2 && parts[0] != "" && (parts[1] == "approve" || parts[1] == "deny")
-	}
-	return false
-}
-
-func (state *pairingState) operatorHandler(next http.Handler, control ControlAuth) http.Handler {
-	// This loopback-only surface uses explicit Basic credentials rather than
-	// ambient browser cookies, so device CSRF tokens do not apply here.
-	controlAuth := newBasicAuthenticator("fern", control.Password, "fern-control")
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if isFernRoute(request) {
-			if request.URL.Path == "/fern/pair" {
-				http.NotFound(writer, request)
-				return
-			}
-			if !controlAuth.valid(request) {
-				controlAuth.reject(writer)
-				return
-			}
-			request.Header.Del("Authorization")
-			stripAllCookies(request)
-			actor, err := state.operatorActor()
-			if err != nil {
-				http.Error(writer, "operator identity unavailable", http.StatusInternalServerError)
-				return
-			}
-			request = request.WithContext(task.WithActor(request.Context(), actor))
-			if request.URL.Path == "/fern/pair/new" && request.URL.EscapedPath() == "/fern/pair/new" {
-				state.issue(writer, request)
-				return
-			}
-			next.ServeHTTP(writer, request)
-			return
-		}
-		http.NotFound(writer, request)
-	})
-}
-
-func isFernRoute(request *http.Request) bool {
-	path := request.URL.Path
-	return path == "/fern" || path == "/fern/" || strings.HasPrefix(path, "/fern/")
-}
-
-func (state *pairingState) issue(writer http.ResponseWriter, request *http.Request) {
-	if request.Method != http.MethodPost {
-		writer.Header().Set("Allow", "POST")
-		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
+func (state *pairingState) issue(writer http.ResponseWriter, _ *http.Request) {
 	now := state.now()
 	state.mu.Lock()
 	state.prune(now)
@@ -198,18 +79,11 @@ func (state *pairingState) issue(writer http.ResponseWriter, request *http.Reque
 	state.codes[digest] = now.Add(pairingCodeTTL)
 	state.lastIssued = now
 	state.mu.Unlock()
-	setFernHeaders(writer.Header())
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]string{"code": code, "expiresIn": pairingCodeTTL.String()})
 }
 
 func (state *pairingState) pair(writer http.ResponseWriter, request *http.Request) {
-	setFernHeaders(writer.Header())
-	if request.Method != http.MethodGet && request.Method != http.MethodPost {
-		writer.Header().Set("Allow", "GET, POST")
-		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
 	code := request.URL.Query().Get("code")
 	name := request.URL.Query().Get("name")
 	if request.Method == http.MethodPost {
@@ -271,11 +145,7 @@ func (state *pairingState) pair(writer http.ResponseWriter, request *http.Reques
 		state.lastSuccess = now
 	}
 	if pairErr == nil {
-		if state.store == nil {
-			state.sessions[sha256.Sum256([]byte(session))] = now.Add(deviceCredentialTTL)
-		} else {
-			_, pairErr = state.store.AddDevice(session, name, now, now.Add(deviceCredentialTTL))
-		}
+		_, pairErr = state.store.AddDevice(session, name, now, now.Add(deviceCredentialTTL))
 	}
 	state.mu.Unlock()
 	if pairErr != nil {
@@ -302,93 +172,56 @@ func pairingDeviceName(name string) (string, bool) {
 	return name, true
 }
 
-func (state *pairingState) authenticatedDevice(request *http.Request) (control.Device, string, bool) {
+// authenticate is the paired-device realm: a durable __Host- cookie whose
+// request is registered against the device so revocation cancels it. A device
+// revoked between authentication and registration is rejected as
+// unauthenticated.
+func (state *pairingState) authenticate(writer http.ResponseWriter, request *http.Request) (*http.Request, func(), bool) {
 	cookie, err := request.Cookie(deviceCookieName)
 	if err != nil || cookie.Value == "" {
-		return control.Device{}, "", false
+		http.Error(writer, "unauthorized", http.StatusUnauthorized)
+		return nil, nil, false
 	}
-	now := state.now()
-	if state.store != nil {
-		device, valid, err := state.store.AuthenticateDeviceIdentity(cookie.Value, now)
-		return device, cookie.Value, err == nil && valid
+	device, valid, err := state.store.AuthenticateDeviceIdentity(cookie.Value, state.now())
+	if err != nil || !valid {
+		http.Error(writer, "unauthorized", http.StatusUnauthorized)
+		return nil, nil, false
 	}
-	hash := sha256.Sum256([]byte(cookie.Value))
-	state.mu.Lock()
-	expires, valid := state.sessions[hash]
-	if valid && !now.Before(expires) {
-		delete(state.sessions, hash)
-		valid = false
-	}
-	state.mu.Unlock()
-	return control.Device{}, cookie.Value, valid
+	return state.admit(writer, request, device, cookie.Value)
 }
 
-// servePaired dispatches an authenticated device request. A device revoked
-// between authentication and request registration is rejected as
-// unauthenticated.
-func (state *pairingState) servePaired(writer http.ResponseWriter, request *http.Request, next http.Handler, device control.Device, credential string) {
-	if state.store != nil {
-		ctx, cancel := context.WithDeadline(request.Context(), device.ExpiresAt)
-		unregister, admitted := state.store.RegisterDeviceRequest(device.ID, cancel)
-		if !admitted {
-			cancel()
-			http.Error(writer, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		defer func() {
-			unregister()
-			cancel()
-		}()
-		request = request.WithContext(ctx)
+func (state *pairingState) admit(writer http.ResponseWriter, request *http.Request, device control.Device, credential string) (*http.Request, func(), bool) {
+	ctx, cancel := context.WithDeadline(request.Context(), device.ExpiresAt)
+	unregister, admitted := state.store.RegisterDeviceRequest(device.ID, cancel)
+	if !admitted {
+		cancel()
+		http.Error(writer, "unauthorized", http.StatusUnauthorized)
+		return nil, nil, false
+	}
+	release := func() {
+		unregister()
+		cancel()
 	}
 	requestID, err := randomCredential()
 	if err != nil {
+		release()
 		http.Error(writer, "device identity unavailable", http.StatusInternalServerError)
-		return
+		return nil, nil, false
 	}
 	actor := task.ActorSnapshot{
 		Type: task.ActorDevice, ID: device.ID, DisplayName: device.Name, CredentialID: device.ID,
 		Authentication: "fern_device_cookie", RequestID: requestID,
 	}
-	request = request.WithContext(context.WithValue(request.Context(), csrfCredentialKey{}, credential))
-	request = request.WithContext(task.WithActor(request.Context(), actor))
-	stripAllCookies(request)
-	request.Header.Del("Authorization")
-	next.ServeHTTP(writer, request)
-}
-
-// operatorActor builds the audit identity stamped on loopback control-surface
-// requests. Its credential identifier is the stable random value persisted by
-// the control store — never anything derived from the control password — so no
-// offline brute-force oracle of that secret reaches durable snapshots.
-func (state *pairingState) operatorActor() (task.ActorSnapshot, error) {
-	if state.operatorCredentialErr != nil {
-		return task.ActorSnapshot{}, state.operatorCredentialErr
-	}
-	requestID, err := randomCredential()
-	if err != nil {
-		return task.ActorSnapshot{}, err
-	}
-	return task.ActorSnapshot{
-		Type: task.ActorOperator, ID: "local-operator", DisplayName: "Local operator",
-		CredentialID:   state.operatorCredentialID,
-		Authentication: "basic", RequestID: requestID,
-	}, nil
-}
-
-func stripAllCookies(request *http.Request) {
-	request.Header.Del("Cookie")
+	ctx = context.WithValue(ctx, csrfCredentialKey{}, credential)
+	request = request.WithContext(task.WithActor(ctx, actor))
+	stripCredentials(request)
+	return request, release, true
 }
 
 func (state *pairingState) prune(now time.Time) {
 	for code, expiry := range state.codes {
 		if !now.Before(expiry) {
 			delete(state.codes, code)
-		}
-	}
-	for session, expiry := range state.sessions {
-		if !now.Before(expiry) {
-			delete(state.sessions, session)
 		}
 	}
 	for digest, attempt := range state.attempts {

@@ -47,61 +47,28 @@ type trustedOrigin struct {
 	port      string
 }
 
-// NewHandlers builds the paired remote and Basic-authenticated loopback
-// control surfaces. Neither surface proxies to a persistent OpenCode runtime.
-func NewHandlers(controls Controls, origins TrustedOrigins) (Handlers, error) {
-	if controls.Store == nil || controls.PluginAuth == nil || controls.Runs == nil || controls.RunClients == nil {
-		return Handlers{}, errors.New("control, plugin authorization, plugin run, and terminal run handlers are required")
-	}
-	remoteOrigin, err := parseTrustedOrigin(origins.Remote)
+// parseTrustedOrigins enforces the listener topology: the remote origin is
+// HTTPS or loopback HTTP, and the operator origin is always loopback HTTP.
+func parseTrustedOrigins(origins TrustedOrigins) (trustedOrigin, trustedOrigin, error) {
+	remote, err := parseTrustedOrigin(origins.Remote)
 	if err != nil {
-		return Handlers{}, err
+		return trustedOrigin{}, trustedOrigin{}, err
 	}
-	operatorOrigin, err := parseTrustedOrigin(origins.Operator)
+	operator, err := parseTrustedOrigin(origins.Operator)
 	if err != nil {
-		return Handlers{}, err
+		return trustedOrigin{}, trustedOrigin{}, err
 	}
-	if remoteOrigin.scheme == "http" && !trustedLoopbackOrigin(remoteOrigin) {
-		return Handlers{}, errors.New("invalid trusted proxy origin: remote listener must be loopback HTTP or HTTPS")
+	if remote.scheme == "http" && !trustedLoopbackOrigin(remote) {
+		return trustedOrigin{}, trustedOrigin{}, errors.New("invalid trusted proxy origin: remote listener must be loopback HTTP or HTTPS")
 	}
-	if operatorOrigin.scheme != "http" || !trustedLoopbackOrigin(operatorOrigin) {
-		return Handlers{}, errors.New("invalid trusted proxy origin: operator listener must be loopback HTTP")
+	if operator.scheme != "http" || !trustedLoopbackOrigin(operator) {
+		return trustedOrigin{}, trustedOrigin{}, errors.New("invalid trusted proxy origin: operator listener must be loopback HTTP")
 	}
-	pairing := newPairingState(controls.Store)
-	pluginAuth := newPluginAuthHTTP(controls.PluginAuth)
-	remoteGateway := gatewayHandler(Controls{Store: controls.Store, Runs: controls.Runs, RunClients: controls.RunClients, Onboarding: controls.Onboarding, PluginAuth: controls.PluginAuth})
-	operatorGateway := gatewayHandler(controls)
-	return Handlers{
-		Remote:   trustedOriginHandler(pluginAuth.remoteHandler(pairing.remoteHandler(remoteGateway), remoteGateway), remoteOrigin),
-		Operator: trustedOriginHandler(pluginAuth.rejectBearerHandler(probeHandler(pairing.operatorHandler(operatorGateway, controls.ControlAuth), controls)), operatorOrigin),
-	}, nil
+	return remote, operator, nil
 }
 
-func probeHandler(next http.Handler, controls Controls) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.EscapedPath() == r.URL.Path {
-			switch r.URL.Path {
-			case "/fern/live":
-				if controls.Liveness != nil {
-					controls.Liveness.ServeHTTP(w, r)
-					return
-				}
-			case "/fern/ready":
-				if controls.Readiness != nil {
-					controls.Readiness.ServeHTTP(w, r)
-					return
-				}
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
-func trustedOriginHandler(next http.Handler, origin trustedOrigin) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ctx := context.WithValue(r.Context(), originKey{}, origin)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
+func withTrustedOrigin(ctx context.Context, origin trustedOrigin) context.Context {
+	return context.WithValue(ctx, originKey{}, origin)
 }
 
 func parseTrustedOrigin(raw string) (trustedOrigin, error) {

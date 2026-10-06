@@ -32,40 +32,25 @@ type pairingAttempt struct {
 	ExpiresAt time.Time
 }
 
-func isMutation(request *http.Request) bool {
-	return request.Method != http.MethodGet && request.Method != http.MethodHead && request.Method != http.MethodOptions
+// validDeviceCSRF checks a device mutation's token against the credential the
+// device realm installed, the method, and the exact escaped path.
+func validDeviceCSRF(request *http.Request) bool {
+	credential, _ := request.Context().Value(csrfCredentialKey{}).(string)
+	return credential != "" &&
+		validCSRFToken(request.Header.Get(csrfHeaderName), credential, request.Method, request.URL.EscapedPath(), time.Now())
 }
 
-func (state *pairingState) authorizeDeviceMutation(writer http.ResponseWriter, request *http.Request, credential string) bool {
-	if !isMutation(request) {
-		return true
-	}
-	if !sameOrigin(request) {
-		http.Error(writer, "cross-origin device request rejected", http.StatusForbidden)
-		return false
-	}
-	if !validCSRFToken(request.Header.Get(csrfHeaderName), credential, request.Method, request.URL.EscapedPath(), state.now()) {
-		http.Error(writer, "invalid device CSRF token", http.StatusForbidden)
-		return false
-	}
-	return true
-}
-
-func (state *pairingState) serveCSRFToken(writer http.ResponseWriter, request *http.Request, credential string) {
-	setFernHeaders(writer.Header())
-	if request.Method != http.MethodGet {
-		methodNotAllowed(writer, "GET")
-		return
-	}
+func serveCSRFToken(writer http.ResponseWriter, request *http.Request) {
+	credential, _ := request.Context().Value(csrfCredentialKey{}).(string)
 	method := strings.ToUpper(request.URL.Query().Get("method"))
 	path := request.URL.Query().Get("path")
 	values := request.URL.Query()
-	if len(values) != 2 || len(values["method"]) != 1 || len(values["path"]) != 1 || !validCSRFMethod(method) ||
+	if credential == "" || len(values) != 2 || len(values["method"]) != 1 || len(values["path"]) != 1 || !validCSRFMethod(method) ||
 		len(path) == 0 || len(path) > 2048 || path[0] != '/' || strings.ContainsAny(path, "\r\n?#") {
 		http.Error(writer, "invalid CSRF token target", http.StatusBadRequest)
 		return
 	}
-	token := mintCSRFToken(credential, method, path, state.now().Add(csrfTokenTTL))
+	token := mintCSRFToken(credential, method, path, time.Now().Add(csrfTokenTTL))
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]string{"token": token})
 }

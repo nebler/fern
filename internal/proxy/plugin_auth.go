@@ -19,9 +19,6 @@ import (
 )
 
 const (
-	pluginAuthStartPath = "/fern/api/plugin-auth/start"
-	pluginAuthPollPath  = "/fern/api/plugin-auth/poll"
-	pluginAuthSelfPath  = "/fern/api/plugin-auth/self/revoke"
 	pluginAuthorizePath = "/fern/plugin-auth/authorize"
 	maxPluginAuthBody   = 4 << 10
 	pluginBearerRealm   = "fern-plugin"
@@ -47,94 +44,37 @@ func newPluginAuthHTTP(store *pluginauth.Store) *pluginAuthHTTP {
 	return &pluginAuthHTTP{store: store, now: time.Now}
 }
 
-// remoteHandler admits the only unauthenticated plugin routes and intercepts
-// every bearer attempt before paired-device authentication or workspace wake.
-func (handler *pluginAuthHTTP) remoteHandler(paired, authenticated http.Handler) http.Handler {
-	if handler == nil || handler.store == nil {
-		return paired
-	}
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		path := request.URL.Path
-		if request.URL.EscapedPath() == path && (path == pluginAuthStartPath || path == pluginAuthPollPath) {
-			request.Header.Del("Authorization")
-			stripAllCookies(request)
-			handler.servePublic(writer, request)
-			return
-		}
-		if request.URL.EscapedPath() == path && (path == "/fern/pair" || path == "/fern/github/app/callback") {
-			paired.ServeHTTP(writer, request)
-			return
-		}
-		authorization := request.Header.Values("Authorization")
-		if len(authorization) > 1 {
-			setFernHeaders(writer.Header())
-			if containsBearerLikeAuthorization(authorization) {
-				rejectPluginBearer(writer)
-			} else {
-				http.Error(writer, "unauthorized", http.StatusUnauthorized)
-			}
-			return
-		}
-		if bearerLikeAuthorization(authorization) {
-			handler.serveBearer(writer, request, authenticated)
-			return
-		}
-		paired.ServeHTTP(writer, request)
-	})
-}
-
-// rejectBearerHandler makes the loopback operator surface explicitly reject
-// plugin bearer authority rather than allowing it to be interpreted as Basic.
-func (handler *pluginAuthHTTP) rejectBearerHandler(next http.Handler) http.Handler {
-	if handler == nil || handler.store == nil {
-		return next
-	}
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		values := request.Header.Values("Authorization")
-		if len(values) > 1 || bearerLikeAuthorization(values) {
-			http.NotFound(writer, request)
-			return
-		}
-		next.ServeHTTP(writer, request)
-	})
-}
-
-func (handler *pluginAuthHTTP) servePublic(writer http.ResponseWriter, request *http.Request) {
-	setFernHeaders(writer.Header())
-	if request.Method != http.MethodPost {
-		methodNotAllowed(writer, "POST")
+func (handler *pluginAuthHTTP) start(writer http.ResponseWriter, request *http.Request) {
+	now := handler.now()
+	verificationURI, ok := pluginVerificationURI(request)
+	if !ok {
+		writeUnavailable(writer, "trusted remote origin")
 		return
 	}
-	if request.URL.Path == pluginAuthStartPath {
-		now := handler.now()
-		verificationURI, ok := pluginVerificationURI(request)
-		if !ok {
-			writeUnavailable(writer, "trusted remote origin")
-			return
-		}
-		var body struct{}
-		if !decodePluginAuthJSON(writer, request, &body) {
-			return
-		}
-		result, err := handler.store.Start(now)
-		if err != nil {
-			writePluginAuthError(writer, err)
-			return
-		}
-		writeJSONStatus(writer, http.StatusCreated, struct {
-			AuthorizationID         string   `json:"authorization_id"`
-			DeviceCode              string   `json:"device_code"`
-			UserCode                string   `json:"user_code"`
-			VerificationURI         string   `json:"verification_uri"`
-			VerificationURIComplete string   `json:"verification_uri_complete"`
-			ExpiresIn               int64    `json:"expires_in"`
-			Interval                int64    `json:"interval"`
-			Scopes                  []string `json:"scopes"`
-		}{result.AuthorizationID, result.DeviceCode, result.UserCode, verificationURI,
-			verificationURI + "?" + url.Values{"id": {result.AuthorizationID}, "code": {result.UserCode}}.Encode(),
-			int64(result.ExpiresAt.Sub(now).Seconds()), int64(result.Interval.Seconds()), fixedScopes()}, nil)
+	var body struct{}
+	if !decodePluginAuthJSON(writer, request, &body) {
 		return
 	}
+	result, err := handler.store.Start(now)
+	if err != nil {
+		writePluginAuthError(writer, err)
+		return
+	}
+	writeJSONStatus(writer, http.StatusCreated, struct {
+		AuthorizationID         string   `json:"authorization_id"`
+		DeviceCode              string   `json:"device_code"`
+		UserCode                string   `json:"user_code"`
+		VerificationURI         string   `json:"verification_uri"`
+		VerificationURIComplete string   `json:"verification_uri_complete"`
+		ExpiresIn               int64    `json:"expires_in"`
+		Interval                int64    `json:"interval"`
+		Scopes                  []string `json:"scopes"`
+	}{result.AuthorizationID, result.DeviceCode, result.UserCode, verificationURI,
+		verificationURI + "?" + url.Values{"id": {result.AuthorizationID}, "code": {result.UserCode}}.Encode(),
+		int64(result.ExpiresAt.Sub(now).Seconds()), int64(result.Interval.Seconds()), fixedScopes()}, nil)
+}
+
+func (handler *pluginAuthHTTP) poll(writer http.ResponseWriter, request *http.Request) {
 	var body struct {
 		DeviceCode string `json:"device_code"`
 	}
@@ -167,203 +107,147 @@ func (handler *pluginAuthHTTP) servePublic(writer http.ResponseWriter, request *
 	}
 }
 
-func (handler *pluginAuthHTTP) serveBearer(writer http.ResponseWriter, request *http.Request, next http.Handler) {
-	setFernHeaders(writer.Header())
+// authenticate is the plugin realm: an exact fixed-scope bearer whose request
+// is registered against the credential so revocation cancels it. Scope checks
+// stay with the run APIs.
+func (handler *pluginAuthHTTP) authenticate(writer http.ResponseWriter, request *http.Request) (*http.Request, func(), bool) {
 	token, ok := exactBearer(request.Header.Values("Authorization"))
 	if !ok {
 		rejectPluginBearer(writer)
-		return
+		return nil, nil, false
 	}
 	now := handler.now()
 	credential, valid, err := handler.store.Authenticate(token, now)
 	if err != nil {
 		writeUnavailable(writer, "plugin authorization")
-		return
+		return nil, nil, false
 	}
 	if !valid {
 		rejectPluginBearer(writer)
-		return
+		return nil, nil, false
 	}
 	ctx, cancel := context.WithDeadline(request.Context(), credential.ExpiresAt)
 	unregister, admitted := handler.store.RegisterRequest(credential.ID, now, cancel)
 	if !admitted {
 		cancel()
 		rejectPluginBearer(writer)
-		return
+		return nil, nil, false
 	}
-	defer func() {
+	release := func() {
 		unregister()
 		cancel()
-	}()
+	}
 	requestID, err := randomCredential()
 	if err != nil {
+		release()
 		http.Error(writer, "plugin identity unavailable", http.StatusInternalServerError)
-		return
+		return nil, nil, false
 	}
 	actor := task.ActorSnapshot{
 		Type: task.ActorOpenCode, ID: credential.ID, DisplayName: pluginClientName,
 		CredentialID: credential.ID, Authentication: "fern_plugin_bearer", RequestID: requestID,
 	}
 	ctx = pluginauth.WithRequestAuthorization(ctx, credential)
-	ctx = task.WithActor(ctx, actor)
-	request = request.WithContext(ctx)
-	request.Header.Del("Authorization")
-	stripAllCookies(request)
-	path := request.URL.Path
-	if isMutation(request) && !sameOrigin(request) {
-		http.Error(writer, "cross-origin plugin authorization request rejected", http.StatusForbidden)
+	request = request.WithContext(task.WithActor(ctx, actor))
+	stripCredentials(request)
+	return request, release, true
+}
+
+func (handler *pluginAuthHTTP) revokeSelf(writer http.ResponseWriter, request *http.Request) {
+	if request.Body != nil && request.ContentLength != 0 {
+		var body struct{}
+		if !decodePluginAuthJSON(writer, request, &body) {
+			return
+		}
+	}
+	authorization, _ := pluginauth.RequestAuthorizationFromContext(request.Context())
+	actor, err := task.ContextActor(request.Context())
+	if err == nil {
+		err = handler.store.Revoke(authorization.Credential.ID, actor, handler.now())
+	}
+	if err != nil {
+		writePluginAuthError(writer, err)
 		return
 	}
-	if request.URL.EscapedPath() != path {
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+// authorizationPage lets a paired device approve or deny a pending plugin
+// authorization; the page's script fetches a CSRF token for its decision.
+func (handler *pluginAuthHTTP) authorizationPage(writer http.ResponseWriter, request *http.Request) {
+	values, err := url.ParseQuery(request.URL.RawQuery)
+	id, code := values.Get("id"), values.Get("code")
+	if err != nil || len(values) != 2 || len(values["id"]) != 1 || len(values["code"]) != 1 || id == "" || code == "" {
+		http.Error(writer, "invalid plugin authorization link", http.StatusBadRequest)
+		return
+	}
+	if !handler.store.Pending(id, code, handler.now()) {
 		http.NotFound(writer, request)
 		return
 	}
-	if path == pluginAuthSelfPath {
-		if request.Method != http.MethodPost {
-			methodNotAllowed(writer, "POST")
-			return
-		}
-		if request.Body != nil && request.ContentLength != 0 {
-			var body struct{}
-			if !decodePluginAuthJSON(writer, request, &body) {
-				return
-			}
-		}
-		unregister()
-		if err := handler.store.Revoke(credential.ID, actor, now); err != nil {
-			writePluginAuthError(writer, err)
-			return
-		}
-		writer.WriteHeader(http.StatusNoContent)
+	nonce, err := randomCredential()
+	if err != nil {
+		http.Error(writer, "render plugin authorization", http.StatusInternalServerError)
 		return
 	}
-	if path == "/fern/api/runs" || strings.HasPrefix(path, "/fern/api/runs/") || path == "/fern/api/v1/runs" ||
-		strings.HasPrefix(path, "/fern/api/v1/runs/") {
-		next.ServeHTTP(writer, request)
-		return
+	approvePath := "/fern/api/plugin-auth/requests/" + id + "/approve"
+	denyPath := "/fern/api/plugin-auth/requests/" + id + "/deny"
+	writer.Header().Set("Referrer-Policy", "no-referrer")
+	writer.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-"+nonce+"'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := pluginAuthorizationTemplate.Execute(writer, pluginAuthorizationPage{pluginClientName, code, approvePath, denyPath, nonce, fixedScopes()}); err != nil {
+		http.Error(writer, "render plugin authorization", http.StatusInternalServerError)
 	}
-	http.NotFound(writer, request)
 }
 
-// serveTrusted handles paired-device approval/denial and operator credential
-// administration after the existing ingress authentication and CSRF checks.
-func (handler *pluginAuthHTTP) serveTrusted(writer http.ResponseWriter, request *http.Request) bool {
-	if handler == nil || handler.store == nil || request.URL.EscapedPath() != request.URL.Path {
-		return false
-	}
-	path := request.URL.Path
-	if path == pluginAuthorizePath {
-		if request.Method != http.MethodGet {
-			methodNotAllowed(writer, "GET")
-			return true
-		}
-		actor, err := task.ContextActor(request.Context())
-		if err != nil || actor.Type != task.ActorDevice {
-			http.NotFound(writer, request)
-			return true
-		}
-		values, err := url.ParseQuery(request.URL.RawQuery)
-		id, code := values.Get("id"), values.Get("code")
-		if err != nil || len(values) != 2 || len(values["id"]) != 1 || len(values["code"]) != 1 || id == "" || code == "" {
-			http.Error(writer, "invalid plugin authorization link", http.StatusBadRequest)
-			return true
-		}
-		if !handler.store.Pending(id, code, handler.now()) {
-			http.NotFound(writer, request)
-			return true
-		}
-		nonce, err := randomCredential()
-		if err != nil {
-			http.Error(writer, "render plugin authorization", http.StatusInternalServerError)
-			return true
-		}
-		approvePath := "/fern/api/plugin-auth/requests/" + id + "/approve"
-		denyPath := "/fern/api/plugin-auth/requests/" + id + "/deny"
-		setFernHeaders(writer.Header())
-		writer.Header().Set("Referrer-Policy", "no-referrer")
-		writer.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-"+nonce+"'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
-		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if err := pluginAuthorizationTemplate.Execute(writer, pluginAuthorizationPage{pluginClientName, code, approvePath, denyPath, nonce, fixedScopes()}); err != nil {
-			http.Error(writer, "render plugin authorization", http.StatusInternalServerError)
-		}
-		return true
-	}
-	if isMutation(request) && !sameOrigin(request) {
-		http.Error(writer, "cross-origin plugin authorization request rejected", http.StatusForbidden)
-		return true
-	}
-	if strings.HasPrefix(path, "/fern/api/plugin-auth/requests/") {
-		remainder := strings.TrimPrefix(path, "/fern/api/plugin-auth/requests/")
-		parts := strings.Split(remainder, "/")
-		if len(parts) != 2 || parts[0] == "" || parts[1] != "approve" && parts[1] != "deny" {
-			http.NotFound(writer, request)
-			return true
-		}
-		if request.Method != http.MethodPost {
-			methodNotAllowed(writer, "POST")
-			return true
-		}
+func (handler *pluginAuthHTTP) decide(approve bool) http.HandlerFunc {
+	return func(writer http.ResponseWriter, request *http.Request) {
 		actor, err := task.ContextActor(request.Context())
 		if err != nil {
 			http.Error(writer, "trusted actor unavailable", http.StatusUnauthorized)
-			return true
+			return
 		}
 		var body struct {
 			UserCode string `json:"user_code"`
 		}
 		if !decodePluginAuthJSON(writer, request, &body) {
-			return true
+			return
 		}
-		if parts[1] == "approve" {
-			_, err = handler.store.Approve(request.Context(), parts[0], body.UserCode, actor, handler.now())
+		id := request.PathValue("id")
+		if approve {
+			_, err = handler.store.Approve(request.Context(), id, body.UserCode, actor, handler.now())
 		} else {
-			err = handler.store.Deny(request.Context(), parts[0], body.UserCode, actor, handler.now())
+			err = handler.store.Deny(request.Context(), id, body.UserCode, actor, handler.now())
 		}
 		if err != nil {
 			writePluginAuthError(writer, err)
-			return true
+			return
 		}
 		writer.WriteHeader(http.StatusNoContent)
-		return true
 	}
-	if path == "/fern/api/plugin-auth/credentials" {
-		if request.Method != http.MethodGet {
-			methodNotAllowed(writer, "GET")
-			return true
-		}
-		credentials, err := handler.store.Credentials(handler.now())
-		writeJSON(writer, struct {
-			Credentials []pluginauth.Credential `json:"credentials"`
-			Scopes      []string                `json:"scopes"`
-		}{credentials, fixedScopes()}, err)
-		return true
+}
+
+func (handler *pluginAuthHTTP) credentials(writer http.ResponseWriter, _ *http.Request) {
+	credentials, err := handler.store.Credentials(handler.now())
+	writeJSON(writer, struct {
+		Credentials []pluginauth.Credential `json:"credentials"`
+		Scopes      []string                `json:"scopes"`
+	}{credentials, fixedScopes()}, err)
+}
+
+func (handler *pluginAuthHTTP) revokeCredential(writer http.ResponseWriter, request *http.Request) {
+	actor, err := task.ContextActor(request.Context())
+	if err == nil {
+		err = handler.store.Revoke(request.PathValue("id"), actor, handler.now())
 	}
-	if strings.HasPrefix(path, "/fern/api/plugin-auth/credentials/") {
-		id := strings.TrimPrefix(path, "/fern/api/plugin-auth/credentials/")
-		if id == "" || strings.Contains(id, "/") {
-			http.NotFound(writer, request)
-			return true
-		}
-		if request.Method != http.MethodDelete {
-			methodNotAllowed(writer, "DELETE")
-			return true
-		}
-		actor, err := task.ContextActor(request.Context())
-		if err == nil {
-			err = handler.store.Revoke(id, actor, handler.now())
-		}
-		if err != nil {
-			if errors.Is(err, pluginauth.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
-				http.NotFound(writer, request)
-			} else {
-				writePluginAuthError(writer, err)
-			}
-			return true
-		}
+	switch {
+	case errors.Is(err, pluginauth.ErrNotFound) || errors.Is(err, os.ErrNotExist):
+		http.NotFound(writer, request)
+	case err != nil:
+		writePluginAuthError(writer, err)
+	default:
 		writer.WriteHeader(http.StatusNoContent)
-		return true
 	}
-	return false
 }
 
 func decodePluginAuthJSON(writer http.ResponseWriter, request *http.Request, value any) bool {

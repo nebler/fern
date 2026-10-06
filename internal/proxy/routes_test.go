@@ -24,17 +24,21 @@ const (
 type credential int
 
 const (
-	none credential = iota
-	device
-	deviceCSRF // device cookie plus a valid CSRF token for the exact method and path
-	plugin
-	badPlugin
-	twoAuthorizations
-	operator
-	badOperator
+	anon credential = iota
+	cookie
+	withCSRF // device cookie plus a valid CSRF token for the exact method and path
+	bearer
+	badBearer
+	twoHeaders
+	basic
+	badBasic
 )
 
+// R and O select the remote and operator listener.
+const R, O = true, false
+
 type routeFixture struct {
+	store        *control.Store
 	handlers     Handlers
 	bearer       string
 	authID       string
@@ -78,7 +82,7 @@ func newRouteFixture(t *testing.T) *routeFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := &routeFixture{bearer: approved.DeviceCode, authID: pending.AuthorizationID, userCode: pending.UserCode,
+	fixture := &routeFixture{store: store, bearer: approved.DeviceCode, authID: pending.AuthorizationID, userCode: pending.UserCode,
 		credentialID: credential.ID, victimID: victim.ID, phoneID: phone.ID}
 	stub := func(name string) http.Handler {
 		return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -117,21 +121,21 @@ func (fixture *routeFixture) request(remote bool, method, target string, cred cr
 		request.Header.Set("Content-Type", "application/json")
 	}
 	switch cred {
-	case device, deviceCSRF:
+	case cookie, withCSRF:
 		request.AddCookie(&http.Cookie{Name: deviceCookieName, Value: testDeviceToken})
-		if cred == deviceCSRF {
+		if cred == withCSRF {
 			request.Header.Set(csrfHeaderName, mintCSRFToken(testDeviceToken, method, request.URL.EscapedPath(), time.Now().Add(time.Minute)))
 		}
-	case plugin:
+	case bearer:
 		request.Header.Set("Authorization", "Bearer "+fixture.bearer)
-	case badPlugin:
+	case badBearer:
 		request.Header.Set("Authorization", "Bearer not-a-credential")
-	case twoAuthorizations:
+	case twoHeaders:
 		request.Header.Add("Authorization", "Bearer "+fixture.bearer)
 		request.Header.Add("Authorization", "Basic Zm9vOmJhcg==")
-	case operator:
+	case basic:
 		request.SetBasicAuth("fern", testPassword)
-	case badOperator:
+	case badBasic:
 		request.SetBasicAuth("fern", "wrong")
 	}
 	if crossOrigin {
@@ -145,7 +149,6 @@ func (fixture *routeFixture) request(remote bool, method, target string, cred cr
 // TestRouteTable pins every listener's method x path x credential decision.
 // Each case uses a fresh fixture so state-changing routes stay independent.
 func TestRouteTable(t *testing.T) {
-	const R, O = true, false
 	cases := []struct {
 		remote bool
 		method string
@@ -158,103 +161,114 @@ func TestRouteTable(t *testing.T) {
 		header string // "Name: value" that must be present
 	}{
 		// Remote: unauthenticated plugin authorization and pairing.
-		{R, "POST", "/fern/api/plugin-auth/start", none, false, "{}", 201, "", ""},
-		{R, "GET", "/fern/api/plugin-auth/start", none, false, "", 405, "", "Allow: POST"},
-		{R, "POST", "/fern/api/plugin-auth/poll", none, false, `{"device_code":"x"}`, 401, "", ""},
-		{R, "POST", "/fern/api/plugin-auth/start", plugin, false, "{}", 201, "", ""},
-		{R, "GET", "/fern/pair?code=x", none, false, "", 401, "", ""},
-		{R, "PUT", "/fern/pair", none, false, "", 405, "", ""},
-		{R, "GET", "/fern/github/app/callback", none, false, "", 200, "onboarding", ""},
-		{R, "GET", "/fern/github/app/callback", plugin, false, "", 200, "onboarding", ""},
+		{R, "POST", "/fern/api/plugin-auth/start", anon, false, "{}", 201, "", ""},
+		{R, "GET", "/fern/api/plugin-auth/start", anon, false, "", 405, "", "Allow: POST"},
+		{R, "POST", "/fern/api/plugin-auth/poll", anon, false, `{"device_code":"x"}`, 401, "", ""},
+		{R, "POST", "/fern/api/plugin-auth/start", bearer, false, "{}", 201, "", ""},
+		{R, "GET", "/fern/pair?code=x", anon, false, "", 401, "", ""},
+		{R, "PUT", "/fern/pair", anon, false, "", 405, "", ""},
+		{R, "GET", "/fern/github/app/callback", anon, false, "", 200, "onboarding", ""},
+		{R, "GET", "/fern/github/app/callback", bearer, false, "", 200, "onboarding", ""},
 
 		// Remote: paired device.
-		{R, "GET", "/fern/", none, false, "", 401, "", ""},
-		{R, "GET", "/fern/", device, false, "", 200, "", "Cache-Control: no-store"},
-		{R, "HEAD", "/fern/", device, false, "", 200, "", ""},
-		{R, "GET", "/fern", device, false, "", 308, "", "Location: /fern/"},
-		{R, "POST", "/fern/", deviceCSRF, false, "", 405, "", ""},
-		{R, "GET", "/fern/control", device, false, "", 404, "", ""},
-		{R, "GET", "/fern/api/v1/csrf?method=POST&path=/fern/api/runs", device, false, "", 200, "", ""},
-		{R, "GET", "/fern/api/v1/csrf?method=POST&path=/fern/api/runs", none, false, "", 401, "", ""},
-		{R, "GET", "/fern/plugin-auth/authorize?id={auth}&code={code}", device, false, "", 200, "", ""},
-		{R, "GET", "/fern/plugin-auth/authorize?id={auth}&code={code}", plugin, false, "", 404, "", ""},
-		{R, "POST", "/fern/api/plugin-auth/requests/{auth}/approve", deviceCSRF, false, `{"user_code":"{code}"}`, 204, "", ""},
-		{R, "POST", "/fern/api/plugin-auth/requests/{auth}/deny", deviceCSRF, false, `{"user_code":"{code}"}`, 204, "", ""},
-		{R, "POST", "/fern/api/plugin-auth/requests/{auth}/approve", device, false, `{"user_code":"{code}"}`, 403, "", ""},
-		{R, "POST", "/fern/api/plugin-auth/requests/{auth}/approve", deviceCSRF, true, `{"user_code":"{code}"}`, 403, "", ""},
-		{R, "POST", "/fern/api/plugin-auth/requests/{auth}/approve", plugin, false, `{"user_code":"{code}"}`, 404, "", ""},
-		{R, "GET", "/fern/api/runs", device, false, "", 200, "runs", ""},
-		{R, "POST", "/fern/api/runs", deviceCSRF, false, "", 200, "runs", ""},
-		{R, "POST", "/fern/api/runs", device, false, "", 403, "", ""},
-		{R, "GET", "/fern/api/runs/%61bc", device, false, "", 404, "", ""},
-		{R, "GET", "/fern/api/v1/runs", device, false, "", 404, "", ""},
-		{R, "GET", "/fern/api/v1/devices", device, false, "", 404, "", ""},
-		{R, "GET", "/fern/api/plugin-auth/credentials", device, false, "", 404, "", ""},
-		{R, "GET", "/fern/github/app/setup", device, false, "", 404, "", ""},
-		{R, "GET", "/fern/status", device, false, "", 404, "", ""},
-		{R, "GET", "/fern/live", device, false, "", 404, "", ""},
-		{R, "GET", "/fern/pair/new", device, false, "", 404, "", ""},
-		{R, "GET", "/elsewhere", device, false, "", 404, "", ""},
+		{R, "GET", "/fern/", anon, false, "", 401, "", ""},
+		{R, "GET", "/fern/", cookie, false, "", 200, "", "Cache-Control: no-store"},
+		{R, "HEAD", "/fern/", cookie, false, "", 200, "", ""},
+		{R, "GET", "/fern", cookie, false, "", 308, "", "Location: /fern/"},
+		{R, "POST", "/fern/", withCSRF, false, "", 405, "", ""},
+		{R, "GET", "/fern/control", cookie, false, "", 404, "", ""},
+		{R, "GET", "/fern/api/v1/csrf?method=POST&path=/fern/api/runs", cookie, false, "", 200, "", ""},
+		{R, "GET", "/fern/api/v1/csrf?method=POST&path=/fern/api/runs", anon, false, "", 401, "", ""},
+		{R, "GET", "/fern/plugin-auth/authorize?id={auth}&code={code}", cookie, false, "", 200, "", ""},
+		{R, "GET", "/fern/plugin-auth/authorize?id={auth}&code={code}", bearer, false, "", 404, "", ""},
+		{R, "POST", "/fern/api/plugin-auth/requests/{auth}/approve", withCSRF, false, `{"user_code":"{code}"}`, 204, "", ""},
+		{R, "POST", "/fern/api/plugin-auth/requests/{auth}/deny", withCSRF, false, `{"user_code":"{code}"}`, 204, "", ""},
+		{R, "POST", "/fern/api/plugin-auth/requests/{auth}/approve", cookie, false, `{"user_code":"{code}"}`, 403, "", ""},
+		{R, "POST", "/fern/api/plugin-auth/requests/{auth}/approve", withCSRF, true, `{"user_code":"{code}"}`, 403, "", ""},
+		{R, "POST", "/fern/api/plugin-auth/requests/{auth}/approve", bearer, false, `{"user_code":"{code}"}`, 404, "", ""},
+		// runapi only admits plugin actors, so devices and the operator used to
+		// reach it just to be refused there; the route table now says so.
+		{R, "GET", "/fern/api/runs", cookie, false, "", 404, "", ""},
+		{R, "POST", "/fern/api/runs", withCSRF, false, "", 404, "", ""},
+		{R, "GET", "/fern/api/runs/%61bc", cookie, false, "", 404, "", ""},
+		{R, "GET", "/fern/api/v1/runs", cookie, false, "", 404, "", ""},
+		{R, "GET", "/fern/api/v1/devices", cookie, false, "", 404, "", ""},
+		{R, "GET", "/fern/api/plugin-auth/credentials", cookie, false, "", 404, "", ""},
+		{R, "GET", "/fern/github/app/setup", cookie, false, "", 404, "", ""},
+		{R, "GET", "/fern/status", cookie, false, "", 404, "", ""},
+		{R, "GET", "/fern/live", cookie, false, "", 404, "", ""},
+		{R, "GET", "/fern/pair/new", cookie, false, "", 404, "", ""},
+		{R, "GET", "/elsewhere", cookie, false, "", 404, "", ""},
+		// Unknown routes and methods are answered before authentication (they
+		// used to need a device cookie first, answering 401).
+		{R, "GET", "/elsewhere", anon, false, "", 404, "", ""},
+		{R, "POST", "/fern/", anon, false, "", 405, "", "Allow: GET, HEAD"},
 
-		// Remote: plugin bearer.
-		{R, "GET", "/fern/api/runs", plugin, false, "", 200, "runs", ""},
-		{R, "POST", "/fern/api/runs/run/stop", plugin, false, "", 200, "runs", ""},
-		{R, "POST", "/fern/api/runs", plugin, true, "", 403, "", ""},
-		{R, "GET", "/fern/api/v1/runs", plugin, false, "", 200, "run-clients", ""},
-		{R, "GET", "/fern/api/v1/runs/run/attach", plugin, false, "", 200, "run-clients", ""},
-		{R, "POST", "/fern/api/plugin-auth/self/revoke", plugin, false, "", 204, "", ""},
-		{R, "GET", "/fern/api/plugin-auth/self/revoke", plugin, false, "", 405, "", "Allow: POST"},
-		{R, "POST", "/fern/api/plugin-auth/self/revoke", deviceCSRF, false, "", 404, "", ""},
-		{R, "GET", "/fern/", plugin, false, "", 404, "", ""},
-		{R, "GET", "/fern/api/runs/%61bc", plugin, false, "", 404, "", ""},
-		{R, "GET", "/fern/api/runs", badPlugin, false, "", 401, "", `WWW-Authenticate: Bearer realm="fern-plugin"`},
-		{R, "GET", "/fern/api/runs", twoAuthorizations, false, "", 401, "", ""},
+		// Remote: bearer bearer.
+		{R, "GET", "/fern/api/runs", bearer, false, "", 200, "runs", ""},
+		{R, "POST", "/fern/api/runs/run/stop", bearer, false, "", 200, "runs", ""},
+		{R, "POST", "/fern/api/runs", bearer, true, "", 403, "", ""},
+		{R, "GET", "/fern/api/v1/runs", bearer, false, "", 200, "run-clients", ""},
+		{R, "GET", "/fern/api/v1/runs/run/attach", bearer, false, "", 200, "run-clients", ""},
+		{R, "POST", "/fern/api/plugin-auth/self/revoke", bearer, false, "", 204, "", ""},
+		{R, "GET", "/fern/api/plugin-auth/self/revoke", bearer, false, "", 405, "", "Allow: POST"},
+		{R, "POST", "/fern/api/plugin-auth/self/revoke", withCSRF, false, "", 404, "", ""},
+		{R, "GET", "/fern/", bearer, false, "", 404, "", ""},
+		{R, "GET", "/fern/api/runs/%61bc", bearer, false, "", 404, "", ""},
+		{R, "GET", "/fern/api/runs", badBearer, false, "", 401, "", `WWW-Authenticate: Bearer realm="fern-plugin"`},
+		{R, "GET", "/fern/api/runs", twoHeaders, false, "", 401, "", ""},
 
 		// Operator: probes precede authentication.
-		{O, "GET", "/fern/live", none, false, "", 200, "live", ""},
-		{O, "GET", "/fern/ready", none, false, "", 200, "ready", ""},
-		{O, "GET", "/fern/status", none, false, "", 401, "", `WWW-Authenticate: Basic realm="fern-control"`},
-		{O, "GET", "/fern/status", badOperator, false, "", 401, "", ""},
-		{O, "GET", "/fern/status", operator, false, "", 200, "status", ""},
-		{O, "GET", "/fern/metrics", operator, false, "", 200, "metrics", ""},
-		{O, "GET", "/fern/status", plugin, false, "", 404, "", ""},
-		{O, "GET", "/fern/live", plugin, false, "", 404, "", ""},
-		{O, "GET", "/fern/status", device, false, "", 401, "", ""},
+		{O, "GET", "/fern/live", anon, false, "", 200, "live", ""},
+		{O, "GET", "/fern/ready", anon, false, "", 200, "ready", ""},
+		{O, "GET", "/fern/status", anon, false, "", 401, "", `WWW-Authenticate: Basic realm="fern-control"`},
+		{O, "GET", "/fern/status", badBasic, false, "", 401, "", ""},
+		{O, "GET", "/fern/status", basic, false, "", 200, "status", ""},
+		{O, "GET", "/fern/metrics", basic, false, "", 200, "metrics", ""},
+		{O, "GET", "/fern/status", bearer, false, "", 404, "", ""},
+		{O, "GET", "/fern/live", bearer, false, "", 404, "", ""},
+		{O, "GET", "/fern/status", cookie, false, "", 401, "", ""},
 
 		// Operator: pages, pairing, devices.
-		{O, "GET", "/fern/", operator, false, "", 200, "", ""},
-		{O, "GET", "/fern/control", operator, false, "", 200, "", ""},
-		{O, "GET", "/fern", operator, false, "", 308, "", ""},
-		{O, "POST", "/fern/pair/new", operator, false, "", 200, "", ""},
-		{O, "GET", "/fern/pair/new", operator, false, "", 405, "", "Allow: POST"},
-		{O, "GET", "/fern/pair?code=x", operator, false, "", 404, "", ""},
-		{O, "GET", "/fern/pair?code=x", none, false, "", 404, "", ""},
-		{O, "GET", "/fern/api/v1/devices", operator, false, "", 200, "", ""},
-		{O, "POST", "/fern/api/v1/devices", operator, false, "", 405, "", ""},
-		{O, "DELETE", "/fern/api/v1/devices/{victim}", operator, false, "", 204, "", ""},
-		{O, "DELETE", "/fern/api/v1/devices/{victim}", operator, true, "", 403, "", ""},
-		{O, "DELETE", "/fern/api/v1/devices/missing", operator, false, "", 404, "", ""},
-		{O, "GET", "/fern/api/v1/devices/%2e", operator, false, "", 404, "", ""},
-		{O, "POST", "/fern/devices/{victim}/revoke", operator, false, "", 200, "", ""},
-		{O, "POST", "/fern/devices/{victim}/revoke", operator, true, "", 403, "", ""},
-		{O, "GET", "/fern/api/v1/csrf?method=POST&path=/x", operator, false, "", 404, "", ""},
+		{O, "GET", "/fern/", basic, false, "", 200, "", ""},
+		{O, "GET", "/fern/control", basic, false, "", 200, "", ""},
+		{O, "GET", "/fern", basic, false, "", 308, "", ""},
+		{O, "POST", "/fern/pair/new", basic, false, "", 200, "", ""},
+		{O, "GET", "/fern/pair/new", basic, false, "", 405, "", "Allow: POST"},
+		{O, "GET", "/fern/pair?code=x", basic, false, "", 404, "", ""},
+		{O, "GET", "/fern/pair?code=x", anon, false, "", 404, "", ""},
+		{O, "GET", "/fern/api/v1/devices", basic, false, "", 200, "", ""},
+		{O, "POST", "/fern/api/v1/devices", basic, false, "", 405, "", ""},
+		{O, "DELETE", "/fern/api/v1/devices/{victim}", basic, false, "", 204, "", ""},
+		{O, "DELETE", "/fern/api/v1/devices/{victim}", basic, true, "", 403, "", ""},
+		{O, "DELETE", "/fern/api/v1/devices/missing", basic, false, "", 404, "", ""},
+		{O, "GET", "/fern/api/v1/devices/%2e", basic, false, "", 404, "", ""},
+		{O, "POST", "/fern/devices/{victim}/revoke", basic, false, "", 200, "", ""},
+		{O, "POST", "/fern/devices/{victim}/revoke", basic, true, "", 403, "", ""},
+		{O, "GET", "/fern/api/v1/csrf?method=POST&path=/x", basic, false, "", 404, "", ""},
 
-		// Operator: plugin credential administration.
-		{O, "GET", "/fern/api/plugin-auth/credentials", operator, false, "", 200, "", ""},
-		{O, "DELETE", "/fern/api/plugin-auth/credentials/{cred}", operator, false, "", 204, "", ""},
-		{O, "DELETE", "/fern/api/plugin-auth/credentials/{cred}", operator, true, "", 403, "", ""},
-		{O, "POST", "/fern/api/plugin-auth/requests/{auth}/approve", operator, false, `{"user_code":"{code}"}`, 204, "", ""},
-		{O, "GET", "/fern/plugin-auth/authorize?id={auth}&code={code}", operator, false, "", 404, "", ""},
+		// Operator: bearer credential administration.
+		{O, "GET", "/fern/api/plugin-auth/credentials", basic, false, "", 200, "", ""},
+		{O, "DELETE", "/fern/api/plugin-auth/credentials/{cred}", basic, false, "", 204, "", ""},
+		{O, "DELETE", "/fern/api/plugin-auth/credentials/{cred}", basic, true, "", 403, "", ""},
+		{O, "POST", "/fern/api/plugin-auth/requests/{auth}/approve", basic, false, `{"user_code":"{code}"}`, 204, "", ""},
+		{O, "GET", "/fern/plugin-auth/authorize?id={auth}&code={code}", basic, false, "", 404, "", ""},
 
 		// Operator: run APIs and onboarding.
-		{O, "GET", "/fern/api/runs", operator, false, "", 200, "runs", ""},
-		{O, "GET", "/fern/api/v1/runs", operator, false, "", 200, "run-clients", ""},
-		{O, "GET", "/fern/api/v1/runs/run/attach", operator, false, "", 200, "run-clients", ""},
-		{O, "GET", "/fern/github/app/setup", operator, false, "", 200, "onboarding", ""},
-		{O, "GET", "/fern/github/app/setup", operator, true, "", 403, "", ""},
-		{O, "GET", "/fern/github/app/callback", operator, false, "", 200, "onboarding", ""},
-		{O, "GET", "/fern/github/app/callback", none, false, "", 401, "", ""},
-		{O, "GET", "/elsewhere", operator, false, "", 404, "", ""},
+		{O, "GET", "/fern/api/runs", basic, false, "", 404, "", ""},
+		{O, "GET", "/fern/api/v1/runs", basic, false, "", 200, "run-clients", ""},
+		{O, "GET", "/fern/api/v1/runs/run/attach", basic, false, "", 200, "run-clients", ""},
+		{O, "GET", "/fern/github/app/setup", basic, false, "", 200, "onboarding", ""},
+		{O, "GET", "/fern/github/app/setup", basic, true, "", 403, "", ""},
+		{O, "GET", "/fern/github/app/callback", basic, false, "", 200, "onboarding", ""},
+		{O, "GET", "/fern/github/app/callback", anon, false, "", 401, "", ""},
+		{O, "GET", "/elsewhere", basic, false, "", 404, "", ""},
+		{O, "GET", "/fern/api/v1/results/res_x/publications", basic, false, "", 404, "", ""},
+		// Plugin authorization is remote-only (this used to fall through to 405).
+		{O, "POST", "/fern/api/plugin-auth/start", basic, false, "{}", 404, "", ""},
+		// Every operator mutation now requires the same origin, not just /fern/api
+		// and /fern/devices paths.
+		{O, "POST", "/fern/pair/new", basic, true, "", 403, "", ""},
 	}
 	for _, tc := range cases {
 		listener := "operator"
@@ -284,32 +298,44 @@ func TestRouteTable(t *testing.T) {
 // TestRevocationCancelsInFlightRequests proves both remote realms fence
 // in-flight work against durable revocation.
 func TestRevocationCancelsInFlightRequests(t *testing.T) {
-	for _, tc := range []struct {
-		cred   credential
-		revoke string
-	}{
-		{plugin, "/fern/api/plugin-auth/credentials/{cred}"},
-		{device, "/fern/api/v1/devices/{phone}"},
-	} {
-		t.Run(tc.revoke, func(t *testing.T) {
-			fixture := newRouteFixture(t)
-			fixture.block = make(chan struct{})
-			done := make(chan struct{})
-			go func() {
-				defer close(done)
-				fixture.handlers.Remote.ServeHTTP(httptest.NewRecorder(), fixture.request(true, "GET", "/fern/api/runs", tc.cred, false, ""))
-			}()
-			<-fixture.block
-			response := httptest.NewRecorder()
-			fixture.handlers.Operator.ServeHTTP(response, fixture.request(false, "DELETE", tc.revoke, operator, false, ""))
-			if response.Code != http.StatusNoContent {
-				t.Fatalf("revoke status=%d", response.Code)
-			}
-			select {
-			case <-done:
-			case <-time.After(5 * time.Second):
-				t.Fatal("in-flight request was not cancelled by revocation")
-			}
-		})
+	t.Run("plugin", func(t *testing.T) {
+		fixture := newRouteFixture(t)
+		fixture.block = make(chan struct{})
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			fixture.handlers.Remote.ServeHTTP(httptest.NewRecorder(), fixture.request(R, "GET", "/fern/api/runs", bearer, false, ""))
+		}()
+		<-fixture.block
+		fixture.revoke(t, "/fern/api/plugin-auth/credentials/{cred}")
+		awaitDone(t, done)
+	})
+	t.Run("device", func(t *testing.T) {
+		fixture := newRouteFixture(t)
+		request, release, ok := newPairingState(fixture.store).authenticate(httptest.NewRecorder(), fixture.request(R, "GET", "/fern/", cookie, false, ""))
+		if !ok {
+			t.Fatal("device was not admitted")
+		}
+		defer release()
+		fixture.revoke(t, "/fern/api/v1/devices/{phone}")
+		awaitDone(t, request.Context().Done())
+	})
+}
+
+func (fixture *routeFixture) revoke(t *testing.T, path string) {
+	t.Helper()
+	response := httptest.NewRecorder()
+	fixture.handlers.Operator.ServeHTTP(response, fixture.request(O, "DELETE", path, basic, false, ""))
+	if response.Code != http.StatusNoContent {
+		t.Fatalf("revoke status=%d", response.Code)
+	}
+}
+
+func awaitDone(t *testing.T, done <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("in-flight request was not cancelled by revocation")
 	}
 }

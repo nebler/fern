@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/nebler/fern/internal/control"
@@ -28,75 +27,38 @@ type landingView struct {
 	OnboardingEnabled bool
 }
 
-func gatewayHandler(controls Controls) http.Handler {
-	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Path == "/fern" || strings.HasPrefix(request.URL.Path, "/fern/") {
-			serveFern(writer, request, controls)
-			return
-		}
-		http.NotFound(writer, request)
-	})
+// pages renders the landing page and, on the operator listener, the control
+// page with paired devices.
+type pages struct {
+	store      *control.Store
+	onboarding bool
 }
 
-func serveFern(writer http.ResponseWriter, request *http.Request, controls Controls) {
-	setFernHeaders(writer.Header())
-	if controls.PluginAuth != nil && newPluginAuthHTTP(controls.PluginAuth).serveTrusted(writer, request) {
+func (pages pages) landing(writer http.ResponseWriter, request *http.Request) {
+	pages.render(writer, request, landingView{OnboardingEnabled: pages.onboarding})
+}
+
+func (pages pages) control(writer http.ResponseWriter, request *http.Request) {
+	devices, err := pages.store.Devices(time.Now())
+	if err != nil {
+		writeUnavailable(writer, "control state")
 		return
 	}
-	if controls.Onboarding != nil && (request.URL.Path == "/fern/github/app/setup" || request.URL.Path == "/fern/github/app/callback") {
-		if request.URL.Path == "/fern/github/app/setup" && !sameOrigin(request) {
-			http.Error(writer, "cross-origin onboarding request rejected", http.StatusForbidden)
-			return
-		}
-		controls.Onboarding.ServeHTTP(writer, request)
+	pages.render(writer, request, landingView{Control: true, Devices: devices, OnboardingEnabled: pages.onboarding})
+}
+
+func (pages) render(writer http.ResponseWriter, request *http.Request, view landingView) {
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if request.Method == http.MethodHead {
 		return
 	}
-	if serveControlRoute(writer, request, controls) {
-		return
+	if err := landingTemplate.Execute(writer, view); err != nil {
+		http.Error(writer, "render landing page", http.StatusInternalServerError)
 	}
-	if request.Method != http.MethodGet && request.Method != http.MethodHead {
-		writer.Header().Set("Allow", "GET, HEAD")
-		http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-	switch {
-	case request.URL.Path == "/fern":
-		http.Redirect(writer, request, "/fern/", http.StatusPermanentRedirect)
-	case (request.URL.Path == "/fern/" || request.URL.Path == "/fern/control") && request.URL.EscapedPath() == request.URL.Path:
-		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if request.Method == http.MethodHead {
-			return
-		}
-		controlPage := request.URL.Path == "/fern/control"
-		view := landingView{Control: controlPage && controls.Store != nil, OnboardingEnabled: controls.Onboarding != nil}
-		if controlPage && controls.Store != nil {
-			var err error
-			view.Devices, err = controls.Store.Devices(time.Now())
-			if err != nil {
-				writeUnavailable(writer, "control state")
-				return
-			}
-		}
-		if err := landingTemplate.Execute(writer, view); err != nil {
-			http.Error(writer, "render landing page", http.StatusInternalServerError)
-		}
-	case request.URL.Path == "/fern/live" && request.URL.EscapedPath() == "/fern/live":
-		writer.Header().Set("Content-Type", "application/json")
-		if request.Method == http.MethodGet {
-			_, _ = writer.Write([]byte(`{"live":true}`))
-		}
-	case request.URL.Path == "/fern/ready" && request.URL.EscapedPath() == "/fern/ready":
-		if controls.Readiness != nil {
-			controls.Readiness.ServeHTTP(writer, request)
-			return
-		}
-		writer.Header().Set("Content-Type", "application/json")
-		if request.Method == http.MethodGet {
-			_, _ = writer.Write([]byte(`{"ready":true}`))
-		}
-	default:
-		http.NotFound(writer, request)
-	}
+}
+
+func redirectToRoot(writer http.ResponseWriter, request *http.Request) {
+	http.Redirect(writer, request, "/fern/", http.StatusPermanentRedirect)
 }
 
 func setFernHeaders(header http.Header) {

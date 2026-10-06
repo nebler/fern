@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/nebler/fern/internal/control"
@@ -16,114 +15,42 @@ var deviceRevokedTemplate = newPage("device-revoked", "Device revoked", dialogCS
 h1{margin:24px 0 8px;font-size:34px;letter-spacing:-.04em}p{margin:0;color:#bdcbb5;font-size:16px;line-height:1.55}`,
 	`<main><div class="mark">F</div><h1>Device revoked</h1><p>This browser may now be closed.</p></main>`)
 
-func serveControlRoute(writer http.ResponseWriter, request *http.Request, controls Controls) bool {
-	store := controls.Store
-	path := request.URL.Path
-	if request.URL.EscapedPath() != path {
-		if strings.HasPrefix(path, "/fern/api/") || strings.HasPrefix(path, "/fern/devices/") {
-			http.NotFound(writer, request)
-			return true
-		}
-		return false
-	}
-	mutation := request.Method == http.MethodPost || request.Method == http.MethodDelete || request.Method == http.MethodPatch || request.Method == http.MethodPut
-	controlPath := strings.HasPrefix(path, "/fern/api/v1/") || strings.HasPrefix(path, "/fern/api/plugin-auth/") || strings.HasPrefix(path, "/fern/devices/")
-	if mutation && controlPath && !sameOrigin(request) {
-		http.Error(writer, "cross-origin control request rejected", http.StatusForbidden)
-		return true
-	}
-	if path == "/fern/api/runs" || strings.HasPrefix(path, "/fern/api/runs/") {
-		if controls.Runs == nil {
-			http.NotFound(writer, request)
-			return true
-		}
-		controls.Runs.ServeHTTP(writer, request)
-		return true
-	}
-	if path == "/fern/api/v1/runs" || strings.HasPrefix(path, "/fern/api/v1/runs/") {
-		if controls.RunClients == nil {
-			http.NotFound(writer, request)
-			return true
-		}
-		controls.RunClients.ServeHTTP(writer, request)
-		return true
-	}
-	if path == "/fern/status" || path == "/fern/metrics" {
-		handler := controls.Status
-		if path == "/fern/metrics" {
-			handler = controls.Metrics
-		}
-		if handler == nil {
-			http.NotFound(writer, request)
-			return true
-		}
-		handler.ServeHTTP(writer, request)
-		return true
-	}
-	if path == "/fern/api/v1/devices" {
-		if store == nil {
-			writeUnavailable(writer, "control store")
-			return true
-		}
-		if request.Method != http.MethodGet {
-			methodNotAllowed(writer, "GET")
-			return true
-		}
-		devices, err := store.Devices(time.Now())
-		writeJSON(writer, devices, err)
-		return true
-	}
-	if strings.HasPrefix(path, "/fern/api/v1/devices/") {
-		if store == nil {
-			writeUnavailable(writer, "control store")
-			return true
-		}
-		if request.Method != http.MethodDelete {
-			methodNotAllowed(writer, "DELETE")
-			return true
-		}
-		id := strings.TrimPrefix(path, "/fern/api/v1/devices/")
-		if id == "" || strings.Contains(id, "/") {
-			http.NotFound(writer, request)
-			return true
-		}
-		if err := revokeDevice(store, id, store.CancelDeviceRequests); err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				http.NotFound(writer, request)
-			} else {
-				writeUnavailable(writer, "control state")
-			}
-			return true
-		}
-		writer.WriteHeader(http.StatusNoContent)
-		return true
-	}
-	if strings.HasPrefix(path, "/fern/devices/") && strings.HasSuffix(path, "/revoke") && request.Method == http.MethodPost {
-		if store == nil {
-			writeUnavailable(writer, "control store")
-			return true
-		}
-		id := strings.TrimSuffix(strings.TrimPrefix(path, "/fern/devices/"), "/revoke")
-		if id == "" || strings.Contains(id, "/") {
-			http.NotFound(writer, request)
-			return true
-		}
-		if err := revokeDevice(store, id, store.CancelDeviceRequests); err != nil && !errors.Is(err, os.ErrNotExist) {
-			writeUnavailable(writer, "control state")
-			return true
-		}
-		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_ = deviceRevokedTemplate.Execute(writer, nil)
-		return true
-	}
-	return false
+type deviceControls struct{ store *control.Store }
+
+func (devices deviceControls) list(writer http.ResponseWriter, _ *http.Request) {
+	list, err := devices.store.Devices(time.Now())
+	writeJSON(writer, list, err)
 }
 
-func revokeDevice(store *control.Store, id string, onRevoked func(string)) error {
-	if err := store.RevokeDevice(id); err != nil {
+func (devices deviceControls) revoke(writer http.ResponseWriter, request *http.Request) {
+	if err := devices.revokeID(request.PathValue("id")); errors.Is(err, os.ErrNotExist) {
+		http.NotFound(writer, request)
+		return
+	} else if err != nil {
+		writeUnavailable(writer, "control state")
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+// revokeFromPage is the control page's form post; revoking an already absent
+// device still renders the confirmation.
+func (devices deviceControls) revokeFromPage(writer http.ResponseWriter, request *http.Request) {
+	if err := devices.revokeID(request.PathValue("id")); err != nil && !errors.Is(err, os.ErrNotExist) {
+		writeUnavailable(writer, "control state")
+		return
+	}
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	_ = deviceRevokedTemplate.Execute(writer, nil)
+}
+
+// revokeID persists the revocation before cancelling the device's in-flight
+// requests.
+func (devices deviceControls) revokeID(id string) error {
+	if err := devices.store.RevokeDevice(id); err != nil {
 		return err
 	}
-	onRevoked(id)
+	devices.store.CancelDeviceRequests(id)
 	return nil
 }
 
@@ -165,9 +92,4 @@ func sameOrigin(request *http.Request) bool {
 	}
 	trusted, ok := request.Context().Value(originKey{}).(trustedOrigin)
 	return ok && origin == trusted.raw
-}
-
-func methodNotAllowed(writer http.ResponseWriter, allow string) {
-	writer.Header().Set("Allow", allow)
-	http.Error(writer, "method not allowed", http.StatusMethodNotAllowed)
 }

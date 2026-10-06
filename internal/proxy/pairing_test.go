@@ -10,7 +10,7 @@ import (
 	"github.com/nebler/fern/internal/control"
 )
 
-func TestServePairedRejectsDeviceRevokedBeforeDispatch(t *testing.T) {
+func TestDeviceRevokedBeforeAdmissionIsUnauthenticated(t *testing.T) {
 	store, err := control.Open(filepath.Join(t.TempDir(), "control"), "workspace")
 	if err != nil {
 		t.Fatal(err)
@@ -25,12 +25,9 @@ func TestServePairedRejectsDeviceRevokedBeforeDispatch(t *testing.T) {
 	if err := store.RevokeDevice(device.ID); err != nil {
 		t.Fatal(err)
 	}
-	state := &pairingState{store: store}
-	called := false
-	next := http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true })
 	response := httptest.NewRecorder()
-	state.servePaired(response, httptest.NewRequest(http.MethodGet, "/fern/", nil), next, device, "device-token")
-	if called || response.Code != http.StatusUnauthorized {
-		t.Fatalf("called=%v status=%d, want 401 without dispatch", called, response.Code)
+	_, _, admitted := newPairingState(store).admit(response, httptest.NewRequest(http.MethodGet, "/fern/", nil), device, "device-token")
+	if admitted || response.Code != http.StatusUnauthorized {
+		t.Fatalf("admitted=%v status=%d, want 401 without admission", admitted, response.Code)
 	}
 }

@@ -4,6 +4,9 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"net/http"
+
+	"github.com/nebler/fern/internal/control"
+	"github.com/nebler/fern/internal/task"
 )
 
 // ControlAuth carries the operator-facing Fern control password shared by the
@@ -14,34 +17,52 @@ type ControlAuth struct {
 	Password string
 }
 
-type basicAuthenticator struct {
-	username [sha256.Size]byte
-	password [sha256.Size]byte
-	realm    string
-	enabled  bool
+// operatorAuth is the loopback operator realm: explicit Basic credentials for
+// user "fern" rather than ambient browser cookies, so device CSRF tokens do not
+// apply. Its audit credential identifier is the stable random value persisted
+// by the control store — never anything derived from the control password — so
+// no offline brute-force oracle of that secret reaches durable snapshots.
+type operatorAuth struct {
+	username, password [sha256.Size]byte
+	enabled            bool
+	credentialID       string
 }
 
-func newBasicAuthenticator(username, password, realm string) basicAuthenticator {
-	return basicAuthenticator{
-		username: sha256.Sum256([]byte(username)),
-		password: sha256.Sum256([]byte(password)),
-		realm:    realm,
-		enabled:  password != "",
+func newOperatorAuth(store *control.Store, auth ControlAuth) (*operatorAuth, error) {
+	credentialID, err := store.EnsureOperatorCredentialID()
+	if err != nil {
+		return nil, err
 	}
+	return &operatorAuth{username: sha256.Sum256([]byte("fern")), password: sha256.Sum256([]byte(auth.Password)),
+		enabled: auth.Password != "", credentialID: credentialID}, nil
 }
 
-func (auth basicAuthenticator) valid(request *http.Request) bool {
-	if !auth.enabled {
-		return false
-	}
+func (auth *operatorAuth) authenticate(writer http.ResponseWriter, request *http.Request) (realm, *http.Request, func(), bool) {
 	username, password, ok := request.BasicAuth()
-	gotUsername := sha256.Sum256([]byte(username))
-	gotPassword := sha256.Sum256([]byte(password))
-	return ok && subtle.ConstantTimeCompare(gotUsername[:], auth.username[:]) == 1 &&
-		subtle.ConstantTimeCompare(gotPassword[:], auth.password[:]) == 1
+	gotUsername, gotPassword := sha256.Sum256([]byte(username)), sha256.Sum256([]byte(password))
+	if !auth.enabled || !ok || subtle.ConstantTimeCompare(gotUsername[:], auth.username[:]) != 1 ||
+		subtle.ConstantTimeCompare(gotPassword[:], auth.password[:]) != 1 {
+		writer.Header().Set("WWW-Authenticate", `Basic realm="fern-control"`)
+		http.Error(writer, "unauthorized", http.StatusUnauthorized)
+		return 0, nil, nil, false
+	}
+	requestID, err := randomCredential()
+	if err != nil {
+		http.Error(writer, "operator identity unavailable", http.StatusInternalServerError)
+		return 0, nil, nil, false
+	}
+	actor := task.ActorSnapshot{
+		Type: task.ActorOperator, ID: "local-operator", DisplayName: "Local operator",
+		CredentialID: auth.credentialID, Authentication: "basic", RequestID: requestID,
+	}
+	request = request.WithContext(task.WithActor(request.Context(), actor))
+	stripCredentials(request)
+	return operator, request, noRelease, true
 }
 
-func (auth basicAuthenticator) reject(writer http.ResponseWriter) {
-	writer.Header().Set("WWW-Authenticate", `Basic realm="`+auth.realm+`"`)
-	http.Error(writer, "unauthorized", http.StatusUnauthorized)
+// stripCredentials removes every client credential before dispatch so inner
+// handlers can only trust the actor installed by the realm.
+func stripCredentials(request *http.Request) {
+	request.Header.Del("Authorization")
+	request.Header.Del("Cookie")
 }
