@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -585,5 +586,66 @@ func TestRunOnceStopCleanupFailureRecoveryPastDeadline(t *testing.T) {
 	}
 	if err = f.c.RunOnce(context.Background()); !errors.Is(err, ErrNoWork) {
 		t.Fatal(err)
+	}
+}
+
+type blockingTransport struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+// RoundTrip ignores request cancellation, like a wedged upstream connection.
+func (b blockingTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	close(b.entered)
+	<-b.release
+	return nil, errors.New("released")
+}
+
+func TestCleanupRequiredBoundsRouteDrain(t *testing.T) {
+	f := newScanFixture(t)
+	f.admit(t)
+	run := f.run(t)
+	started := "2026-08-31T12:00:00.123456789Z"
+	parsed, err := time.Parse(time.RFC3339Nano, started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run.ObservedContainerID, run.ObservedContainerStartedAt, run.RuntimeEpoch = strings.Repeat("a", 64), started, parsed.UnixNano()
+	identity, err := f.c.validatedRouteIdentity(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transport := blockingTransport{entered: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(func() { close(transport.release) })
+	target, err := backgroundroute.NewTarget("http://127.0.0.1:9", transport)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.c.config.Route.Activate(identity, target); err != nil {
+		t.Fatal(err)
+	}
+	attachment, active, err := f.c.config.Route.IssueAttachment(run)
+	if err != nil || !active {
+		t.Fatalf("attachment active=%t error=%v", active, err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "https://fern.example/api/health", nil)
+	request.SetBasicAuth(backgroundroute.AttachmentUsername, attachment.Password)
+	go f.c.config.Route.ServeHTTP(httptest.NewRecorder(), request)
+	<-transport.entered
+
+	f.now = time.Now().UTC()
+	expires := f.now.Add(200 * time.Millisecond)
+	run.ClaimExpiresAt = &expires
+	done := make(chan error, 1)
+	go func() {
+		done <- f.c.cleanupRequired(context.Background(), taskstore.BackgroundRunWork{Run: run}, "test cleanup")
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("cleanupRequired error=%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("route removal was not bounded by the effect context")
 	}
 }

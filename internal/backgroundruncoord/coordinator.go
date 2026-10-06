@@ -975,7 +975,15 @@ func (c *Coordinator) externalFailure(ctx context.Context, work taskstore.Backgr
 
 func (c *Coordinator) cleanupRequired(ctx context.Context, work taskstore.BackgroundRunWork, reason string) error {
 	if identity, identityErr := c.validatedRouteIdentity(work.Run); identityErr == nil && c.config.Route.Active(identity) {
-		if _, removeErr := c.config.Route.Remove(ctx, identity); removeErr != nil {
+		// Remove waits for in-flight proxied requests to drain; bound it like
+		// every other effect so a stuck request cannot hold the scan.
+		removal, cancel, _, err := c.effectContext(ctx, work, false)
+		if err != nil {
+			return err
+		}
+		_, removeErr := c.config.Route.Remove(removal, identity)
+		cancel()
+		if removeErr != nil {
 			return removeErr
 		}
 	}
