@@ -28,7 +28,7 @@ than asking HTTP handlers or external-effect providers to coordinate SQL.
 
 ```mermaid
 graph LR
-  A["runcommand and API readers"] --> B["taskstore"]
+  A["runapi commands and API readers"] --> B["taskstore"]
   C["backgroundruncoord"] --> B
   D["taskenvdocker: DTO import only"] -.-> B
   R["taskresultsource: retained metadata reads"] --> B
@@ -164,7 +164,7 @@ success. The composition root must stop users of the store before `Close`.
 `GetBackgroundRunOwners` is the background parent path. Bundle proof recording
 has one entrypoint, `RecordBackgroundRunBundleVerified`, whose comment makes
 clear that it records supplied evidence rather than reading/verifying bytes.
-Seal admission has one entrypoint, `SealBackgroundRun`, used by `runcommand`.
+Seal admission has one entrypoint, `SealBackgroundRun`, used by `runapi`.
 Snapshot selection, materialization, and export recovery use the coordinator's
 `SelectBackgroundRunSnapshot`, `RecordArtifactMaterializationReady`, and
 `MarkBackgroundRunExportRecoveryRequired` APIs. Artifact GC uses

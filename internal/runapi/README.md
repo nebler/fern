@@ -4,8 +4,14 @@ See the [Go package map](../../docs/go-packages.md) and [maintenance review](../
 
 `runapi` is the plugin-authenticated Background Run HTTP boundary at
 `/fern/api/runs`. It owns routing, scope checks, strict wire DTOs, response/error
-projection, and the configured-checkout Git base verifier. Committed application
-commands live in `runcommand`; durable SQL authority lives in `taskstore`.
+projection, the committed create/stop/seal commands, and the configured-checkout
+Git base verifier. Durable SQL authority lives in `taskstore`.
+
+The package is split by file: `runapi.go` is the HTTP boundary, `service.go` holds
+the transport-independent commands (intent validation, private request hashing,
+idempotent replay, admission, post-commit wake), and `gitverifier.go` holds
+`GitBaseVerifier`. The HTTP layer converts wire DTOs into a private
+`createIntent` so transport changes cannot silently change idempotency identity.
 
 ## Why this package exists
 
@@ -28,7 +34,7 @@ approval of separate agent Git pushes/PRs.
 graph LR
   A["cmd/fern composition and proxy ingress"] --> B["runapi.Handler"]
   B --> C["pluginauth context authorization"]
-  B --> D["runcommand.Service"]
+  B --> D["service (create/stop/seal)"]
   B --> E["Store read interface"]
   B --> F["RetentionVerifier"]
   D --> G["GitBaseVerifier"]
@@ -37,16 +43,17 @@ graph LR
 ```
 
 `cmd/fern` is the direct production importer and wires the handler into ingress.
-Direct internal imports are `strictjson`, `pluginauth`, `run`, `runcommand`,
-`task`, and `taskstore`. Other imports are standard library. Git is an external
+Direct internal imports are `gitref`, `strictjson`, `pluginauth`, `run`, `task`,
+and `taskstore`. Other imports are standard library. Git is an external
 executable dependency of the optional concrete verifier, not a Go library.
 
 ## Entrypoints and routing
 
 `New(Config)` checks dependencies, workspace/repository identity, canonical
-GitHub HTTPS remote, timeout/model selection, environment digest, seal policy,
-and paired qualified profile/image availability. It constructs a command service
-while retaining narrow read and retention-verification interfaces.
+GitHub HTTPS remote (`gitref.ValidateGitHubRemote`), timeout/model selection,
+environment digest, seal policy, and paired qualified profile/image
+availability. The command service shares the same validated `Config`; there is
+no second configuration to keep in sync.
 
 | Method and suffix | Scope | Operation |
 | --- | --- | --- |
@@ -65,13 +72,17 @@ runs. Responses use no-store and nosniff headers.
 Create requires exactly `application/json`, one valid `Idempotency-Key`, no query,
 and at most 32 KiB. `strictjson.Check` checks JSON structure before decoding with
 unknown fields disallowed. Stop/seal require a bounded empty JSON object, not an
-absent body. Instruction/branch semantic validation belongs to `runcommand`.
+absent body. Instruction/branch semantic validation belongs to the command
+service.
 
 ## Typed projection and result integrity
 
 Private HTTP DTOs have explicit JSON fields. They are converted into application
-intent rather than reused as a hash schema. `runcommand` preserves the v1 typed
-payload encoding, field order, escaping, and null branch for SHA-256 identity.
+intent rather than reused as a hash schema. The command service preserves the
+v1 typed payload encoding, field order, escaping, and null branch for SHA-256
+identity: the digest is SHA-256 of command kind, newline, then those marshaled
+bytes, and stop/seal hash a private `run_id` struct. Do not replace this
+encoding with raw JSON hashing, map serialization, or another canonicalizer.
 The store fences actual acceptance transactionally; HTTP replay sets
 `Idempotency-Replayed: true` and returns 202 without duplicating work.
 
@@ -86,6 +97,28 @@ projection. Export recovery is reported as 503; ordinary not-ready is 409.
 The retention verifier is called on each ready-result read. A verifier error
 produces 200 with both retention booleans false, not a claim that the retained
 bytes were verified. Cleanup may still be incomplete while the result is ready.
+
+## Commands
+
+`Create` checks the exact repository/profile, the instruction (valid UTF-8, at
+most `taskstore.MaxPromptBytes` bytes and `taskstore.MaxPromptRunes` runes, not
+blank, no control characters other than newline and tab), the display branch,
+and the exact lowercase base OID. It checks replay before current profile
+availability, base verification, ID generation, or the clock, so a valid
+previous acceptance can replay while execution is unavailable. First use
+verifies the base, allocates all admission IDs, derives generation-1 resource
+names, and calls `AdmitBackgroundRun`.
+
+`Stop` hashes the run ID and looks up a prior receipt. Replay returns the
+original committed acceptance state, not today's run state, after checking
+target and stop-receipt linkage. `Seal` reads the owned run and parent
+revisions, allocates seal/export/result IDs, and relies on store admission for
+replay classification; expected revisions fence stale reads.
+
+Claims include workspace, command kind, key, hash, and actor. Authority
+mismatch takes precedence over hash conflict and is hidden as not-found. `Wake`
+is synchronous, optional, and invoked only after a successful non-replayed
+commit.
 
 ## Representative internal callgraph
 

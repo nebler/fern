@@ -1,4 +1,4 @@
-package runcommand
+package runapi
 
 import (
 	"context"
@@ -13,14 +13,12 @@ import (
 	"github.com/nebler/fern/internal/taskstore"
 )
 
-const workspace = task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001")
-
-type verifier struct {
+type stubVerifier struct {
 	calls int
 	err   error
 }
 
-func (v *verifier) Verify(context.Context, task.GitOID) error { v.calls++; return v.err }
+func (v *stubVerifier) Verify(context.Context, task.GitOID) error { v.calls++; return v.err }
 
 type commandStore struct {
 	Store
@@ -78,11 +76,11 @@ func (s *commandStore) SealBackgroundRun(_ context.Context, p taskstore.SealBack
 	return taskstore.BackgroundRunSealAdmission{Run: s.current, Replayed: s.race}, nil
 }
 
-func setup(t *testing.T) (*Service, *commandStore, *verifier, task.ActorSnapshot, CreateInput, *int) {
+func setupService(t *testing.T) (*service, *commandStore, *stubVerifier, task.ActorSnapshot, createIntent, *int) {
 	t.Helper()
-	store, base := &commandStore{}, &verifier{}
+	store, base := &commandStore{}, &stubVerifier{}
 	wakes := new(int)
-	s, err := New(Config{WorkspaceID: workspace, RepositoryRemote: "https://github.com/owner/repository", Store: store, Generator: task.NewSecureGenerator(), BaseVerifier: base,
+	s := &service{config: Config{WorkspaceID: testWorkspace, RepositoryRemote: "https://github.com/owner/repository", Store: store, Generator: task.NewSecureGenerator(), BaseVerifier: base,
 		Now: func() time.Time { return time.Unix(1750000000, 123456789) }, AttemptTimeout: time.Hour,
 		AvailableProfile: taskstore.BackgroundRunSourceProfile, SealPolicyVersion: "seal.v1",
 		Wake: func() {
@@ -91,17 +89,14 @@ func setup(t *testing.T) (*Service, *commandStore, *verifier, task.ActorSnapshot
 			}
 			*wakes++
 		},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
+	}}
 	actor := task.ActorSnapshot{Type: task.ActorOpenCode, ID: "pc_owner", DisplayName: "Plugin", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "request"}
-	input := CreateInput{Repository: "https://github.com/owner/repository", BaseOID: "0123456789abcdef0123456789abcdef01234567", Instruction: "Work\n\t<exact bytes> ", Profile: taskstore.BackgroundRunSourceProfile}
+	input := createIntent{Repository: "https://github.com/owner/repository", BaseOID: "0123456789abcdef0123456789abcdef01234567", Instruction: "Work\n\t<exact bytes> ", Profile: taskstore.BackgroundRunSourceProfile}
 	return s, store, base, actor, input, wakes
 }
 
 func TestCreateCommitReplayAndIdentity(t *testing.T) {
-	s, store, base, actor, input, wakes := setup(t)
+	s, store, base, actor, input, wakes := setupService(t)
 	ctx := context.Background()
 	accepted, err := s.Create(ctx, actor, "create", input)
 	if err != nil || !accepted.Committed || accepted.Replayed || *wakes != 1 {
@@ -125,7 +120,7 @@ func TestCreateCommitReplayAndIdentity(t *testing.T) {
 		t.Fatalf("replay=%+v err=%v", replayed, err)
 	}
 	input.Instruction += "changed"
-	if _, err := s.Create(ctx, actor, "create", input); !errors.Is(err, ErrReplayConflict) {
+	if _, err := s.Create(ctx, actor, "create", input); !errors.Is(err, errReplayConflict) {
 		t.Fatalf("changed hash=%v", err)
 	}
 	actor.ID, actor.CredentialID = "pc_other", "pc_other"
@@ -140,21 +135,21 @@ func TestCreateCommitReplayAndIdentity(t *testing.T) {
 func TestCreateEnforcesCommandPolicyWithoutHTTP(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
-		mutate func(*CreateInput, *task.ActorSnapshot)
+		mutate func(*createIntent, *task.ActorSnapshot)
 		want   error
 	}{
-		{"foreign repository", func(input *CreateInput, _ *task.ActorSnapshot) {
+		{"foreign repository", func(input *createIntent, _ *task.ActorSnapshot) {
 			input.Repository = "https://github.com/other/repository"
-		}, ErrInvalidCreate},
-		{"unsupported profile", func(input *CreateInput, _ *task.ActorSnapshot) { input.Profile = "unknown" }, ErrInvalidCreate},
-		{"empty instruction", func(input *CreateInput, _ *task.ActorSnapshot) { input.Instruction = " \t\n" }, ErrInvalidCreate},
-		{"control instruction", func(input *CreateInput, _ *task.ActorSnapshot) { input.Instruction = "work\x00" }, ErrInvalidCreate},
-		{"empty branch", func(input *CreateInput, _ *task.ActorSnapshot) { branch := ""; input.Branch = &branch }, ErrInvalidCreate},
-		{"symbolic base", func(input *CreateInput, _ *task.ActorSnapshot) { input.BaseOID = "HEAD" }, ErrInvalidBase},
-		{"non-plugin actor", func(_ *CreateInput, actor *task.ActorSnapshot) { actor.Type = task.ActorOperator }, task.ErrInvalidActor},
+		}, errInvalidCreate},
+		{"unsupported profile", func(input *createIntent, _ *task.ActorSnapshot) { input.Profile = "unknown" }, errInvalidCreate},
+		{"empty instruction", func(input *createIntent, _ *task.ActorSnapshot) { input.Instruction = " \t\n" }, errInvalidCreate},
+		{"control instruction", func(input *createIntent, _ *task.ActorSnapshot) { input.Instruction = "work\x00" }, errInvalidCreate},
+		{"empty branch", func(input *createIntent, _ *task.ActorSnapshot) { branch := ""; input.Branch = &branch }, errInvalidCreate},
+		{"symbolic base", func(input *createIntent, _ *task.ActorSnapshot) { input.BaseOID = "HEAD" }, errInvalidBase},
+		{"non-plugin actor", func(_ *createIntent, actor *task.ActorSnapshot) { actor.Type = task.ActorOperator }, task.ErrInvalidActor},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			s, store, base, actor, input, wakes := setup(t)
+			s, store, base, actor, input, wakes := setupService(t)
 			tt.mutate(&input, &actor)
 			if _, err := s.Create(context.Background(), actor, "create", input); !errors.Is(err, tt.want) {
 				t.Fatalf("Create error = %v, want %v", err, tt.want)
@@ -170,7 +165,7 @@ func TestCommitRaceReplayAndFailureDoNotWake(t *testing.T) {
 	for _, operation := range []string{"create", "stop", "seal"} {
 		for _, mode := range []string{"fresh", "race", "failure"} {
 			t.Run(operation+"/"+mode, func(t *testing.T) {
-				s, store, _, actor, input, wakes := setup(t)
+				s, store, _, actor, input, wakes := setupService(t)
 				ids, _ := s.config.Generator.GenerateAdmissionIDs()
 				store.current = taskstore.BackgroundRun{TaskID: ids.TaskID, AttemptID: ids.AttemptID, Generation: 1, Revision: 5}
 				store.race = mode == "race"
@@ -182,7 +177,7 @@ func TestCommitRaceReplayAndFailureDoNotWake(t *testing.T) {
 				case "create":
 					_, err = s.Create(context.Background(), actor, "key", input)
 				case "stop":
-					var accepted StopAcceptance
+					var accepted stopAcceptance
 					accepted, err = s.Stop(context.Background(), actor, "key", ids.TaskID)
 					if mode == "race" && (accepted.State != run.Canceling || !accepted.Replayed) {
 						t.Fatalf("stop must project receipt: %+v", accepted)
@@ -209,7 +204,7 @@ func TestCommitRaceReplayAndFailureDoNotWake(t *testing.T) {
 }
 
 func TestStopReplayValidatesOriginalReceipt(t *testing.T) {
-	s, store, _, actor, _, wakes := setup(t)
+	s, store, _, actor, _, wakes := setupService(t)
 	ids, _ := s.config.Generator.GenerateAdmissionIDs()
 	store.race = true
 	if _, err := s.Stop(context.Background(), actor, "stop", ids.TaskID); err != nil {
@@ -235,7 +230,7 @@ func TestStopReplayValidatesOriginalReceipt(t *testing.T) {
 }
 
 func TestCommandBoundaryRejectsInvalidIdentities(t *testing.T) {
-	s, _, _, actor, input, wakes := setup(t)
+	s, _, _, actor, input, wakes := setupService(t)
 	if _, err := s.Create(context.Background(), task.ActorSnapshot{}, "key", input); err == nil {
 		t.Fatal("invalid actor accepted")
 	}

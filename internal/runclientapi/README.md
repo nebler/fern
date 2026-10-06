@@ -82,7 +82,7 @@ prompt, host paths, evidence, or unrelated runtime authority.
 
 Typed DTOs prevent accidental whole-record exposure, but string-backed IDs still
 need parsing at ingress. This read-only boundary has no command hash or
-idempotency protocol; those guarantees belong to `runcommand` and `taskstore`.
+idempotency protocol; those guarantees belong to `runapi` and `taskstore`.
 
 ## Representative internal callgraph
 

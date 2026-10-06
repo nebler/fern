@@ -10,9 +10,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -21,7 +18,6 @@ import (
 	"github.com/nebler/fern/internal/gitref"
 	"github.com/nebler/fern/internal/pluginauth"
 	runidentity "github.com/nebler/fern/internal/run"
-	"github.com/nebler/fern/internal/runcommand"
 	"github.com/nebler/fern/internal/strictjson"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
@@ -30,24 +26,24 @@ import (
 const (
 	PathPrefix             = "/fern/api/runs"
 	PluginOpenCodeProfile  = taskstore.BackgroundRunSourceProfile
-	APIContractVersion     = runcommand.APIContractVersion
 	maxCreateBodyBytes     = 32 << 10
 	maxEmptyBodyBytes      = 16
 	backgroundRunListLimit = 100
 )
 
 type Store interface {
-	runcommand.Store
+	AdmitBackgroundRun(context.Context, taskstore.AdmitBackgroundRunParams) (taskstore.Admission, error)
+	FindReceiptByIdempotency(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error)
+	GetBackgroundRun(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRun, error)
+	StopBackgroundRun(context.Context, taskstore.StopBackgroundRunParams) (taskstore.BackgroundRunStop, error)
+	SealBackgroundRun(context.Context, taskstore.SealBackgroundRunParams) (taskstore.BackgroundRunSealAdmission, error)
+	GetBackgroundRunOwners(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.Task, taskstore.Attempt, error)
 	ListBackgroundRuns(context.Context, task.WorkspaceID, task.ActorSnapshot, int) ([]taskstore.BackgroundRun, error)
 	GetBackgroundRunExport(context.Context, task.ArtifactExportID) (taskstore.BackgroundRunExport, error)
 	GetBackgroundRunResult(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error)
 }
 
 var _ Store = (*taskstore.Store)(nil)
-
-// BaseVerifier proves an exact object is a commit reachable from the
-// configured checkout's HEAD or origin tracking refs. It performs no mutation.
-type BaseVerifier = runcommand.BaseVerifier
 
 type ActorResolver func(context.Context) (task.ActorSnapshot, error)
 
@@ -78,7 +74,7 @@ type Config struct {
 
 type Handler struct {
 	config   Config
-	commands *runcommand.Service
+	commands *service
 }
 
 func New(config Config) (*Handler, error) {
@@ -100,22 +96,7 @@ func New(config Config) (*Handler, error) {
 		(config.AvailableProfile != "" && config.AvailableProfile != PluginOpenCodeProfile) {
 		return nil, errors.New("qualified background image and profile must be configured together")
 	}
-	commands, err := newCommands(config)
-	if err != nil {
-		return nil, err
-	}
-	return &Handler{config: config, commands: commands}, nil
-}
-
-func newCommands(config Config) (*runcommand.Service, error) {
-	return runcommand.New(runcommand.Config{
-		WorkspaceID: config.WorkspaceID, RepositoryID: config.RepositoryID, RepositoryRemote: config.RepositoryRemote,
-		BackgroundImageIdentity: config.BackgroundImageIdentity, BackgroundEnvironmentSHA256: config.BackgroundEnvironmentSHA256,
-		AvailableProfile: config.AvailableProfile, Store: config.Store, Generator: config.Generator,
-		BaseVerifier: config.BaseVerifier, Now: config.Now, AttemptTimeout: config.AttemptTimeout,
-		Agent: config.Agent, ModelProvider: config.ModelProvider, Model: config.Model,
-		Wake: config.Wake, SealPolicyVersion: config.SealPolicyVersion,
-	})
+	return &Handler{config: config, commands: &service{config: config}}, nil
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -354,7 +335,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.Acto
 	if !decodeStrict(w, r, maxCreateBodyBytes, &input) {
 		return
 	}
-	admission, err := h.commands.Create(r.Context(), actor, key, runcommand.CreateInput{
+	admission, err := h.commands.Create(r.Context(), actor, key, createIntent{
 		Repository: input.Repository, BaseOID: input.BaseOID, Branch: input.Branch,
 		Instruction: input.Instruction, Profile: input.Profile,
 	})
@@ -504,15 +485,15 @@ func methodNotAllowed(w http.ResponseWriter, method string) {
 }
 func writeStoreError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, runcommand.ErrInvalidCreate):
+	case errors.Is(err, errInvalidCreate):
 		WriteError(w, http.StatusBadRequest, "invalid_run", "Repository, base, branch, instruction, or profile is not valid for this Fern workspace.")
-	case errors.Is(err, runcommand.ErrInvalidBase):
+	case errors.Is(err, errInvalidBase):
 		WriteError(w, http.StatusBadRequest, "invalid_base", "base_oid must be an exact lowercase SHA-1 commit identity.")
-	case errors.Is(err, runcommand.ErrProfileUnavailable):
+	case errors.Is(err, errProfileUnavailable):
 		WriteError(w, http.StatusServiceUnavailable, "profile_unavailable", fmt.Sprintf("Profile %s requires a configured image qualified for exact source commit 39fb919a054190498f6d5b7985bde231f93ad7a6.", PluginOpenCodeProfile))
-	case errors.Is(err, runcommand.ErrBaseUnavailable):
+	case errors.Is(err, errBaseUnavailable):
 		WriteError(w, http.StatusUnprocessableEntity, "base_unavailable", "base_oid is not an exact commit reachable from an allowed configured-repository ref.")
-	case errors.Is(err, runcommand.ErrReplayConflict):
+	case errors.Is(err, errReplayConflict):
 		WriteError(w, http.StatusConflict, "idempotency_conflict", "Idempotency-Key was already used for another request.")
 	case errors.Is(err, taskstore.ErrNotFound):
 		WriteError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
@@ -539,84 +520,4 @@ func WriteJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(value)
-}
-
-type GitBaseVerifier struct {
-	repository, git string
-	timeout         time.Duration
-}
-
-func NewGitBaseVerifier(repository, git string, timeout time.Duration) (*GitBaseVerifier, error) {
-	if !filepath.IsAbs(repository) || filepath.Clean(repository) != repository || !filepath.IsAbs(git) || filepath.Clean(git) != git || timeout <= 0 || timeout > time.Minute {
-		return nil, errors.New("valid configured repository verifier is required")
-	}
-	repositoryInfo, repositoryErr := os.Stat(repository)
-	gitInfo, gitErr := os.Stat(git)
-	if repositoryErr != nil || !repositoryInfo.IsDir() || gitErr != nil || gitInfo.IsDir() || gitInfo.Mode()&0o111 == 0 {
-		return nil, errors.New("configured repository and Git executable must exist")
-	}
-	return &GitBaseVerifier{repository: repository, git: git, timeout: timeout}, nil
-}
-
-func (v *GitBaseVerifier) Verify(parent context.Context, oid task.GitOID) error {
-	ctx, cancel := context.WithTimeout(parent, v.timeout)
-	defer cancel()
-	objectType, err := v.command(ctx, "cat-file", "-t", string(oid))
-	if err != nil || !bytes.Equal(objectType, []byte("commit\n")) {
-		if err != nil {
-			return err
-		}
-		return errors.New("base object is not exactly a commit")
-	}
-	output, err := v.output(ctx, "for-each-ref", "--format=%(refname)", "refs/remotes/origin/")
-	if err != nil {
-		return err
-	}
-	refs := []string{"HEAD"}
-	for _, ref := range strings.Split(strings.TrimSpace(output), "\n") {
-		if strings.HasPrefix(ref, "refs/remotes/origin/") && !strings.ContainsAny(ref, "\x00\r") {
-			refs = append(refs, ref)
-		}
-	}
-	for _, ref := range refs {
-		if v.run(ctx, "merge-base", "--is-ancestor", string(oid), ref) == nil {
-			return nil
-		}
-	}
-	return errors.New("base commit is not reachable from an allowed ref")
-}
-func (v *GitBaseVerifier) run(ctx context.Context, args ...string) error {
-	_, err := v.command(ctx, args...)
-	return err
-}
-func (v *GitBaseVerifier) output(ctx context.Context, args ...string) (string, error) {
-	value, err := v.command(ctx, args...)
-	return string(value), err
-}
-func (v *GitBaseVerifier) command(ctx context.Context, args ...string) ([]byte, error) {
-	base := []string{"--no-pager", "--no-replace-objects", "-C", v.repository}
-	command := exec.CommandContext(ctx, v.git, append(base, args...)...)
-	command.Env = []string{"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_NO_LAZY_FETCH=1", "GIT_OPTIONAL_LOCKS=0", "GIT_TERMINAL_PROMPT=0", "HOME=/", "LANG=C", "LC_ALL=C", "PATH=/usr/bin:/bin"}
-	var output bytes.Buffer
-	command.Stdout = &limitedWriter{writer: &output, remaining: 64 << 10}
-	command.Stderr = &limitedWriter{remaining: 64 << 10}
-	err := command.Run()
-	return output.Bytes(), err
-}
-
-type limitedWriter struct {
-	writer    io.Writer
-	remaining int
-}
-
-func (w *limitedWriter) Write(value []byte) (int, error) {
-	original := len(value)
-	if len(value) > w.remaining {
-		value = value[:w.remaining]
-	}
-	w.remaining -= len(value)
-	if w.writer != nil {
-		_, _ = w.writer.Write(value)
-	}
-	return original, nil
 }

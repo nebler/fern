@@ -1,6 +1,9 @@
-// Package runcommand owns committed background-run application commands.
-// Authentication, HTTP parsing, and response encoding belong to its caller.
-package runcommand
+package runapi
+
+// This file owns the committed background-run commands (create, stop, seal):
+// intent validation, private request-hash encoding, idempotent replay, durable
+// admission, and post-commit wake. Authentication, HTTP parsing, and response
+// encoding stay in runapi.go.
 
 import (
 	"context"
@@ -20,63 +23,24 @@ import (
 const APIContractVersion = "fern.background-run.v1"
 
 var (
-	ErrProfileUnavailable = errors.New("background profile unavailable")
-	ErrBaseUnavailable    = errors.New("background base unavailable")
-	ErrReplayConflict     = errors.New("idempotency key already used for another request")
-	ErrInvalidCreate      = errors.New("invalid run creation input")
-	ErrInvalidBase        = errors.New("invalid exact base commit")
+	errProfileUnavailable = errors.New("background profile unavailable")
+	errBaseUnavailable    = errors.New("background base unavailable")
+	errReplayConflict     = errors.New("idempotency key already used for another request")
+	errInvalidCreate      = errors.New("invalid run creation input")
+	errInvalidBase        = errors.New("invalid exact base commit")
 )
-
-type Store interface {
-	AdmitBackgroundRun(context.Context, taskstore.AdmitBackgroundRunParams) (taskstore.Admission, error)
-	FindReceiptByIdempotency(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error)
-	GetBackgroundRun(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRun, error)
-	StopBackgroundRun(context.Context, taskstore.StopBackgroundRunParams) (taskstore.BackgroundRunStop, error)
-	SealBackgroundRun(context.Context, taskstore.SealBackgroundRunParams) (taskstore.BackgroundRunSealAdmission, error)
-	GetBackgroundRunOwners(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.Task, taskstore.Attempt, error)
-}
 
 // BaseVerifier proves an exact commit is reachable from an allowed repository ref.
 type BaseVerifier interface {
 	Verify(context.Context, task.GitOID) error
 }
 
-type Config struct {
-	WorkspaceID                 task.WorkspaceID
-	RepositoryID                task.RepositoryID
-	RepositoryRemote            string
-	BackgroundImageIdentity     string
-	BackgroundEnvironmentSHA256 [32]byte
-	AvailableProfile            string
-	Store                       Store
-	Generator                   *task.Generator
-	BaseVerifier                BaseVerifier
-	Now                         func() time.Time
-	AttemptTimeout              time.Duration
-	Agent, ModelProvider, Model string
-	Wake                        func()
-	SealPolicyVersion           string
-}
+// service runs the commands against the handler's validated Config. New
+// performs all configuration validation before a service is constructed.
+type service struct{ config Config }
 
-type Service struct{ config Config }
-
-// New captures command policy. Deployment qualification remains the composition
-// root's responsibility; only dependencies needed to execute are checked here.
-func New(config Config) (*Service, error) {
-	if config.Store == nil || config.Generator == nil || config.BaseVerifier == nil || config.Now == nil {
-		return nil, errors.New("run command dependencies are required")
-	}
-	if _, err := task.ParseWorkspaceID(string(config.WorkspaceID)); err != nil {
-		return nil, err
-	}
-	if config.RepositoryRemote == "" {
-		return nil, errors.New("bound repository remote is required")
-	}
-	return &Service{config: config}, nil
-}
-
-// CreateInput is the caller's intent, not the HTTP or persisted hash schema.
-type CreateInput struct {
+// createIntent is the caller's intent, not the HTTP or persisted hash schema.
+type createIntent struct {
 	Repository  string
 	BaseOID     string
 	Branch      *string
@@ -84,16 +48,16 @@ type CreateInput struct {
 	Profile     string
 }
 
-type CreateAcceptance struct {
+type createAcceptance struct {
 	RunID               task.TaskID
 	Committed, Replayed bool
 }
-type StopAcceptance struct {
+type stopAcceptance struct {
 	RunID    task.TaskID
 	State    run.State
 	Replayed bool
 }
-type SealAcceptance struct {
+type sealAcceptance struct {
 	RunID               task.TaskID
 	State               run.State
 	ResultPhase         string
@@ -106,7 +70,7 @@ func commandHash(kind string, value any) task.RequestHash {
 	return task.RequestHash(sha256.Sum256(append(append([]byte(kind), '\n'), encoded...)))
 }
 
-func (s *Service) claim(actor task.ActorSnapshot, key task.IdempotencyKey, kind string, value any) (task.IdempotencyClaim, error) {
+func (s *service) claim(actor task.ActorSnapshot, key task.IdempotencyKey, kind string, value any) (task.IdempotencyClaim, error) {
 	if err := actor.Validate(); err != nil {
 		return task.IdempotencyClaim{}, err
 	}
@@ -119,7 +83,7 @@ func (s *Service) claim(actor task.ActorSnapshot, key task.IdempotencyKey, kind 
 	return task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: s.config.WorkspaceID, CommandKind: kind}, Key: key, RequestHash: commandHash(kind, value), Actor: actor}, nil
 }
 
-func (s *Service) replay(ctx context.Context, claim task.IdempotencyClaim) (taskstore.Receipt, bool, error) {
+func (s *service) replay(ctx context.Context, claim task.IdempotencyClaim) (taskstore.Receipt, bool, error) {
 	receipt, found, err := s.config.Store.FindReceiptByIdempotency(ctx, s.config.WorkspaceID, claim.Scope.CommandKind, claim.Key)
 	if err != nil || !found {
 		return receipt, found, err
@@ -132,25 +96,25 @@ func (s *Service) replay(ctx context.Context, claim task.IdempotencyClaim) (task
 		return receipt, true, taskstore.ErrNotFound
 	}
 	if disposition != task.IdempotencyReplay {
-		return receipt, true, ErrReplayConflict
+		return receipt, true, errReplayConflict
 	}
 	return receipt, true, nil
 }
 
-func (s *Service) notify(replayed bool) {
+func (s *service) notify(replayed bool) {
 	if !replayed && s.config.Wake != nil {
 		s.config.Wake()
 	}
 }
 
-func (s *Service) Create(ctx context.Context, actor task.ActorSnapshot, key task.IdempotencyKey, input CreateInput) (CreateAcceptance, error) {
-	var zero CreateAcceptance
+func (s *service) Create(ctx context.Context, actor task.ActorSnapshot, key task.IdempotencyKey, input createIntent) (createAcceptance, error) {
+	var zero createAcceptance
 	if input.Repository != s.config.RepositoryRemote || input.Profile != run.SourceProfile || !validInstruction(input.Instruction) || !validBranchDisplay(input.Branch) {
-		return zero, ErrInvalidCreate
+		return zero, errInvalidCreate
 	}
 	base, err := task.ParseGitOID(input.BaseOID)
 	if err != nil {
-		return zero, ErrInvalidBase
+		return zero, errInvalidBase
 	}
 	// Preserve the original v1 bytes (including order, escaping, and null
 	// branch) privately. Domain field names are not an idempotency protocol.
@@ -174,13 +138,13 @@ func (s *Service) Create(ctx context.Context, actor task.ActorSnapshot, key task
 		if err != nil {
 			return zero, err
 		}
-		return CreateAcceptance{current.TaskID, true, true}, nil
+		return createAcceptance{current.TaskID, true, true}, nil
 	}
 	if s.config.AvailableProfile != taskstore.BackgroundRunSourceProfile {
-		return zero, ErrProfileUnavailable
+		return zero, errProfileUnavailable
 	}
 	if err := s.config.BaseVerifier.Verify(ctx, base); err != nil {
-		return zero, ErrBaseUnavailable
+		return zero, errBaseUnavailable
 	}
 	ids, err := s.config.Generator.GenerateAdmissionIDs()
 	if err != nil {
@@ -215,7 +179,7 @@ func (s *Service) Create(ctx context.Context, actor task.ActorSnapshot, key task
 		return zero, err
 	}
 	s.notify(admission.Replayed)
-	return CreateAcceptance{admission.Task.ID, true, admission.Replayed}, nil
+	return createAcceptance{admission.Task.ID, true, admission.Replayed}, nil
 }
 
 func validInstruction(value string) bool {
@@ -245,7 +209,7 @@ func validBranchDisplay(branch *string) bool {
 	return true
 }
 
-func (s *Service) mutationClaim(actor task.ActorSnapshot, key task.IdempotencyKey, kind string, id task.TaskID) (task.IdempotencyClaim, error) {
+func (s *service) mutationClaim(actor task.ActorSnapshot, key task.IdempotencyKey, kind string, id task.TaskID) (task.IdempotencyClaim, error) {
 	if _, err := task.ParseTaskID(string(id)); err != nil {
 		return task.IdempotencyClaim{}, err
 	}
@@ -255,20 +219,20 @@ func (s *Service) mutationClaim(actor task.ActorSnapshot, key task.IdempotencyKe
 }
 
 // stopReplay projects the original committed acceptance, not today's run state.
-func stopReplay(id task.TaskID, current taskstore.BackgroundRun, receipt taskstore.Receipt) (StopAcceptance, error) {
+func stopReplay(id task.TaskID, current taskstore.BackgroundRun, receipt taskstore.Receipt) (stopAcceptance, error) {
 	var committed struct {
 		RunID task.TaskID `json:"run_id"`
 		State run.State   `json:"state"`
 	}
 	if receipt.TargetID != id || current.StopReceiptID != receipt.ID || json.Unmarshal(receipt.ResponseProjection, &committed) != nil || committed.RunID != id ||
 		(committed.State != run.Failed && committed.State != run.Canceling) {
-		return StopAcceptance{}, taskstore.ErrCorruptStore
+		return stopAcceptance{}, taskstore.ErrCorruptStore
 	}
-	return StopAcceptance{id, committed.State, true}, nil
+	return stopAcceptance{id, committed.State, true}, nil
 }
 
-func (s *Service) Stop(ctx context.Context, actor task.ActorSnapshot, key task.IdempotencyKey, id task.TaskID) (StopAcceptance, error) {
-	var zero StopAcceptance
+func (s *service) Stop(ctx context.Context, actor task.ActorSnapshot, key task.IdempotencyKey, id task.TaskID) (stopAcceptance, error) {
+	var zero stopAcceptance
 	claim, err := s.mutationClaim(actor, key, taskstore.StopBackgroundRunCommand, id)
 	if err != nil {
 		return zero, err
@@ -279,7 +243,7 @@ func (s *Service) Stop(ctx context.Context, actor task.ActorSnapshot, key task.I
 	}
 	if found {
 		if receipt.TargetID != id {
-			return zero, ErrReplayConflict
+			return zero, errReplayConflict
 		}
 		current, err := s.config.Store.GetBackgroundRun(ctx, s.config.WorkspaceID, id, actor)
 		if err != nil {
@@ -309,11 +273,11 @@ func (s *Service) Stop(ctx context.Context, actor task.ActorSnapshot, key task.I
 		return stopReplay(id, result.Run, result.Receipt)
 	}
 	s.notify(false)
-	return StopAcceptance{id, run.State(result.Run.State), false}, nil
+	return stopAcceptance{id, run.State(result.Run.State), false}, nil
 }
 
-func (s *Service) Seal(ctx context.Context, actor task.ActorSnapshot, key task.IdempotencyKey, id task.TaskID) (SealAcceptance, error) {
-	var zero SealAcceptance
+func (s *service) Seal(ctx context.Context, actor task.ActorSnapshot, key task.IdempotencyKey, id task.TaskID) (sealAcceptance, error) {
+	var zero sealAcceptance
 	claim, err := s.mutationClaim(actor, key, taskstore.SealBackgroundRunCommand, id)
 	if err != nil {
 		return zero, err
@@ -347,5 +311,5 @@ func (s *Service) Seal(ctx context.Context, actor task.ActorSnapshot, key task.I
 		state, phase = run.ResultReady, "ready"
 	}
 	s.notify(admission.Replayed)
-	return SealAcceptance{admission.Run.TaskID, state, phase, admission.Request.ID, true, admission.Replayed}, nil
+	return sealAcceptance{admission.Run.TaskID, state, phase, admission.Request.ID, true, admission.Replayed}, nil
 }
