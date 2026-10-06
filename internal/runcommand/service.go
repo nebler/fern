@@ -219,7 +219,7 @@ func (s *Service) Create(ctx context.Context, actor task.ActorSnapshot, key task
 }
 
 func validInstruction(value string) bool {
-	if len(value) < 1 || len(value) > 16*1024 || utf8.RuneCountInString(value) > 4000 || !utf8.ValidString(value) || strings.TrimSpace(value) == "" {
+	if len(value) < 1 || len(value) > taskstore.MaxPromptBytes || utf8.RuneCountInString(value) > taskstore.MaxPromptRunes || !utf8.ValidString(value) || strings.TrimSpace(value) == "" {
 		return false
 	}
 	for _, char := range value {

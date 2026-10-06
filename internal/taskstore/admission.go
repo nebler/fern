@@ -18,6 +18,13 @@ import (
 
 const (
 	CreateBackgroundRunCommand = "run.create"
+
+	// MaxPromptBytes and MaxPromptRunes bound a background run instruction.
+	// The run API rejects longer instructions; admission re-checks the same
+	// limits so the store never persists a prompt the API would refuse. The
+	// schema's 64 KiB CHECK is only a storage backstop.
+	MaxPromptBytes = 16 << 10
+	MaxPromptRunes = 4000
 )
 
 // AdmitBackgroundRun atomically claims an idempotency key and creates the
@@ -254,7 +261,8 @@ func validateAdmission(p AdmitBackgroundRunParams) error {
 		!validBoundedText(p.BackgroundRun.EndpointIdentity, 1, 256) || !canonicalBackgroundIdentities(p) {
 		return fmt.Errorf("%w: background run intent", ErrInvalidInput)
 	}
-	if !validBoundedText(p.Title, 1, 200) || !utf8.ValidString(p.Prompt) || len(p.Prompt) < 1 || len(p.Prompt) > 64*1024 {
+	if !validBoundedText(p.Title, 1, 200) || !utf8.ValidString(p.Prompt) || len(p.Prompt) < 1 || len(p.Prompt) > MaxPromptBytes ||
+		utf8.RuneCountInString(p.Prompt) > MaxPromptRunes {
 		return fmt.Errorf("%w: title or prompt", ErrInvalidInput)
 	}
 	if p.RepositoryID == 0 || uint64(p.RepositoryID) > math.MaxInt64 {
