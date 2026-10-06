@@ -16,7 +16,7 @@ type migration struct {
 }
 
 var migrations = []migration{
-	{version: 5, name: "retained_result_task_store", sql: initialSchema},
+	{version: 6, name: "reconciled_run_task_store", sql: initialSchema},
 }
 
 // CurrentSchemaVersion is the schema produced by all migrations in this build.
@@ -359,24 +359,17 @@ CREATE TABLE background_runs (
     opencode_message_id TEXT NOT NULL,
     state TEXT NOT NULL CHECK(state IN ('queued','setting_up','working','needs_you','canceling','uncertain','result_ready','failed','cleanup_required')),
     effect_phase TEXT NOT NULL CHECK(effect_phase IN (
-      'absent','provision_intent','clone_observed','volume_observed','container_observed','health_observed','ready',
-      'session_observed','prompt_intent','prompt_admitted','stop_intent','writer_inactive','route_removed',
+      'absent','provisioning','prompt_pending','admitted','stop_intent','writer_inactive','route_removed',
       'container_removed','volume_removed','clone_removed','cleanup_complete','pre_effect_failed'
     )),
     stop_receipt_id TEXT REFERENCES receipts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     stop_actor_snapshot_id INTEGER REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     stop_requested_at INTEGER,
     creator_actor_snapshot_id INTEGER NOT NULL REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    clone_evidence TEXT CHECK(clone_evidence IS NULL OR length(CAST(clone_evidence AS BLOB)) BETWEEN 1 AND 4096),
-    volume_evidence TEXT CHECK(volume_evidence IS NULL OR length(CAST(volume_evidence AS BLOB)) BETWEEN 1 AND 4096),
     observed_container_id TEXT CHECK(observed_container_id IS NULL OR length(CAST(observed_container_id AS BLOB)) BETWEEN 1 AND 128),
     observed_container_started_at TEXT CHECK(observed_container_started_at IS NULL OR length(CAST(observed_container_started_at AS BLOB)) BETWEEN 1 AND 64),
     runtime_epoch INTEGER CHECK(runtime_epoch IS NULL OR runtime_epoch > 0),
     host_port INTEGER CHECK(host_port IS NULL OR host_port BETWEEN 1 AND 65535),
-    health_evidence TEXT CHECK(health_evidence IS NULL OR length(CAST(health_evidence AS BLOB)) BETWEEN 1 AND 4096),
-    ready_evidence TEXT CHECK(ready_evidence IS NULL OR length(CAST(ready_evidence AS BLOB)) BETWEEN 1 AND 4096),
-    session_evidence TEXT CHECK(session_evidence IS NULL OR length(CAST(session_evidence AS BLOB)) BETWEEN 1 AND 4096),
-    prompt_evidence TEXT CHECK(prompt_evidence IS NULL OR length(CAST(prompt_evidence AS BLOB)) BETWEEN 1 AND 4096),
     writer_inactive_evidence TEXT CHECK(writer_inactive_evidence IS NULL OR length(CAST(writer_inactive_evidence AS BLOB)) BETWEEN 1 AND 4096),
     route_removed_evidence TEXT CHECK(route_removed_evidence IS NULL OR length(CAST(route_removed_evidence AS BLOB)) BETWEEN 1 AND 4096),
     container_removed_evidence TEXT CHECK(container_removed_evidence IS NULL OR length(CAST(container_removed_evidence AS BLOB)) BETWEEN 1 AND 4096),
@@ -384,15 +377,6 @@ CREATE TABLE background_runs (
     clone_removed_evidence TEXT CHECK(clone_removed_evidence IS NULL OR length(CAST(clone_removed_evidence AS BLOB)) BETWEEN 1 AND 4096),
     last_evidence TEXT CHECK(last_evidence IS NULL OR length(CAST(last_evidence AS BLOB)) BETWEEN 1 AND 4096),
     last_error TEXT CHECK(last_error IS NULL OR length(CAST(last_error AS BLOB)) BETWEEN 1 AND 4096),
-    provision_intent_at INTEGER,
-    clone_observed_at INTEGER,
-    volume_observed_at INTEGER,
-    container_observed_at INTEGER,
-    health_observed_at INTEGER,
-    ready_at INTEGER,
-    session_observed_at INTEGER,
-    prompt_intent_at INTEGER,
-    prompt_admitted_at INTEGER,
     stop_intent_at INTEGER,
     writer_inactive_at INTEGER,
     route_removed_at INTEGER,
@@ -418,26 +402,16 @@ CREATE TABLE background_runs (
            state IN ('canceling','uncertain','result_ready','failed','cleanup_required'))),
     CHECK(
         (state='queued' AND effect_phase='absent') OR
-        (state='setting_up' AND effect_phase IN ('provision_intent','clone_observed','volume_observed','container_observed','health_observed','ready','session_observed')) OR
-        (state IN ('working','needs_you') AND effect_phase='prompt_admitted') OR
-        (state='uncertain' AND effect_phase IN ('provision_intent','clone_observed','volume_observed','container_observed','health_observed','ready','session_observed','prompt_intent','prompt_admitted','stop_intent')) OR
+        (state='setting_up' AND effect_phase IN ('provisioning','prompt_pending')) OR
+        (state IN ('working','needs_you') AND effect_phase='admitted') OR
+        (state='uncertain' AND effect_phase IN ('prompt_pending','admitted','stop_intent')) OR
         (state IN ('canceling','cleanup_required') AND effect_phase IN ('stop_intent','writer_inactive','route_removed','container_removed','volume_removed','clone_removed')) OR
-        (state='result_ready' AND effect_phase IN ('prompt_admitted','stop_intent','writer_inactive','route_removed','container_removed','volume_removed','clone_removed','cleanup_complete')) OR
+        (state='result_ready' AND effect_phase IN ('stop_intent','writer_inactive','route_removed','container_removed','volume_removed','clone_removed','cleanup_complete')) OR
         (state='failed' AND effect_phase IN ('pre_effect_failed','cleanup_complete'))
     ),
-    CHECK((observed_container_id IS NULL AND observed_container_started_at IS NULL AND runtime_epoch IS NULL AND host_port IS NULL AND container_observed_at IS NULL) OR
-          (observed_container_id IS NOT NULL AND observed_container_started_at IS NOT NULL AND runtime_epoch IS NOT NULL AND host_port IS NOT NULL AND container_observed_at IS NOT NULL)),
-    CHECK(effect_phase NOT IN ('clone_observed','volume_observed','container_observed','health_observed','ready','session_observed','prompt_intent','prompt_admitted') OR
-          (clone_observed_at IS NOT NULL AND clone_evidence IS NOT NULL)),
-    CHECK(effect_phase NOT IN ('volume_observed','container_observed','health_observed','ready','session_observed','prompt_intent','prompt_admitted') OR
-          (volume_observed_at IS NOT NULL AND volume_evidence IS NOT NULL)),
-    CHECK(effect_phase NOT IN ('container_observed','health_observed','ready','session_observed','prompt_intent','prompt_admitted') OR observed_container_id IS NOT NULL),
-    CHECK(effect_phase NOT IN ('health_observed','ready','session_observed','prompt_intent','prompt_admitted') OR
-          (health_observed_at IS NOT NULL AND health_evidence IS NOT NULL)),
-    CHECK(effect_phase NOT IN ('ready','session_observed','prompt_intent','prompt_admitted') OR (ready_at IS NOT NULL AND ready_evidence IS NOT NULL)),
-    CHECK(effect_phase NOT IN ('session_observed','prompt_intent','prompt_admitted') OR (session_observed_at IS NOT NULL AND session_evidence IS NOT NULL)),
-    CHECK(effect_phase NOT IN ('prompt_intent','prompt_admitted') OR prompt_intent_at IS NOT NULL),
-    CHECK(effect_phase<>'prompt_admitted' OR (prompt_admitted_at IS NOT NULL AND prompt_evidence IS NOT NULL)),
+    CHECK((observed_container_id IS NULL AND observed_container_started_at IS NULL AND runtime_epoch IS NULL AND host_port IS NULL) OR
+          (observed_container_id IS NOT NULL AND observed_container_started_at IS NOT NULL AND runtime_epoch IS NOT NULL AND host_port IS NOT NULL)),
+    CHECK(effect_phase NOT IN ('prompt_pending','admitted') OR (observed_container_id IS NOT NULL AND prompt_request_attempted_at IS NOT NULL)),
     CHECK(effect_phase NOT IN ('stop_intent','writer_inactive','route_removed','container_removed','volume_removed','clone_removed','cleanup_complete') OR stop_intent_at IS NOT NULL),
     CHECK(effect_phase NOT IN ('writer_inactive','route_removed','container_removed','volume_removed','clone_removed','cleanup_complete') OR
           (writer_inactive_at IS NOT NULL AND writer_inactive_evidence IS NOT NULL)),
@@ -451,16 +425,7 @@ CREATE TABLE background_runs (
     CHECK((cleanup_completed_at IS NULL AND cleanup_proof IS NULL) OR
           (cleanup_completed_at IS NOT NULL AND cleanup_proof IS NOT NULL AND effect_phase='cleanup_complete')),
     CHECK((effect_phase='pre_effect_failed')=(absence_proof IS NOT NULL)),
-    CHECK((provision_intent_at IS NULL OR provision_intent_at BETWEEN created_at AND updated_at) AND
-          (clone_observed_at IS NULL OR clone_observed_at BETWEEN created_at AND updated_at) AND
-          (volume_observed_at IS NULL OR volume_observed_at BETWEEN created_at AND updated_at) AND
-          (container_observed_at IS NULL OR container_observed_at BETWEEN created_at AND updated_at) AND
-          (health_observed_at IS NULL OR health_observed_at BETWEEN created_at AND updated_at) AND
-          (ready_at IS NULL OR ready_at BETWEEN created_at AND updated_at) AND
-          (session_observed_at IS NULL OR session_observed_at BETWEEN created_at AND updated_at) AND
-          (prompt_intent_at IS NULL OR prompt_intent_at BETWEEN created_at AND updated_at) AND
-          (prompt_admitted_at IS NULL OR prompt_admitted_at BETWEEN created_at AND updated_at) AND
-          (stop_intent_at IS NULL OR stop_intent_at BETWEEN created_at AND updated_at) AND
+    CHECK((stop_intent_at IS NULL OR stop_intent_at BETWEEN created_at AND updated_at) AND
           (writer_inactive_at IS NULL OR writer_inactive_at BETWEEN created_at AND updated_at) AND
           (route_removed_at IS NULL OR route_removed_at BETWEEN created_at AND updated_at) AND
           (container_removed_at IS NULL OR container_removed_at BETWEEN created_at AND updated_at) AND
@@ -509,10 +474,6 @@ BEGIN SELECT RAISE(ABORT, 'background run environment identity is immutable'); E
 CREATE TRIGGER background_runs_prompt_attempt_immutable BEFORE UPDATE ON background_runs
 WHEN OLD.prompt_request_attempted_at IS NOT NULL AND NEW.prompt_request_attempted_at IS NOT OLD.prompt_request_attempted_at
 BEGIN SELECT RAISE(ABORT, 'background run prompt attempt is immutable'); END;
-
-CREATE TRIGGER background_runs_prompt_admission_requires_attempt BEFORE UPDATE ON background_runs
-WHEN NEW.effect_phase='prompt_admitted' AND NEW.prompt_request_attempted_at IS NULL
-BEGIN SELECT RAISE(ABORT, 'background run prompt admission has no request attempt'); END;
 
 CREATE TRIGGER background_runs_timeout_immutable BEFORE UPDATE ON background_runs
 WHEN OLD.timeout_requested_at IS NOT NULL AND
@@ -719,15 +680,6 @@ WHEN OLD.background_seal_request_id IS NOT NULL AND OLD.state='result_ready' AND
 BEGIN SELECT RAISE(ABORT,'retained cleanup has no exact committed tuple'); END;
 
 CREATE TRIGGER background_runs_phase_timestamps_immutable BEFORE UPDATE ON background_runs WHEN
- (OLD.provision_intent_at IS NOT NULL AND NEW.provision_intent_at IS NOT OLD.provision_intent_at) OR
- (OLD.clone_observed_at IS NOT NULL AND NEW.clone_observed_at IS NOT OLD.clone_observed_at) OR
- (OLD.volume_observed_at IS NOT NULL AND NEW.volume_observed_at IS NOT OLD.volume_observed_at) OR
- (OLD.container_observed_at IS NOT NULL AND NEW.container_observed_at IS NOT OLD.container_observed_at) OR
- (OLD.health_observed_at IS NOT NULL AND NEW.health_observed_at IS NOT OLD.health_observed_at) OR
- (OLD.ready_at IS NOT NULL AND NEW.ready_at IS NOT OLD.ready_at) OR
- (OLD.session_observed_at IS NOT NULL AND NEW.session_observed_at IS NOT OLD.session_observed_at) OR
- (OLD.prompt_intent_at IS NOT NULL AND NEW.prompt_intent_at IS NOT OLD.prompt_intent_at) OR
- (OLD.prompt_admitted_at IS NOT NULL AND NEW.prompt_admitted_at IS NOT OLD.prompt_admitted_at) OR
  (OLD.stop_intent_at IS NOT NULL AND NEW.stop_intent_at IS NOT OLD.stop_intent_at) OR
  (OLD.writer_inactive_at IS NOT NULL AND NEW.writer_inactive_at IS NOT OLD.writer_inactive_at) OR
  (OLD.route_removed_at IS NOT NULL AND NEW.route_removed_at IS NOT OLD.route_removed_at) OR
@@ -739,9 +691,6 @@ BEGIN SELECT RAISE(ABORT,'background run phase timestamp is immutable'); END;
 
 CREATE TRIGGER background_runs_observation_immutable BEFORE UPDATE ON background_runs WHEN
  (OLD.observed_container_id IS NOT NULL AND (NEW.observed_container_id IS NOT OLD.observed_container_id OR NEW.observed_container_started_at IS NOT OLD.observed_container_started_at OR NEW.runtime_epoch IS NOT OLD.runtime_epoch OR NEW.host_port IS NOT OLD.host_port)) OR
- (OLD.clone_evidence IS NOT NULL AND NEW.clone_evidence IS NOT OLD.clone_evidence) OR (OLD.volume_evidence IS NOT NULL AND NEW.volume_evidence IS NOT OLD.volume_evidence) OR
- (OLD.health_evidence IS NOT NULL AND NEW.health_evidence IS NOT OLD.health_evidence) OR (OLD.ready_evidence IS NOT NULL AND NEW.ready_evidence IS NOT OLD.ready_evidence) OR
- (OLD.session_evidence IS NOT NULL AND NEW.session_evidence IS NOT OLD.session_evidence) OR (OLD.prompt_evidence IS NOT NULL AND NEW.prompt_evidence IS NOT OLD.prompt_evidence) OR
  (OLD.writer_inactive_evidence IS NOT NULL AND NEW.writer_inactive_evidence IS NOT OLD.writer_inactive_evidence) OR
  (OLD.route_removed_evidence IS NOT NULL AND NEW.route_removed_evidence IS NOT OLD.route_removed_evidence) OR
  (OLD.container_removed_evidence IS NOT NULL AND NEW.container_removed_evidence IS NOT OLD.container_removed_evidence) OR

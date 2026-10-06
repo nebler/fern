@@ -51,15 +51,9 @@ const (
 	BackgroundRunCleanupRequired = run.CleanupRequired
 
 	BackgroundRunEffectAbsent            = run.Absent
-	BackgroundRunEffectProvisionIntent   = run.ProvisionIntent
-	BackgroundRunEffectCloneObserved     = run.CloneObserved
-	BackgroundRunEffectVolumeObserved    = run.VolumeObserved
-	BackgroundRunEffectContainerObserved = run.ContainerObserved
-	BackgroundRunEffectHealthObserved    = run.HealthObserved
-	BackgroundRunEffectReady             = run.Ready
-	BackgroundRunEffectSessionObserved   = run.SessionObserved
-	BackgroundRunEffectPromptIntent      = run.PromptIntent
-	BackgroundRunEffectPromptAdmitted    = run.PromptAdmitted
+	BackgroundRunEffectProvisioning      = run.Provisioning
+	BackgroundRunEffectPromptPending     = run.PromptPending
+	BackgroundRunEffectAdmitted          = run.Admitted
 	BackgroundRunEffectSealIntent        = run.SealIntent
 	BackgroundRunEffectStopIntent        = run.StopIntent
 	BackgroundRunEffectWriterInactive    = run.WriterInactive
@@ -115,12 +109,6 @@ type BackgroundRun struct {
 	ObservedContainerStartedAt string
 	RuntimeEpoch               int64
 	HostPort                   int
-	CloneEvidence              string
-	VolumeEvidence             string
-	HealthEvidence             string
-	ReadyEvidence              string
-	SessionEvidence            string
-	PromptEvidence             string
 	WriterInactiveEvidence     string
 	RouteRemovedEvidence       string
 	ContainerRemovedEvidence   string
@@ -128,16 +116,7 @@ type BackgroundRun struct {
 	CloneRemovedEvidence       string
 	LastEvidence               string
 	LastError                  string
-	ProvisionIntentAt          *time.Time
-	CloneObservedAt            *time.Time
-	VolumeObservedAt           *time.Time
-	ContainerObservedAt        *time.Time
-	HealthObservedAt           *time.Time
-	ReadyAt                    *time.Time
-	SessionObservedAt          *time.Time
-	PromptIntentAt             *time.Time
 	PromptRequestAttemptedAt   *time.Time
-	PromptAdmittedAt           *time.Time
 	TimeoutRequestedAt         *time.Time
 	TimeoutActor               *task.ActorSnapshot
 	StopIntentAt               *time.Time
@@ -205,7 +184,9 @@ type BackgroundRunRef struct {
 	Now              time.Time
 }
 
-type RecordBackgroundRunContainerObservedParams struct {
+// RecordBackgroundRunRuntimeParams commits the exact started runtime: the
+// identity that later authorizes stop and cleanup.
+type RecordBackgroundRunRuntimeParams struct {
 	BackgroundRunRef
 	ContainerID        string
 	ContainerStartedAt string

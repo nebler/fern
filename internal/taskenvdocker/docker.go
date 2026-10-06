@@ -29,6 +29,38 @@ var (
 	expectedReadonlyPaths = []string{"/proc/bus", "/proc/fs", "/proc/irq", "/proc/sys", "/proc/sysrq-trigger"}
 )
 
+// Provision reconciles the clone, volume, and container from their
+// deterministic identities and starts the exact container, returning its
+// runtime. Each step inspects before it creates, so a repeat after a crash or
+// lost response converges. Host Git inspection of the clone happens only while
+// no run container exists: once one does, the clone may be agent-written.
+func (p *Provider) Provision(ctx context.Context, run taskstore.BackgroundRun) (Observation, error) {
+	if _, err := p.validateRun(run); err != nil {
+		return Observation{}, err
+	}
+	if err := ctx.Err(); err != nil {
+		return Observation{}, err
+	}
+	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	_, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
+	cancel()
+	if errdefs.IsNotFound(err) {
+		if _, err := p.EnsureClone(ctx, run); err != nil {
+			return Observation{}, err
+		}
+		if _, err := p.EnsureVolume(ctx, run); err != nil {
+			return Observation{}, err
+		}
+	} else if err != nil {
+		return Observation{}, fmt.Errorf("inspect background run container: %w", err)
+	}
+	created, err := p.EnsureContainer(ctx, run)
+	if err != nil {
+		return Observation{}, err
+	}
+	return p.StartContainer(ctx, run, created.ContainerID)
+}
+
 // EnsureVolume creates or reconciles the exact labeled local OpenCode volume.
 func (p *Provider) EnsureVolume(ctx context.Context, run taskstore.BackgroundRun) (_ Observation, resultErr error) {
 	digest, err := p.validateRun(run)

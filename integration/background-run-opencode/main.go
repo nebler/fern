@@ -1166,7 +1166,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 		return fmt.Errorf("pre-dispatch restart reconciliation: %w", err)
 	}
 	fenced, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
-	if err != nil || fenced.State != taskstore.BackgroundRunUncertain || fenced.EffectPhase != taskstore.BackgroundRunEffectPromptIntent ||
+	if err != nil || fenced.State != taskstore.BackgroundRunUncertain || fenced.EffectPhase != taskstore.BackgroundRunEffectPromptPending ||
 		fenced.PromptRequestAttemptedAt == nil || transport.calls.Load() != 0 || !strings.Contains(fenced.LastEvidence, `"status":"absent"`) {
 		return fmt.Errorf("pre-dispatch restart run=%s/%s fenced=%t posts=%d error=%v", fenced.State, fenced.EffectPhase,
 			fenced.PromptRequestAttemptedAt != nil, transport.calls.Load(), err)

@@ -74,103 +74,60 @@ func (s *Store) StartBackgroundRunProvisioning(ctx context.Context, p Background
 	if p.ExpectedState != BackgroundRunQueued || p.ExpectedPhase != BackgroundRunEffectAbsent {
 		return BackgroundRun{}, fmt.Errorf("%w: background run provisioning", ErrInvalidInput)
 	}
-	return s.transitionRun(ctx, p, BackgroundRunSettingUp, BackgroundRunEffectProvisionIntent,
-		`provision_intent_at=?`, []any{unixMillis(p.Now)}, "start background run provisioning")
+	return s.transitionRun(ctx, p, BackgroundRunSettingUp, BackgroundRunEffectProvisioning, `last_error=NULL`, nil, "start background run provisioning")
 }
 
-func (s *Store) RecordBackgroundRunCloneObserved(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	if p.ExpectedPhase != BackgroundRunEffectProvisionIntent || !validRequiredEvidence(p.Evidence) {
-		return BackgroundRun{}, fmt.Errorf("%w: background run clone observation", ErrInvalidInput)
-	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunSettingUp, BackgroundRunEffectCloneObserved,
-		`clone_observed_at=?,clone_evidence=?,last_evidence=?`, []any{unixMillis(p.Now), p.Evidence, p.Evidence}, "record background run clone observation")
-}
-
-func (s *Store) RecordBackgroundRunVolumeObserved(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	if p.ExpectedPhase != BackgroundRunEffectCloneObserved || !validRequiredEvidence(p.Evidence) {
-		return BackgroundRun{}, fmt.Errorf("%w: background run volume observation", ErrInvalidInput)
-	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunSettingUp, BackgroundRunEffectVolumeObserved,
-		`volume_observed_at=?,volume_evidence=?,last_evidence=?`, []any{unixMillis(p.Now), p.Evidence, p.Evidence}, "record background run volume observation")
-}
-
-func (s *Store) RecordBackgroundRunContainerObserved(ctx context.Context, p RecordBackgroundRunContainerObservedParams) (BackgroundRun, error) {
+// RecordBackgroundRunRuntime commits the exact started runtime once. It is the
+// only stop and cleanup authority for a started container; everything else
+// provisioning creates is reconciled by inspection.
+func (s *Store) RecordBackgroundRunRuntime(ctx context.Context, p RecordBackgroundRunRuntimeParams) (BackgroundRun, error) {
 	if !validBoundedText(p.ContainerID, 1, 128) || !validBoundedText(p.ContainerStartedAt, 1, 64) ||
-		p.RuntimeEpoch <= 0 || p.HostPort < 1 || p.HostPort > 65535 || !validRequiredEvidence(p.Evidence) || p.ExpectedPhase != BackgroundRunEffectVolumeObserved {
-		return BackgroundRun{}, fmt.Errorf("%w: background run observation", ErrInvalidInput)
+		p.RuntimeEpoch <= 0 || p.HostPort < 1 || p.HostPort > 65535 || !validRequiredEvidence(p.Evidence) ||
+		p.ExpectedState != BackgroundRunSettingUp || p.ExpectedPhase != BackgroundRunEffectProvisioning {
+		return BackgroundRun{}, fmt.Errorf("%w: background run runtime", ErrInvalidInput)
 	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunSettingUp, BackgroundRunEffectContainerObserved,
-		`observed_container_id=?,observed_container_started_at=?,runtime_epoch=?,host_port=?,container_observed_at=?,last_evidence=?`,
-		[]any{p.ContainerID, p.ContainerStartedAt, p.RuntimeEpoch, p.HostPort, unixMillis(p.Now), p.Evidence}, "record background run provision observation")
+	return s.updateRun(ctx, p.BackgroundRunRef,
+		`observed_container_id=?,observed_container_started_at=?,runtime_epoch=?,host_port=?,last_evidence=?`,
+		[]any{p.ContainerID, p.ContainerStartedAt, p.RuntimeEpoch, p.HostPort, p.Evidence}, "record background run runtime",
+		`observed_container_id IS NULL`)
 }
 
-func (s *Store) RecordBackgroundRunHealthObserved(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	if p.ExpectedPhase != BackgroundRunEffectContainerObserved || !validRequiredEvidence(p.Evidence) {
-		return BackgroundRun{}, fmt.Errorf("%w: background run health observation", ErrInvalidInput)
-	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunSettingUp, BackgroundRunEffectHealthObserved,
-		`health_observed_at=?,health_evidence=?,last_evidence=?`, []any{unixMillis(p.Now), p.Evidence, p.Evidence}, "record background run health observation")
-}
-
-func (s *Store) RecordBackgroundRunReady(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	if p.ExpectedPhase != BackgroundRunEffectHealthObserved || !validRequiredEvidence(p.Evidence) {
-		return BackgroundRun{}, fmt.Errorf("%w: background run readiness", ErrInvalidInput)
-	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunSettingUp, BackgroundRunEffectReady,
-		`ready_at=?,ready_evidence=?,last_evidence=?`, []any{unixMillis(p.Now), p.Evidence, p.Evidence}, "record background run readiness")
-}
-
-func (s *Store) RecordBackgroundRunSessionObserved(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	if p.ExpectedPhase != BackgroundRunEffectReady || !validRequiredEvidence(p.Evidence) {
-		return BackgroundRun{}, fmt.Errorf("%w: background run session observation", ErrInvalidInput)
-	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunSettingUp, BackgroundRunEffectSessionObserved,
-		`session_observed_at=?,session_evidence=?,last_evidence=?`, []any{unixMillis(p.Now), p.Evidence, p.Evidence}, "record background run session observation")
-}
-
-func (s *Store) RecordBackgroundRunPromptIntent(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	if p.ExpectedPhase != BackgroundRunEffectSessionObserved || !validRequiredEvidence(p.Evidence) {
-		return BackgroundRun{}, fmt.Errorf("%w: background run prompt intent", ErrInvalidInput)
-	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunUncertain, BackgroundRunEffectPromptIntent,
-		`prompt_intent_at=?,last_evidence=?`, []any{unixMillis(p.Now), p.Evidence}, "record background run prompt intent")
-}
-
-// RecordBackgroundRunPromptRequestAttempted is the irreversible pre-I/O fence.
-// A restarted coordinator can observe it but can never set or change it twice.
+// RecordBackgroundRunPromptRequestAttempted is the irreversible pre-I/O fence:
+// it ends provisioning before the single prompt POST. A restarted coordinator
+// finds prompt_pending and only reconciles; it can never dispatch again.
 func (s *Store) RecordBackgroundRunPromptRequestAttempted(ctx context.Context, p BackgroundRunRef) (BackgroundRun, error) {
-	if p.ExpectedState != BackgroundRunUncertain || p.ExpectedPhase != BackgroundRunEffectPromptIntent {
+	if p.ExpectedState != BackgroundRunSettingUp || p.ExpectedPhase != BackgroundRunEffectProvisioning {
 		return BackgroundRun{}, fmt.Errorf("%w: background run prompt request attempt", ErrInvalidInput)
 	}
-	return s.updateRun(ctx, p, `prompt_request_attempted_at=?`, []any{unixMillis(p.Now)}, "record background run prompt request attempt",
-		`prompt_request_attempted_at IS NULL`)
+	return s.transitionRun(ctx, p, BackgroundRunSettingUp, BackgroundRunEffectPromptPending, `prompt_request_attempted_at=?`,
+		[]any{unixMillis(p.Now)}, "record background run prompt request attempt", `prompt_request_attempted_at IS NULL`)
 }
 
 func (s *Store) RecordBackgroundRunPromptAdmitted(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	if p.ExpectedPhase != BackgroundRunEffectPromptIntent || !validRequiredEvidence(p.Evidence) {
+	if p.ExpectedPhase != BackgroundRunEffectPromptPending || !validRequiredEvidence(p.Evidence) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run prompt admission", ErrInvalidInput)
 	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunWorking, BackgroundRunEffectPromptAdmitted,
-		`prompt_admitted_at=?,prompt_evidence=?,last_evidence=?`, []any{unixMillis(p.Now), p.Evidence, p.Evidence}, "record background run prompt admission")
+	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunWorking, BackgroundRunEffectAdmitted,
+		`last_evidence=?`, []any{p.Evidence}, "record background run prompt admission")
 }
 
 func (s *Store) RecordBackgroundRunPromptUncertain(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	if p.ExpectedPhase != BackgroundRunEffectPromptIntent || !validRequiredEvidence(p.Evidence) {
+	if p.ExpectedPhase != BackgroundRunEffectPromptPending || !validRequiredEvidence(p.Evidence) {
 		return BackgroundRun{}, fmt.Errorf("%w: uncertain background run prompt", ErrInvalidInput)
 	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunUncertain, BackgroundRunEffectPromptIntent,
+	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunUncertain, BackgroundRunEffectPromptPending,
 		`last_evidence=?`, []any{p.Evidence}, "record uncertain background run prompt")
 }
 
 // RecordBackgroundRunWorkObservation records positive bounded evidence only.
 // Callers must not invoke it for an empty active/pending observation.
 func (s *Store) RecordBackgroundRunWorkObservation(ctx context.Context, p RecordBackgroundRunEvidenceParams, state BackgroundRunState) (BackgroundRun, error) {
-	if p.ExpectedPhase != BackgroundRunEffectPromptAdmitted ||
+	if p.ExpectedPhase != BackgroundRunEffectAdmitted ||
 		(p.ExpectedState != BackgroundRunWorking && p.ExpectedState != BackgroundRunNeedsYou && p.ExpectedState != BackgroundRunUncertain) ||
 		(state != BackgroundRunWorking && state != BackgroundRunNeedsYou && state != BackgroundRunUncertain) || !validRequiredEvidence(p.Evidence) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run work observation", ErrInvalidInput)
 	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, state, BackgroundRunEffectPromptAdmitted,
+	return s.transitionRun(ctx, p.BackgroundRunRef, state, BackgroundRunEffectAdmitted,
 		`last_evidence=?`, []any{p.Evidence}, "record background run work observation")
 }
 
@@ -351,7 +308,7 @@ func (s *Store) MarkBackgroundRunCleanupRequired(ctx context.Context, p MarkBack
 // parent task/attempt after cleanup, or before any effect with explicit absence
 // proof. It performs no external I/O.
 func (s *Store) FinalizeBackgroundRunFailure(ctx context.Context, p FinalizeBackgroundRunFailureParams) (_ BackgroundRun, err error) {
-	preEffect := p.ExpectedPhase == BackgroundRunEffectProvisionIntent
+	preEffect := p.ExpectedPhase == BackgroundRunEffectProvisioning
 	cleaned := p.ExpectedPhase == BackgroundRunEffectCloneRemoved
 	if err := validateBackgroundRunRef(p.BackgroundRunRef); err != nil || (!preEffect && !cleaned) ||
 		!validBoundedText(p.Reason, 1, 1000) || !validRequiredEvidence(p.Evidence) || !validRequiredEvidence(p.CleanupProof) ||
@@ -471,7 +428,7 @@ func (s *Store) CompleteBackgroundRunResultCleanup(ctx context.Context, p Comple
 		`cleanup_completed_at=?,cleanup_proof=?`, []any{unixMillis(p.Now), p.CleanupProof}, "complete background result cleanup")
 }
 
-func (s *Store) transitionRun(ctx context.Context, ref BackgroundRunRef, state BackgroundRunState, phase BackgroundRunEffectPhase, assignments string, args []any, operation string) (BackgroundRun, error) {
+func (s *Store) transitionRun(ctx context.Context, ref BackgroundRunRef, state BackgroundRunState, phase BackgroundRunEffectPhase, assignments string, args []any, operation string, predicates ...string) (BackgroundRun, error) {
 	if !validBackgroundRunStatePhase(BackgroundRunSourceProfile, state, phase) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run transition", ErrInvalidInput)
 	}
@@ -480,7 +437,7 @@ func (s *Store) transitionRun(ctx context.Context, ref BackgroundRunRef, state B
 			return BackgroundRun{}, fmt.Errorf("%w: background run evidence", ErrInvalidInput)
 		}
 	}
-	return s.updateRun(ctx, ref, `state=?,effect_phase=?,`+assignments, append([]any{state, phase}, args...), operation)
+	return s.updateRun(ctx, ref, `state=?,effect_phase=?,`+assignments, append([]any{state, phase}, args...), operation, predicates...)
 }
 
 // updateRun is the revision compare-and-swap behind every coordinator

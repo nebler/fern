@@ -7,17 +7,16 @@ func TestLifecycleClassification(t *testing.T) {
 	// Specify the complete accepted matrix independently, grouped by state.
 	valid := map[State][]Phase{
 		Queued:          {Absent},
-		SettingUp:       {ProvisionIntent, CloneObserved, VolumeObserved, ContainerObserved, HealthObserved, Ready, SessionObserved},
-		Working:         {PromptAdmitted},
-		NeedsYou:        {PromptAdmitted},
+		SettingUp:       {Provisioning, PromptPending},
+		Working:         {Admitted},
+		NeedsYou:        {Admitted},
 		Canceling:       {StopIntent, WriterInactive, RouteRemoved, ContainerRemoved, VolumeRemoved, CloneRemoved, SealIntent, Exporting},
-		Uncertain:       {ProvisionIntent, CloneObserved, VolumeObserved, ContainerObserved, HealthObserved, Ready, SessionObserved, PromptIntent, PromptAdmitted, StopIntent},
+		Uncertain:       {PromptPending, Admitted, StopIntent},
 		ResultReady:     {ArtifactCommitted, StopIntent, WriterInactive, RouteRemoved, ContainerRemoved, VolumeRemoved, CloneRemoved, CleanupComplete},
 		Failed:          {PreEffectFailed, CleanupComplete},
 		CleanupRequired: {StopIntent, WriterInactive, RouteRemoved, ContainerRemoved, VolumeRemoved, CloneRemoved, Exporting},
 	}
-	phases := []Phase{Absent, ProvisionIntent, CloneObserved, VolumeObserved, ContainerObserved, HealthObserved, Ready, SessionObserved,
-		PromptIntent, PromptAdmitted, SealIntent, StopIntent, WriterInactive, Exporting, ArtifactCommitted, RouteRemoved, ContainerRemoved,
+	phases := []Phase{Absent, Provisioning, PromptPending, Admitted, SealIntent, StopIntent, WriterInactive, Exporting, ArtifactCommitted, RouteRemoved, ContainerRemoved,
 		VolumeRemoved, CloneRemoved, CleanupComplete, PreEffectFailed, "unknown", "provision_started", "prompt_started", "stop_started", "export_started", "cleanup_started"}
 	cleanup := map[Phase]bool{StopIntent: true, WriterInactive: true, RouteRemoved: true, ContainerRemoved: true, VolumeRemoved: true, CloneRemoved: true}
 	recovery := map[Phase]bool{SealIntent: true, StopIntent: true, WriterInactive: true, Exporting: true, ArtifactCommitted: true,

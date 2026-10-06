@@ -120,7 +120,7 @@ func TestEffectContextAllowsCleanupAfterAttemptDeadline(t *testing.T) {
 	if ctx.Err() != context.Canceled {
 		t.Fatalf("cleanup context cancellation = %v", ctx.Err())
 	}
-	work.Run.State, work.Run.EffectPhase = taskstore.BackgroundRunWorking, taskstore.BackgroundRunEffectPromptAdmitted
+	work.Run.State, work.Run.EffectPhase = taskstore.BackgroundRunWorking, taskstore.BackgroundRunEffectAdmitted
 	if _, cancel, _, err := coordinator.effectContext(context.Background(), work, classify(work.Run).EnforceAttemptDeadline); !errors.Is(err, context.DeadlineExceeded) {
 		if cancel != nil {
 			cancel()

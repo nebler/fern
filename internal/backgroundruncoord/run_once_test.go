@@ -211,7 +211,7 @@ func newScanFixture(t *testing.T) *scanFixture {
 	command("config", "user.email", "test@example.invalid")
 	command("remote", "add", "origin", "https://github.com/owner/repository")
 	command("-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "fixture")
-	provider, err := taskenvdocker.New(context.Background(), taskenvdocker.Config{StateRoot: f.root, Repository: repo, GitExecutable: git, ImageReference: "fern/test:dev", ImageID: scanImage, MemoryBytes: 512 << 20, WallTimeout: time.Hour, GitTimeout: 30 * time.Second, DockerTimeout: 10 * time.Second, HealthTimeout: 3 * time.Second, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 64 << 20, CloneObservedLimitBytes: 64 << 20, DiskFreeAdmissionBytes: 64 << 20, LogMaxSize: "1m", LogMaxFiles: 3, StopGrace: time.Second}, f.d)
+	provider, err := taskenvdocker.New(context.Background(), taskenvdocker.Config{StateRoot: f.root, Repository: repo, GitExecutable: git, ImageReference: "fern/test:dev", ImageID: scanImage, MemoryBytes: 512 << 20, WallTimeout: time.Hour, GitTimeout: 30 * time.Second, DockerTimeout: 10 * time.Second, HealthTimeout: 300 * time.Millisecond, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 64 << 20, CloneObservedLimitBytes: 64 << 20, DiskFreeAdmissionBytes: 64 << 20, LogMaxSize: "1m", LogMaxFiles: 3, StopGrace: time.Second}, f.d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -297,13 +297,13 @@ func TestRunSupervisesRealScans(t *testing.T) {
 	for _, mode := range []string{"no work", "progress", "transient failure"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newScanFixture(t)
-			if mode != "no work" {
-				f.admit(t)
-			}
 			failure := errors.New("Docker unavailable")
-			if mode == "transient failure" {
-				f.scan(t, taskstore.BackgroundRunEffectCloneObserved)
-				f.d.inspectErr = failure
+			switch mode {
+			case "progress":
+				f.admitStopped(t)
+			case "transient failure":
+				f.admit(t)
+				f.d.containerErr = failure
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
@@ -323,14 +323,14 @@ func TestRunSupervisesRealScans(t *testing.T) {
 				if successes != 0 || failures != 1 {
 					t.Fatalf("callbacks success=%d failure=%d", successes, failures)
 				}
-				if r := f.run(t); r.EffectPhase != taskstore.BackgroundRunEffectCloneObserved {
+				if r := f.run(t); r.EffectPhase != taskstore.BackgroundRunEffectProvisioning || r.ObservedContainerID != "" {
 					t.Fatalf("failure not recoverable: %+v", r)
 				}
 			} else if successes != 1 || failures != 0 {
 				t.Fatalf("callbacks success=%d failure=%d", successes, failures)
 			}
 			if mode == "progress" {
-				if r := f.run(t); r.EffectPhase != taskstore.BackgroundRunEffectCloneObserved {
+				if r := f.run(t); r.EffectPhase == taskstore.BackgroundRunEffectProvisioning {
 					t.Fatalf("scan did not commit: %+v", r)
 				}
 			}
@@ -338,29 +338,34 @@ func TestRunSupervisesRealScans(t *testing.T) {
 	}
 }
 
+// admitStopped admits a run, starts provisioning without effects, and stops it,
+// leaving cleanup work that needs no Docker resources.
+func (f *scanFixture) admitStopped(t *testing.T) {
+	t.Helper()
+	f.admit(t)
+	queued := f.run(t)
+	if _, err := f.c.store.StartBackgroundRunProvisioning(context.Background(), ref(queued, f.now)); err != nil {
+		t.Fatal(err)
+	}
+	f.stop(t)
+}
+
 func TestRunAdvancesSeveralPhasesWithoutWaitingForTicks(t *testing.T) {
 	f := newScanFixture(t) // PollInterval is one hour.
-	f.admit(t)
-	failure := errors.New("Docker container create unavailable")
-	f.d.createErr = failure
+	f.admitStopped(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	successes := 0
-	f.c.config.OnSuccess = func() { successes++ }
-	f.c.config.OnError = func(err error) {
-		if !errors.Is(err, failure) {
-			t.Errorf("unexpected scan error: %v", err)
+	f.c.config.OnSuccess = func() {
+		if f.run(t).State == taskstore.BackgroundRunFailed {
+			cancel()
 		}
-		cancel()
 	}
+	f.c.config.OnError = func(err error) { t.Errorf("unexpected scan error: %v", err); cancel() }
 	if err := f.c.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run: %v", err)
 	}
-	if ctx.Err() != context.Canceled {
-		t.Fatal("run did not reach the container step before the test timeout")
-	}
-	if r := f.run(t); r.EffectPhase != taskstore.BackgroundRunEffectVolumeObserved || successes != 2 {
-		t.Fatalf("phase=%s successes=%d", r.EffectPhase, successes)
+	if r := f.run(t); r.State != taskstore.BackgroundRunFailed || r.EffectPhase != taskstore.BackgroundRunEffectCleanupComplete {
+		t.Fatalf("cleanup did not finish without ticks: %s/%s", r.State, r.EffectPhase)
 	}
 }
 
@@ -409,7 +414,7 @@ func TestRunOnceExecutionMismatchSelectsCleanupWithoutProvisioning(t *testing.T)
 	f.scan(t, taskstore.BackgroundRunEffectWriterInactive)
 }
 
-func TestRunOnceCancellationAfterProvisioningIntentLeavesRecoverableIntent(t *testing.T) {
+func TestRunOnceCancellationAfterProvisioningStartLeavesRecoverableRun(t *testing.T) {
 	f := newScanFixture(t)
 	f.admit(t)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -426,22 +431,21 @@ func TestRunOnceCancellationAfterProvisioningIntentLeavesRecoverableIntent(t *te
 		t.Fatalf("canceled scan: %v", err)
 	}
 	r := f.run(t)
-	if r.EffectPhase != taskstore.BackgroundRunEffectProvisionIntent {
-		t.Fatalf("lost recovery intent: %+v", r)
+	if r.EffectPhase != taskstore.BackgroundRunEffectProvisioning {
+		t.Fatalf("lost provisioning: %+v", r)
 	}
 	if len(f.d.calls) != 0 {
 		t.Fatalf("canceled scan called Docker: %v", f.d.calls)
 	}
-	f.scan(t, taskstore.BackgroundRunEffectCloneObserved)
 }
 
-func TestRunOnceVolumeFailureAndLostObservationRecover(t *testing.T) {
+// Provisioning keeps no per-resource record: a pass interrupted after any
+// effect reconciles it by inspection on the next pass instead of repeating it.
+func TestRunOnceProvisioningFailureAndLostObservationReconcile(t *testing.T) {
 	for _, mode := range []string{"effect failure", "observation canceled"} {
 		t.Run(mode, func(t *testing.T) {
 			f := newScanFixture(t)
 			f.admit(t)
-			f.scan(t, taskstore.BackgroundRunEffectCloneObserved)
-			f.d.calls = nil
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			failure := errors.New("Docker unavailable")
@@ -456,22 +460,26 @@ func TestRunOnceVolumeFailureAndLostObservationRecover(t *testing.T) {
 				t.Fatalf("error=%v want %v", err, failure)
 			}
 			r := f.run(t)
-			if r.EffectPhase != taskstore.BackgroundRunEffectCloneObserved {
+			if r.EffectPhase != taskstore.BackgroundRunEffectProvisioning || r.ObservedContainerID != "" {
 				t.Fatalf("advanced after failure: %+v", r)
 			}
 			if mode == "observation canceled" && (f.d.item == nil || f.d.creates != 1) {
 				t.Fatal("volume effect did not succeed")
 			}
 			for _, call := range f.d.calls {
-				if strings.HasPrefix(call, "container.") {
+				if call == "container.create" || call == "container.start" {
 					t.Fatalf("premature next operation: %v", f.d.calls)
 				}
 			}
 			f.d.inspectErr = nil
 			f.d.afterVolumeRead = nil
-			f.scan(t, taskstore.BackgroundRunEffectVolumeObserved)
-			if f.d.creates != 1 {
-				t.Fatalf("replay created %d volumes", f.d.creates)
+			// The next pass reaches the started runtime; health has no server.
+			if err := f.c.RunOnce(context.Background()); err == nil {
+				t.Fatal("health succeeded without an OpenCode server")
+			}
+			r = f.run(t)
+			if r.EffectPhase != taskstore.BackgroundRunEffectProvisioning || r.ObservedContainerID != scanContainerID || f.d.creates != 1 {
+				t.Fatalf("replay run=%+v volume creates=%d", r, f.d.creates)
 			}
 		})
 	}
@@ -496,20 +504,18 @@ func TestRunOnceCleansUpStartedContainerWithUnrecordedRuntime(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			f := newScanFixture(t)
 			f.admit(t)
-			f.scan(t, taskstore.BackgroundRunEffectCloneObserved)
-			f.scan(t, taskstore.BackgroundRunEffectVolumeObserved)
 			if mode == "stop races record" {
 				f.d.afterStart = func() { f.stop(t) }
 				if err := f.c.RunOnce(context.Background()); err == nil {
 					t.Fatal("runtime record succeeded after a committed stop")
 				}
 			} else {
-				run := f.run(t)
-				created, err := f.c.provider.EnsureContainer(context.Background(), run)
+				queued := f.run(t)
+				run, err := f.c.store.StartBackgroundRunProvisioning(context.Background(), ref(queued, f.now))
 				if err != nil {
 					t.Fatal(err)
 				}
-				if _, err := f.c.provider.StartContainer(context.Background(), run, created.ContainerID); err != nil {
+				if _, err := f.c.provider.Provision(context.Background(), run); err != nil {
 					t.Fatal(err)
 				}
 				f.d.info.State.Running = false
@@ -542,8 +548,13 @@ func TestRunOnceCleansUpStartedContainerWithUnrecordedRuntime(t *testing.T) {
 func TestRunOnceStopCleanupFailureRecoveryPastDeadline(t *testing.T) {
 	f := newScanFixture(t)
 	f.admit(t)
-	f.scan(t, taskstore.BackgroundRunEffectCloneObserved)
-	f.scan(t, taskstore.BackgroundRunEffectVolumeObserved)
+	// Clone and volume exist; container creation fails.
+	createErr := errors.New("Docker container create unavailable")
+	f.d.createErr = createErr
+	if err := f.c.RunOnce(context.Background()); !errors.Is(err, createErr) {
+		t.Fatal(err)
+	}
+	f.d.createErr = nil
 	stopClaim := f.params.Claim
 	stopClaim.Scope.CommandKind = taskstore.StopBackgroundRunCommand
 	stopClaim.Key = "stop"

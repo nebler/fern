@@ -3,7 +3,7 @@
 // materialization, and retained results. It commits related records and their
 // fences together so HTTP handlers and effect providers never coordinate SQL.
 //
-// Schema 5 is one complete pre-release schema, not a migration chain. Open
+// Schema 6 is one complete pre-release schema, not a migration chain. Open
 // rejects incompatible versions rather than upgrading or deleting data, and
 // refuses symlinked or foreign-owned database paths. The database runs in WAL
 // mode with foreign keys and FULL synchronization.

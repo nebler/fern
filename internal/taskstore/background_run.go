@@ -21,18 +21,16 @@ const backgroundRunSelect = `
 SELECT r.task_id,r.attempt_id,r.workspace_id,r.generation,r.writer_generation,r.repository_id,r.repository_remote,r.base_oid,r.branch,
        r.instruction_sha256,r.profile,r.profile_sha256,r.environment_sha256,r.resource_spec_version,r.image_identity,r.clone_identity,r.volume_identity,
        r.container_identity,r.endpoint_identity,r.opencode_session_id,r.opencode_message_id,r.state,r.effect_phase,
-       r.stop_receipt_id,r.stop_requested_at,
-	       r.clone_evidence,r.volume_evidence,r.observed_container_id,r.observed_container_started_at,r.runtime_epoch,r.host_port,
-	       r.health_evidence,r.ready_evidence,r.session_evidence,r.prompt_evidence,r.writer_inactive_evidence,r.route_removed_evidence,
-	       r.container_removed_evidence,r.volume_removed_evidence,r.clone_removed_evidence,r.last_evidence,r.last_error,
-	       r.provision_intent_at,r.clone_observed_at,r.volume_observed_at,r.container_observed_at,r.health_observed_at,r.ready_at,
-	       r.session_observed_at,r.prompt_intent_at,r.prompt_request_attempted_at,r.prompt_admitted_at,r.timeout_requested_at,r.stop_intent_at,r.writer_inactive_at,r.route_removed_at,
-	       r.container_removed_at,r.volume_removed_at,r.clone_removed_at,r.cleanup_completed_at,r.cleanup_proof,r.absence_proof,
-	       r.revision,r.created_at,r.updated_at,r.background_seal_request_id,r.artifact_export_id,r.retained_artifact_id,
-	       r.materialization_id,r.retained_result_id,r.result_authority_phase,
-	       c.actor_type,c.actor_id,c.display_name,c.credential_id,c.authentication,c.request_id,
-	       s.actor_type,s.actor_id,s.display_name,s.credential_id,s.authentication,s.request_id,
-	       x.actor_type,x.actor_id,x.display_name,x.credential_id,x.authentication,x.request_id
+       r.stop_receipt_id,r.stop_requested_at,r.observed_container_id,r.observed_container_started_at,r.runtime_epoch,r.host_port,
+       r.writer_inactive_evidence,r.route_removed_evidence,
+       r.container_removed_evidence,r.volume_removed_evidence,r.clone_removed_evidence,r.last_evidence,r.last_error,
+       r.prompt_request_attempted_at,r.timeout_requested_at,r.stop_intent_at,r.writer_inactive_at,r.route_removed_at,
+       r.container_removed_at,r.volume_removed_at,r.clone_removed_at,r.cleanup_completed_at,r.cleanup_proof,r.absence_proof,
+       r.revision,r.created_at,r.updated_at,r.background_seal_request_id,r.artifact_export_id,r.retained_artifact_id,
+       r.materialization_id,r.retained_result_id,r.result_authority_phase,
+       c.actor_type,c.actor_id,c.display_name,c.credential_id,c.authentication,c.request_id,
+       s.actor_type,s.actor_id,s.display_name,s.credential_id,s.authentication,s.request_id,
+       x.actor_type,x.actor_id,x.display_name,x.credential_id,x.authentication,x.request_id
 FROM background_runs r
 JOIN actor_snapshots c ON c.id=r.creator_actor_snapshot_id
 LEFT JOIN actor_snapshots s ON s.id=r.stop_actor_snapshot_id
@@ -228,7 +226,7 @@ VALUES(?,?,?,'accepted',?,?,?,?,?,'task',?,202,?)`, p.ReceiptID, run.WorkspaceID
 stop_receipt_id=?,stop_actor_snapshot_id=?,stop_requested_at=?,stop_intent_at=?,
 revision=revision+1,updated_at=?
 WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND stop_receipt_id IS NULL AND revision=? AND
-state IN ('setting_up','working','needs_you','uncertain')`, p.ReceiptID, actorID, now, now, now,
+state IN ('setting_up','working','needs_you','uncertain') AND effect_phase IN ('provisioning','prompt_pending','admitted')`, p.ReceiptID, actorID, now, now, now,
 			run.TaskID, run.AttemptID, run.WorkspaceID, run.Generation, run.Revision)
 		if updateErr != nil {
 			return BackgroundRunStop{}, fmt.Errorf("request active background run stop: %w", updateErr)
@@ -351,13 +349,11 @@ WHERE r.workspace_id=? AND r.task_id=? AND c.actor_type=? AND c.actor_id=? AND c
 func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	var run BackgroundRun
 	var repositoryID int64
-	var branch, stopReceipt, cloneEvidence, volumeEvidence, containerID, containerStarted sql.NullString
-	var healthEvidence, readyEvidence, sessionEvidence, promptEvidence, writerEvidence, routeEvidence sql.NullString
+	var branch, stopReceipt, containerID, containerStarted, writerEvidence, routeEvidence sql.NullString
 	var containerRemovedEvidence, volumeRemovedEvidence, cloneRemovedEvidence, evidence, lastError, cleanupProof, absenceProof sql.NullString
 	var sealRequestID, artifactExportID, retainedArtifactID, materializationID, retainedResultID, resultAuthorityPhase sql.NullString
 	var stopAt, runtimeEpoch, hostPort sql.NullInt64
-	var provisionIntent, cloneObserved, volumeObserved, containerObserved, healthObserved, readyAt sql.NullInt64
-	var sessionObserved, promptIntent, promptAttempted, promptAdmitted, timeoutRequested, stopIntent, writerInactive, routeRemoved sql.NullInt64
+	var promptAttempted, timeoutRequested, stopIntent, writerInactive, routeRemoved sql.NullInt64
 	var containerRemoved, volumeRemoved, cloneRemoved, cleanupCompleted sql.NullInt64
 	var instructionHash, profileHash, environmentHash []byte
 	var created, updated int64
@@ -367,12 +363,10 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 		&run.RepositoryRemote, &run.BaseOID, &branch, &instructionHash, &run.Profile, &profileHash, &environmentHash, &run.ResourceSpecVersion,
 		&run.ImageIdentity, &run.CloneIdentity, &run.VolumeIdentity, &run.ContainerIdentity, &run.EndpointIdentity,
 		&run.OpenCodeSessionID, &run.OpenCodeMessageID, &run.State, &run.EffectPhase,
-		&stopReceipt, &stopAt,
-		&cloneEvidence, &volumeEvidence, &containerID, &containerStarted, &runtimeEpoch, &hostPort,
-		&healthEvidence, &readyEvidence, &sessionEvidence, &promptEvidence, &writerEvidence, &routeEvidence,
+		&stopReceipt, &stopAt, &containerID, &containerStarted, &runtimeEpoch, &hostPort,
+		&writerEvidence, &routeEvidence,
 		&containerRemovedEvidence, &volumeRemovedEvidence, &cloneRemovedEvidence, &evidence, &lastError,
-		&provisionIntent, &cloneObserved, &volumeObserved, &containerObserved, &healthObserved, &readyAt,
-		&sessionObserved, &promptIntent, &promptAttempted, &promptAdmitted, &timeoutRequested, &stopIntent, &writerInactive, &routeRemoved,
+		&promptAttempted, &timeoutRequested, &stopIntent, &writerInactive, &routeRemoved,
 		&containerRemoved, &volumeRemoved, &cloneRemoved, &cleanupCompleted, &cleanupProof, &absenceProof,
 		&run.Revision, &created, &updated, &sealRequestID, &artifactExportID, &retainedArtifactID, &materializationID, &retainedResultID, &resultAuthorityPhase,
 		&run.Creator.Type, &run.Creator.ID, &run.Creator.DisplayName, &run.Creator.CredentialID, &run.Creator.Authentication, &run.Creator.RequestID,
@@ -396,12 +390,6 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	run.ObservedContainerStartedAt = nullableText(containerStarted)
 	run.RuntimeEpoch = runtimeEpoch.Int64
 	run.HostPort = int(hostPort.Int64)
-	run.CloneEvidence = nullableText(cloneEvidence)
-	run.VolumeEvidence = nullableText(volumeEvidence)
-	run.HealthEvidence = nullableText(healthEvidence)
-	run.ReadyEvidence = nullableText(readyEvidence)
-	run.SessionEvidence = nullableText(sessionEvidence)
-	run.PromptEvidence = nullableText(promptEvidence)
 	run.WriterInactiveEvidence = nullableText(writerEvidence)
 	run.RouteRemovedEvidence = nullableText(routeEvidence)
 	run.ContainerRemovedEvidence = nullableText(containerRemovedEvidence)
@@ -409,16 +397,7 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	run.CloneRemovedEvidence = nullableText(cloneRemovedEvidence)
 	run.LastEvidence = nullableText(evidence)
 	run.LastError = nullableText(lastError)
-	run.ProvisionIntentAt = nullableTime(provisionIntent)
-	run.CloneObservedAt = nullableTime(cloneObserved)
-	run.VolumeObservedAt = nullableTime(volumeObserved)
-	run.ContainerObservedAt = nullableTime(containerObserved)
-	run.HealthObservedAt = nullableTime(healthObserved)
-	run.ReadyAt = nullableTime(readyAt)
-	run.SessionObservedAt = nullableTime(sessionObserved)
-	run.PromptIntentAt = nullableTime(promptIntent)
 	run.PromptRequestAttemptedAt = nullableTime(promptAttempted)
-	run.PromptAdmittedAt = nullableTime(promptAdmitted)
 	run.TimeoutRequestedAt = nullableTime(timeoutRequested)
 	run.StopIntentAt = nullableTime(stopIntent)
 	run.WriterInactiveAt = nullableTime(writerInactive)

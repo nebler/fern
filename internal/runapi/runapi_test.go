@@ -520,37 +520,12 @@ func (f *apiFixture) advanceToSession(t *testing.T, id task.TaskID) taskstore.Ba
 	if err != nil {
 		t.Fatalf("start run=%+v error=%v", run, err)
 	}
-	next := func(transition func(context.Context, taskstore.RecordBackgroundRunEvidenceParams) (taskstore.BackgroundRun, error)) {
-		now = now.Add(time.Millisecond)
-		run, err = transition(context.Background(), taskstore.RecordBackgroundRunEvidenceParams{BackgroundRunRef: openTestRef(run, now), Evidence: `{"status":"exact"}`})
-		if err != nil {
-			t.Fatal(err)
-		}
-	}
-	next(f.store.RecordBackgroundRunCloneObserved)
-	next(f.store.RecordBackgroundRunVolumeObserved)
 	started := time.Date(2026, 8, 31, 12, 0, 2, 123456789, time.UTC)
 	now = now.Add(time.Millisecond)
-	run, err = f.store.RecordBackgroundRunContainerObserved(context.Background(), taskstore.RecordBackgroundRunContainerObservedParams{
+	run, err = f.store.RecordBackgroundRunRuntime(context.Background(), taskstore.RecordBackgroundRunRuntimeParams{
 		BackgroundRunRef: openTestRef(run, now), ContainerID: strings.Repeat("a", 64), ContainerStartedAt: started.Format(time.RFC3339Nano),
 		RuntimeEpoch: started.UnixNano(), HostPort: 49152, Evidence: `{"status":"exact"}`,
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	next(f.store.RecordBackgroundRunHealthObserved)
-	next(f.store.RecordBackgroundRunReady)
-	next(f.store.RecordBackgroundRunSessionObserved)
-	f.now = now.Add(time.Second)
-	return run
-}
-
-func (f *apiFixture) advanceToPrompt(t *testing.T, id task.TaskID) taskstore.BackgroundRun {
-	run := f.advanceToSession(t, id)
-	now := run.UpdatedAt.Add(time.Millisecond)
-	var err error
-	run, err = f.store.RecordBackgroundRunPromptIntent(context.Background(), taskstore.RecordBackgroundRunEvidenceParams{
-		BackgroundRunRef: openTestRef(run, now), Evidence: `{"status":"committed"}`})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -559,7 +534,14 @@ func (f *apiFixture) advanceToPrompt(t *testing.T, id task.TaskID) taskstore.Bac
 	if err != nil {
 		t.Fatal(err)
 	}
-	now = now.Add(time.Millisecond)
+	f.now = now.Add(time.Second)
+	return run
+}
+
+func (f *apiFixture) advanceToPrompt(t *testing.T, id task.TaskID) taskstore.BackgroundRun {
+	run := f.advanceToSession(t, id)
+	now := run.UpdatedAt.Add(time.Millisecond)
+	var err error
 	run, err = f.store.RecordBackgroundRunPromptAdmitted(context.Background(), taskstore.RecordBackgroundRunEvidenceParams{
 		BackgroundRunRef: openTestRef(run, now), Evidence: `{"status":"exact"}`})
 	if err != nil {

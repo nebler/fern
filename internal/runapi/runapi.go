@@ -481,9 +481,9 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, actor task.Acto
 func attachmentReady(run taskstore.BackgroundRun) bool {
 	active := run.State == taskstore.BackgroundRunSettingUp || run.State == taskstore.BackgroundRunWorking ||
 		run.State == taskstore.BackgroundRunNeedsYou || run.State == taskstore.BackgroundRunUncertain
-	ready := run.EffectPhase == taskstore.BackgroundRunEffectSessionObserved || run.EffectPhase == taskstore.BackgroundRunEffectPromptIntent ||
-		run.EffectPhase == taskstore.BackgroundRunEffectPromptAdmitted
-	return active && ready && run.SessionObservedAt != nil && run.StopReceiptID == ""
+	// Provisioning reconciles the session before the prompt fence ends it.
+	ready := run.EffectPhase == taskstore.BackgroundRunEffectPromptPending || run.EffectPhase == taskstore.BackgroundRunEffectAdmitted
+	return active && ready && run.StopReceiptID == ""
 }
 
 func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {

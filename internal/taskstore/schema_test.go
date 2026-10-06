@@ -49,8 +49,8 @@ func TestPredecessorSchemasRejectedWithoutMutation(t *testing.T) {
 }
 
 func TestInitialSchemaIsTheOnlySupportedSchema(t *testing.T) {
-	const expectedChecksum = "a8167037ac0e112007dd0a1588772a493aaa6c0a6c5959a15e6a2740cc16be52"
-	if CurrentSchemaVersion() != 5 || len(migrations) != 1 || migrations[0].version != 5 || migrations[0].name != "retained_result_task_store" {
+	const expectedChecksum = "164b77ddc123ab9a2b7d8f73a88952105f82a8bcb0d5260cc3f702ce4fdb3470"
+	if CurrentSchemaVersion() != 6 || len(migrations) != 1 || migrations[0].version != 6 || migrations[0].name != "reconciled_run_task_store" {
 		t.Fatalf("schema version=%d migration count=%d", CurrentSchemaVersion(), len(migrations))
 	}
 	if checksum := migrationChecksum(migrations[0]); checksum != expectedChecksum {
@@ -80,10 +80,10 @@ func TestInitialSchemaRejectsPromptAdmissionWithoutAttemptFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
-	run, _ := advanceBackgroundRunToPromptIntent(t, store, params.BackgroundRun.ImageIdentity, now)
-	if _, err := store.db.Exec(`UPDATE background_runs SET state='working',effect_phase='prompt_admitted',
-prompt_admitted_at=?,prompt_evidence='raw admission',last_evidence='raw admission',revision=revision+1,updated_at=?
-WHERE task_id=?`, now.Add(20*time.Second).UnixMilli(), now.Add(20*time.Second).UnixMilli(), run.TaskID); err == nil {
+	run, _ := advanceBackgroundRunToRuntime(t, store, now)
+	if _, err := store.db.Exec(`UPDATE background_runs SET state='working',effect_phase='admitted',
+last_evidence='raw admission',revision=revision+1,updated_at=?
+WHERE task_id=?`, now.Add(20*time.Second).UnixMilli(), run.TaskID); err == nil {
 		t.Fatal("raw prompt admission without the one-shot fence was accepted")
 	}
 }

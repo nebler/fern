@@ -166,7 +166,7 @@ func (c *Coordinator) step(ctx context.Context) (bool, error) {
 	}
 	// A working run's state may change on observation without new work for
 	// the coordinator; only a phase change counts there.
-	stateProgress := state != work.Run.State && work.Run.EffectPhase != taskstore.BackgroundRunEffectPromptAdmitted
+	stateProgress := state != work.Run.State && work.Run.EffectPhase != taskstore.BackgroundRunEffectAdmitted
 	return phase != work.Run.EffectPhase || stateProgress, nil
 }
 
@@ -218,18 +218,6 @@ func (c *Coordinator) runOnce(ctx context.Context) (taskstore.BackgroundRunWork,
 
 func (c *Coordinator) process(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
 	run := work.Run
-	// Credentials are runtime inputs, never publication authority. Refresh only
-	// while execution is allowed; GitHub availability must not block teardown.
-	switch run.EffectPhase {
-	case taskstore.BackgroundRunEffectHealthObserved, taskstore.BackgroundRunEffectReady,
-		taskstore.BackgroundRunEffectSessionObserved, taskstore.BackgroundRunEffectPromptIntent,
-		taskstore.BackgroundRunEffectPromptAdmitted:
-		if run.StopReceiptID == "" && run.TimeoutRequestedAt == nil {
-			if err := c.provider.RefreshGitHubCredentials(operation, run); err != nil {
-				return c.externalFailure(parent, work, err)
-			}
-		}
-	}
 	switch run.EffectPhase {
 	case taskstore.BackgroundRunEffectSealIntent:
 		_, providerFence, err := c.provider.ProveWriterInactive(operation, run)
@@ -244,69 +232,20 @@ func (c *Coordinator) process(operation, parent context.Context, work taskstore.
 		return c.exportRetained(operation, parent, work)
 	case taskstore.BackgroundRunEffectArtifactCommitted:
 		return c.record(parent, work, `{"effect":"retained_cleanup_intent","status":"committed"}`, c.store.RequestBackgroundRunResultCleanup)
-	case taskstore.BackgroundRunEffectProvisionIntent:
-		observation, err := c.provider.EnsureClone(operation, run)
+	case taskstore.BackgroundRunEffectProvisioning:
+		return c.provision(operation, parent, work)
+	case taskstore.BackgroundRunEffectPromptPending:
+		client, err := c.live(operation, run)
 		if err != nil {
 			return c.externalFailure(parent, work, err)
 		}
-		return c.record(parent, work, observation.Evidence, c.store.RecordBackgroundRunCloneObserved)
-	case taskstore.BackgroundRunEffectCloneObserved:
-		observation, err := c.provider.EnsureVolume(operation, run)
+		return c.reconcilePrompt(parent, work, client)
+	case taskstore.BackgroundRunEffectAdmitted:
+		client, err := c.live(operation, run)
 		if err != nil {
 			return c.externalFailure(parent, work, err)
 		}
-		return c.record(parent, work, observation.Evidence, c.store.RecordBackgroundRunVolumeObserved)
-	case taskstore.BackgroundRunEffectVolumeObserved:
-		created, err := c.provider.EnsureContainer(operation, run)
-		if err != nil {
-			return c.externalFailure(parent, work, err)
-		}
-		started, err := c.provider.StartContainer(operation, run, created.ContainerID)
-		if err != nil {
-			return c.externalFailure(parent, work, err)
-		}
-		mutation, cancel, now, err := c.effectContext(parent, work, true)
-		if err != nil {
-			return err
-		}
-		defer cancel()
-		_, err = c.store.RecordBackgroundRunContainerObserved(mutation, taskstore.RecordBackgroundRunContainerObservedParams{
-			BackgroundRunRef: ref(run, now), ContainerID: started.ContainerID, ContainerStartedAt: started.ContainerStarted,
-			RuntimeEpoch: started.RuntimeEpoch, HostPort: started.HostPort, Evidence: started.Evidence,
-		})
-		return err
-	case taskstore.BackgroundRunEffectContainerObserved:
-		runtime, err := c.provider.CommittedRuntime(run)
-		if err != nil {
-			return c.cleanupRequired(parent, work, "committed runtime identity invalid")
-		}
-		observation, err := c.provider.Health(operation, run, runtime)
-		if err != nil {
-			return c.externalFailure(parent, work, err)
-		}
-		return c.record(parent, work, observation.Evidence, c.store.RecordBackgroundRunHealthObserved)
-	case taskstore.BackgroundRunEffectHealthObserved:
-		return c.record(parent, work, `{"effect":"serial_runtime_ready","status":"exact"}`, c.store.RecordBackgroundRunReady)
-	case taskstore.BackgroundRunEffectReady:
-		if err := c.ensureRoute(operation, run); err != nil {
-			return c.externalFailure(parent, work, err)
-		}
-		return c.reconcileSession(operation, parent, work)
-	case taskstore.BackgroundRunEffectSessionObserved:
-		if err := c.ensureRoute(operation, run); err != nil {
-			return c.externalFailure(parent, work, err)
-		}
-		return c.record(parent, work, `{"effect":"prompt_intent","status":"committed"}`, c.store.RecordBackgroundRunPromptIntent)
-	case taskstore.BackgroundRunEffectPromptIntent:
-		if err := c.ensureRoute(operation, run); err != nil {
-			return c.externalFailure(parent, work, err)
-		}
-		return c.reconcilePrompt(operation, parent, work)
-	case taskstore.BackgroundRunEffectPromptAdmitted:
-		if err := c.ensureRoute(operation, run); err != nil {
-			return c.externalFailure(parent, work, err)
-		}
-		return c.observeWorking(operation, parent, work)
+		return c.observeWorking(operation, parent, work, client)
 	case taskstore.BackgroundRunEffectStopIntent:
 		observation, _, err := c.provider.ProveWriterInactive(operation, run)
 		if err != nil {
@@ -783,12 +722,68 @@ func materializationProof(export taskstore.BackgroundRunExport, path string) [32
 	return sha256.Sum256(payload)
 }
 
-func (c *Coordinator) reconcileSession(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
-	run := work.Run
-	client, err := c.client(operation, run)
+// provision reconciles every inspectable provisioning effect in one pass and
+// ends at the prompt fence. Only the started runtime and the fence are durable:
+// the clone, volume, container, health, route, and session are derived from
+// the run's deterministic identities and re-observed on every pass.
+func (c *Coordinator) provision(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
+	if work.Run.ObservedContainerID == "" {
+		started, err := c.provider.Provision(operation, work.Run)
+		if err != nil {
+			return c.externalFailure(parent, work, err)
+		}
+		mutation, cancel, now, err := c.effectContext(parent, work, true)
+		if err != nil {
+			return err
+		}
+		work.Run, err = c.store.RecordBackgroundRunRuntime(mutation, taskstore.RecordBackgroundRunRuntimeParams{
+			BackgroundRunRef: ref(work.Run, now), ContainerID: started.ContainerID, ContainerStartedAt: started.ContainerStarted,
+			RuntimeEpoch: started.RuntimeEpoch, HostPort: started.HostPort, Evidence: started.Evidence,
+		})
+		cancel()
+		if err != nil {
+			return err
+		}
+	}
+	client, err := c.live(operation, work.Run)
 	if err != nil {
 		return c.externalFailure(parent, work, err)
 	}
+	ready, err := c.reconcileSession(operation, parent, work, client)
+	if err != nil || !ready {
+		return err
+	}
+	return c.dispatchPrompt(operation, parent, work, client)
+}
+
+// live proves the committed runtime healthy, refreshes its GitHub credentials,
+// and keeps its route active. Credentials are runtime inputs, never
+// publication authority, and are refreshed only while execution is allowed.
+func (c *Coordinator) live(ctx context.Context, run taskstore.BackgroundRun) (*backgroundopencode.Client, error) {
+	runtime, err := c.provider.CommittedRuntime(run)
+	if err != nil {
+		return nil, errors.Join(taskenvdocker.ErrIdentityMismatch, err)
+	}
+	if _, err := c.provider.Health(ctx, run, runtime); err != nil {
+		return nil, err
+	}
+	if err := c.provider.RefreshGitHubCredentials(ctx, run); err != nil {
+		return nil, err
+	}
+	target, err := c.provider.BackgroundRouteTarget(run, runtime)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := c.config.Route.Activate(makeRouteIdentity(run, runtime), target); err != nil {
+		return nil, err
+	}
+	return c.provider.OpenCodeClient(run, runtime, c.config.HTTPClient)
+}
+
+// reconcileSession creates the Fern-chosen session at most once per pass and
+// reports whether it exactly exists.
+func (c *Coordinator) reconcileSession(operation, parent context.Context, work taskstore.BackgroundRunWork, client *backgroundopencode.Client) (bool, error) {
+	run := work.Run
 	spec := backgroundopencode.SessionSpec{ID: string(run.OpenCodeSessionID), Agent: c.config.Agent,
 		ProviderID: c.config.ModelProvider, ModelID: c.config.Model, Directory: sessionDirectory}
 	state, err := client.ReconcileSession(operation, spec)
@@ -797,74 +792,72 @@ func (c *Coordinator) reconcileSession(operation, parent context.Context, work t
 		state, err = client.ReconcileSession(operation, spec)
 		if err == nil && state == backgroundopencode.ReconcileAbsent {
 			if createErr == nil {
-				return c.cleanupRequired(parent, work, "OpenCode session disappeared after creation")
+				return false, c.cleanupRequired(parent, work, "OpenCode session disappeared after creation")
 			}
-			return errors.Join(createErr, c.cleanupRequired(parent, work, "OpenCode session creation is inconclusive"))
+			return false, errors.Join(createErr, c.cleanupRequired(parent, work, "OpenCode session creation is inconclusive"))
 		}
 	}
 	if err != nil {
-		return c.externalFailure(parent, work, err)
+		return false, c.externalFailure(parent, work, err)
 	}
 	if state == backgroundopencode.ReconcileConflict {
-		return c.cleanupRequired(parent, work, "OpenCode session identity conflict")
+		return false, c.cleanupRequired(parent, work, "OpenCode session identity conflict")
 	}
-	if state != backgroundopencode.ReconcileExact {
-		return nil
-	}
-	return c.record(parent, work, `{"effect":"session_reconcile","status":"exact"}`, c.store.RecordBackgroundRunSessionObserved)
+	return state == backgroundopencode.ReconcileExact, nil
 }
 
-func (c *Coordinator) reconcilePrompt(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
-	run := work.Run
-	client, err := c.client(operation, run)
+// dispatchPrompt commits the one-way prompt fence, which ends provisioning,
+// before the single admission call. Whatever happens next, the run is
+// prompt_pending and later passes only reconcile.
+func (c *Coordinator) dispatchPrompt(operation, parent context.Context, work taskstore.BackgroundRunWork, client *backgroundopencode.Client) error {
+	mutation, cancel, now, err := c.effectContext(parent, work, true)
 	if err != nil {
-		recordErr := c.record(parent, work, `{"effect":"prompt_reconcile","status":"runtime_unavailable"}`, c.store.RecordBackgroundRunPromptUncertain)
-		return errors.Join(err, recordErr)
+		return err
 	}
-	spec := backgroundopencode.PromptSpec{ID: string(run.OpenCodeMessageID), Text: work.Prompt, Resume: true, Delivery: "steer"}
-	if run.PromptRequestAttemptedAt == nil {
-		mutation, cancel, now, mutationErr := c.effectContext(parent, work, true)
-		if mutationErr != nil {
-			return mutationErr
-		}
-		defer cancel()
-		if !now.Before(work.Deadline) {
-			return c.requestTimeout(parent, run)
-		}
-		run, err = c.store.RecordBackgroundRunPromptRequestAttempted(mutation, ref(run, now))
-		if err != nil {
-			return err
-		}
-		work.Run = run
-		if c.config.AfterPromptFence != nil {
-			c.config.AfterPromptFence()
-		}
-		if err := operation.Err(); err != nil {
-			return err
-		}
-		dispatchErr := c.promptDispatchAuthority(work)
-		if errors.Is(dispatchErr, context.DeadlineExceeded) {
-			return c.requestTimeout(parent, run)
-		}
-		if dispatchErr != nil {
-			return dispatchErr
-		}
-		callErr := client.AdmitPromptOnce(operation, string(run.OpenCodeSessionID), spec)
-		if c.config.AfterPromptCall != nil {
-			c.config.AfterPromptCall(callErr)
-		}
+	defer cancel()
+	if !now.Before(work.Deadline) {
+		return c.requestTimeout(parent, work.Run)
+	}
+	work.Run, err = c.store.RecordBackgroundRunPromptRequestAttempted(mutation, ref(work.Run, now))
+	if err != nil {
+		return err
+	}
+	if c.config.AfterPromptFence != nil {
+		c.config.AfterPromptFence()
+	}
+	if err := operation.Err(); err != nil {
+		return err
+	}
+	if err := c.promptDispatchAuthority(work); errors.Is(err, context.DeadlineExceeded) {
+		return c.requestTimeout(parent, work.Run)
+	} else if err != nil {
+		return err
+	}
+	callErr := client.AdmitPromptOnce(operation, string(work.Run.OpenCodeSessionID), c.promptSpec(work))
+	if c.config.AfterPromptCall != nil {
+		c.config.AfterPromptCall(callErr)
 	}
 	if err := parent.Err(); err != nil {
 		return err
 	}
+	return c.reconcilePrompt(parent, work, client)
+}
+
+func (c *Coordinator) promptSpec(work taskstore.BackgroundRunWork) backgroundopencode.PromptSpec {
+	return backgroundopencode.PromptSpec{ID: string(work.Run.OpenCodeMessageID), Text: work.Prompt, Resume: true, Delivery: "steer"}
+}
+
+// reconcilePrompt reads bounded session history; only exact admission
+// advances, and anything else leaves the prompt uncertain.
+func (c *Coordinator) reconcilePrompt(parent context.Context, work taskstore.BackgroundRunWork, client *backgroundopencode.Client) error {
 	reconcileCtx, reconcileCancel, _, contextErr := c.effectContext(parent, work, true)
 	if contextErr != nil {
 		return contextErr
 	}
 	defer reconcileCancel()
-	state, reconcileErr := client.ReconcilePrompt(reconcileCtx, string(run.OpenCodeSessionID), spec, c.config.HistoryBounds)
+	state, reconcileErr := client.ReconcilePrompt(reconcileCtx, string(work.Run.OpenCodeSessionID), c.promptSpec(work), c.config.HistoryBounds)
 	if reconcileErr == nil && state == backgroundopencode.ReconcileExact {
-		return c.record(parent, work, `{"effect":"prompt_reconcile","status":"admitted_promoted"}`, c.store.RecordBackgroundRunPromptAdmitted)
+		return c.record(parent, work, `{"effect":"prompt_reconcile","status":"admitted"}`, c.store.RecordBackgroundRunPromptAdmitted)
 	}
 	status := "inconclusive"
 	if reconcileErr == nil {
@@ -873,7 +866,7 @@ func (c *Coordinator) reconcilePrompt(operation, parent context.Context, work ta
 	return c.record(parent, work, fmt.Sprintf(`{"effect":"prompt_reconcile","status":%q}`, status), c.store.RecordBackgroundRunPromptUncertain)
 }
 
-func (c *Coordinator) observeWorking(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
+func (c *Coordinator) observeWorking(operation, parent context.Context, work taskstore.BackgroundRunWork, client *backgroundopencode.Client) error {
 	run := work.Run
 	usage, err := c.provider.ObserveUsage(operation, run)
 	if err != nil {
@@ -881,11 +874,6 @@ func (c *Coordinator) observeWorking(operation, parent context.Context, work tas
 			return errors.Join(err, c.cleanupRequired(parent, work, "background usage limit or identity mismatch"))
 		}
 		return c.externalFailure(parent, work, err)
-	}
-	client, err := c.client(operation, run)
-	if err != nil {
-		recordErr := c.recordObservation(parent, work, `{"effect":"work_observe","status":"runtime_unavailable"}`, taskstore.BackgroundRunUncertain)
-		return errors.Join(err, recordErr)
 	}
 	observation, err := client.ObservePending(operation, string(run.OpenCodeSessionID))
 	if err != nil {
@@ -912,33 +900,6 @@ func workObservation(state backgroundopencode.WorkState) (taskstore.BackgroundRu
 	default:
 		return "", ""
 	}
-}
-
-func (c *Coordinator) client(ctx context.Context, run taskstore.BackgroundRun) (*backgroundopencode.Client, error) {
-	runtime, err := c.provider.CommittedRuntime(run)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := c.provider.Health(ctx, run, runtime); err != nil {
-		return nil, err
-	}
-	return c.provider.OpenCodeClient(run, runtime, c.config.HTTPClient)
-}
-
-func (c *Coordinator) ensureRoute(ctx context.Context, run taskstore.BackgroundRun) error {
-	runtime, err := c.provider.CommittedRuntime(run)
-	if err != nil {
-		return err
-	}
-	if _, err := c.provider.Health(ctx, run, runtime); err != nil {
-		return err
-	}
-	target, err := c.provider.BackgroundRouteTarget(run, runtime)
-	if err != nil {
-		return err
-	}
-	_, err = c.config.Route.Activate(makeRouteIdentity(run, runtime), target)
-	return err
 }
 
 func (c *Coordinator) validatedRouteIdentity(run taskstore.BackgroundRun) (backgroundroute.Identity, error) {

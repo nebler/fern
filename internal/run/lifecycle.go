@@ -17,15 +17,9 @@ const (
 
 const (
 	Absent            Phase = "absent"
-	ProvisionIntent   Phase = "provision_intent"
-	CloneObserved     Phase = "clone_observed"
-	VolumeObserved    Phase = "volume_observed"
-	ContainerObserved Phase = "container_observed"
-	HealthObserved    Phase = "health_observed"
-	Ready             Phase = "ready"
-	SessionObserved   Phase = "session_observed"
-	PromptIntent      Phase = "prompt_intent"
-	PromptAdmitted    Phase = "prompt_admitted"
+	Provisioning      Phase = "provisioning"
+	PromptPending     Phase = "prompt_pending"
+	Admitted          Phase = "admitted"
 	SealIntent        Phase = "seal_intent"
 	StopIntent        Phase = "stop_intent"
 	WriterInactive    Phase = "writer_inactive"
@@ -60,11 +54,11 @@ func Classify(state State, phase Phase) Lifecycle {
 	switch phase {
 	case Absent:
 		valid, executing = state == Queued, true
-	case ProvisionIntent, CloneObserved, VolumeObserved, ContainerObserved, HealthObserved, Ready, SessionObserved:
+	case Provisioning:
+		valid, executing = state == SettingUp, true
+	case PromptPending:
 		valid, executing = state == SettingUp || state == Uncertain, true
-	case PromptIntent:
-		valid, executing = state == Uncertain, true
-	case PromptAdmitted:
+	case Admitted:
 		valid, executing = state == Working || state == NeedsYou || state == Uncertain, true
 	case StopIntent:
 		cleanupStep = true

@@ -189,9 +189,9 @@ func TestBackgroundRunWorkspaceFenceAndLifecycleAlgebra(t *testing.T) {
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute).UnixMilli()
 	for name, statement := range map[string]string{
-		"skip clone":             `UPDATE background_runs SET state='setting_up',effect_phase='ready',ready_at=?,ready_evidence='x',revision=revision+1,updated_at=? WHERE task_id=?`,
+		"skip provisioning":      `UPDATE background_runs SET state='setting_up',effect_phase='admitted',prompt_request_attempted_at=?,revision=revision+1,updated_at=? WHERE task_id=?`,
 		"skip cleanup":           `UPDATE background_runs SET state='failed',effect_phase='cleanup_complete',cleanup_completed_at=?,cleanup_proof='x',revision=revision+1,updated_at=? WHERE task_id=?`,
-		"prompt without session": `UPDATE background_runs SET state='uncertain',effect_phase='prompt_intent',prompt_intent_at=?,revision=revision+1,updated_at=? WHERE task_id=?`,
+		"prompt without runtime": `UPDATE background_runs SET state='uncertain',effect_phase='prompt_pending',prompt_request_attempted_at=?,revision=revision+1,updated_at=? WHERE task_id=?`,
 	} {
 		if _, err := store.db.Exec(statement, now, now, admission.Task.ID); err == nil {
 			t.Fatalf("closed transition %q succeeded", name)
@@ -250,8 +250,7 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
 	run, err := startNextBackgroundRun(context.Background(), store, now)
-	if err != nil || run.TaskID != first.TaskID || run.State != BackgroundRunSettingUp || run.EffectPhase != BackgroundRunEffectProvisionIntent ||
-		run.ProvisionIntentAt == nil {
+	if err != nil || run.TaskID != first.TaskID || run.State != BackgroundRunSettingUp || run.EffectPhase != BackgroundRunEffectProvisioning {
 		t.Fatalf("first start = %+v, error = %v", run, err)
 	}
 	continued, err := store.NextBackgroundRun(context.Background(), testWorkspaceID(), BackgroundRunSourceProfile)
@@ -263,51 +262,27 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 	}
 	staleStart := backgroundRunRef(run, now)
 	staleStart.ExpectedRevision--
-	if _, err := store.RecordBackgroundRunCloneObserved(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: staleStart, Evidence: "stale clone"}); !errors.Is(err, ErrInvalidState) {
+	if _, err := store.RecordBackgroundRunRuntime(context.Background(), RecordBackgroundRunRuntimeParams{BackgroundRunRef: staleStart,
+		ContainerID: "aabbcc", ContainerStartedAt: "2026-08-31T12:01:00Z", RuntimeEpoch: 1, HostPort: 49152, Evidence: "stale start"}); !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("stale revision mutated run: %v", err)
 	}
-	ref := BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID,
-		Generation: run.Generation, ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now.Add(2 * time.Second)}
-	advance := func(next BackgroundRun, at time.Time) {
-		run = next
-		ref.ExpectedRevision, ref.ExpectedState, ref.ExpectedPhase, ref.Now = run.Revision, run.State, run.EffectPhase, at
-	}
-	run, err = store.RecordBackgroundRunCloneObserved(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref, Evidence: "clone exact"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	advance(run, ref.Now.Add(time.Second))
-	run, err = store.RecordBackgroundRunVolumeObserved(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref, Evidence: "volume exact"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	advance(run, ref.Now.Add(time.Second))
-	run, err = store.RecordBackgroundRunContainerObserved(context.Background(), RecordBackgroundRunContainerObservedParams{
+	ref := backgroundRunRef(run, now.Add(2*time.Second))
+	run, err = store.RecordBackgroundRunRuntime(context.Background(), RecordBackgroundRunRuntimeParams{
 		BackgroundRunRef: ref, ContainerID: "aabbcc", ContainerStartedAt: "2026-08-31T12:01:00Z", RuntimeEpoch: 1,
 		HostPort: 49152, Evidence: "exact container inspect",
 	})
-	if err != nil || run.EffectPhase != BackgroundRunEffectContainerObserved || run.ObservedContainerID != "aabbcc" {
-		t.Fatalf("provision observation = %+v, error = %v", run, err)
+	if err != nil || run.EffectPhase != BackgroundRunEffectProvisioning || run.ObservedContainerID != "aabbcc" {
+		t.Fatalf("runtime record = %+v, error = %v", run, err)
 	}
-	advance(run, ref.Now.Add(time.Second))
-	run, err = store.RecordBackgroundRunHealthObserved(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref, Evidence: "health exact"})
-	if err != nil {
-		t.Fatal(err)
+	advanceBackgroundRef(&ref, run)
+	ref.Now = ref.Now.Add(time.Second)
+	if _, err := store.RecordBackgroundRunRuntime(context.Background(), RecordBackgroundRunRuntimeParams{BackgroundRunRef: ref,
+		ContainerID: "ddeeff", ContainerStartedAt: "2026-08-31T12:02:00Z", RuntimeEpoch: 2, HostPort: 49153, Evidence: "replacement"}); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("committed runtime was replaced: %v", err)
 	}
-	advance(run, ref.Now.Add(time.Second))
-	run, err = store.RecordBackgroundRunReady(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref, Evidence: "health ready"})
-	if err != nil || run.EffectPhase != BackgroundRunEffectReady {
-		t.Fatalf("ready = %+v, error = %v", run, err)
-	}
-	advance(run, ref.Now.Add(time.Second))
-	run, err = store.RecordBackgroundRunSessionObserved(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref, Evidence: "session exact"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	advance(run, ref.Now.Add(time.Second))
-	run, err = store.RecordBackgroundRunPromptIntent(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref, Evidence: "prompt request begun"})
-	if err != nil || run.State != BackgroundRunUncertain || run.EffectPhase != BackgroundRunEffectPromptIntent {
-		t.Fatalf("prompt start = %+v, error = %v", run, err)
+	run, err = store.RecordBackgroundRunPromptRequestAttempted(context.Background(), ref)
+	if err != nil || run.State != BackgroundRunSettingUp || run.EffectPhase != BackgroundRunEffectPromptPending {
+		t.Fatalf("prompt fence = %+v, error = %v", run, err)
 	}
 	restartedAt := now.Add(2 * time.Minute)
 	if err := store.Close(); err != nil {
@@ -428,7 +403,7 @@ func TestBackgroundRunWorkProjectionAndPromptAttemptFenceSurviveRestart(t *testi
 		t.Fatal(err)
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
-	run, ref := advanceBackgroundRunToPromptIntent(t, store, params.BackgroundRun.ImageIdentity, now)
+	run, ref := advanceBackgroundRunToRuntime(t, store, now)
 	work, err := store.NextBackgroundRunWork(context.Background(), testWorkspaceID(), BackgroundRunSourceProfile)
 	if err != nil || work.Run.Revision != ref.ExpectedRevision || work.Prompt != params.Prompt ||
 		!work.Deadline.Equal(params.Deadline.Truncate(time.Millisecond)) || work.AttemptTimeout != time.Hour {
@@ -450,7 +425,8 @@ func TestBackgroundRunWorkProjectionAndPromptAttemptFenceSurviveRestart(t *testi
 	if err != nil || run.PromptRequestAttemptedAt == nil {
 		t.Fatalf("prompt attempt fence = %+v, error=%v", run, err)
 	}
-	advanceBackgroundRef(&ref, run)
+	// A coordinator that read the run before the fence holds the provisioning
+	// revision; it cannot set the fence, and so dispatch, a second time.
 	ref.Now = ref.Now.Add(time.Millisecond)
 	if _, err := store.RecordBackgroundRunPromptRequestAttempted(context.Background(), ref); !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("second prompt attempt fence = %v", err)
@@ -767,14 +743,9 @@ func startNextBackgroundRunWork(ctx context.Context, store *Store, now time.Time
 }
 
 func advanceBackgroundRunToPrompt(t *testing.T, store *Store, image string, now time.Time) (BackgroundRun, BackgroundRunRef) {
-	_, ref := advanceBackgroundRunToPromptIntent(t, store, image, now)
-	run, err := store.RecordBackgroundRunPromptRequestAttempted(context.Background(), ref)
-	if err != nil {
-		t.Fatal(err)
-	}
-	advanceBackgroundRef(&ref, run)
-	ref.Now = ref.Now.Add(time.Second)
-	run, err = store.RecordBackgroundRunPromptAdmitted(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref, Evidence: "prompt admitted"})
+	t.Helper()
+	_, ref := advanceBackgroundRunToPromptPending(t, store, now)
+	run, err := store.RecordBackgroundRunPromptAdmitted(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref, Evidence: "prompt admitted"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -783,37 +754,36 @@ func advanceBackgroundRunToPrompt(t *testing.T, store *Store, image string, now 
 	return run, ref
 }
 
-func advanceBackgroundRunToPromptIntent(t *testing.T, store *Store, image string, now time.Time) (BackgroundRun, BackgroundRunRef) {
+// advanceBackgroundRunToRuntime starts provisioning and commits a runtime, the
+// only durable record provisioning makes before the prompt fence.
+func advanceBackgroundRunToRuntime(t *testing.T, store *Store, now time.Time) (BackgroundRun, BackgroundRunRef) {
 	t.Helper()
 	run, err := startNextBackgroundRun(context.Background(), store, now)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref := BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID,
-		Generation: run.Generation, ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now.Add(time.Second)}
-	evidenceStep := func(step func(context.Context, RecordBackgroundRunEvidenceParams) (BackgroundRun, error), evidence string) {
-		run, err = step(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref, Evidence: evidence})
-		if err != nil {
-			t.Fatalf("advance from %s: %v", ref.ExpectedPhase, err)
-		}
-		advanceBackgroundRef(&ref, run)
-		ref.Now = ref.Now.Add(time.Second)
-	}
-	evidenceStep(store.RecordBackgroundRunCloneObserved, "clone observed")
-	evidenceStep(store.RecordBackgroundRunVolumeObserved, "volume observed")
-	run, err = store.RecordBackgroundRunContainerObserved(context.Background(), RecordBackgroundRunContainerObservedParams{
+	ref := backgroundRunRef(run, now.Add(time.Second))
+	run, err = store.RecordBackgroundRunRuntime(context.Background(), RecordBackgroundRunRuntimeParams{
 		BackgroundRunRef: ref, ContainerID: "result-container", ContainerStartedAt: "2026-08-31T12:01:00Z",
-		RuntimeEpoch: 1, HostPort: 49153, Evidence: "container observed",
+		RuntimeEpoch: 1, HostPort: 49153, Evidence: "container started",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	advanceBackgroundRef(&ref, run)
 	ref.Now = ref.Now.Add(time.Second)
-	evidenceStep(store.RecordBackgroundRunHealthObserved, "health observed")
-	evidenceStep(store.RecordBackgroundRunReady, "ready observed")
-	evidenceStep(store.RecordBackgroundRunSessionObserved, "session observed")
-	evidenceStep(store.RecordBackgroundRunPromptIntent, "prompt intent")
+	return run, ref
+}
+
+func advanceBackgroundRunToPromptPending(t *testing.T, store *Store, now time.Time) (BackgroundRun, BackgroundRunRef) {
+	t.Helper()
+	_, ref := advanceBackgroundRunToRuntime(t, store, now)
+	run, err := store.RecordBackgroundRunPromptRequestAttempted(context.Background(), ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	advanceBackgroundRef(&ref, run)
+	ref.Now = ref.Now.Add(time.Second)
 	return run, ref
 }
 
