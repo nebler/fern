@@ -5,7 +5,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -82,23 +81,6 @@ func validateRetainedResultEvidence(payload json.RawMessage, expected [32]byte) 
 		return fmt.Errorf("%w: evidence contains a sensitive raw field", ErrInvalidInput)
 	}
 	return nil
-}
-
-func retainedResultEvidencePayload(evidence json.RawMessage, evidenceHash [32]byte) (json.RawMessage, error) {
-	if err := validateRetainedResultEvidence(evidence, evidenceHash); err != nil {
-		return nil, err
-	}
-	var encoded bytes.Buffer
-	encoded.WriteByte('{')
-	encoded.WriteString(`"evidence":`)
-	encoded.Write(evidence)
-	encoded.WriteString(`,"evidenceSha256":"sha256:`)
-	encoded.WriteString(hex.EncodeToString(evidenceHash[:]))
-	encoded.WriteString(`"}`)
-	if !json.Valid(encoded.Bytes()) {
-		return nil, fmt.Errorf("%w: encoded evidence", ErrCorruptStore)
-	}
-	return encoded.Bytes(), nil
 }
 
 var sensitiveEvidenceKeyReplacer = strings.NewReplacer("_", "", "-", "", ".", "")
