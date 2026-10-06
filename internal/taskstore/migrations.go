@@ -357,81 +357,56 @@ CREATE TABLE background_runs (
     endpoint_identity TEXT NOT NULL UNIQUE CHECK(length(CAST(endpoint_identity AS BLOB)) BETWEEN 1 AND 256),
     opencode_session_id TEXT NOT NULL UNIQUE,
     opencode_message_id TEXT NOT NULL,
+    environment_sha256 BLOB NOT NULL CHECK(length(environment_sha256)=32 AND
+      lower(hex(environment_sha256))<>'0000000000000000000000000000000000000000000000000000000000000000'),
+    resource_spec_version INTEGER NOT NULL CHECK(resource_spec_version=10),
     state TEXT NOT NULL CHECK(state IN ('queued','setting_up','working','needs_you','canceling','uncertain','result_ready','failed','cleanup_required')),
-    effect_phase TEXT NOT NULL CHECK(effect_phase IN (
-      'absent','provisioning','prompt_pending','admitted','stop_intent','writer_inactive','route_removed',
-      'container_removed','volume_removed','clone_removed','cleanup_complete','pre_effect_failed'
-    )),
+    effect_phase TEXT NOT NULL CHECK(effect_phase IN ('absent','provisioning','prompt_pending','admitted','sealing','cleaning','cleanup_complete')),
+    creator_actor_snapshot_id INTEGER NOT NULL REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     stop_receipt_id TEXT REFERENCES receipts(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     stop_actor_snapshot_id INTEGER REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     stop_requested_at INTEGER,
-    creator_actor_snapshot_id INTEGER NOT NULL REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
+    timeout_requested_at INTEGER CHECK(timeout_requested_at IS NULL OR timeout_requested_at BETWEEN created_at AND updated_at),
+    timeout_actor_snapshot_id INTEGER REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     observed_container_id TEXT CHECK(observed_container_id IS NULL OR length(CAST(observed_container_id AS BLOB)) BETWEEN 1 AND 128),
     observed_container_started_at TEXT CHECK(observed_container_started_at IS NULL OR length(CAST(observed_container_started_at AS BLOB)) BETWEEN 1 AND 64),
     runtime_epoch INTEGER CHECK(runtime_epoch IS NULL OR runtime_epoch > 0),
     host_port INTEGER CHECK(host_port IS NULL OR host_port BETWEEN 1 AND 65535),
-    writer_inactive_evidence TEXT CHECK(writer_inactive_evidence IS NULL OR length(CAST(writer_inactive_evidence AS BLOB)) BETWEEN 1 AND 4096),
-    route_removed_evidence TEXT CHECK(route_removed_evidence IS NULL OR length(CAST(route_removed_evidence AS BLOB)) BETWEEN 1 AND 4096),
-    container_removed_evidence TEXT CHECK(container_removed_evidence IS NULL OR length(CAST(container_removed_evidence AS BLOB)) BETWEEN 1 AND 4096),
-    volume_removed_evidence TEXT CHECK(volume_removed_evidence IS NULL OR length(CAST(volume_removed_evidence AS BLOB)) BETWEEN 1 AND 4096),
-    clone_removed_evidence TEXT CHECK(clone_removed_evidence IS NULL OR length(CAST(clone_removed_evidence AS BLOB)) BETWEEN 1 AND 4096),
+    prompt_request_attempted_at INTEGER CHECK(prompt_request_attempted_at IS NULL OR prompt_request_attempted_at BETWEEN created_at AND updated_at),
+    background_seal_request_id TEXT,
+    artifact_export_id TEXT,
+    retained_artifact_id TEXT,
+    materialization_id TEXT,
+    retained_result_id TEXT,
     last_evidence TEXT CHECK(last_evidence IS NULL OR length(CAST(last_evidence AS BLOB)) BETWEEN 1 AND 4096),
     last_error TEXT CHECK(last_error IS NULL OR length(CAST(last_error AS BLOB)) BETWEEN 1 AND 4096),
-    stop_intent_at INTEGER,
-    writer_inactive_at INTEGER,
-    route_removed_at INTEGER,
-    container_removed_at INTEGER,
-    volume_removed_at INTEGER,
-    clone_removed_at INTEGER,
-    cleanup_completed_at INTEGER,
     cleanup_proof TEXT CHECK(cleanup_proof IS NULL OR length(CAST(cleanup_proof AS BLOB)) BETWEEN 1 AND 4096),
-    absence_proof TEXT CHECK(absence_proof IS NULL OR length(CAST(absence_proof AS BLOB)) BETWEEN 1 AND 4096),
     revision INTEGER NOT NULL CHECK(revision >= 1),
     created_at INTEGER NOT NULL CHECK(created_at >= 0),
-    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at), prompt_request_attempted_at INTEGER
-  CHECK(prompt_request_attempted_at IS NULL OR prompt_request_attempted_at BETWEEN created_at AND updated_at), timeout_requested_at INTEGER
-  CHECK(timeout_requested_at IS NULL OR timeout_requested_at BETWEEN created_at AND updated_at), timeout_actor_snapshot_id INTEGER
-  REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT, environment_sha256 BLOB NOT NULL
-  CHECK(length(environment_sha256)=32 AND
-    lower(hex(environment_sha256))<>'0000000000000000000000000000000000000000000000000000000000000000'), resource_spec_version INTEGER NOT NULL
-  CHECK(resource_spec_version=10), background_seal_request_id TEXT, artifact_export_id TEXT, retained_artifact_id TEXT, materialization_id TEXT, retained_result_id TEXT, result_authority_phase TEXT
-  CHECK(result_authority_phase IS NULL OR result_authority_phase IN
-    ('seal_intent','writer_inactive','exporting','artifact_committed','cleanup')),
-    CHECK((stop_receipt_id IS NULL AND stop_actor_snapshot_id IS NULL AND stop_requested_at IS NULL AND state<>'canceling') OR
-          (stop_receipt_id IS NOT NULL AND stop_actor_snapshot_id IS NOT NULL AND stop_requested_at IS NOT NULL AND
-           state IN ('canceling','uncertain','result_ready','failed','cleanup_required'))),
+    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
     CHECK(
         (state='queued' AND effect_phase='absent') OR
         (state='setting_up' AND effect_phase IN ('provisioning','prompt_pending')) OR
+        (state='uncertain' AND effect_phase IN ('prompt_pending','admitted')) OR
         (state IN ('working','needs_you') AND effect_phase='admitted') OR
-        (state='uncertain' AND effect_phase IN ('prompt_pending','admitted','stop_intent')) OR
-        (state IN ('canceling','cleanup_required') AND effect_phase IN ('stop_intent','writer_inactive','route_removed','container_removed','volume_removed','clone_removed')) OR
-        (state='result_ready' AND effect_phase IN ('stop_intent','writer_inactive','route_removed','container_removed','volume_removed','clone_removed','cleanup_complete')) OR
-        (state='failed' AND effect_phase IN ('pre_effect_failed','cleanup_complete'))
+        (state='canceling' AND effect_phase IN ('sealing','cleaning')) OR
+        (state='cleanup_required' AND effect_phase='cleaning') OR
+        (state='result_ready' AND effect_phase IN ('cleaning','cleanup_complete')) OR
+        (state='failed' AND effect_phase='cleanup_complete')
     ),
+    CHECK((stop_receipt_id IS NULL AND stop_actor_snapshot_id IS NULL AND stop_requested_at IS NULL) OR
+          (stop_receipt_id IS NOT NULL AND stop_actor_snapshot_id IS NOT NULL AND stop_requested_at IS NOT NULL AND
+           state IN ('canceling','cleanup_required','failed'))),
+    CHECK((timeout_requested_at IS NULL)=(timeout_actor_snapshot_id IS NULL)),
+    CHECK(state<>'canceling' OR stop_receipt_id IS NOT NULL OR effect_phase='sealing'),
     CHECK((observed_container_id IS NULL AND observed_container_started_at IS NULL AND runtime_epoch IS NULL AND host_port IS NULL) OR
           (observed_container_id IS NOT NULL AND observed_container_started_at IS NOT NULL AND runtime_epoch IS NOT NULL AND host_port IS NOT NULL)),
     CHECK(effect_phase NOT IN ('prompt_pending','admitted') OR (observed_container_id IS NOT NULL AND prompt_request_attempted_at IS NOT NULL)),
-    CHECK(effect_phase NOT IN ('stop_intent','writer_inactive','route_removed','container_removed','volume_removed','clone_removed','cleanup_complete') OR stop_intent_at IS NOT NULL),
-    CHECK(effect_phase NOT IN ('writer_inactive','route_removed','container_removed','volume_removed','clone_removed','cleanup_complete') OR
-          (writer_inactive_at IS NOT NULL AND writer_inactive_evidence IS NOT NULL)),
-    CHECK(effect_phase NOT IN ('route_removed','container_removed','volume_removed','clone_removed','cleanup_complete') OR
-          (route_removed_at IS NOT NULL AND route_removed_evidence IS NOT NULL)),
-    CHECK(effect_phase NOT IN ('container_removed','volume_removed','clone_removed','cleanup_complete') OR
-          (container_removed_at IS NOT NULL AND container_removed_evidence IS NOT NULL)),
-    CHECK(effect_phase NOT IN ('volume_removed','clone_removed','cleanup_complete') OR
-          (volume_removed_at IS NOT NULL AND volume_removed_evidence IS NOT NULL)),
-    CHECK(effect_phase NOT IN ('clone_removed','cleanup_complete') OR (clone_removed_at IS NOT NULL AND clone_removed_evidence IS NOT NULL)),
-    CHECK((cleanup_completed_at IS NULL AND cleanup_proof IS NULL) OR
-          (cleanup_completed_at IS NOT NULL AND cleanup_proof IS NOT NULL AND effect_phase='cleanup_complete')),
-    CHECK((effect_phase='pre_effect_failed')=(absence_proof IS NOT NULL)),
-    CHECK((stop_intent_at IS NULL OR stop_intent_at BETWEEN created_at AND updated_at) AND
-          (writer_inactive_at IS NULL OR writer_inactive_at BETWEEN created_at AND updated_at) AND
-          (route_removed_at IS NULL OR route_removed_at BETWEEN created_at AND updated_at) AND
-          (container_removed_at IS NULL OR container_removed_at BETWEEN created_at AND updated_at) AND
-          (volume_removed_at IS NULL OR volume_removed_at BETWEEN created_at AND updated_at) AND
-          (clone_removed_at IS NULL OR clone_removed_at BETWEEN created_at AND updated_at) AND
-          (cleanup_completed_at IS NULL OR cleanup_completed_at BETWEEN created_at AND updated_at)),
+    CHECK((background_seal_request_id IS NULL AND artifact_export_id IS NULL AND retained_artifact_id IS NULL AND materialization_id IS NULL AND retained_result_id IS NULL) OR
+          (background_seal_request_id IS NOT NULL AND artifact_export_id IS NOT NULL AND retained_artifact_id IS NOT NULL AND materialization_id IS NOT NULL AND retained_result_id IS NOT NULL)),
+    CHECK(effect_phase<>'sealing' OR background_seal_request_id IS NOT NULL),
+    CHECK(state<>'result_ready' OR background_seal_request_id IS NOT NULL),
+    CHECK((effect_phase='cleanup_complete')=(cleanup_proof IS NOT NULL)),
     FOREIGN KEY(attempt_id,task_id,workspace_id) REFERENCES attempts(id,task_id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY(task_id,workspace_id) REFERENCES tasks(id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY(workspace_id,repository_id) REFERENCES workspaces(id,repository_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -441,11 +416,11 @@ CREATE TABLE background_runs (
 
 CREATE INDEX background_runs_actor_list ON background_runs(creator_actor_snapshot_id,created_at DESC,task_id DESC);
 
-CREATE INDEX background_runs_next ON background_runs(workspace_id,state,updated_at,task_id);
+CREATE INDEX background_runs_next ON background_runs(workspace_id,effect_phase,updated_at,task_id);
 
 CREATE UNIQUE INDEX background_runs_workspace_capacity_one ON background_runs(workspace_id)
   WHERE profile='source-39fb919a054190498f6d5b7985bde231f93ad7a6' AND
-    effect_phase NOT IN ('absent','cleanup_complete','pre_effect_failed');
+    effect_phase NOT IN ('absent','cleanup_complete');
 
 CREATE TRIGGER background_runs_immutable_inputs BEFORE UPDATE ON background_runs
 WHEN NEW.task_id<>OLD.task_id OR NEW.attempt_id<>OLD.attempt_id OR NEW.workspace_id<>OLD.workspace_id OR
@@ -669,40 +644,27 @@ CREATE TRIGGER background_runs_retained_tuple_immutable BEFORE UPDATE ON backgro
   NEW.retained_result_id IS NOT OLD.retained_result_id)
 BEGIN SELECT RAISE(ABORT,'background retained tuple is immutable'); END;
 
-CREATE TRIGGER background_runs_retained_cleanup_gate BEFORE UPDATE OF effect_phase ON background_runs
-WHEN OLD.background_seal_request_id IS NOT NULL AND OLD.state='result_ready' AND OLD.effect_phase='writer_inactive' AND NEW.effect_phase='route_removed' AND
-  (OLD.result_authority_phase<>'cleanup' OR NOT EXISTS (
+CREATE TRIGGER background_runs_seal_retains_resources BEFORE UPDATE OF effect_phase ON background_runs
+WHEN OLD.effect_phase='sealing' AND NEW.effect_phase<>'sealing' AND NOT EXISTS (
     SELECT 1 FROM results result JOIN retained_artifacts artifact ON artifact.id=OLD.retained_artifact_id
     JOIN background_run_exports export ON export.id=OLD.artifact_export_id
     JOIN artifact_materializations materialization ON materialization.id=OLD.materialization_id
     WHERE result.id=OLD.retained_result_id AND result.source_kind='retained_artifact' AND artifact.result_id=result.id AND
-      export.state='completed' AND export.phase='completed' AND export.result_id=result.id AND materialization.state='ready' AND materialization.result_id=result.id))
-BEGIN SELECT RAISE(ABORT,'retained cleanup has no exact committed tuple'); END;
+      export.state='completed' AND export.phase='completed' AND export.result_id=result.id AND materialization.state='ready' AND materialization.result_id=result.id)
+BEGIN SELECT RAISE(ABORT,'sealed run has no exact committed result'); END;
 
-CREATE TRIGGER background_runs_phase_timestamps_immutable BEFORE UPDATE ON background_runs WHEN
- (OLD.stop_intent_at IS NOT NULL AND NEW.stop_intent_at IS NOT OLD.stop_intent_at) OR
- (OLD.writer_inactive_at IS NOT NULL AND NEW.writer_inactive_at IS NOT OLD.writer_inactive_at) OR
- (OLD.route_removed_at IS NOT NULL AND NEW.route_removed_at IS NOT OLD.route_removed_at) OR
- (OLD.container_removed_at IS NOT NULL AND NEW.container_removed_at IS NOT OLD.container_removed_at) OR
- (OLD.volume_removed_at IS NOT NULL AND NEW.volume_removed_at IS NOT OLD.volume_removed_at) OR
- (OLD.clone_removed_at IS NOT NULL AND NEW.clone_removed_at IS NOT OLD.clone_removed_at) OR
- (OLD.cleanup_completed_at IS NOT NULL AND NEW.cleanup_completed_at IS NOT OLD.cleanup_completed_at)
-BEGIN SELECT RAISE(ABORT,'background run phase timestamp is immutable'); END;
-
-CREATE TRIGGER background_runs_observation_immutable BEFORE UPDATE ON background_runs WHEN
- (OLD.observed_container_id IS NOT NULL AND (NEW.observed_container_id IS NOT OLD.observed_container_id OR NEW.observed_container_started_at IS NOT OLD.observed_container_started_at OR NEW.runtime_epoch IS NOT OLD.runtime_epoch OR NEW.host_port IS NOT OLD.host_port)) OR
- (OLD.writer_inactive_evidence IS NOT NULL AND NEW.writer_inactive_evidence IS NOT OLD.writer_inactive_evidence) OR
- (OLD.route_removed_evidence IS NOT NULL AND NEW.route_removed_evidence IS NOT OLD.route_removed_evidence) OR
- (OLD.container_removed_evidence IS NOT NULL AND NEW.container_removed_evidence IS NOT OLD.container_removed_evidence) OR
- (OLD.volume_removed_evidence IS NOT NULL AND NEW.volume_removed_evidence IS NOT OLD.volume_removed_evidence) OR
- (OLD.clone_removed_evidence IS NOT NULL AND NEW.clone_removed_evidence IS NOT OLD.clone_removed_evidence) OR
- (OLD.absence_proof IS NOT NULL AND NEW.absence_proof IS NOT OLD.absence_proof) OR
- (OLD.cleanup_proof IS NOT NULL AND (NEW.cleanup_proof IS NOT OLD.cleanup_proof OR NEW.cleanup_completed_at IS NOT OLD.cleanup_completed_at))
-BEGIN SELECT RAISE(ABORT,'background run resource proof is immutable'); END;
+CREATE TRIGGER background_runs_runtime_immutable BEFORE UPDATE ON background_runs WHEN
+ OLD.observed_container_id IS NOT NULL AND (NEW.observed_container_id IS NOT OLD.observed_container_id OR
+   NEW.observed_container_started_at IS NOT OLD.observed_container_started_at OR NEW.runtime_epoch IS NOT OLD.runtime_epoch OR NEW.host_port IS NOT OLD.host_port)
+BEGIN SELECT RAISE(ABORT,'background run runtime identity is immutable'); END;
 
 CREATE TRIGGER background_runs_terminal_immutable BEFORE UPDATE ON background_runs
-WHEN OLD.state='failed' OR (OLD.state='result_ready' AND OLD.effect_phase='cleanup_complete')
+WHEN OLD.effect_phase='cleanup_complete'
 BEGIN SELECT RAISE(ABORT,'terminal background run is immutable'); END;
+
+CREATE TRIGGER background_runs_terminal_after_cleanup BEFORE UPDATE OF effect_phase ON background_runs
+WHEN NEW.effect_phase='cleanup_complete' AND OLD.effect_phase NOT IN ('absent','cleaning')
+BEGIN SELECT RAISE(ABORT,'background run resources were not cleaned'); END;
 
 CREATE TRIGGER results_immutable_update BEFORE UPDATE ON results BEGIN SELECT RAISE(ABORT,'results are immutable'); END;
 

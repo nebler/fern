@@ -12,9 +12,11 @@ import (
 	"github.com/nebler/fern/internal/task"
 )
 
+// RecordBackgroundRunWriterFence durably proves, once per seal, that the exact
+// writer no longer runs. Export reads only under this fence.
 func (s *Store) RecordBackgroundRunWriterFence(ctx context.Context, p RecordBackgroundRunWriterFenceParams) (_ BackgroundRun, err error) {
 	if err := validateBackgroundRunRef(p.BackgroundRunRef); err != nil || p.ExpectedState != BackgroundRunCanceling ||
-		p.ExpectedPhase != BackgroundRunEffectSealIntent {
+		p.ExpectedPhase != BackgroundRunEffectSealing {
 		return BackgroundRun{}, fmt.Errorf("%w: writer fence revision", ErrInvalidInput)
 	}
 	if _, parseErr := task.ParseSealRequestID(string(p.SealRequestID)); parseErr != nil {
@@ -41,15 +43,16 @@ func (s *Store) RecordBackgroundRunWriterFence(ctx context.Context, p RecordBack
 	if err != nil {
 		return BackgroundRun{}, err
 	}
-	if run.ResultAuthorityPhase == "writer_inactive" {
-		fence, fenceErr := getWriterFence(ctx, tx, p.SealRequestID)
-		if fenceErr == nil && writerFenceMatches(fence, p) {
-			if err := tx.Commit(); err != nil {
-				return BackgroundRun{}, err
-			}
-			return run, nil
+	if fence, fenceErr := getWriterFence(ctx, tx, p.SealRequestID); fenceErr == nil {
+		if !writerFenceMatches(fence, p) {
+			return BackgroundRun{}, ErrInvalidState
 		}
-		return BackgroundRun{}, ErrInvalidState
+		if err := tx.Commit(); err != nil {
+			return BackgroundRun{}, err
+		}
+		return run, nil
+	} else if !errors.Is(fenceErr, ErrNotFound) {
+		return BackgroundRun{}, fenceErr
 	}
 	if p.Kind == WriterFenceRuntimeStopped && (p.ContainerID != run.ObservedContainerID || p.ContainerStartedAt != run.ObservedContainerStartedAt || p.RuntimeEpoch != run.RuntimeEpoch) {
 		return BackgroundRun{}, ErrInvalidState
@@ -79,11 +82,10 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, p.SealRequestID, p.ExportID, p.TaskID, p.Att
 		return BackgroundRun{}, fmt.Errorf("insert writer fence: %w", err)
 	}
 	evidence := "writer_fence:sha256:" + hex.EncodeToString(p.ProofSHA256[:])
-	result, err := tx.ExecContext(ctx, `UPDATE background_runs SET effect_phase='writer_inactive',writer_inactive_at=?,
-writer_inactive_evidence=?,last_evidence=?,result_authority_phase='writer_inactive',revision=revision+1,updated_at=?
-WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND state='cleanup_required' AND
-effect_phase='stop_intent' AND result_authority_phase='seal_intent' AND background_seal_request_id=? AND artifact_export_id=?`,
-		unixMillis(p.Now), evidence, evidence, unixMillis(p.Now), p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedRevision,
+	result, err := tx.ExecContext(ctx, `UPDATE background_runs SET last_evidence=?,revision=revision+1,updated_at=?
+WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND state='canceling' AND
+effect_phase='sealing' AND background_seal_request_id=? AND artifact_export_id=?`,
+		evidence, unixMillis(p.Now), p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedRevision,
 		p.SealRequestID, p.ExportID)
 	if err != nil {
 		return BackgroundRun{}, fmt.Errorf("record writer inactivity: %w", err)

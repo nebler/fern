@@ -50,21 +50,13 @@ const (
 	BackgroundRunFailed          = run.Failed
 	BackgroundRunCleanupRequired = run.CleanupRequired
 
-	BackgroundRunEffectAbsent            = run.Absent
-	BackgroundRunEffectProvisioning      = run.Provisioning
-	BackgroundRunEffectPromptPending     = run.PromptPending
-	BackgroundRunEffectAdmitted          = run.Admitted
-	BackgroundRunEffectSealIntent        = run.SealIntent
-	BackgroundRunEffectStopIntent        = run.StopIntent
-	BackgroundRunEffectWriterInactive    = run.WriterInactive
-	BackgroundRunEffectExporting         = run.Exporting
-	BackgroundRunEffectArtifactCommitted = run.ArtifactCommitted
-	BackgroundRunEffectRouteRemoved      = run.RouteRemoved
-	BackgroundRunEffectContainerRemoved  = run.ContainerRemoved
-	BackgroundRunEffectVolumeRemoved     = run.VolumeRemoved
-	BackgroundRunEffectCloneRemoved      = run.CloneRemoved
-	BackgroundRunEffectCleanupComplete   = run.CleanupComplete
-	BackgroundRunEffectPreEffectFailed   = run.PreEffectFailed
+	BackgroundRunEffectAbsent          = run.Absent
+	BackgroundRunEffectProvisioning    = run.Provisioning
+	BackgroundRunEffectPromptPending   = run.PromptPending
+	BackgroundRunEffectAdmitted        = run.Admitted
+	BackgroundRunEffectSealing         = run.Sealing
+	BackgroundRunEffectCleaning        = run.Cleaning
+	BackgroundRunEffectCleanupComplete = run.CleanupComplete
 )
 
 // BackgroundRunIntent is the immutable environment selection committed with a
@@ -109,31 +101,17 @@ type BackgroundRun struct {
 	ObservedContainerStartedAt string
 	RuntimeEpoch               int64
 	HostPort                   int
-	WriterInactiveEvidence     string
-	RouteRemovedEvidence       string
-	ContainerRemovedEvidence   string
-	VolumeRemovedEvidence      string
-	CloneRemovedEvidence       string
 	LastEvidence               string
 	LastError                  string
 	PromptRequestAttemptedAt   *time.Time
 	TimeoutRequestedAt         *time.Time
 	TimeoutActor               *task.ActorSnapshot
-	StopIntentAt               *time.Time
-	WriterInactiveAt           *time.Time
-	RouteRemovedAt             *time.Time
-	ContainerRemovedAt         *time.Time
-	VolumeRemovedAt            *time.Time
-	CloneRemovedAt             *time.Time
-	CleanupCompletedAt         *time.Time
 	CleanupProof               string
-	AbsenceProof               string
 	BackgroundSealRequestID    task.SealRequestID
 	ArtifactExportID           task.ArtifactExportID
 	RetainedArtifactID         task.RetainedArtifactID
 	MaterializationID          task.MaterializationID
 	RetainedResultID           task.ResultID
-	ResultAuthorityPhase       string
 	Revision                   int64
 	CreatedAt                  time.Time
 	UpdatedAt                  time.Time

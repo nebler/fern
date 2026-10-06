@@ -887,8 +887,8 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 		if runErr != nil && !errors.Is(runErr, backgroundruncoord.ErrNoWork) {
 			current, _ := store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
 			export, _ := store.GetBackgroundRunExport(context.Background(), seal.Request.ExportID)
-			return fmt.Errorf("retain result at run=%s/%s authority=%s export=%s/%s revision=%d: %w",
-				current.State, current.EffectPhase, current.ResultAuthorityPhase, export.State, export.Phase, export.Revision, runErr)
+			return fmt.Errorf("retain result at run=%s/%s export=%s/%s revision=%d: %w",
+				current.State, current.EffectPhase, export.State, export.Phase, export.Revision, runErr)
 		}
 		run, err = store.GetBackgroundRun(ctx, workspaceID, admission.Task.ID, actor)
 		if err != nil {

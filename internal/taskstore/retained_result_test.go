@@ -36,7 +36,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		CommitEpochSeconds: now.Unix(), PolicyVersion: "background-retained.v1", APIContractVersion: "v1", AcceptedAt: now.Add(20 * time.Second),
 	}
 	sealed, err := store.SealBackgroundRun(context.Background(), seal)
-	if err != nil || sealed.Run.State != BackgroundRunCanceling || sealed.Run.EffectPhase != BackgroundRunEffectSealIntent ||
+	if err != nil || sealed.Run.State != BackgroundRunCanceling || sealed.Run.EffectPhase != BackgroundRunEffectSealing ||
 		sealed.Export.Phase != BackgroundRunExportPhasePrepared {
 		t.Fatalf("seal admission = %+v, error=%v", sealed, err)
 	}
@@ -61,7 +61,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 
 	sealedWork, err := startNextBackgroundRunWork(context.Background(), store, seal.AcceptedAt.Add(2*time.Second))
 	sealedRun := sealedWork.Run
-	if err != nil || sealedRun.State != BackgroundRunCanceling || sealedRun.EffectPhase != BackgroundRunEffectSealIntent {
+	if err != nil || sealedRun.State != BackgroundRunCanceling || sealedRun.EffectPhase != BackgroundRunEffectSealing {
 		t.Fatal(err)
 	}
 	writerAt := seal.AcceptedAt.Add(3 * time.Second)
@@ -88,14 +88,14 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		ContainerID: run.ObservedContainerID, ContainerStartedAt: run.ObservedContainerStartedAt, RuntimeEpoch: run.RuntimeEpoch,
 		RuntimeToken: "runtime-token", StoppedAt: &stoppedAt, ProofSHA256: sha256.Sum256(encodedWriterProof)}
 	writerInactive, err := store.RecordBackgroundRunWriterFence(context.Background(), writerParams)
-	if err != nil || writerInactive.EffectPhase != BackgroundRunEffectWriterInactive {
+	if err != nil || writerInactive.EffectPhase != BackgroundRunEffectSealing || writerInactive.Revision != sealedRun.Revision+1 {
 		t.Fatalf("writer fence = %+v, error=%v", writerInactive, err)
 	}
 	if _, err := store.RecordBackgroundRunWriterFence(context.Background(), writerParams); err != nil {
 		t.Fatalf("writer fence replay: %v", err)
 	}
 	writerRun, err := startNextBackgroundRun(context.Background(), store, writerAt.Add(time.Millisecond))
-	if err != nil || writerRun.EffectPhase != BackgroundRunEffectWriterInactive {
+	if err != nil || writerRun.EffectPhase != BackgroundRunEffectSealing {
 		t.Fatalf("writer-inactive production claim = %+v, error=%v", writerRun, err)
 	}
 
@@ -142,7 +142,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		t.Fatalf("recovery-required export advanced before restart: %v", err)
 	}
 	reselected, err := startNextBackgroundRun(context.Background(), store, failureAt.Add(time.Second))
-	if err != nil || reselected.EffectPhase != BackgroundRunEffectExporting {
+	if err != nil || reselected.EffectPhase != BackgroundRunEffectSealing {
 		t.Fatalf("reselect failed export run = %+v, error=%v", reselected, err)
 	}
 	export, err = store.StartBackgroundRunExport(context.Background(), BackgroundRunExportRef{
@@ -229,8 +229,12 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT count(*) FROM results WHERE id=?`, seal.ResultID).Scan(&uncommitted); err != nil || uncommitted != 0 {
 		t.Fatalf("mismatched commit leaked result: count=%d error=%v", uncommitted, err)
 	}
+	if _, err := store.db.Exec(`UPDATE background_runs SET state='result_ready',effect_phase='cleaning',
+revision=revision+1,updated_at=updated_at+1 WHERE task_id=?`, run.TaskID); err == nil {
+		t.Fatal("sealed run released its resources without a committed result")
+	}
 	committed, err := store.CommitBackgroundRunRetainedResult(context.Background(), commit)
-	if err != nil || committed.Run.State != BackgroundRunResultReady || committed.Run.EffectPhase != BackgroundRunEffectArtifactCommitted ||
+	if err != nil || committed.Run.State != BackgroundRunResultReady || committed.Run.EffectPhase != BackgroundRunEffectCleaning ||
 		committed.Result.SourceKind != ResultSourceRetainedArtifact || committed.Artifact.ManifestSHA256 != sha256.Sum256(artifactManifest) ||
 		committed.Artifact.ChangesSHA256 != sha256.Sum256(resultManifestJSON) || committed.Artifact.ManifestSHA256 == committed.Artifact.ChangesSHA256 ||
 		committed.Artifact.CASLocator != "sha256:"+hex.EncodeToString(committed.Artifact.ManifestSHA256[:]) {
@@ -258,34 +262,18 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	if err != nil || len(digests) != 1 || digests[0] != committed.Artifact.ManifestSHA256 {
 		t.Fatalf("referenced manifests = %x, error=%v", digests, err)
 	}
-	if _, err := store.db.Exec(`UPDATE background_runs SET effect_phase='route_removed',route_removed_at=updated_at+1,
-route_removed_evidence='raw cleanup',revision=revision+1,updated_at=updated_at+1 WHERE task_id=?`, run.TaskID); err == nil {
-		t.Fatal("result-bearing cleanup bypassed committed tuple gate")
-	}
 	cleanupWork, err := startNextBackgroundRunWork(context.Background(), store, exportNow.Add(time.Second))
 	cleanupRun := cleanupWork.Run
-	if err != nil || cleanupRun.EffectPhase != BackgroundRunEffectArtifactCommitted {
+	if err != nil || cleanupRun.State != BackgroundRunResultReady || cleanupRun.EffectPhase != BackgroundRunEffectCleaning {
 		t.Fatal(err)
 	}
 	cleanupRef := backgroundRunRef(cleanupRun, exportNow.Add(2*time.Second))
-	cleanupRun, err = store.RequestBackgroundRunResultCleanup(context.Background(), RecordBackgroundRunEvidenceParams{
-		BackgroundRunRef: cleanupRef, Evidence: "retained tuple accepted",
-	})
-	if err != nil {
-		t.Fatal(err)
+	failed, err := store.MarkBackgroundRunCleanupRequired(context.Background(), MarkBackgroundRunCleanupRequiredParams{
+		BackgroundRunRef: cleanupRef, Error: "container removal unavailable"})
+	if err != nil || failed.State != BackgroundRunResultReady || failed.EffectPhase != BackgroundRunEffectCleaning {
+		t.Fatalf("retained cleanup failure = %+v, error=%v", failed, err)
 	}
-	advanceBackgroundRef(&cleanupRef, cleanupRun)
-	for _, step := range []func(context.Context, RecordBackgroundRunEvidenceParams) (BackgroundRun, error){
-		store.RecordBackgroundRunRouteRemoved, store.RecordBackgroundRunContainerRemoved,
-		store.RecordBackgroundRunVolumeRemoved, store.RecordBackgroundRunCloneRemoved,
-	} {
-		cleanupRef.Now = cleanupRef.Now.Add(time.Second)
-		cleanupRun, err = step(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: cleanupRef, Evidence: "resource absent"})
-		if err != nil {
-			t.Fatalf("retained cleanup from %s: %v", cleanupRef.ExpectedPhase, err)
-		}
-		advanceBackgroundRef(&cleanupRef, cleanupRun)
-	}
+	advanceBackgroundRef(&cleanupRef, failed)
 	cleanupRef.Now = cleanupRef.Now.Add(time.Second)
 	cleanupRun, err = store.CompleteBackgroundRunResultCleanup(context.Background(), CompleteBackgroundRunResultCleanupParams{
 		BackgroundRunRef: cleanupRef, CleanupProof: "all resources absent",

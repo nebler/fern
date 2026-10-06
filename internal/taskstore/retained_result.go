@@ -194,18 +194,20 @@ WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND se
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRunRetainedResult{}, ErrInvalidState
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE background_runs SET state='result_ready',result_authority_phase='artifact_committed',
-revision=revision+1,updated_at=? WHERE task_id=? AND attempt_id=? AND generation=? AND
-state='cleanup_required' AND effect_phase='writer_inactive' AND result_authority_phase='exporting' AND artifact_export_id=? AND retained_artifact_id=?`,
-		sealedMS, p.TaskID, p.AttemptID, p.Generation, p.ExportID, p.ArtifactID)
+	result, err = tx.ExecContext(ctx, `UPDATE background_run_exports SET state='completed',phase='completed',
+revision=revision+1,updated_at=? WHERE id=? AND revision=? AND phase='materialized' AND state='running'`, sealedMS, p.ExportID, p.ExpectedRevision)
 	if err != nil {
 		return BackgroundRunRetainedResult{}, err
 	}
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRunRetainedResult{}, ErrInvalidState
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE background_run_exports SET state='completed',phase='completed',
-revision=revision+1,updated_at=? WHERE id=? AND revision=? AND phase='materialized' AND state='running'`, sealedMS, p.ExportID, p.ExpectedRevision)
+	// The committed tuple is now complete, so the run may leave sealing and
+	// release its resources; the cleanup gate trigger checks exactly this.
+	result, err = tx.ExecContext(ctx, `UPDATE background_runs SET state='result_ready',effect_phase='cleaning',
+revision=revision+1,updated_at=? WHERE task_id=? AND attempt_id=? AND generation=? AND
+state='canceling' AND effect_phase='sealing' AND artifact_export_id=? AND retained_artifact_id=?`,
+		sealedMS, p.TaskID, p.AttemptID, p.Generation, p.ExportID, p.ArtifactID)
 	if err != nil {
 		return BackgroundRunRetainedResult{}, err
 	}
@@ -350,7 +352,7 @@ func retainedResultReplay(ctx context.Context, tx *sql.Tx, result Result, p Comm
 	resultEvent, _ := scanEvent(tx.QueryRowContext(ctx, eventSelect+` WHERE e.id=?`, p.ResultEventID))
 	taskEvent, _ := scanEvent(tx.QueryRowContext(ctx, eventSelect+` WHERE e.id=?`, p.TaskEventID))
 	if export.State != BackgroundRunExportCompleted || export.Phase != BackgroundRunExportPhaseCompleted ||
-		run.EffectPhase != BackgroundRunEffectArtifactCommitted || owner.SealedResultID != p.ResultID || attempt.SealedResultID != p.ResultID ||
+		run.State != BackgroundRunResultReady || owner.SealedResultID != p.ResultID || attempt.SealedResultID != p.ResultID ||
 		!bytes.Equal(artifact.Manifest, export.ArtifactManifest) {
 		return BackgroundRunRetainedResult{}, ErrCorruptStore
 	}

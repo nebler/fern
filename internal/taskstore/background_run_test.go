@@ -187,11 +187,16 @@ func TestBackgroundRunWorkspaceFenceAndLifecycleAlgebra(t *testing.T) {
 	if _, err := store.StopBackgroundRun(context.Background(), wrongWorkspaceStop); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-workspace stop = %v", err)
 	}
-	now := testTime.Truncate(time.Millisecond).Add(time.Minute).UnixMilli()
+	started := testTime.Truncate(time.Millisecond).Add(time.Minute)
+	if _, err := startNextBackgroundRun(context.Background(), store, started); err != nil {
+		t.Fatal(err)
+	}
+	now := started.Add(time.Second).UnixMilli()
 	for name, statement := range map[string]string{
 		"skip provisioning":      `UPDATE background_runs SET state='setting_up',effect_phase='admitted',prompt_request_attempted_at=?,revision=revision+1,updated_at=? WHERE task_id=?`,
-		"skip cleanup":           `UPDATE background_runs SET state='failed',effect_phase='cleanup_complete',cleanup_completed_at=?,cleanup_proof='x',revision=revision+1,updated_at=? WHERE task_id=?`,
+		"skip cleanup":           `UPDATE background_runs SET state='failed',effect_phase='cleanup_complete',cleanup_proof='x',last_error=?,revision=revision+1,updated_at=? WHERE task_id=?`,
 		"prompt without runtime": `UPDATE background_runs SET state='uncertain',effect_phase='prompt_pending',prompt_request_attempted_at=?,revision=revision+1,updated_at=? WHERE task_id=?`,
+		"seal without request":   `UPDATE background_runs SET state='canceling',effect_phase='sealing',last_error=?,revision=revision+1,updated_at=? WHERE task_id=?`,
 	} {
 		if _, err := store.db.Exec(statement, now, now, admission.Task.ID); err == nil {
 			t.Fatalf("closed transition %q succeeded", name)
@@ -302,7 +307,7 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 	stop.Claim.Key = "active-stop"
 	stop.Claim.RequestHash = sha256.Sum256([]byte("active-stop"))
 	stopped, err := store.StopBackgroundRun(context.Background(), stop)
-	if err != nil || stopped.Run.State != BackgroundRunCanceling || stopped.Run.EffectPhase != BackgroundRunEffectStopIntent ||
+	if err != nil || stopped.Run.State != BackgroundRunCanceling || stopped.Run.EffectPhase != BackgroundRunEffectCleaning ||
 		stopped.Run.Revision != run.Revision+1 || stopped.Run.StopReceiptID == "" {
 		t.Fatalf("active stop = %+v, error = %v", stopped, err)
 	}
@@ -323,30 +328,12 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 	stale := BackgroundRunRef{WorkspaceID: stopRun.WorkspaceID, TaskID: stopRun.TaskID, AttemptID: stopRun.AttemptID,
 		Generation: stopRun.Generation, ExpectedRevision: run.Revision,
 		ExpectedState: stopRun.State, ExpectedPhase: stopRun.EffectPhase, Now: stop.StoppedAt.Add(2 * time.Second)}
-	if _, err := store.RecordBackgroundRunWriterInactive(context.Background(), RecordBackgroundRunEvidenceParams{
-		BackgroundRunRef: stale, Evidence: "stale writer observation",
+	if _, err := store.MarkBackgroundRunCleanupRequired(context.Background(), MarkBackgroundRunCleanupRequiredParams{
+		BackgroundRunRef: stale, Error: "stale cleanup observation",
 	}); !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("stale revision mutated run: %v", err)
 	}
-	cleanupRef := BackgroundRunRef{WorkspaceID: stopRun.WorkspaceID, TaskID: stopRun.TaskID, AttemptID: stopRun.AttemptID,
-		Generation: stopRun.Generation, ExpectedRevision: stopRun.Revision, ExpectedState: stopRun.State, ExpectedPhase: stopRun.EffectPhase, Now: stop.StoppedAt.Add(2 * time.Second)}
-	advanceCleanup := func(next BackgroundRun) {
-		cleanupRef.ExpectedRevision, cleanupRef.ExpectedState, cleanupRef.ExpectedPhase = next.Revision, next.State, next.EffectPhase
-		cleanupRef.Now = cleanupRef.Now.Add(time.Second)
-	}
-	for _, step := range []func(context.Context, RecordBackgroundRunEvidenceParams) (BackgroundRun, error){
-		store.RecordBackgroundRunWriterInactive,
-		store.RecordBackgroundRunRouteRemoved,
-		store.RecordBackgroundRunContainerRemoved,
-		store.RecordBackgroundRunVolumeRemoved,
-		store.RecordBackgroundRunCloneRemoved,
-	} {
-		next, stepErr := step(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: cleanupRef, Evidence: "exact absence proof"})
-		if stepErr != nil {
-			t.Fatalf("cleanup phase %s: %v", cleanupRef.ExpectedPhase, stepErr)
-		}
-		advanceCleanup(next)
-	}
+	cleanupRef := backgroundRunRef(stopRun, stop.StoppedAt.Add(2*time.Second))
 	final, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
 		BackgroundRunRef: cleanupRef, AttemptEventID: testEventID(1990), TaskEventID: testEventID(1991),
 		Actor: testSystemActor(), Reason: "background_run_stopped", Evidence: "writer inactive and resources absent",
@@ -468,7 +455,7 @@ func TestBackgroundRunSystemTimeoutHasNoPluginReceipt(t *testing.T) {
 	timedOut, err := store.RequestBackgroundRunTimeout(context.Background(), RequestBackgroundRunTimeoutParams{
 		BackgroundRunRef: backgroundRunRef(work.Run, now), AttemptEventID: testEventID(2081), TaskEventID: testEventID(2082), Actor: actor,
 	})
-	if err != nil || timedOut.State != BackgroundRunCleanupRequired || timedOut.EffectPhase != BackgroundRunEffectStopIntent ||
+	if err != nil || timedOut.State != BackgroundRunCleanupRequired || timedOut.EffectPhase != BackgroundRunEffectCleaning ||
 		timedOut.TimeoutRequestedAt == nil || timedOut.StopReceiptID != "" {
 		t.Fatalf("system timeout = %+v, error=%v", timedOut, err)
 	}
@@ -504,17 +491,6 @@ JOIN attempts a ON a.id=t.current_attempt_id WHERE t.id=?`, timedOut.TaskID).Sca
 		t.Fatalf("restarted timeout run = %+v, error=%v", restarted, err)
 	}
 	cleanupRef := backgroundRunRef(restarted, now.Add(2*time.Second))
-	for _, step := range []func(context.Context, RecordBackgroundRunEvidenceParams) (BackgroundRun, error){
-		store.RecordBackgroundRunWriterInactive, store.RecordBackgroundRunRouteRemoved, store.RecordBackgroundRunContainerRemoved,
-		store.RecordBackgroundRunVolumeRemoved, store.RecordBackgroundRunCloneRemoved,
-	} {
-		restarted, err = step(context.Background(), RecordBackgroundRunEvidenceParams{BackgroundRunRef: cleanupRef, Evidence: "exact timeout cleanup"})
-		if err != nil {
-			t.Fatalf("timeout cleanup from %s: %v", cleanupRef.ExpectedPhase, err)
-		}
-		advanceBackgroundRef(&cleanupRef, restarted)
-		cleanupRef.Now = cleanupRef.Now.Add(time.Second)
-	}
 	wrongActor := actor
 	wrongActor.ID, wrongActor.RequestID = "different-timeout", "different-timeout"
 	if _, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
@@ -547,101 +523,39 @@ WHERE terminal.task_id=? AND terminal.type IN ('attempt.failed','task.failed') A
 }
 
 func TestBackgroundRunCleanupFailuresPreservePhaseAndPermitRetry(t *testing.T) {
-	phases := []BackgroundRunEffectPhase{
-		BackgroundRunEffectStopIntent,
-		BackgroundRunEffectWriterInactive,
-		BackgroundRunEffectRouteRemoved,
-		BackgroundRunEffectContainerRemoved,
-		BackgroundRunEffectVolumeRemoved,
-		BackgroundRunEffectCloneRemoved,
-	}
-	states := []BackgroundRunState{BackgroundRunCanceling, BackgroundRunCleanupRequired}
-	for stateIndex, state := range states {
-		for phaseIndex, phase := range phases {
-			t.Run(string(state)+"/"+string(phase), func(t *testing.T) {
-				path := testDBPath(t)
-				store := openTestStore(t, path)
-				t.Cleanup(func() { _ = store.Close() })
-				createTestWorkspace(t, store)
-				n := 2200 + stateIndex*100 + phaseIndex
-				params := testBackgroundRunAdmission(n, fmt.Sprintf("cleanup-failure-%s-%s", state, phase))
-				if _, err := store.AdmitBackgroundRun(context.Background(), params); err != nil {
-					t.Fatal(err)
-				}
-				now := testTime.Truncate(time.Millisecond).Add(time.Minute)
-				run, ref := prepareBackgroundRunCleanup(t, store, params, state, phase, now, n)
-				failed, err := store.MarkBackgroundRunCleanupRequired(context.Background(), MarkBackgroundRunCleanupRequiredParams{
-					BackgroundRunRef: ref, Error: "cleanup observation unavailable",
-				})
-				wantState := state
-				if state == BackgroundRunCanceling {
-					wantState = BackgroundRunCleanupRequired
-				}
-				if err != nil || failed.State != wantState || failed.EffectPhase != phase || failed.LastError != "cleanup observation unavailable" ||
-					failed.Revision != run.Revision+1 {
-					t.Fatalf("durable cleanup failure = %+v, error=%v", failed, err)
-				}
-				if err := store.Close(); err != nil {
-					t.Fatal(err)
-				}
-				store = openTestStore(t, path)
-				retry, err := startNextBackgroundRun(context.Background(), store, ref.Now.Add(time.Second))
-				if err != nil || retry.State != wantState || retry.EffectPhase != phase || retry.Revision != failed.Revision {
-					t.Fatalf("cleanup retry run = %+v, error=%v", retry, err)
-				}
+	for index, state := range []BackgroundRunState{BackgroundRunCanceling, BackgroundRunCleanupRequired} {
+		t.Run(string(state), func(t *testing.T) {
+			path := testDBPath(t)
+			store := openTestStore(t, path)
+			t.Cleanup(func() { _ = store.Close() })
+			createTestWorkspace(t, store)
+			n := 2200 + index
+			params := testBackgroundRunAdmission(n, fmt.Sprintf("cleanup-failure-%s", state))
+			if _, err := store.AdmitBackgroundRun(context.Background(), params); err != nil {
+				t.Fatal(err)
+			}
+			now := testTime.Truncate(time.Millisecond).Add(time.Minute)
+			run, ref := prepareBackgroundRunCleanup(t, store, params, state, now, n)
+			failed, err := store.MarkBackgroundRunCleanupRequired(context.Background(), MarkBackgroundRunCleanupRequiredParams{
+				BackgroundRunRef: ref, Error: "cleanup observation unavailable",
 			})
-		}
+			if err != nil || failed.State != BackgroundRunCleanupRequired || failed.EffectPhase != BackgroundRunEffectCleaning ||
+				failed.LastError != "cleanup observation unavailable" || failed.Revision != run.Revision+1 {
+				t.Fatalf("durable cleanup failure = %+v, error=%v", failed, err)
+			}
+			if err := store.Close(); err != nil {
+				t.Fatal(err)
+			}
+			store = openTestStore(t, path)
+			retry, err := startNextBackgroundRun(context.Background(), store, ref.Now.Add(time.Second))
+			if err != nil || retry.State != BackgroundRunCleanupRequired || retry.EffectPhase != BackgroundRunEffectCleaning || retry.Revision != failed.Revision {
+				t.Fatalf("cleanup retry run = %+v, error=%v", retry, err)
+			}
+		})
 	}
 }
 
-func TestBackgroundRunPreEffectFailureRequiresAbsenceProofAndFinalizesParents(t *testing.T) {
-	store := openTestStore(t, testDBPath(t))
-	t.Cleanup(func() { _ = store.Close() })
-	createTestWorkspace(t, store)
-	first := testBackgroundRunAdmission(2150, "pre-effect-failure")
-	second := testBackgroundRunAdmission(2151, "after-pre-effect-failure")
-	if _, err := store.AdmitBackgroundRun(context.Background(), first); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.AdmitBackgroundRun(context.Background(), second); err != nil {
-		t.Fatal(err)
-	}
-	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
-	run, err := startNextBackgroundRun(context.Background(), store, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ref := BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID,
-		Generation: run.Generation, ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now.Add(time.Second)}
-	if _, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
-		BackgroundRunRef: ref, AttemptEventID: testEventID(2152), TaskEventID: testEventID(2153),
-		Actor: testSystemActor(), Reason: "background_image_unavailable", Evidence: "image inspect returned deterministic absence",
-	}); !errors.Is(err, ErrInvalidInput) {
-		t.Fatalf("pre-effect failure without absence proof = %v", err)
-	}
-	final, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
-		BackgroundRunRef: ref, AttemptEventID: testEventID(2152), TaskEventID: testEventID(2153),
-		Actor: testSystemActor(), Reason: "background_image_unavailable", Evidence: "image inspect returned deterministic absence",
-		CleanupProof: "clone, volume, container, and route were never created",
-	})
-	if err != nil || final.State != BackgroundRunFailed || final.EffectPhase != BackgroundRunEffectPreEffectFailed ||
-		final.AbsenceProof != "clone, volume, container, and route were never created" || final.CleanupCompletedAt != nil {
-		t.Fatalf("pre-effect finalization = %+v, error = %v", final, err)
-	}
-	var taskState, attemptState, taskReason, attemptReason string
-	if err := store.db.QueryRow(`SELECT t.state,a.state,t.terminal_reason,a.terminal_reason
-FROM tasks t JOIN attempts a ON a.id=t.current_attempt_id WHERE t.id=?`, final.TaskID).
-		Scan(&taskState, &attemptState, &taskReason, &attemptReason); err != nil || taskState != "failed" || attemptState != "failed" ||
-		taskReason != "background_image_unavailable" || attemptReason != taskReason {
-		t.Fatalf("pre-effect parents = %q/%q reasons=%q/%q error=%v", taskState, attemptState, taskReason, attemptReason, err)
-	}
-	next, err := startNextBackgroundRun(context.Background(), store, ref.Now.Add(time.Second))
-	if err != nil || next.TaskID != second.TaskID {
-		t.Fatalf("capacity after pre-effect failure = %+v, error = %v", next, err)
-	}
-}
-
-func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitBackgroundRunParams, state BackgroundRunState, phase BackgroundRunEffectPhase, now time.Time, n int) (BackgroundRun, BackgroundRunRef) {
+func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitBackgroundRunParams, state BackgroundRunState, now time.Time, n int) (BackgroundRun, BackgroundRunRef) {
 	t.Helper()
 	run, ref := advanceBackgroundRunToPrompt(t, store, params.BackgroundRun.ImageIdentity, now)
 	var err error
@@ -655,67 +569,23 @@ func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitBackgro
 		stop.Claim.Scope.CommandKind = StopBackgroundRunCommand
 		stop.Claim.Key = task.IdempotencyKey(fmt.Sprintf("cleanup-stop-%d", n))
 		stop.Claim.RequestHash = sha256.Sum256([]byte(stop.Claim.Key))
-		stopped, stopErr := store.StopBackgroundRun(context.Background(), stop)
-		if stopErr != nil {
-			t.Fatal(stopErr)
+		if _, err := store.StopBackgroundRun(context.Background(), stop); err != nil {
+			t.Fatal(err)
 		}
-		run, err = startNextBackgroundRun(context.Background(), store, stop.StoppedAt.Add(time.Second))
-		if err != nil || run.TaskID != stopped.Run.TaskID || run.State != BackgroundRunCanceling {
-			t.Fatalf("stopped run = %+v, error=%v", run, err)
-		}
-		ref = backgroundRunRef(run, stop.StoppedAt.Add(2*time.Second))
 	case BackgroundRunCleanupRequired:
-		run, err = store.MarkBackgroundRunCleanupRequired(context.Background(), MarkBackgroundRunCleanupRequiredParams{
+		if _, err := store.MarkBackgroundRunCleanupRequired(context.Background(), MarkBackgroundRunCleanupRequiredParams{
 			BackgroundRunRef: ref, Error: "prompt admitted but coordinator unavailable",
-		})
-		if err != nil {
+		}); err != nil {
 			t.Fatal(err)
 		}
-		run, err = startNextBackgroundRun(context.Background(), store, ref.Now.Add(time.Second))
-		if err != nil {
-			t.Fatal(err)
-		}
-		ref = backgroundRunRef(run, ref.Now.Add(2*time.Second))
 	default:
 		t.Fatalf("unsupported cleanup state %s", state)
 	}
-
-	steps := []func(context.Context, RecordBackgroundRunEvidenceParams) (BackgroundRun, error){
-		store.RecordBackgroundRunWriterInactive,
-		store.RecordBackgroundRunRouteRemoved,
-		store.RecordBackgroundRunContainerRemoved,
-		store.RecordBackgroundRunVolumeRemoved,
-		store.RecordBackgroundRunCloneRemoved,
+	run, err = startNextBackgroundRun(context.Background(), store, ref.Now.Add(time.Second))
+	if err != nil || run.State != state || run.EffectPhase != BackgroundRunEffectCleaning {
+		t.Fatalf("cleanup run = %+v, error=%v", run, err)
 	}
-	phases := []BackgroundRunEffectPhase{
-		BackgroundRunEffectStopIntent,
-		BackgroundRunEffectWriterInactive,
-		BackgroundRunEffectRouteRemoved,
-		BackgroundRunEffectContainerRemoved,
-		BackgroundRunEffectVolumeRemoved,
-		BackgroundRunEffectCloneRemoved,
-	}
-	target := -1
-	for index, candidate := range phases {
-		if candidate == phase {
-			target = index
-			break
-		}
-	}
-	if target < 0 {
-		t.Fatalf("unsupported cleanup phase %s", phase)
-	}
-	for index := 0; index < target; index++ {
-		run, err = steps[index](context.Background(), RecordBackgroundRunEvidenceParams{
-			BackgroundRunRef: ref, Evidence: "exact cleanup observation",
-		})
-		if err != nil {
-			t.Fatalf("advance cleanup from %s: %v", ref.ExpectedPhase, err)
-		}
-		advanceBackgroundRef(&ref, run)
-		ref.Now = ref.Now.Add(time.Second)
-	}
-	return run, ref
+	return run, backgroundRunRef(run, ref.Now.Add(2*time.Second))
 }
 
 func backgroundRunRef(run BackgroundRun, now time.Time) BackgroundRunRef {

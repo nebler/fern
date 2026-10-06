@@ -107,7 +107,7 @@ func TestEffectContextAllowsCleanupAfterAttemptDeadline(t *testing.T) {
 	work := taskstore.BackgroundRunWork{
 		Run: taskstore.BackgroundRun{
 			State:       taskstore.BackgroundRunCanceling,
-			EffectPhase: taskstore.BackgroundRunEffectStopIntent,
+			EffectPhase: taskstore.BackgroundRunEffectCleaning,
 		},
 		Deadline: now.Add(-time.Second),
 	}

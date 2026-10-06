@@ -49,7 +49,7 @@ func TestPredecessorSchemasRejectedWithoutMutation(t *testing.T) {
 }
 
 func TestInitialSchemaIsTheOnlySupportedSchema(t *testing.T) {
-	const expectedChecksum = "164b77ddc123ab9a2b7d8f73a88952105f82a8bcb0d5260cc3f702ce4fdb3470"
+	const expectedChecksum = "f45cc3fd8e9411c9136d116f88462c9b0390859908d3fee25dfcacc140ff8450"
 	if CurrentSchemaVersion() != 6 || len(migrations) != 1 || migrations[0].version != 6 || migrations[0].name != "reconciled_run_task_store" {
 		t.Fatalf("schema version=%d migration count=%d", CurrentSchemaVersion(), len(migrations))
 	}

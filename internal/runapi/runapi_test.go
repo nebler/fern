@@ -467,8 +467,8 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 		t.Fatalf("recovered retention projection=%v calls=%d", got, fixture.retained.calls.Load())
 	}
 
-	store.run.State = taskstore.BackgroundRunCleanupRequired
-	store.run.EffectPhase = taskstore.BackgroundRunEffectExporting
+	store.run.State = taskstore.BackgroundRunCanceling
+	store.run.EffectPhase = taskstore.BackgroundRunEffectSealing
 	store.export = taskstore.BackgroundRunExport{State: taskstore.BackgroundRunExportRecoveryRequired}
 	recovery := fixture.request(http.MethodGet, PathPrefix+"/"+string(runID)+"/result", "", "")
 	if recovery.Code != http.StatusServiceUnavailable || !strings.Contains(recovery.Body.String(), "recovery_required") {

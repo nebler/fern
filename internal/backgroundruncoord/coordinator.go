@@ -219,19 +219,6 @@ func (c *Coordinator) runOnce(ctx context.Context) (taskstore.BackgroundRunWork,
 func (c *Coordinator) process(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
 	run := work.Run
 	switch run.EffectPhase {
-	case taskstore.BackgroundRunEffectSealIntent:
-		_, providerFence, err := c.provider.ProveWriterInactive(operation, run)
-		if err != nil {
-			return fmt.Errorf("prove retained writer inactivity: %w", err)
-		}
-		if err := c.recordWriterFence(parent, work, providerFence); err != nil {
-			return fmt.Errorf("record retained writer fence: %w", err)
-		}
-		return nil
-	case taskstore.BackgroundRunEffectExporting:
-		return c.exportRetained(operation, parent, work)
-	case taskstore.BackgroundRunEffectArtifactCommitted:
-		return c.record(parent, work, `{"effect":"retained_cleanup_intent","status":"committed"}`, c.store.RequestBackgroundRunResultCleanup)
 	case taskstore.BackgroundRunEffectProvisioning:
 		return c.provision(operation, parent, work)
 	case taskstore.BackgroundRunEffectPromptPending:
@@ -246,122 +233,121 @@ func (c *Coordinator) process(operation, parent context.Context, work taskstore.
 			return c.externalFailure(parent, work, err)
 		}
 		return c.observeWorking(operation, parent, work, client)
-	case taskstore.BackgroundRunEffectStopIntent:
-		observation, _, err := c.provider.ProveWriterInactive(operation, run)
-		if err != nil {
-			return c.cleanupFailure(parent, work, err)
-		}
-		return c.record(parent, work, observation.Evidence, c.store.RecordBackgroundRunWriterInactive)
-	case taskstore.BackgroundRunEffectWriterInactive:
-		if run.BackgroundSealRequestID != "" && run.ResultAuthorityPhase != "cleanup" {
-			return c.exportRetained(operation, parent, work)
-		}
-		if run.ObservedContainerID == "" && run.ObservedContainerStartedAt == "" && run.RuntimeEpoch == 0 {
-			return c.record(parent, work, `{"effect":"route_remove","status":"never_bound"}`, c.store.RecordBackgroundRunRouteRemoved)
-		}
-		identity, err := c.validatedRouteIdentity(run)
-		if err != nil {
-			return c.cleanupFailure(parent, work, err)
-		}
-		removed, err := c.config.Route.Remove(operation, identity)
-		if err != nil {
-			return c.cleanupFailure(parent, work, err)
-		}
-		return c.record(parent, work, removed, c.store.RecordBackgroundRunRouteRemoved)
-	case taskstore.BackgroundRunEffectRouteRemoved:
-		if run.ObservedContainerID != "" || run.ObservedContainerStartedAt != "" || run.RuntimeEpoch != 0 {
-			identity, identityErr := c.validatedRouteIdentity(run)
-			if identityErr != nil {
-				return c.cleanupFailure(parent, work, identityErr)
-			}
-			if err := c.config.Route.ConfirmRemoval(identity); err != nil {
-				return c.cleanupFailure(parent, work, err)
-			}
-		}
-		_, authority, err := c.provider.ProveWriterInactive(operation, run)
-		if err != nil {
-			return c.cleanupFailure(parent, work, err)
-		}
-		observation, err := c.provider.RemoveContainer(operation, run, authority)
-		if err != nil {
-			return c.cleanupFailure(parent, work, err)
-		}
-		return c.record(parent, work, observation.Evidence, c.store.RecordBackgroundRunContainerRemoved)
-	case taskstore.BackgroundRunEffectContainerRemoved:
-		_, authority, err := c.provider.ProveWriterInactive(operation, run)
-		if err != nil {
-			return c.cleanupFailure(parent, work, err)
-		}
-		observation, err := c.provider.RemoveVolume(operation, run, authority)
-		if err != nil {
-			return c.cleanupFailure(parent, work, err)
-		}
-		return c.record(parent, work, observation.Evidence, c.store.RecordBackgroundRunVolumeRemoved)
-	case taskstore.BackgroundRunEffectVolumeRemoved:
-		_, authority, err := c.provider.ProveWriterInactive(operation, run)
-		if err != nil {
-			return c.cleanupFailure(parent, work, err)
-		}
-		observation, err := c.provider.RemoveClone(operation, run, authority)
-		if err != nil {
-			return c.cleanupFailure(parent, work, err)
-		}
-		return c.record(parent, work, observation.Evidence, c.store.RecordBackgroundRunCloneRemoved)
-	case taskstore.BackgroundRunEffectCloneRemoved:
-		if run.BackgroundSealRequestID != "" {
-			mutation, cancel, now, err := c.effectContext(parent, work, false)
-			if err != nil {
-				return err
-			}
-			defer cancel()
-			_, err = c.store.CompleteBackgroundRunResultCleanup(mutation, taskstore.CompleteBackgroundRunResultCleanupParams{
-				BackgroundRunRef: ref(run, now), CleanupProof: `{"route":"absent","container":"absent","volume":"absent","clone":"absent"}`})
-			return err
-		}
-		attemptEvent, err := c.ids.EventID()
-		if err != nil {
-			return err
-		}
-		taskEvent, err := c.ids.EventID()
-		if err != nil {
-			return err
-		}
-		reason := "runtime_unavailable"
-		if run.TimeoutRequestedAt != nil {
-			reason = "attempt_timeout"
-		} else if run.StopReceiptID != "" {
-			reason = "user_stopped"
-		}
-		mutation, cancel, now, err := c.effectContext(parent, work, false)
-		if err != nil {
-			return err
-		}
-		defer cancel()
-		actor := c.config.SystemActor
-		if run.TimeoutRequestedAt != nil {
-			if run.TimeoutActor == nil {
-				return taskstore.ErrCorruptStore
-			}
-			actor = *run.TimeoutActor
-		}
-		_, err = c.store.FinalizeBackgroundRunFailure(mutation, taskstore.FinalizeBackgroundRunFailureParams{
-			BackgroundRunRef: ref(run, now), AttemptEventID: attemptEvent, TaskEventID: taskEvent, Actor: actor,
-			Reason: reason, Evidence: `{"effect":"terminalize","status":"resources_absent"}`,
-			CleanupProof: `{"route":"serial_absent","container":"absent","volume":"absent","clone":"absent"}`,
-		})
-		return err
+	case taskstore.BackgroundRunEffectSealing:
+		return c.seal(operation, parent, work)
+	case taskstore.BackgroundRunEffectCleaning:
+		return c.clean(operation, parent, work)
 	default:
 		return nil
 	}
 }
 
+// seal proves the exact writer stopped, records that fence once, and exports
+// under it. The run stays sealing, retaining every resource, until the
+// retained result commits.
+func (c *Coordinator) seal(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
+	_, err := c.store.GetBackgroundRunWriterFence(parent, work.Run.BackgroundSealRequestID)
+	if errors.Is(err, taskstore.ErrNotFound) {
+		_, providerFence, proveErr := c.provider.ProveWriterInactive(operation, work.Run)
+		if proveErr != nil {
+			return fmt.Errorf("prove retained writer inactivity: %w", proveErr)
+		}
+		if work.Run, err = c.recordWriterFence(parent, work, providerFence); err != nil {
+			return fmt.Errorf("record retained writer fence: %w", err)
+		}
+	} else if err != nil {
+		return err
+	}
+	return c.exportRetained(operation, parent, work)
+}
+
+// clean reconciles teardown in one pass: drain the route, stop the exact
+// writer, then remove container, volume, and clone. Each step re-inspects and
+// treats absence as done, so a failed pass is simply retried; only when every
+// resource is proven absent does the run become terminal.
+func (c *Coordinator) clean(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
+	run := work.Run
+	if run.ObservedContainerID != "" || run.ObservedContainerStartedAt != "" || run.RuntimeEpoch != 0 {
+		identity, err := c.validatedRouteIdentity(run)
+		if err != nil {
+			return c.cleanupFailure(parent, work, err)
+		}
+		if _, err := c.config.Route.Remove(operation, identity); err != nil {
+			return c.cleanupFailure(parent, work, err)
+		}
+		if err := c.config.Route.ConfirmRemoval(identity); err != nil {
+			return c.cleanupFailure(parent, work, err)
+		}
+	}
+	_, authority, err := c.provider.ProveWriterInactive(operation, run)
+	if err != nil {
+		return c.cleanupFailure(parent, work, err)
+	}
+	if _, err := c.provider.RemoveContainer(operation, run, authority); err != nil {
+		return c.cleanupFailure(parent, work, err)
+	}
+	if _, err := c.provider.RemoveVolume(operation, run, authority); err != nil {
+		return c.cleanupFailure(parent, work, err)
+	}
+	if _, err := c.provider.RemoveClone(operation, run, authority); err != nil {
+		return c.cleanupFailure(parent, work, err)
+	}
+	return c.terminalize(parent, work)
+}
+
+func (c *Coordinator) terminalize(parent context.Context, work taskstore.BackgroundRunWork) error {
+	run := work.Run
+	if run.BackgroundSealRequestID != "" {
+		mutation, cancel, now, err := c.effectContext(parent, work, false)
+		if err != nil {
+			return err
+		}
+		defer cancel()
+		_, err = c.store.CompleteBackgroundRunResultCleanup(mutation, taskstore.CompleteBackgroundRunResultCleanupParams{
+			BackgroundRunRef: ref(run, now), CleanupProof: `{"route":"absent","container":"absent","volume":"absent","clone":"absent"}`})
+		return err
+	}
+	attemptEvent, err := c.ids.EventID()
+	if err != nil {
+		return err
+	}
+	taskEvent, err := c.ids.EventID()
+	if err != nil {
+		return err
+	}
+	reason := "runtime_unavailable"
+	if run.TimeoutRequestedAt != nil {
+		reason = "attempt_timeout"
+	} else if run.StopReceiptID != "" {
+		reason = "user_stopped"
+	}
+	mutation, cancel, now, err := c.effectContext(parent, work, false)
+	if err != nil {
+		return err
+	}
+	defer cancel()
+	actor := c.config.SystemActor
+	if run.TimeoutRequestedAt != nil {
+		if run.TimeoutActor == nil {
+			return taskstore.ErrCorruptStore
+		}
+		actor = *run.TimeoutActor
+	}
+	_, err = c.store.FinalizeBackgroundRunFailure(mutation, taskstore.FinalizeBackgroundRunFailureParams{
+		BackgroundRunRef: ref(run, now), AttemptEventID: attemptEvent, TaskEventID: taskEvent, Actor: actor,
+		Reason: reason, Evidence: `{"effect":"terminalize","status":"resources_absent"}`,
+		CleanupProof: `{"route":"absent","container":"absent","volume":"absent","clone":"absent"}`,
+	})
+	return err
+}
+
 // recordWriterFence persists the structured provider fence; provider prose
 // (the observation evidence) is not durable authority and is not recorded.
-func (c *Coordinator) recordWriterFence(ctx context.Context, work taskstore.BackgroundRunWork, provider taskenvdocker.WriterFence) error {
+func (c *Coordinator) recordWriterFence(ctx context.Context, work taskstore.BackgroundRunWork, provider taskenvdocker.WriterFence) (taskstore.BackgroundRun, error) {
 	run := work.Run
 	now, err := c.freshNow()
 	if err != nil {
-		return err
+		return run, err
 	}
 	params := taskstore.RecordBackgroundRunWriterFenceParams{BackgroundRunRef: ref(run, now),
 		SealRequestID: run.BackgroundSealRequestID, ExportID: run.ArtifactExportID}
@@ -375,19 +361,18 @@ func (c *Coordinator) recordWriterFence(ctx context.Context, work taskstore.Back
 		params.RuntimeEpoch, params.RuntimeToken = run.RuntimeEpoch, provider.Token()
 		params.StoppedAt = &now
 	default:
-		return taskenvdocker.ErrIdentityMismatch
+		return run, taskenvdocker.ErrIdentityMismatch
 	}
 	params.ProofSHA256, err = taskstore.WriterFenceProofDigest(params)
 	if err != nil {
-		return err
+		return run, err
 	}
 	mutation, cancel, _, err := c.effectContext(ctx, work, false)
 	if err != nil {
-		return err
+		return run, err
 	}
 	defer cancel()
-	_, err = c.store.RecordBackgroundRunWriterFence(mutation, params)
-	return err
+	return c.store.RecordBackgroundRunWriterFence(mutation, params)
 }
 
 func (c *Coordinator) exportRetained(operation, parent context.Context, work taskstore.BackgroundRunWork) (resultErr error) {

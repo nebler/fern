@@ -133,12 +133,11 @@ id,seal_request_id,export_id,artifact_id,result_id,state,revision,created_at,upd
 VALUES(?,?,?,?,?,'prepared',1,?,?)`, p.MaterializationID, p.SealRequestID, p.ExportID, p.ArtifactID, p.ResultID, now, now); err != nil {
 		return BackgroundRunSealAdmission{}, fmt.Errorf("prepare artifact materialization: %w", err)
 	}
-	update, err := tx.ExecContext(ctx, `UPDATE background_runs SET state='cleanup_required',effect_phase='stop_intent',
-stop_intent_at=COALESCE(stop_intent_at,?),background_seal_request_id=?,artifact_export_id=?,retained_artifact_id=?,
-materialization_id=?,retained_result_id=?,result_authority_phase='seal_intent',
-revision=revision+1,updated_at=? WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND
+	update, err := tx.ExecContext(ctx, `UPDATE background_runs SET state='canceling',effect_phase='sealing',
+background_seal_request_id=?,artifact_export_id=?,retained_artifact_id=?,
+materialization_id=?,retained_result_id=?,revision=revision+1,updated_at=? WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND
 state IN ('working','needs_you','uncertain') AND effect_phase='admitted' AND stop_receipt_id IS NULL AND timeout_requested_at IS NULL`,
-		now, p.SealRequestID, p.ExportID, p.ArtifactID, p.MaterializationID, p.ResultID, now,
+		p.SealRequestID, p.ExportID, p.ArtifactID, p.MaterializationID, p.ResultID, now,
 		p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedRunRevision)
 	if err != nil {
 		return BackgroundRunSealAdmission{}, fmt.Errorf("bind background seal: %w", err)

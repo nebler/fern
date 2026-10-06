@@ -383,7 +383,7 @@ func TestRunOnceAttemptDeadlineBeforeEffect(t *testing.T) {
 	}
 	err := f.c.RunOnce(context.Background())
 	r := f.run(t)
-	if err != nil || r.TimeoutRequestedAt == nil || r.EffectPhase != taskstore.BackgroundRunEffectStopIntent {
+	if err != nil || r.TimeoutRequestedAt == nil || r.EffectPhase != taskstore.BackgroundRunEffectCleaning {
 		t.Fatalf("timeout: %+v %v", r, err)
 	}
 	if len(f.d.calls) != 0 {
@@ -411,7 +411,7 @@ func TestRunOnceExecutionMismatchSelectsCleanupWithoutProvisioning(t *testing.T)
 	if _, err := os.Stat(filepath.Join(f.root, "background-runs", r.CloneIdentity)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("mismatch created clone: %v", err)
 	}
-	f.scan(t, taskstore.BackgroundRunEffectWriterInactive)
+	f.scan(t, taskstore.BackgroundRunEffectCleanupComplete)
 }
 
 func TestRunOnceCancellationAfterProvisioningStartLeavesRecoverableRun(t *testing.T) {
@@ -525,16 +525,11 @@ func TestRunOnceCleansUpStartedContainerWithUnrecordedRuntime(t *testing.T) {
 				}
 			}
 			r := f.run(t)
-			if (r.State != taskstore.BackgroundRunCleanupRequired && r.State != taskstore.BackgroundRunCanceling) || r.EffectPhase != taskstore.BackgroundRunEffectStopIntent || r.ObservedContainerID != "" {
+			if (r.State != taskstore.BackgroundRunCleanupRequired && r.State != taskstore.BackgroundRunCanceling) || r.EffectPhase != taskstore.BackgroundRunEffectCleaning || r.ObservedContainerID != "" {
 				t.Fatalf("run not in cleanup with unrecorded runtime: %+v", r)
 			}
 			f.now = f.now.Add(2 * time.Minute)
-			for _, phase := range []taskstore.BackgroundRunEffectPhase{taskstore.BackgroundRunEffectWriterInactive, taskstore.BackgroundRunEffectRouteRemoved, taskstore.BackgroundRunEffectContainerRemoved, taskstore.BackgroundRunEffectVolumeRemoved, taskstore.BackgroundRunEffectCloneRemoved} {
-				f.scan(t, phase)
-			}
-			if err := f.c.RunOnce(context.Background()); err != nil {
-				t.Fatal(err)
-			}
+			f.scan(t, taskstore.BackgroundRunEffectCleanupComplete)
 			if r := f.run(t); r.State != taskstore.BackgroundRunFailed {
 				t.Fatalf("terminal state: %+v", r)
 			}
@@ -573,19 +568,14 @@ func TestRunOnceStopCleanupFailureRecoveryPastDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := f.run(t)
-	if r.EffectPhase != taskstore.BackgroundRunEffectStopIntent || r.State != taskstore.BackgroundRunCleanupRequired {
+	if r.EffectPhase != taskstore.BackgroundRunEffectCleaning || r.State != taskstore.BackgroundRunCleanupRequired {
 		t.Fatalf("not recoverable: %+v", r)
 	}
 	if f.d.item == nil {
 		t.Fatal("volume removed before writer proof")
 	}
 	f.d.containerErr = nil
-	for _, phase := range []taskstore.BackgroundRunEffectPhase{taskstore.BackgroundRunEffectWriterInactive, taskstore.BackgroundRunEffectRouteRemoved, taskstore.BackgroundRunEffectContainerRemoved, taskstore.BackgroundRunEffectVolumeRemoved, taskstore.BackgroundRunEffectCloneRemoved} {
-		f.scan(t, phase)
-	}
-	if err = f.c.RunOnce(context.Background()); err != nil {
-		t.Fatal(err)
-	}
+	f.scan(t, taskstore.BackgroundRunEffectCleanupComplete)
 	r = f.run(t)
 	if r.State != taskstore.BackgroundRunFailed || r.StopReceiptID == "" || r.TimeoutRequestedAt != nil {
 		t.Fatalf("terminal state: %+v", r)

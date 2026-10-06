@@ -84,7 +84,7 @@ func scanBackgroundRunExport(row rowScanner) (BackgroundRunExport, error) {
 }
 
 // StartBackgroundRunExport moves a prepared or recovery-required export to
-// running and projects the run into exporting. Restarting a running export is
+// running. Restarting a running export is
 // allowed: the coordinator replays durable phases after a crash.
 func (s *Store) StartBackgroundRunExport(ctx context.Context, ref BackgroundRunExportRef) (_ BackgroundRunExport, err error) {
 	if err := validateExportRef(ref); err != nil {
@@ -109,15 +109,6 @@ WHERE id=? AND task_id=? AND attempt_id=? AND generation=? AND revision=? AND ph
 	export, err := getBackgroundRunExport(ctx, tx, ref.ExportID)
 	if err != nil {
 		return BackgroundRunExport{}, err
-	}
-	projection, err := tx.ExecContext(ctx, `UPDATE background_runs SET result_authority_phase='exporting',revision=revision+1,updated_at=?
-WHERE task_id=? AND attempt_id=? AND generation=? AND artifact_export_id=? AND result_authority_phase IN ('writer_inactive','exporting')`,
-		now, ref.TaskID, ref.AttemptID, ref.Generation, ref.ExportID)
-	if err != nil {
-		return BackgroundRunExport{}, fmt.Errorf("project background export start: %w", err)
-	}
-	if changed, changeErr := projection.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRunExport{}, ErrInvalidState
 	}
 	if err := tx.Commit(); err != nil {
 		return BackgroundRunExport{}, err

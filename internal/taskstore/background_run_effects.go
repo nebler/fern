@@ -23,13 +23,11 @@ func (s *Store) NextBackgroundRun(ctx context.Context, workspaceID task.Workspac
 	run, err := scanBackgroundRun(s.db.QueryRowContext(ctx, backgroundRunSelect+`
 JOIN tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id AND t.current_attempt_id=r.attempt_id
 JOIN attempts a ON a.id=r.attempt_id AND a.task_id=r.task_id AND a.workspace_id=r.workspace_id AND a.sequence=r.generation
-WHERE r.workspace_id=? AND r.profile=? AND r.state<>'failed' AND
-	NOT (r.state='result_ready' AND r.effect_phase='cleanup_complete') AND
-  ((r.state='queued' AND NOT EXISTS (
-      SELECT 1 FROM background_runs active WHERE active.workspace_id=r.workspace_id AND active.profile=? AND
-		active.effect_phase NOT IN ('absent','cleanup_complete','pre_effect_failed')
-	    )) OR r.state IN ('setting_up','working','needs_you','uncertain','canceling','cleanup_required','result_ready'))
-ORDER BY CASE WHEN r.state='queued' THEN 1 ELSE 0 END,r.updated_at,r.task_id LIMIT 1`, workspaceID, profile, profile))
+WHERE r.workspace_id=? AND r.profile=? AND r.effect_phase<>'cleanup_complete' AND
+  (r.effect_phase<>'absent' OR NOT EXISTS (
+    SELECT 1 FROM background_runs active WHERE active.workspace_id=r.workspace_id AND active.profile=? AND
+      active.effect_phase NOT IN ('absent','cleanup_complete')))
+ORDER BY CASE WHEN r.effect_phase='absent' THEN 1 ELSE 0 END,r.updated_at,r.task_id LIMIT 1`, workspaceID, profile, profile))
 	if errors.Is(err, sql.ErrNoRows) {
 		return BackgroundRun{}, ErrNotFound
 	}
@@ -184,11 +182,10 @@ WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND re
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRun{}, ErrInvalidState
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE background_runs SET state='cleanup_required',effect_phase='stop_intent',
-timeout_requested_at=?,timeout_actor_snapshot_id=?,stop_intent_at=COALESCE(stop_intent_at,?),last_error='attempt_timeout',
-revision=revision+1,updated_at=?
+	result, err = tx.ExecContext(ctx, `UPDATE background_runs SET state='cleanup_required',effect_phase='cleaning',
+timeout_requested_at=?,timeout_actor_snapshot_id=?,last_error='attempt_timeout',revision=revision+1,updated_at=?
 WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND state=? AND effect_phase=? AND
-timeout_requested_at IS NULL`, now, actorID, now, now, p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedRevision,
+timeout_requested_at IS NULL`, now, actorID, now, p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedRevision,
 		p.ExpectedState, p.ExpectedPhase)
 	if err != nil {
 		return BackgroundRun{}, fmt.Errorf("request background run timeout: %w", err)
@@ -206,111 +203,32 @@ timeout_requested_at IS NULL`, now, actorID, now, now, p.TaskID, p.AttemptID, p.
 	return stored, nil
 }
 
-func (s *Store) RecordBackgroundRunWriterInactive(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	if p.ExpectedPhase != BackgroundRunEffectStopIntent || !validRequiredEvidence(p.Evidence) {
-		return BackgroundRun{}, fmt.Errorf("%w: background run writer inactivity", ErrInvalidInput)
-	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, p.ExpectedState, BackgroundRunEffectWriterInactive,
-		`writer_inactive_at=?,writer_inactive_evidence=?,last_evidence=?`, []any{unixMillis(p.Now), p.Evidence, p.Evidence}, "record background run writer inactivity")
-}
-
-func (s *Store) RequestBackgroundRunResultCleanup(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	if p.ExpectedState != BackgroundRunResultReady || p.ExpectedPhase != BackgroundRunEffectArtifactCommitted || !validRequiredEvidence(p.Evidence) {
-		return BackgroundRun{}, fmt.Errorf("%w: background result cleanup intent", ErrInvalidInput)
-	}
-	return s.updateRetainedRun(ctx, p.BackgroundRunRef, `result_authority_phase='cleanup',last_evidence=?`, []any{p.Evidence}, "request background result cleanup")
-}
-
-func (s *Store) updateRetainedRun(ctx context.Context, ref BackgroundRunRef, assignments string, args []any, operation string) (_ BackgroundRun, err error) {
-	if err := validateBackgroundRunRef(ref); err != nil {
-		return BackgroundRun{}, err
-	}
-	tx, release, err := s.beginWrite(ctx)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	defer release()
-	defer rollback(tx, &err)
-	query := `UPDATE background_runs SET ` + assignments + `,revision=revision+1,updated_at=?
-WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND state='result_ready' AND
-effect_phase='writer_inactive' AND result_authority_phase='artifact_committed'`
-	args = append(args, unixMillis(ref.Now), ref.TaskID, ref.AttemptID, ref.WorkspaceID, ref.Generation, ref.ExpectedRevision)
-	result, err := tx.ExecContext(ctx, query, args...)
-	if err != nil {
-		return BackgroundRun{}, fmt.Errorf("%s: %w", operation, err)
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRun{}, ErrInvalidState
-	}
-	run, err := readBackgroundRunExact(ctx, tx, ref.WorkspaceID, ref.TaskID)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return BackgroundRun{}, err
-	}
-	return run, nil
-}
-
-func (s *Store) RecordBackgroundRunRouteRemoved(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	return s.recordBackgroundRunRemoval(ctx, p, BackgroundRunEffectWriterInactive, BackgroundRunEffectRouteRemoved, "route_removed_at", "route_removed_evidence", "route removal")
-}
-
-func (s *Store) RecordBackgroundRunContainerRemoved(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	return s.recordBackgroundRunRemoval(ctx, p, BackgroundRunEffectRouteRemoved, BackgroundRunEffectContainerRemoved, "container_removed_at", "container_removed_evidence", "container removal")
-}
-
-func (s *Store) RecordBackgroundRunVolumeRemoved(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	return s.recordBackgroundRunRemoval(ctx, p, BackgroundRunEffectContainerRemoved, BackgroundRunEffectVolumeRemoved, "volume_removed_at", "volume_removed_evidence", "volume removal")
-}
-
-func (s *Store) RecordBackgroundRunCloneRemoved(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	return s.recordBackgroundRunRemoval(ctx, p, BackgroundRunEffectVolumeRemoved, BackgroundRunEffectCloneRemoved, "clone_removed_at", "clone_removed_evidence", "clone removal")
-}
-
-func (s *Store) recordBackgroundRunRemoval(ctx context.Context, p RecordBackgroundRunEvidenceParams, from, to BackgroundRunEffectPhase, timestamp, evidenceColumn, operation string) (BackgroundRun, error) {
-	if p.ExpectedPhase != from || !validRequiredEvidence(p.Evidence) {
-		return BackgroundRun{}, fmt.Errorf("%w: background run %s", ErrInvalidInput, operation)
-	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, p.ExpectedState, to,
-		timestamp+`=?,`+evidenceColumn+`=?,last_evidence=?`, []any{unixMillis(p.Now), p.Evidence, p.Evidence}, "record background run "+operation)
-}
-
+// MarkBackgroundRunCleanupRequired records a failed effect. An executing run
+// moves to cleanup; a run already cleaning keeps its phase so the next pass
+// retries, and only a user stop's canceling becomes cleanup_required.
 func (s *Store) MarkBackgroundRunCleanupRequired(ctx context.Context, p MarkBackgroundRunCleanupRequiredParams) (BackgroundRun, error) {
 	if !validBoundedText(p.Error, 1, 4096) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run cleanup failure", ErrInvalidInput)
 	}
-	if p.ExpectedState == BackgroundRunResultReady && p.ExpectedPhase == BackgroundRunEffectArtifactCommitted {
-		return s.updateRetainedRun(ctx, p.BackgroundRunRef, `last_error=?`, []any{p.Error}, "retain failed background result cleanup")
-	}
 	lifecycle := rundomain.Classify(rundomain.State(p.ExpectedState), rundomain.Phase(p.ExpectedPhase))
-	if lifecycle.CleanupStep {
-		state := p.ExpectedState
-		if state == BackgroundRunCanceling {
-			state = BackgroundRunCleanupRequired
-		}
-		if state != BackgroundRunCleanupRequired && state != BackgroundRunResultReady {
-			return BackgroundRun{}, fmt.Errorf("%w: background run cleanup failure state", ErrInvalidInput)
-		}
-		return s.transitionRun(ctx, p.BackgroundRunRef, state, p.ExpectedPhase,
-			`last_error=?`, []any{p.Error}, "retain failed background run cleanup phase")
-	}
-	validState := p.ExpectedState == BackgroundRunSettingUp || p.ExpectedState == BackgroundRunWorking ||
-		p.ExpectedState == BackgroundRunNeedsYou || p.ExpectedState == BackgroundRunUncertain
-	if !validState || p.ExpectedPhase == BackgroundRunEffectAbsent {
+	state := BackgroundRunCleanupRequired
+	switch {
+	case lifecycle.CleanupStep && p.ExpectedState == BackgroundRunResultReady:
+		state = BackgroundRunResultReady
+	case lifecycle.CleanupStep, lifecycle.TimeoutEligible:
+	default:
 		return BackgroundRun{}, fmt.Errorf("%w: background run cleanup failure state", ErrInvalidInput)
 	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunCleanupRequired, BackgroundRunEffectStopIntent,
-		`stop_intent_at=?,last_error=?`, []any{unixMillis(p.Now), p.Error}, "mark background run cleanup required")
+	return s.transitionRun(ctx, p.BackgroundRunRef, state, BackgroundRunEffectCleaning,
+		`last_error=?`, []any{p.Error}, "mark background run cleanup required")
 }
 
-// FinalizeBackgroundRunFailure atomically closes an active run and its exact
-// parent task/attempt after cleanup, or before any effect with explicit absence
-// proof. It performs no external I/O.
+// FinalizeBackgroundRunFailure atomically closes a cleaned run and its exact
+// parent task/attempt once the caller proved every resource absent. It performs
+// no external I/O.
 func (s *Store) FinalizeBackgroundRunFailure(ctx context.Context, p FinalizeBackgroundRunFailureParams) (_ BackgroundRun, err error) {
-	preEffect := p.ExpectedPhase == BackgroundRunEffectProvisioning
-	cleaned := p.ExpectedPhase == BackgroundRunEffectCloneRemoved
-	if err := validateBackgroundRunRef(p.BackgroundRunRef); err != nil || (!preEffect && !cleaned) ||
+	if err := validateBackgroundRunRef(p.BackgroundRunRef); err != nil || p.ExpectedPhase != BackgroundRunEffectCleaning ||
+		(p.ExpectedState != BackgroundRunCanceling && p.ExpectedState != BackgroundRunCleanupRequired) ||
 		!validBoundedText(p.Reason, 1, 1000) || !validRequiredEvidence(p.Evidence) || !validRequiredEvidence(p.CleanupProof) ||
 		p.Actor.Validate() != nil || p.AttemptEventID == p.TaskEventID {
 		return BackgroundRun{}, fmt.Errorf("%w: background run finalization", ErrInvalidInput)
@@ -391,21 +309,13 @@ WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND re
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRun{}, ErrInvalidState
 	}
-	phase := BackgroundRunEffectCleanupComplete
-	assignments := `state='failed',effect_phase='cleanup_complete',cleanup_completed_at=?,cleanup_proof=?,last_evidence=?,last_error=?`
-	args := []any{now, p.CleanupProof, p.Evidence, p.Reason}
-	if preEffect {
-		phase = BackgroundRunEffectPreEffectFailed
-		assignments = `state='failed',effect_phase='pre_effect_failed',absence_proof=?,last_evidence=?,last_error=?`
-		args = []any{p.CleanupProof, p.Evidence, p.Reason}
-	}
-	query := `UPDATE background_runs SET ` + assignments + `,revision=revision+1,updated_at=?
-WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND state=? AND effect_phase=? AND revision=?`
-	args = append(args, now, p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedState, p.ExpectedPhase,
+	result, err = tx.ExecContext(ctx, `UPDATE background_runs SET state='failed',effect_phase='cleanup_complete',cleanup_proof=?,
+last_evidence=?,last_error=?,revision=revision+1,updated_at=?
+WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND state=? AND effect_phase=? AND revision=?`,
+		p.CleanupProof, p.Evidence, p.Reason, now, p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedState, p.ExpectedPhase,
 		p.ExpectedRevision)
-	result, err = tx.ExecContext(ctx, query, args...)
 	if err != nil {
-		return BackgroundRun{}, fmt.Errorf("finalize background run %s: %w", phase, err)
+		return BackgroundRun{}, fmt.Errorf("finalize background run: %w", err)
 	}
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRun{}, ErrInvalidState
@@ -421,11 +331,11 @@ WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND state=?
 }
 
 func (s *Store) CompleteBackgroundRunResultCleanup(ctx context.Context, p CompleteBackgroundRunResultCleanupParams) (BackgroundRun, error) {
-	if p.ExpectedState != BackgroundRunResultReady || p.ExpectedPhase != BackgroundRunEffectCloneRemoved || !validRequiredEvidence(p.CleanupProof) {
+	if p.ExpectedState != BackgroundRunResultReady || p.ExpectedPhase != BackgroundRunEffectCleaning || !validRequiredEvidence(p.CleanupProof) {
 		return BackgroundRun{}, fmt.Errorf("%w: background result cleanup", ErrInvalidInput)
 	}
 	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunResultReady, BackgroundRunEffectCleanupComplete,
-		`cleanup_completed_at=?,cleanup_proof=?`, []any{unixMillis(p.Now), p.CleanupProof}, "complete background result cleanup")
+		`cleanup_proof=?`, []any{p.CleanupProof}, "complete background result cleanup")
 }
 
 func (s *Store) transitionRun(ctx context.Context, ref BackgroundRunRef, state BackgroundRunState, phase BackgroundRunEffectPhase, assignments string, args []any, operation string, predicates ...string) (BackgroundRun, error) {
@@ -453,14 +363,13 @@ func (s *Store) updateRun(ctx context.Context, ref BackgroundRunRef, assignments
 	}
 	defer release()
 	defer rollback(tx, &err)
-	databaseState, databasePhase := databaseBackgroundStatePhase(ref.ExpectedState, ref.ExpectedPhase)
 	query := `UPDATE background_runs SET ` + assignments + `,revision=revision+1,updated_at=?
 WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND state=? AND effect_phase=?`
 	for _, predicate := range predicates {
 		query += ` AND ` + predicate
 	}
 	args = append(args, unixMillis(ref.Now), ref.TaskID, ref.AttemptID, ref.WorkspaceID, ref.Generation,
-		ref.ExpectedRevision, databaseState, databasePhase)
+		ref.ExpectedRevision, ref.ExpectedState, ref.ExpectedPhase)
 	result, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return BackgroundRun{}, fmt.Errorf("%s: %w", operation, err)
@@ -476,23 +385,6 @@ WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revisio
 		return BackgroundRun{}, fmt.Errorf("commit %s: %w", operation, err)
 	}
 	return run, nil
-}
-
-// databaseBackgroundStatePhase maps the in-memory tuple projected by
-// scanBackgroundRun from result_authority_phase back to the stored tuple.
-func databaseBackgroundStatePhase(state BackgroundRunState, phase BackgroundRunEffectPhase) (BackgroundRunState, BackgroundRunEffectPhase) {
-	if state == BackgroundRunCanceling && phase == BackgroundRunEffectSealIntent {
-		return BackgroundRunCleanupRequired, BackgroundRunEffectStopIntent
-	}
-	// Exporting projects only the phase, so the reachable in-memory tuple is
-	// (cleanup_required, exporting); the stored state stays cleanup_required.
-	if (state == BackgroundRunCleanupRequired || state == BackgroundRunCanceling) && phase == BackgroundRunEffectExporting {
-		return BackgroundRunCleanupRequired, BackgroundRunEffectWriterInactive
-	}
-	if state == BackgroundRunResultReady && phase == BackgroundRunEffectArtifactCommitted {
-		return BackgroundRunResultReady, BackgroundRunEffectWriterInactive
-	}
-	return state, phase
 }
 
 func readBackgroundRunExact(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, taskID task.TaskID) (BackgroundRun, error) {

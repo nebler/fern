@@ -16,21 +16,13 @@ const (
 )
 
 const (
-	Absent            Phase = "absent"
-	Provisioning      Phase = "provisioning"
-	PromptPending     Phase = "prompt_pending"
-	Admitted          Phase = "admitted"
-	SealIntent        Phase = "seal_intent"
-	StopIntent        Phase = "stop_intent"
-	WriterInactive    Phase = "writer_inactive"
-	Exporting         Phase = "exporting"
-	ArtifactCommitted Phase = "artifact_committed"
-	RouteRemoved      Phase = "route_removed"
-	ContainerRemoved  Phase = "container_removed"
-	VolumeRemoved     Phase = "volume_removed"
-	CloneRemoved      Phase = "clone_removed"
-	CleanupComplete   Phase = "cleanup_complete"
-	PreEffectFailed   Phase = "pre_effect_failed"
+	Absent          Phase = "absent"
+	Provisioning    Phase = "provisioning"
+	PromptPending   Phase = "prompt_pending"
+	Admitted        Phase = "admitted"
+	Sealing         Phase = "sealing"
+	Cleaning        Phase = "cleaning"
+	CleanupComplete Phase = "cleanup_complete"
 )
 
 // Lifecycle is a classification, not a transition engine. Fencing, evidence,
@@ -60,22 +52,13 @@ func Classify(state State, phase Phase) Lifecycle {
 		valid, executing = state == SettingUp || state == Uncertain, true
 	case Admitted:
 		valid, executing = state == Working || state == NeedsYou || state == Uncertain, true
-	case StopIntent:
-		cleanupStep = true
-		valid = state == Canceling || state == Uncertain || state == ResultReady || state == CleanupRequired
-	case WriterInactive, RouteRemoved, ContainerRemoved, VolumeRemoved, CloneRemoved:
-		cleanupStep = true
-		valid = state == Canceling || state == ResultReady || state == CleanupRequired
-	case SealIntent:
+	case Sealing:
 		valid = state == Canceling
-	case Exporting:
-		valid = state == Canceling || state == CleanupRequired
-	case ArtifactCommitted:
-		valid = state == ResultReady
+	case Cleaning:
+		cleanupStep = true
+		valid = state == Canceling || state == CleanupRequired || state == ResultReady
 	case CleanupComplete:
 		valid = state == ResultReady || state == Failed
-	case PreEffectFailed:
-		valid = state == Failed
 	}
 	return Lifecycle{
 		Valid:                  valid,
