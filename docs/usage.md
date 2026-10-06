@@ -322,5 +322,4 @@ backups rather than deleting files to make startup succeed.
 
 - [Root README](../README.md): requirements and supported commands.
 - [Plugin README](../plugins/opencode/README.md): client behavior and limitations.
-- [Go package guide](go-packages.md): suggested code-reading order.
-- [Architecture](../ARCHITECTURE.md): persistence, execution, and recovery boundaries.
+- [Architecture](../ARCHITECTURE.md): persistence, execution, and recovery boundaries, plus the package map and suggested code-reading order.

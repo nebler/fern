@@ -1,6 +1,6 @@
 # Disposable Docker runtime contract harness
 
-See the [Go package map](../../docs/go-packages.md) and [maintenance review](../../docs/go-review.md).
+See the [package map](../../ARCHITECTURE.md#19-package-map) and [maintenance review](../../docs/go-review.md).
 
 This `main` package exercises `taskenvdocker` against a **real local Docker
 daemon and an already-built, operator-pinned source image**. It is integration

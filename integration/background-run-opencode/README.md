@@ -1,6 +1,6 @@
 # Pinned OpenCode Background Run harness
 
-See the [Go package map](../../docs/go-packages.md) and [maintenance review](../../docs/go-review.md).
+See the [package map](../../ARCHITECTURE.md#19-package-map) and [maintenance review](../../docs/go-review.md).
 
 This `main` package checks the real pinned OpenCode server together with Fern's
 Docker provider, serial coordinator, attachment route, and retained artifacts.

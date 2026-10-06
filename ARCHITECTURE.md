@@ -470,33 +470,40 @@ generation when one exists.
 
 ## 19. Package Map
 
+Packages are listed in suggested reading order: lifecycle first, then the
+command path, effects, and composition, then the boundaries they rely on. Each
+package's doc comment (`go doc ./internal/<name>`) records its invariants and
+ownership boundaries.
+
 | Package | Responsibility |
 | --- | --- |
+| `internal/run` | persistence-independent lifecycle policy and immutable resource/runtime identities |
+| `internal/runapi` | plugin-authenticated run HTTP contract plus create/stop/seal policy, admission, replay, and post-commit notification |
+| `internal/backgroundruncoord` | serial run effect coordinator and recovery |
 | `cmd/fern` | CLI, composition, backup, credentials, process lifecycle |
-| `backgroundopencode` | pinned disposable OpenCode client and observations |
-| `backgroundroute` | exact live target/session capabilities, request policy, shutdown, and fencing |
-| `backgroundruncoord` | serial run effect coordinator and recovery |
-| `config` | strict compatibility loader and production validator |
-| `control` | devices and pairing |
-| `credentialbundle` | age-encrypted GitHub credential bundles |
-| `githubapp` | onboarding, installation tokens, repository authority |
-| `pluginauth` | fixed-scope plugin device authorization and revocation |
-| `proxy` | remote/operator ingress and browser security |
-| `run` | persistence-independent lifecycle policy and immutable resource/runtime identities |
-| `runapi` | plugin-authenticated run contract |
-| `runcommand` | transport-independent create/stop/seal policy, admission, replay, and post-commit notification |
-| `runclientapi` | operator/client discovery and attachment admission |
-| `task` | identifiers, actor snapshots, idempotency vocabulary |
-| `taskartifact` | deterministic Git bundle creation, CAS, materialization |
-| `taskenvdocker` | disposable Docker resources and writer proof |
-| `taskresultsource` | CAS-only result binding and verified checkout acquisition |
-| `taskstore` | schema 4 run/result authority and state machines |
-| `observability` | health, readiness, status, metrics, retry |
-| `hostlease` | exclusive host-local repository-binding lease |
-| `compatibility` | fresh-schema and release-manifest alignment |
+| `internal/task` | identifiers, actor snapshots, idempotency vocabulary |
+| `internal/taskstore` | schema 4 run/result authority and state machines |
+| `internal/taskartifact` | deterministic Git bundle creation, CAS, materialization |
+| `internal/taskresultsource` | CAS-only result binding and verified checkout acquisition |
+| `internal/taskenvdocker` | disposable Docker resources, writer proof, container GitHub credential delivery |
+| `internal/backgroundopencode` | pinned disposable OpenCode client and observations |
+| `internal/runclientapi` | operator/client discovery and attachment admission |
+| `internal/backgroundroute` | exact live target/session capabilities, request policy, shutdown, and fencing |
+| `internal/proxy` | remote/operator ingress, pairing, and browser security |
+| `internal/control` | durable device identities and operator credential ID |
+| `internal/pluginauth` | fixed-scope plugin device authorization and revocation |
+| `internal/githubapp` | onboarding, installation tokens, repository authority |
+| `internal/credentialbundle` | age-encrypted GitHub credential bundles |
+| `internal/config` | strict configuration loader and bootstrap/execution validation |
+| `internal/hostlease` | exclusive host-local repository-binding lease |
+| `internal/observability` | health, readiness, status, metrics |
+| `internal/gitref` | shared Git ref, GitHub name/remote, and path validation |
+| `internal/strictjson` | strict JSON validation before typed decoding |
+| `internal/compatibility` | test-only fresh-schema and release-manifest alignment |
+| `scripts` | embedded Python host backup tool ([README](scripts/README.md)) |
 
-`gitref` and `strictjson` are narrow shared validation utilities.
-Integration packages qualify Docker, OpenCode, upgrades, and releases.
+Integration packages under `integration/` qualify Docker, OpenCode, upgrades,
+and releases; each has its own README.
 
 ### Boundary decisions
 

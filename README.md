@@ -177,8 +177,7 @@ engineering rigor; it does not erase the deployment and qualification gaps below
 
 - **[Usage guide](docs/usage.md):** setup, run, attach, seal, results, and recovery.
 - **[Phone demo guide](docs/phone-demo.md):** private Tailscale pairing and an end-to-end demo checklist.
-- **[Go package guide](docs/go-packages.md):** package READMEs and suggested reading order.
-- **[Architecture](ARCHITECTURE.md):** ownership, persistence, and effect boundaries.
+- **[Architecture](ARCHITECTURE.md):** ownership, persistence, and effect boundaries, plus the package map in suggested reading order.
 - **[Review findings](docs/go-review.md):** remaining maintenance and performance concerns.
 
 ## License
