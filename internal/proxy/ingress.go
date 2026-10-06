@@ -45,7 +45,6 @@ type trustedOrigin struct {
 	scheme    string
 	authority string
 	port      string
-	legacy    bool
 }
 
 // NewHandlers builds the paired remote and Basic-authenticated loopback

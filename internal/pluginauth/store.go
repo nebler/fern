@@ -257,7 +257,7 @@ func (store *Store) Start(now time.Time) (StartResult, error) {
 	}
 	store.data.Authorizations[id] = record
 	store.data.LastStartedAt = now
-	if err := store.commitLocked(previous); err != nil {
+	if err := store.commitLocked(context.Background(), previous); err != nil {
 		return StartResult{}, err
 	}
 	return StartResult{id, deviceCode, userCode, record.ExpiresAt, pollInterval}, nil
@@ -282,7 +282,7 @@ func (store *Store) Poll(deviceCode string, now time.Time) (PollResult, error) {
 			return PollResult{}, ErrRateLimited
 		}
 		store.data.InvalidPolls = append(store.data.InvalidPolls, now)
-		if err := store.commitLocked(previous); err != nil {
+		if err := store.commitLocked(context.Background(), previous); err != nil {
 			return PollResult{}, err
 		}
 		return PollResult{}, ErrInvalidCode
@@ -311,17 +311,13 @@ func (store *Store) Poll(deviceCode string, now time.Time) (PollResult, error) {
 			result.State = PollDenied
 		}
 	}
-	if err := store.commitLocked(previous); err != nil {
+	if err := store.commitLocked(context.Background(), previous); err != nil {
 		return PollResult{}, err
 	}
 	return result, nil
 }
 
-func (store *Store) Approve(id, userCode string, actor task.ActorSnapshot, now time.Time) (Credential, error) {
-	return store.ApproveContext(context.Background(), id, userCode, actor, now)
-}
-
-func (store *Store) ApproveContext(ctx context.Context, id, userCode string, actor task.ActorSnapshot, now time.Time) (Credential, error) {
+func (store *Store) Approve(ctx context.Context, id, userCode string, actor task.ActorSnapshot, now time.Time) (Credential, error) {
 	if err := ctx.Err(); err != nil {
 		return Credential{}, err
 	}
@@ -352,7 +348,7 @@ func (store *Store) ApproveContext(ctx context.Context, id, userCode string, act
 	if !now.Before(record.ExpiresAt) {
 		record.State, record.DecidedAt = Expired, record.ExpiresAt
 		store.data.Authorizations[id] = record
-		if err := store.commitLockedContext(ctx, previous); err != nil {
+		if err := store.commitLocked(ctx, previous); err != nil {
 			return Credential{}, err
 		}
 		return Credential{}, ErrInvalidState
@@ -372,17 +368,13 @@ func (store *Store) ApproveContext(ctx context.Context, id, userCode string, act
 	store.data.Credentials[credentialID] = credentialRecord{Credential: credential, DeviceDigest: record.DeviceDigest}
 	record.State, record.DecidedAt, record.DecidedBy, record.CredentialID = Approved, now, &attribution, credentialID
 	store.data.Authorizations[id] = record
-	if err := store.commitLockedContext(ctx, previous); err != nil {
+	if err := store.commitLocked(ctx, previous); err != nil {
 		return Credential{}, err
 	}
 	return credential, nil
 }
 
-func (store *Store) Deny(id, userCode string, actor task.ActorSnapshot, now time.Time) error {
-	return store.DenyContext(context.Background(), id, userCode, actor, now)
-}
-
-func (store *Store) DenyContext(ctx context.Context, id, userCode string, actor task.ActorSnapshot, now time.Time) error {
+func (store *Store) Deny(ctx context.Context, id, userCode string, actor task.ActorSnapshot, now time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -418,7 +410,7 @@ func (store *Store) DenyContext(ctx context.Context, id, userCode string, actor 
 		record.DecidedAt = now
 	}
 	store.data.Authorizations[id] = record
-	if err := store.commitLockedContext(ctx, previous); err != nil {
+	if err := store.commitLocked(ctx, previous); err != nil {
 		return err
 	}
 	if record.State == Expired {
@@ -459,7 +451,7 @@ func (store *Store) Authenticate(deviceCode string, now time.Time) (Credential, 
 			previous := store.cloneLocked()
 			record.State = CredentialExpired
 			store.data.Credentials[id] = record
-			if err := store.commitLocked(previous); err != nil {
+			if err := store.commitLocked(context.Background(), previous); err != nil {
 				return Credential{}, false, err
 			}
 			return Credential{}, false, nil
@@ -505,7 +497,7 @@ func (store *Store) Credentials(now time.Time) ([]Credential, error) {
 	previous := store.cloneLocked()
 	changed := store.expireCredentialsLocked(now)
 	if changed {
-		if err := store.commitLocked(previous); err != nil {
+		if err := store.commitLocked(context.Background(), previous); err != nil {
 			return nil, err
 		}
 	}
@@ -538,7 +530,7 @@ func (store *Store) Revoke(id string, actor task.ActorSnapshot, now time.Time) e
 	if record.State == Active && !now.Before(record.ExpiresAt) {
 		record.State = CredentialExpired
 		store.data.Credentials[id] = record
-		if err := store.commitLocked(previous); err != nil {
+		if err := store.commitLocked(context.Background(), previous); err != nil {
 			store.mu.Unlock()
 			return err
 		}
@@ -551,7 +543,7 @@ func (store *Store) Revoke(id string, actor task.ActorSnapshot, now time.Time) e
 	}
 	record.State, record.RevokedAt, record.RevokedBy = Revoked, now, attribution
 	store.data.Credentials[id] = record
-	if err := store.commitLocked(previous); err != nil {
+	if err := store.commitLocked(context.Background(), previous); err != nil {
 		store.mu.Unlock()
 		return err
 	}
@@ -603,11 +595,7 @@ func (store *Store) load() error {
 	return nil
 }
 
-func (store *Store) commitLocked(previous diskState) error {
-	return store.commitLockedContext(context.Background(), previous)
-}
-
-func (store *Store) commitLockedContext(ctx context.Context, previous diskState) error {
+func (store *Store) commitLocked(ctx context.Context, previous diskState) error {
 	if err := ctx.Err(); err != nil {
 		store.data = previous
 		return err

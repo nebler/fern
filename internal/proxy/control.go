@@ -6,7 +6,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -18,20 +17,16 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 	store := controls.Store
 	path := request.URL.Path
 	if request.URL.EscapedPath() != path {
-		if strings.HasPrefix(path, "/fern/api/") || strings.HasPrefix(path, "/fern/devices/") || path == "/fern/workflows" {
+		if strings.HasPrefix(path, "/fern/api/") || strings.HasPrefix(path, "/fern/devices/") {
 			http.NotFound(writer, request)
 			return true
 		}
 		return false
 	}
 	mutation := request.Method == http.MethodPost || request.Method == http.MethodDelete || request.Method == http.MethodPatch || request.Method == http.MethodPut
-	controlPath := strings.HasPrefix(path, "/fern/api/v1/") || strings.HasPrefix(path, "/fern/api/plugin-auth/") || strings.HasPrefix(path, "/fern/workflows") || strings.HasPrefix(path, "/fern/devices/")
+	controlPath := strings.HasPrefix(path, "/fern/api/v1/") || strings.HasPrefix(path, "/fern/api/plugin-auth/") || strings.HasPrefix(path, "/fern/devices/")
 	if mutation && controlPath && !sameOrigin(request) {
 		http.Error(writer, "cross-origin control request rejected", http.StatusForbidden)
-		return true
-	}
-	if retiredLegacyControlPath(path) {
-		http.Error(writer, "legacy workflow and publication control is retired", http.StatusGone)
 		return true
 	}
 	if path == "/fern/api/runs" || strings.HasPrefix(path, "/fern/api/runs/") {
@@ -121,21 +116,6 @@ func serveControlRoute(writer http.ResponseWriter, request *http.Request, contro
 	return false
 }
 
-func retiredLegacyControlPath(path string) bool {
-	if path == "/fern/api/v1/workflows" || path == "/fern/api/v1/publications" || path == "/fern/workflows" {
-		return true
-	}
-	if suffix, found := strings.CutPrefix(path, "/fern/api/v1/workflows/"); found {
-		parts := strings.Split(suffix, "/")
-		return parts[0] != "" && (len(parts) == 1 || len(parts) == 2 && parts[1] == "publish")
-	}
-	if suffix, found := strings.CutPrefix(path, "/fern/workflows/"); found {
-		parts := strings.Split(suffix, "/")
-		return len(parts) == 2 && parts[0] != "" && parts[1] == "publish"
-	}
-	return false
-}
-
 func revokeDevice(store *control.Store, id string, onRevoked func(string)) error {
 	if err := store.RevokeDevice(id); err != nil {
 		return err
@@ -180,14 +160,8 @@ func sameOrigin(request *http.Request) bool {
 	if origin == "" {
 		return true
 	}
-	if trusted, ok := request.Context().Value(originKey{}).(trustedOrigin); ok && !trusted.legacy {
-		return origin == trusted.raw
-	}
-	parsed, err := url.Parse(origin)
-	if err != nil || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
-		return false
-	}
-	return (parsed.Scheme == "https" || parsed.Scheme == "http") && strings.EqualFold(parsed.Host, request.Host)
+	trusted, ok := request.Context().Value(originKey{}).(trustedOrigin)
+	return ok && origin == trusted.raw
 }
 
 func methodNotAllowed(writer http.ResponseWriter, allow string) {

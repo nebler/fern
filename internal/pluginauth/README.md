@@ -25,9 +25,8 @@ graph LR
   start --> commit["commitLocked"]
   poll["Poll"] --> find["findAuthorization: digest scan"]
   poll --> commit
-  approve["ApproveContext"] --> actor["trustedAttributionFromActor"]
-  approve --> contextcommit["commitLockedContext"]
-  commit --> contextcommit
+  approve["Approve"] --> actor["trustedAttributionFromActor"]
+  approve --> commit
   auth["Authenticate"] --> scan["credential digest scan"]
   auth -->|"newly expired record"| commit
   revoke["Revoke"] --> commit
@@ -89,7 +88,7 @@ temporary file before rename and directory sync. These operations hold the
 store mutex. Before rename, errors restore the previous snapshot. After rename,
 directory-sync failure retains the new in-memory state and reports uncertainty.
 
-`ApproveContext` and `DenyContext` check cancellation before committing and just
+`Approve` and `Deny` check cancellation before committing and just
 before rename; they cannot promise rollback after replacement. `RegisterRequest`
 checks active state and expiry under the mutex and returns idempotent cleanup.
 `Revoke` durably transitions first, then cancels registered contexts outside the

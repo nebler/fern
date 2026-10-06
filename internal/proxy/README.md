@@ -72,9 +72,7 @@ There is no standalone result/publication API handler in `Controls`.
 Retained-result access belongs to the current run handlers.
 
 `serveControlRoute` also serves device listing/revocation and injected status
-and metrics handlers. Selected retired workflow/publication control paths
-return 410; this is a retirement response, not an active publication subsystem.
-Escaped control paths are rejected where exact-path checks apply.
+and metrics handlers. Escaped control paths are rejected where exact-path checks apply.
 
 The remote gateway is constructed without the operator status/metrics handlers.
 Browser route allowlists further restrict paired authority; plugin routes are
@@ -95,7 +93,8 @@ have narrowly scoped unauthenticated dispatch exceptions.
   duplicate/depth validation plus strict JSON decoding.
 
 `sameOrigin` rejects non-same-origin Fetch Metadata when present and compares a
-present Origin with the configured trusted origin. Missing Origin is accepted
+present Origin with the configured trusted origin (rejecting it when no trusted
+origin is installed). Missing Origin is accepted
 when other checks allow it; this is not a requirement that every request supply
 an Origin header. Device mutations still require their CSRF token.
 

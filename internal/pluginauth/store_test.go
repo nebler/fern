@@ -33,7 +33,7 @@ func TestAuthorizationPersistsDigestsAndReusesPresentedBearer(t *testing.T) {
 	if started.UserCode == "" || started.UserCode == started.DeviceCode || started.AuthorizationID == "" {
 		t.Fatalf("start result did not use independent durable identities: %+v", started)
 	}
-	credential, err := store.Approve(started.AuthorizationID, started.UserCode, operatorActor(), now.Add(time.Second))
+	credential, err := store.Approve(context.Background(), started.AuthorizationID, started.UserCode, operatorActor(), now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +86,7 @@ func TestAuthorizationDenialExpiryRateAndStrictCodes(t *testing.T) {
 	if _, err := store.Start(now.Add(500 * time.Millisecond)); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("rapid start error = %v", err)
 	}
-	if err := store.Deny(denied.AuthorizationID, denied.UserCode, operatorActor(), now.Add(time.Second)); err != nil {
+	if err := store.Deny(context.Background(), denied.AuthorizationID, denied.UserCode, operatorActor(), now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	result, err := store.Poll(denied.DeviceCode, now.Add(5*time.Second))
@@ -115,7 +115,7 @@ func TestAuthorizationDenialExpiryRateAndStrictCodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	for range 2 {
-		if err := store.Deny(denyAtExpiry.AuthorizationID, denyAtExpiry.UserCode, operatorActor(), denyAtExpiry.ExpiresAt); !errors.Is(err, ErrInvalidState) {
+		if err := store.Deny(context.Background(), denyAtExpiry.AuthorizationID, denyAtExpiry.UserCode, operatorActor(), denyAtExpiry.ExpiresAt); !errors.Is(err, ErrInvalidState) {
 			t.Fatalf("deny at expiry error = %v", err)
 		}
 	}
@@ -139,9 +139,9 @@ func TestCanceledDecisionCannotActivateOrDeny(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
 			if decision == "approve" {
-				_, err = store.ApproveContext(ctx, started.AuthorizationID, started.UserCode, operatorActor(), now.Add(time.Second))
+				_, err = store.Approve(ctx, started.AuthorizationID, started.UserCode, operatorActor(), now.Add(time.Second))
 			} else {
-				err = store.DenyContext(ctx, started.AuthorizationID, started.UserCode, operatorActor(), now.Add(time.Second))
+				err = store.Deny(ctx, started.AuthorizationID, started.UserCode, operatorActor(), now.Add(time.Second))
 			}
 			if !errors.Is(err, context.Canceled) {
 				t.Fatalf("canceled %s error = %v", decision, err)
@@ -234,7 +234,7 @@ func TestConcurrentApprovalActivatesExactlyOneCredential(t *testing.T) {
 		group.Add(1)
 		go func() {
 			defer group.Done()
-			credential, err := store.Approve(started.AuthorizationID, started.UserCode, operatorActor(), now.Add(time.Second))
+			credential, err := store.Approve(context.Background(), started.AuthorizationID, started.UserCode, operatorActor(), now.Add(time.Second))
 			if err != nil {
 				errs <- err
 				return
@@ -402,7 +402,7 @@ func approveTestCredential(t *testing.T, store *Store, now time.Time) approvedTe
 	if err != nil {
 		t.Fatal(err)
 	}
-	credential, err := store.Approve(started.AuthorizationID, started.UserCode, operatorActor(), now.Add(time.Second))
+	credential, err := store.Approve(context.Background(), started.AuthorizationID, started.UserCode, operatorActor(), now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}

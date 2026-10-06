@@ -20,7 +20,6 @@ import (
 
 const (
 	deviceCookieName       = "__Host-fern_device"
-	legacyDeviceCookieName = "fern_device"
 	maxDeviceNameBytes     = 80
 	maxOutstandingPairings = 64
 )
@@ -184,17 +183,6 @@ func (state *pairingState) operatorHandler(next http.Handler, control ControlAut
 func isFernRoute(request *http.Request) bool {
 	path := request.URL.Path
 	return path == "/fern" || path == "/fern/" || strings.HasPrefix(path, "/fern/")
-}
-
-func requiresControlAuth(request *http.Request) bool {
-	path := request.URL.Path
-	escaped := request.URL.EscapedPath()
-	if path != escaped {
-		return strings.HasPrefix(path, "/fern/api/") || strings.HasPrefix(path, "/fern/workflows") || strings.HasPrefix(path, "/fern/devices/") || strings.HasPrefix(path, "/fern/control")
-	}
-	return path == "/fern/control" || strings.HasPrefix(path, "/fern/control/") ||
-		strings.HasPrefix(path, "/fern/api/v1/") || path == "/fern/workflows" || strings.HasPrefix(path, "/fern/workflows/") ||
-		strings.HasPrefix(path, "/fern/devices/") || path == "/fern/api/plugin-auth/credentials" || strings.HasPrefix(path, "/fern/api/plugin-auth/credentials/")
 }
 
 func (state *pairingState) issue(writer http.ResponseWriter, request *http.Request) {
@@ -429,16 +417,6 @@ func (state *pairingState) operatorActor() (task.ActorSnapshot, error) {
 
 func stripAllCookies(request *http.Request) {
 	request.Header.Del("Cookie")
-}
-
-func stripDeviceCookie(request *http.Request) {
-	cookies := request.Cookies()
-	request.Header.Del("Cookie")
-	for _, cookie := range cookies {
-		if cookie.Name != deviceCookieName && cookie.Name != legacyDeviceCookieName {
-			request.AddCookie(cookie)
-		}
-	}
 }
 
 func (state *pairingState) prune(now time.Time) {

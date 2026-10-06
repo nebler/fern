@@ -317,9 +317,9 @@ func (handler *pluginAuthHTTP) serveTrusted(writer http.ResponseWriter, request 
 			return true
 		}
 		if parts[1] == "approve" {
-			_, err = handler.store.ApproveContext(request.Context(), parts[0], body.UserCode, actor, handler.now())
+			_, err = handler.store.Approve(request.Context(), parts[0], body.UserCode, actor, handler.now())
 		} else {
-			err = handler.store.DenyContext(request.Context(), parts[0], body.UserCode, actor, handler.now())
+			err = handler.store.Deny(request.Context(), parts[0], body.UserCode, actor, handler.now())
 		}
 		if err != nil {
 			writePluginAuthError(writer, err)
@@ -424,7 +424,7 @@ func containsBearerLikeAuthorization(values []string) bool {
 
 func pluginVerificationURI(request *http.Request) (string, bool) {
 	origin, ok := request.Context().Value(originKey{}).(trustedOrigin)
-	if !ok || origin.legacy || origin.raw == "" {
+	if !ok || origin.raw == "" {
 		return "", false
 	}
 	return origin.raw + pluginAuthorizePath, true
