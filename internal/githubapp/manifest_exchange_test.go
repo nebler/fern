@@ -127,7 +127,6 @@ func TestManifestClientBoundsAndStrictlyDecodesRedactedResponses(t *testing.T) {
 	}{
 		{name: "HTTP error", status: http.StatusBadRequest, body: remoteSecret, want: ErrRequestFailed},
 		{name: "oversized", status: http.StatusCreated, body: strings.Repeat(remoteSecret, maxManifestResponseBytes), want: ErrResponseTooLarge},
-		{name: "unknown field", status: http.StatusCreated, body: strings.TrimSuffix(valid, "}") + `,"unexpected":"` + remoteSecret + `"}`, want: ErrInvalidAppCredentials},
 		{name: "trailing JSON", status: http.StatusCreated, body: valid + ` {"secret":"` + remoteSecret + `"}`, want: ErrInvalidAppCredentials},
 		{name: "invalid key", status: http.StatusCreated, body: `{"id":1,"client_id":"Iv1.fern","client_secret":"secret","pem":"` + remoteSecret + `"}`, want: ErrInvalidAppCredentials},
 	}
@@ -147,6 +146,28 @@ func TestManifestClientBoundsAndStrictlyDecodesRedactedResponses(t *testing.T) {
 				t.Fatalf("error = %v", err)
 			}
 		})
+	}
+}
+
+func TestManifestClientToleratesUnknownResponseFields(t *testing.T) {
+	t.Parallel()
+	privateKeyPEM := testPrivateKeyPEM(t)
+	body := fmt.Sprintf(`{"id":7,"slug":"fern","owner":{"login":"fern-inc"},"client_id":"Iv1.fern","client_secret":"secret","webhook_secret":"","pem":%q,"field_added_by_github_later":{"nested":[1,2]}}`, privateKeyPEM)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(writer, body)
+	}))
+	defer server.Close()
+	client := newTestManifestClient(t, server)
+	code, _ := NewManifestCode("single-use-code")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	credentials, err := client.Exchange(ctx, code)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if credentials.appID != 7 || credentials.clientID != "Iv1.fern" {
+		t.Fatalf("credentials app=%d client=%q", credentials.appID, credentials.clientID)
 	}
 }
 

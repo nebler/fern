@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/rsa"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -152,14 +151,10 @@ func (client *ManifestClient) Exchange(ctx context.Context, code ManifestCode) (
 		return AppCredentials{}, &HTTPError{statusCode: response.StatusCode}
 	}
 
+	// GitHub adds response fields over time; tolerate unknown fields like
+	// every other GitHub response and validate only what Fern consumes.
 	var decoded manifestConversionResponse
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.DisallowUnknownFields()
-	if decoder.Decode(&decoded) != nil {
-		return AppCredentials{}, ErrInvalidAppCredentials
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); err != io.EOF {
+	if decodeGitHubJSON(payload, &decoded) != nil {
 		return AppCredentials{}, ErrInvalidAppCredentials
 	}
 	key, err := ParseRSAPrivateKeyPEM([]byte(decoded.PEM))
@@ -177,23 +172,11 @@ func (client *ManifestClient) Exchange(ctx context.Context, code ManifestCode) (
 }
 
 type manifestConversionResponse struct {
-	ID                 int64             `json:"id"`
-	Slug               string            `json:"slug"`
-	NodeID             string            `json:"node_id"`
-	Owner              json.RawMessage   `json:"owner"`
-	Name               string            `json:"name"`
-	Description        string            `json:"description"`
-	ExternalURL        string            `json:"external_url"`
-	HTMLURL            string            `json:"html_url"`
-	CreatedAt          string            `json:"created_at"`
-	UpdatedAt          string            `json:"updated_at"`
-	Permissions        map[string]string `json:"permissions"`
-	Events             []string          `json:"events"`
-	InstallationsCount int               `json:"installations_count"`
-	ClientID           string            `json:"client_id"`
-	ClientSecret       string            `json:"client_secret"`
-	WebhookSecret      string            `json:"webhook_secret"`
-	PEM                string            `json:"pem"`
+	ID            int64  `json:"id"`
+	ClientID      string `json:"client_id"`
+	ClientSecret  string `json:"client_secret"`
+	WebhookSecret string `json:"webhook_secret"`
+	PEM           string `json:"pem"`
 }
 
 func validManifestCode(value string) bool {
