@@ -92,8 +92,11 @@ Only the retained-result commit can establish `result_ready`.
 
 The result commit links artifact/export/materialization/writer proof and ordered
 events, completes the task, marks its prepared attempt superseded, and finishes
-the export atomically. SQL triggers independently guard immutable authority,
-revision progression, phase order, event linkage, and cleanup gating. Physical
+the export atomically. Transition order and cross-record linkage are enforced
+by the Go transaction that writes them (exact compare-and-swap updates) plus
+table CHECKs; SQL triggers keep only immutability of recorded authority,
+revision/`updated_at` progression, prompt admission requiring the one-shot
+request fence, and retained-result cleanup gating. Physical
 state/phase columns plus `result_authority_phase` are projected into public
 seal/export/artifact phases by `scanBackgroundRun` and translated back for fences.
 

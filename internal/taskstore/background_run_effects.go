@@ -206,7 +206,7 @@ func (s *Store) RecordBackgroundRunPromptIntent(ctx context.Context, p RecordBac
 // RecordBackgroundRunPromptRequestAttempted is the irreversible pre-I/O fence.
 // A later lease claimant can observe it but no claimant can set or change it twice.
 func (s *Store) RecordBackgroundRunPromptRequestAttempted(ctx context.Context, p BackgroundRunClaim) (BackgroundRun, error) {
-	if p.ExpectedState != BackgroundRunUncertain || p.ExpectedPhase != BackgroundRunEffectPromptIntent {
+	if p.ExpectedState != BackgroundRunUncertain || p.ExpectedPhase != BackgroundRunEffectPromptIntent || p.CancelEpoch != 0 {
 		return BackgroundRun{}, fmt.Errorf("%w: background run prompt request attempt", ErrInvalidInput)
 	}
 	current, err := s.ReadClaimedBackgroundRun(ctx, p)

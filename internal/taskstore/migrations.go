@@ -335,10 +335,6 @@ CREATE TRIGGER tasks_completed_immutable BEFORE UPDATE ON tasks
 WHEN OLD.state='completed' AND (NEW.state<>OLD.state OR NEW.sealed_result_id IS NOT OLD.sealed_result_id OR NEW.terminal_reason IS NOT OLD.terminal_reason)
 BEGIN SELECT RAISE(ABORT, 'completed task is immutable'); END;
 
-CREATE TRIGGER tasks_completed_insert_guard BEFORE INSERT ON tasks
-WHEN NEW.state='completed' OR NEW.sealed_result_id IS NOT NULL
-BEGIN SELECT RAISE(ABORT, 'task result must be recorded by seal transition'); END;
-
 CREATE TABLE background_runs (
     task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     attempt_id TEXT NOT NULL,
@@ -507,39 +503,14 @@ CREATE TRIGGER background_runs_revision BEFORE UPDATE ON background_runs
 WHEN NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at
 BEGIN SELECT RAISE(ABORT, 'invalid background run revision'); END;
 
-CREATE TRIGGER background_runs_claim_integrity BEFORE UPDATE ON background_runs
-BEGIN
-  SELECT CASE WHEN NEW.claim_generation<OLD.claim_generation OR NEW.claim_generation>OLD.claim_generation+1 OR
-    (NEW.claim_generation=OLD.claim_generation AND NEW.claim_owner IS NOT OLD.claim_owner AND NEW.claim_owner IS NOT NULL) OR
-    (NEW.claim_generation=OLD.claim_generation+1 AND (NEW.claim_owner IS NULL OR
-      (OLD.claim_owner IS NOT NULL AND OLD.claim_expires_at>NEW.updated_at))) OR
-    (NEW.claim_owner IS NOT NULL AND (NEW.state IN ('queued','failed') OR (NEW.state='result_ready' AND NEW.effect_phase='cleanup_complete')))
-    THEN RAISE(ABORT, 'invalid background run claim') END;
-END;
-
 CREATE TRIGGER background_runs_stop_fields_immutable BEFORE UPDATE ON background_runs
 WHEN OLD.cancel_epoch=1 AND (NEW.cancel_epoch<>OLD.cancel_epoch OR NEW.stop_receipt_id IS NOT OLD.stop_receipt_id OR
   NEW.stop_actor_snapshot_id IS NOT OLD.stop_actor_snapshot_id OR NEW.stop_requested_at IS NOT OLD.stop_requested_at)
 BEGIN SELECT RAISE(ABORT, 'background run stop fields are immutable'); END;
 
-CREATE TRIGGER background_runs_v9_insert_fences BEFORE INSERT ON background_runs
-WHEN NEW.prompt_request_attempted_at IS NOT NULL OR NEW.timeout_requested_at IS NOT NULL OR NEW.timeout_actor_snapshot_id IS NOT NULL OR
-  NEW.environment_sha256 IS NULL OR NEW.resource_spec_version IS NOT 10
-BEGIN SELECT RAISE(ABORT, 'background run fences must start empty'); END;
-
 CREATE TRIGGER background_runs_environment_immutable BEFORE UPDATE ON background_runs
 WHEN NEW.environment_sha256 IS NOT OLD.environment_sha256 OR NEW.resource_spec_version IS NOT OLD.resource_spec_version
 BEGIN SELECT RAISE(ABORT, 'background run environment identity is immutable'); END;
-
-CREATE TRIGGER background_runs_prompt_attempt_fence BEFORE UPDATE ON background_runs
-WHEN NEW.prompt_request_attempted_at IS NOT OLD.prompt_request_attempted_at
-BEGIN
-  SELECT CASE WHEN OLD.prompt_request_attempted_at IS NOT NULL OR NEW.prompt_request_attempted_at IS NULL OR
-    OLD.state<>'uncertain' OR OLD.effect_phase<>'prompt_intent' OR OLD.cancel_epoch<>0 OR
-    NEW.state<>OLD.state OR NEW.effect_phase<>OLD.effect_phase OR NEW.cancel_epoch<>OLD.cancel_epoch OR
-    NEW.prompt_request_attempted_at<>NEW.updated_at
-    THEN RAISE(ABORT, 'invalid background run prompt attempt fence') END;
-END;
 
 CREATE TRIGGER background_runs_prompt_attempt_immutable BEFORE UPDATE ON background_runs
 WHEN OLD.prompt_request_attempted_at IS NOT NULL AND NEW.prompt_request_attempted_at IS NOT OLD.prompt_request_attempted_at
@@ -725,20 +696,6 @@ CREATE TRIGGER background_run_exports_revision BEFORE UPDATE ON background_run_e
   NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR NEW.claim_generation<OLD.claim_generation OR NEW.claim_generation>OLD.claim_generation+1
 BEGIN SELECT RAISE(ABORT,'invalid background export revision'); END;
 
-CREATE TRIGGER background_run_exports_phase BEFORE UPDATE OF phase ON background_run_exports WHEN NEW.phase<>OLD.phase AND NOT (
-  (OLD.phase='prepared' AND NEW.phase='snapshot_started') OR (OLD.phase='snapshot_started' AND NEW.phase='snapshot_selected') OR
-  (OLD.phase='snapshot_selected' AND NEW.phase='bundle_write_started') OR (OLD.phase='bundle_write_started' AND NEW.phase='bundle_verified') OR
-  (OLD.phase='bundle_verified' AND NEW.phase='cas_install_started') OR (OLD.phase='cas_install_started' AND NEW.phase='cas_installed') OR
-  (OLD.phase='cas_installed' AND NEW.phase='materialize_started') OR (OLD.phase='materialize_started' AND NEW.phase='materialized') OR
-  (OLD.phase='materialized' AND NEW.phase='completed'))
-BEGIN SELECT RAISE(ABORT,'invalid background export phase'); END;
-
-CREATE TRIGGER background_run_exports_state BEFORE UPDATE OF state ON background_run_exports WHEN NEW.state<>OLD.state AND NOT (
-  (OLD.state IN ('prepared','recovery_required') AND NEW.state='running') OR
-  (OLD.state='running' AND NEW.state='recovery_required') OR
-  (OLD.state='running' AND NEW.state='completed' AND NEW.phase='completed'))
-BEGIN SELECT RAISE(ABORT,'invalid background export state'); END;
-
 CREATE TRIGGER background_run_exports_terminal BEFORE UPDATE ON background_run_exports WHEN OLD.state='completed'
 BEGIN SELECT RAISE(ABORT,'completed background export is immutable'); END;
 
@@ -758,12 +715,6 @@ CREATE TRIGGER artifact_manifests_safe_insert BEFORE INSERT ON retained_artifact
 	 lower(COALESCE(key,'')) IN ('host_path','remote_url','prompt','environment','credential','credentials','cookie','cookies','authorization','actor_auth','opencode_output','raw_output'))
 BEGIN SELECT RAISE(ABORT,'artifact manifest contains forbidden authority'); END;
 
-CREATE TRIGGER background_export_manifests_safe_update BEFORE UPDATE OF artifact_manifest_json ON background_run_exports
-WHEN NEW.artifact_manifest_json IS NOT NULL AND EXISTS (
-  SELECT 1 FROM json_tree(NEW.artifact_manifest_json) WHERE
-	 lower(COALESCE(key,'')) IN ('host_path','remote_url','prompt','environment','credential','credentials','cookie','cookies','authorization','actor_auth','opencode_output','raw_output'))
-BEGIN SELECT RAISE(ABORT,'background export manifest contains forbidden authority'); END;
-
 CREATE TRIGGER background_runs_retained_tuple_immutable BEFORE UPDATE ON background_runs WHEN OLD.background_seal_request_id IS NOT NULL AND (
   NEW.background_seal_request_id IS NOT OLD.background_seal_request_id OR NEW.artifact_export_id IS NOT OLD.artifact_export_id OR
   NEW.retained_artifact_id IS NOT OLD.retained_artifact_id OR NEW.materialization_id IS NOT OLD.materialization_id OR
@@ -779,40 +730,6 @@ WHEN OLD.background_seal_request_id IS NOT NULL AND OLD.state='result_ready' AND
     WHERE result.id=OLD.retained_result_id AND result.source_kind='retained_artifact' AND artifact.result_id=result.id AND
       export.state='completed' AND export.phase='completed' AND export.result_id=result.id AND materialization.state='ready' AND materialization.result_id=result.id))
 BEGIN SELECT RAISE(ABORT,'retained cleanup has no exact committed tuple'); END;
-
-CREATE TRIGGER background_runs_phase_transition BEFORE UPDATE OF effect_phase ON background_runs
-WHEN NEW.effect_phase<>OLD.effect_phase AND NOT (
-  (OLD.effect_phase='absent' AND NEW.effect_phase IN ('provision_intent','pre_effect_failed')) OR
-  (OLD.effect_phase='provision_intent' AND NEW.effect_phase IN ('clone_observed','stop_intent','pre_effect_failed')) OR
-  (OLD.effect_phase='clone_observed' AND NEW.effect_phase IN ('volume_observed','stop_intent')) OR
-  (OLD.effect_phase='volume_observed' AND NEW.effect_phase IN ('container_observed','stop_intent')) OR
-  (OLD.effect_phase='container_observed' AND NEW.effect_phase IN ('health_observed','stop_intent')) OR
-  (OLD.effect_phase='health_observed' AND NEW.effect_phase IN ('ready','stop_intent')) OR
-  (OLD.effect_phase='ready' AND NEW.effect_phase IN ('session_observed','stop_intent')) OR
-  (OLD.effect_phase='session_observed' AND NEW.effect_phase IN ('prompt_intent','stop_intent')) OR
-  (OLD.effect_phase='prompt_intent' AND NEW.effect_phase IN ('prompt_admitted','stop_intent')) OR
-  (OLD.effect_phase='prompt_admitted' AND NEW.effect_phase='stop_intent') OR
-  (OLD.effect_phase='stop_intent' AND NEW.effect_phase='writer_inactive') OR
-  (OLD.effect_phase='writer_inactive' AND NEW.effect_phase='route_removed') OR
-  (OLD.effect_phase='route_removed' AND NEW.effect_phase='container_removed') OR
-  (OLD.effect_phase='container_removed' AND NEW.effect_phase='volume_removed') OR
-  (OLD.effect_phase='volume_removed' AND NEW.effect_phase='clone_removed') OR
-  (OLD.effect_phase='clone_removed' AND NEW.effect_phase='cleanup_complete'))
-BEGIN SELECT RAISE(ABORT,'invalid background run effect transition'); END;
-
-CREATE TRIGGER background_runs_state_transition BEFORE UPDATE OF state ON background_runs
-WHEN NEW.state<>OLD.state AND NOT (
-  (OLD.state='queued' AND NEW.state='setting_up' AND NEW.effect_phase='provision_intent') OR
-  (OLD.state='queued' AND NEW.state='failed' AND NEW.effect_phase='pre_effect_failed') OR
-  (OLD.state='setting_up' AND NEW.state='uncertain') OR
-  (OLD.state='uncertain' AND NEW.state='setting_up') OR
-  (OLD.state IN ('working','needs_you','uncertain') AND NEW.state IN ('working','needs_you','uncertain') AND NEW.effect_phase='prompt_admitted') OR
-  (OLD.state IN ('setting_up','working','needs_you','uncertain') AND NEW.state IN ('canceling','cleanup_required') AND NEW.effect_phase='stop_intent') OR
-  (OLD.state='canceling' AND NEW.state='cleanup_required') OR
-  (OLD.state IN ('canceling','cleanup_required') AND NEW.state='failed' AND NEW.effect_phase='cleanup_complete') OR
-  (OLD.state='cleanup_required' AND NEW.state='result_ready' AND NEW.effect_phase='writer_inactive' AND NEW.result_authority_phase='artifact_committed') OR
-  (OLD.state IN ('setting_up','uncertain') AND NEW.state='failed' AND NEW.effect_phase='pre_effect_failed'))
-BEGIN SELECT RAISE(ABORT,'invalid background run state transition'); END;
 
 CREATE TRIGGER background_runs_phase_timestamps_immutable BEFORE UPDATE ON background_runs WHEN
  (OLD.provision_intent_at IS NOT NULL AND NEW.provision_intent_at IS NOT OLD.provision_intent_at) OR
