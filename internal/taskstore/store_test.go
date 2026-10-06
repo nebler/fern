@@ -460,9 +460,6 @@ func TestCanceledContextsStopOperations(t *testing.T) {
 	if _, err := s.AdmitBackgroundRun(ctx, testAdmission(8, "canceled", "Canceled")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("admit canceled context = %v", err)
 	}
-	if _, err := s.ListEvents(ctx, testWorkspaceID(), 0, 10); !errors.Is(err, context.Canceled) {
-		t.Fatalf("list canceled context = %v", err)
-	}
 }
 
 func TestAdmissionHonorsDeadlineWhileDatabaseIsBusy(t *testing.T) {

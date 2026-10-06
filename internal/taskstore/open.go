@@ -16,8 +16,7 @@ import (
 const busyTimeoutMS = 5000
 
 type Store struct {
-	db   *sql.DB
-	path string
+	db *sql.DB
 }
 
 // Open opens or creates dbPath. Its immediate parent must already exist, must
@@ -61,7 +60,7 @@ func Open(ctx context.Context, dbPath string) (*Store, error) {
 	db.SetMaxOpenConns(8)
 	db.SetMaxIdleConns(8)
 
-	s := &Store{db: db, path: path}
+	s := &Store{db: db}
 	if err := s.initialize(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -119,5 +118,3 @@ func validateDBFile(path string) error {
 }
 
 func (s *Store) Close() error { return s.db.Close() }
-
-func (s *Store) Path() string { return s.path }

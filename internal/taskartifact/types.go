@@ -218,25 +218,6 @@ func (l Locator) String() string {
 }
 func (l Locator) Digest() Digest { return l.digest }
 
-func (l Locator) MarshalText() ([]byte, error) {
-	if !l.valid {
-		return nil, ErrInvalidLocator
-	}
-	return []byte(l.String()), nil
-}
-
-func (l *Locator) UnmarshalText(value []byte) error {
-	if l == nil {
-		return ErrInvalidLocator
-	}
-	parsed, err := ParseLocator(string(value))
-	if err != nil {
-		return err
-	}
-	*l = parsed
-	return nil
-}
-
 // Checkout is an engine-owned detached checkout. Close removes it only after
 // revalidating its marker and filesystem identity.
 type Checkout struct {

@@ -34,16 +34,6 @@ func (s *Store) GetResult(ctx context.Context, id task.ResultID) (Result, error)
 	return getResult(ctx, s.db, id)
 }
 
-func (s *Store) GetResultManifest(ctx context.Context, id task.ResultID) ([]ManifestEntry, error) {
-	if _, err := task.ParseResultID(string(id)); err != nil {
-		return nil, fmt.Errorf("%w: result ID", ErrInvalidInput)
-	}
-	if _, err := getResult(ctx, s.db, id); err != nil {
-		return nil, err
-	}
-	return getResultManifest(ctx, s.db, id)
-}
-
 func getResult(ctx context.Context, q queryRower, id task.ResultID) (Result, error) {
 	r, err := scanResult(q.QueryRowContext(ctx, resultSelect+` WHERE r.id=?`, id))
 	if errors.Is(err, sql.ErrNoRows) {

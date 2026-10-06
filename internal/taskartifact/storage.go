@@ -112,19 +112,6 @@ func (e *Engine) StagedManifest(ctx context.Context, staged StagedLocator) ([]by
 	return append([]byte(nil), manifest...), staged.digest, nil
 }
 
-// StoredManifest returns byte-exact canonical manifest bytes after full CAS
-// and independent bundle verification.
-func (e *Engine) StoredManifest(ctx context.Context, locator Locator) ([]byte, Digest, error) {
-	if _, err := e.Inspect(ctx, locator); err != nil {
-		return nil, Digest{}, err
-	}
-	manifest, err := readExactFile(filepath.Join(e.casRoot, locator.digest.String(), manifestName), int64(e.outputBytes), 0o400)
-	if err != nil {
-		return nil, Digest{}, err
-	}
-	return append([]byte(nil), manifest...), locator.digest, nil
-}
-
 func (e *Engine) validateStoredBytes(target string, digest Digest, manifestBytes []byte, stagedBundle string) error {
 	if err := validateArtifactDirectory(target, 0o400); err != nil {
 		return err

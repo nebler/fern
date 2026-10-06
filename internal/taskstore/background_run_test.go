@@ -326,12 +326,11 @@ func TestBackgroundRunClaimsCapacityRecoveryAndActiveStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	store = openTestStore(t, path)
-	takeover, err := store.ClaimActiveBackgroundRun(context.Background(), ClaimBackgroundRunParams{
-		WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, CancelEpoch: run.CancelEpoch,
-		ClaimOwner: "worker-b", Now: expired.Now, LeaseDuration: time.Minute, Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity,
+	takeover, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
+		WorkspaceID: run.WorkspaceID, ClaimOwner: "worker-b", Now: expired.Now, LeaseDuration: time.Minute,
+		Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity,
 	})
-	if err != nil || takeover.ClaimGeneration != 2 {
+	if err != nil || takeover.TaskID != run.TaskID || takeover.ClaimGeneration != 2 {
 		t.Fatalf("expired takeover=%+v error=%v", takeover, err)
 	}
 	run = takeover
@@ -355,13 +354,11 @@ func TestBackgroundRunClaimsCapacityRecoveryAndActiveStop(t *testing.T) {
 		t.Fatalf("active stop falsely terminalized task=%q attempt=%q error=%v", taskState, attemptState, err)
 	}
 
-	stopClaim, err := store.ClaimBackgroundRunStop(context.Background(), ClaimBackgroundRunParams{
-		WorkspaceID: stopped.Run.WorkspaceID, TaskID: stopped.Run.TaskID, AttemptID: stopped.Run.AttemptID,
-		Generation: stopped.Run.Generation, ExpectedRevision: stopped.Run.Revision, ExpectedState: stopped.Run.State, ExpectedPhase: stopped.Run.EffectPhase, CancelEpoch: 1,
-		ClaimOwner: "stopper", Now: stop.StoppedAt.Add(time.Second), LeaseDuration: time.Minute,
+	stopClaim, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
+		WorkspaceID: stopped.Run.WorkspaceID, ClaimOwner: "stopper", Now: stop.StoppedAt.Add(time.Second), LeaseDuration: time.Minute,
 		Profile: BackgroundRunSourceProfile, ImageIdentity: stopped.Run.ImageIdentity,
 	})
-	if err != nil || stopClaim.ClaimGeneration != 3 {
+	if err != nil || stopClaim.TaskID != stopped.Run.TaskID || stopClaim.State != BackgroundRunCanceling || stopClaim.CancelEpoch != 1 || stopClaim.ClaimGeneration != 3 {
 		t.Fatalf("stop claim = %+v, error = %v", stopClaim, err)
 	}
 	stale := BackgroundRunClaim{WorkspaceID: stopClaim.WorkspaceID, TaskID: stopClaim.TaskID, AttemptID: stopClaim.AttemptID,
@@ -533,10 +530,8 @@ func TestBackgroundRunWorkProjectionAndPromptAttemptFenceSurviveRestart(t *testi
 		t.Fatal(err)
 	}
 	store = openTestStore(t, path)
-	run, err = store.ClaimActiveBackgroundRun(context.Background(), ClaimBackgroundRunParams{
-		WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, CancelEpoch: run.CancelEpoch,
-		ClaimOwner: "prompt-takeover", Now: now.Add(3 * time.Minute), LeaseDuration: time.Minute,
+	run, err = store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
+		WorkspaceID: run.WorkspaceID, ClaimOwner: "prompt-takeover", Now: now.Add(3 * time.Minute), LeaseDuration: time.Minute,
 		Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity,
 	})
 	if err != nil {
@@ -616,10 +611,8 @@ JOIN attempts a ON a.id=t.current_attempt_id WHERE t.id=?`, timedOut.TaskID).Sca
 		t.Fatal(err)
 	}
 	store = openTestStore(t, path)
-	claimed, err := store.ClaimActiveBackgroundRun(context.Background(), ClaimBackgroundRunParams{
-		WorkspaceID: timedOut.WorkspaceID, TaskID: timedOut.TaskID, AttemptID: timedOut.AttemptID, Generation: timedOut.Generation,
-		ExpectedRevision: timedOut.Revision, ExpectedState: timedOut.State, ExpectedPhase: timedOut.EffectPhase,
-		CancelEpoch: timedOut.CancelEpoch, ClaimOwner: "timeout-cleanup-restart", Now: now.Add(time.Second), LeaseDuration: 2 * time.Minute,
+	claimed, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
+		WorkspaceID: timedOut.WorkspaceID, ClaimOwner: "timeout-cleanup-restart", Now: now.Add(time.Second), LeaseDuration: 2 * time.Minute,
 		Profile: BackgroundRunSourceProfile, ImageIdentity: timedOut.ImageIdentity,
 	})
 	if err != nil || claimed.TimeoutActor == nil || *claimed.TimeoutActor != actor {
@@ -707,10 +700,8 @@ func TestBackgroundRunCleanupFailuresPreservePhaseAndPermitRetry(t *testing.T) {
 					t.Fatal(err)
 				}
 				store = openTestStore(t, path)
-				retry, err := store.ClaimActiveBackgroundRun(context.Background(), ClaimBackgroundRunParams{
-					WorkspaceID: failed.WorkspaceID, TaskID: failed.TaskID, AttemptID: failed.AttemptID, Generation: failed.Generation,
-					ExpectedRevision: failed.Revision, ExpectedState: failed.State, ExpectedPhase: failed.EffectPhase, CancelEpoch: failed.CancelEpoch,
-					ClaimOwner: "cleanup-retry", Now: claim.Now.Add(time.Second), LeaseDuration: time.Minute,
+				retry, err := store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
+					WorkspaceID: failed.WorkspaceID, ClaimOwner: "cleanup-retry", Now: claim.Now.Add(time.Second), LeaseDuration: time.Minute,
 					Profile: BackgroundRunSourceProfile, ImageIdentity: failed.ImageIdentity,
 				})
 				if err != nil || retry.State != wantState || retry.EffectPhase != phase || retry.ClaimGeneration != failed.ClaimGeneration+1 {
@@ -718,25 +709,6 @@ func TestBackgroundRunCleanupFailuresPreservePhaseAndPermitRetry(t *testing.T) {
 				}
 			})
 		}
-	}
-}
-
-func TestBackgroundRunDiagnosticResultReadyIsRejected(t *testing.T) {
-	store := openTestStore(t, testDBPath(t))
-	t.Cleanup(func() { _ = store.Close() })
-	createTestWorkspace(t, store)
-	first := testBackgroundRunAdmission(2100, "result-cleanup-first")
-	if _, err := store.AdmitBackgroundRun(context.Background(), first); err != nil {
-		t.Fatal(err)
-	}
-
-	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
-	run, claim := advanceBackgroundRunToPrompt(t, store, first.BackgroundRun.ImageIdentity, now)
-	run, err := store.RecordBackgroundRunResultReady(context.Background(), RecordBackgroundRunEvidenceParams{
-		BackgroundRunClaim: claim, Evidence: "sealed result exact",
-	})
-	if !errors.Is(err, ErrInvalidState) || run.TaskID != "" {
-		t.Fatalf("diagnostic readiness = %+v, error = %v", run, err)
 	}
 }
 
@@ -813,14 +785,12 @@ func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitBackgro
 		if stopErr != nil {
 			t.Fatal(stopErr)
 		}
-		run, err = store.ClaimBackgroundRunStop(context.Background(), ClaimBackgroundRunParams{
-			WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-			ExpectedRevision: stopped.Run.Revision, ExpectedState: stopped.Run.State, ExpectedPhase: stopped.Run.EffectPhase,
-			CancelEpoch: stopped.Run.CancelEpoch, ClaimOwner: "cleanup-worker", Now: stop.StoppedAt.Add(time.Second),
-			LeaseDuration: 2 * time.Minute, Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity,
+		run, err = store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
+			WorkspaceID: run.WorkspaceID, ClaimOwner: "cleanup-worker", Now: stop.StoppedAt.Add(time.Second), LeaseDuration: 2 * time.Minute,
+			Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity,
 		})
-		if err != nil {
-			t.Fatal(err)
+		if err != nil || run.TaskID != stopped.Run.TaskID || run.State != BackgroundRunCanceling {
+			t.Fatalf("stop claim = %+v, error=%v", run, err)
 		}
 		claim = backgroundRunClaim(run, stop.StoppedAt.Add(2*time.Second))
 	case BackgroundRunCleanupRequired:
@@ -830,33 +800,14 @@ func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitBackgro
 		if err != nil {
 			t.Fatal(err)
 		}
-		run, err = store.ClaimActiveBackgroundRun(context.Background(), ClaimBackgroundRunParams{
-			WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-			ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, CancelEpoch: run.CancelEpoch,
-			ClaimOwner: "cleanup-worker", Now: claim.Now.Add(time.Second), LeaseDuration: 2 * time.Minute,
+		run, err = store.ClaimNextBackgroundRun(context.Background(), ClaimNextBackgroundRunParams{
+			WorkspaceID: run.WorkspaceID, ClaimOwner: "cleanup-worker", Now: claim.Now.Add(time.Second), LeaseDuration: 2 * time.Minute,
 			Profile: BackgroundRunSourceProfile, ImageIdentity: run.ImageIdentity,
 		})
 		if err != nil {
 			t.Fatal(err)
 		}
 		claim = backgroundRunClaim(run, claim.Now.Add(2*time.Second))
-	case BackgroundRunResultReady:
-		run, err = store.RecordBackgroundRunResultReady(context.Background(), RecordBackgroundRunEvidenceParams{
-			BackgroundRunClaim: claim, Evidence: "sealed result exact",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		advanceBackgroundClaim(&claim, run)
-		claim.Now = claim.Now.Add(time.Second)
-		run, err = store.RequestBackgroundRunResultCleanup(context.Background(), RecordBackgroundRunEvidenceParams{
-			BackgroundRunClaim: claim, Evidence: "result retention permits cleanup",
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		advanceBackgroundClaim(&claim, run)
-		claim.Now = claim.Now.Add(time.Second)
 	default:
 		t.Fatalf("unsupported cleanup state %s", state)
 	}

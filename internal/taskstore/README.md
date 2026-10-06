@@ -51,17 +51,16 @@ durable DTOs/proofs; their presence does not move external I/O into this store.
 | Lifetime and binding | `Open`, `Close`, `EnsureWorkspace`, `GetWorkspace` |
 | Admission and command receipts | `AdmitBackgroundRun`, `FindReceiptByIdempotency`, `StopBackgroundRun`, `SealBackgroundRun` |
 | Actor-scoped reads | `GetBackgroundRun`, `ListBackgroundRuns`, `GetBackgroundRunOwners`, `GetBackgroundRunResult` |
-| Effect authority | `ClaimNextBackgroundRunWork`, `ClaimActiveBackgroundRun`, `ReadClaimedBackgroundRun`, `RenewBackgroundRunClaim`, `ReleaseBackgroundRunClaim` |
+| Effect authority | `ClaimNextBackgroundRunWork`, `ReadClaimedBackgroundRun`, `ReleaseBackgroundRunClaim` |
 | Execution observations | `RecordBackgroundRunCloneObserved`, session/prompt observations, `RequestBackgroundRunTimeout` |
 | Retention | `RecordBackgroundRunWriterFence`, `ClaimBackgroundRunExport`, snapshot/bundle/CAS records, `RecordArtifactMaterializationReady` |
-| Result commitment | `CommitBackgroundRunRetainedResult`, `HasRetainedResultAuthority` |
+| Result commitment | `CommitBackgroundRunRetainedResult` |
 | Cleanup | Removal observations, `MarkBackgroundRunCleanupRequired`, `FinalizeBackgroundRunFailure`, `CompleteBackgroundRunResultCleanup` |
 
 Plugin reads filter creator authority in SQL before list bounds. Trusted
 operator/device readers get a workspace-wide projection. `GetBackgroundRunOwners`
 first applies that ownership-hiding check, then reads parent revisions; those
 reads are not one snapshot, so subsequent mutations must compare revisions.
-`ListEvents` excludes background-owned records; use the actor-scoped background APIs.
 Unscoped result/artifact reads are internal primitives, not authenticated APIs.
 
 ## Transactions and fencing
@@ -89,8 +88,7 @@ Seal admission races transactionally against stop/timeout and persists all expor
 artifact, materialization, result, and event IDs before external collection.
 Writer fencing precedes export. Export phases advance through snapshot selection,
 bundle verification, CAS installation, and materialization with exact claim checks.
-Only the retained-result commit can establish `result_ready`; the old
-`RecordBackgroundRunResultReady` entrypoint intentionally always rejects.
+Only the retained-result commit can establish `result_ready`.
 
 The result commit links artifact/export/materialization/writer proof and ordered
 events, completes the task, marks its prepared attempt superseded, and finishes
@@ -116,8 +114,7 @@ These checks do not guarantee arbitrary strings contain no secrets: providers
 must supply sanitized evidence. Writer proof hashes exclude their own digest.
 
 Stored bundle hashes/proofs are supplied evidence, not a filesystem read.
-`HasRetainedResultAuthority` checks the committed ownership tuple; the separate
-retention verifier must prove the retained bytes remain reconstructable. CAS
+The separate retention verifier must prove the retained bytes remain reconstructable. CAS
 locators and materialization details must not be serialized wholesale to users.
 
 ## Representative internal callgraph

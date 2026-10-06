@@ -10,7 +10,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/nebler/fern/internal/task"
 )
@@ -125,13 +124,6 @@ claim_owner=? AND claim_expires_at>?`, now, p.TaskID, p.AttemptID, p.Generation,
 		return BackgroundRunExport{}, err
 	}
 	return export, nil
-}
-
-func (s *Store) RenewBackgroundRunExportClaim(ctx context.Context, claim BackgroundRunExportClaim, duration time.Duration) (BackgroundRunExport, error) {
-	if err := validateExportClaim(claim); err != nil || duration <= 0 || duration > maxBackgroundRunLease {
-		return BackgroundRunExport{}, fmt.Errorf("%w: background export renewal", ErrInvalidInput)
-	}
-	return s.updateBackgroundExport(ctx, claim, claim.ExpectedPhase, `claim_expires_at=?`, []any{unixMillis(claim.Now.Add(duration))}, nil)
 }
 
 func (s *Store) RecordBackgroundRunSnapshotStarted(ctx context.Context, claim BackgroundRunExportClaim) (BackgroundRunExport, error) {

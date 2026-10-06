@@ -84,61 +84,6 @@ WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revisio
 	return run, nil
 }
 
-// ClaimActiveBackgroundRun claims one exact recoverable run after restart.
-func (s *Store) ClaimActiveBackgroundRun(ctx context.Context, p ClaimBackgroundRunParams) (BackgroundRun, error) {
-	return s.claimExactBackgroundRun(ctx, p, false)
-}
-
-// ClaimBackgroundRunStop claims only an already committed stop request.
-func (s *Store) ClaimBackgroundRunStop(ctx context.Context, p ClaimBackgroundRunParams) (BackgroundRun, error) {
-	return s.claimExactBackgroundRun(ctx, p, true)
-}
-
-func (s *Store) claimExactBackgroundRun(ctx context.Context, p ClaimBackgroundRunParams, stopping bool) (_ BackgroundRun, err error) {
-	if err := validateBackgroundClaimRequest(p.WorkspaceID, p.ClaimOwner, p.Profile, p.ImageIdentity, p.Now, p.LeaseDuration); err != nil ||
-		p.TaskID == "" || p.AttemptID == "" || p.Generation <= 0 || p.ExpectedRevision <= 0 || p.CancelEpoch > 1 ||
-		!validBackgroundRunStatePhase(p.Profile, p.ExpectedState, p.ExpectedPhase) {
-		return BackgroundRun{}, fmt.Errorf("%w: exact background run claim", ErrInvalidInput)
-	}
-	tx, release, err := s.beginWrite(ctx)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	defer release()
-	defer rollback(tx, &err)
-	now, expiry := unixMillis(p.Now), unixMillis(p.Now.Add(p.LeaseDuration))
-	states := "('setting_up','working','needs_you','uncertain','cleanup_required','result_ready')"
-	databaseState, databasePhase := p.ExpectedState, p.ExpectedPhase
-	if p.ExpectedState == BackgroundRunCanceling && p.ExpectedPhase == BackgroundRunEffectSealIntent {
-		databaseState, databasePhase = BackgroundRunCleanupRequired, BackgroundRunEffectStopIntent
-	}
-	if p.ExpectedState == BackgroundRunResultReady && p.ExpectedPhase == BackgroundRunEffectArtifactCommitted {
-		databaseState, databasePhase = BackgroundRunResultReady, BackgroundRunEffectWriterInactive
-	}
-	if stopping {
-		states = "('canceling','cleanup_required')"
-	}
-	query := `UPDATE background_runs SET claim_owner=?,claim_expires_at=?,claim_generation=claim_generation+1,
-revision=revision+1,updated_at=? WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND
-cancel_epoch=? AND profile=? AND image_identity=? AND state=? AND effect_phase=? AND state IN ` + states + ` AND (claim_owner IS NULL OR claim_expires_at<=?)`
-	result, err := tx.ExecContext(ctx, query, p.ClaimOwner, expiry, now, p.TaskID, p.AttemptID, p.WorkspaceID,
-		p.Generation, p.ExpectedRevision, p.CancelEpoch, p.Profile, p.ImageIdentity, databaseState, databasePhase, now)
-	if err != nil {
-		return BackgroundRun{}, fmt.Errorf("claim exact background run: %w", err)
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRun{}, ErrInvalidState
-	}
-	run, err := readBackgroundRunExact(ctx, tx, p.WorkspaceID, p.TaskID)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return BackgroundRun{}, err
-	}
-	return run, nil
-}
-
 func (s *Store) ReadClaimedBackgroundRun(ctx context.Context, p BackgroundRunClaim) (BackgroundRun, error) {
 	if err := validateBackgroundRunClaim(p); err != nil {
 		return BackgroundRun{}, err
@@ -194,14 +139,6 @@ func (s *Store) readBackgroundRunWork(ctx context.Context, run BackgroundRun) (B
 	}
 	return BackgroundRunWork{Run: run, Prompt: owner.Prompt, Deadline: attempt.Deadline, AttemptCreated: attempt.CreatedAt,
 		AttemptTimeout: attempt.Deadline.Sub(attempt.CreatedAt), Agent: attempt.Agent, ModelProvider: attempt.ModelProvider, Model: attempt.Model}, nil
-}
-
-func (s *Store) RenewBackgroundRunClaim(ctx context.Context, p RenewBackgroundRunClaimParams) (BackgroundRun, error) {
-	if err := validateBackgroundRunClaim(p.BackgroundRunClaim); err != nil || p.LeaseDuration <= 0 || p.LeaseDuration > maxBackgroundRunLease {
-		return BackgroundRun{}, fmt.Errorf("%w: background run claim renewal", ErrInvalidInput)
-	}
-	return s.updateClaimedRun(ctx, p.BackgroundRunClaim,
-		`claim_expires_at=?`, []any{unixMillis(p.Now.Add(p.LeaseDuration))}, "renew background run claim")
 }
 
 func (s *Store) ReleaseBackgroundRunClaim(ctx context.Context, p BackgroundRunClaim) (BackgroundRun, error) {
@@ -392,10 +329,6 @@ claim_owner=? AND claim_generation=? AND claim_expires_at>?`, now, actorID, now,
 		return BackgroundRun{}, err
 	}
 	return stored, nil
-}
-
-func (s *Store) RecordBackgroundRunResultReady(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	return BackgroundRun{}, fmt.Errorf("%w: retained result commit is the only result-ready authority", ErrInvalidState)
 }
 
 func (s *Store) RecordBackgroundRunWriterInactive(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {

@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/nebler/fern/internal/task"
 )
@@ -121,19 +120,4 @@ WHERE id=? AND revision=? AND phase='materialize_started' AND claim_owner=? AND 
 		return BackgroundRunExport{}, err
 	}
 	return stored, nil
-}
-
-func (s *Store) MarkArtifactMaterializationRecoveryRequired(ctx context.Context, id task.MaterializationID, expectedRevision int64, reason string, now time.Time) (ArtifactMaterialization, error) {
-	if _, err := task.ParseMaterializationID(string(id)); err != nil || expectedRevision <= 0 || !validBoundedText(reason, 1, 1000) || validExactTimestamp(now) != nil {
-		return ArtifactMaterialization{}, fmt.Errorf("%w: materialization recovery", ErrInvalidInput)
-	}
-	result, err := s.db.ExecContext(ctx, `UPDATE artifact_materializations SET state='recovery_required',recovery_reason=?,revision=revision+1,updated_at=?
-WHERE id=? AND state='prepared' AND revision=?`, reason, unixMillis(now), id, expectedRevision)
-	if err != nil {
-		return ArtifactMaterialization{}, fmt.Errorf("mark materialization recovery: %w", err)
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return ArtifactMaterialization{}, ErrInvalidState
-	}
-	return s.GetArtifactMaterialization(ctx, id)
 }

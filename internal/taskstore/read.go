@@ -177,20 +177,6 @@ func nullableTime(v sql.NullInt64) *time.Time {
 	return &t
 }
 
-func (s *Store) GetReceipt(ctx context.Context, id task.ReceiptID) (Receipt, error) {
-	if _, err := task.ParseReceiptID(string(id)); err != nil {
-		return Receipt{}, fmt.Errorf("%w: receipt ID", ErrInvalidInput)
-	}
-	r, err := scanReceipt(s.db.QueryRowContext(ctx, receiptSelect+` WHERE r.id=? AND r.command_kind NOT IN ('run.create','run.stop')`, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return Receipt{}, ErrNotFound
-	}
-	if err != nil {
-		return Receipt{}, fmt.Errorf("read receipt: %w", err)
-	}
-	return r, nil
-}
-
 // FindReceiptByIdempotency returns the durable command receipt for one exact
 // workspace/kind/key scope. Ownership and request-hash classification remains
 // in the command transition that consumes this read.
@@ -234,50 +220,6 @@ func scanReceipt(row rowScanner) (Receipt, error) {
 	r.AcceptedAt = fromUnixMillis(acceptedAt)
 	r.ResponseProjection = json.RawMessage(response)
 	return r, nil
-}
-
-// ListEvents returns workspace events after an exclusive cursor, bounded by a
-// watermark captured before the page query.
-func (s *Store) ListEvents(ctx context.Context, workspaceID task.WorkspaceID, after task.Cursor, limit int) (EventPage, error) {
-	if _, err := task.ParseWorkspaceID(string(workspaceID)); err != nil {
-		return EventPage{}, fmt.Errorf("%w: workspace ID", ErrInvalidInput)
-	}
-	if err := after.Validate(); err != nil {
-		return EventPage{}, fmt.Errorf("%w: after cursor", ErrInvalidInput)
-	}
-	if limit == 0 {
-		limit = 100
-	}
-	if limit < 1 || limit > 500 {
-		return EventPage{}, fmt.Errorf("%w: event limit", ErrInvalidInput)
-	}
-	var watermark task.Cursor
-	if err := s.db.QueryRowContext(ctx, `SELECT coalesce(max(e.cursor),0) FROM events e WHERE e.workspace_id=? AND
-NOT EXISTS (SELECT 1 FROM background_runs br WHERE br.task_id=e.task_id)`, workspaceID).Scan(&watermark); err != nil {
-		return EventPage{}, fmt.Errorf("read event watermark: %w", err)
-	}
-	rows, err := s.db.QueryContext(ctx, eventSelect+`
-WHERE e.workspace_id=? AND e.cursor>? AND e.cursor<=?
-  AND NOT EXISTS (SELECT 1 FROM background_runs br WHERE br.task_id=e.task_id)
-ORDER BY e.cursor ASC LIMIT ?`, workspaceID, after, watermark, limit)
-	if err != nil {
-		return EventPage{}, fmt.Errorf("list events: %w", err)
-	}
-	defer rows.Close()
-	page := EventPage{NextCursor: after, Watermark: watermark}
-	for rows.Next() {
-		event, err := scanEvent(rows)
-		if err != nil {
-			return EventPage{}, fmt.Errorf("read event: %w", err)
-		}
-		page.Events = append(page.Events, event)
-		page.NextCursor = event.Cursor
-	}
-	if err := rows.Err(); err != nil {
-		return EventPage{}, fmt.Errorf("list events: %w", err)
-	}
-	page.CaughtUp = page.NextCursor >= page.Watermark
-	return page, nil
 }
 
 func admissionEvents(ctx context.Context, q queryRower, taskID task.TaskID, attemptID task.AttemptID) (Event, Event, error) {

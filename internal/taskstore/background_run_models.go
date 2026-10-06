@@ -203,22 +203,6 @@ type ClaimNextBackgroundRunParams struct {
 	ImageIdentity string
 }
 
-type ClaimBackgroundRunParams struct {
-	WorkspaceID      task.WorkspaceID
-	TaskID           task.TaskID
-	AttemptID        task.AttemptID
-	Generation       int64
-	ExpectedRevision int64
-	ExpectedState    BackgroundRunState
-	ExpectedPhase    BackgroundRunEffectPhase
-	CancelEpoch      uint64
-	ClaimOwner       string
-	Now              time.Time
-	LeaseDuration    time.Duration
-	Profile          string
-	ImageIdentity    string
-}
-
 // BackgroundRunClaim identifies one exact, fenced mutation authority.
 type BackgroundRunClaim struct {
 	WorkspaceID      task.WorkspaceID
@@ -232,11 +216,6 @@ type BackgroundRunClaim struct {
 	ExpectedPhase    BackgroundRunEffectPhase
 	CancelEpoch      uint64
 	Now              time.Time
-}
-
-type RenewBackgroundRunClaimParams struct {
-	BackgroundRunClaim
-	LeaseDuration time.Duration
 }
 
 type RecordBackgroundRunContainerObservedParams struct {

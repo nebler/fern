@@ -229,17 +229,9 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	if err != nil || readResult.ID != committed.Result.ID || readResult.SourceKind != ResultSourceRetainedArtifact {
 		t.Fatalf("read result = %+v, error=%v", readResult, err)
 	}
-	readManifest, err := store.GetResultManifest(context.Background(), committed.Result.ID)
-	if err != nil || len(readManifest) != len(committed.Manifest) {
-		t.Fatalf("read result manifest = %+v, error=%v", readManifest, err)
-	}
 	readArtifact, err := store.GetRetainedArtifact(context.Background(), committed.Artifact.ID)
 	if err != nil || readArtifact.ID != committed.Artifact.ID {
 		t.Fatalf("read retained artifact = %+v, error=%v", readArtifact, err)
-	}
-	authorized, err := store.HasRetainedResultAuthority(context.Background(), committed.Result.ID)
-	if err != nil || !authorized {
-		t.Fatalf("retained result authority = %t, error=%v", authorized, err)
 	}
 	if _, err := store.db.Exec(`UPDATE retained_artifacts SET bundle_size=bundle_size+1 WHERE id=?`, seal.ArtifactID); err == nil {
 		t.Fatal("retained artifact accepted raw mutation")

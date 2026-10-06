@@ -35,7 +35,7 @@ The provider's writer fence and clone lease precede snapshot capture externally.
 | `Snapshot` | Capture and independently verify a staged artifact bound to the supplied execution/seal tuple. |
 | `Store` | Verify stage and atomically install/deduplicate immutable CAS content. |
 | `Discard` | Remove the exact owned staged capability. |
-| `StagedManifest` / `StoredManifest` | Return manifest bytes after the respective integrity checks. |
+| `StagedManifest` | Return staged manifest bytes after integrity checks. |
 | `Inspect` | Freshly verify CAS manifest, bundle, and independent Git object graph. |
 | `Acquire` | Verify once, then return snapshot plus newly materialized owned checkout. |
 | `Materialize` | Delegate to `Acquire`, returning only checkout. |

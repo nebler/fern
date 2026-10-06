@@ -284,10 +284,3 @@ type Event struct {
 	Actor       task.ActorSnapshot
 	Payload     json.RawMessage
 }
-
-type EventPage struct {
-	Events     []Event
-	NextCursor task.Cursor
-	Watermark  task.Cursor
-	CaughtUp   bool
-}
