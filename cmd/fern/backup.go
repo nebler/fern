@@ -1,8 +1,11 @@
 package main
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -10,32 +13,51 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/url"
 	"os"
-	"os/exec"
+	"path"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
 
+	"filippo.io/age"
 	"github.com/nebler/fern/internal/config"
+	"github.com/nebler/fern/internal/credentialbundle"
 	"github.com/nebler/fern/internal/hostlease"
-	backupscript "github.com/nebler/fern/scripts"
 	_ "modernc.org/sqlite"
 )
 
 const (
 	defaultBackupConfig = "/etc/fern/fern.yaml"
 	defaultBackupEnv    = "/etc/fern/fern.env"
-)
 
-const operationalRollbackDirectory = "operational-rollback"
+	// A backup is one age-encrypted gzip tar holding state/..., the
+	// configuration and protected environment under config/, and MANIFEST.json
+	// with a sha256 for every file. Nothing in it is ever written in plaintext.
+	backupFormat       = "fern-backup-v2"
+	backupManifestName = "MANIFEST.json"
+	backupConfigEntry  = "config/fern.yaml"
+	backupEnvEntry     = "config/fern.env"
+	maxBackupManifest  = 64 << 20
+)
 
 type backupOptions struct {
 	configPath, envPath, stateDirectory string
-	archiveTool                         string
+}
+
+type backupManifest struct {
+	Format    string            `json:"format"`
+	CreatedAt time.Time         `json:"created_at"`
+	Workspace string            `json:"workspace"`
+	Files     []backupFileEntry `json:"files"`
+}
+
+type backupFileEntry struct {
+	Path   string `json:"path"`
+	SHA256 string `json:"sha256"`
 }
 
 func backupFlags(command, description string) (*flag.FlagSet, *backupOptions) {
@@ -43,219 +65,88 @@ func backupFlags(command, description string) (*flag.FlagSet, *backupOptions) {
 	options := &backupOptions{}
 	fs.StringVar(&options.configPath, "config", defaultBackupConfig, "configuration file")
 	fs.StringVar(&options.envPath, "env-file", defaultBackupEnv, "protected environment file")
-	defaultState, err := statePath("")
-	if err == nil {
-		options.stateDirectory = filepath.Clean(defaultState)
+	if state, err := statePath(""); err == nil {
+		options.stateDirectory = filepath.Clean(state)
 	}
 	fs.StringVar(&options.stateDirectory, "state-dir", options.stateDirectory, "Fern state directory")
-	fs.StringVar(&options.archiveTool, "archive-tool", "", "alternate fern-host-backup.py path")
 	return fs, options
 }
 
-func runBackupCreate(args []string, log *slog.Logger) error {
-	fs, options := backupFlags("backup create", "Create and verify an offline Fern host backup.")
-	output := fs.String("output", "", "backup bundle output directory (required)")
-	credentials := fs.String("credential-output", "", "separate credential and volume archive")
-	generation := fs.String("generation", "", "backup generation identifier")
+func runBackupCreate(args []string, _ *slog.Logger) error {
+	fs, options := backupFlags("backup create", "Create an age-encrypted offline Fern host backup.")
+	output := fs.String("output", "", "encrypted backup file to create (required)")
+	var recipientFlags repeatedFlag
+	fs.Var(&recipientFlags, "recipient", "age X25519 recipient (repeatable, required)")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	if *output == "" {
-		return invocationError{message: "-output is required"}
+	if *output == "" || len(recipientFlags) == 0 {
+		return invocationError{message: "--output and at least one --recipient are required"}
 	}
 	if options.stateDirectory == "" {
 		return errors.New("cannot determine Fern state directory")
 	}
-	if *generation == "" {
-		var err error
-		*generation, err = newBackupGeneration()
-		if err != nil {
-			return err
-		}
-	}
-	if *credentials == "" {
-		*credentials = *output + ".credentials.tar"
-	}
-	cfg, name, err := loadBackupConfig(*options)
+	recipients, err := credentialbundle.ParseRecipients(recipientFlags)
 	if err != nil {
 		return err
 	}
-	lease, err := hostlease.Acquire(filepath.Join(options.stateDirectory, "locks"), name)
+	_, name, err := loadBackupConfig(*options)
 	if err != nil {
-		return fmt.Errorf("backup requires the offline Fern lease: %w", err)
+		return err
 	}
-	defer lease.Release()
-
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	if err := checkpointSQLiteTree(ctx, options.stateDirectory); err != nil {
-		return err
-	}
-
-	staging, err := os.MkdirTemp("", ".fern-backup-create-")
+	manifest, err := createBackup(ctx, *options, name, *output, recipients)
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(staging)
-	if err := os.Chmod(staging, 0o700); err != nil {
-		return err
-	}
-	stateSource := filepath.Join(staging, "state")
-	configSource := filepath.Join(staging, "config")
-	for _, path := range []string{stateSource, configSource} {
-		if err := os.Mkdir(path, 0o700); err != nil {
-			return err
-		}
-	}
-	if err := stageFernState(options.stateDirectory, stateSource); err != nil {
-		return err
-	}
-	if err := stageConfig(options.configPath, options.envPath, configSource); err != nil {
-		return err
-	}
-	epoch, lockDirectory, err := ensureBackupEpoch(options.stateDirectory)
-	if err != nil {
-		return err
-	}
-	toolArgs := []string{"backup", "--lock-dir", lockDirectory, "--epoch", epoch,
-		"--generation", *generation, "--output", *output, "--state", stateSource,
-		"--config", configSource, "--repository", cfg.Workspace.Repo,
-		"--credential-policy", "external", "--credential-output", *credentials}
-	if err := runBackupArchiveTool(ctx, options.archiveTool, toolArgs, os.Stdout, os.Stderr); err != nil {
-		return err
-	}
-	return nil
+	_, err = fmt.Fprintf(os.Stdout, "created encrypted backup %s (%d files)\n", *output, len(manifest.Files))
+	return err
 }
 
-func runBackupRestore(args []string, log *slog.Logger) error {
-	fs, options := backupFlags("backup restore", "Verify and transactionally restore an offline Fern host backup.")
-	bundle := fs.String("backup", "", "backup bundle directory (required)")
-	credentials := fs.String("credential-input", "", "separate credential and volume archive")
-	recoveryDirectory := fs.String("recovery-dir", "", "staged generation and transaction receipt directory")
+func runBackupRestore(args []string, _ *slog.Logger) error {
+	fs, options := backupFlags("backup restore", "Verify an encrypted backup and swap it into place, keeping the replaced state for rollback.")
+	input := fs.String("input", "", "encrypted backup file (required)")
+	replace := fs.Bool("replace", false, "replace existing Fern state and configuration (kept as *.previous)")
+	var identityPaths repeatedFlag
+	fs.Var(&identityPaths, "identity", "private age X25519 identity file (repeatable, required)")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	if *bundle == "" {
-		return invocationError{message: "-backup is required"}
+	if *input == "" || len(identityPaths) == 0 {
+		return invocationError{message: "--input and at least one --identity are required"}
 	}
 	if options.stateDirectory == "" {
 		return errors.New("cannot determine Fern state directory")
 	}
-	credentialInput, err := credentialInputForRestore(*bundle, *credentials)
+	identities, err := credentialbundle.LoadIdentities(identityPaths)
 	if err != nil {
 		return err
 	}
-	*credentials = credentialInput
-	if *recoveryDirectory == "" {
-		*recoveryDirectory = filepath.Join(options.stateDirectory, "recovery")
-	}
-	cfg, name, err := loadBackupConfig(*options)
-	if err != nil {
-		return err
-	}
-	lease, err := hostlease.Acquire(filepath.Join(options.stateDirectory, "locks"), name)
-	if err != nil {
-		return fmt.Errorf("restore requires the offline Fern lease: %w", err)
-	}
-	defer lease.Release()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	epoch, lockDirectory, err := ensureBackupEpoch(options.stateDirectory)
+	manifest, err := restoreBackup(ctx, *options, *input, identities, *replace)
 	if err != nil {
 		return err
 	}
-	toolArgs := []string{"restore", "--lock-dir", lockDirectory, "--epoch", epoch,
-		"--backup", *bundle, "--target", *recoveryDirectory}
-	if *credentials != "" {
-		toolArgs = append(toolArgs, "--credential-input", *credentials)
-	}
-	if err := runBackupArchiveTool(ctx, options.archiveTool, toolArgs, os.Stdout, os.Stderr); err != nil {
-		return err
-	}
-	current := filepath.Join(*recoveryDirectory, "current")
-	manifest, err := readStagedBackupManifest(filepath.Join(current, "BACKUP-MANIFEST.json"))
-	if err != nil {
-		return err
-	}
-	if len(manifest.NamedVolumes) != 0 {
-		return fmt.Errorf("backup contains retired persistent workspace volumes: %q", manifest.NamedVolumes)
-	}
-	transaction, err := prepareFilesystemRestore(current, options.stateDirectory, options.configPath, options.envPath, cfg.Workspace.Repo, manifest.Generation)
-	if err != nil {
-		return err
-	}
-	rollbackGeneration, err := newBackupGeneration()
-	if err != nil {
-		transaction.Cleanup()
-		return err
-	}
-	rollbackRoot, err := createOperationalRollback(*recoveryDirectory, rollbackGeneration, manifest.Generation, transaction.paths)
-	if err != nil {
-		transaction.Cleanup()
-		return err
-	}
-	if err := transaction.Activate(); err != nil {
-		transaction.Cleanup()
-		return err
-	}
-	if err := checkpointSQLiteTree(ctx, options.stateDirectory); err != nil {
-		return errors.Join(fmt.Errorf("validate restored filesystem generation: %w", err), transaction.Rollback())
-	}
-	if err := transaction.Commit(); err != nil {
-		return fmt.Errorf("restored data is active but old filesystem generations need manual cleanup: %w", err)
-	}
-	if _, err := fmt.Fprintf(os.Stdout, "restored operational generation %s; Fern remains offline\nrollback generation %s retained at %s; use 'fern backup rollback' if post-restore validation fails\n", manifest.Generation, rollbackGeneration, rollbackRoot); err != nil {
-		return fmt.Errorf("report restored generation: %w", err)
-	}
-	return nil
+	_, err = fmt.Fprintf(os.Stdout, "restored backup of %q created %s; Fern remains stopped\nreplaced state, if any, is kept as %s.previous; 'fern backup rollback' swaps it back\n",
+		manifest.Workspace, manifest.CreatedAt.Format(time.RFC3339), options.stateDirectory)
+	return err
 }
 
-func runBackupRollback(args []string, log *slog.Logger) error {
-	fs, options := backupFlags("backup rollback", "Activate the durable pre-restore generation after a failed restore validation.")
-	recoveryDirectory := fs.String("recovery-dir", "", "staged generation and durable rollback directory")
+func runBackupRollback(args []string, _ *slog.Logger) error {
+	fs, options := backupFlags("backup rollback", "Swap the state replaced by the last restore back into place.")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	if options.stateDirectory == "" {
 		return errors.New("cannot determine Fern state directory")
 	}
-	if *recoveryDirectory == "" {
-		*recoveryDirectory = filepath.Join(options.stateDirectory, "recovery")
-	}
-	cfg, name, err := loadBackupConfig(*options)
-	if err != nil {
+	if err := rollbackBackup(*options); err != nil {
 		return err
 	}
-	rollbackRoot := filepath.Join(*recoveryDirectory, operationalRollbackDirectory)
-	manifest, paths, _, err := readOperationalRollback(rollbackRoot, options.stateDirectory, options.configPath, options.envPath, cfg.Workspace.Repo, nil)
-	if err != nil {
-		return err
-	}
-	lease, err := hostlease.Acquire(filepath.Join(options.stateDirectory, "locks"), name)
-	if err != nil {
-		return fmt.Errorf("rollback requires the offline Fern lease: %w", err)
-	}
-	defer lease.Release()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
-	defer cancel()
-	transaction, err := prepareFilesystemRestorePaths(paths, manifest.Generation)
-	if err != nil {
-		return err
-	}
-	if err := transaction.Activate(); err != nil {
-		transaction.Cleanup()
-		return err
-	}
-	if err := checkpointSQLiteTree(ctx, options.stateDirectory); err != nil {
-		return errors.Join(fmt.Errorf("validate rollback filesystem generation: %w", err), transaction.Rollback())
-	}
-	if err := transaction.Commit(); err != nil {
-		return fmt.Errorf("rollback data is active but replaced filesystem paths need manual cleanup: %w", err)
-	}
-	if _, err := fmt.Fprintf(os.Stdout, "rolled back to durable operational generation %s; Fern remains offline\nrollback material retained at %s\n", manifest.Generation, rollbackRoot); err != nil {
-		return fmt.Errorf("report rolled back generation: %w", err)
-	}
-	return nil
+	_, err := fmt.Fprintf(os.Stdout, "swapped %s.previous back into place; running rollback again undoes it\n", options.stateDirectory)
+	return err
 }
 
 func loadBackupConfig(options backupOptions) (config.Config, string, error) {
@@ -277,545 +168,551 @@ func newBackupGeneration() (string, error) {
 	return time.Now().UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(random), nil
 }
 
-func checkpointSQLiteTree(ctx context.Context, root string) error {
-	return filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if info.IsDir() && path != root {
-			relative, err := filepath.Rel(root, path)
-			if err != nil {
-				return err
-			}
-			if excludedStateEntries[strings.Split(relative, string(filepath.Separator))[0]] {
-				return filepath.SkipDir
-			}
-		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("symlink rejected in Fern state: %s", path)
-		}
-		if !info.Mode().IsRegular() {
-			return nil
-		}
-		extension := strings.ToLower(filepath.Ext(path))
-		if extension != ".db" && extension != ".sqlite" && extension != ".sqlite3" {
-			return nil
-		}
-		dsn := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
-		query := dsn.Query()
-		query.Set("mode", "rw")
-		query.Add("_pragma", "busy_timeout(5000)")
-		dsn.RawQuery = query.Encode()
-		database, err := sql.Open("sqlite", dsn.String())
-		if err != nil {
-			return fmt.Errorf("open SQLite state %q: %w", path, err)
-		}
-		var busy, logFrames, checkpointed int
-		err = database.QueryRowContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)").Scan(&busy, &logFrames, &checkpointed)
-		if err == nil && busy != 0 {
-			err = fmt.Errorf("SQLite checkpoint remained busy")
-		}
-		if err == nil {
-			var integrity string
-			err = database.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity)
-			if err == nil && integrity != "ok" {
-				err = fmt.Errorf("SQLite integrity_check returned %q", integrity)
-			}
-		}
-		err = errors.Join(err, database.Close())
-		if err != nil {
-			return fmt.Errorf("checkpoint SQLite state %q: %w", path, err)
-		}
-		return nil
-	})
+// backupLeases holds the named workspace lease plus every other lease file in
+// the state directory, so no `fern up` sharing this state can run meanwhile.
+type backupLeases struct {
+	lease *hostlease.Lease
+	files []*os.File
 }
 
-var excludedStateEntries = map[string]bool{
-	"locks": true, "recovery": true, "backup-operator": true,
-}
-
-func stageFernState(source, destination string) error {
-	entries, err := os.ReadDir(source)
-	if err != nil {
-		return fmt.Errorf("read Fern state: %w", err)
+func acquireBackupLeases(stateDirectory, workspace string) (*backupLeases, error) {
+	directory := filepath.Join(stateDirectory, "locks")
+	held := &backupLeases{}
+	own := ""
+	if workspace != "" {
+		lease, err := hostlease.Acquire(directory, workspace)
+		if err != nil {
+			return nil, fmt.Errorf("Fern must be stopped: %w", err)
+		}
+		held.lease = lease
+		own = fmt.Sprintf("%x.lock", sha256.Sum256([]byte(workspace)))
+	}
+	entries, err := os.ReadDir(directory)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		held.release()
+		return nil, err
 	}
 	for _, entry := range entries {
-		if excludedStateEntries[entry.Name()] {
+		if entry.Name() == own || !strings.HasSuffix(entry.Name(), ".lock") {
 			continue
 		}
-		if err := copyStatePath(filepath.Join(source, entry.Name()), filepath.Join(destination, entry.Name()), entry.Name()); err != nil {
-			return err
+		file, err := os.OpenFile(filepath.Join(directory, entry.Name()), os.O_RDWR|syscall.O_NOFOLLOW, 0)
+		if err == nil {
+			if err = syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+				_ = file.Close()
+			}
 		}
+		if err != nil {
+			held.release()
+			return nil, fmt.Errorf("Fern must be stopped: lease %s is held: %w", entry.Name(), err)
+		}
+		held.files = append(held.files, file)
 	}
-	return nil
+	return held, nil
 }
 
-func copyStatePath(source, target, relative string) error {
-	base := filepath.Base(relative)
-	// Keep excluding legacy host-publication scratch directories: upgrading
-	// must not turn abandoned disposable checkouts into durable backup state.
-	if base == "artifact-work" || strings.HasSuffix(base, "-publication") || strings.HasPrefix(base, ".clone-") {
+func (held *backupLeases) release() {
+	for _, file := range held.files {
+		_ = file.Close()
+	}
+	_ = held.lease.Release()
+}
+
+// backupIncluded reports whether a slash-separated state-relative path is
+// durable state. Locks, SQLite sidecars (databases are snapshotted), artifact
+// scratch, and runtime clones are disposable; of the runtime root only the
+// host key is kept.
+func backupIncluded(relative string) bool {
+	parts := strings.Split(relative, "/")
+	if parts[0] == "locks" || isSQLiteSidecar(parts[len(parts)-1]) {
+		return false
+	}
+	if len(parts) >= 3 && parts[0] == "tasks" && strings.HasSuffix(parts[1], "-background") {
+		switch parts[2] {
+		case "artifact-work":
+			return false
+		case "runtime":
+			rest := strings.Join(parts[3:], "/")
+			return rest == "" || rest == "background-runs" || rest == "background-runs/host.key"
+		}
+	}
+	return true
+}
+
+func isSQLite(name string) bool {
+	switch strings.ToLower(path.Ext(name)) {
+	case ".db", ".sqlite", ".sqlite3":
+		return true
+	}
+	return false
+}
+
+func isSQLiteSidecar(name string) bool {
+	for _, suffix := range []string{"-wal", "-shm", "-journal"} {
+		if base, ok := strings.CutSuffix(name, suffix); ok && isSQLite(base) {
+			return true
+		}
+	}
+	return false
+}
+
+func createBackup(ctx context.Context, options backupOptions, workspace, output string, recipients []age.Recipient) (backupManifest, error) {
+	manifest := backupManifest{Format: backupFormat, CreatedAt: time.Now().UTC().Truncate(time.Second), Workspace: workspace}
+	if pathExists(output) {
+		return manifest, fmt.Errorf("backup output already exists: %s", output)
+	}
+	if pathContains(options.stateDirectory, output) {
+		return manifest, errors.New("backup output must be outside the Fern state directory")
+	}
+	leases, err := acquireBackupLeases(options.stateDirectory, workspace)
+	if err != nil {
+		return manifest, err
+	}
+	defer leases.release()
+
+	scratch, err := os.MkdirTemp(filepath.Dir(options.stateDirectory), ".fern-backup-")
+	if err != nil {
+		return manifest, err
+	}
+	defer os.RemoveAll(scratch)
+	temporary, err := os.CreateTemp(filepath.Dir(output), ".fern-backup-*.tmp")
+	if err != nil {
+		return manifest, err
+	}
+	defer os.Remove(temporary.Name())
+	defer temporary.Close()
+	if err := temporary.Chmod(0o600); err != nil {
+		return manifest, err
+	}
+	encrypted, err := age.Encrypt(temporary, recipients...)
+	if err != nil {
+		return manifest, err
+	}
+	compressed := gzip.NewWriter(encrypted)
+	archive := tar.NewWriter(compressed)
+
+	add := func(name, source string) error {
+		file, err := os.OpenFile(source, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("backup source is not a regular file: %s", source)
+		}
+		header := &tar.Header{Typeflag: tar.TypeReg, Name: name, Mode: int64(info.Mode().Perm()), Size: info.Size(), ModTime: info.ModTime().UTC()}
+		if err := archive.WriteHeader(header); err != nil {
+			return err
+		}
+		hash := sha256.New()
+		if _, err := io.Copy(io.MultiWriter(archive, hash), io.LimitReader(file, info.Size())); err != nil {
+			return fmt.Errorf("archive %s: %w", source, err)
+		}
+		manifest.Files = append(manifest.Files, backupFileEntry{Path: name, SHA256: hex.EncodeToString(hash.Sum(nil))})
 		return nil
 	}
-	if base == "runtime" && strings.Contains(filepath.ToSlash(relative), "-background/") {
-		info, err := os.Lstat(source)
-		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("invalid disposable runtime state: %s", source)
-		}
-		if err := os.Mkdir(target, info.Mode().Perm()); err != nil {
-			return err
-		}
-		return copyPath(filepath.Join(source, "host.key"), filepath.Join(target, "host.key"))
-	}
-	info, err := os.Lstat(source)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return copyPath(source, target)
-	}
-	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("link or special backup source rejected: %s", source)
-	}
-	if err := os.Mkdir(target, info.Mode().Perm()); err != nil {
-		return err
-	}
-	entries, err := os.ReadDir(source)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		child := filepath.Join(relative, entry.Name())
-		if err := copyStatePath(filepath.Join(source, entry.Name()), filepath.Join(target, entry.Name()), child); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
-func stageConfig(configPath, envPath, destination string) error {
-	if filepath.Base(configPath) == filepath.Base(envPath) {
-		return errors.New("configuration and environment files must have distinct names")
-	}
-	if err := copyPath(configPath, filepath.Join(destination, filepath.Base(configPath))); err != nil {
-		return err
-	}
-	return copyPath(envPath, filepath.Join(destination, filepath.Base(envPath)))
-}
-
-func ensureBackupEpoch(stateDirectory string) (string, string, error) {
-	lockDirectory := filepath.Join(stateDirectory, "backup-operator")
-	if err := os.MkdirAll(lockDirectory, 0o700); err != nil {
-		return "", "", err
-	}
-	info, err := os.Lstat(lockDirectory)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
-		return "", "", errors.New("backup operator directory must be a private real directory")
-	}
-	marker := filepath.Join(lockDirectory, "appliance-epoch")
-	data, err := os.ReadFile(marker)
-	if os.IsNotExist(err) {
-		value, generationErr := newBackupGeneration()
-		if generationErr != nil {
-			return "", "", generationErr
+	snapshots := 0
+	err = filepath.WalkDir(options.stateDirectory, func(source string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || source == options.stateDirectory {
+			return walkErr
 		}
-		file, createErr := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-		if createErr == nil {
-			_, createErr = io.WriteString(file, value+"\n")
-			createErr = errors.Join(createErr, file.Sync(), file.Close())
-		}
-		if createErr != nil && !os.IsExist(createErr) {
-			return "", "", createErr
-		}
-		data, err = os.ReadFile(marker)
-	}
-	if err != nil {
-		return "", "", err
-	}
-	epoch := strings.TrimSpace(string(data))
-	if epoch == "" || strings.ContainsAny(epoch, " /\\\t\r\n") {
-		return "", "", errors.New("invalid backup appliance epoch")
-	}
-	return epoch, lockDirectory, nil
-}
-
-func runBackupArchiveTool(ctx context.Context, override string, args []string, stdout, stderr io.Writer) error {
-	path := override
-	var cleanup func()
-	if path == "" {
-		file, err := os.CreateTemp("", ".fern-host-backup-*.py")
+		relative, err := filepath.Rel(options.stateDirectory, source)
 		if err != nil {
 			return err
 		}
-		path = file.Name()
-		cleanup = func() { _ = os.Remove(path) }
-		defer cleanup()
-		if err := file.Chmod(0o700); err != nil {
-			file.Close()
-			return err
+		relative = filepath.ToSlash(relative)
+		if !backupIncluded(relative) {
+			if entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
-		if _, err := file.Write(backupscript.HostBackupTool); err != nil {
-			file.Close()
-			return err
+		switch {
+		case entry.IsDir():
+			return nil
+		case !entry.Type().IsRegular():
+			return fmt.Errorf("link or special file rejected in Fern state: %s", source)
+		case isSQLite(relative):
+			snapshots++
+			snapshot := filepath.Join(scratch, fmt.Sprintf("%d.db", snapshots))
+			if err := snapshotSQLite(ctx, source, snapshot); err != nil {
+				return err
+			}
+			return add("state/"+relative, snapshot)
+		default:
+			return add("state/"+relative, source)
 		}
-		if err := file.Close(); err != nil {
-			return err
-		}
-	}
-	command := exec.CommandContext(ctx, "python3", append([]string{path}, args...)...)
-	command.Stdout, command.Stderr = stdout, stderr
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("host backup archive utility: %w", err)
-	}
-	return nil
-}
-
-type stagedBackupManifest struct {
-	Generation   string   `json:"generation"`
-	NamedVolumes []string `json:"named_volumes"`
-	Credentials  struct {
-		Policy string `json:"policy"`
-	} `json:"credentials"`
-}
-
-func credentialInputForRestore(bundle, requested string) (string, error) {
-	manifest, err := readStagedBackupManifest(filepath.Join(bundle, "BACKUP-MANIFEST.json"))
-	if err != nil {
-		return "", fmt.Errorf("read backup credential policy: %w", err)
-	}
-	switch manifest.Credentials.Policy {
-	case "external":
-		if requested == "" {
-			requested = bundle + ".credentials.tar"
-		}
-		return requested, nil
-	case "exclude":
-		return requested, nil
-	default:
-		return "", errors.New("backup manifest has an invalid credential policy")
-	}
-}
-
-func readStagedBackupManifest(path string) (stagedBackupManifest, error) {
-	var manifest stagedBackupManifest
-	data, err := os.ReadFile(path)
+	})
 	if err != nil {
 		return manifest, err
 	}
-	if err := json.Unmarshal(data, &manifest); err != nil {
+	if err := add(backupConfigEntry, options.configPath); err != nil {
 		return manifest, err
 	}
-	if manifest.Generation == "" {
-		return manifest, errors.New("staged backup manifest has no generation")
-	}
-	return manifest, nil
-}
-
-type restorePath struct {
-	source, target string
-}
-
-type operationalRollbackManifest struct {
-	SchemaVersion      int                       `json:"schema_version"`
-	Generation         string                    `json:"generation"`
-	RestoredGeneration string                    `json:"restored_generation"`
-	Paths              []operationalRollbackPath `json:"paths"`
-	NamedVolumes       []string                  `json:"named_volumes"`
-}
-
-type operationalRollbackPath struct {
-	Target    string `json:"target"`
-	HadTarget bool   `json:"had_target"`
-}
-
-type preparedRestorePath struct {
-	target, staged, prior string
-	hadTarget             bool
-	activated             bool
-}
-
-type filesystemRestore struct {
-	paths []preparedRestorePath
-}
-
-func prepareFilesystemRestore(current, stateDirectory, configPath, envPath, repository, generation string) (*filesystemRestore, error) {
-	paths := []restorePath{
-		{source: filepath.Join(current, "config", filepath.Base(configPath)), target: configPath},
-		{source: filepath.Join(current, "config", filepath.Base(envPath)), target: envPath},
-		{source: filepath.Join(current, "repository"), target: repository},
-	}
-	if _, err := os.Lstat(paths[1].source); os.IsNotExist(err) {
-		paths[1].source = ""
-	}
-	stagedState := filepath.Join(current, "state")
-	stateEntries, err := os.ReadDir(stagedState)
-	if err != nil {
-		return nil, err
-	}
-	currentEntries, err := os.ReadDir(stateDirectory)
-	if err != nil {
-		return nil, err
-	}
-	names := make(map[string]bool)
-	for _, entries := range [][]os.DirEntry{stateEntries, currentEntries} {
-		for _, entry := range entries {
-			if !excludedStateEntries[entry.Name()] {
-				names[entry.Name()] = true
-			}
-		}
-	}
-	for name := range names {
-		source := filepath.Join(stagedState, name)
-		if _, err := os.Lstat(source); os.IsNotExist(err) {
-			source = ""
-		}
-		paths = append(paths, restorePath{source: source, target: filepath.Join(stateDirectory, name)})
-	}
-	slices.SortFunc(paths[3:], func(left, right restorePath) int { return strings.Compare(left.target, right.target) })
-	for index := range paths {
-		paths[index].target, err = filepath.Abs(paths[index].target)
-		if err != nil {
-			return nil, err
-		}
-	}
-	for left := range paths {
-		for right := left + 1; right < len(paths); right++ {
-			if pathContains(paths[left].target, paths[right].target) || pathContains(paths[right].target, paths[left].target) {
-				return nil, fmt.Errorf("restore destinations overlap: %s and %s", paths[left].target, paths[right].target)
-			}
-		}
-	}
-	return prepareFilesystemRestorePaths(paths, generation)
-}
-
-func prepareFilesystemRestorePaths(paths []restorePath, generation string) (*filesystemRestore, error) {
-	transaction := &filesystemRestore{}
-	for index, path := range paths {
-		item := preparedRestorePath{target: path.target}
-		suffix := fmt.Sprintf(".fern-%s-%d", generation, index)
-		item.staged = path.target + suffix + ".staged"
-		item.prior = path.target + suffix + ".prior"
-		if _, stagedErr := os.Lstat(item.staged); stagedErr == nil || !os.IsNotExist(stagedErr) {
-			transaction.Cleanup()
-			return nil, fmt.Errorf("restore staging path already exists for %s", path.target)
-		}
-		if _, priorErr := os.Lstat(item.prior); priorErr == nil || !os.IsNotExist(priorErr) {
-			transaction.Cleanup()
-			return nil, fmt.Errorf("restore rollback path already exists for %s", path.target)
-		}
-		transaction.paths = append(transaction.paths, item)
-		if path.source != "" {
-			if err := copyPath(path.source, item.staged); err != nil {
-				transaction.Cleanup()
-				return nil, err
-			}
-		}
-	}
-	return transaction, nil
-}
-
-func createOperationalRollback(recoveryDirectory, generation, restoredGeneration string, paths []preparedRestorePath) (string, error) {
-	root := filepath.Join(recoveryDirectory, operationalRollbackDirectory)
-	staging := root + ".staged"
-	if pathExists(root) || pathExists(staging) {
-		return "", fmt.Errorf("durable operational rollback generation already exists at %s", root)
-	}
-	if err := os.Mkdir(staging, 0o700); err != nil {
-		return "", err
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_ = os.RemoveAll(staging)
-		}
-	}()
-	filesystem := filepath.Join(staging, "filesystem")
-	if err := os.Mkdir(filesystem, 0o700); err != nil {
-		return "", err
-	}
-	manifest := operationalRollbackManifest{SchemaVersion: 1, Generation: generation, RestoredGeneration: restoredGeneration}
-	for index, path := range paths {
-		item := operationalRollbackPath{Target: path.target, HadTarget: pathExists(path.target)}
-		manifest.Paths = append(manifest.Paths, item)
-		if item.HadTarget {
-			if err := copyPath(path.target, filepath.Join(filesystem, fmt.Sprintf("%d", index))); err != nil {
-				return "", fmt.Errorf("snapshot rollback path %s: %w", path.target, err)
-			}
+	if pathExists(options.envPath) {
+		if err := add(backupEnvEntry, options.envPath); err != nil {
+			return manifest, err
 		}
 	}
 	encoded, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
-		return "", err
+		return manifest, err
 	}
-	encoded = append(encoded, '\n')
-	manifestPath := filepath.Join(staging, "ROLLBACK-MANIFEST.json")
-	file, err := os.OpenFile(manifestPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return "", err
+	header := &tar.Header{Typeflag: tar.TypeReg, Name: backupManifestName, Mode: 0o600, Size: int64(len(encoded)), ModTime: manifest.CreatedAt}
+	if err := archive.WriteHeader(header); err != nil {
+		return manifest, err
 	}
-	if _, err := file.Write(encoded); err != nil {
-		_ = file.Close()
-		return "", err
+	if _, err := archive.Write(encoded); err != nil {
+		return manifest, err
 	}
-	if err := errors.Join(file.Sync(), file.Close()); err != nil {
-		return "", err
+	if err := errors.Join(archive.Close(), compressed.Close(), encrypted.Close(), temporary.Sync(), temporary.Close()); err != nil {
+		return manifest, err
 	}
-	if err := os.Rename(staging, root); err != nil {
-		return "", err
+	// Link refuses to replace an output created concurrently.
+	if err := os.Link(temporary.Name(), output); err != nil {
+		return manifest, fmt.Errorf("install backup: %w", err)
 	}
-	committed = true
-	return root, nil
+	return manifest, syncDirectory(filepath.Dir(output))
 }
 
-func readOperationalRollback(root, stateDirectory, configPath, envPath, repository string, wantVolumes []string) (operationalRollbackManifest, []restorePath, map[string]string, error) {
-	var manifest operationalRollbackManifest
-	info, err := os.Lstat(root)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
-		return manifest, nil, nil, fmt.Errorf("durable operational rollback generation is unavailable or unsafe at %s", root)
-	}
-	data, err := os.ReadFile(filepath.Join(root, "ROLLBACK-MANIFEST.json"))
-	if err != nil {
-		return manifest, nil, nil, err
-	}
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&manifest); err != nil || manifest.SchemaVersion != 1 || manifest.Generation == "" || manifest.RestoredGeneration == "" {
-		return manifest, nil, nil, errors.New("invalid durable operational rollback manifest")
-	}
-	configTarget, _ := filepath.Abs(configPath)
-	envTarget, _ := filepath.Abs(envPath)
-	repositoryTarget, _ := filepath.Abs(repository)
-	stateTarget, _ := filepath.Abs(stateDirectory)
-	if len(manifest.Paths) < 3 || manifest.Paths[0].Target != configTarget || manifest.Paths[1].Target != envTarget || manifest.Paths[2].Target != repositoryTarget || !slices.Equal(manifest.NamedVolumes, wantVolumes) {
-		return manifest, nil, nil, errors.New("rollback generation does not match the active Fern configuration")
-	}
-	paths := make([]restorePath, 0, len(manifest.Paths))
-	for index, item := range manifest.Paths {
-		if index >= 3 {
-			parent, err := filepath.Rel(stateTarget, item.Target)
-			if err != nil || parent == "." || filepath.Dir(parent) != "." || excludedStateEntries[filepath.Base(item.Target)] {
-				return manifest, nil, nil, errors.New("rollback manifest contains an invalid Fern state target")
-			}
-		}
-		source := ""
-		if item.HadTarget {
-			source = filepath.Join(root, "filesystem", fmt.Sprintf("%d", index))
-			if !pathExists(source) {
-				return manifest, nil, nil, errors.New("rollback filesystem generation is incomplete")
-			}
-		}
-		paths = append(paths, restorePath{source: source, target: item.Target})
-	}
-	volumeSources := make(map[string]string, len(wantVolumes))
-	for _, name := range wantVolumes {
-		source := filepath.Join(root, "volumes", name)
-		if !pathExists(source) {
-			return manifest, nil, nil, errors.New("rollback Docker generation is incomplete")
-		}
-		volumeSources[name] = source
-	}
-	return manifest, paths, volumeSources, nil
+func sqliteDSN(path string) string {
+	dsn := url.URL{Scheme: "file", Path: filepath.ToSlash(path)}
+	query := dsn.Query()
+	query.Set("mode", "rw")
+	query.Add("_pragma", "busy_timeout(5000)")
+	dsn.RawQuery = query.Encode()
+	return dsn.String()
 }
 
-func (transaction *filesystemRestore) Activate() error {
-	for index := range transaction.paths {
-		item := &transaction.paths[index]
-		if info, err := os.Lstat(item.target); err == nil {
-			if info.Mode()&os.ModeSymlink != 0 {
-				return errors.Join(fmt.Errorf("restore target is a symlink: %s", item.target), transaction.Rollback())
-			}
-			if err := os.Rename(item.target, item.prior); err != nil {
-				return errors.Join(err, transaction.Rollback())
-			}
-			item.hadTarget = true
-		} else if !os.IsNotExist(err) {
-			return errors.Join(err, transaction.Rollback())
-		}
-		if pathExists(item.staged) {
-			if err := os.Rename(item.staged, item.target); err != nil {
-				return errors.Join(err, transaction.Rollback())
-			}
-		}
-		item.activated = true
+// snapshotSQLite writes a consistent, WAL-free copy with VACUUM INTO and
+// integrity-checks the copy.
+func snapshotSQLite(ctx context.Context, source, target string) error {
+	database, err := sql.Open("sqlite", sqliteDSN(source))
+	if err != nil {
+		return err
+	}
+	_, err = database.ExecContext(ctx, "VACUUM INTO ?", target)
+	if err = errors.Join(err, database.Close()); err != nil {
+		return fmt.Errorf("snapshot SQLite state %s: %w", source, err)
+	}
+	return checkSQLite(ctx, target)
+}
+
+func checkSQLite(ctx context.Context, path string) error {
+	database, err := sql.Open("sqlite", sqliteDSN(path))
+	if err != nil {
+		return err
+	}
+	var integrity string
+	err = database.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity)
+	if err == nil && integrity != "ok" {
+		err = fmt.Errorf("integrity_check returned %q", integrity)
+	}
+	if err = errors.Join(err, database.Close()); err != nil {
+		return fmt.Errorf("check SQLite state %s: %w", path, err)
 	}
 	return nil
 }
 
-func (transaction *filesystemRestore) Rollback() error {
+func restoreBackup(ctx context.Context, options backupOptions, input string, identities []age.Identity, replace bool) (backupManifest, error) {
+	state := filepath.Clean(options.stateDirectory)
+	live, err := hasLiveState(state)
+	if err != nil {
+		return backupManifest{}, err
+	}
+	if !replace {
+		if live {
+			return backupManifest{}, fmt.Errorf("Fern state exists at %s; pass --replace to replace it", state)
+		}
+		for _, target := range []string{options.configPath, options.envPath} {
+			if pathExists(target) {
+				return backupManifest{}, fmt.Errorf("%s exists; pass --replace to replace it", target)
+			}
+		}
+	}
+	file, err := os.Open(input)
+	if err != nil {
+		return backupManifest{}, err
+	}
+	defer file.Close()
+	if err := os.MkdirAll(filepath.Dir(state), 0o700); err != nil {
+		return backupManifest{}, err
+	}
+	staging, err := os.MkdirTemp(filepath.Dir(state), ".fern-restore-")
+	if err != nil {
+		return backupManifest{}, err
+	}
+	defer os.RemoveAll(staging)
+	manifest, err := extractBackup(file, identities, staging)
+	if err != nil {
+		return manifest, err
+	}
+	stagedState := filepath.Join(staging, "state")
+	if err := os.MkdirAll(stagedState, 0o700); err != nil {
+		return manifest, err
+	}
+	err = filepath.WalkDir(stagedState, func(path string, entry fs.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.IsDir() || !isSQLite(path) {
+			return walkErr
+		}
+		return checkSQLite(ctx, path)
+	})
+	if err != nil {
+		return manifest, err
+	}
+	leases, err := acquireBackupLeases(state, manifest.Workspace)
+	if err != nil {
+		return manifest, err
+	}
+	defer leases.release()
+
+	// The held lease files move into the new state so the lease stays in force.
+	steps := []renameStep{{filepath.Join(state, "locks"), filepath.Join(stagedState, "locks")}}
+	if live {
+		steps = append(steps, replaceSteps(state, stagedState)...)
+	} else {
+		steps = append(steps, renameStep{state, state + ".discard"}, renameStep{stagedState, state})
+	}
+	files := map[string]string{options.configPath: backupConfigEntry, options.envPath: backupEnvEntry}
+	for target, entry := range files {
+		source := filepath.Join(staging, filepath.FromSlash(entry))
+		if !pathExists(source) {
+			continue
+		}
+		// Copy next to the target so the final rename stays on one filesystem.
+		incoming := target + ".restore"
+		if err := os.RemoveAll(incoming); err != nil {
+			return manifest, err
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0o750); err != nil {
+			return manifest, err
+		}
+		if err := copyPath(source, incoming); err != nil {
+			return manifest, err
+		}
+		defer os.Remove(incoming)
+		steps = append(steps, replaceSteps(target, incoming)...)
+	}
+	return manifest, applyRenames(steps)
+}
+
+func hasLiveState(state string) (bool, error) {
+	entries, err := os.ReadDir(state)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if entry.Name() != "locks" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// extractBackup authenticates, decompresses, and unpacks a backup into
+// staging, accepting only regular files under state/ or config/ whose
+// checksums exactly match the manifest.
+func extractBackup(source io.Reader, identities []age.Identity, staging string) (backupManifest, error) {
+	var manifest backupManifest
+	decrypted, err := age.Decrypt(source, identities...)
+	if err != nil {
+		return manifest, fmt.Errorf("decrypt backup: %w", err)
+	}
+	compressed, err := gzip.NewReader(decrypted)
+	if err != nil {
+		return manifest, fmt.Errorf("read backup: %w", err)
+	}
+	archive := tar.NewReader(compressed)
+	written := make(map[string]string)
+	haveManifest := false
+	for {
+		header, err := archive.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return manifest, fmt.Errorf("read backup: %w", err)
+		}
+		name := header.Name
+		if !validBackupEntry(name) {
+			return manifest, fmt.Errorf("unsafe backup entry %q", name)
+		}
+		if header.Typeflag != tar.TypeReg {
+			return manifest, fmt.Errorf("backup entry %q is not a regular file", name)
+		}
+		if _, duplicate := written[name]; duplicate || (haveManifest && name == backupManifestName) {
+			return manifest, fmt.Errorf("duplicate backup entry %q", name)
+		}
+		if name == backupManifestName {
+			decoder := json.NewDecoder(io.LimitReader(archive, maxBackupManifest))
+			decoder.DisallowUnknownFields()
+			if err := decoder.Decode(&manifest); err != nil {
+				return manifest, fmt.Errorf("invalid backup manifest: %w", err)
+			}
+			haveManifest = true
+			continue
+		}
+		target := filepath.Join(staging, filepath.FromSlash(name))
+		if err := os.MkdirAll(filepath.Dir(target), 0o700); err != nil {
+			return manifest, err
+		}
+		output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, header.FileInfo().Mode().Perm())
+		if err != nil {
+			return manifest, err
+		}
+		hash := sha256.New()
+		_, err = io.Copy(io.MultiWriter(output, hash), archive)
+		if err = errors.Join(err, output.Sync(), output.Close()); err != nil {
+			return manifest, fmt.Errorf("extract %s: %w", name, err)
+		}
+		written[name] = hex.EncodeToString(hash.Sum(nil))
+	}
+	// Reading to the end makes gzip verify its checksum and age authenticate
+	// the final chunk, so truncation is detected before anything is activated.
+	if _, err := io.Copy(io.Discard, compressed); err != nil {
+		return manifest, fmt.Errorf("read backup: %w", err)
+	}
+	if _, err := io.Copy(io.Discard, decrypted); err != nil {
+		return manifest, fmt.Errorf("read backup: %w", err)
+	}
+	if !haveManifest || manifest.Format != backupFormat || manifest.Workspace == "" {
+		return manifest, fmt.Errorf("backup has no %s manifest", backupFormat)
+	}
+	if len(manifest.Files) != len(written) {
+		return manifest, errors.New("backup files do not match the manifest")
+	}
+	for _, entry := range manifest.Files {
+		if actual, ok := written[entry.Path]; !ok || actual != entry.SHA256 {
+			return manifest, fmt.Errorf("backup checksum mismatch: %s", entry.Path)
+		}
+	}
+	if _, ok := written[backupConfigEntry]; !ok {
+		return manifest, errors.New("backup has no configuration file")
+	}
+	return manifest, nil
+}
+
+func validBackupEntry(name string) bool {
+	if name == backupManifestName || name == backupConfigEntry || name == backupEnvEntry {
+		return true
+	}
+	relative, ok := strings.CutPrefix(name, "state/")
+	return ok && relative != "" && path.Clean(name) == name && !strings.Contains(name, "\\") &&
+		!strings.HasPrefix(relative, "../") && relative != ".."
+}
+
+func rollbackBackup(options backupOptions) error {
+	state := filepath.Clean(options.stateDirectory)
+	if !pathExists(state + ".previous") {
+		return fmt.Errorf("no previous state to roll back to at %s.previous", state)
+	}
+	leases, err := acquireBackupLeases(state, "")
+	if err != nil {
+		return err
+	}
+	defer leases.release()
+	var steps []renameStep
+	if !pathExists(filepath.Join(state+".previous", "locks")) {
+		steps = append(steps, renameStep{filepath.Join(state, "locks"), filepath.Join(state+".previous", "locks")})
+	}
+	for _, target := range []string{state, options.configPath, options.envPath} {
+		if pathExists(target + ".previous") {
+			steps = append(steps, renameStep{target, target + ".swap"}, renameStep{target + ".previous", target}, renameStep{target + ".swap", target + ".previous"})
+		}
+	}
+	return applyRenames(steps)
+}
+
+type renameStep struct{ from, to string }
+
+// replaceSteps installs incoming at target, keeping the current target as
+// target.previous and discarding an older previous copy only on success.
+func replaceSteps(target, incoming string) []renameStep {
+	var steps []renameStep
+	if pathExists(target + ".previous") {
+		steps = append(steps, renameStep{target + ".previous", target + ".discard"})
+	}
+	if pathExists(target) {
+		steps = append(steps, renameStep{target, target + ".previous"})
+	}
+	return append(steps, renameStep{incoming, target})
+}
+
+// applyRenames performs the renames in order, undoing completed ones if any
+// fails, then removes discarded copies. Steps whose source is absent are skipped.
+func applyRenames(steps []renameStep) error {
+	for _, step := range steps {
+		if strings.HasSuffix(step.to, ".discard") || strings.HasSuffix(step.to, ".swap") {
+			if err := os.RemoveAll(step.to); err != nil {
+				return err
+			}
+		}
+	}
+	var done []renameStep
+	for _, step := range steps {
+		if !pathExists(step.from) {
+			continue
+		}
+		if err := os.Rename(step.from, step.to); err != nil {
+			for index := len(done) - 1; index >= 0; index-- {
+				err = errors.Join(err, os.Rename(done[index].to, done[index].from))
+			}
+			return fmt.Errorf("activate restored files: %w", err)
+		}
+		done = append(done, step)
+	}
 	var result error
-	for index := len(transaction.paths) - 1; index >= 0; index-- {
-		item := &transaction.paths[index]
-		if item.activated && pathExists(item.target) {
-			result = errors.Join(result, os.RemoveAll(item.target))
+	for _, step := range done {
+		if strings.HasSuffix(step.to, ".discard") {
+			result = errors.Join(result, os.RemoveAll(step.to))
 		}
-		if item.hadTarget && pathExists(item.prior) {
-			result = errors.Join(result, os.Rename(item.prior, item.target))
-		}
-		if pathExists(item.staged) {
-			result = errors.Join(result, os.RemoveAll(item.staged))
+		if directory := filepath.Dir(step.to); pathExists(directory) {
+			result = errors.Join(result, syncDirectory(directory))
 		}
 	}
 	return result
 }
 
-func (transaction *filesystemRestore) Commit() error {
-	var result error
-	for _, item := range transaction.paths {
-		if pathExists(item.prior) {
-			result = errors.Join(result, os.RemoveAll(item.prior))
-		}
+func syncDirectory(directory string) error {
+	handle, err := os.Open(directory)
+	if err != nil {
+		return err
 	}
-	return result
-}
-
-func (transaction *filesystemRestore) Cleanup() {
-	for _, item := range transaction.paths {
-		if pathExists(item.staged) {
-			_ = os.RemoveAll(item.staged)
-		}
-	}
+	return errors.Join(handle.Sync(), handle.Close())
 }
 
 func copyPath(source, target string) error {
-	info, err := os.Lstat(source)
+	input, err := os.OpenFile(source, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || (!info.IsDir() && !info.Mode().IsRegular()) {
-		return fmt.Errorf("link or special backup source rejected: %s", source)
-	}
-	if info.Mode().IsRegular() {
-		if details, ok := info.Sys().(*syscall.Stat_t); ok && details.Nlink != 1 {
-			return fmt.Errorf("hard-linked backup source rejected: %s", source)
-		}
-		input, err := os.Open(source)
-		if err != nil {
-			return err
-		}
-		defer input.Close()
-		output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
-		if err != nil {
-			return err
-		}
-		_, copyErr := io.Copy(output, input)
-		return errors.Join(copyErr, output.Sync(), output.Close())
-	}
-	if err := os.Mkdir(target, info.Mode().Perm()); err != nil {
-		return err
-	}
-	entries, err := os.ReadDir(source)
+	defer input.Close()
+	info, err := input.Stat()
 	if err != nil {
 		return err
 	}
-	for _, entry := range entries {
-		if err := copyPath(filepath.Join(source, entry.Name()), filepath.Join(target, entry.Name())); err != nil {
-			return err
-		}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file: %s", source)
 	}
-	return nil
+	output, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	_, copyErr := io.Copy(output, input)
+	return errors.Join(copyErr, output.Sync(), output.Close())
 }
 
 func pathContains(parent, child string) bool {
+	parent, _ = filepath.Abs(parent)
+	child, _ = filepath.Abs(child)
 	relative, err := filepath.Rel(parent, child)
 	return err == nil && (relative == "." || (relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))))
 }

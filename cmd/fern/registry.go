@@ -58,9 +58,9 @@ var commands = []command{
 		name:     "backup",
 		overview: "Create, restore, and roll back verified offline host backups.",
 		sub: []subcommand{
-			{name: "create", summary: "Quiesce the workspace and create a verified backup", run: func(_ context.Context, args []string, log *slog.Logger) error { return runBackupCreate(args, log) }},
-			{name: "restore", summary: "Stage, verify, and activate a backup", run: func(_ context.Context, args []string, log *slog.Logger) error { return runBackupRestore(args, log) }},
-			{name: "rollback", summary: "Activate the durable pre-restore generation", run: func(_ context.Context, args []string, log *slog.Logger) error { return runBackupRollback(args, log) }},
+			{name: "create", summary: "Create an age-encrypted backup while Fern is stopped", run: func(_ context.Context, args []string, log *slog.Logger) error { return runBackupCreate(args, log) }},
+			{name: "restore", summary: "Verify, stage, and swap a backup into place", run: func(_ context.Context, args []string, log *slog.Logger) error { return runBackupRestore(args, log) }},
+			{name: "rollback", summary: "Swap the state replaced by the last restore back", run: func(_ context.Context, args []string, log *slog.Logger) error { return runBackupRollback(args, log) }},
 		},
 	},
 	{
