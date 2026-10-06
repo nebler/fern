@@ -18,7 +18,6 @@ func TestLifecycleClassification(t *testing.T) {
 	}
 	phases := []Phase{Absent, Provisioning, PromptPending, Admitted, Sealing, Cleaning, CleanupComplete, "unknown",
 		"stop_intent", "writer_inactive", "exporting", "artifact_committed", "pre_effect_failed"}
-	cleanup := map[Phase]bool{Cleaning: true}
 	recovery := map[Phase]bool{Sealing: true, Cleaning: true, CleanupComplete: true}
 	for _, state := range states {
 		for _, phase := range phases {
@@ -28,11 +27,9 @@ func TestLifecycleClassification(t *testing.T) {
 					wantValid = wantValid || accepted == phase
 				}
 				want := Lifecycle{
-					Valid:                  wantValid,
-					EnforceAttemptDeadline: wantValid && !recovery[phase],
-					EnforceExecutionConfig: wantValid && !recovery[phase],
-					TimeoutEligible:        wantValid && !recovery[phase] && state != Queued,
-					CleanupStep:            wantValid && cleanup[phase],
+					Valid:           wantValid,
+					Executing:       wantValid && !recovery[phase],
+					TimeoutEligible: wantValid && !recovery[phase] && state != Queued,
 				}
 				if got := Classify(state, phase); got != want {
 					t.Fatalf("Classify = %+v, want %+v", got, want)

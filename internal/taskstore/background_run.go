@@ -56,11 +56,9 @@ func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID task.Workspace
 	return run, nil
 }
 
-// GetBackgroundRunOwners returns the exact parent revisions only after the
-// same ownership-hiding check used by GetBackgroundRun.
-// ReadBackgroundRunLifecycle returns the projected (state, phase) tuple of one
-// run for the trusted in-process coordinator. It exposes no task plaintext and
-// authorizes no actor.
+// ReadBackgroundRunLifecycle returns the (state, phase) of one run for the
+// trusted in-process coordinator. It exposes no task plaintext and authorizes
+// no actor.
 func (s *Store) ReadBackgroundRunLifecycle(ctx context.Context, workspaceID task.WorkspaceID, taskID task.TaskID) (BackgroundRunState, BackgroundRunEffectPhase, error) {
 	run, err := scanBackgroundRun(s.db.QueryRowContext(ctx, backgroundRunSelect+` WHERE r.workspace_id=? AND r.task_id=?`, workspaceID, taskID))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -72,6 +70,8 @@ func (s *Store) ReadBackgroundRunLifecycle(ctx context.Context, workspaceID task
 	return run.State, run.EffectPhase, nil
 }
 
+// GetBackgroundRunOwners returns the exact parent revisions only after the
+// same ownership-hiding check used by GetBackgroundRun.
 func (s *Store) GetBackgroundRunOwners(ctx context.Context, workspaceID task.WorkspaceID, taskID task.TaskID, actor task.ActorSnapshot) (Task, Attempt, error) {
 	run, err := s.GetBackgroundRun(ctx, workspaceID, taskID, actor)
 	if err != nil {

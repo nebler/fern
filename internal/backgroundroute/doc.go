@@ -10,9 +10,10 @@
 // start time, token, epoch), not just an endpoint, so a restarted process is a
 // new runtime. Removal has two stages: Remove unpublishes, cancels admitted
 // requests, and drains, leaving a reuse fence even if draining times out;
-// ConfirmRemoval clears it and must only be called by the coordinator after the
-// durable route_removed record is committed. IssueAttachment mints access only
-// for the durable tuple naming the active runtime.
+// ConfirmRemoval clears it once drained. The coordinator removes routes only for
+// a run that is durably cleaning and so never activates that route again.
+// IssueAttachment mints access only for the durable tuple naming the active
+// runtime.
 //
 // Attachment is not read-only: owned-session prompting and selected
 // question/permission replies are allowed, while foreign sessions, /fern,

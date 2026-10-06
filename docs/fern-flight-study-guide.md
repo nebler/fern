@@ -151,13 +151,15 @@ queued -> setting_up -> working <-> needs_you
                                              / cleanup_required
 ```
 
-The durable phase records finer-grained effect boundaries, such as
-`provision_intent`, `container_observed`, `prompt_intent`, `writer_inactive`,
-`exporting`, `artifact_committed`, and `cleanup_complete`.
+The durable phase records only what inspection cannot re-derive: `absent`,
+`provisioning`, `prompt_pending`, `admitted`, `sealing`, `cleaning`, and
+`cleanup_complete`. Clones, volumes, containers, routes, and sessions have
+deterministic identities, so each coordinator pass re-observes them and acts
+where they differ.
 
 The distinction matters during restart recovery. "Working" is too vague to
-tell Fern whether a container existed, whether a prompt may have been sent, or
-whether artifact export had started.
+tell Fern whether a prompt may have been sent; `prompt_pending` says it was
+fenced, so Fern only reconciles and never sends it again.
 
 ## Part 5 — Stop, Seal, result, and recovery
 

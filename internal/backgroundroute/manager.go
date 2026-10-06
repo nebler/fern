@@ -256,8 +256,8 @@ func (m *Manager) Remove(ctx context.Context, identity Identity) (string, error)
 	}
 }
 
-// ConfirmRemoval clears the process-local reuse fence only after durable state
-// positively reports route_removed for the same identity.
+// ConfirmRemoval clears the process-local reuse fence for the same identity
+// once its removal has drained.
 func (m *Manager) ConfirmRemoval(identity Identity) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

@@ -210,12 +210,12 @@ func (s *Store) MarkBackgroundRunCleanupRequired(ctx context.Context, p MarkBack
 	if !validBoundedText(p.Error, 1, 4096) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run cleanup failure", ErrInvalidInput)
 	}
-	lifecycle := rundomain.Classify(rundomain.State(p.ExpectedState), rundomain.Phase(p.ExpectedPhase))
 	state := BackgroundRunCleanupRequired
 	switch {
-	case lifecycle.CleanupStep && p.ExpectedState == BackgroundRunResultReady:
+	case p.ExpectedPhase == BackgroundRunEffectCleaning && p.ExpectedState == BackgroundRunResultReady:
 		state = BackgroundRunResultReady
-	case lifecycle.CleanupStep, lifecycle.TimeoutEligible:
+	case p.ExpectedPhase == BackgroundRunEffectCleaning,
+		rundomain.Classify(rundomain.State(p.ExpectedState), rundomain.Phase(p.ExpectedPhase)).TimeoutEligible:
 	default:
 		return BackgroundRun{}, fmt.Errorf("%w: background run cleanup failure state", ErrInvalidInput)
 	}

@@ -140,10 +140,12 @@ func (c *Coordinator) supervise(ctx context.Context, step func(context.Context) 
 	}
 }
 
-// RunOnce selects the next run and processes its current phase. A phase can
-// require multiple external calls and evidence transitions, each a revision
-// compare-and-swap. The process-local mutex makes concurrent wake and test
-// scans serial; fern up's host lease makes this the workspace's only coordinator.
+// RunOnce selects the next run and reconciles its current phase in one pass:
+// it observes each derived resource, acts where it differs, and continues
+// until the phase is blocked, stable, or the operation deadline expires. Every
+// durable write is a revision compare-and-swap. The process-local mutex makes
+// concurrent wake and test scans serial; fern up's host lease makes this the
+// workspace's only coordinator.
 func (c *Coordinator) RunOnce(ctx context.Context) error {
 	_, err := c.step(ctx)
 	return err
@@ -205,10 +207,10 @@ func (c *Coordinator) runOnce(ctx context.Context) (taskstore.BackgroundRunWork,
 	}
 	configurationDiffers := work.Run.ResourceSpecVersion != rundomain.ResourceSpecVersion || work.Run.ImageIdentity != c.config.ImageIdentity || work.Run.EnvironmentSHA256 != c.config.EnvironmentSHA256 ||
 		work.Agent != c.config.Agent || work.ModelProvider != c.config.ModelProvider || work.Model != c.config.Model
-	if configurationDiffers && lifecycle.EnforceExecutionConfig {
+	if configurationDiffers && lifecycle.Executing {
 		return work, c.cleanupRequired(ctx, work, "configured execution identity differs")
 	}
-	operation, cancel, _, err := c.effectContext(ctx, work, lifecycle.EnforceAttemptDeadline)
+	operation, cancel, _, err := c.effectContext(ctx, work, lifecycle.Executing)
 	if err != nil {
 		return work, err
 	}
@@ -842,7 +844,7 @@ func (c *Coordinator) cleanupRequired(ctx context.Context, work taskstore.Backgr
 			return removeErr
 		}
 	}
-	mutation, cancel, now, err := c.effectContext(ctx, work, classify(work.Run).EnforceAttemptDeadline)
+	mutation, cancel, now, err := c.effectContext(ctx, work, classify(work.Run).Executing)
 	if err != nil {
 		return err
 	}
@@ -915,7 +917,7 @@ func (c *Coordinator) requestTimeout(ctx context.Context, run taskstore.Backgrou
 
 func (c *Coordinator) record(ctx context.Context, work taskstore.BackgroundRunWork, value string,
 	transition func(context.Context, taskstore.RecordBackgroundRunEvidenceParams) (taskstore.BackgroundRun, error)) error {
-	mutation, cancel, now, err := c.effectContext(ctx, work, classify(work.Run).EnforceAttemptDeadline)
+	mutation, cancel, now, err := c.effectContext(ctx, work, classify(work.Run).Executing)
 	if err != nil {
 		return err
 	}
