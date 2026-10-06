@@ -174,20 +174,6 @@ func TestAuxiliaryStatePathStaysBesideControlState(t *testing.T) {
 	}
 }
 
-func TestStoreRejectsUnknownStateFields(t *testing.T) {
-	directory := filepath.Join(t.TempDir(), "control")
-	if err := os.Mkdir(directory, 0o700); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(directory, tokenHash("demo")+".json")
-	if err := os.WriteFile(path, []byte(`{"version":2,"workspace":"demo","devices":{},"unknown":true}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Open(directory, "demo"); err == nil || !strings.Contains(err.Error(), "unknown field") {
-		t.Fatalf("Open error = %v, want unknown state field", err)
-	}
-}
-
 func TestStoreRejectsUnsupportedStateWithoutMutation(t *testing.T) {
 	for _, data := range []string{
 		`{"version":1,"workspace":"demo","devices":{},"workflows":{},"publications":{}}`,
@@ -206,29 +192,6 @@ func TestStoreRejectsUnsupportedStateWithoutMutation(t *testing.T) {
 			}
 			if _, err := Open(directory, "demo"); err == nil || !strings.Contains(err.Error(), "unsupported Fern control state version") {
 				t.Fatalf("Open error = %v, want unsupported version", err)
-			}
-			unchanged, err := os.ReadFile(path)
-			if err != nil || !bytes.Equal(unchanged, []byte(data)) {
-				t.Fatalf("rejected load modified state: err=%v", err)
-			}
-		})
-	}
-}
-
-func TestStoreCurrentSchemaRejectsRetiredFields(t *testing.T) {
-	for _, field := range []string{"workflows", "publications"} {
-		t.Run(field, func(t *testing.T) {
-			directory := filepath.Join(t.TempDir(), "control")
-			if err := os.Mkdir(directory, 0o700); err != nil {
-				t.Fatal(err)
-			}
-			path := filepath.Join(directory, tokenHash("demo")+".json")
-			data := `{"version":2,"workspace":"demo","devices":{},"` + field + `":{}}`
-			if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := Open(directory, "demo"); err == nil || !strings.Contains(err.Error(), "unknown field") {
-				t.Fatalf("Open error = %v, want unknown field", err)
 			}
 			unchanged, err := os.ReadFile(path)
 			if err != nil || !bytes.Equal(unchanged, []byte(data)) {

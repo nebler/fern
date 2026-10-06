@@ -8,9 +8,9 @@
 // digest. Operator credential IDs are random audit identifiers, not secrets or
 // password hashes.
 //
-// Every mutation rewrites the whole file under one in-process mutex via a
-// private temp file, fsync, rename, and directory fsync. Failures before the
-// rename roll back memory; a directory-sync failure after it is an uncertain
+// Every mutation rewrites the whole file under one in-process mutex with
+// atomicfile.Write. Failures before the rename roll back memory; a
+// directory-sync failure after it (atomicfile.ErrNotDurable) is an uncertain
 // commit and is not rolled back. The mutex does not coordinate separate Store
 // instances or processes.
 //

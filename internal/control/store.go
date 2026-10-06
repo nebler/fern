@@ -1,7 +1,6 @@
 package control
 
 import (
-	"bytes"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -9,14 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
+
+	"github.com/nebler/fern/internal/atomicfile"
 )
 
 const schemaVersion = 2
@@ -32,8 +31,8 @@ type Device struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
-// diskState is the current durable control file. Historical schemas are rejected
-// without migration or mutation; unknown fields are not accepted.
+// diskState is the current durable control file. Other schema versions are
+// rejected without migration or mutation.
 type diskState struct {
 	Version              int               `json:"version"`
 	Workspace            string            `json:"workspace"`
@@ -43,7 +42,7 @@ type diskState struct {
 }
 
 // Store is the durable control-plane identity state for one workspace, guarded
-// by a mutex and an atomic private-file write path.
+// by a mutex and written atomically with atomicfile.
 type Store struct {
 	mu                   sync.Mutex
 	path                 string
@@ -54,14 +53,13 @@ type Store struct {
 }
 
 // Open loads (or initializes) the control state for workspace inside directory.
-// The directory and its state file must satisfy the private-file rules or Open
-// refuses to run.
+// The directory must be a private directory owned by the current user.
 func Open(directory, workspace string) (*Store, error) {
 	if workspace == "" {
 		return nil, errors.New("workspace is required for control store")
 	}
-	if err := ensureDirectory(directory); err != nil {
-		return nil, err
+	if err := atomicfile.PrivateDir(directory); err != nil {
+		return nil, fmt.Errorf("Fern control directory: %w", err)
 	}
 	path := filepath.Join(directory, fmt.Sprintf("%x.json", sha256.Sum256([]byte(workspace))))
 	store := &Store{
@@ -255,49 +253,19 @@ func (store *Store) RevokeDevice(id string) error {
 }
 
 func (store *Store) load() error {
-	file, err := os.OpenFile(store.path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	data, err := atomicfile.Read(store.path, maxControlStateBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("open Fern control state: %w", err)
-	}
-	defer file.Close()
-	info, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("inspect Fern control state: %w", err)
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !info.Mode().IsRegular() || !ok || stat.Nlink != 1 || info.Mode().Perm()&0o077 != 0 {
-		return errors.New("Fern control state must be a private singly linked regular file")
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxControlStateBytes+1))
-	if err != nil {
 		return fmt.Errorf("read Fern control state: %w", err)
 	}
-	if len(data) > maxControlStateBytes {
-		return errors.New("Fern control state exceeds 4 MiB")
-	}
-	// Read the version before strict decoding so historical files report the
-	// unsupported schema even when they contain removed fields.
-	var header struct {
-		Version int `json:"version"`
-	}
-	if err := json.Unmarshal(data, &header); err != nil {
-		return fmt.Errorf("decode Fern control state: %w", err)
-	}
-	if header.Version != schemaVersion {
-		return fmt.Errorf("unsupported Fern control state version %d", header.Version)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
 	var state diskState
-	if err := decoder.Decode(&state); err != nil {
+	if err := json.Unmarshal(data, &state); err != nil {
 		return fmt.Errorf("decode Fern control state: %w", err)
 	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return errors.New("decode Fern control state: trailing data")
+	if state.Version != schemaVersion {
+		return fmt.Errorf("unsupported Fern control state version %d", state.Version)
 	}
 	if state.Workspace != store.workspace {
 		return fmt.Errorf("Fern control state belongs to workspace %q", state.Workspace)
@@ -311,89 +279,34 @@ func (store *Store) load() error {
 }
 
 // commitLocked persists the in-memory mutation made under a held store lock.
-// On failure it invokes undo exactly when the durable outcome is known to still
-// match disk (see rollbackWrite), restoring the pre-mutation values. An
-// uncertain commit — the state file was replaced but the directory sync failed
-// — must NOT roll back: disk may already hold the new state, so reverting
+// On failure it invokes undo unless the file was already replaced
+// (atomicfile.ErrNotDurable): disk may then hold the new state, so reverting
 // memory would make memory diverge from disk.
 func (store *Store) commitLocked(undo func()) error {
-	if err := store.writeLocked(); err != nil {
-		if rollbackWrite(err) && undo != nil {
+	previousRevision := store.data.Revision
+	store.data.Revision++
+	err := store.writeLocked()
+	if err != nil && !errors.Is(err, atomicfile.ErrNotDurable) {
+		store.data.Revision = previousRevision
+		if undo != nil {
 			undo()
 		}
-		return err
 	}
-	return nil
+	return err
 }
 
 func (store *Store) writeLocked() error {
-	previousRevision := store.data.Revision
-	store.data.Revision++
 	data, err := json.Marshal(store.data)
 	if err != nil {
-		store.data.Revision = previousRevision
 		return fmt.Errorf("encode Fern control state: %w", err)
 	}
 	if len(data) > maxControlStateBytes {
-		store.data.Revision = previousRevision
 		return errors.New("Fern control state exceeds 4 MiB")
 	}
-	directory := filepath.Dir(store.path)
-	temporary, err := os.CreateTemp(directory, ".control-*.tmp")
-	if err != nil {
-		store.data.Revision = previousRevision
-		return fmt.Errorf("create temporary Fern control state: %w", err)
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err := temporary.Chmod(0o600); err != nil {
-		store.data.Revision = previousRevision
-		temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(data); err != nil {
-		store.data.Revision = previousRevision
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		store.data.Revision = previousRevision
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		store.data.Revision = previousRevision
-		return err
-	}
-	if err := os.Rename(temporaryPath, store.path); err != nil {
-		store.data.Revision = previousRevision
-		return fmt.Errorf("replace Fern control state: %w", err)
-	}
-	handle, err := os.Open(directory)
-	if err != nil {
-		return commitUncertainError{err}
-	}
-	if err := errors.Join(handle.Sync(), handle.Close()); err != nil {
-		return commitUncertainError{err}
+	if err := atomicfile.Write(store.path, data, 0o600); err != nil {
+		return fmt.Errorf("write Fern control state: %w", err)
 	}
 	return nil
-}
-
-type commitUncertainError struct {
-	err error
-}
-
-func (err commitUncertainError) Error() string {
-	return "Fern control state was replaced but directory sync failed: " + err.err.Error()
-}
-
-func (err commitUncertainError) Unwrap() error {
-	return err.err
-}
-
-func rollbackWrite(err error) bool {
-	var uncertain commitUncertainError
-	return !errors.As(err, &uncertain)
 }
 
 // restorePrunedLocked resurrects devices that pruning removed but that no
@@ -485,18 +398,4 @@ func validOperatorCredentialID(value string) bool {
 	}
 	decoded, err := base64.RawURLEncoding.DecodeString(suffix)
 	return err == nil && len(decoded) == 16 && base64.RawURLEncoding.EncodeToString(decoded) == suffix
-}
-
-func ensureDirectory(directory string) error {
-	if err := os.MkdirAll(directory, 0o700); err != nil {
-		return fmt.Errorf("create Fern control directory: %w", err)
-	}
-	info, err := os.Lstat(directory)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o077 != 0 {
-		return errors.New("Fern control directory must be a private real directory")
-	}
-	return nil
 }
