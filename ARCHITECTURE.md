@@ -132,8 +132,7 @@ Fern has three ingress actor classes:
 - OpenCode plugin: device authorization followed by a fixed-scope bearer.
 
 The plugin scopes are `run:create`, `run:read`, `run:stop`, `run:attach`, and
-`run:result`. They are not configuration. Publication admission is reserved for
-paired/operator actors and is not a plugin bearer scope.
+`run:result`. They are not configuration.
 
 Ingress installs a validated `task.ActorSnapshot` in request context. Inner API
 packages do not derive identity from client-controlled headers or bodies.
@@ -162,12 +161,13 @@ The coordinator wakes only after commit. A repeated matching idempotency claim
 returns the original receipt. A changed hash conflicts. Another actor cannot
 probe the original claim.
 
-`runcommand` owns create, stop, and seal application operations: request policy,
-canonical idempotency hashing, replay interpretation, base verification, identity
-generation, admission coordination, and notification after fresh commits. Its
-inputs are separate from HTTP DTOs and its outputs contain accepted-command
-facts rather than raw store receipts. The HTTP handler owns routing,
-authentication/scopes, bounded decoding, error mapping, and response encoding.
+`runapi` owns create, stop, and seal application operations (`service.go`):
+request policy, canonical idempotency hashing, replay interpretation, base
+verification, identity generation, admission coordination, and notification
+after fresh commits. Command inputs are a private intent separate from HTTP
+DTOs, and outputs contain accepted-command facts rather than raw store
+receipts. The HTTP layer (`runapi.go`) owns routing, authentication/scopes,
+bounded decoding, error mapping, and response encoding.
 
 ## 8. Run State
 
@@ -410,7 +410,7 @@ process-local memory as authority. Recovery rules include:
 - preserve cleanup-required state until absence is proven;
 - wake coordinators only after durable admission commits.
 
-Taskstore schema is 3 and control-state schema is 2. This pre-release reset has
+Taskstore schema is 4 and control-state schema is 2. This pre-release reset has
 no supported predecessor: older development state is rejected, never silently
 migrated or deleted. Preserve anything needed before explicitly starting with
 fresh state. Current-version restart recovery and backup/restore remain
@@ -520,7 +520,7 @@ policy frameworks.
 - `run` cannot import taskstore, Docker, HTTP, or coordinators. Storage keeps
   compatibility names for its callers, but current run enum values and lifecycle
   interpretation come from this domain owner.
-- `runcommand` owns create/stop/seal policy and idempotent acceptance. Private
+- `runapi` owns create/stop/seal policy and idempotent acceptance. Private
   hash projections preserve historical request bytes without making the HTTP
   DTO or its JSON field order the public application interface.
 - Artifact integrity and retained-result authority remain separate. The engine

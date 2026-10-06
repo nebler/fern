@@ -250,8 +250,8 @@ proven security sandbox.
 
 - `cmd/fern`: CLI commands, startup, dependency assembly, shutdown.
 - `run`: lifecycle vocabulary and exact resource/runtime identity; no I/O.
-- `runcommand`: create/stop/seal policy, idempotency, admission.
-- `runapi`: plugin-authenticated HTTP run API.
+- `runapi`: plugin-authenticated HTTP run API plus create/stop/seal policy,
+  idempotency, and admission.
 - `taskstore`: SQLite durable state, receipts, claims, transitions.
 - `backgroundruncoord`: serial engine that converts durable phases into effects.
 - `taskenvdocker`: Docker clone/volume/container policy and credential handoff.
