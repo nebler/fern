@@ -238,7 +238,8 @@ func (state *pairingState) persistLocked() error {
 	}
 	temporaryName := temporary.Name()
 	defer os.Remove(temporaryName)
-	if err := temporary.Chmod(0o600); err == nil {
+	err = temporary.Chmod(0o600)
+	if err == nil {
 		err = json.NewEncoder(temporary).Encode(persisted)
 	}
 	if err == nil {
