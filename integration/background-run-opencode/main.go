@@ -494,7 +494,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 		return err
 	}
 	attachmentToken := "not-yet-issued"
-	route, routeURL, routeAddress, stopRoute, err := startSerialRoute(ctx, "")
+	route, _, routeAddress, stopRoute, err := startSerialRoute(ctx, "")
 	if err != nil {
 		return err
 	}
@@ -592,7 +592,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	if err := stopRoute(); err != nil {
 		return err
 	}
-	route, routeURL, _, stopRoute, err = startSerialRoute(ctx, routeAddress)
+	route, routeURL, _, stopRoute, err := startSerialRoute(ctx, routeAddress)
 	if err != nil {
 		return err
 	}

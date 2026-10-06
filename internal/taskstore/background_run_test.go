@@ -859,9 +859,8 @@ func backgroundRunClaim(run BackgroundRun, now time.Time) BackgroundRunClaim {
 }
 
 func advanceBackgroundRunToPrompt(t *testing.T, store *Store, image string, now time.Time) (BackgroundRun, BackgroundRunClaim) {
-	run, claim := advanceBackgroundRunToPromptIntent(t, store, image, now)
-	var err error
-	run, err = store.RecordBackgroundRunPromptRequestAttempted(context.Background(), claim)
+	_, claim := advanceBackgroundRunToPromptIntent(t, store, image, now)
+	run, err := store.RecordBackgroundRunPromptRequestAttempted(context.Background(), claim)
 	if err != nil {
 		t.Fatal(err)
 	}

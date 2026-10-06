@@ -698,7 +698,7 @@ func parseLogSize(value string) (int64, error) {
 	if len(value) < 2 {
 		return 0, errors.New("valid Docker log max-size is required")
 	}
-	multiplier := int64(1)
+	var multiplier int64
 	switch value[len(value)-1] {
 	case 'k':
 		multiplier = 1 << 10

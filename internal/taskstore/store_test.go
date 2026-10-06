@@ -569,11 +569,6 @@ func testSystemActor() task.ActorSnapshot {
 	return task.ActorSnapshot{Type: task.ActorSystem, ID: "background-run-coordinator", DisplayName: "Background Run coordinator", CredentialID: "service-v1", Authentication: "internal", RequestID: "background-run-request"}
 }
 
-func manifestDigest(entries []ManifestEntry) [32]byte {
-	encoded, _ := json.Marshal(entries)
-	return sha256.Sum256(encoded)
-}
-
 func testID(prefix string, n int) string {
 	return fmt.Sprintf("%s0198d34d-6a50-75fb-b1f2-%012x", prefix, n+1)
 }

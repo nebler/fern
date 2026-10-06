@@ -7,6 +7,26 @@ linters:
     - govet
     - ineffassign
     - staticcheck
+    - unused
+  settings:
+    errcheck:
+      exclude-functions:
+        - os.Remove
+        - golang.org/x/sys/unix.Close
+        - golang.org/x/sys/unix.Unlinkat
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+    staticcheck:
+      checks:
+        - default
+        - -QF*
+        - -ST1005
+  exclusions:
+    rules:
+      # Best-effort cleanup on paths that already return the primary error.
+      - linters: [errcheck]
+        source: '(^\s*defer |\.(Close|Rollback)\(\)$)'
 
 formatters:
   enable:
