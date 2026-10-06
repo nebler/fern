@@ -246,7 +246,7 @@ func run() (resultErr error) {
 	config := taskenvdocker.Config{
 		RuntimeStorageRoot: state,
 		StateRoot:          state, Repository: repository, GitExecutable: gitPath, ImageReference: imageTag, ImageID: imageID,
-		MemoryBytes: 512 << 20, NanoCPUs: 2_000_000_000, PIDs: 512, WallTimeout: 3 * time.Minute,
+		MemoryBytes: 512 << 20, WallTimeout: 3 * time.Minute,
 		GitTimeout: 30 * time.Second, DockerTimeout: 20 * time.Second, HealthTimeout: 60 * time.Second,
 		GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 128 << 20, CloneObservedLimitBytes: 128 << 20,
 		DiskFreeAdmissionBytes: 128 << 20, LogMaxSize: "1m", LogMaxFiles: 2, StopGrace: 3 * time.Second,

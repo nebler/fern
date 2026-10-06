@@ -116,7 +116,7 @@ func (p *Provider) EnsureContainer(ctx context.Context, run taskstore.Background
 	status := "reconciled"
 	if errdefs.IsNotFound(err) {
 		useInit := true
-		pids := p.config.PIDs
+		pids := containerPIDs
 		environment := p.expectedEnvironment(run)
 		labels := p.containerLabels(run, digest)
 		response, createErr := p.docker.ContainerCreate(operation, &container.Config{
@@ -126,7 +126,7 @@ func (p *Provider) EnsureContainer(ctx context.Context, run taskstore.Background
 		}, &container.HostConfig{
 			NetworkMode: "bridge", IpcMode: "private", CgroupnsMode: "private", Runtime: "runc", ShmSize: 64 << 20,
 			PortBindings: nat.PortMap{serverPort: []nat.PortBinding{{HostIP: "127.0.0.1", HostPort: "0"}}},
-			Resources:    container.Resources{Memory: p.config.MemoryBytes, MemorySwap: p.config.MemoryBytes * 2, NanoCPUs: p.config.NanoCPUs, PidsLimit: &pids},
+			Resources:    container.Resources{Memory: p.config.MemoryBytes, MemorySwap: p.config.MemoryBytes * 2, NanoCPUs: containerNanoCPUs, PidsLimit: &pids},
 			Init:         &useInit, RestartPolicy: container.RestartPolicy{Name: "no"}, CapDrop: []string{"ALL"}, SecurityOpt: workerSecurityOptions(), ReadonlyRootfs: true, Tmpfs: workerTmpfs(),
 			Mounts: []mount.Mount{
 				{Type: mount.TypeBind, Source: filepath.Join(p.root, run.CloneIdentity), Target: workspaceTarget},
@@ -300,7 +300,7 @@ func (p *Provider) attestContainerMode(run taskstore.BackgroundRun, digest strin
 		if h.PidsLimit != nil {
 			gotPIDs = *h.PidsLimit
 		}
-		if h.Memory != p.config.MemoryBytes || h.MemorySwap != p.config.MemoryBytes*2 || h.MemoryReservation != 0 || h.NanoCPUs != p.config.NanoCPUs || gotPIDs != p.config.PIDs || h.CPUShares != 0 || h.CPUPeriod != 0 || h.CPUQuota != 0 || h.CpusetCpus != "" || h.CpusetMems != "" || (h.OomKillDisable != nil && *h.OomKillDisable) || h.MemorySwappiness != nil || h.OomScoreAdj != 0 || h.Init == nil || !*h.Init || !h.RestartPolicy.IsNone() {
+		if h.Memory != p.config.MemoryBytes || h.MemorySwap != p.config.MemoryBytes*2 || h.MemoryReservation != 0 || h.NanoCPUs != containerNanoCPUs || gotPIDs != containerPIDs || h.CPUShares != 0 || h.CPUPeriod != 0 || h.CPUQuota != 0 || h.CpusetCpus != "" || h.CpusetMems != "" || (h.OomKillDisable != nil && *h.OomKillDisable) || h.MemorySwappiness != nil || h.OomScoreAdj != 0 || h.Init == nil || !*h.Init || !h.RestartPolicy.IsNone() {
 			return fmt.Errorf("container resource, init, or restart limits differ (memory=%d swap=%d reservation=%d nano_cpus=%d pids=%d shares=%d period=%d quota=%d oom_disable=%t swappiness=%t oom_score=%d init=%t restart=%s)", h.Memory, h.MemorySwap, h.MemoryReservation, h.NanoCPUs, gotPIDs, h.CPUShares, h.CPUPeriod, h.CPUQuota, h.OomKillDisable != nil, h.MemorySwappiness != nil, h.OomScoreAdj, h.Init != nil && *h.Init, h.RestartPolicy.Name)
 		}
 	}
@@ -360,9 +360,6 @@ func (p *Provider) attestMounts(run taskstore.BackgroundRun, configured []mount.
 
 func (p *Provider) expectedEnvironment(run taskstore.BackgroundRun) []string {
 	environment := cloneMap(p.imageEnv)
-	for key, value := range p.config.Environment {
-		environment[key] = value
-	}
 	environment[usernameEnv] = p.config.BasicUsername
 	environment[passwordEnv] = p.password(run)
 	result := make([]string, 0, len(environment))

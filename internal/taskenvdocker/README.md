@@ -44,9 +44,9 @@ they are not Fern durable publication authority or a promise that publication oc
 | `StopContainer`, `ProveWriterInactive` | Prove the intended writer stopped/absent/never started. |
 | `RemoveContainer`, `RemoveVolume`, `RemoveClone` | Remove only under explicit writer authority. |
 | `AcquireExportSource` | Acquire exclusive filesystem clone lease after fresh inactivity proof. |
-| `EnvironmentSHA256` | Deterministic digest of supplied environment values. |
+| `EnvironmentSHA256` | Deterministic environment digest; every current run records `EnvironmentSHA256(nil)`. |
 
-Provider construction clones mutable configuration and can own a Docker client if
+Provider construction copies configuration and can own a Docker client if
 one is not injected. Close marks lifecycle closed and closes owned client resources;
 it is not a substitute for ordered run cleanup and does not delete all Docker state.
 Stop coordinator/route users before provider shutdown. Do not copy provider state
@@ -97,7 +97,8 @@ only on loopback with an observed host port. Basic authentication derives from
 host key and immutable run identity; credentials do not enter observation evidence.
 
 Policy checks include bridge networking, private IPC/cgroup namespace, memory/swap,
-CPU/PID limits, init, restart disabled, all capabilities dropped, and
+fixed CPU/PID limits (2 CPUs and 512 PIDs, constants rather than configuration),
+init, restart disabled, all capabilities dropped, and
 `no-new-privileges`. The root filesystem is read-only. Explicit tmpfs mounts bound
 `/tmp` and `/home/user/.cache` to 256 MiB/65,536 inodes each and
 `/home/user/.config` and `/home/user/.local/state` to 16 MiB/4,096 inodes each;
@@ -108,8 +109,8 @@ terminal/pipe ioctl allowlist; it does **not** permit XFS project-ID/inheritance
 changes, unrestricted ioctl, io_uring, or unknown file-attribute APIs. Dropping
 capabilities alone does not prevent an inode owner from changing XFS project IDs.
 Bridge egress is unrestricted. This is not an egress allowlist or defense against a hostile
-Docker administrator. New nonempty host environment maps are rejected specifically
-because the worker has unrestricted egress; legacy digests remain useful for cleanup.
+Docker administrator. There is no host environment injection because the worker
+has unrestricted egress; `Config` has no environment field.
 
 ### Required Linux quota storage
 

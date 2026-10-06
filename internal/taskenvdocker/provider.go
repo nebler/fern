@@ -93,6 +93,13 @@ func (e *IdentityError) Error() string {
 
 func (e *IdentityError) Unwrap() error { return errors.Join(ErrIdentityMismatch, ErrQuarantined) }
 
+// Every background container gets exactly these CPU and PID limits; they are
+// fixed policy rather than configuration.
+const (
+	containerNanoCPUs int64 = 2_000_000_000 // 2 CPUs
+	containerPIDs     int64 = 512
+)
+
 // Config contains server policy, not client-supplied run identities.
 type Config struct {
 	StateRoot string
@@ -105,8 +112,6 @@ type Config struct {
 	ImageReference           string
 	ImageID                  string
 	MemoryBytes              int64
-	NanoCPUs                 int64
-	PIDs                     int64
 	WallTimeout              time.Duration
 	GitTimeout               time.Duration
 	DockerTimeout            time.Duration
@@ -119,10 +124,7 @@ type Config struct {
 	LogMaxFiles              int
 	StopGrace                time.Duration
 	BasicUsername            string
-	// Environment is retained for cleanup identity compatibility. New providers
-	// reject non-empty values because the worker has unrestricted bridge egress.
-	Environment map[string]string
-	HTTPClient  *http.Client
+	HTTPClient               *http.Client
 	// GitHubTokens is nil only for hermetic no-GitHub tests/setup. Production
 	// supplies a repository-scoped App source and its exact configured identity.
 	GitHubTokens             githubapp.InstallationTokenSource
@@ -220,8 +222,10 @@ type evidence struct {
 	Limit     int64  `json:"observed_limit_bytes,omitempty"`
 }
 
-// EnvironmentSHA256 identifies the exact explicitly configured disposable
-// environment without persisting its values in the task store.
+// EnvironmentSHA256 identifies the disposable container environment without
+// persisting its values in the task store. Environment injection is
+// unsupported (the worker has unrestricted bridge egress), so every current
+// run records EnvironmentSHA256(nil).
 func EnvironmentSHA256(environment map[string]string) [sha256.Size]byte {
 	if environment == nil {
 		environment = map[string]string{}
@@ -303,7 +307,7 @@ func New(ctx context.Context, config Config, api dockerAPI) (*Provider, error) {
 		httpClient.Timeout = 2 * time.Second
 	}
 	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Provider{config: cloneConfig(config), docker: api, ownedCLI: owned, root: root, rootDevice: rootDevice, rootInode: rootInode, hostKey: hostKey, imageEnv: imageEnv, imageLabels: cloneMap(inspection.Config.Labels), http: httpClient, lifecycle: &providerLifecycle{}}, nil
+	return &Provider{config: config, docker: api, ownedCLI: owned, root: root, rootDevice: rootDevice, rootInode: rootInode, hostKey: hostKey, imageEnv: imageEnv, imageLabels: cloneMap(inspection.Config.Labels), http: httpClient, lifecycle: &providerLifecycle{}}, nil
 }
 
 func (p *Provider) Close() error {
@@ -452,20 +456,12 @@ func (transport *routeTransport) attest(ctx context.Context) error {
 	return nil
 }
 
-func cloneConfig(config Config) Config {
-	config.Environment = cloneMap(config.Environment)
-	return config
-}
-
 func validateConfig(c Config) error {
 	if c.GitHubTokens != nil {
 		identity, err := githubapp.NewRepositoryIdentity(c.GitHubRepository.InstallationID(), c.GitHubRepository.RepositoryID())
 		if err != nil || identity != c.GitHubRepository || gitref.ValidateOwnerRepo(c.GitHubRepositoryFullName) != nil {
 			return errors.New("exact GitHub App repository identity is required")
 		}
-	}
-	if len(c.Environment) != 0 {
-		return errors.New("background run environment injection is unsupported without brokered egress")
 	}
 	for name, value := range map[string]string{"state root": c.StateRoot, "repository": c.Repository, "Git executable": c.GitExecutable} {
 		if value == "" || !filepath.IsAbs(value) || filepath.Clean(value) != value {
@@ -478,8 +474,8 @@ func validateConfig(c Config) error {
 	if c.ImageReference == "" || strings.TrimSpace(c.ImageReference) != c.ImageReference || len(c.ImageReference) > 512 {
 		return errors.New("qualified background image reference is required")
 	}
-	if c.MemoryBytes < 64<<20 || c.MemoryBytes > 1<<40 || c.NanoCPUs != 2_000_000_000 || c.PIDs != 512 || c.WallTimeout <= 0 || c.WallTimeout > 7*24*time.Hour || c.GitTimeout <= 0 || c.GitTimeout > 10*time.Minute || c.DockerTimeout <= 0 || c.DockerTimeout > 10*time.Minute || c.HealthTimeout <= 0 || c.HealthTimeout > 10*time.Minute || c.GitOutputBytes < 1024 || c.GitOutputBytes > 16<<20 || c.SourceSizeAdmissionBytes <= 0 || c.SourceSizeAdmissionBytes > 1<<40 || c.CloneObservedLimitBytes < c.SourceSizeAdmissionBytes || c.CloneObservedLimitBytes > 1<<40 || c.DiskFreeAdmissionBytes < c.CloneObservedLimitBytes || c.DiskFreeAdmissionBytes > 1<<40 || c.LogMaxSize == "" || c.LogMaxFiles < 1 || c.LogMaxFiles > 100 || c.StopGrace < 0 || c.StopGrace > time.Minute {
-		return errors.New("valid bounded memory, 2 CPU, 512 PID, wall, output, disk, log, and stop limits are required")
+	if c.MemoryBytes < 64<<20 || c.MemoryBytes > 1<<40 || c.WallTimeout <= 0 || c.WallTimeout > 7*24*time.Hour || c.GitTimeout <= 0 || c.GitTimeout > 10*time.Minute || c.DockerTimeout <= 0 || c.DockerTimeout > 10*time.Minute || c.HealthTimeout <= 0 || c.HealthTimeout > 10*time.Minute || c.GitOutputBytes < 1024 || c.GitOutputBytes > 16<<20 || c.SourceSizeAdmissionBytes <= 0 || c.SourceSizeAdmissionBytes > 1<<40 || c.CloneObservedLimitBytes < c.SourceSizeAdmissionBytes || c.CloneObservedLimitBytes > 1<<40 || c.DiskFreeAdmissionBytes < c.CloneObservedLimitBytes || c.DiskFreeAdmissionBytes > 1<<40 || c.LogMaxSize == "" || c.LogMaxFiles < 1 || c.LogMaxFiles > 100 || c.StopGrace < 0 || c.StopGrace > time.Minute {
+		return errors.New("valid bounded memory, wall, output, disk, log, and stop limits are required")
 	}
 	if c.GitTimeout > c.WallTimeout || c.DockerTimeout > c.WallTimeout || c.HealthTimeout > c.WallTimeout {
 		return errors.New("operation timeout exceeds run wall limit")
@@ -538,7 +534,7 @@ func (p *Provider) validateRun(run taskstore.BackgroundRun) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if run.ResourceSpecVersion != runidentity.ResourceSpecVersion || run.ImageIdentity != p.config.ImageID || run.EnvironmentSHA256 != EnvironmentSHA256(p.config.Environment) {
+	if run.ResourceSpecVersion != runidentity.ResourceSpecVersion || run.ImageIdentity != p.config.ImageID || run.EnvironmentSHA256 != EnvironmentSHA256(nil) {
 		return "", errors.New("background run execution configuration differs from immutable intent")
 	}
 	return digest, nil

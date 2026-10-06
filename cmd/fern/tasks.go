@@ -171,7 +171,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, route *backgroundro
 		GitHubTokens: authority.installationTokens, GitHubRepository: githubIdentity,
 		GitHubRepositoryFullName: durableWorkspace.RepositoryFullName,
 		ImageReference:           cfg.Tasks.BackgroundImage, ImageID: cfg.Tasks.BackgroundImageID, MemoryBytes: 1 << 30,
-		NanoCPUs: 2_000_000_000, PIDs: 512, WallTimeout: 24 * time.Hour, GitTimeout: backgroundCloneTimeout,
+		WallTimeout: 24 * time.Hour, GitTimeout: backgroundCloneTimeout,
 		DockerTimeout: 30 * time.Second, HealthTimeout: 30 * time.Second, GitOutputBytes: 1 << 20,
 		SourceSizeAdmissionBytes: backgroundCloneAdmissionBytes, CloneObservedLimitBytes: backgroundCloneAdmissionBytes, DiskFreeAdmissionBytes: 20 << 30,
 		LogMaxSize: "10m", LogMaxFiles: 3, StopGrace: 10 * time.Second,

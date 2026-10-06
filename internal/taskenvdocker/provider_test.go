@@ -685,19 +685,14 @@ func TestConstructorRejectsUnboundedOrUnsafePolicy(t *testing.T) {
 	}{
 		{"image reference", func(c *Config) { c.ImageReference = "" }},
 		{"memory", func(c *Config) { c.MemoryBytes = 1 }},
-		{"CPU", func(c *Config) { c.NanoCPUs = 1 }},
-		{"PIDs", func(c *Config) { c.PIDs = 0 }},
 		{"wall", func(c *Config) { c.WallTimeout = 8 * 24 * time.Hour }},
 		{"disk", func(c *Config) { c.DiskFreeAdmissionBytes = c.CloneObservedLimitBytes - 1 }},
 		{"observed", func(c *Config) { c.CloneObservedLimitBytes = c.SourceSizeAdmissionBytes - 1 }},
 		{"logs", func(c *Config) { c.LogMaxSize = "2t" }},
-		{"environment", func(c *Config) { c.Environment["MODEL_KEY"] = "forbidden" }},
-		{"reserved environment", func(c *Config) { c.Environment[passwordEnv] = "forbidden" }},
-		{"legacy OpenCode password", func(c *Config) { c.Environment["OPENCODE_PASSWORD"] = "forbidden" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			config := cloneConfig(provider.config)
+			config := provider.config
 			test.mutate(&config)
 			if candidate, err := New(context.Background(), config, docker); err == nil {
 				candidate.Close()
@@ -1125,7 +1120,7 @@ func TestExportAuthorityErrorsAndEvidenceDoNotLeakSecretsOrPaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	secret := provider.password(run)
-	for _, forbidden := range []string{provider.root, provider.config.Repository, secret, provider.config.Environment["FERN_MODEL"]} {
+	for _, forbidden := range []string{provider.root, provider.config.Repository, secret} {
 		if forbidden != "" && strings.Contains(observation.Evidence, forbidden) {
 			t.Fatalf("writer evidence leaked %q: %s", forbidden, observation.Evidence)
 		}
@@ -1135,7 +1130,7 @@ func TestExportAuthorityErrorsAndEvidenceDoNotLeakSecretsOrPaths(t *testing.T) {
 	if err == nil {
 		t.Fatal("raw Docker error was accepted")
 	}
-	for _, forbidden := range []string{provider.root, provider.config.Repository, secret, provider.config.Environment["FERN_MODEL"], "raw Docker diagnostics"} {
+	for _, forbidden := range []string{provider.root, provider.config.Repository, secret, "raw Docker diagnostics"} {
 		if forbidden != "" && strings.Contains(err.Error(), forbidden) {
 			t.Fatalf("export error leaked %q: %v", forbidden, err)
 		}
@@ -1357,9 +1352,7 @@ func TestCleanupSurvivesImageAndEnvironmentConfigurationRotation(t *testing.T) {
 	run.RuntimeEpoch = started.RuntimeEpoch
 
 	recovery := *provider
-	recovery.config = cloneConfig(provider.config)
 	recovery.config.ImageID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
-	recovery.config.Environment["FERN_MODEL"] = "rotated-model"
 	recovery.imageLabels = cloneMap(provider.imageLabels)
 	recovery.imageLabels["org.opencontainers.image.created"] = "2026-09-01T00:00:00Z"
 	if _, err := recovery.EnsureClone(context.Background(), run); err == nil {
@@ -1470,11 +1463,10 @@ func testProvider(t *testing.T) (*Provider, *fakeDocker, taskstore.BackgroundRun
 		},
 		StateRoot: state, Repository: repository, GitExecutable: gitPath,
 		ImageReference: "fern/opencode-background-source:dev", ImageID: testImageID,
-		MemoryBytes: 512 << 20, NanoCPUs: 2_000_000_000, PIDs: 512, WallTimeout: time.Minute,
+		MemoryBytes: 512 << 20, WallTimeout: time.Minute,
 		GitTimeout: 30 * time.Second, DockerTimeout: 10 * time.Second, HealthTimeout: 3 * time.Second,
 		GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 64 << 20, CloneObservedLimitBytes: 64 << 20,
 		DiskFreeAdmissionBytes: 64 << 20, LogMaxSize: "1m", LogMaxFiles: 3, StopGrace: time.Second,
-		Environment: map[string]string{},
 	}
 	provider, err := New(context.Background(), config, docker)
 	if err != nil {
@@ -1482,7 +1474,7 @@ func testProvider(t *testing.T) (*Provider, *fakeDocker, taskstore.BackgroundRun
 	}
 	t.Cleanup(func() { _ = provider.Close() })
 	compact := "0198d34d6a5075fbb1f2000000000201"
-	run := taskstore.BackgroundRun{WorkspaceID: task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001"), TaskID: task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-000000000201"), AttemptID: task.AttemptID("att_0198d34d-6a50-75fb-b1f2-000000000301"), Generation: 1, RepositoryRemote: "https://github.com/fern-test/repository", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: EnvironmentSHA256(config.Environment), ResourceSpecVersion: 10, ImageIdentity: testImageID, CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode", ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint", OpenCodeSessionID: "ses_test", OpenCodeMessageID: "msg_test"}
+	run := taskstore.BackgroundRun{WorkspaceID: task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001"), TaskID: task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-000000000201"), AttemptID: task.AttemptID("att_0198d34d-6a50-75fb-b1f2-000000000301"), Generation: 1, RepositoryRemote: "https://github.com/fern-test/repository", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: EnvironmentSHA256(nil), ResourceSpecVersion: 10, ImageIdentity: testImageID, CloneIdentity: "run-" + compact + "-g1-clone", VolumeIdentity: "fern-run-" + compact + "-g1-opencode", ContainerIdentity: "fern-run-" + compact + "-g1", EndpointIdentity: "run-" + compact + "-g1-endpoint", OpenCodeSessionID: "ses_test", OpenCodeMessageID: "msg_test"}
 	return provider, docker, run
 }
 

@@ -158,7 +158,7 @@ func newScanFixture(t *testing.T) *scanFixture {
 	command("config", "user.email", "test@example.invalid")
 	command("remote", "add", "origin", "https://github.com/owner/repository")
 	command("-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "fixture")
-	provider, err := taskenvdocker.New(context.Background(), taskenvdocker.Config{StateRoot: f.root, Repository: repo, GitExecutable: git, ImageReference: "fern/test:dev", ImageID: scanImage, MemoryBytes: 512 << 20, NanoCPUs: 2_000_000_000, PIDs: 512, WallTimeout: time.Hour, GitTimeout: 30 * time.Second, DockerTimeout: 10 * time.Second, HealthTimeout: 3 * time.Second, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 64 << 20, CloneObservedLimitBytes: 64 << 20, DiskFreeAdmissionBytes: 64 << 20, LogMaxSize: "1m", LogMaxFiles: 3, StopGrace: time.Second}, f.d)
+	provider, err := taskenvdocker.New(context.Background(), taskenvdocker.Config{StateRoot: f.root, Repository: repo, GitExecutable: git, ImageReference: "fern/test:dev", ImageID: scanImage, MemoryBytes: 512 << 20, WallTimeout: time.Hour, GitTimeout: 30 * time.Second, DockerTimeout: 10 * time.Second, HealthTimeout: 3 * time.Second, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 64 << 20, CloneObservedLimitBytes: 64 << 20, DiskFreeAdmissionBytes: 64 << 20, LogMaxSize: "1m", LogMaxFiles: 3, StopGrace: time.Second}, f.d)
 	if err != nil {
 		t.Fatal(err)
 	}
