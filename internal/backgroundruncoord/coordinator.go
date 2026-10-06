@@ -200,11 +200,11 @@ func (c *Coordinator) process(operation, parent context.Context, work taskstore.
 	}
 	switch run.EffectPhase {
 	case taskstore.BackgroundRunEffectSealIntent:
-		observation, providerFence, err := c.provider.ProveWriterInactive(operation, run)
+		_, providerFence, err := c.provider.ProveWriterInactive(operation, run)
 		if err != nil {
 			return c.retainedFailure(parent, work, fmt.Errorf("prove retained writer inactivity: %w", err))
 		}
-		if err := c.recordWriterFence(parent, work, observation, providerFence); err != nil {
+		if err := c.recordWriterFence(parent, work, providerFence); err != nil {
 			return fmt.Errorf("record retained writer fence: %w", err)
 		}
 		return nil
@@ -390,7 +390,9 @@ func (c *Coordinator) process(operation, parent context.Context, work taskstore.
 	}
 }
 
-func (c *Coordinator) recordWriterFence(ctx context.Context, work taskstore.BackgroundRunWork, observation taskenvdocker.Observation, provider taskenvdocker.WriterFence) error {
+// recordWriterFence persists the structured provider fence; provider prose
+// (the observation evidence) is not durable authority and is not recorded.
+func (c *Coordinator) recordWriterFence(ctx context.Context, work taskstore.BackgroundRunWork, provider taskenvdocker.WriterFence) error {
 	run := work.Run
 	now, err := c.freshNow()
 	if err != nil {
@@ -420,11 +422,7 @@ func (c *Coordinator) recordWriterFence(ctx context.Context, work taskstore.Back
 	}
 	defer cancel()
 	_, err = c.store.RecordBackgroundRunWriterFence(mutation, params)
-	if err != nil {
-		return err
-	}
-	_ = observation // Structured fence, not provider prose, is durable authority.
-	return nil
+	return err
 }
 
 func (c *Coordinator) exportRetained(operation, parent context.Context, work taskstore.BackgroundRunWork) (resultErr error) {
