@@ -169,7 +169,7 @@ for arch in amd64 arm64; do
 		go build -trimpath -buildvcs=false -ldflags "$ldflags" -o "$payload/$name" ./cmd/fern
 done
 
-mkdir -p "$payload/deploy/systemd" "$payload/deploy/release" "$payload/scripts"
+mkdir -p "$payload/deploy/systemd" "$payload/deploy/release"
 cp deploy/systemd/fern.service deploy/systemd/fern.env.example deploy/systemd/fern.yaml.example \
 	"$payload/deploy/systemd/"
 cp deploy/release/release-manifest.schema.json \
@@ -177,11 +177,7 @@ cp deploy/release/release-manifest.schema.json \
 	deploy/release/compatibility-manifest.json \
 	deploy/release/compatibility-manifest.schema.json \
 	deploy/release/production-rehearsal-evidence.schema.json \
-	deploy/release/transaction-manifest.schema.json \
-	deploy/release/transaction-manifest.example.json \
 	"$payload/deploy/release/"
-cp scripts/fern-host-backup.py "$payload/scripts/"
-chmod 0755 "$payload/scripts/fern-host-backup.py"
 
 checksum() {
 	shasum -a 256 "$payload/$1" | awk '{print $1}'
@@ -196,9 +192,6 @@ backup_schema_sha=$(checksum deploy/release/backup-manifest.schema.json)
 compatibility_manifest_sha=$(checksum deploy/release/compatibility-manifest.json)
 compatibility_schema_sha=$(checksum deploy/release/compatibility-manifest.schema.json)
 rehearsal_schema_sha=$(checksum deploy/release/production-rehearsal-evidence.schema.json)
-transaction_schema_sha=$(checksum deploy/release/transaction-manifest.schema.json)
-transaction_example_sha=$(checksum deploy/release/transaction-manifest.example.json)
-backup_utility_sha=$(checksum scripts/fern-host-backup.py)
 go_version=$(go env GOVERSION)
 bundle_asset="fern-${version}-bundle.tar.gz"
 bundle_root="fern-${version}"
@@ -267,22 +260,17 @@ cat >"$payload/RELEASE-MANIFEST.json" <<EOF
     {"path": "deploy/release/backup-manifest.schema.json", "sha256": "$backup_schema_sha"},
     {"path": "deploy/release/compatibility-manifest.json", "sha256": "$compatibility_manifest_sha"},
     {"path": "deploy/release/compatibility-manifest.schema.json", "sha256": "$compatibility_schema_sha"},
-    {"path": "deploy/release/production-rehearsal-evidence.schema.json", "sha256": "$rehearsal_schema_sha"},
-    {"path": "deploy/release/transaction-manifest.example.json", "sha256": "$transaction_example_sha"},
-    {"path": "deploy/release/transaction-manifest.schema.json", "sha256": "$transaction_schema_sha"},
-    {"path": "scripts/fern-host-backup.py", "sha256": "$backup_utility_sha"}
+    {"path": "deploy/release/production-rehearsal-evidence.schema.json", "sha256": "$rehearsal_schema_sha"}
   ],
   "upgrade_rollback": {
-    "transaction_manifest_schema": "deploy/release/transaction-manifest.schema.json",
-    "transaction_example": "deploy/release/transaction-manifest.example.json",
-    "transaction_receipt": "generated-at-restore-target/TRANSACTION-MANIFEST.json",
     "compatibility_manifest": "deploy/release/compatibility-manifest.json",
     "first_supported_baseline": null,
     "upgrade_harness": "integration/upgrade/run.sh",
-    "host_utility": "scripts/fern-host-backup.py",
+    "backup_command": "fern backup",
+    "backup_manifest_schema": "deploy/release/backup-manifest.schema.json",
     "support_status": "pre-release-schema-reset",
-    "activation_model": "staged-filesystem-rollback",
-    "credential_policy": "external-recipient-with-checksums",
+    "activation_model": "state-directory-swap-with-previous",
+    "credential_policy": "age-encrypted-archive",
     "volume_export_mode": "no-runtime-volumes"
   }
 }

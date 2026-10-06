@@ -15,8 +15,7 @@ mkdir -p "$EVIDENCE"
 
 FIXTURE="$TEMP/repository"
 mkdir -p "$FIXTURE/scripts" "$FIXTURE/cmd/fern" "$FIXTURE/deploy/systemd" "$FIXTURE/deploy/release"
-cp "$ROOT/scripts/build-release.sh" "$ROOT/scripts/create-release-bundle.py" \
-  "$ROOT/scripts/fern-host-backup.py" "$FIXTURE/scripts/"
+cp "$ROOT/scripts/build-release.sh" "$ROOT/scripts/create-release-bundle.py" "$FIXTURE/scripts/"
 cp "$ROOT/deploy/systemd/"* "$FIXTURE/deploy/systemd/"
 cp "$ROOT/deploy/release/"* "$FIXTURE/deploy/release/"
 cat >"$FIXTURE/go.mod" <<'EOF'
@@ -80,16 +79,14 @@ assert manifest["image"] == {
     "provenance": {"status": "not-generated-local", "subject": None, "predicate_type": None, "attestation_url": None},
 }
 assert manifest["upgrade_rollback"] == {
-    "transaction_manifest_schema": "deploy/release/transaction-manifest.schema.json",
-    "transaction_example": "deploy/release/transaction-manifest.example.json",
-    "transaction_receipt": "generated-at-restore-target/TRANSACTION-MANIFEST.json",
     "compatibility_manifest": "deploy/release/compatibility-manifest.json",
     "first_supported_baseline": None,
     "upgrade_harness": "integration/upgrade/run.sh",
-    "host_utility": "scripts/fern-host-backup.py",
+    "backup_command": "fern backup",
+    "backup_manifest_schema": "deploy/release/backup-manifest.schema.json",
     "support_status": "pre-release-schema-reset",
-    "activation_model": "staged-filesystem-rollback",
-    "credential_policy": "external-recipient-with-checksums",
+    "activation_model": "state-directory-swap-with-previous",
+    "credential_policy": "age-encrypted-archive",
     "volume_export_mode": "no-runtime-volumes",
 }
 bundle = root / "dist" / manifest["distribution"]["bundle_asset"]
@@ -120,11 +117,8 @@ assert compatibility["current_release_schemas"]["control_state"] == 2
 current_schema = compatibility_schema["properties"]["current_release_schemas"]
 assert current_schema["additionalProperties"] is False
 assert current_schema["properties"]["task_store"]["const"] == compatibility["current_release_schemas"]["task_store"]
-transaction = json.loads((root / "deploy/release/transaction-manifest.example.json").read_text())
-assert transaction["backup"]["format"] == "fern-host-backup-v1"
-assert transaction["activation"]["model"] == "staged-current-previous"
-assert transaction["rollback"]["available"] is True
-assert "PLACEHOLDER" not in json.dumps(transaction)
+backup_schema = json.loads((root / "deploy/release/backup-manifest.schema.json").read_text())
+assert backup_schema["properties"]["format"]["const"] == "fern-backup-v2"
 PY
 
 (
@@ -196,206 +190,109 @@ if (cd "$FIXTURE" && ./scripts/build-release.sh latest) >"$TEMP/version-check.tx
 fi
 grep -q 'semantic version' "$TEMP/version-check.txt"
 
-BACKUP="$ROOT/scripts/fern-host-backup.py"
+FERN="$TEMP/fern"
+(cd "$ROOT" && go build -o "$FERN" ./cmd/fern)
+RECIPIENT=$(cd "$ROOT" && go run ./integration/release/agekey "$TEMP/identity.txt")
+(cd "$ROOT" && go run ./integration/release/agekey "$TEMP/other-identity.txt") >/dev/null
+
 HOST="$TEMP/host"
-LOCK="$HOST/lock"
 SOURCE="$HOST/source"
-mkdir -p "$SOURCE/state/.fern/control" "$SOURCE/state/.config/gh" \
-  "$SOURCE/state/.fern/github-app" "$SOURCE/config" "$SOURCE/repository/.git"
-printf 'state-a\n' >"$SOURCE/state/.fern/control/state.db"
-printf 'oauth_token: secret-gh-token\n' >"$SOURCE/state/.config/gh/hosts.yml"
-printf '{"client_secret":"secret-app","private_key":"secret-private-key"}\n' >"$SOURCE/state/.fern/github-app/app-credentials.json"
-printf 'proxy: safe\n' >"$SOURCE/config/fern.yaml"
-printf 'OPENCODE_PASSWORD=secret\n' >"$SOURCE/config/fern.env"
-printf 'repository-a\n' >"$SOURCE/repository/work.txt"
-printf 'git-config\n' >"$SOURCE/repository/.git/config"
-
-python3 "$BACKUP" init-epoch --lock-dir "$LOCK" --epoch appliance-A
-python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
-  --generation generation-a --output "$HOST/backup-a" \
-  --state "$SOURCE/state" --config "$SOURCE/config" --repository "$SOURCE/repository" \
-  --credential-policy external \
-  --credential-output "$HOST/credentials-a.tar"
-python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
-  --generation generation-a --output "$HOST/backup-a-copy" \
-  --state "$SOURCE/state" --config "$SOURCE/config" --repository "$SOURCE/repository" \
-  --credential-policy external \
-  --credential-output "$HOST/credentials-a-copy.tar"
-diff -r "$HOST/backup-a" "$HOST/backup-a-copy" >"$TEMP/backup-reproducibility.diff"
-cmp "$HOST/credentials-a.tar" "$HOST/credentials-a-copy.tar"
-
-python3 - "$HOST/backup-a/BACKUP-MANIFEST.json" <<'PY'
-import json, pathlib, sys
-manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert manifest["named_volumes"] == []
-assert manifest["credentials"]["workspace_gh"] == "included-in-external-recipient"
-assert manifest["credentials"]["detected_entries"] == 4
-assert manifest["credentials"]["general_archive_contains_detected_plaintext_credentials"] is False
-assert manifest["credentials"]["external"]["sha256"]
-for component in manifest["components"]:
-    assert component["entries"]
-    assert all(entry["sha256"] for entry in component["entries"])
+STATE="$SOURCE/home/.fern"
+mkdir -p "$SOURCE/etc" "$HOST/repository" "$STATE/control" "$STATE/github-app" \
+  "$STATE/tasks/demo-background/artifact-cas/sha256:abc" "$STATE/tasks/demo-background/artifact-work" \
+  "$STATE/tasks/demo-background/runtime/background-runs/clone" "$STATE/locks"
+sed -e "s|/srv/fern/repository|$HOST/repository|" \
+  -e "s|sha256:REPLACE_WITH_QUALIFIED_LOCAL_IMAGE_ID|sha256:$(printf 'b%.0s' {1..64})|" \
+  "$ROOT/fern.example.yaml" >"$SOURCE/etc/fern.yaml"
+printf 'FERN_CONTROL_PASSWORD=secret-control-password-0123456789\n' >"$SOURCE/etc/fern.env"
+chmod 0600 "$SOURCE/etc/fern.yaml" "$SOURCE/etc/fern.env"
+printf 'devices-a\n' >"$STATE/control/devices.json"
+printf '{"client_secret":"secret-app","private_key":"secret-private-key"}\n' >"$STATE/github-app/app-credentials.json"
+printf 'artifact-a\n' >"$STATE/tasks/demo-background/artifact-cas/sha256:abc/manifest.json"
+printf 'scratch\n' >"$STATE/tasks/demo-background/artifact-work/scratch"
+printf 'secret-host-key-0123456789abcdef' >"$STATE/tasks/demo-background/runtime/background-runs/host.key"
+printf 'clone\n' >"$STATE/tasks/demo-background/runtime/background-runs/clone/file"
+python3 - "$STATE/tasks/demo.db" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute("PRAGMA journal_mode=WAL")
+db.execute("CREATE TABLE runs (id TEXT)")
+db.execute("INSERT INTO runs VALUES ('run-a')")
+db.commit()
 PY
-! grep -R -a -q 'secret-gh-token\|secret-app\|secret-private-key\|OPENCODE_PASSWORD' "$HOST/backup-a"
-grep -a -q 'secret-app' "$HOST/credentials-a.tar"
 
-mkdir -p "$HOST/hardlink-source/state" "$HOST/hardlink-source/config" "$HOST/hardlink-source/repository"
-printf 'linked-secret\n' >"$HOST/hardlink-source/state/credentials.json"
-ln "$HOST/hardlink-source/state/credentials.json" "$HOST/hardlink-source/repository/ordinary.txt"
-if python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
-  --generation hardlink --output "$HOST/hardlink-backup" \
-  --state "$HOST/hardlink-source/state" --config "$HOST/hardlink-source/config" \
-  --repository "$HOST/hardlink-source/repository" --credential-policy exclude \
-  >"$TEMP/hardlink-rejection.txt" 2>&1; then
-  printf 'error: backup accepted a hard-linked credential alias\n' >&2
-  exit 1
-fi
-grep -q 'hard-linked file rejected' "$TEMP/hardlink-rejection.txt"
-
-cp -R "$HOST/backup-a" "$HOST/tampered"
-printf 'corruption\n' >>"$HOST/tampered/state.tar"
-if python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
-  --backup "$HOST/tampered" --target "$HOST/tampered-target" \
-  --credential-input "$HOST/credentials-a.tar" >"$TEMP/backup-tamper.txt" 2>&1; then
-  printf 'error: restore accepted a checksum-tampered backup\n' >&2
-  exit 1
-fi
-grep -q 'checksum mismatch' "$TEMP/backup-tamper.txt"
-
-make_malicious_backup() {
-  local kind=$1 destination=$2
-  cp -R "$HOST/backup-a" "$destination"
-  python3 - "$destination" "$kind" <<'PY'
-import hashlib, io, json, pathlib, tarfile, sys
-root = pathlib.Path(sys.argv[1])
-kind = sys.argv[2]
-manifest_path = root / "BACKUP-MANIFEST.json"
-manifest = json.loads(manifest_path.read_text())
-component = next(item for item in manifest["components"] if item["name"] == "repository")
-entry = component["entries"][0]
-with tarfile.open(root / component["archive"], "w") as archive:
-    info = tarfile.TarInfo("../escaped" if kind == "escape" else entry["path"])
-    if kind == "symlink":
-        info.type = tarfile.SYMTYPE
-        info.linkname = "/etc/passwd"
-        archive.addfile(info)
-    else:
-        data = b"escape"
-        info.size = len(data)
-        archive.addfile(info, io.BytesIO(data))
-sha = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
-component["sha256"] = sha(root / component["archive"])
-manifest_path.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
-names = sorted(path.name for path in root.iterdir() if path.is_file() and path.name != "SHA256SUMS")
-(root / "SHA256SUMS").write_text("".join(f"{sha(root / name)}  {name}\n" for name in names))
+fern_at() {
+  local root=$1
+  shift
+  local command=$1 subcommand=$2
+  shift 2
+  HOME="$root/home" "$FERN" "$command" "$subcommand" --config "$root/etc/fern.yaml" \
+    --env-file "$root/etc/fern.env" --state-dir "$root/home/.fern" "$@"
+}
+run_sql() {
+  python3 - "$1" <<'PY'
+import sqlite3, sys
+print(sqlite3.connect(sys.argv[1]).execute("SELECT id FROM runs").fetchone()[0])
 PY
 }
 
-make_malicious_backup symlink "$HOST/symlink-backup"
-if python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
-  --backup "$HOST/symlink-backup" --target "$HOST/symlink-target" \
-  --credential-input "$HOST/credentials-a.tar" >"$TEMP/symlink-rejection.txt" 2>&1; then
-  printf 'error: restore accepted a symlink archive entry\n' >&2
+fern_at "$SOURCE" backup create --recipient "$RECIPIENT" --output "$HOST/backup-a"
+test "$(stat -c %a "$HOST/backup-a" 2>/dev/null || stat -f %Lp "$HOST/backup-a")" = 600
+! grep -a -q 'secret-app\|secret-private-key\|secret-control-password\|secret-host-key\|devices-a' "$HOST/backup-a"
+if fern_at "$SOURCE" backup create --recipient "$RECIPIENT" --output "$HOST/backup-a" >"$TEMP/overwrite-rejection.txt" 2>&1; then
+  printf 'error: backup replaced an existing output\n' >&2
   exit 1
 fi
-grep -q 'link or special archive entry rejected' "$TEMP/symlink-rejection.txt"
+grep -q 'already exists' "$TEMP/overwrite-rejection.txt"
 
-make_malicious_backup escape "$HOST/escape-backup"
-if python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
-  --backup "$HOST/escape-backup" --target "$HOST/escape-target" \
-  --credential-input "$HOST/credentials-a.tar" >"$TEMP/escape-rejection.txt" 2>&1; then
-  printf 'error: restore accepted a path-escape archive entry\n' >&2
+reject_restore() {
+  local input=$1 identity=$2 evidence=$3 expected=$4
+  local target="$HOST/rejected-$evidence"
+  mkdir -p "$target/etc"
+  if fern_at "$target" backup restore --identity "$identity" --input "$input" >"$TEMP/$evidence.txt" 2>&1; then
+    printf 'error: restore accepted %s\n' "$evidence" >&2
+    exit 1
+  fi
+  grep -q "$expected" "$TEMP/$evidence.txt"
+  test ! -e "$target/home/.fern" && test ! -e "$target/etc/fern.yaml"
+}
+cp "$HOST/backup-a" "$HOST/tampered"
+printf 'X' | dd of="$HOST/tampered" bs=1 seek=400 conv=notrunc 2>/dev/null
+reject_restore "$HOST/tampered" "$TEMP/identity.txt" backup-tamper-rejection 'backup'
+head -c "$(($(wc -c <"$HOST/backup-a") - 32))" "$HOST/backup-a" >"$HOST/truncated"
+reject_restore "$HOST/truncated" "$TEMP/identity.txt" truncation-rejection 'read backup'
+reject_restore "$HOST/backup-a" "$TEMP/other-identity.txt" wrong-identity-rejection 'decrypt backup'
+
+TARGET="$HOST/target"
+mkdir -p "$TARGET/etc"
+fern_at "$TARGET" backup restore --identity "$TEMP/identity.txt" --input "$HOST/backup-a"
+TARGET_STATE="$TARGET/home/.fern"
+grep -qx 'devices-a' "$TARGET_STATE/control/devices.json"
+grep -q 'secret-private-key' "$TARGET_STATE/github-app/app-credentials.json"
+grep -qx 'artifact-a' "$TARGET_STATE/tasks/demo-background/artifact-cas/sha256:abc/manifest.json"
+cmp "$STATE/tasks/demo-background/runtime/background-runs/host.key" \
+  "$TARGET_STATE/tasks/demo-background/runtime/background-runs/host.key"
+cmp "$SOURCE/etc/fern.yaml" "$TARGET/etc/fern.yaml"
+cmp "$SOURCE/etc/fern.env" "$TARGET/etc/fern.env"
+test "$(run_sql "$TARGET_STATE/tasks/demo.db")" = run-a
+test ! -e "$TARGET_STATE/tasks/demo-background/artifact-work"
+test ! -e "$TARGET_STATE/tasks/demo-background/runtime/background-runs/clone"
+test ! -e "$TARGET_STATE.previous"
+
+printf 'devices-b\n' >"$STATE/control/devices.json"
+if fern_at "$SOURCE" backup restore --identity "$TEMP/identity.txt" --input "$HOST/backup-a" >"$TEMP/live-state-rejection.txt" 2>&1; then
+  printf 'error: restore replaced live state without --replace\n' >&2
   exit 1
 fi
-grep -q 'unsafe or duplicate archive path' "$TEMP/escape-rejection.txt"
-test ! -e "$HOST/escaped"
-
-rm -rf "$SOURCE"
-python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
-  --backup "$HOST/backup-a" --target "$HOST/restored" \
-  --credential-input "$HOST/credentials-a.tar"
-grep -qx 'repository-a' "$HOST/restored/current/repository/work.txt"
-grep -q 'secret-gh-token' "$HOST/restored/current/state/.config/gh/hosts.yml"
-grep -qx 'appliance-A' "$HOST/restored/current/.fern-appliance-epoch"
-python3 - "$HOST/restored/TRANSACTION-MANIFEST.json" <<'PY'
-import json, pathlib, sys
-manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert manifest["operation"] == "restore"
-assert manifest["phase"] == "activated"
-assert manifest["generation"] == manifest["activation"]["current_generation"] == "generation-a"
-assert manifest["rollback"] == {"available": False, "previous_generation": None}
-PY
-
-SOURCE_B="$HOST/source-b"
-mkdir "$SOURCE_B"
-cp -R "$HOST/restored/current/state" "$HOST/restored/current/config" \
-  "$HOST/restored/current/repository" "$SOURCE_B/"
-printf 'repository-b\n' >"$SOURCE_B/repository/work.txt"
-python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
-  --generation generation-b --output "$HOST/backup-b" \
-  --state "$SOURCE_B/state" --config "$SOURCE_B/config" \
-  --repository "$SOURCE_B/repository" \
-  --credential-policy external --credential-output "$HOST/credentials-b.tar"
-python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
-  --backup "$HOST/backup-b" --target "$HOST/restored" \
-  --credential-input "$HOST/credentials-b.tar"
-grep -qx 'repository-b' "$HOST/restored/current/repository/work.txt"
-python3 "$BACKUP" rollback --lock-dir "$LOCK" --epoch appliance-A --target "$HOST/restored"
-grep -qx 'repository-a' "$HOST/restored/current/repository/work.txt"
-grep -qx 'generation-a' "$HOST/restored/current/.fern-generation"
-grep -q '"phase": "rolled-back"' "$HOST/restored/TRANSACTION-MANIFEST.json"
-
-if python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-old \
-  --backup "$HOST/backup-a" --target "$HOST/old-epoch-target" \
-  --credential-input "$HOST/credentials-a.tar" >"$TEMP/epoch-rejection.txt" 2>&1; then
-  printf 'error: restore accepted an old appliance epoch\n' >&2
-  exit 1
-fi
-grep -q 'appliance epoch mismatch' "$TEMP/epoch-rejection.txt"
-
-mkdir "$LOCK/operator.lock"
-if python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
-  --generation locked --output "$HOST/locked-backup" \
-  --state "$HOST/restored/current/state" --config "$HOST/restored/current/config" \
-  --repository "$HOST/restored/current/repository" --credential-policy exclude \
-  >"$TEMP/lock-rejection.txt" 2>&1; then
-  printf 'error: backup ignored the exclusive operator lock\n' >&2
-  exit 1
-fi
-rmdir "$LOCK/operator.lock"
-grep -q 'operator lock is already held' "$TEMP/lock-rejection.txt"
-
-python3 "$BACKUP" backup --lock-dir "$LOCK" --epoch appliance-A \
-  --generation generation-excluded --output "$HOST/backup-excluded" \
-  --state "$HOST/restored/current/state" --config "$HOST/restored/current/config" \
-  --repository "$HOST/restored/current/repository" --credential-policy exclude
-python3 - "$HOST/backup-excluded/BACKUP-MANIFEST.json" <<'PY'
-import json, pathlib, sys
-manifest = json.loads(pathlib.Path(sys.argv[1]).read_text())
-assert manifest["credentials"]["policy"] == "exclude"
-assert manifest["credentials"]["workspace_gh"] == "excluded-reauthorize"
-assert manifest["credentials"]["external"] is None
-PY
-python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
-  --backup "$HOST/backup-excluded" --target "$HOST/excluded-restore"
-test ! -e "$HOST/excluded-restore/current/state/.config/gh/hosts.yml"
-test ! -e "$HOST/excluded-restore/current/config/fern.env"
-grep -qx 'repository-a' "$HOST/excluded-restore/current/repository/work.txt"
-
-NEW_LOCK="$HOST/replacement-lock"
-python3 "$BACKUP" init-epoch --lock-dir "$NEW_LOCK" --epoch appliance-B
-python3 "$BACKUP" restore --lock-dir "$NEW_LOCK" --epoch appliance-B \
-  --backup "$HOST/backup-a" --target "$HOST/replacement-restore" \
-  --credential-input "$HOST/credentials-a.tar"
-grep -qx 'appliance-B' "$HOST/replacement-restore/current/.fern-appliance-epoch"
-grep -qx 'appliance-A' "$HOST/replacement-restore/current/.fern-source-epoch"
-if python3 "$BACKUP" restore --lock-dir "$LOCK" --epoch appliance-A \
-  --backup "$HOST/backup-a" --target "$HOST/replacement-restore" \
-  --credential-input "$HOST/credentials-a.tar" >"$TEMP/target-epoch-rejection.txt" 2>&1; then
-  printf 'error: restore replaced a generation owned by another appliance epoch\n' >&2
-  exit 1
-fi
-grep -q 'generation is fenced by another appliance epoch' "$TEMP/target-epoch-rejection.txt"
+grep -q -- '--replace' "$TEMP/live-state-rejection.txt"
+fern_at "$SOURCE" backup restore --identity "$TEMP/identity.txt" --input "$HOST/backup-a" --replace
+grep -qx 'devices-a' "$STATE/control/devices.json"
+grep -qx 'devices-b' "$STATE.previous/control/devices.json"
+test -e "$SOURCE/etc/fern.yaml.previous"
+fern_at "$SOURCE" backup rollback
+grep -qx 'devices-b' "$STATE/control/devices.json"
+grep -qx 'devices-a' "$STATE.previous/control/devices.json"
+test "$(run_sql "$STATE/tasks/demo.db")" = run-a
 
 UNIT="$ROOT/deploy/systemd/fern.service"
 grep -qx 'User=fern' "$UNIT"
@@ -415,24 +312,19 @@ grep -Eq '^  remoteOrigin: https://[a-z0-9.-]+\.ts\.net(:[0-9]+)?$' "$ROOT/deplo
 ! grep -Eq '^  remoteOrigin: http://' "$ROOT/deploy/systemd/fern.yaml.example"
 
 cp "$TEMP/RELEASE-MANIFEST.json" "$EVIDENCE/release-manifest.json"
-cp "$ROOT/deploy/release/transaction-manifest.example.json" "$EVIDENCE/transaction-manifest.example.json"
 cp "$TEMP/checksum-verification.txt" "$EVIDENCE/checksum-verification.txt"
 cp "$TEMP/tamper-check.txt" "$EVIDENCE/tamper-rejection.txt"
-cp "$TEMP/backup-tamper.txt" "$EVIDENCE/backup-tamper-rejection.txt"
-cp "$TEMP/symlink-rejection.txt" "$EVIDENCE/symlink-rejection.txt"
-cp "$TEMP/escape-rejection.txt" "$EVIDENCE/path-escape-rejection.txt"
-cp "$TEMP/epoch-rejection.txt" "$EVIDENCE/epoch-rejection.txt"
-cp "$TEMP/target-epoch-rejection.txt" "$EVIDENCE/target-epoch-rejection.txt"
-cp "$TEMP/hardlink-rejection.txt" "$EVIDENCE/hardlink-rejection.txt"
+for name in backup-tamper-rejection truncation-rejection wrong-identity-rejection live-state-rejection overwrite-rejection; do
+  cp "$TEMP/$name.txt" "$EVIDENCE/$name.txt"
+done
 cat >"$EVIDENCE/static-assertions.txt" <<'EOF'
 PASS systemd runs as fern with explicit hardening and distinct remote/operator loopback listeners
 PASS systemd contains no Docker/Tailscale destructive lifecycle command
 PASS deployment assets contain no wildcard Fern listener
 PASS deployment configuration requires an exact HTTPS remote origin replacement
-PASS deterministic host backup segregates detected credentials and excludes runtime volumes
-PASS restore rejects checksum tampering, symlinks, path escapes, hardlinks, stale appliance epochs, and cross-epoch targets
-PASS destructive restore activation retains and rolls back to the previous generation
-PASS restore and rollback emit transaction manifests matching the active generation
+PASS fern backup create writes one age-encrypted archive with no plaintext secrets and never overwrites
+PASS fern backup restore rejects tampering, truncation, and the wrong identity without touching the target
+PASS fern backup restore requires --replace over live state, keeps it as .previous, and rollback swaps it back
 EOF
 cat >"$EVIDENCE/summary.json" <<EOF
 {
@@ -445,11 +337,9 @@ cat >"$EVIDENCE/summary.json" <<EOF
     "dirty_tree_rejection": "passed",
     "semantic_version_rejection": "passed",
     "static_systemd_tailscale_safety": "passed",
-    "deterministic_host_backup": "passed",
-    "credential_segregation_and_no_runtime_volumes": "passed",
-    "restore_tamper_and_path_safety": "passed",
-    "destructive_restore_and_rollback": "passed",
-    "operator_lock_and_epoch_fencing": "passed"
+    "encrypted_host_backup": "passed",
+    "restore_tamper_and_identity_rejection": "passed",
+    "restore_replace_and_rollback": "passed"
   },
   "not_run": {
     "artifact_signing": "not generated by the local builder; this bundle provides checksums, not authenticity",
@@ -458,7 +348,7 @@ cat >"$EVIDENCE/summary.json" <<EOF
     "tailscale_mutation": "intentionally excluded from this static harness",
     "docker_mutation": "intentionally excluded; runtime volumes are not part of the backup contract",
     "physical_host_atomicity": "rename activation is tested on one local filesystem; crash and filesystem behavior require target-host rehearsal",
-    "credential_encryption": "external recipient segregation is tested; encryption and custody are operator policy"
+    "key_custody": "age identity custody is operator policy"
   }
 }
 EOF
