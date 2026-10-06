@@ -87,6 +87,12 @@ func TestLoadIdentitiesReadsValidFiles(t *testing.T) {
 	if identities, err := LoadIdentities([]string{path}); err != nil || len(identities) != 1 {
 		t.Fatalf("identities = %d, error = %v", len(identities), err)
 	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadIdentities([]string{path}); !errors.Is(err, ErrUnsafeFile) {
+		t.Fatalf("group-readable identity error = %v, want ErrUnsafeFile", err)
+	}
 	if _, err := LoadIdentities([]string{path + "-missing"}); !errors.Is(err, ErrUnsafeFile) {
 		t.Fatalf("missing identity file error = %v", err)
 	}

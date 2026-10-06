@@ -146,10 +146,14 @@ func ParseRecipients(values []string) ([]age.Recipient, error) {
 	return result, nil
 }
 
-// LoadIdentities reads X25519 identities from regular files.
+// LoadIdentities reads X25519 identities from regular files that only their
+// owner can read, as age identities are private keys.
 func LoadIdentities(paths []string) ([]age.Identity, error) {
 	var result []age.Identity
 	for _, path := range paths {
+		if info, err := os.Stat(path); err != nil || info.Mode().Perm()&0o077 != 0 {
+			return nil, ErrUnsafeFile
+		}
 		payload, err := atomicfile.Read(path, maxIdentityBytes)
 		if err != nil {
 			return nil, ErrUnsafeFile
