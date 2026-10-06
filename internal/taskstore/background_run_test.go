@@ -27,7 +27,7 @@ func TestBackgroundRunAdmissionStopAndRestart(t *testing.T) {
 		admission.Attempt.OpenCodeProtocol != BackgroundRunSourceProfile || run.State != BackgroundRunQueued || run.EffectPhase != "absent" {
 		t.Fatalf("background run = %+v, error = %v", run, err)
 	}
-	resources, _ := runidentity.NewResources(run.TaskID, 1)
+	resources := runidentity.NewResources(run.TaskID)
 	if !resources.Matches(run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity) ||
 		run.InstructionSHA256 != sha256.Sum256([]byte(params.Prompt)) || run.ProfileSHA256 != sha256.Sum256([]byte(run.Profile)) {
 		t.Fatalf("admission did not derive run identities: %+v", run)

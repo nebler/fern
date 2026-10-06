@@ -34,16 +34,13 @@ const (
 
 // Identity is the complete immutable route-to-process binding.
 type Identity struct {
-	WorkspaceID      string
-	TaskID           string
-	AttemptID        string
-	Generation       int64
-	WriterGeneration int64
-	SessionID        string
-	RuntimeEpoch     int64
-	ContainerID      string
-	StartedAt        string
-	RuntimeToken     string
+	WorkspaceID  string
+	TaskID       string
+	SessionID    string
+	RuntimeEpoch int64
+	ContainerID  string
+	StartedAt    string
+	RuntimeToken string
 }
 
 // Target is constructed by the qualified Docker provider. Its authenticated
@@ -334,8 +331,7 @@ func identityFromRun(run taskstore.BackgroundRun) (Identity, bool) {
 	if err != nil || runtime.Epoch() != run.RuntimeEpoch {
 		return Identity{}, false
 	}
-	identity := Identity{WorkspaceID: string(run.WorkspaceID), TaskID: string(run.TaskID), AttemptID: string(run.AttemptID),
-		Generation: run.Generation, WriterGeneration: run.WriterGeneration, SessionID: string(run.OpenCodeSessionID),
+	identity := Identity{WorkspaceID: string(run.WorkspaceID), TaskID: string(run.TaskID), SessionID: string(run.OpenCodeSessionID),
 		RuntimeEpoch: run.RuntimeEpoch, ContainerID: run.ObservedContainerID,
 		StartedAt: runtime.StartedAt(), RuntimeToken: runtime.Token()}
 	return identity, true
@@ -524,7 +520,7 @@ func stripFernCookies(header http.Header) {
 
 func validateIdentity(identity Identity) error {
 	runtime, err := runidentity.ParseRuntime(identity.ContainerID, identity.StartedAt, identity.RuntimeToken)
-	if identity.WorkspaceID == "" || identity.TaskID == "" || identity.AttemptID == "" || identity.Generation <= 0 || identity.WriterGeneration != 1 || identity.SessionID == "" ||
+	if identity.WorkspaceID == "" || identity.TaskID == "" || identity.SessionID == "" ||
 		identity.RuntimeEpoch <= 0 || identity.ContainerID == "" || identity.StartedAt == "" ||
 		err != nil || runtime.Epoch() != identity.RuntimeEpoch {
 		return errors.New("complete route identity is required")
@@ -534,19 +530,15 @@ func validateIdentity(identity Identity) error {
 
 func routeEvidence(status string, identity Identity) string {
 	value, _ := json.Marshal(struct {
-		Effect           string `json:"effect"`
-		Status           string `json:"status"`
-		Task             string `json:"task"`
-		Attempt          string `json:"attempt"`
-		Generation       int64  `json:"generation"`
-		WriterGeneration int64  `json:"writer_generation"`
-		SessionID        string `json:"session_id"`
-		RuntimeEpoch     int64  `json:"runtime_epoch"`
-	}{"background_route", status, identity.TaskID, identity.AttemptID, identity.Generation, identity.WriterGeneration, identity.SessionID, identity.RuntimeEpoch})
+		Effect       string `json:"effect"`
+		Status       string `json:"status"`
+		Task         string `json:"task"`
+		SessionID    string `json:"session_id"`
+		RuntimeEpoch int64  `json:"runtime_epoch"`
+	}{"background_route", status, identity.TaskID, identity.SessionID, identity.RuntimeEpoch})
 	return string(value)
 }
 
 func (identity Identity) String() string {
-	return fmt.Sprintf("%s/%s/%s/g%d/w%d/%s@%d", identity.WorkspaceID, identity.TaskID, identity.AttemptID,
-		identity.Generation, identity.WriterGeneration, identity.SessionID, identity.RuntimeEpoch)
+	return fmt.Sprintf("%s/%s/%s@%d", identity.WorkspaceID, identity.TaskID, identity.SessionID, identity.RuntimeEpoch)
 }

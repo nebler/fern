@@ -13,7 +13,7 @@
 //
 // ResourceSpecVersion and SourceProfile pin the current execution contract;
 // recognizing an older provider resource is not permission to start it.
-// Resource names identify a task generation, not a particular process: Runtime
+// Resource names identify a run, not a particular process: Runtime
 // does that, hashing the container ID with its exact original start timestamp,
 // so a restarted container is a different runtime. Non-canonical timestamp
 // spellings are rejected because normalizing them would change persisted

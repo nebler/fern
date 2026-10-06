@@ -63,11 +63,11 @@ func retainedTuple(t *testing.T) (taskartifact.Snapshot, taskstore.BackgroundRun
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot := taskartifact.Snapshot{RepositoryID: 42, WorkspaceID: "workspace", TaskID: "task", AttemptID: "attempt",
-		Generation: 1, SealRequestID: "seal", Base: "base", Result: "result", Tree: "tree",
+	snapshot := taskartifact.Snapshot{RepositoryID: 42, WorkspaceID: "workspace", TaskID: "task",
+		ResultID: "result", Base: "base", Result: "result", Tree: "tree",
 		ChangesSHA256: digest, ManifestSHA256: digest, BundleSHA256: digest, BundleBytes: 42}
 	export := taskstore.BackgroundRunExport{RepositoryID: snapshot.RepositoryID, WorkspaceID: snapshot.WorkspaceID,
-		TaskID: snapshot.TaskID, AttemptID: snapshot.AttemptID, Generation: snapshot.Generation, SealRequestID: snapshot.SealRequestID,
+		TaskID: snapshot.TaskID, ResultID: snapshot.ResultID,
 		BaseSHA: snapshot.Base, ResultCommit: snapshot.Result, TreeOID: snapshot.Tree, ChangesSHA256: digest.Bytes(),
 		ArtifactManifestSHA256: digest.Bytes(), BundleSHA256: digest.Bytes(), BundleBytes: snapshot.BundleBytes, CASLocator: "sha256:" + digest.String()}
 	return snapshot, export
@@ -78,7 +78,7 @@ func TestSnapshotMatchesEveryDurableSelectionField(t *testing.T) {
 	if !snapshotMatchesExport(snapshot, export) {
 		t.Fatal("exact tuple rejected")
 	}
-	for _, field := range []string{"RepositoryID", "WorkspaceID", "TaskID", "AttemptID", "Generation", "SealRequestID", "Base", "Result", "Tree", "ChangesSHA256", "ManifestSHA256", "BundleSHA256", "BundleBytes"} {
+	for _, field := range []string{"RepositoryID", "WorkspaceID", "TaskID", "ResultID", "Base", "Result", "Tree", "ChangesSHA256", "ManifestSHA256", "BundleSHA256", "BundleBytes"} {
 		t.Run(field, func(t *testing.T) {
 			changed := snapshot
 			reflect.ValueOf(&changed).Elem().FieldByName(field).SetZero()
@@ -171,8 +171,7 @@ func TestMakeRouteIdentityProjectsCommittedRuntime(t *testing.T) {
 	run := taskstore.BackgroundRun{WorkspaceID: "workspace", TaskID: "task", AttemptID: "attempt", Generation: 2,
 		WriterGeneration: 3, RuntimeEpoch: 4, OpenCodeSessionID: "session", ObservedContainerID: "not-the-attested-runtime"}
 	runtime := taskenvdocker.RuntimeIdentity{ContainerID: "container", StartedAt: "started", Token: "token"}
-	want := backgroundroute.Identity{WorkspaceID: "workspace", TaskID: "task", AttemptID: "attempt", Generation: 2,
-		WriterGeneration: 3, RuntimeEpoch: 4, SessionID: "session", ContainerID: "container", StartedAt: "started", RuntimeToken: "token"}
+	want := backgroundroute.Identity{WorkspaceID: "workspace", TaskID: "task", RuntimeEpoch: 4, SessionID: "session", ContainerID: "container", StartedAt: "started", RuntimeToken: "token"}
 	if got := makeRouteIdentity(run, runtime); got != want {
 		t.Fatalf("route tuple = %+v, want %+v", got, want)
 	}

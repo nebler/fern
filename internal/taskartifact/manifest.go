@@ -16,9 +16,7 @@ type artifactManifest struct {
 	RepositoryID          task.RepositoryID
 	WorkspaceID           task.WorkspaceID
 	TaskID                task.TaskID
-	AttemptID             task.AttemptID
-	Generation            int64
-	SealRequestID         task.SealRequestID
+	ResultID              task.ResultID
 	ImageIdentity         string
 	Profile               string
 	ProfileSHA256         Digest
@@ -46,9 +44,7 @@ type manifestWire struct {
 	RepositoryID          task.RepositoryID      `json:"repository_id"`
 	WorkspaceID           task.WorkspaceID       `json:"workspace_id"`
 	TaskID                task.TaskID            `json:"task_id"`
-	AttemptID             task.AttemptID         `json:"attempt_id"`
-	Generation            int64                  `json:"generation"`
-	SealRequestID         task.SealRequestID     `json:"seal_request_id"`
+	ResultID              task.ResultID          `json:"result_id"`
 	ImageIdentity         string                 `json:"image_identity"`
 	Profile               string                 `json:"profile"`
 	ProfileSHA256         string                 `json:"profile_sha256"`
@@ -74,7 +70,7 @@ func encodeManifest(manifest artifactManifest) ([]byte, Digest, error) {
 	}
 	wire := manifestWire{
 		Version: manifest.Version, RepositoryID: manifest.RepositoryID, WorkspaceID: manifest.WorkspaceID,
-		TaskID: manifest.TaskID, AttemptID: manifest.AttemptID, Generation: manifest.Generation, SealRequestID: manifest.SealRequestID,
+		TaskID: manifest.TaskID, ResultID: manifest.ResultID,
 		ImageIdentity: manifest.ImageIdentity, Profile: manifest.Profile, ProfileSHA256: manifest.ProfileSHA256.String(),
 		EnvironmentSHA256: manifest.EnvironmentSHA256.String(), ResourceSpecVersion: manifest.ResourceSpecVersion,
 		OpenCodeSessionID: manifest.OpenCodeSessionID, OpenCodeMessageID: manifest.OpenCodeMessageID,
@@ -113,7 +109,7 @@ func decodeManifest(encoded []byte) (artifactManifest, Digest, error) {
 	}
 	manifest := artifactManifest{
 		Version: wire.Version, RepositoryID: wire.RepositoryID, WorkspaceID: wire.WorkspaceID, TaskID: wire.TaskID,
-		AttemptID: wire.AttemptID, Generation: wire.Generation, SealRequestID: wire.SealRequestID,
+		ResultID:      wire.ResultID,
 		ImageIdentity: wire.ImageIdentity, Profile: wire.Profile, ProfileSHA256: profileDigest,
 		EnvironmentSHA256: environmentDigest, ResourceSpecVersion: wire.ResourceSpecVersion,
 		OpenCodeSessionID: wire.OpenCodeSessionID, OpenCodeMessageID: wire.OpenCodeMessageID,
@@ -129,7 +125,7 @@ func decodeManifest(encoded []byte) (artifactManifest, Digest, error) {
 }
 
 func validateManifest(manifest artifactManifest) error {
-	if manifest.Version != 2 || manifest.EpochSecond < 0 || manifest.EpochSecond > 253402300799 || manifest.BundleBytes <= 0 {
+	if manifest.Version != 3 || manifest.EpochSecond < 0 || manifest.EpochSecond > 253402300799 || manifest.BundleBytes <= 0 {
 		return fmt.Errorf("%w: manifest metadata", ErrVerification)
 	}
 	if _, err := task.ParseRepositoryID(strconv.FormatUint(uint64(manifest.RepositoryID), 10)); err != nil {
@@ -141,14 +137,8 @@ func validateManifest(manifest artifactManifest) error {
 	if _, err := task.ParseTaskID(string(manifest.TaskID)); err != nil {
 		return fmt.Errorf("%w: task ID", ErrVerification)
 	}
-	if _, err := task.ParseAttemptID(string(manifest.AttemptID)); err != nil {
-		return fmt.Errorf("%w: attempt ID", ErrVerification)
-	}
-	if manifest.Generation <= 0 || manifest.Generation > maxGeneration {
-		return fmt.Errorf("%w: generation", ErrVerification)
-	}
-	if _, err := task.ParseSealRequestID(string(manifest.SealRequestID)); err != nil {
-		return fmt.Errorf("%w: seal request ID", ErrVerification)
+	if _, err := task.ParseResultID(string(manifest.ResultID)); err != nil {
+		return fmt.Errorf("%w: result ID", ErrVerification)
 	}
 	if !validImageIdentity(manifest.ImageIdentity) || !validProfile(manifest.Profile) || !validDigest(manifest.ProfileSHA256) || !validDigest(manifest.EnvironmentSHA256) {
 		return fmt.Errorf("%w: execution identity", ErrVerification)

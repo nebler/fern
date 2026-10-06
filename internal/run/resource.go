@@ -1,26 +1,22 @@
 package run
 
 import (
-	"errors"
-	"strconv"
 	"strings"
 
 	"github.com/nebler/fern/internal/task"
 )
 
-// Resources is the canonical resource namespace for a run generation. Its
-// spelling is persisted by the current resource contract.
+// Resources is the canonical resource namespace for a run. Its spelling is
+// persisted by the current resource contract.
 type Resources struct{ stem string }
 
-func NewResources(id task.TaskID, generation int64) (Resources, error) {
-	if _, err := task.ParseTaskID(string(id)); err != nil {
-		return Resources{}, err
-	}
-	if generation <= 0 {
-		return Resources{}, errors.New("positive run generation is required")
+// NewResources derives the names from a Fern-generated run ID.
+func NewResources(id task.TaskID) Resources {
+	if id == "" {
+		return Resources{}
 	}
 	compact := strings.ReplaceAll(strings.TrimPrefix(string(id), "tsk_"), "-", "")
-	return Resources{stem: "run-" + compact + "-g" + strconv.FormatInt(generation, 10)}, nil
+	return Resources{stem: "run-" + compact}
 }
 
 func (r Resources) Clone() string {

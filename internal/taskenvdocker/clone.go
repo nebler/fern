@@ -17,18 +17,16 @@ import (
 )
 
 type cloneMarker struct {
-	Version    int    `json:"version"`
-	Workspace  string `json:"workspace"`
-	Task       string `json:"task"`
-	Attempt    string `json:"attempt"`
-	Generation int64  `json:"generation"`
-	Image      string `json:"image"`
-	Clone      string `json:"clone"`
-	Base       string `json:"base"`
-	Remote     string `json:"remote"`
-	Spec       string `json:"spec"`
-	Device     uint64 `json:"device"`
-	Inode      uint64 `json:"inode"`
+	Version   int    `json:"version"`
+	Workspace string `json:"workspace"`
+	Task      string `json:"task"`
+	Image     string `json:"image"`
+	Clone     string `json:"clone"`
+	Base      string `json:"base"`
+	Remote    string `json:"remote"`
+	Spec      string `json:"spec"`
+	Device    uint64 `json:"device"`
+	Inode     uint64 `json:"inode"`
 }
 
 type cloneMarkerSnapshot struct {
@@ -214,7 +212,7 @@ func (p *Provider) cloneMarkerPath(run taskstore.BackgroundRun) string {
 }
 
 func expectedCloneMarker(run taskstore.BackgroundRun, digest string, device, inode uint64) cloneMarker {
-	return cloneMarker{1, string(run.WorkspaceID), string(run.TaskID), string(run.AttemptID), run.Generation, run.ImageIdentity, run.CloneIdentity, string(run.BaseOID), run.RepositoryRemote, digest, device, inode}
+	return cloneMarker{1, string(run.WorkspaceID), string(run.TaskID), run.ImageIdentity, run.CloneIdentity, string(run.BaseOID), run.RepositoryRemote, digest, device, inode}
 }
 
 func (p *Provider) writeCloneMarker(run taskstore.BackgroundRun, digest string, info os.FileInfo) (cloneMarkerSnapshot, error) {

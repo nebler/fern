@@ -282,10 +282,10 @@ clone work has the same 30-second deadline as its Git operation.
 `backgroundroute.Manager` maps short-lived opaque capabilities to one exact
 authenticated runtime and OpenCode session. The route is activated only for a
 committed runtime that has just passed authenticated health; attachment is
-offered once provisioning has reconciled the session and fenced the prompt. The run API can mint a random two-hour capability only while the
-complete workspace, task, attempt, run generation, single-writer generation,
-container ID, start time, runtime epoch, and session tuple remains active. Fern retains only the
-capability digest in process memory.
+offered once provisioning has reconciled the session and fenced the prompt.
+The run API can mint a random two-hour capability only while the complete
+workspace, run, container ID, start time, runtime epoch, and session tuple
+remains active. Fern retains only the capability digest in process memory.
 
 The attached OpenCode TUI may read the dedicated server and interact with the
 exact session. The route rejects cross-session mutation, session creation and

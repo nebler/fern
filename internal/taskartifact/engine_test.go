@@ -23,14 +23,12 @@ import (
 const (
 	testWorkspace  = task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001")
 	testTask       = task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-000000000002")
-	testAttempt    = task.AttemptID("att_0198d34d-6a50-75fb-b1f2-000000000003")
-	testAttempt2   = task.AttemptID("att_0198d34d-6a50-75fb-b1f2-000000000004")
-	testSeal       = task.SealRequestID("slr_0198d34d-6a50-75fb-b1f2-000000000005")
+	testResult     = task.ResultID("res_0198d34d-6a50-75fb-b1f2-000000000005")
 	testSession    = task.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef")
 	testMessage    = task.OpenCodeMessageID("msg_fedcba9876543210fedcba9876543210")
 	testWorkspace2 = task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000011")
 	testTask2      = task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-000000000012")
-	testSeal2      = task.SealRequestID("slr_0198d34d-6a50-75fb-b1f2-000000000015")
+	testResult2    = task.ResultID("res_0198d34d-6a50-75fb-b1f2-000000000015")
 	testSession2   = task.OpenCodeSessionID("ses_11111111111111111111111111111111")
 	testMessage2   = task.OpenCodeMessageID("msg_22222222222222222222222222222222")
 )
@@ -253,16 +251,14 @@ func TestManifestBindsExecutionIdentityAndCanonicalChanges(t *testing.T) {
 	if err != nil || digest != snapshot.ManifestSHA256 {
 		t.Fatalf("decode manifest: %v", err)
 	}
-	if snapshot.RepositoryID != spec.RepositoryID || snapshot.WorkspaceID != spec.Source.WorkspaceID || snapshot.TaskID != spec.Source.TaskID ||
-		snapshot.AttemptID != spec.Source.AttemptID || snapshot.Generation != spec.Generation || snapshot.SealRequestID != spec.SealRequestID ||
+	if snapshot.RepositoryID != spec.RepositoryID || snapshot.WorkspaceID != spec.Source.WorkspaceID || snapshot.TaskID != spec.Source.TaskID || snapshot.ResultID != spec.ResultID ||
 		snapshot.ImageIdentity != spec.ImageIdentity || snapshot.Profile != spec.Profile || snapshot.ProfileSHA256 != spec.ProfileSHA256 ||
 		snapshot.EnvironmentSHA256 != spec.EnvironmentSHA256 || snapshot.ResourceSpecVersion != ResourceSpecVersion ||
 		snapshot.OpenCodeSessionID != spec.OpenCodeSessionID || snapshot.OpenCodeMessageID != spec.OpenCodeMessageID ||
 		snapshot.SnapshotPolicyVersion != SnapshotPolicyV1 || snapshot.CompletionAuthority != CompletionUserSeal {
 		t.Fatalf("snapshot identity differs from spec: %+v", snapshot)
 	}
-	if manifest.RepositoryID != spec.RepositoryID || manifest.WorkspaceID != spec.Source.WorkspaceID || manifest.TaskID != spec.Source.TaskID ||
-		manifest.AttemptID != spec.Source.AttemptID || manifest.Generation != spec.Generation || manifest.SealRequestID != spec.SealRequestID ||
+	if manifest.RepositoryID != spec.RepositoryID || manifest.WorkspaceID != spec.Source.WorkspaceID || manifest.TaskID != spec.Source.TaskID || manifest.ResultID != spec.ResultID ||
 		manifest.ImageIdentity != spec.ImageIdentity || manifest.Profile != spec.Profile || manifest.ProfileSHA256 != spec.ProfileSHA256 ||
 		manifest.EnvironmentSHA256 != spec.EnvironmentSHA256 || manifest.ResourceSpecVersion != ResourceSpecVersion ||
 		manifest.OpenCodeSessionID != spec.OpenCodeSessionID || manifest.OpenCodeMessageID != spec.OpenCodeMessageID ||
@@ -291,8 +287,7 @@ func TestManifestBindsExecutionIdentityAndCanonicalChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inspected.RepositoryID != snapshot.RepositoryID || inspected.WorkspaceID != snapshot.WorkspaceID || inspected.TaskID != snapshot.TaskID ||
-		inspected.AttemptID != snapshot.AttemptID || inspected.Generation != snapshot.Generation || inspected.SealRequestID != snapshot.SealRequestID ||
+	if inspected.RepositoryID != snapshot.RepositoryID || inspected.WorkspaceID != snapshot.WorkspaceID || inspected.TaskID != snapshot.TaskID || inspected.ResultID != snapshot.ResultID ||
 		inspected.ImageIdentity != snapshot.ImageIdentity || inspected.Profile != snapshot.Profile || inspected.ProfileSHA256 != snapshot.ProfileSHA256 ||
 		inspected.EnvironmentSHA256 != snapshot.EnvironmentSHA256 || inspected.ResourceSpecVersion != snapshot.ResourceSpecVersion ||
 		inspected.OpenCodeSessionID != snapshot.OpenCodeSessionID || inspected.OpenCodeMessageID != snapshot.OpenCodeMessageID ||
@@ -332,9 +327,7 @@ func TestManifestTamperingRejected(t *testing.T) {
 		{"repository", func(w *manifestWire) { w.RepositoryID = 0 }},
 		{"workspace", func(w *manifestWire) { w.WorkspaceID = "bad" }},
 		{"task", func(w *manifestWire) { w.TaskID = "bad" }},
-		{"attempt", func(w *manifestWire) { w.AttemptID = "bad" }},
-		{"generation", func(w *manifestWire) { w.Generation = 0 }},
-		{"seal request", func(w *manifestWire) { w.SealRequestID = "bad" }},
+		{"result", func(w *manifestWire) { w.ResultID = "bad" }},
 		{"image", func(w *manifestWire) { w.ImageIdentity = "sha256:" + strings.Repeat("A", 64) }},
 		{"profile", func(w *manifestWire) { w.Profile = "bad profile" }},
 		{"profile hash", func(w *manifestWire) { w.ProfileSHA256 = strings.Repeat("0", 64) }},
@@ -362,9 +355,7 @@ func TestManifestTamperingRejected(t *testing.T) {
 		{"repository", func(w *manifestWire) { w.RepositoryID++ }},
 		{"workspace", func(w *manifestWire) { w.WorkspaceID = testWorkspace2 }},
 		{"task", func(w *manifestWire) { w.TaskID = testTask2 }},
-		{"attempt", func(w *manifestWire) { w.AttemptID = testAttempt2 }},
-		{"generation", func(w *manifestWire) { w.Generation++ }},
-		{"seal request", func(w *manifestWire) { w.SealRequestID = testSeal2 }},
+		{"result", func(w *manifestWire) { w.ResultID = testResult2 }},
 		{"image", func(w *manifestWire) { w.ImageIdentity = "sha256:" + strings.Repeat("b", 64) }},
 		{"profile", func(w *manifestWire) { w.Profile = "opencode-test-2.0" }},
 		{"profile hash", func(w *manifestWire) { w.ProfileSHA256 = digestString("other-profile") }},
@@ -403,12 +394,8 @@ func TestExecutionIdentityProducesDistinctLocators(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondSource, err := NewSource(repository, testWorkspace, testTask, testAttempt2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondSpec := testSnapshotSpec(t, secondSource, base, 46)
-	secondSpec.Generation = 2
+	secondSpec := testSnapshotSpec(t, mustSource(t, repository), base, 46)
+	secondSpec.ResultID = testResult2
 	second, secondStage, err := engine.Snapshot(context.Background(), secondSpec)
 	if err != nil {
 		t.Fatal(err)
@@ -810,7 +797,7 @@ func testEngineRepository(t testing.TB) (*Engine, string, task.GitOID) {
 
 func mustSource(t testing.TB, repository string) Source {
 	t.Helper()
-	source, err := NewSource(repository, testWorkspace, testTask, testAttempt)
+	source, err := NewSource(repository, testWorkspace, testTask)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -828,7 +815,7 @@ func testSnapshotSpec(t testing.TB, source Source, base task.GitOID, epoch int64
 		t.Fatal(err)
 	}
 	return SnapshotSpec{
-		Source: source, RepositoryID: 123, Generation: 1, SealRequestID: testSeal,
+		Source: source, RepositoryID: 123, ResultID: testResult,
 		ImageIdentity: "sha256:" + strings.Repeat("a", 64), Profile: "opencode-test-1.0", ProfileSHA256: profileDigest,
 		EnvironmentSHA256: environmentDigest, ResourceSpecVersion: ResourceSpecVersion,
 		OpenCodeSessionID: testSession, OpenCodeMessageID: testMessage, SnapshotPolicyVersion: SnapshotPolicyV1,

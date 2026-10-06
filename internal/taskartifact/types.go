@@ -28,7 +28,6 @@ const (
 	defaultBundleBytes = 64 << 20
 	defaultFiles       = 10_000
 	defaultBlobBytes   = int64(64 << 20)
-	maxGeneration      = int64(1<<31 - 1)
 	maxProfileBytes    = 128
 )
 
@@ -61,30 +60,20 @@ type Config struct {
 	BlobBytes      int64
 }
 
-// Source identifies the exact provider-selected clone and background-run
-// attempt. Its path is intentionally available only through construction and
-// engine methods.
+// Source identifies the exact provider-selected clone of one background run.
+// Its path is intentionally available only through construction and engine
+// methods.
 type Source struct {
 	WorkspaceID task.WorkspaceID
 	TaskID      task.TaskID
-	AttemptID   task.AttemptID
 	path        string
 }
 
-func NewSource(path string, workspaceID task.WorkspaceID, taskID task.TaskID, attemptID task.AttemptID) (Source, error) {
+func NewSource(path string, workspaceID task.WorkspaceID, taskID task.TaskID) (Source, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return Source{}, fmt.Errorf("%w: repository path", ErrInvalidSource)
 	}
-	if _, err := task.ParseWorkspaceID(string(workspaceID)); err != nil {
-		return Source{}, fmt.Errorf("%w: workspace ID", ErrInvalidSource)
-	}
-	if _, err := task.ParseTaskID(string(taskID)); err != nil {
-		return Source{}, fmt.Errorf("%w: task ID", ErrInvalidSource)
-	}
-	if _, err := task.ParseAttemptID(string(attemptID)); err != nil {
-		return Source{}, fmt.Errorf("%w: attempt ID", ErrInvalidSource)
-	}
-	return Source{WorkspaceID: workspaceID, TaskID: taskID, AttemptID: attemptID, path: path}, nil
+	return Source{WorkspaceID: workspaceID, TaskID: taskID, path: path}, nil
 }
 
 // SnapshotSpec binds a snapshot to admitted repository, execution, seal, and
@@ -93,8 +82,7 @@ func NewSource(path string, workspaceID task.WorkspaceID, taskID task.TaskID, at
 type SnapshotSpec struct {
 	Source                Source
 	RepositoryID          task.RepositoryID
-	Generation            int64
-	SealRequestID         task.SealRequestID
+	ResultID              task.ResultID
 	ImageIdentity         string
 	Profile               string
 	ProfileSHA256         Digest
@@ -158,9 +146,7 @@ type Snapshot struct {
 	RepositoryID          task.RepositoryID
 	WorkspaceID           task.WorkspaceID
 	TaskID                task.TaskID
-	AttemptID             task.AttemptID
-	Generation            int64
-	SealRequestID         task.SealRequestID
+	ResultID              task.ResultID
 	ImageIdentity         string
 	Profile               string
 	ProfileSHA256         Digest

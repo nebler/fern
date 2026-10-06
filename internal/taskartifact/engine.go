@@ -11,12 +11,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/nebler/fern/internal/task"
 )
 
 const (
@@ -210,8 +207,8 @@ func (e *Engine) Snapshot(ctx context.Context, spec SnapshotSpec) (Snapshot, Sta
 		return Snapshot{}, StagedLocator{}, err
 	}
 	manifest := artifactManifest{
-		Version: 2, RepositoryID: spec.RepositoryID, WorkspaceID: spec.Source.WorkspaceID, TaskID: spec.Source.TaskID,
-		AttemptID: spec.Source.AttemptID, Generation: spec.Generation, SealRequestID: spec.SealRequestID,
+		Version: 3, RepositoryID: spec.RepositoryID, WorkspaceID: spec.Source.WorkspaceID, TaskID: spec.Source.TaskID,
+		ResultID:      spec.ResultID,
 		ImageIdentity: spec.ImageIdentity, Profile: spec.Profile, ProfileSHA256: spec.ProfileSHA256,
 		EnvironmentSHA256: spec.EnvironmentSHA256, ResourceSpecVersion: spec.ResourceSpecVersion,
 		OpenCodeSessionID: spec.OpenCodeSessionID, OpenCodeMessageID: spec.OpenCodeMessageID,
@@ -261,40 +258,12 @@ func (e *Engine) Snapshot(ctx context.Context, spec SnapshotSpec) (Snapshot, Sta
 	return snapshot, StagedLocator{engine: e, path: stage, device: device, inode: inode, digest: manifestDigest}, nil
 }
 
+// validateSpec checks only what the Git snapshot needs before it runs. The
+// identities come from Fern's own run row and are validated once, when the
+// manifest is encoded.
 func validateSpec(spec SnapshotSpec) error {
-	if _, err := task.ParseWorkspaceID(string(spec.Source.WorkspaceID)); err != nil ||
-		spec.Source.path == "" {
-		return fmt.Errorf("%w: source", ErrInvalidSpec)
-	}
-	if _, err := task.ParseTaskID(string(spec.Source.TaskID)); err != nil {
-		return fmt.Errorf("%w: source", ErrInvalidSpec)
-	}
-	if _, err := task.ParseAttemptID(string(spec.Source.AttemptID)); err != nil {
-		return fmt.Errorf("%w: source", ErrInvalidSpec)
-	}
-	if _, err := task.ParseRepositoryID(strconv.FormatUint(uint64(spec.RepositoryID), 10)); err != nil {
-		return fmt.Errorf("%w: repository ID", ErrInvalidSpec)
-	}
-	if spec.Generation <= 0 || spec.Generation > maxGeneration {
-		return fmt.Errorf("%w: generation", ErrInvalidSpec)
-	}
-	if _, err := task.ParseSealRequestID(string(spec.SealRequestID)); err != nil {
-		return fmt.Errorf("%w: seal request ID", ErrInvalidSpec)
-	}
-	if !validImageIdentity(spec.ImageIdentity) || !validProfile(spec.Profile) || !validDigest(spec.ProfileSHA256) || !validDigest(spec.EnvironmentSHA256) {
-		return fmt.Errorf("%w: execution identity", ErrInvalidSpec)
-	}
-	if spec.ResourceSpecVersion != ResourceSpecVersion || spec.SnapshotPolicyVersion != SnapshotPolicyV1 {
-		return fmt.Errorf("%w: policy identity", ErrInvalidSpec)
-	}
-	if _, err := task.ParseOpenCodeSessionID(string(spec.OpenCodeSessionID)); err != nil {
-		return fmt.Errorf("%w: OpenCode session ID", ErrInvalidSpec)
-	}
-	if _, err := task.ParseOpenCodeMessageID(string(spec.OpenCodeMessageID)); err != nil {
-		return fmt.Errorf("%w: OpenCode message ID", ErrInvalidSpec)
-	}
-	if _, err := task.ParseGitOID(string(spec.Base)); err != nil || spec.EpochSecond < 0 || spec.EpochSecond > 253402300799 {
-		return fmt.Errorf("%w: base or epoch", ErrInvalidSpec)
+	if spec.Source.path == "" || spec.EpochSecond < 0 || spec.EpochSecond > 253402300799 {
+		return fmt.Errorf("%w: source or epoch", ErrInvalidSpec)
 	}
 	return nil
 }
@@ -345,8 +314,8 @@ func cloneChanges(entries []ChangeEntry) []ChangeEntry {
 
 func snapshotFromManifest(manifest artifactManifest, digest Digest) Snapshot {
 	return Snapshot{
-		RepositoryID: manifest.RepositoryID, WorkspaceID: manifest.WorkspaceID, TaskID: manifest.TaskID, AttemptID: manifest.AttemptID,
-		Generation: manifest.Generation, SealRequestID: manifest.SealRequestID, ImageIdentity: manifest.ImageIdentity,
+		RepositoryID: manifest.RepositoryID, WorkspaceID: manifest.WorkspaceID, TaskID: manifest.TaskID,
+		ResultID: manifest.ResultID, ImageIdentity: manifest.ImageIdentity,
 		Profile: manifest.Profile, ProfileSHA256: manifest.ProfileSHA256, EnvironmentSHA256: manifest.EnvironmentSHA256,
 		ResourceSpecVersion: manifest.ResourceSpecVersion, OpenCodeSessionID: manifest.OpenCodeSessionID,
 		OpenCodeMessageID: manifest.OpenCodeMessageID, SnapshotPolicyVersion: manifest.SnapshotPolicyVersion,

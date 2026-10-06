@@ -179,7 +179,7 @@ func TestAttachmentCapabilityFencesSessionWriterAndExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	for name, mutate := range map[string]func(*taskstore.BackgroundRun){
-		"writer":  func(run *taskstore.BackgroundRun) { run.WriterGeneration++ },
+		"runtime": func(run *taskstore.BackgroundRun) { run.RuntimeEpoch++ },
 		"session": func(run *taskstore.BackgroundRun) { run.OpenCodeSessionID = "ses_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -323,17 +323,16 @@ func pairedRequest(method, target, token, origin string, body io.Reader) *http.R
 
 func testRun(identity Identity) taskstore.BackgroundRun {
 	return taskstore.BackgroundRun{WorkspaceID: task.WorkspaceID(identity.WorkspaceID), TaskID: task.TaskID(identity.TaskID),
-		AttemptID: task.AttemptID(identity.AttemptID), Generation: identity.Generation, WriterGeneration: identity.WriterGeneration, RuntimeEpoch: identity.RuntimeEpoch,
+		RuntimeEpoch:        identity.RuntimeEpoch,
 		ObservedContainerID: identity.ContainerID, ObservedContainerStartedAt: identity.StartedAt,
 		OpenCodeSessionID: task.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef")}
 }
 
-func testIdentity(generation int64) Identity {
-	started := time.Date(2026, 8, 31, 12, 0, int(generation), 0, time.UTC)
-	container := strings.Repeat(string(rune('a'+generation)), 64)
+func testIdentity(n int64) Identity {
+	started := time.Date(2026, 8, 31, 12, 0, int(n), 0, time.UTC)
+	container := strings.Repeat(string(rune('a'+n)), 64)
 	digest := runtimeDigest(container, started.Format(time.RFC3339Nano))
 	return Identity{WorkspaceID: "wsp_0198d34d-6a50-75fb-b1f2-000000000001", TaskID: "tsk_0198d34d-6a50-75fb-b1f2-000000000201",
-		AttemptID: "att_0198d34d-6a50-75fb-b1f2-000000000301", Generation: generation, WriterGeneration: 1,
 		SessionID: "ses_0123456789abcdef0123456789abcdef", RuntimeEpoch: started.UnixNano(),
 		ContainerID: container, StartedAt: started.Format(time.RFC3339Nano), RuntimeToken: digest}
 }

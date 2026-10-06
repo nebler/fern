@@ -93,14 +93,14 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 	artifactID, _ := ids.RetainedArtifactID()
 	exportID, _ := ids.ArtifactExportID()
 	materializationID, _ := ids.MaterializationID()
-	source, err := taskartifact.NewSource(repository, workspaceID, taskID, attemptID)
+	source, err := taskartifact.NewSource(repository, workspaceID, taskID)
 	if err != nil {
 		t.Fatal(err)
 	}
 	profile, _ := taskartifact.NewDigest(sha256.Sum256([]byte("profile")))
 	environment, _ := taskartifact.NewDigest(sha256.Sum256([]byte("environment")))
 	snapshot, staged, err := engine.Snapshot(context.Background(), taskartifact.SnapshotSpec{Source: source, RepositoryID: 1,
-		Generation: 1, SealRequestID: sealID, ImageIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ResultID: resultID, ImageIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		Profile: "profile", ProfileSHA256: profile, EnvironmentSHA256: environment, ResourceSpecVersion: taskartifact.ResourceSpecVersion,
 		OpenCodeSessionID: mustSession(t, ids), OpenCodeMessageID: mustMessage(t, ids), SnapshotPolicyVersion: taskartifact.SnapshotPolicyV1,
 		Base: base, EpochSecond: 1})
@@ -134,7 +134,6 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 		t.Fatalf("Verify calls: Inspect=%d Acquire=%d", counted.inspects, counted.acquisitions)
 	}
 	otherWorkspace, _ := ids.WorkspaceID()
-	otherSeal, _ := ids.SealRequestID()
 	otherArtifact, _ := ids.RetainedArtifactID()
 	otherExport, _ := ids.ArtifactExportID()
 	otherMaterialization, _ := ids.MaterializationID()
@@ -145,8 +144,6 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 	}{
 		{"repository", func(_ *taskstore.RetainedArtifact, result *taskstore.Result) { result.RepositoryID++ }},
 		{"workspace", func(artifact *taskstore.RetainedArtifact, _ *taskstore.Result) { artifact.WorkspaceID = otherWorkspace }},
-		{"generation", func(artifact *taskstore.RetainedArtifact, _ *taskstore.Result) { artifact.Generation++ }},
-		{"seal", func(artifact *taskstore.RetainedArtifact, _ *taskstore.Result) { artifact.SealRequestID = otherSeal }},
 		{"artifact", func(_ *taskstore.RetainedArtifact, result *taskstore.Result) {
 			result.RetainedArtifactID = otherArtifact
 		}},

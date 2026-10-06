@@ -30,7 +30,6 @@ import (
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/gitref"
 	runidentity "github.com/nebler/fern/internal/run"
-	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -47,8 +46,6 @@ const (
 	managedLabel     = "dev.fern.background-run.managed"
 	workspaceLabel   = "dev.fern.background-run.workspace"
 	taskLabel        = "dev.fern.background-run.task"
-	attemptLabel     = "dev.fern.background-run.attempt"
-	generationLabel  = "dev.fern.background-run.generation"
 	imageLabel       = "dev.fern.background-run.image"
 	cloneLabel       = "dev.fern.background-run.clone"
 	volumeLabel      = "dev.fern.background-run.volume"
@@ -556,25 +553,13 @@ func (p *Provider) validateRun(run taskstore.BackgroundRun) (string, error) {
 }
 
 func (p *Provider) validateRunForCleanup(run taskstore.BackgroundRun) (string, error) {
-	if _, err := task.ParseWorkspaceID(string(run.WorkspaceID)); err != nil {
-		return "", err
-	}
-	if _, err := task.ParseTaskID(string(run.TaskID)); err != nil {
-		return "", err
-	}
-	if _, err := task.ParseAttemptID(string(run.AttemptID)); err != nil || run.Generation <= 0 || !validImageID(run.ImageIdentity) ||
-		run.EnvironmentSHA256 == ([sha256.Size]byte{}) || run.ResourceSpecVersion != runidentity.ResourceSpecVersion || run.Profile != taskstore.BackgroundRunSourceProfile {
+	// The run row is Fern's own durable record; only the derived resource names
+	// are re-checked because they become host paths and Docker object names.
+	if !validImageID(run.ImageIdentity) || run.ResourceSpecVersion != runidentity.ResourceSpecVersion || run.Profile != taskstore.BackgroundRunSourceProfile {
 		return "", errors.New("invalid immutable background run tuple")
 	}
-	if _, err := task.ParseGitOID(string(run.BaseOID)); err != nil {
-		return "", err
-	}
-	resources, err := runidentity.NewResources(run.TaskID, run.Generation)
-	if err != nil || !resources.Matches(run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity) {
+	if !runidentity.NewResources(run.TaskID).Matches(run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity) {
 		return "", errors.New("noncanonical background run resource identity")
-	}
-	if strings.ContainsAny(run.CloneIdentity+run.VolumeIdentity+run.ContainerIdentity, `/\\`) || gitref.ValidateGitHubRemote(run.RepositoryRemote) != nil || run.OpenCodeSessionID == "" || run.OpenCodeMessageID == "" {
-		return "", errors.New("incomplete background run identity")
 	}
 	return p.specDigest(run)
 }
@@ -589,12 +574,11 @@ func (p *Provider) specDigest(run taskstore.BackgroundRun) (string, error) {
 	}
 	data, err := json.Marshal(struct {
 		Version                                                                                int `json:"version"`
-		Workspace, Task, Attempt                                                               string
-		Generation                                                                             int64
+		Workspace, Task                                                                        string
 		Image, Clone, Volume, Container, Endpoint, Base, Repository, Profile, Session, Message string
 		EnvironmentSHA256                                                                      string
 	}{
-		Version: runidentity.ResourceSpecVersion, Workspace: string(run.WorkspaceID), Task: string(run.TaskID), Attempt: string(run.AttemptID), Generation: run.Generation,
+		Version: runidentity.ResourceSpecVersion, Workspace: string(run.WorkspaceID), Task: string(run.TaskID),
 		Image: run.ImageIdentity, Clone: run.CloneIdentity, Volume: run.VolumeIdentity,
 		Container: run.ContainerIdentity, Endpoint: run.EndpointIdentity, Base: string(run.BaseOID), Repository: run.RepositoryRemote,
 		Profile: run.Profile, Session: string(run.OpenCodeSessionID), Message: string(run.OpenCodeMessageID),
@@ -610,7 +594,7 @@ func (p *Provider) specDigest(run taskstore.BackgroundRun) (string, error) {
 func (p *Provider) password(run taskstore.BackgroundRun) string {
 	mac := hmac.New(sha256.New, p.hostKey[:])
 	_, _ = mac.Write([]byte(passwordDomain))
-	for _, value := range []string{string(run.WorkspaceID), string(run.TaskID), string(run.AttemptID), strconv.FormatInt(run.Generation, 10), run.ImageIdentity} {
+	for _, value := range []string{string(run.WorkspaceID), string(run.TaskID), run.ImageIdentity} {
 		_, _ = mac.Write([]byte(strconv.Itoa(len(value))))
 		_, _ = mac.Write([]byte{':'})
 		_, _ = mac.Write([]byte(value))
@@ -620,8 +604,8 @@ func (p *Provider) password(run taskstore.BackgroundRun) string {
 
 func (p *Provider) labels(run taskstore.BackgroundRun, digest string) map[string]string {
 	return map[string]string{
-		managedLabel: "true", workspaceLabel: string(run.WorkspaceID), taskLabel: string(run.TaskID), attemptLabel: string(run.AttemptID),
-		generationLabel: strconv.FormatInt(run.Generation, 10), imageLabel: run.ImageIdentity, cloneLabel: run.CloneIdentity,
+		managedLabel: "true", workspaceLabel: string(run.WorkspaceID), taskLabel: string(run.TaskID),
+		imageLabel: run.ImageIdentity, cloneLabel: run.CloneIdentity,
 		volumeLabel: run.VolumeIdentity, containerLabel: run.ContainerIdentity, endpointLabel: run.EndpointIdentity,
 		baseLabel: string(run.BaseOID), repositoryLabel: run.RepositoryRemote, profileLabel: run.Profile,
 		sessionLabel: string(run.OpenCodeSessionID), messageLabel: string(run.OpenCodeMessageID), specLabel: digest,

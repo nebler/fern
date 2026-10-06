@@ -116,10 +116,7 @@ INSERT INTO receipts(
 	if p.BackgroundRun.Branch != "" {
 		branch = p.BackgroundRun.Branch
 	}
-	resources, err := runidentity.NewResources(p.TaskID, 1)
-	if err != nil {
-		return Admission{}, fmt.Errorf("%w: run resources: %v", ErrInvalidInput, err)
-	}
+	resources := runidentity.NewResources(p.TaskID)
 	profileHash := sha256.Sum256([]byte(p.BackgroundRun.Profile))
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO background_runs(

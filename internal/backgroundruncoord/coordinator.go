@@ -465,14 +465,14 @@ func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Con
 	if requestErr != nil {
 		return requestErr
 	}
-	artifactSource, sourceSpecErr := taskartifact.NewSource(repositoryPath, run.WorkspaceID, run.TaskID, run.AttemptID)
+	artifactSource, sourceSpecErr := taskartifact.NewSource(repositoryPath, run.WorkspaceID, run.TaskID)
 	profileDigest, profileErr := taskartifact.NewDigest(run.ProfileSHA256)
 	environmentDigest, environmentErr := taskartifact.NewDigest(run.EnvironmentSHA256)
 	if sourceSpecErr != nil || profileErr != nil || environmentErr != nil {
 		return errors.Join(sourceSpecErr, profileErr, environmentErr)
 	}
 	snapshot, staged, snapshotErr := c.artifact.Snapshot(operation, taskartifact.SnapshotSpec{
-		Source: artifactSource, RepositoryID: run.RepositoryID, Generation: run.Generation, SealRequestID: run.BackgroundSealRequestID,
+		Source: artifactSource, RepositoryID: run.RepositoryID, ResultID: run.RetainedResultID,
 		ImageIdentity: run.ImageIdentity, Profile: run.Profile, ProfileSHA256: profileDigest, EnvironmentSHA256: environmentDigest,
 		ResourceSpecVersion: taskartifact.ResourceSpecVersion, OpenCodeSessionID: run.OpenCodeSessionID, OpenCodeMessageID: run.OpenCodeMessageID,
 		SnapshotPolicyVersion: taskartifact.SnapshotPolicyV1, Base: run.BaseOID, EpochSecond: request.CommitEpochSeconds,
@@ -585,7 +585,7 @@ func manifestEntries(changes []taskartifact.ChangeEntry) []taskstore.ManifestEnt
 func snapshotMatchesExport(snapshot taskartifact.Snapshot, export taskstore.BackgroundRunExport) bool {
 	bundleMatches := snapshot.BundleSHA256.Bytes() == export.BundleSHA256 && snapshot.BundleBytes == export.BundleBytes
 	return snapshot.RepositoryID == export.RepositoryID && snapshot.WorkspaceID == export.WorkspaceID && snapshot.TaskID == export.TaskID &&
-		snapshot.AttemptID == export.AttemptID && snapshot.Generation == export.Generation && snapshot.SealRequestID == export.SealRequestID &&
+		snapshot.ResultID == export.ResultID &&
 		snapshot.Base == export.BaseSHA && snapshot.Result == export.ResultCommit && snapshot.Tree == export.TreeOID &&
 		snapshot.ChangesSHA256.Bytes() == export.ChangesSHA256 && snapshot.ManifestSHA256.Bytes() == export.ArtifactManifestSHA256 && bundleMatches
 }
@@ -792,8 +792,8 @@ func (c *Coordinator) validatedRouteIdentity(run taskstore.BackgroundRun) (backg
 }
 
 func makeRouteIdentity(run taskstore.BackgroundRun, runtime taskenvdocker.RuntimeIdentity) backgroundroute.Identity {
-	return backgroundroute.Identity{WorkspaceID: string(run.WorkspaceID), TaskID: string(run.TaskID), AttemptID: string(run.AttemptID),
-		Generation: run.Generation, WriterGeneration: run.WriterGeneration, SessionID: string(run.OpenCodeSessionID), RuntimeEpoch: run.RuntimeEpoch,
+	return backgroundroute.Identity{WorkspaceID: string(run.WorkspaceID), TaskID: string(run.TaskID),
+		SessionID: string(run.OpenCodeSessionID), RuntimeEpoch: run.RuntimeEpoch,
 		ContainerID: runtime.ContainerID, StartedAt: runtime.StartedAt, RuntimeToken: runtime.Token}
 }
 
