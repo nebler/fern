@@ -405,17 +405,33 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 	if retention := body["retention"].(map[string]any); retention["verified"] != true || retention["reconstructable"] != true || fixture.retained.calls.Load() != 1 {
 		t.Fatalf("retention projection=%v calls=%d", retention, fixture.retained.calls.Load())
 	}
+	retention := func() map[string]any {
+		t.Helper()
+		response := fixture.request(http.MethodGet, PathPrefix+"/"+string(runID)+"/result", "", "")
+		if response.Code != http.StatusOK {
+			t.Fatalf("result=%d %s", response.Code, response.Body.String())
+		}
+		var decoded map[string]any
+		if json.Unmarshal(response.Body.Bytes(), &decoded) != nil {
+			t.Fatal("decode result")
+		}
+		return decoded["retention"].(map[string]any)
+	}
+	// The immutable retained tuple is verified once per process.
+	if got := retention(); got["verified"] != true || fixture.retained.calls.Load() != 1 {
+		t.Fatalf("cached retention projection=%v calls=%d", got, fixture.retained.calls.Load())
+	}
+	// A different bundle digest is a different tuple; failures are not cached.
+	store.projection.Artifact.BundleSHA256 = sha256.Sum256([]byte("other bundle"))
 	fixture.retained.err = errors.New("artifact missing")
-	missing := fixture.request(http.MethodGet, PathPrefix+"/"+string(runID)+"/result", "", "")
-	if missing.Code != http.StatusOK {
-		t.Fatalf("missing artifact result=%d %s", missing.Code, missing.Body.String())
+	for want := int64(2); want <= 3; want++ {
+		if got := retention(); got["verified"] != false || got["reconstructable"] != false || fixture.retained.calls.Load() != want {
+			t.Fatalf("missing retention projection=%v calls=%d", got, fixture.retained.calls.Load())
+		}
 	}
-	var missingBody map[string]any
-	if json.Unmarshal(missing.Body.Bytes(), &missingBody) != nil {
-		t.Fatal("decode missing artifact result")
-	}
-	if retention := missingBody["retention"].(map[string]any); retention["verified"] != false || retention["reconstructable"] != false || fixture.retained.calls.Load() != 2 {
-		t.Fatalf("missing retention projection=%v calls=%d", retention, fixture.retained.calls.Load())
+	fixture.retained.err = nil
+	if got := retention(); got["verified"] != true || fixture.retained.calls.Load() != 4 {
+		t.Fatalf("recovered retention projection=%v calls=%d", got, fixture.retained.calls.Load())
 	}
 
 	store.run.State = taskstore.BackgroundRunCleanupRequired

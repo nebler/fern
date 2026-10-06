@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
@@ -74,6 +75,17 @@ type Config struct {
 type Handler struct {
 	config   Config
 	commands *service
+	// retained caches successful retention verifications for the process
+	// lifetime. Retained artifacts are content-addressed and immutable, so a
+	// verified (result, artifact, bundle digest) tuple stays verified; failures
+	// are never cached.
+	retained sync.Map // map[retainedKey]struct{}
+}
+
+type retainedKey struct {
+	result   task.ResultID
+	artifact task.RetainedArtifactID
+	bundle   [32]byte
 }
 
 func New(config Config) (*Handler, error) {
@@ -271,7 +283,7 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 		writeStoreError(w, err)
 		return
 	}
-	retained := h.config.RetentionVerifier.Verify(r.Context(), projection.Result) == nil
+	retained := h.verifyRetained(r.Context(), projection)
 	digest := func(value [32]byte) string { return hex.EncodeToString(value[:]) }
 	WriteJSON(w, http.StatusOK, resultResponse{RunID: id, State: "result_ready",
 		Result: retainedResultResponse{
@@ -281,6 +293,20 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 		Retention: retentionResponse{retained, retained},
 		Cleanup:   cleanupResponse{run.EffectPhase == taskstore.BackgroundRunEffectCleanupComplete},
 	})
+}
+
+// verifyRetained runs the full retention verification (bundle copy, unbundle,
+// fsck) once per immutable retained tuple instead of on every result read.
+func (h *Handler) verifyRetained(ctx context.Context, projection taskstore.BackgroundRunResultProjection) bool {
+	key := retainedKey{result: projection.Result.ID, artifact: projection.Artifact.ID, bundle: projection.Artifact.BundleSHA256}
+	if _, ok := h.retained.Load(key); ok {
+		return true
+	}
+	if h.config.RetentionVerifier.Verify(ctx, projection.Result) != nil {
+		return false
+	}
+	h.retained.Store(key, struct{}{})
+	return true
 }
 
 func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) (task.ActorSnapshot, bool) {
