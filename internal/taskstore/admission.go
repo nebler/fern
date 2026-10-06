@@ -116,10 +116,10 @@ INSERT INTO tasks(
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO attempts(
-    id,task_id,workspace_id,sequence,state,delivery_phase,opencode_session_id,opencode_message_id,prompt_sha256,
+    id,task_id,workspace_id,sequence,state,opencode_session_id,opencode_message_id,prompt_sha256,
     base_sha,image_digest,opencode_protocol,execution_contract_version,agent,
     model_provider,model,deadline,revision,created_at,updated_at
-) VALUES(?, ?, ?, 1, 'prepared', 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
+) VALUES(?, ?, ?, 1, 'prepared', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
 		p.AttemptID, p.TaskID, p.Claim.Scope.WorkspaceID, p.OpenCodeSessionID, p.OpenCodeMessageID, promptHash[:], p.BaseSHA,
 		attemptImage, attemptProtocol, p.ExecutionContractVersion, p.Agent, p.ModelProvider, p.Model,
 		unixMillis(p.Deadline), acceptedMS, acceptedMS); err != nil {
@@ -201,7 +201,7 @@ INSERT INTO events(
 		CreatedAt: fromUnixMillis(acceptedMS), UpdatedAt: fromUnixMillis(acceptedMS),
 	}
 	storedAttempt := Attempt{
-		ID: p.AttemptID, TaskID: p.TaskID, WorkspaceID: p.Claim.Scope.WorkspaceID, Sequence: 1, State: task.AttemptPrepared, DeliveryPhase: DeliveryPhaseNone,
+		ID: p.AttemptID, TaskID: p.TaskID, WorkspaceID: p.Claim.Scope.WorkspaceID, Sequence: 1, State: task.AttemptPrepared,
 		OpenCodeSessionID: p.OpenCodeSessionID, OpenCodeMessageID: p.OpenCodeMessageID,
 		PromptSHA256: promptHash, BaseSHA: p.BaseSHA, ImageDigest: attemptImage, OpenCodeProtocol: attemptProtocol,
 		ExecutionContractVersion: p.ExecutionContractVersion, Agent: p.Agent, ModelProvider: p.ModelProvider,

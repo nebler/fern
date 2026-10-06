@@ -25,11 +25,9 @@ SELECT t.id,t.workspace_id,t.title,t.prompt,t.prompt_sha256,t.repository_id,t.ba
 FROM tasks t JOIN actor_snapshots a ON a.id=t.actor_snapshot_id`
 
 const attemptSelect = `
-SELECT id,task_id,workspace_id,sequence,state,delivery_phase,opencode_session_id,opencode_message_id,prompt_sha256,base_sha,
+SELECT id,task_id,workspace_id,sequence,state,opencode_session_id,opencode_message_id,prompt_sha256,base_sha,
        image_digest,opencode_protocol,execution_contract_version,agent,model_provider,model,
-       deadline,delivery_claim_owner,delivery_claim_expires_at,delivery_started_at,admitted_at,
-       opencode_log_aggregate_id,opencode_log_seq,recovery_reason,terminal_reason,
-        sealed_result_id,revision,created_at,updated_at
+       deadline,terminal_reason,sealed_result_id,revision,created_at,updated_at
 FROM attempts`
 
 const receiptSelect = `
@@ -101,29 +99,21 @@ func scanAttempt(row rowScanner) (Attempt, error) {
 	var a Attempt
 	var promptHash []byte
 	var deadline, createdAt, updatedAt int64
-	var claimOwner, logAggregateID, recoveryReason, terminalReason, sealedResultID sql.NullString
-	var claimExpiresAt, deliveryStartedAt, admittedAt sql.NullInt64
+	var terminalReason, sealedResultID sql.NullString
 	err := row.Scan(
-		&a.ID, &a.TaskID, &a.WorkspaceID, &a.Sequence, &a.State, &a.DeliveryPhase, &a.OpenCodeSessionID, &a.OpenCodeMessageID,
+		&a.ID, &a.TaskID, &a.WorkspaceID, &a.Sequence, &a.State, &a.OpenCodeSessionID, &a.OpenCodeMessageID,
 		&promptHash, &a.BaseSHA, &a.ImageDigest, &a.OpenCodeProtocol, &a.ExecutionContractVersion,
-		&a.Agent, &a.ModelProvider, &a.Model, &deadline, &claimOwner, &claimExpiresAt,
-		&deliveryStartedAt, &admittedAt, &logAggregateID, &a.OpenCodeLogSeq,
-		&recoveryReason, &terminalReason, &sealedResultID, &a.Revision, &createdAt, &updatedAt,
+		&a.Agent, &a.ModelProvider, &a.Model, &deadline,
+		&terminalReason, &sealedResultID, &a.Revision, &createdAt, &updatedAt,
 	)
 	if err != nil {
 		return Attempt{}, err
 	}
-	if len(promptHash) != len(a.PromptSHA256) || a.Sequence <= 0 || !a.State.Valid() || !a.DeliveryPhase.valid() {
+	if len(promptHash) != len(a.PromptSHA256) || a.Sequence <= 0 || !a.State.Valid() {
 		return Attempt{}, ErrCorruptStore
 	}
 	copy(a.PromptSHA256[:], promptHash)
 	a.Deadline, a.CreatedAt, a.UpdatedAt = fromUnixMillis(deadline), fromUnixMillis(createdAt), fromUnixMillis(updatedAt)
-	a.DeliveryClaimExpiresAt = nullableTime(claimExpiresAt)
-	a.DeliveryStartedAt = nullableTime(deliveryStartedAt)
-	a.AdmittedAt = nullableTime(admittedAt)
-	a.DeliveryClaimOwner = nullableString(claimOwner)
-	a.OpenCodeLogAggregateID = nullableString(logAggregateID)
-	a.RecoveryReason = nullableString(recoveryReason)
 	a.TerminalReason = nullableString(terminalReason)
 	if sealedResultID.Valid {
 		a.SealedResultID = task.ResultID(sealedResultID.String)

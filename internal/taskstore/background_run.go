@@ -186,7 +186,7 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 	}
 	if owner.WorkspaceID != p.WorkspaceID || owner.CurrentAttemptID != attempt.ID || owner.State != task.TaskQueued ||
 		attempt.TaskID != owner.ID || attempt.WorkspaceID != owner.WorkspaceID ||
-		attempt.ID != run.AttemptID || attempt.Sequence != run.Generation || attempt.State != task.AttemptPrepared || attempt.DeliveryPhase != DeliveryPhaseNone {
+		attempt.ID != run.AttemptID || attempt.Sequence != run.Generation || attempt.State != task.AttemptPrepared {
 		return BackgroundRunStop{}, ErrInvalidState
 	}
 	actorID, err := ensureActor(ctx, tx, p.Claim.Actor)
@@ -255,7 +255,7 @@ state IN ('setting_up','working','needs_you','uncertain')`, p.ReceiptID, actorID
 		return BackgroundRunStop{}, ErrCorruptStore
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE attempts SET state='failed',terminal_reason=?,revision=revision+1,updated_at=?
-WHERE id=? AND task_id=? AND workspace_id=? AND state='prepared' AND delivery_phase='none' AND revision=?`,
+WHERE id=? AND task_id=? AND workspace_id=? AND state='prepared' AND revision=?`,
 		BackgroundRunStoppedBeforeStart, now, attempt.ID, owner.ID, owner.WorkspaceID, attempt.Revision)
 	if err != nil {
 		return BackgroundRunStop{}, fmt.Errorf("terminalize background run attempt: %w", err)

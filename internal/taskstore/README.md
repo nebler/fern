@@ -170,9 +170,9 @@ Snapshot selection, materialization, and export recovery use the coordinator's
 `MarkBackgroundRunExportRecoveryRequired` APIs. Artifact GC uses
 `ReferencedArtifactManifestSHA256`; unused forwarding names are removed.
 `retainedResultEvidencePayload` and `validateRetainedResultEvidence` describe
-retained-result evidence, not delivery. Persisted attempt delivery columns,
-phases, constraints, and existing lease-error text remain unchanged; this is
-not a schema or event-encoding migration. The `run.State` and `run.Phase` type
+retained-result evidence, not delivery. The legacy attempt delivery and task
+cancellation columns are gone; the existing lease-error text is unchanged.
+The `run.State` and `run.Phase` type
 aliases remain the shared policy boundary rather than duplicate store types.
 
 The wide background-run select still scans evidence and attribution even for

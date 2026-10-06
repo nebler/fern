@@ -99,7 +99,6 @@ type Attempt struct {
 	WorkspaceID              task.WorkspaceID
 	Sequence                 int64
 	State                    task.AttemptState
-	DeliveryPhase            DeliveryPhase
 	OpenCodeSessionID        task.OpenCodeSessionID
 	OpenCodeMessageID        task.OpenCodeMessageID
 	PromptSHA256             [32]byte
@@ -111,13 +110,6 @@ type Attempt struct {
 	ModelProvider            string
 	Model                    string
 	Deadline                 time.Time
-	DeliveryClaimOwner       *string
-	DeliveryClaimExpiresAt   *time.Time
-	DeliveryStartedAt        *time.Time
-	AdmittedAt               *time.Time
-	OpenCodeLogAggregateID   *string
-	OpenCodeLogSeq           int64
-	RecoveryReason           *string
 	TerminalReason           *string
 	SealedResultID           task.ResultID
 	Revision                 int64
@@ -216,28 +208,6 @@ type resultMaterial struct {
 	SealedAt                time.Time
 	Actor                   task.ActorSnapshot
 	CompletionAuthority     SealCompletionAuthority
-}
-
-// DeliveryPhase is the last durably started delivery effect. It is monotonic:
-// reconciliation and cancellation preserve it rather than inferring progress
-// from an attempt state.
-type DeliveryPhase string
-
-const (
-	DeliveryPhaseNone                 DeliveryPhase = "none"
-	DeliveryPhaseClaimed              DeliveryPhase = "claimed"
-	DeliveryPhaseSessionCreateStarted DeliveryPhase = "session_create_started"
-	DeliveryPhaseSessionReady         DeliveryPhase = "session_ready"
-	DeliveryPhasePromptStarted        DeliveryPhase = "prompt_started"
-)
-
-func (p DeliveryPhase) valid() bool {
-	switch p {
-	case DeliveryPhaseNone, DeliveryPhaseClaimed, DeliveryPhaseSessionCreateStarted, DeliveryPhaseSessionReady, DeliveryPhasePromptStarted:
-		return true
-	default:
-		return false
-	}
 }
 
 type Event struct {

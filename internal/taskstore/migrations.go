@@ -119,7 +119,6 @@ CREATE TABLE attempts (
     workspace_id TEXT NOT NULL,
     sequence INTEGER NOT NULL CHECK(sequence > 0),
     state TEXT NOT NULL CHECK(state IN ('prepared','delivering','admitted','running','input_required','cancel_requested','uncertain','recovery_required','succeeded','failed','canceled','superseded')),
-    delivery_phase TEXT NOT NULL CHECK(delivery_phase IN ('none','claimed','session_create_started','session_ready','prompt_started')),
     opencode_session_id TEXT NOT NULL CHECK(
         length(opencode_session_id) = 36 AND substr(opencode_session_id,1,4) = 'ses_' AND
         substr(opencode_session_id,5) NOT GLOB '*[^0-9a-f]*'
@@ -137,33 +136,11 @@ CREATE TABLE attempts (
     model_provider TEXT NOT NULL CHECK(length(CAST(model_provider AS BLOB)) BETWEEN 1 AND 128),
     model TEXT NOT NULL CHECK(length(CAST(model AS BLOB)) BETWEEN 1 AND 256),
     deadline INTEGER NOT NULL,
-    delivery_claim_owner TEXT CHECK(delivery_claim_owner IS NULL OR length(CAST(delivery_claim_owner AS BLOB)) BETWEEN 1 AND 64),
-    delivery_claim_expires_at INTEGER,
-    delivery_started_at INTEGER,
-    admitted_at INTEGER,
-    opencode_log_aggregate_id TEXT CHECK(opencode_log_aggregate_id IS NULL OR length(CAST(opencode_log_aggregate_id AS BLOB)) BETWEEN 1 AND 256),
-    opencode_log_seq INTEGER NOT NULL DEFAULT 0 CHECK(opencode_log_seq >= 0),
-    recovery_reason TEXT CHECK(recovery_reason IS NULL OR length(CAST(recovery_reason AS BLOB)) BETWEEN 1 AND 1000),
     terminal_reason TEXT CHECK(terminal_reason IS NULL OR length(CAST(terminal_reason AS BLOB)) BETWEEN 1 AND 1000),
     revision INTEGER NOT NULL CHECK(revision >= 1),
     created_at INTEGER NOT NULL CHECK(created_at >= 0),
     updated_at INTEGER NOT NULL CHECK(updated_at >= created_at), sealed_result_id TEXT REFERENCES results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     CHECK(deadline > created_at),
-	CHECK(state <> 'prepared' OR delivery_phase = 'none'),
-	CHECK(state <> 'delivering' OR delivery_phase <> 'none'),
-	CHECK(state NOT IN ('admitted','running','input_required','succeeded') OR delivery_phase = 'prompt_started'),
-	CHECK((delivery_phase = 'none') = (delivery_started_at IS NULL)),
-    CHECK((delivery_claim_owner IS NULL) = (delivery_claim_expires_at IS NULL)),
-    CHECK(state = 'delivering' OR (delivery_claim_owner IS NULL AND delivery_claim_expires_at IS NULL)),
-    CHECK(state <> 'delivering' OR (delivery_claim_owner IS NOT NULL AND delivery_started_at IS NOT NULL AND admitted_at IS NULL)),
-    CHECK(state <> 'prepared' OR (delivery_started_at IS NULL AND admitted_at IS NULL)),
-    CHECK(state <> 'admitted' OR (delivery_started_at IS NOT NULL AND admitted_at IS NOT NULL)),
-    CHECK(admitted_at IS NULL OR state NOT IN ('prepared','delivering')),
-    CHECK(delivery_claim_expires_at IS NULL OR delivery_claim_expires_at >= created_at),
-    CHECK(delivery_started_at IS NULL OR delivery_started_at >= created_at),
-    CHECK(delivery_claim_expires_at IS NULL OR delivery_claim_expires_at > delivery_started_at),
-    CHECK(admitted_at IS NULL OR admitted_at >= created_at),
-    CHECK((opencode_log_aggregate_id IS NULL AND opencode_log_seq = 0) OR opencode_log_aggregate_id IS NOT NULL),
     UNIQUE(task_id, sequence),
     UNIQUE(opencode_session_id),
     UNIQUE(opencode_session_id, opencode_message_id),
@@ -173,8 +150,6 @@ CREATE TABLE attempts (
 ) STRICT;
 
 CREATE INDEX attempts_task_state ON attempts(task_id, state);
-
-CREATE INDEX attempts_delivery_claim ON attempts(delivery_claim_expires_at) WHERE delivery_claim_owner IS NOT NULL;
 
 CREATE UNIQUE INDEX attempts_one_effecting_per_workspace ON attempts(workspace_id)
 WHERE state IN ('delivering','admitted','running','input_required','cancel_requested','uncertain','recovery_required');
@@ -251,57 +226,6 @@ CREATE INDEX events_workspace_cursor ON events(workspace_id, cursor);
 CREATE INDEX events_task_cursor ON events(task_id, cursor) WHERE task_id IS NOT NULL;
 
 CREATE INDEX events_attempt_cursor ON events(attempt_id, cursor) WHERE attempt_id IS NOT NULL;
-
-CREATE TRIGGER attempts_delivery_phase_progression BEFORE UPDATE OF delivery_phase ON attempts
-WHEN NEW.delivery_phase <> OLD.delivery_phase
-BEGIN
-    SELECT CASE WHEN NEW.revision <> OLD.revision + 1 OR NEW.updated_at < OLD.updated_at
-        THEN RAISE(ABORT, 'delivery phase update must advance revision') END;
-    SELECT CASE WHEN NOT (
-        (OLD.delivery_phase='none' AND NEW.delivery_phase='claimed' AND OLD.state='prepared' AND NEW.state='delivering' AND
-         EXISTS (SELECT 1 FROM events e WHERE e.attempt_id=OLD.id AND e.type='attempt.delivery_started'
-                 AND e.occurred_at=NEW.updated_at AND json_extract(e.payload,'$.phase')='claimed')) OR
-        (OLD.state='delivering' AND NEW.state='delivering' AND
-         ((OLD.delivery_phase='claimed' AND NEW.delivery_phase='session_create_started') OR
-          (OLD.delivery_phase='session_create_started' AND NEW.delivery_phase='session_ready') OR
-          (OLD.delivery_phase='session_ready' AND NEW.delivery_phase='prompt_started')) AND
-         EXISTS (SELECT 1 FROM events e WHERE e.attempt_id=OLD.id AND e.type='attempt.delivery_phase_advanced'
-                 AND e.occurred_at=NEW.updated_at AND json_extract(e.payload,'$.from')=OLD.delivery_phase
-                 AND json_extract(e.payload,'$.to')=NEW.delivery_phase))
-    ) THEN RAISE(ABORT, 'invalid delivery phase transition') END;
-END;
-
-CREATE TRIGGER attempts_delivery_resume_integrity BEFORE UPDATE OF state ON attempts
-WHEN OLD.state='uncertain' AND NEW.state='delivering'
-BEGIN
-    SELECT CASE WHEN OLD.delivery_phase NOT IN ('claimed','session_create_started','session_ready') OR
-                          NEW.delivery_phase <> OLD.delivery_phase
-        THEN RAISE(ABORT, 'invalid uncertain delivery resume phase') END;
-    SELECT CASE WHEN OLD.delivery_claim_owner IS NOT NULL OR OLD.delivery_claim_expires_at IS NOT NULL OR
-                          NEW.delivery_claim_owner IS NULL OR NEW.delivery_claim_expires_at IS NULL OR
-                          NEW.delivery_started_at IS NOT OLD.delivery_started_at OR NEW.admitted_at IS NOT OLD.admitted_at OR
-                          NEW.recovery_reason IS NOT NULL OR NEW.revision <> OLD.revision + 1 OR NEW.updated_at < OLD.updated_at OR
-                          NEW.delivery_claim_expires_at <= NEW.updated_at OR NEW.delivery_claim_expires_at > NEW.deadline OR
-                          NEW.delivery_claim_expires_at > NEW.updated_at + 300000
-        THEN RAISE(ABORT, 'invalid uncertain delivery resume shape') END;
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1 FROM events ae
-        JOIN events te ON te.workspace_id=ae.workspace_id AND te.task_id=ae.task_id AND
-                          te.attempt_id IS NULL AND te.type='task.running' AND
-                          te.occurred_at=ae.occurred_at AND te.actor_snapshot_id=ae.actor_snapshot_id AND
-                          te.payload=ae.payload AND te.cursor>ae.cursor
-        JOIN actor_snapshots actor ON actor.id=ae.actor_snapshot_id AND actor.actor_type='recovery'
-        WHERE ae.attempt_id=OLD.id AND ae.type='attempt.delivery_resumed' AND ae.occurred_at=NEW.updated_at
-          AND json_extract(ae.payload,'$.attemptId')=OLD.id
-          AND json_extract(ae.payload,'$.phase')=OLD.delivery_phase
-          AND json_extract(ae.payload,'$.leaseOwner')=NEW.delivery_claim_owner
-          AND json_extract(ae.payload,'$.leaseExpiresAtMillis')=NEW.delivery_claim_expires_at
-          AND json_extract(ae.payload,'$.expectedAttemptRevision')=OLD.revision
-          AND json_extract(ae.payload,'$.expectedTaskRevision')=(SELECT revision FROM tasks WHERE id=OLD.task_id)
-          AND EXISTS (SELECT 1 FROM tasks t WHERE t.id=OLD.task_id AND t.workspace_id=OLD.workspace_id
-                      AND t.current_attempt_id=OLD.id AND t.state='uncertain')
-    ) THEN RAISE(ABORT, 'uncertain delivery resume has no exact event') END;
-END;
 
 CREATE TRIGGER receipts_immutable_update BEFORE UPDATE ON receipts
 BEGIN SELECT RAISE(ABORT, 'receipts are immutable'); END;
