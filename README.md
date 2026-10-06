@@ -144,9 +144,8 @@ just successful agent output:
   controls make source and artifact claims inspectable; they are not a claim
   that the complete image supply chain is bit-for-bit reproducible.
 
-Review the [release workflow](.github/workflows/release.yml),
-[coverage gates](scripts/test-critical-coverage.sh), and
-[local performance evidence](docs/performance.md). The machinery demonstrates
+Review the [release workflow](.github/workflows/release.yml)
+and [coverage gates](scripts/test-critical-coverage.sh). The machinery demonstrates
 engineering rigor; it does not erase the deployment and qualification gaps below.
 
 ## Known limitations
@@ -178,7 +177,6 @@ engineering rigor; it does not erase the deployment and qualification gaps below
 - **[Usage guide](docs/usage.md):** setup, run, attach, seal, results, and recovery.
 - **[Phone demo guide](docs/phone-demo.md):** private Tailscale pairing and an end-to-end demo checklist.
 - **[Architecture](ARCHITECTURE.md):** ownership, persistence, and effect boundaries, plus the package map in suggested reading order.
-- **[Review findings](docs/go-review.md):** remaining maintenance and performance concerns.
 
 ## License
 

@@ -1,6 +1,6 @@
 # Release, deployment, and backup tooling
 
-See the [package map](../ARCHITECTURE.md#19-package-map) and [maintenance review](../docs/go-review.md).
+See the [package map](../ARCHITECTURE.md#19-package-map).
 
 This directory mixes one Go package with shell/Python operational tools. In the
 current tree the Go package is **`backupscript`**, declared by `embed.go`; there

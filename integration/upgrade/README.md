@@ -1,6 +1,6 @@
 # Current-schema initialization and offline restoration harness
 
-See the [package map](../../ARCHITECTURE.md#19-package-map) and [maintenance review](../../docs/go-review.md).
+See the [package map](../../ARCHITECTURE.md#19-package-map).
 
 Despite the historical directory name, this `main` package does **not** migrate
 an old supported release. Fern currently declares no first supported baseline.
