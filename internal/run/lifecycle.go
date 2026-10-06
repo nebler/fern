@@ -1,4 +1,3 @@
-// Package run owns the background execution lifecycle, independent of storage.
 package run
 
 type State string

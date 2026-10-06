@@ -1,5 +1,3 @@
-// Package backgroundroute owns the one fixed loopback listener used by the
-// serial disposable Background Run lane.
 package backgroundroute
 
 import (

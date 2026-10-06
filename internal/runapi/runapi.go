@@ -1,4 +1,3 @@
-// Package runapi exposes the plugin-authenticated Background Run boundary.
 package runapi
 
 import (

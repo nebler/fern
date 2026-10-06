@@ -1,6 +1,3 @@
-// Package taskenvdocker implements the disposable Docker environment used by
-// one serial Fern Background Run. It deliberately does not schedule runs or
-// mutate taskstore lifecycle state.
 package taskenvdocker
 
 import (

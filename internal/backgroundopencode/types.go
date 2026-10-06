@@ -1,6 +1,3 @@
-// Package backgroundopencode is the narrow HTTP client for Fern's qualified
-// source-39fb919a054190498f6d5b7985bde231f93ad7a6 Background Run profile.
-// It does not support the persistent workspace OpenCode contract.
 package backgroundopencode
 
 import (

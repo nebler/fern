@@ -1,5 +1,3 @@
-// Package backgroundruncoord serially coordinates the one qualified OpenCode
-// Background Run profile. It intentionally has no generic runtime abstraction.
 package backgroundruncoord
 
 import (

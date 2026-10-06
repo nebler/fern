@@ -1,4 +1,3 @@
-// Package runclientapi exposes terminal-client run discovery and attachment.
 // It is deliberately separate from the plugin-only run submission API.
 package runclientapi
 

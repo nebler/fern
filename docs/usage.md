@@ -28,8 +28,7 @@ real run, an operator must resolve these requirements:
 
 If you do not have these prerequisites, you can build Fern and read/test its
 components, but do not expect the example below to execute a real agent yet.
-The precise storage contract is in the
-[`taskenvdocker` README](../internal/taskenvdocker/README.md#required-linux-quota-storage).
+The precise storage contract is in [Runtime storage contract](#runtime-storage-contract).
 
 ## 1. Understand the two machines
 
@@ -78,13 +77,54 @@ Building is not full host qualification. See the
 They require `FERN_RUNTIME_STORAGE_ROOT` pointing to provisioned quota storage.
 Do not use production run directories for destructive qualification scenarios.
 
+### Runtime storage contract
+
+`runtimeStorageRoot` must be an existing absolute XFS project directory that the
+operator provisions on native Linux amd64/arm64 (kernel 5.14+), used by the
+same-host Docker daemon over its local Unix socket with the same mount namespace
+as Fern. Docker Desktop, remote daemons, other filesystems, accounting-only
+quotas, project zero, missing `PROJINHERIT`, unlimited byte or inode hard limits,
+and XFS realtime inheritance all fail admission.
+
+- Provision a nonzero project ID with `PROJINHERIT` set recursively, enable XFS
+  project accounting **and enforcement**, and set both block and inode hard
+  limits. Fern only reads the quota (`FSGETXATTR`, `Q_XGETQSTATV`,
+  `Q_XGETQUOTA`); it never mounts, assigns projects, or changes quotas.
+- Reading project hard limits with `Q_XGETQUOTA` requires host `CAP_SYS_ADMIN`.
+  Directory ownership, ACLs, `CAP_CHOWN`, or Docker group membership do not
+  grant it, so the stock unprivileged `fern:fern` service cannot execute runs
+  until you make that security decision explicitly.
+- The runtime root must be on a different filesystem from durable `StateRoot`
+  (admission checks device IDs). Keep the task database, CAS, and recovery
+  exports outside the quota, and size hard limits below filesystem capacity:
+  a large finite quota does not prevent ENOSPC from other writers.
+- One shared project bounds all runs, including retained failed runs. Clone
+  trees and per-run OpenCode volume backing directories live under
+  `<runtimeStorageRoot>/background-runs`; the authoritative host key stays in
+  `StateRoot/background-runs/host.key`. Do not change provisioned storage while
+  workers run.
+- An empty `runtimeStorageRoot` permits cleanup of older resources under
+  `StateRoot/background-runs` only. To migrate, drain legacy runs with the old
+  configuration first; do not move existing clone trees, because their
+  path/inode authority would change.
+
+Quota admission happens before any clone, volume, or container effect;
+cleanup does not need quota availability. macOS and local Docker smoke tests do
+not qualify XFS quota enforcement. To smoke-test the worker seccomp,
+read-only-root, and tmpfs policy against an image (without quota backing):
+
+```sh
+FERN_STORAGE_POLICY_SMOKE_IMAGE=fern/opencode-background-source:signed \
+  go test ./internal/taskenvdocker -run TestLiveWorkerStoragePolicy -count=1 -v
+```
+
 ### Prepare the repository and storage
 
 - Put the bound repository on the host, for example `/srv/fern/repository`.
 - Ensure its canonical GitHub remote and numeric repository ID match the binding.
 - Ensure the exact revision you will submit exists and is reachable in the host
   repository. Fern does not accept arbitrary uploaded working-tree edits.
-- Provision `/var/lib/fern-runtime` according to the storage contract above.
+- Provision `/var/lib/fern-runtime` according to the [storage contract](#runtime-storage-contract).
   Keep durable SQLite/CAS and recovery exports outside the runtime filesystem.
 - Reserve space for metadata, Docker images/logs, and retained results. A finite
   project quota does not guarantee that unrelated host writers cannot fill disk.
