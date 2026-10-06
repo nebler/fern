@@ -1,7 +1,6 @@
 package githubapp
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -9,11 +8,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -22,8 +19,8 @@ import (
 )
 
 const (
-	onboardingStateStoreVersion      = 2
-	onboardingStateFileName          = "onboarding-states-v2.json"
+	onboardingStateStoreVersion      = 3
+	onboardingStateFileName          = "onboarding-states.json"
 	maxOnboardingStateFileBytes      = 128 << 10
 	maxOnboardingStates              = 64
 	maxOnboardingActiveStates        = 16
@@ -488,30 +485,26 @@ func (claim CallbackClaim) validFence() bool {
 	return claim.valid && validOnboardingBinding(OnboardingFlowBinding{FlowID: claim.flowID, ReturnPath: claim.returnPath})
 }
 
-type storedOnboardingStateEntry struct {
-	Status           string `json:"status"`
-	StateHash        string `json:"state_sha256"`
-	FlowID           string `json:"flow_id"`
-	ReturnPath       string `json:"return_path"`
-	IssuedAt         string `json:"issued_at"`
-	ExpiresAt        string `json:"expires_at"`
-	CodeHash         string `json:"callback_code_sha256,omitempty"`
-	ClaimHash        string `json:"claim_id_sha256,omitempty"`
-	ClaimedAt        string `json:"claimed_at,omitempty"`
-	ClosedAt         string `json:"closed_at,omitempty"`
-	RetainUntil      string `json:"retain_until,omitempty"`
-	QuarantineReason string `json:"quarantine_reason,omitempty"`
-}
-
-type unsignedOnboardingStateFile struct {
+// onboardingStateFile is the on-disk form. Digests are hex encoded; raw state,
+// callback code, and claim ID values are never stored.
+type onboardingStateFile struct {
 	Version int                          `json:"version"`
 	Entries []storedOnboardingStateEntry `json:"entries"`
 }
 
-type storedOnboardingStateFile struct {
-	Version  int                          `json:"version"`
-	Entries  []storedOnboardingStateEntry `json:"entries"`
-	Checksum string                       `json:"checksum"`
+type storedOnboardingStateEntry struct {
+	Status           string    `json:"status"`
+	StateHash        string    `json:"state_sha256"`
+	FlowID           string    `json:"flow_id"`
+	ReturnPath       string    `json:"return_path"`
+	IssuedAt         time.Time `json:"issued_at"`
+	ExpiresAt        time.Time `json:"expires_at"`
+	CodeHash         string    `json:"callback_code_sha256,omitempty"`
+	ClaimHash        string    `json:"claim_id_sha256,omitempty"`
+	ClaimedAt        time.Time `json:"claimed_at,omitzero"`
+	ClosedAt         time.Time `json:"closed_at,omitzero"`
+	RetainUntil      time.Time `json:"retain_until,omitzero"`
+	QuarantineReason string    `json:"quarantine_reason,omitempty"`
 }
 
 func contextError(ctx context.Context) error {
@@ -692,316 +685,72 @@ func encodeOnboardingStateFile(entries []onboardingStateEntry) ([]byte, error) {
 	if len(entries) > maxOnboardingStates {
 		return nil, ErrOnboardingStateStoreInvalid
 	}
-	ordered := append([]onboardingStateEntry(nil), entries...)
-	sort.Slice(ordered, func(i, j int) bool {
-		return bytes.Compare(ordered[i].stateHash[:], ordered[j].stateHash[:]) < 0
-	})
-	storedEntries := make([]storedOnboardingStateEntry, len(ordered))
-	for i, entry := range ordered {
-		storedEntries[i] = storeOnboardingStateEntry(entry)
-	}
-	payload, err := marshalOnboardingStateFile(storedEntries)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := decodeOnboardingStateFile(payload); err != nil {
-		return nil, ErrOnboardingStateStoreInvalid
-	}
-	return payload, nil
-}
-
-func storeOnboardingStateEntry(entry onboardingStateEntry) storedOnboardingStateEntry {
-	stored := storedOnboardingStateEntry{
-		Status:     entry.status,
-		StateHash:  hex.EncodeToString(entry.stateHash[:]),
-		FlowID:     entry.flowID,
-		ReturnPath: entry.returnPath,
-		IssuedAt:   entry.issuedAt.Format(time.RFC3339Nano),
-		ExpiresAt:  entry.expiresAt.Format(time.RFC3339Nano),
-	}
-	if entry.status != onboardingStateStatusPending {
-		stored.CodeHash = hex.EncodeToString(entry.codeHash[:])
-		stored.ClaimHash = hex.EncodeToString(entry.claimHash[:])
-		stored.ClaimedAt = entry.claimedAt.Format(time.RFC3339Nano)
-	}
-	if entry.status == onboardingStateStatusCompleted || entry.status == onboardingStateStatusQuarantined {
-		stored.ClosedAt = entry.closedAt.Format(time.RFC3339Nano)
-		stored.RetainUntil = entry.retainUntil.Format(time.RFC3339Nano)
-	}
-	if entry.status == onboardingStateStatusQuarantined {
-		stored.QuarantineReason = entry.quarantineReason
-	}
-	return stored
-}
-
-func marshalOnboardingStateFile(entries []storedOnboardingStateEntry) ([]byte, error) {
-	unsigned := unsignedOnboardingStateFile{Version: onboardingStateStoreVersion, Entries: entries}
-	canonical, err := json.Marshal(unsigned)
-	if err != nil {
-		return nil, err
-	}
-	checksum := sha256.Sum256(canonical)
-	payload, err := json.Marshal(storedOnboardingStateFile{
-		Version:  unsigned.Version,
-		Entries:  unsigned.Entries,
-		Checksum: hex.EncodeToString(checksum[:]),
-	})
-	if err != nil {
-		return nil, err
-	}
-	return append(payload, '\n'), nil
-}
-
-func decodeOnboardingStateFile(payload []byte) ([]onboardingStateEntry, error) {
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	opening, err := decoder.Token()
-	if err != nil || opening != json.Delim('{') {
-		return nil, ErrOnboardingStateStoreInvalid
-	}
-	var version int
-	var rawEntries []json.RawMessage
-	var checksum string
-	seen := make(map[string]bool, 3)
-	for decoder.More() {
-		token, err := decoder.Token()
-		name, ok := token.(string)
-		if err != nil || !ok || seen[name] {
-			return nil, ErrOnboardingStateStoreInvalid
+	file := onboardingStateFile{Version: onboardingStateStoreVersion, Entries: make([]storedOnboardingStateEntry, len(entries))}
+	for i, entry := range entries {
+		stored := storedOnboardingStateEntry{
+			Status:           entry.status,
+			StateHash:        hex.EncodeToString(entry.stateHash[:]),
+			FlowID:           entry.flowID,
+			ReturnPath:       entry.returnPath,
+			IssuedAt:         entry.issuedAt,
+			ExpiresAt:        entry.expiresAt,
+			ClaimedAt:        entry.claimedAt,
+			ClosedAt:         entry.closedAt,
+			RetainUntil:      entry.retainUntil,
+			QuarantineReason: entry.quarantineReason,
 		}
-		seen[name] = true
-		switch name {
-		case "version":
-			err = decoder.Decode(&version)
-		case "entries":
-			err = decoder.Decode(&rawEntries)
-		case "checksum":
-			err = decoder.Decode(&checksum)
+		if entry.status != onboardingStateStatusPending {
+			stored.CodeHash = hex.EncodeToString(entry.codeHash[:])
+			stored.ClaimHash = hex.EncodeToString(entry.claimHash[:])
+		}
+		file.Entries[i] = stored
+	}
+	return json.Marshal(file)
+}
+
+// decodeOnboardingStateFile loads Fern's own state file. It checks the schema
+// version and that every digest and status is usable; expired entries are
+// pruned by each transaction after loading.
+func decodeOnboardingStateFile(payload []byte) ([]onboardingStateEntry, error) {
+	var file onboardingStateFile
+	if err := json.Unmarshal(payload, &file); err != nil || file.Version != onboardingStateStoreVersion || len(file.Entries) > maxOnboardingStates {
+		return nil, ErrOnboardingStateStoreInvalid
+	}
+	entries := make([]onboardingStateEntry, len(file.Entries))
+	for i, stored := range file.Entries {
+		switch stored.Status {
+		case onboardingStateStatusPending, onboardingStateStatusClaimed, onboardingStateStatusCompleted, onboardingStateStatusQuarantined:
 		default:
 			return nil, ErrOnboardingStateStoreInvalid
 		}
-		if err != nil {
-			return nil, ErrOnboardingStateStoreInvalid
+		entry := onboardingStateEntry{
+			status:           stored.Status,
+			flowID:           stored.FlowID,
+			returnPath:       stored.ReturnPath,
+			issuedAt:         stored.IssuedAt,
+			expiresAt:        stored.ExpiresAt,
+			claimedAt:        stored.ClaimedAt,
+			closedAt:         stored.ClosedAt,
+			retainUntil:      stored.RetainUntil,
+			quarantineReason: stored.QuarantineReason,
 		}
-	}
-	closing, err := decoder.Token()
-	if err != nil || closing != json.Delim('}') || len(seen) != 3 || version != onboardingStateStoreVersion || rawEntries == nil || len(rawEntries) > maxOnboardingStates {
-		return nil, ErrOnboardingStateStoreInvalid
-	}
-	if token, err := decoder.Token(); err != io.EOF || token != nil {
-		return nil, ErrOnboardingStateStoreInvalid
-	}
-
-	storedEntries := make([]storedOnboardingStateEntry, len(rawEntries))
-	entries := make([]onboardingStateEntry, len(rawEntries))
-	stateHashes := make(map[[sha256.Size]byte]bool, len(rawEntries))
-	codeHashes := make(map[[sha256.Size]byte]bool, len(rawEntries))
-	claimHashes := make(map[[sha256.Size]byte]bool, len(rawEntries))
-	activeFlows := make(map[string]bool, len(rawEntries))
-	active := 0
-	for i, rawEntry := range rawEntries {
-		stored, fields, err := decodeOnboardingStateEntry(rawEntry)
-		if err != nil {
-			return nil, ErrOnboardingStateStoreInvalid
+		ok := decodeDigest(stored.StateHash, &entry.stateHash)
+		if stored.Status != onboardingStateStatusPending {
+			ok = ok && decodeDigest(stored.CodeHash, &entry.codeHash) && decodeDigest(stored.ClaimHash, &entry.claimHash)
 		}
-		storedEntries[i] = stored
-		entry, err := validateStoredOnboardingStateEntry(stored, fields)
-		if err != nil {
+		if !ok {
 			return nil, ErrOnboardingStateStoreInvalid
 		}
 		entries[i] = entry
-		if stateHashes[entry.stateHash] || (i > 0 && bytes.Compare(entries[i-1].stateHash[:], entry.stateHash[:]) >= 0) {
-			return nil, ErrOnboardingStateStoreInvalid
-		}
-		stateHashes[entry.stateHash] = true
-		if entry.status != onboardingStateStatusPending {
-			if codeHashes[entry.codeHash] || claimHashes[entry.claimHash] {
-				return nil, ErrOnboardingStateStoreInvalid
-			}
-			codeHashes[entry.codeHash] = true
-			claimHashes[entry.claimHash] = true
-		}
-		if entry.active() {
-			active++
-			if activeFlows[entry.flowID] {
-				return nil, ErrOnboardingStateStoreInvalid
-			}
-			activeFlows[entry.flowID] = true
-		}
-	}
-	if active > maxOnboardingActiveStates {
-		return nil, ErrOnboardingStateStoreInvalid
-	}
-	canonical, err := marshalOnboardingStateFile(storedEntries)
-	if err != nil || !bytes.Equal(canonical, payload) {
-		return nil, ErrOnboardingStateStoreInvalid
-	}
-	unsigned, err := json.Marshal(unsignedOnboardingStateFile{Version: version, Entries: storedEntries})
-	if err != nil {
-		return nil, ErrOnboardingStateStoreInvalid
-	}
-	wantChecksum := sha256.Sum256(unsigned)
-	checksumBytes, err := hex.DecodeString(checksum)
-	if err != nil || len(checksumBytes) != sha256.Size || hex.EncodeToString(checksumBytes) != checksum || subtle.ConstantTimeCompare(checksumBytes, wantChecksum[:]) != 1 {
-		return nil, ErrOnboardingStateStoreInvalid
 	}
 	return entries, nil
 }
 
-func decodeOnboardingStateEntry(payload []byte) (storedOnboardingStateEntry, map[string]bool, error) {
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	opening, err := decoder.Token()
-	if err != nil || opening != json.Delim('{') {
-		return storedOnboardingStateEntry{}, nil, ErrOnboardingStateStoreInvalid
-	}
-	var entry storedOnboardingStateEntry
-	seen := make(map[string]bool, 12)
-	for decoder.More() {
-		token, err := decoder.Token()
-		name, ok := token.(string)
-		if err != nil || !ok || seen[name] {
-			return storedOnboardingStateEntry{}, nil, ErrOnboardingStateStoreInvalid
-		}
-		seen[name] = true
-		switch name {
-		case "status":
-			err = decoder.Decode(&entry.Status)
-		case "state_sha256":
-			err = decoder.Decode(&entry.StateHash)
-		case "flow_id":
-			err = decoder.Decode(&entry.FlowID)
-		case "return_path":
-			err = decoder.Decode(&entry.ReturnPath)
-		case "issued_at":
-			err = decoder.Decode(&entry.IssuedAt)
-		case "expires_at":
-			err = decoder.Decode(&entry.ExpiresAt)
-		case "callback_code_sha256":
-			err = decoder.Decode(&entry.CodeHash)
-		case "claim_id_sha256":
-			err = decoder.Decode(&entry.ClaimHash)
-		case "claimed_at":
-			err = decoder.Decode(&entry.ClaimedAt)
-		case "closed_at":
-			err = decoder.Decode(&entry.ClosedAt)
-		case "retain_until":
-			err = decoder.Decode(&entry.RetainUntil)
-		case "quarantine_reason":
-			err = decoder.Decode(&entry.QuarantineReason)
-		default:
-			return storedOnboardingStateEntry{}, nil, ErrOnboardingStateStoreInvalid
-		}
-		if err != nil {
-			return storedOnboardingStateEntry{}, nil, ErrOnboardingStateStoreInvalid
-		}
-	}
-	closing, err := decoder.Token()
-	if err != nil || closing != json.Delim('}') {
-		return storedOnboardingStateEntry{}, nil, ErrOnboardingStateStoreInvalid
-	}
-	if token, err := decoder.Token(); err != io.EOF || token != nil {
-		return storedOnboardingStateEntry{}, nil, ErrOnboardingStateStoreInvalid
-	}
-	return entry, seen, nil
-}
-
-func validateStoredOnboardingStateEntry(stored storedOnboardingStateEntry, fields map[string]bool) (onboardingStateEntry, error) {
-	var entry onboardingStateEntry
-	required := []string{"status", "state_sha256", "flow_id", "return_path", "issued_at", "expires_at"}
-	for _, name := range required {
-		if !fields[name] {
-			return entry, ErrOnboardingStateStoreInvalid
-		}
-	}
-	stateHash, err := decodeCanonicalDigest(stored.StateHash)
-	issuedAt, issuedErr := parseCanonicalUTC(stored.IssuedAt)
-	expiresAt, expiresErr := parseCanonicalUTC(stored.ExpiresAt)
-	if err != nil || issuedErr != nil || expiresErr != nil || !validOnboardingInterval(issuedAt, expiresAt) || !validOnboardingBinding(OnboardingFlowBinding{FlowID: stored.FlowID, ReturnPath: stored.ReturnPath}) {
-		return entry, ErrOnboardingStateStoreInvalid
-	}
-	entry = onboardingStateEntry{status: stored.Status, stateHash: stateHash, flowID: stored.FlowID, returnPath: stored.ReturnPath, issuedAt: issuedAt, expiresAt: expiresAt}
-	claimFields := []string{"callback_code_sha256", "claim_id_sha256", "claimed_at"}
-	closedFields := []string{"closed_at", "retain_until"}
-	switch stored.Status {
-	case onboardingStateStatusPending:
-		if len(fields) != len(required) {
-			return onboardingStateEntry{}, ErrOnboardingStateStoreInvalid
-		}
-		return entry, nil
-	case onboardingStateStatusClaimed, onboardingStateStatusCompleted, onboardingStateStatusQuarantined:
-		for _, name := range claimFields {
-			if !fields[name] {
-				return onboardingStateEntry{}, ErrOnboardingStateStoreInvalid
-			}
-		}
-		entry.codeHash, err = decodeCanonicalDigest(stored.CodeHash)
-		if err != nil {
-			return onboardingStateEntry{}, ErrOnboardingStateStoreInvalid
-		}
-		entry.claimHash, err = decodeCanonicalDigest(stored.ClaimHash)
-		if err != nil {
-			return onboardingStateEntry{}, ErrOnboardingStateStoreInvalid
-		}
-		entry.claimedAt, err = parseCanonicalUTC(stored.ClaimedAt)
-		if err != nil || entry.claimedAt.Before(issuedAt) || !entry.claimedAt.Before(expiresAt) {
-			return onboardingStateEntry{}, ErrOnboardingStateStoreInvalid
-		}
-	}
-	if stored.Status == onboardingStateStatusClaimed {
-		if len(fields) != len(required)+len(claimFields) {
-			return onboardingStateEntry{}, ErrOnboardingStateStoreInvalid
-		}
-		return entry, nil
-	}
-	for _, name := range closedFields {
-		if !fields[name] {
-			return onboardingStateEntry{}, ErrOnboardingStateStoreInvalid
-		}
-	}
-	entry.closedAt, err = parseCanonicalUTC(stored.ClosedAt)
-	if err != nil {
-		return onboardingStateEntry{}, ErrOnboardingStateStoreInvalid
-	}
-	entry.retainUntil, err = parseCanonicalUTC(stored.RetainUntil)
-	wantRetainUntil := expiresAt.Add(maxOnboardingReplayWindow)
-	if err != nil || entry.closedAt.Before(entry.claimedAt) || entry.closedAt.After(expiresAt) || !entry.retainUntil.Equal(wantRetainUntil) || !entry.retainUntil.After(entry.closedAt) {
-		return onboardingStateEntry{}, ErrOnboardingStateStoreInvalid
-	}
-	switch stored.Status {
-	case onboardingStateStatusCompleted:
-		if len(fields) != len(required)+len(claimFields)+len(closedFields) {
-			return onboardingStateEntry{}, ErrOnboardingStateStoreInvalid
-		}
-	case onboardingStateStatusQuarantined:
-		if len(fields) != len(required)+len(claimFields)+len(closedFields)+1 || !fields["quarantine_reason"] {
-			return onboardingStateEntry{}, ErrOnboardingStateStoreInvalid
-		}
-		if stored.QuarantineReason != quarantineReasonClaimExpired && !validCallbackQuarantineReason(CallbackQuarantineReason(stored.QuarantineReason)) {
-			return onboardingStateEntry{}, ErrOnboardingStateStoreInvalid
-		}
-		if stored.QuarantineReason == quarantineReasonClaimExpired && !entry.closedAt.Equal(expiresAt) {
-			return onboardingStateEntry{}, ErrOnboardingStateStoreInvalid
-		}
-		entry.quarantineReason = stored.QuarantineReason
-	default:
-		return onboardingStateEntry{}, ErrOnboardingStateStoreInvalid
-	}
-	return entry, nil
-}
-
-func decodeCanonicalDigest(value string) ([sha256.Size]byte, error) {
-	var digest [sha256.Size]byte
+func decodeDigest(value string, digest *[sha256.Size]byte) bool {
 	decoded, err := hex.DecodeString(value)
-	if err != nil || len(decoded) != sha256.Size || hex.EncodeToString(decoded) != value {
-		return digest, ErrOnboardingStateStoreInvalid
+	if err != nil || len(decoded) != sha256.Size {
+		return false
 	}
 	copy(digest[:], decoded)
-	return digest, nil
-}
-
-func parseCanonicalUTC(value string) (time.Time, error) {
-	parsed, err := time.Parse(time.RFC3339Nano, value)
-	if err != nil || parsed.Location() != time.UTC || parsed.Format(time.RFC3339Nano) != value {
-		return time.Time{}, ErrOnboardingStateStoreInvalid
-	}
-	return parsed, nil
+	return true
 }

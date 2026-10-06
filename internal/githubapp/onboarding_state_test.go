@@ -357,7 +357,7 @@ func TestOnboardingStateStoreCapsAndPrunesAllStatuses(t *testing.T) {
 	}
 }
 
-func TestOnboardingStateStoreRejectsMalformedStatusChecksumAndDuplicates(t *testing.T) {
+func TestOnboardingStateStoreRejectsMalformedFile(t *testing.T) {
 	now := testOnboardingTime()
 	pending := onboardingStateEntry{
 		status:     onboardingStateStatusPending,
@@ -367,70 +367,31 @@ func TestOnboardingStateStoreRejectsMalformedStatusChecksumAndDuplicates(t *test
 		issuedAt:   now,
 		expiresAt:  now.Add(time.Minute),
 	}
-	claimed := pending
-	claimed.status = onboardingStateStatusClaimed
-	claimed.stateHash = mustTestOnboardingHash(t, testOnboardingState(121))
-	claimed.flowID = testOnboardingBinding(121).FlowID
-	claimed.returnPath = testOnboardingBinding(121).ReturnPath
-	claimed.codeHash = testCallbackCodeDigest("malformed-code")
-	claimed.claimHash = testCallbackCodeDigest("malformed-claim")
-	claimed.claimedAt = now
-	validPayload := mustEncodeTestEntries(t, pending)
-	validClaimed := storeOnboardingStateEntry(claimed)
-
-	missingCode := validClaimed
-	missingCode.CodeHash = ""
-	pendingWithClaim := storeOnboardingStateEntry(pending)
-	pendingWithClaim.CodeHash = hexDigest(testCallbackCodeDigest("extra"))
-	badClosed := claimed
-	badClosed.status = onboardingStateStatusCompleted
-	badClosed.closedAt = now.Add(2 * time.Minute)
-	badClosed.retainUntil = pending.expiresAt.Add(maxOnboardingReplayWindow)
-	duplicateState := pending
-	duplicateState.flowID = testOnboardingBinding(122).FlowID
-	duplicateState.returnPath = testOnboardingBinding(122).ReturnPath
-	duplicateCode := claimed
-	duplicateCode.stateHash = mustTestOnboardingHash(t, testOnboardingState(123))
-	duplicateCode.flowID = testOnboardingBinding(123).FlowID
-	duplicateCode.returnPath = testOnboardingBinding(123).ReturnPath
-	duplicateCode.claimHash = testCallbackCodeDigest("another-claim")
+	validPayload := string(mustEncodeTestEntries(t, pending))
+	stateHash := hexDigest(pending.stateHash)
 
 	secret := "malformed-file-secret"
 	tests := []struct {
 		name    string
-		payload []byte
+		payload string
 	}{
-		{name: "malformed", payload: []byte(`{"version":` + secret)},
-		{name: "oversized", payload: []byte(strings.Repeat(secret, maxOnboardingStateFileBytes/len(secret)+2))},
-		{name: "unknown version", payload: []byte(strings.Replace(string(validPayload), `"version":2`, `"version":3`, 1))},
-		{name: "unknown top field", payload: []byte(strings.Replace(string(validPayload), `,"checksum"`, `,"unknown":"`+secret+`","checksum"`, 1))},
-		{name: "duplicate top field", payload: []byte(strings.Replace(string(validPayload), `"version":2`, `"version":2,"version":2`, 1))},
-		{name: "duplicate entry field", payload: []byte(strings.Replace(string(validPayload), `"flow_id":`, `"flow_id":"duplicate","flow_id":`, 1))},
-		{name: "checksum mismatch", payload: []byte(strings.Replace(string(validPayload), `"return_path":"/github/app/return/120"`, `"return_path":"/github/app/return/124"`, 1))},
-		{name: "noncanonical whitespace", payload: append([]byte(" "), validPayload...)},
-		{name: "unknown status", payload: mustMarshalTestStored(t, func() []storedOnboardingStateEntry {
-			e := storeOnboardingStateEntry(pending)
-			e.Status = "unknown"
-			return []storedOnboardingStateEntry{e}
-		}())},
-		{name: "claimed missing code", payload: mustMarshalTestStored(t, []storedOnboardingStateEntry{missingCode})},
-		{name: "pending extra field", payload: mustMarshalTestStored(t, []storedOnboardingStateEntry{pendingWithClaim})},
-		{name: "invalid closed timestamp", payload: mustMarshalTestStored(t, []storedOnboardingStateEntry{storeOnboardingStateEntry(badClosed)})},
-		{name: "duplicate state digest", payload: mustMarshalTestStored(t, sortedTestStoredEntries(storeOnboardingStateEntry(pending), storeOnboardingStateEntry(duplicateState)))},
-		{name: "duplicate code digest", payload: mustMarshalTestStored(t, sortedTestStoredEntries(storeOnboardingStateEntry(claimed), storeOnboardingStateEntry(duplicateCode)))},
-		{name: "unsorted records", payload: mustMarshalTestStored(t, reverseTestStoredEntries(storeOnboardingStateEntry(claimed), storeOnboardingStateEntry(pending)))},
+		{name: "malformed", payload: `{"version":` + secret},
+		{name: "oversized", payload: strings.Repeat(secret, maxOnboardingStateFileBytes/len(secret)+2)},
+		{name: "unknown version", payload: strings.Replace(validPayload, `"version":3`, `"version":2`, 1)},
+		{name: "unknown status", payload: strings.Replace(validPayload, `"status":"pending"`, `"status":"`+secret+`"`, 1)},
+		{name: "invalid digest", payload: strings.Replace(validPayload, stateHash, stateHash[2:], 1)},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			store, directory := newTestOnboardingStateStore(t)
-			if err := os.WriteFile(filepath.Join(directory, onboardingStateFileName), test.payload, 0o600); err != nil {
+			if err := os.WriteFile(filepath.Join(directory, onboardingStateFileName), []byte(test.payload), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			err := store.Begin(context.Background(), testOnboardingState(125), testOnboardingBinding(125), now, now.Add(time.Minute))
 			if !errors.Is(err, ErrOnboardingStateStoreInvalid) {
 				t.Fatalf("error = %v", err)
 			}
-			assertRedacted(t, err, secret, string(test.payload))
+			assertRedacted(t, err, secret, test.payload)
 		})
 	}
 }
@@ -698,29 +659,6 @@ func mustEncodeTestEntries(t *testing.T, entries ...onboardingStateEntry) []byte
 		t.Fatal(err)
 	}
 	return payload
-}
-
-func mustMarshalTestStored(t *testing.T, entries []storedOnboardingStateEntry) []byte {
-	t.Helper()
-	payload, err := marshalOnboardingStateFile(entries)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return payload
-}
-
-func reverseTestStoredEntries(entries ...storedOnboardingStateEntry) []storedOnboardingStateEntry {
-	if entries[0].StateHash < entries[1].StateHash {
-		entries[0], entries[1] = entries[1], entries[0]
-	}
-	return entries
-}
-
-func sortedTestStoredEntries(entries ...storedOnboardingStateEntry) []storedOnboardingStateEntry {
-	if entries[0].StateHash > entries[1].StateHash {
-		entries[0], entries[1] = entries[1], entries[0]
-	}
-	return entries
 }
 
 func hexDigest(digest [sha256.Size]byte) string {
