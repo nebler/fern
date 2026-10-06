@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -420,10 +419,6 @@ type routeTransport struct {
 	endpoint           string
 	dial               func(context.Context, string, string) (net.Conn, error)
 	username, password string
-	// configAttested records that the full container configuration was
-	// attested for this exact runtime. Configuration cannot change without a
-	// new runtime epoch, so later dials re-check only the runtime identity.
-	configAttested atomic.Bool
 }
 
 func (transport *routeTransport) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -463,12 +458,8 @@ func (transport *routeTransport) attest(ctx context.Context) error {
 	if err := requireRuntime(info, transport.runtime); err != nil {
 		return err
 	}
-	if !transport.configAttested.Load() {
-		if err := transport.provider.attestContainer(transport.run, transport.digest, info, true); err != nil {
-			return &IdentityError{Resource: "container", Identity: transport.run.ContainerIdentity, Reason: err.Error()}
-		}
-	} else if info.State == nil || !info.State.Running || info.State.Paused || info.State.Restarting || info.State.Dead {
-		return &IdentityError{Resource: "container", Identity: transport.run.ContainerIdentity, Reason: "routed runtime is not exactly running"}
+	if err := transport.provider.attestContainer(transport.run, transport.digest, info, true); err != nil {
+		return &IdentityError{Resource: "container", Identity: transport.run.ContainerIdentity, Reason: err.Error()}
 	}
 	port, err := hostPort(info)
 	if err != nil {
@@ -477,7 +468,6 @@ func (transport *routeTransport) attest(ctx context.Context) error {
 	if port != transport.hostPort {
 		return &IdentityError{Resource: "endpoint", Identity: transport.run.EndpointIdentity, Reason: "published port differs from routed runtime"}
 	}
-	transport.configAttested.Store(true)
 	return nil
 }
 

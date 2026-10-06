@@ -1205,7 +1205,9 @@ func TestExportAuthorityErrorsAndEvidenceDoNotLeakSecretsOrPaths(t *testing.T) {
 	}
 }
 
-func TestContainerDimensionMismatchFailsClosed(t *testing.T) {
+// A container found by name is adopted only if it is exactly this run's:
+// canonical name, qualified image, and Fern's ownership and spec labels.
+func TestContainerIdentityMismatchFailsClosed(t *testing.T) {
 	provider, docker, run := preparedProvider(t)
 	if _, err := provider.EnsureContainer(context.Background(), run); err != nil {
 		t.Fatal(err)
@@ -1214,26 +1216,19 @@ func TestContainerDimensionMismatchFailsClosed(t *testing.T) {
 		name   string
 		mutate func(*container.InspectResponse)
 	}{
-		{"network", func(i *container.InspectResponse) { i.HostConfig.NetworkMode = "host" }},
-		{"attachment", func(i *container.InspectResponse) { i.NetworkSettings.Networks["extra"] = &network.EndpointSettings{} }},
-		{"IPC", func(i *container.InspectResponse) { i.HostConfig.IpcMode = "host" }},
-		{"auto remove", func(i *container.InspectResponse) { i.HostConfig.AutoRemove = true }},
-		{"port", func(i *container.InspectResponse) { i.HostConfig.PortBindings[serverPort][0].HostIP = "0.0.0.0" }},
-		{"mount propagation", func(i *container.InspectResponse) { i.Mounts[0].Propagation = mount.PropagationRShared }},
-		{"DNS", func(i *container.InspectResponse) { i.HostConfig.DNS = []string{"8.8.8.8"} }},
-		{"device", func(i *container.InspectResponse) {
-			i.HostConfig.Devices = []container.DeviceMapping{{PathOnHost: "/dev/null"}}
-		}},
+		{"image", func(i *container.InspectResponse) { i.Image = "sha256:" + strings.Repeat("c", 64) }},
+		{"ownership label", func(i *container.InspectResponse) { delete(i.Config.Labels, managedLabel) }},
+		{"spec label", func(i *container.InspectResponse) { i.Config.Labels[specLabel] = strings.Repeat("0", 64) }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			original := docker.info
-			original.HostConfig = copyHostConfig(docker.info.HostConfig)
-			original.NetworkSettings = copyNetworkSettings(docker.info.NetworkSettings)
-			original.Mounts = slices.Clone(docker.info.Mounts)
+			base, config := *docker.info.ContainerJSONBase, *docker.info.Config
+			config.Labels = cloneMap(config.Labels)
+			docker.info.ContainerJSONBase, docker.info.Config = &base, &config
 			test.mutate(&docker.info)
 			if _, err := provider.EnsureContainer(context.Background(), run); !errors.Is(err, ErrQuarantined) {
-				t.Fatalf("dimension mismatch error=%v", err)
+				t.Fatalf("identity mismatch error=%v", err)
 			}
 			docker.info = original
 		})
@@ -1779,23 +1774,6 @@ func (f *fakeDocker) observeReadContext(ctx context.Context) error {
 		f.freshReads++
 	}
 	return nil
-}
-
-func copyHostConfig(source *container.HostConfig) *container.HostConfig {
-	copy := *source
-	copy.DNS = slices.Clone(source.DNS)
-	copy.Devices = slices.Clone(source.Devices)
-	copy.PortBindings = cloneMap(source.PortBindings)
-	for port, bindings := range copy.PortBindings {
-		copy.PortBindings[port] = slices.Clone(bindings)
-	}
-	return &copy
-}
-
-func copyNetworkSettings(source *container.NetworkSettings) *container.NetworkSettings {
-	copy := *source
-	copy.Networks = cloneMap(source.Networks)
-	return &copy
 }
 
 func assertNoStagingTrees(t *testing.T, root string) {

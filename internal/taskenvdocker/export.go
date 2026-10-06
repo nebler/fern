@@ -192,7 +192,7 @@ func (p *Provider) requireExportWriterInactive(ctx context.Context, run taskstor
 	if info.State == nil || info.State.Running || info.State.Paused || info.State.Restarting {
 		return exportIdentityError(run, "writer is active")
 	}
-	if err := p.attestContainerForCleanup(run, digest, info, false); err != nil {
+	if err := p.attestContainer(run, digest, info, false); err != nil {
 		return exportIdentityError(run, "container attestation differs from the writer fence")
 	}
 	if kind == WriterFenceCreatedNeverStarted {

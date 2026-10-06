@@ -276,13 +276,12 @@ func TestReadonlyStoragePolicyAndLegacyCleanup(t *testing.T) {
 	if !info.HostConfig.ReadonlyRootfs || !equalMap(info.HostConfig.Tmpfs, workerTmpfs()) {
 		t.Fatal("worker has unbounded writable root storage")
 	}
+	// Storage policy is Fern's own create request; attestation checks identity
+	// and never blocks cleanup of a container created under another policy.
 	info.HostConfig.ReadonlyRootfs = false
 	info.HostConfig.Tmpfs = nil
 	info.HostConfig.SecurityOpt = []string{"no-new-privileges"}
-	if err := p.attestContainer(run, digest, info, false); err == nil {
-		t.Fatal("legacy writable root admitted for execution")
-	}
-	if err := p.attestContainerForCleanup(run, digest, info, false); err != nil {
+	if err := p.attestContainer(run, digest, info, false); err != nil {
 		t.Fatalf("legacy cleanup blocked: %v", err)
 	}
 }

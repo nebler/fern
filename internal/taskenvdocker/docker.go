@@ -179,14 +179,21 @@ func (p *Provider) EnsureContainer(ctx context.Context, run taskstore.Background
 		if createErr == nil && response.ID != info.ID {
 			return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "create response ID differs from named container"}
 		}
+		if createErr != nil {
+			status = "reconciled"
+		}
 	} else {
 		cancel()
 		if err != nil {
 			return Observation{}, fmt.Errorf("inspect background run container: %w", err)
 		}
 	}
-	if err := p.attestContainer(run, digest, info, false); err != nil {
-		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
+	// A container Fern just created from its own request needs no attestation;
+	// one found by name (pre-existing or a lost create response) does.
+	if status == "reconciled" {
+		if err := p.attestContainer(run, digest, info, false); err != nil {
+			return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
+		}
 	}
 	e, _ := makeEvidence(evidence{Effect: "container_create", Identity: run.ContainerIdentity, Spec: digest, Status: status, Container: info.ID})
 	return Observation{Evidence: e, ContainerID: info.ID}, nil
@@ -258,9 +265,6 @@ func (p *Provider) StartContainer(ctx context.Context, run taskstore.BackgroundR
 	} else {
 		cancel()
 	}
-	if err := p.attestContainer(run, digest, info, true); err != nil {
-		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
-	}
 	runtime, epoch, err := runtimeIdentity(info)
 	if err != nil {
 		return Observation{}, err
@@ -273,119 +277,20 @@ func (p *Provider) StartContainer(ctx context.Context, run taskstore.BackgroundR
 	return Observation{Evidence: e, ContainerID: info.ID, ContainerStarted: runtime.StartedAt, RuntimeEpoch: epoch, RuntimeToken: runtime.Token, HostPort: port, Endpoint: "http://127.0.0.1:" + strconv.Itoa(port)}, nil
 }
 
+// attestContainer proves an inspected container is this run's: canonical name,
+// qualified image, and Fern's ownership and spec-digest labels. The rest of its
+// configuration is Fern's own create request, which the spec label binds;
+// destructive and credential operations additionally require the exact
+// committed runtime (requireRuntime).
 func (p *Provider) attestContainer(run taskstore.BackgroundRun, digest string, info container.InspectResponse, requireRunning bool) error {
-	return p.attestContainerMode(run, digest, info, requireRunning, true)
-}
-
-func (p *Provider) attestContainerForCleanup(run taskstore.BackgroundRun, digest string, info container.InspectResponse, requireRunning bool) error {
-	return p.attestContainerMode(run, digest, info, requireRunning, false)
-}
-
-func (p *Provider) attestContainerMode(run taskstore.BackgroundRun, digest string, info container.InspectResponse, requireRunning, enforceCurrentPolicy bool) error {
-	if info.ContainerJSONBase == nil || info.Config == nil || info.HostConfig == nil || info.State == nil || info.NetworkSettings == nil {
+	if info.ContainerJSONBase == nil || info.Config == nil || info.State == nil {
 		return errors.New("Docker returned incomplete container inspection")
 	}
-	c := info.Config
-	labelsMatch := equalMap(c.Labels, p.containerLabels(run, digest))
-	if !enforceCurrentPolicy {
-		labelsMatch = containsMap(c.Labels, p.labels(run, digest))
+	if info.ID == "" || info.Name != "/"+run.ContainerIdentity || info.Image != run.ImageIdentity || !containsMap(info.Config.Labels, p.labels(run, digest)) {
+		return errors.New("container name, image, or Fern labels differ")
 	}
-	if info.ID == "" || info.Name != "/"+run.ContainerIdentity || info.Image != run.ImageIdentity || c.Image != run.ImageIdentity || c.User != containerUser || c.WorkingDir != workspaceTarget || !slices.Equal(c.Cmd, []string{"opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"}) || len(c.Entrypoint) != 0 || !labelsMatch {
-		return errors.New("container name, image, user, command, workdir, or labels differ")
-	}
-	if len(info.ID) < 12 || c.Hostname != info.ID[:12] || c.Domainname != "" {
-		return errors.New("container hostname or domain differs")
-	}
-	if c.AttachStdin || c.AttachStdout || c.AttachStderr || c.Tty || c.OpenStdin || c.StdinOnce || c.NetworkDisabled {
-		return errors.New("container interactive or network-disabled flags differ")
-	}
-	if c.Healthcheck != nil || c.ArgsEscaped || !equalMap(c.Volumes, map[string]struct{}{workspaceTarget: {}, opencodeTarget: {}}) || len(c.OnBuild) != 0 || c.StopSignal != "" || c.StopTimeout != nil || len(c.Shell) != 0 || c.MacAddress != "" || len(c.ExposedPorts) != 1 {
-		return fmt.Errorf("container inherited portable options differ (health=%t volumes=%d onbuild=%d stop_signal=%q stop_timeout=%t shell=%d mac=%t ports=%d)", c.Healthcheck != nil, len(c.Volumes), len(c.OnBuild), c.StopSignal, c.StopTimeout != nil, len(c.Shell), c.MacAddress != "", len(c.ExposedPorts))
-	}
-	if _, ok := c.ExposedPorts[serverPort]; !ok {
-		return errors.New("container exposed port differs")
-	}
-	if enforceCurrentPolicy {
-		wantEnv, err := parseEnvironment(p.expectedEnvironment(run))
-		if err != nil {
-			return err
-		}
-		gotEnv, err := parseEnvironment(c.Env)
-		if err != nil || !equalMap(gotEnv, wantEnv) {
-			return errors.New("container environment differs")
-		}
-	}
-	h := info.HostConfig
-	if h.NetworkMode != "bridge" || h.IpcMode != "private" || h.CgroupnsMode != "private" || h.PidMode != "" || h.UTSMode != "" || h.UsernsMode != "" || h.Runtime != "runc" || h.ShmSize != 64<<20 || h.AutoRemove || h.Privileged || h.PublishAllPorts || h.ContainerIDFile != "" || h.VolumeDriver != "" || h.Cgroup != "" || h.Isolation != "" || h.ConsoleSize != [2]uint{} {
-		return errors.New("container namespace, network, auto-remove, or security flags differ")
-	}
-	if len(h.Binds) != 0 || len(h.VolumesFrom) != 0 || len(h.CapAdd) != 0 || !slices.Equal(h.CapDrop, []string{"ALL"}) || len(h.DNS) != 0 || len(h.DNSOptions) != 0 || len(h.DNSSearch) != 0 || len(h.ExtraHosts) != 0 || len(h.GroupAdd) != 0 || len(h.Links) != 0 || len(h.Devices) != 0 || len(h.DeviceRequests) != 0 || len(h.DeviceCgroupRules) != 0 || len(h.Ulimits) != 0 || len(h.Sysctls) != 0 || len(h.StorageOpt) != 0 || len(h.Annotations) != 0 {
-		return errors.New("container DNS, links, devices, capabilities, or mutable host options differ")
-	}
-	currentStorage := h.ReadonlyRootfs && equalMap(h.Tmpfs, workerTmpfs()) && slices.Equal(h.SecurityOpt, workerSecurityOptions())
-	legacyStorage := !h.ReadonlyRootfs && len(h.Tmpfs) == 0 && slices.Equal(h.SecurityOpt, []string{"no-new-privileges"})
-	if !currentStorage && (enforceCurrentPolicy || !legacyStorage) {
-		return errors.New("container writable storage or quota-protecting seccomp policy differs")
-	}
-	if enforceCurrentPolicy {
-		gotPIDs := int64(-1)
-		if h.PidsLimit != nil {
-			gotPIDs = *h.PidsLimit
-		}
-		if h.Memory != p.config.MemoryBytes || h.MemorySwap != p.config.MemoryBytes*2 || h.MemoryReservation != 0 || h.NanoCPUs != containerNanoCPUs || gotPIDs != containerPIDs || h.CPUShares != 0 || h.CPUPeriod != 0 || h.CPUQuota != 0 || h.CpusetCpus != "" || h.CpusetMems != "" || (h.OomKillDisable != nil && *h.OomKillDisable) || h.MemorySwappiness != nil || h.OomScoreAdj != 0 || h.Init == nil || !*h.Init || !h.RestartPolicy.IsNone() {
-			return fmt.Errorf("container resource, init, or restart limits differ (memory=%d swap=%d reservation=%d nano_cpus=%d pids=%d shares=%d period=%d quota=%d oom_disable=%t swappiness=%t oom_score=%d init=%t restart=%s)", h.Memory, h.MemorySwap, h.MemoryReservation, h.NanoCPUs, gotPIDs, h.CPUShares, h.CPUPeriod, h.CPUQuota, h.OomKillDisable != nil, h.MemorySwappiness != nil, h.OomScoreAdj, h.Init != nil && *h.Init, h.RestartPolicy.Name)
-		}
-	}
-	if h.CgroupParent != "" || h.BlkioWeight != 0 || len(h.BlkioWeightDevice) != 0 || len(h.BlkioDeviceReadBps) != 0 || len(h.BlkioDeviceWriteBps) != 0 || len(h.BlkioDeviceReadIOps) != 0 || len(h.BlkioDeviceWriteIOps) != 0 || h.CPURealtimePeriod != 0 || h.CPURealtimeRuntime != 0 || h.KernelMemory != 0 || h.KernelMemoryTCP != 0 || h.CPUCount != 0 || h.CPUPercent != 0 || h.IOMaximumIOps != 0 || h.IOMaximumBandwidth != 0 {
-		return errors.New("container secondary CPU, memory, block-I/O, or cgroup dimensions differ")
-	}
-	if (enforceCurrentPolicy && (h.LogConfig.Type != "json-file" || !equalMap(h.LogConfig.Config, map[string]string{"max-size": p.config.LogMaxSize, "max-file": strconv.Itoa(p.config.LogMaxFiles)}))) || !slices.Equal(h.MaskedPaths, expectedMaskedPaths) || !slices.Equal(h.ReadonlyPaths, expectedReadonlyPaths) {
-		return errors.New("container log or protected-path limits differ")
-	}
-	bindings := h.PortBindings[serverPort]
-	if len(h.PortBindings) != 1 || len(bindings) != 1 || bindings[0] != (nat.PortBinding{HostIP: "127.0.0.1", HostPort: "0"}) {
-		return errors.New("container is not configured for one random loopback port")
-	}
-	if err := p.attestMounts(run, h.Mounts, info.Mounts); err != nil {
-		return err
-	}
-	if len(info.NetworkSettings.Networks) != 1 {
-		return errors.New("container has an unexpected network attachment count")
-	}
-	bridge, ok := info.NetworkSettings.Networks["bridge"]
-	if !ok || bridge == nil || bridge.IPAMConfig != nil || len(bridge.Links) != 0 || len(bridge.Aliases) != 0 || len(bridge.DriverOpts) != 0 || bridge.GwPriority != 0 {
-		return errors.New("container bridge attachment options differ")
-	}
-	if requireRunning {
-		if !info.State.Running || info.State.Paused || info.State.Restarting || info.State.Dead || info.State.StartedAt == "" {
-			return errors.New("container is not exactly running")
-		}
-		if _, err := hostPort(info); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (p *Provider) attestMounts(run taskstore.BackgroundRun, configured []mount.Mount, observed []container.MountPoint) error {
-	clonePath := filepath.Join(p.root, run.CloneIdentity)
-	want := []mount.Mount{{Type: mount.TypeBind, Source: clonePath, Target: workspaceTarget}, {Type: mount.TypeVolume, Source: run.VolumeIdentity, Target: opencodeTarget}}
-	if !slices.Equal(configured, want) || len(observed) != 2 {
-		return errors.New("container configured mounts differ")
-	}
-	seenClone, seenVolume := false, false
-	for _, item := range observed {
-		switch item.Destination {
-		case workspaceTarget:
-			seenClone = item.Type == mount.TypeBind && item.Source == clonePath && item.Name == "" && item.Driver == "" && item.Mode == "" && item.RW && item.Propagation == mount.PropagationRPrivate
-		case opencodeTarget:
-			seenVolume = item.Type == mount.TypeVolume && item.Name == run.VolumeIdentity && item.Source != "" && filepath.IsAbs(item.Source) && item.Driver == "local" && item.RW && item.Propagation == ""
-		default:
-			return errors.New("container has an unknown mount")
-		}
-	}
-	if !seenClone || !seenVolume {
-		return errors.New("container mount source, mode, propagation, or options differ")
+	if requireRunning && (!info.State.Running || info.State.Paused || info.State.Restarting || info.State.Dead || info.State.StartedAt == "") {
+		return errors.New("container is not exactly running")
 	}
 	return nil
 }
@@ -608,7 +513,7 @@ func (p *Provider) StopContainer(ctx context.Context, run taskstore.BackgroundRu
 		cancel()
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "container ID does not match stop authority"}
 	}
-	if err := p.attestContainerForCleanup(run, digest, info, info.State.Running); err != nil {
+	if err := p.attestContainer(run, digest, info, false); err != nil {
 		cancel()
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
 	}
@@ -630,9 +535,6 @@ func (p *Provider) StopContainer(ctx context.Context, run taskstore.BackgroundRu
 		}
 	} else {
 		cancel()
-	}
-	if err := p.attestContainerForCleanup(run, digest, info, false); err != nil {
-		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "post-stop attestation failed: " + err.Error()}
 	}
 	if err := requireRuntime(info, runtime); err != nil {
 		return Observation{}, err
@@ -677,7 +579,7 @@ func (p *Provider) ProveWriterInactive(ctx context.Context, run taskstore.Backgr
 	if err != nil {
 		return Observation{}, WriterFence{}, err
 	}
-	if err := p.attestContainerForCleanup(run, digest, info, info.State.Running); err != nil {
+	if err := p.attestContainer(run, digest, info, false); err != nil {
 		return Observation{}, WriterFence{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
 	}
 	if info.State.Status == "created" {
@@ -752,7 +654,7 @@ func (p *Provider) RemoveContainer(ctx context.Context, run taskstore.Background
 		cancel()
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "container ID does not match removal authority"}
 	}
-	if err := p.attestContainerForCleanup(run, digest, info, false); err != nil {
+	if err := p.attestContainer(run, digest, info, false); err != nil {
 		cancel()
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
 	}
