@@ -16,22 +16,19 @@ type rowScanner interface {
 }
 
 const actorColumns = `a.actor_type,a.actor_id,a.display_name,a.credential_id,a.authentication,a.request_id`
-const cancellationActorColumns = `ca.actor_type,ca.actor_id,ca.display_name,ca.credential_id,ca.authentication,ca.request_id`
 
 const taskSelect = `
 SELECT t.id,t.workspace_id,t.title,t.prompt,t.prompt_sha256,t.repository_id,t.base_ref,t.base_sha,
-       t.object_format,t.state,t.terminal_reason,t.cancel_epoch,t.cancel_reason,t.cancel_requested_at,t.cancel_receipt_id,
-       t.cancel_attempt_id,t.cancel_attempt_event_id,t.cancel_task_event_id,t.cancel_effect_disposition,
+       t.object_format,t.state,t.terminal_reason,
        t.current_attempt_id,t.sealed_result_id,t.latest_event_cursor,t.revision,t.created_at,t.updated_at,
-       ` + actorColumns + `,` + cancellationActorColumns + `
-FROM tasks t JOIN actor_snapshots a ON a.id=t.actor_snapshot_id
-LEFT JOIN actor_snapshots ca ON ca.id=t.cancel_actor_snapshot_id`
+       ` + actorColumns + `
+FROM tasks t JOIN actor_snapshots a ON a.id=t.actor_snapshot_id`
 
 const attemptSelect = `
 SELECT id,task_id,workspace_id,sequence,state,delivery_phase,opencode_session_id,opencode_message_id,prompt_sha256,base_sha,
        image_digest,opencode_protocol,execution_contract_version,agent,model_provider,model,
        deadline,delivery_claim_owner,delivery_claim_expires_at,delivery_started_at,admitted_at,
-       opencode_log_aggregate_id,opencode_log_seq,cancellation_ack_at,recovery_reason,terminal_reason,
+       opencode_log_aggregate_id,opencode_log_seq,recovery_reason,terminal_reason,
         sealed_result_id,revision,created_at,updated_at
 FROM attempts`
 
@@ -64,50 +61,24 @@ func getTask(ctx context.Context, q queryRower, id task.TaskID) (Task, error) {
 func scanTask(row rowScanner) (Task, error) {
 	var t Task
 	var promptHash []byte
-	var repositoryID, cancelEpoch int64
+	var repositoryID int64
 	var createdAt, updatedAt int64
-	var terminalReason, cancelReason, cancelReceiptID, cancelAttemptID, cancelAttemptEventID, cancelTaskEventID, cancelEffect, sealedResultID sql.NullString
-	var cancelRequestedAt sql.NullInt64
-	var cancelActorType, cancelActorID, cancelDisplayName, cancelCredentialID, cancelAuthentication, cancelRequestID sql.NullString
+	var terminalReason, sealedResultID sql.NullString
 	err := row.Scan(
 		&t.ID, &t.WorkspaceID, &t.Title, &t.Prompt, &promptHash, &repositoryID, &t.BaseRef, &t.BaseSHA,
-		&t.ObjectFormat, &t.State, &terminalReason, &cancelEpoch, &cancelReason, &cancelRequestedAt, &cancelReceiptID,
-		&cancelAttemptID, &cancelAttemptEventID, &cancelTaskEventID, &cancelEffect,
+		&t.ObjectFormat, &t.State, &terminalReason,
 		&t.CurrentAttemptID, &sealedResultID, &t.LatestEventCursor, &t.Revision, &createdAt, &updatedAt,
 		&t.Actor.Type, &t.Actor.ID, &t.Actor.DisplayName, &t.Actor.CredentialID, &t.Actor.Authentication, &t.Actor.RequestID,
-		&cancelActorType, &cancelActorID, &cancelDisplayName, &cancelCredentialID, &cancelAuthentication, &cancelRequestID,
 	)
 	if err != nil {
 		return Task{}, err
 	}
-	if len(promptHash) != len(t.PromptSHA256) || repositoryID <= 0 || cancelEpoch < 0 {
+	if len(promptHash) != len(t.PromptSHA256) || repositoryID <= 0 {
 		return Task{}, ErrCorruptStore
 	}
 	copy(t.PromptSHA256[:], promptHash)
 	t.RepositoryID = task.RepositoryID(repositoryID)
 	t.TerminalReason = nullableString(terminalReason)
-	t.CancelEpoch = uint64(cancelEpoch)
-	if cancelEpoch == 1 {
-		if !cancelActorType.Valid || !cancelActorID.Valid || !cancelCredentialID.Valid || !cancelAuthentication.Valid || !cancelRequestID.Valid ||
-			!cancelRequestedAt.Valid || !cancelReceiptID.Valid || !cancelAttemptID.Valid || !cancelAttemptEventID.Valid || !cancelTaskEventID.Valid || !cancelEffect.Valid {
-			return Task{}, ErrCorruptStore
-		}
-		actor := task.ActorSnapshot{Type: task.ActorType(cancelActorType.String), ID: cancelActorID.String, DisplayName: cancelDisplayName.String, CredentialID: cancelCredentialID.String, Authentication: cancelAuthentication.String, RequestID: cancelRequestID.String}
-		if err := actor.Validate(); err != nil {
-			return Task{}, ErrCorruptStore
-		}
-		t.CancellationActor = &actor
-		t.CancellationReason = nullableString(cancelReason)
-		t.CancellationRequestedAt = nullableTime(cancelRequestedAt)
-		t.CancellationReceiptID = task.ReceiptID(cancelReceiptID.String)
-		t.CancellationAttemptID = task.AttemptID(cancelAttemptID.String)
-		t.CancellationAttemptEventID = task.EventID(cancelAttemptEventID.String)
-		t.CancellationTaskEventID = task.EventID(cancelTaskEventID.String)
-		t.CancellationEffect = CancellationEffectDisposition(cancelEffect.String)
-		if !t.CancellationEffect.valid() {
-			return Task{}, ErrCorruptStore
-		}
-	}
 	t.CreatedAt, t.UpdatedAt = fromUnixMillis(createdAt), fromUnixMillis(updatedAt)
 	if sealedResultID.Valid {
 		t.SealedResultID = task.ResultID(sealedResultID.String)
@@ -131,12 +102,12 @@ func scanAttempt(row rowScanner) (Attempt, error) {
 	var promptHash []byte
 	var deadline, createdAt, updatedAt int64
 	var claimOwner, logAggregateID, recoveryReason, terminalReason, sealedResultID sql.NullString
-	var claimExpiresAt, deliveryStartedAt, admittedAt, cancellationAckAt sql.NullInt64
+	var claimExpiresAt, deliveryStartedAt, admittedAt sql.NullInt64
 	err := row.Scan(
 		&a.ID, &a.TaskID, &a.WorkspaceID, &a.Sequence, &a.State, &a.DeliveryPhase, &a.OpenCodeSessionID, &a.OpenCodeMessageID,
 		&promptHash, &a.BaseSHA, &a.ImageDigest, &a.OpenCodeProtocol, &a.ExecutionContractVersion,
 		&a.Agent, &a.ModelProvider, &a.Model, &deadline, &claimOwner, &claimExpiresAt,
-		&deliveryStartedAt, &admittedAt, &logAggregateID, &a.OpenCodeLogSeq, &cancellationAckAt,
+		&deliveryStartedAt, &admittedAt, &logAggregateID, &a.OpenCodeLogSeq,
 		&recoveryReason, &terminalReason, &sealedResultID, &a.Revision, &createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -152,7 +123,6 @@ func scanAttempt(row rowScanner) (Attempt, error) {
 	a.AdmittedAt = nullableTime(admittedAt)
 	a.DeliveryClaimOwner = nullableString(claimOwner)
 	a.OpenCodeLogAggregateID = nullableString(logAggregateID)
-	a.CancellationAckAt = nullableTime(cancellationAckAt)
 	a.RecoveryReason = nullableString(recoveryReason)
 	a.TerminalReason = nullableString(terminalReason)
 	if sealedResultID.Valid {

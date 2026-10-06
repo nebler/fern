@@ -107,9 +107,9 @@ func (s *Store) AdmitBackgroundRun(ctx context.Context, p AdmitBackgroundRunPara
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO tasks(
     id,workspace_id,title,prompt,prompt_sha256,repository_id,base_ref,base_sha,
-    object_format,state,cancel_epoch,current_attempt_id,actor_snapshot_id,latest_event_cursor,
+    object_format,state,current_attempt_id,actor_snapshot_id,latest_event_cursor,
     revision,created_at,updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,'queued',0,?,?,0,1,?,?)`,
+) VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,0,1,?,?)`,
 		p.TaskID, p.Claim.Scope.WorkspaceID, p.Title, p.Prompt, promptHash[:], p.RepositoryID,
 		p.BaseRef, p.BaseSHA, p.ObjectFormat, p.AttemptID, actorID, acceptedMS, acceptedMS); err != nil {
 		return Admission{}, fmt.Errorf("insert task: %w", err)

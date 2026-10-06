@@ -72,54 +72,25 @@ type Receipt struct {
 
 const ReceiptAccepted = "accepted"
 
-// CancellationEffectDisposition is the external work, if any, that a
-// coordinator may consider only after the cancellation transaction commits.
-type CancellationEffectDisposition string
-
-const (
-	CancellationEffectNonePrepared      CancellationEffectDisposition = "none_prepared"
-	CancellationEffectReconcileDelivery CancellationEffectDisposition = "reconcile_delivery"
-	CancellationEffectInterrupt         CancellationEffectDisposition = "interrupt"
-	CancellationEffectNoneTerminal      CancellationEffectDisposition = "none_terminal"
-)
-
-func (d CancellationEffectDisposition) valid() bool {
-	switch d {
-	case CancellationEffectNonePrepared, CancellationEffectReconcileDelivery, CancellationEffectInterrupt, CancellationEffectNoneTerminal:
-		return true
-	default:
-		return false
-	}
-}
-
 type Task struct {
-	ID                         task.TaskID
-	WorkspaceID                task.WorkspaceID
-	Title                      string
-	Prompt                     string
-	PromptSHA256               [32]byte
-	RepositoryID               task.RepositoryID
-	BaseRef                    string
-	BaseSHA                    task.GitOID
-	ObjectFormat               string
-	State                      task.TaskState
-	TerminalReason             *string
-	CancelEpoch                uint64
-	CancellationActor          *task.ActorSnapshot
-	CancellationReason         *string
-	CancellationRequestedAt    *time.Time
-	CancellationReceiptID      task.ReceiptID
-	CancellationAttemptID      task.AttemptID
-	CancellationAttemptEventID task.EventID
-	CancellationTaskEventID    task.EventID
-	CancellationEffect         CancellationEffectDisposition
-	CurrentAttemptID           task.AttemptID
-	SealedResultID             task.ResultID
-	Actor                      task.ActorSnapshot
-	LatestEventCursor          task.Cursor
-	Revision                   int64
-	CreatedAt                  time.Time
-	UpdatedAt                  time.Time
+	ID                task.TaskID
+	WorkspaceID       task.WorkspaceID
+	Title             string
+	Prompt            string
+	PromptSHA256      [32]byte
+	RepositoryID      task.RepositoryID
+	BaseRef           string
+	BaseSHA           task.GitOID
+	ObjectFormat      string
+	State             task.TaskState
+	TerminalReason    *string
+	CurrentAttemptID  task.AttemptID
+	SealedResultID    task.ResultID
+	Actor             task.ActorSnapshot
+	LatestEventCursor task.Cursor
+	Revision          int64
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
 }
 
 type Attempt struct {
@@ -146,7 +117,6 @@ type Attempt struct {
 	AdmittedAt               *time.Time
 	OpenCodeLogAggregateID   *string
 	OpenCodeLogSeq           int64
-	CancellationAckAt        *time.Time
 	RecoveryReason           *string
 	TerminalReason           *string
 	SealedResultID           task.ResultID

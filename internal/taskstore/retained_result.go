@@ -79,7 +79,7 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 		run.ResultAuthorityPhase != "exporting" || run.EffectPhase != BackgroundRunEffectExporting || run.BackgroundSealRequestID != request.ID ||
 		run.ArtifactExportID != p.ExportID || run.RetainedArtifactID != p.ArtifactID || run.MaterializationID != p.MaterializationID ||
 		run.RetainedResultID != p.ResultID || run.CancelEpoch != 0 || owner.Revision != request.ExpectedTaskRevision ||
-		attempt.Revision != request.ExpectedAttemptRevision || owner.State != task.TaskQueued || owner.CancelEpoch != 0 || owner.SealedResultID != "" ||
+		attempt.Revision != request.ExpectedAttemptRevision || owner.State != task.TaskQueued || owner.SealedResultID != "" ||
 		owner.CurrentAttemptID != attempt.ID || attempt.State != task.AttemptPrepared || attempt.SealedResultID != "" {
 		return BackgroundRunRetainedResult{}, ErrInvalidState
 	}
@@ -190,7 +190,7 @@ WHERE id=? AND task_id=? AND workspace_id=? AND state='prepared' AND sealed_resu
 		return BackgroundRunRetainedResult{}, ErrInvalidState
 	}
 	result, err = tx.ExecContext(ctx, `UPDATE tasks SET state='completed',sealed_result_id=?,latest_event_cursor=?,revision=revision+1,updated_at=?
-WHERE id=? AND workspace_id=? AND state='queued' AND cancel_epoch=0 AND current_attempt_id=? AND sealed_result_id IS NULL AND revision=?`,
+WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND sealed_result_id IS NULL AND revision=?`,
 		p.ResultID, taskEvent.Cursor, sealedMS, p.TaskID, export.WorkspaceID, p.AttemptID, request.ExpectedTaskRevision)
 	if err != nil {
 		return BackgroundRunRetainedResult{}, err

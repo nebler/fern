@@ -91,40 +91,15 @@ CREATE TABLE tasks (
     object_format TEXT NOT NULL CHECK(object_format = 'sha1'),
     state TEXT NOT NULL CHECK(state IN ('queued','running','input_required','cancel_requested','uncertain','recovery_required','completed','failed','canceled')),
     terminal_reason TEXT CHECK(terminal_reason IS NULL OR length(CAST(terminal_reason AS BLOB)) BETWEEN 1 AND 1000),
-    cancel_epoch INTEGER NOT NULL DEFAULT 0 CHECK(cancel_epoch IN (0,1)),
-    cancel_actor_snapshot_id INTEGER REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    cancel_reason TEXT CHECK(cancel_reason IS NULL OR length(CAST(cancel_reason AS BLOB)) BETWEEN 1 AND 500),
-    cancel_requested_at INTEGER CHECK(cancel_requested_at IS NULL OR cancel_requested_at >= 0),
-    cancel_receipt_id TEXT,
-    cancel_attempt_id TEXT,
-    cancel_attempt_event_id TEXT,
-    cancel_task_event_id TEXT,
-    cancel_effect_disposition TEXT CHECK(cancel_effect_disposition IS NULL OR cancel_effect_disposition IN ('none_prepared','reconcile_delivery','interrupt','none_terminal')),
     current_attempt_id TEXT NOT NULL,
     actor_snapshot_id INTEGER NOT NULL REFERENCES actor_snapshots(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     latest_event_cursor INTEGER NOT NULL DEFAULT 0 CHECK(latest_event_cursor >= 0),
     revision INTEGER NOT NULL CHECK(revision >= 1),
     created_at INTEGER NOT NULL CHECK(created_at >= 0),
     updated_at INTEGER NOT NULL CHECK(updated_at >= created_at), sealed_result_id TEXT REFERENCES results(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
-    CHECK(
-        (cancel_epoch = 0 AND cancel_actor_snapshot_id IS NULL AND cancel_reason IS NULL AND cancel_requested_at IS NULL AND
-         cancel_receipt_id IS NULL AND cancel_attempt_id IS NULL AND cancel_attempt_event_id IS NULL AND
-         cancel_task_event_id IS NULL AND cancel_effect_disposition IS NULL) OR
-        (cancel_epoch = 1 AND cancel_actor_snapshot_id IS NOT NULL AND cancel_requested_at IS NOT NULL AND
-         cancel_receipt_id IS NOT NULL AND cancel_attempt_id IS NOT NULL AND cancel_attempt_event_id IS NOT NULL AND
-         cancel_task_event_id IS NOT NULL AND cancel_effect_disposition IS NOT NULL)
-    ),
-    CHECK(cancel_epoch <> 0 OR state NOT IN ('cancel_requested','canceled')),
-    CHECK(cancel_epoch = 0 OR state IN ('cancel_requested','uncertain','recovery_required','canceled')),
-	CHECK(state <> 'canceled' OR terminal_reason = 'cancellation_acknowledged'),
-    CHECK(cancel_requested_at IS NULL OR cancel_requested_at >= created_at),
     FOREIGN KEY(workspace_id, repository_id) REFERENCES workspaces(id, repository_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
     FOREIGN KEY(current_attempt_id, id) REFERENCES attempts(id, task_id) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     FOREIGN KEY(latest_event_cursor, id) REFERENCES events(cursor, task_id) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY(cancel_receipt_id) REFERENCES receipts(id) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY(cancel_attempt_id, id, workspace_id) REFERENCES attempts(id, task_id, workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY(cancel_attempt_event_id) REFERENCES events(id) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
-    FOREIGN KEY(cancel_task_event_id) REFERENCES events(id) ON UPDATE RESTRICT ON DELETE RESTRICT DEFERRABLE INITIALLY DEFERRED,
     UNIQUE(id, workspace_id)
 ) STRICT;
 
@@ -168,7 +143,6 @@ CREATE TABLE attempts (
     admitted_at INTEGER,
     opencode_log_aggregate_id TEXT CHECK(opencode_log_aggregate_id IS NULL OR length(CAST(opencode_log_aggregate_id AS BLOB)) BETWEEN 1 AND 256),
     opencode_log_seq INTEGER NOT NULL DEFAULT 0 CHECK(opencode_log_seq >= 0),
-    cancellation_ack_at INTEGER,
     recovery_reason TEXT CHECK(recovery_reason IS NULL OR length(CAST(recovery_reason AS BLOB)) BETWEEN 1 AND 1000),
     terminal_reason TEXT CHECK(terminal_reason IS NULL OR length(CAST(terminal_reason AS BLOB)) BETWEEN 1 AND 1000),
     revision INTEGER NOT NULL CHECK(revision >= 1),
@@ -190,9 +164,6 @@ CREATE TABLE attempts (
     CHECK(delivery_claim_expires_at IS NULL OR delivery_claim_expires_at > delivery_started_at),
     CHECK(admitted_at IS NULL OR admitted_at >= created_at),
     CHECK((opencode_log_aggregate_id IS NULL AND opencode_log_seq = 0) OR opencode_log_aggregate_id IS NOT NULL),
-    CHECK(cancellation_ack_at IS NULL OR cancellation_ack_at >= created_at),
-	CHECK((state <> 'canceled' AND cancellation_ack_at IS NULL) OR
-	      (state = 'canceled' AND cancellation_ack_at IS NOT NULL AND terminal_reason = 'cancellation_acknowledged')),
     UNIQUE(task_id, sequence),
     UNIQUE(opencode_session_id),
     UNIQUE(opencode_session_id, opencode_message_id),
@@ -281,10 +252,6 @@ CREATE INDEX events_task_cursor ON events(task_id, cursor) WHERE task_id IS NOT 
 
 CREATE INDEX events_attempt_cursor ON events(attempt_id, cursor) WHERE attempt_id IS NOT NULL;
 
-CREATE UNIQUE INDEX events_one_attempt_canceled ON events(attempt_id) WHERE type='attempt.canceled';
-
-CREATE UNIQUE INDEX events_one_task_canceled ON events(task_id) WHERE type='task.canceled';
-
 CREATE TRIGGER attempts_delivery_phase_progression BEFORE UPDATE OF delivery_phase ON attempts
 WHEN NEW.delivery_phase <> OLD.delivery_phase
 BEGIN
@@ -347,159 +314,6 @@ BEGIN SELECT RAISE(ABORT, 'events are immutable'); END;
 
 CREATE TRIGGER events_immutable_delete BEFORE DELETE ON events
 BEGIN SELECT RAISE(ABORT, 'events are immutable'); END;
-
-CREATE TRIGGER tasks_cancellation_integrity BEFORE UPDATE ON tasks
-WHEN OLD.cancel_epoch = 0 AND NEW.cancel_epoch = 1
-BEGIN
-    SELECT CASE WHEN OLD.state NOT IN ('queued','running','input_required','uncertain','recovery_required')
-        THEN RAISE(ABORT, 'terminal or invalid task cancellation transition') END;
-    SELECT CASE WHEN NEW.current_attempt_id <> NEW.cancel_attempt_id
-        THEN RAISE(ABORT, 'cancellation attempt is not current') END;
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1 FROM attempts a WHERE a.id=NEW.cancel_attempt_id AND a.task_id=NEW.id AND a.workspace_id=NEW.workspace_id AND (
-            (NEW.cancel_effect_disposition='none_prepared' AND a.state='prepared') OR
-            (NEW.cancel_effect_disposition='reconcile_delivery' AND a.state='delivering') OR
-            (NEW.cancel_effect_disposition='interrupt' AND a.state IN ('admitted','running','input_required','uncertain','recovery_required')) OR
-            (NEW.cancel_effect_disposition='none_terminal' AND a.state IN ('succeeded','failed','canceled','superseded'))
-        )
-    ) THEN RAISE(ABORT, 'invalid cancellation effect disposition') END;
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1 FROM receipts r
-        WHERE r.id=NEW.cancel_receipt_id AND r.workspace_id=NEW.workspace_id AND r.command_kind='task.cancel'
-          AND r.target_type='task' AND r.target_id=NEW.id AND r.actor_snapshot_id=NEW.cancel_actor_snapshot_id
-          AND r.accepted_at=NEW.cancel_requested_at
-    ) THEN RAISE(ABORT, 'invalid cancellation receipt ownership') END;
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1 FROM events e
-        WHERE e.id=NEW.cancel_attempt_event_id AND e.workspace_id=NEW.workspace_id AND e.task_id=NEW.id
-          AND e.attempt_id=NEW.cancel_attempt_id AND e.entity_type='attempt' AND e.entity_id=NEW.cancel_attempt_id
-          AND e.type='attempt.cancel_requested' AND e.actor_snapshot_id=NEW.cancel_actor_snapshot_id
-          AND e.occurred_at=NEW.cancel_requested_at
-    ) THEN RAISE(ABORT, 'invalid cancellation attempt event ownership') END;
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1 FROM events e
-        WHERE e.id=NEW.cancel_task_event_id AND e.workspace_id=NEW.workspace_id AND e.task_id=NEW.id
-          AND e.attempt_id IS NULL AND e.entity_type='task' AND e.entity_id=NEW.id
-          AND e.type='task.cancel_requested' AND e.actor_snapshot_id=NEW.cancel_actor_snapshot_id
-          AND e.occurred_at=NEW.cancel_requested_at AND e.cursor=NEW.latest_event_cursor
-    ) THEN RAISE(ABORT, 'invalid cancellation task event ownership') END;
-    SELECT CASE WHEN (SELECT cursor FROM events WHERE id=NEW.cancel_attempt_event_id) >=
-                          (SELECT cursor FROM events WHERE id=NEW.cancel_task_event_id)
-        THEN RAISE(ABORT, 'invalid cancellation event order') END;
-END;
-
-CREATE TRIGGER tasks_cancellation_insert_guard BEFORE INSERT ON tasks
-WHEN NEW.cancel_epoch <> 0 OR NEW.state IN ('cancel_requested','canceled')
-BEGIN SELECT RAISE(ABORT, 'task cancellation must be recorded by transition'); END;
-
-CREATE TRIGGER tasks_cancellation_immutable BEFORE UPDATE ON tasks
-WHEN OLD.cancel_epoch = 1 AND (
-    NEW.cancel_epoch <> OLD.cancel_epoch OR
-    NEW.cancel_actor_snapshot_id IS NOT OLD.cancel_actor_snapshot_id OR
-    NEW.cancel_reason IS NOT OLD.cancel_reason OR
-    NEW.cancel_requested_at IS NOT OLD.cancel_requested_at OR
-    NEW.cancel_receipt_id IS NOT OLD.cancel_receipt_id OR
-    NEW.cancel_attempt_id IS NOT OLD.cancel_attempt_id OR
-    NEW.cancel_attempt_event_id IS NOT OLD.cancel_attempt_event_id OR
-    NEW.cancel_task_event_id IS NOT OLD.cancel_task_event_id OR
-    NEW.cancel_effect_disposition IS NOT OLD.cancel_effect_disposition
-)
-BEGIN SELECT RAISE(ABORT, 'task cancellation is immutable'); END;
-
-CREATE TRIGGER attempts_cancel_requested_integrity BEFORE UPDATE OF state ON attempts
-WHEN NEW.state = 'cancel_requested' AND OLD.state <> 'cancel_requested'
-BEGIN
-    SELECT CASE WHEN OLD.state NOT IN ('prepared','delivering','admitted','running','input_required','uncertain','recovery_required')
-        THEN RAISE(ABORT, 'invalid attempt cancellation transition') END;
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1 FROM tasks t WHERE t.id=NEW.task_id AND t.workspace_id=NEW.workspace_id
-          AND t.current_attempt_id=NEW.id AND t.cancel_attempt_id=NEW.id
-          AND t.cancel_epoch=1 AND t.state='cancel_requested'
-    ) THEN RAISE(ABORT, 'attempt cancellation has no owning task fence') END;
-END;
-
-CREATE TRIGGER attempts_cancellation_ack_integrity BEFORE UPDATE OF cancellation_ack_at ON attempts
-WHEN OLD.cancellation_ack_at IS NULL AND NEW.cancellation_ack_at IS NOT NULL
-BEGIN
-    SELECT CASE WHEN NEW.state <> 'canceled' OR NEW.terminal_reason <> 'cancellation_acknowledged' OR
-                          NEW.cancellation_ack_at <> NEW.updated_at OR NEW.revision <> OLD.revision + 1 OR
-                          NEW.delivery_claim_owner IS NOT NULL OR NEW.delivery_claim_expires_at IS NOT NULL OR
-                          NOT (OLD.state='cancel_requested' OR
-                               (OLD.state IN ('succeeded','failed','canceled','superseded') AND EXISTS (
-                                   SELECT 1 FROM tasks t WHERE t.id=OLD.task_id AND
-                                   t.cancel_effect_disposition='none_terminal')))
-        THEN RAISE(ABORT, 'invalid cancellation acknowledgment shape') END;
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1
-        FROM tasks t
-        JOIN events ae ON ae.workspace_id=t.workspace_id AND ae.task_id=t.id AND
-                          ae.attempt_id=OLD.id AND ae.entity_type='attempt' AND ae.entity_id=OLD.id AND
-                          ae.type='attempt.canceled' AND ae.occurred_at=NEW.cancellation_ack_at
-        JOIN events te ON te.workspace_id=t.workspace_id AND te.task_id=t.id AND
-                          te.attempt_id IS NULL AND te.entity_type='task' AND te.entity_id=t.id AND
-                          te.type='task.canceled' AND te.occurred_at=NEW.cancellation_ack_at AND
-                          te.actor_snapshot_id=ae.actor_snapshot_id AND te.payload=ae.payload AND te.cursor>ae.cursor
-        JOIN actor_snapshots actor ON actor.id=ae.actor_snapshot_id AND actor.actor_type IN ('system','recovery')
-        WHERE t.id=OLD.task_id AND t.workspace_id=OLD.workspace_id AND t.current_attempt_id=OLD.id AND
-              t.cancel_attempt_id=OLD.id AND t.cancel_epoch=1 AND t.state='cancel_requested' AND
-              json_extract(ae.payload,'$.taskId')=t.id AND json_extract(ae.payload,'$.attemptId')=OLD.id AND
-              json_extract(ae.payload,'$.cancelEpoch')=1 AND
-              json_extract(ae.payload,'$.expectedAttemptRevision')=OLD.revision AND
-              json_extract(ae.payload,'$.expectedTaskRevision')=t.revision AND
-              json_extract(ae.payload,'$.disposition')=t.cancel_effect_disposition AND
-              json_extract(ae.payload,'$.terminalReason')='cancellation_acknowledged' AND
-              json_type(ae.payload,'$.evidence')='object' AND
-              substr(json_extract(ae.payload,'$.evidenceSha256'),1,7)='sha256:' AND
-              length(json_extract(ae.payload,'$.evidenceSha256'))=71 AND
-              substr(json_extract(ae.payload,'$.evidenceSha256'),8) NOT GLOB '*[^0-9a-f]*'
-    ) THEN RAISE(ABORT, 'cancellation acknowledgment has no exact events') END;
-END;
-
-CREATE TRIGGER attempts_cancellation_ack_insert_guard BEFORE INSERT ON attempts
-WHEN NEW.cancellation_ack_at IS NOT NULL OR NEW.state='canceled'
-BEGIN SELECT RAISE(ABORT, 'attempt cancellation acknowledgment must be recorded by transition'); END;
-
-CREATE TRIGGER tasks_cancellation_ack_integrity BEFORE UPDATE OF state ON tasks
-WHEN OLD.state<>'canceled' AND NEW.state='canceled'
-BEGIN
-    SELECT CASE WHEN OLD.state <> 'cancel_requested' OR OLD.cancel_epoch <> 1 OR NEW.cancel_epoch <> 1 OR
-                          NEW.terminal_reason <> 'cancellation_acknowledged' OR
-                          NEW.revision <> OLD.revision + 1 OR NEW.updated_at < OLD.updated_at
-        THEN RAISE(ABORT, 'invalid canceled task shape') END;
-    SELECT CASE WHEN NOT EXISTS (
-        SELECT 1
-        FROM attempts a
-        JOIN events ae ON ae.workspace_id=OLD.workspace_id AND ae.task_id=OLD.id AND
-                          ae.attempt_id=a.id AND ae.type='attempt.canceled' AND
-                          ae.occurred_at=a.cancellation_ack_at
-        JOIN events te ON te.workspace_id=OLD.workspace_id AND te.task_id=OLD.id AND
-                          te.attempt_id IS NULL AND te.type='task.canceled' AND
-                          te.occurred_at=a.cancellation_ack_at AND te.actor_snapshot_id=ae.actor_snapshot_id AND
-                          te.payload=ae.payload AND te.cursor>ae.cursor AND te.cursor=NEW.latest_event_cursor
-        JOIN actor_snapshots actor ON actor.id=ae.actor_snapshot_id AND actor.actor_type IN ('system','recovery')
-        WHERE a.id=OLD.current_attempt_id AND a.task_id=OLD.id AND a.workspace_id=OLD.workspace_id AND
-              a.state='canceled' AND a.cancellation_ack_at=NEW.updated_at AND
-              a.terminal_reason='cancellation_acknowledged' AND a.delivery_claim_owner IS NULL AND
-              a.delivery_claim_expires_at IS NULL AND
-              json_extract(ae.payload,'$.taskId')=OLD.id AND json_extract(ae.payload,'$.attemptId')=a.id AND
-              json_extract(ae.payload,'$.cancelEpoch')=OLD.cancel_epoch AND
-              json_extract(ae.payload,'$.expectedAttemptRevision')=a.revision-1 AND
-              json_extract(ae.payload,'$.expectedTaskRevision')=OLD.revision AND
-              json_extract(ae.payload,'$.disposition')=OLD.cancel_effect_disposition AND
-              json_extract(ae.payload,'$.terminalReason')=NEW.terminal_reason
-    ) THEN RAISE(ABORT, 'canceled task has no exact acknowledged attempt') END;
-END;
-
-CREATE TRIGGER attempts_cancellation_ack_immutable BEFORE UPDATE ON attempts
-WHEN OLD.cancellation_ack_at IS NOT NULL AND (
-    NEW.cancellation_ack_at IS NOT OLD.cancellation_ack_at OR NEW.state <> OLD.state OR
-    NEW.terminal_reason IS NOT OLD.terminal_reason
-)
-BEGIN SELECT RAISE(ABORT, 'attempt cancellation acknowledgment is immutable'); END;
-
-CREATE TRIGGER tasks_canceled_immutable BEFORE UPDATE ON tasks
-WHEN OLD.state='canceled' AND (NEW.state <> OLD.state OR NEW.terminal_reason IS NOT OLD.terminal_reason)
-BEGIN SELECT RAISE(ABORT, 'canceled task terminal state is immutable'); END;
 
 CREATE UNIQUE INDEX attempts_result_ownership ON attempts(id, sealed_result_id);
 
@@ -1267,7 +1081,7 @@ CREATE TRIGGER results_insert_integrity BEFORE INSERT ON results BEGIN
         run.state='cleanup_required' AND run.effect_phase='writer_inactive' AND run.result_authority_phase='exporting' AND
         run.background_seal_request_id=artifact.seal_request_id AND run.artifact_export_id=artifact.export_id AND run.retained_artifact_id=artifact.id AND
         run.materialization_id=artifact.materialization_id AND run.retained_result_id=NEW.id AND
-        t.state='queued' AND t.cancel_epoch=0 AND t.sealed_result_id IS NULL AND t.current_attempt_id=a.id AND
+        t.state='queued' AND t.sealed_result_id IS NULL AND t.current_attempt_id=a.id AND
         a.state='prepared' AND a.sealed_result_id IS NULL AND t.revision=json_extract(ae.payload,'$.expectedTaskRevision') AND
         a.revision=json_extract(ae.payload,'$.expectedAttemptRevision') AND json_extract(ae.payload,'$.sourceKind')='retained_artifact'
     )) THEN RAISE(ABORT,'retained result has no exact authority tuple') END;
@@ -1285,7 +1099,7 @@ END;
 
 CREATE TRIGGER tasks_result_seal_integrity BEFORE UPDATE OF state,sealed_result_id ON tasks
 WHEN OLD.state<>'completed' AND NEW.state='completed' BEGIN
-  SELECT CASE WHEN OLD.cancel_epoch<>0 OR NEW.cancel_epoch<>0 OR OLD.sealed_result_id IS NOT NULL OR NEW.sealed_result_id IS NULL OR
+  SELECT CASE WHEN OLD.sealed_result_id IS NOT NULL OR NEW.sealed_result_id IS NULL OR
     NEW.terminal_reason IS NOT NULL OR NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR NOT EXISTS (
       SELECT 1 FROM results r JOIN attempts a ON a.id=OLD.current_attempt_id AND a.task_id=OLD.id AND a.workspace_id=OLD.workspace_id
       JOIN events ae ON ae.id=r.sealed_event_id JOIN events te ON te.id=r.completed_event_id

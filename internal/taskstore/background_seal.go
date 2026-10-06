@@ -85,7 +85,7 @@ func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams
 		return BackgroundRunSealAdmission{}, ErrStaleRevision
 	}
 	if owner.WorkspaceID != run.WorkspaceID || owner.CurrentAttemptID != attempt.ID || owner.State != task.TaskQueued ||
-		owner.CancelEpoch != 0 || owner.SealedResultID != "" || attempt.TaskID != owner.ID || attempt.WorkspaceID != owner.WorkspaceID ||
+		owner.SealedResultID != "" || attempt.TaskID != owner.ID || attempt.WorkspaceID != owner.WorkspaceID ||
 		attempt.Sequence != run.Generation || attempt.State != task.AttemptPrepared || attempt.SealedResultID != "" {
 		return BackgroundRunSealAdmission{}, ErrInvalidState
 	}

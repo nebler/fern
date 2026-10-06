@@ -185,7 +185,7 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 		return BackgroundRunStop{}, err
 	}
 	if owner.WorkspaceID != p.WorkspaceID || owner.CurrentAttemptID != attempt.ID || owner.State != task.TaskQueued ||
-		owner.CancelEpoch != 0 || attempt.TaskID != owner.ID || attempt.WorkspaceID != owner.WorkspaceID ||
+		attempt.TaskID != owner.ID || attempt.WorkspaceID != owner.WorkspaceID ||
 		attempt.ID != run.AttemptID || attempt.Sequence != run.Generation || attempt.State != task.AttemptPrepared || attempt.DeliveryPhase != DeliveryPhaseNone {
 		return BackgroundRunStop{}, ErrInvalidState
 	}
@@ -264,7 +264,7 @@ WHERE id=? AND task_id=? AND workspace_id=? AND state='prepared' AND delivery_ph
 		return BackgroundRunStop{}, ErrInvalidState
 	}
 	result, err = tx.ExecContext(ctx, `UPDATE tasks SET state='failed',terminal_reason=?,latest_event_cursor=?,revision=revision+1,updated_at=?
-WHERE id=? AND workspace_id=? AND state='queued' AND cancel_epoch=0 AND current_attempt_id=? AND revision=?`,
+WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND revision=?`,
 		BackgroundRunStoppedBeforeStart, taskEvent.Cursor, now, owner.ID, owner.WorkspaceID, attempt.ID, owner.Revision)
 	if err != nil {
 		return BackgroundRunStop{}, fmt.Errorf("terminalize background run task: %w", err)
