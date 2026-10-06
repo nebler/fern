@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -84,7 +85,7 @@ func TestChangedSnapshotDeterministicAndMaterializable(t *testing.T) {
 		t.Fatalf("unexpected changed snapshot: %+v", first)
 	}
 	paths := decodedPaths(t, first.Changes)
-	if runtime.GOOS == "linux" && !bytes.Equal(paths[len(paths)-1], []byte(nonUTF8)) {
+	if runtime.GOOS == "linux" && !slices.ContainsFunc(paths, func(path []byte) bool { return bytes.Equal(path, []byte(nonUTF8)) }) {
 		t.Fatalf("raw-byte path missing: %q", paths)
 	}
 	if got := gitCommand(t, repository, "rev-parse", "HEAD"); got != beforeHead {
