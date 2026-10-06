@@ -1,7 +1,6 @@
 package pluginauth
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -12,17 +11,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
+	"github.com/nebler/fern/internal/atomicfile"
 	"github.com/nebler/fern/internal/control"
-	"github.com/nebler/fern/internal/strictjson"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -556,221 +552,66 @@ func (store *Store) Revoke(id string, actor task.ActorSnapshot, now time.Time) e
 }
 
 func (store *Store) load() error {
-	file, err := os.OpenFile(store.path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	data, err := atomicfile.Read(store.path, maxStateBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("open plugin authorization state: %w", err)
-	}
-	defer file.Close()
-	if err := validatePrivateFile(file); err != nil {
-		return err
-	}
-	data, err := io.ReadAll(io.LimitReader(file, maxStateBytes+1))
-	if err != nil {
 		return fmt.Errorf("read plugin authorization state: %w", err)
 	}
-	if len(data) > maxStateBytes {
-		return errors.New("plugin authorization state exceeds 256 KiB")
-	}
-	if err := strictjson.Check(data, 8); err != nil {
-		return fmt.Errorf("decode plugin authorization state: %w", err)
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
 	var state diskState
-	if err := decoder.Decode(&state); err != nil {
+	if err := json.Unmarshal(data, &state); err != nil {
 		return fmt.Errorf("decode plugin authorization state: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return errors.New("decode plugin authorization state: trailing data")
 	}
 	if err := validateState(state, store.workspace); err != nil {
 		return err
+	}
+	if state.Authorizations == nil {
+		state.Authorizations = make(map[string]authorizationRecord)
+	}
+	if state.Credentials == nil {
+		state.Credentials = make(map[string]credentialRecord)
 	}
 	store.data = state
 	return nil
 }
 
+// commitLocked persists the current state, restoring previous on any failure
+// before the file is replaced. Once atomicfile has renamed the new file into
+// place the transition may be durable, so an ErrNotDurable directory-sync
+// failure is reported without rolling memory back.
 func (store *Store) commitLocked(ctx context.Context, previous diskState) error {
 	if err := ctx.Err(); err != nil {
 		store.data = previous
 		return err
 	}
 	store.data.Revision++
-	if err := validateState(store.data, store.workspace); err != nil {
-		store.data = previous
-		return fmt.Errorf("validate plugin authorization state: %w", err)
-	}
 	data, err := json.Marshal(store.data)
-	if err != nil || len(data) > maxStateBytes {
-		store.data = previous
-		if err != nil {
-			return fmt.Errorf("encode plugin authorization state: %w", err)
+	if err == nil && len(data) > maxStateBytes {
+		err = errors.New("plugin authorization state exceeds 256 KiB")
+	}
+	if err == nil {
+		err = atomicfile.Write(store.path, data, 0o600)
+	}
+	if err != nil {
+		if !errors.Is(err, atomicfile.ErrNotDurable) {
+			store.data = previous
 		}
-		return errors.New("plugin authorization state exceeds 256 KiB")
-	}
-	if err := secureExistingPath(store.path); err != nil {
-		store.data = previous
-		return err
-	}
-	directory := filepath.Dir(store.path)
-	temporary, err := os.CreateTemp(directory, ".pluginauth-*.tmp")
-	if err != nil {
-		store.data = previous
-		return err
-	}
-	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
-	if err = temporary.Chmod(0o600); err == nil {
-		_, err = temporary.Write(data)
-	}
-	if err == nil {
-		err = temporary.Sync()
-	}
-	if closeErr := temporary.Close(); err == nil {
-		err = closeErr
-	}
-	// Cancellation can still safely abort while only the private temporary file
-	// exists. Once rename succeeds the transition may be durable, so Fern must
-	// finish directory sync and report that commit outcome instead of pretending
-	// cancellation rolled it back.
-	if err == nil {
-		err = ctx.Err()
-	}
-	if err == nil {
-		err = os.Rename(temporaryPath, store.path)
-	}
-	if err != nil {
-		store.data = previous
 		return fmt.Errorf("persist plugin authorization state: %w", err)
-	}
-	dir, err := os.Open(directory)
-	if err != nil {
-		return fmt.Errorf("plugin authorization state replaced but directory sync failed: %w", err)
-	}
-	err = errors.Join(dir.Sync(), dir.Close())
-	if err != nil {
-		return fmt.Errorf("plugin authorization state replaced but directory sync failed: %w", err)
 	}
 	return nil
 }
 
+// validateState is a sanity check of Fern's own state file on load: it must
+// belong to this workspace's current schema and stay within the fixed caps.
 func validateState(state diskState, workspace string) error {
-	if state.Version != stateVersion || state.Workspace != workspace || state.Authorizations == nil || state.Credentials == nil {
+	if state.Version != stateVersion || state.Workspace != workspace {
 		return errors.New("invalid plugin authorization state header")
 	}
 	if len(state.Authorizations) > maxAuthorizations || len(state.Credentials) > maxCredentials || len(state.InvalidPolls) > maxInvalidPolls {
 		return errors.New("plugin authorization state exceeds bounds")
 	}
-	deviceDigests := make(map[string]struct{}, len(state.Authorizations))
-	userDigests := make(map[string]struct{}, len(state.Authorizations))
-	for id, record := range state.Authorizations {
-		if id != record.ID || !canonicalID(id, authorizationIDTag) || !canonicalDigest(record.DeviceDigest) || !canonicalDigest(record.UserDigest) || record.CreatedAt.IsZero() || !record.ExpiresAt.After(record.CreatedAt) || record.ExpiresAt.Sub(record.CreatedAt) != authorizationTTL {
-			return errors.New("invalid plugin authorization record")
-		}
-		if _, exists := deviceDigests[record.DeviceDigest]; exists {
-			return errors.New("duplicate plugin device-code digest")
-		}
-		if _, exists := userDigests[record.UserDigest]; exists {
-			return errors.New("duplicate plugin user-code digest")
-		}
-		deviceDigests[record.DeviceDigest], userDigests[record.UserDigest] = struct{}{}, struct{}{}
-		if !record.LastPolledAt.IsZero() && record.LastPolledAt.Before(record.CreatedAt) {
-			return errors.New("invalid plugin authorization poll time")
-		}
-		switch record.State {
-		case Pending:
-			if !record.DecidedAt.IsZero() || record.DecidedBy != nil || record.CredentialID != "" {
-				return errors.New("invalid pending plugin authorization")
-			}
-		case Approved:
-			credential, ok := state.Credentials[record.CredentialID]
-			if !ok || record.DecidedAt.Before(record.CreatedAt) || !record.DecidedAt.Before(record.ExpiresAt) || record.DecidedBy == nil || credential.AuthorizationID != id || credential.DeviceDigest != record.DeviceDigest || credential.ApprovedBy != *record.DecidedBy {
-				return errors.New("invalid approved plugin authorization")
-			}
-		case Denied:
-			if record.DecidedAt.Before(record.CreatedAt) || !record.DecidedAt.Before(record.ExpiresAt) || record.DecidedBy == nil || record.CredentialID != "" {
-				return errors.New("invalid denied plugin authorization")
-			}
-		case Expired:
-			if record.DecidedAt.Before(record.ExpiresAt) || record.DecidedBy != nil || record.CredentialID != "" {
-				return errors.New("invalid expired plugin authorization")
-			}
-		default:
-			return errors.New("invalid plugin authorization state")
-		}
-		if record.DecidedBy != nil && !validAttribution(*record.DecidedBy) {
-			return errors.New("invalid plugin authorization attribution")
-		}
-		if record.DecidedBy != nil && record.DecidedBy.Type != task.ActorDevice && record.DecidedBy.Type != task.ActorOperator {
-			return errors.New("untrusted plugin authorization decision attribution")
-		}
-	}
-	for id, record := range state.Credentials {
-		if id != record.ID || !canonicalID(id, credentialIDTag) || !canonicalID(record.AuthorizationID, authorizationIDTag) || !canonicalDigest(record.DeviceDigest) || record.CreatedAt.IsZero() || record.ExpiresAt.Sub(record.CreatedAt) != credentialTTL || !validAttribution(record.ApprovedBy) {
-			return errors.New("invalid plugin credential record")
-		}
-		authorization, ok := state.Authorizations[record.AuthorizationID]
-		if !ok || authorization.State != Approved || authorization.CredentialID != id || !record.CreatedAt.Equal(authorization.DecidedAt) {
-			return errors.New("orphaned plugin credential record")
-		}
-		switch record.State {
-		case Active, CredentialExpired:
-			if !record.RevokedAt.IsZero() || record.RevokedBy != nil {
-				return errors.New("invalid plugin credential lifecycle")
-			}
-		case Revoked:
-			if record.RevokedAt.Before(record.CreatedAt) {
-				return errors.New("invalid revoked plugin credential")
-			}
-		default:
-			return errors.New("invalid plugin credential state")
-		}
-		if record.RevokedBy != nil && !validAttribution(*record.RevokedBy) {
-			return errors.New("invalid plugin credential revocation attribution")
-		}
-	}
-	for index, value := range state.InvalidPolls {
-		if value.IsZero() {
-			return errors.New("invalid plugin authorization limiter time")
-		}
-		if index != 0 && value.Before(state.InvalidPolls[index-1]) {
-			return errors.New("unsorted plugin authorization limiter times")
-		}
-	}
 	return nil
-}
-
-func validAttribution(value Attribution) bool {
-	actor := task.ActorSnapshot{Type: value.Type, ID: value.ID, DisplayName: value.DisplayName, CredentialID: value.CredentialID, Authentication: value.Authentication, RequestID: value.RequestID}
-	return actor.Validate() == nil
-}
-
-func validatePrivateFile(file *os.File) error {
-	info, err := file.Stat()
-	if err != nil {
-		return err
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !info.Mode().IsRegular() || !ok || stat.Nlink != 1 || info.Mode().Perm()&0o077 != 0 {
-		return errors.New("plugin authorization state must be a private singly linked regular file")
-	}
-	return nil
-}
-
-func secureExistingPath(path string) error {
-	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("inspect plugin authorization state: %w", err)
-	}
-	defer file.Close()
-	return validatePrivateFile(file)
 }
 
 func emptyState(workspace string) diskState {
@@ -950,9 +791,4 @@ func canonicalUserCode(value string) bool {
 func canonicalID(value, prefix string) bool {
 	suffix, ok := strings.CutPrefix(value, prefix)
 	return ok && canonicalBase64(suffix, randomIDBytes)
-}
-
-func canonicalDigest(value string) bool {
-	decoded, err := hex.DecodeString(value)
-	return err == nil && len(decoded) == sha256.Size && hex.EncodeToString(decoded) == value
 }

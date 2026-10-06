@@ -11,9 +11,9 @@
 //
 // State is a private auxiliary JSON file located through control.Store but
 // versioned separately. Mutations rewrite the whole file under one in-process
-// mutex with the same temp/fsync/rename/directory-fsync protocol as control;
-// a directory-sync failure after rename is reported as uncertain, not rolled
-// back. Pending and active records are never evicted to admit new requests.
+// mutex with atomicfile.Write, like control; a directory-sync failure after
+// rename is reported as uncertain, not rolled back. Pending and active records
+// are never evicted to admit new requests.
 //
 // Poll, Authenticate, and Credentials can all write (rate-limit timing,
 // expiry), so their errors must be handled. Revoke durably transitions first,

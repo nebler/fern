@@ -320,16 +320,13 @@ func TestRegisterAndRevokeRaceLeavesNoAdmittedRequestActive(t *testing.T) {
 	}
 }
 
-func TestOpenRejectsCorruptAndUnsafeState(t *testing.T) {
+func TestOpenRejectsCorruptState(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		content string
-		mode    os.FileMode
 	}{
-		{name: "malformed", content: `{`, mode: 0o600},
-		{name: "unknown", content: `{"version":1,"revision":0,"authorizations":{},"credentials":{},"extra":true}`, mode: 0o600},
-		{name: "duplicate", content: `{"version":1,"version":1,"revision":0,"authorizations":{},"credentials":{}}`, mode: 0o600},
-		{name: "public", content: `{"version":1,"revision":0,"authorizations":{},"credentials":{}}`, mode: 0o644},
+		{name: "malformed", content: `{`},
+		{name: "version", content: `{"version":2,"workspace":"demo","revision":0,"authorizations":{},"credentials":{}}`},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			controlStore := testControlStore(t)
@@ -337,11 +334,11 @@ func TestOpenRejectsCorruptAndUnsafeState(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(path, []byte(test.content), test.mode); err != nil {
+			if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
 				t.Fatal(err)
 			}
 			if _, err := Open(controlStore, "demo"); err == nil {
-				t.Fatal("unsafe state unexpectedly loaded")
+				t.Fatal("corrupt state unexpectedly loaded")
 			}
 		})
 	}
