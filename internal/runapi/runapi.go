@@ -287,7 +287,7 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 	}
 	if run.State != taskstore.BackgroundRunResultReady {
 		if run.ArtifactExportID != "" {
-			if export, exportErr := h.config.Store.GetBackgroundRunExport(r.Context(), run.ArtifactExportID); exportErr == nil && export.State == taskstore.BackgroundRunExportRecoveryRequired {
+			if export, exportErr := h.config.Store.GetBackgroundRunExport(r.Context(), run.ArtifactExportID); exportErr == nil && export.RecoveryReason != "" {
 				WriteError(w, http.StatusServiceUnavailable, "recovery_required", "The retained result requires recovery.")
 				return
 			}

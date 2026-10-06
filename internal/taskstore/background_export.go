@@ -15,7 +15,7 @@ import (
 )
 
 const backgroundRunExportSelect = `SELECT id,seal_request_id,workspace_id,task_id,attempt_id,generation,artifact_id,
-materialization_id,result_id,state,phase,repository_id,base_sha,opencode_session_id,opencode_message_id,
+materialization_id,result_id,phase,repository_id,base_sha,opencode_session_id,opencode_message_id,
 result_commit,tree_oid,outcome,result_manifest_json,result_manifest_entries,result_manifest_sha256,artifact_manifest_json,
 artifact_manifest_sha256,cas_locator,bundle_sha256,bundle_size,collected_at,recovery_reason,revision,created_at,updated_at
 FROM background_run_exports`
@@ -38,7 +38,7 @@ func scanBackgroundRunExport(row rowScanner) (BackgroundRunExport, error) {
 	var resultManifestHash, artifactManifestHash, bundleHash []byte
 	var repositoryID, createdAt, updatedAt int64
 	err := row.Scan(&value.ID, &value.SealRequestID, &value.WorkspaceID, &value.TaskID, &value.AttemptID, &value.Generation,
-		&value.ArtifactID, &value.MaterializationID, &value.ResultID, &value.State, &value.Phase,
+		&value.ArtifactID, &value.MaterializationID, &value.ResultID, &value.Phase,
 		&repositoryID, &value.BaseSHA, &value.OpenCodeSessionID, &value.OpenCodeMessageID, &resultCommit, &treeOID, &outcome, &resultManifestJSON,
 		&resultEntries, &resultManifestHash, &artifactManifestJSON, &artifactManifestHash, &casLocator, &bundleHash, &bundleSize,
 		&collectedAt, &recoveryReason, &value.Revision, &createdAt, &updatedAt)
@@ -83,43 +83,9 @@ func scanBackgroundRunExport(row rowScanner) (BackgroundRunExport, error) {
 	return value, nil
 }
 
-// StartBackgroundRunExport moves a prepared or recovery-required export to
-// running. Restarting a running export is
-// allowed: the coordinator replays durable phases after a crash.
-func (s *Store) StartBackgroundRunExport(ctx context.Context, ref BackgroundRunExportRef) (_ BackgroundRunExport, err error) {
-	if err := validateExportRef(ref); err != nil {
-		return BackgroundRunExport{}, err
-	}
-	tx, release, err := s.beginWrite(ctx)
-	if err != nil {
-		return BackgroundRunExport{}, err
-	}
-	defer release()
-	defer rollback(tx, &err)
-	now := unixMillis(ref.Now)
-	result, err := tx.ExecContext(ctx, `UPDATE background_run_exports SET state='running',recovery_reason=NULL,revision=revision+1,updated_at=?
-WHERE id=? AND task_id=? AND attempt_id=? AND generation=? AND revision=? AND phase=? AND state IN ('prepared','running','recovery_required')`,
-		now, ref.ExportID, ref.TaskID, ref.AttemptID, ref.Generation, ref.ExpectedRevision, ref.ExpectedPhase)
-	if err != nil {
-		return BackgroundRunExport{}, fmt.Errorf("start background export: %w", err)
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRunExport{}, ErrInvalidState
-	}
-	export, err := getBackgroundRunExport(ctx, tx, ref.ExportID)
-	if err != nil {
-		return BackgroundRunExport{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return BackgroundRunExport{}, err
-	}
-	return export, nil
-}
-
-func (s *Store) RecordBackgroundRunSnapshotStarted(ctx context.Context, ref BackgroundRunExportRef) (BackgroundRunExport, error) {
-	return s.advanceBackgroundExport(ctx, ref, BackgroundRunExportPhasePrepared, BackgroundRunExportPhaseSnapshotStarted, "", nil, nil)
-}
-
+// SelectBackgroundRunSnapshot durably selects the exact snapshot tuple taken
+// under the writer fence. Every later export step re-derives from, and is
+// checked against, this selection.
 func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgroundRunSnapshotParams) (BackgroundRunExport, error) {
 	manifest, err := validateManifest(p.ResultManifest)
 	if err != nil {
@@ -133,7 +99,8 @@ func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgro
 	// ResultManifest is its lossless relational projection, not a second digest
 	// authority with a different JSON shape.
 	if p.ChangesSHA256 == ([32]byte{}) || sha256.Sum256(p.ArtifactManifest) != p.ArtifactManifestSHA256 ||
-		!safeArtifactManifest(p.ArtifactManifest) || validExactTimestamp(p.CollectedAt) != nil {
+		!safeArtifactManifest(p.ArtifactManifest) || validExactTimestamp(p.CollectedAt) != nil ||
+		p.BundleSHA256 == ([32]byte{}) || p.BundleBytes < 0 {
 		return BackgroundRunExport{}, fmt.Errorf("%w: selected background snapshot", ErrInvalidInput)
 	}
 	if _, err := task.ParseGitOID(string(p.ResultCommit)); err != nil {
@@ -160,54 +127,27 @@ func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgro
 			value.OpenCodeSessionID == p.OpenCodeSessionID && value.OpenCodeMessageID == p.OpenCodeMessageID &&
 			value.ChangesSHA256 == p.ChangesSHA256 && bytes.Equal(stored, requested) &&
 			value.ArtifactManifestSHA256 == p.ArtifactManifestSHA256 && bytes.Equal(value.ArtifactManifest, p.ArtifactManifest) &&
+			value.BundleSHA256 == p.BundleSHA256 && value.BundleBytes == p.BundleBytes &&
 			value.CollectedAt != nil && value.CollectedAt.Equal(p.CollectedAt)
 	}
-	return s.advanceBackgroundExport(ctx, p.BackgroundRunExportRef, BackgroundRunExportPhaseSnapshotStarted,
-		BackgroundRunExportPhaseSnapshotSelected,
+	return s.advanceBackgroundExport(ctx, p.BackgroundRunExportRef, BackgroundRunExportPhasePrepared,
+		BackgroundRunExportPhaseSelected,
 		`result_commit=?,tree_oid=?,outcome=?,result_manifest_json=?,result_manifest_entries=?,result_manifest_sha256=?,
-artifact_manifest_json=?,artifact_manifest_sha256=?,cas_locator=?,opencode_session_id=?,opencode_message_id=?,collected_at=?`,
+artifact_manifest_json=?,artifact_manifest_sha256=?,cas_locator=?,bundle_sha256=?,bundle_size=?,opencode_session_id=?,opencode_message_id=?,
+collected_at=?,recovery_reason=NULL`,
 		[]any{p.ResultCommit, p.TreeOID, p.Outcome, string(encodedManifest), len(manifest), p.ChangesSHA256[:],
 			string(p.ArtifactManifest), p.ArtifactManifestSHA256[:], "sha256:" + hex.EncodeToString(p.ArtifactManifestSHA256[:]),
-			p.OpenCodeSessionID, p.OpenCodeMessageID, unixMillis(p.CollectedAt)}, replay)
+			p.BundleSHA256[:], p.BundleBytes, p.OpenCodeSessionID, p.OpenCodeMessageID, unixMillis(p.CollectedAt)}, replay)
 }
 
-func (s *Store) RecordBackgroundRunBundleWriteStarted(ctx context.Context, ref BackgroundRunExportRef) (BackgroundRunExport, error) {
-	return s.advanceBackgroundExport(ctx, ref, BackgroundRunExportPhaseSnapshotSelected, BackgroundRunExportPhaseBundleWriteStarted, "", nil, nil)
-}
-
-// RecordBackgroundRunBundleVerified commits the caller's verified digest/size
-// evidence at the export revision. It does not read or verify bundle bytes.
-func (s *Store) RecordBackgroundRunBundleVerified(ctx context.Context, p RecordBackgroundRunBundleVerifiedParams) (BackgroundRunExport, error) {
-	if p.BundleSHA256 == ([32]byte{}) || p.BundleBytes < 0 {
-		return BackgroundRunExport{}, fmt.Errorf("%w: verified bundle", ErrInvalidInput)
-	}
-	replay := func(value BackgroundRunExport) bool {
-		return value.BundleSHA256 == p.BundleSHA256 && value.BundleBytes == p.BundleBytes
-	}
-	return s.advanceBackgroundExport(ctx, p.BackgroundRunExportRef, BackgroundRunExportPhaseBundleWriteStarted,
-		BackgroundRunExportPhaseBundleVerified, `bundle_sha256=?,bundle_size=?`, []any{p.BundleSHA256[:], p.BundleBytes}, replay)
-}
-
-func (s *Store) RecordBackgroundRunCASInstallStarted(ctx context.Context, ref BackgroundRunExportRef) (BackgroundRunExport, error) {
-	return s.advanceBackgroundExport(ctx, ref, BackgroundRunExportPhaseBundleVerified, BackgroundRunExportPhaseCASInstallStarted, "", nil, nil)
-}
-
-func (s *Store) RecordBackgroundRunCASInstalled(ctx context.Context, ref BackgroundRunExportRef) (BackgroundRunExport, error) {
-	return s.advanceBackgroundExport(ctx, ref, BackgroundRunExportPhaseCASInstallStarted, BackgroundRunExportPhaseCASInstalled, "", nil, nil)
-}
-
-func (s *Store) RecordBackgroundRunMaterializeStarted(ctx context.Context, ref BackgroundRunExportRef) (BackgroundRunExport, error) {
-	return s.advanceBackgroundExport(ctx, ref, BackgroundRunExportPhaseCASInstalled, BackgroundRunExportPhaseMaterializeStarted, "", nil, nil)
-}
-
+// MarkBackgroundRunExportRecoveryRequired records why the last export pass
+// failed. The export keeps its phase; the next pass retries from it.
 func (s *Store) MarkBackgroundRunExportRecoveryRequired(ctx context.Context, ref BackgroundRunExportRef, reason string) (BackgroundRunExport, error) {
 	if !validBoundedText(reason, 1, 1000) {
 		return BackgroundRunExport{}, fmt.Errorf("%w: export recovery reason", ErrInvalidInput)
 	}
-	replay := func(value BackgroundRunExport) bool {
-		return value.State == BackgroundRunExportRecoveryRequired && value.RecoveryReason == reason
-	}
-	return s.updateBackgroundExport(ctx, ref, ref.ExpectedPhase, `state='recovery_required',recovery_reason=?`, []any{reason}, replay)
+	replay := func(value BackgroundRunExport) bool { return value.RecoveryReason == reason }
+	return s.updateBackgroundExport(ctx, ref, ref.ExpectedPhase, `recovery_reason=?`, []any{reason}, replay)
 }
 
 func (s *Store) advanceBackgroundExport(ctx context.Context, ref BackgroundRunExportRef, from, to BackgroundRunExportPhase,
@@ -249,7 +189,7 @@ func (s *Store) updateBackgroundExport(ctx context.Context, ref BackgroundRunExp
 	values = append(values, unixMillis(ref.Now), ref.ExportID, ref.TaskID, ref.AttemptID, ref.Generation,
 		ref.ExpectedRevision, ref.ExpectedPhase)
 	result, err := tx.ExecContext(ctx, `UPDATE background_run_exports SET `+set+`revision=revision+1,updated_at=?
-WHERE id=? AND task_id=? AND attempt_id=? AND generation=? AND revision=? AND phase=? AND state='running'`, values...)
+WHERE id=? AND task_id=? AND attempt_id=? AND generation=? AND revision=? AND phase=? AND phase<>'committed'`, values...)
 	if err != nil {
 		return BackgroundRunExport{}, fmt.Errorf("advance background export: %w", err)
 	}

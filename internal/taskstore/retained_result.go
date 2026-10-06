@@ -73,8 +73,7 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 		export.ArtifactID != p.ArtifactID || export.MaterializationID != p.MaterializationID || export.ResultID != p.ResultID ||
 		request.ArtifactID != p.ArtifactID || request.MaterializationID != p.MaterializationID || request.ResultID != p.ResultID ||
 		request.ResultEventID != p.ResultEventID || request.TaskEventID != p.TaskEventID || request.ExportID != p.ExportID ||
-		materialization.State != ArtifactMaterializationReady || materialization.ExportID != p.ExportID || materialization.ArtifactID != p.ArtifactID ||
-		materialization.ResultID != p.ResultID || materialization.ResultCommit != export.ResultCommit || materialization.TreeOID != export.TreeOID ||
+		materialization.ExportID != p.ExportID || materialization.ArtifactID != p.ArtifactID || materialization.ResultID != p.ResultID ||
 		fence.ExportID != p.ExportID || fence.TaskID != p.TaskID || fence.AttemptID != p.AttemptID || fence.Generation != p.Generation ||
 		run.BackgroundSealRequestID != request.ID || run.MaterializationID != p.MaterializationID || run.RetainedResultID != p.ResultID {
 		return BackgroundRunRetainedResult{}, ErrInvalidState
@@ -194,8 +193,18 @@ WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND se
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRunRetainedResult{}, ErrInvalidState
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE background_run_exports SET state='completed',phase='completed',
-revision=revision+1,updated_at=? WHERE id=? AND revision=? AND phase='materialized' AND state='running'`, sealedMS, p.ExportID, p.ExpectedRevision)
+	result, err = tx.ExecContext(ctx, `UPDATE artifact_materializations SET state='ready',result_commit=?,tree_oid=?,proof_sha256=?,
+revision=revision+1,updated_at=? WHERE id=? AND export_id=? AND artifact_id=? AND result_id=? AND state='prepared' AND revision=?`,
+		export.ResultCommit, export.TreeOID, p.MaterializationProof[:], sealedMS, p.MaterializationID, p.ExportID, p.ArtifactID, p.ResultID,
+		materialization.Revision)
+	if err != nil {
+		return BackgroundRunRetainedResult{}, fmt.Errorf("accept artifact materialization: %w", err)
+	}
+	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
+		return BackgroundRunRetainedResult{}, ErrInvalidState
+	}
+	result, err = tx.ExecContext(ctx, `UPDATE background_run_exports SET phase='committed',recovery_reason=NULL,
+revision=revision+1,updated_at=? WHERE id=? AND revision=? AND phase='selected'`, sealedMS, p.ExportID, p.ExpectedRevision)
 	if err != nil {
 		return BackgroundRunRetainedResult{}, err
 	}
@@ -224,6 +233,7 @@ state='canceling' AND effect_phase='sealing' AND artifact_export_id=? AND retain
 	storedRun, _ := readBackgroundRunExact(ctx, tx, export.WorkspaceID, p.TaskID)
 	storedExport, _ := getBackgroundRunExport(ctx, tx, p.ExportID)
 	artifact, _ := getRetainedArtifact(ctx, tx, p.ArtifactID)
+	materialization, _ = getArtifactMaterialization(ctx, tx, p.MaterializationID)
 	if err := tx.Commit(); err != nil {
 		return BackgroundRunRetainedResult{}, err
 	}
@@ -233,7 +243,8 @@ state='canceling' AND effect_phase='sealing' AND artifact_export_id=? AND retain
 }
 
 func validateRetainedResultCommit(p CommitBackgroundRunRetainedResultParams) error {
-	if err := validateExportRef(p.BackgroundRunExportRef); err != nil || p.ExpectedPhase != BackgroundRunExportPhaseMaterialized {
+	if err := validateExportRef(p.BackgroundRunExportRef); err != nil || p.ExpectedPhase != BackgroundRunExportPhaseSelected ||
+		p.MaterializationProof == ([32]byte{}) {
 		return fmt.Errorf("%w: retained result export revision", ErrInvalidInput)
 	}
 	if _, err := task.ParseMaterializationID(string(p.MaterializationID)); err != nil {
@@ -351,7 +362,8 @@ func retainedResultReplay(ctx context.Context, tx *sql.Tx, result Result, p Comm
 	manifest, _ := getResultManifest(ctx, tx, p.ResultID)
 	resultEvent, _ := scanEvent(tx.QueryRowContext(ctx, eventSelect+` WHERE e.id=?`, p.ResultEventID))
 	taskEvent, _ := scanEvent(tx.QueryRowContext(ctx, eventSelect+` WHERE e.id=?`, p.TaskEventID))
-	if export.State != BackgroundRunExportCompleted || export.Phase != BackgroundRunExportPhaseCompleted ||
+	if export.Phase != BackgroundRunExportPhaseCommitted || materialization.State != ArtifactMaterializationReady ||
+		materialization.ProofSHA256 != p.MaterializationProof ||
 		run.State != BackgroundRunResultReady || owner.SealedResultID != p.ResultID || attempt.SealedResultID != p.ResultID ||
 		!bytes.Equal(artifact.Manifest, export.ArtifactManifest) {
 		return BackgroundRunRetainedResult{}, ErrCorruptStore

@@ -99,75 +99,33 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		t.Fatalf("writer-inactive production claim = %+v, error=%v", writerRun, err)
 	}
 
-	export, err := store.StartBackgroundRunExport(context.Background(), BackgroundRunExportRef{
-		ExportID: seal.ExportID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRevision: 1, ExpectedPhase: BackgroundRunExportPhasePrepared,
-		Now: writerAt.Add(time.Second),
-	})
-	if err != nil {
-		t.Fatal(err)
+	export, err := store.GetBackgroundRunExport(context.Background(), seal.ExportID)
+	if err != nil || export.Phase != BackgroundRunExportPhasePrepared {
+		t.Fatalf("prepared export = %+v, error=%v", export, err)
 	}
-	// A stale export revision is rejected; restarting a running export at its
-	// current revision is allowed so a restarted coordinator can replay.
-	if _, err := store.StartBackgroundRunExport(context.Background(), BackgroundRunExportRef{
-		ExportID: export.ID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRevision: export.Revision - 1, ExpectedPhase: export.Phase,
-		Now: writerAt.Add(1500 * time.Millisecond),
-	}); !errors.Is(err, ErrInvalidState) {
-		t.Fatalf("stale export start = %v", err)
+	exportNow := writerAt.Add(time.Second)
+	exportRef := func() BackgroundRunExportRef {
+		return BackgroundRunExportRef{ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID,
+			Generation: export.Generation, ExpectedRevision: export.Revision, ExpectedPhase: export.Phase, Now: exportNow}
 	}
-	restartedRevision := export.Revision
-	export, err = store.StartBackgroundRunExport(context.Background(), BackgroundRunExportRef{
-		ExportID: export.ID, TaskID: run.TaskID, AttemptID: run.AttemptID, Generation: run.Generation,
-		ExpectedRevision: export.Revision, ExpectedPhase: export.Phase,
-		Now: writerAt.Add(1500 * time.Millisecond),
-	})
-	if err != nil || export.State != BackgroundRunExportRunning || export.Revision != restartedRevision+1 {
-		t.Fatalf("restarted export = %+v, error=%v", export, err)
-	}
-	failureAt := writerAt.Add(2 * time.Second)
-	failureRef := BackgroundRunExportRef{ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID,
-		Generation: export.Generation, ExpectedRevision: export.Revision, ExpectedPhase: export.Phase,
-		Now: failureAt}
-	recovery, err := store.MarkBackgroundRunExportRecoveryRequired(context.Background(), failureRef, "injected export interruption")
-	if err != nil || recovery.State != BackgroundRunExportRecoveryRequired {
+	// A failed pass records why; the export keeps its phase for the next pass,
+	// and a stale revision cannot record over it.
+	recovery, err := store.MarkBackgroundRunExportRecoveryRequired(context.Background(), exportRef(), "injected export interruption")
+	if err != nil || recovery.Phase != BackgroundRunExportPhasePrepared || recovery.RecoveryReason != "injected export interruption" {
 		t.Fatalf("export recovery = %+v, error=%v", recovery, err)
 	}
-	if replayed, err := store.MarkBackgroundRunExportRecoveryRequired(context.Background(), failureRef, "injected export interruption"); err != nil || replayed.Revision != recovery.Revision {
+	if replayed, err := store.MarkBackgroundRunExportRecoveryRequired(context.Background(), exportRef(), "injected export interruption"); err != nil || replayed.Revision != recovery.Revision {
 		t.Fatalf("export recovery replay = %+v, error=%v", replayed, err)
 	}
-	if _, err := store.RecordBackgroundRunSnapshotStarted(context.Background(), BackgroundRunExportRef{ExportID: recovery.ID,
-		TaskID: recovery.TaskID, AttemptID: recovery.AttemptID, Generation: recovery.Generation, ExpectedRevision: recovery.Revision,
-		ExpectedPhase: recovery.Phase, Now: failureAt}); !errors.Is(err, ErrInvalidState) {
-		t.Fatalf("recovery-required export advanced before restart: %v", err)
+	if _, err := store.MarkBackgroundRunExportRecoveryRequired(context.Background(), exportRef(), "different interruption"); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("stale export recovery = %v", err)
 	}
-	reselected, err := startNextBackgroundRun(context.Background(), store, failureAt.Add(time.Second))
+	reselected, err := startNextBackgroundRun(context.Background(), store, exportNow.Add(time.Second))
 	if err != nil || reselected.EffectPhase != BackgroundRunEffectSealing {
 		t.Fatalf("reselect failed export run = %+v, error=%v", reselected, err)
 	}
-	export, err = store.StartBackgroundRunExport(context.Background(), BackgroundRunExportRef{
-		ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID, Generation: export.Generation,
-		ExpectedRevision: recovery.Revision, ExpectedPhase: recovery.Phase,
-		Now: failureAt.Add(2 * time.Second),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	exportNow := failureAt.Add(3 * time.Second)
-	exportRef := func() BackgroundRunExportRef {
-		return BackgroundRunExportRef{ExportID: export.ID, TaskID: export.TaskID, AttemptID: export.AttemptID,
-			Generation: export.Generation, ExpectedRevision: export.Revision, ExpectedPhase: export.Phase,
-			Now: exportNow}
-	}
-	advance := func(call func(context.Context, BackgroundRunExportRef) (BackgroundRunExport, error)) {
-		var stepErr error
-		export, stepErr = call(context.Background(), exportRef())
-		if stepErr != nil {
-			t.Fatalf("advance export from %s: %v", exportRef().ExpectedPhase, stepErr)
-		}
-		exportNow = exportNow.Add(time.Second)
-	}
-	advance(store.RecordBackgroundRunSnapshotStarted)
+	export = recovery
+	exportNow = exportNow.Add(2 * time.Second)
 	mode, blob, size := "100644", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", int64(12)
 	resultManifest := []ManifestEntry{{PathBase64: "Y2hhbmdlLnR4dA==", ChangeKind: "added", NewMode: &mode, NewBlobOID: &blob, NewSize: &size}}
 	resultManifestJSON, _ := json.Marshal(resultManifest)
@@ -175,48 +133,35 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	// /A== is standard Base64 for a non-UTF8 Git path prefix. It is artifact
 	// data, not host-path authority, and must survive both Go and SQL guards.
 	artifactManifest := json.RawMessage(`{"version":1,"changes":[{"path_base64":"/A=="}]}`)
-	if _, err := store.SelectBackgroundRunSnapshot(context.Background(), SelectBackgroundRunSnapshotParams{
+	selection := SelectBackgroundRunSnapshotParams{
 		BackgroundRunExportRef: exportRef(), ResultCommit: resultCommit, TreeOID: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
 		Outcome: task.ResultChanged, ResultManifest: resultManifest, ChangesSHA256: sha256.Sum256(resultManifestJSON),
 		ArtifactManifest:       json.RawMessage(`{"host_path":"/private/work"}`),
 		ArtifactManifestSHA256: sha256.Sum256([]byte(`{"host_path":"/private/work"}`)),
-		OpenCodeSessionID:      run.OpenCodeSessionID, OpenCodeMessageID: run.OpenCodeMessageID, CollectedAt: exportNow,
-	}); !errors.Is(err, ErrInvalidInput) {
+		BundleSHA256:           sha256.Sum256([]byte("bundle")), BundleBytes: 6,
+		OpenCodeSessionID: run.OpenCodeSessionID, OpenCodeMessageID: run.OpenCodeMessageID, CollectedAt: exportNow,
+	}
+	if _, err := store.SelectBackgroundRunSnapshot(context.Background(), selection); !errors.Is(err, ErrInvalidInput) {
 		t.Fatalf("unsafe artifact manifest = %v", err)
 	}
-	export, err = store.SelectBackgroundRunSnapshot(context.Background(), SelectBackgroundRunSnapshotParams{
-		BackgroundRunExportRef: exportRef(), ResultCommit: resultCommit, TreeOID: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-		Outcome: task.ResultChanged, ResultManifest: resultManifest, ChangesSHA256: sha256.Sum256(resultManifestJSON),
-		ArtifactManifest: artifactManifest, ArtifactManifestSHA256: sha256.Sum256(artifactManifest),
-		OpenCodeSessionID: run.OpenCodeSessionID, OpenCodeMessageID: run.OpenCodeMessageID, CollectedAt: exportNow,
-	})
-	if err != nil {
-		t.Fatal(err)
+	selection.ArtifactManifest, selection.ArtifactManifestSHA256 = artifactManifest, sha256.Sum256(artifactManifest)
+	export, err = store.SelectBackgroundRunSnapshot(context.Background(), selection)
+	if err != nil || export.Phase != BackgroundRunExportPhaseSelected || export.RecoveryReason != "" || export.BundleBytes != 6 {
+		t.Fatalf("selected export = %+v, error=%v", export, err)
+	}
+	if replayed, err := store.SelectBackgroundRunSnapshot(context.Background(), selection); err != nil || replayed.Revision != export.Revision {
+		t.Fatalf("selection replay = %+v, error=%v", replayed, err)
+	}
+	different := selection
+	different.TreeOID = task.GitOID("cccccccccccccccccccccccccccccccccccccccc")
+	if _, err := store.SelectBackgroundRunSnapshot(context.Background(), different); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("different selection = %v", err)
 	}
 	exportNow = exportNow.Add(time.Second)
-	advance(store.RecordBackgroundRunBundleWriteStarted)
-	export, err = store.RecordBackgroundRunBundleVerified(context.Background(), RecordBackgroundRunBundleVerifiedParams{
-		BackgroundRunExportRef: exportRef(), BundleSHA256: sha256.Sum256([]byte("bundle")), BundleBytes: 6,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	exportNow = exportNow.Add(time.Second)
-	advance(store.RecordBackgroundRunCASInstallStarted)
-	advance(store.RecordBackgroundRunCASInstalled)
-	advance(store.RecordBackgroundRunMaterializeStarted)
 	materialProof := sha256.Sum256([]byte("acceptance materialization"))
-	export, err = store.RecordArtifactMaterializationReady(context.Background(), RecordArtifactMaterializationReadyParams{
-		BackgroundRunExportRef: exportRef(), MaterializationID: seal.MaterializationID, ArtifactID: seal.ArtifactID,
-		ResultID: seal.ResultID, ResultCommit: export.ResultCommit, TreeOID: export.TreeOID, ProofSHA256: materialProof,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	exportNow = exportNow.Add(time.Second)
 	evidence := json.RawMessage(`{"authorityRead":true,"objects":1}`)
 	commit := CommitBackgroundRunRetainedResultParams{BackgroundRunExportRef: exportRef(),
-		MaterializationID: seal.MaterializationID, ArtifactID: seal.ArtifactID, ResultID: seal.ResultID,
+		MaterializationID: seal.MaterializationID, MaterializationProof: materialProof, ArtifactID: seal.ArtifactID, ResultID: seal.ResultID,
 		ResultEventID: seal.ResultEventID, TaskEventID: seal.TaskEventID, EvidencePayload: evidence,
 		EvidenceSHA256: sha256.Sum256(evidence), Actor: testSystemActor(), SealedAt: exportNow,
 	}
@@ -237,7 +182,9 @@ revision=revision+1,updated_at=updated_at+1 WHERE task_id=?`, run.TaskID); err =
 	if err != nil || committed.Run.State != BackgroundRunResultReady || committed.Run.EffectPhase != BackgroundRunEffectCleaning ||
 		committed.Result.SourceKind != ResultSourceRetainedArtifact || committed.Artifact.ManifestSHA256 != sha256.Sum256(artifactManifest) ||
 		committed.Artifact.ChangesSHA256 != sha256.Sum256(resultManifestJSON) || committed.Artifact.ManifestSHA256 == committed.Artifact.ChangesSHA256 ||
-		committed.Artifact.CASLocator != "sha256:"+hex.EncodeToString(committed.Artifact.ManifestSHA256[:]) {
+		committed.Artifact.CASLocator != "sha256:"+hex.EncodeToString(committed.Artifact.ManifestSHA256[:]) ||
+		committed.Export.Phase != BackgroundRunExportPhaseCommitted || committed.Materialization.State != ArtifactMaterializationReady ||
+		committed.Materialization.ProofSHA256 != materialProof || committed.Materialization.ResultCommit != resultCommit {
 		t.Fatalf("retained result commit = %+v, error=%v", committed, err)
 	}
 	commitReplay, err := store.CommitBackgroundRunRetainedResult(context.Background(), commit)

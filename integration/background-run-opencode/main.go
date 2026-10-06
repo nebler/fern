@@ -887,8 +887,8 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 		if runErr != nil && !errors.Is(runErr, backgroundruncoord.ErrNoWork) {
 			current, _ := store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
 			export, _ := store.GetBackgroundRunExport(context.Background(), seal.Request.ExportID)
-			return fmt.Errorf("retain result at run=%s/%s export=%s/%s revision=%d: %w",
-				current.State, current.EffectPhase, export.State, export.Phase, export.Revision, runErr)
+			return fmt.Errorf("retain result at run=%s/%s export=%s revision=%d: %w",
+				current.State, current.EffectPhase, export.Phase, export.Revision, runErr)
 		}
 		run, err = store.GetBackgroundRun(ctx, workspaceID, admission.Task.ID, actor)
 		if err != nil {
@@ -900,7 +900,7 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 	}
 	if run.State != taskstore.BackgroundRunResultReady || run.EffectPhase != taskstore.BackgroundRunEffectCleanupComplete {
 		export, _ := store.GetBackgroundRunExport(ctx, seal.Request.ExportID)
-		return fmt.Errorf("retained result incomplete: run=%s/%s export=%s/%s reason=%s", run.State, run.EffectPhase, export.State, export.Phase, export.RecoveryReason)
+		return fmt.Errorf("retained result incomplete: run=%s/%s export=%s reason=%s", run.State, run.EffectPhase, export.Phase, export.RecoveryReason)
 	}
 	projection, err := store.GetBackgroundRunResult(ctx, workspaceID, admission.Task.ID, actor)
 	if err != nil {

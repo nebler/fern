@@ -17,10 +17,10 @@ func TestExportTransitionKeepsLastConfirmedRevision(t *testing.T) {
 	now := time.Date(2026, 9, 5, 12, 0, 0, 123456789, time.UTC)
 	a := retainedExportAttempt{coordinator: &Coordinator{config: Config{Now: func() time.Time { return now }}}, export: taskstore.BackgroundRunExport{
 		ID: "export", TaskID: "task", AttemptID: "attempt", Generation: 3, Revision: 7,
-		Phase: taskstore.BackgroundRunExportPhaseSnapshotSelected,
+		Phase: taskstore.BackgroundRunExportPhasePrepared,
 	}}
 	want := taskstore.BackgroundRunExportRef{ExportID: "export", TaskID: "task", AttemptID: "attempt", Generation: 3,
-		ExpectedRevision: 7, ExpectedPhase: taskstore.BackgroundRunExportPhaseSnapshotSelected, Now: now.Truncate(time.Millisecond)}
+		ExpectedRevision: 7, ExpectedPhase: taskstore.BackgroundRunExportPhasePrepared, Now: now.Truncate(time.Millisecond)}
 	failure := errors.New("SQL response failed")
 	err := a.record(func(got taskstore.BackgroundRunExportRef) (taskstore.BackgroundRunExport, error) {
 		if got != want {
@@ -38,10 +38,10 @@ func TestExportTransitionKeepsLastConfirmedRevision(t *testing.T) {
 		}
 		next := a.export
 		next.Revision++
-		next.Phase = taskstore.BackgroundRunExportPhaseBundleWriteStarted
+		next.Phase = taskstore.BackgroundRunExportPhaseSelected
 		return next, nil
 	})
-	if err != nil || a.export.Revision != 8 || a.export.Phase != taskstore.BackgroundRunExportPhaseBundleWriteStarted {
+	if err != nil || a.export.Revision != 8 || a.export.Phase != taskstore.BackgroundRunExportPhaseSelected {
 		t.Fatalf("successful transition not adopted: %+v, %v", a.export, err)
 	}
 	now = time.Time{}
@@ -86,34 +86,6 @@ func TestSnapshotMatchesEveryDurableSelectionField(t *testing.T) {
 				t.Fatal("mismatched tuple accepted")
 			}
 		})
-	}
-	export.BundleSHA256 = [32]byte{}
-	export.BundleBytes++
-	if !snapshotMatchesExport(snapshot, export) {
-		t.Fatal("selection before bundle verification incorrectly requires bundle evidence")
-	}
-}
-
-func TestRetainedSnapshotReplayStopsAfterCASInstallation(t *testing.T) {
-	for _, tt := range []struct {
-		phase taskstore.BackgroundRunExportPhase
-		want  bool
-	}{
-		{taskstore.BackgroundRunExportPhasePrepared, true},
-		{taskstore.BackgroundRunExportPhaseSnapshotStarted, true},
-		{taskstore.BackgroundRunExportPhaseSnapshotSelected, true},
-		{taskstore.BackgroundRunExportPhaseBundleWriteStarted, true},
-		{taskstore.BackgroundRunExportPhaseBundleVerified, true},
-		{taskstore.BackgroundRunExportPhaseCASInstallStarted, true},
-		{taskstore.BackgroundRunExportPhaseCASInstalled, false},
-		{taskstore.BackgroundRunExportPhaseMaterializeStarted, false},
-		{taskstore.BackgroundRunExportPhaseMaterialized, false},
-		{taskstore.BackgroundRunExportPhaseCompleted, false},
-		{"unknown", false},
-	} {
-		if got := needsRetainedSnapshot(tt.phase); got != tt.want {
-			t.Errorf("snapshot replay for %q = %v, want %v", tt.phase, got, tt.want)
-		}
 	}
 }
 
@@ -164,27 +136,33 @@ func (f failingRetainedArtifact) Materialize(context.Context, taskartifact.Locat
 	return nil, f.err
 }
 
-func TestRetainedRecoveryAndMaterializationFailuresDoNotAdvance(t *testing.T) {
+// Only an exact CAS inspection of the selected tuple skips the fenced
+// snapshot replay; anything else re-derives from the stopped clone.
+func TestRetainedInstallationSkipsSnapshotOnlyForExactSelection(t *testing.T) {
 	snapshot, export := retainedTuple(t)
-	export.Phase = taskstore.BackgroundRunExportPhaseCASInstallStarted
 	failure := errors.New("artifact unavailable")
+	for _, tt := range []struct {
+		name     string
+		phase    taskstore.BackgroundRunExportPhase
+		artifact failingRetainedArtifact
+		want     bool
+	}{
+		{"prepared", taskstore.BackgroundRunExportPhasePrepared, failingRetainedArtifact{snapshot: snapshot}, false},
+		{"inspection failure", taskstore.BackgroundRunExportPhaseSelected, failingRetainedArtifact{err: failure}, false},
+		{"mismatched", taskstore.BackgroundRunExportPhaseSelected, failingRetainedArtifact{}, false},
+		{"exact", taskstore.BackgroundRunExportPhaseSelected, failingRetainedArtifact{snapshot: snapshot}, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			export.Phase = tt.phase
+			a := retainedExportAttempt{coordinator: &Coordinator{artifact: tt.artifact}, export: export}
+			if got := a.installed(context.Background()); got != tt.want {
+				t.Fatalf("installed = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	export.Phase = taskstore.BackgroundRunExportPhaseSelected
 	a := retainedExportAttempt{coordinator: &Coordinator{artifact: failingRetainedArtifact{err: failure}}, export: export}
-	if err := a.recoverInstalledCAS(context.Background(), context.Background()); err != nil || !needsRetainedSnapshot(a.export.Phase) {
-		t.Fatalf("failed CAS inspection must leave fenced snapshot replay available: %v", err)
-	}
-	a.coordinator.artifact = failingRetainedArtifact{snapshot: taskartifact.Snapshot{}}
-	if err := a.recoverInstalledCAS(context.Background(), context.Background()); err != nil || a.export.Phase != export.Phase {
-		t.Fatalf("mismatched CAS advanced export: %v", err)
-	}
-	// Exact inspection may record recovery, but an invalid clock must prevent SQL.
-	a.coordinator.config.Now = func() time.Time { return time.Time{} }
-	a.coordinator.artifact = failingRetainedArtifact{snapshot: snapshot}
-	if err := a.recoverInstalledCAS(context.Background(), context.Background()); err == nil || a.export.Phase != export.Phase {
-		t.Fatalf("invalid clock permitted CAS recovery: %v", err)
-	}
-	a.export.Phase = taskstore.BackgroundRunExportPhaseMaterializeStarted
-	a.coordinator.artifact = failingRetainedArtifact{err: failure}
-	if err := a.verifyMaterialization(context.Background(), context.Background()); !errors.Is(err, failure) || a.export.Phase != taskstore.BackgroundRunExportPhaseMaterializeStarted {
+	if _, err := a.materialize(context.Background()); !errors.Is(err, failure) || a.export.Phase != taskstore.BackgroundRunExportPhaseSelected {
 		t.Fatalf("materialization failure advanced export: %v", err)
 	}
 }

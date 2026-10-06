@@ -492,8 +492,7 @@ CREATE TABLE background_run_exports (
   artifact_id TEXT NOT NULL UNIQUE CHECK(length(artifact_id)=40 AND substr(artifact_id,1,4)='art_' AND substr(artifact_id,19,1)='7'),
   materialization_id TEXT NOT NULL UNIQUE CHECK(length(materialization_id)=40 AND substr(materialization_id,1,4)='mat_' AND substr(materialization_id,19,1)='7'),
   result_id TEXT NOT NULL UNIQUE CHECK(length(result_id)=40 AND substr(result_id,1,4)='res_' AND substr(result_id,19,1)='7'),
-  state TEXT NOT NULL CHECK(state IN ('prepared','running','recovery_required','completed')),
-  phase TEXT NOT NULL CHECK(phase IN ('prepared','snapshot_started','snapshot_selected','bundle_write_started','bundle_verified','cas_install_started','cas_installed','materialize_started','materialized','completed')),
+  phase TEXT NOT NULL CHECK(phase IN ('prepared','selected','committed')),
   repository_id INTEGER NOT NULL CHECK(repository_id>0),
   base_sha TEXT NOT NULL CHECK(length(base_sha)=40 AND base_sha NOT GLOB '*[^0-9a-f]*'),
   opencode_session_id TEXT NOT NULL CHECK(length(opencode_session_id)=36 AND substr(opencode_session_id,1,4)='ses_' AND substr(opencode_session_id,5) NOT GLOB '*[^0-9a-f]*'),
@@ -514,12 +513,11 @@ CREATE TABLE background_run_exports (
   revision INTEGER NOT NULL CHECK(revision>=1),
   created_at INTEGER NOT NULL CHECK(created_at>=0),
   updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),
-  CHECK((phase IN ('prepared','snapshot_started')) OR
+  CHECK(phase='prepared' OR
         (result_commit IS NOT NULL AND tree_oid IS NOT NULL AND outcome IS NOT NULL AND result_manifest_json IS NOT NULL AND
          result_manifest_entries IS NOT NULL AND result_manifest_sha256 IS NOT NULL AND artifact_manifest_json IS NOT NULL AND
-         artifact_manifest_sha256 IS NOT NULL AND cas_locator='sha256:'||lower(hex(artifact_manifest_sha256)) AND collected_at IS NOT NULL)),
-  CHECK(phase NOT IN ('bundle_verified','cas_install_started','cas_installed','materialize_started','materialized','completed') OR
-        (bundle_sha256 IS NOT NULL AND bundle_size IS NOT NULL)),
+         artifact_manifest_sha256 IS NOT NULL AND cas_locator='sha256:'||lower(hex(artifact_manifest_sha256)) AND
+         bundle_sha256 IS NOT NULL AND bundle_size IS NOT NULL AND collected_at IS NOT NULL)),
   FOREIGN KEY(task_id,workspace_id) REFERENCES tasks(id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   FOREIGN KEY(attempt_id,task_id,workspace_id) REFERENCES attempts(id,task_id,workspace_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   FOREIGN KEY(workspace_id,repository_id) REFERENCES workspaces(id,repository_id) ON UPDATE RESTRICT ON DELETE RESTRICT,
@@ -532,17 +530,15 @@ CREATE TABLE artifact_materializations (
   export_id TEXT NOT NULL UNIQUE REFERENCES background_run_exports(id) ON UPDATE RESTRICT ON DELETE RESTRICT,
   artifact_id TEXT NOT NULL UNIQUE CHECK(length(artifact_id)=40 AND substr(artifact_id,1,4)='art_' AND substr(artifact_id,19,1)='7'),
   result_id TEXT NOT NULL UNIQUE CHECK(length(result_id)=40 AND substr(result_id,1,4)='res_' AND substr(result_id,19,1)='7'),
-  state TEXT NOT NULL CHECK(state IN ('prepared','ready','recovery_required')),
+  state TEXT NOT NULL CHECK(state IN ('prepared','ready')),
   result_commit TEXT,
   tree_oid TEXT,
   proof_sha256 BLOB CHECK(proof_sha256 IS NULL OR length(proof_sha256)=32),
-  recovery_reason TEXT CHECK(recovery_reason IS NULL OR length(CAST(recovery_reason AS BLOB)) BETWEEN 1 AND 1000),
   revision INTEGER NOT NULL CHECK(revision>=1),
   created_at INTEGER NOT NULL CHECK(created_at>=0),
   updated_at INTEGER NOT NULL CHECK(updated_at>=created_at),
-  CHECK((state='prepared' AND result_commit IS NULL AND tree_oid IS NULL AND proof_sha256 IS NULL AND recovery_reason IS NULL) OR
-        (state='ready' AND length(result_commit)=40 AND length(tree_oid)=40 AND proof_sha256 IS NOT NULL AND recovery_reason IS NULL) OR
-        (state='recovery_required' AND recovery_reason IS NOT NULL))
+  CHECK((state='prepared' AND result_commit IS NULL AND tree_oid IS NULL AND proof_sha256 IS NULL) OR
+        (state='ready' AND length(result_commit)=40 AND length(tree_oid)=40 AND proof_sha256 IS NOT NULL))
 ) STRICT;
 
 CREATE TABLE background_run_writer_fences (
@@ -619,15 +615,15 @@ CREATE TRIGGER background_run_exports_revision BEFORE UPDATE ON background_run_e
   NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at
 BEGIN SELECT RAISE(ABORT,'invalid background export revision'); END;
 
-CREATE TRIGGER background_run_exports_terminal BEFORE UPDATE ON background_run_exports WHEN OLD.state='completed'
-BEGIN SELECT RAISE(ABORT,'completed background export is immutable'); END;
+CREATE TRIGGER background_run_exports_terminal BEFORE UPDATE ON background_run_exports WHEN OLD.phase='committed'
+BEGIN SELECT RAISE(ABORT,'committed background export is immutable'); END;
 
 CREATE TRIGGER background_run_exports_delete BEFORE DELETE ON background_run_exports BEGIN SELECT RAISE(ABORT,'background export is durable'); END;
 
 CREATE TRIGGER artifact_materializations_transition BEFORE UPDATE ON artifact_materializations BEGIN
   SELECT CASE WHEN OLD.state<>'prepared' OR NEW.revision<>OLD.revision+1 OR NEW.updated_at<OLD.updated_at OR
     NEW.id<>OLD.id OR NEW.seal_request_id<>OLD.seal_request_id OR NEW.export_id<>OLD.export_id OR NEW.artifact_id<>OLD.artifact_id OR
-    NEW.result_id<>OLD.result_id OR NEW.created_at<>OLD.created_at OR NEW.state NOT IN ('ready','recovery_required')
+    NEW.result_id<>OLD.result_id OR NEW.created_at<>OLD.created_at OR NEW.state<>'ready'
     THEN RAISE(ABORT,'invalid artifact materialization transition') END;
 END;
 
@@ -650,7 +646,7 @@ WHEN OLD.effect_phase='sealing' AND NEW.effect_phase<>'sealing' AND NOT EXISTS (
     JOIN background_run_exports export ON export.id=OLD.artifact_export_id
     JOIN artifact_materializations materialization ON materialization.id=OLD.materialization_id
     WHERE result.id=OLD.retained_result_id AND result.source_kind='retained_artifact' AND artifact.result_id=result.id AND
-      export.state='completed' AND export.phase='completed' AND export.result_id=result.id AND materialization.state='ready' AND materialization.result_id=result.id)
+      export.phase='committed' AND export.result_id=result.id AND materialization.state='ready' AND materialization.result_id=result.id)
 BEGIN SELECT RAISE(ABORT,'sealed run has no exact committed result'); END;
 
 CREATE TRIGGER background_runs_runtime_immutable BEFORE UPDATE ON background_runs WHEN

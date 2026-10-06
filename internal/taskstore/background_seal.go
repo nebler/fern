@@ -122,8 +122,8 @@ commit_epoch_seconds,policy_version,accepted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,
 		return BackgroundRunSealAdmission{}, fmt.Errorf("insert background seal request: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO background_run_exports(
-id,seal_request_id,workspace_id,task_id,attempt_id,generation,artifact_id,materialization_id,result_id,state,phase,
-repository_id,base_sha,opencode_session_id,opencode_message_id,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'prepared','prepared',?,?,?,?,1,?,?)`,
+id,seal_request_id,workspace_id,task_id,attempt_id,generation,artifact_id,materialization_id,result_id,phase,
+repository_id,base_sha,opencode_session_id,opencode_message_id,revision,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,'prepared',?,?,?,?,1,?,?)`,
 		p.ExportID, p.SealRequestID, p.WorkspaceID, p.TaskID, p.AttemptID, p.Generation, p.ArtifactID,
 		p.MaterializationID, p.ResultID, run.RepositoryID, run.BaseOID, run.OpenCodeSessionID, run.OpenCodeMessageID, now, now); err != nil {
 		return BackgroundRunSealAdmission{}, fmt.Errorf("prepare background export: %w", err)

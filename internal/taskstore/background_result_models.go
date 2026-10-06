@@ -64,25 +64,16 @@ type BackgroundRunSealAdmission struct {
 	Replayed bool
 }
 
-type BackgroundRunExportState string
+// BackgroundRunExportPhase is the durable export progress. Only the selected
+// snapshot tuple and the atomic commit are records; snapshotting, CAS install,
+// and materialization are content-addressed and re-derived from the stopped
+// clone under the writer fence.
 type BackgroundRunExportPhase string
 
 const (
-	BackgroundRunExportPrepared         BackgroundRunExportState = "prepared"
-	BackgroundRunExportRunning          BackgroundRunExportState = "running"
-	BackgroundRunExportRecoveryRequired BackgroundRunExportState = "recovery_required"
-	BackgroundRunExportCompleted        BackgroundRunExportState = "completed"
-
-	BackgroundRunExportPhasePrepared           BackgroundRunExportPhase = "prepared"
-	BackgroundRunExportPhaseSnapshotStarted    BackgroundRunExportPhase = "snapshot_started"
-	BackgroundRunExportPhaseSnapshotSelected   BackgroundRunExportPhase = "snapshot_selected"
-	BackgroundRunExportPhaseBundleWriteStarted BackgroundRunExportPhase = "bundle_write_started"
-	BackgroundRunExportPhaseBundleVerified     BackgroundRunExportPhase = "bundle_verified"
-	BackgroundRunExportPhaseCASInstallStarted  BackgroundRunExportPhase = "cas_install_started"
-	BackgroundRunExportPhaseCASInstalled       BackgroundRunExportPhase = "cas_installed"
-	BackgroundRunExportPhaseMaterializeStarted BackgroundRunExportPhase = "materialize_started"
-	BackgroundRunExportPhaseMaterialized       BackgroundRunExportPhase = "materialized"
-	BackgroundRunExportPhaseCompleted          BackgroundRunExportPhase = "completed"
+	BackgroundRunExportPhasePrepared  BackgroundRunExportPhase = "prepared"
+	BackgroundRunExportPhaseSelected  BackgroundRunExportPhase = "selected"
+	BackgroundRunExportPhaseCommitted BackgroundRunExportPhase = "committed"
 )
 
 type BackgroundRunExport struct {
@@ -95,7 +86,6 @@ type BackgroundRunExport struct {
 	ArtifactID             task.RetainedArtifactID
 	MaterializationID      task.MaterializationID
 	ResultID               task.ResultID
-	State                  BackgroundRunExportState
 	Phase                  BackgroundRunExportPhase
 	RepositoryID           task.RepositoryID
 	BaseSHA                task.GitOID
@@ -139,15 +129,11 @@ type SelectBackgroundRunSnapshotParams struct {
 	ChangesSHA256          [32]byte
 	ArtifactManifest       json.RawMessage
 	ArtifactManifestSHA256 [32]byte
+	BundleSHA256           [32]byte
+	BundleBytes            int64
 	OpenCodeSessionID      task.OpenCodeSessionID
 	OpenCodeMessageID      task.OpenCodeMessageID
 	CollectedAt            time.Time
-}
-
-type RecordBackgroundRunBundleVerifiedParams struct {
-	BackgroundRunExportRef
-	BundleSHA256 [32]byte
-	BundleBytes  int64
 }
 
 type WriterFenceKind string
@@ -190,35 +176,23 @@ type RecordBackgroundRunWriterFenceParams struct {
 type ArtifactMaterializationState string
 
 const (
-	ArtifactMaterializationPrepared         ArtifactMaterializationState = "prepared"
-	ArtifactMaterializationReady            ArtifactMaterializationState = "ready"
-	ArtifactMaterializationRecoveryRequired ArtifactMaterializationState = "recovery_required"
+	ArtifactMaterializationPrepared ArtifactMaterializationState = "prepared"
+	ArtifactMaterializationReady    ArtifactMaterializationState = "ready"
 )
 
 type ArtifactMaterialization struct {
-	ID             task.MaterializationID
-	SealRequestID  task.SealRequestID
-	ExportID       task.ArtifactExportID
-	ArtifactID     task.RetainedArtifactID
-	ResultID       task.ResultID
-	State          ArtifactMaterializationState
-	ResultCommit   task.GitOID
-	TreeOID        task.GitOID
-	ProofSHA256    [32]byte
-	RecoveryReason string
-	Revision       int64
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-}
-
-type RecordArtifactMaterializationReadyParams struct {
-	BackgroundRunExportRef
-	MaterializationID task.MaterializationID
-	ArtifactID        task.RetainedArtifactID
-	ResultID          task.ResultID
-	ResultCommit      task.GitOID
-	TreeOID           task.GitOID
-	ProofSHA256       [32]byte
+	ID            task.MaterializationID
+	SealRequestID task.SealRequestID
+	ExportID      task.ArtifactExportID
+	ArtifactID    task.RetainedArtifactID
+	ResultID      task.ResultID
+	State         ArtifactMaterializationState
+	ResultCommit  task.GitOID
+	TreeOID       task.GitOID
+	ProofSHA256   [32]byte
+	Revision      int64
+	CreatedAt     time.Time
+	UpdatedAt     time.Time
 }
 
 type RetainedArtifact struct {
@@ -248,14 +222,17 @@ type RetainedArtifact struct {
 type CommitBackgroundRunRetainedResultParams struct {
 	BackgroundRunExportRef
 	MaterializationID task.MaterializationID
-	ArtifactID        task.RetainedArtifactID
-	ResultID          task.ResultID
-	ResultEventID     task.EventID
-	TaskEventID       task.EventID
-	EvidencePayload   json.RawMessage
-	EvidenceSHA256    [32]byte
-	Actor             task.ActorSnapshot
-	SealedAt          time.Time
+	// MaterializationProof binds a verified detached checkout of the
+	// installed artifact; it is committed with the result, not before it.
+	MaterializationProof [32]byte
+	ArtifactID           task.RetainedArtifactID
+	ResultID             task.ResultID
+	ResultEventID        task.EventID
+	TaskEventID          task.EventID
+	EvidencePayload      json.RawMessage
+	EvidenceSHA256       [32]byte
+	Actor                task.ActorSnapshot
+	SealedAt             time.Time
 }
 
 type BackgroundRunRetainedResult struct {
