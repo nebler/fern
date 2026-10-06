@@ -4,11 +4,17 @@
 // the configured-checkout Git base verifier (gitverifier.go). Durable SQL
 // authority lives in taskstore.
 //
-// Only OpenCode plugin actors whose identity matches the ingress bearer
-// authorization are accepted. Terminal discovery and attachment are a separate
-// surface in runclientapi; neither package is authentication middleware. A
-// scope never grants access to another plugin's runs: the store still filters
-// by owner.
+// Ingress authenticates; this package is not authentication middleware. It
+// accepts OpenCode plugin actors whose identity matches the ingress bearer
+// authorization, and the operator actor for discovery and attachment only
+// (list, get, attach) with workspace-wide visibility. A scope never grants
+// access to another plugin's runs: the store still filters plugins by owner.
+//
+// The list's attachable flag is advisory, not a reservation. Attachment
+// requires durable readiness and then a successful issuance from the
+// backgroundroute manager, which owns credential expiry and runtime fencing.
+// The returned credentials are secrets: responses are no-store and nothing
+// here retains or logs them.
 //
 // Request idempotency hashes are SHA-256 over the command kind, a newline, and
 // the private v1 typed-struct encoding. HTTP DTOs are converted to a private

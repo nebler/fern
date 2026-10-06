@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
@@ -48,8 +49,24 @@ type apiFixture struct {
 	actor    task.ActorSnapshot
 	verifier *countingVerifier
 	retained *retentionVerifier
+	route    *fakeRoute
 	path     string
 	now      time.Time
+}
+
+type fakeRoute struct {
+	active bool
+	calls  int
+}
+
+func (route *fakeRoute) IssueAttachment(taskstore.BackgroundRun) (backgroundroute.Attachment, bool, error) {
+	route.calls++
+	return backgroundroute.Attachment{Origin: "https://fern.example:8443", Username: backgroundroute.AttachmentUsername,
+		Password: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ExpiresAt: time.Now().Add(time.Hour)}, route.active, nil
+}
+
+func (route *fakeRoute) ActiveOrigin(taskstore.BackgroundRun) (string, bool) {
+	return "https://fern.example:8443", route.active
 }
 
 func (fixture *apiFixture) rebuildCommands(t *testing.T) {
@@ -127,8 +144,24 @@ func TestRunAPIAdmissionReplayOwnershipStopAndRestart(t *testing.T) {
 	}
 	operator := fixture.withActor(t, task.ActorSnapshot{Type: task.ActorOperator, ID: "operator", DisplayName: "Operator",
 		CredentialID: "operator", Authentication: "basic", RequestID: "request"})
-	if got := operator.request(http.MethodGet, PathPrefix, "", ""); got.Code != http.StatusUnauthorized {
-		t.Fatalf("operator reached plugin-only run API = %d %s", got.Code, got.Body.String())
+	if got := operator.request(http.MethodGet, PathPrefix, "", ""); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), response.RunID) ||
+		!strings.Contains(got.Body.String(), `"attachable":false`) {
+		t.Fatalf("operator workspace list = %d %s", got.Code, got.Body.String())
+	}
+	if got := operator.request(http.MethodGet, PathPrefix+"/"+response.RunID, "", ""); got.Code != http.StatusOK {
+		t.Fatalf("operator get = %d %s", got.Code, got.Body.String())
+	}
+	for _, mutation := range []struct{ method, suffix, body string }{{http.MethodPost, "", validCreateBody("x")},
+		{http.MethodPost, "/" + response.RunID + "/stop", "{}"}, {http.MethodPost, "/" + response.RunID + "/seal", "{}"},
+		{http.MethodGet, "/" + response.RunID + "/result", ""}} {
+		if got := operator.request(mutation.method, PathPrefix+mutation.suffix, mutation.body, "operator-key"); got.Code != http.StatusForbidden {
+			t.Fatalf("operator %s %s = %d %s", mutation.method, mutation.suffix, got.Code, got.Body.String())
+		}
+	}
+	device := fixture.withActor(t, task.ActorSnapshot{Type: task.ActorDevice, ID: "dev_1", DisplayName: "Phone",
+		CredentialID: "dev_1", Authentication: "device_cookie", RequestID: "request"})
+	if got := device.request(http.MethodGet, PathPrefix, "", ""); got.Code != http.StatusUnauthorized {
+		t.Fatalf("device reached run API = %d %s", got.Code, got.Body.String())
 	}
 	for _, route := range []struct{ method, suffix string }{{http.MethodGet, "/result"}} {
 		result := fixture.request(route.method, PathPrefix+"/"+response.RunID+route.suffix, "", "")
@@ -458,7 +491,7 @@ func newAPIFixture(t *testing.T, available string) *apiFixture {
 	if err := store.CreateWorkspace(context.Background(), taskstore.Workspace{ID: testWorkspace, Name: "demo", State: taskstore.WorkspaceActive, RepositoryPath: "/srv/repo", GitHubAuthority: taskstore.GitHubAuthorityAppBroker, InstallationID: 1, RepositoryID: 99, RepositoryFullName: "owner/repository", ImageDigest: "sha256:image", OpenCodeProtocol: "0.0.0-next-17444", RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	fixture := &apiFixture{store: store, actor: pluginActor("pc_owner"), verifier: &countingVerifier{}, retained: &retentionVerifier{}, path: path, now: now}
+	fixture := &apiFixture{store: store, actor: pluginActor("pc_owner"), verifier: &countingVerifier{}, retained: &retentionVerifier{}, route: &fakeRoute{}, path: path, now: now}
 	t.Cleanup(func() { _ = store.Close() })
 	fixture.handler = fixture.buildHandler(t, available)
 	return fixture
@@ -469,7 +502,7 @@ func (f *apiFixture) buildHandler(t *testing.T, available string) *Handler {
 	if available == PluginOpenCodeProfile {
 		backgroundImage = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	}
-	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), AvailableProfile: available, Store: f.store, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, RetentionVerifier: f.retained, Now: func() time.Time { return f.now }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", SealPolicyVersion: "fern.background-user-seal.v1"})
+	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), AvailableProfile: available, Store: f.store, Route: f.route, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, RetentionVerifier: f.retained, Now: func() time.Time { return f.now }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", SealPolicyVersion: "fern.background-user-seal.v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,4 +609,42 @@ func (f *apiFixture) requestWithContentType(method, path, body, key, contentType
 	response := httptest.NewRecorder()
 	f.handler.ServeHTTP(response, request)
 	return response
+}
+
+func TestRunAPIAttachIssuesOnlyForReadyActiveRoute(t *testing.T) {
+	fixture := newAPIFixture(t, PluginOpenCodeProfile)
+	created := fixture.request(http.MethodPost, PathPrefix, validCreateBody("attach to this"), "attach-create")
+	var admission struct {
+		RunID task.TaskID `json:"run_id"`
+	}
+	if created.Code != http.StatusAccepted || json.Unmarshal(created.Body.Bytes(), &admission) != nil {
+		t.Fatalf("create = %d: %s", created.Code, created.Body.String())
+	}
+	path := PathPrefix + "/" + string(admission.RunID) + "/attach"
+	if got := fixture.request(http.MethodGet, path, "", ""); got.Code != http.StatusConflict || fixture.route.calls != 0 {
+		t.Fatalf("queued attach = %d calls=%d %s", got.Code, fixture.route.calls, got.Body.String())
+	}
+	fixture.advanceToSession(t, admission.RunID)
+	if got := fixture.request(http.MethodGet, path, "", ""); got.Code != http.StatusConflict || fixture.route.calls != 1 {
+		t.Fatalf("inactive route attach = %d calls=%d %s", got.Code, fixture.route.calls, got.Body.String())
+	}
+	fixture.route.active = true
+	if got := fixture.request(http.MethodPost, path, "{}", "attach-post"); got.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("attach POST = %d", got.Code)
+	}
+	if got := fixture.withActor(t, pluginActor("pc_other")).request(http.MethodGet, path, "", ""); got.Code != http.StatusNotFound {
+		t.Fatalf("cross-credential attach = %d %s", got.Code, got.Body.String())
+	}
+	operator := fixture.withActor(t, task.ActorSnapshot{Type: task.ActorOperator, ID: "operator", DisplayName: "Operator",
+		CredentialID: "operator", Authentication: "basic", RequestID: "request"})
+	if got := operator.request(http.MethodGet, PathPrefix, "", ""); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"attachable":true`) {
+		t.Fatalf("operator list = %d %s", got.Code, got.Body.String())
+	}
+	for _, client := range []*apiFixture{fixture, operator} {
+		got := client.request(http.MethodGet, path, "", "")
+		if got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"session_id":"ses_`) ||
+			!strings.Contains(got.Body.String(), `"password":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"`) || got.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("%s attach = %d %s", client.actor.Type, got.Code, got.Body.String())
+		}
+	}
 }

@@ -15,6 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/gitref"
 	"github.com/nebler/fern/internal/pluginauth"
 	runidentity "github.com/nebler/fern/internal/run"
@@ -45,6 +46,12 @@ type Store interface {
 
 var _ Store = (*taskstore.Store)(nil)
 
+// Route issues short-lived OpenCode attachment credentials for live runs.
+type Route interface {
+	IssueAttachment(taskstore.BackgroundRun) (backgroundroute.Attachment, bool, error)
+	ActiveOrigin(taskstore.BackgroundRun) (string, bool)
+}
+
 type ActorResolver func(context.Context) (task.ActorSnapshot, error)
 
 type RetentionVerifier interface {
@@ -59,6 +66,7 @@ type Config struct {
 	BackgroundEnvironmentSHA256 [32]byte
 	AvailableProfile            string
 	Store                       Store
+	Route                       Route
 	Generator                   *task.Generator
 	ActorResolver               ActorResolver
 	BaseVerifier                BaseVerifier
@@ -89,7 +97,7 @@ type retainedKey struct {
 }
 
 func New(config Config) (*Handler, error) {
-	if config.Store == nil || config.Generator == nil || config.ActorResolver == nil || config.BaseVerifier == nil || config.RetentionVerifier == nil || config.Now == nil ||
+	if config.Store == nil || config.Route == nil || config.Generator == nil || config.ActorResolver == nil || config.BaseVerifier == nil || config.RetentionVerifier == nil || config.Now == nil ||
 		config.AttemptTimeout <= 0 || config.RepositoryID == 0 || config.RepositoryRemote == "" ||
 		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.BackgroundEnvironmentSHA256 == ([32]byte{}) {
 		return nil, errors.New("valid background run API configuration is required")
@@ -161,6 +169,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch parts[1] {
+	case "attach":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		if !h.requireScope(w, r, actor, "run:attach") {
+			return
+		}
+		h.attach(w, r, actor, id)
 	case "stop":
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w, http.MethodPost)
@@ -309,9 +326,14 @@ func (h *Handler) verifyRetained(ctx context.Context, projection taskstore.Backg
 	return true
 }
 
+// authorize accepts the ingress-authenticated actor: the loopback operator, or
+// an OpenCode plugin whose identity matches its bearer authorization.
 func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) (task.ActorSnapshot, bool) {
 	authorization, exists := pluginauth.RequestAuthorizationFromContext(r.Context())
 	actor, err := h.config.ActorResolver(r.Context())
+	if err == nil && actor.Type == task.ActorOperator && actor.Validate() == nil {
+		return actor, true
+	}
 	if err != nil || actor.Validate() != nil || !exists || actor.Type != task.ActorOpenCode || actor.ID != authorization.Credential.ID ||
 		actor.CredentialID != authorization.Credential.ID || actor.Authentication != "fern_plugin_bearer" {
 		WriteError(w, http.StatusUnauthorized, "unauthenticated", "Plugin authentication is required.")
@@ -320,7 +342,18 @@ func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) (task.ActorS
 	return actor, true
 }
 
+// operatorScopes are the operations the operator may perform without a plugin
+// credential: workspace-wide discovery and attachment, never run mutation.
+var operatorScopes = map[string]bool{"run:read": true, "run:attach": true}
+
 func (h *Handler) requireScope(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, scope string) bool {
+	if actor.Type == task.ActorOperator {
+		if !operatorScopes[scope] {
+			WriteError(w, http.StatusForbidden, "forbidden", "The operator cannot perform this run operation.")
+			return false
+		}
+		return true
+	}
 	authorization, ok := pluginauth.RequestAuthorizationFromContext(r.Context())
 	if actor.Type != task.ActorOpenCode || !ok || actor.ID != authorization.Credential.ID || !authorization.HasScope(scope) {
 		WriteError(w, http.StatusForbidden, "forbidden", "The plugin credential lacks the required scope.")
@@ -386,7 +419,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request, actor task.ActorS
 	}
 	views := make([]runView, 0, len(runs))
 	for _, run := range runs {
-		views = append(views, view(run))
+		views = append(views, h.view(run))
 	}
 	WriteJSON(w, http.StatusOK, struct {
 		Runs []runView `json:"runs"`
@@ -403,7 +436,54 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, actor task.ActorSn
 		writeStoreError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, view(run))
+	WriteJSON(w, http.StatusOK, h.view(run))
+}
+
+type attachResponse struct {
+	RunID     task.TaskID            `json:"run_id"`
+	URL       string                 `json:"url"`
+	SessionID task.OpenCodeSessionID `json:"session_id"`
+	Username  string                 `json:"username"`
+	Password  string                 `json:"password"`
+	ExpiresAt time.Time              `json:"expires_at"`
+}
+
+// attach mints a short-lived OpenCode credential. Durable readiness alone
+// never grants access: the route manager must also issue it, and it owns
+// expiry and runtime fencing. The response carries a secret and is no-store.
+func (h *Handler) attach(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
+	if !noQuery(r) || !noBody(r) {
+		WriteError(w, http.StatusBadRequest, "invalid_query", "Run attachment does not accept query parameters.")
+		return
+	}
+	run, err := h.config.Store.GetBackgroundRun(r.Context(), h.config.WorkspaceID, id, actor)
+	if err != nil {
+		writeStoreError(w, err)
+		return
+	}
+	if !attachmentReady(run) {
+		WriteError(w, http.StatusConflict, "not_ready", "The OpenCode session is not ready for attachment.")
+		return
+	}
+	attachment, issued, err := h.config.Route.IssueAttachment(run)
+	if err != nil {
+		WriteError(w, http.StatusServiceUnavailable, "unavailable", "The OpenCode attachment could not be issued.")
+		return
+	}
+	if !issued {
+		WriteError(w, http.StatusConflict, "not_ready", "The OpenCode session is not ready for attachment.")
+		return
+	}
+	WriteJSON(w, http.StatusOK, attachResponse{RunID: run.TaskID, URL: attachment.Origin, SessionID: run.OpenCodeSessionID,
+		Username: attachment.Username, Password: attachment.Password, ExpiresAt: attachment.ExpiresAt})
+}
+
+func attachmentReady(run taskstore.BackgroundRun) bool {
+	active := run.State == taskstore.BackgroundRunSettingUp || run.State == taskstore.BackgroundRunWorking ||
+		run.State == taskstore.BackgroundRunNeedsYou || run.State == taskstore.BackgroundRunUncertain
+	ready := run.EffectPhase == taskstore.BackgroundRunEffectSessionObserved || run.EffectPhase == taskstore.BackgroundRunEffectPromptIntent ||
+		run.EffectPhase == taskstore.BackgroundRunEffectPromptAdmitted
+	return active && ready && run.SessionObservedAt != nil && run.StopReceiptID == ""
 }
 
 func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
@@ -431,10 +511,13 @@ type runView struct {
 	Repository string                       `json:"repository"`
 	Head       task.GitOID                  `json:"head"`
 	Branch     *string                      `json:"branch"`
+	// Attachable is advisory, not a reservation; attach re-checks readiness.
+	Attachable bool `json:"attachable"`
 }
 
-func view(run taskstore.BackgroundRun) runView {
-	return runView{run.TaskID, run.State, run.RepositoryRemote, run.BaseOID, run.Branch}
+func (h *Handler) view(run taskstore.BackgroundRun) runView {
+	_, active := h.config.Route.ActiveOrigin(run)
+	return runView{run.TaskID, run.State, run.RepositoryRemote, run.BaseOID, run.Branch, active && attachmentReady(run)}
 }
 func decodeStrict(w http.ResponseWriter, r *http.Request, limit int64, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
