@@ -1,4 +1,3 @@
-// Package credentialbundle implements bounded, age-encrypted credential bundles.
 package credentialbundle
 
 import (

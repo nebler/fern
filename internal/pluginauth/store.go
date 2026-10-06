@@ -1,4 +1,3 @@
-// Package pluginauth owns the fixed-scope OpenCode plugin authorization state.
 package pluginauth
 
 import (

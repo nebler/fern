@@ -1,5 +1,3 @@
-// Package taskresultsource resolves immutable result Git state without ever
-// treating a disposable Background Run clone as post-result authority.
 package taskresultsource
 
 import (

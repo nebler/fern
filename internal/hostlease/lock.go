@@ -1,4 +1,3 @@
-// Package hostlease owns Fern's exclusive host-process lease.
 package hostlease
 
 import (
