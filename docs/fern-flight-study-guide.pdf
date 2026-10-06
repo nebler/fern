@@ -1,0 +1,378 @@
+%PDF-1.4
+%‚„œ”
+1 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+endobj
+2 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>
+endobj
+3 0 obj
+<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>
+endobj
+4 0 obj
+<< /Type /Pages /Kids [11 0 R 12 0 R 13 0 R 14 0 R 15 0 R 16 0 R] /Count 6 >>
+endobj
+5 0 obj
+<< /Length 3979 >>
+stream
+q
+0.08 0.31 0.23 rg
+BT /F2 8 Tf 54 770 Td (FERN - OFFLINE FLIGHT STUDY GUIDE) Tj ET
+0 g
+BT /F2 20 Tf 54 736 Td (Fern: offline flight study guide) Tj ET
+BT /F1 10 Tf 54 698 Td (Goal: arrive able to explain one complete Fern run, its important safety) Tj ET
+BT /F1 10 Tf 54 685 Td (choices, and its current limitations. This guide is designed to be read without) Tj ET
+BT /F1 10 Tf 54 672 Td (the repository or an internet connection.) Tj ET
+BT /F2 14 Tf 54 646 Td (How to use this guide) Tj ET
+BT /F1 10 Tf 54 622 Td (Do not try to memorise package names or read every implementation detail. For) Tj ET
+BT /F1 10 Tf 54 609 Td (each section, pause and explain the idea aloud in your own words. Write down) Tj ET
+BT /F1 10 Tf 54 596 Td (questions rather than getting stuck on a detail. The goal is a coherent mental) Tj ET
+BT /F1 10 Tf 54 583 Td (model, not total source-code recall.) Tj ET
+BT /F1 10 Tf 54 565 Td (The codebase is roughly 33,000 lines of Go production code plus 16,700 lines of) Tj ET
+BT /F1 10 Tf 54 552 Td (Go tests. Its scope includes a CLI/server, durable state, Docker lifecycle,) Tj ET
+BT /F1 10 Tf 54 539 Td (OpenCode attachment, GitHub App credentials, artifacts, pairing, backup, and) Tj ET
+BT /F1 10 Tf 54 526 Td (release tooling. A complete reading is not a sensible flight goal.) Tj ET
+BT /F2 14 Tf 54 500 Td (Part 1 - The product in plain English) Tj ET
+BT /F1 10 Tf 54 476 Td (Fern is a self-hosted control plane for coding-agent tasks. A user submits an) Tj ET
+BT /F1 10 Tf 54 463 Td (instruction against one exact Git revision. Fern records that request durably,) Tj ET
+BT /F1 10 Tf 54 450 Td (creates a disposable workspace and OpenCode container, lets the user inspect) Tj ET
+BT /F1 10 Tf 54 437 Td (the live agent, then either discards the run or retains its final Git work.) Tj ET
+BT /F1 10 Tf 54 419 Td (The key distinction is this: Fern is not mainly an agent or an IDE. OpenCode) Tj ET
+BT /F1 10 Tf 54 406 Td (does the reasoning, edits files, runs commands, and may push a branch or open a) Tj ET
+BT /F1 10 Tf 54 393 Td (PR. Fern controls the lifecycle around that agent so it can answer questions) Tj ET
+BT /F1 10 Tf 54 380 Td (such as: which exact container wrote this work? Did a request happen before the) Tj ET
+BT /F1 10 Tf 54 367 Td (network response was lost? Is it safe to retry? Can the container now be) Tj ET
+BT /F1 10 Tf 54 354 Td (removed without losing the result?) Tj ET
+BT /F1 10 Tf 54 336 Td (The durable product is a run record and, after sealing, a retained Git artifact.) Tj ET
+BT /F1 10 Tf 54 323 Td (The Docker workspace is deliberately temporary.) Tj ET
+BT /F2 11 Tf 54 300 Td (A useful interview answer) Tj ET
+BT /F1 10 Tf 54 279 Td ("Fern coordinates long-running coding-agent work. It records intent before) Tj ET
+BT /F1 10 Tf 54 266 Td (external effects, binds work to an exact container and Git revision, supports) Tj ET
+BT /F1 10 Tf 54 253 Td (live attachment without adding a second writer, and can seal a Git artifact) Tj ET
+BT /F1 10 Tf 54 240 Td (before it removes the disposable workspace.") Tj ET
+BT /F2 14 Tf 54 214 Td (Part 2 - What Fern owns, and what it does not) Tj ET
+BT /F1 10 Tf 54 190 Td (Fern owns:) Tj ET
+BT /F1 10 Tf 61 172 Td (-  task admission, idempotency, run state, and recovery evidence;) Tj ET
+BT /F1 10 Tf 61 159 Td (-  the exact repository/revision, container, volume, and session identities;) Tj ET
+BT /F1 10 Tf 61 146 Td (-  short-lived repository-scoped GitHub App credentials;) Tj ET
+BT /F1 10 Tf 61 133 Td (-  live-session attachment policy;) Tj ET
+BT /F1 10 Tf 61 120 Td (-  sealing, Git-bundle retention, and cleanup;) Tj ET
+BT /F1 10 Tf 61 107 Td (-  device pairing, plugin authorization, backup, and credential rotation.) Tj ET
+BT /F1 10 Tf 54 89 Td (OpenCode owns:) Tj ET
+BT /F1 10 Tf 61 71 Td (-  the model conversation and provider interaction;) Tj ET
+BT /F1 10 Tf 61 58 Td (-  edits, tool use, tests, questions, and permissions;) Tj ET
+BT /F1 8 Tf 520 28 Td (1 / 6) Tj ET
+Q
+endstream
+endobj
+6 0 obj
+<< /Length 4321 >>
+stream
+q
+0.08 0.31 0.23 rg
+BT /F2 8 Tf 54 770 Td (FERN - OFFLINE FLIGHT STUDY GUIDE) Tj ET
+0 g
+BT /F1 10 Tf 61 744 Td (-  Git pushes and draft PR creation when the task requests them.) Tj ET
+BT /F1 10 Tf 54 726 Td (Fern does not independently prove that repository tests passed. It does not) Tj ET
+BT /F1 10 Tf 54 713 Td (guarantee exactly-once PR creation. A PR can differ from the final sealed) Tj ET
+BT /F1 10 Tf 54 700 Td (artifact if the agent edits again after pushing.) Tj ET
+BT /F2 14 Tf 54 674 Td (Part 3 - The normal run story) Tj ET
+BT /F1 10 Tf 54 650 Td (Read this as a narrative. It is the single most important thing to understand.) Tj ET
+BT /F1 10 Tf 59 632 Td (1.  A user starts OpenCode in a clean, committed repository and selects /fern) Tj ET
+BT /F1 10 Tf 54 619 Td (then Run.) Tj ET
+BT /F1 10 Tf 59 606 Td (2.  The Fern plugin collects the canonical Git remote and exact HEAD, asks for) Tj ET
+BT /F1 10 Tf 54 593 Td (confirmation, and sends a create request to Fern.) Tj ET
+BT /F1 10 Tf 59 580 Td (3.  Fern authenticates the actor, validates the repository/revision against its) Tj ET
+BT /F1 10 Tf 54 567 Td (bound host repository, and commits run intent to SQLite. A matching repeated) Tj ET
+BT /F1 10 Tf 54 554 Td (request can return its original result through an idempotency key.) Tj ET
+BT /F1 10 Tf 59 541 Td (4.  The serial coordinator wakes only after that database transaction commits.) Tj ET
+BT /F1 10 Tf 59 528 Td (5.  The coordinator creates and attests an isolated clone, a private volume, and) Tj ET
+BT /F1 10 Tf 54 515 Td (an exact Docker container using the qualified image and policy.) Tj ET
+BT /F1 10 Tf 59 502 Td (6.  It starts the container, checks its identity and health, creates/reconciles) Tj ET
+BT /F1 10 Tf 54 489 Td (the one OpenCode session, then records prompt intent before dispatching the) Tj ET
+BT /F1 10 Tf 54 476 Td (instruction.) Tj ET
+BT /F1 10 Tf 59 463 Td (7.  While the run works, Fern observes bounded OpenCode status/question signals) Tj ET
+BT /F1 10 Tf 54 450 Td (and Docker usage. The run can be working or needs_you.) Tj ET
+BT /F1 10 Tf 59 437 Td (8.  A user can attach with the normal OpenCode TUI. Attachment reaches the exact) Tj ET
+BT /F1 10 Tf 54 424 Td (existing session; it is not another agent and does not own the filesystem.) Tj ET
+BT /F1 10 Tf 59 411 Td (9.  The user chooses Stop or Seal. Both fence the exact writer. Seal then) Tj ET
+BT /F1 10 Tf 54 398 Td (exports and verifies the Git result; Stop does not promise retention.) Tj ET
+BT /F1 10 Tf 59 385 Td (10.  After a successful seal, Fern retains an artifact in local content-addressed) Tj ET
+BT /F1 10 Tf 54 372 Td (storage, commits the result record, then removes the route, container,) Tj ET
+BT /F1 10 Tf 54 359 Td (volume, and clone.) Tj ET
+BT /F2 11 Tf 54 336 Td (The simplified topology) Tj ET
+BT /F3 8 Tf 66 315 Td (OpenCode plugin / paired device) Tj ET
+BT /F3 8 Tf 66 302 Td (            |) Tj ET
+BT /F3 8 Tf 66 289 Td (            v) Tj ET
+BT /F3 8 Tf 66 276 Td (Fern HTTP APIs -> SQLite task store -> serial coordinator) Tj ET
+BT /F3 8 Tf 66 263 Td (                                      |         |        |) Tj ET
+BT /F3 8 Tf 66 250 Td (                                      v         v        v) Tj ET
+BT /F3 8 Tf 66 237 Td (                                Docker provider OpenCode  artifact CAS) Tj ET
+BT /F3 8 Tf 66 224 Td (                                      |) Tj ET
+BT /F3 8 Tf 66 211 Td (                                      v) Tj ET
+BT /F3 8 Tf 66 198 Td (                           one disposable agent container) Tj ET
+BT /F3 8 Tf 66 185 Td (                                      |) Tj ET
+BT /F3 8 Tf 66 172 Td (                                      v) Tj ET
+BT /F3 8 Tf 66 159 Td (                              Git / gh / optional draft PR) Tj ET
+BT /F2 14 Tf 54 133 Td (Part 4 - The concepts that make Fern more than docker run) Tj ET
+BT /F2 11 Tf 54 104 Td (Durable intent before external effect) Tj ET
+BT /F1 10 Tf 54 83 Td (Network calls and Docker operations are not database transactions. A process) Tj ET
+BT /F1 10 Tf 54 70 Td (may crash after sending a request but before receiving a response. Fern records) Tj ET
+BT /F1 10 Tf 54 57 Td (an intent or started phase before it makes the corresponding external mutation.) Tj ET
+BT /F1 8 Tf 520 28 Td (2 / 6) Tj ET
+Q
+endstream
+endobj
+7 0 obj
+<< /Length 4115 >>
+stream
+q
+0.08 0.31 0.23 rg
+BT /F2 8 Tf 54 770 Td (FERN - OFFLINE FLIGHT STUDY GUIDE) Tj ET
+0 g
+BT /F1 10 Tf 54 744 Td (After a restart it can inspect what exists and decide whether an operation) Tj ET
+BT /F1 10 Tf 54 731 Td (actually happened.) Tj ET
+BT /F1 10 Tf 54 713 Td (This is why a task request, a prompt request, a seal request, and cleanup steps) Tj ET
+BT /F1 10 Tf 54 700 Td (have durable records. Fern avoids treating a timeout as proof that nothing) Tj ET
+BT /F1 10 Tf 54 687 Td (happened.) Tj ET
+BT /F2 11 Tf 54 664 Td (Idempotency) Tj ET
+BT /F1 10 Tf 54 643 Td (An idempotency key lets a client retry the *same* create request without) Tj ET
+BT /F1 10 Tf 54 630 Td (creating duplicate work. Fern binds the key to the actor and canonical request) Tj ET
+BT /F1 10 Tf 54 617 Td (hash. Reusing it for a different request conflicts instead of silently doing) Tj ET
+BT /F1 10 Tf 54 604 Td (the wrong thing.) Tj ET
+BT /F1 10 Tf 54 586 Td (Idempotency is not magic. It does not prove an arbitrary external API supplied) Tj ET
+BT /F1 10 Tf 54 573 Td (exactly-once behavior. Prompt dispatch, for example, has a no-replay fence.) Tj ET
+BT /F2 11 Tf 54 550 Td (Exact writer identity) Tj ET
+BT /F1 10 Tf 54 529 Td (A container name is not enough: names can be reused. Fern records a resource) Tj ET
+BT /F1 10 Tf 54 516 Td (identity and an exact runtime identity that includes the Docker container ID and) Tj ET
+BT /F1 10 Tf 54 503 Td (its canonical start time. Destructive operations re-inspect the resources and) Tj ET
+BT /F1 10 Tf 54 490 Td (reject replacements or ambiguous ownership.) Tj ET
+BT /F1 10 Tf 54 472 Td (This supports the claim "stop this exact writer" rather than "stop whichever) Tj ET
+BT /F1 10 Tf 54 459 Td (container currently has a familiar name.") Tj ET
+BT /F2 11 Tf 54 436 Td (State and phase are different) Tj ET
+BT /F1 10 Tf 54 415 Td (The visible state describes the user-level situation:) Tj ET
+BT /F3 8 Tf 66 397 Td (queued -> setting_up -> working <-> needs_you) Tj ET
+BT /F3 8 Tf 66 384 Td (                           |          |) Tj ET
+BT /F3 8 Tf 66 371 Td (                           +-> canceling / uncertain / result_ready / failed) Tj ET
+BT /F3 8 Tf 66 358 Td (                                             / cleanup_required) Tj ET
+BT /F1 10 Tf 54 340 Td (The durable phase records finer-grained effect boundaries, such as) Tj ET
+BT /F1 10 Tf 54 327 Td (provision_intent, container_observed, prompt_intent, writer_inactive,) Tj ET
+BT /F1 10 Tf 54 314 Td (exporting, artifact_committed, and cleanup_complete.) Tj ET
+BT /F1 10 Tf 54 296 Td (The distinction matters during restart recovery. "Working" is too vague to) Tj ET
+BT /F1 10 Tf 54 283 Td (tell Fern whether a container existed, whether a prompt may have been sent, or) Tj ET
+BT /F1 10 Tf 54 270 Td (whether artifact export had started.) Tj ET
+BT /F2 14 Tf 54 244 Td (Part 5 - Stop, Seal, result, and recovery) Tj ET
+BT /F1 10 Tf 54 220 Td (Stop means cancel and clean up. It is not a request to preserve unfinished) Tj ET
+BT /F1 10 Tf 54 207 Td (work.) Tj ET
+BT /F1 10 Tf 54 189 Td (Seal is explicit and irreversible. Fern first stops and proves inactive the) Tj ET
+BT /F1 10 Tf 54 176 Td (exact writer. It then captures committed, staged, unstaged, and untracked Git) Tj ET
+BT /F1 10 Tf 54 163 Td (changes, creates a verified Git bundle and manifest, stores it in an) Tj ET
+BT /F1 10 Tf 54 150 Td (artifact-CAS, materializes a detached checkout to verify it, commits the result) Tj ET
+BT /F1 10 Tf 54 137 Td (tuple to SQLite, and only then removes disposable resources.) Tj ET
+BT /F1 10 Tf 54 119 Td (The phrase "verified result" means artifact bytes and identity agree. It does) Tj ET
+BT /F1 10 Tf 54 106 Td (not mean tests passed, the code is correct, or a PR was created.) Tj ET
+BT /F1 10 Tf 54 88 Td (Recovery follows a conservative rule: retry an external mutation only when) Tj ET
+BT /F1 10 Tf 54 75 Td (evidence proves it was not attempted. If Fern cannot prove the outcome, it) Tj ET
+BT /F1 10 Tf 54 62 Td (keeps the run uncertain rather than blindly replaying a potentially) Tj ET
+BT /F1 8 Tf 520 28 Td (3 / 6) Tj ET
+Q
+endstream
+endobj
+8 0 obj
+<< /Length 4263 >>
+stream
+q
+0.08 0.31 0.23 rg
+BT /F2 8 Tf 54 770 Td (FERN - OFFLINE FLIGHT STUDY GUIDE) Tj ET
+0 g
+BT /F1 10 Tf 54 744 Td (side-effecting action. Cleanup stays cleanup_required until absence is proven.) Tj ET
+BT /F2 11 Tf 54 721 Td (Interview answer: why not retry automatically?) Tj ET
+BT /F1 10 Tf 54 700 Td ("A lost response is ambiguous. The operation could have succeeded remotely even) Tj ET
+BT /F1 10 Tf 54 687 Td (though the client did not receive the response. Replaying a prompt, a push, or) Tj ET
+BT /F1 10 Tf 54 674 Td (a destructive cleanup action could duplicate work or affect the wrong resource,) Tj ET
+BT /F1 10 Tf 54 661 Td (so Fern persists intent and reconciles evidence first.") Tj ET
+BT /F2 14 Tf 54 635 Td (Part 6 - Docker and security: be precise) Tj ET
+BT /F1 10 Tf 54 611 Td (Fern configures a container with a read-only root filesystem, bounded tmpfs) Tj ET
+BT /F1 10 Tf 54 598 Td (writes, memory/CPU/PID limits, dropped capabilities, no-new-privileges, a) Tj ET
+BT /F1 10 Tf 54 585 Td (seccomp profile, private IPC/cgroup namespaces, a loopback-only server port,) Tj ET
+BT /F1 10 Tf 54 572 Td (and a qualified image. Its runtime storage is intended to be bounded by Linux) Tj ET
+BT /F1 10 Tf 54 559 Td (XFS project byte and inode quotas.) Tj ET
+BT /F1 10 Tf 54 541 Td (Those are useful resource and lifecycle boundaries. They do not make Fern a) Tj ET
+BT /F1 10 Tf 54 528 Td (safe hostile-code sandbox:) Tj ET
+BT /F1 10 Tf 61 510 Td (-  bridge network egress is unrestricted;) Tj ET
+BT /F1 10 Tf 61 497 Td (-  repository code and an agent may misuse or exfiltrate their short-lived) Tj ET
+BT /F1 10 Tf 54 484 Td (repository token while it is valid;) Tj ET
+BT /F1 10 Tf 61 471 Td (-  Docker administrators and the host administrator are trusted;) Tj ET
+BT /F1 10 Tf 61 458 Td (-  Docker alone does not prove filesystem or network isolation.) Tj ET
+BT /F1 10 Tf 54 440 Td (The code intentionally rejects arbitrary environment injection, including a) Tj ET
+BT /F1 10 Tf 54 427 Td (normal paid model-provider API key, because unrestricted network egress would) Tj ET
+BT /F1 10 Tf 54 414 Td (make that credential unsafe under this threat model.) Tj ET
+BT /F2 14 Tf 54 388 Td (Part 7 - Credentials and access) Tj ET
+BT /F1 10 Tf 54 364 Td (Fern uses a GitHub App. Its private key stays on the Fern host. Fern mints a) Tj ET
+BT /F1 10 Tf 54 351 Td (short-lived installation token restricted to the one bound repository and puts) Tj ET
+BT /F1 10 Tf 54 338 Td (the rotating token in private runtime storage. Image-installed Git and gh) Tj ET
+BT /F1 10 Tf 54 325 Td (helpers read it there.) Tj ET
+BT /F1 10 Tf 54 307 Td (The token is not intentionally put in Docker environment/configuration, command) Tj ET
+BT /F1 10 Tf 54 294 Td (arguments, labels, logs, repository files, or retained artifacts. This reduces) Tj ET
+BT /F1 10 Tf 54 281 Td (accidental secret persistence. It does not stop malicious code inside the agent) Tj ET
+BT /F1 10 Tf 54 268 Td (container from reading its own token and sending it over the network.) Tj ET
+BT /F1 10 Tf 54 250 Td (There are three actor types at the HTTP edge:) Tj ET
+BT /F1 10 Tf 61 232 Td (-  the operator, using loopback Basic authentication;) Tj ET
+BT /F1 10 Tf 61 219 Td (-  a paired device, using a durable browser cookie;) Tj ET
+BT /F1 10 Tf 61 206 Td (-  the OpenCode plugin, using a device-authorized fixed-scope bearer token.) Tj ET
+BT /F1 10 Tf 54 188 Td (The phone pairing flow is browser pairing over private Tailscale HTTPS. It is) Tj ET
+BT /F1 10 Tf 54 175 Td (not a native mobile application and not yet a rich run dashboard.) Tj ET
+BT /F2 14 Tf 54 149 Td (Part 8 - Why the real demo is currently difficult) Tj ET
+BT /F1 10 Tf 54 125 Td (Fern has intentionally high execution requirements:) Tj ET
+BT /F1 10 Tf 61 107 Td (-  native Linux \(not macOS or Docker Desktop\);) Tj ET
+BT /F1 10 Tf 61 94 Td (-  a same-host local Docker socket;) Tj ET
+BT /F1 10 Tf 61 81 Td (-  an XFS project-quota runtime filesystem with enforced byte and inode limits;) Tj ET
+BT /F1 10 Tf 61 68 Td (-  a deliberate solution to Linux quota-query CAP_SYS_ADMIN requirements;) Tj ET
+BT /F1 10 Tf 61 55 Td (-  a qualified image, bound Git repository, private HTTPS routes, and GitHub) Tj ET
+BT /F1 8 Tf 520 28 Td (4 / 6) Tj ET
+Q
+endstream
+endobj
+9 0 obj
+<< /Length 4241 >>
+stream
+q
+0.08 0.31 0.23 rg
+BT /F2 8 Tf 54 770 Td (FERN - OFFLINE FLIGHT STUDY GUIDE) Tj ET
+0 g
+BT /F1 10 Tf 61 744 Td (  App;) Tj ET
+BT /F1 10 Tf 61 731 Td (-  a usable credential-free model provider.) Tj ET
+BT /F1 10 Tf 54 713 Td (The current repository passes its Go unit/integration tests, but the docs are) Tj ET
+BT /F1 10 Tf 54 700 Td (honest that the macOS development host has not qualified actual XFS quota) Tj ET
+BT /F1 10 Tf 54 687 Td (enforcement, a physical phone test, a host reboot, or a live GitHub mutation.) Tj ET
+BT /F1 10 Tf 54 669 Td (This is the right interview framing: Fern is a pre-release systems prototype) Tj ET
+BT /F1 10 Tf 54 656 Td (with strong tested control-plane mechanics, not a finished hosted product or) Tj ET
+BT /F1 10 Tf 54 643 Td (proven security sandbox.) Tj ET
+BT /F2 14 Tf 54 617 Td (Part 9 - Package map: only remember the roles) Tj ET
+BT /F1 10 Tf 61 593 Td (-  cmd/fern: CLI commands, startup, dependency assembly, shutdown.) Tj ET
+BT /F1 10 Tf 61 580 Td (-  run: lifecycle vocabulary and exact resource/runtime identity; no I/O.) Tj ET
+BT /F1 10 Tf 61 567 Td (-  runcommand: create/stop/seal policy, idempotency, admission.) Tj ET
+BT /F1 10 Tf 61 554 Td (-  runapi: plugin-authenticated HTTP run API.) Tj ET
+BT /F1 10 Tf 61 541 Td (-  taskstore: SQLite durable state, receipts, claims, transitions.) Tj ET
+BT /F1 10 Tf 61 528 Td (-  backgroundruncoord: serial engine that converts durable phases into) Tj ET
+BT /F1 10 Tf 61 515 Td (  effects.) Tj ET
+BT /F1 10 Tf 61 502 Td (-  taskenvdocker: Docker clone/volume/container policy and credential handoff.) Tj ET
+BT /F1 10 Tf 61 489 Td (-  backgroundopencode: pinned OpenCode session/prompt/observation protocol.) Tj ET
+BT /F1 10 Tf 61 476 Td (-  backgroundroute: exact live-session attachment route and fencing.) Tj ET
+BT /F1 10 Tf 61 463 Td (-  taskartifact: Git snapshot/bundle/manifest/CAS verification.) Tj ET
+BT /F1 10 Tf 61 450 Td (-  taskresultsource: matches a durable result to freshly verified artifact) Tj ET
+BT /F1 10 Tf 61 437 Td (  bytes.) Tj ET
+BT /F1 10 Tf 61 424 Td (-  proxy, control, pluginauth: HTTP ingress, browser pairing,) Tj ET
+BT /F1 10 Tf 61 411 Td (  device/plugin auth.) Tj ET
+BT /F1 10 Tf 61 398 Td (-  githubapp: GitHub App onboarding and scoped token issuance.) Tj ET
+BT /F1 10 Tf 54 380 Td (The dependency direction is intentional: policy \(run\) does not import Docker,) Tj ET
+BT /F1 10 Tf 54 367 Td (HTTP, the coordinator, or SQLite. The coordinator orchestrates; the task store) Tj ET
+BT /F1 10 Tf 54 354 Td (owns durable transition legality; the Docker provider owns external resources.) Tj ET
+BT /F2 14 Tf 54 328 Td (Part 10 - A 13-hour tablet plan) Tj ET
+BT /F1 10 Tf 54 304 Td (Hour 0-1: Read Parts 1-3. Explain the ten-step normal run story aloud.) Tj ET
+BT /F1 10 Tf 54 286 Td (Hour 1-2: Read Parts 4-5. Write your own definitions for durable intent,) Tj ET
+BT /F1 10 Tf 54 273 Td (idempotency, exact writer, phase, Stop, Seal, and uncertain.) Tj ET
+BT /F1 10 Tf 54 255 Td (Hour 2-3: Read Parts 6-8. Make a two-column list: "Fern protects against") Tj ET
+BT /F1 10 Tf 54 242 Td (and "Fern does not protect against.") Tj ET
+BT /F1 10 Tf 54 224 Td (Hour 3-4: Read Part 9 twice. Draw the package arrows from memory.) Tj ET
+BT /F1 10 Tf 54 206 Td (Hour 4-6: Re-read the normal run story and pretend you are the coordinator.) Tj ET
+BT /F1 10 Tf 54 193 Td (For each step, say what durable evidence should exist before and after it.) Tj ET
+BT /F1 10 Tf 54 175 Td (Hour 6-7: Walk through a failure: prompt request times out after being sent.) Tj ET
+BT /F1 10 Tf 54 162 Td (What must Fern avoid doing? What evidence can it inspect?) Tj ET
+BT /F1 10 Tf 54 144 Td (Hour 7-8: Walk through Seal. Why must the exact writer be stopped before) Tj ET
+BT /F1 10 Tf 54 131 Td (export? Why must materialization be checked before cleanup?) Tj ET
+BT /F1 10 Tf 54 113 Td (Hour 8-9: Walk through credentials. What does the container receive? What) Tj ET
+BT /F1 10 Tf 54 100 Td (never leaves the host? What risk remains?) Tj ET
+BT /F1 10 Tf 54 82 Td (Hour 9-10: Study the phone demo story: Tailscale route, one-time pairing) Tj ET
+BT /F1 10 Tf 54 69 Td (code, paired browser, and its limits.) Tj ET
+BT /F1 8 Tf 520 28 Td (5 / 6) Tj ET
+Q
+endstream
+endobj
+10 0 obj
+<< /Length 2978 >>
+stream
+q
+0.08 0.31 0.23 rg
+BT /F2 8 Tf 54 770 Td (FERN - OFFLINE FLIGHT STUDY GUIDE) Tj ET
+0 g
+BT /F1 10 Tf 54 744 Td (Hour 10-11: Prepare a two-minute verbal project explanation and repeat it) Tj ET
+BT /F1 10 Tf 54 731 Td (until it is natural.) Tj ET
+BT /F1 10 Tf 54 713 Td (Hour 11-12: Prepare answers to the interview questions below.) Tj ET
+BT /F1 10 Tf 54 695 Td (Hour 12-13: Write a one-page plan for your first real demo: Linux host,) Tj ET
+BT /F1 10 Tf 54 682 Td (model-provider decision, tiny blog task, evidence to capture, and limitation to) Tj ET
+BT /F1 10 Tf 54 669 Td (state honestly.) Tj ET
+BT /F2 14 Tf 54 643 Td (Part 11 - Interview practice questions) Tj ET
+BT /F1 10 Tf 59 619 Td (1.  Why does Fern exist if Docker can already run a coding agent?) Tj ET
+BT /F1 10 Tf 59 606 Td (2.  What exactly becomes durable when a task is admitted?) Tj ET
+BT /F1 10 Tf 59 593 Td (3.  Why is an idempotency key useful, and what does it not solve?) Tj ET
+BT /F1 10 Tf 59 580 Td (4.  Why are container names insufficient for safe cleanup?) Tj ET
+BT /F1 10 Tf 59 567 Td (5.  What is the difference between a user-visible state and a durable phase?) Tj ET
+BT /F1 10 Tf 59 554 Td (6.  Explain Stop versus Seal without using jargon.) Tj ET
+BT /F1 10 Tf 59 541 Td (7.  What does Fern verify about a sealed artifact, and what does it not verify?) Tj ET
+BT /F1 10 Tf 59 528 Td (8.  Why can a PR differ from the sealed result?) Tj ET
+BT /F1 10 Tf 59 515 Td (9.  Why does Fern report uncertainty instead of replaying every failed request?) Tj ET
+BT /F1 10 Tf 59 502 Td (10.  Describe the container's security boundary honestly.) Tj ET
+BT /F1 10 Tf 59 489 Td (11.  How are GitHub credentials delivered, and what is the remaining risk?) Tj ET
+BT /F1 10 Tf 59 476 Td (12.  What are the main deployment blockers today?) Tj ET
+BT /F2 14 Tf 54 450 Td (Final one-minute summary) Tj ET
+BT /F1 10 Tf 54 426 Td ("Fern is a single-host control plane for coding-agent jobs. A plugin submits a) Tj ET
+BT /F1 10 Tf 54 413 Td (task for one clean Git revision, and Fern records that intent in SQLite before) Tj ET
+BT /F1 10 Tf 54 400 Td (it provisions a disposable Docker workspace. It binds the task to exact) Tj ET
+BT /F1 10 Tf 54 387 Td (container and session identities, supplies short-lived repository-scoped GitHub) Tj ET
+BT /F1 10 Tf 54 374 Td (credentials, and allows a user to attach to the existing agent session. When I) Tj ET
+BT /F1 10 Tf 54 361 Td (seal a run, Fern fences the exact writer, exports and verifies the Git artifact,) Tj ET
+BT /F1 10 Tf 54 348 Td (records the retained result, and then cleans up the workspace. It is not a) Tj ET
+BT /F1 10 Tf 54 335 Td (hostile-code sandbox and it does not prove test success or exactly-once PRs. The) Tj ET
+BT /F1 10 Tf 54 322 Td (current project is a pre-release prototype whose strict Linux/XFS and) Tj ET
+BT /F1 10 Tf 54 309 Td (model-provider requirements still need a real end-to-end deployment.") Tj ET
+BT /F1 8 Tf 520 28 Td (6 / 6) Tj ET
+Q
+endstream
+endobj
+11 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 5 0 R >>
+endobj
+12 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 6 0 R >>
+endobj
+13 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 7 0 R >>
+endobj
+14 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 8 0 R >>
+endobj
+15 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 9 0 R >>
+endobj
+16 0 obj
+<< /Type /Page /Parent 4 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 1 0 R /F2 2 0 R /F3 3 0 R >> >> /Contents 10 0 R >>
+endobj
+17 0 obj
+<< /Type /Catalog /Pages 4 0 R /PageLayout /OneColumn >>
+endobj
+xref
+0 18
+0000000000 65535 f 
+0000000015 00000 n 
+0000000085 00000 n 
+0000000160 00000 n 
+0000000228 00000 n 
+0000000321 00000 n 
+0000004352 00000 n 
+0000008725 00000 n 
+0000012892 00000 n 
+0000017207 00000 n 
+0000021500 00000 n 
+0000024531 00000 n 
+0000024678 00000 n 
+0000024825 00000 n 
+0000024972 00000 n 
+0000025119 00000 n 
+0000025266 00000 n 
+0000025414 00000 n 
+trailer
+<< /Size 18 /Root 17 0 R >>
+startxref
+25487
+%%EOF
