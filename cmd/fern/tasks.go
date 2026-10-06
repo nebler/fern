@@ -28,7 +28,6 @@ import (
 )
 
 const (
-	taskServiceCredentialID       = "service-v1"
 	taskPollInterval              = time.Second
 	taskOperationTimeout          = 2 * time.Minute
 	taskInspectTimeout            = 15 * time.Second
@@ -186,8 +185,8 @@ func newTaskServices(ctx context.Context, cfg config.Config, route *backgroundro
 	}
 
 	coordinator, err := backgroundruncoord.New(store, provider, artifact, ids, backgroundruncoord.Config{
-		WorkspaceID: durableWorkspace.ID, SystemActor: systemActor("background-run", "Background Run coordinator"),
-		Profile: runapi.PluginOpenCodeProfile, ImageIdentity: cfg.Tasks.BackgroundImageID,
+		WorkspaceID: durableWorkspace.ID,
+		Profile:     runapi.PluginOpenCodeProfile, ImageIdentity: cfg.Tasks.BackgroundImageID,
 		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: cfg.Tasks.Agent,
 		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID,
 		OperationTimeout: backgroundCloneTimeout,
@@ -255,11 +254,6 @@ func resolveGitHubAuthority(github config.GitHubApp) (*gitHubAuthority, error) {
 		return nil, err
 	}
 	return &gitHubAuthority{installationTokens: tokens}, nil
-}
-
-func systemActor(id, displayName string) task.ActorSnapshot {
-	return task.ActorSnapshot{Type: task.ActorSystem, ID: id, DisplayName: displayName,
-		CredentialID: taskServiceCredentialID, Authentication: "internal", RequestID: id}
 }
 
 func gitExecutable() string {

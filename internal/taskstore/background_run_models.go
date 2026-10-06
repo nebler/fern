@@ -11,8 +11,6 @@ type AdmitBackgroundRunParams struct {
 	TaskID                   task.TaskID
 	AttemptID                task.AttemptID
 	ReceiptID                task.ReceiptID
-	TaskEventID              task.EventID
-	AttemptEventID           task.EventID
 	OpenCodeSessionID        task.OpenCodeSessionID
 	OpenCodeMessageID        task.OpenCodeMessageID
 	Claim                    task.IdempotencyClaim
@@ -94,7 +92,6 @@ type BackgroundRun struct {
 	State                      BackgroundRunState
 	EffectPhase                BackgroundRunEffectPhase
 	StopReceiptID              task.ReceiptID
-	StopActor                  *task.ActorSnapshot
 	StopRequestedAt            *time.Time
 	Creator                    task.ActorSnapshot
 	ObservedContainerID        string
@@ -105,7 +102,6 @@ type BackgroundRun struct {
 	LastError                  string
 	PromptRequestAttemptedAt   *time.Time
 	TimeoutRequestedAt         *time.Time
-	TimeoutActor               *task.ActorSnapshot
 	CleanupProof               string
 	BackgroundSealRequestID    task.SealRequestID
 	ArtifactExportID           task.ArtifactExportID
@@ -121,8 +117,6 @@ type StopBackgroundRunParams struct {
 	WorkspaceID        task.WorkspaceID
 	TaskID             task.TaskID
 	ReceiptID          task.ReceiptID
-	AttemptEventID     task.EventID
-	TaskEventID        task.EventID
 	Claim              task.IdempotencyClaim
 	APIContractVersion string
 	StoppedAt          time.Time
@@ -180,12 +174,9 @@ type RecordBackgroundRunEvidenceParams struct {
 
 type FinalizeBackgroundRunFailureParams struct {
 	BackgroundRunRef
-	AttemptEventID task.EventID
-	TaskEventID    task.EventID
-	Actor          task.ActorSnapshot
-	Reason         string
-	Evidence       string
-	CleanupProof   string
+	Reason       string
+	Evidence     string
+	CleanupProof string
 }
 
 type CompleteBackgroundRunResultCleanupParams struct {
@@ -198,18 +189,9 @@ type MarkBackgroundRunCleanupRequiredParams struct {
 	Error string
 }
 
-type RequestBackgroundRunTimeoutParams struct {
-	BackgroundRunRef
-	AttemptEventID task.EventID
-	TaskEventID    task.EventID
-	Actor          task.ActorSnapshot
-}
-
 type Admission struct {
-	Task         Task
-	Attempt      Attempt
-	Receipt      Receipt
-	TaskEvent    Event
-	AttemptEvent Event
-	Replayed     bool
+	Task     Task
+	Attempt  Attempt
+	Receipt  Receipt
+	Replayed bool
 }

@@ -1,9 +1,7 @@
 package task
 
 import (
-	"encoding/json"
 	"errors"
-	"math"
 	"strings"
 	"testing"
 )
@@ -19,7 +17,6 @@ func TestFernIDParsers(t *testing.T) {
 		{"task", "tsk_", func(v string) error { _, err := ParseTaskID(v); return err }},
 		{"attempt", "att_", func(v string) error { _, err := ParseAttemptID(v); return err }},
 		{"receipt", "rcp_", func(v string) error { _, err := ParseReceiptID(v); return err }},
-		{"event", "fev_", func(v string) error { _, err := ParseEventID(v); return err }},
 		{"result", "res_", func(v string) error { _, err := ParseResultID(v); return err }},
 		{"artifact export", "exp_", func(v string) error { _, err := ParseArtifactExportID(v); return err }},
 		{"retained artifact", "art_", func(v string) error { _, err := ParseRetainedArtifactID(v); return err }},
@@ -84,39 +81,5 @@ func TestRequestHashString(t *testing.T) {
 	}
 	if got, want := h.String(), strings.Repeat("ab", 32); got != want {
 		t.Fatalf("String() = %q, want %q", got, want)
-	}
-}
-
-func TestCursorWire(t *testing.T) {
-	for _, v := range []string{"0", "1", "1842", "9223372036854775807"} {
-		c, err := ParseCursorWire(v)
-		if err != nil || c.String() != v {
-			t.Errorf("%q round trip: %v, %v", v, c, err)
-		}
-		encoded, err := json.Marshal(c)
-		if err != nil || string(encoded) != `"`+v+`"` {
-			t.Errorf("marshal %q = %s, %v", v, encoded, err)
-		}
-		var decoded Cursor
-		if err := json.Unmarshal(encoded, &decoded); err != nil || decoded != c {
-			t.Errorf("unmarshal %q = %v, %v", encoded, decoded, err)
-		}
-	}
-	for _, v := range []string{"", "00", "01", "+1", "-1", " 1", "1.0", "9223372036854775808"} {
-		if _, err := ParseCursorWire(v); !errors.Is(err, ErrInvalidCursor) {
-			t.Errorf("%q accepted", v)
-		}
-	}
-	if err := Cursor(0).ValidateEvent(); !errors.Is(err, ErrInvalidCursor) {
-		t.Error("zero event cursor accepted")
-	}
-	if err := Cursor(math.MaxInt64).ValidateEvent(); err != nil {
-		t.Error(err)
-	}
-	var c Cursor
-	for _, raw := range []string{`1`, `"01"`, `"-1"`, `null`} {
-		if err := json.Unmarshal([]byte(raw), &c); !errors.Is(err, ErrInvalidCursor) {
-			t.Errorf("JSON %s accepted", raw)
-		}
 	}
 }

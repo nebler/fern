@@ -87,7 +87,7 @@ removes it and waits for admitted forwarding to exit before writer teardown.
 3. Bind remote, operator, and live-run listeners.
 4. Acquire the host-local repository-name lease.
 5. Open control and plugin-authorization state.
-6. Open taskstore schema 6.
+6. Open taskstore schema 7.
 7. If the installation ID is pending, block readiness and expose onboarding
    without composing task services.
 8. Otherwise apply strict `config.Validate` and resolve exact GitHub
@@ -168,12 +168,12 @@ bound host repository.
 Admission atomically writes:
 
 - task and attempt identities;
-- actor snapshot;
+- creator actor, stored on the run row;
 - repository and base authority;
 - instruction hash;
 - image, profile, environment, and resource identities;
 - OpenCode session and message identities;
-- receipt and event records;
+- receipt;
 - queued Background Run intent.
 
 The coordinator wakes only after commit. A repeated matching idempotency claim
@@ -447,7 +447,7 @@ process-local memory as authority. Recovery rules include:
   commits;
 - wake coordinators only after durable admission commits.
 
-Taskstore schema is 6 and control-state schema is 2. This pre-release reset has
+Taskstore schema is 7 and control-state schema is 2. This pre-release reset has
 no supported predecessor: older development state is rejected, never silently
 migrated or deleted. Preserve anything needed before explicitly starting with
 fresh state. Current-version restart recovery and backup/restore remain
@@ -523,7 +523,7 @@ ownership boundaries.
 | `internal/backgroundruncoord` | serial run effect coordinator and recovery |
 | `cmd/fern` | CLI, composition, backup, credentials, process lifecycle |
 | `internal/task` | identifiers, actor snapshots, idempotency vocabulary |
-| `internal/taskstore` | schema 6 run/result authority and state machines |
+| `internal/taskstore` | schema 7 run/result authority and state machines |
 | `internal/taskartifact` | deterministic Git bundle creation, CAS, materialization |
 | `internal/taskresultsource` | CAS-only result binding and verified checkout acquisition |
 | `internal/taskenvdocker` | disposable Docker resources, writer proof, container GitHub credential delivery |

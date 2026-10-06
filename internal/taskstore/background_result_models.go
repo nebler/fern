@@ -21,13 +21,10 @@ type BackgroundRunSealRequest struct {
 	ExpectedAttemptRevision int64
 	IdempotencyKey          task.IdempotencyKey
 	RequestHash             task.RequestHash
-	Owner                   task.ActorSnapshot
 	ExportID                task.ArtifactExportID
 	ArtifactID              task.RetainedArtifactID
 	MaterializationID       task.MaterializationID
 	ResultID                task.ResultID
-	ResultEventID           task.EventID
-	TaskEventID             task.EventID
 	CommitEpochSeconds      int64
 	PolicyVersion           string
 	AcceptedAt              time.Time
@@ -47,8 +44,6 @@ type SealBackgroundRunParams struct {
 	ArtifactID              task.RetainedArtifactID
 	MaterializationID       task.MaterializationID
 	ResultID                task.ResultID
-	ResultEventID           task.EventID
-	TaskEventID             task.EventID
 	Claim                   task.IdempotencyClaim
 	CommitEpochSeconds      int64
 	PolicyVersion           string
@@ -227,11 +222,6 @@ type CommitBackgroundRunRetainedResultParams struct {
 	MaterializationProof [32]byte
 	ArtifactID           task.RetainedArtifactID
 	ResultID             task.ResultID
-	ResultEventID        task.EventID
-	TaskEventID          task.EventID
-	EvidencePayload      json.RawMessage
-	EvidenceSHA256       [32]byte
-	Actor                task.ActorSnapshot
 	SealedAt             time.Time
 }
 

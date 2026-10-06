@@ -18,7 +18,6 @@ type (
 	TaskID             string
 	AttemptID          string
 	ReceiptID          string
-	EventID            string
 	SealRequestID      string
 	ResultID           string
 	ArtifactExportID   string
@@ -56,12 +55,6 @@ func ParseReceiptID(v string) (ReceiptID, error) {
 		return "", err
 	}
 	return ReceiptID(v), nil
-}
-func ParseEventID(v string) (EventID, error) {
-	if err := validateFernID(v, "fev_"); err != nil {
-		return "", err
-	}
-	return EventID(v), nil
 }
 func ParseSealRequestID(v string) (SealRequestID, error) {
 	if err := validateFernID(v, "slr_"); err != nil {

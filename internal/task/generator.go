@@ -25,8 +25,6 @@ type AdmissionIDs struct {
 	TaskID            TaskID
 	AttemptID         AttemptID
 	ReceiptID         ReceiptID
-	TaskEventID       EventID
-	AttemptEventID    EventID
 	OpenCodeSessionID OpenCodeSessionID
 	OpenCodeMessageID OpenCodeMessageID
 }
@@ -41,8 +39,6 @@ type BackgroundSealIDs struct {
 	RetainedArtifactID RetainedArtifactID
 	MaterializationID  MaterializationID
 	ResultID           ResultID
-	ResultEventID      EventID
-	TaskEventID        EventID
 }
 
 func NewGenerator(random io.Reader, now func() time.Time) (*Generator, error) {
@@ -68,12 +64,6 @@ func (g *Generator) GenerateAdmissionIDs() (AdmissionIDs, error) {
 		return AdmissionIDs{}, err
 	}
 	if ids.ReceiptID, err = g.ReceiptID(); err != nil {
-		return AdmissionIDs{}, err
-	}
-	if ids.TaskEventID, err = g.EventID(); err != nil {
-		return AdmissionIDs{}, err
-	}
-	if ids.AttemptEventID, err = g.EventID(); err != nil {
 		return AdmissionIDs{}, err
 	}
 	if ids.OpenCodeSessionID, err = g.OpenCodeSessionID(); err != nil {
@@ -106,12 +96,6 @@ func (g *Generator) GenerateBackgroundSealIDs() (BackgroundSealIDs, error) {
 	if ids.ResultID, err = g.ResultID(); err != nil {
 		return BackgroundSealIDs{}, err
 	}
-	if ids.ResultEventID, err = g.EventID(); err != nil {
-		return BackgroundSealIDs{}, err
-	}
-	if ids.TaskEventID, err = g.EventID(); err != nil {
-		return BackgroundSealIDs{}, err
-	}
 	return ids, nil
 }
 
@@ -133,11 +117,6 @@ func (g *Generator) AttemptID() (AttemptID, error) {
 func (g *Generator) ReceiptID() (ReceiptID, error) {
 	value, err := g.fernID("rcp_")
 	return ReceiptID(value), err
-}
-
-func (g *Generator) EventID() (EventID, error) {
-	value, err := g.fernID("fev_")
-	return EventID(value), err
 }
 
 func (g *Generator) SealRequestID() (SealRequestID, error) {

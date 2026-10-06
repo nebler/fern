@@ -167,8 +167,8 @@ func (s *service) Create(ctx context.Context, actor task.ActorSnapshot, key task
 	intent := &taskstore.BackgroundRunIntent{RepositoryRemote: input.Repository, Branch: branch, Profile: input.Profile,
 		EnvironmentSHA256: s.config.BackgroundEnvironmentSHA256, ImageIdentity: s.config.BackgroundImageIdentity}
 	admission, err := s.config.Store.AdmitBackgroundRun(ctx, taskstore.AdmitBackgroundRunParams{
-		TaskID: ids.TaskID, AttemptID: ids.AttemptID, ReceiptID: ids.ReceiptID, TaskEventID: ids.TaskEventID,
-		AttemptEventID: ids.AttemptEventID, OpenCodeSessionID: ids.OpenCodeSessionID, OpenCodeMessageID: ids.OpenCodeMessageID,
+		TaskID: ids.TaskID, AttemptID: ids.AttemptID, ReceiptID: ids.ReceiptID,
+		OpenCodeSessionID: ids.OpenCodeSessionID, OpenCodeMessageID: ids.OpenCodeMessageID,
 		Claim: claim, Title: "Background Run", Prompt: input.Instruction, RepositoryID: s.config.RepositoryID,
 		BaseRef: baseRef, BaseSHA: base, ObjectFormat: "sha1", ExecutionContractVersion: APIContractVersion,
 		Agent: s.config.Agent, ModelProvider: s.config.ModelProvider, Model: s.config.Model,
@@ -255,16 +255,8 @@ func (s *service) Stop(ctx context.Context, actor task.ActorSnapshot, key task.I
 	if err != nil {
 		return zero, err
 	}
-	attemptEventID, err := s.config.Generator.EventID()
-	if err != nil {
-		return zero, err
-	}
-	taskEventID, err := s.config.Generator.EventID()
-	if err != nil {
-		return zero, err
-	}
 	result, err := s.config.Store.StopBackgroundRun(ctx, taskstore.StopBackgroundRunParams{WorkspaceID: s.config.WorkspaceID,
-		TaskID: id, ReceiptID: receiptID, AttemptEventID: attemptEventID, TaskEventID: taskEventID, Claim: claim,
+		TaskID: id, ReceiptID: receiptID, Claim: claim,
 		APIContractVersion: APIContractVersion, StoppedAt: s.config.Now().UTC().Truncate(time.Millisecond)})
 	if err != nil {
 		return zero, err
@@ -300,7 +292,7 @@ func (s *service) Seal(ctx context.Context, actor task.ActorSnapshot, key task.I
 		ExpectedRunRevision: current.Revision, ExpectedTaskRevision: owner.Revision, ExpectedAttemptRevision: attempt.Revision,
 		SealRequestID: ids.SealRequestID, ReceiptID: ids.ReceiptID, ExportID: ids.ArtifactExportID,
 		ArtifactID: ids.RetainedArtifactID, MaterializationID: ids.MaterializationID, ResultID: ids.ResultID,
-		ResultEventID: ids.ResultEventID, TaskEventID: ids.TaskEventID, Claim: claim, CommitEpochSeconds: now.Unix(),
+		Claim: claim, CommitEpochSeconds: now.Unix(),
 		PolicyVersion: s.config.SealPolicyVersion, APIContractVersion: APIContractVersion, AcceptedAt: now,
 	})
 	if err != nil {

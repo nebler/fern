@@ -57,20 +57,12 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 	if err != nil {
 		return BackgroundRunRetainedResult{}, err
 	}
-	owner, err := getTask(ctx, tx, export.TaskID)
-	if err != nil {
-		return BackgroundRunRetainedResult{}, err
-	}
-	attempt, err := getAttempt(ctx, tx, export.AttemptID)
-	if err != nil {
-		return BackgroundRunRetainedResult{}, err
-	}
 	// The task, attempt, run and export UPDATEs below pin revision, state and
 	// phase; this check covers only the cross-row tuple they do not.
 	if export.TaskID != p.TaskID || export.AttemptID != p.AttemptID || export.Generation != p.Generation ||
 		export.ArtifactID != p.ArtifactID || export.MaterializationID != p.MaterializationID || export.ResultID != p.ResultID ||
 		request.ArtifactID != p.ArtifactID || request.MaterializationID != p.MaterializationID || request.ResultID != p.ResultID ||
-		request.ResultEventID != p.ResultEventID || request.TaskEventID != p.TaskEventID || request.ExportID != p.ExportID ||
+		request.ExportID != p.ExportID ||
 		materialization.ExportID != p.ExportID || materialization.ArtifactID != p.ArtifactID || materialization.ResultID != p.ResultID ||
 		fence.ExportID != p.ExportID || fence.TaskID != p.TaskID || fence.AttemptID != p.AttemptID || fence.Generation != p.Generation ||
 		run.BackgroundSealRequestID != request.ID || run.MaterializationID != p.MaterializationID || run.RetainedResultID != p.ResultID {
@@ -80,47 +72,7 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 		return BackgroundRunRetainedResult{}, ErrInvalidInput
 	}
 
-	sealParams := resultMaterial{ResultID: p.ResultID, TaskID: p.TaskID, AttemptID: p.AttemptID,
-		ExpectedAttemptRevision: request.ExpectedAttemptRevision, ExpectedTaskRevision: request.ExpectedTaskRevision,
-		ResultEventID: p.ResultEventID, TaskEventID: p.TaskEventID, RepositoryID: export.RepositoryID, BaseSHA: export.BaseSHA,
-		ResultCommit: export.ResultCommit, TreeOID: export.TreeOID, Outcome: export.Outcome, WorktreeClean: true,
-		Manifest: export.ResultManifest, ManifestSHA256: export.ChangesSHA256, OpenCodeSessionID: run.OpenCodeSessionID,
-		OpenCodeMessageID: run.OpenCodeMessageID, EvidencePayload: p.EvidencePayload, EvidenceSHA256: p.EvidenceSHA256,
-		PolicyVersion: request.PolicyVersion, CollectedAt: *export.CollectedAt, SealedAt: p.SealedAt, Actor: p.Actor,
-		CompletionAuthority: SealAuthorityUser}
-	// The manifest was validated when the snapshot was selected; the retained
-	// changes digest is taskartifact's canonical ChangeEntry digest.
-	payload, err := resultSealPayload(sealParams)
-	if err != nil {
-		return BackgroundRunRetainedResult{}, err
-	}
-	var payloadObject map[string]any
-	if json.Unmarshal(payload, &payloadObject) != nil {
-		return BackgroundRunRetainedResult{}, ErrCorruptStore
-	}
-	payloadObject["sourceKind"] = string(ResultSourceRetainedArtifact)
-	payloadObject["sealRequestId"] = request.ID
-	payloadObject["artifactExportId"] = export.ID
-	payloadObject["retainedArtifactId"] = export.ArtifactID
-	payloadObject["materializationId"] = export.MaterializationID
-	payloadObject["commitEpochSeconds"] = request.CommitEpochSeconds
-	payload, err = json.Marshal(payloadObject)
-	if err != nil {
-		return BackgroundRunRetainedResult{}, err
-	}
-	actorID, err := ensureActor(ctx, tx, p.Actor)
-	if err != nil {
-		return BackgroundRunRetainedResult{}, err
-	}
 	sealedMS := unixMillis(p.SealedAt)
-	resultEvent, err := insertAttemptEvent(ctx, tx, p.ResultEventID, attempt, "attempt.result_sealed", sealedMS, actorID, payload)
-	if err != nil {
-		return BackgroundRunRetainedResult{}, err
-	}
-	taskEvent, err := insertTaskEvent(ctx, tx, p.TaskEventID, owner, "task.completed", sealedMS, actorID, payload)
-	if err != nil || resultEvent.Cursor >= taskEvent.Cursor {
-		return BackgroundRunRetainedResult{}, fmt.Errorf("insert retained result events: %w", err)
-	}
 	for index, entry := range export.ResultManifest {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO result_manifest(
 result_id,ordinal,path_base64,change_kind,old_mode,new_mode,old_blob_oid,new_blob_oid,old_size,new_size)
@@ -141,14 +93,14 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO results(
 id,task_id,attempt_id,workspace_id,state,outcome,repository_id,base_sha,result_commit,tree_oid,worktree_clean,
-manifest_entries,manifest_sha256,opencode_session_id,opencode_message_id,evidence_sha256,policy_version,collected_at,sealed_at,
-creator_actor_snapshot_id,sealed_event_id,completed_event_id,revision,created_at,updated_at,completion_authority,
+manifest_entries,manifest_sha256,opencode_session_id,opencode_message_id,policy_version,collected_at,sealed_at,
+revision,created_at,updated_at,completion_authority,
 source_kind,retained_artifact_id,artifact_export_id,materialization_id)
-VALUES(?,?,?,?,'sealed',?,?,?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,1,?,?,'user_seal','retained_artifact',?,?,?)`,
+VALUES(?,?,?,?,'sealed',?,?,?,?,?,1,?,?,?,?,?,?,?,1,?,?,'user_seal','retained_artifact',?,?,?)`,
 		p.ResultID, p.TaskID, p.AttemptID, export.WorkspaceID, export.Outcome, export.RepositoryID, export.BaseSHA,
 		export.ResultCommit, export.TreeOID, len(export.ResultManifest), export.ChangesSHA256[:], run.OpenCodeSessionID,
-		run.OpenCodeMessageID, p.EvidenceSHA256[:], request.PolicyVersion, unixMillis(*export.CollectedAt), sealedMS, actorID,
-		p.ResultEventID, p.TaskEventID, sealedMS, sealedMS, p.ArtifactID, p.ExportID, p.MaterializationID); err != nil {
+		run.OpenCodeMessageID, request.PolicyVersion, unixMillis(*export.CollectedAt), sealedMS,
+		sealedMS, sealedMS, p.ArtifactID, p.ExportID, p.MaterializationID); err != nil {
 		return BackgroundRunRetainedResult{}, fmt.Errorf("insert retained result: %w", err)
 	}
 	result, err := tx.ExecContext(ctx, `UPDATE attempts SET state='superseded',sealed_result_id=?,revision=revision+1,updated_at=?
@@ -160,9 +112,9 @@ WHERE id=? AND task_id=? AND workspace_id=? AND state='prepared' AND sealed_resu
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRunRetainedResult{}, ErrInvalidState
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE tasks SET state='completed',sealed_result_id=?,latest_event_cursor=?,revision=revision+1,updated_at=?
+	result, err = tx.ExecContext(ctx, `UPDATE tasks SET state='completed',sealed_result_id=?,revision=revision+1,updated_at=?
 WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND sealed_result_id IS NULL AND revision=?`,
-		p.ResultID, taskEvent.Cursor, sealedMS, p.TaskID, export.WorkspaceID, p.AttemptID, request.ExpectedTaskRevision)
+		p.ResultID, sealedMS, p.TaskID, export.WorkspaceID, p.AttemptID, request.ExpectedTaskRevision)
 	if err != nil {
 		return BackgroundRunRetainedResult{}, err
 	}
@@ -214,16 +166,15 @@ state='canceling' AND effect_phase='sealing' AND artifact_export_id=? AND retain
 		return BackgroundRunRetainedResult{}, err
 	}
 	return BackgroundRunRetainedResult{SealedResult: SealedResult{Result: storedResult, Manifest: export.ResultManifest,
-		Task: storedTask, Attempt: storedAttempt, ResultEvent: resultEvent, TaskEvent: taskEvent}, Run: storedRun,
+		Task: storedTask, Attempt: storedAttempt}, Run: storedRun,
 		SealRequest: request, Export: storedExport, Artifact: artifact, Materialization: materialization}, nil
 }
 
 func validateRetainedResultCommit(p CommitBackgroundRunRetainedResultParams) error {
-	if p.ExpectedPhase != BackgroundRunExportPhaseSelected || p.TaskEventID == p.ResultEventID ||
-		(p.Actor.Type != task.ActorSystem && p.Actor.Type != task.ActorRecovery) {
+	if p.ExpectedPhase != BackgroundRunExportPhaseSelected {
 		return fmt.Errorf("%w: retained result commit", ErrInvalidInput)
 	}
-	return validateRetainedResultEvidence(p.EvidencePayload, p.EvidenceSHA256)
+	return nil
 }
 
 func (s *Store) GetRetainedArtifact(ctx context.Context, id task.RetainedArtifactID) (RetainedArtifact, error) {
@@ -282,8 +233,7 @@ func (s *Store) ReferencedArtifactManifestSHA256(ctx context.Context) ([][32]byt
 func retainedResultReplay(ctx context.Context, tx *sql.Tx, result Result, p CommitBackgroundRunRetainedResultParams) (BackgroundRunRetainedResult, error) {
 	if result.SourceKind != ResultSourceRetainedArtifact || result.ID != p.ResultID || result.TaskID != p.TaskID || result.AttemptID != p.AttemptID ||
 		result.RetainedArtifactID != p.ArtifactID || result.ArtifactExportID != p.ExportID || result.MaterializationID != p.MaterializationID ||
-		result.SealedEventID != p.ResultEventID || result.CompletedEventID != p.TaskEventID || result.EvidenceSHA256 != p.EvidenceSHA256 ||
-		result.Creator != p.Actor || !result.SealedAt.Equal(p.SealedAt) {
+		!result.SealedAt.Equal(p.SealedAt) {
 		return BackgroundRunRetainedResult{}, fmt.Errorf("%w: retained result replay differs", ErrInvalidState)
 	}
 	artifact, err := getRetainedArtifact(ctx, tx, p.ArtifactID)
@@ -309,15 +259,12 @@ func retainedResultReplay(ctx context.Context, tx *sql.Tx, result Result, p Comm
 	owner, _ := getTask(ctx, tx, p.TaskID)
 	attempt, _ := getAttempt(ctx, tx, p.AttemptID)
 	manifest, _ := getResultManifest(ctx, tx, p.ResultID)
-	resultEvent, _ := scanEvent(tx.QueryRowContext(ctx, eventSelect+` WHERE e.id=?`, p.ResultEventID))
-	taskEvent, _ := scanEvent(tx.QueryRowContext(ctx, eventSelect+` WHERE e.id=?`, p.TaskEventID))
 	if export.Phase != BackgroundRunExportPhaseCommitted || materialization.State != ArtifactMaterializationReady ||
 		materialization.ProofSHA256 != p.MaterializationProof ||
 		run.State != BackgroundRunResultReady || owner.SealedResultID != p.ResultID || attempt.SealedResultID != p.ResultID ||
 		!bytes.Equal(artifact.Manifest, export.ArtifactManifest) {
 		return BackgroundRunRetainedResult{}, ErrCorruptStore
 	}
-	return BackgroundRunRetainedResult{SealedResult: SealedResult{Result: result, Manifest: manifest, Task: owner, Attempt: attempt,
-		ResultEvent: resultEvent, TaskEvent: taskEvent}, Run: run, SealRequest: request, Export: export, Artifact: artifact,
+	return BackgroundRunRetainedResult{SealedResult: SealedResult{Result: result, Manifest: manifest, Task: owner, Attempt: attempt}, Run: run, SealRequest: request, Export: export, Artifact: artifact,
 		Materialization: materialization}, nil
 }

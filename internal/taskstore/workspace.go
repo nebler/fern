@@ -174,3 +174,10 @@ func validBoundedText(v string, min, max int) bool {
 func unixMillis(v time.Time) int64 { return v.UnixMilli() }
 
 func fromUnixMillis(v int64) time.Time { return time.UnixMilli(v).UTC() }
+
+func validExactTimestamp(value time.Time) error {
+	if err := validTimestamp(value); err != nil || !value.Equal(fromUnixMillis(unixMillis(value))) {
+		return fmt.Errorf("%w: timestamp must be exact Unix milliseconds", ErrInvalidInput)
+	}
+	return nil
+}

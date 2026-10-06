@@ -23,14 +23,8 @@ SELECT r.task_id,r.attempt_id,r.workspace_id,r.generation,r.writer_generation,r.
        r.stop_receipt_id,r.stop_requested_at,r.observed_container_id,r.observed_container_started_at,r.runtime_epoch,r.host_port,
        r.last_evidence,r.last_error,r.prompt_request_attempted_at,r.timeout_requested_at,r.cleanup_proof,
        r.revision,r.created_at,r.updated_at,r.background_seal_request_id,r.artifact_export_id,r.retained_artifact_id,
-       r.materialization_id,r.retained_result_id,
-       c.actor_type,c.actor_id,c.display_name,c.credential_id,c.authentication,c.request_id,
-       s.actor_type,s.actor_id,s.display_name,s.credential_id,s.authentication,s.request_id,
-       x.actor_type,x.actor_id,x.display_name,x.credential_id,x.authentication,x.request_id
-FROM background_runs r
-JOIN actor_snapshots c ON c.id=r.creator_actor_snapshot_id
-LEFT JOIN actor_snapshots s ON s.id=r.stop_actor_snapshot_id
-LEFT JOIN actor_snapshots x ON x.id=r.timeout_actor_snapshot_id`
+       r.materialization_id,r.retained_result_id,r.creator_actor
+FROM background_runs r`
 
 func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID task.WorkspaceID, taskID task.TaskID, actor task.ActorSnapshot) (BackgroundRun, error) {
 	if !backgroundRunReader(actor.Type) {
@@ -39,8 +33,8 @@ func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID task.Workspace
 	query := backgroundRunSelect + ` WHERE r.workspace_id=? AND r.task_id=?`
 	arguments := []any{workspaceID, taskID}
 	if actor.Type == task.ActorOpenCode {
-		query += ` AND c.actor_type=? AND c.actor_id=? AND c.credential_id=? AND c.authentication=?`
-		arguments = append(arguments, actor.Type, actor.ID, actor.CredentialID, actor.Authentication)
+		query += ownedBy
+		arguments = append(arguments, ownerArgs(actor)...)
 	}
 	run, err := scanBackgroundRun(s.db.QueryRowContext(ctx, query, arguments...))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -92,8 +86,8 @@ func (s *Store) ListBackgroundRuns(ctx context.Context, workspaceID task.Workspa
 	query := backgroundRunSelect + ` WHERE r.workspace_id=?`
 	arguments := []any{workspaceID}
 	if actor.Type == task.ActorOpenCode {
-		query += ` AND c.actor_type=? AND c.actor_id=? AND c.credential_id=? AND c.authentication=?`
-		arguments = append(arguments, actor.Type, actor.ID, actor.CredentialID, actor.Authentication)
+		query += ownedBy
+		arguments = append(arguments, ownerArgs(actor)...)
 	}
 	query += ` ORDER BY r.created_at DESC,r.task_id DESC LIMIT ?`
 	arguments = append(arguments, limit)
@@ -187,10 +181,6 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 		attempt.ID != run.AttemptID || attempt.Sequence != run.Generation || attempt.State != task.AttemptPrepared {
 		return BackgroundRunStop{}, ErrInvalidState
 	}
-	actorID, err := ensureActor(ctx, tx, p.Claim.Actor)
-	if err != nil {
-		return BackgroundRunStop{}, err
-	}
 	stopState := BackgroundRunFailed
 	if activeStop {
 		stopState = BackgroundRunCanceling
@@ -201,17 +191,17 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 	}{run.TaskID, stopState})
 	now := unixMillis(p.StoppedAt)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO receipts(
-id,workspace_id,command_kind,state,idempotency_key,request_hash,actor_snapshot_id,accepted_at,
+id,workspace_id,command_kind,state,idempotency_key,request_hash,actor,accepted_at,
 api_contract_version,target_type,target_id,response_status,response_projection)
 VALUES(?,?,?,'accepted',?,?,?,?,?,'task',?,202,?)`, p.ReceiptID, run.WorkspaceID, StopBackgroundRunCommand,
-		p.Claim.Key, p.Claim.RequestHash[:], actorID, now, p.APIContractVersion, run.TaskID, string(response)); err != nil {
+		p.Claim.Key, p.Claim.RequestHash[:], encodeActor(p.Claim.Actor), now, p.APIContractVersion, run.TaskID, string(response)); err != nil {
 		return BackgroundRunStop{}, fmt.Errorf("insert background run stop receipt: %w", err)
 	}
 	if activeStop {
 		result, updateErr := tx.ExecContext(ctx, `UPDATE background_runs SET state='canceling',effect_phase='cleaning',
-stop_receipt_id=?,stop_actor_snapshot_id=?,stop_requested_at=?,revision=revision+1,updated_at=?
+stop_receipt_id=?,stop_requested_at=?,revision=revision+1,updated_at=?
 WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND stop_receipt_id IS NULL AND revision=? AND
-effect_phase IN ('provisioning','prompt_pending','admitted')`, p.ReceiptID, actorID, now, now,
+effect_phase IN ('provisioning','prompt_pending','admitted')`, p.ReceiptID, now, now,
 			run.TaskID, run.AttemptID, run.WorkspaceID, run.Generation, run.Revision)
 		if updateErr != nil {
 			return BackgroundRunStop{}, fmt.Errorf("request active background run stop: %w", updateErr)
@@ -232,25 +222,6 @@ effect_phase IN ('provisioning','prompt_pending','admitted')`, p.ReceiptID, acto
 			APIContractVersion: p.APIContractVersion, TargetType: "task", TargetID: run.TaskID,
 			ResponseStatus: 202, ResponseProjection: response}}, nil
 	}
-	payload, err := json.Marshal(struct {
-		RunID         task.TaskID    `json:"runId"`
-		Reason        string         `json:"reason"`
-		StopReceiptID task.ReceiptID `json:"stopReceiptId"`
-	}{run.TaskID, BackgroundRunStoppedBeforeStart, p.ReceiptID})
-	if err != nil {
-		return BackgroundRunStop{}, fmt.Errorf("encode background run stop event: %w", err)
-	}
-	attemptEvent, err := insertAttemptEvent(ctx, tx, p.AttemptEventID, attempt, "attempt.failed", now, actorID, payload)
-	if err != nil {
-		return BackgroundRunStop{}, err
-	}
-	taskEvent, err := insertTaskEvent(ctx, tx, p.TaskEventID, owner, "task.failed", now, actorID, payload)
-	if err != nil {
-		return BackgroundRunStop{}, err
-	}
-	if attemptEvent.Cursor >= taskEvent.Cursor {
-		return BackgroundRunStop{}, ErrCorruptStore
-	}
 	result, err := tx.ExecContext(ctx, `UPDATE attempts SET state='failed',terminal_reason=?,revision=revision+1,updated_at=?
 WHERE id=? AND task_id=? AND workspace_id=? AND state='prepared' AND revision=?`,
 		BackgroundRunStoppedBeforeStart, now, attempt.ID, owner.ID, owner.WorkspaceID, attempt.Revision)
@@ -260,9 +231,9 @@ WHERE id=? AND task_id=? AND workspace_id=? AND state='prepared' AND revision=?`
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRunStop{}, ErrInvalidState
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE tasks SET state='failed',terminal_reason=?,latest_event_cursor=?,revision=revision+1,updated_at=?
+	result, err = tx.ExecContext(ctx, `UPDATE tasks SET state='failed',terminal_reason=?,revision=revision+1,updated_at=?
 WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND revision=?`,
-		BackgroundRunStoppedBeforeStart, taskEvent.Cursor, now, owner.ID, owner.WorkspaceID, attempt.ID, owner.Revision)
+		BackgroundRunStoppedBeforeStart, now, owner.ID, owner.WorkspaceID, attempt.ID, owner.Revision)
 	if err != nil {
 		return BackgroundRunStop{}, fmt.Errorf("terminalize background run task: %w", err)
 	}
@@ -270,9 +241,9 @@ WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND re
 		return BackgroundRunStop{}, ErrInvalidState
 	}
 	result, err = tx.ExecContext(ctx, `UPDATE background_runs SET state='failed',effect_phase='cleanup_complete',
-stop_receipt_id=?,stop_actor_snapshot_id=?,stop_requested_at=?,cleanup_proof='queued:no_effect_claim',last_error=?,revision=revision+1,updated_at=?
+stop_receipt_id=?,stop_requested_at=?,cleanup_proof='queued:no_effect_claim',last_error=?,revision=revision+1,updated_at=?
 WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND state='queued' AND effect_phase='absent' AND stop_receipt_id IS NULL AND revision=?`,
-		p.ReceiptID, actorID, now, BackgroundRunStoppedBeforeStart, now, run.TaskID, run.AttemptID, run.WorkspaceID, run.Generation, run.Revision)
+		p.ReceiptID, now, BackgroundRunStoppedBeforeStart, now, run.TaskID, run.AttemptID, run.WorkspaceID, run.Generation, run.Revision)
 	if err != nil {
 		return BackgroundRunStop{}, fmt.Errorf("fence background run stop: %w", err)
 	}
@@ -294,17 +265,15 @@ WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND state='
 }
 
 func validateBackgroundRunStop(p StopBackgroundRunParams) error {
-	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != StopBackgroundRunCommand || p.Claim.Actor.Type != task.ActorOpenCode ||
-		p.AttemptEventID == p.TaskEventID {
+	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != StopBackgroundRunCommand || p.Claim.Actor.Type != task.ActorOpenCode {
 		return fmt.Errorf("%w: run stop claim", ErrInvalidInput)
 	}
 	return nil
 }
 
 func getBackgroundRunOwned(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, taskID task.TaskID, actor task.ActorSnapshot) (BackgroundRun, error) {
-	run, err := scanBackgroundRun(q.QueryRowContext(ctx, backgroundRunSelect+`
-WHERE r.workspace_id=? AND r.task_id=? AND c.actor_type=? AND c.actor_id=? AND c.credential_id=? AND c.authentication=?`,
-		workspaceID, taskID, actor.Type, actor.ID, actor.CredentialID, actor.Authentication))
+	run, err := scanBackgroundRun(q.QueryRowContext(ctx, backgroundRunSelect+` WHERE r.workspace_id=? AND r.task_id=?`+ownedBy,
+		append([]any{workspaceID, taskID}, ownerArgs(actor)...)...))
 	if errors.Is(err, sql.ErrNoRows) {
 		return BackgroundRun{}, ErrNotFound
 	}
@@ -322,8 +291,7 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	var stopAt, runtimeEpoch, hostPort, promptAttempted, timeoutRequested sql.NullInt64
 	var instructionHash, profileHash, environmentHash []byte
 	var created, updated int64
-	var stopType, stopID, stopName, stopCredential, stopAuth, stopRequest sql.NullString
-	var timeoutType, timeoutID, timeoutName, timeoutCredential, timeoutAuth, timeoutRequest sql.NullString
+	var creator string
 	err := row.Scan(&run.TaskID, &run.AttemptID, &run.WorkspaceID, &run.Generation, &run.WriterGeneration, &repositoryID,
 		&run.RepositoryRemote, &run.BaseOID, &branch, &instructionHash, &run.Profile, &profileHash, &environmentHash, &run.ResourceSpecVersion,
 		&run.ImageIdentity, &run.CloneIdentity, &run.VolumeIdentity, &run.ContainerIdentity, &run.EndpointIdentity,
@@ -331,9 +299,7 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 		&stopReceipt, &stopAt, &containerID, &containerStarted, &runtimeEpoch, &hostPort,
 		&evidence, &lastError, &promptAttempted, &timeoutRequested, &cleanupProof,
 		&run.Revision, &created, &updated, &sealRequestID, &artifactExportID, &retainedArtifactID, &materializationID, &retainedResultID,
-		&run.Creator.Type, &run.Creator.ID, &run.Creator.DisplayName, &run.Creator.CredentialID, &run.Creator.Authentication, &run.Creator.RequestID,
-		&stopType, &stopID, &stopName, &stopCredential, &stopAuth, &stopRequest,
-		&timeoutType, &timeoutID, &timeoutName, &timeoutCredential, &timeoutAuth, &timeoutRequest)
+		&creator)
 	if err != nil {
 		return BackgroundRun{}, err
 	}
@@ -357,18 +323,10 @@ func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
 	run.RetainedArtifactID = task.RetainedArtifactID(nullableText(retainedArtifactID))
 	run.MaterializationID = task.MaterializationID(nullableText(materializationID))
 	run.RetainedResultID = task.ResultID(nullableText(retainedResultID))
-	// Schema CHECKs keep the stop and timeout groups all-or-nothing.
-	if stopReceipt.Valid {
-		run.StopReceiptID = task.ReceiptID(stopReceipt.String)
-		run.StopRequestedAt = nullableTime(stopAt)
-		run.StopActor = &task.ActorSnapshot{Type: task.ActorType(stopType.String), ID: stopID.String, DisplayName: stopName.String,
-			CredentialID: stopCredential.String, Authentication: stopAuth.String, RequestID: stopRequest.String}
-	}
-	if timeoutRequested.Valid {
-		run.TimeoutActor = &task.ActorSnapshot{Type: task.ActorType(timeoutType.String), ID: timeoutID.String, DisplayName: timeoutName.String,
-			CredentialID: timeoutCredential.String, Authentication: timeoutAuth.String, RequestID: timeoutRequest.String}
-	}
-	return run, nil
+	run.StopReceiptID = task.ReceiptID(nullableText(stopReceipt))
+	run.StopRequestedAt = nullableTime(stopAt)
+	run.Creator, err = decodeActor(creator)
+	return run, err
 }
 
 func validBackgroundRunStatePhase(profile string, state BackgroundRunState, phase BackgroundRunEffectPhase) bool {

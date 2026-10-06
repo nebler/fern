@@ -82,10 +82,6 @@ func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams
 		attempt.Sequence != run.Generation || attempt.State != task.AttemptPrepared || attempt.SealedResultID != "" {
 		return BackgroundRunSealAdmission{}, ErrInvalidState
 	}
-	actorID, err := ensureActor(ctx, tx, p.Claim.Actor)
-	if err != nil {
-		return BackgroundRunSealAdmission{}, err
-	}
 	now := unixMillis(p.AcceptedAt)
 	response, err := json.Marshal(struct {
 		RunID             task.TaskID             `json:"run_id"`
@@ -99,19 +95,19 @@ func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams
 		return BackgroundRunSealAdmission{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO receipts(
-id,workspace_id,command_kind,state,idempotency_key,request_hash,actor_snapshot_id,accepted_at,
+id,workspace_id,command_kind,state,idempotency_key,request_hash,actor,accepted_at,
 api_contract_version,target_type,target_id,response_status,response_projection)
 VALUES(?,?,?,'accepted',?,?,?,?,?,'task',?,202,?)`, p.ReceiptID, p.WorkspaceID, SealBackgroundRunCommand,
-		p.Claim.Key, p.Claim.RequestHash[:], actorID, now, p.APIContractVersion, p.TaskID, string(response)); err != nil {
+		p.Claim.Key, p.Claim.RequestHash[:], encodeActor(p.Claim.Actor), now, p.APIContractVersion, p.TaskID, string(response)); err != nil {
 		return BackgroundRunSealAdmission{}, fmt.Errorf("insert background seal receipt: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO background_run_seal_requests(
 id,receipt_id,workspace_id,task_id,attempt_id,generation,expected_run_revision,expected_task_revision,expected_attempt_revision,
-idempotency_key,request_hash,owner_actor_snapshot_id,export_id,artifact_id,materialization_id,result_id,result_event_id,task_event_id,
-commit_epoch_seconds,policy_version,accepted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+idempotency_key,request_hash,export_id,artifact_id,materialization_id,result_id,
+commit_epoch_seconds,policy_version,accepted_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		p.SealRequestID, p.ReceiptID, p.WorkspaceID, p.TaskID, p.AttemptID, p.Generation, p.ExpectedRunRevision,
-		p.ExpectedTaskRevision, p.ExpectedAttemptRevision, p.Claim.Key, p.Claim.RequestHash[:], actorID, p.ExportID,
-		p.ArtifactID, p.MaterializationID, p.ResultID, p.ResultEventID, p.TaskEventID, p.CommitEpochSeconds, p.PolicyVersion, now); err != nil {
+		p.ExpectedTaskRevision, p.ExpectedAttemptRevision, p.Claim.Key, p.Claim.RequestHash[:], p.ExportID,
+		p.ArtifactID, p.MaterializationID, p.ResultID, p.CommitEpochSeconds, p.PolicyVersion, now); err != nil {
 		return BackgroundRunSealAdmission{}, fmt.Errorf("insert background seal request: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO background_run_exports(
@@ -163,7 +159,7 @@ state IN ('working','needs_you','uncertain') AND effect_phase='admitted' AND sto
 
 func validateBackgroundRunSeal(p SealBackgroundRunParams) error {
 	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != SealBackgroundRunCommand ||
-		p.Claim.Actor.Type != task.ActorOpenCode || p.TaskEventID == p.ResultEventID {
+		p.Claim.Actor.Type != task.ActorOpenCode {
 		return fmt.Errorf("%w: background seal authority", ErrInvalidInput)
 	}
 	return nil
@@ -175,9 +171,9 @@ func (s *Store) GetBackgroundRunSealRequest(ctx context.Context, id task.SealReq
 
 const backgroundRunSealRequestSelect = `SELECT q.id,q.receipt_id,q.workspace_id,q.task_id,q.attempt_id,q.generation,
 q.expected_run_revision,q.expected_task_revision,q.expected_attempt_revision,q.idempotency_key,q.request_hash,
-q.export_id,q.artifact_id,q.materialization_id,q.result_id,q.result_event_id,q.task_event_id,q.commit_epoch_seconds,
-q.policy_version,q.accepted_at,a.actor_type,a.actor_id,a.display_name,a.credential_id,a.authentication,a.request_id
-FROM background_run_seal_requests q JOIN actor_snapshots a ON a.id=q.owner_actor_snapshot_id`
+q.export_id,q.artifact_id,q.materialization_id,q.result_id,q.commit_epoch_seconds,
+q.policy_version,q.accepted_at
+FROM background_run_seal_requests q`
 
 func getBackgroundRunSealRequest(ctx context.Context, q queryRower, id task.SealRequestID) (BackgroundRunSealRequest, error) {
 	return scanBackgroundRunSealRequest(q.QueryRowContext(ctx, backgroundRunSealRequestSelect+` WHERE q.id=?`, id))
@@ -193,9 +189,8 @@ func scanBackgroundRunSealRequest(row rowScanner) (BackgroundRunSealRequest, err
 	var accepted int64
 	err := row.Scan(&request.ID, &request.ReceiptID, &request.WorkspaceID, &request.TaskID, &request.AttemptID, &request.Generation,
 		&request.ExpectedRunRevision, &request.ExpectedTaskRevision, &request.ExpectedAttemptRevision, &request.IdempotencyKey, &requestHash,
-		&request.ExportID, &request.ArtifactID, &request.MaterializationID, &request.ResultID, &request.ResultEventID, &request.TaskEventID,
-		&request.CommitEpochSeconds, &request.PolicyVersion, &accepted, &request.Owner.Type, &request.Owner.ID, &request.Owner.DisplayName,
-		&request.Owner.CredentialID, &request.Owner.Authentication, &request.Owner.RequestID)
+		&request.ExportID, &request.ArtifactID, &request.MaterializationID, &request.ResultID,
+		&request.CommitEpochSeconds, &request.PolicyVersion, &accepted)
 	if errors.Is(err, sql.ErrNoRows) {
 		return BackgroundRunSealRequest{}, ErrNotFound
 	}

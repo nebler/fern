@@ -25,7 +25,6 @@ const sessionDirectory = "/home/user/workspace"
 
 type Config struct {
 	WorkspaceID       task.WorkspaceID
-	SystemActor       task.ActorSnapshot
 	Profile           string
 	ImageIdentity     string
 	EnvironmentSHA256 [32]byte
@@ -70,8 +69,8 @@ func New(store *taskstore.Store, provider *taskenvdocker.Provider, artifact Arti
 		config.Profile != taskstore.BackgroundRunSourceProfile || config.ImageIdentity == "" || config.EnvironmentSHA256 == ([32]byte{}) ||
 		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.OperationTimeout <= 0 ||
 		config.OperationTimeout > 5*time.Minute || config.PollInterval <= 0 ||
-		config.HTTPClient.Timeout <= 0 || config.HTTPClient.Timeout > config.OperationTimeout || config.SystemActor.Validate() != nil ||
-		config.SystemActor.Type != task.ActorSystem || config.HistoryBounds.PageLimit < 1 || config.HistoryBounds.MaxPages < 1 ||
+		config.HTTPClient.Timeout <= 0 || config.HTTPClient.Timeout > config.OperationTimeout ||
+		config.HistoryBounds.PageLimit < 1 || config.HistoryBounds.MaxPages < 1 ||
 		config.HistoryBounds.MaxEvents < 1 {
 		return nil, errors.New("valid serial background run coordinator configuration is required")
 	}
@@ -309,14 +308,6 @@ func (c *Coordinator) terminalize(parent context.Context, work taskstore.Backgro
 			BackgroundRunRef: ref(run, now), CleanupProof: `{"route":"absent","container":"absent","volume":"absent","clone":"absent"}`})
 		return err
 	}
-	attemptEvent, err := c.ids.EventID()
-	if err != nil {
-		return err
-	}
-	taskEvent, err := c.ids.EventID()
-	if err != nil {
-		return err
-	}
 	reason := "runtime_unavailable"
 	if run.TimeoutRequestedAt != nil {
 		reason = "attempt_timeout"
@@ -328,16 +319,8 @@ func (c *Coordinator) terminalize(parent context.Context, work taskstore.Backgro
 		return err
 	}
 	defer cancel()
-	actor := c.config.SystemActor
-	if run.TimeoutRequestedAt != nil {
-		if run.TimeoutActor == nil {
-			return taskstore.ErrCorruptStore
-		}
-		actor = *run.TimeoutActor
-	}
 	_, err = c.store.FinalizeBackgroundRunFailure(mutation, taskstore.FinalizeBackgroundRunFailureParams{
-		BackgroundRunRef: ref(run, now), AttemptEventID: attemptEvent, TaskEventID: taskEvent, Actor: actor,
-		Reason: reason, Evidence: `{"effect":"terminalize","status":"resources_absent"}`,
+		BackgroundRunRef: ref(run, now), Reason: reason, Evidence: `{"effect":"terminalize","status":"resources_absent"}`,
 		CleanupProof: `{"route":"absent","container":"absent","volume":"absent","clone":"absent"}`,
 	})
 	return err
@@ -559,21 +542,15 @@ func (a *retainedExportAttempt) materialize(operation context.Context) ([32]byte
 
 func (a *retainedExportAttempt) commitResult(parent context.Context, run taskstore.BackgroundRun, proof [32]byte) error {
 	c, export := a.coordinator, a.export
-	request, requestErr := c.store.GetBackgroundRunSealRequest(parent, run.BackgroundSealRequestID)
-	if requestErr != nil {
-		return requestErr
-	}
 	sealedAt, timeErr := c.freshNow()
 	if timeErr != nil {
 		return timeErr
 	}
-	evidence, _ := json.Marshal(struct{ Schema, Locator string }{"fern.background-retained-result.v1", export.CASLocator})
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), c.config.OperationTimeout)
 	defer cancel()
 	_, err := c.store.CommitBackgroundRunRetainedResult(ctx, taskstore.CommitBackgroundRunRetainedResultParams{
 		BackgroundRunExportRef: exportRef(export, sealedAt), MaterializationID: export.MaterializationID, MaterializationProof: proof,
-		ArtifactID: export.ArtifactID, ResultID: export.ResultID, ResultEventID: request.ResultEventID, TaskEventID: request.TaskEventID,
-		EvidencePayload: evidence, EvidenceSHA256: sha256.Sum256(evidence), Actor: c.config.SystemActor, SealedAt: sealedAt,
+		ArtifactID: export.ArtifactID, ResultID: export.ResultID, SealedAt: sealedAt,
 	})
 	return err
 }
@@ -895,23 +872,13 @@ func (c *Coordinator) effectContext(parent context.Context, work taskstore.Backg
 }
 
 func (c *Coordinator) requestTimeout(ctx context.Context, run taskstore.BackgroundRun) error {
-	attemptEvent, err := c.ids.EventID()
-	if err != nil {
-		return err
-	}
-	taskEvent, err := c.ids.EventID()
-	if err != nil {
-		return err
-	}
 	work := taskstore.BackgroundRunWork{Run: run}
 	mutation, cancel, now, err := c.effectContext(ctx, work, false)
 	if err != nil {
 		return err
 	}
 	defer cancel()
-	_, err = c.store.RequestBackgroundRunTimeout(mutation, taskstore.RequestBackgroundRunTimeoutParams{
-		BackgroundRunRef: ref(run, now), AttemptEventID: attemptEvent, TaskEventID: taskEvent, Actor: c.config.SystemActor,
-	})
+	_, err = c.store.RequestBackgroundRunTimeout(mutation, ref(run, now))
 	return err
 }
 

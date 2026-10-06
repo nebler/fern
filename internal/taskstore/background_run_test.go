@@ -34,7 +34,6 @@ func TestBackgroundRunAdmissionStopAndRestart(t *testing.T) {
 	}
 	stopHash := sha256.Sum256([]byte("stop"))
 	stopParams := StopBackgroundRunParams{WorkspaceID: testWorkspaceID(), TaskID: run.TaskID, ReceiptID: testReceiptID(1600),
-		AttemptEventID: testEventID(1601), TaskEventID: testEventID(1602),
 		Claim: params.Claim, APIContractVersion: "run-v1", StoppedAt: testTime.Truncate(time.Millisecond).Add(time.Minute)}
 	stopParams.Claim.Scope.CommandKind = StopBackgroundRunCommand
 	stopParams.Claim.Key = "run-stop"
@@ -82,7 +81,7 @@ func TestBackgroundRunAdmissionIsAtomicAndActorFiltered(t *testing.T) {
 	if _, err := store.AdmitBackgroundRun(context.Background(), second); err == nil {
 		t.Fatal("duplicate session identity did not abort admission")
 	}
-	assertCounts(t, store, 1, 1, 1, 2)
+	assertCounts(t, store, 1, 1, 1)
 	var runs int
 	if err := store.db.QueryRow(`SELECT count(*) FROM background_runs`).Scan(&runs); err != nil || runs != 1 {
 		t.Fatalf("run count = %d, error = %v", runs, err)
@@ -183,7 +182,7 @@ func TestBackgroundRunWorkspaceFenceAndLifecycleAlgebra(t *testing.T) {
 		t.Fatalf("cross-workspace read = %v", err)
 	}
 	wrongWorkspaceStop := StopBackgroundRunParams{WorkspaceID: otherWorkspace, TaskID: admission.Task.ID, ReceiptID: testReceiptID(1910),
-		AttemptEventID: testEventID(1911), TaskEventID: testEventID(1912), Claim: params.Claim,
+		Claim:              params.Claim,
 		APIContractVersion: "run-v1", StoppedAt: testTime.Truncate(time.Millisecond).Add(time.Minute)}
 	wrongWorkspaceStop.Claim.Scope.WorkspaceID = otherWorkspace
 	wrongWorkspaceStop.Claim.Scope.CommandKind = StopBackgroundRunCommand
@@ -226,7 +225,7 @@ func TestBackgroundRunAdmissionRejectsMismatchedIntentAtomically(t *testing.T) {
 			if _, err := store.AdmitBackgroundRun(context.Background(), params); !errors.Is(err, ErrInvalidInput) {
 				t.Fatalf("admission error = %v", err)
 			}
-			assertCounts(t, store, 0, 0, 0, 0)
+			assertCounts(t, store, 0, 0, 0)
 		})
 	}
 	t.Run("repository binding SQL", func(t *testing.T) {
@@ -238,7 +237,7 @@ func TestBackgroundRunAdmissionRejectsMismatchedIntentAtomically(t *testing.T) {
 		if _, err := store.AdmitBackgroundRun(context.Background(), params); err == nil {
 			t.Fatal("workspace repository mismatch admitted")
 		}
-		assertCounts(t, store, 0, 0, 0, 0)
+		assertCounts(t, store, 0, 0, 0)
 	})
 }
 
@@ -303,7 +302,7 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 	run = restarted
 
 	stop := StopBackgroundRunParams{WorkspaceID: testWorkspaceID(), TaskID: run.TaskID, ReceiptID: testReceiptID(1980),
-		AttemptEventID: testEventID(1981), TaskEventID: testEventID(1982), Claim: first.Claim,
+		Claim:              first.Claim,
 		APIContractVersion: "run-v1", StoppedAt: restartedAt.Add(time.Second)}
 	stop.Claim.Scope.CommandKind = StopBackgroundRunCommand
 	stop.Claim.Key = "active-stop"
@@ -337,8 +336,7 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 	}
 	cleanupRef := backgroundRunRef(stopRun, stop.StoppedAt.Add(2*time.Second))
 	final, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
-		BackgroundRunRef: cleanupRef, AttemptEventID: testEventID(1990), TaskEventID: testEventID(1991),
-		Actor: testSystemActor(), Reason: "background_run_stopped", Evidence: "writer inactive and resources absent",
+		BackgroundRunRef: cleanupRef, Reason: "background_run_stopped", Evidence: "writer inactive and resources absent",
 		CleanupProof: "route, container, volume, and clone absent",
 	})
 	if err != nil || final.State != BackgroundRunFailed || final.EffectPhase != BackgroundRunEffectCleanupComplete {
@@ -445,67 +443,53 @@ func TestBackgroundRunSystemTimeoutHasNoPluginReceipt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	actor := testSystemActor()
-	actor.Type, actor.ID, actor.DisplayName = task.ActorSystem, "background-timeout", "Background timeout"
+	early := backgroundRunRef(work.Run, params.Deadline.Add(-time.Second).Truncate(time.Millisecond))
+	if _, err := store.RequestBackgroundRunTimeout(context.Background(), early); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("timeout before deadline = %v", err)
+	}
 	stale := backgroundRunRef(work.Run, now)
 	stale.ExpectedRevision--
-	if _, err := store.RequestBackgroundRunTimeout(context.Background(), RequestBackgroundRunTimeoutParams{
-		BackgroundRunRef: stale, AttemptEventID: testEventID(2081), TaskEventID: testEventID(2082), Actor: actor,
-	}); !errors.Is(err, ErrInvalidState) {
+	if _, err := store.RequestBackgroundRunTimeout(context.Background(), stale); !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("stale timeout = %v", err)
 	}
-	timedOut, err := store.RequestBackgroundRunTimeout(context.Background(), RequestBackgroundRunTimeoutParams{
-		BackgroundRunRef: backgroundRunRef(work.Run, now), AttemptEventID: testEventID(2081), TaskEventID: testEventID(2082), Actor: actor,
-	})
+	timedOut, err := store.RequestBackgroundRunTimeout(context.Background(), backgroundRunRef(work.Run, now))
 	if err != nil || timedOut.State != BackgroundRunCleanupRequired || timedOut.EffectPhase != BackgroundRunEffectCleaning ||
 		timedOut.TimeoutRequestedAt == nil || timedOut.StopReceiptID != "" {
 		t.Fatalf("system timeout = %+v, error=%v", timedOut, err)
 	}
-	var events, receipts int
-	if err := store.db.QueryRow(`SELECT count(*) FROM events WHERE task_id=? AND type IN ('attempt.timeout_requested','task.timeout_requested') AND json_extract(payload,'$.reason')='attempt_timeout'`, timedOut.TaskID).Scan(&events); err != nil {
-		t.Fatal(err)
-	}
+	var receipts int
 	if err := store.db.QueryRow(`SELECT count(*) FROM receipts WHERE target_id=? AND command_kind='run.stop'`, timedOut.TaskID).Scan(&receipts); err != nil {
 		t.Fatal(err)
 	}
-	if events != 2 || receipts != 0 || timedOut.TimeoutActor == nil || *timedOut.TimeoutActor != actor {
-		t.Fatalf("timeout evidence events=%d plugin receipts=%d", events, receipts)
+	if receipts != 0 {
+		t.Fatalf("timeout plugin receipts=%d", receipts)
 	}
 	var taskState, attemptState string
-	var latestCursor, taskRevision int64
-	if err := store.db.QueryRow(`SELECT t.state,a.state,t.latest_event_cursor,t.revision FROM tasks t
-JOIN attempts a ON a.id=t.current_attempt_id WHERE t.id=?`, timedOut.TaskID).Scan(&taskState, &attemptState, &latestCursor, &taskRevision); err != nil {
+	if err := store.db.QueryRow(`SELECT t.state,a.state FROM tasks t
+JOIN attempts a ON a.id=t.current_attempt_id WHERE t.id=?`, timedOut.TaskID).Scan(&taskState, &attemptState); err != nil {
 		t.Fatal(err)
 	}
-	var timeoutTaskCursor int64
-	if err := store.db.QueryRow(`SELECT cursor FROM events WHERE task_id=? AND attempt_id IS NULL AND type='task.timeout_requested'`, timedOut.TaskID).Scan(&timeoutTaskCursor); err != nil {
-		t.Fatal(err)
-	}
-	if taskState != "queued" || attemptState != "prepared" || latestCursor != timeoutTaskCursor || taskRevision != 2 {
-		t.Fatalf("timeout parent before cleanup task=%s attempt=%s cursor=%d/%d revision=%d", taskState, attemptState, latestCursor, timeoutTaskCursor, taskRevision)
+	if taskState != "queued" || attemptState != "prepared" {
+		t.Fatalf("timeout parent before cleanup task=%s attempt=%s", taskState, attemptState)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
 	store = openTestStore(t, path)
 	restarted, err := startNextBackgroundRun(context.Background(), store, now.Add(time.Second))
-	if err != nil || restarted.TimeoutActor == nil || *restarted.TimeoutActor != actor {
+	if err != nil || restarted.TimeoutRequestedAt == nil {
 		t.Fatalf("restarted timeout run = %+v, error=%v", restarted, err)
 	}
 	cleanupRef := backgroundRunRef(restarted, now.Add(2*time.Second))
-	wrongActor := actor
-	wrongActor.ID, wrongActor.RequestID = "different-timeout", "different-timeout"
 	if _, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
-		BackgroundRunRef: cleanupRef, AttemptEventID: testEventID(2083), TaskEventID: testEventID(2084), Actor: wrongActor,
-		Reason: "attempt_timeout", Evidence: "resources absent", CleanupProof: "exact timeout cleanup",
+		BackgroundRunRef: cleanupRef, Reason: "user_stopped", Evidence: "resources absent", CleanupProof: "exact timeout cleanup",
 	}); !errors.Is(err, ErrInvalidState) {
-		t.Fatalf("different timeout actor finalization = %v", err)
+		t.Fatalf("timeout finalized with a different reason = %v", err)
 	}
 	final, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
-		BackgroundRunRef: cleanupRef, AttemptEventID: testEventID(2085), TaskEventID: testEventID(2086), Actor: actor,
-		Reason: "attempt_timeout", Evidence: "resources absent", CleanupProof: "exact timeout cleanup",
+		BackgroundRunRef: cleanupRef, Reason: "attempt_timeout", Evidence: "resources absent", CleanupProof: "exact timeout cleanup",
 	})
-	if err != nil || final.State != BackgroundRunFailed || final.TimeoutActor == nil || *final.TimeoutActor != actor {
+	if err != nil || final.State != BackgroundRunFailed {
 		t.Fatalf("timeout finalization = %+v, error=%v", final, err)
 	}
 	var taskReason, attemptReason string
@@ -513,14 +497,8 @@ JOIN attempts a ON a.id=t.current_attempt_id WHERE t.id=?`, timedOut.TaskID).Sca
 JOIN attempts a ON a.id=t.current_attempt_id WHERE t.id=?`, final.TaskID).Scan(&taskState, &attemptState, &taskReason, &attemptReason); err != nil {
 		t.Fatal(err)
 	}
-	var attributed int
-	if err := store.db.QueryRow(`SELECT count(*) FROM events terminal
-JOIN actor_snapshots actor ON actor.id=terminal.actor_snapshot_id
-WHERE terminal.task_id=? AND terminal.type IN ('attempt.failed','task.failed') AND actor.actor_id=?`, final.TaskID, actor.ID).Scan(&attributed); err != nil {
-		t.Fatal(err)
-	}
-	if taskState != "failed" || attemptState != "failed" || taskReason != "attempt_timeout" || attemptReason != taskReason || attributed != 2 {
-		t.Fatalf("timeout terminal parent task=%s attempt=%s reasons=%s/%s actor events=%d", taskState, attemptState, taskReason, attemptReason, attributed)
+	if taskState != "failed" || attemptState != "failed" || taskReason != "attempt_timeout" || attemptReason != taskReason {
+		t.Fatalf("timeout terminal parent task=%s attempt=%s reasons=%s/%s", taskState, attemptState, taskReason, attemptReason)
 	}
 }
 
@@ -565,7 +543,7 @@ func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitBackgro
 	case BackgroundRunCanceling:
 		stop := StopBackgroundRunParams{
 			WorkspaceID: testWorkspaceID(), TaskID: run.TaskID, ReceiptID: testReceiptID(5000 + n),
-			AttemptEventID: testEventID(5001 + n), TaskEventID: testEventID(5002 + n), Claim: params.Claim,
+			Claim:              params.Claim,
 			APIContractVersion: "run-v1", StoppedAt: ref.Now,
 		}
 		stop.Claim.Scope.CommandKind = StopBackgroundRunCommand

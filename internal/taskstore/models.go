@@ -84,24 +84,22 @@ func (r Receipt) classify(incoming task.IdempotencyClaim) task.IdempotencyDispos
 }
 
 type Task struct {
-	ID                task.TaskID
-	WorkspaceID       task.WorkspaceID
-	Title             string
-	Prompt            string
-	PromptSHA256      [32]byte
-	RepositoryID      task.RepositoryID
-	BaseRef           string
-	BaseSHA           task.GitOID
-	ObjectFormat      string
-	State             task.TaskState
-	TerminalReason    *string
-	CurrentAttemptID  task.AttemptID
-	SealedResultID    task.ResultID
-	Actor             task.ActorSnapshot
-	LatestEventCursor task.Cursor
-	Revision          int64
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
+	ID               task.TaskID
+	WorkspaceID      task.WorkspaceID
+	Title            string
+	Prompt           string
+	PromptSHA256     [32]byte
+	RepositoryID     task.RepositoryID
+	BaseRef          string
+	BaseSHA          task.GitOID
+	ObjectFormat     string
+	State            task.TaskState
+	TerminalReason   *string
+	CurrentAttemptID task.AttemptID
+	SealedResultID   task.ResultID
+	Revision         int64
+	CreatedAt        time.Time
+	UpdatedAt        time.Time
 }
 
 type Attempt struct {
@@ -144,14 +142,10 @@ type Result struct {
 	ManifestSHA256      [32]byte
 	OpenCodeSessionID   task.OpenCodeSessionID
 	OpenCodeMessageID   task.OpenCodeMessageID
-	EvidenceSHA256      [32]byte
 	PolicyVersion       string
 	CollectedAt         time.Time
 	SealedAt            time.Time
-	Creator             task.ActorSnapshot
 	CompletionAuthority SealCompletionAuthority
-	SealedEventID       task.EventID
-	CompletedEventID    task.EventID
 	Revision            int64
 	SourceKind          ResultSourceKind
 	RetainedArtifactID  task.RetainedArtifactID
@@ -185,53 +179,9 @@ type ManifestEntry struct {
 }
 
 type SealedResult struct {
-	Result      Result
-	Manifest    []ManifestEntry
-	Task        Task
-	Attempt     Attempt
-	ResultEvent Event
-	TaskEvent   Event
-	Replayed    bool
-}
-
-type resultMaterial struct {
-	ResultID                task.ResultID
-	TaskID                  task.TaskID
-	AttemptID               task.AttemptID
-	ExpectedAttemptRevision int64
-	ExpectedTaskRevision    int64
-	ResultEventID           task.EventID
-	TaskEventID             task.EventID
-	RepositoryID            task.RepositoryID
-	BaseSHA                 task.GitOID
-	ResultCommit            task.GitOID
-	TreeOID                 task.GitOID
-	Outcome                 task.ResultOutcome
-	WorktreeClean           bool
-	Manifest                []ManifestEntry
-	ManifestSHA256          [32]byte
-	OpenCodeSessionID       task.OpenCodeSessionID
-	OpenCodeMessageID       task.OpenCodeMessageID
-	EvidencePayload         json.RawMessage
-	EvidenceSHA256          [32]byte
-	PolicyVersion           string
-	CollectedAt             time.Time
-	SealedAt                time.Time
-	Actor                   task.ActorSnapshot
-	CompletionAuthority     SealCompletionAuthority
-}
-
-type Event struct {
-	ID          task.EventID
-	Cursor      task.Cursor
-	WorkspaceID task.WorkspaceID
-	TaskID      task.TaskID
-	AttemptID   task.AttemptID
-	EntityType  string
-	EntityID    string
-	Type        string
-	Version     int
-	OccurredAt  time.Time
-	Actor       task.ActorSnapshot
-	Payload     json.RawMessage
+	Result   Result
+	Manifest []ManifestEntry
+	Task     Task
+	Attempt  Attempt
+	Replayed bool
 }

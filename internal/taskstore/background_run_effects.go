@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -130,71 +129,16 @@ func (s *Store) RecordBackgroundRunWorkObservation(ctx context.Context, p Record
 }
 
 // RequestBackgroundRunTimeout commits a system-owned stop without manufacturing
-// a plugin receipt. Parent terminalization remains coupled to cleanup finality.
-func (s *Store) RequestBackgroundRunTimeout(ctx context.Context, p RequestBackgroundRunTimeoutParams) (_ BackgroundRun, err error) {
-	if p.Actor.Type != task.ActorSystem || p.TaskEventID == p.AttemptEventID ||
-		!rundomain.Classify(rundomain.State(p.ExpectedState), rundomain.Phase(p.ExpectedPhase)).TimeoutEligible {
+// a plugin receipt once the attempt deadline has passed. Parent terminalization
+// remains coupled to cleanup finality.
+func (s *Store) RequestBackgroundRunTimeout(ctx context.Context, p BackgroundRunRef) (_ BackgroundRun, err error) {
+	if !rundomain.Classify(rundomain.State(p.ExpectedState), rundomain.Phase(p.ExpectedPhase)).TimeoutEligible {
 		return BackgroundRun{}, fmt.Errorf("%w: background run timeout", ErrInvalidInput)
 	}
-	tx, release, err := s.beginWrite(ctx)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	defer release()
-	defer rollback(tx, &err)
-	owner, err := getTask(ctx, tx, p.TaskID)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	attempt, err := getAttempt(ctx, tx, p.AttemptID)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	if p.Now.Before(attempt.Deadline) || attempt.State != task.AttemptPrepared {
-		return BackgroundRun{}, ErrInvalidState
-	}
-	actorID, err := ensureActor(ctx, tx, p.Actor)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
 	now := unixMillis(p.Now)
-	payload := json.RawMessage(`{"reason":"attempt_timeout"}`)
-	attemptEvent, err := insertAttemptEvent(ctx, tx, p.AttemptEventID, attempt, "attempt.timeout_requested", now, actorID, payload)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	taskEvent, err := insertTaskEvent(ctx, tx, p.TaskEventID, owner, "task.timeout_requested", now, actorID, payload)
-	if err != nil || attemptEvent.Cursor >= taskEvent.Cursor {
-		return BackgroundRun{}, fmt.Errorf("insert background run timeout events: %w", err)
-	}
-	result, err := tx.ExecContext(ctx, `UPDATE tasks SET latest_event_cursor=?,revision=revision+1,updated_at=?
-WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND revision=?`, taskEvent.Cursor, now,
-		owner.ID, owner.WorkspaceID, attempt.ID, owner.Revision)
-	if err != nil {
-		return BackgroundRun{}, fmt.Errorf("project background run timeout event: %w", err)
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRun{}, ErrInvalidState
-	}
-	result, err = tx.ExecContext(ctx, `UPDATE background_runs SET state='cleanup_required',effect_phase='cleaning',
-timeout_requested_at=?,timeout_actor_snapshot_id=?,last_error='attempt_timeout',revision=revision+1,updated_at=?
-WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND state=? AND effect_phase=? AND
-timeout_requested_at IS NULL`, now, actorID, now, p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedRevision,
-		p.ExpectedState, p.ExpectedPhase)
-	if err != nil {
-		return BackgroundRun{}, fmt.Errorf("request background run timeout: %w", err)
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRun{}, ErrInvalidState
-	}
-	stored, err := readBackgroundRunExact(ctx, tx, p.WorkspaceID, p.TaskID)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return BackgroundRun{}, err
-	}
-	return stored, nil
+	return s.updateRun(ctx, p, `state='cleanup_required',effect_phase='cleaning',timeout_requested_at=?,last_error='attempt_timeout'`,
+		[]any{now}, "request background run timeout", `timeout_requested_at IS NULL`,
+		`EXISTS (SELECT 1 FROM attempts a WHERE a.id=background_runs.attempt_id AND a.state='prepared' AND a.deadline<=`+fmt.Sprint(now)+`)`)
 }
 
 // MarkBackgroundRunCleanupRequired records a failed effect. An executing run
@@ -222,7 +166,7 @@ func (s *Store) MarkBackgroundRunCleanupRequired(ctx context.Context, p MarkBack
 // no external I/O.
 func (s *Store) FinalizeBackgroundRunFailure(ctx context.Context, p FinalizeBackgroundRunFailureParams) (_ BackgroundRun, err error) {
 	if p.ExpectedPhase != BackgroundRunEffectCleaning ||
-		(p.ExpectedState != BackgroundRunCanceling && p.ExpectedState != BackgroundRunCleanupRequired) || p.AttemptEventID == p.TaskEventID {
+		(p.ExpectedState != BackgroundRunCanceling && p.ExpectedState != BackgroundRunCleanupRequired) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run finalization", ErrInvalidInput)
 	}
 	tx, release, err := s.beginWrite(ctx)
@@ -249,34 +193,10 @@ func (s *Store) FinalizeBackgroundRunFailure(ctx context.Context, p FinalizeBack
 	if owner.WorkspaceID != run.WorkspaceID || attempt.TaskID != owner.ID || attempt.WorkspaceID != owner.WorkspaceID || attempt.Sequence != p.Generation {
 		return BackgroundRun{}, ErrInvalidState
 	}
-	if run.TimeoutRequestedAt != nil {
-		if run.TimeoutActor == nil || p.Actor != *run.TimeoutActor || p.Reason != "attempt_timeout" {
-			return BackgroundRun{}, ErrInvalidState
-		}
-	}
-	actorID, err := ensureActor(ctx, tx, p.Actor)
-	if err != nil {
-		return BackgroundRun{}, err
+	if run.TimeoutRequestedAt != nil && p.Reason != "attempt_timeout" {
+		return BackgroundRun{}, ErrInvalidState
 	}
 	now := unixMillis(p.Now)
-	payload, err := json.Marshal(struct {
-		RunID         task.TaskID    `json:"runId"`
-		Reason        string         `json:"reason"`
-		Evidence      string         `json:"evidence"`
-		CleanupProof  string         `json:"cleanupProof"`
-		StopReceiptID task.ReceiptID `json:"stopReceiptId,omitempty"`
-	}{run.TaskID, p.Reason, p.Evidence, p.CleanupProof, run.StopReceiptID})
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	attemptEvent, err := insertAttemptEvent(ctx, tx, p.AttemptEventID, attempt, "attempt.failed", now, actorID, payload)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	taskEvent, err := insertTaskEvent(ctx, tx, p.TaskEventID, owner, "task.failed", now, actorID, payload)
-	if err != nil || attemptEvent.Cursor >= taskEvent.Cursor {
-		return BackgroundRun{}, fmt.Errorf("insert background run finalization events: %w", err)
-	}
 	result, err := tx.ExecContext(ctx, `UPDATE attempts SET state='failed',terminal_reason=?,revision=revision+1,updated_at=?
 WHERE id=? AND task_id=? AND workspace_id=? AND state='prepared' AND revision=?`, p.Reason, now,
 		attempt.ID, owner.ID, owner.WorkspaceID, attempt.Revision)
@@ -286,8 +206,8 @@ WHERE id=? AND task_id=? AND workspace_id=? AND state='prepared' AND revision=?`
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRun{}, ErrInvalidState
 	}
-	result, err = tx.ExecContext(ctx, `UPDATE tasks SET state='failed',terminal_reason=?,latest_event_cursor=?,revision=revision+1,updated_at=?
-WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND revision=?`, p.Reason, taskEvent.Cursor, now,
+	result, err = tx.ExecContext(ctx, `UPDATE tasks SET state='failed',terminal_reason=?,revision=revision+1,updated_at=?
+WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND revision=?`, p.Reason, now,
 		owner.ID, owner.WorkspaceID, attempt.ID, owner.Revision)
 	if err != nil {
 		return BackgroundRun{}, err

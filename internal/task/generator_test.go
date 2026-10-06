@@ -46,13 +46,6 @@ func TestGeneratorProducesEveryTypedID(t *testing.T) {
 			return err
 		},
 		func() error {
-			value, err := generator.EventID()
-			if err == nil {
-				_, err = ParseEventID(string(value))
-			}
-			return err
-		},
-		func() error {
 			value, err := generator.SealRequestID()
 			if err == nil {
 				_, err = ParseSealRequestID(string(value))
@@ -125,10 +118,6 @@ func TestGenerateAdmissionIDsReturnsCompleteValidatedSet(t *testing.T) {
 	checks = append(checks, err)
 	_, err = ParseReceiptID(string(ids.ReceiptID))
 	checks = append(checks, err)
-	_, err = ParseEventID(string(ids.TaskEventID))
-	checks = append(checks, err)
-	_, err = ParseEventID(string(ids.AttemptEventID))
-	checks = append(checks, err)
 	_, err = ParseOpenCodeSessionID(string(ids.OpenCodeSessionID))
 	checks = append(checks, err)
 	_, err = ParseOpenCodeMessageID(string(ids.OpenCodeMessageID))
@@ -137,9 +126,6 @@ func TestGenerateAdmissionIDsReturnsCompleteValidatedSet(t *testing.T) {
 		if validationErr != nil {
 			t.Fatalf("admission ID %d: %v", index, validationErr)
 		}
-	}
-	if ids.TaskEventID == ids.AttemptEventID {
-		t.Fatal("admission event IDs are equal")
 	}
 }
 
@@ -165,17 +151,10 @@ func TestGenerateBackgroundSealIDsReturnsCompleteValidatedSet(t *testing.T) {
 	validations = append(validations, err)
 	_, err = ParseResultID(string(ids.ResultID))
 	validations = append(validations, err)
-	_, err = ParseEventID(string(ids.ResultEventID))
-	validations = append(validations, err)
-	_, err = ParseEventID(string(ids.TaskEventID))
-	validations = append(validations, err)
 	for _, validationErr := range validations {
 		if validationErr != nil {
 			t.Fatal(validationErr)
 		}
-	}
-	if ids.ResultEventID == ids.TaskEventID {
-		t.Fatal("background seal event IDs are equal")
 	}
 }
 
@@ -226,9 +205,9 @@ func TestGeneratorConcurrentIDsAreUnique(t *testing.T) {
 		wait.Add(1)
 		go func(index int) {
 			defer wait.Done()
-			value, generationErr := generator.EventID()
+			value, generationErr := generator.ResultID()
 			if generationErr != nil {
-				t.Errorf("EventID: %v", generationErr)
+				t.Errorf("ResultID: %v", generationErr)
 				return
 			}
 			values[index] = string(value)

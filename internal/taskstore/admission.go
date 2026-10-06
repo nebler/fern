@@ -43,14 +43,10 @@ func (s *Store) AdmitBackgroundRun(ctx context.Context, p AdmitBackgroundRunPara
 			if getErr != nil {
 				return Admission{}, getErr
 			}
-			taskEvent, attemptEvent, getErr := admissionEvents(ctx, tx, storedTask.ID, storedAttempt.ID)
-			if getErr != nil {
-				return Admission{}, getErr
-			}
 			if err := tx.Commit(); err != nil {
 				return Admission{}, fmt.Errorf("finish admission replay: %w", err)
 			}
-			return Admission{Task: storedTask, Attempt: storedAttempt, Receipt: existing, TaskEvent: taskEvent, AttemptEvent: attemptEvent, Replayed: true}, nil
+			return Admission{Task: storedTask, Attempt: storedAttempt, Receipt: existing, Replayed: true}, nil
 		case task.IdempotencyOwnerMismatch:
 			return Admission{}, ErrIdempotencyOwnerMismatch
 		case task.IdempotencyConflict:
@@ -76,21 +72,17 @@ func (s *Store) AdmitBackgroundRun(ctx context.Context, p AdmitBackgroundRunPara
 		return Admission{}, ErrRepositoryMismatch
 	}
 
-	actorID, err := ensureActor(ctx, tx, p.Claim.Actor)
-	if err != nil {
-		return Admission{}, err
-	}
+	actor := encodeActor(p.Claim.Actor)
 	promptHash := sha256.Sum256([]byte(p.Prompt))
 	attemptImage, attemptProtocol := p.BackgroundRun.ImageIdentity, p.BackgroundRun.Profile
 	acceptedMS := unixMillis(p.AcceptedAt)
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO tasks(
     id,workspace_id,title,prompt,prompt_sha256,repository_id,base_ref,base_sha,
-    object_format,state,current_attempt_id,actor_snapshot_id,latest_event_cursor,
-    revision,created_at,updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,'queued',?,?,0,1,?,?)`,
+    object_format,state,current_attempt_id,revision,created_at,updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,'queued',?,1,?,?)`,
 		p.TaskID, p.Claim.Scope.WorkspaceID, p.Title, p.Prompt, promptHash[:], p.RepositoryID,
-		p.BaseRef, p.BaseSHA, p.ObjectFormat, p.AttemptID, actorID, acceptedMS, acceptedMS); err != nil {
+		p.BaseRef, p.BaseSHA, p.ObjectFormat, p.AttemptID, acceptedMS, acceptedMS); err != nil {
 		return Admission{}, fmt.Errorf("insert task: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `
@@ -113,11 +105,11 @@ INSERT INTO attempts(
 	}
 	if _, err := tx.ExecContext(ctx, `
 INSERT INTO receipts(
-    id,workspace_id,command_kind,state,idempotency_key,request_hash,actor_snapshot_id,
+    id,workspace_id,command_kind,state,idempotency_key,request_hash,actor,
     accepted_at,api_contract_version,target_type,target_id,response_status,response_projection
 ) VALUES(?,?,?,'accepted',?,?,?,?,?,'task',?,202,?)`,
 		p.ReceiptID, p.Claim.Scope.WorkspaceID, p.Claim.Scope.CommandKind, p.Claim.Key,
-		p.Claim.RequestHash[:], actorID, acceptedMS, p.APIContractVersion, p.TaskID, string(response)); err != nil {
+		p.Claim.RequestHash[:], actor, acceptedMS, p.APIContractVersion, p.TaskID, string(response)); err != nil {
 		return Admission{}, fmt.Errorf("insert receipt: %w", err)
 	}
 	branch := any(nil)
@@ -134,54 +126,23 @@ INSERT INTO background_runs(
     task_id,attempt_id,workspace_id,generation,repository_id,repository_remote,base_oid,branch,
     instruction_sha256,profile,profile_sha256,environment_sha256,resource_spec_version,image_identity,clone_identity,volume_identity,
     container_identity,endpoint_identity,opencode_session_id,opencode_message_id,state,effect_phase,
-    creator_actor_snapshot_id,revision,created_at,updated_at
+    creator_actor,revision,created_at,updated_at
 ) VALUES(?,?,?,1,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued','absent',?,1,?,?)`,
 		p.TaskID, p.AttemptID, p.Claim.Scope.WorkspaceID, p.RepositoryID, p.BackgroundRun.RepositoryRemote,
 		p.BaseSHA, branch, promptHash[:], p.BackgroundRun.Profile,
 		profileHash[:], p.BackgroundRun.EnvironmentSHA256[:], backgroundRunResourceSpecVersion, p.BackgroundRun.ImageIdentity, resources.Clone(),
 		resources.Volume(), resources.Container(), resources.Endpoint(),
-		p.OpenCodeSessionID, p.OpenCodeMessageID, actorID, acceptedMS, acceptedMS); err != nil {
+		p.OpenCodeSessionID, p.OpenCodeMessageID, actor, acceptedMS, acceptedMS); err != nil {
 		return Admission{}, fmt.Errorf("insert background run: %w", err)
-	}
-	taskPayload := []byte(`{}`)
-	result, err := tx.ExecContext(ctx, `
-INSERT INTO events(
-    id,workspace_id,task_id,attempt_id,entity_type,entity_id,type,version,occurred_at,actor_snapshot_id,payload
-) VALUES(?, ?, ?, NULL, 'task', ?, 'task.accepted', 1, ?, ?, ?)`,
-		p.TaskEventID, p.Claim.Scope.WorkspaceID, p.TaskID, p.TaskID, acceptedMS, actorID, string(taskPayload))
-	if err != nil {
-		return Admission{}, fmt.Errorf("insert acceptance event: %w", err)
-	}
-	taskCursor, err := result.LastInsertId()
-	if err != nil || taskCursor <= 0 {
-		return Admission{}, fmt.Errorf("read acceptance cursor: %w", err)
-	}
-	attemptPayload := []byte(`{"sequence":1}`)
-	result, err = tx.ExecContext(ctx, `
-INSERT INTO events(
-    id,workspace_id,task_id,attempt_id,entity_type,entity_id,type,version,occurred_at,actor_snapshot_id,payload
-) VALUES(?, ?, ?, ?, 'attempt', ?, 'attempt.prepared', 1, ?, ?, ?)`,
-		p.AttemptEventID, p.Claim.Scope.WorkspaceID, p.TaskID, p.AttemptID, p.AttemptID, acceptedMS, actorID, string(attemptPayload))
-	if err != nil {
-		return Admission{}, fmt.Errorf("insert prepared event: %w", err)
-	}
-	attemptCursor, err := result.LastInsertId()
-	if err != nil || attemptCursor <= taskCursor {
-		return Admission{}, fmt.Errorf("read prepared cursor: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE tasks SET current_attempt_id=?,latest_event_cursor=? WHERE id=?`, p.AttemptID, attemptCursor, p.TaskID); err != nil {
-		return Admission{}, fmt.Errorf("link current attempt and events: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return Admission{}, fmt.Errorf("commit task admission: %w", err)
 	}
 
-	actor := p.Claim.Actor
 	storedTask := Task{
 		ID: p.TaskID, WorkspaceID: p.Claim.Scope.WorkspaceID, Title: p.Title, Prompt: p.Prompt,
 		PromptSHA256: promptHash, RepositoryID: p.RepositoryID, BaseRef: p.BaseRef, BaseSHA: p.BaseSHA,
-		ObjectFormat: p.ObjectFormat, State: task.TaskQueued, CurrentAttemptID: p.AttemptID, Actor: actor,
-		LatestEventCursor: task.Cursor(attemptCursor), Revision: 1,
+		ObjectFormat: p.ObjectFormat, State: task.TaskQueued, CurrentAttemptID: p.AttemptID, Revision: 1,
 		CreatedAt: fromUnixMillis(acceptedMS), UpdatedAt: fromUnixMillis(acceptedMS),
 	}
 	storedAttempt := Attempt{
@@ -194,21 +155,11 @@ INSERT INTO events(
 	}
 	receipt := Receipt{
 		ID: p.ReceiptID, WorkspaceID: p.Claim.Scope.WorkspaceID, CommandKind: p.Claim.Scope.CommandKind,
-		State: ReceiptAccepted, IdempotencyKey: p.Claim.Key, RequestHash: p.Claim.RequestHash, Actor: actor,
+		State: ReceiptAccepted, IdempotencyKey: p.Claim.Key, RequestHash: p.Claim.RequestHash, Actor: p.Claim.Actor,
 		AcceptedAt: fromUnixMillis(acceptedMS), APIContractVersion: p.APIContractVersion,
 		TargetType: "task", TargetID: p.TaskID, ResponseStatus: 202, ResponseProjection: response,
 	}
-	taskEvent := Event{
-		ID: p.TaskEventID, Cursor: task.Cursor(taskCursor), WorkspaceID: p.Claim.Scope.WorkspaceID,
-		TaskID: p.TaskID, EntityType: "task", EntityID: string(p.TaskID), Type: "task.accepted",
-		Version: 1, OccurredAt: fromUnixMillis(acceptedMS), Actor: actor, Payload: taskPayload,
-	}
-	attemptEvent := Event{
-		ID: p.AttemptEventID, Cursor: task.Cursor(attemptCursor), WorkspaceID: p.Claim.Scope.WorkspaceID,
-		TaskID: p.TaskID, AttemptID: p.AttemptID, EntityType: "attempt", EntityID: string(p.AttemptID), Type: "attempt.prepared",
-		Version: 1, OccurredAt: fromUnixMillis(acceptedMS), Actor: actor, Payload: attemptPayload,
-	}
-	return Admission{Task: storedTask, Attempt: storedAttempt, Receipt: receipt, TaskEvent: taskEvent, AttemptEvent: attemptEvent}, nil
+	return Admission{Task: storedTask, Attempt: storedAttempt, Receipt: receipt}, nil
 }
 
 // validateAdmission checks only command authority. IDs, the prompt, and the
@@ -220,24 +171,6 @@ func validateAdmission(p AdmitBackgroundRunParams) error {
 		return fmt.Errorf("%w: background run admission", ErrInvalidInput)
 	}
 	return nil
-}
-
-func ensureActor(ctx context.Context, tx *sql.Tx, actor task.ActorSnapshot) (int64, error) {
-	_, err := tx.ExecContext(ctx, `
-INSERT INTO actor_snapshots(actor_type,actor_id,display_name,credential_id,authentication,request_id)
-VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING`,
-		actor.Type, actor.ID, actor.DisplayName, actor.CredentialID, actor.Authentication, actor.RequestID)
-	if err != nil {
-		return 0, fmt.Errorf("insert actor snapshot: %w", err)
-	}
-	var id int64
-	if err := tx.QueryRowContext(ctx, `
-SELECT id FROM actor_snapshots
-WHERE actor_type=? AND actor_id=? AND display_name=? AND credential_id=? AND authentication=? AND request_id=?`,
-		actor.Type, actor.ID, actor.DisplayName, actor.CredentialID, actor.Authentication, actor.RequestID).Scan(&id); err != nil {
-		return 0, fmt.Errorf("read actor snapshot: %w", err)
-	}
-	return id, nil
 }
 
 func receiptByKey(ctx context.Context, tx *sql.Tx, workspaceID task.WorkspaceID, kind string, key task.IdempotencyKey) (Receipt, bool, error) {

@@ -15,14 +15,44 @@ type rowScanner interface {
 	Scan(...any) error
 }
 
-const actorColumns = `a.actor_type,a.actor_id,a.display_name,a.credential_id,a.authentication,a.request_id`
+// actorRecord is the stored JSON form of an actor snapshot. Actors are
+// attribution on the row that names them, not an interned table.
+type actorRecord struct {
+	Type           task.ActorType `json:"type"`
+	ID             string         `json:"id"`
+	DisplayName    string         `json:"display_name"`
+	CredentialID   string         `json:"credential_id"`
+	Authentication string         `json:"authentication"`
+	RequestID      string         `json:"request_id"`
+}
+
+func encodeActor(actor task.ActorSnapshot) string {
+	encoded, _ := json.Marshal(actorRecord(actor))
+	return string(encoded)
+}
+
+func decodeActor(value string) (task.ActorSnapshot, error) {
+	var record actorRecord
+	if err := json.Unmarshal([]byte(value), &record); err != nil {
+		return task.ActorSnapshot{}, fmt.Errorf("%w: actor: %v", ErrCorruptStore, err)
+	}
+	return task.ActorSnapshot(record), nil
+}
+
+// ownedBy restricts a run query (aliased r) to one authenticated authority;
+// display name and request ID are not authority.
+const ownedBy = ` AND json_extract(r.creator_actor,'$.type')=? AND json_extract(r.creator_actor,'$.id')=?
+AND json_extract(r.creator_actor,'$.credential_id')=? AND json_extract(r.creator_actor,'$.authentication')=?`
+
+func ownerArgs(actor task.ActorSnapshot) []any {
+	return []any{actor.Type, actor.ID, actor.CredentialID, actor.Authentication}
+}
 
 const taskSelect = `
 SELECT t.id,t.workspace_id,t.title,t.prompt,t.prompt_sha256,t.repository_id,t.base_ref,t.base_sha,
        t.object_format,t.state,t.terminal_reason,
-       t.current_attempt_id,t.sealed_result_id,t.latest_event_cursor,t.revision,t.created_at,t.updated_at,
-       ` + actorColumns + `
-FROM tasks t JOIN actor_snapshots a ON a.id=t.actor_snapshot_id`
+       t.current_attempt_id,t.sealed_result_id,t.revision,t.created_at,t.updated_at
+FROM tasks t`
 
 const attemptSelect = `
 SELECT id,task_id,workspace_id,sequence,state,opencode_session_id,opencode_message_id,prompt_sha256,base_sha,
@@ -32,14 +62,8 @@ FROM attempts`
 
 const receiptSelect = `
 SELECT r.id,r.workspace_id,r.command_kind,r.state,r.idempotency_key,r.request_hash,r.accepted_at,
-       r.api_contract_version,r.target_type,r.target_id,r.response_status,r.response_projection,
-       ` + actorColumns + `
-FROM receipts r JOIN actor_snapshots a ON a.id=r.actor_snapshot_id`
-
-const eventSelect = `
-SELECT e.id,e.cursor,e.workspace_id,e.task_id,e.attempt_id,e.entity_type,e.entity_id,e.type,e.version,e.occurred_at,e.payload,
-       ` + actorColumns + `
-FROM events e JOIN actor_snapshots a ON a.id=e.actor_snapshot_id`
+       r.api_contract_version,r.target_type,r.target_id,r.response_status,r.response_projection,r.actor
+FROM receipts r`
 
 type queryRower interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -65,8 +89,7 @@ func scanTask(row rowScanner) (Task, error) {
 	err := row.Scan(
 		&t.ID, &t.WorkspaceID, &t.Title, &t.Prompt, &promptHash, &repositoryID, &t.BaseRef, &t.BaseSHA,
 		&t.ObjectFormat, &t.State, &terminalReason,
-		&t.CurrentAttemptID, &sealedResultID, &t.LatestEventCursor, &t.Revision, &createdAt, &updatedAt,
-		&t.Actor.Type, &t.Actor.ID, &t.Actor.DisplayName, &t.Actor.CredentialID, &t.Actor.Authentication, &t.Actor.RequestID,
+		&t.CurrentAttemptID, &sealedResultID, &t.Revision, &createdAt, &updatedAt,
 	)
 	if err != nil {
 		return Task{}, err
@@ -149,61 +172,19 @@ func scanReceipt(row rowScanner) (Receipt, error) {
 	var r Receipt
 	var requestHash []byte
 	var acceptedAt int64
-	var response string
+	var response, actor string
 	err := row.Scan(
 		&r.ID, &r.WorkspaceID, &r.CommandKind, &r.State, &r.IdempotencyKey, &requestHash, &acceptedAt,
-		&r.APIContractVersion, &r.TargetType, &r.TargetID, &r.ResponseStatus, &response,
-		&r.Actor.Type, &r.Actor.ID, &r.Actor.DisplayName, &r.Actor.CredentialID, &r.Actor.Authentication, &r.Actor.RequestID,
+		&r.APIContractVersion, &r.TargetType, &r.TargetID, &r.ResponseStatus, &response, &actor,
 	)
 	if err != nil {
+		return Receipt{}, err
+	}
+	if r.Actor, err = decodeActor(actor); err != nil {
 		return Receipt{}, err
 	}
 	copy(r.RequestHash[:], requestHash)
 	r.AcceptedAt = fromUnixMillis(acceptedAt)
 	r.ResponseProjection = json.RawMessage(response)
 	return r, nil
-}
-
-func admissionEvents(ctx context.Context, q queryRower, taskID task.TaskID, attemptID task.AttemptID) (Event, Event, error) {
-	taskEvent, err := scanEvent(q.QueryRowContext(ctx, eventSelect+` WHERE e.task_id=? AND e.type='task.accepted' ORDER BY e.cursor ASC LIMIT 1`, taskID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return Event{}, Event{}, fmt.Errorf("%w: accepted task has no event", ErrCorruptStore)
-	}
-	if err != nil {
-		return Event{}, Event{}, fmt.Errorf("read acceptance event: %w", err)
-	}
-	attemptEvent, err := scanEvent(q.QueryRowContext(ctx, eventSelect+` WHERE e.task_id=? AND e.attempt_id=? AND e.type='attempt.prepared' ORDER BY e.cursor ASC LIMIT 1`, taskID, attemptID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return Event{}, Event{}, fmt.Errorf("%w: prepared attempt has no event", ErrCorruptStore)
-	}
-	if err != nil {
-		return Event{}, Event{}, fmt.Errorf("read prepared event: %w", err)
-	}
-	if taskEvent.Cursor >= attemptEvent.Cursor {
-		return Event{}, Event{}, fmt.Errorf("%w: admission event ordering", ErrCorruptStore)
-	}
-	return taskEvent, attemptEvent, nil
-}
-
-func scanEvent(row rowScanner) (Event, error) {
-	var e Event
-	var taskID, attemptID sql.NullString
-	var occurredAt int64
-	var payload string
-	err := row.Scan(
-		&e.ID, &e.Cursor, &e.WorkspaceID, &taskID, &attemptID, &e.EntityType, &e.EntityID, &e.Type, &e.Version, &occurredAt, &payload,
-		&e.Actor.Type, &e.Actor.ID, &e.Actor.DisplayName, &e.Actor.CredentialID, &e.Actor.Authentication, &e.Actor.RequestID,
-	)
-	if err != nil {
-		return Event{}, err
-	}
-	if taskID.Valid {
-		e.TaskID = task.TaskID(taskID.String)
-	}
-	if attemptID.Valid {
-		e.AttemptID = task.AttemptID(attemptID.String)
-	}
-	e.OccurredAt = fromUnixMillis(occurredAt)
-	e.Payload = json.RawMessage(payload)
-	return e, nil
 }

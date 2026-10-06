@@ -528,7 +528,6 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	}
 	admission, err := store.AdmitBackgroundRun(ctx, taskstore.AdmitBackgroundRunParams{
 		TaskID: generated.TaskID, AttemptID: generated.AttemptID, ReceiptID: generated.ReceiptID,
-		TaskEventID: generated.TaskEventID, AttemptEventID: generated.AttemptEventID,
 		OpenCodeSessionID: generated.OpenCodeSessionID, OpenCodeMessageID: generated.OpenCodeMessageID,
 		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.CreateBackgroundRunCommand},
 			Key: "serial-create", RequestHash: requestHash, Actor: actor},
@@ -555,9 +554,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	operationCtx, cancelOperation := context.WithCancel(ctx)
 	config := backgroundruncoord.Config{
 		WorkspaceID: workspaceID,
-		SystemActor: task.ActorSnapshot{Type: task.ActorSystem, ID: "serial-coordinator", DisplayName: "Serial coordinator",
-			CredentialID: "service-v1", Authentication: "internal", RequestID: "serial-worker-a"},
-		Profile: backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
+		Profile:     backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
 		OperationTimeout: 20 * time.Second, PollInterval: 100 * time.Millisecond,
 		HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000}, Now: time.Now,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: loss}, AfterPromptCall: func(error) { cancelOperation() }, Route: route,
@@ -604,7 +601,6 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 		return err
 	}
 	defer store.Close()
-	config.SystemActor.RequestID = "serial-worker-b"
 	config.AfterPromptCall = nil
 	config.Now = func() time.Time { return time.Now().Add(2 * time.Minute) }
 	config.Route = route
@@ -798,7 +794,6 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 	}
 	admission, err := store.AdmitBackgroundRun(ctx, taskstore.AdmitBackgroundRunParams{
 		TaskID: generated.TaskID, AttemptID: generated.AttemptID, ReceiptID: generated.ReceiptID,
-		TaskEventID: generated.TaskEventID, AttemptEventID: generated.AttemptEventID,
 		OpenCodeSessionID: generated.OpenCodeSessionID, OpenCodeMessageID: generated.OpenCodeMessageID,
 		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.CreateBackgroundRunCommand},
 			Key: "retained-create", RequestHash: sha256.Sum256([]byte("retained-create")), Actor: actor},
@@ -812,9 +807,7 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 	}
 	config := backgroundruncoord.Config{
 		WorkspaceID: workspaceID,
-		SystemActor: task.ActorSnapshot{Type: task.ActorSystem, ID: "retained-coordinator", DisplayName: "Retained coordinator",
-			CredentialID: "service-v1", Authentication: "internal", RequestID: "retained-worker"},
-		Profile: backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil),
+		Profile:     backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil),
 		Agent: "contract", ModelProvider: "test", Model: "test-model", OperationTimeout: 30 * time.Second,
 		PollInterval:  100 * time.Millisecond,
 		HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000},
@@ -873,7 +866,6 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 		ExpectedRunRevision: run.Revision, ExpectedTaskRevision: owner.Revision, ExpectedAttemptRevision: attempt.Revision,
 		SealRequestID: sealIDs.SealRequestID, ReceiptID: sealIDs.ReceiptID, ExportID: sealIDs.ArtifactExportID,
 		ArtifactID: sealIDs.RetainedArtifactID, MaterializationID: sealIDs.MaterializationID, ResultID: sealIDs.ResultID,
-		ResultEventID: sealIDs.ResultEventID, TaskEventID: sealIDs.TaskEventID,
 		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.SealBackgroundRunCommand},
 			Key: "retained-seal", RequestHash: sha256.Sum256([]byte("retained-seal")), Actor: actor},
 		CommitEpochSeconds: sealAt.Unix(), PolicyVersion: "fern.background-user-seal.v1",
@@ -1098,7 +1090,6 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 	requestHash := sha256.Sum256([]byte("serial-fence-crash-create"))
 	admission, err := store.AdmitBackgroundRun(ctx, taskstore.AdmitBackgroundRunParams{
 		TaskID: generated.TaskID, AttemptID: generated.AttemptID, ReceiptID: generated.ReceiptID,
-		TaskEventID: generated.TaskEventID, AttemptEventID: generated.AttemptEventID,
 		OpenCodeSessionID: generated.OpenCodeSessionID, OpenCodeMessageID: generated.OpenCodeMessageID,
 		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.CreateBackgroundRunCommand},
 			Key: "serial-fence-crash-create", RequestHash: requestHash, Actor: actor},
@@ -1116,9 +1107,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 	crashCtx, crash := context.WithCancel(ctx)
 	config := backgroundruncoord.Config{
 		WorkspaceID: workspaceID,
-		SystemActor: task.ActorSnapshot{Type: task.ActorSystem, ID: "serial-coordinator", DisplayName: "Serial coordinator",
-			CredentialID: "service-v1", Authentication: "internal", RequestID: "serial-fence-worker-a"},
-		Profile: backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
+		Profile:     backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
 		OperationTimeout: 20 * time.Second, PollInterval: 100 * time.Millisecond,
 		HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000},
 		Now:           func() time.Time { return time.Now().Add(2 * time.Minute) }, HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: transport}, Route: route,
@@ -1155,7 +1144,6 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 	if err != nil {
 		return err
 	}
-	config.SystemActor.RequestID = "serial-fence-worker-b"
 	config.Now = func() time.Time { return time.Now().Add(4 * time.Minute) }
 	config.AfterPromptFence = nil
 	coordinator, err = backgroundruncoord.New(store, provider, artifact, ids, config)
@@ -1175,18 +1163,9 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 	if err != nil {
 		return err
 	}
-	attemptEvent, err := ids.EventID()
-	if err != nil {
-		return err
-	}
-	taskEvent, err := ids.EventID()
-	if err != nil {
-		return err
-	}
 	stopHash := sha256.Sum256([]byte("serial-fence-crash-stop"))
 	if _, err := store.StopBackgroundRun(context.Background(), taskstore.StopBackgroundRunParams{
-		WorkspaceID: workspaceID, TaskID: fenced.TaskID, ReceiptID: stopReceipt, AttemptEventID: attemptEvent, TaskEventID: taskEvent,
-		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.StopBackgroundRunCommand},
+		WorkspaceID: workspaceID, TaskID: fenced.TaskID, ReceiptID: stopReceipt, Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.StopBackgroundRunCommand},
 			Key: "serial-fence-crash-stop", RequestHash: stopHash, Actor: actor}, APIContractVersion: "fern.background-run.v1",
 		StoppedAt: time.Now().UTC().Truncate(time.Millisecond).Add(4 * time.Minute),
 	}); err != nil {

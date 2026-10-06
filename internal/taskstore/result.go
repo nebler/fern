@@ -5,8 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -19,12 +17,10 @@ const maxManifestEntries = 10000
 const resultSelect = `
 SELECT r.id,r.task_id,r.attempt_id,r.workspace_id,r.state,r.outcome,r.repository_id,r.base_sha,
        r.result_commit,r.tree_oid,r.worktree_clean,r.manifest_entries,r.manifest_sha256,
-	       r.opencode_session_id,r.opencode_message_id,r.evidence_sha256,r.policy_version,
-	       r.collected_at,r.sealed_at,r.sealed_event_id,r.completed_event_id,r.revision,r.created_at,r.updated_at,
-	       a.actor_type,a.actor_id,a.display_name,a.credential_id,a.authentication,a.request_id,
-	       r.completion_authority,
-	       r.source_kind,r.retained_artifact_id,r.artifact_export_id,r.materialization_id
-	FROM results r JOIN actor_snapshots a ON a.id=r.creator_actor_snapshot_id`
+       r.opencode_session_id,r.opencode_message_id,r.policy_version,
+       r.collected_at,r.sealed_at,r.revision,r.created_at,r.updated_at,r.completion_authority,
+       r.source_kind,r.retained_artifact_id,r.artifact_export_id,r.materialization_id
+FROM results r`
 
 func (s *Store) GetResult(ctx context.Context, id task.ResultID) (Result, error) {
 	return getResult(ctx, s.db, id)
@@ -44,13 +40,11 @@ func getResult(ctx context.Context, q queryRower, id task.ResultID) (Result, err
 func scanResult(row rowScanner) (Result, error) {
 	var r Result
 	var repositoryID, clean, collectedAt, sealedAt, createdAt, updatedAt int64
-	var manifestHash, evidenceHash []byte
+	var manifestHash []byte
 	var retainedArtifactID, artifactExportID, materializationID sql.NullString
 	err := row.Scan(&r.ID, &r.TaskID, &r.AttemptID, &r.WorkspaceID, &r.State, &r.Outcome, &repositoryID, &r.BaseSHA,
 		&r.ResultCommit, &r.TreeOID, &clean, &r.ManifestEntries, &manifestHash, &r.OpenCodeSessionID, &r.OpenCodeMessageID,
-		&evidenceHash, &r.PolicyVersion, &collectedAt, &sealedAt, &r.SealedEventID, &r.CompletedEventID,
-		&r.Revision, &createdAt, &updatedAt, &r.Creator.Type, &r.Creator.ID, &r.Creator.DisplayName,
-		&r.Creator.CredentialID, &r.Creator.Authentication, &r.Creator.RequestID, &r.CompletionAuthority,
+		&r.PolicyVersion, &collectedAt, &sealedAt, &r.Revision, &createdAt, &updatedAt, &r.CompletionAuthority,
 		&r.SourceKind, &retainedArtifactID, &artifactExportID, &materializationID)
 	if err != nil {
 		return Result{}, err
@@ -58,7 +52,6 @@ func scanResult(row rowScanner) (Result, error) {
 	r.RepositoryID = task.RepositoryID(repositoryID)
 	r.WorktreeClean = true
 	copy(r.ManifestSHA256[:], manifestHash)
-	copy(r.EvidenceSHA256[:], evidenceHash)
 	r.CollectedAt, r.SealedAt = fromUnixMillis(collectedAt), fromUnixMillis(sealedAt)
 	r.CreatedAt, r.UpdatedAt = fromUnixMillis(createdAt), fromUnixMillis(updatedAt)
 	r.RetainedArtifactID = task.RetainedArtifactID(retainedArtifactID.String)
@@ -159,43 +152,4 @@ func validateManifestEntry(e ManifestEntry) error {
 		return ErrInvalidInput
 	}
 	return nil
-}
-
-func resultSealPayload(p resultMaterial) (json.RawMessage, error) {
-	if err := validateRetainedResultEvidence(p.EvidencePayload, p.EvidenceSHA256); err != nil {
-		return nil, err
-	}
-	type proof struct {
-		ResultID                task.ResultID           `json:"resultId"`
-		TaskID                  task.TaskID             `json:"taskId"`
-		AttemptID               task.AttemptID          `json:"attemptId"`
-		ExpectedAttemptRevision int64                   `json:"expectedAttemptRevision"`
-		ExpectedTaskRevision    int64                   `json:"expectedTaskRevision"`
-		RepositoryID            task.RepositoryID       `json:"repositoryId"`
-		BaseSHA                 task.GitOID             `json:"baseSha"`
-		ResultCommit            task.GitOID             `json:"resultCommit"`
-		TreeOID                 task.GitOID             `json:"treeOid"`
-		Outcome                 task.ResultOutcome      `json:"outcome"`
-		Clean                   bool                    `json:"clean"`
-		ManifestEntries         int                     `json:"manifestEntries"`
-		ManifestSHA256          string                  `json:"manifestSha256"`
-		OpenCodeSessionID       task.OpenCodeSessionID  `json:"opencodeSessionId"`
-		OpenCodeMessageID       task.OpenCodeMessageID  `json:"opencodeMessageId"`
-		EvidenceSHA256          string                  `json:"evidenceSha256"`
-		PolicyVersion           string                  `json:"policyVersion"`
-		CollectedAtMillis       int64                   `json:"collectedAtMillis"`
-		CompletionAuthority     SealCompletionAuthority `json:"completionAuthority"`
-		// Evidence carries the exact sanitized evidence object alongside its
-		// digest in the same canonical payload.
-		Evidence json.RawMessage `json:"evidence"`
-	}
-	encoded, err := json.Marshal(proof{p.ResultID, p.TaskID, p.AttemptID, p.ExpectedAttemptRevision, p.ExpectedTaskRevision,
-		p.RepositoryID, p.BaseSHA, p.ResultCommit, p.TreeOID, p.Outcome, p.WorktreeClean, len(p.Manifest),
-		"sha256:" + hex.EncodeToString(p.ManifestSHA256[:]), p.OpenCodeSessionID, p.OpenCodeMessageID,
-		"sha256:" + hex.EncodeToString(p.EvidenceSHA256[:]), p.PolicyVersion, unixMillis(p.CollectedAt),
-		p.CompletionAuthority, p.EvidencePayload})
-	if err != nil {
-		return nil, fmt.Errorf("encode result proof: %w", err)
-	}
-	return encoded, nil
 }

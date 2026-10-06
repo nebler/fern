@@ -29,7 +29,7 @@ func TestAdmissionReplaySurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
-	if first.Replayed || first.Task.State != task.TaskQueued || first.Attempt.State != task.AttemptPrepared || first.TaskEvent.Cursor <= 0 || first.AttemptEvent.Cursor <= first.TaskEvent.Cursor {
+	if first.Replayed || first.Task.State != task.TaskQueued || first.Attempt.State != task.AttemptPrepared {
 		t.Fatalf("unexpected first admission: %+v", first)
 	}
 	if got := sha256.Sum256([]byte(p.Prompt)); got != first.Task.PromptSHA256 {
@@ -48,7 +48,7 @@ func TestAdmissionReplaySurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
-	if !replay.Replayed || replay.Task.ID != first.Task.ID || replay.Attempt.ID != first.Attempt.ID || replay.Receipt.ID != first.Receipt.ID || replay.TaskEvent.ID != first.TaskEvent.ID || replay.AttemptEvent.ID != first.AttemptEvent.ID {
+	if !replay.Replayed || replay.Task.ID != first.Task.ID || replay.Attempt.ID != first.Attempt.ID || replay.Receipt.ID != first.Receipt.ID {
 		t.Fatalf("replay did not return originals: %+v", replay)
 	}
 	if !replay.Task.CreatedAt.Equal(testTime.Truncate(time.Millisecond)) || replay.Receipt.Actor.RequestID != "req-1" {
@@ -56,7 +56,7 @@ func TestAdmissionReplaySurvivesRestart(t *testing.T) {
 	}
 
 	gotTask, err := getTask(context.Background(), s.db, first.Task.ID)
-	if err != nil || gotTask.Prompt != p.Prompt || gotTask.CurrentAttemptID != first.Attempt.ID || gotTask.LatestEventCursor != first.AttemptEvent.Cursor {
+	if err != nil || gotTask.Prompt != p.Prompt || gotTask.CurrentAttemptID != first.Attempt.ID {
 		t.Fatalf("get task: %+v, %v", gotTask, err)
 	}
 	gotAttempt, err := getAttempt(context.Background(), s.db, first.Attempt.ID)
@@ -73,7 +73,7 @@ func TestAdmissionReplaySurvivesRestart(t *testing.T) {
 	if err := json.Unmarshal(gotReceipt.ResponseProjection, &projection); err != nil || projection.RunID != first.Task.ID {
 		t.Fatalf("receipt projection: %+v, %v", projection, err)
 	}
-	assertCounts(t, s, 1, 1, 1, 2)
+	assertCounts(t, s, 1, 1, 1)
 }
 
 func TestConcurrentSameKeyAdmissionCreatesOneSet(t *testing.T) {
@@ -112,14 +112,14 @@ func TestConcurrentSameKeyAdmissionCreatesOneSet(t *testing.T) {
 		if !result.Replayed {
 			firstUses++
 		}
-		if result.Task.ID != p.TaskID || result.Attempt.ID != p.AttemptID || result.Receipt.ID != p.ReceiptID || result.TaskEvent.ID != p.TaskEventID || result.AttemptEvent.ID != p.AttemptEventID {
+		if result.Task.ID != p.TaskID || result.Attempt.ID != p.AttemptID || result.Receipt.ID != p.ReceiptID {
 			t.Errorf("wrong durable IDs: %+v", result)
 		}
 	}
 	if firstUses != 1 {
 		t.Fatalf("first-use count = %d, want 1", firstUses)
 	}
-	assertCounts(t, s, 1, 1, 1, 2)
+	assertCounts(t, s, 1, 1, 1)
 }
 
 func TestAdmissionConflictsHaveNoWrites(t *testing.T) {
@@ -146,10 +146,10 @@ func TestAdmissionConflictsHaveNoWrites(t *testing.T) {
 	if !errors.Is(err, ErrIdempotencyOwnerMismatch) {
 		t.Fatalf("actor conflict = %v", err)
 	}
-	assertCounts(t, s, 1, 1, 1, 2)
+	assertCounts(t, s, 1, 1, 1)
 }
 
-func TestAdmissionRollsBackOnLateEventFailure(t *testing.T) {
+func TestAdmissionRollsBackOnLateInsertFailure(t *testing.T) {
 	s := openTestStore(t, testDBPath(t))
 	t.Cleanup(func() { _ = s.Close() })
 	createTestWorkspace(t, s)
@@ -158,9 +158,9 @@ func TestAdmissionRollsBackOnLateEventFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := testAdmission(7, "second", "Second")
-	second.AttemptEventID = first.TaskEventID // Fails on the second event insert.
+	second.OpenCodeSessionID = first.OpenCodeSessionID // Fails on the late run insert.
 	if _, err := s.AdmitBackgroundRun(context.Background(), second); err == nil {
-		t.Fatal("expected duplicate event failure")
+		t.Fatal("expected duplicate session failure")
 	}
 	if _, err := getTask(context.Background(), s.db, second.TaskID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("partially written task: %v", err)
@@ -171,7 +171,7 @@ func TestAdmissionRollsBackOnLateEventFailure(t *testing.T) {
 	if _, err := getAttempt(context.Background(), s.db, second.AttemptID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("partially written attempt: %v", err)
 	}
-	assertCounts(t, s, 1, 1, 1, 2)
+	assertCounts(t, s, 1, 1, 1)
 }
 
 func TestAttemptIdentityAndSequenceConstraints(t *testing.T) {
@@ -211,10 +211,10 @@ FROM attempts WHERE id=?`, testAttemptID(33), testSessionID(33), testMessageID(3
 	if _, err := s.db.Exec(`UPDATE attempts SET base_sha=? WHERE id=?`, "89abcdef0123456789abcdef0123456789abcdef", first.AttemptID); err == nil {
 		t.Fatal("immutable attempt base SHA was updated")
 	}
-	assertCounts(t, s, 2, 2, 2, 4)
+	assertCounts(t, s, 2, 2, 2)
 }
 
-func TestDeferredTaskAttemptAndEventOwnership(t *testing.T) {
+func TestDeferredTaskAttemptOwnership(t *testing.T) {
 	s := openTestStore(t, testDBPath(t))
 	t.Cleanup(func() { _ = s.Close() })
 	createTestWorkspace(t, s)
@@ -243,27 +243,8 @@ func TestDeferredTaskAttemptAndEventOwnership(t *testing.T) {
 	}
 	_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 
-	if _, err := conn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.ExecContext(context.Background(), `UPDATE tasks SET latest_event_cursor=? WHERE id=?`, second.AttemptEvent.Cursor, first.Task.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.ExecContext(context.Background(), `COMMIT`); err == nil {
-		t.Fatal("task linked to another task's event")
-	}
-	_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-
-	_, err = s.db.Exec(`INSERT INTO events(
-id,workspace_id,task_id,attempt_id,entity_type,entity_id,type,version,occurred_at,actor_snapshot_id,payload)
-SELECT ?,workspace_id,?,?, 'attempt',?, 'attempt.prepared',1,occurred_at,actor_snapshot_id,'{}'
-FROM events WHERE id=?`, testEventID(100), first.Task.ID, second.Attempt.ID, second.Attempt.ID, first.TaskEvent.ID)
-	if err == nil {
-		t.Fatal("attempt event with mismatched task ownership was accepted")
-	}
-
 	got, err := getTask(context.Background(), s.db, first.Task.ID)
-	if err != nil || got.CurrentAttemptID != first.Attempt.ID || got.LatestEventCursor != first.AttemptEvent.Cursor {
+	if err != nil || got.CurrentAttemptID != first.Attempt.ID {
 		t.Fatalf("failed deferred transaction changed task: %+v, %v", got, err)
 	}
 }
@@ -278,7 +259,6 @@ func TestSchemaRejectsMalformedAttemptInputs(t *testing.T) {
 		mutate func(*AdmitBackgroundRunParams)
 	}{
 		{"attempt ID", func(p *AdmitBackgroundRunParams) { p.AttemptID = "att_bad" }},
-		{"attempt event ID", func(p *AdmitBackgroundRunParams) { p.AttemptEventID = p.TaskEventID }},
 		{"session prefix", func(p *AdmitBackgroundRunParams) { p.OpenCodeSessionID = "ses_bad" }},
 		{"session uppercase", func(p *AdmitBackgroundRunParams) {
 			p.OpenCodeSessionID = task.OpenCodeSessionID("ses_ABCDEF0123456789abcdef0123456789")
@@ -299,7 +279,7 @@ func TestSchemaRejectsMalformedAttemptInputs(t *testing.T) {
 			}
 		})
 	}
-	assertCounts(t, s, 0, 0, 0, 0)
+	assertCounts(t, s, 0, 0, 0)
 }
 
 func TestMigrationDriftAndUnknownVersionFailClosed(t *testing.T) {
@@ -353,9 +333,9 @@ func TestSQLitePoliciesAndForeignKeys(t *testing.T) {
 		}
 	}
 	_, err := s.db.Exec(`INSERT INTO receipts(
-id,workspace_id,command_kind,state,idempotency_key,request_hash,actor_snapshot_id,accepted_at,
+id,workspace_id,command_kind,state,idempotency_key,request_hash,actor,accepted_at,
 api_contract_version,target_type,target_id,response_status,response_projection)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, testReceiptID(20), testWorkspaceID(), "task.submit", "accepted", "fk", make([]byte, 32), 999, 1, "v1", "task", testTaskID(20), 202, `{}`)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, testReceiptID(20), testWorkspaceID(), "task.submit", "accepted", "fk", make([]byte, 32), `{}`, 1, "v1", "task", testTaskID(20), 202, `{}`)
 	if err == nil {
 		t.Fatal("foreign key violation was accepted")
 	}
@@ -369,15 +349,10 @@ func TestOpenRejectsExistingForeignKeyViolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw := openRaw(t, path) // SQLite defaults foreign_keys off for this connection.
-	if _, err := raw.Exec(`INSERT INTO actor_snapshots(
-actor_type,actor_id,display_name,credential_id,authentication,request_id)
-VALUES('device','device-1','Phone','credential-1','fern_device_cookie','req-corrupt')`); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := raw.Exec(`INSERT INTO receipts(
-id,workspace_id,command_kind,state,idempotency_key,request_hash,actor_snapshot_id,accepted_at,
+id,workspace_id,command_kind,state,idempotency_key,request_hash,actor,accepted_at,
 api_contract_version,target_type,target_id,response_status,response_projection)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, testReceiptID(21), testWorkspaceID(), "task.submit", "accepted", "broken-fk", make([]byte, 32), 1, 1, "v1", "task", testTaskID(21), 202, `{}`); err != nil {
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, testReceiptID(21), testWorkspaceID(), "task.submit", "accepted", "broken-fk", make([]byte, 32), `{}`, 1, "v1", "task", testTaskID(21), 202, `{}`); err != nil {
 		t.Fatal(err)
 	}
 	if err := raw.Close(); err != nil {
@@ -480,7 +455,7 @@ func TestAdmissionHonorsDeadlineWhileDatabaseIsBusy(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("deadline took %v despite context cancellation", elapsed)
 	}
-	assertCounts(t, s, 0, 0, 0, 0)
+	assertCounts(t, s, 0, 0, 0)
 }
 
 func openTestStore(t *testing.T, path string) *Store {
@@ -523,7 +498,6 @@ func testAdmission(n int, key, prompt string) AdmitBackgroundRunParams {
 	hash := sha256.Sum256([]byte(key + "\n" + prompt))
 	params := AdmitBackgroundRunParams{
 		TaskID: testTaskID(n), AttemptID: testAttemptID(n), ReceiptID: testReceiptID(n),
-		TaskEventID: testEventID(n * 2), AttemptEventID: testEventID(n*2 + 1),
 		OpenCodeSessionID: testSessionID(n), OpenCodeMessageID: testMessageID(n),
 		Claim: task.IdempotencyClaim{
 			Scope: task.IdempotencyScope{WorkspaceID: testWorkspaceID(), CommandKind: CreateBackgroundRunCommand},
@@ -548,7 +522,6 @@ func testWorkspaceID() task.WorkspaceID  { return task.WorkspaceID(testID("wsp_"
 func testTaskID(n int) task.TaskID       { return task.TaskID(testID("tsk_", n)) }
 func testAttemptID(n int) task.AttemptID { return task.AttemptID(testID("att_", n)) }
 func testReceiptID(n int) task.ReceiptID { return task.ReceiptID(testID("rcp_", n)) }
-func testEventID(n int) task.EventID     { return task.EventID(testID("fev_", n)) }
 
 func testSessionID(n int) task.OpenCodeSessionID {
 	return task.OpenCodeSessionID(fmt.Sprintf("ses_%032x", n+1))
@@ -560,17 +533,13 @@ func testMessageID(n int) task.OpenCodeMessageID {
 
 func testResultID(n int) task.ResultID { return task.ResultID(testID("res_", n)) }
 
-func testSystemActor() task.ActorSnapshot {
-	return task.ActorSnapshot{Type: task.ActorSystem, ID: "background-run-coordinator", DisplayName: "Background Run coordinator", CredentialID: "service-v1", Authentication: "internal", RequestID: "background-run-request"}
-}
-
 func testID(prefix string, n int) string {
 	return fmt.Sprintf("%s0198d34d-6a50-75fb-b1f2-%012x", prefix, n+1)
 }
 
-func assertCounts(t *testing.T, s *Store, tasks, attempts, receipts, events int) {
+func assertCounts(t *testing.T, s *Store, tasks, attempts, receipts int) {
 	t.Helper()
-	for table, want := range map[string]int{"tasks": tasks, "attempts": attempts, "receipts": receipts, "events": events} {
+	for table, want := range map[string]int{"tasks": tasks, "attempts": attempts, "receipts": receipts} {
 		var got int
 		if err := s.db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&got); err != nil {
 			t.Fatal(err)

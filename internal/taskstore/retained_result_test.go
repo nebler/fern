@@ -32,7 +32,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		SealRequestID: task.SealRequestID(testID("slr_", 5101)), ReceiptID: testReceiptID(5102),
 		ExportID: task.ArtifactExportID(testID("exp_", 5103)), ArtifactID: task.RetainedArtifactID(testID("art_", 5104)),
 		MaterializationID: task.MaterializationID(testID("mat_", 5105)), ResultID: testResultID(5106),
-		ResultEventID: testEventID(5107), TaskEventID: testEventID(5108), Claim: sealClaim,
+		Claim:              sealClaim,
 		CommitEpochSeconds: now.Unix(), PolicyVersion: "background-retained.v1", APIContractVersion: "v1", AcceptedAt: now.Add(20 * time.Second),
 	}
 	sealed, err := store.SealBackgroundRun(context.Background(), seal)
@@ -51,7 +51,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		t.Fatalf("seal owner mismatch = %v", err)
 	}
 	stop := StopBackgroundRunParams{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, ReceiptID: testReceiptID(5109),
-		AttemptEventID: testEventID(5110), TaskEventID: testEventID(5111), Claim: task.IdempotencyClaim{
+		Claim: task.IdempotencyClaim{
 			Scope: task.IdempotencyScope{WorkspaceID: run.WorkspaceID, CommandKind: StopBackgroundRunCommand}, Key: "stop-after-seal",
 			RequestHash: sha256.Sum256([]byte("stop-after-seal")), Actor: admission.Claim.Actor,
 		}, APIContractVersion: "v1", StoppedAt: seal.AcceptedAt.Add(time.Second)}
@@ -159,11 +159,9 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	}
 	exportNow = exportNow.Add(time.Second)
 	materialProof := sha256.Sum256([]byte("acceptance materialization"))
-	evidence := json.RawMessage(`{"authorityRead":true,"objects":1}`)
 	commit := CommitBackgroundRunRetainedResultParams{BackgroundRunExportRef: exportRef(),
 		MaterializationID: seal.MaterializationID, MaterializationProof: materialProof, ArtifactID: seal.ArtifactID, ResultID: seal.ResultID,
-		ResultEventID: seal.ResultEventID, TaskEventID: seal.TaskEventID, EvidencePayload: evidence,
-		EvidenceSHA256: sha256.Sum256(evidence), Actor: testSystemActor(), SealedAt: exportNow,
+		SealedAt: exportNow,
 	}
 	mismatch := commit
 	mismatch.ArtifactID = task.RetainedArtifactID(testID("art_", 5199))
