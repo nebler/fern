@@ -101,19 +101,6 @@ type InstallationDiscoveryToken struct {
 	permissions    InstallationDiscoveryPermissions
 }
 
-func NewInstallationDiscoveryToken(value string, expiresAt time.Time, installationID int64, permissions map[string]string) (InstallationDiscoveryToken, error) {
-	validated, err := ValidateInstallationDiscoveryPermissions(permissions)
-	if err != nil || !validAccessToken(value) || installationID <= 0 || expiresAt.IsZero() || expiresAt.Unix() <= 0 {
-		return InstallationDiscoveryToken{}, firstError(err, ErrInvalidDiscoveryToken)
-	}
-	return InstallationDiscoveryToken{
-		value:          value,
-		expiresAt:      expiresAt.UTC(),
-		installationID: installationID,
-		permissions:    validated,
-	}, nil
-}
-
 func (token InstallationDiscoveryToken) Value(now time.Time) (string, error) {
 	if !validAccessToken(token.value) || token.installationID <= 0 || !token.permissions.valid() || now.IsZero() || token.expiresAt.After(now.Add(maximumTokenLife)) {
 		return "", ErrInvalidDiscoveryToken
@@ -172,14 +159,6 @@ type InstallationObservation struct {
 	repositorySelection string
 }
 
-func (observation InstallationObservation) InstallationID() int64 { return observation.installationID }
-func (observation InstallationObservation) AccountLogin() string  { return observation.accountLogin }
-func (observation InstallationObservation) AccountID() int64      { return observation.accountID }
-func (observation InstallationObservation) AccountType() string   { return observation.accountType }
-func (observation InstallationObservation) TargetType() string    { return observation.targetType }
-func (observation InstallationObservation) RepositorySelection() string {
-	return observation.repositorySelection
-}
 func (InstallationObservation) String() string               { return "GitHub installation observation" }
 func (observation InstallationObservation) GoString() string { return observation.String() }
 
@@ -202,37 +181,13 @@ type InstallationRepositoryObservation struct {
 	canPush        bool
 }
 
-func (observation InstallationRepositoryObservation) InstallationID() int64 {
-	return observation.installationID
-}
-func (observation InstallationRepositoryObservation) RepositoryID() int64 {
-	return observation.repositoryID
-}
-func (observation InstallationRepositoryObservation) FullName() string { return observation.fullName }
-func (observation InstallationRepositoryObservation) OwnerLogin() string {
-	return observation.ownerLogin
-}
-func (observation InstallationRepositoryObservation) OwnerID() int64    { return observation.ownerID }
-func (observation InstallationRepositoryObservation) OwnerType() string { return observation.ownerType }
-func (observation InstallationRepositoryObservation) Name() string      { return observation.name }
-func (observation InstallationRepositoryObservation) Private() bool     { return observation.private }
-func (observation InstallationRepositoryObservation) Archived() bool    { return observation.archived }
-func (observation InstallationRepositoryObservation) Disabled() bool    { return observation.disabled }
-func (observation InstallationRepositoryObservation) DefaultBranch() string {
-	return observation.defaultBranch
-}
-func (observation InstallationRepositoryObservation) Permissions() InstallationDiscoveryPermissions {
-	return observation.permissions
-}
-func (observation InstallationRepositoryObservation) CanPull() bool { return observation.canPull }
-func (observation InstallationRepositoryObservation) CanPush() bool { return observation.canPush }
 func (InstallationRepositoryObservation) String() string {
 	return "GitHub installation repository observation"
 }
 func (observation InstallationRepositoryObservation) GoString() string { return observation.String() }
 
 // SelectedRepositoryMetadata is an immutable, coordinator-proven repository
-// snapshot. RepositorySelection records GitHub's explicit selected/all value;
+// snapshot. repositorySelection records GitHub's explicit selected/all value;
 // this package does not infer policy from it.
 type SelectedRepositoryMetadata struct {
 	installationID      int64
@@ -250,23 +205,6 @@ type SelectedRepositoryMetadata struct {
 	permissions         InstallationDiscoveryPermissions
 }
 
-func (metadata SelectedRepositoryMetadata) InstallationID() int64 { return metadata.installationID }
-func (metadata SelectedRepositoryMetadata) RepositoryID() int64   { return metadata.repositoryID }
-func (metadata SelectedRepositoryMetadata) FullName() string      { return metadata.fullName }
-func (metadata SelectedRepositoryMetadata) OwnerLogin() string    { return metadata.ownerLogin }
-func (metadata SelectedRepositoryMetadata) OwnerID() int64        { return metadata.ownerID }
-func (metadata SelectedRepositoryMetadata) OwnerType() string     { return metadata.ownerType }
-func (metadata SelectedRepositoryMetadata) Name() string          { return metadata.name }
-func (metadata SelectedRepositoryMetadata) Private() bool         { return metadata.private }
-func (metadata SelectedRepositoryMetadata) Archived() bool        { return metadata.archived }
-func (metadata SelectedRepositoryMetadata) Disabled() bool        { return metadata.disabled }
-func (metadata SelectedRepositoryMetadata) DefaultBranch() string { return metadata.defaultBranch }
-func (metadata SelectedRepositoryMetadata) RepositorySelection() string {
-	return metadata.repositorySelection
-}
-func (metadata SelectedRepositoryMetadata) Permissions() InstallationDiscoveryPermissions {
-	return metadata.permissions
-}
 func (SelectedRepositoryMetadata) String() string            { return "selected GitHub repository metadata" }
 func (metadata SelectedRepositoryMetadata) GoString() string { return metadata.String() }
 

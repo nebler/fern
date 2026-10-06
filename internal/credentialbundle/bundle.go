@@ -283,12 +283,3 @@ func validate(bundle Bundle) error {
 	}
 	return nil
 }
-
-// Summary returns non-secret operator output.
-func Summary(bundle Bundle) string {
-	fingerprint, err := bundle.Fingerprint()
-	if err != nil {
-		return "credential bundle (invalid)"
-	}
-	return fmt.Sprintf("epoch=%s fingerprint=sha256:%s", bundle.Epoch, fingerprint)
-}

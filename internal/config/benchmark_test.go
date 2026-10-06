@@ -44,7 +44,7 @@ proxy:
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		b.Fatal(err)
 	}
-	cfg, err := Load(path, repo, true, Overrides{})
+	cfg, err := LoadWithEnvironment(path, repo, true, Overrides{}, nil)
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func BenchmarkLoad(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if _, err := Load(path, repo, true, Overrides{}); err != nil {
+		if _, err := LoadWithEnvironment(path, repo, true, Overrides{}, nil); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -82,7 +82,7 @@ func BenchmarkParseTaskPolicy(b *testing.B) {
 
 func BenchmarkValidate(b *testing.B) {
 	path, repo, _ := benchmarkConfigFixture(b)
-	cfg, err := Load(path, repo, true, Overrides{})
+	cfg, err := LoadWithEnvironment(path, repo, true, Overrides{}, nil)
 	if err != nil {
 		b.Fatal(err)
 	}

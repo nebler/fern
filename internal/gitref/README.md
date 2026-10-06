@@ -15,7 +15,7 @@ configuration from quietly accepting different identifier languages.
 ```mermaid
 flowchart LR
   callers["config / githubapp / taskartifact / taskstore"] -->|"validate boundary values"| refs["ValidateRef / ValidateOwnerRepo"]
-  callers -->|"object and artifact identifiers"| values["ValidSHA1 / ValidPath / ValidPathBytes"]
+  callers -->|"object and artifact identifiers"| values["ValidPath / ValidPathBytes"]
   refs -->|"reject non-printable bytes"| ascii["printableASCII"]
   refs -->|"component and suffix checks"| str["stdlib strings"]
   refs -->|"owner and repository characters"| alpha["asciiAlphanumeric"]
@@ -29,8 +29,6 @@ flowchart LR
   ASCII bytes, no leading hyphen, forbidden Git metacharacters, empty or dotted
   components, `..`, `@{`, or case-insensitive `.lock` suffixes. This is a Fern
   policy boundary, not a shell-out equivalence test against every Git version.
-- `ValidSHA1` requires exactly 40 **lowercase** hexadecimal characters. It does
-  not support SHA-256 object identifiers or prove an object exists.
 - `ValidateOwnerRepo` requires one slash, an owner of 1–39 characters, and a
   repository name of 1–100 characters. It rejects `.`, `..`, and `.git` suffixes
   and applies the documented ASCII owner/repository character restrictions.

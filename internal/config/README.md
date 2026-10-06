@@ -22,7 +22,7 @@ private attachment route. There is no alternative legacy execution shape.
 
 ```mermaid
 graph LR
-  load["Load / LoadWithEnvironment"] --> merge["load"]
+  load["LoadWithEnvironment"] --> merge["load"]
   merge --> defaults["Default"]
   merge --> decode["decode: KnownFields and one document"]
   merge --> workspace["applyFileWorkspace"]
@@ -90,7 +90,7 @@ origin uses the remote hostname and an explicit distinct non-443 HTTPS port.
 
 ## Naming review
 
-- `Load` accurately says loading, not validation; keep the explicit validation
+- `LoadWithEnvironment` accurately says loading, not validation; keep the explicit validation
   call visible at composition sites.
 - `decodeRequiredTaskString` is also used for workspace, proxy, and password
   fields. `decodeRequiredString` would describe its current general purpose.
@@ -113,7 +113,7 @@ configuration may omit the path; there is no fallback to unbounded storage.
 The root must be separate from durable control state and retained artifacts.
 Drain and clean existing runs before changing runtime storage locations.
 
-`Load` reads at most `MaxConfigBytes + 1` bytes and rejects raw YAML over **1 MiB**
+`LoadWithEnvironment` reads at most `MaxConfigBytes + 1` bytes and rejects raw YAML over **1 MiB**
 before constructing a YAML tree. This bounds the read itself, not just an earlier
 file-size observation, so file growth cannot bypass the byte limit. It does not
 bound environment expansion or promise protection from blocking special files.

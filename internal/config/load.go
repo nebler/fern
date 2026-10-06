@@ -28,12 +28,6 @@ func readConfig(path string) ([]byte, error) {
 	return data, nil
 }
 
-// Load merges defaults, strict YAML, and explicit overrides, then expands
-// repository and control-password references from the process environment.
-func Load(path, defaultRepo string, required bool, overrides Overrides) (Config, error) {
-	return load(path, defaultRepo, required, overrides, os.LookupEnv)
-}
-
 // LoadWithEnvironment gives protected environment-file values precedence over
 // process values. Loading does not authorize execution; callers must validate.
 func LoadWithEnvironment(path, defaultRepo string, required bool, overrides Overrides, environment map[string]string) (Config, error) {

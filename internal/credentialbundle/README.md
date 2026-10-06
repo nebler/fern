@@ -32,8 +32,7 @@ graph LR
   decrypt --> stream["age.Decrypt and bounded ReadAll"]
   decrypt --> json["JSON decoder: unknown fields and trailing data"]
   decrypt --> validate
-  summary["Summary"] --> fingerprint["Bundle.Fingerprint"]
-  fingerprint --> marshal
+  fingerprint["Bundle.Fingerprint"] --> marshal
 ```
 
 These are representative direct calls. Encryption and decryption use complete
@@ -78,8 +77,7 @@ run delivery sends the short-lived installation token, not that private key.
   can return an error with the encrypted destination already installed.
 - `ReadFile` decrypts in memory; it does not materialize a plaintext file.
 
-`String` and `GoString` redact bundle contents. `Summary` returns epoch and a
-SHA-256 fingerprint, or a generic invalid summary. `Fingerprint` hashes the
+`String` and `GoString` redact bundle contents. `Fingerprint` hashes the
 validated JSON serialization plus its newline, not the randomized ciphertext.
 Do not treat a fingerprint as a MAC, access credential, or semantic equality
 proof across arbitrary alternate serializations.
@@ -116,7 +114,7 @@ Rollback defaults to `<input>.rollback-<generation>.age` unless overridden.
 
 ## Performance: static observations and measurement scope
 
-`Fingerprint`, `Summary`, and `Encrypt` each serialize the bundle when called.
+`Fingerprint` and `Encrypt` each serialize the bundle when called.
 Export code requesting both fingerprint and encryption can therefore repeat
 large JSON/base64 work. Decryption buffers the whole plaintext and then decodes
 it, so the byte cap is not a claim that peak memory equals 32 MiB.

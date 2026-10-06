@@ -268,15 +268,6 @@ func sameListenPort(first, second string) bool {
 	return firstErr == nil && secondErr == nil && firstNumber == secondNumber
 }
 
-// ValidateWorkspaceName accepts only the printable identifier pattern used for
-// workspace directory and container names.
-func ValidateWorkspaceName(name string) error {
-	if !workspaceNamePattern.MatchString(name) {
-		return fmt.Errorf("invalid workspace name %q", name)
-	}
-	return nil
-}
-
 func validateListen(field, address string) error {
 	host, portText, err := net.SplitHostPort(address)
 	if err != nil {

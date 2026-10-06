@@ -16,7 +16,7 @@ func TestConfigSizeBoundary(t *testing.T) {
 		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		_, err := Load(path, t.TempDir(), true, Overrides{})
+		_, err := LoadWithEnvironment(path, t.TempDir(), true, Overrides{}, nil)
 		if size <= MaxConfigBytes && err != nil {
 			t.Fatalf("size %d: %v", size, err)
 		}
@@ -24,7 +24,7 @@ func TestConfigSizeBoundary(t *testing.T) {
 			t.Fatalf("oversized config: %v", err)
 		}
 		if size > MaxConfigBytes {
-			if _, loadErr := Load(path, t.TempDir(), false, Overrides{}); loadErr == nil || !strings.Contains(loadErr.Error(), "1 MiB limit") {
+			if _, loadErr := LoadWithEnvironment(path, t.TempDir(), false, Overrides{}, nil); loadErr == nil || !strings.Contains(loadErr.Error(), "1 MiB limit") {
 				t.Fatalf("Load did not enforce size limit: %v", loadErr)
 			}
 		}
@@ -36,10 +36,10 @@ func TestConfigSizeBoundary(t *testing.T) {
 
 func TestMissingConfigRequiredPolicy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing.yaml")
-	if _, err := Load(path, t.TempDir(), false, Overrides{}); err != nil {
+	if _, err := LoadWithEnvironment(path, t.TempDir(), false, Overrides{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Load(path, t.TempDir(), true, Overrides{}); err == nil {
+	if _, err := LoadWithEnvironment(path, t.TempDir(), true, Overrides{}, nil); err == nil {
 		t.Fatal("required missing config accepted")
 	}
 }

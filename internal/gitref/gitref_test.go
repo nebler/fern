@@ -26,22 +26,6 @@ func TestValidateRef(t *testing.T) {
 	}
 }
 
-func TestValidSHA1(t *testing.T) {
-	t.Parallel()
-	if !ValidSHA1("0123456789abcdef0123456789abcdef01234567") {
-		t.Fatal("ValidSHA1 rejected a lowercase hex SHA-1")
-	}
-	for _, sha := range []string{
-		"", "short", "0123456789ABCDEF0123456789abcdef01234567",
-		"0123456789abcdef0123456789abcdef0123456g",
-		"0123456789abcdef0123456789abcdef012345678",
-	} {
-		if ValidSHA1(sha) {
-			t.Errorf("ValidSHA1(%q) accepted invalid SHA-1", sha)
-		}
-	}
-}
-
 func TestValidateOwnerRepo(t *testing.T) {
 	t.Parallel()
 	longOwner := strings.Repeat("a", 39) + "/" + strings.Repeat("b", 100)

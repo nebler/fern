@@ -273,10 +273,10 @@ func TestParseRemoteOrigin(t *testing.T) {
 func TestMissingConfigAndExample(t *testing.T) {
 	t.Parallel()
 	path := filepath.Join(t.TempDir(), "missing.yaml")
-	if _, err := Load(path, filepath.Dir(path), true, Overrides{}); err == nil {
+	if _, err := LoadWithEnvironment(path, filepath.Dir(path), true, Overrides{}, nil); err == nil {
 		t.Fatal("required file absent")
 	}
-	cfg, err := Load(path, filepath.Dir(path), false, Overrides{})
+	cfg, err := LoadWithEnvironment(path, filepath.Dir(path), false, Overrides{}, nil)
 	if err != nil || cfg.Workspace.Name != "demo" {
 		t.Fatalf("defaults = %+v, %v", cfg, err)
 	}

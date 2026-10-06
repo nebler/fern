@@ -95,12 +95,6 @@ var onboardingManifestPage = template.Must(template.New("github-app-manifest").P
 </body>
 </html>`))
 
-// NewOnboardingHTTP validates fixed onboarding policy and constructs a handler.
-// rootOrigin must be a canonical HTTPS origin without a trailing slash.
-func NewOnboardingHTTP(rootOrigin, appName string, states onboardingStatePersistence, exchanger manifestExchanger, credentials credentialPersistence, random io.Reader, now func() time.Time) (*OnboardingHTTP, error) {
-	return NewOnboardingHTTPWithSetupOrigin(rootOrigin, rootOrigin, appName, states, exchanger, credentials, random, now)
-}
-
 // NewOnboardingHTTPWithSetupOrigin allows the authenticated setup page to be
 // served on an exact loopback HTTP origin while retaining the private HTTPS
 // origin as the only accepted GitHub callback authority.

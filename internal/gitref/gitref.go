@@ -42,19 +42,6 @@ func ValidateRef(ref string) error {
 	return nil
 }
 
-// ValidSHA1 reports whether sha is exactly 40 lowercase hexadecimal characters.
-func ValidSHA1(sha string) bool {
-	if len(sha) != 40 {
-		return false
-	}
-	for i := range len(sha) {
-		if character := sha[i]; (character < '0' || character > '9') && (character < 'a' || character > 'f') {
-			return false
-		}
-	}
-	return true
-}
-
 // ValidateOwnerRepo accepts only canonical 'owner/repository' full names:
 // exactly one '/', total length 3-140, owner 1-39 characters from
 // [A-Za-z0-9-] without leading/trailing '-', repository 1-100 characters from

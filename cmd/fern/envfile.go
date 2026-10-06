@@ -57,12 +57,3 @@ func readEnvFile(path string) (map[string]string, error) {
 	}
 	return values, nil
 }
-
-func environmentLookup(fileValues map[string]string) func(string) (string, bool) {
-	return func(key string) (string, bool) {
-		if value, exists := fileValues[key]; exists {
-			return value, true
-		}
-		return os.LookupEnv(key)
-	}
-}

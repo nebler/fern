@@ -94,7 +94,7 @@ func TestInstallationClientListsInstallationsWithExactPagination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(observations) != 2 || observations[0].InstallationID() != 101 || observations[0].AccountLogin() != "fern-inc" || observations[0].AccountID() != 1001 || observations[0].AccountType() != "Organization" || observations[0].TargetType() != "Organization" || observations[0].RepositorySelection() != "selected" || observations[1].RepositorySelection() != "all" {
+	if len(observations) != 2 || observations[0].installationID != 101 || observations[0].accountLogin != "fern-inc" || observations[0].accountID != 1001 || observations[0].accountType != "Organization" || observations[0].targetType != "Organization" || observations[0].repositorySelection != "selected" || observations[1].repositorySelection != "all" {
 		t.Fatalf("observations = %#v", observations)
 	}
 	if app.callCount() != 1 {
@@ -128,10 +128,10 @@ func TestInstallationClientListsRepositoriesWithInstallationToken(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repositories) != 2 || repositories[0].InstallationID() != 101 || repositories[0].RepositoryID() != 201 || repositories[0].FullName() != "fern-inc/widget" || repositories[0].OwnerLogin() != "fern-inc" || repositories[0].OwnerID() != 1001 || repositories[0].OwnerType() != "Organization" || repositories[0].Name() != "widget" || repositories[0].Private() || repositories[0].Archived() || repositories[0].Disabled() || repositories[0].DefaultBranch() != "main" || !repositories[0].CanPull() || !repositories[0].CanPush() {
+	if len(repositories) != 2 || repositories[0].installationID != 101 || repositories[0].repositoryID != 201 || repositories[0].fullName != "fern-inc/widget" || repositories[0].ownerLogin != "fern-inc" || repositories[0].ownerID != 1001 || repositories[0].ownerType != "Organization" || repositories[0].name != "widget" || repositories[0].private || repositories[0].archived || repositories[0].disabled || repositories[0].defaultBranch != "main" || !repositories[0].canPull || !repositories[0].canPush {
 		t.Fatalf("repositories = %#v", repositories)
 	}
-	permissions := repositories[0].Permissions()
+	permissions := repositories[0].permissions
 	if permissions.Metadata() != "read" || permissions.Contents() != "write" || permissions.PullRequests() != "write" {
 		t.Fatalf("permissions = %#v", permissions)
 	}
@@ -349,7 +349,7 @@ func TestSelectRepositoryProvesExactTupleForSelectedAndAll(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if identity.InstallationID() != 101 || identity.RepositoryID() != 201 || metadata.InstallationID() != 101 || metadata.RepositoryID() != 201 || metadata.FullName() != "fern-inc/widget" || metadata.OwnerLogin() != "fern-inc" || metadata.OwnerID() != 1001 || metadata.OwnerType() != "Organization" || metadata.Name() != "widget" || !metadata.Private() || metadata.DefaultBranch() != "main" || metadata.RepositorySelection() != selection || metadata.Permissions() != permissions {
+		if identity.InstallationID() != 101 || identity.RepositoryID() != 201 || metadata.installationID != 101 || metadata.repositoryID != 201 || metadata.fullName != "fern-inc/widget" || metadata.ownerLogin != "fern-inc" || metadata.ownerID != 1001 || metadata.ownerType != "Organization" || metadata.name != "widget" || !metadata.private || metadata.defaultBranch != "main" || metadata.repositorySelection != selection || metadata.permissions != permissions {
 			t.Fatalf("identity = %#v, metadata = %#v", identity, metadata)
 		}
 	}
@@ -397,7 +397,6 @@ func TestSelectRepositoryRejectsMismatchArchivedDisabledPermissionsAndAmbiguity(
 func TestInstallationTypesRedactStringAndGoString(t *testing.T) {
 	t.Parallel()
 	secret := "remote-secret-account"
-	permissions := InstallationDiscoveryPermissions{metadata: "read", contents: "write", pullRequests: "write"}
 	values := []any{
 		&InstallationClient{},
 		InstallationDiscoveryToken{value: secret, installationID: 1},
@@ -412,13 +411,6 @@ func TestInstallationTypesRedactStringAndGoString(t *testing.T) {
 		if strings.Contains(formatted, secret) {
 			t.Fatalf("formatting exposed secret for %T: %s", value, formatted)
 		}
-	}
-	token, err := NewInstallationDiscoveryToken(installationTestCredential, installationTestNow().Add(time.Hour), 101, map[string]string{"metadata": "read", "contents": "write", "pull_requests": "write"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if token.InstallationID() != 101 || token.ExpiresAt() != installationTestNow().Add(time.Hour) || token.Permissions() != permissions {
-		t.Fatalf("token metadata = %#v", token)
 	}
 }
 
@@ -507,11 +499,8 @@ func installationTestContext(t *testing.T) context.Context {
 
 func installationTestDiscoverySource(t *testing.T, now time.Time, installationID int64) *installationDiscoverySource {
 	t.Helper()
-	token, err := NewInstallationDiscoveryToken(installationTestCredential, now.Add(time.Hour), installationID, map[string]string{"metadata": "read", "contents": "write", "pull_requests": "write"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return &installationDiscoverySource{token: token}
+	permissions := InstallationDiscoveryPermissions{metadata: "read", contents: "write", pullRequests: "write"}
+	return &installationDiscoverySource{token: InstallationDiscoveryToken{value: installationTestCredential, expiresAt: now.Add(time.Hour).UTC(), installationID: installationID, permissions: permissions}}
 }
 
 func newInstallationTestClient(t *testing.T, httpClient *http.Client, apiBase string, app AppTokenSource, discovery InstallationDiscoveryTokenSource, now time.Time) *InstallationClient {

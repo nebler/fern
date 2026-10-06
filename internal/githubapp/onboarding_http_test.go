@@ -368,11 +368,11 @@ func TestNewOnboardingHTTPRejectsInvalidConfiguration(t *testing.T) {
 	random := testOnboardingRandom(60, 61, 62)
 	now := func() time.Time { return testOnboardingTime() }
 	for _, origin := range []string{"", "http://fern.example", "HTTPS://fern.example", "https://Fern.example", "https://fern.example/", "https://user@fern.example", "https://fern.example/path", "https://fern.example?query", "https://fern.example#fragment", "https://"} {
-		if handler, err := NewOnboardingHTTP(origin, "Fern", store, exchanger, saver, random, now); handler != nil || !errors.Is(err, ErrInvalidOnboardingHTTPConfiguration) {
+		if handler, err := NewOnboardingHTTPWithSetupOrigin(origin, origin, "Fern", store, exchanger, saver, random, now); handler != nil || !errors.Is(err, ErrInvalidOnboardingHTTPConfiguration) {
 			t.Fatalf("origin %q: handler = %v, error = %v", origin, handler, err)
 		}
 	}
-	if handler, err := NewOnboardingHTTP("https://fern.example:443", "Fern", store, exchanger, saver, random, now); handler != nil || !errors.Is(err, ErrInvalidOnboardingHTTPConfiguration) {
+	if handler, err := NewOnboardingHTTPWithSetupOrigin("https://fern.example:443", "https://fern.example:443", "Fern", store, exchanger, saver, random, now); handler != nil || !errors.Is(err, ErrInvalidOnboardingHTTPConfiguration) {
 		t.Fatalf("default HTTPS port: handler = %v, error = %v", handler, err)
 	}
 	var nilStore *OnboardingStateStore
@@ -397,11 +397,11 @@ func TestNewOnboardingHTTPRejectsInvalidConfiguration(t *testing.T) {
 		{store, exchanger, saver, random, nil},
 	}
 	for index, test := range dependencies {
-		if handler, err := NewOnboardingHTTP(testOnboardingOrigin, "Fern", test.states, test.exchanger, test.saver, test.random, test.now); handler != nil || !errors.Is(err, ErrInvalidOnboardingHTTPConfiguration) {
+		if handler, err := NewOnboardingHTTPWithSetupOrigin(testOnboardingOrigin, testOnboardingOrigin, "Fern", test.states, test.exchanger, test.saver, test.random, test.now); handler != nil || !errors.Is(err, ErrInvalidOnboardingHTTPConfiguration) {
 			t.Fatalf("dependency %d: handler = %v, error = %v", index, handler, err)
 		}
 	}
-	if handler, err := NewOnboardingHTTP(testOnboardingOrigin, "", store, exchanger, saver, random, now); handler != nil || !errors.Is(err, ErrInvalidOnboardingHTTPConfiguration) {
+	if handler, err := NewOnboardingHTTPWithSetupOrigin(testOnboardingOrigin, testOnboardingOrigin, "", store, exchanger, saver, random, now); handler != nil || !errors.Is(err, ErrInvalidOnboardingHTTPConfiguration) {
 		t.Fatalf("empty app name: handler = %v, error = %v", handler, err)
 	}
 }
@@ -650,7 +650,7 @@ func newTestOnboardingHTTP(t *testing.T, states onboardingStatePersistence, exch
 
 func newTestOnboardingHTTPWithClock(t *testing.T, states onboardingStatePersistence, exchanger manifestExchanger, credentials credentialPersistence, random io.Reader, now func() time.Time) *OnboardingHTTP {
 	t.Helper()
-	handler, err := NewOnboardingHTTP(testOnboardingOrigin, "Fern Test App", states, exchanger, credentials, random, now)
+	handler, err := NewOnboardingHTTPWithSetupOrigin(testOnboardingOrigin, testOnboardingOrigin, "Fern Test App", states, exchanger, credentials, random, now)
 	if err != nil {
 		t.Fatal(err)
 	}
