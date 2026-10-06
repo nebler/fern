@@ -17,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
@@ -360,55 +361,55 @@ func (p *Provider) OpenCodeClient(run taskstore.BackgroundRun, runtime RuntimeId
 // BackgroundRouteTarget derives the exact endpoint and an authenticated
 // transport without exposing the run password outside the provider.
 func (p *Provider) BackgroundRouteTarget(run taskstore.BackgroundRun, runtime RuntimeIdentity) (backgroundroute.Target, error) {
-	digest, err := p.validateRun(run)
+	transport, err := p.newRouteTransport(run, runtime)
 	if err != nil {
 		return backgroundroute.Target{}, err
 	}
+	return backgroundroute.NewTarget("http://"+transport.endpoint, transport)
+}
+
+func (p *Provider) newRouteTransport(run taskstore.BackgroundRun, runtime RuntimeIdentity) (*routeTransport, error) {
+	digest, err := p.validateRun(run)
+	if err != nil {
+		return nil, err
+	}
 	if err := validateCommittedRuntime(runtime); err != nil || runtime.ContainerID != run.ObservedContainerID ||
 		runtime.StartedAt != run.ObservedContainerStartedAt || run.HostPort < 1 || run.HostPort > 65535 {
-		return backgroundroute.Target{}, errors.New("exact committed background runtime is required")
+		return nil, errors.New("exact committed background runtime is required")
 	}
 	base, ok := http.DefaultTransport.(*http.Transport)
 	if !ok {
-		return backgroundroute.Target{}, errors.New("standard background route transport is unavailable")
+		return nil, errors.New("standard background route transport is unavailable")
 	}
 	base = base.Clone()
 	if p.http.Transport != nil {
 		configured, ok := p.http.Transport.(*http.Transport)
 		if !ok {
-			return backgroundroute.Target{}, errors.New("background route requires a standard HTTP transport")
+			return nil, errors.New("background route requires a standard HTTP transport")
 		}
 		base = configured.Clone()
 	}
 	endpoint := "127.0.0.1:" + strconv.Itoa(run.HostPort)
-	transport := &routeTransport{
-		provider: p, run: run, digest: digest, runtime: runtime, hostPort: run.HostPort,
-		username: p.config.BasicUsername, password: p.password(run),
-	}
 	dial := base.DialContext
 	if dial == nil {
 		dialer := &net.Dialer{Timeout: p.config.DockerTimeout, KeepAlive: 30 * time.Second}
 		dial = dialer.DialContext
 	}
-	base.Proxy = nil
-	base.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
-		if network != "tcp" || address != endpoint {
-			return nil, errors.New("background route dial target is not exact")
-		}
-		connection, err := dial(ctx, network, address)
-		if err != nil {
-			return nil, err
-		}
-		if err := transport.attest(ctx); err != nil {
-			_ = connection.Close()
-			return nil, err
-		}
-		return connection, nil
+	transport := &routeTransport{
+		provider: p, run: run, digest: digest, runtime: runtime, hostPort: run.HostPort, endpoint: endpoint, dial: dial,
+		username: p.config.BasicUsername, password: p.password(run),
 	}
+	base.Proxy = nil
+	base.DialContext = transport.dialContext
 	transport.base = base
-	return backgroundroute.NewTarget("http://"+endpoint, transport)
+	return transport, nil
 }
 
+// routeTransport forwards proxied requests only over connections attested to
+// the exact routed runtime. A TCP connection to the published loopback port is
+// bound to the container process that held the port when it was dialed and
+// cannot migrate to a replacement, so attesting at dial time keeps every
+// request on the exact runtime without a Docker inspect per request.
 type routeTransport struct {
 	base               http.RoundTripper
 	provider           *Provider
@@ -416,19 +417,37 @@ type routeTransport struct {
 	digest             string
 	runtime            RuntimeIdentity
 	hostPort           int
+	endpoint           string
+	dial               func(context.Context, string, string) (net.Conn, error)
 	username, password string
+	// configAttested records that the full container configuration was
+	// attested for this exact runtime. Configuration cannot change without a
+	// new runtime epoch, so later dials re-check only the runtime identity.
+	configAttested atomic.Bool
 }
 
 func (transport *routeTransport) RoundTrip(request *http.Request) (*http.Response, error) {
-	if err := transport.attest(request.Context()); err != nil {
-		return nil, err
-	}
 	forward := request.Clone(request.Context())
 	forward.Header = request.Header.Clone()
 	forward.Header.Del("Authorization")
 	forward.Header.Del("Cookie")
 	forward.SetBasicAuth(transport.username, transport.password)
 	return transport.base.RoundTrip(forward)
+}
+
+func (transport *routeTransport) dialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	if network != "tcp" || address != transport.endpoint {
+		return nil, errors.New("background route dial target is not exact")
+	}
+	connection, err := transport.dial(ctx, network, address)
+	if err != nil {
+		return nil, err
+	}
+	if err := transport.attest(ctx); err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
+	return connection, nil
 }
 
 func (transport *routeTransport) attest(ctx context.Context) error {
@@ -441,11 +460,15 @@ func (transport *routeTransport) attest(ctx context.Context) error {
 	if info.ID != transport.runtime.ContainerID {
 		return &IdentityError{Resource: "container", Identity: transport.run.ContainerIdentity, Reason: "named container ID differs from routed runtime"}
 	}
-	if err := transport.provider.attestContainer(transport.run, transport.digest, info, true); err != nil {
-		return &IdentityError{Resource: "container", Identity: transport.run.ContainerIdentity, Reason: err.Error()}
-	}
 	if err := requireRuntime(info, transport.runtime); err != nil {
 		return err
+	}
+	if !transport.configAttested.Load() {
+		if err := transport.provider.attestContainer(transport.run, transport.digest, info, true); err != nil {
+			return &IdentityError{Resource: "container", Identity: transport.run.ContainerIdentity, Reason: err.Error()}
+		}
+	} else if info.State == nil || !info.State.Running || info.State.Paused || info.State.Restarting || info.State.Dead {
+		return &IdentityError{Resource: "container", Identity: transport.run.ContainerIdentity, Reason: "routed runtime is not exactly running"}
 	}
 	port, err := hostPort(info)
 	if err != nil {
@@ -454,6 +477,7 @@ func (transport *routeTransport) attest(ctx context.Context) error {
 	if port != transport.hostPort {
 		return &IdentityError{Resource: "endpoint", Identity: transport.run.EndpointIdentity, Reason: "published port differs from routed runtime"}
 	}
+	transport.configAttested.Store(true)
 	return nil
 }
 

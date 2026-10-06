@@ -3,6 +3,8 @@ package taskenvdocker
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -729,8 +731,24 @@ func TestContainerLostResponsesAttestationAndExactEpochFence(t *testing.T) {
 	}
 }
 
-func TestBackgroundRouteTransportAttestsExactEpochBeforeForwarding(t *testing.T) {
+func TestBackgroundRouteTransportAttestsExactEpochPerConnection(t *testing.T) {
 	provider, docker, run := preparedProvider(t)
+	var forwarded atomic.Int32
+	var credentialsExact atomic.Bool
+	credentialsExact.Store(true)
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		forwarded.Add(1)
+		if username, password, ok := request.BasicAuth(); !ok || username != provider.config.BasicUsername || password != provider.password(run) || request.Header.Get("Cookie") != "" {
+			credentialsExact.Store(false)
+		}
+		writer.WriteHeader(http.StatusNoContent)
+	}))
+	defer upstream.Close()
+	_, port, err := net.SplitHostPort(strings.TrimPrefix(upstream.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	docker.hostPort = port
 	created, err := provider.EnsureContainer(context.Background(), run)
 	if err != nil {
 		t.Fatal(err)
@@ -743,28 +761,43 @@ func TestBackgroundRouteTransportAttestsExactEpochBeforeForwarding(t *testing.T)
 	run.ObservedContainerStartedAt = started.ContainerStarted
 	run.RuntimeEpoch = started.RuntimeEpoch
 	run.HostPort = started.HostPort
-	var forwarded atomic.Int32
-	provider.http.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
-		forwarded.Add(1)
-		if username, password, ok := request.BasicAuth(); !ok || username != provider.config.BasicUsername || password != provider.password(run) {
-			t.Errorf("forwarded route credentials were not exact")
-		}
-		return &http.Response{StatusCode: http.StatusNoContent, Header: make(http.Header), Body: http.NoBody, Request: request}, nil
-	})
-	digest, err := provider.validateRun(run)
+	transport, err := provider.newRouteTransport(run, started.RuntimeIdentity())
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := httptest.NewRequest(http.MethodGet, "http://127.0.0.1/", nil)
-	managerTransport := &routeTransport{base: provider.http.Transport, provider: provider, run: run, digest: digest,
-		runtime: started.RuntimeIdentity(), hostPort: run.HostPort, username: provider.config.BasicUsername, password: provider.password(run)}
-	response, err := managerTransport.RoundTrip(request)
-	if err != nil || response.StatusCode != http.StatusNoContent || forwarded.Load() != 1 {
-		t.Fatalf("exact route response=%v forwarded=%d error=%v", response, forwarded.Load(), err)
+	inspects := 0
+	docker.inspectHook = func() { inspects++ }
+	send := func() (*http.Response, error) {
+		request := httptest.NewRequest(http.MethodGet, "http://"+transport.endpoint+"/api/health", nil)
+		request.RequestURI = ""
+		request.Header.Set("Cookie", "session=browser")
+		response, err := transport.RoundTrip(request)
+		if err == nil {
+			_, _ = io.Copy(io.Discard, response.Body)
+			_ = response.Body.Close()
+		}
+		return response, err
 	}
+	for range 3 {
+		if response, err := send(); err != nil || response.StatusCode != http.StatusNoContent {
+			t.Fatalf("exact route response=%v error=%v", response, err)
+		}
+	}
+	if forwarded.Load() != 3 || !credentialsExact.Load() || inspects != 1 {
+		t.Fatalf("forwarded=%d exact_credentials=%t inspects=%d, want 3 requests over one attested connection", forwarded.Load(), credentialsExact.Load(), inspects)
+	}
+
+	// A replacement process epoch cannot inherit the old connection; the next
+	// dial re-checks the runtime identity and refuses to forward.
+	transport.base.(*http.Transport).CloseIdleConnections()
 	docker.info.State.StartedAt = "2026-08-31T12:00:01.123456789Z"
-	if _, err := managerTransport.RoundTrip(request); !errors.Is(err, ErrIdentityMismatch) || forwarded.Load() != 1 {
+	if _, err := send(); !errors.Is(err, ErrIdentityMismatch) || forwarded.Load() != 3 {
 		t.Fatalf("replacement route forwarded=%d error=%v", forwarded.Load(), err)
+	}
+	docker.info.State.StartedAt = started.ContainerStarted
+	docker.info.State.Running = false
+	if _, err := send(); !errors.Is(err, ErrIdentityMismatch) || forwarded.Load() != 3 {
+		t.Fatalf("stopped route forwarded=%d error=%v", forwarded.Load(), err)
 	}
 }
 
