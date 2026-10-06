@@ -1,39 +1,28 @@
 package proxy
 
 import (
-	"bytes"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-
-	"github.com/nebler/fern/internal/control"
 )
 
 const (
-	csrfHeaderName            = "X-Fern-CSRF-Token"
-	csrfTokenPath             = "/fern/api/v1/csrf"
-	csrfTokenTTL              = 10 * time.Minute
-	pairingCodeTTL            = 5 * time.Minute
-	deviceCredentialTTL       = 30 * 24 * time.Hour
-	pairingFailureWindow      = 5 * time.Minute
-	pairingIssueInterval      = time.Second
-	pairingSuccessInterval    = time.Second
-	maxGlobalPairingFailures  = 32
-	maxPairingCodeAttempts    = 5
-	maxPersistedPairingBytes  = 64 << 10
-	pairingPersistenceVersion = 1
+	csrfHeaderName           = "X-Fern-CSRF-Token"
+	csrfTokenPath            = "/fern/api/v1/csrf"
+	csrfTokenTTL             = 10 * time.Minute
+	pairingCodeTTL           = 5 * time.Minute
+	deviceCredentialTTL      = 30 * 24 * time.Hour
+	pairingFailureWindow     = 5 * time.Minute
+	pairingIssueInterval     = time.Second
+	pairingSuccessInterval   = time.Second
+	maxGlobalPairingFailures = 32
+	maxPairingCodeAttempts   = 5
 )
 
 type csrfCredentialKey struct{}
@@ -41,20 +30,6 @@ type csrfCredentialKey struct{}
 type pairingAttempt struct {
 	Count     int
 	ExpiresAt time.Time
-}
-
-type persistedPairingState struct {
-	Version         int                                `json:"version"`
-	Codes           map[string]time.Time               `json:"codes"`
-	Attempts        map[string]persistedPairingAttempt `json:"attempts,omitempty"`
-	InvalidAttempts []time.Time                        `json:"invalidAttempts,omitempty"`
-	LastIssued      time.Time                          `json:"lastIssued,omitempty"`
-	LastSuccess     time.Time                          `json:"lastSuccess,omitempty"`
-}
-
-type persistedPairingAttempt struct {
-	Count     int       `json:"count"`
-	ExpiresAt time.Time `json:"expiresAt"`
 }
 
 func isMutation(request *http.Request) bool {
@@ -147,132 +122,4 @@ func (state *pairingState) recordInvalidLocked(digest [sha256.Size]byte, now tim
 	}
 	state.attempts[digest] = attempt
 	state.invalidAttempts = append(state.invalidAttempts, now.UTC())
-}
-
-func pairingPersistencePath(store *control.Store) string {
-	if store == nil {
-		return ""
-	}
-	path, err := store.AuxiliaryStatePath("pairing")
-	if err != nil {
-		return ""
-	}
-	return path
-}
-
-func (state *pairingState) loadPersisted() error {
-	if state.persistencePath == "" {
-		return nil
-	}
-	file, err := os.Open(state.persistencePath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	data, err := io.ReadAll(io.LimitReader(file, maxPersistedPairingBytes+1))
-	if err != nil {
-		return err
-	}
-	if len(data) > maxPersistedPairingBytes {
-		return errors.New("pairing limiter state is too large")
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	var persisted persistedPairingState
-	if err := decoder.Decode(&persisted); err != nil {
-		return fmt.Errorf("read pairing limiter state: %w", err)
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return errors.New("invalid trailing pairing limiter state")
-	}
-	if persisted.Version != pairingPersistenceVersion {
-		return errors.New("unsupported pairing limiter state version")
-	}
-	if len(persisted.Codes) > maxOutstandingPairings || len(persisted.InvalidAttempts) > maxGlobalPairingFailures || len(persisted.Attempts) > maxGlobalPairingFailures+maxOutstandingPairings {
-		return errors.New("pairing limiter state exceeds bounds")
-	}
-	for encoded, expiry := range persisted.Codes {
-		digest, ok := decodePairingDigest(encoded)
-		if !ok {
-			return errors.New("invalid pairing code digest")
-		}
-		state.codes[digest] = expiry
-	}
-	for encoded, persistedAttempt := range persisted.Attempts {
-		digest, ok := decodePairingDigest(encoded)
-		if !ok || persistedAttempt.Count < 1 || persistedAttempt.Count > maxPairingCodeAttempts || persistedAttempt.ExpiresAt.IsZero() {
-			return errors.New("invalid pairing attempt state")
-		}
-		state.attempts[digest] = pairingAttempt{Count: persistedAttempt.Count, ExpiresAt: persistedAttempt.ExpiresAt}
-	}
-	state.invalidAttempts = append([]time.Time(nil), persisted.InvalidAttempts...)
-	state.lastIssued = persisted.LastIssued
-	state.lastSuccess = persisted.LastSuccess
-	state.prune(state.now())
-	return nil
-}
-
-func (state *pairingState) persistLocked() error {
-	if state.persistencePath == "" {
-		return nil
-	}
-	persisted := persistedPairingState{
-		Version: pairingPersistenceVersion, Codes: make(map[string]time.Time, len(state.codes)),
-		Attempts:        make(map[string]persistedPairingAttempt, len(state.attempts)),
-		InvalidAttempts: state.invalidAttempts, LastIssued: state.lastIssued, LastSuccess: state.lastSuccess,
-	}
-	for digest, expiry := range state.codes {
-		persisted.Codes[hex.EncodeToString(digest[:])] = expiry
-	}
-	for digest, attempt := range state.attempts {
-		persisted.Attempts[hex.EncodeToString(digest[:])] = persistedPairingAttempt{Count: attempt.Count, ExpiresAt: attempt.ExpiresAt}
-	}
-	directory := filepath.Dir(state.persistencePath)
-	temporary, err := os.CreateTemp(directory, ".pairing-*")
-	if err != nil {
-		return err
-	}
-	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
-	err = temporary.Chmod(0o600)
-	if err == nil {
-		err = json.NewEncoder(temporary).Encode(persisted)
-	}
-	if err == nil {
-		err = temporary.Sync()
-	}
-	closeErr := temporary.Close()
-	if err == nil {
-		err = closeErr
-	}
-	if err == nil {
-		err = os.Rename(temporaryName, state.persistencePath)
-	}
-	if err != nil {
-		return err
-	}
-	dir, err := os.Open(directory)
-	if err != nil {
-		return err
-	}
-	err = dir.Sync()
-	closeErr = dir.Close()
-	if err != nil {
-		return err
-	}
-	return closeErr
-}
-
-func decodePairingDigest(encoded string) ([sha256.Size]byte, bool) {
-	var digest [sha256.Size]byte
-	decoded, err := hex.DecodeString(encoded)
-	if err != nil || len(decoded) != len(digest) {
-		return digest, false
-	}
-	copy(digest[:], decoded)
-	return digest, true
 }

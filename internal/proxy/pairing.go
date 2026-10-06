@@ -43,8 +43,6 @@ type pairingState struct {
 	sessions              map[[sha256.Size]byte]time.Time
 	now                   func() time.Time
 	store                 *control.Store
-	persistencePath       string
-	persistenceErr        error
 	operatorCredentialID  string
 	operatorCredentialErr error
 }
@@ -71,8 +69,6 @@ func newPairingState(stores ...*control.Store) *pairingState {
 	}
 	if len(stores) != 0 {
 		state.store = stores[0]
-		state.persistencePath = pairingPersistencePath(stores[0])
-		state.persistenceErr = state.loadPersisted()
 		if stores[0] != nil {
 			// Resolved once so every operator request in this process attributes
 			// itself with the same stable, persisted random identifier.
@@ -180,11 +176,6 @@ func (state *pairingState) issue(writer http.ResponseWriter, request *http.Reque
 	now := state.now()
 	state.mu.Lock()
 	state.prune(now)
-	if state.persistenceErr != nil {
-		state.mu.Unlock()
-		writeUnavailable(writer, "pairing state")
-		return
-	}
 	if !state.lastIssued.IsZero() && now.Sub(state.lastIssued) < pairingIssueInterval {
 		state.mu.Unlock()
 		writer.Header().Set("Retry-After", "1")
@@ -205,15 +196,7 @@ func (state *pairingState) issue(writer http.ResponseWriter, request *http.Reque
 	}
 	digest := sha256.Sum256([]byte(code))
 	state.codes[digest] = now.Add(pairingCodeTTL)
-	previousIssued := state.lastIssued
 	state.lastIssued = now
-	if err := state.persistLocked(); err != nil {
-		delete(state.codes, digest)
-		state.lastIssued = previousIssued
-		state.mu.Unlock()
-		writeUnavailable(writer, "pairing state")
-		return
-	}
 	state.mu.Unlock()
 	setFernHeaders(writer.Header())
 	writer.Header().Set("Content-Type", "application/json")
@@ -242,11 +225,6 @@ func (state *pairingState) pair(writer http.ResponseWriter, request *http.Reques
 	hash := sha256.Sum256([]byte(code))
 	now := state.now()
 	state.mu.Lock()
-	if state.persistenceErr != nil {
-		state.mu.Unlock()
-		writeUnavailable(writer, "pairing state")
-		return
-	}
 	state.prune(now)
 	if len(state.invalidAttempts) >= maxGlobalPairingFailures {
 		state.mu.Unlock()
@@ -269,11 +247,6 @@ func (state *pairingState) pair(writer http.ResponseWriter, request *http.Reques
 	}
 	if !valid || !validName {
 		state.recordInvalidLocked(hash, now)
-		if err := state.persistLocked(); err != nil {
-			state.mu.Unlock()
-			writeUnavailable(writer, "pairing state")
-			return
-		}
 		state.mu.Unlock()
 		if !validName {
 			http.Error(writer, "invalid device name", http.StatusBadRequest)
@@ -290,13 +263,12 @@ func (state *pairingState) pair(writer http.ResponseWriter, request *http.Reques
 	}
 	session, pairErr := randomCredential()
 	if pairErr == nil {
-		// Consume the one-time code durably before creating a durable device
-		// grant. If a later effect fails, the operator issues a new code rather
-		// than risking reuse after a lost response.
+		// Consume the one-time code before creating a durable device grant. If
+		// a later effect fails, the operator issues a new code rather than
+		// risking reuse after a lost response.
 		delete(state.codes, hash)
 		delete(state.attempts, hash)
 		state.lastSuccess = now
-		pairErr = state.persistLocked()
 	}
 	if pairErr == nil {
 		if state.store == nil {

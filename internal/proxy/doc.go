@@ -15,8 +15,8 @@
 //
 // sameOrigin is a browser policy check, not authentication: a missing Origin
 // header is accepted when other checks pass, and device mutations still need
-// CSRF. Pairing state is a separate auxiliary file owned here, distinct from
-// control and pluginauth state. Device revocation persists before in-flight
+// CSRF. Pairing codes and their rate limits live only in memory, so a restart
+// invalidates outstanding codes. Device revocation persists before in-flight
 // requests are cancelled, and cancellation is cooperative, not proof that a
 // downstream effect was undone.
 package proxy
