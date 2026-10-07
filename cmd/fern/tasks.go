@@ -18,6 +18,7 @@ import (
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/observability"
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/runapi"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskartifact"
@@ -186,7 +187,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, store *taskstore.St
 
 	coordinator, err := backgroundruncoord.New(store, provider, artifact, ids, backgroundruncoord.Config{
 		WorkspaceID: durableWorkspace.ID,
-		Profile:     runapi.PluginOpenCodeProfile, ImageIdentity: cfg.Tasks.BackgroundImageID,
+		Profile:     rundomain.SourceProfile, ImageIdentity: cfg.Tasks.BackgroundImageID,
 		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: cfg.Tasks.Agent,
 		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID,
 		OperationTimeout: backgroundCloneTimeout,
@@ -210,7 +211,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, store *taskstore.St
 		RepositoryRemote:            "https://github.com/" + github.Repository.FullName,
 		BackgroundImageIdentity:     cfg.Tasks.BackgroundImageID,
 		BackgroundEnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil),
-		AvailableProfile:            runapi.PluginOpenCodeProfile, Store: store, Route: route, Generator: ids, ActorResolver: task.ContextActor,
+		Store:                       store, Route: route, Generator: ids, ActorResolver: task.ContextActor,
 		BaseVerifier: baseVerifier, Now: time.Now, RunTimeout: cfg.Tasks.RunTimeout, Agent: cfg.Tasks.Agent,
 		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID, RetentionVerifier: resultSource,
 		SealPolicyVersion: "fern.background-user-seal.v1", Wake: coordinator.Wake,

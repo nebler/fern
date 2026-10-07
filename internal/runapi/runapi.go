@@ -12,8 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
-	"unicode/utf8"
 
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/gitref"
@@ -26,7 +24,6 @@ import (
 
 const (
 	PathPrefix             = "/fern/api/runs"
-	PluginOpenCodeProfile  = rundomain.SourceProfile
 	maxCreateBodyBytes     = 32 << 10
 	maxEmptyBodyBytes      = 16
 	backgroundRunListLimit = 100
@@ -62,7 +59,6 @@ type Config struct {
 	RepositoryRemote            string
 	BackgroundImageIdentity     string
 	BackgroundEnvironmentSHA256 [32]byte
-	AvailableProfile            string
 	Store                       Store
 	Route                       Route
 	Generator                   *task.Generator
@@ -94,117 +90,112 @@ type retainedKey struct {
 }
 
 func New(config Config) (*Handler, error) {
-	if config.Store == nil || config.Route == nil || config.Generator == nil || config.ActorResolver == nil || config.BaseVerifier == nil || config.RetentionVerifier == nil || config.Now == nil ||
-		config.RunTimeout <= 0 || config.RepositoryID == 0 || config.RepositoryRemote == "" ||
-		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.BackgroundEnvironmentSHA256 == ([32]byte{}) {
-		return nil, errors.New("valid background run API configuration is required")
+	_, workspaceErr := task.ParseWorkspaceID(string(config.WorkspaceID))
+	checks := []struct {
+		field string
+		ok    bool
+	}{
+		{"WorkspaceID", workspaceErr == nil},
+		{"RepositoryID", config.RepositoryID != 0},
+		{"RepositoryRemote", gitref.ValidateGitHubRemote(config.RepositoryRemote) == nil},
+		{"BackgroundImageIdentity", config.BackgroundImageIdentity != ""},
+		{"BackgroundEnvironmentSHA256", config.BackgroundEnvironmentSHA256 != [32]byte{}},
+		{"Store", config.Store != nil},
+		{"Route", config.Route != nil},
+		{"Generator", config.Generator != nil},
+		{"ActorResolver", config.ActorResolver != nil},
+		{"BaseVerifier", config.BaseVerifier != nil},
+		{"RetentionVerifier", config.RetentionVerifier != nil},
+		{"Now", config.Now != nil},
+		{"RunTimeout", config.RunTimeout > 0},
+		{"Agent", config.Agent != ""},
+		{"ModelProvider", config.ModelProvider != ""},
+		{"Model", config.Model != ""},
+		{"SealPolicyVersion", config.SealPolicyVersion != ""},
 	}
-	if !validText(config.SealPolicyVersion, 1, 128) {
-		return nil, errors.New("valid background seal policy is required")
-	}
-	if _, err := task.ParseWorkspaceID(string(config.WorkspaceID)); err != nil {
-		return nil, errors.New("valid background run workspace is required")
-	}
-	if gitref.ValidateGitHubRemote(config.RepositoryRemote) != nil {
-		return nil, errors.New("canonical background run repository remote is required")
-	}
-	if (config.AvailableProfile == PluginOpenCodeProfile) != (config.BackgroundImageIdentity != "") ||
-		(config.AvailableProfile != "" && config.AvailableProfile != PluginOpenCodeProfile) {
-		return nil, errors.New("qualified background image and profile must be configured together")
+	for _, check := range checks {
+		if !check.ok {
+			return nil, fmt.Errorf("background run API configuration: %s is required", check.field)
+		}
 	}
 	return &Handler{config: config, commands: &service{config: config}}, nil
+}
+
+// route is one operation on a run resource. Collection operations ignore the
+// run ID.
+type route struct {
+	method string
+	scope  string
+	serve  func(*Handler, http.ResponseWriter, *http.Request, task.ActorSnapshot, task.RunID)
+}
+
+// routes maps a resource below PathPrefix to its operations: "" is the
+// collection, "{id}" one run, and "{id}/<action>" an action on it.
+var routes = map[string][]route{
+	"":            {{http.MethodGet, "run:read", (*Handler).list}, {http.MethodPost, "run:create", (*Handler).create}},
+	"{id}":        {{http.MethodGet, "run:read", (*Handler).get}},
+	"{id}/attach": {{http.MethodGet, "run:attach", (*Handler).attach}},
+	"{id}/stop":   {{http.MethodPost, "run:stop", (*Handler).stop}},
+	"{id}/result": {{http.MethodGet, "run:result", (*Handler).result}},
+	// Sealing turns the run's snapshot into its retained result, so it is
+	// granted with reading that result rather than as a separate capability.
+	"{id}/seal": {{http.MethodPost, "run:result", (*Handler).seal}},
 }
 
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if r.URL.EscapedPath() != r.URL.Path {
-		WriteError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
+		writeNotFound(w)
 		return
 	}
 	actor, ok := h.authorize(w, r)
 	if !ok {
 		return
 	}
-	if r.URL.Path == PathPrefix {
-		switch r.Method {
-		case http.MethodPost:
-			if !h.requireScope(w, r, actor, "run:create") {
-				return
+	resource, id, ok := parseRunPath(r.URL.Path)
+	operations, known := routes[resource]
+	if !ok || !known {
+		writeNotFound(w)
+		return
+	}
+	allowed := make([]string, 0, len(operations))
+	for _, operation := range operations {
+		if operation.method == r.Method {
+			if h.requireScope(w, r, actor, operation.scope) {
+				operation.serve(h, w, r, actor, id)
 			}
-			h.create(w, r, actor)
-		case http.MethodGet:
-			if !h.requireScope(w, r, actor, "run:read") {
-				return
-			}
-			h.list(w, r, actor)
-		default:
-			w.Header().Set("Allow", "GET, POST")
-			WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "The method is not allowed for this resource.")
+			return
 		}
-		return
+		allowed = append(allowed, operation.method)
 	}
-	if !strings.HasPrefix(r.URL.Path, PathPrefix+"/") {
-		WriteError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
-		return
+	w.Header().Set("Allow", strings.Join(allowed, ", "))
+	WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "The method is not allowed for this resource.")
+}
+
+// parseRunPath splits a request path into its routes key and run ID.
+func parseRunPath(path string) (resource string, id task.RunID, ok bool) {
+	rest, ok := strings.CutPrefix(path, PathPrefix)
+	if !ok || rest == "" {
+		return "", "", ok
 	}
-	parts := strings.Split(strings.TrimPrefix(r.URL.Path, PathPrefix+"/"), "/")
-	id, err := task.ParseRunID(parts[0])
-	if err != nil || len(parts) > 2 {
-		WriteError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
-		return
+	rest, ok = strings.CutPrefix(rest, "/")
+	if !ok {
+		return "", "", false
 	}
-	if len(parts) == 1 {
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w, http.MethodGet)
-			return
-		}
-		if !h.requireScope(w, r, actor, "run:read") {
-			return
-		}
-		h.get(w, r, actor, id)
-		return
+	runID, action, hasAction := strings.Cut(rest, "/")
+	id, err := task.ParseRunID(runID)
+	if err != nil {
+		return "", "", false
 	}
-	switch parts[1] {
-	case "attach":
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w, http.MethodGet)
-			return
-		}
-		if !h.requireScope(w, r, actor, "run:attach") {
-			return
-		}
-		h.attach(w, r, actor, id)
-	case "stop":
-		if r.Method != http.MethodPost {
-			methodNotAllowed(w, http.MethodPost)
-			return
-		}
-		if !h.requireScope(w, r, actor, "run:stop") {
-			return
-		}
-		h.stop(w, r, actor, id)
-	case "result":
-		if r.Method != http.MethodGet {
-			methodNotAllowed(w, http.MethodGet)
-			return
-		}
-		if !h.requireScope(w, r, actor, "run:result") {
-			return
-		}
-		h.result(w, r, actor, id)
-	case "seal":
-		if r.Method != http.MethodPost {
-			methodNotAllowed(w, http.MethodPost)
-			return
-		}
-		if !h.requireScope(w, r, actor, "run:result") {
-			return
-		}
-		h.seal(w, r, actor, id)
-	default:
-		WriteError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
+	if hasAction {
+		return "{id}/" + action, id, true
 	}
+	return "{id}", id, true
+}
+
+func writeNotFound(w http.ResponseWriter) {
+	WriteError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
 }
 
 type sealProjection struct {
@@ -375,7 +366,7 @@ type stopResponse struct {
 	State rundomain.State `json:"state"`
 }
 
-func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot) {
+func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, _ task.RunID) {
 	if !noQuery(r) || !exactJSON(r) {
 		WriteError(w, http.StatusBadRequest, "invalid_request", "The request is not valid.")
 		return
@@ -402,7 +393,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.Acto
 	WriteJSON(w, http.StatusAccepted, createResponse{admission.RunID, admission.Committed})
 }
 
-func (h *Handler) list(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot) {
+func (h *Handler) list(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, _ task.RunID) {
 	if !noQuery(r) || !noBody(r) {
 		WriteError(w, http.StatusBadRequest, "invalid_query", "Run listing does not accept query parameters.")
 		return
@@ -547,17 +538,6 @@ func exactJSON(r *http.Request) bool {
 }
 func noQuery(r *http.Request) bool { return r.URL.RawQuery == "" }
 func noBody(r *http.Request) bool  { return r.Body == nil || r.ContentLength == 0 }
-func validText(value string, min, max int) bool {
-	if len(value) < min || len(value) > max || !utf8.ValidString(value) {
-		return false
-	}
-	for _, char := range value {
-		if unicode.IsControl(char) {
-			return false
-		}
-	}
-	return true
-}
 func validateEmptyMutation(w http.ResponseWriter, r *http.Request) bool {
 	if !noQuery(r) {
 		WriteError(w, http.StatusBadRequest, "invalid_request", "This run operation does not accept query parameters.")
@@ -582,24 +562,18 @@ func validateEmptyMutation(w http.ResponseWriter, r *http.Request) bool {
 	}
 	return true
 }
-func methodNotAllowed(w http.ResponseWriter, method string) {
-	w.Header().Set("Allow", method)
-	WriteError(w, http.StatusMethodNotAllowed, "method_not_allowed", "The method is not allowed for this resource.")
-}
 func writeStoreError(w http.ResponseWriter, err error) {
 	switch {
 	case errors.Is(err, errInvalidCreate):
 		WriteError(w, http.StatusBadRequest, "invalid_run", "Repository, base, branch, instruction, or profile is not valid for this Fern workspace.")
 	case errors.Is(err, errInvalidBase):
 		WriteError(w, http.StatusBadRequest, "invalid_base", "base_oid must be an exact lowercase SHA-1 commit identity.")
-	case errors.Is(err, errProfileUnavailable):
-		WriteError(w, http.StatusServiceUnavailable, "profile_unavailable", fmt.Sprintf("Profile %s is unavailable: no background image qualified for it is configured.", PluginOpenCodeProfile))
 	case errors.Is(err, errBaseUnavailable):
 		WriteError(w, http.StatusUnprocessableEntity, "base_unavailable", "base_oid is not an exact commit reachable from an allowed configured-repository ref.")
 	case errors.Is(err, errReplayConflict):
 		WriteError(w, http.StatusConflict, "idempotency_conflict", "Idempotency-Key was already used for another request.")
 	case errors.Is(err, taskstore.ErrNotFound):
-		WriteError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
+		writeNotFound(w)
 	case errors.Is(err, taskstore.ErrIdempotencyConflict), errors.Is(err, taskstore.ErrInvalidState):
 		WriteError(w, http.StatusConflict, "conflict", "The run command conflicts with durable state.")
 	default:

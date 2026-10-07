@@ -31,11 +31,10 @@ const (
 )
 
 var (
-	errProfileUnavailable = errors.New("background profile unavailable")
-	errBaseUnavailable    = errors.New("background base unavailable")
-	errReplayConflict     = errors.New("idempotency key already used for another request")
-	errInvalidCreate      = errors.New("invalid run creation input")
-	errInvalidBase        = errors.New("invalid exact base commit")
+	errBaseUnavailable = errors.New("background base unavailable")
+	errReplayConflict  = errors.New("idempotency key already used for another request")
+	errInvalidCreate   = errors.New("invalid run creation input")
+	errInvalidBase     = errors.New("invalid exact base commit")
 )
 
 // BaseVerifier proves an exact commit is reachable from an allowed repository ref.
@@ -145,9 +144,6 @@ func (s *service) Create(ctx context.Context, actor task.ActorSnapshot, key task
 			return zero, err
 		}
 		return createAcceptance{current.RunID, true, true}, nil
-	}
-	if s.config.AvailableProfile != rundomain.SourceProfile {
-		return zero, errProfileUnavailable
 	}
 	if err := s.config.BaseVerifier.Verify(ctx, base); err != nil {
 		return zero, errBaseUnavailable

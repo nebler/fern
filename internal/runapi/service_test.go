@@ -80,7 +80,7 @@ func setupService(t *testing.T) (*service, *commandStore, *stubVerifier, task.Ac
 	wakes := new(int)
 	s := &service{config: Config{WorkspaceID: testWorkspace, RepositoryRemote: "https://github.com/owner/repository", Store: store, Generator: task.NewSecureGenerator(), BaseVerifier: base,
 		Now: func() time.Time { return time.Unix(1750000000, 123456789) }, RunTimeout: time.Hour,
-		AvailableProfile: rundomain.SourceProfile, SealPolicyVersion: "seal.v1",
+		SealPolicyVersion: "seal.v1",
 		Wake: func() {
 			if !store.committed {
 				t.Error("wake before commit")
@@ -107,7 +107,6 @@ func TestCreateCommitReplayAndIdentity(t *testing.T) {
 	}
 	store.found = true
 	base.err = errors.New("base gone")
-	s.config.AvailableProfile = ""
 	s.config.Now = func() time.Time { panic("replay read clock") }
 	replayed, err := s.Create(ctx, actor, "create", input)
 	if err != nil || !replayed.Replayed || replayed.RunID != accepted.RunID || base.calls != 1 || *wakes != 1 {

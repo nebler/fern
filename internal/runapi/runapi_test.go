@@ -90,7 +90,7 @@ func (store *resultProjectionStore) GetBackgroundRunResult(context.Context, task
 }
 
 func TestCreateMalformedJSONWritesOneError(t *testing.T) {
-	fixture := newAPIFixture(t, PluginOpenCodeProfile)
+	fixture := newAPIFixture(t)
 	for _, body := range []string{`{`, `{"unknown":true}`, `{"repository":"a","repository":"b"}`, strings.Repeat(" ", maxCreateBodyBytes+1)} {
 		response := fixture.request(http.MethodPost, PathPrefix, body, "invalid-json-key")
 		var payload struct {
@@ -109,7 +109,7 @@ func TestCreateMalformedJSONWritesOneError(t *testing.T) {
 }
 
 func TestRunAPIAdmissionReplayOwnershipStopAndRestart(t *testing.T) {
-	fixture := newAPIFixture(t, PluginOpenCodeProfile)
+	fixture := newAPIFixture(t)
 	created := fixture.request(http.MethodPost, PathPrefix, validCreateBody("Do the work"), "create-key")
 	var response struct {
 		RunID     string `json:"run_id"`
@@ -189,14 +189,14 @@ func TestRunAPIAdmissionReplayOwnershipStopAndRestart(t *testing.T) {
 }
 
 func TestRunAPIRejectsRepositoryBaseProfileScopeAndMalformedHTTP(t *testing.T) {
-	fixture := newAPIFixture(t, PluginOpenCodeProfile)
+	fixture := newAPIFixture(t)
 	tests := []struct {
 		name, body, key string
 		status          int
 	}{
 		{"remote", strings.Replace(validCreateBody("Work"), "owner/repository", "owner/other", 1), "remote", 400},
 		{"base", strings.Replace(validCreateBody("Work"), string(testBase), "ABC", 1), "base", 400},
-		{"profile", strings.Replace(validCreateBody("Work"), PluginOpenCodeProfile, "opencode-latest", 1), "profile", 400},
+		{"profile", strings.Replace(validCreateBody("Work"), rundomain.SourceProfile, "opencode-latest", 1), "profile", 400},
 		{"unknown field", strings.TrimSuffix(validCreateBody("Work"), "}") + `,"extra":true}`, "unknown", 400},
 		{"duplicate", strings.Replace(validCreateBody("Work"), `"profile":`, `"profile":"x","profile":`, 1), "duplicate", 400},
 	}
@@ -211,10 +211,6 @@ func TestRunAPIRejectsRepositoryBaseProfileScopeAndMalformedHTTP(t *testing.T) {
 	fixture.verifier.err = errors.New("unreachable")
 	if got := fixture.request(http.MethodPost, PathPrefix, validCreateBody("Work"), "unreachable"); got.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("unreachable=%d %s", got.Code, got.Body.String())
-	}
-	unavailable := newAPIFixture(t, "")
-	if got := unavailable.request(http.MethodPost, PathPrefix, validCreateBody("Work"), "profile-unavailable"); got.Code != http.StatusServiceUnavailable || !strings.Contains(got.Body.String(), "Profile "+PluginOpenCodeProfile+" is unavailable") {
-		t.Fatalf("unavailable=%d %s", got.Code, got.Body.String())
 	}
 	request := httptest.NewRequest(http.MethodGet, PathPrefix, nil)
 	unauthenticated := httptest.NewRecorder()
@@ -245,7 +241,7 @@ func TestRunAPIRejectsRepositoryBaseProfileScopeAndMalformedHTTP(t *testing.T) {
 }
 
 func TestRunAPIMutationsRequireBoundedEmptyObject(t *testing.T) {
-	fixture := newAPIFixture(t, PluginOpenCodeProfile)
+	fixture := newAPIFixture(t)
 	created := fixture.request(http.MethodPost, PathPrefix, validCreateBody("Work"), "create")
 	var response struct {
 		RunID string `json:"run_id"`
@@ -274,7 +270,7 @@ func TestRunAPIMutationsRequireBoundedEmptyObject(t *testing.T) {
 }
 
 func TestRunAPIStopReplayDoesNotNeedFreshEntropyOrTime(t *testing.T) {
-	fixture := newAPIFixture(t, PluginOpenCodeProfile)
+	fixture := newAPIFixture(t)
 	created := fixture.request(http.MethodPost, PathPrefix, validCreateBody("Work"), "create")
 	var response struct {
 		RunID string `json:"run_id"`
@@ -298,7 +294,7 @@ func TestRunAPIStopReplayDoesNotNeedFreshEntropyOrTime(t *testing.T) {
 }
 
 func TestRunAPIWakeFollowsDurableCreateAndStopCommitOnly(t *testing.T) {
-	fixture := newAPIFixture(t, PluginOpenCodeProfile)
+	fixture := newAPIFixture(t)
 	var wakes atomic.Int64
 	fixture.handler.config.Wake = func() {
 		wakes.Add(1)
@@ -342,7 +338,7 @@ func TestRunAPIWakeFollowsDurableCreateAndStopCommitOnly(t *testing.T) {
 }
 
 func TestRunAPISealIsStrictOwnedAndExactlyReplayable(t *testing.T) {
-	fixture := newAPIFixture(t, PluginOpenCodeProfile)
+	fixture := newAPIFixture(t)
 	created := fixture.request(http.MethodPost, PathPrefix, validCreateBody("seal this run"), "seal-create")
 	if created.Code != http.StatusAccepted {
 		t.Fatalf("create = %d: %s", created.Code, created.Body.String())
@@ -385,7 +381,7 @@ func TestRunAPISealIsStrictOwnedAndExactlyReplayable(t *testing.T) {
 }
 
 func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) {
-	fixture := newAPIFixture(t, PluginOpenCodeProfile)
+	fixture := newAPIFixture(t)
 	ids := task.NewSecureGenerator()
 	runID, _ := ids.RunID()
 	resultID, _ := ids.ResultID()
@@ -465,7 +461,7 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 	}
 }
 
-func newAPIFixture(t *testing.T, available string) *apiFixture {
+func newAPIFixture(t *testing.T) *apiFixture {
 	t.Helper()
 	directory := filepath.Join(t.TempDir(), "private")
 	if err := os.Mkdir(directory, 0o700); err != nil {
@@ -482,16 +478,13 @@ func newAPIFixture(t *testing.T, available string) *apiFixture {
 	}
 	fixture := &apiFixture{store: store, actor: pluginActor("pc_owner"), verifier: &countingVerifier{}, retained: &retentionVerifier{}, route: &fakeRoute{}, path: path, now: now}
 	t.Cleanup(func() { _ = store.Close() })
-	fixture.handler = fixture.buildHandler(t, available)
+	fixture.handler = fixture.buildHandler(t)
 	return fixture
 }
-func (f *apiFixture) buildHandler(t *testing.T, available string) *Handler {
+func (f *apiFixture) buildHandler(t *testing.T) *Handler {
 	t.Helper()
-	backgroundImage := ""
-	if available == PluginOpenCodeProfile {
-		backgroundImage = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	}
-	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), AvailableProfile: available, Store: f.store, Route: f.route, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, RetentionVerifier: f.retained, Now: func() time.Time { return f.now }, RunTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", SealPolicyVersion: "fern.background-user-seal.v1"})
+	backgroundImage := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), Store: f.store, Route: f.route, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, RetentionVerifier: f.retained, Now: func() time.Time { return f.now }, RunTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", SealPolicyVersion: "fern.background-user-seal.v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -501,7 +494,7 @@ func (f *apiFixture) buildHandler(t *testing.T, available string) *Handler {
 func (f *apiFixture) advanceToSession(t *testing.T, id task.RunID) taskstore.BackgroundRun {
 	t.Helper()
 	now := time.Date(2026, 8, 31, 12, 0, 1, 0, time.UTC)
-	queued, err := f.store.NextBackgroundRun(context.Background(), testWorkspace, PluginOpenCodeProfile)
+	queued, err := f.store.NextBackgroundRun(context.Background(), testWorkspace, rundomain.SourceProfile)
 	if err != nil || queued.RunID != id {
 		t.Fatalf("next run=%+v error=%v", queued, err)
 	}
@@ -547,20 +540,20 @@ func openTestRef(run taskstore.BackgroundRun, now time.Time) taskstore.Backgroun
 func (f *apiFixture) withActor(t *testing.T, actor task.ActorSnapshot) *apiFixture {
 	clone := *f
 	clone.actor = actor
-	clone.handler = clone.buildHandler(t, PluginOpenCodeProfile)
+	clone.handler = clone.buildHandler(t)
 	return &clone
 }
 func (f *apiFixture) withStore(t *testing.T, store *taskstore.Store) *apiFixture {
 	clone := *f
 	clone.store = store
-	clone.handler = clone.buildHandler(t, PluginOpenCodeProfile)
+	clone.handler = clone.buildHandler(t)
 	return &clone
 }
 func pluginActor(id string) task.ActorSnapshot {
 	return task.ActorSnapshot{Type: task.ActorOpenCode, ID: id, DisplayName: "OpenCode plugin", CredentialID: id, Authentication: "fern_plugin_bearer", RequestID: "request"}
 }
 func validCreateBody(instruction string) string {
-	value, _ := json.Marshal(createInput{Repository: "https://github.com/owner/repository", BaseOID: string(testBase), Branch: stringPointer("main"), Instruction: instruction, Profile: PluginOpenCodeProfile})
+	value, _ := json.Marshal(createInput{Repository: "https://github.com/owner/repository", BaseOID: string(testBase), Branch: stringPointer("main"), Instruction: instruction, Profile: rundomain.SourceProfile})
 	return string(value)
 }
 func stringPointer(value string) *string { return &value }
@@ -583,7 +576,7 @@ func (f *apiFixture) requestWithContentType(method, path, body, key, contentType
 }
 
 func TestRunAPIAttachIssuesOnlyForReadyActiveRoute(t *testing.T) {
-	fixture := newAPIFixture(t, PluginOpenCodeProfile)
+	fixture := newAPIFixture(t)
 	created := fixture.request(http.MethodPost, PathPrefix, validCreateBody("attach to this"), "attach-create")
 	var admission struct {
 		RunID task.RunID `json:"run_id"`
