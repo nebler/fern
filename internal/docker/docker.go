@@ -261,7 +261,7 @@ func (p *Provider) StartContainer(ctx context.Context, run store.Run, expectedID
 		return Observation{}, err
 	}
 	e, _ := makeEvidence(evidence{Effect: "container_start", Identity: run.ContainerIdentity, Spec: digest, Status: status, Container: info.ID, Started: runtime.StartedAt, Runtime: runtime.Token, Port: port})
-	return Observation{Evidence: e, ContainerID: info.ID, ContainerStarted: runtime.StartedAt, RuntimeEpoch: epoch, RuntimeToken: runtime.Token, HostPort: port, Endpoint: "http://127.0.0.1:" + strconv.Itoa(port)}, nil
+	return Observation{Evidence: e, ContainerID: info.ID, ContainerStarted: runtime.StartedAt, RuntimeEpoch: epoch, RuntimeToken: runtime.Token, HostPort: port}, nil
 }
 
 // attestContainer proves an inspected container is this run's: canonical name,
@@ -415,7 +415,7 @@ func (p *Provider) healthOnce(ctx context.Context, run store.Run, digest string,
 	}
 	e, _ := makeEvidence(evidence{Effect: "health", Identity: run.EndpointIdentity, Spec: digest, Status: "authenticated", Container: info.ID, Started: runtime.StartedAt, Runtime: runtime.Token, Port: port})
 	_, epoch, _ := runtimeIdentity(info)
-	return Observation{Evidence: e, ContainerID: info.ID, ContainerStarted: runtime.StartedAt, RuntimeEpoch: epoch, RuntimeToken: runtime.Token, HostPort: port, Endpoint: endpoint}, nil
+	return Observation{Evidence: e, ContainerID: info.ID, ContainerStarted: runtime.StartedAt, RuntimeEpoch: epoch, RuntimeToken: runtime.Token, HostPort: port}, nil
 }
 
 type healthResponse struct {

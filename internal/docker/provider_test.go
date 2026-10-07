@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1121,8 +1122,8 @@ func TestHealthExactContractAndRedirectCredentialNonLeak(t *testing.T) {
 		t.Fatal(err)
 	}
 	health, err := provider.Health(context.Background(), run, started.RuntimeIdentity())
-	if err != nil || health.Endpoint != server.URL || strings.Contains(health.Evidence, password) {
-		t.Fatalf("health evidence=%q endpoint=%q error=%v", health.Evidence, health.Endpoint, err)
+	if err != nil || "http://127.0.0.1:"+strconv.Itoa(health.HostPort) != server.URL || strings.Contains(health.Evidence, password) {
+		t.Fatalf("health evidence=%q port=%d error=%v", health.Evidence, health.HostPort, err)
 	}
 
 	var leaked atomic.Bool

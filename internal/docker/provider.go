@@ -175,7 +175,6 @@ type Observation struct {
 	RuntimeEpoch     int64
 	RuntimeToken     string
 	HostPort         int
-	Endpoint         string
 }
 
 // RuntimeIdentity returns the exact process fence carried by this observation.

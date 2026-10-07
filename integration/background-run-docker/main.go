@@ -282,7 +282,7 @@ func run() (resultErr error) {
 	if volumeInfo.Driver != "local" || volumeInfo.Options["type"] != "none" || volumeInfo.Options["o"] != "bind" || !withinHarnessRoot(runtimeRoot, volumeInfo.Options["device"]) {
 		return errors.New("real volume is not local-bind-backed beneath the quota runtime storage root")
 	}
-	if started.Endpoint == "" || started.HostPort == 0 {
+	if started.HostPort == 0 {
 		return errors.New("real loopback endpoint is absent")
 	}
 	if err := provider.Close(); err != nil {
@@ -338,7 +338,7 @@ func run() (resultErr error) {
 	if _, err := os.Stat(clonePath); !errors.Is(err, os.ErrNotExist) {
 		return errors.New("clone remains after cleanup")
 	}
-	fmt.Printf("PASS image_id=%s container_id=%s endpoint=%s key_mode=0600 clone_isolated=true auth=missing_wrong_correct github=scoped_private_rotated github_auth_guard=true credential_leaks=false reconstruction=true restart_fenced=true cleanup=complete\n", imageID, created.ContainerID, started.Endpoint)
+	fmt.Printf("PASS image_id=%s container_id=%s host_port=%d key_mode=0600 clone_isolated=true auth=missing_wrong_correct github=scoped_private_rotated github_auth_guard=true credential_leaks=false reconstruction=true restart_fenced=true cleanup=complete\n", imageID, created.ContainerID, started.HostPort)
 	return nil
 }
 

@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -294,6 +295,7 @@ func run() (resultErr error) {
 	if _, err := provider.Health(ctx, run, runtime); err != nil {
 		return err
 	}
+	endpoint := "http://127.0.0.1:" + strconv.Itoa(started.HostPort)
 	username, password, err := runtimeCredentials(ctx, cli, created.ContainerID)
 	if err != nil {
 		return err
@@ -302,7 +304,7 @@ func run() (resultErr error) {
 	sessionTransport := http.DefaultTransport.(*http.Transport).Clone()
 	sessionLoss := &lostResponseTransport{base: sessionTransport, path: "/api/session"}
 	lostSessionClient, err := opencode.NewClient(opencode.ClientConfig{
-		Endpoint: started.Endpoint, Username: username, Password: password,
+		Endpoint: endpoint, Username: username, Password: password,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: sessionLoss},
 	})
 	if err != nil {
@@ -334,7 +336,7 @@ func run() (resultErr error) {
 		return fmt.Errorf("session reconstructed provider health: %w", err)
 	}
 	oc, err := opencode.NewClient(opencode.ClientConfig{
-		Endpoint: started.Endpoint, Username: username, Password: password,
+		Endpoint: endpoint, Username: username, Password: password,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second},
 	})
 	if err != nil {
@@ -365,7 +367,7 @@ func run() (resultErr error) {
 	baseTransport := http.DefaultTransport.(*http.Transport).Clone()
 	loss := &lostResponseTransport{base: baseTransport, path: "/api/session/" + string(sessionID) + "/prompt"}
 	lossyClient, err := opencode.NewClient(opencode.ClientConfig{
-		Endpoint: started.Endpoint, Username: username, Password: password,
+		Endpoint: endpoint, Username: username, Password: password,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: loss},
 	})
 	if err != nil {
@@ -393,7 +395,7 @@ func run() (resultErr error) {
 		return fmt.Errorf("reconstructed provider health: %w", err)
 	}
 	oc, err = opencode.NewClient(opencode.ClientConfig{
-		Endpoint: started.Endpoint, Username: username, Password: password,
+		Endpoint: endpoint, Username: username, Password: password,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second},
 	})
 	if err != nil {
