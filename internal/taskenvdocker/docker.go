@@ -299,7 +299,7 @@ func (p *Provider) attestContainer(run taskstore.BackgroundRun, digest string, i
 func (p *Provider) expectedEnvironment(run taskstore.BackgroundRun) []string {
 	environment := make(map[string]string, len(p.imageEnv)+2)
 	maps.Copy(environment, p.imageEnv)
-	environment[usernameEnv] = p.config.BasicUsername
+	environment[usernameEnv] = basicUsername
 	environment[passwordEnv] = p.password(run)
 	result := make([]string, 0, len(environment))
 	for key, value := range environment {
@@ -418,7 +418,7 @@ func (p *Provider) healthOnce(ctx context.Context, run taskstore.BackgroundRun, 
 		name, user, password string
 		want                 int
 		body                 []byte
-	}{{"missing", "", "", http.StatusUnauthorized, []byte(`{"_tag":"UnauthorizedError","message":"Authentication required"}`)}, {"wrong", p.config.BasicUsername, password + "-wrong", http.StatusUnauthorized, []byte(`{"_tag":"UnauthorizedError","message":"Authentication required"}`)}, {"correct", p.config.BasicUsername, password, http.StatusOK, []byte(`{"healthy":true}`)}} {
+	}{{"missing", "", "", http.StatusUnauthorized, []byte(`{"_tag":"UnauthorizedError","message":"Authentication required"}`)}, {"wrong", basicUsername, password + "-wrong", http.StatusUnauthorized, []byte(`{"_tag":"UnauthorizedError","message":"Authentication required"}`)}, {"correct", basicUsername, password, http.StatusOK, []byte(`{"healthy":true}`)}} {
 		response, err := p.requestHealth(ctx, endpoint, probe.user, probe.password)
 		if err != nil {
 			return Observation{}, fmt.Errorf("%s credential health probe: %w", probe.name, err)

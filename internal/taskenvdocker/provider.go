@@ -45,6 +45,7 @@ const (
 	containerUser    = "1001:1001"
 	passwordEnv      = "OPENCODE_SERVER_PASSWORD"
 	usernameEnv      = "OPENCODE_SERVER_USERNAME"
+	basicUsername    = "opencode"
 	managedLabel     = "dev.fern.background-run.managed"
 	workspaceLabel   = "dev.fern.background-run.workspace"
 	taskLabel        = "dev.fern.background-run.task"
@@ -123,8 +124,6 @@ type Config struct {
 	LogMaxSize               string
 	LogMaxFiles              int
 	StopGrace                time.Duration
-	BasicUsername            string
-	HTTPClient               *http.Client
 	// GitHubTokens is nil only for hermetic no-GitHub tests/setup. Production
 	// supplies a repository-scoped App source and its exact configured identity.
 	GitHubTokens             githubapp.InstallationTokenSource
@@ -245,9 +244,6 @@ func New(ctx context.Context, config Config, api dockerAPI) (*Provider, error) {
 			return quotaIdentity{Device: 1, Project: 1, Blocks: 1, Inodes: 1}, verifier.VerifyRuntimeStorage(path)
 		}
 	}
-	if config.BasicUsername == "" {
-		config.BasicUsername = "opencode"
-	}
 	if err := validateConfig(config); err != nil {
 		return nil, err
 	}
@@ -299,14 +295,7 @@ func New(ctx context.Context, config Config, api dockerAPI) (*Provider, error) {
 		}
 		return nil, fmt.Errorf("qualified image environment: %w", err)
 	}
-	httpClient := &http.Client{}
-	if config.HTTPClient != nil {
-		*httpClient = *config.HTTPClient
-	}
-	if httpClient.Timeout <= 0 || httpClient.Timeout > 2*time.Second {
-		httpClient.Timeout = 2 * time.Second
-	}
-	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	httpClient := &http.Client{Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	return &Provider{config: config, docker: api, ownedCLI: owned, root: root, rootDevice: rootDevice, rootInode: rootInode, hostKey: hostKey, imageEnv: imageEnv, imageLabels: maps.Clone(inspection.Config.Labels), http: httpClient, lifecycle: &providerLifecycle{}}, nil
 }
 
@@ -351,7 +340,7 @@ func (p *Provider) OpenCodeClient(run taskstore.BackgroundRun, runtime RuntimeId
 		return nil, errors.New("exact committed background runtime is required")
 	}
 	return backgroundopencode.New(backgroundopencode.Config{
-		Endpoint: "http://127.0.0.1:" + strconv.Itoa(run.HostPort), Username: p.config.BasicUsername,
+		Endpoint: "http://127.0.0.1:" + strconv.Itoa(run.HostPort), Username: basicUsername,
 		Password: p.password(run), HTTPClient: httpClient,
 	})
 }
@@ -380,13 +369,6 @@ func (p *Provider) newRouteTransport(run taskstore.BackgroundRun, runtime Runtim
 		return nil, errors.New("standard background route transport is unavailable")
 	}
 	base = base.Clone()
-	if p.http.Transport != nil {
-		configured, ok := p.http.Transport.(*http.Transport)
-		if !ok {
-			return nil, errors.New("background route requires a standard HTTP transport")
-		}
-		base = configured.Clone()
-	}
 	endpoint := "127.0.0.1:" + strconv.Itoa(run.HostPort)
 	dial := base.DialContext
 	if dial == nil {
@@ -395,7 +377,7 @@ func (p *Provider) newRouteTransport(run taskstore.BackgroundRun, runtime Runtim
 	}
 	transport := &routeTransport{
 		provider: p, run: run, digest: digest, runtime: runtime, hostPort: run.HostPort, endpoint: endpoint, dial: dial,
-		username: p.config.BasicUsername, password: p.password(run),
+		username: basicUsername, password: p.password(run),
 	}
 	base.Proxy = nil
 	base.DialContext = transport.dialContext
@@ -493,9 +475,6 @@ func validateConfig(c Config) error {
 	}
 	if c.GitTimeout > c.WallTimeout || c.DockerTimeout > c.WallTimeout || c.HealthTimeout > c.WallTimeout {
 		return errors.New("operation timeout exceeds run wall limit")
-	}
-	if !validEnvToken(c.BasicUsername) {
-		return errors.New("valid Basic username is required")
 	}
 	if _, err := parseLogSize(c.LogMaxSize); err != nil {
 		return err
@@ -652,10 +631,6 @@ func validEnvKey(value string) bool {
 		}
 	}
 	return true
-}
-
-func validEnvToken(value string) bool {
-	return value != "" && len(value) <= 128 && !strings.ContainsAny(value, ":\r\n\x00")
 }
 
 func parseEnvironment(values []string) (map[string]string, error) {

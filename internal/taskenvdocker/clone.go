@@ -79,7 +79,7 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 	}
 
 	if statErr == nil {
-		size, err := p.attestClone(ctx, run, digest, path, true)
+		size, err := p.attestClone(ctx, run, digest, path)
 		if err != nil {
 			return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: err.Error()}
 		}
@@ -108,7 +108,7 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 			}
 			operation, cancel := context.WithTimeout(ctx, p.config.GitTimeout)
 			defer cancel()
-			size, err := p.attestRepository(operation, run, location.path, true)
+			size, err := p.attestRepository(operation, run, location.path)
 			if err != nil {
 				return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "staged recovery failed attestation: " + err.Error()}
 			}
@@ -175,7 +175,7 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 	if err := makeCloneWritable(stagedClone); err != nil {
 		return Observation{}, err
 	}
-	if _, err := p.attestRepository(operation, run, stagedClone, true); err != nil {
+	if _, err := p.attestRepository(operation, run, stagedClone); err != nil {
 		return Observation{}, err
 	}
 	stagedInfo, err := os.Lstat(stagedClone)
@@ -198,7 +198,7 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 		return Observation{}, fmt.Errorf("remove clone staging directory: %w", err)
 	}
 	stageLive = false
-	size, err := p.attestClone(operation, run, digest, path, true)
+	size, err := p.attestClone(operation, run, digest, path)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -323,17 +323,17 @@ func (p *Provider) removeExactCloneMarker(run taskstore.BackgroundRun, digest st
 	return atomicfile.SyncDir(p.root)
 }
 
-func (p *Provider) attestClone(ctx context.Context, run taskstore.BackgroundRun, digest, path string, requireBase bool) (int64, error) {
+func (p *Provider) attestClone(ctx context.Context, run taskstore.BackgroundRun, digest, path string) (int64, error) {
 	if err := p.attestCloneMarker(run, digest, path); err != nil {
 		return 0, err
 	}
 	if err := p.requireNoRunContainer(ctx, run, digest); err != nil {
 		return 0, err
 	}
-	return p.attestRepository(ctx, run, path, requireBase)
+	return p.attestRepository(ctx, run, path)
 }
 
-func (p *Provider) attestRepository(ctx context.Context, run taskstore.BackgroundRun, path string, requireBase bool) (int64, error) {
+func (p *Provider) attestRepository(ctx context.Context, run taskstore.BackgroundRun, path string) (int64, error) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return 0, errors.New("clone path is not an exact directory")
@@ -350,18 +350,8 @@ func (p *Provider) attestRepository(ctx context.Context, run taskstore.Backgroun
 	}{
 		{[]string{"rev-parse", "--git-common-dir"}, ".git"},
 		{[]string{"cat-file", "-t", string(run.BaseOID)}, "commit"},
-	}
-	if requireBase {
-		checks = append(checks,
-			struct {
-				args []string
-				want string
-			}{[]string{"rev-parse", "HEAD"}, string(run.BaseOID)},
-			struct {
-				args []string
-				want string
-			}{[]string{"status", "--porcelain=v2", "--untracked-files=all", "--ignored=no"}, ""},
-		)
+		{[]string{"rev-parse", "HEAD"}, string(run.BaseOID)},
+		{[]string{"status", "--porcelain=v2", "--untracked-files=all", "--ignored=no"}, ""},
 	}
 	for _, check := range checks {
 		output, err := p.git(ctx, path, check.args...)
@@ -384,10 +374,8 @@ func (p *Provider) attestRepository(ctx context.Context, run taskstore.Backgroun
 			return 0, errors.New("clone index contains skip-worktree or assume-unchanged entries")
 		}
 	}
-	if requireBase {
-		if _, err := p.git(ctx, path, "symbolic-ref", "-q", "HEAD"); err == nil {
-			return 0, errors.New("clone HEAD is not detached")
-		}
+	if _, err := p.git(ctx, path, "symbolic-ref", "-q", "HEAD"); err == nil {
+		return 0, errors.New("clone HEAD is not detached")
 	}
 	size, err := treeSize(ctx, path)
 	if err != nil {

@@ -740,7 +740,7 @@ func TestBackgroundRouteTransportAttestsExactEpochPerConnection(t *testing.T) {
 	credentialsExact.Store(true)
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		forwarded.Add(1)
-		if username, password, ok := request.BasicAuth(); !ok || username != provider.config.BasicUsername || password != provider.password(run) || request.Header.Get("Cookie") != "" {
+		if username, password, ok := request.BasicAuth(); !ok || username != basicUsername || password != provider.password(run) || request.Header.Get("Cookie") != "" {
 			credentialsExact.Store(false)
 		}
 		writer.WriteHeader(http.StatusNoContent)
@@ -1260,7 +1260,7 @@ func TestHealthExactContractAndRedirectCredentialNonLeak(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		user, candidate, ok := r.BasicAuth()
-		if !ok || user != provider.config.BasicUsername || candidate != password {
+		if !ok || user != basicUsername || candidate != password {
 			w.Header().Set("WWW-Authenticate", `Basic realm="Secure Area"`)
 			w.WriteHeader(http.StatusUnauthorized)
 			_, _ = w.Write([]byte(`{"_tag":"UnauthorizedError","message":"Authentication required"}`))
@@ -1287,9 +1287,7 @@ func TestHealthExactContractAndRedirectCredentialNonLeak(t *testing.T) {
 		http.Redirect(w, nil, target.URL, http.StatusFound)
 	}))
 	defer redirect.Close()
-	config := provider.config
-	config.HTTPClient = &http.Client{}
-	redirectProvider, err := New(context.Background(), config, docker)
+	redirectProvider, err := New(context.Background(), provider.config, docker)
 	if err != nil {
 		t.Fatal(err)
 	}
