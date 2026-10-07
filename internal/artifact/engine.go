@@ -1,4 +1,4 @@
-package taskartifact
+package artifact
 
 import (
 	"bytes"
@@ -39,7 +39,7 @@ type Engine struct {
 	closed        bool
 }
 
-func New(config Config) (*Engine, error) {
+func NewEngine(config Config) (*Engine, error) {
 	if config.CommandTimeout == 0 {
 		config.CommandTimeout = defaultTimeout
 	}

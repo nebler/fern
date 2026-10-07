@@ -1,32 +1,31 @@
-package taskresultsource
+package artifact
 
 import (
 	"context"
 	"errors"
 
 	"github.com/nebler/fern/internal/store"
-	"github.com/nebler/fern/internal/taskartifact"
 )
 
-type Artifact interface {
-	Inspect(context.Context, taskartifact.Locator) (taskartifact.Snapshot, error)
-	Acquire(context.Context, taskartifact.Locator) (taskartifact.Snapshot, *taskartifact.Checkout, error)
+type ArtifactReader interface {
+	Inspect(context.Context, Locator) (Snapshot, error)
+	Acquire(context.Context, Locator) (Snapshot, *Checkout, error)
 }
 
 type Resolver struct {
-	artifact Artifact
+	artifact ArtifactReader
 }
 
-func New(artifact Artifact) (*Resolver, error) {
-	if artifact == nil {
+func NewResolver(engine ArtifactReader) (*Resolver, error) {
+	if engine == nil {
 		return nil, errors.New("valid result source configuration is required")
 	}
-	return &Resolver{artifact: artifact}, nil
+	return &Resolver{artifact: engine}, nil
 }
 
 // Acquire returns a fresh repository and an idempotent mandatory cleanup.
 func (r *Resolver) Acquire(ctx context.Context, projection store.BackgroundRunResultProjection) (string, func() error, error) {
-	locator, err := taskartifact.ParseLocator(projection.Result.CASLocator())
+	locator, err := ParseLocator(projection.Result.CASLocator())
 	if err != nil {
 		return "", nil, err
 	}
@@ -50,7 +49,7 @@ func (r *Resolver) Acquire(ctx context.Context, projection store.BackgroundRunRe
 // Verify freshly proves that the retained artifact is present, intact, and
 // bound to the complete durable run and result.
 func (r *Resolver) Verify(ctx context.Context, projection store.BackgroundRunResultProjection) error {
-	locator, err := taskartifact.ParseLocator(projection.Result.CASLocator())
+	locator, err := ParseLocator(projection.Result.CASLocator())
 	if err != nil {
 		return err
 	}
@@ -61,7 +60,7 @@ func (r *Resolver) Verify(ctx context.Context, projection store.BackgroundRunRes
 	return verifyTuple(projection, snapshot)
 }
 
-func verifyTuple(projection store.BackgroundRunResultProjection, snapshot taskartifact.Snapshot) error {
+func verifyTuple(projection store.BackgroundRunResultProjection, snapshot Snapshot) error {
 	run, result := projection.Run, projection.Result
 	if result.State != store.ResultSealed || result.RunID != run.RunID || run.Seal == nil || run.Seal.ResultID != result.ID ||
 		snapshot.RepositoryID != run.RepositoryID || snapshot.WorkspaceID != run.WorkspaceID || snapshot.RunID != run.RunID ||

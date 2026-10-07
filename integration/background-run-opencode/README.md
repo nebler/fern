@@ -24,7 +24,7 @@ flowchart TD
   serial -->|"real API envelope and deny-policy checks"| attach["verifySerialRoute -> verifySerialAPIProjections / verifySerialDeniedMethods"]
   attach -->|"bounded authenticated request"| req["serialAttachmentRequest -> stdlib net/http"]
   serial -->|"seal and preserve committed plus dirty changes"| retain["runRetainedResultScenario"]
-  retain -->|"independent checkouts after runtime cleanup"| artifact["internal/taskartifact / internal/taskresultsource"]
+  retain -->|"independent checkouts after runtime cleanup"| artifact["internal/artifact"]
   serial -->|"reject changed runtime before dispatch"| fence["runPreDispatchFenceScenario"]
   main -->|"exact runtime and temporary-root cleanup"| cleanup["cleanupOpenCode"]
 ```
@@ -86,7 +86,7 @@ raw credential-bearing diagnostics.
 The retained-result scenario admits durable work, advances `RunOnce` to working,
 adds committed and dirty fixture changes, seals with revision/identity checks,
 and advances to `result_ready` plus `cleanup_complete`. It checks that retained
-artifact/result tuples agree, resolves through `taskresultsource`, and materializes
+artifact/result tuples agree, resolves through `artifact.Resolver`, and materializes
 two independent checkouts containing both changes. Those checkouts must not reuse
 the disposable clone and must disappear when closed.
 

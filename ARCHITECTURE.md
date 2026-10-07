@@ -379,7 +379,7 @@ reconstructable. Every positive plugin API projection comes from a fresh CAS
 inspection checked against the complete run and result tuple. Artifact
 locators and host paths are not returned through the plugin API.
 
-Result consumption uses `taskartifact.Engine.Acquire` to perform one fresh full
+Result consumption uses `artifact.Engine.Acquire` to perform one fresh full
 verification and return its snapshot together with an owned detached checkout.
 The result-source resolver checks that snapshot against the durable run and
 result, closing the checkout on mismatch. Materialization still checks the
@@ -550,8 +550,7 @@ ownership boundaries.
 | `internal/backgroundruncoord` | serial run effect coordinator and recovery |
 | `cmd/fern` | CLI, composition, backup, credentials, process lifecycle |
 | `internal/store` | the SQLite database: schema 12, run/result authority and state machines |
-| `internal/taskartifact` | deterministic Git bundle creation, CAS, materialization |
-| `internal/taskresultsource` | CAS-only result binding and verified checkout acquisition |
+| `internal/artifact` | deterministic Git bundle creation, CAS, materialization, and CAS-only result binding with verified checkout acquisition |
 | `internal/taskenvdocker` | disposable Docker resources, writer proof, container GitHub credential delivery |
 | `internal/opencode` | pinned disposable OpenCode client and observations; the Router's exact live target/session capabilities, request policy, shutdown, and fencing |
 | `internal/proxy` | remote/operator ingress, pairing, and browser security |

@@ -1,4 +1,4 @@
-package taskartifact
+package artifact
 
 import (
 	"bytes"
@@ -681,7 +681,7 @@ func TestConfigurationAndCheckoutIdentity(t *testing.T) {
 	if err := os.Symlink(engine.casRoot, symlink); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(Config{GitExecutable: engine.gitExecutable, CASRoot: symlink, WorkRoot: engine.workRoot}); err == nil {
+	if _, err := NewEngine(Config{GitExecutable: engine.gitExecutable, CASRoot: symlink, WorkRoot: engine.workRoot}); err == nil {
 		t.Fatal("symlink root accepted")
 	}
 	_, staged, err := engine.Snapshot(context.Background(), testSnapshotSpec(t, mustSource(t, repository), base, 6))
@@ -727,7 +727,7 @@ func TestNewRemovesOnlyInterruptedEngineDirectories(t *testing.T) {
 	if err := os.Mkdir(committed, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := New(Config{GitExecutable: engine.gitExecutable, CASRoot: engine.casRoot, WorkRoot: engine.workRoot}); err != nil {
+	if _, err := NewEngine(Config{GitExecutable: engine.gitExecutable, CASRoot: engine.casRoot, WorkRoot: engine.workRoot}); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{
@@ -769,7 +769,7 @@ func testEngineRepository(t testing.TB) (*Engine, string, domain.GitOID) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	engine, err := New(Config{GitExecutable: gitPath, CASRoot: casRoot, WorkRoot: workRoot, BundleBytes: 16 << 20, BlobBytes: 4 << 20})
+	engine, err := NewEngine(Config{GitExecutable: gitPath, CASRoot: casRoot, WorkRoot: workRoot, BundleBytes: 16 << 20, BlobBytes: 4 << 20})
 	if err != nil {
 		t.Fatal(err)
 	}

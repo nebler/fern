@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebler/fern/internal/artifact"
 	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
-	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
 )
 
@@ -21,13 +21,13 @@ func TestExportRecoveryKeepsOriginalFailure(t *testing.T) {
 	}
 }
 
-func retainedTuple(t *testing.T) (taskartifact.Snapshot, store.BackgroundRun, store.Result) {
+func retainedTuple(t *testing.T) (artifact.Snapshot, store.BackgroundRun, store.Result) {
 	t.Helper()
-	digest, err := taskartifact.NewDigest([32]byte{1})
+	digest, err := artifact.NewDigest([32]byte{1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot := taskartifact.Snapshot{RepositoryID: 42, WorkspaceID: "workspace", RunID: "task", ResultID: "result",
+	snapshot := artifact.Snapshot{RepositoryID: 42, WorkspaceID: "workspace", RunID: "task", ResultID: "result",
 		OpenCodeSessionID: "session", OpenCodeMessageID: "message", Base: "base", Result: "result", Tree: "tree",
 		ChangesSHA256: digest, ManifestSHA256: digest, BundleSHA256: digest, BundleBytes: 42}
 	run := store.BackgroundRun{RepositoryID: snapshot.RepositoryID, WorkspaceID: snapshot.WorkspaceID, RunID: snapshot.RunID,
@@ -71,15 +71,15 @@ func TestMaterializationProofOmitsHostPathButBindsIdentity(t *testing.T) {
 // Embedding the unused boundary makes any unexpected artifact mutation panic.
 type failingRetainedArtifact struct {
 	Artifact
-	snapshot taskartifact.Snapshot
+	snapshot artifact.Snapshot
 	err      error
 }
 
-func (f failingRetainedArtifact) Inspect(context.Context, taskartifact.Locator) (taskartifact.Snapshot, error) {
+func (f failingRetainedArtifact) Inspect(context.Context, artifact.Locator) (artifact.Snapshot, error) {
 	return f.snapshot, f.err
 }
 
-func (f failingRetainedArtifact) Materialize(context.Context, taskartifact.Locator) (*taskartifact.Checkout, error) {
+func (f failingRetainedArtifact) Materialize(context.Context, artifact.Locator) (*artifact.Checkout, error) {
 	return nil, f.err
 }
 

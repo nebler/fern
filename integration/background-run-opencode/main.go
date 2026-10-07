@@ -23,13 +23,12 @@ import (
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
+	"github.com/nebler/fern/internal/artifact"
 	"github.com/nebler/fern/internal/backgroundruncoord"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
-	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
-	"github.com/nebler/fern/internal/taskresultsource"
 )
 
 const (
@@ -45,7 +44,7 @@ func sourceImageReference() string {
 	return "fern/opencode-background-source:dev"
 }
 
-func integrationArtifactEngine(root string) (*taskartifact.Engine, error) {
+func integrationArtifactEngine(root string) (*artifact.Engine, error) {
 	cas, work := filepath.Join(root, "cas"), filepath.Join(root, "work")
 	for _, path := range []string{root, cas, work} {
 		if err := os.Mkdir(path, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
@@ -60,7 +59,7 @@ func integrationArtifactEngine(root string) (*taskartifact.Engine, error) {
 	if err != nil {
 		return nil, err
 	}
-	return taskartifact.New(taskartifact.Config{GitExecutable: git, CASRoot: cas, WorkRoot: work, CommandTimeout: 30 * time.Second})
+	return artifact.NewEngine(artifact.Config{GitExecutable: git, CASRoot: cas, WorkRoot: work, CommandTimeout: 30 * time.Second})
 }
 
 type providerStats struct {
@@ -481,11 +480,11 @@ func canonicalImageID(value string) bool {
 }
 
 func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, providerEndpoint string, provider *taskenvdocker.Provider, cli *client.Client, imageID, base string) (resultErr error) {
-	artifact, err := integrationArtifactEngine(filepath.Join(root, "serial-artifacts"))
+	engine, err := integrationArtifactEngine(filepath.Join(root, "serial-artifacts"))
 	if err != nil {
 		return err
 	}
-	defer artifact.Close()
+	defer engine.Close()
 	statsBefore, err := readStats(providerEndpoint)
 	if err != nil {
 		return err
@@ -565,7 +564,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 		HistoryBounds: opencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000}, Now: time.Now,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: loss}, AfterPromptCall: func(error) { cancelOperation() }, Route: route,
 	}
-	coordinator, err := backgroundruncoord.New(runStore, provider, artifact, ids, config)
+	coordinator, err := backgroundruncoord.New(runStore, provider, engine, ids, config)
 	if err != nil {
 		_ = runStore.Close()
 		return err
@@ -615,7 +614,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 	config.AfterPromptCall = nil
 	config.Now = func() time.Time { return time.Now().Add(2 * time.Minute) }
 	config.Route = route
-	coordinator, err = backgroundruncoord.New(runStore, provider, artifact, ids, config)
+	coordinator, err = backgroundruncoord.New(runStore, provider, engine, ids, config)
 	if err != nil {
 		return err
 	}
@@ -732,10 +731,10 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 		Scan(&runState, &runPhase, &runReason); err != nil || runState != "failed" || runPhase != "cleanup_complete" || runReason != "runtime_unavailable" {
 		return fmt.Errorf("serial terminal run state=%s phase=%s reason=%s error=%v", runState, runPhase, runReason, err)
 	}
-	if err := runRetainedResultScenario(ctx, root, cloneRoot, repository, runStore, provider, artifact, ids, workspaceID, imageID, base, route); err != nil {
+	if err := runRetainedResultScenario(ctx, root, cloneRoot, repository, runStore, provider, engine, ids, workspaceID, imageID, base, route); err != nil {
 		return err
 	}
-	if err := runPreDispatchFenceScenario(ctx, root, cloneRoot, provider, artifact, cli, ids, workspaceID, imageID, base, route); err != nil {
+	if err := runPreDispatchFenceScenario(ctx, root, cloneRoot, provider, engine, cli, ids, workspaceID, imageID, base, route); err != nil {
 		return err
 	}
 	labelled, err := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(
@@ -779,7 +778,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 }
 
 func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository string, runStore *store.Store, provider *taskenvdocker.Provider,
-	artifact *taskartifact.Engine, ids *domain.Generator, workspaceID domain.WorkspaceID, imageID, base string, route *opencode.Router,
+	engine *artifact.Engine, ids *domain.Generator, workspaceID domain.WorkspaceID, imageID, base string, route *opencode.Router,
 ) error {
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
@@ -820,7 +819,7 @@ func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository 
 		HistoryBounds: opencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000},
 		Now:           func() time.Time { return time.Now().Add(3 * time.Minute) }, HTTPClient: &http.Client{Timeout: 10 * time.Second}, Route: route,
 	}
-	coordinator, err := backgroundruncoord.New(runStore, provider, artifact, ids, config)
+	coordinator, err := backgroundruncoord.New(runStore, provider, engine, ids, config)
 	if err != nil {
 		return err
 	}
@@ -896,11 +895,11 @@ func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository 
 	if projection.Result.ID != resultID || projection.Result.Outcome != domain.ResultChanged || projection.Result.State != store.ResultSealed {
 		return fmt.Errorf("retained result tuple mismatch: %+v", projection)
 	}
-	locator, err := taskartifact.ParseLocator(projection.Result.CASLocator())
+	locator, err := artifact.ParseLocator(projection.Result.CASLocator())
 	if err != nil {
 		return err
 	}
-	resolver, err := taskresultsource.New(artifact)
+	resolver, err := artifact.NewResolver(engine)
 	if err != nil {
 		return err
 	}
@@ -919,7 +918,7 @@ func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository 
 	}
 	var previous string
 	for attempt := 0; attempt < 2; attempt++ {
-		checkout, materializeErr := artifact.Materialize(ctx, locator)
+		checkout, materializeErr := engine.Materialize(ctx, locator)
 		if materializeErr != nil {
 			return materializeErr
 		}
@@ -1047,7 +1046,7 @@ func serialRouteStatus(origin, token, path string) (int, error) {
 	return response.StatusCode, readErr
 }
 
-func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, provider *taskenvdocker.Provider, artifact *taskartifact.Engine, cli *client.Client,
+func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, provider *taskenvdocker.Provider, engine *artifact.Engine, cli *client.Client,
 	ids *domain.Generator, workspaceID domain.WorkspaceID, imageID, base string, route *opencode.Router) error {
 	databasePath := filepath.Join(root, "fence-task-store.sqlite")
 	runStore, err := store.Open(ctx, databasePath)
@@ -1100,7 +1099,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 		Now:           func() time.Time { return time.Now().Add(2 * time.Minute) }, HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: transport}, Route: route,
 		AfterPromptFence: crash,
 	}
-	coordinator, err := backgroundruncoord.New(runStore, provider, artifact, ids, config)
+	coordinator, err := backgroundruncoord.New(runStore, provider, engine, ids, config)
 	if err != nil {
 		return err
 	}
@@ -1133,7 +1132,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 	}
 	config.Now = func() time.Time { return time.Now().Add(4 * time.Minute) }
 	config.AfterPromptFence = nil
-	coordinator, err = backgroundruncoord.New(runStore, provider, artifact, ids, config)
+	coordinator, err = backgroundruncoord.New(runStore, provider, engine, ids, config)
 	if err != nil {
 		return err
 	}

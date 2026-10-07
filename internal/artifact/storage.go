@@ -1,4 +1,4 @@
-package taskartifact
+package artifact
 
 import (
 	"bytes"

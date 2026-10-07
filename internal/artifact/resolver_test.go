@@ -1,4 +1,4 @@
-package taskresultsource
+package artifact
 
 import (
 	"context"
@@ -11,22 +11,21 @@ import (
 
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/store"
-	"github.com/nebler/fern/internal/taskartifact"
 )
 
 type countingArtifact struct {
-	*taskartifact.Engine
+	*Engine
 	inspects, acquisitions int
-	lastCheckout           *taskartifact.Checkout
+	lastCheckout           *Checkout
 	lastPath               string
 }
 
-func (a *countingArtifact) Inspect(ctx context.Context, locator taskartifact.Locator) (taskartifact.Snapshot, error) {
+func (a *countingArtifact) Inspect(ctx context.Context, locator Locator) (Snapshot, error) {
 	a.inspects++
 	return a.Engine.Inspect(ctx, locator)
 }
 
-func (a *countingArtifact) Acquire(ctx context.Context, locator taskartifact.Locator) (taskartifact.Snapshot, *taskartifact.Checkout, error) {
+func (a *countingArtifact) Acquire(ctx context.Context, locator Locator) (Snapshot, *Checkout, error) {
 	a.acquisitions++
 	snapshot, checkout, err := a.Engine.Acquire(ctx, locator)
 	a.lastCheckout, a.lastPath = checkout, checkout.Path()
@@ -73,7 +72,7 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	engine, err := taskartifact.New(taskartifact.Config{GitExecutable: git, CASRoot: cas, WorkRoot: work, CommandTimeout: time.Minute})
+	engine, err := NewEngine(Config{GitExecutable: git, CASRoot: cas, WorkRoot: work, CommandTimeout: time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,16 +82,16 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 	runID, _ := ids.RunID()
 	resultID, _ := ids.ResultID()
 	sessionID, messageID := mustSession(t, ids), mustMessage(t, ids)
-	source, err := taskartifact.NewSource(repository, workspaceID, runID)
+	source, err := NewSource(repository, workspaceID, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile, _ := taskartifact.NewDigest(sha256.Sum256([]byte("profile")))
-	environment, _ := taskartifact.NewDigest(sha256.Sum256([]byte("environment")))
-	snapshot, staged, err := engine.Snapshot(context.Background(), taskartifact.SnapshotSpec{Source: source, RepositoryID: 1,
+	profile, _ := NewDigest(sha256.Sum256([]byte("profile")))
+	environment, _ := NewDigest(sha256.Sum256([]byte("environment")))
+	snapshot, staged, err := engine.Snapshot(context.Background(), SnapshotSpec{Source: source, RepositoryID: 1,
 		ResultID: resultID, ImageIdentity: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		Profile: "profile", ProfileSHA256: profile, EnvironmentSHA256: environment, ResourceSpecVersion: taskartifact.ResourceSpecVersion,
-		OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID, SnapshotPolicyVersion: taskartifact.SnapshotPolicyV1,
+		Profile: "profile", ProfileSHA256: profile, EnvironmentSHA256: environment, ResourceSpecVersion: ResourceSpecVersion,
+		OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID, SnapshotPolicyVersion: SnapshotPolicyV1,
 		Base: base, EpochSecond: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +109,7 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 			SealedAt: &sealedAt},
 	}
 	counted := &countingArtifact{Engine: engine}
-	resolver, err := New(counted)
+	resolver, err := NewResolver(counted)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +143,7 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 			changed.Run.Seal = &seal
 			test.mutate(&changed)
 			changedEngine := &countingArtifact{Engine: engine}
-			changedResolver, newErr := New(changedEngine)
+			changedResolver, newErr := NewResolver(changedEngine)
 			if newErr != nil {
 				t.Fatal(newErr)
 			}

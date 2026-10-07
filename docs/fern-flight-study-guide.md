@@ -258,8 +258,7 @@ proven security sandbox.
 - `backgroundruncoord`: serial engine that converts durable phases into effects.
 - `taskenvdocker`: Docker clone/volume/container policy and credential handoff.
 - `opencode`: pinned OpenCode session/prompt/observation protocol, plus the exact live-session attachment router and fencing.
-- `taskartifact`: Git snapshot/bundle/manifest/CAS verification.
-- `taskresultsource`: matches a durable result to freshly verified artifact bytes.
+- `artifact`: Git snapshot/bundle/manifest/CAS verification, and the resolver that matches a durable result to freshly verified artifact bytes.
 - `proxy`, `control`, `pluginauth`: HTTP ingress, browser pairing, device/plugin auth.
 - `githubapp`: GitHub App credential storage and scoped token issuance.
 

@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nebler/fern/internal/artifact"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
-	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
 )
 
@@ -59,16 +59,16 @@ type Coordinator struct {
 // Artifact is the narrow retained-result CAS boundary. StagedLocator and
 // Checkout remain opaque engine capabilities and never enter durable state.
 type Artifact interface {
-	Snapshot(context.Context, taskartifact.SnapshotSpec) (taskartifact.Snapshot, taskartifact.StagedLocator, error)
-	StagedManifest(context.Context, taskartifact.StagedLocator) ([]byte, taskartifact.Digest, error)
-	Store(context.Context, taskartifact.StagedLocator) (taskartifact.Locator, error)
-	Discard(taskartifact.StagedLocator) error
-	Inspect(context.Context, taskartifact.Locator) (taskartifact.Snapshot, error)
-	Materialize(context.Context, taskartifact.Locator) (*taskartifact.Checkout, error)
+	Snapshot(context.Context, artifact.SnapshotSpec) (artifact.Snapshot, artifact.StagedLocator, error)
+	StagedManifest(context.Context, artifact.StagedLocator) ([]byte, artifact.Digest, error)
+	Store(context.Context, artifact.StagedLocator) (artifact.Locator, error)
+	Discard(artifact.StagedLocator) error
+	Inspect(context.Context, artifact.Locator) (artifact.Snapshot, error)
+	Materialize(context.Context, artifact.Locator) (*artifact.Checkout, error)
 }
 
-func New(runStore *store.Store, provider *taskenvdocker.Provider, artifact Artifact, ids *domain.Generator, config Config) (*Coordinator, error) {
-	if runStore == nil || provider == nil || artifact == nil || ids == nil || config.Now == nil || config.HTTPClient == nil || config.Route == nil ||
+func New(runStore *store.Store, provider *taskenvdocker.Provider, engine Artifact, ids *domain.Generator, config Config) (*Coordinator, error) {
+	if runStore == nil || provider == nil || engine == nil || ids == nil || config.Now == nil || config.HTTPClient == nil || config.Route == nil ||
 		config.Profile != store.BackgroundRunSourceProfile || config.ImageIdentity == "" || config.EnvironmentSHA256 == ([32]byte{}) ||
 		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.OperationTimeout <= 0 ||
 		config.OperationTimeout > 5*time.Minute || config.PollInterval <= 0 ||
@@ -80,7 +80,7 @@ func New(runStore *store.Store, provider *taskenvdocker.Provider, artifact Artif
 	if _, err := domain.ParseWorkspaceID(string(config.WorkspaceID)); err != nil {
 		return nil, errors.New("valid background run coordinator workspace is required")
 	}
-	return &Coordinator{store: runStore, provider: provider, artifact: artifact, ids: ids, config: config, wake: make(chan struct{}, 1)}, nil
+	return &Coordinator{store: runStore, provider: provider, artifact: engine, ids: ids, config: config, wake: make(chan struct{}, 1)}, nil
 }
 
 func (c *Coordinator) Wake() {
@@ -409,7 +409,7 @@ func (a *retainedExportAttempt) installed(operation context.Context) bool {
 	if a.selected == nil {
 		return false
 	}
-	locator, err := taskartifact.ParseLocator(a.selected.CASLocator())
+	locator, err := artifact.ParseLocator(a.selected.CASLocator())
 	if err != nil {
 		return false
 	}
@@ -435,17 +435,17 @@ func (a *retainedExportAttempt) recoveryRequired(parent context.Context, cause e
 // export (or proves a replay identical to the selection), and installs it.
 func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Context, repositoryPath string) (resultErr error) {
 	c, run := a.coordinator, a.run
-	artifactSource, sourceSpecErr := taskartifact.NewSource(repositoryPath, run.WorkspaceID, run.RunID)
-	profileDigest, profileErr := taskartifact.NewDigest(sha256.Sum256([]byte(run.Profile)))
-	environmentDigest, environmentErr := taskartifact.NewDigest(run.EnvironmentSHA256)
+	artifactSource, sourceSpecErr := artifact.NewSource(repositoryPath, run.WorkspaceID, run.RunID)
+	profileDigest, profileErr := artifact.NewDigest(sha256.Sum256([]byte(run.Profile)))
+	environmentDigest, environmentErr := artifact.NewDigest(run.EnvironmentSHA256)
 	if sourceSpecErr != nil || profileErr != nil || environmentErr != nil {
 		return errors.Join(sourceSpecErr, profileErr, environmentErr)
 	}
-	snapshot, staged, snapshotErr := c.artifact.Snapshot(operation, taskartifact.SnapshotSpec{
+	snapshot, staged, snapshotErr := c.artifact.Snapshot(operation, artifact.SnapshotSpec{
 		Source: artifactSource, RepositoryID: run.RepositoryID, ResultID: run.Seal.ResultID,
 		ImageIdentity: run.ImageIdentity, Profile: run.Profile, ProfileSHA256: profileDigest, EnvironmentSHA256: environmentDigest,
-		ResourceSpecVersion: taskartifact.ResourceSpecVersion, OpenCodeSessionID: run.OpenCodeSessionID, OpenCodeMessageID: run.OpenCodeMessageID,
-		SnapshotPolicyVersion: taskartifact.SnapshotPolicyV1, Base: run.BaseOID, EpochSecond: run.Seal.CommitEpochSeconds(),
+		ResourceSpecVersion: artifact.ResourceSpecVersion, OpenCodeSessionID: run.OpenCodeSessionID, OpenCodeMessageID: run.OpenCodeMessageID,
+		SnapshotPolicyVersion: artifact.SnapshotPolicyV1, Base: run.BaseOID, EpochSecond: run.Seal.CommitEpochSeconds(),
 	})
 	if snapshotErr != nil {
 		return snapshotErr
@@ -494,7 +494,7 @@ func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Con
 // materialize proves the installed artifact checks out to the selected commit
 // and tree, closing the checkout before the proof is used.
 func (a *retainedExportAttempt) materialize(operation context.Context) ([32]byte, error) {
-	locator, err := taskartifact.ParseLocator(a.selected.CASLocator())
+	locator, err := artifact.ParseLocator(a.selected.CASLocator())
 	if err != nil {
 		return [32]byte{}, err
 	}
@@ -533,7 +533,7 @@ func providerFence(value store.WriterFence) taskenvdocker.WriterFence {
 
 // snapshotMatches binds a snapshot to the sealing run's identities and the
 // durable selection.
-func snapshotMatches(snapshot taskartifact.Snapshot, run store.BackgroundRun, selected store.Result) bool {
+func snapshotMatches(snapshot artifact.Snapshot, run store.BackgroundRun, selected store.Result) bool {
 	return snapshot.RepositoryID == run.RepositoryID && snapshot.WorkspaceID == run.WorkspaceID && snapshot.RunID == run.RunID &&
 		snapshot.ResultID == selected.ID && snapshot.OpenCodeSessionID == run.OpenCodeSessionID && snapshot.OpenCodeMessageID == run.OpenCodeMessageID &&
 		snapshot.Base == selected.BaseSHA && snapshot.Result == selected.ResultCommit && snapshot.Tree == selected.TreeOID &&

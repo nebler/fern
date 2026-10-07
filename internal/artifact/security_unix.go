@@ -1,6 +1,6 @@
 //go:build unix
 
-package taskartifact
+package artifact
 
 import (
 	"errors"

@@ -12,6 +12,7 @@ import (
 	goruntime "runtime"
 	"time"
 
+	"github.com/nebler/fern/internal/artifact"
 	"github.com/nebler/fern/internal/backgroundruncoord"
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/domain"
@@ -20,9 +21,7 @@ import (
 	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/runapi"
 	"github.com/nebler/fern/internal/store"
-	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
-	"github.com/nebler/fern/internal/taskresultsource"
 )
 
 const (
@@ -47,7 +46,7 @@ type runServices struct {
 	runs       http.Handler
 	background wakeService
 	provider   *taskenvdocker.Provider
-	artifact   *taskartifact.Engine
+	artifact   *artifact.Engine
 	status     *observability.Registry
 }
 
@@ -85,7 +84,7 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 	if err != nil {
 		return nil, err
 	}
-	artifact, err := taskartifact.New(taskartifact.Config{GitExecutable: gitExecutable(), CASRoot: roots.cas,
+	engine, err := artifact.NewEngine(artifact.Config{GitExecutable: gitExecutable(), CASRoot: roots.cas,
 		WorkRoot: roots.work, CommandTimeout: runOperationTimeout})
 	if err != nil {
 		return nil, err
@@ -93,10 +92,10 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 	closeArtifact := true
 	defer func() {
 		if closeArtifact {
-			_ = artifact.Close()
+			_ = engine.Close()
 		}
 	}()
-	if err := inspectRetainedArtifacts(ctx, runStore, artifact); err != nil {
+	if err := inspectRetainedArtifacts(ctx, runStore, engine); err != nil {
 		return nil, err
 	}
 	durableWorkspace, err := ensureWorkspace(ctx, cfg, runStore, ids)
@@ -132,12 +131,12 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 		}
 	}()
 
-	resultSource, err := taskresultsource.New(artifact)
+	resultSource, err := artifact.NewResolver(engine)
 	if err != nil {
 		return nil, err
 	}
 
-	coordinator, err := backgroundruncoord.New(runStore, provider, artifact, ids, backgroundruncoord.Config{
+	coordinator, err := backgroundruncoord.New(runStore, provider, engine, ids, backgroundruncoord.Config{
 		WorkspaceID: durableWorkspace.ID,
 		Profile:     domain.SourceProfile, ImageIdentity: cfg.Runs.BackgroundImageID,
 		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: cfg.Runs.Agent,
@@ -175,7 +174,7 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 	status.Healthy(observability.ComponentBackgroundRunSerial)
 	closeArtifact, closeProvider = false, false
 	return &runServices{store: runStore, runs: runs,
-		background: coordinator, provider: provider, artifact: artifact, status: status}, nil
+		background: coordinator, provider: provider, artifact: engine, status: status}, nil
 }
 
 // stateRoots are the per-workspace durable directories under ~/.fern/runs.
@@ -210,17 +209,17 @@ func prepareStateRoots(workspace string) (stateRoots, error) {
 
 // inspectRetainedArtifacts re-verifies every artifact the store references
 // before the run profile may be declared qualified.
-func inspectRetainedArtifacts(ctx context.Context, runStore *store.Store, artifact *taskartifact.Engine) error {
+func inspectRetainedArtifacts(ctx context.Context, runStore *store.Store, engine *artifact.Engine) error {
 	referencedArtifacts, err := runStore.ReferencedArtifactManifestSHA256(ctx)
 	if err != nil {
 		return fmt.Errorf("list retained artifacts: %w", err)
 	}
 	for _, digest := range referencedArtifacts {
-		locator, err := taskartifact.ParseLocator("sha256:" + hex.EncodeToString(digest[:]))
+		locator, err := artifact.ParseLocator("sha256:" + hex.EncodeToString(digest[:]))
 		if err != nil {
 			return err
 		}
-		if _, err := artifact.Inspect(ctx, locator); err != nil {
+		if _, err := engine.Inspect(ctx, locator); err != nil {
 			return fmt.Errorf("reconcile retained artifact: %w", err)
 		}
 	}
