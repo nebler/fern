@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebler/fern/internal/backgroundopencode"
+	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -71,24 +71,24 @@ func TestDispatchWaitsForModelAndAgentReadiness(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			opencode := &readinessServer{ready: ready}
-			server := httptest.NewServer(opencode)
+			fakeOpenCode := &readinessServer{ready: ready}
+			server := httptest.NewServer(fakeOpenCode)
 			t.Cleanup(server.Close)
-			client, err := backgroundopencode.New(backgroundopencode.Config{Endpoint: server.URL, Username: "opencode", Password: "pw", HTTPClient: &http.Client{Timeout: time.Second}})
+			client, err := opencode.NewClient(opencode.ClientConfig{Endpoint: server.URL, Username: "opencode", Password: "pw", HTTPClient: &http.Client{Timeout: time.Second}})
 			if err != nil {
 				t.Fatal(err)
 			}
 			operation, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 			defer cancel()
 			err = f.c.dispatchWhenReady(operation, context.Background(), store.BackgroundRunWork{Run: run, Prompt: f.params.Prompt}, client)
-			calls := opencode.snapshot()
+			calls := fakeOpenCode.snapshot()
 			prompted := false
 			for _, call := range calls {
 				prompted = prompted || strings.HasSuffix(call, "/prompt")
 			}
 			r := f.run(t)
 			if !ready {
-				if !errors.Is(err, backgroundopencode.ErrNotReady) {
+				if !errors.Is(err, opencode.ErrNotReady) {
 					t.Fatalf("unready dispatch error = %v", err)
 				}
 				if r.EffectPhase != store.BackgroundRunEffectProvisioning || r.State != store.BackgroundRunSettingUp || prompted {

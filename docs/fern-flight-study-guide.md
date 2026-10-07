@@ -257,8 +257,7 @@ proven security sandbox.
 - `store`: SQLite durable state, receipts, revision-checked transitions.
 - `backgroundruncoord`: serial engine that converts durable phases into effects.
 - `taskenvdocker`: Docker clone/volume/container policy and credential handoff.
-- `backgroundopencode`: pinned OpenCode session/prompt/observation protocol.
-- `backgroundroute`: exact live-session attachment route and fencing.
+- `opencode`: pinned OpenCode session/prompt/observation protocol, plus the exact live-session attachment router and fencing.
 - `taskartifact`: Git snapshot/bundle/manifest/CAS verification.
 - `taskresultsource`: matches a durable result to freshly verified artifact bytes.
 - `proxy`, `control`, `pluginauth`: HTTP ingress, browser pairing, device/plugin auth.

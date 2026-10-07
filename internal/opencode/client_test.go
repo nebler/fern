@@ -1,4 +1,4 @@
-package backgroundopencode
+package opencode
 
 import (
 	"context"
@@ -34,7 +34,7 @@ func testClient(t *testing.T, handler http.Handler) (*Client, *httptest.Server) 
 	t.Helper()
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
-	client, err := New(Config{Endpoint: server.URL, Username: "opencode", Password: testSecret, HTTPClient: &http.Client{Timeout: 3 * time.Second}})
+	client, err := NewClient(ClientConfig{Endpoint: server.URL, Username: "opencode", Password: testSecret, HTTPClient: &http.Client{Timeout: 3 * time.Second}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,11 +68,11 @@ func conflictJSON(messageID string) string {
 }
 
 func TestNewRequiresExactLoopbackAndBoundedClient(t *testing.T) {
-	valid := Config{Endpoint: "http://127.0.0.1:4096", Username: "opencode", Password: "pw", HTTPClient: &http.Client{Timeout: time.Second}}
-	if _, err := New(valid); err != nil {
+	valid := ClientConfig{Endpoint: "http://127.0.0.1:4096", Username: "opencode", Password: "pw", HTTPClient: &http.Client{Timeout: time.Second}}
+	if _, err := NewClient(valid); err != nil {
 		t.Fatal(err)
 	}
-	tests := []Config{
+	tests := []ClientConfig{
 		{Endpoint: "http://localhost:4096", Username: "opencode", Password: "pw", HTTPClient: valid.HTTPClient},
 		{Endpoint: "https://127.0.0.1:4096", Username: "opencode", Password: "pw", HTTPClient: valid.HTTPClient},
 		{Endpoint: "http://127.0.0.1:4096/", Username: "opencode", Password: "pw", HTTPClient: valid.HTTPClient},
@@ -85,7 +85,7 @@ func TestNewRequiresExactLoopbackAndBoundedClient(t *testing.T) {
 		{Endpoint: valid.Endpoint, Username: "opencode", Password: "pw", HTTPClient: &http.Client{Timeout: time.Minute}},
 	}
 	for i, input := range tests {
-		if _, err := New(input); !errors.Is(err, ErrInvalidConfig) {
+		if _, err := NewClient(input); !errors.Is(err, ErrInvalidConfig) {
 			t.Errorf("case %d: error = %v", i, err)
 		}
 	}
@@ -487,7 +487,7 @@ func (r *failingRoundTripper) RoundTrip(request *http.Request) (*http.Response, 
 
 func TestMutationTransportLossNeverRetries(t *testing.T) {
 	transport := &failingRoundTripper{t: t}
-	client, err := New(Config{Endpoint: "http://127.0.0.1:4096", Username: "opencode", Password: testSecret, HTTPClient: &http.Client{Timeout: time.Second, Transport: transport}})
+	client, err := NewClient(ClientConfig{Endpoint: "http://127.0.0.1:4096", Username: "opencode", Password: testSecret, HTTPClient: &http.Client{Timeout: time.Second, Transport: transport}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,7 +538,7 @@ func TestDeadlineCancellationAndRequirement(t *testing.T) {
 	t.Run("mutation cancellation after dispatch is ambiguous", func(t *testing.T) {
 		requestCtx, requestCancel := context.WithTimeout(context.Background(), time.Second)
 		transport := &cancelingRoundTripper{cancel: requestCancel}
-		client, err := New(Config{Endpoint: "http://127.0.0.1:4096", Username: "opencode", Password: testSecret, HTTPClient: &http.Client{Timeout: time.Second, Transport: transport}})
+		client, err := NewClient(ClientConfig{Endpoint: "http://127.0.0.1:4096", Username: "opencode", Password: testSecret, HTTPClient: &http.Client{Timeout: time.Second, Transport: transport}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -643,7 +643,7 @@ func TestInterruptExactAndLostResponseAmbiguity(t *testing.T) {
 	})
 	t.Run("lost response one shot", func(t *testing.T) {
 		transport := &failingRoundTripper{t: t}
-		client, err := New(Config{Endpoint: "http://127.0.0.1:4096", Username: "opencode", Password: testSecret, HTTPClient: &http.Client{Timeout: time.Second, Transport: transport}})
+		client, err := NewClient(ClientConfig{Endpoint: "http://127.0.0.1:4096", Username: "opencode", Password: testSecret, HTTPClient: &http.Client{Timeout: time.Second, Transport: transport}})
 		if err != nil {
 			t.Fatal(err)
 		}

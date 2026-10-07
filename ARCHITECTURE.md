@@ -64,7 +64,7 @@ interaction with a live run uses the normal OpenCode TUI.
                        |                 |
                        |          live loopback port
                        |                 |
-                       +------ backgroundroute :8443
+                       +------ opencode.Router :8443
                                          |
                                   private TLS :8443
 
@@ -75,7 +75,7 @@ interaction with a live run uses the normal OpenCode TUI.
 The three listeners are bound before Docker side effects. The remote listener
 is the paired-device and plugin surface. The operator listener is loopback-only
 and protected by the Fern control password. The Background Run listener has no
-default target: `backgroundroute.Manager` binds one exact live runtime and
+default target: `opencode.Router` binds one exact live runtime and
 removes it and waits for admitted forwarding to exit before writer teardown.
 
 ## 4. Startup Composition
@@ -156,7 +156,7 @@ require a CSRF token bound to the method and exact path.
 | operator | `GET /fern/live`, `GET /fern/ready` | public |
 | operator | landing, control page, `POST /fern/pair/new`, device and plugin credential administration, plugin approval, `GET /fern/api/runs[/:id[/attach]]` (runapi, workspace-wide, read and attach only) | operator |
 
-The live route listener (`backgroundroute`, `:8443`) is separate: it admits only
+The live route listener (`opencode.Router`, `:8443`) is separate: it admits only
 attachment capabilities and applies the OpenCode allow-list in `policy.go`.
 
 Ingress installs a validated `domain.ActorSnapshot` in request context. Inner API
@@ -291,7 +291,7 @@ clone work has the same 30-second deadline as its Git operation.
 
 ## 10. Live Route
 
-`backgroundroute.Manager` maps short-lived opaque capabilities to one exact
+`opencode.Router` maps short-lived opaque capabilities to one exact
 authenticated runtime and OpenCode session. The route is activated only for a
 committed runtime that has just passed authenticated health; attachment is
 offered once provisioning has reconciled the session and fenced the prompt.
@@ -435,7 +435,7 @@ ID bypasses selection.
 
 `GET /fern/api/runs/:id/attach` is an operator/client control operation, not a
 plugin UI operation and not a browser deep link. It re-reads run ownership and
-route readiness, then asks `backgroundroute.Manager` for an in-memory capability
+route readiness, then asks `opencode.Router` for an in-memory capability
 bound to the active runtime and session. `fern attach` starts
 `opencode attach <origin> --session <session-id> --pure` with the capability in the
 OpenCode authentication environment. The existing OpenCode process remains the
@@ -553,8 +553,7 @@ ownership boundaries.
 | `internal/taskartifact` | deterministic Git bundle creation, CAS, materialization |
 | `internal/taskresultsource` | CAS-only result binding and verified checkout acquisition |
 | `internal/taskenvdocker` | disposable Docker resources, writer proof, container GitHub credential delivery |
-| `internal/backgroundopencode` | pinned disposable OpenCode client and observations |
-| `internal/backgroundroute` | exact live target/session capabilities, request policy, shutdown, and fencing |
+| `internal/opencode` | pinned disposable OpenCode client and observations; the Router's exact live target/session capabilities, request policy, shutdown, and fencing |
 | `internal/proxy` | remote/operator ingress, pairing, and browser security |
 | `internal/control` | device identities and operator credential ID (SQLite tables) |
 | `internal/pluginauth` | fixed-scope plugin device authorization and revocation (SQLite tables) |

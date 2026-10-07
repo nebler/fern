@@ -1,4 +1,4 @@
-package backgroundroute
+package opencode
 
 import (
 	"bufio"
@@ -40,7 +40,7 @@ func TestManagerAttachmentProxyHeadersPolicyAndSSE(t *testing.T) {
 	}))
 	defer upstream.Close()
 	manager, origin, local := newTestManager(t)
-	target, err := NewTarget(upstream.URL, roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+	target, err := NewRouteTarget(upstream.URL, roundTripperFunc(func(request *http.Request) (*http.Response, error) {
 		forward := request.Clone(request.Context())
 		forward.Header = request.Header.Clone()
 		forward.SetBasicAuth("opencode", "run-secret")
@@ -117,7 +117,7 @@ func TestManagerRemovalFencesRebindAndRuntimeMismatch(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) }))
 	defer upstream.Close()
 	manager, _, local := newTestManager(t)
-	target, err := NewTarget(upstream.URL, http.DefaultTransport)
+	target, err := NewRouteTarget(upstream.URL, http.DefaultTransport)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestAttachmentCapabilityFencesSessionWriterAndExpiry(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { writer.WriteHeader(http.StatusNoContent) }))
 	defer upstream.Close()
 	manager, _, local := newTestManager(t)
-	target, err := NewTarget(upstream.URL, http.DefaultTransport)
+	target, err := NewRouteTarget(upstream.URL, http.DefaultTransport)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestAttachmentResponseFiltersSessionListsStatusesAndEvents(t *testing.T) {
 	}
 }
 
-func newTestManager(t *testing.T) (*Manager, string, string) {
+func newTestManager(t *testing.T) (*Router, string, string) {
 	t.Helper()
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
@@ -289,7 +289,7 @@ func newTestManager(t *testing.T) (*Manager, string, string) {
 	}
 	port := strings.TrimPrefix(listener.Addr().String(), "127.0.0.1:")
 	origin := "https://fern.example.ts.net:" + port
-	manager, err := New(listener, origin)
+	manager, err := NewRouter(listener, origin)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,18 +321,18 @@ func pairedRequest(method, target, token, origin string, body io.Reader) *http.R
 	return request
 }
 
-func testRun(identity Identity) store.BackgroundRun {
+func testRun(identity RouteIdentity) store.BackgroundRun {
 	return store.BackgroundRun{WorkspaceID: domain.WorkspaceID(identity.WorkspaceID), RunID: domain.RunID(identity.RunID),
 		RuntimeEpoch:        identity.RuntimeEpoch,
 		ObservedContainerID: identity.ContainerID, ObservedContainerStartedAt: identity.StartedAt,
 		OpenCodeSessionID: domain.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef")}
 }
 
-func testIdentity(n int64) Identity {
+func testIdentity(n int64) RouteIdentity {
 	started := time.Date(2026, 8, 31, 12, 0, int(n), 0, time.UTC)
 	container := strings.Repeat(string(rune('a'+n)), 64)
 	digest := runtimeDigest(container, started.Format(time.RFC3339Nano))
-	return Identity{WorkspaceID: "wsp_0198d34d-6a50-75fb-b1f2-000000000001", RunID: "run_0198d34d-6a50-75fb-b1f2-000000000201",
+	return RouteIdentity{WorkspaceID: "wsp_0198d34d-6a50-75fb-b1f2-000000000001", RunID: "run_0198d34d-6a50-75fb-b1f2-000000000201",
 		SessionID: "ses_0123456789abcdef0123456789abcdef", RuntimeEpoch: started.UnixNano(),
 		ContainerID: container, StartedAt: started.Format(time.RFC3339Nano), RuntimeToken: digest}
 }

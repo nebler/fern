@@ -10,9 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nebler/fern/internal/backgroundopencode"
-	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/domain"
+	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
@@ -37,10 +36,10 @@ type Config struct {
 	Model             string
 	OperationTimeout  time.Duration
 	PollInterval      time.Duration
-	HistoryBounds     backgroundopencode.HistoryBounds
+	HistoryBounds     opencode.HistoryBounds
 	Now               func() time.Time
 	HTTPClient        *http.Client
-	Route             *backgroundroute.Manager
+	Route             *opencode.Router
 	OnError           func(error)
 	OnSuccess         func()
 	AfterPromptFence  func()
@@ -594,8 +593,8 @@ func (c *Coordinator) provision(operation, parent context.Context, work store.Ba
 // after it first opens the location, and a turn started earlier fails without
 // durable evidence, stranding an admitted prompt. An unready catalog leaves the
 // run provisioning; a later pass retries until the attempt deadline.
-func (c *Coordinator) dispatchWhenReady(operation, parent context.Context, work store.BackgroundRunWork, client *backgroundopencode.Client) error {
-	spec := backgroundopencode.ReadinessSpec{Agent: c.config.Agent, ProviderID: c.config.ModelProvider,
+func (c *Coordinator) dispatchWhenReady(operation, parent context.Context, work store.BackgroundRunWork, client *opencode.Client) error {
+	spec := opencode.ReadinessSpec{Agent: c.config.Agent, ProviderID: c.config.ModelProvider,
 		ModelID: c.config.Model, Directory: sessionDirectory}
 	if err := client.WaitReady(operation, spec, c.readinessInterval()); err != nil {
 		if err := parent.Err(); err != nil {
@@ -613,7 +612,7 @@ func (c *Coordinator) readinessInterval() time.Duration {
 // live proves the committed runtime healthy, refreshes its GitHub credentials,
 // and keeps its route active. Credentials are runtime inputs, never
 // publication authority, and are refreshed only while execution is allowed.
-func (c *Coordinator) live(ctx context.Context, run store.BackgroundRun) (*backgroundopencode.Client, error) {
+func (c *Coordinator) live(ctx context.Context, run store.BackgroundRun) (*opencode.Client, error) {
 	runtime, err := c.provider.CommittedRuntime(run)
 	if err != nil {
 		return nil, errors.Join(taskenvdocker.ErrIdentityMismatch, err)
@@ -636,15 +635,15 @@ func (c *Coordinator) live(ctx context.Context, run store.BackgroundRun) (*backg
 
 // reconcileSession creates the Fern-chosen session at most once per pass and
 // reports whether it exactly exists.
-func (c *Coordinator) reconcileSession(operation, parent context.Context, work store.BackgroundRunWork, client *backgroundopencode.Client) (bool, error) {
+func (c *Coordinator) reconcileSession(operation, parent context.Context, work store.BackgroundRunWork, client *opencode.Client) (bool, error) {
 	run := work.Run
-	spec := backgroundopencode.SessionSpec{ID: string(run.OpenCodeSessionID), Agent: c.config.Agent,
+	spec := opencode.SessionSpec{ID: string(run.OpenCodeSessionID), Agent: c.config.Agent,
 		ProviderID: c.config.ModelProvider, ModelID: c.config.Model, Directory: sessionDirectory}
 	state, err := client.ReconcileSession(operation, spec)
-	if err == nil && state == backgroundopencode.ReconcileAbsent {
+	if err == nil && state == opencode.ReconcileAbsent {
 		createErr := client.CreateSessionOnce(operation, spec)
 		state, err = client.ReconcileSession(operation, spec)
-		if err == nil && state == backgroundopencode.ReconcileAbsent {
+		if err == nil && state == opencode.ReconcileAbsent {
 			if createErr == nil {
 				return false, c.cleanupRequired(parent, work, "OpenCode session disappeared after creation")
 			}
@@ -654,16 +653,16 @@ func (c *Coordinator) reconcileSession(operation, parent context.Context, work s
 	if err != nil {
 		return false, c.externalFailure(parent, work, err)
 	}
-	if state == backgroundopencode.ReconcileConflict {
+	if state == opencode.ReconcileConflict {
 		return false, c.cleanupRequired(parent, work, "OpenCode session identity conflict")
 	}
-	return state == backgroundopencode.ReconcileExact, nil
+	return state == opencode.ReconcileExact, nil
 }
 
 // dispatchPrompt commits the one-way prompt fence, which ends provisioning,
 // before the single admission call. Whatever happens next, the run is
 // prompt_pending and later passes only reconcile.
-func (c *Coordinator) dispatchPrompt(operation, parent context.Context, work store.BackgroundRunWork, client *backgroundopencode.Client) error {
+func (c *Coordinator) dispatchPrompt(operation, parent context.Context, work store.BackgroundRunWork, client *opencode.Client) error {
 	mutation, cancel, now, err := c.effectContext(parent, work, true)
 	if err != nil {
 		return err
@@ -697,20 +696,20 @@ func (c *Coordinator) dispatchPrompt(operation, parent context.Context, work sto
 	return c.reconcilePrompt(parent, work, client)
 }
 
-func (c *Coordinator) promptSpec(work store.BackgroundRunWork) backgroundopencode.PromptSpec {
-	return backgroundopencode.PromptSpec{ID: string(work.Run.OpenCodeMessageID), Text: work.Prompt, Resume: true, Delivery: "steer"}
+func (c *Coordinator) promptSpec(work store.BackgroundRunWork) opencode.PromptSpec {
+	return opencode.PromptSpec{ID: string(work.Run.OpenCodeMessageID), Text: work.Prompt, Resume: true, Delivery: "steer"}
 }
 
 // reconcilePrompt reads bounded session history; only exact admission
 // advances, and anything else leaves the prompt uncertain.
-func (c *Coordinator) reconcilePrompt(parent context.Context, work store.BackgroundRunWork, client *backgroundopencode.Client) error {
+func (c *Coordinator) reconcilePrompt(parent context.Context, work store.BackgroundRunWork, client *opencode.Client) error {
 	reconcileCtx, reconcileCancel, _, contextErr := c.effectContext(parent, work, true)
 	if contextErr != nil {
 		return contextErr
 	}
 	defer reconcileCancel()
 	state, reconcileErr := client.ReconcilePrompt(reconcileCtx, string(work.Run.OpenCodeSessionID), c.promptSpec(work), c.config.HistoryBounds)
-	if reconcileErr == nil && state == backgroundopencode.ReconcileExact {
+	if reconcileErr == nil && state == opencode.ReconcileExact {
 		return c.record(parent, work, `{"effect":"prompt_reconcile","status":"admitted"}`, c.store.RecordBackgroundRunPromptAdmitted)
 	}
 	status := "inconclusive"
@@ -720,7 +719,7 @@ func (c *Coordinator) reconcilePrompt(parent context.Context, work store.Backgro
 	return c.record(parent, work, fmt.Sprintf(`{"effect":"prompt_reconcile","status":%q}`, status), c.store.RecordBackgroundRunPromptUncertain)
 }
 
-func (c *Coordinator) observeWorking(operation, parent context.Context, work store.BackgroundRunWork, client *backgroundopencode.Client) error {
+func (c *Coordinator) observeWorking(operation, parent context.Context, work store.BackgroundRunWork, client *opencode.Client) error {
 	run := work.Run
 	usage, err := c.provider.ObserveUsage(operation, run)
 	if err != nil {
@@ -745,27 +744,27 @@ func (c *Coordinator) observeWorking(operation, parent context.Context, work sto
 
 // The runtime owns pending-observation precedence. Counts remain evidence only;
 // unknown observations do not authorize a durable state change.
-func workObservation(state backgroundopencode.WorkState) (store.BackgroundRunState, string) {
+func workObservation(state opencode.WorkState) (store.BackgroundRunState, string) {
 	switch state {
-	case backgroundopencode.WorkNeedsYou:
+	case opencode.WorkNeedsYou:
 		return store.BackgroundRunNeedsYou, "owned_pending"
-	case backgroundopencode.WorkWorking:
+	case opencode.WorkWorking:
 		return store.BackgroundRunWorking, "positive_active"
 	default:
 		return "", ""
 	}
 }
 
-func (c *Coordinator) validatedRouteIdentity(run store.BackgroundRun) (backgroundroute.Identity, error) {
+func (c *Coordinator) validatedRouteIdentity(run store.BackgroundRun) (opencode.RouteIdentity, error) {
 	runtime, err := c.provider.CommittedRuntime(run)
 	if err != nil {
-		return backgroundroute.Identity{}, err
+		return opencode.RouteIdentity{}, err
 	}
 	return makeRouteIdentity(run, runtime), nil
 }
 
-func makeRouteIdentity(run store.BackgroundRun, runtime taskenvdocker.RuntimeIdentity) backgroundroute.Identity {
-	return backgroundroute.Identity{WorkspaceID: string(run.WorkspaceID), RunID: string(run.RunID),
+func makeRouteIdentity(run store.BackgroundRun, runtime taskenvdocker.RuntimeIdentity) opencode.RouteIdentity {
+	return opencode.RouteIdentity{WorkspaceID: string(run.WorkspaceID), RunID: string(run.RunID),
 		SessionID: string(run.OpenCodeSessionID), RuntimeEpoch: run.RuntimeEpoch,
 		ContainerID: runtime.ContainerID, StartedAt: runtime.StartedAt, RuntimeToken: runtime.Token}
 }

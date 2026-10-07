@@ -12,7 +12,7 @@
 //
 // The list's attachable flag is advisory, not a reservation. Attachment
 // requires durable readiness and then a successful issuance from the
-// backgroundroute manager, which owns credential expiry and runtime fencing.
+// opencode Router, which owns credential expiry and runtime fencing.
 // The returned credentials are secrets: responses are no-store and nothing
 // here retains or logs them.
 //

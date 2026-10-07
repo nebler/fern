@@ -1,4 +1,4 @@
-package backgroundopencode
+package opencode
 
 import (
 	"bytes"
@@ -20,7 +20,7 @@ import (
 	"github.com/nebler/fern/internal/safeio"
 )
 
-type Config struct {
+type ClientConfig struct {
 	Endpoint   string
 	Username   string
 	Password   string
@@ -34,7 +34,7 @@ type Client struct {
 	http     *http.Client
 }
 
-func New(config Config) (*Client, error) {
+func NewClient(config ClientConfig) (*Client, error) {
 	parsed, err := url.Parse(config.Endpoint)
 	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.RawPath != "" || parsed.Path != "" || parsed.Hostname() == "" || parsed.Port() == "" {
 		return nil, ErrInvalidConfig

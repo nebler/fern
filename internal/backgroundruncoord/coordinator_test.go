@@ -7,20 +7,20 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebler/fern/internal/backgroundopencode"
+	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
 )
 
 func TestWorkObservationUsesRuntimeState(t *testing.T) {
 	for _, tt := range []struct {
-		observation backgroundopencode.PendingObservation
+		observation opencode.PendingObservation
 		state       store.BackgroundRunState
 		status      string
 	}{
-		{backgroundopencode.PendingObservation{State: backgroundopencode.WorkWorking, Questions: 2, Permissions: 1}, store.BackgroundRunWorking, "positive_active"},
-		{backgroundopencode.PendingObservation{State: backgroundopencode.WorkNeedsYou, Active: true}, store.BackgroundRunNeedsYou, "owned_pending"},
-		{backgroundopencode.PendingObservation{State: backgroundopencode.WorkUnknown, Active: true, Questions: 2}, "", ""},
-		{backgroundopencode.PendingObservation{State: "unrecognized", Active: true}, "", ""},
+		{opencode.PendingObservation{State: opencode.WorkWorking, Questions: 2, Permissions: 1}, store.BackgroundRunWorking, "positive_active"},
+		{opencode.PendingObservation{State: opencode.WorkNeedsYou, Active: true}, store.BackgroundRunNeedsYou, "owned_pending"},
+		{opencode.PendingObservation{State: opencode.WorkUnknown, Active: true, Questions: 2}, "", ""},
+		{opencode.PendingObservation{State: "unrecognized", Active: true}, "", ""},
 	} {
 		state, status := workObservation(tt.observation.State)
 		if state != tt.state || status != tt.status {

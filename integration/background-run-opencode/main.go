@@ -23,10 +23,9 @@ import (
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
-	"github.com/nebler/fern/internal/backgroundopencode"
-	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/backgroundruncoord"
 	"github.com/nebler/fern/internal/domain"
+	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
@@ -300,17 +299,17 @@ func run() (resultErr error) {
 	if err != nil {
 		return err
 	}
-	session := backgroundopencode.SessionSpec{ID: string(sessionID), Agent: "contract", ProviderID: "test", ModelID: "test-model", Directory: "/home/user/workspace"}
+	session := opencode.SessionSpec{ID: string(sessionID), Agent: "contract", ProviderID: "test", ModelID: "test-model", Directory: "/home/user/workspace"}
 	sessionTransport := http.DefaultTransport.(*http.Transport).Clone()
 	sessionLoss := &lostResponseTransport{base: sessionTransport, path: "/api/session"}
-	lostSessionClient, err := backgroundopencode.New(backgroundopencode.Config{
+	lostSessionClient, err := opencode.NewClient(opencode.ClientConfig{
 		Endpoint: started.Endpoint, Username: username, Password: password,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: sessionLoss},
 	})
 	if err != nil {
 		return err
 	}
-	if err := lostSessionClient.CreateSessionOnce(ctx, session); !errors.Is(err, backgroundopencode.ErrTransport) {
+	if err := lostSessionClient.CreateSessionOnce(ctx, session); !errors.Is(err, opencode.ErrTransport) {
 		return fmt.Errorf("lost session response was not transport ambiguity: %v", err)
 	}
 	if sessionLoss.calls.Load() != 1 || sessionLoss.lost.Load() != 1 {
@@ -335,7 +334,7 @@ func run() (resultErr error) {
 	if _, err := provider.Health(ctx, run, runtime); err != nil {
 		return fmt.Errorf("session reconstructed provider health: %w", err)
 	}
-	oc, err := backgroundopencode.New(backgroundopencode.Config{
+	oc, err := opencode.NewClient(opencode.ClientConfig{
 		Endpoint: started.Endpoint, Username: username, Password: password,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second},
 	})
@@ -344,36 +343,36 @@ func run() (resultErr error) {
 	}
 	if state, err := oc.ReconcileSession(ctx, session); err != nil {
 		return fmt.Errorf("lost-response session reconciliation: %w", err)
-	} else if state != backgroundopencode.ReconcileExact {
+	} else if state != opencode.ReconcileExact {
 		return fmt.Errorf("lost-response session reconciliation state=%s", state)
 	}
-	probeSession := backgroundopencode.SessionSpec{ID: string(probeSessionID), Agent: "contract", ProviderID: "test", ModelID: "test-model", Directory: "/home/user/workspace"}
+	probeSession := opencode.SessionSpec{ID: string(probeSessionID), Agent: "contract", ProviderID: "test", ModelID: "test-model", Directory: "/home/user/workspace"}
 	if err := oc.CreateSessionOnce(ctx, probeSession); err != nil {
 		return fmt.Errorf("create admitted-only probe: %w", err)
 	}
-	probePrompt := backgroundopencode.PromptSpec{ID: string(probeMessageID), Text: "FERN_BACKGROUND_ADMITTED_ONLY", Delivery: "steer", Resume: false}
+	probePrompt := opencode.PromptSpec{ID: string(probeMessageID), Text: "FERN_BACKGROUND_ADMITTED_ONLY", Delivery: "steer", Resume: false}
 	if err := oc.AdmitPromptOnce(ctx, string(probeSessionID), probePrompt); err != nil {
 		return fmt.Errorf("admit non-resuming probe: %w", err)
 	}
 	resumeProbe := probePrompt
 	resumeProbe.Resume = true
-	if state, err := oc.ReconcilePrompt(ctx, string(probeSessionID), resumeProbe, backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000}); err != nil || state != backgroundopencode.ReconcileAdmitted {
+	if state, err := oc.ReconcilePrompt(ctx, string(probeSessionID), resumeProbe, opencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000}); err != nil || state != opencode.ReconcileAdmitted {
 		return fmt.Errorf("admitted-only reconciliation state=%s error=%v", state, err)
 	}
-	if state, err := oc.ReconcilePrompt(ctx, string(probeSessionID), probePrompt, backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000}); err != nil || state != backgroundopencode.ReconcileExact {
+	if state, err := oc.ReconcilePrompt(ctx, string(probeSessionID), probePrompt, opencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000}); err != nil || state != opencode.ReconcileExact {
 		return fmt.Errorf("resume=false reconciliation state=%s error=%v", state, err)
 	}
-	prompt := backgroundopencode.PromptSpec{ID: string(messageID), Text: "FERN_BACKGROUND_CLIENT_HANG", Delivery: "steer", Resume: true}
+	prompt := opencode.PromptSpec{ID: string(messageID), Text: "FERN_BACKGROUND_CLIENT_HANG", Delivery: "steer", Resume: true}
 	baseTransport := http.DefaultTransport.(*http.Transport).Clone()
 	loss := &lostResponseTransport{base: baseTransport, path: "/api/session/" + string(sessionID) + "/prompt"}
-	lossyClient, err := backgroundopencode.New(backgroundopencode.Config{
+	lossyClient, err := opencode.NewClient(opencode.ClientConfig{
 		Endpoint: started.Endpoint, Username: username, Password: password,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: loss},
 	})
 	if err != nil {
 		return err
 	}
-	if err := lossyClient.AdmitPromptOnce(ctx, string(sessionID), prompt); !errors.Is(err, backgroundopencode.ErrTransport) {
+	if err := lossyClient.AdmitPromptOnce(ctx, string(sessionID), prompt); !errors.Is(err, opencode.ErrTransport) {
 		return fmt.Errorf("lost prompt response was not transport ambiguity: %v", err)
 	}
 	if loss.calls.Load() != 1 || loss.lost.Load() != 1 {
@@ -394,7 +393,7 @@ func run() (resultErr error) {
 	if _, err := provider.Health(ctx, run, runtime); err != nil {
 		return fmt.Errorf("reconstructed provider health: %w", err)
 	}
-	oc, err = backgroundopencode.New(backgroundopencode.Config{
+	oc, err = opencode.NewClient(opencode.ClientConfig{
 		Endpoint: started.Endpoint, Username: username, Password: password,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second},
 	})
@@ -402,14 +401,14 @@ func run() (resultErr error) {
 		return err
 	}
 	if err := waitFor(ctx, "durable prompt admission", func() (bool, error) {
-		state, err := oc.ReconcilePrompt(ctx, string(sessionID), prompt, backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000})
-		return state == backgroundopencode.ReconcileExact, err
+		state, err := oc.ReconcilePrompt(ctx, string(sessionID), prompt, opencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000})
+		return state == opencode.ReconcileExact, err
 	}); err != nil {
 		return err
 	}
 	if err := waitFor(ctx, "positive active observation", func() (bool, error) {
 		observation, err := oc.ObservePending(ctx, string(sessionID))
-		return err == nil && observation.State == backgroundopencode.WorkWorking && observation.Active, err
+		return err == nil && observation.State == opencode.WorkWorking && observation.Active, err
 	}); err != nil {
 		return err
 	}
@@ -425,12 +424,12 @@ func run() (resultErr error) {
 	}
 	if state, err := oc.ReconcileSession(ctx, session); err != nil {
 		return fmt.Errorf("reconstructed client session: %w", err)
-	} else if state != backgroundopencode.ReconcileExact {
+	} else if state != opencode.ReconcileExact {
 		return fmt.Errorf("reconstructed client session state=%s", state)
 	}
-	if state, err := oc.ReconcilePrompt(ctx, string(sessionID), prompt, backgroundopencode.HistoryBounds{PageLimit: 1, MaxPages: 100, MaxEvents: 1000}); err != nil {
+	if state, err := oc.ReconcilePrompt(ctx, string(sessionID), prompt, opencode.HistoryBounds{PageLimit: 1, MaxPages: 100, MaxEvents: 1000}); err != nil {
 		return fmt.Errorf("reconstructed client prompt: %w", err)
-	} else if state != backgroundopencode.ReconcileExact {
+	} else if state != opencode.ReconcileExact {
 		return fmt.Errorf("reconstructed client prompt state=%s", state)
 	}
 	stats, err = readStats(providerEndpoint)
@@ -449,7 +448,7 @@ func run() (resultErr error) {
 	}
 	if err := waitFor(ctx, "interrupt inactivity", func() (bool, error) {
 		observation, err := oc.ObservePending(ctx, string(sessionID))
-		if err != nil || observation.Active || observation.State == backgroundopencode.WorkWorking {
+		if err != nil || observation.Active || observation.State == opencode.WorkWorking {
 			return false, err
 		}
 		stats, err := readStats(providerEndpoint)
@@ -465,7 +464,7 @@ func run() (resultErr error) {
 	if err := runSerialCoordinator(ctx, temporary, cloneRoot, repository, providerEndpoint, provider, cli, imageID, base); err != nil {
 		return err
 	}
-	fmt.Printf("PASS profile=%s image_id=%s session=exact session_response_loss=after_effect session_posts=1 no_session_replay=true no_session_replacement=true prompt=admitted_promoted prompt_response_loss=after_effect active=positive interrupt=204 reconstruction=provider_client no_prompt_replay=true provider_calls=1 marker=exact serial_coordinator=complete retained_result=cas_reconstructed_twice route=exact_expiring_attachment fence_crash=uncertain_zero_post runtime_restart=quarantined_then_operator_removed_cleanup\n", backgroundopencode.Profile, imageID)
+	fmt.Printf("PASS profile=%s image_id=%s session=exact session_response_loss=after_effect session_posts=1 no_session_replay=true no_session_replacement=true prompt=admitted_promoted prompt_response_loss=after_effect active=positive interrupt=204 reconstruction=provider_client no_prompt_replay=true provider_calls=1 marker=exact serial_coordinator=complete retained_result=cas_reconstructed_twice route=exact_expiring_attachment fence_crash=uncertain_zero_post runtime_restart=quarantined_then_operator_removed_cleanup\n", opencode.Profile, imageID)
 	return nil
 }
 
@@ -511,7 +510,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 	if _, err := runStore.EnsureWorkspace(ctx, store.Workspace{
 		ID: workspaceID, Name: "serial-background", State: store.WorkspaceActive, RepositoryPath: repository,
 		GitHubAuthority: store.GitHubAuthorityAppBroker, InstallationID: 1, RepositoryID: 1,
-		RepositoryFullName: "fern-integration/background-run", ImageDigest: imageID, OpenCodeProtocol: backgroundopencode.Profile,
+		RepositoryFullName: "fern-integration/background-run", ImageDigest: imageID, OpenCodeProtocol: opencode.Profile,
 		RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: now,
 	}); err != nil {
 		_ = runStore.Close()
@@ -533,7 +532,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 		Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: store.CreateBackgroundRunCommand},
 			Key: "serial-create", RequestHash: requestHash, Actor: actor},
 		Prompt: prompt, RepositoryID: 1, BaseSHA: domain.GitOID(base), Branch: "main",
-		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: backgroundopencode.Profile,
+		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: opencode.Profile,
 		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: imageID, Agent: "contract",
 		ModelProvider: "test", Model: "test-model",
 		Deadline: now.Add(3 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: now,
@@ -561,9 +560,9 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 	operationCtx, cancelOperation := context.WithCancel(ctx)
 	config := backgroundruncoord.Config{
 		WorkspaceID: workspaceID,
-		Profile:     backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
+		Profile:     opencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
 		OperationTimeout: 20 * time.Second, PollInterval: 100 * time.Millisecond,
-		HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000}, Now: time.Now,
+		HistoryBounds: opencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000}, Now: time.Now,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: loss}, AfterPromptCall: func(error) { cancelOperation() }, Route: route,
 	}
 	coordinator, err := backgroundruncoord.New(runStore, provider, artifact, ids, config)
@@ -586,7 +585,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 			break
 		}
 		// An unready model catalog is a retryable pass, never a prompt fence.
-		if err != nil && !errors.Is(err, backgroundopencode.ErrNotReady) {
+		if err != nil && !errors.Is(err, opencode.ErrNotReady) {
 			_ = runStore.Close()
 			return err
 		}
@@ -780,7 +779,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 }
 
 func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository string, runStore *store.Store, provider *taskenvdocker.Provider,
-	artifact *taskartifact.Engine, ids *domain.Generator, workspaceID domain.WorkspaceID, imageID, base string, route *backgroundroute.Manager,
+	artifact *taskartifact.Engine, ids *domain.Generator, workspaceID domain.WorkspaceID, imageID, base string, route *opencode.Router,
 ) error {
 	gitPath, err := exec.LookPath("git")
 	if err != nil {
@@ -805,7 +804,7 @@ func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository 
 		Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: store.CreateBackgroundRunCommand},
 			Key: "retained-create", RequestHash: sha256.Sum256([]byte("retained-create")), Actor: actor},
 		Prompt: prompt, RepositoryID: 1, BaseSHA: domain.GitOID(base), Branch: "main",
-		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: backgroundopencode.Profile,
+		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: opencode.Profile,
 		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: imageID, Agent: "contract",
 		ModelProvider: "test", Model: "test-model",
 		Deadline: now.Add(3 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: now,
@@ -815,10 +814,10 @@ func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository 
 	}
 	config := backgroundruncoord.Config{
 		WorkspaceID: workspaceID,
-		Profile:     backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil),
+		Profile:     opencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil),
 		Agent: "contract", ModelProvider: "test", Model: "test-model", OperationTimeout: 30 * time.Second,
 		PollInterval:  100 * time.Millisecond,
-		HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000},
+		HistoryBounds: opencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000},
 		Now:           func() time.Time { return time.Now().Add(3 * time.Minute) }, HTTPClient: &http.Client{Timeout: 10 * time.Second}, Route: route,
 	}
 	coordinator, err := backgroundruncoord.New(runStore, provider, artifact, ids, config)
@@ -828,7 +827,7 @@ func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository 
 	var run store.BackgroundRun
 	for step := 0; step < 25; step++ {
 		runErr := coordinator.RunOnce(ctx)
-		if runErr != nil && !errors.Is(runErr, backgroundruncoord.ErrNoWork) && !errors.Is(runErr, backgroundopencode.ErrNotReady) {
+		if runErr != nil && !errors.Is(runErr, backgroundruncoord.ErrNoWork) && !errors.Is(runErr, opencode.ErrNotReady) {
 			return fmt.Errorf("advance retained run: %w", runErr)
 		}
 		run, err = runStore.GetBackgroundRun(ctx, workspaceID, admission.Run.RunID, actor)
@@ -956,7 +955,7 @@ func privateBackgroundResidue(name string) bool {
 		strings.HasPrefix(name, ".clone-authority-") || strings.HasPrefix(name, ".clone-marker-stage-")
 }
 
-func startSerialRoute(parent context.Context, address string) (*backgroundroute.Manager, string, string, func() error, error) {
+func startSerialRoute(parent context.Context, address string) (*opencode.Router, string, string, func() error, error) {
 	if address == "" {
 		address = "127.0.0.1:0"
 	}
@@ -964,7 +963,7 @@ func startSerialRoute(parent context.Context, address string) (*backgroundroute.
 	if err != nil {
 		return nil, "", "", nil, err
 	}
-	manager, err := backgroundroute.New(listener, "https://fern.example.ts.net:8443")
+	manager, err := opencode.NewRouter(listener, "https://fern.example.ts.net:8443")
 	if err != nil {
 		_ = listener.Close()
 		return nil, "", "", nil, err
@@ -1019,7 +1018,7 @@ func verifySerialRoute(ctx context.Context, origin, token, sessionID string) err
 	return nil
 }
 
-func verifySerialAttachment(run store.BackgroundRun, route *backgroundroute.Manager) error {
+func verifySerialAttachment(run store.BackgroundRun, route *opencode.Router) error {
 	origin, active := route.ActiveOrigin(run)
 	if !active {
 		return errors.New("serial attachment route was not exactly active")
@@ -1036,7 +1035,7 @@ func serialRouteStatus(origin, token, path string) (int, error) {
 		return 0, err
 	}
 	if token != "" {
-		request.SetBasicAuth(backgroundroute.AttachmentUsername, token)
+		request.SetBasicAuth(opencode.AttachmentUsername, token)
 	}
 	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)
@@ -1049,7 +1048,7 @@ func serialRouteStatus(origin, token, path string) (int, error) {
 }
 
 func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, provider *taskenvdocker.Provider, artifact *taskartifact.Engine, cli *client.Client,
-	ids *domain.Generator, workspaceID domain.WorkspaceID, imageID, base string, route *backgroundroute.Manager) error {
+	ids *domain.Generator, workspaceID domain.WorkspaceID, imageID, base string, route *opencode.Router) error {
 	databasePath := filepath.Join(root, "fence-task-store.sqlite")
 	runStore, err := store.Open(ctx, databasePath)
 	if err != nil {
@@ -1061,7 +1060,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 		ID: workspaceID, Name: "serial-background-fence", State: store.WorkspaceActive,
 		RepositoryPath: filepath.Join(root, "repository"), GitHubAuthority: store.GitHubAuthorityAppBroker,
 		InstallationID: 1, RepositoryID: 1, RepositoryFullName: "fern-integration/background-run",
-		ImageDigest: imageID, OpenCodeProtocol: backgroundopencode.Profile, RuntimeDesiredState: "running",
+		ImageDigest: imageID, OpenCodeProtocol: opencode.Profile, RuntimeDesiredState: "running",
 		ReconciliationEpoch: 1, CreatedAt: acceptedAt,
 	}); err != nil {
 		return err
@@ -1081,7 +1080,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 		Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: store.CreateBackgroundRunCommand},
 			Key: "serial-fence-crash-create", RequestHash: requestHash, Actor: actor},
 		Prompt: prompt, RepositoryID: 1, BaseSHA: domain.GitOID(base), Branch: "main",
-		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: backgroundopencode.Profile,
+		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: opencode.Profile,
 		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: imageID, Agent: "contract",
 		ModelProvider: "test", Model: "test-model",
 		Deadline: acceptedAt.Add(10 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: acceptedAt,
@@ -1095,9 +1094,9 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 	crashCtx, crash := context.WithCancel(ctx)
 	config := backgroundruncoord.Config{
 		WorkspaceID: workspaceID,
-		Profile:     backgroundopencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
+		Profile:     opencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
 		OperationTimeout: 20 * time.Second, PollInterval: 100 * time.Millisecond,
-		HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000},
+		HistoryBounds: opencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000},
 		Now:           func() time.Time { return time.Now().Add(2 * time.Minute) }, HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: transport}, Route: route,
 		AfterPromptFence: crash,
 	}
@@ -1118,7 +1117,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 			}
 			break
 		}
-		if runErr != nil && !errors.Is(runErr, backgroundopencode.ErrNotReady) {
+		if runErr != nil && !errors.Is(runErr, opencode.ErrNotReady) {
 			return runErr
 		}
 	}

@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/domain"
+	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/safeio"
 	"github.com/nebler/fern/internal/store"
@@ -41,7 +41,7 @@ var _ Store = (*store.Store)(nil)
 
 // Route issues short-lived OpenCode attachment credentials for live runs.
 type Route interface {
-	IssueAttachment(store.BackgroundRun) (backgroundroute.Attachment, bool, error)
+	IssueAttachment(store.BackgroundRun) (opencode.Attachment, bool, error)
 	ActiveOrigin(store.BackgroundRun) (string, bool)
 }
 

@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/domain"
+	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/store"
 )
@@ -59,9 +59,9 @@ type fakeRoute struct {
 	calls  int
 }
 
-func (route *fakeRoute) IssueAttachment(store.BackgroundRun) (backgroundroute.Attachment, bool, error) {
+func (route *fakeRoute) IssueAttachment(store.BackgroundRun) (opencode.Attachment, bool, error) {
 	route.calls++
-	return backgroundroute.Attachment{Origin: "https://fern.example:8443", Username: backgroundroute.AttachmentUsername,
+	return opencode.Attachment{Origin: "https://fern.example:8443", Username: opencode.AttachmentUsername,
 		Password: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ExpiresAt: time.Now().Add(time.Hour)}, route.active, nil
 }
 

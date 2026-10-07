@@ -1,4 +1,4 @@
-package backgroundopencode
+package opencode
 
 import (
 	"net"

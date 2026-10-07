@@ -25,9 +25,8 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/go-connections/nat"
-	"github.com/nebler/fern/internal/backgroundopencode"
-	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/domain"
+	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
 	"github.com/nebler/fern/internal/taskenvdocker"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -237,11 +236,11 @@ func newScanFixture(t *testing.T) *scanFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	route, err := backgroundroute.New(listener, "https://"+listener.Addr().String())
+	route, err := opencode.NewRouter(listener, "https://"+listener.Addr().String())
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.c, err = New(runStore, provider, unusedArtifact{}, ids, Config{WorkspaceID: workspace, Profile: store.BackgroundRunSourceProfile, ImageIdentity: scanImage, EnvironmentSHA256: f.params.EnvironmentSHA256, Agent: "build", ModelProvider: "provider", Model: "model", OperationTimeout: 30 * time.Second, PollInterval: time.Hour, Now: func() time.Time { return f.now }, HTTPClient: &http.Client{Timeout: time.Second}, Route: route, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 10, MaxPages: 10, MaxEvents: 100}})
+	f.c, err = New(runStore, provider, unusedArtifact{}, ids, Config{WorkspaceID: workspace, Profile: store.BackgroundRunSourceProfile, ImageIdentity: scanImage, EnvironmentSHA256: f.params.EnvironmentSHA256, Agent: "build", ModelProvider: "provider", Model: "model", OperationTimeout: 30 * time.Second, PollInterval: time.Hour, Now: func() time.Time { return f.now }, HTTPClient: &http.Client{Timeout: time.Second}, Route: route, HistoryBounds: opencode.HistoryBounds{PageLimit: 10, MaxPages: 10, MaxEvents: 100}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,7 +616,7 @@ func TestCleanupRequiredBoundsRouteDrain(t *testing.T) {
 	}
 	transport := blockingTransport{entered: make(chan struct{}), release: make(chan struct{})}
 	t.Cleanup(func() { close(transport.release) })
-	target, err := backgroundroute.NewTarget("http://127.0.0.1:9", transport)
+	target, err := opencode.NewRouteTarget("http://127.0.0.1:9", transport)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -629,7 +628,7 @@ func TestCleanupRequiredBoundsRouteDrain(t *testing.T) {
 		t.Fatalf("attachment active=%t error=%v", active, err)
 	}
 	request := httptest.NewRequest(http.MethodGet, "https://fern.example/api/health", nil)
-	request.SetBasicAuth(backgroundroute.AttachmentUsername, attachment.Password)
+	request.SetBasicAuth(opencode.AttachmentUsername, attachment.Password)
 	go f.c.config.Route.ServeHTTP(httptest.NewRecorder(), request)
 	<-transport.entered
 

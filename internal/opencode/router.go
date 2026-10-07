@@ -1,4 +1,4 @@
-package backgroundroute
+package opencode
 
 import (
 	"context"
@@ -32,8 +32,8 @@ const (
 	maxAttachments     = 16
 )
 
-// Identity is the complete immutable route-to-process binding.
-type Identity struct {
+// RouteIdentity is the complete immutable route-to-process binding.
+type RouteIdentity struct {
 	WorkspaceID  string
 	RunID        string
 	SessionID    string
@@ -43,32 +43,32 @@ type Identity struct {
 	RuntimeToken string
 }
 
-// Target is constructed by the qualified Docker provider. Its authenticated
+// RouteTarget is constructed by the qualified Docker provider. Its authenticated
 // transport is intentionally not inspectable by route or API callers.
-type Target struct {
+type RouteTarget struct {
 	endpoint  *url.URL
 	transport http.RoundTripper
 }
 
-// NewTarget is the narrow provider-facing constructor for an authenticated
+// NewRouteTarget is the narrow provider-facing constructor for an authenticated
 // exact-loopback proxy target.
-func NewTarget(endpoint string, transport http.RoundTripper) (Target, error) {
+func NewRouteTarget(endpoint string, transport http.RoundTripper) (RouteTarget, error) {
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.Scheme != "http" || parsed.User != nil || parsed.Path != "" || parsed.RawPath != "" ||
 		parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Hostname() != "127.0.0.1" || parsed.Port() == "" || transport == nil {
-		return Target{}, errors.New("exact authenticated loopback background target is required")
+		return RouteTarget{}, errors.New("exact authenticated loopback background target is required")
 	}
 	port, err := strconv.Atoi(parsed.Port())
 	if err != nil || port < 1 || port > 65535 || endpoint != "http://127.0.0.1:"+strconv.Itoa(port) {
-		return Target{}, errors.New("canonical authenticated loopback background target is required")
+		return RouteTarget{}, errors.New("canonical authenticated loopback background target is required")
 	}
 	copyURL := *parsed
-	return Target{endpoint: &copyURL, transport: transport}, nil
+	return RouteTarget{endpoint: &copyURL, transport: transport}, nil
 }
 
 type binding struct {
-	identity Identity
-	target   Target
+	identity RouteIdentity
+	target   RouteTarget
 	handler  http.Handler
 	ctx      context.Context
 	cancel   context.CancelFunc
@@ -78,7 +78,7 @@ type binding struct {
 }
 
 type attachment struct {
-	identity  Identity
+	identity  RouteIdentity
 	sessionID string
 	expiresAt time.Time
 }
@@ -92,8 +92,8 @@ type Attachment struct {
 	ExpiresAt time.Time
 }
 
-// Manager owns one already-bound listener and never changes its public origin.
-type Manager struct {
+// Router owns one already-bound listener and never changes its public origin.
+type Router struct {
 	mu          sync.Mutex
 	listener    net.Listener
 	server      *http.Server
@@ -105,7 +105,7 @@ type Manager struct {
 	run         bool
 }
 
-func New(listener net.Listener, origin string) (*Manager, error) {
+func NewRouter(listener net.Listener, origin string) (*Router, error) {
 	if listener == nil {
 		return nil, errors.New("background route listener is required")
 	}
@@ -117,13 +117,13 @@ func New(listener net.Listener, origin string) (*Manager, error) {
 	if err != nil || net.ParseIP(host) == nil || !net.ParseIP(host).IsLoopback() {
 		return nil, errors.New("background route listener must be exact loopback")
 	}
-	manager := &Manager{listener: listener, origin: parsed, attachments: make(map[[sha256.Size]byte]attachment)}
+	manager := &Router{listener: listener, origin: parsed, attachments: make(map[[sha256.Size]byte]attachment)}
 	manager.server = &http.Server{Handler: manager, ReadHeaderTimeout: 10 * time.Second}
 	return manager, nil
 }
 
 // Run serves until cancellation, removing the route before HTTP shutdown.
-func (m *Manager) Run(ctx context.Context) error {
+func (m *Router) Run(ctx context.Context) error {
 	m.mu.Lock()
 	if m.run {
 		m.mu.Unlock()
@@ -152,7 +152,7 @@ func (m *Manager) Run(ctx context.Context) error {
 	}
 }
 
-func (m *Manager) beginShutdown() {
+func (m *Router) beginShutdown() {
 	m.mu.Lock()
 	m.closing = true
 	clear(m.attachments)
@@ -170,14 +170,14 @@ func (m *Manager) beginShutdown() {
 
 // Close makes the listener unreachable. It is safe after Run returned and is
 // ordered before provider/Docker closure by composition.
-func (m *Manager) Close() error {
+func (m *Router) Close() error {
 	m.beginShutdown()
 	return errors.Join(m.server.Close(), m.listener.Close())
 }
 
 // Activate installs one exact binding or proves the same binding is already
 // installed. A removed binding fences all replacement until ConfirmRemoval.
-func (m *Manager) Activate(identity Identity, target Target) (string, error) {
+func (m *Router) Activate(identity RouteIdentity, target RouteTarget) (string, error) {
 	if err := validateIdentity(identity); err != nil || target.endpoint == nil || target.transport == nil {
 		return "", errors.Join(errors.New("valid exact background route activation is required"), err)
 	}
@@ -204,7 +204,7 @@ func (m *Manager) Activate(identity Identity, target Target) (string, error) {
 
 // Remove unpublishes only the exact binding and waits for all requests admitted
 // through it to stop using the target before returning evidence.
-func (m *Manager) Remove(ctx context.Context, identity Identity) (string, error) {
+func (m *Router) Remove(ctx context.Context, identity RouteIdentity) (string, error) {
 	if err := validateIdentity(identity); err != nil {
 		return "", err
 	}
@@ -255,7 +255,7 @@ func (m *Manager) Remove(ctx context.Context, identity Identity) (string, error)
 
 // ConfirmRemoval clears the process-local reuse fence for the same identity
 // once its removal has drained.
-func (m *Manager) ConfirmRemoval(identity Identity) error {
+func (m *Router) ConfirmRemoval(identity RouteIdentity) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.pending == nil {
@@ -276,17 +276,17 @@ func (m *Manager) ConfirmRemoval(identity Identity) error {
 	}
 }
 
-func (m *Manager) Active(identity Identity) bool {
+func (m *Router) Active(identity RouteIdentity) bool {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return !m.closing && m.active != nil && m.active.identity == identity
 }
 
-func (m *Manager) Origin() string { return m.origin.String() }
+func (m *Router) Origin() string { return m.origin.String() }
 
 // IssueAttachment creates an expiring capability only when the complete
 // durable run tuple still names the active OpenCode runtime.
-func (m *Manager) IssueAttachment(run store.BackgroundRun) (Attachment, bool, error) {
+func (m *Router) IssueAttachment(run store.BackgroundRun) (Attachment, bool, error) {
 	identity, ok := identityFromRun(run)
 	if !ok || string(run.OpenCodeSessionID) != identity.SessionID {
 		return Attachment{}, false, nil
@@ -318,7 +318,7 @@ func (m *Manager) IssueAttachment(run store.BackgroundRun) (Attachment, bool, er
 
 // ActiveOrigin returns the configured origin only when the complete durable run
 // tuple still names the process currently bound to the listener.
-func (m *Manager) ActiveOrigin(run store.BackgroundRun) (string, bool) {
+func (m *Router) ActiveOrigin(run store.BackgroundRun) (string, bool) {
 	identity, ok := identityFromRun(run)
 	if !ok || !m.Active(identity) {
 		return "", false
@@ -326,12 +326,12 @@ func (m *Manager) ActiveOrigin(run store.BackgroundRun) (string, bool) {
 	return m.Origin(), true
 }
 
-func identityFromRun(run store.BackgroundRun) (Identity, bool) {
+func identityFromRun(run store.BackgroundRun) (RouteIdentity, bool) {
 	runtime, err := domain.NewRuntime(run.ObservedContainerID, run.ObservedContainerStartedAt)
 	if err != nil || runtime.Epoch() != run.RuntimeEpoch {
-		return Identity{}, false
+		return RouteIdentity{}, false
 	}
-	identity := Identity{WorkspaceID: string(run.WorkspaceID), RunID: string(run.RunID), SessionID: string(run.OpenCodeSessionID),
+	identity := RouteIdentity{WorkspaceID: string(run.WorkspaceID), RunID: string(run.RunID), SessionID: string(run.OpenCodeSessionID),
 		RuntimeEpoch: run.RuntimeEpoch, ContainerID: run.ObservedContainerID,
 		StartedAt: runtime.StartedAt(), RuntimeToken: runtime.Token()}
 	return identity, true
@@ -411,7 +411,7 @@ func attachmentRequestAllowed(request *http.Request, sessionID string) bool {
 	}
 }
 
-func (m *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
+func (m *Router) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "no-store")
 	username, password, authenticated := request.BasicAuth()
 	digest := sha256.Sum256([]byte(password))
@@ -469,7 +469,7 @@ func (m *Manager) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	current.handler.ServeHTTP(writer, request.WithContext(requestContext))
 }
 
-func (m *Manager) reverseProxy(current *binding) http.Handler {
+func (m *Router) reverseProxy(current *binding) http.Handler {
 	origin := m.origin
 	return &httputil.ReverseProxy{
 		Transport: current.target.transport,
@@ -518,7 +518,7 @@ func stripFernCookies(header http.Header) {
 	}
 }
 
-func validateIdentity(identity Identity) error {
+func validateIdentity(identity RouteIdentity) error {
 	runtime, err := domain.ParseRuntime(identity.ContainerID, identity.StartedAt, identity.RuntimeToken)
 	if identity.WorkspaceID == "" || identity.RunID == "" || identity.SessionID == "" ||
 		identity.RuntimeEpoch <= 0 || identity.ContainerID == "" || identity.StartedAt == "" ||
@@ -528,7 +528,7 @@ func validateIdentity(identity Identity) error {
 	return nil
 }
 
-func routeEvidence(status string, identity Identity) string {
+func routeEvidence(status string, identity RouteIdentity) string {
 	value, _ := json.Marshal(struct {
 		Effect       string `json:"effect"`
 		Status       string `json:"status"`
@@ -539,6 +539,6 @@ func routeEvidence(status string, identity Identity) string {
 	return string(value)
 }
 
-func (identity Identity) String() string {
+func (identity RouteIdentity) String() string {
 	return fmt.Sprintf("%s/%s/%s@%d", identity.WorkspaceID, identity.RunID, identity.SessionID, identity.RuntimeEpoch)
 }

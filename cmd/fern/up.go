@@ -12,11 +12,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/observability"
+	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/proxy"
 	"github.com/nebler/fern/internal/safeio"
@@ -83,7 +83,7 @@ func runUp(args []string, log *slog.Logger) (resultErr error) {
 type upRuntime struct {
 	state            *store.Store
 	services         *runServices
-	backgroundRoute  *backgroundroute.Manager
+	backgroundRoute  *opencode.Router
 	remoteServer     *http.Server
 	operatorServer   *http.Server
 	remoteListener   net.Listener
@@ -115,7 +115,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 	if err != nil {
 		return nil, err
 	}
-	route, err := backgroundroute.New(backgroundListener, cfg.Runs.BackgroundRoute.Origin)
+	route, err := opencode.NewRouter(backgroundListener, cfg.Runs.BackgroundRoute.Origin)
 	if err != nil {
 		return nil, errors.Join(err, state.Close())
 	}

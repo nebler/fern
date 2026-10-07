@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/nebler/fern/internal/backgroundroute"
+	"github.com/nebler/fern/internal/opencode"
 )
 
 func TestSerialAPIProjectionsRequireOwnedSessionEnvelopes(t *testing.T) {
@@ -39,7 +39,7 @@ func TestSerialAPIProjectionsRequireOwnedSessionEnvelopes(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				username, password, ok := r.BasicAuth()
-				if !ok || username != backgroundroute.AttachmentUsername || password != "test-secret" || r.Method != http.MethodGet {
+				if !ok || username != opencode.AttachmentUsername || password != "test-secret" || r.Method != http.MethodGet {
 					t.Error("attachment request lost its authentication or method")
 				}
 				w.WriteHeader(test.status)

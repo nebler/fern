@@ -10,7 +10,7 @@ FUNCTIONS="$RUN_ROOT/functions.txt"
 MODULE=github.com/nebler/fern
 PACKAGES=(
   internal/domain
-  internal/backgroundroute
+  internal/opencode
   internal/backgroundruncoord
   internal/taskenvdocker
   internal/taskartifact
@@ -52,7 +52,7 @@ check_function() {
 }
 
 check_package internal/domain 91
-check_package internal/backgroundroute 75
+check_package internal/opencode 84
 check_package internal/backgroundruncoord 28
 check_package internal/taskenvdocker 72
 check_package internal/taskartifact 70

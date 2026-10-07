@@ -26,10 +26,9 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
-	"github.com/nebler/fern/internal/backgroundopencode"
-	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/githubapp"
+	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -301,7 +300,7 @@ func committedRuntimeFromRun(run store.BackgroundRun) (RuntimeIdentity, error) {
 // OpenCodeClient derives Basic credentials in memory and returns only the
 // profile-specific authenticated client. No capability or secret crosses the
 // provider boundary.
-func (p *Provider) OpenCodeClient(run store.BackgroundRun, runtime RuntimeIdentity, httpClient *http.Client) (*backgroundopencode.Client, error) {
+func (p *Provider) OpenCodeClient(run store.BackgroundRun, runtime RuntimeIdentity, httpClient *http.Client) (*opencode.Client, error) {
 	if _, err := p.validateRun(run); err != nil {
 		return nil, err
 	}
@@ -309,7 +308,7 @@ func (p *Provider) OpenCodeClient(run store.BackgroundRun, runtime RuntimeIdenti
 		runtime.StartedAt != run.ObservedContainerStartedAt || run.HostPort < 1 || run.HostPort > 65535 {
 		return nil, errors.New("exact committed background runtime is required")
 	}
-	return backgroundopencode.New(backgroundopencode.Config{
+	return opencode.NewClient(opencode.ClientConfig{
 		Endpoint: "http://127.0.0.1:" + strconv.Itoa(run.HostPort), Username: basicUsername,
 		Password: p.password(run), HTTPClient: httpClient,
 	})
@@ -317,12 +316,12 @@ func (p *Provider) OpenCodeClient(run store.BackgroundRun, runtime RuntimeIdenti
 
 // BackgroundRouteTarget derives the exact endpoint and an authenticated
 // transport without exposing the run password outside the provider.
-func (p *Provider) BackgroundRouteTarget(run store.BackgroundRun, runtime RuntimeIdentity) (backgroundroute.Target, error) {
+func (p *Provider) BackgroundRouteTarget(run store.BackgroundRun, runtime RuntimeIdentity) (opencode.RouteTarget, error) {
 	transport, err := p.newRouteTransport(run, runtime)
 	if err != nil {
-		return backgroundroute.Target{}, err
+		return opencode.RouteTarget{}, err
 	}
-	return backgroundroute.NewTarget("http://"+transport.endpoint, transport)
+	return opencode.NewRouteTarget("http://"+transport.endpoint, transport)
 }
 
 func (p *Provider) newRouteTransport(run store.BackgroundRun, runtime RuntimeIdentity) (*routeTransport, error) {

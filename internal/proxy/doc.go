@@ -1,6 +1,6 @@
 // Package proxy assembles Fern's remote and loopback operator HTTP control
 // surfaces. Despite the name it does not reverse-proxy OpenCode: live run
-// attachment belongs to backgroundroute, and the run handler (runapi) is
+// attachment belongs to opencode.Router, and the run handler (runapi) is
 // injected by cmd/fern rather than imported. NewHandlers builds handlers only;
 // listeners, TLS, and Host validation are part of composition and deployment.
 //

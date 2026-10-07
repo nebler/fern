@@ -12,13 +12,12 @@ import (
 	goruntime "runtime"
 	"time"
 
-	"github.com/nebler/fern/internal/backgroundopencode"
-	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/backgroundruncoord"
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/observability"
+	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/runapi"
 	"github.com/nebler/fern/internal/store"
 	"github.com/nebler/fern/internal/taskartifact"
@@ -70,7 +69,7 @@ func openStateStore(ctx context.Context, cfg config.Config) (*store.Store, error
 	return store.Open(ctx, filepath.Join(runDirectory, cfg.Workspace.Name+".db"))
 }
 
-func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Store, route *backgroundroute.Manager, status *observability.Registry, log *slog.Logger) (*runServices, error) {
+func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Store, route *opencode.Router, status *observability.Registry, log *slog.Logger) (*runServices, error) {
 	if cfg.Runs.BackgroundImage == "" || cfg.Runs.BackgroundImageID == "" || route == nil {
 		return nil, errors.New("a qualified disposable Background Run profile is required")
 	}
@@ -144,7 +143,7 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: cfg.Runs.Agent,
 		ModelProvider: cfg.Runs.Model.Provider, Model: cfg.Runs.Model.ID,
 		OperationTimeout: backgroundCloneTimeout,
-		PollInterval:     runPollInterval, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 100, MaxPages: 100, MaxEvents: 10000},
+		PollInterval:     runPollInterval, HistoryBounds: opencode.HistoryBounds{PageLimit: 100, MaxPages: 100, MaxEvents: 10000},
 		Now: time.Now, HTTPClient: &http.Client{Timeout: backgroundCloneTimeout}, Route: route,
 		OnError: func(err error) {
 			status.Degraded(observability.ComponentBackgroundRunSerial, err)

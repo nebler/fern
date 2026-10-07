@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nebler/fern/internal/backgroundroute"
+	"github.com/nebler/fern/internal/opencode"
 )
 
 // Check real pinned-server envelopes, not a mock or a successful status alone.
@@ -92,7 +92,7 @@ func serialAttachmentRequest(ctx context.Context, origin, token, method, path st
 	if err != nil {
 		return 0, nil, errors.New("construct attachment request")
 	}
-	request.SetBasicAuth(backgroundroute.AttachmentUsername, token)
+	request.SetBasicAuth(opencode.AttachmentUsername, token)
 	request.Header.Set("Content-Type", "application/json")
 	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)

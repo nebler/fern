@@ -13,8 +13,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/domain"
+	"github.com/nebler/fern/internal/opencode"
 )
 
 var workspaceNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
@@ -144,7 +144,7 @@ func validateRuns(config Config) error {
 			return errors.New("proxy.remoteOrigin is required with runs.backgroundRoute")
 		}
 		parsed, _ := url.Parse(origin)
-		if _, err := backgroundopencode.ParseTrustedOrigin(origin); err != nil {
+		if _, err := opencode.ParseTrustedOrigin(origin); err != nil {
 			return errors.New("runs.backgroundRoute.origin must be a canonical non-loopback private HTTPS origin supported by the pinned OpenCode UI")
 		}
 		remotePort := remote.Port()
