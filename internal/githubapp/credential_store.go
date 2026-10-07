@@ -49,10 +49,6 @@ func NewAppCredentials(appID int64, privateKeyPEM []byte) (AppCredentials, error
 
 func (credentials AppCredentials) AppID() int64 { return credentials.appID }
 
-func (credentials AppCredentials) PrivateKeyPEM() []byte {
-	return bytes.Clone(credentials.privateKeyPEM)
-}
-
 func (credentials AppCredentials) PrivateKey() *rsa.PrivateKey { return credentials.privateKey }
 
 func (credentials AppCredentials) String() string {
@@ -95,28 +91,6 @@ func (store *CredentialStore) Save(credentials AppCredentials) error {
 		return err
 	}
 	if err := atomicfile.Write(store.path(), payload, 0o600); err != nil {
-		return fmt.Errorf("%w: %v", ErrCredentialStoreIO, err)
-	}
-	return nil
-}
-
-// Delete removes the committed generation and durably records its absence.
-// It is idempotent so a failed bootstrap can restore the empty-store state
-// whether Save failed before or after making the candidate visible.
-func (store *CredentialStore) Delete() error {
-	if store == nil || store.directory == "" {
-		return ErrCredentialStoreSecurity
-	}
-	if err := os.Remove(store.path()); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("%w: %v", ErrCredentialStoreIO, err)
-	}
-	directory, err := os.Open(store.directory)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrCredentialStoreIO, err)
-	}
-	if err := errors.Join(directory.Sync(), directory.Close()); err != nil {
 		return fmt.Errorf("%w: %v", ErrCredentialStoreIO, err)
 	}
 	return nil

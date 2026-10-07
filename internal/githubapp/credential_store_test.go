@@ -45,15 +45,6 @@ func TestCredentialStoreCreatesPrivateDirectoryAndRoundTrips(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertStoredCredentials(t, got, want)
-	if err := store.Delete(); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Delete(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.Load(); !errors.Is(err, ErrCredentialsNotFound) {
-		t.Fatalf("load after delete error = %v", err)
-	}
 }
 
 func TestStoredCredentialsRoundTripInMemory(t *testing.T) {
@@ -223,12 +214,12 @@ func TestCredentialStoreConcurrentReplacementNeverLoadsPartialState(t *testing.T
 				return
 			}
 			if credentials.AppID() == first.AppID() {
-				if string(credentials.PrivateKeyPEM()) != string(first.PrivateKeyPEM()) {
+				if string(credentials.privateKeyPEM) != string(first.privateKeyPEM) {
 					errorsSeen <- errors.New("loaded partial first credentials")
 					return
 				}
 			} else if credentials.AppID() == second.AppID() {
-				if string(credentials.PrivateKeyPEM()) != string(second.PrivateKeyPEM()) {
+				if string(credentials.privateKeyPEM) != string(second.privateKeyPEM) {
 					errorsSeen <- errors.New("loaded partial second credentials")
 					return
 				}
@@ -254,7 +245,7 @@ func TestCredentialStoreIOErrorsKeepTheirCause(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(directory, credentialFileName, "child"), nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	err := store.Delete()
+	err := store.Save(testStoredCredentials(t, 9))
 	if !errors.Is(err, ErrCredentialStoreIO) || err.Error() == ErrCredentialStoreIO.Error() {
 		t.Fatalf("error = %v, want wrapped ErrCredentialStoreIO with cause", err)
 	}
@@ -268,7 +259,7 @@ func TestAppCredentialsFormattingRedactsKey(t *testing.T) {
 			t.Fatalf("formatted credentials = %q", formatted)
 		}
 	}
-	if _, err := NewAppCredentials(0, credentials.PrivateKeyPEM()); err == nil {
+	if _, err := NewAppCredentials(0, credentials.privateKeyPEM); err == nil {
 		t.Fatal("accepted a non-positive App ID")
 	}
 	if _, err := NewAppCredentials(7, []byte("not a key")); !errors.Is(err, ErrInvalidPrivateKey) {
@@ -306,7 +297,7 @@ func testPrivateKeyPEM(t *testing.T) []byte {
 
 func assertStoredCredentials(t *testing.T, got, want AppCredentials) {
 	t.Helper()
-	if got.AppID() != want.AppID() || string(got.PrivateKeyPEM()) != string(want.PrivateKeyPEM()) || got.PrivateKey() == nil {
+	if got.AppID() != want.AppID() || string(got.privateKeyPEM) != string(want.privateKeyPEM) || got.PrivateKey() == nil {
 		t.Fatal("stored credentials did not round trip")
 	}
 }

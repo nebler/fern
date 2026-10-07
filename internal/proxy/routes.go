@@ -178,16 +178,6 @@ func rejectBearer(next http.Handler) http.Handler {
 	})
 }
 
-func requireSameOrigin(next http.HandlerFunc) http.HandlerFunc {
-	return func(writer http.ResponseWriter, request *http.Request) {
-		if !sameOrigin(request) {
-			http.Error(writer, "cross-origin request rejected", http.StatusForbidden)
-			return
-		}
-		next(writer, request)
-	}
-}
-
 func isMutation(request *http.Request) bool {
 	return request.Method != http.MethodGet && request.Method != http.MethodHead && request.Method != http.MethodOptions
 }
