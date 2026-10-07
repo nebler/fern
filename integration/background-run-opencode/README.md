@@ -17,7 +17,7 @@ flowchart TD
   main -->|"runtime setup"| provider["internal/taskenvdocker + Docker client / container / filters / mount / nat"]
   main -->|"real pinned protocol"| protocol["internal/backgroundopencode"]
   main -->|"serial lifecycle scenario"| serial["runSerialCoordinator"]
-  serial -->|"durable identities and state"| store["internal/task / internal/run / internal/taskstore"]
+  serial -->|"durable identities and state"| store["internal/domain / internal/taskstore"]
   serial -->|"advance one durable step"| coord["internal/backgroundruncoord.RunOnce"]
   coord -->|"runtime effects"| provider
   serial -->|"owned-session attachment"| route["startSerialRoute -> internal/backgroundroute"]

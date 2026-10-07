@@ -9,8 +9,7 @@ import (
 	"errors"
 	"fmt"
 
-	rundomain "github.com/nebler/fern/internal/run"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 // Receipt command kinds.
@@ -29,8 +28,8 @@ const BackgroundRunStoppedBeforeStart = "background_run_stopped_before_start"
 // input), so only command authority is checked; schema CHECKs bound what is
 // persisted.
 func (s *Store) AdmitBackgroundRun(ctx context.Context, p AdmitBackgroundRunParams) (_ Admission, err error) {
-	if p.Claim.Scope.CommandKind != CreateBackgroundRunCommand || p.Claim.Actor.Type != task.ActorOpenCode ||
-		p.Profile != rundomain.SourceProfile {
+	if p.Claim.Scope.CommandKind != CreateBackgroundRunCommand || p.Claim.Actor.Type != domain.ActorOpenCode ||
+		p.Profile != domain.SourceProfile {
 		return Admission{}, fmt.Errorf("%w: background run admission", ErrInvalidInput)
 	}
 	tx, release, err := s.beginWrite(ctx)
@@ -47,7 +46,7 @@ func (s *Store) AdmitBackgroundRun(ctx context.Context, p AdmitBackgroundRunPara
 	}
 	if found {
 		switch existing.classify(p.Claim) {
-		case task.IdempotencyReplay:
+		case domain.IdempotencyReplay:
 			run, getErr := readRun(ctx, tx, workspaceID, existing.RunID)
 			if getErr != nil {
 				return Admission{}, getErr
@@ -56,9 +55,9 @@ func (s *Store) AdmitBackgroundRun(ctx context.Context, p AdmitBackgroundRunPara
 				return Admission{}, fmt.Errorf("finish admission replay: %w", err)
 			}
 			return Admission{Run: run, Receipt: existing, Replayed: true}, nil
-		case task.IdempotencyOwnerMismatch:
+		case domain.IdempotencyOwnerMismatch:
 			return Admission{}, ErrIdempotencyOwnerMismatch
-		case task.IdempotencyConflict:
+		case domain.IdempotencyConflict:
 			return Admission{}, &ConflictError{ReceiptID: existing.ID, RunID: existing.RunID}
 		default:
 			return Admission{}, fmt.Errorf("%w: unexpected idempotency disposition", ErrCorruptStore)
@@ -74,7 +73,7 @@ func (s *Store) AdmitBackgroundRun(ctx context.Context, p AdmitBackgroundRunPara
 		}
 		return Admission{}, fmt.Errorf("read workspace: %w", err)
 	}
-	if task.RepositoryID(repositoryID) != p.RepositoryID || p.RepositoryRemote != "https://github.com/"+repositoryFullName {
+	if domain.RepositoryID(repositoryID) != p.RepositoryID || p.RepositoryRemote != "https://github.com/"+repositoryFullName {
 		return Admission{}, ErrRepositoryMismatch
 	}
 
@@ -91,13 +90,13 @@ INSERT INTO runs(
 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued','absent',1,?,?)`,
 		p.RunID, workspaceID, p.RepositoryID, p.RepositoryRemote, p.BaseSHA, branch, p.Prompt,
 		p.Agent, p.ModelProvider, p.Model, unixMillis(p.Deadline), p.Profile, p.ImageIdentity, p.EnvironmentSHA256[:],
-		rundomain.ResourceSpecVersion, p.OpenCodeSessionID, p.OpenCodeMessageID, encodeActor(p.Claim.Actor),
+		domain.ResourceSpecVersion, p.OpenCodeSessionID, p.OpenCodeMessageID, encodeActor(p.Claim.Actor),
 		acceptedMS, acceptedMS); err != nil {
 		return Admission{}, fmt.Errorf("insert run: %w", err)
 	}
 	receipt, err := insertReceipt(ctx, tx, p.Claim, p.RunID, p.APIContractVersion, p.AcceptedAt, struct {
-		RunID     task.RunID `json:"run_id"`
-		Committed bool       `json:"committed"`
+		RunID     domain.RunID `json:"run_id"`
+		Committed bool         `json:"committed"`
 	}{p.RunID, true})
 	if err != nil {
 		return Admission{}, err
@@ -116,7 +115,7 @@ INSERT INTO runs(
 // once; an executing run moves to cleaning. It is a compare-and-swap on the
 // run revision, so exactly one of a racing stop and seal wins.
 func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams) (_ BackgroundRunStop, err error) {
-	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != StopBackgroundRunCommand || p.Claim.Actor.Type != task.ActorOpenCode {
+	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != StopBackgroundRunCommand || p.Claim.Actor.Type != domain.ActorOpenCode {
 		return BackgroundRunStop{}, fmt.Errorf("%w: run stop claim", ErrInvalidInput)
 	}
 	tx, release, err := s.beginWrite(ctx)
@@ -132,7 +131,7 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 	}
 	if found {
 		switch existing.classify(p.Claim) {
-		case task.IdempotencyReplay:
+		case domain.IdempotencyReplay:
 			if existing.RunID != p.RunID {
 				return BackgroundRunStop{}, ErrIdempotencyConflict
 			}
@@ -144,9 +143,9 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 				return BackgroundRunStop{}, err
 			}
 			return BackgroundRunStop{Run: run, Receipt: existing, Replayed: true}, nil
-		case task.IdempotencyOwnerMismatch:
+		case domain.IdempotencyOwnerMismatch:
 			return BackgroundRunStop{}, ErrNotFound
-		case task.IdempotencyConflict:
+		case domain.IdempotencyConflict:
 			return BackgroundRunStop{}, ErrIdempotencyConflict
 		default:
 			return BackgroundRunStop{}, ErrCorruptStore
@@ -157,18 +156,18 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 	if err != nil {
 		return BackgroundRunStop{}, err
 	}
-	queuedStop := run.EffectPhase == rundomain.Absent
-	activeStop := run.EffectPhase == rundomain.Provisioning || run.EffectPhase == rundomain.PromptPending || run.EffectPhase == rundomain.Admitted
+	queuedStop := run.EffectPhase == domain.Absent
+	activeStop := run.EffectPhase == domain.Provisioning || run.EffectPhase == domain.PromptPending || run.EffectPhase == domain.Admitted
 	if run.StopReceiptID != 0 || (!queuedStop && !activeStop) {
 		return BackgroundRunStop{}, ErrInvalidState
 	}
-	stopState := rundomain.Failed
+	stopState := domain.Failed
 	if activeStop {
-		stopState = rundomain.Canceling
+		stopState = domain.Canceling
 	}
 	receipt, err := insertReceipt(ctx, tx, p.Claim, run.RunID, p.APIContractVersion, p.StoppedAt, struct {
-		RunID task.RunID      `json:"run_id"`
-		State rundomain.State `json:"state"`
+		RunID domain.RunID `json:"run_id"`
+		State domain.State `json:"state"`
 	}{run.RunID, stopState})
 	if err != nil {
 		return BackgroundRunStop{}, err
@@ -199,7 +198,7 @@ cleanup_proof='queued:no_effect_claim',last_error=?`, []any{receipt.ID, now, Bac
 // longer be stopped or timed out. Once input validation has completed, caller
 // cancellation cannot split the receipt from the seal.
 func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams) (_ BackgroundRunSealAdmission, err error) {
-	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != SealBackgroundRunCommand || p.Claim.Actor.Type != task.ActorOpenCode {
+	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != SealBackgroundRunCommand || p.Claim.Actor.Type != domain.ActorOpenCode {
 		return BackgroundRunSealAdmission{}, fmt.Errorf("%w: background seal authority", ErrInvalidInput)
 	}
 	ctx = context.WithoutCancel(ctx)
@@ -216,11 +215,11 @@ func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams
 	}
 	if found {
 		switch existing.classify(p.Claim) {
-		case task.IdempotencyOwnerMismatch:
+		case domain.IdempotencyOwnerMismatch:
 			return BackgroundRunSealAdmission{}, ErrNotFound
-		case task.IdempotencyConflict:
+		case domain.IdempotencyConflict:
 			return BackgroundRunSealAdmission{}, ErrIdempotencyConflict
-		case task.IdempotencyReplay:
+		case domain.IdempotencyReplay:
 			if existing.RunID != p.RunID {
 				return BackgroundRunSealAdmission{}, ErrIdempotencyConflict
 			}
@@ -245,8 +244,8 @@ func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams
 		return BackgroundRunSealAdmission{}, ErrInvalidState
 	}
 	receipt, err := insertReceipt(ctx, tx, p.Claim, run.RunID, p.APIContractVersion, p.AcceptedAt, struct {
-		RunID    task.RunID    `json:"run_id"`
-		ResultID task.ResultID `json:"result_id"`
+		RunID    domain.RunID    `json:"run_id"`
+		ResultID domain.ResultID `json:"result_id"`
 	}{run.RunID, p.ResultID})
 	if err != nil {
 		return BackgroundRunSealAdmission{}, err
@@ -270,5 +269,5 @@ seal_receipt_id=?,seal_requested_at=?,seal_policy_version=?,result_id=?`,
 // earlier seal has claimed it.
 func sealable(run BackgroundRun) bool {
 	claimed := run.Seal != nil || run.TimeoutRequestedAt != nil || run.StopReceiptID != 0
-	return run.EffectPhase == rundomain.Admitted && admittedState(run.State) && !claimed
+	return run.EffectPhase == domain.Admitted && admittedState(run.State) && !claimed
 }

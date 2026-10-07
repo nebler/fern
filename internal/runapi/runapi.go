@@ -14,11 +14,9 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/backgroundroute"
-	"github.com/nebler/fern/internal/gitref"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/pluginauth"
-	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/strictjson"
-	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -31,12 +29,12 @@ const (
 
 type Store interface {
 	AdmitBackgroundRun(context.Context, taskstore.AdmitBackgroundRunParams) (taskstore.Admission, error)
-	FindReceiptByIdempotency(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error)
-	GetBackgroundRun(context.Context, task.WorkspaceID, task.RunID, task.ActorSnapshot) (taskstore.BackgroundRun, error)
+	FindReceiptByIdempotency(context.Context, domain.WorkspaceID, string, domain.IdempotencyKey) (taskstore.Receipt, bool, error)
+	GetBackgroundRun(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (taskstore.BackgroundRun, error)
 	StopBackgroundRun(context.Context, taskstore.StopBackgroundRunParams) (taskstore.BackgroundRunStop, error)
 	SealBackgroundRun(context.Context, taskstore.SealBackgroundRunParams) (taskstore.BackgroundRunSealAdmission, error)
-	ListBackgroundRuns(context.Context, task.WorkspaceID, task.ActorSnapshot, int) ([]taskstore.BackgroundRun, error)
-	GetBackgroundRunResult(context.Context, task.WorkspaceID, task.RunID, task.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error)
+	ListBackgroundRuns(context.Context, domain.WorkspaceID, domain.ActorSnapshot, int) ([]taskstore.BackgroundRun, error)
+	GetBackgroundRunResult(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error)
 }
 
 var _ Store = (*taskstore.Store)(nil)
@@ -47,21 +45,21 @@ type Route interface {
 	ActiveOrigin(taskstore.BackgroundRun) (string, bool)
 }
 
-type ActorResolver func(context.Context) (task.ActorSnapshot, error)
+type ActorResolver func(context.Context) (domain.ActorSnapshot, error)
 
 type RetentionVerifier interface {
 	Verify(context.Context, taskstore.BackgroundRunResultProjection) error
 }
 
 type Config struct {
-	WorkspaceID                 task.WorkspaceID
-	RepositoryID                task.RepositoryID
+	WorkspaceID                 domain.WorkspaceID
+	RepositoryID                domain.RepositoryID
 	RepositoryRemote            string
 	BackgroundImageIdentity     string
 	BackgroundEnvironmentSHA256 [32]byte
 	Store                       Store
 	Route                       Route
-	Generator                   *task.Generator
+	Generator                   *domain.Generator
 	ActorResolver               ActorResolver
 	BaseVerifier                BaseVerifier
 	Now                         func() time.Time
@@ -85,19 +83,19 @@ type Handler struct {
 }
 
 type retainedKey struct {
-	result task.ResultID
+	result domain.ResultID
 	bundle [32]byte
 }
 
 func New(config Config) (*Handler, error) {
-	_, workspaceErr := task.ParseWorkspaceID(string(config.WorkspaceID))
+	_, workspaceErr := domain.ParseWorkspaceID(string(config.WorkspaceID))
 	checks := []struct {
 		field string
 		ok    bool
 	}{
 		{"WorkspaceID", workspaceErr == nil},
 		{"RepositoryID", config.RepositoryID != 0},
-		{"RepositoryRemote", gitref.ValidateGitHubRemote(config.RepositoryRemote) == nil},
+		{"RepositoryRemote", domain.ValidateGitHubRemote(config.RepositoryRemote) == nil},
 		{"BackgroundImageIdentity", config.BackgroundImageIdentity != ""},
 		{"BackgroundEnvironmentSHA256", config.BackgroundEnvironmentSHA256 != [32]byte{}},
 		{"Store", config.Store != nil},
@@ -126,7 +124,7 @@ func New(config Config) (*Handler, error) {
 type route struct {
 	method string
 	scope  string
-	serve  func(*Handler, http.ResponseWriter, *http.Request, task.ActorSnapshot, task.RunID)
+	serve  func(*Handler, http.ResponseWriter, *http.Request, domain.ActorSnapshot, domain.RunID)
 }
 
 // routes maps a resource below PathPrefix to its operations: "" is the
@@ -175,7 +173,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // parseRunPath splits a request path into its routes key and run ID.
-func parseRunPath(path string) (resource string, id task.RunID, ok bool) {
+func parseRunPath(path string) (resource string, id domain.RunID, ok bool) {
 	rest, ok := strings.CutPrefix(path, PathPrefix)
 	if !ok || rest == "" {
 		return "", "", ok
@@ -185,7 +183,7 @@ func parseRunPath(path string) (resource string, id task.RunID, ok bool) {
 		return "", "", false
 	}
 	runID, action, hasAction := strings.Cut(rest, "/")
-	id, err := task.ParseRunID(runID)
+	id, err := domain.ParseRunID(runID)
 	if err != nil {
 		return "", "", false
 	}
@@ -200,14 +198,14 @@ func writeNotFound(w http.ResponseWriter) {
 }
 
 type sealProjection struct {
-	RunID       task.RunID      `json:"run_id"`
-	State       rundomain.State `json:"state"`
+	RunID       domain.RunID    `json:"run_id"`
+	State       domain.State    `json:"state"`
 	ResultPhase string          `json:"result_phase"`
-	ResultID    task.ResultID   `json:"result_id"`
+	ResultID    domain.ResultID `json:"result_id"`
 	Committed   bool            `json:"committed"`
 }
 
-func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.RunID) {
+func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor domain.ActorSnapshot, id domain.RunID) {
 	if !validateEmptyMutation(w, r) {
 		return
 	}
@@ -227,7 +225,7 @@ func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorS
 }
 
 type resultResponse struct {
-	RunID     task.RunID               `json:"run_id"`
+	RunID     domain.RunID             `json:"run_id"`
 	State     string                   `json:"state"`
 	Result    retainedResultResponse   `json:"result"`
 	Artifact  retainedArtifactResponse `json:"artifact"`
@@ -236,14 +234,14 @@ type resultResponse struct {
 }
 
 type retainedResultResponse struct {
-	ID         task.ResultID      `json:"id"`
-	Outcome    task.ResultOutcome `json:"outcome"`
-	Repository string             `json:"repository"`
-	Base       task.GitOID        `json:"base_oid"`
-	Commit     task.GitOID        `json:"result_commit"`
-	Tree       task.GitOID        `json:"tree_oid"`
-	Entries    int                `json:"manifest_entries"`
-	Manifest   string             `json:"manifest_sha256"`
+	ID         domain.ResultID      `json:"id"`
+	Outcome    domain.ResultOutcome `json:"outcome"`
+	Repository string               `json:"repository"`
+	Base       domain.GitOID        `json:"base_oid"`
+	Commit     domain.GitOID        `json:"result_commit"`
+	Tree       domain.GitOID        `json:"tree_oid"`
+	Entries    int                  `json:"manifest_entries"`
+	Manifest   string               `json:"manifest_sha256"`
 }
 
 type retainedArtifactResponse struct {
@@ -263,7 +261,7 @@ type cleanupResponse struct {
 	Complete bool `json:"complete"`
 }
 
-func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.RunID) {
+func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor domain.ActorSnapshot, id domain.RunID) {
 	if !noQuery(r) || !noBody(r) {
 		WriteError(w, http.StatusBadRequest, "invalid_query", "This run operation does not accept query parameters.")
 		return
@@ -273,9 +271,9 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 		writeStoreError(w, err)
 		return
 	}
-	if run.State != rundomain.ResultReady {
+	if run.State != domain.ResultReady {
 		// A sealing run records its last failed export pass as last_error.
-		if run.EffectPhase == rundomain.Sealing && run.LastError != "" {
+		if run.EffectPhase == domain.Sealing && run.LastError != "" {
 			WriteError(w, http.StatusServiceUnavailable, "recovery_required", "The retained result requires recovery.")
 			return
 		}
@@ -295,7 +293,7 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 		Artifact: retainedArtifactResponse{
 			"git_bundle_v1", digest(projection.Result.ManifestSHA256), digest(projection.Result.BundleSHA256), projection.Result.BundleBytes, digest(projection.Result.ManifestSHA256)},
 		Retention: retentionResponse{retained, retained},
-		Cleanup:   cleanupResponse{run.EffectPhase == rundomain.CleanupComplete},
+		Cleanup:   cleanupResponse{run.EffectPhase == domain.CleanupComplete},
 	})
 }
 
@@ -315,12 +313,12 @@ func (h *Handler) verifyRetained(ctx context.Context, projection taskstore.Backg
 
 // authorize accepts the ingress-authenticated actor: the loopback operator, or
 // an OpenCode plugin whose identity matches its bearer authorization.
-func (h *Handler) authorize(r *http.Request) (task.ActorSnapshot, pluginauth.RequestAuthorization, bool) {
+func (h *Handler) authorize(r *http.Request) (domain.ActorSnapshot, pluginauth.RequestAuthorization, bool) {
 	actor, err := h.config.ActorResolver(r.Context())
 	if err != nil || actor.Validate() != nil {
-		return task.ActorSnapshot{}, pluginauth.RequestAuthorization{}, false
+		return domain.ActorSnapshot{}, pluginauth.RequestAuthorization{}, false
 	}
-	if actor.Type == task.ActorOperator {
+	if actor.Type == domain.ActorOperator {
 		return actor, pluginauth.RequestAuthorization{}, true
 	}
 	authorization, ok := pluginauth.RequestAuthorizationFromContext(r.Context())
@@ -329,8 +327,8 @@ func (h *Handler) authorize(r *http.Request) (task.ActorSnapshot, pluginauth.Req
 
 // pluginBearerActor reports whether actor is the OpenCode plugin identity
 // authenticated by the bearer credential credentialID.
-func pluginBearerActor(actor task.ActorSnapshot, credentialID string) bool {
-	return actor.Type == task.ActorOpenCode &&
+func pluginBearerActor(actor domain.ActorSnapshot, credentialID string) bool {
+	return actor.Type == domain.ActorOpenCode &&
 		actor.ID == credentialID &&
 		actor.CredentialID == credentialID &&
 		actor.Authentication == "fern_plugin_bearer"
@@ -342,12 +340,12 @@ var operatorScopes = map[string]bool{"run:read": true, "run:attach": true}
 
 // requireScope checks an authorized actor: the operator against
 // operatorScopes, a plugin against its credential's scopes.
-func requireScope(w http.ResponseWriter, actor task.ActorSnapshot, authorization pluginauth.RequestAuthorization, scope string) bool {
+func requireScope(w http.ResponseWriter, actor domain.ActorSnapshot, authorization pluginauth.RequestAuthorization, scope string) bool {
 	switch {
-	case actor.Type == task.ActorOperator && !operatorScopes[scope]:
+	case actor.Type == domain.ActorOperator && !operatorScopes[scope]:
 		WriteError(w, http.StatusForbidden, "forbidden", "The operator cannot perform this run operation.")
 		return false
-	case actor.Type != task.ActorOperator && !authorization.HasScope(scope):
+	case actor.Type != domain.ActorOperator && !authorization.HasScope(scope):
 		WriteError(w, http.StatusForbidden, "forbidden", "The plugin credential lacks the required scope.")
 		return false
 	}
@@ -363,16 +361,16 @@ type createInput struct {
 }
 
 type createResponse struct {
-	RunID     task.RunID `json:"run_id"`
-	Committed bool       `json:"committed"`
+	RunID     domain.RunID `json:"run_id"`
+	Committed bool         `json:"committed"`
 }
 
 type stopResponse struct {
-	RunID task.RunID      `json:"run_id"`
-	State rundomain.State `json:"state"`
+	RunID domain.RunID `json:"run_id"`
+	State domain.State `json:"state"`
 }
 
-func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, _ task.RunID) {
+func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor domain.ActorSnapshot, _ domain.RunID) {
 	if !noQuery(r) || !exactJSON(r) {
 		WriteError(w, http.StatusBadRequest, "invalid_request", "The request is not valid.")
 		return
@@ -399,7 +397,7 @@ func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.Acto
 	WriteJSON(w, http.StatusAccepted, createResponse{admission.RunID, admission.Committed})
 }
 
-func (h *Handler) list(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, _ task.RunID) {
+func (h *Handler) list(w http.ResponseWriter, r *http.Request, actor domain.ActorSnapshot, _ domain.RunID) {
 	if !noQuery(r) || !noBody(r) {
 		WriteError(w, http.StatusBadRequest, "invalid_query", "Run listing does not accept query parameters.")
 		return
@@ -418,7 +416,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request, actor task.ActorS
 	}{views})
 }
 
-func (h *Handler) get(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.RunID) {
+func (h *Handler) get(w http.ResponseWriter, r *http.Request, actor domain.ActorSnapshot, id domain.RunID) {
 	if !noQuery(r) || !noBody(r) {
 		WriteError(w, http.StatusBadRequest, "invalid_query", "Run reads do not accept query parameters.")
 		return
@@ -432,18 +430,18 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, actor task.ActorSn
 }
 
 type attachResponse struct {
-	RunID     task.RunID             `json:"run_id"`
-	URL       string                 `json:"url"`
-	SessionID task.OpenCodeSessionID `json:"session_id"`
-	Username  string                 `json:"username"`
-	Password  string                 `json:"password"`
-	ExpiresAt time.Time              `json:"expires_at"`
+	RunID     domain.RunID             `json:"run_id"`
+	URL       string                   `json:"url"`
+	SessionID domain.OpenCodeSessionID `json:"session_id"`
+	Username  string                   `json:"username"`
+	Password  string                   `json:"password"`
+	ExpiresAt time.Time                `json:"expires_at"`
 }
 
 // attach mints a short-lived OpenCode credential. Durable readiness alone
 // never grants access: the route manager must also issue it, and it owns
 // expiry and runtime fencing. The response carries a secret and is no-store.
-func (h *Handler) attach(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.RunID) {
+func (h *Handler) attach(w http.ResponseWriter, r *http.Request, actor domain.ActorSnapshot, id domain.RunID) {
 	if !noQuery(r) || !noBody(r) {
 		WriteError(w, http.StatusBadRequest, "invalid_query", "Run attachment does not accept query parameters.")
 		return
@@ -471,14 +469,14 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, actor task.Acto
 }
 
 func attachmentReady(run taskstore.BackgroundRun) bool {
-	active := run.State == rundomain.SettingUp || run.State == rundomain.Working ||
-		run.State == rundomain.NeedsYou || run.State == rundomain.Uncertain
+	active := run.State == domain.SettingUp || run.State == domain.Working ||
+		run.State == domain.NeedsYou || run.State == domain.Uncertain
 	// Provisioning reconciles the session before the prompt fence ends it.
-	ready := run.EffectPhase == rundomain.PromptPending || run.EffectPhase == rundomain.Admitted
+	ready := run.EffectPhase == domain.PromptPending || run.EffectPhase == domain.Admitted
 	return active && ready && run.StopReceiptID == 0
 }
 
-func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.RunID) {
+func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor domain.ActorSnapshot, id domain.RunID) {
 	if !validateEmptyMutation(w, r) {
 		return
 	}
@@ -498,11 +496,11 @@ func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor task.ActorS
 }
 
 type runView struct {
-	ID         task.RunID      `json:"id"`
-	State      rundomain.State `json:"state"`
-	Repository string          `json:"repository"`
-	Head       task.GitOID     `json:"head"`
-	Branch     *string         `json:"branch"`
+	ID         domain.RunID  `json:"id"`
+	State      domain.State  `json:"state"`
+	Repository string        `json:"repository"`
+	Head       domain.GitOID `json:"head"`
+	Branch     *string       `json:"branch"`
 	// Attachable is advisory, not a reservation; attach re-checks readiness.
 	Attachable bool `json:"attachable"`
 }
@@ -526,13 +524,13 @@ func decodeStrict(w http.ResponseWriter, r *http.Request, limit int64, target an
 	}
 	return true
 }
-func idempotencyKey(w http.ResponseWriter, r *http.Request) (task.IdempotencyKey, bool) {
+func idempotencyKey(w http.ResponseWriter, r *http.Request) (domain.IdempotencyKey, bool) {
 	values := r.Header.Values("Idempotency-Key")
 	if len(values) != 1 {
 		WriteError(w, http.StatusBadRequest, "invalid_idempotency_key", "A valid Idempotency-Key is required.")
 		return "", false
 	}
-	key, err := task.ParseIdempotencyKey(values[0])
+	key, err := domain.ParseIdempotencyKey(values[0])
 	if err != nil {
 		WriteError(w, http.StatusBadRequest, "invalid_idempotency_key", "A valid Idempotency-Key is required.")
 		return "", false

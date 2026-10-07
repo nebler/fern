@@ -1,9 +1,7 @@
-package run
+package domain
 
 import (
 	"strings"
-
-	"github.com/nebler/fern/internal/task"
 )
 
 // Resources is the canonical resource namespace for a run. Its spelling is
@@ -11,7 +9,7 @@ import (
 type Resources struct{ stem string }
 
 // NewResources derives the names from a Fern-generated run ID.
-func NewResources(id task.RunID) Resources {
+func NewResources(id RunID) Resources {
 	if id == "" {
 		return Resources{}
 	}

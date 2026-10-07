@@ -8,27 +8,27 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 type artifactManifest struct {
 	Version               int
-	RepositoryID          task.RepositoryID
-	WorkspaceID           task.WorkspaceID
-	RunID                 task.RunID
-	ResultID              task.ResultID
+	RepositoryID          domain.RepositoryID
+	WorkspaceID           domain.WorkspaceID
+	RunID                 domain.RunID
+	ResultID              domain.ResultID
 	ImageIdentity         string
 	Profile               string
 	ProfileSHA256         Digest
 	EnvironmentSHA256     Digest
 	ResourceSpecVersion   int
-	OpenCodeSessionID     task.OpenCodeSessionID
-	OpenCodeMessageID     task.OpenCodeMessageID
+	OpenCodeSessionID     domain.OpenCodeSessionID
+	OpenCodeMessageID     domain.OpenCodeMessageID
 	SnapshotPolicyVersion string
 	CompletionAuthority   string
-	Base                  task.GitOID
-	Result                task.GitOID
-	Tree                  task.GitOID
+	Base                  domain.GitOID
+	Result                domain.GitOID
+	Tree                  domain.GitOID
 	EpochSecond           int64
 	Changes               []ChangeEntry
 	ChangesSHA256         Digest
@@ -40,28 +40,28 @@ type artifactManifest struct {
 // fields. decodeManifest re-encodes it byte-for-byte to reject unknown fields,
 // duplicates, alternate ordering, whitespace, and alternate JSON spellings.
 type manifestWire struct {
-	Version               int                    `json:"version"`
-	RepositoryID          task.RepositoryID      `json:"repository_id"`
-	WorkspaceID           task.WorkspaceID       `json:"workspace_id"`
-	RunID                 task.RunID             `json:"run_id"`
-	ResultID              task.ResultID          `json:"result_id"`
-	ImageIdentity         string                 `json:"image_identity"`
-	Profile               string                 `json:"profile"`
-	ProfileSHA256         string                 `json:"profile_sha256"`
-	EnvironmentSHA256     string                 `json:"environment_sha256"`
-	ResourceSpecVersion   int                    `json:"resource_spec_version"`
-	OpenCodeSessionID     task.OpenCodeSessionID `json:"opencode_session_id"`
-	OpenCodeMessageID     task.OpenCodeMessageID `json:"opencode_message_id"`
-	SnapshotPolicyVersion string                 `json:"snapshot_policy_version"`
-	CompletionAuthority   string                 `json:"completion_authority"`
-	Base                  task.GitOID            `json:"base"`
-	Result                task.GitOID            `json:"result"`
-	Tree                  task.GitOID            `json:"tree"`
-	EpochSecond           int64                  `json:"epoch_second"`
-	Changes               []ChangeEntry          `json:"changes"`
-	ChangesSHA256         string                 `json:"changes_sha256"`
-	BundleSHA256          string                 `json:"bundle_sha256"`
-	BundleBytes           int64                  `json:"bundle_bytes"`
+	Version               int                      `json:"version"`
+	RepositoryID          domain.RepositoryID      `json:"repository_id"`
+	WorkspaceID           domain.WorkspaceID       `json:"workspace_id"`
+	RunID                 domain.RunID             `json:"run_id"`
+	ResultID              domain.ResultID          `json:"result_id"`
+	ImageIdentity         string                   `json:"image_identity"`
+	Profile               string                   `json:"profile"`
+	ProfileSHA256         string                   `json:"profile_sha256"`
+	EnvironmentSHA256     string                   `json:"environment_sha256"`
+	ResourceSpecVersion   int                      `json:"resource_spec_version"`
+	OpenCodeSessionID     domain.OpenCodeSessionID `json:"opencode_session_id"`
+	OpenCodeMessageID     domain.OpenCodeMessageID `json:"opencode_message_id"`
+	SnapshotPolicyVersion string                   `json:"snapshot_policy_version"`
+	CompletionAuthority   string                   `json:"completion_authority"`
+	Base                  domain.GitOID            `json:"base"`
+	Result                domain.GitOID            `json:"result"`
+	Tree                  domain.GitOID            `json:"tree"`
+	EpochSecond           int64                    `json:"epoch_second"`
+	Changes               []ChangeEntry            `json:"changes"`
+	ChangesSHA256         string                   `json:"changes_sha256"`
+	BundleSHA256          string                   `json:"bundle_sha256"`
+	BundleBytes           int64                    `json:"bundle_bytes"`
 }
 
 func encodeManifest(manifest artifactManifest) ([]byte, Digest, error) {
@@ -128,16 +128,16 @@ func validateManifest(manifest artifactManifest) error {
 	if manifest.Version != 3 || manifest.EpochSecond < 0 || manifest.EpochSecond > 253402300799 || manifest.BundleBytes <= 0 {
 		return fmt.Errorf("%w: manifest metadata", ErrVerification)
 	}
-	if _, err := task.ParseRepositoryID(strconv.FormatUint(uint64(manifest.RepositoryID), 10)); err != nil {
+	if _, err := domain.ParseRepositoryID(strconv.FormatUint(uint64(manifest.RepositoryID), 10)); err != nil {
 		return fmt.Errorf("%w: repository ID", ErrVerification)
 	}
-	if _, err := task.ParseWorkspaceID(string(manifest.WorkspaceID)); err != nil {
+	if _, err := domain.ParseWorkspaceID(string(manifest.WorkspaceID)); err != nil {
 		return fmt.Errorf("%w: workspace ID", ErrVerification)
 	}
-	if _, err := task.ParseRunID(string(manifest.RunID)); err != nil {
+	if _, err := domain.ParseRunID(string(manifest.RunID)); err != nil {
 		return fmt.Errorf("%w: task ID", ErrVerification)
 	}
-	if _, err := task.ParseResultID(string(manifest.ResultID)); err != nil {
+	if _, err := domain.ParseResultID(string(manifest.ResultID)); err != nil {
 		return fmt.Errorf("%w: result ID", ErrVerification)
 	}
 	if !validImageIdentity(manifest.ImageIdentity) || !validProfile(manifest.Profile) || !validDigest(manifest.ProfileSHA256) || !validDigest(manifest.EnvironmentSHA256) {
@@ -146,14 +146,14 @@ func validateManifest(manifest artifactManifest) error {
 	if manifest.ResourceSpecVersion != ResourceSpecVersion || manifest.SnapshotPolicyVersion != SnapshotPolicyV1 || manifest.CompletionAuthority != CompletionUserSeal {
 		return fmt.Errorf("%w: policy identity", ErrVerification)
 	}
-	if _, err := task.ParseOpenCodeSessionID(string(manifest.OpenCodeSessionID)); err != nil {
+	if _, err := domain.ParseOpenCodeSessionID(string(manifest.OpenCodeSessionID)); err != nil {
 		return fmt.Errorf("%w: OpenCode session ID", ErrVerification)
 	}
-	if _, err := task.ParseOpenCodeMessageID(string(manifest.OpenCodeMessageID)); err != nil {
+	if _, err := domain.ParseOpenCodeMessageID(string(manifest.OpenCodeMessageID)); err != nil {
 		return fmt.Errorf("%w: OpenCode message ID", ErrVerification)
 	}
-	for _, oid := range []task.GitOID{manifest.Base, manifest.Result, manifest.Tree} {
-		if _, err := task.ParseGitOID(string(oid)); err != nil {
+	for _, oid := range []domain.GitOID{manifest.Base, manifest.Result, manifest.Tree} {
+		if _, err := domain.ParseGitOID(string(oid)); err != nil {
 			return fmt.Errorf("%w: manifest object ID", ErrVerification)
 		}
 	}
@@ -229,7 +229,7 @@ func validChange(entry ChangeEntry) bool {
 		if version == nil || !validMode(version.Mode) || version.Size < 0 {
 			return false
 		}
-		_, err := task.ParseGitOID(string(version.BlobOID))
+		_, err := domain.ParseGitOID(string(version.BlobOID))
 		return err == nil
 	}
 	switch entry.Kind {

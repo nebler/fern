@@ -9,16 +9,15 @@ import (
 	"errors"
 	"fmt"
 
-	rundomain "github.com/nebler/fern/internal/run"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 // NextBackgroundRun returns the run the coordinator should advance next. It
 // prefers recovery of an existing effect over consuming the workspace's one
 // provisioning slot. It is a plain read: the host lease admits one coordinator
 // per workspace, and every later mutation is a revision compare-and-swap.
-func (s *Store) NextBackgroundRun(ctx context.Context, workspaceID task.WorkspaceID, profile string) (BackgroundRun, error) {
-	if profile != rundomain.SourceProfile {
+func (s *Store) NextBackgroundRun(ctx context.Context, workspaceID domain.WorkspaceID, profile string) (BackgroundRun, error) {
+	if profile != domain.SourceProfile {
 		return BackgroundRun{}, fmt.Errorf("%w: next background run", ErrInvalidInput)
 	}
 	run, err := scanRun(s.db.QueryRowContext(ctx, runSelect+`
@@ -37,7 +36,7 @@ ORDER BY CASE WHEN r.effect_phase='absent' THEN 1 ELSE 0 END,r.updated_at,r.id L
 }
 
 // NextBackgroundRunWork pairs NextBackgroundRun with its prompt plaintext.
-func (s *Store) NextBackgroundRunWork(ctx context.Context, workspaceID task.WorkspaceID, profile string) (BackgroundRunWork, error) {
+func (s *Store) NextBackgroundRunWork(ctx context.Context, workspaceID domain.WorkspaceID, profile string) (BackgroundRunWork, error) {
 	run, err := s.NextBackgroundRun(ctx, workspaceID, profile)
 	if err != nil {
 		return BackgroundRunWork{}, err
@@ -53,10 +52,10 @@ func (s *Store) NextBackgroundRunWork(ctx context.Context, workspaceID task.Work
 // StartBackgroundRunProvisioning consumes the workspace's provisioning slot
 // before any external I/O. The capacity index rejects a second active run.
 func (s *Store) StartBackgroundRunProvisioning(ctx context.Context, p BackgroundRunRef) (BackgroundRun, error) {
-	if p.ExpectedState != rundomain.Queued || p.ExpectedPhase != rundomain.Absent {
+	if p.ExpectedState != domain.Queued || p.ExpectedPhase != domain.Absent {
 		return BackgroundRun{}, fmt.Errorf("%w: background run provisioning", ErrInvalidInput)
 	}
-	return s.transitionRun(ctx, p, rundomain.SettingUp, rundomain.Provisioning, `last_error=NULL`, nil, "start background run provisioning")
+	return s.transitionRun(ctx, p, domain.SettingUp, domain.Provisioning, `last_error=NULL`, nil, "start background run provisioning")
 }
 
 // RecordBackgroundRunRuntime commits the exact started runtime once. It is the
@@ -73,7 +72,7 @@ func (s *Store) RecordBackgroundRunRuntime(ctx context.Context, p RecordBackgrou
 }
 
 func (p RecordBackgroundRunRuntimeParams) valid() bool {
-	return p.ExpectedState == rundomain.SettingUp && p.ExpectedPhase == rundomain.Provisioning &&
+	return p.ExpectedState == domain.SettingUp && p.ExpectedPhase == domain.Provisioning &&
 		validBoundedText(p.ContainerID, 1, 128) &&
 		validBoundedText(p.ContainerStartedAt, 1, 64) &&
 		p.RuntimeEpoch > 0 &&
@@ -85,36 +84,36 @@ func (p RecordBackgroundRunRuntimeParams) valid() bool {
 // it ends provisioning before the single prompt POST. A restarted coordinator
 // finds prompt_pending and only reconciles; it can never dispatch again.
 func (s *Store) RecordBackgroundRunPromptRequestAttempted(ctx context.Context, p BackgroundRunRef) (BackgroundRun, error) {
-	if p.ExpectedState != rundomain.SettingUp || p.ExpectedPhase != rundomain.Provisioning {
+	if p.ExpectedState != domain.SettingUp || p.ExpectedPhase != domain.Provisioning {
 		return BackgroundRun{}, fmt.Errorf("%w: background run prompt request attempt", ErrInvalidInput)
 	}
-	return s.transitionRun(ctx, p, rundomain.SettingUp, rundomain.PromptPending, `prompt_request_attempted_at=?`,
+	return s.transitionRun(ctx, p, domain.SettingUp, domain.PromptPending, `prompt_request_attempted_at=?`,
 		[]any{unixMillis(p.Now)}, "record background run prompt request attempt", `prompt_request_attempted_at IS NULL`)
 }
 
 func (s *Store) RecordBackgroundRunPromptAdmitted(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	if p.ExpectedPhase != rundomain.PromptPending || !validRequiredEvidence(p.Evidence) {
+	if p.ExpectedPhase != domain.PromptPending || !validRequiredEvidence(p.Evidence) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run prompt admission", ErrInvalidInput)
 	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, rundomain.Working, rundomain.Admitted,
+	return s.transitionRun(ctx, p.BackgroundRunRef, domain.Working, domain.Admitted,
 		`last_evidence=?`, []any{p.Evidence}, "record background run prompt admission")
 }
 
 func (s *Store) RecordBackgroundRunPromptUncertain(ctx context.Context, p RecordBackgroundRunEvidenceParams) (BackgroundRun, error) {
-	if p.ExpectedPhase != rundomain.PromptPending || !validRequiredEvidence(p.Evidence) {
+	if p.ExpectedPhase != domain.PromptPending || !validRequiredEvidence(p.Evidence) {
 		return BackgroundRun{}, fmt.Errorf("%w: uncertain background run prompt", ErrInvalidInput)
 	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, rundomain.Uncertain, rundomain.PromptPending,
+	return s.transitionRun(ctx, p.BackgroundRunRef, domain.Uncertain, domain.PromptPending,
 		`last_evidence=?`, []any{p.Evidence}, "record uncertain background run prompt")
 }
 
 // RecordBackgroundRunWorkObservation records positive bounded evidence only.
 // Callers must not invoke it for an empty active/pending observation.
-func (s *Store) RecordBackgroundRunWorkObservation(ctx context.Context, p RecordBackgroundRunEvidenceParams, state rundomain.State) (BackgroundRun, error) {
-	if p.ExpectedPhase != rundomain.Admitted || !admittedState(p.ExpectedState) || !admittedState(state) || !validRequiredEvidence(p.Evidence) {
+func (s *Store) RecordBackgroundRunWorkObservation(ctx context.Context, p RecordBackgroundRunEvidenceParams, state domain.State) (BackgroundRun, error) {
+	if p.ExpectedPhase != domain.Admitted || !admittedState(p.ExpectedState) || !admittedState(state) || !validRequiredEvidence(p.Evidence) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run work observation", ErrInvalidInput)
 	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, state, rundomain.Admitted,
+	return s.transitionRun(ctx, p.BackgroundRunRef, state, domain.Admitted,
 		`last_evidence=?`, []any{p.Evidence}, "record background run work observation")
 }
 
@@ -122,7 +121,7 @@ func (s *Store) RecordBackgroundRunWorkObservation(ctx context.Context, p Record
 // a plugin receipt once the run deadline has passed. Parent terminalization
 // remains coupled to cleanup finality.
 func (s *Store) RequestBackgroundRunTimeout(ctx context.Context, p BackgroundRunRef) (_ BackgroundRun, err error) {
-	if !rundomain.Classify(p.ExpectedState, p.ExpectedPhase).TimeoutEligible {
+	if !domain.Classify(p.ExpectedState, p.ExpectedPhase).TimeoutEligible {
 		return BackgroundRun{}, fmt.Errorf("%w: background run timeout", ErrInvalidInput)
 	}
 	now := unixMillis(p.Now)
@@ -138,16 +137,16 @@ func (s *Store) MarkBackgroundRunCleanupRequired(ctx context.Context, p MarkBack
 	if !validBoundedText(p.Error, 1, 4096) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run cleanup failure", ErrInvalidInput)
 	}
-	state := rundomain.CleanupRequired
+	state := domain.CleanupRequired
 	switch {
-	case p.ExpectedPhase == rundomain.Cleaning && p.ExpectedState == rundomain.ResultReady:
-		state = rundomain.ResultReady
-	case p.ExpectedPhase == rundomain.Cleaning,
-		rundomain.Classify(p.ExpectedState, p.ExpectedPhase).TimeoutEligible:
+	case p.ExpectedPhase == domain.Cleaning && p.ExpectedState == domain.ResultReady:
+		state = domain.ResultReady
+	case p.ExpectedPhase == domain.Cleaning,
+		domain.Classify(p.ExpectedState, p.ExpectedPhase).TimeoutEligible:
 	default:
 		return BackgroundRun{}, fmt.Errorf("%w: background run cleanup failure state", ErrInvalidInput)
 	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, state, rundomain.Cleaning,
+	return s.transitionRun(ctx, p.BackgroundRunRef, state, domain.Cleaning,
 		`last_error=?`, []any{p.Error}, "mark background run cleanup required")
 }
 
@@ -155,28 +154,28 @@ func (s *Store) MarkBackgroundRunCleanupRequired(ctx context.Context, p MarkBack
 // every resource absent. It performs no external I/O. A timed-out run can only
 // finalize with the timeout reason.
 func (s *Store) FinalizeBackgroundRunFailure(ctx context.Context, p FinalizeBackgroundRunFailureParams) (BackgroundRun, error) {
-	if p.ExpectedPhase != rundomain.Cleaning || !validBoundedText(p.Reason, 1, 4096) ||
-		(p.ExpectedState != rundomain.Canceling && p.ExpectedState != rundomain.CleanupRequired) {
+	if p.ExpectedPhase != domain.Cleaning || !validBoundedText(p.Reason, 1, 4096) ||
+		(p.ExpectedState != domain.Canceling && p.ExpectedState != domain.CleanupRequired) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run finalization", ErrInvalidInput)
 	}
 	var predicates []string
 	if p.Reason != "run_timeout" {
 		predicates = append(predicates, `timeout_requested_at IS NULL`)
 	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, rundomain.Failed, rundomain.CleanupComplete,
+	return s.transitionRun(ctx, p.BackgroundRunRef, domain.Failed, domain.CleanupComplete,
 		`cleanup_proof=?,last_error=?,last_evidence=?`, []any{p.CleanupProof, p.Reason, p.Evidence}, "finalize background run", predicates...)
 }
 
 func (s *Store) CompleteBackgroundRunResultCleanup(ctx context.Context, p CompleteBackgroundRunResultCleanupParams) (BackgroundRun, error) {
-	if p.ExpectedState != rundomain.ResultReady || p.ExpectedPhase != rundomain.Cleaning || !validRequiredEvidence(p.CleanupProof) {
+	if p.ExpectedState != domain.ResultReady || p.ExpectedPhase != domain.Cleaning || !validRequiredEvidence(p.CleanupProof) {
 		return BackgroundRun{}, fmt.Errorf("%w: background result cleanup", ErrInvalidInput)
 	}
-	return s.transitionRun(ctx, p.BackgroundRunRef, rundomain.ResultReady, rundomain.CleanupComplete,
+	return s.transitionRun(ctx, p.BackgroundRunRef, domain.ResultReady, domain.CleanupComplete,
 		`cleanup_proof=?`, []any{p.CleanupProof}, "complete background result cleanup")
 }
 
-func (s *Store) transitionRun(ctx context.Context, ref BackgroundRunRef, state rundomain.State, phase rundomain.Phase, assignments string, args []any, operation string, predicates ...string) (BackgroundRun, error) {
-	if !rundomain.Classify(state, phase).Valid {
+func (s *Store) transitionRun(ctx context.Context, ref BackgroundRunRef, state domain.State, phase domain.Phase, assignments string, args []any, operation string, predicates ...string) (BackgroundRun, error) {
+	if !domain.Classify(state, phase).Valid {
 		return BackgroundRun{}, fmt.Errorf("%w: background run transition", ErrInvalidInput)
 	}
 	if len(args) > 0 {
@@ -229,8 +228,8 @@ WHERE id=? AND workspace_id=? AND revision=? AND state=? AND effect_phase=?`
 
 // admittedState reports whether state is one an admitted prompt may report:
 // working, needs_you, or uncertain.
-func admittedState(state rundomain.State) bool {
-	return rundomain.Classify(state, rundomain.Admitted).Valid
+func admittedState(state domain.State) bool {
+	return domain.Classify(state, domain.Admitted).Valid
 }
 
 // matches reports whether run is still at the exact revision, state, and
@@ -240,7 +239,7 @@ func (ref BackgroundRunRef) matches(run BackgroundRun) bool {
 }
 
 func validateBackgroundRunRef(ref BackgroundRunRef) error {
-	if !rundomain.Classify(ref.ExpectedState, ref.ExpectedPhase).Valid {
+	if !domain.Classify(ref.ExpectedState, ref.ExpectedPhase).Valid {
 		return fmt.Errorf("%w: background run expected state", ErrInvalidInput)
 	}
 	return nil
@@ -257,7 +256,7 @@ func validRequiredEvidence(value string) bool { return validBoundedText(value, 1
 // committed runtime (a schema CHECK); the other kinds require that no runtime
 // was ever committed.
 func (s *Store) RecordBackgroundRunWriterFence(ctx context.Context, p RecordBackgroundRunWriterFenceParams) (BackgroundRun, error) {
-	if p.ExpectedState != rundomain.Canceling || p.ExpectedPhase != rundomain.Sealing {
+	if p.ExpectedState != domain.Canceling || p.ExpectedPhase != domain.Sealing {
 		return BackgroundRun{}, fmt.Errorf("%w: writer fence revision", ErrInvalidInput)
 	}
 	var stoppedAt any

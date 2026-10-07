@@ -1,5 +1,5 @@
 // Package backgroundopencode is the narrow authenticated HTTP client for the
-// OpenCode server inside a Background Run, pinned to run.SourceProfile. It does
+// OpenCode server inside a Background Run, pinned to domain.SourceProfile. It does
 // not support the persistent workspace OpenCode API, and compatibility with that
 // one source profile is deliberate rather than a promise to accept newer
 // response shapes.

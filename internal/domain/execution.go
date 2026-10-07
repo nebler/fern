@@ -1,4 +1,4 @@
-package run
+package domain
 
 // SourceProfile and ResourceSpecVersion identify the one qualified execution
 // contract. Stored runs and provider resources must carry exactly these values.

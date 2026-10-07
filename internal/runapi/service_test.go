@@ -8,8 +8,7 @@ import (
 	"testing"
 	"time"
 
-	rundomain "github.com/nebler/fern/internal/run"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -18,7 +17,7 @@ type stubVerifier struct {
 	err   error
 }
 
-func (v *stubVerifier) Verify(context.Context, task.GitOID) error { v.calls++; return v.err }
+func (v *stubVerifier) Verify(context.Context, domain.GitOID) error { v.calls++; return v.err }
 
 type commandStore struct {
 	Store
@@ -30,13 +29,13 @@ type commandStore struct {
 	seal                   taskstore.SealBackgroundRunParams
 }
 
-func (s *commandStore) FindReceiptByIdempotency(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error) {
+func (s *commandStore) FindReceiptByIdempotency(context.Context, domain.WorkspaceID, string, domain.IdempotencyKey) (taskstore.Receipt, bool, error) {
 	return s.receipt, s.found, nil
 }
-func (s *commandStore) GetBackgroundRun(context.Context, task.WorkspaceID, task.RunID, task.ActorSnapshot) (taskstore.BackgroundRun, error) {
+func (s *commandStore) GetBackgroundRun(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (taskstore.BackgroundRun, error) {
 	return s.current, nil
 }
-func receiptFor(claim task.IdempotencyClaim, id task.RunID, receiptID int64) taskstore.Receipt {
+func receiptFor(claim domain.IdempotencyClaim, id domain.RunID, receiptID int64) taskstore.Receipt {
 	return taskstore.Receipt{ID: receiptID, WorkspaceID: claim.Scope.WorkspaceID, CommandKind: claim.Scope.CommandKind,
 		IdempotencyKey: claim.Key, RequestHash: claim.RequestHash, Actor: claim.Actor, RunID: id}
 }
@@ -56,9 +55,9 @@ func (s *commandStore) StopBackgroundRun(_ context.Context, p taskstore.StopBack
 	}
 	s.committed = true
 	s.current.RunID, s.current.StopReceiptID = p.RunID, 2
-	s.current.State = rundomain.Canceling
+	s.current.State = domain.Canceling
 	if s.race {
-		s.current.State = rundomain.CleanupRequired // advanced since the original commit
+		s.current.State = domain.CleanupRequired // advanced since the original commit
 	}
 	s.receipt = receiptFor(p.Claim, p.RunID, 2)
 	s.receipt.ResponseProjection = json.RawMessage(`{"run_id":"` + string(p.RunID) + `","state":"canceling"}`)
@@ -74,11 +73,11 @@ func (s *commandStore) SealBackgroundRun(_ context.Context, p taskstore.SealBack
 	return taskstore.BackgroundRunSealAdmission{Run: s.current, Replayed: s.race}, nil
 }
 
-func setupService(t *testing.T) (*service, *commandStore, *stubVerifier, task.ActorSnapshot, createIntent, *int) {
+func setupService(t *testing.T) (*service, *commandStore, *stubVerifier, domain.ActorSnapshot, createIntent, *int) {
 	t.Helper()
 	store, base := &commandStore{}, &stubVerifier{}
 	wakes := new(int)
-	s := &service{config: Config{WorkspaceID: testWorkspace, RepositoryRemote: "https://github.com/owner/repository", Store: store, Generator: task.NewSecureGenerator(), BaseVerifier: base,
+	s := &service{config: Config{WorkspaceID: testWorkspace, RepositoryRemote: "https://github.com/owner/repository", Store: store, Generator: domain.NewSecureGenerator(), BaseVerifier: base,
 		Now: func() time.Time { return time.Unix(1750000000, 123456789) }, RunTimeout: time.Hour,
 		SealPolicyVersion: "seal.v1",
 		Wake: func() {
@@ -88,8 +87,8 @@ func setupService(t *testing.T) (*service, *commandStore, *stubVerifier, task.Ac
 			*wakes++
 		},
 	}}
-	actor := task.ActorSnapshot{Type: task.ActorOpenCode, ID: "pc_owner", DisplayName: "Plugin", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "request"}
-	input := createIntent{Repository: "https://github.com/owner/repository", BaseOID: "0123456789abcdef0123456789abcdef01234567", Instruction: "Work\n\t<exact bytes> ", Profile: rundomain.SourceProfile}
+	actor := domain.ActorSnapshot{Type: domain.ActorOpenCode, ID: "pc_owner", DisplayName: "Plugin", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "request"}
+	input := createIntent{Repository: "https://github.com/owner/repository", BaseOID: "0123456789abcdef0123456789abcdef01234567", Instruction: "Work\n\t<exact bytes> ", Profile: domain.SourceProfile}
 	return s, store, base, actor, input, wakes
 }
 
@@ -102,7 +101,7 @@ func TestCreateCommitReplayAndIdentity(t *testing.T) {
 	}
 	// Literal v1 encoding protects field order, null branch, escaping, and whitespace.
 	wantHash := sha256.Sum256([]byte(taskstore.CreateBackgroundRunCommand + "\n" + `{"repository":"https://github.com/owner/repository","base_oid":"0123456789abcdef0123456789abcdef01234567","branch":null,"instruction":"Work\n\t\u003cexact bytes\u003e ","profile":"` + input.Profile + `"}`))
-	if store.admit.Claim.RequestHash != task.RequestHash(wantHash) || store.admit.Prompt != input.Instruction {
+	if store.admit.Claim.RequestHash != domain.RequestHash(wantHash) || store.admit.Prompt != input.Instruction {
 		t.Fatal("create bytes changed")
 	}
 	store.found = true
@@ -128,18 +127,18 @@ func TestCreateCommitReplayAndIdentity(t *testing.T) {
 func TestCreateEnforcesCommandPolicyWithoutHTTP(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
-		mutate func(*createIntent, *task.ActorSnapshot)
+		mutate func(*createIntent, *domain.ActorSnapshot)
 		want   error
 	}{
-		{"foreign repository", func(input *createIntent, _ *task.ActorSnapshot) {
+		{"foreign repository", func(input *createIntent, _ *domain.ActorSnapshot) {
 			input.Repository = "https://github.com/other/repository"
 		}, errInvalidCreate},
-		{"unsupported profile", func(input *createIntent, _ *task.ActorSnapshot) { input.Profile = "unknown" }, errInvalidCreate},
-		{"empty instruction", func(input *createIntent, _ *task.ActorSnapshot) { input.Instruction = " \t\n" }, errInvalidCreate},
-		{"control instruction", func(input *createIntent, _ *task.ActorSnapshot) { input.Instruction = "work\x00" }, errInvalidCreate},
-		{"empty branch", func(input *createIntent, _ *task.ActorSnapshot) { branch := ""; input.Branch = &branch }, errInvalidCreate},
-		{"symbolic base", func(input *createIntent, _ *task.ActorSnapshot) { input.BaseOID = "HEAD" }, errInvalidBase},
-		{"non-plugin actor", func(_ *createIntent, actor *task.ActorSnapshot) { actor.Type = task.ActorOperator }, task.ErrInvalidActor},
+		{"unsupported profile", func(input *createIntent, _ *domain.ActorSnapshot) { input.Profile = "unknown" }, errInvalidCreate},
+		{"empty instruction", func(input *createIntent, _ *domain.ActorSnapshot) { input.Instruction = " \t\n" }, errInvalidCreate},
+		{"control instruction", func(input *createIntent, _ *domain.ActorSnapshot) { input.Instruction = "work\x00" }, errInvalidCreate},
+		{"empty branch", func(input *createIntent, _ *domain.ActorSnapshot) { branch := ""; input.Branch = &branch }, errInvalidCreate},
+		{"symbolic base", func(input *createIntent, _ *domain.ActorSnapshot) { input.BaseOID = "HEAD" }, errInvalidBase},
+		{"non-plugin actor", func(_ *createIntent, actor *domain.ActorSnapshot) { actor.Type = domain.ActorOperator }, domain.ErrInvalidActor},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s, store, base, actor, input, wakes := setupService(t)
@@ -172,7 +171,7 @@ func TestCommitRaceReplayAndFailureDoNotWake(t *testing.T) {
 				case "stop":
 					var accepted stopAcceptance
 					accepted, err = s.Stop(context.Background(), actor, "key", ids.RunID)
-					if mode == "race" && (accepted.State != rundomain.Canceling || !accepted.Replayed) {
+					if mode == "race" && (accepted.State != domain.Canceling || !accepted.Replayed) {
 						t.Fatalf("stop must project receipt: %+v", accepted)
 					}
 				case "seal":
@@ -206,7 +205,7 @@ func TestStopReplayValidatesOriginalReceipt(t *testing.T) {
 	store.found = true
 	s.config.Now = func() time.Time { panic("replay read clock") }
 	accepted, err := s.Stop(context.Background(), actor, "stop", ids.RunID)
-	if err != nil || accepted.State != rundomain.Canceling || !accepted.Replayed {
+	if err != nil || accepted.State != domain.Canceling || !accepted.Replayed {
 		t.Fatalf("replay=%+v err=%v", accepted, err)
 	}
 	store.receipt.ResponseProjection = json.RawMessage(`{"run_id":"` + string(ids.RunID) + `","state":"result_ready"}`)
@@ -224,7 +223,7 @@ func TestStopReplayValidatesOriginalReceipt(t *testing.T) {
 
 func TestCommandBoundaryRejectsInvalidIdentities(t *testing.T) {
 	s, _, _, actor, input, wakes := setupService(t)
-	if _, err := s.Create(context.Background(), task.ActorSnapshot{}, "key", input); err == nil {
+	if _, err := s.Create(context.Background(), domain.ActorSnapshot{}, "key", input); err == nil {
 		t.Fatal("invalid actor accepted")
 	}
 	if _, err := s.Create(context.Background(), actor, "", input); err == nil {

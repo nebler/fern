@@ -3,7 +3,7 @@ package taskenvdocker
 import (
 	"errors"
 
-	runidentity "github.com/nebler/fern/internal/run"
+	"github.com/nebler/fern/internal/domain"
 )
 
 // WriterFenceKind identifies the lifecycle assertion carried by a WriterFence.
@@ -22,7 +22,7 @@ const (
 type WriterFence struct {
 	kind        WriterFenceKind
 	containerID string
-	runtime     runidentity.Runtime
+	runtime     domain.Runtime
 }
 
 func NeverCreatedAuthority() WriterFence {
@@ -41,7 +41,7 @@ func CreatedContainerAuthority(containerID string) WriterFence {
 // The caller asserts that this exact runtime has stopped; construction is not
 // proof that the writer is inactive.
 func RuntimeCleanupAuthority(runtime RuntimeIdentity) WriterFence {
-	identity, err := runidentity.ParseRuntime(runtime.ContainerID, runtime.StartedAt, runtime.Token)
+	identity, err := domain.ParseRuntime(runtime.ContainerID, runtime.StartedAt, runtime.Token)
 	if err != nil {
 		return WriterFence{}
 	}
@@ -60,7 +60,7 @@ func (a WriterFence) Token() string                    { return a.runtime.Token(
 func (a WriterFence) runtimeIdentity() RuntimeIdentity { return runtimeFromIdentity(a.runtime) }
 
 func validateCleanupAuthority(authority WriterFence) (WriterFenceKind, error) {
-	emptyRuntime := authority.runtime == (runidentity.Runtime{})
+	emptyRuntime := authority.runtime == (domain.Runtime{})
 	switch authority.kind {
 	case WriterFenceNeverCreated:
 		if authority.containerID == "" && emptyRuntime {

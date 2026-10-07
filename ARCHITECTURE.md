@@ -159,7 +159,7 @@ require a CSRF token bound to the method and exact path.
 The live route listener (`backgroundroute`, `:8443`) is separate: it admits only
 attachment capabilities and applies the OpenCode allow-list in `policy.go`.
 
-Ingress installs a validated `task.ActorSnapshot` in request context. Inner API
+Ingress installs a validated `domain.ActorSnapshot` in request context. Inner API
 packages do not derive identity from client-controlled headers or bodies.
 Receipts bind actor, command kind, workspace, idempotency key, and canonical
 request hash.
@@ -279,8 +279,8 @@ Replacement or unowned resources are quarantined or rejected. The provider
 does not trust names alone. Host Git inspection of a clone happens only while
 no run container exists, because the agent can write the clone.
 
-`run.Resources` owns canonical resource-name derivation and matching;
-`run.Runtime` owns exact timestamp and token interpretation. Both have private
+`domain.Resources` owns canonical resource-name derivation and matching;
+`domain.Runtime` owns exact timestamp and token interpretation. Both have private
 representations. These identity values are not inactivity proof: destructive
 provider operations still re-observe the exact resource before acting.
 
@@ -545,11 +545,10 @@ ownership boundaries.
 
 | Package | Responsibility |
 | --- | --- |
-| `internal/run` | persistence-independent lifecycle policy and immutable resource/runtime identities |
+| `internal/domain` | identifiers, actor snapshots, idempotency vocabulary, persistence-independent lifecycle policy, immutable resource/runtime identities, and shared Git ref, GitHub name/remote, and path validation |
 | `internal/runapi` | run HTTP contract (plugin bearer; operator for list/get/attach), attachment admission, plus create/stop/seal policy, admission, replay, and post-commit notification |
 | `internal/backgroundruncoord` | serial run effect coordinator and recovery |
 | `cmd/fern` | CLI, composition, backup, credentials, process lifecycle |
-| `internal/task` | identifiers, actor snapshots, idempotency vocabulary |
 | `internal/taskstore` | the SQLite database: schema 12, run/result authority and state machines |
 | `internal/taskartifact` | deterministic Git bundle creation, CAS, materialization |
 | `internal/taskresultsource` | CAS-only result binding and verified checkout acquisition |
@@ -563,7 +562,6 @@ ownership boundaries.
 | `internal/config` | strict configuration loader and bootstrap/execution validation |
 | `internal/hostlease` | exclusive host-local repository-binding lease |
 | `internal/observability` | in-memory component readiness behind the liveness and readiness probes |
-| `internal/gitref` | shared Git ref, GitHub name/remote, and path validation |
 | `internal/strictjson` | strict JSON validation before typed decoding |
 | `internal/atomicfile` | atomic replace and bounded read of the remaining private files (App credentials, host key) |
 

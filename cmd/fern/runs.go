@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/config"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 const (
@@ -48,12 +48,12 @@ type runConnection struct {
 }
 
 type runSummary struct {
-	ID         task.RunID `json:"id"`
-	State      string     `json:"state"`
-	Repository string     `json:"repository"`
-	Head       string     `json:"head"`
-	Branch     *string    `json:"branch"`
-	Attachable bool       `json:"attachable"`
+	ID         domain.RunID `json:"id"`
+	State      string       `json:"state"`
+	Repository string       `json:"repository"`
+	Head       string       `json:"head"`
+	Branch     *string      `json:"branch"`
+	Attachable bool         `json:"attachable"`
 }
 
 type runListResponse struct {
@@ -61,12 +61,12 @@ type runListResponse struct {
 }
 
 type runAttachResponse struct {
-	RunID     task.RunID             `json:"run_id"`
-	URL       string                 `json:"url"`
-	SessionID task.OpenCodeSessionID `json:"session_id"`
-	Username  string                 `json:"username"`
-	Password  string                 `json:"password"`
-	ExpiresAt time.Time              `json:"expires_at"`
+	RunID     domain.RunID             `json:"run_id"`
+	URL       string                   `json:"url"`
+	SessionID domain.OpenCodeSessionID `json:"session_id"`
+	Username  string                   `json:"username"`
+	Password  string                   `json:"password"`
+	ExpiresAt time.Time                `json:"expires_at"`
 }
 
 func runRuns(ctx context.Context, args []string) error {
@@ -113,9 +113,9 @@ func runAttach(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	var runID task.RunID
+	var runID domain.RunID
 	if len(positional) == 1 {
-		runID, err = task.ParseRunID(positional[0])
+		runID, err = domain.ParseRunID(positional[0])
 		if err != nil {
 			return invocationError{message: "attach requires a valid Fern run ID"}
 		}
@@ -148,7 +148,7 @@ func runAttach(ctx context.Context, args []string) error {
 	return launchOpenCodeAttach(ctx, options.opencode, connection.attachURL(attachment.URL), attachment)
 }
 
-func selectAttachRun(input io.Reader, output io.Writer, runs []runSummary) (task.RunID, error) {
+func selectAttachRun(input io.Reader, output io.Writer, runs []runSummary) (domain.RunID, error) {
 	if len(runs) == 0 {
 		return "", errors.New("no Fern session is ready to attach")
 	}
@@ -261,17 +261,17 @@ func (connection *runConnection) list(ctx context.Context) ([]runSummary, error)
 		return nil, err
 	}
 	for _, run := range response.Runs {
-		if _, err := task.ParseRunID(string(run.ID)); err != nil || run.State == "" || run.Repository == "" {
+		if _, err := domain.ParseRunID(string(run.ID)); err != nil || run.State == "" || run.Repository == "" {
 			return nil, errors.New("Fern returned an invalid run list")
 		}
-		if _, err := task.ParseGitOID(run.Head); err != nil {
+		if _, err := domain.ParseGitOID(run.Head); err != nil {
 			return nil, errors.New("Fern returned an invalid run list")
 		}
 	}
 	return response.Runs, nil
 }
 
-func (connection *runConnection) attach(ctx context.Context, runID task.RunID) (runAttachResponse, error) {
+func (connection *runConnection) attach(ctx context.Context, runID domain.RunID) (runAttachResponse, error) {
 	var response runAttachResponse
 	if err := connection.get(ctx, "/fern/api/runs/"+url.PathEscape(string(runID))+"/attach", &response); err != nil {
 		return runAttachResponse{}, err
@@ -281,7 +281,7 @@ func (connection *runConnection) attach(ctx context.Context, runID task.RunID) (
 		!response.ExpiresAt.After(now) || response.ExpiresAt.After(now.Add(maxAttachmentTTL+time.Minute)) {
 		return runAttachResponse{}, errors.New("Fern returned an invalid attachment identity")
 	}
-	if _, err := task.ParseOpenCodeSessionID(string(response.SessionID)); err != nil {
+	if _, err := domain.ParseOpenCodeSessionID(string(response.SessionID)); err != nil {
 		return runAttachResponse{}, errors.New("Fern returned an invalid OpenCode session identity")
 	}
 	returned, err := url.Parse(response.URL)

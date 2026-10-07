@@ -12,7 +12,7 @@ or a benchmark. The direct caller is `run.sh` (or `go run` from the repository r
 ```mermaid
 flowchart TD
   shell["run.sh: validate pinned local image ID"] -->|"go run"| main["main -> run"]
-  main -->|"fixture IDs and spec"| identity["internal/task / internal/run / internal/taskstore"]
+  main -->|"fixture IDs and spec"| identity["internal/domain / internal/taskstore"]
   main -->|"create provider"| provider["internal/taskenvdocker.New"]
   main -->|"isolated Git fixture"| git["git / gitOutput / ensureNoSharedFiles"]
   main -->|"scope-checked dummy token server"| fixture["newGitHubFixture -> internal/githubapp.NewClient"]

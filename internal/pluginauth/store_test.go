@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/taskstore/taskstoretest"
 )
 
@@ -135,7 +135,7 @@ func TestPollDistinguishesExpiredAndRevokedCredentials(t *testing.T) {
 		t.Fatalf("expired credential poll = %+v, %v", result, err)
 	}
 	revoked := approveTestCredential(t, store, now.Add(2*time.Second))
-	actor := task.ActorSnapshot{Type: task.ActorOperator, ID: "local-operator", CredentialID: "control-test", Authentication: "basic", RequestID: "revoke-poll"}
+	actor := domain.ActorSnapshot{Type: domain.ActorOperator, ID: "local-operator", CredentialID: "control-test", Authentication: "basic", RequestID: "revoke-poll"}
 	if err := store.Revoke(revoked.credential.ID, actor, now.Add(4*time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -162,7 +162,7 @@ func TestDurableRevokeCancelsOnlyRegisteredCredentialRequests(t *testing.T) {
 		t.Fatal("second request was not admitted")
 	}
 	defer unregisterSecond()
-	selfActor := task.ActorSnapshot{Type: task.ActorOpenCode, ID: first.credential.AuthorizationID, CredentialID: first.credential.ID, Authentication: "bearer", RequestID: "self-revoke"}
+	selfActor := domain.ActorSnapshot{Type: domain.ActorOpenCode, ID: first.credential.AuthorizationID, CredentialID: first.credential.ID, Authentication: "bearer", RequestID: "self-revoke"}
 	if err := store.Revoke(first.credential.ID, selfActor, now.Add(5*time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestRegisterAndRevokeRaceLeavesNoAdmittedRequestActive(t *testing.T) {
 	go func() {
 		defer group.Done()
 		<-start
-		actor := task.ActorSnapshot{Type: task.ActorOpenCode, ID: approved.credential.AuthorizationID, CredentialID: approved.credential.ID, Authentication: "bearer", RequestID: "racing-revoke"}
+		actor := domain.ActorSnapshot{Type: domain.ActorOpenCode, ID: approved.credential.AuthorizationID, CredentialID: approved.credential.ID, Authentication: "bearer", RequestID: "racing-revoke"}
 		if err := store.Revoke(approved.credential.ID, actor, now.Add(3*time.Second)); err != nil {
 			revokeErr <- err
 		}
@@ -279,8 +279,8 @@ func TestRegisterAndRevokeRaceLeavesNoAdmittedRequestActive(t *testing.T) {
 	}
 }
 
-func operatorActor() task.ActorSnapshot {
-	return task.ActorSnapshot{Type: task.ActorOperator, ID: "local-operator", DisplayName: "Local operator", CredentialID: "control-test", Authentication: "basic", RequestID: "request-test"}
+func operatorActor() domain.ActorSnapshot {
+	return domain.ActorSnapshot{Type: domain.ActorOperator, ID: "local-operator", DisplayName: "Local operator", CredentialID: "control-test", Authentication: "basic", RequestID: "request-test"}
 }
 
 type approvedTestCredential struct {

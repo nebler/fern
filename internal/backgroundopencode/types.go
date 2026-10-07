@@ -3,10 +3,10 @@ package backgroundopencode
 import (
 	"encoding/json"
 
-	"github.com/nebler/fern/internal/run"
+	"github.com/nebler/fern/internal/domain"
 )
 
-const Profile = run.SourceProfile
+const Profile = domain.SourceProfile
 
 const (
 	maxRequestBytes  = 128 << 10

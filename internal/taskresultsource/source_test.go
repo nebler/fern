@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskstore"
 )
@@ -68,7 +68,7 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 	}
 	runGit("add", "tracked.txt")
 	runGit("commit", "-m", "base")
-	base := task.GitOID(trim(runGit("rev-parse", "HEAD")))
+	base := domain.GitOID(trim(runGit("rev-parse", "HEAD")))
 	if err := os.WriteFile(filepath.Join(repository, "tracked.txt"), []byte("changed\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer engine.Close()
-	ids := task.NewSecureGenerator()
+	ids := domain.NewSecureGenerator()
 	workspaceID, _ := ids.WorkspaceID()
 	runID, _ := ids.RunID()
 	resultID, _ := ids.ResultID()
@@ -206,7 +206,7 @@ func trim(value string) string {
 	return value
 }
 
-func mustSession(t *testing.T, ids *task.Generator) task.OpenCodeSessionID {
+func mustSession(t *testing.T, ids *domain.Generator) domain.OpenCodeSessionID {
 	t.Helper()
 	value, err := ids.OpenCodeSessionID()
 	if err != nil {
@@ -214,7 +214,7 @@ func mustSession(t *testing.T, ids *task.Generator) task.OpenCodeSessionID {
 	}
 	return value
 }
-func mustMessage(t *testing.T, ids *task.Generator) task.OpenCodeMessageID {
+func mustMessage(t *testing.T, ids *domain.Generator) domain.OpenCodeMessageID {
 	t.Helper()
 	value, err := ids.OpenCodeMessageID()
 	if err != nil {

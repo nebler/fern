@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/strictjson"
-	"github.com/nebler/fern/internal/task"
 )
 
 const (
@@ -139,12 +139,12 @@ func (handler *pluginAuthHTTP) authenticate(writer http.ResponseWriter, request 
 		unregister()
 		cancel()
 	}
-	actor := task.ActorSnapshot{
-		Type: task.ActorOpenCode, ID: credential.ID, DisplayName: pluginClientName,
+	actor := domain.ActorSnapshot{
+		Type: domain.ActorOpenCode, ID: credential.ID, DisplayName: pluginClientName,
 		CredentialID: credential.ID, Authentication: "fern_plugin_bearer", RequestID: rand.Text(),
 	}
 	ctx = pluginauth.WithRequestAuthorization(ctx, credential)
-	request = request.WithContext(task.WithActor(ctx, actor))
+	request = request.WithContext(domain.WithActor(ctx, actor))
 	stripCredentials(request)
 	return request, release, true
 }
@@ -157,7 +157,7 @@ func (handler *pluginAuthHTTP) revokeSelf(writer http.ResponseWriter, request *h
 		}
 	}
 	authorization, _ := pluginauth.RequestAuthorizationFromContext(request.Context())
-	actor, err := task.ContextActor(request.Context())
+	actor, err := domain.ContextActor(request.Context())
 	if err == nil {
 		err = handler.store.Revoke(authorization.Credential.ID, actor, handler.now())
 	}
@@ -194,7 +194,7 @@ func (handler *pluginAuthHTTP) authorizationPage(writer http.ResponseWriter, req
 
 func (handler *pluginAuthHTTP) decide(approve bool) http.HandlerFunc {
 	return func(writer http.ResponseWriter, request *http.Request) {
-		actor, err := task.ContextActor(request.Context())
+		actor, err := domain.ContextActor(request.Context())
 		if err != nil {
 			http.Error(writer, "trusted actor unavailable", http.StatusUnauthorized)
 			return
@@ -228,7 +228,7 @@ func (handler *pluginAuthHTTP) credentials(writer http.ResponseWriter, _ *http.R
 }
 
 func (handler *pluginAuthHTTP) revokeCredential(writer http.ResponseWriter, request *http.Request) {
-	actor, err := task.ContextActor(request.Context())
+	actor, err := domain.ContextActor(request.Context())
 	if err == nil {
 		err = handler.store.Revoke(request.PathValue("id"), actor, handler.now())
 	}

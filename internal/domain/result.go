@@ -1,4 +1,4 @@
-package task
+package domain
 
 // ResultOutcome classifies a sealed result: changed work or an explicit
 // no-op against base.

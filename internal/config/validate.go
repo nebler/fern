@@ -14,7 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/nebler/fern/internal/backgroundopencode"
-	"github.com/nebler/fern/internal/gitref"
+	"github.com/nebler/fern/internal/domain"
 )
 
 var workspaceNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]*$`)
@@ -280,8 +280,8 @@ func validateListen(field, address string) error {
 }
 
 // ValidateGitHubRepositoryFullName accepts only canonical GitHub
-// OWNER/REPOSITORY full names. It delegates to the shared gitref rules so
+// OWNER/REPOSITORY full names. It delegates to the shared domain rules so
 // configuration cannot drift from the repository identity validators.
 func ValidateGitHubRepositoryFullName(value string) error {
-	return gitref.ValidateOwnerRepo(value)
+	return domain.ValidateOwnerRepo(value)
 }

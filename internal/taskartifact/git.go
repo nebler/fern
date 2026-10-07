@@ -17,19 +17,18 @@ import (
 	"strings"
 
 	"github.com/nebler/fern/internal/atomicfile"
-	"github.com/nebler/fern/internal/gitref"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 type sourceIdentity struct {
 	rootDevice, rootInode uint64
 	gitDevice, gitInode   uint64
-	head                  task.GitOID
+	head                  domain.GitOID
 	indexDigest           Digest
 	indexSize             int64
 }
 
-func (e *Engine) admitSource(ctx context.Context, repository string, base task.GitOID) (sourceIdentity, error) {
+func (e *Engine) admitSource(ctx context.Context, repository string, base domain.GitOID) (sourceIdentity, error) {
 	var identity sourceIdentity
 	root, err := exactDirectory(repository, false)
 	if err != nil {
@@ -205,7 +204,7 @@ func validateLocalConfig(output []byte) error {
 	return nil
 }
 
-func (e *Engine) checkSourceIdentity(ctx context.Context, repository string, base task.GitOID, expected sourceIdentity) error {
+func (e *Engine) checkSourceIdentity(ctx context.Context, repository string, base domain.GitOID, expected sourceIdentity) error {
 	root, err := os.Lstat(repository)
 	if err != nil {
 		return fmt.Errorf("%w: source disappeared", ErrUnsafeSource)
@@ -239,7 +238,7 @@ func (e *Engine) proveArtifactRefsEmpty(ctx context.Context, repository string) 
 	return nil
 }
 
-func (e *Engine) captureTree(ctx context.Context, repository, stage, name string) (task.GitOID, error) {
+func (e *Engine) captureTree(ctx context.Context, repository, stage, name string) (domain.GitOID, error) {
 	index := filepath.Join(stage, name)
 	file, err := os.OpenFile(index, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -261,7 +260,7 @@ func (e *Engine) captureTree(ctx context.Context, repository, stage, name string
 	return e.refreshCapturedTree(ctx, repository, index)
 }
 
-func (e *Engine) refreshCapturedTree(ctx context.Context, repository, index string) (task.GitOID, error) {
+func (e *Engine) refreshCapturedTree(ctx context.Context, repository, index string) (domain.GitOID, error) {
 	environment := []string{"GIT_INDEX_FILE=" + index}
 	if _, err := e.gitOutput(ctx, repository, environment, nil, "read-tree", "HEAD"); err != nil {
 		return "", err
@@ -310,7 +309,7 @@ func rejectTransformAttributes(output []byte) error {
 	return nil
 }
 
-func (e *Engine) commitTree(ctx context.Context, repository string, tree, base task.GitOID, epoch int64) (task.GitOID, error) {
+func (e *Engine) commitTree(ctx context.Context, repository string, tree, base domain.GitOID, epoch int64) (domain.GitOID, error) {
 	date := "@" + strconv.FormatInt(epoch, 10) + " +0000"
 	environment := []string{
 		"GIT_AUTHOR_NAME=Fern Artifact", "GIT_AUTHOR_EMAIL=artifact@fern.invalid", "GIT_AUTHOR_DATE=" + date,
@@ -319,7 +318,7 @@ func (e *Engine) commitTree(ctx context.Context, repository string, tree, base t
 	return e.oid(ctx, repository, "", environment, "commit-tree", string(tree), "-p", string(base), "-m", "Fern retained background run artifact")
 }
 
-func (e *Engine) proveTree(ctx context.Context, repository string, object task.GitOID) error {
+func (e *Engine) proveTree(ctx context.Context, repository string, object domain.GitOID) error {
 	output, err := e.gitOutput(ctx, repository, nil, nil, "ls-tree", "-r", "-z", "--full-tree", string(object))
 	if err != nil {
 		return err
@@ -344,7 +343,7 @@ func (e *Engine) proveTree(ctx context.Context, repository string, object task.G
 	return nil
 }
 
-func (e *Engine) oid(ctx context.Context, repository, revision string, environment []string, arguments ...string) (task.GitOID, error) {
+func (e *Engine) oid(ctx context.Context, repository, revision string, environment []string, arguments ...string) (domain.GitOID, error) {
 	if revision != "" {
 		arguments = append(arguments, "rev-parse", "--verify", revision)
 	}
@@ -355,14 +354,14 @@ func (e *Engine) oid(ctx context.Context, repository, revision string, environme
 	if len(output) != 41 || output[40] != '\n' {
 		return "", fmt.Errorf("%w: malformed object ID", ErrVerification)
 	}
-	oid, err := task.ParseGitOID(string(output[:40]))
+	oid, err := domain.ParseGitOID(string(output[:40]))
 	if err != nil {
 		return "", fmt.Errorf("%w: malformed object ID", ErrVerification)
 	}
 	return oid, nil
 }
 
-func (e *Engine) createBundle(ctx context.Context, repository, destination string, base, result task.GitOID) (Digest, int64, error) {
+func (e *Engine) createBundle(ctx context.Context, repository, destination string, base, result domain.GitOID) (Digest, int64, error) {
 	// Keep bundle refs in the engine-owned staging tree. Mutating source refs
 	// would make a host crash observable in, and potentially block, the retained
 	// run clone on recovery.
@@ -462,7 +461,7 @@ func (e *Engine) gitTo(ctx context.Context, repository string, environment []str
 func validMode(mode string) bool { return mode == "100644" || mode == "100755" || mode == "120000" }
 
 func safeArtifactPath(path []byte) bool {
-	if !gitref.ValidPathBytes(path) || strings.EqualFold(string(path), ".gitmodules") {
+	if !domain.ValidPathBytes(path) || strings.EqualFold(string(path), ".gitmodules") {
 		return false
 	}
 	for _, component := range bytes.Split(path, []byte{'/'}) {
@@ -477,10 +476,10 @@ type rawChange struct {
 	path             []byte
 	kind             string
 	oldMode, newMode string
-	oldOID, newOID   task.GitOID
+	oldOID, newOID   domain.GitOID
 }
 
-func (e *Engine) buildChanges(ctx context.Context, repository string, base, result task.GitOID) ([]ChangeEntry, error) {
+func (e *Engine) buildChanges(ctx context.Context, repository string, base, result domain.GitOID) ([]ChangeEntry, error) {
 	if base == result {
 		return []ChangeEntry{}, nil
 	}
@@ -542,23 +541,23 @@ func parseRawChanges(output []byte, limit int) ([]rawChange, error) {
 			if change.oldMode != "000000" || oldOID != strings.Repeat("0", 40) || !validMode(change.newMode) {
 				return nil, ErrVerification
 			}
-			change.kind, change.newOID = "added", task.GitOID(newOID)
+			change.kind, change.newOID = "added", domain.GitOID(newOID)
 		case "D":
 			if change.newMode != "000000" || newOID != strings.Repeat("0", 40) || !validMode(change.oldMode) {
 				return nil, ErrVerification
 			}
-			change.kind, change.oldOID = "deleted", task.GitOID(oldOID)
+			change.kind, change.oldOID = "deleted", domain.GitOID(oldOID)
 		case "M", "T":
 			if !validMode(change.oldMode) || !validMode(change.newMode) {
 				return nil, ErrVerification
 			}
-			change.kind, change.oldOID, change.newOID = "modified", task.GitOID(oldOID), task.GitOID(newOID)
+			change.kind, change.oldOID, change.newOID = "modified", domain.GitOID(oldOID), domain.GitOID(newOID)
 		default:
 			return nil, ErrVerification
 		}
-		for _, oid := range []task.GitOID{change.oldOID, change.newOID} {
+		for _, oid := range []domain.GitOID{change.oldOID, change.newOID} {
 			if oid != "" {
-				if _, err := task.ParseGitOID(string(oid)); err != nil {
+				if _, err := domain.ParseGitOID(string(oid)); err != nil {
 					return nil, ErrVerification
 				}
 			}
@@ -571,8 +570,8 @@ func parseRawChanges(output []byte, limit int) ([]rawChange, error) {
 	return changes, nil
 }
 
-func (e *Engine) blobSizes(ctx context.Context, repository string, changes []rawChange) (map[task.GitOID]int64, error) {
-	set := make(map[task.GitOID]struct{})
+func (e *Engine) blobSizes(ctx context.Context, repository string, changes []rawChange) (map[domain.GitOID]int64, error) {
+	set := make(map[domain.GitOID]struct{})
 	for _, change := range changes {
 		if change.oldOID != "" {
 			set[change.oldOID] = struct{}{}
@@ -595,7 +594,7 @@ func (e *Engine) blobSizes(ctx context.Context, repository string, changes []raw
 	if len(lines) != len(oids)+1 || len(lines[len(lines)-1]) != 0 {
 		return nil, ErrVerification
 	}
-	sizes := make(map[task.GitOID]int64, len(oids))
+	sizes := make(map[domain.GitOID]int64, len(oids))
 	for index, line := range lines[:len(lines)-1] {
 		fields := bytes.Fields(line)
 		if len(fields) != 3 || string(fields[0]) != oids[index] || string(fields[1]) != "blob" {
@@ -605,7 +604,7 @@ func (e *Engine) blobSizes(ctx context.Context, repository string, changes []raw
 		if err != nil || size < 0 || size > e.blobBytes {
 			return nil, ErrOutputLimit
 		}
-		sizes[task.GitOID(oids[index])] = size
+		sizes[domain.GitOID(oids[index])] = size
 	}
 	return sizes, nil
 }

@@ -4,8 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
-	rundomain "github.com/nebler/fern/internal/run"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 type WorkspaceState string
@@ -28,13 +27,13 @@ func (s WorkspaceState) valid() bool { return s == WorkspaceActive }
 // Workspace is the durable repository and runtime binding needed by task
 // admission. It is created once and never transitions.
 type Workspace struct {
-	ID                  task.WorkspaceID
+	ID                  domain.WorkspaceID
 	Name                string
 	State               WorkspaceState
 	RepositoryPath      string
 	GitHubAuthority     GitHubAuthority
-	InstallationID      task.InstallationID
-	RepositoryID        task.RepositoryID
+	InstallationID      domain.InstallationID
+	RepositoryID        domain.RepositoryID
 	RepositoryFullName  string
 	ImageDigest         string
 	OpenCodeProtocol    string
@@ -49,41 +48,41 @@ type Workspace struct {
 // its request hash and authenticated actor.
 type Receipt struct {
 	ID                 int64
-	WorkspaceID        task.WorkspaceID
+	WorkspaceID        domain.WorkspaceID
 	CommandKind        string
-	IdempotencyKey     task.IdempotencyKey
-	RequestHash        task.RequestHash
-	Actor              task.ActorSnapshot
+	IdempotencyKey     domain.IdempotencyKey
+	RequestHash        domain.RequestHash
+	Actor              domain.ActorSnapshot
 	AcceptedAt         time.Time
 	APIContractVersion string
-	RunID              task.RunID
+	RunID              domain.RunID
 	ResponseStatus     int
 	ResponseProjection json.RawMessage
 }
 
 // Claim is the idempotency claim this receipt accepted.
-func (r Receipt) Claim() task.IdempotencyClaim {
-	return task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: r.WorkspaceID, CommandKind: r.CommandKind},
+func (r Receipt) Claim() domain.IdempotencyClaim {
+	return domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: r.WorkspaceID, CommandKind: r.CommandKind},
 		Key: r.IdempotencyKey, RequestHash: r.RequestHash, Actor: r.Actor}
 }
 
-func (r Receipt) classify(incoming task.IdempotencyClaim) task.IdempotencyDisposition {
+func (r Receipt) classify(incoming domain.IdempotencyClaim) domain.IdempotencyDisposition {
 	claim := r.Claim()
-	return task.ClassifyIdempotency(&claim, incoming)
+	return domain.ClassifyIdempotency(&claim, incoming)
 }
 
 // AdmitBackgroundRunParams is the complete immutable intent of one run. The
 // store derives the instruction and profile digests and the canonical
 // resource identities itself.
 type AdmitBackgroundRunParams struct {
-	RunID              task.RunID
-	OpenCodeSessionID  task.OpenCodeSessionID
-	OpenCodeMessageID  task.OpenCodeMessageID
-	Claim              task.IdempotencyClaim
+	RunID              domain.RunID
+	OpenCodeSessionID  domain.OpenCodeSessionID
+	OpenCodeMessageID  domain.OpenCodeMessageID
+	Claim              domain.IdempotencyClaim
 	Prompt             string
-	RepositoryID       task.RepositoryID
+	RepositoryID       domain.RepositoryID
 	RepositoryRemote   string
-	BaseSHA            task.GitOID
+	BaseSHA            domain.GitOID
 	Branch             string
 	Profile            string
 	ImageIdentity      string
@@ -99,41 +98,41 @@ type AdmitBackgroundRunParams struct {
 // Compatibility names for packages outside taskstore that still spell the run
 // vocabulary through this package; taskstore and runapi use package run
 // directly. Remove once those callers do too.
-type BackgroundRunState = rundomain.State
+type BackgroundRunState = domain.State
 
-type BackgroundRunEffectPhase = rundomain.Phase
+type BackgroundRunEffectPhase = domain.Phase
 
-const BackgroundRunSourceProfile = rundomain.SourceProfile
+const BackgroundRunSourceProfile = domain.SourceProfile
 
 const (
-	BackgroundRunQueued          = rundomain.Queued
-	BackgroundRunSettingUp       = rundomain.SettingUp
-	BackgroundRunWorking         = rundomain.Working
-	BackgroundRunNeedsYou        = rundomain.NeedsYou
-	BackgroundRunCanceling       = rundomain.Canceling
-	BackgroundRunUncertain       = rundomain.Uncertain
-	BackgroundRunResultReady     = rundomain.ResultReady
-	BackgroundRunFailed          = rundomain.Failed
-	BackgroundRunCleanupRequired = rundomain.CleanupRequired
+	BackgroundRunQueued          = domain.Queued
+	BackgroundRunSettingUp       = domain.SettingUp
+	BackgroundRunWorking         = domain.Working
+	BackgroundRunNeedsYou        = domain.NeedsYou
+	BackgroundRunCanceling       = domain.Canceling
+	BackgroundRunUncertain       = domain.Uncertain
+	BackgroundRunResultReady     = domain.ResultReady
+	BackgroundRunFailed          = domain.Failed
+	BackgroundRunCleanupRequired = domain.CleanupRequired
 
-	BackgroundRunEffectAbsent          = rundomain.Absent
-	BackgroundRunEffectProvisioning    = rundomain.Provisioning
-	BackgroundRunEffectPromptPending   = rundomain.PromptPending
-	BackgroundRunEffectAdmitted        = rundomain.Admitted
-	BackgroundRunEffectSealing         = rundomain.Sealing
-	BackgroundRunEffectCleaning        = rundomain.Cleaning
-	BackgroundRunEffectCleanupComplete = rundomain.CleanupComplete
+	BackgroundRunEffectAbsent          = domain.Absent
+	BackgroundRunEffectProvisioning    = domain.Provisioning
+	BackgroundRunEffectPromptPending   = domain.PromptPending
+	BackgroundRunEffectAdmitted        = domain.Admitted
+	BackgroundRunEffectSealing         = domain.Sealing
+	BackgroundRunEffectCleaning        = domain.Cleaning
+	BackgroundRunEffectCleanupComplete = domain.CleanupComplete
 )
 
 // BackgroundRun is one run row: its immutable intent, lifecycle, and the
 // authority recorded once along the way. The prompt itself is read only with
 // BackgroundRunWork.
 type BackgroundRun struct {
-	RunID                      task.RunID
-	WorkspaceID                task.WorkspaceID
-	RepositoryID               task.RepositoryID
+	RunID                      domain.RunID
+	WorkspaceID                domain.WorkspaceID
+	RepositoryID               domain.RepositoryID
 	RepositoryRemote           string
-	BaseOID                    task.GitOID
+	BaseOID                    domain.GitOID
 	Branch                     *string
 	Agent                      string
 	ModelProvider              string
@@ -147,9 +146,9 @@ type BackgroundRun struct {
 	VolumeIdentity             string
 	ContainerIdentity          string
 	EndpointIdentity           string
-	OpenCodeSessionID          task.OpenCodeSessionID
-	OpenCodeMessageID          task.OpenCodeMessageID
-	Creator                    task.ActorSnapshot
+	OpenCodeSessionID          domain.OpenCodeSessionID
+	OpenCodeMessageID          domain.OpenCodeMessageID
+	Creator                    domain.ActorSnapshot
 	State                      BackgroundRunState
 	EffectPhase                BackgroundRunEffectPhase
 	StopReceiptID              int64
@@ -171,9 +170,9 @@ type BackgroundRun struct {
 }
 
 type StopBackgroundRunParams struct {
-	WorkspaceID        task.WorkspaceID
-	RunID              task.RunID
-	Claim              task.IdempotencyClaim
+	WorkspaceID        domain.WorkspaceID
+	RunID              domain.RunID
+	Claim              domain.IdempotencyClaim
 	APIContractVersion string
 	StoppedAt          time.Time
 }
@@ -196,8 +195,8 @@ type BackgroundRunWork struct {
 // workspace, and the in-process stop/seal API bumps the same revision, so a
 // stale ref fails instead of overwriting a concurrent transition.
 type BackgroundRunRef struct {
-	WorkspaceID      task.WorkspaceID
-	RunID            task.RunID
+	WorkspaceID      domain.WorkspaceID
+	RunID            domain.RunID
 	ExpectedRevision int64
 	ExpectedState    BackgroundRunState
 	ExpectedPhase    BackgroundRunEffectPhase
@@ -247,7 +246,7 @@ type Admission struct {
 // the requesting actor, idempotency key, and request hash.
 type Seal struct {
 	ReceiptID     int64
-	ResultID      task.ResultID
+	ResultID      domain.ResultID
 	RequestedAt   time.Time
 	PolicyVersion string
 }
@@ -257,11 +256,11 @@ type Seal struct {
 func (s Seal) CommitEpochSeconds() int64 { return s.RequestedAt.Unix() }
 
 type SealBackgroundRunParams struct {
-	WorkspaceID         task.WorkspaceID
-	RunID               task.RunID
+	WorkspaceID         domain.WorkspaceID
+	RunID               domain.RunID
 	ExpectedRunRevision int64
-	ResultID            task.ResultID
-	Claim               task.IdempotencyClaim
+	ResultID            domain.ResultID
+	Claim               domain.IdempotencyClaim
 	PolicyVersion       string
 	APIContractVersion  string
 	AcceptedAt          time.Time

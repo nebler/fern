@@ -17,20 +17,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 const (
-	testWorkspace  = task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001")
-	testTask       = task.RunID("run_0198d34d-6a50-75fb-b1f2-000000000002")
-	testResult     = task.ResultID("res_0198d34d-6a50-75fb-b1f2-000000000005")
-	testSession    = task.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef")
-	testMessage    = task.OpenCodeMessageID("msg_fedcba9876543210fedcba9876543210")
-	testWorkspace2 = task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000011")
-	testTask2      = task.RunID("run_0198d34d-6a50-75fb-b1f2-000000000012")
-	testResult2    = task.ResultID("res_0198d34d-6a50-75fb-b1f2-000000000015")
-	testSession2   = task.OpenCodeSessionID("ses_11111111111111111111111111111111")
-	testMessage2   = task.OpenCodeMessageID("msg_22222222222222222222222222222222")
+	testWorkspace  = domain.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001")
+	testTask       = domain.RunID("run_0198d34d-6a50-75fb-b1f2-000000000002")
+	testResult     = domain.ResultID("res_0198d34d-6a50-75fb-b1f2-000000000005")
+	testSession    = domain.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef")
+	testMessage    = domain.OpenCodeMessageID("msg_fedcba9876543210fedcba9876543210")
+	testWorkspace2 = domain.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000011")
+	testTask2      = domain.RunID("run_0198d34d-6a50-75fb-b1f2-000000000012")
+	testResult2    = domain.ResultID("res_0198d34d-6a50-75fb-b1f2-000000000015")
+	testSession2   = domain.OpenCodeSessionID("ses_11111111111111111111111111111111")
+	testMessage2   = domain.OpenCodeMessageID("msg_22222222222222222222222222222222")
 )
 
 func TestChangedSnapshotDeterministicAndMaterializable(t *testing.T) {
@@ -524,7 +524,7 @@ func TestSubmoduleMetadataAndGitlinksRejected(t *testing.T) {
 		writeFile(t, filepath.Join(repository, ".gitmodules"), []byte("[submodule \"x\"]\n\tpath = x\n\turl = x\n"), 0o644)
 		gitRun(t, repository, "add", ".gitmodules")
 		gitRun(t, repository, "commit", "-m", "gitmodules")
-		base, err := task.ParseGitOID(strings.TrimSpace(gitCommand(t, repository, "rev-parse", "HEAD")))
+		base, err := domain.ParseGitOID(strings.TrimSpace(gitCommand(t, repository, "rev-parse", "HEAD")))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -538,7 +538,7 @@ func TestSubmoduleMetadataAndGitlinksRejected(t *testing.T) {
 		engine, repository, parent := testEngineRepository(t)
 		gitRun(t, repository, "update-index", "--add", "--cacheinfo", "160000,"+string(parent)+",nested")
 		gitRun(t, repository, "commit", "-m", "gitlink")
-		base, err := task.ParseGitOID(strings.TrimSpace(gitCommand(t, repository, "rev-parse", "HEAD")))
+		base, err := domain.ParseGitOID(strings.TrimSpace(gitCommand(t, repository, "rev-parse", "HEAD")))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -745,7 +745,7 @@ func TestNewRemovesOnlyInterruptedEngineDirectories(t *testing.T) {
 	}
 }
 
-func testEngineRepository(t testing.TB) (*Engine, string, task.GitOID) {
+func testEngineRepository(t testing.TB) (*Engine, string, domain.GitOID) {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
 	if err != nil {
@@ -788,7 +788,7 @@ func testEngineRepository(t testing.TB) (*Engine, string, task.GitOID) {
 	}
 	gitRun(t, repository, "add", "--all")
 	gitRun(t, repository, "commit", "-m", "base")
-	base, err := task.ParseGitOID(strings.TrimSpace(gitCommand(t, repository, "rev-parse", "HEAD")))
+	base, err := domain.ParseGitOID(strings.TrimSpace(gitCommand(t, repository, "rev-parse", "HEAD")))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -804,7 +804,7 @@ func mustSource(t testing.TB, repository string) Source {
 	return source
 }
 
-func testSnapshotSpec(t testing.TB, source Source, base task.GitOID, epoch int64) SnapshotSpec {
+func testSnapshotSpec(t testing.TB, source Source, base domain.GitOID, epoch int64) SnapshotSpec {
 	t.Helper()
 	profileDigest, err := NewDigest(sha256.Sum256([]byte("opencode-test-profile")))
 	if err != nil {

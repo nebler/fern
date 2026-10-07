@@ -11,8 +11,7 @@ import (
 	"strings"
 	"time"
 
-	rundomain "github.com/nebler/fern/internal/run"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 type ResultState string
@@ -29,13 +28,13 @@ const (
 // materialization proof. Selected fields are immutable from insertion and the
 // whole row is immutable once sealed.
 type Result struct {
-	ID                    task.ResultID
-	RunID                 task.RunID
+	ID                    domain.ResultID
+	RunID                 domain.RunID
 	State                 ResultState
-	Outcome               task.ResultOutcome
-	BaseSHA               task.GitOID
-	ResultCommit          task.GitOID
-	TreeOID               task.GitOID
+	Outcome               domain.ResultOutcome
+	BaseSHA               domain.GitOID
+	ResultCommit          domain.GitOID
+	TreeOID               domain.GitOID
 	ChangeCount           int
 	ChangesSHA256         [32]byte
 	Manifest              json.RawMessage
@@ -54,8 +53,8 @@ func (r Result) CASLocator() string { return "sha256:" + hex.EncodeToString(r.Ma
 // the writer fence. The outcome follows from the commit and the run's base.
 type SelectBackgroundRunSnapshotParams struct {
 	BackgroundRunRef
-	ResultCommit           task.GitOID
-	TreeOID                task.GitOID
+	ResultCommit           domain.GitOID
+	TreeOID                domain.GitOID
 	ChangeCount            int
 	ChangesSHA256          [32]byte
 	ArtifactManifest       json.RawMessage
@@ -89,11 +88,11 @@ manifest_json,manifest_sha256,bundle_sha256,bundle_size,collected_at,materializa
 
 // GetResult reads a selected or sealed result. A sealed run's result ID names
 // its row before selection, so ErrNotFound means nothing is selected yet.
-func (s *Store) GetResult(ctx context.Context, id task.ResultID) (Result, error) {
+func (s *Store) GetResult(ctx context.Context, id domain.ResultID) (Result, error) {
 	return getResult(ctx, s.db, id)
 }
 
-func getResult(ctx context.Context, q queryRower, id task.ResultID) (Result, error) {
+func getResult(ctx context.Context, q queryRower, id domain.ResultID) (Result, error) {
 	var r Result
 	var manifest string
 	var changes, manifestHash, bundle, materialization []byte
@@ -123,7 +122,7 @@ func getResult(ctx context.Context, q queryRower, id task.ResultID) (Result, err
 // and must equal this selection; a repeated identical selection is a replay.
 // The artifact manifest is agent-derived content, so it is checked here.
 func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgroundRunSnapshotParams) (_ Result, err error) {
-	if p.ExpectedState != rundomain.Canceling || p.ExpectedPhase != rundomain.Sealing ||
+	if p.ExpectedState != domain.Canceling || p.ExpectedPhase != domain.Sealing ||
 		sha256.Sum256(p.ArtifactManifest) != p.ArtifactManifestSHA256 || !safeArtifactManifest(p.ArtifactManifest) ||
 		validExactTimestamp(p.CollectedAt) != nil || p.ChangeCount < 0 {
 		return Result{}, fmt.Errorf("%w: selected background snapshot", ErrInvalidInput)
@@ -141,9 +140,9 @@ func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgro
 	if !p.BackgroundRunRef.matches(run) || run.Seal == nil || run.WriterFence == nil {
 		return Result{}, ErrInvalidState
 	}
-	outcome := task.ResultChanged
+	outcome := domain.ResultChanged
 	if p.ResultCommit == run.BaseOID {
-		outcome = task.ResultNoChanges
+		outcome = domain.ResultNoChanges
 	}
 	if existing, getErr := getResult(ctx, tx, run.Seal.ResultID); getErr == nil {
 		if !p.selects(existing) {
@@ -182,7 +181,7 @@ func (p SelectBackgroundRunSnapshotParams) selects(existing Result) bool {
 // MarkBackgroundRunExportRecoveryRequired records why the last export pass
 // failed. The run stays sealing; the next pass retries from the selection.
 func (s *Store) MarkBackgroundRunExportRecoveryRequired(ctx context.Context, ref BackgroundRunRef, reason string) (BackgroundRun, error) {
-	if ref.ExpectedState != rundomain.Canceling || ref.ExpectedPhase != rundomain.Sealing || !validBoundedText(reason, 1, 1000) {
+	if ref.ExpectedState != domain.Canceling || ref.ExpectedPhase != domain.Sealing || !validBoundedText(reason, 1, 1000) {
 		return BackgroundRun{}, fmt.Errorf("%w: export recovery reason", ErrInvalidInput)
 	}
 	return s.updateRun(ctx, ref, `last_error=?`, []any{reason}, "mark background export recovery")
@@ -193,7 +192,7 @@ func (s *Store) MarkBackgroundRunExportRecoveryRequired(ctx context.Context, ref
 // only after the retained result is durable. Caller cancellation cannot split
 // it once validation has completed.
 func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitBackgroundRunRetainedResultParams) (_ BackgroundRunRetainedResult, err error) {
-	if p.ExpectedState != rundomain.Canceling || p.ExpectedPhase != rundomain.Sealing ||
+	if p.ExpectedState != domain.Canceling || p.ExpectedPhase != domain.Sealing ||
 		p.MaterializationProof == ([32]byte{}) {
 		return BackgroundRunRetainedResult{}, fmt.Errorf("%w: retained result commit", ErrInvalidInput)
 	}
@@ -239,12 +238,12 @@ WHERE id=? AND run_id=? AND state='selected'`, p.MaterializationProof[:], sealed
 
 // GetBackgroundRunResult returns a result_ready run with its sealed result
 // after the same ownership-hiding check as GetBackgroundRun.
-func (s *Store) GetBackgroundRunResult(ctx context.Context, workspaceID task.WorkspaceID, runID task.RunID, actor task.ActorSnapshot) (BackgroundRunResultProjection, error) {
+func (s *Store) GetBackgroundRunResult(ctx context.Context, workspaceID domain.WorkspaceID, runID domain.RunID, actor domain.ActorSnapshot) (BackgroundRunResultProjection, error) {
 	run, err := s.GetBackgroundRun(ctx, workspaceID, runID, actor)
 	if err != nil {
 		return BackgroundRunResultProjection{}, err
 	}
-	if run.State != rundomain.ResultReady || run.Seal == nil {
+	if run.State != domain.ResultReady || run.Seal == nil {
 		return BackgroundRunResultProjection{}, ErrInvalidState
 	}
 	result, err := s.GetResult(ctx, run.Seal.ResultID)

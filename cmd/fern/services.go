@@ -16,11 +16,10 @@ import (
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/backgroundruncoord"
 	"github.com/nebler/fern/internal/config"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/observability"
-	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/runapi"
-	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
 	"github.com/nebler/fern/internal/taskresultsource"
@@ -76,7 +75,7 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 		return nil, errors.New("a qualified disposable Background Run profile is required")
 	}
 	github := cfg.Workspace.GitHub
-	ids := task.NewSecureGenerator()
+	ids := domain.NewSecureGenerator()
 	installationTokens, err := resolveGitHubAuthority(github)
 	if err != nil {
 		return nil, err
@@ -141,7 +140,7 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 
 	coordinator, err := backgroundruncoord.New(store, provider, artifact, ids, backgroundruncoord.Config{
 		WorkspaceID: durableWorkspace.ID,
-		Profile:     rundomain.SourceProfile, ImageIdentity: cfg.Runs.BackgroundImageID,
+		Profile:     domain.SourceProfile, ImageIdentity: cfg.Runs.BackgroundImageID,
 		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: cfg.Runs.Agent,
 		ModelProvider: cfg.Runs.Model.Provider, Model: cfg.Runs.Model.ID,
 		OperationTimeout: backgroundCloneTimeout,
@@ -165,7 +164,7 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 		RepositoryRemote:            "https://github.com/" + github.Repository.FullName,
 		BackgroundImageIdentity:     cfg.Runs.BackgroundImageID,
 		BackgroundEnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil),
-		Store:                       store, Route: route, Generator: ids, ActorResolver: task.ContextActor,
+		Store:                       store, Route: route, Generator: ids, ActorResolver: domain.ContextActor,
 		BaseVerifier: baseVerifier, Now: time.Now, RunTimeout: cfg.Runs.RunTimeout, Agent: cfg.Runs.Agent,
 		ModelProvider: cfg.Runs.Model.Provider, Model: cfg.Runs.Model.ID, RetentionVerifier: resultSource,
 		SealPolicyVersion: "fern.background-user-seal.v1", Wake: coordinator.Wake,
@@ -232,7 +231,7 @@ func inspectRetainedArtifacts(ctx context.Context, store *taskstore.Store, artif
 // ensureWorkspace records the configured repository binding, keeping the
 // durable identity of an existing workspace while EnsureWorkspace still checks
 // every repository and GitHub authority field against the configuration.
-func ensureWorkspace(ctx context.Context, cfg config.Config, store *taskstore.Store, ids *task.Generator) (taskstore.Workspace, error) {
+func ensureWorkspace(ctx context.Context, cfg config.Config, store *taskstore.Store, ids *domain.Generator) (taskstore.Workspace, error) {
 	candidateID, err := ids.WorkspaceID()
 	if err != nil {
 		return taskstore.Workspace{}, err
@@ -240,7 +239,7 @@ func ensureWorkspace(ctx context.Context, cfg config.Config, store *taskstore.St
 	github := cfg.Workspace.GitHub
 	desired := taskstore.Workspace{ID: candidateID, Name: cfg.Workspace.Name, State: taskstore.WorkspaceActive,
 		RepositoryPath: cfg.Workspace.Repo, GitHubAuthority: taskstore.GitHubAuthorityAppBroker,
-		InstallationID: task.InstallationID(github.InstallationID), RepositoryID: task.RepositoryID(github.Repository.ID),
+		InstallationID: domain.InstallationID(github.InstallationID), RepositoryID: domain.RepositoryID(github.Repository.ID),
 		RepositoryFullName: github.Repository.FullName, ImageDigest: cfg.Runs.BackgroundImageID,
 		OpenCodeProtocol: runapi.APIContractVersion, RuntimeDesiredState: "disposable", ReconciliationEpoch: 1,
 		CreatedAt: time.Now().UTC().Truncate(time.Millisecond)}

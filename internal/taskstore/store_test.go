@@ -14,8 +14,7 @@ import (
 	"testing"
 	"time"
 
-	rundomain "github.com/nebler/fern/internal/run"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 var testTime = time.Date(2026, 8, 22, 18, 57, 11, 565123000, time.UTC)
@@ -30,7 +29,7 @@ func TestAdmissionReplaySurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
-	if first.Replayed || first.Run.State != rundomain.Queued || first.Run.EffectPhase != rundomain.Absent {
+	if first.Replayed || first.Run.State != domain.Queued || first.Run.EffectPhase != domain.Absent {
 		t.Fatalf("unexpected first admission: %+v", first)
 	}
 	if err := s.Close(); err != nil {
@@ -63,7 +62,7 @@ func TestAdmissionReplaySurvivesRestart(t *testing.T) {
 		t.Fatalf("get receipt: %+v, %v", gotReceipt, err)
 	}
 	var projection struct {
-		RunID task.RunID `json:"run_id"`
+		RunID domain.RunID `json:"run_id"`
 	}
 	if err := json.Unmarshal(gotReceipt.ResponseProjection, &projection); err != nil || projection.RunID != first.Run.RunID {
 		t.Fatalf("receipt projection: %+v, %v", projection, err)
@@ -209,7 +208,7 @@ func TestSchemaRejectsMalformedRunInputs(t *testing.T) {
 		{"run ID", func(p *AdmitBackgroundRunParams) { p.RunID = "run_bad" }},
 		{"session prefix", func(p *AdmitBackgroundRunParams) { p.OpenCodeSessionID = "ses_bad" }},
 		{"session uppercase", func(p *AdmitBackgroundRunParams) {
-			p.OpenCodeSessionID = task.OpenCodeSessionID("ses_ABCDEF0123456789abcdef0123456789")
+			p.OpenCodeSessionID = domain.OpenCodeSessionID("ses_ABCDEF0123456789abcdef0123456789")
 		}},
 		{"message prefix", func(p *AdmitBackgroundRunParams) { p.OpenCodeMessageID = "msg_bad" }},
 		{"agent", func(p *AdmitBackgroundRunParams) { p.Agent = "" }},
@@ -401,14 +400,14 @@ func testAdmission(n int, key, prompt string) AdmitBackgroundRunParams {
 	hash := sha256.Sum256([]byte(key + "\n" + prompt))
 	params := AdmitBackgroundRunParams{
 		RunID: testRunID(n), OpenCodeSessionID: testSessionID(n), OpenCodeMessageID: testMessageID(n),
-		Claim: task.IdempotencyClaim{
-			Scope: task.IdempotencyScope{WorkspaceID: testWorkspaceID(), CommandKind: CreateBackgroundRunCommand},
-			Key:   task.IdempotencyKey(key), RequestHash: task.RequestHash(hash),
-			Actor: task.ActorSnapshot{Type: task.ActorOpenCode, ID: "pc_owner", DisplayName: "OpenCode", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "req-1"},
+		Claim: domain.IdempotencyClaim{
+			Scope: domain.IdempotencyScope{WorkspaceID: testWorkspaceID(), CommandKind: CreateBackgroundRunCommand},
+			Key:   domain.IdempotencyKey(key), RequestHash: domain.RequestHash(hash),
+			Actor: domain.ActorSnapshot{Type: domain.ActorOpenCode, ID: "pc_owner", DisplayName: "OpenCode", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "req-1"},
 		},
 		Prompt: prompt, RepositoryID: 987654321, RepositoryRemote: "https://github.com/owner/repository",
-		BaseSHA: task.GitOID("0123456789abcdef0123456789abcdef01234567"), Branch: "main",
-		Profile: rundomain.SourceProfile, EnvironmentSHA256: sha256.Sum256([]byte("{}")),
+		BaseSHA: domain.GitOID("0123456789abcdef0123456789abcdef01234567"), Branch: "main",
+		Profile: domain.SourceProfile, EnvironmentSHA256: sha256.Sum256([]byte("{}")),
 		ImageIdentity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		Agent:         "build", ModelProvider: "provider", Model: "model-1",
 		Deadline:           testTime.Add(time.Hour),
@@ -417,18 +416,18 @@ func testAdmission(n int, key, prompt string) AdmitBackgroundRunParams {
 	return params
 }
 
-func testWorkspaceID() task.WorkspaceID { return task.WorkspaceID(testID("wsp_", 0)) }
-func testRunID(n int) task.RunID        { return task.RunID(testID("run_", n)) }
+func testWorkspaceID() domain.WorkspaceID { return domain.WorkspaceID(testID("wsp_", 0)) }
+func testRunID(n int) domain.RunID        { return domain.RunID(testID("run_", n)) }
 
-func testSessionID(n int) task.OpenCodeSessionID {
-	return task.OpenCodeSessionID(fmt.Sprintf("ses_%032x", n+1))
+func testSessionID(n int) domain.OpenCodeSessionID {
+	return domain.OpenCodeSessionID(fmt.Sprintf("ses_%032x", n+1))
 }
 
-func testMessageID(n int) task.OpenCodeMessageID {
-	return task.OpenCodeMessageID(fmt.Sprintf("msg_%032x", n+1))
+func testMessageID(n int) domain.OpenCodeMessageID {
+	return domain.OpenCodeMessageID(fmt.Sprintf("msg_%032x", n+1))
 }
 
-func testResultID(n int) task.ResultID { return task.ResultID(testID("res_", n)) }
+func testResultID(n int) domain.ResultID { return domain.ResultID(testID("res_", n)) }
 
 func testID(prefix string, n int) string {
 	return fmt.Sprintf("%s0198d34d-6a50-75fb-b1f2-%012x", prefix, n+1)

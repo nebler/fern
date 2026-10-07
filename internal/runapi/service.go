@@ -15,8 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	rundomain "github.com/nebler/fern/internal/run"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -39,7 +38,7 @@ var (
 
 // BaseVerifier proves an exact commit is reachable from an allowed repository ref.
 type BaseVerifier interface {
-	Verify(context.Context, task.GitOID) error
+	Verify(context.Context, domain.GitOID) error
 }
 
 // service runs the commands against the handler's validated Config. New
@@ -56,51 +55,51 @@ type createIntent struct {
 }
 
 type createAcceptance struct {
-	RunID               task.RunID
+	RunID               domain.RunID
 	Committed, Replayed bool
 }
 type stopAcceptance struct {
-	RunID    task.RunID
-	State    rundomain.State
+	RunID    domain.RunID
+	State    domain.State
 	Replayed bool
 }
 type sealAcceptance struct {
-	RunID               task.RunID
-	State               rundomain.State
+	RunID               domain.RunID
+	State               domain.State
 	ResultPhase         string
-	ResultID            task.ResultID
+	ResultID            domain.ResultID
 	Committed, Replayed bool
 }
 
-func commandHash(kind string, value any) task.RequestHash {
+func commandHash(kind string, value any) domain.RequestHash {
 	encoded, _ := json.Marshal(value)
-	return task.RequestHash(sha256.Sum256(append(append([]byte(kind), '\n'), encoded...)))
+	return domain.RequestHash(sha256.Sum256(append(append([]byte(kind), '\n'), encoded...)))
 }
 
-func (s *service) claim(actor task.ActorSnapshot, key task.IdempotencyKey, kind string, value any) (task.IdempotencyClaim, error) {
+func (s *service) claim(actor domain.ActorSnapshot, key domain.IdempotencyKey, kind string, value any) (domain.IdempotencyClaim, error) {
 	if err := actor.Validate(); err != nil {
-		return task.IdempotencyClaim{}, err
+		return domain.IdempotencyClaim{}, err
 	}
-	if actor.Type != task.ActorOpenCode {
-		return task.IdempotencyClaim{}, task.ErrInvalidActor
+	if actor.Type != domain.ActorOpenCode {
+		return domain.IdempotencyClaim{}, domain.ErrInvalidActor
 	}
-	if _, err := task.ParseIdempotencyKey(string(key)); err != nil {
-		return task.IdempotencyClaim{}, err
+	if _, err := domain.ParseIdempotencyKey(string(key)); err != nil {
+		return domain.IdempotencyClaim{}, err
 	}
-	return task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: s.config.WorkspaceID, CommandKind: kind}, Key: key, RequestHash: commandHash(kind, value), Actor: actor}, nil
+	return domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: s.config.WorkspaceID, CommandKind: kind}, Key: key, RequestHash: commandHash(kind, value), Actor: actor}, nil
 }
 
-func (s *service) replay(ctx context.Context, claim task.IdempotencyClaim) (taskstore.Receipt, bool, error) {
+func (s *service) replay(ctx context.Context, claim domain.IdempotencyClaim) (taskstore.Receipt, bool, error) {
 	receipt, found, err := s.config.Store.FindReceiptByIdempotency(ctx, s.config.WorkspaceID, claim.Scope.CommandKind, claim.Key)
 	if err != nil || !found {
 		return receipt, found, err
 	}
 	existing := receipt.Claim()
-	disposition := task.ClassifyIdempotency(&existing, claim)
-	if disposition == task.IdempotencyOwnerMismatch {
+	disposition := domain.ClassifyIdempotency(&existing, claim)
+	if disposition == domain.IdempotencyOwnerMismatch {
 		return receipt, true, taskstore.ErrNotFound
 	}
-	if disposition != task.IdempotencyReplay {
+	if disposition != domain.IdempotencyReplay {
 		return receipt, true, errReplayConflict
 	}
 	return receipt, true, nil
@@ -112,12 +111,12 @@ func (s *service) notify(replayed bool) {
 	}
 }
 
-func (s *service) Create(ctx context.Context, actor task.ActorSnapshot, key task.IdempotencyKey, input createIntent) (createAcceptance, error) {
+func (s *service) Create(ctx context.Context, actor domain.ActorSnapshot, key domain.IdempotencyKey, input createIntent) (createAcceptance, error) {
 	var zero createAcceptance
-	if input.Repository != s.config.RepositoryRemote || input.Profile != rundomain.SourceProfile || !validInstruction(input.Instruction) || !validBranchDisplay(input.Branch) {
+	if input.Repository != s.config.RepositoryRemote || input.Profile != domain.SourceProfile || !validInstruction(input.Instruction) || !validBranchDisplay(input.Branch) {
 		return zero, errInvalidCreate
 	}
-	base, err := task.ParseGitOID(input.BaseOID)
+	base, err := domain.ParseGitOID(input.BaseOID)
 	if err != nil {
 		return zero, errInvalidBase
 	}
@@ -202,32 +201,32 @@ func validBranchDisplay(branch *string) bool {
 	return true
 }
 
-func (s *service) mutationClaim(actor task.ActorSnapshot, key task.IdempotencyKey, kind string, id task.RunID) (task.IdempotencyClaim, error) {
-	if _, err := task.ParseRunID(string(id)); err != nil {
-		return task.IdempotencyClaim{}, err
+func (s *service) mutationClaim(actor domain.ActorSnapshot, key domain.IdempotencyKey, kind string, id domain.RunID) (domain.IdempotencyClaim, error) {
+	if _, err := domain.ParseRunID(string(id)); err != nil {
+		return domain.IdempotencyClaim{}, err
 	}
 	return s.claim(actor, key, kind, struct {
-		RunID task.RunID `json:"run_id"`
+		RunID domain.RunID `json:"run_id"`
 	}{id})
 }
 
 // stopReplay projects the original committed acceptance, not today's run state.
-func stopReplay(id task.RunID, current taskstore.BackgroundRun, receipt taskstore.Receipt) (stopAcceptance, error) {
+func stopReplay(id domain.RunID, current taskstore.BackgroundRun, receipt taskstore.Receipt) (stopAcceptance, error) {
 	var committed struct {
-		RunID task.RunID      `json:"run_id"`
-		State rundomain.State `json:"state"`
+		RunID domain.RunID `json:"run_id"`
+		State domain.State `json:"state"`
 	}
 	if receipt.RunID != id || current.StopReceiptID != receipt.ID || json.Unmarshal(receipt.ResponseProjection, &committed) != nil {
 		return stopAcceptance{}, taskstore.ErrCorruptStore
 	}
 	// A stop commits failed (queued run) or canceling (executing run).
-	if committed.RunID != id || (committed.State != rundomain.Failed && committed.State != rundomain.Canceling) {
+	if committed.RunID != id || (committed.State != domain.Failed && committed.State != domain.Canceling) {
 		return stopAcceptance{}, taskstore.ErrCorruptStore
 	}
 	return stopAcceptance{id, committed.State, true}, nil
 }
 
-func (s *service) Stop(ctx context.Context, actor task.ActorSnapshot, key task.IdempotencyKey, id task.RunID) (stopAcceptance, error) {
+func (s *service) Stop(ctx context.Context, actor domain.ActorSnapshot, key domain.IdempotencyKey, id domain.RunID) (stopAcceptance, error) {
 	var zero stopAcceptance
 	claim, err := s.mutationClaim(actor, key, taskstore.StopBackgroundRunCommand, id)
 	if err != nil {
@@ -257,10 +256,10 @@ func (s *service) Stop(ctx context.Context, actor task.ActorSnapshot, key task.I
 		return stopReplay(id, result.Run, result.Receipt)
 	}
 	s.notify(false)
-	return stopAcceptance{id, rundomain.State(result.Run.State), false}, nil
+	return stopAcceptance{id, domain.State(result.Run.State), false}, nil
 }
 
-func (s *service) Seal(ctx context.Context, actor task.ActorSnapshot, key task.IdempotencyKey, id task.RunID) (sealAcceptance, error) {
+func (s *service) Seal(ctx context.Context, actor domain.ActorSnapshot, key domain.IdempotencyKey, id domain.RunID) (sealAcceptance, error) {
 	var zero sealAcceptance
 	claim, err := s.mutationClaim(actor, key, taskstore.SealBackgroundRunCommand, id)
 	if err != nil {
@@ -283,9 +282,9 @@ func (s *service) Seal(ctx context.Context, actor task.ActorSnapshot, key task.I
 	if err != nil {
 		return zero, err
 	}
-	state, phase := rundomain.Canceling, "seal_requested"
-	if admission.Run.State == rundomain.ResultReady {
-		state, phase = rundomain.ResultReady, "ready"
+	state, phase := domain.Canceling, "seal_requested"
+	if admission.Run.State == domain.ResultReady {
+		state, phase = domain.ResultReady, "ready"
 	}
 	s.notify(admission.Replayed)
 	return sealAcceptance{admission.Run.RunID, state, phase, admission.Run.Seal.ResultID, true, admission.Replayed}, nil

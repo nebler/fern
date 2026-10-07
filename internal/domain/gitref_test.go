@@ -1,4 +1,4 @@
-package gitref
+package domain
 
 import (
 	"strings"

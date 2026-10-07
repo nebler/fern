@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 const (
@@ -108,24 +108,24 @@ type Credential struct {
 // Attribution is immutable decision evidence. It contains identifiers only,
 // never the authenticating secret or a secret-derived digest.
 type Attribution struct {
-	Type           task.ActorType `json:"type"`
-	ID             string         `json:"id"`
-	DisplayName    string         `json:"displayName,omitempty"`
-	CredentialID   string         `json:"credentialId"`
-	Authentication string         `json:"authentication"`
-	RequestID      string         `json:"requestId"`
+	Type           domain.ActorType `json:"type"`
+	ID             string           `json:"id"`
+	DisplayName    string           `json:"displayName,omitempty"`
+	CredentialID   string           `json:"credentialId"`
+	Authentication string           `json:"authentication"`
+	RequestID      string           `json:"requestId"`
 }
 
-func AttributionFromActor(actor task.ActorSnapshot) (Attribution, error) {
+func AttributionFromActor(actor domain.ActorSnapshot) (Attribution, error) {
 	if err := actor.Validate(); err != nil {
 		return Attribution{}, errors.New("valid plugin authorization actor is required")
 	}
 	return Attribution{actor.Type, actor.ID, actor.DisplayName, actor.CredentialID, actor.Authentication, actor.RequestID}, nil
 }
 
-func trustedAttributionFromActor(actor task.ActorSnapshot) (Attribution, error) {
+func trustedAttributionFromActor(actor domain.ActorSnapshot) (Attribution, error) {
 	value, err := AttributionFromActor(actor)
-	if err != nil || actor.Type != task.ActorDevice && actor.Type != task.ActorOperator {
+	if err != nil || actor.Type != domain.ActorDevice && actor.Type != domain.ActorOperator {
 		return Attribution{}, errors.New("trusted approval actor is required")
 	}
 	return value, nil
@@ -285,7 +285,7 @@ func (store *Store) Poll(deviceCode string, now time.Time) (PollResult, error) {
 	return result, nil
 }
 
-func (store *Store) Approve(ctx context.Context, id, userCode string, actor task.ActorSnapshot, now time.Time) (Credential, error) {
+func (store *Store) Approve(ctx context.Context, id, userCode string, actor domain.ActorSnapshot, now time.Time) (Credential, error) {
 	if err := ctx.Err(); err != nil {
 		return Credential{}, err
 	}
@@ -343,7 +343,7 @@ VALUES(?,?,'active',?,?,?)`, credentialID, id, now.UnixNano(), credential.Expire
 	return credential, nil
 }
 
-func (store *Store) Deny(ctx context.Context, id, userCode string, actor task.ActorSnapshot, now time.Time) error {
+func (store *Store) Deny(ctx context.Context, id, userCode string, actor domain.ActorSnapshot, now time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -467,7 +467,7 @@ func (store *Store) Credentials(now time.Time) ([]Credential, error) {
 
 // Revoke durably revokes an active credential, then cancels every request
 // registered against it.
-func (store *Store) Revoke(id string, actor task.ActorSnapshot, now time.Time) error {
+func (store *Store) Revoke(id string, actor domain.ActorSnapshot, now time.Time) error {
 	attribution, err := AttributionFromActor(actor)
 	if err != nil {
 		return err
@@ -636,8 +636,8 @@ func atCapacity(tx *sql.Tx, table string, limit int) (bool, error) {
 
 func fromNanos(value sql.NullInt64) time.Time { return time.Unix(0, value.Int64).UTC() }
 
-func digest(domain, value string) string {
-	sum := sha256.Sum256([]byte("fern-plugin-auth-v1\x00" + domain + "\x00" + value))
+func digest(label, value string) string {
+	sum := sha256.Sum256([]byte("fern-plugin-auth-v1\x00" + label + "\x00" + value))
 	return hex.EncodeToString(sum[:])
 }
 

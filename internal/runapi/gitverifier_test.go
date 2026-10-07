@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 func TestGitBaseVerifierRequiresAllowedReachability(t *testing.T) {
@@ -32,7 +32,7 @@ func TestGitBaseVerifierRequiresAllowedReachability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	head, err := task.ParseGitOID(strings.TrimSpace(headRaw))
+	head, err := domain.ParseGitOID(strings.TrimSpace(headRaw))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestGitBaseVerifierRequiresAllowedReachability(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tagOID, err := task.ParseGitOID(strings.TrimSpace(tagRaw))
+	tagOID, err := domain.ParseGitOID(strings.TrimSpace(tagRaw))
 	if err != nil {
 		t.Fatal(err)
 	}

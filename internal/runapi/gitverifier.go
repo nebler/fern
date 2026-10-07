@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 // GitBaseVerifier is the production BaseVerifier. It proves an exact object is
@@ -34,7 +34,7 @@ func NewGitBaseVerifier(repository, git string, timeout time.Duration) (*GitBase
 	return &GitBaseVerifier{repository: repository, git: git, timeout: timeout}, nil
 }
 
-func (v *GitBaseVerifier) Verify(parent context.Context, oid task.GitOID) error {
+func (v *GitBaseVerifier) Verify(parent context.Context, oid domain.GitOID) error {
 	ctx, cancel := context.WithTimeout(parent, v.timeout)
 	defer cancel()
 	objectType, err := v.command(ctx, "cat-file", "-t", string(oid))

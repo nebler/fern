@@ -9,8 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nebler/fern/internal/run"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 const (
@@ -19,7 +18,7 @@ const (
 	MaxBundleBytes      = 512 << 20
 	MaxManifestFiles    = 100_000
 	MaxBlobBytes        = int64(2 << 30)
-	ResourceSpecVersion = run.ResourceSpecVersion
+	ResourceSpecVersion = domain.ResourceSpecVersion
 	SnapshotPolicyV1    = "fern.taskartifact.snapshot.v1"
 	CompletionUserSeal  = "user_seal"
 
@@ -64,12 +63,12 @@ type Config struct {
 // Its path is intentionally available only through construction and engine
 // methods.
 type Source struct {
-	WorkspaceID task.WorkspaceID
-	RunID       task.RunID
+	WorkspaceID domain.WorkspaceID
+	RunID       domain.RunID
 	path        string
 }
 
-func NewSource(path string, workspaceID task.WorkspaceID, runID task.RunID) (Source, error) {
+func NewSource(path string, workspaceID domain.WorkspaceID, runID domain.RunID) (Source, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return Source{}, fmt.Errorf("%w: repository path", ErrInvalidSource)
 	}
@@ -81,25 +80,25 @@ func NewSource(path string, workspaceID task.WorkspaceID, runID task.RunID) (Sou
 // Git commit; the other fields bind the retained artifact manifest.
 type SnapshotSpec struct {
 	Source                Source
-	RepositoryID          task.RepositoryID
-	ResultID              task.ResultID
+	RepositoryID          domain.RepositoryID
+	ResultID              domain.ResultID
 	ImageIdentity         string
 	Profile               string
 	ProfileSHA256         Digest
 	EnvironmentSHA256     Digest
 	ResourceSpecVersion   int
-	OpenCodeSessionID     task.OpenCodeSessionID
-	OpenCodeMessageID     task.OpenCodeMessageID
+	OpenCodeSessionID     domain.OpenCodeSessionID
+	OpenCodeMessageID     domain.OpenCodeMessageID
 	SnapshotPolicyVersion string
-	Base                  task.GitOID
+	Base                  domain.GitOID
 	EpochSecond           int64
 }
 
 // FileVersion is the exact Git representation of one side of a change.
 type FileVersion struct {
-	Mode    string      `json:"mode"`
-	BlobOID task.GitOID `json:"blob_oid"`
-	Size    int64       `json:"size"`
+	Mode    string        `json:"mode"`
+	BlobOID domain.GitOID `json:"blob_oid"`
+	Size    int64         `json:"size"`
 }
 
 // ChangeEntry records a raw-byte path as standard padded Base64. Entries are
@@ -143,22 +142,22 @@ func (d Digest) Bytes() [32]byte { return d.value }
 // Snapshot is the verified, normalized content description. Slices returned
 // by Engine methods do not alias engine-owned state.
 type Snapshot struct {
-	RepositoryID          task.RepositoryID
-	WorkspaceID           task.WorkspaceID
-	RunID                 task.RunID
-	ResultID              task.ResultID
+	RepositoryID          domain.RepositoryID
+	WorkspaceID           domain.WorkspaceID
+	RunID                 domain.RunID
+	ResultID              domain.ResultID
 	ImageIdentity         string
 	Profile               string
 	ProfileSHA256         Digest
 	EnvironmentSHA256     Digest
 	ResourceSpecVersion   int
-	OpenCodeSessionID     task.OpenCodeSessionID
-	OpenCodeMessageID     task.OpenCodeMessageID
+	OpenCodeSessionID     domain.OpenCodeSessionID
+	OpenCodeMessageID     domain.OpenCodeMessageID
 	SnapshotPolicyVersion string
 	CompletionAuthority   string
-	Base                  task.GitOID
-	Result                task.GitOID
-	Tree                  task.GitOID
+	Base                  domain.GitOID
+	Result                domain.GitOID
+	Tree                  domain.GitOID
 	EpochSecond           int64
 	Changes               []ChangeEntry
 	ChangesSHA256         Digest

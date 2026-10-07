@@ -28,9 +28,8 @@ import (
 	"github.com/docker/go-connections/nat"
 	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/backgroundroute"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/githubapp"
-	"github.com/nebler/fern/internal/gitref"
-	runidentity "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/taskstore"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -292,7 +291,7 @@ func (p *Provider) CommittedRuntime(run taskstore.BackgroundRun) (RuntimeIdentit
 }
 
 func committedRuntimeFromRun(run taskstore.BackgroundRun) (RuntimeIdentity, error) {
-	identity, err := runidentity.NewRuntime(run.ObservedContainerID, run.ObservedContainerStartedAt)
+	identity, err := domain.NewRuntime(run.ObservedContainerID, run.ObservedContainerStartedAt)
 	if err != nil || identity.Epoch() != run.RuntimeEpoch {
 		return RuntimeIdentity{}, errors.New("durable background runtime epoch is incomplete")
 	}
@@ -426,7 +425,7 @@ func (transport *routeTransport) attest(ctx context.Context) error {
 func validateConfig(c Config) error {
 	if c.GitHubTokens != nil {
 		identity, err := githubapp.NewRepositoryIdentity(c.GitHubRepository.InstallationID(), c.GitHubRepository.RepositoryID())
-		if err != nil || identity != c.GitHubRepository || gitref.ValidateOwnerRepo(c.GitHubRepositoryFullName) != nil {
+		if err != nil || identity != c.GitHubRepository || domain.ValidateOwnerRepo(c.GitHubRepositoryFullName) != nil {
 			return errors.New("exact GitHub App repository identity is required")
 		}
 	}
@@ -502,7 +501,7 @@ func inspectQualifiedImage(ctx context.Context, api dockerAPI, config Config) (i
 }
 
 func qualifyImage(got image.InspectResponse, want string) error {
-	if got.Config == nil || got.Config.Labels["ai.fern.runtime.spec"] != strconv.Itoa(runidentity.ResourceSpecVersion) {
+	if got.Config == nil || got.Config.Labels["ai.fern.runtime.spec"] != strconv.Itoa(domain.ResourceSpecVersion) {
 		return errors.New("background image runtime credential profile is not qualified")
 	}
 	if got.ID != want || got.Config == nil || got.Config.User != containerUser || len(got.Config.Entrypoint) != 0 ||
@@ -539,10 +538,10 @@ func (p *Provider) validateRun(run taskstore.BackgroundRun) (string, error) {
 func (p *Provider) validateRunForCleanup(run taskstore.BackgroundRun) (string, error) {
 	// The run row is Fern's own durable record; only the derived resource names
 	// are re-checked because they become host paths and Docker object names.
-	if !validImageID(run.ImageIdentity) || run.ResourceSpecVersion != runidentity.ResourceSpecVersion || run.Profile != taskstore.BackgroundRunSourceProfile {
+	if !validImageID(run.ImageIdentity) || run.ResourceSpecVersion != domain.ResourceSpecVersion || run.Profile != taskstore.BackgroundRunSourceProfile {
 		return "", errors.New("invalid immutable background run tuple")
 	}
-	if !runidentity.NewResources(run.RunID).Matches(run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity) {
+	if !domain.NewResources(run.RunID).Matches(run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity) {
 		return "", errors.New("noncanonical background run resource identity")
 	}
 	return p.specDigest(run)
@@ -555,7 +554,7 @@ func (p *Provider) specDigest(run taskstore.BackgroundRun) (string, error) {
 		Image, Clone, Volume, Container, Endpoint, Base, Repository, Profile, Session, Message string
 		EnvironmentSHA256                                                                      string
 	}{
-		Version: runidentity.ResourceSpecVersion, Workspace: string(run.WorkspaceID), Task: string(run.RunID),
+		Version: domain.ResourceSpecVersion, Workspace: string(run.WorkspaceID), Task: string(run.RunID),
 		Image: run.ImageIdentity, Clone: run.CloneIdentity, Volume: run.VolumeIdentity,
 		Container: run.ContainerIdentity, Endpoint: run.EndpointIdentity, Base: string(run.BaseOID), Repository: run.RepositoryRemote,
 		Profile: run.Profile, Session: string(run.OpenCodeSessionID), Message: string(run.OpenCodeMessageID),

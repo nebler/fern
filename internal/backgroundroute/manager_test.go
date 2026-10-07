@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -322,10 +322,10 @@ func pairedRequest(method, target, token, origin string, body io.Reader) *http.R
 }
 
 func testRun(identity Identity) taskstore.BackgroundRun {
-	return taskstore.BackgroundRun{WorkspaceID: task.WorkspaceID(identity.WorkspaceID), RunID: task.RunID(identity.RunID),
+	return taskstore.BackgroundRun{WorkspaceID: domain.WorkspaceID(identity.WorkspaceID), RunID: domain.RunID(identity.RunID),
 		RuntimeEpoch:        identity.RuntimeEpoch,
 		ObservedContainerID: identity.ContainerID, ObservedContainerStartedAt: identity.StartedAt,
-		OpenCodeSessionID: task.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef")}
+		OpenCodeSessionID: domain.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef")}
 }
 
 func testIdentity(n int64) Identity {

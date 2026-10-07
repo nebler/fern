@@ -12,8 +12,7 @@ import (
 
 	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/backgroundroute"
-	rundomain "github.com/nebler/fern/internal/run"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
 	"github.com/nebler/fern/internal/taskstore"
@@ -29,7 +28,7 @@ const (
 )
 
 type Config struct {
-	WorkspaceID       task.WorkspaceID
+	WorkspaceID       domain.WorkspaceID
 	Profile           string
 	ImageIdentity     string
 	EnvironmentSHA256 [32]byte
@@ -52,7 +51,7 @@ type Coordinator struct {
 	store    *taskstore.Store
 	provider *taskenvdocker.Provider
 	artifact Artifact
-	ids      *task.Generator
+	ids      *domain.Generator
 	config   Config
 	wake     chan struct{}
 	scan     sync.Mutex
@@ -69,7 +68,7 @@ type Artifact interface {
 	Materialize(context.Context, taskartifact.Locator) (*taskartifact.Checkout, error)
 }
 
-func New(store *taskstore.Store, provider *taskenvdocker.Provider, artifact Artifact, ids *task.Generator, config Config) (*Coordinator, error) {
+func New(store *taskstore.Store, provider *taskenvdocker.Provider, artifact Artifact, ids *domain.Generator, config Config) (*Coordinator, error) {
 	if store == nil || provider == nil || artifact == nil || ids == nil || config.Now == nil || config.HTTPClient == nil || config.Route == nil ||
 		config.Profile != taskstore.BackgroundRunSourceProfile || config.ImageIdentity == "" || config.EnvironmentSHA256 == ([32]byte{}) ||
 		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.OperationTimeout <= 0 ||
@@ -79,7 +78,7 @@ func New(store *taskstore.Store, provider *taskenvdocker.Provider, artifact Arti
 		config.HistoryBounds.MaxEvents < 1 {
 		return nil, errors.New("valid serial background run coordinator configuration is required")
 	}
-	if _, err := task.ParseWorkspaceID(string(config.WorkspaceID)); err != nil {
+	if _, err := domain.ParseWorkspaceID(string(config.WorkspaceID)); err != nil {
 		return nil, errors.New("valid background run coordinator workspace is required")
 	}
 	return &Coordinator{store: store, provider: provider, artifact: artifact, ids: ids, config: config, wake: make(chan struct{}, 1)}, nil
@@ -209,7 +208,7 @@ func (c *Coordinator) runOnce(ctx context.Context) (taskstore.BackgroundRunWork,
 		!now.Before(work.Run.Deadline) {
 		return work, c.requestTimeout(ctx, work.Run)
 	}
-	configurationDiffers := work.Run.ResourceSpecVersion != rundomain.ResourceSpecVersion || work.Run.ImageIdentity != c.config.ImageIdentity || work.Run.EnvironmentSHA256 != c.config.EnvironmentSHA256 ||
+	configurationDiffers := work.Run.ResourceSpecVersion != domain.ResourceSpecVersion || work.Run.ImageIdentity != c.config.ImageIdentity || work.Run.EnvironmentSHA256 != c.config.EnvironmentSHA256 ||
 		work.Run.Agent != c.config.Agent || work.Run.ModelProvider != c.config.ModelProvider || work.Run.Model != c.config.Model
 	if configurationDiffers && lifecycle.Executing {
 		return work, c.cleanupRequired(ctx, work, "configured execution identity differs")
@@ -547,11 +546,11 @@ func materializationProof(selected taskstore.Result, path string) [32]byte {
 	// Path is deliberately reduced to an observation bit; host paths never enter
 	// durable evidence. Engine.Materialize already proves detached clean state.
 	payload, _ := json.Marshal(struct {
-		Schema  string      `json:"schema"`
-		Locator string      `json:"locator"`
-		Commit  task.GitOID `json:"commit"`
-		Tree    task.GitOID `json:"tree"`
-		Clean   bool        `json:"clean"`
+		Schema  string        `json:"schema"`
+		Locator string        `json:"locator"`
+		Commit  domain.GitOID `json:"commit"`
+		Tree    domain.GitOID `json:"tree"`
+		Clean   bool          `json:"clean"`
 	}{"fern.taskartifact.materialization.v1", selected.CASLocator(), selected.ResultCommit, selected.TreeOID, path != ""})
 	return sha256.Sum256(payload)
 }
@@ -887,6 +886,6 @@ func evidence(run taskstore.BackgroundRun, now time.Time, value string) taskstor
 	return taskstore.RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref(run, now), Evidence: value}
 }
 
-func classify(run taskstore.BackgroundRun) rundomain.Lifecycle {
-	return rundomain.Classify(rundomain.State(run.State), rundomain.Phase(run.EffectPhase))
+func classify(run taskstore.BackgroundRun) domain.Lifecycle {
+	return domain.Classify(domain.State(run.State), domain.Phase(run.EffectPhase))
 }

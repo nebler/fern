@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/nebler/fern/internal/gitref"
+	"github.com/nebler/fern/internal/domain"
 )
 
 const (
@@ -290,7 +290,7 @@ func (client *InstallationClient) ListInstallationRepositories(ctx context.Conte
 // from the List methods, which already validated and de-duplicated them.
 func SelectRepository(installations []InstallationObservation, repositories []InstallationRepositoryObservation, installationID, repositoryID int64, fullName string) error {
 	owner, name, hasName := "", "", false
-	if gitref.ValidateOwnerRepo(fullName) == nil {
+	if domain.ValidateOwnerRepo(fullName) == nil {
 		owner, name, _ = strings.Cut(fullName, "/")
 		hasName = true
 	}
@@ -409,11 +409,11 @@ func makeInstallationRepositoryObservation(response installationRepositoryAPIRes
 	if response.ID == nil || *response.ID <= 0 || response.FullName == nil || response.Name == nil || response.Owner == nil || response.Owner.Login == nil || response.Owner.ID == nil || *response.Owner.ID <= 0 || response.Owner.Type == nil || response.Private == nil || response.Archived == nil || response.Disabled == nil || response.DefaultBranch == nil || response.Permissions == nil {
 		return InstallationRepositoryObservation{}, false
 	}
-	if gitref.ValidateOwnerRepo(*response.FullName) != nil {
+	if domain.ValidateOwnerRepo(*response.FullName) != nil {
 		return InstallationRepositoryObservation{}, false
 	}
 	owner, name, _ := strings.Cut(*response.FullName, "/")
-	if owner != *response.Owner.Login || name != *response.Name || !validAccountType(*response.Owner.Type) || gitref.ValidateRef(*response.DefaultBranch) != nil {
+	if owner != *response.Owner.Login || name != *response.Name || !validAccountType(*response.Owner.Type) || domain.ValidateRef(*response.DefaultBranch) != nil {
 		return InstallationRepositoryObservation{}, false
 	}
 	if !validRepositoryAPIPermissions(response.Permissions) {
@@ -436,7 +436,7 @@ func makeInstallationRepositoryObservation(response installationRepositoryAPIRes
 
 func validAccountLogin(login string) bool {
 	composite := login + "/repository"
-	if gitref.ValidateOwnerRepo(composite) != nil {
+	if domain.ValidateOwnerRepo(composite) != nil {
 		return false
 	}
 	owner, _, _ := strings.Cut(composite, "/")

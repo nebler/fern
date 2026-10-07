@@ -1,4 +1,4 @@
-package run
+package domain
 
 type State string
 type Phase string

@@ -10,7 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 const workspaceSelect = `
@@ -47,7 +47,7 @@ func (s *Store) EnsureWorkspace(ctx context.Context, desired Workspace) (Workspa
 	return s.GetWorkspace(ctx, desired.ID)
 }
 
-func (s *Store) GetWorkspace(ctx context.Context, id task.WorkspaceID) (Workspace, error) {
+func (s *Store) GetWorkspace(ctx context.Context, id domain.WorkspaceID) (Workspace, error) {
 	return scanWorkspace(s.db.QueryRowContext(ctx, workspaceSelect+` WHERE id=?`, id))
 }
 
@@ -74,8 +74,8 @@ func scanWorkspace(row rowScanner) (Workspace, error) {
 	if err != nil {
 		return Workspace{}, fmt.Errorf("read workspace: %w", err)
 	}
-	workspace.InstallationID = task.InstallationID(installationID)
-	workspace.RepositoryID = task.RepositoryID(repositoryID)
+	workspace.InstallationID = domain.InstallationID(installationID)
+	workspace.RepositoryID = domain.RepositoryID(repositoryID)
 	workspace.ReconciliationEpoch = uint64(reconciliationEpoch)
 	workspace.CreatedAt = fromUnixMillis(createdAt)
 	workspace.UpdatedAt = fromUnixMillis(updatedAt)
@@ -126,7 +126,7 @@ INSERT INTO workspaces(
 }
 
 func validateWorkspace(w Workspace) error {
-	if _, err := task.ParseWorkspaceID(string(w.ID)); err != nil {
+	if _, err := domain.ParseWorkspaceID(string(w.ID)); err != nil {
 		return fmt.Errorf("%w: workspace ID: %v", ErrInvalidInput, err)
 	}
 	if !w.State.valid() {

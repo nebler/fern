@@ -5,11 +5,11 @@ import (
 	"errors"
 	"testing"
 
-	runidentity "github.com/nebler/fern/internal/run"
+	"github.com/nebler/fern/internal/domain"
 )
 
 func TestWriterFenceVariants(t *testing.T) {
-	identity, err := runidentity.NewRuntime("container", "2026-09-05T01:02:03.123456789Z")
+	identity, err := domain.NewRuntime("container", "2026-09-05T01:02:03.123456789Z")
 	if err != nil {
 		t.Fatal(err)
 	}

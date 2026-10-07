@@ -4,7 +4,7 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 var (
@@ -23,7 +23,7 @@ var (
 // request content.
 type ConflictError struct {
 	ReceiptID int64
-	RunID     task.RunID
+	RunID     domain.RunID
 }
 
 func (e *ConflictError) Error() string {

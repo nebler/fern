@@ -21,7 +21,7 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/go-connections/nat"
-	runidentity "github.com/nebler/fern/internal/run"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -314,19 +314,19 @@ func runtimeIdentity(info container.InspectResponse) (RuntimeIdentity, int64, er
 	if info.State == nil || info.ID == "" {
 		return RuntimeIdentity{}, 0, errors.New("Docker returned incomplete runtime identity")
 	}
-	identity, err := runidentity.NewRuntime(info.ID, info.State.StartedAt)
+	identity, err := domain.NewRuntime(info.ID, info.State.StartedAt)
 	if err != nil {
 		return RuntimeIdentity{}, 0, errors.New("Docker returned a noncanonical container start timestamp")
 	}
 	return runtimeFromIdentity(identity), identity.Epoch(), nil
 }
 
-func runtimeFromIdentity(identity runidentity.Runtime) RuntimeIdentity {
+func runtimeFromIdentity(identity domain.Runtime) RuntimeIdentity {
 	return RuntimeIdentity{ContainerID: identity.ContainerID(), StartedAt: identity.StartedAt(), Token: identity.Token()}
 }
 
 func validateCommittedRuntime(runtime RuntimeIdentity) error {
-	_, err := runidentity.ParseRuntime(runtime.ContainerID, runtime.StartedAt, runtime.Token)
+	_, err := domain.ParseRuntime(runtime.ContainerID, runtime.StartedAt, runtime.Token)
 	return err
 }
 

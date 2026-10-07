@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 func TestEnsureWorkspaceCreatesAndAdoptsExactBinding(t *testing.T) {
@@ -23,7 +23,7 @@ func TestEnsureWorkspaceCreatesAndAdoptsExactBinding(t *testing.T) {
 		t.Fatalf("created = %+v", created)
 	}
 	otherCandidate := desired
-	otherCandidate.ID = task.WorkspaceID(testID("wsp_", 42))
+	otherCandidate.ID = domain.WorkspaceID(testID("wsp_", 42))
 	otherCandidate.CreatedAt = testTime.AddDate(0, 0, 1)
 	adopted, err := store.EnsureWorkspace(context.Background(), otherCandidate)
 	if err != nil {

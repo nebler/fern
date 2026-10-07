@@ -14,7 +14,7 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/atomicfile"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 const (
@@ -177,7 +177,7 @@ func (e *Engine) Snapshot(ctx context.Context, spec SnapshotSpec) (Snapshot, Sta
 
 // captureStableTree admits the source and captures its worktree as a tree
 // twice, into private indexes in stage, requiring both captures to agree.
-func (e *Engine) captureStableTree(ctx context.Context, spec SnapshotSpec, stage string) (sourceIdentity, task.GitOID, error) {
+func (e *Engine) captureStableTree(ctx context.Context, spec SnapshotSpec, stage string) (sourceIdentity, domain.GitOID, error) {
 	source := spec.Source.path
 	identity, err := e.admitSource(ctx, source, spec.Base)
 	if err != nil {
@@ -205,7 +205,7 @@ func (e *Engine) captureStableTree(ctx context.Context, spec SnapshotSpec, stage
 
 // stageArtifact commits tree onto the base (unless unchanged), writes the
 // bundle and canonical manifest into stage, and returns the manifest.
-func (e *Engine) stageArtifact(ctx context.Context, spec SnapshotSpec, stage string, tree task.GitOID) (artifactManifest, []byte, Digest, error) {
+func (e *Engine) stageArtifact(ctx context.Context, spec SnapshotSpec, stage string, tree domain.GitOID) (artifactManifest, []byte, Digest, error) {
 	source := spec.Source.path
 	baseTree, err := e.oid(ctx, source, string(spec.Base)+"^{tree}", nil)
 	if err != nil {
@@ -259,7 +259,7 @@ func (e *Engine) stageArtifact(ctx context.Context, spec SnapshotSpec, stage str
 // confirmSourceUnchanged recaptures the worktree and rechecks the source
 // identity after the artifact was built, then removes the capture indexes so
 // the stage holds only the manifest and bundle.
-func (e *Engine) confirmSourceUnchanged(ctx context.Context, spec SnapshotSpec, stage string, tree task.GitOID, identity sourceIdentity) error {
+func (e *Engine) confirmSourceUnchanged(ctx context.Context, spec SnapshotSpec, stage string, tree domain.GitOID, identity sourceIdentity) error {
 	finalTree, err := e.refreshCapturedTree(ctx, spec.Source.path, filepath.Join(stage, "index-two"))
 	if err != nil || finalTree != tree {
 		return fmt.Errorf("%w: worktree changed during snapshot", ErrUnsafeSource)

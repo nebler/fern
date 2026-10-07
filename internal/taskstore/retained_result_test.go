@@ -9,8 +9,7 @@ import (
 	"testing"
 	"time"
 
-	rundomain "github.com/nebler/fern/internal/run"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
@@ -23,8 +22,8 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
 	run, _ := advanceBackgroundRunToPrompt(t, store, admission.ImageIdentity, now)
-	sealClaim := task.IdempotencyClaim{
-		Scope: task.IdempotencyScope{WorkspaceID: run.WorkspaceID, CommandKind: SealBackgroundRunCommand},
+	sealClaim := domain.IdempotencyClaim{
+		Scope: domain.IdempotencyScope{WorkspaceID: run.WorkspaceID, CommandKind: SealBackgroundRunCommand},
 		Key:   "retained-seal", RequestHash: sha256.Sum256([]byte("retained-seal")), Actor: admission.Claim.Actor,
 	}
 	seal := SealBackgroundRunParams{
@@ -33,7 +32,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		PolicyVersion: "background-retained.v1", APIContractVersion: "v1", AcceptedAt: now.Add(20 * time.Second),
 	}
 	sealed, err := store.SealBackgroundRun(context.Background(), seal)
-	if err != nil || sealed.Run.State != rundomain.Canceling || sealed.Run.EffectPhase != rundomain.Sealing ||
+	if err != nil || sealed.Run.State != domain.Canceling || sealed.Run.EffectPhase != domain.Sealing ||
 		sealed.Run.Seal == nil || sealed.Run.Seal.ResultID != seal.ResultID || sealed.Run.Seal.CommitEpochSeconds() != seal.AcceptedAt.Unix() {
 		t.Fatalf("seal admission = %+v, error=%v", sealed, err)
 	}
@@ -48,8 +47,8 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		t.Fatalf("seal owner mismatch = %v", err)
 	}
 	stop := StopBackgroundRunParams{WorkspaceID: run.WorkspaceID, RunID: run.RunID,
-		Claim: task.IdempotencyClaim{
-			Scope: task.IdempotencyScope{WorkspaceID: run.WorkspaceID, CommandKind: StopBackgroundRunCommand}, Key: "stop-after-seal",
+		Claim: domain.IdempotencyClaim{
+			Scope: domain.IdempotencyScope{WorkspaceID: run.WorkspaceID, CommandKind: StopBackgroundRunCommand}, Key: "stop-after-seal",
 			RequestHash: sha256.Sum256([]byte("stop-after-seal")), Actor: admission.Claim.Actor,
 		}, APIContractVersion: "v1", StoppedAt: seal.AcceptedAt.Add(time.Second)}
 	if _, err := store.StopBackgroundRun(context.Background(), stop); !errors.Is(err, ErrInvalidState) {
@@ -58,7 +57,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 
 	sealedWork, err := startNextBackgroundRunWork(context.Background(), store, seal.AcceptedAt.Add(2*time.Second))
 	sealedRun := sealedWork.Run
-	if err != nil || sealedRun.State != rundomain.Canceling || sealedRun.EffectPhase != rundomain.Sealing {
+	if err != nil || sealedRun.State != domain.Canceling || sealedRun.EffectPhase != domain.Sealing {
 		t.Fatal(err)
 	}
 	writerAt := seal.AcceptedAt.Add(3 * time.Second)
@@ -77,7 +76,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		Kind: WriterFenceRuntimeStopped, ContainerID: run.ObservedContainerID, ContainerStartedAt: run.ObservedContainerStartedAt,
 		RuntimeToken: "runtime-token", StoppedAt: &stoppedAt}}
 	writerInactive, err := store.RecordBackgroundRunWriterFence(context.Background(), writerParams)
-	if err != nil || writerInactive.EffectPhase != rundomain.Sealing || writerInactive.Revision != sealedRun.Revision+1 ||
+	if err != nil || writerInactive.EffectPhase != domain.Sealing || writerInactive.Revision != sealedRun.Revision+1 ||
 		writerInactive.WriterFence == nil || writerInactive.WriterFence.RuntimeToken != "runtime-token" {
 		t.Fatalf("writer fence = %+v, error=%v", writerInactive, err)
 	}
@@ -89,24 +88,24 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	// A failed pass records why on the run; the run stays sealing for the next
 	// pass, and a stale revision cannot record over it.
 	recovery, err := store.MarkBackgroundRunExportRecoveryRequired(context.Background(), backgroundRunRef(writerInactive, exportNow), "injected export interruption")
-	if err != nil || recovery.EffectPhase != rundomain.Sealing || recovery.LastError != "injected export interruption" {
+	if err != nil || recovery.EffectPhase != domain.Sealing || recovery.LastError != "injected export interruption" {
 		t.Fatalf("export recovery = %+v, error=%v", recovery, err)
 	}
 	if _, err := store.MarkBackgroundRunExportRecoveryRequired(context.Background(), backgroundRunRef(writerInactive, exportNow), "different"); !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("stale export recovery = %v", err)
 	}
 	reselected, err := startNextBackgroundRun(context.Background(), store, exportNow.Add(time.Second))
-	if err != nil || reselected.EffectPhase != rundomain.Sealing {
+	if err != nil || reselected.EffectPhase != domain.Sealing {
 		t.Fatalf("reselect failed export run = %+v, error=%v", reselected, err)
 	}
 	exportNow = exportNow.Add(2 * time.Second)
-	resultCommit := task.GitOID("1111111111111111111111111111111111111111")
+	resultCommit := domain.GitOID("1111111111111111111111111111111111111111")
 	// /A== is standard Base64 for a non-UTF8 Git path prefix. It is artifact
 	// data, not host-path authority, and must survive the manifest guard.
 	artifactManifest := json.RawMessage(`{"version":3,"changes":[{"path_base64":"/A=="}]}`)
 	selection := SelectBackgroundRunSnapshotParams{
 		BackgroundRunRef: backgroundRunRef(recovery, exportNow), ResultCommit: resultCommit,
-		TreeOID: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), ChangeCount: 1, ChangesSHA256: sha256.Sum256([]byte("changes")),
+		TreeOID: domain.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), ChangeCount: 1, ChangesSHA256: sha256.Sum256([]byte("changes")),
 		ArtifactManifest:       json.RawMessage(`{"host_path":"/private/work"}`),
 		ArtifactManifestSHA256: sha256.Sum256([]byte(`{"host_path":"/private/work"}`)),
 		BundleSHA256:           sha256.Sum256([]byte("bundle")), BundleBytes: 6, CollectedAt: exportNow,
@@ -116,7 +115,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	}
 	selection.ArtifactManifest, selection.ArtifactManifestSHA256 = artifactManifest, sha256.Sum256(artifactManifest)
 	selected, err := store.SelectBackgroundRunSnapshot(context.Background(), selection)
-	if err != nil || selected.State != ResultSelected || selected.Outcome != task.ResultChanged || selected.BundleBytes != 6 ||
+	if err != nil || selected.State != ResultSelected || selected.Outcome != domain.ResultChanged || selected.BundleBytes != 6 ||
 		selected.CASLocator() != "sha256:"+hex.EncodeToString(selection.ArtifactManifestSHA256[:]) {
 		t.Fatalf("selected result = %+v, error=%v", selected, err)
 	}
@@ -124,7 +123,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		t.Fatalf("selection replay = %+v, error=%v", replayed, err)
 	}
 	different := selection
-	different.TreeOID = task.GitOID("cccccccccccccccccccccccccccccccccccccccc")
+	different.TreeOID = domain.GitOID("cccccccccccccccccccccccccccccccccccccccc")
 	if _, err := store.SelectBackgroundRunSnapshot(context.Background(), different); !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("different selection = %v", err)
 	}
@@ -143,7 +142,7 @@ revision=revision+1,updated_at=updated_at+1 WHERE id=?`, run.RunID); err == nil 
 	}
 	commit := CommitBackgroundRunRetainedResultParams{BackgroundRunRef: backgroundRunRef(recovery, exportNow), MaterializationProof: materialProof}
 	committed, err := store.CommitBackgroundRunRetainedResult(context.Background(), commit)
-	if err != nil || committed.Run.State != rundomain.ResultReady || committed.Run.EffectPhase != rundomain.Cleaning ||
+	if err != nil || committed.Run.State != domain.ResultReady || committed.Run.EffectPhase != domain.Cleaning ||
 		committed.Run.LastError != "" || committed.Result.State != ResultSealed || committed.Result.MaterializationSHA256 != materialProof ||
 		committed.Result.SealedAt == nil || !committed.Result.SealedAt.Equal(exportNow) || committed.Result.ManifestSHA256 != sha256.Sum256(artifactManifest) {
 		t.Fatalf("retained result commit = %+v, error=%v", committed, err)
@@ -163,13 +162,13 @@ revision=revision+1,updated_at=updated_at+1 WHERE id=?`, run.RunID); err == nil 
 	}
 	cleanupWork, err := startNextBackgroundRunWork(context.Background(), store, exportNow.Add(time.Second))
 	cleanupRun := cleanupWork.Run
-	if err != nil || cleanupRun.State != rundomain.ResultReady || cleanupRun.EffectPhase != rundomain.Cleaning {
+	if err != nil || cleanupRun.State != domain.ResultReady || cleanupRun.EffectPhase != domain.Cleaning {
 		t.Fatal(err)
 	}
 	cleanupRef := backgroundRunRef(cleanupRun, exportNow.Add(2*time.Second))
 	failed, err := store.MarkBackgroundRunCleanupRequired(context.Background(), MarkBackgroundRunCleanupRequiredParams{
 		BackgroundRunRef: cleanupRef, Error: "container removal unavailable"})
-	if err != nil || failed.State != rundomain.ResultReady || failed.EffectPhase != rundomain.Cleaning {
+	if err != nil || failed.State != domain.ResultReady || failed.EffectPhase != domain.Cleaning {
 		t.Fatalf("retained cleanup failure = %+v, error=%v", failed, err)
 	}
 	advanceBackgroundRef(&cleanupRef, failed)
@@ -177,7 +176,7 @@ revision=revision+1,updated_at=updated_at+1 WHERE id=?`, run.RunID); err == nil 
 	cleanupRun, err = store.CompleteBackgroundRunResultCleanup(context.Background(), CompleteBackgroundRunResultCleanupParams{
 		BackgroundRunRef: cleanupRef, CleanupProof: "all resources absent",
 	})
-	if err != nil || cleanupRun.EffectPhase != rundomain.CleanupComplete {
+	if err != nil || cleanupRun.EffectPhase != domain.CleanupComplete {
 		t.Fatalf("retained cleanup completion = %+v, error=%v", cleanupRun, err)
 	}
 	projection, err := store.GetBackgroundRunResult(context.Background(), run.WorkspaceID, run.RunID, admission.Claim.Actor)

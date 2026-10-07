@@ -16,15 +16,14 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/backgroundroute"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/pluginauth"
-	rundomain "github.com/nebler/fern/internal/run"
-	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
 const (
-	testWorkspace = task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001")
-	testBase      = task.GitOID("0123456789abcdef0123456789abcdef01234567")
+	testWorkspace = domain.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001")
+	testBase      = domain.GitOID("0123456789abcdef0123456789abcdef01234567")
 )
 
 type countingVerifier struct {
@@ -32,7 +31,7 @@ type countingVerifier struct {
 	err   error
 }
 
-func (v *countingVerifier) Verify(context.Context, task.GitOID) error { v.calls.Add(1); return v.err }
+func (v *countingVerifier) Verify(context.Context, domain.GitOID) error { v.calls.Add(1); return v.err }
 
 type retentionVerifier struct {
 	calls atomic.Int64
@@ -47,7 +46,7 @@ func (v *retentionVerifier) Verify(context.Context, taskstore.BackgroundRunResul
 type apiFixture struct {
 	store    *taskstore.Store
 	handler  *Handler
-	actor    task.ActorSnapshot
+	actor    domain.ActorSnapshot
 	verifier *countingVerifier
 	retained *retentionVerifier
 	route    *fakeRoute
@@ -81,11 +80,11 @@ type resultProjectionStore struct {
 	projection taskstore.BackgroundRunResultProjection
 }
 
-func (store *resultProjectionStore) GetBackgroundRun(context.Context, task.WorkspaceID, task.RunID, task.ActorSnapshot) (taskstore.BackgroundRun, error) {
+func (store *resultProjectionStore) GetBackgroundRun(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (taskstore.BackgroundRun, error) {
 	return store.run, nil
 }
 
-func (store *resultProjectionStore) GetBackgroundRunResult(context.Context, task.WorkspaceID, task.RunID, task.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error) {
+func (store *resultProjectionStore) GetBackgroundRunResult(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error) {
 	return store.projection, nil
 }
 
@@ -138,7 +137,7 @@ func TestRunAPIAdmissionReplayOwnershipStopAndRestart(t *testing.T) {
 	if otherList.Code != http.StatusOK || otherList.Body.String() != "{\"runs\":[]}\n" {
 		t.Fatalf("cross-credential list = %d %s", otherList.Code, otherList.Body.String())
 	}
-	operator := fixture.withActor(t, task.ActorSnapshot{Type: task.ActorOperator, ID: "operator", DisplayName: "Operator",
+	operator := fixture.withActor(t, domain.ActorSnapshot{Type: domain.ActorOperator, ID: "operator", DisplayName: "Operator",
 		CredentialID: "operator", Authentication: "basic", RequestID: "request"})
 	if got := operator.request(http.MethodGet, PathPrefix, "", ""); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), response.RunID) ||
 		!strings.Contains(got.Body.String(), `"attachable":false`) {
@@ -154,7 +153,7 @@ func TestRunAPIAdmissionReplayOwnershipStopAndRestart(t *testing.T) {
 			t.Fatalf("operator %s %s = %d %s", mutation.method, mutation.suffix, got.Code, got.Body.String())
 		}
 	}
-	device := fixture.withActor(t, task.ActorSnapshot{Type: task.ActorDevice, ID: "dev_1", DisplayName: "Phone",
+	device := fixture.withActor(t, domain.ActorSnapshot{Type: domain.ActorDevice, ID: "dev_1", DisplayName: "Phone",
 		CredentialID: "dev_1", Authentication: "device_cookie", RequestID: "request"})
 	if got := device.request(http.MethodGet, PathPrefix, "", ""); got.Code != http.StatusUnauthorized {
 		t.Fatalf("device reached run API = %d %s", got.Code, got.Body.String())
@@ -197,7 +196,7 @@ func TestRunAPIRejectsRepositoryBaseProfileScopeAndMalformedHTTP(t *testing.T) {
 	}{
 		{"remote", http.MethodPost, PathPrefix, strings.Replace(work, "owner/repository", "owner/other", 1), "remote", 400},
 		{"base", http.MethodPost, PathPrefix, strings.Replace(work, string(testBase), "ABC", 1), "base", 400},
-		{"profile", http.MethodPost, PathPrefix, strings.Replace(work, rundomain.SourceProfile, "opencode-latest", 1), "profile", 400},
+		{"profile", http.MethodPost, PathPrefix, strings.Replace(work, domain.SourceProfile, "opencode-latest", 1), "profile", 400},
 		{"unknown field", http.MethodPost, PathPrefix, strings.TrimSuffix(work, "}") + `,"extra":true}`, "unknown", 400},
 		{"duplicate", http.MethodPost, PathPrefix, strings.Replace(work, `"profile":`, `"profile":"x","profile":`, 1), "duplicate", 400},
 		{"query", http.MethodGet, PathPrefix + "?limit=1", "", "", 400},
@@ -268,7 +267,7 @@ func TestRunAPIStopReplayDoesNotNeedFreshEntropyOrTime(t *testing.T) {
 	if got := fixture.request(http.MethodPost, PathPrefix+"/"+response.RunID+"/stop", "{}", "stop"); got.Code != http.StatusAccepted {
 		t.Fatalf("stop=%d %s", got.Code, got.Body.String())
 	}
-	failedGenerator, err := task.NewGenerator(strings.NewReader(""), time.Now)
+	failedGenerator, err := domain.NewGenerator(strings.NewReader(""), time.Now)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +295,7 @@ func TestRunAPIWakeFollowsDurableCreateAndStopCommitOnly(t *testing.T) {
 	}
 	created := fixture.request(http.MethodPost, PathPrefix, validCreateBody("Work"), "create-wake")
 	var response struct {
-		RunID task.RunID `json:"run_id"`
+		RunID domain.RunID `json:"run_id"`
 	}
 	if created.Code != http.StatusAccepted || json.Unmarshal(created.Body.Bytes(), &response) != nil || wakes.Load() != 1 {
 		t.Fatalf("create status=%d wakes=%d body=%s", created.Code, wakes.Load(), created.Body.String())
@@ -307,7 +306,7 @@ func TestRunAPIWakeFollowsDurableCreateAndStopCommitOnly(t *testing.T) {
 	fixture.handler.config.Wake = func() {
 		wakes.Add(1)
 		run, err := fixture.store.GetBackgroundRun(context.Background(), testWorkspace, response.RunID, fixture.actor)
-		if err != nil || (run.State != rundomain.Canceling && run.State != rundomain.Failed) {
+		if err != nil || (run.State != domain.Canceling && run.State != domain.Failed) {
 			t.Errorf("stop wake could not observe committed state: run=%+v error=%v", run, err)
 		}
 	}
@@ -331,7 +330,7 @@ func TestRunAPISealIsStrictOwnedAndExactlyReplayable(t *testing.T) {
 		t.Fatalf("create = %d: %s", created.Code, created.Body.String())
 	}
 	var admission struct {
-		RunID task.RunID `json:"run_id"`
+		RunID domain.RunID `json:"run_id"`
 	}
 	if json.Unmarshal(created.Body.Bytes(), &admission) != nil {
 		t.Fatal("decode create")
@@ -369,18 +368,18 @@ func TestRunAPISealIsStrictOwnedAndExactlyReplayable(t *testing.T) {
 
 func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) {
 	fixture := newAPIFixture(t)
-	ids := task.NewSecureGenerator()
+	ids := domain.NewSecureGenerator()
 	runID, _ := ids.RunID()
 	resultID, _ := ids.ResultID()
 	changes := sha256.Sum256([]byte("changes"))
 	manifest := sha256.Sum256([]byte("artifact manifest"))
 	bundle := sha256.Sum256([]byte("bundle"))
 	run := taskstore.BackgroundRun{RunID: runID, WorkspaceID: testWorkspace,
-		RepositoryRemote: "https://github.com/owner/repository", State: rundomain.ResultReady,
-		EffectPhase: rundomain.CleanupComplete, Seal: &taskstore.Seal{ResultID: resultID}}
+		RepositoryRemote: "https://github.com/owner/repository", State: domain.ResultReady,
+		EffectPhase: domain.CleanupComplete, Seal: &taskstore.Seal{ResultID: resultID}}
 	projection := taskstore.BackgroundRunResultProjection{Run: run,
-		Result: taskstore.Result{ID: resultID, RunID: runID, State: taskstore.ResultSealed, Outcome: task.ResultChanged, BaseSHA: testBase,
-			ResultCommit: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), TreeOID: task.GitOID("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+		Result: taskstore.Result{ID: resultID, RunID: runID, State: taskstore.ResultSealed, Outcome: domain.ResultChanged, BaseSHA: testBase,
+			ResultCommit: domain.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), TreeOID: domain.GitOID("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
 			ChangeCount: 2, ChangesSHA256: changes, ManifestSHA256: manifest, BundleSHA256: bundle, BundleBytes: 1234}}
 	store := &resultProjectionStore{Store: fixture.store, run: run, projection: projection}
 	fixture.handler.config.Store = store
@@ -439,8 +438,8 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 		t.Fatalf("recovered retention projection=%v calls=%d", got, fixture.retained.calls.Load())
 	}
 
-	store.run.State = rundomain.Canceling
-	store.run.EffectPhase = rundomain.Sealing
+	store.run.State = domain.Canceling
+	store.run.EffectPhase = domain.Sealing
 	store.run.LastError = "retained artifact export retry required"
 	recovery := fixture.request(http.MethodGet, PathPrefix+"/"+string(runID)+"/result", "", "")
 	if recovery.Code != http.StatusServiceUnavailable || !strings.Contains(recovery.Body.String(), "recovery_required") {
@@ -471,17 +470,17 @@ func newAPIFixture(t *testing.T) *apiFixture {
 func (f *apiFixture) buildHandler(t *testing.T) *Handler {
 	t.Helper()
 	backgroundImage := "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), Store: f.store, Route: f.route, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, RetentionVerifier: f.retained, Now: func() time.Time { return f.now }, RunTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", SealPolicyVersion: "fern.background-user-seal.v1"})
+	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), Store: f.store, Route: f.route, Generator: domain.NewSecureGenerator(), ActorResolver: func(context.Context) (domain.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, RetentionVerifier: f.retained, Now: func() time.Time { return f.now }, RunTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", SealPolicyVersion: "fern.background-user-seal.v1"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return handler
 }
 
-func (f *apiFixture) advanceToSession(t *testing.T, id task.RunID) taskstore.BackgroundRun {
+func (f *apiFixture) advanceToSession(t *testing.T, id domain.RunID) taskstore.BackgroundRun {
 	t.Helper()
 	now := time.Date(2026, 8, 31, 12, 0, 1, 0, time.UTC)
-	queued, err := f.store.NextBackgroundRun(context.Background(), testWorkspace, rundomain.SourceProfile)
+	queued, err := f.store.NextBackgroundRun(context.Background(), testWorkspace, domain.SourceProfile)
 	if err != nil || queued.RunID != id {
 		t.Fatalf("next run=%+v error=%v", queued, err)
 	}
@@ -507,7 +506,7 @@ func (f *apiFixture) advanceToSession(t *testing.T, id task.RunID) taskstore.Bac
 	return run
 }
 
-func (f *apiFixture) advanceToPrompt(t *testing.T, id task.RunID) taskstore.BackgroundRun {
+func (f *apiFixture) advanceToPrompt(t *testing.T, id domain.RunID) taskstore.BackgroundRun {
 	run := f.advanceToSession(t, id)
 	now := run.UpdatedAt.Add(time.Millisecond)
 	var err error
@@ -524,7 +523,7 @@ func openTestRef(run taskstore.BackgroundRun, now time.Time) taskstore.Backgroun
 	return taskstore.BackgroundRunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID,
 		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now}
 }
-func (f *apiFixture) withActor(t *testing.T, actor task.ActorSnapshot) *apiFixture {
+func (f *apiFixture) withActor(t *testing.T, actor domain.ActorSnapshot) *apiFixture {
 	clone := *f
 	clone.actor = actor
 	clone.handler = clone.buildHandler(t)
@@ -536,11 +535,11 @@ func (f *apiFixture) withStore(t *testing.T, store *taskstore.Store) *apiFixture
 	clone.handler = clone.buildHandler(t)
 	return &clone
 }
-func pluginActor(id string) task.ActorSnapshot {
-	return task.ActorSnapshot{Type: task.ActorOpenCode, ID: id, DisplayName: "OpenCode plugin", CredentialID: id, Authentication: "fern_plugin_bearer", RequestID: "request"}
+func pluginActor(id string) domain.ActorSnapshot {
+	return domain.ActorSnapshot{Type: domain.ActorOpenCode, ID: id, DisplayName: "OpenCode plugin", CredentialID: id, Authentication: "fern_plugin_bearer", RequestID: "request"}
 }
 func validCreateBody(instruction string) string {
-	value, _ := json.Marshal(createInput{Repository: "https://github.com/owner/repository", BaseOID: string(testBase), Branch: stringPointer("main"), Instruction: instruction, Profile: rundomain.SourceProfile})
+	value, _ := json.Marshal(createInput{Repository: "https://github.com/owner/repository", BaseOID: string(testBase), Branch: stringPointer("main"), Instruction: instruction, Profile: domain.SourceProfile})
 	return string(value)
 }
 func stringPointer(value string) *string { return &value }
@@ -566,7 +565,7 @@ func TestRunAPIAttachIssuesOnlyForReadyActiveRoute(t *testing.T) {
 	fixture := newAPIFixture(t)
 	created := fixture.request(http.MethodPost, PathPrefix, validCreateBody("attach to this"), "attach-create")
 	var admission struct {
-		RunID task.RunID `json:"run_id"`
+		RunID domain.RunID `json:"run_id"`
 	}
 	if created.Code != http.StatusAccepted || json.Unmarshal(created.Body.Bytes(), &admission) != nil {
 		t.Fatalf("create = %d: %s", created.Code, created.Body.String())
@@ -586,7 +585,7 @@ func TestRunAPIAttachIssuesOnlyForReadyActiveRoute(t *testing.T) {
 	if got := fixture.withActor(t, pluginActor("pc_other")).request(http.MethodGet, path, "", ""); got.Code != http.StatusNotFound {
 		t.Fatalf("cross-credential attach = %d %s", got.Code, got.Body.String())
 	}
-	operator := fixture.withActor(t, task.ActorSnapshot{Type: task.ActorOperator, ID: "operator", DisplayName: "Operator",
+	operator := fixture.withActor(t, domain.ActorSnapshot{Type: domain.ActorOperator, ID: "operator", DisplayName: "Operator",
 		CredentialID: "operator", Authentication: "basic", RequestID: "request"})
 	if got := operator.request(http.MethodGet, PathPrefix, "", ""); got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"attachable":true`) {
 		t.Fatalf("operator list = %d %s", got.Code, got.Body.String())

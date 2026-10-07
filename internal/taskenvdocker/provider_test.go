@@ -28,7 +28,7 @@ import (
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/go-connections/nat"
 	"github.com/nebler/fern/internal/atomicfile"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/taskstore"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -158,7 +158,7 @@ func TestCloneRejectsUnreachableCommitIndexFlagsAndCriticalSymlink(t *testing.T)
 		}
 		runGit(t, provider.config.GitExecutable, provider.config.Repository, "add", "orphan")
 		runGit(t, provider.config.GitExecutable, provider.config.Repository, "commit", "-m", "orphan")
-		run.BaseOID = task.GitOID(gitOutput(t, provider.config.GitExecutable, provider.config.Repository, "rev-parse", "HEAD"))
+		run.BaseOID = domain.GitOID(gitOutput(t, provider.config.GitExecutable, provider.config.Repository, "rev-parse", "HEAD"))
 		runGit(t, provider.config.GitExecutable, provider.config.Repository, "checkout", "main")
 		runGit(t, provider.config.GitExecutable, provider.config.Repository, "branch", "-D", "unreachable")
 		if _, err := provider.EnsureClone(context.Background(), run); err == nil {
@@ -1378,7 +1378,7 @@ func testProvider(t *testing.T) (*Provider, *fakeDocker, taskstore.BackgroundRun
 	}
 	t.Cleanup(func() { _ = provider.Close() })
 	compact := "0198d34d6a5075fbb1f2000000000201"
-	run := taskstore.BackgroundRun{WorkspaceID: task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001"), RunID: task.RunID("run_0198d34d-6a50-75fb-b1f2-000000000201"), RepositoryRemote: "https://github.com/fern-test/repository", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: EnvironmentSHA256(nil), ResourceSpecVersion: 10, ImageIdentity: testImageID, CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode", ContainerIdentity: "fern-run-" + compact, EndpointIdentity: "run-" + compact + "-endpoint", OpenCodeSessionID: "ses_test", OpenCodeMessageID: "msg_test"}
+	run := taskstore.BackgroundRun{WorkspaceID: domain.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001"), RunID: domain.RunID("run_0198d34d-6a50-75fb-b1f2-000000000201"), RepositoryRemote: "https://github.com/fern-test/repository", BaseOID: domain.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: EnvironmentSHA256(nil), ResourceSpecVersion: 10, ImageIdentity: testImageID, CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode", ContainerIdentity: "fern-run-" + compact, EndpointIdentity: "run-" + compact + "-endpoint", OpenCodeSessionID: "ses_test", OpenCodeMessageID: "msg_test"}
 	return provider, docker, run
 }
 

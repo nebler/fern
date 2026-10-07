@@ -8,8 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	rundomain "github.com/nebler/fern/internal/run"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 type rowScanner interface {
@@ -23,25 +22,25 @@ type queryRower interface {
 // actorRecord is the stored JSON form of an actor snapshot. Actors are
 // attribution on the row that names them, not an interned table.
 type actorRecord struct {
-	Type           task.ActorType `json:"type"`
-	ID             string         `json:"id"`
-	DisplayName    string         `json:"display_name"`
-	CredentialID   string         `json:"credential_id"`
-	Authentication string         `json:"authentication"`
-	RequestID      string         `json:"request_id"`
+	Type           domain.ActorType `json:"type"`
+	ID             string           `json:"id"`
+	DisplayName    string           `json:"display_name"`
+	CredentialID   string           `json:"credential_id"`
+	Authentication string           `json:"authentication"`
+	RequestID      string           `json:"request_id"`
 }
 
-func encodeActor(actor task.ActorSnapshot) string {
+func encodeActor(actor domain.ActorSnapshot) string {
 	encoded, _ := json.Marshal(actorRecord(actor))
 	return string(encoded)
 }
 
-func decodeActor(value string) (task.ActorSnapshot, error) {
+func decodeActor(value string) (domain.ActorSnapshot, error) {
 	var record actorRecord
 	if err := json.Unmarshal([]byte(value), &record); err != nil {
-		return task.ActorSnapshot{}, fmt.Errorf("%w: actor: %v", ErrCorruptStore, err)
+		return domain.ActorSnapshot{}, fmt.Errorf("%w: actor: %v", ErrCorruptStore, err)
 	}
-	return task.ActorSnapshot(record), nil
+	return domain.ActorSnapshot(record), nil
 }
 
 // ownedBy restricts a run query (aliased r) to one authenticated authority;
@@ -49,7 +48,7 @@ func decodeActor(value string) (task.ActorSnapshot, error) {
 const ownedBy = ` AND json_extract(r.creator_actor,'$.type')=? AND json_extract(r.creator_actor,'$.id')=?
 AND json_extract(r.creator_actor,'$.credential_id')=? AND json_extract(r.creator_actor,'$.authentication')=?`
 
-func ownerArgs(actor task.ActorSnapshot) []any {
+func ownerArgs(actor domain.ActorSnapshot) []any {
 	return []any{actor.Type, actor.ID, actor.CredentialID, actor.Authentication}
 }
 
@@ -87,7 +86,7 @@ func scanRun(row rowScanner) (BackgroundRun, error) {
 		return BackgroundRun{}, err
 	}
 	copy(run.EnvironmentSHA256[:], environmentHash)
-	resources := rundomain.NewResources(run.RunID)
+	resources := domain.NewResources(run.RunID)
 	run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity =
 		resources.Clone(), resources.Volume(), resources.Container(), resources.Endpoint()
 	run.Branch = nullableString(branch)
@@ -97,7 +96,7 @@ func scanRun(row rowScanner) (BackgroundRun, error) {
 	run.RuntimeEpoch, run.HostPort = runtimeEpoch.Int64, int(hostPort.Int64)
 	run.PromptRequestAttemptedAt = nullableTime(promptAttempted)
 	if sealReceipt.Valid {
-		run.Seal = &Seal{ReceiptID: sealReceipt.Int64, ResultID: task.ResultID(resultID.String),
+		run.Seal = &Seal{ReceiptID: sealReceipt.Int64, ResultID: domain.ResultID(resultID.String),
 			RequestedAt: fromUnixMillis(sealRequested.Int64), PolicyVersion: sealPolicy.String}
 	}
 	if fenceKind.Valid {
@@ -109,7 +108,7 @@ func scanRun(row rowScanner) (BackgroundRun, error) {
 	return run, err
 }
 
-func readRun(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, id task.RunID) (BackgroundRun, error) {
+func readRun(ctx context.Context, q queryRower, workspaceID domain.WorkspaceID, id domain.RunID) (BackgroundRun, error) {
 	run, err := scanRun(q.QueryRowContext(ctx, runSelect+` WHERE r.workspace_id=? AND r.id=?`, workspaceID, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return BackgroundRun{}, ErrNotFound
@@ -120,7 +119,7 @@ func readRun(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, id
 	return run, nil
 }
 
-func readOwnedRun(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, id task.RunID, actor task.ActorSnapshot) (BackgroundRun, error) {
+func readOwnedRun(ctx context.Context, q queryRower, workspaceID domain.WorkspaceID, id domain.RunID, actor domain.ActorSnapshot) (BackgroundRun, error) {
 	run, err := scanRun(q.QueryRowContext(ctx, runSelect+` WHERE r.workspace_id=? AND r.id=?`+ownedBy,
 		append([]any{workspaceID, id}, ownerArgs(actor)...)...))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -154,11 +153,11 @@ api_contract_version,run_id,response_status,response_projection FROM receipts`
 // FindReceiptByIdempotency returns the durable command receipt for one exact
 // workspace/kind/key scope. Ownership and request-hash classification remains
 // in the command transition that consumes this read.
-func (s *Store) FindReceiptByIdempotency(ctx context.Context, workspaceID task.WorkspaceID, commandKind string, key task.IdempotencyKey) (Receipt, bool, error) {
+func (s *Store) FindReceiptByIdempotency(ctx context.Context, workspaceID domain.WorkspaceID, commandKind string, key domain.IdempotencyKey) (Receipt, bool, error) {
 	return receiptByKey(ctx, s.db, workspaceID, commandKind, key)
 }
 
-func receiptByKey(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, kind string, key task.IdempotencyKey) (Receipt, bool, error) {
+func receiptByKey(ctx context.Context, q queryRower, workspaceID domain.WorkspaceID, kind string, key domain.IdempotencyKey) (Receipt, bool, error) {
 	var r Receipt
 	var requestHash []byte
 	var acceptedAt int64
@@ -180,7 +179,7 @@ func receiptByKey(ctx context.Context, q queryRower, workspaceID task.WorkspaceI
 }
 
 // insertReceipt records an accepted command for run and returns it.
-func insertReceipt(ctx context.Context, tx *sql.Tx, claim task.IdempotencyClaim, run task.RunID, apiVersion string,
+func insertReceipt(ctx context.Context, tx *sql.Tx, claim domain.IdempotencyClaim, run domain.RunID, apiVersion string,
 	acceptedAt time.Time, response any) (Receipt, error) {
 	projection, err := json.Marshal(response)
 	if err != nil {
@@ -205,11 +204,11 @@ accepted_at,api_contract_version,run_id,response_status,response_projection) VAL
 
 // GetBackgroundRun reads one run. Plugin actors see only runs they created;
 // a foreign run reads as not found.
-func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID task.WorkspaceID, runID task.RunID, actor task.ActorSnapshot) (BackgroundRun, error) {
+func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID domain.WorkspaceID, runID domain.RunID, actor domain.ActorSnapshot) (BackgroundRun, error) {
 	if !backgroundRunReader(actor.Type) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run reader", ErrInvalidInput)
 	}
-	if actor.Type == task.ActorOpenCode {
+	if actor.Type == domain.ActorOpenCode {
 		return readOwnedRun(ctx, s.db, workspaceID, runID, actor)
 	}
 	return readRun(ctx, s.db, workspaceID, runID)
@@ -217,9 +216,9 @@ func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID task.Workspace
 
 // ReadBackgroundRunLifecycle returns the (state, phase) of one run for the
 // trusted in-process coordinator. It authorizes no actor.
-func (s *Store) ReadBackgroundRunLifecycle(ctx context.Context, workspaceID task.WorkspaceID, runID task.RunID) (rundomain.State, rundomain.Phase, error) {
-	var state rundomain.State
-	var phase rundomain.Phase
+func (s *Store) ReadBackgroundRunLifecycle(ctx context.Context, workspaceID domain.WorkspaceID, runID domain.RunID) (domain.State, domain.Phase, error) {
+	var state domain.State
+	var phase domain.Phase
 	if err := s.db.QueryRowContext(ctx, `SELECT state,effect_phase FROM runs WHERE workspace_id=? AND id=?`, workspaceID, runID).
 		Scan(&state, &phase); err != nil {
 		return "", "", fmt.Errorf("read run lifecycle: %w", err)
@@ -231,13 +230,13 @@ const MaxBackgroundRunListLimit = 100
 
 // ListBackgroundRuns applies plugin ownership in SQL before its bound. Trusted
 // operator/device actors receive the workspace-wide operator projection.
-func (s *Store) ListBackgroundRuns(ctx context.Context, workspaceID task.WorkspaceID, actor task.ActorSnapshot, limit int) ([]BackgroundRun, error) {
+func (s *Store) ListBackgroundRuns(ctx context.Context, workspaceID domain.WorkspaceID, actor domain.ActorSnapshot, limit int) ([]BackgroundRun, error) {
 	if !backgroundRunReader(actor.Type) || limit < 1 || limit > MaxBackgroundRunListLimit {
 		return nil, fmt.Errorf("%w: background run list", ErrInvalidInput)
 	}
 	query := runSelect + ` WHERE r.workspace_id=?`
 	arguments := []any{workspaceID}
-	if actor.Type == task.ActorOpenCode {
+	if actor.Type == domain.ActorOpenCode {
 		query += ownedBy
 		arguments = append(arguments, ownerArgs(actor)...)
 	}
@@ -269,6 +268,6 @@ func (s *Store) ListBackgroundRuns(ctx context.Context, workspaceID task.Workspa
 	return runs, nil
 }
 
-func backgroundRunReader(actorType task.ActorType) bool {
-	return actorType == task.ActorOpenCode || actorType == task.ActorDevice || actorType == task.ActorOperator
+func backgroundRunReader(actorType domain.ActorType) bool {
+	return actorType == domain.ActorOpenCode || actorType == domain.ActorDevice || actorType == domain.ActorOperator
 }

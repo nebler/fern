@@ -13,8 +13,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/nebler/fern/internal/control"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/pluginauth"
-	"github.com/nebler/fern/internal/task"
 )
 
 const (
@@ -193,12 +193,12 @@ func (state *pairingState) admit(writer http.ResponseWriter, request *http.Reque
 		unregister()
 		cancel()
 	}
-	actor := task.ActorSnapshot{
-		Type: task.ActorDevice, ID: device.ID, DisplayName: device.Name, CredentialID: device.ID,
+	actor := domain.ActorSnapshot{
+		Type: domain.ActorDevice, ID: device.ID, DisplayName: device.Name, CredentialID: device.ID,
 		Authentication: "fern_device_cookie", RequestID: rand.Text(),
 	}
 	ctx = context.WithValue(ctx, csrfCredentialKey{}, credential)
-	request = request.WithContext(task.WithActor(ctx, actor))
+	request = request.WithContext(domain.WithActor(ctx, actor))
 	stripCredentials(request)
 	return request, release, true
 }

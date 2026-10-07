@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/control"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/pluginauth"
-	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore/taskstoretest"
 )
 
@@ -63,7 +63,7 @@ func newRouteFixture(t *testing.T) *routeFixture {
 		t.Fatal(err)
 	}
 	plugins := pluginauth.New(database)
-	approver := task.ActorSnapshot{Type: task.ActorOperator, ID: "local-operator", DisplayName: "Local operator",
+	approver := domain.ActorSnapshot{Type: domain.ActorOperator, ID: "local-operator", DisplayName: "Local operator",
 		CredentialID: "control-test", Authentication: "basic", RequestID: "request-test"}
 	approved, err := plugins.Start(now.Add(-2 * time.Minute))
 	if err != nil {

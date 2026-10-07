@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 func TestTypedErrorsDescribeAndUnwrapCause(t *testing.T) {
@@ -16,7 +16,7 @@ func TestTypedErrorsDescribeAndUnwrapCause(t *testing.T) {
 		cause   error
 		message string
 	}{
-		{"idempotency conflict", &ConflictError{ReceiptID: 7, RunID: task.RunID("task-1")}, ErrIdempotencyConflict, "idempotency key conflict: receipt 7 targets task-1"},
+		{"idempotency conflict", &ConflictError{ReceiptID: 7, RunID: domain.RunID("task-1")}, ErrIdempotencyConflict, "idempotency key conflict: receipt 7 targets task-1"},
 	}
 
 	for _, test := range tests {

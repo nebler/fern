@@ -1,4 +1,4 @@
-package run
+package domain
 
 import "testing"
 

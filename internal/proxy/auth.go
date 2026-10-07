@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	"github.com/nebler/fern/internal/control"
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 // ControlAuth carries the operator-facing Fern control password shared by the
@@ -47,11 +47,11 @@ func (auth *operatorAuth) authenticate(writer http.ResponseWriter, request *http
 		http.Error(writer, "unauthorized", http.StatusUnauthorized)
 		return 0, nil, nil, false
 	}
-	actor := task.ActorSnapshot{
-		Type: task.ActorOperator, ID: "local-operator", DisplayName: "Local operator",
+	actor := domain.ActorSnapshot{
+		Type: domain.ActorOperator, ID: "local-operator", DisplayName: "Local operator",
 		CredentialID: auth.credentialID, Authentication: "basic", RequestID: rand.Text(),
 	}
-	request = request.WithContext(task.WithActor(request.Context(), actor))
+	request = request.WithContext(domain.WithActor(request.Context(), actor))
 	stripCredentials(request)
 	return operator, request, noRelease, true
 }

@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/domain"
 )
 
 func TestLocalRunConnectionRejectsIncompleteConfiguration(t *testing.T) {
@@ -27,8 +27,8 @@ func TestLocalRunConnectionRejectsIncompleteConfiguration(t *testing.T) {
 func TestSelectAttachRunUsesBoundedNumberedSelection(t *testing.T) {
 	branch := "main"
 	runs := []runSummary{
-		{ID: task.RunID("run_0198d34d-6a50-75fb-b1f2-000000000201"), State: "working", Repository: "owner/first"},
-		{ID: task.RunID("run_0198d34d-6a50-75fb-b1f2-000000000202"), State: "needs_you", Repository: "owner/second", Branch: &branch},
+		{ID: domain.RunID("run_0198d34d-6a50-75fb-b1f2-000000000201"), State: "working", Repository: "owner/first"},
+		{ID: domain.RunID("run_0198d34d-6a50-75fb-b1f2-000000000202"), State: "needs_you", Repository: "owner/second", Branch: &branch},
 	}
 	var output bytes.Buffer
 	selected, err := selectAttachRun(strings.NewReader("2\n"), &output, runs)
@@ -48,7 +48,7 @@ func TestActiveAndAttachableRunFiltering(t *testing.T) {
 	runs := make([]runSummary, 0, len(states))
 	for index, state := range states {
 		attachable := state == "setting_up" || state == "working" || state == "needs_you" || state == "uncertain"
-		runs = append(runs, runSummary{ID: task.RunID("run-" + string(rune('a'+index))), State: state, Attachable: attachable})
+		runs = append(runs, runSummary{ID: domain.RunID("run-" + string(rune('a'+index))), State: state, Attachable: attachable})
 	}
 	active := activeRuns(runs)
 	if got := statesOf(active); strings.Join(got, ",") != "queued,setting_up,working,needs_you,canceling,uncertain" {
@@ -79,7 +79,7 @@ printf '%s\n%s\n%s\n' "$OPENCODE_SERVER_USERNAME" "$OPENCODE_SERVER_PASSWORD" "$
 	t.Setenv("FERN_TEST_ARGUMENTS", arguments)
 	t.Setenv("FERN_TEST_ENVIRONMENT", environment)
 	t.Setenv("FERN_TOKEN", "must-not-be-inherited")
-	attachment := runAttachResponse{SessionID: task.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef"), Username: "opencode"}
+	attachment := runAttachResponse{SessionID: domain.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef"), Username: "opencode"}
 	attachment.Password = "short-lived-secret"
 	if err := launchOpenCodeAttach(context.Background(), executable, "https://fern.example:8443", attachment); err != nil {
 		t.Fatal(err)
@@ -101,7 +101,7 @@ printf '%s\n%s\n%s\n' "$OPENCODE_SERVER_USERNAME" "$OPENCODE_SERVER_PASSWORD" "$
 }
 
 func TestLaunchOpenCodeAttachChecksVersionAndPropagatesExitCode(t *testing.T) {
-	attachment := runAttachResponse{SessionID: task.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef"),
+	attachment := runAttachResponse{SessionID: domain.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef"),
 		Username: "opencode", Password: "short-lived-secret"}
 	for _, test := range []struct {
 		name, script string
@@ -135,7 +135,7 @@ func TestRunCommandFlagParsing(t *testing.T) {
 
 func TestRemoteConnectionUsesSeparateClientAPIAndValidatesAttachment(t *testing.T) {
 	token := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	runID := task.RunID("run_0198d34d-6a50-75fb-b1f2-000000000201")
+	runID := domain.RunID("run_0198d34d-6a50-75fb-b1f2-000000000201")
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer "+token {
 			http.Error(writer, "missing bearer", http.StatusUnauthorized)
@@ -148,7 +148,7 @@ func TestRemoteConnectionUsesSeparateClientAPIAndValidatesAttachment(t *testing.
 				Head: strings.Repeat("a", 40), Attachable: true}}})
 		case "/fern/api/runs/" + string(runID) + "/attach":
 			_ = json.NewEncoder(writer).Encode(runAttachResponse{RunID: runID, URL: "https://127.0.0.1:8443",
-				SessionID: task.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef"), Username: "opencode",
+				SessionID: domain.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef"), Username: "opencode",
 				Password: token, ExpiresAt: time.Now().Add(time.Hour)})
 		default:
 			http.NotFound(writer, request)

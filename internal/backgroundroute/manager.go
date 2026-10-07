@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	runidentity "github.com/nebler/fern/internal/run"
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -327,7 +327,7 @@ func (m *Manager) ActiveOrigin(run taskstore.BackgroundRun) (string, bool) {
 }
 
 func identityFromRun(run taskstore.BackgroundRun) (Identity, bool) {
-	runtime, err := runidentity.NewRuntime(run.ObservedContainerID, run.ObservedContainerStartedAt)
+	runtime, err := domain.NewRuntime(run.ObservedContainerID, run.ObservedContainerStartedAt)
 	if err != nil || runtime.Epoch() != run.RuntimeEpoch {
 		return Identity{}, false
 	}
@@ -519,7 +519,7 @@ func stripFernCookies(header http.Header) {
 }
 
 func validateIdentity(identity Identity) error {
-	runtime, err := runidentity.ParseRuntime(identity.ContainerID, identity.StartedAt, identity.RuntimeToken)
+	runtime, err := domain.ParseRuntime(identity.ContainerID, identity.StartedAt, identity.RuntimeToken)
 	if identity.WorkspaceID == "" || identity.RunID == "" || identity.SessionID == "" ||
 		identity.RuntimeEpoch <= 0 || identity.ContainerID == "" || identity.StartedAt == "" ||
 		err != nil || runtime.Epoch() != identity.RuntimeEpoch {
