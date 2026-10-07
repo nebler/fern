@@ -202,3 +202,73 @@ accepted_at,api_contract_version,run_id,response_status,response_projection) VAL
 		RequestHash: claim.RequestHash, Actor: claim.Actor, AcceptedAt: fromUnixMillis(acceptedMS), APIContractVersion: apiVersion,
 		RunID: run, ResponseStatus: 202, ResponseProjection: projection}, nil
 }
+
+// GetBackgroundRun reads one run. Plugin actors see only runs they created;
+// a foreign run reads as not found.
+func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID task.WorkspaceID, runID task.RunID, actor task.ActorSnapshot) (BackgroundRun, error) {
+	if !backgroundRunReader(actor.Type) {
+		return BackgroundRun{}, fmt.Errorf("%w: background run reader", ErrInvalidInput)
+	}
+	if actor.Type == task.ActorOpenCode {
+		return readOwnedRun(ctx, s.db, workspaceID, runID, actor)
+	}
+	return readRun(ctx, s.db, workspaceID, runID)
+}
+
+// ReadBackgroundRunLifecycle returns the (state, phase) of one run for the
+// trusted in-process coordinator. It authorizes no actor.
+func (s *Store) ReadBackgroundRunLifecycle(ctx context.Context, workspaceID task.WorkspaceID, runID task.RunID) (rundomain.State, rundomain.Phase, error) {
+	var state rundomain.State
+	var phase rundomain.Phase
+	if err := s.db.QueryRowContext(ctx, `SELECT state,effect_phase FROM runs WHERE workspace_id=? AND id=?`, workspaceID, runID).
+		Scan(&state, &phase); err != nil {
+		return "", "", fmt.Errorf("read run lifecycle: %w", err)
+	}
+	return state, phase, nil
+}
+
+const MaxBackgroundRunListLimit = 100
+
+// ListBackgroundRuns applies plugin ownership in SQL before its bound. Trusted
+// operator/device actors receive the workspace-wide operator projection.
+func (s *Store) ListBackgroundRuns(ctx context.Context, workspaceID task.WorkspaceID, actor task.ActorSnapshot, limit int) ([]BackgroundRun, error) {
+	if !backgroundRunReader(actor.Type) || limit < 1 || limit > MaxBackgroundRunListLimit {
+		return nil, fmt.Errorf("%w: background run list", ErrInvalidInput)
+	}
+	query := runSelect + ` WHERE r.workspace_id=?`
+	arguments := []any{workspaceID}
+	if actor.Type == task.ActorOpenCode {
+		query += ownedBy
+		arguments = append(arguments, ownerArgs(actor)...)
+	}
+	query += ` ORDER BY r.created_at DESC,r.id DESC LIMIT ?`
+	arguments = append(arguments, limit)
+	rows, err := s.db.QueryContext(ctx, query, arguments...)
+	if err != nil {
+		return nil, fmt.Errorf("list background runs: %w", err)
+	}
+	defer rows.Close()
+	runs := make([]BackgroundRun, 0)
+	for rows.Next() {
+		run, scanErr := scanRun(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan background run list: %w", scanErr)
+		}
+		if len(runs) == cap(runs) {
+			// Grow only after a successful scan, without exceeding the query bound.
+			// Starting at one avoids reserving excess space for sparse lists.
+			grown := make([]BackgroundRun, len(runs), min(limit, max(1, 2*cap(runs))))
+			copy(grown, runs)
+			runs = grown
+		}
+		runs = append(runs, run)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate background run list: %w", err)
+	}
+	return runs, nil
+}
+
+func backgroundRunReader(actorType task.ActorType) bool {
+	return actorType == task.ActorOpenCode || actorType == task.ActorDevice || actorType == task.ActorOperator
+}

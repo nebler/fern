@@ -1,5 +1,8 @@
 package taskstore
 
+// This file holds the coordinator's effect transitions. Each is a
+// compare-and-swap on a BackgroundRunRef.
+
 import (
 	"context"
 	"database/sql"
@@ -231,3 +234,33 @@ func validOptionalEvidence(value string) bool {
 }
 
 func validRequiredEvidence(value string) bool { return validBoundedText(value, 1, 4096) }
+
+// RecordBackgroundRunWriterFence durably records, once per seal, that the
+// exact writer no longer runs. A runtime_stopped fence must name the run's
+// committed runtime (a schema CHECK); the other kinds require that no runtime
+// was ever committed.
+func (s *Store) RecordBackgroundRunWriterFence(ctx context.Context, p RecordBackgroundRunWriterFenceParams) (BackgroundRun, error) {
+	if p.ExpectedState != rundomain.Canceling || p.ExpectedPhase != rundomain.Sealing {
+		return BackgroundRun{}, fmt.Errorf("%w: writer fence revision", ErrInvalidInput)
+	}
+	var stoppedAt any
+	if p.StoppedAt != nil {
+		stoppedAt = unixMillis(*p.StoppedAt)
+	}
+	predicate := `observed_container_id IS NULL`
+	if p.Kind == WriterFenceRuntimeStopped {
+		predicate = `observed_container_id IS NOT NULL`
+	}
+	return s.updateRun(ctx, p.BackgroundRunRef,
+		`writer_fence_kind=?,writer_fence_container_id=?,writer_fence_started_at=?,writer_fence_token=?,writer_fence_stopped_at=?,last_evidence=?`,
+		[]any{p.Kind, nullIfEmpty(p.ContainerID), nullIfEmpty(p.ContainerStartedAt), nullIfEmpty(p.RuntimeToken), stoppedAt,
+			"writer_fence:" + string(p.Kind)},
+		"record writer fence", `seal_receipt_id IS NOT NULL`, `writer_fence_kind IS NULL`, predicate)
+}
+
+func nullIfEmpty(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
