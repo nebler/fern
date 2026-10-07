@@ -23,18 +23,3 @@ func TestReadinessAndLivenessHaveDistinctFailureSemantics(t *testing.T) {
 		t.Fatalf("readiness = %d %q", ready.Code, ready.Body.String())
 	}
 }
-
-func TestMetricsAreOpenMetricsWithFixedComponentLabels(t *testing.T) {
-	registry := NewRegistry()
-	registry.Degraded(ComponentBackgroundRunSerial, errors.New("secret response"))
-	response := httptest.NewRecorder()
-	registry.MetricsHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/fern/metrics", nil))
-	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "application/openmetrics-text; version=1.0.0; charset=utf-8" {
-		t.Fatalf("metrics response = %d %q", response.Code, response.Header().Get("Content-Type"))
-	}
-	body := response.Body.String()
-	if strings.Count(body, "fern_component_ready{") != len(components) || strings.Count(body, "fern_component_blocked{") != len(components) ||
-		!strings.HasSuffix(body, "# EOF\n") || strings.Contains(body, "secret response") {
-		t.Fatalf("metrics body = %q", body)
-	}
-}

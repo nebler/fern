@@ -179,7 +179,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 	}
 	controls := proxy.Controls{Store: control.New(state.DB()), Runs: runs,
 		ControlAuth: proxy.ControlAuth{Password: cfg.Control.Password}, PluginAuth: pluginauth.New(state.DB()),
-		Liveness: status.LivenessHandler(), Readiness: status.ReadinessHandler(), Status: status.StatusHandler(), Metrics: status.MetricsHandler()}
+		Liveness: status.LivenessHandler(), Readiness: status.ReadinessHandler()}
 	handlers, err := proxy.NewHandlers(controls, origins)
 	if err != nil {
 		if tasks != nil {

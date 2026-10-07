@@ -93,7 +93,7 @@ func newRouteFixture(t *testing.T) *routeFixture {
 	fixture.handlers, err = NewHandlers(Controls{
 		Store: store, PluginAuth: plugins, ControlAuth: ControlAuth{Password: testPassword},
 		Runs:     stub("runs"),
-		Liveness: stub("live"), Readiness: stub("ready"), Status: stub("status"), Metrics: stub("metrics"),
+		Liveness: stub("live"), Readiness: stub("ready"),
 	}, TrustedOrigins{Remote: testRemoteOrigin, Operator: testOperatorOrigin})
 	if err != nil {
 		t.Fatal(err)
@@ -190,7 +190,6 @@ func TestRouteTable(t *testing.T) {
 		{R, "GET", "/fern/api/v1/devices", cookie, false, "", 404, "", ""},
 		{R, "GET", "/fern/api/plugin-auth/credentials", cookie, false, "", 404, "", ""},
 		{R, "GET", "/fern/github/app/setup", cookie, false, "", 404, "", ""},
-		{R, "GET", "/fern/status", cookie, false, "", 404, "", ""},
 		{R, "GET", "/fern/live", cookie, false, "", 404, "", ""},
 		{R, "GET", "/fern/pair/new", cookie, false, "", 404, "", ""},
 		{R, "GET", "/elsewhere", cookie, false, "", 404, "", ""},
@@ -216,13 +215,13 @@ func TestRouteTable(t *testing.T) {
 		// Operator: probes precede authentication.
 		{O, "GET", "/fern/live", anon, false, "", 200, "live", ""},
 		{O, "GET", "/fern/ready", anon, false, "", 200, "ready", ""},
-		{O, "GET", "/fern/status", anon, false, "", 401, "", `WWW-Authenticate: Basic realm="fern-control"`},
-		{O, "GET", "/fern/status", badBasic, false, "", 401, "", ""},
-		{O, "GET", "/fern/status", basic, false, "", 200, "status", ""},
-		{O, "GET", "/fern/metrics", basic, false, "", 200, "metrics", ""},
-		{O, "GET", "/fern/status", bearer, false, "", 404, "", ""},
+		{O, "GET", "/fern/control", anon, false, "", 401, "", `WWW-Authenticate: Basic realm="fern-control"`},
+		{O, "GET", "/fern/control", badBasic, false, "", 401, "", ""},
+		{O, "GET", "/fern/control", bearer, false, "", 404, "", ""},
 		{O, "GET", "/fern/live", bearer, false, "", 404, "", ""},
-		{O, "GET", "/fern/status", cookie, false, "", 401, "", ""},
+		{O, "GET", "/fern/control", cookie, false, "", 401, "", ""},
+		{O, "GET", "/fern/status", basic, false, "", 404, "", ""},
+		{O, "GET", "/fern/metrics", basic, false, "", 404, "", ""},
 
 		// Operator: pages, pairing, devices.
 		{O, "GET", "/fern/", basic, false, "", 200, "", ""},

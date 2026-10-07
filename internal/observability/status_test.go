@@ -1,57 +1,38 @@
 package observability
 
 import (
-	"encoding/json"
 	"errors"
-	"strings"
 	"sync"
 	"testing"
 )
 
-func TestRegistryIsFixedCardinalityAndSanitizesFailures(t *testing.T) {
+func TestRegistryRejectsUnknownComponentsAndTracksReadiness(t *testing.T) {
 	registry := NewRegistry()
-	if registry.Healthy(Component("task-publication")) {
-		t.Fatal("removed host publication component was accepted")
+	if !registry.Ready() {
+		t.Fatal("new registry is unready")
 	}
-	secret := "remote token must-not-escape\nsecond line"
-	if !registry.Degraded(ComponentBackgroundRunSerial, errors.New(secret)) {
-		t.Fatal("known component update was rejected")
-	}
-	if registry.Failed(Component("attacker="+secret), errors.New(secret)) {
+	if registry.Healthy(Component("task-publication")) || registry.Failed(Component("attacker"), errors.New("x")) {
 		t.Fatal("unknown component update was accepted")
 	}
-	payload, err := json.Marshal(registry.Snapshot())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(payload), secret) || len(registry.Snapshot().Components) != len(components) {
-		t.Fatalf("unsafe or variable snapshot: %s", payload)
-	}
-	if !registry.Snapshot().Ready {
+	if !registry.Degraded(ComponentBackgroundRunSerial, errors.New("transient")) || !registry.Ready() {
 		t.Fatal("degraded component made service unready")
 	}
-	registry.Blocked(ComponentGitHubTaskDependency, errors.New(secret))
-	blocked := registry.Snapshot()
-	if blocked.Ready || blocked.Components[componentIndexForTest(ComponentGitHubTaskDependency)].State != StateBlocked {
-		t.Fatalf("blocked dependency snapshot = %+v", blocked)
+	registry.Blocked(ComponentGitHubTaskDependency, errors.New("credentials unavailable"))
+	if registry.Ready() {
+		t.Fatal("blocked dependency left service ready")
 	}
 	registry.Healthy(ComponentGitHubTaskDependency)
-	registry.Failed(ComponentBackgroundRunSerial, errors.New(secret))
-	if registry.Snapshot().Ready {
+	registry.Failed(ComponentBackgroundRunSerial, errors.New("fatal"))
+	if registry.Ready() {
 		t.Fatal("failed component left service ready")
 	}
 	registry.Healthy(ComponentBackgroundRunSerial)
-	if !registry.Snapshot().Ready {
+	if !registry.Ready() {
 		t.Fatal("healthy recovery left service unready")
 	}
 }
 
-func componentIndexForTest(component Component) int {
-	index, _ := componentIndex(component)
-	return index
-}
-
-func TestRegistryConcurrentUpdatesAndSnapshots(t *testing.T) {
+func TestRegistryConcurrentUpdatesAndReads(t *testing.T) {
 	registry := NewRegistry()
 	var wait sync.WaitGroup
 	for i := 0; i < 16; i++ {
@@ -60,14 +41,14 @@ func TestRegistryConcurrentUpdatesAndSnapshots(t *testing.T) {
 			defer wait.Done()
 			for iteration := 0; iteration < 1000; iteration++ {
 				component := components[(offset+iteration)%len(components)]
-				registry.Degraded(component, errors.New("not exported"))
+				registry.Blocked(component, nil)
+				_ = registry.Ready()
 				registry.Healthy(component)
-				if got := len(registry.Snapshot().Components); got != len(components) {
-					t.Errorf("component count = %d", got)
-					return
-				}
 			}
 		}(i)
 	}
 	wait.Wait()
+	if !registry.Ready() {
+		t.Fatal("registry unready after every component recovered")
+	}
 }

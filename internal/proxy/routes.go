@@ -25,7 +25,7 @@ const (
 // route names the realms that may reach it.
 func NewHandlers(controls Controls, origins TrustedOrigins) (Handlers, error) {
 	if controls.Store == nil || controls.PluginAuth == nil || controls.Runs == nil ||
-		controls.Liveness == nil || controls.Readiness == nil || controls.Status == nil || controls.Metrics == nil {
+		controls.Liveness == nil || controls.Readiness == nil {
 		return Handlers{}, errors.New("control, plugin authorization, run, and probe handlers are required")
 	}
 	remoteOrigin, operatorOrigin, err := parseTrustedOrigins(origins)
@@ -81,8 +81,6 @@ func NewHandlers(controls Controls, origins TrustedOrigins) (Handlers, error) {
 	ops := newRouter(operatorAuth.authenticate)
 	ops.handle("GET /fern/live", public, controls.Liveness.ServeHTTP)
 	ops.handle("GET /fern/ready", public, controls.Readiness.ServeHTTP)
-	ops.handle("GET /fern/status", operator, controls.Status.ServeHTTP)
-	ops.handle("GET /fern/metrics", operator, controls.Metrics.ServeHTTP)
 	ops.handle("GET /fern", operator, redirectToRoot)
 	ops.handle("GET /fern/{$}", operator, pages.landing)
 	ops.handle("GET /fern/control", operator, pages.control)

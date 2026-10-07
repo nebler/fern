@@ -20,8 +20,6 @@ type Controls struct {
 	Runs        http.Handler
 	Liveness    http.Handler
 	Readiness   http.Handler
-	Status      http.Handler
-	Metrics     http.Handler
 	ControlAuth ControlAuth
 	PluginAuth  *pluginauth.Store
 }
