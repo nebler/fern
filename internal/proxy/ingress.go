@@ -69,8 +69,9 @@ func withTrustedOrigin(ctx context.Context, origin trustedOrigin) context.Contex
 
 func parseTrustedOrigin(raw string) (trustedOrigin, error) {
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Host == "" || parsed.User != nil ||
-		parsed.Opaque != "" || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" || parsed.RawFragment != "" {
+	// Requiring raw to be exactly scheme://host rules out user info, paths,
+	// queries, and fragments.
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" || raw != parsed.Scheme+"://"+parsed.Host {
 		return trustedOrigin{}, fmt.Errorf("invalid trusted proxy origin %q", raw)
 	}
 	port := parsed.Port()
@@ -83,9 +84,6 @@ func parseTrustedOrigin(raw string) (trustedOrigin, error) {
 		port = "443"
 	} else {
 		port = "80"
-	}
-	if parsed.Hostname() == "" || raw != parsed.Scheme+"://"+parsed.Host {
-		return trustedOrigin{}, fmt.Errorf("invalid trusted proxy origin %q", raw)
 	}
 	return trustedOrigin{raw: raw, scheme: parsed.Scheme, authority: parsed.Host, port: port}, nil
 }

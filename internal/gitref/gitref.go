@@ -28,10 +28,11 @@ const githubRemotePrefix = "https://github.com/"
 // component starting with '.', and no case-insensitive '.lock' component
 // suffix. These are Fern's deliberately restricted reference rules.
 func ValidateRef(ref string) error {
-	if len(ref) == 0 || len(ref) > maxRefBytes || !printableASCII(ref) || ref == "@" ||
-		strings.HasPrefix(ref, "-") || strings.HasPrefix(ref, "/") || strings.HasSuffix(ref, "/") ||
-		strings.HasSuffix(ref, ".") || strings.Contains(ref, "//") || strings.Contains(ref, "..") ||
-		strings.Contains(ref, "@{") || strings.ContainsAny(ref, " ~^:?*[\\") {
+	// Empty components also rule out leading, trailing, and doubled '/'.
+	wholeRefInvalid := len(ref) == 0 || len(ref) > maxRefBytes || !printableASCII(ref) ||
+		ref == "@" || strings.HasPrefix(ref, "-") || strings.HasSuffix(ref, ".") ||
+		strings.Contains(ref, "..") || strings.Contains(ref, "@{") || strings.ContainsAny(ref, " ~^:?*[\\")
+	if wholeRefInvalid {
 		return ErrInvalidRef
 	}
 	for _, component := range strings.Split(ref, "/") {
@@ -43,32 +44,40 @@ func ValidateRef(ref string) error {
 }
 
 // ValidateOwnerRepo accepts only canonical 'owner/repository' full names:
-// exactly one '/', total length 3-140, owner 1-39 characters from
-// [A-Za-z0-9-] without leading/trailing '-', repository 1-100 characters from
-// [A-Za-z0-9._-], never '.' or '..', and never carrying a case-insensitive
-// '.git' suffix.
+// exactly one '/', owner 1-39 characters from [A-Za-z0-9-] without
+// leading/trailing '-', repository 1-100 characters from [A-Za-z0-9._-], never
+// '.' or '..', and never carrying a case-insensitive '.git' suffix.
 func ValidateOwnerRepo(fullName string) error {
-	if len(fullName) < 3 || len(fullName) > 140 || strings.Count(fullName, "/") != 1 || !printableASCII(fullName) {
+	owner, name, ok := strings.Cut(fullName, "/")
+	if !ok || !validOwner(owner) || !validRepositoryName(name) {
 		return ErrInvalidOwnerRepo
-	}
-	owner, name, _ := strings.Cut(fullName, "/")
-	if len(owner) < 1 || len(owner) > 39 || owner[0] == '-' || owner[len(owner)-1] == '-' ||
-		len(name) < 1 || len(name) > 100 || name == "." || name == ".." ||
-		strings.HasSuffix(strings.ToLower(name), ".git") {
-		return ErrInvalidOwnerRepo
-	}
-	for i := range len(owner) {
-		if character := owner[i]; !asciiAlphanumeric(character) && character != '-' {
-			return ErrInvalidOwnerRepo
-		}
-	}
-	for i := range len(name) {
-		character := name[i]
-		if !asciiAlphanumeric(character) && character != '-' && character != '_' && character != '.' {
-			return ErrInvalidOwnerRepo
-		}
 	}
 	return nil
+}
+
+func validOwner(owner string) bool {
+	if len(owner) < 1 || len(owner) > 39 || owner[0] == '-' || owner[len(owner)-1] == '-' {
+		return false
+	}
+	return onlyCharacters(owner, "-")
+}
+
+func validRepositoryName(name string) bool {
+	if len(name) < 1 || len(name) > 100 || name == "." || name == ".." || strings.HasSuffix(strings.ToLower(name), ".git") {
+		return false
+	}
+	return onlyCharacters(name, "-_.")
+}
+
+// onlyCharacters reports whether value holds only ASCII letters, digits, and
+// bytes from extra.
+func onlyCharacters(value, extra string) bool {
+	for i := range len(value) {
+		if character := value[i]; !asciiAlphanumeric(character) && strings.IndexByte(extra, character) < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // ValidateGitHubRemote accepts only the canonical remote URL

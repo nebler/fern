@@ -177,7 +177,7 @@ func (handler *pluginAuthHTTP) revokeSelf(writer http.ResponseWriter, request *h
 func (handler *pluginAuthHTTP) authorizationPage(writer http.ResponseWriter, request *http.Request) {
 	values, err := url.ParseQuery(request.URL.RawQuery)
 	id, code := values.Get("id"), values.Get("code")
-	if err != nil || len(values) != 2 || len(values["id"]) != 1 || len(values["code"]) != 1 || id == "" || code == "" {
+	if err != nil || !exactQuery(values, "id", "code") {
 		http.Error(writer, "invalid plugin authorization link", http.StatusBadRequest)
 		return
 	}

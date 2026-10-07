@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -42,17 +43,34 @@ func validDeviceCSRF(request *http.Request) bool {
 
 func serveCSRFToken(writer http.ResponseWriter, request *http.Request) {
 	credential, _ := request.Context().Value(csrfCredentialKey{}).(string)
-	method := strings.ToUpper(request.URL.Query().Get("method"))
-	path := request.URL.Query().Get("path")
 	values := request.URL.Query()
-	if credential == "" || len(values) != 2 || len(values["method"]) != 1 || len(values["path"]) != 1 || !validCSRFMethod(method) ||
-		len(path) == 0 || len(path) > 2048 || path[0] != '/' || strings.ContainsAny(path, "\r\n?#") {
+	method, path := strings.ToUpper(values.Get("method")), values.Get("path")
+	if credential == "" || !exactQuery(values, "method", "path") || !validCSRFMethod(method) || !validCSRFPath(path) {
 		http.Error(writer, "invalid CSRF token target", http.StatusBadRequest)
 		return
 	}
 	token := mintCSRFToken(credential, method, path, time.Now().Add(csrfTokenTTL))
 	writer.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(writer).Encode(map[string]string{"token": token})
+}
+
+// exactQuery reports whether values holds exactly keys, each once and non-empty.
+func exactQuery(values url.Values, keys ...string) bool {
+	if len(values) != len(keys) {
+		return false
+	}
+	for _, key := range keys {
+		if len(values[key]) != 1 || values[key][0] == "" {
+			return false
+		}
+	}
+	return true
+}
+
+// validCSRFPath accepts a bounded absolute path without a query, fragment, or
+// line break.
+func validCSRFPath(path string) bool {
+	return len(path) <= 2048 && strings.HasPrefix(path, "/") && !strings.ContainsAny(path, "\r\n?#")
 }
 
 func validCSRFMethod(method string) bool {
