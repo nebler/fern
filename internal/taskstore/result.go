@@ -138,8 +138,7 @@ func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgro
 	if err != nil {
 		return Result{}, err
 	}
-	if run.Revision != p.ExpectedRevision || run.State != p.ExpectedState || run.EffectPhase != p.ExpectedPhase ||
-		run.Seal == nil || run.WriterFence == nil {
+	if !p.BackgroundRunRef.matches(run) || run.Seal == nil || run.WriterFence == nil {
 		return Result{}, ErrInvalidState
 	}
 	outcome := task.ResultChanged
@@ -147,9 +146,7 @@ func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgro
 		outcome = task.ResultNoChanges
 	}
 	if existing, getErr := getResult(ctx, tx, run.Seal.ResultID); getErr == nil {
-		if existing.ResultCommit != p.ResultCommit || existing.TreeOID != p.TreeOID || existing.ChangeCount != p.ChangeCount ||
-			existing.ChangesSHA256 != p.ChangesSHA256 || existing.ManifestSHA256 != p.ArtifactManifestSHA256 ||
-			existing.BundleSHA256 != p.BundleSHA256 || existing.BundleBytes != p.BundleBytes || !existing.CollectedAt.Equal(p.CollectedAt) {
+		if !p.selects(existing) {
 			return Result{}, ErrInvalidState
 		}
 		return existing, tx.Commit()
@@ -167,6 +164,19 @@ changes_sha256,manifest_json,manifest_sha256,bundle_sha256,bundle_size,collected
 		return Result{}, err
 	}
 	return selected, tx.Commit()
+}
+
+// selects reports whether an already selected result is this exact snapshot,
+// so a repeated export pass is idempotent.
+func (p SelectBackgroundRunSnapshotParams) selects(existing Result) bool {
+	return existing.ResultCommit == p.ResultCommit &&
+		existing.TreeOID == p.TreeOID &&
+		existing.ChangeCount == p.ChangeCount &&
+		existing.ChangesSHA256 == p.ChangesSHA256 &&
+		existing.ManifestSHA256 == p.ArtifactManifestSHA256 &&
+		existing.BundleSHA256 == p.BundleSHA256 &&
+		existing.BundleBytes == p.BundleBytes &&
+		existing.CollectedAt.Equal(p.CollectedAt)
 }
 
 // MarkBackgroundRunExportRecoveryRequired records why the last export pass

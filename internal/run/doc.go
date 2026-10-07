@@ -11,8 +11,7 @@
 // evidence, and persistence belong to callers. Sealing and cleanup outlive the
 // run deadline, and ResultReady does not mean cleanup is complete.
 //
-// ResourceSpecVersion and SourceProfile pin the current execution contract;
-// recognizing an older provider resource is not permission to start it.
+// ResourceSpecVersion and SourceProfile pin the one execution contract.
 // Resource names identify a run, not a particular process: Runtime
 // does that, hashing the container ID with its exact original start timestamp,
 // so a restarted container is a different runtime. Non-canonical timestamp

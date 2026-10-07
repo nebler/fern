@@ -217,8 +217,11 @@ func stopReplay(id task.RunID, current taskstore.BackgroundRun, receipt taskstor
 		RunID task.RunID      `json:"run_id"`
 		State rundomain.State `json:"state"`
 	}
-	if receipt.RunID != id || current.StopReceiptID != receipt.ID || json.Unmarshal(receipt.ResponseProjection, &committed) != nil || committed.RunID != id ||
-		(committed.State != rundomain.Failed && committed.State != rundomain.Canceling) {
+	if receipt.RunID != id || current.StopReceiptID != receipt.ID || json.Unmarshal(receipt.ResponseProjection, &committed) != nil {
+		return stopAcceptance{}, taskstore.ErrCorruptStore
+	}
+	// A stop commits failed (queued run) or canceling (executing run).
+	if committed.RunID != id || (committed.State != rundomain.Failed && committed.State != rundomain.Canceling) {
 		return stopAcceptance{}, taskstore.ErrCorruptStore
 	}
 	return stopAcceptance{id, committed.State, true}, nil

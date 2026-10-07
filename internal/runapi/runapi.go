@@ -149,8 +149,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeNotFound(w)
 		return
 	}
-	actor, ok := h.authorize(w, r)
+	actor, authorization, ok := h.authorize(r)
 	if !ok {
+		WriteError(w, http.StatusUnauthorized, "unauthenticated", "Plugin authentication is required.")
 		return
 	}
 	resource, id, ok := parseRunPath(r.URL.Path)
@@ -162,7 +163,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	allowed := make([]string, 0, len(operations))
 	for _, operation := range operations {
 		if operation.method == r.Method {
-			if h.requireScope(w, r, actor, operation.scope) {
+			if requireScope(w, actor, authorization, operation.scope) {
 				operation.serve(h, w, r, actor, id)
 			}
 			return
@@ -314,34 +315,39 @@ func (h *Handler) verifyRetained(ctx context.Context, projection taskstore.Backg
 
 // authorize accepts the ingress-authenticated actor: the loopback operator, or
 // an OpenCode plugin whose identity matches its bearer authorization.
-func (h *Handler) authorize(w http.ResponseWriter, r *http.Request) (task.ActorSnapshot, bool) {
-	authorization, exists := pluginauth.RequestAuthorizationFromContext(r.Context())
+func (h *Handler) authorize(r *http.Request) (task.ActorSnapshot, pluginauth.RequestAuthorization, bool) {
 	actor, err := h.config.ActorResolver(r.Context())
-	if err == nil && actor.Type == task.ActorOperator && actor.Validate() == nil {
-		return actor, true
+	if err != nil || actor.Validate() != nil {
+		return task.ActorSnapshot{}, pluginauth.RequestAuthorization{}, false
 	}
-	if err != nil || actor.Validate() != nil || !exists || actor.Type != task.ActorOpenCode || actor.ID != authorization.Credential.ID ||
-		actor.CredentialID != authorization.Credential.ID || actor.Authentication != "fern_plugin_bearer" {
-		WriteError(w, http.StatusUnauthorized, "unauthenticated", "Plugin authentication is required.")
-		return task.ActorSnapshot{}, false
+	if actor.Type == task.ActorOperator {
+		return actor, pluginauth.RequestAuthorization{}, true
 	}
-	return actor, true
+	authorization, ok := pluginauth.RequestAuthorizationFromContext(r.Context())
+	return actor, authorization, ok && pluginBearerActor(actor, authorization.Credential.ID)
+}
+
+// pluginBearerActor reports whether actor is the OpenCode plugin identity
+// authenticated by the bearer credential credentialID.
+func pluginBearerActor(actor task.ActorSnapshot, credentialID string) bool {
+	return actor.Type == task.ActorOpenCode &&
+		actor.ID == credentialID &&
+		actor.CredentialID == credentialID &&
+		actor.Authentication == "fern_plugin_bearer"
 }
 
 // operatorScopes are the operations the operator may perform without a plugin
 // credential: workspace-wide discovery and attachment, never run mutation.
 var operatorScopes = map[string]bool{"run:read": true, "run:attach": true}
 
-func (h *Handler) requireScope(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, scope string) bool {
-	if actor.Type == task.ActorOperator {
-		if !operatorScopes[scope] {
-			WriteError(w, http.StatusForbidden, "forbidden", "The operator cannot perform this run operation.")
-			return false
-		}
-		return true
-	}
-	authorization, ok := pluginauth.RequestAuthorizationFromContext(r.Context())
-	if actor.Type != task.ActorOpenCode || !ok || actor.ID != authorization.Credential.ID || !authorization.HasScope(scope) {
+// requireScope checks an authorized actor: the operator against
+// operatorScopes, a plugin against its credential's scopes.
+func requireScope(w http.ResponseWriter, actor task.ActorSnapshot, authorization pluginauth.RequestAuthorization, scope string) bool {
+	switch {
+	case actor.Type == task.ActorOperator && !operatorScopes[scope]:
+		WriteError(w, http.StatusForbidden, "forbidden", "The operator cannot perform this run operation.")
+		return false
+	case actor.Type != task.ActorOperator && !authorization.HasScope(scope):
 		WriteError(w, http.StatusForbidden, "forbidden", "The plugin credential lacks the required scope.")
 		return false
 	}

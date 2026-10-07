@@ -241,9 +241,7 @@ func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams
 	if err != nil {
 		return BackgroundRunSealAdmission{}, err
 	}
-	if run.Revision != p.ExpectedRunRevision || run.EffectPhase != rundomain.Admitted ||
-		(run.State != rundomain.Working && run.State != rundomain.NeedsYou && run.State != rundomain.Uncertain) ||
-		run.Seal != nil || run.TimeoutRequestedAt != nil || run.StopReceiptID != 0 {
+	if run.Revision != p.ExpectedRunRevision || !sealable(run) {
 		return BackgroundRunSealAdmission{}, ErrInvalidState
 	}
 	receipt, err := insertReceipt(ctx, tx, p.Claim, run.RunID, p.APIContractVersion, p.AcceptedAt, struct {
@@ -266,4 +264,11 @@ seal_receipt_id=?,seal_requested_at=?,seal_policy_version=?,result_id=?`,
 		return BackgroundRunSealAdmission{}, fmt.Errorf("commit background run seal: %w", err)
 	}
 	return BackgroundRunSealAdmission{Run: stored, Receipt: receipt}, nil
+}
+
+// sealable reports whether run has an admitted prompt and no stop, timeout, or
+// earlier seal has claimed it.
+func sealable(run BackgroundRun) bool {
+	claimed := run.Seal != nil || run.TimeoutRequestedAt != nil || run.StopReceiptID != 0
+	return run.EffectPhase == rundomain.Admitted && admittedState(run.State) && !claimed
 }

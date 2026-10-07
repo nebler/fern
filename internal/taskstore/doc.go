@@ -24,7 +24,7 @@
 // Docker, Git, OpenCode, or GitHub, and recorded bundle proofs are supplied
 // evidence, not a filesystem read.
 //
-// There are no per-run claims or leases: the host lease admits one coordinator
+// There are no per-run locks or leases: the host lease admits one coordinator
 // per workspace, and the only other writer is the in-process stop/seal API.
 // Effect mutations compare a BackgroundRunRef (revision, state/phase) in SQL
 // and require exactly one affected row, so a write prepared before a

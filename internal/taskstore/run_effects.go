@@ -63,15 +63,22 @@ func (s *Store) StartBackgroundRunProvisioning(ctx context.Context, p Background
 // only stop and cleanup authority for a started container; everything else
 // provisioning creates is reconciled by inspection.
 func (s *Store) RecordBackgroundRunRuntime(ctx context.Context, p RecordBackgroundRunRuntimeParams) (BackgroundRun, error) {
-	if !validBoundedText(p.ContainerID, 1, 128) || !validBoundedText(p.ContainerStartedAt, 1, 64) ||
-		p.RuntimeEpoch <= 0 || p.HostPort < 1 || p.HostPort > 65535 || !validRequiredEvidence(p.Evidence) ||
-		p.ExpectedState != rundomain.SettingUp || p.ExpectedPhase != rundomain.Provisioning {
+	if !p.valid() {
 		return BackgroundRun{}, fmt.Errorf("%w: background run runtime", ErrInvalidInput)
 	}
 	return s.updateRun(ctx, p.BackgroundRunRef,
 		`observed_container_id=?,observed_container_started_at=?,runtime_epoch=?,host_port=?,last_evidence=?`,
 		[]any{p.ContainerID, p.ContainerStartedAt, p.RuntimeEpoch, p.HostPort, p.Evidence}, "record background run runtime",
 		`observed_container_id IS NULL`)
+}
+
+func (p RecordBackgroundRunRuntimeParams) valid() bool {
+	return p.ExpectedState == rundomain.SettingUp && p.ExpectedPhase == rundomain.Provisioning &&
+		validBoundedText(p.ContainerID, 1, 128) &&
+		validBoundedText(p.ContainerStartedAt, 1, 64) &&
+		p.RuntimeEpoch > 0 &&
+		p.HostPort >= 1 && p.HostPort <= 65535 &&
+		validRequiredEvidence(p.Evidence)
 }
 
 // RecordBackgroundRunPromptRequestAttempted is the irreversible pre-I/O fence:
@@ -104,9 +111,7 @@ func (s *Store) RecordBackgroundRunPromptUncertain(ctx context.Context, p Record
 // RecordBackgroundRunWorkObservation records positive bounded evidence only.
 // Callers must not invoke it for an empty active/pending observation.
 func (s *Store) RecordBackgroundRunWorkObservation(ctx context.Context, p RecordBackgroundRunEvidenceParams, state rundomain.State) (BackgroundRun, error) {
-	if p.ExpectedPhase != rundomain.Admitted ||
-		(p.ExpectedState != rundomain.Working && p.ExpectedState != rundomain.NeedsYou && p.ExpectedState != rundomain.Uncertain) ||
-		(state != rundomain.Working && state != rundomain.NeedsYou && state != rundomain.Uncertain) || !validRequiredEvidence(p.Evidence) {
+	if p.ExpectedPhase != rundomain.Admitted || !admittedState(p.ExpectedState) || !admittedState(state) || !validRequiredEvidence(p.Evidence) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run work observation", ErrInvalidInput)
 	}
 	return s.transitionRun(ctx, p.BackgroundRunRef, state, rundomain.Admitted,
@@ -220,6 +225,18 @@ WHERE id=? AND workspace_id=? AND revision=? AND state=? AND effect_phase=?`
 		return BackgroundRun{}, ErrInvalidState
 	}
 	return readRun(ctx, tx, ref.WorkspaceID, ref.RunID)
+}
+
+// admittedState reports whether state is one an admitted prompt may report:
+// working, needs_you, or uncertain.
+func admittedState(state rundomain.State) bool {
+	return rundomain.Classify(state, rundomain.Admitted).Valid
+}
+
+// matches reports whether run is still at the exact revision, state, and
+// phase the ref pinned.
+func (ref BackgroundRunRef) matches(run BackgroundRun) bool {
+	return run.Revision == ref.ExpectedRevision && run.State == ref.ExpectedState && run.EffectPhase == ref.ExpectedPhase
 }
 
 func validateBackgroundRunRef(ref BackgroundRunRef) error {
