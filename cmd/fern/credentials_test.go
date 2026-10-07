@@ -41,14 +41,14 @@ func TestCredentialSetValidatesBeforeStoring(t *testing.T) {
 	stateDirectory := filepath.Join(directory, "state")
 	set := func(appID, path string) error {
 		return runCredentialSet([]string{"--config", configPath, "--env-file", envPath, "--state-dir", stateDirectory,
-			"--app-id", appID, "--private-key", path}, nil)
+			"--app-id", appID, "--private-key", path})
 	}
 
 	var validated []int64
 	validation := errors.New("installation not visible")
-	original := validateCredentialCandidates
-	t.Cleanup(func() { validateCredentialCandidates = original })
-	validateCredentialCandidates = func(_ context.Context, cfg config.Config, app githubapp.AppCredentials) error {
+	original := validateCredentials
+	t.Cleanup(func() { validateCredentials = original })
+	validateCredentials = func(_ context.Context, cfg config.Config, app githubapp.AppCredentials) error {
 		if cfg.Workspace.GitHub.InstallationID != 77 {
 			t.Errorf("validated against installation %d", cfg.Workspace.GitHub.InstallationID)
 		}

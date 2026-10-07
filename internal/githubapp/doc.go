@@ -15,6 +15,6 @@
 // proof of continued access.
 //
 // CredentialStore provides private-file protection, not encryption at rest;
-// encrypted export is credentialbundle's job. Clients disable redirects, and
+// fern backup carries the credentials age-encrypted. Clients disable redirects, and
 // public errors never include response bodies or secrets.
 package githubapp

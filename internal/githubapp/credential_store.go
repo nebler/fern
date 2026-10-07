@@ -90,7 +90,7 @@ func (store *CredentialStore) Save(credentials AppCredentials) error {
 	if store == nil || store.directory == "" {
 		return ErrCredentialStoreSecurity
 	}
-	payload, err := MarshalStoredCredentials(credentials)
+	payload, err := marshalStoredCredentials(credentials)
 	if err != nil {
 		return err
 	}
@@ -140,7 +140,7 @@ func (store *CredentialStore) Load() (AppCredentials, error) {
 	case err != nil:
 		return AppCredentials{}, fmt.Errorf("%w: %v", ErrCredentialStoreIO, err)
 	}
-	return ParseStoredCredentials(payload)
+	return parseStoredCredentials(payload)
 }
 
 type storedCredentialFile struct {
@@ -149,9 +149,8 @@ type storedCredentialFile struct {
 	PrivateKeyPEM string `json:"private_key_pem"`
 }
 
-// MarshalStoredCredentials returns the strict store representation. Callers
-// must not persist the returned plaintext outside the store.
-func MarshalStoredCredentials(credentials AppCredentials) ([]byte, error) {
+// marshalStoredCredentials returns the strict store representation.
+func marshalStoredCredentials(credentials AppCredentials) ([]byte, error) {
 	if _, err := NewAppCredentials(credentials.appID, credentials.privateKeyPEM); err != nil {
 		return nil, ErrStoredCredentialsInvalid
 	}
@@ -166,8 +165,8 @@ func MarshalStoredCredentials(credentials AppCredentials) ([]byte, error) {
 	return append(payload, '\n'), nil
 }
 
-// ParseStoredCredentials strictly validates an in-memory store payload.
-func ParseStoredCredentials(payload []byte) (AppCredentials, error) {
+// parseStoredCredentials strictly validates a store payload.
+func parseStoredCredentials(payload []byte) (AppCredentials, error) {
 	if len(payload) > maxCredentialFileBytes || strictjson.Check(payload, 4) != nil {
 		return AppCredentials{}, ErrStoredCredentialsInvalid
 	}

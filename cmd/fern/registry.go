@@ -64,16 +64,9 @@ var commands = []command{
 	},
 	{
 		name:     "credentials",
-		overview: "Export, import, and rollback-safely rotate encrypted GitHub credentials.",
+		overview: "Store the GitHub App credentials Fern uses to mint installation tokens.",
 		sub: []subcommand{
-			{name: "set", summary: "Validate and store the GitHub App ID and private key", run: func(_ context.Context, args []string, log *slog.Logger) error { return runCredentialSet(args, log) }},
-			{name: "export", summary: "Export an age-encrypted credential bundle", run: func(_ context.Context, args []string, log *slog.Logger) error { return runCredentialExport(args, log) }},
-			{name: "import", summary: "Validate and activate encrypted credentials", run: func(_ context.Context, args []string, log *slog.Logger) error {
-				return runCredentialImport(args, log, false)
-			}},
-			{name: "rotate", summary: "Rotate credentials with an encrypted rollback", run: func(_ context.Context, args []string, log *slog.Logger) error {
-				return runCredentialImport(args, log, true)
-			}},
+			{name: "set", summary: "Validate and store the GitHub App ID and private key", run: func(_ context.Context, args []string, _ *slog.Logger) error { return runCredentialSet(args) }},
 		},
 	},
 	{

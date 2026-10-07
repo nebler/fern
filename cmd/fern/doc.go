@@ -21,7 +21,7 @@
 // Shutdown order matters: the background route is closed first, fencing
 // attachment admission and its connections, before the artifact engine, Docker
 // provider, and SQLite database; the host lease is released last. Offline
-// backup and credential commands take the same host lease, so they require the
+// backup and credentials set take the same host lease, so they require the
 // server to be stopped. They stage and roll back filesystem state but promise
 // no transaction spanning the host, containers, and GitHub.
 package main

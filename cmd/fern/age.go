@@ -14,6 +14,18 @@ const maxAgeIdentityBytes = 64 << 10
 
 var errUnsafeIdentityFile = errors.New("unsafe age identity file")
 
+// repeatedFlag collects a flag given more than once, such as --recipient.
+type repeatedFlag []string
+
+func (values *repeatedFlag) String() string { return strings.Join(*values, ",") }
+func (values *repeatedFlag) Set(value string) error {
+	if strings.TrimSpace(value) == "" {
+		return errors.New("value must not be empty")
+	}
+	*values = append(*values, value)
+	return nil
+}
+
 // parseAgeRecipients accepts explicit age X25519 recipients.
 func parseAgeRecipients(values []string) ([]age.Recipient, error) {
 	result := make([]age.Recipient, 0, len(values))

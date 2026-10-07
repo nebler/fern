@@ -59,17 +59,14 @@ var commandUsageSuffix = map[string]string{"attach": " [run-id]"}
 // a plain literal because deriving it from the command registry would create a
 // package initialization cycle.
 var commandExamples = map[string]string{
-	"runs":               "fern runs --endpoint https://fern-host.example.ts.net",
-	"attach":             "fern attach --endpoint https://fern-host.example.ts.net run_...",
-	"init":               "fern init --repo /path/to/repository",
-	"doctor":             "fern doctor --phone",
-	"up":                 "fern up --config /etc/fern/fern.yaml",
-	"backup create":      "fern backup create --recipient age1... --output /srv/backups/fern.backup",
-	"backup restore":     "fern backup restore --identity /secure/identity.txt --input /srv/backups/fern.backup",
-	"credentials set":    "fern credentials set --app-id 123456 --private-key /secure/fern-app.pem",
-	"credentials export": "fern credentials export --recipient age1... --output /srv/backups/credentials.age",
-	"credentials import": "fern credentials import --identity /secure/identity.txt --input credentials.age",
-	"credentials rotate": "fern credentials rotate --identity /secure/identity.txt --input next.age --acknowledge-external-revocation",
+	"runs":            "fern runs --endpoint https://fern-host.example.ts.net",
+	"attach":          "fern attach --endpoint https://fern-host.example.ts.net run_...",
+	"init":            "fern init --repo /path/to/repository",
+	"doctor":          "fern doctor --phone",
+	"up":              "fern up --config /etc/fern/fern.yaml",
+	"backup create":   "fern backup create --recipient age1... --output /srv/backups/fern.backup",
+	"backup restore":  "fern backup restore --identity /secure/identity.txt --input /srv/backups/fern.backup",
+	"credentials set": "fern credentials set --app-id 123456 --private-key /secure/fern-app.pem",
 }
 
 func parseFlags(fs *flag.FlagSet, args []string) error {
