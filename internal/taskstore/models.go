@@ -10,12 +10,8 @@ import (
 type WorkspaceState string
 type GitHubAuthority string
 
-const (
-	WorkspaceActive           WorkspaceState = "active"
-	WorkspaceMaintenance      WorkspaceState = "maintenance"
-	WorkspaceRecoveryRequired WorkspaceState = "recovery_required"
-	WorkspaceDisabled         WorkspaceState = "disabled"
-)
+// WorkspaceActive is the only workspace state; workspaces have no lifecycle.
+const WorkspaceActive WorkspaceState = "active"
 
 const (
 	GitHubAuthorityAppBroker GitHubAuthority = "github-app-broker"
@@ -25,17 +21,10 @@ func (authority GitHubAuthority) valid() bool {
 	return authority == GitHubAuthorityAppBroker
 }
 
-func (s WorkspaceState) valid() bool {
-	switch s {
-	case WorkspaceActive, WorkspaceMaintenance, WorkspaceRecoveryRequired, WorkspaceDisabled:
-		return true
-	default:
-		return false
-	}
-}
+func (s WorkspaceState) valid() bool { return s == WorkspaceActive }
 
 // Workspace is the durable repository and runtime binding needed by task
-// admission. Lifecycle transitions are deliberately outside this tranche.
+// admission. It is created once and never transitions.
 type Workspace struct {
 	ID                  task.WorkspaceID
 	Name                string

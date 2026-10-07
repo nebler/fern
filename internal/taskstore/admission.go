@@ -53,18 +53,14 @@ func (s *Store) AdmitBackgroundRun(ctx context.Context, p AdmitBackgroundRunPara
 		}
 	}
 
-	var workspaceState WorkspaceState
 	var repositoryID int64
 	var repositoryFullName string
-	if err := tx.QueryRowContext(ctx, `SELECT state,repository_id,repository_full_name FROM workspaces WHERE id=?`, workspaceID).
-		Scan(&workspaceState, &repositoryID, &repositoryFullName); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT repository_id,repository_full_name FROM workspaces WHERE id=?`, workspaceID).
+		Scan(&repositoryID, &repositoryFullName); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Admission{}, fmt.Errorf("%w: workspace", ErrNotFound)
 		}
 		return Admission{}, fmt.Errorf("read workspace: %w", err)
-	}
-	if workspaceState != WorkspaceActive {
-		return Admission{}, ErrWorkspaceUnavailable
 	}
 	if task.RepositoryID(repositoryID) != p.RepositoryID || p.RepositoryRemote != "https://github.com/"+repositoryFullName {
 		return Admission{}, ErrRepositoryMismatch

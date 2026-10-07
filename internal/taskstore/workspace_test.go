@@ -48,7 +48,6 @@ func TestEnsureWorkspaceRejectsEveryBindingDrift(t *testing.T) {
 		name   string
 		change func(*Workspace)
 	}{
-		{"state", func(value *Workspace) { value.State = WorkspaceMaintenance }},
 		{"path", func(value *Workspace) { value.RepositoryPath = "/srv/other" }},
 		{"installation", func(value *Workspace) { value.InstallationID++ }},
 		{"repository", func(value *Workspace) { value.RepositoryID++ }},

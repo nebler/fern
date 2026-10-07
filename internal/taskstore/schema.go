@@ -11,7 +11,7 @@ import (
 // predecessor schemas: Open applies schema to an empty database, opens a
 // database already at schemaVersion, and refuses every other version.
 // Incompatible development databases must be deleted and recreated.
-const schemaVersion = 11
+const schemaVersion = 12
 
 const schema = `CREATE TABLE workspaces (
     id TEXT PRIMARY KEY CHECK(
@@ -22,7 +22,7 @@ const schema = `CREATE TABLE workspaces (
         replace(substr(id,5),'-','') NOT GLOB '*[^0-9a-f]*'
     ),
     name TEXT NOT NULL UNIQUE CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 200),
-    state TEXT NOT NULL CHECK(state IN ('active','maintenance','recovery_required','disabled')),
+    state TEXT NOT NULL CHECK(state='active'),
     repository_path TEXT NOT NULL UNIQUE CHECK(length(CAST(repository_path AS BLOB)) BETWEEN 1 AND 4096),
     installation_id INTEGER NOT NULL CHECK(installation_id > 0),
     repository_id INTEGER NOT NULL UNIQUE CHECK(repository_id > 0),

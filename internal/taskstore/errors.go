@@ -13,7 +13,6 @@ var (
 	ErrCorruptStore             = errors.New("corrupt task store")
 	ErrNotFound                 = errors.New("task store record not found")
 	ErrInvalidInput             = errors.New("invalid task store input")
-	ErrWorkspaceUnavailable     = errors.New("workspace is not active")
 	ErrRepositoryMismatch       = errors.New("workspace repository mismatch")
 	ErrIdempotencyConflict      = errors.New("idempotency key conflict")
 	ErrIdempotencyOwnerMismatch = errors.New("idempotency key owner mismatch")

@@ -82,12 +82,11 @@ func scanWorkspace(row rowScanner) (Workspace, error) {
 	return workspace, nil
 }
 
+// sameWorkspaceBinding compares every field except the store-assigned or
+// candidate-only ID, revision, and timestamps.
 func sameWorkspaceBinding(existing, desired Workspace) bool {
-	return existing.Name == desired.Name && existing.State == desired.State &&
-		existing.RepositoryPath == desired.RepositoryPath && existing.GitHubAuthority == desired.GitHubAuthority && existing.InstallationID == desired.InstallationID &&
-		existing.RepositoryID == desired.RepositoryID && existing.RepositoryFullName == desired.RepositoryFullName &&
-		existing.ImageDigest == desired.ImageDigest && existing.OpenCodeProtocol == desired.OpenCodeProtocol &&
-		existing.RuntimeDesiredState == desired.RuntimeDesiredState && existing.ReconciliationEpoch == desired.ReconciliationEpoch
+	existing.ID, existing.Revision, existing.CreatedAt, existing.UpdatedAt = desired.ID, desired.Revision, desired.CreatedAt, desired.UpdatedAt
+	return existing == desired
 }
 
 // CreateWorkspace inserts a caller-validated workspace binding. IDs and
