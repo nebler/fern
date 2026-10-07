@@ -278,57 +278,49 @@ func TestOpenRejectsUnsafePathsAndPermissions(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("Unix permission and symlink semantics")
 	}
-	t.Run("directory permissions", func(t *testing.T) {
-		dir := t.TempDir()
-		if err := os.Chmod(dir, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		_, err := Open(context.Background(), filepath.Join(dir, "tasks.db"))
-		if !errors.Is(err, ErrUnsafePath) {
-			t.Fatalf("open public directory = %v", err)
-		}
-	})
-	t.Run("file permissions", func(t *testing.T) {
-		dir := privateDir(t)
-		path := filepath.Join(dir, "tasks.db")
-		if err := os.WriteFile(path, nil, 0o644); err != nil {
-			t.Fatal(err)
-		}
-		_, err := Open(context.Background(), path)
-		if !errors.Is(err, ErrUnsafePath) {
-			t.Fatalf("open public file = %v", err)
-		}
-	})
-	t.Run("database symlink", func(t *testing.T) {
-		dir := privateDir(t)
-		target := filepath.Join(dir, "target.db")
-		if err := os.WriteFile(target, nil, 0o600); err != nil {
-			t.Fatal(err)
-		}
-		link := filepath.Join(dir, "tasks.db")
-		if err := os.Symlink(target, link); err != nil {
-			t.Fatal(err)
-		}
-		_, err := Open(context.Background(), link)
-		if !errors.Is(err, ErrUnsafePath) {
-			t.Fatalf("open symlink = %v", err)
-		}
-	})
-	t.Run("directory symlink", func(t *testing.T) {
-		root := privateDir(t)
-		realDir := filepath.Join(root, "real")
-		if err := os.Mkdir(realDir, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		linkDir := filepath.Join(root, "link")
-		if err := os.Symlink(realDir, linkDir); err != nil {
-			t.Fatal(err)
-		}
-		_, err := Open(context.Background(), filepath.Join(linkDir, "tasks.db"))
-		if !errors.Is(err, ErrUnsafePath) {
-			t.Fatalf("open under symlink = %v", err)
-		}
-	})
+	tests := []struct {
+		name string
+		path func(t *testing.T) string // prepares an unsafe database path
+	}{
+		{"directory permissions", func(t *testing.T) string {
+			dir := t.TempDir()
+			must(t, os.Chmod(dir, 0o755))
+			return filepath.Join(dir, "tasks.db")
+		}},
+		{"file permissions", func(t *testing.T) string {
+			path := filepath.Join(privateDir(t), "tasks.db")
+			must(t, os.WriteFile(path, nil, 0o644))
+			return path
+		}},
+		{"database symlink", func(t *testing.T) string {
+			dir := privateDir(t)
+			target, link := filepath.Join(dir, "target.db"), filepath.Join(dir, "tasks.db")
+			must(t, os.WriteFile(target, nil, 0o600))
+			must(t, os.Symlink(target, link))
+			return link
+		}},
+		{"directory symlink", func(t *testing.T) string {
+			root := privateDir(t)
+			realDir, linkDir := filepath.Join(root, "real"), filepath.Join(root, "link")
+			must(t, os.Mkdir(realDir, 0o700))
+			must(t, os.Symlink(realDir, linkDir))
+			return filepath.Join(linkDir, "tasks.db")
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if _, err := Open(context.Background(), test.path(t)); !errors.Is(err, ErrUnsafePath) {
+				t.Fatalf("open = %v, want ErrUnsafePath", err)
+			}
+		})
+	}
+}
+
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestCanceledContextsStopOperations(t *testing.T) {

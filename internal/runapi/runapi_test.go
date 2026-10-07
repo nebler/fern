@@ -190,53 +190,40 @@ func TestRunAPIAdmissionReplayOwnershipStopAndRestart(t *testing.T) {
 
 func TestRunAPIRejectsRepositoryBaseProfileScopeAndMalformedHTTP(t *testing.T) {
 	fixture := newAPIFixture(t)
+	work := validCreateBody("Work")
 	tests := []struct {
-		name, body, key string
-		status          int
+		name, method, path, body, key string
+		status                        int
 	}{
-		{"remote", strings.Replace(validCreateBody("Work"), "owner/repository", "owner/other", 1), "remote", 400},
-		{"base", strings.Replace(validCreateBody("Work"), string(testBase), "ABC", 1), "base", 400},
-		{"profile", strings.Replace(validCreateBody("Work"), rundomain.SourceProfile, "opencode-latest", 1), "profile", 400},
-		{"unknown field", strings.TrimSuffix(validCreateBody("Work"), "}") + `,"extra":true}`, "unknown", 400},
-		{"duplicate", strings.Replace(validCreateBody("Work"), `"profile":`, `"profile":"x","profile":`, 1), "duplicate", 400},
+		{"remote", http.MethodPost, PathPrefix, strings.Replace(work, "owner/repository", "owner/other", 1), "remote", 400},
+		{"base", http.MethodPost, PathPrefix, strings.Replace(work, string(testBase), "ABC", 1), "base", 400},
+		{"profile", http.MethodPost, PathPrefix, strings.Replace(work, rundomain.SourceProfile, "opencode-latest", 1), "profile", 400},
+		{"unknown field", http.MethodPost, PathPrefix, strings.TrimSuffix(work, "}") + `,"extra":true}`, "unknown", 400},
+		{"duplicate", http.MethodPost, PathPrefix, strings.Replace(work, `"profile":`, `"profile":"x","profile":`, 1), "duplicate", 400},
+		{"query", http.MethodGet, PathPrefix + "?limit=1", "", "", 400},
+		{"missing idempotency key", http.MethodPost, PathPrefix, work, "", 400},
+		{"multiline instruction", http.MethodPost, PathPrefix, validCreateBody("first line\n\tsecond line"), "multiline", 202},
+		{"control instruction", http.MethodPost, PathPrefix, validCreateBody("unsafe\rcontrol"), "control", 400},
+		{"Unicode control instruction", http.MethodPost, PathPrefix, validCreateBody("unsafe\u0085control"), "unicode-control", 400},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			got := fixture.request(http.MethodPost, PathPrefix, test.body, test.key)
-			if got.Code != test.status {
+			if got := fixture.request(test.method, test.path, test.body, test.key); got.Code != test.status {
 				t.Fatalf("status=%d body=%s", got.Code, got.Body.String())
 			}
 		})
 	}
-	fixture.verifier.err = errors.New("unreachable")
-	if got := fixture.request(http.MethodPost, PathPrefix, validCreateBody("Work"), "unreachable"); got.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("unreachable=%d %s", got.Code, got.Body.String())
+	if got := fixture.requestWithContentType(http.MethodPost, PathPrefix, work, "content", "application/json; charset=utf-8"); got.Code != http.StatusBadRequest {
+		t.Fatalf("content type=%d", got.Code)
 	}
-	request := httptest.NewRequest(http.MethodGet, PathPrefix, nil)
 	unauthenticated := httptest.NewRecorder()
-	fixture.handler.ServeHTTP(unauthenticated, request)
+	fixture.handler.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodGet, PathPrefix, nil))
 	if unauthenticated.Code != http.StatusUnauthorized {
 		t.Fatalf("missing scope context=%d", unauthenticated.Code)
 	}
-	badContent := fixture.requestWithContentType(http.MethodPost, PathPrefix, validCreateBody("Work"), "content", "application/json; charset=utf-8")
-	if badContent.Code != http.StatusBadRequest {
-		t.Fatalf("content type=%d", badContent.Code)
-	}
-	if got := fixture.request(http.MethodGet, PathPrefix+"?limit=1", "", ""); got.Code != http.StatusBadRequest {
-		t.Fatalf("query=%d", got.Code)
-	}
-	if got := fixture.request(http.MethodPost, PathPrefix, validCreateBody("Work"), ""); got.Code != http.StatusBadRequest {
-		t.Fatalf("missing idempotency=%d", got.Code)
-	}
-	fixture.verifier.err = nil
-	if got := fixture.request(http.MethodPost, PathPrefix, validCreateBody("first line\n\tsecond line"), "multiline"); got.Code != http.StatusAccepted {
-		t.Fatalf("multiline instruction=%d %s", got.Code, got.Body.String())
-	}
-	if got := fixture.request(http.MethodPost, PathPrefix, validCreateBody("unsafe\rcontrol"), "control"); got.Code != http.StatusBadRequest {
-		t.Fatalf("unsafe instruction=%d %s", got.Code, got.Body.String())
-	}
-	if got := fixture.request(http.MethodPost, PathPrefix, validCreateBody("unsafe\u0085control"), "unicode-control"); got.Code != http.StatusBadRequest {
-		t.Fatalf("unsafe Unicode instruction=%d %s", got.Code, got.Body.String())
+	fixture.verifier.err = errors.New("unreachable")
+	if got := fixture.request(http.MethodPost, PathPrefix, work, "unreachable"); got.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("unreachable=%d %s", got.Code, got.Body.String())
 	}
 }
 

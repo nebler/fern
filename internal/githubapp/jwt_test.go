@@ -8,7 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
-	"strconv"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -49,32 +49,15 @@ func TestJWTSignerCreatesBoundedRS256Claims(t *testing.T) {
 	if len(header) != 2 || header["alg"] != "RS256" || header["typ"] != "JWT" {
 		t.Fatalf("header = %#v", header)
 	}
-	var claims map[string]json.RawMessage
+	// The window is backdated a minute for clock skew and stays inside
+	// GitHub's ten-minute bound.
+	var claims map[string]any
 	if err := json.Unmarshal(decode(parts[1]), &claims); err != nil {
 		t.Fatal(err)
 	}
-	if len(claims) != 3 {
-		t.Fatalf("claim count = %d, claims = %v", len(claims), claims)
-	}
-	var issuedAt, expiresAt int64
-	var issuer string
-	if err := json.Unmarshal(claims["iat"], &issuedAt); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(claims["exp"], &expiresAt); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(claims["iss"], &issuer); err != nil {
-		t.Fatal(err)
-	}
-	if issuer != strconv.FormatInt(123456, 10) {
-		t.Fatalf("issuer = %q", issuer)
-	}
-	if issuedAt != now.Add(-time.Minute).Unix() || expiresAt != now.Add(9*time.Minute).Unix() {
-		t.Fatalf("claim window = %s through %s", time.Unix(issuedAt, 0), time.Unix(expiresAt, 0))
-	}
-	if expiresAt-issuedAt > int64((10*time.Minute)/time.Second) || expiresAt-now.Unix() > int64((10*time.Minute)/time.Second) {
-		t.Fatal("JWT claims exceed GitHub's ten-minute bound")
+	want := map[string]any{"iss": "123456", "iat": float64(now.Add(-time.Minute).Unix()), "exp": float64(now.Add(9 * time.Minute).Unix())}
+	if !reflect.DeepEqual(claims, want) {
+		t.Fatalf("claims = %v, want %v", claims, want)
 	}
 
 	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
