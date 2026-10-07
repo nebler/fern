@@ -5,26 +5,21 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
+	"database/sql"
 	"encoding/base32"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"sort"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/nebler/fern/internal/atomicfile"
-	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/task"
 )
 
 const (
-	stateVersion       = 1
-	maxStateBytes      = 256 << 10
 	maxAuthorizations  = 64
 	maxCredentials     = 32
 	maxInvalidPolls    = 64
@@ -136,39 +131,12 @@ func trustedAttributionFromActor(actor task.ActorSnapshot) (Attribution, error) 
 	return value, nil
 }
 
-type authorizationRecord struct {
-	ID           string             `json:"id"`
-	DeviceDigest string             `json:"deviceDigest"`
-	UserDigest   string             `json:"userDigest"`
-	State        AuthorizationState `json:"state"`
-	CreatedAt    time.Time          `json:"createdAt"`
-	ExpiresAt    time.Time          `json:"expiresAt"`
-	LastPolledAt time.Time          `json:"lastPolledAt,omitempty"`
-	DecidedAt    time.Time          `json:"decidedAt,omitempty"`
-	DecidedBy    *Attribution       `json:"decidedBy,omitempty"`
-	CredentialID string             `json:"credentialId,omitempty"`
-}
-
-type credentialRecord struct {
-	Credential
-	DeviceDigest string `json:"deviceDigest"`
-}
-
-type diskState struct {
-	Version        int                            `json:"version"`
-	Workspace      string                         `json:"workspace"`
-	Revision       uint64                         `json:"revision"`
-	LastStartedAt  time.Time                      `json:"lastStartedAt,omitempty"`
-	InvalidPolls   []time.Time                    `json:"invalidPolls,omitempty"`
-	Authorizations map[string]authorizationRecord `json:"authorizations"`
-	Credentials    map[string]credentialRecord    `json:"credentials"`
-}
-
+// Store is the plugin authorization state in Fern's SQLite database. Each
+// operation is one transaction; mu only fences the in-memory request registry
+// against revocation.
 type Store struct {
+	db            *sql.DB
 	mu            sync.Mutex
-	path          string
-	workspace     string
-	data          diskState
 	active        map[string]map[uint64]context.CancelFunc
 	nextRequestID uint64
 }
@@ -199,24 +167,10 @@ func (RequestAuthorization) HasScope(scope string) bool {
 	return false
 }
 
-// Open loads the subsystem-owned private auxiliary state. Missing state starts
-// empty; malformed or unsafe existing state is a startup error.
-func Open(controlStore *control.Store, workspace string) (*Store, error) {
-	if controlStore == nil {
-		return nil, errors.New("control store is required for plugin authorization")
-	}
-	if workspace == "" {
-		return nil, errors.New("workspace is required for plugin authorization")
-	}
-	path, err := controlStore.AuxiliaryStatePath("pluginauth")
-	if err != nil {
-		return nil, err
-	}
-	store := &Store{path: path, workspace: workspace, data: emptyState(workspace), active: make(map[string]map[uint64]context.CancelFunc)}
-	if err := store.load(); err != nil {
-		return nil, err
-	}
-	return store, nil
+// New returns the plugin authorization store backed by db, whose schema
+// (taskstore) defines the plugin_* tables.
+func New(db *sql.DB) *Store {
+	return &Store{db: db, active: make(map[string]map[uint64]context.CancelFunc)}
 }
 
 func (store *Store) Start(now time.Time) (StartResult, error) {
@@ -233,29 +187,38 @@ func (store *Store) Start(now time.Time) (StartResult, error) {
 	if err != nil {
 		return StartResult{}, err
 	}
-	record := authorizationRecord{
-		ID: id, DeviceDigest: digest("device", deviceCode), UserDigest: digest("user", userCode),
-		State: Pending, CreatedAt: now, ExpiresAt: now.Add(authorizationTTL),
-	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	previous := store.cloneLocked()
-	store.pruneLocked(now)
-	if !store.data.LastStartedAt.IsZero() && now.Sub(store.data.LastStartedAt) < startInterval {
-		store.data = previous
-		return StartResult{}, ErrRateLimited
-	}
-	store.evictAuthorizationLocked()
-	if len(store.data.Authorizations) >= maxAuthorizations {
-		store.data = previous
-		return StartResult{}, ErrCapacity
-	}
-	store.data.Authorizations[id] = record
-	store.data.LastStartedAt = now
-	if err := store.commitLocked(context.Background(), previous); err != nil {
+	expiresAt := now.Add(authorizationTTL)
+	err = store.transact(context.Background(), func(tx *sql.Tx) error {
+		if err := prune(tx, now); err != nil {
+			return err
+		}
+		var lastStarted sql.NullInt64
+		if err := tx.QueryRow(`SELECT max(created_at) FROM plugin_authorizations`).Scan(&lastStarted); err != nil {
+			return err
+		}
+		if lastStarted.Valid && now.Sub(fromNanos(lastStarted)) < startInterval {
+			return ErrRateLimited
+		}
+		// Terminal records are oldest-first eviction candidates; pending and
+		// active authority is never displaced to admit a new request.
+		if err := evict(tx, `plugin_authorizations`, maxAuthorizations, `SELECT a.id FROM plugin_authorizations a
+LEFT JOIN plugin_credentials c ON c.authorization_id=a.id
+WHERE a.state<>'pending' AND (c.state IS NULL OR c.state<>'active') ORDER BY a.decided_at LIMIT 1`); err != nil {
+			return err
+		}
+		if full, err := atCapacity(tx, `plugin_authorizations`, maxAuthorizations); err != nil {
+			return err
+		} else if full {
+			return ErrCapacity
+		}
+		_, err := tx.Exec(`INSERT INTO plugin_authorizations(id,device_sha256,user_sha256,state,created_at,expires_at)
+VALUES(?,?,?,?,?,?)`, id, digest("device", deviceCode), digest("user", userCode), Pending, now.UnixNano(), expiresAt.UnixNano())
+		return err
+	})
+	if err != nil {
 		return StartResult{}, err
 	}
-	return StartResult{id, deviceCode, userCode, record.ExpiresAt, pollInterval}, nil
+	return StartResult{id, deviceCode, userCode, expiresAt, pollInterval}, nil
 }
 
 // Poll records the fixed polling interval durably. On PollApproved the caller
@@ -265,49 +228,70 @@ func (store *Store) Poll(deviceCode string, now time.Time) (PollResult, error) {
 		return PollResult{}, ErrInvalidCode
 	}
 	now = now.UTC()
-	want := digest("device", deviceCode)
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	previous := store.cloneLocked()
-	store.pruneFailuresLocked(now)
-	record, id, found := findAuthorization(store.data.Authorizations, want)
-	if !found {
-		if len(store.data.InvalidPolls) >= maxInvalidPolls {
-			store.data = previous
-			return PollResult{}, ErrRateLimited
+	var result PollResult
+	var outcome error
+	err := store.transact(context.Background(), func(tx *sql.Tx) error {
+		if _, err := tx.Exec(`DELETE FROM plugin_invalid_polls WHERE at<=?`, now.Add(-failureWindow).UnixNano()); err != nil {
+			return err
 		}
-		store.data.InvalidPolls = append(store.data.InvalidPolls, now)
-		if err := store.commitLocked(context.Background(), previous); err != nil {
-			return PollResult{}, err
+		var id string
+		var state AuthorizationState
+		var expiresAt int64
+		var lastPolled sql.NullInt64
+		err := tx.QueryRow(`SELECT id,state,expires_at,last_polled_at FROM plugin_authorizations WHERE device_sha256=?`,
+			digest("device", deviceCode)).Scan(&id, &state, &expiresAt, &lastPolled)
+		if errors.Is(err, sql.ErrNoRows) {
+			if full, err := atCapacity(tx, `plugin_invalid_polls`, maxInvalidPolls); err != nil {
+				return err
+			} else if full {
+				return ErrRateLimited
+			}
+			// The failed attempt itself is durable rate-limit evidence.
+			outcome = ErrInvalidCode
+			_, err := tx.Exec(`INSERT INTO plugin_invalid_polls(at) VALUES(?)`, now.UnixNano())
+			return err
 		}
-		return PollResult{}, ErrInvalidCode
-	}
-	if !record.LastPolledAt.IsZero() && now.Sub(record.LastPolledAt) < pollInterval {
-		store.data = previous
-		return PollResult{}, ErrRateLimited
-	}
-	if record.State == Pending && !now.Before(record.ExpiresAt) {
-		record.State, record.DecidedAt = Expired, record.ExpiresAt
-	}
-	record.LastPolledAt = now
-	store.data.Authorizations[id] = record
-	result := PollResult{State: PollState(record.State)}
-	if record.State == Approved {
-		credential, ok := store.data.Credentials[record.CredentialID]
-		if !ok || credential.State == Revoked {
+		if err != nil {
+			return err
+		}
+		if lastPolled.Valid && now.Sub(fromNanos(lastPolled)) < pollInterval {
+			return ErrRateLimited
+		}
+		if state == Pending && now.UnixNano() >= expiresAt {
+			state = Expired
+			if _, err := tx.Exec(`UPDATE plugin_authorizations SET state='expired',decided_at=expires_at WHERE id=?`, id); err != nil {
+				return err
+			}
+		}
+		if _, err := tx.Exec(`UPDATE plugin_authorizations SET last_polled_at=? WHERE id=?`, now.UnixNano(), id); err != nil {
+			return err
+		}
+		result = PollResult{State: PollState(state)}
+		if state != Approved {
+			return nil
+		}
+		credential, err := scanCredential(tx.QueryRow(`SELECT `+credentialColumns+` FROM plugin_credentials WHERE authorization_id=?`, id))
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
 			result.State = PollDenied
-		} else if credential.State == CredentialExpired || !now.Before(credential.ExpiresAt) {
-			credential.State = CredentialExpired
-			store.data.Credentials[credential.ID] = credential
+		case err != nil:
+			return err
+		case credential.State == CredentialExpired || credential.State == Active && !now.Before(credential.ExpiresAt):
 			result.State = PollExpired
-		} else if credential.State == Active {
+			_, err = tx.Exec(`UPDATE plugin_credentials SET state='expired' WHERE id=?`, credential.ID)
+			return err
+		case credential.State == Active:
 			result.CredentialID, result.ExpiresAt = credential.ID, credential.ExpiresAt
-		} else {
+		default:
 			result.State = PollDenied
 		}
-	}
-	if err := store.commitLocked(context.Background(), previous); err != nil {
+		return nil
+	})
+	if err != nil {
 		return PollResult{}, err
+	}
+	if outcome != nil {
+		return PollResult{}, outcome
 	}
 	return result, nil
 }
@@ -324,46 +308,50 @@ func (store *Store) Approve(ctx context.Context, id, userCode string, actor task
 		return Credential{}, ErrInvalidCode
 	}
 	now = now.UTC()
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if err := ctx.Err(); err != nil {
-		return Credential{}, err
-	}
-	previous := store.cloneLocked()
-	record, ok := store.data.Authorizations[id]
-	if !ok || subtle.ConstantTimeCompare([]byte(record.UserDigest), []byte(digest("user", userCode))) != 1 {
-		return Credential{}, ErrNotFound
-	}
-	if record.State == Approved {
-		return store.data.Credentials[record.CredentialID].Credential, nil
-	}
-	if record.State != Pending {
-		return Credential{}, ErrInvalidState
-	}
-	if !now.Before(record.ExpiresAt) {
-		record.State, record.DecidedAt = Expired, record.ExpiresAt
-		store.data.Authorizations[id] = record
-		if err := store.commitLocked(ctx, previous); err != nil {
-			return Credential{}, err
+	var credential Credential
+	err = store.transact(ctx, func(tx *sql.Tx) error {
+		state, expiresAt, err := pendingAuthorization(tx, id, userCode)
+		if err != nil {
+			return err
 		}
-		return Credential{}, ErrInvalidState
-	}
-	store.evictCredentialLocked()
-	if len(store.data.Credentials) >= maxCredentials {
-		return Credential{}, ErrCapacity
-	}
-	credentialID, err := randomID(credentialIDTag)
+		if state == Approved {
+			credential, err = scanCredential(tx.QueryRow(`SELECT `+credentialColumns+` FROM plugin_credentials WHERE authorization_id=?`, id))
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrInvalidState
+			}
+			return err
+		}
+		if state != Pending || !now.Before(expiresAt) {
+			return ErrInvalidState
+		}
+		if err := evict(tx, `plugin_credentials`, maxCredentials, `SELECT authorization_id FROM plugin_credentials
+WHERE state<>'active' ORDER BY CASE state WHEN 'expired' THEN expires_at ELSE revoked_at END LIMIT 1`); err != nil {
+			return err
+		}
+		if full, err := atCapacity(tx, `plugin_credentials`, maxCredentials); err != nil {
+			return err
+		} else if full {
+			return ErrCapacity
+		}
+		credentialID, err := randomID(credentialIDTag)
+		if err != nil {
+			return err
+		}
+		credential = Credential{ID: credentialID, AuthorizationID: id, State: Active, CreatedAt: now,
+			ExpiresAt: now.Add(credentialTTL), ApprovedBy: attribution}
+		approvedBy, err := json.Marshal(attribution)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE plugin_authorizations SET state='approved',decided_at=?,decided_by=? WHERE id=?`,
+			now.UnixNano(), string(approvedBy), id); err != nil {
+			return err
+		}
+		_, err = tx.Exec(`INSERT INTO plugin_credentials(id,authorization_id,state,created_at,expires_at,approved_by)
+VALUES(?,?,'active',?,?,?)`, credentialID, id, now.UnixNano(), credential.ExpiresAt.UnixNano(), string(approvedBy))
+		return err
+	})
 	if err != nil {
-		return Credential{}, err
-	}
-	credential := Credential{
-		ID: credentialID, AuthorizationID: id, State: Active, CreatedAt: now,
-		ExpiresAt: now.Add(credentialTTL), ApprovedBy: attribution,
-	}
-	store.data.Credentials[credentialID] = credentialRecord{Credential: credential, DeviceDigest: record.DeviceDigest}
-	record.State, record.DecidedAt, record.DecidedBy, record.CredentialID = Approved, now, &attribution, credentialID
-	store.data.Authorizations[id] = record
-	if err := store.commitLocked(ctx, previous); err != nil {
 		return Credential{}, err
 	}
 	return credential, nil
@@ -381,37 +369,25 @@ func (store *Store) Deny(ctx context.Context, id, userCode string, actor task.Ac
 		return ErrInvalidCode
 	}
 	now = now.UTC()
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if err := ctx.Err(); err != nil {
+	return store.transact(ctx, func(tx *sql.Tx) error {
+		state, expiresAt, err := pendingAuthorization(tx, id, userCode)
+		if err != nil {
+			return err
+		}
+		if state == Denied {
+			return nil
+		}
+		if state != Pending || !now.Before(expiresAt) {
+			return ErrInvalidState
+		}
+		deniedBy, err := json.Marshal(attribution)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(`UPDATE plugin_authorizations SET state='denied',decided_at=?,decided_by=? WHERE id=?`,
+			now.UnixNano(), string(deniedBy), id)
 		return err
-	}
-	previous := store.cloneLocked()
-	record, ok := store.data.Authorizations[id]
-	if !ok || subtle.ConstantTimeCompare([]byte(record.UserDigest), []byte(digest("user", userCode))) != 1 {
-		return ErrNotFound
-	}
-	if record.State == Denied {
-		return nil
-	}
-	if record.State != Pending {
-		return ErrInvalidState
-	}
-	if !now.Before(record.ExpiresAt) {
-		record.State = Expired
-		record.DecidedAt = record.ExpiresAt
-	} else {
-		record.State, record.DecidedBy = Denied, &attribution
-		record.DecidedAt = now
-	}
-	store.data.Authorizations[id] = record
-	if err := store.commitLocked(ctx, previous); err != nil {
-		return err
-	}
-	if record.State == Expired {
-		return ErrInvalidState
-	}
-	return nil
+	})
 }
 
 // Pending verifies the independent user code without returning either stored
@@ -420,48 +396,38 @@ func (store *Store) Pending(id, userCode string, now time.Time) bool {
 	if !canonicalID(id, authorizationIDTag) || !canonicalUserCode(userCode) {
 		return false
 	}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	record, ok := store.data.Authorizations[id]
-	return ok && record.State == Pending && now.Before(record.ExpiresAt) &&
-		subtle.ConstantTimeCompare([]byte(record.UserDigest), []byte(digest("user", userCode))) == 1
+	state, expiresAt, err := pendingAuthorization(store.db, id, userCode)
+	return err == nil && state == Pending && now.Before(expiresAt)
 }
 
+// Authenticate resolves a presented bearer to its active credential. It never
+// writes: an expired credential is merely rejected here and marked expired by
+// the next listing, poll, or start.
 func (store *Store) Authenticate(deviceCode string, now time.Time) (Credential, bool, error) {
 	if !canonicalBase64(deviceCode, deviceCodeBytes) {
 		return Credential{}, false, nil
 	}
-	want := digest("device", deviceCode)
-	now = now.UTC()
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	for id, record := range store.data.Credentials {
-		if subtle.ConstantTimeCompare([]byte(record.DeviceDigest), []byte(want)) != 1 {
-			continue
-		}
-		if record.State != Active {
-			return Credential{}, false, nil
-		}
-		if !now.Before(record.ExpiresAt) {
-			previous := store.cloneLocked()
-			record.State = CredentialExpired
-			store.data.Credentials[id] = record
-			if err := store.commitLocked(context.Background(), previous); err != nil {
-				return Credential{}, false, err
-			}
-			return Credential{}, false, nil
-		}
-		return record.Credential, true, nil
+	credential, err := scanCredential(store.db.QueryRow(`SELECT `+credentialColumns+` FROM plugin_credentials
+JOIN plugin_authorizations a ON a.id=authorization_id WHERE a.device_sha256=?`, digest("device", deviceCode)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return Credential{}, false, nil
 	}
-	return Credential{}, false, nil
+	if err != nil {
+		return Credential{}, false, fmt.Errorf("read plugin credential: %w", err)
+	}
+	if credential.State != Active || !now.Before(credential.ExpiresAt) {
+		return Credential{}, false, nil
+	}
+	return credential, true, nil
 }
 
 // RegisterRequest atomically fences request admission against revoke.
 func (store *Store) RegisterRequest(id string, now time.Time, cancel context.CancelFunc) (func(), bool) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	record, ok := store.data.Credentials[id]
-	if !ok || record.State != Active || !now.Before(record.ExpiresAt) {
+	var active bool
+	if err := store.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM plugin_credentials WHERE id=? AND state='active' AND expires_at>?)`,
+		id, now.UnixNano()).Scan(&active); err != nil || !active {
 		return nil, false
 	}
 	store.nextRequestID++
@@ -485,267 +451,204 @@ func (store *Store) RegisterRequest(id string, now time.Time, cancel context.Can
 	}, true
 }
 
+// Credentials lists every retained credential newest-first, durably marking
+// lapsed active credentials expired.
 func (store *Store) Credentials(now time.Time) ([]Credential, error) {
-	now = now.UTC()
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	previous := store.cloneLocked()
-	changed := store.expireCredentialsLocked(now)
-	if changed {
-		if err := store.commitLocked(context.Background(), previous); err != nil {
-			return nil, err
+	result := []Credential{}
+	err := store.transact(context.Background(), func(tx *sql.Tx) error {
+		if err := expireCredentials(tx, now); err != nil {
+			return err
 		}
+		rows, err := tx.Query(`SELECT ` + credentialColumns + ` FROM plugin_credentials ORDER BY created_at DESC`)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			credential, err := scanCredential(rows)
+			if err != nil {
+				return err
+			}
+			result = append(result, credential)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
 	}
-	result := make([]Credential, 0, len(store.data.Credentials))
-	for _, record := range store.data.Credentials {
-		result = append(result, record.Credential)
-	}
-	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.After(result[j].CreatedAt) })
 	return result, nil
 }
 
+// Revoke durably revokes an active credential, then cancels every request
+// registered against it.
 func (store *Store) Revoke(id string, actor task.ActorSnapshot, now time.Time) error {
-	value, err := AttributionFromActor(actor)
+	attribution, err := AttributionFromActor(actor)
 	if err != nil {
 		return err
 	}
-	attribution := &value
-	now = now.UTC()
-	store.mu.Lock()
-	previous := store.cloneLocked()
-	record, ok := store.data.Credentials[id]
-	if !ok {
-		store.mu.Unlock()
-		return ErrNotFound
-	}
-	if record.State == Revoked {
-		store.mu.Unlock()
-		return nil
-	}
-	if record.State == Active && !now.Before(record.ExpiresAt) {
-		record.State = CredentialExpired
-		store.data.Credentials[id] = record
-		if err := store.commitLocked(context.Background(), previous); err != nil {
-			store.mu.Unlock()
-			return err
-		}
-		store.mu.Unlock()
-		return ErrInvalidState
-	}
-	if record.State != Active {
-		store.mu.Unlock()
-		return ErrInvalidState
-	}
-	record.State, record.RevokedAt, record.RevokedBy = Revoked, now, attribution
-	store.data.Credentials[id] = record
-	if err := store.commitLocked(context.Background(), previous); err != nil {
-		store.mu.Unlock()
+	revokedBy, err := json.Marshal(attribution)
+	if err != nil {
 		return err
 	}
+	store.mu.Lock()
+	err = store.transact(context.Background(), func(tx *sql.Tx) error {
+		var state CredentialState
+		var expiresAt int64
+		err := tx.QueryRow(`SELECT state,expires_at FROM plugin_credentials WHERE id=?`, id).Scan(&state, &expiresAt)
+		switch {
+		case errors.Is(err, sql.ErrNoRows):
+			return ErrNotFound
+		case err != nil:
+			return err
+		case state == Revoked:
+			return nil
+		case state != Active || now.UnixNano() >= expiresAt:
+			return ErrInvalidState
+		}
+		_, err = tx.Exec(`UPDATE plugin_credentials SET state='revoked',revoked_at=?,revoked_by=? WHERE id=?`,
+			now.UnixNano(), string(revokedBy), id)
+		return err
+	})
 	requests := store.active[id]
-	delete(store.active, id)
+	if err == nil {
+		delete(store.active, id)
+	}
 	store.mu.Unlock()
+	if err != nil {
+		return err
+	}
 	for _, cancel := range requests {
 		cancel()
 	}
 	return nil
 }
 
-func (store *Store) load() error {
-	data, err := atomicfile.Read(store.path, maxStateBytes)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
+// transact runs fn in one immediate SQLite transaction, committing only when
+// fn succeeds and ctx is still live.
+func (store *Store) transact(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("read plugin authorization state: %w", err)
+		return fmt.Errorf("begin plugin authorization transaction: %w", err)
 	}
-	var state diskState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return fmt.Errorf("decode plugin authorization state: %w", err)
-	}
-	if err := validateState(state, store.workspace); err != nil {
+	if err := fn(tx); err != nil {
+		_ = tx.Rollback()
 		return err
 	}
-	if state.Authorizations == nil {
-		state.Authorizations = make(map[string]authorizationRecord)
-	}
-	if state.Credentials == nil {
-		state.Credentials = make(map[string]credentialRecord)
-	}
-	store.data = state
-	return nil
-}
-
-// commitLocked persists the current state, restoring previous on any failure
-// before the file is replaced. Once atomicfile has renamed the new file into
-// place the transition may be durable, so an ErrNotDurable directory-sync
-// failure is reported without rolling memory back.
-func (store *Store) commitLocked(ctx context.Context, previous diskState) error {
 	if err := ctx.Err(); err != nil {
-		store.data = previous
+		_ = tx.Rollback()
 		return err
 	}
-	store.data.Revision++
-	data, err := json.Marshal(store.data)
-	if err == nil && len(data) > maxStateBytes {
-		err = errors.New("plugin authorization state exceeds 256 KiB")
-	}
-	if err == nil {
-		err = atomicfile.Write(store.path, data, 0o600)
-	}
-	if err != nil {
-		if !errors.Is(err, atomicfile.ErrNotDurable) {
-			store.data = previous
-		}
+	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("persist plugin authorization state: %w", err)
 	}
 	return nil
 }
 
-// validateState is a sanity check of Fern's own state file on load: it must
-// belong to this workspace's current schema and stay within the fixed caps.
-func validateState(state diskState, workspace string) error {
-	if state.Version != stateVersion || state.Workspace != workspace {
-		return errors.New("invalid plugin authorization state header")
+type queryRower interface {
+	QueryRow(string, ...any) *sql.Row
+}
+
+// pendingAuthorization loads an authorization by ID after a constant-time
+// comparison of the presented user code's digest.
+func pendingAuthorization(q queryRower, id, userCode string) (AuthorizationState, time.Time, error) {
+	var state AuthorizationState
+	var userDigest string
+	var expiresAt int64
+	err := q.QueryRow(`SELECT state,user_sha256,expires_at FROM plugin_authorizations WHERE id=?`, id).Scan(&state, &userDigest, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) || err == nil && subtle.ConstantTimeCompare([]byte(userDigest), []byte(digest("user", userCode))) != 1 {
+		return "", time.Time{}, ErrNotFound
 	}
-	if len(state.Authorizations) > maxAuthorizations || len(state.Credentials) > maxCredentials || len(state.InvalidPolls) > maxInvalidPolls {
-		return errors.New("plugin authorization state exceeds bounds")
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	return state, time.Unix(0, expiresAt).UTC(), nil
+}
+
+const credentialColumns = `plugin_credentials.id,authorization_id,plugin_credentials.state,plugin_credentials.created_at,
+plugin_credentials.expires_at,revoked_at,approved_by,revoked_by`
+
+func scanCredential(row interface{ Scan(...any) error }) (Credential, error) {
+	var credential Credential
+	var createdAt, expiresAt int64
+	var revokedAt sql.NullInt64
+	var approvedBy string
+	var revokedBy sql.NullString
+	if err := row.Scan(&credential.ID, &credential.AuthorizationID, &credential.State, &createdAt, &expiresAt,
+		&revokedAt, &approvedBy, &revokedBy); err != nil {
+		return Credential{}, err
+	}
+	credential.CreatedAt, credential.ExpiresAt = time.Unix(0, createdAt).UTC(), time.Unix(0, expiresAt).UTC()
+	if revokedAt.Valid {
+		credential.RevokedAt = fromNanos(revokedAt)
+	}
+	if err := json.Unmarshal([]byte(approvedBy), &credential.ApprovedBy); err != nil {
+		return Credential{}, err
+	}
+	if revokedBy.Valid {
+		credential.RevokedBy = new(Attribution)
+		if err := json.Unmarshal([]byte(revokedBy.String), credential.RevokedBy); err != nil {
+			return Credential{}, err
+		}
+	}
+	return credential, nil
+}
+
+// prune applies time-driven transitions: expired pending authorizations and
+// credentials become terminal, stale invalid polls leave the rate window, and
+// terminal records older than the retention window are deleted.
+func prune(tx *sql.Tx, now time.Time) error {
+	if err := expireCredentials(tx, now); err != nil {
+		return err
+	}
+	retained := now.Add(-terminalRetention).UnixNano()
+	for _, statement := range []struct {
+		sql  string
+		args []any
+	}{
+		{`DELETE FROM plugin_invalid_polls WHERE at<=?`, []any{now.Add(-failureWindow).UnixNano()}},
+		{`UPDATE plugin_authorizations SET state='expired',decided_at=expires_at WHERE state='pending' AND expires_at<=?`, []any{now.UnixNano()}},
+		{`DELETE FROM plugin_authorizations WHERE state<>'pending' AND decided_at<=?
+AND id NOT IN (SELECT authorization_id FROM plugin_credentials)`, []any{retained}},
+		{`DELETE FROM plugin_authorizations WHERE id IN (SELECT authorization_id FROM plugin_credentials
+WHERE state<>'active' AND CASE state WHEN 'expired' THEN expires_at ELSE revoked_at END<=?)`, []any{retained}},
+	} {
+		if _, err := tx.Exec(statement.sql, statement.args...); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func emptyState(workspace string) diskState {
-	return diskState{Version: stateVersion, Workspace: workspace, Authorizations: make(map[string]authorizationRecord), Credentials: make(map[string]credentialRecord)}
+func expireCredentials(tx *sql.Tx, now time.Time) error {
+	_, err := tx.Exec(`UPDATE plugin_credentials SET state='expired' WHERE state='active' AND expires_at<=?`, now.UnixNano())
+	return err
 }
 
-func (store *Store) cloneLocked() diskState {
-	clone := store.data
-	clone.InvalidPolls = append([]time.Time(nil), store.data.InvalidPolls...)
-	clone.Authorizations = make(map[string]authorizationRecord, len(store.data.Authorizations))
-	for id, record := range store.data.Authorizations {
-		if record.DecidedBy != nil {
-			value := *record.DecidedBy
-			record.DecidedBy = &value
+// evict deletes the authorization (and so its credential) named by
+// oldestQuery until table has room for one more row or nothing is evictable.
+func evict(tx *sql.Tx, table string, limit int, oldestQuery string) error {
+	for {
+		full, err := atCapacity(tx, table, limit)
+		if err != nil || !full {
+			return err
 		}
-		clone.Authorizations[id] = record
-	}
-	clone.Credentials = make(map[string]credentialRecord, len(store.data.Credentials))
-	for id, record := range store.data.Credentials {
-		if record.RevokedBy != nil {
-			value := *record.RevokedBy
-			record.RevokedBy = &value
+		result, err := tx.Exec(`DELETE FROM plugin_authorizations WHERE id=(` + oldestQuery + `)`)
+		if err != nil {
+			return err
 		}
-		clone.Credentials[id] = record
-	}
-	return clone
-}
-
-func (store *Store) pruneLocked(now time.Time) {
-	store.pruneFailuresLocked(now)
-	store.expireCredentialsLocked(now)
-	for id, record := range store.data.Authorizations {
-		if record.State == Pending && !now.Before(record.ExpiresAt) {
-			record.State, record.DecidedAt = Expired, record.ExpiresAt
-			store.data.Authorizations[id] = record
-		}
-		_, hasCredential := store.data.Credentials[record.CredentialID]
-		if record.State != Pending && (!hasCredential || record.CredentialID == "") && !record.DecidedAt.IsZero() && !now.Before(record.DecidedAt.Add(terminalRetention)) {
-			delete(store.data.Authorizations, id)
-		}
-	}
-	for id, record := range store.data.Credentials {
-		terminalAt := record.RevokedAt
-		if record.State == CredentialExpired {
-			terminalAt = record.ExpiresAt
-		}
-		if record.State != Active && !terminalAt.IsZero() && !now.Before(terminalAt.Add(terminalRetention)) {
-			delete(store.data.Credentials, id)
-			delete(store.data.Authorizations, record.AuthorizationID)
+		if deleted, err := result.RowsAffected(); err != nil || deleted == 0 {
+			return err
 		}
 	}
 }
 
-// The retention window is best effort under the fixed file caps. Terminal
-// records are oldest-first eviction candidates; pending and active authority is
-// never displaced to admit a new request.
-func (store *Store) evictAuthorizationLocked() {
-	for len(store.data.Authorizations) >= maxAuthorizations {
-		oldestID := ""
-		var oldest time.Time
-		for id, record := range store.data.Authorizations {
-			if record.State == Pending {
-				continue
-			}
-			credential, hasCredential := store.data.Credentials[record.CredentialID]
-			if hasCredential && credential.State == Active {
-				continue
-			}
-			if oldestID == "" || record.DecidedAt.Before(oldest) {
-				oldestID, oldest = id, record.DecidedAt
-			}
-		}
-		if oldestID == "" {
-			return
-		}
-		credentialID := store.data.Authorizations[oldestID].CredentialID
-		delete(store.data.Authorizations, oldestID)
-		delete(store.data.Credentials, credentialID)
-	}
+func atCapacity(tx *sql.Tx, table string, limit int) (bool, error) {
+	var count int
+	err := tx.QueryRow(`SELECT count(*) FROM ` + table).Scan(&count)
+	return count >= limit, err
 }
 
-func (store *Store) evictCredentialLocked() {
-	for len(store.data.Credentials) >= maxCredentials {
-		oldestID := ""
-		var oldest time.Time
-		for id, record := range store.data.Credentials {
-			if record.State == Active {
-				continue
-			}
-			terminalAt := record.RevokedAt
-			if record.State == CredentialExpired {
-				terminalAt = record.ExpiresAt
-			}
-			if oldestID == "" || terminalAt.Before(oldest) {
-				oldestID, oldest = id, terminalAt
-			}
-		}
-		if oldestID == "" {
-			return
-		}
-		authorizationID := store.data.Credentials[oldestID].AuthorizationID
-		delete(store.data.Credentials, oldestID)
-		delete(store.data.Authorizations, authorizationID)
-	}
-}
-
-func (store *Store) pruneFailuresLocked(now time.Time) {
-	first := 0
-	for first < len(store.data.InvalidPolls) && !now.Before(store.data.InvalidPolls[first].Add(failureWindow)) {
-		first++
-	}
-	store.data.InvalidPolls = append([]time.Time(nil), store.data.InvalidPolls[first:]...)
-}
-
-func (store *Store) expireCredentialsLocked(now time.Time) bool {
-	changed := false
-	for id, record := range store.data.Credentials {
-		if record.State == Active && !now.Before(record.ExpiresAt) {
-			record.State = CredentialExpired
-			store.data.Credentials[id] = record
-			changed = true
-		}
-	}
-	return changed
-}
-
-func findAuthorization(records map[string]authorizationRecord, digest string) (authorizationRecord, string, bool) {
-	for id, record := range records {
-		if subtle.ConstantTimeCompare([]byte(record.DeviceDigest), []byte(digest)) == 1 {
-			return record, id, true
-		}
-	}
-	return authorizationRecord{}, "", false
-}
+func fromNanos(value sql.NullInt64) time.Time { return time.Unix(0, value.Int64).UTC() }
 
 func digest(domain, value string) string {
 	sum := sha256.Sum256([]byte("fern-plugin-auth-v1\x00" + domain + "\x00" + value))

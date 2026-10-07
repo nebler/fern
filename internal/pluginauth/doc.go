@@ -9,15 +9,16 @@
 // are persisted; on approval the HTTP adapter returns the original device code
 // as the bearer, so Poll never mints a new secret.
 //
-// State is a private auxiliary JSON file located through control.Store but
-// versioned separately. Mutations rewrite the whole file under one in-process
-// mutex with atomicfile.Write, like control; a directory-sync failure after
-// rename is reported as uncertain, not rolled back. Pending and active records
-// are never evicted to admit new requests.
+// State lives in the plugin_* tables of Fern's SQLite database (schema owned by
+// taskstore). Each operation is one transaction that rolls back on any error;
+// time-driven transitions (expiry, retention pruning, the invalid-poll window)
+// are applied inside the operation that observes them. Pending and active
+// records are never evicted to admit new requests.
 //
-// Poll, Authenticate, and Credentials can all write (rate-limit timing,
-// expiry), so their errors must be handled. Revoke durably transitions first,
-// then cancels requests registered through RegisterRequest. The request-context
-// helpers trust their caller: only middleware that already verified the bearer
-// may install them.
+// Poll and Credentials can write (rate-limit timing, expiry), so their errors
+// must be handled; Authenticate only reads. Revoke durably transitions first,
+// then cancels requests registered through RegisterRequest; the in-process
+// mutex fences that registry against revocation. The request-context helpers
+// trust their caller: only middleware that already verified the bearer may
+// install them.
 package pluginauth

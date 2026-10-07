@@ -12,6 +12,7 @@ import (
 	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/taskstore/taskstoretest"
 )
 
 const (
@@ -64,10 +65,8 @@ func newRouteFixture(t *testing.T) *routeFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plugins, err := pluginauth.Open(store, "workspace")
-	if err != nil {
-		t.Fatal(err)
-	}
+	database, _ := taskstoretest.Open(t)
+	plugins := pluginauth.New(database.DB())
 	approver := task.ActorSnapshot{Type: task.ActorOperator, ID: "local-operator", DisplayName: "Local operator",
 		CredentialID: "control-test", Authentication: "basic", RequestID: "request-test"}
 	approved, err := plugins.Start(now.Add(-2 * time.Minute))

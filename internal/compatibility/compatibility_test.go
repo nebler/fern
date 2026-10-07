@@ -55,11 +55,11 @@ func TestFreshTaskStoreIsCurrentSchema(t *testing.T) {
 	}
 	var requiredTables int
 	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN
-('workspaces','runs','receipts','results')`).Scan(&requiredTables); err != nil {
+('workspaces','runs','receipts','results','plugin_authorizations','plugin_credentials','plugin_invalid_polls')`).Scan(&requiredTables); err != nil {
 		t.Fatal(err)
 	}
 	digest, digestErr := hex.DecodeString(checksum)
-	if version != 8 || version != taskstore.CurrentSchemaVersion() || entries != 1 || name != "run_task_store" || digestErr != nil || len(digest) != sha256.Size || integrity != "ok" || requiredTables != 4 {
+	if version != 9 || version != taskstore.CurrentSchemaVersion() || entries != 1 || name != "fern_state" || digestErr != nil || len(digest) != sha256.Size || integrity != "ok" || requiredTables != 7 {
 		t.Fatalf("version=%d current=%d entries=%d name=%q checksum=%q integrity=%q required_tables=%d",
 			version, taskstore.CurrentSchemaVersion(), entries, name, checksum, integrity, requiredTables)
 	}

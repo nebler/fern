@@ -20,6 +20,7 @@ import (
 	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/proxy"
+	"github.com/nebler/fern/internal/taskstore"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -107,6 +108,7 @@ func loadUpConfig(opts upOptions) (config.Config, error) {
 }
 
 type upRuntime struct {
+	state            *taskstore.Store
 	tasks            *taskServices
 	backgroundRoute  *backgroundroute.Manager
 	remoteServer     *http.Server
@@ -120,16 +122,19 @@ type upRuntime struct {
 }
 
 func (runtime *upRuntime) Close() error {
-	var taskErr, routeErr error
+	var taskErr, routeErr, stateErr error
 	// Fence attachment admission and close its connections before releasing
-	// the provider and durable stores that back the runtime.
+	// the provider and the durable store that back the runtime.
 	if runtime.backgroundRoute != nil {
 		routeErr = runtime.backgroundRoute.Close()
 	}
 	if runtime.tasks != nil {
 		taskErr = runtime.tasks.Close()
 	}
-	return errors.Join(taskErr, routeErr)
+	if runtime.state != nil {
+		stateErr = runtime.state.Close()
+	}
+	return errors.Join(taskErr, routeErr, stateErr)
 }
 
 func assembleServices(serviceCtx context.Context, cfg config.Config, origins proxy.TrustedOrigins,
@@ -142,16 +147,16 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 	if err != nil {
 		return nil, err
 	}
-	pluginAuthStore, err := pluginauth.Open(controlStore, cfg.Workspace.Name)
+	state, err := openStateStore(serviceCtx, cfg)
 	if err != nil {
 		return nil, err
 	}
 	route, err := backgroundroute.New(backgroundListener, cfg.Tasks.BackgroundRoute.Origin)
 	if err != nil {
-		return nil, err
+		return nil, errors.Join(err, state.Close())
 	}
 	fail := func(cause error) (*upRuntime, error) {
-		return nil, errors.Join(cause, route.Close())
+		return nil, errors.Join(cause, route.Close(), state.Close())
 	}
 	status := observability.NewRegistry()
 	onboarding, err := newGitHubOnboarding(cfg)
@@ -167,7 +172,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 		if err := config.Validate(cfg); err != nil {
 			return fail(err)
 		}
-		tasks, err = newTaskServices(serviceCtx, cfg, route, status, log)
+		tasks, err = newTaskServices(serviceCtx, cfg, state, route, status, log)
 		if errors.Is(err, githubapp.ErrCredentialsNotFound) && onboarding != nil {
 			log.Warn("Background Runs await GitHub App onboarding and restart", "repository", cfg.Workspace.Name)
 			status.Blocked(observability.ComponentGitHubTaskDependency, err)
@@ -185,7 +190,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 		runs = tasks.runs
 	}
 	controls := proxy.Controls{Store: controlStore, Runs: runs, Onboarding: onboarding,
-		ControlAuth: proxy.ControlAuth{Password: cfg.Control.Password}, PluginAuth: pluginAuthStore,
+		ControlAuth: proxy.ControlAuth{Password: cfg.Control.Password}, PluginAuth: pluginauth.New(state.DB()),
 		Liveness: status.LivenessHandler(), Readiness: status.ReadinessHandler(), Status: status.StatusHandler(), Metrics: status.MetricsHandler()}
 	handlers, err := proxy.NewHandlers(controls, origins)
 	if err != nil {
@@ -195,7 +200,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 		return fail(err)
 	}
 	connections := newConnectionTracker()
-	return &upRuntime{tasks: tasks, backgroundRoute: route,
+	return &upRuntime{state: state, tasks: tasks, backgroundRoute: route,
 		remoteServer:   &http.Server{Handler: handlers.Remote, ReadHeaderTimeout: 10 * time.Second, BaseContext: func(net.Listener) context.Context { return serviceCtx }},
 		operatorServer: &http.Server{Handler: handlers.Operator, ReadHeaderTimeout: 10 * time.Second, BaseContext: func(net.Listener) context.Context { return serviceCtx }},
 		remoteListener: remoteListener, operatorListener: operatorListener, connections: connections,

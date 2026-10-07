@@ -4,23 +4,18 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/task"
+	"github.com/nebler/fern/internal/taskstore/taskstoretest"
 )
 
 func TestAuthorizationPersistsDigestsAndReusesPresentedBearer(t *testing.T) {
-	controlStore := testControlStore(t)
-	store, err := Open(controlStore, "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
+	database, path := taskstoretest.Open(t)
+	store := New(database.DB())
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	started, err := store.Start(now)
 	if err != nil {
@@ -42,27 +37,9 @@ func TestAuthorizationPersistsDigestsAndReusesPresentedBearer(t *testing.T) {
 		t.Fatalf("approved poll = %+v, %v", result, err)
 	}
 
-	path, err := controlStore.AuxiliaryStatePath("pluginauth")
-	if err != nil {
-		t.Fatal(err)
-	}
-	persisted, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, secret := range []string{started.DeviceCode, started.UserCode} {
-		if strings.Contains(string(persisted), secret) {
-			t.Fatalf("persisted state contains protocol secret %q", secret)
-		}
-	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
-		t.Fatalf("state mode = %v, %v", info, err)
-	}
+	taskstoretest.AssertNoSecrets(t, path, started.DeviceCode, started.UserCode)
 
-	restarted, err := Open(controlStore, "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
+	restarted := New(database.DB())
 	repeated, err := restarted.Poll(started.DeviceCode, now.Add(10*time.Second))
 	if err != nil || repeated != result {
 		t.Fatalf("restarted repeat poll = %+v, %v; want %+v", repeated, err, result)
@@ -74,10 +51,7 @@ func TestAuthorizationPersistsDigestsAndReusesPresentedBearer(t *testing.T) {
 }
 
 func TestAuthorizationDenialExpiryRateAndStrictCodes(t *testing.T) {
-	store, err := Open(testControlStore(t), "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := testStore(t)
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	denied, err := store.Start(now)
 	if err != nil {
@@ -127,10 +101,7 @@ func TestAuthorizationDenialExpiryRateAndStrictCodes(t *testing.T) {
 func TestCanceledDecisionCannotActivateOrDeny(t *testing.T) {
 	for _, decision := range []string{"approve", "deny"} {
 		t.Run(decision, func(t *testing.T) {
-			store, err := Open(testControlStore(t), "demo")
-			if err != nil {
-				t.Fatal(err)
-			}
+			store := testStore(t)
 			now := time.Now().UTC()
 			started, err := store.Start(now)
 			if err != nil {
@@ -157,10 +128,7 @@ func TestCanceledDecisionCannotActivateOrDeny(t *testing.T) {
 }
 
 func TestPollDistinguishesExpiredAndRevokedCredentials(t *testing.T) {
-	store, err := Open(testControlStore(t), "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := testStore(t)
 	now := time.Now().UTC()
 	expired := approveTestCredential(t, store, now)
 	if result, err := store.Poll(expired.deviceCode, expired.credential.ExpiresAt.Add(time.Second)); err != nil || result.State != PollExpired {
@@ -177,10 +145,7 @@ func TestPollDistinguishesExpiredAndRevokedCredentials(t *testing.T) {
 }
 
 func TestDurableRevokeCancelsOnlyRegisteredCredentialRequests(t *testing.T) {
-	store, err := Open(testControlStore(t), "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := testStore(t)
 	now := time.Now().UTC()
 	first := approveTestCredential(t, store, now)
 	second := approveTestCredential(t, store, now.Add(2*time.Second))
@@ -217,10 +182,7 @@ func TestDurableRevokeCancelsOnlyRegisteredCredentialRequests(t *testing.T) {
 }
 
 func TestConcurrentApprovalActivatesExactlyOneCredential(t *testing.T) {
-	store, err := Open(testControlStore(t), "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := testStore(t)
 	now := time.Now().UTC()
 	started, err := store.Start(now)
 	if err != nil {
@@ -264,10 +226,7 @@ func TestConcurrentApprovalActivatesExactlyOneCredential(t *testing.T) {
 }
 
 func TestRegisterAndRevokeRaceLeavesNoAdmittedRequestActive(t *testing.T) {
-	store, err := Open(testControlStore(t), "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
+	store := testStore(t)
 	now := time.Now().UTC()
 	approved := approveTestCredential(t, store, now)
 	const requests = 32
@@ -320,68 +279,10 @@ func TestRegisterAndRevokeRaceLeavesNoAdmittedRequestActive(t *testing.T) {
 	}
 }
 
-func TestOpenRejectsCorruptState(t *testing.T) {
-	for _, test := range []struct {
-		name    string
-		content string
-	}{
-		{name: "malformed", content: `{`},
-		{name: "version", content: `{"version":2,"workspace":"demo","revision":0,"authorizations":{},"credentials":{}}`},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			controlStore := testControlStore(t)
-			path, err := controlStore.AuxiliaryStatePath("pluginauth")
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(path, []byte(test.content), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			if _, err := Open(controlStore, "demo"); err == nil {
-				t.Fatal("corrupt state unexpectedly loaded")
-			}
-		})
-	}
-}
-
-func TestOpenRejectsStateCopiedFromAnotherWorkspace(t *testing.T) {
-	root := t.TempDir()
-	firstControl, err := control.Open(filepath.Join(root, "control"), "first")
-	if err != nil {
-		t.Fatal(err)
-	}
-	first, err := Open(firstControl, "first")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := first.Start(time.Now().UTC()); err != nil {
-		t.Fatal(err)
-	}
-	firstPath, _ := firstControl.AuxiliaryStatePath("pluginauth")
-	data, err := os.ReadFile(firstPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondControl, err := control.Open(filepath.Join(root, "control"), "second")
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondPath, _ := secondControl.AuxiliaryStatePath("pluginauth")
-	if err := os.WriteFile(secondPath, data, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := Open(secondControl, "second"); err == nil || !strings.Contains(err.Error(), "state header") {
-		t.Fatalf("copied workspace state error = %v", err)
-	}
-}
-
-func testControlStore(t *testing.T) *control.Store {
+func testStore(t *testing.T) *Store {
 	t.Helper()
-	store, err := control.Open(filepath.Join(t.TempDir(), "control"), "demo")
-	if err != nil {
-		t.Fatal(err)
-	}
-	return store
+	database, _ := taskstoretest.Open(t)
+	return New(database.DB())
 }
 
 func operatorActor() task.ActorSnapshot {
@@ -420,5 +321,46 @@ func TestRequestAuthorizationHasOnlyFixedScopes(t *testing.T) {
 	}
 	if authorization.HasScope("control:admin") {
 		t.Fatal("dynamic/admin scope was accepted")
+	}
+}
+
+func TestCapacityEvictsOnlyTerminalAuthorizationsAndBoundsInvalidPolls(t *testing.T) {
+	store := testStore(t)
+	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
+	var first StartResult
+	for i := range maxAuthorizations {
+		started, err := store.Start(now.Add(time.Duration(i) * time.Second))
+		if err != nil {
+			t.Fatalf("start %d: %v", i, err)
+		}
+		if i == 0 {
+			first = started
+		}
+	}
+	later := now.Add(maxAuthorizations * time.Second)
+	if _, err := store.Start(later); !errors.Is(err, ErrCapacity) {
+		t.Fatalf("start over pending capacity = %v", err)
+	}
+	if err := store.Deny(context.Background(), first.AuthorizationID, first.UserCode, operatorActor(), later); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Start(later.Add(time.Second)); err != nil {
+		t.Fatalf("start after a terminal record became evictable = %v", err)
+	}
+	if store.Pending(first.AuthorizationID, first.UserCode, later) {
+		t.Fatal("evicted authorization is still pending")
+	}
+
+	unknown := strings.Repeat("A", 43)
+	for i := range maxInvalidPolls {
+		if _, err := store.Poll(unknown, later.Add(time.Duration(i)*time.Millisecond)); !errors.Is(err, ErrInvalidCode) {
+			t.Fatalf("invalid poll %d = %v", i, err)
+		}
+	}
+	if _, err := store.Poll(unknown, later.Add(time.Second)); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("invalid poll over the window cap = %v", err)
+	}
+	if _, err := store.Poll(unknown, later.Add(failureWindow+time.Second)); !errors.Is(err, ErrInvalidCode) {
+		t.Fatalf("invalid poll after the window = %v", err)
 	}
 }

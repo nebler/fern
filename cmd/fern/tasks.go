@@ -53,11 +53,25 @@ type taskServices struct {
 	status     *observability.Registry
 }
 
+// Close releases the artifact engine and Docker provider. The store belongs to
+// the caller, which closes it after these.
 func (services *taskServices) Close() error {
-	return errors.Join(services.artifact.Close(), services.provider.Close(), services.store.Close())
+	return errors.Join(services.artifact.Close(), services.provider.Close())
 }
 
-func newTaskServices(ctx context.Context, cfg config.Config, route *backgroundroute.Manager, status *observability.Registry, log *slog.Logger) (*taskServices, error) {
+// openStateStore opens the workspace's single durable SQLite database.
+func openStateStore(ctx context.Context, cfg config.Config) (*taskstore.Store, error) {
+	taskDirectory, err := statePath("tasks")
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(taskDirectory, 0o700); err != nil {
+		return nil, fmt.Errorf("create task state directory: %w", err)
+	}
+	return taskstore.Open(ctx, filepath.Join(taskDirectory, cfg.Workspace.Name+".db"))
+}
+
+func newTaskServices(ctx context.Context, cfg config.Config, store *taskstore.Store, route *backgroundroute.Manager, status *observability.Registry, log *slog.Logger) (*taskServices, error) {
 	if cfg.Tasks.BackgroundImage == "" || cfg.Tasks.BackgroundImageID == "" || route == nil {
 		return nil, errors.New("a qualified disposable Background Run profile is required")
 	}
@@ -66,19 +80,6 @@ func newTaskServices(ctx context.Context, cfg config.Config, route *backgroundro
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(taskDirectory, 0o700); err != nil {
-		return nil, fmt.Errorf("create task state directory: %w", err)
-	}
-	store, err := taskstore.Open(ctx, filepath.Join(taskDirectory, cfg.Workspace.Name+".db"))
-	if err != nil {
-		return nil, err
-	}
-	closeStore := true
-	defer func() {
-		if closeStore {
-			_ = store.Close()
-		}
-	}()
 
 	ids := task.NewSecureGenerator()
 	authority, err := resolveGitHubAuthority(github)
@@ -220,7 +221,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, route *backgroundro
 	}
 	status.Qualified(observability.ComponentBackgroundRunProfile)
 	status.Healthy(observability.ComponentBackgroundRunSerial)
-	closeStore, closeArtifact, closeProvider = false, false, false
+	closeArtifact, closeProvider = false, false
 	return &taskServices{store: store, runs: runs,
 		background: coordinator, provider: provider, artifact: artifact, status: status}, nil
 }

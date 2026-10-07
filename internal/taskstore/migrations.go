@@ -16,7 +16,7 @@ type migration struct {
 }
 
 var migrations = []migration{
-	{version: 8, name: "run_task_store", sql: initialSchema},
+	{version: 9, name: "fern_state", sql: initialSchema},
 }
 
 // CurrentSchemaVersion is the schema produced by all migrations in this build.
@@ -245,6 +245,36 @@ CREATE TRIGGER results_seal_once BEFORE UPDATE ON results WHEN OLD.state<>'selec
 BEGIN SELECT RAISE(ABORT,'result is immutable'); END;
 
 CREATE TRIGGER results_durable BEFORE DELETE ON results BEGIN SELECT RAISE(ABORT,'result is durable'); END;
+
+-- Plugin device authorization (package pluginauth). Only domain-separated
+-- SHA-256 digests of the device and user codes are stored. Times are Unix
+-- nanoseconds. A credential lives and dies with its authorization.
+CREATE TABLE plugin_authorizations (
+    id TEXT PRIMARY KEY,
+    device_sha256 TEXT NOT NULL UNIQUE CHECK(length(device_sha256)=64 AND device_sha256 NOT GLOB '*[^0-9a-f]*'),
+    user_sha256 TEXT NOT NULL CHECK(length(user_sha256)=64 AND user_sha256 NOT GLOB '*[^0-9a-f]*'),
+    state TEXT NOT NULL CHECK(state IN ('pending','approved','denied','expired')),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
+    last_polled_at INTEGER,
+    decided_at INTEGER,
+    decided_by TEXT CHECK(decided_by IS NULL OR json_valid(decided_by)),
+    CHECK((state='pending') = (decided_at IS NULL))
+) STRICT;
+
+CREATE TABLE plugin_credentials (
+    id TEXT PRIMARY KEY,
+    authorization_id TEXT NOT NULL UNIQUE REFERENCES plugin_authorizations(id) ON DELETE CASCADE,
+    state TEXT NOT NULL CHECK(state IN ('active','revoked','expired')),
+    created_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK(expires_at > created_at),
+    revoked_at INTEGER,
+    approved_by TEXT NOT NULL CHECK(json_valid(approved_by)),
+    revoked_by TEXT CHECK(revoked_by IS NULL OR json_valid(revoked_by)),
+    CHECK((state='revoked') = (revoked_at IS NOT NULL))
+) STRICT;
+
+CREATE TABLE plugin_invalid_polls (at INTEGER NOT NULL) STRICT;
 `
 
 func (s *Store) initialize(ctx context.Context) error {
