@@ -1,5 +1,5 @@
 // Command fern is the executable composition root for Fern's disposable
-// Background Run control plane. It owns command dispatch (registry.go is the
+// run control plane. It owns command dispatch (registry.go is the
 // single command table for dispatch and help), operator
 // workflows, service wiring, and process lifetime. Durable state transitions,
 // Docker ownership, artifact retention, and HTTP authorization stay in their
@@ -13,7 +13,7 @@
 // plane up with the GitHub dependency marked blocked, so run handlers report
 // unavailable; bootstrap readiness is not permission to accept durable work.
 // Before declaring the run profile qualified, startup re-inspects every
-// retained artifact the store references. Only the serial Background Run
+// retained artifact the store references. Only the serial run
 // coordinator runs as a worker; there is no host publication or
 // result-verification worker, and the runapi base verifier only checks
 // admission Git identity.

@@ -2,7 +2,7 @@
 // repository discovery, and short-lived installation-token minting. The
 // operator creates and installs the App by hand; `fern credentials set`
 // validates its ID and private key and stores them here. App private
-// keys remain on the host; the Background Run provider delivers repository-scoped
+// keys remain on the host; the Docker provider delivers repository-scoped
 // installation tokens to containers. This package is not a general GitHub proxy
 // or a host-side pull request publisher.
 //

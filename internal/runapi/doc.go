@@ -1,4 +1,4 @@
-// Package runapi is the plugin-authenticated Background Run HTTP boundary at
+// Package runapi is the plugin-authenticated run HTTP boundary at
 // /fern/api/runs. It owns routing (one method/scope table), scope checks, strict wire DTOs, response and
 // error projection, the committed create/stop/seal commands (service.go), and
 // the configured-checkout Git base verifier (gitverifier.go). Durable SQL

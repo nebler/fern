@@ -1,5 +1,5 @@
 // Package docker is the provider for one serial, disposable Docker
-// Background Run. It owns exact resource attestation, clone/volume/container
+// run. It owns exact resource attestation, clone/volume/container
 // lifecycle effects, runtime-fenced transport, and repository-scoped GitHub
 // credential delivery. It never schedules work or writes store state; it
 // imports store only for record types.

@@ -1,4 +1,4 @@
-// Package config loads and validates Fern's single current Background Run
+// Package config loads and validates Fern's single current run
 // configuration shape. One strict YAML document (at most MaxConfigBytes) is the
 // single source of truth; there are no CLI overrides. Obsolete or unknown
 // fields are rejected rather than translated; there is no legacy execution
