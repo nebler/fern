@@ -835,12 +835,22 @@ func gitRun(t testing.TB, repository string, arguments ...string) {
 func gitCommand(t testing.TB, repository string, arguments ...string) string {
 	t.Helper()
 	command := exec.Command("git", append([]string{"-C", repository}, arguments...)...)
-	command.Env = append(os.Environ(), "LC_ALL=C")
+	command.Env = hermeticGitEnv()
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("git %v: %v: %s", arguments, err, output)
 	}
 	return string(output)
+}
+
+// hermeticGitEnv keeps fixture Git commands from reading host or CI config
+// and from writing into the repository behind the test's back: no detached
+// auto-maintenance or gc after commit, no fsmonitor daemon, and no
+// opportunistic index refresh by status.
+func hermeticGitEnv() []string {
+	return append(os.Environ(), "LC_ALL=C", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_OPTIONAL_LOCKS=0",
+		"GIT_CONFIG_COUNT=3", "GIT_CONFIG_KEY_0=maintenance.auto", "GIT_CONFIG_VALUE_0=false",
+		"GIT_CONFIG_KEY_1=gc.auto", "GIT_CONFIG_VALUE_1=0", "GIT_CONFIG_KEY_2=core.fsmonitor", "GIT_CONFIG_VALUE_2=false")
 }
 
 func writeFile(t testing.TB, path string, content []byte, mode os.FileMode) {

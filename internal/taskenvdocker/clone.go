@@ -557,6 +557,7 @@ func (p *Provider) git(ctx context.Context, directory string, args ...string) (s
 		"-c", "protocol.ext.allow=never",
 		"-c", "fetch.writeCommitGraph=false",
 		"-c", "gc.auto=0",
+		"-c", "maintenance.auto=false",
 	}
 	command := exec.CommandContext(ctx, p.config.GitExecutable, append(safe, args...)...)
 	command.Dir = directory

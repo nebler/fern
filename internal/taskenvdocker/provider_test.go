@@ -1785,11 +1785,21 @@ func assertNoStagingTrees(t *testing.T, root string) {
 	}
 }
 
+// hermeticGitEnv keeps fixture Git commands from reading host or CI config
+// and from writing into repositories behind the test's back (detached
+// auto-maintenance or gc, fsmonitor, opportunistic index refresh).
+func hermeticGitEnv() []string {
+	return append(os.Environ(), "LC_ALL=C", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL="+os.DevNull, "GIT_OPTIONAL_LOCKS=0",
+		"GIT_AUTHOR_NAME=Fixture", "GIT_AUTHOR_EMAIL=fixture@example.invalid", "GIT_COMMITTER_NAME=Fixture", "GIT_COMMITTER_EMAIL=fixture@example.invalid",
+		"GIT_CONFIG_COUNT=3", "GIT_CONFIG_KEY_0=maintenance.auto", "GIT_CONFIG_VALUE_0=false",
+		"GIT_CONFIG_KEY_1=gc.auto", "GIT_CONFIG_VALUE_1=0", "GIT_CONFIG_KEY_2=core.fsmonitor", "GIT_CONFIG_VALUE_2=false")
+}
+
 func runGit(t *testing.T, git, directory string, args ...string) {
 	t.Helper()
 	command := exec.Command(git, args...)
 	command.Dir = directory
-	command.Env = append(os.Environ(), "LC_ALL=C")
+	command.Env = hermeticGitEnv()
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("git %v: %v: %s", args, err, output)
 	}
@@ -1799,6 +1809,7 @@ func gitOutput(t *testing.T, git, directory string, args ...string) string {
 	t.Helper()
 	command := exec.Command(git, args...)
 	command.Dir = directory
+	command.Env = hermeticGitEnv()
 	output, err := command.Output()
 	if err != nil {
 		t.Fatalf("git %v: %v", args, err)
