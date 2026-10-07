@@ -286,7 +286,7 @@ func (m *Router) Origin() string { return m.origin.String() }
 
 // IssueAttachment creates an expiring capability only when the complete
 // durable run tuple still names the active OpenCode runtime.
-func (m *Router) IssueAttachment(run store.BackgroundRun) (Attachment, bool, error) {
+func (m *Router) IssueAttachment(run store.Run) (Attachment, bool, error) {
 	identity, ok := identityFromRun(run)
 	if !ok || string(run.OpenCodeSessionID) != identity.SessionID {
 		return Attachment{}, false, nil
@@ -318,7 +318,7 @@ func (m *Router) IssueAttachment(run store.BackgroundRun) (Attachment, bool, err
 
 // ActiveOrigin returns the configured origin only when the complete durable run
 // tuple still names the process currently bound to the listener.
-func (m *Router) ActiveOrigin(run store.BackgroundRun) (string, bool) {
+func (m *Router) ActiveOrigin(run store.Run) (string, bool) {
 	identity, ok := identityFromRun(run)
 	if !ok || !m.Active(identity) {
 		return "", false
@@ -326,7 +326,7 @@ func (m *Router) ActiveOrigin(run store.BackgroundRun) (string, bool) {
 	return m.Origin(), true
 }
 
-func identityFromRun(run store.BackgroundRun) (RouteIdentity, bool) {
+func identityFromRun(run store.Run) (RouteIdentity, bool) {
 	runtime, err := domain.NewRuntime(run.ObservedContainerID, run.ObservedContainerStartedAt)
 	if err != nil || runtime.Epoch() != run.RuntimeEpoch {
 		return RouteIdentity{}, false

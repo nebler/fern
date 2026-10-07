@@ -67,12 +67,12 @@ func TestInitialSchemaRejectsPromptAdmissionWithoutAttemptFence(t *testing.T) {
 	store := openTestStore(t, testDBPath(t))
 	defer store.Close()
 	createTestWorkspace(t, store)
-	params := testBackgroundRunAdmission(2910, "initial-schema-prompt-fence")
-	if _, err := store.AdmitBackgroundRun(context.Background(), params); err != nil {
+	params := testRunAdmission(2910, "initial-schema-prompt-fence")
+	if _, err := store.AdmitRun(context.Background(), params); err != nil {
 		t.Fatal(err)
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
-	run, _ := advanceBackgroundRunToRuntime(t, store, now)
+	run, _ := advanceRunToRuntime(t, store, now)
 	if _, err := store.db.Exec(`UPDATE runs SET state='working',effect_phase='admitted',
 last_evidence='raw admission',revision=revision+1,updated_at=?
 WHERE id=?`, now.Add(20*time.Second).UnixMilli(), run.RunID); err == nil {

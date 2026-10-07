@@ -24,7 +24,7 @@ func NewResolver(engine ArtifactReader) (*Resolver, error) {
 }
 
 // Acquire returns a fresh repository and an idempotent mandatory cleanup.
-func (r *Resolver) Acquire(ctx context.Context, projection store.BackgroundRunResultProjection) (string, func() error, error) {
+func (r *Resolver) Acquire(ctx context.Context, projection store.RunResult) (string, func() error, error) {
 	locator, err := ParseLocator(projection.Result.CASLocator())
 	if err != nil {
 		return "", nil, err
@@ -48,7 +48,7 @@ func (r *Resolver) Acquire(ctx context.Context, projection store.BackgroundRunRe
 
 // Verify freshly proves that the retained artifact is present, intact, and
 // bound to the complete durable run and result.
-func (r *Resolver) Verify(ctx context.Context, projection store.BackgroundRunResultProjection) error {
+func (r *Resolver) Verify(ctx context.Context, projection store.RunResult) error {
 	locator, err := ParseLocator(projection.Result.CASLocator())
 	if err != nil {
 		return err
@@ -60,7 +60,7 @@ func (r *Resolver) Verify(ctx context.Context, projection store.BackgroundRunRes
 	return verifyTuple(projection, snapshot)
 }
 
-func verifyTuple(projection store.BackgroundRunResultProjection, snapshot Snapshot) error {
+func verifyTuple(projection store.RunResult, snapshot Snapshot) error {
 	run, result := projection.Run, projection.Result
 	if result.State != store.ResultSealed || result.RunID != run.RunID || run.Seal == nil || run.Seal.ResultID != result.ID ||
 		snapshot.RepositoryID != run.RepositoryID || snapshot.WorkspaceID != run.WorkspaceID || snapshot.RunID != run.RunID ||

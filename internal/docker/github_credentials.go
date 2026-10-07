@@ -41,7 +41,7 @@ type githubCredentialCache struct {
 // admission and is reported for retry; an already-running harness may still use
 // its previous token until GitHub expires it. A failed refresh is never cached.
 // Token bytes never appear in errors.
-func (p *Provider) RefreshGitHubCredentials(ctx context.Context, run store.BackgroundRun) error {
+func (p *Provider) RefreshGitHubCredentials(ctx context.Context, run store.Run) error {
 	if p.config.GitHubTokens == nil {
 		return nil
 	}

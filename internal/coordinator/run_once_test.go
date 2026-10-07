@@ -66,7 +66,7 @@ func (d *scanDocker) ImageInspect(context.Context, string, ...client.ImageInspec
 			"org.opencontainers.image.source":   "https://github.com/anomalyco/opencode",
 			"org.opencontainers.image.revision": "39fb919a054190498f6d5b7985bde231f93ad7a6",
 			"org.opencontainers.image.version":  "0.0.0-source-39fb919a054190498f6d5b7985bde231f93ad7a6",
-			"ai.fern.opencode.profile":          store.BackgroundRunSourceProfile,
+			"ai.fern.opencode.profile":          domain.SourceProfile,
 			"ai.fern.runtime.spec":              "10",
 		},
 	}}, nil
@@ -168,7 +168,7 @@ type unusedArtifact struct{ Artifact }
 type scanFixture struct {
 	c      *Coordinator
 	d      *scanDocker
-	params store.AdmitBackgroundRunParams
+	params store.AdmitRunParams
 	now    time.Time
 	root   string
 }
@@ -226,7 +226,7 @@ func newScanFixture(t *testing.T) *scanFixture {
 		t.Fatal(err)
 	}
 	actor := domain.ActorSnapshot{Type: domain.ActorOpenCode, ID: "pc_owner", DisplayName: "OpenCode", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "req-1"}
-	f.params = store.AdmitBackgroundRunParams{RunID: domain.RunID(id("run_", 2)), OpenCodeSessionID: "ses_00000000000000000000000000000001", OpenCodeMessageID: "msg_00000000000000000000000000000001", Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspace, CommandKind: store.CreateBackgroundRunCommand}, Key: "create", RequestHash: sha256.Sum256([]byte("create")), Actor: actor}, Prompt: "Do work", RepositoryID: 987654321, RepositoryRemote: "https://github.com/owner/repository", BaseSHA: domain.GitOID(command("rev-parse", "HEAD")), Branch: "main", Profile: store.BackgroundRunSourceProfile, EnvironmentSHA256: docker.EnvironmentSHA256(nil), ImageIdentity: scanImage, Agent: "build", ModelProvider: "provider", Model: "model", Deadline: f.now.Add(time.Hour), APIContractVersion: "v1", AcceptedAt: f.now}
+	f.params = store.AdmitRunParams{RunID: domain.RunID(id("run_", 2)), OpenCodeSessionID: "ses_00000000000000000000000000000001", OpenCodeMessageID: "msg_00000000000000000000000000000001", Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspace, CommandKind: store.CreateRunCommand}, Key: "create", RequestHash: sha256.Sum256([]byte("create")), Actor: actor}, Prompt: "Do work", RepositoryID: 987654321, RepositoryRemote: "https://github.com/owner/repository", BaseSHA: domain.GitOID(command("rev-parse", "HEAD")), Branch: "main", Profile: domain.SourceProfile, EnvironmentSHA256: docker.EnvironmentSHA256(nil), ImageIdentity: scanImage, Agent: "build", ModelProvider: "provider", Model: "model", Deadline: f.now.Add(time.Hour), APIContractVersion: "v1", AcceptedAt: f.now}
 	ids, err := domain.NewGenerator(rand.Reader, func() time.Time { return f.now })
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +240,7 @@ func newScanFixture(t *testing.T) *scanFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.c, err = New(runStore, provider, unusedArtifact{}, ids, Config{WorkspaceID: workspace, Profile: store.BackgroundRunSourceProfile, ImageIdentity: scanImage, EnvironmentSHA256: f.params.EnvironmentSHA256, Agent: "build", ModelProvider: "provider", Model: "model", OperationTimeout: 30 * time.Second, PollInterval: time.Hour, Now: func() time.Time { return f.now }, HTTPClient: &http.Client{Timeout: time.Second}, Route: route, HistoryBounds: opencode.HistoryBounds{PageLimit: 10, MaxPages: 10, MaxEvents: 100}})
+	f.c, err = New(runStore, provider, unusedArtifact{}, ids, Config{WorkspaceID: workspace, Profile: domain.SourceProfile, ImageIdentity: scanImage, EnvironmentSHA256: f.params.EnvironmentSHA256, Agent: "build", ModelProvider: "provider", Model: "model", OperationTimeout: 30 * time.Second, PollInterval: time.Hour, Now: func() time.Time { return f.now }, HTTPClient: &http.Client{Timeout: time.Second}, Route: route, HistoryBounds: opencode.HistoryBounds{PageLimit: 10, MaxPages: 10, MaxEvents: 100}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,19 +248,19 @@ func newScanFixture(t *testing.T) *scanFixture {
 }
 func (f *scanFixture) admit(t *testing.T) {
 	t.Helper()
-	if _, err := f.c.store.AdmitBackgroundRun(context.Background(), f.params); err != nil {
+	if _, err := f.c.store.AdmitRun(context.Background(), f.params); err != nil {
 		t.Fatal(err)
 	}
 }
-func (f *scanFixture) run(t *testing.T) store.BackgroundRun {
+func (f *scanFixture) run(t *testing.T) store.Run {
 	t.Helper()
-	r, err := f.c.store.GetBackgroundRun(context.Background(), f.c.config.WorkspaceID, f.params.RunID, f.params.Claim.Actor)
+	r, err := f.c.store.GetRun(context.Background(), f.c.config.WorkspaceID, f.params.RunID, f.params.Claim.Actor)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return r
 }
-func (f *scanFixture) scan(t *testing.T, phase store.BackgroundRunEffectPhase) {
+func (f *scanFixture) scan(t *testing.T, phase domain.Phase) {
 	t.Helper()
 	if err := f.c.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -320,14 +320,14 @@ func TestRunSupervisesRealScans(t *testing.T) {
 				if successes != 0 || failures != 1 {
 					t.Fatalf("callbacks success=%d failure=%d", successes, failures)
 				}
-				if r := f.run(t); r.EffectPhase != store.BackgroundRunEffectProvisioning || r.ObservedContainerID != "" {
+				if r := f.run(t); r.EffectPhase != domain.Provisioning || r.ObservedContainerID != "" {
 					t.Fatalf("failure not recoverable: %+v", r)
 				}
 			} else if successes != 1 || failures != 0 {
 				t.Fatalf("callbacks success=%d failure=%d", successes, failures)
 			}
 			if mode == "progress" {
-				if r := f.run(t); r.EffectPhase == store.BackgroundRunEffectProvisioning {
+				if r := f.run(t); r.EffectPhase == domain.Provisioning {
 					t.Fatalf("scan did not commit: %+v", r)
 				}
 			}
@@ -341,7 +341,7 @@ func (f *scanFixture) admitStopped(t *testing.T) {
 	t.Helper()
 	f.admit(t)
 	queued := f.run(t)
-	if _, err := f.c.store.StartBackgroundRunProvisioning(context.Background(), ref(queued, f.now)); err != nil {
+	if _, err := f.c.store.StartRunProvisioning(context.Background(), ref(queued, f.now)); err != nil {
 		t.Fatal(err)
 	}
 	f.stop(t)
@@ -353,7 +353,7 @@ func TestRunAdvancesSeveralPhasesWithoutWaitingForTicks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	f.c.config.OnSuccess = func() {
-		if f.run(t).State == store.BackgroundRunFailed {
+		if f.run(t).State == domain.Failed {
 			cancel()
 		}
 	}
@@ -361,7 +361,7 @@ func TestRunAdvancesSeveralPhasesWithoutWaitingForTicks(t *testing.T) {
 	if err := f.c.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run: %v", err)
 	}
-	if r := f.run(t); r.State != store.BackgroundRunFailed || r.EffectPhase != store.BackgroundRunEffectCleanupComplete {
+	if r := f.run(t); r.State != domain.Failed || r.EffectPhase != domain.CleanupComplete {
 		t.Fatalf("cleanup did not finish without ticks: %s/%s", r.State, r.EffectPhase)
 	}
 }
@@ -380,7 +380,7 @@ func TestRunOnceAttemptDeadlineBeforeEffect(t *testing.T) {
 	}
 	err := f.c.RunOnce(context.Background())
 	r := f.run(t)
-	if err != nil || r.TimeoutRequestedAt == nil || r.EffectPhase != store.BackgroundRunEffectCleaning {
+	if err != nil || r.TimeoutRequestedAt == nil || r.EffectPhase != domain.Cleaning {
 		t.Fatalf("timeout: %+v %v", r, err)
 	}
 	if len(f.d.calls) != 0 {
@@ -399,7 +399,7 @@ func TestRunOnceExecutionMismatchSelectsCleanupWithoutProvisioning(t *testing.T)
 		t.Fatal(err)
 	}
 	r := f.run(t)
-	if r.State != store.BackgroundRunCleanupRequired {
+	if r.State != domain.CleanupRequired {
 		t.Fatalf("mismatch not durable: %+v", r)
 	}
 	if len(f.d.calls) != 0 {
@@ -408,7 +408,7 @@ func TestRunOnceExecutionMismatchSelectsCleanupWithoutProvisioning(t *testing.T)
 	if _, err := os.Stat(filepath.Join(f.root, "background-runs", r.CloneIdentity)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("mismatch created clone: %v", err)
 	}
-	f.scan(t, store.BackgroundRunEffectCleanupComplete)
+	f.scan(t, domain.CleanupComplete)
 }
 
 func TestRunOnceCancellationAfterProvisioningStartLeavesRecoverableRun(t *testing.T) {
@@ -428,7 +428,7 @@ func TestRunOnceCancellationAfterProvisioningStartLeavesRecoverableRun(t *testin
 		t.Fatalf("canceled scan: %v", err)
 	}
 	r := f.run(t)
-	if r.EffectPhase != store.BackgroundRunEffectProvisioning {
+	if r.EffectPhase != domain.Provisioning {
 		t.Fatalf("lost provisioning: %+v", r)
 	}
 	if len(f.d.calls) != 0 {
@@ -457,7 +457,7 @@ func TestRunOnceProvisioningFailureAndLostObservationReconcile(t *testing.T) {
 				t.Fatalf("error=%v want %v", err, failure)
 			}
 			r := f.run(t)
-			if r.EffectPhase != store.BackgroundRunEffectProvisioning || r.ObservedContainerID != "" {
+			if r.EffectPhase != domain.Provisioning || r.ObservedContainerID != "" {
 				t.Fatalf("advanced after failure: %+v", r)
 			}
 			if mode == "observation canceled" && (f.d.item == nil || f.d.creates != 1) {
@@ -475,7 +475,7 @@ func TestRunOnceProvisioningFailureAndLostObservationReconcile(t *testing.T) {
 				t.Fatal("health succeeded without an OpenCode server")
 			}
 			r = f.run(t)
-			if r.EffectPhase != store.BackgroundRunEffectProvisioning || r.ObservedContainerID != scanContainerID || f.d.creates != 1 {
+			if r.EffectPhase != domain.Provisioning || r.ObservedContainerID != scanContainerID || f.d.creates != 1 {
 				t.Fatalf("replay run=%+v volume creates=%d", r, f.d.creates)
 			}
 		})
@@ -485,10 +485,10 @@ func TestRunOnceProvisioningFailureAndLostObservationReconcile(t *testing.T) {
 func (f *scanFixture) stop(t *testing.T) {
 	t.Helper()
 	stopClaim := f.params.Claim
-	stopClaim.Scope.CommandKind = store.StopBackgroundRunCommand
+	stopClaim.Scope.CommandKind = store.StopRunCommand
 	stopClaim.Key = "stop"
 	stopClaim.RequestHash = sha256.Sum256([]byte("stop"))
-	if _, err := f.c.store.StopBackgroundRun(context.Background(), store.StopBackgroundRunParams{WorkspaceID: f.c.config.WorkspaceID, RunID: f.params.RunID, Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now}); err != nil {
+	if _, err := f.c.store.StopRun(context.Background(), store.StopRunParams{WorkspaceID: f.c.config.WorkspaceID, RunID: f.params.RunID, Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -508,7 +508,7 @@ func TestRunOnceCleansUpStartedContainerWithUnrecordedRuntime(t *testing.T) {
 				}
 			} else {
 				queued := f.run(t)
-				run, err := f.c.store.StartBackgroundRunProvisioning(context.Background(), ref(queued, f.now))
+				run, err := f.c.store.StartRunProvisioning(context.Background(), ref(queued, f.now))
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -522,12 +522,12 @@ func TestRunOnceCleansUpStartedContainerWithUnrecordedRuntime(t *testing.T) {
 				}
 			}
 			r := f.run(t)
-			if (r.State != store.BackgroundRunCleanupRequired && r.State != store.BackgroundRunCanceling) || r.EffectPhase != store.BackgroundRunEffectCleaning || r.ObservedContainerID != "" {
+			if (r.State != domain.CleanupRequired && r.State != domain.Canceling) || r.EffectPhase != domain.Cleaning || r.ObservedContainerID != "" {
 				t.Fatalf("run not in cleanup with unrecorded runtime: %+v", r)
 			}
 			f.now = f.now.Add(2 * time.Minute)
-			f.scan(t, store.BackgroundRunEffectCleanupComplete)
-			if r := f.run(t); r.State != store.BackgroundRunFailed {
+			f.scan(t, domain.CleanupComplete)
+			if r := f.run(t); r.State != domain.Failed {
 				t.Fatalf("terminal state: %+v", r)
 			}
 			if f.d.info != nil || f.d.item != nil {
@@ -548,10 +548,10 @@ func TestRunOnceStopCleanupFailureRecoveryPastDeadline(t *testing.T) {
 	}
 	f.d.createErr = nil
 	stopClaim := f.params.Claim
-	stopClaim.Scope.CommandKind = store.StopBackgroundRunCommand
+	stopClaim.Scope.CommandKind = store.StopRunCommand
 	stopClaim.Key = "stop"
 	stopClaim.RequestHash = sha256.Sum256([]byte("stop"))
-	_, err := f.c.store.StopBackgroundRun(context.Background(), store.StopBackgroundRunParams{WorkspaceID: f.c.config.WorkspaceID, RunID: f.params.RunID, Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now})
+	_, err := f.c.store.StopRun(context.Background(), store.StopRunParams{WorkspaceID: f.c.config.WorkspaceID, RunID: f.params.RunID, Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,16 +565,16 @@ func TestRunOnceStopCleanupFailureRecoveryPastDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := f.run(t)
-	if r.EffectPhase != store.BackgroundRunEffectCleaning || r.State != store.BackgroundRunCleanupRequired {
+	if r.EffectPhase != domain.Cleaning || r.State != domain.CleanupRequired {
 		t.Fatalf("not recoverable: %+v", r)
 	}
 	if f.d.item == nil {
 		t.Fatal("volume removed before writer proof")
 	}
 	f.d.containerErr = nil
-	f.scan(t, store.BackgroundRunEffectCleanupComplete)
+	f.scan(t, domain.CleanupComplete)
 	r = f.run(t)
-	if r.State != store.BackgroundRunFailed || r.StopReceiptID == 0 || r.TimeoutRequestedAt != nil {
+	if r.State != domain.Failed || r.StopReceiptID == 0 || r.TimeoutRequestedAt != nil {
 		t.Fatalf("terminal state: %+v", r)
 	}
 	if f.d.item != nil {
@@ -636,7 +636,7 @@ func TestCleanupRequiredBoundsRouteDrain(t *testing.T) {
 	f.c.config.OperationTimeout = 200 * time.Millisecond
 	done := make(chan error, 1)
 	go func() {
-		done <- f.c.cleanupRequired(context.Background(), store.BackgroundRunWork{Run: run}, "test cleanup")
+		done <- f.c.cleanupRequired(context.Background(), store.RunWork{Run: run}, "test cleanup")
 	}()
 	select {
 	case err := <-done:

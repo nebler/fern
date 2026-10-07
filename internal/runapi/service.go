@@ -129,7 +129,7 @@ func (s *service) Create(ctx context.Context, actor domain.ActorSnapshot, key do
 		Instruction string  `json:"instruction"`
 		Profile     string  `json:"profile"`
 	}{input.Repository, input.BaseOID, input.Branch, input.Instruction, input.Profile}
-	claim, err := s.claim(actor, key, store.CreateBackgroundRunCommand, payload)
+	claim, err := s.claim(actor, key, store.CreateRunCommand, payload)
 	if err != nil {
 		return zero, err
 	}
@@ -138,7 +138,7 @@ func (s *service) Create(ctx context.Context, actor domain.ActorSnapshot, key do
 		return zero, err
 	}
 	if found {
-		current, err := s.config.Store.GetBackgroundRun(ctx, s.config.WorkspaceID, receipt.RunID, actor)
+		current, err := s.config.Store.GetRun(ctx, s.config.WorkspaceID, receipt.RunID, actor)
 		if err != nil {
 			return zero, err
 		}
@@ -159,7 +159,7 @@ func (s *service) Create(ctx context.Context, actor domain.ActorSnapshot, key do
 	if input.Branch != nil {
 		branch = *input.Branch
 	}
-	admission, err := s.config.Store.AdmitBackgroundRun(ctx, store.AdmitBackgroundRunParams{
+	admission, err := s.config.Store.AdmitRun(ctx, store.AdmitRunParams{
 		RunID: ids.RunID, OpenCodeSessionID: ids.OpenCodeSessionID, OpenCodeMessageID: ids.OpenCodeMessageID,
 		Claim: claim, Prompt: input.Instruction, RepositoryID: s.config.RepositoryID,
 		RepositoryRemote: input.Repository, BaseSHA: base, Branch: branch, Profile: input.Profile,
@@ -211,7 +211,7 @@ func (s *service) mutationClaim(actor domain.ActorSnapshot, key domain.Idempoten
 }
 
 // stopReplay projects the original committed acceptance, not today's run state.
-func stopReplay(id domain.RunID, current store.BackgroundRun, receipt store.Receipt) (stopAcceptance, error) {
+func stopReplay(id domain.RunID, current store.Run, receipt store.Receipt) (stopAcceptance, error) {
 	var committed struct {
 		RunID domain.RunID `json:"run_id"`
 		State domain.State `json:"state"`
@@ -228,7 +228,7 @@ func stopReplay(id domain.RunID, current store.BackgroundRun, receipt store.Rece
 
 func (s *service) Stop(ctx context.Context, actor domain.ActorSnapshot, key domain.IdempotencyKey, id domain.RunID) (stopAcceptance, error) {
 	var zero stopAcceptance
-	claim, err := s.mutationClaim(actor, key, store.StopBackgroundRunCommand, id)
+	claim, err := s.mutationClaim(actor, key, store.StopRunCommand, id)
 	if err != nil {
 		return zero, err
 	}
@@ -240,13 +240,13 @@ func (s *service) Stop(ctx context.Context, actor domain.ActorSnapshot, key doma
 		if receipt.RunID != id {
 			return zero, errReplayConflict
 		}
-		current, err := s.config.Store.GetBackgroundRun(ctx, s.config.WorkspaceID, id, actor)
+		current, err := s.config.Store.GetRun(ctx, s.config.WorkspaceID, id, actor)
 		if err != nil {
 			return zero, err
 		}
 		return stopReplay(id, current, receipt)
 	}
-	result, err := s.config.Store.StopBackgroundRun(ctx, store.StopBackgroundRunParams{WorkspaceID: s.config.WorkspaceID,
+	result, err := s.config.Store.StopRun(ctx, store.StopRunParams{WorkspaceID: s.config.WorkspaceID,
 		RunID: id, Claim: claim,
 		APIContractVersion: APIContractVersion, StoppedAt: s.config.Now().UTC().Truncate(time.Millisecond)})
 	if err != nil {
@@ -261,11 +261,11 @@ func (s *service) Stop(ctx context.Context, actor domain.ActorSnapshot, key doma
 
 func (s *service) Seal(ctx context.Context, actor domain.ActorSnapshot, key domain.IdempotencyKey, id domain.RunID) (sealAcceptance, error) {
 	var zero sealAcceptance
-	claim, err := s.mutationClaim(actor, key, store.SealBackgroundRunCommand, id)
+	claim, err := s.mutationClaim(actor, key, store.SealRunCommand, id)
 	if err != nil {
 		return zero, err
 	}
-	current, err := s.config.Store.GetBackgroundRun(ctx, s.config.WorkspaceID, id, actor)
+	current, err := s.config.Store.GetRun(ctx, s.config.WorkspaceID, id, actor)
 	if err != nil {
 		return zero, err
 	}
@@ -274,7 +274,7 @@ func (s *service) Seal(ctx context.Context, actor domain.ActorSnapshot, key doma
 		return zero, err
 	}
 	now := s.config.Now().UTC().Truncate(time.Millisecond)
-	admission, err := s.config.Store.SealBackgroundRun(ctx, store.SealBackgroundRunParams{
+	admission, err := s.config.Store.SealRun(ctx, store.SealRunParams{
 		WorkspaceID: s.config.WorkspaceID, RunID: current.RunID, ExpectedRunRevision: current.Revision,
 		ResultID: resultID, Claim: claim, PolicyVersion: s.config.SealPolicyVersion,
 		APIContractVersion: APIContractVersion, AcceptedAt: now,

@@ -49,10 +49,10 @@ type Result struct {
 // CASLocator is the content address of the retained artifact manifest.
 func (r Result) CASLocator() string { return "sha256:" + hex.EncodeToString(r.ManifestSHA256[:]) }
 
-// SelectBackgroundRunSnapshotParams is the exact snapshot tuple taken under
+// SelectRunSnapshotParams is the exact snapshot tuple taken under
 // the writer fence. The outcome follows from the commit and the run's base.
-type SelectBackgroundRunSnapshotParams struct {
-	BackgroundRunRef
+type SelectRunSnapshotParams struct {
+	RunRef
 	ResultCommit           domain.GitOID
 	TreeOID                domain.GitOID
 	ChangeCount            int
@@ -64,22 +64,22 @@ type SelectBackgroundRunSnapshotParams struct {
 	CollectedAt            time.Time
 }
 
-type CommitBackgroundRunRetainedResultParams struct {
-	BackgroundRunRef
+type CommitRunRetainedResultParams struct {
+	RunRef
 	// MaterializationProof binds a verified detached checkout of the installed
 	// artifact; it is committed with the result, not before it.
 	MaterializationProof [32]byte
 }
 
-type BackgroundRunRetainedResult struct {
-	Run    BackgroundRun
+type RunRetainedResult struct {
+	Run    Run
 	Result Result
 }
 
-// BackgroundRunResultProjection is an ownership-scoped immutable result view.
+// RunResult is an ownership-scoped immutable result view.
 // CAS locators and materialization paths intentionally remain internal.
-type BackgroundRunResultProjection struct {
-	Run    BackgroundRun
+type RunResult struct {
+	Run    Run
 	Result Result
 }
 
@@ -117,11 +117,11 @@ func getResult(ctx context.Context, q queryRower, id domain.ResultID) (Result, e
 	return r, nil
 }
 
-// SelectBackgroundRunSnapshot durably selects the snapshot tuple of a sealing
+// SelectRunSnapshot durably selects the snapshot tuple of a sealing
 // run under its writer fence. Every later export pass re-derives the snapshot
 // and must equal this selection; a repeated identical selection is a replay.
 // The artifact manifest is agent-derived content, so it is checked here.
-func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgroundRunSnapshotParams) (_ Result, err error) {
+func (s *Store) SelectRunSnapshot(ctx context.Context, p SelectRunSnapshotParams) (_ Result, err error) {
 	if p.ExpectedState != domain.Canceling || p.ExpectedPhase != domain.Sealing ||
 		sha256.Sum256(p.ArtifactManifest) != p.ArtifactManifestSHA256 || !safeArtifactManifest(p.ArtifactManifest) ||
 		validExactTimestamp(p.CollectedAt) != nil || p.ChangeCount < 0 {
@@ -137,7 +137,7 @@ func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgro
 	if err != nil {
 		return Result{}, err
 	}
-	if !p.BackgroundRunRef.matches(run) || run.Seal == nil || run.WriterFence == nil {
+	if !p.RunRef.matches(run) || run.Seal == nil || run.WriterFence == nil {
 		return Result{}, ErrInvalidState
 	}
 	outcome := domain.ResultChanged
@@ -167,7 +167,7 @@ changes_sha256,manifest_json,manifest_sha256,bundle_sha256,bundle_size,collected
 
 // selects reports whether an already selected result is this exact snapshot,
 // so a repeated export pass is idempotent.
-func (p SelectBackgroundRunSnapshotParams) selects(existing Result) bool {
+func (p SelectRunSnapshotParams) selects(existing Result) bool {
 	return existing.ResultCommit == p.ResultCommit &&
 		existing.TreeOID == p.TreeOID &&
 		existing.ChangeCount == p.ChangeCount &&
@@ -178,82 +178,82 @@ func (p SelectBackgroundRunSnapshotParams) selects(existing Result) bool {
 		existing.CollectedAt.Equal(p.CollectedAt)
 }
 
-// MarkBackgroundRunExportRecoveryRequired records why the last export pass
+// MarkRunExportRecoveryRequired records why the last export pass
 // failed. The run stays sealing; the next pass retries from the selection.
-func (s *Store) MarkBackgroundRunExportRecoveryRequired(ctx context.Context, ref BackgroundRunRef, reason string) (BackgroundRun, error) {
+func (s *Store) MarkRunExportRecoveryRequired(ctx context.Context, ref RunRef, reason string) (Run, error) {
 	if ref.ExpectedState != domain.Canceling || ref.ExpectedPhase != domain.Sealing || !validBoundedText(reason, 1, 1000) {
-		return BackgroundRun{}, fmt.Errorf("%w: export recovery reason", ErrInvalidInput)
+		return Run{}, fmt.Errorf("%w: export recovery reason", ErrInvalidInput)
 	}
 	return s.updateRun(ctx, ref, `last_error=?`, []any{reason}, "mark background export recovery")
 }
 
-// CommitBackgroundRunRetainedResult seals the selected result and moves the
+// CommitRunRetainedResult seals the selected result and moves the
 // run to result_ready/cleaning in one transaction, so resources are released
 // only after the retained result is durable. Caller cancellation cannot split
 // it once validation has completed.
-func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitBackgroundRunRetainedResultParams) (_ BackgroundRunRetainedResult, err error) {
+func (s *Store) CommitRunRetainedResult(ctx context.Context, p CommitRunRetainedResultParams) (_ RunRetainedResult, err error) {
 	if p.ExpectedState != domain.Canceling || p.ExpectedPhase != domain.Sealing ||
 		p.MaterializationProof == ([32]byte{}) {
-		return BackgroundRunRetainedResult{}, fmt.Errorf("%w: retained result commit", ErrInvalidInput)
+		return RunRetainedResult{}, fmt.Errorf("%w: retained result commit", ErrInvalidInput)
 	}
 	ctx = context.WithoutCancel(ctx)
 	tx, release, err := s.beginWrite(ctx)
 	if err != nil {
-		return BackgroundRunRetainedResult{}, err
+		return RunRetainedResult{}, err
 	}
 	defer release()
 	defer rollback(tx, &err)
 	run, err := readRun(ctx, tx, p.WorkspaceID, p.RunID)
 	if err != nil {
-		return BackgroundRunRetainedResult{}, err
+		return RunRetainedResult{}, err
 	}
 	if run.Seal == nil || run.WriterFence == nil {
-		return BackgroundRunRetainedResult{}, ErrInvalidState
+		return RunRetainedResult{}, ErrInvalidState
 	}
 	sealedMS := unixMillis(p.Now)
 	result, err := tx.ExecContext(ctx, `UPDATE results SET state='sealed',materialization_sha256=?,sealed_at=?
 WHERE id=? AND run_id=? AND state='selected'`, p.MaterializationProof[:], sealedMS, run.Seal.ResultID, run.RunID)
 	if err != nil {
-		return BackgroundRunRetainedResult{}, fmt.Errorf("seal retained result: %w", err)
+		return RunRetainedResult{}, fmt.Errorf("seal retained result: %w", err)
 	}
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRunRetainedResult{}, ErrInvalidState
+		return RunRetainedResult{}, ErrInvalidState
 	}
 	// The result is now sealed, so the run may leave sealing and release its
 	// resources; the cleanup gate trigger checks exactly this.
-	stored, err := updateRunTx(ctx, tx, p.BackgroundRunRef, `state='result_ready',effect_phase='cleaning',last_error=NULL`, nil,
+	stored, err := updateRunTx(ctx, tx, p.RunRef, `state='result_ready',effect_phase='cleaning',last_error=NULL`, nil,
 		"commit retained result")
 	if err != nil {
-		return BackgroundRunRetainedResult{}, err
+		return RunRetainedResult{}, err
 	}
 	sealed, err := getResult(ctx, tx, run.Seal.ResultID)
 	if err != nil {
-		return BackgroundRunRetainedResult{}, err
+		return RunRetainedResult{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return BackgroundRunRetainedResult{}, err
+		return RunRetainedResult{}, err
 	}
-	return BackgroundRunRetainedResult{Run: stored, Result: sealed}, nil
+	return RunRetainedResult{Run: stored, Result: sealed}, nil
 }
 
-// GetBackgroundRunResult returns a result_ready run with its sealed result
-// after the same ownership-hiding check as GetBackgroundRun.
-func (s *Store) GetBackgroundRunResult(ctx context.Context, workspaceID domain.WorkspaceID, runID domain.RunID, actor domain.ActorSnapshot) (BackgroundRunResultProjection, error) {
-	run, err := s.GetBackgroundRun(ctx, workspaceID, runID, actor)
+// GetRunResult returns a result_ready run with its sealed result
+// after the same ownership-hiding check as GetRun.
+func (s *Store) GetRunResult(ctx context.Context, workspaceID domain.WorkspaceID, runID domain.RunID, actor domain.ActorSnapshot) (RunResult, error) {
+	run, err := s.GetRun(ctx, workspaceID, runID, actor)
 	if err != nil {
-		return BackgroundRunResultProjection{}, err
+		return RunResult{}, err
 	}
 	if run.State != domain.ResultReady || run.Seal == nil {
-		return BackgroundRunResultProjection{}, ErrInvalidState
+		return RunResult{}, ErrInvalidState
 	}
 	result, err := s.GetResult(ctx, run.Seal.ResultID)
 	if err != nil {
-		return BackgroundRunResultProjection{}, err
+		return RunResult{}, err
 	}
 	if result.State != ResultSealed || result.RunID != run.RunID {
-		return BackgroundRunResultProjection{}, fmt.Errorf("%w: retained result projection", ErrCorruptStore)
+		return RunResult{}, fmt.Errorf("%w: retained result projection", ErrCorruptStore)
 	}
-	return BackgroundRunResultProjection{Run: run, Result: result}, nil
+	return RunResult{Run: run, Result: result}, nil
 }
 
 // ReferencedArtifactManifestSHA256 lists the CAS manifests sealed results

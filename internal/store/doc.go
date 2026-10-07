@@ -25,7 +25,7 @@
 //
 // There are no per-run locks or leases: the host lease admits one coordinator
 // per workspace, and the only other writer is the in-process stop/seal API.
-// Effect mutations compare a BackgroundRunRef (revision, state/phase) in SQL
+// Effect mutations compare a RunRef (revision, state/phase) in SQL
 // and require exactly one affected row, so a write prepared before a
 // concurrent stop or seal fails. A partial unique index permits at most one
 // effecting run per workspace.

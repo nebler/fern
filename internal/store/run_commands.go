@@ -14,21 +14,21 @@ import (
 
 // Receipt command kinds.
 const (
-	CreateBackgroundRunCommand = "run.create"
-	StopBackgroundRunCommand   = "run.stop"
-	SealBackgroundRunCommand   = "run.seal"
+	CreateRunCommand = "run.create"
+	StopRunCommand   = "run.stop"
+	SealRunCommand   = "run.seal"
 )
 
-// BackgroundRunStoppedBeforeStart is the last_error of a run stopped while queued.
-const BackgroundRunStoppedBeforeStart = "background_run_stopped_before_start"
+// RunStoppedBeforeStart is the last_error of a run stopped while queued.
+const RunStoppedBeforeStart = "background_run_stopped_before_start"
 
-// AdmitBackgroundRun atomically claims an idempotency key and creates the run
+// AdmitRun atomically claims an idempotency key and creates the run
 // and its receipt. It performs no external effects. IDs, the prompt, and the
 // environment selection come from Fern itself (runapi validated the HTTP
 // input), so only command authority is checked; schema CHECKs bound what is
 // persisted.
-func (s *Store) AdmitBackgroundRun(ctx context.Context, p AdmitBackgroundRunParams) (_ Admission, err error) {
-	if p.Claim.Scope.CommandKind != CreateBackgroundRunCommand || p.Claim.Actor.Type != domain.ActorOpenCode ||
+func (s *Store) AdmitRun(ctx context.Context, p AdmitRunParams) (_ Admission, err error) {
+	if p.Claim.Scope.CommandKind != CreateRunCommand || p.Claim.Actor.Type != domain.ActorOpenCode ||
 		p.Profile != domain.SourceProfile {
 		return Admission{}, fmt.Errorf("%w: background run admission", ErrInvalidInput)
 	}
@@ -40,7 +40,7 @@ func (s *Store) AdmitBackgroundRun(ctx context.Context, p AdmitBackgroundRunPara
 	defer rollback(tx, &err)
 
 	workspaceID := p.Claim.Scope.WorkspaceID
-	existing, found, err := receiptByKey(ctx, tx, workspaceID, CreateBackgroundRunCommand, p.Claim.Key)
+	existing, found, err := receiptByKey(ctx, tx, workspaceID, CreateRunCommand, p.Claim.Key)
 	if err != nil {
 		return Admission{}, err
 	}
@@ -111,55 +111,55 @@ INSERT INTO runs(
 	return Admission{Run: run, Receipt: receipt}, nil
 }
 
-// StopBackgroundRun commits a user stop. A queued run becomes terminal at
+// StopRun commits a user stop. A queued run becomes terminal at
 // once; an executing run moves to cleaning. It is a compare-and-swap on the
 // run revision, so exactly one of a racing stop and seal wins.
-func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams) (_ BackgroundRunStop, err error) {
-	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != StopBackgroundRunCommand || p.Claim.Actor.Type != domain.ActorOpenCode {
-		return BackgroundRunStop{}, fmt.Errorf("%w: run stop claim", ErrInvalidInput)
+func (s *Store) StopRun(ctx context.Context, p StopRunParams) (_ RunStop, err error) {
+	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != StopRunCommand || p.Claim.Actor.Type != domain.ActorOpenCode {
+		return RunStop{}, fmt.Errorf("%w: run stop claim", ErrInvalidInput)
 	}
 	tx, release, err := s.beginWrite(ctx)
 	if err != nil {
-		return BackgroundRunStop{}, fmt.Errorf("begin background run stop: %w", err)
+		return RunStop{}, fmt.Errorf("begin background run stop: %w", err)
 	}
 	defer release()
 	defer rollback(tx, &err)
 
-	existing, found, err := receiptByKey(ctx, tx, p.WorkspaceID, StopBackgroundRunCommand, p.Claim.Key)
+	existing, found, err := receiptByKey(ctx, tx, p.WorkspaceID, StopRunCommand, p.Claim.Key)
 	if err != nil {
-		return BackgroundRunStop{}, err
+		return RunStop{}, err
 	}
 	if found {
 		switch existing.classify(p.Claim) {
 		case domain.IdempotencyReplay:
 			if existing.RunID != p.RunID {
-				return BackgroundRunStop{}, ErrIdempotencyConflict
+				return RunStop{}, ErrIdempotencyConflict
 			}
 			run, getErr := readOwnedRun(ctx, tx, p.WorkspaceID, existing.RunID, p.Claim.Actor)
 			if getErr != nil || run.StopReceiptID != existing.ID {
-				return BackgroundRunStop{}, fmt.Errorf("%w: background run stop replay", ErrCorruptStore)
+				return RunStop{}, fmt.Errorf("%w: background run stop replay", ErrCorruptStore)
 			}
 			if err := tx.Commit(); err != nil {
-				return BackgroundRunStop{}, err
+				return RunStop{}, err
 			}
-			return BackgroundRunStop{Run: run, Receipt: existing, Replayed: true}, nil
+			return RunStop{Run: run, Receipt: existing, Replayed: true}, nil
 		case domain.IdempotencyOwnerMismatch:
-			return BackgroundRunStop{}, ErrNotFound
+			return RunStop{}, ErrNotFound
 		case domain.IdempotencyConflict:
-			return BackgroundRunStop{}, ErrIdempotencyConflict
+			return RunStop{}, ErrIdempotencyConflict
 		default:
-			return BackgroundRunStop{}, ErrCorruptStore
+			return RunStop{}, ErrCorruptStore
 		}
 	}
 
 	run, err := readOwnedRun(ctx, tx, p.WorkspaceID, p.RunID, p.Claim.Actor)
 	if err != nil {
-		return BackgroundRunStop{}, err
+		return RunStop{}, err
 	}
 	queuedStop := run.EffectPhase == domain.Absent
 	activeStop := run.EffectPhase == domain.Provisioning || run.EffectPhase == domain.PromptPending || run.EffectPhase == domain.Admitted
 	if run.StopReceiptID != 0 || (!queuedStop && !activeStop) {
-		return BackgroundRunStop{}, ErrInvalidState
+		return RunStop{}, ErrInvalidState
 	}
 	stopState := domain.Failed
 	if activeStop {
@@ -170,104 +170,104 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 		State domain.State `json:"state"`
 	}{run.RunID, stopState})
 	if err != nil {
-		return BackgroundRunStop{}, err
+		return RunStop{}, err
 	}
-	ref := BackgroundRunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID, ExpectedRevision: run.Revision,
+	ref := RunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID, ExpectedRevision: run.Revision,
 		ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: p.StoppedAt}
 	now := unixMillis(p.StoppedAt)
-	var stored BackgroundRun
+	var stored Run
 	if activeStop {
 		stored, err = updateRunTx(ctx, tx, ref, `state='canceling',effect_phase='cleaning',stop_receipt_id=?,stop_requested_at=?`,
 			[]any{receipt.ID, now}, "request active background run stop", `stop_receipt_id IS NULL`)
 	} else {
 		stored, err = updateRunTx(ctx, tx, ref, `state='failed',effect_phase='cleanup_complete',stop_receipt_id=?,stop_requested_at=?,
-cleanup_proof='queued:no_effect_claim',last_error=?`, []any{receipt.ID, now, BackgroundRunStoppedBeforeStart},
+cleanup_proof='queued:no_effect_claim',last_error=?`, []any{receipt.ID, now, RunStoppedBeforeStart},
 			"stop queued background run", `stop_receipt_id IS NULL`)
 	}
 	if err != nil {
-		return BackgroundRunStop{}, err
+		return RunStop{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return BackgroundRunStop{}, fmt.Errorf("commit background run stop: %w", err)
+		return RunStop{}, fmt.Errorf("commit background run stop: %w", err)
 	}
-	return BackgroundRunStop{Run: stored, Receipt: receipt}, nil
+	return RunStop{Run: stored, Receipt: receipt}, nil
 }
 
-// SealBackgroundRun atomically wins against stop and timeout: it is a
+// SealRun atomically wins against stop and timeout: it is a
 // compare-and-swap on the admitted run's revision, and a sealed run can no
 // longer be stopped or timed out. Once input validation has completed, caller
 // cancellation cannot split the receipt from the seal.
-func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams) (_ BackgroundRunSealAdmission, err error) {
-	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != SealBackgroundRunCommand || p.Claim.Actor.Type != domain.ActorOpenCode {
-		return BackgroundRunSealAdmission{}, fmt.Errorf("%w: background seal authority", ErrInvalidInput)
+func (s *Store) SealRun(ctx context.Context, p SealRunParams) (_ RunSealAdmission, err error) {
+	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != SealRunCommand || p.Claim.Actor.Type != domain.ActorOpenCode {
+		return RunSealAdmission{}, fmt.Errorf("%w: background seal authority", ErrInvalidInput)
 	}
 	ctx = context.WithoutCancel(ctx)
 	tx, release, err := s.beginWrite(ctx)
 	if err != nil {
-		return BackgroundRunSealAdmission{}, fmt.Errorf("begin background run seal: %w", err)
+		return RunSealAdmission{}, fmt.Errorf("begin background run seal: %w", err)
 	}
 	defer release()
 	defer rollback(tx, &err)
 
-	existing, found, err := receiptByKey(ctx, tx, p.WorkspaceID, SealBackgroundRunCommand, p.Claim.Key)
+	existing, found, err := receiptByKey(ctx, tx, p.WorkspaceID, SealRunCommand, p.Claim.Key)
 	if err != nil {
-		return BackgroundRunSealAdmission{}, err
+		return RunSealAdmission{}, err
 	}
 	if found {
 		switch existing.classify(p.Claim) {
 		case domain.IdempotencyOwnerMismatch:
-			return BackgroundRunSealAdmission{}, ErrNotFound
+			return RunSealAdmission{}, ErrNotFound
 		case domain.IdempotencyConflict:
-			return BackgroundRunSealAdmission{}, ErrIdempotencyConflict
+			return RunSealAdmission{}, ErrIdempotencyConflict
 		case domain.IdempotencyReplay:
 			if existing.RunID != p.RunID {
-				return BackgroundRunSealAdmission{}, ErrIdempotencyConflict
+				return RunSealAdmission{}, ErrIdempotencyConflict
 			}
 			run, getErr := readOwnedRun(ctx, tx, p.WorkspaceID, existing.RunID, p.Claim.Actor)
 			if getErr != nil || run.Seal == nil || run.Seal.ReceiptID != existing.ID {
-				return BackgroundRunSealAdmission{}, fmt.Errorf("%w: background seal replay", ErrCorruptStore)
+				return RunSealAdmission{}, fmt.Errorf("%w: background seal replay", ErrCorruptStore)
 			}
 			if err := tx.Commit(); err != nil {
-				return BackgroundRunSealAdmission{}, err
+				return RunSealAdmission{}, err
 			}
-			return BackgroundRunSealAdmission{Run: run, Receipt: existing, Replayed: true}, nil
+			return RunSealAdmission{Run: run, Receipt: existing, Replayed: true}, nil
 		default:
-			return BackgroundRunSealAdmission{}, ErrCorruptStore
+			return RunSealAdmission{}, ErrCorruptStore
 		}
 	}
 
 	run, err := readOwnedRun(ctx, tx, p.WorkspaceID, p.RunID, p.Claim.Actor)
 	if err != nil {
-		return BackgroundRunSealAdmission{}, err
+		return RunSealAdmission{}, err
 	}
 	if run.Revision != p.ExpectedRunRevision || !sealable(run) {
-		return BackgroundRunSealAdmission{}, ErrInvalidState
+		return RunSealAdmission{}, ErrInvalidState
 	}
 	receipt, err := insertReceipt(ctx, tx, p.Claim, run.RunID, p.APIContractVersion, p.AcceptedAt, struct {
 		RunID    domain.RunID    `json:"run_id"`
 		ResultID domain.ResultID `json:"result_id"`
 	}{run.RunID, p.ResultID})
 	if err != nil {
-		return BackgroundRunSealAdmission{}, err
+		return RunSealAdmission{}, err
 	}
-	ref := BackgroundRunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID, ExpectedRevision: run.Revision,
+	ref := RunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID, ExpectedRevision: run.Revision,
 		ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: p.AcceptedAt}
 	stored, err := updateRunTx(ctx, tx, ref, `state='canceling',effect_phase='sealing',
 seal_receipt_id=?,seal_requested_at=?,seal_policy_version=?,result_id=?`,
 		[]any{receipt.ID, unixMillis(p.AcceptedAt), p.PolicyVersion, p.ResultID}, "bind background seal",
 		`stop_receipt_id IS NULL`, `timeout_requested_at IS NULL`, `seal_receipt_id IS NULL`)
 	if err != nil {
-		return BackgroundRunSealAdmission{}, err
+		return RunSealAdmission{}, err
 	}
 	if err := tx.Commit(); err != nil {
-		return BackgroundRunSealAdmission{}, fmt.Errorf("commit background run seal: %w", err)
+		return RunSealAdmission{}, fmt.Errorf("commit background run seal: %w", err)
 	}
-	return BackgroundRunSealAdmission{Run: stored, Receipt: receipt}, nil
+	return RunSealAdmission{Run: stored, Receipt: receipt}, nil
 }
 
 // sealable reports whether run has an admitted prompt and no stop, timeout, or
 // earlier seal has claimed it.
-func sealable(run BackgroundRun) bool {
+func sealable(run Run) bool {
 	claimed := run.Seal != nil || run.TimeoutRequestedAt != nil || run.StopReceiptID != 0
 	return run.EffectPhase == domain.Admitted && admittedState(run.State) && !claimed
 }

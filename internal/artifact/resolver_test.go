@@ -100,8 +100,8 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 		t.Fatal(err)
 	}
 	sealedAt := time.UnixMilli(2)
-	projection := store.BackgroundRunResultProjection{
-		Run: store.BackgroundRun{WorkspaceID: workspaceID, RunID: runID, RepositoryID: 1, BaseOID: base,
+	projection := store.RunResult{
+		Run: store.Run{WorkspaceID: workspaceID, RunID: runID, RepositoryID: 1, BaseOID: base,
 			OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID, Seal: &store.Seal{ResultID: resultID}},
 		Result: store.Result{ID: resultID, RunID: runID, State: store.ResultSealed, BaseSHA: snapshot.Base,
 			ResultCommit: snapshot.Result, TreeOID: snapshot.Tree, ChangeCount: len(snapshot.Changes), ChangesSHA256: snapshot.ChangesSHA256.Bytes(),
@@ -124,18 +124,18 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 	otherSession := mustSession(t, ids)
 	for _, test := range []struct {
 		name   string
-		mutate func(*store.BackgroundRunResultProjection)
+		mutate func(*store.RunResult)
 	}{
-		{"repository", func(p *store.BackgroundRunResultProjection) { p.Run.RepositoryID++ }},
-		{"workspace", func(p *store.BackgroundRunResultProjection) { p.Run.WorkspaceID = otherWorkspace }},
-		{"result", func(p *store.BackgroundRunResultProjection) {
+		{"repository", func(p *store.RunResult) { p.Run.RepositoryID++ }},
+		{"workspace", func(p *store.RunResult) { p.Run.WorkspaceID = otherWorkspace }},
+		{"result", func(p *store.RunResult) {
 			p.Result.ID, p.Run.Seal.ResultID = otherResult, otherResult
 		}},
-		{"unsealed", func(p *store.BackgroundRunResultProjection) { p.Result.State = store.ResultSelected }},
-		{"change count", func(p *store.BackgroundRunResultProjection) { p.Result.ChangeCount++ }},
-		{"bundle digest", func(p *store.BackgroundRunResultProjection) { p.Result.BundleSHA256[0] ^= 0xff }},
-		{"bundle size", func(p *store.BackgroundRunResultProjection) { p.Result.BundleBytes++ }},
-		{"session", func(p *store.BackgroundRunResultProjection) { p.Run.OpenCodeSessionID = otherSession }},
+		{"unsealed", func(p *store.RunResult) { p.Result.State = store.ResultSelected }},
+		{"change count", func(p *store.RunResult) { p.Result.ChangeCount++ }},
+		{"bundle digest", func(p *store.RunResult) { p.Result.BundleSHA256[0] ^= 0xff }},
+		{"bundle size", func(p *store.RunResult) { p.Result.BundleBytes++ }},
+		{"session", func(p *store.RunResult) { p.Run.OpenCodeSessionID = otherSession }},
 	} {
 		t.Run("rejects "+test.name+" mismatch", func(t *testing.T) {
 			changed := projection

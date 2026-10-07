@@ -130,7 +130,7 @@ func run() (resultErr error) {
 		return err
 	}
 	compact := strings.ReplaceAll(strings.TrimPrefix(string(runID), "run_"), "-", "")
-	run := store.BackgroundRun{WorkspaceID: workspaceID, RunID: runID, RepositoryID: 42, RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: domain.GitOID(base), Profile: store.BackgroundRunSourceProfile, EnvironmentSHA256: docker.EnvironmentSHA256(nil), ResourceSpecVersion: domain.ResourceSpecVersion, ImageIdentity: imageID, CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode", ContainerIdentity: "fern-run-" + compact, EndpointIdentity: "run-" + compact + "-endpoint", OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID}
+	run := store.Run{WorkspaceID: workspaceID, RunID: runID, RepositoryID: 42, RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: domain.GitOID(base), Profile: domain.SourceProfile, EnvironmentSHA256: docker.EnvironmentSHA256(nil), ResourceSpecVersion: domain.ResourceSpecVersion, ImageIdentity: imageID, CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode", ContainerIdentity: "fern-run-" + compact, EndpointIdentity: "run-" + compact + "-endpoint", OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID}
 	config := docker.Config{StateRoot: state, Repository: repository, GitExecutable: gitPath, ImageReference: imageReference, ImageID: imageID, MemoryBytes: 512 << 20, WallTimeout: 2 * time.Minute, GitTimeout: 30 * time.Second, DockerTimeout: 20 * time.Second, HealthTimeout: 60 * time.Second, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 128 << 20, CloneObservedLimitBytes: 128 << 20, DiskFreeAdmissionBytes: 128 << 20, LogMaxSize: "1m", LogMaxFiles: 2, StopGrace: 3 * time.Second}
 	githubFixture, err := newGitHubFixture()
 	config.RuntimeStorageRoot = runtimeRoot
@@ -409,7 +409,7 @@ func ensureNoSharedFiles(source, clone string) error {
 	})
 }
 
-func cleanupHarness(provider *docker.Provider, cli *client.Client, run store.BackgroundRun, containerID string, runtime docker.RuntimeIdentity, clonePath string) error {
+func cleanupHarness(provider *docker.Provider, cli *client.Client, run store.Run, containerID string, runtime docker.RuntimeIdentity, clonePath string) error {
 	var cleanupErr error
 	call := func(name string, operation func(context.Context) error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

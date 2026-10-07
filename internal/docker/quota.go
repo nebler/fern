@@ -50,7 +50,7 @@ func validateQuotaKernelState(project, xflags uint32, version byte, flags uint16
 	return nil
 }
 
-func (p *Provider) removeVolumeBacking(run store.BackgroundRun) error {
+func (p *Provider) removeVolumeBacking(run store.Run) error {
 	parent := filepath.Dir(p.volumeBackingPath(run))
 	info, err := os.Lstat(parent)
 	if errors.Is(err, os.ErrNotExist) {
@@ -114,18 +114,18 @@ func (p *Provider) admitStorage() error {
 	return nil
 }
 
-func (p *Provider) volumeBackingPath(run store.BackgroundRun) string {
+func (p *Provider) volumeBackingPath(run store.Run) string {
 	return filepath.Join(p.root, "opencode-volumes", run.VolumeIdentity)
 }
 
-func (p *Provider) volumeOptions(run store.BackgroundRun) map[string]string {
+func (p *Provider) volumeOptions(run store.Run) map[string]string {
 	if p.config.RuntimeStorageRoot == "" && p.config.quotaCheck != nil {
 		return nil
 	}
 	return map[string]string{"type": "none", "o": "bind", "device": p.volumeBackingPath(run)}
 }
 
-func (p *Provider) attestExecutionVolume(run store.BackgroundRun, item volume.Volume) error {
+func (p *Provider) attestExecutionVolume(run store.Run, item volume.Volume) error {
 	if !maps.Equal(item.Options, p.volumeOptions(run)) {
 		return errors.New("execution rejects legacy or non-quota-backed Docker volumes")
 	}
@@ -135,7 +135,7 @@ func (p *Provider) attestExecutionVolume(run store.BackgroundRun, item volume.Vo
 	return p.attestQuotaChild(p.volumeBackingPath(run))
 }
 
-func (p *Provider) prepareVolumeBacking(run store.BackgroundRun) error {
+func (p *Provider) prepareVolumeBacking(run store.Run) error {
 	if len(p.volumeOptions(run)) == 0 {
 		return nil
 	}

@@ -25,7 +25,7 @@ func TestAdmissionReplaySurvivesRestart(t *testing.T) {
 	createTestWorkspace(t, s)
 	p := testAdmission(1, "command-1", "Fix signup")
 
-	first, err := s.AdmitBackgroundRun(context.Background(), p)
+	first, err := s.AdmitRun(context.Background(), p)
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
@@ -41,7 +41,7 @@ func TestAdmissionReplaySurvivesRestart(t *testing.T) {
 	p.AcceptedAt = p.AcceptedAt.Add(time.Hour)
 	p.Deadline = p.Deadline.Add(time.Hour)
 	p.Claim.Actor.RequestID = "req-retry"
-	replay, err := s.AdmitBackgroundRun(context.Background(), p)
+	replay, err := s.AdmitRun(context.Background(), p)
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestAdmissionReplaySurvivesRestart(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT prompt FROM runs WHERE id=?`, first.Run.RunID).Scan(&prompt); err != nil || prompt != p.Prompt {
 		t.Fatalf("stored prompt = %q, %v", prompt, err)
 	}
-	gotReceipt, _, err := s.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateBackgroundRunCommand, p.Claim.Key)
+	gotReceipt, _, err := s.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateRunCommand, p.Claim.Key)
 	if err != nil || gotReceipt.RunID != first.Run.RunID {
 		t.Fatalf("get receipt: %+v, %v", gotReceipt, err)
 	}
@@ -86,7 +86,7 @@ func TestConcurrentSameKeyAdmissionCreatesOneSet(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			result, err := s.AdmitBackgroundRun(context.Background(), p)
+			result, err := s.AdmitRun(context.Background(), p)
 			if err != nil {
 				errs <- err
 				return
@@ -123,13 +123,13 @@ func TestAdmissionConflictsHaveNoWrites(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	createTestWorkspace(t, s)
 	p := testAdmission(3, "owned-key", "Original")
-	accepted, err := s.AdmitBackgroundRun(context.Background(), p)
+	accepted, err := s.AdmitRun(context.Background(), p)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	changed := testAdmission(4, "owned-key", "Changed")
-	_, err = s.AdmitBackgroundRun(context.Background(), changed)
+	_, err = s.AdmitRun(context.Background(), changed)
 	var conflict *ConflictError
 	if !errors.As(err, &conflict) || conflict.ReceiptID != accepted.Receipt.ID || conflict.RunID != accepted.Run.RunID {
 		t.Fatalf("hash conflict = %v", err)
@@ -138,7 +138,7 @@ func TestAdmissionConflictsHaveNoWrites(t *testing.T) {
 	otherActor := p
 	otherActor.Claim.Actor.ID = "pc_other"
 	otherActor.Claim.Actor.CredentialID = "pc_other"
-	_, err = s.AdmitBackgroundRun(context.Background(), otherActor)
+	_, err = s.AdmitRun(context.Background(), otherActor)
 	if !errors.Is(err, ErrIdempotencyOwnerMismatch) {
 		t.Fatalf("actor conflict = %v", err)
 	}
@@ -150,18 +150,18 @@ func TestAdmissionRollsBackOnLateInsertFailure(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	createTestWorkspace(t, s)
 	first := testAdmission(6, "first", "First")
-	if _, err := s.AdmitBackgroundRun(context.Background(), first); err != nil {
+	if _, err := s.AdmitRun(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
 	second := testAdmission(7, "second", "Second")
 	second.OpenCodeSessionID = first.OpenCodeSessionID // Fails on the late run insert.
-	if _, err := s.AdmitBackgroundRun(context.Background(), second); err == nil {
+	if _, err := s.AdmitRun(context.Background(), second); err == nil {
 		t.Fatal("expected duplicate session failure")
 	}
 	if _, err := readRun(context.Background(), s.db, testWorkspaceID(), second.RunID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("partially written run: %v", err)
 	}
-	if _, found, err := s.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateBackgroundRunCommand, second.Claim.Key); err != nil || found {
+	if _, found, err := s.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateRunCommand, second.Claim.Key); err != nil || found {
 		t.Fatalf("partially written receipt: %v", err)
 	}
 	assertCounts(t, s, 1, 1)
@@ -172,19 +172,19 @@ func TestRunSessionIdentityAndInputConstraints(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	createTestWorkspace(t, s)
 	first := testAdmission(30, "first-run", "First")
-	if _, err := s.AdmitBackgroundRun(context.Background(), first); err != nil {
+	if _, err := s.AdmitRun(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
 
 	sameSession := testAdmission(31, "same-session", "Second")
 	sameSession.OpenCodeSessionID = first.OpenCodeSessionID
-	if _, err := s.AdmitBackgroundRun(context.Background(), sameSession); err == nil {
+	if _, err := s.AdmitRun(context.Background(), sameSession); err == nil {
 		t.Fatal("duplicate OpenCode session was accepted")
 	}
 
 	sameMessage := testAdmission(32, "same-message", "Third")
 	sameMessage.OpenCodeMessageID = first.OpenCodeMessageID
-	if _, err := s.AdmitBackgroundRun(context.Background(), sameMessage); err != nil {
+	if _, err := s.AdmitRun(context.Background(), sameMessage); err != nil {
 		t.Fatalf("message ID in another session should be independent: %v", err)
 	}
 
@@ -203,24 +203,24 @@ func TestSchemaRejectsMalformedRunInputs(t *testing.T) {
 
 	tests := []struct {
 		name   string
-		mutate func(*AdmitBackgroundRunParams)
+		mutate func(*AdmitRunParams)
 	}{
-		{"run ID", func(p *AdmitBackgroundRunParams) { p.RunID = "run_bad" }},
-		{"session prefix", func(p *AdmitBackgroundRunParams) { p.OpenCodeSessionID = "ses_bad" }},
-		{"session uppercase", func(p *AdmitBackgroundRunParams) {
+		{"run ID", func(p *AdmitRunParams) { p.RunID = "run_bad" }},
+		{"session prefix", func(p *AdmitRunParams) { p.OpenCodeSessionID = "ses_bad" }},
+		{"session uppercase", func(p *AdmitRunParams) {
 			p.OpenCodeSessionID = domain.OpenCodeSessionID("ses_ABCDEF0123456789abcdef0123456789")
 		}},
-		{"message prefix", func(p *AdmitBackgroundRunParams) { p.OpenCodeMessageID = "msg_bad" }},
-		{"agent", func(p *AdmitBackgroundRunParams) { p.Agent = "" }},
-		{"model", func(p *AdmitBackgroundRunParams) { p.Model = string(make([]byte, 257)) }},
-		{"deadline", func(p *AdmitBackgroundRunParams) { p.Deadline = p.AcceptedAt }},
+		{"message prefix", func(p *AdmitRunParams) { p.OpenCodeMessageID = "msg_bad" }},
+		{"agent", func(p *AdmitRunParams) { p.Agent = "" }},
+		{"model", func(p *AdmitRunParams) { p.Model = string(make([]byte, 257)) }},
+		{"deadline", func(p *AdmitRunParams) { p.Deadline = p.AcceptedAt }},
 	}
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := testAdmission(60+i, "invalid-"+fmt.Sprint(i), "Invalid")
 			tt.mutate(&p)
 			// Fern generates these values; schema CHECKs are the backstop.
-			if _, err := s.AdmitBackgroundRun(context.Background(), p); err == nil {
+			if _, err := s.AdmitRun(context.Background(), p); err == nil {
 				t.Fatal("malformed admission was accepted")
 			}
 		})
@@ -245,7 +245,7 @@ func TestSQLitePoliciesAndForeignKeys(t *testing.T) {
 	_, err := s.db.Exec(`INSERT INTO receipts(
 workspace_id,command_kind,idempotency_key,request_hash,actor,accepted_at,
 api_contract_version,run_id,response_status,response_projection)
-VALUES(?,?,?,?,?,?,?,?,?,?)`, testWorkspaceID(), CreateBackgroundRunCommand, "fk", make([]byte, 32), `{}`, 1, "v1", testRunID(20), 202, `{}`)
+VALUES(?,?,?,?,?,?,?,?,?,?)`, testWorkspaceID(), CreateRunCommand, "fk", make([]byte, 32), `{}`, 1, "v1", testRunID(20), 202, `{}`)
 	if err == nil {
 		t.Fatal("foreign key violation was accepted")
 	}
@@ -262,7 +262,7 @@ func TestOpenRejectsExistingForeignKeyViolation(t *testing.T) {
 	if _, err := raw.Exec(`INSERT INTO receipts(
 workspace_id,command_kind,idempotency_key,request_hash,actor,accepted_at,
 api_contract_version,run_id,response_status,response_projection)
-VALUES(?,?,?,?,?,?,?,?,?,?)`, testWorkspaceID(), CreateBackgroundRunCommand, "broken-fk", make([]byte, 32), `{}`, 1, "v1", testRunID(21), 202, `{}`); err != nil {
+VALUES(?,?,?,?,?,?,?,?,?,?)`, testWorkspaceID(), CreateRunCommand, "broken-fk", make([]byte, 32), `{}`, 1, "v1", testRunID(21), 202, `{}`); err != nil {
 		t.Fatal(err)
 	}
 	if err := raw.Close(); err != nil {
@@ -332,7 +332,7 @@ func TestCanceledContextsStopOperations(t *testing.T) {
 	s := openTestStore(t, testDBPath(t))
 	t.Cleanup(func() { _ = s.Close() })
 	createTestWorkspace(t, s)
-	if _, err := s.AdmitBackgroundRun(ctx, testAdmission(8, "canceled", "Canceled")); !errors.Is(err, context.Canceled) {
+	if _, err := s.AdmitRun(ctx, testAdmission(8, "canceled", "Canceled")); !errors.Is(err, context.Canceled) {
 		t.Fatalf("admit canceled context = %v", err)
 	}
 }
@@ -350,7 +350,7 @@ func TestAdmissionHonorsDeadlineWhileDatabaseIsBusy(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	_, err = s.AdmitBackgroundRun(ctx, testAdmission(9, "deadline", "Deadline"))
+	_, err = s.AdmitRun(ctx, testAdmission(9, "deadline", "Deadline"))
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("busy admission = %v", err)
 	}
@@ -396,12 +396,12 @@ func createTestWorkspace(t *testing.T, s *Store) {
 	}
 }
 
-func testAdmission(n int, key, prompt string) AdmitBackgroundRunParams {
+func testAdmission(n int, key, prompt string) AdmitRunParams {
 	hash := sha256.Sum256([]byte(key + "\n" + prompt))
-	params := AdmitBackgroundRunParams{
+	params := AdmitRunParams{
 		RunID: testRunID(n), OpenCodeSessionID: testSessionID(n), OpenCodeMessageID: testMessageID(n),
 		Claim: domain.IdempotencyClaim{
-			Scope: domain.IdempotencyScope{WorkspaceID: testWorkspaceID(), CommandKind: CreateBackgroundRunCommand},
+			Scope: domain.IdempotencyScope{WorkspaceID: testWorkspaceID(), CommandKind: CreateRunCommand},
 			Key:   domain.IdempotencyKey(key), RequestHash: domain.RequestHash(hash),
 			Actor: domain.ActorSnapshot{Type: domain.ActorOpenCode, ID: "pc_owner", DisplayName: "OpenCode", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "req-1"},
 		},

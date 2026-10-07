@@ -127,15 +127,15 @@ func TestFindReceiptByIdempotencyIsReadOnlyAndExactScoped(t *testing.T) {
 	store := openTestStore(t, testDBPath(t))
 	defer store.Close()
 	createTestWorkspace(t, store)
-	admission, err := store.AdmitBackgroundRun(context.Background(), testAdmission(88, "receipt-lookup", "work"))
+	admission, err := store.AdmitRun(context.Background(), testAdmission(88, "receipt-lookup", "work"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	receipt, found, err := store.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateBackgroundRunCommand, "receipt-lookup")
+	receipt, found, err := store.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateRunCommand, "receipt-lookup")
 	if err != nil || !found || receipt.ID != admission.Receipt.ID {
 		t.Fatalf("receipt=%+v found=%t err=%v", receipt, found, err)
 	}
-	if _, found, err := store.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateBackgroundRunCommand, "other-key"); err != nil || found {
+	if _, found, err := store.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateRunCommand, "other-key"); err != nil || found {
 		t.Fatalf("missing found=%t err=%v", found, err)
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
 )
@@ -14,11 +15,11 @@ import (
 func TestWorkObservationUsesRuntimeState(t *testing.T) {
 	for _, tt := range []struct {
 		observation opencode.PendingObservation
-		state       store.BackgroundRunState
+		state       domain.State
 		status      string
 	}{
-		{opencode.PendingObservation{State: opencode.WorkWorking, Questions: 2, Permissions: 1}, store.BackgroundRunWorking, "positive_active"},
-		{opencode.PendingObservation{State: opencode.WorkNeedsYou, Active: true}, store.BackgroundRunNeedsYou, "owned_pending"},
+		{opencode.PendingObservation{State: opencode.WorkWorking, Questions: 2, Permissions: 1}, domain.Working, "positive_active"},
+		{opencode.PendingObservation{State: opencode.WorkNeedsYou, Active: true}, domain.NeedsYou, "owned_pending"},
 		{opencode.PendingObservation{State: opencode.WorkUnknown, Active: true, Questions: 2}, "", ""},
 		{opencode.PendingObservation{State: "unrecognized", Active: true}, "", ""},
 	} {
@@ -104,10 +105,10 @@ func TestSuperviseRunsAgainImmediatelyOnlyAfterProgress(t *testing.T) {
 func TestEffectContextAllowsCleanupAfterAttemptDeadline(t *testing.T) {
 	now := time.Now().UTC()
 	coordinator := &Coordinator{config: Config{Now: func() time.Time { return now }, OperationTimeout: 10 * time.Second}}
-	work := store.BackgroundRunWork{
-		Run: store.BackgroundRun{
-			State:       store.BackgroundRunCanceling,
-			EffectPhase: store.BackgroundRunEffectCleaning,
+	work := store.RunWork{
+		Run: store.Run{
+			State:       domain.Canceling,
+			EffectPhase: domain.Cleaning,
 			Deadline:    now.Add(-time.Second),
 		},
 	}
@@ -120,7 +121,7 @@ func TestEffectContextAllowsCleanupAfterAttemptDeadline(t *testing.T) {
 	if ctx.Err() != context.Canceled {
 		t.Fatalf("cleanup context cancellation = %v", ctx.Err())
 	}
-	work.Run.State, work.Run.EffectPhase = store.BackgroundRunWorking, store.BackgroundRunEffectAdmitted
+	work.Run.State, work.Run.EffectPhase = domain.Working, domain.Admitted
 	if _, cancel, _, err := coordinator.effectContext(context.Background(), work, classify(work.Run).Executing); !errors.Is(err, context.DeadlineExceeded) {
 		if cancel != nil {
 			cancel()
@@ -133,7 +134,7 @@ func TestEffectContextBoundsEffectsAndPromptDeadline(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	deadline := now.Add(2 * time.Second)
 	coordinator := &Coordinator{config: Config{Now: func() time.Time { return now }, OperationTimeout: 10 * time.Second}}
-	work := store.BackgroundRunWork{Run: store.BackgroundRun{Deadline: deadline}}
+	work := store.RunWork{Run: store.Run{Deadline: deadline}}
 
 	ctx, cancel, _, err := coordinator.effectContext(context.Background(), work, false)
 	if err != nil {

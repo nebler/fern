@@ -282,14 +282,14 @@ func (p *Provider) Close() error {
 
 // CommittedRuntime reconstructs the exact durable process identity without
 // requiring the current execution configuration to match the run being cleaned.
-func (p *Provider) CommittedRuntime(run store.BackgroundRun) (RuntimeIdentity, error) {
+func (p *Provider) CommittedRuntime(run store.Run) (RuntimeIdentity, error) {
 	if _, err := p.validateRunForCleanup(run); err != nil {
 		return RuntimeIdentity{}, err
 	}
 	return committedRuntimeFromRun(run)
 }
 
-func committedRuntimeFromRun(run store.BackgroundRun) (RuntimeIdentity, error) {
+func committedRuntimeFromRun(run store.Run) (RuntimeIdentity, error) {
 	identity, err := domain.NewRuntime(run.ObservedContainerID, run.ObservedContainerStartedAt)
 	if err != nil || identity.Epoch() != run.RuntimeEpoch {
 		return RuntimeIdentity{}, errors.New("durable background runtime epoch is incomplete")
@@ -300,7 +300,7 @@ func committedRuntimeFromRun(run store.BackgroundRun) (RuntimeIdentity, error) {
 // OpenCodeClient derives Basic credentials in memory and returns only the
 // profile-specific authenticated client. No capability or secret crosses the
 // provider boundary.
-func (p *Provider) OpenCodeClient(run store.BackgroundRun, runtime RuntimeIdentity, httpClient *http.Client) (*opencode.Client, error) {
+func (p *Provider) OpenCodeClient(run store.Run, runtime RuntimeIdentity, httpClient *http.Client) (*opencode.Client, error) {
 	if _, err := p.validateRun(run); err != nil {
 		return nil, err
 	}
@@ -316,7 +316,7 @@ func (p *Provider) OpenCodeClient(run store.BackgroundRun, runtime RuntimeIdenti
 
 // BackgroundRouteTarget derives the exact endpoint and an authenticated
 // transport without exposing the run password outside the provider.
-func (p *Provider) BackgroundRouteTarget(run store.BackgroundRun, runtime RuntimeIdentity) (opencode.RouteTarget, error) {
+func (p *Provider) BackgroundRouteTarget(run store.Run, runtime RuntimeIdentity) (opencode.RouteTarget, error) {
 	transport, err := p.newRouteTransport(run, runtime)
 	if err != nil {
 		return opencode.RouteTarget{}, err
@@ -324,7 +324,7 @@ func (p *Provider) BackgroundRouteTarget(run store.BackgroundRun, runtime Runtim
 	return opencode.NewRouteTarget("http://"+transport.endpoint, transport)
 }
 
-func (p *Provider) newRouteTransport(run store.BackgroundRun, runtime RuntimeIdentity) (*routeTransport, error) {
+func (p *Provider) newRouteTransport(run store.Run, runtime RuntimeIdentity) (*routeTransport, error) {
 	digest, err := p.validateRun(run)
 	if err != nil {
 		return nil, err
@@ -362,7 +362,7 @@ func (p *Provider) newRouteTransport(run store.BackgroundRun, runtime RuntimeIde
 type routeTransport struct {
 	base               http.RoundTripper
 	provider           *Provider
-	run                store.BackgroundRun
+	run                store.Run
 	digest             string
 	runtime            RuntimeIdentity
 	hostPort           int
@@ -520,7 +520,7 @@ func qualifyImage(got image.InspectResponse, want string) error {
 	return nil
 }
 
-func (p *Provider) validateRun(run store.BackgroundRun) (string, error) {
+func (p *Provider) validateRun(run store.Run) (string, error) {
 	if err := p.admitStorage(); err != nil {
 		return "", err
 	}
@@ -534,10 +534,10 @@ func (p *Provider) validateRun(run store.BackgroundRun) (string, error) {
 	return digest, nil
 }
 
-func (p *Provider) validateRunForCleanup(run store.BackgroundRun) (string, error) {
+func (p *Provider) validateRunForCleanup(run store.Run) (string, error) {
 	// The run row is Fern's own durable record; only the derived resource names
 	// are re-checked because they become host paths and Docker object names.
-	if !validImageID(run.ImageIdentity) || run.ResourceSpecVersion != domain.ResourceSpecVersion || run.Profile != store.BackgroundRunSourceProfile {
+	if !validImageID(run.ImageIdentity) || run.ResourceSpecVersion != domain.ResourceSpecVersion || run.Profile != domain.SourceProfile {
 		return "", errors.New("invalid immutable background run tuple")
 	}
 	if !domain.NewResources(run.RunID).Matches(run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity) {
@@ -546,7 +546,7 @@ func (p *Provider) validateRunForCleanup(run store.BackgroundRun) (string, error
 	return p.specDigest(run)
 }
 
-func (p *Provider) specDigest(run store.BackgroundRun) (string, error) {
+func (p *Provider) specDigest(run store.Run) (string, error) {
 	data, err := json.Marshal(struct {
 		Version                                                                                int `json:"version"`
 		Workspace, Task                                                                        string
@@ -566,7 +566,7 @@ func (p *Provider) specDigest(run store.BackgroundRun) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func (p *Provider) password(run store.BackgroundRun) string {
+func (p *Provider) password(run store.Run) string {
 	mac := hmac.New(sha256.New, p.hostKey[:])
 	_, _ = mac.Write([]byte(passwordDomain))
 	for _, value := range []string{string(run.WorkspaceID), string(run.RunID), run.ImageIdentity} {
@@ -577,7 +577,7 @@ func (p *Provider) password(run store.BackgroundRun) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (p *Provider) labels(run store.BackgroundRun, digest string) map[string]string {
+func (p *Provider) labels(run store.Run, digest string) map[string]string {
 	return map[string]string{
 		managedLabel: "true", workspaceLabel: string(run.WorkspaceID), taskLabel: string(run.RunID),
 		imageLabel: run.ImageIdentity, cloneLabel: run.CloneIdentity,
@@ -587,7 +587,7 @@ func (p *Provider) labels(run store.BackgroundRun, digest string) map[string]str
 	}
 }
 
-func (p *Provider) containerLabels(run store.BackgroundRun, digest string) map[string]string {
+func (p *Provider) containerLabels(run store.Run, digest string) map[string]string {
 	labels := make(map[string]string, len(p.imageLabels)+14)
 	maps.Copy(labels, p.imageLabels)
 	maps.Copy(labels, p.labels(run, digest))

@@ -71,10 +71,10 @@ func (r Receipt) classify(incoming domain.IdempotencyClaim) domain.IdempotencyDi
 	return domain.ClassifyIdempotency(&claim, incoming)
 }
 
-// AdmitBackgroundRunParams is the complete immutable intent of one run. The
+// AdmitRunParams is the complete immutable intent of one run. The
 // store derives the instruction and profile digests and the canonical
 // resource identities itself.
-type AdmitBackgroundRunParams struct {
+type AdmitRunParams struct {
 	RunID              domain.RunID
 	OpenCodeSessionID  domain.OpenCodeSessionID
 	OpenCodeMessageID  domain.OpenCodeMessageID
@@ -95,39 +95,10 @@ type AdmitBackgroundRunParams struct {
 	AcceptedAt         time.Time
 }
 
-// Compatibility names for packages outside store that still spell the run
-// vocabulary through this package; store and runapi use package run
-// directly. Remove once those callers do too.
-type BackgroundRunState = domain.State
-
-type BackgroundRunEffectPhase = domain.Phase
-
-const BackgroundRunSourceProfile = domain.SourceProfile
-
-const (
-	BackgroundRunQueued          = domain.Queued
-	BackgroundRunSettingUp       = domain.SettingUp
-	BackgroundRunWorking         = domain.Working
-	BackgroundRunNeedsYou        = domain.NeedsYou
-	BackgroundRunCanceling       = domain.Canceling
-	BackgroundRunUncertain       = domain.Uncertain
-	BackgroundRunResultReady     = domain.ResultReady
-	BackgroundRunFailed          = domain.Failed
-	BackgroundRunCleanupRequired = domain.CleanupRequired
-
-	BackgroundRunEffectAbsent          = domain.Absent
-	BackgroundRunEffectProvisioning    = domain.Provisioning
-	BackgroundRunEffectPromptPending   = domain.PromptPending
-	BackgroundRunEffectAdmitted        = domain.Admitted
-	BackgroundRunEffectSealing         = domain.Sealing
-	BackgroundRunEffectCleaning        = domain.Cleaning
-	BackgroundRunEffectCleanupComplete = domain.CleanupComplete
-)
-
-// BackgroundRun is one run row: its immutable intent, lifecycle, and the
+// Run is one run row: its immutable intent, lifecycle, and the
 // authority recorded once along the way. The prompt itself is read only with
-// BackgroundRunWork.
-type BackgroundRun struct {
+// RunWork.
+type Run struct {
 	RunID                      domain.RunID
 	WorkspaceID                domain.WorkspaceID
 	RepositoryID               domain.RepositoryID
@@ -149,8 +120,8 @@ type BackgroundRun struct {
 	OpenCodeSessionID          domain.OpenCodeSessionID
 	OpenCodeMessageID          domain.OpenCodeMessageID
 	Creator                    domain.ActorSnapshot
-	State                      BackgroundRunState
-	EffectPhase                BackgroundRunEffectPhase
+	State                      domain.State
+	EffectPhase                domain.Phase
 	StopReceiptID              int64
 	StopRequestedAt            *time.Time
 	TimeoutRequestedAt         *time.Time
@@ -169,7 +140,7 @@ type BackgroundRun struct {
 	UpdatedAt                  time.Time
 }
 
-type StopBackgroundRunParams struct {
+type StopRunParams struct {
 	WorkspaceID        domain.WorkspaceID
 	RunID              domain.RunID
 	Claim              domain.IdempotencyClaim
@@ -177,36 +148,36 @@ type StopBackgroundRunParams struct {
 	StoppedAt          time.Time
 }
 
-type BackgroundRunStop struct {
-	Run      BackgroundRun
+type RunStop struct {
+	Run      Run
 	Receipt  Receipt
 	Replayed bool
 }
 
-// BackgroundRunWork pairs the next runnable run with its plaintext prompt.
+// RunWork pairs the next runnable run with its plaintext prompt.
 // The prompt is never copied into run evidence.
-type BackgroundRunWork struct {
-	Run    BackgroundRun
+type RunWork struct {
+	Run    Run
 	Prompt string
 }
 
-// BackgroundRunRef pins one exact run revision. Every coordinator mutation is
+// RunRef pins one exact run revision. Every coordinator mutation is
 // a compare-and-swap on it: fern up's host lease admits one coordinator per
 // workspace, and the in-process stop/seal API bumps the same revision, so a
 // stale ref fails instead of overwriting a concurrent transition.
-type BackgroundRunRef struct {
+type RunRef struct {
 	WorkspaceID      domain.WorkspaceID
 	RunID            domain.RunID
 	ExpectedRevision int64
-	ExpectedState    BackgroundRunState
-	ExpectedPhase    BackgroundRunEffectPhase
+	ExpectedState    domain.State
+	ExpectedPhase    domain.Phase
 	Now              time.Time
 }
 
-// RecordBackgroundRunRuntimeParams commits the exact started runtime: the
+// RecordRunRuntimeParams commits the exact started runtime: the
 // identity that later authorizes stop and cleanup.
-type RecordBackgroundRunRuntimeParams struct {
-	BackgroundRunRef
+type RecordRunRuntimeParams struct {
+	RunRef
 	ContainerID        string
 	ContainerStartedAt string
 	RuntimeEpoch       int64
@@ -214,30 +185,30 @@ type RecordBackgroundRunRuntimeParams struct {
 	Evidence           string
 }
 
-type RecordBackgroundRunEvidenceParams struct {
-	BackgroundRunRef
+type RecordRunEvidenceParams struct {
+	RunRef
 	Evidence string
 }
 
-type FinalizeBackgroundRunFailureParams struct {
-	BackgroundRunRef
+type FinalizeRunFailureParams struct {
+	RunRef
 	Reason       string
 	Evidence     string
 	CleanupProof string
 }
 
-type CompleteBackgroundRunResultCleanupParams struct {
-	BackgroundRunRef
+type CompleteRunResultCleanupParams struct {
+	RunRef
 	CleanupProof string
 }
 
-type MarkBackgroundRunCleanupRequiredParams struct {
-	BackgroundRunRef
+type MarkRunCleanupRequiredParams struct {
+	RunRef
 	Error string
 }
 
 type Admission struct {
-	Run      BackgroundRun
+	Run      Run
 	Receipt  Receipt
 	Replayed bool
 }
@@ -255,7 +226,7 @@ type Seal struct {
 // snapshot, fixed at seal admission so every export pass is deterministic.
 func (s Seal) CommitEpochSeconds() int64 { return s.RequestedAt.Unix() }
 
-type SealBackgroundRunParams struct {
+type SealRunParams struct {
 	WorkspaceID         domain.WorkspaceID
 	RunID               domain.RunID
 	ExpectedRunRevision int64
@@ -266,8 +237,8 @@ type SealBackgroundRunParams struct {
 	AcceptedAt          time.Time
 }
 
-type BackgroundRunSealAdmission struct {
-	Run      BackgroundRun
+type RunSealAdmission struct {
+	Run      Run
 	Receipt  Receipt
 	Replayed bool
 }
@@ -290,7 +261,7 @@ type WriterFence struct {
 	StoppedAt          *time.Time
 }
 
-type RecordBackgroundRunWriterFenceParams struct {
-	BackgroundRunRef
+type RecordRunWriterFenceParams struct {
+	RunRef
 	WriterFence
 }

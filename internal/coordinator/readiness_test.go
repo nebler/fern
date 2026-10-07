@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
 )
@@ -60,12 +61,12 @@ func TestDispatchWaitsForModelAndAgentReadiness(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			f := newScanFixture(t)
 			f.admit(t)
-			run, err := f.c.store.StartBackgroundRunProvisioning(context.Background(), ref(f.run(t), f.now))
+			run, err := f.c.store.StartRunProvisioning(context.Background(), ref(f.run(t), f.now))
 			if err != nil {
 				t.Fatal(err)
 			}
-			run, err = f.c.store.RecordBackgroundRunRuntime(context.Background(), store.RecordBackgroundRunRuntimeParams{
-				BackgroundRunRef: ref(run, f.now), ContainerID: scanContainerID, ContainerStartedAt: "2026-08-31T12:00:00.123456789Z",
+			run, err = f.c.store.RecordRunRuntime(context.Background(), store.RecordRunRuntimeParams{
+				RunRef: ref(run, f.now), ContainerID: scanContainerID, ContainerStartedAt: "2026-08-31T12:00:00.123456789Z",
 				RuntimeEpoch: 1, HostPort: 49152, Evidence: `{"effect":"runtime"}`,
 			})
 			if err != nil {
@@ -80,7 +81,7 @@ func TestDispatchWaitsForModelAndAgentReadiness(t *testing.T) {
 			}
 			operation, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 			defer cancel()
-			err = f.c.dispatchWhenReady(operation, context.Background(), store.BackgroundRunWork{Run: run, Prompt: f.params.Prompt}, client)
+			err = f.c.dispatchWhenReady(operation, context.Background(), store.RunWork{Run: run, Prompt: f.params.Prompt}, client)
 			calls := fakeOpenCode.snapshot()
 			prompted := false
 			for _, call := range calls {
@@ -91,7 +92,7 @@ func TestDispatchWaitsForModelAndAgentReadiness(t *testing.T) {
 				if !errors.Is(err, opencode.ErrNotReady) {
 					t.Fatalf("unready dispatch error = %v", err)
 				}
-				if r.EffectPhase != store.BackgroundRunEffectProvisioning || r.State != store.BackgroundRunSettingUp || prompted {
+				if r.EffectPhase != domain.Provisioning || r.State != domain.SettingUp || prompted {
 					t.Fatalf("unready catalog crossed the fence: %s/%s calls=%v", r.State, r.EffectPhase, calls)
 				}
 				if len(calls) < 2 {
@@ -102,7 +103,7 @@ func TestDispatchWaitsForModelAndAgentReadiness(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ready dispatch error = %v", err)
 			}
-			if r.EffectPhase != store.BackgroundRunEffectPromptPending || !prompted {
+			if r.EffectPhase != domain.PromptPending || !prompted {
 				t.Fatalf("ready catalog did not dispatch: %s/%s calls=%v", r.State, r.EffectPhase, calls)
 			}
 			if calls[0] != "GET /api/model" || calls[1] != "GET /api/agent" {

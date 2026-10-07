@@ -85,7 +85,7 @@ func (f credentialSourceFunc) InstallationToken(ctx context.Context, id githubap
 	return f(ctx, id)
 }
 
-func githubCredentialFixture(t *testing.T) (*Provider, *credentialDocker, store.BackgroundRun, *time.Time, *int) {
+func githubCredentialFixture(t *testing.T) (*Provider, *credentialDocker, store.Run, *time.Time, *int) {
 	t.Helper()
 	p, base, run := preparedProvider(t)
 	run.RepositoryID = 202

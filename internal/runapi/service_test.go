@@ -22,24 +22,24 @@ func (v *stubVerifier) Verify(context.Context, domain.GitOID) error { v.calls++;
 type commandStore struct {
 	Store
 	receipt                store.Receipt
-	current                store.BackgroundRun
+	current                store.Run
 	found, race, committed bool
 	err                    error
-	admit                  store.AdmitBackgroundRunParams
-	seal                   store.SealBackgroundRunParams
+	admit                  store.AdmitRunParams
+	seal                   store.SealRunParams
 }
 
 func (s *commandStore) FindReceiptByIdempotency(context.Context, domain.WorkspaceID, string, domain.IdempotencyKey) (store.Receipt, bool, error) {
 	return s.receipt, s.found, nil
 }
-func (s *commandStore) GetBackgroundRun(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.BackgroundRun, error) {
+func (s *commandStore) GetRun(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.Run, error) {
 	return s.current, nil
 }
 func receiptFor(claim domain.IdempotencyClaim, id domain.RunID, receiptID int64) store.Receipt {
 	return store.Receipt{ID: receiptID, WorkspaceID: claim.Scope.WorkspaceID, CommandKind: claim.Scope.CommandKind,
 		IdempotencyKey: claim.Key, RequestHash: claim.RequestHash, Actor: claim.Actor, RunID: id}
 }
-func (s *commandStore) AdmitBackgroundRun(_ context.Context, p store.AdmitBackgroundRunParams) (store.Admission, error) {
+func (s *commandStore) AdmitRun(_ context.Context, p store.AdmitRunParams) (store.Admission, error) {
 	s.admit = p
 	if s.err != nil {
 		return store.Admission{}, s.err
@@ -49,9 +49,9 @@ func (s *commandStore) AdmitBackgroundRun(_ context.Context, p store.AdmitBackgr
 	s.receipt = receiptFor(p.Claim, p.RunID, 1)
 	return store.Admission{Run: s.current, Receipt: s.receipt, Replayed: s.race}, nil
 }
-func (s *commandStore) StopBackgroundRun(_ context.Context, p store.StopBackgroundRunParams) (store.BackgroundRunStop, error) {
+func (s *commandStore) StopRun(_ context.Context, p store.StopRunParams) (store.RunStop, error) {
 	if s.err != nil {
-		return store.BackgroundRunStop{}, s.err
+		return store.RunStop{}, s.err
 	}
 	s.committed = true
 	s.current.RunID, s.current.StopReceiptID = p.RunID, 2
@@ -61,16 +61,16 @@ func (s *commandStore) StopBackgroundRun(_ context.Context, p store.StopBackgrou
 	}
 	s.receipt = receiptFor(p.Claim, p.RunID, 2)
 	s.receipt.ResponseProjection = json.RawMessage(`{"run_id":"` + string(p.RunID) + `","state":"canceling"}`)
-	return store.BackgroundRunStop{Run: s.current, Receipt: s.receipt, Replayed: s.race}, nil
+	return store.RunStop{Run: s.current, Receipt: s.receipt, Replayed: s.race}, nil
 }
-func (s *commandStore) SealBackgroundRun(_ context.Context, p store.SealBackgroundRunParams) (store.BackgroundRunSealAdmission, error) {
+func (s *commandStore) SealRun(_ context.Context, p store.SealRunParams) (store.RunSealAdmission, error) {
 	s.seal = p
 	if s.err != nil {
-		return store.BackgroundRunSealAdmission{}, s.err
+		return store.RunSealAdmission{}, s.err
 	}
 	s.committed = true
 	s.current.Seal = &store.Seal{ReceiptID: 3, ResultID: p.ResultID}
-	return store.BackgroundRunSealAdmission{Run: s.current, Replayed: s.race}, nil
+	return store.RunSealAdmission{Run: s.current, Replayed: s.race}, nil
 }
 
 func setupService(t *testing.T) (*service, *commandStore, *stubVerifier, domain.ActorSnapshot, createIntent, *int) {
@@ -100,7 +100,7 @@ func TestCreateCommitReplayAndIdentity(t *testing.T) {
 		t.Fatalf("create=%+v err=%v wakes=%d", accepted, err, *wakes)
 	}
 	// Literal v1 encoding protects field order, null branch, escaping, and whitespace.
-	wantHash := sha256.Sum256([]byte(store.CreateBackgroundRunCommand + "\n" + `{"repository":"https://github.com/owner/repository","base_oid":"0123456789abcdef0123456789abcdef01234567","branch":null,"instruction":"Work\n\t\u003cexact bytes\u003e ","profile":"` + input.Profile + `"}`))
+	wantHash := sha256.Sum256([]byte(store.CreateRunCommand + "\n" + `{"repository":"https://github.com/owner/repository","base_oid":"0123456789abcdef0123456789abcdef01234567","branch":null,"instruction":"Work\n\t\u003cexact bytes\u003e ","profile":"` + input.Profile + `"}`))
 	if runStore.admit.Claim.RequestHash != domain.RequestHash(wantHash) || runStore.admit.Prompt != input.Instruction {
 		t.Fatal("create bytes changed")
 	}
@@ -159,7 +159,7 @@ func TestCommitRaceReplayAndFailureDoNotWake(t *testing.T) {
 			t.Run(operation+"/"+mode, func(t *testing.T) {
 				s, runStore, _, actor, input, wakes := setupService(t)
 				ids, _ := s.config.Generator.GenerateAdmissionIDs()
-				runStore.current = store.BackgroundRun{RunID: ids.RunID, Revision: 5}
+				runStore.current = store.Run{RunID: ids.RunID, Revision: 5}
 				runStore.race = mode == "race"
 				if mode == "failure" {
 					runStore.err = errors.New("commit failed")

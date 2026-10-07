@@ -21,7 +21,7 @@ func TestExportRecoveryKeepsOriginalFailure(t *testing.T) {
 	}
 }
 
-func retainedTuple(t *testing.T) (artifact.Snapshot, store.BackgroundRun, store.Result) {
+func retainedTuple(t *testing.T) (artifact.Snapshot, store.Run, store.Result) {
 	t.Helper()
 	digest, err := artifact.NewDigest([32]byte{1})
 	if err != nil {
@@ -30,7 +30,7 @@ func retainedTuple(t *testing.T) (artifact.Snapshot, store.BackgroundRun, store.
 	snapshot := artifact.Snapshot{RepositoryID: 42, WorkspaceID: "workspace", RunID: "task", ResultID: "result",
 		OpenCodeSessionID: "session", OpenCodeMessageID: "message", Base: "base", Result: "result", Tree: "tree",
 		ChangesSHA256: digest, ManifestSHA256: digest, BundleSHA256: digest, BundleBytes: 42}
-	run := store.BackgroundRun{RepositoryID: snapshot.RepositoryID, WorkspaceID: snapshot.WorkspaceID, RunID: snapshot.RunID,
+	run := store.Run{RepositoryID: snapshot.RepositoryID, WorkspaceID: snapshot.WorkspaceID, RunID: snapshot.RunID,
 		OpenCodeSessionID: snapshot.OpenCodeSessionID, OpenCodeMessageID: snapshot.OpenCodeMessageID}
 	result := store.Result{ID: snapshot.ResultID, RunID: snapshot.RunID, BaseSHA: snapshot.Base, ResultCommit: snapshot.Result,
 		TreeOID: snapshot.Tree, ChangesSHA256: digest.Bytes(), ManifestSHA256: digest.Bytes(), BundleSHA256: digest.Bytes(), BundleBytes: snapshot.BundleBytes}
@@ -113,7 +113,7 @@ func TestRetainedInstallationSkipsSnapshotOnlyForExactSelection(t *testing.T) {
 }
 
 func TestMakeRouteIdentityProjectsCommittedRuntime(t *testing.T) {
-	run := store.BackgroundRun{WorkspaceID: "workspace", RunID: "task", RuntimeEpoch: 4, OpenCodeSessionID: "session",
+	run := store.Run{WorkspaceID: "workspace", RunID: "task", RuntimeEpoch: 4, OpenCodeSessionID: "session",
 		ObservedContainerID: "not-the-attested-runtime"}
 	runtime := docker.RuntimeIdentity{ContainerID: "container", StartedAt: "started", Token: "token"}
 	want := opencode.RouteIdentity{WorkspaceID: "workspace", RunID: "task", RuntimeEpoch: 4, SessionID: "session", ContainerID: "container", StartedAt: "started", RuntimeToken: "token"}

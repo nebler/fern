@@ -65,8 +65,8 @@ FROM runs r`
 
 // scanRun reads one run row. Schema CHECKs keep the runtime, stop, seal, and
 // writer-fence column groups all-or-nothing, so they are not re-checked here.
-func scanRun(row rowScanner) (BackgroundRun, error) {
-	var run BackgroundRun
+func scanRun(row rowScanner) (Run, error) {
+	var run Run
 	var branch, containerID, containerStarted, sealPolicy, resultID sql.NullString
 	var fenceKind, fenceContainer, fenceStarted, fenceToken, evidence, lastError, cleanupProof sql.NullString
 	var stopReceipt, stopAt, timeoutAt, runtimeEpoch, hostPort, promptAttempted sql.NullInt64
@@ -83,7 +83,7 @@ func scanRun(row rowScanner) (BackgroundRun, error) {
 		&fenceKind, &fenceContainer, &fenceStarted, &fenceToken, &fenceStopped,
 		&evidence, &lastError, &cleanupProof, &run.Revision, &created, &updated)
 	if err != nil {
-		return BackgroundRun{}, err
+		return Run{}, err
 	}
 	copy(run.EnvironmentSHA256[:], environmentHash)
 	resources := domain.NewResources(run.RunID)
@@ -108,25 +108,25 @@ func scanRun(row rowScanner) (BackgroundRun, error) {
 	return run, err
 }
 
-func readRun(ctx context.Context, q queryRower, workspaceID domain.WorkspaceID, id domain.RunID) (BackgroundRun, error) {
+func readRun(ctx context.Context, q queryRower, workspaceID domain.WorkspaceID, id domain.RunID) (Run, error) {
 	run, err := scanRun(q.QueryRowContext(ctx, runSelect+` WHERE r.workspace_id=? AND r.id=?`, workspaceID, id))
 	if errors.Is(err, sql.ErrNoRows) {
-		return BackgroundRun{}, ErrNotFound
+		return Run{}, ErrNotFound
 	}
 	if err != nil {
-		return BackgroundRun{}, fmt.Errorf("read run: %w", err)
+		return Run{}, fmt.Errorf("read run: %w", err)
 	}
 	return run, nil
 }
 
-func readOwnedRun(ctx context.Context, q queryRower, workspaceID domain.WorkspaceID, id domain.RunID, actor domain.ActorSnapshot) (BackgroundRun, error) {
+func readOwnedRun(ctx context.Context, q queryRower, workspaceID domain.WorkspaceID, id domain.RunID, actor domain.ActorSnapshot) (Run, error) {
 	run, err := scanRun(q.QueryRowContext(ctx, runSelect+` WHERE r.workspace_id=? AND r.id=?`+ownedBy,
 		append([]any{workspaceID, id}, ownerArgs(actor)...)...))
 	if errors.Is(err, sql.ErrNoRows) {
-		return BackgroundRun{}, ErrNotFound
+		return Run{}, ErrNotFound
 	}
 	if err != nil {
-		return BackgroundRun{}, fmt.Errorf("read owned run: %w", err)
+		return Run{}, fmt.Errorf("read owned run: %w", err)
 	}
 	return run, nil
 }
@@ -202,11 +202,11 @@ accepted_at,api_contract_version,run_id,response_status,response_projection) VAL
 		RunID: run, ResponseStatus: 202, ResponseProjection: projection}, nil
 }
 
-// GetBackgroundRun reads one run. Plugin actors see only runs they created;
+// GetRun reads one run. Plugin actors see only runs they created;
 // a foreign run reads as not found.
-func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID domain.WorkspaceID, runID domain.RunID, actor domain.ActorSnapshot) (BackgroundRun, error) {
+func (s *Store) GetRun(ctx context.Context, workspaceID domain.WorkspaceID, runID domain.RunID, actor domain.ActorSnapshot) (Run, error) {
 	if !backgroundRunReader(actor.Type) {
-		return BackgroundRun{}, fmt.Errorf("%w: background run reader", ErrInvalidInput)
+		return Run{}, fmt.Errorf("%w: background run reader", ErrInvalidInput)
 	}
 	if actor.Type == domain.ActorOpenCode {
 		return readOwnedRun(ctx, s.db, workspaceID, runID, actor)
@@ -214,9 +214,9 @@ func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID domain.Workspa
 	return readRun(ctx, s.db, workspaceID, runID)
 }
 
-// ReadBackgroundRunLifecycle returns the (state, phase) of one run for the
+// ReadRunLifecycle returns the (state, phase) of one run for the
 // trusted in-process coordinator. It authorizes no actor.
-func (s *Store) ReadBackgroundRunLifecycle(ctx context.Context, workspaceID domain.WorkspaceID, runID domain.RunID) (domain.State, domain.Phase, error) {
+func (s *Store) ReadRunLifecycle(ctx context.Context, workspaceID domain.WorkspaceID, runID domain.RunID) (domain.State, domain.Phase, error) {
 	var state domain.State
 	var phase domain.Phase
 	if err := s.db.QueryRowContext(ctx, `SELECT state,effect_phase FROM runs WHERE workspace_id=? AND id=?`, workspaceID, runID).
@@ -226,12 +226,12 @@ func (s *Store) ReadBackgroundRunLifecycle(ctx context.Context, workspaceID doma
 	return state, phase, nil
 }
 
-const MaxBackgroundRunListLimit = 100
+const MaxRunListLimit = 100
 
-// ListBackgroundRuns applies plugin ownership in SQL before its bound. Trusted
+// ListRuns applies plugin ownership in SQL before its bound. Trusted
 // operator/device actors receive the workspace-wide operator projection.
-func (s *Store) ListBackgroundRuns(ctx context.Context, workspaceID domain.WorkspaceID, actor domain.ActorSnapshot, limit int) ([]BackgroundRun, error) {
-	if !backgroundRunReader(actor.Type) || limit < 1 || limit > MaxBackgroundRunListLimit {
+func (s *Store) ListRuns(ctx context.Context, workspaceID domain.WorkspaceID, actor domain.ActorSnapshot, limit int) ([]Run, error) {
+	if !backgroundRunReader(actor.Type) || limit < 1 || limit > MaxRunListLimit {
 		return nil, fmt.Errorf("%w: background run list", ErrInvalidInput)
 	}
 	query := runSelect + ` WHERE r.workspace_id=?`
@@ -247,7 +247,7 @@ func (s *Store) ListBackgroundRuns(ctx context.Context, workspaceID domain.Works
 		return nil, fmt.Errorf("list background runs: %w", err)
 	}
 	defer rows.Close()
-	runs := make([]BackgroundRun, 0)
+	runs := make([]Run, 0)
 	for rows.Next() {
 		run, scanErr := scanRun(rows)
 		if scanErr != nil {
@@ -256,7 +256,7 @@ func (s *Store) ListBackgroundRuns(ctx context.Context, workspaceID domain.Works
 		if len(runs) == cap(runs) {
 			// Grow only after a successful scan, without exceeding the query bound.
 			// Starting at one avoids reserving excess space for sparse lists.
-			grown := make([]BackgroundRun, len(runs), min(limit, max(1, 2*cap(runs))))
+			grown := make([]Run, len(runs), min(limit, max(1, 2*cap(runs))))
 			copy(grown, runs)
 			runs = grown
 		}

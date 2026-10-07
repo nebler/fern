@@ -28,27 +28,27 @@ const (
 )
 
 type Store interface {
-	AdmitBackgroundRun(context.Context, store.AdmitBackgroundRunParams) (store.Admission, error)
+	AdmitRun(context.Context, store.AdmitRunParams) (store.Admission, error)
 	FindReceiptByIdempotency(context.Context, domain.WorkspaceID, string, domain.IdempotencyKey) (store.Receipt, bool, error)
-	GetBackgroundRun(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.BackgroundRun, error)
-	StopBackgroundRun(context.Context, store.StopBackgroundRunParams) (store.BackgroundRunStop, error)
-	SealBackgroundRun(context.Context, store.SealBackgroundRunParams) (store.BackgroundRunSealAdmission, error)
-	ListBackgroundRuns(context.Context, domain.WorkspaceID, domain.ActorSnapshot, int) ([]store.BackgroundRun, error)
-	GetBackgroundRunResult(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.BackgroundRunResultProjection, error)
+	GetRun(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.Run, error)
+	StopRun(context.Context, store.StopRunParams) (store.RunStop, error)
+	SealRun(context.Context, store.SealRunParams) (store.RunSealAdmission, error)
+	ListRuns(context.Context, domain.WorkspaceID, domain.ActorSnapshot, int) ([]store.Run, error)
+	GetRunResult(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.RunResult, error)
 }
 
 var _ Store = (*store.Store)(nil)
 
 // Route issues short-lived OpenCode attachment credentials for live runs.
 type Route interface {
-	IssueAttachment(store.BackgroundRun) (opencode.Attachment, bool, error)
-	ActiveOrigin(store.BackgroundRun) (string, bool)
+	IssueAttachment(store.Run) (opencode.Attachment, bool, error)
+	ActiveOrigin(store.Run) (string, bool)
 }
 
 type ActorResolver func(context.Context) (domain.ActorSnapshot, error)
 
 type RetentionVerifier interface {
-	Verify(context.Context, store.BackgroundRunResultProjection) error
+	Verify(context.Context, store.RunResult) error
 }
 
 type Config struct {
@@ -266,7 +266,7 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor domain.Ac
 		WriteError(w, http.StatusBadRequest, "invalid_query", "This run operation does not accept query parameters.")
 		return
 	}
-	run, err := h.config.Store.GetBackgroundRun(r.Context(), h.config.WorkspaceID, id, actor)
+	run, err := h.config.Store.GetRun(r.Context(), h.config.WorkspaceID, id, actor)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -280,7 +280,7 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor domain.Ac
 		WriteError(w, http.StatusConflict, "not_ready", "The retained result is not ready.")
 		return
 	}
-	projection, err := h.config.Store.GetBackgroundRunResult(r.Context(), h.config.WorkspaceID, id, actor)
+	projection, err := h.config.Store.GetRunResult(r.Context(), h.config.WorkspaceID, id, actor)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -299,7 +299,7 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor domain.Ac
 
 // verifyRetained runs the full retention verification (bundle copy, unbundle,
 // fsck) once per immutable retained tuple instead of on every result read.
-func (h *Handler) verifyRetained(ctx context.Context, projection store.BackgroundRunResultProjection) bool {
+func (h *Handler) verifyRetained(ctx context.Context, projection store.RunResult) bool {
 	key := retainedKey{result: projection.Result.ID, bundle: projection.Result.BundleSHA256}
 	if _, ok := h.retained.Load(key); ok {
 		return true
@@ -402,7 +402,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request, actor domain.Acto
 		WriteError(w, http.StatusBadRequest, "invalid_query", "Run listing does not accept query parameters.")
 		return
 	}
-	runs, err := h.config.Store.ListBackgroundRuns(r.Context(), h.config.WorkspaceID, actor, backgroundRunListLimit)
+	runs, err := h.config.Store.ListRuns(r.Context(), h.config.WorkspaceID, actor, backgroundRunListLimit)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -421,7 +421,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, actor domain.Actor
 		WriteError(w, http.StatusBadRequest, "invalid_query", "Run reads do not accept query parameters.")
 		return
 	}
-	run, err := h.config.Store.GetBackgroundRun(r.Context(), h.config.WorkspaceID, id, actor)
+	run, err := h.config.Store.GetRun(r.Context(), h.config.WorkspaceID, id, actor)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -446,7 +446,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, actor domain.Ac
 		WriteError(w, http.StatusBadRequest, "invalid_query", "Run attachment does not accept query parameters.")
 		return
 	}
-	run, err := h.config.Store.GetBackgroundRun(r.Context(), h.config.WorkspaceID, id, actor)
+	run, err := h.config.Store.GetRun(r.Context(), h.config.WorkspaceID, id, actor)
 	if err != nil {
 		writeStoreError(w, err)
 		return
@@ -468,7 +468,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, actor domain.Ac
 		Username: attachment.Username, Password: attachment.Password, ExpiresAt: attachment.ExpiresAt})
 }
 
-func attachmentReady(run store.BackgroundRun) bool {
+func attachmentReady(run store.Run) bool {
 	active := run.State == domain.SettingUp || run.State == domain.Working ||
 		run.State == domain.NeedsYou || run.State == domain.Uncertain
 	// Provisioning reconciles the session before the prompt fence ends it.
@@ -505,7 +505,7 @@ type runView struct {
 	Attachable bool `json:"attachable"`
 }
 
-func (h *Handler) view(run store.BackgroundRun) runView {
+func (h *Handler) view(run store.Run) runView {
 	_, active := h.config.Route.ActiveOrigin(run)
 	return runView{run.RunID, run.State, run.RepositoryRemote, run.BaseOID, run.Branch, active && attachmentReady(run)}
 }

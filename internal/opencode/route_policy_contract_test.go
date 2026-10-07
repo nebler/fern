@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nebler/fern/internal/store"
+	"github.com/nebler/fern/internal/domain"
 )
 
 // This literal is an upgrade gate, not an alias of the production profile.
@@ -17,7 +17,7 @@ import (
 // before consciously changing it, and rerun the live qualification.
 func TestAttachmentPinnedProfileContract(t *testing.T) {
 	const reviewed = "source-39fb919a054190498f6d5b7985bde231f93ad7a6"
-	if Profile != reviewed || store.BackgroundRunSourceProfile != reviewed {
+	if Profile != reviewed || domain.SourceProfile != reviewed {
 		t.Fatal("OpenCode profile changed: review attachment policy and live envelope contracts before updating the reviewed commit")
 	}
 }

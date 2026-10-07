@@ -38,7 +38,7 @@ type retentionVerifier struct {
 	err   error
 }
 
-func (v *retentionVerifier) Verify(context.Context, store.BackgroundRunResultProjection) error {
+func (v *retentionVerifier) Verify(context.Context, store.RunResult) error {
 	v.calls.Add(1)
 	return v.err
 }
@@ -59,13 +59,13 @@ type fakeRoute struct {
 	calls  int
 }
 
-func (route *fakeRoute) IssueAttachment(store.BackgroundRun) (opencode.Attachment, bool, error) {
+func (route *fakeRoute) IssueAttachment(store.Run) (opencode.Attachment, bool, error) {
 	route.calls++
 	return opencode.Attachment{Origin: "https://fern.example:8443", Username: opencode.AttachmentUsername,
 		Password: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ExpiresAt: time.Now().Add(time.Hour)}, route.active, nil
 }
 
-func (route *fakeRoute) ActiveOrigin(store.BackgroundRun) (string, bool) {
+func (route *fakeRoute) ActiveOrigin(store.Run) (string, bool) {
 	return "https://fern.example:8443", route.active
 }
 
@@ -76,15 +76,15 @@ func (fixture *apiFixture) rebuildCommands(t *testing.T) {
 
 type resultProjectionStore struct {
 	*store.Store
-	run        store.BackgroundRun
-	projection store.BackgroundRunResultProjection
+	run        store.Run
+	projection store.RunResult
 }
 
-func (s *resultProjectionStore) GetBackgroundRun(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.BackgroundRun, error) {
+func (s *resultProjectionStore) GetRun(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.Run, error) {
 	return s.run, nil
 }
 
-func (s *resultProjectionStore) GetBackgroundRunResult(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.BackgroundRunResultProjection, error) {
+func (s *resultProjectionStore) GetRunResult(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.RunResult, error) {
 	return s.projection, nil
 }
 
@@ -284,7 +284,7 @@ func TestRunAPIWakeFollowsDurableCreateAndStopCommitOnly(t *testing.T) {
 	var wakes atomic.Int64
 	fixture.handler.config.Wake = func() {
 		wakes.Add(1)
-		runs, err := fixture.store.ListBackgroundRuns(context.Background(), testWorkspace, fixture.actor, 10)
+		runs, err := fixture.store.ListRuns(context.Background(), testWorkspace, fixture.actor, 10)
 		if err != nil || len(runs) != 1 {
 			t.Errorf("wake could not observe committed run: runs=%d error=%v", len(runs), err)
 		}
@@ -305,7 +305,7 @@ func TestRunAPIWakeFollowsDurableCreateAndStopCommitOnly(t *testing.T) {
 	}
 	fixture.handler.config.Wake = func() {
 		wakes.Add(1)
-		run, err := fixture.store.GetBackgroundRun(context.Background(), testWorkspace, response.RunID, fixture.actor)
+		run, err := fixture.store.GetRun(context.Background(), testWorkspace, response.RunID, fixture.actor)
 		if err != nil || (run.State != domain.Canceling && run.State != domain.Failed) {
 			t.Errorf("stop wake could not observe committed state: run=%+v error=%v", run, err)
 		}
@@ -374,10 +374,10 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 	changes := sha256.Sum256([]byte("changes"))
 	manifest := sha256.Sum256([]byte("artifact manifest"))
 	bundle := sha256.Sum256([]byte("bundle"))
-	run := store.BackgroundRun{RunID: runID, WorkspaceID: testWorkspace,
+	run := store.Run{RunID: runID, WorkspaceID: testWorkspace,
 		RepositoryRemote: "https://github.com/owner/repository", State: domain.ResultReady,
 		EffectPhase: domain.CleanupComplete, Seal: &store.Seal{ResultID: resultID}}
-	projection := store.BackgroundRunResultProjection{Run: run,
+	projection := store.RunResult{Run: run,
 		Result: store.Result{ID: resultID, RunID: runID, State: store.ResultSealed, Outcome: domain.ResultChanged, BaseSHA: testBase,
 			ResultCommit: domain.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), TreeOID: domain.GitOID("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
 			ChangeCount: 2, ChangesSHA256: changes, ManifestSHA256: manifest, BundleSHA256: bundle, BundleBytes: 1234}}
@@ -477,28 +477,28 @@ func (f *apiFixture) buildHandler(t *testing.T) *Handler {
 	return handler
 }
 
-func (f *apiFixture) advanceToSession(t *testing.T, id domain.RunID) store.BackgroundRun {
+func (f *apiFixture) advanceToSession(t *testing.T, id domain.RunID) store.Run {
 	t.Helper()
 	now := time.Date(2026, 8, 31, 12, 0, 1, 0, time.UTC)
-	queued, err := f.store.NextBackgroundRun(context.Background(), testWorkspace, domain.SourceProfile)
+	queued, err := f.store.NextRun(context.Background(), testWorkspace, domain.SourceProfile)
 	if err != nil || queued.RunID != id {
 		t.Fatalf("next run=%+v error=%v", queued, err)
 	}
-	run, err := f.store.StartBackgroundRunProvisioning(context.Background(), openTestRef(queued, now))
+	run, err := f.store.StartRunProvisioning(context.Background(), openTestRef(queued, now))
 	if err != nil {
 		t.Fatalf("start run=%+v error=%v", run, err)
 	}
 	started := time.Date(2026, 8, 31, 12, 0, 2, 123456789, time.UTC)
 	now = now.Add(time.Millisecond)
-	run, err = f.store.RecordBackgroundRunRuntime(context.Background(), store.RecordBackgroundRunRuntimeParams{
-		BackgroundRunRef: openTestRef(run, now), ContainerID: strings.Repeat("a", 64), ContainerStartedAt: started.Format(time.RFC3339Nano),
+	run, err = f.store.RecordRunRuntime(context.Background(), store.RecordRunRuntimeParams{
+		RunRef: openTestRef(run, now), ContainerID: strings.Repeat("a", 64), ContainerStartedAt: started.Format(time.RFC3339Nano),
 		RuntimeEpoch: started.UnixNano(), HostPort: 49152, Evidence: `{"status":"exact"}`,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	now = now.Add(time.Millisecond)
-	run, err = f.store.RecordBackgroundRunPromptRequestAttempted(context.Background(), openTestRef(run, now))
+	run, err = f.store.RecordRunPromptRequestAttempted(context.Background(), openTestRef(run, now))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,12 +506,12 @@ func (f *apiFixture) advanceToSession(t *testing.T, id domain.RunID) store.Backg
 	return run
 }
 
-func (f *apiFixture) advanceToPrompt(t *testing.T, id domain.RunID) store.BackgroundRun {
+func (f *apiFixture) advanceToPrompt(t *testing.T, id domain.RunID) store.Run {
 	run := f.advanceToSession(t, id)
 	now := run.UpdatedAt.Add(time.Millisecond)
 	var err error
-	run, err = f.store.RecordBackgroundRunPromptAdmitted(context.Background(), store.RecordBackgroundRunEvidenceParams{
-		BackgroundRunRef: openTestRef(run, now), Evidence: `{"status":"exact"}`})
+	run, err = f.store.RecordRunPromptAdmitted(context.Background(), store.RecordRunEvidenceParams{
+		RunRef: openTestRef(run, now), Evidence: `{"status":"exact"}`})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -519,8 +519,8 @@ func (f *apiFixture) advanceToPrompt(t *testing.T, id domain.RunID) store.Backgr
 	return run
 }
 
-func openTestRef(run store.BackgroundRun, now time.Time) store.BackgroundRunRef {
-	return store.BackgroundRunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID,
+func openTestRef(run store.Run, now time.Time) store.RunRef {
+	return store.RunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID,
 		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now}
 }
 func (f *apiFixture) withActor(t *testing.T, actor domain.ActorSnapshot) *apiFixture {

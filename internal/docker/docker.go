@@ -35,7 +35,7 @@ var (
 // runtime. Each step inspects before it creates, so a repeat after a crash or
 // lost response converges. Host Git inspection of the clone happens only while
 // no run container exists: once one does, the clone may be agent-written.
-func (p *Provider) Provision(ctx context.Context, run store.BackgroundRun) (Observation, error) {
+func (p *Provider) Provision(ctx context.Context, run store.Run) (Observation, error) {
 	if _, err := p.validateRun(run); err != nil {
 		return Observation{}, err
 	}
@@ -63,7 +63,7 @@ func (p *Provider) Provision(ctx context.Context, run store.BackgroundRun) (Obse
 }
 
 // EnsureVolume creates or reconciles the exact labeled local OpenCode volume.
-func (p *Provider) EnsureVolume(ctx context.Context, run store.BackgroundRun) (_ Observation, resultErr error) {
+func (p *Provider) EnsureVolume(ctx context.Context, run store.Run) (_ Observation, resultErr error) {
 	digest, err := p.validateRun(run)
 	if err != nil {
 		return Observation{}, err
@@ -102,7 +102,7 @@ func (p *Provider) EnsureVolume(ctx context.Context, run store.BackgroundRun) (_
 
 // inspectRunVolume inspects the run's volume and proves it is the exact
 // quota-backed volume execution may mount.
-func (p *Provider) inspectRunVolume(ctx context.Context, run store.BackgroundRun, digest string) (volume.Volume, error) {
+func (p *Provider) inspectRunVolume(ctx context.Context, run store.Run, digest string) (volume.Volume, error) {
 	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	defer cancel()
 	item, err := p.docker.VolumeInspect(operation, run.VolumeIdentity)
@@ -112,14 +112,14 @@ func (p *Provider) inspectRunVolume(ctx context.Context, run store.BackgroundRun
 	return item, p.attestRunVolume(run, digest, item)
 }
 
-func (p *Provider) attestRunVolume(run store.BackgroundRun, digest string, item volume.Volume) error {
+func (p *Provider) attestRunVolume(run store.Run, digest string, item volume.Volume) error {
 	if err := p.attestVolume(run, digest, item); err != nil {
 		return &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: err.Error()}
 	}
 	return p.attestExecutionVolume(run, item)
 }
 
-func (p *Provider) attestVolume(run store.BackgroundRun, digest string, item volume.Volume) error {
+func (p *Provider) attestVolume(run store.Run, digest string, item volume.Volume) error {
 	if item.Name != run.VolumeIdentity || !maps.Equal(item.Labels, p.labels(run, digest)) {
 		return errors.New("Docker name or labels do not match the immutable run")
 	}
@@ -134,7 +134,7 @@ func (p *Provider) attestVolume(run store.BackgroundRun, digest string, item vol
 
 // EnsureContainer creates the exact stopped container or reconciles a lost
 // create response. It never starts a container.
-func (p *Provider) EnsureContainer(ctx context.Context, run store.BackgroundRun) (_ Observation, resultErr error) {
+func (p *Provider) EnsureContainer(ctx context.Context, run store.Run) (_ Observation, resultErr error) {
 	digest, err := p.validateRun(run)
 	if err != nil {
 		return Observation{}, err
@@ -202,7 +202,7 @@ func (p *Provider) EnsureContainer(ctx context.Context, run store.BackgroundRun)
 
 // StartContainer starts only an exactly attested created container and returns
 // its exact Docker process epoch.
-func (p *Provider) StartContainer(ctx context.Context, run store.BackgroundRun, expectedID string) (_ Observation, resultErr error) {
+func (p *Provider) StartContainer(ctx context.Context, run store.Run, expectedID string) (_ Observation, resultErr error) {
 	digest, err := p.validateRun(run)
 	if err != nil {
 		return Observation{}, err
@@ -269,7 +269,7 @@ func (p *Provider) StartContainer(ctx context.Context, run store.BackgroundRun, 
 // configuration is Fern's own create request, which the spec label binds;
 // destructive and credential operations additionally require the exact
 // committed runtime (requireRuntime).
-func (p *Provider) attestContainer(run store.BackgroundRun, digest string, info container.InspectResponse, requireRunning bool) error {
+func (p *Provider) attestContainer(run store.Run, digest string, info container.InspectResponse, requireRunning bool) error {
 	if info.ContainerJSONBase == nil || info.Config == nil || info.State == nil {
 		return errors.New("Docker returned incomplete container inspection")
 	}
@@ -282,7 +282,7 @@ func (p *Provider) attestContainer(run store.BackgroundRun, digest string, info 
 	return nil
 }
 
-func (p *Provider) expectedEnvironment(run store.BackgroundRun) []string {
+func (p *Provider) expectedEnvironment(run store.Run) []string {
 	environment := make(map[string]string, len(p.imageEnv)+2)
 	maps.Copy(environment, p.imageEnv)
 	environment[usernameEnv] = basicUsername
@@ -350,7 +350,7 @@ func (p *Provider) freshDockerContext(parent context.Context) (context.Context, 
 }
 
 // Health proves exact Basic-auth failures and success for the committed runtime.
-func (p *Provider) Health(ctx context.Context, run store.BackgroundRun, runtime RuntimeIdentity) (Observation, error) {
+func (p *Provider) Health(ctx context.Context, run store.Run, runtime RuntimeIdentity) (Observation, error) {
 	if err := validateCommittedRuntime(runtime); err != nil {
 		return Observation{}, err
 	}
@@ -380,7 +380,7 @@ func (p *Provider) Health(ctx context.Context, run store.BackgroundRun, runtime 
 	}
 }
 
-func (p *Provider) healthOnce(ctx context.Context, run store.BackgroundRun, digest string, runtime RuntimeIdentity) (Observation, error) {
+func (p *Provider) healthOnce(ctx context.Context, run store.Run, digest string, runtime RuntimeIdentity) (Observation, error) {
 	info, err := p.docker.ContainerInspect(ctx, run.ContainerIdentity)
 	if err != nil {
 		return Observation{}, err
@@ -471,7 +471,7 @@ func (p *Provider) requestHealth(ctx context.Context, endpoint, user, password s
 
 // StopContainer attests the exact process epoch before stopping and returns
 // positive non-running writer-inactivity evidence.
-func (p *Provider) StopContainer(ctx context.Context, run store.BackgroundRun, runtime RuntimeIdentity) (Observation, error) {
+func (p *Provider) StopContainer(ctx context.Context, run store.Run, runtime RuntimeIdentity) (Observation, error) {
 	digest, err := p.validateRunForCleanup(run)
 	if err != nil {
 		return Observation{}, err
@@ -524,7 +524,7 @@ func (p *Provider) StopContainer(ctx context.Context, run store.BackgroundRun, r
 // ProveWriterInactive resolves one explicit writer fence from exact
 // provider-owned labels. It never creates a resource and never deletes an
 // identity that was not fully attested.
-func (p *Provider) ProveWriterInactive(ctx context.Context, run store.BackgroundRun) (Observation, WriterFence, error) {
+func (p *Provider) ProveWriterInactive(ctx context.Context, run store.Run) (Observation, WriterFence, error) {
 	digest, err := p.validateRunForCleanup(run)
 	if err != nil {
 		return Observation{}, WriterFence{}, err
@@ -587,7 +587,7 @@ func (p *Provider) ProveWriterInactive(ctx context.Context, run store.Background
 }
 
 // RemoveContainer removes only the exact attested stopped runtime.
-func (p *Provider) RemoveContainer(ctx context.Context, run store.BackgroundRun, authority WriterFence) (Observation, error) {
+func (p *Provider) RemoveContainer(ctx context.Context, run store.Run, authority WriterFence) (Observation, error) {
 	digest, err := p.validateRunForCleanup(run)
 	if err != nil {
 		return Observation{}, err
@@ -643,7 +643,7 @@ func (p *Provider) RemoveContainer(ctx context.Context, run store.BackgroundRun,
 }
 
 // RemoveVolume removes only the exact attested volume after the exact runtime is absent.
-func (p *Provider) RemoveVolume(ctx context.Context, run store.BackgroundRun, authority WriterFence) (_ Observation, resultErr error) {
+func (p *Provider) RemoveVolume(ctx context.Context, run store.Run, authority WriterFence) (_ Observation, resultErr error) {
 	digest, err := p.validateRunForCleanup(run)
 	if err != nil {
 		return Observation{}, err
@@ -706,7 +706,7 @@ func (p *Provider) RemoveVolume(ctx context.Context, run store.BackgroundRun, au
 // requireContainerAbsent proves that no container of this run exists: not
 // under its canonical name, not as containerID (when set), and not under any
 // other name with the run's exact labels.
-func (p *Provider) requireContainerAbsent(ctx context.Context, run store.BackgroundRun, digest, containerID string) error {
+func (p *Provider) requireContainerAbsent(ctx context.Context, run store.Run, digest, containerID string) error {
 	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	defer cancel()
 	if info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity); err == nil {
@@ -719,7 +719,7 @@ func (p *Provider) requireContainerAbsent(ctx context.Context, run store.Backgro
 
 // requireNoStrayContainer is requireContainerAbsent for callers that have
 // already found the canonical name absent.
-func (p *Provider) requireNoStrayContainer(ctx context.Context, run store.BackgroundRun, digest, containerID string) error {
+func (p *Provider) requireNoStrayContainer(ctx context.Context, run store.Run, digest, containerID string) error {
 	if containerID != "" {
 		if _, err := p.docker.ContainerInspect(ctx, containerID); err == nil {
 			return &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "expected container ID exists under another name"}
@@ -737,7 +737,7 @@ func (p *Provider) requireNoStrayContainer(ctx context.Context, run store.Backgr
 	return nil
 }
 
-func (p *Provider) requireVolumeAbsent(ctx context.Context, run store.BackgroundRun, digest string) error {
+func (p *Provider) requireVolumeAbsent(ctx context.Context, run store.Run, digest string) error {
 	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	defer cancel()
 	if item, err := p.docker.VolumeInspect(operation, run.VolumeIdentity); err == nil {
@@ -748,7 +748,7 @@ func (p *Provider) requireVolumeAbsent(ctx context.Context, run store.Background
 	return p.requireNoStrayVolume(operation, run, digest)
 }
 
-func (p *Provider) requireNoStrayVolume(ctx context.Context, run store.BackgroundRun, digest string) error {
+func (p *Provider) requireNoStrayVolume(ctx context.Context, run store.Run, digest string) error {
 	listed, err := p.listRunVolumes(ctx, run, digest)
 	if err != nil {
 		return err
@@ -759,7 +759,7 @@ func (p *Provider) requireNoStrayVolume(ctx context.Context, run store.Backgroun
 	return nil
 }
 
-func (p *Provider) listRunContainers(ctx context.Context, run store.BackgroundRun, digest string) ([]container.Summary, error) {
+func (p *Provider) listRunContainers(ctx context.Context, run store.Run, digest string) ([]container.Summary, error) {
 	items, err := p.docker.ContainerList(ctx, container.ListOptions{All: true, Filters: p.labelFilter(run, digest)})
 	if err != nil {
 		return nil, fmt.Errorf("list exact-labeled run containers: %w", err)
@@ -767,7 +767,7 @@ func (p *Provider) listRunContainers(ctx context.Context, run store.BackgroundRu
 	return items, nil
 }
 
-func (p *Provider) listRunVolumes(ctx context.Context, run store.BackgroundRun, digest string) ([]*volume.Volume, error) {
+func (p *Provider) listRunVolumes(ctx context.Context, run store.Run, digest string) ([]*volume.Volume, error) {
 	response, err := p.docker.VolumeList(ctx, volume.ListOptions{Filters: p.labelFilter(run, digest)})
 	if err != nil {
 		return nil, fmt.Errorf("list exact-labeled run volumes: %w", err)
@@ -776,7 +776,7 @@ func (p *Provider) listRunVolumes(ctx context.Context, run store.BackgroundRun, 
 }
 
 // labelFilter matches resources carrying every one of the run's exact labels.
-func (p *Provider) labelFilter(run store.BackgroundRun, digest string) filters.Args {
+func (p *Provider) labelFilter(run store.Run, digest string) filters.Args {
 	args := filters.NewArgs()
 	for key, value := range p.labels(run, digest) {
 		args.Add("label", key+"="+value)
