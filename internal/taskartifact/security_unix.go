@@ -3,14 +3,11 @@
 package taskartifact
 
 import (
-	"crypto/rand"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"syscall"
 
-	"github.com/nebler/fern/internal/atomicfile"
 	"golang.org/x/sys/unix"
 )
 
@@ -73,21 +70,6 @@ func openPrivateExclusive(path string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), path), nil
 }
 
-func writePrivateFile(path string, value []byte) error {
-	file, err := openPrivateExclusive(path)
-	if err != nil {
-		return err
-	}
-	writeErr := func() error {
-		if _, err := file.Write(value); err != nil {
-			return err
-		}
-		return file.Sync()
-	}()
-	closeErr := file.Close()
-	return errors.Join(writeErr, closeErr)
-}
-
 func openPrivateRead(path string, mode os.FileMode, singleLink bool) (*os.File, os.FileInfo, error) {
 	fd, err := unix.Open(path, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -124,29 +106,4 @@ func changePrivateFileMode(path string, from, to os.FileMode) error {
 		return err
 	}
 	return file.Sync()
-}
-
-func removeExactDirectory(path string, device, inode uint64) error {
-	info, err := os.Lstat(path)
-	if err != nil || !safeDirectoryInfo(info) {
-		return fmt.Errorf("%w: removal target", ErrStorage)
-	}
-	currentDevice, currentInode, err := atomicfile.Identity(info)
-	if err != nil || currentDevice != device || currentInode != inode {
-		return fmt.Errorf("%w: removal identity", ErrStorage)
-	}
-	token := rand.Text()
-	quarantine := filepath.Join(filepath.Dir(path), ".remove-"+token)
-	if err := atomicfile.RenameNoReplace(path, quarantine); err != nil {
-		return err
-	}
-	quarantined, err := os.Lstat(quarantine)
-	qDevice, qInode, identityErr := atomicfile.Identity(quarantined)
-	if err != nil || identityErr != nil || qDevice != device || qInode != inode {
-		return fmt.Errorf("%w: quarantined removal identity", ErrStorage)
-	}
-	if err := os.RemoveAll(quarantine); err != nil {
-		return err
-	}
-	return atomicfile.SyncDir(filepath.Dir(path))
 }

@@ -14,11 +14,9 @@ func exactDirectory(string, bool) (os.FileInfo, error) {
 func privateRoot(string) error                      { return errors.New("unsupported platform") }
 func safeDirectoryInfo(os.FileInfo) bool            { return false }
 func openPrivateExclusive(string) (*os.File, error) { return nil, errors.New("unsupported platform") }
-func writePrivateFile(string, []byte) error         { return errors.New("unsupported platform") }
 func openPrivateRead(string, os.FileMode, bool) (*os.File, os.FileInfo, error) {
 	return nil, nil, errors.New("unsupported platform")
 }
 func changePrivateFileMode(string, os.FileMode, os.FileMode) error {
 	return errors.New("unsupported platform")
 }
-func removeExactDirectory(string, uint64, uint64) error { return errors.New("unsupported platform") }

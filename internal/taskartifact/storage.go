@@ -208,7 +208,7 @@ func (e *Engine) materializeVerified(ctx context.Context, locator Locator, snaps
 		return nil, err
 	}
 	markerPath := checkoutMarkerPath(path)
-	if err := writePrivateFile(markerPath, []byte(token+"\n")); err != nil {
+	if err := atomicfile.WriteExclusive(markerPath, []byte(token+"\n"), 0o600); err != nil {
 		return nil, err
 	}
 	bundle := filepath.Join(e.casRoot, locator.digest.String(), bundleName)
@@ -463,4 +463,22 @@ func readersEqual(left, right io.Reader) (bool, error) {
 			return false, errors.Join(leftErr, rightErr)
 		}
 	}
+}
+
+// removeExactDirectory removes the engine-created directory at path only if
+// it is still a private directory with the given identity, quarantining it
+// first so a replacement is never deleted.
+func removeExactDirectory(path string, device, inode uint64) error {
+	info, err := os.Lstat(path)
+	if err != nil || !safeDirectoryInfo(info) {
+		return fmt.Errorf("%w: removal target", ErrStorage)
+	}
+	if currentDevice, currentInode, err := atomicfile.Identity(info); err != nil || currentDevice != device || currentInode != inode {
+		return fmt.Errorf("%w: removal identity", ErrStorage)
+	}
+	err = atomicfile.QuarantineRemove(path, filepath.Join(filepath.Dir(path), ".remove-"+rand.Text()), device, inode)
+	if errors.Is(err, atomicfile.ErrChanged) {
+		return fmt.Errorf("%w: quarantined removal identity", ErrStorage)
+	}
+	return err
 }

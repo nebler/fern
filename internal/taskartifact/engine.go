@@ -223,10 +223,7 @@ func (e *Engine) Snapshot(ctx context.Context, spec SnapshotSpec) (Snapshot, Sta
 	if len(manifestBytes) > e.outputBytes {
 		return Snapshot{}, StagedLocator{}, ErrOutputLimit
 	}
-	if err := writePrivateFile(filepath.Join(stage, manifestName), manifestBytes); err != nil {
-		return Snapshot{}, StagedLocator{}, err
-	}
-	if err := atomicfile.SyncDir(stage); err != nil {
+	if err := atomicfile.WriteExclusive(filepath.Join(stage, manifestName), manifestBytes, 0o600); err != nil {
 		return Snapshot{}, StagedLocator{}, err
 	}
 	if _, err := e.verifyArtifact(ctx, manifestBytes, bundlePath, 0o600, manifestDigest); err != nil {
