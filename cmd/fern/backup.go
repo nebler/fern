@@ -89,13 +89,13 @@ func runBackupCreate(args []string, _ *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	_, name, err := loadBackupConfig(options)
+	cfg, err := loadBackupConfig(options)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	manifest, err := createBackup(ctx, options, name, *output, recipients)
+	manifest, err := createBackup(ctx, options, cfg.Workspace.Name, *output, recipients)
 	if err != nil {
 		return err
 	}
@@ -132,15 +132,13 @@ func runBackupRestore(args []string, _ *slog.Logger) error {
 	return err
 }
 
-func loadBackupConfig(options backupOptions) (config.Config, string, error) {
+// loadBackupConfig needs only the workspace binding, not live credentials.
+func loadBackupConfig(options backupOptions) (config.Config, error) {
 	cfg, err := loadCommandConfig(options.configPath, options.envPath)
 	if err != nil {
-		return config.Config{}, "", err
+		return config.Config{}, err
 	}
-	if err := config.ValidateWorkspace(cfg); err != nil {
-		return config.Config{}, "", err
-	}
-	return cfg, cfg.Workspace.Name, nil
+	return cfg, config.ValidateWorkspace(cfg)
 }
 
 // backupLeases holds the named workspace lease plus every other lease file in

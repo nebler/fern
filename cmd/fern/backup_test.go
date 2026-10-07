@@ -39,18 +39,18 @@ func TestBackupLoadsOnlyCurrentConfiguration(t *testing.T) {
 		t.Fatal(err)
 	}
 	options := backupOptions{configPath: path, envPath: envPath}
-	cfg, name, err := loadBackupConfig(options)
+	cfg, err := loadBackupConfig(options)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if name != "default" || cfg.Workspace.Repo != directory || cfg.Workspace.GitHub.Repository.ID != 123456789 || cfg.ControlPassword != strings.Repeat("s", 32) {
-		t.Fatalf("backup configuration = %+v, %q", cfg, name)
+	if cfg.Workspace.Name != "default" || cfg.Workspace.Repo != directory || cfg.Workspace.GitHub.Repository.ID != 123456789 || cfg.ControlPassword != strings.Repeat("s", 32) {
+		t.Fatalf("backup configuration = %+v", cfg)
 	}
 	for _, retired := range []string{"  image: retired\n", "  memory: 8Gi\n", "  env: {}\n"} {
 		if err := os.WriteFile(path, []byte(strings.Replace(current, "workspace:\n", "workspace:\n"+retired, 1)), 0600); err != nil {
 			t.Fatal(err)
 		}
-		if _, _, err := loadBackupConfig(options); err == nil {
+		if _, err := loadBackupConfig(options); err == nil {
 			t.Fatalf("backup accepted retired setting %q", retired)
 		}
 	}
