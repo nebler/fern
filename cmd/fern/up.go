@@ -60,7 +60,7 @@ func runUp(args []string, log *slog.Logger) (resultErr error) {
 		return err
 	}
 	defer func() { resultErr = errors.Join(resultErr, runtime.Close()) }()
-	startTaskCoordinators(group, runtime.tasks, serviceCtx)
+	startRunCoordinator(group, runtime.services, serviceCtx)
 	startProxyServers(group, runtime, serviceCtx, log)
 
 	fmt.Printf("repository: %s\nremote: %s\noperator: %s\nbackground: %s\nready in: %s\n",
@@ -77,7 +77,7 @@ func runUp(args []string, log *slog.Logger) (resultErr error) {
 
 type upRuntime struct {
 	state            *taskstore.Store
-	tasks            *taskServices
+	services         *runServices
 	backgroundRoute  *backgroundroute.Manager
 	remoteServer     *http.Server
 	operatorServer   *http.Server
@@ -89,19 +89,19 @@ type upRuntime struct {
 }
 
 func (runtime *upRuntime) Close() error {
-	var taskErr, routeErr, stateErr error
+	var servicesErr, routeErr, stateErr error
 	// Fence attachment admission and close its connections before releasing
 	// the provider and the durable store that back the runtime.
 	if runtime.backgroundRoute != nil {
 		routeErr = runtime.backgroundRoute.Close()
 	}
-	if runtime.tasks != nil {
-		taskErr = runtime.tasks.Close()
+	if runtime.services != nil {
+		servicesErr = runtime.services.Close()
 	}
 	if runtime.state != nil {
 		stateErr = runtime.state.Close()
 	}
-	return errors.Join(taskErr, routeErr, stateErr)
+	return errors.Join(servicesErr, routeErr, stateErr)
 }
 
 func assembleServices(serviceCtx context.Context, cfg config.Config, origins proxy.TrustedOrigins,
@@ -118,7 +118,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 		return nil, errors.Join(cause, route.Close(), state.Close())
 	}
 	status := observability.NewRegistry()
-	var tasks *taskServices
+	var services *runServices
 	if cfg.Workspace.GitHub.InstallationID == 0 {
 		pending := errors.New("GitHub App installation ID is not configured")
 		status.Blocked(observability.ComponentGitHubTaskDependency, pending)
@@ -127,11 +127,11 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 		if err := config.Validate(cfg); err != nil {
 			return fail(err)
 		}
-		tasks, err = newTaskServices(serviceCtx, cfg, state, route, status, log)
+		services, err = newRunServices(serviceCtx, cfg, state, route, status, log)
 		if errors.Is(err, githubapp.ErrCredentialsNotFound) {
 			log.Warn("Background Runs await GitHub App credentials ('fern credentials set') and restart", "repository", cfg.Workspace.Name)
 			status.Blocked(observability.ComponentGitHubTaskDependency, err)
-			tasks, err = nil, nil
+			services, err = nil, nil
 		}
 	}
 	if err != nil {
@@ -141,39 +141,39 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 		http.Error(w, "Background Runs await GitHub App setup", http.StatusServiceUnavailable)
 	}))
 	runs := unavailable
-	if tasks != nil {
-		runs = tasks.runs
+	if services != nil {
+		runs = services.runs
 	}
 	controls := proxy.Controls{Store: control.New(state.DB()), Runs: runs,
 		ControlAuth: proxy.ControlAuth{Password: cfg.ControlPassword}, PluginAuth: pluginauth.New(state.DB()),
 		Liveness: status.LivenessHandler(), Readiness: status.ReadinessHandler()}
 	handlers, err := proxy.NewHandlers(controls, origins)
 	if err != nil {
-		if tasks != nil {
-			_ = tasks.Close()
+		if services != nil {
+			_ = services.Close()
 		}
 		return fail(err)
 	}
-	return &upRuntime{state: state, tasks: tasks, backgroundRoute: route,
+	return &upRuntime{state: state, services: services, backgroundRoute: route,
 		remoteServer:   &http.Server{Handler: handlers.Remote, ReadHeaderTimeout: 10 * time.Second, BaseContext: func(net.Listener) context.Context { return serviceCtx }},
 		operatorServer: &http.Server{Handler: handlers.Operator, ReadHeaderTimeout: 10 * time.Second, BaseContext: func(net.Listener) context.Context { return serviceCtx }},
 		remoteListener: remoteListener, operatorListener: operatorListener,
 		origins: origins, status: status, start: time.Now()}, nil
 }
 
-// startTaskCoordinators runs the serial coordinator; a fatal failure marks it
+// startRunCoordinator runs the serial coordinator; a fatal failure marks it
 // unready and, through the group, stops the other services.
-func startTaskCoordinators(group *errgroup.Group, tasks *taskServices, serviceCtx context.Context) {
-	if tasks == nil {
+func startRunCoordinator(group *errgroup.Group, services *runServices, serviceCtx context.Context) {
+	if services == nil {
 		return
 	}
 	group.Go(func() error {
-		err := tasks.background.Run(serviceCtx)
+		err := services.background.Run(serviceCtx)
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
 		if err != nil {
-			tasks.status.Failed(observability.ComponentBackgroundRunSerial, err)
+			services.status.Failed(observability.ComponentBackgroundRunSerial, err)
 		}
 		return err
 	})

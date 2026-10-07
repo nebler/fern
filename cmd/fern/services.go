@@ -28,26 +28,26 @@ import (
 )
 
 const (
-	taskPollInterval              = time.Second
-	taskOperationTimeout          = 2 * time.Minute
-	taskInspectTimeout            = 15 * time.Second
+	runPollInterval               = time.Second
+	runOperationTimeout           = 2 * time.Minute
+	runInspectTimeout             = 15 * time.Second
 	backgroundCloneTimeout        = 30 * time.Second
 	backgroundCloneAdmissionBytes = 128 << 20
 )
 
-type taskRunService interface {
+type runService interface {
 	Run(context.Context) error
 }
 
-type taskWakeService interface {
-	taskRunService
+type wakeService interface {
+	runService
 	Wake()
 }
 
-type taskServices struct {
+type runServices struct {
 	store      *taskstore.Store
 	runs       http.Handler
-	background taskWakeService
+	background wakeService
 	provider   *taskenvdocker.Provider
 	artifact   *taskartifact.Engine
 	status     *observability.Registry
@@ -55,28 +55,28 @@ type taskServices struct {
 
 // Close releases the artifact engine and Docker provider. The store belongs to
 // the caller, which closes it after these.
-func (services *taskServices) Close() error {
+func (services *runServices) Close() error {
 	return errors.Join(services.artifact.Close(), services.provider.Close())
 }
 
 // openStateStore opens the workspace's single durable SQLite database.
 func openStateStore(ctx context.Context, cfg config.Config) (*taskstore.Store, error) {
-	taskDirectory, err := statePath("tasks")
+	runDirectory, err := statePath("runs")
 	if err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(taskDirectory, 0o700); err != nil {
-		return nil, fmt.Errorf("create task state directory: %w", err)
+	if err := os.MkdirAll(runDirectory, 0o700); err != nil {
+		return nil, fmt.Errorf("create run state directory: %w", err)
 	}
-	return taskstore.Open(ctx, filepath.Join(taskDirectory, cfg.Workspace.Name+".db"))
+	return taskstore.Open(ctx, filepath.Join(runDirectory, cfg.Workspace.Name+".db"))
 }
 
-func newTaskServices(ctx context.Context, cfg config.Config, store *taskstore.Store, route *backgroundroute.Manager, status *observability.Registry, log *slog.Logger) (*taskServices, error) {
+func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Store, route *backgroundroute.Manager, status *observability.Registry, log *slog.Logger) (*runServices, error) {
 	if cfg.Runs.BackgroundImage == "" || cfg.Runs.BackgroundImageID == "" || route == nil {
 		return nil, errors.New("a qualified disposable Background Run profile is required")
 	}
 	github := cfg.Workspace.GitHub
-	taskDirectory, err := statePath("tasks")
+	runDirectory, err := statePath("runs")
 	if err != nil {
 		return nil, err
 	}
@@ -88,7 +88,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, store *taskstore.St
 	}
 	status.Healthy(observability.ComponentGitHubTaskDependency)
 
-	backgroundRoot := filepath.Join(taskDirectory, cfg.Workspace.Name+"-background")
+	backgroundRoot := filepath.Join(runDirectory, cfg.Workspace.Name+"-background")
 	if err := os.MkdirAll(backgroundRoot, 0o700); err != nil {
 		return nil, fmt.Errorf("create background run state root: %w", err)
 	}
@@ -105,7 +105,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, store *taskstore.St
 		}
 	}
 	artifact, err := taskartifact.New(taskartifact.Config{GitExecutable: gitExecutable(), CASRoot: casRoot,
-		WorkRoot: workRoot, CommandTimeout: taskOperationTimeout})
+		WorkRoot: workRoot, CommandTimeout: runOperationTimeout})
 	if err != nil {
 		return nil, err
 	}
@@ -191,7 +191,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, store *taskstore.St
 		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: cfg.Runs.Agent,
 		ModelProvider: cfg.Runs.Model.Provider, Model: cfg.Runs.Model.ID,
 		OperationTimeout: backgroundCloneTimeout,
-		PollInterval:     taskPollInterval, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 100, MaxPages: 100, MaxEvents: 10000},
+		PollInterval:     runPollInterval, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 100, MaxPages: 100, MaxEvents: 10000},
 		Now: time.Now, HTTPClient: &http.Client{Timeout: backgroundCloneTimeout}, Route: route,
 		OnError: func(err error) {
 			status.Degraded(observability.ComponentBackgroundRunSerial, err)
@@ -202,7 +202,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, store *taskstore.St
 	if err != nil {
 		return nil, err
 	}
-	baseVerifier, err := runapi.NewGitBaseVerifier(cfg.Workspace.Repo, gitExecutable(), taskInspectTimeout)
+	baseVerifier, err := runapi.NewGitBaseVerifier(cfg.Workspace.Repo, gitExecutable(), runInspectTimeout)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +222,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, store *taskstore.St
 	status.Qualified(observability.ComponentBackgroundRunProfile)
 	status.Healthy(observability.ComponentBackgroundRunSerial)
 	closeArtifact, closeProvider = false, false
-	return &taskServices{store: store, runs: runs,
+	return &runServices{store: store, runs: runs,
 		background: coordinator, provider: provider, artifact: artifact, status: status}, nil
 }
 

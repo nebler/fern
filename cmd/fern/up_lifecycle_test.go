@@ -16,7 +16,7 @@ func TestFatalBackgroundFailureBlocksReadiness(t *testing.T) {
 	status := observability.NewRegistry()
 	status.Healthy(observability.ComponentBackgroundRunSerial)
 	group, ctx := errgroup.WithContext(context.Background())
-	startTaskCoordinators(group, &taskServices{background: failingService{taskstore.ErrCorruptStore}, status: status}, ctx)
+	startRunCoordinator(group, &runServices{background: failingService{taskstore.ErrCorruptStore}, status: status}, ctx)
 	if err := group.Wait(); !errors.Is(err, taskstore.ErrCorruptStore) {
 		t.Fatalf("supervision error = %v", err)
 	}

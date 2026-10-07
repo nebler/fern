@@ -202,7 +202,7 @@ func backupIncluded(relative string) bool {
 	if parts[0] == "locks" || isSQLiteSidecar(parts[len(parts)-1]) {
 		return false
 	}
-	if len(parts) >= 3 && parts[0] == "tasks" && strings.HasSuffix(parts[1], "-background") {
+	if len(parts) >= 3 && parts[0] == "runs" && strings.HasSuffix(parts[1], "-background") {
 		switch parts[2] {
 		case "artifact-work":
 			return false

@@ -105,18 +105,18 @@ func (fixture backupFixture) seed(t *testing.T, marker string) string {
 	t.Helper()
 	state := fixture.options.stateDirectory
 	for relative, value := range map[string]string{
-		"github-app/app-credentials.json":                            `{"private_key":"secret-app-key"}`,
-		"tasks/demo-background/artifact-cas/sha256:abc/manifest":     "artifact-" + marker,
-		"tasks/demo-background/artifact-work/scratch":                "scratch",
-		"tasks/demo-background/runtime/background-runs/host.key":     "secret-host-key-0123456789abcdef",
-		"tasks/demo-background/runtime/background-runs/clone/README": "clone",
+		"github-app/app-credentials.json":                           `{"private_key":"secret-app-key"}`,
+		"runs/demo-background/artifact-cas/sha256:abc/manifest":     "artifact-" + marker,
+		"runs/demo-background/artifact-work/scratch":                "scratch",
+		"runs/demo-background/runtime/background-runs/host.key":     "secret-host-key-0123456789abcdef",
+		"runs/demo-background/runtime/background-runs/clone/README": "clone",
 		"locks/other.lock": "",
 	} {
 		writeTestFile(t, filepath.Join(state, relative), value)
 	}
 	writeTestFile(t, fixture.options.configPath, "workspace:\n  name: demo\n")
 	writeTestFile(t, fixture.options.envPath, "FERN_CONTROL_PASSWORD=secret-control-password\n")
-	database := filepath.Join(state, "tasks", "demo.db")
+	database := filepath.Join(state, "runs", "demo.db")
 	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(database)+"?mode=rwc")
 	if err != nil {
 		t.Fatal(err)
@@ -180,8 +180,8 @@ func TestBackupRoundTripEncryptsSecretsAndRefusesExistingState(t *testing.T) {
 	for _, entry := range manifest.Files {
 		paths[entry.Path] = true
 	}
-	for _, excluded := range []string{"state/locks/other.lock", "state/tasks/demo.db-wal",
-		"state/tasks/demo-background/artifact-work/scratch", "state/tasks/demo-background/runtime/background-runs/clone/README"} {
+	for _, excluded := range []string{"state/locks/other.lock", "state/runs/demo.db-wal",
+		"state/runs/demo-background/artifact-work/scratch", "state/runs/demo-background/runtime/background-runs/clone/README"} {
 		if paths[excluded] {
 			t.Fatalf("backup captured disposable %s", excluded)
 		}
@@ -195,22 +195,22 @@ func TestBackupRoundTripEncryptsSecretsAndRefusesExistingState(t *testing.T) {
 	}
 	state := target.options.stateDirectory
 	for relative, want := range map[string]string{
-		"github-app/app-credentials.json":                        `{"private_key":"secret-app-key"}`,
-		"tasks/demo-background/artifact-cas/sha256:abc/manifest": "artifact-a",
-		"tasks/demo-background/runtime/background-runs/host.key": "secret-host-key-0123456789abcdef",
+		"github-app/app-credentials.json":                       `{"private_key":"secret-app-key"}`,
+		"runs/demo-background/artifact-cas/sha256:abc/manifest": "artifact-a",
+		"runs/demo-background/runtime/background-runs/host.key": "secret-host-key-0123456789abcdef",
 	} {
 		if got := readTestFile(t, filepath.Join(state, relative)); got != want {
 			t.Fatalf("%s = %q, want %q", relative, got, want)
 		}
 	}
-	if got := readRun(t, filepath.Join(state, "tasks", "demo.db")); got != "a" {
+	if got := readRun(t, filepath.Join(state, "runs", "demo.db")); got != "a" {
 		t.Fatalf("restored run = %q", got)
 	}
 	if !strings.Contains(readTestFile(t, target.options.envPath), "secret-control-password") ||
 		readTestFile(t, target.options.configPath) != "workspace:\n  name: demo\n" {
 		t.Fatal("configuration was not restored")
 	}
-	if pathExists(filepath.Join(state, "tasks/demo-background/artifact-work")) {
+	if pathExists(filepath.Join(state, "runs/demo-background/artifact-work")) {
 		t.Fatal("restore produced disposable state")
 	}
 
@@ -401,18 +401,18 @@ func TestBackupIncludedKeepsAuthorityAndDropsDisposableWork(t *testing.T) {
 	t.Parallel()
 	for relative, want := range map[string]bool{
 		"github-app/app-credentials.json": true,
-		"tasks/demo.db":                   true,
-		"tasks/demo.db-wal":               false,
-		"tasks/demo.db-shm":               false,
-		"tasks/demo-background/artifact-cas/sha256:a/manifest":        true,
-		"tasks/demo-background/runtime":                               true,
-		"tasks/demo-background/runtime/background-runs":               true,
-		"tasks/demo-background/runtime/background-runs/host.key":      true,
-		"tasks/demo-background/runtime/background-runs/clone":         false,
-		"tasks/demo-background/runtime/background-runs/.clone-lock-x": false,
-		"tasks/demo-background/artifact-work":                         false,
-		"locks":                                                       false,
-		"locks/abc.lock":                                              false,
+		"runs/demo.db":                    true,
+		"runs/demo.db-wal":                false,
+		"runs/demo.db-shm":                false,
+		"runs/demo-background/artifact-cas/sha256:a/manifest":        true,
+		"runs/demo-background/runtime":                               true,
+		"runs/demo-background/runtime/background-runs":               true,
+		"runs/demo-background/runtime/background-runs/host.key":      true,
+		"runs/demo-background/runtime/background-runs/clone":         false,
+		"runs/demo-background/runtime/background-runs/.clone-lock-x": false,
+		"runs/demo-background/artifact-work":                         false,
+		"locks":                                                      false,
+		"locks/abc.lock":                                             false,
 	} {
 		if got := backupIncluded(relative); got != want {
 			t.Errorf("backupIncluded(%q) = %v, want %v", relative, got, want)
@@ -476,7 +476,7 @@ func TestBackupCommandsRoundTripAHost(t *testing.T) {
 	if err := run(restore, log); err != nil {
 		t.Fatal(err)
 	}
-	for _, path := range []string{"github-app/app-credentials.json", "tasks/demo-background/runtime/background-runs/host.key"} {
+	for _, path := range []string{"github-app/app-credentials.json", "runs/demo-background/runtime/background-runs/host.key"} {
 		if readTestFile(t, filepath.Join(target.stateDirectory, path)) != readTestFile(t, filepath.Join(source.options.stateDirectory, path)) {
 			t.Fatalf("restored %s differs", path)
 		}
@@ -484,10 +484,10 @@ func TestBackupCommandsRoundTripAHost(t *testing.T) {
 	if readTestFile(t, target.configPath) != configuration || readTestFile(t, target.envPath) != readTestFile(t, source.options.envPath) {
 		t.Fatal("restored configuration differs")
 	}
-	if got := readRun(t, filepath.Join(target.stateDirectory, "tasks", "demo.db")); got != "a" {
+	if got := readRun(t, filepath.Join(target.stateDirectory, "runs", "demo.db")); got != "a" {
 		t.Fatalf("restored run = %q", got)
 	}
-	if pathExists(filepath.Join(target.stateDirectory, "tasks/demo-background/artifact-work")) {
+	if pathExists(filepath.Join(target.stateDirectory, "runs/demo-background/artifact-work")) {
 		t.Fatal("restore produced disposable scratch")
 	}
 	if err := run(restore, log); err == nil || !strings.Contains(err.Error(), "Fern state exists") {
