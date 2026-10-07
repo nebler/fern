@@ -25,7 +25,6 @@ import (
 
 	"filippo.io/age"
 	"github.com/nebler/fern/internal/config"
-	"github.com/nebler/fern/internal/credentialbundle"
 	"github.com/nebler/fern/internal/hostlease"
 	_ "modernc.org/sqlite"
 )
@@ -86,7 +85,7 @@ func runBackupCreate(args []string, _ *slog.Logger) error {
 	if options.stateDirectory == "" {
 		return errors.New("cannot determine Fern state directory")
 	}
-	recipients, err := credentialbundle.ParseRecipients(recipientFlags)
+	recipients, err := parseAgeRecipients(recipientFlags)
 	if err != nil {
 		return err
 	}
@@ -119,7 +118,7 @@ func runBackupRestore(args []string, _ *slog.Logger) error {
 	if options.stateDirectory == "" {
 		return errors.New("cannot determine Fern state directory")
 	}
-	identities, err := credentialbundle.LoadIdentities(identityPaths)
+	identities, err := loadAgeIdentities(identityPaths)
 	if err != nil {
 		return err
 	}
