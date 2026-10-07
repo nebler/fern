@@ -90,7 +90,7 @@ artifact/result tuples agree, resolves through `taskresultsource`, and materiali
 two independent checkouts containing both changes. Those checkouts must not reuse
 the disposable clone and must disappear when closed.
 
-These fixtures use the current task-store schema **9** and runtime resource spec
+These fixtures use the current task-store schema **10** and runtime resource spec
 **10**. Control-state schema **2** is a host control-plane contract, not a store
 opened by this harness. There is no host publication or verification pipeline.
 The fixture's direct Git writes create retention test data; they do not imply
