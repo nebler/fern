@@ -16,9 +16,7 @@ func TestFatalBackgroundFailureBlocksReadiness(t *testing.T) {
 	status := observability.NewRegistry()
 	status.Healthy(observability.ComponentBackgroundRunSerial)
 	group, ctx := errgroup.WithContext(context.Background())
-	goComponent(group, ctx, status, observability.ComponentBackgroundRunSerial, func(context.Context) error {
-		return taskstore.ErrCorruptStore
-	})
+	startTaskCoordinators(group, &taskServices{background: failingService{taskstore.ErrCorruptStore}, status: status}, ctx)
 	if err := group.Wait(); !errors.Is(err, taskstore.ErrCorruptStore) {
 		t.Fatalf("supervision error = %v", err)
 	}
@@ -31,3 +29,8 @@ func TestFatalBackgroundFailureBlocksReadiness(t *testing.T) {
 		t.Fatal("fatal failure did not cancel sibling services")
 	}
 }
+
+type failingService struct{ err error }
+
+func (service failingService) Run(context.Context) error { return service.err }
+func (failingService) Wake()                             {}

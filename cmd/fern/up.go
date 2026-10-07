@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -37,17 +36,16 @@ func runUp(args []string, log *slog.Logger) (resultErr error) {
 	if err := config.ValidateBootstrap(cfg); err != nil {
 		return err
 	}
-	remoteListener, operatorListener, err := listenProxySurfaces(cfg.Proxy.Listen, cfg.Proxy.OperatorListen)
-	if err != nil {
-		return err
+	var listeners [3]net.Listener
+	for index, address := range []string{cfg.Proxy.Listen, cfg.Proxy.OperatorListen, cfg.Runs.BackgroundRoute.Listen} {
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			return fmt.Errorf("listen on %s: %w", address, err)
+		}
+		defer func() { _ = listener.Close() }()
+		listeners[index] = listener
 	}
-	defer func() { _ = remoteListener.Close() }()
-	defer func() { _ = operatorListener.Close() }()
-	backgroundListener, err := listenBackgroundRoute(cfg)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = backgroundListener.Close() }()
+	remoteListener, operatorListener, backgroundListener := listeners[0], listeners[1], listeners[2]
 
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
@@ -85,7 +83,6 @@ type upRuntime struct {
 	operatorServer   *http.Server
 	remoteListener   net.Listener
 	operatorListener net.Listener
-	connections      *connectionTracker
 	origins          proxy.TrustedOrigins
 	status           *observability.Registry
 	start            time.Time
@@ -157,30 +154,26 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 		}
 		return fail(err)
 	}
-	connections := newConnectionTracker()
 	return &upRuntime{state: state, tasks: tasks, backgroundRoute: route,
 		remoteServer:   &http.Server{Handler: handlers.Remote, ReadHeaderTimeout: 10 * time.Second, BaseContext: func(net.Listener) context.Context { return serviceCtx }},
 		operatorServer: &http.Server{Handler: handlers.Operator, ReadHeaderTimeout: 10 * time.Second, BaseContext: func(net.Listener) context.Context { return serviceCtx }},
-		remoteListener: remoteListener, operatorListener: operatorListener, connections: connections,
+		remoteListener: remoteListener, operatorListener: operatorListener,
 		origins: origins, status: status, start: time.Now()}, nil
 }
 
+// startTaskCoordinators runs the serial coordinator; a fatal failure marks it
+// unready and, through the group, stops the other services.
 func startTaskCoordinators(group *errgroup.Group, tasks *taskServices, serviceCtx context.Context) {
 	if tasks == nil {
 		return
 	}
-	goComponent(group, serviceCtx, tasks.status, observability.ComponentBackgroundRunSerial, tasks.background.Run)
-}
-
-func goComponent(group *errgroup.Group, serviceCtx context.Context, status *observability.Registry,
-	component observability.Component, service func(context.Context) error) {
 	group.Go(func() error {
-		err := service(serviceCtx)
+		err := tasks.background.Run(serviceCtx)
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
 		if err != nil {
-			status.Failed(component, err)
+			tasks.status.Failed(observability.ComponentBackgroundRunSerial, err)
 		}
 		return err
 	})
@@ -193,13 +186,16 @@ func startProxyServers(group *errgroup.Group, runtime *upRuntime, serviceCtx con
 		listener net.Listener
 	}{{runtime.remoteServer, runtime.remoteListener}, {runtime.operatorServer, runtime.operatorListener}} {
 		group.Go(func() error {
-			err := serving.server.Serve(runtime.connections.wrap(serving.listener))
+			err := serving.server.Serve(serving.listener)
 			if errors.Is(err, http.ErrServerClosed) {
 				return nil
 			}
 			return err
 		})
 	}
+	// Neither server hijacks connections (live attachment WebSockets are served
+	// by the background route, which closes its own), so Shutdown and Close
+	// account for every connection.
 	group.Go(func() error {
 		<-serviceCtx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -209,17 +205,8 @@ func startProxyServers(group *errgroup.Group, runtime *upRuntime, serviceCtx con
 			log.Warn("graceful HTTP shutdown timed out", "err", err)
 			return errors.Join(err, runtime.remoteServer.Close(), runtime.operatorServer.Close())
 		}
-		runtime.connections.closeAll()
 		return nil
 	})
-}
-
-func listenBackgroundRoute(cfg config.Config) (net.Listener, error) {
-	listener, err := net.Listen("tcp", cfg.Runs.BackgroundRoute.Listen)
-	if err != nil {
-		return nil, fmt.Errorf("listen on Background Run route %s: %w", cfg.Runs.BackgroundRoute.Listen, err)
-	}
-	return listener, nil
 }
 
 func trustedProxyOrigins(cfg config.Config) proxy.TrustedOrigins {
@@ -228,69 +215,4 @@ func trustedProxyOrigins(cfg config.Config) proxy.TrustedOrigins {
 		remote = "http://" + cfg.Proxy.Listen
 	}
 	return proxy.TrustedOrigins{Remote: remote, Operator: "http://" + cfg.Proxy.OperatorListen}
-}
-
-func listenProxySurfaces(remoteAddress, operatorAddress string) (net.Listener, net.Listener, error) {
-	remote, err := net.Listen("tcp", remoteAddress)
-	if err != nil {
-		return nil, nil, fmt.Errorf("listen on %s: %w", remoteAddress, err)
-	}
-	operator, err := net.Listen("tcp", operatorAddress)
-	if err != nil {
-		_ = remote.Close()
-		return nil, nil, fmt.Errorf("listen on %s: %w", operatorAddress, err)
-	}
-	return remote, operator, nil
-}
-
-type connectionTracker struct {
-	mu    sync.Mutex
-	conns map[net.Conn]struct{}
-}
-
-type trackedListener struct {
-	net.Listener
-	tracker *connectionTracker
-}
-
-type trackedConnection struct {
-	net.Conn
-	tracker *connectionTracker
-}
-
-func newConnectionTracker() *connectionTracker {
-	return &connectionTracker{conns: make(map[net.Conn]struct{})}
-}
-func (tracker *connectionTracker) wrap(listener net.Listener) net.Listener {
-	return &trackedListener{Listener: listener, tracker: tracker}
-}
-func (listener *trackedListener) Accept() (net.Conn, error) {
-	connection, err := listener.Listener.Accept()
-	if err != nil {
-		return nil, err
-	}
-	tracked := &trackedConnection{Conn: connection, tracker: listener.tracker}
-	listener.tracker.mu.Lock()
-	listener.tracker.conns[tracked] = struct{}{}
-	listener.tracker.mu.Unlock()
-	return tracked, nil
-}
-func (connection *trackedConnection) Close() error {
-	err := connection.Conn.Close()
-	connection.tracker.mu.Lock()
-	delete(connection.tracker.conns, connection)
-	connection.tracker.mu.Unlock()
-	return err
-}
-func (tracker *connectionTracker) closeAll() {
-	tracker.mu.Lock()
-	connections := make([]net.Conn, 0, len(tracker.conns))
-	for connection := range tracker.conns {
-		connections = append(connections, connection)
-		delete(tracker.conns, connection)
-	}
-	tracker.mu.Unlock()
-	for _, connection := range connections {
-		_ = connection.Close()
-	}
 }

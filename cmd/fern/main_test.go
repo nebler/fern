@@ -1,7 +1,6 @@
 package main
 
 import (
-	"net"
 	"strings"
 	"testing"
 )
@@ -28,25 +27,6 @@ func TestLoopbackURLUsesReachableAddress(t *testing.T) {
 		if _, err := loopbackURL(address); err == nil {
 			t.Fatalf("loopbackURL accepted non-loopback address %q", address)
 		}
-	}
-}
-
-func TestTrackedConnectionRemovesItselfOnClose(t *testing.T) {
-	t.Parallel()
-	tracker := newConnectionTracker()
-	left, right := net.Pipe()
-	defer right.Close()
-	tracked := &trackedConnection{Conn: left, tracker: tracker}
-	tracker.mu.Lock()
-	tracker.conns[tracked] = struct{}{}
-	tracker.mu.Unlock()
-	if err := tracked.Close(); err != nil {
-		t.Fatal(err)
-	}
-	tracker.mu.Lock()
-	defer tracker.mu.Unlock()
-	if len(tracker.conns) != 0 {
-		t.Fatalf("tracker retained %d closed connections", len(tracker.conns))
 	}
 }
 
