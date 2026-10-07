@@ -56,7 +56,8 @@ func (p *Provider) AcquireExportSource(ctx context.Context, run taskstore.Backgr
 	if err != nil {
 		return nil, err
 	}
-	if _, err := validateCleanupAuthority(fence); err != nil {
+	kind, err := validateCleanupAuthority(fence)
+	if err != nil {
 		return nil, err
 	}
 	if err := p.attestExportRoot(); err != nil {
@@ -80,7 +81,7 @@ func (p *Provider) AcquireExportSource(ctx context.Context, run taskstore.Backgr
 	if err != nil {
 		return nil, exportIdentityError(run, "private clone authority is not exact")
 	}
-	if err := p.requireExportWriterInactive(ctx, run, digest, fence); err != nil {
+	if err := p.requireExportWriterInactive(ctx, run, digest, kind, fence); err != nil {
 		return nil, err
 	}
 
@@ -147,28 +148,16 @@ func (p *Provider) readExportClone(run taskstore.BackgroundRun, digest string) (
 	return marker, info, device, inode, nil
 }
 
-func (p *Provider) requireExportWriterInactive(ctx context.Context, run taskstore.BackgroundRun, digest string, fence WriterFence) error {
-	kind, err := validateCleanupAuthority(fence)
-	if err != nil {
-		return err
-	}
+func (p *Provider) requireExportWriterInactive(ctx context.Context, run taskstore.BackgroundRun, digest string, kind WriterFenceKind, fence WriterFence) error {
 	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	defer cancel()
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	if errdefs.IsNotFound(err) {
-		if fence.ContainerID() != "" {
-			if _, idErr := p.docker.ContainerInspect(operation, fence.ContainerID()); idErr == nil {
-				return exportIdentityError(run, "fenced container exists under another name")
-			} else if !errdefs.IsNotFound(idErr) {
-				return exportDockerError(ctx)
-			}
-		}
-		listed, listErr := p.listRunContainers(operation, run, digest)
-		if listErr != nil {
+		var identity *IdentityError
+		if err := p.requireNoStrayContainer(operation, run, digest, fence.ContainerID()); errors.As(err, &identity) {
+			return exportIdentityError(run, identity.Reason)
+		} else if err != nil {
 			return exportDockerError(ctx)
-		}
-		if len(listed) != 0 {
-			return exportIdentityError(run, "an exact-labeled replacement container exists")
 		}
 		return nil
 	}

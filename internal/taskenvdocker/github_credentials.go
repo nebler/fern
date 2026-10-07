@@ -45,11 +45,8 @@ func (p *Provider) RefreshGitHubCredentials(ctx context.Context, run taskstore.B
 	}
 	p.lifecycle.githubMu.Lock()
 	defer p.lifecycle.githubMu.Unlock()
-	p.lifecycle.mu.Lock()
-	closed := p.lifecycle.closed
-	p.lifecycle.mu.Unlock()
-	if closed {
-		return ErrProviderClosed
+	if err := p.requireOpen(); err != nil {
+		return err
 	}
 	digest, err := p.validateRun(run)
 	if err != nil {

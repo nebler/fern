@@ -270,27 +270,12 @@ func New(ctx context.Context, config Config, api dockerAPI) (*Provider, error) {
 		}
 		api = owned
 	}
-	operation, cancel := context.WithTimeout(ctx, config.DockerTimeout)
-	defer cancel()
-	inspection, err := api.ImageInspect(operation, config.ImageReference)
+	inspection, imageEnv, err := inspectQualifiedImage(ctx, api, config)
 	if err != nil {
-		if owned != nil {
-			_ = owned.Close()
-		}
-		return nil, fmt.Errorf("inspect qualified background image: %w", err)
-	}
-	if err := qualifyImage(inspection, config.ImageID); err != nil {
 		if owned != nil {
 			_ = owned.Close()
 		}
 		return nil, err
-	}
-	imageEnv, err := parseEnvironment(inspection.Config.Env)
-	if err != nil {
-		if owned != nil {
-			_ = owned.Close()
-		}
-		return nil, fmt.Errorf("qualified image environment: %w", err)
 	}
 	httpClient := &http.Client{Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	return &Provider{config: config, docker: api, ownedCLI: owned, root: root, rootDevice: rootDevice, rootInode: rootInode, hostKey: hostKey, imageEnv: imageEnv, imageLabels: maps.Clone(inspection.Config.Labels), http: httpClient, lifecycle: &providerLifecycle{}}, nil
@@ -508,6 +493,23 @@ func validateConfig(c Config) error {
 		}
 	}
 	return nil
+}
+
+func inspectQualifiedImage(ctx context.Context, api dockerAPI, config Config) (image.InspectResponse, map[string]string, error) {
+	operation, cancel := context.WithTimeout(ctx, config.DockerTimeout)
+	defer cancel()
+	inspection, err := api.ImageInspect(operation, config.ImageReference)
+	if err != nil {
+		return image.InspectResponse{}, nil, fmt.Errorf("inspect qualified background image: %w", err)
+	}
+	if err := qualifyImage(inspection, config.ImageID); err != nil {
+		return image.InspectResponse{}, nil, err
+	}
+	imageEnv, err := parseEnvironment(inspection.Config.Env)
+	if err != nil {
+		return image.InspectResponse{}, nil, fmt.Errorf("qualified image environment: %w", err)
+	}
+	return inspection, imageEnv, nil
 }
 
 func qualifyImage(got image.InspectResponse, want string) error {

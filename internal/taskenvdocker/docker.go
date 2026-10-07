@@ -73,38 +73,50 @@ func (p *Provider) EnsureVolume(ctx context.Context, run taskstore.BackgroundRun
 		return Observation{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
-	want := p.labels(run, digest)
 	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
+	defer cancel()
 	existing, err := p.docker.VolumeInspect(operation, run.VolumeIdentity)
 	status := "reconciled"
 	if errdefs.IsNotFound(err) {
 		status = "created"
 		if err := p.prepareVolumeBacking(run); err != nil {
-			cancel()
 			return Observation{}, err
 		}
-		_, createErr := p.docker.VolumeCreate(operation, volume.CreateOptions{Name: run.VolumeIdentity, Driver: "local", Labels: want, DriverOpts: p.volumeOptions(run)})
-		cancel()
+		_, createErr := p.docker.VolumeCreate(operation, volume.CreateOptions{Name: run.VolumeIdentity, Driver: "local", Labels: p.labels(run, digest), DriverOpts: p.volumeOptions(run)})
 		read, readCancel := p.freshDockerContext(ctx)
+		defer readCancel()
 		existing, err = p.docker.VolumeInspect(read, run.VolumeIdentity)
-		readCancel()
 		if err != nil {
 			return Observation{}, errors.Join(fmt.Errorf("create background run volume: %w", createErr), fmt.Errorf("reconcile created volume: %w", err))
 		}
-	} else {
-		cancel()
 	}
 	if err != nil {
 		return Observation{}, fmt.Errorf("ensure background run volume: %w", err)
 	}
-	if err := p.attestVolume(run, digest, existing); err != nil {
-		return Observation{}, &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: err.Error()}
-	}
-	if err := p.attestExecutionVolume(run, existing); err != nil {
+	if err := p.attestRunVolume(run, digest, existing); err != nil {
 		return Observation{}, err
 	}
 	e, _ := makeEvidence(evidence{Effect: "volume", Identity: run.VolumeIdentity, Spec: digest, Status: status})
 	return Observation{Evidence: e}, nil
+}
+
+// inspectRunVolume inspects the run's volume and proves it is the exact
+// quota-backed volume execution may mount.
+func (p *Provider) inspectRunVolume(ctx context.Context, run taskstore.BackgroundRun, digest string) (volume.Volume, error) {
+	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
+	defer cancel()
+	item, err := p.docker.VolumeInspect(operation, run.VolumeIdentity)
+	if err != nil {
+		return volume.Volume{}, fmt.Errorf("inspect background run volume: %w", err)
+	}
+	return item, p.attestRunVolume(run, digest, item)
+}
+
+func (p *Provider) attestRunVolume(run taskstore.BackgroundRun, digest string, item volume.Volume) error {
+	if err := p.attestVolume(run, digest, item); err != nil {
+		return &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: err.Error()}
+	}
+	return p.attestExecutionVolume(run, item)
 }
 
 func (p *Provider) attestVolume(run taskstore.BackgroundRun, digest string, item volume.Volume) error {
@@ -132,19 +144,11 @@ func (p *Provider) EnsureContainer(ctx context.Context, run taskstore.Background
 		return Observation{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
-	volumeOperation, volumeCancel := context.WithTimeout(ctx, p.config.DockerTimeout)
-	item, err := p.docker.VolumeInspect(volumeOperation, run.VolumeIdentity)
-	volumeCancel()
-	if err != nil {
-		return Observation{}, fmt.Errorf("inspect background run volume before container create: %w", err)
-	}
-	if err := p.attestVolume(run, digest, item); err != nil {
-		return Observation{}, &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: err.Error()}
-	}
-	if err := p.attestExecutionVolume(run, item); err != nil {
+	if _, err := p.inspectRunVolume(ctx, run, digest); err != nil {
 		return Observation{}, err
 	}
 	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
+	defer cancel()
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	status := "reconciled"
 	if errdefs.IsNotFound(err) {
@@ -170,10 +174,9 @@ func (p *Provider) EnsureContainer(ctx context.Context, run taskstore.Background
 			ReadonlyPaths: slices.Clone(expectedReadonlyPaths),
 		}, &network.NetworkingConfig{}, nil, run.ContainerIdentity)
 		status = "created"
-		cancel()
 		read, readCancel := p.freshDockerContext(ctx)
+		defer readCancel()
 		info, err = p.docker.ContainerInspect(read, run.ContainerIdentity)
-		readCancel()
 		if err != nil {
 			return Observation{}, errors.Join(fmt.Errorf("create background run container: %w", createErr), fmt.Errorf("reconcile created container: %w", err))
 		}
@@ -183,11 +186,8 @@ func (p *Provider) EnsureContainer(ctx context.Context, run taskstore.Background
 		if createErr != nil {
 			status = "reconciled"
 		}
-	} else {
-		cancel()
-		if err != nil {
-			return Observation{}, fmt.Errorf("inspect background run container: %w", err)
-		}
+	} else if err != nil {
+		return Observation{}, fmt.Errorf("inspect background run container: %w", err)
 	}
 	// A container Fern just created from its own request needs no attestation;
 	// one found by name (pre-existing or a lost create response) does.
@@ -212,16 +212,8 @@ func (p *Provider) StartContainer(ctx context.Context, run taskstore.BackgroundR
 		return Observation{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
-	volumeCtx, volumeCancel := context.WithTimeout(ctx, p.config.DockerTimeout)
-	storage, storageErr := p.docker.VolumeInspect(volumeCtx, run.VolumeIdentity)
-	volumeCancel()
-	if storageErr != nil {
-		return Observation{}, storageErr
-	}
-	if err := p.attestVolume(run, digest, storage); err != nil {
-		return Observation{}, err
-	}
-	if err := p.attestExecutionVolume(run, storage); err != nil {
+	storage, err := p.inspectRunVolume(ctx, run, digest)
+	if err != nil {
 		return Observation{}, err
 	}
 	storageCtx, storageCancel := context.WithTimeout(ctx, p.config.DockerTimeout)
@@ -235,36 +227,30 @@ func (p *Provider) StartContainer(ctx context.Context, run taskstore.BackgroundR
 		}
 	}
 	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
+	defer cancel()
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	if err != nil {
-		cancel()
-		return Observation{}, err
+		return Observation{}, fmt.Errorf("inspect background run container: %w", err)
 	}
 	if expectedID == "" || info.ID != expectedID {
-		cancel()
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "container ID does not match committed observation"}
 	}
 	if err := p.attestContainer(run, digest, info, false); err != nil {
-		cancel()
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
 	}
 	status := "running"
 	if !info.State.Running {
 		if info.State.Status != "created" {
-			cancel()
 			return Observation{}, fmt.Errorf("container is %s: %w", info.State.Status, ErrRuntimeExited)
 		}
 		status = "started"
 		startErr := p.docker.ContainerStart(operation, expectedID, container.StartOptions{})
-		cancel()
 		read, readCancel := p.freshDockerContext(ctx)
+		defer readCancel()
 		info, err = p.docker.ContainerInspect(read, run.ContainerIdentity)
-		readCancel()
 		if err != nil || info.ID != expectedID || info.State == nil || !info.State.Running {
 			return Observation{}, errors.Join(fmt.Errorf("start background run container: %w", startErr), err)
 		}
-	} else {
-		cancel()
 	}
 	runtime, epoch, err := runtimeIdentity(info)
 	if err != nil {
@@ -494,55 +480,45 @@ func (p *Provider) StopContainer(ctx context.Context, run taskstore.BackgroundRu
 		return Observation{}, err
 	}
 	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout+p.config.StopGrace)
-	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
-	if errdefs.IsNotFound(err) {
-		if _, idErr := p.docker.ContainerInspect(operation, runtime.ContainerID); idErr == nil {
-			cancel()
-			return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "committed container ID exists under another name"}
-		} else if !errdefs.IsNotFound(idErr) {
-			cancel()
-			return Observation{}, idErr
-		}
-		cancel()
-		e, _ := makeEvidence(evidence{Effect: "writer_inactive", Identity: run.ContainerIdentity, Spec: digest, Status: "absent", Container: runtime.ContainerID, Started: runtime.StartedAt, Runtime: runtime.Token})
+	defer cancel()
+	inactive := func(status string) (Observation, error) {
+		e, _ := makeEvidence(evidence{Effect: "writer_inactive", Identity: run.ContainerIdentity, Spec: digest, Status: status, Container: runtime.ContainerID, Started: runtime.StartedAt, Runtime: runtime.Token})
 		return Observation{Evidence: e, ContainerID: runtime.ContainerID, ContainerStarted: runtime.StartedAt, RuntimeToken: runtime.Token}, nil
 	}
+	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
+	if errdefs.IsNotFound(err) {
+		if err := p.requireNoStrayContainer(operation, run, digest, runtime.ContainerID); err != nil {
+			return Observation{}, err
+		}
+		return inactive("absent")
+	}
 	if err != nil {
-		cancel()
-		return Observation{}, err
+		return Observation{}, fmt.Errorf("inspect background run container: %w", err)
 	}
 	if info.ID != runtime.ContainerID {
-		cancel()
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "container ID does not match stop authority"}
 	}
 	if err := p.attestContainer(run, digest, info, false); err != nil {
-		cancel()
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
 	}
 	if err := requireRuntime(info, runtime); err != nil {
-		cancel()
 		return Observation{}, err
 	}
-	status := "already_stopped"
-	if info.State.Running {
-		seconds := int(p.config.StopGrace / time.Second)
-		status = "stopped"
-		stopErr := p.docker.ContainerStop(operation, runtime.ContainerID, container.StopOptions{Timeout: &seconds})
-		cancel()
-		read, readCancel := p.freshDockerContext(ctx)
-		info, err = p.docker.ContainerInspect(read, run.ContainerIdentity)
-		readCancel()
-		if err != nil || info.ID != runtime.ContainerID || info.State == nil || info.State.Running {
-			return Observation{}, errors.Join(fmt.Errorf("stop exact container: %w", stopErr), err)
-		}
-	} else {
-		cancel()
+	if !info.State.Running {
+		return inactive("already_stopped")
+	}
+	seconds := int(p.config.StopGrace / time.Second)
+	stopErr := p.docker.ContainerStop(operation, runtime.ContainerID, container.StopOptions{Timeout: &seconds})
+	read, readCancel := p.freshDockerContext(ctx)
+	defer readCancel()
+	info, err = p.docker.ContainerInspect(read, run.ContainerIdentity)
+	if err != nil || info.ID != runtime.ContainerID || info.State == nil || info.State.Running {
+		return Observation{}, errors.Join(fmt.Errorf("stop exact container: %w", stopErr), err)
 	}
 	if err := requireRuntime(info, runtime); err != nil {
 		return Observation{}, err
 	}
-	e, _ := makeEvidence(evidence{Effect: "writer_inactive", Identity: run.ContainerIdentity, Spec: digest, Status: status, Container: runtime.ContainerID, Started: runtime.StartedAt, Runtime: runtime.Token})
-	return Observation{Evidence: e, ContainerID: runtime.ContainerID, ContainerStarted: runtime.StartedAt, RuntimeToken: runtime.Token}, nil
+	return inactive("stopped")
 }
 
 // ProveWriterInactive resolves one explicit writer fence from exact
@@ -553,39 +529,35 @@ func (p *Provider) ProveWriterInactive(ctx context.Context, run taskstore.Backgr
 	if err != nil {
 		return Observation{}, WriterFence{}, err
 	}
+	uncommitted := run.ObservedContainerID == "" && run.ObservedContainerStartedAt == "" && run.RuntimeEpoch == 0
 	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
+	defer cancel()
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	if errdefs.IsNotFound(err) {
-		listed, listErr := p.listRunContainers(operation, run, digest)
-		cancel()
-		if listErr != nil {
-			return Observation{}, WriterFence{}, listErr
+		if err := p.requireNoStrayContainer(operation, run, digest, ""); err != nil {
+			return Observation{}, WriterFence{}, err
 		}
-		if len(listed) != 0 {
-			return Observation{}, WriterFence{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "exact-labeled run container exists under a noncanonical name"}
+		if uncommitted {
+			e, _ := makeEvidence(evidence{Effect: "writer_inactive", Identity: run.ContainerIdentity, Spec: digest, Status: "never_created"})
+			return Observation{Evidence: e}, NeverCreatedAuthority(), nil
 		}
-		if run.ObservedContainerID != "" || run.ObservedContainerStartedAt != "" || run.RuntimeEpoch != 0 {
-			committed, committedErr := committedRuntimeFromRun(run)
-			if committedErr != nil {
-				return Observation{}, WriterFence{}, committedErr
-			}
-			e, _ := makeEvidence(evidence{Effect: "writer_inactive", Identity: run.ContainerIdentity, Spec: digest, Status: "committed_runtime_absent",
-				Container: committed.ContainerID, Started: committed.StartedAt, Runtime: committed.Token})
-			return Observation{Evidence: e, ContainerID: committed.ContainerID, ContainerStarted: committed.StartedAt,
-				RuntimeToken: committed.Token}, RuntimeCleanupAuthority(committed), nil
+		committed, err := committedRuntimeFromRun(run)
+		if err != nil {
+			return Observation{}, WriterFence{}, err
 		}
-		e, _ := makeEvidence(evidence{Effect: "writer_inactive", Identity: run.ContainerIdentity, Spec: digest, Status: "never_created"})
-		return Observation{Evidence: e}, NeverCreatedAuthority(), nil
+		e, _ := makeEvidence(evidence{Effect: "writer_inactive", Identity: run.ContainerIdentity, Spec: digest, Status: "committed_runtime_absent",
+			Container: committed.ContainerID, Started: committed.StartedAt, Runtime: committed.Token})
+		return Observation{Evidence: e, ContainerID: committed.ContainerID, ContainerStarted: committed.StartedAt,
+			RuntimeToken: committed.Token}, RuntimeCleanupAuthority(committed), nil
 	}
-	cancel()
 	if err != nil {
-		return Observation{}, WriterFence{}, err
+		return Observation{}, WriterFence{}, fmt.Errorf("inspect background run container: %w", err)
 	}
 	if err := p.attestContainer(run, digest, info, false); err != nil {
 		return Observation{}, WriterFence{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
 	}
 	if info.State.Status == "created" {
-		if run.ObservedContainerID != "" || run.ObservedContainerStartedAt != "" || run.RuntimeEpoch != 0 {
+		if !uncommitted {
 			return Observation{}, WriterFence{}, &IdentityError{Resource: "runtime", Identity: run.ContainerIdentity, Reason: "created container differs from committed runtime"}
 		}
 		e, _ := makeEvidence(evidence{Effect: "writer_inactive", Identity: run.ContainerIdentity, Spec: digest, Status: "never_started", Container: info.ID})
@@ -600,10 +572,9 @@ func (p *Provider) ProveWriterInactive(ctx context.Context, run taskstore.Backgr
 	// this run's canonical name is then this run's only possible writer, so
 	// adopt its observed runtime as cleanup authority instead of failing
 	// forever. Any partially committed identity still requires an exact match.
-	uncommitted := run.ObservedContainerID == "" && run.ObservedContainerStartedAt == "" && run.RuntimeEpoch == 0
 	if !uncommitted {
-		committed, committedErr := committedRuntimeFromRun(run)
-		if committedErr != nil || requireRuntime(info, committed) != nil || runtime != committed {
+		committed, err := committedRuntimeFromRun(run)
+		if err != nil || runtime != committed {
 			return Observation{}, WriterFence{}, &IdentityError{Resource: "runtime", Identity: run.ContainerIdentity, Reason: "container ID or exact start epoch differs from committed observation"}
 		}
 	}
@@ -626,61 +597,40 @@ func (p *Provider) RemoveContainer(ctx context.Context, run taskstore.Background
 		return Observation{}, err
 	}
 	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
+	defer cancel()
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	if errdefs.IsNotFound(err) {
-		if authority.ContainerID() != "" {
-			if _, idErr := p.docker.ContainerInspect(operation, authority.ContainerID()); idErr == nil {
-				cancel()
-				return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "expected container ID exists under another name"}
-			} else if !errdefs.IsNotFound(idErr) {
-				cancel()
-				return Observation{}, idErr
-			}
-		}
-		listed, listErr := p.listRunContainers(operation, run, digest)
-		cancel()
-		if listErr != nil {
-			return Observation{}, listErr
-		}
-		if len(listed) != 0 {
-			return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "exact-labeled run container exists under a noncanonical name"}
+		if err := p.requireNoStrayContainer(operation, run, digest, authority.ContainerID()); err != nil {
+			return Observation{}, err
 		}
 		e, _ := makeEvidence(evidence{Effect: "container_remove", Identity: run.ContainerIdentity, Spec: digest, Status: "absent"})
 		return Observation{Evidence: e}, nil
 	}
 	if err != nil {
-		cancel()
-		return Observation{}, err
+		return Observation{}, fmt.Errorf("inspect background run container: %w", err)
 	}
 	if kind == WriterFenceNeverCreated || authority.ContainerID() == "" || info.ID != authority.ContainerID() {
-		cancel()
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "container ID does not match removal authority"}
 	}
 	if err := p.attestContainer(run, digest, info, false); err != nil {
-		cancel()
 		return Observation{}, &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: err.Error()}
 	}
 	if info.State.Status == "created" {
 		if kind != WriterFenceCreatedNeverStarted {
-			cancel()
 			return Observation{}, errors.New("created container cleanup requires its exact ID without a process epoch")
 		}
 	} else {
 		if kind != WriterFenceStoppedRuntime {
-			cancel()
 			return Observation{}, errors.New("a container that started requires full committed runtime cleanup authority")
 		}
 		if err := requireRuntime(info, authority.runtimeIdentity()); err != nil {
-			cancel()
 			return Observation{}, err
 		}
 	}
 	if info.State.Running {
-		cancel()
 		return Observation{}, errors.New("refusing to remove a running background container")
 	}
 	removeErr := p.docker.ContainerRemove(operation, authority.ContainerID(), container.RemoveOptions{})
-	cancel()
 	read, readCancel := p.freshDockerContext(ctx)
 	defer readCancel()
 	_, nameErr := p.docker.ContainerInspect(read, run.ContainerIdentity)
@@ -706,19 +656,15 @@ func (p *Provider) RemoveVolume(ctx context.Context, run taskstore.BackgroundRun
 		return Observation{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
-	if err := p.requireContainerAbsent(ctx, run, digest, authority); err != nil {
+	if err := p.requireContainerAbsent(ctx, run, digest, authority.ContainerID()); err != nil {
 		return Observation{}, err
 	}
 	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
+	defer cancel()
 	item, err := p.docker.VolumeInspect(operation, run.VolumeIdentity)
 	if errdefs.IsNotFound(err) {
-		listed, listErr := p.listRunVolumes(operation, run, digest)
-		cancel()
-		if listErr != nil {
-			return Observation{}, listErr
-		}
-		if len(listed) != 0 {
-			return Observation{}, &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: "exact-labeled run volume exists under a noncanonical name"}
+		if err := p.requireNoStrayVolume(operation, run, digest); err != nil {
+			return Observation{}, err
 		}
 		if clonePresent {
 			if err := p.removeVolumeBacking(run); err != nil {
@@ -729,19 +675,15 @@ func (p *Provider) RemoveVolume(ctx context.Context, run taskstore.BackgroundRun
 		return Observation{Evidence: e}, nil
 	}
 	if err != nil {
-		cancel()
-		return Observation{}, err
+		return Observation{}, fmt.Errorf("inspect background run volume: %w", err)
 	}
 	if !clonePresent {
-		cancel()
 		return Observation{}, &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: "volume exists without private clone authority"}
 	}
 	if err := p.attestVolume(run, digest, item); err != nil {
-		cancel()
 		return Observation{}, &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: err.Error()}
 	}
 	removeErr := p.docker.VolumeRemove(operation, run.VolumeIdentity, false)
-	cancel()
 	read, readCancel := p.freshDockerContext(ctx)
 	defer readCancel()
 	_, inspectErr := p.docker.VolumeInspect(read, run.VolumeIdentity)
@@ -761,27 +703,36 @@ func (p *Provider) RemoveVolume(ctx context.Context, run taskstore.BackgroundRun
 	return Observation{Evidence: e}, nil
 }
 
-func (p *Provider) requireContainerAbsent(ctx context.Context, run taskstore.BackgroundRun, digest string, authority WriterFence) error {
+// requireContainerAbsent proves that no container of this run exists: not
+// under its canonical name, not as containerID (when set), and not under any
+// other name with the run's exact labels.
+func (p *Provider) requireContainerAbsent(ctx context.Context, run taskstore.BackgroundRun, digest, containerID string) error {
 	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	defer cancel()
 	if info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity); err == nil {
-		return &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "container still exists before disposable storage cleanup: " + info.ID}
+		return &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "run container still exists: " + info.ID}
 	} else if !errdefs.IsNotFound(err) {
-		return err
+		return fmt.Errorf("inspect background run container: %w", err)
 	}
-	if authority.ContainerID() != "" {
-		if _, err := p.docker.ContainerInspect(operation, authority.ContainerID()); err == nil {
-			return &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "expected container ID still exists under another name"}
+	return p.requireNoStrayContainer(operation, run, digest, containerID)
+}
+
+// requireNoStrayContainer is requireContainerAbsent for callers that have
+// already found the canonical name absent.
+func (p *Provider) requireNoStrayContainer(ctx context.Context, run taskstore.BackgroundRun, digest, containerID string) error {
+	if containerID != "" {
+		if _, err := p.docker.ContainerInspect(ctx, containerID); err == nil {
+			return &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "expected container ID exists under another name"}
 		} else if !errdefs.IsNotFound(err) {
-			return err
+			return fmt.Errorf("inspect expected container ID: %w", err)
 		}
 	}
-	listed, err := p.listRunContainers(operation, run, digest)
+	listed, err := p.listRunContainers(ctx, run, digest)
 	if err != nil {
 		return err
 	}
 	if len(listed) != 0 {
-		return &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "exact-labeled run container still exists under another name"}
+		return &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "exact-labeled run container exists under a noncanonical name"}
 	}
 	return nil
 }
@@ -792,32 +743,18 @@ func (p *Provider) requireVolumeAbsent(ctx context.Context, run taskstore.Backgr
 	if item, err := p.docker.VolumeInspect(operation, run.VolumeIdentity); err == nil {
 		return &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: "volume still exists before clone cleanup: " + item.Name}
 	} else if !errdefs.IsNotFound(err) {
-		return err
+		return fmt.Errorf("inspect background run volume: %w", err)
 	}
-	listed, err := p.listRunVolumes(operation, run, digest)
+	return p.requireNoStrayVolume(operation, run, digest)
+}
+
+func (p *Provider) requireNoStrayVolume(ctx context.Context, run taskstore.BackgroundRun, digest string) error {
+	listed, err := p.listRunVolumes(ctx, run, digest)
 	if err != nil {
 		return err
 	}
 	if len(listed) != 0 {
-		return &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: "exact-labeled run volume still exists under another name"}
-	}
-	return nil
-}
-
-func (p *Provider) requireNoRunContainer(ctx context.Context, run taskstore.BackgroundRun, digest string) error {
-	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
-	defer cancel()
-	if info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity); err == nil {
-		return &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "container exists while host Git inspection is requested: " + info.ID}
-	} else if !errdefs.IsNotFound(err) {
-		return err
-	}
-	items, err := p.listRunContainers(operation, run, digest)
-	if err != nil {
-		return err
-	}
-	if len(items) != 0 {
-		return &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "exact-labeled run container exists while host Git inspection is requested"}
+		return &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: "exact-labeled run volume exists under a noncanonical name"}
 	}
 	return nil
 }

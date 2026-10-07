@@ -51,7 +51,7 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 	markerPath := p.cloneMarkerPath(run)
 	_, statErr := os.Lstat(path)
 	if statErr == nil {
-		if err := p.requireNoRunContainer(ctx, run, digest); err != nil {
+		if err := p.requireContainerAbsent(ctx, run, digest, ""); err != nil {
 			return Observation{}, err
 		}
 	} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -103,7 +103,7 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 			if location.kind != cloneRecoveryStage {
 				return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "marker-bound clone is quarantined after interrupted cleanup"}
 			}
-			if err := p.requireNoRunContainer(ctx, run, digest); err != nil {
+			if err := p.requireContainerAbsent(ctx, run, digest, ""); err != nil {
 				return Observation{}, err
 			}
 			operation, cancel := context.WithTimeout(ctx, p.config.GitTimeout)
@@ -327,7 +327,7 @@ func (p *Provider) attestClone(ctx context.Context, run taskstore.BackgroundRun,
 	if err := p.attestCloneMarker(run, digest, path); err != nil {
 		return 0, err
 	}
-	if err := p.requireNoRunContainer(ctx, run, digest); err != nil {
+	if err := p.requireContainerAbsent(ctx, run, digest, ""); err != nil {
 		return 0, err
 	}
 	return p.attestRepository(ctx, run, path)
@@ -875,7 +875,7 @@ func (p *Provider) RemoveClone(ctx context.Context, run taskstore.BackgroundRun,
 		return Observation{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
-	if err := p.requireContainerAbsent(ctx, run, digest, authority); err != nil {
+	if err := p.requireContainerAbsent(ctx, run, digest, authority.ContainerID()); err != nil {
 		return Observation{}, err
 	}
 	if err := p.requireVolumeAbsent(ctx, run, digest); err != nil {
