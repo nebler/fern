@@ -182,19 +182,34 @@ func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, sta
 	add("phone", "pass", "phone-demo transport is ready", "")
 }
 
-func checkBackgroundRouteSurface(ctx context.Context, origin string) error {
+// doctorHTTP sends one bodiless, redirect-free request bounded by five seconds
+// and returns the response with at most limit bytes of its body. A nonempty
+// password authenticates as the operator.
+func doctorHTTP(ctx context.Context, method, target, password string, limit int64) (*http.Response, []byte, error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/api/health", nil)
+	request, err := http.NewRequestWithContext(ctx, method, target, nil)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	client := &http.Client{Timeout: 5 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	if password != "" {
+		request.SetBasicAuth("fern", password)
+	}
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	response, err := client.Do(request)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	defer response.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(response.Body, limit))
+	return response, body, err
+}
+
+func checkBackgroundRouteSurface(ctx context.Context, origin string) error {
+	response, _, err := doctorHTTP(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/api/health", "", 4<<10)
+	if err != nil {
+		return err
+	}
 	if response.StatusCode != http.StatusUnauthorized || response.Header.Get("Cache-Control") != "no-store" {
 		return fmt.Errorf("Background Run route returned %s without the dedicated no-store boundary", response.Status)
 	}
@@ -234,25 +249,17 @@ func checkCommand(ctx context.Context, timeout time.Duration, name string, args 
 }
 
 func checkReady(ctx context.Context, origin, password string) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/fern/ready", nil)
+	response, body, err := doctorHTTP(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/fern/ready", password, 4<<10)
 	if err != nil {
 		return err
 	}
-	request.SetBasicAuth("fern", password)
-	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
-	if err != nil {
-		return err
-	}
-	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("Fern readiness returned %s", response.Status)
 	}
 	var readiness struct {
 		Ready bool `json:"ready"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 4<<10)).Decode(&readiness); err != nil {
+	if err := json.Unmarshal(body, &readiness); err != nil {
 		return fmt.Errorf("decode Fern readiness response: %w", err)
 	}
 	if !readiness.Ready {
@@ -262,25 +269,17 @@ func checkReady(ctx context.Context, origin, password string) error {
 }
 
 func issuePairingCode(ctx context.Context, origin, password string) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(origin, "/")+"/fern/pair/new", nil)
+	response, body, err := doctorHTTP(ctx, http.MethodPost, strings.TrimRight(origin, "/")+"/fern/pair/new", password, 16<<10)
 	if err != nil {
 		return "", err
 	}
-	request.SetBasicAuth("fern", password)
-	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
-	if err != nil {
-		return "", err
-	}
-	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("pairing endpoint returned %s", response.Status)
 	}
 	var result struct {
 		Code string `json:"code"`
 	}
-	if err := json.NewDecoder(io.LimitReader(response.Body, 16<<10)).Decode(&result); err != nil {
+	if err := json.Unmarshal(body, &result); err != nil {
 		return "", err
 	}
 	if result.Code == "" {
@@ -290,26 +289,17 @@ func issuePairingCode(ctx context.Context, origin, password string) (string, err
 }
 
 func checkPairingPreview(ctx context.Context, origin, code string) error {
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/fern/pair?code="+url.QueryEscape(code), nil)
-	if err != nil {
-		return err
-	}
-	request.Header.Set("User-Agent", "Fern-Doctor-Pairing-Scanner/1")
-	response, err := (&http.Client{Timeout: 5 * time.Second}).Do(request)
+	response, body, err := doctorHTTP(ctx, http.MethodGet, strings.TrimRight(origin, "/")+"/fern/pair?code="+url.QueryEscape(code), "", 64<<10)
 	if err != nil {
 		return fmt.Errorf("pairing preview failed: %w", err)
 	}
-	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("pairing preview returned %s", response.Status)
 	}
 	if len(response.Cookies()) != 0 {
 		return errors.New("pairing preview unexpectedly set a cookie")
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, 64<<10))
-	if err != nil || !strings.Contains(string(body), "Pair this phone?") {
+	if !strings.Contains(string(body), "Pair this phone?") {
 		return errors.New("pairing preview returned an invalid response")
 	}
 	return nil
