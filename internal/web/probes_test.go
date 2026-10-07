@@ -10,7 +10,7 @@ import (
 
 func TestReadinessAndLivenessHaveDistinctFailureSemantics(t *testing.T) {
 	registry := NewRegistry()
-	registry.Blocked(ComponentGitHubDependency, errors.New("credentials unavailable"))
+	registry.Blocked(ComponentGitHub, errors.New("credentials unavailable"))
 
 	live := httptest.NewRecorder()
 	registry.LivenessHandler().ServeHTTP(live, httptest.NewRequest(http.MethodGet, "/fern/live", nil))

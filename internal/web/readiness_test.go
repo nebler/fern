@@ -14,19 +14,19 @@ func TestRegistryRejectsUnknownComponentsAndTracksReadiness(t *testing.T) {
 	if registry.Healthy(Component("task-publication")) || registry.Failed(Component("attacker"), errors.New("x")) {
 		t.Fatal("unknown component update was accepted")
 	}
-	if !registry.Degraded(ComponentBackgroundRunSerial, errors.New("transient")) || !registry.Ready() {
+	if !registry.Degraded(ComponentCoordinator, errors.New("transient")) || !registry.Ready() {
 		t.Fatal("degraded component made service unready")
 	}
-	registry.Blocked(ComponentGitHubDependency, errors.New("credentials unavailable"))
+	registry.Blocked(ComponentGitHub, errors.New("credentials unavailable"))
 	if registry.Ready() {
 		t.Fatal("blocked dependency left service ready")
 	}
-	registry.Healthy(ComponentGitHubDependency)
-	registry.Failed(ComponentBackgroundRunSerial, errors.New("fatal"))
+	registry.Healthy(ComponentGitHub)
+	registry.Failed(ComponentCoordinator, errors.New("fatal"))
 	if registry.Ready() {
 		t.Fatal("failed component left service ready")
 	}
-	registry.Healthy(ComponentBackgroundRunSerial)
+	registry.Healthy(ComponentCoordinator)
 	if !registry.Ready() {
 		t.Fatal("healthy recovery left service unready")
 	}

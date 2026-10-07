@@ -5,16 +5,11 @@ import "sync/atomic"
 type Component string
 
 const (
-	ComponentGitHubDependency     Component = "github-dependency"
-	ComponentBackgroundRunProfile Component = "background-run-profile"
-	ComponentBackgroundRunSerial  Component = "background-run-serial"
+	ComponentGitHub      Component = "github"
+	ComponentCoordinator Component = "coordinator"
 )
 
-var components = [...]Component{
-	ComponentGitHubDependency,
-	ComponentBackgroundRunProfile,
-	ComponentBackgroundRunSerial,
-}
+var components = [...]Component{ComponentGitHub, ComponentCoordinator}
 
 // Registry holds one readiness flag for each compile-time component. Every
 // component starts ready.

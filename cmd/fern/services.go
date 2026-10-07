@@ -42,12 +42,12 @@ type wakeService interface {
 }
 
 type runServices struct {
-	store      *store.Store
-	runs       http.Handler
-	background wakeService
-	provider   *docker.Provider
-	artifact   *artifact.Engine
-	status     *web.Registry
+	store       *store.Store
+	runs        http.Handler
+	coordinator wakeService
+	provider    *docker.Provider
+	artifact    *artifact.Engine
+	status      *web.Registry
 }
 
 // Close releases the artifact engine and Docker provider. The store belongs to
@@ -78,7 +78,7 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 	if err != nil {
 		return nil, err
 	}
-	status.Healthy(web.ComponentGitHubDependency)
+	status.Healthy(web.ComponentGitHub)
 
 	roots, err := prepareStateRoots(cfg.Workspace.Name)
 	if err != nil {
@@ -145,10 +145,10 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 		PollInterval:     runPollInterval, HistoryBounds: opencode.HistoryBounds{PageLimit: 100, MaxPages: 100, MaxEvents: 10000},
 		Now: time.Now, HTTPClient: &http.Client{Timeout: backgroundCloneTimeout}, Route: route,
 		OnError: func(err error) {
-			status.Degraded(web.ComponentBackgroundRunSerial, err)
+			status.Degraded(web.ComponentCoordinator, err)
 			log.Error("Background Run coordination deferred", "err", err, "repository", cfg.Workspace.Name)
 		},
-		OnSuccess: func() { status.Healthy(web.ComponentBackgroundRunSerial) },
+		OnSuccess: func() { status.Healthy(web.ComponentCoordinator) },
 	})
 	if err != nil {
 		return nil, err
@@ -170,11 +170,10 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 	if err != nil {
 		return nil, err
 	}
-	status.Healthy(web.ComponentBackgroundRunProfile)
-	status.Healthy(web.ComponentBackgroundRunSerial)
+	status.Healthy(web.ComponentCoordinator)
 	closeArtifact, closeProvider = false, false
 	return &runServices{store: runStore, runs: runs,
-		background: coord, provider: provider, artifact: engine, status: status}, nil
+		coordinator: coord, provider: provider, artifact: engine, status: status}, nil
 }
 
 // stateRoots are the per-workspace durable directories under ~/.fern/runs.

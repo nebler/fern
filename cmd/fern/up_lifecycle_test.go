@@ -14,9 +14,9 @@ import (
 
 func TestFatalBackgroundFailureBlocksReadiness(t *testing.T) {
 	status := web.NewRegistry()
-	status.Healthy(web.ComponentBackgroundRunSerial)
+	status.Healthy(web.ComponentCoordinator)
 	group, ctx := errgroup.WithContext(context.Background())
-	startRunCoordinator(group, &runServices{background: failingService{store.ErrCorruptStore}, status: status}, ctx)
+	startRunCoordinator(group, &runServices{coordinator: failingService{store.ErrCorruptStore}, status: status}, ctx)
 	if err := group.Wait(); !errors.Is(err, store.ErrCorruptStore) {
 		t.Fatalf("supervision error = %v", err)
 	}

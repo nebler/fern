@@ -124,7 +124,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins web
 	var services *runServices
 	if cfg.Workspace.GitHub.InstallationID == 0 {
 		pending := errors.New("GitHub App installation ID is not configured")
-		status.Blocked(web.ComponentGitHubDependency, pending)
+		status.Blocked(web.ComponentGitHub, pending)
 		log.Warn("Background Runs await GitHub App installation binding and restart", "repository", cfg.Workspace.Name)
 	} else {
 		if err := config.Validate(cfg); err != nil {
@@ -133,7 +133,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins web
 		services, err = newRunServices(serviceCtx, cfg, state, route, status, log)
 		if errors.Is(err, githubapp.ErrCredentialsNotFound) {
 			log.Warn("Background Runs await GitHub App credentials ('fern credentials set') and restart", "repository", cfg.Workspace.Name)
-			status.Blocked(web.ComponentGitHubDependency, err)
+			status.Blocked(web.ComponentGitHub, err)
 			services, err = nil, nil
 		}
 	}
@@ -171,12 +171,12 @@ func startRunCoordinator(group *errgroup.Group, services *runServices, serviceCt
 		return
 	}
 	group.Go(func() error {
-		err := services.background.Run(serviceCtx)
+		err := services.coordinator.Run(serviceCtx)
 		if errors.Is(err, context.Canceled) {
 			return nil
 		}
 		if err != nil {
-			services.status.Failed(web.ComponentBackgroundRunSerial, err)
+			services.status.Failed(web.ComponentCoordinator, err)
 		}
 		return err
 	})
