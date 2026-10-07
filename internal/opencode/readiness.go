@@ -118,7 +118,7 @@ func (c *Client) WaitReady(ctx context.Context, spec ReadinessSpec, interval tim
 			return nil
 		}
 		if err != nil {
-			if ctx.Err() != nil && errors.Is(err, ErrTransport) {
+			if ctx.Err() != nil && (errors.Is(err, ErrTransport) || errors.Is(err, ctx.Err())) {
 				continue
 			}
 			return err
