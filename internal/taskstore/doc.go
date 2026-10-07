@@ -2,8 +2,9 @@
 // connection policy, and the workspace, run, receipt, and retained-result
 // records. It commits related records and their fences together so HTTP
 // handlers and effect providers never coordinate SQL. The same schema defines
-// the plugin authorization tables, which package pluginauth reads and writes
-// through DB.
+// the device and operator-credential tables (package control) and the plugin
+// authorization tables (package pluginauth), which those packages read and
+// write through DB.
 //
 // A run is one row holding its immutable intent (prompt, repository and base,
 // agent and model, deadline, image, profile, environment, OpenCode session,

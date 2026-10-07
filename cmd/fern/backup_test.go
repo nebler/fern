@@ -103,7 +103,6 @@ func (fixture backupFixture) seed(t *testing.T, marker string) string {
 	t.Helper()
 	state := fixture.options.stateDirectory
 	for relative, value := range map[string]string{
-		"control/devices.json":                                       "devices-" + marker,
 		"github-app/app-credentials.json":                            `{"private_key":"secret-app-key"}`,
 		"tasks/demo-background/artifact-cas/sha256:abc/manifest":     "artifact-" + marker,
 		"tasks/demo-background/artifact-work/scratch":                "scratch",
@@ -124,8 +123,11 @@ func (fixture backupFixture) seed(t *testing.T, marker string) string {
 	for _, statement := range []string{
 		"PRAGMA journal_mode=WAL",
 		"CREATE TABLE IF NOT EXISTS runs (id TEXT)",
+		"CREATE TABLE IF NOT EXISTS devices (name TEXT)",
 		"DELETE FROM runs",
+		"DELETE FROM devices",
 		"INSERT INTO runs VALUES ('" + marker + "')",
+		"INSERT INTO devices VALUES ('devices-" + marker + "')",
 	} {
 		if _, err := db.Exec(statement); err != nil {
 			t.Fatal(err)
@@ -191,7 +193,6 @@ func TestBackupRoundTripEncryptsSecretsAndKeepsPreviousState(t *testing.T) {
 	}
 	state := target.options.stateDirectory
 	for relative, want := range map[string]string{
-		"control/devices.json":                                   "devices-a",
 		"github-app/app-credentials.json":                        `{"private_key":"secret-app-key"}`,
 		"tasks/demo-background/artifact-cas/sha256:abc/manifest": "artifact-a",
 		"tasks/demo-background/runtime/background-runs/host.key": "secret-host-key-0123456789abcdef",
@@ -341,7 +342,7 @@ func TestBackupRestoreRejectsTamperedOrUnsafeArchives(t *testing.T) {
 		}
 		return manifest
 	}
-	stateFile := testEntry{name: "state/control/devices.json", body: "devices", typeflag: tar.TypeReg}
+	stateFile := testEntry{name: "state/github-app/app-credentials.json", body: "credentials", typeflag: tar.TypeReg}
 	tampered := valid(stateFile)
 	tampered.Files[1].SHA256 = checksum("other")
 	unlisted := valid()
@@ -410,7 +411,6 @@ func TestBackupRestoreRejectsTamperedOrUnsafeArchives(t *testing.T) {
 func TestBackupIncludedKeepsAuthorityAndDropsDisposableWork(t *testing.T) {
 	t.Parallel()
 	for relative, want := range map[string]bool{
-		"control/devices.json":            true,
 		"github-app/app-credentials.json": true,
 		"tasks/demo.db":                   true,
 		"tasks/demo.db-wal":               false,

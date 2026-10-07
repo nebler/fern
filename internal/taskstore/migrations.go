@@ -246,6 +246,22 @@ BEGIN SELECT RAISE(ABORT,'result is immutable'); END;
 
 CREATE TRIGGER results_durable BEFORE DELETE ON results BEGIN SELECT RAISE(ABORT,'result is durable'); END;
 
+-- Paired browser devices and the operator credential identifier (package
+-- control). Only the SHA-256 of a device bearer token is stored; the device ID
+-- is its first 16 hex digits. Times are Unix nanoseconds.
+CREATE TABLE devices (
+    token_sha256 TEXT PRIMARY KEY CHECK(length(token_sha256)=64 AND token_sha256 NOT GLOB '*[^0-9a-f]*'),
+    name TEXT NOT NULL CHECK(length(CAST(name AS BLOB)) BETWEEN 1 AND 80),
+    created_at INTEGER NOT NULL,
+    last_seen INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK(expires_at > created_at)
+) STRICT;
+
+CREATE TABLE operator_credential (
+    singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+    id TEXT NOT NULL
+) STRICT;
+
 -- Plugin device authorization (package pluginauth). Only domain-separated
 -- SHA-256 digests of the device and user codes are stored. Times are Unix
 -- nanoseconds. A credential lives and dies with its authorization.

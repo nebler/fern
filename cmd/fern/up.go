@@ -139,14 +139,6 @@ func (runtime *upRuntime) Close() error {
 
 func assembleServices(serviceCtx context.Context, cfg config.Config, origins proxy.TrustedOrigins,
 	remoteListener, operatorListener, backgroundListener net.Listener, log *slog.Logger) (*upRuntime, error) {
-	controlDir, err := statePath("control")
-	if err != nil {
-		return nil, err
-	}
-	controlStore, err := control.Open(controlDir, cfg.Workspace.Name)
-	if err != nil {
-		return nil, err
-	}
 	state, err := openStateStore(serviceCtx, cfg)
 	if err != nil {
 		return nil, err
@@ -189,7 +181,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 	if tasks != nil {
 		runs = tasks.runs
 	}
-	controls := proxy.Controls{Store: controlStore, Runs: runs, Onboarding: onboarding,
+	controls := proxy.Controls{Store: control.New(state.DB()), Runs: runs, Onboarding: onboarding,
 		ControlAuth: proxy.ControlAuth{Password: cfg.Control.Password}, PluginAuth: pluginauth.New(state.DB()),
 		Liveness: status.LivenessHandler(), Readiness: status.ReadinessHandler(), Status: status.StatusHandler(), Metrics: status.MetricsHandler()}
 	handlers, err := proxy.NewHandlers(controls, origins)

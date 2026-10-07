@@ -86,9 +86,9 @@ removes it and waits for admitted forwarding to exit before writer teardown.
 2. Apply `config.ValidateBootstrap`.
 3. Bind remote, operator, and live-run listeners.
 4. Acquire the host-local repository-name lease.
-5. Open the workspace SQLite database (taskstore schema 9, which also holds
-   plugin authorizations).
-6. Open control state.
+5. Open the workspace SQLite database (taskstore schema 9), which also holds
+   devices and plugin authorizations.
+6. Compose control and plugin-authorization stores over it.
 7. If the installation ID is pending, block readiness and expose onboarding
    without composing task services.
 8. Otherwise apply strict `config.Validate` and resolve exact GitHub
@@ -457,7 +457,7 @@ process-local memory as authority. Recovery rules include:
   commits;
 - wake coordinators only after durable admission commits.
 
-Taskstore schema is 8 and control-state schema is 2. This pre-release reset has
+Taskstore schema is 9. This pre-release reset has
 no supported predecessor: older development state is rejected, never silently
 migrated or deleted. Preserve anything needed before explicitly starting with
 fresh state. Current-version restart recovery and backup/restore remain

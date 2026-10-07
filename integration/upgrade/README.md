@@ -45,8 +45,8 @@ replaces that fixture with invalid bytes, restores the backup, and verifies agai
 Its exit trap removes only its own temporary tree. This is an isolated fixture,
 not a command to corrupt real operator state.
 
-The broader compatibility manifest declares control-state schema **2** and
-GitHub credential schema **1**, but this executable inspects only the task store.
+The broader compatibility manifest also declares GitHub credential schema **1**,
+but this executable inspects only the task store.
 Resource spec **10** governs runtime identity and is not a migration version.
 Obsolete development state is rejected rather than silently migrated or removed.
 

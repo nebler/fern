@@ -3,23 +3,18 @@ package control
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/nebler/fern/internal/atomicfile"
 )
 
-const schemaVersion = 2
-const maxControlStateBytes = 4 << 20
+const maxDevices = 64
 
 // Device is a paired browser credential. Only the SHA-256 hash of the bearer
 // token is ever stored; ID is that hash's leading bytes.
@@ -31,64 +26,20 @@ type Device struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
-// diskState is the current durable control file. Other schema versions are
-// rejected without migration or mutation.
-type diskState struct {
-	Version              int               `json:"version"`
-	Workspace            string            `json:"workspace"`
-	Revision             uint64            `json:"revision"`
-	OperatorCredentialID string            `json:"operatorCredentialId,omitempty"`
-	Devices              map[string]Device `json:"devices"`
-}
-
-// Store is the durable control-plane identity state for one workspace, guarded
-// by a mutex and written atomically with atomicfile.
+// Store is the workspace's control-plane identity state in Fern's SQLite
+// database. mu guards only the in-memory request registry and its fence
+// against revocation.
 type Store struct {
+	db                   *sql.DB
 	mu                   sync.Mutex
-	path                 string
-	workspace            string
-	data                 diskState
 	activeDeviceRequests map[string]map[uint64]func()
 	nextDeviceRequestID  uint64
 }
 
-// Open loads (or initializes) the control state for workspace inside directory.
-// The directory must be a private directory owned by the current user.
-func Open(directory, workspace string) (*Store, error) {
-	if workspace == "" {
-		return nil, errors.New("workspace is required for control store")
-	}
-	if err := atomicfile.PrivateDir(directory); err != nil {
-		return nil, fmt.Errorf("Fern control directory: %w", err)
-	}
-	path := filepath.Join(directory, fmt.Sprintf("%x.json", sha256.Sum256([]byte(workspace))))
-	store := &Store{
-		path:                 path,
-		workspace:            workspace,
-		data:                 emptyState(workspace),
-		activeDeviceRequests: make(map[string]map[uint64]func()),
-	}
-	if err := store.load(); err != nil {
-		return nil, err
-	}
-	return store, nil
-}
-
-// AuxiliaryStatePath returns a sibling path for a small subsystem-owned state
-// file. Restricted lowercase name syntax prevents escaping the control directory.
-func (store *Store) AuxiliaryStatePath(name string) (string, error) {
-	if store == nil || store.path == "" {
-		return "", errors.New("control store is unavailable")
-	}
-	if name == "" || len(name) > 32 {
-		return "", errors.New("invalid auxiliary state name")
-	}
-	for _, character := range name {
-		if character < 'a' || character > 'z' {
-			return "", errors.New("invalid auxiliary state name")
-		}
-	}
-	return store.path + "." + name, nil
+// New returns the control store backed by db, whose schema (taskstore) defines
+// the devices and operator_credential tables.
+func New(db *sql.DB) *Store {
+	return &Store{db: db, activeDeviceRequests: make(map[string]map[uint64]func())}
 }
 
 // AddDevice durably registers a paired browser credential, pruning expired
@@ -107,58 +58,56 @@ func (store *Store) AddDevice(token, name string, now, expires time.Time) (Devic
 	}
 	hash := tokenHash(token)
 	device := Device{ID: hash[:16], Name: name, CreatedAt: now.UTC(), LastSeen: now.UTC(), ExpiresAt: expires.UTC()}
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	pruned := store.pruneLocked(now)
-	if len(store.data.Devices) >= 64 {
-		// No durable write follows this rejection, so memory must keep matching
-		// disk by resurrecting everything pruning removed.
-		store.restorePrunedLocked(pruned)
+	tx, err := store.db.Begin()
+	if err != nil {
+		return Device{}, fmt.Errorf("begin Fern control transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.Exec(`DELETE FROM devices WHERE expires_at<=?`, now.UnixNano()); err != nil {
+		return Device{}, fmt.Errorf("prune Fern devices: %w", err)
+	}
+	var count int
+	if err := tx.QueryRow(`SELECT count(*) FROM devices`).Scan(&count); err != nil {
+		return Device{}, fmt.Errorf("count Fern devices: %w", err)
+	}
+	if count >= maxDevices {
 		return Device{}, errors.New("device limit reached; revoke an existing device")
 	}
-	previous, existed := store.data.Devices[hash]
-	store.data.Devices[hash] = device
-	err := store.commitLocked(func() {
-		store.restorePrunedLocked(pruned)
-		if existed {
-			store.data.Devices[hash] = previous
-		} else {
-			delete(store.data.Devices, hash)
-		}
-	})
-	if err != nil {
-		return Device{}, err
+	if _, err := tx.Exec(`INSERT OR REPLACE INTO devices(token_sha256,name,created_at,last_seen,expires_at) VALUES(?,?,?,?,?)`,
+		hash, device.Name, device.CreatedAt.UnixNano(), device.LastSeen.UnixNano(), device.ExpiresAt.UnixNano()); err != nil {
+		return Device{}, fmt.Errorf("record Fern device: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return Device{}, fmt.Errorf("commit Fern device: %w", err)
 	}
 	return device, nil
 }
 
 // AuthenticateDeviceIdentity validates a device bearer token and returns its
-// durable identity, pruning the matched expired credential and refreshing LastSeen at most
-// once an hour along the way.
+// durable identity, deleting the matched expired credential and refreshing
+// LastSeen at most once an hour along the way.
 func (store *Store) AuthenticateDeviceIdentity(token string, now time.Time) (Device, bool, error) {
 	if token == "" {
 		return Device{}, false, nil
 	}
 	hash := tokenHash(token)
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	device, exists := store.data.Devices[hash]
-	if !exists {
+	device, err := scanDevice(store.db.QueryRow(`SELECT `+deviceColumns+` FROM devices WHERE token_sha256=?`, hash))
+	if errors.Is(err, sql.ErrNoRows) {
 		return Device{}, false, nil
 	}
+	if err != nil {
+		return Device{}, false, fmt.Errorf("read Fern device: %w", err)
+	}
 	if !now.Before(device.ExpiresAt) {
-		delete(store.data.Devices, hash)
-		if err := store.commitLocked(func() { store.data.Devices[hash] = device }); err != nil {
-			return Device{}, false, err
+		if _, err := store.db.Exec(`DELETE FROM devices WHERE token_sha256=?`, hash); err != nil {
+			return Device{}, false, fmt.Errorf("delete expired Fern device: %w", err)
 		}
 		return Device{}, false, nil
 	}
 	if now.Sub(device.LastSeen) >= time.Hour {
-		previous := device
 		device.LastSeen = now.UTC()
-		store.data.Devices[hash] = device
-		if err := store.commitLocked(func() { store.data.Devices[hash] = previous }); err != nil {
-			return Device{}, false, err
+		if _, err := store.db.Exec(`UPDATE devices SET last_seen=? WHERE token_sha256=?`, device.LastSeen.UnixNano(), hash); err != nil {
+			return Device{}, false, fmt.Errorf("refresh Fern device: %w", err)
 		}
 	}
 	return device, true, nil
@@ -169,14 +118,8 @@ func (store *Store) AuthenticateDeviceIdentity(token string, now time.Time) (Dev
 func (store *Store) RegisterDeviceRequest(deviceID string, cancel func()) (func(), bool) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	found := false
-	for _, device := range store.data.Devices {
-		if device.ID == deviceID {
-			found = true
-			break
-		}
-	}
-	if !found {
+	var found bool
+	if err := store.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM devices WHERE substr(token_sha256,1,16)=?)`, deviceID).Scan(&found); err != nil || !found {
 		return nil, false
 	}
 	store.nextDeviceRequestID++
@@ -199,7 +142,7 @@ func (store *Store) RegisterDeviceRequest(deviceID string, cancel func()) (func(
 }
 
 // CancelDeviceRequests is the in-memory callback run only after revocation has
-// been persisted. Cancellation callbacks are deliberately absent from diskState.
+// been persisted.
 func (store *Store) CancelDeviceRequests(deviceID string) {
 	store.mu.Lock()
 	requests := store.activeDeviceRequests[deviceID]
@@ -210,136 +153,62 @@ func (store *Store) CancelDeviceRequests(deviceID string) {
 	}
 }
 
-// Devices lists every unexpired device oldest-first, durably persisting the
-// pruning of expired entries.
+// Devices lists every unexpired device oldest-first, durably deleting expired
+// entries.
 func (store *Store) Devices(now time.Time) ([]Device, error) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	pruned := store.pruneLocked(now)
-	if len(pruned) != 0 {
-		if err := store.commitLocked(func() { store.restorePrunedLocked(pruned) }); err != nil {
-			return nil, err
-		}
+	if _, err := store.db.Exec(`DELETE FROM devices WHERE expires_at<=?`, now.UnixNano()); err != nil {
+		return nil, fmt.Errorf("prune Fern devices: %w", err)
 	}
-	result := make([]Device, 0, len(store.data.Devices))
-	for _, device := range store.data.Devices {
+	rows, err := store.db.Query(`SELECT ` + deviceColumns + ` FROM devices ORDER BY created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("list Fern devices: %w", err)
+	}
+	defer rows.Close()
+	result := []Device{}
+	for rows.Next() {
+		device, err := scanDevice(rows)
+		if err != nil {
+			return nil, fmt.Errorf("list Fern devices: %w", err)
+		}
 		result = append(result, device)
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].CreatedAt.Before(result[j].CreatedAt) })
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list Fern devices: %w", err)
+	}
 	return result, nil
 }
 
 // RevokeDevice durably removes every credential sharing the device ID.
+// Callers then call CancelDeviceRequests.
 func (store *Store) RevokeDevice(id string) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	found := false
-	removed := make(map[string]Device)
-	for hash, device := range store.data.Devices {
-		if device.ID == id {
-			removed[hash] = device
-			delete(store.data.Devices, hash)
-			found = true
-		}
+	result, err := store.db.Exec(`DELETE FROM devices WHERE substr(token_sha256,1,16)=?`, id)
+	if err != nil {
+		return fmt.Errorf("revoke Fern device: %w", err)
 	}
-	if !found {
+	removed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("revoke Fern device: %w", err)
+	}
+	if removed == 0 {
 		return os.ErrNotExist
 	}
-	return store.commitLocked(func() {
-		for hash, device := range removed {
-			store.data.Devices[hash] = device
-		}
-	})
-}
-
-func (store *Store) load() error {
-	data, err := atomicfile.Read(store.path, maxControlStateBytes)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("read Fern control state: %w", err)
-	}
-	var state diskState
-	if err := json.Unmarshal(data, &state); err != nil {
-		return fmt.Errorf("decode Fern control state: %w", err)
-	}
-	if state.Version != schemaVersion {
-		return fmt.Errorf("unsupported Fern control state version %d", state.Version)
-	}
-	if state.Workspace != store.workspace {
-		return fmt.Errorf("Fern control state belongs to workspace %q", state.Workspace)
-	}
-	if !validOperatorCredentialID(state.OperatorCredentialID) {
-		return errors.New("Fern control state has an invalid operator credential identifier")
-	}
-	initializeMaps(&state)
-	store.data = state
 	return nil
 }
 
-// commitLocked persists the in-memory mutation made under a held store lock.
-// On failure it invokes undo unless the file was already replaced
-// (atomicfile.ErrNotDurable): disk may then hold the new state, so reverting
-// memory would make memory diverge from disk.
-func (store *Store) commitLocked(undo func()) error {
-	previousRevision := store.data.Revision
-	store.data.Revision++
-	err := store.writeLocked()
-	if err != nil && !errors.Is(err, atomicfile.ErrNotDurable) {
-		store.data.Revision = previousRevision
-		if undo != nil {
-			undo()
-		}
-	}
-	return err
-}
+const deviceColumns = `substr(token_sha256,1,16),name,created_at,last_seen,expires_at`
 
-func (store *Store) writeLocked() error {
-	data, err := json.Marshal(store.data)
-	if err != nil {
-		return fmt.Errorf("encode Fern control state: %w", err)
+func scanDevice(row interface{ Scan(...any) error }) (Device, error) {
+	var device Device
+	var createdAt, lastSeen, expiresAt int64
+	if err := row.Scan(&device.ID, &device.Name, &createdAt, &lastSeen, &expiresAt); err != nil {
+		return Device{}, err
 	}
-	if len(data) > maxControlStateBytes {
-		return errors.New("Fern control state exceeds 4 MiB")
-	}
-	if err := atomicfile.Write(store.path, data, 0o600); err != nil {
-		return fmt.Errorf("write Fern control state: %w", err)
-	}
-	return nil
-}
-
-// restorePrunedLocked resurrects devices that pruning removed but that no
-// successful write has persisted yet. Whenever a mutation fails before any
-// durable write, memory must keep matching disk exactly, so pruned entries
-// cannot simply vanish from the in-memory map.
-func (store *Store) restorePrunedLocked(pruned map[string]Device) {
-	for hash, device := range pruned {
-		store.data.Devices[hash] = device
-	}
-}
-
-func (store *Store) pruneLocked(now time.Time) map[string]Device {
-	pruned := make(map[string]Device)
-	for hash, device := range store.data.Devices {
-		if !now.Before(device.ExpiresAt) {
-			pruned[hash] = device
-			delete(store.data.Devices, hash)
-		}
-	}
-	return pruned
-}
-
-func emptyState(workspace string) diskState {
-	state := diskState{Version: schemaVersion, Workspace: workspace}
-	initializeMaps(&state)
-	return state
-}
-
-func initializeMaps(state *diskState) {
-	if state.Devices == nil {
-		state.Devices = make(map[string]Device)
-	}
+	device.CreatedAt = time.Unix(0, createdAt).UTC()
+	device.LastSeen = time.Unix(0, lastSeen).UTC()
+	device.ExpiresAt = time.Unix(0, expiresAt).UTC()
+	return device, nil
 }
 
 func tokenHash(token string) string {
@@ -351,10 +220,10 @@ func tokenHash(token string) string {
 // audit snapshots can distinguish control-surface credentials from device IDs.
 const OperatorCredentialIDPrefix = "control-"
 
-// NewOperatorCredentialID mints a fresh random operator credential identifier.
+// newOperatorCredentialID mints a fresh random operator credential identifier.
 // It carries no derived secret material, so persisting it in audit snapshots
 // creates no offline guessing opportunity.
-func NewOperatorCredentialID() (string, error) {
+func newOperatorCredentialID() (string, error) {
 	random := make([]byte, 16)
 	if _, err := rand.Read(random); err != nil {
 		return "", fmt.Errorf("generate Fern operator credential ID: %w", err)
@@ -364,38 +233,21 @@ func NewOperatorCredentialID() (string, error) {
 
 // EnsureOperatorCredentialID returns the stable random identifier attributed to
 // control-password operators in audit snapshots, generating and durably
-// recording one on first use through the same atomic write path as every other
-// mutation. The identifier is pure randomness — never a derivation of the
-// control password — so durable audit records cannot become an offline
-// brute-force oracle for that secret. It is an identifier, not a secret.
+// recording one on first use. The identifier is pure randomness — never a
+// derivation of the control password — so durable audit records cannot become
+// an offline brute-force oracle for that secret. It is an identifier, not a
+// secret.
 func (store *Store) EnsureOperatorCredentialID() (string, error) {
-	store.mu.Lock()
-	defer store.mu.Unlock()
-	if id := store.data.OperatorCredentialID; id != "" {
-		return id, nil
-	}
-	generated, err := NewOperatorCredentialID()
+	generated, err := newOperatorCredentialID()
 	if err != nil {
 		return "", err
 	}
-	store.data.OperatorCredentialID = generated
-	if err := store.commitLocked(func() { store.data.OperatorCredentialID = "" }); err != nil {
-		return "", err
+	if _, err := store.db.Exec(`INSERT INTO operator_credential(singleton,id) VALUES(1,?) ON CONFLICT DO NOTHING`, generated); err != nil {
+		return "", fmt.Errorf("record Fern operator credential ID: %w", err)
 	}
-	return generated, nil
-}
-
-// validOperatorCredentialID accepts either the empty value before the first
-// operator credential is issued, or exactly the canonical
-// spelling produced by NewOperatorCredentialID.
-func validOperatorCredentialID(value string) bool {
-	if value == "" {
-		return true
+	var id string
+	if err := store.db.QueryRow(`SELECT id FROM operator_credential`).Scan(&id); err != nil {
+		return "", fmt.Errorf("read Fern operator credential ID: %w", err)
 	}
-	suffix, ok := strings.CutPrefix(value, OperatorCredentialIDPrefix)
-	if !ok || len(suffix) != base64.RawURLEncoding.EncodedLen(16) {
-		return false
-	}
-	decoded, err := base64.RawURLEncoding.DecodeString(suffix)
-	return err == nil && len(decoded) == 16 && base64.RawURLEncoding.EncodeToString(decoded) == suffix
+	return id, nil
 }

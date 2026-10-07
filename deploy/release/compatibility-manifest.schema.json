@@ -14,10 +14,9 @@
     "current_release_schemas": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["task_store", "control_state", "github_app_credentials"],
+      "required": ["task_store", "github_app_credentials"],
       "properties": {
         "task_store": {"const": 9},
-        "control_state": {"const": 2},
         "github_app_credentials": {"const": 1}
       }
     },

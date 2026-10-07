@@ -25,8 +25,8 @@ command in an actively edited working tree.
 
 ## Current state and safety boundaries
 
-The compatibility manifest declares task-store schema **9**, control-state schema
-**2**, credential schema **1**, and no supported historical baseline. Runtime
+The compatibility manifest declares task-store schema **9**, credential schema
+**1**, and no supported historical baseline. Runtime
 resource spec **10** is a separate container identity contract. Release metadata
 describes a pre-release reset, an offline age-encrypted `fern backup`, restore by
 state-directory swap with a kept previous copy, and **no runtime volume exports**.

@@ -3,18 +3,16 @@ package proxy
 import (
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/nebler/fern/internal/control"
+	"github.com/nebler/fern/internal/taskstore/taskstoretest"
 )
 
 func TestDeviceRevokedBeforeAdmissionIsUnauthenticated(t *testing.T) {
-	store, err := control.Open(filepath.Join(t.TempDir(), "control"), "workspace")
-	if err != nil {
-		t.Fatal(err)
-	}
+	database, _ := taskstoretest.Open(t)
+	store := control.New(database.DB())
 	now := time.Now()
 	device, err := store.AddDevice("device-token", "phone", now, now.Add(time.Hour))
 	if err != nil {

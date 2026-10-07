@@ -113,7 +113,7 @@ compatibility_schema = json.loads((root / "deploy/release/compatibility-manifest
 assert compatibility["schema_version"] == 1
 assert compatibility["first_supported_baseline"] is None
 assert compatibility["current_release_schemas"]["task_store"] == 9
-assert compatibility["current_release_schemas"]["control_state"] == 2
+assert set(compatibility["current_release_schemas"]) == {"task_store", "github_app_credentials"}
 current_schema = compatibility_schema["properties"]["current_release_schemas"]
 assert current_schema["additionalProperties"] is False
 assert current_schema["properties"]["task_store"]["const"] == compatibility["current_release_schemas"]["task_store"]
@@ -198,7 +198,7 @@ RECIPIENT=$(cd "$ROOT" && go run ./integration/release/agekey "$TEMP/identity.tx
 HOST="$TEMP/host"
 SOURCE="$HOST/source"
 STATE="$SOURCE/home/.fern"
-mkdir -p "$SOURCE/etc" "$HOST/repository" "$STATE/control" "$STATE/github-app" \
+mkdir -p "$SOURCE/etc" "$HOST/repository" "$STATE/github-app" \
   "$STATE/tasks/demo-background/artifact-cas/sha256:abc" "$STATE/tasks/demo-background/artifact-work" \
   "$STATE/tasks/demo-background/runtime/background-runs/clone" "$STATE/locks"
 sed -e "s|/srv/fern/repository|$HOST/repository|" \
@@ -206,7 +206,6 @@ sed -e "s|/srv/fern/repository|$HOST/repository|" \
   "$ROOT/fern.example.yaml" >"$SOURCE/etc/fern.yaml"
 printf 'FERN_CONTROL_PASSWORD=secret-control-password-0123456789\n' >"$SOURCE/etc/fern.env"
 chmod 0600 "$SOURCE/etc/fern.yaml" "$SOURCE/etc/fern.env"
-printf 'devices-a\n' >"$STATE/control/devices.json"
 printf '{"client_secret":"secret-app","private_key":"secret-private-key"}\n' >"$STATE/github-app/app-credentials.json"
 printf 'artifact-a\n' >"$STATE/tasks/demo-background/artifact-cas/sha256:abc/manifest.json"
 printf 'scratch\n' >"$STATE/tasks/demo-background/artifact-work/scratch"
@@ -218,6 +217,8 @@ db = sqlite3.connect(sys.argv[1])
 db.execute("PRAGMA journal_mode=WAL")
 db.execute("CREATE TABLE runs (id TEXT)")
 db.execute("INSERT INTO runs VALUES ('run-a')")
+db.execute("CREATE TABLE devices (name TEXT)")
+db.execute("INSERT INTO devices VALUES ('devices-a')")
 db.commit()
 PY
 
@@ -267,7 +268,6 @@ TARGET="$HOST/target"
 mkdir -p "$TARGET/etc"
 fern_at "$TARGET" backup restore --identity "$TEMP/identity.txt" --input "$HOST/backup-a"
 TARGET_STATE="$TARGET/home/.fern"
-grep -qx 'devices-a' "$TARGET_STATE/control/devices.json"
 grep -q 'secret-private-key' "$TARGET_STATE/github-app/app-credentials.json"
 grep -qx 'artifact-a' "$TARGET_STATE/tasks/demo-background/artifact-cas/sha256:abc/manifest.json"
 cmp "$STATE/tasks/demo-background/runtime/background-runs/host.key" \
@@ -279,20 +279,24 @@ test ! -e "$TARGET_STATE/tasks/demo-background/artifact-work"
 test ! -e "$TARGET_STATE/tasks/demo-background/runtime/background-runs/clone"
 test ! -e "$TARGET_STATE.previous"
 
-printf 'devices-b\n' >"$STATE/control/devices.json"
+python3 - "$STATE/tasks/demo.db" <<'PY'
+import sqlite3, sys
+db = sqlite3.connect(sys.argv[1])
+db.execute("UPDATE runs SET id='run-b'")
+db.commit()
+PY
 if fern_at "$SOURCE" backup restore --identity "$TEMP/identity.txt" --input "$HOST/backup-a" >"$TEMP/live-state-rejection.txt" 2>&1; then
   printf 'error: restore replaced live state without --replace\n' >&2
   exit 1
 fi
 grep -q -- '--replace' "$TEMP/live-state-rejection.txt"
 fern_at "$SOURCE" backup restore --identity "$TEMP/identity.txt" --input "$HOST/backup-a" --replace
-grep -qx 'devices-a' "$STATE/control/devices.json"
-grep -qx 'devices-b' "$STATE.previous/control/devices.json"
+test "$(run_sql "$STATE/tasks/demo.db")" = run-a
+test "$(run_sql "$STATE.previous/tasks/demo.db")" = run-b
 test -e "$SOURCE/etc/fern.yaml.previous"
 fern_at "$SOURCE" backup rollback
-grep -qx 'devices-b' "$STATE/control/devices.json"
-grep -qx 'devices-a' "$STATE.previous/control/devices.json"
-test "$(run_sql "$STATE/tasks/demo.db")" = run-a
+test "$(run_sql "$STATE/tasks/demo.db")" = run-b
+test "$(run_sql "$STATE.previous/tasks/demo.db")" = run-a
 
 UNIT="$ROOT/deploy/systemd/fern.service"
 grep -qx 'User=fern' "$UNIT"

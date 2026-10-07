@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -52,10 +51,8 @@ type routeFixture struct {
 
 func newRouteFixture(t *testing.T) *routeFixture {
 	t.Helper()
-	store, err := control.Open(filepath.Join(t.TempDir(), "control"), "workspace")
-	if err != nil {
-		t.Fatal(err)
-	}
+	database, _ := taskstoretest.Open(t)
+	store := control.New(database.DB())
 	now := time.Now()
 	phone, err := store.AddDevice(testDeviceToken, "phone", now, now.Add(time.Hour))
 	if err != nil {
@@ -65,7 +62,6 @@ func newRouteFixture(t *testing.T) *routeFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	database, _ := taskstoretest.Open(t)
 	plugins := pluginauth.New(database.DB())
 	approver := task.ActorSnapshot{Type: task.ActorOperator, ID: "local-operator", DisplayName: "Local operator",
 		CredentialID: "control-test", Authentication: "basic", RequestID: "request-test"}
