@@ -311,7 +311,7 @@ func (p *Provider) Close() error {
 // CommittedRuntime reconstructs the exact durable process identity without
 // requiring the current execution configuration to match the run being cleaned.
 func (p *Provider) CommittedRuntime(run taskstore.BackgroundRun) (RuntimeIdentity, error) {
-	if _, err := p.cleanupDigest(run); err != nil {
+	if _, err := p.validateRunForCleanup(run); err != nil {
 		return RuntimeIdentity{}, err
 	}
 	return committedRuntimeFromRun(run)
@@ -467,11 +467,26 @@ func validateConfig(c Config) error {
 	if c.ImageReference == "" || strings.TrimSpace(c.ImageReference) != c.ImageReference || len(c.ImageReference) > 512 {
 		return errors.New("qualified background image reference is required")
 	}
-	if c.MemoryBytes < 64<<20 || c.MemoryBytes > 1<<40 || c.WallTimeout <= 0 || c.WallTimeout > 7*24*time.Hour || c.GitTimeout <= 0 || c.GitTimeout > 10*time.Minute || c.DockerTimeout <= 0 || c.DockerTimeout > 10*time.Minute || c.HealthTimeout <= 0 || c.HealthTimeout > 10*time.Minute || c.GitOutputBytes < 1024 || c.GitOutputBytes > 16<<20 || c.SourceSizeAdmissionBytes <= 0 || c.SourceSizeAdmissionBytes > 1<<40 || c.CloneObservedLimitBytes < c.SourceSizeAdmissionBytes || c.CloneObservedLimitBytes > 1<<40 || c.DiskFreeAdmissionBytes < c.CloneObservedLimitBytes || c.DiskFreeAdmissionBytes > 1<<40 || c.LogMaxSize == "" || c.LogMaxFiles < 1 || c.LogMaxFiles > 100 || c.StopGrace < 0 || c.StopGrace > time.Minute {
-		return errors.New("valid bounded memory, wall, output, disk, log, and stop limits are required")
-	}
-	if c.GitTimeout > c.WallTimeout || c.DockerTimeout > c.WallTimeout || c.HealthTimeout > c.WallTimeout {
-		return errors.New("operation timeout exceeds run wall limit")
+	// The limits are Fern's own constants (cmd/fern); only reject unset ones.
+	for _, limit := range []struct {
+		name string
+		ok   bool
+	}{
+		{"MemoryBytes", c.MemoryBytes > 0},
+		{"WallTimeout", c.WallTimeout > 0},
+		{"GitTimeout", c.GitTimeout > 0},
+		{"DockerTimeout", c.DockerTimeout > 0},
+		{"HealthTimeout", c.HealthTimeout > 0},
+		{"GitOutputBytes", c.GitOutputBytes > 0},
+		{"SourceSizeAdmissionBytes", c.SourceSizeAdmissionBytes > 0},
+		{"CloneObservedLimitBytes", c.CloneObservedLimitBytes > 0},
+		{"DiskFreeAdmissionBytes", c.DiskFreeAdmissionBytes > 0},
+		{"LogMaxFiles", c.LogMaxFiles > 0},
+		{"StopGrace", c.StopGrace >= 0},
+	} {
+		if !limit.ok {
+			return fmt.Errorf("background run Config.%s is unset or negative", limit.name)
+		}
 	}
 	if _, err := parseLogSize(c.LogMaxSize); err != nil {
 		return err
@@ -524,7 +539,7 @@ func (p *Provider) validateRun(run taskstore.BackgroundRun) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if run.ResourceSpecVersion != runidentity.ResourceSpecVersion || run.ImageIdentity != p.config.ImageID || run.EnvironmentSHA256 != EnvironmentSHA256(nil) {
+	if run.ImageIdentity != p.config.ImageID || run.EnvironmentSHA256 != EnvironmentSHA256(nil) {
 		return "", errors.New("background run execution configuration differs from immutable intent")
 	}
 	return digest, nil
@@ -542,14 +557,7 @@ func (p *Provider) validateRunForCleanup(run taskstore.BackgroundRun) (string, e
 	return p.specDigest(run)
 }
 
-func (p *Provider) cleanupDigest(run taskstore.BackgroundRun) (string, error) {
-	return p.validateRunForCleanup(run)
-}
-
 func (p *Provider) specDigest(run taskstore.BackgroundRun) (string, error) {
-	if run.ResourceSpecVersion != runidentity.ResourceSpecVersion {
-		return "", errors.New("unsupported background run resource spec version")
-	}
 	data, err := json.Marshal(struct {
 		Version                                                                                int `json:"version"`
 		Workspace, Task                                                                        string

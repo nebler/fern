@@ -863,7 +863,7 @@ func (p *Provider) ObserveUsage(ctx context.Context, run taskstore.BackgroundRun
 
 // RemoveClone removes only an exactly attested clone after the exact runtime is absent.
 func (p *Provider) RemoveClone(ctx context.Context, run taskstore.BackgroundRun, authority WriterFence) (_ Observation, resultErr error) {
-	digest, err := p.cleanupDigest(run)
+	digest, err := p.validateRunForCleanup(run)
 	if err != nil {
 		return Observation{}, err
 	}

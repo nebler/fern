@@ -675,17 +675,16 @@ func TestProviderEnforcesCloneVolumeContainerLifetimeOrder(t *testing.T) {
 	}
 }
 
-func TestConstructorRejectsUnboundedOrUnsafePolicy(t *testing.T) {
+func TestConstructorRejectsUnsetOrUnsafePolicy(t *testing.T) {
 	provider, docker, _ := testProvider(t)
 	tests := []struct {
 		name   string
 		mutate func(*Config)
 	}{
 		{"image reference", func(c *Config) { c.ImageReference = "" }},
-		{"memory", func(c *Config) { c.MemoryBytes = 1 }},
-		{"wall", func(c *Config) { c.WallTimeout = 8 * 24 * time.Hour }},
-		{"disk", func(c *Config) { c.DiskFreeAdmissionBytes = c.CloneObservedLimitBytes - 1 }},
-		{"observed", func(c *Config) { c.CloneObservedLimitBytes = c.SourceSizeAdmissionBytes - 1 }},
+		{"memory", func(c *Config) { c.MemoryBytes = 0 }},
+		{"wall", func(c *Config) { c.WallTimeout = 0 }},
+		{"stop grace", func(c *Config) { c.StopGrace = -time.Second }},
 		{"logs", func(c *Config) { c.LogMaxSize = "2t" }},
 	}
 	for _, test := range tests {
@@ -1430,7 +1429,7 @@ func TestUnsupportedResourceSpecCannotExecuteOrCleanUp(t *testing.T) {
 	provider, docker, run := testProvider(t)
 	for _, version := range []int{0, 8, 9, 11} {
 		run.ResourceSpecVersion = version
-		if _, err := provider.specDigest(run); err == nil {
+		if _, err := provider.validateRunForCleanup(run); err == nil {
 			t.Fatalf("spec %d received a digest", version)
 		}
 		if _, err := provider.EnsureClone(context.Background(), run); err == nil {

@@ -161,7 +161,7 @@ func TestQuotaAdmissionFailsBeforeExecutionMutation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	if _, err := reopened.cleanupDigest(run); err != nil {
+	if _, err := reopened.validateRunForCleanup(run); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -202,7 +202,7 @@ func TestQuotaVolumeRejectsLegacyAdoptionButAllowsCleanupIdentity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest, err := p.cleanupDigest(run)
+	digest, err := p.validateRunForCleanup(run)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -270,7 +270,7 @@ func TestReadonlyStoragePolicyAndLegacyCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	digest, err := p.cleanupDigest(run)
+	digest, err := p.validateRunForCleanup(run)
 	if err != nil {
 		t.Fatal(err)
 	}

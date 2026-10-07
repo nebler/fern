@@ -486,7 +486,7 @@ func (p *Provider) requestHealth(ctx context.Context, endpoint, user, password s
 // StopContainer attests the exact process epoch before stopping and returns
 // positive non-running writer-inactivity evidence.
 func (p *Provider) StopContainer(ctx context.Context, run taskstore.BackgroundRun, runtime RuntimeIdentity) (Observation, error) {
-	digest, err := p.cleanupDigest(run)
+	digest, err := p.validateRunForCleanup(run)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -549,7 +549,7 @@ func (p *Provider) StopContainer(ctx context.Context, run taskstore.BackgroundRu
 // provider-owned labels. It never creates a resource and never deletes an
 // identity that was not fully attested.
 func (p *Provider) ProveWriterInactive(ctx context.Context, run taskstore.BackgroundRun) (Observation, WriterFence, error) {
-	digest, err := p.cleanupDigest(run)
+	digest, err := p.validateRunForCleanup(run)
 	if err != nil {
 		return Observation{}, WriterFence{}, err
 	}
@@ -617,7 +617,7 @@ func (p *Provider) ProveWriterInactive(ctx context.Context, run taskstore.Backgr
 
 // RemoveContainer removes only the exact attested stopped runtime.
 func (p *Provider) RemoveContainer(ctx context.Context, run taskstore.BackgroundRun, authority WriterFence) (Observation, error) {
-	digest, err := p.cleanupDigest(run)
+	digest, err := p.validateRunForCleanup(run)
 	if err != nil {
 		return Observation{}, err
 	}
@@ -694,7 +694,7 @@ func (p *Provider) RemoveContainer(ctx context.Context, run taskstore.Background
 
 // RemoveVolume removes only the exact attested volume after the exact runtime is absent.
 func (p *Provider) RemoveVolume(ctx context.Context, run taskstore.BackgroundRun, authority WriterFence) (_ Observation, resultErr error) {
-	digest, err := p.cleanupDigest(run)
+	digest, err := p.validateRunForCleanup(run)
 	if err != nil {
 		return Observation{}, err
 	}
