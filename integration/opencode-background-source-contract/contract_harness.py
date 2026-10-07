@@ -129,6 +129,23 @@ class Harness:
             check=True,
         )
         self.proven.append("pinned gh 2.98.0 wrapper and repository-scoped Git helper exist in the final image and fail closed without credentials")
+        # The workspace is a bind mount owned by the host Fern user (root on CI),
+        # never by the worker. Recreate that ownership mismatch inside the image
+        # and prove the worker's Git trusts exactly the workspace path.
+        subprocess.run(
+            ["docker", "run", "--rm", "--user", "0:0", "--read-only",
+             "--tmpfs", "/home/user/workspace", "--tmpfs", "/tmp/elsewhere",
+             "--entrypoint", "sh", self.image_id, "-ec",
+             "test \"$(git config --system --get-all safe.directory)\" = /home/user/workspace; "
+             "for repo in /home/user/workspace /tmp/elsewhere; do "
+             "git init --quiet \"$repo\"; chown -R 0:0 \"$repo\"; chmod -R a+rwX \"$repo\"; done; "
+             "setpriv --reuid=1001 --regid=1001 --clear-groups env HOME=/tmp "
+             "git -C /home/user/workspace status --porcelain; "
+             "if setpriv --reuid=1001 --regid=1001 --clear-groups env HOME=/tmp "
+             "git -C /tmp/elsewhere status --porcelain 2>/dev/null; then exit 1; fi"],
+            check=True,
+        )
+        self.proven.append("worker Git as 1001:1001 trusts a foreign-owned /home/user/workspace and no other path")
 
         self.repo.mkdir()
         self.data.mkdir()

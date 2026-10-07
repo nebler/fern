@@ -64,10 +64,15 @@ RUN set -eux; \
 COPY gh /usr/local/bin/gh
 COPY fern-git-credential /usr/local/bin/fern-git-credential
 COPY fern-github-credentials.cjs /usr/local/libexec/fern-github-credentials.cjs
+# The workspace clone is bind-mounted owned by the host Fern user while the
+# worker runs as 1001:1001; trust exactly that path so Git (and the agent's own
+# commits and pushes) does not refuse it as dubious ownership.
 RUN chmod 0755 /usr/local/bin/gh /usr/local/bin/fern-git-credential \
     && chmod 0644 /usr/local/libexec/fern-github-credentials.cjs \
     && git config --system credential.useHttpPath true \
-    && git config --system credential.helper /usr/local/bin/fern-git-credential
+    && git config --system credential.helper /usr/local/bin/fern-git-credential \
+    && git config --system safe.directory /home/user/workspace \
+    && test "$(git config --system --get-all safe.directory)" = "/home/user/workspace"
 
 COPY --from=build /src/opencode /usr/local/bin/opencode
 RUN chmod 0755 /usr/local/bin/opencode \

@@ -105,3 +105,32 @@ func printContainerExec(ctx context.Context, cli *client.Client, containerID, sc
 	_, copyErr := stdcopy.StdCopy(&buffer, &buffer, io.LimitReader(attached.Reader, 256<<10))
 	fmt.Fprintf(out, "container exec (error=%v):\n%s\n", copyErr, buffer.String())
 }
+
+// assertWorkerGit proves the worker's own Git accepts the bind-mounted clone,
+// which the host owns, as uid 1001: the agent commits and pushes from there.
+func assertWorkerGit(ctx context.Context, cli *client.Client, containerID string) error {
+	created, err := cli.ContainerExecCreate(ctx, containerID, container.ExecOptions{
+		User: "1001:1001", Cmd: []string{"git", "-C", "/home/user/workspace", "status", "--porcelain"}, AttachStdout: true, AttachStderr: true,
+	})
+	if err != nil {
+		return fmt.Errorf("worker git exec: %w", err)
+	}
+	attached, err := cli.ContainerExecAttach(ctx, created.ID, container.ExecAttachOptions{})
+	if err != nil {
+		return fmt.Errorf("worker git attach: %w", err)
+	}
+	var output bytes.Buffer
+	_, copyErr := stdcopy.StdCopy(&output, &output, io.LimitReader(attached.Reader, 64<<10))
+	attached.Close()
+	if copyErr != nil {
+		return fmt.Errorf("worker git output: %w", copyErr)
+	}
+	inspected, err := cli.ContainerExecInspect(ctx, created.ID)
+	if err != nil {
+		return fmt.Errorf("worker git inspect: %w", err)
+	}
+	if inspected.Running || inspected.ExitCode != 0 {
+		return fmt.Errorf("worker git status as 1001:1001 failed (exit %d): %s", inspected.ExitCode, output.String())
+	}
+	return nil
+}

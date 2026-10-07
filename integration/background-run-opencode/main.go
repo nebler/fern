@@ -580,9 +580,14 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 			return readErr
 		}
 		if run.PromptRequestAttemptedAt != nil {
+			if err := assertWorkerGit(ctx, cli, run.ObservedContainerID); err != nil {
+				_ = store.Close()
+				return err
+			}
 			break
 		}
-		if err != nil {
+		// An unready model catalog is a retryable pass, never a prompt fence.
+		if err != nil && !errors.Is(err, backgroundopencode.ErrNotReady) {
 			_ = store.Close()
 			return err
 		}
@@ -824,7 +829,7 @@ func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository 
 	var run taskstore.BackgroundRun
 	for step := 0; step < 25; step++ {
 		runErr := coordinator.RunOnce(ctx)
-		if runErr != nil && !errors.Is(runErr, backgroundruncoord.ErrNoWork) {
+		if runErr != nil && !errors.Is(runErr, backgroundruncoord.ErrNoWork) && !errors.Is(runErr, backgroundopencode.ErrNotReady) {
 			return fmt.Errorf("advance retained run: %w", runErr)
 		}
 		run, err = store.GetBackgroundRun(ctx, workspaceID, admission.Run.RunID, actor)
@@ -1114,7 +1119,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 			}
 			break
 		}
-		if runErr != nil {
+		if runErr != nil && !errors.Is(runErr, backgroundopencode.ErrNotReady) {
 			return runErr
 		}
 	}
