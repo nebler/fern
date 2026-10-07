@@ -343,11 +343,18 @@ independently certify repository test success. Review the PR and CI yourself.
 
 Seal any work you want to preserve, wait for result/cleanup completion, then stop
 the foreground Fern server normally. Offline backup/credential commands require
-Fern to be stopped because they take the host leases:
+Fern to be stopped because they take the host leases. Like every host command,
+they read `--config` and `--env-file` (default `fern.yaml` and `fern.env` in the
+current directory) and use the Fern state directory `~/.fern` of the invoking
+user, so run them as the same user and `HOME` as `fern up`:
 
 ```sh
-./fern backup create --recipient age1... --output /secure/fern.backup
+./fern backup create --config fern.yaml --env-file fern.env \
+  --recipient age1... --output /secure/fern.backup
 ```
+
+For the systemd service, that means for example
+`sudo -u fern env HOME=/var/lib/fern fern backup create --config /etc/fern/fern.yaml --env-file /etc/fern/fern.env ...`.
 
 Replace `age1...` with a real recipient. The backup is one age-encrypted file
 holding the Fern state directory (a snapshot of the SQLite database with runs,
@@ -360,7 +367,8 @@ To restore onto a host with no Fern state or configuration, use the matching
 identity:
 
 ```sh
-./fern backup restore --identity /secure/identity.txt --input /secure/fern.backup
+./fern backup restore --config fern.yaml --env-file fern.env \
+  --identity /secure/identity.txt --input /secure/fern.backup
 ```
 
 Restore verifies every file before installing anything and never overwrites:

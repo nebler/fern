@@ -442,8 +442,10 @@ func TestBackupCommandsRoundTripAHost(t *testing.T) {
 			envPath:        filepath.Join(root, name, "etc", "fern.env"),
 		}
 	}
+	// The state directory is always ~/.fern, so each host gets its own HOME.
 	flags := func(options backupOptions) []string {
-		return []string{"--config", options.configPath, "--env-file", options.envPath, "--state-dir", options.stateDirectory}
+		t.Setenv("HOME", filepath.Dir(options.stateDirectory))
+		return []string{"--config", options.configPath, "--env-file", options.envPath}
 	}
 	source := backupFixture{options: host("source")}
 	source.seed(t, "a")

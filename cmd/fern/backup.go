@@ -29,9 +29,6 @@ import (
 )
 
 const (
-	defaultBackupConfig = "/etc/fern/fern.yaml"
-	defaultBackupEnv    = "/etc/fern/fern.env"
-
 	// A backup is one age-encrypted gzip tar holding state/..., the
 	// configuration and protected environment under config/, and MANIFEST.json
 	// with a sha256 for every file. Nothing in it is ever written in plaintext.
@@ -58,20 +55,23 @@ type backupFileEntry struct {
 	SHA256 string `json:"sha256"`
 }
 
-func backupFlags(command, description string) (*flag.FlagSet, *backupOptions) {
+// backupFlags registers the shared flags; the returned function resolves them
+// after parsing. The state directory is always ~/.fern of the invoking user,
+// exactly as for fern up.
+func backupFlags(command, description string) (*flag.FlagSet, func() (backupOptions, error)) {
 	fs := newFlagSet(command, description)
-	options := &backupOptions{}
-	fs.StringVar(&options.configPath, "config", defaultBackupConfig, "configuration file")
-	fs.StringVar(&options.envPath, "env-file", defaultBackupEnv, "protected environment file")
-	if state, err := statePath(""); err == nil {
-		options.stateDirectory = filepath.Clean(state)
+	configPath, envPath := addConfigFlags(fs)
+	return fs, func() (backupOptions, error) {
+		state, err := statePath("")
+		if err != nil {
+			return backupOptions{}, fmt.Errorf("determine Fern state directory: %w", err)
+		}
+		return backupOptions{configPath: *configPath, envPath: *envPath, stateDirectory: filepath.Clean(state)}, nil
 	}
-	fs.StringVar(&options.stateDirectory, "state-dir", options.stateDirectory, "Fern state directory")
-	return fs, options
 }
 
 func runBackupCreate(args []string, _ *slog.Logger) error {
-	fs, options := backupFlags("backup create", "Create an age-encrypted offline Fern host backup.")
+	fs, resolveOptions := backupFlags("backup create", "Create an age-encrypted offline Fern host backup.")
 	output := fs.String("output", "", "encrypted backup file to create (required)")
 	var recipientFlags repeatedFlag
 	fs.Var(&recipientFlags, "recipient", "age X25519 recipient (repeatable, required)")
@@ -81,20 +81,21 @@ func runBackupCreate(args []string, _ *slog.Logger) error {
 	if *output == "" || len(recipientFlags) == 0 {
 		return invocationError{message: "--output and at least one --recipient are required"}
 	}
-	if options.stateDirectory == "" {
-		return errors.New("cannot determine Fern state directory")
+	options, err := resolveOptions()
+	if err != nil {
+		return err
 	}
 	recipients, err := parseAgeRecipients(recipientFlags)
 	if err != nil {
 		return err
 	}
-	_, name, err := loadBackupConfig(*options)
+	_, name, err := loadBackupConfig(options)
 	if err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	manifest, err := createBackup(ctx, *options, name, *output, recipients)
+	manifest, err := createBackup(ctx, options, name, *output, recipients)
 	if err != nil {
 		return err
 	}
@@ -103,7 +104,7 @@ func runBackupCreate(args []string, _ *slog.Logger) error {
 }
 
 func runBackupRestore(args []string, _ *slog.Logger) error {
-	fs, options := backupFlags("backup restore", "Verify an encrypted backup and install it on a host with no Fern state or configuration.")
+	fs, resolveOptions := backupFlags("backup restore", "Verify an encrypted backup and install it on a host with no Fern state or configuration.")
 	input := fs.String("input", "", "encrypted backup file (required)")
 	var identityPaths repeatedFlag
 	fs.Var(&identityPaths, "identity", "private age X25519 identity file (repeatable, required)")
@@ -113,8 +114,9 @@ func runBackupRestore(args []string, _ *slog.Logger) error {
 	if *input == "" || len(identityPaths) == 0 {
 		return invocationError{message: "--input and at least one --identity are required"}
 	}
-	if options.stateDirectory == "" {
-		return errors.New("cannot determine Fern state directory")
+	options, err := resolveOptions()
+	if err != nil {
+		return err
 	}
 	identities, err := loadAgeIdentities(identityPaths)
 	if err != nil {
@@ -122,7 +124,7 @@ func runBackupRestore(args []string, _ *slog.Logger) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	manifest, err := restoreBackup(ctx, *options, *input, identities)
+	manifest, err := restoreBackup(ctx, options, *input, identities)
 	if err != nil {
 		return err
 	}

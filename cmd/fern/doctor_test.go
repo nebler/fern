@@ -14,7 +14,7 @@ func TestDiagnoseFailsClosedBeforeExternalChecksWithoutSecrets(t *testing.T) {
 		ConfigPath: filepath.Join(t.TempDir(), "fern.yaml"),
 		EnvPath:    filepath.Join(t.TempDir(), "fern.env"),
 	})
-	if report.Ready || len(report.Checks) != 1 || report.Checks[0].ID != "secrets" || report.Checks[0].Status != "fail" {
+	if report.Ready || len(report.Checks) != 1 || report.Checks[0].ID != "config" || report.Checks[0].Status != "fail" {
 		t.Fatalf("doctor report = %+v", report)
 	}
 }

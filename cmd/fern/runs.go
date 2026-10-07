@@ -175,8 +175,7 @@ func selectAttachRun(input io.Reader, output io.Writer, runs []runSummary) (task
 func parseRunsFlags(args []string) (runCLIOptions, error) {
 	fs := newFlagSet("runs", "List Fern Background Run sessions.")
 	endpoint := fs.String("endpoint", os.Getenv("FERN_ENDPOINT"), "remote Fern root HTTPS origin")
-	configPath := fs.String("config", "fern.yaml", "local Fern configuration file")
-	envPath := fs.String("env-file", "", "local Fern protected environment file")
+	configPath, envPath := addConfigFlags(fs)
 	all := fs.Bool("all", false, "include completed and failed runs")
 	jsonOutput := fs.Bool("json", false, "write JSON output")
 	if err := parseFlagValues(fs, args); err != nil {
@@ -191,8 +190,7 @@ func parseRunsFlags(args []string) (runCLIOptions, error) {
 func parseAttachFlags(args []string) (runCLIOptions, []string, error) {
 	fs := newFlagSet("attach", "Attach the OpenCode TUI to a live Fern session.")
 	endpoint := fs.String("endpoint", os.Getenv("FERN_ENDPOINT"), "remote Fern root HTTPS origin")
-	configPath := fs.String("config", "fern.yaml", "local Fern configuration file")
-	envPath := fs.String("env-file", "", "local Fern protected environment file")
+	configPath, envPath := addConfigFlags(fs)
 	opencode := fs.String("opencode", "opencode", "OpenCode executable")
 	if err := parseFlagValues(fs, args); err != nil {
 		return runCLIOptions{}, nil, err

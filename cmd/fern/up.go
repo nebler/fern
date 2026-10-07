@@ -25,11 +25,12 @@ import (
 )
 
 func runUp(args []string, log *slog.Logger) (resultErr error) {
-	configPath, envPath, err := parseUpFlags(args)
-	if err != nil {
+	fs := newFlagSet("up", "Run the Background Run control plane.")
+	configPath, envPath := addConfigFlags(fs)
+	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
-	cfg, err := loadCommandConfig(configPath, envPath)
+	cfg, err := loadCommandConfig(*configPath, *envPath)
 	if err != nil {
 		return err
 	}
@@ -74,13 +75,6 @@ func runUp(args []string, log *slog.Logger) (resultErr error) {
 		return nil
 	}
 	return err
-}
-
-func parseUpFlags(args []string) (configPath, envPath string, err error) {
-	fs := newFlagSet("up", "Run the Background Run control plane.")
-	fs.StringVar(&configPath, "config", "fern.yaml", "configuration file")
-	fs.StringVar(&envPath, "env-file", "", "protected environment file")
-	return configPath, envPath, parseFlags(fs, args)
 }
 
 type upRuntime struct {

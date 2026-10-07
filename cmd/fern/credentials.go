@@ -25,10 +25,7 @@ const maxPrivateKeyFileBytes = 64 << 10
 // repository. It takes the host lease, so Fern must be stopped.
 func runCredentialSet(args []string) error {
 	fs := newFlagSet("credentials set", "Validate and store the GitHub App ID and private key while Fern is stopped.")
-	configPath := fs.String("config", defaultBackupConfig, "configuration file")
-	envPath := fs.String("env-file", defaultBackupEnv, "protected environment file")
-	stateDirectory, _ := statePath("")
-	fs.StringVar(&stateDirectory, "state-dir", stateDirectory, "Fern state directory")
+	configPath, envPath := addConfigFlags(fs)
 	appID := fs.Int64("app-id", 0, "GitHub App ID (required)")
 	keyPath := fs.String("private-key", "", "GitHub App private key PEM file (required)")
 	if err := parseFlags(fs, args); err != nil {
@@ -37,8 +34,9 @@ func runCredentialSet(args []string) error {
 	if *appID <= 0 || *keyPath == "" {
 		return invocationError{message: "--app-id and --private-key are required"}
 	}
-	if stateDirectory == "" {
-		return errors.New("cannot determine Fern state directory")
+	stateDirectory, err := statePath("")
+	if err != nil {
+		return fmt.Errorf("determine Fern state directory: %w", err)
 	}
 	privateKeyPEM, err := readPrivateKeyFile(*keyPath)
 	if err != nil {

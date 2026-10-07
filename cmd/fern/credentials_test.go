@@ -38,9 +38,11 @@ func TestCredentialSetValidatesBeforeStoring(t *testing.T) {
 	if err := os.WriteFile(garbagePath, []byte("not a key"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	stateDirectory := filepath.Join(directory, "state")
+	home := filepath.Join(directory, "home")
+	t.Setenv("HOME", home)
+	stateDirectory := filepath.Join(home, ".fern")
 	set := func(appID, path string) error {
-		return runCredentialSet([]string{"--config", configPath, "--env-file", envPath, "--state-dir", stateDirectory,
+		return runCredentialSet([]string{"--config", configPath, "--env-file", envPath,
 			"--app-id", appID, "--private-key", path})
 	}
 

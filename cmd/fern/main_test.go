@@ -83,7 +83,7 @@ func TestPersistentWorkspaceCommandsAreNotRegistered(t *testing.T) {
 func TestInitRequiresQualifiedLocalImageID(t *testing.T) {
 	t.Parallel()
 	err := runInit([]string{"--config", t.TempDir() + "/fern.yaml", "--env-file", t.TempDir() + "/fern.env"})
-	if err == nil || !strings.Contains(err.Error(), "-background-image-id is required") {
+	if err == nil || !strings.Contains(err.Error(), "--background-image-id is required") {
 		t.Fatalf("init without qualified image ID = %v", err)
 	}
 }

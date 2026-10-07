@@ -41,29 +41,20 @@ type doctorReport struct {
 type diagnoseOptions struct {
 	ConfigPath   string
 	EnvPath      string
-	ExplicitURL  string
 	RequirePhone bool
-	FieldDemo    bool
 }
 
 func runDoctor(args []string) error {
 	fs := newFlagSet("doctor", "Verify Fern and the private phone-demo path.")
-	configPath := fs.String("config", "fern.yaml", "configuration file")
-	envPath := fs.String("env-file", "fern.env", "protected environment file")
-	phone := fs.Bool("phone", false, "require and verify a Tailscale HTTPS route")
-	fieldDemo := fs.Bool("field-demo", false, "require all locally verifiable field-demo prerequisites")
-	remoteURL := fs.String("url", "", "explicit private HTTPS origin")
+	configPath, envPath := addConfigFlags(fs)
+	phone := fs.Bool("phone", false, "verify the private Tailscale HTTPS route and print a one-time pairing QR code")
 	jsonOutput := fs.Bool("json", false, "output a stable JSON report")
-	qr := fs.Bool("qr", true, "print a terminal QR code for a ready phone URL")
 	if err := parseFlags(fs, args); err != nil {
 		return err
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	report := diagnose(ctx, diagnoseOptions{
-		ConfigPath: *configPath, EnvPath: *envPath, ExplicitURL: *remoteURL,
-		RequirePhone: *phone || *fieldDemo, FieldDemo: *fieldDemo,
-	})
+	report := diagnose(ctx, diagnoseOptions{ConfigPath: *configPath, EnvPath: *envPath, RequirePhone: *phone})
 	if *jsonOutput {
 		encoder := json.NewEncoder(os.Stdout)
 		encoder.SetEscapeHTML(false)
@@ -71,7 +62,7 @@ func runDoctor(args []string) error {
 			return err
 		}
 	} else {
-		writeDoctorReport(os.Stdout, report, *qr)
+		writeDoctorReport(os.Stdout, report)
 	}
 	if !report.Ready {
 		return errors.New("requested Fern readiness checks failed; resolve failed checks above")
@@ -89,17 +80,9 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 			report.Ready = false
 		}
 	}
-	// Unlike up, doctor treats the environment file as required, so it
-	// reads it directly instead of through the optional-file preamble.
-	values, err := readEnvFile(opts.EnvPath)
+	cfg, err := loadCommandConfig(opts.ConfigPath, opts.EnvPath)
 	if err != nil {
-		add("secrets", "fail", err.Error(), "Run fern init or pass --env-file.")
-		return report
-	}
-	add("secrets", "pass", "protected environment file loaded", "")
-	cfg, err := config.Load(opts.ConfigPath, values)
-	if err != nil {
-		add("config", "fail", err.Error(), "Fix the strict Fern configuration.")
+		add("config", "fail", err.Error(), "Run fern init, or pass the --config and --env-file it wrote.")
 		return report
 	}
 	if err := config.ValidateBootstrap(cfg); err != nil {
@@ -143,24 +126,17 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 	} else {
 		add("gateway", "pass", "local Fern gateway is serving", "")
 	}
-	if opts.FieldDemo {
-		add("live-checks", "warn", "model execution and GitHub mutation are not run by doctor", "Run the opt-in Background Run qualification before the phone demo.")
-	}
-	if opts.RequirePhone || opts.ExplicitURL != "" {
-		checkPhoneRoute(ctx, &report, add, opts, cfg, localURL)
+	if opts.RequirePhone {
+		checkPhoneRoute(ctx, &report, add, cfg, localURL)
 	}
 	return report
 }
 
 // checkPhoneRoute verifies the private Tailscale HTTPS path end to end and, on
 // success, records the one-time pairing URL on the report.
-func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, status, summary, remediation string), opts diagnoseOptions, cfg config.Config, localURL string) {
+func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, status, summary, remediation string), cfg config.Config, localURL string) {
 	if cfg.Proxy.RemoteOrigin == "" {
 		add("tailscale", "fail", "proxy.remoteOrigin is required for phone mode", "Set proxy.remoteOrigin to the exact canonical HTTPS root origin reported for this host, then retry.")
-		return
-	}
-	if opts.ExplicitURL != "" && opts.ExplicitURL != cfg.Proxy.RemoteOrigin {
-		add("tailscale", "fail", "--url does not exactly match proxy.remoteOrigin", "Remove --url or pass the exact configured canonical origin.")
 		return
 	}
 	servedOrigin, serveErr := discoverTailscaleURL(ctx, cfg.Proxy.Listen, cfg.Proxy.OperatorListen)
@@ -169,7 +145,7 @@ func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, sta
 		return
 	}
 	localOrigin, localErr := localTailscaleOrigin(ctx)
-	if topologyErr := validatePhoneTopology(cfg.Proxy.RemoteOrigin, opts.ExplicitURL, servedOrigin, localOrigin, localErr); topologyErr != nil {
+	if topologyErr := validatePhoneTopology(cfg.Proxy.RemoteOrigin, servedOrigin, localOrigin, localErr); topologyErr != nil {
 		add("tailscale", "fail", topologyErr.Error(), "Make proxy.remoteOrigin, the root Serve origin, and this host's tailnet HTTPS origin identical.")
 		return
 	}
@@ -225,12 +201,9 @@ func checkBackgroundRouteSurface(ctx context.Context, origin string) error {
 	return nil
 }
 
-func validatePhoneTopology(configured, asserted, served, local string, localErr error) error {
+func validatePhoneTopology(configured, served, local string, localErr error) error {
 	if configured == "" {
 		return errors.New("proxy.remoteOrigin is required for phone mode")
-	}
-	if asserted != "" && asserted != configured {
-		return errors.New("--url does not exactly match proxy.remoteOrigin")
 	}
 	if served != configured {
 		return fmt.Errorf("Tailscale Serve origin %q does not exactly match proxy.remoteOrigin %q", served, configured)
@@ -440,7 +413,7 @@ func serveTargetUsesListener(target, listener string) bool {
 	return targetErr == nil && listenerErr == nil && targetPort == configuredPort
 }
 
-func writeDoctorReport(writer io.Writer, report doctorReport, showQR bool) {
+func writeDoctorReport(writer io.Writer, report doctorReport) {
 	for _, check := range report.Checks {
 		fmt.Fprintf(writer, "%-5s %-12s %s\n", strings.ToUpper(check.Status), check.ID, check.Summary)
 		if check.Remediation != "" && check.Status != "pass" {
@@ -451,9 +424,7 @@ func writeDoctorReport(writer io.Writer, report doctorReport, showQR bool) {
 		return
 	}
 	fmt.Fprintf(writer, "\nOne-time phone URL (expires in 5 minutes):\n%s\n", report.PhoneURL)
-	if showQR {
-		_ = writeQR(writer, report.PhoneURL)
-	}
+	_ = writeQR(writer, report.PhoneURL)
 	fmt.Fprintln(writer, "Transport checks passed. Real phone interaction still requires your confirmation.")
 }
 

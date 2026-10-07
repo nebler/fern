@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"net"
 	"net/url"
@@ -27,16 +28,20 @@ func loopbackURL(address string) (string, error) {
 	return (&url.URL{Scheme: "http", Host: address}).String(), nil
 }
 
-// loadCommandConfig owns the shared command preamble: read the optional
-// protected environment file, then load configuration against it without
-// copying host-only secrets into run state.
+// addConfigFlags registers the --config and --env-file flags every
+// host-side command shares, defaulting to the files fern init writes.
+func addConfigFlags(fs *flag.FlagSet) (configPath, envPath *string) {
+	return fs.String("config", "fern.yaml", "configuration file"),
+		fs.String("env-file", "fern.env", "protected environment file holding FERN_CONTROL_PASSWORD")
+}
+
+// loadCommandConfig owns the shared command preamble: read the protected
+// environment file, then load configuration against it without copying
+// host-only secrets into run state.
 func loadCommandConfig(configPath, envPath string) (config.Config, error) {
-	var values map[string]string
-	if envPath != "" {
-		var err error
-		if values, err = readEnvFile(envPath); err != nil {
-			return config.Config{}, err
-		}
+	values, err := readEnvFile(envPath)
+	if err != nil {
+		return config.Config{}, err
 	}
 	return config.Load(configPath, values)
 }

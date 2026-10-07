@@ -65,7 +65,7 @@ func TestInitCreatesPendingConfigurationWithoutInstallationID(t *testing.T) {
 		t.Fatal("pending configuration authorized execution")
 	}
 	report := diagnose(t.Context(), diagnoseOptions{ConfigPath: configPath, EnvPath: envPath})
-	if report.Ready || len(report.Checks) != 3 || report.Checks[2].ID != "github" || report.Checks[2].Status != "fail" {
+	if report.Ready || len(report.Checks) != 2 || report.Checks[1].ID != "github" || report.Checks[1].Status != "fail" {
 		t.Fatalf("pending doctor report = %+v", report)
 	}
 }
