@@ -68,7 +68,7 @@ func (state *pairingState) issue(writer http.ResponseWriter, _ *http.Request) {
 		http.Error(writer, "too many outstanding pairing codes", http.StatusTooManyRequests)
 		return
 	}
-	code := auth.NewSecret()
+	code := domain.NewSecret()
 	digest := sha256.Sum256([]byte(code))
 	state.codes[digest] = now.Add(pairingCodeTTL)
 	state.lastIssued = now
@@ -135,7 +135,7 @@ func (state *pairingState) pair(writer http.ResponseWriter, request *http.Reques
 	delete(state.codes, hash)
 	delete(state.attempts, hash)
 	state.lastSuccess = now
-	session := auth.NewSecret()
+	session := domain.NewSecret()
 	_, pairErr := state.store.AddDevice(session, name, now, now.Add(deviceCredentialTTL))
 	state.mu.Unlock()
 	if pairErr != nil {

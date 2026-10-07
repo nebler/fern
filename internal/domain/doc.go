@@ -1,5 +1,5 @@
 // Package domain is Fern's dependency-free vocabulary for runs: typed
-// identifiers, actor attribution, idempotency comparison, secure ID
+// identifiers, actor attribution, idempotency comparison, secure ID and secret
 // generation, run lifecycle states and phases, canonical resource names,
 // runtime identity, and Git/GitHub reference validation. It contains no
 // persistence, transport, or external-authority logic, so ingress, storage,

@@ -175,7 +175,7 @@ func NewPluginStore(db *sql.DB) *PluginStore {
 
 func (store *PluginStore) Start(now time.Time) (StartResult, error) {
 	now = now.UTC()
-	deviceCode, userCode, id := NewSecret(), randomUserCode(), randomID(authorizationIDTag)
+	deviceCode, userCode, id := domain.NewSecret(), randomUserCode(), randomID(authorizationIDTag)
 	expiresAt := now.Add(authorizationTTL)
 	err := store.transact(context.Background(), func(tx *sql.Tx) error {
 		if err := prune(tx, now); err != nil {
@@ -640,10 +640,6 @@ func digest(label, value string) string {
 	sum := sha256.Sum256([]byte("fern-plugin-auth-v1\x00" + label + "\x00" + value))
 	return hex.EncodeToString(sum[:])
 }
-
-// NewSecret returns 256 random bits, base64url-encoded without padding: the
-// format of device codes and of the web package's pairing codes and device sessions.
-func NewSecret() string { return base64.RawURLEncoding.EncodeToString(randomBytes(deviceCodeBytes)) }
 
 func randomID(prefix string) string {
 	return prefix + base64.RawURLEncoding.EncodeToString(randomBytes(randomIDBytes))

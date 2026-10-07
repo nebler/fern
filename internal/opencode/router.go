@@ -2,9 +2,7 @@ package opencode
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -291,11 +289,7 @@ func (m *Router) IssueAttachment(run store.Run) (Attachment, bool, error) {
 	if !ok || string(run.OpenCodeSessionID) != identity.SessionID {
 		return Attachment{}, false, nil
 	}
-	secret := make([]byte, 32)
-	if _, err := rand.Read(secret); err != nil {
-		return Attachment{}, false, fmt.Errorf("create attachment capability: %w", err)
-	}
-	password := base64.RawURLEncoding.EncodeToString(secret)
+	password := domain.NewSecret()
 	digest := sha256.Sum256([]byte(password))
 	now := time.Now().UTC()
 	m.mu.Lock()
