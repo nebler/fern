@@ -79,7 +79,7 @@ func setupService(t *testing.T) (*service, *commandStore, *stubVerifier, task.Ac
 	store, base := &commandStore{}, &stubVerifier{}
 	wakes := new(int)
 	s := &service{config: Config{WorkspaceID: testWorkspace, RepositoryRemote: "https://github.com/owner/repository", Store: store, Generator: task.NewSecureGenerator(), BaseVerifier: base,
-		Now: func() time.Time { return time.Unix(1750000000, 123456789) }, AttemptTimeout: time.Hour,
+		Now: func() time.Time { return time.Unix(1750000000, 123456789) }, RunTimeout: time.Hour,
 		AvailableProfile: taskstore.BackgroundRunSourceProfile, SealPolicyVersion: "seal.v1",
 		Wake: func() {
 			if !store.committed {

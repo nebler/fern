@@ -412,7 +412,7 @@ func TestExecutionIdentityProducesDistinctLocators(t *testing.T) {
 		t.Fatal(err)
 	}
 	if firstLocator == secondLocator {
-		t.Fatal("different attempt/generation identities deduplicated")
+		t.Fatal("different result identities deduplicated")
 	}
 }
 

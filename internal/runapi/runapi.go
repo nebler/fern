@@ -69,7 +69,7 @@ type Config struct {
 	ActorResolver               ActorResolver
 	BaseVerifier                BaseVerifier
 	Now                         func() time.Time
-	AttemptTimeout              time.Duration
+	RunTimeout                  time.Duration
 	Agent                       string
 	ModelProvider               string
 	Model                       string
@@ -95,7 +95,7 @@ type retainedKey struct {
 
 func New(config Config) (*Handler, error) {
 	if config.Store == nil || config.Route == nil || config.Generator == nil || config.ActorResolver == nil || config.BaseVerifier == nil || config.RetentionVerifier == nil || config.Now == nil ||
-		config.AttemptTimeout <= 0 || config.RepositoryID == 0 || config.RepositoryRemote == "" ||
+		config.RunTimeout <= 0 || config.RepositoryID == 0 || config.RepositoryRemote == "" ||
 		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.BackgroundEnvironmentSHA256 == ([32]byte{}) {
 		return nil, errors.New("valid background run API configuration is required")
 	}

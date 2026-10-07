@@ -13,7 +13,7 @@
 // cut short by failure, crash, or the operation deadline is simply repeated.
 // taskstore owns transition legality, and every durable write is a revision
 // compare-and-swap. Passes are bounded by the operation timeout (at most five
-// minutes) and, while executing, the attempt deadline. Recovery and final
+// minutes) and, while executing, the run deadline. Recovery and final
 // result writes ignore caller cancellation but remain bounded by the operation
 // timeout.
 //

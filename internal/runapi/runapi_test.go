@@ -490,7 +490,7 @@ func (f *apiFixture) buildHandler(t *testing.T, available string) *Handler {
 	if available == PluginOpenCodeProfile {
 		backgroundImage = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 	}
-	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), AvailableProfile: available, Store: f.store, Route: f.route, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, RetentionVerifier: f.retained, Now: func() time.Time { return f.now }, AttemptTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", SealPolicyVersion: "fern.background-user-seal.v1"})
+	handler, err := New(Config{WorkspaceID: testWorkspace, RepositoryID: 99, RepositoryRemote: "https://github.com/owner/repository", BackgroundImageIdentity: backgroundImage, BackgroundEnvironmentSHA256: sha256.Sum256([]byte("{}")), AvailableProfile: available, Store: f.store, Route: f.route, Generator: task.NewSecureGenerator(), ActorResolver: func(context.Context) (task.ActorSnapshot, error) { return f.actor, nil }, BaseVerifier: f.verifier, RetentionVerifier: f.retained, Now: func() time.Time { return f.now }, RunTimeout: time.Hour, Agent: "build", ModelProvider: "test", Model: "model", SealPolicyVersion: "fern.background-user-seal.v1"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,7 +24,7 @@ tasks:
   model:
     provider: openai
     id: gpt-5
-  attemptTimeout: 30m
+  runTimeout: 30m
   backgroundImage: image:test
   backgroundImageID: sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
   backgroundRoute:
@@ -73,7 +73,7 @@ func TestCurrentConfiguration(t *testing.T) {
 	}
 	if cfg.Workspace.GitHub.InstallationID != 123 || cfg.Workspace.GitHub.Repository.ID != 456 ||
 		cfg.Workspace.GitHub.Repository.FullName != "owner/repository" || cfg.Tasks.Agent != "build" ||
-		cfg.Tasks.Model.Provider != "openai" || cfg.Tasks.Model.ID != "gpt-5" || cfg.Tasks.AttemptTimeout != 30*time.Minute ||
+		cfg.Tasks.Model.Provider != "openai" || cfg.Tasks.Model.ID != "gpt-5" || cfg.Tasks.RunTimeout != 30*time.Minute ||
 		cfg.Control.Password != strings.Repeat("s", 32) {
 		t.Fatalf("decoded configuration = %+v", cfg)
 	}
@@ -112,7 +112,7 @@ func TestStrictParserRejectsRetiredAndUnknownSettings(t *testing.T) {
 
 func TestRequiredFieldsAndStrictScalarTypes(t *testing.T) {
 	t.Parallel()
-	for _, field := range []string{"    mode: github-app-broker\n", "      id: 456\n", "      fullName: owner/repository\n", "  agent: build\n", "    provider: openai\n", "    id: gpt-5\n", "  attemptTimeout: 30m\n"} {
+	for _, field := range []string{"    mode: github-app-broker\n", "      id: 456\n", "      fullName: owner/repository\n", "  agent: build\n", "    provider: openai\n", "    id: gpt-5\n", "  runTimeout: 30m\n"} {
 		t.Run(strings.TrimSpace(field), func(t *testing.T) {
 			if _, err := loadConfig(t, strings.Replace(currentYAML, field, "", 1)); err == nil {
 				t.Fatal("required field omitted")
@@ -126,7 +126,7 @@ func TestRequiredFieldsAndStrictScalarTypes(t *testing.T) {
 		{"installationId: 123", "installationId: 0123"}, {"fullName: owner/repository", "fullName: owner/repository/extra"},
 		{"hostname: github.com", "hostname: enterprise.example"}, {"agent: build", "agent: 1"},
 		{"provider: openai", "provider: true"}, {"id: gpt-5", "id: []"},
-		{"attemptTimeout: 30m", "attemptTimeout: 30"},
+		{"runTimeout: 30m", "runTimeout: 30"},
 		{"backgroundImage: image:test", "backgroundImage: ''"}, {"backgroundImageID: sha256:" + strings.Repeat("b", 64), "backgroundImageID: ''"},
 	} {
 		t.Run(replacement.value, func(t *testing.T) {
@@ -173,8 +173,8 @@ func TestValidationBoundsAndDependencies(t *testing.T) {
 		"agent_long":               func(c *Config) { c.Tasks.Agent = strings.Repeat("x", 129) },
 		"provider":                 func(c *Config) { c.Tasks.Model.Provider = "\x00" },
 		"model":                    func(c *Config) { c.Tasks.Model.ID = strings.Repeat("x", 257) },
-		"attempt_low":              func(c *Config) { c.Tasks.AttemptTimeout = time.Minute - time.Nanosecond },
-		"attempt_high":             func(c *Config) { c.Tasks.AttemptTimeout = 24*time.Hour + time.Nanosecond },
+		"run_low":                  func(c *Config) { c.Tasks.RunTimeout = time.Minute - time.Nanosecond },
+		"run_high":                 func(c *Config) { c.Tasks.RunTimeout = 24*time.Hour + time.Nanosecond },
 		"image_missing":            func(c *Config) { c.Tasks.BackgroundImage = "" },
 		"image_spaces":             func(c *Config) { c.Tasks.BackgroundImage = " image:test" },
 		"image_id":                 func(c *Config) { c.Tasks.BackgroundImageID = "sha256:" + strings.Repeat("B", 64) },
@@ -202,7 +202,7 @@ func TestValidationBoundsAndDependencies(t *testing.T) {
 	}
 	for _, attempt := range []time.Duration{time.Minute, 24 * time.Hour} {
 		cfg := validConfig(t)
-		cfg.Tasks.AttemptTimeout = attempt
+		cfg.Tasks.RunTimeout = attempt
 		if err := Validate(cfg); err != nil {
 			t.Fatal(err)
 		}

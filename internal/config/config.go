@@ -36,7 +36,7 @@ type TaskPolicy struct {
 	RuntimeStorageRoot string
 	Agent              string
 	Model              TaskModel
-	AttemptTimeout     time.Duration
+	RunTimeout         time.Duration
 	BackgroundImage    string
 	BackgroundImageID  string
 	BackgroundRoute    *BackgroundRoute

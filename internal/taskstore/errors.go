@@ -19,7 +19,6 @@ var (
 	ErrIdempotencyConflict      = errors.New("idempotency key conflict")
 	ErrIdempotencyOwnerMismatch = errors.New("idempotency key owner mismatch")
 	ErrInvalidState             = errors.New("invalid task store state")
-	ErrStaleRevision            = errors.New("stale task store revision")
 )
 
 // ConflictError identifies the original accepted command without disclosing

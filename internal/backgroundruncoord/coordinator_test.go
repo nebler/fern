@@ -114,7 +114,7 @@ func TestEffectContextAllowsCleanupAfterAttemptDeadline(t *testing.T) {
 
 	ctx, cancel, _, err := coordinator.effectContext(context.Background(), work, classify(work.Run).Executing)
 	if err != nil {
-		t.Fatalf("cleanup context after attempt deadline: %v", err)
+		t.Fatalf("cleanup context after run deadline: %v", err)
 	}
 	cancel()
 	if ctx.Err() != context.Canceled {
@@ -125,7 +125,7 @@ func TestEffectContextAllowsCleanupAfterAttemptDeadline(t *testing.T) {
 		if cancel != nil {
 			cancel()
 		}
-		t.Fatalf("non-cleanup context after attempt deadline = %v", err)
+		t.Fatalf("non-cleanup context after run deadline = %v", err)
 	}
 }
 
@@ -148,7 +148,7 @@ func TestEffectContextBoundsEffectsAndPromptDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	if bound, ok := ctx.Deadline(); !ok || !bound.Equal(deadline) {
-		t.Fatalf("attempt-bounded effect deadline = %v, %v", bound, ok)
+		t.Fatalf("run-bounded effect deadline = %v, %v", bound, ok)
 	}
 	cancel()
 	if err := coordinator.promptDispatchAuthority(work); err != nil {

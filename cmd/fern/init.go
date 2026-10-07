@@ -56,7 +56,7 @@ func runInit(args []string) error {
 		Control: config.Control{Password: controlSecret}, Listen: *listen, OperatorListen: *operatorListen, RemoteOrigin: *remoteOrigin,
 		Tasks: config.TaskPolicy{Agent: "build", Model: config.TaskModel{Provider: *modelProvider, ID: *model},
 			RuntimeStorageRoot: *runtimeStorageRoot,
-			AttemptTimeout:     30 * time.Minute,
+			RunTimeout:         30 * time.Minute,
 			BackgroundImage:    *backgroundImage, BackgroundImageID: *backgroundImageID,
 			BackgroundRoute: &config.BackgroundRoute{Listen: *backgroundListen, Origin: *backgroundOrigin}},
 	}
@@ -84,7 +84,7 @@ func runInit(args []string) error {
 				Provider string `yaml:"provider"`
 				ID       string `yaml:"id"`
 			} `yaml:"model"`
-			AttemptTimeout    string `yaml:"attemptTimeout"`
+			RunTimeout        string `yaml:"runTimeout"`
 			BackgroundImage   string `yaml:"backgroundImage"`
 			BackgroundImageID string `yaml:"backgroundImageID"`
 			BackgroundRoute   struct {
@@ -110,7 +110,7 @@ func runInit(args []string) error {
 	output.Tasks.Agent = values.Tasks.Agent
 	output.Tasks.RuntimeStorageRoot = values.Tasks.RuntimeStorageRoot
 	output.Tasks.Model.Provider, output.Tasks.Model.ID = values.Tasks.Model.Provider, values.Tasks.Model.ID
-	output.Tasks.AttemptTimeout = values.Tasks.AttemptTimeout.String()
+	output.Tasks.RunTimeout = values.Tasks.RunTimeout.String()
 	output.Tasks.BackgroundImage, output.Tasks.BackgroundImageID = values.Tasks.BackgroundImage, values.Tasks.BackgroundImageID
 	output.Tasks.BackgroundRoute.Listen, output.Tasks.BackgroundRoute.Origin = values.Tasks.BackgroundRoute.Listen, values.Tasks.BackgroundRoute.Origin
 	output.Control.Password = "${FERN_CONTROL_PASSWORD}"

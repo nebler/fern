@@ -307,7 +307,7 @@ func (c *Coordinator) terminalize(parent context.Context, work taskstore.Backgro
 	}
 	reason := "runtime_unavailable"
 	if run.TimeoutRequestedAt != nil {
-		reason = "attempt_timeout"
+		reason = "run_timeout"
 	} else if run.StopReceiptID != 0 {
 		reason = "user_stopped"
 	}
@@ -803,13 +803,13 @@ func (c *Coordinator) promptDispatchAuthority(work taskstore.BackgroundRunWork) 
 	return nil
 }
 
-func (c *Coordinator) effectContext(parent context.Context, work taskstore.BackgroundRunWork, enforceAttemptDeadline bool) (context.Context, context.CancelFunc, time.Time, error) {
+func (c *Coordinator) effectContext(parent context.Context, work taskstore.BackgroundRunWork, enforceRunDeadline bool) (context.Context, context.CancelFunc, time.Time, error) {
 	now, err := c.freshNow()
 	if err != nil {
 		return nil, nil, time.Time{}, err
 	}
 	deadline := now.Add(c.config.OperationTimeout)
-	if enforceAttemptDeadline && work.Run.Deadline.Before(deadline) {
+	if enforceRunDeadline && work.Run.Deadline.Before(deadline) {
 		deadline = work.Run.Deadline
 	}
 	if !deadline.After(now) {

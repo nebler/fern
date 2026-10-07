@@ -15,7 +15,7 @@ tasks:
   model:
     provider: replace-with-provider-id
     id: replace-with-model-id
-  attemptTimeout: 30m
+  runTimeout: 30m
   backgroundImage: fern/opencode-background-source:dev
   backgroundImageID: sha256:REPLACE_WITH_QUALIFIED_LOCAL_IMAGE_ID
   backgroundRoute:

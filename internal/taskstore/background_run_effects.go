@@ -111,14 +111,14 @@ func (s *Store) RecordBackgroundRunWorkObservation(ctx context.Context, p Record
 }
 
 // RequestBackgroundRunTimeout commits a system-owned stop without manufacturing
-// a plugin receipt once the attempt deadline has passed. Parent terminalization
+// a plugin receipt once the run deadline has passed. Parent terminalization
 // remains coupled to cleanup finality.
 func (s *Store) RequestBackgroundRunTimeout(ctx context.Context, p BackgroundRunRef) (_ BackgroundRun, err error) {
 	if !rundomain.Classify(p.ExpectedState, p.ExpectedPhase).TimeoutEligible {
 		return BackgroundRun{}, fmt.Errorf("%w: background run timeout", ErrInvalidInput)
 	}
 	now := unixMillis(p.Now)
-	return s.updateRun(ctx, p, `state='cleanup_required',effect_phase='cleaning',timeout_requested_at=?,last_error='attempt_timeout'`,
+	return s.updateRun(ctx, p, `state='cleanup_required',effect_phase='cleaning',timeout_requested_at=?,last_error='run_timeout'`,
 		[]any{now}, "request background run timeout", `timeout_requested_at IS NULL`,
 		`deadline<=`+fmt.Sprint(now))
 }
@@ -152,7 +152,7 @@ func (s *Store) FinalizeBackgroundRunFailure(ctx context.Context, p FinalizeBack
 		return BackgroundRun{}, fmt.Errorf("%w: background run finalization", ErrInvalidInput)
 	}
 	var predicates []string
-	if p.Reason != "attempt_timeout" {
+	if p.Reason != "run_timeout" {
 		predicates = append(predicates, `timeout_requested_at IS NULL`)
 	}
 	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunFailed, BackgroundRunEffectCleanupComplete,

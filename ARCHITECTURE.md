@@ -386,7 +386,7 @@ not a second CI system.
 Artifact verification remains mandatory: checking bundle bytes, Git objects,
 and result identity protects the work being delivered. It does not claim that
 the changes pass repository tests. There is no `tasks.verification` policy or
-`tasks.budget.maxTurns` configuration; attempt timeouts remain enforced.
+`tasks.budget.maxTurns` configuration; run timeouts remain enforced.
 
 ## 14. Harness-Owned GitHub Delivery
 

@@ -26,7 +26,7 @@ tasks:
   model:
     provider: anthropic
     id: test-model
-  attemptTimeout: 30m
+  runTimeout: 30m
   backgroundImage: fern/opencode-background-source:dev
   backgroundImageID: sha256:%s
   backgroundRoute:

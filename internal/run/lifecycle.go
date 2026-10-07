@@ -33,7 +33,7 @@ const (
 // execution authority.
 type Lifecycle struct {
 	Valid bool
-	// Executing phases enforce the attempt deadline and the configured
+	// Executing phases enforce the run deadline and the configured
 	// execution identity. Sealing and cleanup deliberately outlive both.
 	Executing bool
 	// TimeoutEligible is an executing phase past admission's queue.

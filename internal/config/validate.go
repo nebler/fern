@@ -106,8 +106,8 @@ func validateTasks(config Config) error {
 	if !validTaskText(config.Tasks.Model.ID, 1, 256) {
 		return errors.New("tasks.model.id must be 1-256 bytes of valid text")
 	}
-	if config.Tasks.AttemptTimeout < time.Minute || config.Tasks.AttemptTimeout > 24*time.Hour {
-		return errors.New("tasks.attemptTimeout must be between 1m and 24h")
+	if config.Tasks.RunTimeout < time.Minute || config.Tasks.RunTimeout > 24*time.Hour {
+		return errors.New("tasks.runTimeout must be between 1m and 24h")
 	}
 	if config.Tasks.BackgroundImage != "" && (!validTaskText(config.Tasks.BackgroundImage, 1, 256) || strings.TrimSpace(config.Tasks.BackgroundImage) != config.Tasks.BackgroundImage) {
 		return errors.New("tasks.backgroundImage must be an exact nonempty image reference of at most 256 bytes")

@@ -170,7 +170,7 @@ func (s *service) Create(ctx context.Context, actor task.ActorSnapshot, key task
 		RepositoryRemote: input.Repository, BaseSHA: base, Branch: branch, Profile: input.Profile,
 		ImageIdentity: s.config.BackgroundImageIdentity, EnvironmentSHA256: s.config.BackgroundEnvironmentSHA256,
 		Agent: s.config.Agent, ModelProvider: s.config.ModelProvider, Model: s.config.Model,
-		Deadline: now.Add(s.config.AttemptTimeout), APIContractVersion: APIContractVersion, AcceptedAt: now,
+		Deadline: now.Add(s.config.RunTimeout), APIContractVersion: APIContractVersion, AcceptedAt: now,
 	})
 	if err != nil {
 		return zero, err

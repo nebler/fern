@@ -557,7 +557,7 @@ func TestRunOnceStopCleanupFailureRecoveryPastDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.now = f.params.Deadline.Add(time.Minute)
-	// Cleanup must ignore rotated execution configuration and the expired attempt.
+	// Cleanup must ignore rotated execution configuration and the expired run deadline.
 	f.c.config.Model = "rotated"
 	f.c.config.ImageIdentity = "sha256:" + strings.Repeat("c", 64)
 	failure := errors.New("Docker cleanup unavailable")

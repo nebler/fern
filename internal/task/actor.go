@@ -8,12 +8,9 @@ import (
 type ActorType string
 
 const (
-	ActorDevice    ActorType = "device"
-	ActorOperator  ActorType = "operator"
-	ActorSystem    ActorType = "system"
-	ActorOpenCode  ActorType = "opencode"
-	ActorGitHubApp ActorType = "github_app"
-	ActorRecovery  ActorType = "recovery"
+	ActorDevice   ActorType = "device"
+	ActorOperator ActorType = "operator"
+	ActorOpenCode ActorType = "opencode"
 )
 
 const (
@@ -61,7 +58,7 @@ func (a ActorSnapshot) Validate() error {
 
 func (t ActorType) Valid() bool {
 	switch t {
-	case ActorDevice, ActorOperator, ActorSystem, ActorOpenCode, ActorGitHubApp, ActorRecovery:
+	case ActorDevice, ActorOperator, ActorOpenCode:
 		return true
 	default:
 		return false

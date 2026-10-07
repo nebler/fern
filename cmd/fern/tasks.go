@@ -211,7 +211,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, route *backgroundro
 		BackgroundImageIdentity:     cfg.Tasks.BackgroundImageID,
 		BackgroundEnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil),
 		AvailableProfile:            runapi.PluginOpenCodeProfile, Store: store, Route: route, Generator: ids, ActorResolver: task.ContextActor,
-		BaseVerifier: baseVerifier, Now: time.Now, AttemptTimeout: cfg.Tasks.AttemptTimeout, Agent: cfg.Tasks.Agent,
+		BaseVerifier: baseVerifier, Now: time.Now, RunTimeout: cfg.Tasks.RunTimeout, Agent: cfg.Tasks.Agent,
 		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID, RetentionVerifier: resultSource,
 		SealPolicyVersion: "fern.background-user-seal.v1", Wake: coordinator.Wake,
 	})

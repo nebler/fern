@@ -704,10 +704,10 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 		return err
 	}
 	defer database.Close()
-	var taskState, attemptState, taskReason, attemptReason string
-	if err := database.QueryRow(`SELECT t.state,a.state,t.terminal_reason,a.terminal_reason FROM tasks t JOIN attempts a ON a.id=t.current_attempt_id WHERE t.id=?`, current.RunID).
-		Scan(&taskState, &attemptState, &taskReason, &attemptReason); err != nil || taskState != "failed" || attemptState != "failed" || taskReason != "runtime_unavailable" || attemptReason != taskReason {
-		return fmt.Errorf("serial parent consistency task=%s attempt=%s reasons=%s/%s error=%v", taskState, attemptState, taskReason, attemptReason, err)
+	var runState, runPhase, runReason string
+	if err := database.QueryRow(`SELECT state,effect_phase,last_error FROM runs WHERE id=?`, current.RunID).
+		Scan(&runState, &runPhase, &runReason); err != nil || runState != "failed" || runPhase != "cleanup_complete" || runReason != "runtime_unavailable" {
+		return fmt.Errorf("serial terminal run state=%s phase=%s reason=%s error=%v", runState, runPhase, runReason, err)
 	}
 	if err := runRetainedResultScenario(ctx, root, repository, store, provider, artifact, ids, workspaceID, imageID, base, route); err != nil {
 		return err

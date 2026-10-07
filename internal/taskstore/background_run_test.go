@@ -467,9 +467,9 @@ func TestBackgroundRunSystemTimeoutHasNoPluginReceipt(t *testing.T) {
 		t.Fatalf("timeout finalized with a different reason = %v", err)
 	}
 	final, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
-		BackgroundRunRef: cleanupRef, Reason: "attempt_timeout", Evidence: "resources absent", CleanupProof: "exact timeout cleanup",
+		BackgroundRunRef: cleanupRef, Reason: "run_timeout", Evidence: "resources absent", CleanupProof: "exact timeout cleanup",
 	})
-	if err != nil || final.State != BackgroundRunFailed || final.LastError != "attempt_timeout" {
+	if err != nil || final.State != BackgroundRunFailed || final.LastError != "run_timeout" {
 		t.Fatalf("timeout finalization = %+v, error=%v", final, err)
 	}
 }
