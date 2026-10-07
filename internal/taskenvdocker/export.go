@@ -8,6 +8,7 @@ import (
 	"sync"
 
 	"github.com/docker/docker/errdefs"
+	"github.com/nebler/fern/internal/atomicfile"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -130,7 +131,7 @@ func (p *Provider) attestExportRoot() error {
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
 		return errors.New("private provider root is unsafe")
 	}
-	device, inode, err := fileIdentity(info)
+	device, inode, err := atomicfile.Identity(info)
 	if err != nil || device != p.rootDevice || inode != p.rootInode {
 		return errors.New("private provider root identity changed")
 	}
@@ -151,7 +152,7 @@ func (p *Provider) readExportClone(run taskstore.BackgroundRun, digest string) (
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return cloneMarkerSnapshot{}, nil, 0, 0, errors.New("clone is not an exact directory")
 	}
-	device, inode, err := fileIdentity(info)
+	device, inode, err := atomicfile.Identity(info)
 	if err != nil || marker.marker.Device != device || marker.marker.Inode != inode {
 		return cloneMarkerSnapshot{}, nil, 0, 0, errors.New("clone inode differs from private authority")
 	}

@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/nebler/fern/internal/atomicfile"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -110,10 +111,10 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 			if err != nil {
 				return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "staged recovery failed attestation: " + err.Error()}
 			}
-			if err := renameNoReplace(location.path, path); err != nil {
+			if err := atomicfile.RenameNoReplace(location.path, path); err != nil {
 				return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "staged recovery publication failed: " + err.Error()}
 			}
-			if err := syncDirectory(p.root); err != nil {
+			if err := atomicfile.SyncDir(p.root); err != nil {
 				return Observation{}, err
 			}
 			if err := os.Remove(location.parent); err != nil {
@@ -187,12 +188,12 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 	if err != nil {
 		return Observation{}, err
 	}
-	if err := renameNoReplace(stagedClone, path); err != nil {
-		device, inode, identityErr := fileIdentity(stagedInfo)
+	if err := atomicfile.RenameNoReplace(stagedClone, path); err != nil {
+		device, inode, identityErr := atomicfile.Identity(stagedInfo)
 		markerErr := p.removeExactCloneMarker(run, digest, markerSnapshot, device, inode)
 		return Observation{}, errors.Join(fmt.Errorf("publish attested clone: %w", err), identityErr, markerErr)
 	}
-	if err := syncDirectory(p.root); err != nil {
+	if err := atomicfile.SyncDir(p.root); err != nil {
 		return Observation{}, err
 	}
 	if err := os.Remove(stageRoot); err != nil {
@@ -216,7 +217,7 @@ func expectedCloneMarker(run taskstore.BackgroundRun, digest string, device, ino
 }
 
 func (p *Provider) writeCloneMarker(run taskstore.BackgroundRun, digest string, info os.FileInfo) (cloneMarkerSnapshot, error) {
-	device, inode, err := fileIdentity(info)
+	device, inode, err := atomicfile.Identity(info)
 	if err != nil {
 		return cloneMarkerSnapshot{}, err
 	}
@@ -245,11 +246,11 @@ func (p *Provider) writeCloneMarker(run taskstore.BackgroundRun, digest string, 
 		_ = os.Remove(temporary)
 		return cloneMarkerSnapshot{}, errors.Join(writeErr, closeErr)
 	}
-	if err := renameNoReplace(temporary, p.cloneMarkerPath(run)); err != nil {
+	if err := atomicfile.RenameNoReplace(temporary, p.cloneMarkerPath(run)); err != nil {
 		_ = os.Remove(temporary)
 		return cloneMarkerSnapshot{}, fmt.Errorf("publish clone authority without replacement: %w", err)
 	}
-	if err := syncDirectory(p.root); err != nil {
+	if err := atomicfile.SyncDir(p.root); err != nil {
 		return cloneMarkerSnapshot{}, err
 	}
 	snapshot, err := p.readCloneMarkerSnapshot(run, digest)
@@ -287,7 +288,7 @@ func (p *Provider) readCloneMarkerSnapshot(run taskstore.BackgroundRun, digest s
 	if !bytes.Equal(data, want) {
 		return cloneMarkerSnapshot{}, errors.New("private clone authority does not match")
 	}
-	markerDevice, markerInode, err := fileIdentity(after)
+	markerDevice, markerInode, err := atomicfile.Identity(after)
 	if err != nil {
 		return cloneMarkerSnapshot{}, err
 	}
@@ -303,7 +304,7 @@ func (p *Provider) attestCloneMarker(run taskstore.BackgroundRun, digest, cloneP
 	if err != nil {
 		return errors.New("clone named by private authority is absent")
 	}
-	device, inode, err := fileIdentity(info)
+	device, inode, err := atomicfile.Identity(info)
 	if err != nil || marker.Device != device || marker.Inode != inode {
 		return errors.New("private clone authority names a different filesystem object")
 	}
@@ -324,7 +325,7 @@ func (p *Provider) removeExactCloneMarker(run taskstore.BackgroundRun, digest st
 	if err := os.Remove(p.cloneMarkerPath(run)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return syncDirectory(p.root)
+	return atomicfile.SyncDir(p.root)
 }
 
 func (p *Provider) attestClone(ctx context.Context, run taskstore.BackgroundRun, digest, path string, requireBase bool) (int64, error) {
@@ -685,7 +686,7 @@ func (p *Provider) findRecoverableClones(ctx context.Context, marker cloneMarker
 }
 
 func sameCloneIdentity(info os.FileInfo, marker cloneMarker) bool {
-	device, inode, err := fileIdentity(info)
+	device, inode, err := atomicfile.Identity(info)
 	return err == nil && device == marker.Device && inode == marker.Inode
 }
 
@@ -781,7 +782,7 @@ func removeCreatedTree(ctx context.Context, root, path string, expected os.FileI
 	if err := removeCloneTree(ctx, root, quarantine); err != nil {
 		return err
 	}
-	return syncDirectory(root)
+	return atomicfile.SyncDir(root)
 }
 
 func removeCloneTree(ctx context.Context, rootPath, path string) (resultErr error) {

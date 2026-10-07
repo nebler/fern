@@ -25,6 +25,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/go-connections/nat"
+	"github.com/nebler/fern/internal/atomicfile"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
@@ -486,7 +487,7 @@ func TestStaleClonePublisherAndMarkerCleanupCannotReplaceWinner(t *testing.T) {
 	if _, err := provider.writeCloneMarker(run, digest, staleInfo); err == nil {
 		t.Fatal("stale worker overwrote the winner marker")
 	}
-	if err := renameNoReplace(stale, canonical); err == nil {
+	if err := atomicfile.RenameNoReplace(stale, canonical); err == nil {
 		t.Fatal("stale worker overwrote the canonical clone")
 	}
 	afterClone, err := os.Lstat(canonical)
@@ -504,7 +505,7 @@ func TestStaleClonePublisherAndMarkerCleanupCannotReplaceWinner(t *testing.T) {
 	// Keep the old marker inode alive so the filesystem cannot reuse it, then
 	// publish an equivalent new winner and exercise stale cleanup authority.
 	retired := filepath.Join(provider.root, ".retired-marker")
-	if err := renameNoReplace(provider.cloneMarkerPath(run), retired); err != nil {
+	if err := atomicfile.RenameNoReplace(provider.cloneMarkerPath(run), retired); err != nil {
 		t.Fatal(err)
 	}
 	newWinner, err := provider.writeCloneMarker(run, digest, winnerClone)
@@ -1004,7 +1005,7 @@ func TestAcquireExportSourceExactStoppedRuntimeAndFenceValidation(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	device, inode, err := fileIdentity(info)
+	device, inode, err := atomicfile.Identity(info)
 	if err != nil {
 		t.Fatal(err)
 	}

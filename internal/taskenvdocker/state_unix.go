@@ -63,7 +63,7 @@ func prepareRootWithKey(stateRoot string, authoritative *[32]byte) (string, [32]
 	if err := atomicfile.Write(filepath.Join(staging, hostKeyName), generated[:], 0o600); err != nil {
 		return "", zero, fmt.Errorf("write staged background run host key: %w", err)
 	}
-	if err := renameNoReplace(staging, root); err != nil {
+	if err := atomicfile.RenameNoReplace(staging, root); err != nil {
 		if _, statErr := os.Lstat(root); statErr == nil {
 			key, loadErr := loadExistingRoot(root)
 			if loadErr == nil && authoritative != nil && key != *authoritative {
@@ -74,7 +74,7 @@ func prepareRootWithKey(stateRoot string, authoritative *[32]byte) (string, [32]
 		return "", zero, fmt.Errorf("publish staged background run root: %w", err)
 	}
 	stagingLive = false
-	if err := syncDirectory(stateRoot); err != nil {
+	if err := atomicfile.SyncDir(stateRoot); err != nil {
 		return "", zero, err
 	}
 	committed, err := loadExistingRoot(root)
@@ -118,15 +118,6 @@ func randomSuffix() (string, error) {
 		result[i] = alphabet[int(item)%len(alphabet)]
 	}
 	return string(result), nil
-}
-
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
 }
 
 func diskAvailable(path string) (int64, error) {

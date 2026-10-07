@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/nebler/fern/internal/atomicfile"
 )
 
 const (
@@ -104,7 +106,7 @@ func removeInterruptedDirectories(root string, prefixes ...string) error {
 		if err != nil || !safeDirectoryInfo(info) {
 			return ErrStorage
 		}
-		device, inode, err := fileIdentity(info)
+		device, inode, err := atomicfile.Identity(info)
 		if err != nil {
 			return err
 		}
@@ -112,7 +114,7 @@ func removeInterruptedDirectories(root string, prefixes ...string) error {
 			return err
 		}
 	}
-	return syncDirectory(root)
+	return atomicfile.SyncDir(root)
 }
 
 // Close removes all still-live engine checkouts after coordinators have
@@ -226,7 +228,7 @@ func (e *Engine) Snapshot(ctx context.Context, spec SnapshotSpec) (Snapshot, Sta
 	if err := writePrivateFile(filepath.Join(stage, manifestName), manifestBytes); err != nil {
 		return Snapshot{}, StagedLocator{}, err
 	}
-	if err := syncDirectory(stage); err != nil {
+	if err := atomicfile.SyncDir(stage); err != nil {
 		return Snapshot{}, StagedLocator{}, err
 	}
 	if _, err := e.verifyArtifact(ctx, manifestBytes, bundlePath, 0o600, manifestDigest); err != nil {
@@ -249,7 +251,7 @@ func (e *Engine) Snapshot(ctx context.Context, spec SnapshotSpec) (Snapshot, Sta
 	if err != nil {
 		return Snapshot{}, StagedLocator{}, err
 	}
-	device, inode, err := fileIdentity(info)
+	device, inode, err := atomicfile.Identity(info)
 	if err != nil {
 		return Snapshot{}, StagedLocator{}, err
 	}

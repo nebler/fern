@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/nebler/fern/internal/atomicfile"
 )
 
 // Store atomically installs a verified staged artifact. Repeated installation
@@ -25,7 +27,7 @@ func (e *Engine) Store(ctx context.Context, staged StagedLocator) (Locator, erro
 	if err != nil || !safeDirectoryInfo(info) {
 		return Locator{}, fmt.Errorf("%w: staged directory", ErrStorage)
 	}
-	device, inode, err := fileIdentity(info)
+	device, inode, err := atomicfile.Identity(info)
 	if err != nil || device != staged.device || inode != staged.inode {
 		return Locator{}, fmt.Errorf("%w: staged identity", ErrStorage)
 	}
@@ -45,12 +47,12 @@ func (e *Engine) Store(ctx context.Context, staged StagedLocator) (Locator, erro
 	if err := publishReadOnly(staged.path); err != nil {
 		return Locator{}, err
 	}
-	if err := syncDirectory(staged.path); err != nil {
+	if err := atomicfile.SyncDir(staged.path); err != nil {
 		_ = restoreStagedModes(staged.path)
 		return Locator{}, err
 	}
 	target := filepath.Join(e.casRoot, staged.digest.String())
-	if err := renameNoReplace(staged.path, target); err != nil {
+	if err := atomicfile.RenameNoReplace(staged.path, target); err != nil {
 		if _, statErr := os.Lstat(target); statErr != nil {
 			_ = restoreStagedModes(staged.path)
 			return Locator{}, fmt.Errorf("%w: publish CAS object", ErrStorage)
@@ -62,7 +64,7 @@ func (e *Engine) Store(ctx context.Context, staged StagedLocator) (Locator, erro
 		if removeErr := removeExactDirectory(staged.path, staged.device, staged.inode); removeErr != nil {
 			return Locator{}, removeErr
 		}
-	} else if err := syncDirectory(e.casRoot); err != nil {
+	} else if err := atomicfile.SyncDir(e.casRoot); err != nil {
 		return Locator{}, err
 	}
 	return Locator{digest: staged.digest, valid: true}, nil
@@ -98,7 +100,7 @@ func (e *Engine) StagedManifest(ctx context.Context, staged StagedLocator) ([]by
 	if err != nil || !safeDirectoryInfo(info) {
 		return nil, Digest{}, fmt.Errorf("%w: staged identity", ErrStorage)
 	}
-	device, inode, identityErr := fileIdentity(info)
+	device, inode, identityErr := atomicfile.Identity(info)
 	if identityErr != nil || device != staged.device || inode != staged.inode {
 		return nil, Digest{}, fmt.Errorf("%w: staged identity", ErrStorage)
 	}
@@ -240,18 +242,18 @@ func (e *Engine) materializeVerified(ctx context.Context, locator Locator, snaps
 	if err != nil {
 		return nil, err
 	}
-	device, inode, err := fileIdentity(pathInfo)
+	device, inode, err := atomicfile.Identity(pathInfo)
 	if err != nil {
 		return nil, err
 	}
-	markerDevice, markerInode, err := fileIdentity(markerInfo)
+	markerDevice, markerInode, err := atomicfile.Identity(markerInfo)
 	if err != nil {
 		return nil, err
 	}
-	if err := syncDirectory(path); err != nil {
+	if err := atomicfile.SyncDir(path); err != nil {
 		return nil, err
 	}
-	if err := syncDirectory(filepath.Join(path, ".git")); err != nil {
+	if err := atomicfile.SyncDir(filepath.Join(path, ".git")); err != nil {
 		return nil, err
 	}
 	checkout := &Checkout{engine: e, path: path, marker: token, device: device, inode: inode, markerDevice: markerDevice, markerInode: markerInode}
@@ -311,13 +313,13 @@ func (c *Checkout) Close() error {
 	if err != nil {
 		return fmt.Errorf("%w: checkout path", ErrCheckout)
 	}
-	device, inode, _ := fileIdentity(info)
+	device, inode, _ := atomicfile.Identity(info)
 	if device != c.device || inode != c.inode {
 		return fmt.Errorf("%w: checkout identity", ErrCheckout)
 	}
 	markerBytes, err := readExactFile(checkoutMarkerPath(c.path), 256, 0o600)
 	markerInfo, markerErr := os.Lstat(checkoutMarkerPath(c.path))
-	markerDevice, markerInode, _ := fileIdentity(markerInfo)
+	markerDevice, markerInode, _ := atomicfile.Identity(markerInfo)
 	markerChanged := err != nil || markerErr != nil || markerDevice != c.markerDevice || markerInode != c.markerInode || string(markerBytes) != c.marker+"\n"
 	if err := removeExactDirectory(c.path, c.device, c.inode); err != nil {
 		return err
@@ -347,7 +349,7 @@ func directoryIdentity(path string) (uint64, uint64, error) {
 	if err != nil || !safeDirectoryInfo(info) {
 		return 0, 0, fmt.Errorf("%w: generated directory", ErrStorage)
 	}
-	return fileIdentity(info)
+	return atomicfile.Identity(info)
 }
 
 func validateArtifactDirectory(path string, mode os.FileMode) error {
@@ -389,7 +391,7 @@ func normalizeStagedModes(path string) error {
 			return fmt.Errorf("%w: staged file mode", ErrStorage)
 		}
 	}
-	return syncDirectory(path)
+	return atomicfile.SyncDir(path)
 }
 
 func publishReadOnly(path string) error {
@@ -420,7 +422,7 @@ func restoreStagedModes(path string) error {
 			result = errors.Join(result, ErrStorage)
 		}
 	}
-	return errors.Join(result, syncDirectory(path))
+	return errors.Join(result, atomicfile.SyncDir(path))
 }
 
 func openCheckedArtifactFile(path string, mode os.FileMode) (*os.File, error) {

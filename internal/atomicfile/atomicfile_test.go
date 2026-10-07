@@ -79,3 +79,41 @@ func TestPrivateDir(t *testing.T) {
 		t.Fatalf("symlinked directory error = %v", err)
 	}
 }
+
+func TestRenameNoReplaceAndIdentity(t *testing.T) {
+	directory := t.TempDir()
+	source, target := filepath.Join(directory, "source"), filepath.Join(directory, "target")
+	for _, path := range []string{source, target} {
+		if err := os.WriteFile(path, []byte(path), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := RenameNoReplace(source, target); err == nil {
+		t.Fatal("RenameNoReplace replaced an existing target")
+	}
+	before, err := os.Lstat(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	if err := RenameNoReplace(source, target); err != nil {
+		t.Fatal(err)
+	}
+	if err := SyncDir(directory); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Lstat(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeDevice, beforeInode, err := Identity(before)
+	afterDevice, afterInode, afterErr := Identity(after)
+	if err != nil || afterErr != nil || beforeDevice != afterDevice || beforeInode != afterInode {
+		t.Fatalf("identity changed across rename: %v %v", err, afterErr)
+	}
+	if _, _, err := Identity(nil); err == nil {
+		t.Fatal("Identity accepted nil info")
+	}
+}

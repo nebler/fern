@@ -5,6 +5,10 @@
 // directory is checked once by PrivateDir when a store opens, and individual
 // files are then read and written without per-file link-count, mode, or owner
 // checks. It is not suitable for directories an agent or other user can modify.
+//
+// The small filesystem primitives RenameNoReplace, SyncDir, and Identity make
+// no trust assumption and are shared by packages that do guard such
+// directories.
 package atomicfile
 
 import (

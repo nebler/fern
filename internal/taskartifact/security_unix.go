@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/nebler/fern/internal/atomicfile"
 	"golang.org/x/sys/unix"
 )
 
@@ -57,17 +58,6 @@ func safeDirectoryInfo(info os.FileInfo) bool {
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	return ok && stat.Uid == uint32(os.Geteuid())
-}
-
-func fileIdentity(info os.FileInfo) (uint64, uint64, error) {
-	if info == nil {
-		return 0, 0, errors.New("filesystem object has no durable identity")
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Dev == 0 || stat.Ino == 0 {
-		return 0, 0, errors.New("filesystem object has no durable identity")
-	}
-	return uint64(stat.Dev), uint64(stat.Ino), nil
 }
 
 func openPrivateExclusive(path string) (*os.File, error) {
@@ -135,21 +125,12 @@ func changePrivateFileMode(path string, from, to os.FileMode) error {
 	return file.Sync()
 }
 
-func syncDirectory(path string) error {
-	directory, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer directory.Close()
-	return directory.Sync()
-}
-
 func removeExactDirectory(path string, device, inode uint64) error {
 	info, err := os.Lstat(path)
 	if err != nil || !safeDirectoryInfo(info) {
 		return fmt.Errorf("%w: removal target", ErrStorage)
 	}
-	currentDevice, currentInode, err := fileIdentity(info)
+	currentDevice, currentInode, err := atomicfile.Identity(info)
 	if err != nil || currentDevice != device || currentInode != inode {
 		return fmt.Errorf("%w: removal identity", ErrStorage)
 	}
@@ -158,16 +139,16 @@ func removeExactDirectory(path string, device, inode uint64) error {
 		return err
 	}
 	quarantine := filepath.Join(filepath.Dir(path), ".remove-"+token)
-	if err := renameNoReplace(path, quarantine); err != nil {
+	if err := atomicfile.RenameNoReplace(path, quarantine); err != nil {
 		return err
 	}
 	quarantined, err := os.Lstat(quarantine)
-	qDevice, qInode, identityErr := fileIdentity(quarantined)
+	qDevice, qInode, identityErr := atomicfile.Identity(quarantined)
 	if err != nil || identityErr != nil || qDevice != device || qInode != inode {
 		return fmt.Errorf("%w: quarantined removal identity", ErrStorage)
 	}
 	if err := os.RemoveAll(quarantine); err != nil {
 		return err
 	}
-	return syncDirectory(filepath.Dir(path))
+	return atomicfile.SyncDir(filepath.Dir(path))
 }

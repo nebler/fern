@@ -1,9 +1,10 @@
 //go:build !darwin && !linux
 
-package taskenvdocker
+package atomicfile
 
 import "errors"
 
-func renameNoReplace(string, string) error {
+// RenameNoReplace is unsupported on this platform.
+func RenameNoReplace(string, string) error {
 	return errors.New("atomic no-replace rename is unsupported on this platform")
 }

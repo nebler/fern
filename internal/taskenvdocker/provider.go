@@ -25,6 +25,7 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
+	"github.com/nebler/fern/internal/atomicfile"
 	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/githubapp"
@@ -263,7 +264,7 @@ func New(ctx context.Context, config Config, api dockerAPI) (*Provider, error) {
 	if err != nil {
 		return nil, errors.New("inspect private background run root")
 	}
-	rootDevice, rootInode, err := fileIdentity(rootInfo)
+	rootDevice, rootInode, err := atomicfile.Identity(rootInfo)
 	if err != nil {
 		return nil, errors.New("identify private background run root")
 	}
