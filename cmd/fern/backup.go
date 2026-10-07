@@ -4,7 +4,6 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
@@ -140,14 +139,6 @@ func loadBackupConfig(options backupOptions) (config.Config, string, error) {
 		return config.Config{}, "", err
 	}
 	return cfg, cfg.Workspace.Name, nil
-}
-
-func newBackupGeneration() (string, error) {
-	random := make([]byte, 4)
-	if _, err := rand.Read(random); err != nil {
-		return "", fmt.Errorf("generate backup identifier: %w", err)
-	}
-	return time.Now().UTC().Format("20060102T150405Z") + "-" + hex.EncodeToString(random), nil
 }
 
 // backupLeases holds the named workspace lease plus every other lease file in
