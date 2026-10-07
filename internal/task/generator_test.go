@@ -12,7 +12,10 @@ import (
 
 func TestGeneratorProducesEveryTypedID(t *testing.T) {
 	now := time.UnixMilli(1_700_000_000_000)
-	generator := newTestGenerator(bytes.NewReader(make([]byte, 256)), func() time.Time { return now })
+	generator, err := NewGenerator(bytes.NewReader(make([]byte, 256)), func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
 	checks := []func() error{
 		func() error {
 			value, err := generator.WorkspaceID()
@@ -58,7 +61,10 @@ func TestGeneratorProducesEveryTypedID(t *testing.T) {
 }
 
 func TestGenerateAdmissionIDsReturnsCompleteValidatedSet(t *testing.T) {
-	generator := newTestGenerator(bytes.NewReader(make([]byte, 128)), func() time.Time { return time.UnixMilli(1_700_000_000_000) })
+	generator, err := NewGenerator(bytes.NewReader(make([]byte, 128)), func() time.Time { return time.UnixMilli(1_700_000_000_000) })
+	if err != nil {
+		t.Fatal(err)
+	}
 	ids, err := generator.GenerateAdmissionIDs()
 	if err != nil {
 		t.Fatal(err)
@@ -78,7 +84,10 @@ func TestGenerateAdmissionIDsReturnsCompleteValidatedSet(t *testing.T) {
 }
 
 func TestGenerateAdmissionIDsReturnsZeroSetOnLateEntropyFailure(t *testing.T) {
-	generator := newTestGenerator(io.LimitReader(bytes.NewReader(make([]byte, 128)), 30), func() time.Time { return time.UnixMilli(1_700_000_000_000) })
+	generator, err := NewGenerator(io.LimitReader(bytes.NewReader(make([]byte, 128)), 30), func() time.Time { return time.UnixMilli(1_700_000_000_000) })
+	if err != nil {
+		t.Fatal(err)
+	}
 	ids, err := generator.GenerateAdmissionIDs()
 	if ids != (AdmissionIDs{}) || !errors.Is(err, ErrIDGeneration) {
 		t.Fatalf("late failure = %+v, %v", ids, err)
@@ -88,11 +97,14 @@ func TestGenerateAdmissionIDsReturnsZeroSetOnLateEntropyFailure(t *testing.T) {
 func TestGeneratorUUIDv7IsMonotonicAcrossClockRegression(t *testing.T) {
 	times := []time.Time{time.UnixMilli(2000), time.UnixMilli(2000), time.UnixMilli(1999), time.UnixMilli(2001)}
 	index := 0
-	generator := newTestGenerator(bytes.NewReader(make([]byte, 64)), func() time.Time {
+	generator, err := NewGenerator(bytes.NewReader(make([]byte, 64)), func() time.Time {
 		value := times[index]
 		index++
 		return value
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	values := make([]string, len(times))
 	for index := range values {
 		value, err := generator.RunID()
@@ -107,7 +119,10 @@ func TestGeneratorUUIDv7IsMonotonicAcrossClockRegression(t *testing.T) {
 }
 
 func TestGeneratorConcurrentIDsAreUnique(t *testing.T) {
-	generator := newTestGenerator(bytes.NewReader(make([]byte, 32)), func() time.Time { return time.UnixMilli(3000) })
+	generator, err := NewGenerator(bytes.NewReader(make([]byte, 32)), func() time.Time { return time.UnixMilli(3000) })
+	if err != nil {
+		t.Fatal(err)
+	}
 	const count = 500
 	values := make([]string, count)
 	var wait sync.WaitGroup
@@ -133,14 +148,20 @@ func TestGeneratorConcurrentIDsAreUnique(t *testing.T) {
 }
 
 func TestGeneratorEntropyAndClockFailuresDoNotReturnIDs(t *testing.T) {
-	generator := newTestGenerator(errorReader{}, func() time.Time { return time.UnixMilli(1) })
+	if _, err := NewGenerator(nil, time.Now); !errors.Is(err, ErrIDGeneration) {
+		t.Fatalf("nil entropy error = %v", err)
+	}
+	if _, err := NewGenerator(bytes.NewReader(nil), nil); !errors.Is(err, ErrIDGeneration) {
+		t.Fatalf("nil clock error = %v", err)
+	}
+	generator, _ := NewGenerator(errorReader{}, func() time.Time { return time.UnixMilli(1) })
 	if value, err := generator.RunID(); value != "" || !errors.Is(err, ErrIDGeneration) {
 		t.Fatalf("entropy failure = %q, %v", value, err)
 	}
 	if value, err := generator.OpenCodeMessageID(); value != "" || !errors.Is(err, ErrIDGeneration) {
 		t.Fatalf("OpenCode entropy failure = %q, %v", value, err)
 	}
-	generator = newTestGenerator(bytes.NewReader(make([]byte, 16)), func() time.Time { return time.UnixMilli(-1) })
+	generator, _ = NewGenerator(bytes.NewReader(make([]byte, 16)), func() time.Time { return time.UnixMilli(-1) })
 	if value, err := generator.RunID(); value != "" || !errors.Is(err, ErrIDGeneration) {
 		t.Fatalf("clock failure = %q, %v", value, err)
 	}
@@ -148,7 +169,10 @@ func TestGeneratorEntropyAndClockFailuresDoNotReturnIDs(t *testing.T) {
 
 func TestGeneratorAdvancesTimestampWhenRandomFieldOverflows(t *testing.T) {
 	entropy := append(bytes.Repeat([]byte{0xff}, 10), make([]byte, 10)...)
-	generator := newTestGenerator(bytes.NewReader(entropy), func() time.Time { return time.UnixMilli(4000) })
+	generator, err := NewGenerator(bytes.NewReader(entropy), func() time.Time { return time.UnixMilli(4000) })
+	if err != nil {
+		t.Fatal(err)
+	}
 	first, err := generator.RunID()
 	if err != nil {
 		t.Fatal(err)
@@ -165,8 +189,3 @@ func TestGeneratorAdvancesTimestampWhenRandomFieldOverflows(t *testing.T) {
 type errorReader struct{}
 
 func (errorReader) Read([]byte) (int, error) { return 0, io.ErrUnexpectedEOF }
-
-// newTestGenerator replaces the entropy source and clock of the secure generator.
-func newTestGenerator(random io.Reader, now func() time.Time) *Generator {
-	return &Generator{random: random, now: now}
-}
