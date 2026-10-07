@@ -40,8 +40,7 @@ func Load(path string, environment map[string]string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %q: %w", path, err)
 	}
-	config := Config{Workspace: Workspace{Name: "demo"},
-		Proxy: Proxy{Listen: "127.0.0.1:8080", OperatorListen: "127.0.0.1:8081"}}
+	config := Default()
 	if err := decode(data, &config); err != nil {
 		return Config{}, fmt.Errorf("parse config %q: %w", path, err)
 	}
@@ -79,10 +78,8 @@ func requireFields(config Config) error {
 	}{
 		{"workspace.github.repository.id", config.Workspace.GitHub.Repository.ID == 0},
 		{"workspace.github.repository.fullName", config.Workspace.GitHub.Repository.FullName == ""},
-		{"tasks.agent", config.Tasks.Agent == ""},
 		{"tasks.model.provider", config.Tasks.Model.Provider == ""},
 		{"tasks.model.id", config.Tasks.Model.ID == ""},
-		{"tasks.runTimeout", config.Tasks.RunTimeout == 0},
 	} {
 		if field.unset {
 			return fmt.Errorf("%s is required", field.name)

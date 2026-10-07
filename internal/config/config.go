@@ -69,6 +69,15 @@ type Proxy struct {
 	RemoteOrigin   string `yaml:"remoteOrigin,omitempty"`
 }
 
+// Default returns the values Load uses for keys the file omits.
+func Default() Config {
+	return Config{
+		Workspace: Workspace{Name: "default"},
+		Tasks:     TaskPolicy{Agent: "build", RunTimeout: 30 * time.Minute},
+		Proxy:     Proxy{Listen: "127.0.0.1:8080", OperatorListen: "127.0.0.1:8081"},
+	}
+}
+
 // GitHubID is a GitHub numeric identifier. YAML accepts only its canonical
 // positive decimal spelling, so octal, hex, or quoted values cannot silently
 // bind a different installation or repository.

@@ -108,7 +108,7 @@ func TestStrictParserRejectsRetiredAndUnknownSettings(t *testing.T) {
 
 func TestRequiredFieldsAndStrictScalarTypes(t *testing.T) {
 	t.Parallel()
-	for _, field := range []string{"      id: 456\n", "      fullName: owner/repository\n", "  agent: build\n", "    provider: openai\n", "    id: gpt-5\n", "  runTimeout: 30m\n"} {
+	for _, field := range []string{"      id: 456\n", "      fullName: owner/repository\n", "    provider: openai\n", "    id: gpt-5\n"} {
 		t.Run(strings.TrimSpace(field), func(t *testing.T) {
 			if _, err := loadConfig(t, strings.Replace(currentYAML, field, "", 1)); err == nil {
 				t.Fatal("required field omitted")
@@ -143,6 +143,26 @@ func TestRequiredFieldsAndStrictScalarTypes(t *testing.T) {
 		if _, err := loadConfig(t, data); err == nil {
 			t.Fatal("missing required section accepted")
 		}
+	}
+}
+
+func TestOmittedKeysUseDefaults(t *testing.T) {
+	t.Parallel()
+	minimal := currentYAML
+	for _, line := range []string{"  name: demo\n", "  agent: build\n", "  runTimeout: 30m\n", "  listen: 127.0.0.1:8080\n", "  operatorListen: 127.0.0.1:8081\n"} {
+		minimal = strings.Replace(minimal, line, "", 1)
+	}
+	cfg, err := loadConfig(t, minimal)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Default()
+	if cfg.Workspace.Name != want.Workspace.Name || cfg.Tasks.Agent != "build" || cfg.Tasks.RunTimeout != 30*time.Minute ||
+		cfg.Proxy.Listen != "127.0.0.1:8080" || cfg.Proxy.OperatorListen != "127.0.0.1:8081" {
+		t.Fatalf("defaults = %+v", cfg)
+	}
+	if err := Validate(cfg); err != nil {
+		t.Fatal(err)
 	}
 }
 

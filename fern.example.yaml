@@ -1,5 +1,8 @@
+# Optional keys and their defaults: workspace.name (default), tasks.agent
+# (build), tasks.runTimeout (30m), proxy.listen (127.0.0.1:8080),
+# proxy.operatorListen (127.0.0.1:8081). The control password is read from
+# FERN_CONTROL_PASSWORD in the protected environment file, never from here.
 workspace:
-  name: demo
   repo: /srv/fern/repository
   github:
     installationId: 12345678
@@ -9,17 +12,13 @@ workspace:
 tasks:
   # Operator-provisioned Linux XFS project quota; never durable DB/CAS storage.
   runtimeStorageRoot: /var/lib/fern-runtime
-  agent: build
   model:
     provider: replace-with-provider-id
     id: replace-with-model-id
-  runTimeout: 30m
   backgroundImage: fern/opencode-background-source:dev
   backgroundImageID: sha256:REPLACE_WITH_QUALIFIED_LOCAL_IMAGE_ID
   backgroundRoute:
     listen: 127.0.0.1:8443
     origin: https://this-host.example.ts.net:8443
 proxy:
-  listen: 127.0.0.1:8080
-  operatorListen: 127.0.0.1:8081
   remoteOrigin: https://this-host.example.ts.net
