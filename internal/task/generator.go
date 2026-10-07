@@ -27,13 +27,6 @@ type AdmissionIDs struct {
 	OpenCodeMessageID OpenCodeMessageID
 }
 
-func NewGenerator(random io.Reader, now func() time.Time) (*Generator, error) {
-	if random == nil || now == nil {
-		return nil, ErrIDGeneration
-	}
-	return &Generator{random: random, now: now}, nil
-}
-
 func NewSecureGenerator() *Generator {
 	return &Generator{random: rand.Reader, now: time.Now}
 }
