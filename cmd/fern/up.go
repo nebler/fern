@@ -151,10 +151,6 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 		return nil, errors.Join(cause, route.Close(), state.Close())
 	}
 	status := observability.NewRegistry()
-	onboarding, err := newGitHubOnboarding(cfg, state.DB())
-	if err != nil {
-		return fail(err)
-	}
 	var tasks *taskServices
 	if cfg.Workspace.GitHub.InstallationID == 0 {
 		pending := errors.New("GitHub App installation ID is not configured")
@@ -165,8 +161,8 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 			return fail(err)
 		}
 		tasks, err = newTaskServices(serviceCtx, cfg, state, route, status, log)
-		if errors.Is(err, githubapp.ErrCredentialsNotFound) && onboarding != nil {
-			log.Warn("Background Runs await GitHub App onboarding and restart", "repository", cfg.Workspace.Name)
+		if errors.Is(err, githubapp.ErrCredentialsNotFound) {
+			log.Warn("Background Runs await GitHub App credentials ('fern credentials set') and restart", "repository", cfg.Workspace.Name)
 			status.Blocked(observability.ComponentGitHubTaskDependency, err)
 			tasks, err = nil, nil
 		}
@@ -175,13 +171,13 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 		return fail(err)
 	}
 	unavailable := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		http.Error(w, "Background Runs await GitHub App onboarding", http.StatusServiceUnavailable)
+		http.Error(w, "Background Runs await GitHub App setup", http.StatusServiceUnavailable)
 	}))
 	runs := unavailable
 	if tasks != nil {
 		runs = tasks.runs
 	}
-	controls := proxy.Controls{Store: control.New(state.DB()), Runs: runs, Onboarding: onboarding,
+	controls := proxy.Controls{Store: control.New(state.DB()), Runs: runs,
 		ControlAuth: proxy.ControlAuth{Password: cfg.Control.Password}, PluginAuth: pluginauth.New(state.DB()),
 		Liveness: status.LivenessHandler(), Readiness: status.ReadinessHandler(), Status: status.StatusHandler(), Metrics: status.MetricsHandler()}
 	handlers, err := proxy.NewHandlers(controls, origins)

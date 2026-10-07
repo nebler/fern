@@ -66,6 +66,7 @@ var commands = []command{
 		name:     "credentials",
 		overview: "Export, import, and rollback-safely rotate encrypted GitHub credentials.",
 		sub: []subcommand{
+			{name: "set", summary: "Validate and store the GitHub App ID and private key", run: func(_ context.Context, args []string, log *slog.Logger) error { return runCredentialSet(args, log) }},
 			{name: "export", summary: "Export an age-encrypted credential bundle", run: func(_ context.Context, args []string, log *slog.Logger) error { return runCredentialExport(args, log) }},
 			{name: "import", summary: "Validate and activate encrypted credentials", run: func(_ context.Context, args []string, log *slog.Logger) error {
 				return runCredentialImport(args, log, false)

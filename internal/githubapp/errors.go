@@ -16,6 +16,7 @@ var (
 	ErrResponseTooLarge        = errors.New("GitHub response exceeds the size limit")
 	ErrTokenExpired            = errors.New("GitHub installation token is expired")
 	ErrPaginationRefused       = errors.New("GitHub response requires unsupported pagination")
+	ErrInvalidPrivateKey       = errors.New("invalid GitHub App RSA private key")
 )
 
 // HTTPError reports only the response status. Response bodies may contain

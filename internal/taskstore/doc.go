@@ -2,9 +2,9 @@
 // connection policy, and the workspace, run, receipt, and retained-result
 // records. It commits related records and their fences together so HTTP
 // handlers and effect providers never coordinate SQL. The same schema defines
-// the device and operator-credential tables (package control), the plugin
-// authorization tables (package pluginauth), and GitHub App onboarding states
-// (package githubapp), which those packages read and write through DB.
+// the device and operator-credential tables (package control) and the plugin
+// authorization tables (package pluginauth), which those packages read and
+// write through DB.
 //
 // A run is one row holding its immutable intent (prompt, repository and base,
 // agent and model, deadline, image, profile, environment, OpenCode session,
@@ -13,7 +13,7 @@
 // replay returns it, a changed hash conflicts. Resource names derive from the
 // run ID and are not stored.
 //
-// Schema 9 is one complete pre-release schema, not a migration chain. Open
+// Schema 10 is one complete pre-release schema, not a migration chain. Open
 // rejects incompatible versions rather than upgrading or deleting data, and
 // refuses symlinked or foreign-owned database paths. The database runs in WAL
 // mode with foreign keys and FULL synchronization.

@@ -24,8 +24,9 @@ func Validate(config Config) error {
 	return validateBackground(config, false)
 }
 
-// ValidateBootstrap accepts an omitted App installation ID so Fern
-// can expose only its onboarding control plane. It does not authorize task
+// ValidateBootstrap accepts an omitted App installation ID so Fern can serve
+// its control plane (devices, plugin authorization) before GitHub setup is
+// complete. It does not authorize task
 // composition; callers must still use Validate before execution.
 func ValidateBootstrap(config Config) error {
 	return validateBackground(config, true)

@@ -7,8 +7,8 @@
 //
 // fern up validates bootstrap configuration, binds its listeners, and takes the
 // repository's host lease before assembling services. It always opens the
-// workspace's one SQLite database, which backs devices, plugin authorization,
-// and onboarding as well as runs, so those surfaces work before task services
+// workspace's one SQLite database, which backs devices and plugin
+// authorization as well as runs, so those surfaces work before task services
 // can be composed. A missing App installation or credentials keeps the control
 // plane up with the GitHub dependency marked blocked, so run handlers report
 // unavailable; bootstrap readiness is not permission to accept durable work.

@@ -38,7 +38,7 @@ func NewHandlers(controls Controls, origins TrustedOrigins) (Handlers, error) {
 	}
 	pairing := newPairingState(controls.Store)
 	plugins := newPluginAuthHTTP(controls.PluginAuth)
-	pages := pages{store: controls.Store, onboarding: controls.Onboarding != nil}
+	pages := pages{store: controls.Store}
 	devices := deviceControls{store: controls.Store}
 
 	remote := newRouter(func(writer http.ResponseWriter, request *http.Request) (realm, *http.Request, func(), bool) {
@@ -98,13 +98,6 @@ func NewHandlers(controls Controls, origins TrustedOrigins) (Handlers, error) {
 	ops.handle("GET /fern/api/runs/{id}", operator, controls.Runs.ServeHTTP)
 	ops.handle("GET /fern/api/runs/{id}/attach", operator, controls.Runs.ServeHTTP)
 
-	if controls.Onboarding != nil {
-		// The callback is a cross-site redirect from GitHub, so it carries no
-		// credential remotely; setup must start from this exact origin.
-		remote.handle("GET /fern/github/app/callback", public, controls.Onboarding.ServeHTTP)
-		ops.handle("GET /fern/github/app/callback", operator, controls.Onboarding.ServeHTTP)
-		ops.handle("GET /fern/github/app/setup", operator, requireSameOrigin(controls.Onboarding.ServeHTTP))
-	}
 	return Handlers{
 		Remote:   listener(remote.mux, remoteOrigin),
 		Operator: listener(rejectBearer(ops.mux), operatorOrigin),

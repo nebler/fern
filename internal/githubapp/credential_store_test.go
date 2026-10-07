@@ -1,6 +1,10 @@
 package githubapp
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
@@ -25,7 +29,7 @@ func TestCredentialStoreCreatesPrivateDirectoryAndRoundTrips(t *testing.T) {
 		t.Fatalf("directory mode = %v", info.Mode())
 	}
 
-	want := testStoredCredentials(t, 123, "first")
+	want := testStoredCredentials(t, 123)
 	if err := store.Save(want); err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +58,7 @@ func TestCredentialStoreCreatesPrivateDirectoryAndRoundTrips(t *testing.T) {
 
 func TestStoredCredentialCandidateRoundTripsInMemory(t *testing.T) {
 	t.Parallel()
-	want := testStoredCredentials(t, 123, "candidate")
+	want := testStoredCredentials(t, 123)
 	payload, err := MarshalStoredCredentials(want)
 	if err != nil {
 		t.Fatal(err)
@@ -112,7 +116,7 @@ func TestCredentialStoreStrictlyRejectsMalformedAndOversizedData(t *testing.T) {
 	t.Parallel()
 	privateKey := testPrivateKeyPEM(t)
 	secret := "stored-secret-must-not-escape"
-	valid := fmt.Sprintf(`{"version":1,"app_id":1,"client_id":"client","client_secret":%q,"webhook_secret":"","private_key_pem":%q}`, secret, privateKey)
+	valid := fmt.Sprintf(`{"version":2,"app_id":1,"private_key_pem":%q}`, privateKey)
 	tests := []struct {
 		name    string
 		payload string
@@ -121,10 +125,10 @@ func TestCredentialStoreStrictlyRejectsMalformedAndOversizedData(t *testing.T) {
 		{name: "unknown field", payload: strings.TrimSuffix(valid, "}") + `,"unknown":"` + secret + `"}`},
 		{name: "trailing data", payload: valid + ` {"secret":"` + secret + `"}`},
 		{name: "duplicate field", payload: strings.Replace(valid, `"app_id":1`, `"app_id":1,"app_id":2`, 1)},
-		{name: "unsupported version", payload: strings.Replace(valid, `"version":1`, `"version":2`, 1)},
-		{name: "missing field", payload: strings.Replace(valid, `,"webhook_secret":""`, "", 1)},
+		{name: "unsupported version", payload: strings.Replace(valid, `"version":2`, `"version":1`, 1)},
+		{name: "removed manifest field", payload: strings.Replace(valid, `"app_id":1`, `"app_id":1,"client_secret":"`+secret+`"`, 1)},
+		{name: "missing field", payload: strings.Replace(valid, `"app_id":1,`, "", 1)},
 		{name: "invalid app ID", payload: strings.Replace(valid, `"app_id":1`, `"app_id":0`, 1)},
-		{name: "invalid secret", payload: strings.Replace(valid, `"client_id":"client"`, `"client_id":"bad secret"`, 1)},
 		{name: "invalid key", payload: strings.Replace(valid, fmt.Sprintf("%q", privateKey), fmt.Sprintf("%q", secret), 1)},
 		{name: "oversized", payload: strings.Repeat(secret, maxCredentialFileBytes/len(secret)+2)},
 	}
@@ -145,8 +149,8 @@ func TestCredentialStoreStrictlyRejectsMalformedAndOversizedData(t *testing.T) {
 func TestCredentialStoreIgnoresInterruptedTempsAndReplacesAtomically(t *testing.T) {
 	t.Parallel()
 	store, directory := newTestCredentialStore(t)
-	first := testStoredCredentials(t, 101, "first")
-	second := testStoredCredentials(t, 202, "second")
+	first := testStoredCredentials(t, 101)
+	second := testStoredCredentials(t, 202)
 	if err := store.Save(first); err != nil {
 		t.Fatal(err)
 	}
@@ -188,8 +192,8 @@ func TestCredentialStoreIgnoresInterruptedTempsAndReplacesAtomically(t *testing.
 func TestCredentialStoreConcurrentReplacementNeverLoadsPartialState(t *testing.T) {
 	t.Parallel()
 	store, _ := newTestCredentialStore(t)
-	first := testStoredCredentials(t, 1, "first")
-	second := testStoredCredentials(t, 2, "second")
+	first := testStoredCredentials(t, 1)
+	second := testStoredCredentials(t, 2)
 	if err := store.Save(first); err != nil {
 		t.Fatal(err)
 	}
@@ -219,12 +223,12 @@ func TestCredentialStoreConcurrentReplacementNeverLoadsPartialState(t *testing.T
 				return
 			}
 			if credentials.AppID() == first.AppID() {
-				if credentials.ClientSecret() != first.ClientSecret() {
+				if string(credentials.PrivateKeyPEM()) != string(first.PrivateKeyPEM()) {
 					errorsSeen <- errors.New("loaded partial first credentials")
 					return
 				}
 			} else if credentials.AppID() == second.AppID() {
-				if credentials.ClientSecret() != second.ClientSecret() {
+				if string(credentials.PrivateKeyPEM()) != string(second.PrivateKeyPEM()) {
 					errorsSeen <- errors.New("loaded partial second credentials")
 					return
 				}
@@ -241,13 +245,34 @@ func TestCredentialStoreConcurrentReplacementNeverLoadsPartialState(t *testing.T
 	}
 }
 
-func TestCredentialStoreErrorsAreRedacted(t *testing.T) {
+func TestCredentialStoreIOErrorsKeepTheirCause(t *testing.T) {
 	t.Parallel()
 	store, directory := newTestCredentialStore(t)
-	secretPath := filepath.Join(directory, "path-must-not-be-formatted")
-	store.directory = secretPath
-	if _, err := store.Load(); err == nil || strings.Contains(err.Error(), secretPath) {
-		t.Fatalf("error = %v", err)
+	if err := os.Mkdir(filepath.Join(directory, credentialFileName), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(directory, credentialFileName, "child"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := store.Delete()
+	if !errors.Is(err, ErrCredentialStoreIO) || err.Error() == ErrCredentialStoreIO.Error() {
+		t.Fatalf("error = %v, want wrapped ErrCredentialStoreIO with cause", err)
+	}
+}
+
+func TestAppCredentialsFormattingRedactsKey(t *testing.T) {
+	t.Parallel()
+	credentials := testStoredCredentials(t, 7)
+	for _, formatted := range []string{fmt.Sprint(credentials), fmt.Sprintf("%#v", credentials), fmt.Sprintf("%+v", credentials)} {
+		if strings.Contains(formatted, "PRIVATE KEY") || !strings.Contains(formatted, "redacted") {
+			t.Fatalf("formatted credentials = %q", formatted)
+		}
+	}
+	if _, err := NewAppCredentials(0, credentials.PrivateKeyPEM()); err == nil {
+		t.Fatal("accepted a non-positive App ID")
+	}
+	if _, err := NewAppCredentials(7, []byte("not a key")); !errors.Is(err, ErrInvalidPrivateKey) {
+		t.Fatalf("invalid key error = %v", err)
 	}
 }
 
@@ -261,26 +286,27 @@ func newTestCredentialStore(t *testing.T) (*CredentialStore, string) {
 	return store, directory
 }
 
-func testStoredCredentials(t *testing.T, appID int64, label string) AppCredentials {
+func testStoredCredentials(t *testing.T, appID int64) AppCredentials {
 	t.Helper()
-	privateKeyPEM := testPrivateKeyPEM(t)
-	key, err := ParseRSAPrivateKeyPEM(privateKeyPEM)
+	credentials, err := NewAppCredentials(appID, testPrivateKeyPEM(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return AppCredentials{
-		appID:         appID,
-		clientID:      "client-" + label,
-		clientSecret:  "client-secret-" + label,
-		webhookSecret: "webhook-secret-" + label,
-		privateKeyPEM: privateKeyPEM,
-		privateKey:    key,
+	return credentials
+}
+
+func testPrivateKeyPEM(t *testing.T) []byte {
+	t.Helper()
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
 	}
+	return pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
 }
 
 func assertStoredCredentials(t *testing.T, got, want AppCredentials) {
 	t.Helper()
-	if got.AppID() != want.AppID() || got.ClientID() != want.ClientID() || got.ClientSecret() != want.ClientSecret() || got.WebhookSecret() != want.WebhookSecret() || string(got.PrivateKeyPEM()) != string(want.PrivateKeyPEM()) || got.PrivateKey() == nil {
+	if got.AppID() != want.AppID() || string(got.PrivateKeyPEM()) != string(want.PrivateKeyPEM()) || got.PrivateKey() == nil {
 		t.Fatal("stored credentials did not round trip")
 	}
 }

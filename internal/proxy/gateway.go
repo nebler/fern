@@ -16,26 +16,23 @@ small,.meta{display:block;margin-top:12px;color:#82917c;line-height:1.45;font-si
 form.grid{display:grid;gap:10px}input{width:100%;min-height:48px;padding:13px 14px;border:1px solid #52664a;border-radius:13px;background:#10180e;color:#f3f7e9;font:inherit}button.danger{width:auto;min-height:44px;margin:8px 0 0;padding:8px 13px;background:#472a26;color:#ffcbc2;font-size:13px}`, `<main>
 <section class="hero"><div class="mark">F</div><h1>Fern Background Runs</h1><p>Submit work from the OpenCode plugin, inspect the exact live session, then retain an immutable Git result.</p><div class="status"><span class="dot"></span> Private control plane connected</div><small>Run compute is disposable. Receipts, audit identity, and retained results are durable.</small></section>
 {{if .Control}}
-{{if .OnboardingEnabled}}<section class="panel"><h2>GitHub App</h2><p>Create this host's private GitHub App credentials through GitHub's one-time manifest flow.</p><a class="primary" href="/fern/github/app/setup?return=%2Ffern%2Fcontrol%3Fconnected%3D1">Connect GitHub App</a><small>After creation, install the App on the configured repository, set workspace.github.installationId from the installation URL, and restart Fern.</small></section>{{end}}
 <section class="panel"><h2>Paired devices</h2>{{if .Devices}}<ul>{{range .Devices}}<li><div class="title">{{.Name}}</div><span class="meta">Last seen {{.LastSeen.Format "2006-01-02 15:04 UTC"}}</span><form method="post" action="/fern/devices/{{.ID}}/revoke"><button class="danger" type="submit">Revoke</button></form></li>{{end}}</ul>{{else}}<p>No durable devices are paired.</p>{{end}}</section>
 {{end}}
 </main>`)
 
 type landingView struct {
-	Control           bool
-	Devices           []control.Device
-	OnboardingEnabled bool
+	Control bool
+	Devices []control.Device
 }
 
 // pages renders the landing page and, on the operator listener, the control
 // page with paired devices.
 type pages struct {
-	store      *control.Store
-	onboarding bool
+	store *control.Store
 }
 
 func (pages pages) landing(writer http.ResponseWriter, request *http.Request) {
-	pages.render(writer, request, landingView{OnboardingEnabled: pages.onboarding})
+	pages.render(writer, request, landingView{})
 }
 
 func (pages pages) control(writer http.ResponseWriter, request *http.Request) {
@@ -44,7 +41,7 @@ func (pages pages) control(writer http.ResponseWriter, request *http.Request) {
 		writeUnavailable(writer, "control state")
 		return
 	}
-	pages.render(writer, request, landingView{Control: true, Devices: devices, OnboardingEnabled: pages.onboarding})
+	pages.render(writer, request, landingView{Control: true, Devices: devices})
 }
 
 func (pages) render(writer http.ResponseWriter, request *http.Request, view landingView) {

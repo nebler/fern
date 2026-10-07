@@ -1,5 +1,7 @@
-// Package githubapp provides host-side GitHub App onboarding, credential storage,
-// repository discovery, and short-lived installation-token minting. App private
+// Package githubapp provides host-side GitHub App credential storage,
+// repository discovery, and short-lived installation-token minting. The
+// operator creates and installs the App by hand; `fern credentials set`
+// validates its ID and private key and stores them here. App private
 // keys remain on the host; the Background Run provider delivers repository-scoped
 // installation tokens to containers. This package is not a general GitHub proxy
 // or a host-side pull request publisher.
@@ -12,12 +14,6 @@
 // Repository identities and observations are bindings at a point in time, not
 // proof of continued access.
 //
-// The onboarding callback exchanges a one-time manifest code at most once:
-// durable claims fence restarts and replays, credentials are saved before the
-// claim completes, and ambiguous outcomes are quarantined rather than retried.
-// Onboarding states live in the onboarding_states table of Fern's SQLite
-// database; each operation is one SQLite transaction, and only digests of the
-// state, manifest code, and claim ID are stored.
 // CredentialStore provides private-file protection, not encryption at rest;
 // encrypted export is credentialbundle's job. Clients disable redirects, and
 // public errors never include response bodies or secrets.

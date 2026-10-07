@@ -113,7 +113,7 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 	}
 	add("config", "pass", "configuration is valid", "")
 	if cfg.Workspace.GitHub.InstallationID == 0 {
-		add("github", "fail", "GitHub App installation ID is not configured", "Complete App onboarding, install it on the configured repository, set workspace.github.installationId, and restart Fern.")
+		add("github", "fail", "GitHub App installation ID is not configured", "Create the GitHub App, install it on the configured repository, set workspace.github.installationId, run 'fern credentials set', and restart Fern.")
 		return report
 	}
 	if runtime.GOOS != "linux" {

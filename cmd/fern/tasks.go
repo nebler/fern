@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
-	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -267,30 +265,4 @@ func gitExecutable() string {
 		}
 	}
 	return "/usr/bin/git"
-}
-
-func newGitHubOnboarding(cfg config.Config, db *sql.DB) (http.Handler, error) {
-	if cfg.RemoteOrigin == "" {
-		return nil, nil
-	}
-	directory, err := statePath("github-app")
-	if err != nil {
-		return nil, err
-	}
-	credentials, err := githubapp.NewCredentialStore(directory)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := credentials.Load(); err == nil {
-		return nil, nil
-	} else if !errors.Is(err, githubapp.ErrCredentialsNotFound) {
-		return nil, err
-	}
-	states := githubapp.NewOnboardingStateStore(db)
-	exchanger, err := githubapp.NewManifestClient(http.DefaultClient)
-	if err != nil {
-		return nil, err
-	}
-	return githubapp.NewOnboardingHTTPWithSetupOrigin(cfg.RemoteOrigin, "http://"+cfg.OperatorListen,
-		"Fern "+cfg.Workspace.Name, states, exchanger, credentials, rand.Reader, time.Now)
 }

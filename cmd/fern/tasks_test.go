@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
-	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"testing"
@@ -24,15 +23,7 @@ func TestGitHubAuthorityRequiresHostAppCredentialsAndProvidesTokens(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload, err := json.Marshal(map[string]any{
-		"version": 1, "app_id": 123, "client_id": "client-id",
-		"client_secret": "client-secret", "webhook_secret": "webhook-secret",
-		"private_key_pem": string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	credentials, err := githubapp.ParseStoredCredentials(payload)
+	credentials, err := githubapp.NewAppCredentials(123, pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}))
 	if err != nil {
 		t.Fatal(err)
 	}

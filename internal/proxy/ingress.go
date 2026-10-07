@@ -18,7 +18,6 @@ import (
 type Controls struct {
 	Store       *control.Store
 	Runs        http.Handler
-	Onboarding  http.Handler
 	Liveness    http.Handler
 	Readiness   http.Handler
 	Status      http.Handler

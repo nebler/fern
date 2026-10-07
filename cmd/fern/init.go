@@ -128,13 +128,14 @@ func runInit(args []string) error {
 	}
 	fmt.Printf("Fern Background Run configuration created\n\nconfig: %s\nsecrets: %s\nrepository: %s\n\n", *configPath, *envPath, absRepo)
 	fmt.Printf("Before execution: provision %s on Linux XFS with enforced project quotas for both bytes and inodes, enclosing clone and state-volume directories. Keep durable DB/CAS storage outside this root and reserve host capacity. init does not create or configure quotas. Docker Desktop execution is unsupported.\n\n", *runtimeStorageRoot)
+	fmt.Printf("Next:\n  1. Create a private GitHub App (permissions: metadata read, contents write, pull requests write; no webhook), generate a private key, and install the App on %s.\n", *repositoryName)
+	step := 2
 	if *installationID == 0 {
-		fmt.Printf("Next:\n  1. Configure private TLS routing for %s and %s.\n  2. Run: fern up --config %s --env-file %s\n  3. Open http://%s/fern/control, create the GitHub App, and install it on %s.\n  4. Set workspace.github.installationId in %s from the GitHub installation URL, then restart Fern.\n",
-			*listen, *backgroundListen, *configPath, *envPath, *operatorListen, *repositoryName, *configPath)
-	} else {
-		fmt.Printf("Next:\n  1. Import the matching GitHub App credentials with fern credentials import.\n  2. Configure private TLS routing for %s and %s.\n  3. Run: fern up --config %s --env-file %s\n",
-			*listen, *backgroundListen, *configPath, *envPath)
+		fmt.Printf("  %d. Set workspace.github.installationId in %s from the installation URL.\n", step, *configPath)
+		step++
 	}
+	fmt.Printf("  %d. Run: fern credentials set --config %s --env-file %s --app-id <id> --private-key <app.pem>\n  %d. Configure private TLS routing for %s and %s.\n  %d. Run: fern up --config %s --env-file %s\n",
+		step, *configPath, *envPath, step+1, *listen, *backgroundListen, step+2, *configPath, *envPath)
 	return nil
 }
 

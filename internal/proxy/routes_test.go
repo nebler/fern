@@ -92,7 +92,7 @@ func newRouteFixture(t *testing.T) *routeFixture {
 	}
 	fixture.handlers, err = NewHandlers(Controls{
 		Store: store, PluginAuth: plugins, ControlAuth: ControlAuth{Password: testPassword},
-		Runs: stub("runs"), Onboarding: stub("onboarding"),
+		Runs:     stub("runs"),
 		Liveness: stub("live"), Readiness: stub("ready"), Status: stub("status"), Metrics: stub("metrics"),
 	}, TrustedOrigins{Remote: testRemoteOrigin, Operator: testOperatorOrigin})
 	if err != nil {
@@ -162,8 +162,8 @@ func TestRouteTable(t *testing.T) {
 		{R, "POST", "/fern/api/plugin-auth/start", bearer, false, "{}", 201, "", ""},
 		{R, "GET", "/fern/pair?code=x", anon, false, "", 401, "", ""},
 		{R, "PUT", "/fern/pair", anon, false, "", 405, "", ""},
-		{R, "GET", "/fern/github/app/callback", anon, false, "", 200, "onboarding", ""},
-		{R, "GET", "/fern/github/app/callback", bearer, false, "", 200, "onboarding", ""},
+		// The removed GitHub App manifest onboarding routes stay unrouted.
+		{R, "GET", "/fern/github/app/callback", anon, false, "", 404, "", ""},
 
 		// Remote: paired device.
 		{R, "GET", "/fern/", anon, false, "", 401, "", ""},
@@ -249,7 +249,7 @@ func TestRouteTable(t *testing.T) {
 		{O, "POST", "/fern/api/plugin-auth/requests/{auth}/approve", basic, false, `{"user_code":"{code}"}`, 204, "", ""},
 		{O, "GET", "/fern/plugin-auth/authorize?id={auth}&code={code}", basic, false, "", 404, "", ""},
 
-		// Operator: run APIs and onboarding.
+		// Operator: run APIs.
 		{O, "GET", "/fern/api/runs", basic, false, "", 200, "runs", ""},
 		{O, "GET", "/fern/api/runs/run", basic, false, "", 200, "runs", ""},
 		{O, "GET", "/fern/api/runs/run/attach", basic, false, "", 200, "runs", ""},
@@ -258,10 +258,8 @@ func TestRouteTable(t *testing.T) {
 		{O, "POST", "/fern/api/runs/run/stop", basic, false, "{}", 404, "", ""},
 		{O, "GET", "/fern/api/runs/run/result", basic, false, "", 404, "", ""},
 		{O, "GET", "/fern/api/v1/runs", basic, false, "", 404, "", ""},
-		{O, "GET", "/fern/github/app/setup", basic, false, "", 200, "onboarding", ""},
-		{O, "GET", "/fern/github/app/setup", basic, true, "", 403, "", ""},
-		{O, "GET", "/fern/github/app/callback", basic, false, "", 200, "onboarding", ""},
-		{O, "GET", "/fern/github/app/callback", anon, false, "", 401, "", ""},
+		{O, "GET", "/fern/github/app/setup", basic, false, "", 404, "", ""},
+		{O, "GET", "/fern/github/app/callback", basic, false, "", 404, "", ""},
 		{O, "GET", "/elsewhere", basic, false, "", 404, "", ""},
 		{O, "GET", "/fern/api/v1/results/res_x/publications", basic, false, "", 404, "", ""},
 		// Plugin authorization is remote-only (this used to fall through to 405).

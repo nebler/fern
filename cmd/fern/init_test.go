@@ -9,7 +9,7 @@ import (
 	"github.com/nebler/fern/internal/config"
 )
 
-func TestInitCreatesOnboardingOnlyConfigurationWithoutInstallationID(t *testing.T) {
+func TestInitCreatesPendingConfigurationWithoutInstallationID(t *testing.T) {
 	t.Parallel()
 	directory := t.TempDir()
 	configPath := filepath.Join(directory, "fern.yaml")
@@ -62,13 +62,13 @@ func TestInitCreatesOnboardingOnlyConfigurationWithoutInstallationID(t *testing.
 		t.Fatalf("bootstrap validation: %v", err)
 	}
 	if err := config.Validate(loaded); err == nil {
-		t.Fatal("onboarding-only configuration authorized execution")
+		t.Fatal("pending configuration authorized execution")
 	}
 	if _, err := loadUpConfig(upOptions{configPath: configPath, envPath: envPath, configRequired: true}); err != nil {
-		t.Fatalf("up rejected onboarding-only configuration: %v", err)
+		t.Fatalf("up rejected pending configuration: %v", err)
 	}
 	report := diagnose(t.Context(), diagnoseOptions{ConfigPath: configPath, EnvPath: envPath})
 	if report.Ready || len(report.Checks) != 3 || report.Checks[2].ID != "github" || report.Checks[2].Status != "fail" {
-		t.Fatalf("onboarding doctor report = %+v", report)
+		t.Fatalf("pending doctor report = %+v", report)
 	}
 }
