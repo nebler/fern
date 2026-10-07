@@ -182,6 +182,10 @@ func assertNoHostCredentials(hostRoot string) error {
 		if err != nil {
 			return err
 		}
+		// The private OpenCode volume is bind-backed here; credentials belong in it.
+		if entry.IsDir() && entry.Name() == "opencode-volumes" {
+			return filepath.SkipDir
+		}
 		if strings.Contains(entry.Name(), "fern-github-token") || strings.Contains(entry.Name(), "fern-github-repository") {
 			return errors.New("runtime GitHub credential file escaped private volume")
 		}
