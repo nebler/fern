@@ -78,8 +78,8 @@ func requireFields(config Config) error {
 	}{
 		{"workspace.github.repository.id", config.Workspace.GitHub.Repository.ID == 0},
 		{"workspace.github.repository.fullName", config.Workspace.GitHub.Repository.FullName == ""},
-		{"tasks.model.provider", config.Tasks.Model.Provider == ""},
-		{"tasks.model.id", config.Tasks.Model.ID == ""},
+		{"runs.model.provider", config.Runs.Model.Provider == ""},
+		{"runs.model.id", config.Runs.Model.ID == ""},
 	} {
 		if field.unset {
 			return fmt.Errorf("%s is required", field.name)

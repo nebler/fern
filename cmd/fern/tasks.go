@@ -72,7 +72,7 @@ func openStateStore(ctx context.Context, cfg config.Config) (*taskstore.Store, e
 }
 
 func newTaskServices(ctx context.Context, cfg config.Config, store *taskstore.Store, route *backgroundroute.Manager, status *observability.Registry, log *slog.Logger) (*taskServices, error) {
-	if cfg.Tasks.BackgroundImage == "" || cfg.Tasks.BackgroundImageID == "" || route == nil {
+	if cfg.Runs.BackgroundImage == "" || cfg.Runs.BackgroundImageID == "" || route == nil {
 		return nil, errors.New("a qualified disposable Background Run profile is required")
 	}
 	github := cfg.Workspace.GitHub
@@ -137,7 +137,7 @@ func newTaskServices(ctx context.Context, cfg config.Config, store *taskstore.St
 	desired := taskstore.Workspace{ID: candidateID, Name: cfg.Workspace.Name, State: taskstore.WorkspaceActive,
 		RepositoryPath: cfg.Workspace.Repo, GitHubAuthority: taskstore.GitHubAuthorityAppBroker,
 		InstallationID: task.InstallationID(github.InstallationID), RepositoryID: task.RepositoryID(github.Repository.ID),
-		RepositoryFullName: github.Repository.FullName, ImageDigest: cfg.Tasks.BackgroundImageID,
+		RepositoryFullName: github.Repository.FullName, ImageDigest: cfg.Runs.BackgroundImageID,
 		OpenCodeProtocol: runapi.APIContractVersion, RuntimeDesiredState: "disposable", ReconciliationEpoch: 1, CreatedAt: now}
 	if existing, readErr := store.GetWorkspaceByName(ctx, cfg.Workspace.Name); readErr == nil {
 		// Preserve the durable workspace identity while still checking every
@@ -160,11 +160,11 @@ func newTaskServices(ctx context.Context, cfg config.Config, store *taskstore.St
 		return nil, fmt.Errorf("resolve Background Run repository: %w", err)
 	}
 	provider, err := taskenvdocker.New(ctx, taskenvdocker.Config{
-		RuntimeStorageRoot: cfg.Tasks.RuntimeStorageRoot,
+		RuntimeStorageRoot: cfg.Runs.RuntimeStorageRoot,
 		StateRoot:          providerRoot, Repository: repository, GitExecutable: gitExecutable(),
 		GitHubTokens: authority.installationTokens, GitHubRepository: githubIdentity,
 		GitHubRepositoryFullName: durableWorkspace.RepositoryFullName,
-		ImageReference:           cfg.Tasks.BackgroundImage, ImageID: cfg.Tasks.BackgroundImageID, MemoryBytes: 1 << 30,
+		ImageReference:           cfg.Runs.BackgroundImage, ImageID: cfg.Runs.BackgroundImageID, MemoryBytes: 1 << 30,
 		WallTimeout: 24 * time.Hour, GitTimeout: backgroundCloneTimeout,
 		DockerTimeout: 30 * time.Second, HealthTimeout: 30 * time.Second, GitOutputBytes: 1 << 20,
 		SourceSizeAdmissionBytes: backgroundCloneAdmissionBytes, CloneObservedLimitBytes: backgroundCloneAdmissionBytes, DiskFreeAdmissionBytes: 20 << 30,
@@ -187,9 +187,9 @@ func newTaskServices(ctx context.Context, cfg config.Config, store *taskstore.St
 
 	coordinator, err := backgroundruncoord.New(store, provider, artifact, ids, backgroundruncoord.Config{
 		WorkspaceID: durableWorkspace.ID,
-		Profile:     rundomain.SourceProfile, ImageIdentity: cfg.Tasks.BackgroundImageID,
-		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: cfg.Tasks.Agent,
-		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID,
+		Profile:     rundomain.SourceProfile, ImageIdentity: cfg.Runs.BackgroundImageID,
+		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: cfg.Runs.Agent,
+		ModelProvider: cfg.Runs.Model.Provider, Model: cfg.Runs.Model.ID,
 		OperationTimeout: backgroundCloneTimeout,
 		PollInterval:     taskPollInterval, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 100, MaxPages: 100, MaxEvents: 10000},
 		Now: time.Now, HTTPClient: &http.Client{Timeout: backgroundCloneTimeout}, Route: route,
@@ -209,11 +209,11 @@ func newTaskServices(ctx context.Context, cfg config.Config, store *taskstore.St
 	runs, err := runapi.New(runapi.Config{
 		WorkspaceID: durableWorkspace.ID, RepositoryID: durableWorkspace.RepositoryID,
 		RepositoryRemote:            "https://github.com/" + github.Repository.FullName,
-		BackgroundImageIdentity:     cfg.Tasks.BackgroundImageID,
+		BackgroundImageIdentity:     cfg.Runs.BackgroundImageID,
 		BackgroundEnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil),
 		Store:                       store, Route: route, Generator: ids, ActorResolver: task.ContextActor,
-		BaseVerifier: baseVerifier, Now: time.Now, RunTimeout: cfg.Tasks.RunTimeout, Agent: cfg.Tasks.Agent,
-		ModelProvider: cfg.Tasks.Model.Provider, Model: cfg.Tasks.Model.ID, RetentionVerifier: resultSource,
+		BaseVerifier: baseVerifier, Now: time.Now, RunTimeout: cfg.Runs.RunTimeout, Agent: cfg.Runs.Agent,
+		ModelProvider: cfg.Runs.Model.Provider, Model: cfg.Runs.Model.ID, RetentionVerifier: resultSource,
 		SealPolicyVersion: "fern.background-user-seal.v1", Wake: coordinator.Wake,
 	})
 	if err != nil {

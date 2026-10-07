@@ -65,10 +65,10 @@ func runUp(args []string, log *slog.Logger) (resultErr error) {
 	startProxyServers(group, runtime, serviceCtx, log)
 
 	fmt.Printf("repository: %s\nremote: %s\noperator: %s\nbackground: %s\nready in: %s\n",
-		cfg.Workspace.Repo, runtime.origins.Remote, runtime.origins.Operator, cfg.Tasks.BackgroundRoute.Origin,
+		cfg.Workspace.Repo, runtime.origins.Remote, runtime.origins.Operator, cfg.Runs.BackgroundRoute.Origin,
 		time.Since(runtime.start).Round(time.Millisecond))
 	log.Info("Background Run control plane ready", "remote", runtime.origins.Remote, "operator", runtime.origins.Operator,
-		"background", cfg.Tasks.BackgroundRoute.Origin, "repository", cfg.Workspace.Name)
+		"background", cfg.Runs.BackgroundRoute.Origin, "repository", cfg.Workspace.Name)
 	err = group.Wait()
 	if errors.Is(err, context.Canceled) {
 		return nil
@@ -119,7 +119,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 	if err != nil {
 		return nil, err
 	}
-	route, err := backgroundroute.New(backgroundListener, cfg.Tasks.BackgroundRoute.Origin)
+	route, err := backgroundroute.New(backgroundListener, cfg.Runs.BackgroundRoute.Origin)
 	if err != nil {
 		return nil, errors.Join(err, state.Close())
 	}
@@ -221,9 +221,9 @@ func startProxyServers(group *errgroup.Group, runtime *upRuntime, serviceCtx con
 }
 
 func listenBackgroundRoute(cfg config.Config) (net.Listener, error) {
-	listener, err := net.Listen("tcp", cfg.Tasks.BackgroundRoute.Listen)
+	listener, err := net.Listen("tcp", cfg.Runs.BackgroundRoute.Listen)
 	if err != nil {
-		return nil, fmt.Errorf("listen on Background Run route %s: %w", cfg.Tasks.BackgroundRoute.Listen, err)
+		return nil, fmt.Errorf("listen on Background Run route %s: %w", cfg.Runs.BackgroundRoute.Listen, err)
 	}
 	return listener, nil
 }

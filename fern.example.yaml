@@ -1,5 +1,5 @@
-# Optional keys and their defaults: workspace.name (default), tasks.agent
-# (build), tasks.runTimeout (30m), proxy.listen (127.0.0.1:8080),
+# Optional keys and their defaults: workspace.name (default), runs.agent
+# (build), runs.runTimeout (30m), proxy.listen (127.0.0.1:8080),
 # proxy.operatorListen (127.0.0.1:8081). The control password is read from
 # FERN_CONTROL_PASSWORD in the protected environment file, never from here.
 workspace:
@@ -9,7 +9,7 @@ workspace:
     repository:
       id: 123456789
       fullName: owner/repository
-tasks:
+runs:
   # Operator-provisioned Linux XFS project quota; never durable DB/CAS storage.
   runtimeStorageRoot: /var/lib/fern-runtime
   model:

@@ -56,7 +56,7 @@ func runInit(args []string) error {
 			InstallationID: config.GitHubID(*installationID), Repository: config.GitHubRepository{ID: config.GitHubID(*repositoryID), FullName: *repositoryName}}},
 		ControlPassword: controlSecret,
 		Proxy:           config.Proxy{Listen: *listen, OperatorListen: *operatorListen, RemoteOrigin: *remoteOrigin},
-		Tasks: config.TaskPolicy{Agent: "build", Model: config.TaskModel{Provider: *modelProvider, ID: *model},
+		Runs: config.RunPolicy{Agent: "build", Model: config.RunModel{Provider: *modelProvider, ID: *model},
 			RuntimeStorageRoot: *runtimeStorageRoot,
 			RunTimeout:         30 * time.Minute,
 			BackgroundImage:    *backgroundImage, BackgroundImageID: *backgroundImageID,

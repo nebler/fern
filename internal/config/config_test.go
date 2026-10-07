@@ -16,7 +16,7 @@ const currentYAML = `workspace:
     repository:
       id: 456
       fullName: owner/repository
-tasks:
+runs:
   agent: build
   runtimeStorageRoot: /var/lib/fern-runtime
   model:
@@ -61,15 +61,15 @@ func validConfig(t *testing.T) Config {
 func TestCurrentConfiguration(t *testing.T) {
 	t.Parallel()
 	cfg := validConfig(t)
-	if cfg.Tasks.RuntimeStorageRoot != "/var/lib/fern-runtime" {
-		t.Fatalf("runtime storage root = %q", cfg.Tasks.RuntimeStorageRoot)
+	if cfg.Runs.RuntimeStorageRoot != "/var/lib/fern-runtime" {
+		t.Fatalf("runtime storage root = %q", cfg.Runs.RuntimeStorageRoot)
 	}
 	if err := Validate(cfg); err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Workspace.GitHub.InstallationID != 123 || cfg.Workspace.GitHub.Repository.ID != 456 ||
-		cfg.Workspace.GitHub.Repository.FullName != "owner/repository" || cfg.Tasks.Agent != "build" ||
-		cfg.Tasks.Model.Provider != "openai" || cfg.Tasks.Model.ID != "gpt-5" || cfg.Tasks.RunTimeout != 30*time.Minute ||
+		cfg.Workspace.GitHub.Repository.FullName != "owner/repository" || cfg.Runs.Agent != "build" ||
+		cfg.Runs.Model.Provider != "openai" || cfg.Runs.Model.ID != "gpt-5" || cfg.Runs.RunTimeout != 30*time.Minute ||
 		cfg.ControlPassword != strings.Repeat("s", 32) {
 		t.Fatalf("decoded configuration = %+v", cfg)
 	}
@@ -90,6 +90,7 @@ func TestStrictParserRejectsRetiredAndUnknownSettings(t *testing.T) {
 		"maxTurns":               strings.Replace(currentYAML, "  agent: build", "  maxTurns: 100\n  agent: build", 1),
 		"leaseDuration":          strings.Replace(currentYAML, "  agent: build", "  leaseDuration: 2m\n  agent: build", 1),
 		"verification":           strings.Replace(currentYAML, "  agent: build", "  verification:\n    checkName: tests\n    argv: [/usr/bin/make, test]\n    workingDirectory: ''\n    timeout: 1m\n    outputBytes: 4096\n  agent: build", 1),
+		"retired_tasks_section":  strings.Replace(currentYAML, "runs:", "tasks:", 1),
 		"unknown_root":           currentYAML + "unknown: true\n",
 		"unknown_workspace":      strings.Replace(currentYAML, "  name: demo", "  unknown: true\n  name: demo", 1),
 		"unknown_task":           strings.Replace(currentYAML, "  agent: build", "  unknown: true\n  agent: build", 1),
@@ -139,7 +140,7 @@ func TestRequiredFieldsAndStrictScalarTypes(t *testing.T) {
 			}
 		})
 	}
-	for _, data := range []string{"workspace: {}\ntasks: {}", "workspace: {}", strings.Replace(currentYAML, "tasks:\n  agent: build", "tasks: null\nretired:\n  agent: build", 1)} {
+	for _, data := range []string{"workspace: {}\nruns: {}", "workspace: {}", strings.Replace(currentYAML, "runs:\n  agent: build", "runs: null\nretired:\n  agent: build", 1)} {
 		if _, err := loadConfig(t, data); err == nil {
 			t.Fatal("missing required section accepted")
 		}
@@ -157,7 +158,7 @@ func TestOmittedKeysUseDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := Default()
-	if cfg.Workspace.Name != want.Workspace.Name || cfg.Tasks.Agent != "build" || cfg.Tasks.RunTimeout != 30*time.Minute ||
+	if cfg.Workspace.Name != want.Workspace.Name || cfg.Runs.Agent != "build" || cfg.Runs.RunTimeout != 30*time.Minute ||
 		cfg.Proxy.Listen != "127.0.0.1:8080" || cfg.Proxy.OperatorListen != "127.0.0.1:8081" {
 		t.Fatalf("defaults = %+v", cfg)
 	}
@@ -193,24 +194,24 @@ func TestValidationBoundsAndDependencies(t *testing.T) {
 		"repository_path":          func(c *Config) { c.Workspace.Repo += "/missing" },
 		"password_missing":         func(c *Config) { c.ControlPassword = "" },
 		"password_short":           func(c *Config) { c.ControlPassword = "short" },
-		"agent":                    func(c *Config) { c.Tasks.Agent = "" },
-		"agent_long":               func(c *Config) { c.Tasks.Agent = strings.Repeat("x", 129) },
-		"provider":                 func(c *Config) { c.Tasks.Model.Provider = "\x00" },
-		"model":                    func(c *Config) { c.Tasks.Model.ID = strings.Repeat("x", 257) },
-		"run_low":                  func(c *Config) { c.Tasks.RunTimeout = time.Minute - time.Nanosecond },
-		"run_high":                 func(c *Config) { c.Tasks.RunTimeout = 24*time.Hour + time.Nanosecond },
-		"image_missing":            func(c *Config) { c.Tasks.BackgroundImage = "" },
-		"image_spaces":             func(c *Config) { c.Tasks.BackgroundImage = " image:test" },
-		"image_id":                 func(c *Config) { c.Tasks.BackgroundImageID = "sha256:" + strings.Repeat("B", 64) },
-		"route_missing":            func(c *Config) { c.Tasks.BackgroundRoute = nil },
-		"route_listener":           func(c *Config) { c.Tasks.BackgroundRoute.Listen = "0.0.0.0:8443" },
-		"route_collision":          func(c *Config) { c.Tasks.BackgroundRoute.Listen = c.Proxy.Listen },
-		"route_operator_collision": func(c *Config) { c.Tasks.BackgroundRoute.Listen = c.Proxy.OperatorListen },
-		"route_hostname":           func(c *Config) { c.Tasks.BackgroundRoute.Origin = "https://other.example:8443" },
-		"route_port":               func(c *Config) { c.Tasks.BackgroundRoute.Origin = "https://fern.example.ts.net" },
-		"route_loopback":           func(c *Config) { c.Tasks.BackgroundRoute.Origin = "https://localhost:8443" },
+		"agent":                    func(c *Config) { c.Runs.Agent = "" },
+		"agent_long":               func(c *Config) { c.Runs.Agent = strings.Repeat("x", 129) },
+		"provider":                 func(c *Config) { c.Runs.Model.Provider = "\x00" },
+		"model":                    func(c *Config) { c.Runs.Model.ID = strings.Repeat("x", 257) },
+		"run_low":                  func(c *Config) { c.Runs.RunTimeout = time.Minute - time.Nanosecond },
+		"run_high":                 func(c *Config) { c.Runs.RunTimeout = 24*time.Hour + time.Nanosecond },
+		"image_missing":            func(c *Config) { c.Runs.BackgroundImage = "" },
+		"image_spaces":             func(c *Config) { c.Runs.BackgroundImage = " image:test" },
+		"image_id":                 func(c *Config) { c.Runs.BackgroundImageID = "sha256:" + strings.Repeat("B", 64) },
+		"route_missing":            func(c *Config) { c.Runs.BackgroundRoute = nil },
+		"route_listener":           func(c *Config) { c.Runs.BackgroundRoute.Listen = "0.0.0.0:8443" },
+		"route_collision":          func(c *Config) { c.Runs.BackgroundRoute.Listen = c.Proxy.Listen },
+		"route_operator_collision": func(c *Config) { c.Runs.BackgroundRoute.Listen = c.Proxy.OperatorListen },
+		"route_hostname":           func(c *Config) { c.Runs.BackgroundRoute.Origin = "https://other.example:8443" },
+		"route_port":               func(c *Config) { c.Runs.BackgroundRoute.Origin = "https://fern.example.ts.net" },
+		"route_loopback":           func(c *Config) { c.Runs.BackgroundRoute.Origin = "https://localhost:8443" },
 		"remote_missing":           func(c *Config) { c.Proxy.RemoteOrigin = "" },
-		"remote_collision":         func(c *Config) { c.Proxy.RemoteOrigin = c.Tasks.BackgroundRoute.Origin },
+		"remote_collision":         func(c *Config) { c.Proxy.RemoteOrigin = c.Runs.BackgroundRoute.Origin },
 		"listen_public":            func(c *Config) { c.Proxy.Listen = "0.0.0.0:8080" },
 		"listen_dynamic":           func(c *Config) { c.Proxy.Listen = "127.0.0.1:0" },
 		"operator_public":          func(c *Config) { c.Proxy.OperatorListen = "0.0.0.0:8081" },
@@ -226,7 +227,7 @@ func TestValidationBoundsAndDependencies(t *testing.T) {
 	}
 	for _, attempt := range []time.Duration{time.Minute, 24 * time.Hour} {
 		cfg := validConfig(t)
-		cfg.Tasks.RunTimeout = attempt
+		cfg.Runs.RunTimeout = attempt
 		if err := Validate(cfg); err != nil {
 			t.Fatal(err)
 		}
@@ -262,7 +263,7 @@ func TestConfigurationDoesNotExpandEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Tasks.Agent != "${FERN_CONTROL_PASSWORD}" {
+	if cfg.Runs.Agent != "${FERN_CONTROL_PASSWORD}" {
 		t.Fatal("task policy captured a host secret")
 	}
 }

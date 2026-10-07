@@ -233,7 +233,7 @@ func resolveRunConnection(ctx context.Context, options runCLIOptions) (*runConne
 	if err != nil {
 		return nil, err
 	}
-	attach, err := loopbackURL(cfg.Tasks.BackgroundRoute.Listen)
+	attach, err := loopbackURL(cfg.Runs.BackgroundRoute.Listen)
 	if err != nil {
 		return nil, err
 	}

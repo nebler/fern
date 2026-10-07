@@ -113,8 +113,8 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 	}
 	if runtime.GOOS != "linux" {
 		add("runtime-storage", "fail", "execution requires native Linux; Docker Desktop is unsupported", "Use a native Linux Docker host with operator-provisioned XFS project quotas for bytes and inodes.")
-	} else if cfg.Tasks.RuntimeStorageRoot == "" {
-		add("runtime-storage", "fail", "tasks.runtimeStorageRoot is required for execution", "Provision an XFS project-quota root, separate from durable DB/CAS storage, and configure tasks.runtimeStorageRoot.")
+	} else if cfg.Runs.RuntimeStorageRoot == "" {
+		add("runtime-storage", "fail", "runs.runtimeStorageRoot is required for execution", "Provision an XFS project-quota root, separate from durable DB/CAS storage, and configure runs.runtimeStorageRoot.")
 	} else {
 		add("runtime-storage", "warn", "path syntax only checked; doctor does not qualify quota enforcement or host reserve", "Provider startup must accept the native Linux XFS project-quota root; qualify byte and inode exhaustion and maintain host reserve before production. Docker Desktop is unsupported.")
 	}
@@ -129,7 +129,7 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 		add("docker", "fail", err.Error(), "Start Docker and grant this user access.")
 	} else {
 		add("docker", "pass", "local Docker daemon is reachable", "")
-		if err := checkCommand(ctx, 5*time.Second, "docker", "image", "inspect", cfg.Tasks.BackgroundImage); err != nil {
+		if err := checkCommand(ctx, 5*time.Second, "docker", "image", "inspect", cfg.Runs.BackgroundImage); err != nil {
 			add("image", "fail", "qualified Background Run image is unavailable", "Run make image-background-source or pull the configured image.")
 		} else {
 			add("image", "pass", "Background Run image is available", "")
@@ -173,19 +173,19 @@ func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, sta
 		add("tailscale", "fail", topologyErr.Error(), "Make proxy.remoteOrigin, the root Serve origin, and this host's tailnet HTTPS origin identical.")
 		return
 	}
-	if cfg.Tasks.BackgroundRoute != nil {
-		routeOrigin, routeErr := discoverTailscaleURL(ctx, cfg.Tasks.BackgroundRoute.Listen, cfg.Proxy.OperatorListen)
-		parsedRouteOrigin, _ := url.Parse(cfg.Tasks.BackgroundRoute.Origin)
-		if routeErr != nil || routeOrigin != cfg.Tasks.BackgroundRoute.Origin {
+	if cfg.Runs.BackgroundRoute != nil {
+		routeOrigin, routeErr := discoverTailscaleURL(ctx, cfg.Runs.BackgroundRoute.Listen, cfg.Proxy.OperatorListen)
+		parsedRouteOrigin, _ := url.Parse(cfg.Runs.BackgroundRoute.Origin)
+		if routeErr != nil || routeOrigin != cfg.Runs.BackgroundRoute.Origin {
 			add("background-route", "fail", "the Background Run listener is not published at its exact configured private origin",
-				fmt.Sprintf("Run tailscale serve --https=%s --bg http://%s without changing any other listener.", parsedRouteOrigin.Port(), cfg.Tasks.BackgroundRoute.Listen))
+				fmt.Sprintf("Run tailscale serve --https=%s --bg http://%s without changing any other listener.", parsedRouteOrigin.Port(), cfg.Runs.BackgroundRoute.Listen))
 			return
 		}
-		if routeErr := checkBackgroundRouteSurface(ctx, "http://"+cfg.Tasks.BackgroundRoute.Listen); routeErr != nil {
+		if routeErr := checkBackgroundRouteSurface(ctx, "http://"+cfg.Runs.BackgroundRoute.Listen); routeErr != nil {
 			add("background-route", "fail", "the local Background Run listener is not serving the dedicated paired-device boundary", "Start Fern with the configured Background Run listener, then retry.")
 			return
 		}
-		if routeErr := checkBackgroundRouteSurface(ctx, cfg.Tasks.BackgroundRoute.Origin); routeErr != nil {
+		if routeErr := checkBackgroundRouteSurface(ctx, cfg.Runs.BackgroundRoute.Origin); routeErr != nil {
 			add("background-route", "fail", "the private Background Run origin does not reach the dedicated paired-device boundary", "Check the exact Tailscale Serve port mapping and private TLS route, then retry.")
 			return
 		}

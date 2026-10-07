@@ -45,13 +45,13 @@ func validateBackground(config Config, allowPendingInstallation bool) error {
 	if config.Workspace.GitHub.InstallationID < 0 || !allowPendingInstallation && config.Workspace.GitHub.InstallationID == 0 {
 		return errors.New("background runs require a positive workspace.github.installationId")
 	}
-	if err := validateTasks(config); err != nil {
+	if err := validateRuns(config); err != nil {
 		return err
 	}
-	if !allowPendingInstallation && config.Tasks.RuntimeStorageRoot == "" {
-		return errors.New("tasks.runtimeStorageRoot is required for execution; provision a Linux XFS project-quota root")
+	if !allowPendingInstallation && config.Runs.RuntimeStorageRoot == "" {
+		return errors.New("runs.runtimeStorageRoot is required for execution; provision a Linux XFS project-quota root")
 	}
-	if config.Tasks.BackgroundImage == "" || config.Tasks.BackgroundImageID == "" || config.Tasks.BackgroundRoute == nil {
+	if config.Runs.BackgroundImage == "" || config.Runs.BackgroundImageID == "" || config.Runs.BackgroundRoute == nil {
 		return errors.New("a qualified Background Run image and route are required")
 	}
 	if err := validateListen("proxy.listen", config.Proxy.Listen); err != nil {
@@ -92,67 +92,67 @@ func ValidateWorkspace(config Config) error {
 	return nil
 }
 
-func validateTasks(config Config) error {
-	if root := config.Tasks.RuntimeStorageRoot; root != "" {
-		if !validTaskText(root, 1, 4096) || !filepath.IsAbs(root) || filepath.Clean(root) != root || root == string(filepath.Separator) {
-			return errors.New("tasks.runtimeStorageRoot must be an absolute, cleaned, non-root path")
+func validateRuns(config Config) error {
+	if root := config.Runs.RuntimeStorageRoot; root != "" {
+		if !validText(root, 1, 4096) || !filepath.IsAbs(root) || filepath.Clean(root) != root || root == string(filepath.Separator) {
+			return errors.New("runs.runtimeStorageRoot must be an absolute, cleaned, non-root path")
 		}
 	}
-	if !validTaskText(config.Tasks.Agent, 1, 128) {
-		return errors.New("tasks.agent must be 1-128 bytes of valid text")
+	if !validText(config.Runs.Agent, 1, 128) {
+		return errors.New("runs.agent must be 1-128 bytes of valid text")
 	}
-	if !validTaskText(config.Tasks.Model.Provider, 1, 128) {
-		return errors.New("tasks.model.provider must be 1-128 bytes of valid text")
+	if !validText(config.Runs.Model.Provider, 1, 128) {
+		return errors.New("runs.model.provider must be 1-128 bytes of valid text")
 	}
-	if !validTaskText(config.Tasks.Model.ID, 1, 256) {
-		return errors.New("tasks.model.id must be 1-256 bytes of valid text")
+	if !validText(config.Runs.Model.ID, 1, 256) {
+		return errors.New("runs.model.id must be 1-256 bytes of valid text")
 	}
-	if config.Tasks.RunTimeout < time.Minute || config.Tasks.RunTimeout > 24*time.Hour {
-		return errors.New("tasks.runTimeout must be between 1m and 24h")
+	if config.Runs.RunTimeout < time.Minute || config.Runs.RunTimeout > 24*time.Hour {
+		return errors.New("runs.runTimeout must be between 1m and 24h")
 	}
-	if config.Tasks.BackgroundImage != "" && (!validTaskText(config.Tasks.BackgroundImage, 1, 256) || strings.TrimSpace(config.Tasks.BackgroundImage) != config.Tasks.BackgroundImage) {
-		return errors.New("tasks.backgroundImage must be an exact nonempty image reference of at most 256 bytes")
+	if config.Runs.BackgroundImage != "" && (!validText(config.Runs.BackgroundImage, 1, 256) || strings.TrimSpace(config.Runs.BackgroundImage) != config.Runs.BackgroundImage) {
+		return errors.New("runs.backgroundImage must be an exact nonempty image reference of at most 256 bytes")
 	}
-	if (config.Tasks.BackgroundImage == "") != (config.Tasks.BackgroundImageID == "") {
-		return errors.New("tasks.backgroundImage and tasks.backgroundImageID must be configured together")
+	if (config.Runs.BackgroundImage == "") != (config.Runs.BackgroundImageID == "") {
+		return errors.New("runs.backgroundImage and runs.backgroundImageID must be configured together")
 	}
-	if config.Tasks.BackgroundImageID != "" && !validCanonicalImageID(config.Tasks.BackgroundImageID) {
-		return errors.New("tasks.backgroundImageID must be a canonical sha256 image ID")
+	if config.Runs.BackgroundImageID != "" && !validCanonicalImageID(config.Runs.BackgroundImageID) {
+		return errors.New("runs.backgroundImageID must be a canonical sha256 image ID")
 	}
-	if config.Tasks.BackgroundImage == "" && config.Tasks.BackgroundRoute != nil {
-		return errors.New("tasks.backgroundRoute is forbidden without tasks.backgroundImage")
+	if config.Runs.BackgroundImage == "" && config.Runs.BackgroundRoute != nil {
+		return errors.New("runs.backgroundRoute is forbidden without runs.backgroundImage")
 	}
-	if config.Tasks.BackgroundImage != "" && config.Tasks.BackgroundRoute == nil {
-		return errors.New("tasks.backgroundRoute is required with tasks.backgroundImage")
+	if config.Runs.BackgroundImage != "" && config.Runs.BackgroundRoute == nil {
+		return errors.New("runs.backgroundRoute is required with runs.backgroundImage")
 	}
-	if route := config.Tasks.BackgroundRoute; route != nil {
-		if err := validateListen("tasks.backgroundRoute.listen", route.Listen); err != nil {
+	if route := config.Runs.BackgroundRoute; route != nil {
+		if err := validateListen("runs.backgroundRoute.listen", route.Listen); err != nil {
 			return err
 		}
 		if sameListenPort(route.Listen, config.Proxy.Listen) || sameListenPort(route.Listen, config.Proxy.OperatorListen) {
-			return errors.New("tasks.backgroundRoute.listen must use a distinct port")
+			return errors.New("runs.backgroundRoute.listen must use a distinct port")
 		}
 		origin, err := ParseRemoteOrigin(route.Origin)
 		if err != nil {
-			return fmt.Errorf("invalid tasks.backgroundRoute.origin: %w", err)
+			return fmt.Errorf("invalid runs.backgroundRoute.origin: %w", err)
 		}
 		if origin == "" {
-			return errors.New("invalid tasks.backgroundRoute.origin: a private HTTPS origin is required")
+			return errors.New("invalid runs.backgroundRoute.origin: a private HTTPS origin is required")
 		}
 		remote, err := url.Parse(config.Proxy.RemoteOrigin)
 		if err != nil || config.Proxy.RemoteOrigin == "" {
-			return errors.New("proxy.remoteOrigin is required with tasks.backgroundRoute")
+			return errors.New("proxy.remoteOrigin is required with runs.backgroundRoute")
 		}
 		parsed, _ := url.Parse(origin)
 		if _, err := backgroundopencode.ParseTrustedOrigin(origin); err != nil {
-			return errors.New("tasks.backgroundRoute.origin must be a canonical non-loopback private HTTPS origin supported by the pinned OpenCode UI")
+			return errors.New("runs.backgroundRoute.origin must be a canonical non-loopback private HTTPS origin supported by the pinned OpenCode UI")
 		}
 		remotePort := remote.Port()
 		if remotePort == "" {
 			remotePort = "443"
 		}
 		if parsed.Hostname() != remote.Hostname() || parsed.Port() == "" || parsed.Port() == "443" || parsed.Port() == remotePort {
-			return errors.New("tasks.backgroundRoute.origin must use the proxy.remoteOrigin hostname and an explicit non-443 port")
+			return errors.New("runs.backgroundRoute.origin must use the proxy.remoteOrigin hostname and an explicit non-443 port")
 		}
 	}
 	return nil
@@ -170,7 +170,7 @@ func validCanonicalImageID(value string) bool {
 	return true
 }
 
-func validTaskText(value string, minimum, maximum int) bool {
+func validText(value string, minimum, maximum int) bool {
 	if len(value) < minimum || len(value) > maximum || !utf8.ValidString(value) {
 		return false
 	}

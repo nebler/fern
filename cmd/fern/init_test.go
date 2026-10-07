@@ -52,8 +52,8 @@ func TestInitCreatesPendingConfigurationWithoutInstallationID(t *testing.T) {
 	if loaded.Workspace.GitHub.InstallationID != 0 {
 		t.Fatalf("pending GitHub binding = %+v", loaded.Workspace.GitHub)
 	}
-	if loaded.Tasks.RuntimeStorageRoot != runtimeRoot {
-		t.Fatalf("runtime storage root = %q", loaded.Tasks.RuntimeStorageRoot)
+	if loaded.Runs.RuntimeStorageRoot != runtimeRoot {
+		t.Fatalf("runtime storage root = %q", loaded.Runs.RuntimeStorageRoot)
 	}
 	if _, err := os.Stat(runtimeRoot); !os.IsNotExist(err) {
 		t.Fatalf("init must not provision runtime storage: %v", err)

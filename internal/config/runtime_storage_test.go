@@ -10,22 +10,22 @@ func TestRuntimeStorageRootValidation(t *testing.T) {
 	for _, root := range []string{"/", "relative", "/var/lib/../runtime", "/var//runtime", "/var/runtime/", "/var/runtime\x00"} {
 		t.Run(root, func(t *testing.T) {
 			cfg := validConfig(t)
-			cfg.Tasks.RuntimeStorageRoot = root
-			if err := ValidateBootstrap(cfg); err == nil || !strings.Contains(err.Error(), "tasks.runtimeStorageRoot") {
+			cfg.Runs.RuntimeStorageRoot = root
+			if err := ValidateBootstrap(cfg); err == nil || !strings.Contains(err.Error(), "runs.runtimeStorageRoot") {
 				t.Fatalf("invalid root accepted: %v", err)
 			}
 		})
 	}
 	cfg := validConfig(t)
-	cfg.Tasks.RuntimeStorageRoot = ""
+	cfg.Runs.RuntimeStorageRoot = ""
 	if err := ValidateBootstrap(cfg); err != nil {
 		t.Fatalf("bootstrap requires storage: %v", err)
 	}
-	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "tasks.runtimeStorageRoot") {
+	if err := Validate(cfg); err == nil || !strings.Contains(err.Error(), "runs.runtimeStorageRoot") {
 		t.Fatalf("execution without storage accepted: %v", err)
 	}
 	// Shape validation deliberately does not assert filesystem quota support.
-	cfg.Tasks.RuntimeStorageRoot = "/synthetic/unprovisioned/runtime"
+	cfg.Runs.RuntimeStorageRoot = "/synthetic/unprovisioned/runtime"
 	if err := Validate(cfg); err != nil {
 		t.Fatal(err)
 	}

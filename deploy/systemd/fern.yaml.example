@@ -6,7 +6,7 @@ workspace:
     repository:
       id: 123456789
       fullName: owner/repository
-tasks:
+runs:
   # Operator-provisioned Linux XFS project quota; never durable DB/CAS storage.
   runtimeStorageRoot: /var/lib/fern-runtime
   agent: build

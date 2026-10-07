@@ -12,9 +12,9 @@ import (
 // document Fern reads and `fern init` writes. ValidateBootstrap permits a
 // pending App installation; Validate requires an installed execution binding.
 type Config struct {
-	Workspace Workspace  `yaml:"workspace"`
-	Tasks     TaskPolicy `yaml:"tasks"`
-	Proxy     Proxy      `yaml:"proxy"`
+	Workspace Workspace `yaml:"workspace"`
+	Runs      RunPolicy `yaml:"runs"`
+	Proxy     Proxy     `yaml:"proxy"`
 	// ControlPassword is never read from or written to the file; Load takes
 	// it from ControlPasswordVariable.
 	ControlPassword string `yaml:"-"`
@@ -43,17 +43,17 @@ type GitHubRepository struct {
 	FullName string   `yaml:"fullName"`
 }
 
-type TaskPolicy struct {
+type RunPolicy struct {
 	RuntimeStorageRoot string           `yaml:"runtimeStorageRoot,omitempty"`
 	Agent              string           `yaml:"agent"`
-	Model              TaskModel        `yaml:"model"`
+	Model              RunModel         `yaml:"model"`
 	RunTimeout         time.Duration    `yaml:"runTimeout"`
 	BackgroundImage    string           `yaml:"backgroundImage"`
 	BackgroundImageID  string           `yaml:"backgroundImageID"`
 	BackgroundRoute    *BackgroundRoute `yaml:"backgroundRoute"`
 }
 
-type TaskModel struct {
+type RunModel struct {
 	Provider string `yaml:"provider"`
 	ID       string `yaml:"id"`
 }
@@ -73,7 +73,7 @@ type Proxy struct {
 func Default() Config {
 	return Config{
 		Workspace: Workspace{Name: "default"},
-		Tasks:     TaskPolicy{Agent: "build", RunTimeout: 30 * time.Minute},
+		Runs:      RunPolicy{Agent: "build", RunTimeout: 30 * time.Minute},
 		Proxy:     Proxy{Listen: "127.0.0.1:8080", OperatorListen: "127.0.0.1:8081"},
 	}
 }
