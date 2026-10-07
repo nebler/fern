@@ -13,6 +13,7 @@ var (
 	ErrTransport     = errors.New("Background Run OpenCode transport failed")
 	ErrProtocol      = errors.New("Background Run OpenCode protocol violation")
 	ErrScanBound     = errors.New("Background Run OpenCode history scan exceeded its bound")
+	ErrNotReady      = errors.New("Background Run OpenCode model or agent is not ready")
 )
 
 // NotFoundError omits the endpoint and external identity deliberately.

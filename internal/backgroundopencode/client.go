@@ -128,7 +128,11 @@ type statusAuthority struct {
 }
 
 func (c *Client) json(ctx context.Context, method, requestPath string, body any, status int, operation string, authority statusAuthority, destination any) error {
-	payload, gotStatus, headers, err := c.do(ctx, method, requestPath, body, operation)
+	return c.jsonBounded(ctx, method, requestPath, body, status, operation, authority, destination, maxResponseBytes)
+}
+
+func (c *Client) jsonBounded(ctx context.Context, method, requestPath string, body any, status int, operation string, authority statusAuthority, destination any, limit int) error {
+	payload, gotStatus, headers, err := c.do(ctx, method, requestPath, body, operation, limit)
 	if err != nil {
 		return err
 	}
@@ -142,7 +146,7 @@ func (c *Client) json(ctx context.Context, method, requestPath string, body any,
 }
 
 func (c *Client) empty(ctx context.Context, method, requestPath, operation string, authority statusAuthority) error {
-	payload, status, headers, err := c.do(ctx, method, requestPath, nil, operation)
+	payload, status, headers, err := c.do(ctx, method, requestPath, nil, operation, maxResponseBytes)
 	if err != nil {
 		return err
 	}
@@ -155,7 +159,7 @@ func (c *Client) empty(ctx context.Context, method, requestPath, operation strin
 	return nil
 }
 
-func (c *Client) do(ctx context.Context, method, requestPath string, body any, operation string) ([]byte, int, http.Header, error) {
+func (c *Client) do(ctx context.Context, method, requestPath string, body any, operation string, limit int) ([]byte, int, http.Header, error) {
 	if c == nil || c.http == nil || c.endpoint == "" {
 		return nil, 0, nil, ErrInvalidConfig
 	}
@@ -203,11 +207,11 @@ func (c *Client) do(ctx context.Context, method, requestPath string, body any, o
 		return nil, 0, nil, &TransportError{operation: operation, kind: "request"}
 	}
 	defer response.Body.Close()
-	payload, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
+	payload, err := io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
 	if err != nil {
 		return nil, 0, nil, &TransportError{operation: operation, kind: "response"}
 	}
-	if len(payload) > maxResponseBytes {
+	if len(payload) > limit {
 		return nil, 0, nil, protocol(operation, "response body exceeds bound")
 	}
 	return payload, response.StatusCode, response.Header.Clone(), nil

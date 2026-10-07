@@ -23,6 +23,11 @@ var ErrNoWork = errors.New("no background run work")
 
 const sessionDirectory = "/home/user/workspace"
 
+const (
+	readinessMinInterval = 50 * time.Millisecond
+	readinessMaxInterval = 250 * time.Millisecond
+)
+
 type Config struct {
 	WorkspaceID       task.WorkspaceID
 	Profile           string
@@ -582,7 +587,28 @@ func (c *Coordinator) provision(operation, parent context.Context, work taskstor
 	if err != nil || !ready {
 		return err
 	}
+	return c.dispatchWhenReady(operation, parent, work, client)
+}
+
+// dispatchWhenReady crosses the prompt fence only once the session's location
+// lists the configured model and agent. OpenCode loads them asynchronously
+// after it first opens the location, and a turn started earlier fails without
+// durable evidence, stranding an admitted prompt. An unready catalog leaves the
+// run provisioning; a later pass retries until the attempt deadline.
+func (c *Coordinator) dispatchWhenReady(operation, parent context.Context, work taskstore.BackgroundRunWork, client *backgroundopencode.Client) error {
+	spec := backgroundopencode.ReadinessSpec{Agent: c.config.Agent, ProviderID: c.config.ModelProvider,
+		ModelID: c.config.Model, Directory: sessionDirectory}
+	if err := client.WaitReady(operation, spec, c.readinessInterval()); err != nil {
+		if err := parent.Err(); err != nil {
+			return err
+		}
+		return c.externalFailure(parent, work, err)
+	}
 	return c.dispatchPrompt(operation, parent, work, client)
+}
+
+func (c *Coordinator) readinessInterval() time.Duration {
+	return min(max(c.config.PollInterval, readinessMinInterval), readinessMaxInterval)
 }
 
 // live proves the committed runtime healthy, refreshes its GitHub credentials,
