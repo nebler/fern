@@ -320,15 +320,17 @@ artifacts; host key), the configuration,
 and the protected environment file; nothing is written in plaintext. Run clones,
 artifact scratch, locks, and containers are not included.
 
-To restore, verify and swap a backup into place with the matching identity:
+To restore onto a host with no Fern state or configuration, use the matching
+identity:
 
 ```sh
 ./fern backup restore --identity /secure/identity.txt --input /secure/fern.backup
 ```
 
-Restore refuses to overwrite existing state or configuration unless you pass
-`--replace`; the replaced state directory and files are then kept next to the
-originals with a `.previous` suffix, and `fern backup rollback` swaps them back.
+Restore verifies every file before installing anything and never overwrites:
+it refuses while the state directory holds anything but locks, or while the
+configuration or environment file exists. To restore over a host, stop Fern and
+move the old state directory and configuration aside (or delete them) first.
 Credential bundles use format 2 and do not overwrite an existing destination.
 Existing older database/bundle formats may be rejected: preserve backups rather
 than deleting files to make startup succeed.

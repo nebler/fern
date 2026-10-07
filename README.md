@@ -137,14 +137,12 @@ just successful agent output:
 - **Source authentication:** the image build verifies the pinned OpenCode commit
   against a vendored GitHub web-flow signing key before dependency installation.
   This authenticates GitHub-signed content, not independent maintainer approval.
-- **Reproducible packaging and signed release machinery:** release scripts use
-  source-derived timestamps, trimmed build paths, and deterministic packaging.
-  The release workflow verifies signed tags and binds assets/images to SPDX
-  SBOMs, build provenance, and verified Cosign signatures/attestations. These
-  controls make source and artifact claims inspectable; they are not a claim
-  that the complete image supply chain is bit-for-bit reproducible.
+- **Reproducible binaries:** `make release VERSION=vX.Y.Z` builds trimmed,
+  CGO-free Linux amd64/arm64 binaries plus `SHA256SUMS`; a `v*` tag publishes
+  them as a GitHub release. There are no signatures, SBOMs, or attestations,
+  and the OpenCode image is built locally rather than published.
 
-Review the [release workflow](.github/workflows/release.yml)
+Review the [CI workflow](.github/workflows/ci.yml)
 and [coverage gates](scripts/test-critical-coverage.sh). The machinery demonstrates
 engineering rigor; it does not erase the deployment and qualification gaps below.
 
@@ -152,9 +150,9 @@ engineering rigor; it does not erase the deployment and qualification gaps below
 
 - **Pre-release deployment:** the quota-query privilege arrangement remains an
   operator security decision. Actual XFS byte/inode exhaustion and recovery have
-  not been qualified on the local development host. The stock hosted release
-  runner is not provisioned with that storage boundary either; the full release
-  qualification path needs it. Docker Desktop is not an execution fallback.
+  not been qualified on the local development host. The full qualification path
+  needs an XFS project-quota storage boundary, which CI provisions on a loop
+  device. Docker Desktop is not an execution fallback.
 - **Capacity one:** Fern is a single-host runner, not a fleet scheduler.
 - **Trusted code and network:** bridge isolation is not a hostile-code sandbox.
   An agent can misuse or exfiltrate its scoped GitHub token until expiry. Quotas

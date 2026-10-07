@@ -149,7 +149,7 @@ require a CSRF token bound to the method and exact path.
 | remote | `GET /fern/`, `GET /fern/api/v1/csrf`, `GET /fern/plugin-auth/authorize`, `POST /fern/api/plugin-auth/requests/:id/{approve,deny}` | device |
 | remote | `/fern/api/runs` (runapi, including `GET /fern/api/runs/:id/attach`), `POST /fern/api/plugin-auth/self/revoke` | plugin |
 | operator | `GET /fern/live`, `GET /fern/ready` | public |
-| operator | status, metrics, landing, control page, `POST /fern/pair/new`, device and plugin credential administration, plugin approval, `GET /fern/api/runs[/:id[/attach]]` (runapi, workspace-wide, read and attach only), GitHub App setup/callback | operator |
+| operator | landing, control page, `POST /fern/pair/new`, device and plugin credential administration, plugin approval, `GET /fern/api/runs[/:id[/attach]]` (runapi, workspace-wide, read and attach only), GitHub App setup/callback | operator |
 
 The live route listener (`backgroundroute`, `:8443`) is separate: it admits only
 attachment capabilities and applies the OpenCode allow-list in `policy.go`.
@@ -519,11 +519,13 @@ Containers and volumes are never part of a backup.
 `fern backup restore` decrypts into a staging directory next to the state
 directory, rejects anything but regular files under `state/` and `config/`,
 requires every checksum to match the manifest, and integrity-checks restored
-databases before activating anything. Activation is a short sequence of renames
-with undo: the held lease directory moves into the staged state, the live state
-and configuration files become `*.previous`, and the staged copies take their
-place. `fern backup rollback` swaps `*.previous` back. A restored startup
-inspects every taskstore-referenced CAS object before serving work.
+databases before activating anything. Restore never replaces anything: it
+refuses when the state directory holds more than locks or when the
+configuration or environment file exists, so restoring over a host means moving
+the old state aside first. Activation is a short sequence of renames with undo:
+the held lease directory moves into the staged state, and the staged state and
+configuration files take their places. A restored startup inspects every
+taskstore-referenced CAS object before serving work.
 
 GitHub App credentials can be exported and rotated as bounded age-encrypted
 bundles. Binding includes Fern name, mode, host, App ID, installation ID,
@@ -558,14 +560,13 @@ ownership boundaries.
 | `internal/credentialbundle` | age-encrypted GitHub credential bundles |
 | `internal/config` | strict configuration loader and bootstrap/execution validation |
 | `internal/hostlease` | exclusive host-local repository-binding lease |
-| `internal/observability` | health, readiness, status, metrics |
+| `internal/observability` | in-memory component readiness behind the liveness and readiness probes |
 | `internal/gitref` | shared Git ref, GitHub name/remote, and path validation |
 | `internal/strictjson` | strict JSON validation before typed decoding |
 | `internal/atomicfile` | atomic replace and bounded read of the remaining private files (App credentials, host key, bundles) |
-| `internal/compatibility` | test-only fresh-schema and release-manifest alignment |
 
-Integration packages under `integration/` qualify Docker, OpenCode, upgrades,
-and releases; each has its own README.
+Integration packages under `integration/` qualify Docker and OpenCode; each has
+its own README.
 
 ### Boundary decisions
 
@@ -625,8 +626,10 @@ test -z "$(gofmt -l .)"
 go test ./...
 go test -race ./...
 go vet ./...
-CGO_ENABLED=0 go test ./internal/taskstore ./internal/compatibility
-make build
+CGO_ENABLED=0 go test ./internal/taskstore
+./scripts/test-critical-coverage.sh
+./scripts/test-deployment.sh
+make release VERSION=v0.0.0-dev
 
 cd plugins/opencode
 bun run format:check
@@ -634,18 +637,15 @@ bun run typecheck
 bun test
 ```
 
-Docker/release gates qualify the source-pinned Background Run image, serial run
-lifecycle, exact-session attachment fencing, artifact retention, fresh-schema
-initialization, deployment files, reproducibility, SBOM,
-signatures, and provenance. Release publication must bind the image by registry
-digest; a local image ID is not portable registry authority. Each architecture
-is built as a candidate, the exact pushed digest is qualified under its target
-architecture, and only those candidate digests are promoted into the release
-manifest.
+The Docker qualification job exercises the source-pinned Background Run image,
+serial run lifecycle, exact-session attachment fencing, and artifact retention.
+A release is only the `make release` binaries and `SHA256SUMS`, uploaded by the
+tag workflow; the Background Run image is built and qualified locally and bound
+by local image ID, so it is not published or signed.
 
 No synthetic harness may claim a physical phone test, host reboot,
-replacement-host restore, independent tailnet ACL denial, release, or signed
-tag. Those facts require operator-supplied evidence.
+replacement-host restore, or independent tailnet ACL denial. Those facts
+require operator-supplied evidence.
 
 ## 22. Current Scale
 
