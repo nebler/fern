@@ -3,6 +3,7 @@ package taskenvdocker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"net"
@@ -65,7 +66,7 @@ func TestCloneIsolationReconciliationUsageAndPrivateAuthority(t *testing.T) {
 		t.Fatalf("reconcile clone: evidence=%q error=%v", second.Evidence, err)
 	}
 	usage, err := provider.ObserveUsage(context.Background(), run)
-	if err != nil || usage.CloneBytes <= 0 || usage.ObservedLimitBytes != provider.config.CloneObservedLimitBytes || usage.VolumeBytesAvailable {
+	if err != nil || !strings.Contains(usage.Evidence, `"observed_bytes":`) || !strings.Contains(usage.Evidence, fmt.Sprintf(`"observed_limit_bytes":%d`, provider.config.CloneObservedLimitBytes)) {
 		t.Fatalf("usage=%+v error=%v", usage, err)
 	}
 	if err := os.WriteFile(provider.cloneMarkerPath(run), []byte("{}\n"), 0o600); err != nil {
@@ -812,7 +813,7 @@ func TestExistingContainerFencesHostGitButNotFilesystemUsage(t *testing.T) {
 	clone := filepath.Join(provider.root, run.CloneIdentity)
 	runGit(t, provider.config.GitExecutable, clone, "config", "core.fsmonitor", helper)
 	usage, err := provider.ObserveUsage(context.Background(), run)
-	if err != nil || usage.CloneBytes == 0 {
+	if err != nil || !strings.Contains(usage.Evidence, `"observed_bytes":`) {
 		t.Fatalf("filesystem-only usage observation=%+v error=%v", usage, err)
 	}
 	if _, err := provider.EnsureClone(context.Background(), run); !errors.Is(err, ErrIdentityMismatch) {
@@ -1001,17 +1002,8 @@ func TestAcquireExportSourceExactStoppedRuntimeAndFenceValidation(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantPath := filepath.Join(provider.root, run.CloneIdentity)
-	info, err := os.Lstat(wantPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	device, inode, err := atomicfile.Identity(info)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if source.RepositoryPath() != wantPath || source.CloneIdentity() != run.CloneIdentity || source.Device() != device || source.Inode() != inode {
-		t.Fatalf("export identity path=%q clone=%q device=%d inode=%d", source.RepositoryPath(), source.CloneIdentity(), source.Device(), source.Inode())
+	if wantPath := filepath.Join(provider.root, run.CloneIdentity); source.RepositoryPath() != wantPath {
+		t.Fatalf("export path=%q, want %q", source.RepositoryPath(), wantPath)
 	}
 	if err := source.Close(); err != nil {
 		t.Fatal(err)

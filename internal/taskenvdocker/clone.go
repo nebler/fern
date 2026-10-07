@@ -858,7 +858,7 @@ func (p *Provider) ObserveUsage(ctx context.Context, run taskstore.BackgroundRun
 		return UsageObservation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: fmt.Sprintf("observed clone use is %d bytes, limit is %d", size, p.config.CloneObservedLimitBytes)}
 	}
 	e, _ := makeEvidence(evidence{Effect: "usage", Identity: run.CloneIdentity, Spec: digest, Status: "observed", Bytes: size, Limit: p.config.CloneObservedLimitBytes})
-	return UsageObservation{Evidence: e, CloneBytes: size, ObservedLimitBytes: p.config.CloneObservedLimitBytes, VolumeBytesAvailable: false}, nil
+	return UsageObservation{Evidence: e}, nil
 }
 
 // RemoveClone removes only an exactly attested clone after the exact runtime is absent.

@@ -200,10 +200,7 @@ type RuntimeIdentity struct {
 // UsageObservation is bounded monitoring evidence, not a filesystem quota.
 // Docker local-volume usage is intentionally unavailable here.
 type UsageObservation struct {
-	Evidence             string
-	CloneBytes           int64
-	ObservedLimitBytes   int64
-	VolumeBytesAvailable bool
+	Evidence string
 }
 
 type evidence struct {

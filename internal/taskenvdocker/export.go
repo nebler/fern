@@ -18,13 +18,10 @@ import (
 type ExportSource struct {
 	noCopy noCopy
 
-	path          string
-	cloneIdentity string
-	device        uint64
-	inode         uint64
-	unlock        func() error
-	closeOnce     sync.Once
-	closeErr      error
+	path      string
+	unlock    func() error
+	closeOnce sync.Once
+	closeErr  error
 }
 
 type noCopy struct{}
@@ -34,15 +31,6 @@ func (*noCopy) Unlock() {}
 
 // RepositoryPath returns only the exact clone path authorized for export.
 func (source *ExportSource) RepositoryPath() string { return source.path }
-
-// CloneIdentity returns the immutable provider clone identity.
-func (source *ExportSource) CloneIdentity() string { return source.cloneIdentity }
-
-// Device returns the clone directory's stable Unix device identity.
-func (source *ExportSource) Device() uint64 { return source.device }
-
-// Inode returns the clone directory's stable Unix inode identity.
-func (source *ExportSource) Inode() uint64 { return source.inode }
 
 // Close releases the exact clone authority. It is safe to call more than once.
 func (source *ExportSource) Close() error {
@@ -112,7 +100,7 @@ func (p *Provider) AcquireExportSource(ctx context.Context, run taskstore.Backgr
 		p.lifecycle.mu.Unlock()
 		return nil, ErrProviderClosed
 	}
-	source := &ExportSource{path: filepath.Join(p.root, run.CloneIdentity), cloneIdentity: run.CloneIdentity, device: device, inode: inode, unlock: unlock}
+	source := &ExportSource{path: filepath.Join(p.root, run.CloneIdentity), unlock: unlock}
 	p.lifecycle.mu.Unlock()
 	return source, nil
 }
