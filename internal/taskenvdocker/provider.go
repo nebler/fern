@@ -159,7 +159,7 @@ type Provider struct {
 	imageLabels      map[string]string
 	http             *http.Client
 	lifecycle        *providerLifecycle
-	githubCredential githubCredentialLease
+	githubCredential githubCredentialCache
 	githubNow        func() time.Time
 }
 

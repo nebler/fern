@@ -162,7 +162,7 @@ func TestGitHubCredentialDeliveryRefreshAndRestart(t *testing.T) {
 		t.Fatal("did not refresh five minutes early")
 	}
 	// Reconstructed providers retain no credential lease.
-	p.githubCredential = githubCredentialLease{}
+	p.githubCredential = githubCredentialCache{}
 	refresh()
 	if *calls != 3 {
 		t.Fatal("restart reused credential")
