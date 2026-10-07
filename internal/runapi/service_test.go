@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebler/fern/internal/run"
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 )
@@ -56,9 +56,9 @@ func (s *commandStore) StopBackgroundRun(_ context.Context, p taskstore.StopBack
 	}
 	s.committed = true
 	s.current.RunID, s.current.StopReceiptID = p.RunID, 2
-	s.current.State = taskstore.BackgroundRunCanceling
+	s.current.State = rundomain.Canceling
 	if s.race {
-		s.current.State = taskstore.BackgroundRunCleanupRequired // advanced since the original commit
+		s.current.State = rundomain.CleanupRequired // advanced since the original commit
 	}
 	s.receipt = receiptFor(p.Claim, p.RunID, 2)
 	s.receipt.ResponseProjection = json.RawMessage(`{"run_id":"` + string(p.RunID) + `","state":"canceling"}`)
@@ -80,7 +80,7 @@ func setupService(t *testing.T) (*service, *commandStore, *stubVerifier, task.Ac
 	wakes := new(int)
 	s := &service{config: Config{WorkspaceID: testWorkspace, RepositoryRemote: "https://github.com/owner/repository", Store: store, Generator: task.NewSecureGenerator(), BaseVerifier: base,
 		Now: func() time.Time { return time.Unix(1750000000, 123456789) }, RunTimeout: time.Hour,
-		AvailableProfile: taskstore.BackgroundRunSourceProfile, SealPolicyVersion: "seal.v1",
+		AvailableProfile: rundomain.SourceProfile, SealPolicyVersion: "seal.v1",
 		Wake: func() {
 			if !store.committed {
 				t.Error("wake before commit")
@@ -89,7 +89,7 @@ func setupService(t *testing.T) (*service, *commandStore, *stubVerifier, task.Ac
 		},
 	}}
 	actor := task.ActorSnapshot{Type: task.ActorOpenCode, ID: "pc_owner", DisplayName: "Plugin", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "request"}
-	input := createIntent{Repository: "https://github.com/owner/repository", BaseOID: "0123456789abcdef0123456789abcdef01234567", Instruction: "Work\n\t<exact bytes> ", Profile: taskstore.BackgroundRunSourceProfile}
+	input := createIntent{Repository: "https://github.com/owner/repository", BaseOID: "0123456789abcdef0123456789abcdef01234567", Instruction: "Work\n\t<exact bytes> ", Profile: rundomain.SourceProfile}
 	return s, store, base, actor, input, wakes
 }
 
@@ -173,7 +173,7 @@ func TestCommitRaceReplayAndFailureDoNotWake(t *testing.T) {
 				case "stop":
 					var accepted stopAcceptance
 					accepted, err = s.Stop(context.Background(), actor, "key", ids.RunID)
-					if mode == "race" && (accepted.State != run.Canceling || !accepted.Replayed) {
+					if mode == "race" && (accepted.State != rundomain.Canceling || !accepted.Replayed) {
 						t.Fatalf("stop must project receipt: %+v", accepted)
 					}
 				case "seal":
@@ -207,7 +207,7 @@ func TestStopReplayValidatesOriginalReceipt(t *testing.T) {
 	store.found = true
 	s.config.Now = func() time.Time { panic("replay read clock") }
 	accepted, err := s.Stop(context.Background(), actor, "stop", ids.RunID)
-	if err != nil || accepted.State != run.Canceling || !accepted.Replayed {
+	if err != nil || accepted.State != rundomain.Canceling || !accepted.Replayed {
 		t.Fatalf("replay=%+v err=%v", accepted, err)
 	}
 	store.receipt.ResponseProjection = json.RawMessage(`{"run_id":"` + string(ids.RunID) + `","state":"result_ready"}`)

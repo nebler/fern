@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	runidentity "github.com/nebler/fern/internal/run"
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -23,11 +23,11 @@ func TestBackgroundRunAdmissionStopAndRestart(t *testing.T) {
 	}
 	run, err := store.GetBackgroundRun(context.Background(), testWorkspaceID(), admission.Run.RunID, params.Claim.Actor)
 	if err != nil || run.RunID != admission.Run.RunID || run.BaseOID != params.BaseSHA || run.ImageIdentity != params.ImageIdentity ||
-		run.Profile != BackgroundRunSourceProfile || run.Agent != params.Agent || !run.Deadline.Equal(params.Deadline.Truncate(time.Millisecond)) ||
-		run.State != BackgroundRunQueued || run.EffectPhase != "absent" {
+		run.Profile != rundomain.SourceProfile || run.Agent != params.Agent || !run.Deadline.Equal(params.Deadline.Truncate(time.Millisecond)) ||
+		run.State != rundomain.Queued || run.EffectPhase != "absent" {
 		t.Fatalf("background run = %+v, error = %v", run, err)
 	}
-	resources := runidentity.NewResources(run.RunID)
+	resources := rundomain.NewResources(run.RunID)
 	if !resources.Matches(run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity) {
 		t.Fatalf("admission did not derive run identities: %+v", run)
 	}
@@ -38,7 +38,7 @@ func TestBackgroundRunAdmissionStopAndRestart(t *testing.T) {
 	stopParams.Claim.Key = "run-stop"
 	stopParams.Claim.RequestHash = stopHash
 	stopped, err := store.StopBackgroundRun(context.Background(), stopParams)
-	if err != nil || stopped.Run.State != BackgroundRunFailed || stopped.Run.StopReceiptID == 0 || stopped.Run.StopReceiptID != stopped.Receipt.ID {
+	if err != nil || stopped.Run.State != rundomain.Failed || stopped.Run.StopReceiptID == 0 || stopped.Run.StopReceiptID != stopped.Receipt.ID {
 		t.Fatalf("stop = %+v, error = %v", stopped, err)
 	}
 	replay, err := store.StopBackgroundRun(context.Background(), stopParams)
@@ -56,7 +56,7 @@ func TestBackgroundRunAdmissionStopAndRestart(t *testing.T) {
 	store = openTestStore(t, path)
 	t.Cleanup(func() { _ = store.Close() })
 	persisted, err := store.GetBackgroundRun(context.Background(), testWorkspaceID(), run.RunID, params.Claim.Actor)
-	if err != nil || persisted.State != BackgroundRunFailed || persisted.Revision != 2 || persisted.LastError != BackgroundRunStoppedBeforeStart {
+	if err != nil || persisted.State != rundomain.Failed || persisted.Revision != 2 || persisted.LastError != BackgroundRunStoppedBeforeStart {
 		t.Fatalf("restarted run = %+v, error = %v", persisted, err)
 	}
 }
@@ -249,10 +249,10 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
 	run, err := startNextBackgroundRun(context.Background(), store, now)
-	if err != nil || run.RunID != first.RunID || run.State != BackgroundRunSettingUp || run.EffectPhase != BackgroundRunEffectProvisioning {
+	if err != nil || run.RunID != first.RunID || run.State != rundomain.SettingUp || run.EffectPhase != rundomain.Provisioning {
 		t.Fatalf("first start = %+v, error = %v", run, err)
 	}
-	continued, err := store.NextBackgroundRun(context.Background(), testWorkspaceID(), BackgroundRunSourceProfile)
+	continued, err := store.NextBackgroundRun(context.Background(), testWorkspaceID(), rundomain.SourceProfile)
 	if err != nil || continued.RunID != run.RunID || continued.Revision != run.Revision {
 		t.Fatalf("capacity-one next run = %+v, error=%v", continued, err)
 	}
@@ -270,7 +270,7 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 		BackgroundRunRef: ref, ContainerID: "aabbcc", ContainerStartedAt: "2026-08-31T12:01:00Z", RuntimeEpoch: 1,
 		HostPort: 49152, Evidence: "exact container inspect",
 	})
-	if err != nil || run.EffectPhase != BackgroundRunEffectProvisioning || run.ObservedContainerID != "aabbcc" {
+	if err != nil || run.EffectPhase != rundomain.Provisioning || run.ObservedContainerID != "aabbcc" {
 		t.Fatalf("runtime record = %+v, error = %v", run, err)
 	}
 	advanceBackgroundRef(&ref, run)
@@ -280,7 +280,7 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 		t.Fatalf("committed runtime was replaced: %v", err)
 	}
 	run, err = store.RecordBackgroundRunPromptRequestAttempted(context.Background(), ref)
-	if err != nil || run.State != BackgroundRunSettingUp || run.EffectPhase != BackgroundRunEffectPromptPending {
+	if err != nil || run.State != rundomain.SettingUp || run.EffectPhase != rundomain.PromptPending {
 		t.Fatalf("prompt fence = %+v, error = %v", run, err)
 	}
 	restartedAt := now.Add(2 * time.Minute)
@@ -301,19 +301,19 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 	stop.Claim.Key = "active-stop"
 	stop.Claim.RequestHash = sha256.Sum256([]byte("active-stop"))
 	stopped, err := store.StopBackgroundRun(context.Background(), stop)
-	if err != nil || stopped.Run.State != BackgroundRunCanceling || stopped.Run.EffectPhase != BackgroundRunEffectCleaning ||
+	if err != nil || stopped.Run.State != rundomain.Canceling || stopped.Run.EffectPhase != rundomain.Cleaning ||
 		stopped.Run.Revision != run.Revision+1 || stopped.Run.StopReceiptID == 0 {
 		t.Fatalf("active stop = %+v, error = %v", stopped, err)
 	}
 	if replay, replayErr := store.StopBackgroundRun(context.Background(), stop); replayErr != nil || !replay.Replayed || replay.Receipt.ID != stopped.Receipt.ID || string(replay.Receipt.ResponseProjection) != string(stopped.Receipt.ResponseProjection) {
 		t.Fatalf("active stop replay = %+v, error = %v", replay, replayErr)
 	}
-	if stopped.Run.EffectPhase != BackgroundRunEffectCleaning {
+	if stopped.Run.EffectPhase != rundomain.Cleaning {
 		t.Fatalf("active stop falsely terminalized run: %+v", stopped.Run)
 	}
 
 	stopRun, err := startNextBackgroundRun(context.Background(), store, stop.StoppedAt.Add(time.Second))
-	if err != nil || stopRun.RunID != stopped.Run.RunID || stopRun.State != BackgroundRunCanceling || stopRun.StopReceiptID == 0 {
+	if err != nil || stopRun.RunID != stopped.Run.RunID || stopRun.State != rundomain.Canceling || stopRun.StopReceiptID == 0 {
 		t.Fatalf("stopped next run = %+v, error = %v", stopRun, err)
 	}
 	// A coordinator that read the run before the stop committed holds a stale
@@ -331,7 +331,7 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 		BackgroundRunRef: cleanupRef, Reason: "background_run_stopped", Evidence: "writer inactive and resources absent",
 		CleanupProof: "route, container, volume, and clone absent",
 	})
-	if err != nil || final.State != BackgroundRunFailed || final.EffectPhase != BackgroundRunEffectCleanupComplete || final.LastError != "background_run_stopped" {
+	if err != nil || final.State != rundomain.Failed || final.EffectPhase != rundomain.CleanupComplete || final.LastError != "background_run_stopped" {
 		t.Fatalf("active finalization = %+v, error = %v", final, err)
 	}
 	if replay, replayErr := store.StopBackgroundRun(context.Background(), stop); replayErr != nil || !replay.Replayed || replay.Receipt.ID != stopped.Receipt.ID {
@@ -379,7 +379,7 @@ func TestBackgroundRunWorkProjectionAndPromptAttemptFenceSurviveRestart(t *testi
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
 	run, ref := advanceBackgroundRunToRuntime(t, store, now)
-	work, err := store.NextBackgroundRunWork(context.Background(), testWorkspaceID(), BackgroundRunSourceProfile)
+	work, err := store.NextBackgroundRunWork(context.Background(), testWorkspaceID(), rundomain.SourceProfile)
 	if err != nil || work.Run.Revision != ref.ExpectedRevision || work.Prompt != params.Prompt ||
 		!work.Run.Deadline.Equal(params.Deadline.Truncate(time.Millisecond)) {
 		t.Fatalf("next work = %+v, error=%v", work, err)
@@ -441,7 +441,7 @@ func TestBackgroundRunSystemTimeoutHasNoPluginReceipt(t *testing.T) {
 		t.Fatalf("stale timeout = %v", err)
 	}
 	timedOut, err := store.RequestBackgroundRunTimeout(context.Background(), backgroundRunRef(work.Run, now))
-	if err != nil || timedOut.State != BackgroundRunCleanupRequired || timedOut.EffectPhase != BackgroundRunEffectCleaning ||
+	if err != nil || timedOut.State != rundomain.CleanupRequired || timedOut.EffectPhase != rundomain.Cleaning ||
 		timedOut.TimeoutRequestedAt == nil || timedOut.StopReceiptID != 0 {
 		t.Fatalf("system timeout = %+v, error=%v", timedOut, err)
 	}
@@ -469,13 +469,13 @@ func TestBackgroundRunSystemTimeoutHasNoPluginReceipt(t *testing.T) {
 	final, err := store.FinalizeBackgroundRunFailure(context.Background(), FinalizeBackgroundRunFailureParams{
 		BackgroundRunRef: cleanupRef, Reason: "run_timeout", Evidence: "resources absent", CleanupProof: "exact timeout cleanup",
 	})
-	if err != nil || final.State != BackgroundRunFailed || final.LastError != "run_timeout" {
+	if err != nil || final.State != rundomain.Failed || final.LastError != "run_timeout" {
 		t.Fatalf("timeout finalization = %+v, error=%v", final, err)
 	}
 }
 
 func TestBackgroundRunCleanupFailuresPreservePhaseAndPermitRetry(t *testing.T) {
-	for index, state := range []BackgroundRunState{BackgroundRunCanceling, BackgroundRunCleanupRequired} {
+	for index, state := range []rundomain.State{rundomain.Canceling, rundomain.CleanupRequired} {
 		t.Run(string(state), func(t *testing.T) {
 			path := testDBPath(t)
 			store := openTestStore(t, path)
@@ -491,7 +491,7 @@ func TestBackgroundRunCleanupFailuresPreservePhaseAndPermitRetry(t *testing.T) {
 			failed, err := store.MarkBackgroundRunCleanupRequired(context.Background(), MarkBackgroundRunCleanupRequiredParams{
 				BackgroundRunRef: ref, Error: "cleanup observation unavailable",
 			})
-			if err != nil || failed.State != BackgroundRunCleanupRequired || failed.EffectPhase != BackgroundRunEffectCleaning ||
+			if err != nil || failed.State != rundomain.CleanupRequired || failed.EffectPhase != rundomain.Cleaning ||
 				failed.LastError != "cleanup observation unavailable" || failed.Revision != run.Revision+1 {
 				t.Fatalf("durable cleanup failure = %+v, error=%v", failed, err)
 			}
@@ -500,19 +500,19 @@ func TestBackgroundRunCleanupFailuresPreservePhaseAndPermitRetry(t *testing.T) {
 			}
 			store = openTestStore(t, path)
 			retry, err := startNextBackgroundRun(context.Background(), store, ref.Now.Add(time.Second))
-			if err != nil || retry.State != BackgroundRunCleanupRequired || retry.EffectPhase != BackgroundRunEffectCleaning || retry.Revision != failed.Revision {
+			if err != nil || retry.State != rundomain.CleanupRequired || retry.EffectPhase != rundomain.Cleaning || retry.Revision != failed.Revision {
 				t.Fatalf("cleanup retry run = %+v, error=%v", retry, err)
 			}
 		})
 	}
 }
 
-func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitBackgroundRunParams, state BackgroundRunState, now time.Time, n int) (BackgroundRun, BackgroundRunRef) {
+func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitBackgroundRunParams, state rundomain.State, now time.Time, n int) (BackgroundRun, BackgroundRunRef) {
 	t.Helper()
 	run, ref := advanceBackgroundRunToPrompt(t, store, params.ImageIdentity, now)
 	var err error
 	switch state {
-	case BackgroundRunCanceling:
+	case rundomain.Canceling:
 		stop := StopBackgroundRunParams{
 			WorkspaceID: testWorkspaceID(), RunID: run.RunID,
 			Claim:              params.Claim,
@@ -524,7 +524,7 @@ func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitBackgro
 		if _, err := store.StopBackgroundRun(context.Background(), stop); err != nil {
 			t.Fatal(err)
 		}
-	case BackgroundRunCleanupRequired:
+	case rundomain.CleanupRequired:
 		if _, err := store.MarkBackgroundRunCleanupRequired(context.Background(), MarkBackgroundRunCleanupRequiredParams{
 			BackgroundRunRef: ref, Error: "prompt admitted but coordinator unavailable",
 		}); err != nil {
@@ -534,7 +534,7 @@ func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitBackgro
 		t.Fatalf("unsupported cleanup state %s", state)
 	}
 	run, err = startNextBackgroundRun(context.Background(), store, ref.Now.Add(time.Second))
-	if err != nil || run.State != state || run.EffectPhase != BackgroundRunEffectCleaning {
+	if err != nil || run.State != state || run.EffectPhase != rundomain.Cleaning {
 		t.Fatalf("cleanup run = %+v, error=%v", run, err)
 	}
 	return run, backgroundRunRef(run, ref.Now.Add(2*time.Second))
@@ -550,8 +550,8 @@ func backgroundRunRef(run BackgroundRun, now time.Time) BackgroundRunRef {
 // startNextBackgroundRun mirrors one coordinator scan: read the next run and,
 // when it is queued, consume the provisioning slot.
 func startNextBackgroundRun(ctx context.Context, store *Store, now time.Time) (BackgroundRun, error) {
-	run, err := store.NextBackgroundRun(ctx, testWorkspaceID(), BackgroundRunSourceProfile)
-	if err != nil || run.State != BackgroundRunQueued {
+	run, err := store.NextBackgroundRun(ctx, testWorkspaceID(), rundomain.SourceProfile)
+	if err != nil || run.State != rundomain.Queued {
 		return run, err
 	}
 	return store.StartBackgroundRunProvisioning(ctx, backgroundRunRef(run, now))
@@ -561,7 +561,7 @@ func startNextBackgroundRunWork(ctx context.Context, store *Store, now time.Time
 	if _, err := startNextBackgroundRun(ctx, store, now); err != nil {
 		return BackgroundRunWork{}, err
 	}
-	return store.NextBackgroundRunWork(ctx, testWorkspaceID(), BackgroundRunSourceProfile)
+	return store.NextBackgroundRunWork(ctx, testWorkspaceID(), rundomain.SourceProfile)
 }
 
 func advanceBackgroundRunToPrompt(t *testing.T, store *Store, image string, now time.Time) (BackgroundRun, BackgroundRunRef) {

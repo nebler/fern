@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -32,7 +33,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		PolicyVersion: "background-retained.v1", APIContractVersion: "v1", AcceptedAt: now.Add(20 * time.Second),
 	}
 	sealed, err := store.SealBackgroundRun(context.Background(), seal)
-	if err != nil || sealed.Run.State != BackgroundRunCanceling || sealed.Run.EffectPhase != BackgroundRunEffectSealing ||
+	if err != nil || sealed.Run.State != rundomain.Canceling || sealed.Run.EffectPhase != rundomain.Sealing ||
 		sealed.Run.Seal == nil || sealed.Run.Seal.ResultID != seal.ResultID || sealed.Run.Seal.CommitEpochSeconds() != seal.AcceptedAt.Unix() {
 		t.Fatalf("seal admission = %+v, error=%v", sealed, err)
 	}
@@ -57,7 +58,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 
 	sealedWork, err := startNextBackgroundRunWork(context.Background(), store, seal.AcceptedAt.Add(2*time.Second))
 	sealedRun := sealedWork.Run
-	if err != nil || sealedRun.State != BackgroundRunCanceling || sealedRun.EffectPhase != BackgroundRunEffectSealing {
+	if err != nil || sealedRun.State != rundomain.Canceling || sealedRun.EffectPhase != rundomain.Sealing {
 		t.Fatal(err)
 	}
 	writerAt := seal.AcceptedAt.Add(3 * time.Second)
@@ -76,7 +77,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		Kind: WriterFenceRuntimeStopped, ContainerID: run.ObservedContainerID, ContainerStartedAt: run.ObservedContainerStartedAt,
 		RuntimeToken: "runtime-token", StoppedAt: &stoppedAt}}
 	writerInactive, err := store.RecordBackgroundRunWriterFence(context.Background(), writerParams)
-	if err != nil || writerInactive.EffectPhase != BackgroundRunEffectSealing || writerInactive.Revision != sealedRun.Revision+1 ||
+	if err != nil || writerInactive.EffectPhase != rundomain.Sealing || writerInactive.Revision != sealedRun.Revision+1 ||
 		writerInactive.WriterFence == nil || writerInactive.WriterFence.RuntimeToken != "runtime-token" {
 		t.Fatalf("writer fence = %+v, error=%v", writerInactive, err)
 	}
@@ -88,14 +89,14 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	// A failed pass records why on the run; the run stays sealing for the next
 	// pass, and a stale revision cannot record over it.
 	recovery, err := store.MarkBackgroundRunExportRecoveryRequired(context.Background(), backgroundRunRef(writerInactive, exportNow), "injected export interruption")
-	if err != nil || recovery.EffectPhase != BackgroundRunEffectSealing || recovery.LastError != "injected export interruption" {
+	if err != nil || recovery.EffectPhase != rundomain.Sealing || recovery.LastError != "injected export interruption" {
 		t.Fatalf("export recovery = %+v, error=%v", recovery, err)
 	}
 	if _, err := store.MarkBackgroundRunExportRecoveryRequired(context.Background(), backgroundRunRef(writerInactive, exportNow), "different"); !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("stale export recovery = %v", err)
 	}
 	reselected, err := startNextBackgroundRun(context.Background(), store, exportNow.Add(time.Second))
-	if err != nil || reselected.EffectPhase != BackgroundRunEffectSealing {
+	if err != nil || reselected.EffectPhase != rundomain.Sealing {
 		t.Fatalf("reselect failed export run = %+v, error=%v", reselected, err)
 	}
 	exportNow = exportNow.Add(2 * time.Second)
@@ -142,7 +143,7 @@ revision=revision+1,updated_at=updated_at+1 WHERE id=?`, run.RunID); err == nil 
 	}
 	commit := CommitBackgroundRunRetainedResultParams{BackgroundRunRef: backgroundRunRef(recovery, exportNow), MaterializationProof: materialProof}
 	committed, err := store.CommitBackgroundRunRetainedResult(context.Background(), commit)
-	if err != nil || committed.Run.State != BackgroundRunResultReady || committed.Run.EffectPhase != BackgroundRunEffectCleaning ||
+	if err != nil || committed.Run.State != rundomain.ResultReady || committed.Run.EffectPhase != rundomain.Cleaning ||
 		committed.Run.LastError != "" || committed.Result.State != ResultSealed || committed.Result.MaterializationSHA256 != materialProof ||
 		committed.Result.SealedAt == nil || !committed.Result.SealedAt.Equal(exportNow) || committed.Result.ManifestSHA256 != sha256.Sum256(artifactManifest) {
 		t.Fatalf("retained result commit = %+v, error=%v", committed, err)
@@ -162,13 +163,13 @@ revision=revision+1,updated_at=updated_at+1 WHERE id=?`, run.RunID); err == nil 
 	}
 	cleanupWork, err := startNextBackgroundRunWork(context.Background(), store, exportNow.Add(time.Second))
 	cleanupRun := cleanupWork.Run
-	if err != nil || cleanupRun.State != BackgroundRunResultReady || cleanupRun.EffectPhase != BackgroundRunEffectCleaning {
+	if err != nil || cleanupRun.State != rundomain.ResultReady || cleanupRun.EffectPhase != rundomain.Cleaning {
 		t.Fatal(err)
 	}
 	cleanupRef := backgroundRunRef(cleanupRun, exportNow.Add(2*time.Second))
 	failed, err := store.MarkBackgroundRunCleanupRequired(context.Background(), MarkBackgroundRunCleanupRequiredParams{
 		BackgroundRunRef: cleanupRef, Error: "container removal unavailable"})
-	if err != nil || failed.State != BackgroundRunResultReady || failed.EffectPhase != BackgroundRunEffectCleaning {
+	if err != nil || failed.State != rundomain.ResultReady || failed.EffectPhase != rundomain.Cleaning {
 		t.Fatalf("retained cleanup failure = %+v, error=%v", failed, err)
 	}
 	advanceBackgroundRef(&cleanupRef, failed)
@@ -176,7 +177,7 @@ revision=revision+1,updated_at=updated_at+1 WHERE id=?`, run.RunID); err == nil 
 	cleanupRun, err = store.CompleteBackgroundRunResultCleanup(context.Background(), CompleteBackgroundRunResultCleanupParams{
 		BackgroundRunRef: cleanupRef, CleanupProof: "all resources absent",
 	})
-	if err != nil || cleanupRun.EffectPhase != BackgroundRunEffectCleanupComplete {
+	if err != nil || cleanupRun.EffectPhase != rundomain.CleanupComplete {
 		t.Fatalf("retained cleanup completion = %+v, error=%v", cleanupRun, err)
 	}
 	projection, err := store.GetBackgroundRunResult(context.Background(), run.WorkspaceID, run.RunID, admission.Claim.Actor)

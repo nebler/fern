@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -122,7 +123,7 @@ func getResult(ctx context.Context, q queryRower, id task.ResultID) (Result, err
 // and must equal this selection; a repeated identical selection is a replay.
 // The artifact manifest is agent-derived content, so it is checked here.
 func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgroundRunSnapshotParams) (_ Result, err error) {
-	if p.ExpectedState != BackgroundRunCanceling || p.ExpectedPhase != BackgroundRunEffectSealing ||
+	if p.ExpectedState != rundomain.Canceling || p.ExpectedPhase != rundomain.Sealing ||
 		sha256.Sum256(p.ArtifactManifest) != p.ArtifactManifestSHA256 || !safeArtifactManifest(p.ArtifactManifest) ||
 		validExactTimestamp(p.CollectedAt) != nil || p.ChangeCount < 0 {
 		return Result{}, fmt.Errorf("%w: selected background snapshot", ErrInvalidInput)
@@ -171,7 +172,7 @@ changes_sha256,manifest_json,manifest_sha256,bundle_sha256,bundle_size,collected
 // MarkBackgroundRunExportRecoveryRequired records why the last export pass
 // failed. The run stays sealing; the next pass retries from the selection.
 func (s *Store) MarkBackgroundRunExportRecoveryRequired(ctx context.Context, ref BackgroundRunRef, reason string) (BackgroundRun, error) {
-	if ref.ExpectedState != BackgroundRunCanceling || ref.ExpectedPhase != BackgroundRunEffectSealing || !validBoundedText(reason, 1, 1000) {
+	if ref.ExpectedState != rundomain.Canceling || ref.ExpectedPhase != rundomain.Sealing || !validBoundedText(reason, 1, 1000) {
 		return BackgroundRun{}, fmt.Errorf("%w: export recovery reason", ErrInvalidInput)
 	}
 	return s.updateRun(ctx, ref, `last_error=?`, []any{reason}, "mark background export recovery")
@@ -182,7 +183,7 @@ func (s *Store) MarkBackgroundRunExportRecoveryRequired(ctx context.Context, ref
 // only after the retained result is durable. Caller cancellation cannot split
 // it once validation has completed.
 func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitBackgroundRunRetainedResultParams) (_ BackgroundRunRetainedResult, err error) {
-	if p.ExpectedState != BackgroundRunCanceling || p.ExpectedPhase != BackgroundRunEffectSealing ||
+	if p.ExpectedState != rundomain.Canceling || p.ExpectedPhase != rundomain.Sealing ||
 		p.MaterializationProof == ([32]byte{}) {
 		return BackgroundRunRetainedResult{}, fmt.Errorf("%w: retained result commit", ErrInvalidInput)
 	}
@@ -233,7 +234,7 @@ func (s *Store) GetBackgroundRunResult(ctx context.Context, workspaceID task.Wor
 	if err != nil {
 		return BackgroundRunResultProjection{}, err
 	}
-	if run.State != BackgroundRunResultReady || run.Seal == nil {
+	if run.State != rundomain.ResultReady || run.Seal == nil {
 		return BackgroundRunResultProjection{}, ErrInvalidState
 	}
 	result, err := s.GetResult(ctx, run.Seal.ResultID)

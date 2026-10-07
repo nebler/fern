@@ -14,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -29,7 +30,7 @@ func TestAdmissionReplaySurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
-	if first.Replayed || first.Run.State != BackgroundRunQueued || first.Run.EffectPhase != BackgroundRunEffectAbsent {
+	if first.Replayed || first.Run.State != rundomain.Queued || first.Run.EffectPhase != rundomain.Absent {
 		t.Fatalf("unexpected first admission: %+v", first)
 	}
 	if err := s.Close(); err != nil {
@@ -415,7 +416,7 @@ func testAdmission(n int, key, prompt string) AdmitBackgroundRunParams {
 		},
 		Prompt: prompt, RepositoryID: 987654321, RepositoryRemote: "https://github.com/owner/repository",
 		BaseSHA: task.GitOID("0123456789abcdef0123456789abcdef01234567"), Branch: "main",
-		Profile: BackgroundRunSourceProfile, EnvironmentSHA256: sha256.Sum256([]byte("{}")),
+		Profile: rundomain.SourceProfile, EnvironmentSHA256: sha256.Sum256([]byte("{}")),
 		ImageIdentity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
 		Agent:         "build", ModelProvider: "provider", Model: "model-1",
 		Deadline:           testTime.Add(time.Hour),

@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	runidentity "github.com/nebler/fern/internal/run"
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -87,7 +87,7 @@ func scanRun(row rowScanner) (BackgroundRun, error) {
 		return BackgroundRun{}, err
 	}
 	copy(run.EnvironmentSHA256[:], environmentHash)
-	resources := runidentity.NewResources(run.RunID)
+	resources := rundomain.NewResources(run.RunID)
 	run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity =
 		resources.Clone(), resources.Volume(), resources.Container(), resources.Endpoint()
 	run.Branch = nullableString(branch)

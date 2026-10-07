@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -18,7 +19,7 @@ const CreateBackgroundRunCommand = "run.create"
 // persisted.
 func (s *Store) AdmitBackgroundRun(ctx context.Context, p AdmitBackgroundRunParams) (_ Admission, err error) {
 	if p.Claim.Scope.CommandKind != CreateBackgroundRunCommand || p.Claim.Actor.Type != task.ActorOpenCode ||
-		p.Profile != BackgroundRunSourceProfile {
+		p.Profile != rundomain.SourceProfile {
 		return Admission{}, fmt.Errorf("%w: background run admission", ErrInvalidInput)
 	}
 	tx, release, err := s.beginWrite(ctx)

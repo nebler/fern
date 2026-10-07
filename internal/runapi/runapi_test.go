@@ -17,6 +17,7 @@ import (
 
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/pluginauth"
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 )
@@ -323,7 +324,7 @@ func TestRunAPIWakeFollowsDurableCreateAndStopCommitOnly(t *testing.T) {
 	fixture.handler.config.Wake = func() {
 		wakes.Add(1)
 		run, err := fixture.store.GetBackgroundRun(context.Background(), testWorkspace, response.RunID, fixture.actor)
-		if err != nil || (run.State != taskstore.BackgroundRunCanceling && run.State != taskstore.BackgroundRunFailed) {
+		if err != nil || (run.State != rundomain.Canceling && run.State != rundomain.Failed) {
 			t.Errorf("stop wake could not observe committed state: run=%+v error=%v", run, err)
 		}
 	}
@@ -392,8 +393,8 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 	manifest := sha256.Sum256([]byte("artifact manifest"))
 	bundle := sha256.Sum256([]byte("bundle"))
 	run := taskstore.BackgroundRun{RunID: runID, WorkspaceID: testWorkspace,
-		RepositoryRemote: "https://github.com/owner/repository", State: taskstore.BackgroundRunResultReady,
-		EffectPhase: taskstore.BackgroundRunEffectCleanupComplete, Seal: &taskstore.Seal{ResultID: resultID}}
+		RepositoryRemote: "https://github.com/owner/repository", State: rundomain.ResultReady,
+		EffectPhase: rundomain.CleanupComplete, Seal: &taskstore.Seal{ResultID: resultID}}
 	projection := taskstore.BackgroundRunResultProjection{Run: run,
 		Result: taskstore.Result{ID: resultID, RunID: runID, State: taskstore.ResultSealed, Outcome: task.ResultChanged, BaseSHA: testBase,
 			ResultCommit: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), TreeOID: task.GitOID("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
@@ -455,8 +456,8 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 		t.Fatalf("recovered retention projection=%v calls=%d", got, fixture.retained.calls.Load())
 	}
 
-	store.run.State = taskstore.BackgroundRunCanceling
-	store.run.EffectPhase = taskstore.BackgroundRunEffectSealing
+	store.run.State = rundomain.Canceling
+	store.run.EffectPhase = rundomain.Sealing
 	store.run.LastError = "retained artifact export retry required"
 	recovery := fixture.request(http.MethodGet, PathPrefix+"/"+string(runID)+"/result", "", "")
 	if recovery.Code != http.StatusServiceUnavailable || !strings.Contains(recovery.Body.String(), "recovery_required") {

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -87,8 +88,8 @@ func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams
 	if err != nil {
 		return BackgroundRunSealAdmission{}, err
 	}
-	if run.Revision != p.ExpectedRunRevision || run.EffectPhase != BackgroundRunEffectAdmitted ||
-		(run.State != BackgroundRunWorking && run.State != BackgroundRunNeedsYou && run.State != BackgroundRunUncertain) ||
+	if run.Revision != p.ExpectedRunRevision || run.EffectPhase != rundomain.Admitted ||
+		(run.State != rundomain.Working && run.State != rundomain.NeedsYou && run.State != rundomain.Uncertain) ||
 		run.Seal != nil || run.TimeoutRequestedAt != nil || run.StopReceiptID != 0 {
 		return BackgroundRunSealAdmission{}, ErrInvalidState
 	}
@@ -142,7 +143,7 @@ type RecordBackgroundRunWriterFenceParams struct {
 // committed runtime (a schema CHECK); the other kinds require that no runtime
 // was ever committed.
 func (s *Store) RecordBackgroundRunWriterFence(ctx context.Context, p RecordBackgroundRunWriterFenceParams) (BackgroundRun, error) {
-	if p.ExpectedState != BackgroundRunCanceling || p.ExpectedPhase != BackgroundRunEffectSealing {
+	if p.ExpectedState != rundomain.Canceling || p.ExpectedPhase != rundomain.Sealing {
 		return BackgroundRun{}, fmt.Errorf("%w: writer fence revision", ErrInvalidInput)
 	}
 	var stoppedAt any

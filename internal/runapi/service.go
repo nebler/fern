@@ -15,7 +15,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/nebler/fern/internal/run"
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
 )
@@ -62,12 +62,12 @@ type createAcceptance struct {
 }
 type stopAcceptance struct {
 	RunID    task.RunID
-	State    run.State
+	State    rundomain.State
 	Replayed bool
 }
 type sealAcceptance struct {
 	RunID               task.RunID
-	State               run.State
+	State               rundomain.State
 	ResultPhase         string
 	ResultID            task.ResultID
 	Committed, Replayed bool
@@ -115,7 +115,7 @@ func (s *service) notify(replayed bool) {
 
 func (s *service) Create(ctx context.Context, actor task.ActorSnapshot, key task.IdempotencyKey, input createIntent) (createAcceptance, error) {
 	var zero createAcceptance
-	if input.Repository != s.config.RepositoryRemote || input.Profile != run.SourceProfile || !validInstruction(input.Instruction) || !validBranchDisplay(input.Branch) {
+	if input.Repository != s.config.RepositoryRemote || input.Profile != rundomain.SourceProfile || !validInstruction(input.Instruction) || !validBranchDisplay(input.Branch) {
 		return zero, errInvalidCreate
 	}
 	base, err := task.ParseGitOID(input.BaseOID)
@@ -146,7 +146,7 @@ func (s *service) Create(ctx context.Context, actor task.ActorSnapshot, key task
 		}
 		return createAcceptance{current.RunID, true, true}, nil
 	}
-	if s.config.AvailableProfile != taskstore.BackgroundRunSourceProfile {
+	if s.config.AvailableProfile != rundomain.SourceProfile {
 		return zero, errProfileUnavailable
 	}
 	if err := s.config.BaseVerifier.Verify(ctx, base); err != nil {
@@ -218,11 +218,11 @@ func (s *service) mutationClaim(actor task.ActorSnapshot, key task.IdempotencyKe
 // stopReplay projects the original committed acceptance, not today's run state.
 func stopReplay(id task.RunID, current taskstore.BackgroundRun, receipt taskstore.Receipt) (stopAcceptance, error) {
 	var committed struct {
-		RunID task.RunID `json:"run_id"`
-		State run.State  `json:"state"`
+		RunID task.RunID      `json:"run_id"`
+		State rundomain.State `json:"state"`
 	}
 	if receipt.RunID != id || current.StopReceiptID != receipt.ID || json.Unmarshal(receipt.ResponseProjection, &committed) != nil || committed.RunID != id ||
-		(committed.State != run.Failed && committed.State != run.Canceling) {
+		(committed.State != rundomain.Failed && committed.State != rundomain.Canceling) {
 		return stopAcceptance{}, taskstore.ErrCorruptStore
 	}
 	return stopAcceptance{id, committed.State, true}, nil
@@ -258,7 +258,7 @@ func (s *service) Stop(ctx context.Context, actor task.ActorSnapshot, key task.I
 		return stopReplay(id, result.Run, result.Receipt)
 	}
 	s.notify(false)
-	return stopAcceptance{id, run.State(result.Run.State), false}, nil
+	return stopAcceptance{id, rundomain.State(result.Run.State), false}, nil
 }
 
 func (s *service) Seal(ctx context.Context, actor task.ActorSnapshot, key task.IdempotencyKey, id task.RunID) (sealAcceptance, error) {
@@ -284,9 +284,9 @@ func (s *service) Seal(ctx context.Context, actor task.ActorSnapshot, key task.I
 	if err != nil {
 		return zero, err
 	}
-	state, phase := run.Canceling, "seal_requested"
-	if admission.Run.State == taskstore.BackgroundRunResultReady {
-		state, phase = run.ResultReady, "ready"
+	state, phase := rundomain.Canceling, "seal_requested"
+	if admission.Run.State == rundomain.ResultReady {
+		state, phase = rundomain.ResultReady, "ready"
 	}
 	s.notify(admission.Replayed)
 	return sealAcceptance{admission.Run.RunID, state, phase, admission.Run.Seal.ResultID, true, admission.Replayed}, nil

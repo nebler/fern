@@ -18,7 +18,7 @@ import (
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/gitref"
 	"github.com/nebler/fern/internal/pluginauth"
-	runidentity "github.com/nebler/fern/internal/run"
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/strictjson"
 	"github.com/nebler/fern/internal/task"
 	"github.com/nebler/fern/internal/taskstore"
@@ -26,7 +26,7 @@ import (
 
 const (
 	PathPrefix             = "/fern/api/runs"
-	PluginOpenCodeProfile  = taskstore.BackgroundRunSourceProfile
+	PluginOpenCodeProfile  = rundomain.SourceProfile
 	maxCreateBodyBytes     = 32 << 10
 	maxEmptyBodyBytes      = 16
 	backgroundRunListLimit = 100
@@ -208,11 +208,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type sealProjection struct {
-	RunID       task.RunID        `json:"run_id"`
-	State       runidentity.State `json:"state"`
-	ResultPhase string            `json:"result_phase"`
-	ResultID    task.ResultID     `json:"result_id"`
-	Committed   bool              `json:"committed"`
+	RunID       task.RunID      `json:"run_id"`
+	State       rundomain.State `json:"state"`
+	ResultPhase string          `json:"result_phase"`
+	ResultID    task.ResultID   `json:"result_id"`
+	Committed   bool            `json:"committed"`
 }
 
 func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.RunID) {
@@ -281,9 +281,9 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 		writeStoreError(w, err)
 		return
 	}
-	if run.State != taskstore.BackgroundRunResultReady {
+	if run.State != rundomain.ResultReady {
 		// A sealing run records its last failed export pass as last_error.
-		if run.EffectPhase == taskstore.BackgroundRunEffectSealing && run.LastError != "" {
+		if run.EffectPhase == rundomain.Sealing && run.LastError != "" {
 			WriteError(w, http.StatusServiceUnavailable, "recovery_required", "The retained result requires recovery.")
 			return
 		}
@@ -303,7 +303,7 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.Acto
 		Artifact: retainedArtifactResponse{
 			"git_bundle_v1", digest(projection.Result.ManifestSHA256), digest(projection.Result.BundleSHA256), projection.Result.BundleBytes, digest(projection.Result.ManifestSHA256)},
 		Retention: retentionResponse{retained, retained},
-		Cleanup:   cleanupResponse{run.EffectPhase == taskstore.BackgroundRunEffectCleanupComplete},
+		Cleanup:   cleanupResponse{run.EffectPhase == rundomain.CleanupComplete},
 	})
 }
 
@@ -371,8 +371,8 @@ type createResponse struct {
 }
 
 type stopResponse struct {
-	RunID task.RunID        `json:"run_id"`
-	State runidentity.State `json:"state"`
+	RunID task.RunID      `json:"run_id"`
+	State rundomain.State `json:"state"`
 }
 
 func (h *Handler) create(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot) {
@@ -474,10 +474,10 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, actor task.Acto
 }
 
 func attachmentReady(run taskstore.BackgroundRun) bool {
-	active := run.State == taskstore.BackgroundRunSettingUp || run.State == taskstore.BackgroundRunWorking ||
-		run.State == taskstore.BackgroundRunNeedsYou || run.State == taskstore.BackgroundRunUncertain
+	active := run.State == rundomain.SettingUp || run.State == rundomain.Working ||
+		run.State == rundomain.NeedsYou || run.State == rundomain.Uncertain
 	// Provisioning reconciles the session before the prompt fence ends it.
-	ready := run.EffectPhase == taskstore.BackgroundRunEffectPromptPending || run.EffectPhase == taskstore.BackgroundRunEffectAdmitted
+	ready := run.EffectPhase == rundomain.PromptPending || run.EffectPhase == rundomain.Admitted
 	return active && ready && run.StopReceiptID == 0
 }
 
@@ -501,11 +501,11 @@ func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor task.ActorS
 }
 
 type runView struct {
-	ID         task.RunID                   `json:"id"`
-	State      taskstore.BackgroundRunState `json:"state"`
-	Repository string                       `json:"repository"`
-	Head       task.GitOID                  `json:"head"`
-	Branch     *string                      `json:"branch"`
+	ID         task.RunID      `json:"id"`
+	State      rundomain.State `json:"state"`
+	Repository string          `json:"repository"`
+	Head       task.GitOID     `json:"head"`
+	Branch     *string         `json:"branch"`
 	// Attachable is advisory, not a reservation; attach re-checks readiness.
 	Attachable bool `json:"attachable"`
 }

@@ -4,14 +4,14 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/nebler/fern/internal/run"
+	rundomain "github.com/nebler/fern/internal/run"
 	"github.com/nebler/fern/internal/task"
 )
 
 const StopBackgroundRunCommand = "run.stop"
 const BackgroundRunStoppedBeforeStart = "background_run_stopped_before_start"
 
-const backgroundRunResourceSpecVersion = run.ResourceSpecVersion
+const backgroundRunResourceSpecVersion = rundomain.ResourceSpecVersion
 
 // GetBackgroundRun reads one run. Plugin actors see only runs they created;
 // a foreign run reads as not found.
@@ -27,9 +27,9 @@ func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID task.Workspace
 
 // ReadBackgroundRunLifecycle returns the (state, phase) of one run for the
 // trusted in-process coordinator. It authorizes no actor.
-func (s *Store) ReadBackgroundRunLifecycle(ctx context.Context, workspaceID task.WorkspaceID, runID task.RunID) (BackgroundRunState, BackgroundRunEffectPhase, error) {
-	var state BackgroundRunState
-	var phase BackgroundRunEffectPhase
+func (s *Store) ReadBackgroundRunLifecycle(ctx context.Context, workspaceID task.WorkspaceID, runID task.RunID) (rundomain.State, rundomain.Phase, error) {
+	var state rundomain.State
+	var phase rundomain.Phase
 	if err := s.db.QueryRowContext(ctx, `SELECT state,effect_phase FROM runs WHERE workspace_id=? AND id=?`, workspaceID, runID).
 		Scan(&state, &phase); err != nil {
 		return "", "", fmt.Errorf("read run lifecycle: %w", err)
@@ -128,18 +128,18 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 	if err != nil {
 		return BackgroundRunStop{}, err
 	}
-	queuedStop := run.EffectPhase == BackgroundRunEffectAbsent
-	activeStop := run.EffectPhase == BackgroundRunEffectProvisioning || run.EffectPhase == BackgroundRunEffectPromptPending || run.EffectPhase == BackgroundRunEffectAdmitted
+	queuedStop := run.EffectPhase == rundomain.Absent
+	activeStop := run.EffectPhase == rundomain.Provisioning || run.EffectPhase == rundomain.PromptPending || run.EffectPhase == rundomain.Admitted
 	if run.StopReceiptID != 0 || (!queuedStop && !activeStop) {
 		return BackgroundRunStop{}, ErrInvalidState
 	}
-	stopState := BackgroundRunFailed
+	stopState := rundomain.Failed
 	if activeStop {
-		stopState = BackgroundRunCanceling
+		stopState = rundomain.Canceling
 	}
 	receipt, err := insertReceipt(ctx, tx, p.Claim, run.RunID, p.APIContractVersion, p.StoppedAt, struct {
-		RunID task.RunID         `json:"run_id"`
-		State BackgroundRunState `json:"state"`
+		RunID task.RunID      `json:"run_id"`
+		State rundomain.State `json:"state"`
 	}{run.RunID, stopState})
 	if err != nil {
 		return BackgroundRunStop{}, err

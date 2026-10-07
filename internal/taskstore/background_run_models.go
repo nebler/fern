@@ -31,8 +31,9 @@ type AdmitBackgroundRunParams struct {
 	AcceptedAt         time.Time
 }
 
-// Compatibility names expose the domain vocabulary without maintaining a
-// second enum. SQL representation stays in Store.
+// Compatibility names for packages outside taskstore that still spell the run
+// vocabulary through this package; taskstore and runapi use package run
+// directly. Remove once those callers do too.
 type BackgroundRunState = run.State
 type BackgroundRunEffectPhase = run.Phase
 
