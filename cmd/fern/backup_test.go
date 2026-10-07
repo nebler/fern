@@ -9,6 +9,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -150,7 +152,7 @@ func readRun(t *testing.T, database string) string {
 	return id
 }
 
-func TestBackupRoundTripEncryptsSecretsAndKeepsPreviousState(t *testing.T) {
+func TestBackupRoundTripEncryptsSecretsAndRefusesExistingState(t *testing.T) {
 	ctx := context.Background()
 	source := newBackupFixture(t)
 	source.seed(t, "a")
@@ -188,7 +190,7 @@ func TestBackupRoundTripEncryptsSecretsAndKeepsPreviousState(t *testing.T) {
 	// Restore onto a fresh host.
 	target := newBackupFixture(t)
 	target.options.stateDirectory = filepath.Join(t.TempDir(), ".fern")
-	if _, err := restoreBackup(ctx, target.options, output, []age.Identity{source.identity}, false); err != nil {
+	if _, err := restoreBackup(ctx, target.options, output, []age.Identity{source.identity}); err != nil {
 		t.Fatal(err)
 	}
 	state := target.options.stateDirectory
@@ -212,34 +214,24 @@ func TestBackupRoundTripEncryptsSecretsAndKeepsPreviousState(t *testing.T) {
 		t.Fatal("restore produced disposable state or a spurious previous copy")
 	}
 
-	// Restoring over live state requires --replace and keeps the replaced state.
+	// Restore never replaces existing state or configuration.
 	database := source.seed(t, "b")
-	if _, err := restoreBackup(ctx, source.options, output, []age.Identity{source.identity}, false); err == nil ||
-		!strings.Contains(err.Error(), "--replace") {
+	if _, err := restoreBackup(ctx, source.options, output, []age.Identity{source.identity}); err == nil ||
+		!strings.Contains(err.Error(), "Fern state exists") {
 		t.Fatalf("restore over live state = %v", err)
 	}
-	if _, err := restoreBackup(ctx, source.options, output, []age.Identity{source.identity}, true); err != nil {
+	if readRun(t, database) != "b" {
+		t.Fatal("refused restore changed live state")
+	}
+	if err := os.RemoveAll(source.options.stateDirectory); err != nil {
 		t.Fatal(err)
 	}
-	previous := source.options.stateDirectory + ".previous"
-	if readRun(t, database) != "a" || readRun(t, filepath.Join(previous, "tasks", "demo.db")) != "b" {
-		t.Fatal("replace did not activate the backup and keep the previous state")
+	if _, err := restoreBackup(ctx, source.options, output, []age.Identity{source.identity}); err == nil ||
+		!strings.Contains(err.Error(), source.options.configPath+" exists") {
+		t.Fatalf("restore over existing configuration = %v", err)
 	}
-	if !pathExists(filepath.Join(source.options.stateDirectory, "locks", "other.lock")) {
-		t.Fatal("restore did not carry the held lease files into the new state")
-	}
-	if !pathExists(source.options.configPath + ".previous") {
-		t.Fatal("restore did not keep the previous configuration")
-	}
-
-	if err := rollbackBackup(source.options); err != nil {
-		t.Fatal(err)
-	}
-	if readRun(t, database) != "b" || readRun(t, filepath.Join(previous, "tasks", "demo.db")) != "a" {
-		t.Fatal("rollback did not swap the previous state back")
-	}
-	if !pathExists(filepath.Join(source.options.stateDirectory, "locks", "other.lock")) {
-		t.Fatal("rollback lost the lease directory")
+	if pathExists(source.options.stateDirectory) {
+		t.Fatal("refused restore created state")
 	}
 }
 
@@ -255,9 +247,6 @@ func TestBackupRefusesWhileFernHoldsTheLease(t *testing.T) {
 		}
 		if _, err := createBackup(ctx, fixture.options, "demo", output, fixture.recipient); err == nil || !strings.Contains(err.Error(), "Fern must be stopped") {
 			t.Fatalf("backup with %s lease held = %v", name, err)
-		}
-		if err := rollbackBackup(fixture.options); err == nil {
-			t.Fatal("rollback without a previous state succeeded")
 		}
 		if err := lease.Release(); err != nil {
 			t.Fatal(err)
@@ -390,7 +379,7 @@ func TestBackupRestoreRejectsTamperedOrUnsafeArchives(t *testing.T) {
 	}
 	for name, test := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, err := restoreBackup(ctx, fixture.options, test.input, []age.Identity{test.identity}, false)
+			_, err := restoreBackup(ctx, fixture.options, test.input, []age.Identity{test.identity})
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("restore error = %v, want %q", err, test.want)
 			}
@@ -403,7 +392,7 @@ func TestBackupRestoreRejectsTamperedOrUnsafeArchives(t *testing.T) {
 			}
 		})
 	}
-	if _, err := restoreBackup(ctx, fixture.options, good, []age.Identity{fixture.identity}, false); err != nil {
+	if _, err := restoreBackup(ctx, fixture.options, good, []age.Identity{fixture.identity}); err != nil {
 		t.Fatalf("well-formed crafted backup rejected: %v", err)
 	}
 }
@@ -428,5 +417,78 @@ func TestBackupIncludedKeepsAuthorityAndDropsDisposableWork(t *testing.T) {
 		if got := backupIncluded(relative); got != want {
 			t.Errorf("backupIncluded(%q) = %v, want %v", relative, got, want)
 		}
+	}
+}
+
+// TestBackupCommandsRoundTripAHost drives `fern backup create` and `fern backup
+// restore` through the CLI with a real configuration, as an operator would when
+// moving a stopped host.
+func TestBackupCommandsRoundTripAHost(t *testing.T) {
+	root := t.TempDir()
+	repository := filepath.Join(root, "repository")
+	if err := os.MkdirAll(repository, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	example, err := os.ReadFile("../../fern.example.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	configuration := strings.Replace(string(example), "/srv/fern/repository", repository, 1)
+	configuration = strings.Replace(configuration, "sha256:REPLACE_WITH_QUALIFIED_LOCAL_IMAGE_ID", "sha256:"+strings.Repeat("b", 64), 1)
+	host := func(name string) backupOptions {
+		return backupOptions{
+			stateDirectory: filepath.Join(root, name, "home", ".fern"),
+			configPath:     filepath.Join(root, name, "etc", "fern.yaml"),
+			envPath:        filepath.Join(root, name, "etc", "fern.env"),
+		}
+	}
+	flags := func(options backupOptions) []string {
+		return []string{"--config", options.configPath, "--env-file", options.envPath, "--state-dir", options.stateDirectory}
+	}
+	source := backupFixture{options: host("source")}
+	source.seed(t, "a")
+	writeTestFile(t, source.options.configPath, configuration)
+	writeTestFile(t, source.options.envPath, "FERN_CONTROL_PASSWORD=secret-control-password-0123456789\n")
+
+	identity, err := age.GenerateX25519Identity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityPath := filepath.Join(root, "identity.txt")
+	writeTestFile(t, identityPath, identity.String()+"\n")
+	output := filepath.Join(root, "fern.backup")
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	create := append([]string{"backup", "create"}, flags(source.options)...)
+	create = append(create, "--recipient", identity.Recipient().String(), "--output", output)
+	if err := run(create, log); err != nil {
+		t.Fatal(err)
+	}
+	if err := run(create, log); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("second backup create = %v", err)
+	}
+
+	target := host("target")
+	restore := append([]string{"backup", "restore"}, flags(target)...)
+	restore = append(restore, "--identity", identityPath, "--input", output)
+	if err := run(restore, log); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"github-app/app-credentials.json", "tasks/demo-background/runtime/background-runs/host.key"} {
+		if readTestFile(t, filepath.Join(target.stateDirectory, path)) != readTestFile(t, filepath.Join(source.options.stateDirectory, path)) {
+			t.Fatalf("restored %s differs", path)
+		}
+	}
+	if readTestFile(t, target.configPath) != configuration || readTestFile(t, target.envPath) != readTestFile(t, source.options.envPath) {
+		t.Fatal("restored configuration differs")
+	}
+	if got := readRun(t, filepath.Join(target.stateDirectory, "tasks", "demo.db")); got != "a" {
+		t.Fatalf("restored run = %q", got)
+	}
+	if pathExists(filepath.Join(target.stateDirectory, "tasks/demo-background/artifact-work")) {
+		t.Fatal("restore produced disposable scratch")
+	}
+	if err := run(restore, log); err == nil || !strings.Contains(err.Error(), "Fern state exists") {
+		t.Fatalf("restore over a restored host = %v", err)
 	}
 }

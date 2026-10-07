@@ -66,7 +66,6 @@ var commandExamples = map[string]string{
 	"up":                 "fern up --config /etc/fern/fern.yaml",
 	"backup create":      "fern backup create --recipient age1... --output /srv/backups/fern.backup",
 	"backup restore":     "fern backup restore --identity /secure/identity.txt --input /srv/backups/fern.backup",
-	"backup rollback":    "fern backup rollback",
 	"credentials export": "fern credentials export --recipient age1... --output /srv/backups/credentials.age",
 	"credentials import": "fern credentials import --identity /secure/identity.txt --input credentials.age",
 	"credentials rotate": "fern credentials rotate --identity /secure/identity.txt --input next.age --acknowledge-external-revocation",

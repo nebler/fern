@@ -104,9 +104,8 @@ func runBackupCreate(args []string, _ *slog.Logger) error {
 }
 
 func runBackupRestore(args []string, _ *slog.Logger) error {
-	fs, options := backupFlags("backup restore", "Verify an encrypted backup and swap it into place, keeping the replaced state for rollback.")
+	fs, options := backupFlags("backup restore", "Verify an encrypted backup and install it on a host with no Fern state or configuration.")
 	input := fs.String("input", "", "encrypted backup file (required)")
-	replace := fs.Bool("replace", false, "replace existing Fern state and configuration (kept as *.previous)")
 	var identityPaths repeatedFlag
 	fs.Var(&identityPaths, "identity", "private age X25519 identity file (repeatable, required)")
 	if err := parseFlags(fs, args); err != nil {
@@ -124,29 +123,11 @@ func runBackupRestore(args []string, _ *slog.Logger) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
-	manifest, err := restoreBackup(ctx, *options, *input, identities, *replace)
+	manifest, err := restoreBackup(ctx, *options, *input, identities)
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(os.Stdout, "restored backup of %q created %s; Fern remains stopped\n", manifest.Workspace, manifest.CreatedAt.Format(time.RFC3339)); err != nil || !*replace {
-		return err
-	}
-	_, err = fmt.Fprintf(os.Stdout, "replaced state is kept as %s.previous; 'fern backup rollback' swaps it back\n", options.stateDirectory)
-	return err
-}
-
-func runBackupRollback(args []string, _ *slog.Logger) error {
-	fs, options := backupFlags("backup rollback", "Swap the state replaced by the last restore back into place.")
-	if err := parseFlags(fs, args); err != nil {
-		return err
-	}
-	if options.stateDirectory == "" {
-		return errors.New("cannot determine Fern state directory")
-	}
-	if err := rollbackBackup(*options); err != nil {
-		return err
-	}
-	_, err := fmt.Fprintf(os.Stdout, "swapped %s.previous back into place; running rollback again undoes it\n", options.stateDirectory)
+	_, err = fmt.Fprintf(os.Stdout, "restored backup of %q created %s; Fern remains stopped\n", manifest.Workspace, manifest.CreatedAt.Format(time.RFC3339))
 	return err
 }
 
@@ -420,20 +401,21 @@ func checkSQLite(ctx context.Context, path string) error {
 	return nil
 }
 
-func restoreBackup(ctx context.Context, options backupOptions, input string, identities []age.Identity, replace bool) (backupManifest, error) {
+// restoreBackup installs a verified backup on a host with no Fern state or
+// configuration. It never replaces existing files: an operator restoring over a
+// host must move or delete the old state and configuration first.
+func restoreBackup(ctx context.Context, options backupOptions, input string, identities []age.Identity) (backupManifest, error) {
 	state := filepath.Clean(options.stateDirectory)
 	live, err := hasLiveState(state)
 	if err != nil {
 		return backupManifest{}, err
 	}
-	if !replace {
-		if live {
-			return backupManifest{}, fmt.Errorf("Fern state exists at %s; pass --replace to replace it", state)
-		}
-		for _, target := range []string{options.configPath, options.envPath} {
-			if pathExists(target) {
-				return backupManifest{}, fmt.Errorf("%s exists; pass --replace to replace it", target)
-			}
+	if live {
+		return backupManifest{}, fmt.Errorf("Fern state exists at %s; move it aside or delete it before restoring", state)
+	}
+	for _, target := range []string{options.configPath, options.envPath} {
+		if pathExists(target) {
+			return backupManifest{}, fmt.Errorf("%s exists; move it aside or delete it before restoring", target)
 		}
 	}
 	file, err := os.Open(input)
@@ -472,12 +454,12 @@ func restoreBackup(ctx context.Context, options backupOptions, input string, ide
 	}
 	defer leases.release()
 
-	// The held lease files move into the new state so the lease stays in force.
-	steps := []renameStep{{filepath.Join(state, "locks"), filepath.Join(stagedState, "locks")}}
-	if live {
-		steps = append(steps, replaceSteps(state, stagedState)...)
-	} else {
-		steps = append(steps, renameStep{state, state + ".discard"}, renameStep{stagedState, state})
+	// The held lease files move into the new state so the lease stays in force;
+	// the old directory holds nothing else and is discarded.
+	steps := []renameStep{
+		{filepath.Join(state, "locks"), filepath.Join(stagedState, "locks")},
+		{state, state + ".discard"},
+		{stagedState, state},
 	}
 	files := map[string]string{options.configPath: backupConfigEntry, options.envPath: backupEnvEntry}
 	for target, entry := range files {
@@ -497,7 +479,7 @@ func restoreBackup(ctx context.Context, options backupOptions, input string, ide
 			return manifest, err
 		}
 		defer os.Remove(incoming)
-		steps = append(steps, replaceSteps(target, incoming)...)
+		steps = append(steps, renameStep{incoming, target})
 	}
 	return manifest, applyRenames(steps)
 }
@@ -610,48 +592,13 @@ func validBackupEntry(name string) bool {
 		!strings.HasPrefix(relative, "../") && relative != ".."
 }
 
-func rollbackBackup(options backupOptions) error {
-	state := filepath.Clean(options.stateDirectory)
-	if !pathExists(state + ".previous") {
-		return fmt.Errorf("no previous state to roll back to at %s.previous", state)
-	}
-	leases, err := acquireBackupLeases(state, "")
-	if err != nil {
-		return err
-	}
-	defer leases.release()
-	var steps []renameStep
-	if !pathExists(filepath.Join(state+".previous", "locks")) {
-		steps = append(steps, renameStep{filepath.Join(state, "locks"), filepath.Join(state+".previous", "locks")})
-	}
-	for _, target := range []string{state, options.configPath, options.envPath} {
-		if pathExists(target + ".previous") {
-			steps = append(steps, renameStep{target, target + ".swap"}, renameStep{target + ".previous", target}, renameStep{target + ".swap", target + ".previous"})
-		}
-	}
-	return applyRenames(steps)
-}
-
 type renameStep struct{ from, to string }
-
-// replaceSteps installs incoming at target, keeping the current target as
-// target.previous and discarding an older previous copy only on success.
-func replaceSteps(target, incoming string) []renameStep {
-	var steps []renameStep
-	if pathExists(target + ".previous") {
-		steps = append(steps, renameStep{target + ".previous", target + ".discard"})
-	}
-	if pathExists(target) {
-		steps = append(steps, renameStep{target, target + ".previous"})
-	}
-	return append(steps, renameStep{incoming, target})
-}
 
 // applyRenames performs the renames in order, undoing completed ones if any
 // fails, then removes discarded copies. Steps whose source is absent are skipped.
 func applyRenames(steps []renameStep) error {
 	for _, step := range steps {
-		if strings.HasSuffix(step.to, ".discard") || strings.HasSuffix(step.to, ".swap") {
+		if strings.HasSuffix(step.to, ".discard") {
 			if err := os.RemoveAll(step.to); err != nil {
 				return err
 			}
