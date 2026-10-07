@@ -86,7 +86,7 @@ removes it and waits for admitted forwarding to exit before writer teardown.
 2. Apply `config.ValidateBootstrap`.
 3. Bind remote, operator, and live-run listeners.
 4. Acquire the host-local repository-name lease.
-5. Open the workspace SQLite database (store schema 12), which also holds
+5. Open the workspace SQLite database (the `store` schema), which also holds
    devices and plugin authorizations.
 6. Compose control and plugin-authorization stores over it.
 7. If the installation ID is pending, block readiness without composing task
@@ -462,7 +462,7 @@ process-local memory as authority. Recovery rules include:
   commits;
 - wake coordinators only after durable admission commits.
 
-Taskstore schema is 9. This pre-release reset has
+The store schema is one pre-release baseline with
 no supported predecessor: older development state is rejected, never silently
 migrated or deleted. Preserve anything needed before explicitly starting with
 fresh state. Current-version restart recovery and backup/restore remain
@@ -549,7 +549,7 @@ ownership boundaries.
 | `internal/runapi` | run HTTP contract (plugin bearer; operator for list/get/attach), attachment admission, plus create/stop/seal policy, admission, replay, and post-commit notification |
 | `internal/coordinator` | serial run effect coordinator and recovery |
 | `cmd/fern` | CLI, composition, backup, credentials, process lifecycle |
-| `internal/store` | the SQLite database: schema 12, run/result authority and state machines |
+| `internal/store` | the SQLite database: schema, run/result authority and state machines |
 | `internal/artifact` | deterministic Git bundle creation, CAS, materialization, and CAS-only result binding with verified checkout acquisition |
 | `internal/docker` | disposable Docker resources, writer proof, container GitHub credential delivery |
 | `internal/opencode` | pinned disposable OpenCode client and observations; the Router's exact live target/session capabilities, request policy, shutdown, and fencing |

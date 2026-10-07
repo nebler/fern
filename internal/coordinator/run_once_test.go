@@ -222,7 +222,7 @@ func newScanFixture(t *testing.T) *scanFixture {
 	t.Cleanup(func() { _ = runStore.Close() })
 	id := func(prefix string, n int) string { return fmt.Sprintf("%s0198d34d-6a50-75fb-b1f2-%012x", prefix, n) }
 	workspace := domain.WorkspaceID(id("wsp_", 1))
-	if err = runStore.CreateWorkspace(context.Background(), store.Workspace{ID: workspace, Name: "test", State: store.WorkspaceActive, RepositoryPath: repo, GitHubAuthority: store.GitHubAuthorityAppBroker, InstallationID: 123, RepositoryID: 987654321, RepositoryFullName: "owner/repository", ImageDigest: scanImage, OpenCodeProtocol: "v2", RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: f.now}); err != nil {
+	if err = runStore.CreateWorkspace(context.Background(), store.Workspace{ID: workspace, Name: "test", State: store.WorkspaceActive, RepositoryPath: repo, GitHubAuthority: store.GitHubAuthorityAppBroker, InstallationID: 123, RepositoryID: 987654321, RepositoryFullName: "owner/repository", CreatedAt: f.now}); err != nil {
 		t.Fatal(err)
 	}
 	actor := domain.ActorSnapshot{Type: domain.ActorOpenCode, ID: "pc_owner", DisplayName: "OpenCode", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "req-1"}

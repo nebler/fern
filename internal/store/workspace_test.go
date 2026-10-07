@@ -52,10 +52,6 @@ func TestEnsureWorkspaceRejectsEveryBindingDrift(t *testing.T) {
 		{"installation", func(value *Workspace) { value.InstallationID++ }},
 		{"repository", func(value *Workspace) { value.RepositoryID++ }},
 		{"full name", func(value *Workspace) { value.RepositoryFullName = "owner/other" }},
-		{"image", func(value *Workspace) { value.ImageDigest = "sha256:other" }},
-		{"protocol", func(value *Workspace) { value.OpenCodeProtocol = "v3" }},
-		{"desired state", func(value *Workspace) { value.RuntimeDesiredState = "paused" }},
-		{"epoch", func(value *Workspace) { value.ReconciliationEpoch++ }},
 	}
 	for _, test := range mutations {
 		test := test
@@ -144,7 +140,6 @@ func testWorkspaceBinding() Workspace {
 	return Workspace{
 		ID: testWorkspaceID(), Name: "demo", State: WorkspaceActive,
 		RepositoryPath: "/srv/fern/workspaces/demo", GitHubAuthority: GitHubAuthorityAppBroker, InstallationID: 123, RepositoryID: 987654321,
-		RepositoryFullName: "owner/repository", ImageDigest: "sha256:image", OpenCodeProtocol: "v2",
-		RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: testTime,
+		RepositoryFullName: "owner/repository", CreatedAt: testTime,
 	}
 }

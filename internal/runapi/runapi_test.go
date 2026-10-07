@@ -459,7 +459,7 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
-	if err := runStore.CreateWorkspace(context.Background(), store.Workspace{ID: testWorkspace, Name: "demo", State: store.WorkspaceActive, RepositoryPath: "/srv/repo", GitHubAuthority: store.GitHubAuthorityAppBroker, InstallationID: 1, RepositoryID: 99, RepositoryFullName: "owner/repository", ImageDigest: "sha256:image", OpenCodeProtocol: "0.0.0-next-17444", RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: now}); err != nil {
+	if err := runStore.CreateWorkspace(context.Background(), store.Workspace{ID: testWorkspace, Name: "demo", State: store.WorkspaceActive, RepositoryPath: "/srv/repo", GitHubAuthority: store.GitHubAuthorityAppBroker, InstallationID: 1, RepositoryID: 99, RepositoryFullName: "owner/repository", CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	fixture := &apiFixture{store: runStore, actor: pluginActor("pc_owner"), verifier: &countingVerifier{}, retained: &retentionVerifier{}, route: &fakeRoute{}, path: path, now: now}

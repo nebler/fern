@@ -237,12 +237,9 @@ func ensureWorkspace(ctx context.Context, cfg config.Config, runStore *store.Sto
 	desired := store.Workspace{ID: candidateID, Name: cfg.Workspace.Name, State: store.WorkspaceActive,
 		RepositoryPath: cfg.Workspace.Repo, GitHubAuthority: store.GitHubAuthorityAppBroker,
 		InstallationID: domain.InstallationID(github.InstallationID), RepositoryID: domain.RepositoryID(github.Repository.ID),
-		RepositoryFullName: github.Repository.FullName, ImageDigest: cfg.Runs.BackgroundImageID,
-		OpenCodeProtocol: runapi.APIContractVersion, RuntimeDesiredState: "disposable", ReconciliationEpoch: 1,
-		CreatedAt: time.Now().UTC().Truncate(time.Millisecond)}
+		RepositoryFullName: github.Repository.FullName, CreatedAt: time.Now().UTC().Truncate(time.Millisecond)}
 	if existing, err := runStore.GetWorkspaceByName(ctx, cfg.Workspace.Name); err == nil {
-		desired.ID, desired.ImageDigest, desired.OpenCodeProtocol = existing.ID, existing.ImageDigest, existing.OpenCodeProtocol
-		desired.RuntimeDesiredState, desired.ReconciliationEpoch, desired.CreatedAt = existing.RuntimeDesiredState, existing.ReconciliationEpoch, existing.CreatedAt
+		desired.ID, desired.CreatedAt = existing.ID, existing.CreatedAt
 	} else if !errors.Is(err, store.ErrNotFound) {
 		return store.Workspace{}, err
 	}

@@ -388,8 +388,7 @@ func createTestWorkspace(t *testing.T, s *Store) {
 	err := s.CreateWorkspace(context.Background(), Workspace{
 		ID: testWorkspaceID(), Name: "demo", State: WorkspaceActive,
 		RepositoryPath: "/srv/fern/workspaces/demo", GitHubAuthority: GitHubAuthorityAppBroker, InstallationID: 123, RepositoryID: 987654321,
-		RepositoryFullName: "owner/repository", ImageDigest: "sha256:image", OpenCodeProtocol: "v2",
-		RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: testTime,
+		RepositoryFullName: "owner/repository", CreatedAt: testTime,
 	})
 	if err != nil {
 		t.Fatalf("create workspace: %v", err)

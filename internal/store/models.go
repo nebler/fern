@@ -24,24 +24,20 @@ func (authority GitHubAuthority) valid() bool {
 
 func (s WorkspaceState) valid() bool { return s == WorkspaceActive }
 
-// Workspace is the durable repository and runtime binding needed by task
+// Workspace is the durable repository and runtime binding needed by run
 // admission. It is created once and never transitions.
 type Workspace struct {
-	ID                  domain.WorkspaceID
-	Name                string
-	State               WorkspaceState
-	RepositoryPath      string
-	GitHubAuthority     GitHubAuthority
-	InstallationID      domain.InstallationID
-	RepositoryID        domain.RepositoryID
-	RepositoryFullName  string
-	ImageDigest         string
-	OpenCodeProtocol    string
-	RuntimeDesiredState string
-	ReconciliationEpoch uint64
-	Revision            int64
-	CreatedAt           time.Time
-	UpdatedAt           time.Time
+	ID                 domain.WorkspaceID
+	Name               string
+	State              WorkspaceState
+	RepositoryPath     string
+	GitHubAuthority    GitHubAuthority
+	InstallationID     domain.InstallationID
+	RepositoryID       domain.RepositoryID
+	RepositoryFullName string
+	Revision           int64
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
 }
 
 // Receipt is the durable acceptance of one idempotent run command, bound to

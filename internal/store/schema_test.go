@@ -51,7 +51,7 @@ func TestOtherSchemaVersionsRejectedWithoutMutation(t *testing.T) {
 }
 
 func TestSchemaIsPinned(t *testing.T) {
-	const expectedChecksum = "13c247c0f623c59b4081f3899aa46e452afeb316acf72eb914d5ed5e4ee62956"
+	const expectedChecksum = "6d455d4d88e0d17da35f41113528f020473ebb181d3bde0131e5cb8b2baeec93"
 	if sum := sha256.Sum256([]byte(schema)); hex.EncodeToString(sum[:]) != expectedChecksum {
 		t.Fatalf("schema checksum=%x; bump schemaVersion and update the pin", sum)
 	}

@@ -15,7 +15,7 @@ import (
 
 const workspaceSelect = `
 SELECT id,name,state,repository_path,github_authority,installation_id,repository_id,repository_full_name,
-       image_digest,opencode_protocol,runtime_desired_state,reconciliation_epoch,revision,created_at,updated_at
+       revision,created_at,updated_at
 FROM workspaces`
 
 // EnsureWorkspace creates a workspace once or returns the existing exact
@@ -60,12 +60,11 @@ func (s *Store) GetWorkspaceByName(ctx context.Context, name string) (Workspace,
 
 func scanWorkspace(row rowScanner) (Workspace, error) {
 	var workspace Workspace
-	var installationID, repositoryID, reconciliationEpoch int64
+	var installationID, repositoryID int64
 	var createdAt, updatedAt int64
 	err := row.Scan(
 		&workspace.ID, &workspace.Name, &workspace.State, &workspace.RepositoryPath,
-		&workspace.GitHubAuthority, &installationID, &repositoryID, &workspace.RepositoryFullName, &workspace.ImageDigest,
-		&workspace.OpenCodeProtocol, &workspace.RuntimeDesiredState, &reconciliationEpoch,
+		&workspace.GitHubAuthority, &installationID, &repositoryID, &workspace.RepositoryFullName,
 		&workspace.Revision, &createdAt, &updatedAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -76,7 +75,6 @@ func scanWorkspace(row rowScanner) (Workspace, error) {
 	}
 	workspace.InstallationID = domain.InstallationID(installationID)
 	workspace.RepositoryID = domain.RepositoryID(repositoryID)
-	workspace.ReconciliationEpoch = uint64(reconciliationEpoch)
 	workspace.CreatedAt = fromUnixMillis(createdAt)
 	workspace.UpdatedAt = fromUnixMillis(updatedAt)
 	return workspace, nil
@@ -109,12 +107,10 @@ func (s *Store) CreateWorkspace(ctx context.Context, w Workspace) error {
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO workspaces(
     id,name,state,repository_path,github_authority,installation_id,repository_id,
-    repository_full_name,image_digest,opencode_protocol,runtime_desired_state,
-    reconciliation_epoch,revision,created_at,updated_at
-) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+    repository_full_name,revision,created_at,updated_at
+) VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 		w.ID, w.Name, w.State, w.RepositoryPath, w.GitHubAuthority, w.InstallationID, w.RepositoryID,
-		w.RepositoryFullName, w.ImageDigest, w.OpenCodeProtocol, w.RuntimeDesiredState,
-		w.ReconciliationEpoch, 1, unixMillis(w.CreatedAt), unixMillis(w.CreatedAt))
+		w.RepositoryFullName, 1, unixMillis(w.CreatedAt), unixMillis(w.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("create workspace: %w", err)
 	}
@@ -132,9 +128,7 @@ func validateWorkspace(w Workspace) error {
 	if !w.State.valid() {
 		return fmt.Errorf("%w: workspace state", ErrInvalidInput)
 	}
-	if !validBoundedText(w.Name, 1, 200) || !validBoundedText(w.RepositoryFullName, 1, 512) ||
-		!validBoundedText(w.ImageDigest, 1, 256) || !validBoundedText(w.OpenCodeProtocol, 1, 128) ||
-		!validBoundedText(w.RuntimeDesiredState, 1, 64) {
+	if !validBoundedText(w.Name, 1, 200) || !validBoundedText(w.RepositoryFullName, 1, 512) {
 		return fmt.Errorf("%w: workspace text", ErrInvalidInput)
 	}
 	if !filepath.IsAbs(w.RepositoryPath) || filepath.Clean(w.RepositoryPath) != w.RepositoryPath || len(w.RepositoryPath) > 4096 {
@@ -142,7 +136,7 @@ func validateWorkspace(w Workspace) error {
 	}
 	if !w.GitHubAuthority.valid() ||
 		w.InstallationID == 0 || uint64(w.InstallationID) > math.MaxInt64 ||
-		w.RepositoryID == 0 || uint64(w.RepositoryID) > math.MaxInt64 || w.ReconciliationEpoch > math.MaxInt64 {
+		w.RepositoryID == 0 || uint64(w.RepositoryID) > math.MaxInt64 {
 		return fmt.Errorf("%w: SQLite integer range", ErrInvalidInput)
 	}
 	if err := validTimestamp(w.CreatedAt); err != nil {

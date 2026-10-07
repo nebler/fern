@@ -12,12 +12,12 @@
 // replay returns it, a changed hash conflicts. Resource names derive from the
 // run ID and are not stored.
 //
-// Schema 12 is one complete pre-release schema, not a migration chain. Open
+// The schema is one complete pre-release baseline, not a migration chain. Open
 // rejects incompatible versions rather than upgrading or deleting data, and
 // refuses symlinked or foreign-owned database paths. The database runs in WAL
 // mode with foreign keys and FULL synchronization.
 //
-// Package run owns state/phase vocabulary and classification; this package owns
+// Package domain owns state/phase vocabulary and classification; this package owns
 // durable representation and effect authority. IDs, timestamps, actor
 // snapshots, and external evidence come from callers: the store never calls
 // Docker, Git, OpenCode, or GitHub, and recorded bundle proofs are supplied

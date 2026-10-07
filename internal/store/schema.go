@@ -11,7 +11,7 @@ import (
 // predecessor schemas: Open applies schema to an empty database, opens a
 // database already at schemaVersion, and refuses every other version.
 // Incompatible development databases must be deleted and recreated.
-const schemaVersion = 12
+const schemaVersion = 13
 
 const schema = `CREATE TABLE workspaces (
     id TEXT PRIMARY KEY CHECK(
@@ -27,14 +27,10 @@ const schema = `CREATE TABLE workspaces (
     installation_id INTEGER NOT NULL CHECK(installation_id > 0),
     repository_id INTEGER NOT NULL UNIQUE CHECK(repository_id > 0),
     repository_full_name TEXT NOT NULL CHECK(length(CAST(repository_full_name AS BLOB)) BETWEEN 1 AND 512),
-    image_digest TEXT NOT NULL CHECK(length(CAST(image_digest AS BLOB)) BETWEEN 1 AND 256),
-    opencode_protocol TEXT NOT NULL CHECK(length(CAST(opencode_protocol AS BLOB)) BETWEEN 1 AND 128),
-    runtime_desired_state TEXT NOT NULL CHECK(length(CAST(runtime_desired_state AS BLOB)) BETWEEN 1 AND 64),
-    reconciliation_epoch INTEGER NOT NULL CHECK(reconciliation_epoch >= 0),
     revision INTEGER NOT NULL CHECK(revision >= 1),
     created_at INTEGER NOT NULL CHECK(created_at >= 0),
-    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at), github_authority TEXT NOT NULL DEFAULT 'github-app-broker'
-CHECK(github_authority='github-app-broker'),
+    updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
+    github_authority TEXT NOT NULL DEFAULT 'github-app-broker' CHECK(github_authority='github-app-broker'),
     UNIQUE(id, repository_id)
 ) STRICT;
 
@@ -229,7 +225,7 @@ BEGIN SELECT RAISE(ABORT,'result is immutable'); END;
 CREATE TRIGGER results_durable BEFORE DELETE ON results BEGIN SELECT RAISE(ABORT,'result is durable'); END;
 
 -- Paired browser devices and the operator credential identifier (package
--- control). Only the SHA-256 of a device bearer token is stored; the device ID
+-- auth). Only the SHA-256 of a device bearer token is stored; the device ID
 -- is its first 16 hex digits. Times are Unix nanoseconds.
 CREATE TABLE devices (
     token_sha256 TEXT PRIMARY KEY CHECK(length(token_sha256)=64 AND token_sha256 NOT GLOB '*[^0-9a-f]*'),
@@ -244,7 +240,7 @@ CREATE TABLE operator_credential (
     id TEXT NOT NULL
 ) STRICT;
 
--- Plugin device authorization (package pluginauth). Only domain-separated
+-- Plugin device authorization (package auth). Only domain-separated
 -- SHA-256 digests of the device and user codes are stored. Times are Unix
 -- nanoseconds. A credential lives and dies with its authorization.
 CREATE TABLE plugin_authorizations (

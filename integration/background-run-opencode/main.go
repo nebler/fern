@@ -509,8 +509,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 	if _, err := runStore.EnsureWorkspace(ctx, store.Workspace{
 		ID: workspaceID, Name: "serial-background", State: store.WorkspaceActive, RepositoryPath: repository,
 		GitHubAuthority: store.GitHubAuthorityAppBroker, InstallationID: 1, RepositoryID: 1,
-		RepositoryFullName: "fern-integration/background-run", ImageDigest: imageID, OpenCodeProtocol: opencode.Profile,
-		RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: now,
+		RepositoryFullName: "fern-integration/background-run", CreatedAt: now,
 	}); err != nil {
 		_ = runStore.Close()
 		return err
@@ -1058,9 +1057,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 	if _, err := runStore.EnsureWorkspace(ctx, store.Workspace{
 		ID: workspaceID, Name: "serial-background-fence", State: store.WorkspaceActive,
 		RepositoryPath: filepath.Join(root, "repository"), GitHubAuthority: store.GitHubAuthorityAppBroker,
-		InstallationID: 1, RepositoryID: 1, RepositoryFullName: "fern-integration/background-run",
-		ImageDigest: imageID, OpenCodeProtocol: opencode.Profile, RuntimeDesiredState: "running",
-		ReconciliationEpoch: 1, CreatedAt: acceptedAt,
+		InstallationID: 1, RepositoryID: 1, RepositoryFullName: "fern-integration/background-run", CreatedAt: acceptedAt,
 	}); err != nil {
 		return err
 	}
