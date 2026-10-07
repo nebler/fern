@@ -627,6 +627,14 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 	if current.State != taskstore.BackgroundRunWorking || loss.calls.Load() != 1 {
 		return fmt.Errorf("serial read-only recovery state=%s prompt_calls=%d", current.State, loss.calls.Load())
 	}
+	// Admission is durable before OpenCode starts executing; the active
+	// projection checked below only appears once the provider is called.
+	if err := waitFor(ctx, "serial provider call", func() (bool, error) {
+		stats, readErr := readStats(providerEndpoint)
+		return readErr == nil && stats.Calls == statsBefore.Calls+1, readErr
+	}); err != nil {
+		return err
+	}
 	attachment, active, err := route.IssueAttachment(current)
 	if err != nil || !active {
 		return fmt.Errorf("issue serial attachment active=%t error=%v", active, err)
@@ -636,12 +644,6 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 		return err
 	}
 	if err := verifySerialAttachment(current, route); err != nil {
-		return err
-	}
-	if err := waitFor(ctx, "serial provider call", func() (bool, error) {
-		stats, readErr := readStats(providerEndpoint)
-		return readErr == nil && stats.Calls == statsBefore.Calls+1, readErr
-	}); err != nil {
 		return err
 	}
 	statsAfter, err := readStats(providerEndpoint)
