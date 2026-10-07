@@ -35,7 +35,7 @@ func run(args []string, log *slog.Logger) error {
 	}
 	entry := lookupCommand(args[0])
 	if entry == nil {
-		return unknownCommand(args)
+		return unknownCommand(args[:1])
 	}
 	err := dispatchCommand(entry, args[1:], log)
 	if errors.Is(err, errHelpShown) {
@@ -61,7 +61,7 @@ func dispatchCommand(entry *command, args []string, log *slog.Logger) error {
 	}
 	sub := entry.subcommand(args[0])
 	if sub == nil {
-		return unknownCommand(append([]string{entry.name}, args...))
+		return unknownCommand([]string{entry.name, args[0]})
 	}
 	return sub.run(ctx, args[1:], log)
 }

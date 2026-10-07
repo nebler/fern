@@ -32,7 +32,7 @@ type command struct {
 }
 
 // commands is the single source of truth for routing, top-level usage text,
-// help dispatch, and typo suggestions.
+// and help dispatch.
 var commands = []command{
 	{
 		name: "init", summary: "Create a Background Run configuration",
@@ -102,24 +102,14 @@ func lookupSubcommand(parent, name string) *subcommand {
 	return entry.subcommand(name)
 }
 
-// groupedHelp renders the short help printed for 'fern <namespace> --help':
-// an overview line plus either the version form or one usage line per
-// subcommand.
+// groupedHelp renders the short help printed for 'fern <namespace> --help'
+// and 'fern help <namespace>': an overview line plus either the version form
+// or one usage line per subcommand.
 func groupedHelp(entry *command) string {
 	lines := []string{entry.overview, "", "Usage:"}
 	if len(entry.sub) == 0 {
 		lines = append(lines, "  fern "+entry.name)
 	}
-	for _, sub := range entry.sub {
-		lines = append(lines, fmt.Sprintf("  fern %s %s [flags]", entry.name, sub.name))
-	}
-	return strings.Join(lines, "\n")
-}
-
-// subcommandUsage renders the bare usage block printed for
-// 'fern help <namespace>'.
-func subcommandUsage(entry *command) string {
-	lines := []string{"Usage:"}
 	for _, sub := range entry.sub {
 		lines = append(lines, fmt.Sprintf("  fern %s %s [flags]", entry.name, sub.name))
 	}

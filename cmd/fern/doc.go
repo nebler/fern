@@ -1,6 +1,6 @@
 // Command fern is the executable composition root for Fern's disposable
 // Background Run control plane. It owns command dispatch (registry.go is the
-// single command table for dispatch, help, and suggestions), operator
+// single command table for dispatch and help), operator
 // workflows, service wiring, and process lifetime. Durable state transitions,
 // Docker ownership, artifact retention, and HTTP authorization stay in their
 // internal packages; user-facing command documentation is docs/usage.md.

@@ -102,7 +102,7 @@ func runHelp(args []string, dispatch func([]string) error) error {
 	}
 	if len(args) == 1 {
 		if entry := lookupCommand(args[0]); entry != nil && entry.run == nil && len(entry.sub) > 0 {
-			fmt.Fprintln(os.Stdout, subcommandUsage(entry))
+			fmt.Fprintln(os.Stdout, groupedHelp(entry))
 			return nil
 		}
 	}
@@ -114,63 +114,5 @@ func runHelp(args []string, dispatch func([]string) error) error {
 }
 
 func unknownCommand(args []string) error {
-	command := strings.Join(args, " ")
-	// Collapse multi-word invocations to the parent command unless the parent
-	// is a namespace with several subcommands, where the sub name may be the
-	// real typo target.
-	entry := lookupCommand(args[0])
-	if len(args) > 1 && (entry == nil || len(entry.sub) <= 1) {
-		command = args[0]
-	}
-	message := fmt.Sprintf("unknown command %q", command)
-	if suggestion := suggestCommand(command); suggestion != "" {
-		message += fmt.Sprintf("; did you mean %q?", suggestion)
-	}
-	return invocationError{message: message}
-}
-
-// suggestionCandidates lists every directly runnable command and every
-// two-level "parent sub" pair, in registry order.
-func suggestionCandidates() []string {
-	names := make([]string, 0, 2*len(commands))
-	for _, entry := range commands {
-		if entry.run != nil {
-			names = append(names, entry.name)
-		}
-		for _, sub := range entry.sub {
-			names = append(names, entry.name+" "+sub.name)
-		}
-	}
-	return names
-}
-
-func suggestCommand(input string) string {
-	best, distance := "", 3
-	for _, candidate := range suggestionCandidates() {
-		if current := editDistance(input, candidate); current < distance {
-			best, distance = candidate, current
-		}
-	}
-	return best
-}
-
-func editDistance(left, right string) int {
-	leftRunes, rightRunes := []rune(left), []rune(right)
-	previous := make([]int, len(rightRunes)+1)
-	for index := range previous {
-		previous[index] = index
-	}
-	for leftIndex, leftRune := range leftRunes {
-		current := make([]int, len(rightRunes)+1)
-		current[0] = leftIndex + 1
-		for rightIndex, rightRune := range rightRunes {
-			cost := 1
-			if leftRune == rightRune {
-				cost = 0
-			}
-			current[rightIndex+1] = min(current[rightIndex]+1, previous[rightIndex+1]+1, previous[rightIndex]+cost)
-		}
-		previous = current
-	}
-	return previous[len(rightRunes)]
+	return invocationError{message: fmt.Sprintf("unknown command %q", strings.Join(args, " "))}
 }
