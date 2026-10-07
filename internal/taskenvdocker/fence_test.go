@@ -1,6 +1,8 @@
 package taskenvdocker
 
 import (
+	"context"
+	"errors"
 	"testing"
 
 	runidentity "github.com/nebler/fern/internal/run"
@@ -72,4 +74,47 @@ func TestRuntimeFenceConstructionDoesNotProveWriterStopped(t *testing.T) {
 	if _, err := provider.RemoveClone(t.Context(), run, fence); err == nil {
 		t.Fatal("runtime fence bypassed fresh clone cleanup inspection")
 	}
+}
+
+func TestWriterFenceKindsGateContainerCleanup(t *testing.T) {
+	t.Run("created exact ID", func(t *testing.T) {
+		provider, _, run := preparedProvider(t)
+		created, err := provider.EnsureContainer(context.Background(), run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := provider.RemoveContainer(context.Background(), run, CreatedContainerAuthority(created.ContainerID)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("started rejects created authority", func(t *testing.T) {
+		provider, _, run := preparedProvider(t)
+		created, err := provider.EnsureContainer(context.Background(), run)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := provider.StartContainer(context.Background(), run, created.ContainerID); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := provider.RemoveContainer(context.Background(), run, CreatedContainerAuthority(created.ContainerID)); err == nil {
+			t.Fatal("started container accepted ID-only cleanup authority")
+		}
+	})
+	t.Run("NeverCreated lists renamed labels", func(t *testing.T) {
+		provider, docker, run := preparedProvider(t)
+		if _, err := provider.EnsureContainer(context.Background(), run); err != nil {
+			t.Fatal(err)
+		}
+		docker.info.Name = "/renamed-before-observation"
+		authority := NeverCreatedAuthority()
+		if _, err := provider.RemoveContainer(context.Background(), run, authority); !errors.Is(err, ErrIdentityMismatch) {
+			t.Fatalf("renamed NeverCreated container removal error=%v", err)
+		}
+		if _, err := provider.RemoveVolume(context.Background(), run, authority); !errors.Is(err, ErrIdentityMismatch) {
+			t.Fatalf("renamed NeverCreated volume cleanup error=%v", err)
+		}
+		if _, err := provider.RemoveClone(context.Background(), run, authority); !errors.Is(err, ErrIdentityMismatch) {
+			t.Fatalf("renamed NeverCreated clone cleanup error=%v", err)
+		}
+	})
 }

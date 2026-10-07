@@ -169,19 +169,39 @@ func TestGitHubCredentialDeliveryRefreshAndRestart(t *testing.T) {
 	}
 }
 
-func TestGitHubCredentialRejectsChangedRuntimeAfterMint(t *testing.T) {
-	p, d, run, _, _ := githubCredentialFixture(t)
-	source := p.config.GitHubTokens
-	p.config.GitHubTokens = credentialSourceFunc(func(ctx context.Context, id githubapp.RepositoryIdentity) (githubapp.InstallationToken, error) {
-		token, err := source.InstallationToken(ctx, id)
-		d.info.State.StartedAt = "2026-09-05T12:00:00.000000001Z"
-		return token, err
-	})
-	if err := p.RefreshGitHubCredentials(context.Background(), run); !errors.Is(err, ErrIdentityMismatch) {
-		t.Fatalf("error = %v", err)
-	}
-	if d.copies != 0 || d.execs != 0 {
-		t.Fatal("mutated changed runtime")
+func TestGitHubCredentialRejectsRuntimeChangedMidRefresh(t *testing.T) {
+	const restarted = "2026-09-05T12:00:00.000000001Z"
+	for _, test := range []struct {
+		name          string
+		afterMint     bool
+		copies, execs int
+	}{
+		{"after mint", true, 0, 0},
+		{"between staging and install", false, 1, 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p, d, run, _, _ := githubCredentialFixture(t)
+			if test.afterMint {
+				source := p.config.GitHubTokens
+				p.config.GitHubTokens = credentialSourceFunc(func(ctx context.Context, id githubapp.RepositoryIdentity) (githubapp.InstallationToken, error) {
+					token, err := source.InstallationToken(ctx, id)
+					d.info.State.StartedAt = restarted
+					return token, err
+				})
+			} else {
+				d.inspectHook = func() {
+					if d.copies != 0 {
+						d.info.State.StartedAt = restarted
+					}
+				}
+			}
+			if err := p.RefreshGitHubCredentials(context.Background(), run); !errors.Is(err, ErrIdentityMismatch) {
+				t.Fatalf("error = %v", err)
+			}
+			if d.copies != test.copies || d.execs != test.execs {
+				t.Fatalf("changed runtime was mutated: copies=%d execs=%d", d.copies, d.execs)
+			}
+		})
 	}
 }
 
@@ -269,20 +289,5 @@ func TestGitHubCredentialExpiredSourceAndCachedRuntimeAreRevalidated(t *testing.
 	}
 	if d.copies != 1 || d.execs != 1 || *calls != 1 {
 		t.Fatal("expired source token caused mutation")
-	}
-}
-
-func TestGitHubCredentialChangedRuntimeBetweenStagingAndInstall(t *testing.T) {
-	p, d, run, _, _ := githubCredentialFixture(t)
-	d.inspectHook = func() {
-		if d.copies != 0 {
-			d.info.State.StartedAt = "2026-09-05T12:00:00.000000001Z"
-		}
-	}
-	if err := p.RefreshGitHubCredentials(context.Background(), run); !errors.Is(err, ErrIdentityMismatch) {
-		t.Fatalf("error = %v", err)
-	}
-	if d.copies != 1 || d.execs != 0 {
-		t.Fatal("changed process received installation exec")
 	}
 }
