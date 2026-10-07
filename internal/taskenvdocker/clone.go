@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -18,6 +17,8 @@ import (
 	"github.com/nebler/fern/internal/taskstore"
 )
 
+// cloneMarker is the private authority binding a run to the exact clone
+// directory inode it created. It lives in Fern's private run root.
 type cloneMarker struct {
 	Version   int    `json:"version"`
 	Workspace string `json:"workspace"`
@@ -31,11 +32,6 @@ type cloneMarker struct {
 	Inode     uint64 `json:"inode"`
 }
 
-type cloneMarkerSnapshot struct {
-	marker                    cloneMarker
-	markerDevice, markerInode uint64
-}
-
 // EnsureClone creates or reconciles the exact full independent checkout.
 func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun) (_ Observation, resultErr error) {
 	digest, err := p.validateRun(run)
@@ -47,163 +43,183 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 		return Observation{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
+	// Host Git may inspect the clone only while no run container can write it.
+	// The clone lock keeps Fern from creating one until this call returns.
+	if err := p.requireContainerAbsent(ctx, run, digest, ""); err != nil {
+		return Observation{}, err
+	}
+	if err := p.admitCloneSource(ctx, run); err != nil {
+		return Observation{}, err
+	}
+	operation, cancel := context.WithTimeout(ctx, p.config.GitTimeout)
+	defer cancel()
 	path := filepath.Join(p.root, run.CloneIdentity)
-	markerPath := p.cloneMarkerPath(run)
-	_, statErr := os.Lstat(path)
-	if statErr == nil {
-		if err := p.requireContainerAbsent(ctx, run, digest, ""); err != nil {
-			return Observation{}, err
-		}
+	var size int64
+	status := "reconciled"
+	if _, statErr := os.Lstat(path); statErr == nil {
+		size, err = p.reconcileExistingClone(operation, run, digest, path)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return Observation{}, statErr
+	} else {
+		var recovered bool
+		status = "recovered"
+		size, recovered, err = p.recoverStagedClone(operation, run, digest, path)
+		if err == nil && !recovered {
+			status = "created"
+			size, err = p.createClone(operation, run, digest, path)
+		}
 	}
+	if err != nil {
+		return Observation{}, err
+	}
+	e, _ := makeEvidence(evidence{Effect: "clone", Identity: run.CloneIdentity, Spec: digest, Status: status, Detail: string(run.BaseOID), Bytes: size, Limit: p.config.CloneObservedLimitBytes})
+	return Observation{Evidence: e}, nil
+}
+
+// admitCloneSource checks the operator's configured source repository and the
+// clone filesystem before any clone is created or reconciled.
+func (p *Provider) admitCloneSource(ctx context.Context, run taskstore.BackgroundRun) error {
 	sourceBytes, err := treeSize(ctx, p.config.Repository)
 	if err != nil {
-		return Observation{}, fmt.Errorf("predict clone source size: %w", err)
+		return fmt.Errorf("predict clone source size: %w", err)
 	}
 	if sourceBytes > p.config.SourceSizeAdmissionBytes {
-		return Observation{}, fmt.Errorf("clone source admission predicts %d bytes, limit is %d", sourceBytes, p.config.SourceSizeAdmissionBytes)
+		return fmt.Errorf("clone source admission predicts %d bytes, limit is %d", sourceBytes, p.config.SourceSizeAdmissionBytes)
 	}
 	if err := p.rejectCriticalGitSymlinks(p.config.Repository); err != nil {
-		return Observation{}, fmt.Errorf("source Git paths are unsafe: %w", err)
+		return fmt.Errorf("source Git paths are unsafe: %w", err)
 	}
 	if err := p.attestSourceGitConfig(ctx, run.RepositoryRemote); err != nil {
-		return Observation{}, err
+		return err
 	}
 	available, err := diskAvailable(p.root)
 	if err != nil {
-		return Observation{}, fmt.Errorf("inspect clone disk availability: %w", err)
+		return fmt.Errorf("inspect clone disk availability: %w", err)
 	}
 	if available < p.config.DiskFreeAdmissionBytes {
-		return Observation{}, fmt.Errorf("clone disk admission requires %d bytes free, only %d available", p.config.DiskFreeAdmissionBytes, available)
+		return fmt.Errorf("clone disk admission requires %d bytes free, only %d available", p.config.DiskFreeAdmissionBytes, available)
 	}
+	return nil
+}
 
-	if statErr == nil {
-		size, err := p.attestClone(ctx, run, digest, path)
-		if err != nil {
-			return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: err.Error()}
-		}
-		e, _ := makeEvidence(evidence{Effect: "clone", Identity: run.CloneIdentity, Spec: digest, Status: "reconciled", Detail: string(run.BaseOID), Bytes: size, Limit: p.config.CloneObservedLimitBytes})
-		return Observation{Evidence: e}, nil
+// reconcileExistingClone attests a clone already at its canonical path.
+func (p *Provider) reconcileExistingClone(ctx context.Context, run taskstore.BackgroundRun, digest, path string) (int64, error) {
+	err := p.attestCloneMarker(run, digest, path)
+	var size int64
+	if err == nil {
+		size, err = p.attestRepository(ctx, run, path)
 	}
-	if _, err := os.Lstat(markerPath); err == nil {
-		snapshot, err := p.readCloneMarkerSnapshot(run, digest)
-		if err != nil {
-			return Observation{}, &IdentityError{Resource: "clone marker", Identity: run.CloneIdentity, Reason: err.Error()}
-		}
-		locations, unknown, err := p.findRecoverableClones(ctx, snapshot.marker)
-		if err != nil {
-			return Observation{}, err
-		}
-		if unknown || len(locations) > 1 {
-			return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "marker-bound clone inode has unknown or multiple recovery locations"}
-		}
-		if len(locations) == 1 {
-			location := locations[0]
-			if location.kind != cloneRecoveryStage {
-				return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "marker-bound clone is quarantined after interrupted cleanup"}
-			}
-			if err := p.requireContainerAbsent(ctx, run, digest, ""); err != nil {
-				return Observation{}, err
-			}
-			operation, cancel := context.WithTimeout(ctx, p.config.GitTimeout)
-			defer cancel()
-			size, err := p.attestRepository(operation, run, location.path)
-			if err != nil {
-				return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "staged recovery failed attestation: " + err.Error()}
-			}
-			if err := atomicfile.RenameNoReplace(location.path, path); err != nil {
-				return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "staged recovery publication failed: " + err.Error()}
-			}
-			if err := atomicfile.SyncDir(p.root); err != nil {
-				return Observation{}, err
-			}
-			if err := os.Remove(location.parent); err != nil {
-				return Observation{}, fmt.Errorf("remove recovered clone staging directory: %w", err)
-			}
-			e, _ := makeEvidence(evidence{Effect: "clone", Identity: run.CloneIdentity, Spec: digest, Status: "recovered", Detail: string(run.BaseOID), Bytes: size, Limit: p.config.CloneObservedLimitBytes})
-			return Observation{Evidence: e}, nil
-		}
-		if err := p.removeExactCloneMarker(run, digest, snapshot, snapshot.marker.Device, snapshot.marker.Inode); err != nil {
-			return Observation{}, fmt.Errorf("remove inode-free orphaned clone marker: %w", err)
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return Observation{}, err
+	if err != nil {
+		return 0, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: err.Error()}
 	}
+	return size, nil
+}
 
-	suffix := rand.Text()
-	stageRoot := filepath.Join(p.root, ".clone-stage-"+suffix)
+// recoverStagedClone finishes a publication interrupted after the marker was
+// written. It reports recovered=false, after dropping any orphaned marker,
+// when there is nothing to recover and a fresh clone must be created.
+func (p *Provider) recoverStagedClone(ctx context.Context, run taskstore.BackgroundRun, digest, path string) (size int64, recovered bool, err error) {
+	if _, err := os.Lstat(p.cloneMarkerPath(run)); errors.Is(err, os.ErrNotExist) {
+		return 0, false, nil
+	} else if err != nil {
+		return 0, false, err
+	}
+	marker, err := p.readCloneMarker(run, digest)
+	if err != nil {
+		return 0, false, &IdentityError{Resource: "clone marker", Identity: run.CloneIdentity, Reason: err.Error()}
+	}
+	locations, unknown, err := p.findRecoverableClones(ctx, marker)
+	if err != nil {
+		return 0, false, err
+	}
+	if unknown || len(locations) > 1 {
+		return 0, false, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "marker-bound clone inode has unknown or multiple recovery locations"}
+	}
+	if len(locations) == 0 {
+		if err := p.removeCloneMarker(run, digest, marker); err != nil {
+			return 0, false, fmt.Errorf("remove inode-free orphaned clone marker: %w", err)
+		}
+		return 0, false, nil
+	}
+	location := locations[0]
+	if location.kind != cloneRecoveryStage {
+		return 0, false, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "marker-bound clone is quarantined after interrupted cleanup"}
+	}
+	size, err = p.attestRepository(ctx, run, location.path)
+	if err != nil {
+		return 0, false, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "staged recovery failed attestation: " + err.Error()}
+	}
+	if err := atomicfile.RenameNoReplace(location.path, path); err != nil {
+		return 0, false, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "staged recovery publication failed: " + err.Error()}
+	}
+	if err := atomicfile.SyncDir(p.root); err != nil {
+		return 0, false, err
+	}
+	if err := os.Remove(location.parent); err != nil {
+		return 0, false, fmt.Errorf("remove recovered clone staging directory: %w", err)
+	}
+	return size, true, nil
+}
+
+// createClone clones the source into a private stage, normalizes and attests
+// it, writes its marker, and publishes it to path without replacement. A
+// failure before publication removes the stage.
+func (p *Provider) createClone(ctx context.Context, run taskstore.BackgroundRun, digest, path string) (_ int64, resultErr error) {
+	stageRoot := filepath.Join(p.root, ".clone-stage-"+rand.Text())
 	if err := os.Mkdir(stageRoot, 0o700); err != nil {
-		return Observation{}, fmt.Errorf("create clone staging directory: %w", err)
+		return 0, fmt.Errorf("create clone staging directory: %w", err)
 	}
 	stageInfo, err := os.Lstat(stageRoot)
 	if err != nil {
-		return Observation{}, err
+		return 0, err
 	}
-	stageLive := true
+	published := false
 	defer func() {
-		if stageLive {
-			resultErr = errors.Join(resultErr, removeCreatedTree(ctx, p.root, stageRoot, stageInfo))
+		if !published {
+			resultErr = errors.Join(resultErr, removeCreatedTree(p.root, stageRoot, stageInfo))
 		}
 	}()
 	stagedClone := filepath.Join(stageRoot, "clone")
-	operation, cancel := context.WithTimeout(ctx, p.config.GitTimeout)
-	defer cancel()
-	if _, err := p.git(operation, p.root, "clone", "--no-local", "--no-hardlinks", "--no-checkout", "--", p.config.Repository, stagedClone); err != nil {
-		return Observation{}, fmt.Errorf("create independent background clone: %w", err)
-	}
-	if err := p.rejectCriticalGitSymlinks(stagedClone); err != nil {
-		return Observation{}, err
+	if _, err := p.git(ctx, p.root, "clone", "--no-local", "--no-hardlinks", "--no-checkout", "--", p.config.Repository, stagedClone); err != nil {
+		return 0, fmt.Errorf("create independent background clone: %w", err)
 	}
 	for key, value := range map[string]string{"core.filemode": "true", "core.ignorecase": "false", "core.precomposeunicode": "false"} {
-		if _, err := p.git(operation, stagedClone, "config", "--local", key, value); err != nil {
-			return Observation{}, fmt.Errorf("normalize clone Git config: %w", err)
+		if _, err := p.git(ctx, stagedClone, "config", "--local", key, value); err != nil {
+			return 0, fmt.Errorf("normalize clone Git config: %w", err)
 		}
 	}
-	if err := p.attestGitConfig(operation, stagedClone, p.config.Repository); err != nil {
-		return Observation{}, err
+	if _, err := p.git(ctx, stagedClone, "checkout", "--detach", "--force", string(run.BaseOID)); err != nil {
+		return 0, fmt.Errorf("detach exact base: %w", err)
 	}
-	if err := p.requireReachableBase(operation, stagedClone, string(run.BaseOID)); err != nil {
-		return Observation{}, err
-	}
-	if _, err := p.git(operation, stagedClone, "checkout", "--detach", "--force", string(run.BaseOID)); err != nil {
-		return Observation{}, fmt.Errorf("detach exact base: %w", err)
-	}
-	if _, err := p.git(operation, stagedClone, "remote", "set-url", "origin", run.RepositoryRemote); err != nil {
-		return Observation{}, fmt.Errorf("set canonical origin: %w", err)
+	if _, err := p.git(ctx, stagedClone, "remote", "set-url", "origin", run.RepositoryRemote); err != nil {
+		return 0, fmt.Errorf("set canonical origin: %w", err)
 	}
 	if err := makeCloneWritable(stagedClone); err != nil {
-		return Observation{}, err
+		return 0, err
 	}
-	if _, err := p.attestRepository(operation, run, stagedClone); err != nil {
-		return Observation{}, err
+	size, err := p.attestRepository(ctx, run, stagedClone)
+	if err != nil {
+		return 0, err
 	}
 	stagedInfo, err := os.Lstat(stagedClone)
 	if err != nil {
-		return Observation{}, err
+		return 0, err
 	}
-	markerSnapshot, err := p.writeCloneMarker(run, digest, stagedInfo)
+	marker, err := p.writeCloneMarker(run, digest, stagedInfo)
 	if err != nil {
-		return Observation{}, err
+		return 0, err
 	}
 	if err := atomicfile.RenameNoReplace(stagedClone, path); err != nil {
-		device, inode, identityErr := atomicfile.Identity(stagedInfo)
-		markerErr := p.removeExactCloneMarker(run, digest, markerSnapshot, device, inode)
-		return Observation{}, errors.Join(fmt.Errorf("publish attested clone: %w", err), identityErr, markerErr)
+		return 0, errors.Join(fmt.Errorf("publish attested clone: %w", err), p.removeCloneMarker(run, digest, marker))
 	}
 	if err := atomicfile.SyncDir(p.root); err != nil {
-		return Observation{}, err
+		return 0, err
 	}
 	if err := os.Remove(stageRoot); err != nil {
-		return Observation{}, fmt.Errorf("remove clone staging directory: %w", err)
+		return 0, fmt.Errorf("remove clone staging directory: %w", err)
 	}
-	stageLive = false
-	size, err := p.attestClone(operation, run, digest, path)
-	if err != nil {
-		return Observation{}, err
-	}
-	e, _ := makeEvidence(evidence{Effect: "clone", Identity: run.CloneIdentity, Spec: digest, Status: "created", Detail: string(run.BaseOID), Bytes: size, Limit: p.config.CloneObservedLimitBytes})
-	return Observation{Evidence: e}, nil
+	published = true
+	return size, nil
 }
 
 func (p *Provider) cloneMarkerPath(run taskstore.BackgroundRun) string {
@@ -214,80 +230,38 @@ func expectedCloneMarker(run taskstore.BackgroundRun, digest string, device, ino
 	return cloneMarker{1, string(run.WorkspaceID), string(run.RunID), run.ImageIdentity, run.CloneIdentity, string(run.BaseOID), run.RepositoryRemote, digest, device, inode}
 }
 
-func (p *Provider) writeCloneMarker(run taskstore.BackgroundRun, digest string, info os.FileInfo) (cloneMarkerSnapshot, error) {
+func encodeCloneMarker(marker cloneMarker) []byte {
+	data, _ := json.Marshal(marker) // fixed struct of strings and integers
+	return append(data, '\n')
+}
+
+// writeCloneMarker publishes the marker for the clone directory info names. It
+// never replaces an existing marker.
+func (p *Provider) writeCloneMarker(run taskstore.BackgroundRun, digest string, info os.FileInfo) (cloneMarker, error) {
 	device, inode, err := atomicfile.Identity(info)
 	if err != nil {
-		return cloneMarkerSnapshot{}, err
+		return cloneMarker{}, err
 	}
-	data, err := json.Marshal(expectedCloneMarker(run, digest, device, inode))
-	if err != nil {
-		return cloneMarkerSnapshot{}, err
+	marker := expectedCloneMarker(run, digest, device, inode)
+	if err := atomicfile.WriteExclusive(p.cloneMarkerPath(run), encodeCloneMarker(marker), 0o600); err != nil {
+		return cloneMarker{}, fmt.Errorf("publish clone authority without replacement: %w", err)
 	}
-	data = append(data, '\n')
-	suffix := rand.Text()
-	temporary := filepath.Join(p.root, ".clone-marker-stage-"+suffix)
-	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return cloneMarkerSnapshot{}, fmt.Errorf("create staged clone authority: %w", err)
-	}
-	writeErr := func() error {
-		if _, err := file.Write(data); err != nil {
-			return err
-		}
-		return file.Sync()
-	}()
-	closeErr := file.Close()
-	if writeErr != nil || closeErr != nil {
-		_ = os.Remove(temporary)
-		return cloneMarkerSnapshot{}, errors.Join(writeErr, closeErr)
-	}
-	if err := atomicfile.RenameNoReplace(temporary, p.cloneMarkerPath(run)); err != nil {
-		_ = os.Remove(temporary)
-		return cloneMarkerSnapshot{}, fmt.Errorf("publish clone authority without replacement: %w", err)
-	}
-	if err := atomicfile.SyncDir(p.root); err != nil {
-		return cloneMarkerSnapshot{}, err
-	}
-	snapshot, err := p.readCloneMarkerSnapshot(run, digest)
-	if err != nil {
-		return cloneMarkerSnapshot{}, err
-	}
-	return snapshot, nil
+	return marker, nil
 }
 
+// readCloneMarker returns the run's marker, which must be byte-for-byte the
+// marker this run would write for the inode it names.
 func (p *Provider) readCloneMarker(run taskstore.BackgroundRun, digest string) (cloneMarker, error) {
-	snapshot, err := p.readCloneMarkerSnapshot(run, digest)
-	return snapshot.marker, err
-}
-
-func (p *Provider) readCloneMarkerSnapshot(run taskstore.BackgroundRun, digest string) (cloneMarkerSnapshot, error) {
-	path := p.cloneMarkerPath(run)
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o600 || info.Size() > maxEvidenceBytes {
-		return cloneMarkerSnapshot{}, errors.New("private clone authority is absent or unsafe")
-	}
-	data, err := os.ReadFile(path)
+	data, err := atomicfile.Read(p.cloneMarkerPath(run), maxEvidenceBytes)
 	if err != nil {
-		return cloneMarkerSnapshot{}, errors.New("private clone authority cannot be read")
-	}
-	after, err := os.Lstat(path)
-	if err != nil || !os.SameFile(info, after) {
-		return cloneMarkerSnapshot{}, errors.New("private clone authority changed while being read")
+		return cloneMarker{}, fmt.Errorf("read private clone authority: %w", err)
 	}
 	var marker cloneMarker
-	if err := json.Unmarshal(data, &marker); err != nil || marker.Device == 0 || marker.Inode == 0 {
-		return cloneMarkerSnapshot{}, errors.New("private clone authority is malformed")
+	if err := json.Unmarshal(data, &marker); err != nil || marker.Device == 0 || marker.Inode == 0 ||
+		!bytes.Equal(data, encodeCloneMarker(expectedCloneMarker(run, digest, marker.Device, marker.Inode))) {
+		return cloneMarker{}, errors.New("private clone authority does not match this run")
 	}
-	want, _ := json.Marshal(expectedCloneMarker(run, digest, marker.Device, marker.Inode))
-	want = append(want, '\n')
-	if !bytes.Equal(data, want) {
-		return cloneMarkerSnapshot{}, errors.New("private clone authority does not match")
-	}
-	markerDevice, markerInode, err := atomicfile.Identity(after)
-	if err != nil {
-		return cloneMarkerSnapshot{}, err
-	}
-	return cloneMarkerSnapshot{marker: marker, markerDevice: markerDevice, markerInode: markerInode}, nil
+	return marker, nil
 }
 
 func (p *Provider) attestCloneMarker(run taskstore.BackgroundRun, digest, clonePath string) error {
@@ -299,38 +273,25 @@ func (p *Provider) attestCloneMarker(run taskstore.BackgroundRun, digest, cloneP
 	if err != nil {
 		return errors.New("clone named by private authority is absent")
 	}
-	device, inode, err := atomicfile.Identity(info)
-	if err != nil || marker.Device != device || marker.Inode != inode {
+	if !sameCloneIdentity(info, marker) {
 		return errors.New("private clone authority names a different filesystem object")
 	}
 	return nil
 }
 
-func (p *Provider) removeExactCloneMarker(run taskstore.BackgroundRun, digest string, expected cloneMarkerSnapshot, cloneDevice, cloneInode uint64) error {
-	if expected.marker.Device != cloneDevice || expected.marker.Inode != cloneInode {
-		return errors.New("clone marker removal authority names a different clone inode")
-	}
-	current, err := p.readCloneMarkerSnapshot(run, digest)
+// removeCloneMarker removes the marker only while it is still expected.
+func (p *Provider) removeCloneMarker(run taskstore.BackgroundRun, digest string, expected cloneMarker) error {
+	current, err := p.readCloneMarker(run, digest)
 	if err != nil {
 		return err
 	}
 	if current != expected {
-		return errors.New("clone marker changed before exact removal")
+		return errors.New("clone marker changed before removal")
 	}
 	if err := os.Remove(p.cloneMarkerPath(run)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return atomicfile.SyncDir(p.root)
-}
-
-func (p *Provider) attestClone(ctx context.Context, run taskstore.BackgroundRun, digest, path string) (int64, error) {
-	if err := p.attestCloneMarker(run, digest, path); err != nil {
-		return 0, err
-	}
-	if err := p.requireContainerAbsent(ctx, run, digest, ""); err != nil {
-		return 0, err
-	}
-	return p.attestRepository(ctx, run, path)
 }
 
 func (p *Provider) attestRepository(ctx context.Context, run taskstore.BackgroundRun, path string) (int64, error) {
@@ -571,116 +532,6 @@ type boundedBuffer struct {
 	exceeded bool
 }
 
-type cloneRecoveryKind uint8
-
-const (
-	cloneRecoveryStage cloneRecoveryKind = iota + 1
-	cloneRecoveryQuarantine
-)
-
-type cloneRecoveryLocation struct {
-	kind   cloneRecoveryKind
-	path   string
-	parent string
-}
-
-func (p *Provider) findRecoverableClones(ctx context.Context, marker cloneMarker) ([]cloneRecoveryLocation, bool, error) {
-	if err := ctx.Err(); err != nil {
-		return nil, false, err
-	}
-	entries, err := os.ReadDir(p.root)
-	if err != nil {
-		return nil, false, err
-	}
-	var locations []cloneRecoveryLocation
-	unknown := false
-	for _, entry := range entries {
-		if err := ctx.Err(); err != nil {
-			return nil, false, err
-		}
-		path := filepath.Join(p.root, entry.Name())
-		info, err := entry.Info()
-		if err != nil {
-			return nil, false, err
-		}
-		if sameCloneIdentity(info, marker) {
-			if validRecoveryName(entry.Name(), ".clone-quarantine-") && entry.IsDir() {
-				locations = append(locations, cloneRecoveryLocation{kind: cloneRecoveryQuarantine, path: path, parent: p.root})
-			} else if entry.Name() != marker.Clone {
-				unknown = true
-			}
-		}
-		if !entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
-			continue
-		}
-		candidate := filepath.Join(path, "clone")
-		candidateInfo, err := os.Lstat(candidate)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, false, err
-		}
-		if !sameCloneIdentity(candidateInfo, marker) {
-			continue
-		}
-		if validRecoveryName(entry.Name(), ".clone-stage-") && candidateInfo.IsDir() && candidateInfo.Mode()&os.ModeSymlink == 0 {
-			locations = append(locations, cloneRecoveryLocation{kind: cloneRecoveryStage, path: candidate, parent: path})
-		} else {
-			unknown = true
-		}
-	}
-	known := make(map[string]bool, len(locations))
-	for _, location := range locations {
-		known[location.path] = true
-	}
-	err = filepath.WalkDir(p.root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if walkErr != nil {
-			return walkErr
-		}
-		if entry.Type()&os.ModeSymlink != 0 {
-			if entry.IsDir() {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !entry.IsDir() || path == p.root {
-			return nil
-		}
-		if known[path] {
-			return filepath.SkipDir
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return err
-		}
-		if sameCloneIdentity(info, marker) {
-			unknown = true
-			return filepath.SkipDir
-		}
-		return nil
-	})
-	if err != nil {
-		return nil, false, err
-	}
-	return locations, unknown, nil
-}
-
-func sameCloneIdentity(info os.FileInfo, marker cloneMarker) bool {
-	device, inode, err := atomicfile.Identity(info)
-	return err == nil && device == marker.Device && inode == marker.Inode
-}
-
-// validRecoveryName accepts only names this package generates: prefix plus
-// one crypto/rand.Text value.
-func validRecoveryName(name, prefix string) bool {
-	suffix, ok := strings.CutPrefix(name, prefix)
-	return ok && len(suffix) == 26 && strings.Trim(suffix, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567") == ""
-}
-
 func (b *boundedBuffer) Write(value []byte) (int, error) {
 	original := len(value)
 	remaining := b.limit - int64(b.Len())
@@ -743,97 +594,6 @@ func treeSize(ctx context.Context, root string) (int64, error) {
 	return total, err
 }
 
-func removeCreatedTree(ctx context.Context, root, path string, expected os.FileInfo) error {
-	suffix := rand.Text()
-	quarantine := filepath.Join(root, ".clone-quarantine-"+suffix)
-	if err := os.Rename(path, quarantine); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return fmt.Errorf("quarantine created clone tree: %w", err)
-	}
-	got, err := os.Lstat(quarantine)
-	if err != nil || !os.SameFile(expected, got) {
-		return errors.New("quarantined clone tree is not the created inode")
-	}
-	if err := removeCloneTree(ctx, root, quarantine); err != nil {
-		return err
-	}
-	return atomicfile.SyncDir(root)
-}
-
-func removeCloneTree(ctx context.Context, rootPath, path string) (resultErr error) {
-	relative, err := filepath.Rel(rootPath, path)
-	if err != nil || relative == "." || !filepath.IsLocal(relative) {
-		return errors.New("clone deletion target is outside its private root")
-	}
-	root, err := os.OpenRoot(rootPath)
-	if err != nil {
-		return err
-	}
-	defer func() { resultErr = errors.Join(resultErr, root.Close()) }()
-	return removeClonePath(ctx, root, relative)
-}
-
-func removeClonePath(ctx context.Context, root *os.Root, name string) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	info, err := root.Lstat(name)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return root.Remove(name)
-	}
-	directory, err := root.Open(name)
-	if err != nil {
-		return err
-	}
-	for {
-		if err := ctx.Err(); err != nil {
-			return errors.Join(err, directory.Close())
-		}
-		entries, readErr := directory.ReadDir(128)
-		for _, entry := range entries {
-			if err := ctx.Err(); err != nil {
-				return errors.Join(err, directory.Close())
-			}
-			child := filepath.Join(name, entry.Name())
-			childInfo, err := root.Lstat(child)
-			if errors.Is(err, os.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				return errors.Join(err, directory.Close())
-			}
-			if childInfo.IsDir() && childInfo.Mode()&os.ModeSymlink == 0 {
-				err = removeClonePath(ctx, root, child)
-			} else {
-				err = root.Remove(child)
-			}
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
-				return errors.Join(err, directory.Close())
-			}
-		}
-		if readErr != nil {
-			if !errors.Is(readErr, io.EOF) {
-				return errors.Join(readErr, directory.Close())
-			}
-			break
-		}
-	}
-	if err := directory.Close(); err != nil {
-		return err
-	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	return root.Remove(name)
-}
-
 // ObserveUsage returns bounded observed clone usage. This is monitoring
 // evidence, not a kernel-enforced quota; Docker local-volume usage is unknown.
 func (p *Provider) ObserveUsage(ctx context.Context, run taskstore.BackgroundRun) (_ UsageObservation, resultErr error) {
@@ -859,160 +619,4 @@ func (p *Provider) ObserveUsage(ctx context.Context, run taskstore.BackgroundRun
 	}
 	e, _ := makeEvidence(evidence{Effect: "usage", Identity: run.CloneIdentity, Spec: digest, Status: "observed", Bytes: size, Limit: p.config.CloneObservedLimitBytes})
 	return UsageObservation{Evidence: e}, nil
-}
-
-// RemoveClone removes only an exactly attested clone after the exact runtime is absent.
-func (p *Provider) RemoveClone(ctx context.Context, run taskstore.BackgroundRun, authority WriterFence) (_ Observation, resultErr error) {
-	digest, err := p.validateRunForCleanup(run)
-	if err != nil {
-		return Observation{}, err
-	}
-	if _, err := validateCleanupAuthority(authority); err != nil {
-		return Observation{}, err
-	}
-	unlock, err := p.acquireCloneLock(ctx, run.CloneIdentity)
-	if err != nil {
-		return Observation{}, err
-	}
-	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
-	if err := p.requireContainerAbsent(ctx, run, digest, authority.ContainerID()); err != nil {
-		return Observation{}, err
-	}
-	if err := p.requireVolumeAbsent(ctx, run, digest); err != nil {
-		return Observation{}, err
-	}
-	path := filepath.Join(p.root, run.CloneIdentity)
-	info, err := os.Lstat(path)
-	if errors.Is(err, os.ErrNotExist) {
-		if _, markerErr := os.Lstat(p.cloneMarkerPath(run)); markerErr == nil {
-			recovered, markerErr := p.finishMarkerBoundDeletion(ctx, run, digest)
-			if markerErr != nil {
-				if errors.Is(markerErr, context.Canceled) || errors.Is(markerErr, context.DeadlineExceeded) {
-					return Observation{}, markerErr
-				}
-				return Observation{}, &IdentityError{Resource: "clone marker", Identity: run.CloneIdentity, Reason: markerErr.Error()}
-			}
-			status := "absent"
-			if recovered {
-				status = "recovered"
-			}
-			e, _ := makeEvidence(evidence{Effect: "clone_remove", Identity: run.CloneIdentity, Spec: digest, Status: status})
-			return Observation{Evidence: e}, nil
-		} else if !errors.Is(markerErr, os.ErrNotExist) {
-			return Observation{}, markerErr
-		}
-		e, _ := makeEvidence(evidence{Effect: "clone_remove", Identity: run.CloneIdentity, Spec: digest, Status: "absent"})
-		return Observation{Evidence: e}, nil
-	}
-	if err != nil {
-		return Observation{}, err
-	}
-	if err := p.attestCloneDeletion(run, digest, path); err != nil {
-		return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: err.Error()}
-	}
-	suffix := rand.Text()
-	quarantine := filepath.Join(p.root, ".clone-quarantine-"+suffix)
-	if err := os.Rename(path, quarantine); err != nil {
-		return Observation{}, fmt.Errorf("quarantine clone before removal: %w", err)
-	}
-	quarantinedInfo, err := os.Lstat(quarantine)
-	if err != nil || !os.SameFile(info, quarantinedInfo) {
-		return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "renamed clone is not the attested inode"}
-	}
-	if err := p.attestCloneDeletion(run, digest, quarantine); err != nil {
-		return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "renamed clone failed re-attestation: " + err.Error()}
-	}
-	if err := removeCloneTree(ctx, p.root, quarantine); err != nil {
-		return Observation{}, err
-	}
-	if _, err := p.finishMarkerBoundDeletion(ctx, run, digest); err != nil {
-		return Observation{}, err
-	}
-	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
-		return Observation{}, errors.New("canonical clone path was replaced during removal and remains quarantined")
-	}
-	e, _ := makeEvidence(evidence{Effect: "clone_remove", Identity: run.CloneIdentity, Spec: digest, Status: "removed"})
-	return Observation{Evidence: e}, nil
-}
-
-func (p *Provider) finishMarkerBoundDeletion(ctx context.Context, run taskstore.BackgroundRun, digest string) (bool, error) {
-	snapshot, err := p.readCloneMarkerSnapshot(run, digest)
-	if err != nil {
-		return false, err
-	}
-	marker := snapshot.marker
-	locations, unknown, err := p.findRecoverableClones(ctx, marker)
-	if err != nil {
-		return false, err
-	}
-	if unknown || len(locations) > 1 {
-		return false, errors.New("marker-bound clone inode has unknown or multiple recovery locations")
-	}
-	recovered := len(locations) == 1
-	if recovered {
-		location := locations[0]
-		if err := p.attestCloneMarker(run, digest, location.path); err != nil {
-			return false, err
-		}
-		if err := removeCloneTree(ctx, p.root, location.path); err != nil {
-			return false, err
-		}
-		if location.kind == cloneRecoveryStage {
-			if err := os.Remove(location.parent); err != nil {
-				return false, fmt.Errorf("remove recovered staging parent: %w", err)
-			}
-		}
-		locations, unknown, err = p.findRecoverableClones(ctx, marker)
-		if err != nil {
-			return false, err
-		}
-	}
-	if unknown || len(locations) != 0 {
-		return false, errors.New("marker-bound clone inode remains after deletion")
-	}
-	if err := ctx.Err(); err != nil {
-		return false, err
-	}
-	if err := p.removeExactCloneMarker(run, digest, snapshot, marker.Device, marker.Inode); err != nil {
-		return false, err
-	}
-	return recovered, nil
-}
-
-func (p *Provider) attestCloneDeletion(run taskstore.BackgroundRun, digest, path string) error {
-	if err := p.attestCloneMarker(run, digest, path); err != nil {
-		return err
-	}
-	info, err := os.Lstat(path)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return errors.New("clone deletion target is not an exact directory")
-	}
-	return nil
-}
-
-func (p *Provider) acquireCloneAuthority(ctx context.Context, run taskstore.BackgroundRun, digest string) (func() error, error) {
-	unlock, present, err := p.acquireCloneAuthorityIfPresent(ctx, run, digest)
-	if err != nil {
-		return nil, err
-	}
-	if !present {
-		return nil, errors.Join(&IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "private clone authority is absent"}, unlock())
-	}
-	return unlock, nil
-}
-
-func (p *Provider) acquireCloneAuthorityIfPresent(ctx context.Context, run taskstore.BackgroundRun, digest string) (func() error, bool, error) {
-	unlock, err := p.acquireCloneLock(ctx, run.CloneIdentity)
-	if err != nil {
-		return nil, false, err
-	}
-	if _, err := os.Lstat(p.cloneMarkerPath(run)); errors.Is(err, os.ErrNotExist) {
-		return unlock, false, nil
-	} else if err != nil {
-		return nil, false, errors.Join(err, unlock())
-	}
-	if err := p.attestCloneDeletion(run, digest, filepath.Join(p.root, run.CloneIdentity)); err != nil {
-		return nil, false, errors.Join(&IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: err.Error()}, unlock())
-	}
-	return unlock, true, nil
 }

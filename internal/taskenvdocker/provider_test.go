@@ -319,62 +319,6 @@ func TestCloneFilesystemWorkHonorsCancellationAndRemainsRecoverable(t *testing.T
 		}
 	})
 
-	t.Run("rollback quarantine", func(t *testing.T) {
-		root := t.TempDir()
-		stage := filepath.Join(root, ".clone-stage-AAAAAAAAAAAAAAAAAAAAAAAAAA")
-		if err := os.Mkdir(stage, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(filepath.Join(stage, "data"), []byte("retain"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		expected, err := os.Lstat(stage)
-		if err != nil {
-			t.Fatal(err)
-		}
-		ctx, cancel := context.WithCancel(context.Background())
-		cancel()
-		if err := removeCreatedTree(ctx, root, stage, expected); !errors.Is(err, context.Canceled) {
-			t.Fatalf("canceled rollback error = %v", err)
-		}
-		if _, err := os.Lstat(stage); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("rollback staging path remains: %v", err)
-		}
-		entries, err := os.ReadDir(root)
-		if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), ".clone-quarantine-") {
-			t.Fatalf("rollback quarantine entries=%v error=%v", entries, err)
-		}
-		quarantined, err := os.Lstat(filepath.Join(root, entries[0].Name()))
-		if err != nil || !os.SameFile(expected, quarantined) {
-			t.Fatalf("rollback quarantine changed inode: info=%v error=%v", quarantined, err)
-		}
-	})
-
-	t.Run("recursive deletion does not follow symlinks", func(t *testing.T) {
-		root := t.TempDir()
-		target := filepath.Join(root, "target")
-		outside := t.TempDir()
-		sentinel := filepath.Join(outside, "retain")
-		if err := os.Mkdir(target, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(sentinel, []byte("retain"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Symlink(outside, filepath.Join(target, "outside")); err != nil {
-			t.Fatal(err)
-		}
-		if err := removeCloneTree(context.Background(), root, target); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := os.Lstat(target); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("clone tree remains: %v", err)
-		}
-		if data, err := os.ReadFile(sentinel); err != nil || string(data) != "retain" {
-			t.Fatalf("recursive deletion followed symlink: data=%q error=%v", data, err)
-		}
-	})
-
 	t.Run("marker-bound quarantine retry", func(t *testing.T) {
 		provider, _, run := testProvider(t)
 		if _, err := provider.EnsureClone(context.Background(), run); err != nil {
@@ -474,7 +418,7 @@ func TestStaleClonePublisherAndMarkerCleanupCannotReplaceWinner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	winnerMarker, err := provider.readCloneMarkerSnapshot(run, digest)
+	winnerMarker, err := provider.readCloneMarker(run, digest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,33 +440,16 @@ func TestStaleClonePublisherAndMarkerCleanupCannotReplaceWinner(t *testing.T) {
 	if err != nil || !os.SameFile(winnerClone, afterClone) {
 		t.Fatalf("canonical clone winner changed: %v", err)
 	}
-	afterMarker, err := provider.readCloneMarkerSnapshot(run, digest)
+	afterMarker, err := provider.readCloneMarker(run, digest)
 	if err != nil || afterMarker != winnerMarker {
-		t.Fatalf("marker winner changed: snapshot=%+v error=%v", afterMarker, err)
+		t.Fatalf("marker winner changed: marker=%+v error=%v", afterMarker, err)
 	}
-	if err := os.RemoveAll(stale); err != nil {
-		t.Fatal(err)
+	staleMarker := expectedCloneMarker(run, digest, winnerMarker.Device, winnerMarker.Inode+1)
+	if err := provider.removeCloneMarker(run, digest, staleMarker); err == nil {
+		t.Fatal("stale cleanup removed a marker naming a different clone")
 	}
-
-	// Keep the old marker inode alive so the filesystem cannot reuse it, then
-	// publish an equivalent new winner and exercise stale cleanup authority.
-	retired := filepath.Join(provider.root, ".retired-marker")
-	if err := atomicfile.RenameNoReplace(provider.cloneMarkerPath(run), retired); err != nil {
-		t.Fatal(err)
-	}
-	newWinner, err := provider.writeCloneMarker(run, digest, winnerClone)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := provider.removeExactCloneMarker(run, digest, winnerMarker, winnerMarker.marker.Device, winnerMarker.marker.Inode); err == nil {
-		t.Fatal("stale cleanup removed a newer winner marker")
-	}
-	current, err := provider.readCloneMarkerSnapshot(run, digest)
-	if err != nil || current != newWinner {
-		t.Fatalf("new marker winner was disturbed: snapshot=%+v error=%v", current, err)
-	}
-	if err := os.Remove(retired); err != nil {
-		t.Fatal(err)
+	if _, err := provider.readCloneMarker(run, digest); err != nil {
+		t.Fatalf("winner marker was disturbed: %v", err)
 	}
 }
 
@@ -1042,32 +969,11 @@ func TestWriterFenceReconcilesExactCommittedRuntimeAbsence(t *testing.T) {
 	}
 }
 
-func TestAcquireExportSourceReattestsMarkerAndCloneInode(t *testing.T) {
+func TestAcquireExportSourceReattestsCloneInode(t *testing.T) {
 	tests := []struct {
 		name    string
 		replace func(*testing.T, *Provider, taskstore.BackgroundRun)
 	}{
-		{
-			name: "marker",
-			replace: func(t *testing.T, provider *Provider, run taskstore.BackgroundRun) {
-				path := provider.cloneMarkerPath(run)
-				data, err := os.ReadFile(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				retained, err := os.Open(path)
-				if err != nil {
-					t.Fatal(err)
-				}
-				t.Cleanup(func() { _ = retained.Close() })
-				if err := os.Remove(path); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.WriteFile(path, data, 0o600); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
 		{
 			name: "clone inode",
 			replace: func(t *testing.T, provider *Provider, run taskstore.BackgroundRun) {

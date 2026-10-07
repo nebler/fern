@@ -77,7 +77,7 @@ func (p *Provider) AcquireExportSource(ctx context.Context, run taskstore.Backgr
 		}
 	}()
 
-	marker, info, device, inode, err := p.readExportClone(run, digest)
+	marker, err := p.readExportClone(run, digest)
 	if err != nil {
 		return nil, exportIdentityError(run, "private clone authority is not exact")
 	}
@@ -91,8 +91,7 @@ func (p *Provider) AcquireExportSource(ctx context.Context, run taskstore.Backgr
 	if err := p.attestExportRoot(); err != nil {
 		return nil, exportIdentityError(run, "private provider root changed")
 	}
-	current, finalInfo, finalDevice, finalInode, err := p.readExportClone(run, digest)
-	if err != nil || current != marker || !os.SameFile(info, finalInfo) || finalDevice != device || finalInode != inode {
+	if current, err := p.readExportClone(run, digest); err != nil || current != marker {
 		return nil, exportIdentityError(run, "clone authority changed during export acquisition")
 	}
 
@@ -131,21 +130,16 @@ func (p *Provider) attestExportRoot() error {
 	return nil
 }
 
-func (p *Provider) readExportClone(run taskstore.BackgroundRun, digest string) (cloneMarkerSnapshot, os.FileInfo, uint64, uint64, error) {
-	marker, err := p.readCloneMarkerSnapshot(run, digest)
+func (p *Provider) readExportClone(run taskstore.BackgroundRun, digest string) (cloneMarker, error) {
+	marker, err := p.readCloneMarker(run, digest)
 	if err != nil {
-		return cloneMarkerSnapshot{}, nil, 0, 0, err
+		return cloneMarker{}, err
 	}
-	path := filepath.Join(p.root, run.CloneIdentity)
-	info, err := os.Lstat(path)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return cloneMarkerSnapshot{}, nil, 0, 0, errors.New("clone is not an exact directory")
+	info, err := os.Lstat(filepath.Join(p.root, run.CloneIdentity))
+	if err != nil || !info.IsDir() || !sameCloneIdentity(info, marker) {
+		return cloneMarker{}, errors.New("clone is not the exact directory its private authority names")
 	}
-	device, inode, err := atomicfile.Identity(info)
-	if err != nil || marker.marker.Device != device || marker.marker.Inode != inode {
-		return cloneMarkerSnapshot{}, nil, 0, 0, errors.New("clone inode differs from private authority")
-	}
-	return marker, info, device, inode, nil
+	return marker, nil
 }
 
 func (p *Provider) requireExportWriterInactive(ctx context.Context, run taskstore.BackgroundRun, digest string, kind WriterFenceKind, fence WriterFence) error {
