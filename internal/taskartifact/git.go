@@ -16,8 +16,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/nebler/fern/internal/atomicfile"
 	"github.com/nebler/fern/internal/domain"
+	"github.com/nebler/fern/internal/safeio"
 )
 
 type sourceIdentity struct {
@@ -39,11 +39,11 @@ func (e *Engine) admitSource(ctx context.Context, repository string, base domain
 	if err != nil {
 		return identity, fmt.Errorf("%w: .git directory", ErrUnsafeSource)
 	}
-	identity.rootDevice, identity.rootInode, err = atomicfile.Identity(root)
+	identity.rootDevice, identity.rootInode, err = safeio.Identity(root)
 	if err != nil {
 		return identity, err
 	}
-	identity.gitDevice, identity.gitInode, err = atomicfile.Identity(gitInfo)
+	identity.gitDevice, identity.gitInode, err = safeio.Identity(gitInfo)
 	if err != nil {
 		return identity, err
 	}
@@ -213,8 +213,8 @@ func (e *Engine) checkSourceIdentity(ctx context.Context, repository string, bas
 	if err != nil {
 		return fmt.Errorf("%w: source disappeared", ErrUnsafeSource)
 	}
-	rootDevice, rootInode, _ := atomicfile.Identity(root)
-	gitDevice, gitInode, _ := atomicfile.Identity(gitInfo)
+	rootDevice, rootInode, _ := safeio.Identity(root)
+	gitDevice, gitInode, _ := safeio.Identity(gitInfo)
 	indexDigest, indexSize, err := hashRegularFile(filepath.Join(repository, ".git", "index"), int64(e.outputBytes))
 	if err != nil || rootDevice != expected.rootDevice || rootInode != expected.rootInode || gitDevice != expected.gitDevice || gitInode != expected.gitInode ||
 		indexDigest != expected.indexDigest || indexSize != expected.indexSize {

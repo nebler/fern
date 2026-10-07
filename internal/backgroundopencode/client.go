@@ -17,7 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"github.com/nebler/fern/internal/strictjson"
+	"github.com/nebler/fern/internal/safeio"
 )
 
 type Config struct {
@@ -276,7 +276,7 @@ func exactJSONContentType(header http.Header) error {
 }
 
 func strictDecode(payload []byte, destination any, operation string) error {
-	if len(payload) == 0 || strictjson.Check(payload, maxJSONDepth) != nil {
+	if len(payload) == 0 || safeio.CheckJSON(payload, maxJSONDepth) != nil {
 		return protocol(operation, "invalid JSON")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))

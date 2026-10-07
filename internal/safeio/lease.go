@@ -1,4 +1,4 @@
-package hostlease
+package safeio
 
 import (
 	"crypto/sha256"
@@ -16,12 +16,12 @@ type Lease struct {
 	file *os.File
 }
 
-// Acquire takes the exclusive repository-binding lease in directory, creating and
+// AcquireLease takes the exclusive repository-binding lease in directory, creating and
 // locking its lock file if necessary. It fails if the lock is held (reporting
 // the recorded holder), if the path is not a singly linked regular private
 // file, or if holder metadata cannot be written durably. The returned Lease
 // must be released; Release is nil-safe.
-func Acquire(directory, binding string) (*Lease, error) {
+func AcquireLease(directory, binding string) (*Lease, error) {
 	if err := ensurePrivateDirectory(directory, "lock"); err != nil {
 		return nil, err
 	}

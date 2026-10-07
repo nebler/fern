@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"filippo.io/age"
-	"github.com/nebler/fern/internal/atomicfile"
+	"github.com/nebler/fern/internal/safeio"
 )
 
 const maxAgeIdentityBytes = 64 << 10
@@ -54,7 +54,7 @@ func loadAgeIdentities(paths []string) ([]age.Identity, error) {
 		if info.Mode().Perm()&0o077 != 0 {
 			return nil, fmt.Errorf("%w %s: mode %04o is group or world accessible", errUnsafeIdentityFile, path, info.Mode().Perm())
 		}
-		payload, err := atomicfile.Read(path, maxAgeIdentityBytes)
+		payload, err := safeio.ReadFile(path, maxAgeIdentityBytes)
 		if err != nil {
 			return nil, fmt.Errorf("%w %s: %v", errUnsafeIdentityFile, path, err)
 		}

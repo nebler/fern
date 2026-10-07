@@ -1,4 +1,4 @@
-package strictjson
+package safeio
 
 import (
 	"strings"
@@ -16,8 +16,8 @@ func TestCheckAcceptsCanonicalJSON(t *testing.T) {
 		"\n\t {\"spaced\": true} \n",
 	}
 	for _, payload := range payloads {
-		if err := Check([]byte(payload), 64); err != nil {
-			t.Errorf("Check(%q) = %v, want nil", payload, err)
+		if err := CheckJSON([]byte(payload), 64); err != nil {
+			t.Errorf("CheckJSON(%q) = %v, want nil", payload, err)
 		}
 	}
 }
@@ -25,9 +25,9 @@ func TestCheckAcceptsCanonicalJSON(t *testing.T) {
 func TestCheckRejectsDuplicateKeysCaseInsensitively(t *testing.T) {
 	t.Parallel()
 	for _, payload := range []string{`{"id":1,"id":2}`, `{"id":1,"ID":2}`, `{"outer":{"k":1,"K":2}}`} {
-		err := Check([]byte(payload), 64)
+		err := CheckJSON([]byte(payload), 64)
 		if err == nil || err.Error() != "duplicate JSON object key" {
-			t.Errorf("Check(%q) = %v, want duplicate JSON object key", payload, err)
+			t.Errorf("CheckJSON(%q) = %v, want duplicate JSON object key", payload, err)
 		}
 	}
 }
@@ -35,11 +35,11 @@ func TestCheckRejectsDuplicateKeysCaseInsensitively(t *testing.T) {
 func TestCheckRejectsDepthBeyondLimit(t *testing.T) {
 	t.Parallel()
 	nested := strings.Repeat("[", 5) + strings.Repeat("]", 5)
-	if err := Check([]byte(nested), 64); err != nil {
-		t.Fatalf("Check(nested within limit) = %v", err)
+	if err := CheckJSON([]byte(nested), 64); err != nil {
+		t.Fatalf("CheckJSON(nested within limit) = %v", err)
 	}
-	if err := Check([]byte(nested), 3); err == nil || err.Error() != "JSON nesting exceeds limit" {
-		t.Fatalf("Check(nested beyond limit) = %v", err)
+	if err := CheckJSON([]byte(nested), 3); err == nil || err.Error() != "JSON nesting exceeds limit" {
+		t.Fatalf("CheckJSON(nested beyond limit) = %v", err)
 	}
 }
 
@@ -62,9 +62,9 @@ func TestCheckRejectsEncodingAndStructureViolations(t *testing.T) {
 		{[]byte(`{"a":1]`), "invalid JSON object"},
 	}
 	for _, testCase := range cases {
-		err := Check(testCase.payload, 64)
+		err := CheckJSON(testCase.payload, 64)
 		if err == nil || !strings.Contains(err.Error(), testCase.want) {
-			t.Errorf("Check(%q) = %v, want containing %q", testCase.payload, err, testCase.want)
+			t.Errorf("CheckJSON(%q) = %v, want containing %q", testCase.payload, err, testCase.want)
 		}
 	}
 }

@@ -16,7 +16,7 @@ import (
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/pluginauth"
-	"github.com/nebler/fern/internal/strictjson"
+	"github.com/nebler/fern/internal/safeio"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -512,7 +512,7 @@ func (h *Handler) view(run taskstore.BackgroundRun) runView {
 func decodeStrict(w http.ResponseWriter, r *http.Request, limit int64, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	payload, err := io.ReadAll(r.Body)
-	if err != nil || strictjson.Check(payload, 3) != nil {
+	if err != nil || safeio.CheckJSON(payload, 3) != nil {
 		WriteError(w, http.StatusBadRequest, "invalid_json", "The JSON body is not valid.")
 		return false
 	}
@@ -554,7 +554,7 @@ func validateEmptyMutation(w http.ResponseWriter, r *http.Request) bool {
 	var value struct{}
 	r.Body = http.MaxBytesReader(w, r.Body, maxEmptyBodyBytes)
 	payload, err := io.ReadAll(r.Body)
-	if err != nil || len(bytes.TrimSpace(payload)) < 2 || bytes.TrimSpace(payload)[0] != '{' || strictjson.Check(payload, 3) != nil {
+	if err != nil || len(bytes.TrimSpace(payload)) < 2 || bytes.TrimSpace(payload)[0] != '{' || safeio.CheckJSON(payload, 3) != nil {
 		WriteError(w, http.StatusBadRequest, "invalid_json", "The JSON body must be an empty object.")
 		return false
 	}

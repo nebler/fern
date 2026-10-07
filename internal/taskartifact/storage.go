@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/nebler/fern/internal/atomicfile"
+	"github.com/nebler/fern/internal/safeio"
 )
 
 // Store atomically installs a verified staged artifact. Repeated installation
@@ -28,7 +28,7 @@ func (e *Engine) Store(ctx context.Context, staged StagedLocator) (Locator, erro
 	if err != nil || !safeDirectoryInfo(info) {
 		return Locator{}, fmt.Errorf("%w: staged directory", ErrStorage)
 	}
-	device, inode, err := atomicfile.Identity(info)
+	device, inode, err := safeio.Identity(info)
 	if err != nil || device != staged.device || inode != staged.inode {
 		return Locator{}, fmt.Errorf("%w: staged identity", ErrStorage)
 	}
@@ -48,12 +48,12 @@ func (e *Engine) Store(ctx context.Context, staged StagedLocator) (Locator, erro
 	if err := publishReadOnly(staged.path); err != nil {
 		return Locator{}, err
 	}
-	if err := atomicfile.SyncDir(staged.path); err != nil {
+	if err := safeio.SyncDir(staged.path); err != nil {
 		_ = restoreStagedModes(staged.path)
 		return Locator{}, err
 	}
 	target := filepath.Join(e.casRoot, staged.digest.String())
-	if err := atomicfile.RenameNoReplace(staged.path, target); err != nil {
+	if err := safeio.RenameNoReplace(staged.path, target); err != nil {
 		if _, statErr := os.Lstat(target); statErr != nil {
 			_ = restoreStagedModes(staged.path)
 			return Locator{}, fmt.Errorf("%w: publish CAS object", ErrStorage)
@@ -65,7 +65,7 @@ func (e *Engine) Store(ctx context.Context, staged StagedLocator) (Locator, erro
 		if removeErr := removeExactDirectory(staged.path, staged.device, staged.inode); removeErr != nil {
 			return Locator{}, removeErr
 		}
-	} else if err := atomicfile.SyncDir(e.casRoot); err != nil {
+	} else if err := safeio.SyncDir(e.casRoot); err != nil {
 		return Locator{}, err
 	}
 	return Locator{digest: staged.digest, valid: true}, nil
@@ -101,7 +101,7 @@ func (e *Engine) StagedManifest(ctx context.Context, staged StagedLocator) ([]by
 	if err != nil || !safeDirectoryInfo(info) {
 		return nil, Digest{}, fmt.Errorf("%w: staged identity", ErrStorage)
 	}
-	device, inode, identityErr := atomicfile.Identity(info)
+	device, inode, identityErr := safeio.Identity(info)
 	if identityErr != nil || device != staged.device || inode != staged.inode {
 		return nil, Digest{}, fmt.Errorf("%w: staged identity", ErrStorage)
 	}
@@ -208,7 +208,7 @@ func (e *Engine) materializeVerified(ctx context.Context, locator Locator, snaps
 		return nil, err
 	}
 	markerPath := checkoutMarkerPath(path)
-	if err := atomicfile.WriteExclusive(markerPath, []byte(token+"\n"), 0o600); err != nil {
+	if err := safeio.WriteFileExclusive(markerPath, []byte(token+"\n"), 0o600); err != nil {
 		return nil, err
 	}
 	bundle := filepath.Join(e.casRoot, locator.digest.String(), bundleName)
@@ -240,18 +240,18 @@ func (e *Engine) materializeVerified(ctx context.Context, locator Locator, snaps
 	if err != nil {
 		return nil, err
 	}
-	device, inode, err := atomicfile.Identity(pathInfo)
+	device, inode, err := safeio.Identity(pathInfo)
 	if err != nil {
 		return nil, err
 	}
-	markerDevice, markerInode, err := atomicfile.Identity(markerInfo)
+	markerDevice, markerInode, err := safeio.Identity(markerInfo)
 	if err != nil {
 		return nil, err
 	}
-	if err := atomicfile.SyncDir(path); err != nil {
+	if err := safeio.SyncDir(path); err != nil {
 		return nil, err
 	}
-	if err := atomicfile.SyncDir(filepath.Join(path, ".git")); err != nil {
+	if err := safeio.SyncDir(filepath.Join(path, ".git")); err != nil {
 		return nil, err
 	}
 	checkout := &Checkout{engine: e, path: path, marker: token, device: device, inode: inode, markerDevice: markerDevice, markerInode: markerInode}
@@ -311,13 +311,13 @@ func (c *Checkout) Close() error {
 	if err != nil {
 		return fmt.Errorf("%w: checkout path", ErrCheckout)
 	}
-	device, inode, _ := atomicfile.Identity(info)
+	device, inode, _ := safeio.Identity(info)
 	if device != c.device || inode != c.inode {
 		return fmt.Errorf("%w: checkout identity", ErrCheckout)
 	}
 	markerBytes, err := readExactFile(checkoutMarkerPath(c.path), 256, 0o600)
 	markerInfo, markerErr := os.Lstat(checkoutMarkerPath(c.path))
-	markerDevice, markerInode, _ := atomicfile.Identity(markerInfo)
+	markerDevice, markerInode, _ := safeio.Identity(markerInfo)
 	markerChanged := err != nil || markerErr != nil || markerDevice != c.markerDevice || markerInode != c.markerInode || string(markerBytes) != c.marker+"\n"
 	if err := removeExactDirectory(c.path, c.device, c.inode); err != nil {
 		return err
@@ -347,7 +347,7 @@ func directoryIdentity(path string) (uint64, uint64, error) {
 	if err != nil || !safeDirectoryInfo(info) {
 		return 0, 0, fmt.Errorf("%w: generated directory", ErrStorage)
 	}
-	return atomicfile.Identity(info)
+	return safeio.Identity(info)
 }
 
 func validateArtifactDirectory(path string, mode os.FileMode) error {
@@ -389,7 +389,7 @@ func normalizeStagedModes(path string) error {
 			return fmt.Errorf("%w: staged file mode", ErrStorage)
 		}
 	}
-	return atomicfile.SyncDir(path)
+	return safeio.SyncDir(path)
 }
 
 func publishReadOnly(path string) error {
@@ -420,7 +420,7 @@ func restoreStagedModes(path string) error {
 			result = errors.Join(result, ErrStorage)
 		}
 	}
-	return errors.Join(result, atomicfile.SyncDir(path))
+	return errors.Join(result, safeio.SyncDir(path))
 }
 
 func openCheckedArtifactFile(path string, mode os.FileMode) (*os.File, error) {
@@ -473,11 +473,11 @@ func removeExactDirectory(path string, device, inode uint64) error {
 	if err != nil || !safeDirectoryInfo(info) {
 		return fmt.Errorf("%w: removal target", ErrStorage)
 	}
-	if currentDevice, currentInode, err := atomicfile.Identity(info); err != nil || currentDevice != device || currentInode != inode {
+	if currentDevice, currentInode, err := safeio.Identity(info); err != nil || currentDevice != device || currentInode != inode {
 		return fmt.Errorf("%w: removal identity", ErrStorage)
 	}
-	err = atomicfile.QuarantineRemove(path, filepath.Join(filepath.Dir(path), ".remove-"+rand.Text()), device, inode)
-	if errors.Is(err, atomicfile.ErrChanged) {
+	err = safeio.QuarantineRemove(path, filepath.Join(filepath.Dir(path), ".remove-"+rand.Text()), device, inode)
+	if errors.Is(err, safeio.ErrChanged) {
 		return fmt.Errorf("%w: quarantined removal identity", ErrStorage)
 	}
 	return err

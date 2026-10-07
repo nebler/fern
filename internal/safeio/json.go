@@ -1,4 +1,4 @@
-package strictjson
+package safeio
 
 import (
 	"bytes"
@@ -14,13 +14,13 @@ var (
 	errTrailing = errors.New("invalid trailing JSON")
 )
 
-// Check verifies that payload holds exactly one valid UTF-8 JSON value whose
+// CheckJSON verifies that payload holds exactly one valid UTF-8 JSON value whose
 // object keys are unique case-insensitively, whose nesting never exceeds
 // maxDepth, and which carries no trailing content after the top-level value.
 // Malformed bytes surface as the underlying encoding/json scanner error;
 // structural violations use the descriptive errors documented on each branch
 // below. Callers wrap or map these errors with their own context.
-func Check(payload []byte, maxDepth int) error {
+func CheckJSON(payload []byte, maxDepth int) error {
 	if len(payload) == 0 || !utf8.Valid(payload) {
 		return errEncoding
 	}

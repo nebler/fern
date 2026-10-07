@@ -9,8 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/nebler/fern/internal/atomicfile"
-	"github.com/nebler/fern/internal/strictjson"
+	"github.com/nebler/fern/internal/safeio"
 )
 
 const (
@@ -58,7 +57,7 @@ func (credentials AppCredentials) String() string {
 func (credentials AppCredentials) GoString() string { return credentials.String() }
 
 // CredentialStore persists host-only GitHub App credentials in a caller-owned,
-// dedicated private directory (see atomicfile.PrivateDir). The credential file
+// dedicated private directory (see safeio.PrivateDir). The credential file
 // is written with mode 0600.
 //
 // This store provides filesystem-permission protection, not encryption at rest.
@@ -71,8 +70,8 @@ func NewCredentialStore(directory string) (*CredentialStore, error) {
 	if directory == "" {
 		return nil, ErrCredentialStoreSecurity
 	}
-	if err := atomicfile.PrivateDir(directory); err != nil {
-		if errors.Is(err, atomicfile.ErrUnsafeDir) {
+	if err := safeio.PrivateDir(directory); err != nil {
+		if errors.Is(err, safeio.ErrUnsafeDir) {
 			return nil, ErrCredentialStoreSecurity
 		}
 		return nil, fmt.Errorf("%w: %v", ErrCredentialStoreIO, err)
@@ -90,7 +89,7 @@ func (store *CredentialStore) Save(credentials AppCredentials) error {
 	if err != nil {
 		return err
 	}
-	if err := atomicfile.Write(store.path(), payload, 0o600); err != nil {
+	if err := safeio.WriteFile(store.path(), payload, 0o600); err != nil {
 		return fmt.Errorf("%w: %v", ErrCredentialStoreIO, err)
 	}
 	return nil
@@ -105,11 +104,11 @@ func (store *CredentialStore) Load() (AppCredentials, error) {
 	if store == nil || store.directory == "" {
 		return AppCredentials{}, ErrCredentialStoreSecurity
 	}
-	payload, err := atomicfile.Read(store.path(), maxCredentialFileBytes)
+	payload, err := safeio.ReadFile(store.path(), maxCredentialFileBytes)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
 		return AppCredentials{}, ErrCredentialsNotFound
-	case errors.Is(err, atomicfile.ErrTooLarge):
+	case errors.Is(err, safeio.ErrTooLarge):
 		return AppCredentials{}, ErrStoredCredentialsInvalid
 	case err != nil:
 		return AppCredentials{}, fmt.Errorf("%w: %v", ErrCredentialStoreIO, err)
@@ -141,7 +140,7 @@ func marshalStoredCredentials(credentials AppCredentials) ([]byte, error) {
 
 // parseStoredCredentials strictly validates a store payload.
 func parseStoredCredentials(payload []byte) (AppCredentials, error) {
-	if len(payload) > maxCredentialFileBytes || strictjson.Check(payload, 4) != nil {
+	if len(payload) > maxCredentialFileBytes || safeio.CheckJSON(payload, 4) != nil {
 		return AppCredentials{}, ErrStoredCredentialsInvalid
 	}
 	decoder := json.NewDecoder(bytes.NewReader(payload))

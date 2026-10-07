@@ -508,7 +508,7 @@ operator credential ID) and `pluginauth` (plugin authorizations and
 credentials); those packages issue their own SQL through the shared handle, one
 transaction per operation. Only digests of device tokens and plugin device and
 user codes are stored. In-flight request registries that revocation cancels
-stay in memory. `atomicfile` remains only for the credential file and host key.
+stay in memory. `safeio` private-file writes remain only for the credential file and host key.
 
 Backup is offline: `fern backup` takes the workspace lease used by `fern up`
 and every other lease file in the state directory. `fern backup create` writes
@@ -560,10 +560,8 @@ ownership boundaries.
 | `internal/pluginauth` | fixed-scope plugin device authorization and revocation (SQLite tables) |
 | `internal/githubapp` | credential file, installation tokens, repository discovery and authority |
 | `internal/config` | strict configuration loader and bootstrap/execution validation |
-| `internal/hostlease` | exclusive host-local repository-binding lease |
 | `internal/observability` | in-memory component readiness behind the liveness and readiness probes |
-| `internal/strictjson` | strict JSON validation before typed decoding |
-| `internal/atomicfile` | atomic replace and bounded read of the remaining private files (App credentials, host key) |
+| `internal/safeio` | atomic replace and bounded read of private files (App credentials, host key), trust-neutral filesystem helpers, the exclusive host-local repository-binding lease, and strict JSON validation before typed decoding |
 
 Integration packages under `integration/` qualify Docker and OpenCode; each has
 its own README.

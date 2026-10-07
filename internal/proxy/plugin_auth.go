@@ -17,7 +17,7 @@ import (
 
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/pluginauth"
-	"github.com/nebler/fern/internal/strictjson"
+	"github.com/nebler/fern/internal/safeio"
 )
 
 const (
@@ -250,7 +250,7 @@ func decodePluginAuthJSON(writer http.ResponseWriter, request *http.Request, val
 	}
 	request.Body = http.MaxBytesReader(writer, request.Body, maxPluginAuthBody)
 	payload, err := io.ReadAll(request.Body)
-	if err != nil || strictjson.Check(payload, 3) != nil {
+	if err != nil || safeio.CheckJSON(payload, 3) != nil {
 		http.Error(writer, "invalid plugin authorization request", http.StatusBadRequest)
 		return false
 	}

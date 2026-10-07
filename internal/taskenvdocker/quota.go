@@ -10,7 +10,7 @@ import (
 	"strings"
 
 	"github.com/docker/docker/api/types/volume"
-	"github.com/nebler/fern/internal/atomicfile"
+	"github.com/nebler/fern/internal/safeio"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -96,7 +96,7 @@ func (p *Provider) admitStorage() error {
 		if err != nil {
 			return fmt.Errorf("inspect durable state filesystem: %w", err)
 		}
-		stateDevice, _, err := atomicfile.Identity(stateInfo)
+		stateDevice, _, err := safeio.Identity(stateInfo)
 		if err != nil {
 			return err
 		}

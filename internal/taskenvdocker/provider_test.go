@@ -27,8 +27,8 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/go-connections/nat"
-	"github.com/nebler/fern/internal/atomicfile"
 	"github.com/nebler/fern/internal/domain"
+	"github.com/nebler/fern/internal/safeio"
 	"github.com/nebler/fern/internal/taskstore"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
@@ -433,7 +433,7 @@ func TestStaleClonePublisherAndMarkerCleanupCannotReplaceWinner(t *testing.T) {
 	if _, err := provider.writeCloneMarker(run, digest, staleInfo); err == nil {
 		t.Fatal("stale worker overwrote the winner marker")
 	}
-	if err := atomicfile.RenameNoReplace(stale, canonical); err == nil {
+	if err := safeio.RenameNoReplace(stale, canonical); err == nil {
 		t.Fatal("stale worker overwrote the canonical clone")
 	}
 	afterClone, err := os.Lstat(canonical)

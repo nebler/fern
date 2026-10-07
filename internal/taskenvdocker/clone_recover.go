@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/nebler/fern/internal/atomicfile"
+	"github.com/nebler/fern/internal/safeio"
 )
 
 type cloneRecoveryKind uint8
@@ -110,7 +110,7 @@ func (p *Provider) findRecoverableClones(ctx context.Context, marker cloneMarker
 }
 
 func sameCloneIdentity(info os.FileInfo, marker cloneMarker) bool {
-	device, inode, err := atomicfile.Identity(info)
+	device, inode, err := safeio.Identity(info)
 	return err == nil && device == marker.Device && inode == marker.Inode
 }
 

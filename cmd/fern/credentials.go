@@ -12,7 +12,7 @@ import (
 
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/githubapp"
-	"github.com/nebler/fern/internal/hostlease"
+	"github.com/nebler/fern/internal/safeio"
 )
 
 // validateCredentials is replaced in tests to avoid live GitHub calls.
@@ -53,7 +53,7 @@ func runCredentialSet(args []string) error {
 	if err := config.ValidateBootstrap(cfg); err != nil {
 		return err
 	}
-	lease, err := hostlease.Acquire(filepath.Join(stateDirectory, "locks"), cfg.Workspace.Name)
+	lease, err := safeio.AcquireLease(filepath.Join(stateDirectory, "locks"), cfg.Workspace.Name)
 	if err != nil {
 		return fmt.Errorf("setting credentials requires Fern to be stopped: %w", err)
 	}

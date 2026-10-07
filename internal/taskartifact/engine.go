@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/nebler/fern/internal/atomicfile"
 	"github.com/nebler/fern/internal/domain"
+	"github.com/nebler/fern/internal/safeio"
 )
 
 const (
@@ -105,7 +105,7 @@ func removeInterruptedDirectories(root string, prefixes ...string) error {
 		if err != nil || !safeDirectoryInfo(info) {
 			return ErrStorage
 		}
-		device, inode, err := atomicfile.Identity(info)
+		device, inode, err := safeio.Identity(info)
 		if err != nil {
 			return err
 		}
@@ -113,7 +113,7 @@ func removeInterruptedDirectories(root string, prefixes ...string) error {
 			return err
 		}
 	}
-	return atomicfile.SyncDir(root)
+	return safeio.SyncDir(root)
 }
 
 // Close removes all still-live engine checkouts after coordinators have
@@ -250,7 +250,7 @@ func (e *Engine) stageArtifact(ctx context.Context, spec SnapshotSpec, stage str
 	if len(manifestBytes) > e.outputBytes {
 		return artifactManifest{}, nil, Digest{}, ErrOutputLimit
 	}
-	if err := atomicfile.WriteExclusive(filepath.Join(stage, manifestName), manifestBytes, 0o600); err != nil {
+	if err := safeio.WriteFileExclusive(filepath.Join(stage, manifestName), manifestBytes, 0o600); err != nil {
 		return artifactManifest{}, nil, Digest{}, err
 	}
 	return manifest, manifestBytes, digest, nil

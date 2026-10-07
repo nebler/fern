@@ -24,7 +24,7 @@ import (
 
 	"filippo.io/age"
 	"github.com/nebler/fern/internal/config"
-	"github.com/nebler/fern/internal/hostlease"
+	"github.com/nebler/fern/internal/safeio"
 	_ "modernc.org/sqlite"
 )
 
@@ -144,7 +144,7 @@ func loadBackupConfig(options backupOptions) (config.Config, error) {
 // backupLeases holds the named workspace lease plus every other lease file in
 // the state directory, so no `fern up` sharing this state can run meanwhile.
 type backupLeases struct {
-	lease *hostlease.Lease
+	lease *safeio.Lease
 	files []*os.File
 }
 
@@ -153,7 +153,7 @@ func acquireBackupLeases(stateDirectory, workspace string) (*backupLeases, error
 	held := &backupLeases{}
 	own := ""
 	if workspace != "" {
-		lease, err := hostlease.Acquire(directory, workspace)
+		lease, err := safeio.AcquireLease(directory, workspace)
 		if err != nil {
 			return nil, fmt.Errorf("Fern must be stopped: %w", err)
 		}

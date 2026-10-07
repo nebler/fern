@@ -8,7 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/nebler/fern/internal/atomicfile"
+	"github.com/nebler/fern/internal/safeio"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -61,12 +61,12 @@ func (p *Provider) RemoveClone(ctx context.Context, run taskstore.BackgroundRun,
 	if err := p.attestCloneDeletion(run, digest, path); err != nil {
 		return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: err.Error()}
 	}
-	device, inode, err := atomicfile.Identity(info)
+	device, inode, err := safeio.Identity(info)
 	if err != nil {
 		return Observation{}, err
 	}
 	quarantine := filepath.Join(p.root, ".clone-quarantine-"+rand.Text())
-	if err := atomicfile.QuarantineRemove(path, quarantine, device, inode); errors.Is(err, atomicfile.ErrChanged) {
+	if err := safeio.QuarantineRemove(path, quarantine, device, inode); errors.Is(err, safeio.ErrChanged) {
 		return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "renamed clone is not the attested inode"}
 	} else if err != nil {
 		return Observation{}, fmt.Errorf("quarantine and remove clone: %w", err)
@@ -100,7 +100,7 @@ func (p *Provider) finishMarkerBoundDeletion(ctx context.Context, run taskstore.
 		if err := p.attestCloneMarker(run, digest, location.path); err != nil {
 			return false, err
 		}
-		if err := atomicfile.RemoveTree(filepath.Dir(location.path), filepath.Base(location.path)); err != nil {
+		if err := safeio.RemoveTree(filepath.Dir(location.path), filepath.Base(location.path)); err != nil {
 			return false, err
 		}
 		if location.kind == cloneRecoveryStage {
@@ -128,11 +128,11 @@ func (p *Provider) finishMarkerBoundDeletion(ctx context.Context, run taskstore.
 // removeCreatedTree rolls back a stage this call created, proving by inode
 // that it removes exactly that directory. A missing stage is already gone.
 func removeCreatedTree(root, path string, created os.FileInfo) error {
-	device, inode, err := atomicfile.Identity(created)
+	device, inode, err := safeio.Identity(created)
 	if err != nil {
 		return err
 	}
-	err = atomicfile.QuarantineRemove(path, filepath.Join(root, ".clone-quarantine-"+rand.Text()), device, inode)
+	err = safeio.QuarantineRemove(path, filepath.Join(root, ".clone-quarantine-"+rand.Text()), device, inode)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}

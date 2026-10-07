@@ -16,10 +16,10 @@ import (
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/githubapp"
-	"github.com/nebler/fern/internal/hostlease"
 	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/proxy"
+	"github.com/nebler/fern/internal/safeio"
 	"github.com/nebler/fern/internal/taskstore"
 	"golang.org/x/sync/errgroup"
 )
@@ -55,7 +55,7 @@ func runUp(args []string, log *slog.Logger) (resultErr error) {
 	if err != nil {
 		return err
 	}
-	lease, err := hostlease.Acquire(lockDirectory, cfg.Workspace.Name)
+	lease, err := safeio.AcquireLease(lockDirectory, cfg.Workspace.Name)
 	if err != nil {
 		return err
 	}

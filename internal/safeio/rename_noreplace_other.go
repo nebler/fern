@@ -1,6 +1,6 @@
 //go:build !darwin && !linux
 
-package atomicfile
+package safeio
 
 import "errors"
 

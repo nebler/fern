@@ -1,15 +1,4 @@
-// Package atomicfile reads and atomically replaces small files that Fern keeps
-// in its own private state directories.
-//
-// It is meant for paths only the Fern user (or root) can write: the containing
-// directory is checked once by PrivateDir when a store opens, and individual
-// files are then read and written without per-file link-count, mode, or owner
-// checks. It is not suitable for directories an agent or other user can modify.
-//
-// The filesystem primitives RenameNoReplace, SyncDir, Identity,
-// QuarantineRemove, and RemoveTree make no trust assumption about the
-// directory and are shared by packages that do guard agent-writable trees.
-package atomicfile
+package safeio
 
 import (
 	"errors"
@@ -21,24 +10,24 @@ import (
 )
 
 var (
-	// ErrTooLarge reports that Read found more than maxBytes.
+	// ErrTooLarge reports that ReadFile found more than maxBytes.
 	ErrTooLarge = errors.New("file exceeds size limit")
 	// ErrUnsafeDir reports that PrivateDir found a directory that is not a real,
 	// owner-only directory owned by the current user.
 	ErrUnsafeDir = errors.New("state directory must be a real directory owned by the current user with no group or other access")
 )
 
-// Write atomically replaces path with data. It writes a temporary file in the
+// WriteFile atomically replaces path with data. It writes a temporary file in the
 // same directory, syncs it, renames it over path, and syncs the directory.
 // Failures before the rename leave path untouched; a failed directory sync
 // after it means the new content is visible but may not survive a crash.
-func Write(path string, data []byte, perm os.FileMode) error {
+func WriteFile(path string, data []byte, perm os.FileMode) error {
 	return write(path, data, perm, os.Rename)
 }
 
-// WriteExclusive is Write that fails, leaving the existing file untouched,
+// WriteFileExclusive is WriteFile that fails, leaving the existing file untouched,
 // if path already exists.
-func WriteExclusive(path string, data []byte, perm os.FileMode) error {
+func WriteFileExclusive(path string, data []byte, perm os.FileMode) error {
 	return write(path, data, perm, RenameNoReplace)
 }
 
@@ -76,10 +65,10 @@ func write(path string, data []byte, perm os.FileMode, rename func(string, strin
 	return nil
 }
 
-// Read returns the contents of the regular file at path, failing with
+// ReadFile returns the contents of the regular file at path, failing with
 // ErrTooLarge if it holds more than maxBytes. A missing file returns an error
 // matching os.ErrNotExist.
-func Read(path string, maxBytes int64) ([]byte, error) {
+func ReadFile(path string, maxBytes int64) ([]byte, error) {
 	file, err := os.Open(path)
 	if err != nil {
 		return nil, err

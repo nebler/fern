@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/nebler/fern/internal/strictjson"
+	"github.com/nebler/fern/internal/safeio"
 )
 
 // ReconcileSession is read-only and compares the complete caller-selected
@@ -117,7 +117,7 @@ func (c *Client) ReconcilePrompt(ctx context.Context, sessionID string, spec Pro
 				Timestamp *float64 `json:"timestamp"`
 				SessionID string   `json:"sessionID"`
 			}
-			if strictjson.Check(event.Data, maxJSONDepth) != nil {
+			if safeio.CheckJSON(event.Data, maxJSONDepth) != nil {
 				return ReconcileUncertain, protocol("reconcile prompt", "invalid durable event data")
 			}
 			if err := json.Unmarshal(event.Data, &base); err != nil || base.Timestamp == nil || !validTimestamp(*base.Timestamp) || base.SessionID != sessionID {

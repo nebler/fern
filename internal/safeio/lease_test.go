@@ -1,4 +1,4 @@
-package hostlease
+package safeio
 
 import (
 	"bufio"
@@ -13,7 +13,7 @@ import (
 
 func TestAcquireIsExclusiveAcrossProcesses(t *testing.T) {
 	if os.Getenv("FERN_LOCK_HELPER") == "1" {
-		lease, err := Acquire(os.Getenv("FERN_LOCK_DIR"), "demo")
+		lease, err := AcquireLease(os.Getenv("FERN_LOCK_DIR"), "demo")
 		if err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(2)
@@ -42,8 +42,8 @@ func TestAcquireIsExclusiveAcrossProcesses(t *testing.T) {
 	if line, _ := bufio.NewReader(stdout).ReadString('\n'); line != "locked\n" {
 		t.Fatalf("helper output = %q", line)
 	}
-	if _, err := Acquire(directory, "demo"); err == nil {
-		t.Fatal("Acquire succeeded while helper process held the lease")
+	if _, err := AcquireLease(directory, "demo"); err == nil {
+		t.Fatal("AcquireLease succeeded while helper process held the lease")
 	}
 	if err := stdin.Close(); err != nil {
 		t.Fatal(err)
@@ -51,9 +51,9 @@ func TestAcquireIsExclusiveAcrossProcesses(t *testing.T) {
 	if err := command.Wait(); err != nil {
 		t.Fatal(err)
 	}
-	lease, err := Acquire(directory, "demo")
+	lease, err := AcquireLease(directory, "demo")
 	if err != nil {
-		t.Fatalf("Acquire after helper exit: %v", err)
+		t.Fatalf("AcquireLease after helper exit: %v", err)
 	}
 	t.Cleanup(func() {
 		if err := lease.Release(); err != nil {
@@ -73,8 +73,8 @@ func TestAcquireRejectsSymlinkLockWithoutChangingTarget(t *testing.T) {
 	if err := os.Symlink(victim, lock); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Acquire(directory, "demo"); err == nil {
-		t.Fatal("Acquire accepted a symlink lock")
+	if _, err := AcquireLease(directory, "demo"); err == nil {
+		t.Fatal("AcquireLease accepted a symlink lock")
 	}
 	data, err := os.ReadFile(victim)
 	if err != nil {
@@ -92,7 +92,7 @@ func TestAcquireRejectsSymlinkDirectory(t *testing.T) {
 	if err := os.Symlink(target, directory); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Acquire(directory, "demo"); err == nil {
-		t.Fatal("Acquire accepted a symlink directory")
+	if _, err := AcquireLease(directory, "demo"); err == nil {
+		t.Fatal("AcquireLease accepted a symlink directory")
 	}
 }

@@ -1,4 +1,4 @@
-package atomicfile
+package safeio
 
 import (
 	"errors"
@@ -11,12 +11,12 @@ func TestWriteCreatesAndReplaces(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "state.json")
 	for _, content := range []string{"first", "second"} {
-		if err := Write(path, []byte(content), 0o600); err != nil {
+		if err := WriteFile(path, []byte(content), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		data, err := Read(path, 64)
+		data, err := ReadFile(path, 64)
 		if err != nil || string(data) != content {
-			t.Fatalf("Read = %q, %v; want %q", data, err, content)
+			t.Fatalf("ReadFile = %q, %v; want %q", data, err, content)
 		}
 	}
 	info, err := os.Stat(path)
@@ -31,28 +31,28 @@ func TestWriteCreatesAndReplaces(t *testing.T) {
 
 func TestWriteFailureLeavesTargetUntouched(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "state.json")
-	if err := Write(path, []byte("data"), 0o600); err == nil {
-		t.Fatalf("Write into missing directory = %v", err)
+	if err := WriteFile(path, []byte("data"), 0o600); err == nil {
+		t.Fatalf("WriteFile into missing directory = %v", err)
 	}
 }
 
 func TestReadLimitsAndPassesThroughNotExist(t *testing.T) {
 	directory := t.TempDir()
-	if _, err := Read(filepath.Join(directory, "absent"), 8); !errors.Is(err, os.ErrNotExist) {
+	if _, err := ReadFile(filepath.Join(directory, "absent"), 8); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("missing file error = %v", err)
 	}
 	path := filepath.Join(directory, "big")
 	if err := os.WriteFile(path, []byte("123456789"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Read(path, 8); !errors.Is(err, ErrTooLarge) {
+	if _, err := ReadFile(path, 8); !errors.Is(err, ErrTooLarge) {
 		t.Fatalf("oversized file error = %v", err)
 	}
-	if data, err := Read(path, 9); err != nil || string(data) != "123456789" {
+	if data, err := ReadFile(path, 9); err != nil || string(data) != "123456789" {
 		t.Fatalf("exact-limit read = %q, %v", data, err)
 	}
-	if _, err := Read(directory, 8); err == nil {
-		t.Fatal("Read accepted a directory")
+	if _, err := ReadFile(directory, 8); err == nil {
+		t.Fatal("ReadFile accepted a directory")
 	}
 }
 
@@ -118,15 +118,15 @@ func TestRenameNoReplaceAndIdentity(t *testing.T) {
 	}
 }
 
-func TestWriteExclusiveRefusesExistingTarget(t *testing.T) {
+func TestWriteFileExclusiveRefusesExistingTarget(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "marker")
-	if err := WriteExclusive(path, []byte("first"), 0o600); err != nil {
+	if err := WriteFileExclusive(path, []byte("first"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := WriteExclusive(path, []byte("second"), 0o600); err == nil {
-		t.Fatal("WriteExclusive replaced an existing file")
+	if err := WriteFileExclusive(path, []byte("second"), 0o600); err == nil {
+		t.Fatal("WriteFileExclusive replaced an existing file")
 	}
-	if data, err := Read(path, 64); err != nil || string(data) != "first" {
+	if data, err := ReadFile(path, 64); err != nil || string(data) != "first" {
 		t.Fatalf("existing file = %q, %v", data, err)
 	}
 }

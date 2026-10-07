@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"net/url"
 
-	"github.com/nebler/fern/internal/strictjson"
+	"github.com/nebler/fern/internal/safeio"
 )
 
 const maxJSONDepth = 64
@@ -15,7 +15,7 @@ func validAPIBase(base string) bool {
 }
 
 func decodeGitHubJSON(payload []byte, destination any) error {
-	if err := strictjson.Check(payload, maxJSONDepth); err != nil {
+	if err := safeio.CheckJSON(payload, maxJSONDepth); err != nil {
 		return ErrInvalidResponse
 	}
 	if err := json.Unmarshal(payload, destination); err != nil {

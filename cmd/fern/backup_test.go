@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"filippo.io/age"
-	"github.com/nebler/fern/internal/hostlease"
+	"github.com/nebler/fern/internal/safeio"
 )
 
 func TestBackupLoadsOnlyCurrentConfiguration(t *testing.T) {
@@ -241,7 +241,7 @@ func TestBackupRefusesWhileFernHoldsTheLease(t *testing.T) {
 	fixture.seed(t, "a")
 	output := filepath.Join(t.TempDir(), "fern.backup")
 	for _, name := range []string{"demo", "other-workspace"} {
-		lease, err := hostlease.Acquire(filepath.Join(fixture.options.stateDirectory, "locks"), name)
+		lease, err := safeio.AcquireLease(filepath.Join(fixture.options.stateDirectory, "locks"), name)
 		if err != nil {
 			t.Fatal(err)
 		}

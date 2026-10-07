@@ -9,7 +9,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/nebler/fern/internal/atomicfile"
+	"github.com/nebler/fern/internal/safeio"
 	"golang.org/x/sys/unix"
 )
 
@@ -55,16 +55,16 @@ func publishRoot(stateRoot, root string, authoritative *[32]byte) ([32]byte, err
 	} else {
 		_, _ = rand.Read(key[:]) // never fails since Go 1.24
 	}
-	if err := atomicfile.Write(filepath.Join(staging, hostKeyName), key[:], 0o600); err != nil {
+	if err := safeio.WriteFile(filepath.Join(staging, hostKeyName), key[:], 0o600); err != nil {
 		return [32]byte{}, fmt.Errorf("write staged background run host key: %w", err)
 	}
-	if err := atomicfile.RenameNoReplace(staging, root); err != nil {
+	if err := safeio.RenameNoReplace(staging, root); err != nil {
 		if _, statErr := os.Lstat(root); statErr == nil {
 			return loadExistingRoot(root)
 		}
 		return [32]byte{}, fmt.Errorf("publish staged background run root: %w", err)
 	}
-	if err := atomicfile.SyncDir(stateRoot); err != nil {
+	if err := safeio.SyncDir(stateRoot); err != nil {
 		return [32]byte{}, err
 	}
 	return loadExistingRoot(root)
@@ -79,7 +79,7 @@ func loadExistingRoot(root string) ([32]byte, error) {
 	if info.Mode().Perm() != 0o700 {
 		return key, fmt.Errorf("background run root mode is %04o, want 0700", info.Mode().Perm())
 	}
-	data, err := atomicfile.Read(filepath.Join(root, hostKeyName), int64(len(key)))
+	data, err := safeio.ReadFile(filepath.Join(root, hostKeyName), int64(len(key)))
 	if errors.Is(err, os.ErrNotExist) {
 		return key, errors.New("background run host key is missing from initialized state")
 	}

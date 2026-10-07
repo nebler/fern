@@ -1,4 +1,4 @@
-package atomicfile
+package safeio
 
 import (
 	"errors"

@@ -14,7 +14,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/nebler/fern/internal/atomicfile"
+	"github.com/nebler/fern/internal/safeio"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -150,10 +150,10 @@ func (p *Provider) recoverStagedClone(ctx context.Context, run taskstore.Backgro
 	if err != nil {
 		return 0, false, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "staged recovery failed attestation: " + err.Error()}
 	}
-	if err := atomicfile.RenameNoReplace(location.path, path); err != nil {
+	if err := safeio.RenameNoReplace(location.path, path); err != nil {
 		return 0, false, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: "staged recovery publication failed: " + err.Error()}
 	}
-	if err := atomicfile.SyncDir(p.root); err != nil {
+	if err := safeio.SyncDir(p.root); err != nil {
 		return 0, false, err
 	}
 	if err := os.Remove(location.parent); err != nil {
@@ -210,10 +210,10 @@ func (p *Provider) createClone(ctx context.Context, run taskstore.BackgroundRun,
 	if err != nil {
 		return 0, err
 	}
-	if err := atomicfile.RenameNoReplace(stagedClone, path); err != nil {
+	if err := safeio.RenameNoReplace(stagedClone, path); err != nil {
 		return 0, errors.Join(fmt.Errorf("publish attested clone: %w", err), p.removeCloneMarker(run, digest, marker))
 	}
-	if err := atomicfile.SyncDir(p.root); err != nil {
+	if err := safeio.SyncDir(p.root); err != nil {
 		return 0, err
 	}
 	if err := os.Remove(stageRoot); err != nil {
@@ -239,12 +239,12 @@ func encodeCloneMarker(marker cloneMarker) []byte {
 // writeCloneMarker publishes the marker for the clone directory info names. It
 // never replaces an existing marker.
 func (p *Provider) writeCloneMarker(run taskstore.BackgroundRun, digest string, info os.FileInfo) (cloneMarker, error) {
-	device, inode, err := atomicfile.Identity(info)
+	device, inode, err := safeio.Identity(info)
 	if err != nil {
 		return cloneMarker{}, err
 	}
 	marker := expectedCloneMarker(run, digest, device, inode)
-	if err := atomicfile.WriteExclusive(p.cloneMarkerPath(run), encodeCloneMarker(marker), 0o600); err != nil {
+	if err := safeio.WriteFileExclusive(p.cloneMarkerPath(run), encodeCloneMarker(marker), 0o600); err != nil {
 		return cloneMarker{}, fmt.Errorf("publish clone authority without replacement: %w", err)
 	}
 	return marker, nil
@@ -253,7 +253,7 @@ func (p *Provider) writeCloneMarker(run taskstore.BackgroundRun, digest string, 
 // readCloneMarker returns the run's marker, which must be byte-for-byte the
 // marker this run would write for the inode it names.
 func (p *Provider) readCloneMarker(run taskstore.BackgroundRun, digest string) (cloneMarker, error) {
-	data, err := atomicfile.Read(p.cloneMarkerPath(run), maxEvidenceBytes)
+	data, err := safeio.ReadFile(p.cloneMarkerPath(run), maxEvidenceBytes)
 	if err != nil {
 		return cloneMarker{}, fmt.Errorf("read private clone authority: %w", err)
 	}
@@ -292,7 +292,7 @@ func (p *Provider) removeCloneMarker(run taskstore.BackgroundRun, digest string,
 	if err := os.Remove(p.cloneMarkerPath(run)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return atomicfile.SyncDir(p.root)
+	return safeio.SyncDir(p.root)
 }
 
 func (p *Provider) attestRepository(ctx context.Context, run taskstore.BackgroundRun, path string) (int64, error) {
