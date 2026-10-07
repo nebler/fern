@@ -18,10 +18,10 @@ import (
 	"github.com/nebler/fern/internal/docker"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/githubapp"
-	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/runapi"
 	"github.com/nebler/fern/internal/store"
+	"github.com/nebler/fern/internal/web"
 )
 
 const (
@@ -47,7 +47,7 @@ type runServices struct {
 	background wakeService
 	provider   *docker.Provider
 	artifact   *artifact.Engine
-	status     *observability.Registry
+	status     *web.Registry
 }
 
 // Close releases the artifact engine and Docker provider. The store belongs to
@@ -68,7 +68,7 @@ func openStateStore(ctx context.Context, cfg config.Config) (*store.Store, error
 	return store.Open(ctx, filepath.Join(runDirectory, cfg.Workspace.Name+".db"))
 }
 
-func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Store, route *opencode.Router, status *observability.Registry, log *slog.Logger) (*runServices, error) {
+func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Store, route *opencode.Router, status *web.Registry, log *slog.Logger) (*runServices, error) {
 	if cfg.Runs.BackgroundImage == "" || cfg.Runs.BackgroundImageID == "" || route == nil {
 		return nil, errors.New("a qualified disposable Background Run profile is required")
 	}
@@ -78,7 +78,7 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 	if err != nil {
 		return nil, err
 	}
-	status.Healthy(observability.ComponentGitHubDependency)
+	status.Healthy(web.ComponentGitHubDependency)
 
 	roots, err := prepareStateRoots(cfg.Workspace.Name)
 	if err != nil {
@@ -145,10 +145,10 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 		PollInterval:     runPollInterval, HistoryBounds: opencode.HistoryBounds{PageLimit: 100, MaxPages: 100, MaxEvents: 10000},
 		Now: time.Now, HTTPClient: &http.Client{Timeout: backgroundCloneTimeout}, Route: route,
 		OnError: func(err error) {
-			status.Degraded(observability.ComponentBackgroundRunSerial, err)
+			status.Degraded(web.ComponentBackgroundRunSerial, err)
 			log.Error("Background Run coordination deferred", "err", err, "repository", cfg.Workspace.Name)
 		},
-		OnSuccess: func() { status.Healthy(observability.ComponentBackgroundRunSerial) },
+		OnSuccess: func() { status.Healthy(web.ComponentBackgroundRunSerial) },
 	})
 	if err != nil {
 		return nil, err
@@ -170,8 +170,8 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 	if err != nil {
 		return nil, err
 	}
-	status.Healthy(observability.ComponentBackgroundRunProfile)
-	status.Healthy(observability.ComponentBackgroundRunSerial)
+	status.Healthy(web.ComponentBackgroundRunProfile)
+	status.Healthy(web.ComponentBackgroundRunSerial)
 	closeArtifact, closeProvider = false, false
 	return &runServices{store: runStore, runs: runs,
 		background: coord, provider: provider, artifact: engine, status: status}, nil

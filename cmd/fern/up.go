@@ -15,11 +15,10 @@ import (
 	"github.com/nebler/fern/internal/auth"
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/githubapp"
-	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/opencode"
-	"github.com/nebler/fern/internal/proxy"
 	"github.com/nebler/fern/internal/safeio"
 	"github.com/nebler/fern/internal/store"
+	"github.com/nebler/fern/internal/web"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -87,8 +86,8 @@ type upRuntime struct {
 	operatorServer   *http.Server
 	remoteListener   net.Listener
 	operatorListener net.Listener
-	origins          proxy.TrustedOrigins
-	status           *observability.Registry
+	origins          web.TrustedOrigins
+	status           *web.Registry
 	start            time.Time
 }
 
@@ -108,7 +107,7 @@ func (runtime *upRuntime) Close() error {
 	return errors.Join(servicesErr, routeErr, stateErr)
 }
 
-func assembleServices(serviceCtx context.Context, cfg config.Config, origins proxy.TrustedOrigins,
+func assembleServices(serviceCtx context.Context, cfg config.Config, origins web.TrustedOrigins,
 	remoteListener, operatorListener, backgroundListener net.Listener, log *slog.Logger) (*upRuntime, error) {
 	state, err := openStateStore(serviceCtx, cfg)
 	if err != nil {
@@ -121,11 +120,11 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 	fail := func(cause error) (*upRuntime, error) {
 		return nil, errors.Join(cause, route.Close(), state.Close())
 	}
-	status := observability.NewRegistry()
+	status := web.NewRegistry()
 	var services *runServices
 	if cfg.Workspace.GitHub.InstallationID == 0 {
 		pending := errors.New("GitHub App installation ID is not configured")
-		status.Blocked(observability.ComponentGitHubDependency, pending)
+		status.Blocked(web.ComponentGitHubDependency, pending)
 		log.Warn("Background Runs await GitHub App installation binding and restart", "repository", cfg.Workspace.Name)
 	} else {
 		if err := config.Validate(cfg); err != nil {
@@ -134,7 +133,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 		services, err = newRunServices(serviceCtx, cfg, state, route, status, log)
 		if errors.Is(err, githubapp.ErrCredentialsNotFound) {
 			log.Warn("Background Runs await GitHub App credentials ('fern credentials set') and restart", "repository", cfg.Workspace.Name)
-			status.Blocked(observability.ComponentGitHubDependency, err)
+			status.Blocked(web.ComponentGitHubDependency, err)
 			services, err = nil, nil
 		}
 	}
@@ -148,10 +147,10 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 	if services != nil {
 		runs = services.runs
 	}
-	controls := proxy.Controls{Store: auth.NewDeviceStore(state.DB()), Runs: runs,
-		ControlAuth: proxy.ControlAuth{Password: cfg.ControlPassword}, PluginAuth: auth.NewPluginStore(state.DB()),
+	controls := web.Controls{Store: auth.NewDeviceStore(state.DB()), Runs: runs,
+		ControlAuth: web.ControlAuth{Password: cfg.ControlPassword}, PluginAuth: auth.NewPluginStore(state.DB()),
 		Liveness: status.LivenessHandler(), Readiness: status.ReadinessHandler()}
-	handlers, err := proxy.NewHandlers(controls, origins)
+	handlers, err := web.NewHandlers(controls, origins)
 	if err != nil {
 		if services != nil {
 			_ = services.Close()
@@ -177,7 +176,7 @@ func startRunCoordinator(group *errgroup.Group, services *runServices, serviceCt
 			return nil
 		}
 		if err != nil {
-			services.status.Failed(observability.ComponentBackgroundRunSerial, err)
+			services.status.Failed(web.ComponentBackgroundRunSerial, err)
 		}
 		return err
 	})
@@ -213,10 +212,10 @@ func startProxyServers(group *errgroup.Group, runtime *upRuntime, serviceCtx con
 	})
 }
 
-func trustedProxyOrigins(cfg config.Config) proxy.TrustedOrigins {
+func trustedProxyOrigins(cfg config.Config) web.TrustedOrigins {
 	remote := cfg.Proxy.RemoteOrigin
 	if remote == "" {
 		remote = "http://" + cfg.Proxy.Listen
 	}
-	return proxy.TrustedOrigins{Remote: remote, Operator: "http://" + cfg.Proxy.OperatorListen}
+	return web.TrustedOrigins{Remote: remote, Operator: "http://" + cfg.Proxy.OperatorListen}
 }

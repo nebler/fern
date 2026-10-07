@@ -1,4 +1,4 @@
-package observability
+package web
 
 import (
 	"errors"

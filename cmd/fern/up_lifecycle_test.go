@@ -7,14 +7,14 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/store"
+	"github.com/nebler/fern/internal/web"
 	"golang.org/x/sync/errgroup"
 )
 
 func TestFatalBackgroundFailureBlocksReadiness(t *testing.T) {
-	status := observability.NewRegistry()
-	status.Healthy(observability.ComponentBackgroundRunSerial)
+	status := web.NewRegistry()
+	status.Healthy(web.ComponentBackgroundRunSerial)
 	group, ctx := errgroup.WithContext(context.Background())
 	startRunCoordinator(group, &runServices{background: failingService{store.ErrCorruptStore}, status: status}, ctx)
 	if err := group.Wait(); !errors.Is(err, store.ErrCorruptStore) {

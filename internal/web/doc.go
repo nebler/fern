@@ -1,8 +1,11 @@
-// Package proxy assembles Fern's remote and loopback operator HTTP control
-// surfaces. Despite the name it does not reverse-proxy OpenCode: live run
-// attachment belongs to opencode.Router, and the run handler (runapi) is
-// injected by cmd/fern rather than imported. NewHandlers builds handlers only;
-// listeners, TLS, and Host validation are part of composition and deployment.
+// Package web assembles Fern's remote and loopback operator HTTP control
+// surfaces and the in-process readiness registry behind their liveness and
+// readiness probes. It does not reverse-proxy OpenCode: live run attachment
+// belongs to opencode.Router, and the run handler (runapi) is injected by
+// cmd/fern rather than imported. NewHandlers builds handlers only; listeners,
+// TLS, and Host validation are part of composition and deployment.
+//
+// # Routes and realms
 //
 // routes.go holds one ServeMux route table per listener and is the complete
 // access policy: each route names the realms (public, paired device, plugin
@@ -26,4 +29,14 @@
 // Device and plugin revocation persist before in-flight requests are
 // cancelled, and cancellation is cooperative, not proof that a downstream
 // effect was undone.
-package proxy
+//
+// # Readiness
+//
+// cmd/fern owns the Registry and updates component states; the operator
+// listener mounts its probes. State is in memory and lost on restart: this is
+// service health, not the durable run ledger. The component set is fixed at
+// compile time and unknown components are rejected. Only blocked and failed
+// make a component unready; healthy and degraded components are ready. Error
+// values passed to the state methods are discarded, so nothing secret can
+// reach a probe.
+package web

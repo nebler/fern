@@ -140,7 +140,7 @@ Fern has three ingress actor classes:
 The plugin scopes are `run:create`, `run:read`, `run:stop`, `run:attach`, and
 `run:result`. They are not configuration.
 
-Each control listener has one route table in `internal/proxy/routes.go`, the
+Each control listener has one route table in `internal/web/routes.go`, the
 complete access policy for that listener. A request authenticates as the realm
 of the credential it carries (bearer, device cookie, or Basic), never by path; a
 route that does not admit that realm answers 404. Unlisted paths are 404 and
@@ -553,11 +553,10 @@ ownership boundaries.
 | `internal/artifact` | deterministic Git bundle creation, CAS, materialization, and CAS-only result binding with verified checkout acquisition |
 | `internal/docker` | disposable Docker resources, writer proof, container GitHub credential delivery |
 | `internal/opencode` | pinned disposable OpenCode client and observations; the Router's exact live target/session capabilities, request policy, shutdown, and fencing |
-| `internal/proxy` | remote/operator ingress, pairing, and browser security |
+| `internal/web` | remote/operator ingress, pairing, browser security, and in-memory component readiness behind the liveness and readiness probes |
 | `internal/auth` | device identities, operator credential ID, and fixed-scope plugin device authorization and revocation (SQLite tables) |
 | `internal/githubapp` | credential file, installation tokens, repository discovery and authority |
 | `internal/config` | strict configuration loader and bootstrap/execution validation |
-| `internal/observability` | in-memory component readiness behind the liveness and readiness probes |
 | `internal/safeio` | atomic replace and bounded read of private files (App credentials, host key), trust-neutral filesystem helpers, the exclusive host-local repository-binding lease, and strict JSON validation before typed decoding |
 
 Integration packages under `integration/` qualify Docker and OpenCode; each has

@@ -642,7 +642,7 @@ func digest(label, value string) string {
 }
 
 // NewSecret returns 256 random bits, base64url-encoded without padding: the
-// format of device codes and of the proxy's pairing codes and device sessions.
+// format of device codes and of the web package's pairing codes and device sessions.
 func NewSecret() string { return base64.RawURLEncoding.EncodeToString(randomBytes(deviceCodeBytes)) }
 
 func randomID(prefix string) string {
