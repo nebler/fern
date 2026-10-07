@@ -5,13 +5,13 @@ import "sync/atomic"
 type Component string
 
 const (
-	ComponentGitHubTaskDependency Component = "github-task-dependency"
+	ComponentGitHubDependency     Component = "github-dependency"
 	ComponentBackgroundRunProfile Component = "background-run-profile"
 	ComponentBackgroundRunSerial  Component = "background-run-serial"
 )
 
 var components = [...]Component{
-	ComponentGitHubTaskDependency,
+	ComponentGitHubDependency,
 	ComponentBackgroundRunProfile,
 	ComponentBackgroundRunSerial,
 }
@@ -27,10 +27,6 @@ func NewRegistry() *Registry {
 }
 
 func (registry *Registry) Healthy(component Component) bool {
-	return registry.set(component, true)
-}
-
-func (registry *Registry) Qualified(component Component) bool {
 	return registry.set(component, true)
 }
 

@@ -12,7 +12,6 @@ import (
 
 	"github.com/docker/docker/client"
 	"github.com/nebler/fern/internal/config"
-	"github.com/nebler/fern/internal/hostlease"
 )
 
 func loopbackURL(address string) (string, error) {
@@ -44,14 +43,6 @@ func loadCommandConfig(configPath, envPath string) (config.Config, error) {
 		return config.Config{}, err
 	}
 	return config.Load(configPath, values)
-}
-
-func acquireHostLease(name string) (*hostlease.Lease, error) {
-	lockDir, err := statePath("locks")
-	if err != nil {
-		return nil, err
-	}
-	return hostlease.Acquire(lockDir, name)
 }
 
 func validateDockerTopology() error {

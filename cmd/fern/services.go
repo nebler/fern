@@ -77,11 +77,11 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 	}
 	github := cfg.Workspace.GitHub
 	ids := task.NewSecureGenerator()
-	authority, err := resolveGitHubAuthority(github)
+	installationTokens, err := resolveGitHubAuthority(github)
 	if err != nil {
 		return nil, err
 	}
-	status.Healthy(observability.ComponentGitHubTaskDependency)
+	status.Healthy(observability.ComponentGitHubDependency)
 
 	roots, err := prepareStateRoots(cfg.Workspace.Name)
 	if err != nil {
@@ -116,7 +116,7 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 	provider, err := taskenvdocker.New(ctx, taskenvdocker.Config{
 		RuntimeStorageRoot: cfg.Runs.RuntimeStorageRoot,
 		StateRoot:          roots.provider, Repository: repository, GitExecutable: gitExecutable(),
-		GitHubTokens: authority.installationTokens, GitHubRepository: githubIdentity,
+		GitHubTokens: installationTokens, GitHubRepository: githubIdentity,
 		GitHubRepositoryFullName: durableWorkspace.RepositoryFullName,
 		ImageReference:           cfg.Runs.BackgroundImage, ImageID: cfg.Runs.BackgroundImageID, MemoryBytes: 1 << 30,
 		WallTimeout: 24 * time.Hour, GitTimeout: backgroundCloneTimeout,
@@ -173,7 +173,7 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 	if err != nil {
 		return nil, err
 	}
-	status.Qualified(observability.ComponentBackgroundRunProfile)
+	status.Healthy(observability.ComponentBackgroundRunProfile)
 	status.Healthy(observability.ComponentBackgroundRunSerial)
 	closeArtifact, closeProvider = false, false
 	return &runServices{store: store, runs: runs,
@@ -253,11 +253,9 @@ func ensureWorkspace(ctx context.Context, cfg config.Config, store *taskstore.St
 	return store.EnsureWorkspace(ctx, desired)
 }
 
-type gitHubAuthority struct {
-	installationTokens githubapp.InstallationTokenSource
-}
-
-func resolveGitHubAuthority(github config.GitHubApp) (*gitHubAuthority, error) {
+// resolveGitHubAuthority loads the stored App credentials and returns the
+// installation token source for the configured repository binding.
+func resolveGitHubAuthority(github config.GitHubApp) (githubapp.InstallationTokenSource, error) {
 	directory, err := statePath("github-app")
 	if err != nil {
 		return nil, err
@@ -281,7 +279,7 @@ func resolveGitHubAuthority(github config.GitHubApp) (*gitHubAuthority, error) {
 	if _, err := githubapp.NewRepositoryIdentity(int64(github.InstallationID), int64(github.Repository.ID)); err != nil {
 		return nil, err
 	}
-	return &gitHubAuthority{installationTokens: tokens}, nil
+	return tokens, nil
 }
 
 func gitExecutable() string {

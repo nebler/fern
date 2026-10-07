@@ -38,11 +38,11 @@ func TestGitHubAuthorityRequiresHostAppCredentialsAndProvidesTokens(t *testing.T
 	if err := store.Save(credentials); err != nil {
 		t.Fatal(err)
 	}
-	authority, err := resolveGitHubAuthority(github)
+	tokens, err := resolveGitHubAuthority(github)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if authority.installationTokens == nil {
+	if tokens == nil {
 		t.Fatal("production App authority omitted installation token source")
 	}
 	github.InstallationID = 0

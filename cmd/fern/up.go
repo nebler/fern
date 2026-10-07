@@ -16,6 +16,7 @@ import (
 	"github.com/nebler/fern/internal/config"
 	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/githubapp"
+	"github.com/nebler/fern/internal/hostlease"
 	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/proxy"
@@ -50,7 +51,11 @@ func runUp(args []string, log *slog.Logger) (resultErr error) {
 	rootCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
 	group, serviceCtx := errgroup.WithContext(rootCtx)
-	lease, err := acquireHostLease(cfg.Workspace.Name)
+	lockDirectory, err := statePath("locks")
+	if err != nil {
+		return err
+	}
+	lease, err := hostlease.Acquire(lockDirectory, cfg.Workspace.Name)
 	if err != nil {
 		return err
 	}
@@ -121,7 +126,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 	var services *runServices
 	if cfg.Workspace.GitHub.InstallationID == 0 {
 		pending := errors.New("GitHub App installation ID is not configured")
-		status.Blocked(observability.ComponentGitHubTaskDependency, pending)
+		status.Blocked(observability.ComponentGitHubDependency, pending)
 		log.Warn("Background Runs await GitHub App installation binding and restart", "repository", cfg.Workspace.Name)
 	} else {
 		if err := config.Validate(cfg); err != nil {
@@ -130,7 +135,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 		services, err = newRunServices(serviceCtx, cfg, state, route, status, log)
 		if errors.Is(err, githubapp.ErrCredentialsNotFound) {
 			log.Warn("Background Runs await GitHub App credentials ('fern credentials set') and restart", "repository", cfg.Workspace.Name)
-			status.Blocked(observability.ComponentGitHubTaskDependency, err)
+			status.Blocked(observability.ComponentGitHubDependency, err)
 			services, err = nil, nil
 		}
 	}
