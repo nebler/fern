@@ -1,7 +1,6 @@
 package control
 
 import (
-	"encoding/base64"
 	"fmt"
 	"strings"
 	"testing"
@@ -9,12 +8,6 @@ import (
 
 	"github.com/nebler/fern/internal/taskstore/taskstoretest"
 )
-
-func testStore(t *testing.T) *Store {
-	t.Helper()
-	database, _ := taskstoretest.Open(t)
-	return New(database.DB())
-}
 
 func TestStorePersistsDevices(t *testing.T) {
 	database, path := taskstoretest.Open(t)
@@ -42,7 +35,7 @@ func TestStorePersistsDevices(t *testing.T) {
 }
 
 func TestStorePrunesExpiredDevice(t *testing.T) {
-	store := testStore(t)
+	store := New(taskstoretest.DB(t))
 	now := time.Now()
 	if _, err := store.AddDevice("expired", "old", now, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
@@ -53,7 +46,7 @@ func TestStorePrunesExpiredDevice(t *testing.T) {
 }
 
 func TestStoreAuthenticationReturnsDurableDeviceIdentity(t *testing.T) {
-	store := testStore(t)
+	store := New(taskstoretest.DB(t))
 	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
 	want, err := store.AddDevice("device-secret", "Phone", now, now.Add(2*time.Hour))
 	if err != nil {
@@ -73,7 +66,7 @@ func TestStoreAuthenticationReturnsDurableDeviceIdentity(t *testing.T) {
 }
 
 func TestDeviceLimitAdmitsAfterExpiredDevicesArePruned(t *testing.T) {
-	store := testStore(t)
+	store := New(taskstoretest.DB(t))
 	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
 	for i := range maxDevices {
 		expires := now.Add(time.Hour)
@@ -98,13 +91,13 @@ func TestEnsureOperatorCredentialIDIsStableRandomAndPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(first, "control-") || len(first) != len("control-")+base64.RawURLEncoding.EncodedLen(16) {
+	if !strings.HasPrefix(first, "control-") || len(first) != len("control-")+26 {
 		t.Fatalf("operator credential ID %q has unexpected format", first)
 	}
 	if persisted, err := New(database.DB()).EnsureOperatorCredentialID(); err != nil || persisted != first {
 		t.Fatalf("persisted ID = %q, %v; want %q", persisted, err, first)
 	}
-	if different, err := testStore(t).EnsureOperatorCredentialID(); err != nil || different == first {
+	if different, err := New(taskstoretest.DB(t)).EnsureOperatorCredentialID(); err != nil || different == first {
 		t.Fatalf("independent store reused ID %q (%v)", different, err)
 	}
 }

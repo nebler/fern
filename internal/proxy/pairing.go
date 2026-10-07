@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -14,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/nebler/fern/internal/control"
+	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/task"
 )
 
@@ -69,12 +69,7 @@ func (state *pairingState) issue(writer http.ResponseWriter, _ *http.Request) {
 		http.Error(writer, "too many outstanding pairing codes", http.StatusTooManyRequests)
 		return
 	}
-	code, err := randomCredential()
-	if err != nil {
-		state.mu.Unlock()
-		http.Error(writer, "failed to create pairing code", http.StatusInternalServerError)
-		return
-	}
+	code := pluginauth.NewSecret()
 	digest := sha256.Sum256([]byte(code))
 	state.codes[digest] = now.Add(pairingCodeTTL)
 	state.lastIssued = now
@@ -135,18 +130,14 @@ func (state *pairingState) pair(writer http.ResponseWriter, request *http.Reques
 		http.Error(writer, "pairing is temporarily limited", http.StatusTooManyRequests)
 		return
 	}
-	session, pairErr := randomCredential()
-	if pairErr == nil {
-		// Consume the one-time code before creating a durable device grant. If
-		// a later effect fails, the operator issues a new code rather than
-		// risking reuse after a lost response.
-		delete(state.codes, hash)
-		delete(state.attempts, hash)
-		state.lastSuccess = now
-	}
-	if pairErr == nil {
-		_, pairErr = state.store.AddDevice(session, name, now, now.Add(deviceCredentialTTL))
-	}
+	// Consume the one-time code before creating a durable device grant. If a
+	// later effect fails, the operator issues a new code rather than risking
+	// reuse after a lost response.
+	delete(state.codes, hash)
+	delete(state.attempts, hash)
+	state.lastSuccess = now
+	session := pluginauth.NewSecret()
+	_, pairErr := state.store.AddDevice(session, name, now, now.Add(deviceCredentialTTL))
 	state.mu.Unlock()
 	if pairErr != nil {
 		writeUnavailable(writer, "pairing state")
@@ -202,15 +193,9 @@ func (state *pairingState) admit(writer http.ResponseWriter, request *http.Reque
 		unregister()
 		cancel()
 	}
-	requestID, err := randomCredential()
-	if err != nil {
-		release()
-		http.Error(writer, "device identity unavailable", http.StatusInternalServerError)
-		return nil, nil, false
-	}
 	actor := task.ActorSnapshot{
 		Type: task.ActorDevice, ID: device.ID, DisplayName: device.Name, CredentialID: device.ID,
-		Authentication: "fern_device_cookie", RequestID: requestID,
+		Authentication: "fern_device_cookie", RequestID: rand.Text(),
 	}
 	ctx = context.WithValue(ctx, csrfCredentialKey{}, credential)
 	request = request.WithContext(task.WithActor(ctx, actor))
@@ -234,12 +219,4 @@ func (state *pairingState) prune(now time.Time) {
 		first++
 	}
 	state.invalidAttempts = append([]time.Time(nil), state.invalidAttempts[first:]...)
-}
-
-func randomCredential() (string, error) {
-	value := make([]byte, 32)
-	if _, err := rand.Read(value); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(value), nil
 }

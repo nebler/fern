@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"net/http"
@@ -46,14 +47,9 @@ func (auth *operatorAuth) authenticate(writer http.ResponseWriter, request *http
 		http.Error(writer, "unauthorized", http.StatusUnauthorized)
 		return 0, nil, nil, false
 	}
-	requestID, err := randomCredential()
-	if err != nil {
-		http.Error(writer, "operator identity unavailable", http.StatusInternalServerError)
-		return 0, nil, nil, false
-	}
 	actor := task.ActorSnapshot{
 		Type: task.ActorOperator, ID: "local-operator", DisplayName: "Local operator",
-		CredentialID: auth.credentialID, Authentication: "basic", RequestID: requestID,
+		CredentialID: auth.credentialID, Authentication: "basic", RequestID: rand.Text(),
 	}
 	request = request.WithContext(task.WithActor(request.Context(), actor))
 	stripCredentials(request)

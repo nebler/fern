@@ -175,20 +175,9 @@ func New(db *sql.DB) *Store {
 
 func (store *Store) Start(now time.Time) (StartResult, error) {
 	now = now.UTC()
-	deviceCode, err := randomBase64(deviceCodeBytes)
-	if err != nil {
-		return StartResult{}, err
-	}
-	userCode, err := randomUserCode()
-	if err != nil {
-		return StartResult{}, err
-	}
-	id, err := randomID(authorizationIDTag)
-	if err != nil {
-		return StartResult{}, err
-	}
+	deviceCode, userCode, id := NewSecret(), randomUserCode(), randomID(authorizationIDTag)
 	expiresAt := now.Add(authorizationTTL)
-	err = store.transact(context.Background(), func(tx *sql.Tx) error {
+	err := store.transact(context.Background(), func(tx *sql.Tx) error {
 		if err := prune(tx, now); err != nil {
 			return err
 		}
@@ -333,10 +322,7 @@ WHERE state<>'active' ORDER BY CASE state WHEN 'expired' THEN expires_at ELSE re
 		} else if full {
 			return ErrCapacity
 		}
-		credentialID, err := randomID(credentialIDTag)
-		if err != nil {
-			return err
-		}
+		credentialID := randomID(credentialIDTag)
 		credential = Credential{ID: credentialID, AuthorizationID: id, State: Active, CreatedAt: now,
 			ExpiresAt: now.Add(credentialTTL), ApprovedBy: attribution}
 		approvedBy, err := json.Marshal(attribution)
@@ -655,26 +641,25 @@ func digest(domain, value string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func randomBase64(size int) (string, error) {
+// NewSecret returns 256 random bits, base64url-encoded without padding: the
+// format of device codes and of the proxy's pairing codes and device sessions.
+func NewSecret() string { return base64.RawURLEncoding.EncodeToString(randomBytes(deviceCodeBytes)) }
+
+func randomID(prefix string) string {
+	return prefix + base64.RawURLEncoding.EncodeToString(randomBytes(randomIDBytes))
+}
+
+func randomUserCode() string {
+	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(randomBytes(userCodeBytes))
+	return encoded[:5] + "-" + encoded[5:10] + "-" + encoded[10:]
+}
+
+// randomBytes reads size bytes from crypto/rand, which never returns an error
+// (it aborts the process instead) since Go 1.24.
+func randomBytes(size int) []byte {
 	value := make([]byte, size)
-	if _, err := rand.Read(value); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(value), nil
-}
-
-func randomID(prefix string) (string, error) {
-	value, err := randomBase64(randomIDBytes)
-	return prefix + value, err
-}
-
-func randomUserCode() (string, error) {
-	value := make([]byte, userCodeBytes)
-	if _, err := rand.Read(value); err != nil {
-		return "", err
-	}
-	encoded := base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(value)
-	return encoded[:5] + "-" + encoded[5:10] + "-" + encoded[10:], nil
+	_, _ = rand.Read(value)
+	return value
 }
 
 func canonicalBase64(value string, size int) bool {

@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
@@ -57,7 +59,7 @@ func (handler *pluginAuthHTTP) start(writer http.ResponseWriter, request *http.R
 	}
 	result, err := handler.store.Start(now)
 	if err != nil {
-		writePluginAuthError(writer, err)
+		writePluginAuthError(writer, err, 0)
 		return
 	}
 	writeJSONStatus(writer, http.StatusCreated, struct {
@@ -71,7 +73,7 @@ func (handler *pluginAuthHTTP) start(writer http.ResponseWriter, request *http.R
 		Scopes                  []string `json:"scopes"`
 	}{result.AuthorizationID, result.DeviceCode, result.UserCode, verificationURI,
 		verificationURI + "?" + url.Values{"id": {result.AuthorizationID}, "code": {result.UserCode}}.Encode(),
-		int64(result.ExpiresAt.Sub(now).Seconds()), int64(result.Interval.Seconds()), fixedScopes()}, nil)
+		int64(result.ExpiresAt.Sub(now).Seconds()), int64(result.Interval.Seconds()), pluginauth.Scopes()}, nil)
 }
 
 func (handler *pluginAuthHTTP) poll(writer http.ResponseWriter, request *http.Request) {
@@ -84,7 +86,7 @@ func (handler *pluginAuthHTTP) poll(writer http.ResponseWriter, request *http.Re
 	now := handler.now()
 	result, err := handler.store.Poll(body.DeviceCode, now)
 	if err != nil {
-		writePluginAuthErrorWithRetry(writer, err, int(pollIntervalSeconds()))
+		writePluginAuthError(writer, err, pollIntervalSeconds)
 		return
 	}
 	switch result.State {
@@ -101,7 +103,7 @@ func (handler *pluginAuthHTTP) poll(writer http.ResponseWriter, request *http.Re
 			CredentialID string   `json:"credential_id"`
 			ExpiresIn    int64    `json:"expires_in"`
 			Scopes       []string `json:"scopes"`
-		}{body.DeviceCode, "Bearer", result.CredentialID, int64(result.ExpiresAt.Sub(now).Seconds()), fixedScopes()}, nil)
+		}{body.DeviceCode, "Bearer", result.CredentialID, int64(result.ExpiresAt.Sub(now).Seconds()), pluginauth.Scopes()}, nil)
 	default:
 		writeUnavailable(writer, "plugin authorization")
 	}
@@ -137,15 +139,9 @@ func (handler *pluginAuthHTTP) authenticate(writer http.ResponseWriter, request 
 		unregister()
 		cancel()
 	}
-	requestID, err := randomCredential()
-	if err != nil {
-		release()
-		http.Error(writer, "plugin identity unavailable", http.StatusInternalServerError)
-		return nil, nil, false
-	}
 	actor := task.ActorSnapshot{
 		Type: task.ActorOpenCode, ID: credential.ID, DisplayName: pluginClientName,
-		CredentialID: credential.ID, Authentication: "fern_plugin_bearer", RequestID: requestID,
+		CredentialID: credential.ID, Authentication: "fern_plugin_bearer", RequestID: rand.Text(),
 	}
 	ctx = pluginauth.WithRequestAuthorization(ctx, credential)
 	request = request.WithContext(task.WithActor(ctx, actor))
@@ -166,7 +162,7 @@ func (handler *pluginAuthHTTP) revokeSelf(writer http.ResponseWriter, request *h
 		err = handler.store.Revoke(authorization.Credential.ID, actor, handler.now())
 	}
 	if err != nil {
-		writePluginAuthError(writer, err)
+		writePluginAuthError(writer, err, 0)
 		return
 	}
 	writer.WriteHeader(http.StatusNoContent)
@@ -185,17 +181,13 @@ func (handler *pluginAuthHTTP) authorizationPage(writer http.ResponseWriter, req
 		http.NotFound(writer, request)
 		return
 	}
-	nonce, err := randomCredential()
-	if err != nil {
-		http.Error(writer, "render plugin authorization", http.StatusInternalServerError)
-		return
-	}
+	nonce := rand.Text()
 	approvePath := "/fern/api/plugin-auth/requests/" + id + "/approve"
 	denyPath := "/fern/api/plugin-auth/requests/" + id + "/deny"
 	writer.Header().Set("Referrer-Policy", "no-referrer")
 	writer.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-"+nonce+"'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := pluginAuthorizationTemplate.Execute(writer, pluginAuthorizationPage{pluginClientName, code, approvePath, denyPath, nonce, fixedScopes()}); err != nil {
+	if err := pluginAuthorizationTemplate.Execute(writer, pluginAuthorizationPage{pluginClientName, code, approvePath, denyPath, nonce, pluginauth.Scopes()}); err != nil {
 		http.Error(writer, "render plugin authorization", http.StatusInternalServerError)
 	}
 }
@@ -220,7 +212,7 @@ func (handler *pluginAuthHTTP) decide(approve bool) http.HandlerFunc {
 			err = handler.store.Deny(request.Context(), id, body.UserCode, actor, handler.now())
 		}
 		if err != nil {
-			writePluginAuthError(writer, err)
+			writePluginAuthError(writer, err, 0)
 			return
 		}
 		writer.WriteHeader(http.StatusNoContent)
@@ -232,7 +224,7 @@ func (handler *pluginAuthHTTP) credentials(writer http.ResponseWriter, _ *http.R
 	writeJSON(writer, struct {
 		Credentials []pluginauth.Credential `json:"credentials"`
 		Scopes      []string                `json:"scopes"`
-	}{credentials, fixedScopes()}, err)
+	}{credentials, pluginauth.Scopes()}, err)
 }
 
 func (handler *pluginAuthHTTP) revokeCredential(writer http.ResponseWriter, request *http.Request) {
@@ -244,7 +236,7 @@ func (handler *pluginAuthHTTP) revokeCredential(writer http.ResponseWriter, requ
 	case errors.Is(err, pluginauth.ErrNotFound) || errors.Is(err, os.ErrNotExist):
 		http.NotFound(writer, request)
 	case err != nil:
-		writePluginAuthError(writer, err)
+		writePluginAuthError(writer, err, 0)
 	default:
 		writer.WriteHeader(http.StatusNoContent)
 	}
@@ -262,7 +254,7 @@ func decodePluginAuthJSON(writer http.ResponseWriter, request *http.Request, val
 		http.Error(writer, "invalid plugin authorization request", http.StatusBadRequest)
 		return false
 	}
-	decoder := json.NewDecoder(strings.NewReader(string(payload)))
+	decoder := json.NewDecoder(bytes.NewReader(payload))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(value); err != nil {
 		http.Error(writer, "invalid plugin authorization request", http.StatusBadRequest)
@@ -284,24 +276,13 @@ func exactBearer(values []string) (string, bool) {
 	return token, token != "" && !strings.ContainsAny(token, " \t\r\n,")
 }
 
-func bearerLikeAuthorization(values []string) bool {
-	if len(values) != 1 {
-		return false
-	}
-	value := values[0]
+// bearerLike reports whether one Authorization value uses the Bearer scheme,
+// in any case, so it can never fall through to another realm.
+func bearerLike(value string) bool {
 	if len(value) < len("Bearer") || !strings.EqualFold(value[:len("Bearer")], "Bearer") {
 		return false
 	}
 	return len(value) == len("Bearer") || value[len("Bearer")] == ' ' || value[len("Bearer")] == '\t'
-}
-
-func containsBearerLikeAuthorization(values []string) bool {
-	for _, value := range values {
-		if bearerLikeAuthorization([]string{value}) {
-			return true
-		}
-	}
-	return false
 }
 
 func pluginVerificationURI(request *http.Request) (string, bool) {
@@ -317,21 +298,13 @@ func rejectPluginBearer(writer http.ResponseWriter) {
 	http.Error(writer, "unauthorized", http.StatusUnauthorized)
 }
 
-func pollIntervalSeconds() int64 {
-	// Kept beside the HTTP vocabulary so all valid and invalid polls expose the
-	// same retry interval without revealing whether a code exists.
-	return 5
-}
+// pollIntervalSeconds is the retry interval every poll exposes, valid or not,
+// so it never reveals whether a code exists.
+const pollIntervalSeconds = 5
 
-func fixedScopes() []string {
-	return pluginauth.Scopes()
-}
-
-func writePluginAuthError(writer http.ResponseWriter, err error) {
-	writePluginAuthErrorWithRetry(writer, err, 0)
-}
-
-func writePluginAuthErrorWithRetry(writer http.ResponseWriter, err error, retryAfter int) {
+// writePluginAuthError maps a pluginauth error to its HTTP status. A rate
+// limit carries retryAfter seconds, at least one.
+func writePluginAuthError(writer http.ResponseWriter, err error, retryAfter int) {
 	switch {
 	case errors.Is(err, pluginauth.ErrRateLimited):
 		if retryAfter <= 0 {

@@ -3,6 +3,7 @@ package proxy
 import (
 	"errors"
 	"net/http"
+	"slices"
 )
 
 // realm is the set of credential classes a route admits. A request
@@ -45,13 +46,13 @@ func NewHandlers(controls Controls, origins TrustedOrigins) (Handlers, error) {
 		authorization := request.Header.Values("Authorization")
 		switch {
 		case len(authorization) > 1:
-			if containsBearerLikeAuthorization(authorization) {
+			if slices.ContainsFunc(authorization, bearerLike) {
 				rejectPluginBearer(writer)
 			} else {
 				http.Error(writer, "unauthorized", http.StatusUnauthorized)
 			}
 			return 0, nil, nil, false
-		case bearerLikeAuthorization(authorization):
+		case slices.ContainsFunc(authorization, bearerLike):
 			request, release, ok := plugins.authenticate(writer, request)
 			return plugin, request, release, ok
 		default:
@@ -170,7 +171,7 @@ func listener(next http.Handler, origin trustedOrigin) http.Handler {
 func rejectBearer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		values := request.Header.Values("Authorization")
-		if len(values) > 1 || bearerLikeAuthorization(values) {
+		if len(values) > 1 || slices.ContainsFunc(values, bearerLike) {
 			http.NotFound(writer, request)
 			return
 		}

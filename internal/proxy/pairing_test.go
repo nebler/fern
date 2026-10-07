@@ -11,8 +11,7 @@ import (
 )
 
 func TestDeviceRevokedBeforeAdmissionIsUnauthenticated(t *testing.T) {
-	database, _ := taskstoretest.Open(t)
-	store := control.New(database.DB())
+	store := control.New(taskstoretest.DB(t))
 	now := time.Now()
 	device, err := store.AddDevice("device-token", "phone", now, now.Add(time.Hour))
 	if err != nil {

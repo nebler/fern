@@ -51,7 +51,7 @@ func TestAuthorizationPersistsDigestsAndReusesPresentedBearer(t *testing.T) {
 }
 
 func TestAuthorizationDenialExpiryRateAndStrictCodes(t *testing.T) {
-	store := testStore(t)
+	store := New(taskstoretest.DB(t))
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	denied, err := store.Start(now)
 	if err != nil {
@@ -101,7 +101,7 @@ func TestAuthorizationDenialExpiryRateAndStrictCodes(t *testing.T) {
 func TestCanceledDecisionCannotActivateOrDeny(t *testing.T) {
 	for _, decision := range []string{"approve", "deny"} {
 		t.Run(decision, func(t *testing.T) {
-			store := testStore(t)
+			store := New(taskstoretest.DB(t))
 			now := time.Now().UTC()
 			started, err := store.Start(now)
 			if err != nil {
@@ -128,7 +128,7 @@ func TestCanceledDecisionCannotActivateOrDeny(t *testing.T) {
 }
 
 func TestPollDistinguishesExpiredAndRevokedCredentials(t *testing.T) {
-	store := testStore(t)
+	store := New(taskstoretest.DB(t))
 	now := time.Now().UTC()
 	expired := approveTestCredential(t, store, now)
 	if result, err := store.Poll(expired.deviceCode, expired.credential.ExpiresAt.Add(time.Second)); err != nil || result.State != PollExpired {
@@ -145,7 +145,7 @@ func TestPollDistinguishesExpiredAndRevokedCredentials(t *testing.T) {
 }
 
 func TestDurableRevokeCancelsOnlyRegisteredCredentialRequests(t *testing.T) {
-	store := testStore(t)
+	store := New(taskstoretest.DB(t))
 	now := time.Now().UTC()
 	first := approveTestCredential(t, store, now)
 	second := approveTestCredential(t, store, now.Add(2*time.Second))
@@ -182,7 +182,7 @@ func TestDurableRevokeCancelsOnlyRegisteredCredentialRequests(t *testing.T) {
 }
 
 func TestConcurrentApprovalActivatesExactlyOneCredential(t *testing.T) {
-	store := testStore(t)
+	store := New(taskstoretest.DB(t))
 	now := time.Now().UTC()
 	started, err := store.Start(now)
 	if err != nil {
@@ -226,7 +226,7 @@ func TestConcurrentApprovalActivatesExactlyOneCredential(t *testing.T) {
 }
 
 func TestRegisterAndRevokeRaceLeavesNoAdmittedRequestActive(t *testing.T) {
-	store := testStore(t)
+	store := New(taskstoretest.DB(t))
 	now := time.Now().UTC()
 	approved := approveTestCredential(t, store, now)
 	const requests = 32
@@ -279,12 +279,6 @@ func TestRegisterAndRevokeRaceLeavesNoAdmittedRequestActive(t *testing.T) {
 	}
 }
 
-func testStore(t *testing.T) *Store {
-	t.Helper()
-	database, _ := taskstoretest.Open(t)
-	return New(database.DB())
-}
-
 func operatorActor() task.ActorSnapshot {
 	return task.ActorSnapshot{Type: task.ActorOperator, ID: "local-operator", DisplayName: "Local operator", CredentialID: "control-test", Authentication: "basic", RequestID: "request-test"}
 }
@@ -325,7 +319,7 @@ func TestRequestAuthorizationHasOnlyFixedScopes(t *testing.T) {
 }
 
 func TestCapacityEvictsOnlyTerminalAuthorizationsAndBoundsInvalidPolls(t *testing.T) {
-	store := testStore(t)
+	store := New(taskstoretest.DB(t))
 	now := time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)
 	var first StartResult
 	for i := range maxAuthorizations {

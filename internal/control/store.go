@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
-	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -220,17 +219,6 @@ func tokenHash(token string) string {
 // audit snapshots can distinguish control-surface credentials from device IDs.
 const OperatorCredentialIDPrefix = "control-"
 
-// newOperatorCredentialID mints a fresh random operator credential identifier.
-// It carries no derived secret material, so persisting it in audit snapshots
-// creates no offline guessing opportunity.
-func newOperatorCredentialID() (string, error) {
-	random := make([]byte, 16)
-	if _, err := rand.Read(random); err != nil {
-		return "", fmt.Errorf("generate Fern operator credential ID: %w", err)
-	}
-	return OperatorCredentialIDPrefix + base64.RawURLEncoding.EncodeToString(random), nil
-}
-
 // EnsureOperatorCredentialID returns the stable random identifier attributed to
 // control-password operators in audit snapshots, generating and durably
 // recording one on first use. The identifier is pure randomness — never a
@@ -238,10 +226,9 @@ func newOperatorCredentialID() (string, error) {
 // an offline brute-force oracle for that secret. It is an identifier, not a
 // secret.
 func (store *Store) EnsureOperatorCredentialID() (string, error) {
-	generated, err := newOperatorCredentialID()
-	if err != nil {
-		return "", err
-	}
+	// 128 random bits with no derived secret material, so persisting the ID in
+	// audit snapshots creates no offline guessing opportunity.
+	generated := OperatorCredentialIDPrefix + rand.Text()
 	if _, err := store.db.Exec(`INSERT INTO operator_credential(singleton,id) VALUES(1,?) ON CONFLICT DO NOTHING`, generated); err != nil {
 		return "", fmt.Errorf("record Fern operator credential ID: %w", err)
 	}

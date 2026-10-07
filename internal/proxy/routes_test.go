@@ -51,8 +51,8 @@ type routeFixture struct {
 
 func newRouteFixture(t *testing.T) *routeFixture {
 	t.Helper()
-	database, _ := taskstoretest.Open(t)
-	store := control.New(database.DB())
+	database := taskstoretest.DB(t)
+	store := control.New(database)
 	now := time.Now()
 	phone, err := store.AddDevice(testDeviceToken, "phone", now, now.Add(time.Hour))
 	if err != nil {
@@ -62,7 +62,7 @@ func newRouteFixture(t *testing.T) *routeFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plugins := pluginauth.New(database.DB())
+	plugins := pluginauth.New(database)
 	approver := task.ActorSnapshot{Type: task.ActorOperator, ID: "local-operator", DisplayName: "Local operator",
 		CredentialID: "control-test", Authentication: "basic", RequestID: "request-test"}
 	approved, err := plugins.Start(now.Add(-2 * time.Minute))

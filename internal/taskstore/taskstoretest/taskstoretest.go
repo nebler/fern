@@ -5,6 +5,7 @@ package taskstoretest
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,6 +28,14 @@ func Open(t testing.TB) (*taskstore.Store, string) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	return store, path
+}
+
+// DB opens a fresh store like Open and returns only its shared handle, for
+// the packages (control, pluginauth) that issue their own SQL.
+func DB(t testing.TB) *sql.DB {
+	t.Helper()
+	store, _ := Open(t)
+	return store.DB()
 }
 
 // AssertNoSecrets fails if any secret appears in the database file or its
