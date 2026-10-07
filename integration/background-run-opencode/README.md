@@ -18,7 +18,7 @@ flowchart TD
   main -->|"real pinned protocol"| protocol["internal/opencode"]
   main -->|"serial lifecycle scenario"| serial["runSerialCoordinator"]
   serial -->|"durable identities and state"| store["internal/domain / internal/store"]
-  serial -->|"advance one durable step"| coord["internal/backgroundruncoord.RunOnce"]
+  serial -->|"advance one durable step"| coord["internal/coordinator.RunOnce"]
   coord -->|"runtime effects"| provider
   serial -->|"owned-session attachment"| route["startSerialRoute -> internal/opencode"]
   serial -->|"real API envelope and deny-policy checks"| attach["verifySerialRoute -> verifySerialAPIProjections / verifySerialDeniedMethods"]

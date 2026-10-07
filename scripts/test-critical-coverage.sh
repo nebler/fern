@@ -11,7 +11,7 @@ MODULE=github.com/nebler/fern
 PACKAGES=(
   internal/domain
   internal/opencode
-  internal/backgroundruncoord
+  internal/coordinator
   internal/docker
   internal/artifact
   internal/runapi
@@ -53,11 +53,11 @@ check_function() {
 
 check_package internal/domain 91
 check_package internal/opencode 84
-check_package internal/backgroundruncoord 28
+check_package internal/coordinator 28
 check_package internal/docker 72
 check_package internal/artifact 74
 check_package internal/runapi 68
 check_package internal/store 60
 
-check_function internal/backgroundruncoord/coordinator.go supervise 95
-check_function internal/backgroundruncoord/coordinator.go RunOnce 85
+check_function internal/coordinator/coordinator.go supervise 95
+check_function internal/coordinator/coordinator.go RunOnce 85

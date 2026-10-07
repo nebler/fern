@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/artifact"
-	"github.com/nebler/fern/internal/backgroundruncoord"
 	"github.com/nebler/fern/internal/config"
+	"github.com/nebler/fern/internal/coordinator"
 	"github.com/nebler/fern/internal/docker"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/githubapp"
@@ -136,7 +136,7 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 		return nil, err
 	}
 
-	coordinator, err := backgroundruncoord.New(runStore, provider, engine, ids, backgroundruncoord.Config{
+	coord, err := coordinator.New(runStore, provider, engine, ids, coordinator.Config{
 		WorkspaceID: durableWorkspace.ID,
 		Profile:     domain.SourceProfile, ImageIdentity: cfg.Runs.BackgroundImageID,
 		EnvironmentSHA256: docker.EnvironmentSHA256(nil), Agent: cfg.Runs.Agent,
@@ -165,7 +165,7 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 		Store:                       runStore, Route: route, Generator: ids, ActorResolver: domain.ContextActor,
 		BaseVerifier: baseVerifier, Now: time.Now, RunTimeout: cfg.Runs.RunTimeout, Agent: cfg.Runs.Agent,
 		ModelProvider: cfg.Runs.Model.Provider, Model: cfg.Runs.Model.ID, RetentionVerifier: resultSource,
-		SealPolicyVersion: "fern.background-user-seal.v1", Wake: coordinator.Wake,
+		SealPolicyVersion: "fern.background-user-seal.v1", Wake: coord.Wake,
 	})
 	if err != nil {
 		return nil, err
@@ -174,7 +174,7 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 	status.Healthy(observability.ComponentBackgroundRunSerial)
 	closeArtifact, closeProvider = false, false
 	return &runServices{store: runStore, runs: runs,
-		background: coordinator, provider: provider, artifact: engine, status: status}, nil
+		background: coord, provider: provider, artifact: engine, status: status}, nil
 }
 
 // stateRoots are the per-workspace durable directories under ~/.fern/runs.

@@ -547,7 +547,7 @@ ownership boundaries.
 | --- | --- |
 | `internal/domain` | identifiers, actor snapshots, idempotency vocabulary, persistence-independent lifecycle policy, immutable resource/runtime identities, and shared Git ref, GitHub name/remote, and path validation |
 | `internal/runapi` | run HTTP contract (plugin bearer; operator for list/get/attach), attachment admission, plus create/stop/seal policy, admission, replay, and post-commit notification |
-| `internal/backgroundruncoord` | serial run effect coordinator and recovery |
+| `internal/coordinator` | serial run effect coordinator and recovery |
 | `cmd/fern` | CLI, composition, backup, credentials, process lifecycle |
 | `internal/store` | the SQLite database: schema 12, run/result authority and state machines |
 | `internal/artifact` | deterministic Git bundle creation, CAS, materialization, and CAS-only result binding with verified checkout acquisition |

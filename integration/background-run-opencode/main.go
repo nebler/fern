@@ -24,7 +24,7 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 	"github.com/nebler/fern/internal/artifact"
-	"github.com/nebler/fern/internal/backgroundruncoord"
+	"github.com/nebler/fern/internal/coordinator"
 	"github.com/nebler/fern/internal/docker"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/opencode"
@@ -557,20 +557,20 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 	baseTransport := http.DefaultTransport.(*http.Transport).Clone()
 	loss := &lostResponseTransport{base: baseTransport, path: "/api/session/" + string(generated.OpenCodeSessionID) + "/prompt"}
 	operationCtx, cancelOperation := context.WithCancel(ctx)
-	config := backgroundruncoord.Config{
+	config := coordinator.Config{
 		WorkspaceID: workspaceID,
 		Profile:     opencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: docker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
 		OperationTimeout: 20 * time.Second, PollInterval: 100 * time.Millisecond,
 		HistoryBounds: opencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000}, Now: time.Now,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: loss}, AfterPromptCall: func(error) { cancelOperation() }, Route: route,
 	}
-	coordinator, err := backgroundruncoord.New(runStore, provider, engine, ids, config)
+	coord, err := coordinator.New(runStore, provider, engine, ids, config)
 	if err != nil {
 		_ = runStore.Close()
 		return err
 	}
 	for step := 0; step < 20; step++ {
-		err = coordinator.RunOnce(operationCtx)
+		err = coord.RunOnce(operationCtx)
 		run, readErr := runStore.GetBackgroundRun(context.Background(), workspaceID, admission.Run.RunID, actor)
 		if readErr != nil {
 			_ = runStore.Close()
@@ -614,13 +614,13 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 	config.AfterPromptCall = nil
 	config.Now = func() time.Time { return time.Now().Add(2 * time.Minute) }
 	config.Route = route
-	coordinator, err = backgroundruncoord.New(runStore, provider, engine, ids, config)
+	coord, err = coordinator.New(runStore, provider, engine, ids, config)
 	if err != nil {
 		return err
 	}
 	var current store.BackgroundRun
 	for step := 0; step < 10; step++ {
-		if err := coordinator.RunOnce(context.Background()); err != nil && !errors.Is(err, backgroundruncoord.ErrNoWork) {
+		if err := coord.RunOnce(context.Background()); err != nil && !errors.Is(err, coordinator.ErrNoWork) {
 			return err
 		}
 		current, err = runStore.GetBackgroundRun(context.Background(), workspaceID, admission.Run.RunID, actor)
@@ -657,7 +657,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 	if err != nil || statsAfter.Calls != statsBefore.Calls+1 {
 		return fmt.Errorf("serial provider calls before=%d after=%d error=%v", statsBefore.Calls, statsAfter.Calls, err)
 	}
-	if err := coordinator.RunOnce(context.Background()); err != nil {
+	if err := coord.RunOnce(context.Background()); err != nil {
 		return err
 	}
 	current, err = runStore.GetBackgroundRun(context.Background(), workspaceID, admission.Run.RunID, actor)
@@ -674,7 +674,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 	if status, routeErr := serialRouteStatus(routeURL, attachmentToken, "/api/health"); routeErr != nil || status != http.StatusBadGateway {
 		return fmt.Errorf("replacement reached route before reconciliation status=%d error=%v", status, routeErr)
 	}
-	observeErr := coordinator.RunOnce(context.Background())
+	observeErr := coord.RunOnce(context.Background())
 	current, err = runStore.GetBackgroundRun(context.Background(), workspaceID, admission.Run.RunID, actor)
 	if !errors.Is(observeErr, docker.ErrIdentityMismatch) || err != nil || current.State != store.BackgroundRunCleanupRequired {
 		return fmt.Errorf("serial runtime replacement state=%s observe_error=%v read_error=%v", current.State, observeErr, err)
@@ -698,7 +698,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 		return fmt.Errorf("operator remove quarantined replacement: %w", err)
 	}
 	for step := 0; step < 20; step++ {
-		if err := coordinator.RunOnce(context.Background()); err != nil && !errors.Is(err, backgroundruncoord.ErrNoWork) {
+		if err := coord.RunOnce(context.Background()); err != nil && !errors.Is(err, coordinator.ErrNoWork) {
 			return err
 		}
 		current, err = runStore.GetBackgroundRun(context.Background(), workspaceID, admission.Run.RunID, actor)
@@ -811,7 +811,7 @@ func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository 
 	if err != nil {
 		return err
 	}
-	config := backgroundruncoord.Config{
+	config := coordinator.Config{
 		WorkspaceID: workspaceID,
 		Profile:     opencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: docker.EnvironmentSHA256(nil),
 		Agent: "contract", ModelProvider: "test", Model: "test-model", OperationTimeout: 30 * time.Second,
@@ -819,14 +819,14 @@ func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository 
 		HistoryBounds: opencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000},
 		Now:           func() time.Time { return time.Now().Add(3 * time.Minute) }, HTTPClient: &http.Client{Timeout: 10 * time.Second}, Route: route,
 	}
-	coordinator, err := backgroundruncoord.New(runStore, provider, engine, ids, config)
+	coord, err := coordinator.New(runStore, provider, engine, ids, config)
 	if err != nil {
 		return err
 	}
 	var run store.BackgroundRun
 	for step := 0; step < 25; step++ {
-		runErr := coordinator.RunOnce(ctx)
-		if runErr != nil && !errors.Is(runErr, backgroundruncoord.ErrNoWork) && !errors.Is(runErr, opencode.ErrNotReady) {
+		runErr := coord.RunOnce(ctx)
+		if runErr != nil && !errors.Is(runErr, coordinator.ErrNoWork) && !errors.Is(runErr, opencode.ErrNotReady) {
 			return fmt.Errorf("advance retained run: %w", runErr)
 		}
 		run, err = runStore.GetBackgroundRun(ctx, workspaceID, admission.Run.RunID, actor)
@@ -872,8 +872,8 @@ func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository 
 		return err
 	}
 	for step := 0; step < 25; step++ {
-		runErr := coordinator.RunOnce(ctx)
-		if runErr != nil && !errors.Is(runErr, backgroundruncoord.ErrNoWork) {
+		runErr := coord.RunOnce(ctx)
+		if runErr != nil && !errors.Is(runErr, coordinator.ErrNoWork) {
 			current, _ := runStore.GetBackgroundRun(context.Background(), workspaceID, admission.Run.RunID, actor)
 			return fmt.Errorf("retain result at run=%s/%s revision=%d: %w", current.State, current.EffectPhase, current.Revision, runErr)
 		}
@@ -1091,7 +1091,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 	transport := &countingPromptTransport{base: baseTransport, path: "/api/session/" + string(generated.OpenCodeSessionID) + "/prompt"}
 	defer baseTransport.CloseIdleConnections()
 	crashCtx, crash := context.WithCancel(ctx)
-	config := backgroundruncoord.Config{
+	config := coordinator.Config{
 		WorkspaceID: workspaceID,
 		Profile:     opencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: docker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
 		OperationTimeout: 20 * time.Second, PollInterval: 100 * time.Millisecond,
@@ -1099,13 +1099,13 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 		Now:           func() time.Time { return time.Now().Add(2 * time.Minute) }, HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: transport}, Route: route,
 		AfterPromptFence: crash,
 	}
-	coordinator, err := backgroundruncoord.New(runStore, provider, engine, ids, config)
+	coord, err := coordinator.New(runStore, provider, engine, ids, config)
 	if err != nil {
 		return err
 	}
 	var fenced store.BackgroundRun
 	for step := 0; step < 20; step++ {
-		runErr := coordinator.RunOnce(crashCtx)
+		runErr := coord.RunOnce(crashCtx)
 		fenced, err = runStore.GetBackgroundRun(context.Background(), workspaceID, admission.Run.RunID, actor)
 		if err != nil {
 			return err
@@ -1132,11 +1132,11 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 	}
 	config.Now = func() time.Time { return time.Now().Add(4 * time.Minute) }
 	config.AfterPromptFence = nil
-	coordinator, err = backgroundruncoord.New(runStore, provider, engine, ids, config)
+	coord, err = coordinator.New(runStore, provider, engine, ids, config)
 	if err != nil {
 		return err
 	}
-	if err := coordinator.RunOnce(context.Background()); err != nil {
+	if err := coord.RunOnce(context.Background()); err != nil {
 		return fmt.Errorf("pre-dispatch restart reconciliation: %w", err)
 	}
 	fenced, err = runStore.GetBackgroundRun(context.Background(), workspaceID, admission.Run.RunID, actor)
@@ -1154,7 +1154,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 		return err
 	}
 	for step := 0; step < 20; step++ {
-		if err := coordinator.RunOnce(context.Background()); err != nil && !errors.Is(err, backgroundruncoord.ErrNoWork) {
+		if err := coord.RunOnce(context.Background()); err != nil && !errors.Is(err, coordinator.ErrNoWork) {
 			return err
 		}
 		fenced, err = runStore.GetBackgroundRun(context.Background(), workspaceID, admission.Run.RunID, actor)

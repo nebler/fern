@@ -1,5 +1,5 @@
-// Package backgroundruncoord serially coordinates the one qualified OpenCode
-// Background Run profile, connecting durable store state to Docker,
+// Package coordinator serially coordinates the one qualified OpenCode
+// run profile, connecting durable store state to Docker,
 // OpenCode, route, and retained-artifact effects. It is intentionally not a
 // generic executor framework: there is one lane, no parallelism, and no
 // per-run claim or lease. fern up's host lease makes it the workspace's only
@@ -34,4 +34,4 @@
 // different content. A run becomes terminal only once every resource is proven
 // absent. The coordinator does not close its dependencies; composition stops
 // it first.
-package backgroundruncoord
+package coordinator

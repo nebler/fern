@@ -1,4 +1,4 @@
-package backgroundruncoord
+package coordinator
 
 import (
 	"context"

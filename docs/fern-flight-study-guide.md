@@ -255,7 +255,7 @@ proven security sandbox.
 - `runapi`: plugin-authenticated HTTP run API plus create/stop/seal policy,
   idempotency, and admission.
 - `store`: SQLite durable state, receipts, revision-checked transitions.
-- `backgroundruncoord`: serial engine that converts durable phases into effects.
+- `coordinator`: serial engine that converts durable phases into effects.
 - `docker`: Docker clone/volume/container policy and credential handoff.
 - `opencode`: pinned OpenCode session/prompt/observation protocol, plus the exact live-session attachment router and fencing.
 - `artifact`: Git snapshot/bundle/manifest/CAS verification, and the resolver that matches a durable result to freshly verified artifact bytes.
