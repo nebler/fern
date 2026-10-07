@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/atomicfile"
+	"github.com/nebler/fern/internal/task"
 )
 
 const (
@@ -146,65 +147,91 @@ func (e *Engine) Snapshot(ctx context.Context, spec SnapshotSpec) (Snapshot, Sta
 	if err != nil {
 		return Snapshot{}, StagedLocator{}, err
 	}
-	stageDevice, stageInode, err := directoryIdentity(stage)
+	device, inode, err := directoryIdentity(stage)
 	if err != nil {
 		return Snapshot{}, StagedLocator{}, err
 	}
 	keep := false
 	defer func() {
 		if !keep {
-			_ = removeExactDirectory(stage, stageDevice, stageInode)
+			_ = removeExactDirectory(stage, device, inode)
 		}
 	}()
-	identity, err := e.admitSource(ctx, spec.Source.path, spec.Base)
+	identity, tree, err := e.captureStableTree(ctx, spec, stage)
 	if err != nil {
 		return Snapshot{}, StagedLocator{}, err
 	}
-	treeOne, err := e.captureTree(ctx, spec.Source.path, stage, "index-one")
+	manifest, manifestBytes, digest, err := e.stageArtifact(ctx, spec, stage, tree)
 	if err != nil {
 		return Snapshot{}, StagedLocator{}, err
 	}
-	treeTwo, err := e.captureTree(ctx, spec.Source.path, stage, "index-two")
-	if err != nil {
+	if _, err := e.verifyArtifact(ctx, manifestBytes, filepath.Join(stage, bundleName), 0o600, digest); err != nil {
 		return Snapshot{}, StagedLocator{}, err
+	}
+	if err := e.confirmSourceUnchanged(ctx, spec, stage, tree, identity); err != nil {
+		return Snapshot{}, StagedLocator{}, err
+	}
+	keep = true
+	return snapshotFromManifest(manifest, digest), StagedLocator{engine: e, path: stage, device: device, inode: inode, digest: digest}, nil
+}
+
+// captureStableTree admits the source and captures its worktree as a tree
+// twice, into private indexes in stage, requiring both captures to agree.
+func (e *Engine) captureStableTree(ctx context.Context, spec SnapshotSpec, stage string) (sourceIdentity, task.GitOID, error) {
+	source := spec.Source.path
+	identity, err := e.admitSource(ctx, source, spec.Base)
+	if err != nil {
+		return sourceIdentity{}, "", err
+	}
+	treeOne, err := e.captureTree(ctx, source, stage, "index-one")
+	if err != nil {
+		return sourceIdentity{}, "", err
+	}
+	treeTwo, err := e.captureTree(ctx, source, stage, "index-two")
+	if err != nil {
+		return sourceIdentity{}, "", err
 	}
 	if treeOne != treeTwo {
-		return Snapshot{}, StagedLocator{}, fmt.Errorf("%w: unstable worktree", ErrUnsafeSource)
+		return sourceIdentity{}, "", fmt.Errorf("%w: unstable worktree", ErrUnsafeSource)
 	}
-	defer os.Remove(filepath.Join(stage, "index-one"))
-	defer os.Remove(filepath.Join(stage, "index-two"))
-	if err := e.proveTree(ctx, spec.Source.path, treeOne); err != nil {
-		return Snapshot{}, StagedLocator{}, err
+	if err := e.proveTree(ctx, source, treeOne); err != nil {
+		return sourceIdentity{}, "", err
 	}
-	if err := e.checkSourceIdentity(ctx, spec.Source.path, spec.Base, identity); err != nil {
-		return Snapshot{}, StagedLocator{}, err
+	if err := e.checkSourceIdentity(ctx, source, spec.Base, identity); err != nil {
+		return sourceIdentity{}, "", err
 	}
-	baseTree, err := e.oid(ctx, spec.Source.path, string(spec.Base)+"^{tree}", nil)
+	return identity, treeOne, nil
+}
+
+// stageArtifact commits tree onto the base (unless unchanged), writes the
+// bundle and canonical manifest into stage, and returns the manifest.
+func (e *Engine) stageArtifact(ctx context.Context, spec SnapshotSpec, stage string, tree task.GitOID) (artifactManifest, []byte, Digest, error) {
+	source := spec.Source.path
+	baseTree, err := e.oid(ctx, source, string(spec.Base)+"^{tree}", nil)
 	if err != nil {
-		return Snapshot{}, StagedLocator{}, err
+		return artifactManifest{}, nil, Digest{}, err
 	}
 	result := spec.Base
-	if treeOne != baseTree {
-		result, err = e.commitTree(ctx, spec.Source.path, treeOne, spec.Base, spec.EpochSecond)
+	if tree != baseTree {
+		result, err = e.commitTree(ctx, source, tree, spec.Base, spec.EpochSecond)
 		if err != nil {
-			return Snapshot{}, StagedLocator{}, err
+			return artifactManifest{}, nil, Digest{}, err
 		}
 	}
-	changes, err := e.buildChanges(ctx, spec.Source.path, spec.Base, result)
+	changes, err := e.buildChanges(ctx, source, spec.Base, result)
 	if err != nil {
-		return Snapshot{}, StagedLocator{}, err
+		return artifactManifest{}, nil, Digest{}, err
 	}
 	if (result == spec.Base) != (len(changes) == 0) {
-		return Snapshot{}, StagedLocator{}, fmt.Errorf("%w: inconsistent no-change result", ErrVerification)
+		return artifactManifest{}, nil, Digest{}, fmt.Errorf("%w: inconsistent no-change result", ErrVerification)
 	}
 	_, changesDigest, err := canonicalChanges(changes)
 	if err != nil {
-		return Snapshot{}, StagedLocator{}, err
+		return artifactManifest{}, nil, Digest{}, err
 	}
-	bundlePath := filepath.Join(stage, bundleName)
-	bundleDigest, bundleSize, err := e.createBundle(ctx, spec.Source.path, bundlePath, spec.Base, result)
+	bundleDigest, bundleSize, err := e.createBundle(ctx, source, filepath.Join(stage, bundleName), spec.Base, result)
 	if err != nil {
-		return Snapshot{}, StagedLocator{}, err
+		return artifactManifest{}, nil, Digest{}, err
 	}
 	manifest := artifactManifest{
 		Version: 3, RepositoryID: spec.RepositoryID, WorkspaceID: spec.Source.WorkspaceID, RunID: spec.Source.RunID,
@@ -213,46 +240,37 @@ func (e *Engine) Snapshot(ctx context.Context, spec SnapshotSpec) (Snapshot, Sta
 		EnvironmentSHA256: spec.EnvironmentSHA256, ResourceSpecVersion: spec.ResourceSpecVersion,
 		OpenCodeSessionID: spec.OpenCodeSessionID, OpenCodeMessageID: spec.OpenCodeMessageID,
 		SnapshotPolicyVersion: spec.SnapshotPolicyVersion, CompletionAuthority: CompletionUserSeal,
-		Base: spec.Base, Result: result, Tree: treeOne, EpochSecond: spec.EpochSecond,
+		Base: spec.Base, Result: result, Tree: tree, EpochSecond: spec.EpochSecond,
 		Changes: changes, ChangesSHA256: changesDigest, BundleSHA256: bundleDigest, BundleBytes: bundleSize,
 	}
-	manifestBytes, manifestDigest, err := encodeManifest(manifest)
+	manifestBytes, digest, err := encodeManifest(manifest)
 	if err != nil {
-		return Snapshot{}, StagedLocator{}, err
+		return artifactManifest{}, nil, Digest{}, err
 	}
 	if len(manifestBytes) > e.outputBytes {
-		return Snapshot{}, StagedLocator{}, ErrOutputLimit
+		return artifactManifest{}, nil, Digest{}, ErrOutputLimit
 	}
 	if err := atomicfile.WriteExclusive(filepath.Join(stage, manifestName), manifestBytes, 0o600); err != nil {
-		return Snapshot{}, StagedLocator{}, err
+		return artifactManifest{}, nil, Digest{}, err
 	}
-	if _, err := e.verifyArtifact(ctx, manifestBytes, bundlePath, 0o600, manifestDigest); err != nil {
-		return Snapshot{}, StagedLocator{}, err
-	}
+	return manifest, manifestBytes, digest, nil
+}
+
+// confirmSourceUnchanged recaptures the worktree and rechecks the source
+// identity after the artifact was built, then removes the capture indexes so
+// the stage holds only the manifest and bundle.
+func (e *Engine) confirmSourceUnchanged(ctx context.Context, spec SnapshotSpec, stage string, tree task.GitOID, identity sourceIdentity) error {
 	finalTree, err := e.refreshCapturedTree(ctx, spec.Source.path, filepath.Join(stage, "index-two"))
-	if err != nil || finalTree != treeOne {
-		return Snapshot{}, StagedLocator{}, fmt.Errorf("%w: worktree changed during snapshot", ErrUnsafeSource)
+	if err != nil || finalTree != tree {
+		return fmt.Errorf("%w: worktree changed during snapshot", ErrUnsafeSource)
 	}
 	if err := e.checkSourceIdentity(ctx, spec.Source.path, spec.Base, identity); err != nil {
-		return Snapshot{}, StagedLocator{}, err
+		return err
 	}
 	if err := os.Remove(filepath.Join(stage, "index-one")); err != nil {
-		return Snapshot{}, StagedLocator{}, err
+		return err
 	}
-	if err := os.Remove(filepath.Join(stage, "index-two")); err != nil {
-		return Snapshot{}, StagedLocator{}, err
-	}
-	info, err := os.Lstat(stage)
-	if err != nil {
-		return Snapshot{}, StagedLocator{}, err
-	}
-	device, inode, err := atomicfile.Identity(info)
-	if err != nil {
-		return Snapshot{}, StagedLocator{}, err
-	}
-	keep = true
-	snapshot := snapshotFromManifest(manifest, manifestDigest)
-	return snapshot, StagedLocator{engine: e, path: stage, device: device, inode: inode, digest: manifestDigest}, nil
+	return os.Remove(filepath.Join(stage, "index-two"))
 }
 
 // validateSpec checks only what the Git snapshot needs before it runs. The
