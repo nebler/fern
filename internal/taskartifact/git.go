@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -156,6 +157,34 @@ func rejectHooks(gitDirectory string) error {
 	return nil
 }
 
+// Local Git config the snapshot refuses because it could redirect, filter,
+// or partially populate the worktree or object store being captured.
+var (
+	unsafeConfigKeys = []string{
+		"core.worktree", "core.hookspath", "core.fsmonitor", "core.attributesfile", "core.excludesfile",
+		"core.alternaterefscommand", "core.sparsecheckout", "core.sparsecheckoutcone",
+		"extensions.worktreeconfig", "extensions.partialclone", "diff.external",
+	}
+	unsafeConfigPrefixes = []string{"include.", "includeif.", "filter.", "submodule."}
+	// Each pair denies keys with both the prefix and the suffix.
+	unsafeConfigPrefixSuffixes = [][2]string{
+		{"diff.", ".command"},
+		{"remote.", ".promisor"}, {"remote.", ".partialclonefilter"},
+		{"url.", ".insteadof"}, {"url.", ".pushinsteadof"},
+	}
+)
+
+func unsafeConfig(key, value string) bool {
+	if key == "core.sharedrepository" {
+		return value != "0" && value != "false" && value != "umask"
+	}
+	return slices.Contains(unsafeConfigKeys, key) ||
+		slices.ContainsFunc(unsafeConfigPrefixes, func(prefix string) bool { return strings.HasPrefix(key, prefix) }) ||
+		slices.ContainsFunc(unsafeConfigPrefixSuffixes, func(pair [2]string) bool {
+			return strings.HasPrefix(key, pair[0]) && strings.HasSuffix(key, pair[1])
+		})
+}
+
 func validateLocalConfig(output []byte) error {
 	if len(output) > 0 && output[len(output)-1] != 0 {
 		return fmt.Errorf("%w: malformed local config", ErrUnsafeSource)
@@ -169,19 +198,8 @@ func validateLocalConfig(output []byte) error {
 			return fmt.Errorf("%w: malformed local config", ErrUnsafeSource)
 		}
 		key := strings.ToLower(string(record[:separator]))
-		value := strings.ToLower(string(record[separator+1:]))
-		dangerous := strings.HasPrefix(key, "include.") || strings.HasPrefix(key, "includeif.") ||
-			key == "core.worktree" || key == "core.hookspath" || key == "core.fsmonitor" || key == "core.attributesfile" ||
-			key == "core.excludesfile" || key == "core.alternaterefscommand" || key == "core.sparsecheckout" ||
-			key == "core.sparsecheckoutcone" || key == "extensions.worktreeconfig" || key == "extensions.partialclone" ||
-			key == "diff.external" || strings.HasPrefix(key, "filter.") ||
-			(strings.HasPrefix(key, "diff.") && strings.HasSuffix(key, ".command")) ||
-			(strings.HasPrefix(key, "remote.") && (strings.HasSuffix(key, ".promisor") || strings.HasSuffix(key, ".partialclonefilter"))) ||
-			strings.HasPrefix(key, "submodule.") ||
-			(strings.HasPrefix(key, "url.") && (strings.HasSuffix(key, ".insteadof") || strings.HasSuffix(key, ".pushinsteadof"))) ||
-			key == "core.sharedrepository" && value != "0" && value != "false" && value != "umask"
-		if dangerous {
-			return fmt.Errorf("%w: unsafe local config", ErrUnsafeSource)
+		if unsafeConfig(key, strings.ToLower(string(record[separator+1:]))) {
+			return fmt.Errorf("%w: unsafe local config key %q", ErrUnsafeSource, key)
 		}
 	}
 	return nil

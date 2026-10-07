@@ -881,3 +881,38 @@ func decodedPaths(t *testing.T, entries []ChangeEntry) [][]byte {
 	}
 	return paths
 }
+
+func TestValidateLocalConfigDeniesEveryUnsafeKey(t *testing.T) {
+	record := func(key, value string) []byte { return []byte(key + "\n" + value + "\x00") }
+	denied := [][2]string{
+		{"core.worktree", "/x"}, {"core.hooksPath", "/x"}, {"core.fsmonitor", "true"}, {"core.attributesFile", "/x"},
+		{"core.excludesFile", "/x"}, {"core.alternateRefsCommand", "x"}, {"core.sparseCheckout", "true"},
+		{"core.sparseCheckoutCone", "true"}, {"extensions.worktreeConfig", "true"}, {"extensions.partialClone", "origin"},
+		{"diff.external", "x"}, {"include.path", "x"}, {"includeIf.gitdir:/x.path", "x"}, {"filter.lfs.clean", "x"},
+		{"submodule.a.url", "x"}, {"diff.tool.command", "x"}, {"diff.command", "x"}, {"remote.origin.promisor", "true"},
+		{"remote.origin.partialCloneFilter", "blob:none"}, {"url.https://x/.insteadOf", "y"},
+		{"url.https://x/.pushInsteadOf", "y"}, {"core.sharedRepository", "group"},
+	}
+	for _, entry := range denied {
+		err := validateLocalConfig(record(entry[0], entry[1]))
+		if !errors.Is(err, ErrUnsafeSource) || !strings.Contains(err.Error(), strings.ToLower(entry[0])) {
+			t.Errorf("%s=%s: error = %v", entry[0], entry[1], err)
+		}
+	}
+	var allowed []byte
+	for _, entry := range [][2]string{
+		{"core.repositoryformatversion", "0"}, {"core.bare", "false"}, {"user.name", "Agent"},
+		{"remote.origin.url", "https://x"}, {"branch.main.remote", "origin"},
+		{"core.sharedRepository", "0"}, {"core.sharedRepository", "false"}, {"core.sharedRepository", "umask"},
+	} {
+		allowed = append(allowed, record(entry[0], entry[1])...)
+	}
+	if err := validateLocalConfig(allowed); err != nil {
+		t.Fatalf("ordinary config rejected: %v", err)
+	}
+	for _, malformed := range []string{"no-terminator", "\nvalue\x00"} {
+		if err := validateLocalConfig([]byte(malformed)); !errors.Is(err, ErrUnsafeSource) {
+			t.Errorf("malformed %q: error = %v", malformed, err)
+		}
+	}
+}
