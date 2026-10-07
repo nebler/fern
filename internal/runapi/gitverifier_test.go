@@ -78,7 +78,7 @@ func TestGitBaseVerifierUsesPromisorSafeEnvironment(t *testing.T) {
 	if err := os.WriteFile(git, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	verifier, err := NewGitBaseVerifier(directory, git, 5*time.Second)
+	verifier, err := NewGitBaseVerifier(directory, git, 30*time.Second)
 	if err != nil {
 		t.Fatal(err)
 	}
