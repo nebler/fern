@@ -33,6 +33,16 @@ var (
 // Failures before the rename leave path untouched; a failed directory sync
 // after it means the new content is visible but may not survive a crash.
 func Write(path string, data []byte, perm os.FileMode) error {
+	return write(path, data, perm, os.Rename)
+}
+
+// WriteExclusive is Write that fails, leaving the existing file untouched,
+// if path already exists.
+func WriteExclusive(path string, data []byte, perm os.FileMode) error {
+	return write(path, data, perm, RenameNoReplace)
+}
+
+func write(path string, data []byte, perm os.FileMode, rename func(string, string) error) error {
 	directory := filepath.Dir(path)
 	temporary, err := os.CreateTemp(directory, "."+filepath.Base(path)+".*.tmp")
 	if err != nil {
@@ -51,7 +61,7 @@ func Write(path string, data []byte, perm os.FileMode) error {
 		err = closeErr
 	}
 	if err == nil {
-		err = os.Rename(temporaryPath, path)
+		err = rename(temporaryPath, path)
 	}
 	if err != nil {
 		return err

@@ -117,3 +117,74 @@ func TestRenameNoReplaceAndIdentity(t *testing.T) {
 		t.Fatal("Identity accepted nil info")
 	}
 }
+
+func TestWriteExclusiveRefusesExistingTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "marker")
+	if err := WriteExclusive(path, []byte("first"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteExclusive(path, []byte("second"), 0o600); err == nil {
+		t.Fatal("WriteExclusive replaced an existing file")
+	}
+	if data, err := Read(path, 64); err != nil || string(data) != "first" {
+		t.Fatalf("existing file = %q, %v", data, err)
+	}
+}
+
+func TestQuarantineRemove(t *testing.T) {
+	t.Run("removes the proven tree without following symlinks", func(t *testing.T) {
+		parent, outside := t.TempDir(), t.TempDir()
+		target := filepath.Join(parent, "tree")
+		sentinel := filepath.Join(outside, "retain")
+		if err := os.MkdirAll(filepath.Join(target, "nested"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(sentinel, []byte("retain"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(outside, filepath.Join(target, "nested", "outside")); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Lstat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		device, inode, err := Identity(info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := QuarantineRemove(target, filepath.Join(parent, "quarantine"), device, inode); err != nil {
+			t.Fatal(err)
+		}
+		if entries, err := os.ReadDir(parent); err != nil || len(entries) != 0 {
+			t.Fatalf("parent entries = %v, %v", entries, err)
+		}
+		if data, err := os.ReadFile(sentinel); err != nil || string(data) != "retain" {
+			t.Fatalf("removal followed a symlink: %q, %v", data, err)
+		}
+	})
+	t.Run("keeps a replaced object quarantined", func(t *testing.T) {
+		parent := t.TempDir()
+		target, quarantine := filepath.Join(parent, "tree"), filepath.Join(parent, "quarantine")
+		if err := os.Mkdir(target, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Lstat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		device, inode, err := Identity(info)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := QuarantineRemove(target, quarantine, device, inode+1); !errors.Is(err, ErrChanged) {
+			t.Fatalf("identity mismatch error = %v", err)
+		}
+		if _, err := os.Lstat(quarantine); err != nil {
+			t.Fatalf("mismatched object was not left in quarantine: %v", err)
+		}
+		if err := QuarantineRemove(target, quarantine+"-2", device, inode); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("missing path error = %v", err)
+		}
+	})
+}
