@@ -482,7 +482,7 @@ func canonicalImageID(value string) bool {
 	return true
 }
 
-func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, providerEndpoint string, provider *taskenvdocker.Provider, cli *client.Client, imageID, base string) error {
+func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, providerEndpoint string, provider *taskenvdocker.Provider, cli *client.Client, imageID, base string) (resultErr error) {
 	artifact, err := integrationArtifactEngine(filepath.Join(root, "serial-artifacts"))
 	if err != nil {
 		return err
@@ -543,6 +543,11 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 		_ = store.Close()
 		return err
 	}
+	defer func() {
+		if resultErr != nil {
+			printSerialDiagnostics(cli, databasePath, string(admission.Run.RunID), providerEndpoint)
+		}
+	}()
 	clonePath := filepath.Join(cloneRoot, resources.Clone())
 	if admission.Run.RunID == "" {
 		_ = store.Close()
