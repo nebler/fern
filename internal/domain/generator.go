@@ -34,8 +34,10 @@ func NewGenerator(random io.Reader, now func() time.Time) (*Generator, error) {
 	return &Generator{random: random, now: now}, nil
 }
 
+// NewSecureGenerator is NewGenerator over crypto/rand and the wall clock.
 func NewSecureGenerator() *Generator {
-	return &Generator{random: rand.Reader, now: time.Now}
+	generator, _ := NewGenerator(rand.Reader, time.Now) // both are non-nil
+	return generator
 }
 
 // GenerateAdmissionIDs allocates the complete identity set that must exist
