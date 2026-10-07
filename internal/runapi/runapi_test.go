@@ -15,9 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nebler/fern/internal/auth"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/opencode"
-	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -554,8 +554,8 @@ func (f *apiFixture) requestWithContentType(method, path, body, key, contentType
 	if key != "" {
 		request.Header.Set("Idempotency-Key", key)
 	}
-	credential := pluginauth.Credential{ID: f.actor.ID}
-	request = request.WithContext(pluginauth.WithRequestAuthorization(request.Context(), credential))
+	credential := auth.Credential{ID: f.actor.ID}
+	request = request.WithContext(auth.WithRequestAuthorization(request.Context(), credential))
 	response := httptest.NewRecorder()
 	f.handler.ServeHTTP(response, request)
 	return response

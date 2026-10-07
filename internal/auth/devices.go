@@ -1,4 +1,4 @@
-package control
+package auth
 
 import (
 	"crypto/rand"
@@ -25,26 +25,26 @@ type Device struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
-// Store is the workspace's control-plane identity state in Fern's SQLite
+// DeviceStore is the workspace's control-plane identity state in Fern's SQLite
 // database. mu guards only the in-memory request registry and its fence
 // against revocation.
-type Store struct {
+type DeviceStore struct {
 	db                   *sql.DB
 	mu                   sync.Mutex
 	activeDeviceRequests map[string]map[uint64]func()
 	nextDeviceRequestID  uint64
 }
 
-// New returns the control store backed by db, whose schema (store) defines
+// NewDeviceStore returns the device store backed by db, whose schema (store) defines
 // the devices and operator_credential tables.
-func New(db *sql.DB) *Store {
-	return &Store{db: db, activeDeviceRequests: make(map[string]map[uint64]func())}
+func NewDeviceStore(db *sql.DB) *DeviceStore {
+	return &DeviceStore{db: db, activeDeviceRequests: make(map[string]map[uint64]func())}
 }
 
 // AddDevice durably registers a paired browser credential, pruning expired
 // devices before admitting against the 64-device cap. The raw token is never
 // persisted.
-func (store *Store) AddDevice(token, name string, now, expires time.Time) (Device, error) {
+func (store *DeviceStore) AddDevice(token, name string, now, expires time.Time) (Device, error) {
 	if token == "" || !expires.After(now) {
 		return Device{}, errors.New("valid device token and expiry are required")
 	}
@@ -85,7 +85,7 @@ func (store *Store) AddDevice(token, name string, now, expires time.Time) (Devic
 // AuthenticateDeviceIdentity validates a device bearer token and returns its
 // durable identity, deleting the matched expired credential and refreshing
 // LastSeen at most once an hour along the way.
-func (store *Store) AuthenticateDeviceIdentity(token string, now time.Time) (Device, bool, error) {
+func (store *DeviceStore) AuthenticateDeviceIdentity(token string, now time.Time) (Device, bool, error) {
 	if token == "" {
 		return Device{}, false, nil
 	}
@@ -114,7 +114,7 @@ func (store *Store) AuthenticateDeviceIdentity(token string, now time.Time) (Dev
 
 // RegisterDeviceRequest fences admission against durable revocation. The
 // returned cleanup must be called when the admitted request completes.
-func (store *Store) RegisterDeviceRequest(deviceID string, cancel func()) (func(), bool) {
+func (store *DeviceStore) RegisterDeviceRequest(deviceID string, cancel func()) (func(), bool) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	var found bool
@@ -142,7 +142,7 @@ func (store *Store) RegisterDeviceRequest(deviceID string, cancel func()) (func(
 
 // CancelDeviceRequests is the in-memory callback run only after revocation has
 // been persisted.
-func (store *Store) CancelDeviceRequests(deviceID string) {
+func (store *DeviceStore) CancelDeviceRequests(deviceID string) {
 	store.mu.Lock()
 	requests := store.activeDeviceRequests[deviceID]
 	delete(store.activeDeviceRequests, deviceID)
@@ -154,7 +154,7 @@ func (store *Store) CancelDeviceRequests(deviceID string) {
 
 // Devices lists every unexpired device oldest-first, durably deleting expired
 // entries.
-func (store *Store) Devices(now time.Time) ([]Device, error) {
+func (store *DeviceStore) Devices(now time.Time) ([]Device, error) {
 	if _, err := store.db.Exec(`DELETE FROM devices WHERE expires_at<=?`, now.UnixNano()); err != nil {
 		return nil, fmt.Errorf("prune Fern devices: %w", err)
 	}
@@ -179,7 +179,7 @@ func (store *Store) Devices(now time.Time) ([]Device, error) {
 
 // RevokeDevice durably removes every credential sharing the device ID.
 // Callers then call CancelDeviceRequests.
-func (store *Store) RevokeDevice(id string) error {
+func (store *DeviceStore) RevokeDevice(id string) error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	result, err := store.db.Exec(`DELETE FROM devices WHERE substr(token_sha256,1,16)=?`, id)
@@ -225,7 +225,7 @@ const OperatorCredentialIDPrefix = "control-"
 // derivation of the control password — so durable audit records cannot become
 // an offline brute-force oracle for that secret. It is an identifier, not a
 // secret.
-func (store *Store) EnsureOperatorCredentialID() (string, error) {
+func (store *DeviceStore) EnsureOperatorCredentialID() (string, error) {
 	// 128 random bits with no derived secret material, so persisting the ID in
 	// audit snapshots creates no offline guessing opportunity.
 	generated := OperatorCredentialIDPrefix + rand.Text()

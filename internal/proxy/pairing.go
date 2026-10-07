@@ -12,9 +12,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
-	"github.com/nebler/fern/internal/control"
+	"github.com/nebler/fern/internal/auth"
 	"github.com/nebler/fern/internal/domain"
-	"github.com/nebler/fern/internal/pluginauth"
 )
 
 const (
@@ -41,10 +40,10 @@ type pairingState struct {
 	lastIssued      time.Time
 	lastSuccess     time.Time
 	now             func() time.Time
-	store           *control.Store
+	store           *auth.DeviceStore
 }
 
-func newPairingState(store *control.Store) *pairingState {
+func newPairingState(store *auth.DeviceStore) *pairingState {
 	return &pairingState{
 		codes:    make(map[[sha256.Size]byte]time.Time),
 		attempts: make(map[[sha256.Size]byte]pairingAttempt),
@@ -69,7 +68,7 @@ func (state *pairingState) issue(writer http.ResponseWriter, _ *http.Request) {
 		http.Error(writer, "too many outstanding pairing codes", http.StatusTooManyRequests)
 		return
 	}
-	code := pluginauth.NewSecret()
+	code := auth.NewSecret()
 	digest := sha256.Sum256([]byte(code))
 	state.codes[digest] = now.Add(pairingCodeTTL)
 	state.lastIssued = now
@@ -136,7 +135,7 @@ func (state *pairingState) pair(writer http.ResponseWriter, request *http.Reques
 	delete(state.codes, hash)
 	delete(state.attempts, hash)
 	state.lastSuccess = now
-	session := pluginauth.NewSecret()
+	session := auth.NewSecret()
 	_, pairErr := state.store.AddDevice(session, name, now, now.Add(deviceCredentialTTL))
 	state.mu.Unlock()
 	if pairErr != nil {
@@ -181,7 +180,7 @@ func (state *pairingState) authenticate(writer http.ResponseWriter, request *htt
 	return state.admit(writer, request, device, cookie.Value)
 }
 
-func (state *pairingState) admit(writer http.ResponseWriter, request *http.Request, device control.Device, credential string) (*http.Request, func(), bool) {
+func (state *pairingState) admit(writer http.ResponseWriter, request *http.Request, device auth.Device, credential string) (*http.Request, func(), bool) {
 	ctx, cancel := context.WithDeadline(request.Context(), device.ExpiresAt)
 	unregister, admitted := state.store.RegisterDeviceRequest(device.ID, cancel)
 	if !admitted {

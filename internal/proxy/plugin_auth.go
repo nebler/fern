@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nebler/fern/internal/auth"
 	"github.com/nebler/fern/internal/domain"
-	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/safeio"
 )
 
@@ -38,11 +38,11 @@ type pluginAuthorizationPage struct {
 }
 
 type pluginAuthHTTP struct {
-	store *pluginauth.Store
+	store *auth.PluginStore
 	now   func() time.Time
 }
 
-func newPluginAuthHTTP(store *pluginauth.Store) *pluginAuthHTTP {
+func newPluginAuthHTTP(store *auth.PluginStore) *pluginAuthHTTP {
 	return &pluginAuthHTTP{store: store, now: time.Now}
 }
 
@@ -73,7 +73,7 @@ func (handler *pluginAuthHTTP) start(writer http.ResponseWriter, request *http.R
 		Scopes                  []string `json:"scopes"`
 	}{result.AuthorizationID, result.DeviceCode, result.UserCode, verificationURI,
 		verificationURI + "?" + url.Values{"id": {result.AuthorizationID}, "code": {result.UserCode}}.Encode(),
-		int64(result.ExpiresAt.Sub(now).Seconds()), int64(result.Interval.Seconds()), pluginauth.Scopes()}, nil)
+		int64(result.ExpiresAt.Sub(now).Seconds()), int64(result.Interval.Seconds()), auth.Scopes()}, nil)
 }
 
 func (handler *pluginAuthHTTP) poll(writer http.ResponseWriter, request *http.Request) {
@@ -90,20 +90,20 @@ func (handler *pluginAuthHTTP) poll(writer http.ResponseWriter, request *http.Re
 		return
 	}
 	switch result.State {
-	case pluginauth.PollPending:
+	case auth.PollPending:
 		writeJSONStatus(writer, http.StatusAccepted, map[string]string{"status": "pending"}, nil)
-	case pluginauth.PollDenied:
+	case auth.PollDenied:
 		writeJSONStatus(writer, http.StatusForbidden, map[string]string{"status": "denied"}, nil)
-	case pluginauth.PollExpired:
+	case auth.PollExpired:
 		writeJSONStatus(writer, http.StatusGone, map[string]string{"status": "expired"}, nil)
-	case pluginauth.PollApproved:
+	case auth.PollApproved:
 		writeJSONStatus(writer, http.StatusOK, struct {
 			AccessToken  string   `json:"access_token"`
 			TokenType    string   `json:"token_type"`
 			CredentialID string   `json:"credential_id"`
 			ExpiresIn    int64    `json:"expires_in"`
 			Scopes       []string `json:"scopes"`
-		}{body.DeviceCode, "Bearer", result.CredentialID, int64(result.ExpiresAt.Sub(now).Seconds()), pluginauth.Scopes()}, nil)
+		}{body.DeviceCode, "Bearer", result.CredentialID, int64(result.ExpiresAt.Sub(now).Seconds()), auth.Scopes()}, nil)
 	default:
 		writeUnavailable(writer, "plugin authorization")
 	}
@@ -143,7 +143,7 @@ func (handler *pluginAuthHTTP) authenticate(writer http.ResponseWriter, request 
 		Type: domain.ActorOpenCode, ID: credential.ID, DisplayName: pluginClientName,
 		CredentialID: credential.ID, Authentication: "fern_plugin_bearer", RequestID: rand.Text(),
 	}
-	ctx = pluginauth.WithRequestAuthorization(ctx, credential)
+	ctx = auth.WithRequestAuthorization(ctx, credential)
 	request = request.WithContext(domain.WithActor(ctx, actor))
 	stripCredentials(request)
 	return request, release, true
@@ -156,7 +156,7 @@ func (handler *pluginAuthHTTP) revokeSelf(writer http.ResponseWriter, request *h
 			return
 		}
 	}
-	authorization, _ := pluginauth.RequestAuthorizationFromContext(request.Context())
+	authorization, _ := auth.RequestAuthorizationFromContext(request.Context())
 	actor, err := domain.ContextActor(request.Context())
 	if err == nil {
 		err = handler.store.Revoke(authorization.Credential.ID, actor, handler.now())
@@ -187,7 +187,7 @@ func (handler *pluginAuthHTTP) authorizationPage(writer http.ResponseWriter, req
 	writer.Header().Set("Referrer-Policy", "no-referrer")
 	writer.Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-"+nonce+"'; connect-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'")
 	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-	if err := pluginAuthorizationTemplate.Execute(writer, pluginAuthorizationPage{pluginClientName, code, approvePath, denyPath, nonce, pluginauth.Scopes()}); err != nil {
+	if err := pluginAuthorizationTemplate.Execute(writer, pluginAuthorizationPage{pluginClientName, code, approvePath, denyPath, nonce, auth.Scopes()}); err != nil {
 		http.Error(writer, "render plugin authorization", http.StatusInternalServerError)
 	}
 }
@@ -222,9 +222,9 @@ func (handler *pluginAuthHTTP) decide(approve bool) http.HandlerFunc {
 func (handler *pluginAuthHTTP) credentials(writer http.ResponseWriter, _ *http.Request) {
 	credentials, err := handler.store.Credentials(handler.now())
 	writeJSON(writer, struct {
-		Credentials []pluginauth.Credential `json:"credentials"`
-		Scopes      []string                `json:"scopes"`
-	}{credentials, pluginauth.Scopes()}, err)
+		Credentials []auth.Credential `json:"credentials"`
+		Scopes      []string          `json:"scopes"`
+	}{credentials, auth.Scopes()}, err)
 }
 
 func (handler *pluginAuthHTTP) revokeCredential(writer http.ResponseWriter, request *http.Request) {
@@ -233,7 +233,7 @@ func (handler *pluginAuthHTTP) revokeCredential(writer http.ResponseWriter, requ
 		err = handler.store.Revoke(request.PathValue("id"), actor, handler.now())
 	}
 	switch {
-	case errors.Is(err, pluginauth.ErrNotFound) || errors.Is(err, os.ErrNotExist):
+	case errors.Is(err, auth.ErrNotFound) || errors.Is(err, os.ErrNotExist):
 		http.NotFound(writer, request)
 	case err != nil:
 		writePluginAuthError(writer, err, 0)
@@ -302,21 +302,21 @@ func rejectPluginBearer(writer http.ResponseWriter) {
 // so it never reveals whether a code exists.
 const pollIntervalSeconds = 5
 
-// writePluginAuthError maps a pluginauth error to its HTTP status. A rate
+// writePluginAuthError maps an auth plugin error to its HTTP status. A rate
 // limit carries retryAfter seconds, at least one.
 func writePluginAuthError(writer http.ResponseWriter, err error, retryAfter int) {
 	switch {
-	case errors.Is(err, pluginauth.ErrRateLimited):
+	case errors.Is(err, auth.ErrRateLimited):
 		if retryAfter <= 0 {
 			retryAfter = 1
 		}
 		writer.Header().Set("Retry-After", strconv.Itoa(retryAfter))
 		http.Error(writer, "plugin authorization temporarily limited", http.StatusTooManyRequests)
-	case errors.Is(err, pluginauth.ErrCapacity):
+	case errors.Is(err, auth.ErrCapacity):
 		http.Error(writer, "plugin authorization capacity reached", http.StatusTooManyRequests)
-	case errors.Is(err, pluginauth.ErrInvalidCode), errors.Is(err, pluginauth.ErrNotFound):
+	case errors.Is(err, auth.ErrInvalidCode), errors.Is(err, auth.ErrNotFound):
 		http.Error(writer, "plugin authorization not found", http.StatusUnauthorized)
-	case errors.Is(err, pluginauth.ErrInvalidState):
+	case errors.Is(err, auth.ErrInvalidState):
 		http.Error(writer, "plugin authorization is no longer pending", http.StatusConflict)
 	default:
 		writeUnavailable(writer, "plugin authorization")

@@ -6,7 +6,7 @@ import (
 	"crypto/subtle"
 	"net/http"
 
-	"github.com/nebler/fern/internal/control"
+	"github.com/nebler/fern/internal/auth"
 	"github.com/nebler/fern/internal/domain"
 )
 
@@ -29,27 +29,27 @@ type operatorAuth struct {
 	credentialID       string
 }
 
-func newOperatorAuth(store *control.Store, auth ControlAuth) (*operatorAuth, error) {
+func newOperatorAuth(store *auth.DeviceStore, config ControlAuth) (*operatorAuth, error) {
 	credentialID, err := store.EnsureOperatorCredentialID()
 	if err != nil {
 		return nil, err
 	}
-	return &operatorAuth{username: sha256.Sum256([]byte("fern")), password: sha256.Sum256([]byte(auth.Password)),
-		enabled: auth.Password != "", credentialID: credentialID}, nil
+	return &operatorAuth{username: sha256.Sum256([]byte("fern")), password: sha256.Sum256([]byte(config.Password)),
+		enabled: config.Password != "", credentialID: credentialID}, nil
 }
 
-func (auth *operatorAuth) authenticate(writer http.ResponseWriter, request *http.Request) (realm, *http.Request, func(), bool) {
+func (basic *operatorAuth) authenticate(writer http.ResponseWriter, request *http.Request) (realm, *http.Request, func(), bool) {
 	username, password, ok := request.BasicAuth()
 	gotUsername, gotPassword := sha256.Sum256([]byte(username)), sha256.Sum256([]byte(password))
-	if !auth.enabled || !ok || subtle.ConstantTimeCompare(gotUsername[:], auth.username[:]) != 1 ||
-		subtle.ConstantTimeCompare(gotPassword[:], auth.password[:]) != 1 {
+	if !basic.enabled || !ok || subtle.ConstantTimeCompare(gotUsername[:], basic.username[:]) != 1 ||
+		subtle.ConstantTimeCompare(gotPassword[:], basic.password[:]) != 1 {
 		writer.Header().Set("WWW-Authenticate", `Basic realm="fern-control"`)
 		http.Error(writer, "unauthorized", http.StatusUnauthorized)
 		return 0, nil, nil, false
 	}
 	actor := domain.ActorSnapshot{
 		Type: domain.ActorOperator, ID: "local-operator", DisplayName: "Local operator",
-		CredentialID: auth.credentialID, Authentication: "basic", RequestID: rand.Text(),
+		CredentialID: basic.credentialID, Authentication: "basic", RequestID: rand.Text(),
 	}
 	request = request.WithContext(domain.WithActor(request.Context(), actor))
 	stripCredentials(request)

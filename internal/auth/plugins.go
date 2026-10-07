@@ -1,4 +1,4 @@
-package pluginauth
+package auth
 
 import (
 	"context"
@@ -131,10 +131,10 @@ func trustedAttributionFromActor(actor domain.ActorSnapshot) (Attribution, error
 	return value, nil
 }
 
-// Store is the plugin authorization state in Fern's SQLite database. Each
+// PluginStore is the plugin authorization state in Fern's SQLite database. Each
 // operation is one transaction; mu only fences the in-memory request registry
 // against revocation.
-type Store struct {
+type PluginStore struct {
 	db            *sql.DB
 	mu            sync.Mutex
 	active        map[string]map[uint64]context.CancelFunc
@@ -167,13 +167,13 @@ func (RequestAuthorization) HasScope(scope string) bool {
 	return false
 }
 
-// New returns the plugin authorization store backed by db, whose schema
+// NewPluginStore returns the plugin authorization store backed by db, whose schema
 // (store) defines the plugin_* tables.
-func New(db *sql.DB) *Store {
-	return &Store{db: db, active: make(map[string]map[uint64]context.CancelFunc)}
+func NewPluginStore(db *sql.DB) *PluginStore {
+	return &PluginStore{db: db, active: make(map[string]map[uint64]context.CancelFunc)}
 }
 
-func (store *Store) Start(now time.Time) (StartResult, error) {
+func (store *PluginStore) Start(now time.Time) (StartResult, error) {
 	now = now.UTC()
 	deviceCode, userCode, id := NewSecret(), randomUserCode(), randomID(authorizationIDTag)
 	expiresAt := now.Add(authorizationTTL)
@@ -212,7 +212,7 @@ VALUES(?,?,?,?,?,?)`, id, digest("device", deviceCode), digest("user", userCode)
 
 // Poll records the fixed polling interval durably. On PollApproved the caller
 // returns the deviceCode argument itself as the bearer; no new secret is minted.
-func (store *Store) Poll(deviceCode string, now time.Time) (PollResult, error) {
+func (store *PluginStore) Poll(deviceCode string, now time.Time) (PollResult, error) {
 	if !canonicalBase64(deviceCode, deviceCodeBytes) {
 		return PollResult{}, ErrInvalidCode
 	}
@@ -285,7 +285,7 @@ func (store *Store) Poll(deviceCode string, now time.Time) (PollResult, error) {
 	return result, nil
 }
 
-func (store *Store) Approve(ctx context.Context, id, userCode string, actor domain.ActorSnapshot, now time.Time) (Credential, error) {
+func (store *PluginStore) Approve(ctx context.Context, id, userCode string, actor domain.ActorSnapshot, now time.Time) (Credential, error) {
 	if err := ctx.Err(); err != nil {
 		return Credential{}, err
 	}
@@ -343,7 +343,7 @@ VALUES(?,?,'active',?,?,?)`, credentialID, id, now.UnixNano(), credential.Expire
 	return credential, nil
 }
 
-func (store *Store) Deny(ctx context.Context, id, userCode string, actor domain.ActorSnapshot, now time.Time) error {
+func (store *PluginStore) Deny(ctx context.Context, id, userCode string, actor domain.ActorSnapshot, now time.Time) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -378,7 +378,7 @@ func (store *Store) Deny(ctx context.Context, id, userCode string, actor domain.
 
 // Pending verifies the independent user code without returning either stored
 // digest. It performs no transition; expiry is projected by the current time.
-func (store *Store) Pending(id, userCode string, now time.Time) bool {
+func (store *PluginStore) Pending(id, userCode string, now time.Time) bool {
 	if !canonicalID(id, authorizationIDTag) || !canonicalUserCode(userCode) {
 		return false
 	}
@@ -389,7 +389,7 @@ func (store *Store) Pending(id, userCode string, now time.Time) bool {
 // Authenticate resolves a presented bearer to its active credential. It never
 // writes: an expired credential is merely rejected here and marked expired by
 // the next listing, poll, or start.
-func (store *Store) Authenticate(deviceCode string, now time.Time) (Credential, bool, error) {
+func (store *PluginStore) Authenticate(deviceCode string, now time.Time) (Credential, bool, error) {
 	if !canonicalBase64(deviceCode, deviceCodeBytes) {
 		return Credential{}, false, nil
 	}
@@ -408,7 +408,7 @@ JOIN plugin_authorizations a ON a.id=authorization_id WHERE a.device_sha256=?`, 
 }
 
 // RegisterRequest atomically fences request admission against revoke.
-func (store *Store) RegisterRequest(id string, now time.Time, cancel context.CancelFunc) (func(), bool) {
+func (store *PluginStore) RegisterRequest(id string, now time.Time, cancel context.CancelFunc) (func(), bool) {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	var active bool
@@ -439,7 +439,7 @@ func (store *Store) RegisterRequest(id string, now time.Time, cancel context.Can
 
 // Credentials lists every retained credential newest-first, durably marking
 // lapsed active credentials expired.
-func (store *Store) Credentials(now time.Time) ([]Credential, error) {
+func (store *PluginStore) Credentials(now time.Time) ([]Credential, error) {
 	result := []Credential{}
 	err := store.transact(context.Background(), func(tx *sql.Tx) error {
 		if err := expireCredentials(tx, now); err != nil {
@@ -467,7 +467,7 @@ func (store *Store) Credentials(now time.Time) ([]Credential, error) {
 
 // Revoke durably revokes an active credential, then cancels every request
 // registered against it.
-func (store *Store) Revoke(id string, actor domain.ActorSnapshot, now time.Time) error {
+func (store *PluginStore) Revoke(id string, actor domain.ActorSnapshot, now time.Time) error {
 	attribution, err := AttributionFromActor(actor)
 	if err != nil {
 		return err
@@ -511,7 +511,7 @@ func (store *Store) Revoke(id string, actor domain.ActorSnapshot, now time.Time)
 
 // transact runs fn in one immediate SQLite transaction, committing only when
 // fn succeeds and ctx is still live.
-func (store *Store) transact(ctx context.Context, fn func(*sql.Tx) error) error {
+func (store *PluginStore) transact(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := store.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin plugin authorization transaction: %w", err)

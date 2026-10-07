@@ -14,7 +14,7 @@
 //
 // The device realm is a durable __Host- cookie; its mutations also need a CSRF
 // token bound to credential, method, expiry, and exact path. The plugin realm
-// is a pluginauth bearer; fixed scopes are checked by the run APIs. The
+// is an auth plugin bearer; fixed scopes are checked by the run APIs. The
 // operator listener requires Basic credentials for user "fern", answers any
 // plugin bearer with 404, and serves probes before authentication. Every
 // realm strips incoming credentials and cookies before dispatch and rejects

@@ -10,18 +10,17 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/nebler/fern/internal/control"
-	"github.com/nebler/fern/internal/pluginauth"
+	"github.com/nebler/fern/internal/auth"
 )
 
 // Controls contains the durable control-plane handlers exposed by Fern.
 type Controls struct {
-	Store       *control.Store
+	Store       *auth.DeviceStore
 	Runs        http.Handler
 	Liveness    http.Handler
 	Readiness   http.Handler
 	ControlAuth ControlAuth
-	PluginAuth  *pluginauth.Store
+	PluginAuth  *auth.PluginStore
 }
 
 type Handlers struct {

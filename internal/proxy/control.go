@@ -8,14 +8,14 @@ import (
 	"os"
 	"time"
 
-	"github.com/nebler/fern/internal/control"
+	"github.com/nebler/fern/internal/auth"
 )
 
 var deviceRevokedTemplate = newPage("device-revoked", "Device revoked", dialogCSS+`
 h1{margin:24px 0 8px;font-size:34px;letter-spacing:-.04em}p{margin:0;color:#bdcbb5;font-size:16px;line-height:1.55}`,
 	`<main><div class="mark">F</div><h1>Device revoked</h1><p>This browser may now be closed.</p></main>`)
 
-type deviceControls struct{ store *control.Store }
+type deviceControls struct{ store *auth.DeviceStore }
 
 func (devices deviceControls) list(writer http.ResponseWriter, _ *http.Request) {
 	list, err := devices.store.Devices(time.Now())

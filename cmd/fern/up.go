@@ -12,12 +12,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nebler/fern/internal/auth"
 	"github.com/nebler/fern/internal/config"
-	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/opencode"
-	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/proxy"
 	"github.com/nebler/fern/internal/safeio"
 	"github.com/nebler/fern/internal/store"
@@ -149,8 +148,8 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 	if services != nil {
 		runs = services.runs
 	}
-	controls := proxy.Controls{Store: control.New(state.DB()), Runs: runs,
-		ControlAuth: proxy.ControlAuth{Password: cfg.ControlPassword}, PluginAuth: pluginauth.New(state.DB()),
+	controls := proxy.Controls{Store: auth.NewDeviceStore(state.DB()), Runs: runs,
+		ControlAuth: proxy.ControlAuth{Password: cfg.ControlPassword}, PluginAuth: auth.NewPluginStore(state.DB()),
 		Liveness: status.LivenessHandler(), Readiness: status.ReadinessHandler()}
 	handlers, err := proxy.NewHandlers(controls, origins)
 	if err != nil {

@@ -8,9 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebler/fern/internal/control"
+	"github.com/nebler/fern/internal/auth"
 	"github.com/nebler/fern/internal/domain"
-	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/store/storetest"
 )
 
@@ -38,7 +37,7 @@ const (
 const R, O = true, false
 
 type routeFixture struct {
-	store        *control.Store
+	store        *auth.DeviceStore
 	handlers     Handlers
 	bearer       string
 	authID       string
@@ -52,7 +51,7 @@ type routeFixture struct {
 func newRouteFixture(t *testing.T) *routeFixture {
 	t.Helper()
 	database := storetest.DB(t)
-	store := control.New(database)
+	store := auth.NewDeviceStore(database)
 	now := time.Now()
 	phone, err := store.AddDevice(testDeviceToken, "phone", now, now.Add(time.Hour))
 	if err != nil {
@@ -62,7 +61,7 @@ func newRouteFixture(t *testing.T) *routeFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	plugins := pluginauth.New(database)
+	plugins := auth.NewPluginStore(database)
 	approver := domain.ActorSnapshot{Type: domain.ActorOperator, ID: "local-operator", DisplayName: "Local operator",
 		CredentialID: "control-test", Authentication: "basic", RequestID: "request-test"}
 	approved, err := plugins.Start(now.Add(-2 * time.Minute))

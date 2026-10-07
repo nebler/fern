@@ -259,7 +259,7 @@ proven security sandbox.
 - `taskenvdocker`: Docker clone/volume/container policy and credential handoff.
 - `opencode`: pinned OpenCode session/prompt/observation protocol, plus the exact live-session attachment router and fencing.
 - `artifact`: Git snapshot/bundle/manifest/CAS verification, and the resolver that matches a durable result to freshly verified artifact bytes.
-- `proxy`, `control`, `pluginauth`: HTTP ingress, browser pairing, device/plugin auth.
+- `proxy`, `auth`: HTTP ingress, browser pairing, device/plugin auth.
 - `githubapp`: GitHub App credential storage and scoped token issuance.
 
 The dependency direction is intentional: policy (`run`) does not import Docker,

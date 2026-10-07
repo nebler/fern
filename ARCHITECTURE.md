@@ -503,9 +503,9 @@ are therefore not supported by this profile.
 Fern's durable state is the workspace's one SQLite database
 (`~/.fern/tasks/<name>.db`), the artifact CAS beside it, the disposable-resource
 host key, and the private GitHub App credential file. The database schema is
-owned by `store` and also defines the tables of `control` (paired devices,
-operator credential ID) and `pluginauth` (plugin authorizations and
-credentials); those packages issue their own SQL through the shared handle, one
+owned by `store` and also defines the tables of `auth` (paired devices,
+operator credential ID, plugin authorizations and
+credentials); that package issues their own SQL through the shared handle, one
 transaction per operation. Only digests of device tokens and plugin device and
 user codes are stored. In-flight request registries that revocation cancels
 stay in memory. `safeio` private-file writes remain only for the credential file and host key.
@@ -554,8 +554,7 @@ ownership boundaries.
 | `internal/taskenvdocker` | disposable Docker resources, writer proof, container GitHub credential delivery |
 | `internal/opencode` | pinned disposable OpenCode client and observations; the Router's exact live target/session capabilities, request policy, shutdown, and fencing |
 | `internal/proxy` | remote/operator ingress, pairing, and browser security |
-| `internal/control` | device identities and operator credential ID (SQLite tables) |
-| `internal/pluginauth` | fixed-scope plugin device authorization and revocation (SQLite tables) |
+| `internal/auth` | device identities, operator credential ID, and fixed-scope plugin device authorization and revocation (SQLite tables) |
 | `internal/githubapp` | credential file, installation tokens, repository discovery and authority |
 | `internal/config` | strict configuration loader and bootstrap/execution validation |
 | `internal/observability` | in-memory component readiness behind the liveness and readiness probes |

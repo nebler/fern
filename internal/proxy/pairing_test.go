@@ -6,12 +6,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebler/fern/internal/control"
+	"github.com/nebler/fern/internal/auth"
 	"github.com/nebler/fern/internal/store/storetest"
 )
 
 func TestDeviceRevokedBeforeAdmissionIsUnauthenticated(t *testing.T) {
-	store := control.New(storetest.DB(t))
+	store := auth.NewDeviceStore(storetest.DB(t))
 	now := time.Now()
 	device, err := store.AddDevice("device-token", "phone", now, now.Add(time.Hour))
 	if err != nil {

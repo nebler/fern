@@ -4,7 +4,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/nebler/fern/internal/control"
+	"github.com/nebler/fern/internal/auth"
 )
 
 var landingTemplate = newPage("landing", "Fern", `body{padding:max(24px,env(safe-area-inset-top)) 18px max(24px,env(safe-area-inset-bottom))}
@@ -22,13 +22,13 @@ form.grid{display:grid;gap:10px}input{width:100%;min-height:48px;padding:13px 14
 
 type landingView struct {
 	Control bool
-	Devices []control.Device
+	Devices []auth.Device
 }
 
 // pages renders the landing page and, on the operator listener, the control
 // page with paired devices.
 type pages struct {
-	store *control.Store
+	store *auth.DeviceStore
 }
 
 func (pages pages) landing(writer http.ResponseWriter, request *http.Request) {

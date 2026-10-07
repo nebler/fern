@@ -1,4 +1,4 @@
-package control
+package auth
 
 import "time"
 
@@ -6,7 +6,7 @@ import "time"
 // AuthenticateDeviceIdentity. Production callers use the identity-returning
 // method directly; keeping this wrapper out of store.go avoids exporting a
 // second authentication surface.
-func authenticateDevice(store *Store, token string, now time.Time) (bool, error) {
+func authenticateDevice(store *DeviceStore, token string, now time.Time) (bool, error) {
 	_, valid, err := store.AuthenticateDeviceIdentity(token, now)
 	return valid, err
 }

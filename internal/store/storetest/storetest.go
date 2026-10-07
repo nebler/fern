@@ -31,7 +31,7 @@ func Open(t testing.TB) (*store.Store, string) {
 }
 
 // DB opens a fresh store like Open and returns only its shared handle, for
-// the packages (control, pluginauth) that issue their own SQL.
+// package auth, which issues its own SQL.
 func DB(t testing.TB) *sql.DB {
 	t.Helper()
 	runStore, _ := Open(t)

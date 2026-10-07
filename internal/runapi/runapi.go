@@ -13,9 +13,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nebler/fern/internal/auth"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/opencode"
-	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/safeio"
 	"github.com/nebler/fern/internal/store"
 )
@@ -313,15 +313,15 @@ func (h *Handler) verifyRetained(ctx context.Context, projection store.Backgroun
 
 // authorize accepts the ingress-authenticated actor: the loopback operator, or
 // an OpenCode plugin whose identity matches its bearer authorization.
-func (h *Handler) authorize(r *http.Request) (domain.ActorSnapshot, pluginauth.RequestAuthorization, bool) {
+func (h *Handler) authorize(r *http.Request) (domain.ActorSnapshot, auth.RequestAuthorization, bool) {
 	actor, err := h.config.ActorResolver(r.Context())
 	if err != nil || actor.Validate() != nil {
-		return domain.ActorSnapshot{}, pluginauth.RequestAuthorization{}, false
+		return domain.ActorSnapshot{}, auth.RequestAuthorization{}, false
 	}
 	if actor.Type == domain.ActorOperator {
-		return actor, pluginauth.RequestAuthorization{}, true
+		return actor, auth.RequestAuthorization{}, true
 	}
-	authorization, ok := pluginauth.RequestAuthorizationFromContext(r.Context())
+	authorization, ok := auth.RequestAuthorizationFromContext(r.Context())
 	return actor, authorization, ok && pluginBearerActor(actor, authorization.Credential.ID)
 }
 
@@ -340,7 +340,7 @@ var operatorScopes = map[string]bool{"run:read": true, "run:attach": true}
 
 // requireScope checks an authorized actor: the operator against
 // operatorScopes, a plugin against its credential's scopes.
-func requireScope(w http.ResponseWriter, actor domain.ActorSnapshot, authorization pluginauth.RequestAuthorization, scope string) bool {
+func requireScope(w http.ResponseWriter, actor domain.ActorSnapshot, authorization auth.RequestAuthorization, scope string) bool {
 	switch {
 	case actor.Type == domain.ActorOperator && !operatorScopes[scope]:
 		WriteError(w, http.StatusForbidden, "forbidden", "The operator cannot perform this run operation.")
