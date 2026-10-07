@@ -9,11 +9,11 @@ import (
 	"path/filepath"
 
 	"github.com/nebler/fern/internal/safeio"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 )
 
 // RemoveClone removes only an exactly attested clone after the exact runtime is absent.
-func (p *Provider) RemoveClone(ctx context.Context, run taskstore.BackgroundRun, authority WriterFence) (_ Observation, resultErr error) {
+func (p *Provider) RemoveClone(ctx context.Context, run store.BackgroundRun, authority WriterFence) (_ Observation, resultErr error) {
 	digest, err := p.validateRunForCleanup(run)
 	if err != nil {
 		return Observation{}, err
@@ -82,7 +82,7 @@ func (p *Provider) RemoveClone(ctx context.Context, run taskstore.BackgroundRun,
 
 // finishMarkerBoundDeletion removes the one recoverable location still holding
 // the marker's clone inode, if any, and then the marker itself.
-func (p *Provider) finishMarkerBoundDeletion(ctx context.Context, run taskstore.BackgroundRun, digest string) (bool, error) {
+func (p *Provider) finishMarkerBoundDeletion(ctx context.Context, run store.BackgroundRun, digest string) (bool, error) {
 	marker, err := p.readCloneMarker(run, digest)
 	if err != nil {
 		return false, err
@@ -139,7 +139,7 @@ func removeCreatedTree(root, path string, created os.FileInfo) error {
 	return err
 }
 
-func (p *Provider) attestCloneDeletion(run taskstore.BackgroundRun, digest, path string) error {
+func (p *Provider) attestCloneDeletion(run store.BackgroundRun, digest, path string) error {
 	if err := p.attestCloneMarker(run, digest, path); err != nil {
 		return err
 	}
@@ -150,7 +150,7 @@ func (p *Provider) attestCloneDeletion(run taskstore.BackgroundRun, digest, path
 	return nil
 }
 
-func (p *Provider) acquireCloneAuthority(ctx context.Context, run taskstore.BackgroundRun, digest string) (func() error, error) {
+func (p *Provider) acquireCloneAuthority(ctx context.Context, run store.BackgroundRun, digest string) (func() error, error) {
 	unlock, present, err := p.acquireCloneAuthorityIfPresent(ctx, run, digest)
 	if err != nil {
 		return nil, err
@@ -161,7 +161,7 @@ func (p *Provider) acquireCloneAuthority(ctx context.Context, run taskstore.Back
 	return unlock, nil
 }
 
-func (p *Provider) acquireCloneAuthorityIfPresent(ctx context.Context, run taskstore.BackgroundRun, digest string) (func() error, bool, error) {
+func (p *Provider) acquireCloneAuthorityIfPresent(ctx context.Context, run store.BackgroundRun, digest string) (func() error, bool, error) {
 	unlock, err := p.acquireCloneLock(ctx, run.CloneIdentity)
 	if err != nil {
 		return nil, false, err

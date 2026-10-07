@@ -86,7 +86,7 @@ removes it and waits for admitted forwarding to exit before writer teardown.
 2. Apply `config.ValidateBootstrap`.
 3. Bind remote, operator, and live-run listeners.
 4. Acquire the host-local repository-name lease.
-5. Open the workspace SQLite database (taskstore schema 12), which also holds
+5. Open the workspace SQLite database (store schema 12), which also holds
    devices and plugin authorizations.
 6. Compose control and plugin-authorization stores over it.
 7. If the installation ID is pending, block readiness without composing task
@@ -411,7 +411,7 @@ Fern retains the GitHub App private key on the host and mints short-lived
 installation tokens restricted to the bound repository. Before admitting the
 prompt and during active execution, it refreshes runtime credentials in the
 private disposable OpenCode volume, outside the clone and retained artifact.
-Tokens are not written into Docker environment/configuration, taskstore,
+Tokens are not written into Docker environment/configuration, store,
 labels, command arguments, or logs. Git and gh read the current credential via
 image-installed helpers; no personal gh configuration is mounted.
 
@@ -503,7 +503,7 @@ are therefore not supported by this profile.
 Fern's durable state is the workspace's one SQLite database
 (`~/.fern/tasks/<name>.db`), the artifact CAS beside it, the disposable-resource
 host key, and the private GitHub App credential file. The database schema is
-owned by `taskstore` and also defines the tables of `control` (paired devices,
+owned by `store` and also defines the tables of `control` (paired devices,
 operator credential ID) and `pluginauth` (plugin authorizations and
 credentials); those packages issue their own SQL through the shared handle, one
 transaction per operation. Only digests of device tokens and plugin device and
@@ -528,7 +528,7 @@ configuration or environment file exists, so restoring over a host means moving
 the old state aside first. Activation is a short sequence of renames with undo:
 the held lease directory moves into the staged state, and the staged state and
 configuration files take their places. A restored startup inspects every
-taskstore-referenced CAS object before serving work.
+store-referenced CAS object before serving work.
 
 The GitHub App credential file (`~/.fern/github-app/app-credentials.json`, mode
 0600) holds only the App ID and private key; it is not encrypted at rest, and
@@ -549,7 +549,7 @@ ownership boundaries.
 | `internal/runapi` | run HTTP contract (plugin bearer; operator for list/get/attach), attachment admission, plus create/stop/seal policy, admission, replay, and post-commit notification |
 | `internal/backgroundruncoord` | serial run effect coordinator and recovery |
 | `cmd/fern` | CLI, composition, backup, credentials, process lifecycle |
-| `internal/taskstore` | the SQLite database: schema 12, run/result authority and state machines |
+| `internal/store` | the SQLite database: schema 12, run/result authority and state machines |
 | `internal/taskartifact` | deterministic Git bundle creation, CAS, materialization |
 | `internal/taskresultsource` | CAS-only result binding and verified checkout acquisition |
 | `internal/taskenvdocker` | disposable Docker resources, writer proof, container GitHub credential delivery |
@@ -578,9 +578,8 @@ duplicated decisions or protect authority-bearing combinations. Keep the
 explicit coordinator and route allow-list rather than building workflow or
 policy frameworks.
 
-- `run` cannot import taskstore, Docker, HTTP, or coordinators. Storage keeps
-  compatibility names for its callers, but current run enum values and lifecycle
-  interpretation come from this domain owner.
+- `domain` cannot import store, Docker, HTTP, or coordinators. Run enum
+  values and lifecycle interpretation come from this domain owner.
 - `runapi` owns create/stop/seal policy and idempotent acceptance. Private
   hash projections preserve historical request bytes without making the HTTP
   DTO or its JSON field order the public application interface.
@@ -624,7 +623,7 @@ test -z "$(gofmt -l .)"
 go test ./...
 go test -race ./...
 go vet ./...
-CGO_ENABLED=0 go test ./internal/taskstore
+CGO_ENABLED=0 go test ./internal/store
 ./scripts/test-critical-coverage.sh
 ./scripts/test-deployment.sh
 make release VERSION=v0.0.0-dev

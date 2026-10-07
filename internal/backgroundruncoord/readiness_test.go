@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/backgroundopencode"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 )
 
 const readinessLocation = `{"directory":"/home/user/workspace","project":{"id":"prj_fixture","directory":"/home/user/workspace"}}`
@@ -64,7 +64,7 @@ func TestDispatchWaitsForModelAndAgentReadiness(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			run, err = f.c.store.RecordBackgroundRunRuntime(context.Background(), taskstore.RecordBackgroundRunRuntimeParams{
+			run, err = f.c.store.RecordBackgroundRunRuntime(context.Background(), store.RecordBackgroundRunRuntimeParams{
 				BackgroundRunRef: ref(run, f.now), ContainerID: scanContainerID, ContainerStartedAt: "2026-08-31T12:00:00.123456789Z",
 				RuntimeEpoch: 1, HostPort: 49152, Evidence: `{"effect":"runtime"}`,
 			})
@@ -80,7 +80,7 @@ func TestDispatchWaitsForModelAndAgentReadiness(t *testing.T) {
 			}
 			operation, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 			defer cancel()
-			err = f.c.dispatchWhenReady(operation, context.Background(), taskstore.BackgroundRunWork{Run: run, Prompt: f.params.Prompt}, client)
+			err = f.c.dispatchWhenReady(operation, context.Background(), store.BackgroundRunWork{Run: run, Prompt: f.params.Prompt}, client)
 			calls := opencode.snapshot()
 			prompted := false
 			for _, call := range calls {
@@ -91,7 +91,7 @@ func TestDispatchWaitsForModelAndAgentReadiness(t *testing.T) {
 				if !errors.Is(err, backgroundopencode.ErrNotReady) {
 					t.Fatalf("unready dispatch error = %v", err)
 				}
-				if r.EffectPhase != taskstore.BackgroundRunEffectProvisioning || r.State != taskstore.BackgroundRunSettingUp || prompted {
+				if r.EffectPhase != store.BackgroundRunEffectProvisioning || r.State != store.BackgroundRunSettingUp || prompted {
 					t.Fatalf("unready catalog crossed the fence: %s/%s calls=%v", r.State, r.EffectPhase, calls)
 				}
 				if len(calls) < 2 {
@@ -102,7 +102,7 @@ func TestDispatchWaitsForModelAndAgentReadiness(t *testing.T) {
 			if err != nil {
 				t.Fatalf("ready dispatch error = %v", err)
 			}
-			if r.EffectPhase != taskstore.BackgroundRunEffectPromptPending || !prompted {
+			if r.EffectPhase != store.BackgroundRunEffectPromptPending || !prompted {
 				t.Fatalf("ready catalog did not dispatch: %s/%s calls=%v", r.State, r.EffectPhase, calls)
 			}
 			if calls[0] != "GET /api/model" || calls[1] != "GET /api/agent" {

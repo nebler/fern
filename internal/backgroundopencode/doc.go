@@ -7,7 +7,7 @@
 // The client owns bounded, strict wire decoding and evidence interpretation.
 // The coordinator owns durable intent and retry policy, and the Docker provider
 // supplies the endpoint and credentials; nothing here inspects Docker, writes
-// taskstore state, or decides that a run succeeded. ParseTrustedOrigin is pure
+// store state, or decides that a run succeeded. ParseTrustedOrigin is pure
 // syntax validation used by config, not a reachability or TLS check.
 //
 // The *Once methods send at most one mutation with no retry and no request-body

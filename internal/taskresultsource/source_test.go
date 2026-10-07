@@ -10,8 +10,8 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/domain"
+	"github.com/nebler/fern/internal/store"
 	"github.com/nebler/fern/internal/taskartifact"
-	"github.com/nebler/fern/internal/taskstore"
 )
 
 type countingArtifact struct {
@@ -101,10 +101,10 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 		t.Fatal(err)
 	}
 	sealedAt := time.UnixMilli(2)
-	projection := taskstore.BackgroundRunResultProjection{
-		Run: taskstore.BackgroundRun{WorkspaceID: workspaceID, RunID: runID, RepositoryID: 1, BaseOID: base,
-			OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID, Seal: &taskstore.Seal{ResultID: resultID}},
-		Result: taskstore.Result{ID: resultID, RunID: runID, State: taskstore.ResultSealed, BaseSHA: snapshot.Base,
+	projection := store.BackgroundRunResultProjection{
+		Run: store.BackgroundRun{WorkspaceID: workspaceID, RunID: runID, RepositoryID: 1, BaseOID: base,
+			OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID, Seal: &store.Seal{ResultID: resultID}},
+		Result: store.Result{ID: resultID, RunID: runID, State: store.ResultSealed, BaseSHA: snapshot.Base,
 			ResultCommit: snapshot.Result, TreeOID: snapshot.Tree, ChangeCount: len(snapshot.Changes), ChangesSHA256: snapshot.ChangesSHA256.Bytes(),
 			ManifestSHA256: snapshot.ManifestSHA256.Bytes(), BundleSHA256: snapshot.BundleSHA256.Bytes(), BundleBytes: snapshot.BundleBytes,
 			SealedAt: &sealedAt},
@@ -125,18 +125,18 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 	otherSession := mustSession(t, ids)
 	for _, test := range []struct {
 		name   string
-		mutate func(*taskstore.BackgroundRunResultProjection)
+		mutate func(*store.BackgroundRunResultProjection)
 	}{
-		{"repository", func(p *taskstore.BackgroundRunResultProjection) { p.Run.RepositoryID++ }},
-		{"workspace", func(p *taskstore.BackgroundRunResultProjection) { p.Run.WorkspaceID = otherWorkspace }},
-		{"result", func(p *taskstore.BackgroundRunResultProjection) {
+		{"repository", func(p *store.BackgroundRunResultProjection) { p.Run.RepositoryID++ }},
+		{"workspace", func(p *store.BackgroundRunResultProjection) { p.Run.WorkspaceID = otherWorkspace }},
+		{"result", func(p *store.BackgroundRunResultProjection) {
 			p.Result.ID, p.Run.Seal.ResultID = otherResult, otherResult
 		}},
-		{"unsealed", func(p *taskstore.BackgroundRunResultProjection) { p.Result.State = taskstore.ResultSelected }},
-		{"change count", func(p *taskstore.BackgroundRunResultProjection) { p.Result.ChangeCount++ }},
-		{"bundle digest", func(p *taskstore.BackgroundRunResultProjection) { p.Result.BundleSHA256[0] ^= 0xff }},
-		{"bundle size", func(p *taskstore.BackgroundRunResultProjection) { p.Result.BundleBytes++ }},
-		{"session", func(p *taskstore.BackgroundRunResultProjection) { p.Run.OpenCodeSessionID = otherSession }},
+		{"unsealed", func(p *store.BackgroundRunResultProjection) { p.Result.State = store.ResultSelected }},
+		{"change count", func(p *store.BackgroundRunResultProjection) { p.Result.ChangeCount++ }},
+		{"bundle digest", func(p *store.BackgroundRunResultProjection) { p.Result.BundleSHA256[0] ^= 0xff }},
+		{"bundle size", func(p *store.BackgroundRunResultProjection) { p.Result.BundleBytes++ }},
+		{"session", func(p *store.BackgroundRunResultProjection) { p.Run.OpenCodeSessionID = otherSession }},
 	} {
 		t.Run("rejects "+test.name+" mismatch", func(t *testing.T) {
 			changed := projection
@@ -148,10 +148,10 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 			if newErr != nil {
 				t.Fatal(newErr)
 			}
-			if path, closeSource, acquireErr := changedResolver.Acquire(context.Background(), changed); path != "" || closeSource != nil || acquireErr != taskstore.ErrCorruptStore {
+			if path, closeSource, acquireErr := changedResolver.Acquire(context.Background(), changed); path != "" || closeSource != nil || acquireErr != store.ErrCorruptStore {
 				t.Fatalf("mismatched authority path=%q close=%v error=%v", path, closeSource != nil, acquireErr)
 			}
-			if verifyErr := changedResolver.Verify(context.Background(), changed); verifyErr != taskstore.ErrCorruptStore {
+			if verifyErr := changedResolver.Verify(context.Background(), changed); verifyErr != store.ErrCorruptStore {
 				t.Fatalf("mismatched retention verification error=%v", verifyErr)
 			}
 			if changedEngine.acquisitions != 1 || changedEngine.inspects != 1 {

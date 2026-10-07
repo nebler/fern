@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/domain"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 )
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
@@ -178,9 +178,9 @@ func TestAttachmentCapabilityFencesSessionWriterAndExpiry(t *testing.T) {
 	if _, err := manager.Activate(identity, target); err != nil {
 		t.Fatal(err)
 	}
-	for name, mutate := range map[string]func(*taskstore.BackgroundRun){
-		"runtime": func(run *taskstore.BackgroundRun) { run.RuntimeEpoch++ },
-		"session": func(run *taskstore.BackgroundRun) { run.OpenCodeSessionID = "ses_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+	for name, mutate := range map[string]func(*store.BackgroundRun){
+		"runtime": func(run *store.BackgroundRun) { run.RuntimeEpoch++ },
+		"session": func(run *store.BackgroundRun) { run.OpenCodeSessionID = "ses_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			run := testRun(identity)
@@ -321,8 +321,8 @@ func pairedRequest(method, target, token, origin string, body io.Reader) *http.R
 	return request
 }
 
-func testRun(identity Identity) taskstore.BackgroundRun {
-	return taskstore.BackgroundRun{WorkspaceID: domain.WorkspaceID(identity.WorkspaceID), RunID: domain.RunID(identity.RunID),
+func testRun(identity Identity) store.BackgroundRun {
+	return store.BackgroundRun{WorkspaceID: domain.WorkspaceID(identity.WorkspaceID), RunID: domain.RunID(identity.RunID),
 		RuntimeEpoch:        identity.RuntimeEpoch,
 		ObservedContainerID: identity.ContainerID, ObservedContainerStartedAt: identity.StartedAt,
 		OpenCodeSessionID: domain.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef")}

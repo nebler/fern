@@ -18,7 +18,7 @@ import (
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/pluginauth"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 )
 
 const (
@@ -38,13 +38,13 @@ type retentionVerifier struct {
 	err   error
 }
 
-func (v *retentionVerifier) Verify(context.Context, taskstore.BackgroundRunResultProjection) error {
+func (v *retentionVerifier) Verify(context.Context, store.BackgroundRunResultProjection) error {
 	v.calls.Add(1)
 	return v.err
 }
 
 type apiFixture struct {
-	store    *taskstore.Store
+	store    *store.Store
 	handler  *Handler
 	actor    domain.ActorSnapshot
 	verifier *countingVerifier
@@ -59,13 +59,13 @@ type fakeRoute struct {
 	calls  int
 }
 
-func (route *fakeRoute) IssueAttachment(taskstore.BackgroundRun) (backgroundroute.Attachment, bool, error) {
+func (route *fakeRoute) IssueAttachment(store.BackgroundRun) (backgroundroute.Attachment, bool, error) {
 	route.calls++
 	return backgroundroute.Attachment{Origin: "https://fern.example:8443", Username: backgroundroute.AttachmentUsername,
 		Password: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", ExpiresAt: time.Now().Add(time.Hour)}, route.active, nil
 }
 
-func (route *fakeRoute) ActiveOrigin(taskstore.BackgroundRun) (string, bool) {
+func (route *fakeRoute) ActiveOrigin(store.BackgroundRun) (string, bool) {
 	return "https://fern.example:8443", route.active
 }
 
@@ -75,17 +75,17 @@ func (fixture *apiFixture) rebuildCommands(t *testing.T) {
 }
 
 type resultProjectionStore struct {
-	*taskstore.Store
-	run        taskstore.BackgroundRun
-	projection taskstore.BackgroundRunResultProjection
+	*store.Store
+	run        store.BackgroundRun
+	projection store.BackgroundRunResultProjection
 }
 
-func (store *resultProjectionStore) GetBackgroundRun(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (taskstore.BackgroundRun, error) {
-	return store.run, nil
+func (s *resultProjectionStore) GetBackgroundRun(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.BackgroundRun, error) {
+	return s.run, nil
 }
 
-func (store *resultProjectionStore) GetBackgroundRunResult(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error) {
-	return store.projection, nil
+func (s *resultProjectionStore) GetBackgroundRunResult(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.BackgroundRunResultProjection, error) {
+	return s.projection, nil
 }
 
 func TestCreateMalformedJSONWritesOneError(t *testing.T) {
@@ -175,12 +175,12 @@ func TestRunAPIAdmissionReplayOwnershipStopAndRestart(t *testing.T) {
 	if err := fixture.store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store, err := taskstore.Open(context.Background(), fixture.path)
+	runStore, err := store.Open(context.Background(), fixture.path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
-	restarted := fixture.withStore(t, store)
+	t.Cleanup(func() { _ = runStore.Close() })
+	restarted := fixture.withStore(t, runStore)
 	got := restarted.request(http.MethodGet, PathPrefix+"/"+response.RunID, "", "")
 	if got.Code != http.StatusOK || !strings.Contains(got.Body.String(), `"state":"failed"`) {
 		t.Fatalf("restart get = %d %s", got.Code, got.Body.String())
@@ -374,15 +374,15 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 	changes := sha256.Sum256([]byte("changes"))
 	manifest := sha256.Sum256([]byte("artifact manifest"))
 	bundle := sha256.Sum256([]byte("bundle"))
-	run := taskstore.BackgroundRun{RunID: runID, WorkspaceID: testWorkspace,
+	run := store.BackgroundRun{RunID: runID, WorkspaceID: testWorkspace,
 		RepositoryRemote: "https://github.com/owner/repository", State: domain.ResultReady,
-		EffectPhase: domain.CleanupComplete, Seal: &taskstore.Seal{ResultID: resultID}}
-	projection := taskstore.BackgroundRunResultProjection{Run: run,
-		Result: taskstore.Result{ID: resultID, RunID: runID, State: taskstore.ResultSealed, Outcome: domain.ResultChanged, BaseSHA: testBase,
+		EffectPhase: domain.CleanupComplete, Seal: &store.Seal{ResultID: resultID}}
+	projection := store.BackgroundRunResultProjection{Run: run,
+		Result: store.Result{ID: resultID, RunID: runID, State: store.ResultSealed, Outcome: domain.ResultChanged, BaseSHA: testBase,
 			ResultCommit: domain.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), TreeOID: domain.GitOID("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
 			ChangeCount: 2, ChangesSHA256: changes, ManifestSHA256: manifest, BundleSHA256: bundle, BundleBytes: 1234}}
-	store := &resultProjectionStore{Store: fixture.store, run: run, projection: projection}
-	fixture.handler.config.Store = store
+	runStore := &resultProjectionStore{Store: fixture.store, run: run, projection: projection}
+	fixture.handler.config.Store = runStore
 	response := fixture.request(http.MethodGet, PathPrefix+"/"+string(runID)+"/result", "", "")
 	if response.Code != http.StatusOK {
 		t.Fatalf("result=%d %s", response.Code, response.Body.String())
@@ -426,7 +426,7 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 		t.Fatalf("cached retention projection=%v calls=%d", got, fixture.retained.calls.Load())
 	}
 	// A different bundle digest is a different tuple; failures are not cached.
-	store.projection.Result.BundleSHA256 = sha256.Sum256([]byte("other bundle"))
+	runStore.projection.Result.BundleSHA256 = sha256.Sum256([]byte("other bundle"))
 	fixture.retained.err = errors.New("artifact missing")
 	for want := int64(2); want <= 3; want++ {
 		if got := retention(); got["verified"] != false || got["reconstructable"] != false || fixture.retained.calls.Load() != want {
@@ -438,9 +438,9 @@ func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) 
 		t.Fatalf("recovered retention projection=%v calls=%d", got, fixture.retained.calls.Load())
 	}
 
-	store.run.State = domain.Canceling
-	store.run.EffectPhase = domain.Sealing
-	store.run.LastError = "retained artifact export retry required"
+	runStore.run.State = domain.Canceling
+	runStore.run.EffectPhase = domain.Sealing
+	runStore.run.LastError = "retained artifact export retry required"
 	recovery := fixture.request(http.MethodGet, PathPrefix+"/"+string(runID)+"/result", "", "")
 	if recovery.Code != http.StatusServiceUnavailable || !strings.Contains(recovery.Body.String(), "recovery_required") {
 		t.Fatalf("recovery result=%d %s", recovery.Code, recovery.Body.String())
@@ -454,16 +454,16 @@ func newAPIFixture(t *testing.T) *apiFixture {
 		t.Fatal(err)
 	}
 	path := filepath.Join(directory, "tasks.db")
-	store, err := taskstore.Open(context.Background(), path)
+	runStore, err := store.Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
-	if err := store.CreateWorkspace(context.Background(), taskstore.Workspace{ID: testWorkspace, Name: "demo", State: taskstore.WorkspaceActive, RepositoryPath: "/srv/repo", GitHubAuthority: taskstore.GitHubAuthorityAppBroker, InstallationID: 1, RepositoryID: 99, RepositoryFullName: "owner/repository", ImageDigest: "sha256:image", OpenCodeProtocol: "0.0.0-next-17444", RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: now}); err != nil {
+	if err := runStore.CreateWorkspace(context.Background(), store.Workspace{ID: testWorkspace, Name: "demo", State: store.WorkspaceActive, RepositoryPath: "/srv/repo", GitHubAuthority: store.GitHubAuthorityAppBroker, InstallationID: 1, RepositoryID: 99, RepositoryFullName: "owner/repository", ImageDigest: "sha256:image", OpenCodeProtocol: "0.0.0-next-17444", RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	fixture := &apiFixture{store: store, actor: pluginActor("pc_owner"), verifier: &countingVerifier{}, retained: &retentionVerifier{}, route: &fakeRoute{}, path: path, now: now}
-	t.Cleanup(func() { _ = store.Close() })
+	fixture := &apiFixture{store: runStore, actor: pluginActor("pc_owner"), verifier: &countingVerifier{}, retained: &retentionVerifier{}, route: &fakeRoute{}, path: path, now: now}
+	t.Cleanup(func() { _ = runStore.Close() })
 	fixture.handler = fixture.buildHandler(t)
 	return fixture
 }
@@ -477,7 +477,7 @@ func (f *apiFixture) buildHandler(t *testing.T) *Handler {
 	return handler
 }
 
-func (f *apiFixture) advanceToSession(t *testing.T, id domain.RunID) taskstore.BackgroundRun {
+func (f *apiFixture) advanceToSession(t *testing.T, id domain.RunID) store.BackgroundRun {
 	t.Helper()
 	now := time.Date(2026, 8, 31, 12, 0, 1, 0, time.UTC)
 	queued, err := f.store.NextBackgroundRun(context.Background(), testWorkspace, domain.SourceProfile)
@@ -490,7 +490,7 @@ func (f *apiFixture) advanceToSession(t *testing.T, id domain.RunID) taskstore.B
 	}
 	started := time.Date(2026, 8, 31, 12, 0, 2, 123456789, time.UTC)
 	now = now.Add(time.Millisecond)
-	run, err = f.store.RecordBackgroundRunRuntime(context.Background(), taskstore.RecordBackgroundRunRuntimeParams{
+	run, err = f.store.RecordBackgroundRunRuntime(context.Background(), store.RecordBackgroundRunRuntimeParams{
 		BackgroundRunRef: openTestRef(run, now), ContainerID: strings.Repeat("a", 64), ContainerStartedAt: started.Format(time.RFC3339Nano),
 		RuntimeEpoch: started.UnixNano(), HostPort: 49152, Evidence: `{"status":"exact"}`,
 	})
@@ -506,11 +506,11 @@ func (f *apiFixture) advanceToSession(t *testing.T, id domain.RunID) taskstore.B
 	return run
 }
 
-func (f *apiFixture) advanceToPrompt(t *testing.T, id domain.RunID) taskstore.BackgroundRun {
+func (f *apiFixture) advanceToPrompt(t *testing.T, id domain.RunID) store.BackgroundRun {
 	run := f.advanceToSession(t, id)
 	now := run.UpdatedAt.Add(time.Millisecond)
 	var err error
-	run, err = f.store.RecordBackgroundRunPromptAdmitted(context.Background(), taskstore.RecordBackgroundRunEvidenceParams{
+	run, err = f.store.RecordBackgroundRunPromptAdmitted(context.Background(), store.RecordBackgroundRunEvidenceParams{
 		BackgroundRunRef: openTestRef(run, now), Evidence: `{"status":"exact"}`})
 	if err != nil {
 		t.Fatal(err)
@@ -519,8 +519,8 @@ func (f *apiFixture) advanceToPrompt(t *testing.T, id domain.RunID) taskstore.Ba
 	return run
 }
 
-func openTestRef(run taskstore.BackgroundRun, now time.Time) taskstore.BackgroundRunRef {
-	return taskstore.BackgroundRunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID,
+func openTestRef(run store.BackgroundRun, now time.Time) store.BackgroundRunRef {
+	return store.BackgroundRunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID,
 		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now}
 }
 func (f *apiFixture) withActor(t *testing.T, actor domain.ActorSnapshot) *apiFixture {
@@ -529,9 +529,9 @@ func (f *apiFixture) withActor(t *testing.T, actor domain.ActorSnapshot) *apiFix
 	clone.handler = clone.buildHandler(t)
 	return &clone
 }
-func (f *apiFixture) withStore(t *testing.T, store *taskstore.Store) *apiFixture {
+func (f *apiFixture) withStore(t *testing.T, runStore *store.Store) *apiFixture {
 	clone := *f
-	clone.store = store
+	clone.store = runStore
 	clone.handler = clone.buildHandler(t)
 	return &clone
 }

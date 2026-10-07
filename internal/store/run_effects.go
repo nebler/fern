@@ -1,4 +1,4 @@
-package taskstore
+package store
 
 // This file holds the coordinator's effect transitions. Each is a
 // compare-and-swap on a BackgroundRunRef.

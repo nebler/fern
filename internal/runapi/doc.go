@@ -2,7 +2,7 @@
 // /fern/api/runs. It owns routing (one method/scope table), scope checks, strict wire DTOs, response and
 // error projection, the committed create/stop/seal commands (service.go), and
 // the configured-checkout Git base verifier (gitverifier.go). Durable SQL
-// authority lives in taskstore.
+// authority lives in store.
 //
 // Ingress authenticates; this package is not authentication middleware. It
 // accepts OpenCode plugin actors whose identity matches the ingress bearer

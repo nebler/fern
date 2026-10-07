@@ -1,4 +1,4 @@
-package taskstore
+package store
 
 import (
 	"context"
@@ -121,5 +121,5 @@ func (s *Store) Close() error { return s.db.Close() }
 
 // DB is the shared handle for the packages whose tables this schema also
 // defines (control, pluginauth). They issue their own
-// SQL; taskstore owns only the schema and the connection policy.
+// SQL; store owns only the schema and the connection policy.
 func (s *Store) DB() *sql.DB { return s.db }

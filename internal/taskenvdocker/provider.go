@@ -30,7 +30,7 @@ import (
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/githubapp"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -167,7 +167,7 @@ type providerLifecycle struct {
 	closed    bool
 }
 
-// Observation is bounded canonical evidence suitable for taskstore evidence
+// Observation is bounded canonical evidence suitable for store evidence
 // columns. It never contains credentials or environment values.
 type Observation struct {
 	Evidence         string
@@ -283,14 +283,14 @@ func (p *Provider) Close() error {
 
 // CommittedRuntime reconstructs the exact durable process identity without
 // requiring the current execution configuration to match the run being cleaned.
-func (p *Provider) CommittedRuntime(run taskstore.BackgroundRun) (RuntimeIdentity, error) {
+func (p *Provider) CommittedRuntime(run store.BackgroundRun) (RuntimeIdentity, error) {
 	if _, err := p.validateRunForCleanup(run); err != nil {
 		return RuntimeIdentity{}, err
 	}
 	return committedRuntimeFromRun(run)
 }
 
-func committedRuntimeFromRun(run taskstore.BackgroundRun) (RuntimeIdentity, error) {
+func committedRuntimeFromRun(run store.BackgroundRun) (RuntimeIdentity, error) {
 	identity, err := domain.NewRuntime(run.ObservedContainerID, run.ObservedContainerStartedAt)
 	if err != nil || identity.Epoch() != run.RuntimeEpoch {
 		return RuntimeIdentity{}, errors.New("durable background runtime epoch is incomplete")
@@ -301,7 +301,7 @@ func committedRuntimeFromRun(run taskstore.BackgroundRun) (RuntimeIdentity, erro
 // OpenCodeClient derives Basic credentials in memory and returns only the
 // profile-specific authenticated client. No capability or secret crosses the
 // provider boundary.
-func (p *Provider) OpenCodeClient(run taskstore.BackgroundRun, runtime RuntimeIdentity, httpClient *http.Client) (*backgroundopencode.Client, error) {
+func (p *Provider) OpenCodeClient(run store.BackgroundRun, runtime RuntimeIdentity, httpClient *http.Client) (*backgroundopencode.Client, error) {
 	if _, err := p.validateRun(run); err != nil {
 		return nil, err
 	}
@@ -317,7 +317,7 @@ func (p *Provider) OpenCodeClient(run taskstore.BackgroundRun, runtime RuntimeId
 
 // BackgroundRouteTarget derives the exact endpoint and an authenticated
 // transport without exposing the run password outside the provider.
-func (p *Provider) BackgroundRouteTarget(run taskstore.BackgroundRun, runtime RuntimeIdentity) (backgroundroute.Target, error) {
+func (p *Provider) BackgroundRouteTarget(run store.BackgroundRun, runtime RuntimeIdentity) (backgroundroute.Target, error) {
 	transport, err := p.newRouteTransport(run, runtime)
 	if err != nil {
 		return backgroundroute.Target{}, err
@@ -325,7 +325,7 @@ func (p *Provider) BackgroundRouteTarget(run taskstore.BackgroundRun, runtime Ru
 	return backgroundroute.NewTarget("http://"+transport.endpoint, transport)
 }
 
-func (p *Provider) newRouteTransport(run taskstore.BackgroundRun, runtime RuntimeIdentity) (*routeTransport, error) {
+func (p *Provider) newRouteTransport(run store.BackgroundRun, runtime RuntimeIdentity) (*routeTransport, error) {
 	digest, err := p.validateRun(run)
 	if err != nil {
 		return nil, err
@@ -363,7 +363,7 @@ func (p *Provider) newRouteTransport(run taskstore.BackgroundRun, runtime Runtim
 type routeTransport struct {
 	base               http.RoundTripper
 	provider           *Provider
-	run                taskstore.BackgroundRun
+	run                store.BackgroundRun
 	digest             string
 	runtime            RuntimeIdentity
 	hostPort           int
@@ -521,7 +521,7 @@ func qualifyImage(got image.InspectResponse, want string) error {
 	return nil
 }
 
-func (p *Provider) validateRun(run taskstore.BackgroundRun) (string, error) {
+func (p *Provider) validateRun(run store.BackgroundRun) (string, error) {
 	if err := p.admitStorage(); err != nil {
 		return "", err
 	}
@@ -535,10 +535,10 @@ func (p *Provider) validateRun(run taskstore.BackgroundRun) (string, error) {
 	return digest, nil
 }
 
-func (p *Provider) validateRunForCleanup(run taskstore.BackgroundRun) (string, error) {
+func (p *Provider) validateRunForCleanup(run store.BackgroundRun) (string, error) {
 	// The run row is Fern's own durable record; only the derived resource names
 	// are re-checked because they become host paths and Docker object names.
-	if !validImageID(run.ImageIdentity) || run.ResourceSpecVersion != domain.ResourceSpecVersion || run.Profile != taskstore.BackgroundRunSourceProfile {
+	if !validImageID(run.ImageIdentity) || run.ResourceSpecVersion != domain.ResourceSpecVersion || run.Profile != store.BackgroundRunSourceProfile {
 		return "", errors.New("invalid immutable background run tuple")
 	}
 	if !domain.NewResources(run.RunID).Matches(run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity) {
@@ -547,7 +547,7 @@ func (p *Provider) validateRunForCleanup(run taskstore.BackgroundRun) (string, e
 	return p.specDigest(run)
 }
 
-func (p *Provider) specDigest(run taskstore.BackgroundRun) (string, error) {
+func (p *Provider) specDigest(run store.BackgroundRun) (string, error) {
 	data, err := json.Marshal(struct {
 		Version                                                                                int `json:"version"`
 		Workspace, Task                                                                        string
@@ -567,7 +567,7 @@ func (p *Provider) specDigest(run taskstore.BackgroundRun) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func (p *Provider) password(run taskstore.BackgroundRun) string {
+func (p *Provider) password(run store.BackgroundRun) string {
 	mac := hmac.New(sha256.New, p.hostKey[:])
 	_, _ = mac.Write([]byte(passwordDomain))
 	for _, value := range []string{string(run.WorkspaceID), string(run.RunID), run.ImageIdentity} {
@@ -578,7 +578,7 @@ func (p *Provider) password(run taskstore.BackgroundRun) string {
 	return base64.RawURLEncoding.EncodeToString(mac.Sum(nil))
 }
 
-func (p *Provider) labels(run taskstore.BackgroundRun, digest string) map[string]string {
+func (p *Provider) labels(run store.BackgroundRun, digest string) map[string]string {
 	return map[string]string{
 		managedLabel: "true", workspaceLabel: string(run.WorkspaceID), taskLabel: string(run.RunID),
 		imageLabel: run.ImageIdentity, cloneLabel: run.CloneIdentity,
@@ -588,7 +588,7 @@ func (p *Provider) labels(run taskstore.BackgroundRun, digest string) map[string
 	}
 }
 
-func (p *Provider) containerLabels(run taskstore.BackgroundRun, digest string) map[string]string {
+func (p *Provider) containerLabels(run store.BackgroundRun, digest string) map[string]string {
 	labels := make(map[string]string, len(p.imageLabels)+14)
 	maps.Copy(labels, p.imageLabels)
 	maps.Copy(labels, p.labels(run, digest))

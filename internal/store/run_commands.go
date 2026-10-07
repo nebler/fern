@@ -1,4 +1,4 @@
-package taskstore
+package store
 
 // This file holds the idempotent run commands: create, stop, and seal. Each
 // classifies its receipt, then commits the receipt and run transition together.

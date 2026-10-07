@@ -12,7 +12,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/nebler/fern/internal/githubapp"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 )
 
 const githubRefreshAhead = 5 * time.Minute
@@ -41,7 +41,7 @@ type githubCredentialCache struct {
 // admission and is reported for retry; an already-running harness may still use
 // its previous token until GitHub expires it. A failed refresh is never cached.
 // Token bytes never appear in errors.
-func (p *Provider) RefreshGitHubCredentials(ctx context.Context, run taskstore.BackgroundRun) error {
+func (p *Provider) RefreshGitHubCredentials(ctx context.Context, run store.BackgroundRun) error {
 	if p.config.GitHubTokens == nil {
 		return nil
 	}

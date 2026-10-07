@@ -1,4 +1,4 @@
-package taskstore
+package store
 
 import (
 	"bytes"

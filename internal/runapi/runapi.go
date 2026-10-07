@@ -17,7 +17,7 @@ import (
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/safeio"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 )
 
 const (
@@ -28,27 +28,27 @@ const (
 )
 
 type Store interface {
-	AdmitBackgroundRun(context.Context, taskstore.AdmitBackgroundRunParams) (taskstore.Admission, error)
-	FindReceiptByIdempotency(context.Context, domain.WorkspaceID, string, domain.IdempotencyKey) (taskstore.Receipt, bool, error)
-	GetBackgroundRun(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (taskstore.BackgroundRun, error)
-	StopBackgroundRun(context.Context, taskstore.StopBackgroundRunParams) (taskstore.BackgroundRunStop, error)
-	SealBackgroundRun(context.Context, taskstore.SealBackgroundRunParams) (taskstore.BackgroundRunSealAdmission, error)
-	ListBackgroundRuns(context.Context, domain.WorkspaceID, domain.ActorSnapshot, int) ([]taskstore.BackgroundRun, error)
-	GetBackgroundRunResult(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error)
+	AdmitBackgroundRun(context.Context, store.AdmitBackgroundRunParams) (store.Admission, error)
+	FindReceiptByIdempotency(context.Context, domain.WorkspaceID, string, domain.IdempotencyKey) (store.Receipt, bool, error)
+	GetBackgroundRun(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.BackgroundRun, error)
+	StopBackgroundRun(context.Context, store.StopBackgroundRunParams) (store.BackgroundRunStop, error)
+	SealBackgroundRun(context.Context, store.SealBackgroundRunParams) (store.BackgroundRunSealAdmission, error)
+	ListBackgroundRuns(context.Context, domain.WorkspaceID, domain.ActorSnapshot, int) ([]store.BackgroundRun, error)
+	GetBackgroundRunResult(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.BackgroundRunResultProjection, error)
 }
 
-var _ Store = (*taskstore.Store)(nil)
+var _ Store = (*store.Store)(nil)
 
 // Route issues short-lived OpenCode attachment credentials for live runs.
 type Route interface {
-	IssueAttachment(taskstore.BackgroundRun) (backgroundroute.Attachment, bool, error)
-	ActiveOrigin(taskstore.BackgroundRun) (string, bool)
+	IssueAttachment(store.BackgroundRun) (backgroundroute.Attachment, bool, error)
+	ActiveOrigin(store.BackgroundRun) (string, bool)
 }
 
 type ActorResolver func(context.Context) (domain.ActorSnapshot, error)
 
 type RetentionVerifier interface {
-	Verify(context.Context, taskstore.BackgroundRunResultProjection) error
+	Verify(context.Context, store.BackgroundRunResultProjection) error
 }
 
 type Config struct {
@@ -299,7 +299,7 @@ func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor domain.Ac
 
 // verifyRetained runs the full retention verification (bundle copy, unbundle,
 // fsck) once per immutable retained tuple instead of on every result read.
-func (h *Handler) verifyRetained(ctx context.Context, projection taskstore.BackgroundRunResultProjection) bool {
+func (h *Handler) verifyRetained(ctx context.Context, projection store.BackgroundRunResultProjection) bool {
 	key := retainedKey{result: projection.Result.ID, bundle: projection.Result.BundleSHA256}
 	if _, ok := h.retained.Load(key); ok {
 		return true
@@ -468,7 +468,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, actor domain.Ac
 		Username: attachment.Username, Password: attachment.Password, ExpiresAt: attachment.ExpiresAt})
 }
 
-func attachmentReady(run taskstore.BackgroundRun) bool {
+func attachmentReady(run store.BackgroundRun) bool {
 	active := run.State == domain.SettingUp || run.State == domain.Working ||
 		run.State == domain.NeedsYou || run.State == domain.Uncertain
 	// Provisioning reconciles the session before the prompt fence ends it.
@@ -505,7 +505,7 @@ type runView struct {
 	Attachable bool `json:"attachable"`
 }
 
-func (h *Handler) view(run taskstore.BackgroundRun) runView {
+func (h *Handler) view(run store.BackgroundRun) runView {
 	_, active := h.config.Route.ActiveOrigin(run)
 	return runView{run.RunID, run.State, run.RepositoryRemote, run.BaseOID, run.Branch, active && attachmentReady(run)}
 }
@@ -576,9 +576,9 @@ func writeStoreError(w http.ResponseWriter, err error) {
 		WriteError(w, http.StatusUnprocessableEntity, "base_unavailable", "base_oid is not an exact commit reachable from an allowed configured-repository ref.")
 	case errors.Is(err, errReplayConflict):
 		WriteError(w, http.StatusConflict, "idempotency_conflict", "Idempotency-Key was already used for another request.")
-	case errors.Is(err, taskstore.ErrNotFound):
+	case errors.Is(err, store.ErrNotFound):
 		writeNotFound(w)
-	case errors.Is(err, taskstore.ErrIdempotencyConflict), errors.Is(err, taskstore.ErrInvalidState):
+	case errors.Is(err, store.ErrIdempotencyConflict), errors.Is(err, store.ErrInvalidState):
 		WriteError(w, http.StatusConflict, "conflict", "The run command conflicts with durable state.")
 	default:
 		WriteError(w, http.StatusInternalServerError, "internal_error", "The run command could not be completed.")

@@ -1,8 +1,8 @@
 // Package taskenvdocker is the provider for one serial, disposable Docker
 // Background Run. It owns exact resource attestation, clone/volume/container
 // lifecycle effects, runtime-fenced transport, and repository-scoped GitHub
-// credential delivery. It never schedules work or writes taskstore state; it
-// imports taskstore only for record types.
+// credential delivery. It never schedules work or writes store state; it
+// imports store only for record types.
 //
 // Every resource has a deterministic identity, and each Ensure*/Remove* call
 // inspects before it acts, so callers can repeat any step to reconcile.

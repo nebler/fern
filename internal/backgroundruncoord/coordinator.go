@@ -13,9 +13,9 @@ import (
 	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/domain"
+	"github.com/nebler/fern/internal/store"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
-	"github.com/nebler/fern/internal/taskstore"
 )
 
 var ErrNoWork = errors.New("no background run work")
@@ -48,7 +48,7 @@ type Config struct {
 }
 
 type Coordinator struct {
-	store    *taskstore.Store
+	store    *store.Store
 	provider *taskenvdocker.Provider
 	artifact Artifact
 	ids      *domain.Generator
@@ -68,9 +68,9 @@ type Artifact interface {
 	Materialize(context.Context, taskartifact.Locator) (*taskartifact.Checkout, error)
 }
 
-func New(store *taskstore.Store, provider *taskenvdocker.Provider, artifact Artifact, ids *domain.Generator, config Config) (*Coordinator, error) {
-	if store == nil || provider == nil || artifact == nil || ids == nil || config.Now == nil || config.HTTPClient == nil || config.Route == nil ||
-		config.Profile != taskstore.BackgroundRunSourceProfile || config.ImageIdentity == "" || config.EnvironmentSHA256 == ([32]byte{}) ||
+func New(runStore *store.Store, provider *taskenvdocker.Provider, artifact Artifact, ids *domain.Generator, config Config) (*Coordinator, error) {
+	if runStore == nil || provider == nil || artifact == nil || ids == nil || config.Now == nil || config.HTTPClient == nil || config.Route == nil ||
+		config.Profile != store.BackgroundRunSourceProfile || config.ImageIdentity == "" || config.EnvironmentSHA256 == ([32]byte{}) ||
 		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.OperationTimeout <= 0 ||
 		config.OperationTimeout > 5*time.Minute || config.PollInterval <= 0 ||
 		config.HTTPClient.Timeout <= 0 || config.HTTPClient.Timeout > config.OperationTimeout ||
@@ -81,7 +81,7 @@ func New(store *taskstore.Store, provider *taskenvdocker.Provider, artifact Arti
 	if _, err := domain.ParseWorkspaceID(string(config.WorkspaceID)); err != nil {
 		return nil, errors.New("valid background run coordinator workspace is required")
 	}
-	return &Coordinator{store: store, provider: provider, artifact: artifact, ids: ids, config: config, wake: make(chan struct{}, 1)}, nil
+	return &Coordinator{store: runStore, provider: provider, artifact: artifact, ids: ids, config: config, wake: make(chan struct{}, 1)}, nil
 }
 
 func (c *Coordinator) Wake() {
@@ -119,7 +119,7 @@ func (c *Coordinator) supervise(ctx context.Context, step func(context.Context) 
 		}
 		var err error
 		progressed, err = step(ctx)
-		if errors.Is(err, taskstore.ErrCorruptStore) {
+		if errors.Is(err, store.ErrCorruptStore) {
 			return err
 		}
 		if errors.Is(err, ErrNoWork) {
@@ -171,23 +171,23 @@ func (c *Coordinator) step(ctx context.Context) (bool, error) {
 	}
 	// A working run's state may change on observation without new work for
 	// the coordinator; only a phase change counts there.
-	stateProgress := state != work.Run.State && work.Run.EffectPhase != taskstore.BackgroundRunEffectAdmitted
+	stateProgress := state != work.Run.State && work.Run.EffectPhase != store.BackgroundRunEffectAdmitted
 	return phase != work.Run.EffectPhase || stateProgress, nil
 }
 
-func (c *Coordinator) runOnce(ctx context.Context) (taskstore.BackgroundRunWork, error) {
+func (c *Coordinator) runOnce(ctx context.Context) (store.BackgroundRunWork, error) {
 	now, err := c.freshNow()
 	if err != nil {
-		return taskstore.BackgroundRunWork{}, err
+		return store.BackgroundRunWork{}, err
 	}
 	work, err := c.store.NextBackgroundRunWork(ctx, c.config.WorkspaceID, c.config.Profile)
-	if errors.Is(err, taskstore.ErrNotFound) {
+	if errors.Is(err, store.ErrNotFound) {
 		return work, ErrNoWork
 	}
 	if err != nil {
 		return work, err
 	}
-	if work.Run.State == taskstore.BackgroundRunQueued {
+	if work.Run.State == store.BackgroundRunQueued {
 		// Consume the provisioning slot before any external effect.
 		queued := work.Run
 		work.Run, err = c.store.StartBackgroundRunProvisioning(ctx, ref(queued, now))
@@ -202,7 +202,7 @@ func (c *Coordinator) runOnce(ctx context.Context) (taskstore.BackgroundRunWork,
 	}
 	lifecycle := classify(work.Run)
 	if !lifecycle.Valid {
-		return work, taskstore.ErrCorruptStore
+		return work, store.ErrCorruptStore
 	}
 	if work.Run.StopReceiptID == 0 && work.Run.TimeoutRequestedAt == nil && lifecycle.TimeoutEligible &&
 		!now.Before(work.Run.Deadline) {
@@ -221,26 +221,26 @@ func (c *Coordinator) runOnce(ctx context.Context) (taskstore.BackgroundRunWork,
 	return work, c.process(operation, ctx, work)
 }
 
-func (c *Coordinator) process(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
+func (c *Coordinator) process(operation, parent context.Context, work store.BackgroundRunWork) error {
 	run := work.Run
 	switch run.EffectPhase {
-	case taskstore.BackgroundRunEffectProvisioning:
+	case store.BackgroundRunEffectProvisioning:
 		return c.provision(operation, parent, work)
-	case taskstore.BackgroundRunEffectPromptPending:
+	case store.BackgroundRunEffectPromptPending:
 		client, err := c.live(operation, run)
 		if err != nil {
 			return c.externalFailure(parent, work, err)
 		}
 		return c.reconcilePrompt(parent, work, client)
-	case taskstore.BackgroundRunEffectAdmitted:
+	case store.BackgroundRunEffectAdmitted:
 		client, err := c.live(operation, run)
 		if err != nil {
 			return c.externalFailure(parent, work, err)
 		}
 		return c.observeWorking(operation, parent, work, client)
-	case taskstore.BackgroundRunEffectSealing:
+	case store.BackgroundRunEffectSealing:
 		return c.seal(operation, parent, work)
-	case taskstore.BackgroundRunEffectCleaning:
+	case store.BackgroundRunEffectCleaning:
 		return c.clean(operation, parent, work)
 	default:
 		return nil
@@ -250,7 +250,7 @@ func (c *Coordinator) process(operation, parent context.Context, work taskstore.
 // seal proves the exact writer stopped, records that fence once, and exports
 // under it. The run stays sealing, retaining every resource, until the
 // retained result commits.
-func (c *Coordinator) seal(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
+func (c *Coordinator) seal(operation, parent context.Context, work store.BackgroundRunWork) error {
 	if work.Run.WriterFence == nil {
 		_, providerFence, err := c.provider.ProveWriterInactive(operation, work.Run)
 		if err != nil {
@@ -267,7 +267,7 @@ func (c *Coordinator) seal(operation, parent context.Context, work taskstore.Bac
 // writer, then remove container, volume, and clone. Each step re-inspects and
 // treats absence as done, so a failed pass is simply retried; only when every
 // resource is proven absent does the run become terminal.
-func (c *Coordinator) clean(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
+func (c *Coordinator) clean(operation, parent context.Context, work store.BackgroundRunWork) error {
 	run := work.Run
 	if run.ObservedContainerID != "" || run.ObservedContainerStartedAt != "" || run.RuntimeEpoch != 0 {
 		identity, err := c.validatedRouteIdentity(run)
@@ -297,7 +297,7 @@ func (c *Coordinator) clean(operation, parent context.Context, work taskstore.Ba
 	return c.terminalize(parent, work)
 }
 
-func (c *Coordinator) terminalize(parent context.Context, work taskstore.BackgroundRunWork) error {
+func (c *Coordinator) terminalize(parent context.Context, work store.BackgroundRunWork) error {
 	run := work.Run
 	if run.Seal != nil {
 		mutation, cancel, now, err := c.effectContext(parent, work, false)
@@ -305,7 +305,7 @@ func (c *Coordinator) terminalize(parent context.Context, work taskstore.Backgro
 			return err
 		}
 		defer cancel()
-		_, err = c.store.CompleteBackgroundRunResultCleanup(mutation, taskstore.CompleteBackgroundRunResultCleanupParams{
+		_, err = c.store.CompleteBackgroundRunResultCleanup(mutation, store.CompleteBackgroundRunResultCleanupParams{
 			BackgroundRunRef: ref(run, now), CleanupProof: `{"route":"absent","container":"absent","volume":"absent","clone":"absent"}`})
 		return err
 	}
@@ -320,7 +320,7 @@ func (c *Coordinator) terminalize(parent context.Context, work taskstore.Backgro
 		return err
 	}
 	defer cancel()
-	_, err = c.store.FinalizeBackgroundRunFailure(mutation, taskstore.FinalizeBackgroundRunFailureParams{
+	_, err = c.store.FinalizeBackgroundRunFailure(mutation, store.FinalizeBackgroundRunFailureParams{
 		BackgroundRunRef: ref(run, now), Reason: reason, Evidence: `{"effect":"terminalize","status":"resources_absent"}`,
 		CleanupProof: `{"route":"absent","container":"absent","volume":"absent","clone":"absent"}`,
 	})
@@ -329,20 +329,20 @@ func (c *Coordinator) terminalize(parent context.Context, work taskstore.Backgro
 
 // recordWriterFence persists the structured provider fence; provider prose
 // (the observation evidence) is not durable authority and is not recorded.
-func (c *Coordinator) recordWriterFence(ctx context.Context, work taskstore.BackgroundRunWork, provider taskenvdocker.WriterFence) (taskstore.BackgroundRun, error) {
+func (c *Coordinator) recordWriterFence(ctx context.Context, work store.BackgroundRunWork, provider taskenvdocker.WriterFence) (store.BackgroundRun, error) {
 	run := work.Run
 	now, err := c.freshNow()
 	if err != nil {
 		return run, err
 	}
-	params := taskstore.RecordBackgroundRunWriterFenceParams{BackgroundRunRef: ref(run, now)}
+	params := store.RecordBackgroundRunWriterFenceParams{BackgroundRunRef: ref(run, now)}
 	switch provider.Kind() {
 	case taskenvdocker.WriterFenceNeverCreated:
-		params.Kind = taskstore.WriterFenceNeverCreated
+		params.Kind = store.WriterFenceNeverCreated
 	case taskenvdocker.WriterFenceCreatedNeverStarted:
-		params.Kind, params.ContainerID = taskstore.WriterFenceNeverStarted, provider.ContainerID()
+		params.Kind, params.ContainerID = store.WriterFenceNeverStarted, provider.ContainerID()
 	case taskenvdocker.WriterFenceStoppedRuntime:
-		params.Kind, params.ContainerID, params.ContainerStartedAt = taskstore.WriterFenceRuntimeStopped, provider.ContainerID(), provider.StartedAt()
+		params.Kind, params.ContainerID, params.ContainerStartedAt = store.WriterFenceRuntimeStopped, provider.ContainerID(), provider.StartedAt()
 		params.RuntimeToken, params.StoppedAt = provider.Token(), &now
 	default:
 		return run, taskenvdocker.ErrIdentityMismatch
@@ -360,13 +360,13 @@ func (c *Coordinator) recordWriterFence(ctx context.Context, work taskstore.Back
 // stopped clone, CAS installation is content-addressed, and materialization is
 // a verification, so a pass interrupted anywhere re-derives and re-checks them
 // against the selected result.
-func (c *Coordinator) exportRetained(operation, parent context.Context, run taskstore.BackgroundRun) error {
+func (c *Coordinator) exportRetained(operation, parent context.Context, run store.BackgroundRun) error {
 	attempt := retainedExportAttempt{coordinator: c, run: run}
 	selected, err := c.store.GetResult(parent, run.Seal.ResultID)
 	switch {
 	case err == nil:
 		attempt.selected = &selected
-	case !errors.Is(err, taskstore.ErrNotFound):
+	case !errors.Is(err, store.ErrNotFound):
 		return err
 	}
 	if err := attempt.reconcile(operation, parent); err != nil {
@@ -379,8 +379,8 @@ func (c *Coordinator) exportRetained(operation, parent context.Context, run task
 // selected result, if any. SQL remains the authority for both.
 type retainedExportAttempt struct {
 	coordinator *Coordinator
-	run         taskstore.BackgroundRun
-	selected    *taskstore.Result
+	run         store.BackgroundRun
+	selected    *store.Result
 }
 
 func (a *retainedExportAttempt) reconcile(operation, parent context.Context) (resultErr error) {
@@ -466,7 +466,7 @@ func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Con
 		if err != nil {
 			return err
 		}
-		selected, err := c.store.SelectBackgroundRunSnapshot(parent, taskstore.SelectBackgroundRunSnapshotParams{
+		selected, err := c.store.SelectBackgroundRunSnapshot(parent, store.SelectBackgroundRunSnapshotParams{
 			BackgroundRunRef: ref(run, collectedAt), ResultCommit: snapshot.Result, TreeOID: snapshot.Tree,
 			ChangeCount: len(snapshot.Changes), ChangesSHA256: snapshot.ChangesSHA256.Bytes(), ArtifactManifest: manifestBytes,
 			ArtifactManifestSHA256: manifestDigest.Bytes(), BundleSHA256: snapshot.BundleSHA256.Bytes(), BundleBytes: snapshot.BundleBytes,
@@ -515,17 +515,17 @@ func (a *retainedExportAttempt) commitResult(parent context.Context, proof [32]b
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), c.config.OperationTimeout)
 	defer cancel()
-	_, err := c.store.CommitBackgroundRunRetainedResult(ctx, taskstore.CommitBackgroundRunRetainedResultParams{
+	_, err := c.store.CommitBackgroundRunRetainedResult(ctx, store.CommitBackgroundRunRetainedResultParams{
 		BackgroundRunRef: ref(a.run, sealedAt), MaterializationProof: proof,
 	})
 	return err
 }
 
-func providerFence(value taskstore.WriterFence) taskenvdocker.WriterFence {
+func providerFence(value store.WriterFence) taskenvdocker.WriterFence {
 	switch value.Kind {
-	case taskstore.WriterFenceNeverCreated:
+	case store.WriterFenceNeverCreated:
 		return taskenvdocker.NeverCreatedAuthority()
-	case taskstore.WriterFenceNeverStarted:
+	case store.WriterFenceNeverStarted:
 		return taskenvdocker.CreatedContainerAuthority(value.ContainerID)
 	default:
 		return taskenvdocker.RuntimeCleanupAuthority(taskenvdocker.RuntimeIdentity{ContainerID: value.ContainerID, StartedAt: value.ContainerStartedAt, Token: value.RuntimeToken})
@@ -534,7 +534,7 @@ func providerFence(value taskstore.WriterFence) taskenvdocker.WriterFence {
 
 // snapshotMatches binds a snapshot to the sealing run's identities and the
 // durable selection.
-func snapshotMatches(snapshot taskartifact.Snapshot, run taskstore.BackgroundRun, selected taskstore.Result) bool {
+func snapshotMatches(snapshot taskartifact.Snapshot, run store.BackgroundRun, selected store.Result) bool {
 	return snapshot.RepositoryID == run.RepositoryID && snapshot.WorkspaceID == run.WorkspaceID && snapshot.RunID == run.RunID &&
 		snapshot.ResultID == selected.ID && snapshot.OpenCodeSessionID == run.OpenCodeSessionID && snapshot.OpenCodeMessageID == run.OpenCodeMessageID &&
 		snapshot.Base == selected.BaseSHA && snapshot.Result == selected.ResultCommit && snapshot.Tree == selected.TreeOID &&
@@ -542,7 +542,7 @@ func snapshotMatches(snapshot taskartifact.Snapshot, run taskstore.BackgroundRun
 		snapshot.BundleSHA256.Bytes() == selected.BundleSHA256 && snapshot.BundleBytes == selected.BundleBytes
 }
 
-func materializationProof(selected taskstore.Result, path string) [32]byte {
+func materializationProof(selected store.Result, path string) [32]byte {
 	// Path is deliberately reduced to an observation bit; host paths never enter
 	// durable evidence. Engine.Materialize already proves detached clean state.
 	payload, _ := json.Marshal(struct {
@@ -559,7 +559,7 @@ func materializationProof(selected taskstore.Result, path string) [32]byte {
 // ends at the prompt fence. Only the started runtime and the fence are durable:
 // the clone, volume, container, health, route, and session are derived from
 // the run's deterministic identities and re-observed on every pass.
-func (c *Coordinator) provision(operation, parent context.Context, work taskstore.BackgroundRunWork) error {
+func (c *Coordinator) provision(operation, parent context.Context, work store.BackgroundRunWork) error {
 	if work.Run.ObservedContainerID == "" {
 		started, err := c.provider.Provision(operation, work.Run)
 		if err != nil {
@@ -569,7 +569,7 @@ func (c *Coordinator) provision(operation, parent context.Context, work taskstor
 		if err != nil {
 			return err
 		}
-		work.Run, err = c.store.RecordBackgroundRunRuntime(mutation, taskstore.RecordBackgroundRunRuntimeParams{
+		work.Run, err = c.store.RecordBackgroundRunRuntime(mutation, store.RecordBackgroundRunRuntimeParams{
 			BackgroundRunRef: ref(work.Run, now), ContainerID: started.ContainerID, ContainerStartedAt: started.ContainerStarted,
 			RuntimeEpoch: started.RuntimeEpoch, HostPort: started.HostPort, Evidence: started.Evidence,
 		})
@@ -594,7 +594,7 @@ func (c *Coordinator) provision(operation, parent context.Context, work taskstor
 // after it first opens the location, and a turn started earlier fails without
 // durable evidence, stranding an admitted prompt. An unready catalog leaves the
 // run provisioning; a later pass retries until the attempt deadline.
-func (c *Coordinator) dispatchWhenReady(operation, parent context.Context, work taskstore.BackgroundRunWork, client *backgroundopencode.Client) error {
+func (c *Coordinator) dispatchWhenReady(operation, parent context.Context, work store.BackgroundRunWork, client *backgroundopencode.Client) error {
 	spec := backgroundopencode.ReadinessSpec{Agent: c.config.Agent, ProviderID: c.config.ModelProvider,
 		ModelID: c.config.Model, Directory: sessionDirectory}
 	if err := client.WaitReady(operation, spec, c.readinessInterval()); err != nil {
@@ -613,7 +613,7 @@ func (c *Coordinator) readinessInterval() time.Duration {
 // live proves the committed runtime healthy, refreshes its GitHub credentials,
 // and keeps its route active. Credentials are runtime inputs, never
 // publication authority, and are refreshed only while execution is allowed.
-func (c *Coordinator) live(ctx context.Context, run taskstore.BackgroundRun) (*backgroundopencode.Client, error) {
+func (c *Coordinator) live(ctx context.Context, run store.BackgroundRun) (*backgroundopencode.Client, error) {
 	runtime, err := c.provider.CommittedRuntime(run)
 	if err != nil {
 		return nil, errors.Join(taskenvdocker.ErrIdentityMismatch, err)
@@ -636,7 +636,7 @@ func (c *Coordinator) live(ctx context.Context, run taskstore.BackgroundRun) (*b
 
 // reconcileSession creates the Fern-chosen session at most once per pass and
 // reports whether it exactly exists.
-func (c *Coordinator) reconcileSession(operation, parent context.Context, work taskstore.BackgroundRunWork, client *backgroundopencode.Client) (bool, error) {
+func (c *Coordinator) reconcileSession(operation, parent context.Context, work store.BackgroundRunWork, client *backgroundopencode.Client) (bool, error) {
 	run := work.Run
 	spec := backgroundopencode.SessionSpec{ID: string(run.OpenCodeSessionID), Agent: c.config.Agent,
 		ProviderID: c.config.ModelProvider, ModelID: c.config.Model, Directory: sessionDirectory}
@@ -663,7 +663,7 @@ func (c *Coordinator) reconcileSession(operation, parent context.Context, work t
 // dispatchPrompt commits the one-way prompt fence, which ends provisioning,
 // before the single admission call. Whatever happens next, the run is
 // prompt_pending and later passes only reconcile.
-func (c *Coordinator) dispatchPrompt(operation, parent context.Context, work taskstore.BackgroundRunWork, client *backgroundopencode.Client) error {
+func (c *Coordinator) dispatchPrompt(operation, parent context.Context, work store.BackgroundRunWork, client *backgroundopencode.Client) error {
 	mutation, cancel, now, err := c.effectContext(parent, work, true)
 	if err != nil {
 		return err
@@ -697,13 +697,13 @@ func (c *Coordinator) dispatchPrompt(operation, parent context.Context, work tas
 	return c.reconcilePrompt(parent, work, client)
 }
 
-func (c *Coordinator) promptSpec(work taskstore.BackgroundRunWork) backgroundopencode.PromptSpec {
+func (c *Coordinator) promptSpec(work store.BackgroundRunWork) backgroundopencode.PromptSpec {
 	return backgroundopencode.PromptSpec{ID: string(work.Run.OpenCodeMessageID), Text: work.Prompt, Resume: true, Delivery: "steer"}
 }
 
 // reconcilePrompt reads bounded session history; only exact admission
 // advances, and anything else leaves the prompt uncertain.
-func (c *Coordinator) reconcilePrompt(parent context.Context, work taskstore.BackgroundRunWork, client *backgroundopencode.Client) error {
+func (c *Coordinator) reconcilePrompt(parent context.Context, work store.BackgroundRunWork, client *backgroundopencode.Client) error {
 	reconcileCtx, reconcileCancel, _, contextErr := c.effectContext(parent, work, true)
 	if contextErr != nil {
 		return contextErr
@@ -720,7 +720,7 @@ func (c *Coordinator) reconcilePrompt(parent context.Context, work taskstore.Bac
 	return c.record(parent, work, fmt.Sprintf(`{"effect":"prompt_reconcile","status":%q}`, status), c.store.RecordBackgroundRunPromptUncertain)
 }
 
-func (c *Coordinator) observeWorking(operation, parent context.Context, work taskstore.BackgroundRunWork, client *backgroundopencode.Client) error {
+func (c *Coordinator) observeWorking(operation, parent context.Context, work store.BackgroundRunWork, client *backgroundopencode.Client) error {
 	run := work.Run
 	usage, err := c.provider.ObserveUsage(operation, run)
 	if err != nil {
@@ -731,7 +731,7 @@ func (c *Coordinator) observeWorking(operation, parent context.Context, work tas
 	}
 	observation, err := client.ObservePending(operation, string(run.OpenCodeSessionID))
 	if err != nil {
-		recordErr := c.recordObservation(parent, work, `{"effect":"work_observe","status":"inconclusive"}`, taskstore.BackgroundRunUncertain)
+		recordErr := c.recordObservation(parent, work, `{"effect":"work_observe","status":"inconclusive"}`, store.BackgroundRunUncertain)
 		return errors.Join(err, recordErr)
 	}
 	state, status := workObservation(observation.State)
@@ -745,18 +745,18 @@ func (c *Coordinator) observeWorking(operation, parent context.Context, work tas
 
 // The runtime owns pending-observation precedence. Counts remain evidence only;
 // unknown observations do not authorize a durable state change.
-func workObservation(state backgroundopencode.WorkState) (taskstore.BackgroundRunState, string) {
+func workObservation(state backgroundopencode.WorkState) (store.BackgroundRunState, string) {
 	switch state {
 	case backgroundopencode.WorkNeedsYou:
-		return taskstore.BackgroundRunNeedsYou, "owned_pending"
+		return store.BackgroundRunNeedsYou, "owned_pending"
 	case backgroundopencode.WorkWorking:
-		return taskstore.BackgroundRunWorking, "positive_active"
+		return store.BackgroundRunWorking, "positive_active"
 	default:
 		return "", ""
 	}
 }
 
-func (c *Coordinator) validatedRouteIdentity(run taskstore.BackgroundRun) (backgroundroute.Identity, error) {
+func (c *Coordinator) validatedRouteIdentity(run store.BackgroundRun) (backgroundroute.Identity, error) {
 	runtime, err := c.provider.CommittedRuntime(run)
 	if err != nil {
 		return backgroundroute.Identity{}, err
@@ -764,13 +764,13 @@ func (c *Coordinator) validatedRouteIdentity(run taskstore.BackgroundRun) (backg
 	return makeRouteIdentity(run, runtime), nil
 }
 
-func makeRouteIdentity(run taskstore.BackgroundRun, runtime taskenvdocker.RuntimeIdentity) backgroundroute.Identity {
+func makeRouteIdentity(run store.BackgroundRun, runtime taskenvdocker.RuntimeIdentity) backgroundroute.Identity {
 	return backgroundroute.Identity{WorkspaceID: string(run.WorkspaceID), RunID: string(run.RunID),
 		SessionID: string(run.OpenCodeSessionID), RuntimeEpoch: run.RuntimeEpoch,
 		ContainerID: runtime.ContainerID, StartedAt: runtime.StartedAt, RuntimeToken: runtime.Token}
 }
 
-func (c *Coordinator) externalFailure(ctx context.Context, work taskstore.BackgroundRunWork, external error) error {
+func (c *Coordinator) externalFailure(ctx context.Context, work store.BackgroundRunWork, external error) error {
 	if errors.Is(external, taskenvdocker.ErrIdentityMismatch) || errors.Is(external, taskenvdocker.ErrQuarantined) {
 		return errors.Join(external, c.cleanupRequired(ctx, work, "background resource identity mismatch"))
 	}
@@ -780,7 +780,7 @@ func (c *Coordinator) externalFailure(ctx context.Context, work taskstore.Backgr
 	return external
 }
 
-func (c *Coordinator) cleanupRequired(ctx context.Context, work taskstore.BackgroundRunWork, reason string) error {
+func (c *Coordinator) cleanupRequired(ctx context.Context, work store.BackgroundRunWork, reason string) error {
 	if identity, identityErr := c.validatedRouteIdentity(work.Run); identityErr == nil && c.config.Route.Active(identity) {
 		// Remove waits for in-flight proxied requests to drain; bound it like
 		// every other effect so a stuck request cannot hold the scan.
@@ -799,13 +799,13 @@ func (c *Coordinator) cleanupRequired(ctx context.Context, work taskstore.Backgr
 		return err
 	}
 	defer cancel()
-	_, err = c.store.MarkBackgroundRunCleanupRequired(mutation, taskstore.MarkBackgroundRunCleanupRequiredParams{
+	_, err = c.store.MarkBackgroundRunCleanupRequired(mutation, store.MarkBackgroundRunCleanupRequiredParams{
 		BackgroundRunRef: ref(work.Run, now), Error: reason,
 	})
 	return err
 }
 
-func (c *Coordinator) cleanupFailure(ctx context.Context, work taskstore.BackgroundRunWork, external error) error {
+func (c *Coordinator) cleanupFailure(ctx context.Context, work store.BackgroundRunWork, external error) error {
 	return errors.Join(external, c.cleanupRequired(ctx, work, "background cleanup retry required"))
 }
 
@@ -817,7 +817,7 @@ func (c *Coordinator) freshNow() (time.Time, error) {
 	return raw.UTC().Truncate(time.Millisecond), nil
 }
 
-func (c *Coordinator) promptDispatchAuthority(work taskstore.BackgroundRunWork) error {
+func (c *Coordinator) promptDispatchAuthority(work store.BackgroundRunWork) error {
 	now, err := c.freshNow()
 	if err != nil {
 		return err
@@ -828,7 +828,7 @@ func (c *Coordinator) promptDispatchAuthority(work taskstore.BackgroundRunWork) 
 	return nil
 }
 
-func (c *Coordinator) effectContext(parent context.Context, work taskstore.BackgroundRunWork, enforceRunDeadline bool) (context.Context, context.CancelFunc, time.Time, error) {
+func (c *Coordinator) effectContext(parent context.Context, work store.BackgroundRunWork, enforceRunDeadline bool) (context.Context, context.CancelFunc, time.Time, error) {
 	now, err := c.freshNow()
 	if err != nil {
 		return nil, nil, time.Time{}, err
@@ -844,8 +844,8 @@ func (c *Coordinator) effectContext(parent context.Context, work taskstore.Backg
 	return ctx, cancel, now, nil
 }
 
-func (c *Coordinator) requestTimeout(ctx context.Context, run taskstore.BackgroundRun) error {
-	work := taskstore.BackgroundRunWork{Run: run}
+func (c *Coordinator) requestTimeout(ctx context.Context, run store.BackgroundRun) error {
+	work := store.BackgroundRunWork{Run: run}
 	mutation, cancel, now, err := c.effectContext(ctx, work, false)
 	if err != nil {
 		return err
@@ -855,8 +855,8 @@ func (c *Coordinator) requestTimeout(ctx context.Context, run taskstore.Backgrou
 	return err
 }
 
-func (c *Coordinator) record(ctx context.Context, work taskstore.BackgroundRunWork, value string,
-	transition func(context.Context, taskstore.RecordBackgroundRunEvidenceParams) (taskstore.BackgroundRun, error)) error {
+func (c *Coordinator) record(ctx context.Context, work store.BackgroundRunWork, value string,
+	transition func(context.Context, store.RecordBackgroundRunEvidenceParams) (store.BackgroundRun, error)) error {
 	mutation, cancel, now, err := c.effectContext(ctx, work, classify(work.Run).Executing)
 	if err != nil {
 		return err
@@ -866,7 +866,7 @@ func (c *Coordinator) record(ctx context.Context, work taskstore.BackgroundRunWo
 	return err
 }
 
-func (c *Coordinator) recordObservation(ctx context.Context, work taskstore.BackgroundRunWork, value string, state taskstore.BackgroundRunState) error {
+func (c *Coordinator) recordObservation(ctx context.Context, work store.BackgroundRunWork, value string, state store.BackgroundRunState) error {
 	mutation, cancel, now, err := c.effectContext(ctx, work, true)
 	if err != nil {
 		return err
@@ -877,15 +877,15 @@ func (c *Coordinator) recordObservation(ctx context.Context, work taskstore.Back
 }
 
 // ref pins the revision this scan read; every write is a compare-and-swap on it.
-func ref(run taskstore.BackgroundRun, now time.Time) taskstore.BackgroundRunRef {
-	return taskstore.BackgroundRunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID,
+func ref(run store.BackgroundRun, now time.Time) store.BackgroundRunRef {
+	return store.BackgroundRunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID,
 		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now}
 }
 
-func evidence(run taskstore.BackgroundRun, now time.Time, value string) taskstore.RecordBackgroundRunEvidenceParams {
-	return taskstore.RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref(run, now), Evidence: value}
+func evidence(run store.BackgroundRun, now time.Time, value string) store.RecordBackgroundRunEvidenceParams {
+	return store.RecordBackgroundRunEvidenceParams{BackgroundRunRef: ref(run, now), Evidence: value}
 }
 
-func classify(run taskstore.BackgroundRun) domain.Lifecycle {
+func classify(run store.BackgroundRun) domain.Lifecycle {
 	return domain.Classify(domain.State(run.State), domain.Phase(run.EffectPhase))
 }

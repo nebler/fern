@@ -168,7 +168,7 @@ func (RequestAuthorization) HasScope(scope string) bool {
 }
 
 // New returns the plugin authorization store backed by db, whose schema
-// (taskstore) defines the plugin_* tables.
+// (store) defines the plugin_* tables.
 func New(db *sql.DB) *Store {
 	return &Store{db: db, active: make(map[string]map[uint64]context.CancelFunc)}
 }

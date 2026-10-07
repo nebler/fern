@@ -254,7 +254,7 @@ proven security sandbox.
 - `run`: lifecycle vocabulary and exact resource/runtime identity; no I/O.
 - `runapi`: plugin-authenticated HTTP run API plus create/stop/seal policy,
   idempotency, and admission.
-- `taskstore`: SQLite durable state, receipts, revision-checked transitions.
+- `store`: SQLite durable state, receipts, revision-checked transitions.
 - `backgroundruncoord`: serial engine that converts durable phases into effects.
 - `taskenvdocker`: Docker clone/volume/container policy and credential handoff.
 - `backgroundopencode`: pinned OpenCode session/prompt/observation protocol.

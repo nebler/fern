@@ -1,4 +1,4 @@
-package taskstore
+package store
 
 import (
 	"encoding/json"
@@ -95,8 +95,8 @@ type AdmitBackgroundRunParams struct {
 	AcceptedAt         time.Time
 }
 
-// Compatibility names for packages outside taskstore that still spell the run
-// vocabulary through this package; taskstore and runapi use package run
+// Compatibility names for packages outside store that still spell the run
+// vocabulary through this package; store and runapi use package run
 // directly. Remove once those callers do too.
 type BackgroundRunState = domain.State
 

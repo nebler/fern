@@ -6,17 +6,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nebler/fern/internal/taskstore/taskstoretest"
+	"github.com/nebler/fern/internal/store/storetest"
 )
 
 func TestStorePersistsDevices(t *testing.T) {
-	database, path := taskstoretest.Open(t)
+	database, path := storetest.Open(t)
 	now := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
 	device, err := New(database.DB()).AddDevice("device-secret", "Noah's phone", now, now.Add(24*time.Hour))
 	if err != nil {
 		t.Fatal(err)
 	}
-	taskstoretest.AssertNoSecrets(t, path, "device-secret")
+	storetest.AssertNoSecrets(t, path, "device-secret")
 
 	reopened := New(database.DB())
 	if valid, err := authenticateDevice(reopened, "device-secret", now.Add(time.Minute)); err != nil || !valid {
@@ -35,7 +35,7 @@ func TestStorePersistsDevices(t *testing.T) {
 }
 
 func TestStorePrunesExpiredDevice(t *testing.T) {
-	store := New(taskstoretest.DB(t))
+	store := New(storetest.DB(t))
 	now := time.Now()
 	if _, err := store.AddDevice("expired", "old", now, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
@@ -46,7 +46,7 @@ func TestStorePrunesExpiredDevice(t *testing.T) {
 }
 
 func TestStoreAuthenticationReturnsDurableDeviceIdentity(t *testing.T) {
-	store := New(taskstoretest.DB(t))
+	store := New(storetest.DB(t))
 	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
 	want, err := store.AddDevice("device-secret", "Phone", now, now.Add(2*time.Hour))
 	if err != nil {
@@ -66,7 +66,7 @@ func TestStoreAuthenticationReturnsDurableDeviceIdentity(t *testing.T) {
 }
 
 func TestDeviceLimitAdmitsAfterExpiredDevicesArePruned(t *testing.T) {
-	store := New(taskstoretest.DB(t))
+	store := New(storetest.DB(t))
 	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
 	for i := range maxDevices {
 		expires := now.Add(time.Hour)
@@ -86,7 +86,7 @@ func TestDeviceLimitAdmitsAfterExpiredDevicesArePruned(t *testing.T) {
 }
 
 func TestEnsureOperatorCredentialIDIsStableRandomAndPersisted(t *testing.T) {
-	database, _ := taskstoretest.Open(t)
+	database, _ := storetest.Open(t)
 	first, err := New(database.DB()).EnsureOperatorCredentialID()
 	if err != nil {
 		t.Fatal(err)
@@ -97,7 +97,7 @@ func TestEnsureOperatorCredentialIDIsStableRandomAndPersisted(t *testing.T) {
 	if persisted, err := New(database.DB()).EnsureOperatorCredentialID(); err != nil || persisted != first {
 		t.Fatalf("persisted ID = %q, %v; want %q", persisted, err, first)
 	}
-	if different, err := New(taskstoretest.DB(t)).EnsureOperatorCredentialID(); err != nil || different == first {
+	if different, err := New(storetest.DB(t)).EnsureOperatorCredentialID(); err != nil || different == first {
 		t.Fatalf("independent store reused ID %q (%v)", different, err)
 	}
 }

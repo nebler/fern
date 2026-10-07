@@ -15,7 +15,7 @@ import (
 	"strings"
 
 	"github.com/nebler/fern/internal/safeio"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 )
 
 // cloneMarker is the private authority binding a run to the exact clone
@@ -34,7 +34,7 @@ type cloneMarker struct {
 }
 
 // EnsureClone creates or reconciles the exact full independent checkout.
-func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun) (_ Observation, resultErr error) {
+func (p *Provider) EnsureClone(ctx context.Context, run store.BackgroundRun) (_ Observation, resultErr error) {
 	digest, err := p.validateRun(run)
 	if err != nil {
 		return Observation{}, err
@@ -79,7 +79,7 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 
 // admitCloneSource checks the operator's configured source repository and the
 // clone filesystem before any clone is created or reconciled.
-func (p *Provider) admitCloneSource(ctx context.Context, run taskstore.BackgroundRun) error {
+func (p *Provider) admitCloneSource(ctx context.Context, run store.BackgroundRun) error {
 	sourceBytes, err := treeSize(ctx, p.config.Repository)
 	if err != nil {
 		return fmt.Errorf("predict clone source size: %w", err)
@@ -104,7 +104,7 @@ func (p *Provider) admitCloneSource(ctx context.Context, run taskstore.Backgroun
 }
 
 // reconcileExistingClone attests a clone already at its canonical path.
-func (p *Provider) reconcileExistingClone(ctx context.Context, run taskstore.BackgroundRun, digest, path string) (int64, error) {
+func (p *Provider) reconcileExistingClone(ctx context.Context, run store.BackgroundRun, digest, path string) (int64, error) {
 	err := p.attestCloneMarker(run, digest, path)
 	var size int64
 	if err == nil {
@@ -119,7 +119,7 @@ func (p *Provider) reconcileExistingClone(ctx context.Context, run taskstore.Bac
 // recoverStagedClone finishes a publication interrupted after the marker was
 // written. It reports recovered=false, after dropping any orphaned marker,
 // when there is nothing to recover and a fresh clone must be created.
-func (p *Provider) recoverStagedClone(ctx context.Context, run taskstore.BackgroundRun, digest, path string) (size int64, recovered bool, err error) {
+func (p *Provider) recoverStagedClone(ctx context.Context, run store.BackgroundRun, digest, path string) (size int64, recovered bool, err error) {
 	if _, err := os.Lstat(p.cloneMarkerPath(run)); errors.Is(err, os.ErrNotExist) {
 		return 0, false, nil
 	} else if err != nil {
@@ -165,7 +165,7 @@ func (p *Provider) recoverStagedClone(ctx context.Context, run taskstore.Backgro
 // createClone clones the source into a private stage, normalizes and attests
 // it, writes its marker, and publishes it to path without replacement. A
 // failure before publication removes the stage.
-func (p *Provider) createClone(ctx context.Context, run taskstore.BackgroundRun, digest, path string) (_ int64, resultErr error) {
+func (p *Provider) createClone(ctx context.Context, run store.BackgroundRun, digest, path string) (_ int64, resultErr error) {
 	stageRoot := filepath.Join(p.root, ".clone-stage-"+rand.Text())
 	if err := os.Mkdir(stageRoot, 0o700); err != nil {
 		return 0, fmt.Errorf("create clone staging directory: %w", err)
@@ -223,11 +223,11 @@ func (p *Provider) createClone(ctx context.Context, run taskstore.BackgroundRun,
 	return size, nil
 }
 
-func (p *Provider) cloneMarkerPath(run taskstore.BackgroundRun) string {
+func (p *Provider) cloneMarkerPath(run store.BackgroundRun) string {
 	return filepath.Join(p.root, ".clone-authority-"+run.CloneIdentity+".json")
 }
 
-func expectedCloneMarker(run taskstore.BackgroundRun, digest string, device, inode uint64) cloneMarker {
+func expectedCloneMarker(run store.BackgroundRun, digest string, device, inode uint64) cloneMarker {
 	return cloneMarker{1, string(run.WorkspaceID), string(run.RunID), run.ImageIdentity, run.CloneIdentity, string(run.BaseOID), run.RepositoryRemote, digest, device, inode}
 }
 
@@ -238,7 +238,7 @@ func encodeCloneMarker(marker cloneMarker) []byte {
 
 // writeCloneMarker publishes the marker for the clone directory info names. It
 // never replaces an existing marker.
-func (p *Provider) writeCloneMarker(run taskstore.BackgroundRun, digest string, info os.FileInfo) (cloneMarker, error) {
+func (p *Provider) writeCloneMarker(run store.BackgroundRun, digest string, info os.FileInfo) (cloneMarker, error) {
 	device, inode, err := safeio.Identity(info)
 	if err != nil {
 		return cloneMarker{}, err
@@ -252,7 +252,7 @@ func (p *Provider) writeCloneMarker(run taskstore.BackgroundRun, digest string, 
 
 // readCloneMarker returns the run's marker, which must be byte-for-byte the
 // marker this run would write for the inode it names.
-func (p *Provider) readCloneMarker(run taskstore.BackgroundRun, digest string) (cloneMarker, error) {
+func (p *Provider) readCloneMarker(run store.BackgroundRun, digest string) (cloneMarker, error) {
 	data, err := safeio.ReadFile(p.cloneMarkerPath(run), maxEvidenceBytes)
 	if err != nil {
 		return cloneMarker{}, fmt.Errorf("read private clone authority: %w", err)
@@ -265,7 +265,7 @@ func (p *Provider) readCloneMarker(run taskstore.BackgroundRun, digest string) (
 	return marker, nil
 }
 
-func (p *Provider) attestCloneMarker(run taskstore.BackgroundRun, digest, clonePath string) error {
+func (p *Provider) attestCloneMarker(run store.BackgroundRun, digest, clonePath string) error {
 	marker, err := p.readCloneMarker(run, digest)
 	if err != nil {
 		return err
@@ -281,7 +281,7 @@ func (p *Provider) attestCloneMarker(run taskstore.BackgroundRun, digest, cloneP
 }
 
 // removeCloneMarker removes the marker only while it is still expected.
-func (p *Provider) removeCloneMarker(run taskstore.BackgroundRun, digest string, expected cloneMarker) error {
+func (p *Provider) removeCloneMarker(run store.BackgroundRun, digest string, expected cloneMarker) error {
 	current, err := p.readCloneMarker(run, digest)
 	if err != nil {
 		return err
@@ -295,7 +295,7 @@ func (p *Provider) removeCloneMarker(run taskstore.BackgroundRun, digest string,
 	return safeio.SyncDir(p.root)
 }
 
-func (p *Provider) attestRepository(ctx context.Context, run taskstore.BackgroundRun, path string) (int64, error) {
+func (p *Provider) attestRepository(ctx context.Context, run store.BackgroundRun, path string) (int64, error) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return 0, errors.New("clone path is not an exact directory")
@@ -584,7 +584,7 @@ func treeSize(ctx context.Context, root string) (int64, error) {
 
 // ObserveUsage returns bounded observed clone usage. This is monitoring
 // evidence, not a kernel-enforced quota; Docker local-volume usage is unknown.
-func (p *Provider) ObserveUsage(ctx context.Context, run taskstore.BackgroundRun) (_ UsageObservation, resultErr error) {
+func (p *Provider) ObserveUsage(ctx context.Context, run store.BackgroundRun) (_ UsageObservation, resultErr error) {
 	digest, err := p.validateRun(run)
 	if err != nil {
 		return UsageObservation{}, err

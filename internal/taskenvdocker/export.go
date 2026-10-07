@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"github.com/docker/docker/errdefs"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 )
 
 // ExportSource is an opaque lease on one exact Background Run clone. The
@@ -47,7 +47,7 @@ func (source *ExportSource) Close() error {
 // AcquireExportSource acquires a filesystem-only export lease after proving
 // that the supplied exact writer fence remains inactive. It performs no Git
 // reads and grants no provider-root or cleanup authority.
-func (p *Provider) AcquireExportSource(ctx context.Context, run taskstore.BackgroundRun, fence WriterFence) (_ *ExportSource, resultErr error) {
+func (p *Provider) AcquireExportSource(ctx context.Context, run store.BackgroundRun, fence WriterFence) (_ *ExportSource, resultErr error) {
 	if err := p.requireOpen(); err != nil {
 		return nil, err
 	}
@@ -106,7 +106,7 @@ func (p *Provider) requireOpen() error {
 	return nil
 }
 
-func (p *Provider) readExportClone(run taskstore.BackgroundRun, digest string) (cloneMarker, error) {
+func (p *Provider) readExportClone(run store.BackgroundRun, digest string) (cloneMarker, error) {
 	marker, err := p.readCloneMarker(run, digest)
 	if err != nil {
 		return cloneMarker{}, err
@@ -118,7 +118,7 @@ func (p *Provider) readExportClone(run taskstore.BackgroundRun, digest string) (
 	return marker, nil
 }
 
-func (p *Provider) requireExportWriterInactive(ctx context.Context, run taskstore.BackgroundRun, digest string, kind WriterFenceKind, fence WriterFence) error {
+func (p *Provider) requireExportWriterInactive(ctx context.Context, run store.BackgroundRun, digest string, kind WriterFenceKind, fence WriterFence) error {
 	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	defer cancel()
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
@@ -165,7 +165,7 @@ func (p *Provider) requireExportWriterInactive(ctx context.Context, run taskstor
 	return nil
 }
 
-func exportIdentityError(run taskstore.BackgroundRun, reason string) error {
+func exportIdentityError(run store.BackgroundRun, reason string) error {
 	return &IdentityError{Resource: "export source", Identity: run.CloneIdentity, Reason: reason}
 }
 

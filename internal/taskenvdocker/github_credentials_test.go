@@ -16,7 +16,7 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/nebler/fern/internal/githubapp"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 )
 
 const githubTestSecret = "github_installation_token_private_12345"
@@ -85,7 +85,7 @@ func (f credentialSourceFunc) InstallationToken(ctx context.Context, id githubap
 	return f(ctx, id)
 }
 
-func githubCredentialFixture(t *testing.T) (*Provider, *credentialDocker, taskstore.BackgroundRun, *time.Time, *int) {
+func githubCredentialFixture(t *testing.T) (*Provider, *credentialDocker, store.BackgroundRun, *time.Time, *int) {
 	t.Helper()
 	p, base, run := preparedProvider(t)
 	run.RepositoryID = 202

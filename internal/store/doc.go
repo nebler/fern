@@ -1,4 +1,4 @@
-// Package taskstore owns Fern's durable SQLite database: the schema and
+// Package store owns Fern's durable SQLite database: the schema and
 // connection policy, and the workspace, run, receipt, and retained-result
 // records. It commits related records and their fences together so HTTP
 // handlers and effect providers never coordinate SQL. The same schema defines
@@ -46,4 +46,4 @@
 // cancellation after validation; callers reconcile outcomes through durable
 // IDs and receipts. Ownership-hiding reads return not-found rather than
 // revealing foreign runs.
-package taskstore
+package store

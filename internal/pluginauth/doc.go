@@ -10,7 +10,7 @@
 // as the bearer, so Poll never mints a new secret.
 //
 // State lives in the plugin_* tables of Fern's SQLite database (schema owned by
-// taskstore). Each operation is one transaction that rolls back on any error;
+// store). Each operation is one transaction that rolls back on any error;
 // time-driven transitions (expiry, retention pruning, the invalid-poll window)
 // are applied inside the operation that observes them. Pending and active
 // records are never evicted to admit new requests.

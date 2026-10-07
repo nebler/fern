@@ -15,7 +15,7 @@ PACKAGES=(
   internal/taskenvdocker
   internal/taskartifact
   internal/runapi
-  internal/taskstore
+  internal/store
 )
 
 cd "$ROOT"
@@ -57,7 +57,7 @@ check_package internal/backgroundruncoord 28
 check_package internal/taskenvdocker 72
 check_package internal/taskartifact 70
 check_package internal/runapi 68
-check_package internal/taskstore 60
+check_package internal/store 60
 
 check_function internal/backgroundruncoord/coordinator.go supervise 95
 check_function internal/backgroundruncoord/coordinator.go RunOnce 85

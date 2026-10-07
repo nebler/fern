@@ -29,7 +29,7 @@ import (
 	"github.com/docker/go-connections/nat"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/safeio"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -921,11 +921,11 @@ func TestWriterFenceReconcilesExactCommittedRuntimeAbsence(t *testing.T) {
 func TestAcquireExportSourceReattestsCloneInode(t *testing.T) {
 	tests := []struct {
 		name    string
-		replace func(*testing.T, *Provider, taskstore.BackgroundRun)
+		replace func(*testing.T, *Provider, store.BackgroundRun)
 	}{
 		{
 			name: "clone inode",
-			replace: func(t *testing.T, provider *Provider, run taskstore.BackgroundRun) {
+			replace: func(t *testing.T, provider *Provider, run store.BackgroundRun) {
 				path := filepath.Join(provider.root, run.CloneIdentity)
 				retired := filepath.Join(provider.root, ".retired-export-clone")
 				if err := os.Rename(path, retired); err != nil {
@@ -1322,7 +1322,7 @@ func TestLostContainerRemoveResponseReconcilesWithFreshReads(t *testing.T) {
 	}
 }
 
-func preparedProvider(t *testing.T) (*Provider, *fakeDocker, taskstore.BackgroundRun) {
+func preparedProvider(t *testing.T) (*Provider, *fakeDocker, store.BackgroundRun) {
 	t.Helper()
 	provider, docker, run := testProvider(t)
 	if _, err := provider.EnsureClone(context.Background(), run); err != nil {
@@ -1334,7 +1334,7 @@ func preparedProvider(t *testing.T) (*Provider, *fakeDocker, taskstore.Backgroun
 	return provider, docker, run
 }
 
-func testProvider(t *testing.T) (*Provider, *fakeDocker, taskstore.BackgroundRun) {
+func testProvider(t *testing.T) (*Provider, *fakeDocker, store.BackgroundRun) {
 	t.Helper()
 	state, repository := t.TempDir(), t.TempDir()
 	state, _ = filepath.EvalSymlinks(state)
@@ -1378,7 +1378,7 @@ func testProvider(t *testing.T) (*Provider, *fakeDocker, taskstore.BackgroundRun
 	}
 	t.Cleanup(func() { _ = provider.Close() })
 	compact := "0198d34d6a5075fbb1f2000000000201"
-	run := taskstore.BackgroundRun{WorkspaceID: domain.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001"), RunID: domain.RunID("run_0198d34d-6a50-75fb-b1f2-000000000201"), RepositoryRemote: "https://github.com/fern-test/repository", BaseOID: domain.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: EnvironmentSHA256(nil), ResourceSpecVersion: 10, ImageIdentity: testImageID, CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode", ContainerIdentity: "fern-run-" + compact, EndpointIdentity: "run-" + compact + "-endpoint", OpenCodeSessionID: "ses_test", OpenCodeMessageID: "msg_test"}
+	run := store.BackgroundRun{WorkspaceID: domain.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001"), RunID: domain.RunID("run_0198d34d-6a50-75fb-b1f2-000000000201"), RepositoryRemote: "https://github.com/fern-test/repository", BaseOID: domain.GitOID(base), Profile: store.BackgroundRunSourceProfile, EnvironmentSHA256: EnvironmentSHA256(nil), ResourceSpecVersion: 10, ImageIdentity: testImageID, CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode", ContainerIdentity: "fern-run-" + compact, EndpointIdentity: "run-" + compact + "-endpoint", OpenCodeSessionID: "ses_test", OpenCodeMessageID: "msg_test"}
 	return provider, docker, run
 }
 
@@ -1497,7 +1497,7 @@ func (ctx *observedDoneContext) Done() <-chan struct{} {
 	return ctx.Context.Done()
 }
 
-func stoppedExportFixture(t *testing.T) (*Provider, *fakeDocker, taskstore.BackgroundRun, WriterFence) {
+func stoppedExportFixture(t *testing.T) (*Provider, *fakeDocker, store.BackgroundRun, WriterFence) {
 	t.Helper()
 	provider, docker, run := preparedProvider(t)
 	created, err := provider.EnsureContainer(context.Background(), run)

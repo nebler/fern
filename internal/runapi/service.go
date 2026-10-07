@@ -16,7 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/nebler/fern/internal/domain"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 )
 
 const APIContractVersion = "fern.background-run.v1"
@@ -89,7 +89,7 @@ func (s *service) claim(actor domain.ActorSnapshot, key domain.IdempotencyKey, k
 	return domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: s.config.WorkspaceID, CommandKind: kind}, Key: key, RequestHash: commandHash(kind, value), Actor: actor}, nil
 }
 
-func (s *service) replay(ctx context.Context, claim domain.IdempotencyClaim) (taskstore.Receipt, bool, error) {
+func (s *service) replay(ctx context.Context, claim domain.IdempotencyClaim) (store.Receipt, bool, error) {
 	receipt, found, err := s.config.Store.FindReceiptByIdempotency(ctx, s.config.WorkspaceID, claim.Scope.CommandKind, claim.Key)
 	if err != nil || !found {
 		return receipt, found, err
@@ -97,7 +97,7 @@ func (s *service) replay(ctx context.Context, claim domain.IdempotencyClaim) (ta
 	existing := receipt.Claim()
 	disposition := domain.ClassifyIdempotency(&existing, claim)
 	if disposition == domain.IdempotencyOwnerMismatch {
-		return receipt, true, taskstore.ErrNotFound
+		return receipt, true, store.ErrNotFound
 	}
 	if disposition != domain.IdempotencyReplay {
 		return receipt, true, errReplayConflict
@@ -129,7 +129,7 @@ func (s *service) Create(ctx context.Context, actor domain.ActorSnapshot, key do
 		Instruction string  `json:"instruction"`
 		Profile     string  `json:"profile"`
 	}{input.Repository, input.BaseOID, input.Branch, input.Instruction, input.Profile}
-	claim, err := s.claim(actor, key, taskstore.CreateBackgroundRunCommand, payload)
+	claim, err := s.claim(actor, key, store.CreateBackgroundRunCommand, payload)
 	if err != nil {
 		return zero, err
 	}
@@ -159,7 +159,7 @@ func (s *service) Create(ctx context.Context, actor domain.ActorSnapshot, key do
 	if input.Branch != nil {
 		branch = *input.Branch
 	}
-	admission, err := s.config.Store.AdmitBackgroundRun(ctx, taskstore.AdmitBackgroundRunParams{
+	admission, err := s.config.Store.AdmitBackgroundRun(ctx, store.AdmitBackgroundRunParams{
 		RunID: ids.RunID, OpenCodeSessionID: ids.OpenCodeSessionID, OpenCodeMessageID: ids.OpenCodeMessageID,
 		Claim: claim, Prompt: input.Instruction, RepositoryID: s.config.RepositoryID,
 		RepositoryRemote: input.Repository, BaseSHA: base, Branch: branch, Profile: input.Profile,
@@ -211,24 +211,24 @@ func (s *service) mutationClaim(actor domain.ActorSnapshot, key domain.Idempoten
 }
 
 // stopReplay projects the original committed acceptance, not today's run state.
-func stopReplay(id domain.RunID, current taskstore.BackgroundRun, receipt taskstore.Receipt) (stopAcceptance, error) {
+func stopReplay(id domain.RunID, current store.BackgroundRun, receipt store.Receipt) (stopAcceptance, error) {
 	var committed struct {
 		RunID domain.RunID `json:"run_id"`
 		State domain.State `json:"state"`
 	}
 	if receipt.RunID != id || current.StopReceiptID != receipt.ID || json.Unmarshal(receipt.ResponseProjection, &committed) != nil {
-		return stopAcceptance{}, taskstore.ErrCorruptStore
+		return stopAcceptance{}, store.ErrCorruptStore
 	}
 	// A stop commits failed (queued run) or canceling (executing run).
 	if committed.RunID != id || (committed.State != domain.Failed && committed.State != domain.Canceling) {
-		return stopAcceptance{}, taskstore.ErrCorruptStore
+		return stopAcceptance{}, store.ErrCorruptStore
 	}
 	return stopAcceptance{id, committed.State, true}, nil
 }
 
 func (s *service) Stop(ctx context.Context, actor domain.ActorSnapshot, key domain.IdempotencyKey, id domain.RunID) (stopAcceptance, error) {
 	var zero stopAcceptance
-	claim, err := s.mutationClaim(actor, key, taskstore.StopBackgroundRunCommand, id)
+	claim, err := s.mutationClaim(actor, key, store.StopBackgroundRunCommand, id)
 	if err != nil {
 		return zero, err
 	}
@@ -246,7 +246,7 @@ func (s *service) Stop(ctx context.Context, actor domain.ActorSnapshot, key doma
 		}
 		return stopReplay(id, current, receipt)
 	}
-	result, err := s.config.Store.StopBackgroundRun(ctx, taskstore.StopBackgroundRunParams{WorkspaceID: s.config.WorkspaceID,
+	result, err := s.config.Store.StopBackgroundRun(ctx, store.StopBackgroundRunParams{WorkspaceID: s.config.WorkspaceID,
 		RunID: id, Claim: claim,
 		APIContractVersion: APIContractVersion, StoppedAt: s.config.Now().UTC().Truncate(time.Millisecond)})
 	if err != nil {
@@ -261,7 +261,7 @@ func (s *service) Stop(ctx context.Context, actor domain.ActorSnapshot, key doma
 
 func (s *service) Seal(ctx context.Context, actor domain.ActorSnapshot, key domain.IdempotencyKey, id domain.RunID) (sealAcceptance, error) {
 	var zero sealAcceptance
-	claim, err := s.mutationClaim(actor, key, taskstore.SealBackgroundRunCommand, id)
+	claim, err := s.mutationClaim(actor, key, store.SealBackgroundRunCommand, id)
 	if err != nil {
 		return zero, err
 	}
@@ -274,7 +274,7 @@ func (s *service) Seal(ctx context.Context, actor domain.ActorSnapshot, key doma
 		return zero, err
 	}
 	now := s.config.Now().UTC().Truncate(time.Millisecond)
-	admission, err := s.config.Store.SealBackgroundRun(ctx, taskstore.SealBackgroundRunParams{
+	admission, err := s.config.Store.SealBackgroundRun(ctx, store.SealBackgroundRunParams{
 		WorkspaceID: s.config.WorkspaceID, RunID: current.RunID, ExpectedRunRevision: current.Revision,
 		ResultID: resultID, Claim: claim, PolicyVersion: s.config.SealPolicyVersion,
 		APIContractVersion: APIContractVersion, AcceptedAt: now,

@@ -8,7 +8,7 @@ import (
 	"testing"
 
 	"github.com/nebler/fern/internal/observability"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -16,8 +16,8 @@ func TestFatalBackgroundFailureBlocksReadiness(t *testing.T) {
 	status := observability.NewRegistry()
 	status.Healthy(observability.ComponentBackgroundRunSerial)
 	group, ctx := errgroup.WithContext(context.Background())
-	startRunCoordinator(group, &runServices{background: failingService{taskstore.ErrCorruptStore}, status: status}, ctx)
-	if err := group.Wait(); !errors.Is(err, taskstore.ErrCorruptStore) {
+	startRunCoordinator(group, &runServices{background: failingService{store.ErrCorruptStore}, status: status}, ctx)
+	if err := group.Wait(); !errors.Is(err, store.ErrCorruptStore) {
 		t.Fatalf("supervision error = %v", err)
 	}
 	response := httptest.NewRecorder()

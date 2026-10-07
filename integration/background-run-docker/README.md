@@ -12,7 +12,7 @@ or a benchmark. The direct caller is `run.sh` (or `go run` from the repository r
 ```mermaid
 flowchart TD
   shell["run.sh: validate pinned local image ID"] -->|"go run"| main["main -> run"]
-  main -->|"fixture IDs and spec"| identity["internal/domain / internal/taskstore"]
+  main -->|"fixture IDs and spec"| identity["internal/domain / internal/store"]
   main -->|"create provider"| provider["internal/taskenvdocker.New"]
   main -->|"isolated Git fixture"| git["git / gitOutput / ensureNoSharedFiles"]
   main -->|"scope-checked dummy token server"| fixture["newGitHubFixture -> internal/githubapp.NewClient"]
@@ -27,7 +27,7 @@ flowchart TD
 
 Direct Go dependencies are the internal packages shown, Docker client/container
 types and stream demultiplexing, plus standard-library HTTP, process, filesystem,
-and synchronization facilities. `taskstore` supplies run models here; this harness
+and synchronization facilities. `store` supplies run models here; this harness
 does not open a durable task database. Host Git and image-provided `git`/`gh`
 helpers are external executables.
 

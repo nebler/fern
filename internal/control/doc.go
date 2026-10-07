@@ -3,7 +3,7 @@
 // pairing belongs to proxy and plugin grants to pluginauth.
 //
 // State lives in the devices and operator_credential tables of Fern's SQLite
-// database (schema owned by taskstore). Raw device bearer tokens are never
+// database (schema owned by store). Raw device bearer tokens are never
 // persisted; devices are keyed by SHA-256 digest and the device ID is that
 // digest's prefix. Operator credential IDs are random audit identifiers, not
 // secrets or password hashes.

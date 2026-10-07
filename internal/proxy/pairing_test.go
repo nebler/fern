@@ -7,11 +7,11 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/control"
-	"github.com/nebler/fern/internal/taskstore/taskstoretest"
+	"github.com/nebler/fern/internal/store/storetest"
 )
 
 func TestDeviceRevokedBeforeAdmissionIsUnauthenticated(t *testing.T) {
-	store := control.New(taskstoretest.DB(t))
+	store := control.New(storetest.DB(t))
 	now := time.Now()
 	device, err := store.AddDevice("device-token", "phone", now, now.Add(time.Hour))
 	if err != nil {

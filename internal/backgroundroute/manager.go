@@ -18,7 +18,7 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/domain"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 )
 
 var (
@@ -286,7 +286,7 @@ func (m *Manager) Origin() string { return m.origin.String() }
 
 // IssueAttachment creates an expiring capability only when the complete
 // durable run tuple still names the active OpenCode runtime.
-func (m *Manager) IssueAttachment(run taskstore.BackgroundRun) (Attachment, bool, error) {
+func (m *Manager) IssueAttachment(run store.BackgroundRun) (Attachment, bool, error) {
 	identity, ok := identityFromRun(run)
 	if !ok || string(run.OpenCodeSessionID) != identity.SessionID {
 		return Attachment{}, false, nil
@@ -318,7 +318,7 @@ func (m *Manager) IssueAttachment(run taskstore.BackgroundRun) (Attachment, bool
 
 // ActiveOrigin returns the configured origin only when the complete durable run
 // tuple still names the process currently bound to the listener.
-func (m *Manager) ActiveOrigin(run taskstore.BackgroundRun) (string, bool) {
+func (m *Manager) ActiveOrigin(run store.BackgroundRun) (string, bool) {
 	identity, ok := identityFromRun(run)
 	if !ok || !m.Active(identity) {
 		return "", false
@@ -326,7 +326,7 @@ func (m *Manager) ActiveOrigin(run taskstore.BackgroundRun) (string, bool) {
 	return m.Origin(), true
 }
 
-func identityFromRun(run taskstore.BackgroundRun) (Identity, bool) {
+func identityFromRun(run store.BackgroundRun) (Identity, bool) {
 	runtime, err := domain.NewRuntime(run.ObservedContainerID, run.ObservedContainerStartedAt)
 	if err != nil || runtime.Epoch() != run.RuntimeEpoch {
 		return Identity{}, false

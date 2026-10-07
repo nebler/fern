@@ -1,5 +1,5 @@
 // Package backgroundruncoord serially coordinates the one qualified OpenCode
-// Background Run profile, connecting durable taskstore state to Docker,
+// Background Run profile, connecting durable store state to Docker,
 // OpenCode, route, and retained-artifact effects. It is intentionally not a
 // generic executor framework: there is one lane, no parallelism, and no
 // per-run claim or lease. fern up's host lease makes it the workspace's only
@@ -11,7 +11,7 @@
 // drains the route, stops the exact writer, and removes container, volume, and
 // clone. Each step inspects deterministic resources before acting, so a pass
 // cut short by failure, crash, or the operation deadline is simply repeated.
-// taskstore owns transition legality, and every durable write is a revision
+// store owns transition legality, and every durable write is a revision
 // compare-and-swap. Passes are bounded by the operation timeout (at most five
 // minutes) and, while executing, the run deadline. Recovery and final
 // result writes ignore caller cancellation but remain bounded by the operation

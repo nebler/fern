@@ -11,7 +11,7 @@ import (
 	"github.com/nebler/fern/internal/control"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/pluginauth"
-	"github.com/nebler/fern/internal/taskstore/taskstoretest"
+	"github.com/nebler/fern/internal/store/storetest"
 )
 
 const (
@@ -51,7 +51,7 @@ type routeFixture struct {
 
 func newRouteFixture(t *testing.T) *routeFixture {
 	t.Helper()
-	database := taskstoretest.DB(t)
+	database := storetest.DB(t)
 	store := control.New(database)
 	now := time.Now()
 	phone, err := store.AddDevice(testDeviceToken, "phone", now, now.Add(time.Hour))

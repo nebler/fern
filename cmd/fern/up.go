@@ -20,7 +20,7 @@ import (
 	"github.com/nebler/fern/internal/pluginauth"
 	"github.com/nebler/fern/internal/proxy"
 	"github.com/nebler/fern/internal/safeio"
-	"github.com/nebler/fern/internal/taskstore"
+	"github.com/nebler/fern/internal/store"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -81,7 +81,7 @@ func runUp(args []string, log *slog.Logger) (resultErr error) {
 }
 
 type upRuntime struct {
-	state            *taskstore.Store
+	state            *store.Store
 	services         *runServices
 	backgroundRoute  *backgroundroute.Manager
 	remoteServer     *http.Server

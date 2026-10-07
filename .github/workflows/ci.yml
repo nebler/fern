@@ -43,8 +43,8 @@ jobs:
       - name: Enforce critical coverage floors
         run: ./scripts/test-critical-coverage.sh
 
-      - name: Verify CGO-free task store
-        run: CGO_ENABLED=0 GOTOOLCHAIN=local go test ./internal/taskstore
+      - name: Verify CGO-free store
+        run: CGO_ENABLED=0 GOTOOLCHAIN=local go test ./internal/store
 
       - name: Run race tests
         run: GOTOOLCHAIN=local go test -race ./...

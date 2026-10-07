@@ -1,9 +1,9 @@
 // Package taskartifact is the local retained-artifact engine: it captures the
 // final nonignored Git state of a background-run checkout, independently
 // verifies it, installs immutable content-addressed bytes, and hands out owned
-// checkouts. It is not a remote artifact service, a taskstore transaction
+// checkouts. It is not a remote artifact service, a store transaction
 // manager, or a GitHub publisher, and has no database, network, or container
-// dependencies; durable result ownership belongs to taskstore and
+// dependencies; durable result ownership belongs to store and
 // taskresultsource, and write fencing to the coordinator.
 //
 // A changed result is a normalized commit whose parent is the admitted base; a

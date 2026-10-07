@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/backgroundroute"
+	"github.com/nebler/fern/internal/store"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
-	"github.com/nebler/fern/internal/taskstore"
 )
 
 func TestExportRecoveryKeepsOriginalFailure(t *testing.T) {
@@ -21,7 +21,7 @@ func TestExportRecoveryKeepsOriginalFailure(t *testing.T) {
 	}
 }
 
-func retainedTuple(t *testing.T) (taskartifact.Snapshot, taskstore.BackgroundRun, taskstore.Result) {
+func retainedTuple(t *testing.T) (taskartifact.Snapshot, store.BackgroundRun, store.Result) {
 	t.Helper()
 	digest, err := taskartifact.NewDigest([32]byte{1})
 	if err != nil {
@@ -30,9 +30,9 @@ func retainedTuple(t *testing.T) (taskartifact.Snapshot, taskstore.BackgroundRun
 	snapshot := taskartifact.Snapshot{RepositoryID: 42, WorkspaceID: "workspace", RunID: "task", ResultID: "result",
 		OpenCodeSessionID: "session", OpenCodeMessageID: "message", Base: "base", Result: "result", Tree: "tree",
 		ChangesSHA256: digest, ManifestSHA256: digest, BundleSHA256: digest, BundleBytes: 42}
-	run := taskstore.BackgroundRun{RepositoryID: snapshot.RepositoryID, WorkspaceID: snapshot.WorkspaceID, RunID: snapshot.RunID,
+	run := store.BackgroundRun{RepositoryID: snapshot.RepositoryID, WorkspaceID: snapshot.WorkspaceID, RunID: snapshot.RunID,
 		OpenCodeSessionID: snapshot.OpenCodeSessionID, OpenCodeMessageID: snapshot.OpenCodeMessageID}
-	result := taskstore.Result{ID: snapshot.ResultID, RunID: snapshot.RunID, BaseSHA: snapshot.Base, ResultCommit: snapshot.Result,
+	result := store.Result{ID: snapshot.ResultID, RunID: snapshot.RunID, BaseSHA: snapshot.Base, ResultCommit: snapshot.Result,
 		TreeOID: snapshot.Tree, ChangesSHA256: digest.Bytes(), ManifestSHA256: digest.Bytes(), BundleSHA256: digest.Bytes(), BundleBytes: snapshot.BundleBytes}
 	return snapshot, run, result
 }
@@ -90,7 +90,7 @@ func TestRetainedInstallationSkipsSnapshotOnlyForExactSelection(t *testing.T) {
 	failure := errors.New("artifact unavailable")
 	for _, tt := range []struct {
 		name     string
-		selected *taskstore.Result
+		selected *store.Result
 		artifact failingRetainedArtifact
 		want     bool
 	}{
@@ -113,7 +113,7 @@ func TestRetainedInstallationSkipsSnapshotOnlyForExactSelection(t *testing.T) {
 }
 
 func TestMakeRouteIdentityProjectsCommittedRuntime(t *testing.T) {
-	run := taskstore.BackgroundRun{WorkspaceID: "workspace", RunID: "task", RuntimeEpoch: 4, OpenCodeSessionID: "session",
+	run := store.BackgroundRun{WorkspaceID: "workspace", RunID: "task", RuntimeEpoch: 4, OpenCodeSessionID: "session",
 		ObservedContainerID: "not-the-attested-runtime"}
 	runtime := taskenvdocker.RuntimeIdentity{ContainerID: "container", StartedAt: "started", Token: "token"}
 	want := backgroundroute.Identity{WorkspaceID: "workspace", RunID: "task", RuntimeEpoch: 4, SessionID: "session", ContainerID: "container", StartedAt: "started", RuntimeToken: "token"}

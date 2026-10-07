@@ -35,7 +35,7 @@ type Store struct {
 	nextDeviceRequestID  uint64
 }
 
-// New returns the control store backed by db, whose schema (taskstore) defines
+// New returns the control store backed by db, whose schema (store) defines
 // the devices and operator_credential tables.
 func New(db *sql.DB) *Store {
 	return &Store{db: db, activeDeviceRequests: make(map[string]map[uint64]func())}

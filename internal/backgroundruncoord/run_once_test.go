@@ -28,8 +28,8 @@ import (
 	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/domain"
+	"github.com/nebler/fern/internal/store"
 	"github.com/nebler/fern/internal/taskenvdocker"
-	"github.com/nebler/fern/internal/taskstore"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -67,7 +67,7 @@ func (d *scanDocker) ImageInspect(context.Context, string, ...client.ImageInspec
 			"org.opencontainers.image.source":   "https://github.com/anomalyco/opencode",
 			"org.opencontainers.image.revision": "39fb919a054190498f6d5b7985bde231f93ad7a6",
 			"org.opencontainers.image.version":  "0.0.0-source-39fb919a054190498f6d5b7985bde231f93ad7a6",
-			"ai.fern.opencode.profile":          taskstore.BackgroundRunSourceProfile,
+			"ai.fern.opencode.profile":          store.BackgroundRunSourceProfile,
 			"ai.fern.runtime.spec":              "10",
 		},
 	}}, nil
@@ -169,7 +169,7 @@ type unusedArtifact struct{ Artifact }
 type scanFixture struct {
 	c      *Coordinator
 	d      *scanDocker
-	params taskstore.AdmitBackgroundRunParams
+	params store.AdmitBackgroundRunParams
 	now    time.Time
 	root   string
 }
@@ -216,18 +216,18 @@ func newScanFixture(t *testing.T) *scanFixture {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = provider.Close() })
-	store, err := taskstore.Open(context.Background(), filepath.Join(private(), "tasks.db"))
+	runStore, err := store.Open(context.Background(), filepath.Join(private(), "tasks.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
+	t.Cleanup(func() { _ = runStore.Close() })
 	id := func(prefix string, n int) string { return fmt.Sprintf("%s0198d34d-6a50-75fb-b1f2-%012x", prefix, n) }
 	workspace := domain.WorkspaceID(id("wsp_", 1))
-	if err = store.CreateWorkspace(context.Background(), taskstore.Workspace{ID: workspace, Name: "test", State: taskstore.WorkspaceActive, RepositoryPath: repo, GitHubAuthority: taskstore.GitHubAuthorityAppBroker, InstallationID: 123, RepositoryID: 987654321, RepositoryFullName: "owner/repository", ImageDigest: scanImage, OpenCodeProtocol: "v2", RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: f.now}); err != nil {
+	if err = runStore.CreateWorkspace(context.Background(), store.Workspace{ID: workspace, Name: "test", State: store.WorkspaceActive, RepositoryPath: repo, GitHubAuthority: store.GitHubAuthorityAppBroker, InstallationID: 123, RepositoryID: 987654321, RepositoryFullName: "owner/repository", ImageDigest: scanImage, OpenCodeProtocol: "v2", RuntimeDesiredState: "running", ReconciliationEpoch: 1, CreatedAt: f.now}); err != nil {
 		t.Fatal(err)
 	}
 	actor := domain.ActorSnapshot{Type: domain.ActorOpenCode, ID: "pc_owner", DisplayName: "OpenCode", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "req-1"}
-	f.params = taskstore.AdmitBackgroundRunParams{RunID: domain.RunID(id("run_", 2)), OpenCodeSessionID: "ses_00000000000000000000000000000001", OpenCodeMessageID: "msg_00000000000000000000000000000001", Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspace, CommandKind: taskstore.CreateBackgroundRunCommand}, Key: "create", RequestHash: sha256.Sum256([]byte("create")), Actor: actor}, Prompt: "Do work", RepositoryID: 987654321, RepositoryRemote: "https://github.com/owner/repository", BaseSHA: domain.GitOID(command("rev-parse", "HEAD")), Branch: "main", Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: scanImage, Agent: "build", ModelProvider: "provider", Model: "model", Deadline: f.now.Add(time.Hour), APIContractVersion: "v1", AcceptedAt: f.now}
+	f.params = store.AdmitBackgroundRunParams{RunID: domain.RunID(id("run_", 2)), OpenCodeSessionID: "ses_00000000000000000000000000000001", OpenCodeMessageID: "msg_00000000000000000000000000000001", Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspace, CommandKind: store.CreateBackgroundRunCommand}, Key: "create", RequestHash: sha256.Sum256([]byte("create")), Actor: actor}, Prompt: "Do work", RepositoryID: 987654321, RepositoryRemote: "https://github.com/owner/repository", BaseSHA: domain.GitOID(command("rev-parse", "HEAD")), Branch: "main", Profile: store.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: scanImage, Agent: "build", ModelProvider: "provider", Model: "model", Deadline: f.now.Add(time.Hour), APIContractVersion: "v1", AcceptedAt: f.now}
 	ids, err := domain.NewGenerator(rand.Reader, func() time.Time { return f.now })
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +241,7 @@ func newScanFixture(t *testing.T) *scanFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.c, err = New(store, provider, unusedArtifact{}, ids, Config{WorkspaceID: workspace, Profile: taskstore.BackgroundRunSourceProfile, ImageIdentity: scanImage, EnvironmentSHA256: f.params.EnvironmentSHA256, Agent: "build", ModelProvider: "provider", Model: "model", OperationTimeout: 30 * time.Second, PollInterval: time.Hour, Now: func() time.Time { return f.now }, HTTPClient: &http.Client{Timeout: time.Second}, Route: route, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 10, MaxPages: 10, MaxEvents: 100}})
+	f.c, err = New(runStore, provider, unusedArtifact{}, ids, Config{WorkspaceID: workspace, Profile: store.BackgroundRunSourceProfile, ImageIdentity: scanImage, EnvironmentSHA256: f.params.EnvironmentSHA256, Agent: "build", ModelProvider: "provider", Model: "model", OperationTimeout: 30 * time.Second, PollInterval: time.Hour, Now: func() time.Time { return f.now }, HTTPClient: &http.Client{Timeout: time.Second}, Route: route, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 10, MaxPages: 10, MaxEvents: 100}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func (f *scanFixture) admit(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-func (f *scanFixture) run(t *testing.T) taskstore.BackgroundRun {
+func (f *scanFixture) run(t *testing.T) store.BackgroundRun {
 	t.Helper()
 	r, err := f.c.store.GetBackgroundRun(context.Background(), f.c.config.WorkspaceID, f.params.RunID, f.params.Claim.Actor)
 	if err != nil {
@@ -261,7 +261,7 @@ func (f *scanFixture) run(t *testing.T) taskstore.BackgroundRun {
 	}
 	return r
 }
-func (f *scanFixture) scan(t *testing.T, phase taskstore.BackgroundRunEffectPhase) {
+func (f *scanFixture) scan(t *testing.T, phase store.BackgroundRunEffectPhase) {
 	t.Helper()
 	if err := f.c.RunOnce(context.Background()); err != nil {
 		t.Fatal(err)
@@ -321,14 +321,14 @@ func TestRunSupervisesRealScans(t *testing.T) {
 				if successes != 0 || failures != 1 {
 					t.Fatalf("callbacks success=%d failure=%d", successes, failures)
 				}
-				if r := f.run(t); r.EffectPhase != taskstore.BackgroundRunEffectProvisioning || r.ObservedContainerID != "" {
+				if r := f.run(t); r.EffectPhase != store.BackgroundRunEffectProvisioning || r.ObservedContainerID != "" {
 					t.Fatalf("failure not recoverable: %+v", r)
 				}
 			} else if successes != 1 || failures != 0 {
 				t.Fatalf("callbacks success=%d failure=%d", successes, failures)
 			}
 			if mode == "progress" {
-				if r := f.run(t); r.EffectPhase == taskstore.BackgroundRunEffectProvisioning {
+				if r := f.run(t); r.EffectPhase == store.BackgroundRunEffectProvisioning {
 					t.Fatalf("scan did not commit: %+v", r)
 				}
 			}
@@ -354,7 +354,7 @@ func TestRunAdvancesSeveralPhasesWithoutWaitingForTicks(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	f.c.config.OnSuccess = func() {
-		if f.run(t).State == taskstore.BackgroundRunFailed {
+		if f.run(t).State == store.BackgroundRunFailed {
 			cancel()
 		}
 	}
@@ -362,7 +362,7 @@ func TestRunAdvancesSeveralPhasesWithoutWaitingForTicks(t *testing.T) {
 	if err := f.c.Run(ctx); !errors.Is(err, context.Canceled) {
 		t.Fatalf("Run: %v", err)
 	}
-	if r := f.run(t); r.State != taskstore.BackgroundRunFailed || r.EffectPhase != taskstore.BackgroundRunEffectCleanupComplete {
+	if r := f.run(t); r.State != store.BackgroundRunFailed || r.EffectPhase != store.BackgroundRunEffectCleanupComplete {
 		t.Fatalf("cleanup did not finish without ticks: %s/%s", r.State, r.EffectPhase)
 	}
 }
@@ -381,7 +381,7 @@ func TestRunOnceAttemptDeadlineBeforeEffect(t *testing.T) {
 	}
 	err := f.c.RunOnce(context.Background())
 	r := f.run(t)
-	if err != nil || r.TimeoutRequestedAt == nil || r.EffectPhase != taskstore.BackgroundRunEffectCleaning {
+	if err != nil || r.TimeoutRequestedAt == nil || r.EffectPhase != store.BackgroundRunEffectCleaning {
 		t.Fatalf("timeout: %+v %v", r, err)
 	}
 	if len(f.d.calls) != 0 {
@@ -400,7 +400,7 @@ func TestRunOnceExecutionMismatchSelectsCleanupWithoutProvisioning(t *testing.T)
 		t.Fatal(err)
 	}
 	r := f.run(t)
-	if r.State != taskstore.BackgroundRunCleanupRequired {
+	if r.State != store.BackgroundRunCleanupRequired {
 		t.Fatalf("mismatch not durable: %+v", r)
 	}
 	if len(f.d.calls) != 0 {
@@ -409,7 +409,7 @@ func TestRunOnceExecutionMismatchSelectsCleanupWithoutProvisioning(t *testing.T)
 	if _, err := os.Stat(filepath.Join(f.root, "background-runs", r.CloneIdentity)); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("mismatch created clone: %v", err)
 	}
-	f.scan(t, taskstore.BackgroundRunEffectCleanupComplete)
+	f.scan(t, store.BackgroundRunEffectCleanupComplete)
 }
 
 func TestRunOnceCancellationAfterProvisioningStartLeavesRecoverableRun(t *testing.T) {
@@ -429,7 +429,7 @@ func TestRunOnceCancellationAfterProvisioningStartLeavesRecoverableRun(t *testin
 		t.Fatalf("canceled scan: %v", err)
 	}
 	r := f.run(t)
-	if r.EffectPhase != taskstore.BackgroundRunEffectProvisioning {
+	if r.EffectPhase != store.BackgroundRunEffectProvisioning {
 		t.Fatalf("lost provisioning: %+v", r)
 	}
 	if len(f.d.calls) != 0 {
@@ -458,7 +458,7 @@ func TestRunOnceProvisioningFailureAndLostObservationReconcile(t *testing.T) {
 				t.Fatalf("error=%v want %v", err, failure)
 			}
 			r := f.run(t)
-			if r.EffectPhase != taskstore.BackgroundRunEffectProvisioning || r.ObservedContainerID != "" {
+			if r.EffectPhase != store.BackgroundRunEffectProvisioning || r.ObservedContainerID != "" {
 				t.Fatalf("advanced after failure: %+v", r)
 			}
 			if mode == "observation canceled" && (f.d.item == nil || f.d.creates != 1) {
@@ -476,7 +476,7 @@ func TestRunOnceProvisioningFailureAndLostObservationReconcile(t *testing.T) {
 				t.Fatal("health succeeded without an OpenCode server")
 			}
 			r = f.run(t)
-			if r.EffectPhase != taskstore.BackgroundRunEffectProvisioning || r.ObservedContainerID != scanContainerID || f.d.creates != 1 {
+			if r.EffectPhase != store.BackgroundRunEffectProvisioning || r.ObservedContainerID != scanContainerID || f.d.creates != 1 {
 				t.Fatalf("replay run=%+v volume creates=%d", r, f.d.creates)
 			}
 		})
@@ -486,10 +486,10 @@ func TestRunOnceProvisioningFailureAndLostObservationReconcile(t *testing.T) {
 func (f *scanFixture) stop(t *testing.T) {
 	t.Helper()
 	stopClaim := f.params.Claim
-	stopClaim.Scope.CommandKind = taskstore.StopBackgroundRunCommand
+	stopClaim.Scope.CommandKind = store.StopBackgroundRunCommand
 	stopClaim.Key = "stop"
 	stopClaim.RequestHash = sha256.Sum256([]byte("stop"))
-	if _, err := f.c.store.StopBackgroundRun(context.Background(), taskstore.StopBackgroundRunParams{WorkspaceID: f.c.config.WorkspaceID, RunID: f.params.RunID, Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now}); err != nil {
+	if _, err := f.c.store.StopBackgroundRun(context.Background(), store.StopBackgroundRunParams{WorkspaceID: f.c.config.WorkspaceID, RunID: f.params.RunID, Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -523,12 +523,12 @@ func TestRunOnceCleansUpStartedContainerWithUnrecordedRuntime(t *testing.T) {
 				}
 			}
 			r := f.run(t)
-			if (r.State != taskstore.BackgroundRunCleanupRequired && r.State != taskstore.BackgroundRunCanceling) || r.EffectPhase != taskstore.BackgroundRunEffectCleaning || r.ObservedContainerID != "" {
+			if (r.State != store.BackgroundRunCleanupRequired && r.State != store.BackgroundRunCanceling) || r.EffectPhase != store.BackgroundRunEffectCleaning || r.ObservedContainerID != "" {
 				t.Fatalf("run not in cleanup with unrecorded runtime: %+v", r)
 			}
 			f.now = f.now.Add(2 * time.Minute)
-			f.scan(t, taskstore.BackgroundRunEffectCleanupComplete)
-			if r := f.run(t); r.State != taskstore.BackgroundRunFailed {
+			f.scan(t, store.BackgroundRunEffectCleanupComplete)
+			if r := f.run(t); r.State != store.BackgroundRunFailed {
 				t.Fatalf("terminal state: %+v", r)
 			}
 			if f.d.info != nil || f.d.item != nil {
@@ -549,10 +549,10 @@ func TestRunOnceStopCleanupFailureRecoveryPastDeadline(t *testing.T) {
 	}
 	f.d.createErr = nil
 	stopClaim := f.params.Claim
-	stopClaim.Scope.CommandKind = taskstore.StopBackgroundRunCommand
+	stopClaim.Scope.CommandKind = store.StopBackgroundRunCommand
 	stopClaim.Key = "stop"
 	stopClaim.RequestHash = sha256.Sum256([]byte("stop"))
-	_, err := f.c.store.StopBackgroundRun(context.Background(), taskstore.StopBackgroundRunParams{WorkspaceID: f.c.config.WorkspaceID, RunID: f.params.RunID, Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now})
+	_, err := f.c.store.StopBackgroundRun(context.Background(), store.StopBackgroundRunParams{WorkspaceID: f.c.config.WorkspaceID, RunID: f.params.RunID, Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,16 +566,16 @@ func TestRunOnceStopCleanupFailureRecoveryPastDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := f.run(t)
-	if r.EffectPhase != taskstore.BackgroundRunEffectCleaning || r.State != taskstore.BackgroundRunCleanupRequired {
+	if r.EffectPhase != store.BackgroundRunEffectCleaning || r.State != store.BackgroundRunCleanupRequired {
 		t.Fatalf("not recoverable: %+v", r)
 	}
 	if f.d.item == nil {
 		t.Fatal("volume removed before writer proof")
 	}
 	f.d.containerErr = nil
-	f.scan(t, taskstore.BackgroundRunEffectCleanupComplete)
+	f.scan(t, store.BackgroundRunEffectCleanupComplete)
 	r = f.run(t)
-	if r.State != taskstore.BackgroundRunFailed || r.StopReceiptID == 0 || r.TimeoutRequestedAt != nil {
+	if r.State != store.BackgroundRunFailed || r.StopReceiptID == 0 || r.TimeoutRequestedAt != nil {
 		t.Fatalf("terminal state: %+v", r)
 	}
 	if f.d.item != nil {
@@ -637,7 +637,7 @@ func TestCleanupRequiredBoundsRouteDrain(t *testing.T) {
 	f.c.config.OperationTimeout = 200 * time.Millisecond
 	done := make(chan error, 1)
 	go func() {
-		done <- f.c.cleanupRequired(context.Background(), taskstore.BackgroundRunWork{Run: run}, "test cleanup")
+		done <- f.c.cleanupRequired(context.Background(), store.BackgroundRunWork{Run: run}, "test cleanup")
 	}()
 	select {
 	case err := <-done:

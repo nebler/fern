@@ -20,10 +20,10 @@ import (
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/runapi"
+	"github.com/nebler/fern/internal/store"
 	"github.com/nebler/fern/internal/taskartifact"
 	"github.com/nebler/fern/internal/taskenvdocker"
 	"github.com/nebler/fern/internal/taskresultsource"
-	"github.com/nebler/fern/internal/taskstore"
 )
 
 const (
@@ -44,7 +44,7 @@ type wakeService interface {
 }
 
 type runServices struct {
-	store      *taskstore.Store
+	store      *store.Store
 	runs       http.Handler
 	background wakeService
 	provider   *taskenvdocker.Provider
@@ -59,7 +59,7 @@ func (services *runServices) Close() error {
 }
 
 // openStateStore opens the workspace's single durable SQLite database.
-func openStateStore(ctx context.Context, cfg config.Config) (*taskstore.Store, error) {
+func openStateStore(ctx context.Context, cfg config.Config) (*store.Store, error) {
 	runDirectory, err := statePath("runs")
 	if err != nil {
 		return nil, err
@@ -67,10 +67,10 @@ func openStateStore(ctx context.Context, cfg config.Config) (*taskstore.Store, e
 	if err := os.MkdirAll(runDirectory, 0o700); err != nil {
 		return nil, fmt.Errorf("create run state directory: %w", err)
 	}
-	return taskstore.Open(ctx, filepath.Join(runDirectory, cfg.Workspace.Name+".db"))
+	return store.Open(ctx, filepath.Join(runDirectory, cfg.Workspace.Name+".db"))
 }
 
-func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Store, route *backgroundroute.Manager, status *observability.Registry, log *slog.Logger) (*runServices, error) {
+func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Store, route *backgroundroute.Manager, status *observability.Registry, log *slog.Logger) (*runServices, error) {
 	if cfg.Runs.BackgroundImage == "" || cfg.Runs.BackgroundImageID == "" || route == nil {
 		return nil, errors.New("a qualified disposable Background Run profile is required")
 	}
@@ -97,10 +97,10 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 			_ = artifact.Close()
 		}
 	}()
-	if err := inspectRetainedArtifacts(ctx, store, artifact); err != nil {
+	if err := inspectRetainedArtifacts(ctx, runStore, artifact); err != nil {
 		return nil, err
 	}
-	durableWorkspace, err := ensureWorkspace(ctx, cfg, store, ids)
+	durableWorkspace, err := ensureWorkspace(ctx, cfg, runStore, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +138,7 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 		return nil, err
 	}
 
-	coordinator, err := backgroundruncoord.New(store, provider, artifact, ids, backgroundruncoord.Config{
+	coordinator, err := backgroundruncoord.New(runStore, provider, artifact, ids, backgroundruncoord.Config{
 		WorkspaceID: durableWorkspace.ID,
 		Profile:     domain.SourceProfile, ImageIdentity: cfg.Runs.BackgroundImageID,
 		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: cfg.Runs.Agent,
@@ -164,7 +164,7 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 		RepositoryRemote:            "https://github.com/" + github.Repository.FullName,
 		BackgroundImageIdentity:     cfg.Runs.BackgroundImageID,
 		BackgroundEnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil),
-		Store:                       store, Route: route, Generator: ids, ActorResolver: domain.ContextActor,
+		Store:                       runStore, Route: route, Generator: ids, ActorResolver: domain.ContextActor,
 		BaseVerifier: baseVerifier, Now: time.Now, RunTimeout: cfg.Runs.RunTimeout, Agent: cfg.Runs.Agent,
 		ModelProvider: cfg.Runs.Model.Provider, Model: cfg.Runs.Model.ID, RetentionVerifier: resultSource,
 		SealPolicyVersion: "fern.background-user-seal.v1", Wake: coordinator.Wake,
@@ -175,7 +175,7 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 	status.Healthy(observability.ComponentBackgroundRunProfile)
 	status.Healthy(observability.ComponentBackgroundRunSerial)
 	closeArtifact, closeProvider = false, false
-	return &runServices{store: store, runs: runs,
+	return &runServices{store: runStore, runs: runs,
 		background: coordinator, provider: provider, artifact: artifact, status: status}, nil
 }
 
@@ -211,8 +211,8 @@ func prepareStateRoots(workspace string) (stateRoots, error) {
 
 // inspectRetainedArtifacts re-verifies every artifact the store references
 // before the run profile may be declared qualified.
-func inspectRetainedArtifacts(ctx context.Context, store *taskstore.Store, artifact *taskartifact.Engine) error {
-	referencedArtifacts, err := store.ReferencedArtifactManifestSHA256(ctx)
+func inspectRetainedArtifacts(ctx context.Context, runStore *store.Store, artifact *taskartifact.Engine) error {
+	referencedArtifacts, err := runStore.ReferencedArtifactManifestSHA256(ctx)
 	if err != nil {
 		return fmt.Errorf("list retained artifacts: %w", err)
 	}
@@ -231,25 +231,25 @@ func inspectRetainedArtifacts(ctx context.Context, store *taskstore.Store, artif
 // ensureWorkspace records the configured repository binding, keeping the
 // durable identity of an existing workspace while EnsureWorkspace still checks
 // every repository and GitHub authority field against the configuration.
-func ensureWorkspace(ctx context.Context, cfg config.Config, store *taskstore.Store, ids *domain.Generator) (taskstore.Workspace, error) {
+func ensureWorkspace(ctx context.Context, cfg config.Config, runStore *store.Store, ids *domain.Generator) (store.Workspace, error) {
 	candidateID, err := ids.WorkspaceID()
 	if err != nil {
-		return taskstore.Workspace{}, err
+		return store.Workspace{}, err
 	}
 	github := cfg.Workspace.GitHub
-	desired := taskstore.Workspace{ID: candidateID, Name: cfg.Workspace.Name, State: taskstore.WorkspaceActive,
-		RepositoryPath: cfg.Workspace.Repo, GitHubAuthority: taskstore.GitHubAuthorityAppBroker,
+	desired := store.Workspace{ID: candidateID, Name: cfg.Workspace.Name, State: store.WorkspaceActive,
+		RepositoryPath: cfg.Workspace.Repo, GitHubAuthority: store.GitHubAuthorityAppBroker,
 		InstallationID: domain.InstallationID(github.InstallationID), RepositoryID: domain.RepositoryID(github.Repository.ID),
 		RepositoryFullName: github.Repository.FullName, ImageDigest: cfg.Runs.BackgroundImageID,
 		OpenCodeProtocol: runapi.APIContractVersion, RuntimeDesiredState: "disposable", ReconciliationEpoch: 1,
 		CreatedAt: time.Now().UTC().Truncate(time.Millisecond)}
-	if existing, err := store.GetWorkspaceByName(ctx, cfg.Workspace.Name); err == nil {
+	if existing, err := runStore.GetWorkspaceByName(ctx, cfg.Workspace.Name); err == nil {
 		desired.ID, desired.ImageDigest, desired.OpenCodeProtocol = existing.ID, existing.ImageDigest, existing.OpenCodeProtocol
 		desired.RuntimeDesiredState, desired.ReconciliationEpoch, desired.CreatedAt = existing.RuntimeDesiredState, existing.ReconciliationEpoch, existing.CreatedAt
-	} else if !errors.Is(err, taskstore.ErrNotFound) {
-		return taskstore.Workspace{}, err
+	} else if !errors.Is(err, store.ErrNotFound) {
+		return store.Workspace{}, err
 	}
-	return store.EnsureWorkspace(ctx, desired)
+	return runStore.EnsureWorkspace(ctx, desired)
 }
 
 // resolveGitHubAuthority loads the stored App credentials and returns the

@@ -17,7 +17,7 @@ flowchart TD
   main -->|"runtime setup"| provider["internal/taskenvdocker + Docker client / container / filters / mount / nat"]
   main -->|"real pinned protocol"| protocol["internal/backgroundopencode"]
   main -->|"serial lifecycle scenario"| serial["runSerialCoordinator"]
-  serial -->|"durable identities and state"| store["internal/domain / internal/taskstore"]
+  serial -->|"durable identities and state"| store["internal/domain / internal/store"]
   serial -->|"advance one durable step"| coord["internal/backgroundruncoord.RunOnce"]
   coord -->|"runtime effects"| provider
   serial -->|"owned-session attachment"| route["startSerialRoute -> internal/backgroundroute"]
@@ -32,7 +32,7 @@ flowchart TD
 The internal packages above are direct imports. Third-party imports are Docker's
 client/type packages and `github.com/docker/go-connections/nat`; remaining imports
 are standard-library crypto, JSON, HTTP, filesystem, process, and timing helpers.
-SQLite enters through `taskstore`, not a direct driver import. Host Git, Docker,
+SQLite enters through `store`, not a direct driver import. Host Git, Docker,
 the pinned source image, and its Node/OpenCode runtime are external dependencies.
 
 ## Running

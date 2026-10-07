@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
+	"github.com/nebler/fern/internal/store"
 	"github.com/nebler/fern/internal/taskartifact"
-	"github.com/nebler/fern/internal/taskstore"
 )
 
 type Artifact interface {
@@ -25,7 +25,7 @@ func New(artifact Artifact) (*Resolver, error) {
 }
 
 // Acquire returns a fresh repository and an idempotent mandatory cleanup.
-func (r *Resolver) Acquire(ctx context.Context, projection taskstore.BackgroundRunResultProjection) (string, func() error, error) {
+func (r *Resolver) Acquire(ctx context.Context, projection store.BackgroundRunResultProjection) (string, func() error, error) {
 	locator, err := taskartifact.ParseLocator(projection.Result.CASLocator())
 	if err != nil {
 		return "", nil, err
@@ -42,14 +42,14 @@ func (r *Resolver) Acquire(ctx context.Context, projection taskstore.BackgroundR
 	}
 	path := checkout.Path()
 	if path == "" {
-		return "", nil, errors.Join(taskstore.ErrCorruptStore, checkout.Close())
+		return "", nil, errors.Join(store.ErrCorruptStore, checkout.Close())
 	}
 	return path, checkout.Close, nil
 }
 
 // Verify freshly proves that the retained artifact is present, intact, and
 // bound to the complete durable run and result.
-func (r *Resolver) Verify(ctx context.Context, projection taskstore.BackgroundRunResultProjection) error {
+func (r *Resolver) Verify(ctx context.Context, projection store.BackgroundRunResultProjection) error {
 	locator, err := taskartifact.ParseLocator(projection.Result.CASLocator())
 	if err != nil {
 		return err
@@ -61,16 +61,16 @@ func (r *Resolver) Verify(ctx context.Context, projection taskstore.BackgroundRu
 	return verifyTuple(projection, snapshot)
 }
 
-func verifyTuple(projection taskstore.BackgroundRunResultProjection, snapshot taskartifact.Snapshot) error {
+func verifyTuple(projection store.BackgroundRunResultProjection, snapshot taskartifact.Snapshot) error {
 	run, result := projection.Run, projection.Result
-	if result.State != taskstore.ResultSealed || result.RunID != run.RunID || run.Seal == nil || run.Seal.ResultID != result.ID ||
+	if result.State != store.ResultSealed || result.RunID != run.RunID || run.Seal == nil || run.Seal.ResultID != result.ID ||
 		snapshot.RepositoryID != run.RepositoryID || snapshot.WorkspaceID != run.WorkspaceID || snapshot.RunID != run.RunID ||
 		snapshot.ResultID != result.ID || snapshot.OpenCodeSessionID != run.OpenCodeSessionID || snapshot.OpenCodeMessageID != run.OpenCodeMessageID ||
 		snapshot.Base != result.BaseSHA || snapshot.Base != run.BaseOID || snapshot.Result != result.ResultCommit || snapshot.Tree != result.TreeOID ||
 		snapshot.ChangesSHA256.Bytes() != result.ChangesSHA256 || len(snapshot.Changes) != result.ChangeCount ||
 		snapshot.ManifestSHA256.Bytes() != result.ManifestSHA256 ||
 		snapshot.BundleSHA256.Bytes() != result.BundleSHA256 || snapshot.BundleBytes != result.BundleBytes {
-		return taskstore.ErrCorruptStore
+		return store.ErrCorruptStore
 	}
 	return nil
 }
