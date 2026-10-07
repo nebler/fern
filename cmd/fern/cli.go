@@ -61,7 +61,7 @@ var commandUsageSuffix = map[string]string{"attach": " [run-id]"}
 var commandExamples = map[string]string{
 	"runs":            "fern runs --endpoint https://fern-host.example.ts.net",
 	"attach":          "fern attach --endpoint https://fern-host.example.ts.net run_...",
-	"init":            "fern init --repo /path/to/repository",
+	"init":            "fern init --repo /path/to/repository --background-image-id sha256:...",
 	"doctor":          "fern doctor --phone",
 	"up":              "fern up --config /etc/fern/fern.yaml",
 	"backup create":   "fern backup create --recipient age1... --output /srv/backups/fern.backup",

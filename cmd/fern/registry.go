@@ -118,7 +118,7 @@ func groupedHelp(entry *command) string {
 
 // usageExamples are the curated top-level examples shown in 'fern --help'.
 var usageExamples = []string{
-	"fern init --repo /path/to/repository --repository owner/repository --repository-id 123 --installation-id 456 --model-provider anthropic --model claude-sonnet-4-5",
+	"fern init --repo /path/to/repository --repository owner/repository --repository-id 123 --installation-id 456 --model-provider anthropic --model claude-sonnet-4-5 --background-image-id sha256:...",
 	"fern up --config fern.yaml --env-file fern.env",
 	"fern runs --endpoint https://fern-host.example.ts.net",
 	"fern attach --endpoint https://fern-host.example.ts.net run_...",
