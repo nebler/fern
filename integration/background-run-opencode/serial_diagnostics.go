@@ -56,9 +56,8 @@ func printSerialDiagnostics(cli *client.Client, databasePath, runID, providerEnd
 		_ = logs.Close()
 		fmt.Fprintf(out, "container logs (tail, error=%v):\n%s\n", copyErr, buffer.String())
 	}
-	printContainerExec(ctx, cli, containerID, `cd /home/user/workspace && ls -la && git rev-parse --git-dir --show-toplevel HEAD; `+
-		`ls -la /home/user/.local/share/opencode /home/user/.local/share/opencode/log /home/user/.cache /home/user/.cache/opencode 2>&1 | head -60; `+
-		`for f in $(ls -t /home/user/.local/share/opencode/log/*.log 2>/dev/null | head -2); do echo "--- $f"; tail -n 150 "$f"; done`)
+	printContainerExec(ctx, cli, containerID, `git -C /home/user/workspace rev-parse --show-toplevel 2>&1 | head -n 1; `+
+		`for f in $(ls -t /home/user/.local/share/opencode/log/*.log 2>/dev/null | head -1); do echo "--- $f"; tail -n 60 "$f"; done`)
 	if !hostPort.Valid || sessionID == "" {
 		return
 	}
@@ -70,12 +69,9 @@ func printSerialDiagnostics(cli *client.Client, databasePath, runID, providerEnd
 	endpoint := "http://127.0.0.1:" + strconv.FormatInt(hostPort.Int64, 10)
 	for _, path := range []string{
 		"/api/session/active",
-		"/api/model",
-		"/api/agent",
 		"/api/session/" + sessionID,
 		"/api/session/" + sessionID + "/history?after=0&limit=50",
 		"/api/session/" + sessionID + "/message",
-		"/session/" + sessionID + "/message",
 	} {
 		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+path, nil)
 		request.SetBasicAuth(username, password)
