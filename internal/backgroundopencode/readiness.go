@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -66,7 +67,7 @@ func (c *Client) ModelReady(ctx context.Context, spec ReadinessSpec) (bool, erro
 			ProviderID string `json:"providerID"`
 			Enabled    *bool  `json:"enabled"`
 		}
-		if err := lenientDecode(raw, &model); err != nil || !validOpaque(model.ID, 256) || !validOpaque(model.ProviderID, 128) || model.Enabled == nil {
+		if err := lenientDecode(raw, &model); err != nil || !validCatalogID(model.ID) || !validCatalogID(model.ProviderID) || model.Enabled == nil {
 			return false, protocol("list models", "invalid model entry")
 		}
 		if model.ProviderID == spec.ProviderID && model.ID == spec.ModelID && *model.Enabled {
@@ -84,7 +85,7 @@ func (c *Client) ModelReady(ctx context.Context, spec ReadinessSpec) (bool, erro
 		var agent struct {
 			ID string `json:"id"`
 		}
-		if err := lenientDecode(raw, &agent); err != nil || !validOpaque(agent.ID, 128) {
+		if err := lenientDecode(raw, &agent); err != nil || !validCatalogID(agent.ID) {
 			return false, protocol("list agents", "invalid agent entry")
 		}
 		if agent.ID == spec.Agent {
@@ -140,6 +141,13 @@ func (c *Client) catalog(ctx context.Context, requestPath, operation, directory 
 		return nil, protocol(operation, "invalid list bound")
 	}
 	return envelope.Data, nil
+}
+
+// validCatalogID accepts any bounded identity. Catalog entries come from
+// models.dev and provider plugins, whose IDs legitimately contain slashes,
+// colons, and spaces; only the configured identity must be a token.
+func validCatalogID(value string) bool {
+	return value != "" && len(value) <= 1024 && utf8.ValidString(value)
 }
 
 // lenientDecode reads identity fields from one already strictly checked

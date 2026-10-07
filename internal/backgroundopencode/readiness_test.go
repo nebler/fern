@@ -59,7 +59,7 @@ func (s *catalogServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func TestModelReadyRequiresExactEnabledModelAndAgent(t *testing.T) {
-	ready := catalogJSON(testLocation, modelJSON("other", "test-model", true), modelJSON("test", "test-model", true))
+	ready := catalogJSON(testLocation, modelJSON("openrouter", "anthropic/claude-sonnet:beta", true), modelJSON("other", "test-model", true), modelJSON("test", "test-model", true))
 	agents := catalogJSON(testLocation, agentJSON("build"), agentJSON("contract"))
 	for _, tt := range []struct {
 		name           string
@@ -99,7 +99,7 @@ func TestModelReadyRejectsProtocolViolations(t *testing.T) {
 		{"duplicate key", `{"location":` + testLocation + `,"data":[],"data":[]}`, agents},
 		{"non-object entry", catalogJSON(testLocation, `"test-model"`), agents},
 		{"entry without enabled", catalogJSON(testLocation, `{"id":"test-model","providerID":"test"}`), agents},
-		{"entry with invalid identity", catalogJSON(testLocation, `{"id":"a b","providerID":"test","enabled":true}`), agents},
+		{"entry with empty identity", catalogJSON(testLocation, `{"id":"","providerID":"test","enabled":true}`), agents},
 		{"invalid agent entry", catalogJSON(testLocation, model), catalogJSON(testLocation, `{"mode":"primary"}`)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
