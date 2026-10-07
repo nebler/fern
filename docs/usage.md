@@ -314,8 +314,9 @@ Fern to be stopped because they take the host leases:
 ```
 
 Replace `age1...` with a real recipient. The backup is one age-encrypted file
-holding the Fern state directory (task database snapshot, control/plugin auth
-state, GitHub App credentials, retained artifacts, host key), the configuration,
+holding the Fern state directory (a snapshot of the SQLite database with runs,
+paired devices, plugin and onboarding state; GitHub App credentials; retained
+artifacts; host key), the configuration,
 and the protected environment file; nothing is written in plaintext. Run clones,
 artifact scratch, locks, and containers are not included.
 

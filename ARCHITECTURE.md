@@ -55,7 +55,7 @@ interaction with a live run uses the normal OpenCode TUI.
                                          |
                        +-----------------+------------------+
                        |                 |                  |
-                   taskstore 3       run coordinator   GitHub App credentials
+               SQLite state db       run coordinator   GitHub App credentials
                        |                 |
                        |                 v
                        |         taskenvdocker provider
@@ -493,7 +493,19 @@ injection, including provider credentials, is rejected until a trusted provider
 broker and restricted egress network exist. Credential-bearing remote providers
 are therefore not supported by this profile.
 
-## 18. Backup And Credentials
+## 18. Durable State, Backup, And Credentials
+
+Fern's durable state is the workspace's one SQLite database
+(`~/.fern/tasks/<name>.db`), the artifact CAS beside it, the disposable-resource
+host key, and the private GitHub App credential file. The database schema is
+owned by `taskstore` and also defines the tables of `control` (paired devices,
+operator credential ID), `pluginauth` (plugin authorizations and credentials),
+and `githubapp` onboarding callback states; those packages issue their own SQL
+through the shared handle, one transaction per operation. Only digests of
+device tokens, plugin device and user codes, and onboarding state, code, and
+claim values are stored. In-flight request registries that revocation cancels
+stay in memory. `atomicfile` remains only for the credential file, host key, and
+credential bundles.
 
 Backup is offline: `fern backup` takes the workspace lease used by `fern up`
 and every other lease file in the state directory. `fern backup create` writes
@@ -533,23 +545,23 @@ ownership boundaries.
 | `internal/backgroundruncoord` | serial run effect coordinator and recovery |
 | `cmd/fern` | CLI, composition, backup, credentials, process lifecycle |
 | `internal/task` | identifiers, actor snapshots, idempotency vocabulary |
-| `internal/taskstore` | schema 9 run/result authority and state machines |
+| `internal/taskstore` | the SQLite database: schema 9, run/result authority and state machines |
 | `internal/taskartifact` | deterministic Git bundle creation, CAS, materialization |
 | `internal/taskresultsource` | CAS-only result binding and verified checkout acquisition |
 | `internal/taskenvdocker` | disposable Docker resources, writer proof, container GitHub credential delivery |
 | `internal/backgroundopencode` | pinned disposable OpenCode client and observations |
 | `internal/backgroundroute` | exact live target/session capabilities, request policy, shutdown, and fencing |
 | `internal/proxy` | remote/operator ingress, pairing, and browser security |
-| `internal/control` | durable device identities and operator credential ID |
-| `internal/pluginauth` | fixed-scope plugin device authorization and revocation |
-| `internal/githubapp` | onboarding, installation tokens, repository authority |
+| `internal/control` | device identities and operator credential ID (SQLite tables) |
+| `internal/pluginauth` | fixed-scope plugin device authorization and revocation (SQLite tables) |
+| `internal/githubapp` | onboarding (states in SQLite), credential file, installation tokens, repository authority |
 | `internal/credentialbundle` | age-encrypted GitHub credential bundles |
 | `internal/config` | strict configuration loader and bootstrap/execution validation |
 | `internal/hostlease` | exclusive host-local repository-binding lease |
 | `internal/observability` | health, readiness, status, metrics |
 | `internal/gitref` | shared Git ref, GitHub name/remote, and path validation |
 | `internal/strictjson` | strict JSON validation before typed decoding |
-| `internal/atomicfile` | atomic replace and bounded read of files in Fern's private state directories |
+| `internal/atomicfile` | atomic replace and bounded read of the remaining private files (App credentials, host key, bundles) |
 | `internal/compatibility` | test-only fresh-schema and release-manifest alignment |
 
 Integration packages under `integration/` qualify Docker, OpenCode, upgrades,
