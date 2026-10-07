@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -273,7 +274,7 @@ func TestReadonlyStoragePolicyAndLegacyCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !info.HostConfig.ReadonlyRootfs || !equalMap(info.HostConfig.Tmpfs, workerTmpfs()) {
+	if !info.HostConfig.ReadonlyRootfs || !maps.Equal(info.HostConfig.Tmpfs, workerTmpfs()) {
 		t.Fatal("worker has unbounded writable root storage")
 	}
 	// Storage policy is Fern's own create request; attestation checks identity

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -125,7 +126,7 @@ func (p *Provider) volumeOptions(run taskstore.BackgroundRun) map[string]string 
 }
 
 func (p *Provider) attestExecutionVolume(run taskstore.BackgroundRun, item volume.Volume) error {
-	if !equalMap(item.Options, p.volumeOptions(run)) {
+	if !maps.Equal(item.Options, p.volumeOptions(run)) {
 		return errors.New("execution rejects legacy or non-quota-backed Docker volumes")
 	}
 	if len(item.Options) == 0 {

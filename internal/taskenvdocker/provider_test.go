@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -1220,7 +1221,7 @@ func TestContainerIdentityMismatchFailsClosed(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			original := docker.info
 			base, config := *docker.info.ContainerJSONBase, *docker.info.Config
-			config.Labels = cloneMap(config.Labels)
+			config.Labels = maps.Clone(config.Labels)
 			docker.info.ContainerJSONBase, docker.info.Config = &base, &config
 			test.mutate(&docker.info)
 			if _, err := provider.EnsureContainer(context.Background(), run); !errors.Is(err, ErrQuarantined) {
@@ -1412,7 +1413,7 @@ func TestCleanupSurvivesImageAndEnvironmentConfigurationRotation(t *testing.T) {
 
 	recovery := *provider
 	recovery.config.ImageID = "sha256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCcccc"
-	recovery.imageLabels = cloneMap(provider.imageLabels)
+	recovery.imageLabels = maps.Clone(provider.imageLabels)
 	recovery.imageLabels["org.opencontainers.image.created"] = "2026-09-01T00:00:00Z"
 	if _, err := recovery.EnsureClone(context.Background(), run); err == nil {
 		t.Fatal("rotated execution configuration was allowed to resume the run")
@@ -1604,7 +1605,7 @@ func (f *fakeDocker) VolumeCreate(ctx context.Context, o volume.CreateOptions) (
 	if err := ctx.Err(); err != nil {
 		return volume.Volume{}, err
 	}
-	item := volume.Volume{Name: o.Name, Driver: "local", Scope: "local", Mountpoint: "/daemon-data/volumes/" + o.Name + "/mount", Labels: cloneMap(o.Labels), Options: map[string]string{}}
+	item := volume.Volume{Name: o.Name, Driver: "local", Scope: "local", Mountpoint: "/daemon-data/volumes/" + o.Name + "/mount", Labels: maps.Clone(o.Labels), Options: map[string]string{}}
 	f.volumes[o.Name] = item
 	if f.loseVolumeCreateResponse {
 		f.wantFreshRead++
@@ -1683,7 +1684,7 @@ func (f *fakeDocker) ContainerList(ctx context.Context, options container.ListOp
 	if f.info.ContainerJSONBase == nil || f.info.Config == nil || !options.Filters.MatchKVList("label", f.info.Config.Labels) {
 		return nil, nil
 	}
-	return []container.Summary{{ID: f.info.ID, Names: []string{f.info.Name}, Labels: cloneMap(f.info.Config.Labels), State: f.info.State.Status}}, nil
+	return []container.Summary{{ID: f.info.ID, Names: []string{f.info.Name}, Labels: maps.Clone(f.info.Config.Labels), State: f.info.State.Status}}, nil
 }
 
 func (f *fakeDocker) ContainerCreate(ctx context.Context, c *container.Config, h *container.HostConfig, _ *network.NetworkingConfig, _ *ocispec.Platform, name string) (container.CreateResponse, error) {

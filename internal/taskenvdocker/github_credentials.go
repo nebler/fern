@@ -67,7 +67,7 @@ func (p *Provider) RefreshGitHubCredentials(ctx context.Context, run taskstore.B
 	if !ok {
 		return errors.New("Docker GitHub credential delivery is unavailable")
 	}
-	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	defer cancel()
 	attest := func() error {
 		if operation.Err() != nil {

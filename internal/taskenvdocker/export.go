@@ -164,7 +164,7 @@ func (p *Provider) requireExportWriterInactive(ctx context.Context, run taskstor
 	if err != nil {
 		return err
 	}
-	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	defer cancel()
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	if errdefs.IsNotFound(err) {

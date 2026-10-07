@@ -106,7 +106,7 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 			if err := p.requireNoRunContainer(ctx, run, digest); err != nil {
 				return Observation{}, err
 			}
-			operation, cancel := operationContext(ctx, p.config.GitTimeout)
+			operation, cancel := context.WithTimeout(ctx, p.config.GitTimeout)
 			defer cancel()
 			size, err := p.attestRepository(operation, run, location.path, true)
 			if err != nil {
@@ -147,7 +147,7 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 		}
 	}()
 	stagedClone := filepath.Join(stageRoot, "clone")
-	operation, cancel := operationContext(ctx, p.config.GitTimeout)
+	operation, cancel := context.WithTimeout(ctx, p.config.GitTimeout)
 	defer cancel()
 	if _, err := p.git(operation, p.root, "clone", "--no-local", "--no-hardlinks", "--no-checkout", "--", p.config.Repository, stagedClone); err != nil {
 		return Observation{}, fmt.Errorf("create independent background clone: %w", err)
@@ -466,7 +466,7 @@ func (p *Provider) attestGitConfig(ctx context.Context, path, remote string) err
 }
 
 func (p *Provider) attestSourceGitConfig(ctx context.Context, expectedRemote string) error {
-	operation, cancel := operationContext(ctx, p.config.GitTimeout)
+	operation, cancel := context.WithTimeout(ctx, p.config.GitTimeout)
 	defer cancel()
 	output, err := p.git(operation, p.config.Repository, "config", "--local", "--null", "--list")
 	if err != nil {

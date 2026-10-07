@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -306,7 +307,7 @@ func New(ctx context.Context, config Config, api dockerAPI) (*Provider, error) {
 		httpClient.Timeout = 2 * time.Second
 	}
 	httpClient.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	return &Provider{config: config, docker: api, ownedCLI: owned, root: root, rootDevice: rootDevice, rootInode: rootInode, hostKey: hostKey, imageEnv: imageEnv, imageLabels: cloneMap(inspection.Config.Labels), http: httpClient, lifecycle: &providerLifecycle{}}, nil
+	return &Provider{config: config, docker: api, ownedCLI: owned, root: root, rootDevice: rootDevice, rootInode: rootInode, hostKey: hostKey, imageEnv: imageEnv, imageLabels: maps.Clone(inspection.Config.Labels), http: httpClient, lifecycle: &providerLifecycle{}}, nil
 }
 
 func (p *Provider) Close() error {
@@ -444,7 +445,7 @@ func (transport *routeTransport) dialContext(ctx context.Context, network, addre
 }
 
 func (transport *routeTransport) attest(ctx context.Context) error {
-	operation, cancel := operationContext(ctx, transport.provider.config.DockerTimeout)
+	operation, cancel := context.WithTimeout(ctx, transport.provider.config.DockerTimeout)
 	defer cancel()
 	info, err := transport.provider.docker.ContainerInspect(operation, transport.run.ContainerIdentity)
 	if err != nil {
@@ -524,7 +525,7 @@ func qualifyImage(got image.InspectResponse, want string) error {
 	}
 	if got.ID != want || got.Config == nil || got.Config.User != containerUser || len(got.Config.Entrypoint) != 0 ||
 		!slices.Equal(got.Config.Cmd, []string{"opencode", "serve", "--hostname", "0.0.0.0", "--port", "4096"}) ||
-		len(got.Config.ExposedPorts) != 1 || !equalMap(got.Config.Volumes, map[string]struct{}{workspaceTarget: {}, opencodeTarget: {}}) {
+		len(got.Config.ExposedPorts) != 1 || !maps.Equal(got.Config.Volumes, map[string]struct{}{workspaceTarget: {}, opencodeTarget: {}}) {
 		return errors.New("background image does not match qualified immutable source profile")
 	}
 	if _, ok := got.Config.ExposedPorts[serverPort]; !ok || got.Config.Labels["org.opencontainers.image.source"] != expectedSource || got.Config.Labels["org.opencontainers.image.revision"] != expectedRevision || got.Config.Labels["org.opencontainers.image.version"] != expectedVersion || got.Config.Labels["ai.fern.opencode.profile"] != expectedProfile {
@@ -614,10 +615,9 @@ func (p *Provider) labels(run taskstore.BackgroundRun, digest string) map[string
 }
 
 func (p *Provider) containerLabels(run taskstore.BackgroundRun, digest string) map[string]string {
-	labels := cloneMap(p.imageLabels)
-	for key, value := range p.labels(run, digest) {
-		labels[key] = value
-	}
+	labels := make(map[string]string, len(p.imageLabels)+14)
+	maps.Copy(labels, p.imageLabels)
+	maps.Copy(labels, p.labels(run, digest))
 	return labels
 }
 
@@ -631,10 +631,6 @@ func makeEvidence(value evidence) (string, error) {
 		return "", errors.New("background run evidence exceeds bound")
 	}
 	return string(data), nil
-}
-
-func operationContext(ctx context.Context, limit time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, limit)
 }
 
 func validImageID(value string) bool {
@@ -675,14 +671,6 @@ func parseEnvironment(values []string) (map[string]string, error) {
 		result[key] = value
 	}
 	return result, nil
-}
-
-func cloneMap[K comparable, V any](source map[K]V) map[K]V {
-	result := make(map[K]V, len(source))
-	for key, value := range source {
-		result[key] = value
-	}
-	return result
 }
 
 func parseLogSize(value string) (int64, error) {

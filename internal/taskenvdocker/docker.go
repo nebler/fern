@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"mime"
 	"net/http"
 	"path/filepath"
@@ -41,7 +42,7 @@ func (p *Provider) Provision(ctx context.Context, run taskstore.BackgroundRun) (
 	if err := ctx.Err(); err != nil {
 		return Observation{}, err
 	}
-	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	_, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	cancel()
 	if errdefs.IsNotFound(err) {
@@ -73,7 +74,7 @@ func (p *Provider) EnsureVolume(ctx context.Context, run taskstore.BackgroundRun
 	}
 	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
 	want := p.labels(run, digest)
-	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	existing, err := p.docker.VolumeInspect(operation, run.VolumeIdentity)
 	status := "reconciled"
 	if errdefs.IsNotFound(err) {
@@ -107,10 +108,10 @@ func (p *Provider) EnsureVolume(ctx context.Context, run taskstore.BackgroundRun
 }
 
 func (p *Provider) attestVolume(run taskstore.BackgroundRun, digest string, item volume.Volume) error {
-	if item.Name != run.VolumeIdentity || !equalMap(item.Labels, p.labels(run, digest)) {
+	if item.Name != run.VolumeIdentity || !maps.Equal(item.Labels, p.labels(run, digest)) {
 		return errors.New("Docker name or labels do not match the immutable run")
 	}
-	if item.Driver != "local" || item.Scope != "local" || (len(item.Options) != 0 && !equalMap(item.Options, p.volumeOptions(run))) || item.ClusterVolume != nil || len(item.Status) != 0 {
+	if item.Driver != "local" || item.Scope != "local" || (len(item.Options) != 0 && !maps.Equal(item.Options, p.volumeOptions(run))) || item.ClusterVolume != nil || len(item.Status) != 0 {
 		return errors.New("Docker volume is not an option-free local-scope local-driver volume")
 	}
 	if item.Mountpoint == "" || !filepath.IsAbs(item.Mountpoint) {
@@ -131,7 +132,7 @@ func (p *Provider) EnsureContainer(ctx context.Context, run taskstore.Background
 		return Observation{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
-	volumeOperation, volumeCancel := operationContext(ctx, p.config.DockerTimeout)
+	volumeOperation, volumeCancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	item, err := p.docker.VolumeInspect(volumeOperation, run.VolumeIdentity)
 	volumeCancel()
 	if err != nil {
@@ -143,7 +144,7 @@ func (p *Provider) EnsureContainer(ctx context.Context, run taskstore.Background
 	if err := p.attestExecutionVolume(run, item); err != nil {
 		return Observation{}, err
 	}
-	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	status := "reconciled"
 	if errdefs.IsNotFound(err) {
@@ -211,7 +212,7 @@ func (p *Provider) StartContainer(ctx context.Context, run taskstore.BackgroundR
 		return Observation{}, err
 	}
 	defer func() { resultErr = errors.Join(resultErr, unlock()) }()
-	volumeCtx, volumeCancel := operationContext(ctx, p.config.DockerTimeout)
+	volumeCtx, volumeCancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	storage, storageErr := p.docker.VolumeInspect(volumeCtx, run.VolumeIdentity)
 	volumeCancel()
 	if storageErr != nil {
@@ -223,7 +224,7 @@ func (p *Provider) StartContainer(ctx context.Context, run taskstore.BackgroundR
 	if err := p.attestExecutionVolume(run, storage); err != nil {
 		return Observation{}, err
 	}
-	storageCtx, storageCancel := operationContext(ctx, p.config.DockerTimeout)
+	storageCtx, storageCancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	defer storageCancel()
 	if err := p.attestExecutionTree(storageCtx, filepath.Join(p.root, run.CloneIdentity)); err != nil {
 		return Observation{}, err
@@ -233,7 +234,7 @@ func (p *Provider) StartContainer(ctx context.Context, run taskstore.BackgroundR
 			return Observation{}, err
 		}
 	}
-	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	if err != nil {
 		cancel()
@@ -296,7 +297,8 @@ func (p *Provider) attestContainer(run taskstore.BackgroundRun, digest string, i
 }
 
 func (p *Provider) expectedEnvironment(run taskstore.BackgroundRun) []string {
-	environment := cloneMap(p.imageEnv)
+	environment := make(map[string]string, len(p.imageEnv)+2)
+	maps.Copy(environment, p.imageEnv)
 	environment[usernameEnv] = p.config.BasicUsername
 	environment[passwordEnv] = p.password(run)
 	result := make([]string, 0, len(environment))
@@ -370,7 +372,7 @@ func (p *Provider) Health(ctx context.Context, run taskstore.BackgroundRun, runt
 	if err != nil {
 		return Observation{}, err
 	}
-	deadline, cancel := operationContext(ctx, p.config.HealthTimeout)
+	deadline, cancel := context.WithTimeout(ctx, p.config.HealthTimeout)
 	defer cancel()
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
@@ -491,7 +493,7 @@ func (p *Provider) StopContainer(ctx context.Context, run taskstore.BackgroundRu
 	if err := validateCommittedRuntime(runtime); err != nil {
 		return Observation{}, err
 	}
-	operation, cancel := operationContext(ctx, p.config.DockerTimeout+p.config.StopGrace)
+	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout+p.config.StopGrace)
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	if errdefs.IsNotFound(err) {
 		if _, idErr := p.docker.ContainerInspect(operation, runtime.ContainerID); idErr == nil {
@@ -551,7 +553,7 @@ func (p *Provider) ProveWriterInactive(ctx context.Context, run taskstore.Backgr
 	if err != nil {
 		return Observation{}, WriterFence{}, err
 	}
-	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	if errdefs.IsNotFound(err) {
 		listed, listErr := p.listRunContainers(operation, run, digest)
@@ -623,7 +625,7 @@ func (p *Provider) RemoveContainer(ctx context.Context, run taskstore.Background
 	if err != nil {
 		return Observation{}, err
 	}
-	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity)
 	if errdefs.IsNotFound(err) {
 		if authority.ContainerID() != "" {
@@ -707,7 +709,7 @@ func (p *Provider) RemoveVolume(ctx context.Context, run taskstore.BackgroundRun
 	if err := p.requireContainerAbsent(ctx, run, digest, authority); err != nil {
 		return Observation{}, err
 	}
-	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	item, err := p.docker.VolumeInspect(operation, run.VolumeIdentity)
 	if errdefs.IsNotFound(err) {
 		listed, listErr := p.listRunVolumes(operation, run, digest)
@@ -760,7 +762,7 @@ func (p *Provider) RemoveVolume(ctx context.Context, run taskstore.BackgroundRun
 }
 
 func (p *Provider) requireContainerAbsent(ctx context.Context, run taskstore.BackgroundRun, digest string, authority WriterFence) error {
-	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	defer cancel()
 	if info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity); err == nil {
 		return &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "container still exists before disposable storage cleanup: " + info.ID}
@@ -785,7 +787,7 @@ func (p *Provider) requireContainerAbsent(ctx context.Context, run taskstore.Bac
 }
 
 func (p *Provider) requireVolumeAbsent(ctx context.Context, run taskstore.BackgroundRun, digest string) error {
-	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	defer cancel()
 	if item, err := p.docker.VolumeInspect(operation, run.VolumeIdentity); err == nil {
 		return &IdentityError{Resource: "volume", Identity: run.VolumeIdentity, Reason: "volume still exists before clone cleanup: " + item.Name}
@@ -803,7 +805,7 @@ func (p *Provider) requireVolumeAbsent(ctx context.Context, run taskstore.Backgr
 }
 
 func (p *Provider) requireNoRunContainer(ctx context.Context, run taskstore.BackgroundRun, digest string) error {
-	operation, cancel := operationContext(ctx, p.config.DockerTimeout)
+	operation, cancel := context.WithTimeout(ctx, p.config.DockerTimeout)
 	defer cancel()
 	if info, err := p.docker.ContainerInspect(operation, run.ContainerIdentity); err == nil {
 		return &IdentityError{Resource: "container", Identity: run.ContainerIdentity, Reason: "container exists while host Git inspection is requested: " + info.ID}
@@ -821,17 +823,7 @@ func (p *Provider) requireNoRunContainer(ctx context.Context, run taskstore.Back
 }
 
 func (p *Provider) listRunContainers(ctx context.Context, run taskstore.BackgroundRun, digest string) ([]container.Summary, error) {
-	labels := p.labels(run, digest)
-	keys := make([]string, 0, len(labels))
-	for key := range labels {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	args := filters.NewArgs()
-	for _, key := range keys {
-		args.Add("label", key+"="+labels[key])
-	}
-	items, err := p.docker.ContainerList(ctx, container.ListOptions{All: true, Filters: args})
+	items, err := p.docker.ContainerList(ctx, container.ListOptions{All: true, Filters: p.labelFilter(run, digest)})
 	if err != nil {
 		return nil, fmt.Errorf("list exact-labeled run containers: %w", err)
 	}
@@ -839,33 +831,20 @@ func (p *Provider) listRunContainers(ctx context.Context, run taskstore.Backgrou
 }
 
 func (p *Provider) listRunVolumes(ctx context.Context, run taskstore.BackgroundRun, digest string) ([]*volume.Volume, error) {
-	labels := p.labels(run, digest)
-	keys := make([]string, 0, len(labels))
-	for key := range labels {
-		keys = append(keys, key)
-	}
-	slices.Sort(keys)
-	args := filters.NewArgs()
-	for _, key := range keys {
-		args.Add("label", key+"="+labels[key])
-	}
-	response, err := p.docker.VolumeList(ctx, volume.ListOptions{Filters: args})
+	response, err := p.docker.VolumeList(ctx, volume.ListOptions{Filters: p.labelFilter(run, digest)})
 	if err != nil {
 		return nil, fmt.Errorf("list exact-labeled run volumes: %w", err)
 	}
 	return response.Volumes, nil
 }
 
-func equalMap[K comparable, V comparable](left, right map[K]V) bool {
-	if len(left) != len(right) {
-		return false
+// labelFilter matches resources carrying every one of the run's exact labels.
+func (p *Provider) labelFilter(run taskstore.BackgroundRun, digest string) filters.Args {
+	args := filters.NewArgs()
+	for key, value := range p.labels(run, digest) {
+		args.Add("label", key+"="+value)
 	}
-	for key, value := range left {
-		if right[key] != value {
-			return false
-		}
-	}
-	return true
+	return args
 }
 
 func containsMap[K comparable, V comparable](got, required map[K]V) bool {
