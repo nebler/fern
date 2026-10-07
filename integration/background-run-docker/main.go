@@ -59,11 +59,23 @@ func run() (resultErr error) {
 	if image.ID != imageID {
 		return fmt.Errorf("operator-pinned image ID is %s, local tag resolves to %s", imageID, image.ID)
 	}
-	temporary, err := os.MkdirTemp(quotaRoot, "fern-background-run-docker-")
+	// Durable state and the source repository live on the ordinary
+	// filesystem; disposable clones and volumes live under the quota root, as
+	// the provider requires them to be on different filesystems.
+	runtimeRoot, err := os.MkdirTemp(quotaRoot, "fern-background-run-docker-")
 	if err != nil {
 		return err
 	}
-	defer func() { resultErr = errors.Join(resultErr, removeHarnessRoot(cli, temporary)) }()
+	defer func() { resultErr = errors.Join(resultErr, removeHarnessRoot(cli, runtimeRoot)) }()
+	runtimeRoot, err = filepath.EvalSymlinks(runtimeRoot)
+	if err != nil {
+		return err
+	}
+	temporary, err := os.MkdirTemp("", "fern-background-run-docker-state-")
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(temporary)) }()
 	temporary, err = filepath.EvalSymlinks(temporary)
 	if err != nil {
 		return err
@@ -122,7 +134,7 @@ func run() (resultErr error) {
 	run := taskstore.BackgroundRun{WorkspaceID: workspaceID, RunID: runID, RepositoryID: 42, RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ResourceSpecVersion: runidentity.ResourceSpecVersion, ImageIdentity: imageID, CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode", ContainerIdentity: "fern-run-" + compact, EndpointIdentity: "run-" + compact + "-endpoint", OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID}
 	config := taskenvdocker.Config{StateRoot: state, Repository: repository, GitExecutable: gitPath, ImageReference: imageReference, ImageID: imageID, MemoryBytes: 512 << 20, WallTimeout: 2 * time.Minute, GitTimeout: 30 * time.Second, DockerTimeout: 20 * time.Second, HealthTimeout: 60 * time.Second, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 128 << 20, CloneObservedLimitBytes: 128 << 20, DiskFreeAdmissionBytes: 128 << 20, LogMaxSize: "1m", LogMaxFiles: 2, StopGrace: 3 * time.Second}
 	githubFixture, err := newGitHubFixture()
-	config.RuntimeStorageRoot = state
+	config.RuntimeStorageRoot = runtimeRoot
 	if err != nil {
 		return err
 	}
@@ -141,7 +153,7 @@ func run() (resultErr error) {
 	var containerID string
 	var runtime taskenvdocker.RuntimeIdentity
 	defer func() {
-		resultErr = errors.Join(resultErr, cleanupHarness(provider, cli, run, containerID, runtime, filepath.Join(state, "background-runs", run.CloneIdentity)))
+		resultErr = errors.Join(resultErr, cleanupHarness(provider, cli, run, containerID, runtime, filepath.Join(runtimeRoot, "background-runs", run.CloneIdentity)))
 	}()
 
 	otherTask, err := ids.RunID()
@@ -155,7 +167,7 @@ func run() (resultErr error) {
 	other.VolumeIdentity = "fern-run-" + otherCompact + "-opencode"
 	other.ContainerIdentity = "fern-run-" + otherCompact
 	other.EndpointIdentity = "run-" + otherCompact + "-endpoint"
-	unknown := filepath.Join(state, "background-runs", other.CloneIdentity)
+	unknown := filepath.Join(runtimeRoot, "background-runs", other.CloneIdentity)
 	if err := os.Mkdir(unknown, 0o700); err != nil {
 		return err
 	}
@@ -176,7 +188,7 @@ func run() (resultErr error) {
 	if err != nil {
 		return err
 	}
-	clonePath := filepath.Join(state, "background-runs", run.CloneIdentity)
+	clonePath := filepath.Join(runtimeRoot, "background-runs", run.CloneIdentity)
 	if common, err := gitOutput(clonePath, gitPath, "rev-parse", "--git-common-dir"); err != nil || common != ".git" {
 		return fmt.Errorf("clone common dir=%q error=%v", common, err)
 	}
@@ -215,7 +227,7 @@ func run() (resultErr error) {
 	if err := provider.RefreshGitHubCredentials(ctx, run); err != nil {
 		return err
 	}
-	if err := assertGitHubCredentials(ctx, cli, containerID, temporary, githubFixture, 1); err != nil {
+	if err := assertGitHubCredentials(ctx, cli, containerID, []string{temporary, runtimeRoot}, githubFixture, 1); err != nil {
 		return err
 	}
 	if err := provider.RefreshGitHubCredentials(ctx, run); err != nil {
@@ -268,7 +280,7 @@ func run() (resultErr error) {
 	if err != nil || volumeInfo.Labels["dev.fern.background-run.task"] != string(runID) {
 		return errors.New("real volume immutable labels differ")
 	}
-	if volumeInfo.Driver != "local" || volumeInfo.Options["type"] != "none" || volumeInfo.Options["o"] != "bind" || !withinHarnessRoot(state, volumeInfo.Options["device"]) {
+	if volumeInfo.Driver != "local" || volumeInfo.Options["type"] != "none" || volumeInfo.Options["o"] != "bind" || !withinHarnessRoot(runtimeRoot, volumeInfo.Options["device"]) {
 		return errors.New("real volume is not local-bind-backed beneath the quota runtime storage root")
 	}
 	if started.Endpoint == "" || started.HostPort == 0 {
@@ -287,7 +299,7 @@ func run() (resultErr error) {
 	if err := provider.RefreshGitHubCredentials(ctx, run); err != nil {
 		return err
 	}
-	if err := assertGitHubCredentials(ctx, cli, containerID, temporary, githubFixture, 2); err != nil {
+	if err := assertGitHubCredentials(ctx, cli, containerID, []string{temporary, runtimeRoot}, githubFixture, 2); err != nil {
 		return err
 	}
 	if err := os.WriteFile(filepath.Join(clonePath, "agent-output.txt"), []byte("dirty result\n"), 0o666); err != nil {

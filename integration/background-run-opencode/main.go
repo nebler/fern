@@ -142,23 +142,36 @@ func run() (resultErr error) {
 		return fmt.Errorf("operator-pinned image mismatch: inspect=%v local=%q want=%q", err, image.ID, imageID)
 	}
 
-	temporary, err := os.MkdirTemp(quotaRoot, "fern-background-run-opencode-")
+	// Durable state, stores, artifacts, and the source repository live on the
+	// ordinary filesystem; disposable clones and volumes live under the quota
+	// root, as the provider requires them to be on different filesystems.
+	runtimeRoot, err := os.MkdirTemp(quotaRoot, "fern-background-run-opencode-")
 	if err != nil {
 		return err
 	}
-	removeRoot := temporary
+	removeRoot := runtimeRoot
 	defer func() {
 		resultErr = errors.Join(resultErr, removeHarnessRoot(cli, removeRoot))
 		if _, err := os.Lstat(removeRoot); !errors.Is(err, os.ErrNotExist) {
-			resultErr = errors.Join(resultErr, fmt.Errorf("temporary root residue: %v", err))
+			resultErr = errors.Join(resultErr, fmt.Errorf("runtime root residue: %v", err))
 		}
 	}()
+	runtimeRoot, err = filepath.EvalSymlinks(runtimeRoot)
+	if err != nil {
+		return err
+	}
+	temporary, err := os.MkdirTemp("", "fern-background-run-opencode-state-")
+	if err != nil {
+		return err
+	}
+	defer func() { resultErr = errors.Join(resultErr, os.RemoveAll(temporary)) }()
 	temporary, err = filepath.EvalSymlinks(temporary)
 	if err != nil {
 		return err
 	}
+	cloneRoot := filepath.Join(runtimeRoot, "background-runs")
 
-	providerName := "fern-background-opencode-provider-" + filepath.Base(temporary)
+	providerName := "fern-background-opencode-provider-" + filepath.Base(runtimeRoot)
 	defer func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cleanupCancel()
@@ -240,7 +253,7 @@ func run() (resultErr error) {
 		OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID,
 	}
 	config := taskenvdocker.Config{
-		RuntimeStorageRoot: state,
+		RuntimeStorageRoot: runtimeRoot,
 		StateRoot:          state, Repository: repository, GitExecutable: gitPath, ImageReference: imageTag, ImageID: imageID,
 		MemoryBytes: 512 << 20, WallTimeout: 3 * time.Minute,
 		GitTimeout: 30 * time.Second, DockerTimeout: 20 * time.Second, HealthTimeout: 60 * time.Second,
@@ -249,7 +262,7 @@ func run() (resultErr error) {
 	}
 	var containerID string
 	var runtime taskenvdocker.RuntimeIdentity
-	clonePath := filepath.Join(state, "background-runs", run.CloneIdentity)
+	clonePath := filepath.Join(cloneRoot, run.CloneIdentity)
 	defer func() {
 		resultErr = errors.Join(resultErr, cleanupOpenCode(nil, cli, run, containerID, runtime, clonePath))
 	}()
@@ -450,7 +463,7 @@ func run() (resultErr error) {
 	}
 	containerID = ""
 	runtime = taskenvdocker.RuntimeIdentity{}
-	if err := runSerialCoordinator(ctx, temporary, repository, providerEndpoint, provider, cli, imageID, base); err != nil {
+	if err := runSerialCoordinator(ctx, temporary, cloneRoot, repository, providerEndpoint, provider, cli, imageID, base); err != nil {
 		return err
 	}
 	fmt.Printf("PASS profile=%s image_id=%s session=exact session_response_loss=after_effect session_posts=1 no_session_replay=true no_session_replacement=true prompt=admitted_promoted prompt_response_loss=after_effect active=positive interrupt=204 reconstruction=provider_client no_prompt_replay=true provider_calls=1 marker=exact serial_coordinator=complete retained_result=cas_reconstructed_twice route=exact_expiring_attachment fence_crash=uncertain_zero_post runtime_restart=quarantined_then_operator_removed_cleanup\n", backgroundopencode.Profile, imageID)
@@ -469,7 +482,7 @@ func canonicalImageID(value string) bool {
 	return true
 }
 
-func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoint string, provider *taskenvdocker.Provider, cli *client.Client, imageID, base string) error {
+func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, providerEndpoint string, provider *taskenvdocker.Provider, cli *client.Client, imageID, base string) error {
 	artifact, err := integrationArtifactEngine(filepath.Join(root, "serial-artifacts"))
 	if err != nil {
 		return err
@@ -530,7 +543,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 		_ = store.Close()
 		return err
 	}
-	clonePath := filepath.Join(root, "state", "background-runs", resources.Clone())
+	clonePath := filepath.Join(cloneRoot, resources.Clone())
 	if admission.Run.RunID == "" {
 		_ = store.Close()
 		return errors.New("serial admission did not return a durable run ID")
@@ -709,10 +722,10 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 		Scan(&runState, &runPhase, &runReason); err != nil || runState != "failed" || runPhase != "cleanup_complete" || runReason != "runtime_unavailable" {
 		return fmt.Errorf("serial terminal run state=%s phase=%s reason=%s error=%v", runState, runPhase, runReason, err)
 	}
-	if err := runRetainedResultScenario(ctx, root, repository, store, provider, artifact, ids, workspaceID, imageID, base, route); err != nil {
+	if err := runRetainedResultScenario(ctx, root, cloneRoot, repository, store, provider, artifact, ids, workspaceID, imageID, base, route); err != nil {
 		return err
 	}
-	if err := runPreDispatchFenceScenario(ctx, root, provider, artifact, cli, ids, workspaceID, imageID, base, route); err != nil {
+	if err := runPreDispatchFenceScenario(ctx, root, cloneRoot, provider, artifact, cli, ids, workspaceID, imageID, base, route); err != nil {
 		return err
 	}
 	labelled, err := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: filters.NewArgs(
@@ -722,7 +735,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	if err != nil || len(labelled) != 0 {
 		return fmt.Errorf("serial exact-label container residue count=%d error=%v", len(labelled), err)
 	}
-	backgroundRoot := filepath.Join(root, "state", "background-runs")
+	backgroundRoot := cloneRoot
 	if err := filepath.WalkDir(backgroundRoot, func(path string, entry os.DirEntry, walkErr error) error {
 		if walkErr != nil {
 			return walkErr
@@ -755,7 +768,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	return nil
 }
 
-func runRetainedResultScenario(ctx context.Context, root, repository string, store *taskstore.Store, provider *taskenvdocker.Provider,
+func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository string, store *taskstore.Store, provider *taskenvdocker.Provider,
 	artifact *taskartifact.Engine, ids *task.Generator, workspaceID task.WorkspaceID, imageID, base string, route *backgroundroute.Manager,
 ) error {
 	gitPath, err := exec.LookPath("git")
@@ -818,7 +831,7 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 	if run.State != taskstore.BackgroundRunWorking {
 		return fmt.Errorf("retained run did not reach working: %s/%s", run.State, run.EffectPhase)
 	}
-	clonePath := filepath.Join(root, "state", "background-runs", resources.Clone())
+	clonePath := filepath.Join(cloneRoot, resources.Clone())
 	if err := os.WriteFile(filepath.Join(clonePath, "committed-result.txt"), []byte("committed result\n"), 0o600); err != nil {
 		return err
 	}
@@ -1024,7 +1037,7 @@ func serialRouteStatus(origin, token, path string) (int, error) {
 	return response.StatusCode, readErr
 }
 
-func runPreDispatchFenceScenario(ctx context.Context, root string, provider *taskenvdocker.Provider, artifact *taskartifact.Engine, cli *client.Client,
+func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, provider *taskenvdocker.Provider, artifact *taskartifact.Engine, cli *client.Client,
 	ids *task.Generator, workspaceID task.WorkspaceID, imageID, base string, route *backgroundroute.Manager) error {
 	databasePath := filepath.Join(root, "fence-task-store.sqlite")
 	store, err := taskstore.Open(ctx, databasePath)
@@ -1152,7 +1165,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 	if _, err := cli.VolumeInspect(context.Background(), resources.Volume()); !client.IsErrNotFound(err) {
 		return fmt.Errorf("pre-dispatch volume residue: %v", err)
 	}
-	clonePath := filepath.Join(root, "state", "background-runs", resources.Clone())
+	clonePath := filepath.Join(cloneRoot, resources.Clone())
 	if _, err := os.Lstat(clonePath); !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("pre-dispatch clone residue: %v", err)
 	}

@@ -120,7 +120,7 @@ func privateExec(ctx context.Context, cli *client.Client, id string, args ...str
 	}
 }
 
-func assertGitHubCredentials(ctx context.Context, cli *client.Client, id, hostRoot string, fixture *gitHubFixture, mint int) error {
+func assertGitHubCredentials(ctx context.Context, cli *client.Client, id string, hostRoots []string, fixture *gitHubFixture, mint int) error {
 	if int(fixture.calls.Load()) != mint {
 		return errors.New("GitHub credential mint count differs")
 	}
@@ -169,6 +169,15 @@ test "$(cat /home/user/.local/share/opencode/fern-github-repository)" = fern-int
 	if err != nil || containsDummySecret(data) {
 		return errors.New("container logs unreadable or contain a credential")
 	}
+	for _, hostRoot := range hostRoots {
+		if err := assertNoHostCredentials(hostRoot); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func assertNoHostCredentials(hostRoot string) error {
 	return filepath.WalkDir(hostRoot, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
