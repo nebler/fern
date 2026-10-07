@@ -138,7 +138,7 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 	localURL, err := loopbackURL(cfg.Proxy.OperatorListen)
 	if err != nil {
 		add("gateway", "fail", err.Error(), "Fix proxy.operatorListen.")
-	} else if err := checkReady(ctx, localURL, cfg.Control.Password); err != nil {
+	} else if err := checkReady(ctx, localURL, cfg.ControlPassword); err != nil {
 		add("gateway", "fail", "local Fern gateway is not ready", "Start fern up with the same --config and --env-file.")
 	} else {
 		add("gateway", "pass", "local Fern gateway is serving", "")
@@ -191,7 +191,7 @@ func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, sta
 		}
 		add("background-route", "pass", "private Background Run route reaches its exact loopback listener", "")
 	}
-	code, pairErr := issuePairingCode(ctx, localURL, cfg.Control.Password)
+	code, pairErr := issuePairingCode(ctx, localURL, cfg.ControlPassword)
 	if pairErr != nil {
 		add("pairing", "fail", "could not create a one-time phone pairing link", "Ensure the local Fern process is the current build.")
 		return

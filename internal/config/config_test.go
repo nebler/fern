@@ -28,8 +28,6 @@ tasks:
   backgroundRoute:
     listen: 127.0.0.1:8443
     origin: https://fern.example.ts.net:8443
-control:
-  password: ${FERN_CONTROL_PASSWORD}
 proxy:
   listen: 127.0.0.1:8080
   operatorListen: 127.0.0.1:8081
@@ -72,7 +70,7 @@ func TestCurrentConfiguration(t *testing.T) {
 	if cfg.Workspace.GitHub.InstallationID != 123 || cfg.Workspace.GitHub.Repository.ID != 456 ||
 		cfg.Workspace.GitHub.Repository.FullName != "owner/repository" || cfg.Tasks.Agent != "build" ||
 		cfg.Tasks.Model.Provider != "openai" || cfg.Tasks.Model.ID != "gpt-5" || cfg.Tasks.RunTimeout != 30*time.Minute ||
-		cfg.Control.Password != strings.Repeat("s", 32) {
+		cfg.ControlPassword != strings.Repeat("s", 32) {
 		t.Fatalf("decoded configuration = %+v", cfg)
 	}
 }
@@ -173,8 +171,8 @@ func TestValidationBoundsAndDependencies(t *testing.T) {
 		"repository_id":            func(c *Config) { c.Workspace.GitHub.Repository.ID = 0 },
 		"repository_name":          func(c *Config) { c.Workspace.GitHub.Repository.FullName = "invalid" },
 		"repository_path":          func(c *Config) { c.Workspace.Repo += "/missing" },
-		"password_missing":         func(c *Config) { c.Control.Password = "" },
-		"password_short":           func(c *Config) { c.Control.Password = "short" },
+		"password_missing":         func(c *Config) { c.ControlPassword = "" },
+		"password_short":           func(c *Config) { c.ControlPassword = "short" },
 		"agent":                    func(c *Config) { c.Tasks.Agent = "" },
 		"agent_long":               func(c *Config) { c.Tasks.Agent = strings.Repeat("x", 129) },
 		"provider":                 func(c *Config) { c.Tasks.Model.Provider = "\x00" },
@@ -215,7 +213,7 @@ func TestValidationBoundsAndDependencies(t *testing.T) {
 	}
 }
 
-func TestEnvironmentExpansion(t *testing.T) {
+func TestControlPasswordSource(t *testing.T) {
 	t.Setenv("FERN_CONTROL_PASSWORD", "process-secret")
 	path := writeConfig(t, currentYAML)
 	protected := strings.Repeat("p", 32)
@@ -223,22 +221,22 @@ func TestEnvironmentExpansion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Control.Password != protected || cfg.Workspace.Repo != filepath.Dir(path) {
+	if cfg.ControlPassword != protected || cfg.Workspace.Repo != filepath.Dir(path) {
 		t.Fatalf("expansion or relative repository = %+v", cfg)
 	}
-	cfg, err = loadConfig(t, strings.Replace(currentYAML, "${FERN_CONTROL_PASSWORD}", "$$literal", 1))
-	if err != nil || cfg.Control.Password != "$literal" {
-		t.Fatalf("dollar escape: %q, %v", cfg.Control.Password, err)
+	cfg, err = Load(path, nil)
+	if err != nil || cfg.ControlPassword != "process-secret" {
+		t.Fatalf("process environment fallback: %q, %v", cfg.ControlPassword, err)
 	}
-	if _, err := loadConfig(t, strings.Replace(currentYAML, "${FERN_CONTROL_PASSWORD}", "${FERN_TEST_UNSET_4E9511}", 1)); err == nil {
-		t.Fatal("unset reference accepted")
+	if _, err := loadConfig(t, currentYAML+"control:\n  password: inline\n"); err == nil {
+		t.Fatal("inline control password accepted")
 	}
 	if _, err := loadConfig(t, strings.Replace(currentYAML, "  repo: .", "  repo: ''", 1)); err == nil {
 		t.Fatal("empty repository accepted")
 	}
 }
 
-func TestTaskPolicyDoesNotExpandEnvironment(t *testing.T) {
+func TestConfigurationDoesNotExpandEnvironment(t *testing.T) {
 	t.Parallel()
 	cfg, err := loadConfig(t, strings.Replace(currentYAML, "  agent: build", "  agent: ${FERN_CONTROL_PASSWORD}", 1))
 	if err != nil {

@@ -14,9 +14,15 @@ import (
 type Config struct {
 	Workspace Workspace  `yaml:"workspace"`
 	Tasks     TaskPolicy `yaml:"tasks"`
-	Control   Control    `yaml:"control"`
 	Proxy     Proxy      `yaml:"proxy"`
+	// ControlPassword is never read from or written to the file; Load takes
+	// it from ControlPasswordVariable.
+	ControlPassword string `yaml:"-"`
 }
+
+// ControlPasswordVariable names the protected environment value holding the
+// host control-plane password.
+const ControlPasswordVariable = "FERN_CONTROL_PASSWORD"
 
 type Workspace struct {
 	Name   string    `yaml:"name"`
@@ -55,11 +61,6 @@ type TaskModel struct {
 type BackgroundRoute struct {
 	Listen string `yaml:"listen"`
 	Origin string `yaml:"origin"`
-}
-
-// Control contains only the host-side control-plane credential.
-type Control struct {
-	Password string `yaml:"password"`
 }
 
 type Proxy struct {

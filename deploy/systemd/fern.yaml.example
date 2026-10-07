@@ -19,8 +19,6 @@ tasks:
   backgroundRoute:
     listen: 127.0.0.1:8443
     origin: https://replace-with-this-host.example.ts.net:8443
-control:
-  password: ${FERN_CONTROL_PASSWORD}
 proxy:
   listen: 127.0.0.1:8080
   operatorListen: 127.0.0.1:8081

@@ -11,7 +11,7 @@ func TestConfigSizeBoundary(t *testing.T) {
 	for _, size := range []int{MaxConfigBytes - 1, MaxConfigBytes, MaxConfigBytes + 1} {
 		path := filepath.Join(t.TempDir(), "fern.yaml")
 		// Pad a valid schema with a comment to isolate the raw byte boundary.
-		base := strings.ReplaceAll(currentYAML, "${FERN_CONTROL_PASSWORD}", "test-password") + "#"
+		base := currentYAML + "#"
 		contents := base + strings.Repeat("x", size-len(base))
 		if err := os.WriteFile(path, []byte(contents), 0o600); err != nil {
 			t.Fatal(err)

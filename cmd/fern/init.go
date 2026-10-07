@@ -54,8 +54,8 @@ func runInit(args []string) error {
 	values := config.Config{
 		Workspace: config.Workspace{Name: *name, Repo: absRepo, GitHub: config.GitHubApp{
 			InstallationID: config.GitHubID(*installationID), Repository: config.GitHubRepository{ID: config.GitHubID(*repositoryID), FullName: *repositoryName}}},
-		Control: config.Control{Password: controlSecret},
-		Proxy:   config.Proxy{Listen: *listen, OperatorListen: *operatorListen, RemoteOrigin: *remoteOrigin},
+		ControlPassword: controlSecret,
+		Proxy:           config.Proxy{Listen: *listen, OperatorListen: *operatorListen, RemoteOrigin: *remoteOrigin},
 		Tasks: config.TaskPolicy{Agent: "build", Model: config.TaskModel{Provider: *modelProvider, ID: *model},
 			RuntimeStorageRoot: *runtimeStorageRoot,
 			RunTimeout:         30 * time.Minute,
@@ -65,8 +65,6 @@ func runInit(args []string) error {
 	if err := config.ValidateBootstrap(values); err != nil {
 		return err
 	}
-	// The file references the secret; only the protected environment holds it.
-	values.Control.Password = "${FERN_CONTROL_PASSWORD}"
 	var configData bytes.Buffer
 	encoder := yaml.NewEncoder(&configData)
 	encoder.SetIndent(2)

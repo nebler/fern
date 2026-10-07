@@ -43,7 +43,7 @@ func TestBackupLoadsOnlyCurrentConfiguration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if name != "demo" || cfg.Workspace.Repo != directory || cfg.Workspace.GitHub.Repository.ID != 123456789 || cfg.Control.Password != strings.Repeat("s", 32) {
+	if name != "demo" || cfg.Workspace.Repo != directory || cfg.Workspace.GitHub.Repository.ID != 123456789 || cfg.ControlPassword != strings.Repeat("s", 32) {
 		t.Fatalf("backup configuration = %+v, %q", cfg, name)
 	}
 	for _, retired := range []string{"  image: retired\n", "  memory: 8Gi\n", "  env: {}\n"} {

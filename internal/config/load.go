@@ -12,7 +12,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// MaxConfigBytes bounds raw YAML before parsing or environment expansion.
+// MaxConfigBytes bounds raw YAML before parsing.
 const MaxConfigBytes = 1 << 20
 
 func readConfig(path string) ([]byte, error) {
@@ -32,16 +32,10 @@ func readConfig(path string) ([]byte, error) {
 }
 
 // Load reads the configuration file, the single source of truth for a Fern
-// host. Protected environment-file values take precedence over process values
-// during expansion. Loading does not authorize execution; callers must
-// validate.
+// host. The control password comes from FERN_CONTROL_PASSWORD, preferring the
+// protected environment-file values over the process environment. Loading does
+// not authorize execution; callers must validate.
 func Load(path string, environment map[string]string) (Config, error) {
-	lookup := func(key string) (string, bool) {
-		if value, exists := environment[key]; exists {
-			return value, true
-		}
-		return os.LookupEnv(key)
-	}
 	data, err := readConfig(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config %q: %w", path, err)
@@ -58,10 +52,7 @@ func Load(path string, environment map[string]string) (Config, error) {
 	if err != nil {
 		return Config{}, fmt.Errorf("parse proxy.remoteOrigin: %w", err)
 	}
-	repo, err := expandRequired(config.Workspace.Repo, lookup)
-	if err != nil {
-		return Config{}, fmt.Errorf("expand workspace.repo: %w", err)
-	}
+	repo := config.Workspace.Repo
 	if strings.TrimSpace(repo) == "" {
 		return Config{}, errors.New("workspace.repo is required")
 	}
@@ -72,10 +63,11 @@ func Load(path string, environment map[string]string) (Config, error) {
 		}
 	}
 	config.Workspace.Repo = filepath.Clean(repo)
-	config.Control.Password, err = expandRequired(config.Control.Password, lookup)
-	if err != nil {
-		return Config{}, fmt.Errorf("expand control.password: %w", err)
+	password, ok := environment[ControlPasswordVariable]
+	if !ok {
+		password = os.Getenv(ControlPasswordVariable)
 	}
+	config.ControlPassword = password
 	return config, nil
 }
 

@@ -11,9 +11,9 @@
 // repository, image, installation, or runtime storage quota actually exist;
 // those are established by the components that use them.
 //
-// Only the repository path and control password undergo environment expansion
-// ($$ escapes a dollar; an unset variable is an error). A file-supplied relative
-// repository resolves against the config file's directory. The configuration
+// Nothing in the file undergoes environment expansion; the control password is
+// never in the file and comes from FERN_CONTROL_PASSWORD. A relative
+// workspace.repo resolves against the config file's directory. The configuration
 // binds GitHub installation and repository IDs but never holds the App private
 // key.
 package config

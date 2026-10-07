@@ -36,10 +36,10 @@ func validateBackground(config Config, allowPendingInstallation bool) error {
 	if err := ValidateWorkspace(config); err != nil {
 		return err
 	}
-	if config.Control.Password == "" {
-		return errors.New("FERN_CONTROL_PASSWORD is required through control.password")
+	if config.ControlPassword == "" {
+		return errors.New("FERN_CONTROL_PASSWORD is required in the --env-file or the process environment")
 	}
-	if len(config.Control.Password) < 32 {
+	if len(config.ControlPassword) < 32 {
 		return errors.New("FERN_CONTROL_PASSWORD must be at least 32 characters")
 	}
 	if config.Workspace.GitHub.InstallationID < 0 || !allowPendingInstallation && config.Workspace.GitHub.InstallationID == 0 {

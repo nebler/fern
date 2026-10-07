@@ -237,7 +237,7 @@ func resolveRunConnection(ctx context.Context, options runCLIOptions) (*runConne
 	if err != nil {
 		return nil, err
 	}
-	return &runConnection{apiOrigin: mustURL(api), apiAuthorization: basicAuthorization(fernRunUsername, cfg.Control.Password),
+	return &runConnection{apiOrigin: mustURL(api), apiAuthorization: basicAuthorization(fernRunUsername, cfg.ControlPassword),
 		attachOrigin: attach, client: client}, nil
 }
 
