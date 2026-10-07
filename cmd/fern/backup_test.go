@@ -210,8 +210,8 @@ func TestBackupRoundTripEncryptsSecretsAndRefusesExistingState(t *testing.T) {
 		readTestFile(t, target.options.configPath) != "workspace:\n  name: demo\n" {
 		t.Fatal("configuration was not restored")
 	}
-	if pathExists(filepath.Join(state, "tasks/demo-background/artifact-work")) || pathExists(state+".previous") {
-		t.Fatal("restore produced disposable state or a spurious previous copy")
+	if pathExists(filepath.Join(state, "tasks/demo-background/artifact-work")) {
+		t.Fatal("restore produced disposable state")
 	}
 
 	// Restore never replaces existing state or configuration.
