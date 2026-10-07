@@ -6,9 +6,9 @@
 // files are then read and written without per-file link-count, mode, or owner
 // checks. It is not suitable for directories an agent or other user can modify.
 //
-// The small filesystem primitives RenameNoReplace, SyncDir, and Identity make
-// no trust assumption and are shared by packages that do guard such
-// directories.
+// The filesystem primitives RenameNoReplace, SyncDir, Identity,
+// QuarantineRemove, and RemoveTree make no trust assumption about the
+// directory and are shared by packages that do guard agent-writable trees.
 package atomicfile
 
 import (
