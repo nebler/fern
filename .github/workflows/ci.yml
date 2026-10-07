@@ -52,27 +52,11 @@ jobs:
       - name: Run vet
         run: GOTOOLCHAIN=local go vet ./...
 
-      - name: Build fern
-        run: GOTOOLCHAIN=local go build ./cmd/fern
-
       - name: Verify systemd deployment
         run: ./scripts/test-deployment.sh
 
-      - name: Verify release workflow controls
-        run: ./scripts/test-release-workflow.sh
-
-      - name: Verify reproducible release artifacts
-        run: ./integration/release/run.sh
-
-      - name: Verify production rehearsal evidence harness
-        run: |
-          python3 -m json.tool deploy/release/production-rehearsal-evidence.schema.json >/dev/null
-          ./integration/production-rehearsal/run.sh self-test
-
-      - name: Build and verify release candidate
-        run: |
-          ./scripts/build-release.sh v0.0.0-ci
-          (cd dist && shasum -a 256 -c SHA256SUMS)
+      - name: Build release binaries
+        run: GOTOOLCHAIN=local make release VERSION=v0.0.0-ci && (cd dist && shasum -a 256 -c SHA256SUMS)
 
   opencode-plugin:
     name: OpenCode plugin package

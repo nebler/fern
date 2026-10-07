@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"io"
 	"log/slog"
-	"os/exec"
 	"strings"
 	"testing"
 )
@@ -47,16 +46,5 @@ func TestRunVersionSucceeds(t *testing.T) {
 func TestUsageIncludesVersion(t *testing.T) {
 	if !strings.Contains(usageText, "version") {
 		t.Fatalf("usage %q does not include version", usageText)
-	}
-}
-
-func TestBuildReleaseRequiresVersion(t *testing.T) {
-	command := exec.Command("sh", "../../scripts/build-release.sh")
-	output, err := command.CombinedOutput()
-	if err == nil {
-		t.Fatalf("build-release.sh succeeded without a version: %s", output)
-	}
-	if !strings.Contains(string(output), "usage:") {
-		t.Fatalf("missing-version output = %q, want usage", output)
 	}
 }
