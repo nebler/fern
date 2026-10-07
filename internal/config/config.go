@@ -8,8 +8,6 @@ type GitHubRepository struct {
 	FullName string
 }
 
-const GitHubModeGitHubAppBroker = "github-app-broker"
-
 // GitHubApp holds the GitHub.com App installation and repository binding.
 type GitHubApp struct {
 	InstallationID int64

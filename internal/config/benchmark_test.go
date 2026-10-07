@@ -15,7 +15,6 @@ func benchmarkConfigFixture(b *testing.B) (string, string, []byte) {
   name: bench
   repo: %q
   github:
-    mode: github-app-broker
     installationId: 123
     repository:
       id: 456

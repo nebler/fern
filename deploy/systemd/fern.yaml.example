@@ -2,8 +2,6 @@ workspace:
   name: demo
   repo: /srv/fern/repository
   github:
-    mode: github-app-broker
-    hostname: github.com
     installationId: 12345678
     repository:
       id: 123456789

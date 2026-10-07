@@ -12,8 +12,6 @@ const currentYAML = `workspace:
   name: demo
   repo: .
   github:
-    mode: github-app-broker
-    hostname: github.com
     installationId: 123
     repository:
       id: 456
@@ -87,8 +85,8 @@ func TestStrictParserRejectsRetiredAndUnknownSettings(t *testing.T) {
 		"workspace_env":          strings.Replace(currentYAML, "  name: demo", "  env: {}\n  name: demo", 1),
 		"idle":                   currentYAML + "idle:\n  after: 10m\n  mode: freeze\n",
 		"idle_empty":             currentYAML + "idle: {}\n",
-		"workspace_gh":           strings.Replace(currentYAML, "github-app-broker", "workspace-gh", 1),
-		"unknown_mode":           strings.Replace(currentYAML, "github-app-broker", "other", 1),
+		"retired_github_mode":    strings.Replace(currentYAML, "    installationId: 123", "    mode: github-app-broker\n    installationId: 123", 1),
+		"retired_github_host":    strings.Replace(currentYAML, "    installationId: 123", "    hostname: github.com\n    installationId: 123", 1),
 		"background_environment": strings.Replace(currentYAML, "  agent: build", "  backgroundEnvironment: {}\n  agent: build", 1),
 		"budget":                 strings.Replace(currentYAML, "  agent: build", "  budget:\n    maxTurns: 100\n  agent: build", 1),
 		"maxTurns":               strings.Replace(currentYAML, "  agent: build", "  maxTurns: 100\n  agent: build", 1),
@@ -112,7 +110,7 @@ func TestStrictParserRejectsRetiredAndUnknownSettings(t *testing.T) {
 
 func TestRequiredFieldsAndStrictScalarTypes(t *testing.T) {
 	t.Parallel()
-	for _, field := range []string{"    mode: github-app-broker\n", "      id: 456\n", "      fullName: owner/repository\n", "  agent: build\n", "    provider: openai\n", "    id: gpt-5\n", "  runTimeout: 30m\n"} {
+	for _, field := range []string{"      id: 456\n", "      fullName: owner/repository\n", "  agent: build\n", "    provider: openai\n", "    id: gpt-5\n", "  runTimeout: 30m\n"} {
 		t.Run(strings.TrimSpace(field), func(t *testing.T) {
 			if _, err := loadConfig(t, strings.Replace(currentYAML, field, "", 1)); err == nil {
 				t.Fatal("required field omitted")
@@ -124,7 +122,7 @@ func TestRequiredFieldsAndStrictScalarTypes(t *testing.T) {
 		{"id: 456", "id: 9223372036854775808"}, {"installationId: 123", "installationId: '123'"},
 		{"installationId: 123", "installationId: 0"}, {"installationId: 123", "installationId: -1"},
 		{"installationId: 123", "installationId: 0123"}, {"fullName: owner/repository", "fullName: owner/repository/extra"},
-		{"hostname: github.com", "hostname: enterprise.example"}, {"agent: build", "agent: 1"},
+		{"agent: build", "agent: 1"},
 		{"provider: openai", "provider: true"}, {"id: gpt-5", "id: []"},
 		{"runTimeout: 30m", "runTimeout: 30"},
 		{"backgroundImage: image:test", "backgroundImage: ''"}, {"backgroundImageID: sha256:" + strings.Repeat("b", 64), "backgroundImageID: ''"},

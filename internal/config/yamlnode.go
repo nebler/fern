@@ -15,8 +15,6 @@ type fileWorkspace struct {
 	Name   yaml.Node `yaml:"name"`
 	Repo   yaml.Node `yaml:"repo"`
 	GitHub *struct {
-		Mode           yaml.Node `yaml:"mode"`
-		Hostname       yaml.Node `yaml:"hostname"`
 		InstallationID yaml.Node `yaml:"installationId"`
 		Repository     *struct {
 			ID       yaml.Node `yaml:"id"`
@@ -90,22 +88,6 @@ func applyFileWorkspace(workspace *Workspace, file fileWorkspace, overrides Over
 	}
 	if err := ValidateGitHubRepositoryFullName(fullName); err != nil {
 		return fmt.Errorf("github.repository.fullName: %w", err)
-	}
-	modeText, err := decodeRequiredTaskString(file.GitHub.Mode)
-	if err != nil {
-		return fmt.Errorf("github.mode: %w", err)
-	}
-	if modeText != GitHubModeGitHubAppBroker {
-		return errors.New("github.mode must be github-app-broker")
-	}
-	if !file.GitHub.Hostname.IsZero() {
-		hostname, err := decodeRequiredTaskString(file.GitHub.Hostname)
-		if err != nil {
-			return fmt.Errorf("github.hostname: %w", err)
-		}
-		if hostname != "github.com" {
-			return errors.New("github.hostname must be github.com")
-		}
 	}
 	var installationID int64
 	if !file.GitHub.InstallationID.IsZero() {

@@ -68,9 +68,7 @@ func runInit(args []string) error {
 			Name   string `yaml:"name"`
 			Repo   string `yaml:"repo"`
 			GitHub struct {
-				Mode           string `yaml:"mode"`
-				Hostname       string `yaml:"hostname"`
-				InstallationID int64  `yaml:"installationId,omitempty"`
+				InstallationID int64 `yaml:"installationId,omitempty"`
 				Repository     struct {
 					ID       int64  `yaml:"id"`
 					FullName string `yaml:"fullName"`
@@ -103,7 +101,6 @@ func runInit(args []string) error {
 	}
 	var output initFile
 	output.Workspace.Name, output.Workspace.Repo = values.Workspace.Name, values.Workspace.Repo
-	output.Workspace.GitHub.Mode, output.Workspace.GitHub.Hostname = config.GitHubModeGitHubAppBroker, "github.com"
 	output.Workspace.GitHub.InstallationID = values.Workspace.GitHub.InstallationID
 	output.Workspace.GitHub.Repository.ID = values.Workspace.GitHub.Repository.ID
 	output.Workspace.GitHub.Repository.FullName = values.Workspace.GitHub.Repository.FullName

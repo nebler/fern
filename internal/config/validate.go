@@ -43,7 +43,7 @@ func validateBackground(config Config, allowPendingInstallation bool) error {
 		return errors.New("FERN_CONTROL_PASSWORD must be at least 32 characters")
 	}
 	if config.Workspace.GitHub.InstallationID < 0 || !allowPendingInstallation && config.Workspace.GitHub.InstallationID == 0 {
-		return errors.New("background runs require github-app-broker with a positive installationId")
+		return errors.New("background runs require a positive workspace.github.installationId")
 	}
 	if err := validateTasks(config); err != nil {
 		return err
