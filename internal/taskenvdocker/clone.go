@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/nebler/fern/internal/atomicfile"
@@ -445,25 +446,12 @@ func (p *Provider) attestSourceGitConfig(ctx context.Context, expectedRemote str
 }
 
 func sourceGitConfigCanExecute(key string) bool {
-	for _, exact := range []string{
+	return slices.Contains([]string{
 		"core.fsmonitor", "core.hookspath", "core.sshcommand", "core.gitproxy", "core.askpass", "core.pager",
 		"diff.external", "interactive.difffilter", "uploadpack.packobjectshook", "sequence.editor",
-	} {
-		if key == exact {
-			return true
-		}
-	}
-	for _, prefix := range []string{"alias.", "credential.", "filter.", "include.", "includeif.", "url.", "difftool.", "mergetool."} {
-		if strings.HasPrefix(key, prefix) {
-			return true
-		}
-	}
-	for _, suffix := range []string{".command", ".driver", ".textconv", ".cmd", ".uploadpack", ".receivepack"} {
-		if strings.HasSuffix(key, suffix) {
-			return true
-		}
-	}
-	return false
+	}, key) ||
+		slices.ContainsFunc([]string{"alias.", "credential.", "filter.", "include.", "includeif.", "url.", "difftool.", "mergetool."}, func(prefix string) bool { return strings.HasPrefix(key, prefix) }) ||
+		slices.ContainsFunc([]string{".command", ".driver", ".textconv", ".cmd", ".uploadpack", ".receivepack"}, func(suffix string) bool { return strings.HasSuffix(key, suffix) })
 }
 
 func (p *Provider) requireReachableBase(ctx context.Context, path, base string) error {
