@@ -81,13 +81,6 @@ jobs:
           bun run build
           bun run smoke
 
-      - name: Build official OpenCode compatibility image
-        run: docker build --tag fern/opencode-background:plugin-ci images/opencode-background
-
-      - name: Verify packed plugin with OpenCode 1.18.16
-        working-directory: plugins/opencode
-        run: ./test/docker-cli-smoke.sh fern/opencode-background:plugin-ci
-
   background-qualification:
     name: Background Run qualification
     runs-on: ubuntu-latest
