@@ -3,7 +3,6 @@ package githubapp
 import (
 	"encoding/json"
 	"net/url"
-	"reflect"
 
 	"github.com/nebler/fern/internal/strictjson"
 )
@@ -23,26 +22,4 @@ func decodeGitHubJSON(payload []byte, destination any) error {
 		return ErrInvalidResponse
 	}
 	return nil
-}
-
-func firstError(err, fallback error) error {
-	if err != nil {
-		return err
-	}
-	return fallback
-}
-
-// isNilInterface reports whether value is a nil interface or a typed nil
-// pointer, map, slice, channel, or function.
-func isNilInterface(value any) bool {
-	if value == nil {
-		return true
-	}
-	reflected := reflect.ValueOf(value)
-	switch reflected.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
-		return reflected.IsNil()
-	default:
-		return false
-	}
 }

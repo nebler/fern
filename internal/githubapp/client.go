@@ -136,14 +136,10 @@ func (client *Client) InstallationDiscoveryToken(ctx context.Context, installati
 	if err != nil {
 		return InstallationDiscoveryToken{}, err
 	}
-	permissions, err := ValidateInstallationDiscoveryPermissions(minted.permissions)
-	if err != nil {
+	if err := validateDiscoveryPermissions(minted.permissions); err != nil {
 		return InstallationDiscoveryToken{}, err
 	}
-	return InstallationDiscoveryToken{
-		value: minted.value, expiresAt: minted.expiresAt,
-		installationID: installationID, permissions: permissions,
-	}, nil
+	return InstallationDiscoveryToken{value: minted.value, expiresAt: minted.expiresAt, installationID: installationID}, nil
 }
 
 type mintedInstallationAccessToken struct {

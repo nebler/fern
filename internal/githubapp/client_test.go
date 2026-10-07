@@ -131,7 +131,7 @@ func TestClientRequestsInstallationWideDiscoveryToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if value != accessToken || token.InstallationID() != 101 || token.ExpiresAt() != now.Add(time.Hour) || token.Permissions().Metadata() != "read" {
+	if value != accessToken || token.InstallationID() != 101 || token.ExpiresAt() != now.Add(time.Hour) {
 		t.Fatalf("discovery token metadata = %v", token)
 	}
 }

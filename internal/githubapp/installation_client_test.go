@@ -68,20 +68,23 @@ func (roundTrip installationRoundTripper) RoundTrip(request *http.Request) (*htt
 	return roundTrip(request)
 }
 
-func TestInstallationClientListsInstallationsWithExactPagination(t *testing.T) {
+func TestInstallationClientListsInstallationsUntilAShortPage(t *testing.T) {
 	t.Parallel()
 	now := installationTestNow()
 	app := &installationAppSource{token: installationTestAppToken}
 	discovery := installationTestDiscoverySource(t, now, 101)
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	fullPage := []string{installationJSON(101, 1001, "fern-inc", "Organization", "selected")}
+	for index := 1; index < installationPageSize; index++ {
+		fullPage = append(fullPage, installationJSON(int64(5000+index), int64(9000+index), fmt.Sprintf("org-%d", index), "Organization", "all"))
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		assertInstallationGET(t, request, "/app/installations", "per_page=100&page="+request.URL.Query().Get("page"), installationTestAppToken)
+		// A server-supplied next link is never followed.
+		writer.Header().Set("Link", `<https://attacker.invalid/app/installations?page=2>; rel="next"`)
 		switch request.URL.Query().Get("page") {
 		case "1":
-			writer.Header().Set("Link", "<"+server.URL+"/app/installations?per_page=100&page=2>; rel=\"next\", <"+server.URL+"/app/installations?per_page=100&page=2>; rel=\"last\"")
-			_, _ = io.WriteString(writer, `[`+installationJSON(101, 1001, "fern-inc", "Organization", "selected")+`]`)
+			_, _ = io.WriteString(writer, `[`+strings.Join(fullPage, ",")+`]`)
 		case "2":
-			writer.Header().Set("Link", "<"+server.URL+"/app/installations?per_page=100&page=1>; rel=\"prev\"")
 			_, _ = io.WriteString(writer, `[`+installationJSON(102, 1002, "fern-user", "User", "all")+`]`)
 		default:
 			t.Fatalf("unexpected page %q", request.URL.Query().Get("page"))
@@ -94,8 +97,9 @@ func TestInstallationClientListsInstallationsWithExactPagination(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(observations) != 2 || observations[0].installationID != 101 || observations[0].accountLogin != "fern-inc" || observations[0].accountID != 1001 || observations[0].accountType != "Organization" || observations[0].targetType != "Organization" || observations[0].repositorySelection != "selected" || observations[1].repositorySelection != "all" {
-		t.Fatalf("observations = %#v", observations)
+	last := observations[len(observations)-1]
+	if len(observations) != installationPageSize+1 || observations[0].installationID != 101 || observations[0].accountLogin != "fern-inc" || observations[0].accountID != 1001 || observations[0].accountType != "Organization" || observations[0].targetType != "Organization" || observations[0].repositorySelection != "selected" || last.installationID != 102 || last.repositorySelection != "all" {
+		t.Fatalf("observations = %d, first = %#v, last = %#v", len(observations), observations[0], last)
 	}
 	if app.callCount() != 1 {
 		t.Fatalf("app token calls = %d", app.callCount())
@@ -110,16 +114,19 @@ func TestInstallationClientListsRepositoriesWithInstallationToken(t *testing.T) 
 	now := installationTestNow()
 	app := &installationAppSource{token: installationTestAppToken}
 	discovery := installationTestDiscoverySource(t, now, 101)
-	var server *httptest.Server
-	server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	fullPage := []string{repositoryInstallationJSON(201, 1001, "fern-inc/widget", false, false)}
+	for index := 1; index < installationPageSize; index++ {
+		fullPage = append(fullPage, repositoryInstallationJSON(int64(3000+index), 1001, fmt.Sprintf("fern-inc/repo-%d", index), false, false))
+	}
+	total := strconv.Itoa(installationPageSize + 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		assertInstallationGET(t, request, "/installation/repositories", "per_page=100&page="+request.URL.Query().Get("page"), installationTestCredential)
 		if request.URL.Query().Get("page") == "1" {
-			writer.Header().Set("Link", "<"+server.URL+"/installation/repositories?per_page=100&page=2>; rel=\"next\"")
-			_, _ = io.WriteString(writer, `{"total_count":2,"repositories":[`+repositoryInstallationJSON(201, 1001, "fern-inc/widget", false, false)+`]}`)
+			_, _ = io.WriteString(writer, `{"total_count":`+total+`,"repositories":[`+strings.Join(fullPage, ",")+`]}`)
 			return
 		}
 		fineGrained := strings.Replace(repositoryInstallationJSON(202, 1001, "fern-inc/private-widget", true, false), `"permissions":{"pull":true,"push":true}`, `"permissions":{"metadata":"read","contents":"write","pull_requests":"write"}`, 1)
-		_, _ = io.WriteString(writer, `{"total_count":2,"repositories":[`+fineGrained+`]}`)
+		_, _ = io.WriteString(writer, `{"total_count":`+total+`,"repositories":[`+fineGrained+`]}`)
 	}))
 	defer server.Close()
 	client := newInstallationTestClient(t, server.Client(), server.URL, app, discovery, now)
@@ -128,12 +135,8 @@ func TestInstallationClientListsRepositoriesWithInstallationToken(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(repositories) != 2 || repositories[0].installationID != 101 || repositories[0].repositoryID != 201 || repositories[0].fullName != "fern-inc/widget" || repositories[0].ownerLogin != "fern-inc" || repositories[0].ownerID != 1001 || repositories[0].ownerType != "Organization" || repositories[0].name != "widget" || repositories[0].private || repositories[0].archived || repositories[0].disabled || repositories[0].defaultBranch != "main" || !repositories[0].canPull || !repositories[0].canPush {
-		t.Fatalf("repositories = %#v", repositories)
-	}
-	permissions := repositories[0].permissions
-	if permissions.Metadata() != "read" || permissions.Contents() != "write" || permissions.PullRequests() != "write" {
-		t.Fatalf("permissions = %#v", permissions)
+	if len(repositories) != installationPageSize+1 || repositories[0].installationID != 101 || repositories[0].repositoryID != 201 || repositories[0].fullName != "fern-inc/widget" || repositories[0].ownerLogin != "fern-inc" || repositories[0].ownerID != 1001 || repositories[0].ownerType != "Organization" || repositories[0].name != "widget" || repositories[0].private || repositories[0].archived || repositories[0].disabled || repositories[0].defaultBranch != "main" || !repositories[installationPageSize].private {
+		t.Fatalf("repositories = %d, first = %#v", len(repositories), repositories[0])
 	}
 	if calls, ids := discovery.snapshot(); calls != 1 || len(ids) != 1 || ids[0] != 101 {
 		t.Fatalf("token calls = %d, ids = %v", calls, ids)
@@ -189,10 +192,9 @@ func TestInstallationClientValidatesInputsBeforeCredentialsOrNetwork(t *testing.
 	}
 }
 
-func TestInstallationClientRejectsDiscoveryTokenIdentityExpiryAndPermissions(t *testing.T) {
+func TestInstallationClientRejectsDiscoveryTokenIdentityAndExpiry(t *testing.T) {
 	t.Parallel()
 	now := installationTestNow()
-	validPermissions := InstallationDiscoveryPermissions{metadata: "read", contents: "write", pullRequests: "write"}
 	tests := []struct {
 		name  string
 		token InstallationDiscoveryToken
@@ -200,11 +202,10 @@ func TestInstallationClientRejectsDiscoveryTokenIdentityExpiryAndPermissions(t *
 		want  error
 	}{
 		{name: "source", err: errors.New("source-secret"), want: ErrRequestFailed},
-		{name: "identity", token: InstallationDiscoveryToken{value: installationTestCredential, expiresAt: now.Add(time.Hour), installationID: 999, permissions: validPermissions}, want: ErrInvalidDiscoveryToken},
-		{name: "expiry", token: InstallationDiscoveryToken{value: installationTestCredential, expiresAt: now.Add(30 * time.Second), installationID: 101, permissions: validPermissions}, want: ErrTokenExpired},
-		{name: "implausible expiry", token: InstallationDiscoveryToken{value: installationTestCredential, expiresAt: now.Add(66 * time.Minute), installationID: 101, permissions: validPermissions}, want: ErrInvalidDiscoveryToken},
-		{name: "permissions", token: InstallationDiscoveryToken{value: installationTestCredential, expiresAt: now.Add(time.Hour), installationID: 101}, want: ErrInsufficientPermissions},
-		{name: "value", token: InstallationDiscoveryToken{value: "unsafe\ncredential_that_is_long_enough", expiresAt: now.Add(time.Hour), installationID: 101, permissions: validPermissions}, want: ErrInvalidDiscoveryToken},
+		{name: "identity", token: InstallationDiscoveryToken{value: installationTestCredential, expiresAt: now.Add(time.Hour), installationID: 999}, want: ErrInvalidDiscoveryToken},
+		{name: "expiry", token: InstallationDiscoveryToken{value: installationTestCredential, expiresAt: now.Add(30 * time.Second), installationID: 101}, want: ErrTokenExpired},
+		{name: "implausible expiry", token: InstallationDiscoveryToken{value: installationTestCredential, expiresAt: now.Add(66 * time.Minute), installationID: 101}, want: ErrInvalidDiscoveryToken},
+		{name: "value", token: InstallationDiscoveryToken{value: "unsafe\ncredential_that_is_long_enough", expiresAt: now.Add(time.Hour), installationID: 101}, want: ErrInvalidDiscoveryToken},
 	}
 	for _, test := range tests {
 		test := test
@@ -255,12 +256,11 @@ func TestInstallationClientAcceptsFullPageOfRealisticallySizedRepositories(t *te
 	}
 }
 
-func TestInstallationClientRejectsMalformedDuplicateOversizedAndUnsafePagination(t *testing.T) {
+func TestInstallationClientRejectsMalformedDuplicateAndOversizedPages(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name string
 		body []byte
-		link func(string) string
 		want error
 	}{
 		{name: "malformed", body: []byte(`[{"id":`)},
@@ -271,23 +271,14 @@ func TestInstallationClientRejectsMalformedDuplicateOversizedAndUnsafePagination
 		{name: "missing required", body: []byte(`[{"id":101,"account":null,"target_type":"Organization","repository_selection":"selected"}]`)},
 		{name: "unsafe value", body: []byte(`[` + installationJSON(101, 1001, "fern-inc", "Bot", "selected") + `]`)},
 		{name: "oversized", body: []byte(strings.Repeat("x", maxListPageBytes+1)), want: ErrResponseTooLarge},
-		{name: "cross origin next", body: []byte(`[]`), link: func(string) string {
-			return `<https://attacker.invalid/app/installations?per_page=100&page=2>; rel="next"`
-		}, want: ErrPaginationRefused},
-		{name: "skipped page", body: []byte(`[]`), link: func(base string) string { return `<` + base + `/app/installations?per_page=100&page=3>; rel="next"` }, want: ErrPaginationRefused},
-		{name: "extra query", body: []byte(`[]`), link: func(base string) string {
-			return `<` + base + `/app/installations?per_page=100&page=2&secret=x>; rel="next"`
-		}, want: ErrPaginationRefused},
+		{name: "duplicate installation", body: []byte(`[` + installationJSON(101, 1001, "fern-inc", "Organization", "all") + `,` + installationJSON(101, 1002, "other", "Organization", "all") + `]`), want: ErrInstallationConflict},
+		{name: "duplicate account", body: []byte(`[` + installationJSON(101, 1001, "fern-inc", "Organization", "all") + `,` + installationJSON(102, 1001, "fern-inc", "Organization", "all") + `]`), want: ErrInstallationConflict},
 	}
 	for _, test := range tests {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			var server *httptest.Server
-			server = httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
-				if test.link != nil {
-					writer.Header().Set("Link", test.link(server.URL))
-				}
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 				_, _ = writer.Write(test.body)
 			}))
 			defer server.Close()
@@ -372,21 +363,19 @@ func TestInstallationClientRepositoryResponseValidation(t *testing.T) {
 
 func TestSelectRepositoryProvesExactTupleForSelectedAndAll(t *testing.T) {
 	t.Parallel()
-	permissions := InstallationDiscoveryPermissions{metadata: "read", contents: "write", pullRequests: "write"}
 	for _, selection := range []string{"selected", "all"} {
 		installation := InstallationObservation{installationID: 101, accountLogin: "fern-inc", accountID: 1001, accountType: "Organization", targetType: "Organization", repositorySelection: selection}
-		repository := InstallationRepositoryObservation{installationID: 101, repositoryID: 201, fullName: "fern-inc/widget", ownerLogin: "fern-inc", ownerID: 1001, ownerType: "Organization", name: "widget", private: true, defaultBranch: "main", permissions: permissions, canPull: true, canPush: true}
+		repository := InstallationRepositoryObservation{installationID: 101, repositoryID: 201, fullName: "fern-inc/widget", ownerLogin: "fern-inc", ownerID: 1001, ownerType: "Organization", name: "widget", private: true, defaultBranch: "main"}
 		if err := SelectRepository([]InstallationObservation{installation}, []InstallationRepositoryObservation{repository}, 101, 201, "fern-inc/widget"); err != nil {
 			t.Fatalf("%s: %v", selection, err)
 		}
 	}
 }
 
-func TestSelectRepositoryRejectsMismatchArchivedDisabledPermissionsAndAmbiguity(t *testing.T) {
+func TestSelectRepositoryRejectsMismatchArchivedDisabledAndAmbiguity(t *testing.T) {
 	t.Parallel()
-	permissions := InstallationDiscoveryPermissions{metadata: "read", contents: "write", pullRequests: "write"}
 	installation := InstallationObservation{installationID: 101, accountLogin: "fern-inc", accountID: 1001, accountType: "Organization", targetType: "Organization", repositorySelection: "selected"}
-	repository := InstallationRepositoryObservation{installationID: 101, repositoryID: 201, fullName: "fern-inc/widget", ownerLogin: "fern-inc", ownerID: 1001, ownerType: "Organization", name: "widget", defaultBranch: "main", permissions: permissions, canPull: true, canPush: true}
+	repository := InstallationRepositoryObservation{installationID: 101, repositoryID: 201, fullName: "fern-inc/widget", ownerLogin: "fern-inc", ownerID: 1001, ownerType: "Organization", name: "widget", defaultBranch: "main"}
 	tests := []struct {
 		name          string
 		installations []InstallationObservation
@@ -403,7 +392,6 @@ func TestSelectRepositoryRejectsMismatchArchivedDisabledPermissionsAndAmbiguity(
 		{name: "noncanonical", installations: []InstallationObservation{installation}, repositories: []InstallationRepositoryObservation{repository}, id: 201, fullName: "https://github.com/fern-inc/widget", want: ErrInvalidInstallationRequest},
 		{name: "archived", installations: []InstallationObservation{installation}, repositories: []InstallationRepositoryObservation{mutateInstallationRepository(repository, func(value *InstallationRepositoryObservation) { value.archived = true })}, id: 201, fullName: "fern-inc/widget", want: ErrRepositorySelection},
 		{name: "disabled", installations: []InstallationObservation{installation}, repositories: []InstallationRepositoryObservation{mutateInstallationRepository(repository, func(value *InstallationRepositoryObservation) { value.disabled = true })}, id: 201, fullName: "fern-inc/widget", want: ErrRepositorySelection},
-		{name: "permissions", installations: []InstallationObservation{installation}, repositories: []InstallationRepositoryObservation{mutateInstallationRepository(repository, func(value *InstallationRepositoryObservation) { value.permissions = InstallationDiscoveryPermissions{} })}, id: 201, fullName: "fern-inc/widget", want: ErrRepositorySelection},
 		{name: "owner tuple", installations: []InstallationObservation{installation}, repositories: []InstallationRepositoryObservation{mutateInstallationRepository(repository, func(value *InstallationRepositoryObservation) { value.ownerID = 2002 })}, id: 201, fullName: "fern-inc/widget", want: ErrRepositorySelection},
 	}
 	for _, test := range tests {
@@ -421,22 +409,59 @@ func TestSelectRepositoryRejectsMismatchArchivedDisabledPermissionsAndAmbiguity(
 	}
 }
 
-func TestInstallationTypesRedactStringAndGoString(t *testing.T) {
+func TestInstallationDiscoveryTokenFormattingIsRedacted(t *testing.T) {
 	t.Parallel()
-	secret := "remote-secret-account"
-	values := []any{
-		&InstallationClient{},
-		InstallationDiscoveryToken{value: secret, installationID: 1},
-		InstallationObservation{accountLogin: secret},
-		InstallationRepositoryObservation{fullName: secret, ownerLogin: secret},
-		&InstallationConflictError{count: 2},
-		&RepositorySelectionError{},
+	token := InstallationDiscoveryToken{value: installationTestCredential, installationID: 1}
+	if formatted := fmt.Sprintf("%s %v %+v %#v", token, token, token, token); strings.Contains(formatted, installationTestCredential) {
+		t.Fatalf("formatting exposed the token: %s", formatted)
 	}
-	for _, value := range values {
-		formatted := fmt.Sprintf("%s %#v", value, value)
-		if strings.Contains(formatted, secret) {
-			t.Fatalf("formatting exposed secret for %T: %s", value, formatted)
-		}
+}
+
+func TestInstallationClientRefusesUnboundedOrInconsistentPagination(t *testing.T) {
+	t.Parallel()
+	var page []string
+	for index := range installationPageSize {
+		page = append(page, repositoryInstallationJSON(int64(4000+index), 1001, fmt.Sprintf("fern-inc/r-%d", index), false, false))
+	}
+	tests := map[string]func(page int) string{
+		// Every page full: more than ten pages of installations are refused.
+		"installations": nil,
+		"count overshoot": func(int) string {
+			return `{"total_count":2,"repositories":[` + strings.Join(page[:3], ",") + `]}`
+		},
+		"short page before total": func(int) string {
+			return `{"total_count":5,"repositories":[` + strings.Join(page[:3], ",") + `]}`
+		},
+	}
+	for name, repositories := range tests {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+				number := int(requests.Add(1))
+				if repositories != nil {
+					_, _ = io.WriteString(writer, repositories(number))
+					return
+				}
+				var installations []string
+				for index := range installationPageSize {
+					id := int64(number*1000 + index + 1)
+					installations = append(installations, installationJSON(id, id, fmt.Sprintf("org-%d", id), "Organization", "all"))
+				}
+				_, _ = io.WriteString(writer, `[`+strings.Join(installations, ",")+`]`)
+			}))
+			defer server.Close()
+			client := newInstallationTestClient(t, server.Client(), server.URL, &installationAppSource{token: installationTestAppToken}, installationTestDiscoverySource(t, installationTestNow(), 101), installationTestNow())
+			var err error
+			if repositories == nil {
+				_, err = client.ListAppInstallations(installationTestContext(t))
+			} else {
+				_, err = client.ListInstallationRepositories(installationTestContext(t), 101)
+			}
+			if !errors.Is(err, ErrPaginationRefused) || requests.Load() > installationMaxPages {
+				t.Fatalf("error = %v after %d requests", err, requests.Load())
+			}
+		})
 	}
 }
 
@@ -525,8 +550,7 @@ func installationTestContext(t *testing.T) context.Context {
 
 func installationTestDiscoverySource(t *testing.T, now time.Time, installationID int64) *installationDiscoverySource {
 	t.Helper()
-	permissions := InstallationDiscoveryPermissions{metadata: "read", contents: "write", pullRequests: "write"}
-	return &installationDiscoverySource{token: InstallationDiscoveryToken{value: installationTestCredential, expiresAt: now.Add(time.Hour).UTC(), installationID: installationID, permissions: permissions}}
+	return &installationDiscoverySource{token: InstallationDiscoveryToken{value: installationTestCredential, expiresAt: now.Add(time.Hour).UTC(), installationID: installationID}}
 }
 
 func newInstallationTestClient(t *testing.T, httpClient *http.Client, apiBase string, app AppTokenSource, discovery InstallationDiscoveryTokenSource, now time.Time) *InstallationClient {

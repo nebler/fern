@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -27,70 +25,24 @@ var (
 	ErrRepositorySelection        = errors.New("GitHub repository selection could not be proven")
 )
 
-// InstallationConflictError reports only the number of conflicting
-// observations. Remote account and repository names are deliberately omitted.
-type InstallationConflictError struct {
-	count int
-}
-
-func (err *InstallationConflictError) Error() string {
-	return fmt.Sprintf("conflicting GitHub installation observations (count %d)", err.Count())
-}
-
-func (err *InstallationConflictError) GoString() string { return err.Error() }
-
-func (err *InstallationConflictError) Is(target error) bool {
-	return target == ErrInstallationConflict
-}
-
-func (err *InstallationConflictError) Count() int {
-	if err == nil {
-		return 0
-	}
-	return err.count
-}
-
-// RepositorySelectionError intentionally carries no remote values.
-type RepositorySelectionError struct{}
-
-func (*RepositorySelectionError) Error() string        { return ErrRepositorySelection.Error() }
-func (err *RepositorySelectionError) GoString() string { return err.Error() }
-func (*RepositorySelectionError) Is(target error) bool { return target == ErrRepositorySelection }
-
 // InstallationDiscoveryTokenSource supplies an installation-wide credential.
 // It is deliberately separate from repository-scoped publication credentials.
 type InstallationDiscoveryTokenSource interface {
 	InstallationDiscoveryToken(context.Context, int64) (InstallationDiscoveryToken, error)
 }
 
-// InstallationDiscoveryPermissions is an immutable snapshot of the minimum
-// permissions required to discover and later publish to a repository.
-type InstallationDiscoveryPermissions struct {
-	metadata     string
-	contents     string
-	pullRequests string
-}
-
-func ValidateInstallationDiscoveryPermissions(values map[string]string) (InstallationDiscoveryPermissions, error) {
+// validateDiscoveryPermissions requires the minimum permissions needed to
+// discover and later publish to a repository, and nothing unexpected.
+func validateDiscoveryPermissions(values map[string]string) error {
 	for name, level := range values {
 		if !validPermissionName(name) || (level != "read" && level != "write") {
-			return InstallationDiscoveryPermissions{}, ErrInsufficientPermissions
+			return ErrInsufficientPermissions
 		}
 	}
 	if values["metadata"] != "read" || values["contents"] != "write" || values["pull_requests"] != "write" {
-		return InstallationDiscoveryPermissions{}, ErrInsufficientPermissions
+		return ErrInsufficientPermissions
 	}
-	return InstallationDiscoveryPermissions{metadata: "read", contents: "write", pullRequests: "write"}, nil
-}
-
-func (permissions InstallationDiscoveryPermissions) Metadata() string { return permissions.metadata }
-func (permissions InstallationDiscoveryPermissions) Contents() string { return permissions.contents }
-func (permissions InstallationDiscoveryPermissions) PullRequests() string {
-	return permissions.pullRequests
-}
-
-func (permissions InstallationDiscoveryPermissions) valid() bool {
-	return permissions.metadata == "read" && permissions.contents == "write" && permissions.pullRequests == "write"
+	return nil
 }
 
 // InstallationDiscoveryToken is an opaque installation-wide credential.
@@ -98,11 +50,10 @@ type InstallationDiscoveryToken struct {
 	value          string
 	expiresAt      time.Time
 	installationID int64
-	permissions    InstallationDiscoveryPermissions
 }
 
 func (token InstallationDiscoveryToken) Value(now time.Time) (string, error) {
-	if !validAccessToken(token.value) || token.installationID <= 0 || !token.permissions.valid() || now.IsZero() || token.expiresAt.After(now.Add(maximumTokenLife)) {
+	if !validAccessToken(token.value) || token.installationID <= 0 || now.IsZero() || token.expiresAt.After(now.Add(maximumTokenLife)) {
 		return "", ErrInvalidDiscoveryToken
 	}
 	if !now.Add(minimumTokenLife).Before(token.expiresAt) {
@@ -113,14 +64,11 @@ func (token InstallationDiscoveryToken) Value(now time.Time) (string, error) {
 
 func (token InstallationDiscoveryToken) ExpiresAt() time.Time  { return token.expiresAt }
 func (token InstallationDiscoveryToken) InstallationID() int64 { return token.installationID }
-func (token InstallationDiscoveryToken) Permissions() InstallationDiscoveryPermissions {
-	return token.permissions
-}
-func (InstallationDiscoveryToken) String() string         { return "GitHub installation discovery token" }
-func (token InstallationDiscoveryToken) GoString() string { return token.String() }
+func (InstallationDiscoveryToken) String() string              { return "GitHub installation discovery token" }
+func (token InstallationDiscoveryToken) GoString() string      { return token.String() }
 
 // InstallationClient discovers installations and repositories without storing
-// credentials or applying onboarding selection policy.
+// credentials or applying selection policy.
 type InstallationClient struct {
 	httpClient      *http.Client
 	appTokens       AppTokenSource
@@ -130,7 +78,7 @@ type InstallationClient struct {
 }
 
 func NewInstallationClient(httpClient *http.Client, appTokens AppTokenSource, discoveryTokens InstallationDiscoveryTokenSource, now func() time.Time) (*InstallationClient, error) {
-	if httpClient == nil || appTokens == nil || isNilInterface(appTokens) || discoveryTokens == nil || isNilInterface(discoveryTokens) || now == nil {
+	if httpClient == nil || appTokens == nil || discoveryTokens == nil || now == nil {
 		return nil, ErrInvalidConfiguration
 	}
 	clientCopy := *httpClient
@@ -146,9 +94,6 @@ func NewInstallationClient(httpClient *http.Client, appTokens AppTokenSource, di
 	}, nil
 }
 
-func (*InstallationClient) String() string          { return "GitHub installation discovery client" }
-func (client *InstallationClient) GoString() string { return client.String() }
-
 // InstallationObservation is an immutable installation/account tuple.
 type InstallationObservation struct {
 	installationID      int64
@@ -158,9 +103,6 @@ type InstallationObservation struct {
 	targetType          string
 	repositorySelection string
 }
-
-func (InstallationObservation) String() string               { return "GitHub installation observation" }
-func (observation InstallationObservation) GoString() string { return observation.String() }
 
 // InstallationRepositoryObservation is an immutable repository tuple returned
 // under one exact installation-wide token identity.
@@ -176,15 +118,7 @@ type InstallationRepositoryObservation struct {
 	archived       bool
 	disabled       bool
 	defaultBranch  string
-	permissions    InstallationDiscoveryPermissions
-	canPull        bool
-	canPush        bool
 }
-
-func (InstallationRepositoryObservation) String() string {
-	return "GitHub installation repository observation"
-}
-func (observation InstallationRepositoryObservation) GoString() string { return observation.String() }
 
 type installationAPIResponse struct {
 	ID                  *int64  `json:"id"`
@@ -218,8 +152,8 @@ type installationRepositoryAPIResponse struct {
 	} `json:"owner"`
 }
 
-// ListAppInstallations signs once per call and follows at most ten exact,
-// same-origin GitHub next-page links.
+// ListAppInstallations signs once per call and requests numbered pages until
+// one is short, refusing more than ten. Server-supplied URLs are never followed.
 func (client *InstallationClient) ListAppInstallations(ctx context.Context) ([]InstallationObservation, error) {
 	if err := validateDiscoveryContext(ctx); err != nil {
 		return nil, err
@@ -243,7 +177,7 @@ func (client *InstallationClient) ListAppInstallations(ctx context.Context) ([]I
 	installationIDs := make(map[int64]struct{})
 	accountIDs := make(map[int64]struct{})
 	for page := 1; page <= installationMaxPages; page++ {
-		payload, link, err := client.getPage(ctx, credential, "/app/installations", page)
+		payload, err := client.getPage(ctx, credential, "/app/installations", page)
 		if err != nil {
 			return nil, err
 		}
@@ -257,27 +191,17 @@ func (client *InstallationClient) ListAppInstallations(ctx context.Context) ([]I
 				return nil, ErrInvalidResponse
 			}
 			if _, duplicate := installationIDs[observation.installationID]; duplicate {
-				return nil, &InstallationConflictError{count: 2}
+				return nil, ErrInstallationConflict
 			}
 			if _, duplicate := accountIDs[observation.accountID]; duplicate {
-				return nil, &InstallationConflictError{count: 2}
+				return nil, ErrInstallationConflict
 			}
 			installationIDs[observation.installationID] = struct{}{}
 			accountIDs[observation.accountID] = struct{}{}
 			observations = append(observations, observation)
-			if len(observations) > installationPageSize*installationMaxPages {
-				return nil, ErrPaginationRefused
-			}
 		}
-		hasNext, err := client.validateNextLink(link, "/app/installations", page)
-		if err != nil {
-			return nil, err
-		}
-		if !hasNext {
+		if len(*decoded) < installationPageSize {
 			return observations, nil
-		}
-		if page == installationMaxPages {
-			return nil, ErrPaginationRefused
 		}
 	}
 	return nil, ErrPaginationRefused
@@ -306,8 +230,8 @@ func (client *InstallationClient) ListInstallationRepositories(ctx context.Conte
 		}
 		return nil, ErrRequestFailed
 	}
-	if token.installationID != installationID || !token.permissions.valid() {
-		return nil, firstError(discoveryPermissionError(token.permissions), ErrInvalidDiscoveryToken)
+	if token.installationID != installationID {
+		return nil, ErrInvalidDiscoveryToken
 	}
 	credential, err := token.Value(now)
 	if err != nil {
@@ -322,7 +246,7 @@ func (client *InstallationClient) ListInstallationRepositories(ctx context.Conte
 	fullNames := make(map[string]struct{})
 	totalCount := -1
 	for page := 1; page <= installationMaxPages; page++ {
-		payload, link, err := client.getPage(ctx, credential, "/installation/repositories", page)
+		payload, err := client.getPage(ctx, credential, "/installation/repositories", page)
 		if err != nil {
 			return nil, err
 		}
@@ -336,41 +260,34 @@ func (client *InstallationClient) ListInstallationRepositories(ctx context.Conte
 			return nil, ErrInvalidResponse
 		}
 		for _, response := range *decoded.Repositories {
-			observation, ok := makeInstallationRepositoryObservation(response, installationID, token.permissions)
+			observation, ok := makeInstallationRepositoryObservation(response, installationID)
 			if !ok {
 				return nil, ErrInvalidResponse
 			}
 			if _, duplicate := repositoryIDs[observation.repositoryID]; duplicate {
-				return nil, &InstallationConflictError{count: 2}
+				return nil, ErrInstallationConflict
 			}
 			if _, duplicate := fullNames[observation.fullName]; duplicate {
-				return nil, &InstallationConflictError{count: 2}
+				return nil, ErrInstallationConflict
 			}
 			repositoryIDs[observation.repositoryID] = struct{}{}
 			fullNames[observation.fullName] = struct{}{}
 			observations = append(observations, observation)
 		}
-		hasNext, err := client.validateNextLink(link, "/installation/repositories", page)
-		if err != nil {
-			return nil, err
-		}
-		if hasNext {
-			if page == installationMaxPages || len(observations) >= totalCount {
-				return nil, ErrPaginationRefused
-			}
-			continue
-		}
-		if len(observations) != totalCount {
+		switch {
+		case len(observations) == totalCount:
+			return observations, nil
+		case len(observations) > totalCount || len(*decoded.Repositories) < installationPageSize:
+			// GitHub's own count disagrees with the pages it returned.
 			return nil, ErrPaginationRefused
 		}
-		return observations, nil
 	}
 	return nil, ErrPaginationRefused
 }
 
 // SelectRepository proves the requested installation and repository tuples.
-// Both GitHub repository-selection modes are accepted; onboarding policy is
-// applied by the caller.
+// Both GitHub repository-selection modes are accepted. The observations come
+// from the List methods, which already validated and de-duplicated them.
 func SelectRepository(installations []InstallationObservation, repositories []InstallationRepositoryObservation, installationID, repositoryID int64, fullName string) error {
 	owner, name, hasName := "", "", false
 	if gitref.ValidateOwnerRepo(fullName) == nil {
@@ -383,49 +300,26 @@ func SelectRepository(installations []InstallationObservation, repositories []In
 
 	var installation InstallationObservation
 	installationMatches := 0
-	seenInstallationIDs := make(map[int64]struct{}, len(installations))
-	seenAccountIDs := make(map[int64]struct{}, len(installations))
 	for _, candidate := range installations {
-		if !candidate.valid() {
-			return selectionFailure()
-		}
-		if _, duplicate := seenInstallationIDs[candidate.installationID]; duplicate {
-			return selectionFailure()
-		}
-		if _, duplicate := seenAccountIDs[candidate.accountID]; duplicate {
-			return selectionFailure()
-		}
-		seenInstallationIDs[candidate.installationID] = struct{}{}
-		seenAccountIDs[candidate.accountID] = struct{}{}
 		if candidate.installationID == installationID {
 			installation = candidate
 			installationMatches++
 		}
 	}
 	if installationMatches != 1 {
-		return selectionFailure()
+		return ErrRepositorySelection
 	}
 
 	var repository InstallationRepositoryObservation
 	repositoryMatches := 0
-	seenRepositoryIDs := make(map[int64]struct{}, len(repositories))
-	seenFullNames := make(map[string]struct{}, len(repositories))
 	for _, candidate := range repositories {
-		if !candidate.valid() || candidate.installationID != installationID {
-			return selectionFailure()
+		if candidate.installationID != installationID {
+			return ErrRepositorySelection
 		}
-		if _, duplicate := seenRepositoryIDs[candidate.repositoryID]; duplicate {
-			return selectionFailure()
-		}
-		if _, duplicate := seenFullNames[candidate.fullName]; duplicate {
-			return selectionFailure()
-		}
-		seenRepositoryIDs[candidate.repositoryID] = struct{}{}
-		seenFullNames[candidate.fullName] = struct{}{}
 		idMatch := candidate.repositoryID == repositoryID
 		nameMatch := candidate.fullName == fullName
 		if idMatch != nameMatch {
-			return selectionFailure()
+			return ErrRepositorySelection
 		}
 		if idMatch {
 			repository = candidate
@@ -433,13 +327,13 @@ func SelectRepository(installations []InstallationObservation, repositories []In
 		}
 	}
 	if repositoryMatches != 1 || repository.archived || repository.disabled || repository.ownerLogin != owner || repository.name != name || repository.ownerID != installation.accountID || repository.ownerLogin != installation.accountLogin || repository.ownerType != installation.accountType {
-		return selectionFailure()
+		return ErrRepositorySelection
 	}
 	return nil
 }
 
 func (client *InstallationClient) validate() error {
-	if client == nil || client.httpClient == nil || client.appTokens == nil || isNilInterface(client.appTokens) || client.discoveryTokens == nil || isNilInterface(client.discoveryTokens) || client.now == nil || !validAPIBase(client.apiBase) {
+	if client == nil || client.httpClient == nil || client.appTokens == nil || client.discoveryTokens == nil || client.now == nil || !validAPIBase(client.apiBase) {
 		return ErrInvalidConfiguration
 	}
 	return nil
@@ -463,11 +357,11 @@ func validateDiscoveryContext(ctx context.Context) error {
 	return ctx.Err()
 }
 
-func (client *InstallationClient) getPage(ctx context.Context, credential, route string, page int) ([]byte, string, error) {
+func (client *InstallationClient) getPage(ctx context.Context, credential, route string, page int) ([]byte, error) {
 	endpoint := client.apiBase + route + "?per_page=100&page=" + strconv.Itoa(page)
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return nil, "", ErrInvalidConfiguration
+		return nil, ErrInvalidConfiguration
 	}
 	request.Header.Set("Authorization", "Bearer "+credential)
 	request.Header.Set("Accept", "application/vnd.github+json")
@@ -476,83 +370,22 @@ func (client *InstallationClient) getPage(ctx context.Context, credential, route
 	response, err := client.httpClient.Do(request)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, "", ctxErr
+			return nil, ctxErr
 		}
-		return nil, "", ErrRequestFailed
+		return nil, ErrRequestFailed
 	}
 	defer response.Body.Close()
 	payload, err := io.ReadAll(io.LimitReader(response.Body, maxListPageBytes+1))
 	if err != nil {
-		return nil, "", ErrRequestFailed
+		return nil, ErrRequestFailed
 	}
 	if len(payload) > maxListPageBytes {
-		return nil, "", ErrResponseTooLarge
+		return nil, ErrResponseTooLarge
 	}
 	if response.StatusCode != http.StatusOK {
-		return nil, "", &HTTPError{statusCode: response.StatusCode}
+		return nil, &HTTPError{statusCode: response.StatusCode}
 	}
-	return payload, strings.Join(response.Header.Values("Link"), ","), nil
-}
-
-func (client *InstallationClient) validateNextLink(header, route string, page int) (bool, error) {
-	if header == "" {
-		return false, nil
-	}
-	next := ""
-	for _, entry := range strings.Split(header, ",") {
-		entry = strings.TrimSpace(entry)
-		if !strings.HasPrefix(entry, "<") {
-			return false, ErrPaginationRefused
-		}
-		end := strings.IndexByte(entry, '>')
-		if end < 2 {
-			return false, ErrPaginationRefused
-		}
-		reference := entry[1:end]
-		parameters := strings.Split(entry[end+1:], ";")
-		relations := ""
-		for _, parameter := range parameters {
-			parameter = strings.TrimSpace(parameter)
-			if parameter == "" {
-				continue
-			}
-			name, value, found := strings.Cut(parameter, "=")
-			if !found || !strings.EqualFold(strings.TrimSpace(name), "rel") {
-				continue
-			}
-			value = strings.TrimSpace(value)
-			if len(value) >= 2 && value[0] == '"' && value[len(value)-1] == '"' {
-				value = value[1 : len(value)-1]
-			}
-			relations = value
-		}
-		isNext := false
-		for _, relation := range strings.Fields(relations) {
-			if relation == "next" {
-				isNext = true
-			}
-		}
-		if !isNext {
-			continue
-		}
-		if next != "" {
-			return false, ErrPaginationRefused
-		}
-		next = reference
-	}
-	if next == "" {
-		return false, nil
-	}
-	parsed, err := url.Parse(next)
-	base, baseErr := url.Parse(client.apiBase)
-	if err != nil || baseErr != nil || parsed.Scheme != base.Scheme || parsed.Host != base.Host || parsed.User != nil || parsed.Fragment != "" || parsed.RawPath != "" || parsed.Path != route {
-		return false, ErrPaginationRefused
-	}
-	query := parsed.Query()
-	if len(query) != 2 || len(query["per_page"]) != 1 || query.Get("per_page") != "100" || len(query["page"]) != 1 || query.Get("page") != strconv.Itoa(page+1) {
-		return false, ErrPaginationRefused
-	}
-	return true, nil
+	return payload, nil
 }
 
 func makeInstallationObservation(response installationAPIResponse) (InstallationObservation, bool) {
@@ -572,8 +405,8 @@ func makeInstallationObservation(response installationAPIResponse) (Installation
 	}, true
 }
 
-func makeInstallationRepositoryObservation(response installationRepositoryAPIResponse, installationID int64, permissions InstallationDiscoveryPermissions) (InstallationRepositoryObservation, bool) {
-	if response.ID == nil || *response.ID <= 0 || response.FullName == nil || response.Name == nil || response.Owner == nil || response.Owner.Login == nil || response.Owner.ID == nil || *response.Owner.ID <= 0 || response.Owner.Type == nil || response.Private == nil || response.Archived == nil || response.Disabled == nil || response.DefaultBranch == nil || response.Permissions == nil || !permissions.valid() {
+func makeInstallationRepositoryObservation(response installationRepositoryAPIResponse, installationID int64) (InstallationRepositoryObservation, bool) {
+	if response.ID == nil || *response.ID <= 0 || response.FullName == nil || response.Name == nil || response.Owner == nil || response.Owner.Login == nil || response.Owner.ID == nil || *response.Owner.ID <= 0 || response.Owner.Type == nil || response.Private == nil || response.Archived == nil || response.Disabled == nil || response.DefaultBranch == nil || response.Permissions == nil {
 		return InstallationRepositoryObservation{}, false
 	}
 	if gitref.ValidateOwnerRepo(*response.FullName) != nil {
@@ -598,22 +431,7 @@ func makeInstallationRepositoryObservation(response installationRepositoryAPIRes
 		archived:       *response.Archived,
 		disabled:       *response.Disabled,
 		defaultBranch:  *response.DefaultBranch,
-		permissions:    permissions,
-		canPull:        true,
-		canPush:        true,
 	}, true
-}
-
-func (observation InstallationObservation) valid() bool {
-	return observation.installationID > 0 && observation.accountID > 0 && validAccountLogin(observation.accountLogin) && validAccountType(observation.accountType) && observation.targetType == observation.accountType && (observation.repositorySelection == "selected" || observation.repositorySelection == "all")
-}
-
-func (observation InstallationRepositoryObservation) valid() bool {
-	if gitref.ValidateOwnerRepo(observation.fullName) != nil {
-		return false
-	}
-	owner, name, _ := strings.Cut(observation.fullName, "/")
-	return observation.installationID > 0 && observation.repositoryID > 0 && observation.ownerID > 0 && owner == observation.ownerLogin && name == observation.name && validAccountType(observation.ownerType) && gitref.ValidateRef(observation.defaultBranch) == nil && observation.permissions.valid() && observation.canPull && observation.canPush
 }
 
 func validAccountLogin(login string) bool {
@@ -686,17 +504,5 @@ func validRepositoryAPIPermissions(values map[string]json.RawMessage) bool {
 	if kind == 'b' {
 		return boolValues["pull"] && boolValues["push"]
 	}
-	_, err := ValidateInstallationDiscoveryPermissions(levelValues)
-	return err == nil
-}
-
-func discoveryPermissionError(permissions InstallationDiscoveryPermissions) error {
-	if !permissions.valid() {
-		return ErrInsufficientPermissions
-	}
-	return nil
-}
-
-func selectionFailure() error {
-	return &RepositorySelectionError{}
+	return validateDiscoveryPermissions(levelValues) == nil
 }
