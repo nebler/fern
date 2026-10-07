@@ -41,10 +41,10 @@ type runCLIOptions struct {
 }
 
 type runConnection struct {
-	apiOrigin        *url.URL
-	apiAuthorization string
-	attachOrigin     string
-	client           *http.Client
+	apiOrigin    *url.URL
+	authorize    func(*http.Request)
+	attachOrigin string
+	client       *http.Client
 }
 
 type runSummary struct {
@@ -218,7 +218,8 @@ func resolveRunConnection(ctx context.Context, options runCLIOptions) (*runConne
 		if !validFernCredential(token) {
 			return nil, errors.New("Fern has no valid plugin credential for this endpoint")
 		}
-		return &runConnection{apiOrigin: origin, apiAuthorization: "Bearer " + token, client: client}, nil
+		authorize := func(request *http.Request) { request.Header.Set("Authorization", "Bearer "+token) }
+		return &runConnection{apiOrigin: origin, authorize: authorize, client: client}, nil
 	}
 	cfg, err := loadCommandConfig(options.configPath, options.envPath)
 	if err != nil {
@@ -231,12 +232,16 @@ func resolveRunConnection(ctx context.Context, options runCLIOptions) (*runConne
 	if err != nil {
 		return nil, err
 	}
+	apiOrigin, err := url.Parse(api)
+	if err != nil {
+		return nil, err
+	}
 	attach, err := loopbackURL(cfg.Runs.BackgroundRoute.Listen)
 	if err != nil {
 		return nil, err
 	}
-	return &runConnection{apiOrigin: mustURL(api), apiAuthorization: basicAuthorization(fernRunUsername, cfg.ControlPassword),
-		attachOrigin: attach, client: client}, nil
+	authorize := func(request *http.Request) { request.SetBasicAuth(fernRunUsername, cfg.ControlPassword) }
+	return &runConnection{apiOrigin: apiOrigin, authorize: authorize, attachOrigin: attach, client: client}, nil
 }
 
 func parseFernClientOrigin(raw string) (*url.URL, error) {
@@ -302,7 +307,9 @@ func (connection *runConnection) get(ctx context.Context, path string, destinati
 	if err != nil {
 		return err
 	}
-	request.Header.Set("Authorization", connection.apiAuthorization)
+	if connection.authorize != nil {
+		connection.authorize(request)
+	}
 	request.Header.Set("Accept", "application/json")
 	response, err := connection.client.Do(request)
 	if err != nil {
@@ -409,38 +416,26 @@ func readFernKeyringCredential(ctx context.Context, origin string) (string, erro
 	default:
 		return "", errors.New("Fern credentials require macOS Keychain or Linux Secret Service")
 	}
-	var output limitedBuffer
-	command.Stdout, command.Stderr = &output, io.Discard
+	const maxKeyringOutput = 4096
+	command.Stderr = io.Discard
 	command.WaitDelay = time.Second
-	if err := command.Run(); err != nil {
-		return "", errors.New("could not read the Fern plugin credential from the operating-system keyring")
+	failed := errors.New("could not read the Fern plugin credential from the operating-system keyring")
+	stdout, err := command.StdoutPipe()
+	if err != nil {
+		return "", failed
 	}
-	return strings.TrimRight(output.String(), "\r\n"), nil
-}
-
-type limitedBuffer struct {
-	buffer bytes.Buffer
-	over   bool
-}
-
-func (buffer *limitedBuffer) Write(value []byte) (int, error) {
-	const limit = 4096
-	if buffer.buffer.Len()+len(value) > limit {
-		buffer.over = true
-		remaining := limit - buffer.buffer.Len()
-		if remaining > 0 {
-			_, _ = buffer.buffer.Write(value[:remaining])
-		}
-		return len(value), nil
+	if err := command.Start(); err != nil {
+		return "", failed
 	}
-	return buffer.buffer.Write(value)
-}
-
-func (buffer *limitedBuffer) String() string {
-	if buffer.over {
-		return ""
+	output, readErr := io.ReadAll(io.LimitReader(stdout, maxKeyringOutput+1))
+	_, _ = io.Copy(io.Discard, stdout)
+	if err := errors.Join(readErr, command.Wait()); err != nil {
+		return "", failed
 	}
-	return buffer.buffer.String()
+	if len(output) > maxKeyringOutput {
+		return "", nil // An oversized secret is rejected as an invalid credential.
+	}
+	return strings.TrimRight(string(output), "\r\n"), nil
 }
 
 func validFernCredential(value string) bool {
@@ -449,18 +444,6 @@ func validFernCredential(value string) bool {
 }
 
 func canonicalKeyringOrigin(origin string) string { return strings.TrimRight(origin, "/") + "/" }
-
-func basicAuthorization(username, password string) string {
-	return "Basic " + base64.StdEncoding.EncodeToString([]byte(username+":"+password))
-}
-
-func mustURL(value string) *url.URL {
-	parsed, err := url.Parse(value)
-	if err != nil {
-		panic(err)
-	}
-	return parsed
-}
 
 func isLoopbackHost(host string) bool {
 	return host == "localhost" || host == "127.0.0.1" || host == "::1"
