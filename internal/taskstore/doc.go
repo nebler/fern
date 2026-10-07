@@ -1,9 +1,16 @@
-// Package taskstore owns Fern's durable SQLite task state: workspaces,
-// background-run admission and lifecycle, sealing, exports, and retained
-// results. It commits related records and their
-// fences together so HTTP handlers and effect providers never coordinate SQL.
+// Package taskstore owns Fern's durable SQLite state: workspaces, runs, their
+// idempotency receipts, and retained results. It commits related records and
+// their fences together so HTTP handlers and effect providers never coordinate
+// SQL.
 //
-// Schema 7 is one complete pre-release schema, not a migration chain. Open
+// A run is one row holding its immutable intent (prompt, repository and base,
+// agent and model, deadline, image, profile, environment, OpenCode session,
+// creator actor) and its lifecycle. Each accepted create, stop, or seal has one
+// immutable receipt bound to its actor, idempotency key, and request hash; a
+// replay returns it, a changed hash conflicts. Resource names derive from the
+// run ID and are not stored.
+//
+// Schema 8 is one complete pre-release schema, not a migration chain. Open
 // rejects incompatible versions rather than upgrading or deleting data, and
 // refuses symlinked or foreign-owned database paths. The database runs in WAL
 // mode with foreign keys and FULL synchronization.
@@ -16,19 +23,21 @@
 //
 // There are no per-run claims or leases: the host lease admits one coordinator
 // per workspace, and the only other writer is the in-process stop/seal API.
-// Effect mutations compare a BackgroundRunRef (revision, state/phase) in SQL and require exactly one affected
-// row, so a write prepared before a concurrent stop or seal fails. A partial
-// unique index permits at most one effecting background run per workspace.
+// Effect mutations compare a BackgroundRunRef (revision, state/phase) in SQL
+// and require exactly one affected row, so a write prepared before a
+// concurrent stop or seal fails. A partial unique index permits at most one
+// effecting run per workspace.
 //
 // A run stores only what inspection cannot re-derive: its phase, the committed
 // runtime identity (stop and cleanup authority), the one-way prompt-request
 // fence that ends provisioning before dispatch, stop/timeout/seal admission,
 // the writer fence, and the terminal cleanup proof. The selected snapshot is
 // the run's results row; only sealing that row establishes result_ready, in the
-// same transaction that releases the run to cleaning. Transition order is enforced by these Go compare-and-swap updates plus
-// table CHECKs; triggers guard immutability of recorded authority, revision
-// progression, and that a sealed run keeps its resources until its result
-// commits and no run becomes terminal without cleaning.
+// same transaction that releases the run to cleaning. Transition order is
+// enforced by these Go compare-and-swap updates plus table CHECKs; triggers
+// guard immutability of run inputs, recorded authority, receipts, and results,
+// revision progression, and that a sealed run keeps its resources until its
+// result commits and no run becomes terminal without cleaning.
 //
 // Seal admission and the retained-result commit deliberately ignore request
 // cancellation after validation; callers reconcile outcomes through durable

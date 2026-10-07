@@ -17,7 +17,7 @@ Fern owns:
 
 - repository and GitHub App authority;
 - actor identity, pairing, plugin grants, and revocation;
-- idempotent task, stop, and seal admission;
+- idempotent run create, stop, and seal admission;
 - exact disposable resource identity and lifecycle;
 - run revisions, stop receipts, and evidence;
 - short-lived exact-session attachment capabilities and connection shutdown;
@@ -165,16 +165,22 @@ canonical remote and exact `HEAD`. The plugin rechecks the repository after
 human confirmation. Fern independently verifies the submitted base against its
 bound host repository.
 
-Admission atomically writes:
+Admission atomically writes one queued `runs` row and its create receipt. The
+task store has four tables:
 
-- task and attempt identities;
-- creator actor, stored on the run row;
-- repository and base authority;
-- instruction hash;
-- image, profile, environment, and resource identities;
-- OpenCode session and message identities;
-- receipt;
-- queued Background Run intent.
+- `workspaces`: the bound repository, GitHub App installation, and image;
+- `runs`: one row per run, keyed by its `run_` UUIDv7. Its immutable intent is
+  the prompt, repository and base, branch, agent and model, deadline, image,
+  profile, environment digest, OpenCode session and message, and creator actor.
+  Its lifecycle is state, phase, revision, and the authority recorded once
+  along the way (runtime identity, prompt fence, stop/timeout/seal admission,
+  writer fence), plus last evidence, last error, and the cleanup proof;
+- `receipts`: one per accepted create, stop, or seal, bound to actor, command
+  kind, workspace, idempotency key, and request hash, pointing at its run;
+- `results`: a sealed run's retained snapshot, selected and then sealed.
+
+Clone, volume, container, and endpoint names derive from the run ID and are not
+stored.
 
 The coordinator wakes only after commit. A repeated matching idempotency claim
 returns the original receipt. A changed hash conflicts. Another actor cannot
@@ -230,7 +236,7 @@ ID, revision, state, and phase, so a write prepared before a concurrent stop or
 seal fails.
 
 `run` owns lifecycle classification independently of persistence: valid
-state/phase combinations, whether a phase is executing (bound by the attempt
+state/phase combinations, whether a phase is executing (bound by the run
 deadline and the configured execution identity), and timeout eligibility. The
 coordinator dispatches concrete effects; it does not maintain a second list of
 phase categories. Taskstore keeps SQL representation private and enforces
@@ -418,7 +424,7 @@ does not authorize execution after cancellation and cannot block teardown.
 `fern runs` queries `/fern/api/runs` through either loopback operator Basic
 authentication or the existing remote plugin bearer. It shows running runs by
 default and has a stable `--json` projection for automation. Bare `fern attach`
-selects the only attachable run or presents an interactive picker; an exact task
+selects the only attachable run or presents an interactive picker; an exact run
 ID bypasses selection.
 
 `GET /fern/api/runs/:id/attach` is an operator/client control operation, not a

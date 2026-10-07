@@ -1,6 +1,7 @@
-// Package task defines the dependency-free domain contract for Fern durable
-// tasks: typed identifiers, actor attribution, idempotency comparison, and
-// secure ID generation. It contains no persistence, transport, or
+// Package task defines the dependency-free domain contract for Fern runs:
+// typed identifiers (workspace, run, and result IDs plus external GitHub, Git,
+// and OpenCode IDs), actor attribution, idempotency comparison, and secure ID
+// generation. It contains no persistence, transport, or
 // external-authority logic, so ingress, storage, and artifact code can agree on
 // identities without depending on each other.
 //
