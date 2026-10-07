@@ -56,6 +56,9 @@ func printSerialDiagnostics(cli *client.Client, databasePath, runID, providerEnd
 		_ = logs.Close()
 		fmt.Fprintf(out, "container logs (tail, error=%v):\n%s\n", copyErr, buffer.String())
 	}
+	printContainerExec(ctx, cli, containerID, `cd /home/user/workspace && ls -la && git rev-parse --git-dir --show-toplevel HEAD; `+
+		`ls -la /home/user/.local/share/opencode /home/user/.local/share/opencode/log /home/user/.cache /home/user/.cache/opencode 2>&1 | head -60; `+
+		`for f in $(ls -t /home/user/.local/share/opencode/log/*.log 2>/dev/null | head -2); do echo "--- $f"; tail -n 150 "$f"; done`)
 	if !hostPort.Valid || sessionID == "" {
 		return
 	}
@@ -67,6 +70,8 @@ func printSerialDiagnostics(cli *client.Client, databasePath, runID, providerEnd
 	endpoint := "http://127.0.0.1:" + strconv.FormatInt(hostPort.Int64, 10)
 	for _, path := range []string{
 		"/api/session/active",
+		"/api/model",
+		"/api/agent",
 		"/api/session/" + sessionID,
 		"/api/session/" + sessionID + "/history?after=0&limit=50",
 		"/api/session/" + sessionID + "/message",
@@ -83,4 +88,24 @@ func printSerialDiagnostics(cli *client.Client, databasePath, runID, providerEnd
 		_ = response.Body.Close()
 		fmt.Fprintf(out, "GET %s status=%d body=%s\n", path, response.StatusCode, body)
 	}
+}
+
+func printContainerExec(ctx context.Context, cli *client.Client, containerID, script string) {
+	out := os.Stderr
+	created, err := cli.ContainerExecCreate(ctx, containerID, container.ExecOptions{
+		User: "1001:1001", Cmd: []string{"/bin/sh", "-c", script}, AttachStdout: true, AttachStderr: true,
+	})
+	if err != nil {
+		fmt.Fprintf(out, "container exec create error: %v\n", err)
+		return
+	}
+	attached, err := cli.ContainerExecAttach(ctx, created.ID, container.ExecAttachOptions{})
+	if err != nil {
+		fmt.Fprintf(out, "container exec attach error: %v\n", err)
+		return
+	}
+	defer attached.Close()
+	var buffer bytes.Buffer
+	_, copyErr := stdcopy.StdCopy(&buffer, &buffer, io.LimitReader(attached.Reader, 256<<10))
+	fmt.Fprintf(out, "container exec (error=%v):\n%s\n", copyErr, buffer.String())
 }
