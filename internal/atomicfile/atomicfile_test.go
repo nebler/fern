@@ -31,7 +31,7 @@ func TestWriteCreatesAndReplaces(t *testing.T) {
 
 func TestWriteFailureLeavesTargetUntouched(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing", "state.json")
-	if err := Write(path, []byte("data"), 0o600); err == nil || errors.Is(err, ErrNotDurable) {
+	if err := Write(path, []byte("data"), 0o600); err == nil {
 		t.Fatalf("Write into missing directory = %v", err)
 	}
 }

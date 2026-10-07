@@ -17,10 +17,6 @@ import (
 )
 
 var (
-	// ErrNotDurable reports that Write replaced the file but could not sync the
-	// directory: readers already see the new content, but it may not survive a
-	// crash. Callers must not roll back in-memory state on this error.
-	ErrNotDurable = errors.New("file replaced but directory sync failed")
 	// ErrTooLarge reports that Read found more than maxBytes.
 	ErrTooLarge = errors.New("file exceeds size limit")
 	// ErrUnsafeDir reports that PrivateDir found a directory that is not a real,
@@ -31,7 +27,7 @@ var (
 // Write atomically replaces path with data. It writes a temporary file in the
 // same directory, syncs it, renames it over path, and syncs the directory.
 // Failures before the rename leave path untouched; a failed directory sync
-// after it is reported as ErrNotDurable.
+// after it means the new content is visible but may not survive a crash.
 func Write(path string, data []byte, perm os.FileMode) error {
 	directory := filepath.Dir(path)
 	temporary, err := os.CreateTemp(directory, "."+filepath.Base(path)+".*.tmp")
@@ -61,7 +57,7 @@ func Write(path string, data []byte, perm os.FileMode) error {
 		err = errors.Join(handle.Sync(), handle.Close())
 	}
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrNotDurable, err)
+		return fmt.Errorf("file replaced but directory sync failed: %w", err)
 	}
 	return nil
 }
