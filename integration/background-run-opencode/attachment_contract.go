@@ -38,17 +38,17 @@ func verifySerialAPIProjections(ctx context.Context, origin, token, sessionID st
 				ID string `json:"id"`
 			}
 			if json.Unmarshal(data, &sessions) != nil || len(sessions) != 1 || sessions[0].ID != sessionID {
-				return errors.New("attached session list must contain exactly the owned session")
+				return fmt.Errorf("attached session list must contain exactly the owned session %s: %s", sessionID, data)
 			}
 		} else {
 			var active map[string]struct {
 				Type string `json:"type"`
 			}
 			if json.Unmarshal(data, &active) != nil || len(active) != 1 {
-				return errors.New("attached active-session projection must contain exactly one owned entry")
+				return fmt.Errorf("attached active-session projection must contain exactly one owned entry for %s: %s", sessionID, data)
 			}
 			if value, ok := active[sessionID]; !ok || value.Type != "running" {
-				return errors.New("attached active-session projection lacks the owned active entry")
+				return fmt.Errorf("attached active-session projection lacks the owned active entry for %s: %s", sessionID, data)
 			}
 		}
 	}
