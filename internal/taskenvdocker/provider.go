@@ -558,7 +558,7 @@ func (p *Provider) validateRunForCleanup(run taskstore.BackgroundRun) (string, e
 	if !validImageID(run.ImageIdentity) || run.ResourceSpecVersion != runidentity.ResourceSpecVersion || run.Profile != taskstore.BackgroundRunSourceProfile {
 		return "", errors.New("invalid immutable background run tuple")
 	}
-	if !runidentity.NewResources(run.TaskID).Matches(run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity) {
+	if !runidentity.NewResources(run.RunID).Matches(run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity) {
 		return "", errors.New("noncanonical background run resource identity")
 	}
 	return p.specDigest(run)
@@ -578,7 +578,7 @@ func (p *Provider) specDigest(run taskstore.BackgroundRun) (string, error) {
 		Image, Clone, Volume, Container, Endpoint, Base, Repository, Profile, Session, Message string
 		EnvironmentSHA256                                                                      string
 	}{
-		Version: runidentity.ResourceSpecVersion, Workspace: string(run.WorkspaceID), Task: string(run.TaskID),
+		Version: runidentity.ResourceSpecVersion, Workspace: string(run.WorkspaceID), Task: string(run.RunID),
 		Image: run.ImageIdentity, Clone: run.CloneIdentity, Volume: run.VolumeIdentity,
 		Container: run.ContainerIdentity, Endpoint: run.EndpointIdentity, Base: string(run.BaseOID), Repository: run.RepositoryRemote,
 		Profile: run.Profile, Session: string(run.OpenCodeSessionID), Message: string(run.OpenCodeMessageID),
@@ -594,7 +594,7 @@ func (p *Provider) specDigest(run taskstore.BackgroundRun) (string, error) {
 func (p *Provider) password(run taskstore.BackgroundRun) string {
 	mac := hmac.New(sha256.New, p.hostKey[:])
 	_, _ = mac.Write([]byte(passwordDomain))
-	for _, value := range []string{string(run.WorkspaceID), string(run.TaskID), run.ImageIdentity} {
+	for _, value := range []string{string(run.WorkspaceID), string(run.RunID), run.ImageIdentity} {
 		_, _ = mac.Write([]byte(strconv.Itoa(len(value))))
 		_, _ = mac.Write([]byte{':'})
 		_, _ = mac.Write([]byte(value))
@@ -604,7 +604,7 @@ func (p *Provider) password(run taskstore.BackgroundRun) string {
 
 func (p *Provider) labels(run taskstore.BackgroundRun, digest string) map[string]string {
 	return map[string]string{
-		managedLabel: "true", workspaceLabel: string(run.WorkspaceID), taskLabel: string(run.TaskID),
+		managedLabel: "true", workspaceLabel: string(run.WorkspaceID), taskLabel: string(run.RunID),
 		imageLabel: run.ImageIdentity, cloneLabel: run.CloneIdentity,
 		volumeLabel: run.VolumeIdentity, containerLabel: run.ContainerIdentity, endpointLabel: run.EndpointIdentity,
 		baseLabel: string(run.BaseOID), repositoryLabel: run.RepositoryRemote, profileLabel: run.Profile,

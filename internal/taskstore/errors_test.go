@@ -16,7 +16,7 @@ func TestTypedErrorsDescribeAndUnwrapCause(t *testing.T) {
 		cause   error
 		message string
 	}{
-		{"idempotency conflict", &ConflictError{ReceiptID: 7, RunID: task.TaskID("task-1")}, ErrIdempotencyConflict, "idempotency key conflict: receipt 7 targets task-1"},
+		{"idempotency conflict", &ConflictError{ReceiptID: 7, RunID: task.RunID("task-1")}, ErrIdempotencyConflict, "idempotency key conflict: receipt 7 targets task-1"},
 	}
 
 	for _, test := range tests {

@@ -22,12 +22,12 @@ import (
 
 const (
 	testWorkspace  = task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000001")
-	testTask       = task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-000000000002")
+	testTask       = task.RunID("run_0198d34d-6a50-75fb-b1f2-000000000002")
 	testResult     = task.ResultID("res_0198d34d-6a50-75fb-b1f2-000000000005")
 	testSession    = task.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef")
 	testMessage    = task.OpenCodeMessageID("msg_fedcba9876543210fedcba9876543210")
 	testWorkspace2 = task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000011")
-	testTask2      = task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-000000000012")
+	testTask2      = task.RunID("run_0198d34d-6a50-75fb-b1f2-000000000012")
 	testResult2    = task.ResultID("res_0198d34d-6a50-75fb-b1f2-000000000015")
 	testSession2   = task.OpenCodeSessionID("ses_11111111111111111111111111111111")
 	testMessage2   = task.OpenCodeMessageID("msg_22222222222222222222222222222222")
@@ -251,14 +251,14 @@ func TestManifestBindsExecutionIdentityAndCanonicalChanges(t *testing.T) {
 	if err != nil || digest != snapshot.ManifestSHA256 {
 		t.Fatalf("decode manifest: %v", err)
 	}
-	if snapshot.RepositoryID != spec.RepositoryID || snapshot.WorkspaceID != spec.Source.WorkspaceID || snapshot.TaskID != spec.Source.TaskID || snapshot.ResultID != spec.ResultID ||
+	if snapshot.RepositoryID != spec.RepositoryID || snapshot.WorkspaceID != spec.Source.WorkspaceID || snapshot.RunID != spec.Source.RunID || snapshot.ResultID != spec.ResultID ||
 		snapshot.ImageIdentity != spec.ImageIdentity || snapshot.Profile != spec.Profile || snapshot.ProfileSHA256 != spec.ProfileSHA256 ||
 		snapshot.EnvironmentSHA256 != spec.EnvironmentSHA256 || snapshot.ResourceSpecVersion != ResourceSpecVersion ||
 		snapshot.OpenCodeSessionID != spec.OpenCodeSessionID || snapshot.OpenCodeMessageID != spec.OpenCodeMessageID ||
 		snapshot.SnapshotPolicyVersion != SnapshotPolicyV1 || snapshot.CompletionAuthority != CompletionUserSeal {
 		t.Fatalf("snapshot identity differs from spec: %+v", snapshot)
 	}
-	if manifest.RepositoryID != spec.RepositoryID || manifest.WorkspaceID != spec.Source.WorkspaceID || manifest.TaskID != spec.Source.TaskID || manifest.ResultID != spec.ResultID ||
+	if manifest.RepositoryID != spec.RepositoryID || manifest.WorkspaceID != spec.Source.WorkspaceID || manifest.RunID != spec.Source.RunID || manifest.ResultID != spec.ResultID ||
 		manifest.ImageIdentity != spec.ImageIdentity || manifest.Profile != spec.Profile || manifest.ProfileSHA256 != spec.ProfileSHA256 ||
 		manifest.EnvironmentSHA256 != spec.EnvironmentSHA256 || manifest.ResourceSpecVersion != ResourceSpecVersion ||
 		manifest.OpenCodeSessionID != spec.OpenCodeSessionID || manifest.OpenCodeMessageID != spec.OpenCodeMessageID ||
@@ -287,7 +287,7 @@ func TestManifestBindsExecutionIdentityAndCanonicalChanges(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inspected.RepositoryID != snapshot.RepositoryID || inspected.WorkspaceID != snapshot.WorkspaceID || inspected.TaskID != snapshot.TaskID || inspected.ResultID != snapshot.ResultID ||
+	if inspected.RepositoryID != snapshot.RepositoryID || inspected.WorkspaceID != snapshot.WorkspaceID || inspected.RunID != snapshot.RunID || inspected.ResultID != snapshot.ResultID ||
 		inspected.ImageIdentity != snapshot.ImageIdentity || inspected.Profile != snapshot.Profile || inspected.ProfileSHA256 != snapshot.ProfileSHA256 ||
 		inspected.EnvironmentSHA256 != snapshot.EnvironmentSHA256 || inspected.ResourceSpecVersion != snapshot.ResourceSpecVersion ||
 		inspected.OpenCodeSessionID != snapshot.OpenCodeSessionID || inspected.OpenCodeMessageID != snapshot.OpenCodeMessageID ||
@@ -326,7 +326,7 @@ func TestManifestTamperingRejected(t *testing.T) {
 	}{
 		{"repository", func(w *manifestWire) { w.RepositoryID = 0 }},
 		{"workspace", func(w *manifestWire) { w.WorkspaceID = "bad" }},
-		{"task", func(w *manifestWire) { w.TaskID = "bad" }},
+		{"task", func(w *manifestWire) { w.RunID = "bad" }},
 		{"result", func(w *manifestWire) { w.ResultID = "bad" }},
 		{"image", func(w *manifestWire) { w.ImageIdentity = "sha256:" + strings.Repeat("A", 64) }},
 		{"profile", func(w *manifestWire) { w.Profile = "bad profile" }},
@@ -354,7 +354,7 @@ func TestManifestTamperingRejected(t *testing.T) {
 	}{
 		{"repository", func(w *manifestWire) { w.RepositoryID++ }},
 		{"workspace", func(w *manifestWire) { w.WorkspaceID = testWorkspace2 }},
-		{"task", func(w *manifestWire) { w.TaskID = testTask2 }},
+		{"task", func(w *manifestWire) { w.RunID = testTask2 }},
 		{"result", func(w *manifestWire) { w.ResultID = testResult2 }},
 		{"image", func(w *manifestWire) { w.ImageIdentity = "sha256:" + strings.Repeat("b", 64) }},
 		{"profile", func(w *manifestWire) { w.Profile = "opencode-test-2.0" }},

@@ -25,9 +25,9 @@ func TestGeneratorProducesEveryTypedID(t *testing.T) {
 			return err
 		},
 		func() error {
-			value, err := generator.TaskID()
+			value, err := generator.RunID()
 			if err == nil {
-				_, err = ParseTaskID(string(value))
+				_, err = ParseRunID(string(value))
 			}
 			return err
 		},
@@ -70,7 +70,7 @@ func TestGenerateAdmissionIDsReturnsCompleteValidatedSet(t *testing.T) {
 		t.Fatal(err)
 	}
 	checks := []error{}
-	_, err = ParseTaskID(string(ids.TaskID))
+	_, err = ParseRunID(string(ids.RunID))
 	checks = append(checks, err)
 	_, err = ParseOpenCodeSessionID(string(ids.OpenCodeSessionID))
 	checks = append(checks, err)
@@ -107,7 +107,7 @@ func TestGeneratorUUIDv7IsMonotonicAcrossClockRegression(t *testing.T) {
 	}
 	values := make([]string, len(times))
 	for index := range values {
-		value, err := generator.TaskID()
+		value, err := generator.RunID()
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -155,14 +155,14 @@ func TestGeneratorEntropyAndClockFailuresDoNotReturnIDs(t *testing.T) {
 		t.Fatalf("nil clock error = %v", err)
 	}
 	generator, _ := NewGenerator(errorReader{}, func() time.Time { return time.UnixMilli(1) })
-	if value, err := generator.TaskID(); value != "" || !errors.Is(err, ErrIDGeneration) {
+	if value, err := generator.RunID(); value != "" || !errors.Is(err, ErrIDGeneration) {
 		t.Fatalf("entropy failure = %q, %v", value, err)
 	}
 	if value, err := generator.OpenCodeMessageID(); value != "" || !errors.Is(err, ErrIDGeneration) {
 		t.Fatalf("OpenCode entropy failure = %q, %v", value, err)
 	}
 	generator, _ = NewGenerator(bytes.NewReader(make([]byte, 16)), func() time.Time { return time.UnixMilli(-1) })
-	if value, err := generator.TaskID(); value != "" || !errors.Is(err, ErrIDGeneration) {
+	if value, err := generator.RunID(); value != "" || !errors.Is(err, ErrIDGeneration) {
 		t.Fatalf("clock failure = %q, %v", value, err)
 	}
 }
@@ -173,11 +173,11 @@ func TestGeneratorAdvancesTimestampWhenRandomFieldOverflows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := generator.TaskID()
+	first, err := generator.RunID()
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := generator.TaskID()
+	second, err := generator.RunID()
 	if err != nil {
 		t.Fatal(err)
 	}

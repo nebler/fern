@@ -42,7 +42,7 @@ func BenchmarkBackgroundRunAdmissionFresh(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		p := testAdmission(i+1, fmt.Sprintf("bench-%d", i), "Implement the requested change and retain the result.")
 		admission, err := s.AdmitBackgroundRun(ctx, p)
-		if err != nil || admission.Replayed || admission.Run.TaskID != p.TaskID {
+		if err != nil || admission.Replayed || admission.Run.RunID != p.RunID {
 			b.Fatalf("fresh admission: replay=%v err=%v", admission.Replayed, err)
 		}
 	}
@@ -65,7 +65,7 @@ func BenchmarkNextBackgroundRunRecovery(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		current, err := s.NextBackgroundRun(ctx, testWorkspaceID(), BackgroundRunSourceProfile)
-		if err != nil || current.TaskID != p.TaskID || current.Revision != initial.Revision {
+		if err != nil || current.RunID != p.RunID || current.Revision != initial.Revision {
 			b.Fatalf("recovery read: revision=%d err=%v", current.Revision, err)
 		}
 	}
@@ -108,8 +108,8 @@ func BenchmarkBackgroundRunRead(b *testing.B) {
 	b.Run("OwnedGet", func(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
-			current, err := s.GetBackgroundRun(ctx, testWorkspaceID(), p.TaskID, p.Claim.Actor)
-			if err != nil || current.TaskID != p.TaskID {
+			current, err := s.GetBackgroundRun(ctx, testWorkspaceID(), p.RunID, p.Claim.Actor)
+			if err != nil || current.RunID != p.RunID {
 				b.Fatalf("owned read: %v", err)
 			}
 		}
@@ -127,7 +127,7 @@ func BenchmarkBackgroundRunRead(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			receipt, found, err := s.FindReceiptByIdempotency(ctx, testWorkspaceID(), CreateBackgroundRunCommand, p.Claim.Key)
-			if err != nil || !found || receipt.RunID != p.TaskID {
+			if err != nil || !found || receipt.RunID != p.RunID {
 				b.Fatalf("receipt lookup: found=%v err=%v", found, err)
 			}
 		}

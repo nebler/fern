@@ -254,10 +254,10 @@ root with `go build -o ./fern ./cmd/fern`, and use that binary (or put it on you
 
 ```sh
 fern runs --endpoint https://fern-host.example.ts.net
-fern attach --endpoint https://fern-host.example.ts.net tsk_...
+fern attach --endpoint https://fern-host.example.ts.net run_...
 ```
 
-Replace `tsk_...` with the ID returned by the list. The CLI reuses the plugin
+Replace `run_...` with the ID returned by the list. The CLI reuses the plugin
 credential from the OS keyring. On the Fern host, with its local config/env file,
 you can use `./fern runs` and `./fern attach` without `--endpoint`.
 

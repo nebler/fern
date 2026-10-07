@@ -27,8 +27,8 @@ func TestLocalRunConnectionRejectsIncompleteConfiguration(t *testing.T) {
 func TestSelectAttachRunUsesBoundedNumberedSelection(t *testing.T) {
 	branch := "main"
 	runs := []runSummary{
-		{ID: task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-000000000201"), State: "working", Repository: "owner/first"},
-		{ID: task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-000000000202"), State: "needs_you", Repository: "owner/second", Branch: &branch},
+		{ID: task.RunID("run_0198d34d-6a50-75fb-b1f2-000000000201"), State: "working", Repository: "owner/first"},
+		{ID: task.RunID("run_0198d34d-6a50-75fb-b1f2-000000000202"), State: "needs_you", Repository: "owner/second", Branch: &branch},
 	}
 	var output bytes.Buffer
 	selected, err := selectAttachRun(strings.NewReader("2\n"), &output, runs)
@@ -48,7 +48,7 @@ func TestActiveAndAttachableRunFiltering(t *testing.T) {
 	runs := make([]runSummary, 0, len(states))
 	for index, state := range states {
 		attachable := state == "setting_up" || state == "working" || state == "needs_you" || state == "uncertain"
-		runs = append(runs, runSummary{ID: task.TaskID("run-" + string(rune('a'+index))), State: state, Attachable: attachable})
+		runs = append(runs, runSummary{ID: task.RunID("run-" + string(rune('a'+index))), State: state, Attachable: attachable})
 	}
 	active := activeRuns(runs)
 	if got := statesOf(active); strings.Join(got, ",") != "queued,setting_up,working,needs_you,canceling,uncertain" {
@@ -124,7 +124,7 @@ func TestLaunchOpenCodeAttachChecksVersionAndPropagatesExitCode(t *testing.T) {
 }
 
 func TestRunCommandFlagParsing(t *testing.T) {
-	options, positional, err := parseAttachFlags([]string{"--endpoint", "https://fern.example", "tsk_0198d34d-6a50-75fb-b1f2-000000000201"})
+	options, positional, err := parseAttachFlags([]string{"--endpoint", "https://fern.example", "run_0198d34d-6a50-75fb-b1f2-000000000201"})
 	if err != nil || options.endpoint != "https://fern.example" || len(positional) != 1 {
 		t.Fatalf("options=%+v positional=%v error=%v", options, positional, err)
 	}
@@ -135,7 +135,7 @@ func TestRunCommandFlagParsing(t *testing.T) {
 
 func TestRemoteConnectionUsesSeparateClientAPIAndValidatesAttachment(t *testing.T) {
 	token := "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
-	runID := task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-000000000201")
+	runID := task.RunID("run_0198d34d-6a50-75fb-b1f2-000000000201")
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer "+token {
 			http.Error(writer, "missing bearer", http.StatusUnauthorized)

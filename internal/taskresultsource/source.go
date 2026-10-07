@@ -63,8 +63,8 @@ func (r *Resolver) Verify(ctx context.Context, projection taskstore.BackgroundRu
 
 func verifyTuple(projection taskstore.BackgroundRunResultProjection, snapshot taskartifact.Snapshot) error {
 	run, result := projection.Run, projection.Result
-	if result.State != taskstore.ResultSealed || result.TaskID != run.TaskID || run.Seal == nil || run.Seal.ResultID != result.ID ||
-		snapshot.RepositoryID != run.RepositoryID || snapshot.WorkspaceID != run.WorkspaceID || snapshot.TaskID != run.TaskID ||
+	if result.State != taskstore.ResultSealed || result.RunID != run.RunID || run.Seal == nil || run.Seal.ResultID != result.ID ||
+		snapshot.RepositoryID != run.RepositoryID || snapshot.WorkspaceID != run.WorkspaceID || snapshot.RunID != run.RunID ||
 		snapshot.ResultID != result.ID || snapshot.OpenCodeSessionID != run.OpenCodeSessionID || snapshot.OpenCodeMessageID != run.OpenCodeMessageID ||
 		snapshot.Base != result.BaseSHA || snapshot.Base != run.BaseOID || snapshot.Result != result.ResultCommit || snapshot.Tree != result.TreeOID ||
 		snapshot.ChangesSHA256.Bytes() != result.ChangesSHA256 || len(snapshot.Changes) != result.ChangeCount ||

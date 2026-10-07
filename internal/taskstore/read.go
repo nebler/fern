@@ -75,7 +75,7 @@ func scanRun(row rowScanner) (BackgroundRun, error) {
 	var environmentHash []byte
 	var deadline, created, updated int64
 	var creator string
-	err := row.Scan(&run.TaskID, &run.WorkspaceID, &run.RepositoryID, &run.RepositoryRemote, &run.BaseOID, &branch,
+	err := row.Scan(&run.RunID, &run.WorkspaceID, &run.RepositoryID, &run.RepositoryRemote, &run.BaseOID, &branch,
 		&run.Agent, &run.ModelProvider, &run.Model, &deadline, &run.Profile, &run.ImageIdentity, &environmentHash, &run.ResourceSpecVersion,
 		&run.OpenCodeSessionID, &run.OpenCodeMessageID, &creator, &run.State, &run.EffectPhase,
 		&stopReceipt, &stopAt, &timeoutAt,
@@ -87,7 +87,7 @@ func scanRun(row rowScanner) (BackgroundRun, error) {
 		return BackgroundRun{}, err
 	}
 	copy(run.EnvironmentSHA256[:], environmentHash)
-	resources := runidentity.NewResources(run.TaskID)
+	resources := runidentity.NewResources(run.RunID)
 	run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity =
 		resources.Clone(), resources.Volume(), resources.Container(), resources.Endpoint()
 	run.Branch = nullableString(branch)
@@ -109,7 +109,7 @@ func scanRun(row rowScanner) (BackgroundRun, error) {
 	return run, err
 }
 
-func readRun(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, id task.TaskID) (BackgroundRun, error) {
+func readRun(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, id task.RunID) (BackgroundRun, error) {
 	run, err := scanRun(q.QueryRowContext(ctx, runSelect+` WHERE r.workspace_id=? AND r.id=?`, workspaceID, id))
 	if errors.Is(err, sql.ErrNoRows) {
 		return BackgroundRun{}, ErrNotFound
@@ -120,7 +120,7 @@ func readRun(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, id
 	return run, nil
 }
 
-func readOwnedRun(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, id task.TaskID, actor task.ActorSnapshot) (BackgroundRun, error) {
+func readOwnedRun(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, id task.RunID, actor task.ActorSnapshot) (BackgroundRun, error) {
 	run, err := scanRun(q.QueryRowContext(ctx, runSelect+` WHERE r.workspace_id=? AND r.id=?`+ownedBy,
 		append([]any{workspaceID, id}, ownerArgs(actor)...)...))
 	if errors.Is(err, sql.ErrNoRows) {
@@ -180,7 +180,7 @@ func receiptByKey(ctx context.Context, q queryRower, workspaceID task.WorkspaceI
 }
 
 // insertReceipt records an accepted command for run and returns it.
-func insertReceipt(ctx context.Context, tx *sql.Tx, claim task.IdempotencyClaim, run task.TaskID, apiVersion string,
+func insertReceipt(ctx context.Context, tx *sql.Tx, claim task.IdempotencyClaim, run task.RunID, apiVersion string,
 	acceptedAt time.Time, response any) (Receipt, error) {
 	projection, err := json.Marshal(response)
 	if err != nil {

@@ -58,7 +58,7 @@ CHECK(github_authority='github-app-broker'),
 
 CREATE TABLE runs (
     id TEXT PRIMARY KEY CHECK(
-        length(id) = 40 AND substr(id,1,4) = 'tsk_' AND
+        length(id) = 40 AND substr(id,1,4) = 'run_' AND
         substr(id,13,1) = '-' AND substr(id,18,1) = '-' AND substr(id,19,1) = '7' AND
         substr(id,23,1) = '-' AND substr(id,24,1) IN ('8','9','a','b') AND substr(id,28,1) = '-' AND
         length(replace(substr(id,5),'-','')) = 32 AND

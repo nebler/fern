@@ -22,7 +22,7 @@ type Generator struct {
 }
 
 type AdmissionIDs struct {
-	TaskID            TaskID
+	RunID             RunID
 	OpenCodeSessionID OpenCodeSessionID
 	OpenCodeMessageID OpenCodeMessageID
 }
@@ -43,7 +43,7 @@ func NewSecureGenerator() *Generator {
 func (g *Generator) GenerateAdmissionIDs() (AdmissionIDs, error) {
 	var ids AdmissionIDs
 	var err error
-	if ids.TaskID, err = g.TaskID(); err != nil {
+	if ids.RunID, err = g.RunID(); err != nil {
 		return AdmissionIDs{}, err
 	}
 	if ids.OpenCodeSessionID, err = g.OpenCodeSessionID(); err != nil {
@@ -60,9 +60,9 @@ func (g *Generator) WorkspaceID() (WorkspaceID, error) {
 	return WorkspaceID(value), err
 }
 
-func (g *Generator) TaskID() (TaskID, error) {
-	value, err := g.fernID("tsk_")
-	return TaskID(value), err
+func (g *Generator) RunID() (RunID, error) {
+	value, err := g.fernID("run_")
+	return RunID(value), err
 }
 
 func (g *Generator) ResultID() (ResultID, error) {

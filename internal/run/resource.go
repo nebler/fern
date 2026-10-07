@@ -11,11 +11,11 @@ import (
 type Resources struct{ stem string }
 
 // NewResources derives the names from a Fern-generated run ID.
-func NewResources(id task.TaskID) Resources {
+func NewResources(id task.RunID) Resources {
 	if id == "" {
 		return Resources{}
 	}
-	compact := strings.ReplaceAll(strings.TrimPrefix(string(id), "tsk_"), "-", "")
+	compact := strings.ReplaceAll(strings.TrimPrefix(string(id), "run_"), "-", "")
 	return Resources{stem: "run-" + compact}
 }
 

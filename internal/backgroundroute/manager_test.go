@@ -322,7 +322,7 @@ func pairedRequest(method, target, token, origin string, body io.Reader) *http.R
 }
 
 func testRun(identity Identity) taskstore.BackgroundRun {
-	return taskstore.BackgroundRun{WorkspaceID: task.WorkspaceID(identity.WorkspaceID), TaskID: task.TaskID(identity.TaskID),
+	return taskstore.BackgroundRun{WorkspaceID: task.WorkspaceID(identity.WorkspaceID), RunID: task.RunID(identity.RunID),
 		RuntimeEpoch:        identity.RuntimeEpoch,
 		ObservedContainerID: identity.ContainerID, ObservedContainerStartedAt: identity.StartedAt,
 		OpenCodeSessionID: task.OpenCodeSessionID("ses_0123456789abcdef0123456789abcdef")}
@@ -332,7 +332,7 @@ func testIdentity(n int64) Identity {
 	started := time.Date(2026, 8, 31, 12, 0, int(n), 0, time.UTC)
 	container := strings.Repeat(string(rune('a'+n)), 64)
 	digest := runtimeDigest(container, started.Format(time.RFC3339Nano))
-	return Identity{WorkspaceID: "wsp_0198d34d-6a50-75fb-b1f2-000000000001", TaskID: "tsk_0198d34d-6a50-75fb-b1f2-000000000201",
+	return Identity{WorkspaceID: "wsp_0198d34d-6a50-75fb-b1f2-000000000001", RunID: "run_0198d34d-6a50-75fb-b1f2-000000000201",
 		SessionID: "ses_0123456789abcdef0123456789abcdef", RuntimeEpoch: started.UnixNano(),
 		ContainerID: container, StartedAt: started.Format(time.RFC3339Nano), RuntimeToken: digest}
 }

@@ -35,7 +35,7 @@ const (
 // Identity is the complete immutable route-to-process binding.
 type Identity struct {
 	WorkspaceID  string
-	TaskID       string
+	RunID        string
 	SessionID    string
 	RuntimeEpoch int64
 	ContainerID  string
@@ -331,7 +331,7 @@ func identityFromRun(run taskstore.BackgroundRun) (Identity, bool) {
 	if err != nil || runtime.Epoch() != run.RuntimeEpoch {
 		return Identity{}, false
 	}
-	identity := Identity{WorkspaceID: string(run.WorkspaceID), TaskID: string(run.TaskID), SessionID: string(run.OpenCodeSessionID),
+	identity := Identity{WorkspaceID: string(run.WorkspaceID), RunID: string(run.RunID), SessionID: string(run.OpenCodeSessionID),
 		RuntimeEpoch: run.RuntimeEpoch, ContainerID: run.ObservedContainerID,
 		StartedAt: runtime.StartedAt(), RuntimeToken: runtime.Token()}
 	return identity, true
@@ -520,7 +520,7 @@ func stripFernCookies(header http.Header) {
 
 func validateIdentity(identity Identity) error {
 	runtime, err := runidentity.ParseRuntime(identity.ContainerID, identity.StartedAt, identity.RuntimeToken)
-	if identity.WorkspaceID == "" || identity.TaskID == "" || identity.SessionID == "" ||
+	if identity.WorkspaceID == "" || identity.RunID == "" || identity.SessionID == "" ||
 		identity.RuntimeEpoch <= 0 || identity.ContainerID == "" || identity.StartedAt == "" ||
 		err != nil || runtime.Epoch() != identity.RuntimeEpoch {
 		return errors.New("complete route identity is required")
@@ -532,13 +532,13 @@ func routeEvidence(status string, identity Identity) string {
 	value, _ := json.Marshal(struct {
 		Effect       string `json:"effect"`
 		Status       string `json:"status"`
-		Task         string `json:"task"`
+		Run          string `json:"run"`
 		SessionID    string `json:"session_id"`
 		RuntimeEpoch int64  `json:"runtime_epoch"`
-	}{"background_route", status, identity.TaskID, identity.SessionID, identity.RuntimeEpoch})
+	}{"background_route", status, identity.RunID, identity.SessionID, identity.RuntimeEpoch})
 	return string(value)
 }
 
 func (identity Identity) String() string {
-	return fmt.Sprintf("%s/%s/%s@%d", identity.WorkspaceID, identity.TaskID, identity.SessionID, identity.RuntimeEpoch)
+	return fmt.Sprintf("%s/%s/%s@%d", identity.WorkspaceID, identity.RunID, identity.SessionID, identity.RuntimeEpoch)
 }

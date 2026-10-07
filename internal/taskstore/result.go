@@ -29,7 +29,7 @@ const (
 // whole row is immutable once sealed.
 type Result struct {
 	ID                    task.ResultID
-	TaskID                task.TaskID
+	RunID                 task.RunID
 	State                 ResultState
 	Outcome               task.ResultOutcome
 	BaseSHA               task.GitOID
@@ -98,7 +98,7 @@ func getResult(ctx context.Context, q queryRower, id task.ResultID) (Result, err
 	var changes, manifestHash, bundle, materialization []byte
 	var collected int64
 	var sealed sql.NullInt64
-	err := q.QueryRowContext(ctx, resultSelect+` WHERE id=?`, id).Scan(&r.ID, &r.TaskID, &r.State, &r.Outcome, &r.BaseSHA,
+	err := q.QueryRowContext(ctx, resultSelect+` WHERE id=?`, id).Scan(&r.ID, &r.RunID, &r.State, &r.Outcome, &r.BaseSHA,
 		&r.ResultCommit, &r.TreeOID, &r.ChangeCount, &changes, &manifest, &manifestHash, &bundle, &r.BundleBytes, &collected,
 		&materialization, &sealed)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -133,7 +133,7 @@ func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgro
 	}
 	defer release()
 	defer rollback(tx, &err)
-	run, err := readRun(ctx, tx, p.WorkspaceID, p.TaskID)
+	run, err := readRun(ctx, tx, p.WorkspaceID, p.RunID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -157,7 +157,7 @@ func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgro
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO results(id,run_id,state,outcome,base_sha,result_commit,tree_oid,change_count,
 changes_sha256,manifest_json,manifest_sha256,bundle_sha256,bundle_size,collected_at) VALUES(?,?,'selected',?,?,?,?,?,?,?,?,?,?,?)`,
-		run.Seal.ResultID, run.TaskID, outcome, run.BaseOID, p.ResultCommit, p.TreeOID, p.ChangeCount, p.ChangesSHA256[:],
+		run.Seal.ResultID, run.RunID, outcome, run.BaseOID, p.ResultCommit, p.TreeOID, p.ChangeCount, p.ChangesSHA256[:],
 		string(p.ArtifactManifest), p.ArtifactManifestSHA256[:], p.BundleSHA256[:], p.BundleBytes, unixMillis(p.CollectedAt)); err != nil {
 		return Result{}, fmt.Errorf("select background snapshot: %w", err)
 	}
@@ -193,7 +193,7 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 	}
 	defer release()
 	defer rollback(tx, &err)
-	run, err := readRun(ctx, tx, p.WorkspaceID, p.TaskID)
+	run, err := readRun(ctx, tx, p.WorkspaceID, p.RunID)
 	if err != nil {
 		return BackgroundRunRetainedResult{}, err
 	}
@@ -202,7 +202,7 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 	}
 	sealedMS := unixMillis(p.Now)
 	result, err := tx.ExecContext(ctx, `UPDATE results SET state='sealed',materialization_sha256=?,sealed_at=?
-WHERE id=? AND run_id=? AND state='selected'`, p.MaterializationProof[:], sealedMS, run.Seal.ResultID, run.TaskID)
+WHERE id=? AND run_id=? AND state='selected'`, p.MaterializationProof[:], sealedMS, run.Seal.ResultID, run.RunID)
 	if err != nil {
 		return BackgroundRunRetainedResult{}, fmt.Errorf("seal retained result: %w", err)
 	}
@@ -228,8 +228,8 @@ WHERE id=? AND run_id=? AND state='selected'`, p.MaterializationProof[:], sealed
 
 // GetBackgroundRunResult returns a result_ready run with its sealed result
 // after the same ownership-hiding check as GetBackgroundRun.
-func (s *Store) GetBackgroundRunResult(ctx context.Context, workspaceID task.WorkspaceID, taskID task.TaskID, actor task.ActorSnapshot) (BackgroundRunResultProjection, error) {
-	run, err := s.GetBackgroundRun(ctx, workspaceID, taskID, actor)
+func (s *Store) GetBackgroundRunResult(ctx context.Context, workspaceID task.WorkspaceID, runID task.RunID, actor task.ActorSnapshot) (BackgroundRunResultProjection, error) {
+	run, err := s.GetBackgroundRun(ctx, workspaceID, runID, actor)
 	if err != nil {
 		return BackgroundRunResultProjection{}, err
 	}
@@ -240,7 +240,7 @@ func (s *Store) GetBackgroundRunResult(ctx context.Context, workspaceID task.Wor
 	if err != nil {
 		return BackgroundRunResultProjection{}, err
 	}
-	if result.State != ResultSealed || result.TaskID != run.TaskID {
+	if result.State != ResultSealed || result.RunID != run.RunID {
 		return BackgroundRunResultProjection{}, fmt.Errorf("%w: retained result projection", ErrCorruptStore)
 	}
 	return BackgroundRunResultProjection{Run: run, Result: result}, nil

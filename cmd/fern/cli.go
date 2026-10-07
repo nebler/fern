@@ -60,7 +60,7 @@ var commandUsageSuffix = map[string]string{"attach": " [run-id]"}
 // package initialization cycle.
 var commandExamples = map[string]string{
 	"runs":               "fern runs --endpoint https://fern-host.example.ts.net",
-	"attach":             "fern attach --endpoint https://fern-host.example.ts.net tsk_...",
+	"attach":             "fern attach --endpoint https://fern-host.example.ts.net run_...",
 	"init":               "fern init --repo /path/to/repository",
 	"doctor":             "fern doctor --phone",
 	"up":                 "fern up --config /etc/fern/fern.yaml",

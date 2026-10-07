@@ -26,7 +26,7 @@ var (
 // request content.
 type ConflictError struct {
 	ReceiptID int64
-	RunID     task.TaskID
+	RunID     task.RunID
 }
 
 func (e *ConflictError) Error() string {

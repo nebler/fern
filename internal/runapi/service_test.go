@@ -33,10 +33,10 @@ type commandStore struct {
 func (s *commandStore) FindReceiptByIdempotency(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error) {
 	return s.receipt, s.found, nil
 }
-func (s *commandStore) GetBackgroundRun(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRun, error) {
+func (s *commandStore) GetBackgroundRun(context.Context, task.WorkspaceID, task.RunID, task.ActorSnapshot) (taskstore.BackgroundRun, error) {
 	return s.current, nil
 }
-func receiptFor(claim task.IdempotencyClaim, id task.TaskID, receiptID int64) taskstore.Receipt {
+func receiptFor(claim task.IdempotencyClaim, id task.RunID, receiptID int64) taskstore.Receipt {
 	return taskstore.Receipt{ID: receiptID, WorkspaceID: claim.Scope.WorkspaceID, CommandKind: claim.Scope.CommandKind,
 		IdempotencyKey: claim.Key, RequestHash: claim.RequestHash, Actor: claim.Actor, RunID: id}
 }
@@ -46,8 +46,8 @@ func (s *commandStore) AdmitBackgroundRun(_ context.Context, p taskstore.AdmitBa
 		return taskstore.Admission{}, s.err
 	}
 	s.committed = true
-	s.current.TaskID = p.TaskID
-	s.receipt = receiptFor(p.Claim, p.TaskID, 1)
+	s.current.RunID = p.RunID
+	s.receipt = receiptFor(p.Claim, p.RunID, 1)
 	return taskstore.Admission{Run: s.current, Receipt: s.receipt, Replayed: s.race}, nil
 }
 func (s *commandStore) StopBackgroundRun(_ context.Context, p taskstore.StopBackgroundRunParams) (taskstore.BackgroundRunStop, error) {
@@ -55,13 +55,13 @@ func (s *commandStore) StopBackgroundRun(_ context.Context, p taskstore.StopBack
 		return taskstore.BackgroundRunStop{}, s.err
 	}
 	s.committed = true
-	s.current.TaskID, s.current.StopReceiptID = p.TaskID, 2
+	s.current.RunID, s.current.StopReceiptID = p.RunID, 2
 	s.current.State = taskstore.BackgroundRunCanceling
 	if s.race {
 		s.current.State = taskstore.BackgroundRunCleanupRequired // advanced since the original commit
 	}
-	s.receipt = receiptFor(p.Claim, p.TaskID, 2)
-	s.receipt.ResponseProjection = json.RawMessage(`{"run_id":"` + string(p.TaskID) + `","state":"canceling"}`)
+	s.receipt = receiptFor(p.Claim, p.RunID, 2)
+	s.receipt.ResponseProjection = json.RawMessage(`{"run_id":"` + string(p.RunID) + `","state":"canceling"}`)
 	return taskstore.BackgroundRunStop{Run: s.current, Receipt: s.receipt, Replayed: s.race}, nil
 }
 func (s *commandStore) SealBackgroundRun(_ context.Context, p taskstore.SealBackgroundRunParams) (taskstore.BackgroundRunSealAdmission, error) {
@@ -161,7 +161,7 @@ func TestCommitRaceReplayAndFailureDoNotWake(t *testing.T) {
 			t.Run(operation+"/"+mode, func(t *testing.T) {
 				s, store, _, actor, input, wakes := setupService(t)
 				ids, _ := s.config.Generator.GenerateAdmissionIDs()
-				store.current = taskstore.BackgroundRun{TaskID: ids.TaskID, Revision: 5}
+				store.current = taskstore.BackgroundRun{RunID: ids.RunID, Revision: 5}
 				store.race = mode == "race"
 				if mode == "failure" {
 					store.err = errors.New("commit failed")
@@ -172,12 +172,12 @@ func TestCommitRaceReplayAndFailureDoNotWake(t *testing.T) {
 					_, err = s.Create(context.Background(), actor, "key", input)
 				case "stop":
 					var accepted stopAcceptance
-					accepted, err = s.Stop(context.Background(), actor, "key", ids.TaskID)
+					accepted, err = s.Stop(context.Background(), actor, "key", ids.RunID)
 					if mode == "race" && (accepted.State != run.Canceling || !accepted.Replayed) {
 						t.Fatalf("stop must project receipt: %+v", accepted)
 					}
 				case "seal":
-					_, err = s.Seal(context.Background(), actor, "key", ids.TaskID)
+					_, err = s.Seal(context.Background(), actor, "key", ids.RunID)
 					if store.seal.ExpectedRunRevision != 5 || store.seal.ResultID == "" || store.seal.PolicyVersion != "seal.v1" || store.seal.AcceptedAt.Nanosecond() != 123000000 {
 						t.Fatalf("seal assembly=%+v", store.seal)
 					}
@@ -201,21 +201,21 @@ func TestStopReplayValidatesOriginalReceipt(t *testing.T) {
 	s, store, _, actor, _, wakes := setupService(t)
 	ids, _ := s.config.Generator.GenerateAdmissionIDs()
 	store.race = true
-	if _, err := s.Stop(context.Background(), actor, "stop", ids.TaskID); err != nil {
+	if _, err := s.Stop(context.Background(), actor, "stop", ids.RunID); err != nil {
 		t.Fatal(err)
 	}
 	store.found = true
 	s.config.Now = func() time.Time { panic("replay read clock") }
-	accepted, err := s.Stop(context.Background(), actor, "stop", ids.TaskID)
+	accepted, err := s.Stop(context.Background(), actor, "stop", ids.RunID)
 	if err != nil || accepted.State != run.Canceling || !accepted.Replayed {
 		t.Fatalf("replay=%+v err=%v", accepted, err)
 	}
-	store.receipt.ResponseProjection = json.RawMessage(`{"run_id":"` + string(ids.TaskID) + `","state":"result_ready"}`)
-	if _, err := s.Stop(context.Background(), actor, "stop", ids.TaskID); !errors.Is(err, taskstore.ErrCorruptStore) {
+	store.receipt.ResponseProjection = json.RawMessage(`{"run_id":"` + string(ids.RunID) + `","state":"result_ready"}`)
+	if _, err := s.Stop(context.Background(), actor, "stop", ids.RunID); !errors.Is(err, taskstore.ErrCorruptStore) {
 		t.Fatalf("invalid receipt=%v", err)
 	}
 	store.current.StopReceiptID = 0
-	if _, err := s.Stop(context.Background(), actor, "stop", ids.TaskID); !errors.Is(err, taskstore.ErrCorruptStore) {
+	if _, err := s.Stop(context.Background(), actor, "stop", ids.RunID); !errors.Is(err, taskstore.ErrCorruptStore) {
 		t.Fatalf("receipt mismatch=%v", err)
 	}
 	if *wakes != 0 {

@@ -161,7 +161,7 @@ func (c *Coordinator) step(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	state, phase, readErr := c.store.ReadBackgroundRunLifecycle(ctx, work.Run.WorkspaceID, work.Run.TaskID)
+	state, phase, readErr := c.store.ReadBackgroundRunLifecycle(ctx, work.Run.WorkspaceID, work.Run.RunID)
 	if readErr != nil {
 		return false, nil
 	}
@@ -432,7 +432,7 @@ func (a *retainedExportAttempt) recoveryRequired(parent context.Context, cause e
 // export (or proves a replay identical to the selection), and installs it.
 func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Context, repositoryPath string) (resultErr error) {
 	c, run := a.coordinator, a.run
-	artifactSource, sourceSpecErr := taskartifact.NewSource(repositoryPath, run.WorkspaceID, run.TaskID)
+	artifactSource, sourceSpecErr := taskartifact.NewSource(repositoryPath, run.WorkspaceID, run.RunID)
 	profileDigest, profileErr := taskartifact.NewDigest(sha256.Sum256([]byte(run.Profile)))
 	environmentDigest, environmentErr := taskartifact.NewDigest(run.EnvironmentSHA256)
 	if sourceSpecErr != nil || profileErr != nil || environmentErr != nil {
@@ -531,7 +531,7 @@ func providerFence(value taskstore.WriterFence) taskenvdocker.WriterFence {
 // snapshotMatches binds a snapshot to the sealing run's identities and the
 // durable selection.
 func snapshotMatches(snapshot taskartifact.Snapshot, run taskstore.BackgroundRun, selected taskstore.Result) bool {
-	return snapshot.RepositoryID == run.RepositoryID && snapshot.WorkspaceID == run.WorkspaceID && snapshot.TaskID == run.TaskID &&
+	return snapshot.RepositoryID == run.RepositoryID && snapshot.WorkspaceID == run.WorkspaceID && snapshot.RunID == run.RunID &&
 		snapshot.ResultID == selected.ID && snapshot.OpenCodeSessionID == run.OpenCodeSessionID && snapshot.OpenCodeMessageID == run.OpenCodeMessageID &&
 		snapshot.Base == selected.BaseSHA && snapshot.Result == selected.ResultCommit && snapshot.Tree == selected.TreeOID &&
 		snapshot.ChangesSHA256.Bytes() == selected.ChangesSHA256 && snapshot.ManifestSHA256.Bytes() == selected.ManifestSHA256 &&
@@ -740,7 +740,7 @@ func (c *Coordinator) validatedRouteIdentity(run taskstore.BackgroundRun) (backg
 }
 
 func makeRouteIdentity(run taskstore.BackgroundRun, runtime taskenvdocker.RuntimeIdentity) backgroundroute.Identity {
-	return backgroundroute.Identity{WorkspaceID: string(run.WorkspaceID), TaskID: string(run.TaskID),
+	return backgroundroute.Identity{WorkspaceID: string(run.WorkspaceID), RunID: string(run.RunID),
 		SessionID: string(run.OpenCodeSessionID), RuntimeEpoch: run.RuntimeEpoch,
 		ContainerID: runtime.ContainerID, StartedAt: runtime.StartedAt, RuntimeToken: runtime.Token}
 }
@@ -853,7 +853,7 @@ func (c *Coordinator) recordObservation(ctx context.Context, work taskstore.Back
 
 // ref pins the revision this scan read; every write is a compare-and-swap on it.
 func ref(run taskstore.BackgroundRun, now time.Time) taskstore.BackgroundRunRef {
-	return taskstore.BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID,
+	return taskstore.BackgroundRunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID,
 		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now}
 }
 

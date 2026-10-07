@@ -138,7 +138,7 @@ var usageExamples = []string{
 	"fern init --repo /path/to/repository --repository owner/repository --repository-id 123 --installation-id 456 --model-provider anthropic --model claude-sonnet-4-5",
 	"fern up --config fern.yaml --env-file fern.env",
 	"fern runs --endpoint https://fern-host.example.ts.net",
-	"fern attach --endpoint https://fern-host.example.ts.net tsk_...",
+	"fern attach --endpoint https://fern-host.example.ts.net run_...",
 }
 
 // buildUsageText derives top-level help from the registry so commands appear,

@@ -35,11 +35,11 @@ const (
 type Store interface {
 	AdmitBackgroundRun(context.Context, taskstore.AdmitBackgroundRunParams) (taskstore.Admission, error)
 	FindReceiptByIdempotency(context.Context, task.WorkspaceID, string, task.IdempotencyKey) (taskstore.Receipt, bool, error)
-	GetBackgroundRun(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRun, error)
+	GetBackgroundRun(context.Context, task.WorkspaceID, task.RunID, task.ActorSnapshot) (taskstore.BackgroundRun, error)
 	StopBackgroundRun(context.Context, taskstore.StopBackgroundRunParams) (taskstore.BackgroundRunStop, error)
 	SealBackgroundRun(context.Context, taskstore.SealBackgroundRunParams) (taskstore.BackgroundRunSealAdmission, error)
 	ListBackgroundRuns(context.Context, task.WorkspaceID, task.ActorSnapshot, int) ([]taskstore.BackgroundRun, error)
-	GetBackgroundRunResult(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error)
+	GetBackgroundRunResult(context.Context, task.WorkspaceID, task.RunID, task.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error)
 }
 
 var _ Store = (*taskstore.Store)(nil)
@@ -149,7 +149,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, PathPrefix+"/"), "/")
-	id, err := task.ParseTaskID(parts[0])
+	id, err := task.ParseRunID(parts[0])
 	if err != nil || len(parts) > 2 {
 		WriteError(w, http.StatusNotFound, "not_found", "The requested run was not found.")
 		return
@@ -208,14 +208,14 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 type sealProjection struct {
-	RunID       task.TaskID       `json:"run_id"`
+	RunID       task.RunID        `json:"run_id"`
 	State       runidentity.State `json:"state"`
 	ResultPhase string            `json:"result_phase"`
 	ResultID    task.ResultID     `json:"result_id"`
 	Committed   bool              `json:"committed"`
 }
 
-func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
+func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.RunID) {
 	if !validateEmptyMutation(w, r) {
 		return
 	}
@@ -235,7 +235,7 @@ func (h *Handler) seal(w http.ResponseWriter, r *http.Request, actor task.ActorS
 }
 
 type resultResponse struct {
-	RunID     task.TaskID              `json:"run_id"`
+	RunID     task.RunID               `json:"run_id"`
 	State     string                   `json:"state"`
 	Result    retainedResultResponse   `json:"result"`
 	Artifact  retainedArtifactResponse `json:"artifact"`
@@ -271,7 +271,7 @@ type cleanupResponse struct {
 	Complete bool `json:"complete"`
 }
 
-func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
+func (h *Handler) result(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.RunID) {
 	if !noQuery(r) || !noBody(r) {
 		WriteError(w, http.StatusBadRequest, "invalid_query", "This run operation does not accept query parameters.")
 		return
@@ -366,12 +366,12 @@ type createInput struct {
 }
 
 type createResponse struct {
-	RunID     task.TaskID `json:"run_id"`
-	Committed bool        `json:"committed"`
+	RunID     task.RunID `json:"run_id"`
+	Committed bool       `json:"committed"`
 }
 
 type stopResponse struct {
-	RunID task.TaskID       `json:"run_id"`
+	RunID task.RunID        `json:"run_id"`
 	State runidentity.State `json:"state"`
 }
 
@@ -421,7 +421,7 @@ func (h *Handler) list(w http.ResponseWriter, r *http.Request, actor task.ActorS
 	}{views})
 }
 
-func (h *Handler) get(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
+func (h *Handler) get(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.RunID) {
 	if !noQuery(r) || !noBody(r) {
 		WriteError(w, http.StatusBadRequest, "invalid_query", "Run reads do not accept query parameters.")
 		return
@@ -435,7 +435,7 @@ func (h *Handler) get(w http.ResponseWriter, r *http.Request, actor task.ActorSn
 }
 
 type attachResponse struct {
-	RunID     task.TaskID            `json:"run_id"`
+	RunID     task.RunID             `json:"run_id"`
 	URL       string                 `json:"url"`
 	SessionID task.OpenCodeSessionID `json:"session_id"`
 	Username  string                 `json:"username"`
@@ -446,7 +446,7 @@ type attachResponse struct {
 // attach mints a short-lived OpenCode credential. Durable readiness alone
 // never grants access: the route manager must also issue it, and it owns
 // expiry and runtime fencing. The response carries a secret and is no-store.
-func (h *Handler) attach(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
+func (h *Handler) attach(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.RunID) {
 	if !noQuery(r) || !noBody(r) {
 		WriteError(w, http.StatusBadRequest, "invalid_query", "Run attachment does not accept query parameters.")
 		return
@@ -469,7 +469,7 @@ func (h *Handler) attach(w http.ResponseWriter, r *http.Request, actor task.Acto
 		WriteError(w, http.StatusConflict, "not_ready", "The OpenCode session is not ready for attachment.")
 		return
 	}
-	WriteJSON(w, http.StatusOK, attachResponse{RunID: run.TaskID, URL: attachment.Origin, SessionID: run.OpenCodeSessionID,
+	WriteJSON(w, http.StatusOK, attachResponse{RunID: run.RunID, URL: attachment.Origin, SessionID: run.OpenCodeSessionID,
 		Username: attachment.Username, Password: attachment.Password, ExpiresAt: attachment.ExpiresAt})
 }
 
@@ -481,7 +481,7 @@ func attachmentReady(run taskstore.BackgroundRun) bool {
 	return active && ready && run.StopReceiptID == 0
 }
 
-func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {
+func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.RunID) {
 	if !validateEmptyMutation(w, r) {
 		return
 	}
@@ -501,7 +501,7 @@ func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor task.ActorS
 }
 
 type runView struct {
-	ID         task.TaskID                  `json:"id"`
+	ID         task.RunID                   `json:"id"`
 	State      taskstore.BackgroundRunState `json:"state"`
 	Repository string                       `json:"repository"`
 	Head       task.GitOID                  `json:"head"`
@@ -512,7 +512,7 @@ type runView struct {
 
 func (h *Handler) view(run taskstore.BackgroundRun) runView {
 	_, active := h.config.Route.ActiveOrigin(run)
-	return runView{run.TaskID, run.State, run.RepositoryRemote, run.BaseOID, run.Branch, active && attachmentReady(run)}
+	return runView{run.RunID, run.State, run.RepositoryRemote, run.BaseOID, run.Branch, active && attachmentReady(run)}
 }
 func decodeStrict(w http.ResponseWriter, r *http.Request, limit int64, target any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, limit)

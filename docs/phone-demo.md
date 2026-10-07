@@ -167,7 +167,7 @@ session from the client computer:
 
 ```sh
 fern runs --endpoint https://your-host.your-tailnet.ts.net
-fern attach --endpoint https://your-host.your-tailnet.ts.net tsk_...
+fern attach --endpoint https://your-host.your-tailnet.ts.net run_...
 ```
 
 `attach` opens the existing agent session; it does not start a second writer.

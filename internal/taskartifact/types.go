@@ -65,15 +65,15 @@ type Config struct {
 // methods.
 type Source struct {
 	WorkspaceID task.WorkspaceID
-	TaskID      task.TaskID
+	RunID       task.RunID
 	path        string
 }
 
-func NewSource(path string, workspaceID task.WorkspaceID, taskID task.TaskID) (Source, error) {
+func NewSource(path string, workspaceID task.WorkspaceID, runID task.RunID) (Source, error) {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return Source{}, fmt.Errorf("%w: repository path", ErrInvalidSource)
 	}
-	return Source{WorkspaceID: workspaceID, TaskID: taskID, path: path}, nil
+	return Source{WorkspaceID: workspaceID, RunID: runID, path: path}, nil
 }
 
 // SnapshotSpec binds a snapshot to admitted repository, execution, seal, and
@@ -145,7 +145,7 @@ func (d Digest) Bytes() [32]byte { return d.value }
 type Snapshot struct {
 	RepositoryID          task.RepositoryID
 	WorkspaceID           task.WorkspaceID
-	TaskID                task.TaskID
+	RunID                 task.RunID
 	ResultID              task.ResultID
 	ImageIdentity         string
 	Profile               string

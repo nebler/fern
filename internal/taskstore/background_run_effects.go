@@ -40,7 +40,7 @@ func (s *Store) NextBackgroundRunWork(ctx context.Context, workspaceID task.Work
 		return BackgroundRunWork{}, err
 	}
 	var prompt string
-	if err := s.db.QueryRowContext(ctx, `SELECT prompt FROM runs WHERE workspace_id=? AND id=?`, run.WorkspaceID, run.TaskID).
+	if err := s.db.QueryRowContext(ctx, `SELECT prompt FROM runs WHERE workspace_id=? AND id=?`, run.WorkspaceID, run.RunID).
 		Scan(&prompt); err != nil {
 		return BackgroundRunWork{}, fmt.Errorf("read run prompt: %w", err)
 	}
@@ -208,7 +208,7 @@ WHERE id=? AND workspace_id=? AND revision=? AND state=? AND effect_phase=?`
 	for _, predicate := range predicates {
 		query += ` AND ` + predicate
 	}
-	args = append(args, unixMillis(ref.Now), ref.TaskID, ref.WorkspaceID, ref.ExpectedRevision, ref.ExpectedState, ref.ExpectedPhase)
+	args = append(args, unixMillis(ref.Now), ref.RunID, ref.WorkspaceID, ref.ExpectedRevision, ref.ExpectedState, ref.ExpectedPhase)
 	result, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return BackgroundRun{}, fmt.Errorf("%s: %w", operation, err)
@@ -216,7 +216,7 @@ WHERE id=? AND workspace_id=? AND revision=? AND state=? AND effect_phase=?`
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRun{}, ErrInvalidState
 	}
-	return readRun(ctx, tx, ref.WorkspaceID, ref.TaskID)
+	return readRun(ctx, tx, ref.WorkspaceID, ref.RunID)
 }
 
 func validateBackgroundRunRef(ref BackgroundRunRef) error {

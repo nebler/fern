@@ -106,7 +106,7 @@ func run() (resultErr error) {
 	if err != nil {
 		return err
 	}
-	taskID, err := ids.TaskID()
+	runID, err := ids.RunID()
 	if err != nil {
 		return err
 	}
@@ -118,8 +118,8 @@ func run() (resultErr error) {
 	if err != nil {
 		return err
 	}
-	compact := strings.ReplaceAll(strings.TrimPrefix(string(taskID), "tsk_"), "-", "")
-	run := taskstore.BackgroundRun{WorkspaceID: workspaceID, TaskID: taskID, RepositoryID: 42, RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ResourceSpecVersion: runidentity.ResourceSpecVersion, ImageIdentity: imageID, CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode", ContainerIdentity: "fern-run-" + compact, EndpointIdentity: "run-" + compact + "-endpoint", OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID}
+	compact := strings.ReplaceAll(strings.TrimPrefix(string(runID), "run_"), "-", "")
+	run := taskstore.BackgroundRun{WorkspaceID: workspaceID, RunID: runID, RepositoryID: 42, RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ResourceSpecVersion: runidentity.ResourceSpecVersion, ImageIdentity: imageID, CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode", ContainerIdentity: "fern-run-" + compact, EndpointIdentity: "run-" + compact + "-endpoint", OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID}
 	config := taskenvdocker.Config{StateRoot: state, Repository: repository, GitExecutable: gitPath, ImageReference: imageReference, ImageID: imageID, MemoryBytes: 512 << 20, WallTimeout: 2 * time.Minute, GitTimeout: 30 * time.Second, DockerTimeout: 20 * time.Second, HealthTimeout: 60 * time.Second, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 128 << 20, CloneObservedLimitBytes: 128 << 20, DiskFreeAdmissionBytes: 128 << 20, LogMaxSize: "1m", LogMaxFiles: 2, StopGrace: 3 * time.Second}
 	githubFixture, err := newGitHubFixture()
 	config.RuntimeStorageRoot = state
@@ -144,13 +144,13 @@ func run() (resultErr error) {
 		resultErr = errors.Join(resultErr, cleanupHarness(provider, cli, run, containerID, runtime, filepath.Join(state, "background-runs", run.CloneIdentity)))
 	}()
 
-	otherTask, err := ids.TaskID()
+	otherTask, err := ids.RunID()
 	if err != nil {
 		return err
 	}
 	other := run
-	other.TaskID = otherTask
-	otherCompact := strings.ReplaceAll(strings.TrimPrefix(string(otherTask), "tsk_"), "-", "")
+	other.RunID = otherTask
+	otherCompact := strings.ReplaceAll(strings.TrimPrefix(string(otherTask), "run_"), "-", "")
 	other.CloneIdentity = "run-" + otherCompact + "-clone"
 	other.VolumeIdentity = "fern-run-" + otherCompact + "-opencode"
 	other.ContainerIdentity = "fern-run-" + otherCompact
@@ -261,11 +261,11 @@ func run() (resultErr error) {
 	if info.Config.User != "1001:1001" || info.HostConfig.Memory != config.MemoryBytes || info.HostConfig.NanoCPUs != 2_000_000_000 || info.HostConfig.PidsLimit == nil || *info.HostConfig.PidsLimit != 512 || info.HostConfig.Init == nil || !*info.HostConfig.Init || !info.HostConfig.RestartPolicy.IsNone() || len(info.HostConfig.CapDrop) != 1 || info.HostConfig.CapDrop[0] != "ALL" || len(info.HostConfig.Devices) != 0 || len(info.HostConfig.DeviceRequests) != 0 || info.HostConfig.LogConfig.Config["max-size"] != "1m" || persistentMounts != 2 || !info.HostConfig.ReadonlyRootfs || len(info.HostConfig.Tmpfs) == 0 {
 		return errors.New("real container security, resources, logs, or mounts differ")
 	}
-	if info.Config.Labels["dev.fern.background-run.task"] != string(taskID) || info.Config.Labels["dev.fern.background-run.spec"] == "" {
+	if info.Config.Labels["dev.fern.background-run.task"] != string(runID) || info.Config.Labels["dev.fern.background-run.spec"] == "" {
 		return errors.New("real container immutable labels differ")
 	}
 	volumeInfo, err := cli.VolumeInspect(ctx, run.VolumeIdentity)
-	if err != nil || volumeInfo.Labels["dev.fern.background-run.task"] != string(taskID) {
+	if err != nil || volumeInfo.Labels["dev.fern.background-run.task"] != string(runID) {
 		return errors.New("real volume immutable labels differ")
 	}
 	if volumeInfo.Driver != "local" || volumeInfo.Options["type"] != "none" || volumeInfo.Options["o"] != "bind" || !withinHarnessRoot(state, volumeInfo.Options["device"]) {

@@ -49,7 +49,7 @@ func TestPredecessorSchemasRejectedWithoutMutation(t *testing.T) {
 }
 
 func TestInitialSchemaIsTheOnlySupportedSchema(t *testing.T) {
-	const expectedChecksum = "8417b9b48eae675fa817cf0e2745e258be9aafb970e69557e99c65dbcc76fcf6"
+	const expectedChecksum = "902f2bc431dc276cd1095b0c96fe5aead7c2aba8b5987362b9fa91a64232c433"
 	if CurrentSchemaVersion() != 8 || len(migrations) != 1 || migrations[0].version != 8 || migrations[0].name != "run_task_store" {
 		t.Fatalf("schema version=%d migration count=%d", CurrentSchemaVersion(), len(migrations))
 	}
@@ -83,7 +83,7 @@ func TestInitialSchemaRejectsPromptAdmissionWithoutAttemptFence(t *testing.T) {
 	run, _ := advanceBackgroundRunToRuntime(t, store, now)
 	if _, err := store.db.Exec(`UPDATE runs SET state='working',effect_phase='admitted',
 last_evidence='raw admission',revision=revision+1,updated_at=?
-WHERE id=?`, now.Add(20*time.Second).UnixMilli(), run.TaskID); err == nil {
+WHERE id=?`, now.Add(20*time.Second).UnixMilli(), run.RunID); err == nil {
 		t.Fatal("raw prompt admission without the one-shot fence was accepted")
 	}
 }

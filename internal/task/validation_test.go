@@ -14,7 +14,7 @@ func TestFernIDParsers(t *testing.T) {
 		parse        func(string) error
 	}{
 		{"workspace", "wsp_", func(v string) error { _, err := ParseWorkspaceID(v); return err }},
-		{"task", "tsk_", func(v string) error { _, err := ParseTaskID(v); return err }},
+		{"task", "run_", func(v string) error { _, err := ParseRunID(v); return err }},
 		{"result", "res_", func(v string) error { _, err := ParseResultID(v); return err }},
 	}
 	for _, tt := range tests {

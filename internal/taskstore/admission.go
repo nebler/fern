@@ -81,20 +81,20 @@ INSERT INTO runs(
     deadline,profile,image_identity,environment_sha256,resource_spec_version,opencode_session_id,opencode_message_id,
     creator_actor,state,effect_phase,revision,created_at,updated_at
 ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'queued','absent',1,?,?)`,
-		p.TaskID, workspaceID, p.RepositoryID, p.RepositoryRemote, p.BaseSHA, branch, p.Prompt,
+		p.RunID, workspaceID, p.RepositoryID, p.RepositoryRemote, p.BaseSHA, branch, p.Prompt,
 		p.Agent, p.ModelProvider, p.Model, unixMillis(p.Deadline), p.Profile, p.ImageIdentity, p.EnvironmentSHA256[:],
 		backgroundRunResourceSpecVersion, p.OpenCodeSessionID, p.OpenCodeMessageID, encodeActor(p.Claim.Actor),
 		acceptedMS, acceptedMS); err != nil {
 		return Admission{}, fmt.Errorf("insert run: %w", err)
 	}
-	receipt, err := insertReceipt(ctx, tx, p.Claim, p.TaskID, p.APIContractVersion, p.AcceptedAt, struct {
-		RunID     task.TaskID `json:"run_id"`
-		Committed bool        `json:"committed"`
-	}{p.TaskID, true})
+	receipt, err := insertReceipt(ctx, tx, p.Claim, p.RunID, p.APIContractVersion, p.AcceptedAt, struct {
+		RunID     task.RunID `json:"run_id"`
+		Committed bool       `json:"committed"`
+	}{p.RunID, true})
 	if err != nil {
 		return Admission{}, err
 	}
-	run, err := readRun(ctx, tx, workspaceID, p.TaskID)
+	run, err := readRun(ctx, tx, workspaceID, p.RunID)
 	if err != nil {
 		return Admission{}, err
 	}

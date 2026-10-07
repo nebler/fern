@@ -49,12 +49,12 @@ type runConnection struct {
 }
 
 type runSummary struct {
-	ID         task.TaskID `json:"id"`
-	State      string      `json:"state"`
-	Repository string      `json:"repository"`
-	Head       string      `json:"head"`
-	Branch     *string     `json:"branch"`
-	Attachable bool        `json:"attachable"`
+	ID         task.RunID `json:"id"`
+	State      string     `json:"state"`
+	Repository string     `json:"repository"`
+	Head       string     `json:"head"`
+	Branch     *string    `json:"branch"`
+	Attachable bool       `json:"attachable"`
 }
 
 type runListResponse struct {
@@ -62,7 +62,7 @@ type runListResponse struct {
 }
 
 type runAttachResponse struct {
-	RunID     task.TaskID            `json:"run_id"`
+	RunID     task.RunID             `json:"run_id"`
 	URL       string                 `json:"url"`
 	SessionID task.OpenCodeSessionID `json:"session_id"`
 	Username  string                 `json:"username"`
@@ -114,9 +114,9 @@ func runAttach(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	var runID task.TaskID
+	var runID task.RunID
 	if len(positional) == 1 {
-		runID, err = task.ParseTaskID(positional[0])
+		runID, err = task.ParseRunID(positional[0])
 		if err != nil {
 			return invocationError{message: "attach requires a valid Fern run ID"}
 		}
@@ -149,7 +149,7 @@ func runAttach(ctx context.Context, args []string) error {
 	return launchOpenCodeAttach(ctx, options.opencode, connection.attachURL(attachment.URL), attachment)
 }
 
-func selectAttachRun(input io.Reader, output io.Writer, runs []runSummary) (task.TaskID, error) {
+func selectAttachRun(input io.Reader, output io.Writer, runs []runSummary) (task.RunID, error) {
 	if len(runs) == 0 {
 		return "", errors.New("no Fern session is ready to attach")
 	}
@@ -261,7 +261,7 @@ func (connection *runConnection) list(ctx context.Context) ([]runSummary, error)
 		return nil, err
 	}
 	for _, run := range response.Runs {
-		if _, err := task.ParseTaskID(string(run.ID)); err != nil || run.State == "" || run.Repository == "" {
+		if _, err := task.ParseRunID(string(run.ID)); err != nil || run.State == "" || run.Repository == "" {
 			return nil, errors.New("Fern returned an invalid run list")
 		}
 		if _, err := task.ParseGitOID(run.Head); err != nil {
@@ -271,7 +271,7 @@ func (connection *runConnection) list(ctx context.Context) ([]runSummary, error)
 	return response.Runs, nil
 }
 
-func (connection *runConnection) attach(ctx context.Context, runID task.TaskID) (runAttachResponse, error) {
+func (connection *runConnection) attach(ctx context.Context, runID task.RunID) (runAttachResponse, error) {
 	var response runAttachResponse
 	if err := connection.get(ctx, "/fern/api/runs/"+url.PathEscape(string(runID))+"/attach", &response); err != nil {
 		return runAttachResponse{}, err

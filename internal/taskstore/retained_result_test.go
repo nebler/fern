@@ -27,7 +27,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		Key:   "retained-seal", RequestHash: sha256.Sum256([]byte("retained-seal")), Actor: admission.Claim.Actor,
 	}
 	seal := SealBackgroundRunParams{
-		WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, ExpectedRunRevision: run.Revision,
+		WorkspaceID: run.WorkspaceID, RunID: run.RunID, ExpectedRunRevision: run.Revision,
 		ResultID: testResultID(5106), Claim: sealClaim,
 		PolicyVersion: "background-retained.v1", APIContractVersion: "v1", AcceptedAt: now.Add(20 * time.Second),
 	}
@@ -46,7 +46,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	if _, err := store.SealBackgroundRun(context.Background(), ownerMismatch); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("seal owner mismatch = %v", err)
 	}
-	stop := StopBackgroundRunParams{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID,
+	stop := StopBackgroundRunParams{WorkspaceID: run.WorkspaceID, RunID: run.RunID,
 		Claim: task.IdempotencyClaim{
 			Scope: task.IdempotencyScope{WorkspaceID: run.WorkspaceID, CommandKind: StopBackgroundRunCommand}, Key: "stop-after-seal",
 			RequestHash: sha256.Sum256([]byte("stop-after-seal")), Actor: admission.Claim.Actor,
@@ -80,7 +80,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		writerInactive.WriterFence == nil || writerInactive.WriterFence.RuntimeToken != "runtime-token" {
 		t.Fatalf("writer fence = %+v, error=%v", writerInactive, err)
 	}
-	if _, err := store.db.Exec(`UPDATE runs SET writer_fence_token='other',revision=revision+1,updated_at=updated_at+1 WHERE id=?`, run.TaskID); err == nil {
+	if _, err := store.db.Exec(`UPDATE runs SET writer_fence_token='other',revision=revision+1,updated_at=updated_at+1 WHERE id=?`, run.RunID); err == nil {
 		t.Fatal("writer fence accepted raw mutation")
 	}
 
@@ -131,7 +131,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		t.Fatal("selected result accepted raw mutation")
 	}
 	if _, err := store.db.Exec(`UPDATE runs SET state='result_ready',effect_phase='cleaning',
-revision=revision+1,updated_at=updated_at+1 WHERE id=?`, run.TaskID); err == nil {
+revision=revision+1,updated_at=updated_at+1 WHERE id=?`, run.RunID); err == nil {
 		t.Fatal("sealed run released its resources without a committed result")
 	}
 	exportNow = exportNow.Add(time.Second)
@@ -179,8 +179,8 @@ revision=revision+1,updated_at=updated_at+1 WHERE id=?`, run.TaskID); err == nil
 	if err != nil || cleanupRun.EffectPhase != BackgroundRunEffectCleanupComplete {
 		t.Fatalf("retained cleanup completion = %+v, error=%v", cleanupRun, err)
 	}
-	projection, err := store.GetBackgroundRunResult(context.Background(), run.WorkspaceID, run.TaskID, admission.Claim.Actor)
-	if err != nil || projection.Result.ID != seal.ResultID || projection.Run.TaskID != run.TaskID {
+	projection, err := store.GetBackgroundRunResult(context.Background(), run.WorkspaceID, run.RunID, admission.Claim.Actor)
+	if err != nil || projection.Result.ID != seal.ResultID || projection.Run.RunID != run.RunID {
 		t.Fatalf("background result projection = %+v, error=%v", projection, err)
 	}
 }

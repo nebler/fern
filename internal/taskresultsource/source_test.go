@@ -80,10 +80,10 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 	defer engine.Close()
 	ids := task.NewSecureGenerator()
 	workspaceID, _ := ids.WorkspaceID()
-	taskID, _ := ids.TaskID()
+	runID, _ := ids.RunID()
 	resultID, _ := ids.ResultID()
 	sessionID, messageID := mustSession(t, ids), mustMessage(t, ids)
-	source, err := taskartifact.NewSource(repository, workspaceID, taskID)
+	source, err := taskartifact.NewSource(repository, workspaceID, runID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,9 +102,9 @@ func TestRetainedSourceUsesFreshValidatedCheckoutAndAlwaysCleans(t *testing.T) {
 	}
 	sealedAt := time.UnixMilli(2)
 	projection := taskstore.BackgroundRunResultProjection{
-		Run: taskstore.BackgroundRun{WorkspaceID: workspaceID, TaskID: taskID, RepositoryID: 1, BaseOID: base,
+		Run: taskstore.BackgroundRun{WorkspaceID: workspaceID, RunID: runID, RepositoryID: 1, BaseOID: base,
 			OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID, Seal: &taskstore.Seal{ResultID: resultID}},
-		Result: taskstore.Result{ID: resultID, TaskID: taskID, State: taskstore.ResultSealed, BaseSHA: snapshot.Base,
+		Result: taskstore.Result{ID: resultID, RunID: runID, State: taskstore.ResultSealed, BaseSHA: snapshot.Base,
 			ResultCommit: snapshot.Result, TreeOID: snapshot.Tree, ChangeCount: len(snapshot.Changes), ChangesSHA256: snapshot.ChangesSHA256.Bytes(),
 			ManifestSHA256: snapshot.ManifestSHA256.Bytes(), BundleSHA256: snapshot.BundleSHA256.Bytes(), BundleBytes: snapshot.BundleBytes,
 			SealedAt: &sealedAt},

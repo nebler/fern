@@ -7,7 +7,7 @@ import (
 )
 
 func TestResourcesPreserveNames(t *testing.T) {
-	r := NewResources(task.TaskID("tsk_0198d34d-6a50-75fb-b1f2-000000000001"))
+	r := NewResources(task.RunID("run_0198d34d-6a50-75fb-b1f2-000000000001"))
 	stem := "run-0198d34d6a5075fbb1f2000000000001"
 	if !r.Matches(stem+"-clone", "fern-"+stem+"-opencode", "fern-"+stem, stem+"-endpoint") {
 		t.Fatalf("names changed: %+v", r)

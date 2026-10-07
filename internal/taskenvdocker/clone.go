@@ -19,7 +19,7 @@ import (
 type cloneMarker struct {
 	Version   int    `json:"version"`
 	Workspace string `json:"workspace"`
-	Task      string `json:"task"`
+	Run       string `json:"run"`
 	Image     string `json:"image"`
 	Clone     string `json:"clone"`
 	Base      string `json:"base"`
@@ -212,7 +212,7 @@ func (p *Provider) cloneMarkerPath(run taskstore.BackgroundRun) string {
 }
 
 func expectedCloneMarker(run taskstore.BackgroundRun, digest string, device, inode uint64) cloneMarker {
-	return cloneMarker{1, string(run.WorkspaceID), string(run.TaskID), run.ImageIdentity, run.CloneIdentity, string(run.BaseOID), run.RepositoryRemote, digest, device, inode}
+	return cloneMarker{1, string(run.WorkspaceID), string(run.RunID), run.ImageIdentity, run.CloneIdentity, string(run.BaseOID), run.RepositoryRemote, digest, device, inode}
 }
 
 func (p *Provider) writeCloneMarker(run taskstore.BackgroundRun, digest string, info os.FileInfo) (cloneMarkerSnapshot, error) {

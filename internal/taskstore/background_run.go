@@ -15,22 +15,22 @@ const backgroundRunResourceSpecVersion = run.ResourceSpecVersion
 
 // GetBackgroundRun reads one run. Plugin actors see only runs they created;
 // a foreign run reads as not found.
-func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID task.WorkspaceID, taskID task.TaskID, actor task.ActorSnapshot) (BackgroundRun, error) {
+func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID task.WorkspaceID, runID task.RunID, actor task.ActorSnapshot) (BackgroundRun, error) {
 	if !backgroundRunReader(actor.Type) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run reader", ErrInvalidInput)
 	}
 	if actor.Type == task.ActorOpenCode {
-		return readOwnedRun(ctx, s.db, workspaceID, taskID, actor)
+		return readOwnedRun(ctx, s.db, workspaceID, runID, actor)
 	}
-	return readRun(ctx, s.db, workspaceID, taskID)
+	return readRun(ctx, s.db, workspaceID, runID)
 }
 
 // ReadBackgroundRunLifecycle returns the (state, phase) of one run for the
 // trusted in-process coordinator. It authorizes no actor.
-func (s *Store) ReadBackgroundRunLifecycle(ctx context.Context, workspaceID task.WorkspaceID, taskID task.TaskID) (BackgroundRunState, BackgroundRunEffectPhase, error) {
+func (s *Store) ReadBackgroundRunLifecycle(ctx context.Context, workspaceID task.WorkspaceID, runID task.RunID) (BackgroundRunState, BackgroundRunEffectPhase, error) {
 	var state BackgroundRunState
 	var phase BackgroundRunEffectPhase
-	if err := s.db.QueryRowContext(ctx, `SELECT state,effect_phase FROM runs WHERE workspace_id=? AND id=?`, workspaceID, taskID).
+	if err := s.db.QueryRowContext(ctx, `SELECT state,effect_phase FROM runs WHERE workspace_id=? AND id=?`, workspaceID, runID).
 		Scan(&state, &phase); err != nil {
 		return "", "", fmt.Errorf("read run lifecycle: %w", err)
 	}
@@ -104,7 +104,7 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 	if found {
 		switch existing.classify(p.Claim) {
 		case task.IdempotencyReplay:
-			if existing.RunID != p.TaskID {
+			if existing.RunID != p.RunID {
 				return BackgroundRunStop{}, ErrIdempotencyConflict
 			}
 			run, getErr := readOwnedRun(ctx, tx, p.WorkspaceID, existing.RunID, p.Claim.Actor)
@@ -124,7 +124,7 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 		}
 	}
 
-	run, err := readOwnedRun(ctx, tx, p.WorkspaceID, p.TaskID, p.Claim.Actor)
+	run, err := readOwnedRun(ctx, tx, p.WorkspaceID, p.RunID, p.Claim.Actor)
 	if err != nil {
 		return BackgroundRunStop{}, err
 	}
@@ -137,14 +137,14 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 	if activeStop {
 		stopState = BackgroundRunCanceling
 	}
-	receipt, err := insertReceipt(ctx, tx, p.Claim, run.TaskID, p.APIContractVersion, p.StoppedAt, struct {
-		RunID task.TaskID        `json:"run_id"`
+	receipt, err := insertReceipt(ctx, tx, p.Claim, run.RunID, p.APIContractVersion, p.StoppedAt, struct {
+		RunID task.RunID         `json:"run_id"`
 		State BackgroundRunState `json:"state"`
-	}{run.TaskID, stopState})
+	}{run.RunID, stopState})
 	if err != nil {
 		return BackgroundRunStop{}, err
 	}
-	ref := BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, ExpectedRevision: run.Revision,
+	ref := BackgroundRunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID, ExpectedRevision: run.Revision,
 		ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: p.StoppedAt}
 	now := unixMillis(p.StoppedAt)
 	var stored BackgroundRun

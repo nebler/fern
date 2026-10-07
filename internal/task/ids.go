@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Identity types for Fern domain entities. Fern IDs (WorkspaceID, TaskID,
+// Identity types for Fern domain entities. Fern IDs (WorkspaceID, RunID,
 // ResultID) are prefixed lowercase UUIDv7 strings, validated by
 // their Parse functions; Generator mints them. GitHub-derived numeric types
 // are bounded by SQLite's signed integer range via parsePositiveUint.
@@ -15,7 +15,7 @@ import (
 // clock-ordering discipline.
 type (
 	WorkspaceID       string
-	TaskID            string
+	RunID             string
 	ResultID          string
 	RepositoryID      uint64
 	InstallationID    uint64
@@ -32,11 +32,11 @@ func ParseWorkspaceID(v string) (WorkspaceID, error) {
 	}
 	return WorkspaceID(v), nil
 }
-func ParseTaskID(v string) (TaskID, error) {
-	if err := validateFernID(v, "tsk_"); err != nil {
+func ParseRunID(v string) (RunID, error) {
+	if err := validateFernID(v, "run_"); err != nil {
 		return "", err
 	}
-	return TaskID(v), nil
+	return RunID(v), nil
 }
 func ParseResultID(v string) (ResultID, error) {
 	if err := validateFernID(v, "res_"); err != nil {

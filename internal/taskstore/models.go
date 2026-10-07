@@ -65,7 +65,7 @@ type Receipt struct {
 	Actor              task.ActorSnapshot
 	AcceptedAt         time.Time
 	APIContractVersion string
-	RunID              task.TaskID
+	RunID              task.RunID
 	ResponseStatus     int
 	ResponseProjection json.RawMessage
 }

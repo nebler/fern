@@ -21,18 +21,18 @@ func TestBackgroundRunAdmissionStopAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.GetBackgroundRun(context.Background(), testWorkspaceID(), admission.Run.TaskID, params.Claim.Actor)
-	if err != nil || run.TaskID != admission.Run.TaskID || run.BaseOID != params.BaseSHA || run.ImageIdentity != params.ImageIdentity ||
+	run, err := store.GetBackgroundRun(context.Background(), testWorkspaceID(), admission.Run.RunID, params.Claim.Actor)
+	if err != nil || run.RunID != admission.Run.RunID || run.BaseOID != params.BaseSHA || run.ImageIdentity != params.ImageIdentity ||
 		run.Profile != BackgroundRunSourceProfile || run.Agent != params.Agent || !run.Deadline.Equal(params.Deadline.Truncate(time.Millisecond)) ||
 		run.State != BackgroundRunQueued || run.EffectPhase != "absent" {
 		t.Fatalf("background run = %+v, error = %v", run, err)
 	}
-	resources := runidentity.NewResources(run.TaskID)
+	resources := runidentity.NewResources(run.RunID)
 	if !resources.Matches(run.CloneIdentity, run.VolumeIdentity, run.ContainerIdentity, run.EndpointIdentity) {
 		t.Fatalf("admission did not derive run identities: %+v", run)
 	}
 	stopHash := sha256.Sum256([]byte("stop"))
-	stopParams := StopBackgroundRunParams{WorkspaceID: testWorkspaceID(), TaskID: run.TaskID,
+	stopParams := StopBackgroundRunParams{WorkspaceID: testWorkspaceID(), RunID: run.RunID,
 		Claim: params.Claim, APIContractVersion: "run-v1", StoppedAt: testTime.Truncate(time.Millisecond).Add(time.Minute)}
 	stopParams.Claim.Scope.CommandKind = StopBackgroundRunCommand
 	stopParams.Claim.Key = "run-stop"
@@ -46,7 +46,7 @@ func TestBackgroundRunAdmissionStopAndRestart(t *testing.T) {
 		t.Fatalf("stop replay = %+v, error = %v", replay, err)
 	}
 	wrongTarget := stopParams
-	wrongTarget.TaskID = testTaskID(1699)
+	wrongTarget.RunID = testRunID(1699)
 	if _, err := store.StopBackgroundRun(context.Background(), wrongTarget); !errors.Is(err, ErrIdempotencyConflict) {
 		t.Fatalf("stop replay target mismatch = %v", err)
 	}
@@ -55,7 +55,7 @@ func TestBackgroundRunAdmissionStopAndRestart(t *testing.T) {
 	}
 	store = openTestStore(t, path)
 	t.Cleanup(func() { _ = store.Close() })
-	persisted, err := store.GetBackgroundRun(context.Background(), testWorkspaceID(), run.TaskID, params.Claim.Actor)
+	persisted, err := store.GetBackgroundRun(context.Background(), testWorkspaceID(), run.RunID, params.Claim.Actor)
 	if err != nil || persisted.State != BackgroundRunFailed || persisted.Revision != 2 || persisted.LastError != BackgroundRunStoppedBeforeStart {
 		t.Fatalf("restarted run = %+v, error = %v", persisted, err)
 	}
@@ -85,19 +85,19 @@ func TestBackgroundRunAdmissionIsAtomicAndActorFiltered(t *testing.T) {
 	if err != nil || len(listed) != 0 {
 		t.Fatalf("cross-credential list = %+v, error = %v", listed, err)
 	}
-	if _, err := store.GetBackgroundRun(context.Background(), testWorkspaceID(), first.TaskID, other); !errors.Is(err, ErrNotFound) {
+	if _, err := store.GetBackgroundRun(context.Background(), testWorkspaceID(), first.RunID, other); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-credential read = %v", err)
 	}
 	operator := task.ActorSnapshot{Type: task.ActorOperator, ID: "operator", DisplayName: "Operator",
 		CredentialID: "operator", Authentication: "basic", RequestID: "request"}
 	listed, err = store.ListBackgroundRuns(context.Background(), testWorkspaceID(), operator, 100)
-	if err != nil || len(listed) != 1 || listed[0].TaskID != first.TaskID {
+	if err != nil || len(listed) != 1 || listed[0].RunID != first.RunID {
 		t.Fatalf("operator list = %+v, error = %v", listed, err)
 	}
-	if run, err := store.GetBackgroundRun(context.Background(), testWorkspaceID(), first.TaskID, operator); err != nil || run.TaskID != first.TaskID {
+	if run, err := store.GetBackgroundRun(context.Background(), testWorkspaceID(), first.RunID, operator); err != nil || run.RunID != first.RunID {
 		t.Fatalf("operator read = %+v, error = %v", run, err)
 	}
-	if _, err := store.db.Exec(`UPDATE runs SET repository_remote='https://github.com/other/repo' WHERE id=?`, first.TaskID); err == nil {
+	if _, err := store.db.Exec(`UPDATE runs SET repository_remote='https://github.com/other/repo' WHERE id=?`, first.RunID); err == nil {
 		t.Fatal("immutable run input changed")
 	}
 }
@@ -108,32 +108,32 @@ func TestBackgroundRunListLazyCapacityAndOwnership(t *testing.T) {
 	createTestWorkspace(t, store)
 	ctx := context.Background()
 	first := testBackgroundRunAdmission(1800, "list-first")
-	assertList := func(actor task.ActorSnapshot, limit, count, capacity int, want task.TaskID) {
+	assertList := func(actor task.ActorSnapshot, limit, count, capacity int, want task.RunID) {
 		t.Helper()
 		runs, err := store.ListBackgroundRuns(ctx, testWorkspaceID(), actor, limit)
 		if err != nil || runs == nil || len(runs) != count || cap(runs) != capacity {
 			t.Fatalf("list: len=%d cap=%d nil=%v err=%v", len(runs), cap(runs), runs == nil, err)
 		}
-		if count > 0 && runs[0].TaskID != want {
-			t.Fatalf("first task = %s, want %s", runs[0].TaskID, want)
+		if count > 0 && runs[0].RunID != want {
+			t.Fatalf("first task = %s, want %s", runs[0].RunID, want)
 		}
 	}
 	assertList(first.Claim.Actor, MaxBackgroundRunListLimit, 0, 0, "")
 	if _, err := store.AdmitBackgroundRun(ctx, first); err != nil {
 		t.Fatal(err)
 	}
-	assertList(first.Claim.Actor, MaxBackgroundRunListLimit, 1, 1, first.TaskID)
-	assertList(first.Claim.Actor, 1, 1, 1, first.TaskID)
+	assertList(first.Claim.Actor, MaxBackgroundRunListLimit, 1, 1, first.RunID)
+	assertList(first.Claim.Actor, 1, 1, 1, first.RunID)
 	second := testBackgroundRunAdmission(1801, "list-second")
 	second.Claim.Actor.ID, second.Claim.Actor.CredentialID = "pc_other", "pc_other"
 	if _, err := store.AdmitBackgroundRun(ctx, second); err != nil {
 		t.Fatal(err)
 	}
 	// The newer foreign row must not consume the SQL limit before ownership.
-	assertList(first.Claim.Actor, 1, 1, 1, first.TaskID)
+	assertList(first.Claim.Actor, 1, 1, 1, first.RunID)
 	operator := task.ActorSnapshot{Type: task.ActorOperator, ID: "operator", DisplayName: "Operator",
 		CredentialID: "operator", Authentication: "basic", RequestID: "request"}
-	assertList(operator, 1, 1, 1, second.TaskID)
+	assertList(operator, 1, 1, 1, second.RunID)
 	other := first.Claim.Actor
 	other.CredentialID = "pc_absent"
 	assertList(other, MaxBackgroundRunListLimit, 0, 0, "")
@@ -143,11 +143,11 @@ func TestBackgroundRunListLazyCapacityAndOwnership(t *testing.T) {
 			t.Fatal(err)
 		}
 		if i == 10 {
-			assertList(first.Claim.Actor, MaxBackgroundRunListLimit, 10, 16, p.TaskID)
-			assertList(first.Claim.Actor, 7, 7, 7, p.TaskID)
+			assertList(first.Claim.Actor, MaxBackgroundRunListLimit, 10, 16, p.RunID)
+			assertList(first.Claim.Actor, 7, 7, 7, p.RunID)
 		}
 		if i == MaxBackgroundRunListLimit {
-			assertList(first.Claim.Actor, MaxBackgroundRunListLimit, i, i, p.TaskID)
+			assertList(first.Claim.Actor, MaxBackgroundRunListLimit, i, i, p.RunID)
 		}
 	}
 	// Invalid bounds are rejected before SQL, even when the context is canceled.
@@ -171,10 +171,10 @@ func TestBackgroundRunWorkspaceFenceAndLifecycleAlgebra(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherWorkspace := task.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000002")
-	if _, err := store.GetBackgroundRun(context.Background(), otherWorkspace, admission.Run.TaskID, params.Claim.Actor); !errors.Is(err, ErrNotFound) {
+	if _, err := store.GetBackgroundRun(context.Background(), otherWorkspace, admission.Run.RunID, params.Claim.Actor); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-workspace read = %v", err)
 	}
-	wrongWorkspaceStop := StopBackgroundRunParams{WorkspaceID: otherWorkspace, TaskID: admission.Run.TaskID,
+	wrongWorkspaceStop := StopBackgroundRunParams{WorkspaceID: otherWorkspace, RunID: admission.Run.RunID,
 		Claim:              params.Claim,
 		APIContractVersion: "run-v1", StoppedAt: testTime.Truncate(time.Millisecond).Add(time.Minute)}
 	wrongWorkspaceStop.Claim.Scope.WorkspaceID = otherWorkspace
@@ -195,7 +195,7 @@ func TestBackgroundRunWorkspaceFenceAndLifecycleAlgebra(t *testing.T) {
 		"prompt without runtime": `UPDATE runs SET state='uncertain',effect_phase='prompt_pending',prompt_request_attempted_at=?,revision=revision+1,updated_at=? WHERE id=?`,
 		"seal without request":   `UPDATE runs SET state='canceling',effect_phase='sealing',last_error=?,revision=revision+1,updated_at=? WHERE id=?`,
 	} {
-		if _, err := store.db.Exec(statement, now, now, admission.Run.TaskID); err == nil {
+		if _, err := store.db.Exec(statement, now, now, admission.Run.RunID); err == nil {
 			t.Fatalf("closed transition %q succeeded", name)
 		}
 	}
@@ -249,11 +249,11 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
 	run, err := startNextBackgroundRun(context.Background(), store, now)
-	if err != nil || run.TaskID != first.TaskID || run.State != BackgroundRunSettingUp || run.EffectPhase != BackgroundRunEffectProvisioning {
+	if err != nil || run.RunID != first.RunID || run.State != BackgroundRunSettingUp || run.EffectPhase != BackgroundRunEffectProvisioning {
 		t.Fatalf("first start = %+v, error = %v", run, err)
 	}
 	continued, err := store.NextBackgroundRun(context.Background(), testWorkspaceID(), BackgroundRunSourceProfile)
-	if err != nil || continued.TaskID != run.TaskID || continued.Revision != run.Revision {
+	if err != nil || continued.RunID != run.RunID || continued.Revision != run.Revision {
 		t.Fatalf("capacity-one next run = %+v, error=%v", continued, err)
 	}
 	if _, err := store.StartBackgroundRunProvisioning(context.Background(), backgroundRunRef(run, now)); !errors.Is(err, ErrInvalidInput) {
@@ -289,12 +289,12 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 	}
 	store = openTestStore(t, path)
 	restarted, err := startNextBackgroundRun(context.Background(), store, restartedAt)
-	if err != nil || restarted.TaskID != run.TaskID || restarted.Revision != run.Revision {
+	if err != nil || restarted.RunID != run.RunID || restarted.Revision != run.Revision {
 		t.Fatalf("restarted next run=%+v error=%v", restarted, err)
 	}
 	run = restarted
 
-	stop := StopBackgroundRunParams{WorkspaceID: testWorkspaceID(), TaskID: run.TaskID,
+	stop := StopBackgroundRunParams{WorkspaceID: testWorkspaceID(), RunID: run.RunID,
 		Claim:              first.Claim,
 		APIContractVersion: "run-v1", StoppedAt: restartedAt.Add(time.Second)}
 	stop.Claim.Scope.CommandKind = StopBackgroundRunCommand
@@ -313,12 +313,12 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 	}
 
 	stopRun, err := startNextBackgroundRun(context.Background(), store, stop.StoppedAt.Add(time.Second))
-	if err != nil || stopRun.TaskID != stopped.Run.TaskID || stopRun.State != BackgroundRunCanceling || stopRun.StopReceiptID == 0 {
+	if err != nil || stopRun.RunID != stopped.Run.RunID || stopRun.State != BackgroundRunCanceling || stopRun.StopReceiptID == 0 {
 		t.Fatalf("stopped next run = %+v, error = %v", stopRun, err)
 	}
 	// A coordinator that read the run before the stop committed holds a stale
 	// revision; the compare-and-swap rejects its write.
-	stale := BackgroundRunRef{WorkspaceID: stopRun.WorkspaceID, TaskID: stopRun.TaskID,
+	stale := BackgroundRunRef{WorkspaceID: stopRun.WorkspaceID, RunID: stopRun.RunID,
 		ExpectedRevision: run.Revision,
 		ExpectedState:    stopRun.State, ExpectedPhase: stopRun.EffectPhase, Now: stop.StoppedAt.Add(2 * time.Second)}
 	if _, err := store.MarkBackgroundRunCleanupRequired(context.Background(), MarkBackgroundRunCleanupRequiredParams{
@@ -338,7 +338,7 @@ func TestBackgroundRunCapacityRecoveryAndActiveStop(t *testing.T) {
 		t.Fatalf("final stop replay = %+v, error = %v", replay, replayErr)
 	}
 	next, err := startNextBackgroundRun(context.Background(), store, cleanupRef.Now.Add(time.Second))
-	if err != nil || next.TaskID != second.TaskID {
+	if err != nil || next.RunID != second.RunID {
 		t.Fatalf("capacity after final cleanup = %+v, error = %v", next, err)
 	}
 }
@@ -361,10 +361,10 @@ func TestNextBackgroundRunRequiresProfileButRecoversAcrossImageRotation(t *testi
 		t.Fatalf("old profile next run = %v", err)
 	}
 	started, err := startNextBackgroundRun(context.Background(), store, now)
-	if err != nil || started.TaskID != first.TaskID || started.ImageIdentity != first.ImageIdentity {
+	if err != nil || started.RunID != first.RunID || started.ImageIdentity != first.ImageIdentity {
 		t.Fatalf("rotated image recovery start = %+v, error = %v", started, err)
 	}
-	if next, err := startNextBackgroundRun(context.Background(), store, now); err != nil || next.TaskID != first.TaskID {
+	if next, err := startNextBackgroundRun(context.Background(), store, now); err != nil || next.RunID != first.RunID {
 		t.Fatalf("second image bypassed workspace capacity: %+v, %v", next, err)
 	}
 }
@@ -411,7 +411,7 @@ func TestBackgroundRunWorkProjectionAndPromptAttemptFenceSurviveRestart(t *testi
 	}
 	store = openTestStore(t, path)
 	t.Cleanup(func() { _ = store.Close() })
-	persisted, err := store.GetBackgroundRun(context.Background(), run.WorkspaceID, run.TaskID, params.Claim.Actor)
+	persisted, err := store.GetBackgroundRun(context.Background(), run.WorkspaceID, run.RunID, params.Claim.Actor)
 	if err != nil || persisted.PromptRequestAttemptedAt == nil || !persisted.PromptRequestAttemptedAt.Equal(*run.PromptRequestAttemptedAt) {
 		t.Fatalf("persisted attempt fence = %+v, error=%v", persisted, err)
 	}
@@ -446,7 +446,7 @@ func TestBackgroundRunSystemTimeoutHasNoPluginReceipt(t *testing.T) {
 		t.Fatalf("system timeout = %+v, error=%v", timedOut, err)
 	}
 	var receipts int
-	if err := store.db.QueryRow(`SELECT count(*) FROM receipts WHERE run_id=? AND command_kind='run.stop'`, timedOut.TaskID).Scan(&receipts); err != nil {
+	if err := store.db.QueryRow(`SELECT count(*) FROM receipts WHERE run_id=? AND command_kind='run.stop'`, timedOut.RunID).Scan(&receipts); err != nil {
 		t.Fatal(err)
 	}
 	if receipts != 0 {
@@ -514,7 +514,7 @@ func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitBackgro
 	switch state {
 	case BackgroundRunCanceling:
 		stop := StopBackgroundRunParams{
-			WorkspaceID: testWorkspaceID(), TaskID: run.TaskID,
+			WorkspaceID: testWorkspaceID(), RunID: run.RunID,
 			Claim:              params.Claim,
 			APIContractVersion: "run-v1", StoppedAt: ref.Now,
 		}
@@ -542,7 +542,7 @@ func prepareBackgroundRunCleanup(t *testing.T, store *Store, params AdmitBackgro
 
 func backgroundRunRef(run BackgroundRun, now time.Time) BackgroundRunRef {
 	return BackgroundRunRef{
-		WorkspaceID: run.WorkspaceID, TaskID: run.TaskID,
+		WorkspaceID: run.WorkspaceID, RunID: run.RunID,
 		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now,
 	}
 }

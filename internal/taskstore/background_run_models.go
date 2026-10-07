@@ -11,7 +11,7 @@ import (
 // store derives the instruction and profile digests and the canonical
 // resource identities itself.
 type AdmitBackgroundRunParams struct {
-	TaskID             task.TaskID
+	RunID              task.RunID
 	OpenCodeSessionID  task.OpenCodeSessionID
 	OpenCodeMessageID  task.OpenCodeMessageID
 	Claim              task.IdempotencyClaim
@@ -62,7 +62,7 @@ const (
 // authority recorded once along the way. The prompt itself is read only with
 // BackgroundRunWork.
 type BackgroundRun struct {
-	TaskID                     task.TaskID
+	RunID                      task.RunID
 	WorkspaceID                task.WorkspaceID
 	RepositoryID               task.RepositoryID
 	RepositoryRemote           string
@@ -105,7 +105,7 @@ type BackgroundRun struct {
 
 type StopBackgroundRunParams struct {
 	WorkspaceID        task.WorkspaceID
-	TaskID             task.TaskID
+	RunID              task.RunID
 	Claim              task.IdempotencyClaim
 	APIContractVersion string
 	StoppedAt          time.Time
@@ -130,7 +130,7 @@ type BackgroundRunWork struct {
 // stale ref fails instead of overwriting a concurrent transition.
 type BackgroundRunRef struct {
 	WorkspaceID      task.WorkspaceID
-	TaskID           task.TaskID
+	RunID            task.RunID
 	ExpectedRevision int64
 	ExpectedState    BackgroundRunState
 	ExpectedPhase    BackgroundRunEffectPhase

@@ -15,7 +15,7 @@ type artifactManifest struct {
 	Version               int
 	RepositoryID          task.RepositoryID
 	WorkspaceID           task.WorkspaceID
-	TaskID                task.TaskID
+	RunID                 task.RunID
 	ResultID              task.ResultID
 	ImageIdentity         string
 	Profile               string
@@ -43,7 +43,7 @@ type manifestWire struct {
 	Version               int                    `json:"version"`
 	RepositoryID          task.RepositoryID      `json:"repository_id"`
 	WorkspaceID           task.WorkspaceID       `json:"workspace_id"`
-	TaskID                task.TaskID            `json:"task_id"`
+	RunID                 task.RunID             `json:"run_id"`
 	ResultID              task.ResultID          `json:"result_id"`
 	ImageIdentity         string                 `json:"image_identity"`
 	Profile               string                 `json:"profile"`
@@ -70,7 +70,7 @@ func encodeManifest(manifest artifactManifest) ([]byte, Digest, error) {
 	}
 	wire := manifestWire{
 		Version: manifest.Version, RepositoryID: manifest.RepositoryID, WorkspaceID: manifest.WorkspaceID,
-		TaskID: manifest.TaskID, ResultID: manifest.ResultID,
+		RunID: manifest.RunID, ResultID: manifest.ResultID,
 		ImageIdentity: manifest.ImageIdentity, Profile: manifest.Profile, ProfileSHA256: manifest.ProfileSHA256.String(),
 		EnvironmentSHA256: manifest.EnvironmentSHA256.String(), ResourceSpecVersion: manifest.ResourceSpecVersion,
 		OpenCodeSessionID: manifest.OpenCodeSessionID, OpenCodeMessageID: manifest.OpenCodeMessageID,
@@ -108,7 +108,7 @@ func decodeManifest(encoded []byte) (artifactManifest, Digest, error) {
 		return artifactManifest{}, Digest{}, fmt.Errorf("%w: bundle digest", ErrVerification)
 	}
 	manifest := artifactManifest{
-		Version: wire.Version, RepositoryID: wire.RepositoryID, WorkspaceID: wire.WorkspaceID, TaskID: wire.TaskID,
+		Version: wire.Version, RepositoryID: wire.RepositoryID, WorkspaceID: wire.WorkspaceID, RunID: wire.RunID,
 		ResultID:      wire.ResultID,
 		ImageIdentity: wire.ImageIdentity, Profile: wire.Profile, ProfileSHA256: profileDigest,
 		EnvironmentSHA256: environmentDigest, ResourceSpecVersion: wire.ResourceSpecVersion,
@@ -134,7 +134,7 @@ func validateManifest(manifest artifactManifest) error {
 	if _, err := task.ParseWorkspaceID(string(manifest.WorkspaceID)); err != nil {
 		return fmt.Errorf("%w: workspace ID", ErrVerification)
 	}
-	if _, err := task.ParseTaskID(string(manifest.TaskID)); err != nil {
+	if _, err := task.ParseRunID(string(manifest.RunID)); err != nil {
 		return fmt.Errorf("%w: task ID", ErrVerification)
 	}
 	if _, err := task.ParseResultID(string(manifest.ResultID)); err != nil {

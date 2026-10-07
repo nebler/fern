@@ -25,7 +25,7 @@ func (s Seal) CommitEpochSeconds() int64 { return s.RequestedAt.Unix() }
 
 type SealBackgroundRunParams struct {
 	WorkspaceID         task.WorkspaceID
-	TaskID              task.TaskID
+	RunID               task.RunID
 	ExpectedRunRevision int64
 	ResultID            task.ResultID
 	Claim               task.IdempotencyClaim
@@ -67,7 +67,7 @@ func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams
 		case task.IdempotencyConflict:
 			return BackgroundRunSealAdmission{}, ErrIdempotencyConflict
 		case task.IdempotencyReplay:
-			if existing.RunID != p.TaskID {
+			if existing.RunID != p.RunID {
 				return BackgroundRunSealAdmission{}, ErrIdempotencyConflict
 			}
 			run, getErr := readOwnedRun(ctx, tx, p.WorkspaceID, existing.RunID, p.Claim.Actor)
@@ -83,7 +83,7 @@ func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams
 		}
 	}
 
-	run, err := readOwnedRun(ctx, tx, p.WorkspaceID, p.TaskID, p.Claim.Actor)
+	run, err := readOwnedRun(ctx, tx, p.WorkspaceID, p.RunID, p.Claim.Actor)
 	if err != nil {
 		return BackgroundRunSealAdmission{}, err
 	}
@@ -92,14 +92,14 @@ func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams
 		run.Seal != nil || run.TimeoutRequestedAt != nil || run.StopReceiptID != 0 {
 		return BackgroundRunSealAdmission{}, ErrInvalidState
 	}
-	receipt, err := insertReceipt(ctx, tx, p.Claim, run.TaskID, p.APIContractVersion, p.AcceptedAt, struct {
-		RunID    task.TaskID   `json:"run_id"`
+	receipt, err := insertReceipt(ctx, tx, p.Claim, run.RunID, p.APIContractVersion, p.AcceptedAt, struct {
+		RunID    task.RunID    `json:"run_id"`
 		ResultID task.ResultID `json:"result_id"`
-	}{run.TaskID, p.ResultID})
+	}{run.RunID, p.ResultID})
 	if err != nil {
 		return BackgroundRunSealAdmission{}, err
 	}
-	ref := BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, ExpectedRevision: run.Revision,
+	ref := BackgroundRunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID, ExpectedRevision: run.Revision,
 		ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: p.AcceptedAt}
 	stored, err := updateRunTx(ctx, tx, ref, `state='canceling',effect_phase='sealing',
 seal_receipt_id=?,seal_requested_at=?,seal_policy_version=?,result_id=?`,

@@ -27,12 +27,12 @@ func retainedTuple(t *testing.T) (taskartifact.Snapshot, taskstore.BackgroundRun
 	if err != nil {
 		t.Fatal(err)
 	}
-	snapshot := taskartifact.Snapshot{RepositoryID: 42, WorkspaceID: "workspace", TaskID: "task", ResultID: "result",
+	snapshot := taskartifact.Snapshot{RepositoryID: 42, WorkspaceID: "workspace", RunID: "task", ResultID: "result",
 		OpenCodeSessionID: "session", OpenCodeMessageID: "message", Base: "base", Result: "result", Tree: "tree",
 		ChangesSHA256: digest, ManifestSHA256: digest, BundleSHA256: digest, BundleBytes: 42}
-	run := taskstore.BackgroundRun{RepositoryID: snapshot.RepositoryID, WorkspaceID: snapshot.WorkspaceID, TaskID: snapshot.TaskID,
+	run := taskstore.BackgroundRun{RepositoryID: snapshot.RepositoryID, WorkspaceID: snapshot.WorkspaceID, RunID: snapshot.RunID,
 		OpenCodeSessionID: snapshot.OpenCodeSessionID, OpenCodeMessageID: snapshot.OpenCodeMessageID}
-	result := taskstore.Result{ID: snapshot.ResultID, TaskID: snapshot.TaskID, BaseSHA: snapshot.Base, ResultCommit: snapshot.Result,
+	result := taskstore.Result{ID: snapshot.ResultID, RunID: snapshot.RunID, BaseSHA: snapshot.Base, ResultCommit: snapshot.Result,
 		TreeOID: snapshot.Tree, ChangesSHA256: digest.Bytes(), ManifestSHA256: digest.Bytes(), BundleSHA256: digest.Bytes(), BundleBytes: snapshot.BundleBytes}
 	return snapshot, run, result
 }
@@ -42,7 +42,7 @@ func TestSnapshotMatchesEveryDurableSelectionField(t *testing.T) {
 	if !snapshotMatches(snapshot, run, result) {
 		t.Fatal("exact tuple rejected")
 	}
-	for _, field := range []string{"RepositoryID", "WorkspaceID", "TaskID", "ResultID", "OpenCodeSessionID", "OpenCodeMessageID", "Base", "Result", "Tree", "ChangesSHA256", "ManifestSHA256", "BundleSHA256", "BundleBytes"} {
+	for _, field := range []string{"RepositoryID", "WorkspaceID", "RunID", "ResultID", "OpenCodeSessionID", "OpenCodeMessageID", "Base", "Result", "Tree", "ChangesSHA256", "ManifestSHA256", "BundleSHA256", "BundleBytes"} {
 		t.Run(field, func(t *testing.T) {
 			changed := snapshot
 			reflect.ValueOf(&changed).Elem().FieldByName(field).SetZero()
@@ -113,10 +113,10 @@ func TestRetainedInstallationSkipsSnapshotOnlyForExactSelection(t *testing.T) {
 }
 
 func TestMakeRouteIdentityProjectsCommittedRuntime(t *testing.T) {
-	run := taskstore.BackgroundRun{WorkspaceID: "workspace", TaskID: "task", RuntimeEpoch: 4, OpenCodeSessionID: "session",
+	run := taskstore.BackgroundRun{WorkspaceID: "workspace", RunID: "task", RuntimeEpoch: 4, OpenCodeSessionID: "session",
 		ObservedContainerID: "not-the-attested-runtime"}
 	runtime := taskenvdocker.RuntimeIdentity{ContainerID: "container", StartedAt: "started", Token: "token"}
-	want := backgroundroute.Identity{WorkspaceID: "workspace", TaskID: "task", RuntimeEpoch: 4, SessionID: "session", ContainerID: "container", StartedAt: "started", RuntimeToken: "token"}
+	want := backgroundroute.Identity{WorkspaceID: "workspace", RunID: "task", RuntimeEpoch: 4, SessionID: "session", ContainerID: "container", StartedAt: "started", RuntimeToken: "token"}
 	if got := makeRouteIdentity(run, runtime); got != want {
 		t.Fatalf("route tuple = %+v, want %+v", got, want)
 	}

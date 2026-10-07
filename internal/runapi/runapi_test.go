@@ -80,11 +80,11 @@ type resultProjectionStore struct {
 	projection taskstore.BackgroundRunResultProjection
 }
 
-func (store *resultProjectionStore) GetBackgroundRun(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRun, error) {
+func (store *resultProjectionStore) GetBackgroundRun(context.Context, task.WorkspaceID, task.RunID, task.ActorSnapshot) (taskstore.BackgroundRun, error) {
 	return store.run, nil
 }
 
-func (store *resultProjectionStore) GetBackgroundRunResult(context.Context, task.WorkspaceID, task.TaskID, task.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error) {
+func (store *resultProjectionStore) GetBackgroundRunResult(context.Context, task.WorkspaceID, task.RunID, task.ActorSnapshot) (taskstore.BackgroundRunResultProjection, error) {
 	return store.projection, nil
 }
 
@@ -312,7 +312,7 @@ func TestRunAPIWakeFollowsDurableCreateAndStopCommitOnly(t *testing.T) {
 	}
 	created := fixture.request(http.MethodPost, PathPrefix, validCreateBody("Work"), "create-wake")
 	var response struct {
-		RunID task.TaskID `json:"run_id"`
+		RunID task.RunID `json:"run_id"`
 	}
 	if created.Code != http.StatusAccepted || json.Unmarshal(created.Body.Bytes(), &response) != nil || wakes.Load() != 1 {
 		t.Fatalf("create status=%d wakes=%d body=%s", created.Code, wakes.Load(), created.Body.String())
@@ -347,7 +347,7 @@ func TestRunAPISealIsStrictOwnedAndExactlyReplayable(t *testing.T) {
 		t.Fatalf("create = %d: %s", created.Code, created.Body.String())
 	}
 	var admission struct {
-		RunID task.TaskID `json:"run_id"`
+		RunID task.RunID `json:"run_id"`
 	}
 	if json.Unmarshal(created.Body.Bytes(), &admission) != nil {
 		t.Fatal("decode create")
@@ -386,16 +386,16 @@ func TestRunAPISealIsStrictOwnedAndExactlyReplayable(t *testing.T) {
 func TestRunAPIResultSeparatesImmutableAuthoritiesAndHidesStorage(t *testing.T) {
 	fixture := newAPIFixture(t, PluginOpenCodeProfile)
 	ids := task.NewSecureGenerator()
-	runID, _ := ids.TaskID()
+	runID, _ := ids.RunID()
 	resultID, _ := ids.ResultID()
 	changes := sha256.Sum256([]byte("changes"))
 	manifest := sha256.Sum256([]byte("artifact manifest"))
 	bundle := sha256.Sum256([]byte("bundle"))
-	run := taskstore.BackgroundRun{TaskID: runID, WorkspaceID: testWorkspace,
+	run := taskstore.BackgroundRun{RunID: runID, WorkspaceID: testWorkspace,
 		RepositoryRemote: "https://github.com/owner/repository", State: taskstore.BackgroundRunResultReady,
 		EffectPhase: taskstore.BackgroundRunEffectCleanupComplete, Seal: &taskstore.Seal{ResultID: resultID}}
 	projection := taskstore.BackgroundRunResultProjection{Run: run,
-		Result: taskstore.Result{ID: resultID, TaskID: runID, State: taskstore.ResultSealed, Outcome: task.ResultChanged, BaseSHA: testBase,
+		Result: taskstore.Result{ID: resultID, RunID: runID, State: taskstore.ResultSealed, Outcome: task.ResultChanged, BaseSHA: testBase,
 			ResultCommit: task.GitOID("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), TreeOID: task.GitOID("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
 			ChangeCount: 2, ChangesSHA256: changes, ManifestSHA256: manifest, BundleSHA256: bundle, BundleBytes: 1234}}
 	store := &resultProjectionStore{Store: fixture.store, run: run, projection: projection}
@@ -497,11 +497,11 @@ func (f *apiFixture) buildHandler(t *testing.T, available string) *Handler {
 	return handler
 }
 
-func (f *apiFixture) advanceToSession(t *testing.T, id task.TaskID) taskstore.BackgroundRun {
+func (f *apiFixture) advanceToSession(t *testing.T, id task.RunID) taskstore.BackgroundRun {
 	t.Helper()
 	now := time.Date(2026, 8, 31, 12, 0, 1, 0, time.UTC)
 	queued, err := f.store.NextBackgroundRun(context.Background(), testWorkspace, PluginOpenCodeProfile)
-	if err != nil || queued.TaskID != id {
+	if err != nil || queued.RunID != id {
 		t.Fatalf("next run=%+v error=%v", queued, err)
 	}
 	run, err := f.store.StartBackgroundRunProvisioning(context.Background(), openTestRef(queued, now))
@@ -526,7 +526,7 @@ func (f *apiFixture) advanceToSession(t *testing.T, id task.TaskID) taskstore.Ba
 	return run
 }
 
-func (f *apiFixture) advanceToPrompt(t *testing.T, id task.TaskID) taskstore.BackgroundRun {
+func (f *apiFixture) advanceToPrompt(t *testing.T, id task.RunID) taskstore.BackgroundRun {
 	run := f.advanceToSession(t, id)
 	now := run.UpdatedAt.Add(time.Millisecond)
 	var err error
@@ -540,7 +540,7 @@ func (f *apiFixture) advanceToPrompt(t *testing.T, id task.TaskID) taskstore.Bac
 }
 
 func openTestRef(run taskstore.BackgroundRun, now time.Time) taskstore.BackgroundRunRef {
-	return taskstore.BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID,
+	return taskstore.BackgroundRunRef{WorkspaceID: run.WorkspaceID, RunID: run.RunID,
 		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now}
 }
 func (f *apiFixture) withActor(t *testing.T, actor task.ActorSnapshot) *apiFixture {
@@ -585,7 +585,7 @@ func TestRunAPIAttachIssuesOnlyForReadyActiveRoute(t *testing.T) {
 	fixture := newAPIFixture(t, PluginOpenCodeProfile)
 	created := fixture.request(http.MethodPost, PathPrefix, validCreateBody("attach to this"), "attach-create")
 	var admission struct {
-		RunID task.TaskID `json:"run_id"`
+		RunID task.RunID `json:"run_id"`
 	}
 	if created.Code != http.StatusAccepted || json.Unmarshal(created.Body.Bytes(), &admission) != nil {
 		t.Fatalf("create = %d: %s", created.Code, created.Body.String())

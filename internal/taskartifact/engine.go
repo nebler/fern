@@ -207,7 +207,7 @@ func (e *Engine) Snapshot(ctx context.Context, spec SnapshotSpec) (Snapshot, Sta
 		return Snapshot{}, StagedLocator{}, err
 	}
 	manifest := artifactManifest{
-		Version: 3, RepositoryID: spec.RepositoryID, WorkspaceID: spec.Source.WorkspaceID, TaskID: spec.Source.TaskID,
+		Version: 3, RepositoryID: spec.RepositoryID, WorkspaceID: spec.Source.WorkspaceID, RunID: spec.Source.RunID,
 		ResultID:      spec.ResultID,
 		ImageIdentity: spec.ImageIdentity, Profile: spec.Profile, ProfileSHA256: spec.ProfileSHA256,
 		EnvironmentSHA256: spec.EnvironmentSHA256, ResourceSpecVersion: spec.ResourceSpecVersion,
@@ -314,7 +314,7 @@ func cloneChanges(entries []ChangeEntry) []ChangeEntry {
 
 func snapshotFromManifest(manifest artifactManifest, digest Digest) Snapshot {
 	return Snapshot{
-		RepositoryID: manifest.RepositoryID, WorkspaceID: manifest.WorkspaceID, TaskID: manifest.TaskID,
+		RepositoryID: manifest.RepositoryID, WorkspaceID: manifest.WorkspaceID, RunID: manifest.RunID,
 		ResultID: manifest.ResultID, ImageIdentity: manifest.ImageIdentity,
 		Profile: manifest.Profile, ProfileSHA256: manifest.ProfileSHA256, EnvironmentSHA256: manifest.EnvironmentSHA256,
 		ResourceSpecVersion: manifest.ResourceSpecVersion, OpenCodeSessionID: manifest.OpenCodeSessionID,
