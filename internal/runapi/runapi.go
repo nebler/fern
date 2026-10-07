@@ -478,7 +478,7 @@ func attachmentReady(run taskstore.BackgroundRun) bool {
 		run.State == taskstore.BackgroundRunNeedsYou || run.State == taskstore.BackgroundRunUncertain
 	// Provisioning reconciles the session before the prompt fence ends it.
 	ready := run.EffectPhase == taskstore.BackgroundRunEffectPromptPending || run.EffectPhase == taskstore.BackgroundRunEffectAdmitted
-	return active && ready && run.StopReceiptID == ""
+	return active && ready && run.StopReceiptID == 0
 }
 
 func (h *Handler) stop(w http.ResponseWriter, r *http.Request, actor task.ActorSnapshot, id task.TaskID) {

@@ -42,7 +42,7 @@ func BenchmarkBackgroundRunAdmissionFresh(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		p := testAdmission(i+1, fmt.Sprintf("bench-%d", i), "Implement the requested change and retain the result.")
 		admission, err := s.AdmitBackgroundRun(ctx, p)
-		if err != nil || admission.Replayed || admission.Task.ID != p.TaskID {
+		if err != nil || admission.Replayed || admission.Run.TaskID != p.TaskID {
 			b.Fatalf("fresh admission: replay=%v err=%v", admission.Replayed, err)
 		}
 	}
@@ -127,7 +127,7 @@ func BenchmarkBackgroundRunRead(b *testing.B) {
 		b.ReportAllocs()
 		for i := 0; i < b.N; i++ {
 			receipt, found, err := s.FindReceiptByIdempotency(ctx, testWorkspaceID(), CreateBackgroundRunCommand, p.Claim.Key)
-			if err != nil || !found || receipt.TargetID != p.TaskID {
+			if err != nil || !found || receipt.RunID != p.TaskID {
 				b.Fatalf("receipt lookup: found=%v err=%v", found, err)
 			}
 		}

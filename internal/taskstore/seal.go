@@ -2,7 +2,6 @@ package taskstore
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -14,7 +13,7 @@ const SealBackgroundRunCommand = "run.seal"
 // Seal is the durable seal admission recorded on its run. Its receipt holds
 // the requesting actor, idempotency key, and request hash.
 type Seal struct {
-	ReceiptID     task.ReceiptID
+	ReceiptID     int64
 	ResultID      task.ResultID
 	RequestedAt   time.Time
 	PolicyVersion string
@@ -28,7 +27,6 @@ type SealBackgroundRunParams struct {
 	WorkspaceID         task.WorkspaceID
 	TaskID              task.TaskID
 	ExpectedRunRevision int64
-	ReceiptID           task.ReceiptID
 	ResultID            task.ResultID
 	Claim               task.IdempotencyClaim
 	PolicyVersion       string
@@ -69,8 +67,11 @@ func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams
 		case task.IdempotencyConflict:
 			return BackgroundRunSealAdmission{}, ErrIdempotencyConflict
 		case task.IdempotencyReplay:
-			run, getErr := readBackgroundRunExact(ctx, tx, p.WorkspaceID, existing.TargetID)
-			if getErr != nil || existing.TargetID != p.TaskID || run.Seal == nil || run.Seal.ReceiptID != existing.ID {
+			if existing.RunID != p.TaskID {
+				return BackgroundRunSealAdmission{}, ErrIdempotencyConflict
+			}
+			run, getErr := readOwnedRun(ctx, tx, p.WorkspaceID, existing.RunID, p.Claim.Actor)
+			if getErr != nil || run.Seal == nil || run.Seal.ReceiptID != existing.ID {
 				return BackgroundRunSealAdmission{}, fmt.Errorf("%w: background seal replay", ErrCorruptStore)
 			}
 			if err := tx.Commit(); err != nil {
@@ -82,54 +83,35 @@ func (s *Store) SealBackgroundRun(ctx context.Context, p SealBackgroundRunParams
 		}
 	}
 
-	run, err := getBackgroundRunOwned(ctx, tx, p.WorkspaceID, p.TaskID, p.Claim.Actor)
+	run, err := readOwnedRun(ctx, tx, p.WorkspaceID, p.TaskID, p.Claim.Actor)
 	if err != nil {
 		return BackgroundRunSealAdmission{}, err
 	}
 	if run.Revision != p.ExpectedRunRevision || run.EffectPhase != BackgroundRunEffectAdmitted ||
 		(run.State != BackgroundRunWorking && run.State != BackgroundRunNeedsYou && run.State != BackgroundRunUncertain) ||
-		run.Seal != nil || run.TimeoutRequestedAt != nil || run.StopReceiptID != "" {
+		run.Seal != nil || run.TimeoutRequestedAt != nil || run.StopReceiptID != 0 {
 		return BackgroundRunSealAdmission{}, ErrInvalidState
 	}
-	now := unixMillis(p.AcceptedAt)
-	response, err := json.Marshal(struct {
+	receipt, err := insertReceipt(ctx, tx, p.Claim, run.TaskID, p.APIContractVersion, p.AcceptedAt, struct {
 		RunID    task.TaskID   `json:"run_id"`
 		ResultID task.ResultID `json:"result_id"`
 	}{run.TaskID, p.ResultID})
 	if err != nil {
 		return BackgroundRunSealAdmission{}, err
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO receipts(
-id,workspace_id,command_kind,state,idempotency_key,request_hash,actor,accepted_at,
-api_contract_version,target_type,target_id,response_status,response_projection)
-VALUES(?,?,?,'accepted',?,?,?,?,?,'task',?,202,?)`, p.ReceiptID, p.WorkspaceID, SealBackgroundRunCommand,
-		p.Claim.Key, p.Claim.RequestHash[:], encodeActor(p.Claim.Actor), now, p.APIContractVersion, p.TaskID, string(response)); err != nil {
-		return BackgroundRunSealAdmission{}, fmt.Errorf("insert background seal receipt: %w", err)
-	}
-	update, err := tx.ExecContext(ctx, `UPDATE background_runs SET state='canceling',effect_phase='sealing',
-seal_receipt_id=?,seal_requested_at=?,seal_policy_version=?,result_id=?,revision=revision+1,updated_at=?
-WHERE task_id=? AND workspace_id=? AND revision=? AND state IN ('working','needs_you','uncertain') AND effect_phase='admitted' AND
-stop_receipt_id IS NULL AND timeout_requested_at IS NULL AND seal_receipt_id IS NULL`,
-		p.ReceiptID, now, p.PolicyVersion, p.ResultID, now, p.TaskID, p.WorkspaceID, p.ExpectedRunRevision)
-	if err != nil {
-		return BackgroundRunSealAdmission{}, fmt.Errorf("bind background seal: %w", err)
-	}
-	if changed, changeErr := update.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRunSealAdmission{}, ErrInvalidState
-	}
-	stored, err := readBackgroundRunExact(ctx, tx, p.WorkspaceID, p.TaskID)
+	ref := BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, ExpectedRevision: run.Revision,
+		ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: p.AcceptedAt}
+	stored, err := updateRunTx(ctx, tx, ref, `state='canceling',effect_phase='sealing',
+seal_receipt_id=?,seal_requested_at=?,seal_policy_version=?,result_id=?`,
+		[]any{receipt.ID, unixMillis(p.AcceptedAt), p.PolicyVersion, p.ResultID}, "bind background seal",
+		`stop_receipt_id IS NULL`, `timeout_requested_at IS NULL`, `seal_receipt_id IS NULL`)
 	if err != nil {
 		return BackgroundRunSealAdmission{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return BackgroundRunSealAdmission{}, fmt.Errorf("commit background run seal: %w", err)
 	}
-	return BackgroundRunSealAdmission{Run: stored, Receipt: Receipt{
-		ID: p.ReceiptID, WorkspaceID: p.WorkspaceID, CommandKind: SealBackgroundRunCommand, State: ReceiptAccepted,
-		IdempotencyKey: p.Claim.Key, RequestHash: p.Claim.RequestHash, Actor: p.Claim.Actor, AcceptedAt: fromUnixMillis(now),
-		APIContractVersion: p.APIContractVersion, TargetType: "task", TargetID: p.TaskID, ResponseStatus: 202,
-		ResponseProjection: response,
-	}}, nil
+	return BackgroundRunSealAdmission{Run: stored, Receipt: receipt}, nil
 }
 
 type WriterFenceKind string

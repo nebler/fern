@@ -200,12 +200,12 @@ func (c *Coordinator) runOnce(ctx context.Context) (taskstore.BackgroundRunWork,
 	if !lifecycle.Valid {
 		return work, taskstore.ErrCorruptStore
 	}
-	if work.Run.StopReceiptID == "" && work.Run.TimeoutRequestedAt == nil && lifecycle.TimeoutEligible &&
-		!now.Before(work.Deadline) {
+	if work.Run.StopReceiptID == 0 && work.Run.TimeoutRequestedAt == nil && lifecycle.TimeoutEligible &&
+		!now.Before(work.Run.Deadline) {
 		return work, c.requestTimeout(ctx, work.Run)
 	}
 	configurationDiffers := work.Run.ResourceSpecVersion != rundomain.ResourceSpecVersion || work.Run.ImageIdentity != c.config.ImageIdentity || work.Run.EnvironmentSHA256 != c.config.EnvironmentSHA256 ||
-		work.Agent != c.config.Agent || work.ModelProvider != c.config.ModelProvider || work.Model != c.config.Model
+		work.Run.Agent != c.config.Agent || work.Run.ModelProvider != c.config.ModelProvider || work.Run.Model != c.config.Model
 	if configurationDiffers && lifecycle.Executing {
 		return work, c.cleanupRequired(ctx, work, "configured execution identity differs")
 	}
@@ -308,7 +308,7 @@ func (c *Coordinator) terminalize(parent context.Context, work taskstore.Backgro
 	reason := "runtime_unavailable"
 	if run.TimeoutRequestedAt != nil {
 		reason = "attempt_timeout"
-	} else if run.StopReceiptID != "" {
+	} else if run.StopReceiptID != 0 {
 		reason = "user_stopped"
 	}
 	mutation, cancel, now, err := c.effectContext(parent, work, false)
@@ -433,7 +433,7 @@ func (a *retainedExportAttempt) recoveryRequired(parent context.Context, cause e
 func (a *retainedExportAttempt) snapshotAndInstall(operation, parent context.Context, repositoryPath string) (resultErr error) {
 	c, run := a.coordinator, a.run
 	artifactSource, sourceSpecErr := taskartifact.NewSource(repositoryPath, run.WorkspaceID, run.TaskID)
-	profileDigest, profileErr := taskartifact.NewDigest(run.ProfileSHA256)
+	profileDigest, profileErr := taskartifact.NewDigest(sha256.Sum256([]byte(run.Profile)))
 	environmentDigest, environmentErr := taskartifact.NewDigest(run.EnvironmentSHA256)
 	if sourceSpecErr != nil || profileErr != nil || environmentErr != nil {
 		return errors.Join(sourceSpecErr, profileErr, environmentErr)
@@ -644,7 +644,7 @@ func (c *Coordinator) dispatchPrompt(operation, parent context.Context, work tas
 		return err
 	}
 	defer cancel()
-	if !now.Before(work.Deadline) {
+	if !now.Before(work.Run.Deadline) {
 		return c.requestTimeout(parent, work.Run)
 	}
 	work.Run, err = c.store.RecordBackgroundRunPromptRequestAttempted(mutation, ref(work.Run, now))
@@ -797,7 +797,7 @@ func (c *Coordinator) promptDispatchAuthority(work taskstore.BackgroundRunWork) 
 	if err != nil {
 		return err
 	}
-	if !now.Before(work.Deadline) {
+	if !now.Before(work.Run.Deadline) {
 		return context.DeadlineExceeded
 	}
 	return nil
@@ -809,8 +809,8 @@ func (c *Coordinator) effectContext(parent context.Context, work taskstore.Backg
 		return nil, nil, time.Time{}, err
 	}
 	deadline := now.Add(c.config.OperationTimeout)
-	if enforceAttemptDeadline && work.Deadline.Before(deadline) {
-		deadline = work.Deadline
+	if enforceAttemptDeadline && work.Run.Deadline.Before(deadline) {
+		deadline = work.Run.Deadline
 	}
 	if !deadline.After(now) {
 		return nil, nil, now, context.DeadlineExceeded
@@ -853,8 +853,8 @@ func (c *Coordinator) recordObservation(ctx context.Context, work taskstore.Back
 
 // ref pins the revision this scan read; every write is a compare-and-swap on it.
 func ref(run taskstore.BackgroundRun, now time.Time) taskstore.BackgroundRunRef {
-	return taskstore.BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, AttemptID: run.AttemptID,
-		Generation: run.Generation, ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now}
+	return taskstore.BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID,
+		ExpectedRevision: run.Revision, ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: now}
 }
 
 func evidence(run taskstore.BackgroundRun, now time.Time, value string) taskstore.RecordBackgroundRunEvidenceParams {

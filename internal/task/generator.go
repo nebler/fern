@@ -23,8 +23,6 @@ type Generator struct {
 
 type AdmissionIDs struct {
 	TaskID            TaskID
-	AttemptID         AttemptID
-	ReceiptID         ReceiptID
 	OpenCodeSessionID OpenCodeSessionID
 	OpenCodeMessageID OpenCodeMessageID
 }
@@ -48,12 +46,6 @@ func (g *Generator) GenerateAdmissionIDs() (AdmissionIDs, error) {
 	if ids.TaskID, err = g.TaskID(); err != nil {
 		return AdmissionIDs{}, err
 	}
-	if ids.AttemptID, err = g.AttemptID(); err != nil {
-		return AdmissionIDs{}, err
-	}
-	if ids.ReceiptID, err = g.ReceiptID(); err != nil {
-		return AdmissionIDs{}, err
-	}
 	if ids.OpenCodeSessionID, err = g.OpenCodeSessionID(); err != nil {
 		return AdmissionIDs{}, err
 	}
@@ -71,16 +63,6 @@ func (g *Generator) WorkspaceID() (WorkspaceID, error) {
 func (g *Generator) TaskID() (TaskID, error) {
 	value, err := g.fernID("tsk_")
 	return TaskID(value), err
-}
-
-func (g *Generator) AttemptID() (AttemptID, error) {
-	value, err := g.fernID("att_")
-	return AttemptID(value), err
-}
-
-func (g *Generator) ReceiptID() (ReceiptID, error) {
-	value, err := g.fernID("rcp_")
-	return ReceiptID(value), err
 }
 
 func (g *Generator) ResultID() (ResultID, error) {

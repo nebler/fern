@@ -25,12 +25,12 @@ var (
 // ConflictError identifies the original accepted command without disclosing
 // request content.
 type ConflictError struct {
-	ReceiptID task.ReceiptID
-	TargetID  task.TaskID
+	ReceiptID int64
+	RunID     task.TaskID
 }
 
 func (e *ConflictError) Error() string {
-	return fmt.Sprintf("%v: receipt %s targets %s", ErrIdempotencyConflict, e.ReceiptID, e.TargetID)
+	return fmt.Sprintf("%v: receipt %d targets %s", ErrIdempotencyConflict, e.ReceiptID, e.RunID)
 }
 
 func (e *ConflictError) Unwrap() error { return ErrIdempotencyConflict }

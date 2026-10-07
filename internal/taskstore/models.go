@@ -54,23 +54,21 @@ type Workspace struct {
 	UpdatedAt           time.Time
 }
 
+// Receipt is the durable acceptance of one idempotent run command, bound to
+// its request hash and authenticated actor.
 type Receipt struct {
-	ID                 task.ReceiptID
+	ID                 int64
 	WorkspaceID        task.WorkspaceID
 	CommandKind        string
-	State              string
 	IdempotencyKey     task.IdempotencyKey
 	RequestHash        task.RequestHash
 	Actor              task.ActorSnapshot
 	AcceptedAt         time.Time
 	APIContractVersion string
-	TargetType         string
-	TargetID           task.TaskID
+	RunID              task.TaskID
 	ResponseStatus     int
 	ResponseProjection json.RawMessage
 }
-
-const ReceiptAccepted = "accepted"
 
 // Claim is the idempotency claim this receipt accepted.
 func (r Receipt) Claim() task.IdempotencyClaim {
@@ -81,47 +79,4 @@ func (r Receipt) Claim() task.IdempotencyClaim {
 func (r Receipt) classify(incoming task.IdempotencyClaim) task.IdempotencyDisposition {
 	claim := r.Claim()
 	return task.ClassifyIdempotency(&claim, incoming)
-}
-
-type Task struct {
-	ID               task.TaskID
-	WorkspaceID      task.WorkspaceID
-	Title            string
-	Prompt           string
-	PromptSHA256     [32]byte
-	RepositoryID     task.RepositoryID
-	BaseRef          string
-	BaseSHA          task.GitOID
-	ObjectFormat     string
-	State            task.TaskState
-	TerminalReason   *string
-	CurrentAttemptID task.AttemptID
-	SealedResultID   task.ResultID
-	Revision         int64
-	CreatedAt        time.Time
-	UpdatedAt        time.Time
-}
-
-type Attempt struct {
-	ID                       task.AttemptID
-	TaskID                   task.TaskID
-	WorkspaceID              task.WorkspaceID
-	Sequence                 int64
-	State                    task.AttemptState
-	OpenCodeSessionID        task.OpenCodeSessionID
-	OpenCodeMessageID        task.OpenCodeMessageID
-	PromptSHA256             [32]byte
-	BaseSHA                  task.GitOID
-	ImageDigest              string
-	OpenCodeProtocol         string
-	ExecutionContractVersion string
-	Agent                    string
-	ModelProvider            string
-	Model                    string
-	Deadline                 time.Time
-	TerminalReason           *string
-	SealedResultID           task.ResultID
-	Revision                 int64
-	CreatedAt                time.Time
-	UpdatedAt                time.Time
 }

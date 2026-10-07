@@ -108,8 +108,8 @@ func TestEffectContextAllowsCleanupAfterAttemptDeadline(t *testing.T) {
 		Run: taskstore.BackgroundRun{
 			State:       taskstore.BackgroundRunCanceling,
 			EffectPhase: taskstore.BackgroundRunEffectCleaning,
+			Deadline:    now.Add(-time.Second),
 		},
-		Deadline: now.Add(-time.Second),
 	}
 
 	ctx, cancel, _, err := coordinator.effectContext(context.Background(), work, classify(work.Run).Executing)
@@ -133,7 +133,7 @@ func TestEffectContextBoundsEffectsAndPromptDeadline(t *testing.T) {
 	now := time.Date(2026, 8, 31, 12, 0, 0, 0, time.UTC)
 	deadline := now.Add(2 * time.Second)
 	coordinator := &Coordinator{config: Config{Now: func() time.Time { return now }, OperationTimeout: 10 * time.Second}}
-	work := taskstore.BackgroundRunWork{Deadline: deadline}
+	work := taskstore.BackgroundRunWork{Run: taskstore.BackgroundRun{Deadline: deadline}}
 
 	ctx, cancel, _, err := coordinator.effectContext(context.Background(), work, false)
 	if err != nil {

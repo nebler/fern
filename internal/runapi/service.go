@@ -140,7 +140,7 @@ func (s *service) Create(ctx context.Context, actor task.ActorSnapshot, key task
 		return zero, err
 	}
 	if found {
-		current, err := s.config.Store.GetBackgroundRun(ctx, s.config.WorkspaceID, receipt.TargetID, actor)
+		current, err := s.config.Store.GetBackgroundRun(ctx, s.config.WorkspaceID, receipt.RunID, actor)
 		if err != nil {
 			return zero, err
 		}
@@ -160,26 +160,23 @@ func (s *service) Create(ctx context.Context, actor task.ActorSnapshot, key task
 	if now.IsZero() || now.UnixMilli() < 0 {
 		return zero, errors.New("invalid command clock")
 	}
-	branch, baseRef := "", input.BaseOID
+	branch := ""
 	if input.Branch != nil {
-		branch, baseRef = *input.Branch, *input.Branch
+		branch = *input.Branch
 	}
-	intent := &taskstore.BackgroundRunIntent{RepositoryRemote: input.Repository, Branch: branch, Profile: input.Profile,
-		EnvironmentSHA256: s.config.BackgroundEnvironmentSHA256, ImageIdentity: s.config.BackgroundImageIdentity}
 	admission, err := s.config.Store.AdmitBackgroundRun(ctx, taskstore.AdmitBackgroundRunParams{
-		TaskID: ids.TaskID, AttemptID: ids.AttemptID, ReceiptID: ids.ReceiptID,
-		OpenCodeSessionID: ids.OpenCodeSessionID, OpenCodeMessageID: ids.OpenCodeMessageID,
-		Claim: claim, Title: "Background Run", Prompt: input.Instruction, RepositoryID: s.config.RepositoryID,
-		BaseRef: baseRef, BaseSHA: base, ObjectFormat: "sha1", ExecutionContractVersion: APIContractVersion,
+		TaskID: ids.TaskID, OpenCodeSessionID: ids.OpenCodeSessionID, OpenCodeMessageID: ids.OpenCodeMessageID,
+		Claim: claim, Prompt: input.Instruction, RepositoryID: s.config.RepositoryID,
+		RepositoryRemote: input.Repository, BaseSHA: base, Branch: branch, Profile: input.Profile,
+		ImageIdentity: s.config.BackgroundImageIdentity, EnvironmentSHA256: s.config.BackgroundEnvironmentSHA256,
 		Agent: s.config.Agent, ModelProvider: s.config.ModelProvider, Model: s.config.Model,
-		Deadline: now.Add(s.config.AttemptTimeout), APIContractVersion: APIContractVersion,
-		AcceptedAt: now, BackgroundRun: intent,
+		Deadline: now.Add(s.config.AttemptTimeout), APIContractVersion: APIContractVersion, AcceptedAt: now,
 	})
 	if err != nil {
 		return zero, err
 	}
 	s.notify(admission.Replayed)
-	return createAcceptance{admission.Task.ID, true, admission.Replayed}, nil
+	return createAcceptance{admission.Run.TaskID, true, admission.Replayed}, nil
 }
 
 func validInstruction(value string) bool {
@@ -224,7 +221,7 @@ func stopReplay(id task.TaskID, current taskstore.BackgroundRun, receipt tasksto
 		RunID task.TaskID `json:"run_id"`
 		State run.State   `json:"state"`
 	}
-	if receipt.TargetID != id || current.StopReceiptID != receipt.ID || json.Unmarshal(receipt.ResponseProjection, &committed) != nil || committed.RunID != id ||
+	if receipt.RunID != id || current.StopReceiptID != receipt.ID || json.Unmarshal(receipt.ResponseProjection, &committed) != nil || committed.RunID != id ||
 		(committed.State != run.Failed && committed.State != run.Canceling) {
 		return stopAcceptance{}, taskstore.ErrCorruptStore
 	}
@@ -242,7 +239,7 @@ func (s *service) Stop(ctx context.Context, actor task.ActorSnapshot, key task.I
 		return zero, err
 	}
 	if found {
-		if receipt.TargetID != id {
+		if receipt.RunID != id {
 			return zero, errReplayConflict
 		}
 		current, err := s.config.Store.GetBackgroundRun(ctx, s.config.WorkspaceID, id, actor)
@@ -251,12 +248,8 @@ func (s *service) Stop(ctx context.Context, actor task.ActorSnapshot, key task.I
 		}
 		return stopReplay(id, current, receipt)
 	}
-	receiptID, err := s.config.Generator.ReceiptID()
-	if err != nil {
-		return zero, err
-	}
 	result, err := s.config.Store.StopBackgroundRun(ctx, taskstore.StopBackgroundRunParams{WorkspaceID: s.config.WorkspaceID,
-		TaskID: id, ReceiptID: receiptID, Claim: claim,
+		TaskID: id, Claim: claim,
 		APIContractVersion: APIContractVersion, StoppedAt: s.config.Now().UTC().Truncate(time.Millisecond)})
 	if err != nil {
 		return zero, err
@@ -278,10 +271,6 @@ func (s *service) Seal(ctx context.Context, actor task.ActorSnapshot, key task.I
 	if err != nil {
 		return zero, err
 	}
-	receiptID, err := s.config.Generator.ReceiptID()
-	if err != nil {
-		return zero, err
-	}
 	resultID, err := s.config.Generator.ResultID()
 	if err != nil {
 		return zero, err
@@ -289,7 +278,7 @@ func (s *service) Seal(ctx context.Context, actor task.ActorSnapshot, key task.I
 	now := s.config.Now().UTC().Truncate(time.Millisecond)
 	admission, err := s.config.Store.SealBackgroundRun(ctx, taskstore.SealBackgroundRunParams{
 		WorkspaceID: s.config.WorkspaceID, TaskID: current.TaskID, ExpectedRunRevision: current.Revision,
-		ReceiptID: receiptID, ResultID: resultID, Claim: claim, PolicyVersion: s.config.SealPolicyVersion,
+		ResultID: resultID, Claim: claim, PolicyVersion: s.config.SealPolicyVersion,
 		APIContractVersion: APIContractVersion, AcceptedAt: now,
 	})
 	if err != nil {

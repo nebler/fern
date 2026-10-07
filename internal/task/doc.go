@@ -14,6 +14,5 @@
 // canonicalizes JSON. ClassifyIdempotency compares ownership before hashes so it
 // cannot disclose another actor's request equality.
 //
-// Task/attempt states describe parent records only; package run owns
-// background execution state and phase.
+// Package run owns run lifecycle state and phase.
 package task

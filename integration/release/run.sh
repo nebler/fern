@@ -112,7 +112,7 @@ compatibility = json.loads((root / "deploy/release/compatibility-manifest.json")
 compatibility_schema = json.loads((root / "deploy/release/compatibility-manifest.schema.json").read_text())
 assert compatibility["schema_version"] == 1
 assert compatibility["first_supported_baseline"] is None
-assert compatibility["current_release_schemas"]["task_store"] == 7
+assert compatibility["current_release_schemas"]["task_store"] == 8
 assert compatibility["current_release_schemas"]["control_state"] == 2
 current_schema = compatibility_schema["properties"]["current_release_schemas"]
 assert current_schema["additionalProperties"] is False

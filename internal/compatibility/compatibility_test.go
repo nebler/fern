@@ -55,24 +55,21 @@ func TestFreshTaskStoreIsCurrentSchema(t *testing.T) {
 	}
 	var requiredTables int
 	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type='table' AND name IN
-('background_runs','results')`).Scan(&requiredTables); err != nil {
+('workspaces','runs','receipts','results')`).Scan(&requiredTables); err != nil {
 		t.Fatal(err)
 	}
 	digest, digestErr := hex.DecodeString(checksum)
-	if version != 7 || version != taskstore.CurrentSchemaVersion() || entries != 1 || name != "run_task_store" || digestErr != nil || len(digest) != sha256.Size || integrity != "ok" || requiredTables != 2 {
+	if version != 8 || version != taskstore.CurrentSchemaVersion() || entries != 1 || name != "run_task_store" || digestErr != nil || len(digest) != sha256.Size || integrity != "ok" || requiredTables != 4 {
 		t.Fatalf("version=%d current=%d entries=%d name=%q checksum=%q integrity=%q required_tables=%d",
 			version, taskstore.CurrentSchemaVersion(), entries, name, checksum, integrity, requiredTables)
 	}
-	var obsoleteTables, obsoleteColumns int
+	var obsoleteTables int
 	if err := database.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type='table' AND
-(name='verifications' OR name LIKE '%publication%')`).Scan(&obsoleteTables); err != nil {
+(name IN ('tasks','attempts','background_runs','verifications') OR name LIKE '%publication%')`).Scan(&obsoleteTables); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.QueryRow(`SELECT count(*) FROM pragma_table_info('attempts') WHERE name='budget_snapshot'`).Scan(&obsoleteColumns); err != nil {
-		t.Fatal(err)
-	}
-	if obsoleteTables != 0 || obsoleteColumns != 0 {
-		t.Fatalf("fresh schema retains obsolete tables=%d columns=%d", obsoleteTables, obsoleteColumns)
+	if obsoleteTables != 0 {
+		t.Fatalf("fresh schema retains %d obsolete tables", obsoleteTables)
 	}
 	rows, err := database.Query(`PRAGMA foreign_key_check`)
 	if err != nil {

@@ -227,8 +227,7 @@ func newScanFixture(t *testing.T) *scanFixture {
 		t.Fatal(err)
 	}
 	actor := task.ActorSnapshot{Type: task.ActorOpenCode, ID: "pc_owner", DisplayName: "OpenCode", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "req-1"}
-	f.params = taskstore.AdmitBackgroundRunParams{TaskID: task.TaskID(id("tsk_", 2)), AttemptID: task.AttemptID(id("att_", 3)), ReceiptID: task.ReceiptID(id("rcp_", 4)), OpenCodeSessionID: "ses_00000000000000000000000000000001", OpenCodeMessageID: "msg_00000000000000000000000000000001", Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspace, CommandKind: taskstore.CreateBackgroundRunCommand}, Key: "create", RequestHash: sha256.Sum256([]byte("create")), Actor: actor}, Title: "Test", Prompt: "Do work", RepositoryID: 987654321, BaseRef: "main", BaseSHA: task.GitOID(command("rev-parse", "HEAD")), ObjectFormat: "sha1", ExecutionContractVersion: "exec-v1", Agent: "build", ModelProvider: "provider", Model: "model", Deadline: f.now.Add(time.Hour), APIContractVersion: "v1", AcceptedAt: f.now}
-	f.params.BackgroundRun = &taskstore.BackgroundRunIntent{RepositoryRemote: "https://github.com/owner/repository", Branch: "main", Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: scanImage}
+	f.params = taskstore.AdmitBackgroundRunParams{TaskID: task.TaskID(id("tsk_", 2)), OpenCodeSessionID: "ses_00000000000000000000000000000001", OpenCodeMessageID: "msg_00000000000000000000000000000001", Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspace, CommandKind: taskstore.CreateBackgroundRunCommand}, Key: "create", RequestHash: sha256.Sum256([]byte("create")), Actor: actor}, Prompt: "Do work", RepositoryID: 987654321, RepositoryRemote: "https://github.com/owner/repository", BaseSHA: task.GitOID(command("rev-parse", "HEAD")), Branch: "main", Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: scanImage, Agent: "build", ModelProvider: "provider", Model: "model", Deadline: f.now.Add(time.Hour), APIContractVersion: "v1", AcceptedAt: f.now}
 	ids, err := task.NewGenerator(rand.Reader, func() time.Time { return f.now })
 	if err != nil {
 		t.Fatal(err)
@@ -242,7 +241,7 @@ func newScanFixture(t *testing.T) *scanFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	f.c, err = New(store, provider, unusedArtifact{}, ids, Config{WorkspaceID: workspace, Profile: taskstore.BackgroundRunSourceProfile, ImageIdentity: scanImage, EnvironmentSHA256: f.params.BackgroundRun.EnvironmentSHA256, Agent: "build", ModelProvider: "provider", Model: "model", OperationTimeout: 30 * time.Second, PollInterval: time.Hour, Now: func() time.Time { return f.now }, HTTPClient: &http.Client{Timeout: time.Second}, Route: route, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 10, MaxPages: 10, MaxEvents: 100}})
+	f.c, err = New(store, provider, unusedArtifact{}, ids, Config{WorkspaceID: workspace, Profile: taskstore.BackgroundRunSourceProfile, ImageIdentity: scanImage, EnvironmentSHA256: f.params.EnvironmentSHA256, Agent: "build", ModelProvider: "provider", Model: "model", OperationTimeout: 30 * time.Second, PollInterval: time.Hour, Now: func() time.Time { return f.now }, HTTPClient: &http.Client{Timeout: time.Second}, Route: route, HistoryBounds: backgroundopencode.HistoryBounds{PageLimit: 10, MaxPages: 10, MaxEvents: 100}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -490,7 +489,7 @@ func (f *scanFixture) stop(t *testing.T) {
 	stopClaim.Scope.CommandKind = taskstore.StopBackgroundRunCommand
 	stopClaim.Key = "stop"
 	stopClaim.RequestHash = sha256.Sum256([]byte("stop"))
-	if _, err := f.c.store.StopBackgroundRun(context.Background(), taskstore.StopBackgroundRunParams{WorkspaceID: f.c.config.WorkspaceID, TaskID: f.params.TaskID, ReceiptID: "rcp_0198d34d-6a50-75fb-b1f2-000000000010", Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now}); err != nil {
+	if _, err := f.c.store.StopBackgroundRun(context.Background(), taskstore.StopBackgroundRunParams{WorkspaceID: f.c.config.WorkspaceID, TaskID: f.params.TaskID, Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -553,7 +552,7 @@ func TestRunOnceStopCleanupFailureRecoveryPastDeadline(t *testing.T) {
 	stopClaim.Scope.CommandKind = taskstore.StopBackgroundRunCommand
 	stopClaim.Key = "stop"
 	stopClaim.RequestHash = sha256.Sum256([]byte("stop"))
-	_, err := f.c.store.StopBackgroundRun(context.Background(), taskstore.StopBackgroundRunParams{WorkspaceID: f.c.config.WorkspaceID, TaskID: f.params.TaskID, ReceiptID: "rcp_0198d34d-6a50-75fb-b1f2-000000000010", Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now})
+	_, err := f.c.store.StopBackgroundRun(context.Background(), taskstore.StopBackgroundRunParams{WorkspaceID: f.c.config.WorkspaceID, TaskID: f.params.TaskID, Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -576,7 +575,7 @@ func TestRunOnceStopCleanupFailureRecoveryPastDeadline(t *testing.T) {
 	f.d.containerErr = nil
 	f.scan(t, taskstore.BackgroundRunEffectCleanupComplete)
 	r = f.run(t)
-	if r.State != taskstore.BackgroundRunFailed || r.StopReceiptID == "" || r.TimeoutRequestedAt != nil {
+	if r.State != taskstore.BackgroundRunFailed || r.StopReceiptID == 0 || r.TimeoutRequestedAt != nil {
 		t.Fatalf("terminal state: %+v", r)
 	}
 	if f.d.item != nil {

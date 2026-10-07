@@ -214,10 +214,6 @@ func run() (resultErr error) {
 	if err != nil {
 		return err
 	}
-	attemptID, err := ids.AttemptID()
-	if err != nil {
-		return err
-	}
 	sessionID, err := ids.OpenCodeSessionID()
 	if err != nil {
 		return err
@@ -236,7 +232,7 @@ func run() (resultErr error) {
 	}
 	compact := strings.ReplaceAll(strings.TrimPrefix(string(taskID), "tsk_"), "-", "")
 	run := taskstore.BackgroundRun{
-		WorkspaceID: workspaceID, TaskID: taskID, AttemptID: attemptID, Generation: 1,
+		WorkspaceID: workspaceID, TaskID: taskID,
 		RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: task.GitOID(base),
 		Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ResourceSpecVersion: runidentity.ResourceSpecVersion, ImageIdentity: imageID,
 		CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode",
@@ -519,25 +515,23 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 		CredentialID: "serial-plugin", Authentication: "fern_plugin_bearer", RequestID: "serial-request"}
 	requestHash := sha256.Sum256([]byte("serial-run-create"))
 	resources := runidentity.NewResources(generated.TaskID)
-	intent := &taskstore.BackgroundRunIntent{
-		RepositoryRemote: "https://github.com/fern-integration/background-run", Branch: "main", Profile: backgroundopencode.Profile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: imageID,
-	}
 	admission, err := store.AdmitBackgroundRun(ctx, taskstore.AdmitBackgroundRunParams{
-		TaskID: generated.TaskID, AttemptID: generated.AttemptID, ReceiptID: generated.ReceiptID,
+		TaskID:            generated.TaskID,
 		OpenCodeSessionID: generated.OpenCodeSessionID, OpenCodeMessageID: generated.OpenCodeMessageID,
 		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.CreateBackgroundRunCommand},
 			Key: "serial-create", RequestHash: requestHash, Actor: actor},
-		Title: "Serial Background Run", Prompt: prompt, RepositoryID: 1, BaseRef: "main", BaseSHA: task.GitOID(base),
-		ObjectFormat: "sha1", ExecutionContractVersion: "fern.background-run.v1", Agent: "contract",
+		Prompt: prompt, RepositoryID: 1, BaseSHA: task.GitOID(base), Branch: "main",
+		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: backgroundopencode.Profile,
+		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: imageID, Agent: "contract",
 		ModelProvider: "test", Model: "test-model",
-		Deadline: now.Add(3 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: now, BackgroundRun: intent,
+		Deadline: now.Add(3 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: now,
 	})
 	if err != nil {
 		_ = store.Close()
 		return err
 	}
 	clonePath := filepath.Join(root, "state", "background-runs", resources.Clone())
-	if admission.Task.ID == "" {
+	if admission.Run.TaskID == "" {
 		_ = store.Close()
 		return errors.New("serial admission did not return a durable run ID")
 	}
@@ -562,7 +556,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	}
 	for step := 0; step < 20; step++ {
 		err = coordinator.RunOnce(operationCtx)
-		run, readErr := store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+		run, readErr := store.GetBackgroundRun(context.Background(), workspaceID, admission.Run.TaskID, actor)
 		if readErr != nil {
 			_ = store.Close()
 			return readErr
@@ -609,7 +603,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 		if err := coordinator.RunOnce(context.Background()); err != nil && !errors.Is(err, backgroundruncoord.ErrNoWork) {
 			return err
 		}
-		current, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+		current, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Run.TaskID, actor)
 		if err != nil {
 			return err
 		}
@@ -644,7 +638,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 	if err := coordinator.RunOnce(context.Background()); err != nil {
 		return err
 	}
-	current, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+	current, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Run.TaskID, actor)
 	if err != nil || current.State != taskstore.BackgroundRunWorking || !strings.Contains(current.LastEvidence, "positive_active") {
 		return fmt.Errorf("serial positive working observation state=%s evidence=%q error=%v", current.State, current.LastEvidence, err)
 	}
@@ -659,7 +653,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 		return fmt.Errorf("replacement reached route before reconciliation status=%d error=%v", status, routeErr)
 	}
 	observeErr := coordinator.RunOnce(context.Background())
-	current, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+	current, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Run.TaskID, actor)
 	if !errors.Is(observeErr, taskenvdocker.ErrIdentityMismatch) || err != nil || current.State != taskstore.BackgroundRunCleanupRequired {
 		return fmt.Errorf("serial runtime replacement state=%s observe_error=%v read_error=%v", current.State, observeErr, err)
 	}
@@ -685,7 +679,7 @@ func runSerialCoordinator(ctx context.Context, root, repository, providerEndpoin
 		if err := coordinator.RunOnce(context.Background()); err != nil && !errors.Is(err, backgroundruncoord.ErrNoWork) {
 			return err
 		}
-		current, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+		current, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Run.TaskID, actor)
 		if err != nil {
 			return err
 		}
@@ -781,18 +775,16 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 	actor := task.ActorSnapshot{Type: task.ActorOpenCode, ID: "retained-plugin", DisplayName: "Retained integration",
 		CredentialID: "retained-plugin", Authentication: "fern_plugin_bearer", RequestID: "retained-request"}
 	resources := runidentity.NewResources(generated.TaskID)
-	intent := &taskstore.BackgroundRunIntent{
-		RepositoryRemote: "https://github.com/fern-integration/background-run", Branch: "main", Profile: backgroundopencode.Profile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: imageID,
-	}
 	admission, err := store.AdmitBackgroundRun(ctx, taskstore.AdmitBackgroundRunParams{
-		TaskID: generated.TaskID, AttemptID: generated.AttemptID, ReceiptID: generated.ReceiptID,
+		TaskID:            generated.TaskID,
 		OpenCodeSessionID: generated.OpenCodeSessionID, OpenCodeMessageID: generated.OpenCodeMessageID,
 		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.CreateBackgroundRunCommand},
 			Key: "retained-create", RequestHash: sha256.Sum256([]byte("retained-create")), Actor: actor},
-		Title: "Retained Background Run", Prompt: prompt, RepositoryID: 1, BaseRef: "main", BaseSHA: task.GitOID(base),
-		ObjectFormat: "sha1", ExecutionContractVersion: "fern.background-run.v1", Agent: "contract",
+		Prompt: prompt, RepositoryID: 1, BaseSHA: task.GitOID(base), Branch: "main",
+		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: backgroundopencode.Profile,
+		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: imageID, Agent: "contract",
 		ModelProvider: "test", Model: "test-model",
-		Deadline: now.Add(3 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: now, BackgroundRun: intent,
+		Deadline: now.Add(3 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: now,
 	})
 	if err != nil {
 		return err
@@ -815,7 +807,7 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 		if runErr != nil && !errors.Is(runErr, backgroundruncoord.ErrNoWork) {
 			return fmt.Errorf("advance retained run: %w", runErr)
 		}
-		run, err = store.GetBackgroundRun(ctx, workspaceID, admission.Task.ID, actor)
+		run, err = store.GetBackgroundRun(ctx, workspaceID, admission.Run.TaskID, actor)
 		if err != nil {
 			return err
 		}
@@ -844,17 +836,13 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 	if err := os.WriteFile(filepath.Join(clonePath, "dirty-result.txt"), []byte("dirty result\n"), 0o600); err != nil {
 		return err
 	}
-	sealReceipt, err := ids.ReceiptID()
-	if err != nil {
-		return err
-	}
 	resultID, err := ids.ResultID()
 	if err != nil {
 		return err
 	}
 	sealAt := config.Now().UTC().Truncate(time.Millisecond)
 	if _, err := store.SealBackgroundRun(ctx, taskstore.SealBackgroundRunParams{
-		WorkspaceID: workspaceID, TaskID: run.TaskID, ExpectedRunRevision: run.Revision, ReceiptID: sealReceipt, ResultID: resultID,
+		WorkspaceID: workspaceID, TaskID: run.TaskID, ExpectedRunRevision: run.Revision, ResultID: resultID,
 		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.SealBackgroundRunCommand},
 			Key: "retained-seal", RequestHash: sha256.Sum256([]byte("retained-seal")), Actor: actor},
 		PolicyVersion: "fern.background-user-seal.v1", APIContractVersion: "fern.background-run.v1", AcceptedAt: sealAt,
@@ -864,10 +852,10 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 	for step := 0; step < 25; step++ {
 		runErr := coordinator.RunOnce(ctx)
 		if runErr != nil && !errors.Is(runErr, backgroundruncoord.ErrNoWork) {
-			current, _ := store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+			current, _ := store.GetBackgroundRun(context.Background(), workspaceID, admission.Run.TaskID, actor)
 			return fmt.Errorf("retain result at run=%s/%s revision=%d: %w", current.State, current.EffectPhase, current.Revision, runErr)
 		}
-		run, err = store.GetBackgroundRun(ctx, workspaceID, admission.Task.ID, actor)
+		run, err = store.GetBackgroundRun(ctx, workspaceID, admission.Run.TaskID, actor)
 		if err != nil {
 			return err
 		}
@@ -878,7 +866,7 @@ func runRetainedResultScenario(ctx context.Context, root, repository string, sto
 	if run.State != taskstore.BackgroundRunResultReady || run.EffectPhase != taskstore.BackgroundRunEffectCleanupComplete {
 		return fmt.Errorf("retained result incomplete: run=%s/%s reason=%s", run.State, run.EffectPhase, run.LastError)
 	}
-	projection, err := store.GetBackgroundRunResult(ctx, workspaceID, admission.Task.ID, actor)
+	projection, err := store.GetBackgroundRunResult(ctx, workspaceID, admission.Run.TaskID, actor)
 	if err != nil {
 		return err
 	}
@@ -1062,19 +1050,17 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 	actor := task.ActorSnapshot{Type: task.ActorOpenCode, ID: "serial-plugin", DisplayName: "Serial integration",
 		CredentialID: "serial-plugin", Authentication: "fern_plugin_bearer", RequestID: "serial-fence-crash"}
 	resources := runidentity.NewResources(generated.TaskID)
-	intent := &taskstore.BackgroundRunIntent{
-		RepositoryRemote: "https://github.com/fern-integration/background-run", Branch: "main", Profile: backgroundopencode.Profile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: imageID,
-	}
 	requestHash := sha256.Sum256([]byte("serial-fence-crash-create"))
 	admission, err := store.AdmitBackgroundRun(ctx, taskstore.AdmitBackgroundRunParams{
-		TaskID: generated.TaskID, AttemptID: generated.AttemptID, ReceiptID: generated.ReceiptID,
+		TaskID:            generated.TaskID,
 		OpenCodeSessionID: generated.OpenCodeSessionID, OpenCodeMessageID: generated.OpenCodeMessageID,
 		Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.CreateBackgroundRunCommand},
 			Key: "serial-fence-crash-create", RequestHash: requestHash, Actor: actor},
-		Title: "Serial pre-dispatch fence crash", Prompt: prompt, RepositoryID: 1, BaseRef: "main", BaseSHA: task.GitOID(base),
-		ObjectFormat: "sha1", ExecutionContractVersion: "fern.background-run.v1", Agent: "contract",
+		Prompt: prompt, RepositoryID: 1, BaseSHA: task.GitOID(base), Branch: "main",
+		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: backgroundopencode.Profile,
+		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: imageID, Agent: "contract",
 		ModelProvider: "test", Model: "test-model",
-		Deadline: acceptedAt.Add(10 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: acceptedAt, BackgroundRun: intent,
+		Deadline: acceptedAt.Add(10 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: acceptedAt,
 	})
 	if err != nil {
 		return err
@@ -1098,7 +1084,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 	var fenced taskstore.BackgroundRun
 	for step := 0; step < 20; step++ {
 		runErr := coordinator.RunOnce(crashCtx)
-		fenced, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+		fenced, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Run.TaskID, actor)
 		if err != nil {
 			return err
 		}
@@ -1131,19 +1117,15 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 	if err := coordinator.RunOnce(context.Background()); err != nil {
 		return fmt.Errorf("pre-dispatch restart reconciliation: %w", err)
 	}
-	fenced, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+	fenced, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Run.TaskID, actor)
 	if err != nil || fenced.State != taskstore.BackgroundRunUncertain || fenced.EffectPhase != taskstore.BackgroundRunEffectPromptPending ||
 		fenced.PromptRequestAttemptedAt == nil || transport.calls.Load() != 0 || !strings.Contains(fenced.LastEvidence, `"status":"absent"`) {
 		return fmt.Errorf("pre-dispatch restart run=%s/%s fenced=%t posts=%d error=%v", fenced.State, fenced.EffectPhase,
 			fenced.PromptRequestAttemptedAt != nil, transport.calls.Load(), err)
 	}
-	stopReceipt, err := ids.ReceiptID()
-	if err != nil {
-		return err
-	}
 	stopHash := sha256.Sum256([]byte("serial-fence-crash-stop"))
 	if _, err := store.StopBackgroundRun(context.Background(), taskstore.StopBackgroundRunParams{
-		WorkspaceID: workspaceID, TaskID: fenced.TaskID, ReceiptID: stopReceipt, Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.StopBackgroundRunCommand},
+		WorkspaceID: workspaceID, TaskID: fenced.TaskID, Claim: task.IdempotencyClaim{Scope: task.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: taskstore.StopBackgroundRunCommand},
 			Key: "serial-fence-crash-stop", RequestHash: stopHash, Actor: actor}, APIContractVersion: "fern.background-run.v1",
 		StoppedAt: time.Now().UTC().Truncate(time.Millisecond).Add(4 * time.Minute),
 	}); err != nil {
@@ -1153,7 +1135,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root string, provider *tas
 		if err := coordinator.RunOnce(context.Background()); err != nil && !errors.Is(err, backgroundruncoord.ErrNoWork) {
 			return err
 		}
-		fenced, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Task.ID, actor)
+		fenced, err = store.GetBackgroundRun(context.Background(), workspaceID, admission.Run.TaskID, actor)
 		if err != nil {
 			return err
 		}

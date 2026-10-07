@@ -2,7 +2,6 @@ package taskstore
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -19,14 +18,12 @@ func (s *Store) NextBackgroundRun(ctx context.Context, workspaceID task.Workspac
 	if profile != BackgroundRunSourceProfile {
 		return BackgroundRun{}, fmt.Errorf("%w: next background run", ErrInvalidInput)
 	}
-	run, err := scanBackgroundRun(s.db.QueryRowContext(ctx, backgroundRunSelect+`
-JOIN tasks t ON t.id=r.task_id AND t.workspace_id=r.workspace_id AND t.current_attempt_id=r.attempt_id
-JOIN attempts a ON a.id=r.attempt_id AND a.task_id=r.task_id AND a.workspace_id=r.workspace_id AND a.sequence=r.generation
+	run, err := scanRun(s.db.QueryRowContext(ctx, runSelect+`
 WHERE r.workspace_id=? AND r.profile=? AND r.effect_phase<>'cleanup_complete' AND
   (r.effect_phase<>'absent' OR NOT EXISTS (
-    SELECT 1 FROM background_runs active WHERE active.workspace_id=r.workspace_id AND active.profile=? AND
+    SELECT 1 FROM runs active WHERE active.workspace_id=r.workspace_id AND
       active.effect_phase NOT IN ('absent','cleanup_complete')))
-ORDER BY CASE WHEN r.effect_phase='absent' THEN 1 ELSE 0 END,r.updated_at,r.task_id LIMIT 1`, workspaceID, profile, profile))
+ORDER BY CASE WHEN r.effect_phase='absent' THEN 1 ELSE 0 END,r.updated_at,r.id LIMIT 1`, workspaceID, profile))
 	if errors.Is(err, sql.ErrNoRows) {
 		return BackgroundRun{}, ErrNotFound
 	}
@@ -36,33 +33,18 @@ ORDER BY CASE WHEN r.effect_phase='absent' THEN 1 ELSE 0 END,r.updated_at,r.task
 	return run, nil
 }
 
-// NextBackgroundRunWork pairs NextBackgroundRun with its task plaintext after
-// rechecking the digest binding.
+// NextBackgroundRunWork pairs NextBackgroundRun with its prompt plaintext.
 func (s *Store) NextBackgroundRunWork(ctx context.Context, workspaceID task.WorkspaceID, profile string) (BackgroundRunWork, error) {
 	run, err := s.NextBackgroundRun(ctx, workspaceID, profile)
 	if err != nil {
 		return BackgroundRunWork{}, err
 	}
-	return s.readBackgroundRunWork(ctx, run)
-}
-
-func (s *Store) readBackgroundRunWork(ctx context.Context, run BackgroundRun) (BackgroundRunWork, error) {
-	owner, err := getTask(ctx, s.db, run.TaskID)
-	if err != nil {
-		return BackgroundRunWork{}, err
+	var prompt string
+	if err := s.db.QueryRowContext(ctx, `SELECT prompt FROM runs WHERE workspace_id=? AND id=?`, run.WorkspaceID, run.TaskID).
+		Scan(&prompt); err != nil {
+		return BackgroundRunWork{}, fmt.Errorf("read run prompt: %w", err)
 	}
-	attempt, err := getAttempt(ctx, s.db, run.AttemptID)
-	if err != nil {
-		return BackgroundRunWork{}, err
-	}
-	digest := sha256.Sum256([]byte(owner.Prompt))
-	if owner.WorkspaceID != run.WorkspaceID || owner.CurrentAttemptID != attempt.ID || attempt.TaskID != run.TaskID ||
-		attempt.WorkspaceID != run.WorkspaceID || attempt.Sequence != run.Generation || digest != run.InstructionSHA256 ||
-		owner.PromptSHA256 != digest || attempt.PromptSHA256 != digest || !attempt.Deadline.After(attempt.CreatedAt) {
-		return BackgroundRunWork{}, ErrCorruptStore
-	}
-	return BackgroundRunWork{Run: run, Prompt: owner.Prompt, Deadline: attempt.Deadline, AttemptCreated: attempt.CreatedAt,
-		AttemptTimeout: attempt.Deadline.Sub(attempt.CreatedAt), Agent: attempt.Agent, ModelProvider: attempt.ModelProvider, Model: attempt.Model}, nil
+	return BackgroundRunWork{Run: run, Prompt: prompt}, nil
 }
 
 // StartBackgroundRunProvisioning consumes the workspace's provisioning slot
@@ -132,13 +114,13 @@ func (s *Store) RecordBackgroundRunWorkObservation(ctx context.Context, p Record
 // a plugin receipt once the attempt deadline has passed. Parent terminalization
 // remains coupled to cleanup finality.
 func (s *Store) RequestBackgroundRunTimeout(ctx context.Context, p BackgroundRunRef) (_ BackgroundRun, err error) {
-	if !rundomain.Classify(rundomain.State(p.ExpectedState), rundomain.Phase(p.ExpectedPhase)).TimeoutEligible {
+	if !rundomain.Classify(p.ExpectedState, p.ExpectedPhase).TimeoutEligible {
 		return BackgroundRun{}, fmt.Errorf("%w: background run timeout", ErrInvalidInput)
 	}
 	now := unixMillis(p.Now)
 	return s.updateRun(ctx, p, `state='cleanup_required',effect_phase='cleaning',timeout_requested_at=?,last_error='attempt_timeout'`,
 		[]any{now}, "request background run timeout", `timeout_requested_at IS NULL`,
-		`EXISTS (SELECT 1 FROM attempts a WHERE a.id=background_runs.attempt_id AND a.state='prepared' AND a.deadline<=`+fmt.Sprint(now)+`)`)
+		`deadline<=`+fmt.Sprint(now))
 }
 
 // MarkBackgroundRunCleanupRequired records a failed effect. An executing run
@@ -153,7 +135,7 @@ func (s *Store) MarkBackgroundRunCleanupRequired(ctx context.Context, p MarkBack
 	case p.ExpectedPhase == BackgroundRunEffectCleaning && p.ExpectedState == BackgroundRunResultReady:
 		state = BackgroundRunResultReady
 	case p.ExpectedPhase == BackgroundRunEffectCleaning,
-		rundomain.Classify(rundomain.State(p.ExpectedState), rundomain.Phase(p.ExpectedPhase)).TimeoutEligible:
+		rundomain.Classify(p.ExpectedState, p.ExpectedPhase).TimeoutEligible:
 	default:
 		return BackgroundRun{}, fmt.Errorf("%w: background run cleanup failure state", ErrInvalidInput)
 	}
@@ -161,79 +143,20 @@ func (s *Store) MarkBackgroundRunCleanupRequired(ctx context.Context, p MarkBack
 		`last_error=?`, []any{p.Error}, "mark background run cleanup required")
 }
 
-// FinalizeBackgroundRunFailure atomically closes a cleaned run and its exact
-// parent task/attempt once the caller proved every resource absent. It performs
-// no external I/O.
-func (s *Store) FinalizeBackgroundRunFailure(ctx context.Context, p FinalizeBackgroundRunFailureParams) (_ BackgroundRun, err error) {
-	if p.ExpectedPhase != BackgroundRunEffectCleaning ||
+// FinalizeBackgroundRunFailure closes a cleaned run once the caller proved
+// every resource absent. It performs no external I/O. A timed-out run can only
+// finalize with the timeout reason.
+func (s *Store) FinalizeBackgroundRunFailure(ctx context.Context, p FinalizeBackgroundRunFailureParams) (BackgroundRun, error) {
+	if p.ExpectedPhase != BackgroundRunEffectCleaning || !validBoundedText(p.Reason, 1, 4096) ||
 		(p.ExpectedState != BackgroundRunCanceling && p.ExpectedState != BackgroundRunCleanupRequired) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run finalization", ErrInvalidInput)
 	}
-	tx, release, err := s.beginWrite(ctx)
-	if err != nil {
-		return BackgroundRun{}, err
+	var predicates []string
+	if p.Reason != "attempt_timeout" {
+		predicates = append(predicates, `timeout_requested_at IS NULL`)
 	}
-	defer release()
-	defer rollback(tx, &err)
-
-	// The final UPDATE pins the run revision, so the stop receipt and timeout
-	// actor read here are the ones the transition commits against.
-	run, err := readBackgroundRunExact(ctx, tx, p.WorkspaceID, p.TaskID)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	owner, err := getTask(ctx, tx, run.TaskID)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	attempt, err := getAttempt(ctx, tx, p.AttemptID)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	if owner.WorkspaceID != run.WorkspaceID || attempt.TaskID != owner.ID || attempt.WorkspaceID != owner.WorkspaceID || attempt.Sequence != p.Generation {
-		return BackgroundRun{}, ErrInvalidState
-	}
-	if run.TimeoutRequestedAt != nil && p.Reason != "attempt_timeout" {
-		return BackgroundRun{}, ErrInvalidState
-	}
-	now := unixMillis(p.Now)
-	result, err := tx.ExecContext(ctx, `UPDATE attempts SET state='failed',terminal_reason=?,revision=revision+1,updated_at=?
-WHERE id=? AND task_id=? AND workspace_id=? AND state='prepared' AND revision=?`, p.Reason, now,
-		attempt.ID, owner.ID, owner.WorkspaceID, attempt.Revision)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRun{}, ErrInvalidState
-	}
-	result, err = tx.ExecContext(ctx, `UPDATE tasks SET state='failed',terminal_reason=?,revision=revision+1,updated_at=?
-WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND revision=?`, p.Reason, now,
-		owner.ID, owner.WorkspaceID, attempt.ID, owner.Revision)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRun{}, ErrInvalidState
-	}
-	result, err = tx.ExecContext(ctx, `UPDATE background_runs SET state='failed',effect_phase='cleanup_complete',cleanup_proof=?,
-last_evidence=?,last_error=?,revision=revision+1,updated_at=?
-WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND state=? AND effect_phase=? AND revision=?`,
-		p.CleanupProof, p.Evidence, p.Reason, now, p.TaskID, p.AttemptID, p.WorkspaceID, p.Generation, p.ExpectedState, p.ExpectedPhase,
-		p.ExpectedRevision)
-	if err != nil {
-		return BackgroundRun{}, fmt.Errorf("finalize background run: %w", err)
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRun{}, ErrInvalidState
-	}
-	stored, err := readBackgroundRunExact(ctx, tx, run.WorkspaceID, run.TaskID)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return BackgroundRun{}, err
-	}
-	return stored, nil
+	return s.transitionRun(ctx, p.BackgroundRunRef, BackgroundRunFailed, BackgroundRunEffectCleanupComplete,
+		`cleanup_proof=?,last_error=?,last_evidence=?`, []any{p.CleanupProof, p.Reason, p.Evidence}, "finalize background run", predicates...)
 }
 
 func (s *Store) CompleteBackgroundRunResultCleanup(ctx context.Context, p CompleteBackgroundRunResultCleanupParams) (BackgroundRun, error) {
@@ -245,7 +168,7 @@ func (s *Store) CompleteBackgroundRunResultCleanup(ctx context.Context, p Comple
 }
 
 func (s *Store) transitionRun(ctx context.Context, ref BackgroundRunRef, state BackgroundRunState, phase BackgroundRunEffectPhase, assignments string, args []any, operation string, predicates ...string) (BackgroundRun, error) {
-	if !validBackgroundRunStatePhase(BackgroundRunSourceProfile, state, phase) {
+	if !rundomain.Classify(state, phase).Valid {
 		return BackgroundRun{}, fmt.Errorf("%w: background run transition", ErrInvalidInput)
 	}
 	if len(args) > 0 {
@@ -280,13 +203,12 @@ func (s *Store) updateRun(ctx context.Context, ref BackgroundRunRef, assignments
 }
 
 func updateRunTx(ctx context.Context, tx *sql.Tx, ref BackgroundRunRef, assignments string, args []any, operation string, predicates ...string) (BackgroundRun, error) {
-	query := `UPDATE background_runs SET ` + assignments + `,revision=revision+1,updated_at=?
-WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revision=? AND state=? AND effect_phase=?`
+	query := `UPDATE runs SET ` + assignments + `,revision=revision+1,updated_at=?
+WHERE id=? AND workspace_id=? AND revision=? AND state=? AND effect_phase=?`
 	for _, predicate := range predicates {
 		query += ` AND ` + predicate
 	}
-	args = append(args, unixMillis(ref.Now), ref.TaskID, ref.AttemptID, ref.WorkspaceID, ref.Generation,
-		ref.ExpectedRevision, ref.ExpectedState, ref.ExpectedPhase)
+	args = append(args, unixMillis(ref.Now), ref.TaskID, ref.WorkspaceID, ref.ExpectedRevision, ref.ExpectedState, ref.ExpectedPhase)
 	result, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return BackgroundRun{}, fmt.Errorf("%s: %w", operation, err)
@@ -294,22 +216,11 @@ WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND revisio
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRun{}, ErrInvalidState
 	}
-	return readBackgroundRunExact(ctx, tx, ref.WorkspaceID, ref.TaskID)
-}
-
-func readBackgroundRunExact(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, taskID task.TaskID) (BackgroundRun, error) {
-	run, err := scanBackgroundRun(q.QueryRowContext(ctx, backgroundRunSelect+` WHERE r.workspace_id=? AND r.task_id=?`, workspaceID, taskID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return BackgroundRun{}, ErrNotFound
-	}
-	if err != nil {
-		return BackgroundRun{}, fmt.Errorf("read exact background run: %w", err)
-	}
-	return run, nil
+	return readRun(ctx, tx, ref.WorkspaceID, ref.TaskID)
 }
 
 func validateBackgroundRunRef(ref BackgroundRunRef) error {
-	if !validBackgroundRunStatePhase(BackgroundRunSourceProfile, ref.ExpectedState, ref.ExpectedPhase) {
+	if !rundomain.Classify(ref.ExpectedState, ref.ExpectedPhase).Valid {
 		return fmt.Errorf("%w: background run expected state", ErrInvalidInput)
 	}
 	return nil

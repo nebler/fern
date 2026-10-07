@@ -110,10 +110,6 @@ func run() (resultErr error) {
 	if err != nil {
 		return err
 	}
-	attemptID, err := ids.AttemptID()
-	if err != nil {
-		return err
-	}
 	sessionID, err := ids.OpenCodeSessionID()
 	if err != nil {
 		return err
@@ -123,7 +119,7 @@ func run() (resultErr error) {
 		return err
 	}
 	compact := strings.ReplaceAll(strings.TrimPrefix(string(taskID), "tsk_"), "-", "")
-	run := taskstore.BackgroundRun{WorkspaceID: workspaceID, TaskID: taskID, AttemptID: attemptID, Generation: 1, RepositoryID: 42, RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ResourceSpecVersion: runidentity.ResourceSpecVersion, ImageIdentity: imageID, CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode", ContainerIdentity: "fern-run-" + compact, EndpointIdentity: "run-" + compact + "-endpoint", OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID}
+	run := taskstore.BackgroundRun{WorkspaceID: workspaceID, TaskID: taskID, RepositoryID: 42, RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: task.GitOID(base), Profile: taskstore.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ResourceSpecVersion: runidentity.ResourceSpecVersion, ImageIdentity: imageID, CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode", ContainerIdentity: "fern-run-" + compact, EndpointIdentity: "run-" + compact + "-endpoint", OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID}
 	config := taskenvdocker.Config{StateRoot: state, Repository: repository, GitExecutable: gitPath, ImageReference: imageReference, ImageID: imageID, MemoryBytes: 512 << 20, WallTimeout: 2 * time.Minute, GitTimeout: 30 * time.Second, DockerTimeout: 20 * time.Second, HealthTimeout: 60 * time.Second, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 128 << 20, CloneObservedLimitBytes: 128 << 20, DiskFreeAdmissionBytes: 128 << 20, LogMaxSize: "1m", LogMaxFiles: 2, StopGrace: 3 * time.Second}
 	githubFixture, err := newGitHubFixture()
 	config.RuntimeStorageRoot = state
@@ -152,12 +148,8 @@ func run() (resultErr error) {
 	if err != nil {
 		return err
 	}
-	otherAttempt, err := ids.AttemptID()
-	if err != nil {
-		return err
-	}
 	other := run
-	other.TaskID, other.AttemptID = otherTask, otherAttempt
+	other.TaskID = otherTask
 	otherCompact := strings.ReplaceAll(strings.TrimPrefix(string(otherTask), "tsk_"), "-", "")
 	other.CloneIdentity = "run-" + otherCompact + "-clone"
 	other.VolumeIdentity = "fern-run-" + otherCompact + "-opencode"

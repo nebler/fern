@@ -29,11 +29,8 @@ func TestAdmissionReplaySurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("admit: %v", err)
 	}
-	if first.Replayed || first.Task.State != task.TaskQueued || first.Attempt.State != task.AttemptPrepared {
+	if first.Replayed || first.Run.State != BackgroundRunQueued || first.Run.EffectPhase != BackgroundRunEffectAbsent {
 		t.Fatalf("unexpected first admission: %+v", first)
-	}
-	if got := sha256.Sum256([]byte(p.Prompt)); got != first.Task.PromptSHA256 {
-		t.Fatal("prompt digest differs")
 	}
 	if err := s.Close(); err != nil {
 		t.Fatal(err)
@@ -48,32 +45,29 @@ func TestAdmissionReplaySurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("replay: %v", err)
 	}
-	if !replay.Replayed || replay.Task.ID != first.Task.ID || replay.Attempt.ID != first.Attempt.ID || replay.Receipt.ID != first.Receipt.ID {
+	if !replay.Replayed || replay.Run.TaskID != first.Run.TaskID || replay.Receipt.ID != first.Receipt.ID {
 		t.Fatalf("replay did not return originals: %+v", replay)
 	}
-	if !replay.Task.CreatedAt.Equal(testTime.Truncate(time.Millisecond)) || replay.Receipt.Actor.RequestID != "req-1" {
+	if !replay.Run.CreatedAt.Equal(testTime.Truncate(time.Millisecond)) || !replay.Run.Deadline.Equal(first.Run.Deadline) ||
+		replay.Receipt.Actor.RequestID != "req-1" {
 		t.Fatalf("stored clock or actor changed: %+v", replay)
 	}
 
-	gotTask, err := getTask(context.Background(), s.db, first.Task.ID)
-	if err != nil || gotTask.Prompt != p.Prompt || gotTask.CurrentAttemptID != first.Attempt.ID {
-		t.Fatalf("get task: %+v, %v", gotTask, err)
-	}
-	gotAttempt, err := getAttempt(context.Background(), s.db, first.Attempt.ID)
-	if err != nil || gotAttempt.OpenCodeSessionID != first.Attempt.OpenCodeSessionID || gotAttempt.OpenCodeMessageID != first.Attempt.OpenCodeMessageID || gotAttempt.ImageDigest != p.BackgroundRun.ImageIdentity || gotAttempt.OpenCodeProtocol != BackgroundRunSourceProfile || gotAttempt.PromptSHA256 != first.Task.PromptSHA256 || gotAttempt.BaseSHA != first.Task.BaseSHA {
-		t.Fatalf("get attempt: %+v, %v", gotAttempt, err)
+	var prompt string
+	if err := s.db.QueryRow(`SELECT prompt FROM runs WHERE id=?`, first.Run.TaskID).Scan(&prompt); err != nil || prompt != p.Prompt {
+		t.Fatalf("stored prompt = %q, %v", prompt, err)
 	}
 	gotReceipt, _, err := s.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateBackgroundRunCommand, p.Claim.Key)
-	if err != nil || gotReceipt.TargetID != first.Task.ID {
+	if err != nil || gotReceipt.RunID != first.Run.TaskID {
 		t.Fatalf("get receipt: %+v, %v", gotReceipt, err)
 	}
 	var projection struct {
 		RunID task.TaskID `json:"run_id"`
 	}
-	if err := json.Unmarshal(gotReceipt.ResponseProjection, &projection); err != nil || projection.RunID != first.Task.ID {
+	if err := json.Unmarshal(gotReceipt.ResponseProjection, &projection); err != nil || projection.RunID != first.Run.TaskID {
 		t.Fatalf("receipt projection: %+v, %v", projection, err)
 	}
-	assertCounts(t, s, 1, 1, 1)
+	assertCounts(t, s, 1, 1)
 }
 
 func TestConcurrentSameKeyAdmissionCreatesOneSet(t *testing.T) {
@@ -108,18 +102,20 @@ func TestConcurrentSameKeyAdmissionCreatesOneSet(t *testing.T) {
 		t.Errorf("concurrent admission: %v", err)
 	}
 	firstUses := 0
+	receipts := map[int64]bool{}
 	for result := range results {
 		if !result.Replayed {
 			firstUses++
 		}
-		if result.Task.ID != p.TaskID || result.Attempt.ID != p.AttemptID || result.Receipt.ID != p.ReceiptID {
-			t.Errorf("wrong durable IDs: %+v", result)
+		receipts[result.Receipt.ID] = true
+		if result.Run.TaskID != p.TaskID {
+			t.Errorf("wrong durable run: %+v", result)
 		}
 	}
-	if firstUses != 1 {
-		t.Fatalf("first-use count = %d, want 1", firstUses)
+	if firstUses != 1 || len(receipts) != 1 {
+		t.Fatalf("first-use count = %d, receipts = %d, want 1", firstUses, len(receipts))
 	}
-	assertCounts(t, s, 1, 1, 1)
+	assertCounts(t, s, 1, 1)
 }
 
 func TestAdmissionConflictsHaveNoWrites(t *testing.T) {
@@ -135,7 +131,7 @@ func TestAdmissionConflictsHaveNoWrites(t *testing.T) {
 	changed := testAdmission(4, "owned-key", "Changed")
 	_, err = s.AdmitBackgroundRun(context.Background(), changed)
 	var conflict *ConflictError
-	if !errors.As(err, &conflict) || conflict.ReceiptID != accepted.Receipt.ID || conflict.TargetID != accepted.Task.ID {
+	if !errors.As(err, &conflict) || conflict.ReceiptID != accepted.Receipt.ID || conflict.RunID != accepted.Run.TaskID {
 		t.Fatalf("hash conflict = %v", err)
 	}
 
@@ -146,7 +142,7 @@ func TestAdmissionConflictsHaveNoWrites(t *testing.T) {
 	if !errors.Is(err, ErrIdempotencyOwnerMismatch) {
 		t.Fatalf("actor conflict = %v", err)
 	}
-	assertCounts(t, s, 1, 1, 1)
+	assertCounts(t, s, 1, 1)
 }
 
 func TestAdmissionRollsBackOnLateInsertFailure(t *testing.T) {
@@ -162,23 +158,20 @@ func TestAdmissionRollsBackOnLateInsertFailure(t *testing.T) {
 	if _, err := s.AdmitBackgroundRun(context.Background(), second); err == nil {
 		t.Fatal("expected duplicate session failure")
 	}
-	if _, err := getTask(context.Background(), s.db, second.TaskID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("partially written task: %v", err)
+	if _, err := readRun(context.Background(), s.db, testWorkspaceID(), second.TaskID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("partially written run: %v", err)
 	}
 	if _, found, err := s.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateBackgroundRunCommand, second.Claim.Key); err != nil || found {
 		t.Fatalf("partially written receipt: %v", err)
 	}
-	if _, err := getAttempt(context.Background(), s.db, second.AttemptID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("partially written attempt: %v", err)
-	}
-	assertCounts(t, s, 1, 1, 1)
+	assertCounts(t, s, 1, 1)
 }
 
-func TestAttemptIdentityAndSequenceConstraints(t *testing.T) {
+func TestRunSessionIdentityAndInputConstraints(t *testing.T) {
 	s := openTestStore(t, testDBPath(t))
 	t.Cleanup(func() { _ = s.Close() })
 	createTestWorkspace(t, s)
-	first := testAdmission(30, "first-attempt", "First")
+	first := testAdmission(30, "first-run", "First")
 	if _, err := s.AdmitBackgroundRun(context.Background(), first); err != nil {
 		t.Fatal(err)
 	}
@@ -188,9 +181,6 @@ func TestAttemptIdentityAndSequenceConstraints(t *testing.T) {
 	if _, err := s.AdmitBackgroundRun(context.Background(), sameSession); err == nil {
 		t.Fatal("duplicate OpenCode session was accepted")
 	}
-	if _, err := getTask(context.Background(), s.db, sameSession.TaskID); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("duplicate-session task was partially written: %v", err)
-	}
 
 	sameMessage := testAdmission(32, "same-message", "Third")
 	sameMessage.OpenCodeMessageID = first.OpenCodeMessageID
@@ -198,58 +188,15 @@ func TestAttemptIdentityAndSequenceConstraints(t *testing.T) {
 		t.Fatalf("message ID in another session should be independent: %v", err)
 	}
 
-	_, err := s.db.Exec(`INSERT INTO attempts(
-id,task_id,workspace_id,sequence,state,opencode_session_id,opencode_message_id,prompt_sha256,base_sha,
-image_digest,opencode_protocol,execution_contract_version,agent,model_provider,model,
-deadline,revision,created_at,updated_at)
-SELECT ?,task_id,workspace_id,sequence,state,?,?,prompt_sha256,base_sha,image_digest,opencode_protocol,
-execution_contract_version,agent,model_provider,model,deadline,revision,created_at,updated_at
-FROM attempts WHERE id=?`, testAttemptID(33), testSessionID(33), testMessageID(33), first.AttemptID)
-	if err == nil {
-		t.Fatal("duplicate task attempt sequence was accepted")
+	for column, value := range map[string]any{"base_oid": "89abcdef0123456789abcdef0123456789abcdef", "prompt": "Changed", "deadline": 1} {
+		if _, err := s.db.Exec(`UPDATE runs SET `+column+`=?,revision=revision+1 WHERE id=?`, value, first.TaskID); err == nil {
+			t.Fatalf("immutable run %s was updated", column)
+		}
 	}
-	if _, err := s.db.Exec(`UPDATE attempts SET base_sha=? WHERE id=?`, "89abcdef0123456789abcdef0123456789abcdef", first.AttemptID); err == nil {
-		t.Fatal("immutable attempt base SHA was updated")
-	}
-	assertCounts(t, s, 2, 2, 2)
+	assertCounts(t, s, 2, 2)
 }
 
-func TestDeferredTaskAttemptOwnership(t *testing.T) {
-	s := openTestStore(t, testDBPath(t))
-	t.Cleanup(func() { _ = s.Close() })
-	createTestWorkspace(t, s)
-	first, err := s.AdmitBackgroundRun(context.Background(), testAdmission(40, "owner-1", "First"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	second, err := s.AdmitBackgroundRun(context.Background(), testAdmission(41, "owner-2", "Second"))
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	conn, err := s.db.Conn(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer conn.Close()
-	if _, err := conn.ExecContext(context.Background(), `BEGIN IMMEDIATE`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.ExecContext(context.Background(), `UPDATE tasks SET current_attempt_id=? WHERE id=?`, second.Attempt.ID, first.Task.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := conn.ExecContext(context.Background(), `COMMIT`); err == nil {
-		t.Fatal("task linked to another task's attempt")
-	}
-	_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
-
-	got, err := getTask(context.Background(), s.db, first.Task.ID)
-	if err != nil || got.CurrentAttemptID != first.Attempt.ID {
-		t.Fatalf("failed deferred transaction changed task: %+v, %v", got, err)
-	}
-}
-
-func TestSchemaRejectsMalformedAttemptInputs(t *testing.T) {
+func TestSchemaRejectsMalformedRunInputs(t *testing.T) {
 	s := openTestStore(t, testDBPath(t))
 	t.Cleanup(func() { _ = s.Close() })
 	createTestWorkspace(t, s)
@@ -258,13 +205,12 @@ func TestSchemaRejectsMalformedAttemptInputs(t *testing.T) {
 		name   string
 		mutate func(*AdmitBackgroundRunParams)
 	}{
-		{"attempt ID", func(p *AdmitBackgroundRunParams) { p.AttemptID = "att_bad" }},
+		{"run ID", func(p *AdmitBackgroundRunParams) { p.TaskID = "tsk_bad" }},
 		{"session prefix", func(p *AdmitBackgroundRunParams) { p.OpenCodeSessionID = "ses_bad" }},
 		{"session uppercase", func(p *AdmitBackgroundRunParams) {
 			p.OpenCodeSessionID = task.OpenCodeSessionID("ses_ABCDEF0123456789abcdef0123456789")
 		}},
 		{"message prefix", func(p *AdmitBackgroundRunParams) { p.OpenCodeMessageID = "msg_bad" }},
-		{"execution contract", func(p *AdmitBackgroundRunParams) { p.ExecutionContractVersion = "" }},
 		{"agent", func(p *AdmitBackgroundRunParams) { p.Agent = "" }},
 		{"model", func(p *AdmitBackgroundRunParams) { p.Model = string(make([]byte, 257)) }},
 		{"deadline", func(p *AdmitBackgroundRunParams) { p.Deadline = p.AcceptedAt }},
@@ -279,7 +225,7 @@ func TestSchemaRejectsMalformedAttemptInputs(t *testing.T) {
 			}
 		})
 	}
-	assertCounts(t, s, 0, 0, 0)
+	assertCounts(t, s, 0, 0)
 }
 
 func TestMigrationDriftAndUnknownVersionFailClosed(t *testing.T) {
@@ -333,9 +279,9 @@ func TestSQLitePoliciesAndForeignKeys(t *testing.T) {
 		}
 	}
 	_, err := s.db.Exec(`INSERT INTO receipts(
-id,workspace_id,command_kind,state,idempotency_key,request_hash,actor,accepted_at,
-api_contract_version,target_type,target_id,response_status,response_projection)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, testReceiptID(20), testWorkspaceID(), "task.submit", "accepted", "fk", make([]byte, 32), `{}`, 1, "v1", "task", testTaskID(20), 202, `{}`)
+workspace_id,command_kind,idempotency_key,request_hash,actor,accepted_at,
+api_contract_version,run_id,response_status,response_projection)
+VALUES(?,?,?,?,?,?,?,?,?,?)`, testWorkspaceID(), CreateBackgroundRunCommand, "fk", make([]byte, 32), `{}`, 1, "v1", testTaskID(20), 202, `{}`)
 	if err == nil {
 		t.Fatal("foreign key violation was accepted")
 	}
@@ -350,9 +296,9 @@ func TestOpenRejectsExistingForeignKeyViolation(t *testing.T) {
 	}
 	raw := openRaw(t, path) // SQLite defaults foreign_keys off for this connection.
 	if _, err := raw.Exec(`INSERT INTO receipts(
-id,workspace_id,command_kind,state,idempotency_key,request_hash,actor,accepted_at,
-api_contract_version,target_type,target_id,response_status,response_projection)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, testReceiptID(21), testWorkspaceID(), "task.submit", "accepted", "broken-fk", make([]byte, 32), `{}`, 1, "v1", "task", testTaskID(21), 202, `{}`); err != nil {
+workspace_id,command_kind,idempotency_key,request_hash,actor,accepted_at,
+api_contract_version,run_id,response_status,response_projection)
+VALUES(?,?,?,?,?,?,?,?,?,?)`, testWorkspaceID(), CreateBackgroundRunCommand, "broken-fk", make([]byte, 32), `{}`, 1, "v1", testTaskID(21), 202, `{}`); err != nil {
 		t.Fatal(err)
 	}
 	if err := raw.Close(); err != nil {
@@ -455,7 +401,7 @@ func TestAdmissionHonorsDeadlineWhileDatabaseIsBusy(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > time.Second {
 		t.Fatalf("deadline took %v despite context cancellation", elapsed)
 	}
-	assertCounts(t, s, 0, 0, 0)
+	assertCounts(t, s, 0, 0)
 }
 
 func openTestStore(t *testing.T, path string) *Store {
@@ -497,31 +443,25 @@ func createTestWorkspace(t *testing.T, s *Store) {
 func testAdmission(n int, key, prompt string) AdmitBackgroundRunParams {
 	hash := sha256.Sum256([]byte(key + "\n" + prompt))
 	params := AdmitBackgroundRunParams{
-		TaskID: testTaskID(n), AttemptID: testAttemptID(n), ReceiptID: testReceiptID(n),
-		OpenCodeSessionID: testSessionID(n), OpenCodeMessageID: testMessageID(n),
+		TaskID: testTaskID(n), OpenCodeSessionID: testSessionID(n), OpenCodeMessageID: testMessageID(n),
 		Claim: task.IdempotencyClaim{
 			Scope: task.IdempotencyScope{WorkspaceID: testWorkspaceID(), CommandKind: CreateBackgroundRunCommand},
 			Key:   task.IdempotencyKey(key), RequestHash: task.RequestHash(hash),
 			Actor: task.ActorSnapshot{Type: task.ActorOpenCode, ID: "pc_owner", DisplayName: "OpenCode", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "req-1"},
 		},
-		Title: "Task title", Prompt: prompt, RepositoryID: 987654321, BaseRef: "main",
-		BaseSHA: task.GitOID("0123456789abcdef0123456789abcdef01234567"), ObjectFormat: "sha1",
-		ExecutionContractVersion: "exec-v1", Agent: "build", ModelProvider: "provider", Model: "model-1",
-		Deadline:           testTime.Add(time.Hour),
-		APIContractVersion: "v1", AcceptedAt: testTime,
-	}
-	params.BackgroundRun = &BackgroundRunIntent{
-		RepositoryRemote: "https://github.com/owner/repository", Branch: "main",
+		Prompt: prompt, RepositoryID: 987654321, RepositoryRemote: "https://github.com/owner/repository",
+		BaseSHA: task.GitOID("0123456789abcdef0123456789abcdef01234567"), Branch: "main",
 		Profile: BackgroundRunSourceProfile, EnvironmentSHA256: sha256.Sum256([]byte("{}")),
 		ImageIdentity: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		Agent:         "build", ModelProvider: "provider", Model: "model-1",
+		Deadline:           testTime.Add(time.Hour),
+		APIContractVersion: "v1", AcceptedAt: testTime,
 	}
 	return params
 }
 
-func testWorkspaceID() task.WorkspaceID  { return task.WorkspaceID(testID("wsp_", 0)) }
-func testTaskID(n int) task.TaskID       { return task.TaskID(testID("tsk_", n)) }
-func testAttemptID(n int) task.AttemptID { return task.AttemptID(testID("att_", n)) }
-func testReceiptID(n int) task.ReceiptID { return task.ReceiptID(testID("rcp_", n)) }
+func testWorkspaceID() task.WorkspaceID { return task.WorkspaceID(testID("wsp_", 0)) }
+func testTaskID(n int) task.TaskID      { return task.TaskID(testID("tsk_", n)) }
 
 func testSessionID(n int) task.OpenCodeSessionID {
 	return task.OpenCodeSessionID(fmt.Sprintf("ses_%032x", n+1))
@@ -537,9 +477,9 @@ func testID(prefix string, n int) string {
 	return fmt.Sprintf("%s0198d34d-6a50-75fb-b1f2-%012x", prefix, n+1)
 }
 
-func assertCounts(t *testing.T, s *Store, tasks, attempts, receipts int) {
+func assertCounts(t *testing.T, s *Store, runs, receipts int) {
 	t.Helper()
-	for table, want := range map[string]int{"tasks": tasks, "attempts": attempts, "receipts": receipts} {
+	for table, want := range map[string]int{"runs": runs, "receipts": receipts} {
 		var got int
 		if err := s.db.QueryRow(`SELECT count(*) FROM ` + table).Scan(&got); err != nil {
 			t.Fatal(err)

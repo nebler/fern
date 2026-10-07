@@ -83,7 +83,7 @@ type BackgroundRunResultProjection struct {
 	Result Result
 }
 
-const resultSelect = `SELECT id,task_id,state,outcome,base_sha,result_commit,tree_oid,change_count,changes_sha256,
+const resultSelect = `SELECT id,run_id,state,outcome,base_sha,result_commit,tree_oid,change_count,changes_sha256,
 manifest_json,manifest_sha256,bundle_sha256,bundle_size,collected_at,materialization_sha256,sealed_at FROM results`
 
 // GetResult reads a selected or sealed result. A sealed run's result ID names
@@ -133,7 +133,7 @@ func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgro
 	}
 	defer release()
 	defer rollback(tx, &err)
-	run, err := readBackgroundRunExact(ctx, tx, p.WorkspaceID, p.TaskID)
+	run, err := readRun(ctx, tx, p.WorkspaceID, p.TaskID)
 	if err != nil {
 		return Result{}, err
 	}
@@ -155,7 +155,7 @@ func (s *Store) SelectBackgroundRunSnapshot(ctx context.Context, p SelectBackgro
 	} else if !errors.Is(getErr, ErrNotFound) {
 		return Result{}, getErr
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO results(id,task_id,state,outcome,base_sha,result_commit,tree_oid,change_count,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO results(id,run_id,state,outcome,base_sha,result_commit,tree_oid,change_count,
 changes_sha256,manifest_json,manifest_sha256,bundle_sha256,bundle_size,collected_at) VALUES(?,?,'selected',?,?,?,?,?,?,?,?,?,?,?)`,
 		run.Seal.ResultID, run.TaskID, outcome, run.BaseOID, p.ResultCommit, p.TreeOID, p.ChangeCount, p.ChangesSHA256[:],
 		string(p.ArtifactManifest), p.ArtifactManifestSHA256[:], p.BundleSHA256[:], p.BundleBytes, unixMillis(p.CollectedAt)); err != nil {
@@ -193,7 +193,7 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 	}
 	defer release()
 	defer rollback(tx, &err)
-	run, err := readBackgroundRunExact(ctx, tx, p.WorkspaceID, p.TaskID)
+	run, err := readRun(ctx, tx, p.WorkspaceID, p.TaskID)
 	if err != nil {
 		return BackgroundRunRetainedResult{}, err
 	}
@@ -202,25 +202,9 @@ func (s *Store) CommitBackgroundRunRetainedResult(ctx context.Context, p CommitB
 	}
 	sealedMS := unixMillis(p.Now)
 	result, err := tx.ExecContext(ctx, `UPDATE results SET state='sealed',materialization_sha256=?,sealed_at=?
-WHERE id=? AND task_id=? AND state='selected'`, p.MaterializationProof[:], sealedMS, run.Seal.ResultID, run.TaskID)
+WHERE id=? AND run_id=? AND state='selected'`, p.MaterializationProof[:], sealedMS, run.Seal.ResultID, run.TaskID)
 	if err != nil {
 		return BackgroundRunRetainedResult{}, fmt.Errorf("seal retained result: %w", err)
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRunRetainedResult{}, ErrInvalidState
-	}
-	result, err = tx.ExecContext(ctx, `UPDATE attempts SET state='superseded',sealed_result_id=?,revision=revision+1,updated_at=?
-WHERE id=? AND task_id=? AND state='prepared' AND sealed_result_id IS NULL`, run.Seal.ResultID, sealedMS, run.AttemptID, run.TaskID)
-	if err != nil {
-		return BackgroundRunRetainedResult{}, err
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRunRetainedResult{}, ErrInvalidState
-	}
-	result, err = tx.ExecContext(ctx, `UPDATE tasks SET state='completed',sealed_result_id=?,revision=revision+1,updated_at=?
-WHERE id=? AND state='queued' AND sealed_result_id IS NULL`, run.Seal.ResultID, sealedMS, run.TaskID)
-	if err != nil {
-		return BackgroundRunRetainedResult{}, err
 	}
 	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
 		return BackgroundRunRetainedResult{}, ErrInvalidState

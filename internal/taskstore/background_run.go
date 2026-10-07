@@ -2,9 +2,6 @@ package taskstore
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
-	"errors"
 	"fmt"
 
 	"github.com/nebler/fern/internal/run"
@@ -16,64 +13,28 @@ const BackgroundRunStoppedBeforeStart = "background_run_stopped_before_start"
 
 const backgroundRunResourceSpecVersion = run.ResourceSpecVersion
 
-const backgroundRunSelect = `
-SELECT r.task_id,r.attempt_id,r.workspace_id,r.generation,r.writer_generation,r.repository_id,r.repository_remote,r.base_oid,r.branch,
-       r.instruction_sha256,r.profile,r.profile_sha256,r.environment_sha256,r.resource_spec_version,r.image_identity,r.clone_identity,r.volume_identity,
-       r.container_identity,r.endpoint_identity,r.opencode_session_id,r.opencode_message_id,r.state,r.effect_phase,
-       r.stop_receipt_id,r.stop_requested_at,r.observed_container_id,r.observed_container_started_at,r.runtime_epoch,r.host_port,
-       r.last_evidence,r.last_error,r.prompt_request_attempted_at,r.timeout_requested_at,r.cleanup_proof,
-       r.revision,r.created_at,r.updated_at,r.seal_receipt_id,r.seal_requested_at,r.seal_policy_version,r.result_id,
-       r.writer_fence_kind,r.writer_fence_container_id,r.writer_fence_started_at,r.writer_fence_token,r.writer_fence_stopped_at,
-       r.creator_actor
-FROM background_runs r`
-
+// GetBackgroundRun reads one run. Plugin actors see only runs they created;
+// a foreign run reads as not found.
 func (s *Store) GetBackgroundRun(ctx context.Context, workspaceID task.WorkspaceID, taskID task.TaskID, actor task.ActorSnapshot) (BackgroundRun, error) {
 	if !backgroundRunReader(actor.Type) {
 		return BackgroundRun{}, fmt.Errorf("%w: background run reader", ErrInvalidInput)
 	}
-	query := backgroundRunSelect + ` WHERE r.workspace_id=? AND r.task_id=?`
-	arguments := []any{workspaceID, taskID}
 	if actor.Type == task.ActorOpenCode {
-		query += ownedBy
-		arguments = append(arguments, ownerArgs(actor)...)
+		return readOwnedRun(ctx, s.db, workspaceID, taskID, actor)
 	}
-	run, err := scanBackgroundRun(s.db.QueryRowContext(ctx, query, arguments...))
-	if errors.Is(err, sql.ErrNoRows) {
-		return BackgroundRun{}, ErrNotFound
-	}
-	if err != nil {
-		return BackgroundRun{}, fmt.Errorf("read background run: %w", err)
-	}
-	return run, nil
+	return readRun(ctx, s.db, workspaceID, taskID)
 }
 
 // ReadBackgroundRunLifecycle returns the (state, phase) of one run for the
-// trusted in-process coordinator. It exposes no task plaintext and authorizes
-// no actor.
+// trusted in-process coordinator. It authorizes no actor.
 func (s *Store) ReadBackgroundRunLifecycle(ctx context.Context, workspaceID task.WorkspaceID, taskID task.TaskID) (BackgroundRunState, BackgroundRunEffectPhase, error) {
-	run, err := scanBackgroundRun(s.db.QueryRowContext(ctx, backgroundRunSelect+` WHERE r.workspace_id=? AND r.task_id=?`, workspaceID, taskID))
-	if errors.Is(err, sql.ErrNoRows) {
-		return "", "", ErrNotFound
+	var state BackgroundRunState
+	var phase BackgroundRunEffectPhase
+	if err := s.db.QueryRowContext(ctx, `SELECT state,effect_phase FROM runs WHERE workspace_id=? AND id=?`, workspaceID, taskID).
+		Scan(&state, &phase); err != nil {
+		return "", "", fmt.Errorf("read run lifecycle: %w", err)
 	}
-	if err != nil {
-		return "", "", fmt.Errorf("read background run lifecycle: %w", err)
-	}
-	return run.State, run.EffectPhase, nil
-}
-
-// GetBackgroundRunOwners returns the exact parent revisions only after the
-// same ownership-hiding check used by GetBackgroundRun.
-func (s *Store) GetBackgroundRunOwners(ctx context.Context, workspaceID task.WorkspaceID, taskID task.TaskID, actor task.ActorSnapshot) (Task, Attempt, error) {
-	run, err := s.GetBackgroundRun(ctx, workspaceID, taskID, actor)
-	if err != nil {
-		return Task{}, Attempt{}, err
-	}
-	owner, err := getTask(ctx, s.db, run.TaskID)
-	if err != nil {
-		return Task{}, Attempt{}, err
-	}
-	attempt, err := getAttempt(ctx, s.db, run.AttemptID)
-	return owner, attempt, err
+	return state, phase, nil
 }
 
 const MaxBackgroundRunListLimit = 100
@@ -84,13 +45,13 @@ func (s *Store) ListBackgroundRuns(ctx context.Context, workspaceID task.Workspa
 	if !backgroundRunReader(actor.Type) || limit < 1 || limit > MaxBackgroundRunListLimit {
 		return nil, fmt.Errorf("%w: background run list", ErrInvalidInput)
 	}
-	query := backgroundRunSelect + ` WHERE r.workspace_id=?`
+	query := runSelect + ` WHERE r.workspace_id=?`
 	arguments := []any{workspaceID}
 	if actor.Type == task.ActorOpenCode {
 		query += ownedBy
 		arguments = append(arguments, ownerArgs(actor)...)
 	}
-	query += ` ORDER BY r.created_at DESC,r.task_id DESC LIMIT ?`
+	query += ` ORDER BY r.created_at DESC,r.id DESC LIMIT ?`
 	arguments = append(arguments, limit)
 	rows, err := s.db.QueryContext(ctx, query, arguments...)
 	if err != nil {
@@ -99,7 +60,7 @@ func (s *Store) ListBackgroundRuns(ctx context.Context, workspaceID task.Workspa
 	defer rows.Close()
 	runs := make([]BackgroundRun, 0)
 	for rows.Next() {
-		run, scanErr := scanBackgroundRun(rows)
+		run, scanErr := scanRun(rows)
 		if scanErr != nil {
 			return nil, fmt.Errorf("scan background run list: %w", scanErr)
 		}
@@ -122,9 +83,12 @@ func backgroundRunReader(actorType task.ActorType) bool {
 	return actorType == task.ActorOpenCode || actorType == task.ActorDevice || actorType == task.ActorOperator
 }
 
+// StopBackgroundRun commits a user stop. A queued run becomes terminal at
+// once; an executing run moves to cleaning. It is a compare-and-swap on the
+// run revision, so exactly one of a racing stop and seal wins.
 func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams) (_ BackgroundRunStop, err error) {
-	if err := validateBackgroundRunStop(p); err != nil {
-		return BackgroundRunStop{}, err
+	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != StopBackgroundRunCommand || p.Claim.Actor.Type != task.ActorOpenCode {
+		return BackgroundRunStop{}, fmt.Errorf("%w: run stop claim", ErrInvalidInput)
 	}
 	tx, release, err := s.beginWrite(ctx)
 	if err != nil {
@@ -133,17 +97,17 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 	defer release()
 	defer rollback(tx, &err)
 
-	existing, found, err := receiptByKey(ctx, tx, p.Claim.Scope.WorkspaceID, p.Claim.Scope.CommandKind, p.Claim.Key)
+	existing, found, err := receiptByKey(ctx, tx, p.WorkspaceID, StopBackgroundRunCommand, p.Claim.Key)
 	if err != nil {
 		return BackgroundRunStop{}, err
 	}
 	if found {
 		switch existing.classify(p.Claim) {
 		case task.IdempotencyReplay:
-			if existing.TargetID != p.TaskID {
+			if existing.RunID != p.TaskID {
 				return BackgroundRunStop{}, ErrIdempotencyConflict
 			}
-			run, getErr := getBackgroundRunOwned(ctx, tx, p.WorkspaceID, existing.TargetID, p.Claim.Actor)
+			run, getErr := readOwnedRun(ctx, tx, p.WorkspaceID, existing.RunID, p.Claim.Actor)
 			if getErr != nil || run.StopReceiptID != existing.ID {
 				return BackgroundRunStop{}, fmt.Errorf("%w: background run stop replay", ErrCorruptStore)
 			}
@@ -160,190 +124,43 @@ func (s *Store) StopBackgroundRun(ctx context.Context, p StopBackgroundRunParams
 		}
 	}
 
-	run, err := getBackgroundRunOwned(ctx, tx, p.WorkspaceID, p.TaskID, p.Claim.Actor)
+	run, err := readOwnedRun(ctx, tx, p.WorkspaceID, p.TaskID, p.Claim.Actor)
 	if err != nil {
 		return BackgroundRunStop{}, err
 	}
 	queuedStop := run.EffectPhase == BackgroundRunEffectAbsent
 	activeStop := run.EffectPhase == BackgroundRunEffectProvisioning || run.EffectPhase == BackgroundRunEffectPromptPending || run.EffectPhase == BackgroundRunEffectAdmitted
-	if run.StopReceiptID != "" || (!queuedStop && !activeStop) {
-		return BackgroundRunStop{}, ErrInvalidState
-	}
-	owner, err := getTask(ctx, tx, run.TaskID)
-	if err != nil {
-		return BackgroundRunStop{}, err
-	}
-	attempt, err := getAttempt(ctx, tx, run.AttemptID)
-	if err != nil {
-		return BackgroundRunStop{}, err
-	}
-	if owner.WorkspaceID != p.WorkspaceID || owner.CurrentAttemptID != attempt.ID || owner.State != task.TaskQueued ||
-		attempt.TaskID != owner.ID || attempt.WorkspaceID != owner.WorkspaceID ||
-		attempt.ID != run.AttemptID || attempt.Sequence != run.Generation || attempt.State != task.AttemptPrepared {
+	if run.StopReceiptID != 0 || (!queuedStop && !activeStop) {
 		return BackgroundRunStop{}, ErrInvalidState
 	}
 	stopState := BackgroundRunFailed
 	if activeStop {
 		stopState = BackgroundRunCanceling
 	}
-	response, _ := json.Marshal(struct {
+	receipt, err := insertReceipt(ctx, tx, p.Claim, run.TaskID, p.APIContractVersion, p.StoppedAt, struct {
 		RunID task.TaskID        `json:"run_id"`
 		State BackgroundRunState `json:"state"`
 	}{run.TaskID, stopState})
+	if err != nil {
+		return BackgroundRunStop{}, err
+	}
+	ref := BackgroundRunRef{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, ExpectedRevision: run.Revision,
+		ExpectedState: run.State, ExpectedPhase: run.EffectPhase, Now: p.StoppedAt}
 	now := unixMillis(p.StoppedAt)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO receipts(
-id,workspace_id,command_kind,state,idempotency_key,request_hash,actor,accepted_at,
-api_contract_version,target_type,target_id,response_status,response_projection)
-VALUES(?,?,?,'accepted',?,?,?,?,?,'task',?,202,?)`, p.ReceiptID, run.WorkspaceID, StopBackgroundRunCommand,
-		p.Claim.Key, p.Claim.RequestHash[:], encodeActor(p.Claim.Actor), now, p.APIContractVersion, run.TaskID, string(response)); err != nil {
-		return BackgroundRunStop{}, fmt.Errorf("insert background run stop receipt: %w", err)
-	}
+	var stored BackgroundRun
 	if activeStop {
-		result, updateErr := tx.ExecContext(ctx, `UPDATE background_runs SET state='canceling',effect_phase='cleaning',
-stop_receipt_id=?,stop_requested_at=?,revision=revision+1,updated_at=?
-WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND stop_receipt_id IS NULL AND revision=? AND
-effect_phase IN ('provisioning','prompt_pending','admitted')`, p.ReceiptID, now, now,
-			run.TaskID, run.AttemptID, run.WorkspaceID, run.Generation, run.Revision)
-		if updateErr != nil {
-			return BackgroundRunStop{}, fmt.Errorf("request active background run stop: %w", updateErr)
-		}
-		if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-			return BackgroundRunStop{}, ErrInvalidState
-		}
-		stored, getErr := getBackgroundRunOwned(ctx, tx, p.WorkspaceID, run.TaskID, p.Claim.Actor)
-		if getErr != nil {
-			return BackgroundRunStop{}, getErr
-		}
-		if err := tx.Commit(); err != nil {
-			return BackgroundRunStop{}, fmt.Errorf("commit active background run stop: %w", err)
-		}
-		return BackgroundRunStop{Run: stored, Receipt: Receipt{ID: p.ReceiptID, WorkspaceID: run.WorkspaceID,
-			CommandKind: StopBackgroundRunCommand, State: ReceiptAccepted, IdempotencyKey: p.Claim.Key,
-			RequestHash: p.Claim.RequestHash, Actor: p.Claim.Actor, AcceptedAt: fromUnixMillis(now),
-			APIContractVersion: p.APIContractVersion, TargetType: "task", TargetID: run.TaskID,
-			ResponseStatus: 202, ResponseProjection: response}}, nil
+		stored, err = updateRunTx(ctx, tx, ref, `state='canceling',effect_phase='cleaning',stop_receipt_id=?,stop_requested_at=?`,
+			[]any{receipt.ID, now}, "request active background run stop", `stop_receipt_id IS NULL`)
+	} else {
+		stored, err = updateRunTx(ctx, tx, ref, `state='failed',effect_phase='cleanup_complete',stop_receipt_id=?,stop_requested_at=?,
+cleanup_proof='queued:no_effect_claim',last_error=?`, []any{receipt.ID, now, BackgroundRunStoppedBeforeStart},
+			"stop queued background run", `stop_receipt_id IS NULL`)
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE attempts SET state='failed',terminal_reason=?,revision=revision+1,updated_at=?
-WHERE id=? AND task_id=? AND workspace_id=? AND state='prepared' AND revision=?`,
-		BackgroundRunStoppedBeforeStart, now, attempt.ID, owner.ID, owner.WorkspaceID, attempt.Revision)
-	if err != nil {
-		return BackgroundRunStop{}, fmt.Errorf("terminalize background run attempt: %w", err)
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRunStop{}, ErrInvalidState
-	}
-	result, err = tx.ExecContext(ctx, `UPDATE tasks SET state='failed',terminal_reason=?,revision=revision+1,updated_at=?
-WHERE id=? AND workspace_id=? AND state='queued' AND current_attempt_id=? AND revision=?`,
-		BackgroundRunStoppedBeforeStart, now, owner.ID, owner.WorkspaceID, attempt.ID, owner.Revision)
-	if err != nil {
-		return BackgroundRunStop{}, fmt.Errorf("terminalize background run task: %w", err)
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRunStop{}, ErrInvalidState
-	}
-	result, err = tx.ExecContext(ctx, `UPDATE background_runs SET state='failed',effect_phase='cleanup_complete',
-stop_receipt_id=?,stop_requested_at=?,cleanup_proof='queued:no_effect_claim',last_error=?,revision=revision+1,updated_at=?
-WHERE task_id=? AND attempt_id=? AND workspace_id=? AND generation=? AND state='queued' AND effect_phase='absent' AND stop_receipt_id IS NULL AND revision=?`,
-		p.ReceiptID, now, BackgroundRunStoppedBeforeStart, now, run.TaskID, run.AttemptID, run.WorkspaceID, run.Generation, run.Revision)
-	if err != nil {
-		return BackgroundRunStop{}, fmt.Errorf("fence background run stop: %w", err)
-	}
-	if changed, changeErr := result.RowsAffected(); changeErr != nil || changed != 1 {
-		return BackgroundRunStop{}, ErrInvalidState
-	}
-	stored, err := getBackgroundRunOwned(ctx, tx, p.WorkspaceID, run.TaskID, p.Claim.Actor)
 	if err != nil {
 		return BackgroundRunStop{}, err
 	}
 	if err := tx.Commit(); err != nil {
 		return BackgroundRunStop{}, fmt.Errorf("commit background run stop: %w", err)
 	}
-	return BackgroundRunStop{Run: stored, Receipt: Receipt{ID: p.ReceiptID, WorkspaceID: run.WorkspaceID,
-		CommandKind: StopBackgroundRunCommand, State: ReceiptAccepted, IdempotencyKey: p.Claim.Key,
-		RequestHash: p.Claim.RequestHash, Actor: p.Claim.Actor, AcceptedAt: fromUnixMillis(now),
-		APIContractVersion: p.APIContractVersion, TargetType: "task", TargetID: run.TaskID,
-		ResponseStatus: 202, ResponseProjection: response}}, nil
-}
-
-func validateBackgroundRunStop(p StopBackgroundRunParams) error {
-	if p.WorkspaceID != p.Claim.Scope.WorkspaceID || p.Claim.Scope.CommandKind != StopBackgroundRunCommand || p.Claim.Actor.Type != task.ActorOpenCode {
-		return fmt.Errorf("%w: run stop claim", ErrInvalidInput)
-	}
-	return nil
-}
-
-func getBackgroundRunOwned(ctx context.Context, q queryRower, workspaceID task.WorkspaceID, taskID task.TaskID, actor task.ActorSnapshot) (BackgroundRun, error) {
-	run, err := scanBackgroundRun(q.QueryRowContext(ctx, backgroundRunSelect+` WHERE r.workspace_id=? AND r.task_id=?`+ownedBy,
-		append([]any{workspaceID, taskID}, ownerArgs(actor)...)...))
-	if errors.Is(err, sql.ErrNoRows) {
-		return BackgroundRun{}, ErrNotFound
-	}
-	if err != nil {
-		return BackgroundRun{}, fmt.Errorf("read owned background run: %w", err)
-	}
-	return run, nil
-}
-
-func scanBackgroundRun(row rowScanner) (BackgroundRun, error) {
-	var run BackgroundRun
-	var repositoryID int64
-	var branch, stopReceipt, containerID, containerStarted, evidence, lastError, cleanupProof sql.NullString
-	var sealReceipt, sealPolicy, resultID, fenceKind, fenceContainer, fenceStarted, fenceToken sql.NullString
-	var stopAt, runtimeEpoch, hostPort, promptAttempted, timeoutRequested, sealRequested, fenceStopped sql.NullInt64
-	var instructionHash, profileHash, environmentHash []byte
-	var created, updated int64
-	var creator string
-	err := row.Scan(&run.TaskID, &run.AttemptID, &run.WorkspaceID, &run.Generation, &run.WriterGeneration, &repositoryID,
-		&run.RepositoryRemote, &run.BaseOID, &branch, &instructionHash, &run.Profile, &profileHash, &environmentHash, &run.ResourceSpecVersion,
-		&run.ImageIdentity, &run.CloneIdentity, &run.VolumeIdentity, &run.ContainerIdentity, &run.EndpointIdentity,
-		&run.OpenCodeSessionID, &run.OpenCodeMessageID, &run.State, &run.EffectPhase,
-		&stopReceipt, &stopAt, &containerID, &containerStarted, &runtimeEpoch, &hostPort,
-		&evidence, &lastError, &promptAttempted, &timeoutRequested, &cleanupProof,
-		&run.Revision, &created, &updated, &sealReceipt, &sealRequested, &sealPolicy, &resultID,
-		&fenceKind, &fenceContainer, &fenceStarted, &fenceToken, &fenceStopped, &creator)
-	if err != nil {
-		return BackgroundRun{}, err
-	}
-	copy(run.InstructionSHA256[:], instructionHash)
-	copy(run.ProfileSHA256[:], profileHash)
-	copy(run.EnvironmentSHA256[:], environmentHash)
-	run.RepositoryID = task.RepositoryID(repositoryID)
-	run.Branch = nullableString(branch)
-	run.CreatedAt, run.UpdatedAt = fromUnixMillis(created), fromUnixMillis(updated)
-	run.ObservedContainerID = nullableText(containerID)
-	run.ObservedContainerStartedAt = nullableText(containerStarted)
-	run.RuntimeEpoch = runtimeEpoch.Int64
-	run.HostPort = int(hostPort.Int64)
-	run.LastEvidence = nullableText(evidence)
-	run.LastError = nullableText(lastError)
-	run.PromptRequestAttemptedAt = nullableTime(promptAttempted)
-	run.TimeoutRequestedAt = nullableTime(timeoutRequested)
-	run.CleanupProof = nullableText(cleanupProof)
-	// Schema CHECKs keep the seal and writer-fence column groups all-or-nothing.
-	if sealReceipt.Valid {
-		run.Seal = &Seal{ReceiptID: task.ReceiptID(sealReceipt.String), ResultID: task.ResultID(resultID.String),
-			RequestedAt: fromUnixMillis(sealRequested.Int64), PolicyVersion: sealPolicy.String}
-	}
-	if fenceKind.Valid {
-		run.WriterFence = &WriterFence{Kind: WriterFenceKind(fenceKind.String), ContainerID: nullableText(fenceContainer),
-			ContainerStartedAt: nullableText(fenceStarted), RuntimeToken: nullableText(fenceToken), StoppedAt: nullableTime(fenceStopped)}
-	}
-	run.StopReceiptID = task.ReceiptID(nullableText(stopReceipt))
-	run.StopRequestedAt = nullableTime(stopAt)
-	run.Creator, err = decodeActor(creator)
-	return run, err
-}
-
-func validBackgroundRunStatePhase(profile string, state BackgroundRunState, phase BackgroundRunEffectPhase) bool {
-	if profile != BackgroundRunSourceProfile {
-		return false
-	}
-	return run.Classify(run.State(state), run.Phase(phase)).Valid
-}
-
-func nullableText(value sql.NullString) string {
-	if value.Valid {
-		return value.String
-	}
-	return ""
+	return BackgroundRunStop{Run: stored, Receipt: receipt}, nil
 }

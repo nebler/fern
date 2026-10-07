@@ -21,14 +21,14 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
-	run, _ := advanceBackgroundRunToPrompt(t, store, admission.BackgroundRun.ImageIdentity, now)
+	run, _ := advanceBackgroundRunToPrompt(t, store, admission.ImageIdentity, now)
 	sealClaim := task.IdempotencyClaim{
 		Scope: task.IdempotencyScope{WorkspaceID: run.WorkspaceID, CommandKind: SealBackgroundRunCommand},
 		Key:   "retained-seal", RequestHash: sha256.Sum256([]byte("retained-seal")), Actor: admission.Claim.Actor,
 	}
 	seal := SealBackgroundRunParams{
 		WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, ExpectedRunRevision: run.Revision,
-		ReceiptID: testReceiptID(5102), ResultID: testResultID(5106), Claim: sealClaim,
+		ResultID: testResultID(5106), Claim: sealClaim,
 		PolicyVersion: "background-retained.v1", APIContractVersion: "v1", AcceptedAt: now.Add(20 * time.Second),
 	}
 	sealed, err := store.SealBackgroundRun(context.Background(), seal)
@@ -37,7 +37,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		t.Fatalf("seal admission = %+v, error=%v", sealed, err)
 	}
 	replay, err := store.SealBackgroundRun(context.Background(), seal)
-	if err != nil || !replay.Replayed || replay.Run.Seal.ReceiptID != seal.ReceiptID {
+	if err != nil || !replay.Replayed || replay.Run.Seal.ReceiptID != sealed.Receipt.ID {
 		t.Fatalf("seal replay = %+v, error=%v", replay, err)
 	}
 	ownerMismatch := seal
@@ -46,7 +46,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	if _, err := store.SealBackgroundRun(context.Background(), ownerMismatch); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("seal owner mismatch = %v", err)
 	}
-	stop := StopBackgroundRunParams{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID, ReceiptID: testReceiptID(5109),
+	stop := StopBackgroundRunParams{WorkspaceID: run.WorkspaceID, TaskID: run.TaskID,
 		Claim: task.IdempotencyClaim{
 			Scope: task.IdempotencyScope{WorkspaceID: run.WorkspaceID, CommandKind: StopBackgroundRunCommand}, Key: "stop-after-seal",
 			RequestHash: sha256.Sum256([]byte("stop-after-seal")), Actor: admission.Claim.Actor,
@@ -80,7 +80,7 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		writerInactive.WriterFence == nil || writerInactive.WriterFence.RuntimeToken != "runtime-token" {
 		t.Fatalf("writer fence = %+v, error=%v", writerInactive, err)
 	}
-	if _, err := store.db.Exec(`UPDATE background_runs SET writer_fence_token='other',revision=revision+1,updated_at=updated_at+1 WHERE task_id=?`, run.TaskID); err == nil {
+	if _, err := store.db.Exec(`UPDATE runs SET writer_fence_token='other',revision=revision+1,updated_at=updated_at+1 WHERE id=?`, run.TaskID); err == nil {
 		t.Fatal("writer fence accepted raw mutation")
 	}
 
@@ -130,8 +130,8 @@ func TestBackgroundRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	if _, err := store.db.Exec(`UPDATE results SET tree_oid=? WHERE id=?`, different.TreeOID, seal.ResultID); err == nil {
 		t.Fatal("selected result accepted raw mutation")
 	}
-	if _, err := store.db.Exec(`UPDATE background_runs SET state='result_ready',effect_phase='cleaning',
-revision=revision+1,updated_at=updated_at+1 WHERE task_id=?`, run.TaskID); err == nil {
+	if _, err := store.db.Exec(`UPDATE runs SET state='result_ready',effect_phase='cleaning',
+revision=revision+1,updated_at=updated_at+1 WHERE id=?`, run.TaskID); err == nil {
 		t.Fatal("sealed run released its resources without a committed result")
 	}
 	exportNow = exportNow.Add(time.Second)

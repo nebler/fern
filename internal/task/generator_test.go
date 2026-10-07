@@ -32,20 +32,6 @@ func TestGeneratorProducesEveryTypedID(t *testing.T) {
 			return err
 		},
 		func() error {
-			value, err := generator.AttemptID()
-			if err == nil {
-				_, err = ParseAttemptID(string(value))
-			}
-			return err
-		},
-		func() error {
-			value, err := generator.ReceiptID()
-			if err == nil {
-				_, err = ParseReceiptID(string(value))
-			}
-			return err
-		},
-		func() error {
 			value, err := generator.ResultID()
 			if err == nil {
 				_, err = ParseResultID(string(value))
@@ -85,10 +71,6 @@ func TestGenerateAdmissionIDsReturnsCompleteValidatedSet(t *testing.T) {
 	}
 	checks := []error{}
 	_, err = ParseTaskID(string(ids.TaskID))
-	checks = append(checks, err)
-	_, err = ParseAttemptID(string(ids.AttemptID))
-	checks = append(checks, err)
-	_, err = ParseReceiptID(string(ids.ReceiptID))
 	checks = append(checks, err)
 	_, err = ParseOpenCodeSessionID(string(ids.OpenCodeSessionID))
 	checks = append(checks, err)
