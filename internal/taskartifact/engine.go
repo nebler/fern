@@ -3,12 +3,10 @@ package taskartifact
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"fmt"
 	"hash"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -283,14 +281,6 @@ func (e *Engine) makeTemp(root, prefix string) (string, error) {
 		return "", err
 	}
 	return path, nil
-}
-
-func randomToken() (string, error) {
-	var value [16]byte
-	if _, err := io.ReadFull(rand.Reader, value[:]); err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%x", value[:]), nil
 }
 
 func pathContains(parent, child string) bool {

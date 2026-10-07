@@ -234,7 +234,7 @@ func TestCloneCrashRecoveryFinishesStageAndQuarantine(t *testing.T) {
 			t.Fatal(err)
 		}
 		canonical := filepath.Join(provider.root, run.CloneIdentity)
-		stage := filepath.Join(provider.root, ".clone-stage-aaaaaaaaaaaa")
+		stage := filepath.Join(provider.root, ".clone-stage-AAAAAAAAAAAAAAAAAAAAAAAAAA")
 		if err := os.Mkdir(stage, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -258,7 +258,7 @@ func TestCloneCrashRecoveryFinishesStageAndQuarantine(t *testing.T) {
 			t.Fatal(err)
 		}
 		canonical := filepath.Join(provider.root, run.CloneIdentity)
-		quarantine := filepath.Join(provider.root, ".clone-quarantine-bbbbbbbbbbbb")
+		quarantine := filepath.Join(provider.root, ".clone-quarantine-BBBBBBBBBBBBBBBBBBBBBBBBBB")
 		if err := os.Rename(canonical, quarantine); err != nil {
 			t.Fatal(err)
 		}
@@ -319,7 +319,7 @@ func TestCloneFilesystemWorkHonorsCancellationAndRemainsRecoverable(t *testing.T
 
 	t.Run("rollback quarantine", func(t *testing.T) {
 		root := t.TempDir()
-		stage := filepath.Join(root, ".clone-stage-aaaaaaaaaaaa")
+		stage := filepath.Join(root, ".clone-stage-AAAAAAAAAAAAAAAAAAAAAAAAAA")
 		if err := os.Mkdir(stage, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -383,7 +383,7 @@ func TestCloneFilesystemWorkHonorsCancellationAndRemainsRecoverable(t *testing.T
 			t.Fatal(err)
 		}
 		canonical := filepath.Join(provider.root, run.CloneIdentity)
-		quarantine := filepath.Join(provider.root, ".clone-quarantine-cccccccccccc")
+		quarantine := filepath.Join(provider.root, ".clone-quarantine-CCCCCCCCCCCCCCCCCCCCCCCCCC")
 		if err := os.Rename(canonical, quarantine); err != nil {
 			t.Fatal(err)
 		}
@@ -1411,7 +1411,7 @@ func TestCleanupSurvivesImageAndEnvironmentConfigurationRotation(t *testing.T) {
 	run.RuntimeEpoch = started.RuntimeEpoch
 
 	recovery := *provider
-	recovery.config.ImageID = "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	recovery.config.ImageID = "sha256:CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCcccc"
 	recovery.imageLabels = cloneMap(provider.imageLabels)
 	recovery.imageLabels["org.opencontainers.image.created"] = "2026-09-01T00:00:00Z"
 	if _, err := recovery.EnsureClone(context.Background(), run); err == nil {

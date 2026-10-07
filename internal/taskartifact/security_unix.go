@@ -3,6 +3,7 @@
 package taskartifact
 
 import (
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"os"
@@ -134,10 +135,7 @@ func removeExactDirectory(path string, device, inode uint64) error {
 	if err != nil || currentDevice != device || currentInode != inode {
 		return fmt.Errorf("%w: removal identity", ErrStorage)
 	}
-	token, err := randomToken()
-	if err != nil {
-		return err
-	}
+	token := rand.Text()
 	quarantine := filepath.Join(filepath.Dir(path), ".remove-"+token)
 	if err := atomicfile.RenameNoReplace(path, quarantine); err != nil {
 		return err

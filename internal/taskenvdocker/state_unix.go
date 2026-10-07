@@ -6,7 +6,6 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 
@@ -18,70 +17,57 @@ func prepareRoot(stateRoot string) (string, [32]byte, error) {
 	return prepareRootWithKey(stateRoot, nil)
 }
 
-// prepareRootWithKey retains the existing atomic root publication protocol.
+// prepareRootWithKey loads or atomically publishes the private run root.
 // Runtime roots use a copy of the durable state's authoritative key; they must
 // never silently create a second identity or accept a different existing key.
 func prepareRootWithKey(stateRoot string, authoritative *[32]byte) (string, [32]byte, error) {
-	var zero [32]byte
 	resolved, err := filepath.EvalSymlinks(stateRoot)
 	if err != nil || resolved != stateRoot {
-		return "", zero, errors.New("Fern state root must be an exact path without symlinks")
+		return "", [32]byte{}, errors.New("Fern state root must be an exact path without symlinks")
 	}
 	root := filepath.Join(stateRoot, runRootName)
-	if _, err := os.Lstat(root); err == nil {
-		key, err := loadExistingRoot(root)
-		if err == nil && authoritative != nil && key != *authoritative {
-			return "", zero, errors.New("runtime host key differs from durable authoritative host key")
-		}
-		return root, key, err
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return "", zero, err
+	key, err := publishRoot(stateRoot, root, authoritative)
+	if err == nil && authoritative != nil && key != *authoritative {
+		err = errors.New("runtime host key differs from durable authoritative host key")
 	}
-
-	suffix, err := randomSuffix()
 	if err != nil {
-		return "", zero, err
+		return "", [32]byte{}, err
 	}
-	staging := filepath.Join(stateRoot, "."+runRootName+"-stage-"+suffix)
+	return root, key, nil
+}
+
+// publishRoot loads an existing root, or stages one holding authoritative (or
+// a fresh random key) and publishes it without replacing a concurrent winner.
+func publishRoot(stateRoot, root string, authoritative *[32]byte) ([32]byte, error) {
+	if _, err := os.Lstat(root); err == nil {
+		return loadExistingRoot(root)
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return [32]byte{}, err
+	}
+	staging := filepath.Join(stateRoot, "."+runRootName+"-stage-"+rand.Text())
 	if err := os.Mkdir(staging, 0o700); err != nil {
-		return "", zero, fmt.Errorf("create staged background run root: %w", err)
+		return [32]byte{}, fmt.Errorf("create staged background run root: %w", err)
 	}
-	stagingLive := true
-	defer func() {
-		if stagingLive {
-			_ = os.RemoveAll(staging)
-		}
-	}()
-	var generated [32]byte
+	defer os.RemoveAll(staging) // a no-op once published
+	var key [32]byte
 	if authoritative != nil {
-		generated = *authoritative
+		key = *authoritative
 	} else {
-		if _, err := io.ReadFull(rand.Reader, generated[:]); err != nil {
-			return "", zero, fmt.Errorf("generate background run host key: %w", err)
-		}
+		_, _ = rand.Read(key[:]) // never fails since Go 1.24
 	}
-	if err := atomicfile.Write(filepath.Join(staging, hostKeyName), generated[:], 0o600); err != nil {
-		return "", zero, fmt.Errorf("write staged background run host key: %w", err)
+	if err := atomicfile.Write(filepath.Join(staging, hostKeyName), key[:], 0o600); err != nil {
+		return [32]byte{}, fmt.Errorf("write staged background run host key: %w", err)
 	}
 	if err := atomicfile.RenameNoReplace(staging, root); err != nil {
 		if _, statErr := os.Lstat(root); statErr == nil {
-			key, loadErr := loadExistingRoot(root)
-			if loadErr == nil && authoritative != nil && key != *authoritative {
-				return "", zero, errors.New("runtime host key differs from durable authoritative host key")
-			}
-			return root, key, loadErr
+			return loadExistingRoot(root)
 		}
-		return "", zero, fmt.Errorf("publish staged background run root: %w", err)
+		return [32]byte{}, fmt.Errorf("publish staged background run root: %w", err)
 	}
-	stagingLive = false
 	if err := atomicfile.SyncDir(stateRoot); err != nil {
-		return "", zero, err
+		return [32]byte{}, err
 	}
-	committed, err := loadExistingRoot(root)
-	if err == nil && authoritative != nil && committed != *authoritative {
-		return "", zero, errors.New("runtime host key differs from durable authoritative host key")
-	}
-	return root, committed, err
+	return loadExistingRoot(root)
 }
 
 func loadExistingRoot(root string) ([32]byte, error) {
@@ -105,19 +91,6 @@ func loadExistingRoot(root string) ([32]byte, error) {
 	}
 	copy(key[:], data)
 	return key, nil
-}
-
-func randomSuffix() (string, error) {
-	var value [12]byte
-	if _, err := io.ReadFull(rand.Reader, value[:]); err != nil {
-		return "", fmt.Errorf("generate host key temporary name: %w", err)
-	}
-	const alphabet = "abcdefghijklmnopqrstuvwxyz234567"
-	result := make([]byte, len(value))
-	for i, item := range value {
-		result[i] = alphabet[int(item)%len(alphabet)]
-	}
-	return string(result), nil
 }
 
 func diskAvailable(path string) (int64, error) {

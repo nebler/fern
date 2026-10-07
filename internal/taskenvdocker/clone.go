@@ -3,6 +3,7 @@ package taskenvdocker
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -130,10 +131,7 @@ func (p *Provider) EnsureClone(ctx context.Context, run taskstore.BackgroundRun)
 		return Observation{}, err
 	}
 
-	suffix, err := randomSuffix()
-	if err != nil {
-		return Observation{}, err
-	}
+	suffix := rand.Text()
 	stageRoot := filepath.Join(p.root, ".clone-stage-"+suffix)
 	if err := os.Mkdir(stageRoot, 0o700); err != nil {
 		return Observation{}, fmt.Errorf("create clone staging directory: %w", err)
@@ -226,10 +224,7 @@ func (p *Provider) writeCloneMarker(run taskstore.BackgroundRun, digest string, 
 		return cloneMarkerSnapshot{}, err
 	}
 	data = append(data, '\n')
-	suffix, err := randomSuffix()
-	if err != nil {
-		return cloneMarkerSnapshot{}, err
-	}
+	suffix := rand.Text()
 	temporary := filepath.Join(p.root, ".clone-marker-stage-"+suffix)
 	file, err := os.OpenFile(temporary, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if err != nil {
@@ -691,16 +686,11 @@ func sameCloneIdentity(info os.FileInfo, marker cloneMarker) bool {
 	return err == nil && device == marker.Device && inode == marker.Inode
 }
 
+// validRecoveryName accepts only names this package generates: prefix plus
+// one crypto/rand.Text value.
 func validRecoveryName(name, prefix string) bool {
-	if !strings.HasPrefix(name, prefix) || len(name) != len(prefix)+12 {
-		return false
-	}
-	for _, value := range name[len(prefix):] {
-		if !strings.ContainsRune("abcdefghijklmnopqrstuvwxyz234567", value) {
-			return false
-		}
-	}
-	return true
+	suffix, ok := strings.CutPrefix(name, prefix)
+	return ok && len(suffix) == 26 && strings.Trim(suffix, "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567") == ""
 }
 
 func (b *boundedBuffer) Write(value []byte) (int, error) {
@@ -766,10 +756,7 @@ func treeSize(ctx context.Context, root string) (int64, error) {
 }
 
 func removeCreatedTree(ctx context.Context, root, path string, expected os.FileInfo) error {
-	suffix, err := randomSuffix()
-	if err != nil {
-		return err
-	}
+	suffix := rand.Text()
 	quarantine := filepath.Join(root, ".clone-quarantine-"+suffix)
 	if err := os.Rename(path, quarantine); errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -935,10 +922,7 @@ func (p *Provider) RemoveClone(ctx context.Context, run taskstore.BackgroundRun,
 	if err := p.attestCloneDeletion(run, digest, path); err != nil {
 		return Observation{}, &IdentityError{Resource: "clone", Identity: run.CloneIdentity, Reason: err.Error()}
 	}
-	suffix, err := randomSuffix()
-	if err != nil {
-		return Observation{}, err
-	}
+	suffix := rand.Text()
 	quarantine := filepath.Join(p.root, ".clone-quarantine-"+suffix)
 	if err := os.Rename(path, quarantine); err != nil {
 		return Observation{}, fmt.Errorf("quarantine clone before removal: %w", err)

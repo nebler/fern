@@ -3,6 +3,7 @@ package taskartifact
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -202,10 +203,7 @@ func (e *Engine) materializeVerified(ctx context.Context, locator Locator, snaps
 			_ = removeExactDirectory(path, pathDevice, pathInode)
 		}
 	}()
-	token, err := randomToken()
-	if err != nil {
-		return nil, err
-	}
+	token := rand.Text()
 	if _, err := e.gitOutput(ctx, path, nil, nil, "init"); err != nil {
 		return nil, err
 	}
