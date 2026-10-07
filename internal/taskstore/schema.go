@@ -2,36 +2,18 @@ package taskstore
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
 )
 
-type migration struct {
-	version int
-	name    string
-	sql     string
-}
+// schemaVersion is the PRAGMA user_version of schema. There are no supported
+// predecessor schemas: Open applies schema to an empty database, opens a
+// database already at schemaVersion, and refuses every other version.
+// Incompatible development databases must be deleted and recreated.
+const schemaVersion = 11
 
-var migrations = []migration{
-	{version: 10, name: "fern_state", sql: initialSchema},
-}
-
-// CurrentSchemaVersion is the schema produced by all migrations in this build.
-func CurrentSchemaVersion() int { return migrations[0].version }
-
-// initialSchema is the complete pre-release durable schema. There are no
-// supported predecessor taskstore schemas; incompatible development databases
-// must be deleted and recreated.
-const initialSchema = `CREATE TABLE schema_migrations (
-    version INTEGER PRIMARY KEY,
-    name TEXT NOT NULL,
-    checksum TEXT NOT NULL CHECK(length(checksum) = 64 AND checksum NOT GLOB '*[^0-9a-f]*')
-) STRICT;
-
-CREATE TABLE workspaces (
+const schema = `CREATE TABLE workspaces (
     id TEXT PRIMARY KEY CHECK(
         length(id) = 40 AND substr(id,1,4) = 'wsp_' AND
         substr(id,13,1) = '-' AND substr(id,18,1) = '-' AND substr(id,19,1) = '7' AND
@@ -305,14 +287,13 @@ func (s *Store) initialize(ctx context.Context) error {
 	defer func() {
 		_, _ = conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeoutMS))
 	}()
-	// Reject unsupported stores before changing persistent journal policy. The
-	// version is checked again under the migration lock below.
-	preflightVersion, err := readUserVersion(ctx, conn)
-	if err != nil {
-		return err
+	// Reject unsupported stores before changing persistent journal policy.
+	var version int
+	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("read schema version: %w", err)
 	}
-	if preflightVersion != 0 && preflightVersion != CurrentSchemaVersion() {
-		return fmt.Errorf("%w: user_version %d", ErrUnsupportedSchema, preflightVersion)
+	if version != 0 && version != schemaVersion {
+		return fmt.Errorf("%w: user_version %d", ErrUnsupportedSchema, version)
 	}
 	var journal string
 	if err := conn.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&journal); err != nil {
@@ -324,114 +305,38 @@ func (s *Store) initialize(ctx context.Context) error {
 	if journal != "wal" {
 		return fmt.Errorf("%w: SQLite refused WAL mode: %s", ErrCorruptStore, journal)
 	}
-	if _, err := conn.ExecContext(ctx, "BEGIN EXCLUSIVE"); err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		return fmt.Errorf("lock task migrations: %w", err)
-	}
-	committed := false
-	defer func() {
-		if !committed {
-			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
-		}
-	}()
-
-	version, err := readUserVersion(ctx, conn)
-	if err != nil {
-		return err
-	}
-	if version != 0 && version != CurrentSchemaVersion() {
-		return fmt.Errorf("%w: user_version %d", ErrUnsupportedSchema, version)
-	}
-	if err := verifyMigrationLedger(ctx, conn, version); err != nil {
-		return err
-	}
-	pending := migrations
-	if version == CurrentSchemaVersion() {
-		pending = nil
-	}
-	for _, m := range pending {
-		if _, err := conn.ExecContext(ctx, m.sql); err != nil {
-			return fmt.Errorf("apply migration %d: %w", m.version, err)
-		}
-		sum := migrationChecksum(m)
-		if _, err := conn.ExecContext(ctx, `INSERT INTO schema_migrations(version,name,checksum) VALUES(?,?,?)`, m.version, m.name, sum); err != nil {
-			return fmt.Errorf("record migration %d: %w", m.version, err)
-		}
-		if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", m.version)); err != nil {
-			return fmt.Errorf("set schema version %d: %w", m.version, err)
+	if version == 0 {
+		if err := applySchema(ctx, conn); err != nil {
+			return err
 		}
 	}
-	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
-		return fmt.Errorf("commit task migrations: %w", err)
-	}
-	committed = true
 	if _, err := conn.ExecContext(context.Background(), fmt.Sprintf("PRAGMA busy_timeout=%d", busyTimeoutMS)); err != nil {
 		return fmt.Errorf("restore SQLite busy timeout: %w", err)
 	}
-	if err := s.checkDatabase(ctx, conn); err != nil {
-		return err
-	}
-	return nil
+	return s.checkDatabase(ctx, conn)
 }
 
-func readUserVersion(ctx context.Context, q interface {
-	QueryRowContext(context.Context, string, ...any) *sql.Row
-}) (int, error) {
-	var version int
-	if err := q.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
-		return 0, fmt.Errorf("read schema version: %w", err)
-	}
-	return version, nil
-}
-
-func verifyMigrationLedger(ctx context.Context, conn *sql.Conn, version int) error {
-	if version == 0 {
-		var count int
-		if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'`).Scan(&count); err != nil {
-			return fmt.Errorf("inspect empty schema: %w", err)
-		}
-		if count != 0 {
-			return fmt.Errorf("%w: objects exist at user_version 0", ErrMigrationDrift)
-		}
-		return nil
-	}
-	rows, err := conn.QueryContext(ctx, `SELECT version,name,checksum FROM schema_migrations ORDER BY version`)
+// applySchema creates the schema and stamps its version in one transaction.
+func applySchema(ctx context.Context, conn *sql.Conn) (err error) {
+	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("%w: missing migration ledger: %v", ErrMigrationDrift, err)
+		return fmt.Errorf("begin schema creation: %w", err)
 	}
-	defer rows.Close()
-	seen := 0
-	for rows.Next() {
-		var gotVersion int
-		var name, checksum string
-		if err := rows.Scan(&gotVersion, &name, &checksum); err != nil {
-			return fmt.Errorf("read migration ledger: %w", err)
-		}
-		seen++
-		if seen > len(migrations) || gotVersion != migrations[seen-1].version {
-			return fmt.Errorf("%w: unknown migration %d", ErrUnsupportedSchema, gotVersion)
-		}
-		expected := migrations[seen-1]
-		if name != expected.name || checksum != migrationChecksum(expected) {
-			return fmt.Errorf("%w: migration %d", ErrMigrationDrift, gotVersion)
-		}
+	defer rollback(tx, &err)
+	if _, err := tx.ExecContext(ctx, schema); err != nil {
+		return fmt.Errorf("create schema: %w", err)
 	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("read migration ledger: %w", err)
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
+		return fmt.Errorf("set schema version: %w", err)
 	}
-	if seen != len(migrations) {
-		return fmt.Errorf("%w: ledger has %d entries at user_version %d", ErrMigrationDrift, seen, version)
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit schema creation: %w", err)
 	}
 	return nil
 }
 
-func migrationChecksum(m migration) string {
-	sum := sha256.Sum256([]byte(m.sql))
-	return hex.EncodeToString(sum[:])
-}
-
+// checkDatabase validates every opened store, including restored and durable
+// ones: SQLite integrity, foreign keys, and the connection policy.
 func (s *Store) checkDatabase(ctx context.Context, conn *sql.Conn) error {
 	var integrity string
 	if err := conn.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&integrity); err != nil {

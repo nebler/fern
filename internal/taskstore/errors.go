@@ -10,7 +10,6 @@ import (
 var (
 	ErrUnsafePath               = errors.New("unsafe database path")
 	ErrUnsupportedSchema        = errors.New("unsupported database schema")
-	ErrMigrationDrift           = errors.New("database migration drift")
 	ErrCorruptStore             = errors.New("corrupt task store")
 	ErrNotFound                 = errors.New("task store record not found")
 	ErrInvalidInput             = errors.New("invalid task store input")

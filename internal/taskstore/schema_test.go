@@ -3,6 +3,8 @@ package taskstore
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
@@ -10,8 +12,8 @@ import (
 	"time"
 )
 
-func TestPredecessorSchemasRejectedWithoutMutation(t *testing.T) {
-	for _, version := range []int{1, 2, 3, 4, 5, 6, 7, 8, 9} {
+func TestOtherSchemaVersionsRejectedWithoutMutation(t *testing.T) {
+	for _, version := range []int{1, schemaVersion - 1, schemaVersion + 1} {
 		t.Run(fmt.Sprintf("v%d", version), func(t *testing.T) {
 			path := testDBPath(t)
 			raw := openRaw(t, path)
@@ -48,26 +50,16 @@ func TestPredecessorSchemasRejectedWithoutMutation(t *testing.T) {
 	}
 }
 
-func TestInitialSchemaIsTheOnlySupportedSchema(t *testing.T) {
-	const expectedChecksum = "dc8370c3f1ece9e8f0db86c0918fa50d8c5f68b34317cc12c7de2fb60276b075"
-	if CurrentSchemaVersion() != 10 || len(migrations) != 1 || migrations[0].version != 10 || migrations[0].name != "fern_state" {
-		t.Fatalf("schema version=%d migration count=%d", CurrentSchemaVersion(), len(migrations))
-	}
-	if checksum := migrationChecksum(migrations[0]); checksum != expectedChecksum {
-		t.Fatalf("schema checksum=%q, want %q", checksum, expectedChecksum)
+func TestSchemaIsPinned(t *testing.T) {
+	const expectedChecksum = "51ec041b6e51684cb80e5a8559ccb0a321df559dbdaeb14480735c4f75879d48"
+	if sum := sha256.Sum256([]byte(schema)); hex.EncodeToString(sum[:]) != expectedChecksum {
+		t.Fatalf("schema checksum=%x; bump schemaVersion and update the pin", sum)
 	}
 	store := openTestStore(t, testDBPath(t))
 	defer store.Close()
-	var version, entries int
-	var name, checksum string
-	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.db.QueryRow(`SELECT count(*),name,checksum FROM schema_migrations`).Scan(&entries, &name, &checksum); err != nil {
-		t.Fatal(err)
-	}
-	if version != CurrentSchemaVersion() || entries != 1 || name != migrations[0].name || checksum != expectedChecksum {
-		t.Fatalf("version=%d entries=%d name=%q checksum=%q", version, entries, name, checksum)
+	var version int
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != schemaVersion {
+		t.Fatalf("user_version=%d, %v", version, err)
 	}
 }
 

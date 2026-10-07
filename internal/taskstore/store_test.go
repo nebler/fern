@@ -228,42 +228,6 @@ func TestSchemaRejectsMalformedRunInputs(t *testing.T) {
 	assertCounts(t, s, 0, 0)
 }
 
-func TestMigrationDriftAndUnknownVersionFailClosed(t *testing.T) {
-	t.Run("checksum drift", func(t *testing.T) {
-		path := testDBPath(t)
-		s := openTestStore(t, path)
-		if err := s.Close(); err != nil {
-			t.Fatal(err)
-		}
-		raw := openRaw(t, path)
-		if _, err := raw.Exec(`UPDATE schema_migrations SET checksum=? WHERE version=?`, fmt.Sprintf("%064d", 1), CurrentSchemaVersion()); err != nil {
-			t.Fatal(err)
-		}
-		_ = raw.Close()
-		_, err := Open(context.Background(), path)
-		if !errors.Is(err, ErrMigrationDrift) {
-			t.Fatalf("open drifted schema = %v", err)
-		}
-	})
-
-	t.Run("unknown newer version", func(t *testing.T) {
-		path := testDBPath(t)
-		s := openTestStore(t, path)
-		if err := s.Close(); err != nil {
-			t.Fatal(err)
-		}
-		raw := openRaw(t, path)
-		if _, err := raw.Exec(`PRAGMA user_version=11`); err != nil {
-			t.Fatal(err)
-		}
-		_ = raw.Close()
-		_, err := Open(context.Background(), path)
-		if !errors.Is(err, ErrUnsupportedSchema) {
-			t.Fatalf("open newer schema = %v", err)
-		}
-	})
-}
-
 func TestSQLitePoliciesAndForeignKeys(t *testing.T) {
 	s := openTestStore(t, testDBPath(t))
 	t.Cleanup(func() { _ = s.Close() })

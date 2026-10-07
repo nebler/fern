@@ -86,7 +86,7 @@ removes it and waits for admitted forwarding to exit before writer teardown.
 2. Apply `config.ValidateBootstrap`.
 3. Bind remote, operator, and live-run listeners.
 4. Acquire the host-local repository-name lease.
-5. Open the workspace SQLite database (taskstore schema 10), which also holds
+5. Open the workspace SQLite database (taskstore schema 11), which also holds
    devices and plugin authorizations.
 6. Compose control and plugin-authorization stores over it.
 7. If the installation ID is pending, block readiness without composing task
@@ -550,7 +550,7 @@ ownership boundaries.
 | `internal/backgroundruncoord` | serial run effect coordinator and recovery |
 | `cmd/fern` | CLI, composition, backup, credentials, process lifecycle |
 | `internal/task` | identifiers, actor snapshots, idempotency vocabulary |
-| `internal/taskstore` | the SQLite database: schema 10, run/result authority and state machines |
+| `internal/taskstore` | the SQLite database: schema 11, run/result authority and state machines |
 | `internal/taskartifact` | deterministic Git bundle creation, CAS, materialization |
 | `internal/taskresultsource` | CAS-only result binding and verified checkout acquisition |
 | `internal/taskenvdocker` | disposable Docker resources, writer proof, container GitHub credential delivery |

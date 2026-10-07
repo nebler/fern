@@ -13,7 +13,7 @@
 // replay returns it, a changed hash conflicts. Resource names derive from the
 // run ID and are not stored.
 //
-// Schema 10 is one complete pre-release schema, not a migration chain. Open
+// Schema 11 is one complete pre-release schema, not a migration chain. Open
 // rejects incompatible versions rather than upgrading or deleting data, and
 // refuses symlinked or foreign-owned database paths. The database runs in WAL
 // mode with foreign keys and FULL synchronization.
