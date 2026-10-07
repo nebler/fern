@@ -17,9 +17,9 @@ for a short demo; a polished phone UI is a separate future feature.
 
 ## The demo you can honestly claim
 
-After completing this guide and one real task, you can demonstrate:
+After completing this guide and one real run, you can demonstrate:
 
-1. A task is submitted against one committed revision of a repository.
+1. A run is submitted against one committed revision of a repository.
 2. Fern runs the agent in a disposable Docker container on a separate Linux
    host.
 3. The phone pairs with the host through private Tailscale HTTPS.
@@ -71,7 +71,7 @@ Create `fern.yaml` and `fern.env` with `fern init`, then create the GitHub App
 and run `fern credentials set` as described in the [usage guide](usage.md#create-and-install-the-github-app). Important configuration values for the phone route look like this:
 
 ```yaml
-tasks:
+runs:
   runtimeStorageRoot: /var/lib/fern-runtime # provisioned XFS project storage
   backgroundRoute:
     listen: 127.0.0.1:8443
@@ -99,12 +99,12 @@ In another host terminal, check basic readiness:
 ```
 
 Readiness and configuration checks do not prove that a real agent can complete
-a task. Before relying on the host, run the opt-in Linux qualification described
+a run. Before relying on the host, run the opt-in Linux qualification described
 in [`integration/background-run-opencode/README.md`](../integration/background-run-opencode/README.md).
 
 ## 2. Publish only private Tailscale routes
 
-With Tailscale running on the Fern host, publish the remote and background
+With Tailscale running on the Fern host, publish the remote and run attachment
 listeners. Substitute the configured loopback listeners if you changed them.
 
 ```sh
@@ -124,9 +124,7 @@ On the Fern host, run:
 ./fern doctor --config fern.yaml --env-file fern.env --phone
 ```
 
-For a stricter preflight, use `--field-demo` instead. It includes the phone
-checks but still warns that it did not perform model execution or a GitHub
-mutation.
+The phone checks do not perform model execution or a GitHub mutation.
 
 When all checks pass, Fern prints a QR code and a one-time URL. The URL expires
 after five minutes.
@@ -142,7 +140,7 @@ Pairing creates a browser credential with a 30-day lifetime. Treat the paired
 phone as an authenticated Fern client. Revoke it from the operator-controlled
 device API if the phone is lost, shared, or no longer needed.
 
-## 4. Submit a small, repeatable task
+## 4. Submit a small, repeatable run
 
 Use a separate small blog repository for the first demo. It should have a clean,
 committed working tree and its exact revision must exist in the repository clone
@@ -157,12 +155,12 @@ Start with a narrow task, for example:
 > Add a posts index page and its relevant test. Commit the work to a new branch,
 > run the relevant tests, push the branch, and open a draft PR. Do not merge.
 
-Fern reports successful admission when the task is durably accepted. Admission
+Fern reports successful admission when the run is durably accepted. Admission
 does not mean the agent finished or that tests passed.
 
 ## 5. Inspect, steer, and finish deliberately
 
-Use `/fern` → **Runs** to see the task. To open the existing remote OpenCode
+Use `/fern` → **Runs** to see the run. To open the existing remote OpenCode
 session from the client computer:
 
 ```sh
@@ -171,7 +169,7 @@ fern attach --endpoint https://your-host.your-tailnet.ts.net run_...
 ```
 
 `attach` opens the existing agent session; it does not start a second writer.
-Use it to inspect progress, answer questions, or steer the task.
+Use it to inspect progress, answer questions, or steer the run.
 
 When ready, choose one of these actions in `/fern`:
 
@@ -191,7 +189,7 @@ Before recording or presenting the demo, collect evidence for each item:
 - [ ] `fern doctor --phone` passes and produces a one-time pairing URL.
 - [ ] The phone has successfully paired through private Tailscale HTTPS.
 - [ ] The blog repository was clean and committed before submission.
-- [ ] The task was admitted and a disposable run container was created.
+- [ ] The run was admitted and a disposable run container was created.
 - [ ] You inspected or attached to the live agent session.
 - [ ] The agent's changes and test output were reviewed.
 - [ ] The run was sealed and `Result` reports the retained Git artifact.

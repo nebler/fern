@@ -88,8 +88,8 @@ removes it and waits for admitted forwarding to exit before writer teardown.
 4. Acquire the host-local repository-name lease.
 5. Open the workspace SQLite database (the `store` schema), which also holds
    devices and plugin authorizations.
-6. Compose control and plugin-authorization stores over it.
-7. If the installation ID is pending, block readiness without composing task
+6. Compose the device and plugin-authorization stores (`auth`) over it.
+7. If the installation ID is pending, block readiness without composing run
    services.
 8. Otherwise apply strict `config.Validate` and resolve exact GitHub
    App repository authority.
@@ -107,7 +107,7 @@ configured repository (matching ID, name, and owner, not archived or disabled)
 with the required permissions. Fresh-host configuration may omit
 `workspace.github.installationId`; Fern then serves devices and plugin
 authorization, blocks readiness, and returns `503` for run operations. Missing
-credentials take the same blocked path. Neither state can compose task
+credentials take the same blocked path. Neither state can compose run
 services; fixing either requires a restart.
 
 ## 5. Configuration Authority
@@ -115,7 +115,6 @@ services; fixing either requires a restart.
 Production requires:
 
 - `workspace.name` and an absolute repository path;
-- `workspace.github.mode: github-app-broker`;
 - exact installation ID, repository ID, and canonical full name;
 - explicit agent, model provider, model ID, and timeouts;
 - exact Background Run image reference and canonical image ID;
@@ -123,9 +122,7 @@ Production requires:
 - remote and operator loopback listeners;
 - a control password of at least 32 characters.
 
-Retired persistent-workspace settings (`workspace.image`, `workspace.memory`,
-`workspace.env`, `idle`, and `workspace-gh`) are not supported. Arbitrary
-`tasks.backgroundEnvironment`, `tasks.budget`, and `tasks.verification` settings
+The loader is strict: unknown keys, including settings from earlier designs,
 are rejected rather than accepted as unused configuration. `OPENCODE_PASSWORD`
 is not forwarded; each disposable runtime receives a Fern-derived credential.
 
@@ -157,7 +154,7 @@ require a CSRF token bound to the method and exact path.
 | operator | landing, control page, `POST /fern/pair/new`, device and plugin credential administration, plugin approval, `GET /fern/api/runs[/:id[/attach]]` (runapi, workspace-wide, read and attach only) | operator |
 
 The live route listener (`opencode.Router`, `:8443`) is separate: it admits only
-attachment capabilities and applies the OpenCode allow-list in `policy.go`.
+attachment capabilities and applies the OpenCode allow-list in `internal/opencode/route_policy.go`.
 
 Ingress installs a validated `domain.ActorSnapshot` in request context. Inner API
 packages do not derive identity from client-controlled headers or bodies.
@@ -172,9 +169,9 @@ human confirmation. Fern independently verifies the submitted base against its
 bound host repository.
 
 Admission atomically writes one queued `runs` row and its create receipt. The
-task store has four tables:
+run tables are:
 
-- `workspaces`: the bound repository, GitHub App installation, and image;
+- `workspaces`: the bound repository and GitHub App installation;
 - `runs`: one row per run, keyed by its `run_` UUIDv7. Its immutable intent is
   the prompt, repository and base, branch, agent and model, deadline, image,
   profile, environment digest, OpenCode session and message, and creator actor.
@@ -241,17 +238,17 @@ workspace, and every transition is a compare-and-swap on the run's workspace,
 ID, revision, state, and phase, so a write prepared before a concurrent stop or
 seal fails.
 
-`run` owns lifecycle classification independently of persistence: valid
+`domain` owns lifecycle classification independently of persistence: valid
 state/phase combinations, whether a phase is executing (bound by the run
 deadline and the configured execution identity), and timeout eligibility. The
 coordinator dispatches concrete effects; it does not maintain a second list of
-phase categories. Taskstore keeps SQL representation private and enforces
+phase categories. `store` keeps SQL representation private and enforces
 durable transitions transactionally.
 
 ## 9. Disposable Resource Identity
 
 Execution requires native Linux and a local Docker daemon; Docker Desktop is
-unsupported. `tasks.runtimeStorageRoot` names an operator-provisioned XFS
+unsupported. `runs.runtimeStorageRoot` names an operator-provisioned XFS
 project-quota root enclosing disposable clone and state-volume directories,
 separate from durable SQLite/CAS storage. Both byte and inode hard limits must
 be enforced, with project inheritance covering new files. Runtime storage is
@@ -381,7 +378,7 @@ locators and host paths are not returned through the plugin API.
 
 Result consumption uses `artifact.Engine.Acquire` to perform one fresh full
 verification and return its snapshot together with an owned detached checkout.
-The result-source resolver checks that snapshot against the durable run and
+`artifact.Resolver` checks that snapshot against the durable run and
 result, closing the checkout on mismatch. Materialization still checks the
 copied bundle against the verified digest and size; acquisition does not cache
 integrity observations across operations.
@@ -397,8 +394,8 @@ not a second CI system.
 
 Artifact verification remains mandatory: checking bundle bytes, Git objects,
 and result identity protects the work being delivered. It does not claim that
-the changes pass repository tests. There is no `tasks.verification` policy or
-`tasks.budget.maxTurns` configuration; run timeouts remain enforced.
+the changes pass repository tests. There is no verification policy or turn budget
+configuration; run timeouts remain enforced.
 
 ## 14. Harness-Owned GitHub Delivery
 
@@ -501,14 +498,15 @@ are therefore not supported by this profile.
 ## 18. Durable State, Backup, And Credentials
 
 Fern's durable state is the workspace's one SQLite database
-(`~/.fern/tasks/<name>.db`), the artifact CAS beside it, the disposable-resource
+(`~/.fern/runs/<name>.db`), the artifact CAS beside it, the disposable-resource
 host key, and the private GitHub App credential file. The database schema is
 owned by `store` and also defines the tables of `auth` (paired devices,
 operator credential ID, plugin authorizations and
-credentials); that package issues their own SQL through the shared handle, one
+credentials); that package issues its own SQL through the shared handle, one
 transaction per operation. Only digests of device tokens and plugin device and
 user codes are stored. In-flight request registries that revocation cancels
-stay in memory. `safeio` private-file writes remain only for the credential file and host key.
+stay in memory. `safeio` private-file writes remain only for the credential
+file and host key.
 
 Backup is offline: `fern backup` takes the workspace lease used by `fern up`
 and every other lease file in the state directory. `fern backup create` writes
@@ -607,7 +605,7 @@ only `127.0.0.1:8080` and `127.0.0.1:8443` through private TLS. Keep
 `127.0.0.1:8081` host-only.
 
 Readiness fails for corrupt durable state, missing GitHub App credentials, or
-failed background components.
+a failed run coordinator.
 Liveness reports only process availability.
 
 ## 21. Qualification And Release

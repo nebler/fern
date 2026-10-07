@@ -18,7 +18,7 @@
 // result-verification worker, and the runapi base verifier only checks
 // admission Git identity.
 //
-// Shutdown order matters: the background route is closed first, fencing
+// Shutdown order matters: the attachment router is closed first, fencing
 // attachment admission and its connections, before the artifact engine, Docker
 // provider, and SQLite database; the host lease is released last. Offline
 // backup and credentials set take the same host lease, so they require the
