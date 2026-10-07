@@ -1,59 +1,85 @@
 package config
 
-import "time"
+import (
+	"fmt"
+	"strconv"
+	"time"
 
-// GitHubRepository is the canonical GitHub authority binding.
-type GitHubRepository struct {
-	ID       int64
-	FullName string
-}
+	"gopkg.in/yaml.v3"
+)
 
-// GitHubApp holds the GitHub.com App installation and repository binding.
-type GitHubApp struct {
-	InstallationID int64
-	Repository     GitHubRepository
+// Config is the single current configuration shape and also the exact YAML
+// document Fern reads and `fern init` writes. ValidateBootstrap permits a
+// pending App installation; Validate requires an installed execution binding.
+type Config struct {
+	Workspace Workspace  `yaml:"workspace"`
+	Tasks     TaskPolicy `yaml:"tasks"`
+	Control   Control    `yaml:"control"`
+	Proxy     Proxy      `yaml:"proxy"`
 }
 
 type Workspace struct {
-	Name   string
-	Repo   string
-	GitHub GitHubApp
+	Name   string    `yaml:"name"`
+	Repo   string    `yaml:"repo"`
+	GitHub GitHubApp `yaml:"github"`
 }
 
-type TaskModel struct {
-	Provider string
-	ID       string
+// GitHubApp holds the GitHub.com App installation and repository binding. A
+// zero InstallationID means the App is not installed yet.
+type GitHubApp struct {
+	InstallationID GitHubID         `yaml:"installationId,omitempty"`
+	Repository     GitHubRepository `yaml:"repository"`
 }
 
-type BackgroundRoute struct {
-	Listen string
-	Origin string
+// GitHubRepository is the canonical GitHub authority binding.
+type GitHubRepository struct {
+	ID       GitHubID `yaml:"id"`
+	FullName string   `yaml:"fullName"`
 }
 
 type TaskPolicy struct {
-	RuntimeStorageRoot string
-	Agent              string
-	Model              TaskModel
-	RunTimeout         time.Duration
-	BackgroundImage    string
-	BackgroundImageID  string
-	BackgroundRoute    *BackgroundRoute
+	RuntimeStorageRoot string           `yaml:"runtimeStorageRoot,omitempty"`
+	Agent              string           `yaml:"agent"`
+	Model              TaskModel        `yaml:"model"`
+	RunTimeout         time.Duration    `yaml:"runTimeout"`
+	BackgroundImage    string           `yaml:"backgroundImage"`
+	BackgroundImageID  string           `yaml:"backgroundImageID"`
+	BackgroundRoute    *BackgroundRoute `yaml:"backgroundRoute"`
+}
+
+type TaskModel struct {
+	Provider string `yaml:"provider"`
+	ID       string `yaml:"id"`
+}
+
+type BackgroundRoute struct {
+	Listen string `yaml:"listen"`
+	Origin string `yaml:"origin"`
 }
 
 // Control contains only the host-side control-plane credential.
 type Control struct {
-	Password string
+	Password string `yaml:"password"`
 }
 
-// Config is the single current configuration shape. ValidateBootstrap permits
-// a pending App installation; Validate requires an installed execution binding.
-type Config struct {
-	Workspace      Workspace
-	Control        Control
-	Tasks          TaskPolicy
-	Listen         string
-	OperatorListen string
-	RemoteOrigin   string
+type Proxy struct {
+	Listen         string `yaml:"listen"`
+	OperatorListen string `yaml:"operatorListen"`
+	RemoteOrigin   string `yaml:"remoteOrigin,omitempty"`
+}
+
+// GitHubID is a GitHub numeric identifier. YAML accepts only its canonical
+// positive decimal spelling, so octal, hex, or quoted values cannot silently
+// bind a different installation or repository.
+type GitHubID int64
+
+func (id *GitHubID) UnmarshalYAML(node *yaml.Node) error {
+	value, err := strconv.ParseInt(node.Value, 10, 64)
+	if node.Kind != yaml.ScalarNode || node.ShortTag() != "!!int" || err != nil || value <= 0 || strconv.FormatInt(value, 10) != node.Value {
+		return fmt.Errorf("line %d: %q must be a canonical positive decimal integer", node.Line, node.Value)
+	}
+	*id = GitHubID(value)
+	return nil
 }
 
 // Overrides contains only explicitly supplied, current CLI settings.
@@ -66,5 +92,5 @@ type Overrides struct {
 
 func Default(repo string) Config {
 	return Config{Workspace: Workspace{Name: "demo", Repo: repo},
-		Listen: "127.0.0.1:8080", OperatorListen: "127.0.0.1:8081"}
+		Proxy: Proxy{Listen: "127.0.0.1:8080", OperatorListen: "127.0.0.1:8081"}}
 }

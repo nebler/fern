@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -52,8 +53,9 @@ func runInit(args []string) error {
 	controlSecret := hex.EncodeToString(secret)
 	values := config.Config{
 		Workspace: config.Workspace{Name: *name, Repo: absRepo, GitHub: config.GitHubApp{
-			InstallationID: *installationID, Repository: config.GitHubRepository{ID: *repositoryID, FullName: *repositoryName}}},
-		Control: config.Control{Password: controlSecret}, Listen: *listen, OperatorListen: *operatorListen, RemoteOrigin: *remoteOrigin,
+			InstallationID: config.GitHubID(*installationID), Repository: config.GitHubRepository{ID: config.GitHubID(*repositoryID), FullName: *repositoryName}}},
+		Control: config.Control{Password: controlSecret},
+		Proxy:   config.Proxy{Listen: *listen, OperatorListen: *operatorListen, RemoteOrigin: *remoteOrigin},
 		Tasks: config.TaskPolicy{Agent: "build", Model: config.TaskModel{Provider: *modelProvider, ID: *model},
 			RuntimeStorageRoot: *runtimeStorageRoot,
 			RunTimeout:         30 * time.Minute,
@@ -63,60 +65,15 @@ func runInit(args []string) error {
 	if err := config.ValidateBootstrap(values); err != nil {
 		return err
 	}
-	type initFile struct {
-		Workspace struct {
-			Name   string `yaml:"name"`
-			Repo   string `yaml:"repo"`
-			GitHub struct {
-				InstallationID int64 `yaml:"installationId,omitempty"`
-				Repository     struct {
-					ID       int64  `yaml:"id"`
-					FullName string `yaml:"fullName"`
-				} `yaml:"repository"`
-			} `yaml:"github"`
-		} `yaml:"workspace"`
-		Tasks struct {
-			RuntimeStorageRoot string `yaml:"runtimeStorageRoot"`
-			Agent              string `yaml:"agent"`
-			Model              struct {
-				Provider string `yaml:"provider"`
-				ID       string `yaml:"id"`
-			} `yaml:"model"`
-			RunTimeout        string `yaml:"runTimeout"`
-			BackgroundImage   string `yaml:"backgroundImage"`
-			BackgroundImageID string `yaml:"backgroundImageID"`
-			BackgroundRoute   struct {
-				Listen string `yaml:"listen"`
-				Origin string `yaml:"origin"`
-			} `yaml:"backgroundRoute"`
-		} `yaml:"tasks"`
-		Control struct {
-			Password string `yaml:"password"`
-		} `yaml:"control"`
-		Proxy struct {
-			Listen         string `yaml:"listen"`
-			OperatorListen string `yaml:"operatorListen"`
-			RemoteOrigin   string `yaml:"remoteOrigin"`
-		} `yaml:"proxy"`
-	}
-	var output initFile
-	output.Workspace.Name, output.Workspace.Repo = values.Workspace.Name, values.Workspace.Repo
-	output.Workspace.GitHub.InstallationID = values.Workspace.GitHub.InstallationID
-	output.Workspace.GitHub.Repository.ID = values.Workspace.GitHub.Repository.ID
-	output.Workspace.GitHub.Repository.FullName = values.Workspace.GitHub.Repository.FullName
-	output.Tasks.Agent = values.Tasks.Agent
-	output.Tasks.RuntimeStorageRoot = values.Tasks.RuntimeStorageRoot
-	output.Tasks.Model.Provider, output.Tasks.Model.ID = values.Tasks.Model.Provider, values.Tasks.Model.ID
-	output.Tasks.RunTimeout = values.Tasks.RunTimeout.String()
-	output.Tasks.BackgroundImage, output.Tasks.BackgroundImageID = values.Tasks.BackgroundImage, values.Tasks.BackgroundImageID
-	output.Tasks.BackgroundRoute.Listen, output.Tasks.BackgroundRoute.Origin = values.Tasks.BackgroundRoute.Listen, values.Tasks.BackgroundRoute.Origin
-	output.Control.Password = "${FERN_CONTROL_PASSWORD}"
-	output.Proxy.Listen, output.Proxy.OperatorListen, output.Proxy.RemoteOrigin = values.Listen, values.OperatorListen, values.RemoteOrigin
-	configData, err := yaml.Marshal(output)
-	if err != nil {
+	// The file references the secret; only the protected environment holds it.
+	values.Control.Password = "${FERN_CONTROL_PASSWORD}"
+	var configData bytes.Buffer
+	encoder := yaml.NewEncoder(&configData)
+	encoder.SetIndent(2)
+	if err := errors.Join(encoder.Encode(values), encoder.Close()); err != nil {
 		return err
 	}
-	if err := writeNewFile(*configPath, configData, 0o600); err != nil {
+	if err := writeNewFile(*configPath, configData.Bytes(), 0o600); err != nil {
 		return err
 	}
 	if err := writeNewFile(*envPath, []byte("# Keep this file on the Fern host.\nFERN_CONTROL_PASSWORD="+controlSecret+"\n"), 0o600); err != nil {

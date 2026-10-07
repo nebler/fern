@@ -116,9 +116,9 @@ func liveCredentialValidator(ctx context.Context, cfg config.Config, app githuba
 	if err != nil {
 		return fmt.Errorf("list GitHub App installations: %w", err)
 	}
-	repositories, err := discovery.ListInstallationRepositories(ctx, github.InstallationID)
+	repositories, err := discovery.ListInstallationRepositories(ctx, int64(github.InstallationID))
 	if err != nil {
 		return fmt.Errorf("list repositories of installation %d: %w", github.InstallationID, err)
 	}
-	return githubapp.SelectRepository(installations, repositories, github.InstallationID, github.Repository.ID, github.Repository.FullName)
+	return githubapp.SelectRepository(installations, repositories, int64(github.InstallationID), int64(github.Repository.ID), github.Repository.FullName)
 }

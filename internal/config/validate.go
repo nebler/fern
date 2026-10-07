@@ -54,16 +54,16 @@ func validateBackground(config Config, allowPendingInstallation bool) error {
 	if config.Tasks.BackgroundImage == "" || config.Tasks.BackgroundImageID == "" || config.Tasks.BackgroundRoute == nil {
 		return errors.New("a qualified Background Run image and route are required")
 	}
-	if err := validateListen("proxy.listen", config.Listen); err != nil {
+	if err := validateListen("proxy.listen", config.Proxy.Listen); err != nil {
 		return err
 	}
-	if err := validateListen("proxy.operatorListen", config.OperatorListen); err != nil {
+	if err := validateListen("proxy.operatorListen", config.Proxy.OperatorListen); err != nil {
 		return err
 	}
-	if sameListenPort(config.Listen, config.OperatorListen) {
+	if sameListenPort(config.Proxy.Listen, config.Proxy.OperatorListen) {
 		return errors.New("proxy.listen and proxy.operatorListen must use different ports")
 	}
-	if _, err := ParseRemoteOrigin(config.RemoteOrigin); err != nil {
+	if _, err := ParseRemoteOrigin(config.Proxy.RemoteOrigin); err != nil {
 		return err
 	}
 	return nil
@@ -129,7 +129,7 @@ func validateTasks(config Config) error {
 		if err := validateListen("tasks.backgroundRoute.listen", route.Listen); err != nil {
 			return err
 		}
-		if sameListenPort(route.Listen, config.Listen) || sameListenPort(route.Listen, config.OperatorListen) {
+		if sameListenPort(route.Listen, config.Proxy.Listen) || sameListenPort(route.Listen, config.Proxy.OperatorListen) {
 			return errors.New("tasks.backgroundRoute.listen must use a distinct port")
 		}
 		origin, err := ParseRemoteOrigin(route.Origin)
@@ -139,8 +139,8 @@ func validateTasks(config Config) error {
 		if origin == "" {
 			return errors.New("invalid tasks.backgroundRoute.origin: a private HTTPS origin is required")
 		}
-		remote, err := url.Parse(config.RemoteOrigin)
-		if err != nil || config.RemoteOrigin == "" {
+		remote, err := url.Parse(config.Proxy.RemoteOrigin)
+		if err != nil || config.Proxy.RemoteOrigin == "" {
 			return errors.New("proxy.remoteOrigin is required with tasks.backgroundRoute")
 		}
 		parsed, _ := url.Parse(origin)

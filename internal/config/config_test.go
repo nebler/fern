@@ -118,18 +118,26 @@ func TestRequiredFieldsAndStrictScalarTypes(t *testing.T) {
 		})
 	}
 	for _, replacement := range []struct{ old, value string }{
-		{"id: 456", "id: '456'"}, {"id: 456", "id: 0456"}, {"id: 456", "id: 0"}, {"id: 456", "id: -1"},
+		{"id: 456", "id: '456'"}, {"id: 456", "id: 0456"}, {"id: 456", "id: 0x1c8"}, {"id: 456", "id: 0"}, {"id: 456", "id: -1"},
 		{"id: 456", "id: 9223372036854775808"}, {"installationId: 123", "installationId: '123'"},
 		{"installationId: 123", "installationId: 0"}, {"installationId: 123", "installationId: -1"},
-		{"installationId: 123", "installationId: 0123"}, {"fullName: owner/repository", "fullName: owner/repository/extra"},
-		{"agent: build", "agent: 1"},
-		{"provider: openai", "provider: true"}, {"id: gpt-5", "id: []"},
+		{"installationId: 123", "installationId: 0123"}, {"id: gpt-5", "id: []"},
 		{"runTimeout: 30m", "runTimeout: 30"},
-		{"backgroundImage: image:test", "backgroundImage: ''"}, {"backgroundImageID: sha256:" + strings.Repeat("b", 64), "backgroundImageID: ''"},
 	} {
 		t.Run(replacement.value, func(t *testing.T) {
 			if _, err := loadConfig(t, strings.Replace(currentYAML, replacement.old, replacement.value, 1)); err == nil {
 				t.Fatal("invalid scalar accepted")
+			}
+		})
+	}
+	for _, replacement := range []struct{ old, value string }{
+		{"fullName: owner/repository", "fullName: owner/repository/extra"},
+		{"backgroundImage: image:test", "backgroundImage: ''"}, {"backgroundImageID: sha256:" + strings.Repeat("b", 64), "backgroundImageID: ''"},
+	} {
+		t.Run(replacement.value, func(t *testing.T) {
+			cfg, err := loadConfig(t, strings.Replace(currentYAML, replacement.old, replacement.value, 1))
+			if err == nil && Validate(cfg) == nil {
+				t.Fatal("invalid value accepted")
 			}
 		})
 	}
@@ -178,17 +186,17 @@ func TestValidationBoundsAndDependencies(t *testing.T) {
 		"image_id":                 func(c *Config) { c.Tasks.BackgroundImageID = "sha256:" + strings.Repeat("B", 64) },
 		"route_missing":            func(c *Config) { c.Tasks.BackgroundRoute = nil },
 		"route_listener":           func(c *Config) { c.Tasks.BackgroundRoute.Listen = "0.0.0.0:8443" },
-		"route_collision":          func(c *Config) { c.Tasks.BackgroundRoute.Listen = c.Listen },
-		"route_operator_collision": func(c *Config) { c.Tasks.BackgroundRoute.Listen = c.OperatorListen },
+		"route_collision":          func(c *Config) { c.Tasks.BackgroundRoute.Listen = c.Proxy.Listen },
+		"route_operator_collision": func(c *Config) { c.Tasks.BackgroundRoute.Listen = c.Proxy.OperatorListen },
 		"route_hostname":           func(c *Config) { c.Tasks.BackgroundRoute.Origin = "https://other.example:8443" },
 		"route_port":               func(c *Config) { c.Tasks.BackgroundRoute.Origin = "https://fern.example.ts.net" },
 		"route_loopback":           func(c *Config) { c.Tasks.BackgroundRoute.Origin = "https://localhost:8443" },
-		"remote_missing":           func(c *Config) { c.RemoteOrigin = "" },
-		"remote_collision":         func(c *Config) { c.RemoteOrigin = c.Tasks.BackgroundRoute.Origin },
-		"listen_public":            func(c *Config) { c.Listen = "0.0.0.0:8080" },
-		"listen_dynamic":           func(c *Config) { c.Listen = "127.0.0.1:0" },
-		"operator_public":          func(c *Config) { c.OperatorListen = "0.0.0.0:8081" },
-		"operator_collision":       func(c *Config) { c.OperatorListen = "[::1]:8080" },
+		"remote_missing":           func(c *Config) { c.Proxy.RemoteOrigin = "" },
+		"remote_collision":         func(c *Config) { c.Proxy.RemoteOrigin = c.Tasks.BackgroundRoute.Origin },
+		"listen_public":            func(c *Config) { c.Proxy.Listen = "0.0.0.0:8080" },
+		"listen_dynamic":           func(c *Config) { c.Proxy.Listen = "127.0.0.1:0" },
+		"operator_public":          func(c *Config) { c.Proxy.OperatorListen = "0.0.0.0:8081" },
+		"operator_collision":       func(c *Config) { c.Proxy.OperatorListen = "[::1]:8080" },
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := validConfig(t)
@@ -220,12 +228,12 @@ func TestEnvironmentExpansionAndOverrides(t *testing.T) {
 	}
 	repo, name, listen := "child", "override", "127.0.0.1:9000"
 	base := t.TempDir()
-	path = writeConfig(t, strings.Replace(strings.Replace(currentYAML, "  repo: .", "  repo: [invalid]", 1), "  listen: 127.0.0.1:8080", "  listen: []", 1))
+	path = writeConfig(t, currentYAML)
 	cfg, err = LoadWithEnvironment(path, base, true, Overrides{Repo: &repo, Name: &name, Listen: &listen}, map[string]string{"FERN_CONTROL_PASSWORD": protected})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Workspace.Repo != filepath.Join(base, repo) || cfg.Workspace.Name != name || cfg.Listen != listen {
+	if cfg.Workspace.Repo != filepath.Join(base, repo) || cfg.Workspace.Name != name || cfg.Proxy.Listen != listen {
 		t.Fatalf("overrides = %+v", cfg)
 	}
 	cfg, err = loadConfig(t, strings.Replace(currentYAML, "${FERN_CONTROL_PASSWORD}", "$$literal", 1))

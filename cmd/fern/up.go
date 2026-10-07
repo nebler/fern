@@ -33,7 +33,7 @@ func runUp(args []string, log *slog.Logger) (resultErr error) {
 	if err != nil {
 		return err
 	}
-	remoteListener, operatorListener, err := listenProxySurfaces(cfg.Listen, cfg.OperatorListen)
+	remoteListener, operatorListener, err := listenProxySurfaces(cfg.Proxy.Listen, cfg.Proxy.OperatorListen)
 	if err != nil {
 		return err
 	}
@@ -253,11 +253,11 @@ func listenBackgroundRoute(cfg config.Config) (net.Listener, error) {
 }
 
 func trustedProxyOrigins(cfg config.Config) proxy.TrustedOrigins {
-	remote := cfg.RemoteOrigin
+	remote := cfg.Proxy.RemoteOrigin
 	if remote == "" {
-		remote = "http://" + cfg.Listen
+		remote = "http://" + cfg.Proxy.Listen
 	}
-	return proxy.TrustedOrigins{Remote: remote, Operator: "http://" + cfg.OperatorListen}
+	return proxy.TrustedOrigins{Remote: remote, Operator: "http://" + cfg.Proxy.OperatorListen}
 }
 
 func listenProxySurfaces(remoteAddress, operatorAddress string) (net.Listener, net.Listener, error) {

@@ -1,12 +1,15 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 )
 
 // MaxConfigBytes bounds raw YAML before parsing or environment expansion.
@@ -47,49 +50,16 @@ func load(path, defaultRepo string, required bool, overrides Overrides, lookup f
 			return Config{}, fmt.Errorf("read config %q: %w", path, err)
 		}
 	} else {
-		var file fileConfig
-		if err := decode(data, &file); err != nil {
+		if err := decode(data, &config); err != nil {
 			return Config{}, fmt.Errorf("parse config %q: %w", path, err)
 		}
-		if err := applyFileWorkspace(&config.Workspace, file.Workspace, overrides); err != nil {
-			return Config{}, fmt.Errorf("parse workspace: %w", err)
+		if err := requireFields(config); err != nil {
+			return Config{}, fmt.Errorf("parse config %q: %w", path, err)
 		}
-		if overrides.Listen == nil && !file.Proxy.Listen.IsZero() {
-			config.Listen, err = decodeRequiredTaskString(file.Proxy.Listen)
-			if err != nil {
-				return Config{}, fmt.Errorf("parse proxy.listen: %w", err)
-			}
-		}
-		if overrides.OperatorListen == nil && !file.Proxy.OperatorListen.IsZero() {
-			config.OperatorListen, err = decodeRequiredTaskString(file.Proxy.OperatorListen)
-			if err != nil {
-				return Config{}, fmt.Errorf("parse proxy.operatorListen: %w", err)
-			}
-		}
-		if !file.Proxy.RemoteOrigin.IsZero() {
-			config.RemoteOrigin, err = decodeRequiredTaskString(file.Proxy.RemoteOrigin)
-			if err != nil {
-				return Config{}, fmt.Errorf("parse proxy.remoteOrigin: %w", err)
-			}
-			config.RemoteOrigin, err = ParseRemoteOrigin(config.RemoteOrigin)
-			if err != nil {
-				return Config{}, fmt.Errorf("parse proxy.remoteOrigin: %w", err)
-			}
-		}
-		if !file.Control.Password.IsZero() {
-			config.Control.Password, err = decodeRequiredTaskString(file.Control.Password)
-			if err != nil {
-				return Config{}, fmt.Errorf("parse control.password: %w", err)
-			}
-		}
-		if file.Tasks.IsZero() {
-			return Config{}, errors.New("tasks is required")
-		}
-		policy, err := parseTaskPolicy(file.Tasks)
+		config.Proxy.RemoteOrigin, err = ParseRemoteOrigin(config.Proxy.RemoteOrigin)
 		if err != nil {
-			return Config{}, fmt.Errorf("parse tasks: %w", err)
+			return Config{}, fmt.Errorf("parse proxy.remoteOrigin: %w", err)
 		}
-		config.Tasks = *policy
 	}
 	if overrides.Name != nil {
 		config.Workspace.Name = *overrides.Name
@@ -98,10 +68,10 @@ func load(path, defaultRepo string, required bool, overrides Overrides, lookup f
 		config.Workspace.Repo = *overrides.Repo
 	}
 	if overrides.Listen != nil {
-		config.Listen = *overrides.Listen
+		config.Proxy.Listen = *overrides.Listen
 	}
 	if overrides.OperatorListen != nil {
-		config.OperatorListen = *overrides.OperatorListen
+		config.Proxy.OperatorListen = *overrides.OperatorListen
 	}
 	repo, err := expandRequired(config.Workspace.Repo, lookup)
 	if err != nil {
@@ -126,4 +96,41 @@ func load(path, defaultRepo string, required bool, overrides Overrides, lookup f
 		return Config{}, fmt.Errorf("expand control.password: %w", err)
 	}
 	return config, nil
+}
+
+// requireFields reports the first required key the file left unset.
+func requireFields(config Config) error {
+	for _, field := range []struct {
+		name  string
+		unset bool
+	}{
+		{"workspace.github.repository.id", config.Workspace.GitHub.Repository.ID == 0},
+		{"workspace.github.repository.fullName", config.Workspace.GitHub.Repository.FullName == ""},
+		{"tasks.agent", config.Tasks.Agent == ""},
+		{"tasks.model.provider", config.Tasks.Model.Provider == ""},
+		{"tasks.model.id", config.Tasks.Model.ID == ""},
+		{"tasks.runTimeout", config.Tasks.RunTimeout == 0},
+	} {
+		if field.unset {
+			return fmt.Errorf("%s is required", field.name)
+		}
+	}
+	return nil
+}
+
+// decode reads exactly one YAML document, rejecting unknown keys.
+func decode(data []byte, target any) error {
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("multiple YAML documents are not allowed")
+		}
+		return fmt.Errorf("parse trailing document: %w", err)
+	}
+	return nil
 }

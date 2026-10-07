@@ -250,7 +250,7 @@ func resolveGitHubAuthority(github config.GitHubApp) (*gitHubAuthority, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := githubapp.NewRepositoryIdentity(github.InstallationID, github.Repository.ID); err != nil {
+	if _, err := githubapp.NewRepositoryIdentity(int64(github.InstallationID), int64(github.Repository.ID)); err != nil {
 		return nil, err
 	}
 	return &gitHubAuthority{installationTokens: tokens}, nil

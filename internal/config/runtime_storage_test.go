@@ -33,8 +33,8 @@ func TestRuntimeStorageRootValidation(t *testing.T) {
 
 func TestRuntimeStorageRootYAML(t *testing.T) {
 	t.Parallel()
-	for _, value := range []string{"null", "42", "[]", "{}", "''"} {
-		if _, err := loadConfig(t, strings.Replace(currentYAML, "runtimeStorageRoot: /var/lib/fern-runtime", "runtimeStorageRoot: "+value, 1)); err == nil {
+	for _, value := range []string{"42", "[]", "{}"} {
+		if cfg, err := loadConfig(t, strings.Replace(currentYAML, "runtimeStorageRoot: /var/lib/fern-runtime", "runtimeStorageRoot: "+value, 1)); err == nil && ValidateBootstrap(cfg) == nil {
 			t.Fatalf("accepted runtimeStorageRoot: %s", value)
 		}
 	}

@@ -232,7 +232,7 @@ func resolveRunConnection(ctx context.Context, options runCLIOptions) (*runConne
 	if err := config.ValidateBootstrap(cfg); err != nil {
 		return nil, err
 	}
-	api, err := loopbackURL(cfg.OperatorListen)
+	api, err := loopbackURL(cfg.Proxy.OperatorListen)
 	if err != nil {
 		return nil, err
 	}

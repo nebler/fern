@@ -140,7 +140,7 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 			add("image", "pass", "Background Run image is available", "")
 		}
 	}
-	localURL, err := loopbackURL(cfg.OperatorListen)
+	localURL, err := loopbackURL(cfg.Proxy.OperatorListen)
 	if err != nil {
 		add("gateway", "fail", err.Error(), "Fix proxy.operatorListen.")
 	} else if err := checkReady(ctx, localURL, cfg.Control.Password); err != nil {
@@ -160,26 +160,26 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 // checkPhoneRoute verifies the private Tailscale HTTPS path end to end and, on
 // success, records the one-time pairing URL on the report.
 func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, status, summary, remediation string), opts diagnoseOptions, cfg config.Config, localURL string) {
-	if cfg.RemoteOrigin == "" {
+	if cfg.Proxy.RemoteOrigin == "" {
 		add("tailscale", "fail", "proxy.remoteOrigin is required for phone mode", "Set proxy.remoteOrigin to the exact canonical HTTPS root origin reported for this host, then retry.")
 		return
 	}
-	if opts.ExplicitURL != "" && opts.ExplicitURL != cfg.RemoteOrigin {
+	if opts.ExplicitURL != "" && opts.ExplicitURL != cfg.Proxy.RemoteOrigin {
 		add("tailscale", "fail", "--url does not exactly match proxy.remoteOrigin", "Remove --url or pass the exact configured canonical origin.")
 		return
 	}
-	servedOrigin, serveErr := discoverTailscaleURL(ctx, cfg.Listen, cfg.OperatorListen)
+	servedOrigin, serveErr := discoverTailscaleURL(ctx, cfg.Proxy.Listen, cfg.Proxy.OperatorListen)
 	if serveErr != nil || servedOrigin == "" {
-		add("tailscale", "fail", "no Tailscale Serve HTTPS origin was found", fmt.Sprintf("Run tailscale serve --bg http://%s, then retry.", cfg.Listen))
+		add("tailscale", "fail", "no Tailscale Serve HTTPS origin was found", fmt.Sprintf("Run tailscale serve --bg http://%s, then retry.", cfg.Proxy.Listen))
 		return
 	}
 	localOrigin, localErr := localTailscaleOrigin(ctx)
-	if topologyErr := validatePhoneTopology(cfg.RemoteOrigin, opts.ExplicitURL, servedOrigin, localOrigin, localErr); topologyErr != nil {
+	if topologyErr := validatePhoneTopology(cfg.Proxy.RemoteOrigin, opts.ExplicitURL, servedOrigin, localOrigin, localErr); topologyErr != nil {
 		add("tailscale", "fail", topologyErr.Error(), "Make proxy.remoteOrigin, the root Serve origin, and this host's tailnet HTTPS origin identical.")
 		return
 	}
 	if cfg.Tasks.BackgroundRoute != nil {
-		routeOrigin, routeErr := discoverTailscaleURL(ctx, cfg.Tasks.BackgroundRoute.Listen, cfg.OperatorListen)
+		routeOrigin, routeErr := discoverTailscaleURL(ctx, cfg.Tasks.BackgroundRoute.Listen, cfg.Proxy.OperatorListen)
 		parsedRouteOrigin, _ := url.Parse(cfg.Tasks.BackgroundRoute.Origin)
 		if routeErr != nil || routeOrigin != cfg.Tasks.BackgroundRoute.Origin {
 			add("background-route", "fail", "the Background Run listener is not published at its exact configured private origin",
@@ -201,11 +201,11 @@ func checkPhoneRoute(ctx context.Context, report *doctorReport, add func(id, sta
 		add("pairing", "fail", "could not create a one-time phone pairing link", "Ensure the local Fern process is the current build.")
 		return
 	}
-	if err := checkPairingPreview(ctx, cfg.RemoteOrigin, code); err != nil {
+	if err := checkPairingPreview(ctx, cfg.Proxy.RemoteOrigin, code); err != nil {
 		add("pairing", "fail", err.Error(), "Check that Tailscale Serve targets proxy.listen and Fern is current.")
 		return
 	}
-	report.PhoneURL = cfg.RemoteOrigin + "/fern/pair?code=" + url.QueryEscape(code)
+	report.PhoneURL = cfg.Proxy.RemoteOrigin + "/fern/pair?code=" + url.QueryEscape(code)
 	add("tailscale", "pass", "private HTTPS route reaches Fern", "")
 	add("pairing", "pass", "one-time phone pairing link created", "")
 	add("phone", "pass", "phone-demo transport is ready", "")
