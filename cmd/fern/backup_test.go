@@ -108,7 +108,7 @@ func (fixture backupFixture) seed(t *testing.T, marker string) string {
 		"tasks/demo-background/artifact-work/scratch":                "scratch",
 		"tasks/demo-background/runtime/background-runs/host.key":     "secret-host-key-0123456789abcdef",
 		"tasks/demo-background/runtime/background-runs/clone/README": "clone",
-		"locks/other.lock":                                           "",
+		"locks/other.lock": "",
 	} {
 		writeTestFile(t, filepath.Join(state, relative), value)
 	}

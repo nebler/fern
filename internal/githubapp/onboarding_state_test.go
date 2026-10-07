@@ -6,17 +6,17 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/nebler/fern/internal/taskstore/taskstoretest"
 )
 
 func TestOnboardingStateStoreClaimReplayRestartAndComplete(t *testing.T) {
-	store, directory := newTestOnboardingStateStore(t)
+	store, path := newTestOnboardingStateStore(t)
 	now := testOnboardingTime()
 	state := testOnboardingState(1)
 	binding := testOnboardingBinding(1)
@@ -27,26 +27,7 @@ func TestOnboardingStateStoreClaimReplayRestartAndComplete(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	payload := readTestOnboardingPayload(t, directory)
-	for _, secret := range []string{state, code, claimID} {
-		if strings.Contains(string(payload), secret) {
-			t.Fatalf("state file contains raw secret %q", secret)
-		}
-	}
-	directoryInfo, err := os.Lstat(directory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	fileInfo, err := os.Lstat(filepath.Join(directory, onboardingStateFileName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !directoryInfo.IsDir() || directoryInfo.Mode().Perm() != 0o700 {
-		t.Fatalf("directory mode = %v", directoryInfo.Mode())
-	}
-	if !fileInfo.Mode().IsRegular() || fileInfo.Mode().Perm() != 0o600 {
-		t.Fatalf("state file mode = %v", fileInfo.Mode())
-	}
+	taskstoretest.AssertNoSecrets(t, path, state, code, claimID)
 
 	first, err := store.Claim(context.Background(), state, binding, codeHash, claimID, now.Add(time.Minute))
 	if err != nil {
@@ -58,17 +39,9 @@ func TestOnboardingStateStoreClaimReplayRestartAndComplete(t *testing.T) {
 	if first.Binding() != binding || !first.IssuedAt().Equal(now) || !first.ExpiresAt().Equal(now.Add(5*time.Minute)) || !first.ClaimedAt().Equal(now.Add(time.Minute)) {
 		t.Fatal("first claim projection does not match durable record")
 	}
-	payload = readTestOnboardingPayload(t, directory)
-	for _, secret := range []string{state, code, claimID} {
-		if strings.Contains(string(payload), secret) {
-			t.Fatalf("claimed state file contains raw secret %q", secret)
-		}
-	}
+	taskstoretest.AssertNoSecrets(t, path, state, code, claimID)
 
-	restarted, err := NewOnboardingStateStore(directory)
-	if err != nil {
-		t.Fatal(err)
-	}
+	restarted := NewOnboardingStateStore(store.db)
 	replay, err := restarted.Claim(context.Background(), state, binding, codeHash, claimID, now.Add(2*time.Minute))
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +62,7 @@ func TestOnboardingStateStoreClaimReplayRestartAndComplete(t *testing.T) {
 	if _, err := restarted.Claim(context.Background(), state, binding, codeHash, claimID, now.Add(4*time.Minute)); !errors.Is(err, ErrOnboardingStateRecoveryRequired) {
 		t.Fatalf("completed callback replay = %v", err)
 	}
-	entries := readTestOnboardingEntries(t, directory)
+	entries := readTestOnboardingEntries(t, store)
 	if len(entries) != 1 || entries[0].status != onboardingStateStatusCompleted {
 		t.Fatalf("entries after completion = %#v", entries)
 	}
@@ -216,7 +189,7 @@ func TestOnboardingStateStoreConcurrentDifferentClaimsHaveOneWinner(t *testing.T
 }
 
 func TestOnboardingStateStoreQuarantineIsClosedAndStable(t *testing.T) {
-	store, directory := newTestOnboardingStateStore(t)
+	store, _ := newTestOnboardingStateStore(t)
 	now := testOnboardingTime()
 	state := testOnboardingState(6)
 	binding := testOnboardingBinding(6)
@@ -241,7 +214,7 @@ func TestOnboardingStateStoreQuarantineIsClosedAndStable(t *testing.T) {
 	if _, err := store.Claim(context.Background(), state, binding, codeHash, claimID, now.Add(2*time.Minute)); !errors.Is(err, ErrOnboardingStateRecoveryRequired) {
 		t.Fatalf("quarantined callback = %v", err)
 	}
-	entry := readTestOnboardingEntries(t, directory)[0]
+	entry := readTestOnboardingEntries(t, store)[0]
 	if entry.status != onboardingStateStatusQuarantined || entry.quarantineReason != string(CallbackQuarantineExchangeAmbiguous) {
 		t.Fatalf("quarantine entry = %#v", entry)
 	}
@@ -266,7 +239,7 @@ func TestOnboardingStateStorePendingAndClaimedExpiry(t *testing.T) {
 	})
 
 	t.Run("claimed remains fenced through replay window", func(t *testing.T) {
-		store, directory := newTestOnboardingStateStore(t)
+		store, _ := newTestOnboardingStateStore(t)
 		state := testOnboardingState(8)
 		binding := testOnboardingBinding(8)
 		codeHash := testCallbackCodeDigest("code-8")
@@ -289,7 +262,7 @@ func TestOnboardingStateStorePendingAndClaimedExpiry(t *testing.T) {
 		if err := store.Complete(context.Background(), claim, withinWindow); !errors.Is(err, ErrOnboardingStateRecoveryRequired) {
 			t.Fatalf("complete after claim expiry = %v", err)
 		}
-		entry := readTestOnboardingEntries(t, directory)[0]
+		entry := readTestOnboardingEntries(t, store)[0]
 		if entry.status != onboardingStateStatusQuarantined || entry.quarantineReason != quarantineReasonClaimExpired {
 			t.Fatalf("expired claim entry = %#v", entry)
 		}
@@ -301,7 +274,7 @@ func TestOnboardingStateStorePendingAndClaimedExpiry(t *testing.T) {
 }
 
 func TestOnboardingStateStoreCapsAndPrunesAllStatuses(t *testing.T) {
-	store, directory := newTestOnboardingStateStore(t)
+	store, _ := newTestOnboardingStateStore(t)
 	now := testOnboardingTime()
 	for i := range maxOnboardingActiveStates {
 		if err := store.Begin(context.Background(), testOnboardingState(byte(20+i)), testOnboardingBinding(20+i), now, now.Add(5*time.Minute)); err != nil {
@@ -342,7 +315,7 @@ func TestOnboardingStateStoreCapsAndPrunesAllStatuses(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := len(readTestOnboardingEntries(t, directory)); got != maxOnboardingStates {
+	if got := len(readTestOnboardingEntries(t, store)); got != maxOnboardingStates {
 		t.Fatalf("entry count = %d", got)
 	}
 	if err := store.Begin(context.Background(), testOnboardingState(110), testOnboardingBinding(110), now, now.Add(time.Minute)); !errors.Is(err, ErrOnboardingStateLimit) {
@@ -352,51 +325,12 @@ func TestOnboardingStateStoreCapsAndPrunesAllStatuses(t *testing.T) {
 	if err := store.Begin(context.Background(), testOnboardingState(111), testOnboardingBinding(111), later, later.Add(time.Minute)); err != nil {
 		t.Fatalf("begin after tombstone pruning = %v", err)
 	}
-	if got := len(readTestOnboardingEntries(t, directory)); got != 1 {
+	if got := len(readTestOnboardingEntries(t, store)); got != 1 {
 		t.Fatalf("entries after pruning = %d", got)
 	}
 }
 
-func TestOnboardingStateStoreRejectsMalformedFile(t *testing.T) {
-	now := testOnboardingTime()
-	pending := onboardingStateEntry{
-		status:     onboardingStateStatusPending,
-		stateHash:  mustTestOnboardingHash(t, testOnboardingState(120)),
-		flowID:     testOnboardingBinding(120).FlowID,
-		returnPath: testOnboardingBinding(120).ReturnPath,
-		issuedAt:   now,
-		expiresAt:  now.Add(time.Minute),
-	}
-	validPayload := string(mustEncodeTestEntries(t, pending))
-	stateHash := hexDigest(pending.stateHash)
-
-	secret := "malformed-file-secret"
-	tests := []struct {
-		name    string
-		payload string
-	}{
-		{name: "malformed", payload: `{"version":` + secret},
-		{name: "oversized", payload: strings.Repeat(secret, maxOnboardingStateFileBytes/len(secret)+2)},
-		{name: "unknown version", payload: strings.Replace(validPayload, `"version":3`, `"version":2`, 1)},
-		{name: "unknown status", payload: strings.Replace(validPayload, `"status":"pending"`, `"status":"`+secret+`"`, 1)},
-		{name: "invalid digest", payload: strings.Replace(validPayload, stateHash, stateHash[2:], 1)},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			store, directory := newTestOnboardingStateStore(t)
-			if err := os.WriteFile(filepath.Join(directory, onboardingStateFileName), []byte(test.payload), 0o600); err != nil {
-				t.Fatal(err)
-			}
-			err := store.Begin(context.Background(), testOnboardingState(125), testOnboardingBinding(125), now, now.Add(time.Minute))
-			if !errors.Is(err, ErrOnboardingStateStoreInvalid) {
-				t.Fatalf("error = %v", err)
-			}
-			assertRedacted(t, err, secret, test.payload)
-		})
-	}
-}
-
-func TestOnboardingStateStoreLateCancellationAndWriteFailureRollback(t *testing.T) {
+func TestOnboardingStateStoreLateCancellationRollsBack(t *testing.T) {
 	t.Run("late cancellation", func(t *testing.T) {
 		store, _ := newTestOnboardingStateStore(t)
 		now := testOnboardingTime()
@@ -409,7 +343,7 @@ func TestOnboardingStateStoreLateCancellationAndWriteFailureRollback(t *testing.
 		if _, err := store.Claim(ctx, state, binding, testCallbackCodeDigest("code-130"), "claim-130", now); !errors.Is(err, context.Canceled) {
 			t.Fatalf("late claim error = %v", err)
 		}
-		entry := readTestOnboardingEntries(t, store.directory)[0]
+		entry := readTestOnboardingEntries(t, store)[0]
 		if entry.status != onboardingStateStatusPending {
 			t.Fatalf("late cancellation advanced status to %q", entry.status)
 		}
@@ -419,101 +353,10 @@ func TestOnboardingStateStoreLateCancellationAndWriteFailureRollback(t *testing.
 		}
 	})
 
-	t.Run("write failure", func(t *testing.T) {
-		store, directory := newTestOnboardingStateStore(t)
-		now := testOnboardingTime()
-		state := testOnboardingState(131)
-		binding := testOnboardingBinding(131)
-		if err := store.Begin(context.Background(), state, binding, now, now.Add(time.Minute)); err != nil {
-			t.Fatal(err)
-		}
-		remove := makeTestDirectoryReadOnly(t, directory)
-		if _, err := store.Claim(context.Background(), state, binding, testCallbackCodeDigest("code-131"), "claim-131", now); !errors.Is(err, ErrOnboardingStateStoreIO) {
-			t.Fatalf("write failure = %v", err)
-		}
-		remove()
-		claim, err := store.Claim(context.Background(), state, binding, testCallbackCodeDigest("code-131"), "claim-131", now)
-		if err != nil || claim.Disposition() != CallbackClaimExchangeOnce {
-			t.Fatalf("claim after write failure = %#v, %v", claim, err)
-		}
-
-		remove = makeTestDirectoryReadOnly(t, directory)
-		if err := store.Complete(context.Background(), claim, now); !errors.Is(err, ErrOnboardingStateStoreIO) {
-			t.Fatalf("complete write failure = %v", err)
-		}
-		remove()
-		replay, err := store.Claim(context.Background(), state, binding, testCallbackCodeDigest("code-131"), "claim-131", now)
-		if err != nil || replay.Disposition() != CallbackClaimReconcileOnly {
-			t.Fatalf("claim after failed complete = %#v, %v", replay, err)
-		}
-	})
-}
-
-func TestOnboardingStateStoreAtomicReplacementAndInterruptedTemps(t *testing.T) {
-	store, directory := newTestOnboardingStateStore(t)
-	now := testOnboardingTime()
-	if err := store.Begin(context.Background(), testOnboardingState(132), testOnboardingBinding(132), now, now.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	statePath := filepath.Join(directory, onboardingStateFileName)
-	oldGeneration, err := os.Open(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer oldGeneration.Close()
-	oldInfo, err := oldGeneration.Stat()
-	if err != nil {
-		t.Fatal(err)
-	}
-	interruptedPath := filepath.Join(directory, "."+onboardingStateFileName+".interrupted.tmp")
-	const interruptedContent = "partial-sensitive-state-file"
-	if err := os.WriteFile(interruptedPath, []byte(interruptedContent), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Begin(context.Background(), testOnboardingState(133), testOnboardingBinding(133), now, now.Add(time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	newInfo, err := os.Stat(statePath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if os.SameFile(oldInfo, newInfo) {
-		t.Fatal("state file was not atomically replaced")
-	}
-	content, err := os.ReadFile(interruptedPath)
-	if err != nil || string(content) != interruptedContent {
-		t.Fatalf("interrupted temp = %q, error = %v", content, err)
-	}
-}
-
-func TestOnboardingStateStoreRejectsUnsafeDirectory(t *testing.T) {
-	t.Run("directory permissions", func(t *testing.T) {
-		directory := filepath.Join(t.TempDir(), "states")
-		if err := os.Mkdir(directory, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := NewOnboardingStateStore(directory); !errors.Is(err, ErrOnboardingStateStoreSecurity) {
-			t.Fatalf("error = %v", err)
-		}
-	})
-	t.Run("directory symlink", func(t *testing.T) {
-		parent := t.TempDir()
-		realDirectory := filepath.Join(parent, "real")
-		if err := os.Mkdir(realDirectory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-		link := filepath.Join(parent, "link")
-		if err := os.Symlink(realDirectory, link); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := NewOnboardingStateStore(link); !errors.Is(err, ErrOnboardingStateStoreSecurity) {
-			t.Fatalf("error = %v", err)
-		}
-	})
 }
 
 func TestOnboardingStateStoreContextsValidationAndRedaction(t *testing.T) {
-	store, directory := newTestOnboardingStateStore(t)
+	store, _ := newTestOnboardingStateStore(t)
 	now := testOnboardingTime()
 	state := testOnboardingState(137)
 	binding := OnboardingFlowBinding{FlowID: "flow-secret-137", ReturnPath: "/return/path-secret-137"}
@@ -524,8 +367,8 @@ func TestOnboardingStateStoreContextsValidationAndRedaction(t *testing.T) {
 	if err := store.Begin(canceled, state, binding, now, now.Add(time.Minute)); !errors.Is(err, context.Canceled) {
 		t.Fatalf("begin error = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(directory, onboardingStateFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("state file error = %v", err)
+	if entries := readTestOnboardingEntries(t, store); len(entries) != 0 {
+		t.Fatalf("canceled begin stored %#v", entries)
 	}
 	if err := store.Begin(context.Background(), state, binding, now, now.Add(time.Minute)); err != nil {
 		t.Fatal(err)
@@ -584,22 +427,21 @@ func TestOnboardingStateStoreContextsValidationAndRedaction(t *testing.T) {
 
 	formatted := fmt.Sprintf("%#v", claim)
 	assertRedacted(t, errors.New(formatted), state, claimID, "code-secret-137")
-	store.directory = filepath.Join(directory, "private-directory-name")
-	err = store.Complete(context.Background(), claim, now)
-	if err == nil {
-		t.Fatal("complete unexpectedly succeeded with missing directory")
+	closed, _ := newTestOnboardingStateStore(t)
+	if err := closed.db.Close(); err != nil {
+		t.Fatal(err)
 	}
-	assertRedacted(t, err, store.directory, state, binding.FlowID, binding.ReturnPath, claimID)
+	err = closed.Complete(context.Background(), claim, now)
+	if !errors.Is(err, ErrOnboardingStateStoreIO) {
+		t.Fatalf("complete on a closed database = %v", err)
+	}
+	assertRedacted(t, err, state, binding.FlowID, binding.ReturnPath, claimID)
 }
 
 func newTestOnboardingStateStore(t *testing.T) (*OnboardingStateStore, string) {
 	t.Helper()
-	directory := filepath.Join(t.TempDir(), "github-app-private")
-	store, err := NewOnboardingStateStore(directory)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return store, directory
+	database, path := taskstoretest.Open(t)
+	return NewOnboardingStateStore(database.DB()), path
 }
 
 func testOnboardingTime() time.Time {
@@ -625,56 +467,25 @@ func testCallbackCodeDigest(code string) [sha256.Size]byte {
 	return sha256.Sum256([]byte(code))
 }
 
-func mustTestOnboardingHash(t *testing.T, state string) [sha256.Size]byte {
+func readTestOnboardingEntries(t *testing.T, store *OnboardingStateStore) []onboardingStateEntry {
 	t.Helper()
-	hash, err := onboardingStateHash(state)
+	rows, err := store.db.Query(`SELECT ` + onboardingStateColumns + ` FROM onboarding_states ORDER BY issued_at`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return hash
-}
-
-func readTestOnboardingPayload(t *testing.T, directory string) []byte {
-	t.Helper()
-	payload, err := os.ReadFile(filepath.Join(directory, onboardingStateFileName))
-	if err != nil {
-		t.Fatal(err)
+	defer rows.Close()
+	var entries []onboardingStateEntry
+	for rows.Next() {
+		entry, err := scanOnboardingState(rows)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entries = append(entries, entry)
 	}
-	return payload
-}
-
-func readTestOnboardingEntries(t *testing.T, directory string) []onboardingStateEntry {
-	t.Helper()
-	entries, err := decodeOnboardingStateFile(readTestOnboardingPayload(t, directory))
-	if err != nil {
+	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
 	return entries
-}
-
-func mustEncodeTestEntries(t *testing.T, entries ...onboardingStateEntry) []byte {
-	t.Helper()
-	payload, err := encodeOnboardingStateFile(entries)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return payload
-}
-
-func hexDigest(digest [sha256.Size]byte) string {
-	return fmt.Sprintf("%x", digest)
-}
-
-func makeTestDirectoryReadOnly(t *testing.T, directory string) func() {
-	t.Helper()
-	if err := os.Chmod(directory, 0o500); err != nil {
-		t.Fatal(err)
-	}
-	return func() {
-		if err := os.Chmod(directory, 0o700); err != nil {
-			t.Fatal(err)
-		}
-	}
 }
 
 func assertRedacted(t *testing.T, err error, secrets ...string) {

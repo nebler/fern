@@ -13,13 +13,13 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/nebler/fern/internal/taskstore/taskstoretest"
 )
 
 const testOnboardingOrigin = "https://fern.example"
@@ -56,7 +56,7 @@ func TestOnboardingHTTPSeparatesLoopbackSetupFromHTTPSCallbackAuthority(t *testi
 }
 
 func TestOnboardingHTTPSetupPersistsBeforeRenderingBoundManifest(t *testing.T) {
-	store, directory := newTestOnboardingStateStore(t)
+	store, path := newTestOnboardingStateStore(t)
 	events := &onboardingHTTPEvents{}
 	states := &recordingOnboardingStates{delegate: store, events: events}
 	handler := newTestOnboardingHTTP(t, states, &fakeManifestExchanger{}, &fakeCredentialPersistence{}, testOnboardingRandom(1, 2, 3))
@@ -97,20 +97,18 @@ func TestOnboardingHTTPSetupPersistsBeforeRenderingBoundManifest(t *testing.T) {
 		t.Fatalf("manifest = %#v", manifest)
 	}
 
-	entries := readTestOnboardingEntries(t, directory)
+	entries := readTestOnboardingEntries(t, store)
 	if len(entries) != 1 || entries[0].status != onboardingStateStatusPending || entries[0].flowID != flowID || entries[0].returnPath != "/fern/control?connected=1" || !entries[0].issuedAt.Equal(testOnboardingTime()) || !entries[0].expiresAt.Equal(testOnboardingTime().Add(onboardingHTTPStateLifetime)) {
 		t.Fatalf("stored flow = %#v", entries)
 	}
-	if strings.Contains(string(readTestOnboardingPayload(t, directory)), state) {
-		t.Fatal("state store persisted the raw callback state")
-	}
+	taskstoretest.AssertNoSecrets(t, path, state)
 	if got := events.snapshot(); strings.Join(got, ",") != "begin" {
 		t.Fatalf("events = %v", got)
 	}
 }
 
 func TestOnboardingHTTPCallbackClaimsExchangesSavesCompletesAndRedirects(t *testing.T) {
-	store, directory := newTestOnboardingStateStore(t)
+	store, _ := newTestOnboardingStateStore(t)
 	events := &onboardingHTTPEvents{}
 	credentials := testStoredCredentials(t, 701, "onboarding-http")
 	exchanger := &fakeManifestExchanger{credentials: credentials, events: events}
@@ -139,7 +137,7 @@ func TestOnboardingHTTPCallbackClaimsExchangesSavesCompletesAndRedirects(t *test
 	if got := events.snapshot(); strings.Join(got, ",") != "begin,claim,exchange,save,complete" {
 		t.Fatalf("events = %v", got)
 	}
-	entry := readTestOnboardingEntries(t, directory)[0]
+	entry := readTestOnboardingEntries(t, store)[0]
 	if entry.status != onboardingStateStatusCompleted || entry.codeHash != sha256.Sum256([]byte(code)) || entry.claimHash != sha256.Sum256([]byte(testHTTPRandomValue(12))) {
 		t.Fatalf("completed entry = %#v", entry)
 	}
@@ -156,7 +154,7 @@ func TestOnboardingHTTPCallbackClaimsExchangesSavesCompletesAndRedirects(t *test
 }
 
 func TestOnboardingHTTPReconcileOnlyQuarantinesWithoutEffects(t *testing.T) {
-	store, directory := newTestOnboardingStateStore(t)
+	store, _ := newTestOnboardingStateStore(t)
 	events := &onboardingHTTPEvents{}
 	exchanger := &fakeManifestExchanger{events: events}
 	saver := &fakeCredentialPersistence{events: events}
@@ -180,7 +178,7 @@ func TestOnboardingHTTPReconcileOnlyQuarantinesWithoutEffects(t *testing.T) {
 	if exchanger.calls() != 0 || saver.calls() != 0 {
 		t.Fatalf("reconcile performed effects: exchange = %d, save = %d", exchanger.calls(), saver.calls())
 	}
-	entry := readTestOnboardingEntries(t, directory)[0]
+	entry := readTestOnboardingEntries(t, store)[0]
 	if entry.status != onboardingStateStatusQuarantined || entry.quarantineReason != string(CallbackQuarantineReconcileAmbiguous) {
 		t.Fatalf("entry = %#v", entry)
 	}
@@ -206,7 +204,7 @@ func TestOnboardingHTTPFailuresAfterClaimAlwaysFailClosed(t *testing.T) {
 	}
 	for index, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			store, directory := newTestOnboardingStateStore(t)
+			store, _ := newTestOnboardingStateStore(t)
 			events := &onboardingHTTPEvents{}
 			states := &recordingOnboardingStates{delegate: store, events: events, completeErr: test.completeErr}
 			exchanger := &fakeManifestExchanger{credentials: testStoredCredentials(t, int64(800+index), test.name), err: test.exchangeErr, events: events}
@@ -224,7 +222,7 @@ func TestOnboardingHTTPFailuresAfterClaimAlwaysFailClosed(t *testing.T) {
 			if exchanger.calls() != test.wantExchangeCall || saver.calls() != test.wantSaveCall {
 				t.Fatalf("exchange = %d, save = %d", exchanger.calls(), saver.calls())
 			}
-			entry := readTestOnboardingEntries(t, directory)[0]
+			entry := readTestOnboardingEntries(t, store)[0]
 			if entry.status != onboardingStateStatusQuarantined || entry.quarantineReason != string(test.wantReason) {
 				t.Fatalf("entry = %#v", entry)
 			}
@@ -284,7 +282,7 @@ func TestOnboardingHTTPPreEffectFailuresDoNotExchange(t *testing.T) {
 	}
 
 	t.Run("claim ID random failure", func(t *testing.T) {
-		store, directory := newTestOnboardingStateStore(t)
+		store, _ := newTestOnboardingStateStore(t)
 		events := &onboardingHTTPEvents{}
 		exchanger := &fakeManifestExchanger{}
 		handler := newTestOnboardingHTTP(t, &recordingOnboardingStates{delegate: store, events: events}, exchanger, &fakeCredentialPersistence{}, testOnboardingRandom(49, 50))
@@ -295,7 +293,7 @@ func TestOnboardingHTTPPreEffectFailuresDoNotExchange(t *testing.T) {
 		if response.Code != http.StatusServiceUnavailable || exchanger.calls() != 0 {
 			t.Fatalf("status = %d, exchanges = %d", response.Code, exchanger.calls())
 		}
-		if entry := readTestOnboardingEntries(t, directory)[0]; entry.status != onboardingStateStatusPending {
+		if entry := readTestOnboardingEntries(t, store)[0]; entry.status != onboardingStateStatusPending {
 			t.Fatalf("entry = %#v", entry)
 		}
 	})
@@ -422,7 +420,7 @@ func TestOnboardingHTTPFormattingRedactsInMemorySecrets(t *testing.T) {
 }
 
 func TestOnboardingHTTPRandomFailureAndPreCallbackRestartRecovery(t *testing.T) {
-	store, directory := newTestOnboardingStateStore(t)
+	store, _ := newTestOnboardingStateStore(t)
 	events := &onboardingHTTPEvents{}
 	states := &recordingOnboardingStates{delegate: store, events: events}
 	handler := newTestOnboardingHTTP(t, states, &fakeManifestExchanger{}, &fakeCredentialPersistence{}, bytes.NewReader(make([]byte, sha256.Size+1)))
@@ -430,8 +428,8 @@ func TestOnboardingHTTPRandomFailureAndPreCallbackRestartRecovery(t *testing.T) 
 	if response.Code != http.StatusServiceUnavailable || len(events.snapshot()) != 0 {
 		t.Fatalf("random failure status = %d, events = %v", response.Code, events.snapshot())
 	}
-	if _, err := os.Stat(filepath.Join(directory, onboardingStateFileName)); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("state file after random failure = %v", err)
+	if entries := readTestOnboardingEntries(t, store); len(entries) != 0 {
+		t.Fatalf("states after random failure = %#v", entries)
 	}
 
 	active := newTestOnboardingHTTPWithClock(t, states, &fakeManifestExchanger{}, &fakeCredentialPersistence{}, testOnboardingRandom(70, 71, 72), func() time.Time { return testOnboardingTime() })

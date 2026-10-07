@@ -151,7 +151,7 @@ func assembleServices(serviceCtx context.Context, cfg config.Config, origins pro
 		return nil, errors.Join(cause, route.Close(), state.Close())
 	}
 	status := observability.NewRegistry()
-	onboarding, err := newGitHubOnboarding(cfg)
+	onboarding, err := newGitHubOnboarding(cfg, state.DB())
 	if err != nil {
 		return fail(err)
 	}

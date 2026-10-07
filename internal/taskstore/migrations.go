@@ -291,6 +291,28 @@ CREATE TABLE plugin_credentials (
 ) STRICT;
 
 CREATE TABLE plugin_invalid_polls (at INTEGER NOT NULL) STRICT;
+
+-- GitHub App onboarding callback states (package githubapp). Only SHA-256
+-- digests of the callback state, manifest code, and claim ID are stored.
+-- Times are Unix nanoseconds.
+CREATE TABLE onboarding_states (
+    state_sha256 BLOB PRIMARY KEY CHECK(length(state_sha256)=32),
+    status TEXT NOT NULL CHECK(status IN ('pending','claimed','completed','quarantined')),
+    flow_id TEXT NOT NULL CHECK(length(CAST(flow_id AS BLOB)) BETWEEN 1 AND 128),
+    return_path TEXT NOT NULL CHECK(length(CAST(return_path AS BLOB)) BETWEEN 1 AND 1024),
+    issued_at INTEGER NOT NULL,
+    expires_at INTEGER NOT NULL CHECK(expires_at > issued_at),
+    code_sha256 BLOB CHECK(code_sha256 IS NULL OR length(code_sha256)=32),
+    claim_sha256 BLOB CHECK(claim_sha256 IS NULL OR length(claim_sha256)=32),
+    claimed_at INTEGER,
+    closed_at INTEGER,
+    retain_until INTEGER,
+    quarantine_reason TEXT,
+    CHECK((status='pending') = (code_sha256 IS NULL) AND (status='pending') = (claim_sha256 IS NULL) AND
+          (status='pending') = (claimed_at IS NULL)),
+    CHECK((status IN ('pending','claimed')) = (closed_at IS NULL) AND (status IN ('pending','claimed')) = (retain_until IS NULL)),
+    CHECK((status='quarantined') = (quarantine_reason IS NOT NULL))
+) STRICT;
 `
 
 func (s *Store) initialize(ctx context.Context) error {

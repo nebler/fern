@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -268,7 +269,7 @@ func gitExecutable() string {
 	return "/usr/bin/git"
 }
 
-func newGitHubOnboarding(cfg config.Config) (http.Handler, error) {
+func newGitHubOnboarding(cfg config.Config, db *sql.DB) (http.Handler, error) {
 	if cfg.RemoteOrigin == "" {
 		return nil, nil
 	}
@@ -285,10 +286,7 @@ func newGitHubOnboarding(cfg config.Config) (http.Handler, error) {
 	} else if !errors.Is(err, githubapp.ErrCredentialsNotFound) {
 		return nil, err
 	}
-	states, err := githubapp.NewOnboardingStateStore(filepath.Join(directory, "onboarding"))
-	if err != nil {
-		return nil, err
-	}
+	states := githubapp.NewOnboardingStateStore(db)
 	exchanger, err := githubapp.NewManifestClient(http.DefaultClient)
 	if err != nil {
 		return nil, err

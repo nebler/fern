@@ -15,8 +15,9 @@
 // The onboarding callback exchanges a one-time manifest code at most once:
 // durable claims fence restarts and replays, credentials are saved before the
 // claim completes, and ambiguous outcomes are quarantined rather than retried.
-// Onboarding transactions are serialized per OnboardingStateStore, not across
-// processes.
+// Onboarding states live in the onboarding_states table of Fern's SQLite
+// database; each operation is one SQLite transaction, and only digests of the
+// state, manifest code, and claim ID are stored.
 // CredentialStore provides private-file protection, not encryption at rest;
 // encrypted export is credentialbundle's job. Clients disable redirects, and
 // public errors never include response bodies or secrets.
