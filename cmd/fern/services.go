@@ -76,11 +76,6 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 		return nil, errors.New("a qualified disposable Background Run profile is required")
 	}
 	github := cfg.Workspace.GitHub
-	runDirectory, err := statePath("runs")
-	if err != nil {
-		return nil, err
-	}
-
 	ids := task.NewSecureGenerator()
 	authority, err := resolveGitHubAuthority(github)
 	if err != nil {
@@ -88,24 +83,12 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 	}
 	status.Healthy(observability.ComponentGitHubTaskDependency)
 
-	backgroundRoot := filepath.Join(runDirectory, cfg.Workspace.Name+"-background")
-	if err := os.MkdirAll(backgroundRoot, 0o700); err != nil {
-		return nil, fmt.Errorf("create background run state root: %w", err)
-	}
-	backgroundRoot, err = filepath.EvalSymlinks(backgroundRoot)
+	roots, err := prepareStateRoots(cfg.Workspace.Name)
 	if err != nil {
 		return nil, err
 	}
-	providerRoot := filepath.Join(backgroundRoot, "runtime")
-	casRoot := filepath.Join(backgroundRoot, "artifact-cas")
-	workRoot := filepath.Join(backgroundRoot, "artifact-work")
-	for _, root := range []string{providerRoot, casRoot, workRoot} {
-		if err := os.Mkdir(root, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
-			return nil, fmt.Errorf("create background state root: %w", err)
-		}
-	}
-	artifact, err := taskartifact.New(taskartifact.Config{GitExecutable: gitExecutable(), CASRoot: casRoot,
-		WorkRoot: workRoot, CommandTimeout: runOperationTimeout})
+	artifact, err := taskartifact.New(taskartifact.Config{GitExecutable: gitExecutable(), CASRoot: roots.cas,
+		WorkRoot: roots.work, CommandTimeout: runOperationTimeout})
 	if err != nil {
 		return nil, err
 	}
@@ -115,39 +98,10 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 			_ = artifact.Close()
 		}
 	}()
-	referencedArtifacts, err := store.ReferencedArtifactManifestSHA256(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("list retained artifacts: %w", err)
-	}
-	for _, digest := range referencedArtifacts {
-		locator, parseErr := taskartifact.ParseLocator("sha256:" + hex.EncodeToString(digest[:]))
-		if parseErr != nil {
-			return nil, parseErr
-		}
-		if _, inspectErr := artifact.Inspect(ctx, locator); inspectErr != nil {
-			return nil, fmt.Errorf("reconcile retained artifact: %w", inspectErr)
-		}
-	}
-
-	candidateID, err := ids.WorkspaceID()
-	if err != nil {
+	if err := inspectRetainedArtifacts(ctx, store, artifact); err != nil {
 		return nil, err
 	}
-	now := time.Now().UTC().Truncate(time.Millisecond)
-	desired := taskstore.Workspace{ID: candidateID, Name: cfg.Workspace.Name, State: taskstore.WorkspaceActive,
-		RepositoryPath: cfg.Workspace.Repo, GitHubAuthority: taskstore.GitHubAuthorityAppBroker,
-		InstallationID: task.InstallationID(github.InstallationID), RepositoryID: task.RepositoryID(github.Repository.ID),
-		RepositoryFullName: github.Repository.FullName, ImageDigest: cfg.Runs.BackgroundImageID,
-		OpenCodeProtocol: runapi.APIContractVersion, RuntimeDesiredState: "disposable", ReconciliationEpoch: 1, CreatedAt: now}
-	if existing, readErr := store.GetWorkspaceByName(ctx, cfg.Workspace.Name); readErr == nil {
-		// Preserve the durable workspace identity while still checking every
-		// repository and GitHub authority field through EnsureWorkspace.
-		desired.ID, desired.ImageDigest, desired.OpenCodeProtocol = existing.ID, existing.ImageDigest, existing.OpenCodeProtocol
-		desired.RuntimeDesiredState, desired.ReconciliationEpoch, desired.CreatedAt = existing.RuntimeDesiredState, existing.ReconciliationEpoch, existing.CreatedAt
-	} else if !errors.Is(readErr, taskstore.ErrNotFound) {
-		return nil, readErr
-	}
-	durableWorkspace, err := store.EnsureWorkspace(ctx, desired)
+	durableWorkspace, err := ensureWorkspace(ctx, cfg, store, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -161,7 +115,7 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 	}
 	provider, err := taskenvdocker.New(ctx, taskenvdocker.Config{
 		RuntimeStorageRoot: cfg.Runs.RuntimeStorageRoot,
-		StateRoot:          providerRoot, Repository: repository, GitExecutable: gitExecutable(),
+		StateRoot:          roots.provider, Repository: repository, GitExecutable: gitExecutable(),
 		GitHubTokens: authority.installationTokens, GitHubRepository: githubIdentity,
 		GitHubRepositoryFullName: durableWorkspace.RepositoryFullName,
 		ImageReference:           cfg.Runs.BackgroundImage, ImageID: cfg.Runs.BackgroundImageID, MemoryBytes: 1 << 30,
@@ -224,6 +178,79 @@ func newRunServices(ctx context.Context, cfg config.Config, store *taskstore.Sto
 	closeArtifact, closeProvider = false, false
 	return &runServices{store: store, runs: runs,
 		background: coordinator, provider: provider, artifact: artifact, status: status}, nil
+}
+
+// stateRoots are the per-workspace durable directories under ~/.fern/runs.
+type stateRoots struct {
+	provider, cas, work string
+}
+
+// prepareStateRoots creates the workspace's Background Run state directories,
+// resolving symlinks so every component sees the same canonical paths.
+func prepareStateRoots(workspace string) (stateRoots, error) {
+	runDirectory, err := statePath("runs")
+	if err != nil {
+		return stateRoots{}, err
+	}
+	backgroundRoot := filepath.Join(runDirectory, workspace+"-background")
+	if err := os.MkdirAll(backgroundRoot, 0o700); err != nil {
+		return stateRoots{}, fmt.Errorf("create background run state root: %w", err)
+	}
+	backgroundRoot, err = filepath.EvalSymlinks(backgroundRoot)
+	if err != nil {
+		return stateRoots{}, err
+	}
+	roots := stateRoots{provider: filepath.Join(backgroundRoot, "runtime"),
+		cas: filepath.Join(backgroundRoot, "artifact-cas"), work: filepath.Join(backgroundRoot, "artifact-work")}
+	for _, root := range []string{roots.provider, roots.cas, roots.work} {
+		if err := os.Mkdir(root, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return stateRoots{}, fmt.Errorf("create background state root: %w", err)
+		}
+	}
+	return roots, nil
+}
+
+// inspectRetainedArtifacts re-verifies every artifact the store references
+// before the run profile may be declared qualified.
+func inspectRetainedArtifacts(ctx context.Context, store *taskstore.Store, artifact *taskartifact.Engine) error {
+	referencedArtifacts, err := store.ReferencedArtifactManifestSHA256(ctx)
+	if err != nil {
+		return fmt.Errorf("list retained artifacts: %w", err)
+	}
+	for _, digest := range referencedArtifacts {
+		locator, err := taskartifact.ParseLocator("sha256:" + hex.EncodeToString(digest[:]))
+		if err != nil {
+			return err
+		}
+		if _, err := artifact.Inspect(ctx, locator); err != nil {
+			return fmt.Errorf("reconcile retained artifact: %w", err)
+		}
+	}
+	return nil
+}
+
+// ensureWorkspace records the configured repository binding, keeping the
+// durable identity of an existing workspace while EnsureWorkspace still checks
+// every repository and GitHub authority field against the configuration.
+func ensureWorkspace(ctx context.Context, cfg config.Config, store *taskstore.Store, ids *task.Generator) (taskstore.Workspace, error) {
+	candidateID, err := ids.WorkspaceID()
+	if err != nil {
+		return taskstore.Workspace{}, err
+	}
+	github := cfg.Workspace.GitHub
+	desired := taskstore.Workspace{ID: candidateID, Name: cfg.Workspace.Name, State: taskstore.WorkspaceActive,
+		RepositoryPath: cfg.Workspace.Repo, GitHubAuthority: taskstore.GitHubAuthorityAppBroker,
+		InstallationID: task.InstallationID(github.InstallationID), RepositoryID: task.RepositoryID(github.Repository.ID),
+		RepositoryFullName: github.Repository.FullName, ImageDigest: cfg.Runs.BackgroundImageID,
+		OpenCodeProtocol: runapi.APIContractVersion, RuntimeDesiredState: "disposable", ReconciliationEpoch: 1,
+		CreatedAt: time.Now().UTC().Truncate(time.Millisecond)}
+	if existing, err := store.GetWorkspaceByName(ctx, cfg.Workspace.Name); err == nil {
+		desired.ID, desired.ImageDigest, desired.OpenCodeProtocol = existing.ID, existing.ImageDigest, existing.OpenCodeProtocol
+		desired.RuntimeDesiredState, desired.ReconciliationEpoch, desired.CreatedAt = existing.RuntimeDesiredState, existing.ReconciliationEpoch, existing.CreatedAt
+	} else if !errors.Is(err, taskstore.ErrNotFound) {
+		return taskstore.Workspace{}, err
+	}
+	return store.EnsureWorkspace(ctx, desired)
 }
 
 type gitHubAuthority struct {
