@@ -79,7 +79,7 @@ Do not use production run directories for destructive qualification scenarios.
 
 ### Runtime storage contract
 
-`runtimeStorageRoot` must be an existing absolute XFS project directory that the
+`runs.runtimeStorageRoot` must be an existing absolute XFS project directory that the
 operator provisions on native Linux amd64/arm64 (kernel 5.14+), used by the
 same-host Docker daemon over its local Unix socket with the same mount namespace
 as Fern. Docker Desktop, remote daemons, other filesystems, accounting-only
@@ -172,8 +172,20 @@ Fern authenticates to GitHub as a GitHub App that you create by hand:
 ```
 
 The model placeholders are not working example model names. Keep `fern.env`
-private and out of version control; it contains the generated control password.
-Configuration YAML is limited to 1 MiB. See [the complete example](../fern.example.yaml).
+private and out of version control; it contains the generated control password
+as `FERN_CONTROL_PASSWORD`, which Fern reads only from that file (or the process
+environment) and never from the YAML. Omit `--installation-id` if the App is not
+installed yet and add `workspace.github.installationId` later.
+
+`fern.yaml` is the only source of settings; no command overrides it. Unknown keys
+are rejected and the file is limited to 1 MiB. Optional keys default to
+`workspace.name: default`, `runs.agent: build`, `runs.runTimeout: 30m`,
+`proxy.listen: 127.0.0.1:8080`, and `proxy.operatorListen: 127.0.0.1:8081`;
+`fern init` writes them out explicitly, along with
+`runs.backgroundRoute.listen: 127.0.0.1:8443`. Edit the file to change them.
+Every host command (`up`, `doctor`, `runs`, `attach`, `credentials set`,
+`backup`) reads `--config` and `--env-file`, defaulting to `fern.yaml` and
+`fern.env` in the current directory. See [the complete example](../fern.example.yaml).
 
 ### Store the GitHub App credentials
 
@@ -217,6 +229,9 @@ Then check:
 ./fern doctor --config fern.yaml --env-file fern.env
 curl --fail http://127.0.0.1:8081/fern/ready
 ```
+
+Add `--phone` to also verify the private Tailscale route end to end and print a
+one-time phone pairing URL with its QR code; `--json` prints a stable report.
 
 Readiness and `doctor` are not substitutes for quota exhaustion qualification.
 A missing installation ID or App credentials keeps the control plane up but
