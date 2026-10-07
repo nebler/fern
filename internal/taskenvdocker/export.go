@@ -8,7 +8,6 @@ import (
 	"sync"
 
 	"github.com/docker/docker/errdefs"
-	"github.com/nebler/fern/internal/atomicfile"
 	"github.com/nebler/fern/internal/taskstore"
 )
 
@@ -60,10 +59,6 @@ func (p *Provider) AcquireExportSource(ctx context.Context, run taskstore.Backgr
 	if err != nil {
 		return nil, err
 	}
-	if err := p.attestExportRoot(); err != nil {
-		return nil, exportIdentityError(run, "private provider root changed")
-	}
-
 	unlock, err := p.acquireCloneLock(ctx, run.CloneIdentity)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
@@ -86,11 +81,8 @@ func (p *Provider) AcquireExportSource(ctx context.Context, run taskstore.Backgr
 	}
 
 	// This is intentionally the last filesystem operation before publishing the
-	// lease: both authority files and the canonical clone path must still name
-	// the exact objects observed before the Docker inactivity proof.
-	if err := p.attestExportRoot(); err != nil {
-		return nil, exportIdentityError(run, "private provider root changed")
-	}
+	// lease: the marker and canonical clone path must still name the exact
+	// clone observed before the Docker inactivity proof.
 	if current, err := p.readExportClone(run, digest); err != nil || current != marker {
 		return nil, exportIdentityError(run, "clone authority changed during export acquisition")
 	}
@@ -110,22 +102,6 @@ func (p *Provider) requireOpen() error {
 	defer p.lifecycle.mu.Unlock()
 	if p.lifecycle.closed {
 		return ErrProviderClosed
-	}
-	return nil
-}
-
-func (p *Provider) attestExportRoot() error {
-	info, err := os.Lstat(p.root)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0o700 {
-		return errors.New("private provider root is unsafe")
-	}
-	device, inode, err := atomicfile.Identity(info)
-	if err != nil || device != p.rootDevice || inode != p.rootInode {
-		return errors.New("private provider root identity changed")
-	}
-	resolved, err := filepath.EvalSymlinks(p.root)
-	if err != nil || resolved != p.root {
-		return errors.New("private provider root path changed")
 	}
 	return nil
 }

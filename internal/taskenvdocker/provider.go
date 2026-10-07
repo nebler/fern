@@ -26,7 +26,6 @@ import (
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
-	"github.com/nebler/fern/internal/atomicfile"
 	"github.com/nebler/fern/internal/backgroundopencode"
 	"github.com/nebler/fern/internal/backgroundroute"
 	"github.com/nebler/fern/internal/githubapp"
@@ -152,8 +151,6 @@ type Provider struct {
 	docker           dockerAPI
 	ownedCLI         *client.Client
 	root             string
-	rootDevice       uint64
-	rootInode        uint64
 	hostKey          [32]byte
 	imageEnv         map[string]string
 	imageLabels      map[string]string
@@ -254,14 +251,6 @@ func New(ctx context.Context, config Config, api dockerAPI) (*Provider, error) {
 			return nil, err
 		}
 	}
-	rootInfo, err := os.Lstat(root)
-	if err != nil {
-		return nil, errors.New("inspect private background run root")
-	}
-	rootDevice, rootInode, err := atomicfile.Identity(rootInfo)
-	if err != nil {
-		return nil, errors.New("identify private background run root")
-	}
 	var owned *client.Client
 	if api == nil {
 		owned, err = client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
@@ -278,7 +267,7 @@ func New(ctx context.Context, config Config, api dockerAPI) (*Provider, error) {
 		return nil, err
 	}
 	httpClient := &http.Client{Timeout: 2 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
-	return &Provider{config: config, docker: api, ownedCLI: owned, root: root, rootDevice: rootDevice, rootInode: rootInode, hostKey: hostKey, imageEnv: imageEnv, imageLabels: maps.Clone(inspection.Config.Labels), http: httpClient, lifecycle: &providerLifecycle{}}, nil
+	return &Provider{config: config, docker: api, ownedCLI: owned, root: root, hostKey: hostKey, imageEnv: imageEnv, imageLabels: maps.Clone(inspection.Config.Labels), http: httpClient, lifecycle: &providerLifecycle{}}, nil
 }
 
 func (p *Provider) Close() error {
