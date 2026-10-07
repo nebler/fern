@@ -24,7 +24,7 @@ Fern owns:
 - writer inactivity proof;
 - Git bundle export and local content-addressed storage;
 - short-lived, repository-scoped GitHub credentials for the runtime;
-- backup, restore, credential rotation, and schema compatibility.
+- backup, restore, and validated GitHub App credential storage.
 
 OpenCode owns:
 
@@ -86,11 +86,11 @@ removes it and waits for admitted forwarding to exit before writer teardown.
 2. Apply `config.ValidateBootstrap`.
 3. Bind remote, operator, and live-run listeners.
 4. Acquire the host-local repository-name lease.
-5. Open the workspace SQLite database (taskstore schema 9), which also holds
+5. Open the workspace SQLite database (taskstore schema 10), which also holds
    devices and plugin authorizations.
 6. Compose control and plugin-authorization stores over it.
-7. If the installation ID is pending, block readiness and expose onboarding
-   without composing task services.
+7. If the installation ID is pending, block readiness without composing task
+   services.
 8. Otherwise apply strict `config.Validate` and resolve exact GitHub
    App repository authority.
 9. Qualify the exact Background Run image through Docker inspection.
@@ -98,12 +98,17 @@ removes it and waits for admitted forwarding to exit before writer teardown.
 11. Build run, route, and HTTP services with the scoped token source.
 12. Start all services under one cancellation errgroup.
 
-Fresh-host configuration may omit `workspace.github.installationId` only to
-bootstrap onboarding. Fern then exposes onboarding, blocks readiness, and
-returns `503` for run operations. After creating and installing the
-App on the configured repository, the operator records the numeric installation
-ID from GitHub's installation URL and restarts Fern. Missing credentials follow
-the same blocked, onboarding-only path. Neither state can compose task services.
+The operator creates the GitHub App by hand (metadata read, contents and pull
+requests write, no webhook), installs it on only the bound repository, and runs
+`fern credentials set --app-id N --private-key app.pem` while Fern is stopped.
+That command parses the RSA key and stores it only after proving it live: the App
+must see the configured installation, and the installation must expose the
+configured repository (matching ID, name, and owner, not archived or disabled)
+with the required permissions. Fresh-host configuration may omit
+`workspace.github.installationId`; Fern then serves devices and plugin
+authorization, blocks readiness, and returns `503` for run operations. Missing
+credentials take the same blocked path. Neither state can compose task
+services; fixing either requires a restart.
 
 ## 5. Configuration Authority
 
@@ -145,11 +150,11 @@ require a CSRF token bound to the method and exact path.
 
 | Listener | Routes | Realm |
 | --- | --- | --- |
-| remote | `POST /fern/api/plugin-auth/{start,poll}`, `GET\|POST /fern/pair`, `GET /fern/github/app/callback` | public |
+| remote | `POST /fern/api/plugin-auth/{start,poll}`, `GET\|POST /fern/pair` | public |
 | remote | `GET /fern/`, `GET /fern/api/v1/csrf`, `GET /fern/plugin-auth/authorize`, `POST /fern/api/plugin-auth/requests/:id/{approve,deny}` | device |
 | remote | `/fern/api/runs` (runapi, including `GET /fern/api/runs/:id/attach`), `POST /fern/api/plugin-auth/self/revoke` | plugin |
 | operator | `GET /fern/live`, `GET /fern/ready` | public |
-| operator | landing, control page, `POST /fern/pair/new`, device and plugin credential administration, plugin approval, `GET /fern/api/runs[/:id[/attach]]` (runapi, workspace-wide, read and attach only), GitHub App setup/callback | operator |
+| operator | landing, control page, `POST /fern/pair/new`, device and plugin credential administration, plugin approval, `GET /fern/api/runs[/:id[/attach]]` (runapi, workspace-wide, read and attach only) | operator |
 
 The live route listener (`backgroundroute`, `:8443`) is separate: it admits only
 attachment capabilities and applies the OpenCode allow-list in `policy.go`.
@@ -499,13 +504,11 @@ Fern's durable state is the workspace's one SQLite database
 (`~/.fern/tasks/<name>.db`), the artifact CAS beside it, the disposable-resource
 host key, and the private GitHub App credential file. The database schema is
 owned by `taskstore` and also defines the tables of `control` (paired devices,
-operator credential ID), `pluginauth` (plugin authorizations and credentials),
-and `githubapp` onboarding callback states; those packages issue their own SQL
-through the shared handle, one transaction per operation. Only digests of
-device tokens, plugin device and user codes, and onboarding state, code, and
-claim values are stored. In-flight request registries that revocation cancels
-stay in memory. `atomicfile` remains only for the credential file, host key, and
-credential bundles.
+operator credential ID) and `pluginauth` (plugin authorizations and
+credentials); those packages issue their own SQL through the shared handle, one
+transaction per operation. Only digests of device tokens and plugin device and
+user codes are stored. In-flight request registries that revocation cancels
+stay in memory. `atomicfile` remains only for the credential file and host key.
 
 Backup is offline: `fern backup` takes the workspace lease used by `fern up`
 and every other lease file in the state directory. `fern backup create` writes
@@ -527,11 +530,11 @@ the held lease directory moves into the staged state, and the staged state and
 configuration files take their places. A restored startup inspects every
 taskstore-referenced CAS object before serving work.
 
-GitHub App credentials can be exported and rotated as bounded age-encrypted
-bundles. Binding includes Fern name, mode, host, App ID, installation ID,
-repository ID, and canonical full name. Activation validates the candidate
-against GitHub before replacing the private store and writes an encrypted prior
-generation when one exists.
+The GitHub App credential file (`~/.fern/github-app/app-credentials.json`, mode
+0600) holds only the App ID and private key; it is not encrypted at rest, and
+backups carry it age-encrypted. Rotating the key means generating a new one on
+GitHub, running `fern credentials set` again, restarting, and then revoking the
+old key on GitHub.
 
 ## 19. Package Map
 
@@ -547,7 +550,7 @@ ownership boundaries.
 | `internal/backgroundruncoord` | serial run effect coordinator and recovery |
 | `cmd/fern` | CLI, composition, backup, credentials, process lifecycle |
 | `internal/task` | identifiers, actor snapshots, idempotency vocabulary |
-| `internal/taskstore` | the SQLite database: schema 9, run/result authority and state machines |
+| `internal/taskstore` | the SQLite database: schema 10, run/result authority and state machines |
 | `internal/taskartifact` | deterministic Git bundle creation, CAS, materialization |
 | `internal/taskresultsource` | CAS-only result binding and verified checkout acquisition |
 | `internal/taskenvdocker` | disposable Docker resources, writer proof, container GitHub credential delivery |
@@ -556,14 +559,13 @@ ownership boundaries.
 | `internal/proxy` | remote/operator ingress, pairing, and browser security |
 | `internal/control` | device identities and operator credential ID (SQLite tables) |
 | `internal/pluginauth` | fixed-scope plugin device authorization and revocation (SQLite tables) |
-| `internal/githubapp` | onboarding (states in SQLite), credential file, installation tokens, repository authority |
-| `internal/credentialbundle` | age-encrypted GitHub credential bundles |
+| `internal/githubapp` | credential file, installation tokens, repository discovery and authority |
 | `internal/config` | strict configuration loader and bootstrap/execution validation |
 | `internal/hostlease` | exclusive host-local repository-binding lease |
 | `internal/observability` | in-memory component readiness behind the liveness and readiness probes |
 | `internal/gitref` | shared Git ref, GitHub name/remote, and path validation |
 | `internal/strictjson` | strict JSON validation before typed decoding |
-| `internal/atomicfile` | atomic replace and bounded read of the remaining private files (App credentials, host key, bundles) |
+| `internal/atomicfile` | atomic replace and bounded read of the remaining private files (App credentials, host key) |
 
 Integration packages under `integration/` qualify Docker and OpenCode; each has
 its own README.

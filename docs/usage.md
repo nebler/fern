@@ -131,6 +131,27 @@ FERN_STORAGE_POLICY_SMOKE_IMAGE=fern/opencode-background-source:signed \
 
 Fern's `init` command writes configuration; it does **not** provision XFS or quotas.
 
+### Create and install the GitHub App
+
+Fern authenticates to GitHub as a GitHub App that you create by hand:
+
+1. In GitHub, open **Settings → Developer settings → GitHub Apps → New GitHub
+   App** (under the organization's settings for an organization-owned repository).
+2. Give it any name and homepage URL. Leave **Webhook → Active** unchecked; Fern
+   uses no webhooks, callback URL, or OAuth client.
+3. Under **Repository permissions** grant exactly:
+   - **Metadata:** Read-only
+   - **Contents:** Read and write
+   - **Pull requests:** Read and write
+4. Select **Only on this account** and create the App. Note its numeric
+   **App ID** on the App's settings page.
+5. Under **Private keys**, click **Generate a private key** and keep the
+   downloaded `.pem` file private (for example `chmod 600`).
+6. Click **Install App**, choose the bound repository's owner, select **Only
+   select repositories**, and pick only the bound repository. The installation
+   ID is the number at the end of the resulting URL
+   (`.../settings/installations/<installation-id>`).
+
 ### Generate configuration
 
 ```sh
@@ -139,6 +160,7 @@ Fern's `init` command writes configuration; it does **not** provision XFS or quo
   --env-file fern.env \
   --repo /srv/fern/repository \
   --runtime-storage-root /var/lib/fern-runtime \
+  --installation-id 12345678 \
   --repository owner/repository \
   --repository-id 123456789 \
   --model-provider YOUR_CREDENTIAL_FREE_PROVIDER \
@@ -153,7 +175,26 @@ The model placeholders are not working example model names. Keep `fern.env`
 private and out of version control; it contains the generated control password.
 Configuration YAML is limited to 1 MiB. See [the complete example](../fern.example.yaml).
 
-### Set up private HTTPS and GitHub App onboarding
+### Store the GitHub App credentials
+
+With Fern stopped, store the App ID and private key:
+
+```sh
+./fern credentials set --config fern.yaml --env-file fern.env \
+  --app-id 123456 --private-key /secure/fern-app.pem
+```
+
+The command parses the key, then proves it live before storing anything: it
+lists the App's installations, mints an installation-wide token for
+`workspace.github.installationId`, and checks that the bound repository is
+visible with the required permissions and is not archived or disabled. On
+success it writes the App ID and key to `~/.fern/github-app/`
+(mode 0600, not encrypted at rest; `fern backup` carries them encrypted). The
+`.pem` file is no longer needed by Fern afterwards. To rotate the key, generate
+a new one on the App's settings page, run `fern credentials set` again, restart
+Fern, and then delete the old key on GitHub.
+
+### Set up private HTTPS
 
 The control and attachment origins must share a hostname; attachment uses an
 explicit non-443 port. For example, on an already configured Tailscale host:
@@ -170,11 +211,6 @@ Access `http://127.0.0.1:8081/fern/control` locally on the host, or through an
 operator-controlled SSH tunnel. Its Basic-auth username is `fern`; use the
 generated control password from your protected environment file.
 
-Follow the control page's GitHub App setup flow, install the App on only the
-bound repository, and set its positive numeric installation ID in
-`workspace.github.installationId`. Restart Fern after updating the configuration.
-The private HTTPS callback route must already work for onboarding to complete.
-
 Then check:
 
 ```sh
@@ -183,7 +219,8 @@ curl --fail http://127.0.0.1:8081/fern/ready
 ```
 
 Readiness and `doctor` are not substitutes for quota exhaustion qualification.
-Missing App credentials/installation block run service; quota failures prevent
+A missing installation ID or App credentials keeps the control plane up but
+blocks run service until you fix it and restart; quota failures prevent
 execution even if configuration syntax is valid.
 
 ## 3. Install the client plugin
@@ -310,12 +347,11 @@ Fern to be stopped because they take the host leases:
 
 ```sh
 ./fern backup create --recipient age1... --output /secure/fern.backup
-./fern credentials export --recipient age1... --output /secure/credentials.age
 ```
 
 Replace `age1...` with a real recipient. The backup is one age-encrypted file
 holding the Fern state directory (a snapshot of the SQLite database with runs,
-paired devices, plugin and onboarding state; GitHub App credentials; retained
+paired devices and plugin state; GitHub App credentials; retained
 artifacts; host key), the configuration,
 and the protected environment file; nothing is written in plaintext. Run clones,
 artifact scratch, locks, and containers are not included.
@@ -331,9 +367,8 @@ Restore verifies every file before installing anything and never overwrites:
 it refuses while the state directory holds anything but locks, or while the
 configuration or environment file exists. To restore over a host, stop Fern and
 move the old state directory and configuration aside (or delete them) first.
-Credential bundles use format 2 and do not overwrite an existing destination.
-Existing older database/bundle formats may be rejected: preserve backups rather
-than deleting files to make startup succeed.
+Older database and credential-file formats are rejected rather than migrated:
+preserve backups rather than deleting files to make startup succeed.
 
 ## Where to read next
 

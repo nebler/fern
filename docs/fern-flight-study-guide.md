@@ -262,7 +262,7 @@ proven security sandbox.
 - `taskartifact`: Git snapshot/bundle/manifest/CAS verification.
 - `taskresultsource`: matches a durable result to freshly verified artifact bytes.
 - `proxy`, `control`, `pluginauth`: HTTP ingress, browser pairing, device/plugin auth.
-- `githubapp`: GitHub App onboarding and scoped token issuance.
+- `githubapp`: GitHub App credential storage and scoped token issuance.
 
 The dependency direction is intentional: policy (`run`) does not import Docker,
 HTTP, the coordinator, or SQLite. The coordinator orchestrates; the task store

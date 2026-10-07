@@ -106,12 +106,14 @@ The current execution contract requires:
    the query used here; **the stock unprivileged service cannot execute it
    unchanged**. Fern neither grants that capability nor installs a helper.
 4. A qualified image, a bound host Git repository, private HTTPS control and
-   attachment origins, and a repository-bound GitHub App installation.
+   attachment origins, and a GitHub App you create by hand (metadata read,
+   contents and pull requests write), installed on only the bound repository and
+   registered with `fern credentials set --app-id N --private-key app.pem`.
 5. A usable credential-free model provider for the pinned runtime. Arbitrary
    provider API-key environment injection is currently rejected. A GitHub token
    does not supply model-provider authentication.
 
-Follow **[the usage guide](docs/usage.md)** for configuration, App onboarding,
+Follow **[the usage guide](docs/usage.md)** for configuration, GitHub App setup,
 local plugin installation, and the daily workflow:
 
 ```text

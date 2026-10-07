@@ -67,8 +67,8 @@ docker build -t fern/opencode-background-source:local images/opencode-background
 BACKGROUND_IMAGE_ID=$(docker image inspect fern/opencode-background-source:local --format '{{.Id}}')
 ```
 
-Create `fern.yaml` and `fern.env` with `fern init`, then complete GitHub App
-onboarding. Important configuration values for the phone route look like this:
+Create `fern.yaml` and `fern.env` with `fern init`, then create the GitHub App
+and run `fern credentials set` as described in the [usage guide](usage.md#create-and-install-the-github-app). Important configuration values for the phone route look like this:
 
 ```yaml
 tasks:
