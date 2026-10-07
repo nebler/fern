@@ -25,12 +25,15 @@ import (
 )
 
 func runUp(args []string, log *slog.Logger) (resultErr error) {
-	opts, err := parseUpFlags(args)
+	configPath, envPath, err := parseUpFlags(args)
 	if err != nil {
 		return err
 	}
-	cfg, err := loadUpConfig(opts)
+	cfg, err := loadCommandConfig(configPath, envPath)
 	if err != nil {
+		return err
+	}
+	if err := config.ValidateBootstrap(cfg); err != nil {
 		return err
 	}
 	remoteListener, operatorListener, err := listenProxySurfaces(cfg.Proxy.Listen, cfg.Proxy.OperatorListen)
@@ -73,38 +76,11 @@ func runUp(args []string, log *slog.Logger) (resultErr error) {
 	return err
 }
 
-type upOptions struct {
-	configPath     string
-	envPath        string
-	configRequired bool
-	overrides      config.Overrides
-}
-
-func parseUpFlags(args []string) (upOptions, error) {
+func parseUpFlags(args []string) (configPath, envPath string, err error) {
 	fs := newFlagSet("up", "Run the Background Run control plane.")
-	configPath := fs.String("config", "fern.yaml", "configuration file")
-	envPath := fs.String("env-file", "", "protected environment file")
-	name := fs.String("name", "", "repository binding name")
-	repo := fs.String("repo", "", "host repository path")
-	listenAddress := fs.String("listen", "", "remote/device control-plane listen address")
-	operatorListenAddress := fs.String("operator-listen", "", "host/operator listen address")
-	if err := parseFlags(fs, args); err != nil {
-		return upOptions{}, err
-	}
-	return upOptions{configPath: *configPath, envPath: *envPath, configRequired: flagProvided(fs, "config"),
-		overrides: config.Overrides{Name: optionalFlag(fs, "name", name), Repo: optionalFlag(fs, "repo", repo),
-			Listen: optionalFlag(fs, "listen", listenAddress), OperatorListen: optionalFlag(fs, "operator-listen", operatorListenAddress)}}, nil
-}
-
-func loadUpConfig(opts upOptions) (config.Config, error) {
-	cfg, _, err := loadCommandConfig(opts.configPath, opts.configRequired, opts.envPath, opts.overrides)
-	if err != nil {
-		return config.Config{}, err
-	}
-	if err := config.ValidateBootstrap(cfg); err != nil {
-		return config.Config{}, err
-	}
-	return cfg, nil
+	fs.StringVar(&configPath, "config", "fern.yaml", "configuration file")
+	fs.StringVar(&envPath, "env-file", "", "protected environment file")
+	return configPath, envPath, parseFlags(fs, args)
 }
 
 type upRuntime struct {

@@ -48,7 +48,7 @@ func writeConfig(t *testing.T, data string) string {
 func loadConfig(t *testing.T, data string) (Config, error) {
 	t.Helper()
 	path := writeConfig(t, data)
-	return LoadWithEnvironment(path, filepath.Dir(path), true, Overrides{}, map[string]string{"FERN_CONTROL_PASSWORD": strings.Repeat("s", 32)})
+	return Load(path, map[string]string{"FERN_CONTROL_PASSWORD": strings.Repeat("s", 32)})
 }
 
 func validConfig(t *testing.T) Config {
@@ -215,26 +215,16 @@ func TestValidationBoundsAndDependencies(t *testing.T) {
 	}
 }
 
-func TestEnvironmentExpansionAndOverrides(t *testing.T) {
+func TestEnvironmentExpansion(t *testing.T) {
 	t.Setenv("FERN_CONTROL_PASSWORD", "process-secret")
 	path := writeConfig(t, currentYAML)
 	protected := strings.Repeat("p", 32)
-	cfg, err := LoadWithEnvironment(path, t.TempDir(), true, Overrides{}, map[string]string{"FERN_CONTROL_PASSWORD": protected})
+	cfg, err := Load(path, map[string]string{"FERN_CONTROL_PASSWORD": protected})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.Control.Password != protected || cfg.Workspace.Repo != filepath.Dir(path) {
 		t.Fatalf("expansion or relative repository = %+v", cfg)
-	}
-	repo, name, listen := "child", "override", "127.0.0.1:9000"
-	base := t.TempDir()
-	path = writeConfig(t, currentYAML)
-	cfg, err = LoadWithEnvironment(path, base, true, Overrides{Repo: &repo, Name: &name, Listen: &listen}, map[string]string{"FERN_CONTROL_PASSWORD": protected})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Workspace.Repo != filepath.Join(base, repo) || cfg.Workspace.Name != name || cfg.Proxy.Listen != listen {
-		t.Fatalf("overrides = %+v", cfg)
 	}
 	cfg, err = loadConfig(t, strings.Replace(currentYAML, "${FERN_CONTROL_PASSWORD}", "$$literal", 1))
 	if err != nil || cfg.Control.Password != "$literal" {
@@ -275,25 +265,17 @@ func TestParseRemoteOrigin(t *testing.T) {
 
 func TestMissingConfigAndExample(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "missing.yaml")
-	if _, err := LoadWithEnvironment(path, filepath.Dir(path), true, Overrides{}, nil); err == nil {
-		t.Fatal("required file absent")
-	}
-	cfg, err := LoadWithEnvironment(path, filepath.Dir(path), false, Overrides{}, nil)
-	if err != nil || cfg.Workspace.Name != "demo" {
-		t.Fatalf("defaults = %+v, %v", cfg, err)
-	}
-	if err := ValidateBootstrap(cfg); err == nil {
-		t.Fatal("defaults authorized bootstrap")
+	if _, err := Load(filepath.Join(t.TempDir(), "missing.yaml"), nil); err == nil {
+		t.Fatal("missing configuration accepted")
 	}
 	data, err := os.ReadFile("../../fern.example.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	data = []byte(strings.Replace(string(data), "sha256:REPLACE_WITH_QUALIFIED_LOCAL_IMAGE_ID", "sha256:"+strings.Repeat("b", 64), 1))
+	example := strings.Replace(string(data), "sha256:REPLACE_WITH_QUALIFIED_LOCAL_IMAGE_ID", "sha256:"+strings.Repeat("b", 64), 1)
 	repo := t.TempDir()
-	path = writeConfig(t, string(data))
-	cfg, err = LoadWithEnvironment(path, repo, true, Overrides{Repo: &repo}, map[string]string{"FERN_CONTROL_PASSWORD": strings.Repeat("s", 32)})
+	path := writeConfig(t, strings.Replace(example, "/srv/fern/repository", repo, 1))
+	cfg, err := Load(path, map[string]string{"FERN_CONTROL_PASSWORD": strings.Repeat("s", 32)})
 	if err != nil {
 		t.Fatal(err)
 	}

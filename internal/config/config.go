@@ -81,16 +81,3 @@ func (id *GitHubID) UnmarshalYAML(node *yaml.Node) error {
 	*id = GitHubID(value)
 	return nil
 }
-
-// Overrides contains only explicitly supplied, current CLI settings.
-type Overrides struct {
-	Name           *string
-	Repo           *string
-	Listen         *string
-	OperatorListen *string
-}
-
-func Default(repo string) Config {
-	return Config{Workspace: Workspace{Name: "demo", Repo: repo},
-		Proxy: Proxy{Listen: "127.0.0.1:8080", OperatorListen: "127.0.0.1:8081"}}
-}

@@ -17,8 +17,6 @@ grep -qx 'EnvironmentFile=/etc/fern/fern.env' "$UNIT"
 grep -qx 'UMask=0077' "$UNIT"
 grep -qx 'PrivateTmp=true' "$UNIT"
 grep -qx 'NoNewPrivileges=true' "$UNIT"
-grep -q -- '--listen 127.0.0.1:8080' "$UNIT"
-grep -q -- '--operator-listen 127.0.0.1:8081' "$UNIT"
 grep -qx 'Restart=on-failure' "$UNIT"
 grep -Eq '^TimeoutStopSec=[1-9][0-9]*s$' "$UNIT"
 grep -qx '  listen: 127.0.0.1:8080' "$CONFIG"
@@ -80,7 +78,7 @@ if command -v systemd-analyze >/dev/null 2>&1; then
     -e "s|^WorkingDirectory=.*$|WorkingDirectory=$TEMP|" \
     -e "s|^Environment=HOME=.*$|Environment=HOME=$TEMP|" \
     -e "s|^EnvironmentFile=.*$|EnvironmentFile=$TEMP/fern.env|" \
-    -e "s|^ExecStart=.*$|ExecStart=$TEMP/fern up --config $TEMP/fern.yaml --listen 127.0.0.1:8080 --operator-listen 127.0.0.1:8081|" \
+    -e "s|^ExecStart=.*$|ExecStart=$TEMP/fern up --config $TEMP/fern.yaml|" \
     "$UNIT" >"$TEMP/fern.service"
   systemd-analyze verify "$TEMP/fern.service"
 else

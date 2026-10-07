@@ -1,7 +1,8 @@
 // Package config loads and validates Fern's single current Background Run
-// configuration shape. It merges defaults, one strict YAML document (at most
-// MaxConfigBytes), and explicitly set CLI overrides. Obsolete or unknown fields
-// are rejected rather than translated; there is no legacy execution shape.
+// configuration shape. One strict YAML document (at most MaxConfigBytes) is the
+// single source of truth; there are no CLI overrides. Obsolete or unknown
+// fields are rejected rather than translated; there is no legacy execution
+// shape.
 //
 // Loading does not validate: callers choose ValidateWorkspace (offline shape and
 // directory check), ValidateBootstrap (permits a pending App installation), or

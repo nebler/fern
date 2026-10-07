@@ -131,7 +131,7 @@ func runBackupRestore(args []string, _ *slog.Logger) error {
 }
 
 func loadBackupConfig(options backupOptions) (config.Config, string, error) {
-	cfg, _, err := loadCommandConfig(options.configPath, true, options.envPath, config.Overrides{})
+	cfg, err := loadCommandConfig(options.configPath, options.envPath)
 	if err != nil {
 		return config.Config{}, "", err
 	}

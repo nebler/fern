@@ -45,7 +45,7 @@ func TestInitCreatesPendingConfigurationWithoutInstallationID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	loaded, err := config.LoadWithEnvironment(configPath, directory, true, config.Overrides{}, environment)
+	loaded, err := config.Load(configPath, environment)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,9 +63,6 @@ func TestInitCreatesPendingConfigurationWithoutInstallationID(t *testing.T) {
 	}
 	if err := config.Validate(loaded); err == nil {
 		t.Fatal("pending configuration authorized execution")
-	}
-	if _, err := loadUpConfig(upOptions{configPath: configPath, envPath: envPath, configRequired: true}); err != nil {
-		t.Fatalf("up rejected pending configuration: %v", err)
 	}
 	report := diagnose(t.Context(), diagnoseOptions{ConfigPath: configPath, EnvPath: envPath})
 	if report.Ready || len(report.Checks) != 3 || report.Checks[2].ID != "github" || report.Checks[2].Status != "fail" {

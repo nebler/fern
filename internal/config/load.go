@@ -31,61 +31,42 @@ func readConfig(path string) ([]byte, error) {
 	return data, nil
 }
 
-// LoadWithEnvironment gives protected environment-file values precedence over
-// process values. Loading does not authorize execution; callers must validate.
-func LoadWithEnvironment(path, defaultRepo string, required bool, overrides Overrides, environment map[string]string) (Config, error) {
-	return load(path, defaultRepo, required, overrides, func(key string) (string, bool) {
+// Load reads the configuration file, the single source of truth for a Fern
+// host. Protected environment-file values take precedence over process values
+// during expansion. Loading does not authorize execution; callers must
+// validate.
+func Load(path string, environment map[string]string) (Config, error) {
+	lookup := func(key string) (string, bool) {
 		if value, exists := environment[key]; exists {
 			return value, true
 		}
 		return os.LookupEnv(key)
-	})
-}
-
-func load(path, defaultRepo string, required bool, overrides Overrides, lookup func(string) (string, bool)) (Config, error) {
-	config := Default(defaultRepo)
+	}
 	data, err := readConfig(path)
 	if err != nil {
-		if !os.IsNotExist(err) || required {
-			return Config{}, fmt.Errorf("read config %q: %w", path, err)
-		}
-	} else {
-		if err := decode(data, &config); err != nil {
-			return Config{}, fmt.Errorf("parse config %q: %w", path, err)
-		}
-		if err := requireFields(config); err != nil {
-			return Config{}, fmt.Errorf("parse config %q: %w", path, err)
-		}
-		config.Proxy.RemoteOrigin, err = ParseRemoteOrigin(config.Proxy.RemoteOrigin)
-		if err != nil {
-			return Config{}, fmt.Errorf("parse proxy.remoteOrigin: %w", err)
-		}
+		return Config{}, fmt.Errorf("read config %q: %w", path, err)
 	}
-	if overrides.Name != nil {
-		config.Workspace.Name = *overrides.Name
+	config := Config{Workspace: Workspace{Name: "demo"},
+		Proxy: Proxy{Listen: "127.0.0.1:8080", OperatorListen: "127.0.0.1:8081"}}
+	if err := decode(data, &config); err != nil {
+		return Config{}, fmt.Errorf("parse config %q: %w", path, err)
 	}
-	if overrides.Repo != nil {
-		config.Workspace.Repo = *overrides.Repo
+	if err := requireFields(config); err != nil {
+		return Config{}, fmt.Errorf("parse config %q: %w", path, err)
 	}
-	if overrides.Listen != nil {
-		config.Proxy.Listen = *overrides.Listen
-	}
-	if overrides.OperatorListen != nil {
-		config.Proxy.OperatorListen = *overrides.OperatorListen
+	config.Proxy.RemoteOrigin, err = ParseRemoteOrigin(config.Proxy.RemoteOrigin)
+	if err != nil {
+		return Config{}, fmt.Errorf("parse proxy.remoteOrigin: %w", err)
 	}
 	repo, err := expandRequired(config.Workspace.Repo, lookup)
 	if err != nil {
 		return Config{}, fmt.Errorf("expand workspace.repo: %w", err)
 	}
 	if strings.TrimSpace(repo) == "" {
-		return Config{}, errors.New("workspace repository is required")
+		return Config{}, errors.New("workspace.repo is required")
 	}
 	if !filepath.IsAbs(repo) {
-		base := filepath.Dir(path)
-		if overrides.Repo != nil {
-			base = defaultRepo
-		}
-		repo, err = filepath.Abs(filepath.Join(base, repo))
+		repo, err = filepath.Abs(filepath.Join(filepath.Dir(path), repo))
 		if err != nil {
 			return Config{}, fmt.Errorf("resolve repository path: %w", err)
 		}

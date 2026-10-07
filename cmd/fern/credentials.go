@@ -48,7 +48,7 @@ func runCredentialSet(args []string) error {
 	if err != nil {
 		return fmt.Errorf("read GitHub App private key %s: %w", *keyPath, err)
 	}
-	cfg, _, err := loadCommandConfig(*configPath, true, *envPath, config.Overrides{})
+	cfg, err := loadCommandConfig(*configPath, *envPath)
 	if err != nil {
 		return err
 	}

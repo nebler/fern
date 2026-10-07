@@ -32,13 +32,12 @@ const (
 )
 
 type runCLIOptions struct {
-	endpoint       string
-	configPath     string
-	envPath        string
-	configRequired bool
-	all            bool
-	json           bool
-	opencode       string
+	endpoint   string
+	configPath string
+	envPath    string
+	all        bool
+	json       bool
+	opencode   string
 }
 
 type runConnection struct {
@@ -186,8 +185,7 @@ func parseRunsFlags(args []string) (runCLIOptions, error) {
 	if fs.NArg() != 0 {
 		return runCLIOptions{}, invocationError{message: "usage: fern runs [flags]"}
 	}
-	return runCLIOptions{endpoint: *endpoint, configPath: *configPath, envPath: *envPath,
-		configRequired: flagProvided(fs, "config"), all: *all, json: *jsonOutput}, nil
+	return runCLIOptions{endpoint: *endpoint, configPath: *configPath, envPath: *envPath, all: *all, json: *jsonOutput}, nil
 }
 
 func parseAttachFlags(args []string) (runCLIOptions, []string, error) {
@@ -202,8 +200,7 @@ func parseAttachFlags(args []string) (runCLIOptions, []string, error) {
 	if fs.NArg() > 1 {
 		return runCLIOptions{}, nil, invocationError{message: "usage: fern attach [flags] [run-id]"}
 	}
-	return runCLIOptions{endpoint: *endpoint, configPath: *configPath, envPath: *envPath,
-		configRequired: flagProvided(fs, "config"), opencode: *opencode}, fs.Args(), nil
+	return runCLIOptions{endpoint: *endpoint, configPath: *configPath, envPath: *envPath, opencode: *opencode}, fs.Args(), nil
 }
 
 func resolveRunConnection(ctx context.Context, options runCLIOptions) (*runConnection, error) {
@@ -225,7 +222,7 @@ func resolveRunConnection(ctx context.Context, options runCLIOptions) (*runConne
 		}
 		return &runConnection{apiOrigin: origin, apiAuthorization: "Bearer " + token, client: client}, nil
 	}
-	cfg, _, err := loadCommandConfig(options.configPath, options.configRequired, options.envPath, config.Overrides{})
+	cfg, err := loadCommandConfig(options.configPath, options.envPath)
 	if err != nil {
 		return nil, err
 	}

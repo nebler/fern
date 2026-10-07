@@ -97,12 +97,7 @@ func diagnose(ctx context.Context, opts diagnoseOptions) doctorReport {
 		return report
 	}
 	add("secrets", "pass", "protected environment file loaded", "")
-	cwd, err := os.Getwd()
-	if err != nil {
-		add("config", "fail", err.Error(), "Run doctor from an accessible directory.")
-		return report
-	}
-	cfg, err := config.LoadWithEnvironment(opts.ConfigPath, cwd, true, config.Overrides{}, values)
+	cfg, err := config.Load(opts.ConfigPath, values)
 	if err != nil {
 		add("config", "fail", err.Error(), "Fix the strict Fern configuration.")
 		return report

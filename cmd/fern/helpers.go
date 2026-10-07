@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"flag"
 	"fmt"
 	"net"
 	"net/url"
@@ -28,49 +27,18 @@ func loopbackURL(address string) (string, error) {
 	return (&url.URL{Scheme: "http", Host: address}).String(), nil
 }
 
-func flagProvided(fs *flag.FlagSet, name string) bool {
-	set := false
-	fs.Visit(func(flag *flag.Flag) {
-		if flag.Name == name {
-			set = true
+// loadCommandConfig owns the shared command preamble: read the optional
+// protected environment file, then load configuration against it without
+// copying host-only secrets into run state.
+func loadCommandConfig(configPath, envPath string) (config.Config, error) {
+	var values map[string]string
+	if envPath != "" {
+		var err error
+		if values, err = readEnvFile(envPath); err != nil {
+			return config.Config{}, err
 		}
-	})
-	return set
-}
-
-func optionalFlag(fs *flag.FlagSet, name string, value *string) *string {
-	if !flagProvided(fs, name) {
-		return nil
 	}
-	return value
-}
-
-// readProtectedEnvironment reads the --env-file values, returning nil when no
-// file was requested so callers can distinguish "no file" from "empty file".
-func readProtectedEnvironment(envPath string) (map[string]string, error) {
-	if envPath == "" {
-		return nil, nil
-	}
-	return readEnvFile(envPath)
-}
-
-// loadCommandConfig owns the shared command preamble: read the protected
-// environment file, load configuration against it and the working directory,
-// expand protected values without copying host-only secrets into run state.
-func loadCommandConfig(configPath string, configRequired bool, envPath string, overrides config.Overrides) (config.Config, map[string]string, error) {
-	values, err := readProtectedEnvironment(envPath)
-	if err != nil {
-		return config.Config{}, nil, err
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return config.Config{}, values, err
-	}
-	cfg, err := config.LoadWithEnvironment(configPath, cwd, configRequired, overrides, values)
-	if err != nil {
-		return config.Config{}, values, err
-	}
-	return cfg, values, nil
+	return config.Load(configPath, values)
 }
 
 func acquireHostLease(name string) (*hostlease.Lease, error) {
