@@ -1,4 +1,4 @@
-package taskenvdocker
+package docker
 
 import (
 	"archive/tar"

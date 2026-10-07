@@ -1,4 +1,4 @@
-package taskenvdocker
+package docker
 
 import (
 	"context"
@@ -19,7 +19,7 @@ import (
 // XFS coverage, and it works on Desktop without bypassing provider admission.
 //
 //	Run: FERN_STORAGE_POLICY_SMOKE_IMAGE=fern/opencode-background-source:signed \
-//	     go test ./internal/taskenvdocker -run TestLiveWorkerStoragePolicy -v
+//	     go test ./internal/docker -run TestLiveWorkerStoragePolicy -v
 func TestLiveWorkerStoragePolicy(t *testing.T) {
 	image := os.Getenv("FERN_STORAGE_POLICY_SMOKE_IMAGE")
 	if image == "" {

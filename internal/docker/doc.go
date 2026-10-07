@@ -1,4 +1,4 @@
-// Package taskenvdocker is the provider for one serial, disposable Docker
+// Package docker is the provider for one serial, disposable Docker
 // Background Run. It owns exact resource attestation, clone/volume/container
 // lifecycle effects, runtime-fenced transport, and repository-scoped GitHub
 // credential delivery. It never schedules work or writes store state; it
@@ -32,4 +32,4 @@
 // files in the OpenCode volume. Token bytes never appear in exec arguments,
 // labels, evidence, or errors. Stopping a container does not revoke its token,
 // and the agent's own tools, not Fern, perform any publication.
-package taskenvdocker
+package docker

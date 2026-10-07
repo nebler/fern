@@ -11,10 +11,10 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/artifact"
+	"github.com/nebler/fern/internal/docker"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
-	"github.com/nebler/fern/internal/taskenvdocker"
 )
 
 var ErrNoWork = errors.New("no background run work")
@@ -48,7 +48,7 @@ type Config struct {
 
 type Coordinator struct {
 	store    *store.Store
-	provider *taskenvdocker.Provider
+	provider *docker.Provider
 	artifact Artifact
 	ids      *domain.Generator
 	config   Config
@@ -67,7 +67,7 @@ type Artifact interface {
 	Materialize(context.Context, artifact.Locator) (*artifact.Checkout, error)
 }
 
-func New(runStore *store.Store, provider *taskenvdocker.Provider, engine Artifact, ids *domain.Generator, config Config) (*Coordinator, error) {
+func New(runStore *store.Store, provider *docker.Provider, engine Artifact, ids *domain.Generator, config Config) (*Coordinator, error) {
 	if runStore == nil || provider == nil || engine == nil || ids == nil || config.Now == nil || config.HTTPClient == nil || config.Route == nil ||
 		config.Profile != store.BackgroundRunSourceProfile || config.ImageIdentity == "" || config.EnvironmentSHA256 == ([32]byte{}) ||
 		config.Agent == "" || config.ModelProvider == "" || config.Model == "" || config.OperationTimeout <= 0 ||
@@ -328,7 +328,7 @@ func (c *Coordinator) terminalize(parent context.Context, work store.BackgroundR
 
 // recordWriterFence persists the structured provider fence; provider prose
 // (the observation evidence) is not durable authority and is not recorded.
-func (c *Coordinator) recordWriterFence(ctx context.Context, work store.BackgroundRunWork, provider taskenvdocker.WriterFence) (store.BackgroundRun, error) {
+func (c *Coordinator) recordWriterFence(ctx context.Context, work store.BackgroundRunWork, provider docker.WriterFence) (store.BackgroundRun, error) {
 	run := work.Run
 	now, err := c.freshNow()
 	if err != nil {
@@ -336,15 +336,15 @@ func (c *Coordinator) recordWriterFence(ctx context.Context, work store.Backgrou
 	}
 	params := store.RecordBackgroundRunWriterFenceParams{BackgroundRunRef: ref(run, now)}
 	switch provider.Kind() {
-	case taskenvdocker.WriterFenceNeverCreated:
+	case docker.WriterFenceNeverCreated:
 		params.Kind = store.WriterFenceNeverCreated
-	case taskenvdocker.WriterFenceCreatedNeverStarted:
+	case docker.WriterFenceCreatedNeverStarted:
 		params.Kind, params.ContainerID = store.WriterFenceNeverStarted, provider.ContainerID()
-	case taskenvdocker.WriterFenceStoppedRuntime:
+	case docker.WriterFenceStoppedRuntime:
 		params.Kind, params.ContainerID, params.ContainerStartedAt = store.WriterFenceRuntimeStopped, provider.ContainerID(), provider.StartedAt()
 		params.RuntimeToken, params.StoppedAt = provider.Token(), &now
 	default:
-		return run, taskenvdocker.ErrIdentityMismatch
+		return run, docker.ErrIdentityMismatch
 	}
 	mutation, cancel, _, err := c.effectContext(ctx, work, false)
 	if err != nil {
@@ -520,14 +520,14 @@ func (a *retainedExportAttempt) commitResult(parent context.Context, proof [32]b
 	return err
 }
 
-func providerFence(value store.WriterFence) taskenvdocker.WriterFence {
+func providerFence(value store.WriterFence) docker.WriterFence {
 	switch value.Kind {
 	case store.WriterFenceNeverCreated:
-		return taskenvdocker.NeverCreatedAuthority()
+		return docker.NeverCreatedAuthority()
 	case store.WriterFenceNeverStarted:
-		return taskenvdocker.CreatedContainerAuthority(value.ContainerID)
+		return docker.CreatedContainerAuthority(value.ContainerID)
 	default:
-		return taskenvdocker.RuntimeCleanupAuthority(taskenvdocker.RuntimeIdentity{ContainerID: value.ContainerID, StartedAt: value.ContainerStartedAt, Token: value.RuntimeToken})
+		return docker.RuntimeCleanupAuthority(docker.RuntimeIdentity{ContainerID: value.ContainerID, StartedAt: value.ContainerStartedAt, Token: value.RuntimeToken})
 	}
 }
 
@@ -615,7 +615,7 @@ func (c *Coordinator) readinessInterval() time.Duration {
 func (c *Coordinator) live(ctx context.Context, run store.BackgroundRun) (*opencode.Client, error) {
 	runtime, err := c.provider.CommittedRuntime(run)
 	if err != nil {
-		return nil, errors.Join(taskenvdocker.ErrIdentityMismatch, err)
+		return nil, errors.Join(docker.ErrIdentityMismatch, err)
 	}
 	if _, err := c.provider.Health(ctx, run, runtime); err != nil {
 		return nil, err
@@ -723,7 +723,7 @@ func (c *Coordinator) observeWorking(operation, parent context.Context, work sto
 	run := work.Run
 	usage, err := c.provider.ObserveUsage(operation, run)
 	if err != nil {
-		if errors.Is(err, taskenvdocker.ErrIdentityMismatch) || errors.Is(err, taskenvdocker.ErrQuarantined) {
+		if errors.Is(err, docker.ErrIdentityMismatch) || errors.Is(err, docker.ErrQuarantined) {
 			return errors.Join(err, c.cleanupRequired(parent, work, "background usage limit or identity mismatch"))
 		}
 		return c.externalFailure(parent, work, err)
@@ -763,17 +763,17 @@ func (c *Coordinator) validatedRouteIdentity(run store.BackgroundRun) (opencode.
 	return makeRouteIdentity(run, runtime), nil
 }
 
-func makeRouteIdentity(run store.BackgroundRun, runtime taskenvdocker.RuntimeIdentity) opencode.RouteIdentity {
+func makeRouteIdentity(run store.BackgroundRun, runtime docker.RuntimeIdentity) opencode.RouteIdentity {
 	return opencode.RouteIdentity{WorkspaceID: string(run.WorkspaceID), RunID: string(run.RunID),
 		SessionID: string(run.OpenCodeSessionID), RuntimeEpoch: run.RuntimeEpoch,
 		ContainerID: runtime.ContainerID, StartedAt: runtime.StartedAt, RuntimeToken: runtime.Token}
 }
 
 func (c *Coordinator) externalFailure(ctx context.Context, work store.BackgroundRunWork, external error) error {
-	if errors.Is(external, taskenvdocker.ErrIdentityMismatch) || errors.Is(external, taskenvdocker.ErrQuarantined) {
+	if errors.Is(external, docker.ErrIdentityMismatch) || errors.Is(external, docker.ErrQuarantined) {
 		return errors.Join(external, c.cleanupRequired(ctx, work, "background resource identity mismatch"))
 	}
-	if errors.Is(external, taskenvdocker.ErrRuntimeExited) {
+	if errors.Is(external, docker.ErrRuntimeExited) {
 		return errors.Join(external, c.cleanupRequired(ctx, work, "background container exited before its runtime was recorded"))
 	}
 	return external

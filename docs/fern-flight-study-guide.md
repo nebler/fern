@@ -256,7 +256,7 @@ proven security sandbox.
   idempotency, and admission.
 - `store`: SQLite durable state, receipts, revision-checked transitions.
 - `backgroundruncoord`: serial engine that converts durable phases into effects.
-- `taskenvdocker`: Docker clone/volume/container policy and credential handoff.
+- `docker`: Docker clone/volume/container policy and credential handoff.
 - `opencode`: pinned OpenCode session/prompt/observation protocol, plus the exact live-session attachment router and fencing.
 - `artifact`: Git snapshot/bundle/manifest/CAS verification, and the resolver that matches a durable result to freshly verified artifact bytes.
 - `proxy`, `auth`: HTTP ingress, browser pairing, device/plugin auth.

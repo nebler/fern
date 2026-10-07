@@ -25,10 +25,10 @@ import (
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/errdefs"
 	"github.com/docker/go-connections/nat"
+	"github.com/nebler/fern/internal/docker"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
-	"github.com/nebler/fern/internal/taskenvdocker"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
@@ -210,7 +210,7 @@ func newScanFixture(t *testing.T) *scanFixture {
 	command("config", "user.email", "test@example.invalid")
 	command("remote", "add", "origin", "https://github.com/owner/repository")
 	command("-c", "commit.gpgsign=false", "commit", "--allow-empty", "-m", "fixture")
-	provider, err := taskenvdocker.New(context.Background(), taskenvdocker.Config{StateRoot: f.root, Repository: repo, GitExecutable: git, ImageReference: "fern/test:dev", ImageID: scanImage, MemoryBytes: 512 << 20, WallTimeout: time.Hour, GitTimeout: 30 * time.Second, DockerTimeout: 10 * time.Second, HealthTimeout: 300 * time.Millisecond, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 64 << 20, CloneObservedLimitBytes: 64 << 20, DiskFreeAdmissionBytes: 64 << 20, LogMaxSize: "1m", LogMaxFiles: 3, StopGrace: time.Second}, f.d)
+	provider, err := docker.New(context.Background(), docker.Config{StateRoot: f.root, Repository: repo, GitExecutable: git, ImageReference: "fern/test:dev", ImageID: scanImage, MemoryBytes: 512 << 20, WallTimeout: time.Hour, GitTimeout: 30 * time.Second, DockerTimeout: 10 * time.Second, HealthTimeout: 300 * time.Millisecond, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 64 << 20, CloneObservedLimitBytes: 64 << 20, DiskFreeAdmissionBytes: 64 << 20, LogMaxSize: "1m", LogMaxFiles: 3, StopGrace: time.Second}, f.d)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func newScanFixture(t *testing.T) *scanFixture {
 		t.Fatal(err)
 	}
 	actor := domain.ActorSnapshot{Type: domain.ActorOpenCode, ID: "pc_owner", DisplayName: "OpenCode", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "req-1"}
-	f.params = store.AdmitBackgroundRunParams{RunID: domain.RunID(id("run_", 2)), OpenCodeSessionID: "ses_00000000000000000000000000000001", OpenCodeMessageID: "msg_00000000000000000000000000000001", Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspace, CommandKind: store.CreateBackgroundRunCommand}, Key: "create", RequestHash: sha256.Sum256([]byte("create")), Actor: actor}, Prompt: "Do work", RepositoryID: 987654321, RepositoryRemote: "https://github.com/owner/repository", BaseSHA: domain.GitOID(command("rev-parse", "HEAD")), Branch: "main", Profile: store.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: scanImage, Agent: "build", ModelProvider: "provider", Model: "model", Deadline: f.now.Add(time.Hour), APIContractVersion: "v1", AcceptedAt: f.now}
+	f.params = store.AdmitBackgroundRunParams{RunID: domain.RunID(id("run_", 2)), OpenCodeSessionID: "ses_00000000000000000000000000000001", OpenCodeMessageID: "msg_00000000000000000000000000000001", Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspace, CommandKind: store.CreateBackgroundRunCommand}, Key: "create", RequestHash: sha256.Sum256([]byte("create")), Actor: actor}, Prompt: "Do work", RepositoryID: 987654321, RepositoryRemote: "https://github.com/owner/repository", BaseSHA: domain.GitOID(command("rev-parse", "HEAD")), Branch: "main", Profile: store.BackgroundRunSourceProfile, EnvironmentSHA256: docker.EnvironmentSHA256(nil), ImageIdentity: scanImage, Agent: "build", ModelProvider: "provider", Model: "model", Deadline: f.now.Add(time.Hour), APIContractVersion: "v1", AcceptedAt: f.now}
 	ids, err := domain.NewGenerator(rand.Reader, func() time.Time { return f.now })
 	if err != nil {
 		t.Fatal(err)
@@ -517,7 +517,7 @@ func TestRunOnceCleansUpStartedContainerWithUnrecordedRuntime(t *testing.T) {
 				}
 				f.d.info.State.Running = false
 				f.d.info.State.Status = "exited"
-				if err := f.c.RunOnce(context.Background()); !errors.Is(err, taskenvdocker.ErrRuntimeExited) {
+				if err := f.c.RunOnce(context.Background()); !errors.Is(err, docker.ErrRuntimeExited) {
 					t.Fatalf("exited container error=%v", err)
 				}
 			}

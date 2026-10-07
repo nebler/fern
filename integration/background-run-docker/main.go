@@ -12,10 +12,10 @@ import (
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
+	"github.com/nebler/fern/internal/docker"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/store"
-	"github.com/nebler/fern/internal/taskenvdocker"
 )
 
 func main() {
@@ -130,8 +130,8 @@ func run() (resultErr error) {
 		return err
 	}
 	compact := strings.ReplaceAll(strings.TrimPrefix(string(runID), "run_"), "-", "")
-	run := store.BackgroundRun{WorkspaceID: workspaceID, RunID: runID, RepositoryID: 42, RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: domain.GitOID(base), Profile: store.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ResourceSpecVersion: domain.ResourceSpecVersion, ImageIdentity: imageID, CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode", ContainerIdentity: "fern-run-" + compact, EndpointIdentity: "run-" + compact + "-endpoint", OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID}
-	config := taskenvdocker.Config{StateRoot: state, Repository: repository, GitExecutable: gitPath, ImageReference: imageReference, ImageID: imageID, MemoryBytes: 512 << 20, WallTimeout: 2 * time.Minute, GitTimeout: 30 * time.Second, DockerTimeout: 20 * time.Second, HealthTimeout: 60 * time.Second, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 128 << 20, CloneObservedLimitBytes: 128 << 20, DiskFreeAdmissionBytes: 128 << 20, LogMaxSize: "1m", LogMaxFiles: 2, StopGrace: 3 * time.Second}
+	run := store.BackgroundRun{WorkspaceID: workspaceID, RunID: runID, RepositoryID: 42, RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: domain.GitOID(base), Profile: store.BackgroundRunSourceProfile, EnvironmentSHA256: docker.EnvironmentSHA256(nil), ResourceSpecVersion: domain.ResourceSpecVersion, ImageIdentity: imageID, CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode", ContainerIdentity: "fern-run-" + compact, EndpointIdentity: "run-" + compact + "-endpoint", OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID}
+	config := docker.Config{StateRoot: state, Repository: repository, GitExecutable: gitPath, ImageReference: imageReference, ImageID: imageID, MemoryBytes: 512 << 20, WallTimeout: 2 * time.Minute, GitTimeout: 30 * time.Second, DockerTimeout: 20 * time.Second, HealthTimeout: 60 * time.Second, GitOutputBytes: 1 << 20, SourceSizeAdmissionBytes: 128 << 20, CloneObservedLimitBytes: 128 << 20, DiskFreeAdmissionBytes: 128 << 20, LogMaxSize: "1m", LogMaxFiles: 2, StopGrace: 3 * time.Second}
 	githubFixture, err := newGitHubFixture()
 	config.RuntimeStorageRoot = runtimeRoot
 	if err != nil {
@@ -144,13 +144,13 @@ func run() (resultErr error) {
 		return err
 	}
 	config.GitHubRepositoryFullName = "fern-integration/background-run"
-	provider, err := taskenvdocker.New(ctx, config, nil)
+	provider, err := docker.New(ctx, config, nil)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = provider.Close() }()
 	var containerID string
-	var runtime taskenvdocker.RuntimeIdentity
+	var runtime docker.RuntimeIdentity
 	defer func() {
 		resultErr = errors.Join(resultErr, cleanupHarness(provider, cli, run, containerID, runtime, filepath.Join(runtimeRoot, "background-runs", run.CloneIdentity)))
 	}()
@@ -173,7 +173,7 @@ func run() (resultErr error) {
 	if err := os.WriteFile(filepath.Join(unknown, "unknown"), []byte("retain"), 0o600); err != nil {
 		return err
 	}
-	if _, err := provider.EnsureClone(ctx, other); !errors.Is(err, taskenvdocker.ErrQuarantined) {
+	if _, err := provider.EnsureClone(ctx, other); !errors.Is(err, docker.ErrQuarantined) {
 		return fmt.Errorf("unknown clone was not quarantined: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(unknown, "unknown")); err != nil {
@@ -288,7 +288,7 @@ func run() (resultErr error) {
 	if err := provider.Close(); err != nil {
 		return err
 	}
-	provider, err = taskenvdocker.New(ctx, config, nil)
+	provider, err = docker.New(ctx, config, nil)
 	if err != nil {
 		return err
 	}
@@ -315,14 +315,14 @@ func run() (resultErr error) {
 	if err := cli.ContainerStart(ctx, containerID, container.StartOptions{}); err != nil {
 		return fmt.Errorf("manually restart stopped container: %w", err)
 	}
-	if _, err := provider.Health(ctx, run, runtime); !errors.Is(err, taskenvdocker.ErrIdentityMismatch) {
+	if _, err := provider.Health(ctx, run, runtime); !errors.Is(err, docker.ErrIdentityMismatch) {
 		return fmt.Errorf("manual same-container restart was not rejected: %v", err)
 	}
 	if err := rawRemoveContainer(cli, run.ContainerIdentity); err != nil {
 		return err
 	}
 	containerID = ""
-	authority := taskenvdocker.RuntimeCleanupAuthority(runtime)
+	authority := docker.RuntimeCleanupAuthority(runtime)
 	if _, err := provider.RemoveVolume(ctx, run, authority); err != nil {
 		return err
 	}
@@ -409,7 +409,7 @@ func ensureNoSharedFiles(source, clone string) error {
 	})
 }
 
-func cleanupHarness(provider *taskenvdocker.Provider, cli *client.Client, run store.BackgroundRun, containerID string, runtime taskenvdocker.RuntimeIdentity, clonePath string) error {
+func cleanupHarness(provider *docker.Provider, cli *client.Client, run store.BackgroundRun, containerID string, runtime docker.RuntimeIdentity, clonePath string) error {
 	var cleanupErr error
 	call := func(name string, operation func(context.Context) error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -425,15 +425,15 @@ func cleanupHarness(provider *taskenvdocker.Provider, cli *client.Client, run st
 			return err
 		})
 		call("provider container remove", func(ctx context.Context) error {
-			_, err := provider.RemoveContainer(ctx, run, taskenvdocker.RuntimeCleanupAuthority(runtime))
+			_, err := provider.RemoveContainer(ctx, run, docker.RuntimeCleanupAuthority(runtime))
 			return err
 		})
 	}
-	authority := taskenvdocker.NeverCreatedAuthority()
+	authority := docker.NeverCreatedAuthority()
 	if runtime.ContainerID != "" {
-		authority = taskenvdocker.RuntimeCleanupAuthority(runtime)
+		authority = docker.RuntimeCleanupAuthority(runtime)
 	} else if containerID != "" {
-		authority = taskenvdocker.CreatedContainerAuthority(containerID)
+		authority = docker.CreatedContainerAuthority(containerID)
 	}
 	call("raw exact-name container fallback", func(context.Context) error {
 		return rawRemoveContainer(cli, run.ContainerIdentity)

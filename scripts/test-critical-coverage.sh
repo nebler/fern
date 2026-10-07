@@ -12,7 +12,7 @@ PACKAGES=(
   internal/domain
   internal/opencode
   internal/backgroundruncoord
-  internal/taskenvdocker
+  internal/docker
   internal/artifact
   internal/runapi
   internal/store
@@ -54,7 +54,7 @@ check_function() {
 check_package internal/domain 91
 check_package internal/opencode 84
 check_package internal/backgroundruncoord 28
-check_package internal/taskenvdocker 72
+check_package internal/docker 72
 check_package internal/artifact 74
 check_package internal/runapi 68
 check_package internal/store 60

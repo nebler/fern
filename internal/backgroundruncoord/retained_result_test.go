@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/artifact"
+	"github.com/nebler/fern/internal/docker"
 	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
-	"github.com/nebler/fern/internal/taskenvdocker"
 )
 
 func TestExportRecoveryKeepsOriginalFailure(t *testing.T) {
@@ -115,7 +115,7 @@ func TestRetainedInstallationSkipsSnapshotOnlyForExactSelection(t *testing.T) {
 func TestMakeRouteIdentityProjectsCommittedRuntime(t *testing.T) {
 	run := store.BackgroundRun{WorkspaceID: "workspace", RunID: "task", RuntimeEpoch: 4, OpenCodeSessionID: "session",
 		ObservedContainerID: "not-the-attested-runtime"}
-	runtime := taskenvdocker.RuntimeIdentity{ContainerID: "container", StartedAt: "started", Token: "token"}
+	runtime := docker.RuntimeIdentity{ContainerID: "container", StartedAt: "started", Token: "token"}
 	want := opencode.RouteIdentity{WorkspaceID: "workspace", RunID: "task", RuntimeEpoch: 4, SessionID: "session", ContainerID: "container", StartedAt: "started", RuntimeToken: "token"}
 	if got := makeRouteIdentity(run, runtime); got != want {
 		t.Fatalf("route tuple = %+v, want %+v", got, want)

@@ -2,7 +2,7 @@
 
 See the [package map](../../ARCHITECTURE.md#19-package-map).
 
-This `main` package exercises `taskenvdocker` against a **real local Docker
+This `main` package exercises `docker` against a **real local Docker
 daemon and an already-built, operator-pinned source image**. It is integration
 evidence for runtime ownership and credential handling, not a production daemon
 or a benchmark. The direct caller is `run.sh` (or `go run` from the repository root).
@@ -13,7 +13,7 @@ or a benchmark. The direct caller is `run.sh` (or `go run` from the repository r
 flowchart TD
   shell["run.sh: validate pinned local image ID"] -->|"go run"| main["main -> run"]
   main -->|"fixture IDs and spec"| identity["internal/domain / internal/store"]
-  main -->|"create provider"| provider["internal/taskenvdocker.New"]
+  main -->|"create provider"| provider["internal/docker.New"]
   main -->|"isolated Git fixture"| git["git / gitOutput / ensureNoSharedFiles"]
   main -->|"scope-checked dummy token server"| fixture["newGitHubFixture -> internal/githubapp.NewClient"]
   fixture -->|"redirect only expected API destination"| local["localGitHubTransport -> httptest.Server"]

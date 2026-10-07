@@ -25,10 +25,10 @@ import (
 	"github.com/docker/go-connections/nat"
 	"github.com/nebler/fern/internal/artifact"
 	"github.com/nebler/fern/internal/backgroundruncoord"
+	"github.com/nebler/fern/internal/docker"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/store"
-	"github.com/nebler/fern/internal/taskenvdocker"
 )
 
 const (
@@ -244,12 +244,12 @@ func run() (resultErr error) {
 	run := store.BackgroundRun{
 		WorkspaceID: workspaceID, RunID: runID,
 		RepositoryRemote: "https://github.com/fern-integration/background-run", BaseOID: domain.GitOID(base),
-		Profile: store.BackgroundRunSourceProfile, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ResourceSpecVersion: domain.ResourceSpecVersion, ImageIdentity: imageID,
+		Profile: store.BackgroundRunSourceProfile, EnvironmentSHA256: docker.EnvironmentSHA256(nil), ResourceSpecVersion: domain.ResourceSpecVersion, ImageIdentity: imageID,
 		CloneIdentity: "run-" + compact + "-clone", VolumeIdentity: "fern-run-" + compact + "-opencode",
 		ContainerIdentity: "fern-run-" + compact, EndpointIdentity: "run-" + compact + "-endpoint",
 		OpenCodeSessionID: sessionID, OpenCodeMessageID: messageID,
 	}
-	config := taskenvdocker.Config{
+	config := docker.Config{
 		RuntimeStorageRoot: runtimeRoot,
 		StateRoot:          state, Repository: repository, GitExecutable: gitPath, ImageReference: imageTag, ImageID: imageID,
 		MemoryBytes: 512 << 20, WallTimeout: 3 * time.Minute,
@@ -258,12 +258,12 @@ func run() (resultErr error) {
 		DiskFreeAdmissionBytes: 128 << 20, LogMaxSize: "1m", LogMaxFiles: 2, StopGrace: 3 * time.Second,
 	}
 	var containerID string
-	var runtime taskenvdocker.RuntimeIdentity
+	var runtime docker.RuntimeIdentity
 	clonePath := filepath.Join(cloneRoot, run.CloneIdentity)
 	defer func() {
 		resultErr = errors.Join(resultErr, cleanupOpenCode(nil, cli, run, containerID, runtime, clonePath))
 	}()
-	provider, err := taskenvdocker.New(ctx, config, nil)
+	provider, err := docker.New(ctx, config, nil)
 	if err != nil {
 		return err
 	}
@@ -319,7 +319,7 @@ func run() (resultErr error) {
 		return err
 	}
 	initialProviderClosed = true
-	sessionProvider, err := taskenvdocker.New(ctx, config, nil)
+	sessionProvider, err := docker.New(ctx, config, nil)
 	if err != nil {
 		return err
 	}
@@ -383,12 +383,12 @@ func run() (resultErr error) {
 		return err
 	}
 	sessionProviderClosed = true
-	nextProvider, err := taskenvdocker.New(ctx, config, nil)
+	nextProvider, err := docker.New(ctx, config, nil)
 	if err != nil {
 		return err
 	}
 	provider = nextProvider
-	defer func(value *taskenvdocker.Provider) { resultErr = errors.Join(resultErr, value.Close()) }(nextProvider)
+	defer func(value *docker.Provider) { resultErr = errors.Join(resultErr, value.Close()) }(nextProvider)
 	if _, err := provider.Health(ctx, run, runtime); err != nil {
 		return fmt.Errorf("reconstructed provider health: %w", err)
 	}
@@ -459,7 +459,7 @@ func run() (resultErr error) {
 		return err
 	}
 	containerID = ""
-	runtime = taskenvdocker.RuntimeIdentity{}
+	runtime = docker.RuntimeIdentity{}
 	if err := runSerialCoordinator(ctx, temporary, cloneRoot, repository, providerEndpoint, provider, cli, imageID, base); err != nil {
 		return err
 	}
@@ -479,7 +479,7 @@ func canonicalImageID(value string) bool {
 	return true
 }
 
-func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, providerEndpoint string, provider *taskenvdocker.Provider, cli *client.Client, imageID, base string) (resultErr error) {
+func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, providerEndpoint string, provider *docker.Provider, cli *client.Client, imageID, base string) (resultErr error) {
 	engine, err := integrationArtifactEngine(filepath.Join(root, "serial-artifacts"))
 	if err != nil {
 		return err
@@ -532,7 +532,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 			Key: "serial-create", RequestHash: requestHash, Actor: actor},
 		Prompt: prompt, RepositoryID: 1, BaseSHA: domain.GitOID(base), Branch: "main",
 		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: opencode.Profile,
-		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: imageID, Agent: "contract",
+		EnvironmentSHA256: docker.EnvironmentSHA256(nil), ImageIdentity: imageID, Agent: "contract",
 		ModelProvider: "test", Model: "test-model",
 		Deadline: now.Add(3 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: now,
 	})
@@ -559,7 +559,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 	operationCtx, cancelOperation := context.WithCancel(ctx)
 	config := backgroundruncoord.Config{
 		WorkspaceID: workspaceID,
-		Profile:     opencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
+		Profile:     opencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: docker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
 		OperationTimeout: 20 * time.Second, PollInterval: 100 * time.Millisecond,
 		HistoryBounds: opencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000}, Now: time.Now,
 		HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: loss}, AfterPromptCall: func(error) { cancelOperation() }, Route: route,
@@ -676,7 +676,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 	}
 	observeErr := coordinator.RunOnce(context.Background())
 	current, err = runStore.GetBackgroundRun(context.Background(), workspaceID, admission.Run.RunID, actor)
-	if !errors.Is(observeErr, taskenvdocker.ErrIdentityMismatch) || err != nil || current.State != store.BackgroundRunCleanupRequired {
+	if !errors.Is(observeErr, docker.ErrIdentityMismatch) || err != nil || current.State != store.BackgroundRunCleanupRequired {
 		return fmt.Errorf("serial runtime replacement state=%s observe_error=%v read_error=%v", current.State, observeErr, err)
 	}
 	if status, routeErr := serialRouteStatus(routeURL, attachmentToken, "/api/health"); routeErr != nil || status != http.StatusNotFound {
@@ -777,7 +777,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 	return nil
 }
 
-func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository string, runStore *store.Store, provider *taskenvdocker.Provider,
+func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository string, runStore *store.Store, provider *docker.Provider,
 	engine *artifact.Engine, ids *domain.Generator, workspaceID domain.WorkspaceID, imageID, base string, route *opencode.Router,
 ) error {
 	gitPath, err := exec.LookPath("git")
@@ -804,7 +804,7 @@ func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository 
 			Key: "retained-create", RequestHash: sha256.Sum256([]byte("retained-create")), Actor: actor},
 		Prompt: prompt, RepositoryID: 1, BaseSHA: domain.GitOID(base), Branch: "main",
 		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: opencode.Profile,
-		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: imageID, Agent: "contract",
+		EnvironmentSHA256: docker.EnvironmentSHA256(nil), ImageIdentity: imageID, Agent: "contract",
 		ModelProvider: "test", Model: "test-model",
 		Deadline: now.Add(3 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: now,
 	})
@@ -813,7 +813,7 @@ func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository 
 	}
 	config := backgroundruncoord.Config{
 		WorkspaceID: workspaceID,
-		Profile:     opencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil),
+		Profile:     opencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: docker.EnvironmentSHA256(nil),
 		Agent: "contract", ModelProvider: "test", Model: "test-model", OperationTimeout: 30 * time.Second,
 		PollInterval:  100 * time.Millisecond,
 		HistoryBounds: opencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000},
@@ -1046,7 +1046,7 @@ func serialRouteStatus(origin, token, path string) (int, error) {
 	return response.StatusCode, readErr
 }
 
-func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, provider *taskenvdocker.Provider, engine *artifact.Engine, cli *client.Client,
+func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, provider *docker.Provider, engine *artifact.Engine, cli *client.Client,
 	ids *domain.Generator, workspaceID domain.WorkspaceID, imageID, base string, route *opencode.Router) error {
 	databasePath := filepath.Join(root, "fence-task-store.sqlite")
 	runStore, err := store.Open(ctx, databasePath)
@@ -1080,7 +1080,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 			Key: "serial-fence-crash-create", RequestHash: requestHash, Actor: actor},
 		Prompt: prompt, RepositoryID: 1, BaseSHA: domain.GitOID(base), Branch: "main",
 		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: opencode.Profile,
-		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), ImageIdentity: imageID, Agent: "contract",
+		EnvironmentSHA256: docker.EnvironmentSHA256(nil), ImageIdentity: imageID, Agent: "contract",
 		ModelProvider: "test", Model: "test-model",
 		Deadline: acceptedAt.Add(10 * time.Minute), APIContractVersion: "fern.background-run.v1", AcceptedAt: acceptedAt,
 	})
@@ -1093,7 +1093,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 	crashCtx, crash := context.WithCancel(ctx)
 	config := backgroundruncoord.Config{
 		WorkspaceID: workspaceID,
-		Profile:     opencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
+		Profile:     opencode.Profile, ImageIdentity: imageID, EnvironmentSHA256: docker.EnvironmentSHA256(nil), Agent: "contract", ModelProvider: "test", Model: "test-model",
 		OperationTimeout: 20 * time.Second, PollInterval: 100 * time.Millisecond,
 		HistoryBounds: opencode.HistoryBounds{PageLimit: 2, MaxPages: 100, MaxEvents: 1000},
 		Now:           func() time.Time { return time.Now().Add(2 * time.Minute) }, HTTPClient: &http.Client{Timeout: 10 * time.Second, Transport: transport}, Route: route,
@@ -1309,7 +1309,7 @@ func waitFor(ctx context.Context, name string, check func() (bool, error)) error
 	}
 }
 
-func cleanupOpenCode(provider *taskenvdocker.Provider, cli *client.Client, run store.BackgroundRun, containerID string, runtime taskenvdocker.RuntimeIdentity, clonePath string) error {
+func cleanupOpenCode(provider *docker.Provider, cli *client.Client, run store.BackgroundRun, containerID string, runtime docker.RuntimeIdentity, clonePath string) error {
 	var result error
 	call := func(name string, fn func(context.Context) error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -1319,13 +1319,13 @@ func cleanupOpenCode(provider *taskenvdocker.Provider, cli *client.Client, run s
 			result = errors.Join(result, fmt.Errorf("cleanup %s: %w", name, err))
 		}
 	}
-	authority := taskenvdocker.NeverCreatedAuthority()
+	authority := docker.NeverCreatedAuthority()
 	if provider != nil && runtime.ContainerID != "" {
-		authority = taskenvdocker.RuntimeCleanupAuthority(runtime)
+		authority = docker.RuntimeCleanupAuthority(runtime)
 		call("stop", func(ctx context.Context) error { _, err := provider.StopContainer(ctx, run, runtime); return err })
 		call("container", func(ctx context.Context) error { _, err := provider.RemoveContainer(ctx, run, authority); return err })
 	} else if provider != nil && containerID != "" {
-		authority = taskenvdocker.CreatedContainerAuthority(containerID)
+		authority = docker.CreatedContainerAuthority(containerID)
 		call("created container", func(ctx context.Context) error { _, err := provider.RemoveContainer(ctx, run, authority); return err })
 	}
 	call("exact-name container fallback", func(ctx context.Context) error {

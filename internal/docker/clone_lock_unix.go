@@ -1,6 +1,6 @@
 //go:build unix
 
-package taskenvdocker
+package docker
 
 import (
 	"context"

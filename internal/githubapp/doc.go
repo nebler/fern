@@ -8,7 +8,7 @@
 //
 // Client.InstallationToken mints a fresh token on every call for exactly one
 // repository with contents and pull_requests write, and validates the returned
-// permissions and lifetime; caching and delivery belong to taskenvdocker.
+// permissions and lifetime; caching and delivery belong to the docker package.
 // Installation-wide discovery tokens are a separate type used only for operator
 // repository selection and are not interchangeable with execution tokens.
 // Repository identities and observations are bindings at a point in time, not

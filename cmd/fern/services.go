@@ -15,13 +15,13 @@ import (
 	"github.com/nebler/fern/internal/artifact"
 	"github.com/nebler/fern/internal/backgroundruncoord"
 	"github.com/nebler/fern/internal/config"
+	"github.com/nebler/fern/internal/docker"
 	"github.com/nebler/fern/internal/domain"
 	"github.com/nebler/fern/internal/githubapp"
 	"github.com/nebler/fern/internal/observability"
 	"github.com/nebler/fern/internal/opencode"
 	"github.com/nebler/fern/internal/runapi"
 	"github.com/nebler/fern/internal/store"
-	"github.com/nebler/fern/internal/taskenvdocker"
 )
 
 const (
@@ -45,7 +45,7 @@ type runServices struct {
 	store      *store.Store
 	runs       http.Handler
 	background wakeService
-	provider   *taskenvdocker.Provider
+	provider   *docker.Provider
 	artifact   *artifact.Engine
 	status     *observability.Registry
 }
@@ -110,7 +110,7 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 	if err != nil {
 		return nil, fmt.Errorf("resolve Background Run repository: %w", err)
 	}
-	provider, err := taskenvdocker.New(ctx, taskenvdocker.Config{
+	provider, err := docker.New(ctx, docker.Config{
 		RuntimeStorageRoot: cfg.Runs.RuntimeStorageRoot,
 		StateRoot:          roots.provider, Repository: repository, GitExecutable: gitExecutable(),
 		GitHubTokens: installationTokens, GitHubRepository: githubIdentity,
@@ -139,7 +139,7 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 	coordinator, err := backgroundruncoord.New(runStore, provider, engine, ids, backgroundruncoord.Config{
 		WorkspaceID: durableWorkspace.ID,
 		Profile:     domain.SourceProfile, ImageIdentity: cfg.Runs.BackgroundImageID,
-		EnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil), Agent: cfg.Runs.Agent,
+		EnvironmentSHA256: docker.EnvironmentSHA256(nil), Agent: cfg.Runs.Agent,
 		ModelProvider: cfg.Runs.Model.Provider, Model: cfg.Runs.Model.ID,
 		OperationTimeout: backgroundCloneTimeout,
 		PollInterval:     runPollInterval, HistoryBounds: opencode.HistoryBounds{PageLimit: 100, MaxPages: 100, MaxEvents: 10000},
@@ -161,7 +161,7 @@ func newRunServices(ctx context.Context, cfg config.Config, runStore *store.Stor
 		WorkspaceID: durableWorkspace.ID, RepositoryID: durableWorkspace.RepositoryID,
 		RepositoryRemote:            "https://github.com/" + github.Repository.FullName,
 		BackgroundImageIdentity:     cfg.Runs.BackgroundImageID,
-		BackgroundEnvironmentSHA256: taskenvdocker.EnvironmentSHA256(nil),
+		BackgroundEnvironmentSHA256: docker.EnvironmentSHA256(nil),
 		Store:                       runStore, Route: route, Generator: ids, ActorResolver: domain.ContextActor,
 		BaseVerifier: baseVerifier, Now: time.Now, RunTimeout: cfg.Runs.RunTimeout, Agent: cfg.Runs.Agent,
 		ModelProvider: cfg.Runs.Model.Provider, Model: cfg.Runs.Model.ID, RetentionVerifier: resultSource,

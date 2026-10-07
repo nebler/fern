@@ -1,6 +1,6 @@
 //go:build linux && (amd64 || arm64)
 
-package taskenvdocker
+package docker
 
 import (
 	"context"

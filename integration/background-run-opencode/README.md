@@ -14,7 +14,7 @@ that fake provider rather than a paid remote model.
 flowchart TD
   shell["run.sh"] -->|"check local image pin; go run"| main["main -> run"]
   main -->|"start deterministic model service"| start["startProvider -> fake_provider.mjs"]
-  main -->|"runtime setup"| provider["internal/taskenvdocker + Docker client / container / filters / mount / nat"]
+  main -->|"runtime setup"| provider["internal/docker + Docker client / container / filters / mount / nat"]
   main -->|"real pinned protocol"| protocol["internal/opencode"]
   main -->|"serial lifecycle scenario"| serial["runSerialCoordinator"]
   serial -->|"durable identities and state"| store["internal/domain / internal/store"]

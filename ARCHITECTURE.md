@@ -58,7 +58,7 @@ interaction with a live run uses the normal OpenCode TUI.
                SQLite state db       run coordinator   GitHub App credentials
                        |                 |
                        |                 v
-                       |         taskenvdocker provider
+                       |         docker provider
                        |                 |
                        |   one exact writer container
                        |                 |
@@ -264,7 +264,7 @@ recovery on the target Linux host and maintain free-space/inode reserve for
 Docker images/logs and durable data outside the runtime quota. macOS tests do
 not establish Linux quota qualification.
 
-`taskenvdocker.Provider` owns Docker policy. Every clone, volume, container,
+`docker.Provider` owns Docker policy. Every clone, volume, container,
 endpoint, and runtime gets a deterministic Fern identity derived from immutable
 run state and a private host key, and every provider step inspects before it
 creates or removes. A container is this run's only if it has the canonical
@@ -551,7 +551,7 @@ ownership boundaries.
 | `cmd/fern` | CLI, composition, backup, credentials, process lifecycle |
 | `internal/store` | the SQLite database: schema 12, run/result authority and state machines |
 | `internal/artifact` | deterministic Git bundle creation, CAS, materialization, and CAS-only result binding with verified checkout acquisition |
-| `internal/taskenvdocker` | disposable Docker resources, writer proof, container GitHub credential delivery |
+| `internal/docker` | disposable Docker resources, writer proof, container GitHub credential delivery |
 | `internal/opencode` | pinned disposable OpenCode client and observations; the Router's exact live target/session capabilities, request policy, shutdown, and fencing |
 | `internal/proxy` | remote/operator ingress, pairing, and browser security |
 | `internal/auth` | device identities, operator credential ID, and fixed-scope plugin device authorization and revocation (SQLite tables) |

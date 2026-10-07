@@ -115,7 +115,7 @@ read-only-root, and tmpfs policy against an image (without quota backing):
 
 ```sh
 FERN_STORAGE_POLICY_SMOKE_IMAGE=fern/opencode-background-source:signed \
-  go test ./internal/taskenvdocker -run TestLiveWorkerStoragePolicy -count=1 -v
+  go test ./internal/docker -run TestLiveWorkerStoragePolicy -count=1 -v
 ```
 
 ### Prepare the repository and storage
