@@ -22,7 +22,7 @@ type IdempotencyScope struct {
 	CommandKind string
 }
 
-type IdempotencyClaim struct {
+type IdempotencyRequest struct {
 	Scope       IdempotencyScope
 	Key         IdempotencyKey
 	RequestHash RequestHash
@@ -39,11 +39,11 @@ const (
 	IdempotencyOwnerMismatch
 )
 
-// ClassifyIdempotency compares an accepted claim with a new command. Both
-// claims were validated where they entered Fern (the HTTP boundary, or the
+// ClassifyIdempotency compares an accepted request with a new command. Both
+// requests were validated where they entered Fern (the HTTP boundary, or the
 // receipt written from one). Actor mismatch takes precedence so hash equality
 // does not disclose ownership information.
-func ClassifyIdempotency(existing *IdempotencyClaim, incoming IdempotencyClaim) IdempotencyDisposition {
+func ClassifyIdempotency(existing *IdempotencyRequest, incoming IdempotencyRequest) IdempotencyDisposition {
 	switch {
 	case existing == nil:
 		return IdempotencyFirstUse

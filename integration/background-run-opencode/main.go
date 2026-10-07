@@ -528,7 +528,7 @@ func runSerialCoordinator(ctx context.Context, root, cloneRoot, repository, prov
 	admission, err := runStore.AdmitRun(ctx, store.AdmitRunParams{
 		RunID:             generated.RunID,
 		OpenCodeSessionID: generated.OpenCodeSessionID, OpenCodeMessageID: generated.OpenCodeMessageID,
-		Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: store.CreateRunCommand},
+		Request: domain.IdempotencyRequest{Scope: domain.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: store.CreateRunCommand},
 			Key: "serial-create", RequestHash: requestHash, Actor: actor},
 		Prompt: prompt, RepositoryID: 1, BaseSHA: domain.GitOID(base), Branch: "main",
 		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: opencode.Profile,
@@ -800,7 +800,7 @@ func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository 
 	admission, err := runStore.AdmitRun(ctx, store.AdmitRunParams{
 		RunID:             generated.RunID,
 		OpenCodeSessionID: generated.OpenCodeSessionID, OpenCodeMessageID: generated.OpenCodeMessageID,
-		Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: store.CreateRunCommand},
+		Request: domain.IdempotencyRequest{Scope: domain.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: store.CreateRunCommand},
 			Key: "retained-create", RequestHash: sha256.Sum256([]byte("retained-create")), Actor: actor},
 		Prompt: prompt, RepositoryID: 1, BaseSHA: domain.GitOID(base), Branch: "main",
 		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: opencode.Profile,
@@ -865,7 +865,7 @@ func runRetainedResultScenario(ctx context.Context, root, cloneRoot, repository 
 	sealAt := config.Now().UTC().Truncate(time.Millisecond)
 	if _, err := runStore.SealRun(ctx, store.SealRunParams{
 		WorkspaceID: workspaceID, RunID: run.RunID, ExpectedRunRevision: run.Revision, ResultID: resultID,
-		Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: store.SealRunCommand},
+		Request: domain.IdempotencyRequest{Scope: domain.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: store.SealRunCommand},
 			Key: "retained-seal", RequestHash: sha256.Sum256([]byte("retained-seal")), Actor: actor},
 		PolicyVersion: "fern.background-user-seal.v1", APIContractVersion: "fern.background-run.v1", AcceptedAt: sealAt,
 	}); err != nil {
@@ -1076,7 +1076,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 	admission, err := runStore.AdmitRun(ctx, store.AdmitRunParams{
 		RunID:             generated.RunID,
 		OpenCodeSessionID: generated.OpenCodeSessionID, OpenCodeMessageID: generated.OpenCodeMessageID,
-		Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: store.CreateRunCommand},
+		Request: domain.IdempotencyRequest{Scope: domain.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: store.CreateRunCommand},
 			Key: "serial-fence-crash-create", RequestHash: requestHash, Actor: actor},
 		Prompt: prompt, RepositoryID: 1, BaseSHA: domain.GitOID(base), Branch: "main",
 		RepositoryRemote: "https://github.com/fern-integration/background-run", Profile: opencode.Profile,
@@ -1147,7 +1147,7 @@ func runPreDispatchFenceScenario(ctx context.Context, root, cloneRoot string, pr
 	}
 	stopHash := sha256.Sum256([]byte("serial-fence-crash-stop"))
 	if _, err := runStore.StopRun(context.Background(), store.StopRunParams{
-		WorkspaceID: workspaceID, RunID: fenced.RunID, Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: store.StopRunCommand},
+		WorkspaceID: workspaceID, RunID: fenced.RunID, Request: domain.IdempotencyRequest{Scope: domain.IdempotencyScope{WorkspaceID: workspaceID, CommandKind: store.StopRunCommand},
 			Key: "serial-fence-crash-stop", RequestHash: stopHash, Actor: actor}, APIContractVersion: "fern.background-run.v1",
 		StoppedAt: time.Now().UTC().Truncate(time.Millisecond).Add(4 * time.Minute),
 	}); err != nil {

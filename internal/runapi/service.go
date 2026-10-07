@@ -76,26 +76,26 @@ func commandHash(kind string, value any) domain.RequestHash {
 	return domain.RequestHash(sha256.Sum256(append(append([]byte(kind), '\n'), encoded...)))
 }
 
-func (s *service) claim(actor domain.ActorSnapshot, key domain.IdempotencyKey, kind string, value any) (domain.IdempotencyClaim, error) {
+func (s *service) idempotencyRequest(actor domain.ActorSnapshot, key domain.IdempotencyKey, kind string, value any) (domain.IdempotencyRequest, error) {
 	if err := actor.Validate(); err != nil {
-		return domain.IdempotencyClaim{}, err
+		return domain.IdempotencyRequest{}, err
 	}
 	if actor.Type != domain.ActorOpenCode {
-		return domain.IdempotencyClaim{}, domain.ErrInvalidActor
+		return domain.IdempotencyRequest{}, domain.ErrInvalidActor
 	}
 	if _, err := domain.ParseIdempotencyKey(string(key)); err != nil {
-		return domain.IdempotencyClaim{}, err
+		return domain.IdempotencyRequest{}, err
 	}
-	return domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: s.config.WorkspaceID, CommandKind: kind}, Key: key, RequestHash: commandHash(kind, value), Actor: actor}, nil
+	return domain.IdempotencyRequest{Scope: domain.IdempotencyScope{WorkspaceID: s.config.WorkspaceID, CommandKind: kind}, Key: key, RequestHash: commandHash(kind, value), Actor: actor}, nil
 }
 
-func (s *service) replay(ctx context.Context, claim domain.IdempotencyClaim) (store.Receipt, bool, error) {
-	receipt, found, err := s.config.Store.FindReceiptByIdempotency(ctx, s.config.WorkspaceID, claim.Scope.CommandKind, claim.Key)
+func (s *service) replay(ctx context.Context, idem domain.IdempotencyRequest) (store.Receipt, bool, error) {
+	receipt, found, err := s.config.Store.FindReceiptByIdempotency(ctx, s.config.WorkspaceID, idem.Scope.CommandKind, idem.Key)
 	if err != nil || !found {
 		return receipt, found, err
 	}
-	existing := receipt.Claim()
-	disposition := domain.ClassifyIdempotency(&existing, claim)
+	existing := receipt.Request()
+	disposition := domain.ClassifyIdempotency(&existing, idem)
 	if disposition == domain.IdempotencyOwnerMismatch {
 		return receipt, true, store.ErrNotFound
 	}
@@ -129,11 +129,11 @@ func (s *service) Create(ctx context.Context, actor domain.ActorSnapshot, key do
 		Instruction string  `json:"instruction"`
 		Profile     string  `json:"profile"`
 	}{input.Repository, input.BaseOID, input.Branch, input.Instruction, input.Profile}
-	claim, err := s.claim(actor, key, store.CreateRunCommand, payload)
+	idem, err := s.idempotencyRequest(actor, key, store.CreateRunCommand, payload)
 	if err != nil {
 		return zero, err
 	}
-	receipt, found, err := s.replay(ctx, claim)
+	receipt, found, err := s.replay(ctx, idem)
 	if err != nil {
 		return zero, err
 	}
@@ -161,7 +161,7 @@ func (s *service) Create(ctx context.Context, actor domain.ActorSnapshot, key do
 	}
 	admission, err := s.config.Store.AdmitRun(ctx, store.AdmitRunParams{
 		RunID: ids.RunID, OpenCodeSessionID: ids.OpenCodeSessionID, OpenCodeMessageID: ids.OpenCodeMessageID,
-		Claim: claim, Prompt: input.Instruction, RepositoryID: s.config.RepositoryID,
+		Request: idem, Prompt: input.Instruction, RepositoryID: s.config.RepositoryID,
 		RepositoryRemote: input.Repository, BaseSHA: base, Branch: branch, Profile: input.Profile,
 		ImageIdentity: s.config.BackgroundImageIdentity, EnvironmentSHA256: s.config.BackgroundEnvironmentSHA256,
 		Agent: s.config.Agent, ModelProvider: s.config.ModelProvider, Model: s.config.Model,
@@ -201,11 +201,11 @@ func validBranchDisplay(branch *string) bool {
 	return true
 }
 
-func (s *service) mutationClaim(actor domain.ActorSnapshot, key domain.IdempotencyKey, kind string, id domain.RunID) (domain.IdempotencyClaim, error) {
+func (s *service) mutationRequest(actor domain.ActorSnapshot, key domain.IdempotencyKey, kind string, id domain.RunID) (domain.IdempotencyRequest, error) {
 	if _, err := domain.ParseRunID(string(id)); err != nil {
-		return domain.IdempotencyClaim{}, err
+		return domain.IdempotencyRequest{}, err
 	}
-	return s.claim(actor, key, kind, struct {
+	return s.idempotencyRequest(actor, key, kind, struct {
 		RunID domain.RunID `json:"run_id"`
 	}{id})
 }
@@ -228,11 +228,11 @@ func stopReplay(id domain.RunID, current store.Run, receipt store.Receipt) (stop
 
 func (s *service) Stop(ctx context.Context, actor domain.ActorSnapshot, key domain.IdempotencyKey, id domain.RunID) (stopAcceptance, error) {
 	var zero stopAcceptance
-	claim, err := s.mutationClaim(actor, key, store.StopRunCommand, id)
+	idem, err := s.mutationRequest(actor, key, store.StopRunCommand, id)
 	if err != nil {
 		return zero, err
 	}
-	receipt, found, err := s.replay(ctx, claim)
+	receipt, found, err := s.replay(ctx, idem)
 	if err != nil {
 		return zero, err
 	}
@@ -247,7 +247,7 @@ func (s *service) Stop(ctx context.Context, actor domain.ActorSnapshot, key doma
 		return stopReplay(id, current, receipt)
 	}
 	result, err := s.config.Store.StopRun(ctx, store.StopRunParams{WorkspaceID: s.config.WorkspaceID,
-		RunID: id, Claim: claim,
+		RunID: id, Request: idem,
 		APIContractVersion: APIContractVersion, StoppedAt: s.config.Now().UTC().Truncate(time.Millisecond)})
 	if err != nil {
 		return zero, err
@@ -261,7 +261,7 @@ func (s *service) Stop(ctx context.Context, actor domain.ActorSnapshot, key doma
 
 func (s *service) Seal(ctx context.Context, actor domain.ActorSnapshot, key domain.IdempotencyKey, id domain.RunID) (sealAcceptance, error) {
 	var zero sealAcceptance
-	claim, err := s.mutationClaim(actor, key, store.SealRunCommand, id)
+	idem, err := s.mutationRequest(actor, key, store.SealRunCommand, id)
 	if err != nil {
 		return zero, err
 	}
@@ -276,7 +276,7 @@ func (s *service) Seal(ctx context.Context, actor domain.ActorSnapshot, key doma
 	now := s.config.Now().UTC().Truncate(time.Millisecond)
 	admission, err := s.config.Store.SealRun(ctx, store.SealRunParams{
 		WorkspaceID: s.config.WorkspaceID, RunID: current.RunID, ExpectedRunRevision: current.Revision,
-		ResultID: resultID, Claim: claim, PolicyVersion: s.config.SealPolicyVersion,
+		ResultID: resultID, Request: idem, PolicyVersion: s.config.SealPolicyVersion,
 		APIContractVersion: APIContractVersion, AcceptedAt: now,
 	})
 	if err != nil {

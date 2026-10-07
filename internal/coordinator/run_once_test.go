@@ -226,7 +226,7 @@ func newScanFixture(t *testing.T) *scanFixture {
 		t.Fatal(err)
 	}
 	actor := domain.ActorSnapshot{Type: domain.ActorOpenCode, ID: "pc_owner", DisplayName: "OpenCode", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "req-1"}
-	f.params = store.AdmitRunParams{RunID: domain.RunID(id("run_", 2)), OpenCodeSessionID: "ses_00000000000000000000000000000001", OpenCodeMessageID: "msg_00000000000000000000000000000001", Claim: domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: workspace, CommandKind: store.CreateRunCommand}, Key: "create", RequestHash: sha256.Sum256([]byte("create")), Actor: actor}, Prompt: "Do work", RepositoryID: 987654321, RepositoryRemote: "https://github.com/owner/repository", BaseSHA: domain.GitOID(command("rev-parse", "HEAD")), Branch: "main", Profile: domain.SourceProfile, EnvironmentSHA256: docker.EnvironmentSHA256(nil), ImageIdentity: scanImage, Agent: "build", ModelProvider: "provider", Model: "model", Deadline: f.now.Add(time.Hour), APIContractVersion: "v1", AcceptedAt: f.now}
+	f.params = store.AdmitRunParams{RunID: domain.RunID(id("run_", 2)), OpenCodeSessionID: "ses_00000000000000000000000000000001", OpenCodeMessageID: "msg_00000000000000000000000000000001", Request: domain.IdempotencyRequest{Scope: domain.IdempotencyScope{WorkspaceID: workspace, CommandKind: store.CreateRunCommand}, Key: "create", RequestHash: sha256.Sum256([]byte("create")), Actor: actor}, Prompt: "Do work", RepositoryID: 987654321, RepositoryRemote: "https://github.com/owner/repository", BaseSHA: domain.GitOID(command("rev-parse", "HEAD")), Branch: "main", Profile: domain.SourceProfile, EnvironmentSHA256: docker.EnvironmentSHA256(nil), ImageIdentity: scanImage, Agent: "build", ModelProvider: "provider", Model: "model", Deadline: f.now.Add(time.Hour), APIContractVersion: "v1", AcceptedAt: f.now}
 	ids, err := domain.NewGenerator(rand.Reader, func() time.Time { return f.now })
 	if err != nil {
 		t.Fatal(err)
@@ -254,7 +254,7 @@ func (f *scanFixture) admit(t *testing.T) {
 }
 func (f *scanFixture) run(t *testing.T) store.Run {
 	t.Helper()
-	r, err := f.c.store.GetRun(context.Background(), f.c.config.WorkspaceID, f.params.RunID, f.params.Claim.Actor)
+	r, err := f.c.store.GetRun(context.Background(), f.c.config.WorkspaceID, f.params.RunID, f.params.Request.Actor)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -484,11 +484,11 @@ func TestRunOnceProvisioningFailureAndLostObservationReconcile(t *testing.T) {
 
 func (f *scanFixture) stop(t *testing.T) {
 	t.Helper()
-	stopClaim := f.params.Claim
-	stopClaim.Scope.CommandKind = store.StopRunCommand
-	stopClaim.Key = "stop"
-	stopClaim.RequestHash = sha256.Sum256([]byte("stop"))
-	if _, err := f.c.store.StopRun(context.Background(), store.StopRunParams{WorkspaceID: f.c.config.WorkspaceID, RunID: f.params.RunID, Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now}); err != nil {
+	stopRequest := f.params.Request
+	stopRequest.Scope.CommandKind = store.StopRunCommand
+	stopRequest.Key = "stop"
+	stopRequest.RequestHash = sha256.Sum256([]byte("stop"))
+	if _, err := f.c.store.StopRun(context.Background(), store.StopRunParams{WorkspaceID: f.c.config.WorkspaceID, RunID: f.params.RunID, Request: stopRequest, APIContractVersion: "v1", StoppedAt: f.now}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -547,11 +547,11 @@ func TestRunOnceStopCleanupFailureRecoveryPastDeadline(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.d.createErr = nil
-	stopClaim := f.params.Claim
-	stopClaim.Scope.CommandKind = store.StopRunCommand
-	stopClaim.Key = "stop"
-	stopClaim.RequestHash = sha256.Sum256([]byte("stop"))
-	_, err := f.c.store.StopRun(context.Background(), store.StopRunParams{WorkspaceID: f.c.config.WorkspaceID, RunID: f.params.RunID, Claim: stopClaim, APIContractVersion: "v1", StoppedAt: f.now})
+	stopRequest := f.params.Request
+	stopRequest.Scope.CommandKind = store.StopRunCommand
+	stopRequest.Key = "stop"
+	stopRequest.RequestHash = sha256.Sum256([]byte("stop"))
+	_, err := f.c.store.StopRun(context.Background(), store.StopRunParams{WorkspaceID: f.c.config.WorkspaceID, RunID: f.params.RunID, Request: stopRequest, APIContractVersion: "v1", StoppedAt: f.now})
 	if err != nil {
 		t.Fatal(err)
 	}

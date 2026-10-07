@@ -53,21 +53,21 @@ func TestIdempotencyKeyValidation(t *testing.T) {
 
 func TestIdempotencyClassification(t *testing.T) {
 	h1, h2 := RequestHash{1}, RequestHash{2}
-	base := IdempotencyClaim{Scope: IdempotencyScope{WorkspaceID: WorkspaceID("wsp_" + validUUID), CommandKind: "task.submit"}, Key: "key", RequestHash: h1, Actor: validActor()}
+	base := IdempotencyRequest{Scope: IdempotencyScope{WorkspaceID: WorkspaceID("wsp_" + validUUID), CommandKind: "task.submit"}, Key: "key", RequestHash: h1, Actor: validActor()}
 	tests := []struct {
 		name     string
-		existing *IdempotencyClaim
-		mutate   func(*IdempotencyClaim)
+		existing *IdempotencyRequest
+		mutate   func(*IdempotencyRequest)
 		want     IdempotencyDisposition
 	}{
 		{"first", nil, nil, IdempotencyFirstUse}, {"replay", &base, nil, IdempotencyReplay},
-		{"different workspace", &base, func(c *IdempotencyClaim) {
+		{"different workspace", &base, func(c *IdempotencyRequest) {
 			c.Scope.WorkspaceID = WorkspaceID("wsp_0198d34d-6a50-75fb-81f2-b4a14d70ec55")
 		}, IdempotencyIndependent},
-		{"different command", &base, func(c *IdempotencyClaim) { c.Scope.CommandKind = "task.cancel" }, IdempotencyIndependent},
-		{"different key", &base, func(c *IdempotencyClaim) { c.Key = "other" }, IdempotencyIndependent},
-		{"hash conflict", &base, func(c *IdempotencyClaim) { c.RequestHash = h2 }, IdempotencyConflict},
-		{"owner mismatch", &base, func(c *IdempotencyClaim) { c.Actor.ID = "phone-2"; c.RequestHash = h2 }, IdempotencyOwnerMismatch},
+		{"different command", &base, func(c *IdempotencyRequest) { c.Scope.CommandKind = "task.cancel" }, IdempotencyIndependent},
+		{"different key", &base, func(c *IdempotencyRequest) { c.Key = "other" }, IdempotencyIndependent},
+		{"hash conflict", &base, func(c *IdempotencyRequest) { c.RequestHash = h2 }, IdempotencyConflict},
+		{"owner mismatch", &base, func(c *IdempotencyRequest) { c.Actor.ID = "phone-2"; c.RequestHash = h2 }, IdempotencyOwnerMismatch},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

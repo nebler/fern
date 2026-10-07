@@ -35,9 +35,9 @@ func (s *commandStore) FindReceiptByIdempotency(context.Context, domain.Workspac
 func (s *commandStore) GetRun(context.Context, domain.WorkspaceID, domain.RunID, domain.ActorSnapshot) (store.Run, error) {
 	return s.current, nil
 }
-func receiptFor(claim domain.IdempotencyClaim, id domain.RunID, receiptID int64) store.Receipt {
-	return store.Receipt{ID: receiptID, WorkspaceID: claim.Scope.WorkspaceID, CommandKind: claim.Scope.CommandKind,
-		IdempotencyKey: claim.Key, RequestHash: claim.RequestHash, Actor: claim.Actor, RunID: id}
+func receiptFor(idem domain.IdempotencyRequest, id domain.RunID, receiptID int64) store.Receipt {
+	return store.Receipt{ID: receiptID, WorkspaceID: idem.Scope.WorkspaceID, CommandKind: idem.Scope.CommandKind,
+		IdempotencyKey: idem.Key, RequestHash: idem.RequestHash, Actor: idem.Actor, RunID: id}
 }
 func (s *commandStore) AdmitRun(_ context.Context, p store.AdmitRunParams) (store.Admission, error) {
 	s.admit = p
@@ -46,7 +46,7 @@ func (s *commandStore) AdmitRun(_ context.Context, p store.AdmitRunParams) (stor
 	}
 	s.committed = true
 	s.current.RunID = p.RunID
-	s.receipt = receiptFor(p.Claim, p.RunID, 1)
+	s.receipt = receiptFor(p.Request, p.RunID, 1)
 	return store.Admission{Run: s.current, Receipt: s.receipt, Replayed: s.race}, nil
 }
 func (s *commandStore) StopRun(_ context.Context, p store.StopRunParams) (store.RunStop, error) {
@@ -59,7 +59,7 @@ func (s *commandStore) StopRun(_ context.Context, p store.StopRunParams) (store.
 	if s.race {
 		s.current.State = domain.CleanupRequired // advanced since the original commit
 	}
-	s.receipt = receiptFor(p.Claim, p.RunID, 2)
+	s.receipt = receiptFor(p.Request, p.RunID, 2)
 	s.receipt.ResponseProjection = json.RawMessage(`{"run_id":"` + string(p.RunID) + `","state":"canceling"}`)
 	return store.RunStop{Run: s.current, Receipt: s.receipt, Replayed: s.race}, nil
 }
@@ -101,7 +101,7 @@ func TestCreateCommitReplayAndIdentity(t *testing.T) {
 	}
 	// Literal v1 encoding protects field order, null branch, escaping, and whitespace.
 	wantHash := sha256.Sum256([]byte(store.CreateRunCommand + "\n" + `{"repository":"https://github.com/owner/repository","base_oid":"0123456789abcdef0123456789abcdef01234567","branch":null,"instruction":"Work\n\t\u003cexact bytes\u003e ","profile":"` + input.Profile + `"}`))
-	if runStore.admit.Claim.RequestHash != domain.RequestHash(wantHash) || runStore.admit.Prompt != input.Instruction {
+	if runStore.admit.Request.RequestHash != domain.RequestHash(wantHash) || runStore.admit.Prompt != input.Instruction {
 		t.Fatal("create bytes changed")
 	}
 	runStore.found = true

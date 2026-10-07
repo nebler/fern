@@ -188,9 +188,9 @@ task store has four tables:
 Clone, volume, container, and endpoint names derive from the run ID and are not
 stored.
 
-The coordinator wakes only after commit. A repeated matching idempotency claim
+The coordinator wakes only after commit. A repeated matching idempotency request
 returns the original receipt. A changed hash conflicts. Another actor cannot
-probe the original claim.
+probe the original request.
 
 `runapi` owns create, stop, and seal application operations (`service.go`):
 request policy, canonical idempotency hashing, replay interpretation, base

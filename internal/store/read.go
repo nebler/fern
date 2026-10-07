@@ -179,7 +179,7 @@ func receiptByKey(ctx context.Context, q queryRower, workspaceID domain.Workspac
 }
 
 // insertReceipt records an accepted command for run and returns it.
-func insertReceipt(ctx context.Context, tx *sql.Tx, claim domain.IdempotencyClaim, run domain.RunID, apiVersion string,
+func insertReceipt(ctx context.Context, tx *sql.Tx, idem domain.IdempotencyRequest, run domain.RunID, apiVersion string,
 	acceptedAt time.Time, response any) (Receipt, error) {
 	projection, err := json.Marshal(response)
 	if err != nil {
@@ -188,17 +188,17 @@ func insertReceipt(ctx context.Context, tx *sql.Tx, claim domain.IdempotencyClai
 	acceptedMS := unixMillis(acceptedAt)
 	result, err := tx.ExecContext(ctx, `INSERT INTO receipts(workspace_id,command_kind,idempotency_key,request_hash,actor,
 accepted_at,api_contract_version,run_id,response_status,response_projection) VALUES(?,?,?,?,?,?,?,?,202,?)`,
-		claim.Scope.WorkspaceID, claim.Scope.CommandKind, claim.Key, claim.RequestHash[:], encodeActor(claim.Actor),
+		idem.Scope.WorkspaceID, idem.Scope.CommandKind, idem.Key, idem.RequestHash[:], encodeActor(idem.Actor),
 		acceptedMS, apiVersion, run, string(projection))
 	if err != nil {
-		return Receipt{}, fmt.Errorf("insert %s receipt: %w", claim.Scope.CommandKind, err)
+		return Receipt{}, fmt.Errorf("insert %s receipt: %w", idem.Scope.CommandKind, err)
 	}
 	id, err := result.LastInsertId()
 	if err != nil {
 		return Receipt{}, err
 	}
-	return Receipt{ID: id, WorkspaceID: claim.Scope.WorkspaceID, CommandKind: claim.Scope.CommandKind, IdempotencyKey: claim.Key,
-		RequestHash: claim.RequestHash, Actor: claim.Actor, AcceptedAt: fromUnixMillis(acceptedMS), APIContractVersion: apiVersion,
+	return Receipt{ID: id, WorkspaceID: idem.Scope.WorkspaceID, CommandKind: idem.Scope.CommandKind, IdempotencyKey: idem.Key,
+		RequestHash: idem.RequestHash, Actor: idem.Actor, AcceptedAt: fromUnixMillis(acceptedMS), APIContractVersion: apiVersion,
 		RunID: run, ResponseStatus: 202, ResponseProjection: projection}, nil
 }
 

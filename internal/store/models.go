@@ -60,15 +60,15 @@ type Receipt struct {
 	ResponseProjection json.RawMessage
 }
 
-// Claim is the idempotency claim this receipt accepted.
-func (r Receipt) Claim() domain.IdempotencyClaim {
-	return domain.IdempotencyClaim{Scope: domain.IdempotencyScope{WorkspaceID: r.WorkspaceID, CommandKind: r.CommandKind},
+// Request is the idempotency request this receipt accepted.
+func (r Receipt) Request() domain.IdempotencyRequest {
+	return domain.IdempotencyRequest{Scope: domain.IdempotencyScope{WorkspaceID: r.WorkspaceID, CommandKind: r.CommandKind},
 		Key: r.IdempotencyKey, RequestHash: r.RequestHash, Actor: r.Actor}
 }
 
-func (r Receipt) classify(incoming domain.IdempotencyClaim) domain.IdempotencyDisposition {
-	claim := r.Claim()
-	return domain.ClassifyIdempotency(&claim, incoming)
+func (r Receipt) classify(incoming domain.IdempotencyRequest) domain.IdempotencyDisposition {
+	accepted := r.Request()
+	return domain.ClassifyIdempotency(&accepted, incoming)
 }
 
 // AdmitRunParams is the complete immutable intent of one run. The
@@ -78,7 +78,7 @@ type AdmitRunParams struct {
 	RunID              domain.RunID
 	OpenCodeSessionID  domain.OpenCodeSessionID
 	OpenCodeMessageID  domain.OpenCodeMessageID
-	Claim              domain.IdempotencyClaim
+	Request            domain.IdempotencyRequest
 	Prompt             string
 	RepositoryID       domain.RepositoryID
 	RepositoryRemote   string
@@ -143,7 +143,7 @@ type Run struct {
 type StopRunParams struct {
 	WorkspaceID        domain.WorkspaceID
 	RunID              domain.RunID
-	Claim              domain.IdempotencyClaim
+	Request            domain.IdempotencyRequest
 	APIContractVersion string
 	StoppedAt          time.Time
 }
@@ -231,7 +231,7 @@ type SealRunParams struct {
 	RunID               domain.RunID
 	ExpectedRunRevision int64
 	ResultID            domain.ResultID
-	Claim               domain.IdempotencyClaim
+	Request             domain.IdempotencyRequest
 	PolicyVersion       string
 	APIContractVersion  string
 	AcceptedAt          time.Time

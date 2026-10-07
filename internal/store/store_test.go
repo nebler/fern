@@ -40,7 +40,7 @@ func TestAdmissionReplaySurvivesRestart(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	p.AcceptedAt = p.AcceptedAt.Add(time.Hour)
 	p.Deadline = p.Deadline.Add(time.Hour)
-	p.Claim.Actor.RequestID = "req-retry"
+	p.Request.Actor.RequestID = "req-retry"
 	replay, err := s.AdmitRun(context.Background(), p)
 	if err != nil {
 		t.Fatalf("replay: %v", err)
@@ -57,7 +57,7 @@ func TestAdmissionReplaySurvivesRestart(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT prompt FROM runs WHERE id=?`, first.Run.RunID).Scan(&prompt); err != nil || prompt != p.Prompt {
 		t.Fatalf("stored prompt = %q, %v", prompt, err)
 	}
-	gotReceipt, _, err := s.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateRunCommand, p.Claim.Key)
+	gotReceipt, _, err := s.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateRunCommand, p.Request.Key)
 	if err != nil || gotReceipt.RunID != first.Run.RunID {
 		t.Fatalf("get receipt: %+v, %v", gotReceipt, err)
 	}
@@ -136,8 +136,8 @@ func TestAdmissionConflictsHaveNoWrites(t *testing.T) {
 	}
 
 	otherActor := p
-	otherActor.Claim.Actor.ID = "pc_other"
-	otherActor.Claim.Actor.CredentialID = "pc_other"
+	otherActor.Request.Actor.ID = "pc_other"
+	otherActor.Request.Actor.CredentialID = "pc_other"
 	_, err = s.AdmitRun(context.Background(), otherActor)
 	if !errors.Is(err, ErrIdempotencyOwnerMismatch) {
 		t.Fatalf("actor conflict = %v", err)
@@ -161,7 +161,7 @@ func TestAdmissionRollsBackOnLateInsertFailure(t *testing.T) {
 	if _, err := readRun(context.Background(), s.db, testWorkspaceID(), second.RunID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("partially written run: %v", err)
 	}
-	if _, found, err := s.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateRunCommand, second.Claim.Key); err != nil || found {
+	if _, found, err := s.FindReceiptByIdempotency(context.Background(), testWorkspaceID(), CreateRunCommand, second.Request.Key); err != nil || found {
 		t.Fatalf("partially written receipt: %v", err)
 	}
 	assertCounts(t, s, 1, 1)
@@ -400,7 +400,7 @@ func testAdmission(n int, key, prompt string) AdmitRunParams {
 	hash := sha256.Sum256([]byte(key + "\n" + prompt))
 	params := AdmitRunParams{
 		RunID: testRunID(n), OpenCodeSessionID: testSessionID(n), OpenCodeMessageID: testMessageID(n),
-		Claim: domain.IdempotencyClaim{
+		Request: domain.IdempotencyRequest{
 			Scope: domain.IdempotencyScope{WorkspaceID: testWorkspaceID(), CommandKind: CreateRunCommand},
 			Key:   domain.IdempotencyKey(key), RequestHash: domain.RequestHash(hash),
 			Actor: domain.ActorSnapshot{Type: domain.ActorOpenCode, ID: "pc_owner", DisplayName: "OpenCode", CredentialID: "pc_owner", Authentication: "fern_plugin_bearer", RequestID: "req-1"},

@@ -22,13 +22,13 @@ func TestRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 	}
 	now := testTime.Truncate(time.Millisecond).Add(time.Minute)
 	run, _ := advanceRunToPrompt(t, store, admission.ImageIdentity, now)
-	sealClaim := domain.IdempotencyClaim{
+	sealRequest := domain.IdempotencyRequest{
 		Scope: domain.IdempotencyScope{WorkspaceID: run.WorkspaceID, CommandKind: SealRunCommand},
-		Key:   "retained-seal", RequestHash: sha256.Sum256([]byte("retained-seal")), Actor: admission.Claim.Actor,
+		Key:   "retained-seal", RequestHash: sha256.Sum256([]byte("retained-seal")), Actor: admission.Request.Actor,
 	}
 	seal := SealRunParams{
 		WorkspaceID: run.WorkspaceID, RunID: run.RunID, ExpectedRunRevision: run.Revision,
-		ResultID: testResultID(5106), Claim: sealClaim,
+		ResultID: testResultID(5106), Request: sealRequest,
 		PolicyVersion: "background-retained.v1", APIContractVersion: "v1", AcceptedAt: now.Add(20 * time.Second),
 	}
 	sealed, err := store.SealRun(context.Background(), seal)
@@ -41,15 +41,15 @@ func TestRunRetainedResultAuthorityEndToEnd(t *testing.T) {
 		t.Fatalf("seal replay = %+v, error=%v", replay, err)
 	}
 	ownerMismatch := seal
-	ownerMismatch.Claim.Actor.ID = "other-owner"
-	ownerMismatch.Claim.Actor.CredentialID = "other-owner"
+	ownerMismatch.Request.Actor.ID = "other-owner"
+	ownerMismatch.Request.Actor.CredentialID = "other-owner"
 	if _, err := store.SealRun(context.Background(), ownerMismatch); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("seal owner mismatch = %v", err)
 	}
 	stop := StopRunParams{WorkspaceID: run.WorkspaceID, RunID: run.RunID,
-		Claim: domain.IdempotencyClaim{
+		Request: domain.IdempotencyRequest{
 			Scope: domain.IdempotencyScope{WorkspaceID: run.WorkspaceID, CommandKind: StopRunCommand}, Key: "stop-after-seal",
-			RequestHash: sha256.Sum256([]byte("stop-after-seal")), Actor: admission.Claim.Actor,
+			RequestHash: sha256.Sum256([]byte("stop-after-seal")), Actor: admission.Request.Actor,
 		}, APIContractVersion: "v1", StoppedAt: seal.AcceptedAt.Add(time.Second)}
 	if _, err := store.StopRun(context.Background(), stop); !errors.Is(err, ErrInvalidState) {
 		t.Fatalf("stop after winning seal = %v", err)
@@ -179,7 +179,7 @@ revision=revision+1,updated_at=updated_at+1 WHERE id=?`, run.RunID); err == nil 
 	if err != nil || cleanupRun.EffectPhase != domain.CleanupComplete {
 		t.Fatalf("retained cleanup completion = %+v, error=%v", cleanupRun, err)
 	}
-	projection, err := store.GetRunResult(context.Background(), run.WorkspaceID, run.RunID, admission.Claim.Actor)
+	projection, err := store.GetRunResult(context.Background(), run.WorkspaceID, run.RunID, admission.Request.Actor)
 	if err != nil || projection.Result.ID != seal.ResultID || projection.Run.RunID != run.RunID {
 		t.Fatalf("background result projection = %+v, error=%v", projection, err)
 	}

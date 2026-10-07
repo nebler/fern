@@ -20,7 +20,7 @@ func TestRunAdmissionStopAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := store.GetRun(context.Background(), testWorkspaceID(), admission.Run.RunID, params.Claim.Actor)
+	run, err := store.GetRun(context.Background(), testWorkspaceID(), admission.Run.RunID, params.Request.Actor)
 	if err != nil || run.RunID != admission.Run.RunID || run.BaseOID != params.BaseSHA || run.ImageIdentity != params.ImageIdentity ||
 		run.Profile != domain.SourceProfile || run.Agent != params.Agent || !run.Deadline.Equal(params.Deadline.Truncate(time.Millisecond)) ||
 		run.State != domain.Queued || run.EffectPhase != "absent" {
@@ -32,10 +32,10 @@ func TestRunAdmissionStopAndRestart(t *testing.T) {
 	}
 	stopHash := sha256.Sum256([]byte("stop"))
 	stopParams := StopRunParams{WorkspaceID: testWorkspaceID(), RunID: run.RunID,
-		Claim: params.Claim, APIContractVersion: "run-v1", StoppedAt: testTime.Truncate(time.Millisecond).Add(time.Minute)}
-	stopParams.Claim.Scope.CommandKind = StopRunCommand
-	stopParams.Claim.Key = "run-stop"
-	stopParams.Claim.RequestHash = stopHash
+		Request: params.Request, APIContractVersion: "run-v1", StoppedAt: testTime.Truncate(time.Millisecond).Add(time.Minute)}
+	stopParams.Request.Scope.CommandKind = StopRunCommand
+	stopParams.Request.Key = "run-stop"
+	stopParams.Request.RequestHash = stopHash
 	stopped, err := store.StopRun(context.Background(), stopParams)
 	if err != nil || stopped.Run.State != domain.Failed || stopped.Run.StopReceiptID == 0 || stopped.Run.StopReceiptID != stopped.Receipt.ID {
 		t.Fatalf("stop = %+v, error = %v", stopped, err)
@@ -54,7 +54,7 @@ func TestRunAdmissionStopAndRestart(t *testing.T) {
 	}
 	store = openTestStore(t, path)
 	t.Cleanup(func() { _ = store.Close() })
-	persisted, err := store.GetRun(context.Background(), testWorkspaceID(), run.RunID, params.Claim.Actor)
+	persisted, err := store.GetRun(context.Background(), testWorkspaceID(), run.RunID, params.Request.Actor)
 	if err != nil || persisted.State != domain.Failed || persisted.Revision != 2 || persisted.LastError != RunStoppedBeforeStart {
 		t.Fatalf("restarted run = %+v, error = %v", persisted, err)
 	}
@@ -78,7 +78,7 @@ func TestRunAdmissionIsAtomicAndActorFiltered(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT count(*) FROM runs`).Scan(&runs); err != nil || runs != 1 {
 		t.Fatalf("run count = %d, error = %v", runs, err)
 	}
-	other := first.Claim.Actor
+	other := first.Request.Actor
 	other.ID, other.CredentialID = "pc_other", "pc_other"
 	listed, err := store.ListRuns(context.Background(), testWorkspaceID(), other, 100)
 	if err != nil || len(listed) != 0 {
@@ -117,23 +117,23 @@ func TestRunListLazyCapacityAndOwnership(t *testing.T) {
 			t.Fatalf("first task = %s, want %s", runs[0].RunID, want)
 		}
 	}
-	assertList(first.Claim.Actor, MaxRunListLimit, 0, 0, "")
+	assertList(first.Request.Actor, MaxRunListLimit, 0, 0, "")
 	if _, err := store.AdmitRun(ctx, first); err != nil {
 		t.Fatal(err)
 	}
-	assertList(first.Claim.Actor, MaxRunListLimit, 1, 1, first.RunID)
-	assertList(first.Claim.Actor, 1, 1, 1, first.RunID)
+	assertList(first.Request.Actor, MaxRunListLimit, 1, 1, first.RunID)
+	assertList(first.Request.Actor, 1, 1, 1, first.RunID)
 	second := testRunAdmission(1801, "list-second")
-	second.Claim.Actor.ID, second.Claim.Actor.CredentialID = "pc_other", "pc_other"
+	second.Request.Actor.ID, second.Request.Actor.CredentialID = "pc_other", "pc_other"
 	if _, err := store.AdmitRun(ctx, second); err != nil {
 		t.Fatal(err)
 	}
 	// The newer foreign row must not consume the SQL limit before ownership.
-	assertList(first.Claim.Actor, 1, 1, 1, first.RunID)
+	assertList(first.Request.Actor, 1, 1, 1, first.RunID)
 	operator := domain.ActorSnapshot{Type: domain.ActorOperator, ID: "operator", DisplayName: "Operator",
 		CredentialID: "operator", Authentication: "basic", RequestID: "request"}
 	assertList(operator, 1, 1, 1, second.RunID)
-	other := first.Claim.Actor
+	other := first.Request.Actor
 	other.CredentialID = "pc_absent"
 	assertList(other, MaxRunListLimit, 0, 0, "")
 	for i := 2; i <= MaxRunListLimit; i++ {
@@ -142,18 +142,18 @@ func TestRunListLazyCapacityAndOwnership(t *testing.T) {
 			t.Fatal(err)
 		}
 		if i == 10 {
-			assertList(first.Claim.Actor, MaxRunListLimit, 10, 16, p.RunID)
-			assertList(first.Claim.Actor, 7, 7, 7, p.RunID)
+			assertList(first.Request.Actor, MaxRunListLimit, 10, 16, p.RunID)
+			assertList(first.Request.Actor, 7, 7, 7, p.RunID)
 		}
 		if i == MaxRunListLimit {
-			assertList(first.Claim.Actor, MaxRunListLimit, i, i, p.RunID)
+			assertList(first.Request.Actor, MaxRunListLimit, i, i, p.RunID)
 		}
 	}
 	// Invalid bounds are rejected before SQL, even when the context is canceled.
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
 	for _, limit := range []int{-1, 0, MaxRunListLimit + 1} {
-		runs, err := store.ListRuns(canceled, testWorkspaceID(), first.Claim.Actor, limit)
+		runs, err := store.ListRuns(canceled, testWorkspaceID(), first.Request.Actor, limit)
 		if !errors.Is(err, ErrInvalidInput) || runs != nil {
 			t.Fatalf("invalid limit %d: runs=%v err=%v", limit, runs, err)
 		}
@@ -170,16 +170,16 @@ func TestRunWorkspaceFenceAndLifecycleAlgebra(t *testing.T) {
 		t.Fatal(err)
 	}
 	otherWorkspace := domain.WorkspaceID("wsp_0198d34d-6a50-75fb-b1f2-000000000002")
-	if _, err := store.GetRun(context.Background(), otherWorkspace, admission.Run.RunID, params.Claim.Actor); !errors.Is(err, ErrNotFound) {
+	if _, err := store.GetRun(context.Background(), otherWorkspace, admission.Run.RunID, params.Request.Actor); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-workspace read = %v", err)
 	}
 	wrongWorkspaceStop := StopRunParams{WorkspaceID: otherWorkspace, RunID: admission.Run.RunID,
-		Claim:              params.Claim,
+		Request:            params.Request,
 		APIContractVersion: "run-v1", StoppedAt: testTime.Truncate(time.Millisecond).Add(time.Minute)}
-	wrongWorkspaceStop.Claim.Scope.WorkspaceID = otherWorkspace
-	wrongWorkspaceStop.Claim.Scope.CommandKind = StopRunCommand
-	wrongWorkspaceStop.Claim.Key = "wrong-workspace-stop"
-	wrongWorkspaceStop.Claim.RequestHash = sha256.Sum256([]byte("wrong-workspace-stop"))
+	wrongWorkspaceStop.Request.Scope.WorkspaceID = otherWorkspace
+	wrongWorkspaceStop.Request.Scope.CommandKind = StopRunCommand
+	wrongWorkspaceStop.Request.Key = "wrong-workspace-stop"
+	wrongWorkspaceStop.Request.RequestHash = sha256.Sum256([]byte("wrong-workspace-stop"))
 	if _, err := store.StopRun(context.Background(), wrongWorkspaceStop); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("cross-workspace stop = %v", err)
 	}
@@ -206,7 +206,7 @@ func TestRunAdmissionRejectsMismatchedIntentAtomically(t *testing.T) {
 		mutate func(*AdmitRunParams)
 	}{
 		{"profile", func(p *AdmitRunParams) { p.Profile = "other" }},
-		{"creator actor", func(p *AdmitRunParams) { p.Claim.Actor.Type = domain.ActorOperator }},
+		{"creator actor", func(p *AdmitRunParams) { p.Request.Actor.Type = domain.ActorOperator }},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store := openTestStore(t, testDBPath(t))
@@ -294,11 +294,11 @@ func TestRunCapacityRecoveryAndActiveStop(t *testing.T) {
 	run = restarted
 
 	stop := StopRunParams{WorkspaceID: testWorkspaceID(), RunID: run.RunID,
-		Claim:              first.Claim,
+		Request:            first.Request,
 		APIContractVersion: "run-v1", StoppedAt: restartedAt.Add(time.Second)}
-	stop.Claim.Scope.CommandKind = StopRunCommand
-	stop.Claim.Key = "active-stop"
-	stop.Claim.RequestHash = sha256.Sum256([]byte("active-stop"))
+	stop.Request.Scope.CommandKind = StopRunCommand
+	stop.Request.Key = "active-stop"
+	stop.Request.RequestHash = sha256.Sum256([]byte("active-stop"))
 	stopped, err := store.StopRun(context.Background(), stop)
 	if err != nil || stopped.Run.State != domain.Canceling || stopped.Run.EffectPhase != domain.Cleaning ||
 		stopped.Run.Revision != run.Revision+1 || stopped.Run.StopReceiptID == 0 {
@@ -410,7 +410,7 @@ func TestRunWorkProjectionAndPromptAttemptFenceSurviveRestart(t *testing.T) {
 	}
 	store = openTestStore(t, path)
 	t.Cleanup(func() { _ = store.Close() })
-	persisted, err := store.GetRun(context.Background(), run.WorkspaceID, run.RunID, params.Claim.Actor)
+	persisted, err := store.GetRun(context.Background(), run.WorkspaceID, run.RunID, params.Request.Actor)
 	if err != nil || persisted.PromptRequestAttemptedAt == nil || !persisted.PromptRequestAttemptedAt.Equal(*run.PromptRequestAttemptedAt) {
 		t.Fatalf("persisted attempt fence = %+v, error=%v", persisted, err)
 	}
@@ -514,12 +514,12 @@ func prepareRunCleanup(t *testing.T, store *Store, params AdmitRunParams, state 
 	case domain.Canceling:
 		stop := StopRunParams{
 			WorkspaceID: testWorkspaceID(), RunID: run.RunID,
-			Claim:              params.Claim,
+			Request:            params.Request,
 			APIContractVersion: "run-v1", StoppedAt: ref.Now,
 		}
-		stop.Claim.Scope.CommandKind = StopRunCommand
-		stop.Claim.Key = domain.IdempotencyKey(fmt.Sprintf("cleanup-stop-%d", n))
-		stop.Claim.RequestHash = sha256.Sum256([]byte(stop.Claim.Key))
+		stop.Request.Scope.CommandKind = StopRunCommand
+		stop.Request.Key = domain.IdempotencyKey(fmt.Sprintf("cleanup-stop-%d", n))
+		stop.Request.RequestHash = sha256.Sum256([]byte(stop.Request.Key))
 		if _, err := store.StopRun(context.Background(), stop); err != nil {
 			t.Fatal(err)
 		}
