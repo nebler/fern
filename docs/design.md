@@ -60,7 +60,7 @@ Short version: *"Amp's Orbs, but open source and self-hosted, for T3 — with th
   - credentials are **never baked into snapshots**
   - no proxy that sits between you and your credentials (see §18)
 - **Single user per login.** Every person on a team uses their own subscription. Never share one.
-- **Linux at the core.** On a Mac, use a Linux VM (OrbStack, Lima) or a remote box.
+- **Remote-first.** Fern and the T3 server run on a **remote Linux machine** (a cloud VM, a home server, or a cluster). The Mac or phone is only a client (the T3 app). A local VM on the Mac is for development of Fern itself, not the intended workflow. See §14.1 for the connection layer.
   - Theo reportedly said on stream that most T3 users are on Linux. *Unverified.*
 
 ---
@@ -122,7 +122,7 @@ T3 already saves a **git checkpoint after every turn**. "Edit from here → Reve
 | **GitHub Codespaces prebuilds** | container snapshot per branch/config/region | | the "golden snapshot" precedent | no | `onCreate`/`updateContent` baked, `postCreate` after |
 | **devenv / Flox (Nix)** | reproducible toolchain | | | yes | rebuilds tools, not data; complements snapshots |
 | **Grab Palana** | namespace per agent | idle reaper | none (EFS `/data`) | internal | Vault + proxy secrets, Envoy/OPA egress, Cilium |
-| **KEP-5823** | Kubernetes pod checkpoint/restore | | | — | alpha targeted v1.38, same node, volumes out of scope |
+| **KEP-5823** | Kubernetes pod checkpoint/restore | | | — | alpha targeted v1.37, same node, volumes out of scope |
 | **boat.dev** | hosted sandbox ($0.036/h) | | disk fork from named snapshots | no | |
 
 **Patterns the best ones share:**
@@ -171,7 +171,7 @@ Nobody does all of these together:
 14. **The box holds no state.** Everything that matters is on the disk.
 15. **Multi-step operations go through a durable log,** and every step is safe to repeat.
 16. **A fork gets a fresh identity:** new IDs, secrets, ports, sessions.
-17. **One source of truth:** the daemon's store, not Kubernetes custom resources plus a disk.
+17. **Clear split of truth:** Kubernetes custom resources hold the *desired* state (what environments exist, their class, their node); the node's daemon owns the disk and reports *observed* state. Per-turn snapshots never become Kubernetes objects.
 
 ---
 
@@ -226,7 +226,7 @@ session       ████████        ██████                
  │ front door      wakes environments, holds requests, routes previews │
  │ managers        one actor per environment, one op at a time         │
  │ operation log   SQLite; multi-step ops are durable and safe to rerun│
- │ box driver      start / stop sessions (container or pod)            │
+ │ box driver      start / stop sessions (agent-sandbox Sandbox)       │
  └──────┬──────────────────────────────────────┬──────────────────────┘
         │                                      │ mount
  disk (btrfs): golden/ · envs/<id>/live · envs/<id>/snaps     sessions (boxes)
@@ -240,7 +240,8 @@ session       ████████        ██████                
 | **Manager (actor)** | owns one environment's name and current pointer; does one operation at a time; supervises its session | `actor` (goroutine + channel per environment) |
 | **Operation log** | durable steps for rewind, fork, golden build; replays after a crash | `oplog` (SQLite) |
 | **Front door / wake layer** | the entrances (socket, HTTP previews, webhooks); merges duplicate wake-ups and holds requests | `wake` |
-| **Box driver** | start/stop sessions: local container, or a Kubernetes pod | `driver/local`, `driver/k8s` |
+| **Box driver** | starts and stops sessions by flipping an agent-sandbox `Sandbox` between `Running` and `Suspended` (Kubernetes only, §16.1, §19) | `driver` |
+| **Thin operator** | reconciles this node's `Environment` resources (desired state) and writes status | `operator` |
 | **Setup runner** | builds golden from the repo's definition | `setup` |
 | **T3 hook** | maps T3 checkpoint capture/restore/delete to snapshot/restore/prune | small TS patch in T3 |
 
@@ -281,6 +282,7 @@ session       ████████        ██████                
 1. T3's fork (it already has a `t3_thread_fork` MCP tool), or the agent's `env.fork`.
 2. New environment `t3-91aa`, whose `live/` = a writable copy of the chosen snapshot.
 3. **Post-fork identity hook:** new environment ID, fresh secrets, ports and session tokens. This is the lesson from Lambda SnapStart and from our spike, where copying T3's state duplicated identity and resurrected revoked logins.
+4. **Caveat found in T3's code:** a T3 fork **shares the source thread's worktree** (`ThreadForkService.ts:84-110`), so today it would share the environment too. Either add a small "fork into a new worktree" patch to T3 (~50–150 lines), or state the rule that only agent-made forks (`env_fork`) get their own environment.
 
 ### 10.5 Sleep and wake
 - **Idle** = no turn running, no terminal open, no preview connection, for N minutes (Amp uses 5 min agent idle + 20 min human idle). CPU doesn't count.
@@ -392,6 +394,8 @@ Caveats:
       live/                     writable; T3's worktree points here
         src/  node_modules/  .fern/pg/  (code, packages, DB data)
         .home/.claude  .home/.codex      (agent session files, so resume works)
+        .home/.claude/.credentials.json  ← NOT here: login files are bind-mounted from outside live/
+                                           (or kept in a nested subvolume, which btrfs snapshots skip)
       snaps/
         7f3a/  91bc/  …         read-only, one per turn (named by T3 checkpoint ID)
   oplog.sqlite                  durable operations
@@ -439,6 +443,21 @@ Caveats:
 
 ## 14. The front door and wake layer
 
+### 14.1 The connection layer: Mac as client, Linux machine remote
+The intended workflow is **remote**: your Mac (or phone) runs only the T3 app; the T3 server, Fern, the disks and the boxes run on a remote Linux machine. Most of the connection layer already exists in T3 (verified in `docs/user/remote-access.md`):
+
+| What needs to reach the remote machine | How | Exists today? |
+|---|---|---|
+| **The T3 app → T3 server** | pairing over HTTPS, `t3 serve --tailscale-serve`, **desktop-managed SSH** (the app starts or reuses a server on `user@host` and opens the port forward), or T3 Connect | yes |
+| **Previews (dev servers in boxes)** | T3's **browser tabs belong to the environment** and are streamed to every device; `localhost` on the host is reachable. So Fern only has to forward each box's ports to the host's loopback (as T3's sandbox PR does) | T3 side yes; Fern side to build |
+| **Sharable preview URLs** (outside T3) | the front door's hostname routing behind Tailscale or a tunnel with a wildcard hostname | to build, optional |
+| **The `fern` CLI from the Mac** | `ssh host fern …` in v1; later the daemon's API over Tailscale or HTTPS with a token | to build |
+| **Agent logins** | done once on the remote machine (`claude setup-token`, Codex device login), stored outside environments | yes (CLI features) |
+
+**Practical setup:** one cheap Linux VM (or a cluster) on Tailscale; `fern up` there; in the T3 desktop app, *Add environment → SSH* (or a pairing link). Nothing runs on the Mac except the app.
+
+### 14.2 Where the front door runs
+
 **Where it runs:** inside the Fern daemon, one per machine. It has three entrances:
 1. **A local socket** (`/run/fern.sock`): T3, the CLI and hooks.
 2. **An HTTP listener for previews:** `fix-login.myrepo.<host>` routed by hostname to the environment.
@@ -451,7 +470,7 @@ Caveats:
 - never return an error just because it was asleep
 
 **On Kubernetes:** the environment lives on one machine, but a preview request can land on any machine.
-- **Simplest:** every daemon forwards to the right one. Which machine an environment lives on is a label, or a row in a small shared table.
+- **Simplest:** every daemon forwards to the right one. Which machine an environment lives on is a field on its `Environment` resource.
 - **Later:** a small "edge" Deployment behind the wildcard Ingress that does the lookup.
 
 **Names instead of ports: portless** (Vercel Labs):
@@ -506,20 +525,49 @@ Caveats:
 - It fails closed, and stop/restart is lazy.
 - The `SandboxService` interface (register / start / execTarget / stop / remove / list / forwardedPorts) is implemented with the `docker` CLI.
 
-### 15.3 The four ways to map threads (we chose D, then refined it)
+### 15.3 The four ways to map threads (D chosen; C re-checked and rejected)
 | Model | Verdict |
 |---|---|
 | A. One T3 per user, threads as worktrees | works today; low Kubernetes value |
 | B. One T3 per repo | the fallback if #15350 stalls |
-| C. **One full `t3 serve` per thread** | **rejected:** fights T3 everywhere (see below) |
-| D. One T3 per person per machine; **each thread's session is a pod/container** behind `SandboxService` | **chosen**, refined into the cell + Fern-daemon design |
+| C. **One full `t3 serve` per thread pod** | **rejected after sizing the patch** (below) |
+| D. **One T3 per person (a "cell"); each thread's session is a pod** behind `SandboxService` | **chosen** |
+| D+. D, plus moving a whole cell to a standby node (fed by incremental `btrfs send`) on drain or node loss | **adopt later** |
 
-**Why C fails** (found in the spike plus code research):
-- the app connects to every machine forever, so pods never sleep
-- nothing outside the app can add machines; the upstream attempt, PR #7545 `t3 env add`, was closed by its own author after review
-- "New thread" can't create a pod
-- a copied state duplicates identity, and rewinding resurrects revoked logins (verified)
-- ~310 MiB per pod
+**Why C is not "a little patch"** (sized against T3's code, 2026-10-17):
+
+| C patch | Lines |
+|---|---|
+| Fleet sync (the app learns about new pods) | 250–300 |
+| Lazy connect (registering an environment connects immediately today: `registry.ts:544-578`) | 150–250 |
+| New thread creates a pod (`ChatView.tsx:3192-3235`, plus mobile) | 350–550 |
+| Fork into a new pod (`Orchestrator.ts:3536` + Fern cleanup) | 100–200 |
+| Hide per-thread rows in Settings → Connections | 30–60 |
+| Checkpoint hook (same as D) | ~100 |
+| **Total** | **~1,050–1,550 + tests** |
+
+- **It's client code** (web, desktop, mobile). You would ship your own T3 apps forever; a patched phone app isn't realistic. D needs ~550–950 lines, all on the server, and works with the official apps.
+- **C still can't put a thread on any node.** T3 reads the worktree, the project's `.git` and `~/.claude` as local files (`ProviderTurnStartService.ts:446-467`, `workflowFileRead.ts:11`, `CheckpointService.ts`), so each thread's disk pins its pod to a node anyway.
+- **Other costs:** ~310 MiB of T3 per awake thread, 4–7 s wakes, a Codex login copy per pod (its token refresh breaks), and lazy connect makes background threads show stale status.
+- **What helps C for free:** repository grouping (`projectGrouping.ts`, default) shows N per-thread environments as one project.
+
+**The mapping for D (the chosen model):**
+
+| T3 / Fern element | Kubernetes or Fern |
+|---|---|
+| T3 app (laptop, phone) | outside the cluster, the official unpatched app, via an Ingress/Service or SSH |
+| Person | Namespace + ResourceQuota + NetworkPolicy |
+| T3 server | **one pod per person** (1-replica StatefulSet + Service) = the **cell**; the scheduler picks the node, the disk keeps it there |
+| Fern daemon | DaemonSet + CSI node plugin (+ the thin operator, §19) |
+| Disk | the node's btrfs pool, one subvolume per environment, no PVCs |
+| Project | a git checkout in the cell's pool + a row in T3's database; no Kubernetes object |
+| Thread | a row in T3's database = one Fern `Environment` |
+| Worktree | the environment's `live/` subvolume, at the path T3 uses |
+| Turn / checkpoint | a T3 git checkpoint ref + a Fern read-only snapshot with the same ID; no Kubernetes object |
+| Session | an agent-sandbox `Sandbox` owned by the `Environment`; its pod mounts the disk through the CSI driver and is deleted on sleep (`operatingMode: Suspended`) |
+| Size class | `EnvironmentClass` CRD → RuntimeClass + resources + nodeSelector |
+
+**One T3 server or many?** One per person. The chain is person → cell (one T3 server) → projects → threads; each thread has one worktree and one environment; an environment has many snapshots and at most one session pod at a time. A person who outgrows a node gets a second cell; the app shows two machines, but the sidebar merges them into one project.
 
 ### 15.4 Spike results (run in Docker and k3s)
 - `t3 serve` in a container: **158 MB image**, **2.9 s cold start**, **~310 MiB idle**. No node-pty build was needed with the npm binary.
@@ -539,14 +587,17 @@ Caveats:
 
 ## 16. Kubernetes: mapping, scaling, setup
 
-### 16.1 Do we need Kubernetes?
-**No for the core:** everything works on one Linux machine.
+### 16.1 Kubernetes only, even for one person
+**Decision (2026-10-17): Fern runs on Kubernetes only.** One person on one machine runs a single-node k3s. There is one code path; a small fake driver exists only for fast unit tests.
 
-**Yes for:**
-- teams (one cell per person)
-- benchmark forks spread over machines (forks on one machine skew each other's numbers)
+**Why:**
+- Even one person needs what Kubernetes gives for free: gVisor (RuntimeClass), deny-by-default networking, CPU/memory limits, restarts and supervision, Secrets, an ingress, metrics. A separate local driver would have to rebuild all of it.
+- Two backends would spend half the effort on a mode the target use case doesn't need.
+- The riskiest piece (a gVisor pod using a btrfs subvolume through our CSI driver) only exists on Kubernetes, so it gets tested from week 0.
 
-**Order:** the engine and daemon first (weeks 1–2, identical either way), then the Kubernetes packaging.
+**Costs, accepted:**
+- k3s idles at ~1.2–1.45 GB RAM ([k3s profiling](https://docs.k3s.io/reference/resource-profiling)), so the first node needs 8 GB.
+- A wake is ~1–2.5 s slower than a plain container (the spike measured 3.7–6.9 s pod restarts vs 2.9–4.3 s for Docker), still inside the 15 s budget.
 
 ### 16.2 The rule: keep the fast path off the Kubernetes API
 - A `VolumeSnapshot` goes through controllers and the API server, typically **≥1 s** (*to be measured*). Restoring means a new PVC and a reschedule.
@@ -560,10 +611,10 @@ Caveats:
 | Project | a folder on that machine's disk, with no object |
 | **Thread** | a Fern **environment**, named by the thread ID; optionally a read-only `Environment` resource for `kubectl` |
 | Thread's disk | a **btrfs subvolume, not a PVC** (a PVC per thread is slow and heavy) |
-| Thread's session | a **pod created by the machine's Fern daemon itself** (no operator), labelled `t3/thread=…` |
+| Thread's session | an **agent-sandbox `Sandbox` owned by the thread's `Environment`**. That node's Fern daemon (a kubelet-style node agent, §19) creates it and sets `operatingMode`; the agent-sandbox controller creates the pod, labelled `t3/thread=…` |
 | Mounting the thread's disk | **a CSI inline (ephemeral) volume:** `csi: { driver: fern, volumeAttributes: { env: t3-8f2c } }`. Kubernetes calls Fern to bind-mount that subvolume. There's no raw hostPath in user pods. |
 | Turn snapshot | a read-only subvolume (no object); `VolumeSnapshot` only for backups |
-| Sleep / wake | pod deleted / created |
+| Sleep / wake | `operatingMode: Suspended` / `Running` (the agent-sandbox controller deletes / creates the pod) |
 | Size class (`EnvironmentClass`) | RuntimeClass (runc / gVisor / Kata), resources, node selector, warm pool |
 | Per-person limits | a namespace per person + ResourceQuota + NetworkPolicy |
 
@@ -573,7 +624,7 @@ Caveats:
 - **namespaces**
 - **RuntimeClass**
 - resources and quotas
-- templates and warm pools (agent-sandbox `SandboxTemplate` / `SandboxWarmPool`)
+- templates and warm pools (agent-sandbox `SandboxTemplate` / `SandboxWarmPool`; not used in v1, §19)
 
 **Different OSes:**
 - other Linux distros: trivial
@@ -612,7 +663,7 @@ curl -fsSL get.fern.dev | sh      # or: fern up
 2. No btrfs/ZFS? Create a **loop-mounted btrfs image file**.
 3. One Helm chart:
    - Fern DaemonSet + CSI driver
-   - agent-sandbox resources (optional)
+   - the agent-sandbox controller (a chart dependency; Fern uses only its `Sandbox` object)
    - gVisor RuntimeClass (optional)
    - default NetworkPolicy and quotas
 4. Start the T3 server pod (patched build with the hook) on the machine holding the disk.
@@ -693,21 +744,28 @@ Agent tools (MCP): `env_snapshot`, `env_restore`, `env_fork`, `env_exec`, `env_d
 
 ## 19. Decision record: actors, Durable Objects, Temporal, operators
 
+*Revised 2026-10-17 after a dedicated review (notes in the private research folder).*
+
 | Option | Decision | Why |
 |---|---|---|
-| **Erlang/OTP actors** | **adopt the pattern** | one goroutine + mailbox per environment; supervision; restart limits; let it crash; boxes are watched by Fern, not tied to T3 |
-| **Virtual actors (Orleans, Dapr, Akka sharding)** | **adopt the pattern** | always addressable, activated on demand, deactivated when idle. Their hardest problem (where does an actor live?) disappears: the disk decides. Idle = no incoming work. |
-| **Cloudflare Durable Objects** | **don't use; copy the ideas** | DO = actor + storage + alarms + hibernation; copy "don't ack a turn until the snapshot is durable" and "no commands during a rewind". Running on Cloudflare would put the coordinator far from the disks. **Later use:** a hosted front door that holds webhooks while you're offline (T3's relay already does this with a DO). |
-| **Temporal** | **don't use** | needs a cluster plus a DB; our steps take milliseconds to seconds; history limits (~51,200 events) fight environments that live for months |
-| **DBOS / Restate ideas** | **adopt in miniature** | the SQLite operation log: durable, safe-to-repeat steps, replay after a crash |
-| **Kubernetes operator + CRDs as truth** | **rejected** | two sources of truth (resource vs disk); the daemon creates pods directly; resources only as read-only status |
-| **`kubectl exec` as the data plane** | **rejected** | fragile (kubelet stream timeouts, API-server load); use `sandboxd` (gRPC + PTY) or the node daemon |
+| **Erlang/OTP actors** | **adopt the pattern** | one goroutine + mailbox per environment; supervision; restart limits; let it crash |
+| **Actor rules, made precise** | **adopt** | only **mutations** (snapshot, restore, fork, delete) queue one at a time; running execs and golden builds are tracked separately, and a restore cancels them using the generation number. Timers (idle sleep, fork TTL, retention) are stored in SQLite so they survive restarts, like Durable Objects' alarms. |
+| **Virtual actors (Orleans, Dapr, Akka sharding)** | **adopt the pattern** | always addressable, activated on demand, deactivated when idle; the disk decides placement; idle = no incoming work |
+| **Cloudflare Durable Objects** | **don't use; copy the ideas** | "don't ack a turn until the snapshot is durable", "no mutations during a rewind", alarms. Later: a hosted front door for webhooks while you're offline |
+| **Temporal** | **don't use** | its history limit is solvable ("continue as new"); the real reasons are a second system to run, a central service while our state lives on one node, and added latency |
+| **DBOS Go / Restate** | **don't use; same idea in miniature** | DBOS Go now runs on SQLite, but Fern v1's intent log already exists, is tested, and adds generation fencing |
+| **Kubernetes: thin, kubelet-style operator** | **adopted (replaces "no operator")** | `Environment` and `EnvironmentClass` CRDs hold desired state (repo, class, retention, node); each node's daemon reconciles only its own node's environments and writes status; each `Environment` owns one agent-sandbox `Sandbox`, which owns the session pod (garbage collection). Snapshot / restore / exec / wake go straight to the daemon, like `kubectl exec` goes to the kubelet; **per-turn snapshots never become Kubernetes objects.** Built with controller-runtime. Removes the homemade "which node owns what" table. |
+| **Exec plane** | **in-box agent (`fern-init`)** | `kubectl exec` now uses WebSockets (1.31), so "fragile" is dated; the real reasons are no reattach and all traffic through the API server. `fern-init` must keep agent terminals alive across daemon restarts and allow reattaching; speak agent-sandbox's `sandboxd` protocol where possible |
+| **Security of mounts and pods** | **new decisions** | the CSI driver only mounts a pod's **own** environment (it checks the requesting pod's identity); an admission policy limits the daemon to creating `Sandbox` objects pinned to its own node with allowed runtimes; user namespaces on for boxes (GA in 1.36); **login files never in `live/`** (bind-mounted, or in a nested subvolume that snapshots skip) |
+| **Docker inside the box** | **adopt as a class** | many repos start Postgres with `docker compose`: a `docker` class using Kata or gVisor (Sysbox where available) |
+| **Warm pools vs inline volumes** | **no warm pools in v1** | a pod's volumes are fixed at creation, so a pre-started pod can't receive an environment's disk later |
+| **Quotas** | **btrfs simple quotas** (Linux 6.7+) | avoids the cost of classic qgroups |
+| **Snapshots as named, frozen copies** | **adopted** | snapshot = value, environment = pointer. (Not "content-addressed": btrfs snapshots are named; the golden key is a hash of inputs.) |
 | **Memory snapshots by default** | **rejected** | fragile, large, connections drop |
-| **Content-addressed snapshots** | **adopted** | snapshot = value, environment = pointer (git, OCI, Nix, Neon, Dolt, Modal, Sprites) |
-| **Plan 9 namespaces / capabilities** | **adopt** | grant access by mounting, not by permission checks; per-environment tokens; avoid shared `~/.claude` mounts across environments |
-| **FUSE on the hot path** | **rejected** | `node_modules` is slow over FUSE; btrfs already exposes snapshots as folders |
-
----
+| **Plan 9 namespaces / capabilities** | **adopt** | grant access by mounting; per-environment tokens |
+| **FUSE on the hot path** | **rejected** | slow for `node_modules` |
+| **agent-sandbox** | **build on its `Sandbox` object (revised 2026-10-18)** | It is the SIG Apps standard (v1.0.x, `v1beta1`). Its `podTemplate` is a plain PodSpec, so our CSI volume, gVisor RuntimeClass and node pinning fit directly; `operatingMode: Running/Suspended` is our wake/sleep. It replaces only the pod-creation code (~5–10% of Fern). Everything it lacks is Fern: snapshots outside GKE, rewind, fork with data, automatic sleep and wake (roadmap: *planned*), golden builds, T3. **Not used:** `SandboxWarmPool` / `SandboxClaim` (volumes are fixed at pod creation), its PVCs (our disk is btrfs), `shutdownTime` (the actor decides). `fern-init` speaks the `sandboxd` protocol so its SDKs work. Costs: one more controller, a beta API, possibly a slower wake (measure in week 0). Contribution plan in §21.4 |
+| **Others** | | crun: adopt (faster starts). Kueue: later, for benchmark forks. Knative/KEDA: reject (prior art for the wake layer). Virtual Kubelet, Cluster API, NATS/Redis/Raft: reject. Kubernetes Lease: only for leader election. OpenTelemetry: adopt (one trace per wake). TopoLVM / OpenEBS / Ceph / overlayfs: not needed with node-local btrfs |
 
 ## 20. Relationship to today's Fern repo
 
@@ -730,38 +788,58 @@ Fern v1 (this repository at tag `v1-final`, 393 commits, Go) is "a self-hosted G
 
 ---
 
-## 21. Roadmap (about 8 weeks)
+## 21. Roadmap (about 8 weeks, Kubernetes first)
 
-1. **Weeks 1–2: the engine on one Linux machine**
-   - store (btrfs, loop-mounted pool), actor per environment, op log (reuse Fern's intent log), local box driver
-   - golden from `.agents/setup` / `resume` / services
-   - **T3 checkpoint hook:** "Revert files too" also reverts the DB
-   - **re-measure everything on Linux** (snapshot time, Postgres consistency, wake time)
-2. **Weeks 3–4: fork, agent tools, previews**
-   - fork with fresh identity
-   - MCP `env_*` tools + Code Mode API
-   - portless integration
-   - sleep and wake with the front door
-3. **Weeks 5–6: Kubernetes packaging**
-   - DaemonSet + CSI inline volumes + pods created by the daemon
-   - `EnvironmentClass`, quotas, NetworkPolicy, gVisor
-   - `fern up` on k3s
-   - (if #15350 has landed) the Fern `SandboxService` backend
-4. **Weeks 7–8: proof and polish**
-   - benchmark forks across machines
-   - failure analysis (node loss, mid-turn crash)
-   - design doc, demo video, blog post
-5. **Alongside:**
-   - propose the checkpoint hook to T3
-   - one agent-sandbox PR (snapshot API #694 or fsfreeze #1237); sign the CNCF CLA early
-6. **Stretch:**
-   - Alchemy layer (`.fern/env.ts`, stages = threads)
-   - memory checkpoints
-   - ACP
-   - moving environments between machines via `send`
+*Revised 2026-10-17: "engine first, Kubernetes later" built throwaway local code and left the riskiest piece for last.*
 
+**The week-by-week plan now lives in [roadmap.md](roadmap.md)** (2026-10-18): an MVP (`v0.1`) in about 3 weeks, where "Revert files too" also restores the database, then v1 by week 8. The table below is the v1 summary; the demo, cut list, machines and contribution plan follow.
 
----
+| Week | Goal |
+|---|---|
+| **0 (2 days, local)** | local lab (k3s in a privileged Docker container, loop-mounted btrfs), the agent-sandbox controller, a tiny CSI plugin. **Prove a `Sandbox` can use a btrfs subvolume through our CSI inline volume;** try gVisor; time `Suspended` → `Running` |
+| **1 (local)** | the engine from the CLI: store, daemon API, `Sandbox` driver, CSI, `fern-init`: snapshot → break → restore → data is back |
+| **2 (local)** | actor, op log, generation numbers, idle sleep and wake on exec, Postgres consistency, small crash test |
+| **3 (local)** | T3 on top (checkpoint hook, `fern-claude` wrapper, two T3 settings, a real Claude turn): the MVP works locally |
+| **4 (remote from here)** | go remote: VPS, gVisor, real timings, Mac/phone over SSH → **MVP `v0.1`**; then golden snapshots, agent fork, previews through the front door; **first agent-sandbox PR:** suspend/resume benchmark on k3s + gVisor (§21.4) |
+| **5** | `Environment` / `EnvironmentClass` CRDs (thin operator); security (CSI authorization, admission policy, user namespaces); Helm / `fern up` |
+| **6** | crash harness at scale, terminal reattach, second node, Grafana |
+| **7** | measurements, failure-analysis doc, record the demo, agent-sandbox bug-fix PRs |
+| **8** | buffer, blog post, upstream proposals (T3 checkpoint hook; agent-sandbox auto-suspend #968 and snapshot provider #694, with Fern as working code) → **`v1.0`** |
+
+### 21.1 The demo (about 2.5 minutes, 2-node k3s)
+| Time | Action | What they see |
+|---|---|---|
+| 0:00 | `kubectl get ds,csidriver,runtimeclass,environments,sandboxes` | the Fern DaemonSet on both nodes, the CSI driver, gVisor, the CRDs. "Sessions are standard agent-sandbox `Sandbox` objects; their disks are btrfs subvolumes, not PVCs." |
+| 0:15 | new thread | the environment comes from golden in milliseconds; the first command starts a gVisor pod with an inline CSI volume |
+| 0:40 | a turn: a migration drops `users.email` | the snapshot takes milliseconds; "this path makes zero Kubernetes API calls" |
+| 1:00 | "Revert files too" | code and Postgres both come back |
+| 1:20 | fork ×3 | three pods, each with its own Postgres on :5432, ~0 extra bytes |
+| 1:45 | **live failure:** force-delete the Fern daemon pod in the middle of a rewind | the DaemonSet restarts it, the op log replays, the environment ends consistent; "CI runs thousands of random crash points" |
+| 2:10 | idle sleep, then 20 requests at once | the pod is gone; requests get 503 then 200; exactly one pod is created |
+| 2:30 | numbers slide + "why snapshots aren't CRDs" | |
+
+- **Must be real:** k3s, DaemonSet, CSI, btrfs, gVisor, Postgres in the box, crash recovery, wake-on-request, metrics.
+- **Can be stubbed:** the live agent turn (a script; show one real `claude` turn in the recording), golden pre-built (show cold vs golden as a number), T3 as a short clip.
+- **Numbers:** snapshot time at 0 / 500 MB / 5 GB (flat), restore, fork time and bytes, wake time by stage, golden vs cold, RAM while asleep (0), Postgres recoveries N/N, crash tests N/N, Kubernetes API calls per turn (0).
+- **Don't kill a node live:** environments live on one node; put that in the written failure analysis (and D+ cell moves later).
+
+### 21.2 Cut from v1
+A local (non-Kubernetes) driver (the local lab runs k3s in Docker instead), ZFS, Alchemy, Code Mode, portless, the `SandboxService` backend, Firecracker/Kata (cheap VMs lack nested virtualization), devcontainer and `t3.json` fallbacks, webhooks, Codex (Claude first), most MCP tools, warm pools (and agent-sandbox claims), multi-person cells.
+
+### 21.3 Machines
+An **8 GB first node** (e.g. Netcup VPS 1000 G12 ~€10/month, or Hetzner CX/CAX if available; check consoles), plus a **4 GB second node** from week 6. About €15–20/month in total. Your Mac only runs the T3 app (§14.1).
+
+### 21.4 Contributing to agent-sandbox
+Fern uses agent-sandbox, so stress-testing it is part of the work, and what we find goes upstream. Its roadmap lists exactly Fern's pieces as *planned*: Auto Suspend/Resume, Scale to Zero, Extended Benchmarking, Publish Benchmarking Methodology, Measure & Improve TFFI. Snapshots exist only on GKE.
+
+| Order | Contribution | Related |
+|---|---|---|
+| 1 | Benchmark suspend/resume on k3s + gVisor (not GKE); publish the method and results as a docs PR | roadmap: benchmarking, TFFI |
+| 2 | Fix the bugs the stress test finds, each with a reproduction | e.g. #837 (status stale at zero), #952 (when a resumed pod is ready) |
+| 3 | Suspend/resume metrics | #1155 |
+| 4 | Join the design discussions with working code: Fern's wake-on-touch and btrfs + CSI snapshots | #968, #849 (auto-suspend, idle policy); #694, #949 (snapshot provider); #1237 (guest agent ≈ `fern-init`) |
+
+**Rules:** read `CONTRIBUTING.md`; sign the CNCF CLA before the first PR; small PRs first; large features need a KEP and maintainer agreement, which can take months. Only merged PRs count.
 
 ## 22. Naming
 
@@ -782,10 +860,11 @@ Fern v1 (this repository at tag `v1-final`, 393 commits, Go) is "a self-hosted G
 
 **Big risks:**
 1. **T3 accepting the checkpoint hook.** Fallback: a patched build.
-2. **PR #15350** may change, stall or never merge.
-3. **Setup friction** for real repos: golden builds failing, services not respecting `PORT`.
-4. **Subscription terms.** Stay single-user, interactive, own login.
-5. **Scope creep:** Alchemy, memory snapshots, ACP and Code Mode beyond the basics are stretch goals.
+2. **agent-sandbox API changes** (`v1beta1`). Pin a version; only the `driver` package touches it.
+3. **PR #15350** may change, stall or never merge.
+4. **Setup friction** for real repos: golden builds failing, services not respecting `PORT`.
+5. **Subscription terms.** Stay single-user, interactive, own login.
+6. **Scope creep:** Alchemy, memory snapshots, ACP and Code Mode beyond the basics are stretch goals.
 
 **Open technical questions:**
 - **Wake time:** session start + resume + services (target ≤15 s, so T3's first connection attempt succeeds).
@@ -794,7 +873,11 @@ Fern v1 (this repository at tag `v1-final`, 393 commits, Go) is "a self-hosted G
 - **Rewind coordination:** is the hook point the right place for revert-with-data in all of T3's flows (edit from here, revert files only, thread fork)?
 - **Kubernetes CSI inline volume + btrfs subvolume:** mount semantics under gVisor.
 - **Node loss:** environments are tied to their machine. Recovery = restore from shipped snapshots. Write this up as a failure analysis.
-- **btrfs quotas** (qgroups have a performance cost) vs XFS project quotas (today's Fern).
+- **btrfs quotas:** simple quotas (Linux 6.7+) vs classic qgroups.
+- **CSI driver authorization:** confirm the driver can reliably check the requesting pod's identity; confirm the admission policy can read the node name from node-bound tokens.
+- **Late mounting under gVisor** and whether `sandboxd` supports reattach.
+- **agent-sandbox fit:** our CSI inline volume in a `Sandbox` `podTemplate` under gVisor; `Suspended` → `Running` time; whether a force-deleted pod is recreated; the pod → `Sandbox` → `Environment` ownership chain for CSI mount checks ("Strict Sandbox-to-Pod Mapping" is still in progress upstream).
+- **Where Claude's transcripts live:** inside `live/` (rewound with the disk) or outside (T3 handles conversation rollback itself).
 
 **Unverified or conflicting:**
 - Sprites' checkpoint timing (300 ms, ~1 s, or 10–30 s across pages).
@@ -813,7 +896,7 @@ Fern v1 (this repository at tag `v1-final`, 393 commits, Go) is "a self-hosted G
 | **"orbd as a T3 backend" (v1 framing)** | weak: T3 and T3 Connect already cover remote machines |
 | **One full `t3 serve` per thread pod + a fleet broker** | fights T3's client: the app never lets pods sleep, nothing outside can add machines, "New thread" can't make a pod, identity is duplicated on fork, revoked logins come back on rewind (§15.3) |
 | **Splitting the agent CLI into another pod via `binaryPath`** | T3 owns files, history and checkpoints locally, so the files would be split |
-| **A Kubernetes operator with an `AgentSession` CRD as truth** | two sources of truth; the daemon is enough |
+| **A heavy operator with per-turn objects (`AgentSession`, `VolumeSnapshot` per turn)** | slow and noisy; replaced by a thin, kubelet-style operator where CRDs hold only desired state (§19) |
 | **`kubectl exec` relay** | fragile data plane |
 | **Per-thread PVCs through CSI snapshots for every turn** | seconds, not milliseconds |
 | **Placeholder-token egress proxy for Claude/Codex logins** | the terms forbid intermediating credentials; OAuth tokens refresh themselves |
@@ -835,12 +918,13 @@ Fern v1 (this repository at tag `v1-final`, 393 commits, Go) is "a self-hosted G
 | **Environment** | a thread's named, lasting workspace: a pointer + `live/` |
 | **Snapshot** | a frozen, read-only copy of `live/` at a moment |
 | **Golden** | a snapshot built from the repo's setup definition; new environments start from it |
-| **Session / box** | temporary compute (container or pod) running on top of `live/` |
+| **Session / box** | temporary compute (a pod) running on top of `live/` |
+| **Sandbox** | agent-sandbox's object for one stateful pod; Fern's session, switched between `Running` and `Suspended` |
 | **Front door / wake layer** | the daemon's entrances; wakes sleeping environments and holds requests |
 | **Manager / actor** | the one goroutine that owns an environment and processes its messages in order |
 | **Operation log** | SQLite record of multi-step operations, for crash recovery |
 | **Cell** | one person's T3 server + sessions + disk on one machine |
-| **EnvironmentClass** | a size/isolation profile (runtime, CPU, memory, node pool, warm pool) |
+| **EnvironmentClass** | a size/isolation profile (runtime, CPU, memory, node pool) |
 | **CoW (copy-on-write)** | copies share blocks until one side changes |
 | **CSI inline volume** | a standard Kubernetes way for a pod to ask a driver (Fern) to mount something |
 | **T3 hook** | the small patch that calls Fern on checkpoint capture/restore/delete |
