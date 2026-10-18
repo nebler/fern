@@ -1,0 +1,5 @@
+services:
+  postgres:
+    run: ./scripts/postgres.sh
+    stop: pg_ctl stop -D .fern/pg -m fast
+    ready: pg_isready -q
