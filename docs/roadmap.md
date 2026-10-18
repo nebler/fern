@@ -60,6 +60,8 @@ These keep T3 changes to one small hook and skip whole components.
 - Go builds and unit tests in a `golang` container
 - the agent-sandbox controller and Fern's chart installed into that k3s
 
+**Agent briefs:** weeks 0–1 are [briefs/iteration-1.md](briefs/iteration-1.md), the first thing to review.
+
 ### Week 0 (2 days, local): prove the riskiest piece
 - **Build:** the local lab, the agent-sandbox controller, a minimal CSI node plugin.
 - **Done when:** a `Sandbox` (runc) uses a btrfs subvolume through our CSI inline volume; Postgres runs in it; a host snapshot and restore work; `Suspended` → `Running` is timed. (E0, local)
