@@ -44,19 +44,19 @@ func main() {
 func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "daemon" {
 		if err := runDaemon(ctx, args[1:], stderr); err != nil {
-			fmt.Fprintf(stderr, "fern daemon: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "fern daemon: %v\n", err)
 			return 1
 		}
 		return 0
 	}
 	cmd, err := parse(args)
 	if err != nil {
-		fmt.Fprintf(stderr, "fern: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "fern: %v\n", err)
 		return 2
 	}
 	code, err := cmd.run(ctx, api.NewClient(cmd.socket), stdin, stdout, stderr)
 	if err != nil {
-		fmt.Fprintf(stderr, "fern %s: %v\n", cmd.name, err)
+		_, _ = fmt.Fprintf(stderr, "fern %s: %v\n", cmd.name, err)
 		return 1
 	}
 	return code
@@ -170,9 +170,9 @@ func (c command) run(ctx context.Context, cl *api.Client, stdin io.Reader, stdou
 			return 0, err
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "ENV\tSTATE\tHEAD\tREPO\tCREATED")
+		_, _ = fmt.Fprintln(tw, "ENV\tSTATE\tHEAD\tREPO\tCREATED") // tabwriter reports errors on Flush
 		for _, e := range envs {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", e.ID, e.State, e.Head, e.Repo, e.Created.Format(time.RFC3339))
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", e.ID, e.State, e.Head, e.Repo, e.Created.Format(time.RFC3339))
 		}
 		return 0, tw.Flush()
 	case "rm":
@@ -182,25 +182,25 @@ func (c command) run(ctx context.Context, cl *api.Client, stdin io.Reader, stdou
 		if err != nil {
 			return 0, err
 		}
-		fmt.Fprintf(stdout, "snapshot %s/%s took %s\n", c.env, snap.ID, ms(time.Since(start)))
-		return 0, nil
+		_, err = fmt.Fprintf(stdout, "snapshot %s/%s took %s\n", c.env, snap.ID, ms(time.Since(start)))
+		return 0, err
 	case "snapshots":
 		snaps, err := cl.Snapshots(ctx, c.env)
 		if err != nil {
 			return 0, err
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "SNAPSHOT\tCREATED")
+		_, _ = fmt.Fprintln(tw, "SNAPSHOT\tCREATED")
 		for _, s := range snaps {
-			fmt.Fprintf(tw, "%s\t%s\n", s.ID, s.Created.Format(time.RFC3339))
+			_, _ = fmt.Fprintf(tw, "%s\t%s\n", s.ID, s.Created.Format(time.RFC3339))
 		}
 		return 0, tw.Flush()
 	case "restore":
 		if err := cl.Restore(ctx, c.env, c.snap); err != nil {
 			return 0, err
 		}
-		fmt.Fprintf(stdout, "restore %s to %s took %s\n", c.env, c.snap, ms(time.Since(start)))
-		return 0, nil
+		_, err := fmt.Fprintf(stdout, "restore %s to %s took %s\n", c.env, c.snap, ms(time.Since(start)))
+		return 0, err
 	case "sleep", "wake":
 		op := cl.Sleep
 		if c.name == "wake" {
@@ -209,8 +209,8 @@ func (c command) run(ctx context.Context, cl *api.Client, stdin io.Reader, stdou
 		if err := op(ctx, c.env); err != nil {
 			return 0, err
 		}
-		fmt.Fprintf(stdout, "%s %s took %s\n", c.name, c.env, ms(time.Since(start)))
-		return 0, nil
+		_, err := fmt.Fprintf(stdout, "%s %s took %s\n", c.name, c.env, ms(time.Since(start)))
+		return 0, err
 	case "exec":
 		return c.exec(ctx, cl, stdin, stdout, stderr)
 	}
@@ -241,8 +241,8 @@ func (c command) create(ctx context.Context, cl *api.Client, stdin io.Reader, st
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "environment %s is %s\n", env.ID, env.State)
-	return nil
+	_, err = fmt.Fprintf(stdout, "environment %s is %s\n", env.ID, env.State)
+	return err
 }
 
 func (c command) exec(ctx context.Context, cl *api.Client, stdin io.Reader, stdout, stderr io.Writer) (int, error) {

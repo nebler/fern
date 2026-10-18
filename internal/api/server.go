@@ -258,12 +258,12 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	defer box.CloseNow()
+	defer func() { _ = box.CloseNow() }()
 	client, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return // Accept has answered the client.
 	}
-	defer client.CloseNow()
+	defer func() { _ = client.CloseNow() }()
 	if err := boxexec.Proxy(r.Context(), client, box); err != nil {
 		s.log.DebugContext(r.Context(), "exec relay ended", slog.String("env", env.ID), slog.Any("error", err))
 	}

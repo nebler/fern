@@ -173,7 +173,7 @@ func (s *Store) List(ctx context.Context) ([]Env, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list environments: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var envs []Env
 	for rows.Next() {
 		env, err := scanEnv(rows)
@@ -252,7 +252,7 @@ func (s *Store) Snapshots(ctx context.Context, envID string) ([]Snapshot, error)
 	if err != nil {
 		return nil, fmt.Errorf("list snapshots of %s: %w", envID, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var snaps []Snapshot
 	for rows.Next() {
 		var snap Snapshot
@@ -350,9 +350,11 @@ func (s *Store) removeDisk(ctx context.Context, id string) error {
 	return os.RemoveAll(dir)
 }
 
-func (s *Store) envDir(id string) string           { return filepath.Join(s.root, "envs", id) }
-func (s *Store) livePath(id string) string         { return filepath.Join(s.envDir(id), "live") }
-func (s *Store) snapPath(id, snapID string) string { return filepath.Join(s.envDir(id), "snaps", snapID) }
+func (s *Store) envDir(id string) string   { return filepath.Join(s.root, "envs", id) }
+func (s *Store) livePath(id string) string { return filepath.Join(s.envDir(id), "live") }
+func (s *Store) snapPath(id, snapID string) string {
+	return filepath.Join(s.envDir(id), "snaps", snapID)
+}
 
 func scanEnv(row interface{ Scan(...any) error }) (Env, error) {
 	var env Env
@@ -390,7 +392,7 @@ func syncfs(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return unix.Syncfs(int(f.Fd()))
 }
 

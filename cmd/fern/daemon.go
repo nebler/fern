@@ -49,7 +49,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	kube, err := kubeClient()
 	if err != nil {
 		return err

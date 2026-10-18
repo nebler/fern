@@ -155,7 +155,7 @@ func isMountpoint(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	sc := bufio.NewScanner(f)
 	for sc.Scan() {
 		// Field 5 is the mount point, with spaces and the like octal-escaped.

@@ -135,14 +135,14 @@ func (c *Client) Exec(ctx context.Context, env string, req boxexec.Request, stdi
 	conn, resp, err := websocket.Dial(ctx, u, &websocket.DialOptions{HTTPClient: c.hc})
 	if err != nil {
 		if resp != nil && resp.Body != nil {
-			defer resp.Body.Close()
+			defer func() { _ = resp.Body.Close() }()
 			if apiErr := decodeError(resp); apiErr != nil {
 				return 0, apiErr
 			}
 		}
 		return 0, fmt.Errorf("exec in %s: %w", env, err)
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	return boxexec.Run(ctx, conn, req, stdin, stdout, stderr, resize)
 }
 
@@ -166,7 +166,7 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, co
 	if err != nil {
 		return fmt.Errorf("%s %s: %w", method, path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= http.StatusMultipleChoices {
 		if apiErr := decodeError(resp); apiErr != nil {
 			return apiErr
@@ -185,8 +185,8 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, co
 // decodeError reads a typed error from resp, or returns nil if it has none.
 func decodeError(resp *http.Response) *Error {
 	var e Error
-	if json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&e) != nil || e.Code == "" {
-		return nil
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&e); err == nil && e.Code != "" {
+		return &e
 	}
-	return &e
+	return nil
 }

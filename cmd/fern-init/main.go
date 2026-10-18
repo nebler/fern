@@ -70,7 +70,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)
 			return
 		}
-		fmt.Fprintln(w, "ok")
+		_, _ = fmt.Fprintln(w, "ok")
 	})
 	srv := &http.Server{
 		Addr:              ":" + strconv.Itoa(boxexec.Port),
@@ -100,11 +100,11 @@ func run(ctx context.Context, log *slog.Logger) error {
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		return fmt.Errorf("serve exec: %w", err)
-	}
 	if err == nil {
-		<-serveErr
+		err = <-serveErr // the server has stopped: ErrServerClosed
+	}
+	if !errors.Is(err, http.ErrServerClosed) {
+		return fmt.Errorf("serve exec: %w", err)
 	}
 	return nil
 }

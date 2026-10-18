@@ -85,7 +85,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return // Accept has answered the client.
 	}
-	defer conn.CloseNow()
+	defer func() { _ = conn.CloseNow() }()
 	conn.SetReadLimit(readLimit)
 	var req Request
 	if err := wsjson.Read(r.Context(), conn, &req); err != nil {
@@ -96,7 +96,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	p, err := s.start(ctx, conn, req)
 	if err != nil {
-		fmt.Fprintf(frames(r.Context(), conn, frameStderr), "exec: %v\n", err)
+		_, _ = fmt.Fprintf(frames(r.Context(), conn, frameStderr), "exec: %v\n", err)
 		finish(r.Context(), conn, 127)
 		return
 	}
@@ -105,9 +105,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// cancels the command.
 	var reader sync.WaitGroup
 	reader.Go(func() {
-		if readInput(r.Context(), conn, p) != nil {
-			cancel()
-		}
+		readInput(ctx, conn, p)
+		cancel()
 	})
 	code := p.wait(s.log)
 	finish(r.Context(), conn, code)
@@ -172,12 +171,12 @@ func finish(ctx context.Context, conn *websocket.Conn, code int) {
 }
 
 // readInput copies stdin frames to the command and applies resizes until the
-// connection fails.
-func readInput(ctx context.Context, conn *websocket.Conn, p *process) error {
+// connection closes.
+func readInput(ctx context.Context, conn *websocket.Conn, p *process) {
 	for {
 		_, data, err := conn.Read(ctx)
 		if err != nil {
-			return err
+			return
 		}
 		if len(data) == 0 {
 			continue
@@ -346,7 +345,9 @@ func Proxy(ctx context.Context, a, b *websocket.Conn) error {
 	go func() { errc <- forward(ctx, b, a) }()
 	err := <-errc
 	cancel()
-	<-errc
+	if err2 := <-errc; err == nil {
+		err = err2
+	}
 	return err
 }
 

@@ -6,6 +6,8 @@ require (
 	github.com/coder/websocket v1.8.15
 	github.com/container-storage-interface/spec v1.13.0
 	github.com/creack/pty v1.1.24
+	github.com/google/go-cmp v0.7.0
+	go.uber.org/goleak v1.3.0
 	golang.org/x/sync v0.24.0
 	golang.org/x/sys v0.49.0
 	golang.org/x/term v0.47.0
