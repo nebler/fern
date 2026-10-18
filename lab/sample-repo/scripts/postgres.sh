@@ -8,6 +8,10 @@ if [ ! -s "$PGDATA/PG_VERSION" ]; then
   mkdir -p .fern
   initdb -D "$PGDATA" -U postgres --auth=trust >/dev/null
 fi
+# Only one box runs per environment, so a pid file here is stale: it came
+# from a snapshot or a killed box. Its PID may belong to another process now,
+# and Postgres would refuse to start.
+rm -f "$PGDATA/postmaster.pid"
 postgres -D "$PGDATA" -k /tmp -c listen_addresses='' &
 pid=$!
 trap 'kill -INT $pid' TERM INT

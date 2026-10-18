@@ -93,7 +93,7 @@ func (d *Driver) Wake(ctx context.Context, env string) (string, error) {
 		return "", err
 	}
 	var addr string
-	err := wait.PollUntilContextTimeout(ctx, pollInterval, wakeTimeout, true, func(ctx context.Context) (bool, error) {
+	err := poll(ctx, wakeTimeout, func(ctx context.Context) (bool, error) {
 		sb, err := d.get(ctx, env)
 		if err != nil {
 			return false, err
@@ -190,13 +190,26 @@ func (d *Driver) setMode(ctx context.Context, env string, mode sandboxv1.Sandbox
 // box pod has the Sandbox's name.
 func (d *Driver) waitGone(ctx context.Context, env string, obj client.Object) error {
 	key := types.NamespacedName{Namespace: d.cfg.Namespace, Name: env}
-	return wait.PollUntilContextTimeout(ctx, pollInterval, stopTimeout, true, func(ctx context.Context) (bool, error) {
+	return poll(ctx, stopTimeout, func(ctx context.Context) (bool, error) {
 		err := d.c.Get(ctx, key, obj)
 		if apierrors.IsNotFound(err) {
 			return true, nil
 		}
 		return false, err
 	})
+}
+
+// poll calls cond until it is done or fails, for at most timeout.
+func poll(ctx context.Context, timeout time.Duration, cond wait.ConditionWithContextFunc) error {
+	pollCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	err := wait.PollUntilContextCancel(pollCtx, pollInterval, true, cond)
+	// The client's rate limiter fails early near the deadline, with an
+	// error that hides the cause.
+	if err != nil && ctx.Err() == nil && pollCtx.Err() != nil {
+		return fmt.Errorf("not done after %s", timeout)
+	}
+	return err
 }
 
 func (d *Driver) podTemplate(env, token string) sandboxv1.PodTemplate {
