@@ -25,6 +25,8 @@ TOML
   docker restart "$LAB" >/dev/null # k3s embeds containerd; this reloads its config
   until k get nodes 2>/dev/null | grep -q ' Ready'; do sleep 1; done
   k -n fern-system rollout status ds/fern --timeout=300s >/dev/null
+  # Kubelet serves exec a little after the node turns Ready.
+  until k -n fern-system exec ds/fern -c fern -- true 2>/dev/null; do sleep 1; done
 fi
 k apply -f - >/dev/null <<'YAML'
 apiVersion: node.k8s.io/v1
