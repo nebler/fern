@@ -270,6 +270,9 @@ func (s *Store) Snapshots(ctx context.Context, envID string) ([]Snapshot, error)
 // snapID. The environment's box must be stopped. Every step can be repeated
 // after a crash.
 func (s *Store) Restore(ctx context.Context, envID, snapID string) error {
+	if !snapIDPattern.MatchString(snapID) {
+		return fmt.Errorf("snapshot %q: %w", snapID, ErrInvalidID)
+	}
 	if _, err := s.Get(ctx, envID); err != nil {
 		return err
 	}

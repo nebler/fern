@@ -226,6 +226,9 @@ func (c command) create(ctx context.Context, cl *api.Client, stdin io.Reader, st
 		seed, repo = stdin, ""
 	default:
 		// Stream the directory as a tar archive, the same format as "-".
+		if info, err := os.Stat(c.repo); err != nil || !info.IsDir() {
+			return fmt.Errorf("--repo %s: not a directory", c.repo)
+		}
 		tar := exec.CommandContext(ctx, "tar", "-C", c.repo, "-c", "-f", "-", ".")
 		out, err := tar.StdoutPipe()
 		if err != nil {
