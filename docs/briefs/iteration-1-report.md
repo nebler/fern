@@ -114,6 +114,18 @@ boxexec (WebSocket)  ─┘   steps written to oplog ─▶ driver (Kubernetes)
 - `wake` (the front door) turns a burst of requests into one wake. `oplog` lets a half-done operation finish after a crash.
 - The daemon stays one process: it is the node agent, like kubelet. `cmd/fern` only wires the pieces together.
 
+**Prior art.** This is how mature Go projects with the same problem are built:
+
+| Project | What it does | What we copy |
+|---|---|---|
+| Fly.io [`flyd`](https://fly.io/blog/carving-the-scheduler-out-of-our-orchestrator/) | one daemon per server, the source of truth for its own VMs; operations are state machines whose steps are logged in BoltDB, so a restarted `flyd` "picks up right where it left off". Its author would use SQLite today ([interview](https://fly.io/blog/the-exit-interview-jp/)) | the op log: an operation is a list of steps logged in SQLite and resumed after a crash; tag every log line with operation, step and environment ID |
+| [E2B](https://github.com/e2b-dev/infra/blob/main/docs/ARCHITECTURE.md) | AI sandboxes: one root Go orchestrator per node, and `envd` in every VM (processes with streamed I/O, files, health, token auth) | confirms the daemon + `fern-init` split |
+| [kubelet](https://github.com/kubernetes/kubernetes/blob/v1.2.2/docs/proposals/pod-lifecycle-event-generator.md) | one goroutine per pod with a one-slot mailbox; while a pod is busy only the newest update is kept; per-pod polling scaled badly and was replaced by events | the actor: one goroutine per environment, newest update wins; watch instead of poll |
+| [Incus](https://github.com/lxc/incus/tree/main/internal/server/storage) | storage logic in `storage/backend.go`, one file per filesystem under `drivers/` (`driver_btrfs.go`, `driver_zfs.go`, `driver_mock.go`) behind one interface | split `store` this way when ZFS arrives, not before |
+| [Go module layout](https://go.dev/doc/modules/layout) | binaries in `cmd/`, server code in `internal/`, `main` wires | already the layout |
+
+Not copied: containerd's plugin system and E2B's central control plane (Redis, Postgres, ClickHouse). Both serve a multi-tenant cloud.
+
 **Box image.** Make the base image the repo's choice (for example its devcontainer image) and inject `fern-init`, a static binary, into any image, through an init container or an image volume. Keep Debian slim as the default: agent tools and prebuilt binaries expect glibc, which rules out Alpine. Offer Wolfi (glibc, minimal, patched daily) as a hardened option. This changes architecture §10, which plans one shared base image.
 
 Then:
