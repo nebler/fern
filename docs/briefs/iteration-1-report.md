@@ -100,6 +100,24 @@ Store tests on real btrfs: `lab/test-store.sh`. After a code change in a running
 
 ## 9. What I'd change in iteration 2
 
+**First: split `api`.** Today it decodes requests, holds a lock per environment and decides when to wake a box. Iteration 2 splits it the way architecture §3 already describes, so that dependencies only point one way:
+
+```
+edges (translate)         core (decides)            backends (do)
+api   (HTTP, CLI/T3) ─┐
+csi   (gRPC, kubelet) ├─▶ actor, one per env ─────▶ store  (btrfs)
+boxexec (WebSocket)  ─┘   steps written to oplog ─▶ driver (Kubernetes)
+```
+
+- `api` only decodes, calls the actor and encodes. No locks and no wake logic.
+- `actor` is the only place where an environment changes state. Each operation is a fixed list of idempotent steps, so new operations add lists, not `if` branches in old code.
+- `wake` (the front door) turns a burst of requests into one wake. `oplog` lets a half-done operation finish after a crash.
+- The daemon stays one process: it is the node agent, like kubelet. `cmd/fern` only wires the pieces together.
+
+**Box image.** Make the base image the repo's choice (for example its devcontainer image) and inject `fern-init`, a static binary, into any image, through an init container or an image volume. Keep Debian slim as the default: agent tools and prebuilt binaries expect glibc, which rules out Alpine. Offer Wolfi (glibc, minimal, patched daily) as a hardened option. This changes architecture §10, which plans one shared base image.
+
+Then:
+
 - Replace the per-environment mutex with the actor; add the generation number, so a restore cancels open execs instead of killing their pod underneath them.
 - Op log for restore/delete/create, plus a startup reconcile of `envs/` against the index.
 - Watch the Sandbox (or poll fern-init directly) instead of polling the API every 200 ms.
