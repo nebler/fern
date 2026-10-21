@@ -60,13 +60,9 @@ func run(ctx context.Context, log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET "+boxexec.Path, boxexec.NewServer(token, dir, env, log))
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		if err := ready(r.Context(), services, dir, env); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
-		_, _ = fmt.Fprintln(w, "ok")
-	})
+	mux.Handle("GET /healthz", newReadiness(func(ctx context.Context) error {
+		return ready(ctx, services, dir, env)
+	}))
 	srv := &http.Server{
 		Addr:              ":" + strconv.Itoa(boxexec.Port),
 		Handler:           mux,
