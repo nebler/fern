@@ -5,7 +5,8 @@
 //
 //	envs/<env>/live/          writable; mounted into the environment's box
 //	envs/<env>/snaps/<snap>/  read-only snapshots of live/
-//	state/fern.sqlite         the index
+//	envs/<env>/incomplete     marks a create or delete that hasn't finished
+//	state/fern.sqlite         the index; it holds the boxes' tokens
 package store
 
 import (
@@ -51,19 +52,28 @@ var (
 
 // Env is an environment: a writable live/ subvolume plus its snapshots.
 type Env struct {
-	ID      string    `json:"id"`
-	Repo    string    `json:"repo,omitempty"`
-	Head    string    `json:"head,omitempty"` // last snapshot taken or restored
-	Created time.Time `json:"created"`
+	ID      string
+	Repo    string
+	Head    string // last snapshot taken or restored
+	Created time.Time
 	// Token authenticates the daemon to the environment's box.
-	Token string `json:"-"`
+	Token string
 }
 
 // Snapshot is a read-only copy of an environment's live/ at one moment.
 type Snapshot struct {
-	ID      string    `json:"id"`
-	Env     string    `json:"env"`
-	Created time.Time `json:"created"`
+	ID      string
+	Env     string
+	Created time.Time
+}
+
+// CheckEnvID returns an error wrapping ErrInvalidID if id can't name an
+// environment.
+func CheckEnvID(id string) error {
+	if !envIDPattern.MatchString(id) {
+		return fmt.Errorf("environment %q: %w", id, ErrInvalidID)
+	}
+	return nil
 }
 
 // Store is a btrfs pool of environments.
@@ -87,12 +97,26 @@ CREATE TABLE IF NOT EXISTS snapshots (
 	PRIMARY KEY (env, id)
 );`
 
-// Open opens the pool mounted at root, creating the index if needed.
+// Open opens the pool mounted at root, which must be on btrfs, creating the
+// index if needed.
 func Open(ctx context.Context, root string) (*Store, error) {
-	for _, dir := range []string{"envs", "state"} {
-		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
-			return nil, fmt.Errorf("open pool: %w", err)
-		}
+	var fsInfo unix.Statfs_t
+	if err := unix.Statfs(root, &fsInfo); err != nil {
+		return nil, fmt.Errorf("open pool: %w", err)
+	}
+	if fsInfo.Type != unix.BTRFS_SUPER_MAGIC {
+		return nil, fmt.Errorf("open pool: %s is not on btrfs", root)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "envs"), 0o755); err != nil {
+		return nil, fmt.Errorf("open pool: %w", err)
+	}
+	// Only root may read the index: it holds every box's token.
+	state := filepath.Join(root, "state")
+	if err := os.MkdirAll(state, 0o700); err != nil {
+		return nil, fmt.Errorf("open pool: %w", err)
+	}
+	if err := os.Chmod(state, 0o700); err != nil {
+		return nil, fmt.Errorf("open pool: %w", err)
 	}
 	dsn := "file:" + filepath.Join(root, "state", "fern.sqlite") +
 		"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)"
@@ -120,12 +144,22 @@ func (s *Store) Create(ctx context.Context, id, repo string, seed io.Reader) (En
 		return env, err
 	}
 	// Anything on disk without an index row is a create or delete that
-	// stopped half-way: start over.
+	// stopped half-way, which is garbage, unless it has a live/ that isn't
+	// marked as one: then the index has lost a workspace, and only a person
+	// should throw it away.
+	if _, err := os.Stat(s.markerPath(id)); errors.Is(err, fs.ErrNotExist) {
+		if _, err := os.Lstat(s.livePath(id)); err == nil {
+			return Env{}, fmt.Errorf("create %s: %s exists but isn't in the index", id, s.envDir(id))
+		}
+	}
 	if err := s.removeDisk(ctx, id); err != nil {
 		return Env{}, fmt.Errorf("create %s: %w", id, err)
 	}
 	live := s.livePath(id)
 	if err := os.MkdirAll(filepath.Join(s.envDir(id), "snaps"), 0o755); err != nil {
+		return Env{}, fmt.Errorf("create %s: %w", id, err)
+	}
+	if err := s.mark(id); err != nil {
 		return Env{}, fmt.Errorf("create %s: %w", id, err)
 	}
 	if err := btrfs(ctx, "subvolume", "create", live); err != nil {
@@ -146,13 +180,17 @@ func (s *Store) Create(ctx context.Context, id, repo string, seed io.Reader) (En
 	if err != nil {
 		return Env{}, fmt.Errorf("create %s: %w", id, err)
 	}
+	// With the row written, a leftover marker means nothing.
+	if err := os.Remove(s.markerPath(id)); err != nil {
+		return Env{}, fmt.Errorf("create %s: %w", id, err)
+	}
 	return env, nil
 }
 
 // Get returns the environment id.
 func (s *Store) Get(ctx context.Context, id string) (Env, error) {
-	if !envIDPattern.MatchString(id) {
-		return Env{}, fmt.Errorf("environment %q: %w", id, ErrInvalidID)
+	if err := CheckEnvID(id); err != nil {
+		return Env{}, err
 	}
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, repo, head, token, created_at FROM environments WHERE id = ?`, id)
@@ -193,16 +231,23 @@ func (s *Store) LivePath(ctx context.Context, id string) (string, error) {
 	return s.livePath(id), nil
 }
 
-// Delete removes the environment's subvolumes and index rows. Deleting an
+// Delete removes the environment's index rows and subvolumes. Deleting an
 // environment that doesn't exist is not an error. Its box must be gone.
+//
+// The rows go first, so an environment is never listed without its disk. A
+// delete that stops half-way leaves marked garbage, which the next Create of
+// the same ID removes.
 func (s *Store) Delete(ctx context.Context, id string) error {
-	if !envIDPattern.MatchString(id) {
-		return fmt.Errorf("environment %q: %w", id, ErrInvalidID)
+	if err := CheckEnvID(id); err != nil {
+		return err
 	}
-	if err := s.removeDisk(ctx, id); err != nil {
+	if err := s.mark(id); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return fmt.Errorf("delete %s: %w", id, err)
 	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM environments WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("delete %s: %w", id, err)
+	}
+	if err := s.removeDisk(ctx, id); err != nil {
 		return fmt.Errorf("delete %s: %w", id, err)
 	}
 	return nil
@@ -224,11 +269,9 @@ func (s *Store) Snapshot(ctx context.Context, envID, snapID string) (Snapshot, e
 	}
 	path := s.snapPath(envID, snapID)
 	// A snapshot on disk without a row was taken just before a crash. btrfs
-	// snapshots are atomic, so it is complete: keep it.
+	// snapshots are atomic, so it is complete: keep it. Taking one flushes
+	// live/'s dirty pages first, so it holds every write made before.
 	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
-		if err := syncfs(s.livePath(envID)); err != nil {
-			return Snapshot{}, fmt.Errorf("snapshot %s/%s: %w", envID, snapID, err)
-		}
 		if err := btrfs(ctx, "subvolume", "snapshot", "-r", s.livePath(envID), path); err != nil {
 			return Snapshot{}, fmt.Errorf("snapshot %s/%s: %w", envID, snapID, err)
 		}
@@ -353,8 +396,15 @@ func (s *Store) removeDisk(ctx context.Context, id string) error {
 	return os.RemoveAll(dir)
 }
 
-func (s *Store) envDir(id string) string   { return filepath.Join(s.root, "envs", id) }
-func (s *Store) livePath(id string) string { return filepath.Join(s.envDir(id), "live") }
+// mark records that a create or delete of environment id has begun. It fails
+// with fs.ErrNotExist if the environment has no directory.
+func (s *Store) mark(id string) error {
+	return os.WriteFile(s.markerPath(id), nil, 0o644)
+}
+
+func (s *Store) envDir(id string) string     { return filepath.Join(s.root, "envs", id) }
+func (s *Store) markerPath(id string) string { return filepath.Join(s.envDir(id), "incomplete") }
+func (s *Store) livePath(id string) string   { return filepath.Join(s.envDir(id), "live") }
 func (s *Store) snapPath(id, snapID string) string {
 	return filepath.Join(s.envDir(id), "snaps", snapID)
 }
@@ -380,23 +430,13 @@ func btrfs(ctx context.Context, args ...string) error {
 	return nil
 }
 
-// deleteSubvolume deletes the subvolume at path, if there is one.
+// deleteSubvolume deletes the subvolume at path, if there is one, with any
+// subvolumes a box made inside it.
 func deleteSubvolume(ctx context.Context, path string) error {
 	if _, err := os.Lstat(path); errors.Is(err, fs.ErrNotExist) {
 		return nil
 	}
-	return btrfs(ctx, "subvolume", "delete", path)
-}
-
-// syncfs flushes the filesystem holding dir, so a snapshot includes writes
-// that are still in the page cache.
-func syncfs(dir string) error {
-	f, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = f.Close() }()
-	return unix.Syncfs(int(f.Fd()))
+	return btrfs(ctx, "subvolume", "delete", "--recursive", path)
 }
 
 // untar extracts a tar stream into dir as the box user, so the files belong to

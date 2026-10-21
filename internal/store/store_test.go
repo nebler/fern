@@ -346,3 +346,125 @@ func TestReopen(t *testing.T) {
 		t.Errorf("Delete(demo) error: %v", err)
 	}
 }
+
+func TestOpen(t *testing.T) {
+	_, dir := openPool(t)
+	info, err := os.Stat(filepath.Join(dir, "state"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o700 {
+		t.Errorf("state/ mode = %v, want 0700: the index holds the tokens", got)
+	}
+
+	other := t.TempDir()
+	var fsInfo syscall.Statfs_t
+	if err := syscall.Statfs(other, &fsInfo); err != nil {
+		t.Fatal(err)
+	}
+	if fsInfo.Type == 0x9123683e { // BTRFS_SUPER_MAGIC
+		t.Skip("the temporary directory is on btrfs")
+	}
+	if st, err := store.Open(t.Context(), other); err == nil {
+		_ = st.Close()
+		t.Errorf("Open(%s) on a filesystem that isn't btrfs succeeded, want an error", other)
+	}
+}
+
+// A snapshot must hold writes still in the page cache: the store relies on
+// btrfs flushing live/ when it takes one.
+func TestSnapshotHasUnflushedWrites(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	if _, err := st.Create(ctx, "demo", "", nil); err != nil {
+		t.Fatalf("Create(demo) error: %v", err)
+	}
+	data := bytes.Repeat([]byte("fern"), 1<<20)
+	if err := os.WriteFile(filepath.Join(livePath(t, st, "demo"), "big"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Snapshot(ctx, "demo", "s1"); err != nil {
+		t.Fatalf("Snapshot(demo, s1) error: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, "envs", "demo", "snaps", "s1", "big"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, data) {
+		t.Errorf("snapshot's file differs from what was written (%d bytes, want %d)", len(got), len(data))
+	}
+}
+
+// A box can make subvolumes inside its workspace; they must not stop a
+// restore or a delete.
+func TestNestedSubvolume(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	if _, err := st.Create(ctx, "demo", "", nil); err != nil {
+		t.Fatalf("Create(demo) error: %v", err)
+	}
+	if _, err := st.Snapshot(ctx, "demo", "s1"); err != nil {
+		t.Fatalf("Snapshot(demo, s1) error: %v", err)
+	}
+	nested := filepath.Join(livePath(t, st, "demo"), "nested")
+	nest := func() {
+		t.Helper()
+		if out, err := exec.CommandContext(ctx, "btrfs", "subvolume", "create", nested).CombinedOutput(); err != nil {
+			t.Fatalf("btrfs subvolume create: %v: %s", err, out)
+		}
+		writeFile(t, filepath.Join(nested, "f"), "x")
+	}
+	nest()
+	if err := st.Restore(ctx, "demo", "s1"); err != nil {
+		t.Fatalf("Restore(demo, s1) with a nested subvolume error: %v", err)
+	}
+	nest()
+	if err := st.Delete(ctx, "demo"); err != nil {
+		t.Fatalf("Delete(demo) with a nested subvolume error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "envs", "demo")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat envs/demo error = %v, want it gone", err)
+	}
+}
+
+// What a create or delete leaves when it stops half-way is garbage, but a
+// workspace the index has lost is not.
+func TestCreateOverLeftovers(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	subvolume := func(id string) string {
+		t.Helper()
+		live := filepath.Join(dir, "envs", id, "live")
+		if err := os.MkdirAll(filepath.Dir(live), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if out, err := exec.CommandContext(ctx, "btrfs", "subvolume", "create", live).CombinedOutput(); err != nil {
+			t.Fatalf("btrfs subvolume create: %v: %s", err, out)
+		}
+		writeFile(t, filepath.Join(live, "old"), "old")
+		return live
+	}
+
+	live := subvolume("half")
+	writeFile(t, filepath.Join(dir, "envs", "half", "incomplete"), "")
+	if _, err := st.Create(ctx, "half", "", nil); err != nil {
+		t.Fatalf("Create(half) over a marked leftover error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(live, "old")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat live/old error = %v, want the leftover gone", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "envs", "half", "incomplete")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat incomplete error = %v, want the marker gone after Create", err)
+	}
+
+	live = subvolume("lost")
+	if _, err := st.Create(ctx, "lost", "", nil); err == nil {
+		t.Errorf("Create(lost) over an unmarked workspace succeeded, want an error")
+	}
+	if got := readFile(t, filepath.Join(live, "old")); got != "old" {
+		t.Errorf("live/old = %q after a refused Create, want it kept", got)
+	}
+	if err := st.Delete(ctx, "lost"); err != nil { // the cleanup only deletes listed environments
+		t.Errorf("Delete(lost) error: %v", err)
+	}
+}
