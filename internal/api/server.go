@@ -454,6 +454,8 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		e.Code = CodeNotFound
 	case errors.Is(err, store.ErrInvalidID):
 		e.Code = CodeInvalid
+	case errors.Is(err, context.Canceled) && r.Context().Err() != nil:
+		// The client gave up waiting; there is no one to answer.
 	default:
 		s.log.ErrorContext(r.Context(), "request failed",
 			slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Any("error", err))
