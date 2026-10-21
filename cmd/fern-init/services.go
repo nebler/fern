@@ -146,9 +146,29 @@ func runService(ctx context.Context, svc service, dir string, env []string) erro
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 	// The service gets its own process group, so stopping it stops its children.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
-	cmd.WaitDelay = killDelay
-	return cmd.Run()
+	// Stopping sends SIGTERM to the group and, killDelay later, SIGKILL to
+	// the group: cmd.WaitDelay would kill only the leader and leave children
+	// that ignore SIGTERM running.
+	//
+	// A group must not be signalled once its leader has been reaped, as its
+	// id may then be reused, so the timer is stopped when Run returns. Two
+	// windows of microseconds remain, both because os/exec reaps the leader
+	// before Run returns: the timer can fire in between, and os/exec can
+	// still call Cancel if ctx is done at that moment. Harm would also need
+	// the kernel to hand out the same pid again within that window.
+	var escalate *time.Timer
+	cmd.Cancel = func() error {
+		pgid := cmd.Process.Pid
+		escalate = time.AfterFunc(killDelay, func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
+		return syscall.Kill(-pgid, syscall.SIGTERM)
+	}
+	err := cmd.Run()
+	// Run reports Cancel's error, so it returns only after Cancel has:
+	// escalate needs no lock.
+	if escalate != nil {
+		escalate.Stop()
+	}
+	return err
 }
 
 // The ready checks share readyTimeout. A timed-out script is killed and

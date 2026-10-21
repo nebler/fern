@@ -5,8 +5,11 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -152,4 +155,44 @@ func TestSupervisorStopDoesNotRestart(t *testing.T) {
 func TestSupervisorStopTerminates(t *testing.T) {
 	s, _ := newService(t, service{Run: "sleep 600 & wait"})
 	s.stop(t.Context())
+}
+
+// A service whose processes ignore SIGTERM is SIGKILLed, children included.
+func TestSupervisorStopKillsGroup(t *testing.T) {
+	ps, err := exec.LookPath("ps")
+	if err != nil {
+		t.Fatalf("ps is needed to see the service's child: %v", err)
+	}
+	s, dir := newService(t, service{
+		Run: `trap "" TERM; sh -c 'trap "" TERM; echo $$ > child; exec sleep 600' & wait`,
+		// Stop only once the child is there to be killed.
+		Stop: `until [ -s child ]; do sleep 0.01; done`,
+	})
+	start := time.Now()
+	s.stop(t.Context())
+	if took := time.Since(start); took > killDelay+2*time.Second {
+		t.Errorf("stop took %v, want about %v", took, killDelay)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "child"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// SIGKILL is delivered asynchronously, so the child may take a moment to
+	// die. A zombie counts as dead: nothing in the test reaps orphans.
+	var state string
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
+		// ps exits 1 when the pid is gone; the empty output says so.
+		out, _ := exec.CommandContext(t.Context(), ps, "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+		state = strings.TrimSpace(string(out))
+		if state == "" || strings.HasPrefix(state, "Z") {
+			return
+		}
+	}
+	t.Errorf("the service's child (pid %d) survived stop in state %q", pid, state)
+	_ = syscall.Kill(pid, syscall.SIGKILL)
 }
