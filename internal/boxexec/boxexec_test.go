@@ -239,13 +239,25 @@ func TestRunCancelKillsBackground(t *testing.T) {
 		t.Fatalf("Run(%q) after cancel succeeded, want an error", req.Argv)
 	}
 	_ = conn.CloseNow() // the client goes away
-	// The kill is asynchronous to the client: wait in the box for the
-	// background process to be gone, bounded by run's timeout. Nobody reaps
-	// it in a test, so a zombie counts as gone.
-	const waitGone = `pid=$(cat bg.pid); while ps -o stat= -p "$pid" | grep -qv Z; do sleep 0.05; done; echo gone`
-	check := boxexec.Request{Argv: []string{"sh", "-c", waitGone}}
-	if got := run(t, url, token, check, nil); got.stdout != "gone\n" {
-		t.Errorf("background process after cancel: stdout %q, stderr %q, want it gone", got.stdout, got.stderr)
+	waitGone(t, url, "bg.pid")
+}
+
+// waitGone waits until the process whose PID is in the box's file pidFile
+// has gone. The kill is asynchronous to the client, so it waits in the box,
+// bounded by run's timeout. Nobody reaps the process in a test, so a zombie
+// counts as gone. Without ps the check fails rather than passing unseen.
+func waitGone(t *testing.T, url, pidFile string) {
+	t.Helper()
+	const script = `command -v ps >/dev/null || { echo "ps not found" >&2; exit 2; }
+pid=$(cat "$1") || exit 2
+while stat=$(ps -o stat= -p "$pid"); do
+	case $stat in *Z*) break ;; esac
+	sleep 0.05
+done
+echo gone`
+	check := boxexec.Request{Argv: []string{"sh", "-c", script, "sh", pidFile}}
+	if got := run(t, url, token, check, nil); got.code != 0 || got.stdout != "gone\n" {
+		t.Errorf("process in %s: code %d, stdout %q, stderr %q, want it gone", pidFile, got.code, got.stdout, got.stderr)
 	}
 }
 
