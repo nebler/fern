@@ -50,6 +50,14 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 	defer func() { _ = st.Close() }()
+	// Finish what a crash interrupted before anyone can see the half-done state.
+	lost, err := st.Reconcile(ctx)
+	if err != nil {
+		return err
+	}
+	for _, dir := range lost {
+		log.WarnContext(ctx, "environment directory not in the index; left for a person to remove", slog.String("dir", dir))
+	}
 	kube, err := kubeClient()
 	if err != nil {
 		return err
@@ -67,8 +75,9 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	apiSrv := api.NewServer(st, drv, log)
 	httpSrv := &http.Server{
-		Handler:           api.NewServer(st, drv, log).Handler(),
+		Handler:           apiSrv.Handler(),
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -97,7 +106,10 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) error {
 		defer cancel()
 		return httpSrv.Shutdown(shutdownCtx)
 	})
-	return g.Wait()
+	err = g.Wait()
+	// Changes outlive their requests; the store must stay open until they end.
+	apiSrv.Wait()
+	return err
 }
 
 func kubeClient() (client.Client, error) {

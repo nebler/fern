@@ -57,7 +57,7 @@ func newFakeStore() *fakeStore {
 
 var validID = regexp.MustCompile(`^[a-z0-9-]+$`)
 
-func (f *fakeStore) Create(_ context.Context, id, repo string, _ io.Reader) (store.Env, error) {
+func (f *fakeStore) Create(_ context.Context, id string, opts store.CreateOptions) (store.Env, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if !validID.MatchString(id) {
@@ -66,7 +66,11 @@ func (f *fakeStore) Create(_ context.Context, id, repo string, _ io.Reader) (sto
 	if env, ok := f.envs[id]; ok {
 		return env, nil
 	}
-	env := store.Env{ID: id, Repo: repo, Created: created, Token: boxToken}
+	path := opts.Path
+	if path == "" {
+		path = "/pool/envs/" + id + "/live"
+	}
+	env := store.Env{ID: id, Repo: opts.Repo, Path: path, Created: created, Token: boxToken}
 	f.envs[id] = env
 	return env, nil
 }
@@ -86,6 +90,27 @@ func (f *fakeStore) getLocked(id string) (store.Env, error) {
 		return store.Env{}, fmt.Errorf("environment %s: %w", id, store.ErrNotFound)
 	}
 	return env, nil
+}
+
+func (f *fakeStore) FindByPath(_ context.Context, path string) (store.Env, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, env := range f.envs {
+		if path == env.Path || strings.HasPrefix(path, env.Path+"/") {
+			return env, nil
+		}
+	}
+	return store.Env{}, fmt.Errorf("environment at %s: %w", path, store.ErrNotFound)
+}
+
+func (f *fakeStore) DeleteSnapshot(_ context.Context, env, snap string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, err := f.getLocked(env); err != nil {
+		return err
+	}
+	f.snaps[env] = slices.DeleteFunc(f.snaps[env], func(s store.Snapshot) bool { return s.ID == snap })
+	return nil
 }
 
 func (f *fakeStore) List(context.Context) ([]store.Env, error) {
@@ -193,7 +218,7 @@ func newAPIWith(t *testing.T, wrap func(*driver.Fake) api.Driver) (*api.Client, 
 
 func mustCreate(t *testing.T, c *api.Client, id string) {
 	t.Helper()
-	if _, err := c.Create(t.Context(), id, "", nil); err != nil {
+	if _, err := c.Create(t.Context(), id, api.CreateOptions{}); err != nil {
 		t.Fatalf("Create(%s) error: %v", id, err)
 	}
 }
@@ -210,10 +235,10 @@ func errCode(err error) string {
 func TestCreateGetList(t *testing.T) {
 	c, _ := newAPI(t)
 	ctx := t.Context()
-	want := api.Env{ID: "demo", Repo: "/src/demo", Created: created, State: driver.Asleep}
+	want := api.Env{ID: "demo", Repo: "/src/demo", Path: "/pool/envs/demo/live", Created: created, State: driver.Asleep}
 
 	for range 2 { // creating again returns the same environment
-		got, err := c.Create(ctx, "demo", "/src/demo", nil)
+		got, err := c.Create(ctx, "demo", api.CreateOptions{Repo: "/src/demo"})
 		if err != nil {
 			t.Fatalf("Create(demo) error: %v", err)
 		}
@@ -248,7 +273,7 @@ func TestErrors(t *testing.T) {
 		{"get unknown", func(ctx context.Context) error { _, err := c.Get(ctx, "nope"); return err }, api.CodeNotFound},
 		{"get invalid", func(ctx context.Context) error { _, err := c.Get(ctx, "Bad_ID"); return err }, api.CodeInvalid},
 		{"create invalid", func(ctx context.Context) error {
-			_, err := c.Create(ctx, "Bad_ID", "", nil)
+			_, err := c.Create(ctx, "Bad_ID", api.CreateOptions{})
 			return err
 		}, api.CodeInvalid},
 		{"delete unknown", func(ctx context.Context) error { return c.Delete(ctx, "nope") }, api.CodeNotFound},
@@ -496,5 +521,57 @@ func TestExecRedialsStaleBox(t *testing.T) {
 	code, err := c.Exec(t.Context(), "demo", boxexec.Request{Argv: []string{"echo", "hi"}}, nil, &stdout, io.Discard, nil)
 	if err != nil || code != 0 || stdout.String() != "hi\n" {
 		t.Errorf("Exec(echo hi) = %d, %q, %v, want 0, %q, nil", code, stdout.String(), err, "hi\n")
+	}
+}
+
+func TestFindByPath(t *testing.T) {
+	c, _ := newAPI(t)
+	ctx := t.Context()
+	const path = "/pool/worktrees/fern/main"
+	if _, err := c.Create(ctx, "wt", api.CreateOptions{Path: path}); err != nil {
+		t.Fatalf("Create(wt, %s) error: %v", path, err)
+	}
+	for _, p := range []string{path, path + "/src/pkg"} {
+		env, err := c.FindByPath(ctx, p)
+		if err != nil || env.ID != "wt" || env.Path != path {
+			t.Errorf("FindByPath(%s) = %+v, %v, want wt at %s", p, env, err, path)
+		}
+	}
+	if _, err := c.FindByPath(ctx, "/pool/worktrees/fern"); errCode(err) != api.CodeNotFound {
+		t.Errorf("FindByPath(parent) error = %v, want code %s", err, api.CodeNotFound)
+	}
+}
+
+// T3 deletes checkpoints after a revert and reuses their names.
+func TestSnapshotDeleteAndReplace(t *testing.T) {
+	c, _ := newAPI(t)
+	ctx := t.Context()
+	mustCreate(t, c, "demo")
+	for _, id := range []string{"s1", "s2"} {
+		if _, err := c.Snapshot(ctx, "demo", id); err != nil {
+			t.Fatalf("Snapshot(demo, %s) error: %v", id, err)
+		}
+	}
+	for range 2 { // deleting again is fine
+		if err := c.DeleteSnapshot(ctx, "demo", "s2"); err != nil {
+			t.Fatalf("DeleteSnapshot(demo, s2) error: %v", err)
+		}
+	}
+	if _, err := c.ReplaceSnapshot(ctx, "demo", "s1"); err != nil {
+		t.Fatalf("ReplaceSnapshot(demo, s1) error: %v", err)
+	}
+	snaps, err := c.Snapshots(ctx, "demo")
+	if err != nil {
+		t.Fatalf("Snapshots(demo) error: %v", err)
+	}
+	var ids []string
+	for _, s := range snaps {
+		ids = append(ids, s.ID)
+	}
+	if diff := cmp.Diff([]string{"s1"}, ids); diff != "" {
+		t.Errorf("Snapshots(demo) mismatch (-want +got):\n%s", diff)
+	}
+	if err := c.DeleteSnapshot(ctx, "nope", "s1"); errCode(err) != api.CodeNotFound {
+		t.Errorf("DeleteSnapshot(nope, s1) error = %v, want code %s", err, api.CodeNotFound)
 	}
 }

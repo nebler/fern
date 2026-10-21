@@ -1,11 +1,13 @@
 // Command fern is the Fern daemon and its command-line client.
 //
 //	fern daemon [flags]                      run the node daemon and CSI plugin
-//	fern create <env> [--repo DIR|-]         make an environment, asleep
+//	fern create <env> [--repo DIR|-] [--path P] make an environment, asleep; P is its workspace
 //	fern ls                                  list environments
+//	fern which <path>                        print the environment whose workspace holds path
 //	fern rm <env>                            delete an environment
-//	fern snapshot <env> [<snapshot>]         take a snapshot
+//	fern snapshot [--replace] <env> [<snap>] take a snapshot (again, with --replace)
 //	fern snapshots <env>                     list snapshots
+//	fern rmsnap <env> <snapshot>…            delete snapshots
 //	fern restore <env> <snapshot>            restore a snapshot; the box stays asleep
 //	fern exec [-i] [-t] [-it] <env> -- cmd…  run a command, waking the box if needed
 //	fern sleep <env> | fern wake <env>       stop or start the box
@@ -70,7 +72,10 @@ type command struct {
 	socket string
 	env    string
 	snap   string   // snapshot, restore
+	snaps  []string // rmsnap
 	repo   string   // create: a directory to copy in, or "-" for a tar stream on stdin
+	path   string   // create: the workspace path; which: the path to look up
+	again  bool     // snapshot --replace
 	stdin  bool     // exec -i
 	tty    bool     // exec -t
 	argv   []string // exec
@@ -96,13 +101,25 @@ func subcommands() []subcommand {
 	return []subcommand{
 		{name: "create", min: 1, max: 1, run: create, flags: func(fs *flag.FlagSet, c *command) {
 			fs.StringVar(&c.repo, "repo", "", "directory to copy into the environment, or - for a tar stream")
+			fs.StringVar(&c.path, "path", "", "the workspace: <pool>/worktrees/<repo>/<name>; a directory there is adopted")
 		}},
 		{name: "ls", run: list},
+		{name: "which", min: 1, max: 1, run: which},
 		{name: "rm", min: 1, max: 1, run: func(ctx context.Context, c command, cl *api.Client, _ stdio) (int, error) {
 			return 0, cl.Delete(ctx, c.env)
 		}},
-		{name: "snapshot", min: 1, max: 2, run: snapshot},
+		{name: "snapshot", min: 1, max: 2, run: snapshot, flags: func(fs *flag.FlagSet, c *command) {
+			fs.BoolVar(&c.again, "replace", false, "take it again if it exists")
+		}},
 		{name: "snapshots", min: 1, max: 1, run: snapshots},
+		{name: "rmsnap", min: 2, max: -1, run: func(ctx context.Context, c command, cl *api.Client, _ stdio) (int, error) {
+			for _, snap := range c.snaps {
+				if err := cl.DeleteSnapshot(ctx, c.env, snap); err != nil {
+					return 0, err
+				}
+			}
+			return 0, nil
+		}},
 		{name: "restore", min: 2, max: 2, run: restore},
 		{name: "exec", min: 1, max: -1, run: execute},
 		{name: "sleep", min: 1, max: 1, run: timed(func(ctx context.Context, cl *api.Client, env string) error {
@@ -158,10 +175,15 @@ func parse(args []string) (command, error) {
 	if len(pos) < sc.min || (sc.max >= 0 && len(pos) > sc.max) {
 		return command{}, fmt.Errorf("%s: wrong number of arguments", cmd.name)
 	}
-	if len(pos) > 0 {
+	switch {
+	case cmd.name == "which":
+		cmd.path = pos[0]
+	case len(pos) > 0:
 		cmd.env = pos[0]
 	}
-	if len(pos) > 1 {
+	if cmd.name == "rmsnap" {
+		cmd.snaps = pos[1:]
+	} else if len(pos) > 1 {
 		cmd.snap = pos[1]
 	}
 	return cmd, nil
@@ -221,9 +243,25 @@ func list(ctx context.Context, _ command, cl *api.Client, std stdio) (int, error
 	return 0, tw.Flush()
 }
 
+func which(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	env, err := cl.FindByPath(ctx, c.path)
+	if err != nil {
+		return 0, err
+	}
+	_, err = fmt.Fprintln(std.out, env.ID)
+	return 0, err
+}
+
 func snapshot(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
 	start := time.Now()
-	snap, err := cl.Snapshot(ctx, c.env, c.snap)
+	take := cl.Snapshot
+	if c.again {
+		if c.snap == "" {
+			return 0, errors.New("--replace needs a snapshot ID")
+		}
+		take = cl.ReplaceSnapshot
+	}
+	snap, err := take(ctx, c.env, c.snap)
 	if err != nil {
 		return 0, err
 	}
@@ -268,13 +306,15 @@ func timed(op func(ctx context.Context, cl *api.Client, env string) error) func(
 func create(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
 	var env api.Env
 	var err error
+	opts := api.CreateOptions{Path: c.path}
 	switch c.repo {
 	case "":
-		env, err = cl.Create(ctx, c.env, "", nil)
+		env, err = cl.Create(ctx, c.env, opts)
 	case "-":
-		env, err = cl.Create(ctx, c.env, "", std.in)
+		opts.Seed = std.in
+		env, err = cl.Create(ctx, c.env, opts)
 	default:
-		env, err = createFromDir(ctx, c, cl, std.err)
+		env, err = createFromDir(ctx, c, opts, cl, std.err)
 	}
 	if err != nil {
 		return 0, err
@@ -286,7 +326,7 @@ func create(ctx context.Context, c command, cl *api.Client, std stdio) (int, err
 // createFromDir creates the environment from the directory c.repo, streamed
 // as a tar archive, the same format as "-". If tar fails, the upload fails
 // with it, so the environment isn't created with files missing.
-func createFromDir(ctx context.Context, c command, cl *api.Client, stderr io.Writer) (api.Env, error) {
+func createFromDir(ctx context.Context, c command, opts api.CreateOptions, cl *api.Client, stderr io.Writer) (api.Env, error) {
 	if info, err := os.Stat(c.repo); err != nil || !info.IsDir() {
 		return api.Env{}, fmt.Errorf("--repo %s: not a directory", c.repo)
 	}
@@ -304,13 +344,17 @@ func createFromDir(ctx context.Context, c command, cl *api.Client, stderr io.Wri
 		}
 		pw.CloseWithError(tarErr) // a nil error is a clean EOF
 	})
-	env, err := cl.Create(ctx, c.env, c.repo, pr)
-	// If the upload stopped early, tar must not block writing to the pipe.
+	opts.Repo, opts.Seed = c.repo, pr
+	env, err := cl.Create(ctx, c.env, opts)
+	// If the daemon stopped reading (it refused, or the environment exists
+	// and needs no seed), tar must not block writing to the pipe.
 	_ = pr.CloseWithError(errors.New("upload ended"))
 	reader.Wait()
-	// A failed tar fails the upload, so err already says why; tar's own
-	// error after a refused upload would only be a broken pipe.
-	if err == nil {
+	// A failed tar fails the upload, so then tar's error says best what went
+	// wrong. Otherwise a tar error is only the broken pipe of an upload the
+	// daemon didn't read to the end.
+	var apiErr *api.Error
+	if err != nil && tarErr != nil && !errors.As(err, &apiErr) {
 		err = tarErr
 	}
 	return env, err

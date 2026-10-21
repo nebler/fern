@@ -25,28 +25,32 @@ import (
 
 // Store keeps environments and snapshots on disk.
 type Store interface {
-	Create(ctx context.Context, id, repo string, seed io.Reader) (store.Env, error)
+	Create(ctx context.Context, id string, opts store.CreateOptions) (store.Env, error)
 	Get(ctx context.Context, id string) (store.Env, error)
+	FindByPath(ctx context.Context, path string) (store.Env, error)
 	List(ctx context.Context) ([]store.Env, error)
 	Delete(ctx context.Context, id string) error
 	Snapshot(ctx context.Context, env, snap string) (store.Snapshot, error)
+	DeleteSnapshot(ctx context.Context, env, snap string) error
 	Snapshots(ctx context.Context, env string) ([]store.Snapshot, error)
 	Restore(ctx context.Context, env, snap string) error
 }
 
 // Driver runs environments' boxes.
 type Driver interface {
-	Create(ctx context.Context, env, token string) error
+	Create(ctx context.Context, env, token, workspace string) error
 	Wake(ctx context.Context, env string) (addr string, err error)
 	Sleep(ctx context.Context, env string) error
 	Delete(ctx context.Context, env string) error
 	State(ctx context.Context, env string) (driver.State, error)
+	States(ctx context.Context) (map[string]driver.State, error)
 }
 
 // Env is an environment as the API reports it.
 type Env struct {
 	ID      string       `json:"id"`
 	Repo    string       `json:"repo,omitempty"`
+	Path    string       `json:"path"`           // the workspace, on the host and in the box
 	Head    string       `json:"head,omitempty"` // last snapshot taken or restored
 	Created time.Time    `json:"created"`
 	State   driver.State `json:"state"`
@@ -81,6 +85,8 @@ type Server struct {
 
 	mu   sync.Mutex
 	envs map[string]*envState
+
+	changes sync.WaitGroup // changes still running, which outlive their requests
 }
 
 // envState is what the server keeps in memory about one environment.
@@ -115,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /envs/{id}", s.delete)
 	mux.HandleFunc("POST /envs/{id}/snapshots", s.snapshot)
 	mux.HandleFunc("GET /envs/{id}/snapshots", s.snapshots)
+	mux.HandleFunc("DELETE /envs/{id}/snapshots/{snap}", s.deleteSnapshot)
 	mux.HandleFunc("POST /envs/{id}/restore", s.restore)
 	mux.HandleFunc("POST /envs/{id}/sleep", s.sleep)
 	mux.HandleFunc("POST /envs/{id}/wake", s.wake)
@@ -122,6 +129,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /envs/{id}/exec", s.exec)
 	return mux
 }
+
+// Wait waits for the changes still running. Call it after the HTTP server
+// has shut down and before closing the store.
+func (s *Server) Wait() { s.changes.Wait() }
 
 // change runs fn on environment id while no one else changes or wakes it.
 // Waiting can be cancelled by the client; fn can't.
@@ -134,25 +145,28 @@ func (s *Server) change(r *http.Request, id string, fn func(ctx context.Context,
 		return err
 	}
 	defer e.release()
+	s.changes.Add(1)
+	defer s.changes.Done()
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), changeTimeout)
 	defer cancel()
 	return fn(ctx, e)
 }
 
-// create makes an environment, filled from a tar body if there is one.
+// create makes an environment, filled from a tar body if there is one. The
+// query may name its repo and its workspace path.
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	var seed io.Reader
+	opts := store.CreateOptions{Repo: r.URL.Query().Get("repo"), Path: r.URL.Query().Get("path")}
 	if r.Header.Get("Content-Type") == "application/x-tar" {
-		seed = r.Body
+		opts.Seed = r.Body
 	}
 	var env store.Env
 	err := s.change(r, id, func(ctx context.Context, _ *envState) error {
 		var err error
-		if env, err = s.store.Create(ctx, id, r.URL.Query().Get("repo"), seed); err != nil {
+		if env, err = s.store.Create(ctx, id, opts); err != nil {
 			return err
 		}
-		return s.driver.Create(ctx, id, env.Token)
+		return s.driver.Create(ctx, id, env.Token, env.Path)
 	})
 	if err != nil {
 		s.fail(w, r, err)
@@ -170,15 +184,38 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 	s.reply(w, r, s.envOf(r.Context(), env))
 }
 
+// list returns all environments, or with ?path= the one whose workspace
+// holds that path (none if there is none).
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
-	envs, err := s.store.List(r.Context())
+	var envs []store.Env
+	var err error
+	if path := r.URL.Query().Get("path"); path != "" {
+		var env store.Env
+		env, err = s.store.FindByPath(r.Context(), path)
+		if err == nil {
+			envs = []store.Env{env}
+		} else if errors.Is(err, store.ErrNotFound) {
+			err = nil
+		}
+	} else {
+		envs, err = s.store.List(r.Context())
+	}
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
+	// One Kubernetes call for all of them, not one each.
+	states, err := s.driver.States(r.Context())
+	if err != nil {
+		s.log.WarnContext(r.Context(), "box states", slog.Any("error", err))
+	}
 	out := make([]Env, 0, len(envs))
 	for _, env := range envs {
-		out = append(out, s.envOf(r.Context(), env))
+		state, ok := states[env.ID]
+		if !ok {
+			state = "unknown"
+		}
+		out = append(out, wireEnv(env, state))
 	}
 	s.reply(w, r, out)
 }
@@ -206,6 +243,9 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request) {
 // SnapshotRequest is the body of POST /envs/{id}/snapshots.
 type SnapshotRequest struct {
 	ID string `json:"id,omitempty"` // generated if empty
+	// Replace takes the snapshot again if one with this ID exists, instead
+	// of returning it. T3 reuses checkpoint names after a revert.
+	Replace bool `json:"replace,omitempty"`
 }
 
 func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
@@ -219,6 +259,11 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var snap store.Snapshot
 	err := s.change(r, id, func(ctx context.Context, _ *envState) error {
+		if req.Replace {
+			if err := s.store.DeleteSnapshot(ctx, id, req.ID); err != nil {
+				return err
+			}
+		}
 		var err error
 		snap, err = s.store.Snapshot(ctx, id, req.ID)
 		return err
@@ -241,6 +286,20 @@ func (s *Server) snapshots(w http.ResponseWriter, r *http.Request) {
 		out = append(out, snapshotOf(snap))
 	}
 	s.reply(w, r, out)
+}
+
+// deleteSnapshot removes a snapshot; removing one that doesn't exist is not an
+// error.
+func (s *Server) deleteSnapshot(w http.ResponseWriter, r *http.Request) {
+	id, snap := r.PathValue("id"), r.PathValue("snap")
+	err := s.change(r, id, func(ctx context.Context, _ *envState) error {
+		return s.store.DeleteSnapshot(ctx, id, snap)
+	})
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // RestoreRequest is the body of POST /envs/{id}/restore.
@@ -416,7 +475,11 @@ func (s *Server) env(id string) (*envState, error) {
 
 // envOf is env as the API reports it.
 func (s *Server) envOf(ctx context.Context, env store.Env) Env {
-	return Env{ID: env.ID, Repo: env.Repo, Head: env.Head, Created: env.Created, State: s.state(ctx, env.ID)}
+	return wireEnv(env, s.state(ctx, env.ID))
+}
+
+func wireEnv(env store.Env, state driver.State) Env {
+	return Env{ID: env.ID, Repo: env.Repo, Path: env.Path, Head: env.Head, Created: env.Created, State: state}
 }
 
 // state is the box state for listings, where an error shouldn't fail the
@@ -452,7 +515,7 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, driver.ErrNotFound):
 		e.Code = CodeNotFound
-	case errors.Is(err, store.ErrInvalidID):
+	case errors.Is(err, store.ErrInvalidID), errors.Is(err, store.ErrInvalidPath):
 		e.Code = CodeInvalid
 	case errors.Is(err, context.Canceled) && r.Context().Err() != nil:
 		// The client gave up waiting; there is no one to answer.

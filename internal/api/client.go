@@ -59,20 +59,45 @@ func NewClient(socket string) *Client {
 // base is the URL prefix for requests; the host is ignored by the transport.
 const base = "http://fern"
 
-// Create makes environment id, filled from seed (a tar stream) if seed isn't
-// nil. Creating one that exists returns it unchanged.
-func (c *Client) Create(ctx context.Context, id, repo string, seed io.Reader) (Env, error) {
+// CreateOptions are the optional parts of a new environment.
+type CreateOptions struct {
+	Repo string    // where the code came from, for listings
+	Path string    // the workspace, <pool>/worktrees/<repo>/<name>; see store.CreateOptions
+	Seed io.Reader // a tar stream to fill the workspace with
+}
+
+// Create makes environment id. Creating one that exists returns it unchanged.
+func (c *Client) Create(ctx context.Context, id string, opts CreateOptions) (Env, error) {
 	path := "/envs/" + url.PathEscape(id)
-	if repo != "" {
-		path += "?" + url.Values{"repo": {repo}}.Encode()
+	q := url.Values{}
+	if opts.Repo != "" {
+		q.Set("repo", opts.Repo)
+	}
+	if opts.Path != "" {
+		q.Set("path", opts.Path)
+	}
+	if len(q) > 0 {
+		path += "?" + q.Encode()
 	}
 	contentType := ""
-	if seed != nil {
+	if opts.Seed != nil {
 		contentType = "application/x-tar"
 	}
 	var env Env
-	err := c.do(ctx, http.MethodPut, path, seed, contentType, &env)
+	err := c.do(ctx, http.MethodPut, path, opts.Seed, contentType, &env)
 	return env, err
+}
+
+// FindByPath returns the environment whose workspace is path or holds it.
+func (c *Client) FindByPath(ctx context.Context, path string) (Env, error) {
+	var envs []Env
+	if err := c.do(ctx, http.MethodGet, "/envs?"+url.Values{"path": {path}}.Encode(), nil, "", &envs); err != nil {
+		return Env{}, err
+	}
+	if len(envs) == 0 {
+		return Env{}, &Error{Code: CodeNotFound, Message: "no environment at " + path}
+	}
+	return envs[0], nil
 }
 
 // Get returns environment id.
@@ -100,6 +125,20 @@ func (c *Client) Snapshot(ctx context.Context, env, snap string) (Snapshot, erro
 	var out Snapshot
 	err := c.doJSON(ctx, http.MethodPost, "/envs/"+url.PathEscape(env)+"/snapshots", SnapshotRequest{ID: snap}, &out)
 	return out, err
+}
+
+// ReplaceSnapshot takes snapshot snap of environment env, replacing one with
+// the same ID.
+func (c *Client) ReplaceSnapshot(ctx context.Context, env, snap string) (Snapshot, error) {
+	var out Snapshot
+	err := c.doJSON(ctx, http.MethodPost, "/envs/"+url.PathEscape(env)+"/snapshots", SnapshotRequest{ID: snap, Replace: true}, &out)
+	return out, err
+}
+
+// DeleteSnapshot removes snapshot snap of environment env; removing one that
+// doesn't exist is not an error.
+func (c *Client) DeleteSnapshot(ctx context.Context, env, snap string) error {
+	return c.do(ctx, http.MethodDelete, "/envs/"+url.PathEscape(env)+"/snapshots/"+url.PathEscape(snap), nil, "", nil)
 }
 
 // Snapshots lists environment env's snapshots, oldest first.

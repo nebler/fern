@@ -3,6 +3,7 @@ package driver
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 )
 
@@ -22,7 +23,7 @@ func NewFake(addr string) *Fake {
 }
 
 // Create makes environment env's box, asleep.
-func (f *Fake) Create(_ context.Context, env, _ string) error {
+func (f *Fake) Create(_ context.Context, env, _, _ string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.boxes[env]; !ok {
@@ -67,6 +68,13 @@ func (f *Fake) State(_ context.Context, env string) (State, error) {
 		return "", fmt.Errorf("environment %s: %w", env, ErrNotFound)
 	}
 	return state, nil
+}
+
+// States reports every box's state.
+func (f *Fake) States(context.Context) (map[string]State, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return maps.Clone(f.boxes), nil
 }
 
 // Wakes returns how many times a box went from not running to running.
