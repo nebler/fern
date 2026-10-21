@@ -153,9 +153,10 @@ func TestRun(t *testing.T) {
 			// terminal open; the exec must end anyway. The command waits
 			// until the hangup is ignored.
 			name: "tty with a process left behind",
-			req: boxexec.Request{Argv: []string{"sh", "-c",
-				`rm -f held; (trap "" HUP; touch held; exec sleep 600) & until [ -e held ]; do sleep 0.01; done; echo started`,
-			}, TTY: true},
+			req: boxexec.Request{
+				Argv: []string{"sh", "-c", `rm -f held; (trap "" HUP; touch held; exec sleep 600) & until [ -e held ]; do sleep 0.01; done; echo started`},
+				TTY:  true,
+			},
 			wantStdout: "started\r\n",
 		},
 		{
@@ -241,8 +242,8 @@ func TestRunCancelKillsBackground(t *testing.T) {
 	// The kill is asynchronous to the client: wait in the box for the
 	// background process to be gone, bounded by run's timeout. Nobody reaps
 	// it in a test, so a zombie counts as gone.
-	check := boxexec.Request{Argv: []string{"sh", "-c",
-		`pid=$(cat bg.pid); while ps -o stat= -p "$pid" | grep -qv Z; do sleep 0.05; done; echo gone`}}
+	const waitGone = `pid=$(cat bg.pid); while ps -o stat= -p "$pid" | grep -qv Z; do sleep 0.05; done; echo gone`
+	check := boxexec.Request{Argv: []string{"sh", "-c", waitGone}}
 	if got := run(t, url, token, check, nil); got.stdout != "gone\n" {
 		t.Errorf("background process after cancel: stdout %q, stderr %q, want it gone", got.stdout, got.stderr)
 	}
