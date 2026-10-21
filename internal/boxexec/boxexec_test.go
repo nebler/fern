@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"go.uber.org/goleak"
 
@@ -63,7 +64,9 @@ type result struct {
 // run runs req at url and returns what came back.
 func run(t *testing.T, url, tok string, req boxexec.Request, stdin io.Reader) result {
 	t.Helper()
-	ctx := t.Context()
+	// A hang is a failure, not a test that runs until the global timeout.
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 	conn, err := boxexec.Dial(ctx, url, tok, nil)
 	if err != nil {
 		t.Fatalf("Dial(%s) error: %v", url, err)
@@ -124,6 +127,11 @@ func TestRun(t *testing.T) {
 			wantStdout: strings.Repeat("0123456789", 10_000),
 		},
 		{
+			// Without -i the command must still see EOF, or cat would wait forever.
+			name: "no stdin",
+			req:  boxexec.Request{Argv: []string{"cat"}},
+		},
+		{
 			name:       "command not found",
 			req:        boxexec.Request{Argv: []string{"no-such-command"}},
 			wantCode:   127,
@@ -139,6 +147,16 @@ func TestRun(t *testing.T) {
 			name:       "tty",
 			req:        boxexec.Request{Argv: []string{"sh", "-c", "test -t 0 && test -t 1 && echo yes"}, TTY: true},
 			wantStdout: "yes\r\n", // the terminal turns \n into \r\n
+		},
+		{
+			// The background process ignores the hangup and keeps the
+			// terminal open; the exec must end anyway. The command waits
+			// until the hangup is ignored.
+			name: "tty with a process left behind",
+			req: boxexec.Request{Argv: []string{"sh", "-c",
+				`rm -f held; (trap "" HUP; touch held; exec sleep 600) & until [ -e held ]; do sleep 0.01; done; echo started`,
+			}, TTY: true},
+			wantStdout: "started\r\n",
 		},
 		{
 			name:       "runs in dir",
@@ -199,6 +217,35 @@ func TestRunCancelStopsCommand(t *testing.T) {
 	}
 	// goleak in TestMain fails the run if the server's goroutines are stuck
 	// waiting for the command.
+}
+
+// Cancelling must also stop what the command started in the background, or
+// it would go on changing the workspace.
+func TestRunCancelKillsBackground(t *testing.T) {
+	url, _ := newBox(t)
+	ctx, cancel := context.WithCancel(t.Context())
+	conn, err := boxexec.Dial(ctx, url, token, nil)
+	if err != nil {
+		t.Fatalf("Dial() error: %v", err)
+	}
+	defer func() { _ = conn.CloseNow() }()
+	stdout := writerFunc(func(p []byte) (int, error) {
+		cancel()
+		return len(p), nil
+	})
+	req := boxexec.Request{Argv: []string{"sh", "-c", "sleep 600 & echo $! > bg.pid; echo started; wait"}}
+	if _, err := boxexec.Run(ctx, conn, req, nil, stdout, io.Discard, nil); err == nil {
+		t.Fatalf("Run(%q) after cancel succeeded, want an error", req.Argv)
+	}
+	_ = conn.CloseNow() // the client goes away
+	// The kill is asynchronous to the client: wait in the box for the
+	// background process to be gone, bounded by run's timeout. Nobody reaps
+	// it in a test, so a zombie counts as gone.
+	check := boxexec.Request{Argv: []string{"sh", "-c",
+		`pid=$(cat bg.pid); while ps -o stat= -p "$pid" | grep -qv Z; do sleep 0.05; done; echo gone`}}
+	if got := run(t, url, token, check, nil); got.stdout != "gone\n" {
+		t.Errorf("background process after cancel: stdout %q, stderr %q, want it gone", got.stdout, got.stderr)
+	}
 }
 
 type writerFunc func([]byte) (int, error)
