@@ -11,7 +11,10 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -91,6 +94,7 @@ type process struct {
 	stdin  io.WriteCloser
 	tty    *os.File // the terminal's controlling side; nil without a terminal
 	output sync.WaitGroup
+	exited atomic.Bool // the command has been reaped: don't signal its group
 }
 
 func (s *Server) start(ctx context.Context, conn *websocket.Conn, req Request) (*process, error) {
@@ -99,6 +103,16 @@ func (s *Server) start(ctx context.Context, conn *websocket.Conn, req Request) (
 	}
 	cmd := exec.CommandContext(ctx, req.Argv[0], req.Argv[1:]...)
 	cmd.Dir, cmd.Env = s.dir, s.env
+	if req.Dir != "" {
+		cmd.Dir = req.Dir
+		if !filepath.IsAbs(req.Dir) {
+			cmd.Dir = filepath.Join(s.dir, req.Dir)
+		}
+	}
+	if len(req.Env) > 0 {
+		// Later entries win (os/exec keeps the last of each name).
+		cmd.Env = append(slices.Clone(s.env), req.Env...)
+	}
 	// The command leads its own process group (a terminal makes it a session
 	// leader, which is one too). Cancelling kills the whole group, so nothing
 	// the command started keeps writing to the workspace after the client
@@ -207,6 +221,7 @@ func setSize(f *os.File, s Size) error {
 // returns the command's exit code.
 func (p *process) wait(log *slog.Logger) int {
 	err := p.cmd.Wait()
+	p.exited.Store(true)
 	killGroup(p.cmd.Process.Pid)
 	if p.tty != nil {
 		// cmd.WaitDelay only bounds pipes. A process killGroup can't reach
@@ -268,6 +283,12 @@ func readInput(ctx context.Context, conn *websocket.Conn, p *process) {
 			if p.tty != nil && len(data) == 5 {
 				size := Size{Rows: binary.BigEndian.Uint16(data[1:]), Cols: binary.BigEndian.Uint16(data[3:])}
 				_ = setSize(p.tty, size) // fails once wait has closed the terminal
+			}
+		case frameSignal:
+			// To the whole group, as a terminal would send it. Once the
+			// command has been reaped its group id may be reused.
+			if sig := syscall.Signal(data[len(data)-1]); len(data) == 2 && forwardable(sig) && !p.exited.Load() {
+				_ = syscall.Kill(-p.cmd.Process.Pid, sig)
 			}
 		}
 	}

@@ -15,6 +15,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"syscall"
 
 	"github.com/coder/websocket"
 )
@@ -35,6 +37,7 @@ const (
 	frameStderr
 	frameStdinEOF
 	frameResize
+	frameSignal // one more byte: the signal number
 )
 
 // MaxMessage is the largest message in the protocol; output frames are at
@@ -48,6 +51,27 @@ type Request struct {
 	Argv []string `json:"argv"`
 	TTY  bool     `json:"tty,omitempty"`
 	Size Size     `json:"size,omitzero"` // initial terminal size when TTY is set
+	// Dir is where the command runs: absolute, or relative to the
+	// workspace, which is the default.
+	Dir string `json:"dir,omitempty"`
+	// Env adds NAME=VALUE pairs to the box's environment, replacing any of
+	// the same name.
+	Env []string `json:"env,omitempty"`
+}
+
+// Streams connect a command to the client: its standard streams, terminal
+// sizes and signals.
+type Streams struct {
+	Stdin          io.Reader // nil: the command reads EOF at once
+	Stdout, Stderr io.Writer
+	Resize         <-chan Size      // new terminal sizes; may be nil
+	Signal         <-chan os.Signal // signals for the command's process group; may be nil
+}
+
+// forwardable reports whether a client may send sig. Others would let a
+// client do more than ask the command it started to stop.
+func forwardable(sig syscall.Signal) bool {
+	return sig == syscall.SIGHUP || sig == syscall.SIGINT || sig == syscall.SIGQUIT || sig == syscall.SIGTERM
 }
 
 // Size is a terminal size.

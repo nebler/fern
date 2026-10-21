@@ -165,9 +165,7 @@ func (c *Client) Wake(ctx context.Context, env string) error {
 
 // Exec runs req in environment env's box, waking it if needed, and returns
 // the command's exit code. See boxexec.Run for the streams.
-func (c *Client) Exec(ctx context.Context, env string, req boxexec.Request, stdin io.Reader,
-	stdout, stderr io.Writer, resize <-chan boxexec.Size,
-) (int, error) {
+func (c *Client) Exec(ctx context.Context, env string, req boxexec.Request, streams boxexec.Streams) (int, error) {
 	u := "ws://fern/envs/" + url.PathEscape(env) + "/exec"
 	conn, err := boxexec.Dial(ctx, u, "", c.hc)
 	if err != nil {
@@ -180,7 +178,7 @@ func (c *Client) Exec(ctx context.Context, env string, req boxexec.Request, stdi
 		return 0, fmt.Errorf("exec in %s: %w", env, err)
 	}
 	defer func() { _ = conn.CloseNow() }()
-	return boxexec.Run(ctx, conn, req, stdin, stdout, stderr, resize)
+	return boxexec.Run(ctx, conn, req, streams)
 }
 
 func (c *Client) doJSON(ctx context.Context, method, path string, in, out any) error {

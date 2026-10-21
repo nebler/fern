@@ -76,7 +76,7 @@ func run(t *testing.T, url, tok string, req boxexec.Request, stdin io.Reader) re
 	}
 	defer func() { _ = conn.CloseNow() }()
 	var stdout, stderr bytes.Buffer
-	code, err := boxexec.Run(ctx, conn, req, stdin, &stdout, &stderr, nil)
+	code, err := boxexec.Run(ctx, conn, req, boxexec.Streams{Stdin: stdin, Stdout: &stdout, Stderr: &stderr})
 	if err != nil {
 		t.Fatalf("Run(%q) error: %v", req.Argv, err)
 	}
@@ -216,7 +216,7 @@ func TestRunCancelStopsCommand(t *testing.T) {
 		return len(p), nil
 	})
 	req := boxexec.Request{Argv: []string{"sh", "-c", "echo started; exec sleep 600"}}
-	if _, err := boxexec.Run(ctx, conn, req, nil, stdout, io.Discard, nil); err == nil {
+	if _, err := boxexec.Run(ctx, conn, req, boxexec.Streams{Stdout: stdout, Stderr: io.Discard}); err == nil {
 		t.Errorf("Run(%q) after cancel succeeded, want an error", req.Argv)
 	}
 	// goleak in TestMain fails the run if the server's goroutines are stuck
@@ -238,7 +238,7 @@ func TestRunCancelKillsBackground(t *testing.T) {
 		return len(p), nil
 	})
 	req := boxexec.Request{Argv: []string{"sh", "-c", "sleep 600 & echo $! > bg.pid; echo started; wait"}}
-	if _, err := boxexec.Run(ctx, conn, req, nil, stdout, io.Discard, nil); err == nil {
+	if _, err := boxexec.Run(ctx, conn, req, boxexec.Streams{Stdout: stdout, Stderr: io.Discard}); err == nil {
 		t.Fatalf("Run(%q) after cancel succeeded, want an error", req.Argv)
 	}
 	_ = conn.CloseNow() // the client goes away
@@ -342,3 +342,62 @@ echo gone`
 type writerFunc func([]byte) (int, error)
 
 func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+
+func TestRunDirAndEnv(t *testing.T) {
+	url, dir := newBox(t)
+	if err := os.Mkdir(filepath.Join(dir, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name string
+		req  boxexec.Request
+		want string
+	}{
+		{"relative dir", boxexec.Request{Argv: []string{"pwd", "-P"}, Dir: "sub"}, filepath.Join(resolved, "sub") + "\n"},
+		{"absolute dir", boxexec.Request{Argv: []string{"pwd", "-P"}, Dir: filepath.Join(dir, "sub")}, filepath.Join(resolved, "sub") + "\n"},
+		{"env added", boxexec.Request{Argv: []string{"sh", "-c", `echo "$A $PATH"`}, Env: []string{"A=1"}}, "1 /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"},
+		{"env replaces", boxexec.Request{Argv: []string{"sh", "-c", `echo "$PATH"`}, Env: []string{"PATH=/bin"}}, "/bin\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := run(t, url, token, tt.req, nil); got.code != 0 || got.stdout != tt.want {
+				t.Errorf("Run(%+v) = %d, %q (stderr %q), want 0, %q", tt.req, got.code, got.stdout, got.stderr, tt.want)
+			}
+		})
+	}
+}
+
+// A signal from the client reaches the command, which decides how to stop:
+// T3 stops Claude with SIGTERM and waits for it to save its transcript.
+func TestRunSignal(t *testing.T) {
+	url, _ := newBox(t)
+	for _, target := range []struct{ name, url string }{{"direct", url}, {"proxy", newRelay(t, url)}} {
+		t.Run(target.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			conn, err := boxexec.Dial(ctx, target.url, token, nil)
+			if err != nil {
+				t.Fatalf("Dial() error: %v", err)
+			}
+			defer func() { _ = conn.CloseNow() }()
+			sigs := make(chan os.Signal, 2)
+			var stdout bytes.Buffer
+			ready := writerFunc(func(p []byte) (int, error) {
+				if bytes.Contains(p, []byte("ready")) {
+					sigs <- syscall.SIGKILL // not forwardable: dropped
+					sigs <- syscall.SIGTERM
+				}
+				return stdout.Write(p)
+			})
+			req := boxexec.Request{Argv: []string{"sh", "-c", `trap 'echo stopping; exit 7' TERM; echo ready; while :; do sleep 0.05; done`}}
+			code, err := boxexec.Run(ctx, conn, req, boxexec.Streams{Stdout: ready, Stderr: io.Discard, Signal: sigs})
+			if err != nil || code != 7 || !strings.Contains(stdout.String(), "stopping") {
+				t.Errorf("Run after SIGTERM = %d, %v, stdout %q; want 7 and the trap's output", code, err, stdout.String())
+			}
+		})
+	}
+}

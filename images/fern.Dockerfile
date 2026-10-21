@@ -14,5 +14,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends btrfs-progs tar \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/fern /usr/local/bin/fern
+# The wrapper T3 runs instead of claude; here so the lab can test it.
+COPY images/fern-claude /usr/local/bin/fern-claude
 ENTRYPOINT ["/usr/local/bin/fern"]
 CMD ["daemon"]

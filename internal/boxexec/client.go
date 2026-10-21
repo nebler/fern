@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sync"
+	"syscall"
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
@@ -48,31 +50,31 @@ func Dial(ctx context.Context, url, token string, hc *http.Client) (*websocket.C
 	return conn, nil
 }
 
-// Run starts req on conn, streams stdin to the command and its output to
-// stdout and stderr, forwards terminal sizes from resize (which may be nil),
-// and returns the command's exit code. A nil stdin is empty: the command
-// reads EOF at once.
+// Run starts req on conn, connects it to s, and returns the command's exit
+// code.
 //
-// A Read on stdin that blocks when the command exits can't be interrupted;
+// A Read on s.Stdin that blocks when the command exits can't be interrupted;
 // the goroutine reading it ends at its next Read.
-func Run(ctx context.Context, conn *websocket.Conn, req Request, stdin io.Reader,
-	stdout, stderr io.Writer, resize <-chan Size,
-) (int, error) {
+func Run(ctx context.Context, conn *websocket.Conn, req Request, s Streams) (int, error) {
 	if err := wsjson.Write(ctx, conn, req); err != nil {
 		return 0, fmt.Errorf("exec: send request: %w", err)
 	}
 	ctx, cancel := context.WithCancel(ctx)
-	var resizer sync.WaitGroup
-	defer resizer.Wait()
+	var senders sync.WaitGroup
+	defer senders.Wait()
 	defer cancel()
-	if stdin != nil {
-		go sendStdin(ctx, conn, stdin)
+	if s.Stdin != nil {
+		go sendStdin(ctx, conn, s.Stdin)
 	} else if err := conn.Write(ctx, websocket.MessageBinary, []byte{frameStdinEOF}); err != nil {
 		return 0, fmt.Errorf("exec: close stdin: %w", err)
 	}
-	if resize != nil {
-		resizer.Go(func() { sendResizes(ctx, conn, resize) })
+	if s.Resize != nil {
+		senders.Go(func() { sendResizes(ctx, conn, s.Resize) })
 	}
+	if s.Signal != nil {
+		senders.Go(func() { sendSignals(ctx, conn, s.Signal) })
+	}
+	stdout, stderr := s.Stdout, s.Stderr
 	r := &messageReader{conn: conn}
 	for {
 		typ, data, err := r.read(ctx)
@@ -116,6 +118,24 @@ func sendStdin(ctx context.Context, conn *websocket.Conn, stdin io.Reader) {
 		if err != nil {
 			_ = conn.Write(ctx, websocket.MessageBinary, []byte{frameStdinEOF})
 			return
+		}
+	}
+}
+
+// sendSignals sends the signals the server will forward; it drops others.
+func sendSignals(ctx context.Context, conn *websocket.Conn, sigs <-chan os.Signal) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case sig := <-sigs:
+			s, ok := sig.(syscall.Signal)
+			if !ok || !forwardable(s) {
+				continue
+			}
+			if conn.Write(ctx, websocket.MessageBinary, []byte{frameSignal, byte(s)}) != nil {
+				return
+			}
 		}
 	}
 }

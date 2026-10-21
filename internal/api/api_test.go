@@ -284,7 +284,7 @@ func TestErrors(t *testing.T) {
 		{"restore unknown snapshot", func(ctx context.Context) error { return c.Restore(ctx, "demo", "nope") }, api.CodeNotFound},
 		{"wake unknown", func(ctx context.Context) error { return c.Wake(ctx, "nope") }, api.CodeNotFound},
 		{"exec unknown", func(ctx context.Context) error {
-			_, err := c.Exec(ctx, "nope", boxexec.Request{Argv: []string{"true"}}, nil, io.Discard, io.Discard, nil)
+			_, err := c.Exec(ctx, "nope", boxexec.Request{Argv: []string{"true"}}, boxexec.Streams{Stdout: io.Discard, Stderr: io.Discard})
 			return err
 		}, api.CodeNotFound},
 	}
@@ -334,7 +334,7 @@ func TestSnapshotRestore(t *testing.T) {
 		t.Errorf("after Restore: Get(demo) = %v, %v, want state %s", env.State, err, driver.Asleep)
 	}
 	// The next exec must wake the box again, not reuse the old address.
-	if _, err := c.Exec(ctx, "demo", boxexec.Request{Argv: []string{"true"}}, nil, io.Discard, io.Discard, nil); err != nil {
+	if _, err := c.Exec(ctx, "demo", boxexec.Request{Argv: []string{"true"}}, boxexec.Streams{Stdout: io.Discard, Stderr: io.Discard}); err != nil {
 		t.Fatalf("Exec(demo) after Restore error: %v", err)
 	}
 	if got := drv.Wakes(); got != 2 {
@@ -348,7 +348,7 @@ func TestExecWakesOnce(t *testing.T) {
 	req := boxexec.Request{Argv: []string{"sh", "-c", "cat; echo err >&2; exit 4"}}
 	for i := range 2 {
 		var stdout, stderr bytes.Buffer
-		code, err := c.Exec(t.Context(), "demo", req, bytes.NewBufferString("hi"), &stdout, &stderr, nil)
+		code, err := c.Exec(t.Context(), "demo", req, boxexec.Streams{Stdin: bytes.NewBufferString("hi"), Stdout: &stdout, Stderr: &stderr})
 		if err != nil {
 			t.Fatalf("Exec #%d error: %v", i+1, err)
 		}
@@ -372,7 +372,7 @@ func TestExecLargeStdin(t *testing.T) {
 	mustCreate(t, c, "demo")
 	in := strings.Repeat("0123456789", 10_000)
 	var stdout bytes.Buffer
-	code, err := c.Exec(t.Context(), "demo", boxexec.Request{Argv: []string{"cat"}}, strings.NewReader(in), &stdout, io.Discard, nil)
+	code, err := c.Exec(t.Context(), "demo", boxexec.Request{Argv: []string{"cat"}}, boxexec.Streams{Stdin: strings.NewReader(in), Stdout: &stdout, Stderr: io.Discard})
 	if err != nil || code != 0 {
 		t.Fatalf("Exec(cat) = %d, %v, want 0, nil", code, err)
 	}
@@ -518,7 +518,7 @@ func TestExecRedialsStaleBox(t *testing.T) {
 	c, _ := newAPIWith(t, func(f *driver.Fake) api.Driver { d.Fake = f; return d })
 	mustCreate(t, c, "demo")
 	var stdout bytes.Buffer
-	code, err := c.Exec(t.Context(), "demo", boxexec.Request{Argv: []string{"echo", "hi"}}, nil, &stdout, io.Discard, nil)
+	code, err := c.Exec(t.Context(), "demo", boxexec.Request{Argv: []string{"echo", "hi"}}, boxexec.Streams{Stdout: &stdout, Stderr: io.Discard})
 	if err != nil || code != 0 || stdout.String() != "hi\n" {
 		t.Errorf("Exec(echo hi) = %d, %q, %v, want 0, %q, nil", code, stdout.String(), err, "hi\n")
 	}

@@ -9,7 +9,10 @@
 //	fern snapshots <env>                     list snapshots
 //	fern rmsnap <env> <snapshot>…            delete snapshots
 //	fern restore <env> <snapshot>            restore a snapshot; the box stays asleep
-//	fern exec [-i] [-t] [-it] <env> -- cmd…  run a command, waking the box if needed
+//	fern exec [-i] [-t] [-it] [--cwd DIR] [-e NAME[=VALUE]]… <env> -- cmd…
+//	                                         run a command, waking the box if needed
+//	fern exec [flags] --here -- cmd…         … in the environment holding the current
+//	                                         directory, in that directory (fern-claude)
 //	fern sleep <env> | fern wake <env>       stop or start the box
 package main
 
@@ -38,15 +41,14 @@ import (
 const defaultSocket = "/run/fern.sock"
 
 func main() {
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
-	stop()
-	os.Exit(code)
+	os.Exit(run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 // run runs one invocation and returns the process exit code.
 func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == "daemon" {
+		ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer stop()
 		if err := runDaemon(ctx, args[1:], stderr); err != nil {
 			_, _ = fmt.Fprintf(stderr, "fern daemon: %v\n", err)
 			return 1
@@ -57,6 +59,12 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "fern: %v\n", err)
 		return 2
+	}
+	// exec passes signals on to the command; everything else stops.
+	if cmd.name != "exec" {
+		var stop context.CancelFunc
+		ctx, stop = signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer stop()
 	}
 	code, err := lookup(cmd.name).run(ctx, cmd, api.NewClient(cmd.socket), stdio{stdin, stdout, stderr})
 	if err != nil {
@@ -78,6 +86,9 @@ type command struct {
 	again  bool     // snapshot --replace
 	stdin  bool     // exec -i
 	tty    bool     // exec -t
+	here   bool     // exec --here
+	dir    string   // exec --cwd
+	vars   []string // exec -e, as NAME=VALUE
 	argv   []string // exec
 }
 
@@ -196,15 +207,31 @@ func parseExec(fs *flag.FlagSet, cmd command, args []string) (command, error) {
 	fs.BoolVar(&cmd.stdin, "i", false, "send stdin")
 	fs.BoolVar(&cmd.tty, "t", false, "allocate a terminal")
 	fs.BoolVar(&it, "it", false, "-i and -t")
+	fs.BoolVar(&cmd.here, "here", false, "use the environment holding the current directory, and run in it")
+	fs.StringVar(&cmd.dir, "cwd", "", "directory to run in (default: the workspace)")
+	fs.Func("e", "pass `NAME` (with its value here) or NAME=VALUE on to the command", func(v string) error {
+		if !strings.Contains(v, "=") {
+			val, ok := os.LookupEnv(v)
+			if !ok {
+				return nil // an unset name passes nothing
+			}
+			v += "=" + val
+		}
+		cmd.vars = append(cmd.vars, v)
+		return nil
+	})
 	if err := fs.Parse(args); err != nil {
 		return command{}, err
 	}
 	pos := fs.Args()
-	if len(pos) == 0 {
-		return command{}, errors.New("exec: wrong number of arguments")
+	if !cmd.here {
+		if len(pos) == 0 {
+			return command{}, errors.New("exec: wrong number of arguments")
+		}
+		cmd.env, pos = pos[0], pos[1:]
 	}
 	cmd.stdin, cmd.tty = cmd.stdin || it, cmd.tty || it
-	cmd.env, cmd.argv = pos[0], pos[1:]
+	cmd.argv = pos
 	if len(cmd.argv) > 0 && cmd.argv[0] == "--" {
 		cmd.argv = cmd.argv[1:]
 	}
@@ -361,7 +388,21 @@ func createFromDir(ctx context.Context, c command, opts api.CreateOptions, cl *a
 }
 
 func execute(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
-	req := boxexec.Request{Argv: c.argv, TTY: c.tty}
+	req := boxexec.Request{Argv: c.argv, TTY: c.tty, Dir: c.dir, Env: c.vars}
+	if c.here {
+		wd, err := os.Getwd()
+		if err != nil {
+			return 0, err
+		}
+		env, err := cl.FindByPath(ctx, wd)
+		if err != nil {
+			return 0, err
+		}
+		c.env = env.ID
+		if req.Dir == "" {
+			req.Dir = wd
+		}
+	}
 	stdin := std.in
 	if !c.stdin {
 		stdin = nil
@@ -371,6 +412,33 @@ func execute(ctx context.Context, c command, cl *api.Client, std stdio) (int, er
 	defer resizer.Wait()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	// The first interrupt goes to the command, which decides how to stop (T3
+	// stops Claude with SIGTERM); a second one gives up on it.
+	sigs := make(chan os.Signal, 4)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigs)
+	forward := make(chan os.Signal, 4)
+	resizer.Go(func() {
+		interrupted := false
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case sig := <-sigs:
+				if sig != syscall.SIGHUP {
+					if interrupted {
+						cancel()
+						return
+					}
+					interrupted = true
+				}
+				select {
+				case forward <- sig:
+				default:
+				}
+			}
+		}
+	})
 	if f, ok := stdin.(*os.File); ok && c.tty && term.IsTerminal(int(f.Fd())) {
 		fd := int(f.Fd())
 		old, err := term.MakeRaw(fd)
@@ -401,7 +469,9 @@ func execute(ctx context.Context, c command, cl *api.Client, std stdio) (int, er
 			}
 		})
 	}
-	return cl.Exec(ctx, c.env, req, stdin, std.out, std.err, resize)
+	return cl.Exec(ctx, c.env, req, boxexec.Streams{
+		Stdin: stdin, Stdout: std.out, Stderr: std.err, Resize: resize, Signal: forward,
+	})
 }
 
 func ms(d time.Duration) string { return fmt.Sprintf("%.1fms", float64(d.Microseconds())/1000) }

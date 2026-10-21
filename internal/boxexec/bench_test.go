@@ -32,7 +32,7 @@ func BenchmarkRunThroughput(b *testing.B) {
 					b.Fatalf("Dial(%s) error: %v", target.url, err)
 				}
 				n := &counter{}
-				code, err := boxexec.Run(b.Context(), conn, req, nil, n, io.Discard, nil)
+				code, err := boxexec.Run(b.Context(), conn, req, boxexec.Streams{Stdout: n, Stderr: io.Discard})
 				_ = conn.CloseNow()
 				if err != nil || code != 0 || n.n != size {
 					b.Fatalf("Run(%q) = %d, %v with %d bytes of output, want 0, nil with %d", req.Argv, code, err, n.n, size)
@@ -63,7 +63,7 @@ func BenchmarkRunLatency(b *testing.B) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				code, err = boxexec.Run(b.Context(), conn, req, stdin, stdout, io.Discard, nil)
+				code, err = boxexec.Run(b.Context(), conn, req, boxexec.Streams{Stdin: stdin, Stdout: stdout, Stderr: io.Discard})
 				_ = stdin.Close() // fail a write nobody will read
 			}()
 			line := []byte("ping\n")

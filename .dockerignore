@@ -1,6 +1,7 @@
-# Only the Go sources go into image builds.
+# Only the Go sources (and the fern-claude wrapper) go into image builds.
 *
 !go.mod
 !go.sum
 !cmd
 !internal
+!images/fern-claude

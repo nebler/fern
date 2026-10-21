@@ -19,7 +19,8 @@ func TestParse(t *testing.T) {
 	tests := []struct {
 		name    string
 		args    []string
-		envSock string // FERN_SOCKET
+		envSock string            // FERN_SOCKET
+		envVars map[string]string // other variables to set
 		want    command
 		wantErr bool
 	}{
@@ -84,6 +85,20 @@ func TestParse(t *testing.T) {
 			want: command{name: "exec", socket: sock, env: "demo", stdin: true, argv: []string{"cat"}},
 		},
 		{
+			name: "exec --here",
+			args: []string{"exec", "-i", "--here", "--", "claude", "-p"},
+			want: command{name: "exec", socket: sock, stdin: true, here: true, argv: []string{"claude", "-p"}},
+		},
+		{
+			name:    "exec -e and --cwd",
+			args:    []string{"exec", "-e", "FERN_TEST_SET", "-e", "FERN_TEST_UNSET", "-e", "A=b", "--cwd", "/w/src", "demo", "env"},
+			envVars: map[string]string{"FERN_TEST_SET": "yes"},
+			want: command{
+				name: "exec", socket: sock, env: "demo", dir: "/w/src",
+				vars: []string{"FERN_TEST_SET=yes", "A=b"}, argv: []string{"env"},
+			},
+		},
+		{
 			name: "exec without --",
 			args: []string{"exec", "demo", "ls", "-la"},
 			want: command{name: "exec", socket: sock, env: "demo", argv: []string{"ls", "-la"}},
@@ -141,6 +156,9 @@ func TestParse(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Setenv("FERN_SOCKET", tt.envSock)
+			for k, v := range tt.envVars {
+				t.Setenv(k, v)
+			}
 			got, err := parse(tt.args)
 			if gotErr := err != nil; gotErr != tt.wantErr {
 				t.Fatalf("parse(%q) error = %v, want error: %t", tt.args, err, tt.wantErr)
