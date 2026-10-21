@@ -185,7 +185,7 @@ This changes architecture §10, which plans one shared base image.
 
 `lab/blockers.sh` (results in `lab/RESULTS.md`) adds four items:
 
-- **Claude's login must survive sleep.** Claude keeps its state in `$HOME/.claude*`, and `$HOME` is `/tmp`, an `emptyDir`, so a login is lost on every sleep. It needs its own volume outside `live/` (architecture §12 already says credentials never enter `live/`). This blocks real turns.
+- **Claude's login must survive sleep.** Claude keeps its state in `$HOME/.claude*`, and `$HOME` is `/tmp`, an `emptyDir`, so a login is lost on every sleep. It needs its own volume outside `live/` (architecture §13 already says credentials never enter `live/`). This blocks real turns.
 - **T3's MCP tools are still untested.** T3's MCP server listens on the host's loopback, which a box can't reach. The fallback is to have `fern-init` forward one port back (roadmap risk table). Testing it needs T3.
 - **Waking many environments at once is slow:** 10 at once took 6.5 s, against 0.8 s for one. The driver polls each Sandbox every 200 ms, through a client with client-go's default rate limit. Watching instead of polling (item 3 below) should fix it; measure again afterwards.
 - **A cancelled exec prints an error** ("failed to get reader: context canceled") instead of exiting quietly.
