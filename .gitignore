@@ -6,7 +6,7 @@
 /experiment/
 *.db-shm
 *.db-wal
-fern.yaml
+/fern.yaml
 /fern.env
 *.out
 *.test
