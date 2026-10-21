@@ -11,7 +11,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/coder/websocket"
 	"go.uber.org/goleak"
 
 	"github.com/nebler/fern/internal/boxexec"
@@ -45,7 +44,7 @@ func newRelay(t *testing.T, boxURL string) string {
 			return
 		}
 		defer func() { _ = box.CloseNow() }()
-		client, err := websocket.Accept(w, r, nil)
+		client, err := boxexec.Accept(w, r)
 		if err != nil {
 			return
 		}
@@ -116,6 +115,13 @@ func TestRun(t *testing.T) {
 			req:        boxexec.Request{Argv: []string{"cat"}},
 			stdin:      "hello",
 			wantStdout: "hello",
+		},
+		{
+			// More than coder/websocket's default read limit (32 KiB) per message.
+			name:       "large stdin",
+			req:        boxexec.Request{Argv: []string{"cat"}},
+			stdin:      strings.Repeat("0123456789", 10_000),
+			wantStdout: strings.Repeat("0123456789", 10_000),
 		},
 		{
 			name:       "command not found",

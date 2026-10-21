@@ -259,7 +259,7 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer func() { _ = box.CloseNow() }()
-	client, err := websocket.Accept(w, r, nil)
+	client, err := boxexec.Accept(w, r)
 	if err != nil {
 		return // Accept has answered the client.
 	}

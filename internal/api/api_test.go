@@ -310,6 +310,22 @@ func TestExecWakesOnce(t *testing.T) {
 	}
 }
 
+// A large prompt on stdin reaches the box in frames of up to 32 KiB, more than
+// a WebSocket reads by default.
+func TestExecLargeStdin(t *testing.T) {
+	c, _ := newAPI(t)
+	mustCreate(t, c, "demo")
+	in := strings.Repeat("0123456789", 10_000)
+	var stdout bytes.Buffer
+	code, err := c.Exec(t.Context(), "demo", boxexec.Request{Argv: []string{"cat"}}, strings.NewReader(in), &stdout, io.Discard, nil)
+	if err != nil || code != 0 {
+		t.Fatalf("Exec(cat) = %d, %v, want 0, nil", code, err)
+	}
+	if stdout.String() != in {
+		t.Errorf("Exec(cat) echoed %d bytes, want the %d sent", stdout.Len(), len(in))
+	}
+}
+
 func TestDelete(t *testing.T) {
 	c, _ := newAPI(t)
 	ctx := t.Context()

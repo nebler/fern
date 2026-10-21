@@ -143,6 +143,7 @@ func (c *Client) Exec(ctx context.Context, env string, req boxexec.Request, stdi
 		return 0, fmt.Errorf("exec in %s: %w", env, err)
 	}
 	defer func() { _ = conn.CloseNow() }()
+	conn.SetReadLimit(boxexec.MaxMessage)
 	return boxexec.Run(ctx, conn, req, stdin, stdout, stderr, resize)
 }
 

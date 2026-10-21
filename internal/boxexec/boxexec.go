@@ -40,8 +40,11 @@ const (
 	frameResize
 )
 
-// readLimit bounds one message; output frames are at most one pipe read.
-const readLimit = 1 << 20
+// MaxMessage is the largest message in the protocol; output frames are at
+// most one pipe read. Every connection must be able to read it, which is more
+// than the WebSocket library allows by default (32 KiB): use Accept and Dial,
+// or call SetReadLimit(MaxMessage).
+const MaxMessage = 1 << 20
 
 // Request starts a command. It is the first message on a connection.
 type Request struct {
@@ -81,12 +84,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	conn, err := websocket.Accept(w, r, nil)
+	conn, err := Accept(w, r)
 	if err != nil {
 		return // Accept has answered the client.
 	}
 	defer func() { _ = conn.CloseNow() }()
-	conn.SetReadLimit(readLimit)
 	var req Request
 	if err := wsjson.Read(r.Context(), conn, &req); err != nil {
 		return
@@ -111,6 +113,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	code := p.wait(s.log)
 	finish(r.Context(), conn, code)
 	reader.Wait()
+}
+
+// Accept upgrades r to an exec connection that can read MaxMessage.
+func Accept(w http.ResponseWriter, r *http.Request) (*websocket.Conn, error) {
+	conn, err := websocket.Accept(w, r, nil)
+	if err != nil {
+		return nil, err
+	}
+	conn.SetReadLimit(MaxMessage)
+	return conn, nil
 }
 
 // process is a running command.
@@ -249,7 +261,7 @@ func Dial(ctx context.Context, url, token string, hc *http.Client) (*websocket.C
 	if err != nil {
 		return nil, err
 	}
-	conn.SetReadLimit(readLimit)
+	conn.SetReadLimit(MaxMessage)
 	return conn, nil
 }
 
