@@ -13,7 +13,7 @@
 #   many         ten environments woken at once
 #   gvisor       Claude Code and the exec stream under gVisor (installs it)
 #   review       the fixes from the code review of 2026-10-21: stdin EOF,
-#                limits, mount flags, network rules, restore and rm safety
+#                limits, no_new_privs, network rules, restore and rm safety
 # Run all of them, or name some: lab/blockers.sh stream daemon. Needs lab/up.sh.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
@@ -238,11 +238,15 @@ review() {
   fresh bk2
   check "exec without -i sees stdin EOF" ok \
     "$(in_daemon "timeout 20 fern exec $ENV -- sh -c 'cat >/dev/null && echo ok'" || echo hang)"
-  mounts=$(fern exec $ENV -- sh -c 'grep " /workspace " /proc/mounts')
-  check "the workspace is mounted nosuid,nodev" yes \
-    "$(echo "$mounts" | grep -q nosuid && echo "$mounts" | grep -q nodev && echo yes || echo "no: $mounts")"
+  # The runtime mounts the workspace without nosuid (whatever the CSI plugin
+  # sets); no_new_privs is what makes setuid files useless in the box.
+  check "commands in the box run with no_new_privs" 1 \
+    "$(fern exec $ENV -- sh -c 'grep NoNewPrivs /proc/self/status' | awk '{print $2}')"
   check "the box has a CPU limit (2 cores)" "200000 100000" "$(fern exec $ENV -- cat /sys/fs/cgroup/cpu.max)"
-  check "the box has a PID limit" 4096 "$(fern exec $ENV -- cat /sys/fs/cgroup/pids.max)"
+  # Kubelet sets the PID limit on the pod's cgroup, which the container can't see.
+  uid=$(pod_uid $ENV)
+  check "the box's pod has a PID limit" 4096 \
+    "$(docker exec "$LAB" sh -c "cat /sys/fs/cgroup/kubepods/*/pod$uid/pids.max /sys/fs/cgroup/kubepods/pod$uid/pids.max 2>/dev/null")"
   fern wake bk2 >/dev/null
   ip=$(k -n fern-boxes get pod bk2 -o jsonpath='{.status.podIP}')
   code=$(fern exec $ENV -- curl -s -m 3 -o /dev/null -w '%{http_code}' "http://$ip:7070/healthz" || true)

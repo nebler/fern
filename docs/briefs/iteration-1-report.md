@@ -1,11 +1,12 @@
 # Report: iteration 1, the first working slice
 
-**Branch:** `iter-1` (from `v2`), not pushed. **Written:** 2026-10-18, plan for iteration 2 added 2026-10-20.
+**Branch:** `iter-1` (from `v2`), not pushed. **Written:** 2026-10-18, plan for iteration 2 added 2026-10-20, review fixes 2026-10-21.
 
 ## Summary
 
 - **The core risk is retired.** An agent-sandbox `Sandbox` runs on a btrfs subvolume served by our own CSI driver. The whole disk, Postgres included, is snapshotted in about 10 ms and restored in about 1.2 s. This works under runc **and under gVisor**, inside Docker Desktop.
-- **Every "Done when" item holds, with two caveats.** The Go code is 2,560 lines, against a target of 2,000–2,500 (§2). Some `go-code-review` findings are still open (§7).
+- **Every "Done when" item holds, with two caveats.** The Go code was 2,560 lines at hand-off, against a target of 2,000–2,500, and is 2,915 after the review fixes (§2). Some review findings are still open (§7).
+- **A second review (2026-10-21), by five reviewers** (speed, security, code quality, Go practice, correctness), found real bugs at the edges: process cleanup, cancellation, and resources shared between environments. The eight worth fixing now are fixed, each with a test that fails without the fix, and the lab checks them (§7.2). The rest is in the plan (§9.5).
 - **Blocker checks (2026-10-21) found and fixed two bugs:** exec broke on chunks over 32 KiB, and the first exec after a node restart used a stale pod IP. Claude Code runs in a box up to the login, under runc and gVisor (`lab/RESULTS.md`).
 - **The structure is the slice's shortcut, not the final shape.** `api` holds a lock per environment and decides when to wake a box. Iteration 2 moves that into an actor per environment with an op log, the pattern used by kubelet and Fly.io's `flyd` (§9).
 
@@ -37,29 +38,30 @@ The packages behind them:
 
 | Package / dir | Code | Tests | What it does |
 |---|---|---|---|
-| `internal/store` | 412 | 348 | The btrfs pool plus a SQLite index. **Create:** an empty subvolume, optionally seeded from a tar extracted as uid 1000. **Snapshot:** `syncfs`, then `btrfs subvolume snapshot -r`. **Restore:** `live.new` from the snapshot, `renameat2(RENAME_EXCHANGE)`, delete the old one. Also delete and list. Every step can be repeated: leftovers (`live.new`, a snapshot without a row, a half-made environment) are cleaned up on the next call. |
-| `internal/driver` | 365 | 0 | One `Sandbox` per environment, created `Suspended`. **Wake:** patch `Running`, poll until `Ready` with a current `observedGeneration`, return `podIP:7070`. **Sleep:** patch `Suspended`, poll until the pod is gone. **Delete:** waits for the Sandbox and the pod. The pod template has the CSI inline volume, the labels `fern.dev/env` and `part-of=fern`, node pinning, uid 1000, a read-only root, an `emptyDir` `/tmp`, and a readiness probe on fern-init. `driver.Fake` (87 of the 365 lines) is used by the API tests. |
+| `internal/store` | 452 | 470 | The btrfs pool plus a SQLite index. **Create:** an empty subvolume, optionally seeded from a tar extracted as uid 1000. **Snapshot:** `btrfs subvolume snapshot -r`, which flushes `live/` first (a test checks it). **Restore:** `live.new` from the snapshot, `renameat2(RENAME_EXCHANGE)`, delete the old one. Also delete and list. Every step can be repeated: leftovers (`live.new`, a snapshot without a row, a half-made environment) are cleaned up on the next call. A create or delete marks the environment `incomplete` until it's done; a `live/` that the index has lost and that isn't marked is kept, not wiped. Subvolumes a box makes inside its workspace are deleted with it. The pool must be btrfs, and `state/` is root-only. |
+| `internal/driver` | 394 | 0 | One `Sandbox` per environment, created `Suspended`. **Wake:** patch `Running`, poll until `Ready` with a current `observedGeneration`, return `podIP:7070`. **Sleep:** patch `Suspended`, poll until the pod is gone. **Delete:** waits for the Sandbox and the pod. The pod template has the CSI inline volume, the labels `fern.dev/env` and `part-of=fern`, node pinning, uid 1000, a read-only root, a CPU limit of 2 and a memory limit of 2 GiB, a 4 GiB `emptyDir` `/tmp`, and a readiness probe on fern-init. `driver.Fake` (87 of the 365 lines) is used by the API tests. |
 | `internal/csi` | 175 | 0 | CSI Identity and Node services. `NodePublishVolume` bind-mounts `envs/<env>/live` for ephemeral volumes only, idempotently (it checks `/proc/self/mountinfo`), and logs the pod's namespace/name, UID and service account. `NodeUnpublishVolume` unmounts. There is no authorization yet. |
-| `internal/boxexec` | 368 | 200 | The exec protocol, used three ways: fern-init serves it, the CLI speaks it, and the daemon relays it (`Proxy`). Each command gets one WebSocket: a JSON request, then binary frames (stdin, stdout, stderr, stdin EOF, resize), then a JSON exit code. PTYs come from `creack/pty`. |
-| `internal/api` | 574 | 366 | The unix-socket HTTP API and a typed client. One mutex per environment serializes mutations and wakes. The box address is cached in memory, so an exec on an awake environment makes no Kubernetes call; if dialing it fails, the cache entry is dropped and the box is woken once more. |
-| `cmd/fern` | 429 | 123 | `fern daemon` (API and CSI gRPC under one errgroup, graceful shutdown) and the CLI: `create`, `ls`, `rm`, `snapshot`, `snapshots`, `restore`, `exec [-i] [-t] [-it]`, `sleep`, `wake`. `-it` puts the terminal in raw mode and forwards SIGWINCH. |
-| `cmd/fern-init` | 237 | 88 | PID 1. It reads `services.yaml` (run/stop/ready/port/env) and supervises each service in its own process group, restarting it with backoff. `/healthz` runs the ready checks. It serves exec on :7070, guarded by the per-environment token, and runs the `stop` commands on SIGTERM. |
-| **Go total** | **2,560** | **1,125** | |
+| `internal/boxexec` | 453 | 254 | The exec protocol, used three ways: fern-init serves it, the CLI speaks it, and the daemon relays it (`Proxy`). Each command gets one WebSocket: a JSON request, then binary frames (stdin, stdout, stderr, stdin EOF, resize), then a JSON exit code. PTYs come from `creack/pty`. A command runs in its own process group, and cancelling kills the group. One file per role: `server.go`, `client.go`, `proxy.go`. |
+| `internal/api` | 663 | 500 | The unix-socket HTTP API and a typed client, with its own JSON types. One lock per environment serializes changes and wakes; waiting for it can be cancelled, but a change, once started, finishes even if the client leaves. The box address is cached in memory, so an exec on an awake environment makes no Kubernetes call; if dialing it fails, the cache entry is dropped and the box is woken once more. |
+| `cmd/fern` | 504 | 123 | `fern daemon` (API and CSI gRPC under one errgroup, graceful shutdown) and the CLI: `create`, `ls`, `rm`, `snapshot`, `snapshots`, `restore`, `exec [-i] [-t] [-it]`, `sleep`, `wake`. `-it` puts the terminal in raw mode and forwards SIGWINCH. The commands are a table (name, argument counts, flags, run). |
+| `cmd/fern-init` | 274 | 153 | PID 1. It reads `services.yaml` (run/stop/ready/port/env) and supervises each service in its own process group, restarting it with backoff. `/healthz` runs the ready checks. It serves exec on :7070, guarded by the per-environment token. On SIGTERM it stops all services at once (stop command, then SIGTERM, then SIGKILL), without restarting them, within the pod's 15 s grace period. |
+| **Go total** | **2,915** | **1,500** | |
 | `lab/` | 581 lines of shell and YAML (incl. `deploy/`, `images/`) | | `up.sh`, `down.sh`, `build.sh`, `reload.sh`, `go.sh`, `lint.sh`, `test-store.sh`, `fern` (the CLI wrapper), `demo-slice.sh`, `e0.sh`, `e1.sh`, `e4.sh`, `gvisor.sh`, `lib.sh`, `sample-repo/`, `RESULTS.md` |
-| `deploy/fern.yaml` | | | Namespaces `fern-system` and `fern-boxes`, `CSIDriver fern.dev`, RBAC (a Role in `fern-boxes`), and the DaemonSet (the daemon plus node-driver-registrar) |
+| `deploy/fern.yaml` | | | Namespaces `fern-system` and `fern-boxes`, a NetworkPolicy (only the daemon may connect to a box), `CSIDriver fern.dev`, RBAC (a Role in `fern-boxes`), and the DaemonSet (the daemon plus node-driver-registrar) |
 | `images/` | | | `fern.Dockerfile` (Debian trixie with btrfs-progs) and `fern-box.Dockerfile` (Debian trixie with Postgres 17 and fern-init, uid 1000) |
 
 On disk, an environment looks like this:
 
 ```
 /var/lib/fern/                  btrfs (in the lab: a 30 GB loop-mounted image)
-  state/fern.sqlite             the index
+  state/fern.sqlite             the index (state/ is 0700: it holds the box tokens)
   envs/<id>/live/               mounted at /workspace in the box
       <repo files>  .fern/pg/   code and the database, side by side
   envs/<id>/snaps/<snapshot>/   read-only
+  envs/<id>/incomplete          only while a create or delete is running
 ```
 
-**Why 2,560 lines and not 2,500 or fewer:** the exec protocol plays three roles (server, client and relay), and the API ships its own client (192 lines) so that the CLI and the tests share it. Nothing is built "for later".
+**Why 2,560 lines and not 2,500 or fewer:** the exec protocol plays three roles (server, client and relay), and the API ships its own client (192 lines) so that the CLI and the tests share it. Nothing is built "for later". The review fixes (§7.2) added about 360 lines, mostly the API's own wire types, the cancellable lock and fern-init's supervisor.
 
 ## 3. Results
 
@@ -111,7 +113,9 @@ These are Docker Desktop numbers, so they show correctness, not speed; real timi
 
 **Against AGENTS.md:** `api.Store` and `api.Driver` are bigger than 1–3 methods. Splitting them now would be artificial, because a single lock-and-call handler uses them all. The actor in iteration 2 is the natural place to narrow them.
 
-## 7. `go-code-review` findings
+## 7. Review findings
+
+### 7.1 `go-code-review` at hand-off (2026-10-18)
 
 **Fixed:**
 - all golangci-lint findings (errcheck, nilerr, staticcheck SA4023, contextcheck, gofumpt);
@@ -121,13 +125,35 @@ These are Docker Desktop numbers, so they show correctness, not speed; real timi
 
 **Not fixed (should-fix, planned in §9):**
 1. **fern-init doesn't reap zombies.** As PID 1, it leaves orphans of exec'd commands (for example a daemonized `pg_ctl start`) as zombies.
-2. **TTY exec waits for the terminal to close.** A background job that keeps the terminal open keeps `fern exec -t` from returning, as with ssh.
+2. ~~**TTY exec waits for the terminal to close.**~~ Fixed in §7.2: what still holds the terminal is killed 2 s after the command exits.
 3. **`boxexec.Run` doesn't wait for its stdin goroutine,** because a blocked `Read` on `os.Stdin` can't be interrupted. This is documented in the code; it's an exception to "every goroutine is waited for".
 4. **The box token** (deviation 7).
 5. **`api.Server.envs` never shrinks:** it keeps one small struct for every environment ID it has seen.
 6. **`csi` ignores the `readonly` flag.** It should refuse it or honour it.
 7. **There are no unit tests for `driver` or `csi`.** E0 and E4 cover them. The controller-runtime fake client would make driver tests cheap.
 8. **`store` stamps times with `time.Now()`** rather than an injected clock. These are only timestamps; there are no timers.
+
+### 7.2 Second review (2026-10-21)
+
+Five reviewers looked at speed, security, code quality, Go practice and correctness. Their verdict: the core is solid (restore and delete can be repeated, there is no path traversal or injection, the box is locked down, the style is disciplined), and the weak spots are at the edges. **Fixed, each with a test that fails without the fix:**
+
+1. **`fern exec` without `-i` never closed stdin,** so `cat`, `psql` without `-c` or `claude -p` waited forever. The client now sends stdin EOF.
+2. **A client that left could stop a change half-way:** Ctrl-C during `fern rm` could delete the disk but keep the row, which broke the environment for good. Changes now run detached from the request (bounded by 10 minutes), and `store.Delete` removes the rows before the disk.
+3. **Restore stopped the box before checking the snapshot,** so a typo killed the agent's processes and Postgres, then said "not found". It checks first now.
+4. **Cancelling an exec killed only the top process;** what it started kept writing to the workspace. The command now leads its own process group, and cancelling kills the group.
+5. **fern-init could restart a service while stopping it,** stopped services one by one in random order, and could run past the pod's 15 s grace period, so Postgres could be killed hard. Services now stop all at once, with no restarts, within 11 s.
+6. **`create --repo` ignored tar's exit status,** so unreadable files silently went missing. A failed tar now fails the upload.
+7. **A subvolume made inside a workspace broke restore and delete forever** ("Directory not empty"). Subvolumes are deleted with `--recursive`.
+8. **Create wiped any directory that had no row,** which goes against "the disk is the truth". Only leftovers marked `incomplete` are wiped; an unmarked `live/` is refused and kept.
+
+Two speed findings were sound but didn't change the numbers:
+
+- **The Kubernetes client was limited to 5 requests a second** (client-go's default). It is now 50, burst 100. The reviewer blamed it for 10 wakes taking 6.5 s, but the lab shows otherwise: all 10 pods start within a second, and the time goes into 10 fresh Postgres clusters running `initdb` at once. Waking the same 10 again takes 1.9 s (one alone: 1.0 s).
+- **Every snapshot flushed the whole pool** (`syncfs`), so neighbours' writes counted against it. btrfs already flushes the source subvolume (a test checks it), so the `syncfs` is gone. A snapshot right after a big clone still waits for that clone's own data (224 ms; quiet ones take 7 ms).
+
+**Also done:** the API has its own JSON types instead of the store's; `driver` no longer imports `store`; one `boxexec.Dial` with a typed `DialError` replaces the API client's copy; the API checks IDs before keeping state for them; waiting for an environment can be cancelled; dialing a box times out after 10 s; driver timeouts wrap `context.DeadlineExceeded`; the daemon refuses a pool that isn't btrfs; `state/` is 0700; boxes have a CPU limit, a 4 GiB `/tmp` and (in the lab) a PID limit; the daemon has resource requests, so it is no longer the first to starve; a NetworkPolicy lets only the daemon connect to a box; the CLI is a table of commands. **Tried and dropped:** mounting the workspace `nosuid,nodev`. The CSI plugin can set the flags, but the container runtime makes its own bind mount for the box and drops them. The box runs with `no_new_privs` anyway, which makes setuid files useless there; the lab checks that. New tests cover the stale-address retry, fern-init's supervisor (with `testing/synctest`), and the concurrency test can now fail.
+
+**Planned** (§9.5): disk quotas per environment, user namespaces, images pinned by digest, a faster restore (stop the box without a clean Postgres shutdown, since its disk is about to be replaced), caching `/healthz`, and the rest of §7.1.
 
 ## 8. Open questions for you
 
@@ -187,7 +213,7 @@ This changes architecture §10, which plans one shared base image.
 
 - **Claude's login must survive sleep.** Claude keeps its state in `$HOME/.claude*`, and `$HOME` is `/tmp`, an `emptyDir`, so a login is lost on every sleep. It needs its own volume outside `live/` (architecture §13 already says credentials never enter `live/`). This blocks real turns.
 - **T3's MCP tools are still untested.** T3's MCP server listens on the host's loopback, which a box can't reach. The fallback is to have `fern-init` forward one port back (roadmap risk table). Testing it needs T3.
-- **Waking many environments at once is slow:** 10 at once took 6.5 s, against 0.8 s for one. The driver polls each Sandbox every 200 ms, through a client with client-go's default rate limit. Watching instead of polling (item 3 below) should fix it; measure again afterwards.
+- **Waking many fresh environments at once is slow:** 10 at once took 6.5 s, against 0.8 s for one. It is not Kubernetes: the pods all start within a second, and the time is 10 Postgres clusters being created at once on Docker Desktop's CPUs. Waking the same 10 again takes 1.9 s. Golden snapshots, with the database already made, remove this.
 - **A cancelled exec prints an error** ("failed to get reader: context canceled") instead of exiting quietly.
 
 ### 9.5 Work list
@@ -201,7 +227,9 @@ In order:
 5. **The box token** moves to a Secret, if question 1 is a yes (finding 4).
 6. **Tests:** driver tests with the controller-runtime fake client, and CSI tests (finding 7).
 7. **Claude's credentials** on a volume outside `live/` that survives sleep (§9.4).
-8. **Disk-space guard and pruning:** keep the last N snapshots per environment, and refuse a new snapshot with a clear error when the pool is nearly full.
+8. **Disk-space guard and pruning:** keep the last N snapshots per environment, refuse a new snapshot with a clear error when the pool is nearly full, and give each environment a quota (btrfs qgroups), so one box can't fill the pool for everyone.
 9. **CI** runs unit tests, the btrfs store tests and lint (`.github/workflows/ci.yml`, added 2026-10-21; it runs once the branch is pushed).
+10. **Faster restore:** a restore replaces the disk, so the box can stop without the clean Postgres shutdown, which is most of its 1.2 s. Cache fern-init's `/healthz` answer for a moment, since kubelet calls it every second.
+11. **Before anyone else uses it:** user namespaces for boxes (`hostUsers: false`, which needs idmapped mounts on btrfs), images pinned by digest, and CSI authorization (only a box pod may mount its own environment).
 
 By hand, needs your login: `lab/fern exec -it <env> -- claude`, log in, and ask it to query the sample database. That is the last open check of the "agent inside the box" risk.

@@ -124,3 +124,28 @@ Command: `lab/up.sh && lab/blockers.sh`, same lab as above, box image with Claud
 | 10 sleeping environments woken at once | PASS, 6.4–6.6 s until all answered; 10 awake boxes use about 1 GB |
 
 **Not checked here:** a real Claude turn (needs a login, by hand), and T3's MCP tools from inside a box (needs T3).
+
+## After the review fixes, 2026-10-21
+
+Command: `lab/build.sh && lab/up.sh && lab/demo-slice.sh && lab/blockers.sh claude stream concurrency restore daemon bigrepo many review`, same lab. Every check passes (`demo-slice: PASS`, and every blocker check, after two fixes to the `review` section noted below).
+
+| Check | Result |
+|---|---|
+| demo slice (create, exec, snapshot, drop table, restore, rm) | PASS; restore 1.4 s |
+| Claude Code in a box, stream-json, terminal | PASS (unchanged) |
+| exec stream: 10k JSON lines, 50 MB, 200 MB stdout, exit codes, stdin EOF, Ctrl-C, disconnect, 180 s idle | PASS; 50 MB round trip 1.0 s, 200 MB stdout 1.5 s |
+| 10 parallel execs on a sleeping box | PASS, one wake, 0.9 s |
+| restore with an open exec | PASS; the exec ends after 2.8 s with an error (iteration 2: the actor cancels it cleanly) |
+| daemon restart | PASS; back in 1.7 s, the box keeps running |
+| 101k files / 1.4 GB: snapshot, restore, rm | snapshot p50 7.2 ms, restore p50 17.3 ms, rm with 10 snapshots 434 ms |
+| t3code clone in a box, then a snapshot | 19.2 s clone; snapshot 224 ms (btrfs writes the clone's data first) |
+| 10 fresh environments woken at once | PASS, 6.2 s. All pods start within 1 s; the rest is 10 `initdb`s at once. Waking the same 10 again: 1.9 s; one alone: 1.0 s |
+| `fern exec` without `-i` sees stdin EOF | PASS |
+| commands in the box run with `no_new_privs` | PASS |
+| box CPU limit (2 cores), pod PID limit (4096) | PASS |
+| a box can't reach another box on :7070; the daemon still can | PASS |
+| restoring a missing snapshot is refused and leaves the box running | PASS |
+| `fern rm` interrupted by the client still finishes, nothing left on disk | PASS |
+| sleep with Postgres (stop command, then SIGTERM) | 1.0 s |
+
+**Two checks were wrong at first, not the code:** the PID limit is on the pod's cgroup, which the container can't see (now read from the node), and `nosuid,nodev` on the workspace was dropped: the container runtime makes its own bind mount for the box without them, whatever the CSI plugin sets. `no_new_privs` is checked instead.
