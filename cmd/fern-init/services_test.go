@@ -100,11 +100,13 @@ func TestServiceEnviron(t *testing.T) {
 	}
 }
 
+// pathEnv is the whole environment of the scripts the tests run.
+const pathEnv = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 func newService(t *testing.T, svc service) (s *supervisor, dir string) {
 	t.Helper()
 	dir = t.TempDir()
-	env := []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
-	return startService(t.Context(), "svc", svc, dir, env, slog.New(slog.DiscardHandler)), dir
+	return startService(t.Context(), "svc", svc, dir, []string{pathEnv}, slog.New(slog.DiscardHandler)), dir
 }
 
 func countLines(t *testing.T, path string) int {

@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"maps"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -148,26 +151,54 @@ func runService(ctx context.Context, svc service, dir string, env []string) erro
 	return cmd.Run()
 }
 
-// ready runs every service's ready check and returns the first failure.
+// The ready checks share readyTimeout. A timed-out script is killed and
+// gets shellWaitDelay to let go of its output, so /healthz answers within
+// 2.25s, under the 2.5s it promises and the probe's 3s timeout.
+const (
+	readyTimeout   = 2 * time.Second
+	shellWaitDelay = 250 * time.Millisecond
+)
+
+// ready runs every service's ready check at once and returns the failures.
 func ready(ctx context.Context, services map[string]service, dir string, env []string) error {
-	for name, svc := range services {
+	ctx, cancel := context.WithTimeout(ctx, readyTimeout)
+	defer cancel()
+	names := slices.Sorted(maps.Keys(services)) // a stable order for the errors
+	errs := make([]error, len(names))
+	var wg sync.WaitGroup
+	for i, name := range names {
+		svc := services[name]
 		if svc.Ready == "" {
 			continue
 		}
-		if err := shell(ctx, 2*time.Second, svc.Ready, dir, svc.environ(env)); err != nil {
-			return fmt.Errorf("%s not ready: %w", name, err)
-		}
+		wg.Go(func() {
+			if err := shell(ctx, readyTimeout, svc.Ready, dir, svc.environ(env)); err != nil {
+				errs[i] = fmt.Errorf("%s not ready: %w", name, err)
+			}
+		})
 	}
-	return nil
+	wg.Wait()
+	return errors.Join(errs...)
 }
 
-// shell runs script with /bin/sh, bounded by timeout.
+// shell runs script with /bin/sh in its own process group, bounded by
+// timeout. When time is up the whole group is killed.
 func shell(ctx context.Context, timeout time.Duration, script, dir string, env []string) error {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", script)
 	cmd.Dir, cmd.Env = dir, env
-	if out, err := cmd.CombinedOutput(); err != nil {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Killing only the shell would leave its children holding the output
+	// pipe, and Wait would wait for them. Like runService's Cancel, this can
+	// run in the microseconds after the shell has been reaped.
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	// Bounds the wait for output held open by processes outside the group.
+	cmd.WaitDelay = shellWaitDelay
+	out, err := cmd.CombinedOutput()
+	// ErrWaitDelay means the script succeeded but left something behind
+	// holding its output; the script's own result is what counts.
+	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		return fmt.Errorf("%w: %s", err, out)
 	}
 	return nil
