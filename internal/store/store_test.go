@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
 	"io/fs"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	_ "modernc.org/sqlite" // the tests edit the index behind the store's back
 
 	"github.com/nebler/fern/internal/store"
 )
@@ -103,7 +105,7 @@ func TestCreate(t *testing.T) {
 	st, _ := openPool(t)
 	ctx := t.Context()
 	seed := tarball(t, map[string]string{"README.md": "hello\n", "src/main.go": "package main\n"})
-	env, err := st.Create(ctx, "demo", "/src/demo", seed)
+	env, err := st.Create(ctx, "demo", store.CreateOptions{Repo: "/src/demo", Seed: seed})
 	if err != nil {
 		t.Fatalf("Create(demo) error: %v", err)
 	}
@@ -127,7 +129,7 @@ func TestCreate(t *testing.T) {
 		}
 	}
 
-	again, err := st.Create(ctx, "demo", "/other", nil)
+	again, err := st.Create(ctx, "demo", store.CreateOptions{Repo: "/other"})
 	if err != nil {
 		t.Fatalf("Create(demo) again error: %v", err)
 	}
@@ -149,7 +151,7 @@ func TestCreate(t *testing.T) {
 func TestSnapshotRestore(t *testing.T) {
 	st, _ := openPool(t)
 	ctx := t.Context()
-	if _, err := st.Create(ctx, "demo", "", nil); err != nil {
+	if _, err := st.Create(ctx, "demo", store.CreateOptions{}); err != nil {
 		t.Fatalf("Create(demo) error: %v", err)
 	}
 	live := livePath(t, st, "demo")
@@ -212,7 +214,7 @@ func TestSnapshotRestore(t *testing.T) {
 func TestRestoreLeftover(t *testing.T) {
 	st, _ := openPool(t)
 	ctx := t.Context()
-	if _, err := st.Create(ctx, "demo", "", nil); err != nil {
+	if _, err := st.Create(ctx, "demo", store.CreateOptions{}); err != nil {
 		t.Fatalf("Create(demo) error: %v", err)
 	}
 	live := livePath(t, st, "demo")
@@ -242,7 +244,7 @@ func TestRestoreLeftover(t *testing.T) {
 
 func TestErrors(t *testing.T) {
 	st, _ := openPool(t)
-	if _, err := st.Create(t.Context(), "demo", "", nil); err != nil {
+	if _, err := st.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 		t.Fatalf("Create(demo) error: %v", err)
 	}
 	tests := []struct {
@@ -258,7 +260,7 @@ func TestErrors(t *testing.T) {
 			return err
 		}, store.ErrNotFound},
 		{"create invalid", func(ctx context.Context) error {
-			_, err := st.Create(ctx, "Bad_ID", "", nil)
+			_, err := st.Create(ctx, "Bad_ID", store.CreateOptions{})
 			return err
 		}, store.ErrInvalidID},
 		{"get path", func(ctx context.Context) error { _, err := st.Get(ctx, "../demo"); return err }, store.ErrInvalidID},
@@ -280,7 +282,7 @@ func TestErrors(t *testing.T) {
 func TestDelete(t *testing.T) {
 	st, dir := openPool(t)
 	ctx := t.Context()
-	if _, err := st.Create(ctx, "demo", "", nil); err != nil {
+	if _, err := st.Create(ctx, "demo", store.CreateOptions{}); err != nil {
 		t.Fatalf("Create(demo) error: %v", err)
 	}
 	if _, err := st.Snapshot(ctx, "demo", "s1"); err != nil {
@@ -299,7 +301,7 @@ func TestDelete(t *testing.T) {
 		t.Errorf("Delete(demo) again error: %v, want nil", err)
 	}
 	// The ID can be used again, with nothing left of the old environment.
-	if _, err := st.Create(ctx, "demo", "", nil); err != nil {
+	if _, err := st.Create(ctx, "demo", store.CreateOptions{}); err != nil {
 		t.Fatalf("Create(demo) after Delete error: %v", err)
 	}
 	if snaps, err := st.Snapshots(ctx, "demo"); err != nil || len(snaps) != 0 {
@@ -310,7 +312,7 @@ func TestDelete(t *testing.T) {
 func TestReopen(t *testing.T) {
 	st, dir := openPool(t)
 	ctx := t.Context()
-	env, err := st.Create(ctx, "demo", "/src/demo", nil)
+	env, err := st.Create(ctx, "demo", store.CreateOptions{Repo: "/src/demo"})
 	if err != nil {
 		t.Fatalf("Create(demo) error: %v", err)
 	}
@@ -376,7 +378,7 @@ func TestOpen(t *testing.T) {
 func TestSnapshotHasUnflushedWrites(t *testing.T) {
 	st, dir := openPool(t)
 	ctx := t.Context()
-	if _, err := st.Create(ctx, "demo", "", nil); err != nil {
+	if _, err := st.Create(ctx, "demo", store.CreateOptions{}); err != nil {
 		t.Fatalf("Create(demo) error: %v", err)
 	}
 	data := bytes.Repeat([]byte("fern"), 1<<20)
@@ -400,7 +402,7 @@ func TestSnapshotHasUnflushedWrites(t *testing.T) {
 func TestNestedSubvolume(t *testing.T) {
 	st, dir := openPool(t)
 	ctx := t.Context()
-	if _, err := st.Create(ctx, "demo", "", nil); err != nil {
+	if _, err := st.Create(ctx, "demo", store.CreateOptions{}); err != nil {
 		t.Fatalf("Create(demo) error: %v", err)
 	}
 	if _, err := st.Snapshot(ctx, "demo", "s1"); err != nil {
@@ -447,7 +449,7 @@ func TestCreateOverLeftovers(t *testing.T) {
 
 	live := subvolume("half")
 	writeFile(t, filepath.Join(dir, "envs", "half", "incomplete"), "")
-	if _, err := st.Create(ctx, "half", "", nil); err != nil {
+	if _, err := st.Create(ctx, "half", store.CreateOptions{}); err != nil {
 		t.Fatalf("Create(half) over a marked leftover error: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(live, "old")); !errors.Is(err, fs.ErrNotExist) {
@@ -458,13 +460,277 @@ func TestCreateOverLeftovers(t *testing.T) {
 	}
 
 	live = subvolume("lost")
-	if _, err := st.Create(ctx, "lost", "", nil); err == nil {
+	if _, err := st.Create(ctx, "lost", store.CreateOptions{}); err == nil {
 		t.Errorf("Create(lost) over an unmarked workspace succeeded, want an error")
 	}
 	if got := readFile(t, filepath.Join(live, "old")); got != "old" {
 		t.Errorf("live/old = %q after a refused Create, want it kept", got)
 	}
-	if err := st.Delete(ctx, "lost"); err != nil { // the cleanup only deletes listed environments
-		t.Errorf("Delete(lost) error: %v", err)
+	if err := st.Delete(ctx, "lost"); err == nil {
+		t.Errorf("Delete(lost) of an unmarked workspace succeeded, want an error")
 	}
+	removeByHand(t, filepath.Join(dir, "envs", "lost"), live)
+
+	// Snapshots without a workspace are kept too.
+	snap := filepath.Join(dir, "envs", "snaps-only", "snaps", "s1")
+	if err := os.MkdirAll(snap, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Create(ctx, "snaps-only", store.CreateOptions{}); err == nil {
+		t.Errorf("Create(snaps-only) over unmarked snapshots succeeded, want an error")
+	}
+	if _, err := os.Stat(snap); err != nil {
+		t.Errorf("stat snaps/s1 after a refused Create error = %v, want it kept", err)
+	}
+}
+
+// removeByHand deletes an environment directory the store refuses to touch,
+// as a person would, and the subvolumes in it.
+func removeByHand(t *testing.T, dir string, subvolumes ...string) {
+	t.Helper()
+	for _, sv := range subvolumes {
+		if out, err := exec.CommandContext(context.WithoutCancel(t.Context()), "btrfs", "subvolume", "delete", sv).CombinedOutput(); err != nil {
+			t.Errorf("btrfs subvolume delete %s: %v: %s", sv, err, out)
+		}
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Error(err)
+	}
+}
+
+// subvolumeIno is the inode number of every btrfs subvolume's root.
+const subvolumeIno = 256
+
+func ino(t *testing.T, path string) uint64 {
+	t.Helper()
+	info, err := os.Lstat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Sys().(*syscall.Stat_t).Ino
+}
+
+// A workspace at a caller's path: made as an empty subvolume when nothing is
+// there, found by any path inside it, snapshotted, restored and deleted there.
+func TestPathWorkspace(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	path := filepath.Join(dir, "worktrees", "fern", "main")
+	env, err := st.Create(ctx, "wt", store.CreateOptions{Path: path})
+	if err != nil {
+		t.Fatalf("Create(wt, %s) error: %v", path, err)
+	}
+	if env.Path != path {
+		t.Errorf("Create(wt).Path = %s, want %s", env.Path, path)
+	}
+	if got := ino(t, path); got != subvolumeIno {
+		t.Errorf("%s has inode %d, want a subvolume", path, got)
+	}
+	for _, p := range []string{path, filepath.Dir(path)} {
+		info, err := os.Stat(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if uid := info.Sys().(*syscall.Stat_t).Uid; uid != store.BoxUID {
+			t.Errorf("%s is owned by %d, want %d (T3 runs as the box user)", p, uid, store.BoxUID)
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(path, "src", "pkg"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{path, filepath.Join(path, "src", "pkg")} {
+		got, err := st.FindByPath(ctx, p)
+		if err != nil || got.ID != "wt" {
+			t.Errorf("FindByPath(%s) = %q, %v, want wt", p, got.ID, err)
+		}
+	}
+	if _, err := st.FindByPath(ctx, filepath.Join(dir, "worktrees", "fern")); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("FindByPath(parent) error = %v, want %v", err, store.ErrNotFound)
+	}
+
+	writeFile(t, filepath.Join(path, "data"), "v1")
+	if _, err := st.Snapshot(ctx, "wt", "s1"); err != nil {
+		t.Fatalf("Snapshot(wt, s1) error: %v", err)
+	}
+	writeFile(t, filepath.Join(path, "data"), "v2")
+	if err := st.Restore(ctx, "wt", "s1"); err != nil {
+		t.Fatalf("Restore(wt, s1) error: %v", err)
+	}
+	if got := readFile(t, filepath.Join(path, "data")); got != "v1" {
+		t.Errorf("after Restore: data = %q, want v1", got)
+	}
+	if err := st.Delete(ctx, "wt"); err != nil {
+		t.Fatalf("Delete(wt) error: %v", err)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat %s after Delete error = %v, want it gone", path, err)
+	}
+}
+
+// A plain directory at the path (a worktree T3 made first) is adopted: the
+// same files, owners and modes, now in a subvolume.
+func TestAdopt(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	path := filepath.Join(dir, "worktrees", "fern", "feature")
+	if err := os.MkdirAll(filepath.Join(path, "src"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{".git": "gitdir: /elsewhere/.git/worktrees/feature\n", "src/main.go": "package main\n"}
+	for name, body := range files {
+		writeFile(t, filepath.Join(path, name), body)
+	}
+	if err := os.Chmod(filepath.Join(path, "src", "main.go"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(filepath.Join(path, "src"), store.BoxUID, store.BoxGID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Create(ctx, "feat", store.CreateOptions{Path: path}); err != nil {
+		t.Fatalf("Create(feat) adopting %s error: %v", path, err)
+	}
+	if got := ino(t, path); got != subvolumeIno {
+		t.Errorf("%s has inode %d after adopt, want a subvolume", path, got)
+	}
+	for name, want := range files {
+		if got := readFile(t, filepath.Join(path, name)); got != want {
+			t.Errorf("%s = %q after adopt, want %q", name, got, want)
+		}
+	}
+	info, err := os.Stat(filepath.Join(path, "src", "main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("src/main.go mode = %v after adopt, want 0600", info.Mode().Perm())
+	}
+	info, err = os.Stat(filepath.Join(path, "src"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uid := info.Sys().(*syscall.Stat_t).Uid; uid != store.BoxUID || info.Mode().Perm() != 0o750 {
+		t.Errorf("src is owned by %d with mode %v after adopt, want %d and 0750", uid, info.Mode().Perm(), store.BoxUID)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, "envs", "feat", "adopt.new")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat adopt.new error = %v, want it gone", err)
+	}
+}
+
+func TestCreatePathErrors(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	wt := filepath.Join(dir, "worktrees")
+	if _, err := st.Create(ctx, "taken", store.CreateOptions{Path: filepath.Join(wt, "r", "taken")}); err != nil {
+		t.Fatalf("Create(taken) error: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "elsewhere"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "elsewhere"), filepath.Join(wt, "r", "link")); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, id, path string
+	}{
+		{"outside worktrees", "a", filepath.Join(dir, "elsewhere", "x")},
+		{"too shallow", "b", filepath.Join(wt, "r")},
+		{"too deep", "c", filepath.Join(wt, "r", "x", "y")},
+		{"dot dot", "d", filepath.Join(wt, "r", "..", "..", "envs", "x")},
+		{"symlink", "e", filepath.Join(wt, "r", "link")},
+		{"another environment's", "f", filepath.Join(wt, "r", "taken")},
+		{"existing environment, other path", "taken", filepath.Join(wt, "r", "other")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := st.Create(t.Context(), tt.id, store.CreateOptions{Path: tt.path}); !errors.Is(err, store.ErrInvalidPath) {
+				t.Errorf("Create(%s, %s) error = %v, want %v", tt.id, tt.path, err, store.ErrInvalidPath)
+			}
+		})
+	}
+}
+
+// T3 deletes checkpoints after a revert and later reuses their names: a
+// snapshot taken again after DeleteSnapshot must hold the new state.
+func TestDeleteSnapshot(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	if _, err := st.Create(ctx, "demo", store.CreateOptions{}); err != nil {
+		t.Fatalf("Create(demo) error: %v", err)
+	}
+	live := livePath(t, st, "demo")
+	writeFile(t, filepath.Join(live, "data"), "old")
+	if _, err := st.Snapshot(ctx, "demo", "s1"); err != nil {
+		t.Fatalf("Snapshot(demo, s1) error: %v", err)
+	}
+	for range 2 { // deleting again is fine
+		if err := st.DeleteSnapshot(ctx, "demo", "s1"); err != nil {
+			t.Fatalf("DeleteSnapshot(demo, s1) error: %v", err)
+		}
+	}
+	if snaps, err := st.Snapshots(ctx, "demo"); err != nil || len(snaps) != 0 {
+		t.Errorf("Snapshots(demo) after DeleteSnapshot = %v, %v, want none", snaps, err)
+	}
+	snapDir := filepath.Join(dir, "envs", "demo", "snaps", "s1")
+	if _, err := os.Lstat(snapDir); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("stat snaps/s1 error = %v, want it gone", err)
+	}
+	writeFile(t, filepath.Join(live, "data"), "new")
+	if _, err := st.Snapshot(ctx, "demo", "s1"); err != nil {
+		t.Fatalf("Snapshot(demo, s1) again error: %v", err)
+	}
+	if got := readFile(t, filepath.Join(snapDir, "data")); got != "new" {
+		t.Errorf("snapshot s1 taken again holds %q, want %q", got, "new")
+	}
+}
+
+// Reconcile finishes what a crash interrupted and keeps what the index lost.
+func TestReconcile(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	// A delete that stopped after removing the row: marked, no row.
+	if _, err := st.Create(ctx, "gone", store.CreateOptions{Path: filepath.Join(dir, "worktrees", "r", "gone")}); err != nil {
+		t.Fatalf("Create(gone) error: %v", err)
+	}
+	writeFile(t, filepath.Join(dir, "envs", "gone", "incomplete"), "delete "+filepath.Join(dir, "worktrees", "r", "gone")+"\n")
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "state", "fern.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.ExecContext(ctx, `DELETE FROM environments WHERE id = 'gone'`); err != nil {
+		t.Fatal(err)
+	}
+	// A restore that stopped before removing live.new.
+	if _, err := st.Create(ctx, "kept", store.CreateOptions{}); err != nil {
+		t.Fatalf("Create(kept) error: %v", err)
+	}
+	next := filepath.Join(dir, "envs", "kept", "live.new")
+	if out, err := exec.CommandContext(ctx, "btrfs", "subvolume", "create", next).CombinedOutput(); err != nil {
+		t.Fatalf("btrfs subvolume create: %v: %s", err, out)
+	}
+	// A workspace the index has lost.
+	lostLive := filepath.Join(dir, "envs", "lost", "live")
+	if err := os.MkdirAll(filepath.Dir(lostLive), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.CommandContext(ctx, "btrfs", "subvolume", "create", lostLive).CombinedOutput(); err != nil {
+		t.Fatalf("btrfs subvolume create: %v: %s", err, out)
+	}
+
+	lost, err := st.Reconcile(ctx)
+	if err != nil {
+		t.Fatalf("Reconcile() error: %v", err)
+	}
+	if diff := cmp.Diff([]string{filepath.Join(dir, "envs", "lost")}, lost); diff != "" {
+		t.Errorf("Reconcile() lost mismatch (-want +got):\n%s", diff)
+	}
+	for _, p := range []string{filepath.Join(dir, "envs", "gone"), filepath.Join(dir, "worktrees", "r", "gone"), next} {
+		if _, err := os.Lstat(p); !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("stat %s after Reconcile error = %v, want it gone", p, err)
+		}
+	}
+	if _, err := os.Lstat(lostLive); err != nil {
+		t.Errorf("stat %s after Reconcile error = %v, want it kept", lostLive, err)
+	}
+	removeByHand(t, filepath.Join(dir, "envs", "lost"), lostLive)
 }
