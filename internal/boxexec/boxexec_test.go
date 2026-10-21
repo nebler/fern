@@ -25,7 +25,7 @@ const token = "secret"
 
 // newBox serves exec in a fresh directory and returns its WebSocket URL and
 // the directory.
-func newBox(t *testing.T) (url, dir string) {
+func newBox(t testing.TB) (url, dir string) {
 	t.Helper()
 	dir = t.TempDir()
 	env := []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
@@ -36,7 +36,7 @@ func newBox(t *testing.T) (url, dir string) {
 
 // newRelay serves a WebSocket endpoint that relays every connection to the
 // box at boxURL, the way the daemon does.
-func newRelay(t *testing.T, boxURL string) string {
+func newRelay(t testing.TB, boxURL string) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		box, err := boxexec.Dial(r.Context(), boxURL, token, nil)
