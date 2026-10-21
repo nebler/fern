@@ -20,6 +20,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"slices"
+	"strings"
 	"sync"
 	"syscall"
 	"text/tabwriter"
@@ -54,7 +56,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		_, _ = fmt.Fprintf(stderr, "fern: %v\n", err)
 		return 2
 	}
-	code, err := cmd.run(ctx, api.NewClient(cmd.socket), stdin, stdout, stderr)
+	code, err := lookup(cmd.name).run(ctx, cmd, api.NewClient(cmd.socket), stdio{stdin, stdout, stderr})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "fern %s: %v\n", cmd.name, err)
 		return 1
@@ -74,6 +76,50 @@ type command struct {
 	argv   []string // exec
 }
 
+// stdio is the invocation's standard streams.
+type stdio struct {
+	in       io.Reader
+	out, err io.Writer
+}
+
+// subcommand is one of the CLI's commands.
+type subcommand struct {
+	name     string
+	min, max int // how many positional arguments it takes; max -1 means no limit
+	// flags defines the command's flags on fs, to be parsed into c.
+	flags func(fs *flag.FlagSet, c *command)
+	run   func(ctx context.Context, c command, cl *api.Client, std stdio) (int, error)
+}
+
+// subcommands are the CLI's commands, in the order the usage lists them.
+func subcommands() []subcommand {
+	return []subcommand{
+		{name: "create", min: 1, max: 1, run: create, flags: func(fs *flag.FlagSet, c *command) {
+			fs.StringVar(&c.repo, "repo", "", "directory to copy into the environment, or - for a tar stream")
+		}},
+		{name: "ls", run: list},
+		{name: "rm", min: 1, max: 1, run: func(ctx context.Context, c command, cl *api.Client, _ stdio) (int, error) {
+			return 0, cl.Delete(ctx, c.env)
+		}},
+		{name: "snapshot", min: 1, max: 2, run: snapshot},
+		{name: "snapshots", min: 1, max: 1, run: snapshots},
+		{name: "restore", min: 2, max: 2, run: restore},
+		{name: "exec", min: 1, max: -1, run: execute},
+		{name: "sleep", min: 1, max: 1, run: timed(func(ctx context.Context, cl *api.Client, env string) error {
+			return cl.Sleep(ctx, env)
+		})},
+		{name: "wake", min: 1, max: 1, run: timed(func(ctx context.Context, cl *api.Client, env string) error {
+			return cl.Wake(ctx, env)
+		})},
+	}
+}
+
+// lookup returns the subcommand called name; parse has checked it exists.
+func lookup(name string) subcommand {
+	i := slices.IndexFunc(subcommands(), func(sc subcommand) bool { return sc.name == name })
+	return subcommands()[i]
+}
+
 func parse(args []string) (command, error) {
 	socket := os.Getenv("FERN_SOCKET")
 	if socket == "" {
@@ -85,60 +131,63 @@ func parse(args []string) (command, error) {
 	if err := global.Parse(args); err != nil {
 		return command{}, err
 	}
-	if global.NArg() == 0 {
-		return command{}, errors.New("usage: fern <create|ls|rm|snapshot|snapshots|restore|exec|sleep|wake> …")
+	var names []string
+	for _, sc := range subcommands() {
+		names = append(names, sc.name)
 	}
-	// How many positional arguments each command takes, at least and at most.
-	positional := map[string][2]int{
-		"create": {1, 1}, "ls": {0, 0}, "rm": {1, 1}, "snapshot": {1, 2}, "snapshots": {1, 1},
-		"restore": {2, 2}, "exec": {1, -1}, "sleep": {1, 1}, "wake": {1, 1},
+	if global.NArg() == 0 {
+		return command{}, fmt.Errorf("usage: fern <%s> …", strings.Join(names, "|"))
 	}
 	cmd := command{name: global.Arg(0), socket: socket}
-	limits, ok := positional[cmd.name]
-	if !ok {
+	if !slices.Contains(names, cmd.name) {
 		return command{}, fmt.Errorf("unknown command %q", cmd.name)
 	}
+	sc := lookup(cmd.name)
 	fs := flag.NewFlagSet(cmd.name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	var it bool
-	switch cmd.name {
-	case "create":
-		fs.StringVar(&cmd.repo, "repo", "", "directory to copy into the environment, or - for a tar stream")
-	case "exec":
-		fs.BoolVar(&cmd.stdin, "i", false, "send stdin")
-		fs.BoolVar(&cmd.tty, "t", false, "allocate a terminal")
-		fs.BoolVar(&it, "it", false, "-i and -t")
+	if sc.flags != nil {
+		sc.flags(fs, &cmd)
 	}
-	var pos []string
-	var err error
 	if cmd.name == "exec" {
-		// Everything after the environment belongs to the command.
-		err = fs.Parse(global.Args()[1:])
-		pos = fs.Args()
-	} else {
-		pos, err = parseInterleaved(fs, global.Args()[1:])
+		return parseExec(fs, cmd, global.Args()[1:])
 	}
+	pos, err := parseInterleaved(fs, global.Args()[1:])
 	if err != nil {
 		return command{}, err
 	}
-	if len(pos) < limits[0] || (limits[1] >= 0 && len(pos) > limits[1]) {
+	if len(pos) < sc.min || (sc.max >= 0 && len(pos) > sc.max) {
 		return command{}, fmt.Errorf("%s: wrong number of arguments", cmd.name)
 	}
 	if len(pos) > 0 {
 		cmd.env = pos[0]
 	}
-	if len(pos) > 1 && cmd.name != "exec" {
+	if len(pos) > 1 {
 		cmd.snap = pos[1]
 	}
-	if cmd.name == "exec" {
-		cmd.stdin, cmd.tty = cmd.stdin || it, cmd.tty || it
-		cmd.argv = pos[1:]
-		if len(cmd.argv) > 0 && cmd.argv[0] == "--" {
-			cmd.argv = cmd.argv[1:]
-		}
-		if len(cmd.argv) == 0 {
-			return command{}, errors.New("exec: no command given")
-		}
+	return cmd, nil
+}
+
+// parseExec parses exec's flags, which come before the environment:
+// everything after it belongs to the command.
+func parseExec(fs *flag.FlagSet, cmd command, args []string) (command, error) {
+	var it bool
+	fs.BoolVar(&cmd.stdin, "i", false, "send stdin")
+	fs.BoolVar(&cmd.tty, "t", false, "allocate a terminal")
+	fs.BoolVar(&it, "it", false, "-i and -t")
+	if err := fs.Parse(args); err != nil {
+		return command{}, err
+	}
+	pos := fs.Args()
+	if len(pos) == 0 {
+		return command{}, errors.New("exec: wrong number of arguments")
+	}
+	cmd.stdin, cmd.tty = cmd.stdin || it, cmd.tty || it
+	cmd.env, cmd.argv = pos[0], pos[1:]
+	if len(cmd.argv) > 0 && cmd.argv[0] == "--" {
+		cmd.argv = cmd.argv[1:]
+	}
+	if len(cmd.argv) == 0 {
+		return command{}, errors.New("exec: no command given")
 	}
 	return cmd, nil
 }
@@ -159,97 +208,117 @@ func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
 	}
 }
 
-func (c command) run(ctx context.Context, cl *api.Client, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
-	start := time.Now()
-	switch c.name {
-	case "create":
-		return 0, c.create(ctx, cl, stdin, stdout)
-	case "ls":
-		envs, err := cl.List(ctx)
-		if err != nil {
-			return 0, err
-		}
-		tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "ENV\tSTATE\tHEAD\tREPO\tCREATED") // tabwriter reports errors on Flush
-		for _, e := range envs {
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", e.ID, e.State, e.Head, e.Repo, e.Created.Format(time.RFC3339))
-		}
-		return 0, tw.Flush()
-	case "rm":
-		return 0, cl.Delete(ctx, c.env)
-	case "snapshot":
-		snap, err := cl.Snapshot(ctx, c.env, c.snap)
-		if err != nil {
-			return 0, err
-		}
-		_, err = fmt.Fprintf(stdout, "snapshot %s/%s took %s\n", c.env, snap.ID, ms(time.Since(start)))
+func list(ctx context.Context, _ command, cl *api.Client, std stdio) (int, error) {
+	envs, err := cl.List(ctx)
+	if err != nil {
 		return 0, err
-	case "snapshots":
-		snaps, err := cl.Snapshots(ctx, c.env)
-		if err != nil {
-			return 0, err
-		}
-		tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "SNAPSHOT\tCREATED")
-		for _, s := range snaps {
-			_, _ = fmt.Fprintf(tw, "%s\t%s\n", s.ID, s.Created.Format(time.RFC3339))
-		}
-		return 0, tw.Flush()
-	case "restore":
-		if err := cl.Restore(ctx, c.env, c.snap); err != nil {
-			return 0, err
-		}
-		_, err := fmt.Fprintf(stdout, "restore %s to %s took %s\n", c.env, c.snap, ms(time.Since(start)))
-		return 0, err
-	case "sleep", "wake":
-		op := cl.Sleep
-		if c.name == "wake" {
-			op = cl.Wake
-		}
-		if err := op(ctx, c.env); err != nil {
-			return 0, err
-		}
-		_, err := fmt.Fprintf(stdout, "%s %s took %s\n", c.name, c.env, ms(time.Since(start)))
-		return 0, err
-	case "exec":
-		return c.exec(ctx, cl, stdin, stdout, stderr)
 	}
-	return 0, fmt.Errorf("unknown command %q", c.name)
+	tw := tabwriter.NewWriter(std.out, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "ENV\tSTATE\tHEAD\tREPO\tCREATED") // tabwriter reports errors on Flush
+	for _, e := range envs {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", e.ID, e.State, e.Head, e.Repo, e.Created.Format(time.RFC3339))
+	}
+	return 0, tw.Flush()
 }
 
-func (c command) create(ctx context.Context, cl *api.Client, stdin io.Reader, stdout io.Writer) error {
-	var seed io.Reader
-	repo := c.repo
+func snapshot(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	start := time.Now()
+	snap, err := cl.Snapshot(ctx, c.env, c.snap)
+	if err != nil {
+		return 0, err
+	}
+	_, err = fmt.Fprintf(std.out, "snapshot %s/%s took %s\n", c.env, snap.ID, ms(time.Since(start)))
+	return 0, err
+}
+
+func snapshots(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	snaps, err := cl.Snapshots(ctx, c.env)
+	if err != nil {
+		return 0, err
+	}
+	tw := tabwriter.NewWriter(std.out, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "SNAPSHOT\tCREATED")
+	for _, s := range snaps {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", s.ID, s.Created.Format(time.RFC3339))
+	}
+	return 0, tw.Flush()
+}
+
+func restore(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	start := time.Now()
+	if err := cl.Restore(ctx, c.env, c.snap); err != nil {
+		return 0, err
+	}
+	_, err := fmt.Fprintf(std.out, "restore %s to %s took %s\n", c.env, c.snap, ms(time.Since(start)))
+	return 0, err
+}
+
+// timed runs op on the command's environment and says how long it took.
+func timed(op func(ctx context.Context, cl *api.Client, env string) error) func(context.Context, command, *api.Client, stdio) (int, error) {
+	return func(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+		start := time.Now()
+		if err := op(ctx, cl, c.env); err != nil {
+			return 0, err
+		}
+		_, err := fmt.Fprintf(std.out, "%s %s took %s\n", c.name, c.env, ms(time.Since(start)))
+		return 0, err
+	}
+}
+
+func create(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	var env api.Env
+	var err error
 	switch c.repo {
 	case "":
+		env, err = cl.Create(ctx, c.env, "", nil)
 	case "-":
-		seed, repo = stdin, ""
+		env, err = cl.Create(ctx, c.env, "", std.in)
 	default:
-		// Stream the directory as a tar archive, the same format as "-".
-		if info, err := os.Stat(c.repo); err != nil || !info.IsDir() {
-			return fmt.Errorf("--repo %s: not a directory", c.repo)
-		}
-		tar := exec.CommandContext(ctx, "tar", "-C", c.repo, "-c", "-f", "-", ".")
-		out, err := tar.StdoutPipe()
-		if err != nil {
-			return err
-		}
-		if err := tar.Start(); err != nil {
-			return fmt.Errorf("read %s: %w", c.repo, err)
-		}
-		defer func() { _ = tar.Wait() }()
-		seed = out
+		env, err = createFromDir(ctx, c, cl, std.err)
 	}
-	env, err := cl.Create(ctx, c.env, repo, seed)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	_, err = fmt.Fprintf(stdout, "environment %s is %s\n", env.ID, env.State)
-	return err
+	_, err = fmt.Fprintf(std.out, "environment %s is %s\n", env.ID, env.State)
+	return 0, err
 }
 
-func (c command) exec(ctx context.Context, cl *api.Client, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
+// createFromDir creates the environment from the directory c.repo, streamed
+// as a tar archive, the same format as "-". If tar fails, the upload fails
+// with it, so the environment isn't created with files missing.
+func createFromDir(ctx context.Context, c command, cl *api.Client, stderr io.Writer) (api.Env, error) {
+	if info, err := os.Stat(c.repo); err != nil || !info.IsDir() {
+		return api.Env{}, fmt.Errorf("--repo %s: not a directory", c.repo)
+	}
+	pr, pw := io.Pipe()
+	tar := exec.CommandContext(ctx, "tar", "-C", c.repo, "-c", "-f", "-", ".")
+	tar.Stdout, tar.Stderr = pw, stderr
+	if err := tar.Start(); err != nil {
+		return api.Env{}, fmt.Errorf("read %s: %w", c.repo, err)
+	}
+	var tarErr error
+	var reader sync.WaitGroup
+	reader.Go(func() {
+		if err := tar.Wait(); err != nil {
+			tarErr = fmt.Errorf("read %s: %w", c.repo, err)
+		}
+		pw.CloseWithError(tarErr) // a nil error is a clean EOF
+	})
+	env, err := cl.Create(ctx, c.env, c.repo, pr)
+	// If the upload stopped early, tar must not block writing to the pipe.
+	_ = pr.CloseWithError(errors.New("upload ended"))
+	reader.Wait()
+	// A failed tar fails the upload, so err already says why; tar's own
+	// error after a refused upload would only be a broken pipe.
+	if err == nil {
+		err = tarErr
+	}
+	return env, err
+}
+
+func execute(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
 	req := boxexec.Request{Argv: c.argv, TTY: c.tty}
+	stdin := std.in
 	if !c.stdin {
 		stdin = nil
 	}
@@ -288,7 +357,7 @@ func (c command) exec(ctx context.Context, cl *api.Client, stdin io.Reader, stdo
 			}
 		})
 	}
-	return cl.Exec(ctx, c.env, req, stdin, stdout, stderr, resize)
+	return cl.Exec(ctx, c.env, req, stdin, std.out, std.err, resize)
 }
 
 func ms(d time.Duration) string { return fmt.Sprintf("%.1fms", float64(d.Microseconds())/1000) }
