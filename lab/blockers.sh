@@ -12,6 +12,8 @@
 #   bigrepo      a 100,000-file workspace: snapshot, restore, rm; a real clone
 #   many         ten environments woken at once
 #   gvisor       Claude Code and the exec stream under gVisor (installs it)
+#   paths        workspaces at a path (T3's worktrees): subvolume first,
+#                adopt, which, snapshot replace and delete, warm wake time
 #   review       the fixes from the code review of 2026-10-21: stdin EOF,
 #                limits, no_new_privs, network rules, restore and rm safety
 # Run all of them, or name some: lab/blockers.sh stream daemon. Needs lab/up.sh.
@@ -263,8 +265,60 @@ review() {
   check "and leaves no disk behind" gone "$(in_daemon 'ls /var/lib/fern/envs' | grep -qx bk2 && echo left || echo gone)"
 }
 
+paths() {
+  echo "== workspaces at a path (T3's worktrees)"
+  local W=/var/lib/fern/worktrees/sample
+  for e in wt ad big; do fern rm $e 2>/dev/null || true; done
+  fern create wt --path $W/main >/dev/null
+  check "the box works in the workspace's own path" "$W/main" "$(fern exec wt -- pwd)"
+  tar -C lab/sample-repo -cf - . | fern exec -i wt -- tar -x -f -
+  fern sleep wt >/dev/null
+  check "a workspace at a path runs Postgres (3 users)" 3 "$(sql wt 'select count(*) from users')"
+  check "which finds it from a folder inside" wt "$(fern which $W/main/scripts)"
+  # What fern-claude does for T3: the environment and directory from the cwd.
+  check "exec --here runs in the current directory" "$W/main/scripts" \
+    "$(in_daemon "cd $W/main/scripts && fern exec --here -- pwd")"
+  check "exec -e passes a variable" "sdk-ts" \
+    "$(in_daemon "cd $W/main && CLAUDE_CODE_ENTRYPOINT=sdk-ts fern exec --here -e CLAUDE_CODE_ENTRYPOINT -- sh -c 'echo \$CLAUDE_CODE_ENTRYPOINT'")"
+  check "fern-claude runs claude in the box" "2.1.304 (Claude Code)" "$(in_daemon "cd $W/main && fern-claude --version")"
+  check "fern-claude outside a workspace runs the local claude" "local --version" \
+    "$(in_daemon "cd / && FERN_LOCAL_CLAUDE=echo fern-claude local --version")"
+  out=$(in_daemon "fern exec wt -- sh -c 'trap \"echo stopping; exit 7\" TERM; echo ready; while :; do sleep 0.1; done' & sleep 2; kill -TERM \$!; wait \$!; echo code=\$?")
+  check "SIGTERM to fern exec reaches the command (exit 7)" "ready stopping code=7" "$(echo $out)"
+  # A worktree T3 made before Fern saw it: adopted.
+  tar -C lab/sample-repo -cf - . | k -n fern-system exec -i ds/fern -c fern -- \
+    sh -c "mkdir -p $W/adopted && tar -x -C $W/adopted -f - && chown -R 1000:1000 $W/adopted"
+  start=$(now_ms)
+  fern create ad --path $W/adopted >/dev/null
+  note "adopt of the sample repo: $(( $(now_ms) - start )) ms"
+  check "the adopted workspace is a subvolume" 256 "$(in_daemon "stat -c %i $W/adopted")"
+  check "the adopted workspace runs Postgres (3 users)" 3 "$(sql ad 'select count(*) from users')"
+  in_daemon "mkdir -p $W/big && cd $W/big && seq 20000 | xargs -n 2000 sh -c 'for i; do echo \$i > f\$i; done' _ && chown -R 1000:1000 $W/big"
+  start=$(now_ms)
+  fern create big --path $W/big >/dev/null
+  note "adopt of 20,000 files: $(( $(now_ms) - start )) ms"
+  check "all 20,000 files adopted" 20000 "$(in_daemon "ls $W/big | wc -l" | tr -d ' ')"
+  # T3 reuses a checkpoint name after a revert: the snapshot must be retaken.
+  fern snapshot ad c1 >/dev/null
+  sql ad 'delete from users' >/dev/null
+  fern snapshot --replace ad c1 >/dev/null
+  sql ad "insert into users (name, email) values ('Grace', 'grace@example.com')" >/dev/null
+  fern restore ad c1 >/dev/null
+  check "a replaced snapshot holds the new state (0 users)" 0 "$(sql ad 'select count(*) from users')"
+  fern rmsnap ad c1
+  check "rmsnap removes it" 0 "$(fern snapshots ad | tail -n +2 | grep -c . || true)"
+  for _ in $(seq 10); do
+    fern sleep ad >/dev/null
+    fern wake ad | took
+  done > /tmp/fern-bk-wake
+  note "warm wake (Postgres), ms: $(stats < /tmp/fern-bk-wake)"
+  for e in wt ad big; do fern rm $e; done
+  check "rm removes the workspaces at their paths" gone \
+    "$(in_daemon "ls $W" | grep -qE '^(main|adopted|big)$' && echo left || echo gone)"
+}
+
 sections=("$@")
-[ ${#sections[@]} -eq 0 ] && sections=(claude stream concurrency restore daemon node bigrepo many gvisor review)
+[ ${#sections[@]} -eq 0 ] && sections=(claude stream concurrency restore daemon node bigrepo many gvisor paths review)
 for s in "${sections[@]}"; do "$s"; done
 fern rm $ENV 2>/dev/null || true
 rm -f /tmp/fern-bk-*
