@@ -10,7 +10,16 @@ import (
 
 // The kubelet probes /healthz every second. Once the box has been ready, a
 // result is good for readyCacheFor, so the ready scripts don't run that often.
-const readyCacheFor = 5 * time.Second
+// Before that, a failure is good for retryEvery: a waking box is asked often,
+// and running the checks back to back would slow its own start (ten boxes
+// starting Postgres at once took 21s instead of 6s).
+const (
+	readyCacheFor = 5 * time.Second
+	retryEvery    = 100 * time.Millisecond
+	// maxWait bounds ?wait=, with which a caller waits for the box to be
+	// ready instead of asking again and again.
+	maxWait = 10 * time.Second
+)
 
 // readiness answers the kubelet's readiness probe on /healthz. Until the box
 // is first ready every probe runs the checks; after that a result is reused
@@ -35,8 +44,23 @@ func newReadiness(check func(context.Context) error) *readiness {
 	return &readiness{check: check}
 }
 
+// ServeHTTP answers whether the box is ready. With ?wait=DURATION it answers
+// as soon as the box is ready, or when the duration (at most maxWait) is up.
 func (r *readiness) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if err := r.ready(req.Context()); err != nil {
+	wait, _ := time.ParseDuration(req.URL.Query().Get("wait"))
+	wait = min(wait, maxWait)
+	ctx := req.Context()
+	deadline := time.Now().Add(wait)
+	err := r.ready(ctx)
+	for err != nil && time.Now().Before(deadline) {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(retryEvery):
+		}
+		err = r.ready(ctx)
+	}
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusServiceUnavailable)
 		return
 	}
@@ -46,9 +70,12 @@ func (r *readiness) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 // ready returns the cached result if it is fresh, else joins or starts a run.
 func (r *readiness) ready(ctx context.Context) error {
 	r.mu.Lock()
-	if r.passed && time.Since(r.last.finished) < readyCacheFor {
-		defer r.mu.Unlock()
-		return r.last.err
+	if r.last != nil {
+		age := time.Since(r.last.finished)
+		if (r.passed && age < readyCacheFor) || (!r.passed && age < retryEvery) {
+			defer r.mu.Unlock()
+			return r.last.err
+		}
 	}
 	if run := r.running; run != nil {
 		r.mu.Unlock()

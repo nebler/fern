@@ -45,13 +45,15 @@ const (
 	pollInterval = 200 * time.Millisecond
 	wakeTimeout  = 2 * time.Minute
 	stopTimeout  = time.Minute
-	// healthInterval is how often a waking box's fern-init is asked whether
-	// its services are ready. The question goes to the box, not to
-	// Kubernetes, so it can be asked often.
+	// healthInterval is the pause between asking a waking box's fern-init
+	// whether its services are ready. Each question waits up to healthWait
+	// for the answer, so fern-init answers the moment they are, and paces
+	// its own checks.
 	healthInterval = 50 * time.Millisecond
-	// podCheckTicks is how many health checks pass between looks at the pod,
-	// which may have been replaced or have failed.
-	podCheckTicks = 20
+	healthWait     = 5 * time.Second
+	// podCheckEvery is how often a pod with an address is looked at again:
+	// it may have been replaced or have failed.
+	podCheckEvery = time.Second
 )
 
 // Config describes the boxes a Driver creates.
@@ -73,8 +75,15 @@ type Driver struct {
 // New returns a Driver that uses c, whose scheme must include corev1 and the
 // agent-sandbox types.
 func New(c client.Client, cfg Config) *Driver {
-	// fern-init answers /healthz within 2.5s.
-	return &Driver{c: c, cfg: cfg, health: &http.Client{Timeout: 3 * time.Second}}
+	// fern-init answers /healthz within 2.5s. Connecting gets far less: for
+	// a moment after a pod starts, the network policy can drop packets to
+	// it instead of refusing them, and a wait for the full timeout there
+	// would cost seconds.
+	health := &http.Client{
+		Timeout:   healthWait + 3*time.Second,
+		Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext},
+	}
+	return &Driver{c: c, cfg: cfg, health: health}
 }
 
 // Create makes environment env's Sandbox, asleep, with its workspace mounted
@@ -104,12 +113,12 @@ func (d *Driver) Wake(ctx context.Context, env string) (string, error) {
 		return "", err
 	}
 	var addr string
-	tick := 0
+	var looked time.Time
 	err := pollEvery(ctx, healthInterval, wakeTimeout, func(ctx context.Context) (bool, error) {
-		defer func() { tick++ }()
-		// Look at the pod while it has no address (every pollInterval), and
-		// now and then once it has one.
-		if (addr == "" && tick%int(pollInterval/healthInterval) == 0) || tick%podCheckTicks == 0 {
+		// Look at the pod every pollInterval while it has no address, and
+		// every podCheckEvery once it has one.
+		if since := time.Since(looked); (addr == "" && since >= pollInterval) || since >= podCheckEvery {
+			looked = time.Now()
 			var err error
 			if addr, err = d.podAddr(ctx, env); err != nil {
 				return false, err
@@ -150,7 +159,7 @@ func (d *Driver) podAddr(ctx context.Context, env string) (string, error) {
 
 // healthy reports whether fern-init at addr says its services are ready.
 func (d *Driver) healthy(ctx context.Context, addr string) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/healthz", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/healthz?wait="+healthWait.String(), nil)
 	if err != nil {
 		return false
 	}

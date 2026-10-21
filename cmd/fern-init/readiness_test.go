@@ -25,7 +25,7 @@ func probe(t *testing.T, r *readiness) int {
 	return w.Code
 }
 
-// Until the box is first ready every probe runs the checks; after that a
+// Until the box is first ready a failure is reused for 100ms; after that a
 // result is reused for 5s.
 func TestReadinessCache(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
@@ -45,7 +45,8 @@ func TestReadinessCache(t *testing.T) {
 			wantChecks int // checks run so far
 		}{
 			{name: "not ready", up: false, wantCode: http.StatusServiceUnavailable, wantChecks: 1},
-			{name: "not ready, checked again", up: false, wantCode: http.StatusServiceUnavailable, wantChecks: 2},
+			{name: "not ready, asked again at once", up: false, wantCode: http.StatusServiceUnavailable, wantChecks: 1},
+			{name: "not ready, checked again", after: 100 * time.Millisecond, up: false, wantCode: http.StatusServiceUnavailable, wantChecks: 2},
 			{name: "first ready", after: time.Second, up: true, wantCode: http.StatusOK, wantChecks: 3},
 			{name: "cached", up: false, wantCode: http.StatusOK, wantChecks: 3},
 			{name: "still cached", after: 4900 * time.Millisecond, up: false, wantCode: http.StatusOK, wantChecks: 3},
@@ -137,6 +138,44 @@ func TestReady(t *testing.T) {
 			if gotErr := err != nil; gotErr != tt.wantErr {
 				t.Errorf("ready() error = %v, want error: %t", err, tt.wantErr)
 			}
+		})
+	}
+}
+
+// With ?wait= the answer comes as soon as the box is ready, and the checks
+// run no more than every 100ms meanwhile.
+func TestReadinessWait(t *testing.T) {
+	tests := []struct {
+		name       string
+		upAfter    time.Duration // when the box becomes ready
+		wait       string
+		wantCode   int
+		wantTook   time.Duration
+		wantChecks int
+	}{
+		{name: "ready during the wait", upAfter: time.Second, wait: "5s", wantCode: http.StatusOK, wantTook: time.Second, wantChecks: 11},
+		{name: "not ready in time", upAfter: time.Hour, wait: "1s", wantCode: http.StatusServiceUnavailable, wantTook: time.Second, wantChecks: 11},
+		{name: "wait capped", upAfter: time.Hour, wait: "1h", wantCode: http.StatusServiceUnavailable, wantTook: maxWait, wantChecks: 101},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var checks atomic.Int32
+				start := time.Now()
+				r := newReadiness(func(context.Context) error {
+					checks.Add(1)
+					if time.Since(start) < tt.upAfter {
+						return errors.New("not yet")
+					}
+					return nil
+				})
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, httptest.NewRequestWithContext(t.Context(), http.MethodGet, "/healthz?wait="+tt.wait, nil))
+				if w.Code != tt.wantCode || time.Since(start) != tt.wantTook || int(checks.Load()) != tt.wantChecks {
+					t.Errorf("GET /healthz?wait=%s = %d after %v with %d checks, want %d after %v with %d",
+						tt.wait, w.Code, time.Since(start), checks.Load(), tt.wantCode, tt.wantTook, tt.wantChecks)
+				}
+			})
 		})
 	}
 }
