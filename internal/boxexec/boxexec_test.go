@@ -279,6 +279,12 @@ func TestRunLeftovers(t *testing.T) {
 			wantStdout: "started\r\n",
 			wantGone:   true,
 		},
+		{
+			name:       "tty held open from another session",
+			tty:        true,
+			start:      `setsid sh -c "$left" &`,
+			wantStdout: "started\r\n",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

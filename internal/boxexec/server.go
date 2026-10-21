@@ -18,6 +18,7 @@ import (
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
 	"github.com/creack/pty"
+	"golang.org/x/sys/unix"
 )
 
 // outputDelay is how long a command's output may go on after it exits:
@@ -62,7 +63,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		finish(r.Context(), conn, 127)
 		return
 	}
-	defer p.close()
 	// The reader stops when the connection closes. A client that goes away
 	// cancels the command.
 	var reader sync.WaitGroup
@@ -115,29 +115,109 @@ func (s *Server) start(ctx context.Context, conn *websocket.Conn, req Request) (
 		}
 		return p, cmd.Start()
 	}
-	tty, err := pty.StartWithSize(cmd, winsize(req.Size))
+	tty, err := startTTY(cmd, req.Size)
 	if err != nil {
 		return nil, err
 	}
 	p.tty, p.stdin = tty, tty
 	// Reading the terminal ends with EIO once the command and its children
-	// have closed it.
+	// have closed it, or at the deadline wait sets.
 	p.output.Go(func() { _, _ = io.Copy(frames(ctx, conn, frameStdout), tty) })
 	return p, nil
 }
 
-// wait waits for the command and its output, and returns its exit code.
+// startTTY starts cmd on a new terminal of the given size and returns the
+// terminal's controlling side.
+//
+// The controlling side is in non-blocking mode, owned by Go's poller, so
+// that a read of it can end at a deadline or when it is closed. pty.Open
+// leaves it blocking (its ioctls go through Fd), and a blocking read only
+// ends once every process holding the terminal has closed it, which one in
+// another session may never do.
+func startTTY(cmd *exec.Cmd, size Size) (*os.File, error) {
+	ptmx, tty, err := pty.Open()
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tty.Close() }() // the command has its own copy
+	f, err := pollable(ptmx)
+	if err != nil {
+		return nil, err
+	}
+	if err := setSize(f, size); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
+	// Ctty is the command's stdin.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true, Setctty: true}
+	if err := cmd.Start(); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
+// pollable returns a non-blocking copy of f that Go's poller owns, and
+// closes f. The copy must not be touched through Fd, which would make it
+// blocking again.
+func pollable(f *os.File) (*os.File, error) {
+	defer func() { _ = f.Close() }()
+	rc, err := f.SyscallConn()
+	if err != nil {
+		return nil, err
+	}
+	var fd int
+	var dupErr error
+	if err := rc.Control(func(old uintptr) {
+		fd, dupErr = unix.FcntlInt(old, unix.F_DUPFD_CLOEXEC, 0)
+	}); err != nil {
+		return nil, err
+	}
+	if dupErr != nil {
+		return nil, fmt.Errorf("dup %s: %w", f.Name(), dupErr)
+	}
+	if err := unix.SetNonblock(fd, true); err != nil {
+		_ = unix.Close(fd)
+		return nil, fmt.Errorf("set %s non-blocking: %w", f.Name(), err)
+	}
+	// NewFile sees O_NONBLOCK and hands the descriptor to the poller.
+	return os.NewFile(uintptr(fd), f.Name()), nil
+}
+
+// setSize sets the size of the terminal whose controlling side is f.
+func setSize(f *os.File, s Size) error {
+	if s.Rows == 0 || s.Cols == 0 {
+		s = Size{Rows: 24, Cols: 80}
+	}
+	rc, err := f.SyscallConn()
+	if err != nil {
+		return err
+	}
+	var ioctlErr error
+	if err := rc.Control(func(fd uintptr) {
+		ioctlErr = unix.IoctlSetWinsize(int(fd), unix.TIOCSWINSZ, &unix.Winsize{Row: s.Rows, Col: s.Cols})
+	}); err != nil {
+		return err
+	}
+	return ioctlErr
+}
+
+// wait waits for the command and its output, closes the terminal, and
+// returns the command's exit code.
 func (p *process) wait(log *slog.Logger) int {
 	err := p.cmd.Wait()
 	killGroup(p.cmd.Process.Pid)
 	if p.tty != nil {
-		// cmd.WaitDelay only bounds pipes. A blocked read of the terminal
-		// can't be interrupted, so stop what still holds it open: the rest
-		// of the command's process group.
-		t := time.AfterFunc(outputDelay, func() { _ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL) })
-		defer t.Stop()
+		// cmd.WaitDelay only bounds pipes. A process killGroup can't reach
+		// can hold the terminal open, so the output gets the same time.
+		_ = p.tty.SetReadDeadline(time.Now().Add(outputDelay))
 	}
 	p.output.Wait()
+	if p.tty != nil {
+		// Closing also ends a write of stdin that the command never read.
+		_ = p.tty.Close()
+	}
 	return exitCode(err, log)
 }
 
@@ -155,12 +235,6 @@ func (p *process) wait(log *slog.Logger) int {
 // moment since the reap to be hit; otherwise the kill finds no group.
 func killGroup(pid int) {
 	_ = syscall.Kill(-pid, syscall.SIGKILL) // ESRCH: nothing was left
-}
-
-func (p *process) close() {
-	if p.tty != nil {
-		_ = p.tty.Close()
-	}
 }
 
 // finish sends the exit code and closes the connection.
@@ -192,7 +266,7 @@ func readInput(ctx context.Context, conn *websocket.Conn, p *process) {
 		case frameResize:
 			if p.tty != nil && len(data) == 5 {
 				size := Size{Rows: binary.BigEndian.Uint16(data[1:]), Cols: binary.BigEndian.Uint16(data[3:])}
-				_ = pty.Setsize(p.tty, winsize(size))
+				_ = setSize(p.tty, size) // fails once wait has closed the terminal
 			}
 		}
 	}
@@ -212,11 +286,4 @@ func exitCode(err error, log *slog.Logger) int {
 		log.Warn("exec: wait", slog.Any("error", err))
 		return 127
 	}
-}
-
-func winsize(s Size) *pty.Winsize {
-	if s.Rows == 0 || s.Cols == 0 {
-		return &pty.Winsize{Rows: 24, Cols: 80}
-	}
-	return &pty.Winsize{Rows: s.Rows, Cols: s.Cols}
 }
