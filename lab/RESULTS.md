@@ -95,3 +95,32 @@ Wake latency is set by the readiness probe (`periodSeconds: 1`): about 0.8 s whe
 | gVisor wake after restore | 20 | 811 | 1,810 | 1,811 |
 
 **Found on the way:** before a fix, about 1 in 7 restores under gVisor left Postgres unable to start. The cause was that the snapshot contained `postmaster.pid`. In the new box, another process (a readiness check) got the same PID, because gVisor hands out PIDs deterministically, so Postgres refused to start. The sample service now deletes the stale pid file on start. Any service that keeps a pid or lock file in `live/` has the same problem after a restore.
+
+## Blocker checks of 2026-10-21
+
+Command: `lab/up.sh && lab/blockers.sh`, same lab as above, box image with Claude Code 2.1.304. Nothing was logged in to, so Claude was checked up to the login.
+
+**Two bugs found and fixed:**
+- **Exec broke on chunks over 32 KiB.** The daemon's relay and the API client kept the WebSocket library's default read limit, so `cat` of 50 MB (and any large prompt on stdin) failed with "message too big". Fixed in `boxexec.Accept` / `MaxMessage`, with tests.
+- **The first exec after a node restart failed** ("no route to host"): the Sandbox's status still named the old pod IP. The driver now takes the address and readiness from the pod. Two reruns pass.
+
+| Check | Result |
+|---|---|
+| `claude --version` in a box (read-only root, uid 1000), runc and gVisor | PASS |
+| the box reaches `api.anthropic.com`, runc and gVisor | PASS |
+| `claude -p --input-format stream-json --output-format stream-json` through `fern exec -i` | PASS: whole JSON lines (`system/init`, `assistant`, `result`); without a login the result is "Not logged in · Please run /login" |
+| interactive `claude` through `fern exec -it` | PASS: the first-run screen draws; two Ctrl-Cs quit |
+| 10,000 JSON lines and 50 MB of random bytes through `cat`, unchanged | PASS (50 MB round trip Mac → box → Mac: 472 ms) |
+| 200 MB of stdout, every byte | PASS (846 ms) |
+| stdout/stderr apart, exit code, stdin EOF, Ctrl-C → 130, a client that goes away stops its command | PASS |
+| a command idle for 180 s still answers | PASS |
+| 10 parallel execs, awake / asleep (one wake) | PASS (asleep: 1.0 s for all 10) |
+| restore while an exec is open | the exec ends with an error after 3 s (no hang); the environment works after it |
+| daemon pod deleted while a box is awake | PASS: same box pod, Postgres keeps its data, snapshot and restore work |
+| whole node restarted (`docker restart`) | PASS after the fix: data and a snapshot from before the restart are back; first exec 3.0 s |
+| 101,003 files, 1.4 GB in `live/` | snapshot p50 6.5 ms (n=10); restore while asleep p50 12.5 ms (n=5); `rm` with 10 snapshots 382 ms |
+| `create --repo` of 20,000 files (20 MB) from the Mac | 728 ms |
+| `git clone --depth 1` of t3code inside a box | 18 s, 32,040 files, 483 MB; the snapshot right after took 148 ms (flushing what the clone just wrote) |
+| 10 sleeping environments woken at once | PASS, 6.4–6.6 s until all answered; 10 awake boxes use about 1 GB |
+
+**Not checked here:** a real Claude turn (needs a login, by hand), and T3's MCP tools from inside a box (needs T3).
