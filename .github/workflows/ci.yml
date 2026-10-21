@@ -1,0 +1,25 @@
+# Runs the same scripts as the lab, so CI and the Mac use the same pinned
+# containers (golang:1.27, golangci-lint v2.15.0).
+name: ci
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: lab/go.sh test -race ./...
+  store:
+    # The store tests need a real btrfs filesystem (a loop-mounted image).
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: lab/test-store.sh
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: lab/lint.sh
