@@ -7,8 +7,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -240,6 +243,75 @@ func TestRunCancelKillsBackground(t *testing.T) {
 	}
 	_ = conn.CloseNow() // the client goes away
 	waitGone(t, url, "bg.pid")
+}
+
+// What a command leaves behind must not keep the exec open, and what is left
+// in its process group must not outlive it.
+func TestRunLeftovers(t *testing.T) {
+	// Every command starts a leftover that ignores the hangup, writes its
+	// PID to left.pid and sleeps. The command exits once the PID is written.
+	const left = `trap "" HUP; echo $$ > left.pid; exec sleep 600`
+	tests := []struct {
+		name       string
+		tty        bool
+		start      string // the shell command that starts the leftover
+		wantStdout string
+		// wantGone says whether the leftover must be killed. One in another
+		// session is out of reach and must only not hold up the exec.
+		wantGone bool
+	}{
+		{
+			name:       "pipes",
+			start:      `sh -c "$left" </dev/null >/dev/null 2>&1 &`,
+			wantStdout: "started\n",
+			wantGone:   true,
+		},
+		{
+			name:       "pipes held open",
+			start:      `sh -c "$left" &`,
+			wantStdout: "started\n",
+			wantGone:   true,
+		},
+		{
+			name:       "tty",
+			tty:        true,
+			start:      `sh -c "$left" </dev/null >/dev/null 2>&1 &`,
+			wantStdout: "started\r\n",
+			wantGone:   true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url, dir := newBox(t)
+			if !tt.wantGone {
+				t.Cleanup(func() { killPID(t, filepath.Join(dir, "left.pid")) })
+			}
+			script := "left='" + left + "'; " + tt.start + "\nuntil [ -s left.pid ]; do sleep 0.01; done; echo started"
+			req := boxexec.Request{Argv: []string{"sh", "-c", script}, TTY: tt.tty}
+			got := run(t, url, token, req, nil)
+			if got.code != 0 || got.stdout != tt.wantStdout {
+				t.Errorf("Run(%q) = code %d, stdout %q, want 0, %q", req.Argv, got.code, got.stdout, tt.wantStdout)
+			}
+			if tt.wantGone {
+				waitGone(t, url, "left.pid")
+			}
+		})
+	}
+}
+
+// killPID kills the process whose PID is in pidFile, if there is one.
+func killPID(t *testing.T, pidFile string) {
+	t.Helper()
+	b, err := os.ReadFile(pidFile)
+	if err != nil {
+		return // the process never started
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil {
+		t.Errorf("PID in %s: %v", pidFile, err)
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGKILL)
 }
 
 // waitGone waits until the process whose PID is in the box's file pidFile

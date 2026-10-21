@@ -129,6 +129,7 @@ func (s *Server) start(ctx context.Context, conn *websocket.Conn, req Request) (
 // wait waits for the command and its output, and returns its exit code.
 func (p *process) wait(log *slog.Logger) int {
 	err := p.cmd.Wait()
+	killGroup(p.cmd.Process.Pid)
 	if p.tty != nil {
 		// cmd.WaitDelay only bounds pipes. A blocked read of the terminal
 		// can't be interrupted, so stop what still holds it open: the rest
@@ -138,6 +139,22 @@ func (p *process) wait(log *slog.Logger) int {
 	}
 	p.output.Wait()
 	return exitCode(err, log)
+}
+
+// killGroup kills what is left of the process group whose leader was pid,
+// once the leader has exited and been reaped: a command's background
+// processes end with it, as T3's do when an agent exits. Without it they
+// would go on changing the workspace with nobody watching. Processes the
+// command moved to another group or session are out of reach.
+//
+// The group's ID is the leader's PID, which reaping has released. That is
+// safe from PID reuse: while any process is left in the group, the kernel
+// won't hand its ID out as a new PID, so the signal reaches only the
+// command's leftovers. Once the group is empty the ID may be reused, but a
+// new process would have to get it and make itself a group leader in the
+// moment since the reap to be hit; otherwise the kill finds no group.
+func killGroup(pid int) {
+	_ = syscall.Kill(-pid, syscall.SIGKILL) // ESRCH: nothing was left
 }
 
 func (p *process) close() {
