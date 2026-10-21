@@ -73,8 +73,9 @@ func Run(ctx context.Context, conn *websocket.Conn, req Request, stdin io.Reader
 	if resize != nil {
 		resizer.Go(func() { sendResizes(ctx, conn, resize) })
 	}
+	r := &messageReader{conn: conn}
 	for {
-		typ, data, err := conn.Read(ctx)
+		typ, data, err := r.read(ctx)
 		if err != nil {
 			return 0, fmt.Errorf("exec: %w", err)
 		}
@@ -102,11 +103,13 @@ func Run(ctx context.Context, conn *websocket.Conn, req Request, stdin io.Reader
 }
 
 func sendStdin(ctx context.Context, conn *websocket.Conn, stdin io.Reader) {
-	buf := make([]byte, 32<<10)
+	// Reading into the frame itself saves a copy and an allocation each.
+	buf := make([]byte, 1+frameData)
+	buf[0] = frameStdin
 	for {
-		n, err := stdin.Read(buf)
+		n, err := stdin.Read(buf[1:])
 		if n > 0 {
-			if conn.Write(ctx, websocket.MessageBinary, append([]byte{frameStdin}, buf[:n]...)) != nil {
+			if conn.Write(ctx, websocket.MessageBinary, buf[:1+n]) != nil {
 				return
 			}
 		}

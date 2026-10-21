@@ -23,8 +23,9 @@ func Proxy(ctx context.Context, a, b *websocket.Conn) error {
 }
 
 func forward(ctx context.Context, dst, src *websocket.Conn) error {
+	r := &messageReader{conn: src}
 	for {
-		typ, data, err := src.Read(ctx)
+		typ, data, err := r.read(ctx)
 		if status := websocket.CloseStatus(err); status != -1 {
 			_ = dst.Close(status, "")
 			return nil

@@ -11,7 +11,9 @@
 package boxexec
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 
 	"github.com/coder/websocket"
@@ -59,17 +61,78 @@ type exit struct {
 	Code int `json:"code"`
 }
 
-// frames returns a writer that sends what is written to it as frames of one
-// kind.
-func frames(ctx context.Context, conn *websocket.Conn, kind byte) io.Writer {
-	return writerFunc(func(p []byte) (int, error) {
-		if err := conn.Write(ctx, websocket.MessageBinary, append([]byte{kind}, p...)); err != nil {
-			return 0, err
-		}
-		return len(p), nil
-	})
+// frameData is the most data the sides put in one frame they send.
+const frameData = 64 << 10
+
+// frameWriter sends what is written to it as frames of one kind, through one
+// buffer it reuses. It is not safe for concurrent use.
+type frameWriter struct {
+	send func([]byte) error // sends one frame; conn.Write doesn't keep it
+	buf  []byte             // the frame: buf[0] is the kind, then the data
 }
 
-type writerFunc func([]byte) (int, error)
+// frames returns a writer that sends what is written to it as frames of one
+// kind.
+func frames(ctx context.Context, conn *websocket.Conn, kind byte) *frameWriter {
+	w := &frameWriter{
+		send: func(frame []byte) error { return conn.Write(ctx, websocket.MessageBinary, frame) },
+		buf:  make([]byte, 1+frameData),
+	}
+	w.buf[0] = kind
+	return w
+}
 
-func (f writerFunc) Write(p []byte) (int, error) { return f(p) }
+// Write sends p as one frame, or as several if it is longer than frameData.
+func (w *frameWriter) Write(p []byte) (int, error) {
+	var n int
+	for len(p) > 0 {
+		c := copy(w.buf[1:], p)
+		if err := w.send(w.buf[:1+c]); err != nil {
+			return n, err
+		}
+		n += c
+		p = p[c:]
+	}
+	return n, nil
+}
+
+// ReadFrom sends what it reads from r until EOF, reading straight into the
+// frame so that io.Copy needs no buffer of its own.
+func (w *frameWriter) ReadFrom(r io.Reader) (int64, error) {
+	var total int64
+	for {
+		n, err := r.Read(w.buf[1:])
+		if n > 0 {
+			if err := w.send(w.buf[:1+n]); err != nil {
+				return total, err
+			}
+			total += int64(n)
+		}
+		if errors.Is(err, io.EOF) {
+			return total, nil
+		}
+		if err != nil {
+			return total, err
+		}
+	}
+}
+
+// messageReader reads whole messages into one buffer it reuses, where
+// conn.Read allocates one per message. What read returns is valid until the
+// next read.
+type messageReader struct {
+	conn *websocket.Conn
+	buf  bytes.Buffer
+}
+
+func (r *messageReader) read(ctx context.Context) (websocket.MessageType, []byte, error) {
+	typ, msg, err := r.conn.Reader(ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	r.buf.Reset()
+	if _, err := r.buf.ReadFrom(msg); err != nil {
+		return 0, nil, err
+	}
+	return typ, r.buf.Bytes(), nil
+}

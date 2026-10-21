@@ -248,8 +248,9 @@ func finish(ctx context.Context, conn *websocket.Conn, code int) {
 // readInput copies stdin frames to the command and applies resizes until the
 // connection closes.
 func readInput(ctx context.Context, conn *websocket.Conn, p *process) {
+	r := &messageReader{conn: conn}
 	for {
-		_, data, err := conn.Read(ctx)
+		_, data, err := r.read(ctx)
 		if err != nil {
 			return
 		}
