@@ -6,6 +6,7 @@
 
 - **The core risk is retired.** An agent-sandbox `Sandbox` runs on a btrfs subvolume served by our own CSI driver. The whole disk, Postgres included, is snapshotted in about 10 ms and restored in about 1.2 s. This works under runc **and under gVisor**, inside Docker Desktop.
 - **Every "Done when" item holds, with two caveats.** The Go code is 2,560 lines, against a target of 2,000–2,500 (§2). Some `go-code-review` findings are still open (§7).
+- **Blocker checks (2026-10-21) found and fixed two bugs:** exec broke on chunks over 32 KiB, and the first exec after a node restart used a stale pod IP. Claude Code runs in a box up to the login, under runc and gVisor (`lab/RESULTS.md`).
 - **The structure is the slice's shortcut, not the final shape.** `api` holds a lock per environment and decides when to wake a box. Iteration 2 moves that into an actor per environment with an op log, the pattern used by kubelet and Fly.io's `flyd` (§9).
 
 ## 1. How to run it
@@ -180,7 +181,16 @@ Make the base image the repo's choice (for example its devcontainer image), and 
 
 This changes architecture §10, which plans one shared base image.
 
-### 9.4 Work list
+### 9.4 What the blocker checks changed
+
+`lab/blockers.sh` (results in `lab/RESULTS.md`) adds four items:
+
+- **Claude's login must survive sleep.** Claude keeps its state in `$HOME/.claude*`, and `$HOME` is `/tmp`, an `emptyDir`, so a login is lost on every sleep. It needs its own volume outside `live/` (architecture §12 already says credentials never enter `live/`). This blocks real turns.
+- **T3's MCP tools are still untested.** T3's MCP server listens on the host's loopback, which a box can't reach. The fallback is to have `fern-init` forward one port back (roadmap risk table). Testing it needs T3.
+- **Waking many environments at once is slow:** 10 at once took 6.5 s, against 0.8 s for one. The driver polls each Sandbox every 200 ms, through a client with client-go's default rate limit. Watching instead of polling (item 3 below) should fix it; measure again afterwards.
+- **A cancelled exec prints an error** ("failed to get reader: context canceled") instead of exiting quietly.
+
+### 9.5 Work list
 
 In order:
 
@@ -190,3 +200,8 @@ In order:
 4. **fern-init:** reap zombies (finding 1), and remove known stale pid and lock files (`postmaster.pid`) before starting services. Document "pid and lock files are stale on start" in the setup contract.
 5. **The box token** moves to a Secret, if question 1 is a yes (finding 4).
 6. **Tests:** driver tests with the controller-runtime fake client, and CSI tests (finding 7).
+7. **Claude's credentials** on a volume outside `live/` that survives sleep (§9.4).
+8. **Disk-space guard and pruning:** keep the last N snapshots per environment, and refuse a new snapshot with a clear error when the pool is nearly full.
+9. **CI** runs unit tests, the btrfs store tests and lint (`.github/workflows/ci.yml`, added 2026-10-21; it runs once the branch is pushed).
+
+By hand, needs your login: `lab/fern exec -it <env> -- claude`, log in, and ask it to query the sample database. That is the last open check of the "agent inside the box" risk.
