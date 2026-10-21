@@ -149,3 +149,23 @@ Command: `lab/build.sh && lab/up.sh && lab/demo-slice.sh && lab/blockers.sh clau
 | sleep with Postgres (stop command, then SIGTERM) | 1.0 s |
 
 **Two checks were wrong at first, not the code:** the PID limit is on the pod's cgroup, which the container can't see (now read from the node), and `nosuid,nodev` on the workspace was dropped: the container runtime makes its own bind mount for the box without them, whatever the CSI plugin sets. `no_new_privs` is checked instead.
+
+## Iteration 2, part A: workspaces at a path and the fast wake, 2026-10-21
+
+Command: `lab/demo-slice.sh && lab/blockers.sh paths review stream concurrency restore daemon many claude`, then the timing sections again after each wake change. Every check passes (53 PASS).
+
+| Check | Result |
+|---|---|
+| a workspace at `worktrees/<repo>/<name>`: the box runs there, Postgres works, `which` finds it from a folder inside | PASS |
+| `exec --here`, `exec -e`, SIGTERM forwarded (the command's trap exits 7) | PASS |
+| `fern-claude` runs claude in the box inside a workspace, the local one outside | PASS |
+| adopt the sample repo / 20,000 files (a plain directory T3 made first) | 302 ms / 810 ms through the CLI, a subvolume afterwards, Postgres works |
+| a replaced snapshot holds the new state; `rmsnap` removes it; `rm` removes the workspaces | PASS |
+| warm wake with Postgres, 10 runs | p50 622 ms, p95 711 ms (was about 0.8–1.0 s) |
+| 10 fresh environments woken at once | 2.4–2.7 s (was 6.2 s) |
+| 10 parallel execs on one sleeping box | 0.95–1.43 s over three runs (0.94 s in one earlier run; the 10 `docker exec` + `kubectl exec` hops make it noisy) |
+
+**Three things the faster wake exposed:**
+- **The sample repo's ready check passed before its seed loaded,** so the first exec found no table. The old wake was slow enough to hide it. `ready` now also waits for `.fern/seeded`.
+- **Connections to a new pod hung.** For a moment after a pod starts, the network policy drops packets instead of refusing them, and each attempt waited the client's full timeout (10 parallel execs: 4.3 s). Connecting now times out after 250 ms.
+- **Ten fresh boxes took 20 s once and 7.5 s another time.** The boxes' logs show 5 s between `initdb` finishing and Postgres starting: `initdb` flushing its files, ten at once on Docker Desktop's disk. The sample repo now runs `initdb --no-sync` (the next snapshot flushes anyway), and the daemon asks `/healthz?wait=5s` once instead of every 50 ms, while fern-init runs its checks at most every 100 ms.

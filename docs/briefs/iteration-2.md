@@ -17,6 +17,8 @@
 
 **Done when:** unit tests, store tests and lint pass; the lab runs the demo and `blockers.sh` plus new checks for adopt, path lookup, snapshot delete/replace, exec with a directory, signals, and wake time (target ≤ 0.6 s warm on Docker Desktop, measured).
 
+**Status (2026-10-21): done.** All of it is built and passes in the lab (`lab/RESULTS.md`). Warm wake p50 0.62 s, p95 0.71 s: just over the 0.6 s target. Go code grew by about 1,000 lines net, over the ~900 budget: the store's path, adopt and reconcile work, and the two builders' changes (fern-init readiness, the exec stream's pty and buffer work).
+
 ## Part B: the T3 spike (needs the user's Claude login)
 
 T3's server in a pod with the pool and the daemon socket, the checkpoint hook in a patched build, one real turn through `fern-claude`, a revert that brings back Postgres. Rough is fine; the goal is to learn the real interface. Blocker research (8 agents, 2026-10-21) feeds this part.
