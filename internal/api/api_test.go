@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -38,15 +39,20 @@ const boxToken = "box-token"
 
 var created = time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
 
-// fakeStore keeps environments in memory. It is safe for concurrent use.
+// fakeStore keeps environments in memory. It is safe for concurrent use,
+// but fails a snapshot that overlaps another of the same environment: the
+// server must run changes of one environment one at a time.
 type fakeStore struct {
-	mu    sync.Mutex
-	envs  map[string]store.Env
-	snaps map[string][]store.Snapshot
+	mu       sync.Mutex
+	envs     map[string]store.Env
+	snaps    map[string][]store.Snapshot
+	changing map[string]bool
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{envs: make(map[string]store.Env), snaps: make(map[string][]store.Snapshot)}
+	return &fakeStore{
+		envs: make(map[string]store.Env), snaps: make(map[string][]store.Snapshot), changing: make(map[string]bool),
+	}
 }
 
 var validID = regexp.MustCompile(`^[a-z0-9-]+$`)
@@ -88,7 +94,11 @@ func (f *fakeStore) List(context.Context) ([]store.Env, error) {
 	return slices.SortedFunc(maps.Values(f.envs), func(a, b store.Env) int { return strings.Compare(a.ID, b.ID) }), nil
 }
 
-func (f *fakeStore) Delete(_ context.Context, id string) error {
+func (f *fakeStore) Delete(ctx context.Context, id string) error {
+	// Like the real store, which runs btrfs with ctx.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.envs, id)
@@ -98,7 +108,17 @@ func (f *fakeStore) Delete(_ context.Context, id string) error {
 
 func (f *fakeStore) Snapshot(_ context.Context, env, snap string) (store.Snapshot, error) {
 	f.mu.Lock()
+	if f.changing[env] {
+		f.mu.Unlock()
+		return store.Snapshot{}, fmt.Errorf("snapshot %s/%s overlaps another change", env, snap)
+	}
+	f.changing[env] = true
+	f.mu.Unlock()
+	// Give an overlapping call the chance to run.
+	runtime.Gosched()
+	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.changing[env] = false
 	if _, err := f.getLocked(env); err != nil {
 		return store.Snapshot{}, err
 	}
@@ -135,14 +155,24 @@ func (f *fakeStore) Restore(_ context.Context, env, snap string) error {
 // driver whose boxes all run commands with a real boxexec server.
 func newAPI(t *testing.T) (*api.Client, *driver.Fake) {
 	t.Helper()
+	return newAPIWith(t, nil)
+}
+
+// newAPIWith is newAPI with the fake driver wrapped by wrap, if it isn't nil.
+func newAPIWith(t *testing.T, wrap func(*driver.Fake) api.Driver) (*api.Client, *driver.Fake) {
+	t.Helper()
 	log := slog.New(slog.DiscardHandler)
 	mux := http.NewServeMux()
-	mux.Handle("/exec", boxexec.NewServer(boxToken, t.TempDir(), nil, log))
+	mux.Handle(boxexec.Path, boxexec.NewServer(boxToken, t.TempDir(), nil, log))
 	box := httptest.NewServer(mux)
 	t.Cleanup(box.Close)
 
 	drv := driver.NewFake(box.Listener.Addr().String())
-	srv := httptest.NewUnstartedServer(api.NewServer(newFakeStore(), drv, log).Handler())
+	var d api.Driver = drv
+	if wrap != nil {
+		d = wrap(drv)
+	}
+	srv := httptest.NewUnstartedServer(api.NewServer(newFakeStore(), d, log).Handler())
 	// t.TempDir is too long for a socket path when test names are long.
 	dir, err := os.MkdirTemp("", "fern")
 	if err != nil {
@@ -180,7 +210,7 @@ func errCode(err error) string {
 func TestCreateGetList(t *testing.T) {
 	c, _ := newAPI(t)
 	ctx := t.Context()
-	want := api.Env{Env: store.Env{ID: "demo", Repo: "/src/demo", Created: created}, State: driver.Asleep}
+	want := api.Env{ID: "demo", Repo: "/src/demo", Created: created, State: driver.Asleep}
 
 	for range 2 { // creating again returns the same environment
 		got, err := c.Create(ctx, "demo", "/src/demo", nil)
@@ -262,7 +292,7 @@ func TestSnapshotRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshots(demo) error: %v", err)
 	}
-	if diff := cmp.Diff([]store.Snapshot{snap, gen}, snaps); diff != "" {
+	if diff := cmp.Diff([]api.Snapshot{snap, gen}, snaps); diff != "" {
 		t.Errorf("Snapshots(demo) mismatch (-want +got):\n%s", diff)
 	}
 
@@ -378,5 +408,93 @@ func TestConcurrentSnapshots(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("snapshots mismatch (-want +got):\n%s", diff)
+	}
+}
+
+// A restore of a snapshot that doesn't exist must not stop the box.
+func TestRestoreUnknownKeepsBox(t *testing.T) {
+	c, drv := newAPI(t)
+	ctx := t.Context()
+	mustCreate(t, c, "demo")
+	if err := c.Wake(ctx, "demo"); err != nil {
+		t.Fatalf("Wake(demo) error: %v", err)
+	}
+	if err := c.Restore(ctx, "demo", "typo"); errCode(err) != api.CodeNotFound {
+		t.Fatalf("Restore(demo, typo) error = %v, want code %s", err, api.CodeNotFound)
+	}
+	if env, err := c.Get(ctx, "demo"); err != nil || env.State != driver.Running {
+		t.Errorf("after a failed Restore: Get(demo) = %v, %v, want state %s", env.State, err, driver.Running)
+	}
+	if got := drv.Wakes(); got != 1 {
+		t.Errorf("Wakes() = %d, want 1", got)
+	}
+}
+
+// blockingDelete is a driver whose Delete waits until release is closed.
+type blockingDelete struct {
+	*driver.Fake
+	started chan struct{}
+	release chan struct{}
+}
+
+func (d *blockingDelete) Delete(ctx context.Context, env string) error {
+	close(d.started)
+	<-d.release
+	return d.Fake.Delete(ctx, env)
+}
+
+// A client that goes away must not leave a delete half done: the box gone
+// but the environment still listed.
+func TestDeleteOutlivesClient(t *testing.T) {
+	d := &blockingDelete{started: make(chan struct{}), release: make(chan struct{})}
+	c, _ := newAPIWith(t, func(f *driver.Fake) api.Driver { d.Fake = f; return d })
+	mustCreate(t, c, "demo")
+
+	ctx, cancel := context.WithCancel(t.Context())
+	errc := make(chan error, 1)
+	go func() { errc <- c.Delete(ctx, "demo") }()
+	<-d.started
+	cancel()
+	if err := <-errc; !errors.Is(err, context.Canceled) {
+		t.Fatalf("Delete(demo) with a cancelled client error = %v, want %v", err, context.Canceled)
+	}
+	close(d.release)
+	// The next change waits for the delete, which must have finished.
+	if _, err := c.Snapshot(t.Context(), "demo", "s1"); errCode(err) != api.CodeNotFound {
+		t.Errorf("Snapshot(demo) after the delete error = %v, want code %s", err, api.CodeNotFound)
+	}
+}
+
+// staleWake is a driver whose first wake reports an address nothing
+// listens on, like a box whose pod has just gone.
+type staleWake struct {
+	*driver.Fake
+	dead  string
+	waked bool
+}
+
+func (d *staleWake) Wake(ctx context.Context, env string) (string, error) {
+	addr, err := d.Fake.Wake(ctx, env)
+	if err == nil && !d.waked {
+		d.waked = true
+		return d.dead, nil
+	}
+	return addr, err
+}
+
+func TestExecRedialsStaleBox(t *testing.T) {
+	ln, err := new(net.ListenConfig).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dead := ln.Addr().String()
+	_ = ln.Close()
+	d := &staleWake{dead: dead}
+	c, _ := newAPIWith(t, func(f *driver.Fake) api.Driver { d.Fake = f; return d })
+	mustCreate(t, c, "demo")
+	var stdout bytes.Buffer
+	code, err := c.Exec(t.Context(), "demo", boxexec.Request{Argv: []string{"echo", "hi"}}, nil, &stdout, io.Discard, nil)
+	if err != nil || code != 0 || stdout.String() != "hi\n" {
+		t.Errorf("Exec(echo hi) = %d, %q, %v, want 0, %q, nil", code, stdout.String(), err, "hi\n")
 	}
 }

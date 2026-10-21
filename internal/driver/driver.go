@@ -22,7 +22,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nebler/fern/internal/boxexec"
-	"github.com/nebler/fern/internal/store"
 )
 
 // State is whether an environment's box is up.
@@ -56,6 +55,7 @@ type Config struct {
 	Image     string // box image; its entrypoint is fern-init
 	Node      string // node boxes are pinned to: the one whose daemon has their disks
 	CSIDriver string // name of the CSI driver that mounts live/
+	UID, GID  int64  // the box user, who owns live/
 }
 
 // Driver manages Sandboxes through the Kubernetes API.
@@ -229,13 +229,13 @@ func poll(ctx context.Context, timeout time.Duration, cond wait.ConditionWithCon
 	// The client's rate limiter fails early near the deadline, with an
 	// error that hides the cause.
 	if err != nil && ctx.Err() == nil && pollCtx.Err() != nil {
-		return fmt.Errorf("not done after %s", timeout)
+		return fmt.Errorf("not done after %s: %w", timeout, context.DeadlineExceeded)
 	}
 	return err
 }
 
 func (d *Driver) podTemplate(env, token string) sandboxv1.PodTemplate {
-	uid, gid := int64(store.BoxUID), int64(store.BoxGID)
+	uid, gid := d.cfg.UID, d.cfg.GID
 	yes, no := true, false
 	grace := int64(15)
 	return sandboxv1.PodTemplate{

@@ -64,7 +64,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("GET /exec", boxexec.NewServer(token, dir, env, log))
+	mux.Handle("GET "+boxexec.Path, boxexec.NewServer(token, dir, env, log))
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 		if err := ready(r.Context(), services, dir, env); err != nil {
 			http.Error(w, err.Error(), http.StatusServiceUnavailable)

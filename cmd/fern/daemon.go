@@ -54,7 +54,10 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	drv := driver.New(kube, driver.Config{Namespace: *namespace, Image: *image, Node: *node, CSIDriver: csi.Name})
+	drv := driver.New(kube, driver.Config{
+		Namespace: *namespace, Image: *image, Node: *node, CSIDriver: csi.Name,
+		UID: store.BoxUID, GID: store.BoxGID,
+	})
 
 	apiLis, err := listenUnix(ctx, *socket)
 	if err != nil {
@@ -102,6 +105,9 @@ func kubeClient() (client.Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes config: %w", err)
 	}
+	// client-go's default of 5 requests a second made waking 10 boxes at
+	// once take 6.5s: every wake polls its Sandbox and pod.
+	cfg.QPS, cfg.Burst = 50, 100
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		return nil, err

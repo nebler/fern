@@ -11,8 +11,10 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/coder/websocket"
 
@@ -43,11 +45,34 @@ type Driver interface {
 
 // Env is an environment as the API reports it.
 type Env struct {
-	store.Env
-	State driver.State `json:"state"`
+	ID      string       `json:"id"`
+	Repo    string       `json:"repo,omitempty"`
+	Head    string       `json:"head,omitempty"` // last snapshot taken or restored
+	Created time.Time    `json:"created"`
+	State   driver.State `json:"state"`
 }
 
-// Server handles API requests. Mutations of one environment run one at a
+// Snapshot is a snapshot as the API reports it.
+type Snapshot struct {
+	ID      string    `json:"id"`
+	Env     string    `json:"env"`
+	Created time.Time `json:"created"`
+}
+
+func snapshotOf(s store.Snapshot) Snapshot {
+	return Snapshot{ID: s.ID, Env: s.Env, Created: s.Created}
+}
+
+const (
+	// changeTimeout bounds a change of an environment. Changes don't stop
+	// when the client goes away, which would leave them half done.
+	changeTimeout = 10 * time.Minute
+	// dialTimeout bounds connecting to a box that is up; a box that vanished
+	// can leave an address nothing answers.
+	dialTimeout = 10 * time.Second
+)
+
+// Server handles API requests. Changes of one environment run one at a
 // time; execs run alongside them.
 type Server struct {
 	store  Store
@@ -60,9 +85,21 @@ type Server struct {
 
 // envState is what the server keeps in memory about one environment.
 type envState struct {
-	mu   sync.Mutex // held for the whole of a mutation or a wake
-	addr string     // the box's exec address while it is known to be up
+	lock chan struct{} // holds a value for the whole of a change or a wake
+	addr string        // the box's exec address while it is known to be up; guarded by lock
 }
+
+// acquire waits until no one else holds e, or ctx is done.
+func (e *envState) acquire(ctx context.Context) error {
+	select {
+	case e.lock <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (e *envState) release() { <-e.lock }
 
 // NewServer returns a Server for the environments in st, run by drv.
 func NewServer(st Store, drv Driver, log *slog.Logger) *Server {
@@ -86,26 +123,42 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
+// change runs fn on environment id while no one else changes or wakes it.
+// Waiting can be cancelled by the client; fn can't.
+func (s *Server) change(r *http.Request, id string, fn func(ctx context.Context, e *envState) error) error {
+	e, err := s.env(id)
+	if err != nil {
+		return err
+	}
+	if err := e.acquire(r.Context()); err != nil {
+		return err
+	}
+	defer e.release()
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), changeTimeout)
+	defer cancel()
+	return fn(ctx, e)
+}
+
 // create makes an environment, filled from a tar body if there is one.
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	e := s.env(id)
-	e.mu.Lock()
-	defer e.mu.Unlock()
 	var seed io.Reader
 	if r.Header.Get("Content-Type") == "application/x-tar" {
 		seed = r.Body
 	}
-	env, err := s.store.Create(r.Context(), id, r.URL.Query().Get("repo"), seed)
+	var env store.Env
+	err := s.change(r, id, func(ctx context.Context, _ *envState) error {
+		var err error
+		if env, err = s.store.Create(ctx, id, r.URL.Query().Get("repo"), seed); err != nil {
+			return err
+		}
+		return s.driver.Create(ctx, id, env.Token)
+	})
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	if err := s.driver.Create(r.Context(), id, env.Token); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	s.reply(w, r, Env{Env: env, State: s.state(r.Context(), id)})
+	s.reply(w, r, s.envOf(r.Context(), env))
 }
 
 func (s *Server) get(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +167,7 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	s.reply(w, r, Env{Env: env, State: s.state(r.Context(), env.ID)})
+	s.reply(w, r, s.envOf(r.Context(), env))
 }
 
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
@@ -125,7 +178,7 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	}
 	out := make([]Env, 0, len(envs))
 	for _, env := range envs {
-		out = append(out, Env{Env: env, State: s.state(r.Context(), env.ID)})
+		out = append(out, s.envOf(r.Context(), env))
 	}
 	s.reply(w, r, out)
 }
@@ -133,19 +186,17 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 // delete stops the box, then removes the disk.
 func (s *Server) delete(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	e := s.env(id)
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if _, err := s.store.Get(r.Context(), id); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	e.addr = ""
-	if err := s.driver.Delete(r.Context(), id); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	if err := s.store.Delete(r.Context(), id); err != nil {
+	err := s.change(r, id, func(ctx context.Context, e *envState) error {
+		if _, err := s.store.Get(ctx, id); err != nil {
+			return err
+		}
+		e.addr = ""
+		if err := s.driver.Delete(ctx, id); err != nil {
+			return err
+		}
+		return s.store.Delete(ctx, id)
+	})
+	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -166,15 +217,17 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 		req.ID = strings.ToLower(rand.Text())
 	}
 	id := r.PathValue("id")
-	e := s.env(id)
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	snap, err := s.store.Snapshot(r.Context(), id, req.ID)
+	var snap store.Snapshot
+	err := s.change(r, id, func(ctx context.Context, _ *envState) error {
+		var err error
+		snap, err = s.store.Snapshot(ctx, id, req.ID)
+		return err
+	})
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	s.reply(w, r, snap)
+	s.reply(w, r, snapshotOf(snap))
 }
 
 func (s *Server) snapshots(w http.ResponseWriter, r *http.Request) {
@@ -183,10 +236,11 @@ func (s *Server) snapshots(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	if snaps == nil {
-		snaps = []store.Snapshot{}
+	out := make([]Snapshot, 0, len(snaps))
+	for _, snap := range snaps {
+		out = append(out, snapshotOf(snap))
 	}
-	s.reply(w, r, snaps)
+	s.reply(w, r, out)
 }
 
 // RestoreRequest is the body of POST /envs/{id}/restore.
@@ -202,18 +256,22 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	e := s.env(id)
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if _, err := s.store.Get(r.Context(), id); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	if err := s.sleepLocked(r.Context(), e, id); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	if err := s.store.Restore(r.Context(), id, req.Snapshot); err != nil {
+	err := s.change(r, id, func(ctx context.Context, e *envState) error {
+		// Check the snapshot before stopping the box: a typo mustn't cost
+		// the agent its running processes.
+		snaps, err := s.store.Snapshots(ctx, id)
+		if err != nil {
+			return err
+		}
+		if !slices.ContainsFunc(snaps, func(snap store.Snapshot) bool { return snap.ID == req.Snapshot }) {
+			return fmt.Errorf("snapshot %s/%s: %w", id, req.Snapshot, store.ErrNotFound)
+		}
+		if err := s.sleepLocked(ctx, e, id); err != nil {
+			return err
+		}
+		return s.store.Restore(ctx, id, req.Snapshot)
+	})
+	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -222,10 +280,13 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) sleep(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	e := s.env(id)
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	if err := s.sleepLocked(r.Context(), e, id); err != nil {
+	err := s.change(r, id, func(ctx context.Context, e *envState) error {
+		if _, err := s.store.Get(ctx, id); err != nil {
+			return err
+		}
+		return s.sleepLocked(ctx, e, id)
+	})
+	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
@@ -279,12 +340,16 @@ func (s *Server) dialBox(ctx context.Context, env store.Env) (*websocket.Conn, e
 		if err != nil {
 			return nil, err
 		}
-		conn, err := boxexec.Dial(ctx, "ws://"+addr+"/exec", env.Token, nil)
+		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+		conn, err := boxexec.Dial(dialCtx, boxexec.URL(addr), env.Token, nil)
+		cancel()
 		if err == nil {
 			return conn, nil
 		}
 		lastErr = err
-		s.forget(env.ID, addr)
+		if err := s.forget(ctx, env.ID, addr); err != nil {
+			return nil, err
+		}
 	}
 	return nil, fmt.Errorf("connect to box %s: %w", env.ID, lastErr)
 }
@@ -292,9 +357,14 @@ func (s *Server) dialBox(ctx context.Context, env store.Env) (*websocket.Conn, e
 // boxAddr returns the address of the environment's box, waking it if it
 // isn't known to be up.
 func (s *Server) boxAddr(ctx context.Context, id string) (string, error) {
-	e := s.env(id)
-	e.mu.Lock()
-	defer e.mu.Unlock()
+	e, err := s.env(id)
+	if err != nil {
+		return "", err
+	}
+	if err := e.acquire(ctx); err != nil {
+		return "", err
+	}
+	defer e.release()
 	if e.addr != "" {
 		return e.addr, nil
 	}
@@ -306,29 +376,47 @@ func (s *Server) boxAddr(ctx context.Context, id string) (string, error) {
 	return addr, nil
 }
 
-func (s *Server) forget(id, addr string) {
-	e := s.env(id)
-	e.mu.Lock()
-	defer e.mu.Unlock()
+// forget drops the box address addr, unless someone has replaced it.
+func (s *Server) forget(ctx context.Context, id, addr string) error {
+	e, err := s.env(id)
+	if err != nil {
+		return err
+	}
+	if err := e.acquire(ctx); err != nil {
+		return err
+	}
+	defer e.release()
 	if e.addr == addr {
 		e.addr = ""
 	}
+	return nil
 }
 
+// sleepLocked stops the box; the caller holds e.
 func (s *Server) sleepLocked(ctx context.Context, e *envState, id string) error {
 	e.addr = ""
 	return s.driver.Sleep(ctx, id)
 }
 
-func (s *Server) env(id string) *envState {
+// env returns the in-memory state of environment id. It checks the ID, so
+// a client can't grow the map with names that will never be environments.
+func (s *Server) env(id string) (*envState, error) {
+	if err := store.CheckEnvID(id); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.envs[id]
 	if !ok {
-		e = &envState{}
+		e = &envState{lock: make(chan struct{}, 1)}
 		s.envs[id] = e
 	}
-	return e
+	return e, nil
+}
+
+// envOf is env as the API reports it.
+func (s *Server) envOf(ctx context.Context, env store.Env) Env {
+	return Env{ID: env.ID, Repo: env.Repo, Head: env.Head, Created: env.Created, State: s.state(ctx, env.ID)}
 }
 
 // state is the box state for listings, where an error shouldn't fail the
