@@ -66,28 +66,75 @@ func (s service) environ(base []string) []string {
 	return env
 }
 
-// supervise runs a service and restarts it with backoff whenever it exits,
-// until ctx is done.
-func supervise(ctx context.Context, name string, svc service, dir string, env []string, log *slog.Logger) {
+// Stopping a box must fit in its pod's 15s grace period, after which
+// Kubernetes kills everything.
+const (
+	stopTimeout = 8 * time.Second // bounds a service's stop command
+	killDelay   = 3 * time.Second // from SIGTERM to SIGKILL
+)
+
+// supervisor keeps one service running until it is stopped.
+type supervisor struct {
+	name string
+	svc  service
+	dir  string
+	env  []string // the service's whole environment
+	log  *slog.Logger
+
+	quit chan struct{}      // closed when the service must not be restarted
+	kill context.CancelFunc // sends SIGTERM to the running service
+	done chan struct{}      // closed when run has returned
+}
+
+// startService starts and supervises svc. It keeps running after ctx is
+// done, until stop.
+func startService(ctx context.Context, name string, svc service, dir string, env []string, log *slog.Logger) *supervisor {
+	ctx, kill := context.WithCancel(context.WithoutCancel(ctx))
+	s := &supervisor{
+		name: name, svc: svc, dir: dir, env: svc.environ(env), log: log,
+		quit: make(chan struct{}), kill: kill, done: make(chan struct{}),
+	}
+	go s.run(ctx)
+	return s
+}
+
+// run runs the service and restarts it with backoff whenever it exits.
+func (s *supervisor) run(ctx context.Context) {
+	defer close(s.done)
 	const minBackoff, maxBackoff = time.Second, 30 * time.Second
 	backoff := minBackoff
 	for {
 		started := time.Now()
-		err := runService(ctx, svc, dir, svc.environ(env))
-		if ctx.Err() != nil {
+		err := runService(ctx, s.svc, s.dir, s.env)
+		select {
+		case <-s.quit:
 			return
+		default:
 		}
-		log.WarnContext(ctx, "service exited", slog.String("service", name), slog.Any("error", err))
+		s.log.WarnContext(ctx, "service exited", slog.String("service", s.name), slog.Any("error", err))
 		if time.Since(started) > time.Minute {
 			backoff = minBackoff
 		}
 		select {
-		case <-ctx.Done():
+		case <-s.quit:
 			return
 		case <-time.After(backoff):
 		}
 		backoff = min(2*backoff, maxBackoff)
 	}
+}
+
+// stop stops the service for good: its stop command, if it has one, then
+// SIGTERM, then SIGKILL. It returns once the service has exited.
+func (s *supervisor) stop(ctx context.Context) {
+	close(s.quit)
+	if s.svc.Stop != "" {
+		if err := shell(ctx, stopTimeout, s.svc.Stop, s.dir, s.env); err != nil {
+			s.log.WarnContext(ctx, "stop command failed", slog.String("service", s.name), slog.Any("error", err))
+		}
+	}
+	s.kill()
+	<-s.done
 }
 
 func runService(ctx context.Context, svc service, dir string, env []string) error {
@@ -97,7 +144,7 @@ func runService(ctx context.Context, svc service, dir string, env []string) erro
 	// The service gets its own process group, so stopping it stops its children.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM) }
-	cmd.WaitDelay = stopTimeout
+	cmd.WaitDelay = killDelay
 	return cmd.Run()
 }
 

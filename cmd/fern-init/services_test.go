@@ -1,11 +1,24 @@
 package main
 
 import (
+	"errors"
+	"io/fs"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
+	"go.uber.org/goleak"
 )
+
+func TestMain(m *testing.M) {
+	goleak.VerifyTestMain(m)
+}
 
 func TestParseServices(t *testing.T) {
 	tests := []struct {
@@ -85,4 +98,56 @@ func TestServiceEnviron(t *testing.T) {
 			}
 		})
 	}
+}
+
+func newService(t *testing.T, svc service) (s *supervisor, dir string) {
+	t.Helper()
+	dir = t.TempDir()
+	env := []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"}
+	return startService(t.Context(), "svc", svc, dir, env, slog.New(slog.DiscardHandler)), dir
+}
+
+func countLines(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(data), "\n")
+}
+
+// A service that keeps failing restarts after 1s, 2s, 4s, ...
+func TestSupervisorBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		s, dir := newService(t, service{Run: "echo run >> runs; exit 1"})
+		// The bubble's clock only moves while every goroutine waits, so the
+		// service's real run time doesn't count: it runs at 0s, 1s, 3s, 7s.
+		time.Sleep(10 * time.Second)
+		synctest.Wait()
+		if got := countLines(t, filepath.Join(dir, "runs")); got != 4 {
+			t.Errorf("service ran %d times in 10s, want 4", got)
+		}
+		s.stop(t.Context())
+	})
+}
+
+// A stop command that ends the service must not get it restarted.
+func TestSupervisorStopDoesNotRestart(t *testing.T) {
+	s, dir := newService(t, service{
+		Run:  "echo run >> runs; echo $$ > pid; exec sleep 600",
+		Stop: `until [ -s pid ]; do sleep 0.01; done; kill "$(cat pid)"`,
+	})
+	s.stop(t.Context())
+	if got := countLines(t, filepath.Join(dir, "runs")); got != 1 {
+		t.Errorf("service ran %d times, want 1", got)
+	}
+}
+
+// Without a stop command, stop sends SIGTERM to the service's process group.
+func TestSupervisorStopTerminates(t *testing.T) {
+	s, _ := newService(t, service{Run: "sleep 600 & wait"})
+	s.stop(t.Context())
 }

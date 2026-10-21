@@ -21,9 +21,6 @@ import (
 	"github.com/nebler/fern/internal/boxexec"
 )
 
-// stopTimeout bounds each service's stop command.
-const stopTimeout = 10 * time.Second
-
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, os.Interrupt)
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
@@ -55,12 +52,10 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return err
 	}
 
-	// Services outlive ctx: they are stopped in order once ctx is done.
-	svcCtx, stopServices := context.WithCancel(context.WithoutCancel(ctx))
-	defer stopServices()
-	var running sync.WaitGroup
+	// Services outlive ctx: they are stopped, all at once, after it is done.
+	supervisors := make([]*supervisor, 0, len(services))
 	for name, svc := range services {
-		running.Go(func() { supervise(svcCtx, name, svc, dir, env, log) })
+		supervisors = append(supervisors, startService(ctx, name, svc, dir, env, log))
 	}
 
 	mux := http.NewServeMux()
@@ -87,16 +82,11 @@ func run(ctx context.Context, log *slog.Logger) error {
 	case err = <-serveErr:
 	}
 	log.InfoContext(ctx, "stopping")
-	for name, svc := range services {
-		if svc.Stop == "" {
-			continue
-		}
-		if err := shell(context.WithoutCancel(ctx), stopTimeout, svc.Stop, dir, svc.environ(env)); err != nil {
-			log.WarnContext(ctx, "stop command failed", slog.String("service", name), slog.Any("error", err))
-		}
+	var stopping sync.WaitGroup
+	for _, s := range supervisors {
+		stopping.Go(func() { s.stop(context.WithoutCancel(ctx)) })
 	}
-	stopServices()
-	running.Wait()
+	stopping.Wait()
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
