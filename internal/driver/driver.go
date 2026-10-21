@@ -238,6 +238,7 @@ func (d *Driver) podTemplate(env, token string) sandboxv1.PodTemplate {
 	uid, gid := d.cfg.UID, d.cfg.GID
 	yes, no := true, false
 	grace := int64(15)
+	tmpSize := resource.MustParse("4Gi")
 	return sandboxv1.PodTemplate{
 		ObjectMeta: sandboxv1.PodMetadata{Labels: labels(env)},
 		Spec: corev1.PodSpec{
@@ -267,12 +268,17 @@ func (d *Driver) podTemplate(env, token string) sandboxv1.PodTemplate {
 					}},
 					PeriodSeconds: 1,
 				},
+				// The limits keep one runaway agent from starving the
+				// other boxes and the daemon.
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{
 						corev1.ResourceCPU:    resource.MustParse("100m"),
 						corev1.ResourceMemory: resource.MustParse("256Mi"),
 					},
-					Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("2"),
+						corev1.ResourceMemory: resource.MustParse("2Gi"),
+					},
 				},
 				SecurityContext: &corev1.SecurityContext{
 					AllowPrivilegeEscalation: &no,
@@ -289,7 +295,8 @@ func (d *Driver) podTemplate(env, token string) sandboxv1.PodTemplate {
 					Driver:           d.cfg.CSIDriver,
 					VolumeAttributes: map[string]string{"env": env},
 				}}},
-				{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				// HOME is in /tmp, so caches land here; the node's disk is shared.
+				{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &tmpSize}}},
 			},
 		},
 	}

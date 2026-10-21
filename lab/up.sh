@@ -26,7 +26,8 @@ docker run -d --name "$LAB" --hostname "$LAB" --label "$LABEL" --privileged \
     mount --make-rshared /
     mkdir -p /var/lib/fern
     mount -o loop /var/lib/fern-img/pool.img /var/lib/fern
-    exec /bin/k3s server --disable=traefik,metrics-server --write-kubeconfig-mode=644' >/dev/null
+    exec /bin/k3s server --disable=traefik,metrics-server --write-kubeconfig-mode=644 \
+      --kubelet-arg=pod-max-pids=4096' >/dev/null
 
 echo "waiting for k3s"
 for _ in $(seq 120); do

@@ -12,6 +12,8 @@
 #   bigrepo      a 100,000-file workspace: snapshot, restore, rm; a real clone
 #   many         ten environments woken at once
 #   gvisor       Claude Code and the exec stream under gVisor (installs it)
+#   review       the fixes from the code review of 2026-10-21: stdin EOF,
+#                limits, mount flags, network rules, restore and rm safety
 # Run all of them, or name some: lab/blockers.sh stream daemon. Needs lab/up.sh.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
@@ -230,8 +232,35 @@ gvisor() {
   fern rm gk
 }
 
+review() {
+  echo "== fixes from the code review"
+  fresh $ENV
+  fresh bk2
+  check "exec without -i sees stdin EOF" ok \
+    "$(in_daemon "timeout 20 fern exec $ENV -- sh -c 'cat >/dev/null && echo ok'" || echo hang)"
+  mounts=$(fern exec $ENV -- sh -c 'grep " /workspace " /proc/mounts')
+  check "the workspace is mounted nosuid,nodev" yes \
+    "$(echo "$mounts" | grep -q nosuid && echo "$mounts" | grep -q nodev && echo yes || echo "no: $mounts")"
+  check "the box has a CPU limit (2 cores)" "200000 100000" "$(fern exec $ENV -- cat /sys/fs/cgroup/cpu.max)"
+  check "the box has a PID limit" 4096 "$(fern exec $ENV -- cat /sys/fs/cgroup/pids.max)"
+  fern wake bk2 >/dev/null
+  ip=$(k -n fern-boxes get pod bk2 -o jsonpath='{.status.podIP}')
+  code=$(fern exec $ENV -- curl -s -m 3 -o /dev/null -w '%{http_code}' "http://$ip:7070/healthz" || true)
+  check "a box can't reach another box" 000 "${code:-000}"
+  check "the daemon still reaches the other box" ok "$(fern exec bk2 -- echo ok)"
+  if fern restore $ENV no-such-snapshot >/dev/null 2>&1; then r=restored; else r=refused; fi
+  check "restoring a missing snapshot is refused" refused "$r"
+  check "and leaves the box running" running "$(fern ls | awk -v e=$ENV '$1 == e { print $2 }')"
+  note "sleep with Postgres (stop command, then SIGTERM): $(fern sleep $ENV | took) ms"
+  # Ctrl-C a delete while it waits for the pod: the daemon must finish it.
+  in_daemon "timeout 1 fern rm bk2" >/dev/null 2>&1 || true
+  for _ in $(seq 60); do fern ls | grep -q '^bk2 ' || break; sleep 1; done
+  check "an interrupted rm still finishes" gone "$(fern ls | grep -q '^bk2 ' && echo listed || echo gone)"
+  check "and leaves no disk behind" gone "$(in_daemon 'ls /var/lib/fern/envs' | grep -qx bk2 && echo left || echo gone)"
+}
+
 sections=("$@")
-[ ${#sections[@]} -eq 0 ] && sections=(claude stream concurrency restore daemon node bigrepo many gvisor)
+[ ${#sections[@]} -eq 0 ] && sections=(claude stream concurrency restore daemon node bigrepo many gvisor review)
 for s in "${sections[@]}"; do "$s"; done
 fern rm $ENV 2>/dev/null || true
 rm -f /tmp/fern-bk-*

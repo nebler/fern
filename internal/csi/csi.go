@@ -123,6 +123,12 @@ func (p *Plugin) NodePublishVolume(ctx context.Context, req *csispec.NodePublish
 			return nil, status.Errorf(codes.Internal, "bind %s on %s: %v", src, target, err)
 		}
 	}
+	// A bind mount takes its flags from a remount. The box can't use setuid
+	// files or devices anyway; this keeps them inert if anything else ever
+	// runs from the workspace. Repeating it is harmless.
+	if err := unix.Mount("", target, "", unix.MS_REMOUNT|unix.MS_BIND|unix.MS_NOSUID|unix.MS_NODEV, ""); err != nil {
+		return nil, status.Errorf(codes.Internal, "remount %s nosuid,nodev: %v", target, err)
+	}
 	return &csispec.NodePublishVolumeResponse{}, nil
 }
 
