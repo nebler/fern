@@ -99,11 +99,24 @@ func (d *Driver) Wake(ctx context.Context, env string) (string, error) {
 			return false, err
 		}
 		ready := meta.FindStatusCondition(sb.Status.Conditions, string(sandboxv1.SandboxConditionReady))
-		if ready == nil || ready.Status != metav1.ConditionTrue ||
-			ready.ObservedGeneration < sb.Generation || len(sb.Status.PodIPs) == 0 {
+		if ready == nil || ready.Status != metav1.ConditionTrue || ready.ObservedGeneration < sb.Generation {
 			return false, nil
 		}
-		addr = net.JoinHostPort(sb.Status.PodIPs[0], strconv.Itoa(boxexec.Port))
+		// The address and readiness come from the pod, which kubelet keeps
+		// current. After a node restart the Sandbox's status still shows the
+		// old pod IP until the controller catches up.
+		pod := &corev1.Pod{}
+		err = d.c.Get(ctx, types.NamespacedName{Namespace: d.cfg.Namespace, Name: env}, pod)
+		if apierrors.IsNotFound(err) {
+			return false, nil
+		}
+		if err != nil {
+			return false, fmt.Errorf("get pod %s: %w", env, err)
+		}
+		if !podReady(pod) || pod.Status.PodIP == "" {
+			return false, nil
+		}
+		addr = net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(boxexec.Port))
 		return true, nil
 	})
 	if err != nil {
@@ -159,6 +172,15 @@ func (d *Driver) State(ctx context.Context, env string) (State, error) {
 		return Running, nil
 	}
 	return Waking, nil
+}
+
+func podReady(pod *corev1.Pod) bool {
+	for _, c := range pod.Status.Conditions {
+		if c.Type == corev1.PodReady {
+			return c.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }
 
 func (d *Driver) get(ctx context.Context, env string) (*sandboxv1.Sandbox, error) {
