@@ -463,9 +463,12 @@ func execute(ctx context.Context, c command, cl *api.Client, std stdio) (int, er
 				case <-ctx.Done():
 					return
 				case <-winch:
+					// Block rather than drop: the newest size must arrive.
+					// winch holds one more, so a burst collapses to it.
 					select {
 					case resize <- size():
-					default:
+					case <-ctx.Done():
+						return
 					}
 				}
 			}
