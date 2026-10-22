@@ -39,6 +39,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) error {
 	node := flags.String("node", os.Getenv("NODE_NAME"), "this node's name")
 	namespace := flags.String("namespace", "fern-boxes", "namespace of box Sandboxes")
 	image := flags.String("box-image", "fern-box:dev", "box image")
+	claudeSecret := flags.String("claude-secret", "claude-login", `Secret in the boxes' namespace whose "token" is Claude's login; "" for none`)
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -66,7 +67,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	drv := driver.New(kube, driver.Config{
 		Namespace: *namespace, Image: *image, Node: *node, CSIDriver: csi.Name,
-		UID: store.BoxUID, GID: store.BoxGID,
+		UID: store.BoxUID, GID: store.BoxGID, ClaudeSecret: *claudeSecret,
 	})
 
 	apiLis, err := listenUnix(ctx, *socket, *socketGroup)
@@ -84,7 +85,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	grpcSrv := grpc.NewServer()
-	csi.New(*node, st.LivePath, log).Register(grpcSrv)
+	csi.New(*node, st.Get, log).Register(grpcSrv)
 
 	log.InfoContext(ctx, "fern daemon started",
 		slog.String("node", *node), slog.String("pool", *pool), slog.String("socket", *socket))

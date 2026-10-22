@@ -63,6 +63,17 @@ type Config struct {
 	Node      string // node boxes are pinned to: the one whose daemon has their disks
 	CSIDriver string // name of the CSI driver that mounts live/
 	UID, GID  int64  // the box user, who owns live/
+	// ClaudeSecret names the Secret whose "token" is Claude's login
+	// (`claude setup-token`). Boxes start without it until it exists.
+	ClaudeSecret string
+}
+
+// Folders are the host folders a box mounts, each at the path it has on the
+// host.
+type Folders struct {
+	Workspace string // the environment's workspace
+	Claude    string // Claude's state, which outlives the box; empty for none
+	Git       string // the main repository's git folder, mounted read-only; empty for none
 }
 
 // Driver manages Sandboxes through the Kubernetes API.
@@ -86,14 +97,14 @@ func New(c client.Client, cfg Config) *Driver {
 	return &Driver{c: c, cfg: cfg, health: health}
 }
 
-// Create makes environment env's Sandbox, asleep, with its workspace mounted
-// at the path it has on the host. Creating one that exists is not an error.
-func (d *Driver) Create(ctx context.Context, env, token, workspace string) error {
+// Create makes environment env's Sandbox, asleep, with its folders mounted at
+// the paths they have on the host. Creating one that exists is not an error.
+func (d *Driver) Create(ctx context.Context, env, token string, folders Folders) error {
 	sb := &sandboxv1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: env, Namespace: d.cfg.Namespace, Labels: labels(env)},
 		Spec: sandboxv1.SandboxSpec{
 			OperatingMode:    sandboxv1.SandboxOperatingModeSuspended,
-			SandboxBlueprint: sandboxv1.SandboxBlueprint{PodTemplate: d.podTemplate(env, token, workspace)},
+			SandboxBlueprint: sandboxv1.SandboxBlueprint{PodTemplate: d.podTemplate(env, token, folders)},
 		},
 	}
 	if err := d.c.Create(ctx, sb); err != nil && !apierrors.IsAlreadyExists(err) {
@@ -296,11 +307,47 @@ func pollEvery(ctx context.Context, interval, timeout time.Duration, cond wait.C
 	return err
 }
 
-func (d *Driver) podTemplate(env, token, workspace string) sandboxv1.PodTemplate {
+func (d *Driver) podTemplate(env, token string, folders Folders) sandboxv1.PodTemplate {
 	uid, gid := d.cfg.UID, d.cfg.GID
 	yes, no := true, false
 	grace := int64(15)
 	tmpSize := resource.MustParse("4Gi")
+	vars := []corev1.EnvVar{
+		{Name: "FERN_ENV", Value: env},
+		{Name: "FERN_TOKEN", Value: token},
+		{Name: "FERN_WORKSPACE", Value: folders.Workspace},
+	}
+	mounts := []corev1.VolumeMount{
+		{Name: "live", MountPath: folders.Workspace},
+		{Name: "tmp", MountPath: "/tmp"},
+	}
+	volumes := []corev1.Volume{
+		d.folder("live", env, "workspace", false),
+		// HOME is in /tmp, so caches land here; the node's disk is shared.
+		{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &tmpSize}}},
+	}
+	// Claude keeps its transcripts here, so `--resume` works after a sleep
+	// or a restore, which both replace the box.
+	if folders.Claude != "" {
+		vars = append(vars, corev1.EnvVar{Name: "CLAUDE_CONFIG_DIR", Value: folders.Claude})
+		mounts = append(mounts, corev1.VolumeMount{Name: "claude", MountPath: folders.Claude})
+		volumes = append(volumes, d.folder("claude", env, "claude", false))
+	}
+	if folders.Git != "" {
+		mounts = append(mounts, corev1.VolumeMount{Name: "git", MountPath: folders.Git, ReadOnly: true})
+		volumes = append(volumes, d.folder("git", env, "git", true))
+	}
+	// The login comes from the Secret when the pod starts, so it is never in
+	// the Sandbox, the index or a snapshot.
+	if d.cfg.ClaudeSecret != "" {
+		vars = append(vars, corev1.EnvVar{Name: "CLAUDE_CODE_OAUTH_TOKEN", ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: d.cfg.ClaudeSecret},
+				Key:                  "token",
+				Optional:             &yes,
+			},
+		}})
+	}
 	return sandboxv1.PodTemplate{
 		ObjectMeta: sandboxv1.PodMetadata{Labels: labels(env)},
 		Spec: corev1.PodSpec{
@@ -320,12 +367,8 @@ func (d *Driver) podTemplate(env, token, workspace string) sandboxv1.PodTemplate
 				Name:            "box",
 				Image:           d.cfg.Image,
 				ImagePullPolicy: corev1.PullIfNotPresent,
-				Env: []corev1.EnvVar{
-					{Name: "FERN_ENV", Value: env},
-					{Name: "FERN_TOKEN", Value: token},
-					{Name: "FERN_WORKSPACE", Value: workspace},
-				},
-				Ports: []corev1.ContainerPort{{Name: "exec", ContainerPort: boxexec.Port}},
+				Env:             vars,
+				Ports:           []corev1.ContainerPort{{Name: "exec", ContainerPort: boxexec.Port}},
 				// fern-init answers only when every service passes its ready check.
 				ReadinessProbe: &corev1.Probe{
 					ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{
@@ -352,21 +395,21 @@ func (d *Driver) podTemplate(env, token, workspace string) sandboxv1.PodTemplate
 					ReadOnlyRootFilesystem:   &yes,
 					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
 				},
-				VolumeMounts: []corev1.VolumeMount{
-					{Name: "live", MountPath: workspace},
-					{Name: "tmp", MountPath: "/tmp"},
-				},
+				VolumeMounts: mounts,
 			}},
-			Volumes: []corev1.Volume{
-				{Name: "live", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
-					Driver:           d.cfg.CSIDriver,
-					VolumeAttributes: map[string]string{"env": env},
-				}}},
-				// HOME is in /tmp, so caches land here; the node's disk is shared.
-				{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &tmpSize}}},
-			},
+			Volumes: volumes,
 		},
 	}
+}
+
+// folder is an inline volume through which the CSI plugin mounts one of
+// environment env's folders: "workspace", "claude" or "git".
+func (d *Driver) folder(name, env, which string, readOnly bool) corev1.Volume {
+	return corev1.Volume{Name: name, VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
+		Driver:           d.cfg.CSIDriver,
+		ReadOnly:         &readOnly,
+		VolumeAttributes: map[string]string{"env": env, "folder": which},
+	}}}
 }
 
 func labels(env string) map[string]string {

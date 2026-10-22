@@ -1,6 +1,6 @@
-// Package csi is Fern's CSI node plugin. It bind-mounts an environment's
-// live/ subvolume into the pod that names the environment in an inline
-// volume.
+// Package csi is Fern's CSI node plugin. It bind-mounts one of an
+// environment's folders (its workspace, Claude's folder or the main
+// repository's git folder) into the pod that names it in an inline volume.
 package csi
 
 import (
@@ -29,6 +29,7 @@ const Name = "fern.dev"
 // object sets podInfoOnMount.
 const (
 	keyEnv       = "env"
+	keyFolder    = "folder" // "workspace" (the default), "claude" or "git"
 	keyEphemeral = "csi.storage.k8s.io/ephemeral"
 	keyPod       = "csi.storage.k8s.io/pod.name"
 	keyNamespace = "csi.storage.k8s.io/pod.namespace"
@@ -41,15 +42,14 @@ type Plugin struct {
 	csispec.UnimplementedIdentityServer
 	csispec.UnimplementedNodeServer
 
-	node     string
-	livePath func(ctx context.Context, env string) (string, error)
-	log      *slog.Logger
+	node string
+	env  func(ctx context.Context, id string) (store.Env, error)
+	log  *slog.Logger
 }
 
-// New returns a Plugin for node that finds an environment's live/ with
-// livePath.
-func New(node string, livePath func(ctx context.Context, env string) (string, error), log *slog.Logger) *Plugin {
-	return &Plugin{node: node, livePath: livePath, log: log}
+// New returns a Plugin for node that looks environments up with env.
+func New(node string, env func(ctx context.Context, id string) (store.Env, error), log *slog.Logger) *Plugin {
+	return &Plugin{node: node, env: env, log: log}
 }
 
 // Register adds the plugin's services to s.
@@ -83,8 +83,9 @@ func (p *Plugin) NodeGetCapabilities(context.Context, *csispec.NodeGetCapabiliti
 	return &csispec.NodeGetCapabilitiesResponse{}, nil
 }
 
-// NodePublishVolume bind-mounts the environment's live/ at the target path.
-// Publishing a volume that is already mounted succeeds.
+// NodePublishVolume bind-mounts the environment's folder at the target path,
+// read-only if the volume is. Publishing a volume that is already mounted
+// succeeds.
 func (p *Plugin) NodePublishVolume(ctx context.Context, req *csispec.NodePublishVolumeRequest) (*csispec.NodePublishVolumeResponse, error) {
 	vc := req.GetVolumeContext()
 	env, target := vc[keyEnv], req.GetTargetPath()
@@ -99,17 +100,15 @@ func (p *Plugin) NodePublishVolume(ctx context.Context, req *csispec.NodePublish
 	// Mounts aren't authorized yet; log who asked, for the record.
 	p.log.InfoContext(ctx, "publish",
 		slog.String("env", env),
+		slog.String("folder", vc[keyFolder]),
 		slog.String("pod", vc[keyNamespace]+"/"+vc[keyPod]),
 		slog.String("pod_uid", vc[keyPodUID]),
 		slog.String("service_account", vc[keyAccount]),
 		slog.String("target", target))
 
-	src, err := p.livePath(ctx, env)
-	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidID) {
-		return nil, status.Error(codes.NotFound, err.Error())
-	}
+	src, err := p.source(ctx, env, vc[keyFolder])
 	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
+		return nil, err
 	}
 	if err := os.MkdirAll(target, 0o750); err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
@@ -122,8 +121,45 @@ func (p *Plugin) NodePublishVolume(ctx context.Context, req *csispec.NodePublish
 		if err := unix.Mount(src, target, "", unix.MS_BIND, ""); err != nil {
 			return nil, status.Errorf(codes.Internal, "bind %s on %s: %v", src, target, err)
 		}
+		// A bind mount keeps its source's flags; read-only takes a remount.
+		// Unmount on failure, or the retry would find it mounted writable.
+		// The main repository's git folder is read-only whatever the pod
+		// asks: a box that could change its config or hooks could run code
+		// in T3's server.
+		if req.GetReadonly() || vc[keyFolder] == "git" {
+			if err := unix.Mount("", target, "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY, ""); err != nil {
+				_ = unix.Unmount(target, 0)
+				return nil, status.Errorf(codes.Internal, "make %s read-only: %v", target, err)
+			}
+		}
 	}
 	return &csispec.NodePublishVolumeResponse{}, nil
+}
+
+// source returns the host path of environment id's folder.
+func (p *Plugin) source(ctx context.Context, id, folder string) (string, error) {
+	env, err := p.env(ctx, id)
+	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidID) {
+		return "", status.Error(codes.NotFound, err.Error())
+	}
+	if err != nil {
+		return "", status.Error(codes.Internal, err.Error())
+	}
+	var src string
+	switch folder {
+	case "", "workspace":
+		src = env.Path
+	case "claude":
+		src = env.Claude
+	case "git":
+		src = env.Git
+	default:
+		return "", status.Errorf(codes.InvalidArgument, "unknown folder %q", folder)
+	}
+	if src == "" {
+		return "", status.Errorf(codes.NotFound, "environment %s has no %s folder", id, folder)
+	}
+	return src, nil
 }
 
 // NodeUnpublishVolume unmounts the target path and removes it. Unpublishing

@@ -23,7 +23,7 @@ func NewFake(addr string) *Fake {
 }
 
 // Create makes environment env's box, asleep.
-func (f *Fake) Create(_ context.Context, env, _, _ string) error {
+func (f *Fake) Create(_ context.Context, env, _ string, _ Folders) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, ok := f.boxes[env]; !ok {

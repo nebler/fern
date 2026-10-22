@@ -118,6 +118,7 @@ spec:
             - --namespace=fern-boxes
             - --box-image=fern-box:dev
             - --socket-group=1000 # T3's server (deploy/t3.yaml)
+            - --claude-secret=claude-login # Claude's login for the boxes (lab/claude-login.sh)
           env:
             - name: NODE_NAME
               valueFrom:

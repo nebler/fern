@@ -38,7 +38,7 @@ type Store interface {
 
 // Driver runs environments' boxes.
 type Driver interface {
-	Create(ctx context.Context, env, token, workspace string) error
+	Create(ctx context.Context, env, token string, folders driver.Folders) error
 	Wake(ctx context.Context, env string) (addr string, err error)
 	Sleep(ctx context.Context, env string) error
 	Delete(ctx context.Context, env string) error
@@ -166,7 +166,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		if env, err = s.store.Create(ctx, id, opts); err != nil {
 			return err
 		}
-		return s.driver.Create(ctx, id, env.Token, env.Path)
+		return s.driver.Create(ctx, id, env.Token, driver.Folders{Workspace: env.Path, Claude: env.Claude, Git: env.Git})
 	})
 	if err != nil {
 		s.fail(w, r, err)
