@@ -18,6 +18,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -524,8 +525,24 @@ func TestExecRedialsStaleBox(t *testing.T) {
 	}
 }
 
+// countStates counts how often the server asks for every box's state, which
+// costs a Kubernetes call.
+type countStates struct {
+	*driver.Fake
+	n atomic.Int32
+}
+
+func (d *countStates) States(ctx context.Context) (map[string]driver.State, error) {
+	d.n.Add(1)
+	return d.Fake.States(ctx)
+}
+
 func TestFindByPath(t *testing.T) {
-	c, _ := newAPI(t)
+	var drv *countStates
+	c, _ := newAPIWith(t, func(f *driver.Fake) api.Driver {
+		drv = &countStates{Fake: f}
+		return drv
+	})
 	ctx := t.Context()
 	const path = "/pool/worktrees/fern/main"
 	if _, err := c.Create(ctx, "wt", api.CreateOptions{Path: path}); err != nil {
@@ -539,6 +556,10 @@ func TestFindByPath(t *testing.T) {
 	}
 	if _, err := c.FindByPath(ctx, "/pool/worktrees/fern"); errCode(err) != api.CodeNotFound {
 		t.Errorf("FindByPath(parent) error = %v, want code %s", err, api.CodeNotFound)
+	}
+	// fern-claude looks its environment up before every Claude start.
+	if n := drv.n.Load(); n != 0 {
+		t.Errorf("lookups by path asked Kubernetes for box states %d times, want 0", n)
 	}
 }
 

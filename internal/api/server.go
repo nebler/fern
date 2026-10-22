@@ -53,7 +53,7 @@ type Env struct {
 	Path    string       `json:"path"`           // the workspace, on the host and in the box
 	Head    string       `json:"head,omitempty"` // last snapshot taken or restored
 	Created time.Time    `json:"created"`
-	State   driver.State `json:"state"`
+	State   driver.State `json:"state,omitempty"` // not in a lookup by path
 }
 
 // Snapshot is a snapshot as the API reports it.
@@ -186,20 +186,25 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 
 // list returns all environments, or with ?path= the one whose workspace
 // holds that path (none if there is none).
+//
+// fern-claude looks its environment up by path before every Claude start,
+// so that answer comes from the index alone, without the box's state: a
+// state costs a Kubernetes call.
 func (s *Server) list(w http.ResponseWriter, r *http.Request) {
-	var envs []store.Env
-	var err error
 	if path := r.URL.Query().Get("path"); path != "" {
-		var env store.Env
-		env, err = s.store.FindByPath(r.Context(), path)
-		if err == nil {
-			envs = []store.Env{env}
-		} else if errors.Is(err, store.ErrNotFound) {
-			err = nil
+		out := []Env{}
+		env, err := s.store.FindByPath(r.Context(), path)
+		switch {
+		case err == nil:
+			out = append(out, wireEnv(env, ""))
+		case !errors.Is(err, store.ErrNotFound):
+			s.fail(w, r, err)
+			return
 		}
-	} else {
-		envs, err = s.store.List(r.Context())
+		s.reply(w, r, out)
+		return
 	}
+	envs, err := s.store.List(r.Context())
 	if err != nil {
 		s.fail(w, r, err)
 		return
