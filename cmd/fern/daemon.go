@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -33,6 +34,7 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) error {
 	flags.SetOutput(stderr)
 	pool := flags.String("pool", "/var/lib/fern", "btrfs pool mount point")
 	socket := flags.String("socket", defaultSocket, "API socket")
+	socketGroup := flags.Int("socket-group", -1, "group that may use the API socket, besides root (T3's server)")
 	csiSocket := flags.String("csi-socket", "/csi/csi.sock", "CSI plugin socket")
 	node := flags.String("node", os.Getenv("NODE_NAME"), "this node's name")
 	namespace := flags.String("namespace", "fern-boxes", "namespace of box Sandboxes")
@@ -67,11 +69,11 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) error {
 		UID: store.BoxUID, GID: store.BoxGID,
 	})
 
-	apiLis, err := listenUnix(ctx, *socket)
+	apiLis, err := listenUnix(ctx, *socket, *socketGroup)
 	if err != nil {
 		return err
 	}
-	csiLis, err := listenUnix(ctx, *csiSocket)
+	csiLis, err := listenUnix(ctx, *csiSocket, -1)
 	if err != nil {
 		return err
 	}
@@ -135,8 +137,11 @@ func kubeClient() (client.Client, error) {
 }
 
 // listenUnix listens on a unix socket at path, replacing a stale one, and
-// lets only the owner (root) connect.
-func listenUnix(ctx context.Context, path string) (net.Listener, error) {
+// lets only the owner (root) connect, and group gid if it isn't -1.
+func listenUnix(ctx context.Context, path string, gid int) (net.Listener, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return nil, err
+	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, err
 	}
@@ -145,7 +150,15 @@ func listenUnix(ctx context.Context, path string) (net.Listener, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(path, 0o600); err != nil {
+	mode := os.FileMode(0o600)
+	if gid != -1 {
+		mode = 0o660
+		if err := os.Chown(path, -1, gid); err != nil {
+			_ = lis.Close()
+			return nil, err
+		}
+	}
+	if err := os.Chmod(path, mode); err != nil {
 		_ = lis.Close()
 		return nil, err
 	}

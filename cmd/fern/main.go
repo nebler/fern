@@ -38,7 +38,9 @@ import (
 	"github.com/nebler/fern/internal/boxexec"
 )
 
-const defaultSocket = "/run/fern.sock"
+// defaultSocket is in a directory of its own, so pods can share it through a
+// hostPath.
+const defaultSocket = "/run/fern/fern.sock"
 
 func main() {
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
