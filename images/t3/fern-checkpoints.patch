@@ -1,9 +1,9 @@
 diff --git a/apps/server/src/checkpointing/FernCheckpointStore.test.ts b/apps/server/src/checkpointing/FernCheckpointStore.test.ts
 new file mode 100644
-index 00000000..36de4d61
+index 00000000..58c1c36c
 --- /dev/null
 +++ b/apps/server/src/checkpointing/FernCheckpointStore.test.ts
-@@ -0,0 +1,205 @@
+@@ -0,0 +1,203 @@
 +// @effect-diagnostics nodeBuiltinImport:off
 +import * as NodePath from "node:path";
 +
@@ -38,8 +38,7 @@ index 00000000..36de4d61
 +
 +/**
 + * A pool with one git worktree, and a fake fern CLI that logs its arguments. On restore it also
-+ * logs README.md as Fern finds it; `which` finds an environment once `known` exists. Once
-+ * `broken` exists, snapshot and restore fail.
++ * logs README.md as Fern finds it. Once `broken` exists, snapshot, restore and rmsnap fail.
 + */
 +const setUp = Effect.gen(function* () {
 +  const fileSystem = yield* FileSystem.FileSystem;
@@ -55,9 +54,8 @@ index 00000000..36de4d61
 +    [
 +      "#!/bin/sh",
 +      `echo "$*" >> '${log}'`,
-+      `[ -e '${tmp}/broken' ] && { [ "$1" = snapshot ] || [ "$1" = restore ]; } && exit 1`,
++      `[ -e '${tmp}/broken' ] && [ "$1" != create ] && exit 1`,
 +      `[ "$1" = restore ] && echo "saw $(cat '${workspace}/README.md')" >> '${log}'`,
-+      `[ "$1" = which ] && { [ -e '${tmp}/known' ] || exit 1; echo t3-found; }`,
 +      "exit 0",
 +      "",
 +    ].join("\n"),
@@ -86,7 +84,7 @@ index 00000000..36de4d61
 +
 +        yield* store.captureCheckpoint({ cwd: workspace, checkpointRef: ref0 });
 +        yield* store.captureCheckpoint({
-+          cwd: NodePath.join(workspace, "."),
++          cwd: `${workspace}/.`,
 +          checkpointRef: ref1,
 +        });
 +
@@ -186,36 +184,42 @@ index 00000000..36de4d61
 +  describe("deleteCheckpointRefs", () => {
 +    it.effect("deletes the snapshots of the worktree's environment", () =>
 +      Effect.gen(function* () {
-+        const { fileSystem, tmp, workspace, store, calls } = yield* setUp;
-+        yield* fileSystem.writeFileString(NodePath.join(tmp, "known"), "");
++        const { workspace, store, env, calls } = yield* setUp;
 +
 +        yield* store.deleteCheckpointRefs({ cwd: workspace, checkpointRefs: [ref0, ref1] });
 +
 +        expect(yield* calls).toEqual([
-+          `which ${workspace}`,
-+          `rmsnap t3-found ${FernCheckpointStore.fernSnapshotId(ref0)} ${FernCheckpointStore.fernSnapshotId(ref1)}`,
++          `rmsnap ${env} ${FernCheckpointStore.fernSnapshotId(ref0)} ${FernCheckpointStore.fernSnapshotId(ref1)}`,
 +        ]);
 +      }),
 +    );
 +
-+    it.effect("does nothing in Fern for a worktree it has no environment for", () =>
++    it.effect("deletes git's refs even when Fern can't delete its snapshots", () =>
 +      Effect.gen(function* () {
-+        const { workspace, store, calls } = yield* setUp;
++        const { fileSystem, tmp, workspace, store } = yield* setUp;
++        yield* store.captureCheckpoint({ cwd: workspace, checkpointRef: ref0 });
++        yield* fileSystem.writeFileString(NodePath.join(tmp, "broken"), "");
 +
 +        yield* store.deleteCheckpointRefs({ cwd: workspace, checkpointRefs: [ref0] });
 +
-+        expect(yield* calls).toEqual([`which ${workspace}`]);
++        expect(yield* store.hasCheckpointRef({ cwd: workspace, checkpointRef: ref0 })).toBe(false);
 +      }),
 +    );
 +  });
 +});
 diff --git a/apps/server/src/checkpointing/FernCheckpointStore.ts b/apps/server/src/checkpointing/FernCheckpointStore.ts
 new file mode 100644
-index 00000000..53ec13b9
+index 00000000..7d0678e9
 --- /dev/null
 +++ b/apps/server/src/checkpointing/FernCheckpointStore.ts
-@@ -0,0 +1,170 @@
+@@ -0,0 +1,151 @@
 +// @effect-diagnostics nodeBuiltinImport:off
++/**
++ * Fern keeps a worktree's whole disk with each checkpoint: ignored files, dependencies and
++ * running databases, which git checkpoints leave behind. A worktree at
++ * `<pool>/worktrees/<repo>/<name>` is a Fern environment, and every checkpoint there is also a
++ * Fern snapshot. Git checkpoints still run, so diffs work as before.
++ */
 +import * as NodeCrypto from "node:crypto";
 +import * as NodePath from "node:path";
 +
@@ -226,12 +230,6 @@ index 00000000..53ec13b9
 +import * as CheckpointStore from "./CheckpointStore.ts";
 +import * as VcsProcess from "../vcs/VcsProcess.ts";
 +
-+/**
-+ * Fern keeps a worktree's whole disk with each checkpoint:
-+ * ignored files, dependencies and running databases, which git checkpoints leave behind. A
-+ * worktree at `<pool>/worktrees/<repo>/<name>` is a Fern environment, and every checkpoint there
-+ * is also a Fern snapshot. Git checkpoints still run, so diffs work as before.
-+ */
 +export interface FernOptions {
 +  /** Fern's pool. T3's worktrees directory must be `<pool>/worktrees`. */
 +  readonly pool: string;
@@ -261,21 +259,17 @@ index 00000000..53ec13b9
 +
 +    // The worktree holding cwd, or null for folders Fern doesn't manage.
 +    const workspaceOf = (cwd: string) => {
-+      const parts = NodePath.relative(worktrees, NodePath.resolve(cwd)).split(NodePath.sep);
-+      if (parts.length < 2 || parts[0] === ".." || NodePath.isAbsolute(parts[0] ?? "")) {
++      const [repo, name] = NodePath.relative(worktrees, NodePath.resolve(cwd)).split(NodePath.sep);
++      if (repo === undefined || name === undefined || repo === "..") {
 +        return null;
 +      }
-+      return NodePath.join(worktrees, parts[0]!, parts[1]!);
++      return NodePath.join(worktrees, repo, name);
 +    };
 +
-+    const fern = (
-+      operation: string,
-+      cwd: string,
-+      args: ReadonlyArray<string>,
-+      allowNonZeroExit = false,
-+    ) =>
++    // Runs the fern CLI. With allowNonZeroExit, a failing command is a result, not an error.
++    const fern = (cwd: string, args: ReadonlyArray<string>, allowNonZeroExit = false) =>
 +      vcsProcess.run({
-+        operation,
++        operation: `FernCheckpointStore.${args[0]}`,
 +        command: options.command,
 +        args,
 +        cwd,
@@ -298,16 +292,11 @@ index 00000000..53ec13b9
 +        yield* Effect.gen(function* () {
 +          if (!created.has(env)) {
 +            // The first checkpoint adopts the worktree: Fern turns it into a snapshottable volume.
-+            yield* fern("FernCheckpointStore.create", input.cwd, [
-+              "create",
-+              "--path",
-+              workspace,
-+              env,
-+            ]);
++            yield* fern(input.cwd, ["create", "--path", workspace, env]);
 +            created.add(env);
 +          }
 +          // T3 reuses ordinals after a revert, so a snapshot of the same ref is taken again.
-+          yield* fern("FernCheckpointStore.snapshot", input.cwd, [
++          yield* fern(input.cwd, [
 +            "snapshot",
 +            "--replace",
 +            env,
@@ -331,10 +320,9 @@ index 00000000..53ec13b9
 +    ) =>
 +      Effect.gen(function* () {
 +        const workspace = workspaceOf(input.cwd);
-+        const ref = { cwd: input.cwd, checkpointRef: input.checkpointRef };
-+        if (workspace !== null && (yield* git.hasCheckpointRef(ref))) {
++        if (workspace !== null && (yield* git.hasCheckpointRef(input))) {
 +          // Fern first: git's restore then fixes the index, which lives in the main repository.
-+          yield* fern("FernCheckpointStore.restore", input.cwd, [
++          yield* fern(input.cwd, [
 +            "restore",
 +            fernEnvironmentId(workspace),
 +            fernSnapshotId(input.checkpointRef),
@@ -351,22 +339,13 @@ index 00000000..53ec13b9
 +          if (workspace === null || input.checkpointRefs.length === 0) {
 +            return;
 +          }
-+          const found = yield* fern(
-+            "FernCheckpointStore.which",
++          // A worktree no checkpoint was captured in has no environment, and a daemon that is
++          // down leaves the snapshots until T3 reuses their ordinals: both only cost disk.
++          yield* fern(
 +            input.cwd,
-+            ["which", workspace],
++            ["rmsnap", fernEnvironmentId(workspace), ...input.checkpointRefs.map(fernSnapshotId)],
 +            true,
 +          );
-+          // No environment means no checkpoint here was captured. If the daemon is down, the
-+          // snapshots stay until T3 reuses their ordinals; that only costs disk.
-+          if (found.exitCode !== 0) {
-+            return;
-+          }
-+          yield* fern("FernCheckpointStore.rmsnap", input.cwd, [
-+            "rmsnap",
-+            found.stdout.trim(),
-+            ...input.checkpointRefs.map(fernSnapshotId),
-+          ]);
 +        });
 +
 +    return CheckpointStore.CheckpointStore.of({
