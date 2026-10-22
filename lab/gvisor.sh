@@ -41,7 +41,11 @@ YAML
 
 fern rm $ENV 2>/dev/null || true
 fern create $ENV --repo lab/sample-repo >/dev/null
+# The Sandbox comes with the first wake; the box restarts under gVisor at the
+# next one, which keeps the runtime class.
+fern wake $ENV >/dev/null
 k -n fern-boxes patch sandbox $ENV --type=merge -p '{"spec":{"podTemplate":{"spec":{"runtimeClassName":"gvisor"}}}}' >/dev/null
+fern sleep $ENV >/dev/null
 check "the box runs under gVisor" "Starting gVisor..." "$(fern exec $ENV -- dmesg | head -1 | cut -c16-)"
 check "Postgres on the CSI volume (3 users)" 3 "$(fern exec $ENV -- psql -tAc 'select count(*) from users')"
 : > /tmp/fern-gv-wake

@@ -235,7 +235,11 @@ gvisor() {
     return
   fi
   fresh gk
+  # The Sandbox comes with the first wake; the box restarts under gVisor at
+  # the next one, which keeps the runtime class.
+  fern wake gk >/dev/null
   k -n fern-boxes patch sandbox gk --type=merge -p '{"spec":{"podTemplate":{"spec":{"runtimeClassName":"gvisor"}}}}' >/dev/null
+  fern sleep gk >/dev/null
   check "the box runs under gVisor" "Starting gVisor..." "$(fern exec gk -- dmesg | head -1 | cut -c16-)"
   check "claude runs under gVisor" "2.1.304 (Claude Code)" "$(fern exec gk -- claude --version)"
   code=$(fern exec gk -- curl -s -o /dev/null -w '%{http_code}' https://api.anthropic.com/ || true)
