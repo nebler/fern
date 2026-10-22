@@ -212,3 +212,27 @@ Command: `lab/reload.sh && lab/build-t3.sh && lab/blockers.sh t3 paths review st
 - **T3's Claude SDK (0.3.276) was built for Claude Code 2.1.276; the box has 2.1.304.** Newer CLIs talk to older SDKs, but if the first real turn fails on the protocol, pin the box to 2.1.276.
 - **The sample repo had no `.gitignore`,** so T3's git checkpoints would have copied Postgres's data folder (`.fern/`) into git at every turn. Any repo whose services keep state in the workspace needs it ignored.
 - Claude can't commit from the box (the git folder is read-only); T3 commits on its side.
+
+## One check script, 2026-10-22
+
+The lab's checks are now one script, `lab/check.sh`, in sections named for what they check. The commands above name the scripts it replaced: `demo-slice.sh` is its `slice` section; `e0.sh` and `e4.sh` are `box`; `e1.sh` and `blockers.sh bigrepo` are `disk`; `gvisor.sh` is `gvisor`; `blockers.sh review` is split into `limits`, `restore` and `daemon`. `lab/build.sh` replaces `reload.sh` and `build-t3.sh`.
+
+Command: `lab/down.sh && lab/up.sh && lab/build.sh t3 && lab/check.sh && lab/check.sh t3`, from a clean start: setup 176 s, checks about 25 minutes, same host and versions as on 2026-10-18. 86 PASS, 1 FAIL: the new check that two Ctrl-Cs quit interactive claude (below). With that check replaced, `lab/check.sh stream claude` passes.
+
+| Check | Result |
+|---|---|
+| warm wake with Postgres, 10 runs | p50 622 ms, p95 670 ms |
+| sleep, until the pod is gone, 10 runs | p50 1,010 ms, p95 1,014 ms |
+| the workspace is unmounted at every sleep; Postgres answers again after its pod is force-deleted | PASS; 748 ms |
+| 100,000 files, 1.4 GB: snapshot (10 runs) / restore while asleep (5 runs) | p50 7.2 ms / 7.8 ms; the restore equals its snapshot (tree hash) |
+| `rm` with 10 snapshots | 432 ms; nothing left |
+| `git clone --depth 1` of t3code in a box (32,203 files, 484 MB), then a snapshot | 19.5 s, then 242 ms |
+| 10 sleeping environments woken at once / 10 parallel execs on one sleeping box | 2.2 s / 1.0 s |
+| restore of an awake T3 worktree (no services) | 816 ms |
+| gVisor: wake after a restore, 5 runs | p50 808 ms |
+| `fern-t3:dev` | 1.45 GB (was 2.82 GB): only the server's production packages |
+
+**Found on the way:**
+- **The old check that two Ctrl-Cs quit interactive claude could never fail, and claude doesn't quit that way,** so the rows above that say it does are wrong. At its first-run screen Claude Code 2.1.304 shows "Press Ctrl-C again to exit" and keeps running after the second, in plain Docker without Fern too. Fern's part is now checked directly: both Ctrl-C bytes reach a program that reads the terminal raw, and the session ends when that program exits.
+- The check that a command without `-i` gets no stdin passed whenever the script's own stdin was empty; it now offers endless input.
+- A process a command leaves in the background ends with the exec (its process group is killed), so the check that nothing survives a sleep starts its stray process with `setsid`.

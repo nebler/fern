@@ -26,7 +26,6 @@ metadata:
     app.kubernetes.io/part-of: fern
 spec:
   podSelector: {}
-  policyTypes: [Ingress]
   ingress:
     - from:
         - namespaceSelector:
@@ -68,10 +67,10 @@ metadata:
 rules:
   - apiGroups: [agents.x-k8s.io]
     resources: [sandboxes]
-    verbs: [get, list, watch, create, patch, delete]
+    verbs: [get, list, create, patch, delete]
   - apiGroups: [""]
     resources: [pods]
-    verbs: [get, list, watch, delete] # delete: a failed pod, so it is replaced
+    verbs: [get, delete] # delete: a failed pod, so it is replaced
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -110,7 +109,7 @@ spec:
       containers:
         - name: fern
           image: fern:dev
-          imagePullPolicy: Never # imported into the lab by lab/up.sh
+          imagePullPolicy: Never # the lab imports its images
           args: [daemon]
           env:
             - name: NODE_NAME
@@ -128,7 +127,6 @@ spec:
           volumeMounts:
             - name: pool
               mountPath: /var/lib/fern
-              mountPropagation: HostToContainer
             - name: plugin
               mountPath: /csi
             - name: socket

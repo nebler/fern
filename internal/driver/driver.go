@@ -287,7 +287,7 @@ func (d *Driver) podTemplate(env store.Env) sandboxv1.PodTemplate {
 			Optional:             new(true),
 		}}},
 	}
-	// HOME is /tmp (images/fern-box.Dockerfile), so caches land here; capped
+	// HOME is /tmp (images/Dockerfile), so caches land here; capped
 	// because every box shares the node's disk.
 	mounts := []corev1.VolumeMount{{Name: "tmp", MountPath: "/tmp"}}
 	volumes := []corev1.Volume{{Name: "tmp", VolumeSource: corev1.VolumeSource{

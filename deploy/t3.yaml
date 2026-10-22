@@ -1,5 +1,5 @@
-# T3 Code's server for one person, on Fern's node (lab/build-t3.sh builds the
-# image). It sees the pool at the same path as the daemon and the boxes, so a
+# T3 Code's server for one person, on Fern's node (lab/build.sh t3 builds and
+# deploys it). It sees the pool at the same path as the daemon and the boxes, so a
 # worktree has one path everywhere, and reaches the daemon through its socket.
 # The T3 app on the Mac pairs with it through the NodePort. On a VPS the
 # NodePort listens on every interface: firewall it or use a tailnet, since
@@ -12,7 +12,6 @@ metadata:
   labels:
     app.kubernetes.io/part-of: fern
 spec:
-  replicas: 1
   strategy:
     type: Recreate # one server per T3 home
   selector:
@@ -52,13 +51,14 @@ spec:
           env:
             - name: T3CODE_HOME
               value: /var/lib/fern
+            # The checkpoint hook's pool: T3's worktrees must be its worktrees/.
+            - name: FERN_POOL
+              value: /var/lib/fern
             # For the Claude T3 runs itself, outside environments (its probes);
             # boxes get the same login from their own namespace's copy.
             - name: CLAUDE_CODE_OAUTH_TOKEN
               valueFrom:
                 secretKeyRef: {name: claude-login, key: token, optional: true}
-          ports:
-            - containerPort: 3773
           # Ready once it answers, so a rollout ends when T3 serves, not when
           # its process starts.
           readinessProbe:
@@ -71,7 +71,6 @@ spec:
           volumeMounts:
             - name: pool
               mountPath: /var/lib/fern
-              mountPropagation: HostToContainer
             - name: socket
               mountPath: /run/fern
       volumes:
@@ -97,5 +96,4 @@ spec:
     app.kubernetes.io/name: t3
   ports:
     - port: 3773
-      targetPort: 3773
       nodePort: 30773

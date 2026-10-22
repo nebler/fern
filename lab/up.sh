@@ -4,9 +4,10 @@
 # Fern. Everything it makes is named fern-lab* or labelled part-of=fern.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
-cd "$LAB_DIR/.."
+K3S_IMAGE=rancher/k3s:v1.36.5-k3s1
+SANDBOX_VERSION=v1.0.7
 
-if docker inspect "$LAB" >/dev/null 2>&1; then
+if lab_up; then
   echo "$LAB already exists; run lab/down.sh first" >&2
   exit 1
 fi
@@ -27,8 +28,7 @@ docker run -d --name "$LAB" --hostname "$LAB" --label "$LABEL" --privileged \
     mount --make-rshared /
     mkdir -p /var/lib/fern
     mount -o loop /var/lib/fern-img/pool.img /var/lib/fern
-    exec /bin/k3s server --disable=traefik,metrics-server --write-kubeconfig-mode=644 \
-      --kubelet-arg=pod-max-pids=4096' >/dev/null
+    exec /bin/k3s server --disable=traefik,metrics-server --kubelet-arg=pod-max-pids=4096' >/dev/null
 
 echo "waiting for k3s"
 for _ in $(seq 120); do
@@ -38,14 +38,13 @@ done
 k get nodes
 
 echo "importing images"
-docker save --platform "linux/$(docker version -f '{{.Server.Arch}}')" fern:dev fern-box:dev \
-  | docker exec -i "$LAB" ctr -n k8s.io images import - >/dev/null
+import_images fern:dev fern-box:dev
 
 echo "installing agent-sandbox $SANDBOX_VERSION"
 k apply --server-side -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/$SANDBOX_VERSION/sandbox.yaml" >/dev/null
 k -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=300s
 
 echo "installing fern"
-k apply -f - < deploy/fern.yaml >/dev/null
+k apply -f - <deploy/fern.yaml >/dev/null
 k -n fern-system rollout status ds/fern --timeout=300s
 echo "lab is up"
