@@ -25,6 +25,8 @@ T3's server in a pod with the pool and the daemon socket, the checkpoint hook in
 
 **The patch (2026-10-22):** one new file wrapping T3's `CheckpointStore` (capture → `fern snapshot --replace`, restore → `fern restore` before T3's git restore, delete → `fern rmsnap`), plus one line in `server.ts`. The Claude program is a T3 setting and MCP goes through fern-init, so neither needs a patch. Users never apply it: it ships inside Fern's T3 image, and the Mac app pairs with that server. Keep notes on what the hook needed to carry; they shape the upstream proposal (architecture §15.1).
 
+**Status (2026-10-22):** T3's server runs in the lab (`lab/build-t3.sh`, `deploy/t3.yaml`) and every command the hook makes works from its pod on a worktree T3 made (`lab/blockers.sh t3`, 11 PASS, `lab/RESULTS.md`). Left before the real turn: Claude's folder per environment outside `live/` and the token in a Secret (code), then the token itself (the user). A revert of an awake box takes 2.2–3.0 s, almost all of it stopping the pod.
+
 ### What the blocker research settled (8 agents, 2026-10-21)
 
 | Question | Answer | What it means for Part B |

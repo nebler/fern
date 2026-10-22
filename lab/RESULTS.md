@@ -169,3 +169,24 @@ Command: `lab/demo-slice.sh && lab/blockers.sh paths review stream concurrency r
 - **The sample repo's ready check passed before its seed loaded,** so the first exec found no table. The old wake was slow enough to hide it. `ready` now also waits for `.fern/seeded`.
 - **Connections to a new pod hung.** For a moment after a pod starts, the network policy drops packets instead of refusing them, and each attempt waited the client's full timeout (10 parallel execs: 4.3 s). Connecting now times out after 250 ms.
 - **Ten fresh boxes took 20 s once and 7.5 s another time.** The boxes' logs show 5 s between `initdb` finishing and Postgres starting: `initdb` flushing its files, ten at once on Docker Desktop's disk. The sample repo now runs `initdb --no-sync` (the next snapshot flushes anyway), and the daemon asks `/healthz?wait=5s` once instead of every 50 ms, while fern-init runs its checks at most every 100 ms.
+
+## Iteration 2, part B: T3's server on the node, 2026-10-22
+
+Command: `lab/up.sh && lab/build-t3.sh && lab/blockers.sh t3`. T3 Code at `9c161462` with `images/t3/fern-checkpoints.patch`; the image build runs the hook's tests and T3's own checkpoint tests first (19 pass). A cold build takes 3 min 42 s; the image is 2.8 GB. Every check passes (11 PASS).
+
+| Check | Result |
+|---|---|
+| the Mac reaches T3's API through the NodePort (`/.well-known/t3/environment`) | PASS |
+| T3 runs as uid 1000 and uses the daemon's socket (group 1000, mode 0660) | PASS |
+| `claude` on T3's PATH is `fern-claude`: the local Claude outside a workspace, the box's inside one | PASS |
+| a worktree T3 made is adopted at its first checkpoint | 172 ms through `kubectl exec` (31 ms inside the pod) |
+| checkpoint snapshot / the same checkpoint replaced | 5.1 ms / 7.7 ms |
+| restore brings back the replaced snapshot and a file git doesn't track; git works afterwards | PASS |
+| `which` finds the worktree's environment; `rmsnap` removes the checkpoint's snapshot | PASS |
+
+**Found on the way:**
+- **T3 keeps its worktrees in `<home>/worktrees`,** so with its home at `/var/lib/fern/t3` the hook would never have fired. T3's home is now the pool itself: its worktrees land in `worktrees/`, and its own state in `userdata/`, `caches/` and `tools/` (architecture §9).
+- **Restoring an awake box takes 2.2–3.0 s (4 runs); asleep, 8–9 ms.** The time is stopping the box, with or without Postgres: sleep took 1.4–3.0 s over 10 runs today (1.0 s in one run on 2026-10-21). In a traced run the pod was gone 1.85 s after the sleep began, so most of it is Kubernetes stopping and removing the pod. A T3 revert usually comes right after a turn, while the box is awake, so this is the restore time users will see.
+- **The image has no web UI** (`/` answers 503, "No static directory configured"): the Mac app brings its own.
+
+Not checked yet: a real turn and a revert through T3 itself (they need the Claude login), and T3's MCP tools from a box.

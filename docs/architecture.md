@@ -276,11 +276,16 @@ services:
 ```
 /var/lib/fern/                   btrfs (a real partition, or a loop-mounted image file)
   golden/<repo>@<key>/           read-only
-  envs/<id>/live/                writable; T3's worktree path points here
-      <repo files> node_modules/ .fern/pg/ .home/.claude .home/.codex
+  envs/<id>/live/                writable workspace of an environment without a path
+      <repo files> node_modules/ .fern/pg/
   envs/<id>/snaps/<snapshot>/    read-only
+  worktrees/<repo>/<name>/       writable workspace of an environment at a path: T3's worktrees
   state/fern.sqlite              index + op log (on the same disk, not inside any snapshot)
+  userdata/ caches/ tools/       T3's own state: T3's home is the pool, so its worktrees land in worktrees/
+  repos/<repo>/                  the projects' main repositories, which T3's worktrees point into
 ```
+
+Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or the main repositories.
 
 - **Snapshot:** `btrfs subvolume snapshot -r`. **Fork:** the same without `-r`. **Restore:** snapshot to `live.new`, then swap. All are metadata operations, taking milliseconds independent of size.
 - **Consistency:** a snapshot is atomic (crash-consistent). Postgres recovers through its WAL; SQLite needs its WAL file kept beside it.
