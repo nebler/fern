@@ -151,10 +151,15 @@ func TestSupervisorStopDoesNotRestart(t *testing.T) {
 	}
 }
 
-// Without a stop command, stop sends SIGTERM to the service's process group.
+// Without a stop command, stop sends SIGTERM to the service's process group,
+// which ends it long before the SIGKILL that would follow.
 func TestSupervisorStopTerminates(t *testing.T) {
 	s, _ := newService(t, service{Run: "sleep 600 & wait"})
+	start := time.Now()
 	s.stop(t.Context())
+	if took := time.Since(start); took >= killDelay {
+		t.Errorf("stop took %v, want well under %v: SIGTERM didn't end the service", took, killDelay)
+	}
 }
 
 // A service whose processes ignore SIGTERM is SIGKILLed, children included.
