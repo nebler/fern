@@ -109,9 +109,9 @@ func (s *Server) start(ctx context.Context, conn *websocket.Conn, req Request) (
 			cmd.Dir = filepath.Join(s.dir, req.Dir)
 		}
 	}
-	if len(req.Env) > 0 {
+	if len(req.Environ) > 0 {
 		// Later entries win (os/exec keeps the last of each name).
-		cmd.Env = append(slices.Clone(s.env), req.Env...)
+		cmd.Env = append(slices.Clone(s.env), req.Environ...)
 	}
 	// The command leads its own process group (a terminal makes it a session
 	// leader, which is one too). Cancelling kills the whole group, so nothing

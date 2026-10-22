@@ -2,9 +2,10 @@ package driver
 
 import (
 	"context"
-	"fmt"
 	"maps"
 	"sync"
+
+	"github.com/nebler/fern/internal/store"
 )
 
 // Fake is an in-memory driver for tests. Every awake box is reachable at the
@@ -13,7 +14,7 @@ type Fake struct {
 	addr string
 
 	mu    sync.Mutex
-	boxes map[string]State
+	boxes map[string]State // by environment ID, from its first wake
 	wakes int
 }
 
@@ -22,74 +23,45 @@ func NewFake(addr string) *Fake {
 	return &Fake{addr: addr, boxes: make(map[string]State)}
 }
 
-// Create makes environment env's box, asleep.
-func (f *Fake) Create(_ context.Context, env, _ string, _ Folders) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, ok := f.boxes[env]; !ok {
-		f.boxes[env] = Asleep
-	}
-	return nil
-}
-
 // Wake marks env's box running and returns the Fake's address.
-func (f *Fake) Wake(_ context.Context, env string) (string, error) {
+func (f *Fake) Wake(_ context.Context, env store.Env) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, ok := f.boxes[env]; !ok {
-		return "", fmt.Errorf("environment %s: %w", env, ErrNotFound)
-	}
-	if f.boxes[env] != Running {
+	if f.boxes[env.ID] != Running {
 		f.wakes++
 	}
-	f.boxes[env] = Running
+	f.boxes[env.ID] = Running
 	return f.addr, nil
 }
 
-// Sleep marks env's box asleep.
-func (f *Fake) Sleep(_ context.Context, env string) error {
-	return f.set(env, Asleep)
-}
-
-// Delete forgets env's box.
-func (f *Fake) Delete(_ context.Context, env string) error {
+// Sleep marks box id asleep.
+func (f *Fake) Sleep(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.boxes, env)
+	if _, ok := f.boxes[id]; ok {
+		f.boxes[id] = Asleep
+	}
 	return nil
 }
 
-// State reports env's box state.
-func (f *Fake) State(_ context.Context, env string) (State, error) {
+// Delete forgets box id.
+func (f *Fake) Delete(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	state, ok := f.boxes[env]
-	if !ok {
-		return "", fmt.Errorf("environment %s: %w", env, ErrNotFound)
-	}
-	return state, nil
+	delete(f.boxes, id)
+	return nil
 }
 
-// States reports every box's state.
+// States returns the state of every box that has been woken.
 func (f *Fake) States(context.Context) (map[string]State, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return maps.Clone(f.boxes), nil
 }
 
-// Wakes returns how many times a box went from not running to running.
+// Wakes returns how many times a box has been woken.
 func (f *Fake) Wakes() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.wakes
-}
-
-func (f *Fake) set(env string, state State) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, ok := f.boxes[env]; !ok {
-		return fmt.Errorf("environment %s: %w", env, ErrNotFound)
-	}
-	f.boxes[env] = state
-	return nil
 }

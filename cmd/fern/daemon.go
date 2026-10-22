@@ -28,27 +28,37 @@ import (
 	"github.com/nebler/fern/internal/store"
 )
 
-// runDaemon serves the API and the CSI plugin until ctx is cancelled.
-func runDaemon(ctx context.Context, args []string, stderr io.Writer) error {
+// Where the daemon finds the pool and serves the CSI plugin; deploy/fern.yaml
+// mounts both.
+const (
+	pool      = "/var/lib/fern"
+	csiSocket = "/csi/csi.sock"
+)
+
+// runDaemon serves the API and the CSI plugin until ctx is cancelled, and
+// returns the process exit code.
+func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
+	log := slog.New(slog.NewTextHandler(stderr, nil))
+	if err := serve(ctx, args, log); err != nil {
+		log.ErrorContext(ctx, "fern daemon failed", slog.Any("error", err))
+		return 1
+	}
+	return 0
+}
+
+func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	flags := flag.NewFlagSet("daemon", flag.ContinueOnError)
-	flags.SetOutput(stderr)
-	pool := flags.String("pool", "/var/lib/fern", "btrfs pool mount point")
-	socket := flags.String("socket", defaultSocket, "API socket")
-	socketGroup := flags.Int("socket-group", -1, "group that may use the API socket, besides root (T3's server)")
-	csiSocket := flags.String("csi-socket", "/csi/csi.sock", "CSI plugin socket")
-	node := flags.String("node", os.Getenv("NODE_NAME"), "this node's name")
-	namespace := flags.String("namespace", "fern-boxes", "namespace of box Sandboxes")
+	flags.SetOutput(io.Discard)
 	image := flags.String("box-image", "fern-box:dev", "box image")
-	claudeSecret := flags.String("claude-secret", "claude-login", `Secret in the boxes' namespace whose "token" is Claude's login; "" for none`)
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	if *node == "" {
-		return errors.New("--node or NODE_NAME is required")
+	node := os.Getenv("NODE_NAME")
+	if node == "" {
+		return errors.New("NODE_NAME is not set")
 	}
-	log := slog.New(slog.NewTextHandler(stderr, nil))
 
-	st, err := store.Open(ctx, *pool)
+	st, err := store.Open(ctx, pool)
 	if err != nil {
 		return err
 	}
@@ -65,31 +75,26 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	drv := driver.New(kube, driver.Config{
-		Namespace: *namespace, Image: *image, Node: *node, CSIDriver: csi.Name,
-		UID: store.BoxUID, GID: store.BoxGID, ClaudeSecret: *claudeSecret,
-	})
+	// T3's server runs as the box user, and uses the API too.
+	apiLis, err := listenUnix(ctx, socket, store.BoxGID)
+	if err != nil {
+		return err
+	}
+	csiLis, err := listenUnix(ctx, csiSocket, -1)
+	if err != nil {
+		return err
+	}
 
-	apiLis, err := listenUnix(ctx, *socket, *socketGroup)
-	if err != nil {
-		return err
-	}
-	csiLis, err := listenUnix(ctx, *csiSocket, -1)
-	if err != nil {
-		return err
-	}
-	apiSrv := api.NewServer(st, drv, log)
+	g, ctx := errgroup.WithContext(ctx)
+	apiSrv := api.NewServer(st, driver.New(kube, node, *image), log)
 	httpSrv := &http.Server{
 		Handler:           apiSrv.Handler(),
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	grpcSrv := grpc.NewServer()
-	csi.New(*node, st.Get, log).Register(grpcSrv)
-
-	log.InfoContext(ctx, "fern daemon started",
-		slog.String("node", *node), slog.String("pool", *pool), slog.String("socket", *socket))
-	g, ctx := errgroup.WithContext(ctx)
+	csi.New(node, st.Get, log).Register(grpcSrv)
+	log.InfoContext(ctx, "fern daemon started", slog.String("node", node))
 	g.Go(func() error {
 		if err := httpSrv.Serve(apiLis); !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("api: %w", err)

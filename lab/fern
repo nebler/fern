@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Runs the fern CLI inside the lab's daemon pod, so it works from the Mac.
-# "create ENV --repo DIR" with a local DIR streams DIR as a tar archive.
+# "create ENV --repo DIR" with a local DIR fills the workspace from DIR.
 set -euo pipefail
 args=() repo=""
 while [ $# -gt 0 ]; do
   if [ "$1" = "--repo" ] && [ $# -gt 1 ] && [ -d "$2" ]; then
-    repo=$2; args+=(--repo -); shift 2
+    repo=$2; args+=(--seed); shift 2
   else
     args+=("$1"); shift
   fi
@@ -13,7 +13,7 @@ done
 tty=(-i)
 if [ -t 0 ] && [ -t 1 ] && [ -z "$repo" ]; then
   for a in "${args[@]}"; do
-    case "$a" in -t|-it) tty=(-it) ;; --) break ;; esac
+    case "$a" in -it) tty=(-it) ;; --) break ;; esac
   done
 fi
 run() { docker exec "${tty[@]}" fern-lab kubectl -n fern-system exec "${tty[@]}" ds/fern -c fern -- fern "${args[@]}"; }

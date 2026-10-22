@@ -1,17 +1,15 @@
 // Package csi is Fern's CSI node plugin. It bind-mounts one of an
 // environment's folders (its workspace, Claude's folder or the main
-// repository's git folder) into the pod that names it in an inline volume.
+// repository's git folder) into the box pod that names it in an inline
+// volume.
 package csi
 
 import (
-	"bufio"
 	"context"
 	"errors"
-	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
-	"strings"
 
 	csispec "github.com/container-storage-interface/spec/lib/go/csi"
 	"golang.org/x/sys/unix"
@@ -25,12 +23,22 @@ import (
 // Name is the CSI driver name that box pods use in their inline volumes.
 const Name = "fern.dev"
 
-// Volume context keys. Kubelet adds the pod's identity because the CSIDriver
-// object sets podInfoOnMount.
+// The attributes of a box's inline volumes.
 const (
-	keyEnv       = "env"
-	keyFolder    = "folder" // "workspace" (the default), "claude" or "git"
-	keyEphemeral = "csi.storage.k8s.io/ephemeral"
+	AttrEnv    = "env"    // the environment's ID
+	AttrFolder = "folder" // which of its folders: FolderWorkspace, FolderClaude or FolderGit
+)
+
+// The folders of an environment that its box mounts.
+const (
+	FolderWorkspace = "workspace"
+	FolderClaude    = "claude"
+	FolderGit       = "git"
+)
+
+// What kubelet adds about the pod, because the CSIDriver object sets
+// podInfoOnMount.
+const (
 	keyPod       = "csi.storage.k8s.io/pod.name"
 	keyNamespace = "csi.storage.k8s.io/pod.namespace"
 	keyPodUID    = "csi.storage.k8s.io/pod.uid"
@@ -42,14 +50,14 @@ type Plugin struct {
 	csispec.UnimplementedIdentityServer
 	csispec.UnimplementedNodeServer
 
-	node string
-	env  func(ctx context.Context, id string) (store.Env, error)
-	log  *slog.Logger
+	node   string
+	lookup func(ctx context.Context, id string) (store.Env, error)
+	log    *slog.Logger
 }
 
-// New returns a Plugin for node that looks environments up with env.
-func New(node string, env func(ctx context.Context, id string) (store.Env, error), log *slog.Logger) *Plugin {
-	return &Plugin{node: node, env: env, log: log}
+// New returns a Plugin for node that looks environments up with lookup.
+func New(node string, lookup func(ctx context.Context, id string) (store.Env, error), log *slog.Logger) *Plugin {
+	return &Plugin{node: node, lookup: lookup, log: log}
 }
 
 // Register adds the plugin's services to s.
@@ -90,26 +98,20 @@ func (p *Plugin) NodeGetCapabilities(context.Context, *csispec.NodeGetCapabiliti
 // pod's volume mount: a read-only remount here would change only this
 // namespace's copy of the mount, not the one that reaches the box.
 func (p *Plugin) NodePublishVolume(ctx context.Context, req *csispec.NodePublishVolumeRequest) (*csispec.NodePublishVolumeResponse, error) {
-	vc := req.GetVolumeContext()
-	env, target := vc[keyEnv], req.GetTargetPath()
-	switch {
-	case vc[keyEphemeral] != "true":
-		return nil, status.Error(codes.InvalidArgument, "only inline ephemeral volumes are supported")
-	case env == "":
-		return nil, status.Error(codes.InvalidArgument, `volume attribute "env" is required`)
-	case target == "":
+	vc, target := req.GetVolumeContext(), req.GetTargetPath()
+	if target == "" {
 		return nil, status.Error(codes.InvalidArgument, "target path is required")
 	}
 	// Mounts aren't authorized yet; log who asked, for the record.
 	p.log.InfoContext(ctx, "publish",
-		slog.String("env", env),
-		slog.String("folder", vc[keyFolder]),
+		slog.String("env", vc[AttrEnv]),
+		slog.String("folder", vc[AttrFolder]),
 		slog.String("pod", vc[keyNamespace]+"/"+vc[keyPod]),
 		slog.String("pod_uid", vc[keyPodUID]),
 		slog.String("service_account", vc[keyAccount]),
 		slog.String("target", target))
 
-	src, err := p.source(ctx, env, vc[keyFolder])
+	src, err := p.source(ctx, vc[AttrEnv], vc[AttrFolder])
 	if err != nil {
 		return nil, err
 	}
@@ -130,7 +132,7 @@ func (p *Plugin) NodePublishVolume(ctx context.Context, req *csispec.NodePublish
 
 // source returns the host path of environment id's folder.
 func (p *Plugin) source(ctx context.Context, id, folder string) (string, error) {
-	env, err := p.env(ctx, id)
+	env, err := p.lookup(ctx, id)
 	if errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrInvalidID) {
 		return "", status.Error(codes.NotFound, err.Error())
 	}
@@ -139,11 +141,11 @@ func (p *Plugin) source(ctx context.Context, id, folder string) (string, error) 
 	}
 	var src string
 	switch folder {
-	case "", "workspace":
+	case FolderWorkspace:
 		src = env.Workspace
-	case "claude":
+	case FolderClaude:
 		src = env.Claude
-	case "git":
+	case FolderGit:
 		src = env.Git
 	default:
 		return "", status.Errorf(codes.InvalidArgument, "unknown folder %q", folder)
@@ -161,14 +163,9 @@ func (p *Plugin) NodeUnpublishVolume(ctx context.Context, req *csispec.NodeUnpub
 	if target == "" {
 		return nil, status.Error(codes.InvalidArgument, "target path is required")
 	}
-	mounted, err := isMountpoint(target)
-	if err != nil {
-		return nil, status.Error(codes.Internal, err.Error())
-	}
-	if mounted {
-		if err := unix.Unmount(target, 0); err != nil {
-			return nil, status.Errorf(codes.Internal, "unmount %s: %v", target, err)
-		}
+	// EINVAL: nothing is mounted there.
+	if err := unix.Unmount(target, 0); err != nil && !errors.Is(err, unix.EINVAL) && !errors.Is(err, fs.ErrNotExist) {
+		return nil, status.Errorf(codes.Internal, "unmount %s: %v", target, err)
 	}
 	if err := os.Remove(target); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return nil, status.Error(codes.Internal, err.Error())
@@ -177,27 +174,11 @@ func (p *Plugin) NodeUnpublishVolume(ctx context.Context, req *csispec.NodeUnpub
 	return &csispec.NodeUnpublishVolumeResponse{}, nil
 }
 
-// isMountpoint reports whether path is a mount point in this mount namespace.
+// isMountpoint reports whether path is the root of a mount.
 func isMountpoint(path string) (bool, error) {
-	f, err := os.Open("/proc/self/mountinfo")
-	if err != nil {
+	var st unix.Statx_t
+	if err := unix.Statx(unix.AT_FDCWD, path, unix.AT_SYMLINK_NOFOLLOW, 0, &st); err != nil {
 		return false, err
 	}
-	defer func() { _ = f.Close() }()
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		// Field 5 is the mount point, with spaces and the like octal-escaped.
-		fields := strings.Fields(sc.Text())
-		if len(fields) > 4 && unescape(fields[4]) == path {
-			return true, nil
-		}
-	}
-	if err := sc.Err(); err != nil {
-		return false, fmt.Errorf("read mountinfo: %w", err)
-	}
-	return false, nil
-}
-
-func unescape(s string) string {
-	return strings.NewReplacer(`\040`, " ", `\011`, "\t", `\012`, "\n", `\134`, `\`).Replace(s)
+	return st.Attributes&unix.STATX_ATTR_MOUNT_ROOT != 0, nil
 }

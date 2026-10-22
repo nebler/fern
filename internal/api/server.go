@@ -4,15 +4,12 @@ package api
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -30,38 +27,18 @@ type Store interface {
 	FindByPath(ctx context.Context, path string) (store.Env, error)
 	List(ctx context.Context) ([]store.Env, error)
 	Delete(ctx context.Context, id string) error
-	Snapshot(ctx context.Context, env, snap string) error
-	DeleteSnapshot(ctx context.Context, env, snap string) error
-	Snapshots(ctx context.Context, env string) ([]store.Snapshot, error)
-	Restore(ctx context.Context, env, snap string) error
+	Snapshot(ctx context.Context, id, snapID string) error
+	DeleteSnapshot(ctx context.Context, id, snapID string) error
+	Snapshots(ctx context.Context, id string) ([]store.Snapshot, error)
+	Restore(ctx context.Context, id, snapID string) error
 }
 
 // Driver runs environments' boxes.
 type Driver interface {
-	Create(ctx context.Context, env, token string, folders driver.Folders) error
-	Wake(ctx context.Context, env string) (addr string, err error)
-	Sleep(ctx context.Context, env string) error
-	Delete(ctx context.Context, env string) error
-	State(ctx context.Context, env string) (driver.State, error)
+	Wake(ctx context.Context, env store.Env) (addr string, err error)
+	Sleep(ctx context.Context, id string) error
+	Delete(ctx context.Context, id string) error
 	States(ctx context.Context) (map[string]driver.State, error)
-}
-
-// Env is an environment as the API reports it.
-type Env struct {
-	ID        string       `json:"id"`
-	Workspace string       `json:"workspace"` // on the host and in the box
-	Created   time.Time    `json:"created"`
-	State     driver.State `json:"state,omitempty"` // not in a lookup by path
-}
-
-// Snapshot is a snapshot as the API reports it.
-type Snapshot struct {
-	ID      string    `json:"id"`
-	Created time.Time `json:"created"`
-}
-
-func snapshotOf(s store.Snapshot) Snapshot {
-	return Snapshot{ID: s.ID, Created: s.Created}
 }
 
 const (
@@ -73,8 +50,17 @@ const (
 	dialTimeout = 10 * time.Second
 )
 
-// Server handles API requests. Changes of one environment run one at a
-// time; execs run alongside them.
+// errBadBody means a request's body isn't the JSON its route takes.
+var errBadBody = errors.New("bad request body")
+
+// Server handles API requests.
+//
+// Each environment has one lock, a channel so that waiting for it can be
+// cancelled. A change (create, delete, snapshot, delete snapshot, restore,
+// sleep) holds it to the end and outlives its request. A wake, or an exec
+// finding its box, holds it only while it finds or wakes the box. So a
+// running exec never holds up a change, a new exec waits for one, and
+// restore and sleep end running execs by stopping the box.
 type Server struct {
 	store  Store
 	driver Driver
@@ -88,18 +74,8 @@ type Server struct {
 
 // envState is what the server keeps in memory about one environment.
 type envState struct {
-	lock chan struct{} // holds a value for the whole of a change or a wake
+	lock chan struct{} // holds a value while someone changes or wakes it
 	addr string        // the box's exec address while it is known to be up; guarded by lock
-}
-
-// acquire waits until no one else holds e, or ctx is done.
-func (e *envState) acquire(ctx context.Context) error {
-	select {
-	case e.lock <- struct{}{}:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
 }
 
 func (e *envState) release() { <-e.lock }
@@ -112,16 +88,15 @@ func NewServer(st Store, drv Driver, log *slog.Logger) *Server {
 // Handler returns the API's routes.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /envs", s.list)
-	mux.HandleFunc("PUT /envs/{id}", s.create)
-	mux.HandleFunc("GET /envs/{id}", s.get)
-	mux.HandleFunc("DELETE /envs/{id}", s.delete)
-	mux.HandleFunc("POST /envs/{id}/snapshots", s.snapshot)
-	mux.HandleFunc("GET /envs/{id}/snapshots", s.snapshots)
-	mux.HandleFunc("DELETE /envs/{id}/snapshots/{snap}", s.deleteSnapshot)
-	mux.HandleFunc("POST /envs/{id}/restore", s.restore)
-	mux.HandleFunc("POST /envs/{id}/sleep", s.sleep)
-	mux.HandleFunc("POST /envs/{id}/wake", s.wake)
+	mux.HandleFunc("GET /envs", s.handle(s.list))
+	mux.HandleFunc("PUT /envs/{id}", s.handle(s.create))
+	mux.HandleFunc("DELETE /envs/{id}", s.handle(s.delete))
+	mux.HandleFunc("POST /envs/{id}/snapshots", s.handle(s.snapshot))
+	mux.HandleFunc("GET /envs/{id}/snapshots", s.handle(s.snapshots))
+	mux.HandleFunc("DELETE /envs/{id}/snapshots/{snap}", s.handle(s.deleteSnapshot))
+	mux.HandleFunc("POST /envs/{id}/restore", s.handle(s.restore))
+	mux.HandleFunc("POST /envs/{id}/sleep", s.handle(s.sleep))
+	mux.HandleFunc("POST /envs/{id}/wake", s.handle(s.wake))
 	// WebSocket handshakes are GET requests.
 	mux.HandleFunc("GET /envs/{id}/exec", s.exec)
 	return mux
@@ -131,54 +106,20 @@ func (s *Server) Handler() http.Handler {
 // has shut down and before closing the store.
 func (s *Server) Wait() { s.changes.Wait() }
 
-// change runs fn on environment id while no one else changes or wakes it.
-// Waiting can be cancelled by the client; fn can't.
-func (s *Server) change(r *http.Request, id string, fn func(ctx context.Context, e *envState) error) error {
-	e, err := s.env(id)
-	if err != nil {
-		return err
-	}
-	if err := e.acquire(r.Context()); err != nil {
-		return err
-	}
-	defer e.release()
-	s.changes.Add(1)
-	defer s.changes.Done()
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), changeTimeout)
-	defer cancel()
-	return fn(ctx, e)
-}
-
-// create makes an environment, filled from a tar body if there is one. The
-// query may name its repo and its workspace path.
-func (s *Server) create(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	opts := store.CreateOptions{Workspace: r.URL.Query().Get("path")}
-	if r.Header.Get("Content-Type") == "application/x-tar" {
-		opts.Seed = r.Body
-	}
-	var env store.Env
-	err := s.change(r, id, func(ctx context.Context, _ *envState) error {
-		var err error
-		if env, err = s.store.Create(ctx, id, opts); err != nil {
-			return err
+// handle serves a request with h and answers with what it returns: an error,
+// nothing (204), or a value as JSON.
+func (s *Server) handle(h func(*http.Request) (any, error)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		v, err := h(r)
+		switch {
+		case err != nil:
+			s.fail(w, r, err)
+		case v == nil:
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			writeJSON(w, http.StatusOK, v)
 		}
-		return s.driver.Create(ctx, id, env.BoxToken, driver.Folders{Workspace: env.Workspace, Claude: env.Claude, Git: env.Git})
-	})
-	if err != nil {
-		s.fail(w, r, err)
-		return
 	}
-	s.reply(w, r, s.envOf(r.Context(), env))
-}
-
-func (s *Server) get(w http.ResponseWriter, r *http.Request) {
-	env, err := s.store.Get(r.Context(), r.PathValue("id"))
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	s.reply(w, r, s.envOf(r.Context(), env))
 }
 
 // list returns all environments, or with ?path= the one whose workspace
@@ -187,24 +128,20 @@ func (s *Server) get(w http.ResponseWriter, r *http.Request) {
 // fern-claude looks its environment up by path before every Claude start,
 // so that answer comes from the index alone, without the box's state: a
 // state costs a Kubernetes call.
-func (s *Server) list(w http.ResponseWriter, r *http.Request) {
+func (s *Server) list(r *http.Request) (any, error) {
 	if path := r.URL.Query().Get("path"); path != "" {
-		out := []Env{}
 		env, err := s.store.FindByPath(r.Context(), path)
-		switch {
-		case err == nil:
-			out = append(out, wireEnv(env, ""))
-		case !errors.Is(err, store.ErrNotFound):
-			s.fail(w, r, err)
-			return
+		if errors.Is(err, store.ErrNotFound) {
+			return []Env{}, nil
 		}
-		s.reply(w, r, out)
-		return
+		if err != nil {
+			return nil, err
+		}
+		return []Env{toAPIEnv(env, "")}, nil
 	}
 	envs, err := s.store.List(r.Context())
 	if err != nil {
-		s.fail(w, r, err)
-		return
+		return nil, err
 	}
 	// One Kubernetes call for all of them, not one each.
 	states, err := s.driver.States(r.Context())
@@ -214,18 +151,35 @@ func (s *Server) list(w http.ResponseWriter, r *http.Request) {
 	out := make([]Env, 0, len(envs))
 	for _, env := range envs {
 		state, ok := states[env.ID]
-		if !ok {
-			state = "unknown"
+		switch {
+		case err != nil:
+			state = driver.Unknown
+		case !ok:
+			state = driver.Asleep // never woken: no box yet
 		}
-		out = append(out, wireEnv(env, state))
+		out = append(out, toAPIEnv(env, state))
 	}
-	s.reply(w, r, out)
+	return out, nil
+}
+
+// create makes an environment, filled from a tar body if there is one. Its
+// box comes with its first wake.
+func (s *Server) create(r *http.Request) (any, error) {
+	id := r.PathValue("id")
+	opts := store.CreateOptions{Workspace: r.URL.Query().Get("path")}
+	if r.Header.Get("Content-Type") == "application/x-tar" {
+		opts.Seed = r.Body
+	}
+	return nil, s.change(r.Context(), id, func(ctx context.Context, _ *envState) error {
+		_, err := s.store.Create(ctx, id, opts)
+		return err
+	})
 }
 
 // delete stops the box, then removes the disk.
-func (s *Server) delete(w http.ResponseWriter, r *http.Request) {
+func (s *Server) delete(r *http.Request) (any, error) {
 	id := r.PathValue("id")
-	err := s.change(r, id, func(ctx context.Context, e *envState) error {
+	return nil, s.change(r.Context(), id, func(ctx context.Context, e *envState) error {
 		if _, err := s.store.Get(ctx, id); err != nil {
 			return err
 		}
@@ -235,31 +189,15 @@ func (s *Server) delete(w http.ResponseWriter, r *http.Request) {
 		}
 		return s.store.Delete(ctx, id)
 	})
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
-// SnapshotRequest is the body of POST /envs/{id}/snapshots.
-type SnapshotRequest struct {
-	ID string `json:"id,omitempty"` // generated if empty
-	// Replace takes the snapshot again if one with this ID exists, instead
-	// of returning it. T3 reuses checkpoint names after a revert.
-	Replace bool `json:"replace,omitempty"`
-}
-
-func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
-	var req SnapshotRequest
-	if !s.decode(w, r, &req) {
-		return
-	}
-	if req.ID == "" {
-		req.ID = strings.ToLower(rand.Text())
+func (s *Server) snapshot(r *http.Request) (any, error) {
+	var req snapshotRequest
+	if err := decode(r, &req); err != nil {
+		return nil, err
 	}
 	id := r.PathValue("id")
-	err := s.change(r, id, func(ctx context.Context, _ *envState) error {
+	return nil, s.change(r.Context(), id, func(ctx context.Context, _ *envState) error {
 		if req.Replace {
 			if err := s.store.DeleteSnapshot(ctx, id, req.ID); err != nil {
 				return err
@@ -267,54 +205,38 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 		}
 		return s.store.Snapshot(ctx, id, req.ID)
 	})
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	s.reply(w, r, Snapshot{ID: req.ID})
 }
 
-func (s *Server) snapshots(w http.ResponseWriter, r *http.Request) {
+func (s *Server) snapshots(r *http.Request) (any, error) {
 	snaps, err := s.store.Snapshots(r.Context(), r.PathValue("id"))
 	if err != nil {
-		s.fail(w, r, err)
-		return
+		return nil, err
 	}
 	out := make([]Snapshot, 0, len(snaps))
 	for _, snap := range snaps {
-		out = append(out, snapshotOf(snap))
+		out = append(out, Snapshot{ID: snap.ID, Created: snap.Created})
 	}
-	s.reply(w, r, out)
+	return out, nil
 }
 
-// deleteSnapshot removes a snapshot; removing one that doesn't exist is not an
-// error.
-func (s *Server) deleteSnapshot(w http.ResponseWriter, r *http.Request) {
-	id, snap := r.PathValue("id"), r.PathValue("snap")
-	err := s.change(r, id, func(ctx context.Context, _ *envState) error {
-		return s.store.DeleteSnapshot(ctx, id, snap)
+// deleteSnapshot removes a snapshot; removing one that doesn't exist is not
+// an error.
+func (s *Server) deleteSnapshot(r *http.Request) (any, error) {
+	id, snapID := r.PathValue("id"), r.PathValue("snap")
+	return nil, s.change(r.Context(), id, func(ctx context.Context, _ *envState) error {
+		return s.store.DeleteSnapshot(ctx, id, snapID)
 	})
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
-
-// RestoreRequest is the body of POST /envs/{id}/restore.
-type RestoreRequest struct {
-	Snapshot string `json:"snapshot"`
 }
 
 // restore puts the environment to sleep and swaps its disk. It stays asleep;
 // the next exec wakes it on the restored disk.
-func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
-	var req RestoreRequest
-	if !s.decode(w, r, &req) {
-		return
+func (s *Server) restore(r *http.Request) (any, error) {
+	var req restoreRequest
+	if err := decode(r, &req); err != nil {
+		return nil, err
 	}
 	id := r.PathValue("id")
-	err := s.change(r, id, func(ctx context.Context, e *envState) error {
+	return nil, s.change(r.Context(), id, func(ctx context.Context, e *envState) error {
 		// Check the snapshot before stopping the box: a typo mustn't cost
 		// the agent its running processes.
 		snaps, err := s.store.Snapshots(ctx, id)
@@ -324,48 +246,38 @@ func (s *Server) restore(w http.ResponseWriter, r *http.Request) {
 		if !slices.ContainsFunc(snaps, func(snap store.Snapshot) bool { return snap.ID == req.Snapshot }) {
 			return fmt.Errorf("snapshot %s/%s: %w", id, req.Snapshot, store.ErrNotFound)
 		}
-		if err := s.sleepLocked(ctx, e, id); err != nil {
+		e.addr = ""
+		if err := s.driver.Sleep(ctx, id); err != nil {
 			return err
 		}
 		return s.store.Restore(ctx, id, req.Snapshot)
 	})
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) sleep(w http.ResponseWriter, r *http.Request) {
+func (s *Server) sleep(r *http.Request) (any, error) {
 	id := r.PathValue("id")
-	err := s.change(r, id, func(ctx context.Context, e *envState) error {
+	return nil, s.change(r.Context(), id, func(ctx context.Context, e *envState) error {
 		if _, err := s.store.Get(ctx, id); err != nil {
 			return err
 		}
-		return s.sleepLocked(ctx, e, id)
+		e.addr = ""
+		return s.driver.Sleep(ctx, id)
 	})
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) wake(w http.ResponseWriter, r *http.Request) {
-	id := r.PathValue("id")
-	if _, err := s.store.Get(r.Context(), id); err != nil {
-		s.fail(w, r, err)
-		return
+func (s *Server) wake(r *http.Request) (any, error) {
+	env, err := s.store.Get(r.Context(), r.PathValue("id"))
+	if err != nil {
+		return nil, err
 	}
-	if _, err := s.boxAddr(r.Context(), id); err != nil {
-		s.fail(w, r, err)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
+	_, err = s.wakeBox(r.Context(), env, "")
+	return nil, err
 }
 
 // exec runs a command in the environment's box, waking it first if needed,
-// by relaying the client's WebSocket to the box's.
+// by relaying the client's WebSocket to the box's. It wakes and dials the
+// box before taking the client's WebSocket, so that a failure is still an
+// HTTP error with a body Client.Exec can read.
 func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	env, err := s.store.Get(r.Context(), r.PathValue("id"))
 	if err != nil {
@@ -383,50 +295,43 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 		return // Accept has answered the client.
 	}
 	defer func() { _ = client.CloseNow() }()
-	if err := boxexec.Proxy(r.Context(), client, box); err != nil {
-		s.log.DebugContext(r.Context(), "exec relay ended", slog.String("env", env.ID), slog.Any("error", err))
-	}
+	_ = boxexec.Proxy(r.Context(), client, box) // it ends when either side does
 }
 
-// dialBox connects to the environment's box, waking it if needed.
+// dialBox connects to the environment's box, waking it if needed. A box seen
+// earlier may be gone (a crash, a deleted pod): then it is woken once more.
 func (s *Server) dialBox(ctx context.Context, env store.Env) (*websocket.Conn, error) {
-	var lastErr error
-	// A box we saw earlier may be gone (a crash, a deleted pod): then forget
-	// it and wake once more.
+	var stale string
+	var err error
 	for range 2 {
-		addr, err := s.boxAddr(ctx, env.ID)
-		if err != nil {
+		var addr string
+		if addr, err = s.wakeBox(ctx, env, stale); err != nil {
 			return nil, err
 		}
 		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
-		conn, err := boxexec.Dial(dialCtx, boxexec.URL(addr), env.BoxToken, nil)
+		conn, dialErr := boxexec.Dial(dialCtx, boxexec.URL(addr), env.BoxToken, nil)
 		cancel()
-		if err == nil {
+		if dialErr == nil {
 			return conn, nil
 		}
-		lastErr = err
-		if err := s.forget(ctx, env.ID, addr); err != nil {
-			return nil, err
-		}
+		stale, err = addr, dialErr
 	}
-	return nil, fmt.Errorf("connect to box %s: %w", env.ID, lastErr)
+	return nil, fmt.Errorf("connect to box %s: %w", env.ID, err)
 }
 
-// boxAddr returns the address of the environment's box, waking it if it
-// isn't known to be up.
-func (s *Server) boxAddr(ctx context.Context, id string) (string, error) {
-	e, err := s.env(id)
+// wakeBox returns the address of the environment's box, waking it unless it
+// is known to be up somewhere other than stale, which didn't answer.
+func (s *Server) wakeBox(ctx context.Context, env store.Env, stale string) (string, error) {
+	e, err := s.lock(ctx, env.ID)
 	if err != nil {
 		return "", err
 	}
-	if err := e.acquire(ctx); err != nil {
-		return "", err
-	}
 	defer e.release()
-	if e.addr != "" {
+	if e.addr != "" && e.addr != stale {
 		return e.addr, nil
 	}
-	addr, err := s.driver.Wake(ctx, id)
+	e.addr = ""
+	addr, err := s.driver.Wake(ctx, env)
 	if err != nil {
 		return "", err
 	}
@@ -434,101 +339,70 @@ func (s *Server) boxAddr(ctx context.Context, id string) (string, error) {
 	return addr, nil
 }
 
-// forget drops the box address addr, unless someone has replaced it.
-func (s *Server) forget(ctx context.Context, id, addr string) error {
-	e, err := s.env(id)
+// change runs fn on environment id while no one else changes or wakes it.
+// Waiting can be cancelled by the client; fn can't.
+func (s *Server) change(ctx context.Context, id string, fn func(ctx context.Context, e *envState) error) error {
+	e, err := s.lock(ctx, id)
 	if err != nil {
 		return err
 	}
-	if err := e.acquire(ctx); err != nil {
-		return err
-	}
 	defer e.release()
-	if e.addr == addr {
-		e.addr = ""
-	}
-	return nil
+	s.changes.Add(1)
+	defer s.changes.Done()
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), changeTimeout)
+	defer cancel()
+	return fn(ctx, e)
 }
 
-// sleepLocked stops the box; the caller holds e.
-func (s *Server) sleepLocked(ctx context.Context, e *envState, id string) error {
-	e.addr = ""
-	return s.driver.Sleep(ctx, id)
-}
-
-// env returns the in-memory state of environment id. It checks the ID, so
-// a client can't grow the map with names that will never be environments.
-func (s *Server) env(id string) (*envState, error) {
+// lock returns environment id's state once no one else changes or wakes it,
+// or ctx is done. The caller releases it. It checks the ID first, so a
+// client can't grow the map with names that will never be environments.
+func (s *Server) lock(ctx context.Context, id string) (*envState, error) {
 	if err := store.CheckEnvID(id); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	e, ok := s.envs[id]
 	if !ok {
 		e = &envState{lock: make(chan struct{}, 1)}
 		s.envs[id] = e
 	}
-	return e, nil
-}
-
-// envOf is env as the API reports it.
-func (s *Server) envOf(ctx context.Context, env store.Env) Env {
-	return wireEnv(env, s.state(ctx, env.ID))
-}
-
-func wireEnv(env store.Env, state driver.State) Env {
-	return Env{ID: env.ID, Workspace: env.Workspace, Created: env.Created, State: state}
-}
-
-// state is the box state for listings, where an error shouldn't fail the
-// whole answer.
-func (s *Server) state(ctx context.Context, id string) driver.State {
-	state, err := s.driver.State(ctx, id)
-	if err != nil {
-		s.log.WarnContext(ctx, "box state", slog.String("env", id), slog.Any("error", err))
-		return "unknown"
-	}
-	return state
-}
-
-func (s *Server) decode(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(r.Body).Decode(v); err != nil && !errors.Is(err, io.EOF) {
-		s.writeError(w, r, &Error{Code: CodeInvalid, Message: "bad request body: " + err.Error()})
-		return false
-	}
-	return true
-}
-
-func (s *Server) reply(w http.ResponseWriter, r *http.Request, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		s.log.DebugContext(r.Context(), "write reply", slog.Any("error", err))
+	s.mu.Unlock()
+	select {
+	case e.lock <- struct{}{}:
+		return e, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
-// fail answers with err as a typed error, and logs failures that aren't the
-// caller's fault.
+func decode(r *http.Request, v any) error {
+	if err := json.NewDecoder(r.Body).Decode(v); err != nil {
+		return fmt.Errorf("%w: %w", errBadBody, err)
+	}
+	return nil
+}
+
+// fail answers with err, and logs failures that aren't the caller's fault.
 func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
-	e := &Error{Code: CodeFailed, Message: err.Error()}
+	status := http.StatusInternalServerError
 	switch {
-	case errors.Is(err, store.ErrNotFound), errors.Is(err, driver.ErrNotFound):
-		e.Code = CodeNotFound
-	case errors.Is(err, store.ErrInvalidID), errors.Is(err, store.ErrInvalidPath):
-		e.Code = CodeInvalid
+	case errors.Is(err, store.ErrNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, store.ErrInvalidID), errors.Is(err, store.ErrInvalidPath), errors.Is(err, errBadBody):
+		status = http.StatusBadRequest
 	case errors.Is(err, context.Canceled) && r.Context().Err() != nil:
 		// The client gave up waiting; there is no one to answer.
 	default:
 		s.log.ErrorContext(r.Context(), "request failed",
 			slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Any("error", err))
 	}
-	s.writeError(w, r, e)
+	writeJSON(w, status, Error{Message: err.Error()})
 }
 
-func (s *Server) writeError(w http.ResponseWriter, r *http.Request, e *Error) {
+// writeJSON answers with v. A client that went away gets nothing more.
+func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(e.status())
-	if err := json.NewEncoder(w).Encode(e); err != nil {
-		s.log.DebugContext(r.Context(), "write error reply", slog.Any("error", err))
-	}
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
 }

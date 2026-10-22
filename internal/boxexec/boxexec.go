@@ -54,9 +54,9 @@ type Request struct {
 	// Dir is where the command runs: absolute, or relative to the
 	// workspace, which is the default.
 	Dir string `json:"dir,omitempty"`
-	// Env adds NAME=VALUE pairs to the box's environment, replacing any of
+	// Environ adds NAME=VALUE variables to the command's, replacing any of
 	// the same name.
-	Env []string `json:"env,omitempty"`
+	Environ []string `json:"environ,omitempty"`
 }
 
 // Streams connect a command to the client: its standard streams, terminal

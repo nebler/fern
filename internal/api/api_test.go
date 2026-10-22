@@ -13,7 +13,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -48,6 +47,7 @@ type fakeStore struct {
 	envs     map[string]store.Env
 	snaps    map[string][]store.Snapshot
 	changing map[string]bool
+	taken    int // snapshots taken, so each gets its own time
 }
 
 func newFakeStore() *fakeStore {
@@ -56,22 +56,17 @@ func newFakeStore() *fakeStore {
 	}
 }
 
-var validID = regexp.MustCompile(`^[a-z0-9-]+$`)
-
 func (f *fakeStore) Create(_ context.Context, id string, opts store.CreateOptions) (store.Env, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if !validID.MatchString(id) {
-		return store.Env{}, store.ErrInvalidID
-	}
 	if env, ok := f.envs[id]; ok {
 		return env, nil
 	}
-	path := opts.Workspace
-	if path == "" {
-		path = "/pool/envs/" + id + "/live"
+	workspace := opts.Workspace
+	if workspace == "" {
+		workspace = "/pool/envs/" + id + "/live"
 	}
-	env := store.Env{ID: id, Workspace: path, Created: created, BoxToken: boxToken}
+	env := store.Env{ID: id, Workspace: workspace, Created: created, BoxToken: boxToken}
 	f.envs[id] = env
 	return env, nil
 }
@@ -83,8 +78,8 @@ func (f *fakeStore) Get(_ context.Context, id string) (store.Env, error) {
 }
 
 func (f *fakeStore) getLocked(id string) (store.Env, error) {
-	if !validID.MatchString(id) {
-		return store.Env{}, store.ErrInvalidID
+	if err := store.CheckEnvID(id); err != nil {
+		return store.Env{}, err
 	}
 	env, ok := f.envs[id]
 	if !ok {
@@ -93,25 +88,17 @@ func (f *fakeStore) getLocked(id string) (store.Env, error) {
 	return env, nil
 }
 
+// FindByPath matches the workspace only: the store's own tests cover paths
+// inside it.
 func (f *fakeStore) FindByPath(_ context.Context, path string) (store.Env, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, env := range f.envs {
-		if path == env.Workspace || strings.HasPrefix(path, env.Workspace+"/") {
+		if env.Workspace == path {
 			return env, nil
 		}
 	}
 	return store.Env{}, fmt.Errorf("environment at %s: %w", path, store.ErrNotFound)
-}
-
-func (f *fakeStore) DeleteSnapshot(_ context.Context, env, snap string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, err := f.getLocked(env); err != nil {
-		return err
-	}
-	f.snaps[env] = slices.DeleteFunc(f.snaps[env], func(s store.Snapshot) bool { return s.ID == snap })
-	return nil
 }
 
 func (f *fakeStore) List(context.Context) ([]store.Env, error) {
@@ -132,47 +119,61 @@ func (f *fakeStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-func (f *fakeStore) Snapshot(_ context.Context, env, snap string) error {
+func (f *fakeStore) Snapshot(_ context.Context, id, snapID string) error {
 	f.mu.Lock()
-	if f.changing[env] {
+	if f.changing[id] {
 		f.mu.Unlock()
-		return fmt.Errorf("snapshot %s/%s overlaps another change", env, snap)
+		return fmt.Errorf("snapshot %s/%s overlaps another change", id, snapID)
 	}
-	f.changing[env] = true
+	f.changing[id] = true
 	f.mu.Unlock()
 	// Give an overlapping call the chance to run.
 	runtime.Gosched()
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.changing[env] = false
-	if _, err := f.getLocked(env); err != nil {
+	f.changing[id] = false
+	if _, err := f.getLocked(id); err != nil {
 		return err
 	}
-	if !slices.ContainsFunc(f.snaps[env], func(s store.Snapshot) bool { return s.ID == snap }) {
-		f.snaps[env] = append(f.snaps[env], store.Snapshot{ID: snap, Created: created})
+	if snapID == "" {
+		return fmt.Errorf("snapshot %q: %w", snapID, store.ErrInvalidID)
+	}
+	if !slices.ContainsFunc(f.snaps[id], func(s store.Snapshot) bool { return s.ID == snapID }) {
+		f.taken++
+		f.snaps[id] = append(f.snaps[id], store.Snapshot{ID: snapID, Created: created.Add(time.Duration(f.taken) * time.Second)})
 	}
 	return nil
 }
 
-func (f *fakeStore) Snapshots(_ context.Context, env string) ([]store.Snapshot, error) {
+func (f *fakeStore) DeleteSnapshot(_ context.Context, id, snapID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if _, err := f.getLocked(env); err != nil {
-		return nil, err
-	}
-	return slices.Clone(f.snaps[env]), nil
-}
-
-func (f *fakeStore) Restore(_ context.Context, env, snap string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if _, err := f.getLocked(env); err != nil {
+	if _, err := f.getLocked(id); err != nil {
 		return err
 	}
-	if slices.ContainsFunc(f.snaps[env], func(s store.Snapshot) bool { return s.ID == snap }) {
+	f.snaps[id] = slices.DeleteFunc(f.snaps[id], func(s store.Snapshot) bool { return s.ID == snapID })
+	return nil
+}
+
+func (f *fakeStore) Snapshots(_ context.Context, id string) ([]store.Snapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, err := f.getLocked(id); err != nil {
+		return nil, err
+	}
+	return slices.Clone(f.snaps[id]), nil
+}
+
+func (f *fakeStore) Restore(_ context.Context, id, snapID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if _, err := f.getLocked(id); err != nil {
+		return err
+	}
+	if slices.ContainsFunc(f.snaps[id], func(s store.Snapshot) bool { return s.ID == snapID }) {
 		return nil
 	}
-	return fmt.Errorf("snapshot %s/%s: %w", env, snap, store.ErrNotFound)
+	return fmt.Errorf("snapshot %s/%s: %w", id, snapID, store.ErrNotFound)
 }
 
 // newAPI serves the API over a unix socket, with a fake store and a fake
@@ -217,46 +218,51 @@ func newAPIWith(t *testing.T, wrap func(*driver.Fake) api.Driver) (*api.Client, 
 
 func mustCreate(t *testing.T, c *api.Client, id string) {
 	t.Helper()
-	if _, err := c.Create(t.Context(), id, api.CreateOptions{}); err != nil {
+	if err := c.Create(t.Context(), id, "", nil); err != nil {
 		t.Fatalf("Create(%s) error: %v", id, err)
 	}
 }
 
-// errCode returns the code of an *api.Error in err's chain, or "".
-func errCode(err error) string {
+// status returns the HTTP status of an *api.Error in err's chain, or 0.
+func status(err error) int {
 	var apiErr *api.Error
 	if !errors.As(err, &apiErr) {
-		return ""
+		return 0
 	}
-	return apiErr.Code
+	return apiErr.Status
 }
 
-func TestCreateGetList(t *testing.T) {
-	c, _ := newAPI(t)
-	ctx := t.Context()
-	want := api.Env{ID: "demo", Workspace: "/pool/envs/demo/live", Created: created, State: driver.Asleep}
-
-	for range 2 { // creating again returns the same environment
-		got, err := c.Create(ctx, "demo", api.CreateOptions{})
-		if err != nil {
-			t.Fatalf("Create(demo) error: %v", err)
-		}
-		if diff := cmp.Diff(want, got); diff != "" {
-			t.Errorf("Create(demo) mismatch (-want +got):\n%s", diff)
-		}
-	}
-	got, err := c.Get(ctx, "demo")
-	if err != nil {
-		t.Fatalf("Get(demo) error: %v", err)
-	}
-	if diff := cmp.Diff(want, got); diff != "" {
-		t.Errorf("Get(demo) mismatch (-want +got):\n%s", diff)
-	}
-	list, err := c.List(ctx)
+// stateOf returns the state List reports for environment id.
+func stateOf(t *testing.T, c *api.Client, id string) driver.State {
+	t.Helper()
+	envs, err := c.List(t.Context())
 	if err != nil {
 		t.Fatalf("List() error: %v", err)
 	}
-	if diff := cmp.Diff([]api.Env{want}, list); diff != "" {
+	i := slices.IndexFunc(envs, func(e api.Env) bool { return e.ID == id })
+	if i < 0 {
+		t.Fatalf("List() has no %s", id)
+	}
+	return envs[i].State
+}
+
+func run(t *testing.T, c *api.Client, id string, argv ...string) {
+	t.Helper()
+	if _, err := c.Exec(t.Context(), id, boxexec.Request{Argv: argv}, boxexec.Streams{Stdout: io.Discard, Stderr: io.Discard}); err != nil {
+		t.Fatalf("Exec(%s, %q) error: %v", id, argv, err)
+	}
+}
+
+func TestCreateList(t *testing.T) {
+	c, _ := newAPI(t)
+	mustCreate(t, c, "demo")
+	mustCreate(t, c, "demo") // creating again changes nothing
+	list, err := c.List(t.Context())
+	if err != nil {
+		t.Fatalf("List() error: %v", err)
+	}
+	want := []api.Env{{ID: "demo", Workspace: "/pool/envs/demo/live", Created: created, State: driver.Asleep}}
+	if diff := cmp.Diff(want, list); diff != "" {
 		t.Errorf("List() mismatch (-want +got):\n%s", diff)
 	}
 }
@@ -265,32 +271,25 @@ func TestErrors(t *testing.T) {
 	c, _ := newAPI(t)
 	mustCreate(t, c, "demo")
 	tests := []struct {
-		name     string
-		call     func(ctx context.Context) error
-		wantCode string
+		name       string
+		call       func(ctx context.Context) error
+		wantStatus int
 	}{
-		{"get unknown", func(ctx context.Context) error { _, err := c.Get(ctx, "nope"); return err }, api.CodeNotFound},
-		{"get invalid", func(ctx context.Context) error { _, err := c.Get(ctx, "Bad_ID"); return err }, api.CodeInvalid},
-		{"create invalid", func(ctx context.Context) error {
-			_, err := c.Create(ctx, "Bad_ID", api.CreateOptions{})
-			return err
-		}, api.CodeInvalid},
-		{"delete unknown", func(ctx context.Context) error { return c.Delete(ctx, "nope") }, api.CodeNotFound},
-		{"snapshot unknown", func(ctx context.Context) error {
-			_, err := c.Snapshot(ctx, "nope", "s1")
-			return err
-		}, api.CodeNotFound},
-		{"restore unknown snapshot", func(ctx context.Context) error { return c.Restore(ctx, "demo", "nope") }, api.CodeNotFound},
-		{"wake unknown", func(ctx context.Context) error { return c.Wake(ctx, "nope") }, api.CodeNotFound},
+		{"create invalid", func(ctx context.Context) error { return c.Create(ctx, "Bad_ID", "", nil) }, http.StatusBadRequest},
+		{"delete unknown", func(ctx context.Context) error { return c.Delete(ctx, "nope") }, http.StatusNotFound},
+		{"snapshot unknown", func(ctx context.Context) error { return c.Snapshot(ctx, "nope", "s1", false) }, http.StatusNotFound},
+		{"snapshot without a name", func(ctx context.Context) error { return c.Snapshot(ctx, "demo", "", false) }, http.StatusBadRequest},
+		{"restore unknown snapshot", func(ctx context.Context) error { return c.Restore(ctx, "demo", "nope") }, http.StatusNotFound},
+		{"wake unknown", func(ctx context.Context) error { return c.Wake(ctx, "nope") }, http.StatusNotFound},
 		{"exec unknown", func(ctx context.Context) error {
 			_, err := c.Exec(ctx, "nope", boxexec.Request{Argv: []string{"true"}}, boxexec.Streams{Stdout: io.Discard, Stderr: io.Discard})
 			return err
-		}, api.CodeNotFound},
+		}, http.StatusNotFound},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := tt.call(t.Context()); errCode(err) != tt.wantCode {
-				t.Errorf("error = %v, want code %q", err, tt.wantCode)
+			if err := tt.call(t.Context()); status(err) != tt.wantStatus {
+				t.Errorf("error = %v, want status %d", err, tt.wantStatus)
 			}
 		})
 	}
@@ -300,46 +299,23 @@ func TestSnapshotRestore(t *testing.T) {
 	c, drv := newAPI(t)
 	ctx := t.Context()
 	mustCreate(t, c, "demo")
-
-	snap, err := c.Snapshot(ctx, "demo", "s1")
-	if err != nil {
+	if err := c.Snapshot(ctx, "demo", "s1", false); err != nil {
 		t.Fatalf("Snapshot(demo, s1) error: %v", err)
 	}
-	gen, err := c.Snapshot(ctx, "demo", "")
-	if err != nil {
-		t.Fatalf("Snapshot(demo, \"\") error: %v", err)
-	}
-	if gen.ID == "" {
-		t.Errorf("Snapshot(demo, \"\") ID is empty, want a generated one")
-	}
-	snaps, err := c.Snapshots(ctx, "demo")
-	if err != nil {
-		t.Fatalf("Snapshots(demo) error: %v", err)
-	}
-	var ids []string
-	for _, s := range snaps {
-		ids = append(ids, s.ID)
-	}
-	if diff := cmp.Diff([]string{snap.ID, gen.ID}, ids); diff != "" {
-		t.Errorf("Snapshots(demo) mismatch (-want +got):\n%s", diff)
-	}
-
 	if err := c.Wake(ctx, "demo"); err != nil {
 		t.Fatalf("Wake(demo) error: %v", err)
 	}
-	if env, err := c.Get(ctx, "demo"); err != nil || env.State != driver.Running {
-		t.Fatalf("after Wake: Get(demo) = %v, %v, want state %s", env.State, err, driver.Running)
+	if got := stateOf(t, c, "demo"); got != driver.Running {
+		t.Fatalf("after Wake: state %s, want %s", got, driver.Running)
 	}
 	if err := c.Restore(ctx, "demo", "s1"); err != nil {
 		t.Fatalf("Restore(demo, s1) error: %v", err)
 	}
-	if env, err := c.Get(ctx, "demo"); err != nil || env.State != driver.Asleep {
-		t.Errorf("after Restore: Get(demo) = %v, %v, want state %s", env.State, err, driver.Asleep)
+	if got := stateOf(t, c, "demo"); got != driver.Asleep {
+		t.Errorf("after Restore: state %s, want %s", got, driver.Asleep)
 	}
 	// The next exec must wake the box again, not reuse the old address.
-	if _, err := c.Exec(ctx, "demo", boxexec.Request{Argv: []string{"true"}}, boxexec.Streams{Stdout: io.Discard, Stderr: io.Discard}); err != nil {
-		t.Fatalf("Exec(demo) after Restore error: %v", err)
-	}
+	run(t, c, "demo", "true")
 	if got := drv.Wakes(); got != 2 {
 		t.Errorf("Wakes() = %d, want 2", got)
 	}
@@ -363,13 +339,13 @@ func TestExecWakesOnce(t *testing.T) {
 			t.Errorf("after exec #%d: Wakes() = %d, want 1", i+1, got)
 		}
 	}
-	if env, err := c.Get(t.Context(), "demo"); err != nil || env.State != driver.Running {
-		t.Errorf("Get(demo) = %v, %v, want state %s", env.State, err, driver.Running)
+	if got := stateOf(t, c, "demo"); got != driver.Running {
+		t.Errorf("state %s, want %s", got, driver.Running)
 	}
 }
 
-// A large prompt on stdin reaches the box in frames of up to 32 KiB, more than
-// a WebSocket reads by default.
+// A large prompt on stdin reaches the box in frames of up to 64 KiB, more
+// than a WebSocket reads by default.
 func TestExecLargeStdin(t *testing.T) {
 	c, _ := newAPI(t)
 	mustCreate(t, c, "demo")
@@ -391,11 +367,11 @@ func TestDelete(t *testing.T) {
 	if err := c.Delete(ctx, "demo"); err != nil {
 		t.Fatalf("Delete(demo) error: %v", err)
 	}
-	if _, err := c.Get(ctx, "demo"); errCode(err) != api.CodeNotFound {
-		t.Errorf("Get(demo) after Delete error = %v, want code %s", err, api.CodeNotFound)
-	}
 	if list, err := c.List(ctx); err != nil || len(list) != 0 {
 		t.Errorf("List() after Delete = %v, %v, want none", list, err)
+	}
+	if err := c.Delete(ctx, "demo"); status(err) != http.StatusNotFound {
+		t.Errorf("Delete(demo) again error = %v, want status %d", err, http.StatusNotFound)
 	}
 }
 
@@ -404,7 +380,7 @@ func TestDelete(t *testing.T) {
 func TestLifecycleRepeats(t *testing.T) {
 	c, drv := newAPI(t)
 	ctx := t.Context()
-	create := func() error { _, err := c.Create(ctx, "demo", api.CreateOptions{}); return err }
+	create := func() error { return c.Create(ctx, "demo", "", nil) }
 	wake := func() error { return c.Wake(ctx, "demo") }
 	sleep := func() error { return c.Sleep(ctx, "demo") }
 	steps := []struct {
@@ -426,24 +402,14 @@ func TestLifecycleRepeats(t *testing.T) {
 		if err := step.do(); err != nil {
 			t.Fatalf("%s: error %v", step.name, err)
 		}
-		env, err := c.Get(ctx, "demo")
-		if err != nil {
-			t.Fatalf("%s: Get(demo) error: %v", step.name, err)
+		if got := stateOf(t, c, "demo"); got != step.wantState || drv.Wakes() != step.wantWakes {
+			t.Errorf("%s: state %s, %d wakes; want %s, %d", step.name, got, drv.Wakes(), step.wantState, step.wantWakes)
 		}
-		if env.State != step.wantState || drv.Wakes() != step.wantWakes {
-			t.Errorf("%s: state %s, %d wakes; want %s, %d", step.name, env.State, drv.Wakes(), step.wantState, step.wantWakes)
-		}
-	}
-	if err := c.Delete(ctx, "demo"); err != nil {
-		t.Fatalf("Delete(demo) error: %v", err)
-	}
-	if _, err := c.Get(ctx, "demo"); errCode(err) != api.CodeNotFound {
-		t.Errorf("Get(demo) after Delete error = %v, want code %s", err, api.CodeNotFound)
 	}
 }
 
-// Concurrent mutations of one environment are serialized by the server and
-// must not race (run with -race).
+// Concurrent changes of one environment are run one at a time: the fake
+// store fails a snapshot that overlaps another.
 func TestConcurrentSnapshots(t *testing.T) {
 	c, _ := newAPI(t)
 	ctx := t.Context()
@@ -456,7 +422,7 @@ func TestConcurrentSnapshots(t *testing.T) {
 	for i := range n {
 		wg.Go(func() {
 			env, snap := envs[i%len(envs)], fmt.Sprintf("s%02d", i)
-			if _, err := c.Snapshot(ctx, env, snap); err != nil {
+			if err := c.Snapshot(ctx, env, snap, false); err != nil {
 				t.Errorf("Snapshot(%s, %s) error: %v", env, snap, err)
 			}
 		})
@@ -490,11 +456,11 @@ func TestRestoreUnknownKeepsBox(t *testing.T) {
 	if err := c.Wake(ctx, "demo"); err != nil {
 		t.Fatalf("Wake(demo) error: %v", err)
 	}
-	if err := c.Restore(ctx, "demo", "typo"); errCode(err) != api.CodeNotFound {
-		t.Fatalf("Restore(demo, typo) error = %v, want code %s", err, api.CodeNotFound)
+	if err := c.Restore(ctx, "demo", "typo"); status(err) != http.StatusNotFound {
+		t.Fatalf("Restore(demo, typo) error = %v, want status %d", err, http.StatusNotFound)
 	}
-	if env, err := c.Get(ctx, "demo"); err != nil || env.State != driver.Running {
-		t.Errorf("after a failed Restore: Get(demo) = %v, %v, want state %s", env.State, err, driver.Running)
+	if got := stateOf(t, c, "demo"); got != driver.Running {
+		t.Errorf("after a failed Restore: state %s, want %s", got, driver.Running)
 	}
 	if got := drv.Wakes(); got != 1 {
 		t.Errorf("Wakes() = %d, want 1", got)
@@ -508,31 +474,34 @@ type blockingDelete struct {
 	release chan struct{}
 }
 
-func (d *blockingDelete) Delete(ctx context.Context, env string) error {
+func (d *blockingDelete) Delete(ctx context.Context, id string) error {
 	close(d.started)
 	<-d.release
-	return d.Fake.Delete(ctx, env)
+	return d.Fake.Delete(ctx, id)
 }
 
 // A client that goes away must not leave a delete half done: the box gone
-// but the environment still listed.
+// but the environment still listed. The handler runs here, so the client's
+// cancel always comes before the delete goes on.
 func TestDeleteOutlivesClient(t *testing.T) {
-	d := &blockingDelete{started: make(chan struct{}), release: make(chan struct{})}
-	c, _ := newAPIWith(t, func(f *driver.Fake) api.Driver { d.Fake = f; return d })
-	mustCreate(t, c, "demo")
-
+	st := newFakeStore()
+	if _, err := st.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	d := &blockingDelete{Fake: driver.NewFake(""), started: make(chan struct{}), release: make(chan struct{})}
+	h := api.NewServer(st, d, slog.New(slog.DiscardHandler)).Handler()
 	ctx, cancel := context.WithCancel(t.Context())
-	errc := make(chan error, 1)
-	go func() { errc <- c.Delete(ctx, "demo") }()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequestWithContext(ctx, http.MethodDelete, "/envs/demo", nil))
+	}()
 	<-d.started
 	cancel()
-	if err := <-errc; !errors.Is(err, context.Canceled) {
-		t.Fatalf("Delete(demo) with a cancelled client error = %v, want %v", err, context.Canceled)
-	}
 	close(d.release)
-	// The next change waits for the delete, which must have finished.
-	if _, err := c.Snapshot(t.Context(), "demo", "s1"); errCode(err) != api.CodeNotFound {
-		t.Errorf("Snapshot(demo) after the delete error = %v, want code %s", err, api.CodeNotFound)
+	<-done
+	if _, err := st.Get(t.Context(), "demo"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("Get(demo) after a delete whose client went away error = %v, want %v", err, store.ErrNotFound)
 	}
 }
 
@@ -544,7 +513,7 @@ type staleWake struct {
 	waked bool
 }
 
-func (d *staleWake) Wake(ctx context.Context, env string) (string, error) {
+func (d *staleWake) Wake(ctx context.Context, env store.Env) (string, error) {
 	addr, err := d.Fake.Wake(ctx, env)
 	if err == nil && !d.waked {
 		d.waked = true
@@ -590,17 +559,14 @@ func TestFindByPath(t *testing.T) {
 	})
 	ctx := t.Context()
 	const path = "/pool/worktrees/fern/main"
-	if _, err := c.Create(ctx, "wt", api.CreateOptions{Path: path}); err != nil {
+	if err := c.Create(ctx, "wt", path, nil); err != nil {
 		t.Fatalf("Create(wt, %s) error: %v", path, err)
 	}
-	for _, p := range []string{path, path + "/src/pkg"} {
-		env, err := c.FindByPath(ctx, p)
-		if err != nil || env.ID != "wt" || env.Workspace != path {
-			t.Errorf("FindByPath(%s) = %+v, %v, want wt at %s", p, env, err, path)
-		}
+	if env, err := c.FindByPath(ctx, path); err != nil || env.ID != "wt" || env.Workspace != path {
+		t.Errorf("FindByPath(%s) = %+v, %v, want wt at %s", path, env, err, path)
 	}
-	if _, err := c.FindByPath(ctx, "/pool/worktrees/fern"); errCode(err) != api.CodeNotFound {
-		t.Errorf("FindByPath(parent) error = %v, want code %s", err, api.CodeNotFound)
+	if _, err := c.FindByPath(ctx, "/pool/worktrees/fern"); status(err) != http.StatusNotFound {
+		t.Errorf("FindByPath(parent) error = %v, want status %d", err, http.StatusNotFound)
 	}
 	// fern-claude looks its environment up before every Claude start.
 	if n := drv.n.Load(); n != 0 {
@@ -608,36 +574,35 @@ func TestFindByPath(t *testing.T) {
 	}
 }
 
-// T3 deletes checkpoints after a revert and reuses their names.
+// T3 deletes checkpoints after a revert and reuses their names: --replace
+// must take the snapshot again.
 func TestSnapshotDeleteAndReplace(t *testing.T) {
 	c, _ := newAPI(t)
 	ctx := t.Context()
 	mustCreate(t, c, "demo")
 	for _, id := range []string{"s1", "s2"} {
-		if _, err := c.Snapshot(ctx, "demo", id); err != nil {
+		if err := c.Snapshot(ctx, "demo", id, false); err != nil {
 			t.Fatalf("Snapshot(demo, %s) error: %v", id, err)
 		}
 	}
-	for range 2 { // deleting again is fine
-		if err := c.DeleteSnapshot(ctx, "demo", "s2"); err != nil {
-			t.Fatalf("DeleteSnapshot(demo, s2) error: %v", err)
-		}
+	if err := c.DeleteSnapshot(ctx, "demo", "s2"); err != nil {
+		t.Fatalf("DeleteSnapshot(demo, s2) error: %v", err)
 	}
-	if _, err := c.ReplaceSnapshot(ctx, "demo", "s1"); err != nil {
-		t.Fatalf("ReplaceSnapshot(demo, s1) error: %v", err)
+	old, err := c.Snapshots(ctx, "demo")
+	if err != nil {
+		t.Fatalf("Snapshots(demo) error: %v", err)
+	}
+	if err := c.Snapshot(ctx, "demo", "s1", true); err != nil {
+		t.Fatalf("Snapshot(demo, s1, replace) error: %v", err)
 	}
 	snaps, err := c.Snapshots(ctx, "demo")
 	if err != nil {
 		t.Fatalf("Snapshots(demo) error: %v", err)
 	}
-	var ids []string
-	for _, s := range snaps {
-		ids = append(ids, s.ID)
+	if len(old) != 1 || len(snaps) != 1 || snaps[0].ID != "s1" || snaps[0].Created.Equal(old[0].Created) {
+		t.Errorf("Snapshots(demo) = %v after replacing %v, want s1 taken again", snaps, old)
 	}
-	if diff := cmp.Diff([]string{"s1"}, ids); diff != "" {
-		t.Errorf("Snapshots(demo) mismatch (-want +got):\n%s", diff)
-	}
-	if err := c.DeleteSnapshot(ctx, "nope", "s1"); errCode(err) != api.CodeNotFound {
-		t.Errorf("DeleteSnapshot(nope, s1) error = %v, want code %s", err, api.CodeNotFound)
+	if err := c.DeleteSnapshot(ctx, "nope", "s1"); status(err) != http.StatusNotFound {
+		t.Errorf("DeleteSnapshot(nope, s1) error = %v, want status %d", err, http.StatusNotFound)
 	}
 }
