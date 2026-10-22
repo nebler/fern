@@ -93,7 +93,10 @@ func (s *Store) Snapshots(ctx context.Context, id string) ([]Snapshot, error) {
 		snap.Created = time.Unix(created, 0).UTC()
 		snaps = append(snaps, snap)
 	}
-	return snaps, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list snapshots of %s: %w", id, err)
+	}
+	return snaps, nil
 }
 
 // Restore replaces environment id's workspace with a writable copy of

@@ -199,7 +199,10 @@ func (s *Store) List(ctx context.Context) ([]Env, error) {
 		}
 		envs = append(envs, env)
 	}
-	return envs, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list environments: %w", err)
+	}
+	return envs, nil
 }
 
 // FindByPath returns the environment whose workspace is path or holds it.

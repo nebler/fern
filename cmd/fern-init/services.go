@@ -34,6 +34,7 @@ func loadServices(path string) (map[string]service, error) {
 	return parseServices(data)
 }
 
+// parseServices parses services.yaml; every service needs a run command.
 func parseServices(data []byte) (map[string]service, error) {
 	var f struct {
 		Services map[string]service `json:"services"`
@@ -127,6 +128,7 @@ func (s *supervisor) stop(ctx context.Context) {
 	<-s.done
 }
 
+// runService runs svc once, until it exits or ctx is done.
 func runService(ctx context.Context, svc service, dir string, env []string) error {
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", svc.Run)
 	cmd.Dir, cmd.Env = dir, env

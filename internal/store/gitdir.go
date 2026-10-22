@@ -15,14 +15,20 @@ import (
 // Nothing outside repos/ is read: the files there are T3's.
 func (s *Store) repoGitDir(workspace string) (string, error) {
 	own, err := pathIn(workspace, ".git", "gitdir: ")
-	if err != nil || own == "" || !within(s.repos(), own) || !isRealDir(own) {
+	if err != nil {
 		return "", err
 	}
+	if own == "" || !within(s.repos(), own) || !isRealDir(own) {
+		return "", nil
+	}
 	common, err := pathIn(own, "commondir", "")
+	if err != nil {
+		return "", err
+	}
 	// The box gets exactly this folder, so it must be what it says: under
 	// repos/, holding the worktree's own folder, with no symlink on the way.
-	if err != nil || common == "" || !within(s.repos(), common) || !within(common, own) || !isRealDir(common) {
-		return "", err
+	if common == "" || !within(s.repos(), common) || !within(common, own) || !isRealDir(common) {
+		return "", nil
 	}
 	return common, nil
 }

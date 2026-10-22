@@ -271,6 +271,9 @@ func poll(ctx context.Context, interval, timeout time.Duration, cond wait.Condit
 	return err
 }
 
+// podTemplate returns the pod env's box runs as: fern-init, with the
+// environment's folders at their own paths, Claude's login and the box's
+// limits.
 func (d *Driver) podTemplate(env store.Env) sandboxv1.PodTemplate {
 	vars := []corev1.EnvVar{
 		{Name: "FERN_BOX_TOKEN", Value: env.BoxToken},

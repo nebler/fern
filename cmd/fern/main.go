@@ -130,6 +130,7 @@ func lookup(name string) subcommand {
 	return subcommands()[i]
 }
 
+// parse turns the CLI's arguments into a command.
 func parse(args []string) (command, error) {
 	var names []string
 	for _, sc := range subcommands() {
