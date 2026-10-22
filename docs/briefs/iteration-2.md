@@ -23,6 +23,8 @@
 
 T3's server in a pod with the pool and the daemon socket, the checkpoint hook in a patched build, one real turn through `fern-claude`, a revert that brings back Postgres. Rough is fine; the goal is to learn the real interface. Blocker research (8 agents, 2026-10-21) feeds this part.
 
+**The patch (2026-10-22):** one new file wrapping T3's `CheckpointStore` (capture → `fern snapshot --replace`, restore → `fern restore` before T3's git restore, delete → `fern rmsnap`), plus one line in `server.ts`. The Claude program is a T3 setting and MCP goes through fern-init, so neither needs a patch. Users never apply it: it ships inside Fern's T3 image, and the Mac app pairs with that server. Keep notes on what the hook needed to carry; they shape the upstream proposal (architecture §15.1).
+
 ### What the blocker research settled (8 agents, 2026-10-21)
 
 | Question | Answer | What it means for Part B |

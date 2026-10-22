@@ -402,6 +402,19 @@ Your Mac or phone only runs the T3 app. More nodes: `fern join <token>`.
 
 **The environment ID is derived from T3's thread ID.** T3's worktree path *is* the environment's `live/`. Fern **never snapshots T3's own database.** Rewinding it would resurrect revoked logins; T3 keeps its own history.
 
+### 15.1 How the hook reaches a user
+Nobody applies a patch by hand. T3's server has to run next to the pool anyway (it runs git and the agent on the worktree paths), so Fern runs it as a pod from an image Fern builds (§14.1). The user installs Fern, opens the T3 app on their Mac and pairs it with the printed link (Settings → Connections). From then on checkpoints and reverts also cover dependencies and the database.
+
+The cost moves to Fern: the image follows T3's releases, and the hook can break when T3 changes. Three ways to carry it:
+
+| Option | What it is | Verdict |
+|---|---|---|
+| **A. Patched image** | ~100 lines: a layer that wraps `CheckpointStore` (`apps/server/src/checkpointing/CheckpointStore.ts`), swapped in at one line in `server.ts` | The spike and the MVP; only Fern's image carries it |
+| **B. Upstream hook** | A general T3 setting (~50 lines): a command T3 runs when it takes, restores or deletes a checkpoint, with the cwd and the ref | The goal: stock T3, Fern only sets the setting. Needs T3's maintainers |
+| **C. No T3 change** | git's `reference-transaction` hook sees saves and deletes (`git update-ref` on `refs/t3/…/checkpoints`) | Fallback only: a restore (`git restore --source <commit>`) moves no ref and fires no hook, so it would need a `git` shim in the image, which breaks when T3's git calls change |
+
+A first, then propose B with what the spike learned (roadmap week 8). C only if B is refused.
+
 ---
 
 ## 16. Observability
