@@ -279,6 +279,7 @@ services:
   envs/<id>/live/                writable workspace of an environment without a path
       <repo files> node_modules/ .fern/pg/
   envs/<id>/snaps/<snapshot>/    read-only
+  envs/<id>/claude/              Claude's state (CLAUDE_CONFIG_DIR): never snapshotted, so a restore keeps the transcripts
   worktrees/<repo>/<name>/       writable workspace of an environment at a path: T3's worktrees
   state/fern.sqlite              index + op log (on the same disk, not inside any snapshot)
   userdata/ caches/ tools/       T3's own state: T3's home is the pool, so its worktrees land in worktrees/
@@ -307,7 +308,7 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
 |---|---|
 | Image | read-only base image with common toolchains (Node, Bun, pnpm, Python, uv, git, gh, Postgres binaries, agent CLIs pinned to tested versions) |
 | PID 1 | `fern-init`: services, exec/PTY server **with reattachable sessions** (agent terminals survive daemon restarts and upgrades), activity reporting, graceful shutdown |
-| Mounts | `live/` → the workspace at **the same path T3 uses**; `live/.home/*` → `$HOME` dotfiles; credentials from a secret mount added by `resume`, **outside `live/`** |
+| Mounts | `live/` → the workspace at **the same path T3 uses**; Claude's folder `envs/<id>/claude/` → `CLAUDE_CONFIG_DIR` at the same path, **outside `live/`**, so a restore doesn't rewind its transcripts; the main repository's git folder **read-only**, so git works and can't change the repository's config or hooks; agent logins as environment variables from a Secret |
 | User | non-root, the same uid as T3 so file ownership matches; **user namespaces on** (GA in Kubernetes 1.36), so a box escape isn't that user on the host |
 | Runtime | from the class: `crun`/`runc` (light), `runsc` / gVisor (untrusted), a `docker` class for repos that need `docker compose` inside (gVisor or Kata) |
 | Limits | CPU and memory from the class (cgroups / pod resources); fork count and TTL caps |
@@ -347,13 +348,13 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
   - **boxes are untrusted**
   - T3 and the CLI are trusted local callers
   - agents via MCP get **a token scoped to their own environment**
-- **Mounting is the permission.** A box sees only its own `live/`, only through the CSI driver, never raw host paths.
+- **Mounting is the permission.** A box sees only its own workspace and Claude folder, and its repository's git folder read-only, only through the CSI driver, never raw host paths.
 - **The CSI driver authorizes every mount:** it only mounts an environment for a pod owned by that `Environment` (checked from the requesting pod's identity). Without this, any pod could name another environment and get its disk.
 - **An admission policy limits the daemon:** it may only create `Sandbox` objects pinned to its own node (node-bound service-account tokens) and only with allowed runtimes.
 - **User namespaces** for every box.
 - **Credentials:**
-  - agent logins (`CLAUDE_CODE_OAUTH_TOKEN`, a short-lived Codex access token from the login the daemon refreshes) are injected by `resume` from a secret store (§13.1)
-  - **never in `live/`, golden or snapshots** (golden builds are scanned). Claude keeps `~/.claude/.credentials.json` and Codex keeps `auth.json` inside folders that otherwise live in `live/`, so those files are bind-mounted from outside (or kept in a nested subvolume, which btrfs snapshots skip)
+  - agent logins (`CLAUDE_CODE_OAUTH_TOKEN`, a short-lived Codex access token from the login the daemon refreshes) come from a Kubernetes Secret as environment variables when the box starts (§13.1), so they are never in the `Sandbox`, the index or a file
+  - **never in `live/`, golden or snapshots** (golden builds are scanned). Claude's state lives in `envs/<id>/claude/`, outside `live/`; with the login in its environment it writes no credentials file. Codex keeps `auth.json` in its home, which is mounted from outside `live/` the same way
   - forks get fresh credentials
 - **Non-model secrets:** a host-side broker for short-lived, scoped tokens (Fern v1's GitHub App broker); per-environment OIDC tokens later.
 - **Network:** deny by default; per-class allowlists.

@@ -25,7 +25,12 @@ T3's server in a pod with the pool and the daemon socket, the checkpoint hook in
 
 **The patch (2026-10-22):** one new file wrapping T3's `CheckpointStore` (capture → `fern snapshot --replace`, restore → `fern restore` before T3's git restore, delete → `fern rmsnap`), plus one line in `server.ts`. The Claude program is a T3 setting and MCP goes through fern-init, so neither needs a patch. Users never apply it: it ships inside Fern's T3 image, and the Mac app pairs with that server. Keep notes on what the hook needed to carry; they shape the upstream proposal (architecture §15.1).
 
-**Status (2026-10-22):** T3's server runs in the lab (`lab/build-t3.sh`, `deploy/t3.yaml`) and every command the hook makes works from its pod on a worktree T3 made (`lab/blockers.sh t3`, 11 PASS, `lab/RESULTS.md`). Left before the real turn: Claude's folder per environment outside `live/` and the token in a Secret (code), then the token itself (the user). A revert of an awake box takes 2.2–3.0 s, almost all of it stopping the pod.
+**Status (2026-10-22):** T3's server runs in the lab (`lab/build-t3.sh`, `deploy/t3.yaml`). Every command the hook makes works from its pod on a worktree T3 made, and that worktree's box has git (the main repository's git folder, read-only), Claude's own folder outside `live/` (`envs/<id>/claude`, kept by sleep and restore) and the login from the `claude-login` Secret: with a fake token, Claude in the box reaches Anthropic and gets a 401 (`lab/blockers.sh t3`, `lab/RESULTS.md`). A failed Fern snapshot now leaves T3 its git checkpoint; reverting to it is refused with Fern's reason. A revert of an awake box takes 1.8–3.0 s, almost all of it stopping the pod.
+
+**What's left needs the user (about 5 minutes):**
+1. `claude setup-token` on the Mac, then `lab/claude-login.sh` and paste the token (hidden; it goes straight into the Secret).
+2. `lab/t3-pair.sh`: it adds the sample project (`repos/sample`, Postgres with three users) and prints a pairing link; in the T3 app, Settings → Connections, add it.
+3. In that connection's `sample` project, start a thread **in a new worktree**, ask Claude to count the users, then to delete one; revert that turn and check the user is back.
 
 ### What the blocker research settled (8 agents, 2026-10-21)
 

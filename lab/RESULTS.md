@@ -190,3 +190,25 @@ Command: `lab/up.sh && lab/build-t3.sh && lab/blockers.sh t3`. T3 Code at `9c161
 - **The image has no web UI** (`/` answers 503, "No static directory configured"): the Mac app brings its own.
 
 Not checked yet: a real turn and a revert through T3 itself (they need the Claude login), and T3's MCP tools from a box.
+
+## Part B: Claude's login, its folder and git in the box, 2026-10-22
+
+Command: `lab/reload.sh && lab/build-t3.sh && lab/blockers.sh t3 paths review stream restore && lab/demo-slice.sh`. Every check passes (56 PASS; the T3 section 15). No real login was used: the check stores a fake token in the `claude-login` Secret and removes it afterwards.
+
+| Check | Result |
+|---|---|
+| the box of a T3 worktree has `CLAUDE_CONFIG_DIR` at `envs/<id>/claude`, outside the workspace | PASS |
+| what Claude writes there outlives a sleep and a restore | PASS |
+| git works in the box (`git log`, `git status`): the main repository's git folder is mounted read-only | PASS |
+| the box can't write to that folder (`touch`, `git commit` → "Read-only file system") | PASS |
+| `claude -p` through T3's `fern-claude` with the fake token: Claude in the box reaches Anthropic and gets "401 Invalid bearer token" | PASS |
+| `ANTHROPIC_API_KEY` is unset in the box | checked by hand |
+| the hook's 9 tests (2 new: a failed snapshot keeps T3's git checkpoint; a restore Fern can't do is refused before git touches the files), `vp fmt`, `vp lint` | PASS, 0 warnings |
+| warm wake (Postgres), 10 runs | p50 566 ms, p95 619 ms |
+| restore of an awake T3 worktree | 1.8–2.0 s (2.2–3.0 s earlier the same day) |
+
+**Found on the way:**
+- Claude writes `.claude.json`, `projects/` (the transcripts) and `sessions/` into `CLAUDE_CONFIG_DIR`, so one folder per environment keeps all of it; `/tmp` gets only a scratch folder.
+- **T3's Claude SDK (0.3.276) was built for Claude Code 2.1.276; the box has 2.1.304.** Newer CLIs talk to older SDKs, but if the first real turn fails on the protocol, pin the box to 2.1.276.
+- **The sample repo had no `.gitignore`,** so T3's git checkpoints would have copied Postgres's data folder (`.fern/`) into git at every turn. Any repo whose services keep state in the workspace needs it ignored.
+- Claude can't commit from the box (the git folder is read-only); T3 commits on its side.
