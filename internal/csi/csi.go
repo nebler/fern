@@ -83,9 +83,12 @@ func (p *Plugin) NodeGetCapabilities(context.Context, *csispec.NodeGetCapabiliti
 	return &csispec.NodeGetCapabilitiesResponse{}, nil
 }
 
-// NodePublishVolume bind-mounts the environment's folder at the target path,
-// read-only if the volume is. Publishing a volume that is already mounted
-// succeeds.
+// NodePublishVolume bind-mounts the environment's folder at the target path.
+// Publishing a volume that is already mounted succeeds.
+//
+// A read-only volume is made read-only by the container runtime, from the
+// pod's volume mount: a read-only remount here would change only this
+// namespace's copy of the mount, not the one that reaches the box.
 func (p *Plugin) NodePublishVolume(ctx context.Context, req *csispec.NodePublishVolumeRequest) (*csispec.NodePublishVolumeResponse, error) {
 	vc := req.GetVolumeContext()
 	env, target := vc[keyEnv], req.GetTargetPath()
@@ -120,17 +123,6 @@ func (p *Plugin) NodePublishVolume(ctx context.Context, req *csispec.NodePublish
 	if !mounted {
 		if err := unix.Mount(src, target, "", unix.MS_BIND, ""); err != nil {
 			return nil, status.Errorf(codes.Internal, "bind %s on %s: %v", src, target, err)
-		}
-		// A bind mount keeps its source's flags; read-only takes a remount.
-		// Unmount on failure, or the retry would find it mounted writable.
-		// The main repository's git folder is read-only whatever the pod
-		// asks: a box that could change its config or hooks could run code
-		// in T3's server.
-		if req.GetReadonly() || vc[keyFolder] == "git" {
-			if err := unix.Mount("", target, "", unix.MS_BIND|unix.MS_REMOUNT|unix.MS_RDONLY, ""); err != nil {
-				_ = unix.Unmount(target, 0)
-				return nil, status.Errorf(codes.Internal, "make %s read-only: %v", target, err)
-			}
 		}
 	}
 	return &csispec.NodePublishVolumeResponse{}, nil

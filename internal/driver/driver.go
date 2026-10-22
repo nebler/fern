@@ -322,7 +322,7 @@ func (d *Driver) podTemplate(env, token string, folders Folders) sandboxv1.PodTe
 		{Name: "tmp", MountPath: "/tmp"},
 	}
 	volumes := []corev1.Volume{
-		d.folder("live", env, "workspace", false),
+		d.folder("live", env, "workspace"),
 		// HOME is in /tmp, so caches land here; the node's disk is shared.
 		{Name: "tmp", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{SizeLimit: &tmpSize}}},
 	}
@@ -331,11 +331,14 @@ func (d *Driver) podTemplate(env, token string, folders Folders) sandboxv1.PodTe
 	if folders.Claude != "" {
 		vars = append(vars, corev1.EnvVar{Name: "CLAUDE_CONFIG_DIR", Value: folders.Claude})
 		mounts = append(mounts, corev1.VolumeMount{Name: "claude", MountPath: folders.Claude})
-		volumes = append(volumes, d.folder("claude", env, "claude", false))
+		volumes = append(volumes, d.folder("claude", env, "claude"))
 	}
+	// Read-only, or a box could change the repository's config or hooks
+	// and so run code in T3's server, which runs git there. The container
+	// runtime enforces it.
 	if folders.Git != "" {
 		mounts = append(mounts, corev1.VolumeMount{Name: "git", MountPath: folders.Git, ReadOnly: true})
-		volumes = append(volumes, d.folder("git", env, "git", true))
+		volumes = append(volumes, d.folder("git", env, "git"))
 	}
 	// The login comes from the Secret when the pod starts, so it is never in
 	// the Sandbox, the index or a snapshot.
@@ -404,10 +407,9 @@ func (d *Driver) podTemplate(env, token string, folders Folders) sandboxv1.PodTe
 
 // folder is an inline volume through which the CSI plugin mounts one of
 // environment env's folders: "workspace", "claude" or "git".
-func (d *Driver) folder(name, env, which string, readOnly bool) corev1.Volume {
+func (d *Driver) folder(name, env, which string) corev1.Volume {
 	return corev1.Volume{Name: name, VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{
 		Driver:           d.cfg.CSIDriver,
-		ReadOnly:         &readOnly,
 		VolumeAttributes: map[string]string{"env": env, "folder": which},
 	}}}
 }
