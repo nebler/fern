@@ -41,12 +41,12 @@ func Dial(ctx context.Context, url, token string, hc *http.Client) (*websocket.C
 	if err != nil {
 		if resp != nil && resp.StatusCode != http.StatusSwitchingProtocols {
 			// The library has already read the start of the body into memory.
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+			body, _ := io.ReadAll(resp.Body)
 			return nil, &DialError{StatusCode: resp.StatusCode, Body: body, Err: err}
 		}
 		return nil, err
 	}
-	conn.SetReadLimit(MaxMessage)
+	conn.SetReadLimit(maxMessage)
 	return conn, nil
 }
 
@@ -57,7 +57,7 @@ func Dial(ctx context.Context, url, token string, hc *http.Client) (*websocket.C
 // the goroutine reading it ends at its next Read.
 func Run(ctx context.Context, conn *websocket.Conn, req Request, s Streams) (int, error) {
 	if err := wsjson.Write(ctx, conn, req); err != nil {
-		return 0, fmt.Errorf("exec: send request: %w", err)
+		return 0, fmt.Errorf("send request: %w", err)
 	}
 	ctx, cancel := context.WithCancel(ctx)
 	var senders sync.WaitGroup
@@ -66,25 +66,19 @@ func Run(ctx context.Context, conn *websocket.Conn, req Request, s Streams) (int
 	if s.Stdin != nil {
 		go sendStdin(ctx, conn, s.Stdin)
 	} else if err := conn.Write(ctx, websocket.MessageBinary, []byte{frameStdinEOF}); err != nil {
-		return 0, fmt.Errorf("exec: close stdin: %w", err)
+		return 0, fmt.Errorf("close stdin: %w", err)
 	}
-	if s.Resize != nil {
-		senders.Go(func() { sendResizes(ctx, conn, s.Resize) })
-	}
-	if s.Signal != nil {
-		senders.Go(func() { sendSignals(ctx, conn, s.Signal) })
-	}
-	stdout, stderr := s.Stdout, s.Stderr
+	senders.Go(func() { sendControls(ctx, conn, s.Resize, s.Signal) })
 	r := &messageReader{conn: conn}
 	for {
 		typ, data, err := r.read(ctx)
 		if err != nil {
-			return 0, fmt.Errorf("exec: %w", err)
+			return 0, err
 		}
 		if typ == websocket.MessageText {
 			var e exit
 			if err := json.Unmarshal(data, &e); err != nil {
-				return 0, fmt.Errorf("exec: bad exit message: %w", err)
+				return 0, fmt.Errorf("bad exit message: %w", err)
 			}
 			_ = conn.Close(websocket.StatusNormalClosure, "")
 			return e.Code, nil
@@ -94,64 +88,42 @@ func Run(ctx context.Context, conn *websocket.Conn, req Request, s Streams) (int
 		}
 		switch data[0] {
 		case frameStdout:
-			_, err = stdout.Write(data[1:])
+			_, err = s.Stdout.Write(data[1:])
 		case frameStderr:
-			_, err = stderr.Write(data[1:])
+			_, err = s.Stderr.Write(data[1:])
 		}
 		if err != nil {
-			return 0, fmt.Errorf("exec: write output: %w", err)
+			return 0, fmt.Errorf("write output: %w", err)
 		}
 	}
 }
 
+// sendStdin sends stdin until it ends, then its end.
 func sendStdin(ctx context.Context, conn *websocket.Conn, stdin io.Reader) {
-	// Reading into the frame itself saves a copy and an allocation each.
-	buf := make([]byte, 1+frameData)
-	buf[0] = frameStdin
-	for {
-		n, err := stdin.Read(buf[1:])
-		if n > 0 {
-			if conn.Write(ctx, websocket.MessageBinary, buf[:1+n]) != nil {
-				return
-			}
-		}
-		if err != nil {
-			_ = conn.Write(ctx, websocket.MessageBinary, []byte{frameStdinEOF})
-			return
-		}
-	}
+	_, _ = frames(ctx, conn, frameStdin).ReadFrom(stdin)
+	_ = conn.Write(ctx, websocket.MessageBinary, []byte{frameStdinEOF})
 }
 
-// sendSignals sends the signals the server will forward; it drops others.
-func sendSignals(ctx context.Context, conn *websocket.Conn, sigs <-chan os.Signal) {
+// sendControls sends terminal sizes and signals; either channel may be nil.
+func sendControls(ctx context.Context, conn *websocket.Conn, resize <-chan Size, sigs <-chan os.Signal) {
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case sig := <-sigs:
-			s, ok := sig.(syscall.Signal)
-			if !ok || !forwardable(s) {
-				continue
-			}
-			if conn.Write(ctx, websocket.MessageBinary, []byte{frameSignal, byte(s)}) != nil {
-				return
-			}
-		}
-	}
-}
-
-func sendResizes(ctx context.Context, conn *websocket.Conn, resize <-chan Size) {
-	for {
+		var msg []byte
 		select {
 		case <-ctx.Done():
 			return
 		case size := <-resize:
-			msg := []byte{frameResize, 0, 0, 0, 0}
+			msg = []byte{frameResize, 0, 0, 0, 0}
 			binary.BigEndian.PutUint16(msg[1:], size.Rows)
 			binary.BigEndian.PutUint16(msg[3:], size.Cols)
-			if conn.Write(ctx, websocket.MessageBinary, msg) != nil {
-				return
+		case sig := <-sigs:
+			s, ok := sig.(syscall.Signal)
+			if !ok {
+				continue
 			}
+			msg = []byte{frameSignal, byte(s)}
+		}
+		if conn.Write(ctx, websocket.MessageBinary, msg) != nil {
+			return
 		}
 	}
 }

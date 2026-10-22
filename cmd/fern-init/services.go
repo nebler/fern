@@ -6,12 +6,8 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"maps"
 	"os"
 	"os/exec"
-	"slices"
-	"strconv"
-	"sync"
 	"syscall"
 	"time"
 
@@ -21,15 +17,9 @@ import (
 // service is one entry in services.yaml. Commands are shell scripts, run
 // with /bin/sh -c in the workspace.
 type service struct {
-	Run   string            `json:"run"`
-	Stop  string            `json:"stop,omitempty"`  // graceful stop; else SIGTERM
-	Ready string            `json:"ready,omitempty"` // exits 0 when the service is ready
-	Port  int               `json:"port,omitempty"`  // passed as $PORT
-	Env   map[string]string `json:"env,omitempty"`
-}
-
-type servicesFile struct {
-	Services map[string]service `json:"services"`
+	Run   string `json:"run"`
+	Stop  string `json:"stop,omitempty"`  // graceful stop; else SIGTERM
+	Ready string `json:"ready,omitempty"` // exits 0 when the service is ready
 }
 
 // loadServices reads services.yaml at path. A missing file means no services.
@@ -45,7 +35,9 @@ func loadServices(path string) (map[string]service, error) {
 }
 
 func parseServices(data []byte) (map[string]service, error) {
-	var f servicesFile
+	var f struct {
+		Services map[string]service `json:"services"`
+	}
 	if err := yaml.UnmarshalStrict(data, &f); err != nil {
 		return nil, fmt.Errorf("services.yaml: %w", err)
 	}
@@ -57,23 +49,19 @@ func parseServices(data []byte) (map[string]service, error) {
 	return f.Services, nil
 }
 
-// environ returns base plus the service's own variables.
-func (s service) environ(base []string) []string {
-	env := append([]string(nil), base...)
-	if s.Port != 0 {
-		env = append(env, "PORT="+strconv.Itoa(s.Port))
-	}
-	for k, v := range s.Env {
-		env = append(env, k+"="+v)
-	}
-	return env
-}
-
 // Stopping a box must fit in its pod's 15s grace period, after which
 // Kubernetes kills everything.
 const (
 	stopTimeout = 8 * time.Second // bounds a service's stop command
 	killDelay   = 3 * time.Second // from SIGTERM to SIGKILL
+)
+
+// The pause between restarts of a service that keeps exiting doubles from
+// minBackoff to maxBackoff, and starts over once a run has lasted stableRun.
+const (
+	minBackoff = time.Second
+	maxBackoff = 30 * time.Second
+	stableRun  = time.Minute
 )
 
 // supervisor keeps one service running until it is stopped.
@@ -84,18 +72,18 @@ type supervisor struct {
 	env  []string // the service's whole environment
 	log  *slog.Logger
 
-	quit chan struct{}      // closed when the service must not be restarted
-	kill context.CancelFunc // sends SIGTERM to the running service
-	done chan struct{}      // closed when run has returned
+	quit      chan struct{}      // closed when the service must not be restarted
+	terminate context.CancelFunc // sends SIGTERM to the running service
+	done      chan struct{}      // closed when run has returned
 }
 
 // startService starts and supervises svc. It keeps running after ctx is
 // done, until stop.
 func startService(ctx context.Context, name string, svc service, dir string, env []string, log *slog.Logger) *supervisor {
-	ctx, kill := context.WithCancel(context.WithoutCancel(ctx))
+	ctx, terminate := context.WithCancel(context.WithoutCancel(ctx))
 	s := &supervisor{
-		name: name, svc: svc, dir: dir, env: svc.environ(env), log: log,
-		quit: make(chan struct{}), kill: kill, done: make(chan struct{}),
+		name: name, svc: svc, dir: dir, env: env, log: log,
+		quit: make(chan struct{}), terminate: terminate, done: make(chan struct{}),
 	}
 	go s.run(ctx)
 	return s
@@ -104,7 +92,6 @@ func startService(ctx context.Context, name string, svc service, dir string, env
 // run runs the service and restarts it with backoff whenever it exits.
 func (s *supervisor) run(ctx context.Context) {
 	defer close(s.done)
-	const minBackoff, maxBackoff = time.Second, 30 * time.Second
 	backoff := minBackoff
 	for {
 		started := time.Now()
@@ -115,7 +102,7 @@ func (s *supervisor) run(ctx context.Context) {
 		default:
 		}
 		s.log.WarnContext(ctx, "service exited", slog.String("service", s.name), slog.Any("error", err))
-		if time.Since(started) > time.Minute {
+		if time.Since(started) > stableRun {
 			backoff = minBackoff
 		}
 		select {
@@ -136,7 +123,7 @@ func (s *supervisor) stop(ctx context.Context) {
 			s.log.WarnContext(ctx, "stop command failed", slog.String("service", s.name), slog.Any("error", err))
 		}
 	}
-	s.kill()
+	s.terminate()
 	<-s.done
 }
 
@@ -171,35 +158,9 @@ func runService(ctx context.Context, svc service, dir string, env []string) erro
 	return err
 }
 
-// The ready checks share readyTimeout. A timed-out script is killed and
-// gets shellWaitDelay to let go of its output, so /healthz answers within
-// 2.25s, under the 2.5s it promises and the probe's 3s timeout.
-const (
-	readyTimeout   = 2 * time.Second
-	shellWaitDelay = 250 * time.Millisecond
-)
-
-// ready runs every service's ready check at once and returns the failures.
-func ready(ctx context.Context, services map[string]service, dir string, env []string) error {
-	ctx, cancel := context.WithTimeout(ctx, readyTimeout)
-	defer cancel()
-	names := slices.Sorted(maps.Keys(services)) // a stable order for the errors
-	errs := make([]error, len(names))
-	var wg sync.WaitGroup
-	for i, name := range names {
-		svc := services[name]
-		if svc.Ready == "" {
-			continue
-		}
-		wg.Go(func() {
-			if err := shell(ctx, readyTimeout, svc.Ready, dir, svc.environ(env)); err != nil {
-				errs[i] = fmt.Errorf("%s not ready: %w", name, err)
-			}
-		})
-	}
-	wg.Wait()
-	return errors.Join(errs...)
-}
+// shellWaitDelay bounds how long a script's output is waited for once it
+// has been killed: something outside its group can still hold it.
+const shellWaitDelay = 250 * time.Millisecond
 
 // shell runs script with /bin/sh in its own process group, bounded by
 // timeout. When time is up the whole group is killed.

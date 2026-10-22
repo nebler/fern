@@ -6,35 +6,29 @@ import (
 	"github.com/coder/websocket"
 )
 
-// Proxy copies messages between a and b, both ways, until one side closes,
-// and passes a normal close on to the other side.
-func Proxy(ctx context.Context, a, b *websocket.Conn) error {
+// Proxy copies messages between a and b, both ways, until either side ends,
+// and passes a close status on to the other side.
+func Proxy(ctx context.Context, a, b *websocket.Conn) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	errc := make(chan error, 2)
-	go func() { errc <- forward(ctx, a, b) }()
-	go func() { errc <- forward(ctx, b, a) }()
-	err := <-errc
+	done := make(chan struct{}, 2)
+	go func() { forward(ctx, a, b); done <- struct{}{} }()
+	go func() { forward(ctx, b, a); done <- struct{}{} }()
+	<-done
 	cancel()
-	if err2 := <-errc; err == nil {
-		err = err2
-	}
-	return err
+	<-done
 }
 
-func forward(ctx context.Context, dst, src *websocket.Conn) error {
+func forward(ctx context.Context, dst, src *websocket.Conn) {
 	r := &messageReader{conn: src}
 	for {
 		typ, data, err := r.read(ctx)
 		if status := websocket.CloseStatus(err); status != -1 {
 			_ = dst.Close(status, "")
-			return nil
+			return
 		}
-		if err != nil {
-			return err
-		}
-		if err := dst.Write(ctx, typ, data); err != nil {
-			return err
+		if err != nil || dst.Write(ctx, typ, data) != nil {
+			return
 		}
 	}
 }

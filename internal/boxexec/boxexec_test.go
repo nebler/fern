@@ -53,10 +53,21 @@ func newRelay(t testing.TB, boxURL string) string {
 			return
 		}
 		defer func() { _ = client.CloseNow() }()
-		_ = boxexec.Proxy(r.Context(), client, box)
+		boxexec.Proxy(r.Context(), client, box)
 	}))
 	t.Cleanup(srv.Close)
 	return "ws" + strings.TrimPrefix(srv.URL, "http")
+}
+
+// targets returns a box and a relay in front of it: the two ways a client
+// reaches a command.
+func targets(tb testing.TB) []struct{ name, url string } {
+	tb.Helper()
+	box, _ := newBox(tb)
+	return []struct{ name, url string }{
+		{"direct", box},
+		{"relay", newRelay(tb, box)},
+	}
 }
 
 type result struct {
@@ -65,12 +76,12 @@ type result struct {
 }
 
 // run runs req at url and returns what came back.
-func run(t *testing.T, url, tok string, req boxexec.Request, stdin io.Reader) result {
+func run(t *testing.T, url string, req boxexec.Request, stdin io.Reader) result {
 	t.Helper()
 	// A hang is a failure, not a test that runs until the global timeout.
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	conn, err := boxexec.Dial(ctx, url, tok, nil)
+	conn, err := boxexec.Dial(ctx, url, token, nil)
 	if err != nil {
 		t.Fatalf("Dial(%s) error: %v", url, err)
 	}
@@ -84,18 +95,6 @@ func run(t *testing.T, url, tok string, req boxexec.Request, stdin io.Reader) re
 }
 
 func TestRun(t *testing.T) {
-	boxURL, dir := newBox(t)
-	dir, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	targets := []struct {
-		name string
-		url  string
-	}{
-		{"direct", boxURL},
-		{"proxy", newRelay(t, boxURL)},
-	}
 	tests := []struct {
 		name       string
 		req        boxexec.Request
@@ -151,31 +150,15 @@ func TestRun(t *testing.T) {
 			req:        boxexec.Request{Argv: []string{"sh", "-c", "test -t 0 && test -t 1 && echo yes"}, TTY: true},
 			wantStdout: "yes\r\n", // the terminal turns \n into \r\n
 		},
-		{
-			// The background process ignores the hangup and keeps the
-			// terminal open; the exec must end anyway. The command waits
-			// until the hangup is ignored.
-			name: "tty with a process left behind",
-			req: boxexec.Request{
-				Argv: []string{"sh", "-c", `rm -f held; (trap "" HUP; touch held; exec sleep 600) & until [ -e held ]; do sleep 0.01; done; echo started`},
-				TTY:  true,
-			},
-			wantStdout: "started\r\n",
-		},
-		{
-			name:       "runs in dir",
-			req:        boxexec.Request{Argv: []string{"pwd"}},
-			wantStdout: dir + "\n",
-		},
 	}
-	for _, target := range targets {
+	for _, target := range targets(t) {
 		for _, tt := range tests {
 			t.Run(target.name+"/"+tt.name, func(t *testing.T) {
 				var stdin io.Reader
 				if tt.stdin != "" {
 					stdin = strings.NewReader(tt.stdin)
 				}
-				got := run(t, target.url, token, tt.req, stdin)
+				got := run(t, target.url, tt.req, stdin)
 				if got.code != tt.wantCode {
 					t.Errorf("Run(%q) code = %d, want %d (stderr %q)", tt.req.Argv, got.code, tt.wantCode, got.stderr)
 				}
@@ -201,28 +184,6 @@ func TestDialWrongToken(t *testing.T) {
 	}
 }
 
-// A client that goes away must stop the command, or it would run forever.
-func TestRunCancelStopsCommand(t *testing.T) {
-	url, _ := newBox(t)
-	ctx, cancel := context.WithCancel(t.Context())
-	conn, err := boxexec.Dial(ctx, url, token, nil)
-	if err != nil {
-		t.Fatalf("Dial() error: %v", err)
-	}
-	defer func() { _ = conn.CloseNow() }()
-	// The command says it started, then blocks; cancel once it has started.
-	stdout := writerFunc(func(p []byte) (int, error) {
-		cancel()
-		return len(p), nil
-	})
-	req := boxexec.Request{Argv: []string{"sh", "-c", "echo started; exec sleep 600"}}
-	if _, err := boxexec.Run(ctx, conn, req, boxexec.Streams{Stdout: stdout, Stderr: io.Discard}); err == nil {
-		t.Errorf("Run(%q) after cancel succeeded, want an error", req.Argv)
-	}
-	// goleak in TestMain fails the run if the server's goroutines are stuck
-	// waiting for the command.
-}
-
 // Cancelling must also stop what the command started in the background, or
 // it would go on changing the workspace.
 func TestRunCancelKillsBackground(t *testing.T) {
@@ -242,7 +203,13 @@ func TestRunCancelKillsBackground(t *testing.T) {
 		t.Fatalf("Run(%q) after cancel succeeded, want an error", req.Argv)
 	}
 	_ = conn.CloseNow() // the client goes away
+	// The kill on cancel ends it at once; the one after the command exits
+	// would only come outputDelay (2s) later.
+	start := time.Now()
 	waitGone(t, url, "bg.pid")
+	if took := time.Since(start); took >= time.Second {
+		t.Errorf("the background process went %v after the client, want at once", took)
+	}
 }
 
 // What a command leaves behind must not keep the exec open, and what is left
@@ -294,7 +261,7 @@ func TestRunLeftovers(t *testing.T) {
 			}
 			script := "left='" + left + "'; " + tt.start + "\nuntil [ -s left.pid ]; do sleep 0.01; done; echo started"
 			req := boxexec.Request{Argv: []string{"sh", "-c", script}, TTY: tt.tty}
-			got := run(t, url, token, req, nil)
+			got := run(t, url, req, nil)
 			if got.code != 0 || got.stdout != tt.wantStdout {
 				t.Errorf("Run(%q) = code %d, stdout %q, want 0, %q", req.Argv, got.code, got.stdout, tt.wantStdout)
 			}
@@ -334,7 +301,7 @@ while stat=$(ps -o stat= -p "$pid"); do
 done
 echo gone`
 	check := boxexec.Request{Argv: []string{"sh", "-c", script, "sh", pidFile}}
-	if got := run(t, url, token, check, nil); got.code != 0 || got.stdout != "gone\n" {
+	if got := run(t, url, check, nil); got.code != 0 || got.stdout != "gone\n" {
 		t.Errorf("process in %s: code %d, stdout %q, stderr %q, want it gone", pidFile, got.code, got.stdout, got.stderr)
 	}
 }
@@ -357,14 +324,14 @@ func TestRunDirAndEnv(t *testing.T) {
 		req  boxexec.Request
 		want string
 	}{
-		{"relative dir", boxexec.Request{Argv: []string{"pwd", "-P"}, Dir: "sub"}, filepath.Join(resolved, "sub") + "\n"},
-		{"absolute dir", boxexec.Request{Argv: []string{"pwd", "-P"}, Dir: filepath.Join(dir, "sub")}, filepath.Join(resolved, "sub") + "\n"},
+		{"default dir", boxexec.Request{Argv: []string{"pwd", "-P"}}, resolved + "\n"},
+		{"dir", boxexec.Request{Argv: []string{"pwd", "-P"}, Dir: filepath.Join(dir, "sub")}, filepath.Join(resolved, "sub") + "\n"},
 		{"env added", boxexec.Request{Argv: []string{"sh", "-c", `echo "$A $PATH"`}, Environ: []string{"A=1"}}, "1 /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"},
 		{"env replaces", boxexec.Request{Argv: []string{"sh", "-c", `echo "$PATH"`}, Environ: []string{"PATH=/bin"}}, "/bin\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := run(t, url, token, tt.req, nil); got.code != 0 || got.stdout != tt.want {
+			if got := run(t, url, tt.req, nil); got.code != 0 || got.stdout != tt.want {
 				t.Errorf("Run(%+v) = %d, %q (stderr %q), want 0, %q", tt.req, got.code, got.stdout, got.stderr, tt.want)
 			}
 		})
@@ -374,8 +341,7 @@ func TestRunDirAndEnv(t *testing.T) {
 // A signal from the client reaches the command, which decides how to stop:
 // T3 stops Claude with SIGTERM and waits for it to save its transcript.
 func TestRunSignal(t *testing.T) {
-	url, _ := newBox(t)
-	for _, target := range []struct{ name, url string }{{"direct", url}, {"proxy", newRelay(t, url)}} {
+	for _, target := range targets(t) {
 		t.Run(target.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
@@ -388,7 +354,7 @@ func TestRunSignal(t *testing.T) {
 			var stdout bytes.Buffer
 			ready := writerFunc(func(p []byte) (int, error) {
 				if bytes.Contains(p, []byte("ready")) {
-					sigs <- syscall.SIGKILL // not forwardable: dropped
+					sigs <- syscall.SIGKILL // the server passes on only stop signals
 					sigs <- syscall.SIGTERM
 				}
 				return stdout.Write(p)

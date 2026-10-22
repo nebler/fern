@@ -262,7 +262,7 @@ review() {
     "$(docker exec "$LAB" sh -c "cat /sys/fs/cgroup/kubepods/*/pod$uid/pids.max /sys/fs/cgroup/kubepods/pod$uid/pids.max 2>/dev/null")"
   fern wake bk2 >/dev/null
   ip=$(k -n fern-boxes get pod bk2 -o jsonpath='{.status.podIP}')
-  code=$(fern exec $ENV -- curl -s -m 3 -o /dev/null -w '%{http_code}' "http://$ip:7070/healthz" || true)
+  code=$(fern exec $ENV -- curl -s -m 3 -o /dev/null -w '%{http_code}' "http://$ip:7070/readyz" || true)
   check "a box can't reach another box" 000 "${code:-000}"
   check "the daemon still reaches the other box" ok "$(fern exec bk2 -- echo ok)"
   if fern restore $ENV no-such-snapshot >/dev/null 2>&1; then r=restored; else r=refused; fi

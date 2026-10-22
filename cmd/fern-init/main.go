@@ -1,6 +1,7 @@
-// Command fern-init is PID 1 in every box. It starts and supervises the
-// services in the workspace's services.yaml, serves exec on boxexec.Port,
-// and on SIGTERM stops the services before exiting.
+// Command fern-init is the main process of every box (the pod's pause
+// container is PID 1 and reaps orphans). It starts and supervises the
+// services in the workspace's services.yaml, serves exec and readiness on
+// boxexec.Port, and on SIGTERM stops the services before exiting.
 package main
 
 import (
@@ -35,14 +36,14 @@ func main() {
 func run(ctx context.Context, log *slog.Logger) error {
 	dir := os.Getenv("FERN_WORKSPACE")
 	if dir == "" {
-		dir = "/workspace"
+		return errors.New("FERN_WORKSPACE is not set")
 	}
 	// The token is for fern-init alone; commands and services don't inherit it.
-	token := os.Getenv("FERN_TOKEN")
+	token := os.Getenv("FERN_BOX_TOKEN")
 	if token == "" {
-		return errors.New("FERN_TOKEN is not set")
+		return errors.New("FERN_BOX_TOKEN is not set")
 	}
-	if err := os.Unsetenv("FERN_TOKEN"); err != nil {
+	if err := os.Unsetenv("FERN_BOX_TOKEN"); err != nil {
 		return err
 	}
 	env := os.Environ()
@@ -60,8 +61,8 @@ func run(ctx context.Context, log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET "+boxexec.Path, boxexec.NewServer(token, dir, env, log))
-	mux.Handle("GET /healthz", newReadiness(func(ctx context.Context) error {
-		return ready(ctx, services, dir, env)
+	mux.Handle("GET "+boxexec.ReadyPath, readiness(func(ctx context.Context) error {
+		return checkServices(ctx, services, dir, env)
 	}))
 	srv := &http.Server{
 		Addr:              ":" + strconv.Itoa(boxexec.Port),
@@ -83,9 +84,9 @@ func run(ctx context.Context, log *slog.Logger) error {
 		stopping.Go(func() { s.stop(context.WithoutCancel(ctx)) })
 	}
 	stopping.Wait()
-	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
-	defer cancel()
-	_ = srv.Shutdown(shutdownCtx)
+	// Execs have ended with ctx; what is left is a readiness answer no one
+	// needs any more.
+	_ = srv.Close()
 	if err == nil {
 		err = <-serveErr // the server has stopped: ErrServerClosed
 	}

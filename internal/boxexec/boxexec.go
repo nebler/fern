@@ -2,9 +2,9 @@
 // fern-init: one WebSocket per command.
 //
 // The client sends a JSON Request as a text message, then binary frames for
-// stdin, stdin EOF and terminal resizes. The server sends binary frames for
-// stdout and stderr, then the exit code as a JSON text message, and closes.
-// Every binary frame starts with one byte saying what it carries.
+// stdin, stdin EOF, terminal resizes and signals. The server sends binary
+// frames for stdout and stderr, then the exit code as a JSON text message,
+// and closes. Every binary frame starts with one byte saying what it carries.
 //
 // The server side is in server.go, the client side in client.go, and the
 // daemon's relay between the two in proxy.go.
@@ -16,7 +16,6 @@ import (
 	"errors"
 	"io"
 	"os"
-	"syscall"
 
 	"github.com/coder/websocket"
 )
@@ -27,6 +26,10 @@ const Port = 7070
 // Path is the URL path of fern-init's exec endpoint.
 const Path = "/exec"
 
+// ReadyPath is the URL path where fern-init says whether the box's services
+// are ready; with ?wait=DURATION it answers as soon as they are.
+const ReadyPath = "/readyz"
+
 // URL returns the exec endpoint of the box serving at addr (host:port).
 func URL(addr string) string { return "ws://" + addr + Path }
 
@@ -36,23 +39,22 @@ const (
 	frameStdout
 	frameStderr
 	frameStdinEOF
-	frameResize
+	frameResize // four more bytes: rows, then columns, as big-endian uint16
 	frameSignal // one more byte: the signal number
 )
 
-// MaxMessage is the largest message in the protocol; output frames are at
-// most one pipe read. Every connection must be able to read it, which is more
-// than the WebSocket library allows by default (32 KiB): use Accept and Dial,
-// or call SetReadLimit(MaxMessage).
-const MaxMessage = 1 << 20
+// maxMessage is the largest message a connection reads, more than the
+// WebSocket library allows by default (32 KiB): frames carry at most
+// 1+frameData bytes, and the JSON Request (argv and environment) the rest.
+const maxMessage = 1 << 20
 
 // Request starts a command. It is the first message on a connection.
 type Request struct {
 	Argv []string `json:"argv"`
 	TTY  bool     `json:"tty,omitempty"`
 	Size Size     `json:"size,omitzero"` // initial terminal size when TTY is set
-	// Dir is where the command runs: absolute, or relative to the
-	// workspace, which is the default.
+	// Dir is where the command runs, an absolute path; the workspace if
+	// empty.
 	Dir string `json:"dir,omitempty"`
 	// Environ adds NAME=VALUE variables to the command's, replacing any of
 	// the same name.
@@ -64,14 +66,10 @@ type Request struct {
 type Streams struct {
 	Stdin          io.Reader // nil: the command reads EOF at once
 	Stdout, Stderr io.Writer
-	Resize         <-chan Size      // new terminal sizes; may be nil
-	Signal         <-chan os.Signal // signals for the command's process group; may be nil
-}
-
-// forwardable reports whether a client may send sig. Others would let a
-// client do more than ask the command it started to stop.
-func forwardable(sig syscall.Signal) bool {
-	return sig == syscall.SIGHUP || sig == syscall.SIGINT || sig == syscall.SIGQUIT || sig == syscall.SIGTERM
+	Resize         <-chan Size // new terminal sizes; may be nil
+	// Signal sends signals to the command's process group; the server passes
+	// on only SIGHUP, SIGINT and SIGTERM. May be nil.
+	Signal <-chan os.Signal
 }
 
 // Size is a terminal size.

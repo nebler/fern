@@ -167,7 +167,7 @@ func (d *Driver) podAddr(ctx context.Context, id string) (string, error) {
 
 // isReady reports whether fern-init at addr says its services are ready.
 func (d *Driver) isReady(ctx context.Context, addr string) bool {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+"/healthz?wait="+readyWait.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+addr+boxexec.ReadyPath+"?wait="+readyWait.String(), nil)
 	if err != nil {
 		return false
 	}
@@ -273,7 +273,7 @@ func poll(ctx context.Context, interval, timeout time.Duration, cond wait.Condit
 
 func (d *Driver) podTemplate(env store.Env) sandboxv1.PodTemplate {
 	vars := []corev1.EnvVar{
-		{Name: "FERN_TOKEN", Value: env.BoxToken},
+		{Name: "FERN_BOX_TOKEN", Value: env.BoxToken},
 		{Name: "FERN_WORKSPACE", Value: env.Workspace},
 		// Claude keeps its transcripts here, so `--resume` works after a
 		// sleep or a restore, which both replace the box.

@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -27,6 +26,16 @@ import (
 // outputDelay is how long a command's output may go on after it exits:
 // background processes it left behind can hold its pipes or terminal open.
 const outputDelay = 2 * time.Second
+
+// exitNotStarted is the exit code of a command that couldn't start, as a
+// shell reports one it can't find.
+const exitNotStarted = 127
+
+// forwardable reports whether a client may send sig. Others would let a
+// client do more than ask the command it started to stop.
+func forwardable(sig syscall.Signal) bool {
+	return sig == syscall.SIGHUP || sig == syscall.SIGINT || sig == syscall.SIGTERM
+}
 
 // Server runs commands for clients that present its token.
 type Server struct {
@@ -62,8 +71,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	p, err := s.start(ctx, conn, req)
 	if err != nil {
-		_, _ = fmt.Fprintf(frames(r.Context(), conn, frameStderr), "exec: %v\n", err)
-		finish(r.Context(), conn, 127)
+		_ = conn.Write(r.Context(), websocket.MessageBinary, fmt.Appendf([]byte{frameStderr}, "exec: %v\n", err))
+		finish(r.Context(), conn, exitNotStarted)
 		return
 	}
 	// The reader stops when the connection closes. A client that goes away
@@ -78,13 +87,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	reader.Wait()
 }
 
-// Accept upgrades r to an exec connection that can read MaxMessage.
+// Accept upgrades r to an exec connection, which reads larger messages than
+// the WebSocket library's default.
 func Accept(w http.ResponseWriter, r *http.Request) (*websocket.Conn, error) {
 	conn, err := websocket.Accept(w, r, nil)
 	if err != nil {
 		return nil, err
 	}
-	conn.SetReadLimit(MaxMessage)
+	conn.SetReadLimit(maxMessage)
 	return conn, nil
 }
 
@@ -105,9 +115,6 @@ func (s *Server) start(ctx context.Context, conn *websocket.Conn, req Request) (
 	cmd.Dir, cmd.Env = s.dir, s.env
 	if req.Dir != "" {
 		cmd.Dir = req.Dir
-		if !filepath.IsAbs(req.Dir) {
-			cmd.Dir = filepath.Join(s.dir, req.Dir)
-		}
 	}
 	if len(req.Environ) > 0 {
 		// Later entries win (os/exec keeps the last of each name).
@@ -173,23 +180,13 @@ func startTTY(cmd *exec.Cmd, size Size) (*os.File, error) {
 }
 
 // pollable returns a non-blocking copy of f that Go's poller owns, and
-// closes f. The copy must not be touched through Fd, which would make it
-// blocking again.
+// closes f. f is blocking already, so using its Fd changes nothing; the copy
+// must never be touched through Fd, which would make it blocking again.
 func pollable(f *os.File) (*os.File, error) {
 	defer func() { _ = f.Close() }()
-	rc, err := f.SyscallConn()
+	fd, err := unix.FcntlInt(f.Fd(), unix.F_DUPFD_CLOEXEC, 0)
 	if err != nil {
-		return nil, err
-	}
-	var fd int
-	var dupErr error
-	if err := rc.Control(func(old uintptr) {
-		fd, dupErr = unix.FcntlInt(old, unix.F_DUPFD_CLOEXEC, 0)
-	}); err != nil {
-		return nil, err
-	}
-	if dupErr != nil {
-		return nil, fmt.Errorf("dup %s: %w", f.Name(), dupErr)
+		return nil, fmt.Errorf("dup %s: %w", f.Name(), err)
 	}
 	if err := unix.SetNonblock(fd, true); err != nil {
 		_ = unix.Close(fd)
@@ -222,34 +219,27 @@ func setSize(f *os.File, s Size) error {
 func (p *process) wait(log *slog.Logger) int {
 	err := p.cmd.Wait()
 	p.exited.Store(true)
-	killGroup(p.cmd.Process.Pid)
+	// Kill what is left of the command's process group: its background
+	// processes end with it, as T3's do when an agent exits. Without this they
+	// would go on changing the workspace with nobody watching. Processes the
+	// command moved to another group or session are out of reach.
+	//
+	// The group's ID is the leader's PID, which reaping has released. That is
+	// safe from PID reuse: while any process is left in the group, the kernel
+	// won't hand its ID out as a new PID, so the signal reaches only the
+	// command's leftovers. Once the group is empty the ID may be reused, but a
+	// new process would have to get it and make itself a group leader in the
+	// moment since the reap to be hit; otherwise the kill finds no group.
+	_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL) // ESRCH: nothing was left
 	if p.tty != nil {
-		// cmd.WaitDelay only bounds pipes. A process killGroup can't reach
-		// can hold the terminal open, so the output gets the same time.
+		// cmd.WaitDelay only bounds pipes. A process the kill can't reach can
+		// hold the terminal open, so the output gets the same time. Closing
+		// the terminal also ends a write of stdin the command never read.
 		_ = p.tty.SetReadDeadline(time.Now().Add(outputDelay))
-	}
-	p.output.Wait()
-	if p.tty != nil {
-		// Closing also ends a write of stdin that the command never read.
+		p.output.Wait()
 		_ = p.tty.Close()
 	}
 	return exitCode(err, log)
-}
-
-// killGroup kills what is left of the process group whose leader was pid,
-// once the leader has exited and been reaped: a command's background
-// processes end with it, as T3's do when an agent exits. Without it they
-// would go on changing the workspace with nobody watching. Processes the
-// command moved to another group or session are out of reach.
-//
-// The group's ID is the leader's PID, which reaping has released. That is
-// safe from PID reuse: while any process is left in the group, the kernel
-// won't hand its ID out as a new PID, so the signal reaches only the
-// command's leftovers. Once the group is empty the ID may be reused, but a
-// new process would have to get it and make itself a group leader in the
-// moment since the reap to be hit; otherwise the kill finds no group.
-func killGroup(pid int) {
-	_ = syscall.Kill(-pid, syscall.SIGKILL) // ESRCH: nothing was left
 }
 
 // finish sends the exit code and closes the connection.
@@ -260,8 +250,9 @@ func finish(ctx context.Context, conn *websocket.Conn, code int) {
 	_ = conn.CloseNow()
 }
 
-// readInput copies stdin frames to the command and applies resizes until the
-// connection closes.
+// readInput applies what the client sends (stdin, its end, terminal sizes,
+// signals) until the connection closes. A command that stops reading a full
+// stdin pipe holds up the frames behind it until it exits.
 func readInput(ctx context.Context, conn *websocket.Conn, p *process) {
 	r := &messageReader{conn: conn}
 	for {
@@ -306,6 +297,6 @@ func exitCode(err error, log *slog.Logger) int {
 		return exitErr.ExitCode()
 	default:
 		log.Warn("exec: wait", slog.Any("error", err))
-		return 127
+		return exitNotStarted
 	}
 }

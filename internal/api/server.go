@@ -295,7 +295,7 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 		return // Accept has answered the client.
 	}
 	defer func() { _ = client.CloseNow() }()
-	_ = boxexec.Proxy(r.Context(), client, box) // it ends when either side does
+	boxexec.Proxy(r.Context(), client, box)
 }
 
 // dialBox connects to the environment's box, waking it if needed. A box seen

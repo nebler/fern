@@ -38,26 +38,18 @@ services:
     run: postgres -D .pg
     stop: pg_ctl stop -D .pg
     ready: pg_isready
-    port: 5432
-    env:
-      PGDATA: .pg
   web:
     run: npm start
 `,
 			want: map[string]service{
-				"db": {
-					Run: "postgres -D .pg", Stop: "pg_ctl stop -D .pg", Ready: "pg_isready",
-					Port: 5432, Env: map[string]string{"PGDATA": ".pg"},
-				},
+				"db":  {Run: "postgres -D .pg", Stop: "pg_ctl stop -D .pg", Ready: "pg_isready"},
 				"web": {Run: "npm start"},
 			},
 		},
 		{name: "empty file", yaml: ""},
 		{name: "no services", yaml: "services: {}\n"},
-		{name: "missing run", yaml: "services:\n  db:\n    port: 5432\n", wantErr: true},
+		{name: "missing run", yaml: "services:\n  db:\n    ready: x\n", wantErr: true},
 		{name: "unknown field", yaml: "services:\n  db:\n    run: x\n    restart: always\n", wantErr: true},
-		{name: "unknown top-level field", yaml: "version: 1\nservices: {}\n", wantErr: true},
-		{name: "bad port", yaml: "services:\n  db:\n    run: x\n    port: high\n", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -67,37 +59,6 @@ services:
 			}
 			if diff := cmp.Diff(tt.want, got, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("parseServices(%q) mismatch (-want +got):\n%s", tt.yaml, diff)
-			}
-		})
-	}
-}
-
-func TestServiceEnviron(t *testing.T) {
-	tests := []struct {
-		name string
-		svc  service
-		want []string
-	}{
-		{name: "nothing added", svc: service{Run: "x"}, want: []string{"PATH=/bin"}},
-		{
-			name: "port and env",
-			svc:  service{Run: "x", Port: 8080, Env: map[string]string{"A": "1", "B": "2"}},
-			want: []string{"PATH=/bin", "PORT=8080", "A=1", "B=2"},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			// Spare capacity would let an append write into the caller's array.
-			base := make([]string, 1, 8)
-			base[0] = "PATH=/bin"
-			got := tt.svc.environ(base)
-			// Env comes from a map, so its order is not defined.
-			sortEnv := cmpopts.SortSlices(func(a, b string) bool { return a < b })
-			if diff := cmp.Diff(tt.want, got, sortEnv); diff != "" {
-				t.Errorf("environ() mismatch (-want +got):\n%s", diff)
-			}
-			if got := base[:cap(base)][1]; got != "" {
-				t.Errorf("environ() wrote %q into the caller's slice", got)
 			}
 		})
 	}
@@ -139,11 +100,12 @@ func TestSupervisorBackoff(t *testing.T) {
 	})
 }
 
-// A stop command that ends the service must not get it restarted.
+// A stop command that ends the service must not get it restarted. It goes on
+// past the shortest backoff, so a restart would have happened by then.
 func TestSupervisorStopDoesNotRestart(t *testing.T) {
 	s, dir := newService(t, service{
 		Run:  "echo run >> runs; echo $$ > pid; exec sleep 600",
-		Stop: `until [ -s pid ]; do sleep 0.01; done; kill "$(cat pid)"`,
+		Stop: `until [ -s pid ]; do sleep 0.01; done; kill "$(cat pid)"; sleep 1.5`,
 	})
 	s.stop(t.Context())
 	if got := countLines(t, filepath.Join(dir, "runs")); got != 1 {
@@ -164,10 +126,6 @@ func TestSupervisorStopTerminates(t *testing.T) {
 
 // A service whose processes ignore SIGTERM is SIGKILLed, children included.
 func TestSupervisorStopKillsGroup(t *testing.T) {
-	ps, err := exec.LookPath("ps")
-	if err != nil {
-		t.Fatalf("ps is needed to see the service's child: %v", err)
-	}
 	s, dir := newService(t, service{
 		Run: `trap "" TERM; sh -c 'trap "" TERM; echo $$ > child; exec sleep 600' & wait`,
 		// Stop only once the child is there to be killed.
@@ -178,8 +136,19 @@ func TestSupervisorStopKillsGroup(t *testing.T) {
 	if took := time.Since(start); took > killDelay+2*time.Second {
 		t.Errorf("stop took %v, want about %v", took, killDelay)
 	}
+	checkGone(t, filepath.Join(dir, "child"))
+}
 
-	data, err := os.ReadFile(filepath.Join(dir, "child"))
+// checkGone fails t unless the process whose pid the file at path holds
+// dies within 2s: SIGKILL is delivered asynchronously. A zombie counts as
+// dead, since nothing in the tests reaps orphans.
+func checkGone(t *testing.T, path string) {
+	t.Helper()
+	ps, err := exec.LookPath("ps")
+	if err != nil {
+		t.Fatalf("ps is needed to see the process: %v", err)
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,8 +156,6 @@ func TestSupervisorStopKillsGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// SIGKILL is delivered asynchronously, so the child may take a moment to
-	// die. A zombie counts as dead: nothing in the test reaps orphans.
 	var state string
 	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); {
 		// ps exits 1 when the pid is gone; the empty output says so.
@@ -198,6 +165,6 @@ func TestSupervisorStopKillsGroup(t *testing.T) {
 			return
 		}
 	}
-	t.Errorf("the service's child (pid %d) survived stop in state %q", pid, state)
+	t.Errorf("process %d survived in state %q", pid, state)
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 }
