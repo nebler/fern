@@ -106,10 +106,10 @@ T3 already saves a **git checkpoint after every turn**. "Edit from here → Reve
 
 | Product | Its unit | Lifecycle | Fork / snapshot | Self-host | Notes |
 |---|---|---|---|---|---|
-| **Amp Orbs** (June 2026) | one sandbox per thread (bought from E2B) | sleeps after 5 min agent idle + 20 min human idle; wakes on a message, preview hit, webhook or schedule | golden "project snapshot" from `.agents/setup`, reused ≤72 h | no (runners = your machine, unmanaged) | closest product vision; supports Claude Pro/Max since 2026-10 |
+| **Amp Orbs** (June 2026) | one sandbox per thread (E2B for hosted orbs; self-hosted orbs run on Agent Substrate with gVisor) | sleeps when both clocks run out: 5 min since the agent's last activity and 20 min since the last human touch (~25 min during first setup); wakes on a message, preview hit, webhook or schedule | golden "project snapshot" from `.agents/setup`, reused ≤72 h; a pause keeps files only (1–2 GiB to a bucket), not memory | since 2026-10-22: you run the compute (dispatch program or Helm chart for GKE/EKS/AKS); the agent, thread state and orb queue stay on ampcode.com, closed source | closest product vision; Claude Pro/Max since 2026-10, through the Agent SDK, not the CLI; dropped file rollback in 2026-05 because it "would have required elaborate snapshotting" |
 | **Fly Sprites** | a named "computer" with a URL | warm → cold on idle; wake on request | disk checkpoints, ~300 ms (pages disagree) | no | best "feel" |
 | **Vercel Sandbox** | a named sandbox containing sessions | `getOrCreate(name)`; any call wakes it; persistent by default | snapshots outlive the sandbox; rollback by moving a pointer | no | **cleanest model** (one noun, ephemeral opt-in) |
-| **Google Agent Substrate** | "actor" = a DB record with a stable name, compute borrowed | router holds the request, restores the snapshot onto a warm pod | one snapshot per actor; revert to the latest only | yes (Apache-2.0) | gVisor checkpoint/restore; docs call parts "aspirational" |
+| **Google Agent Substrate** | "actor" = a Postgres record with a stable name; many actors share one warm worker pod | router holds the request, restores the snapshot onto a warm worker; suspend is an explicit call (no idle timer) | one snapshot per actor; revert to the latest only; tags pin a copy and seed new actors of the same template | yes (Apache-2.0) | gVisor or Cloud Hypervisor; files, rootfs or memory snapshots; pre-1.0 with weekly breaking releases; docs call parts "aspirational"; Amp's self-hosted orbs run on it; unrelated to agent-sandbox |
 | **kubernetes-sigs/agent-sandbox** | `Sandbox` (stateful pod) | `operatingMode: Running/Suspended` (pod deleted, volumes kept) | snapshots GKE-only | yes | `SandboxTemplate`, `WarmPool`, `Claim`, `sandboxd` (gRPC exec + PTY, REST files) |
 | **E2B** | Firecracker VM | pause keeps memory forever | fork up to 100 copies; named snapshots | Embed (one node) | |
 | **smolvm** | local microVM | | live CoW branches; checkpoints with memory, `--at ~N` | yes, macOS + Linux | doesn't capture host-mounted folders; no per-turn trigger |
@@ -124,6 +124,7 @@ T3 already saves a **git checkpoint after every turn**. "Edit from here → Reve
 | **Grab Palana** | namespace per agent | idle reaper | none (EFS `/data`) | internal | Vault + proxy secrets, Envoy/OPA egress, Cilium |
 | **KEP-5823** | Kubernetes pod checkpoint/restore | | | — | alpha targeted v1.37, same node, volumes out of scope |
 | **boat.dev** | hosted sandbox ($0.036/h) | | disk fork from named snapshots | no | |
+| **Zed Delta** (public beta 2026-09) | a thread = a conversation + its own checkouts, versioned by DeltaDB: every edit since the last commit, with the message that made it | cloud runners (private beta) pause after 10 idle min and resume on the next turn | revert the conversation and its files to any point; ignored files, dependencies and databases are not recorded; runner machines snapshotted after `.agents/setup` | no (proprietary, on Cloudflare) | reads `.agents/setup`, `prepare` and `linked`; "does not sandbox agents"; what we copy: architecture §5, §7.3, §8 |
 
 **Patterns the best ones share:**
 1. **The name lasts; the machine is borrowed.**
@@ -159,7 +160,7 @@ Nobody does all of these together:
 5. **Sleep, don't delete.** Wake on any touch. "Ephemeral" is opt-in.
 6. **Isolation over permission; quick reversibility over careful review; parallelism over queues.**
 7. **Few knobs:** one size class, automatic time limits, network denied by default.
-8. **Rewind and fork are plumbing and agent tools,** not the headline. Amp removed both undo and fork as *user* features.
+8. **Rewind and fork are plumbing and agent tools,** not the headline. Amp removed fork (2026-01) and file rollback on edit or restore (2026-05) as *user* features.
 9. **Build for today's models,** and keep a "what we won't do" list.
 
 **From sound primitives (actors, Durable Objects, Orleans, git):**
@@ -285,9 +286,9 @@ session       ████████        ██████                
 4. **Caveat found in T3's code:** a T3 fork **shares the source thread's worktree** (`ThreadForkService.ts:84-110`), so today it would share the environment too. Either add a small "fork into a new worktree" patch to T3 (~50–150 lines), or state the rule that only agent-made forks (`env_fork`) get their own environment.
 
 ### 10.5 Sleep and wake
-- **Idle** = no turn running, no terminal open, no preview connection, for N minutes (Amp uses 5 min agent idle + 20 min human idle). CPU doesn't count.
+- **Idle** = no turn running and two clocks run out: 5 min since the last turn ended, and 20 min since the last human touch (a message, a terminal, a preview hit). Copied from Amp, which also allows ~25 min during a thread's first setup. CPU and running services don't count.
 - **Sleep:** stop the session; `live/` stays; memory is freed.
-- **Wake triggers:** a message, opening the thread (optional, like Amp's "Saver Mode"), a preview hit, a webhook, a schedule, a reply from another agent.
+- **Wake triggers:** a message, opening the thread (Amp wakes on open by default; its "Saver Mode" turns that off), a preview hit, a webhook, a schedule, a reply from another agent.
 - **On wake:** start the session, run `.agents/resume`, start services. Processes restart; their data persists.
 
 ### 10.6 Ephemeral mode (opt-in)
@@ -307,19 +308,20 @@ session       ████████        ██████                
 
 ## 11. Setup: how environments get built
 
-**This is the hardest UX problem.** Amp calls its version "the most important hidden feature".
+**This is the hardest UX problem,** and golden snapshots are its most important hidden feature (§7).
 
 ### 11.1 How Amp does it
 - **`.agents/setup`:**
   - safe to rerun; killed after 20 minutes
   - **no long-running processes** (anything left running is killed before the snapshot)
-  - **no personal credentials** (a project-scoped OIDC token is allowed, and removed before the snapshot)
+  - **no personal credentials** (a project- or workspace-scoped OIDC token is allowed, and removed before the snapshot)
+  - **no services:** the snapshot is taken before the orb belongs to a thread, so services start from resume
 - **The project snapshot (= golden):**
-  - keyed by orb size + repo source + shared config
-  - reused for up to 72 hours
-  - setup is skipped when it matches
-- **`.agents/resume`:** every wake, ≤10 s, for logins and tunnels. Machine identity is never baked in.
-- **`.amp/services.yaml`** plus `amp orb services ensure|start`. Apps must respect `PORT` and `PUBLIC_URL`. A running service doesn't keep the orb awake.
+  - keyed by orb size + repo source + shared config; changing `.agents/setup` alone does **not** rebuild it (you delete it by hand)
+  - reused for up to 72 hours (24 h in July 2026)
+  - setup is skipped when it matches; a failed or timed-out setup publishes nothing
+- **`.agents/resume`:** after every wake, and also on a reconnect that had no pause, so it must be safe to run twice. Amp waits for it up to 10 s, then starts the agent and lets it keep running. For logins and tunnels; machine identity is never baked in.
+- **`.amp/services.yaml`** (`command`, `cwd`, `port`, `env`, `health`, `portal`) plus `amp orb services ensure|start`. Apps must respect `PORT` and `PUBLIC_URL`. A running service doesn't keep the orb awake.
 - **A rich base image:** Node, Bun, pnpm, Python, uv, gh, agent-browser, ffmpeg, tmux. Setup scripts stay small.
 - **Repo advice: "Don't make them guess."**
   - one safe-to-rerun dev-server script
@@ -328,7 +330,7 @@ session       ████████        ██████                
   - dev-only endpoints like `/__dev/log-me-in` and `/__dev/preflight`
 
 ### 11.2 Fern's layered approach
-1. **Amp-compatible bash, the floor:** read `.agents/setup`, `.agents/resume` and a services file. Any repo already set up for Amp works unchanged.
+1. **Amp- and Delta-compatible bash, the floor:** read `.agents/setup`, `.agents/resume` and `.amp/services.yaml` in Amp's format, so a repo already set up for Amp works unchanged. Delta reads the same `.agents/setup`, plus a fast `.agents/prepare` for every new checkout and `.agents/linked` for ignored local files such as `.env`; Fern reads those too (architecture §8). Today `fern-init` reads only Fern's own `services.yaml` (`run`, `stop`, `ready`); the readers come with golden snapshots (roadmap week 4).
 2. **Fallbacks:**
    - `devcontainer.json`, using Codespaces' prebuild split: `onCreate` / `updateContent` go into golden, `postCreate` runs after
    - T3's `t3.json` worktree scripts (`runOnWorktreeCreate`)

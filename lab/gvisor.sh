@@ -28,6 +28,10 @@ TOML
   # Kubelet serves exec a little after the node turns Ready.
   until k -n fern-system exec ds/fern -c fern -- true 2>/dev/null; do sleep 1; done
 fi
+# gVisor mirrors all of a box's memory mappings into one host process; at the
+# kernel's default limit, large builds (Node, JVM) segfault. Set on every run:
+# the Docker Desktop VM forgets it when it restarts.
+docker exec "$LAB" sysctl -qw vm.max_map_count=4194304
 k apply -f - >/dev/null <<'YAML'
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass

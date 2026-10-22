@@ -157,7 +157,7 @@ Unix socket `/run/fern/fern.sock` (a host directory, so T3's server pod can shar
 | `POST /goldens/{repo}/build` | (re)build golden | normally automatic |
 
 **Other entrances:**
-- **Previews:** `http(s)://<env>.<repo>.<host>/…` → the front door → the box's service port. It answers **503** (never 404) while waking.
+- **Previews:** `http(s)://<env>.<repo>.<host>/…` → the front door → the service with a `port` in `services.yaml`. Any other port the box listens on is at `<port>-<env>.<repo>.<host>`, with nothing to declare, and `fern-init url <port>` prints that URL inside the box so agents can hand out links (both copied from Delta). Previews answer **503** (never 404) while waking. Like T3's own port, they are never public (firewall or tailnet).
 - **Webhooks:** `POST /hooks/{env}/{token}` → wakes the environment and delivers the request.
 
 **Errors:**
@@ -195,12 +195,12 @@ Unix socket `/run/fern/fern.sock` (a host directory, so T3's server pod can shar
 The driver reports unexpected exits. The actor restarts with backoff, and gives up after N failures in a window (OTP-style supervision).
 
 ### 6.3 Idle rule
-An environment is idle when, for `idle_timeout` (default 15 min):
-- **no exec is open** (an agent turn is an exec)
-- **no terminal is attached**
-- **no preview connection is active**
+An environment goes to sleep when all of these hold (two clocks, copied from Amp):
+- **no exec is open** (an agent turn is an exec), **no terminal is attached** and **no preview connection is active**
+- **agent clock:** `idle.agent` (default 5 min) since the last exec closed
+- **human clock:** `idle.human` (default 20 min) since the last human touch: an exec or terminal opened, or a preview request
 
-CPU usage is ignored. An explicit `hold` keeps it awake.
+CPU usage and running services are ignored. An explicit `hold` keeps it awake.
 
 ---
 
@@ -216,16 +216,18 @@ CPU usage is ignored. An explicit `hold` keeps it awake.
 1. T3 → `POST /envs/t3-8f2c/exec {cmd: "claude …", pty: true}`.
 2. Asleep → the front door holds the request → the actor → the driver starts a session → `fern-init` runs `.agents/resume`, starts services → ready.
 3. The exec streams until the turn ends.
-4. T3 saves git checkpoint `7f3a` → the hook → `POST /snapshots {id: "7f3a"}` → `btrfs subvolume snapshot -r` → ok. **T3 marks the turn saved only after ok.**
+4. T3 saves git checkpoint `7f3a` → the hook → `POST /snapshots {id: "7f3a"}` → `btrfs subvolume snapshot -r` → ok. **A failed snapshot doesn't fail the turn** (copied from Delta, whose hooks never break the agent): the hook logs it and T3 keeps its git checkpoint. That turn then has code but no disk, and §7.3 refuses to revert to it.
 
 ### 7.3 Revert ("Edit from here → Revert files too")
-1. T3 restores code from git.
-2. The hook → `POST /restore {snapshot: "7f3a"}`. The op is logged in four steps:
+1. The hook → `POST /restore {snapshot: "7f3a"}`. The op is logged in four steps:
    1. stop the session (gracefully)
    2. `live.new` = writable snapshot of `7f3a`
    3. atomic swap `live.new` ↔ `live`; bump the generation
-   4. delete the old live
-3. ok. The next exec restarts the box on the restored disk.
+   4. keep the old live as a read-only snapshot tagged `pre-restore` for a day, so a revert can itself be undone (copied from Delta, which keeps work it couldn't sync instead of dropping it)
+2. ok. Then T3 restores code from git, which also fixes the index in the main repository.
+3. The next exec restarts the box on the restored disk.
+
+**A turn without a snapshot** (§7.2) can't be reverted with its data: the restore fails with that reason, and T3's git restore doesn't run. Restoring the code alone would leave the database newer than the code.
 
 ### 7.4 Fork
 1. `POST /envs/t3-8f2c/fork {snapshot, newId: "t3-91aa"}`. The op is logged: create `t3-91aa/live` from the snapshot, then run the identity hook.
@@ -246,14 +248,17 @@ Stop the session → delete `live/` → apply retention to snapshots (keep tagge
 
 Read from the repo, in order of preference:
 1. **`.fern/env.ts`** (later): a typed definition (Alchemy-style) with cached steps, services and optional per-thread external resources (stage = thread).
-2. **`.agents/setup` + `.agents/resume` + `services.yaml`**: Amp-compatible.
+2. **`.agents/setup` + `.agents/prepare` + `.agents/resume` + `services.yaml`**: compatible with Amp and Delta, which both read `.agents/setup`. `.agents/linked` lists ignored local files, such as `.env`, to bring in. A file in `.fern/` replaces the `.agents/` file of the same name; the two are never merged (Delta does the same with `.delta/`).
 3. **`devcontainer.json`**: `onCreateCommand` / `updateContentCommand` go into golden, `postCreateCommand` runs after.
 4. **T3's `t3.json`** worktree scripts.
 5. **Nothing:** `fern init` asks an agent to write (2) and proves it by building golden.
 
-**Rules** (adopted from Amp):
+**Rules** (adopted from Amp and Delta):
 - `setup` must be **safe to rerun**, finish in ≤20 min, **leave no processes running**, and use **no personal credentials**.
-- `resume` runs on **every wake** in ≤10 s. It's for logins, tunnels and machine identity.
+- `setup` starts **no services**: golden is taken before the environment belongs to a thread. Services start from `services.yaml` or `resume`.
+- `prepare` runs in **every new workspace**: before `setup` in a golden build, and once in each new environment (from golden or a fork) before the first `resume`. It must be fast: downloads and builds belong in `setup` (Delta's rule).
+- `linked` paths come from the project's main repository (`repos/<repo>/`) and are mounted read-only into the box, **outside `live/`**, so they never enter golden or snapshots. They are not mounted while `setup` runs. (Delta symlinks them to one shared copy instead.)
+- `resume` runs on **every wake** and when `fern-init` reconnects without a sleep, so it must be **safe to run twice**. A turn waits for it at most 10 s; after that it keeps running in the background. It's for logins, tunnels and machine identity.
 - Services must respect **`PORT`** and **`PUBLIC_URL`**. **A running service does not keep the environment awake.**
 
 `services.yaml`:
@@ -265,7 +270,7 @@ services:
     ready: pg_isready -p $PORT
   web:
     run: pnpm dev
-    port: 3000          # exposed as a preview
+    port: 3000          # the default preview, <env>.<repo>.<host>
     env: { DATABASE_URL: "postgres://localhost:${services.postgres.port}/app" }
 ```
 
@@ -292,6 +297,7 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
 - **Consistency:** a snapshot is atomic (crash-consistent). Postgres recovers through its WAL; SQLite needs its WAL file kept beside it.
 - **Retention:**
   - keep the last N turn snapshots per environment, plus tagged snapshots, plus golden
+  - keep `pre-restore` copies (§7.3) for a day
   - expire unused goldens after M days
   - **space pressure → refuse new snapshots with a clear error** rather than fill the disk
 - **Quotas:** btrfs qgroups per environment (cost to be measured), or cgroup-level limits on the box.
@@ -336,6 +342,7 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
 | **Crash mid-turn** | the agent CLI resumes from its session files; Fern can restore to the last turn snapshot before resuming if the transcript is broken |
 | **Restore during an exec** | the exec is cancelled first; generation fencing stops any late writes from the old session |
 | **Disk full** | snapshots refused with `quota_exceeded`; retention runs; the box keeps working |
+| **Snapshot fails at a turn's end** | the turn still counts: T3 keeps its git checkpoint and the hook logs the error; reverting to that turn is refused with the reason (§7.3) |
 | **Node loss (Kubernetes)** | environments on that node are unavailable until it returns, or until they're restored elsewhere from shipped snapshots (`btrfs send` to object storage, optional) |
 | **Golden build fails** | the environment is created from the previous golden, with a visible warning; the agent is asked to fix the setup |
 
@@ -459,9 +466,9 @@ A first, then propose B with what the spike learned (roadmap week 8). C only if 
 ```yaml
 pool: /var/lib/fern            # btrfs mount (created if missing, as an image file)
 driver: local                  # local | k8s
-idle_timeout: 15m
+idle: { agent: 5m, human: 20m }
 wake_timeout: 30s
-retention: { turns: 50, golden_unused: 7d }
+retention: { turns: 50, golden_unused: 7d, pre_restore: 1d }
 fork: { max: 8, agent_ttl: 1h }
 classes:
   light:     { runtime: runc,  cpu: 2, memory: 4Gi }

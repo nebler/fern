@@ -49,6 +49,17 @@ T3's server in a pod with the pool and the daemon socket, the checkpoint hook in
 
 The actor per environment with a generation number (restore cancels open execs), the op log for create, adopt, restore and delete with a startup reconcile, failpoint crash tests (E6-lite), E2 and E5, the idle timer, and `/metrics`.
 
+**From Amp's self-hosted orbs (research 2026-10-22):**
+- **Idle timer with two clocks** (architecture §6.3): sleep only when no exec is open, 5 min have passed since the last exec closed, and 20 min since the last human touch. Test it with `testing/synctest`.
+- **Keep the lifecycle safe to repeat** after the actor refactor: `TestLifecycleRepeats` (create, sleep and wake twice each, delete) must still pass, and the lab runs the same sequence against k3s.
+- **A small manifest next to each snapshot** (env, snapshot ID, created, format version), so the startup reconcile can rebuild the index from disk and refuse a snapshot from an unknown format.
+- **For Part B's `fern-claude`, check:** Claude's onboarding and trust prompts are already accepted in `CLAUDE_CONFIG_DIR`, its autoupdater is off (the image pins the version), and `ANTHROPIC_API_KEY` is unset whenever `CLAUDE_CODE_OAUTH_TOKEN` is set.
+
+**From Zed's Delta (research 2026-10-22):**
+- **Restore keeps the old workspace** as a read-only `pre-restore` snapshot for a day instead of deleting it (architecture §7.3), so a revert can be undone. The crash tests check it is never lost.
+- **For Part B's hook:** a failed snapshot is logged and the turn keeps its git checkpoint; a restore without a snapshot is refused with the reason, before T3's git restore runs (architecture §7.2–7.3).
+- **The hook's tests replay real `fern` output:** Go tests write each command's output and exit code to `testdata/`; the hook's fake `fern` answers from them and fails the test on a broken rule, such as a snapshot before `create`.
+
 ## Stop conditions
 
 - Part A adds at most ~900 lines of Go (code, not tests). If it needs more, stop and say why.

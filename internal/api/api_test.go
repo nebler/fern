@@ -397,6 +397,49 @@ func TestDelete(t *testing.T) {
 	}
 }
 
+// Every lifecycle call is safe to repeat: a caller that retries after a lost
+// answer must not get an error, a second box or an extra wake.
+func TestLifecycleRepeats(t *testing.T) {
+	c, drv := newAPI(t)
+	ctx := t.Context()
+	create := func() error { _, err := c.Create(ctx, "demo", api.CreateOptions{}); return err }
+	wake := func() error { return c.Wake(ctx, "demo") }
+	sleep := func() error { return c.Sleep(ctx, "demo") }
+	steps := []struct {
+		name      string
+		do        func() error
+		wantState driver.State
+		wantWakes int
+	}{
+		{"create", create, driver.Asleep, 0},
+		{"create again", create, driver.Asleep, 0},
+		{"wake", wake, driver.Running, 1},
+		{"wake again", wake, driver.Running, 1},
+		{"create while running", create, driver.Running, 1},
+		{"sleep", sleep, driver.Asleep, 1},
+		{"sleep again", sleep, driver.Asleep, 1},
+		{"wake after sleep", wake, driver.Running, 2},
+	}
+	for _, step := range steps {
+		if err := step.do(); err != nil {
+			t.Fatalf("%s: error %v", step.name, err)
+		}
+		env, err := c.Get(ctx, "demo")
+		if err != nil {
+			t.Fatalf("%s: Get(demo) error: %v", step.name, err)
+		}
+		if env.State != step.wantState || drv.Wakes() != step.wantWakes {
+			t.Errorf("%s: state %s, %d wakes; want %s, %d", step.name, env.State, drv.Wakes(), step.wantState, step.wantWakes)
+		}
+	}
+	if err := c.Delete(ctx, "demo"); err != nil {
+		t.Fatalf("Delete(demo) error: %v", err)
+	}
+	if _, err := c.Get(ctx, "demo"); errCode(err) != api.CodeNotFound {
+		t.Errorf("Get(demo) after Delete error = %v, want code %s", err, api.CodeNotFound)
+	}
+}
+
 // Concurrent mutations of one environment are serialized by the server and
 // must not race (run with -race).
 func TestConcurrentSnapshots(t *testing.T) {
