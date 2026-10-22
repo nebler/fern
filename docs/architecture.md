@@ -140,7 +140,7 @@ status: { phase: Asleep, head: 7f3a, session: null, generation: 12, bytes: 1.2Gi
 
 ## 5. API
 
-Unix socket `/run/fern.sock`, JSON over HTTP. Streaming endpoints use chunked responses or WebSockets. Every mutating call takes an `Idempotency-Key`.
+Unix socket `/run/fern/fern.sock` (a host directory, so T3's server pod can share it), JSON over HTTP. Streaming endpoints use chunked responses or WebSockets. Every mutating call takes an `Idempotency-Key`.
 
 | Call | Meaning | Notes |
 |---|---|---|
@@ -347,13 +347,28 @@ services:
 - **An admission policy limits the daemon:** it may only create `Sandbox` objects pinned to its own node (node-bound service-account tokens) and only with allowed runtimes.
 - **User namespaces** for every box.
 - **Credentials:**
-  - agent logins (`CLAUDE_CODE_OAUTH_TOKEN`, a per-session Codex `auth.json`) are injected by `resume` from a secret store
+  - agent logins (`CLAUDE_CODE_OAUTH_TOKEN`, a short-lived Codex access token from the login the daemon refreshes) are injected by `resume` from a secret store (§13.1)
   - **never in `live/`, golden or snapshots** (golden builds are scanned). Claude keeps `~/.claude/.credentials.json` and Codex keeps `auth.json` inside folders that otherwise live in `live/`, so those files are bind-mounted from outside (or kept in a nested subvolume, which btrfs snapshots skip)
   - forks get fresh credentials
 - **Non-model secrets:** a host-side broker for short-lived, scoped tokens (Fern v1's GitHub App broker); per-environment OIDC tokens later.
 - **Network:** deny by default; per-class allowlists.
 - **Isolation levels by class:** runc → gVisor → micro-VM.
-- **Subscription terms:** one login per person; no credential proxy; no sharing.
+
+### 13.1 Subscription terms
+Checked 2026-10-22 against Anthropic's, OpenAI's and the other providers' published terms. These pages change (Anthropic's twice in 2026): check again before a public release.
+
+**Allowed:** a person runs the vendor's real, unmodified CLI with their own subscription on their own machines, in containers, headless. Anthropic says so for Claude Code ([legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)), and suggests keeping a `setup-token` token as a secret. OpenAI documents Codex on headless machines ([auth](https://learn.chatgpt.com/docs/auth)). Using it through T3 Code is tolerated: since 2026-10-07 Anthropic still lets third-party apps use plan limits through the Agent SDK.
+
+**Fern never:**
+- has a login screen, or stores, proxies or relays a subscription token. The person runs `claude setup-token` (or the Codex login) and creates the Secret; Fern only mounts it.
+- changes how a CLI authenticates or what it sends (no `ANTHROPIC_BASE_URL` relay, no client spoofing).
+- serves one login to several people. Multi-person cells: each person brings their own.
+- is reachable without auth. Anyone who reaches T3 uses the owner's account, which is account sharing. On a VPS the T3 port is behind a firewall or a tailnet, never public.
+- shares one Codex `auth.json` between running boxes. OpenAI forbids it ([CI/CD auth](https://learn.chatgpt.com/docs/auth/ci-cd-auth)) and concurrent refreshes break it. The daemon owns the login and refreshes it; boxes get short-lived access tokens.
+
+**Careful with:** parallel forks and automated turns (webhooks, schedules). Plans assume "ordinary, individual usage", so they are capped per subscription and opt-in. API keys stay out (no API keys).
+
+**Providers:** Claude Code and Codex through their own CLIs are supported. Blocked: Claude logins through other agents (pi, OpenCode), which Anthropic prohibits, and Google Antigravity / Gemini consumer logins, which Google forbids wrapping. Fine through T3 if wanted later: pi and OpenCode with ChatGPT, Copilot or xAI logins, Cursor, Muse. Grok's login in a container is undocumented.
 
 ---
 
