@@ -265,9 +265,9 @@ func list(ctx context.Context, _ command, cl *api.Client, std stdio) (int, error
 		return 0, err
 	}
 	tw := tabwriter.NewWriter(std.out, 0, 4, 2, ' ', 0)
-	_, _ = fmt.Fprintln(tw, "ENV\tSTATE\tHEAD\tREPO\tCREATED") // tabwriter reports errors on Flush
+	_, _ = fmt.Fprintln(tw, "ENV\tSTATE\tCREATED\tWORKSPACE") // tabwriter reports errors on Flush
 	for _, e := range envs {
-		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", e.ID, e.State, e.Head, e.Repo, e.Created.Format(time.RFC3339))
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", e.ID, e.State, e.Created.Format(time.RFC3339), e.Workspace)
 	}
 	return 0, tw.Flush()
 }
@@ -373,7 +373,7 @@ func createFromDir(ctx context.Context, c command, opts api.CreateOptions, cl *a
 		}
 		pw.CloseWithError(tarErr) // a nil error is a clean EOF
 	})
-	opts.Repo, opts.Seed = c.repo, pr
+	opts.Seed = pr
 	env, err := cl.Create(ctx, c.env, opts)
 	// If the daemon stopped reading (it refused, or the environment exists
 	// and needs no seed), tar must not block writing to the pipe.

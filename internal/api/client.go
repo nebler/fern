@@ -61,7 +61,6 @@ const base = "http://fern"
 
 // CreateOptions are the optional parts of a new environment.
 type CreateOptions struct {
-	Repo string    // where the code came from, for listings
 	Path string    // the workspace, <pool>/worktrees/<repo>/<name>; see store.CreateOptions
 	Seed io.Reader // a tar stream to fill the workspace with
 }
@@ -70,9 +69,6 @@ type CreateOptions struct {
 func (c *Client) Create(ctx context.Context, id string, opts CreateOptions) (Env, error) {
 	path := "/envs/" + url.PathEscape(id)
 	q := url.Values{}
-	if opts.Repo != "" {
-		q.Set("repo", opts.Repo)
-	}
 	if opts.Path != "" {
 		q.Set("path", opts.Path)
 	}

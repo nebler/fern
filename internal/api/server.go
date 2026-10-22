@@ -30,7 +30,7 @@ type Store interface {
 	FindByPath(ctx context.Context, path string) (store.Env, error)
 	List(ctx context.Context) ([]store.Env, error)
 	Delete(ctx context.Context, id string) error
-	Snapshot(ctx context.Context, env, snap string) (store.Snapshot, error)
+	Snapshot(ctx context.Context, env, snap string) error
 	DeleteSnapshot(ctx context.Context, env, snap string) error
 	Snapshots(ctx context.Context, env string) ([]store.Snapshot, error)
 	Restore(ctx context.Context, env, snap string) error
@@ -48,23 +48,20 @@ type Driver interface {
 
 // Env is an environment as the API reports it.
 type Env struct {
-	ID      string       `json:"id"`
-	Repo    string       `json:"repo,omitempty"`
-	Path    string       `json:"path"`           // the workspace, on the host and in the box
-	Head    string       `json:"head,omitempty"` // last snapshot taken or restored
-	Created time.Time    `json:"created"`
-	State   driver.State `json:"state,omitempty"` // not in a lookup by path
+	ID        string       `json:"id"`
+	Workspace string       `json:"workspace"` // on the host and in the box
+	Created   time.Time    `json:"created"`
+	State     driver.State `json:"state,omitempty"` // not in a lookup by path
 }
 
 // Snapshot is a snapshot as the API reports it.
 type Snapshot struct {
 	ID      string    `json:"id"`
-	Env     string    `json:"env"`
 	Created time.Time `json:"created"`
 }
 
 func snapshotOf(s store.Snapshot) Snapshot {
-	return Snapshot{ID: s.ID, Env: s.Env, Created: s.Created}
+	return Snapshot{ID: s.ID, Created: s.Created}
 }
 
 const (
@@ -156,7 +153,7 @@ func (s *Server) change(r *http.Request, id string, fn func(ctx context.Context,
 // query may name its repo and its workspace path.
 func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	opts := store.CreateOptions{Repo: r.URL.Query().Get("repo"), Path: r.URL.Query().Get("path")}
+	opts := store.CreateOptions{Workspace: r.URL.Query().Get("path")}
 	if r.Header.Get("Content-Type") == "application/x-tar" {
 		opts.Seed = r.Body
 	}
@@ -166,7 +163,7 @@ func (s *Server) create(w http.ResponseWriter, r *http.Request) {
 		if env, err = s.store.Create(ctx, id, opts); err != nil {
 			return err
 		}
-		return s.driver.Create(ctx, id, env.Token, driver.Folders{Workspace: env.Path, Claude: env.Claude, Git: env.Git})
+		return s.driver.Create(ctx, id, env.BoxToken, driver.Folders{Workspace: env.Workspace, Claude: env.Claude, Git: env.Git})
 	})
 	if err != nil {
 		s.fail(w, r, err)
@@ -262,22 +259,19 @@ func (s *Server) snapshot(w http.ResponseWriter, r *http.Request) {
 		req.ID = strings.ToLower(rand.Text())
 	}
 	id := r.PathValue("id")
-	var snap store.Snapshot
 	err := s.change(r, id, func(ctx context.Context, _ *envState) error {
 		if req.Replace {
 			if err := s.store.DeleteSnapshot(ctx, id, req.ID); err != nil {
 				return err
 			}
 		}
-		var err error
-		snap, err = s.store.Snapshot(ctx, id, req.ID)
-		return err
+		return s.store.Snapshot(ctx, id, req.ID)
 	})
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	s.reply(w, r, snapshotOf(snap))
+	s.reply(w, r, Snapshot{ID: req.ID})
 }
 
 func (s *Server) snapshots(w http.ResponseWriter, r *http.Request) {
@@ -405,7 +399,7 @@ func (s *Server) dialBox(ctx context.Context, env store.Env) (*websocket.Conn, e
 			return nil, err
 		}
 		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
-		conn, err := boxexec.Dial(dialCtx, boxexec.URL(addr), env.Token, nil)
+		conn, err := boxexec.Dial(dialCtx, boxexec.URL(addr), env.BoxToken, nil)
 		cancel()
 		if err == nil {
 			return conn, nil
@@ -484,7 +478,7 @@ func (s *Server) envOf(ctx context.Context, env store.Env) Env {
 }
 
 func wireEnv(env store.Env, state driver.State) Env {
-	return Env{ID: env.ID, Repo: env.Repo, Path: env.Path, Head: env.Head, Created: env.Created, State: state}
+	return Env{ID: env.ID, Workspace: env.Workspace, Created: env.Created, State: state}
 }
 
 // state is the box state for listings, where an error shouldn't fail the

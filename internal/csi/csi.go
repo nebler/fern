@@ -140,7 +140,7 @@ func (p *Plugin) source(ctx context.Context, id, folder string) (string, error) 
 	var src string
 	switch folder {
 	case "", "workspace":
-		src = env.Path
+		src = env.Workspace
 	case "claude":
 		src = env.Claude
 	case "git":

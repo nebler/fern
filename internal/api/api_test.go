@@ -67,11 +67,11 @@ func (f *fakeStore) Create(_ context.Context, id string, opts store.CreateOption
 	if env, ok := f.envs[id]; ok {
 		return env, nil
 	}
-	path := opts.Path
+	path := opts.Workspace
 	if path == "" {
 		path = "/pool/envs/" + id + "/live"
 	}
-	env := store.Env{ID: id, Repo: opts.Repo, Path: path, Created: created, Token: boxToken}
+	env := store.Env{ID: id, Workspace: path, Created: created, BoxToken: boxToken}
 	f.envs[id] = env
 	return env, nil
 }
@@ -97,7 +97,7 @@ func (f *fakeStore) FindByPath(_ context.Context, path string) (store.Env, error
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	for _, env := range f.envs {
-		if path == env.Path || strings.HasPrefix(path, env.Path+"/") {
+		if path == env.Workspace || strings.HasPrefix(path, env.Workspace+"/") {
 			return env, nil
 		}
 	}
@@ -132,11 +132,11 @@ func (f *fakeStore) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-func (f *fakeStore) Snapshot(_ context.Context, env, snap string) (store.Snapshot, error) {
+func (f *fakeStore) Snapshot(_ context.Context, env, snap string) error {
 	f.mu.Lock()
 	if f.changing[env] {
 		f.mu.Unlock()
-		return store.Snapshot{}, fmt.Errorf("snapshot %s/%s overlaps another change", env, snap)
+		return fmt.Errorf("snapshot %s/%s overlaps another change", env, snap)
 	}
 	f.changing[env] = true
 	f.mu.Unlock()
@@ -146,14 +146,12 @@ func (f *fakeStore) Snapshot(_ context.Context, env, snap string) (store.Snapsho
 	defer f.mu.Unlock()
 	f.changing[env] = false
 	if _, err := f.getLocked(env); err != nil {
-		return store.Snapshot{}, err
+		return err
 	}
-	if i := slices.IndexFunc(f.snaps[env], func(s store.Snapshot) bool { return s.ID == snap }); i >= 0 {
-		return f.snaps[env][i], nil
+	if !slices.ContainsFunc(f.snaps[env], func(s store.Snapshot) bool { return s.ID == snap }) {
+		f.snaps[env] = append(f.snaps[env], store.Snapshot{ID: snap, Created: created})
 	}
-	s := store.Snapshot{ID: snap, Env: env, Created: created}
-	f.snaps[env] = append(f.snaps[env], s)
-	return s, nil
+	return nil
 }
 
 func (f *fakeStore) Snapshots(_ context.Context, env string) ([]store.Snapshot, error) {
@@ -236,10 +234,10 @@ func errCode(err error) string {
 func TestCreateGetList(t *testing.T) {
 	c, _ := newAPI(t)
 	ctx := t.Context()
-	want := api.Env{ID: "demo", Repo: "/src/demo", Path: "/pool/envs/demo/live", Created: created, State: driver.Asleep}
+	want := api.Env{ID: "demo", Workspace: "/pool/envs/demo/live", Created: created, State: driver.Asleep}
 
 	for range 2 { // creating again returns the same environment
-		got, err := c.Create(ctx, "demo", api.CreateOptions{Repo: "/src/demo"})
+		got, err := c.Create(ctx, "demo", api.CreateOptions{})
 		if err != nil {
 			t.Fatalf("Create(demo) error: %v", err)
 		}
@@ -318,7 +316,11 @@ func TestSnapshotRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshots(demo) error: %v", err)
 	}
-	if diff := cmp.Diff([]api.Snapshot{snap, gen}, snaps); diff != "" {
+	var ids []string
+	for _, s := range snaps {
+		ids = append(ids, s.ID)
+	}
+	if diff := cmp.Diff([]string{snap.ID, gen.ID}, ids); diff != "" {
 		t.Errorf("Snapshots(demo) mismatch (-want +got):\n%s", diff)
 	}
 
@@ -593,7 +595,7 @@ func TestFindByPath(t *testing.T) {
 	}
 	for _, p := range []string{path, path + "/src/pkg"} {
 		env, err := c.FindByPath(ctx, p)
-		if err != nil || env.ID != "wt" || env.Path != path {
+		if err != nil || env.ID != "wt" || env.Workspace != path {
 			t.Errorf("FindByPath(%s) = %+v, %v, want wt at %s", p, env, err, path)
 		}
 	}
