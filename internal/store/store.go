@@ -5,12 +5,15 @@
 //
 //	envs/<env>/live/            the workspace, unless the environment has a path
 //	envs/<env>/snaps/<snap>/    read-only snapshots of the workspace
+//	envs/<env>/claude/          Claude's state (CLAUDE_CONFIG_DIR): kept by restores, never snapshotted
 //	envs/<env>/incomplete       marks a create or delete that hasn't finished
 //	worktrees/<repo>/<name>/    workspaces at a path the caller chose (T3's worktrees)
+//	repos/                      the main repositories those worktrees belong to (T3 keeps them)
 //	state/fern.sqlite           the index; it holds the boxes' tokens
 //
-// The workspace is mounted into the environment's box at the same path, so
-// the caller, the daemon and the box all name files the same way.
+// The workspace, Claude's folder and the main repository's git folder are
+// mounted into the environment's box at the same paths, so the caller, the
+// daemon and the box all name files the same way.
 package store
 
 import (
@@ -61,9 +64,15 @@ var (
 
 // Env is an environment: a writable workspace subvolume plus its snapshots.
 type Env struct {
-	ID      string
-	Repo    string
-	Path    string // the workspace, on the host and in the box
+	ID     string
+	Repo   string
+	Path   string // the workspace, on the host and in the box
+	Claude string // Claude's folder, outside the workspace so a restore doesn't rewind it
+	// Git is the git folder of the main repository the workspace is a
+	// worktree of, as it was at create; empty if it isn't a worktree of one
+	// under repos/. The box gets it read-only, so git works there and can't
+	// change the repository's config or hooks.
+	Git     string
 	Head    string // last snapshot taken or restored
 	Created time.Time
 	// Token authenticates the daemon to the environment's box.
@@ -106,7 +115,8 @@ CREATE TABLE IF NOT EXISTS environments (
 	head       TEXT NOT NULL DEFAULT '',
 	token      TEXT NOT NULL,
 	created_at INTEGER NOT NULL,
-	path       TEXT NOT NULL DEFAULT ''
+	path       TEXT NOT NULL DEFAULT '',
+	git        TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS snapshots (
 	env        TEXT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
@@ -167,14 +177,20 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if _, err := db.ExecContext(ctx, schema); err != nil {
 		return err
 	}
-	var hasPath bool
-	if err := db.QueryRowContext(ctx,
-		`SELECT count(*) > 0 FROM pragma_table_info('environments') WHERE name = 'path'`).Scan(&hasPath); err != nil {
-		return err
-	}
-	if !hasPath {
-		if _, err := db.ExecContext(ctx, `ALTER TABLE environments ADD COLUMN path TEXT NOT NULL DEFAULT ''`); err != nil {
+	// The columns added since the first index, oldest first.
+	for _, col := range []struct{ name, add string }{
+		{"path", `ALTER TABLE environments ADD COLUMN path TEXT NOT NULL DEFAULT ''`},
+		{"git", `ALTER TABLE environments ADD COLUMN git TEXT NOT NULL DEFAULT ''`},
+	} {
+		var has bool
+		if err := db.QueryRowContext(ctx,
+			`SELECT count(*) > 0 FROM pragma_table_info('environments') WHERE name = ?`, col.name).Scan(&has); err != nil {
 			return err
+		}
+		if !has {
+			if _, err := db.ExecContext(ctx, col.add); err != nil {
+				return err
+			}
 		}
 	}
 	_, err := db.ExecContext(ctx, pathIndex)
@@ -210,6 +226,13 @@ func (s *Store) Create(ctx context.Context, id string, opts CreateOptions) (Env,
 	if err := os.MkdirAll(filepath.Join(s.envDir(id), "snaps"), 0o755); err != nil {
 		return Env{}, fmt.Errorf("create %s: %w", id, err)
 	}
+	// Claude's folder holds its transcripts: for the box user alone.
+	if err := os.MkdirAll(s.claudePath(id), 0o700); err != nil {
+		return Env{}, fmt.Errorf("create %s: %w", id, err)
+	}
+	if err := os.Chown(s.claudePath(id), BoxUID, BoxGID); err != nil {
+		return Env{}, fmt.Errorf("create %s: %w", id, err)
+	}
 	if err := s.mark(id, opCreate, path); err != nil {
 		return Env{}, fmt.Errorf("create %s: %w", id, err)
 	}
@@ -225,10 +248,16 @@ func (s *Store) Create(ctx context.Context, id string, opts CreateOptions) (Env,
 			return Env{}, fmt.Errorf("create %s: %w", id, err)
 		}
 	}
-	env = Env{ID: id, Repo: opts.Repo, Path: path, Token: rand.Text(), Created: now()}
+	// The git folder is read now, before an agent has run in the workspace
+	// and could have changed its .git file.
+	git, err := s.repoGitDir(path)
+	if err != nil {
+		return Env{}, fmt.Errorf("create %s: %w", id, err)
+	}
+	env = Env{ID: id, Repo: opts.Repo, Path: path, Claude: s.claudePath(id), Git: git, Token: rand.Text(), Created: now()}
 	_, err = s.db.ExecContext(ctx,
-		`INSERT INTO environments (id, repo, token, created_at, path) VALUES (?, ?, ?, ?, ?)`,
-		env.ID, env.Repo, env.Token, env.Created.Unix(), env.Path)
+		`INSERT INTO environments (id, repo, token, created_at, path, git) VALUES (?, ?, ?, ?, ?, ?)`,
+		env.ID, env.Repo, env.Token, env.Created.Unix(), env.Path, env.Git)
 	if err != nil {
 		return Env{}, fmt.Errorf("create %s: %w", id, err)
 	}
@@ -295,6 +324,78 @@ func (s *Store) makeWorkspace(ctx context.Context, id, path string) error {
 	}
 }
 
+// repoGitDir returns the git folder of the main repository under repos/ that
+// the worktree at workspace belongs to, or "" if it isn't a worktree of one.
+// `git worktree add` writes a .git file naming the worktree's own git folder,
+// which lies inside the repository's and names it in its commondir file.
+func (s *Store) repoGitDir(workspace string) (string, error) {
+	data, err := readPlainFile(filepath.Join(workspace, ".git"))
+	if err != nil || data == "" {
+		return "", err // no git, or a repository of its own inside the workspace
+	}
+	own, ok := strings.CutPrefix(strings.TrimSpace(data), "gitdir: ")
+	if !ok {
+		return "", nil
+	}
+	if !filepath.IsAbs(own) {
+		own = filepath.Join(workspace, own)
+	}
+	own = filepath.Clean(own)
+	// Nothing outside repos/ is read: the files there are T3's.
+	if !within(s.repos(), own) || !isRealDir(own) {
+		return "", nil
+	}
+	data, err = readPlainFile(filepath.Join(own, "commondir"))
+	if err != nil || data == "" {
+		return "", err
+	}
+	common := strings.TrimSpace(data)
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(own, common)
+	}
+	common = filepath.Clean(common)
+	// The box gets exactly this folder, so it must be what it says: under
+	// repos/, holding the worktree's own folder, with no symlink on the way.
+	if !within(s.repos(), common) || !within(common, own) || !isRealDir(common) {
+		return "", nil
+	}
+	return common, nil
+}
+
+// readPlainFile returns the contents of the regular file at path, or "" if
+// there is something else or nothing there. It never follows a symlink or
+// opens a pipe.
+func readPlainFile(path string) (string, error) {
+	fi, err := os.Lstat(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !fi.Mode().IsRegular() {
+		return "", nil
+	}
+	data, err := os.ReadFile(path)
+	return string(data), err
+}
+
+// isRealDir reports whether path is a directory reached through no symlink.
+func isRealDir(path string) bool {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || resolved != path {
+		return false
+	}
+	fi, err := os.Stat(path)
+	return err == nil && fi.IsDir()
+}
+
+// within reports whether path is below dir.
+func within(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 // adopt turns the plain directory path into a subvolume with the same files:
 // a reflink copy (no data is copied, but every file gets a new inode) that is
 // swapped in with one atomic rename. Writes to path during the copy are lost,
@@ -328,7 +429,7 @@ func (s *Store) Get(ctx context.Context, id string) (Env, error) {
 		return Env{}, err
 	}
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id, repo, head, token, created_at, path FROM environments WHERE id = ?`, id)
+		`SELECT id, repo, head, token, created_at, path, git FROM environments WHERE id = ?`, id)
 	env, err := s.scanEnv(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Env{}, fmt.Errorf("environment %q: %w", id, ErrNotFound)
@@ -342,7 +443,7 @@ func (s *Store) Get(ctx context.Context, id string) (Env, error) {
 // List returns all environments, ordered by ID.
 func (s *Store) List(ctx context.Context) ([]Env, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, repo, head, token, created_at, path FROM environments ORDER BY id`)
+		`SELECT id, repo, head, token, created_at, path, git FROM environments ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("list environments: %w", err)
 	}
@@ -709,9 +810,11 @@ func (s *Store) readMarker(id string) (op, path string, err error) {
 }
 
 func (s *Store) worktrees() string           { return filepath.Join(s.root, "worktrees") }
+func (s *Store) repos() string               { return filepath.Join(s.root, "repos") }
 func (s *Store) envDir(id string) string     { return filepath.Join(s.root, "envs", id) }
 func (s *Store) markerPath(id string) string { return filepath.Join(s.envDir(id), "incomplete") }
 func (s *Store) livePath(id string) string   { return filepath.Join(s.envDir(id), "live") }
+func (s *Store) claudePath(id string) string { return filepath.Join(s.envDir(id), "claude") }
 func (s *Store) snapPath(id, snapID string) string {
 	return filepath.Join(s.envDir(id), "snaps", snapID)
 }
@@ -719,13 +822,14 @@ func (s *Store) snapPath(id, snapID string) string {
 func (s *Store) scanEnv(row interface{ Scan(...any) error }) (Env, error) {
 	var env Env
 	var created int64
-	if err := row.Scan(&env.ID, &env.Repo, &env.Head, &env.Token, &created, &env.Path); err != nil {
+	if err := row.Scan(&env.ID, &env.Repo, &env.Head, &env.Token, &created, &env.Path, &env.Git); err != nil {
 		return Env{}, err
 	}
 	env.Created = time.Unix(created, 0).UTC()
 	if env.Path == "" { // a row from before workspaces had paths
 		env.Path = s.livePath(env.ID)
 	}
+	env.Claude = s.claudePath(env.ID)
 	return env, nil
 }
 

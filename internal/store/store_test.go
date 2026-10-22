@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	_ "modernc.org/sqlite" // the tests edit the index behind the store's back
@@ -127,6 +128,18 @@ func TestCreate(t *testing.T) {
 		if uid := info.Sys().(*syscall.Stat_t).Uid; uid != store.BoxUID {
 			t.Errorf("live/%s is owned by %d, want %d", name, uid, store.BoxUID)
 		}
+	}
+
+	// Claude's folder: the box user's alone, beside live/ so a restore keeps it.
+	info, err := os.Stat(env.Claude)
+	if err != nil {
+		t.Fatalf("stat Claude's folder: %v", err)
+	}
+	if uid := info.Sys().(*syscall.Stat_t).Uid; uid != store.BoxUID || info.Mode().Perm() != 0o700 {
+		t.Errorf("Claude's folder is owned by %d with mode %v, want %d and 0700", uid, info.Mode().Perm(), store.BoxUID)
+	}
+	if filepath.Dir(env.Claude) != filepath.Dir(live) {
+		t.Errorf("Claude's folder %s isn't beside the workspace %s", env.Claude, live)
 	}
 
 	again, err := st.Create(ctx, "demo", store.CreateOptions{Repo: "/other"})
@@ -646,6 +659,127 @@ func TestCreatePathErrors(t *testing.T) {
 				t.Errorf("Create(%s, %s) error = %v, want %v", tt.id, tt.path, err, store.ErrInvalidPath)
 			}
 		})
+	}
+}
+
+// A worktree of a repository under repos/ gets that repository's git folder,
+// which its box mounts read-only. Anything that would hand the box another
+// folder gets none.
+func TestWorktreeGit(t *testing.T) {
+	st, dir := openPool(t)
+	repos := filepath.Join(dir, "repos")
+	gitDir := filepath.Join(repos, "app", ".git")
+	// What `git worktree add` leaves in the repository: a folder per
+	// worktree whose commondir points back at the repository's git folder.
+	own := func(name string) string { return filepath.Join(gitDir, "worktrees", name) }
+	for name, commondir := range map[string]string{"abs": "../..", "rel": "../..", "escape": "../../../../../elsewhere"} {
+		if err := os.MkdirAll(own(name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(own(name), "commondir"), commondir+"\n")
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "elsewhere"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(repos, "app"), filepath.Join(repos, "alias")); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name, id string
+		dotGit   string // the worktree's .git file; "dir" makes a directory, "link" a symlink to a good one, "" nothing
+		want     string
+	}{
+		{"worktree of a repository under repos", "abs", "gitdir: " + own("abs"), gitDir},
+		{"relative gitdir", "rel", "gitdir: ../../../repos/app/.git/worktrees/rel", gitDir},
+		{"commondir outside repos", "escape", "gitdir: " + own("escape"), ""},
+		{"repository outside the pool", "outside", "gitdir: /elsewhere/.git/worktrees/x", ""},
+		{"repository through a symlink", "symlink", "gitdir: " + filepath.Join(repos, "alias", ".git", "worktrees", "abs"), ""},
+		{"a repository of its own", "own", "dir", ""},
+		{"a .git symlink", "link", "link", ""},
+		{"no git", "none", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(dir, "worktrees", "app", tt.id)
+			if err := os.MkdirAll(path, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			switch tt.dotGit {
+			case "":
+			case "dir":
+				if err := os.Mkdir(filepath.Join(path, ".git"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			case "link":
+				good := filepath.Join(dir, "elsewhere", "dotgit")
+				writeFile(t, good, "gitdir: "+own("abs")+"\n")
+				if err := os.Symlink(good, filepath.Join(path, ".git")); err != nil {
+					t.Fatal(err)
+				}
+			default:
+				writeFile(t, filepath.Join(path, ".git"), tt.dotGit+"\n")
+			}
+			env, err := st.Create(t.Context(), tt.id, store.CreateOptions{Path: path})
+			if err != nil {
+				t.Fatalf("Create(%s) error: %v", tt.id, err)
+			}
+			if env.Git != tt.want {
+				t.Errorf("Create(%s).Git = %q, want %q", tt.id, env.Git, tt.want)
+			}
+			got, err := st.Get(t.Context(), tt.id)
+			if err != nil || got.Git != tt.want {
+				t.Errorf("Get(%s).Git = %q, %v, want %q", tt.id, got.Git, err, tt.want)
+			}
+		})
+	}
+}
+
+// An index from before workspaces had paths and git folders still opens, and
+// its environments get the defaults.
+func TestOpenOlderIndex(t *testing.T) {
+	root := os.Getenv("FERN_TEST_BTRFS")
+	if root == "" {
+		t.Skip("FERN_TEST_BTRFS is not set; run lab/test-store.sh for the btrfs store tests")
+	}
+	dir, err := os.MkdirTemp(root, "pool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	if err := os.MkdirAll(filepath.Join(dir, "state"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "state", "fern.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`CREATE TABLE environments (id TEXT PRIMARY KEY, repo TEXT NOT NULL, head TEXT NOT NULL DEFAULT '',
+			token TEXT NOT NULL, created_at INTEGER NOT NULL)`,
+		`INSERT INTO environments (id, repo, token, created_at) VALUES ('old', '/src/old', 'tok', 0)`,
+	} {
+		if _, err := db.ExecContext(t.Context(), q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(t.Context(), dir)
+	if err != nil {
+		t.Fatalf("Open(%s) with an older index error: %v", dir, err)
+	}
+	defer func() { _ = st.Close() }()
+	got, err := st.Get(t.Context(), "old")
+	if err != nil {
+		t.Fatalf("Get(old) error: %v", err)
+	}
+	want := store.Env{
+		ID: "old", Repo: "/src/old", Token: "tok", Created: time.Unix(0, 0).UTC(),
+		Path: filepath.Join(dir, "envs", "old", "live"), Claude: filepath.Join(dir, "envs", "old", "claude"),
+	}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("Get(old) mismatch (-want +got):\n%s", diff)
 	}
 }
 
