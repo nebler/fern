@@ -1,8 +1,9 @@
 #!/bin/sh
-# fern-claude is what T3's "Claude binary path" setting points at. In a Fern
-# workspace it runs Claude in that environment's box, in the same directory,
-# so T3, the box and Claude's transcripts all name files the same way.
-# Anywhere else (T3's version checks and probes) it runs the local claude.
+# fern-claude is `claude` on the PATH of Fern's T3 image, so T3 runs it. In a
+# Fern workspace it runs Claude in that environment's box, in the same
+# directory, so T3, the box and Claude's transcripts all name files the same
+# way. Anywhere else (T3's version checks and probes) it runs the local
+# Claude: $FERN_LOCAL_CLAUDE, by default where the T3 image keeps it.
 #
 # Only the variables Claude's SDK sets are passed on: T3's own environment,
 # and any credentials in it, stays out of the box, which gets its login from
@@ -10,6 +11,6 @@
 # transcript, and exits when the box goes away.
 set -eu
 if ! fern which "$PWD" >/dev/null 2>&1; then
-	exec "${FERN_LOCAL_CLAUDE:-/usr/local/bin/claude}" "$@"
+	exec "${FERN_LOCAL_CLAUDE:-/usr/local/libexec/claude}" "$@"
 fi
 exec fern exec -i --here -e CLAUDE_CODE_ENTRYPOINT -e CLAUDE_AGENT_SDK_VERSION -- claude "$@"

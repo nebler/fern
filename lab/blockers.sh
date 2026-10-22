@@ -121,11 +121,13 @@ restore() {
   fern exec $ENV -- true
   fern snapshot $ENV r1 >/dev/null
   start=$(now_ms)
-  (fern exec $ENV -- sh -c 'sleep 120; echo finished' > /tmp/fern-bk-open 2>&1; echo "exit=$?" >> /tmp/fern-bk-open) &
+  fern exec $ENV -- sh -c 'sleep 120; echo finished' > /tmp/fern-bk-open 2>&1 &
+  local open=$!
   sleep 2
   fern restore $ENV r1 >/dev/null
-  wait
-  note "the open exec ended after $(( $(now_ms) - start )) ms with: $(tr '\n' ' ' < /tmp/fern-bk-open)"
+  local code=0
+  wait $open || code=$?
+  note "the open exec ended after $(( $(now_ms) - start )) ms, exit $code: $(tr '\n' ' ' < /tmp/fern-bk-open)"
   check "restore cuts the open exec (no hang, not 'finished')" 0 "$(grep -c finished /tmp/fern-bk-open || true)"
   check "the environment works after it (3 users)" 3 "$(sql $ENV 'select count(*) from users')"
 }
@@ -226,7 +228,12 @@ many() {
 
 gvisor() {
   echo "== under gVisor"
-  RUNS=1 lab/gvisor.sh >/dev/null # installs gVisor and the RuntimeClass if needed
+  # Installs gVisor and the RuntimeClass if needed. Under set -e a failure
+  # would end the whole run without a word.
+  if ! RUNS=1 lab/gvisor.sh >/dev/null; then
+    check "lab/gvisor.sh passes" yes no
+    return
+  fi
   fresh gk
   k -n fern-boxes patch sandbox gk --type=merge -p '{"spec":{"podTemplate":{"spec":{"runtimeClassName":"gvisor"}}}}' >/dev/null
   check "the box runs under gVisor" "Starting gVisor..." "$(fern exec gk -- dmesg | head -1 | cut -c16-)"

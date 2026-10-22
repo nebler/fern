@@ -47,8 +47,7 @@ COPY --from=fern /usr/local/bin/fern-claude /usr/local/bin/claude
 COPY --from=fern-box /usr/local/bin/claude /usr/local/libexec/claude
 # node's image has uid 1000 as "node"; Claude refuses full access as root.
 USER 1000:1000
-ENV FERN_LOCAL_CLAUDE=/usr/local/libexec/claude \
-    FERN_POOL=/var/lib/fern \
+ENV FERN_POOL=/var/lib/fern \
     DISABLE_AUTOUPDATER=1
 ENTRYPOINT ["node", "/opt/t3/apps/server/dist/bin.mjs"]
 CMD ["serve"]

@@ -20,7 +20,7 @@ check "Postgres runs on live/ (3 users)" 3 "$n"
 echo "first wake + query: $((t1 - t0)) ms"
 check "pod is owned by its Sandbox" Sandbox "$(k -n fern-boxes get pod $ENV -o jsonpath='{.metadata.ownerReferences[0].kind}')"
 check "CSI plugin saw the pod's identity" 1 \
-  "$(k -n fern-system logs ds/fern -c fern | grep -c "msg=publish env=$ENV pod=fern-boxes/$ENV " | awk '{print ($1 > 0)}')"
+  "$(k -n fern-system logs ds/fern -c fern | grep -c "msg=publish env=$ENV folder=workspace pod=fern-boxes/$ENV " | awk '{print ($1 > 0)}')"
 fern exec $ENV -- sh -c 'echo from-box > from-box'
 check "box writes are on the pool" from-box "$(in_daemon "cat /var/lib/fern/envs/$ENV/live/from-box")"
 in_daemon "echo from-pool > /var/lib/fern/envs/$ENV/live/from-pool"

@@ -59,6 +59,11 @@ spec:
                 secretKeyRef: {name: claude-login, key: token, optional: true}
           ports:
             - containerPort: 3773
+          # Ready once it answers, so a rollout ends when T3 serves, not when
+          # its process starts.
+          readinessProbe:
+            httpGet: {path: /.well-known/t3/environment, port: 3773}
+            periodSeconds: 1
           resources:
             requests:
               cpu: 100m
