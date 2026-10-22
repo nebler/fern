@@ -11,10 +11,19 @@ Fern gives every T3 Code thread an environment that behaves like git for everyth
 
 If the code and the docs disagree, stop and say so. Don't silently pick one.
 
+## Words
+The nouns are in [architecture §2](docs/architecture.md#2-concepts). In the code:
+- **Pool:** the btrfs filesystem at `/var/lib/fern`, which holds every environment's folders (`envs/<id>/`) and snapshots.
+- **Workspace:** an environment's writable folder, a btrfs subvolume: `envs/<id>/live`, or a T3 worktree at its own path.
+- **Box:** an environment's pod (an agent-sandbox `Sandbox`). An asleep environment has none.
+- **Daemon:** `fern daemon` on every node: the API on a Unix socket, the store, the driver and the CSI node plugin.
+- **fern-init:** a box's main process. It runs the services in `services.yaml` and serves boxexec.
+- **boxexec:** Fern's WebSocket protocol for running a command in a box.
+
 ## Commands
 - Unit tests: `go test -race ./...` (fake driver, runs anywhere Go runs)
 - Lint: `golangci-lint run` (config in `.golangci.yml`; fix the code, don't silence the linter)
-- Integration tests: against k3s in the local lab first, then on the VPS (see engine-local.md)
+- Integration tests: `lab/check.sh`, against k3s in the local lab (`lab/up.sh`) first, then on the VPS (see engine-local.md)
 
 ## Style sources
 Follow, in this order:
@@ -43,12 +52,12 @@ The same sources are available as on-demand skills in [.claude/skills/](.claude/
 - No `panic` outside `main` and truly impossible states.
 
 **Concurrency**
-- Every goroutine has an owner who cancels it (a `context.Context`) and waits for it (`errgroup` or a `done` channel). Tests check for leaks with `goleak`.
+- Every goroutine has an owner who cancels it (a `context.Context`) and waits for it (`errgroup` or a `done` channel). Tests check for leaks with `goleak`. The one exception is a goroutine blocked reading the CLI's stdin, which nothing can interrupt: it ends at its next read, or with the process.
 - An actor's state is touched only by its own goroutine. Talk to it through its mailbox. No mutex next to a mailbox.
 - `context.Context` is the first parameter of anything that blocks, does I/O or calls Kubernetes. Never store it in a struct. Never `context.Background()` below `main` or tests.
 
 **Time, processes, I/O**
-- Code that needs a clock takes one; tests of timers and actors use `testing/synctest`. No `time.Sleep` in tests.
+- Use the `time` package directly. Tests of timers and actors run in a `testing/synctest` bubble, whose clock is fake. No `time.Sleep` in tests outside a bubble.
 - Run programs with `exec.CommandContext(ctx, "btrfs", "subvolume", "snapshot", ...)`: an argument list, never `sh -c` with a built string.
 - Logging with `log/slog`, structured keys (`slog.String("env", id)`). No `fmt.Print*` for logs.
 

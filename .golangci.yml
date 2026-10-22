@@ -1,8 +1,5 @@
 version: "2"
 
-run:
-  tests: true
-
 linters:
   default: standard # errcheck, govet, ineffassign, staticcheck, unused
   enable:
@@ -37,8 +34,6 @@ linters:
               desc: write a small hand-written fake (AGENTS.md)
             - pkg: github.com/pkg/errors
               desc: use fmt.Errorf with %w and errors.Is/As
-    exhaustive:
-      default-signifies-exhaustive: false
     forbidigo:
       forbid:
         - pattern: ^fmt\.Print(f|ln)?$
