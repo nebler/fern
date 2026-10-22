@@ -56,7 +56,7 @@ Then the Fern Helm chart (in progress): CRDs, DaemonSet, CSI driver, NetworkPoli
 
 ### 1.3 Fast inner loop
 - **Unit tests** run anywhere (`go test -race ./...`), using the fake driver. That works on the Mac inside a Go container, or on the VM.
-- **Integration tests** run against k3s, in the local lab first and on the VM before each tag: build the daemon image, `kubectl rollout restart ds/fern`, run `make e<N>`.
+- **Integration tests** run against k3s, in the local lab first and on the VM before each tag: `lab/build.sh` builds the images and restarts the pods, then `lab/check.sh` runs the checks by section (E0 is `box` and `gvisor`, E1 is `disk`, E4 is `box`).
 - **Rules:**
   - Everything Fern creates is labelled `app.kubernetes.io/part-of=fern`, so cleanup is `helm uninstall fern` plus deleting the pool.
   - No credentials in images or snapshots. Agent logins are done by you on the VM and mounted from outside `live/`.
@@ -73,7 +73,7 @@ Then the Fern Helm chart (in progress): CRDs, DaemonSet, CSI driver, NetworkPoli
 | `operator` | kubelet-style reconcile of this node's `Environment` resources; status; owner references | E6, E13 |
 | `driver` | one agent-sandbox `Sandbox` per environment (`podTemplate` with RuntimeClass, limits, CSI volume; `operatingMode` for sleep/wake); a fake for unit tests | E0, E4 |
 | `csi` | CSI node plugin: mount an environment's `live/`, **only for its own pod** | E0, E14 |
-| `fern-init` | PID 1 in boxes: services, exec/PTY with reattach, activity | E4, E8 |
+| `fern-init` | the main process of boxes: services, exec/PTY with reattach, activity | E4, E8 |
 | `setup` | golden from `.agents/setup`; golden keys | E3 |
 | `wake` | front door: socket, previews, one wake per burst, holding requests | E7, E8 |
 | `identity` | post-fork hook: new ID, secrets, ports | E9 |

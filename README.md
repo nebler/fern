@@ -8,4 +8,4 @@
 - Design draft (research, landscape, decisions): [docs/design.md](docs/design.md)
 - Fern v1 (a control plane for coding-agent jobs in disposable containers, with sealed Git artifacts) is preserved at tag [`v1-final`](https://github.com/nebler/fern/tree/v1-final).
 
-Nothing in v2 is built yet.
+Built so far (iteration 2): the daemon with its btrfs store, CSI plugin and Kubernetes driver; boxes with services, exec and Claude Code; T3's server on the node with a checkpoint hook that snapshots each turn's whole disk. Everything runs and is tested in a local lab (k3s in Docker); see [lab/RESULTS.md](lab/RESULTS.md).

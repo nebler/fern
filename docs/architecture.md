@@ -76,7 +76,7 @@ Three nouns. Everything else is a property of one of them.
  webhook ──────▶│ /hooks                                                          └──▶ identity │
                 │                       oplog (SQLite) ◀── every multi-step op                 │
                 └────────────────────────────────────────────────────────────────────────────────┘
- inside every box:  fern-init (PID 1) → runs services, serves exec/PTY, reports activity
+ inside every box:  fern-init (main process) → runs services, serves exec/PTY and readiness, reports activity
 ```
 
 | Component | Job | Talks to |
@@ -87,14 +87,14 @@ Three nouns. Everything else is a property of one of them.
 | **oplog** | durable record of multi-step operations; every step safe to repeat; replayed on startup | SQLite |
 | **store** | btrfs pool: subvolumes, snapshots, forks, restore by swap, retention, size accounting | btrfs |
 | **operator** (in the daemon) | kubelet-style: watches `Environment` resources assigned to **its own node**, reconciles them, writes status; each `Environment` owns one `Sandbox`, which owns the session pod | Kubernetes API (controller-runtime) |
-| **driver** | creates one agent-sandbox `Sandbox` per environment and flips `operatingMode` (`Running` = awake, `Suspended` = asleep); its `podTemplate` carries the CSI volume, RuntimeClass, limits and node pinning. Kubernetes only, plus a fake for unit tests | Kubernetes API (agent-sandbox `v1beta1`) |
+| **driver** | makes one agent-sandbox `Sandbox` per environment at its first wake and brings its `podTemplate` up to date at every wake, then flips `operatingMode` (`Running` = awake, `Suspended` = asleep); the template carries the CSI volumes, RuntimeClass, limits and node pinning. Kubernetes only, plus a fake for unit tests | Kubernetes API (agent-sandbox `v1beta1`) |
 | **setup** | builds golden snapshots from the repo's setup contract; computes golden keys | driver, store |
 | **identity** | post-fork / post-restore hook: new environment ID, fresh secrets, new preview names and ports | actor |
-| **fern-init** | tiny PID 1 inside every box: starts and supervises services, serves exec with PTYs, reports activity (open execs, preview connections) | api (via the driver) |
+| **fern-init** | the main process of every box (the pod's pause container is PID 1): starts and supervises services, serves exec with PTYs and readiness, reports activity (open execs, preview connections; planned) | api (via the driver) |
 | **mcp** | exposes agent tools (`env_snapshot`, `env_restore`, `env_fork`, `env_exec`, `env_delete`) | api |
-| **csi** | CSI node plugin: mounts an environment's `live/` into a pod, **only for that environment's own pod** (checks the requesting pod's identity) | store |
+| **csi** | CSI node plugin: mounts an environment's folders (workspace, Claude's folder, git folder) into its box; planned: **only for that environment's own pod**, checked from the requesting pod's identity | store |
 
-**Why an in-box agent (`fern-init`)?** Exec, services and activity reporting then work the same way locally and on Kubernetes. That avoids `docker exec` / `kubectl exec` as a data plane (those are fragile for long streams). Its exec protocol follows agent-sandbox's `sandboxd` (gRPC streaming with PTY), so agent-sandbox SDKs work against Fern boxes; reattach is our extension if `sandboxd` lacks it.
+**Why an in-box agent (`fern-init`)?** Exec, services and activity reporting then work the same way locally and on Kubernetes. That avoids `docker exec` / `kubectl exec` as a data plane (those are fragile for long streams). Its exec protocol is Fern's own: one WebSocket per command, with frames for stdin, stdout, stderr, terminal sizes and signals (`internal/boxexec`). Speaking agent-sandbox's `sandboxd` (gRPC with PTY) instead, so its SDKs would work, is still open (§20).
 
 ---
 
@@ -140,29 +140,28 @@ status: { phase: Asleep, head: 7f3a, session: null, generation: 12, bytes: 1.2Gi
 
 ## 5. API
 
-Unix socket `/run/fern/fern.sock` (a host directory, so T3's server pod can share it), JSON over HTTP. Streaming endpoints use chunked responses or WebSockets. Every mutating call takes an `Idempotency-Key`.
+Unix socket `/run/fern/fern.sock` (a host directory, so T3's server pod can share it), JSON over HTTP; exec is a WebSocket. Every call is safe to repeat; planned: an `Idempotency-Key` on every mutating call.
 
 | Call | Meaning | Notes |
 |---|---|---|
-| `PUT /envs/{id}` | get-or-create an environment (from golden by default) | body: `{repo, class, retention, from?}`; no box starts |
-| `GET /envs/{id}` / `GET /envs` | inspect / list | state, head, sizes, session |
-| `POST /envs/{id}/exec` | run a command (optional PTY), streaming | wakes the environment if asleep |
-| `POST /envs/{id}/snapshots` | take a snapshot `{id?, tags?}` | T3 hook uses the checkpoint ref as the ID |
-| `POST /envs/{id}/restore` | restore `{snapshot}` | stops the session, swaps `live/`; the box restarts lazily |
-| `POST /envs/{id}/fork` | new environment from `{snapshot}` `{newId, count?}` | runs the identity hook; fork caps apply |
-| `POST /envs/{id}/sleep` / `wake` | explicit lifecycle | usually automatic |
-| `DELETE /envs/{id}` | delete the environment, its sessions and snapshots (by retention) | |
-| `DELETE /envs/{id}/snapshots/{s}` | prune | T3 hook calls this when checkpoints are deleted |
-| `GET /events` | event stream (state changes, snapshots, wakes) | for UIs and tests |
-| `POST /goldens/{repo}/build` | (re)build golden | normally automatic |
+| `PUT /envs/{id}?path=P` | get-or-create an environment; a tar body fills its workspace | built; its box comes with the first wake. Planned: from golden, `{repo, class, retention, from?}` |
+| `GET /envs` / `GET /envs?path=P` | list with box states / the environment whose workspace holds P | built; a lookup by path answers from the index alone (fern-claude does one per Claude start) |
+| `GET /envs/{id}/exec` | run a command (optional PTY) over a WebSocket | built; wakes the environment if asleep |
+| `POST /envs/{id}/snapshots` | take a snapshot `{id, replace?}` | built; the T3 hook uses the checkpoint ref as the ID, and `replace` after a revert. Planned: `tags` |
+| `GET /envs/{id}/snapshots` | list snapshots | built |
+| `POST /envs/{id}/restore` | restore `{snapshot}` | built; stops the box, swaps the workspace; the box restarts lazily |
+| `POST /envs/{id}/sleep` / `wake` | explicit lifecycle | built; planned: usually automatic |
+| `DELETE /envs/{id}` | delete the environment, its box and snapshots | built |
+| `DELETE /envs/{id}/snapshots/{s}` | prune | built; the T3 hook calls this when checkpoints are deleted |
+| `POST /envs/{id}/fork` | new environment from `{snapshot}` `{newId, count?}` | planned; runs the identity hook; fork caps apply |
+| `GET /events` | event stream (state changes, snapshots, wakes) | planned; for UIs and tests |
+| `POST /goldens/{repo}/build` | (re)build golden | planned; normally automatic |
 
-**Other entrances:**
+**Other entrances (planned):**
 - **Previews:** `http(s)://<env>.<repo>.<host>/…` → the front door → the service with a `port` in `services.yaml`. Any other port the box listens on is at `<port>-<env>.<repo>.<host>`, with nothing to declare, and `fern-init url <port>` prints that URL inside the box so agents can hand out links (both copied from Delta). Previews answer **503** (never 404) while waking. Like T3's own port, they are never public (firewall or tailnet).
 - **Webhooks:** `POST /hooks/{env}/{token}` → wakes the environment and delivers the request.
 
-**Errors:**
-- typed (`not_found`, `busy`, `conflict`, `quota_exceeded`, `waking`, `failed`)
-- `busy` only for explicit non-queued calls; normal calls queue in the actor's mailbox
+**Errors:** an HTTP status (404 not found, 400 invalid, 500 failed) with `{"error": message}`. Planned with the actor and quotas: busy, conflict and quota exceeded; normal calls will queue in the actor's mailbox.
 
 **Agent tools (MCP):** `env_snapshot`, `env_restore`, `env_fork`, `env_exec`, `env_delete`. A **Code Mode** client wraps the same API as a small TypeScript library.
 
@@ -313,7 +312,7 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
 | Aspect | Spec |
 |---|---|
 | Image | read-only base image with common toolchains (Node, Bun, pnpm, Python, uv, git, gh, Postgres binaries, agent CLIs pinned to tested versions) |
-| PID 1 | `fern-init`: services, exec/PTY server **with reattachable sessions** (agent terminals survive daemon restarts and upgrades), activity reporting, graceful shutdown |
+| Main process | `fern-init` (the pause container is PID 1 and reaps orphans): services, exec/PTY server, readiness for the daemon's wake (`/readyz`), graceful shutdown; planned: **reattachable sessions** (agent terminals survive daemon restarts and upgrades) and activity reporting |
 | Mounts | `live/` → the workspace at **the same path T3 uses**; Claude's folder `envs/<id>/claude/` → `CLAUDE_CONFIG_DIR` at the same path, **outside `live/`**, so a restore doesn't rewind its transcripts; the main repository's git folder **read-only**, so git works and can't change the repository's config or hooks; agent logins as environment variables from a Secret |
 | User | non-root, the same uid as T3 so file ownership matches; **user namespaces on** (GA in Kubernetes 1.36), so a box escape isn't that user on the host |
 | Runtime | from the class: `crun`/`runc` (light), `runsc` / gVisor (untrusted), a `docker` class for repos that need `docker compose` inside (gVisor or Kata) |
@@ -482,7 +481,7 @@ classes:
 
 ```
 cmd/fern/            daemon + CLI
-cmd/fern-init/       PID 1 inside boxes
+cmd/fern-init/       the main process inside boxes
 internal/api/        socket API, auth, idempotency
 internal/wake/       front door, preview routing, webhooks, coalescing
 internal/actor/      per-environment actors, idle rule, supervision
