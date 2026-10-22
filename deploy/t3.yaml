@@ -52,6 +52,11 @@ spec:
           env:
             - name: T3CODE_HOME
               value: /var/lib/fern
+            # For the Claude T3 runs itself, outside environments (its probes);
+            # boxes get the same login from their own namespace's copy.
+            - name: CLAUDE_CODE_OAUTH_TOKEN
+              valueFrom:
+                secretKeyRef: {name: claude-login, key: token, optional: true}
           ports:
             - containerPort: 3773
           resources:

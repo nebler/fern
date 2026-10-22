@@ -1,9 +1,9 @@
 diff --git a/apps/server/src/checkpointing/FernCheckpointStore.test.ts b/apps/server/src/checkpointing/FernCheckpointStore.test.ts
 new file mode 100644
-index 00000000..a4a71528
+index 00000000..36de4d61
 --- /dev/null
 +++ b/apps/server/src/checkpointing/FernCheckpointStore.test.ts
-@@ -0,0 +1,175 @@
+@@ -0,0 +1,205 @@
 +// @effect-diagnostics nodeBuiltinImport:off
 +import * as NodePath from "node:path";
 +
@@ -38,7 +38,8 @@ index 00000000..a4a71528
 +
 +/**
 + * A pool with one git worktree, and a fake fern CLI that logs its arguments. On restore it also
-+ * logs README.md as Fern finds it; `which` finds an environment once `known` exists.
++ * logs README.md as Fern finds it; `which` finds an environment once `known` exists. Once
++ * `broken` exists, snapshot and restore fail.
 + */
 +const setUp = Effect.gen(function* () {
 +  const fileSystem = yield* FileSystem.FileSystem;
@@ -54,6 +55,7 @@ index 00000000..a4a71528
 +    [
 +      "#!/bin/sh",
 +      `echo "$*" >> '${log}'`,
++      `[ -e '${tmp}/broken' ] && { [ "$1" = snapshot ] || [ "$1" = restore ]; } && exit 1`,
 +      `[ "$1" = restore ] && echo "saw $(cat '${workspace}/README.md')" >> '${log}'`,
 +      `[ "$1" = which ] && { [ -e '${tmp}/known' ] || exit 1; echo t3-found; }`,
 +      "exit 0",
@@ -109,6 +111,20 @@ index 00000000..a4a71528
 +      }),
 +    );
 +
++    it.effect("keeps the git checkpoint when Fern can't snapshot", () =>
++      Effect.gen(function* () {
++        const { fileSystem, tmp, workspace, store, env, calls } = yield* setUp;
++        yield* fileSystem.writeFileString(NodePath.join(tmp, "broken"), "");
++
++        yield* store.captureCheckpoint({ cwd: workspace, checkpointRef: ref0 });
++
++        expect(yield* store.hasCheckpointRef({ cwd: workspace, checkpointRef: ref0 })).toBe(true);
++        expect((yield* calls).at(-1)).toBe(
++          `snapshot --replace ${env} ${FernCheckpointStore.fernSnapshotId(ref0)}`,
++        );
++      }),
++    );
++
 +    it.effect("leaves folders outside the pool's worktrees to git", () =>
 +      Effect.gen(function* () {
 +        const { fileSystem, tmp, store, calls } = yield* setUp;
@@ -140,6 +156,20 @@ index 00000000..a4a71528
 +          "saw # changed",
 +        ]);
 +        expect(yield* fileSystem.readFileString(readme)).toBe("# test\n");
++      }),
++    );
++
++    it.effect("refuses a restore Fern can't do, before git touches the files", () =>
++      Effect.gen(function* () {
++        const { fileSystem, tmp, workspace, store } = yield* setUp;
++        const readme = NodePath.join(workspace, "README.md");
++        yield* store.captureCheckpoint({ cwd: workspace, checkpointRef: ref0 });
++        yield* fileSystem.writeFileString(readme, "# changed\n");
++        yield* fileSystem.writeFileString(NodePath.join(tmp, "broken"), "");
++
++        yield* Effect.flip(store.restoreCheckpoint({ cwd: workspace, checkpointRef: ref0 }));
++
++        expect(yield* fileSystem.readFileString(readme)).toBe("# changed\n");
 +      }),
 +    );
 +
@@ -181,10 +211,10 @@ index 00000000..a4a71528
 +});
 diff --git a/apps/server/src/checkpointing/FernCheckpointStore.ts b/apps/server/src/checkpointing/FernCheckpointStore.ts
 new file mode 100644
-index 00000000..75ff5831
+index 00000000..53ec13b9
 --- /dev/null
 +++ b/apps/server/src/checkpointing/FernCheckpointStore.ts
-@@ -0,0 +1,158 @@
+@@ -0,0 +1,170 @@
 +// @effect-diagnostics nodeBuiltinImport:off
 +import * as NodeCrypto from "node:crypto";
 +import * as NodePath from "node:path";
@@ -265,23 +295,35 @@ index 00000000..75ff5831
 +          return;
 +        }
 +        const env = fernEnvironmentId(workspace);
-+        if (!created.has(env)) {
-+          // The first checkpoint adopts the worktree: Fern turns it into a snapshottable volume.
-+          yield* fern("FernCheckpointStore.create", input.cwd, [
-+            "create",
-+            "--path",
-+            workspace,
++        yield* Effect.gen(function* () {
++          if (!created.has(env)) {
++            // The first checkpoint adopts the worktree: Fern turns it into a snapshottable volume.
++            yield* fern("FernCheckpointStore.create", input.cwd, [
++              "create",
++              "--path",
++              workspace,
++              env,
++            ]);
++            created.add(env);
++          }
++          // T3 reuses ordinals after a revert, so a snapshot of the same ref is taken again.
++          yield* fern("FernCheckpointStore.snapshot", input.cwd, [
++            "snapshot",
++            "--replace",
 +            env,
++            fernSnapshotId(input.checkpointRef),
 +          ]);
-+          created.add(env);
-+        }
-+        // T3 reuses ordinals after a revert, so a snapshot of the same ref is taken again.
-+        yield* fern("FernCheckpointStore.snapshot", input.cwd, [
-+          "snapshot",
-+          "--replace",
-+          env,
-+          fernSnapshotId(input.checkpointRef),
-+        ]);
++        }).pipe(
++          // The turn keeps its git checkpoint. Restoring it is refused later, with Fern's reason,
++          // rather than bringing back the files without the rest of the disk.
++          Effect.catch((cause) =>
++            Effect.logWarning("FernCheckpointStore: Fern couldn't snapshot this checkpoint", {
++              cwd: input.cwd,
++              environment: env,
++              cause,
++            }),
++          ),
++        );
 +      });
 +
 +    const restoreCheckpoint: CheckpointStore.CheckpointStore["Service"]["restoreCheckpoint"] = (

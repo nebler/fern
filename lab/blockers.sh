@@ -17,7 +17,8 @@
 #   review       the fixes from the code review of 2026-10-21: stdin EOF,
 #                limits, no_new_privs, network rules, restore and rm safety
 #   t3           T3's server on the node (deploy/t3.yaml): it reaches the daemon,
-#                and the checkpoint hook's commands work on a worktree it made.
+#                the checkpoint hook's commands work on a worktree it made, and
+#                that worktree's box has git, Claude's own folder and the login.
 #                Not in the default run: needs lab/build-t3.sh first.
 # Run all of them, or name some: lab/blockers.sh stream daemon. Needs lab/up.sh.
 set -euo pipefail
@@ -343,6 +344,14 @@ t3() {
   in_t3 "fern create --path $W t3c" >/dev/null
   note "T3's worktree adopted (first checkpoint): $(( $(now_ms) - start )) ms"
   check "claude in a T3 worktree runs in the box" "2.1.304 (Claude Code)" "$(in_t3 "cd $W && claude --version")"
+  # Claude's folder is outside the workspace, so sleep and restore keep it.
+  local C=/var/lib/fern/envs/t3c/claude
+  check "the box keeps Claude's state outside the workspace" "$C" \
+    "$(in_t3 "cd $W && fern exec --here -- sh -c 'echo \$CLAUDE_CONFIG_DIR'")"
+  in_t3 "cd $W && fern exec --here -- sh -c 'echo kept > $C/note'"
+  check "git works in the box" init "$(in_t3 "cd $W && fern exec --here -- git log --format=%s -1")"
+  check "and can't change the main repository" refused \
+    "$(in_t3 "cd $W && fern exec --here -- sh -c 'touch $R/.git/x 2>/dev/null && echo wrote || echo refused'")"
   in_t3 "echo v1 > $W/a.txt && echo junk > $W/ignored.bin"
   note "checkpoint snapshot: $(in_t3 'fern snapshot --replace t3c c1' | took) ms"
   in_t3 "echo v2 > $W/a.txt"
@@ -355,6 +364,23 @@ t3() {
   check "which finds the worktree's environment" t3c "$(in_t3 "fern which $W")"
   in_t3 'fern rmsnap t3c c1'
   check "rmsnap removes the checkpoint's snapshot" 0 "$(in_t3 'fern snapshots t3c' | tail -n +2 | grep -c . || true)"
+  check "Claude's state outlives the restore" kept "$(in_t3 "cd $W && fern exec --here -- cat $C/note")"
+  # The login reaches the box from the Secret, which a box reads when it
+  # starts. Without one, a fake one shows the way works: Claude then fails at
+  # Anthropic's API instead of asking for a login.
+  if k -n fern-boxes get secret claude-login >/dev/null 2>&1; then
+    fern sleep t3c >/dev/null
+    check "the box has Claude's login" yes \
+      "$(in_t3 "cd $W && fern exec --here -- sh -c '[ -n \"\$CLAUDE_CODE_OAUTH_TOKEN\" ] && echo yes'")"
+    check "T3 has Claude's login" yes "$(in_t3 '[ -n "$CLAUDE_CODE_OAUTH_TOKEN" ] && echo yes')"
+  else
+    printf %s fern-lab-not-a-token | k -n fern-boxes create secret generic claude-login --from-file=token=/dev/stdin >/dev/null
+    fern sleep t3c >/dev/null
+    check "Claude in the box uses the login from the Secret" "API Error: 401" \
+      "$(in_t3 "cd $W && claude -p hi 2>&1" 2>/dev/null | grep -o 'API Error: 401' | head -1)"
+    k -n fern-boxes delete secret claude-login >/dev/null
+    note "no Claude login stored yet: lab/claude-login.sh"
+  fi
   in_t3 "fern rm t3c >/dev/null && rm -rf $R /var/lib/fern/worktrees/t3check"
 }
 
