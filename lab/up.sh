@@ -21,6 +21,7 @@ docker run --rm --label "$LABEL" -v fern-lab-pool:/img --entrypoint sh fern:dev 
 # "/" must be rshared so the CSI plugin's bind mounts reach the box containers.
 docker run -d --name "$LAB" --hostname "$LAB" --label "$LABEL" --privileged \
   --tmpfs /run --tmpfs /var/run -v fern-lab-pool:/var/lib/fern-img \
+  -p 127.0.0.1:30773:30773 \
   --entrypoint /bin/sh "$K3S_IMAGE" -c '
     set -e
     mount --make-rshared /

@@ -1,0 +1,91 @@
+# T3 Code's server for one person, on Fern's node (lab/build-t3.sh builds the
+# image). It sees the pool at the same path as the daemon and the boxes, so a
+# worktree has one path everywhere, and reaches the daemon through its socket.
+# The T3 app on the Mac pairs with it through the NodePort. On a VPS the
+# NodePort listens on every interface: firewall it or use a tailnet, since
+# whoever reaches T3 uses its owner's subscription (architecture §13.1).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: t3
+  namespace: fern-system
+  labels:
+    app.kubernetes.io/part-of: fern
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate # one server per T3 home
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: t3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: t3
+        app.kubernetes.io/part-of: fern
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        runAsNonRoot: true
+      initContainers:
+        # T3's home is the pool itself, so its worktrees (<home>/worktrees)
+        # are where Fern expects workspaces. Its own state (userdata, caches,
+        # tools) and the projects' main repositories sit beside envs/ and
+        # worktrees/, owned by T3's user: Fern never snapshots them.
+        - name: dirs
+          image: fern-t3:dev
+          imagePullPolicy: Never
+          command: [install, -d, -o, "1000", -g, "1000", /var/lib/fern/userdata, /var/lib/fern/caches,
+            /var/lib/fern/tools, /var/lib/fern/repos, /var/lib/fern/worktrees]
+          securityContext:
+            runAsUser: 0
+            runAsNonRoot: false
+          volumeMounts:
+            - name: pool
+              mountPath: /var/lib/fern
+      containers:
+        - name: t3
+          image: fern-t3:dev
+          imagePullPolicy: Never
+          args: [serve, --host=0.0.0.0, --port=3773]
+          env:
+            - name: T3CODE_HOME
+              value: /var/lib/fern
+          ports:
+            - containerPort: 3773
+          resources:
+            requests:
+              cpu: 100m
+              memory: 512Mi
+          volumeMounts:
+            - name: pool
+              mountPath: /var/lib/fern
+              mountPropagation: HostToContainer
+            - name: socket
+              mountPath: /run/fern
+      volumes:
+        - name: pool
+          hostPath:
+            path: /var/lib/fern
+            type: Directory
+        - name: socket
+          hostPath:
+            path: /run/fern
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: t3
+  namespace: fern-system
+  labels:
+    app.kubernetes.io/part-of: fern
+spec:
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: t3
+  ports:
+    - port: 3773
+      targetPort: 3773
+      nodePort: 30773

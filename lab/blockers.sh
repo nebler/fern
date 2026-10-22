@@ -16,6 +16,9 @@
 #                adopt, which, snapshot replace and delete, warm wake time
 #   review       the fixes from the code review of 2026-10-21: stdin EOF,
 #                limits, no_new_privs, network rules, restore and rm safety
+#   t3           T3's server on the node (deploy/t3.yaml): it reaches the daemon,
+#                and the checkpoint hook's commands work on a worktree it made.
+#                Not in the default run: needs lab/build-t3.sh first.
 # Run all of them, or name some: lab/blockers.sh stream daemon. Needs lab/up.sh.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
@@ -315,6 +318,44 @@ paths() {
   for e in wt ad big; do fern rm $e; done
   check "rm removes the workspaces at their paths" gone \
     "$(in_daemon "ls $W" | grep -qE '^(main|adopted|big)$' && echo left || echo gone)"
+}
+
+# in_t3 runs a shell command in T3's server container, as T3's user.
+in_t3() { k -n fern-system exec -i deploy/t3 -c t3 -- sh -c "$1"; }
+
+t3() {
+  echo "== T3's server on Fern's node"
+  k apply -f - < deploy/t3.yaml >/dev/null
+  k -n fern-system rollout status deploy/t3 --timeout=180s >/dev/null
+  check "the Mac reaches T3 through the NodePort" 200 \
+    "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:30773/.well-known/t3/environment)"
+  check "T3 runs as uid 1000" 1000 "$(in_t3 'id -u')"
+  check "T3 reaches the daemon's socket" ok "$(in_t3 'fern ls >/dev/null && echo ok')"
+  check "claude outside a workspace is the local one" "2.1.304 (Claude Code)" "$(in_t3 'cd / && claude --version')"
+  # What the checkpoint hook (images/t3/fern-checkpoints.patch) does with a
+  # worktree T3 made: adopt it at the first checkpoint, then snapshot,
+  # replace, restore, find and delete.
+  local R=/var/lib/fern/repos/t3check W=/var/lib/fern/worktrees/t3check/one
+  fern rm t3c 2>/dev/null || true
+  in_t3 "rm -rf $R /var/lib/fern/worktrees/t3check && git init -q -b main $R && cd $R && echo v0 > a.txt \
+    && git add a.txt && git -c user.email=t@fern -c user.name=t commit -qm init && git worktree add -q -b t3/one $W"
+  start=$(now_ms)
+  in_t3 "fern create --path $W t3c" >/dev/null
+  note "T3's worktree adopted (first checkpoint): $(( $(now_ms) - start )) ms"
+  check "claude in a T3 worktree runs in the box" "2.1.304 (Claude Code)" "$(in_t3 "cd $W && claude --version")"
+  in_t3 "echo v1 > $W/a.txt && echo junk > $W/ignored.bin"
+  note "checkpoint snapshot: $(in_t3 'fern snapshot --replace t3c c1' | took) ms"
+  in_t3 "echo v2 > $W/a.txt"
+  note "checkpoint snapshot, replaced: $(in_t3 'fern snapshot --replace t3c c1' | took) ms"
+  in_t3 "echo v3 > $W/a.txt && rm $W/ignored.bin"
+  note "restore: $(in_t3 'fern restore t3c c1' | took) ms"
+  check "restore brings back the replaced snapshot" v2 "$(in_t3 "cat $W/a.txt")"
+  check "and a file git doesn't track" junk "$(in_t3 "cat $W/ignored.bin")"
+  check "git works in the restored worktree" "M a.txt" "$(in_t3 "git -C $W status --short --untracked-files=no" | xargs)"
+  check "which finds the worktree's environment" t3c "$(in_t3 "fern which $W")"
+  in_t3 'fern rmsnap t3c c1'
+  check "rmsnap removes the checkpoint's snapshot" 0 "$(in_t3 'fern snapshots t3c' | tail -n +2 | grep -c . || true)"
+  in_t3 "fern rm t3c >/dev/null && rm -rf $R /var/lib/fern/worktrees/t3check"
 }
 
 sections=("$@")
