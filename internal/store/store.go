@@ -52,6 +52,9 @@ var (
 	// ErrInvalidPath means a workspace path is outside worktrees/, isn't two
 	// levels below it, goes through a symlink, or is taken.
 	ErrInvalidPath = errors.New("invalid workspace path")
+	// errUnindexed means an environment directory holds data the index has
+	// lost; only a person should throw it away.
+	errUnindexed = errors.New("exists but isn't in the index")
 )
 
 var (
@@ -300,12 +303,16 @@ func (s *Store) makeWorkspace(ctx context.Context, id, path string) error {
 	fi, err := os.Lstat(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
-		parent := filepath.Dir(path)
-		if err := os.MkdirAll(parent, 0o755); err != nil {
-			return err
-		}
-		if err := os.Chown(parent, BoxUID, BoxGID); err != nil {
-			return err
+		// T3 adds worktrees beside this one, as the box user. An
+		// environment's own folder stays root's: the daemon deletes in it.
+		if path != s.livePath(id) {
+			parent := filepath.Dir(path)
+			if err := os.MkdirAll(parent, 0o755); err != nil {
+				return err
+			}
+			if err := os.Chown(parent, BoxUID, BoxGID); err != nil {
+				return err
+			}
 		}
 		if err := btrfs(ctx, "subvolume", "create", path); err != nil {
 			return err
@@ -688,8 +695,11 @@ func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 		_, err := s.Get(ctx, id)
 		switch {
 		case errors.Is(err, ErrNotFound):
-			if err := s.clearLeftovers(ctx, id); err != nil {
+			err := s.clearLeftovers(ctx, id)
+			if errors.Is(err, errUnindexed) {
 				lost = append(lost, s.envDir(id))
+			} else if err != nil {
+				return lost, fmt.Errorf("reconcile %s: %w", id, err)
 			}
 		case err != nil:
 			return lost, fmt.Errorf("reconcile: %w", err)
@@ -730,7 +740,7 @@ func (s *Store) clearLeftovers(ctx context.Context, id string) error {
 			return err
 		}
 		if kept {
-			return fmt.Errorf("%s exists but isn't in the index", dir)
+			return fmt.Errorf("%s: %w", dir, errUnindexed)
 		}
 	}
 	// A half-made workspace of our own is garbage. A workspace at a caller's
@@ -742,19 +752,24 @@ func (s *Store) clearLeftovers(ctx context.Context, id string) error {
 	return s.removeDisk(ctx, id, path)
 }
 
-// holdsData reports whether an environment directory has a live/ or any
-// snapshot.
+// holdsData reports whether an environment directory has a live/, a
+// snapshot or anything in Claude's folder.
 func holdsData(dir string) (bool, error) {
 	if _, err := os.Lstat(filepath.Join(dir, "live")); err == nil {
 		return true, nil
 	} else if !errors.Is(err, fs.ErrNotExist) {
 		return false, err
 	}
-	snaps, err := os.ReadDir(filepath.Join(dir, "snaps"))
-	if err != nil && !errors.Is(err, fs.ErrNotExist) {
-		return false, err
+	for _, sub := range []string{"snaps", "claude"} {
+		entries, err := os.ReadDir(filepath.Join(dir, sub))
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return false, err
+		}
+		if len(entries) > 0 {
+			return true, nil
+		}
 	}
-	return len(snaps) > 0, nil
+	return false, nil
 }
 
 // removeDisk deletes environment id's directory and, if workspace isn't

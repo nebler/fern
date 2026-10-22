@@ -130,8 +130,17 @@ func TestCreate(t *testing.T) {
 		}
 	}
 
+	// The environment's own folder stays root's: T3 runs as the box user with
+	// the whole pool mounted, and the daemon deletes inside this folder.
+	info, err := os.Stat(filepath.Dir(live))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uid := info.Sys().(*syscall.Stat_t).Uid; uid != 0 {
+		t.Errorf("%s is owned by %d, want root", filepath.Dir(live), uid)
+	}
 	// Claude's folder: the box user's alone, beside live/ so a restore keeps it.
-	info, err := os.Stat(env.Claude)
+	info, err = os.Stat(env.Claude)
 	if err != nil {
 		t.Fatalf("stat Claude's folder: %v", err)
 	}
@@ -494,6 +503,18 @@ func TestCreateOverLeftovers(t *testing.T) {
 	}
 	if _, err := os.Stat(snap); err != nil {
 		t.Errorf("stat snaps/s1 after a refused Create error = %v, want it kept", err)
+	}
+	// And so is Claude's folder: it holds the thread's transcripts.
+	transcript := filepath.Join(dir, "envs", "claude-only", "claude", "projects", "t.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, transcript, "{}")
+	if _, err := st.Create(ctx, "claude-only", store.CreateOptions{}); err == nil {
+		t.Errorf("Create(claude-only) over an unmarked Claude folder succeeded, want an error")
+	}
+	if _, err := os.Stat(transcript); err != nil {
+		t.Errorf("stat the transcript after a refused Create error = %v, want it kept", err)
 	}
 }
 
