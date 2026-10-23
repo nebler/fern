@@ -236,3 +236,18 @@ Command: `lab/down.sh && lab/up.sh && lab/build.sh t3 && lab/check.sh && lab/che
 - **The old check that two Ctrl-Cs quit interactive claude could never fail, and claude doesn't quit that way,** so the rows above that say it does are wrong. At its first-run screen Claude Code 2.1.304 shows "Press Ctrl-C again to exit" and keeps running after the second, in plain Docker without Fern too. Fern's part is now checked directly: both Ctrl-C bytes reach a program that reads the terminal raw, and the session ends when that program exits.
 - The check that a command without `-i` gets no stdin passed whenever the script's own stdin was empty; it now offers endless input.
 - A process a command leaves in the background ends with the exec (its process group is killed), so the check that nothing survives a sleep starts its stray process with `setsid`.
+
+## First real turn in T3, 2026-10-24
+
+The T3 app on the Mac, paired with the lab's T3 server (`lab/t3-pair.sh`), Claude on the user's own subscription (`lab/claude-login.sh`). In the `sample` project, a thread in a new worktree:
+1. "How many users?" Claude ran psql in the box: 3.
+2. "Delete Ada from the database with psql. Don't edit any files." Claude deleted her; T3's diff showed nothing, since Postgres's files are in `.fern/`, which git ignores.
+3. "Edit from here" on that message, then "Revert files too".
+4. "How many users?" 3. Checked outside the chat, in the box: Ada, Grace, Linus.
+
+**PASS.** The worktree became environment `t3-16439bae89448185` at its first checkpoint, with one Fern snapshot per checkpoint. Git's checkpoints alone would have left Ada deleted.
+
+**Found on the way:**
+- A thread started in **Local** (the project's main folder) isn't a Fern environment: Claude runs in T3's pod without a database, and edited `seed.sql` instead. Only **New worktree** threads get a box.
+- "Revert and keep changes" rewinds only the chat; "Revert files too" is the one that restores.
+- A stopped Docker Desktop stops the lab; `docker start fern-lab` brings it back with everything in it.

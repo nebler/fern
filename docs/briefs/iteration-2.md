@@ -29,7 +29,7 @@ T3's server in a pod with the pool and the daemon socket, the checkpoint hook in
 
 **Status (2026-10-22, evening):** two review rounds for simplicity and Go practice are done. The store, driver, API, CLI, boxexec, fern-init and the hook got simpler (about 890 lines less Go), and the lab went from 18 scripts to 11 with one Dockerfile. From a fresh lab every check passes (`lab/check.sh`, then `lab/check.sh t3`), after one check that tested claude rather than Fern was replaced (`lab/RESULTS.md`).
 
-**What's left needs the user (about 5 minutes):**
+**Status (2026-10-24): done.** In the T3 app on the Mac, with Claude on the user's subscription, "Revert files too" on a turn that deleted a user from Postgres brought the user back (`lab/RESULTS.md`). The steps that got there:
 1. `claude setup-token` on the Mac, then `lab/claude-login.sh` and paste the token (hidden; it goes straight into the Secret).
 2. `lab/t3-pair.sh`: it adds the sample project (`repos/sample`, Postgres with three users) and prints a pairing link; in the T3 app, Settings → Connections, add it.
 3. In that connection's `sample` project, start a thread **in a new worktree**, ask Claude to count the users, then to delete one; revert that turn and check the user is back.
