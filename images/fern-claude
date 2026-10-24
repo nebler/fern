@@ -3,7 +3,10 @@
 # Fern workspace it runs Claude in that environment's box, in the same
 # directory, so T3, the box and Claude's transcripts all name files the same
 # way. Anywhere else (T3's version checks and probes) it runs the local
-# Claude: $FERN_LOCAL_CLAUDE, by default where the T3 image keeps it.
+# Claude: $FERN_LOCAL_CLAUDE, by default where the T3 image keeps it. In the
+# pool's worktrees it never does: there an agent must not run in T3's own pod,
+# with its login, the whole pool and the daemon's socket, just because the
+# daemon didn't answer or the environment wasn't made.
 #
 # Only the variables Claude's SDK sets are passed on: T3's own environment,
 # and any credentials in it, stays out of the box, which gets its login from
@@ -11,6 +14,12 @@
 # transcript, and exits when the box goes away.
 set -eu
 if ! fern which "$PWD" >/dev/null 2>&1; then
+	case "$PWD/" in
+	"${FERN_POOL:-/var/lib/fern}"/worktrees/*)
+		echo "fern-claude: no Fern environment holds $PWD; not running Claude outside its box" >&2
+		exit 1
+		;;
+	esac
 	exec "${FERN_LOCAL_CLAUDE:-/usr/local/libexec/claude}" "$@"
 fi
 exec fern exec -i --here -e CLAUDE_CODE_ENTRYPOINT -e CLAUDE_AGENT_SDK_VERSION -- claude "$@"

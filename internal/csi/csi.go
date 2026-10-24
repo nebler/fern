@@ -23,6 +23,10 @@ import (
 // Name is the CSI driver name that box pods use in their inline volumes.
 const Name = "fern.dev"
 
+// BoxNamespace holds the boxes, each a pod named after its environment;
+// deploy/fern.yaml makes it.
+const BoxNamespace = "fern-boxes"
+
 // The attributes of a box's inline volumes.
 const (
 	AttrEnv    = "env"    // the environment's ID
@@ -102,7 +106,12 @@ func (p *Plugin) NodePublishVolume(ctx context.Context, req *csispec.NodePublish
 	if target == "" {
 		return nil, status.Error(codes.InvalidArgument, "target path is required")
 	}
-	// Mounts aren't authorized yet; log who asked, for the record.
+	// Only an environment's own box gets its folders: the pod Fern makes for
+	// it has its name, in Fern's namespace, where only the daemon makes pods.
+	if vc[keyNamespace] != BoxNamespace || vc[keyPod] != vc[AttrEnv] {
+		return nil, status.Errorf(codes.PermissionDenied, "pod %s/%s may not mount environment %q",
+			vc[keyNamespace], vc[keyPod], vc[AttrEnv])
+	}
 	p.log.InfoContext(ctx, "publish",
 		slog.String("env", vc[AttrEnv]),
 		slog.String("folder", vc[AttrFolder]),

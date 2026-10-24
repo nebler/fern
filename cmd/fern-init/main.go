@@ -38,7 +38,9 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if dir == "" {
 		return errors.New("FERN_WORKSPACE is not set")
 	}
-	// The token is for fern-init alone; commands and services don't inherit it.
+	// The token is for fern-init alone: commands and services don't inherit
+	// it. A process of the box's user can still read it in /proc, which is
+	// why only the daemon may connect to fern-init.
 	token := os.Getenv("FERN_BOX_TOKEN")
 	if token == "" {
 		return errors.New("FERN_BOX_TOKEN is not set")

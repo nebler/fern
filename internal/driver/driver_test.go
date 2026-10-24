@@ -73,9 +73,12 @@ func TestWakeSetsUpTheBox(t *testing.T) {
 	if sb.Spec.OperatingMode != sandboxv1.SandboxOperatingModeRunning {
 		t.Errorf("operating mode %s, want Running", sb.Spec.OperatingMode)
 	}
-	// The repository's git folder must be read-only: a box that could change
-	// its config or hooks could run code in T3's server.
-	want := map[string]bool{"/tmp": false, env.Workspace: false, env.Claude: false, env.Git: true}
+	// The repository's git folder and the worktree's .git file, which names
+	// it, must be read-only: a box that could change the folder's config or
+	// hooks, or point the file elsewhere, could run code in T3's server.
+	want := map[string]bool{
+		"/tmp": false, env.Workspace: false, env.Claude: false, env.Git: true, env.Workspace + "/.git": true,
+	}
 	if diff := cmp.Diff(want, mounts(sb)); diff != "" {
 		t.Errorf("mounts (path: read-only) mismatch (-want +got):\n%s", diff)
 	}
@@ -99,8 +102,9 @@ func TestWakeWithoutGitFolder(t *testing.T) {
 	noGit := env
 	noGit.Git = ""
 	wake(t, d, noGit)
-	if _, ok := mounts(sandbox(t, c, "demo"))["/pool/repos/r/.git"]; ok {
-		t.Errorf("a box whose workspace isn't a worktree mounts a git folder")
+	want := map[string]bool{"/tmp": false, env.Workspace: false, env.Claude: false}
+	if diff := cmp.Diff(want, mounts(sandbox(t, c, "demo"))); diff != "" {
+		t.Errorf("a box whose workspace isn't a worktree: mounts mismatch (-want +got):\n%s", diff)
 	}
 }
 

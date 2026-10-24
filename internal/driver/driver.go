@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -41,8 +42,7 @@ const (
 )
 
 const (
-	// namespace holds the boxes' Sandboxes; deploy/fern.yaml makes it.
-	namespace = "fern-boxes"
+	namespace = csi.BoxNamespace
 	// claudeSecret's "token" is Claude's login, from `claude setup-token`;
 	// lab/claude-login.sh makes it.
 	claudeSecret = "claude-login"
@@ -312,6 +312,15 @@ func (d *Driver) podTemplate(env store.Env) sandboxv1.PodTemplate {
 			Driver:           csi.Name,
 			VolumeAttributes: map[string]string{csi.AttrEnv: env.ID, csi.AttrFolder: f.name},
 		}}})
+	}
+	if env.Git != "" {
+		// The worktree's .git file names its git folder, and T3's server
+		// runs git by it: a box that pointed it at a folder of its own could
+		// run code in T3 through that folder's config. Read-only, it keeps
+		// naming the read-only git folder.
+		mounts = append(mounts, corev1.VolumeMount{
+			Name: csi.FolderWorkspace, MountPath: filepath.Join(env.Workspace, ".git"), SubPath: ".git", ReadOnly: true,
+		})
 	}
 	return sandboxv1.PodTemplate{Spec: corev1.PodSpec{
 		NodeSelector:                  map[string]string{corev1.LabelHostname: d.node},
