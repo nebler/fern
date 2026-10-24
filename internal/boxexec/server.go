@@ -362,19 +362,19 @@ func queue(ctx context.Context, stdin chan<- []byte, data []byte) bool {
 }
 
 // writeStdin writes what readInput queues to the command's stdin, and closes
-// it at nil. After a failed write (the command closed its stdin or exited)
-// it drops the rest, so readInput is never held up.
+// it at nil. After that, or a failed write (the command closed its stdin or
+// exited), it drops the rest, so readInput is never held up.
 func writeStdin(p *process, stdin <-chan []byte) {
-	failed := false
+	done := false
 	for data := range stdin {
 		switch {
-		case failed:
+		case done:
 		case data == nil:
 			_ = p.stdin.Close()
-			failed = true
+			done = true
 		default:
 			_, err := p.stdin.Write(data)
-			failed = err != nil
+			done = err != nil
 		}
 	}
 }

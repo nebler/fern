@@ -195,7 +195,9 @@ func shell(ctx context.Context, timeout time.Duration, script, dir string, env [
 const maxShellOutput = 4 << 10
 
 // headBuffer keeps the first max bytes written to it and counts the rest.
-// It accepts every write, so the script never blocks on a full pipe.
+// It accepts every write, so the script never blocks on a full pipe. As a
+// command's Stdout and Stderr both, os/exec writes to it from one goroutine
+// at a time.
 type headBuffer struct {
 	max     int
 	buf     []byte
