@@ -9,6 +9,8 @@
 #                stdin, signals, cancellation, long idle commands
 #   concurrency  parallel execs on an awake and on a sleeping environment
 #   restore      a restore while an exec is open; a missing snapshot
+#   idle         an idle box goes to sleep, with the daemon's idle times
+#                shortened for the section; a running command keeps it awake
 #   daemon       the daemon restarts while a box is awake, and finishes an rm
 #                whose client went away
 #   node         the whole node (k3s) restarts
@@ -237,6 +239,36 @@ restore() {
   check "the environment works after it (3 users)" 3 "$(sql $ENV 'select count(*) from users')"
   check "restoring a missing snapshot is refused" no "$(succeeds fern restore $ENV no-such-snapshot)"
   check "and leaves the box running" running "$(state $ENV)"
+}
+
+# daemon_args sets the daemon's arguments, a JSON list, and waits for it.
+daemon_args() {
+  k -n fern-system patch ds fern --type=json \
+    -p "[{\"op\": \"replace\", \"path\": \"/spec/template/spec/containers/0/args\", \"value\": $1}]" >/dev/null
+  wait_daemon
+}
+
+idle() {
+  echo "== an idle box goes to sleep"
+  daemon_args '["daemon", "--idle-agent=5s", "--idle-human=10s"]'
+  fresh $ENV
+  fern exec $ENV -- true
+  check "a box is awake after a command" running "$(state $ENV)"
+  sleep 13
+  check "and asleep 10 s after the command started" asleep "$(state $ENV)"
+  fern exec $ENV -- sleep 20 &
+  local open=$!
+  sleep 15
+  check "a running command keeps it awake past the idle times" running "$(state $ENV)"
+  wait $open
+  sleep 8
+  check "it sleeps 5 s after the command ended" asleep "$(state $ENV)"
+  fern wake $ENV >/dev/null
+  k -n fern-system delete pod -l app.kubernetes.io/name=fern --wait=false >/dev/null
+  wait_daemon
+  sleep 13
+  check "a box awake across a daemon restart goes to sleep too" asleep "$(state $ENV)"
+  daemon_args '["daemon"]'
 }
 
 daemon() {
@@ -482,7 +514,7 @@ t3() {
   in_t3 "fern rm t3c && rm -rf $R /var/lib/fern/worktrees/t3check"
 }
 
-all=(slice box disk stream concurrency restore daemon node many limits paths claude gvisor)
+all=(slice box disk stream concurrency restore idle daemon node many limits paths claude gvisor)
 [ $# -gt 0 ] || set -- "${all[@]}"
 for s in "$@"; do
   case " ${all[*]} t3 " in

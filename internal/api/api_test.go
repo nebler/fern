@@ -24,6 +24,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"go.uber.org/goleak"
 
+	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api"
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/driver"
@@ -183,8 +184,27 @@ func newAPI(t *testing.T) (*api.Client, *driver.Fake) {
 	return newAPIWith(t, nil)
 }
 
+// driverWith is what a test's wrapped fake driver must do.
+type driverWith interface {
+	actor.Driver
+	api.Driver
+}
+
+// newServer returns the API's handler for st and drv, with their actors
+// running until the test ends.
+func newServer(t *testing.T, st *fakeStore, drv actor.Driver) http.Handler {
+	t.Helper()
+	log := slog.New(slog.DiscardHandler)
+	envs := actor.New(st, drv, actor.Idle{}, log)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { envs.Run(ctx); close(done) }()
+	t.Cleanup(func() { cancel(); <-done })
+	return api.NewServer(st, drv, envs, log).Handler()
+}
+
 // newAPIWith is newAPI with the fake driver wrapped by wrap, if it isn't nil.
-func newAPIWith(t *testing.T, wrap func(*driver.Fake) api.Driver) (*api.Client, *driver.Fake) {
+func newAPIWith(t *testing.T, wrap func(*driver.Fake) driverWith) (*api.Client, *driver.Fake) {
 	t.Helper()
 	log := slog.New(slog.DiscardHandler)
 	mux := http.NewServeMux()
@@ -193,11 +213,11 @@ func newAPIWith(t *testing.T, wrap func(*driver.Fake) api.Driver) (*api.Client, 
 	t.Cleanup(box.Close)
 
 	drv := driver.NewFake(box.Listener.Addr().String())
-	var d api.Driver = drv
+	var d driverWith = drv
 	if wrap != nil {
 		d = wrap(drv)
 	}
-	srv := httptest.NewUnstartedServer(api.NewServer(newFakeStore(), d, log).Handler())
+	srv := httptest.NewUnstartedServer(newServer(t, newFakeStore(), d))
 	// t.TempDir is too long for a socket path when test names are long.
 	dir, err := os.MkdirTemp("", "fern")
 	if err != nil {
@@ -481,15 +501,16 @@ func (d *blockingDelete) Delete(ctx context.Context, id string) error {
 }
 
 // A client that goes away must not leave a delete half done: the box gone
-// but the environment still listed. The handler runs here, so the client's
-// cancel always comes before the delete goes on.
+// but the environment still listed. The client's cancel always comes before
+// the delete goes on; a second delete, which the actor runs after it, waits
+// for it to end.
 func TestDeleteOutlivesClient(t *testing.T) {
 	st := newFakeStore()
 	if _, err := st.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 	d := &blockingDelete{Fake: driver.NewFake(""), started: make(chan struct{}), release: make(chan struct{})}
-	h := api.NewServer(st, d, slog.New(slog.DiscardHandler)).Handler()
+	h := newServer(t, st, d)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -500,6 +521,11 @@ func TestDeleteOutlivesClient(t *testing.T) {
 	cancel()
 	close(d.release)
 	<-done
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodDelete, "/envs/demo", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("second Delete(demo) status = %d, want %d", rec.Code, http.StatusNotFound)
+	}
 	if _, err := st.Get(t.Context(), "demo"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("Get(demo) after a delete whose client went away error = %v, want %v", err, store.ErrNotFound)
 	}
@@ -530,7 +556,7 @@ func TestExecRedialsStaleBox(t *testing.T) {
 	dead := ln.Addr().String()
 	_ = ln.Close()
 	d := &staleWake{dead: dead}
-	c, _ := newAPIWith(t, func(f *driver.Fake) api.Driver { d.Fake = f; return d })
+	c, _ := newAPIWith(t, func(f *driver.Fake) driverWith { d.Fake = f; return d })
 	mustCreate(t, c, "demo")
 	var stdout bytes.Buffer
 	code, err := c.Exec(t.Context(), "demo", boxexec.Request{Argv: []string{"echo", "hi"}}, boxexec.Streams{Stdout: &stdout, Stderr: io.Discard})
@@ -553,7 +579,7 @@ func (d *countStates) States(ctx context.Context) (map[string]driver.State, erro
 
 func TestFindByPath(t *testing.T) {
 	var drv *countStates
-	c, _ := newAPIWith(t, func(f *driver.Fake) api.Driver {
+	c, _ := newAPIWith(t, func(f *driver.Fake) driverWith {
 		drv = &countStates{Fake: f}
 		return drv
 	})
@@ -568,9 +594,10 @@ func TestFindByPath(t *testing.T) {
 	if _, err := c.FindByPath(ctx, "/pool/worktrees/fern"); status(err) != http.StatusNotFound {
 		t.Errorf("FindByPath(parent) error = %v, want status %d", err, http.StatusNotFound)
 	}
-	// fern-claude looks its environment up before every Claude start.
-	if n := drv.n.Load(); n != 0 {
-		t.Errorf("lookups by path asked Kubernetes for box states %d times, want 0", n)
+	// fern-claude looks its environment up before every Claude start. The
+	// actors ask once, when they start.
+	if n := drv.n.Load(); n != 1 {
+		t.Errorf("asked Kubernetes for box states %d times, want 1", n)
 	}
 }
 

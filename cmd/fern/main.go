@@ -1,6 +1,7 @@
 // Command fern is the Fern daemon and its command-line client.
 //
-//	fern daemon [--box-image IMAGE]          run the node daemon and CSI plugin
+//	fern daemon [--box-image IMAGE] [--idle-agent D] [--idle-human D]
+//	                                         run the node daemon and CSI plugin
 //	fern create [--path P] [--seed] <env>    make an environment; P is its workspace,
 //	                                         --seed fills it from a tar stream on stdin
 //	fern ls                                  list environments

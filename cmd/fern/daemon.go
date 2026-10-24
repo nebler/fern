@@ -22,6 +22,7 @@ import (
 	sandboxv1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api"
 	"github.com/nebler/fern/internal/csi"
 	"github.com/nebler/fern/internal/driver"
@@ -50,6 +51,9 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	flags := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	image := flags.String("box-image", "fern-box:dev", "box image")
+	var idle actor.Idle
+	flags.DurationVar(&idle.Agent, "idle-agent", 5*time.Minute, "sleep this long after a box's last command ended (0: never)")
+	flags.DurationVar(&idle.Human, "idle-human", 20*time.Minute, "… and this long after it started (0: never)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -86,15 +90,22 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
-	apiSrv := api.NewServer(st, driver.New(kube, node, *image), log)
+	drv := driver.New(kube, node, *image)
+	envs := actor.New(st, drv, idle, log)
 	httpSrv := &http.Server{
-		Handler:           apiSrv.Handler(),
+		Handler:           api.NewServer(st, drv, envs, log).Handler(),
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	grpcSrv := grpc.NewServer()
 	csi.New(node, st.Get, log).Register(grpcSrv)
 	log.InfoContext(ctx, "fern daemon started", slog.String("node", node))
+	// Changes outlive their requests: Run returns once they have ended, and
+	// the store stays open until then.
+	g.Go(func() error {
+		envs.Run(ctx)
+		return nil
+	})
 	g.Go(func() error {
 		if err := httpSrv.Serve(apiLis); !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("api: %w", err)
@@ -114,10 +125,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		defer cancel()
 		return httpSrv.Shutdown(shutdownCtx)
 	})
-	err = g.Wait()
-	// Changes outlive their requests; the store must stay open until they end.
-	apiSrv.Wait()
-	return err
+	return g.Wait()
 }
 
 func kubeClient() (client.Client, error) {

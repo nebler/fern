@@ -9,80 +9,48 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"slices"
-	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 
+	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/driver"
 	"github.com/nebler/fern/internal/store"
 )
 
-// Store keeps environments and snapshots on disk.
+// Store reads environments and snapshots on disk.
 type Store interface {
-	Create(ctx context.Context, id string, opts store.CreateOptions) (store.Env, error)
-	Get(ctx context.Context, id string) (store.Env, error)
 	FindByPath(ctx context.Context, path string) (store.Env, error)
 	List(ctx context.Context) ([]store.Env, error)
-	Delete(ctx context.Context, id string) error
-	Snapshot(ctx context.Context, id, snapID string) error
-	DeleteSnapshot(ctx context.Context, id, snapID string) error
 	Snapshots(ctx context.Context, id string) ([]store.Snapshot, error)
-	Restore(ctx context.Context, id, snapID string) error
 }
 
-// Driver runs environments' boxes.
+// Driver reports the state of environments' boxes.
 type Driver interface {
-	Wake(ctx context.Context, env store.Env) (addr string, err error)
-	Sleep(ctx context.Context, id string) error
-	Delete(ctx context.Context, id string) error
 	States(ctx context.Context) (map[string]driver.State, error)
 }
 
-const (
-	// changeTimeout bounds a change of an environment. Changes don't stop
-	// when the client goes away, which would leave them half done.
-	changeTimeout = 10 * time.Minute
-	// dialTimeout bounds connecting to a box that is up; a box that vanished
-	// can leave an address nothing answers.
-	dialTimeout = 10 * time.Second
-)
+// dialTimeout bounds connecting to a box that is up; a box that vanished can
+// leave an address nothing answers.
+const dialTimeout = 10 * time.Second
 
 // errBadBody means a request's body isn't the JSON its route takes.
 var errBadBody = errors.New("bad request body")
 
-// Server handles API requests.
-//
-// Each environment has one lock, a channel so that waiting for it can be
-// cancelled. A change (create, delete, snapshot, delete snapshot, restore,
-// sleep) holds it to the end and outlives its request. A wake, or an exec
-// finding its box, holds it only while it finds or wakes the box. So a
-// running exec never holds up a change, a new exec waits for one, and
-// restore and sleep end running execs by stopping the box.
+// Server handles API requests. Reads go to the store and the driver; every
+// change, wake and exec goes through the environment's actor.
 type Server struct {
 	store  Store
 	driver Driver
+	envs   *actor.Group
 	log    *slog.Logger
-
-	mu   sync.Mutex
-	envs map[string]*envState
-
-	changes sync.WaitGroup // changes still running, which outlive their requests
 }
 
-// envState is what the server keeps in memory about one environment.
-type envState struct {
-	lock chan struct{} // holds a value while someone changes or wakes it
-	addr string        // the box's exec address while it is known to be up; guarded by lock
-}
-
-func (e *envState) release() { <-e.lock }
-
-// NewServer returns a Server for the environments in st, run by drv.
-func NewServer(st Store, drv Driver, log *slog.Logger) *Server {
-	return &Server{store: st, driver: drv, log: log, envs: make(map[string]*envState)}
+// NewServer returns a Server that reads from st and drv and changes
+// environments through envs.
+func NewServer(st Store, drv Driver, envs *actor.Group, log *slog.Logger) *Server {
+	return &Server{store: st, driver: drv, envs: envs, log: log}
 }
 
 // Handler returns the API's routes.
@@ -101,10 +69,6 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /envs/{id}/exec", s.exec)
 	return mux
 }
-
-// Wait waits for the changes still running. Call it after the HTTP server
-// has shut down and before closing the store.
-func (s *Server) Wait() { s.changes.Wait() }
 
 // handle serves a request with h and answers with what it returns: an error,
 // nothing (204), or a value as JSON.
@@ -165,30 +129,15 @@ func (s *Server) list(r *http.Request) (any, error) {
 // create makes an environment, filled from a tar body if there is one. Its
 // box comes with its first wake.
 func (s *Server) create(r *http.Request) (any, error) {
-	id := r.PathValue("id")
 	opts := store.CreateOptions{Workspace: r.URL.Query().Get("path")}
 	if r.Header.Get("Content-Type") == "application/x-tar" {
 		opts.Seed = r.Body
 	}
-	return nil, s.change(r.Context(), id, func(ctx context.Context, _ *envState) error {
-		_, err := s.store.Create(ctx, id, opts)
-		return err
-	})
+	return nil, s.envs.Create(r.Context(), r.PathValue("id"), opts)
 }
 
-// delete stops the box, then removes the disk.
 func (s *Server) delete(r *http.Request) (any, error) {
-	id := r.PathValue("id")
-	return nil, s.change(r.Context(), id, func(ctx context.Context, e *envState) error {
-		if _, err := s.store.Get(ctx, id); err != nil {
-			return err
-		}
-		e.addr = ""
-		if err := s.driver.Delete(ctx, id); err != nil {
-			return err
-		}
-		return s.store.Delete(ctx, id)
-	})
+	return nil, s.envs.Delete(r.Context(), r.PathValue("id"))
 }
 
 func (s *Server) snapshot(r *http.Request) (any, error) {
@@ -196,15 +145,7 @@ func (s *Server) snapshot(r *http.Request) (any, error) {
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
-	id := r.PathValue("id")
-	return nil, s.change(r.Context(), id, func(ctx context.Context, _ *envState) error {
-		if req.Replace {
-			if err := s.store.DeleteSnapshot(ctx, id, req.ID); err != nil {
-				return err
-			}
-		}
-		return s.store.Snapshot(ctx, id, req.ID)
-	})
+	return nil, s.envs.Snapshot(r.Context(), r.PathValue("id"), req.ID, req.Replace)
 }
 
 func (s *Server) snapshots(r *http.Request) (any, error) {
@@ -219,161 +160,69 @@ func (s *Server) snapshots(r *http.Request) (any, error) {
 	return out, nil
 }
 
-// deleteSnapshot removes a snapshot; removing one that doesn't exist is not
-// an error.
 func (s *Server) deleteSnapshot(r *http.Request) (any, error) {
-	id, snapID := r.PathValue("id"), r.PathValue("snap")
-	return nil, s.change(r.Context(), id, func(ctx context.Context, _ *envState) error {
-		return s.store.DeleteSnapshot(ctx, id, snapID)
-	})
+	return nil, s.envs.DeleteSnapshot(r.Context(), r.PathValue("id"), r.PathValue("snap"))
 }
 
-// restore puts the environment to sleep and swaps its disk. It stays asleep;
-// the next exec wakes it on the restored disk.
 func (s *Server) restore(r *http.Request) (any, error) {
 	var req restoreRequest
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
-	id := r.PathValue("id")
-	return nil, s.change(r.Context(), id, func(ctx context.Context, e *envState) error {
-		// Check the snapshot before stopping the box: a typo mustn't cost
-		// the agent its running processes.
-		snaps, err := s.store.Snapshots(ctx, id)
-		if err != nil {
-			return err
-		}
-		if !slices.ContainsFunc(snaps, func(snap store.Snapshot) bool { return snap.ID == req.Snapshot }) {
-			return fmt.Errorf("snapshot %s/%s: %w", id, req.Snapshot, store.ErrNotFound)
-		}
-		e.addr = ""
-		if err := s.driver.Sleep(ctx, id); err != nil {
-			return err
-		}
-		return s.store.Restore(ctx, id, req.Snapshot)
-	})
+	return nil, s.envs.Restore(r.Context(), r.PathValue("id"), req.Snapshot)
 }
 
 func (s *Server) sleep(r *http.Request) (any, error) {
-	id := r.PathValue("id")
-	return nil, s.change(r.Context(), id, func(ctx context.Context, e *envState) error {
-		if _, err := s.store.Get(ctx, id); err != nil {
-			return err
-		}
-		e.addr = ""
-		return s.driver.Sleep(ctx, id)
-	})
+	return nil, s.envs.Sleep(r.Context(), r.PathValue("id"))
 }
 
 func (s *Server) wake(r *http.Request) (any, error) {
-	env, err := s.store.Get(r.Context(), r.PathValue("id"))
-	if err != nil {
-		return nil, err
-	}
-	_, err = s.wakeBox(r.Context(), env, "")
-	return nil, err
+	return nil, s.envs.Wake(r.Context(), r.PathValue("id"))
 }
 
 // exec runs a command in the environment's box, waking it first if needed,
 // by relaying the client's WebSocket to the box's. It wakes and dials the
 // box before taking the client's WebSocket, so that a failure is still an
-// HTTP error with a body Client.Exec can read.
+// HTTP error with a body Client.Exec can read. A restore, sleep or delete
+// of the environment ends it.
 func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
-	env, err := s.store.Get(r.Context(), r.PathValue("id"))
+	ctx, cancel := context.WithCancel(r.Context())
+	defer cancel()
+	box, ex, err := s.dialBox(ctx, r.PathValue("id"), cancel)
 	if err != nil {
 		s.fail(w, r, err)
 		return
 	}
-	box, err := s.dialBox(r.Context(), env)
-	if err != nil {
-		s.fail(w, r, err)
-		return
-	}
+	defer ex.Close()
 	defer func() { _ = box.CloseNow() }()
 	client, err := boxexec.Accept(w, r)
 	if err != nil {
 		return // Accept has answered the client.
 	}
 	defer func() { _ = client.CloseNow() }()
-	boxexec.Proxy(r.Context(), client, box)
+	boxexec.Proxy(ctx, client, box)
 }
 
-// dialBox connects to the environment's box, waking it if needed. A box seen
+// dialBox connects to environment id's box, waking it if needed. A box seen
 // earlier may be gone (a crash, a deleted pod): then it is woken once more.
-func (s *Server) dialBox(ctx context.Context, env store.Env) (*websocket.Conn, error) {
+func (s *Server) dialBox(ctx context.Context, id string, cancel context.CancelFunc) (*websocket.Conn, *actor.Exec, error) {
 	var stale string
 	var err error
 	for range 2 {
-		var addr string
-		if addr, err = s.wakeBox(ctx, env, stale); err != nil {
-			return nil, err
+		var ex *actor.Exec
+		if ex, err = s.envs.Exec(ctx, id, stale, cancel); err != nil {
+			return nil, nil, err
 		}
-		dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
-		conn, dialErr := boxexec.Dial(dialCtx, boxexec.URL(addr), env.BoxToken, nil)
-		cancel()
+		dialCtx, cancelDial := context.WithTimeout(ctx, dialTimeout)
+		conn, dialErr := boxexec.Dial(dialCtx, boxexec.URL(ex.Addr), ex.Token, nil)
+		cancelDial()
 		if dialErr == nil {
-			return conn, nil
+			return conn, ex, nil
 		}
-		stale, err = addr, dialErr
+		ex.Close()
+		stale, err = ex.Addr, dialErr
 	}
-	return nil, fmt.Errorf("connect to box %s: %w", env.ID, err)
-}
-
-// wakeBox returns the address of the environment's box, waking it unless it
-// is known to be up somewhere other than stale, which didn't answer.
-func (s *Server) wakeBox(ctx context.Context, env store.Env, stale string) (string, error) {
-	e, err := s.lock(ctx, env.ID)
-	if err != nil {
-		return "", err
-	}
-	defer e.release()
-	if e.addr != "" && e.addr != stale {
-		return e.addr, nil
-	}
-	e.addr = ""
-	addr, err := s.driver.Wake(ctx, env)
-	if err != nil {
-		return "", err
-	}
-	e.addr = addr
-	return addr, nil
-}
-
-// change runs fn on environment id while no one else changes or wakes it.
-// Waiting can be cancelled by the client; fn can't.
-func (s *Server) change(ctx context.Context, id string, fn func(ctx context.Context, e *envState) error) error {
-	e, err := s.lock(ctx, id)
-	if err != nil {
-		return err
-	}
-	defer e.release()
-	s.changes.Add(1)
-	defer s.changes.Done()
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), changeTimeout)
-	defer cancel()
-	return fn(ctx, e)
-}
-
-// lock returns environment id's state once no one else changes or wakes it,
-// or ctx is done. The caller releases it. It checks the ID first, so a
-// client can't grow the map with names that will never be environments.
-func (s *Server) lock(ctx context.Context, id string) (*envState, error) {
-	if err := store.CheckEnvID(id); err != nil {
-		return nil, err
-	}
-	s.mu.Lock()
-	e, ok := s.envs[id]
-	if !ok {
-		e = &envState{lock: make(chan struct{}, 1)}
-		s.envs[id] = e
-	}
-	s.mu.Unlock()
-	select {
-	case e.lock <- struct{}{}:
-		return e, nil
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
+	return nil, nil, fmt.Errorf("connect to box %s: %w", id, err)
 }
 
 func decode(r *http.Request, v any) error {
@@ -391,6 +240,8 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, store.ErrInvalidID), errors.Is(err, store.ErrInvalidPath), errors.Is(err, errBadBody):
 		status = http.StatusBadRequest
+	case errors.Is(err, actor.ErrStopped):
+		status = http.StatusServiceUnavailable
 	case errors.Is(err, context.Canceled) && r.Context().Err() != nil:
 		// The client gave up waiting; there is no one to answer.
 	default:
