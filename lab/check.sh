@@ -513,7 +513,8 @@ gvisor() {
   echo "== under gVisor"
   # gVisor goes into the lab node, not the Mac: a pinned release, checked
   # and registered with k3s's containerd for RuntimeClass "gvisor".
-  if ! on_node test -x /usr/local/bin/runsc </dev/null; then
+  # On a VPS, lab/vps.sh installed it.
+  if [ -z "$FERN_HOST" ] && ! docker exec "$LAB" test -x /usr/local/bin/runsc; then
     local arch url
     case $(docker version -f '{{.Server.Arch}}') in arm64) arch=aarch64 ;; *) arch=x86_64 ;; esac
     url=https://storage.googleapis.com/gvisor/releases/release/$GVISOR_RELEASE/$arch/gvisor.tar.bz2

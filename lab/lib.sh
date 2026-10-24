@@ -12,7 +12,7 @@ FERN_HOST=${FERN_HOST:-}
 # shellcheck disable=SC2034 # the scripts that source this use them
 K3S_VERSION=v1.36.5+k3s1 SANDBOX_VERSION=v1.0.7 GVISOR_RELEASE=20261012
 # One SSH connection serves a script's many commands.
-SSH=(ssh -o BatchMode=yes -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/fern-%C" -o ControlPersist=60)
+SSH=(ssh -o BatchMode=yes -o LogLevel=ERROR -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/fern-%C" -o ControlPersist=60)
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit
 
 # GO_RUN starts a container with the repository mounted and Go's module and
