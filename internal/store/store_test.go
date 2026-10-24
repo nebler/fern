@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"syscall"
 	"testing"
 
@@ -692,5 +693,48 @@ func TestReconcile(t *testing.T) {
 	}
 	if env := create(t, st, "half", store.CreateOptions{Workspace: half}); env.Workspace != half {
 		t.Errorf("Create(half) again = %s, want the worktree at %s resumed", env.Workspace, half)
+	}
+}
+
+// A restore keeps the workspace it replaces as a pre-restore snapshot, which
+// can be restored in turn, and the next restore prunes those over a day old.
+func TestPreRestore(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	live := create(t, st, "demo", store.CreateOptions{}).Workspace
+	writeFile(t, filepath.Join(live, "f"), "v1")
+	snapshot(t, st, "demo", "s1")
+	writeFile(t, filepath.Join(live, "f"), "v2")
+	if err := st.Restore(ctx, "demo", "s1"); err != nil {
+		t.Fatalf("Restore(demo, s1) error: %v", err)
+	}
+	pre := preRestores(t, st)
+	if len(pre) != 1 {
+		t.Fatalf("pre-restore snapshots %q, want one", pre)
+	}
+	if err := st.Restore(ctx, "demo", pre[0]); err != nil {
+		t.Fatalf("Restore(demo, %s) error: %v", pre[0], err)
+	}
+	if got := readFile(t, filepath.Join(live, "f")); got != "v2" {
+		t.Errorf("f = %q after undoing the restore, want %q", got, "v2")
+	}
+
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(dir, "state", "fern.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err := db.ExecContext(ctx, `UPDATE snapshots SET created_at = created_at - 2*86400 WHERE id LIKE 'pre-restore-%'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Restore(ctx, "demo", "s1"); err != nil {
+		t.Fatalf("Restore(demo, s1) a day later error: %v", err)
+	}
+	got := preRestores(t, st)
+	if len(got) != 1 || slices.Contains(pre, got[0]) {
+		t.Errorf("pre-restore snapshots %q a day later, want only the new one", got)
+	}
+	for _, id := range pre {
+		gone(t, filepath.Join(dir, "envs", "demo", "snaps", id))
 	}
 }

@@ -7,6 +7,7 @@
 //	envs/<id>/live/            the workspace of an environment created without a path
 //	envs/<id>/snaps/<snap>/    read-only snapshots of the workspace
 //	envs/<id>/claude/          Claude's state (CLAUDE_CONFIG_DIR): never snapshotted, so a restore keeps it
+//	envs/<id>/snaps/pre-restore-<time>/  the workspace a restore replaced, for a day
 //	envs/<id>/live.new/        a restore's copy before the swap, the old workspace after
 //	envs/<id>/adopt.new/       an adopt's copy before the swap, the old directory after
 //	envs/<id>/incomplete       marks a create or delete that hasn't finished
@@ -102,6 +103,18 @@ func CheckEnvID(id string) error {
 type Store struct {
 	root string
 	db   *sql.DB
+	// failAt, if set, is called at every step of a change that has more
+	// than one; an error stops the change there, as a crash would. Crash
+	// tests set it.
+	failAt func(step string) error
+}
+
+// step returns failAt's error for the named step, if failAt is set.
+func (s *Store) step(name string) error {
+	if s.failAt == nil {
+		return nil
+	}
+	return s.failAt(name)
 }
 
 const schema = `

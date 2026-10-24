@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Checks Fern end to end in the lab, in sections:
-#   slice        the whole disk, database included, is snapshotted and restored
+#   slice        the whole disk, database included, is snapshotted and restored,
+#                and a restore can be undone
 #   box          a box keeps no state of its own: only its workspace survives
 #                a sleep, and a force-deleted pod comes back
 #   disk         a 100,000-file workspace: snapshot, restore (equal to its
@@ -83,6 +84,12 @@ slice() {
   fern restore $ENV s1 >/dev/null
   check "a restore leaves it asleep" asleep "$(state $ENV)"
   check "the next exec wakes it with the table (3 users)" 3 "$(sql $ENV 'select count(*) from users')"
+  local pre
+  pre=$(fern snapshots $ENV | awk '$1 ~ /^pre-restore-/ { print $1 }')
+  check "a restore keeps the workspace it replaced" 1 "$(grep -c . <<<"$pre")"
+  fern restore $ENV "$pre" >/dev/null
+  check "restoring that undoes the restore (no table)" 0 \
+    "$(sql $ENV "select count(*) from pg_tables where tablename = 'users'")"
   fern rm $ENV
   check "rm removes it" "" "$(state $ENV)"
 }
@@ -375,7 +382,7 @@ paths() {
   fern restore adopted c1 >/dev/null
   check "a replaced snapshot holds the new state (0 users)" 0 "$(sql adopted 'select count(*) from users')"
   fern rmsnap adopted c1
-  check "rmsnap removes it" "" "$(fern snapshots adopted | tail -n +2)"
+  check "rmsnap removes it" 0 "$(fern snapshots adopted | grep -c '^c1 ' || true)"
   for e in at-path adopted adopted-big; do fern rm $e; done
   check "rm removes the workspaces at their paths" "" "$(in_daemon "ls $W")"
 }

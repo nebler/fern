@@ -54,6 +54,9 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 	if err := s.writeMarker(id, ""); err != nil {
 		return Env{}, err
 	}
+	if err := s.step("create: marked"); err != nil {
+		return Env{}, err
+	}
 	if err := os.MkdirAll(s.snapsDir(id), 0o755); err != nil {
 		return Env{}, err
 	}
@@ -65,6 +68,9 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 		return Env{}, err
 	}
 	if err := s.makeWorkspace(ctx, id, workspace); err != nil {
+		return Env{}, err
+	}
+	if err := s.step("create: workspace made"); err != nil {
 		return Env{}, err
 	}
 	if opts.Seed != nil {
@@ -86,6 +92,9 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO environments (`+envColumns+`) VALUES (?, ?, ?, ?, ?)`,
 		env.ID, env.Workspace, env.Git, env.Created.Unix(), env.BoxToken); err != nil {
+		return Env{}, err
+	}
+	if err := s.step("create: indexed"); err != nil {
 		return Env{}, err
 	}
 	// With the row written, the marker means nothing.
@@ -169,8 +178,14 @@ func (s *Store) adopt(ctx context.Context, id, path string) error {
 	if err != nil {
 		return fmt.Errorf("adopt %s: cp: %w: %s", path, err, bytes.TrimSpace(out))
 	}
+	if err := s.step("adopt: copied"); err != nil {
+		return err
+	}
 	if err := unix.Renameat2(unix.AT_FDCWD, next, unix.AT_FDCWD, path, unix.RENAME_EXCHANGE); err != nil {
 		return fmt.Errorf("adopt %s: swap: %w", path, err)
+	}
+	if err := s.step("adopt: swapped"); err != nil {
+		return err
 	}
 	// next is now the old plain directory.
 	return os.RemoveAll(next)

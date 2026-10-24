@@ -44,8 +44,11 @@ func (s *Store) snapshot(ctx context.Context, env Env, snapID string) error {
 	}
 	// Taking one flushes the workspace's dirty pages first, so it holds every
 	// write made before. It replaces a row whose subvolume a DeleteSnapshot
-	// that stopped half-way already removed.
+	// that stopped half-way already removed, if Reconcile hasn't.
 	if err := btrfs(ctx, "subvolume", "snapshot", "-r", env.Workspace, path); err != nil {
+		return err
+	}
+	if err := s.step("snapshot: taken"); err != nil {
 		return err
 	}
 	_, err = s.db.ExecContext(ctx, `INSERT OR REPLACE INTO snapshots (env, id, created_at) VALUES (?, ?, ?)`,
@@ -65,6 +68,9 @@ func (s *Store) DeleteSnapshot(ctx context.Context, id, snapID string) error {
 	}
 	if err := deleteSubvolumes(ctx, s.snapPath(id, snapID)); err != nil {
 		return fmt.Errorf("delete snapshot %s/%s: %w", id, snapID, err)
+	}
+	if err := s.step("delete snapshot: removed"); err != nil {
+		return err
 	}
 	if _, err := s.db.ExecContext(ctx, `DELETE FROM snapshots WHERE env = ? AND id = ?`, id, snapID); err != nil {
 		return fmt.Errorf("delete snapshot %s/%s: %w", id, snapID, err)
@@ -100,8 +106,10 @@ func (s *Store) Snapshots(ctx context.Context, id string) ([]Snapshot, error) {
 }
 
 // Restore replaces environment id's workspace with a writable copy of
-// snapshot snapID. The environment's box must be stopped. Every step can be
-// repeated after a crash.
+// snapshot snapID, and keeps the workspace it replaces for a day as snapshot
+// pre-restore-<time>, so a restore can be undone. The environment's box must
+// be stopped. After a crash at any step, the workspace is the old one or the
+// new one, and a replaced workspace is kept.
 func (s *Store) Restore(ctx context.Context, id, snapID string) error {
 	if !snapIDPattern.MatchString(snapID) {
 		return fmt.Errorf("snapshot %q: %w", snapID, ErrInvalidID)
@@ -125,18 +133,72 @@ func (s *Store) Restore(ctx context.Context, id, snapID string) error {
 }
 
 func (s *Store) restore(ctx context.Context, env Env, snapID string) error {
+	if err := s.prunePreRestores(ctx, env.ID, snapID); err != nil {
+		return err
+	}
 	next := s.restorePath(env.ID)
 	// A leftover is a half-made copy, or the old workspace of a restore that
-	// stopped before its last step. Either way it is garbage.
+	// stopped before its last step, which its pre-restore snapshot holds.
+	// Either way it is garbage.
 	if err := deleteSubvolumes(ctx, next); err != nil {
 		return err
 	}
 	if err := btrfs(ctx, "subvolume", "snapshot", s.snapPath(env.ID, snapID), next); err != nil {
 		return err
 	}
+	if err := s.step("restore: copied"); err != nil {
+		return err
+	}
+	// Before the swap, so a crash can't lose the workspace being replaced.
+	if err := s.snapshot(ctx, env, preRestorePrefix+time.Now().UTC().Format(preRestoreTime)); err != nil {
+		return err
+	}
+	if err := s.step("restore: kept"); err != nil {
+		return err
+	}
 	// One atomic step: the workspace is always either the old or the new tree.
 	if err := unix.Renameat2(unix.AT_FDCWD, next, unix.AT_FDCWD, env.Workspace, unix.RENAME_EXCHANGE); err != nil {
 		return fmt.Errorf("swap: %w", err)
 	}
+	if err := s.step("restore: swapped"); err != nil {
+		return err
+	}
 	return deleteSubvolumes(ctx, next)
+}
+
+// A restore keeps the workspace it replaces as a snapshot named for the time,
+// to the nanosecond so that two restores never share one, for preRestoreKeep.
+const (
+	preRestorePrefix = "pre-restore-"
+	preRestoreTime   = "20060102-150405.000000000"
+	preRestoreKeep   = 24 * time.Hour
+)
+
+// prunePreRestores deletes environment id's pre-restore snapshots that are
+// older than preRestoreKeep, except snapshot keep.
+func (s *Store) prunePreRestores(ctx context.Context, id, keep string) error {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id FROM snapshots WHERE env = ? AND id LIKE ? AND id != ? AND created_at < ?`,
+		id, preRestorePrefix+"%", keep, time.Now().Add(-preRestoreKeep).Unix())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	var old []string
+	for rows.Next() {
+		var snapID string
+		if err := rows.Scan(&snapID); err != nil {
+			return err
+		}
+		old = append(old, snapID)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, snapID := range old {
+		if err := s.DeleteSnapshot(ctx, id, snapID); err != nil {
+			return err
+		}
+	}
+	return nil
 }

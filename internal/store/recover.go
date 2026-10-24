@@ -24,8 +24,14 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 		if err := s.writeMarker(id, env.Workspace); err != nil {
 			return fmt.Errorf("delete %s: %w", id, err)
 		}
+		if err := s.step("delete: marked"); err != nil {
+			return err
+		}
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM environments WHERE id = ?`, id); err != nil {
 			return fmt.Errorf("delete %s: %w", id, err)
+		}
+		if err := s.step("delete: unindexed"); err != nil {
+			return err
 		}
 	case !errors.Is(err, ErrNotFound):
 		return err
@@ -38,7 +44,8 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 
 // Reconcile brings the disk and the index together after a crash: it finishes
 // the creates and deletes that stopped half-way, removes the leftovers of
-// restores and adopts, and returns the environment directories it keeps
+// restores and adopts, brings the snapshot rows in line with the snapshots on
+// disk, and returns the environment directories it keeps
 // because the index has lost them.
 func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 	dirs, err := os.ReadDir(filepath.Join(s.root, "envs"))
@@ -76,9 +83,55 @@ func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 			if err := os.Remove(s.markerPath(id)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return lost, fmt.Errorf("reconcile %s: %w", id, err)
 			}
+			if err := s.reconcileSnapshots(ctx, id); err != nil {
+				return lost, fmt.Errorf("reconcile %s: %w", id, err)
+			}
 		}
 	}
 	return lost, nil
+}
+
+// reconcileSnapshots makes environment id's snapshot rows match its
+// snapshots on disk. A snapshot without a row was taken just before a crash;
+// btrfs snapshots are atomic, so it is complete, and it gets the time it is
+// found. A row without a snapshot is from a DeleteSnapshot that stopped
+// half-way.
+func (s *Store) reconcileSnapshots(ctx context.Context, id string) error {
+	snaps, err := s.Snapshots(ctx, id)
+	if err != nil {
+		return err
+	}
+	indexed := make(map[string]bool, len(snaps))
+	for _, snap := range snaps {
+		indexed[snap.ID] = true
+	}
+	dirs, err := os.ReadDir(s.snapsDir(id))
+	if err != nil {
+		return err
+	}
+	for _, d := range dirs {
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if !snapIDPattern.MatchString(d.Name()) || !isSubvolume(fi) {
+			continue
+		}
+		if indexed[d.Name()] {
+			delete(indexed, d.Name())
+			continue
+		}
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO snapshots (env, id, created_at) VALUES (?, ?, ?)`,
+			id, d.Name(), now().Unix()); err != nil {
+			return err
+		}
+	}
+	for snapID := range indexed {
+		if _, err := s.db.ExecContext(ctx, `DELETE FROM snapshots WHERE env = ? AND id = ?`, id, snapID); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // clearLeftovers removes what a create or delete of environment id, which has
