@@ -107,7 +107,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	reg := prometheus.NewRegistry()
-	reg.MustRegister(envs, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	reg.MustRegister(envs, drv, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	metricsSrv := &http.Server{
 		Handler:           promhttp.HandlerFor(reg, promhttp.HandlerOpts{}),
 		ReadHeaderTimeout: 10 * time.Second,

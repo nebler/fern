@@ -49,11 +49,36 @@ succeeds() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
 now_ms() { local t=${EPOCHREALTIME//[!0-9]/}; echo $((t / 1000)); }
 # took reads the time from fern's "… took 12.3ms".
 took() { sed -nE 's/.* took ([0-9.]+)ms$/\1/p'; }
-# stats reads numbers, one per line, and prints "n=… p50=… p95=… max=…".
+# stats reads numbers, one per line, and prints "n=… p50=… p95=… max=…",
+# nearest-rank percentiles, and up to 30 of them all, sorted. Under 20
+# numbers p95 is the maximum.
 stats() {
-  sort -n | awk '{a[NR]=$1} END {
-    if (NR == 0) { print "n=0"; exit }
-    printf "n=%d p50=%s p95=%s max=%s\n", NR, a[int((NR-1)*0.50)+1], a[int((NR-1)*0.95)+1], a[NR] }'
+  sort -n | awk '
+    function rank(p,  i) { i = int(p * NR); if (i < p * NR) i++; return a[i] }
+    {a[NR]=$1} END {
+      if (NR == 0) { print "n=0"; exit }
+      printf "n=%d p50=%s p95=%s max=%s", NR, rank(0.50), rank(0.95), a[NR]
+      if (NR <= 30) { printf " all:"; for (i = 1; i <= NR; i++) printf " %s", a[i] }
+      print "" }'
+}
+# metrics prints the daemon's Prometheus metrics.
+metrics() {
+  local pod
+  pod=$(k -n fern-system get pod -l app.kubernetes.io/name=fern -o jsonpath='{.items[0].metadata.name}')
+  k get --raw "/api/v1/namespaces/fern-system/pods/$pod:9090/proxy/metrics"
+}
+# wake_steps prints the mean time of each step of the wakes since the
+# metrics in file BEFORE were read.
+wake_steps() {
+  { sed 's/^/before /' "$1"; metrics | sed 's/^/after /'; } | awk '
+    $2 ~ /^fern_wake_step_seconds_(sum|count)/ {
+      match($2, /step="[a-z]+"/); step = substr($2, RSTART + 6, RLENGTH - 7)
+      kind = ($2 ~ /_sum/) ? "sum" : "count"
+      v[$1, kind, step] = $3; steps[step] = 1 }
+    END { for (s in steps) {
+      n = v["after", "count", s] - v["before", "count", s]
+      if (n > 0) printf "%s=%.0f ", s, 1000 * (v["after", "sum", s] - v["before", "sum", s]) / n }
+      print "(mean ms)" }'
 }
 sha256() { shasum -a 256 | cut -d' ' -f1; }
 sql() { fern exec "$1" -- psql -tAc "$2"; }
@@ -115,13 +140,15 @@ box() {
   check "the box writes to the pool" y "$(in_daemon "cat /var/lib/fern/envs/$ENV/live/inside")"
   check "a stray process runs" 1 "$(procs $ENV | grep -cx sleep || true)"
   local mounted=0
-  for _ in $(seq 10); do
+  metrics >"$TMP/metrics"
+  for _ in $(seq 30); do
     fern sleep $ENV | took >>"$TMP/sleep"
     mounted=$((mounted + $(mounts $ENV)))
     fern wake $ENV | took >>"$TMP/wake"
   done
   note "sleep (until the pod is gone), ms: $(stats <"$TMP/sleep")"
   note "wake (until Postgres is ready), ms: $(stats <"$TMP/wake")"
+  note "wake steps: $(wake_steps "$TMP/metrics")"
   check "the workspace is unmounted at every sleep" 0 "$mounted"
   check "and mounted once while awake" 1 "$(mounts $ENV)"
   check "a write outside the workspace is gone" no "$(succeeds fern exec $ENV -- test -e /tmp/outside)"

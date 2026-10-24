@@ -452,7 +452,7 @@ A first, then propose B with what the spike learned (roadmap week 8). C only if 
 
 - **Events:** `GET /events` (created, woke, slept, snapshot, restored, forked, failed).
 - **Metrics (Prometheus),** at `/metrics` on the daemon's port 9090 (`--metrics-addr`):
-  - built: `fern_snapshot_seconds`, `fern_wake_seconds`, `fern_restore_seconds` (histograms), `fern_idle_sleeps_total`, and Go's process metrics
+  - built: histograms `fern_wake_seconds`, `fern_stop_seconds`, `fern_restore_seconds` and `fern_snapshot_seconds` (by `result`: `ok` or `error`), `fern_queue_seconds` (how long a change waited for its actor, by `change`), `fern_wake_step_seconds` (by `step`: `sandbox`, `pod`, `ready`); `fern_idle_sleeps_total`; Go's process metrics. A wake and a restore are also logged with their time
   - planned: golden hit rate and build time, active sessions, pool usage, box restarts
 - **Logs:** per environment (services, `fern-init`, resume/setup output), viewable with `fern logs <env>`.
 - **CLI:** `fern ls`, `fern inspect <env>`, `fern snapshots <env>`, `fern top`.

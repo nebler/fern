@@ -64,10 +64,10 @@ type Group struct {
 	idle   Idle
 	log    *slog.Logger
 
-	wakes      prometheus.Histogram
-	restores   prometheus.Histogram
-	snapshots  prometheus.Histogram
-	idleSleeps prometheus.Counter
+	// Time histograms, by result ("ok" or "error"), and, for queue, by
+	// change: how long a change waited for its actor.
+	wakes, stops, restores, snapshots, queue *prometheus.HistogramVec
+	idleSleeps                               prometheus.Counter
 
 	find    chan findRequest // to Run, for an environment's actor
 	stopped chan struct{}    // closed when Run returns
@@ -81,20 +81,20 @@ type findRequest struct {
 // New returns a Group for the environments in st, run by drv. Call Run
 // before anything else.
 func New(st Store, drv Driver, idle Idle, log *slog.Logger) *Group {
+	// Boxes take from tens of milliseconds to the timeouts' minutes; disk
+	// changes and queueing take from a millisecond.
+	boxBuckets := prometheus.ExponentialBuckets(0.025, 2, 13)  // 25ms to 102s
+	diskBuckets := prometheus.ExponentialBuckets(0.001, 2, 16) // 1ms to 33s
+	histogram := func(name, help string, buckets []float64, label string) *prometheus.HistogramVec {
+		return prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: name, Help: help, Buckets: buckets}, []string{label})
+	}
 	return &Group{
 		store: st, driver: drv, idle: idle, log: log,
-		wakes: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name: "fern_wake_seconds", Help: "Time to wake a box, until its services are ready.",
-			Buckets: prometheus.ExponentialBuckets(0.05, 2, 10),
-		}),
-		restores: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name: "fern_restore_seconds", Help: "Time to restore a snapshot, stopping the box included.",
-			Buckets: prometheus.ExponentialBuckets(0.05, 2, 10),
-		}),
-		snapshots: prometheus.NewHistogram(prometheus.HistogramOpts{
-			Name: "fern_snapshot_seconds", Help: "Time to take a snapshot.",
-			Buckets: prometheus.ExponentialBuckets(0.001, 2, 12),
-		}),
+		wakes:     histogram("fern_wake_seconds", "Time to wake a box, until its services are ready.", boxBuckets, "result"),
+		stops:     histogram("fern_stop_seconds", "Time to stop a box, until its pod is gone.", boxBuckets, "result"),
+		restores:  histogram("fern_restore_seconds", "Time to restore a snapshot, stopping the box included.", boxBuckets, "result"),
+		snapshots: histogram("fern_snapshot_seconds", "Time to take a snapshot, replacing one included.", diskBuckets, "result"),
+		queue:     histogram("fern_queue_seconds", "Time a change waited for its environment's actor.", diskBuckets, "change"),
 		idleSleeps: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "fern_idle_sleeps_total", Help: "Boxes put to sleep because they were idle.",
 		}),
@@ -103,7 +103,7 @@ func New(st Store, drv Driver, idle Idle, log *slog.Logger) *Group {
 }
 
 func (g *Group) collectors() []prometheus.Collector {
-	return []prometheus.Collector{g.wakes, g.restores, g.snapshots, g.idleSleeps}
+	return []prometheus.Collector{g.wakes, g.stops, g.restores, g.snapshots, g.queue, g.idleSleeps}
 }
 
 // Describe sends the descriptions of the Group's metrics.
@@ -186,12 +186,17 @@ func (g *Group) actorOf(ctx context.Context, id string) (*actor, error) {
 	}
 }
 
-// do runs fn on environment id's actor and returns its error. Waiting for
-// the actor to take fn can be cancelled; once it has, fn runs to the end, and
-// do waits for it, so that fn never uses what its caller has let go of (such
-// as a request's body). changeTimeout bounds the wait.
-func (g *Group) do(ctx context.Context, id string, fn func(ctx context.Context, a *actor) error) error {
-	m := message{fn: fn, reply: make(chan error, 1)}
+// do runs fn, the change named change, on environment id's actor and
+// returns its error. Waiting for the actor to take fn can be cancelled; once
+// it has, fn runs to the end, and do waits for it, so that fn never uses what
+// its caller has let go of (such as a request's body). changeTimeout bounds
+// the wait.
+func (g *Group) do(ctx context.Context, change, id string, fn func(ctx context.Context, a *actor) error) error {
+	queued := time.Now()
+	m := message{reply: make(chan error, 1), fn: func(ctx context.Context, a *actor) error {
+		g.queue.WithLabelValues(change).Observe(time.Since(queued).Seconds())
+		return fn(ctx, a)
+	}}
 	for {
 		a, err := g.actorOf(ctx, id)
 		if err != nil {
@@ -219,7 +224,7 @@ func isClosed(c <-chan struct{}) bool {
 
 // Create makes environment id. Its box comes with its first wake.
 func (g *Group) Create(ctx context.Context, id string, opts store.CreateOptions) error {
-	return g.do(ctx, id, func(ctx context.Context, _ *actor) error {
+	return g.do(ctx, "create", id, func(ctx context.Context, _ *actor) error {
 		_, err := g.store.Create(ctx, id, opts)
 		return err
 	})
@@ -227,7 +232,7 @@ func (g *Group) Create(ctx context.Context, id string, opts store.CreateOptions)
 
 // Delete stops environment id's box, then removes its disk.
 func (g *Group) Delete(ctx context.Context, id string) error {
-	return g.do(ctx, id, func(ctx context.Context, a *actor) error {
+	return g.do(ctx, "delete", id, func(ctx context.Context, a *actor) error {
 		if _, err := g.store.Get(ctx, id); err != nil {
 			return err
 		}
@@ -240,25 +245,21 @@ func (g *Group) Delete(ctx context.Context, id string) error {
 
 // Snapshot takes snapshot snapID of environment id, again if replace is set.
 func (g *Group) Snapshot(ctx context.Context, id, snapID string, replace bool) error {
-	return g.do(ctx, id, func(ctx context.Context, _ *actor) error {
+	return g.do(ctx, "snapshot", id, func(ctx context.Context, _ *actor) (err error) {
+		defer observe(g.snapshots, time.Now(), &err)
 		if replace {
 			if err := g.store.DeleteSnapshot(ctx, id, snapID); err != nil {
 				return err
 			}
 		}
-		start := time.Now()
-		if err := g.store.Snapshot(ctx, id, snapID); err != nil {
-			return err
-		}
-		g.snapshots.Observe(time.Since(start).Seconds())
-		return nil
+		return g.store.Snapshot(ctx, id, snapID)
 	})
 }
 
 // DeleteSnapshot removes snapshot snapID of environment id; removing one that
 // doesn't exist is not an error.
 func (g *Group) DeleteSnapshot(ctx context.Context, id, snapID string) error {
-	return g.do(ctx, id, func(ctx context.Context, _ *actor) error {
+	return g.do(ctx, "delete_snapshot", id, func(ctx context.Context, _ *actor) error {
 		return g.store.DeleteSnapshot(ctx, id, snapID)
 	})
 }
@@ -267,7 +268,9 @@ func (g *Group) DeleteSnapshot(ctx context.Context, id, snapID string) error {
 // box, and swaps its disk for snapshot snapID. It stays asleep; the next
 // command wakes it on the restored disk.
 func (g *Group) Restore(ctx context.Context, id, snapID string) error {
-	return g.do(ctx, id, func(ctx context.Context, a *actor) error {
+	return g.do(ctx, "restore", id, func(ctx context.Context, a *actor) (err error) {
+		start := time.Now()
+		defer observe(g.restores, start, &err)
 		// Check the snapshot before stopping the box: a typo mustn't cost
 		// the agent its running processes.
 		snaps, err := g.store.Snapshots(ctx, id)
@@ -277,21 +280,20 @@ func (g *Group) Restore(ctx context.Context, id, snapID string) error {
 		if !slices.ContainsFunc(snaps, func(snap store.Snapshot) bool { return snap.ID == snapID }) {
 			return fmt.Errorf("snapshot %s/%s: %w", id, snapID, store.ErrNotFound)
 		}
-		start := time.Now()
 		if err := a.stopBox(ctx, g.driver.Sleep); err != nil {
 			return err
 		}
 		if err := g.store.Restore(ctx, id, snapID); err != nil {
 			return err
 		}
-		g.restores.Observe(time.Since(start).Seconds())
+		g.log.InfoContext(ctx, "restored", slog.String("env", id), slog.String("snapshot", snapID), slog.Duration("took", time.Since(start)))
 		return nil
 	})
 }
 
 // Sleep stops environment id's box, ending the commands running in it.
 func (g *Group) Sleep(ctx context.Context, id string) error {
-	return g.do(ctx, id, func(ctx context.Context, a *actor) error {
+	return g.do(ctx, "sleep", id, func(ctx context.Context, a *actor) error {
 		if _, err := g.store.Get(ctx, id); err != nil {
 			return err
 		}
@@ -302,7 +304,7 @@ func (g *Group) Sleep(ctx context.Context, id string) error {
 // Wake starts environment id's box. It counts as a touch, so the box stays
 // up for the idle times.
 func (g *Group) Wake(ctx context.Context, id string) error {
-	return g.do(ctx, id, func(ctx context.Context, a *actor) error {
+	return g.do(ctx, "wake", id, func(ctx context.Context, a *actor) error {
 		if _, err := a.wake(ctx, ""); err != nil {
 			return err
 		}
@@ -331,7 +333,7 @@ func (e *Exec) Close() { e.close() }
 // didn't answer, if any: then the box is woken again.
 func (g *Group) Exec(ctx context.Context, id, stale string, cancel context.CancelFunc) (*Exec, error) {
 	var ex *Exec
-	err := g.do(ctx, id, func(ctx context.Context, a *actor) error {
+	err := g.do(ctx, "exec", id, func(ctx context.Context, a *actor) error {
 		env, err := a.wake(ctx, stale)
 		if err != nil {
 			return err
@@ -436,10 +438,11 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 	}
 	start := time.Now()
 	addr, err := a.g.driver.Wake(ctx, env)
+	observe(a.g.wakes, start, &err)
 	if err != nil {
 		return store.Env{}, err
 	}
-	a.g.wakes.Observe(time.Since(start).Seconds())
+	a.g.log.InfoContext(ctx, "box woke", slog.String("env", a.id), slog.Duration("took", time.Since(start)))
 	a.addr = addr
 	return env, nil
 }
@@ -449,7 +452,10 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 // against the disk that comes next.
 func (a *actor) stopBox(ctx context.Context, stop func(ctx context.Context, id string) error) error {
 	a.addr = ""
-	if err := stop(ctx, a.id); err != nil {
+	start := time.Now()
+	err := stop(ctx, a.id)
+	observe(a.g.stops, start, &err)
+	if err != nil {
 		return err
 	}
 	a.awake = false
@@ -505,6 +511,16 @@ func (a *actor) sleepIfIdle(ctx context.Context) {
 	}
 	a.g.idleSleeps.Inc()
 	a.g.log.InfoContext(ctx, "idle box went to sleep", slog.String("env", a.id))
+}
+
+// observe adds the time since start to h, labelled with whether *err is
+// nil. It takes a pointer so that it can be deferred.
+func observe(h *prometheus.HistogramVec, start time.Time, err *error) {
+	result := "ok"
+	if *err != nil {
+		result = "error"
+	}
+	h.WithLabelValues(result).Observe(time.Since(start).Seconds())
 }
 
 func later(a, b time.Time) time.Time {

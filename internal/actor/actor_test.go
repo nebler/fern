@@ -452,6 +452,9 @@ func TestMetrics(t *testing.T) {
 		if err := g.Restore(ctx, "demo", "s1"); err != nil {
 			t.Fatal(err)
 		}
+		if err := g.Restore(ctx, "demo", "missing"); !errors.Is(err, store.ErrNotFound) {
+			t.Fatalf("Restore(demo, missing) error = %v, want %v", err, store.ErrNotFound)
+		}
 		reg := prometheus.NewRegistry()
 		reg.MustRegister(g)
 		families, err := reg.Gather()
@@ -460,14 +463,31 @@ func TestMetrics(t *testing.T) {
 		}
 		got := make(map[string]uint64)
 		for _, f := range families {
-			m := f.GetMetric()[0]
-			if h := m.GetHistogram(); h != nil {
-				got[f.GetName()] = h.GetSampleCount()
-			} else {
-				got[f.GetName()] = uint64(m.GetCounter().GetValue())
+			for _, m := range f.GetMetric() {
+				name := f.GetName()
+				for _, l := range m.GetLabel() {
+					name += "{" + l.GetName() + "=" + l.GetValue() + "}"
+				}
+				if h := m.GetHistogram(); h != nil {
+					got[name] = h.GetSampleCount()
+				} else {
+					got[name] = uint64(m.GetCounter().GetValue())
+				}
 			}
 		}
-		want := map[string]uint64{"fern_wake_seconds": 1, "fern_snapshot_seconds": 1, "fern_restore_seconds": 1, "fern_idle_sleeps_total": 1}
+		want := map[string]uint64{
+			"fern_wake_seconds{result=ok}":     1,
+			"fern_snapshot_seconds{result=ok}": 1,
+			// The idle sleep's stop and the restore's.
+			"fern_stop_seconds{result=ok}":        2,
+			"fern_restore_seconds{result=ok}":     1,
+			"fern_restore_seconds{result=error}":  1,
+			"fern_queue_seconds{change=create}":   1,
+			"fern_queue_seconds{change=snapshot}": 1,
+			"fern_queue_seconds{change=exec}":     1,
+			"fern_queue_seconds{change=restore}":  2,
+			"fern_idle_sleeps_total":              1,
+		}
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Errorf("metrics mismatch (-want +got):\n%s", diff)
 		}

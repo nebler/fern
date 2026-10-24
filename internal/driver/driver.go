@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -71,6 +72,9 @@ type Driver struct {
 	node  string       // boxes are pinned here: its daemon has their disks
 	image string       // the box image; its entrypoint is fern-init
 	ready *http.Client // asks waking boxes' fern-init whether they are ready
+	// steps times the steps of a wake that succeeded: making the Sandbox
+	// run, until its pod has an address, and until its services are ready.
+	steps *prometheus.HistogramVec
 }
 
 // New returns a Driver that runs boxes from image on node, through c, whose
@@ -84,8 +88,19 @@ func New(c client.Client, node, image string) *Driver {
 		Timeout:   readyWait + 3*time.Second,
 		Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext},
 	}
-	return &Driver{c: c, node: node, image: image, ready: ready}
+	steps := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "fern_wake_step_seconds",
+		Help:    "Time a wake spent in each step: sandbox (the API call), pod (until the pod has an address) and ready (until its services are).",
+		Buckets: prometheus.ExponentialBuckets(0.005, 2, 15), // 5ms to 82s
+	}, []string{"step"})
+	return &Driver{c: c, node: node, image: image, ready: ready, steps: steps}
 }
+
+// Describe sends the descriptions of the Driver's metrics.
+func (d *Driver) Describe(ch chan<- *prometheus.Desc) { d.steps.Describe(ch) }
+
+// Collect sends the Driver's metrics.
+func (d *Driver) Collect(ch chan<- prometheus.Metric) { d.steps.Collect(ch) }
 
 // Wake starts environment env's box, waits until its services are ready and
 // returns the address of its exec server.
@@ -97,11 +112,13 @@ func New(c client.Client, node, image string) *Driver {
 // kubelet and the controller to report the pod Ready would add up to a
 // second, and polling them costs Kubernetes API calls.
 func (d *Driver) Wake(ctx context.Context, env store.Env) (string, error) {
+	start := time.Now()
 	if err := d.apply(ctx, env); err != nil {
 		return "", fmt.Errorf("wake %s: %w", env.ID, err)
 	}
+	applied := time.Now()
 	var addr string
-	var looked time.Time
+	var looked, found time.Time
 	err := poll(ctx, readyInterval, wakeTimeout, func(ctx context.Context) (bool, error) {
 		if since := time.Since(looked); (addr == "" && since >= podInterval) || since >= podCheckEvery {
 			looked = time.Now()
@@ -109,12 +126,18 @@ func (d *Driver) Wake(ctx context.Context, env store.Env) (string, error) {
 			if addr, err = d.podAddr(ctx, env.ID); err != nil {
 				return false, err
 			}
+			if addr != "" && found.IsZero() {
+				found = looked
+			}
 		}
 		return addr != "" && d.isReady(ctx, addr), nil
 	})
 	if err != nil {
 		return "", fmt.Errorf("wake %s: %w", env.ID, err)
 	}
+	d.steps.WithLabelValues("sandbox").Observe(applied.Sub(start).Seconds())
+	d.steps.WithLabelValues("pod").Observe(found.Sub(applied).Seconds())
+	d.steps.WithLabelValues("ready").Observe(time.Since(found).Seconds())
 	return addr, nil
 }
 
