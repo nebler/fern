@@ -139,6 +139,41 @@ func TestSupervisorStopKillsGroup(t *testing.T) {
 	checkGone(t, filepath.Join(dir, "child"))
 }
 
+// What a service's script leaves running when it exits is ended before the
+// service is restarted: here a server that would otherwise run twice.
+func TestSupervisorEndsLeftoversBeforeRestart(t *testing.T) {
+	s, dir := newService(t, service{Run: `sh -c 'echo $$ >> servers; exec sleep 600' & sleep 0.2; exit 1`})
+	// Past the first restart. Nothing reaps the tests' orphans, so the
+	// leftover stays a zombie in the group until its SIGKILL.
+	time.Sleep(killDelay + minBackoff + time.Second)
+	s.stop(t.Context())
+	data, err := os.ReadFile(filepath.Join(dir, "servers"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	servers := strings.Fields(string(data))
+	if len(servers) < 2 {
+		t.Fatalf("the service ran %d times, want a restart", len(servers))
+	}
+	for i := range servers[:len(servers)-1] {
+		path := filepath.Join(dir, "server"+strconv.Itoa(i))
+		if err := os.WriteFile(path, []byte(servers[i]), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		checkGone(t, path)
+	}
+}
+
+// A child that ignores SIGTERM is SIGKILLed after its script has exited.
+func TestSupervisorStopKillsLeftovers(t *testing.T) {
+	s, dir := newService(t, service{
+		Run:  `sh -c 'trap "" TERM; echo $$ > child; exec sleep 600' & until [ -s child ]; do sleep 0.01; done`,
+		Stop: `until [ -s child ]; do sleep 0.01; done`,
+	})
+	s.stop(t.Context())
+	checkGone(t, filepath.Join(dir, "child"))
+}
+
 // checkGone fails t unless the process whose pid the file at path holds
 // dies within 2s: SIGKILL is delivered asynchronously. A zombie counts as
 // dead, since nothing in the tests reaps orphans.

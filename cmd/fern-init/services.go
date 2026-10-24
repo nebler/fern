@@ -145,20 +145,52 @@ func runService(ctx context.Context, svc service, dir string, env []string) erro
 	// before Run returns: the timer can fire in between, and os/exec can
 	// still call Cancel if ctx is done at that moment. Harm would also need
 	// the kernel to hand out the same pid again within that window.
-	var escalate *time.Timer
+	var (
+		escalate *time.Timer
+		kill     time.Time // when the group gets SIGKILL
+	)
 	cmd.Cancel = func() error {
 		pgid := cmd.Process.Pid
+		kill = time.Now().Add(killDelay)
 		escalate = time.AfterFunc(killDelay, func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
 		return syscall.Kill(-pgid, syscall.SIGTERM)
 	}
 	err := cmd.Run()
 	// Run reports Cancel's error, so it returns only after Cancel has:
-	// escalate needs no lock.
+	// escalate and kill need no lock.
 	if escalate != nil {
 		escalate.Stop()
+	} else {
+		kill = time.Now().Add(killDelay)
+	}
+	// What the script started can outlive it, such as a database it put in
+	// the background. Left running, it would hold the service's data while
+	// a restart starts another copy, or outlive a stop.
+	if cmd.Process != nil {
+		endGroup(cmd.Process.Pid, kill)
 	}
 	return err
 }
+
+// endGroup ends what is left of process group pgid, whose leader has
+// exited: SIGTERM, then SIGKILL if anything is still there at kill. A
+// group's id isn't handed out again while a process is in it, so this
+// signals only the service's processes, except in the moment the group
+// empties.
+func endGroup(pgid int, kill time.Time) {
+	if syscall.Kill(-pgid, syscall.SIGTERM) != nil {
+		return // the group is empty
+	}
+	for ; time.Now().Before(kill); time.Sleep(groupPoll) {
+		if syscall.Kill(-pgid, 0) != nil {
+			return
+		}
+	}
+	_ = syscall.Kill(-pgid, syscall.SIGKILL)
+}
+
+// groupPoll is how often endGroup looks whether a group has emptied.
+const groupPoll = 50 * time.Millisecond
 
 // shellWaitDelay bounds how long a script's output is waited for once it
 // has been killed: something outside its group can still hold it.
