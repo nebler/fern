@@ -273,3 +273,23 @@ Same lab. Commands: `lab/test-store.sh`, `lab/go.sh test -race ./...`, `lab/chec
 - **Security review: a box could run code in T3's pod.** T3 runs git in each worktree, and git follows the worktree's `.git` file. A box could point it at a folder of its own whose config runs a command (`core.fsmonitor`). The `.git` file is now read-only in the box. Also fixed: the CSI plugin mounted folders for any pod, `fern-claude` ran Claude in T3's pod when the daemon didn't answer, and boxes could reach anything private.
 - **Go review: two bugs when a caller gives up.** An exec cancelled during a wake stayed counted, so that box never slept; a cancelled seeded create left the actor reading a finished request's body. A caller now waits for a change the actor has started.
 - **k3s in the lab exits when its datastore is slow** (under an image build or pgbench): "Transaction commit failed". The lab container now restarts it. One snapshot under load took 44 s around such a stall.
+
+## Speed and memory pass, 2026-10-24
+
+Same lab, with `deploy/k3s-config.yaml` applied (k3s restarted). Commands: `lab/go.sh test -race ./...`, `lab/check.sh box stream concurrency restore idle many limits t3`. All pass.
+
+| Measurement | Result |
+|---|---|
+| wake, 30 times (nearest-rank) | p50 620–670 ms, p95 717–722 ms |
+| a wake's steps (`fern_wake_step_seconds`, mean) | Sandbox call 6 ms, pod until it has an address 590–623 ms, Postgres ready 21–38 ms |
+| sleep, 30 times | p50 1,007 ms; the times fall 200 ms apart (607, 807, 1,007 ms): the driver looks for the pod every 200 ms |
+| `sh -c 'sleep 600 & echo ready'` | at once; was 2.0 s (the leftover held the output pipes) |
+| SIGTERM to a command that isn't reading 256 KiB of stdin | at once; was never, until the command exited |
+| a failing ready check printing 64 MiB | fern-init stays small; was 459 MiB |
+| idle box, sample Postgres (cgroup) | runc 27 MB, gVisor 72 MB; `claude` started in it adds about 110 MB |
+| ten boxes awake | the lab container uses 1.25 GiB |
+| allocatable memory | 6.2 of 7.65 GiB: 1 GiB reserved for k3s and the system, eviction at 500 MiB |
+
+**Found on the way:**
+- **The 25–41 s wakes in the metrics were `check.sh many` during a disk stall:** Docker Desktop's disk held up k3s's datastore and containerd (10 s to create a pod sandbox, 10 s more for its container). Healthy wakes under the same load test take 0.6–1.5 s. Fern has no timer of that length.
+- **T3 kept Claude running for 30 idle minutes,** so a short turn kept its box (and Claude's 200 MB and more) awake about 35 minutes. Fern's T3 image now releases idle sessions after 5 minutes.
