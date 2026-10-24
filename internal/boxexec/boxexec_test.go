@@ -203,8 +203,8 @@ func TestRunCancelKillsBackground(t *testing.T) {
 		t.Fatalf("Run(%q) after cancel succeeded, want an error", req.Argv)
 	}
 	_ = conn.CloseNow() // the client goes away
-	// The kill on cancel ends it at once; the one after the command exits
-	// would only come outputDelay (2s) later.
+	// The kill on cancel ends it at once; without it the command would wait
+	// for the background process.
 	start := time.Now()
 	waitGone(t, url, "bg.pid")
 	if took := time.Since(start); took >= time.Second {
@@ -363,6 +363,51 @@ func TestRunSignal(t *testing.T) {
 			code, err := boxexec.Run(ctx, conn, req, boxexec.Streams{Stdout: ready, Stderr: io.Discard, Signal: sigs})
 			if err != nil || code != 7 || !strings.Contains(stdout.String(), "stopping") {
 				t.Errorf("Run after SIGTERM = %d, %v, stdout %q; want 7 and the trap's output", code, err, stdout.String())
+			}
+		})
+	}
+}
+
+// A command that leaves a process behind ends when it exits, not when the
+// process lets go of its output: agents start servers in the background.
+func TestRunBackgroundDoesNotDelay(t *testing.T) {
+	for _, target := range targets(t) {
+		t.Run(target.name, func(t *testing.T) {
+			req := boxexec.Request{Argv: []string{"sh", "-c", "sleep 600 & echo ready"}}
+			start := time.Now()
+			got := run(t, target.url, req, nil)
+			if took := time.Since(start); got.code != 0 || got.stdout != "ready\n" || took >= time.Second {
+				t.Errorf("Run(%q) = %d, %q after %v, want 0, %q at once", req.Argv, got.code, got.stdout, took, "ready\n")
+			}
+		})
+	}
+}
+
+// A signal reaches a command that isn't reading the stdin sent before it.
+func TestRunSignalBehindUnreadStdin(t *testing.T) {
+	for _, target := range targets(t) {
+		t.Run(target.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			conn, err := boxexec.Dial(ctx, target.url, token, nil)
+			if err != nil {
+				t.Fatalf("Dial() error: %v", err)
+			}
+			defer func() { _ = conn.CloseNow() }()
+			sigs := make(chan os.Signal, 1)
+			ready := writerFunc(func(p []byte) (int, error) {
+				if bytes.Contains(p, []byte("ready")) {
+					sigs <- syscall.SIGTERM
+				}
+				return len(p), nil
+			})
+			// More than a pipe holds, so a write of it blocks.
+			stdin := bytes.NewReader(make([]byte, 256<<10))
+			req := boxexec.Request{Argv: []string{"sh", "-c", `trap 'exit 7' TERM; echo ready; while :; do sleep 0.05; done`}}
+			start := time.Now()
+			code, err := boxexec.Run(ctx, conn, req, boxexec.Streams{Stdin: stdin, Stdout: ready, Stderr: io.Discard, Signal: sigs})
+			if took := time.Since(start); err != nil || code != 7 || took >= 5*time.Second {
+				t.Errorf("Run after SIGTERM = %d, %v after %v, want 7 at once", code, err, took)
 			}
 		})
 	}

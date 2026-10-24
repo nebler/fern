@@ -1,6 +1,7 @@
 package boxexec
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/binary"
@@ -23,8 +24,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// outputDelay is how long a command's output may go on after it exits:
-// background processes it left behind can hold its pipes or terminal open.
+// outputDelay is how long a command's output may go on after it exits: a
+// process it moved out of its group can hold its pipes or terminal open.
 const outputDelay = 2 * time.Second
 
 // exitNotStarted is the exit code of a command that couldn't start, as a
@@ -76,16 +77,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The reader stops when the connection closes. A client that goes away
-	// cancels the command.
-	var reader sync.WaitGroup
-	reader.Go(func() {
-		readInput(ctx, conn, p)
+	// cancels the command. Stdin has a writer of its own, so that a command
+	// that stops reading it doesn't hold up the signals and the close behind
+	// it.
+	stdin := make(chan []byte, stdinQueue)
+	var streams sync.WaitGroup
+	streams.Go(func() { writeStdin(p, stdin) })
+	streams.Go(func() {
+		readInput(ctx, conn, p, stdin)
+		close(stdin)
 		cancel()
 	})
 	code := p.wait(s.log)
 	finish(r.Context(), conn, code)
-	reader.Wait()
+	streams.Wait()
 }
+
+// stdinQueue is how many stdin frames, of up to frameData bytes each, wait
+// for a command that isn't reading them before the client is held up.
+const stdinQueue = 16
 
 // Accept upgrades r to an exec connection, which reads larger messages than
 // the WebSocket library's default.
@@ -100,11 +110,14 @@ func Accept(w http.ResponseWriter, r *http.Request) (*websocket.Conn, error) {
 
 // process is a running command.
 type process struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	tty    *os.File // the terminal's controlling side; nil without a terminal
-	output sync.WaitGroup
-	exited atomic.Bool // the command has been reaped: don't signal its group
+	cmd   *exec.Cmd
+	stdin io.WriteCloser
+	tty   *os.File // the terminal's controlling side; nil without a terminal
+	// outputs are what the command's output is read from: the terminal, or
+	// the pipes of stdout and stderr.
+	outputs []*os.File
+	output  sync.WaitGroup
+	exited  atomic.Bool // the command has been reaped: don't signal its group
 }
 
 func (s *Server) start(ctx context.Context, conn *websocket.Conn, req Request) (*process, error) {
@@ -125,26 +138,74 @@ func (s *Server) start(ctx context.Context, conn *websocket.Conn, req Request) (
 	// the command started keeps writing to the workspace after the client
 	// has gone.
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
-	cmd.WaitDelay = outputDelay
 	p := &process{cmd: cmd}
 	if !req.TTY {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Stdout, cmd.Stderr = frames(ctx, conn, frameStdout), frames(ctx, conn, frameStderr)
-		var err error
-		if p.stdin, err = cmd.StdinPipe(); err != nil {
+		if err := p.startPipes(cmd); err != nil {
 			return nil, err
 		}
-		return p, cmd.Start()
+		p.copyOutput(ctx, conn, frameStdout, frameStderr)
+		return p, nil
 	}
 	tty, err := startTTY(cmd, req.Size)
 	if err != nil {
 		return nil, err
 	}
-	p.tty, p.stdin = tty, tty
-	// Reading the terminal ends with EIO once the command and its children
-	// have closed it, or at the deadline wait sets.
-	p.output.Go(func() { _, _ = io.Copy(frames(ctx, conn, frameStdout), tty) })
+	p.tty, p.stdin, p.outputs = tty, tty, []*os.File{tty}
+	p.copyOutput(ctx, conn, frameStdout)
 	return p, nil
+}
+
+// startPipes starts cmd in a process group of its own, with pipes for its
+// standard streams.
+//
+// The output pipes are the server's, not os/exec's: Wait would wait for
+// os/exec's to be drained, and a background process the command left behind
+// holds them open, so every such command would take outputDelay to end.
+// With its own, the server can kill the group as soon as the command exits,
+// which closes them.
+func (p *process) startPipes(cmd *exec.Cmd) error {
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	var writers []*os.File
+	defer func() {
+		for _, w := range writers {
+			_ = w.Close() // the command has its own copies
+		}
+	}()
+	for range 2 {
+		r, w, err := os.Pipe()
+		if err != nil {
+			p.closeOutputs()
+			return err
+		}
+		p.outputs, writers = append(p.outputs, r), append(writers, w)
+	}
+	cmd.Stdout, cmd.Stderr = writers[0], writers[1]
+	var err error
+	if p.stdin, err = cmd.StdinPipe(); err != nil {
+		p.closeOutputs()
+		return err
+	}
+	// A failed Start closes the stdin pipe.
+	if err := cmd.Start(); err != nil {
+		p.closeOutputs()
+		return err
+	}
+	return nil
+}
+
+// copyOutput sends what comes out of each of the outputs as frames of the
+// matching kind. Each copy ends once the command and its children have
+// closed their end (EOF; EIO for a terminal), or at the deadline wait sets.
+func (p *process) copyOutput(ctx context.Context, conn *websocket.Conn, kinds ...byte) {
+	for i, out := range p.outputs {
+		p.output.Go(func() { _, _ = io.Copy(frames(ctx, conn, kinds[i]), out) })
+	}
+}
+
+func (p *process) closeOutputs() {
+	for _, out := range p.outputs {
+		_ = out.Close()
+	}
 }
 
 // startTTY starts cmd on a new terminal of the given size and returns the
@@ -214,7 +275,7 @@ func setSize(f *os.File, s Size) error {
 	return ioctlErr
 }
 
-// wait waits for the command and its output, closes the terminal, and
+// wait waits for the command and its output, closes the outputs, and
 // returns the command's exit code.
 func (p *process) wait(log *slog.Logger) int {
 	err := p.cmd.Wait()
@@ -231,14 +292,15 @@ func (p *process) wait(log *slog.Logger) int {
 	// new process would have to get it and make itself a group leader in the
 	// moment since the reap to be hit; otherwise the kill finds no group.
 	_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL) // ESRCH: nothing was left
-	if p.tty != nil {
-		// cmd.WaitDelay only bounds pipes. A process the kill can't reach can
-		// hold the terminal open, so the output gets the same time. Closing
-		// the terminal also ends a write of stdin the command never read.
-		_ = p.tty.SetReadDeadline(time.Now().Add(outputDelay))
-		p.output.Wait()
-		_ = p.tty.Close()
+	// The kill closes what the group held open. A process it can't reach can
+	// hold an output open; it gets outputDelay. Closing the terminal also ends
+	// a write of stdin the command never read (Wait closes the stdin pipe).
+	deadline := time.Now().Add(outputDelay)
+	for _, out := range p.outputs {
+		_ = out.SetReadDeadline(deadline)
 	}
+	p.output.Wait()
+	p.closeOutputs()
 	return exitCode(err, log)
 }
 
@@ -250,10 +312,11 @@ func finish(ctx context.Context, conn *websocket.Conn, code int) {
 	_ = conn.CloseNow()
 }
 
-// readInput applies what the client sends (stdin, its end, terminal sizes,
-// signals) until the connection closes. A command that stops reading a full
-// stdin pipe holds up the frames behind it until it exits.
-func readInput(ctx context.Context, conn *websocket.Conn, p *process) {
+// readInput applies what the client sends (terminal sizes, signals) until
+// the connection closes, and queues stdin and its end (nil) for writeStdin.
+// Only a full queue holds it up: then the client waits for the command to
+// read.
+func readInput(ctx context.Context, conn *websocket.Conn, p *process, stdin chan<- []byte) {
 	r := &messageReader{conn: conn}
 	for {
 		_, data, err := r.read(ctx)
@@ -265,10 +328,13 @@ func readInput(ctx context.Context, conn *websocket.Conn, p *process) {
 		}
 		switch data[0] {
 		case frameStdin:
-			_, _ = p.stdin.Write(data[1:]) // the command may have stopped reading
+			if len(data) > 1 && !queue(ctx, stdin, bytes.Clone(data[1:])) {
+				return
+			}
 		case frameStdinEOF:
-			if p.tty == nil { // a terminal has no EOF of its own; keep it open
-				_ = p.stdin.Close()
+			// A terminal has no EOF of its own; keep it open.
+			if p.tty == nil && !queue(ctx, stdin, nil) {
+				return
 			}
 		case frameResize:
 			if p.tty != nil && len(data) == 5 {
@@ -285,10 +351,38 @@ func readInput(ctx context.Context, conn *websocket.Conn, p *process) {
 	}
 }
 
+// queue puts data on stdin, unless ctx ends first.
+func queue(ctx context.Context, stdin chan<- []byte, data []byte) bool {
+	select {
+	case stdin <- data:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// writeStdin writes what readInput queues to the command's stdin, and closes
+// it at nil. After a failed write (the command closed its stdin or exited)
+// it drops the rest, so readInput is never held up.
+func writeStdin(p *process, stdin <-chan []byte) {
+	failed := false
+	for data := range stdin {
+		switch {
+		case failed:
+		case data == nil:
+			_ = p.stdin.Close()
+			failed = true
+		default:
+			_, err := p.stdin.Write(data)
+			failed = err != nil
+		}
+	}
+}
+
 func exitCode(err error, log *slog.Logger) int {
 	var exitErr *exec.ExitError
 	switch {
-	case err == nil || errors.Is(err, exec.ErrWaitDelay):
+	case err == nil:
 		return 0
 	case errors.As(err, &exitErr):
 		if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
