@@ -10,6 +10,8 @@
 #                stdin, signals, cancellation, long idle commands
 #   concurrency  parallel execs on an awake and on a sleeping environment
 #   restore      a restore while an exec is open; a missing snapshot
+#   pgload       Postgres recovers, consistent, from every one of 60 snapshots
+#                taken under pgbench's write load
 #   idle         an idle box goes to sleep, with the daemon's idle times
 #                shortened for the section; a running command keeps it awake
 #   daemon       the daemon restarts while a box is awake, and finishes an rm
@@ -17,11 +19,13 @@
 #   node         the whole node (k3s) restarts
 #   many         ten environments woken at once
 #   limits       what a box can't do: gain privileges, use more than its CPU
-#                and PIDs, reach another box
+#                and PIDs, reach another box or anything private; and another
+#                pod can't mount an environment
 #   paths        workspaces at a path, as T3's worktrees: adopt, which,
 #                exec --here, snapshot replace and delete
 #   claude       Claude Code in a box: network, stream-json, its terminal UI
-#   gvisor       a box under gVisor, which it installs in the lab node
+#   gvisor       a box under gVisor, which it installs in the lab node, and
+#                pgload's check there with 10 snapshots
 #   t3           T3's server: the checkpoint hook's commands on a worktree it
 #                made, and that worktree's box with git, Claude's folder and
 #                login. Needs lab/build.sh t3; not in the default run.
@@ -248,6 +252,43 @@ restore() {
   check "and leaves the box running" running "$(state $ENV)"
 }
 
+# pg_load ENV N takes N snapshots of ENV's Postgres, one a second, while
+# pgbench writes to it, then restores each and checks that Postgres starts,
+# pg_amcheck finds no corruption, and every transaction is whole: pgbench
+# moves each amount between an account, a teller and a branch, so their
+# balances sum to the same.
+pg_load() {
+  local env=$1 n=$2 ok=0
+  fern exec "$env" -- pgbench -iq -s 5 >/dev/null 2>&1
+  fern exec "$env" -- pgbench -n -c 4 -T $((n + 10)) >/dev/null 2>&1 &
+  local load=$!
+  sleep 2
+  for i in $(seq "$n"); do
+    fern snapshot "$env" "p$i" | took >>"$TMP/pg-snap-$env"
+    sleep 1
+  done
+  wait $load
+  local whole="select (select sum(abalance) from pgbench_accounts) = (select sum(bbalance) from pgbench_branches)
+    and (select sum(bbalance) from pgbench_branches) = (select sum(tbalance) from pgbench_tellers)"
+  for i in $(seq "$n"); do
+    fern restore "$env" "p$i" >/dev/null
+    if [ "$(sql "$env" "$whole" 2>/dev/null)" = t ] &&
+      fern exec "$env" -- pg_amcheck --install-missing --heapallindexed postgres >/dev/null 2>&1; then
+      ok=$((ok + 1))
+    else
+      note "snapshot p$i: Postgres isn't consistent"
+    fi
+  done
+  note "snapshot under load, ms: $(stats <"$TMP/pg-snap-$env")"
+  check "Postgres is whole and uncorrupted after each of $n restores" "$n" "$ok"
+}
+
+pgload() {
+  echo "== Postgres recovers from snapshots taken under load"
+  fresh $ENV
+  pg_load $ENV 60
+}
+
 # daemon_args sets the daemon's arguments, a JSON list, and waits for it.
 daemon_args() {
   k -n fern-system patch ds fern --type=json \
@@ -345,6 +386,25 @@ limits() {
   check "a box can't reach another box" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:7070/")"
   check "the daemon can" ok "$(fern exec ${ENV}2 -- echo ok)"
   fern rm ${ENV}2
+  ip=$(k -n fern-system get pod -l app.kubernetes.io/name=fern -o jsonpath='{.items[0].status.podIP}')
+  check "a box can't reach the daemon's metrics" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:9090/metrics")"
+  check "or the Kubernetes API" no "$(succeeds fern exec $ENV -- curl -sk -m 3 https://10.43.0.1/)"
+  check "but reaches the internet" yes "$(succeeds fern exec $ENV -- curl -s -m 10 -o /dev/null https://api.anthropic.com/)"
+  # A pod that isn't the environment's box can't mount its folders.
+  k apply -f - >/dev/null <<YAML
+apiVersion: v1
+kind: Pod
+metadata: {name: fern-thief, namespace: default, labels: {app.kubernetes.io/part-of: fern}}
+spec:
+  containers:
+    - {name: c, image: fern-box:dev, imagePullPolicy: Never, command: [sleep, "60"], volumeMounts: [{name: w, mountPath: /w}]}
+  volumes: [{name: w, csi: {driver: fern.dev, volumeAttributes: {env: $ENV, folder: workspace}}}]
+YAML
+  sleep 10
+  local refused=no
+  k get events -n default --field-selector involvedObject.name=fern-thief | grep -q 'may not mount' && refused=yes
+  check "another pod can't mount an environment's workspace" yes "$refused"
+  k delete pod fern-thief --now >/dev/null
 }
 
 paths() {
@@ -459,6 +519,7 @@ YAML
   done
   check "5 restores bring the table back" 5 "$(grep -cx 3 "$TMP/gvisor-users")"
   note "wake after a restore, ms: $(stats <"$TMP/gvisor-wake")"
+  pg_load gv 10
   fern rm gv
 }
 
@@ -492,6 +553,10 @@ t3() {
   in_t3 "cd $W && fern exec --here -- sh -c 'echo kept > $C/note'"
   check "git works in the box" init "$(in_t3 "cd $W && fern exec --here -- git log --format=%s -1")"
   check "and can't change the main repository" no "$(succeeds in_t3 "cd $W && fern exec --here -- touch $R/.git/x")"
+  check "or point the worktree's .git elsewhere" no \
+    "$(succeeds in_t3 "cd $W && fern exec --here -- sh -c 'echo gitdir: /tmp > .git'")"
+  check "claude in a worktree without an environment doesn't run" no \
+    "$(succeeds in_t3 "mkdir -p /var/lib/fern/worktrees/t3check/none && cd /var/lib/fern/worktrees/t3check/none && claude --version")"
   in_t3 "echo v1 > $W/a.txt && echo junk > $W/ignored.bin"
   note "checkpoint snapshot: $(in_t3 'fern snapshot --replace t3c c1' | took) ms"
   in_t3 "echo v2 > $W/a.txt"
@@ -521,7 +586,7 @@ t3() {
   in_t3 "fern rm t3c && rm -rf $R /var/lib/fern/worktrees/t3check"
 }
 
-all=(slice box disk stream concurrency restore idle daemon node many limits paths claude gvisor)
+all=(slice box disk stream concurrency restore pgload idle daemon node many limits paths claude gvisor)
 [ $# -gt 0 ] || set -- "${all[@]}"
 for s in "$@"; do
   case " ${all[*]} t3 " in
