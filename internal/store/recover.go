@@ -45,7 +45,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 // Reconcile brings the disk and the index together after a crash: it finishes
 // the creates and deletes that stopped half-way, removes the leftovers of
 // restores and adopts, brings the snapshot rows in line with the snapshots on
-// disk, and returns the environment directories it keeps
+// disk, prunes old pre-restore snapshots, and returns the environment directories it keeps
 // because the index has lost them.
 func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 	dirs, err := os.ReadDir(filepath.Join(s.root, "envs"))
@@ -84,6 +84,9 @@ func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 				return lost, fmt.Errorf("reconcile %s: %w", id, err)
 			}
 			if err := s.reconcileSnapshots(ctx, id); err != nil {
+				return lost, fmt.Errorf("reconcile %s: %w", id, err)
+			}
+			if err := s.prunePreRestores(ctx, id, ""); err != nil {
 				return lost, fmt.Errorf("reconcile %s: %w", id, err)
 			}
 		}

@@ -99,6 +99,13 @@ func CheckEnvID(id string) error {
 	return nil
 }
 
+func checkSnapID(id string) error {
+	if !snapIDPattern.MatchString(id) {
+		return fmt.Errorf("snapshot %q: %w", id, ErrInvalidID)
+	}
+	return nil
+}
+
 // Store is a btrfs pool of environments.
 type Store struct {
 	root string

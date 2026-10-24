@@ -16,8 +16,8 @@ import (
 // snapID. Taking a snapshot that exists changes nothing, so callers can
 // retry; DeleteSnapshot first to take it again.
 func (s *Store) Snapshot(ctx context.Context, id, snapID string) error {
-	if !snapIDPattern.MatchString(snapID) {
-		return fmt.Errorf("snapshot %q: %w", snapID, ErrInvalidID)
+	if err := checkSnapID(snapID); err != nil {
+		return err
 	}
 	env, err := s.Get(ctx, id)
 	if err != nil {
@@ -60,8 +60,8 @@ func (s *Store) snapshot(ctx context.Context, env Env, snapID string) error {
 // that doesn't exist is not an error. The subvolume goes first, so a
 // snapshot on disk without a row is always one that was being taken.
 func (s *Store) DeleteSnapshot(ctx context.Context, id, snapID string) error {
-	if !snapIDPattern.MatchString(snapID) {
-		return fmt.Errorf("snapshot %q: %w", snapID, ErrInvalidID)
+	if err := checkSnapID(snapID); err != nil {
+		return err
 	}
 	if _, err := s.Get(ctx, id); err != nil {
 		return err
@@ -106,13 +106,14 @@ func (s *Store) Snapshots(ctx context.Context, id string) ([]Snapshot, error) {
 }
 
 // Restore replaces environment id's workspace with a writable copy of
-// snapshot snapID, and keeps the workspace it replaces for a day as snapshot
-// pre-restore-<time>, so a restore can be undone. The environment's box must
+// snapshot snapID, and keeps the workspace it replaces as snapshot
+// pre-restore-<time>, so a restore can be undone. Those over a day old go at
+// the next restore or Reconcile. The environment's box must
 // be stopped. After a crash at any step, the workspace is the old one or the
 // new one, and a replaced workspace is kept.
 func (s *Store) Restore(ctx context.Context, id, snapID string) error {
-	if !snapIDPattern.MatchString(snapID) {
-		return fmt.Errorf("snapshot %q: %w", snapID, ErrInvalidID)
+	if err := checkSnapID(snapID); err != nil {
+		return err
 	}
 	env, err := s.Get(ctx, id)
 	if err != nil {
