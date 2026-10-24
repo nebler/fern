@@ -201,6 +201,8 @@ CPU usage and running services are ignored. An explicit `hold` keeps it awake.
 
 Built: the actor's timer, with both clocks touched by every exec (`--idle-agent`, `--idle-human`; 0 turns it off). Terminals, previews and `hold` are planned.
 
+**T3 keeps a thread's Claude running between turns,** in one exec, and ends it once the session has been idle (no turn, tool call, approval or background task). Unpatched T3 waits 30 minutes, so a box would stay awake about 35 minutes after a short turn, holding Claude's memory (200 MB and up). Fern's T3 image waits 5 minutes (`images/t3/fern-sessions.patch`; `T3CODE_PROVIDER_IDLE_TIMEOUT_MS` changes it): Claude exits 5 minutes after the last turn, and the box sleeps 5 minutes later, or 20 minutes after Claude started if that is later. The next turn wakes the box and T3 resumes the same conversation.
+
 ---
 
 ## 7. Main flows
@@ -214,7 +216,7 @@ Built: the actor's timer, with both clocks touched by every exec (`--idle-agent`
 ### 7.2 A turn
 1. T3 → `POST /envs/t3-8f2c/exec {cmd: "claude …", pty: true}`.
 2. Asleep → the front door holds the request → the actor → the driver starts a session → `fern-init` runs `.agents/resume`, starts services → ready.
-3. The exec streams until the turn ends.
+3. The exec streams across turns: T3 keeps Claude running and sends it each turn, and ends it when the session is idle (§6.3).
 4. T3 saves git checkpoint `7f3a` → the hook → `POST /snapshots {id: "7f3a"}` → `btrfs subvolume snapshot -r` → ok. **A failed snapshot doesn't fail the turn** (copied from Delta, whose hooks never break the agent): the hook logs it and T3 keeps its git checkpoint. That turn then has code but no disk, and §7.3 refuses to revert to it.
 
 ### 7.3 Revert ("Edit from here → Revert files too")

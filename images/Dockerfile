@@ -59,11 +59,12 @@ RUN git init -q && git fetch -q --depth 1 https://github.com/pingdotgg/t3code.gi
  && git checkout -q FETCH_HEAD && rm -rf .git \
  && npm pkg delete scripts.prepare && corepack enable
 
-# The server's bundle with the hook (images/t3/fern-checkpoints.patch), whose
-# tests run first.
+# The server's bundle with Fern's patches, the hook's tests run first:
+# fern-checkpoints.patch, the hook; fern-sessions.patch, idle provider
+# sessions released after 5 minutes, so their boxes can sleep.
 FROM t3-src AS t3-build
-COPY images/t3/fern-checkpoints.patch /tmp/
-RUN git apply /tmp/fern-checkpoints.patch
+COPY images/t3/*.patch /tmp/
+RUN git apply /tmp/fern-checkpoints.patch /tmp/fern-sessions.patch
 RUN --mount=type=cache,id=fern-t3-pnpm,target=/pnpm \
     pnpm install --frozen-lockfile --store-dir /pnpm/store --filter "t3..."
 WORKDIR /t3/apps/server

@@ -561,6 +561,8 @@ t3() {
   check "T3 runs as uid 1000" 1000 "$(in_t3 'id -u')"
   check "T3 reaches the daemon's socket" yes "$(succeeds in_t3 'fern ls')"
   check "claude outside a workspace is the local one" "$CLAUDE" "$(in_t3 'cd / && claude --version')"
+  check "T3 releases idle provider sessions after 5 minutes (fern-sessions.patch)" 1 \
+    "$(in_t3 'grep -l T3CODE_PROVIDER_IDLE_TIMEOUT_MS /opt/t3/apps/server/dist/*.mjs | wc -l' || true)"
   # What the checkpoint hook (images/t3/fern-checkpoints.patch) does with a
   # worktree T3 made: adopt it at the first checkpoint, then snapshot,
   # replace and restore.
