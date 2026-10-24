@@ -26,7 +26,7 @@ The engine is everything Fern runs on a node:
 - **What:** Docker Desktop (you start it), one privileged `rancher/k3s` container, a btrfs image file loop-mounted inside it at `/var/lib/fern`. A second k3s container joins as node 2 when needed.
 - **Go:** builds and unit tests run in a `golang` container with the repo mounted.
 - **Known to work** (earlier spikes on this Mac): btrfs snapshots and swaps, Postgres recovery, git worktrees in subvolumes, k3s pods restarting with their data (kernel 6.10 linuxkit, btrfs-progs 6.6).
-- **Unknown:** gVisor (`runsc`) inside Docker Desktop's k3s. Try it in week 0; if it fails, gVisor waits for the VPS.
+- **gVisor** (`runsc`) works inside Docker Desktop's k3s: `lab/up.sh` installs it, and every box runs under it, as on the VPS.
 - **Use it for correctness, not speed:** the virtual disk makes some snapshots slow (spike 01: 1 in 10 took 200 ms–1 s). Only VPS numbers go into the demo.
 - **Cleanup:** delete the lab containers and the image file; nothing else is touched.
 
@@ -54,7 +54,7 @@ With `FERN_HOST=HOST`, the lab's scripts (`check.sh`, `fern`, `claude-login.sh`,
 
 ### 1.3 Fast inner loop
 - **Unit tests** run anywhere (`go test -race ./...`), using the fake driver. That works on the Mac inside a Go container, or on the VM.
-- **Integration tests** run against k3s, in the local lab first and on the VM before each tag: `lab/build.sh` builds the images and restarts the pods, then `lab/check.sh` runs the checks by section (E0 is `box` and `gvisor`, E1 is `disk`, E4 is `box`).
+- **Integration tests** run against k3s, in the local lab first and on the VM before each tag: `lab/build.sh` builds the images and restarts the pods, then `lab/check.sh` runs the checks by section (E0 is `box`, E1 is `disk`, E4 is `box`).
 - **Rules:**
   - Everything Fern creates is labelled `app.kubernetes.io/part-of=fern`, so cleanup is `helm uninstall fern` plus deleting the pool.
   - No credentials in images or snapshots. Agent logins are done by you on the VM and mounted from outside `live/`.

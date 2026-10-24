@@ -54,11 +54,25 @@ fern() { lab/fern "$@"; }
 # in_t3 runs a shell command in T3's server container, as T3's user.
 in_t3() { k -n fern-system exec -i deploy/t3 -c t3 -- sh -c "$1"; }
 
-# import_images copies images from Docker into the node's containerd.
+# import_images copies images from Docker into the node's containerd,
+# skipping those it has: the node keeps the Docker ID of each it imported,
+# since a VPS is far away for gigabytes.
 import_images() {
-  local arch
+  local arch image id changed=() ids=()
   case $(on_node uname -m </dev/null) in aarch64) arch=arm64 ;; *) arch=amd64 ;; esac
-  docker save --platform "linux/$arch" "$@" | on_node ctr -n k8s.io images import - >/dev/null
+  for image in "$@"; do
+    id=$(docker image inspect -f '{{.Id}}' "$image")
+    if [ "$(on_node sh -c "crictl inspecti -q docker.io/library/$image >/dev/null 2>&1 &&
+      cat /var/lib/fern-images/${image/:/-}" </dev/null 2>/dev/null)" != "$id" ]; then
+      changed+=("$image")
+      ids+=("$id")
+    fi
+  done
+  [ ${#changed[@]} -gt 0 ] || return 0
+  docker save --platform "linux/$arch" "${changed[@]}" | on_node ctr -n k8s.io images import - >/dev/null
+  for i in "${!changed[@]}"; do
+    echo "${ids[$i]}" | on_node sh -c "mkdir -p /var/lib/fern-images && cat >/var/lib/fern-images/${changed[$i]/:/-}"
+  done
 }
 
 # tar_dir writes a tar of a directory to stdout, without the extended

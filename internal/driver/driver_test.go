@@ -21,6 +21,11 @@ import (
 
 func newDriver(t *testing.T, objs ...client.Object) (*driver.Driver, client.Client) {
 	t.Helper()
+	return newDriverWithClass(t, "", objs...)
+}
+
+func newDriverWithClass(t *testing.T, class string, objs ...client.Object) (*driver.Driver, client.Client) {
+	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
@@ -29,7 +34,7 @@ func newDriver(t *testing.T, objs ...client.Object) (*driver.Driver, client.Clie
 		t.Fatal(err)
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-	return driver.New(c, "node-1", "fern-box:test"), c
+	return driver.New(c, "node-1", "fern-box:test", class), c
 }
 
 // wake runs Wake until it has set the Sandbox up; with no pod to wait for, it
@@ -130,6 +135,35 @@ func TestWakeUpdatesAnOldBox(t *testing.T) {
 	}
 	if rc := sb.Spec.PodTemplate.Spec.RuntimeClassName; rc == nil || *rc != "gvisor" {
 		t.Errorf("after wake: runtime class %v, want gvisor kept", rc)
+	}
+}
+
+func TestWakeRuntimeClass(t *testing.T) {
+	kata := &sandboxv1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "set", Namespace: "fern-boxes"},
+		Spec: sandboxv1.SandboxSpec{SandboxBlueprint: sandboxv1.SandboxBlueprint{PodTemplate: sandboxv1.PodTemplate{Spec: corev1.PodSpec{
+			RuntimeClassName: new("kata"),
+			Containers:       []corev1.Container{{Name: "box", Image: "fern-box:old"}},
+		}}}},
+	}
+	for _, tt := range []struct {
+		name, class, env string
+		want             *string
+	}{
+		{name: "new box", class: "gvisor", env: "demo", want: new("gvisor")},
+		{name: "new box, node's default", class: "", env: "demo", want: nil},
+		{name: "box whose class was set by hand", class: "gvisor", env: "set", want: new("gvisor")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d, c := newDriverWithClass(t, tt.class, kata.DeepCopy())
+			e := env
+			e.ID = tt.env
+			wake(t, d, e)
+			got := sandbox(t, c, tt.env).Spec.PodTemplate.Spec.RuntimeClassName
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("runtime class mismatch (-want +got):\n%s", diff)
+			}
+		})
 	}
 }
 

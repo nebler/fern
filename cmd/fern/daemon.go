@@ -59,6 +59,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	flags.DurationVar(&idle.Agent, "idle-agent", 5*time.Minute, "sleep this long after a box's last command ended (0: never)")
 	flags.DurationVar(&idle.Human, "idle-human", 20*time.Minute, "… and this long after it started (0: never)")
 	metricsAddr := flags.String("metrics-addr", ":9090", "serve Prometheus metrics at /metrics on this address")
+	runtimeClass := flags.String("runtime-class", "", "run boxes under this RuntimeClass, such as gvisor (\"\": the node's default)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -99,7 +100,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
-	drv := driver.New(kube, node, boxImage)
+	drv := driver.New(kube, node, boxImage, *runtimeClass)
 	envs := actor.New(st, drv, idle, log)
 	httpSrv := &http.Server{
 		Handler:           api.NewServer(st, drv, envs, log).Handler(),

@@ -68,18 +68,20 @@ const (
 
 // Driver manages Sandboxes through the Kubernetes API.
 type Driver struct {
-	c     client.Client
-	node  string       // boxes are pinned here: its daemon has their disks
-	image string       // the box image; its entrypoint is fern-init
-	ready *http.Client // asks waking boxes' fern-init whether they are ready
+	c            client.Client
+	node         string       // boxes are pinned here: its daemon has their disks
+	image        string       // the box image; its entrypoint is fern-init
+	runtimeClass string       // the boxes' RuntimeClass, such as gvisor; "" is the node's default
+	ready        *http.Client // asks waking boxes' fern-init whether they are ready
 	// steps times the steps of a wake that succeeded: making the Sandbox
 	// run, until its pod has an address, and until its services are ready.
 	steps *prometheus.HistogramVec
 }
 
-// New returns a Driver that runs boxes from image on node, through c, whose
-// scheme must include corev1 and the agent-sandbox types.
-func New(c client.Client, node, image string) *Driver {
+// New returns a Driver that runs boxes from image on node under RuntimeClass
+// runtimeClass (or the node's default, if ""), through c, whose scheme must
+// include corev1 and the agent-sandbox types.
+func New(c client.Client, node, image, runtimeClass string) *Driver {
 	// fern-init answers within readyWait and its checks' 2.25s. Connecting
 	// gets far less: for a moment after a pod starts, the network policy can
 	// drop packets to it instead of refusing them, and a wait for the full
@@ -93,7 +95,7 @@ func New(c client.Client, node, image string) *Driver {
 		Help:    "Time a wake spent in each step: sandbox (the API call), pod (until the pod has an address) and ready (until its services are).",
 		Buckets: prometheus.ExponentialBuckets(0.005, 2, 15), // 5ms to 82s
 	}, []string{"step"})
-	return &Driver{c: c, node: node, image: image, ready: ready, steps: steps}
+	return &Driver{c: c, node: node, image: image, runtimeClass: runtimeClass, ready: ready, steps: steps}
 }
 
 // Describe sends the descriptions of the Driver's metrics.
@@ -345,8 +347,13 @@ func (d *Driver) podTemplate(env store.Env) sandboxv1.PodTemplate {
 			Name: csi.FolderWorkspace, MountPath: filepath.Join(env.Workspace, ".git"), SubPath: ".git", ReadOnly: true,
 		})
 	}
+	var class *string // unset, so a wake keeps a runtime class set by hand
+	if d.runtimeClass != "" {
+		class = &d.runtimeClass
+	}
 	return sandboxv1.PodTemplate{Spec: corev1.PodSpec{
 		NodeSelector:                  map[string]string{corev1.LabelHostname: d.node},
+		RuntimeClassName:              class,
 		AutomountServiceAccountToken:  new(false),
 		EnableServiceLinks:            new(false),
 		TerminationGracePeriodSeconds: new(int64(stopGrace / time.Second)),

@@ -2,8 +2,9 @@
 # Checks Fern end to end in the lab, in sections:
 #   slice        the whole disk, database included, is snapshotted and restored,
 #                and a restore can be undone
-#   box          a box keeps no state of its own: only its workspace survives
-#                a sleep, and a force-deleted pod comes back
+#   box          a box runs under gVisor and keeps no state of its own: only
+#                its workspace survives a sleep, and a force-deleted pod
+#                comes back
 #   disk         a 100,000-file workspace: snapshot, restore (equal to its
 #                snapshot) and rm (nothing left); a seeded create; a real clone
 #   stream       fern exec keeps a stream intact: bytes, stderr, exit codes,
@@ -24,8 +25,6 @@
 #   paths        workspaces at a path, as T3's worktrees: adopt, which,
 #                exec --here, snapshot replace and delete
 #   claude       Claude Code in a box: network, stream-json, its terminal UI
-#   gvisor       a box under gVisor, which it installs in the lab node, and
-#                pgload's check there with 10 snapshots
 #   t3           T3's server: the checkpoint hook's commands on a worktree it
 #                made, and that worktree's box with git, Claude's folder and
 #                login. Needs lab/build.sh t3; not in the default run.
@@ -88,6 +87,26 @@ sql() { fern exec "$1" -- psql -tAc "$2"; }
 state() { fern ls | awk -v e="$1" '$1 == e { print $2 }'; }
 # fresh makes an environment from the sample repo, replacing any of that name.
 fresh() { fern rm "$1" 2>/dev/null || true; fern create "$1" --repo lab/sample-repo >/dev/null; }
+# asleep_within prints "asleep" once environment $1 is, or its state after
+# $2 seconds: a box takes a moment to stop, longer under gVisor.
+asleep_within() {
+  local s
+  for _ in $(seq $(($2 * 5))); do
+    s=$(state "$1")
+    [ "$s" = asleep ] && break
+    sleep 0.2
+  done
+  echo "$s"
+}
+# pod_cgroup prints file $2 of pod $1's cgroup on the node, which kubelet
+# sets and the box can't see. Its name depends on the cgroup driver:
+# pod<uid> in the lab, ...-pod<uid with _>.slice under systemd.
+pod_cgroup() {
+  local uid
+  uid=$(pod_uid "$1")
+  on_node sh -c "cat /sys/fs/cgroup/kubepods*/pod$uid/$2 /sys/fs/cgroup/kubepods*/*/pod$uid/$2 \
+    /sys/fs/cgroup/kubepods*/*/*pod${uid//-/_}.slice/$2 /sys/fs/cgroup/kubepods*/*pod${uid//-/_}.slice/$2 2>/dev/null" </dev/null
+}
 # in_daemon runs a shell command in the daemon container, which sees the pool.
 in_daemon() { k -n fern-system exec -i ds/fern -c fern -- sh -c "$1"; }
 pod_uid() { k -n fern-boxes get pod "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null || true; }
@@ -139,6 +158,7 @@ box() {
   sql $ENV "insert into users (name, email) values ('Edsger', 'edsger@example.com')" >/dev/null
   # setsid: an exec's own process group ends with it.
   fern exec $ENV -- sh -c 'echo x > /tmp/outside && echo y > inside && setsid -f sleep 1000 >/dev/null 2>&1'
+  check "the box runs under gVisor" "Starting gVisor..." "$(fern exec $ENV -- dmesg | head -1 | cut -c16-)"
   check "the pod belongs to its Sandbox" Sandbox \
     "$(k -n fern-boxes get pod $ENV -o jsonpath='{.metadata.ownerReferences[0].kind}')"
   check "the root filesystem is read-only" no "$(succeeds fern exec $ENV -- touch /etc/x)"
@@ -226,8 +246,10 @@ stream() {
   got=$(fern exec -i $ENV -- cat <"$TMP/bin" | sha256)
   note "50 MB round trip (Mac -> box -> Mac): $(($(now_ms) - start)) ms"
   check "50 MB of random bytes through cat, unchanged" "$(sha256 <"$TMP/bin")" "$got"
+  # Counted on the node: kubectl exec, which carries a command's output to
+  # the Mac, sometimes cuts a large one short over a slow link (the VPS).
   start=$(now_ms)
-  n=$(fern exec $ENV -- head -c 200000000 /dev/zero | wc -c | tr -d ' ')
+  n=$(in_daemon "fern exec $ENV -- head -c 200000000 /dev/zero | wc -c" | tr -d ' ')
   note "200 MB of stdout: $(($(now_ms) - start)) ms"
   check "200 MB of stdout, every byte" 200000000 "$n"
   check "stdout and stderr stay apart" out "$(fern exec $ENV -- sh -c 'echo out; echo err >&2' 2>/dev/null)"
@@ -330,25 +352,28 @@ daemon_args() {
 
 idle() {
   echo "== an idle box goes to sleep"
-  daemon_args '["daemon", "--idle-agent=5s", "--idle-human=10s"]'
+  # The deployed arguments, such as the runtime class, stay.
+  local args
+  args=$(k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}')
+  daemon_args "${args%]}, \"--idle-agent=5s\", \"--idle-human=10s\"]"
   fresh $ENV
   fern exec $ENV -- true
   check "a box is awake after a command" running "$(state $ENV)"
-  sleep 13
-  check "and asleep 10 s after the command started" asleep "$(state $ENV)"
+  sleep 10
+  check "and asleep 10 s after the command started" asleep "$(asleep_within $ENV 5)"
   fern exec $ENV -- sleep 20 &
   local open=$!
   sleep 15
   check "a running command keeps it awake past the idle times" running "$(state $ENV)"
   wait $open
-  sleep 8
-  check "it sleeps 5 s after the command ended" asleep "$(state $ENV)"
+  sleep 5
+  check "it sleeps 5 s after the command ended" asleep "$(asleep_within $ENV 5)"
   fern wake $ENV >/dev/null
   k -n fern-system delete pod -l app.kubernetes.io/name=fern --wait=false >/dev/null
   wait_daemon
-  sleep 13
-  check "a box awake across a daemon restart goes to sleep too" asleep "$(state $ENV)"
-  daemon_args '["daemon"]'
+  sleep 10
+  check "a box awake across a daemon restart goes to sleep too" asleep "$(asleep_within $ENV 5)"
+  daemon_args "$args"
 }
 
 daemon() {
@@ -397,6 +422,8 @@ many() {
   wait
   note "10 sleeping environments woken at once: $(($(now_ms) - start)) ms until all answered"
   check "all 10 answer (3 users each)" 10 "$(cat "$TMP"/many* | grep -cx 3 || true)"
+  check "all 10 run under gVisor" 10 \
+    "$(k -n fern-boxes get pods -o jsonpath='{range .items[*]}{.metadata.name} {.spec.runtimeClassName}{"\n"}{end}' | grep -cE '^m[0-9]+ gvisor$' || true)"
   if [ -n "$FERN_HOST" ]; then
     note "node memory used with 10 boxes awake: $(on_node free -m </dev/null | awk 'NR == 2 { print $3 }') MiB"
   else
@@ -412,14 +439,8 @@ limits() {
   # The runtime mounts the workspace without nosuid (whatever the CSI plugin
   # sets); no_new_privs is what makes setuid files useless in the box.
   check "commands run with no_new_privs" 1 "$(fern exec $ENV -- grep NoNewPrivs /proc/self/status | awk '{print $2}')"
-  check "the box has a CPU limit (2 cores)" "200000 100000" "$(fern exec $ENV -- cat /sys/fs/cgroup/cpu.max)"
-  # Kubelet sets the PID limit on the pod's cgroup, which the container can't
-  # see. Its name depends on the cgroup driver: pod<uid> in the lab,
-  # ...-pod<uid with _>.slice under systemd.
-  uid=$(pod_uid $ENV)
-  check "the box's pod has a PID limit" 4096 \
-    "$(on_node sh -c "cat /sys/fs/cgroup/kubepods*/pod$uid/pids.max /sys/fs/cgroup/kubepods*/*/pod$uid/pids.max \
-      /sys/fs/cgroup/kubepods*/*/*pod${uid//-/_}.slice/pids.max /sys/fs/cgroup/kubepods*/*pod${uid//-/_}.slice/pids.max 2>/dev/null" </dev/null)"
+  check "the box's pod has a CPU limit (2 cores)" "200000 100000" "$(pod_cgroup $ENV cpu.max)"
+  check "the box's pod has a PID limit" 4096 "$(pod_cgroup $ENV pids.max)"
   fern wake ${ENV}2 >/dev/null
   ip=$(k -n fern-boxes get pod ${ENV}2 -o jsonpath='{.status.podIP}')
   check "a box can't reach another box" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:7070/")"
@@ -509,60 +530,6 @@ except Exception as e:
   check "claude draws its screen through a terminal" yes "$(succeeds grep -qa Welcome <<<"$tui")"
 }
 
-gvisor() {
-  echo "== under gVisor"
-  # gVisor goes into the lab node, not the Mac: a pinned release, checked
-  # and registered with k3s's containerd for RuntimeClass "gvisor".
-  # On a VPS, lab/vps.sh installed it.
-  if [ -z "$FERN_HOST" ] && ! docker exec "$LAB" test -x /usr/local/bin/runsc; then
-    local arch url
-    case $(docker version -f '{{.Server.Arch}}') in arm64) arch=aarch64 ;; *) arch=x86_64 ;; esac
-    url=https://storage.googleapis.com/gvisor/releases/release/$GVISOR_RELEASE/$arch/gvisor.tar.bz2
-    curl -sSfL -o "$TMP/gvisor.tar.bz2" "$url"
-    if [ "$(shasum -a 512 "$TMP/gvisor.tar.bz2" | cut -d' ' -f1)" != "$(curl -sSfL "$url.sha512" | cut -d' ' -f1)" ]; then
-      check "gVisor's download matches its checksum" yes no
-      return
-    fi
-    docker exec -i "$LAB" sh -c 'mkdir -p /usr/local/bin && tar -xjf - -C /usr/local/bin' <"$TMP/gvisor.tar.bz2"
-    printf '%s\n' "[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc]" '  runtime_type = "io.containerd.runsc.v1"' |
-      docker exec -i "$LAB" sh -c 'd=/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d && mkdir -p $d && cat > $d/runsc.toml'
-    restart_node # k3s embeds containerd; this reloads its config
-  fi
-  # gVisor mirrors all of a box's memory mappings into one host process; at
-  # the kernel's default limit, large builds (Node, JVM) segfault. Set on
-  # every run: the Docker Desktop VM forgets it when it restarts.
-  on_node sysctl -qw vm.max_map_count=4194304 </dev/null
-  k apply -f - >/dev/null <<'YAML'
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata: {name: gvisor, labels: {app.kubernetes.io/part-of: fern}}
-handler: runsc
-YAML
-  fresh gv
-  # The Sandbox comes with the first wake; the box restarts under gVisor at
-  # the next one, which keeps the runtime class.
-  fern wake gv >/dev/null
-  k -n fern-boxes patch sandbox gv --type=merge -p '{"spec":{"podTemplate":{"spec":{"runtimeClassName":"gvisor"}}}}' >/dev/null
-  fern sleep gv >/dev/null
-  check "the box runs under gVisor" "Starting gVisor..." "$(fern exec gv -- dmesg | head -1 | cut -c16-)"
-  check "Postgres runs on Fern's volume (3 users)" 3 "$(sql gv 'select count(*) from users')"
-  check "claude runs" "$CLAUDE" "$(fern exec gv -- claude --version)"
-  check "the box reaches api.anthropic.com" yes "$(succeeds fern exec gv -- curl -s -o /dev/null https://api.anthropic.com/)"
-  head -c 20000000 /dev/urandom >"$TMP/bin"
-  check "20 MB through cat, unchanged" "$(sha256 <"$TMP/bin")" "$(fern exec -i gv -- cat <"$TMP/bin" | sha256)"
-  for i in $(seq 5); do
-    fern snapshot gv "g$i" >/dev/null
-    fern exec gv -- psql -qc 'drop table users'
-    fern restore gv "g$i" >/dev/null
-    fern wake gv | took >>"$TMP/gvisor-wake"
-    sql gv 'select count(*) from users' >>"$TMP/gvisor-users"
-  done
-  check "5 restores bring the table back" 5 "$(grep -cx 3 "$TMP/gvisor-users")"
-  note "wake after a restore, ms: $(stats <"$TMP/gvisor-wake")"
-  pg_load gv 10
-  fern rm gv
-}
-
 t3() {
   echo "== T3's server on Fern's node"
   if ! k -n fern-system rollout status deploy/t3 --timeout=180s >/dev/null 2>&1; then
@@ -628,7 +595,7 @@ t3() {
   in_t3 "fern rm t3c && rm -rf $R /var/lib/fern/worktrees/t3check"
 }
 
-all=(slice box disk stream concurrency restore pgload idle daemon node many limits paths claude gvisor)
+all=(slice box disk stream concurrency restore pgload idle daemon node many limits paths claude)
 [ $# -gt 0 ] || set -- "${all[@]}"
 for s in "$@"; do
   case " ${all[*]} t3 " in

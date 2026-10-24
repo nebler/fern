@@ -68,6 +68,15 @@ spec:
             cidr: 0.0.0.0/0
             except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 100.64.0.0/10, 127.0.0.0/8]
 ---
+# gVisor, which the lab and the VPS register with k3s's containerd as runsc.
+apiVersion: node.k8s.io/v1
+kind: RuntimeClass
+metadata:
+  name: gvisor
+  labels:
+    app.kubernetes.io/part-of: fern
+handler: runsc
+---
 apiVersion: storage.k8s.io/v1
 kind: CSIDriver
 metadata:
@@ -141,7 +150,9 @@ spec:
         - name: fern
           image: fern:dev
           imagePullPolicy: Never # the lab imports its images
-          args: [daemon]
+          # Boxes run under gVisor: the agent runs code nobody reviewed. The
+          # lab and the VPS install it (lab/up.sh, lab/vps.sh).
+          args: [daemon, -runtime-class=gvisor]
           env:
             - name: NODE_NAME
               valueFrom:

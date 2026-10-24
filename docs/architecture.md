@@ -319,7 +319,7 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
 | Main process | `fern-init` (the pause container is PID 1 and reaps orphans): services, exec/PTY server, readiness for the daemon's wake (`/readyz`), graceful shutdown; planned: **reattachable sessions** (agent terminals survive daemon restarts and upgrades) and activity reporting |
 | Mounts | `live/` → the workspace at **the same path T3 uses**; Claude's folder `envs/<id>/claude/` → `CLAUDE_CONFIG_DIR` at the same path, **outside `live/`**, so a restore doesn't rewind its transcripts; the main repository's git folder **read-only**, so git works and can't change the repository's config or hooks; agent logins as environment variables from a Secret |
 | User | non-root, the same uid as T3 so file ownership matches; **user namespaces on** (GA in Kubernetes 1.36), so a box escape isn't that user on the host |
-| Runtime | from the class: `crun`/`runc` (light), `runsc` / gVisor (untrusted), a `docker` class for repos that need `docker compose` inside (gVisor or Kata) |
+| Runtime | from the class: `crun`/`runc` (light), `runsc` / gVisor (untrusted), a `docker` class for repos that need `docker compose` inside (gVisor or Kata). Built: every box runs under gVisor, from the daemon's `-runtime-class`, until classes exist |
 | Limits | CPU and memory from the class (cgroups / pod resources); fork count and TTL caps |
 | Network | deny by default; allowlist (package registries, GitHub, the model provider); previews only through the front door |
 | Stop | SIGTERM to services (`stop:` commands), timeout, then kill; never during an open exec unless forced |

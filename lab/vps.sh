@@ -70,7 +70,7 @@ printf '[Unit]\nRequiresMountsFor=/var/lib/fern\n' >/etc/systemd/system/k3s.serv
 echo vm.max_map_count=4194304 >/etc/sysctl.d/90-fern.conf
 sysctl -q --system
 
-if ! /usr/local/bin/runsc --version 2>/dev/null | grep -q "release-$GVISOR_RELEASE"; then
+if ! { /usr/local/bin/runsc --version 2>/dev/null | grep -q "release-$GVISOR_RELEASE" && [ -x /usr/local/bin/gvisor-bin/gvisor_sentry ]; }; then
   url=https://storage.googleapis.com/gvisor/releases/release/$GVISOR_RELEASE/$(uname -m)
   tmp=$(mktemp -d)
   curl -sSfL -o "$tmp/gvisor.tar.bz2" "$url/gvisor.tar.bz2"
@@ -98,12 +98,6 @@ done
 kubectl get nodes
 NODE
 
-k apply -f - >/dev/null <<'YAML'
-apiVersion: node.k8s.io/v1
-kind: RuntimeClass
-metadata: {name: gvisor, labels: {app.kubernetes.io/part-of: fern}}
-handler: runsc
-YAML
 echo "installing agent-sandbox $SANDBOX_VERSION"
 k apply --server-side -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/$SANDBOX_VERSION/sandbox.yaml" >/dev/null
 k -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=300s >/dev/null
