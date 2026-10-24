@@ -196,9 +196,14 @@ func newServer(t *testing.T, st *fakeStore, drv actor.Driver) http.Handler {
 	t.Helper()
 	log := slog.New(slog.DiscardHandler)
 	envs := actor.New(st, drv, actor.Idle{}, log)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
-	go func() { envs.Run(ctx); close(done) }()
+	go func() {
+		if err := envs.Run(ctx); err != nil {
+			t.Errorf("Run() error: %v", err)
+		}
+		close(done)
+	}()
 	t.Cleanup(func() { cancel(); <-done })
 	return api.NewServer(st, drv, envs, log).Handler()
 }

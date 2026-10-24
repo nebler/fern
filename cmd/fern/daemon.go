@@ -37,6 +37,8 @@ import (
 const (
 	pool      = "/var/lib/fern"
 	csiSocket = "/csi/csi.sock"
+	// boxImage is what lab/build.sh builds and imports into every node.
+	boxImage = "fern-box:dev"
 )
 
 // runDaemon serves the API and the CSI plugin until ctx is cancelled, and
@@ -53,7 +55,6 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	flags := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	image := flags.String("box-image", "fern-box:dev", "box image")
 	var idle actor.Idle
 	flags.DurationVar(&idle.Agent, "idle-agent", 5*time.Minute, "sleep this long after a box's last command ended (0: never)")
 	flags.DurationVar(&idle.Human, "idle-human", 20*time.Minute, "… and this long after it started (0: never)")
@@ -98,7 +99,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	}
 
 	g, ctx := errgroup.WithContext(ctx)
-	drv := driver.New(kube, node, *image)
+	drv := driver.New(kube, node, boxImage)
 	envs := actor.New(st, drv, idle, log)
 	httpSrv := &http.Server{
 		Handler:           api.NewServer(st, drv, envs, log).Handler(),
@@ -116,10 +117,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	log.InfoContext(ctx, "fern daemon started", slog.String("node", node))
 	// Changes outlive their requests: Run returns once they have ended, and
 	// the store stays open until then.
-	g.Go(func() error {
-		envs.Run(ctx)
-		return nil
-	})
+	g.Go(func() error { return envs.Run(ctx) })
 	g.Go(func() error {
 		if err := httpSrv.Serve(apiLis); !errors.Is(err, http.ErrServerClosed) {
 			return fmt.Errorf("api: %w", err)

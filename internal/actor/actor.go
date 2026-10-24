@@ -122,8 +122,9 @@ func (g *Group) Collect(ch chan<- prometheus.Metric) {
 
 // Run runs the actors until ctx is done, then waits for each to finish the
 // change it is making. It first gives every box that is running an actor, so
-// that boxes left awake by an earlier daemon go to sleep when idle.
-func (g *Group) Run(ctx context.Context) {
+// that boxes left awake by an earlier daemon go to sleep when idle; if it
+// can't learn which, it returns the error.
+func (g *Group) Run(ctx context.Context) error {
 	var wg sync.WaitGroup
 	defer wg.Wait()
 	defer close(g.stopped)
@@ -144,7 +145,7 @@ func (g *Group) Run(ctx context.Context) {
 	}
 	states, err := g.driver.States(ctx)
 	if err != nil {
-		g.log.WarnContext(ctx, "box states", slog.Any("error", err))
+		return fmt.Errorf("box states: %w", err)
 	}
 	for id, state := range states {
 		if state != driver.Asleep {
@@ -154,10 +155,10 @@ func (g *Group) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			return
+			return nil
 		case req := <-g.find:
 			a, ok := actors[req.id]
-			if !ok {
+			if !ok || isClosed(a.done) {
 				a = start(req.id, false)
 			}
 			req.reply <- a
@@ -185,11 +186,12 @@ func (g *Group) actorOf(ctx context.Context, id string) (*actor, error) {
 	}
 }
 
-// do runs fn on environment id's actor and returns its error. Waiting can be
-// cancelled; once the actor has started fn, fn runs to the end.
+// do runs fn on environment id's actor and returns its error. Waiting for
+// the actor to take fn can be cancelled; once it has, fn runs to the end, and
+// do waits for it, so that fn never uses what its caller has let go of (such
+// as a request's body). changeTimeout bounds the wait.
 func (g *Group) do(ctx context.Context, id string, fn func(ctx context.Context, a *actor) error) error {
-	reply := make(chan error, 1)
-	m := message{fn: fn, reply: reply, cancelled: ctx.Done()}
+	m := message{fn: fn, reply: make(chan error, 1)}
 	for {
 		a, err := g.actorOf(ctx, id)
 		if err != nil {
@@ -197,17 +199,21 @@ func (g *Group) do(ctx context.Context, id string, fn func(ctx context.Context, 
 		}
 		select {
 		case a.mailbox <- m:
+			return <-m.reply
 		case <-a.done:
-			continue // it has just exited; the next one takes the message
+			// It has just exited; Run starts another.
 		case <-ctx.Done():
 			return ctx.Err()
 		}
-		select {
-		case err := <-reply:
-			return err
-		case <-ctx.Done():
-			return ctx.Err()
-		}
+	}
+}
+
+func isClosed(c <-chan struct{}) bool {
+	select {
+	case <-c:
+		return true
+	default:
+		return false
 	}
 }
 
@@ -334,10 +340,15 @@ func (g *Group) Exec(ctx context.Context, id, stale string, cancel context.Cance
 		n := a.next
 		a.execs[n] = cancel
 		a.opened = time.Now()
-		ex = &Exec{Addr: a.addr, Token: env.BoxToken, close: sync.OnceFunc(func() { a.endExec(n) })}
+		ex = &Exec{Addr: a.addr, Token: env.BoxToken, close: func() { a.endExec(n) }}
 		return nil
 	})
 	if err != nil {
+		return nil, err
+	}
+	// The caller gave up during the wake: it won't run the command.
+	if err := ctx.Err(); err != nil {
+		ex.Close()
 		return nil, err
 	}
 	return ex, nil
@@ -345,9 +356,8 @@ func (g *Group) Exec(ctx context.Context, id, stale string, cancel context.Cance
 
 // message is a call for an actor to make.
 type message struct {
-	fn        func(ctx context.Context, a *actor) error
-	reply     chan error      // buffered, so the actor never waits for the caller
-	cancelled <-chan struct{} // the caller stopped waiting before fn started
+	fn    func(ctx context.Context, a *actor) error
+	reply chan error // buffered, so the actor never waits for the caller
 }
 
 // actor owns one environment. Only its own goroutine touches the fields
@@ -402,12 +412,6 @@ func (a *actor) run(ctx context.Context, awake bool) {
 }
 
 func (a *actor) handle(ctx context.Context, m message) {
-	select {
-	case <-m.cancelled:
-		m.reply <- context.Canceled
-		return
-	default:
-	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), changeTimeout)
 	defer cancel()
 	m.reply <- m.fn(ctx, a)
@@ -424,8 +428,12 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 		return env, nil
 	}
 	a.addr = ""
-	// Set first: a wake that fails half-way may leave the box running.
-	a.awake = true
+	// Set first: a wake that fails half-way may leave the box running. Its
+	// idle times start now, so a slow wake isn't put back to sleep at once.
+	if !a.awake {
+		a.awake = true
+		a.opened, a.closed = time.Now(), time.Now()
+	}
 	start := time.Now()
 	addr, err := a.g.driver.Wake(ctx, env)
 	if err != nil {

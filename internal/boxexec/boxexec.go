@@ -30,9 +30,6 @@ const Path = "/exec"
 // are ready; with ?wait=DURATION it answers as soon as they are.
 const ReadyPath = "/readyz"
 
-// URL returns the exec endpoint of the box serving at addr (host:port).
-func URL(addr string) string { return "ws://" + addr + Path }
-
 // Frame kinds: the first byte of every binary message.
 const (
 	frameStdin byte = iota

@@ -42,7 +42,8 @@ type restoreRequest struct {
 }
 
 // Error is an error the daemon answered with. Its status says what kind:
-// http.StatusNotFound, http.StatusBadRequest, or a failure.
+// http.StatusNotFound, http.StatusBadRequest, http.StatusServiceUnavailable
+// (the daemon is stopping), or a failure.
 type Error struct {
 	Status  int    `json:"-"`
 	Message string `json:"error"`

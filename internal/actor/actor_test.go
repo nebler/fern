@@ -95,7 +95,12 @@ func start(t *testing.T, st *fakeStore, drv *driver.Fake, idle actor.Idle) *acto
 	g := actor.New(st, drv, idle, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
-	go func() { g.Run(ctx); close(done) }()
+	go func() {
+		if err := g.Run(ctx); err != nil {
+			t.Errorf("Run() error: %v", err)
+		}
+		close(done)
+	}()
 	t.Cleanup(func() { cancel(); <-done })
 	return g
 }
@@ -322,28 +327,26 @@ func (g *guard) Restore(ctx context.Context, id, snapID string) error {
 	return g.fakeStore.Restore(ctx, id, snapID)
 }
 
-func (g *guard) Wake(ctx context.Context, env store.Env) (string, error) {
-	g.enter(env.ID)
-	defer g.leave(env.ID)
-	return g.drv.Wake(ctx, env)
-}
-
-func (g *guard) Sleep(ctx context.Context, id string) error {
-	g.enter(id)
-	defer g.leave(id)
-	return g.drv.Sleep(ctx, id)
-}
-
-func (g *guard) DeleteBox(ctx context.Context, id string) error {
-	g.enter(id)
-	defer g.leave(id)
-	return g.drv.Delete(ctx, id)
-}
-
-// guardDriver is guard as a Driver, whose Delete is the box's.
+// guardDriver is guard's driver side: its Delete deletes the box.
 type guardDriver struct{ *guard }
 
-func (d guardDriver) Delete(ctx context.Context, id string) error { return d.DeleteBox(ctx, id) }
+func (d guardDriver) Wake(ctx context.Context, env store.Env) (string, error) {
+	d.enter(env.ID)
+	defer d.leave(env.ID)
+	return d.drv.Wake(ctx, env)
+}
+
+func (d guardDriver) Sleep(ctx context.Context, id string) error {
+	d.enter(id)
+	defer d.leave(id)
+	return d.drv.Sleep(ctx, id)
+}
+
+func (d guardDriver) Delete(ctx context.Context, id string) error {
+	d.enter(id)
+	defer d.leave(id)
+	return d.drv.Delete(ctx, id)
+}
 
 func (d guardDriver) States(ctx context.Context) (map[string]driver.State, error) {
 	return d.drv.States(ctx)
@@ -357,7 +360,12 @@ func TestConcurrentChanges(t *testing.T) {
 	envs := actor.New(g, guardDriver{g}, actor.Idle{}, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
-	go func() { envs.Run(ctx); close(done) }()
+	go func() {
+		if err := envs.Run(ctx); err != nil {
+			t.Errorf("Run() error: %v", err)
+		}
+		close(done)
+	}()
 	defer func() { cancel(); <-done }()
 
 	ids := []string{"a", "b", "c"}
@@ -407,8 +415,11 @@ func TestConcurrentChanges(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	if g.overlaps != 0 {
-		t.Errorf("%d calls overlapped another of the same environment", g.overlaps)
+	g.mu.Lock()
+	overlaps := g.overlaps
+	g.mu.Unlock()
+	if overlaps != 0 {
+		t.Errorf("%d calls overlapped another of the same environment", overlaps)
 	}
 	for _, id := range ids {
 		if err := envs.Create(ctx, id, store.CreateOptions{}); err != nil {
@@ -459,6 +470,51 @@ func TestMetrics(t *testing.T) {
 		want := map[string]uint64{"fern_wake_seconds": 1, "fern_snapshot_seconds": 1, "fern_restore_seconds": 1, "fern_idle_sleeps_total": 1}
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Errorf("metrics mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// slowWake is a driver whose Wake waits until release is closed.
+type slowWake struct {
+	*driver.Fake
+	release chan struct{}
+}
+
+func (d *slowWake) Wake(ctx context.Context, env store.Env) (string, error) {
+	<-d.release
+	return d.Fake.Wake(ctx, env)
+}
+
+// A caller that gives up while the box wakes runs no command, so the box
+// still goes to sleep when idle.
+func TestExecGivenUpDuringWake(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		st, fake := newFakeStore(), driver.NewFake("box")
+		drv := &slowWake{Fake: fake, release: make(chan struct{})}
+		g := actor.New(st, drv, idle, slog.New(slog.DiscardHandler))
+		ctx, cancel := context.WithCancel(t.Context())
+		done := make(chan struct{})
+		go func() { _ = g.Run(ctx); close(done) }()
+		defer func() { cancel(); <-done }()
+		if err := g.Create(ctx, "demo", store.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		execCtx, giveUp := context.WithCancel(ctx)
+		result := make(chan error, 1)
+		go func() {
+			_, err := g.Exec(execCtx, "demo", "", giveUp)
+			result <- err
+		}()
+		synctest.Wait() // the wake has started
+		giveUp()
+		close(drv.release)
+		if err := <-result; !errors.Is(err, context.Canceled) {
+			t.Fatalf("Exec() given up error = %v, want %v", err, context.Canceled)
+		}
+		time.Sleep(idle.Human)
+		synctest.Wait()
+		if got := state(t, fake, "demo"); got != driver.Asleep {
+			t.Errorf("after %v: state %s, want %s", idle.Human, got, driver.Asleep)
 		}
 	})
 }

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 
@@ -31,8 +32,7 @@ type Driver interface {
 	States(ctx context.Context) (map[string]driver.State, error)
 }
 
-// dialTimeout bounds connecting to a box that is up; a box that vanished can
-// leave an address nothing answers.
+// dialTimeout bounds connecting to a box and its WebSocket handshake.
 const dialTimeout = 10 * time.Second
 
 // errBadBody means a request's body isn't the JSON its route takes.
@@ -45,12 +45,18 @@ type Server struct {
 	driver Driver
 	envs   *actor.Group
 	log    *slog.Logger
+	// boxes connects to boxes. A box that vanished can leave an address
+	// nothing answers; a short connect timeout gets to the next wake soon.
+	boxes *http.Client
 }
 
 // NewServer returns a Server that reads from st and drv and changes
 // environments through envs.
 func NewServer(st Store, drv Driver, envs *actor.Group, log *slog.Logger) *Server {
-	return &Server{store: st, driver: drv, envs: envs, log: log}
+	return &Server{
+		store: st, driver: drv, envs: envs, log: log,
+		boxes: &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: time.Second}).DialContext}},
+	}
 }
 
 // Handler returns the API's routes.
@@ -214,7 +220,7 @@ func (s *Server) dialBox(ctx context.Context, id string, cancel context.CancelFu
 			return nil, nil, err
 		}
 		dialCtx, cancelDial := context.WithTimeout(ctx, dialTimeout)
-		conn, dialErr := boxexec.Dial(dialCtx, boxexec.URL(ex.Addr), ex.Token, nil)
+		conn, dialErr := boxexec.Dial(dialCtx, "ws://"+ex.Addr+boxexec.Path, ex.Token, s.boxes)
 		cancelDial()
 		if dialErr == nil {
 			return conn, ex, nil

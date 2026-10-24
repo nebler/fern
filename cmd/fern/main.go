@@ -1,6 +1,6 @@
 // Command fern is the Fern daemon and its command-line client.
 //
-//	fern daemon [--box-image IMAGE] [--idle-agent D] [--idle-human D] [--metrics-addr ADDR]
+//	fern daemon [--idle-agent D] [--idle-human D] [--metrics-addr ADDR]
 //	                                         run the node daemon and CSI plugin
 //	fern create [--path P] [--seed] <env>    make an environment; P is its workspace,
 //	                                         --seed fills it from a tar stream on stdin
@@ -65,7 +65,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		ctx, stop = signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 		defer stop()
 	}
-	code, err := lookup(cmd.name).run(ctx, cmd, api.NewClient(socket), stdio{stdin, stdout, stderr})
+	sc, _ := lookup(cmd.name) // parse has checked it
+	code, err := sc.run(ctx, cmd, api.NewClient(socket), stdio{stdin, stdout, stderr})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "fern %s: %v\n", cmd.name, err)
 		return 1
@@ -125,26 +126,30 @@ func subcommands() []subcommand {
 	}
 }
 
-// lookup returns the subcommand called name; parse has checked it exists.
-func lookup(name string) subcommand {
-	i := slices.IndexFunc(subcommands(), func(sc subcommand) bool { return sc.name == name })
-	return subcommands()[i]
+// lookup returns the subcommand called name, if there is one.
+func lookup(name string) (subcommand, bool) {
+	scs := subcommands()
+	i := slices.IndexFunc(scs, func(sc subcommand) bool { return sc.name == name })
+	if i < 0 {
+		return subcommand{}, false
+	}
+	return scs[i], true
 }
 
 // parse turns the CLI's arguments into a command.
 func parse(args []string) (command, error) {
-	var names []string
-	for _, sc := range subcommands() {
-		names = append(names, sc.name)
-	}
 	if len(args) == 0 {
+		var names []string
+		for _, sc := range subcommands() {
+			names = append(names, sc.name)
+		}
 		return command{}, fmt.Errorf("usage: fern <%s> …", strings.Join(names, "|"))
 	}
 	cmd := command{name: args[0]}
-	if !slices.Contains(names, cmd.name) {
+	sc, ok := lookup(cmd.name)
+	if !ok {
 		return command{}, fmt.Errorf("unknown command %q", cmd.name)
 	}
-	sc := lookup(cmd.name)
 	fs := flag.NewFlagSet(cmd.name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	if cmd.name == "exec" {
