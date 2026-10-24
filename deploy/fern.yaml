@@ -38,8 +38,9 @@ spec:
         - port: 7070
 ---
 # A box may reach DNS and the internet (registries, GitHub, Anthropic), but
-# nothing private: not T3, the daemon, the node, the Kubernetes API, other
-# boxes or a cloud's metadata endpoint.
+# nothing private: not T3, the daemon, the Kubernetes API, other boxes,
+# private addresses or a cloud's metadata endpoint. It can't keep a box from
+# the node's own public address; that takes the node's firewall.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

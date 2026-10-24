@@ -68,7 +68,7 @@ The same sources are available as on-demand skills in [.claude/skills/](.claude/
 ## Fern rules
 - **Every multi-step change is crash-safe:** after a crash at any step, the disk shows what was under way (a marker file, a leftover copy beside the workspace, a snapshot without its row), and `Reconcile` finishes it or clears it on start. Every step is safe to repeat (idempotent).
 - **The disk is the truth; SQLite is the index.** On start, reconcile what exists with what the tables say.
-- **Per-turn work never touches the Kubernetes API.** Snapshots, restores and execs go to the node-local daemon.
+- **Per-turn work never touches the Kubernetes API.** Snapshots and execs in an awake box go to the node-local daemon only. Only a box's wake and stop (a sleep, or the stop in a restore) change its `Sandbox`.
 - **Credentials never enter `live/`, golden or snapshots.**
 - **No API keys.** Agents are the real `claude` / `codex` CLIs with the user's own subscription.
 

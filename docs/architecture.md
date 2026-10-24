@@ -1,6 +1,6 @@
 # Fern v2 architecture
 
-**Status:** what we intend to build. Nothing is implemented yet.
+**Status:** what we intend to build. What exists is marked built; the rest is planned.
 - Why, and the research behind it: [design.md](design.md).
 - Experiments and dev loop: [engine-local.md](engine-local.md).
 
@@ -27,7 +27,7 @@ Fern runs on **Kubernetes only**: one Go daemon per node (a DaemonSet), a thin o
 - **Memory snapshots** (`runsc checkpoint`, CRIU). The promise is "stop and restart"; memory snapshots are a later stretch goal.
 - **API-key model access,** and any proxy that intermediates subscription credentials.
 - **A hosted multi-tenant service.** Fern is self-hosted, one login per person.
-- **Per-turn Kubernetes objects.** Snapshots, restores and execs never go through the API server; CRDs hold only desired state.
+- **Per-turn Kubernetes objects.** Snapshots and execs in an awake box never go through the API server; CRDs hold only desired state. Only a box's wake and stop (a sleep, or the stop in a restore) change its `Sandbox`, which happens when a thread wakes or reverts, not every turn.
 - **A non-Kubernetes local backend.** A fake driver exists only for unit tests.
 - **Our own URL product.** We use portless or the front door's simple hostname routing.
 - **Running on the Mac.** Fern runs on a remote Linux machine; the Mac only runs the T3 app.
@@ -193,7 +193,7 @@ The driver reports unexpected exits. The actor restarts with backoff, and gives 
 
 ### 6.3 Idle rule
 An environment goes to sleep when all of these hold (two clocks, copied from Amp):
-- **no exec is open** (an agent turn is an exec), **no terminal is attached** and **no preview connection is active**
+- **no exec is open** (a thread's Claude is one exec while T3 keeps its session), **no terminal is attached** and **no preview connection is active**
 - **agent clock:** `idle.agent` (default 5 min) since the last exec closed
 - **human clock:** `idle.human` (default 20 min) since the last human touch: an exec or terminal opened, or a preview request
 
@@ -215,7 +215,7 @@ Built: the actor's timer, with both clocks touched by every exec (`--idle-agent`
 
 ### 7.2 A turn
 1. T3 → `POST /envs/t3-8f2c/exec {cmd: "claude …", pty: true}`.
-2. Asleep → the front door holds the request → the actor → the driver starts a session → `fern-init` runs `.agents/resume`, starts services → ready.
+2. Asleep → the front door holds the request → the actor → the driver starts a session → `fern-init` runs `.agents/resume` (planned), starts services → ready.
 3. The exec streams across turns: T3 keeps Claude running and sends it each turn, and ends it when the session is idle (§6.3).
 4. T3 saves git checkpoint `7f3a` → the hook → `POST /snapshots {id: "7f3a"}` → `btrfs subvolume snapshot -r` → ok. **A failed snapshot doesn't fail the turn** (copied from Delta, whose hooks never break the agent): the hook logs it and T3 keeps its git checkpoint. That turn then has code but no disk, and §7.3 refuses to revert to it.
 
@@ -296,7 +296,7 @@ services:
 
 Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or the main repositories.
 
-- **Snapshot:** `btrfs subvolume snapshot -r`. **Fork:** the same without `-r`. **Restore:** snapshot to `live.new`, then swap. All are metadata operations, taking milliseconds independent of size.
+- **Snapshot:** `btrfs subvolume snapshot -r`. **Fork:** the same without `-r`. **Restore:** snapshot to `live.new`, then swap. All are metadata operations, whose time doesn't grow with the workspace. A snapshot first flushes what was written since the last one: about 1 ms with nothing written, 24 ms after 8 MB (measured), and more on a busy disk.
 - **Consistency:** a snapshot is atomic (crash-consistent). Postgres recovers through its WAL; SQLite needs its WAL file kept beside it.
 - **Retention:**
   - keep the last N turn snapshots per environment, plus tagged snapshots, plus golden
@@ -368,7 +368,7 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
   - **never in `live/`, golden or snapshots** (golden builds are scanned). Claude's state lives in `envs/<id>/claude/`, outside `live/`; with the login in its environment it writes no credentials file. Codex keeps `auth.json` in its home, which is mounted from outside `live/` the same way
   - forks get fresh credentials
 - **Non-model secrets:** a host-side broker for short-lived, scoped tokens (Fern v1's GitHub App broker); per-environment OIDC tokens later.
-- **Network:** a box takes connections only from the daemon, and reaches only DNS and the public internet: not T3, the daemon, the node, the Kubernetes API, other boxes or a cloud's metadata endpoint (built, `deploy/fern.yaml`). Planned: per-class allowlists.
+- **Network:** a box takes connections only from the daemon, and reaches only DNS and the public internet: not T3, the daemon, the Kubernetes API, other boxes, private addresses or a cloud's metadata endpoint (built, `deploy/fern.yaml`). A NetworkPolicy can't keep it from the node itself on the node's public address, and some network plugins always allow traffic to the node: that needs the node's firewall (planned). Planned: per-class allowlists.
 - **Known gaps:** boxes of the same repository share its read-only git folder, so one can read another's checkpoints (the full fix is a repository per thread); the box token is readable in `/proc` by the box's own processes (harmless while only the daemon can reach fern-init); user namespaces and a Pod Security level for `fern-boxes` aren't set yet.
 - **Isolation levels by class:** runc → gVisor → micro-VM.
 
