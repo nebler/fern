@@ -21,16 +21,19 @@ docker run --rm --label "$LABEL" -v fern-lab-pool:/img --entrypoint sh fern:dev 
 
 # "/" must be rshared so the CSI plugin's bind mounts reach the box containers.
 # k3s exits when its datastore is slow, as under a big image build; Docker
-# then starts it again.
+# then starts it again. Its settings are deploy/k3s-config.yaml, as on a VPS.
+# noatime: reading a file mustn't write to the pool, which snapshots would
+# then have to flush.
 docker run -d --name "$LAB" --hostname "$LAB" --label "$LABEL" --privileged --restart on-failure \
   --tmpfs /run --tmpfs /var/run -v fern-lab-pool:/var/lib/fern-img \
-  -p 127.0.0.1:30773:30773 \
+  -p 127.0.0.1:30773:30773 -e K3S_SETTINGS="$(cat deploy/k3s-config.yaml)" \
   --entrypoint /bin/sh "$K3S_IMAGE" -c '
     set -e
     mount --make-rshared /
-    mkdir -p /var/lib/fern
-    mount -o loop /var/lib/fern-img/pool.img /var/lib/fern
-    exec /bin/k3s server --disable=traefik,metrics-server --kubelet-arg=pod-max-pids=4096' >/dev/null
+    mkdir -p /var/lib/fern /etc/rancher/k3s
+    mount -o loop,noatime /var/lib/fern-img/pool.img /var/lib/fern
+    printf "%s\n" "$K3S_SETTINGS" >/etc/rancher/k3s/config.yaml
+    exec /bin/k3s server' >/dev/null
 
 echo "waiting for k3s"
 for _ in $(seq 120); do

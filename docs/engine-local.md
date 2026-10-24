@@ -45,10 +45,11 @@ docker exec fern-lab kubectl get nodes
 
 ### 1.2 Bootstrap on the VPS (week 4)
 ```sh
-# on the VM
-curl -sfL https://get.k3s.io | sh -                    # single-node k3s
-truncate -s 60G /var/lib/fern.img && mkfs.btrfs -q /var/lib/fern.img
-mkdir -p /var/lib/fern && mount -o loop /var/lib/fern.img /var/lib/fern
+# on the VM: k3s with Fern's settings (deploy/k3s-config.yaml), single node
+mkdir -p /etc/rancher/k3s && cp deploy/k3s-config.yaml /etc/rancher/k3s/config.yaml
+curl -sfL https://get.k3s.io | sh -
+# the pool: a partition of its own if there is one (here /dev/vdb), else a loop image
+mkfs.btrfs -q -d single -m dup /dev/vdb && mkdir -p /var/lib/fern && mount -o noatime /dev/vdb /var/lib/fern
 # gVisor: install runsc, add it to k3s's containerd config template, then a RuntimeClass "gvisor"
 # agent-sandbox: install a pinned release of its controller (manifest or Helm)
 ```
