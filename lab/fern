@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Runs the fern CLI inside the lab's daemon pod, so it works from the Mac.
+# Runs the fern CLI inside the daemon pod (the lab's, or FERN_HOST's), so it
+# works from the Mac.
 # "create ENV --repo DIR" with a local DIR fills the workspace from DIR.
 set -euo pipefail
 args=() repo=""
@@ -21,7 +22,7 @@ if [ -t 0 ] && [ -t 1 ] && [ -z "$repo" ]; then
     case "$a" in -it) tty=(-it) ;; --) break ;; esac
   done
 fi
-run() { docker exec "${tty[@]}" "$LAB" kubectl -n fern-system exec "${tty[@]}" ds/fern -c fern -- fern "${args[@]}"; }
+run() { on_node "${tty[@]}" kubectl -n fern-system exec "${tty[@]}" ds/fern -c fern -- fern "${args[@]}"; }
 if [ -n "$repo" ]; then
   tar_dir "$repo" | run
 else

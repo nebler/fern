@@ -44,16 +44,13 @@ docker exec fern-lab kubectl get nodes
 - **Access:** Tailscale (or plain SSH) from the Mac. The T3 app pairs via *Add environment → SSH*.
 
 ### 1.2 Bootstrap on the VPS (week 4)
-```sh
-# on the VM: k3s with Fern's settings (deploy/k3s-config.yaml), single node
-mkdir -p /etc/rancher/k3s && cp deploy/k3s-config.yaml /etc/rancher/k3s/config.yaml
-curl -sfL https://get.k3s.io | sh -
-# the pool: a partition of its own if there is one (here /dev/vdb), else a loop image
-mkfs.btrfs -q -d single -m dup /dev/vdb && mkdir -p /var/lib/fern && mount -o noatime /dev/vdb /var/lib/fern
-# gVisor: install runsc, add it to k3s's containerd config template, then a RuntimeClass "gvisor"
-# agent-sandbox: install a pinned release of its controller (manifest or Helm)
-```
-Then the Fern Helm chart (in progress): CRDs, DaemonSet, CSI driver, NetworkPolicy defaults.
+`lab/vps.sh HOST`, from the Mac, as root over SSH. Every step skips what is done, so running it again updates Fern:
+- **The pool:** a sparse 50 GB image file on the server's own disk, btrfs, loop-mounted `noatime` at `/var/lib/fern` from fstab; k3s waits for the mount. A network volume would be slower.
+- **gVisor:** a pinned release, checked against its SHA-512, registered with k3s's containerd before k3s first starts; RuntimeClass `gvisor`.
+- **k3s:** a pinned version with `deploy/k3s-config.yaml`; then a pinned agent-sandbox release.
+- **Fern and T3:** `lab/build.sh t3` builds the images on the Mac and streams them to the node's containerd, so the VPS needs the Mac's CPU architecture (ARM for an M-series Mac).
+
+With `FERN_HOST=HOST`, the lab's scripts (`check.sh`, `fern`, `claude-login.sh`, `t3-pair.sh`, `build.sh`) work on the VPS. Only SSH may be reachable from outside: a firewall in front of the server must close the Kubernetes API and T3's NodePort.
 
 ### 1.3 Fast inner loop
 - **Unit tests** run anywhere (`go test -race ./...`), using the fake driver. That works on the Mac inside a Go container, or on the VM.

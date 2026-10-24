@@ -20,6 +20,12 @@ lab_up || exit 0
 
 import_images "${images[@]/%/:dev}"
 k apply -f - <deploy/fern.yaml >/dev/null
+if [ -n "$FERN_HOST" ]; then
+  # In the cluster, the Kubernetes API's address leads to the node's public
+  # one, as do NodePorts; boxes may reach neither (architecture §13).
+  k -n fern-boxes patch networkpolicy boxes-to-internet-only --type=json \
+    -p "[{\"op\": \"add\", \"path\": \"/spec/egress/1/to/0/ipBlock/except/-\", \"value\": \"$FERN_HOST/32\"}]" >/dev/null
+fi
 k -n fern-system rollout restart ds/fern >/dev/null
 k -n fern-system rollout status ds/fern --timeout=300s >/dev/null
 echo "restarted the daemon"

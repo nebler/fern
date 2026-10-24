@@ -4,9 +4,11 @@
 # Fern. Everything it makes is named fern-lab* or labelled part-of=fern.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
-K3S_IMAGE=rancher/k3s:v1.36.5-k3s1
-SANDBOX_VERSION=v1.0.7
 
+if [ -n "$FERN_HOST" ]; then
+  echo "FERN_HOST is set; lab/vps.sh sets up a VPS" >&2
+  exit 1
+fi
 if lab_up; then
   echo "$LAB already exists; run lab/down.sh first" >&2
   exit 1
@@ -27,7 +29,7 @@ docker run --rm --label "$LABEL" -v fern-lab-pool:/img --entrypoint sh fern:dev 
 docker run -d --name "$LAB" --hostname "$LAB" --label "$LABEL" --privileged --restart on-failure \
   --tmpfs /run --tmpfs /var/run -v fern-lab-pool:/var/lib/fern-img \
   -p 127.0.0.1:30773:30773 -e K3S_SETTINGS="$(cat deploy/k3s-config.yaml)" \
-  --entrypoint /bin/sh "$K3S_IMAGE" -c '
+  --entrypoint /bin/sh "rancher/k3s:${K3S_VERSION/+/-}" -c '
     set -e
     mount --make-rshared /
     mkdir -p /var/lib/fern /etc/rancher/k3s

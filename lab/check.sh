@@ -29,7 +29,8 @@
 #   t3           T3's server: the checkpoint hook's commands on a worktree it
 #                made, and that worktree's box with git, Claude's folder and
 #                login. Needs lab/build.sh t3; not in the default run.
-# Run all but t3, or name some: lab/check.sh stream daemon. Needs lab/up.sh.
+# Run all but t3, or name some: lab/check.sh stream daemon. Needs lab/up.sh,
+# or lab/vps.sh and FERN_HOST for a VPS.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 ENV=ck IDLE=${IDLE:-180}
@@ -97,7 +98,11 @@ wait_daemon() {
 }
 # restart_node restarts k3s, and with it every pod.
 restart_node() {
-  docker restart "$LAB" >/dev/null
+  if [ -n "$FERN_HOST" ]; then
+    on_node sh -c 'k3s-killall.sh >/dev/null 2>&1; systemctl start k3s' </dev/null
+  else
+    docker restart "$LAB" >/dev/null
+  fi
   until k get nodes 2>/dev/null | grep -q ' Ready'; do sleep 1; done
   wait_daemon
 }
@@ -124,7 +129,7 @@ slice() {
 }
 
 # mounts prints how often an environment's workspace is mounted on the node.
-mounts() { docker exec "$LAB" grep -c "/envs/$1/live " /proc/self/mountinfo || true; }
+mounts() { on_node grep -c "/envs/$1/live " /proc/self/mountinfo </dev/null || true; }
 # procs prints the names of the processes in an environment's box.
 procs() { fern exec "$1" -- sh -c 'cat /proc/[0-9]*/comm 2>/dev/null; true' | sort -u; }
 
@@ -392,7 +397,11 @@ many() {
   wait
   note "10 sleeping environments woken at once: $(($(now_ms) - start)) ms until all answered"
   check "all 10 answer (3 users each)" 10 "$(cat "$TMP"/many* | grep -cx 3 || true)"
-  note "lab memory with 10 boxes awake: $(docker stats --no-stream --format '{{.MemUsage}}' "$LAB")"
+  if [ -n "$FERN_HOST" ]; then
+    note "node memory used with 10 boxes awake: $(on_node free -m </dev/null | awk 'NR == 2 { print $3 }') MiB"
+  else
+    note "lab memory with 10 boxes awake: $(docker stats --no-stream --format '{{.MemUsage}}' "$LAB")"
+  fi
   for i in $(seq 10); do fern rm "m$i"; done
 }
 
@@ -404,10 +413,13 @@ limits() {
   # sets); no_new_privs is what makes setuid files useless in the box.
   check "commands run with no_new_privs" 1 "$(fern exec $ENV -- grep NoNewPrivs /proc/self/status | awk '{print $2}')"
   check "the box has a CPU limit (2 cores)" "200000 100000" "$(fern exec $ENV -- cat /sys/fs/cgroup/cpu.max)"
-  # Kubelet sets the PID limit on the pod's cgroup, which the container can't see.
+  # Kubelet sets the PID limit on the pod's cgroup, which the container can't
+  # see. Its name depends on the cgroup driver: pod<uid> in the lab,
+  # ...-pod<uid with _>.slice under systemd.
   uid=$(pod_uid $ENV)
   check "the box's pod has a PID limit" 4096 \
-    "$(docker exec "$LAB" sh -c "cat /sys/fs/cgroup/kubepods/*/pod$uid/pids.max /sys/fs/cgroup/kubepods/pod$uid/pids.max 2>/dev/null")"
+    "$(on_node sh -c "cat /sys/fs/cgroup/kubepods*/pod$uid/pids.max /sys/fs/cgroup/kubepods*/*/pod$uid/pids.max \
+      /sys/fs/cgroup/kubepods*/*/*pod${uid//-/_}.slice/pids.max /sys/fs/cgroup/kubepods*/*pod${uid//-/_}.slice/pids.max 2>/dev/null" </dev/null)"
   fern wake ${ENV}2 >/dev/null
   ip=$(k -n fern-boxes get pod ${ENV}2 -o jsonpath='{.status.podIP}')
   check "a box can't reach another box" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:7070/")"
@@ -501,10 +513,10 @@ gvisor() {
   echo "== under gVisor"
   # gVisor goes into the lab node, not the Mac: a pinned release, checked
   # and registered with k3s's containerd for RuntimeClass "gvisor".
-  if ! docker exec "$LAB" test -x /usr/local/bin/runsc; then
+  if ! on_node test -x /usr/local/bin/runsc </dev/null; then
     local arch url
     case $(docker version -f '{{.Server.Arch}}') in arm64) arch=aarch64 ;; *) arch=x86_64 ;; esac
-    url=https://storage.googleapis.com/gvisor/releases/release/20261012/$arch/gvisor.tar.bz2
+    url=https://storage.googleapis.com/gvisor/releases/release/$GVISOR_RELEASE/$arch/gvisor.tar.bz2
     curl -sSfL -o "$TMP/gvisor.tar.bz2" "$url"
     if [ "$(shasum -a 512 "$TMP/gvisor.tar.bz2" | cut -d' ' -f1)" != "$(curl -sSfL "$url.sha512" | cut -d' ' -f1)" ]; then
       check "gVisor's download matches its checksum" yes no
@@ -518,7 +530,7 @@ gvisor() {
   # gVisor mirrors all of a box's memory mappings into one host process; at
   # the kernel's default limit, large builds (Node, JVM) segfault. Set on
   # every run: the Docker Desktop VM forgets it when it restarts.
-  docker exec "$LAB" sysctl -qw vm.max_map_count=4194304
+  on_node sysctl -qw vm.max_map_count=4194304 </dev/null
   k apply -f - >/dev/null <<'YAML'
 apiVersion: node.k8s.io/v1
 kind: RuntimeClass
