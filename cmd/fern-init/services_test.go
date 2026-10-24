@@ -168,3 +168,16 @@ func checkGone(t *testing.T, path string) {
 	t.Errorf("process %d survived in state %q", pid, state)
 	_ = syscall.Kill(pid, syscall.SIGKILL)
 }
+
+// A failing script's error quotes the start of its output, however much it
+// printed.
+func TestShellQuotesBoundedOutput(t *testing.T) {
+	err := shell(t.Context(), 10*time.Second, "echo first; head -c 1048576 /dev/zero; exit 3", t.TempDir(), []string{pathEnv})
+	if err == nil {
+		t.Fatal("shell() error = nil, want the script's exit status")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "first") || !strings.Contains(msg, "more bytes") || len(msg) > maxShellOutput+100 {
+		t.Errorf("shell() error is %d bytes, want the first %d bytes of output and a count of the rest", len(msg), maxShellOutput)
+	}
+}

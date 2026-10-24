@@ -178,11 +178,40 @@ func shell(ctx context.Context, timeout time.Duration, script, dir string, env [
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	// Bounds the wait for output held open by processes outside the group.
 	cmd.WaitDelay = shellWaitDelay
-	out, err := cmd.CombinedOutput()
+	// A ready check runs every 100ms while a box wakes: a failing one that
+	// prints a lot must not grow fern-init by what it prints.
+	out := &headBuffer{max: maxShellOutput}
+	cmd.Stdout, cmd.Stderr = out, out
+	err := cmd.Run()
 	// ErrWaitDelay means the script succeeded but left something behind
 	// holding its output; the script's own result is what counts.
 	if err != nil && !errors.Is(err, exec.ErrWaitDelay) {
 		return fmt.Errorf("%w: %s", err, out)
 	}
 	return nil
+}
+
+// maxShellOutput is how much of a script's output an error quotes.
+const maxShellOutput = 4 << 10
+
+// headBuffer keeps the first max bytes written to it and counts the rest.
+// It accepts every write, so the script never blocks on a full pipe.
+type headBuffer struct {
+	max     int
+	buf     []byte
+	dropped int
+}
+
+func (b *headBuffer) Write(p []byte) (int, error) {
+	n := min(len(p), b.max-len(b.buf))
+	b.buf = append(b.buf, p[:n]...)
+	b.dropped += len(p) - n
+	return len(p), nil
+}
+
+func (b *headBuffer) String() string {
+	if b.dropped == 0 {
+		return string(b.buf)
+	}
+	return fmt.Sprintf("%s… (%d more bytes)", b.buf, b.dropped)
 }
