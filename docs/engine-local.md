@@ -67,9 +67,8 @@ Then the Fern Helm chart (in progress): CRDs, DaemonSet, CSI driver, NetworkPoli
 
 | Package | Job | Tested by |
 |---|---|---|
-| `store` | btrfs pool, subvolumes, snapshot / fork / restore / delete, retention, index (SQLite) | E1, E2 |
-| `oplog` | durable multi-step operations, replay after a crash (port Fern v1's intent log) | E6 |
-| `actor` | one goroutine per environment; mutations one at a time; execs tracked; persisted timers | E5 |
+| `store` | btrfs pool, subvolumes, snapshot / fork / restore / delete, retention, index (SQLite); crash safety: every multi-step change leaves the disk in a state `Reconcile` finishes or clears (no separate op log) | E1, E2, E6 |
+| `actor` | one goroutine per environment; mutations one at a time; execs tracked; idle sleep | E5, E8 |
 | `operator` | kubelet-style reconcile of this node's `Environment` resources; status; owner references | E6, E13 |
 | `driver` | one agent-sandbox `Sandbox` per environment (`podTemplate` with RuntimeClass, limits, CSI volume; `operatingMode` for sleep/wake); a fake for unit tests | E0, E4 |
 | `csi` | CSI node plugin: mount an environment's `live/`, **only for its own pod** | E0, E14 |
@@ -125,6 +124,7 @@ Each one: **shows**, **how**, **pass**. Numbers are reported as p50/p95, with no
   3. Take 50+ snapshots during the writes.
   4. Recover each snapshot on a writable copy.
 - **Pass:** every copy recovers; `max(id)` ≥ the last ID acknowledged before the snapshot; `amcheck` is clean. Bonus: SQLite in WAL mode.
+- **Status (2026-10-24):** `lab/check.sh pgload`: 60 snapshots, one a second, under `pgbench -c 4`; each restored into the environment, then pgbench's account, teller and branch balances agree (every transaction whole) and `pg_amcheck --heapallindexed` is clean: 60 of 60. The acknowledged-ID part isn't checked. Under gVisor: the same with 10 snapshots, in `lab/check.sh gvisor`.
 
 ### E3. Golden snapshots
 - **How:**
@@ -144,14 +144,16 @@ Each one: **shows**, **how**, **pass**. Numbers are reported as p50/p95, with no
 
 ### E5. One writer per environment (actors)
 - **How:** 50 goroutines firing mixed exec/snapshot/restore/fork at one environment; check invariants after each step; run under `-race`.
-- **Pass:** zero violations over 10,000 randomized runs; long execs don't block mutations; a restore cancels execs (generation bump).
+- **Pass:** zero violations over 10,000 randomized runs; long execs don't block mutations; a restore cancels execs.
+- **Status (2026-10-24):** `TestConcurrentChanges`: 50 goroutines, 2,000 mixed changes and execs over three environments, with a store and driver that fail on any overlap; passes under `-race`, repeated. `TestStopCancelsExecs` covers the cancel. Fork isn't built.
 
-### E6. Crash safety (op log + operator)
+### E6. Crash safety (Reconcile + operator)
 - **How:**
   1. Failpoints between every step of rewind, fork and golden build.
   2. Kill the daemon there (`kubectl delete pod --force` on the DaemonSet pod), let it restart and reconcile.
   3. Repeat thousands of times in CI (fake driver) and hundreds of times on k3s.
 - **Pass:** always the "before" or the "after" state; no orphaned subvolumes or pods; `Environment` status correct.
+- **Status (2026-10-24), the store part:** `TestCrash` stops create, adopt, delete, snapshot, delete snapshot and restore at each of their 15 steps, runs `Reconcile`, and checks before-or-after, that a restore never loses the replaced workspace, and that the change can be made again: all pass on btrfs. Killing the real daemon at those points, fork, golden and the operator are still to do.
 
 ### E7. Front door: waking on touch
 - **How:** put an environment to sleep, then send 20 concurrent requests (preview, exec, socket). Count pod creations and time-to-first-byte.

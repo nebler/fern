@@ -51,6 +51,14 @@ T3's server in a pod with the pool and the daemon socket, the checkpoint hook in
 
 The actor per environment with a generation number (restore cancels open execs), the op log for create, adopt, restore and delete with a startup reconcile, failpoint crash tests (E6-lite), E2 and E5, the idle timer, and `/metrics`.
 
+**Status (2026-10-24): done, with one change of plan.**
+- **Actor** (`internal/actor`): one goroutine per environment while its box may be running; changes one at a time; a restore, sleep or delete cancels the execs it counts, which fences stale work without a generation number.
+- **Idle sleep:** 5 min after the last command ended and 20 min after it started (`--idle-agent`, `--idle-human`); boxes left awake by an earlier daemon get an actor at start.
+- **No op log.** The store already left the disk showing how far each change got (markers, `live.new`, `adopt.new`), and `Reconcile` finishes or clears it; a log in SQLite would have been a second source of truth. Added instead: a restore keeps the replaced workspace as `pre-restore-<time>` for a day (taken before the swap), `Reconcile` matches snapshot rows to the disk both ways, and `TestCrash` stops every change at each of its 15 steps (E6, store part).
+- **E2:** Postgres whole (pgbench's balances agree) and clean (`pg_amcheck`) after each of 60 restores of snapshots taken under write load (`lab/check.sh pgload`). **E5:** 2,000 changes from 50 goroutines, no overlap (`TestConcurrentChanges`).
+- **`/metrics`** on the daemon's port 9090: wake, restore and snapshot latency, idle sleeps.
+- **Review round** (architecture, Go, security, dead code, performance): fixed a box escape into T3's pod through the worktree's `.git` file, CSI mounts for any pod, Claude falling back to T3's pod, missing egress rules, and two actor bugs when a caller gives up (`lab/RESULTS.md`).
+
 **From Amp's self-hosted orbs (research 2026-10-22):**
 - **Idle timer with two clocks** (architecture §6.3): sleep only when no exec is open, 5 min have passed since the last exec closed, and 20 min since the last human touch. Test it with `testing/synctest`.
 - **Keep the lifecycle safe to repeat** after the actor refactor: `TestLifecycleRepeats` (create, sleep and wake twice each, delete) must still pass, and the lab runs the same sequence against k3s.

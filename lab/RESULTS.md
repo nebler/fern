@@ -251,3 +251,25 @@ The T3 app on the Mac, paired with the lab's T3 server (`lab/t3-pair.sh`), Claud
 - A thread started in **Local** (the project's main folder) isn't a Fern environment: Claude runs in T3's pod without a database, and edited `seed.sql` instead. Only **New worktree** threads get a box.
 - "Revert and keep changes" rewinds only the chat; "Revert files too" is the one that restores.
 - A stopped Docker Desktop stops the lab; `docker start fern-lab` brings it back with everything in it.
+
+## Part C: actor, crash safety, idle sleep, 2026-10-24
+
+Same lab. Commands: `lab/test-store.sh`, `lab/go.sh test -race ./...`, `lab/check.sh slice concurrency restore pgload idle daemon paths limits claude t3`.
+
+| Check | Result |
+|---|---|
+| crash at each of 15 steps of create, adopt, delete, snapshot, delete snapshot, restore, then `Reconcile` (`TestCrash`) | before or after every time; a restore's replaced workspace never lost |
+| 50 goroutines, 2,000 mixed changes and execs on 3 environments, `-race` (`TestConcurrentChanges`) | no overlapping change |
+| Postgres: 60 snapshots under `pgbench -c 4`, each restored | 60 of 60 whole and `pg_amcheck` clean; snapshot under load p50 19 ms, p95 166 ms |
+| idle sleep, with 5 s / 10 s idle times | asleep 10 s after a command started; a running command keeps it awake; also across a daemon restart |
+| the same under gVisor, 10 snapshots | 10 of 10; snapshot p50 17 ms; wake after a restore p50 1,170 ms (808 ms on 2026-10-22; not yet explained) |
+| a restore keeps the replaced workspace (`pre-restore-<time>`) | restoring it undoes the restore |
+| a box rewrites the worktree's `.git` | refused (read-only) |
+| `claude` in a pool worktree without an environment | refuses to run |
+| a pod outside `fern-boxes` mounts an environment | refused: "may not mount" |
+| a box reaches the daemon's metrics / the Kubernetes API / the internet | no / no / yes |
+
+**Found on the way:**
+- **Security review: a box could run code in T3's pod.** T3 runs git in each worktree, and git follows the worktree's `.git` file. A box could point it at a folder of its own whose config runs a command (`core.fsmonitor`). The `.git` file is now read-only in the box. Also fixed: the CSI plugin mounted folders for any pod, `fern-claude` ran Claude in T3's pod when the daemon didn't answer, and boxes could reach anything private.
+- **Go review: two bugs when a caller gives up.** An exec cancelled during a wake stayed counted, so that box never slept; a cancelled seeded create left the actor reading a finished request's body. A caller now waits for a change the actor has started.
+- **k3s in the lab exits when its datastore is slow** (under an image build or pgbench): "Transaction commit failed". The lab container now restarts it. One snapshot under load took 44 s around such a stall.

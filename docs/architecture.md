@@ -74,7 +74,7 @@ Three nouns. Everything else is a property of one of them.
  MCP ──────┘    │ (socket)     (previews, hooks)       mailbox · one op at a time  ├──▶ driver   │──▶ boxes
  browser ──────▶│ preview http                                                   ├──▶ setup    │
  webhook ──────▶│ /hooks                                                          └──▶ identity │
-                │                       oplog (SQLite) ◀── every multi-step op                 │
+                │                       Reconcile ◀── finishes or clears a change a crash stopped │
                 └────────────────────────────────────────────────────────────────────────────────┘
  inside every box:  fern-init (main process) → runs services, serves exec/PTY and readiness, reports activity
 ```
@@ -83,8 +83,8 @@ Three nouns. Everything else is a property of one of them.
 |---|---|---|
 | **api** | the daemon's request surface: unix socket (JSON over HTTP), auth, idempotency keys | wake, actor |
 | **wake** (front door) | finds or creates the environment's actor; wakes sleeping environments **once**, holds requests while waking, routes previews and webhooks | actor |
-| **actor** | owns one environment: its state, its `live/` pointer, its session; applies operations **one at a time**; enforces idle rules | store, driver, oplog, setup, identity |
-| **oplog** | durable record of multi-step operations; every step safe to repeat; replayed on startup | SQLite |
+| **actor** | owns one environment while its box may be running: applies changes **one at a time**, counts running execs, cancels them on restore, sleep and delete, and puts an idle box to sleep (built: `internal/actor`) | store, driver, setup, identity |
+| **Reconcile** (in store) | crash safety without a separate log: every multi-step change leaves the disk in a state that shows how far it got, and `Reconcile` finishes or clears it on start (built). Crash tests stop each change at every step | btrfs, SQLite |
 | **store** | btrfs pool: subvolumes, snapshots, forks, restore by swap, retention, size accounting | btrfs |
 | **operator** (in the daemon) | kubelet-style: watches `Environment` resources assigned to **its own node**, reconciles them, writes status; each `Environment` owns one `Sandbox`, which owns the session pod | Kubernetes API (controller-runtime) |
 | **driver** | makes one agent-sandbox `Sandbox` per environment at its first wake and brings its `podTemplate` up to date at every wake, then flips `operatingMode` (`Running` = awake, `Suspended` = asleep); the template carries the CSI volumes, RuntimeClass, limits and node pinning. Kubernetes only, plus a fake for unit tests | Kubernetes API (agent-sandbox `v1beta1`) |
@@ -92,7 +92,7 @@ Three nouns. Everything else is a property of one of them.
 | **identity** | post-fork / post-restore hook: new environment ID, fresh secrets, new preview names and ports | actor |
 | **fern-init** | the main process of every box (the pod's pause container is PID 1): starts and supervises services, serves exec with PTYs and readiness, reports activity (open execs, preview connections; planned) | api (via the driver) |
 | **mcp** | exposes agent tools (`env_snapshot`, `env_restore`, `env_fork`, `env_exec`, `env_delete`) | api |
-| **csi** | CSI node plugin: mounts an environment's folders (workspace, Claude's folder, git folder) into its box; planned: **only for that environment's own pod**, checked from the requesting pod's identity | store |
+| **csi** | CSI node plugin: mounts an environment's folders (workspace, Claude's folder, git folder) into its box, **only for that environment's own pod**: named after it, in `fern-boxes` (built); planned: the pod's UID checked against its `Sandbox` | store |
 
 **Why an in-box agent (`fern-init`)?** Exec, services and activity reporting then work the same way locally and on Kubernetes. That avoids `docker exec` / `kubectl exec` as a data plane (those are fragile for long streams). Its exec protocol is Fern's own: one WebSocket per command, with frames for stdin, stdout, stderr, terminal sizes and signals (`internal/boxexec`). Speaking agent-sandbox's `sandboxd` (gRPC with PTY) instead, so its SDKs would work, is still open (§20).
 
@@ -119,12 +119,10 @@ sessions(
   state TEXT, started_at, generation INTEGER
 )
 goldens(key TEXT PRIMARY KEY, repo TEXT, snapshot TEXT, built_at, last_used_at)
-ops(id TEXT PRIMARY KEY, env TEXT, kind TEXT, idem_key TEXT UNIQUE, state TEXT, created_at)
-op_steps(op TEXT, n INTEGER, name TEXT, state TEXT, PRIMARY KEY(op, n))
 ```
 
 - The disk is the data; SQLite is the index and the log. On startup the daemon **reconciles**: the subvolumes and sessions that actually exist versus what the tables say (§12).
-- **Generation numbers fence stale work.** An exec or snapshot that started before a restore can't write after it.
+- **A restore fences stale work** by stopping the box and cancelling every exec the actor counts, including one still connecting, so nothing that started before it runs after it (built). The planned `generation` column records the count of restores for status.
 - **Timers** (idle sleep, fork TTL, retention) are rows too (`timers(env, kind, due_at)`), so they survive restarts, like Durable Objects' alarms.
 - **Kubernetes holds desired state, the daemon holds observed state:**
 ```yaml
@@ -185,7 +183,7 @@ Unix socket `/run/fern/fern.sock` (a host directory, so T3's server pod can shar
    └── delete ──▶ deleting ──▶ (gone)
 ```
 - **Asleep** = disk only. **Running** = disk + session.
-- **Only mutations queue** (snapshot, restore, fork, delete): they run one at a time. Running execs and golden builds are tracked separately; a restore **cancels** running execs first (generation bump), so a long agent turn never blocks the mailbox and a restore never interleaves with an exec.
+- **Only mutations queue** (snapshot, restore, fork, delete): they run one at a time. Running execs and golden builds are tracked separately; a restore **cancels** running execs (built), so a long agent turn never blocks the mailbox and a restore never interleaves with an exec.
 - **Ephemeral environments:** on idle, `stopping` → discard `live/` (keep tagged snapshots) → `asleep (empty)`. The next touch forks from golden again.
 
 ### 6.2 Session
@@ -200,6 +198,8 @@ An environment goes to sleep when all of these hold (two clocks, copied from Amp
 - **human clock:** `idle.human` (default 20 min) since the last human touch: an exec or terminal opened, or a preview request
 
 CPU usage and running services are ignored. An explicit `hold` keeps it awake.
+
+Built: the actor's timer, with both clocks touched by every exec (`--idle-agent`, `--idle-human`; 0 turns it off). Terminals, previews and `hold` are planned.
 
 ---
 
@@ -221,8 +221,10 @@ CPU usage and running services are ignored. An explicit `hold` keeps it awake.
 1. The hook → `POST /restore {snapshot: "7f3a"}`. The op is logged in four steps:
    1. stop the session (gracefully)
    2. `live.new` = writable snapshot of `7f3a`
-   3. atomic swap `live.new` ↔ `live`; bump the generation
-   4. keep the old live as a read-only snapshot tagged `pre-restore` for a day, so a revert can itself be undone (copied from Delta, which keeps work it couldn't sync instead of dropping it)
+   3. keep the current live as a read-only snapshot `pre-restore-<time>` for a day, so a revert can itself be undone (copied from Delta, which keeps work it couldn't sync instead of dropping it); taken before the swap, so a crash can't lose it
+   4. atomic swap `live.new` ↔ `live`; cancel the execs the actor counts
+
+   Built. A crash at any step leaves the old or the new workspace, and `Reconcile` clears `live.new`.
 2. ok. Then T3 restores code from git, which also fixes the index in the main repository.
 3. The next exec restarts the box on the restored disk.
 
@@ -285,7 +287,7 @@ services:
   envs/<id>/snaps/<snapshot>/    read-only
   envs/<id>/claude/              Claude's state (CLAUDE_CONFIG_DIR): never snapshotted, so a restore keeps the transcripts
   worktrees/<repo>/<name>/       writable workspace of an environment at a path: T3's worktrees
-  state/fern.sqlite              index + op log (on the same disk, not inside any snapshot)
+  state/fern.sqlite              the index (on the same disk, not inside any snapshot)
   userdata/ caches/ tools/       T3's own state: T3's home is the pool, so its worktrees land in worktrees/
   repos/<repo>/                  the projects' main repositories, which T3's worktrees point into
 ```
@@ -336,10 +338,10 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
 
 | Failure | What happens |
 |---|---|
-| **Daemon crash** | on restart: replay unfinished ops from `op_steps` (every step safe to repeat), then reconcile subvolumes and sessions against the tables; orphans are removed or re-adopted |
+| **Daemon crash** | on restart, `Reconcile` reads what each half-done change left on disk (markers, `live.new`, snapshots without rows) and finishes or clears it; boxes left running get an actor, so they still sleep when idle (built) |
 | **Box crash** | the actor restarts it with backoff; after N failures in a window → `failed`, the next touch retries |
 | **Crash mid-turn** | the agent CLI resumes from its session files; Fern can restore to the last turn snapshot before resuming if the transcript is broken |
-| **Restore during an exec** | the exec is cancelled first; generation fencing stops any late writes from the old session |
+| **Restore during an exec** | the box stops and the actor cancels the exec, so no late write from the old session reaches the restored disk (built) |
 | **Disk full** | snapshots refused with `quota_exceeded`; retention runs; the box keeps working |
 | **Snapshot fails at a turn's end** | the turn still counts: T3 keeps its git checkpoint and the hook logs the error; reverting to that turn is refused with the reason (§7.3) |
 | **Node loss (Kubernetes)** | environments on that node are unavailable until it returns, or until they're restored elsewhere from shipped snapshots (`btrfs send` to object storage, optional) |
@@ -355,7 +357,8 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
   - T3 and the CLI are trusted local callers
   - agents via MCP get **a token scoped to their own environment**
 - **Mounting is the permission.** A box sees only its own workspace and Claude folder, and its repository's git folder read-only, only through the CSI driver, never raw host paths.
-- **The CSI driver authorizes every mount:** it only mounts an environment for a pod owned by that `Environment` (checked from the requesting pod's identity). Without this, any pod could name another environment and get its disk.
+- **A box can't make T3 run its code.** T3's server runs git in the worktrees, as the box's user. The box gets the main repository's git folder read-only, and the worktree's `.git` file read-only too, so it can't point git at a folder whose config runs commands (such as `core.fsmonitor`). `fern-claude` never runs Claude in T3's pod for a folder in the pool's worktrees. Built and checked (`lab/check.sh t3`).
+- **The CSI driver authorizes every mount:** it only mounts an environment for the pod named after it in `fern-boxes`, where only the daemon makes pods (built). Without this, any pod could name another environment and get its disk. Planned: the pod's UID checked against its `Sandbox`, and the `Environment` owner once there are CRDs.
 - **An admission policy limits the daemon:** it may only create `Sandbox` objects pinned to its own node (node-bound service-account tokens) and only with allowed runtimes.
 - **User namespaces** for every box.
 - **Credentials:**
@@ -363,7 +366,8 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
   - **never in `live/`, golden or snapshots** (golden builds are scanned). Claude's state lives in `envs/<id>/claude/`, outside `live/`; with the login in its environment it writes no credentials file. Codex keeps `auth.json` in its home, which is mounted from outside `live/` the same way
   - forks get fresh credentials
 - **Non-model secrets:** a host-side broker for short-lived, scoped tokens (Fern v1's GitHub App broker); per-environment OIDC tokens later.
-- **Network:** deny by default; per-class allowlists.
+- **Network:** a box takes connections only from the daemon, and reaches only DNS and the public internet: not T3, the daemon, the node, the Kubernetes API, other boxes or a cloud's metadata endpoint (built, `deploy/fern.yaml`). Planned: per-class allowlists.
+- **Known gaps:** boxes of the same repository share its read-only git folder, so one can read another's checkpoints (the full fix is a repository per thread); the box token is readable in `/proc` by the box's own processes (harmless while only the daemon can reach fern-init); user namespaces and a Pod Security level for `fern-boxes` aren't set yet.
 - **Isolation levels by class:** runc → gVisor → micro-VM.
 
 ### 13.1 Subscription terms
@@ -447,14 +451,9 @@ A first, then propose B with what the spike learned (roadmap week 8). C only if 
 ## 16. Observability
 
 - **Events:** `GET /events` (created, woke, slept, snapshot, restored, forked, failed).
-- **Metrics (Prometheus):**
-  - snapshot latency
-  - wake latency (p50, p95)
-  - golden hit rate and build time
-  - active sessions
-  - pool usage
-  - op retries
-  - box restarts
+- **Metrics (Prometheus),** at `/metrics` on the daemon's port 9090 (`--metrics-addr`):
+  - built: `fern_snapshot_seconds`, `fern_wake_seconds`, `fern_restore_seconds` (histograms), `fern_idle_sleeps_total`, and Go's process metrics
+  - planned: golden hit rate and build time, active sessions, pool usage, box restarts
 - **Logs:** per environment (services, `fern-init`, resume/setup output), viewable with `fern logs <env>`.
 - **CLI:** `fern ls`, `fern inspect <env>`, `fern snapshots <env>`, `fern top`.
 
@@ -485,7 +484,6 @@ cmd/fern-init/       the main process inside boxes
 internal/api/        socket API, auth, idempotency
 internal/wake/       front door, preview routing, webhooks, coalescing
 internal/actor/      per-environment actors, idle rule, supervision
-internal/oplog/      durable ops + replay (ported from Fern v1's intent log)
 internal/store/      btrfs (and later zfs) backends, retention, index
 internal/operator/   kubelet-style reconciler for this node's Environments (controller-runtime)
 internal/driver/     agent-sandbox Sandbox per environment (+ a fake for unit tests)

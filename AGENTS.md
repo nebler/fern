@@ -36,7 +36,7 @@ The same sources are available as on-demand skills in [.claude/skills/](.claude/
 ## Go rules
 
 **Packages and types**
-- One job per package, named after the job (`store`, `actor`, `oplog`). No `util`, `common`, `helpers`, `types` or `models` packages.
+- One job per package, named after the job (`store`, `actor`, `driver`). No `util`, `common`, `helpers`, `types` or `models` packages.
 - No stutter: `store.Store`, not `store.StoreService`.
 - Plain structs and constructors (`New(...)`). No builders, no getters/setters. Functional options only when a constructor really has many optional settings.
 - No globals, no `init()`, no package-level mutable state. Wiring happens by hand in `cmd/`.
@@ -66,7 +66,7 @@ The same sources are available as on-demand skills in [.claude/skills/](.claude/
 - No commented-out code, no TODOs without an owner and reason.
 
 ## Fern rules
-- **Every multi-step operation is an op-log entry,** and every step is safe to repeat (idempotent). Write the step, then do it.
+- **Every multi-step change is crash-safe:** after a crash at any step, the disk shows what was under way (a marker file, a leftover copy beside the workspace, a snapshot without its row), and `Reconcile` finishes it or clears it on start. Every step is safe to repeat (idempotent).
 - **The disk is the truth; SQLite is the index.** On start, reconcile what exists with what the tables say.
 - **Per-turn work never touches the Kubernetes API.** Snapshots, restores and execs go to the node-local daemon.
 - **Credentials never enter `live/`, golden or snapshots.**
@@ -80,7 +80,7 @@ The same sources are available as on-demand skills in [.claude/skills/](.claude/
 ## Tests
 - Table-driven tests with `t.Run`. Diffs with `github.com/google/go-cmp/cmp`.
 - Standard `testing` only: no testify, no gomock. Hand-written fakes.
-- Test behaviour through the public API of the package. Crash tests use failpoints at every op-log step.
+- Test behaviour through the public API of the package. Crash tests stop every multi-step change at each of its steps (`store.SetFailAt`).
 
 ## Dependencies
 Allowed without asking: the standard library, `golang.org/x/...`, `k8s.io/...`, `sigs.k8s.io/...`, `modernc.org/sqlite`, the CSI spec + gRPC, `creack/pty`, `coder/websocket`, the MCP Go SDK, Prometheus and OpenTelemetry clients, `go-cmp`, `goleak`, the agent-sandbox API types. Anything else: ask first and say why the standard library isn't enough.
