@@ -7,6 +7,7 @@ require (
 	github.com/container-storage-interface/spec v1.13.0
 	github.com/creack/pty v1.1.24
 	github.com/google/go-cmp v0.7.0
+	github.com/prometheus/client_golang v1.24.1
 	go.uber.org/goleak v1.3.0
 	golang.org/x/sync v0.24.0
 	golang.org/x/sys v0.49.0
@@ -53,7 +54,6 @@ require (
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/prometheus/client_golang v1.24.1 // indirect
 	github.com/prometheus/client_model v0.6.3 // indirect
 	github.com/prometheus/common v0.71.0 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect

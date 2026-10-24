@@ -5,12 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime"
 	"slices"
 	"sync"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.uber.org/goleak"
 
 	"github.com/nebler/fern/internal/actor"
@@ -263,6 +266,199 @@ func TestExecUnknown(t *testing.T) {
 		}
 		if n := drv.Wakes(); n != 0 {
 			t.Errorf("Wakes() = %d, want 0", n)
+		}
+	})
+}
+
+// guard wraps a store and a driver and records an error when two calls for
+// the same environment overlap: an actor must make them one at a time.
+type guard struct {
+	*fakeStore
+	drv *driver.Fake
+
+	mu       sync.Mutex
+	busy     map[string]bool
+	overlaps int
+}
+
+// enter marks id busy and lets an overlapping call run; leave ends it.
+func (g *guard) enter(id string) {
+	g.mu.Lock()
+	if g.busy[id] {
+		g.overlaps++
+	}
+	g.busy[id] = true
+	g.mu.Unlock()
+	runtime.Gosched()
+}
+
+func (g *guard) leave(id string) {
+	g.mu.Lock()
+	g.busy[id] = false
+	g.mu.Unlock()
+}
+
+func (g *guard) Create(ctx context.Context, id string, opts store.CreateOptions) (store.Env, error) {
+	g.enter(id)
+	defer g.leave(id)
+	return g.fakeStore.Create(ctx, id, opts)
+}
+
+func (g *guard) Delete(ctx context.Context, id string) error {
+	g.enter(id)
+	defer g.leave(id)
+	return g.fakeStore.Delete(ctx, id)
+}
+
+func (g *guard) Snapshot(ctx context.Context, id, snapID string) error {
+	g.enter(id)
+	defer g.leave(id)
+	return g.fakeStore.Snapshot(ctx, id, snapID)
+}
+
+func (g *guard) Restore(ctx context.Context, id, snapID string) error {
+	g.enter(id)
+	defer g.leave(id)
+	return g.fakeStore.Restore(ctx, id, snapID)
+}
+
+func (g *guard) Wake(ctx context.Context, env store.Env) (string, error) {
+	g.enter(env.ID)
+	defer g.leave(env.ID)
+	return g.drv.Wake(ctx, env)
+}
+
+func (g *guard) Sleep(ctx context.Context, id string) error {
+	g.enter(id)
+	defer g.leave(id)
+	return g.drv.Sleep(ctx, id)
+}
+
+func (g *guard) DeleteBox(ctx context.Context, id string) error {
+	g.enter(id)
+	defer g.leave(id)
+	return g.drv.Delete(ctx, id)
+}
+
+// guardDriver is guard as a Driver, whose Delete is the box's.
+type guardDriver struct{ *guard }
+
+func (d guardDriver) Delete(ctx context.Context, id string) error { return d.DeleteBox(ctx, id) }
+
+func (d guardDriver) States(ctx context.Context) (map[string]driver.State, error) {
+	return d.drv.States(ctx)
+}
+
+// E5: 50 goroutines make random changes and run commands on three
+// environments at once. No two changes of one environment overlap, every
+// call ends, and afterwards each environment that exists still works.
+func TestConcurrentChanges(t *testing.T) {
+	g := &guard{fakeStore: newFakeStore(), drv: driver.NewFake("box"), busy: make(map[string]bool)}
+	envs := actor.New(g, guardDriver{g}, actor.Idle{}, slog.New(slog.DiscardHandler))
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { envs.Run(ctx); close(done) }()
+	defer func() { cancel(); <-done }()
+
+	ids := []string{"a", "b", "c"}
+	for _, id := range ids {
+		if err := envs.Create(ctx, id, store.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := envs.Snapshot(ctx, id, "s", false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	changes := []func(id string) error{
+		func(id string) error { return envs.Snapshot(ctx, id, "s", true) },
+		func(id string) error { return envs.Restore(ctx, id, "s") },
+		func(id string) error { return envs.Sleep(ctx, id) },
+		func(id string) error { return envs.Wake(ctx, id) },
+		func(id string) error {
+			ex, err := envs.Exec(ctx, id, "", func() {})
+			if err != nil {
+				return err
+			}
+			runtime.Gosched()
+			ex.Close()
+			return nil
+		},
+		func(id string) error {
+			if err := envs.Delete(ctx, id); err != nil {
+				return err
+			}
+			if err := envs.Create(ctx, id, store.CreateOptions{}); err != nil {
+				return err
+			}
+			return envs.Snapshot(ctx, id, "s", false)
+		},
+	}
+	var wg sync.WaitGroup
+	for w := range 50 {
+		wg.Go(func() {
+			for i := range 40 {
+				id := ids[(w+i)%len(ids)]
+				// A delete and create of the same environment in another
+				// goroutine can come between: not found is a fair answer.
+				if err := changes[(w*7+i)%len(changes)](id); err != nil && !errors.Is(err, store.ErrNotFound) {
+					t.Errorf("change %d of %s: %v", (w*7+i)%len(changes), id, err)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if g.overlaps != 0 {
+		t.Errorf("%d calls overlapped another of the same environment", g.overlaps)
+	}
+	for _, id := range ids {
+		if err := envs.Create(ctx, id, store.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		ex, err := envs.Exec(ctx, id, "", func() {})
+		if err != nil {
+			t.Errorf("Exec(%s) after the storm error: %v", id, err)
+			continue
+		}
+		ex.Close()
+	}
+}
+
+// The Group counts wakes, snapshots, restores and idle sleeps.
+func TestMetrics(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		st, drv := newFakeStore(), driver.NewFake("box")
+		g := start(t, st, drv, idle)
+		ctx := t.Context()
+		if err := g.Create(ctx, "demo", store.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.Snapshot(ctx, "demo", "s1", false); err != nil {
+			t.Fatal(err)
+		}
+		exec(t, g, time.Second)
+		time.Sleep(idle.Human)
+		synctest.Wait()
+		if err := g.Restore(ctx, "demo", "s1"); err != nil {
+			t.Fatal(err)
+		}
+		reg := prometheus.NewRegistry()
+		reg.MustRegister(g)
+		families, err := reg.Gather()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make(map[string]uint64)
+		for _, f := range families {
+			m := f.GetMetric()[0]
+			if h := m.GetHistogram(); h != nil {
+				got[f.GetName()] = h.GetSampleCount()
+			} else {
+				got[f.GetName()] = uint64(m.GetCounter().GetValue())
+			}
+		}
+		want := map[string]uint64{"fern_wake_seconds": 1, "fern_snapshot_seconds": 1, "fern_restore_seconds": 1, "fern_idle_sleeps_total": 1}
+		if diff := cmp.Diff(want, got); diff != "" {
+			t.Errorf("metrics mismatch (-want +got):\n%s", diff)
 		}
 	})
 }

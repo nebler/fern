@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/nebler/fern/internal/driver"
 	"github.com/nebler/fern/internal/store"
 )
@@ -54,12 +56,18 @@ const changeTimeout = 10 * time.Minute
 // ErrStopped means the daemon is shutting down.
 var ErrStopped = errors.New("daemon is stopping")
 
-// Group runs the actors of a node's environments.
+// Group runs the actors of a node's environments. It is a Prometheus
+// collector of their metrics.
 type Group struct {
 	store  Store
 	driver Driver
 	idle   Idle
 	log    *slog.Logger
+
+	wakes      prometheus.Histogram
+	restores   prometheus.Histogram
+	snapshots  prometheus.Histogram
+	idleSleeps prometheus.Counter
 
 	find    chan findRequest // to Run, for an environment's actor
 	stopped chan struct{}    // closed when Run returns
@@ -75,7 +83,40 @@ type findRequest struct {
 func New(st Store, drv Driver, idle Idle, log *slog.Logger) *Group {
 	return &Group{
 		store: st, driver: drv, idle: idle, log: log,
+		wakes: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "fern_wake_seconds", Help: "Time to wake a box, until its services are ready.",
+			Buckets: prometheus.ExponentialBuckets(0.05, 2, 10),
+		}),
+		restores: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "fern_restore_seconds", Help: "Time to restore a snapshot, stopping the box included.",
+			Buckets: prometheus.ExponentialBuckets(0.05, 2, 10),
+		}),
+		snapshots: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name: "fern_snapshot_seconds", Help: "Time to take a snapshot.",
+			Buckets: prometheus.ExponentialBuckets(0.001, 2, 12),
+		}),
+		idleSleeps: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "fern_idle_sleeps_total", Help: "Boxes put to sleep because they were idle.",
+		}),
 		find: make(chan findRequest), stopped: make(chan struct{}),
+	}
+}
+
+func (g *Group) collectors() []prometheus.Collector {
+	return []prometheus.Collector{g.wakes, g.restores, g.snapshots, g.idleSleeps}
+}
+
+// Describe sends the descriptions of the Group's metrics.
+func (g *Group) Describe(ch chan<- *prometheus.Desc) {
+	for _, c := range g.collectors() {
+		c.Describe(ch)
+	}
+}
+
+// Collect sends the Group's metrics.
+func (g *Group) Collect(ch chan<- prometheus.Metric) {
+	for _, c := range g.collectors() {
+		c.Collect(ch)
 	}
 }
 
@@ -199,7 +240,12 @@ func (g *Group) Snapshot(ctx context.Context, id, snapID string, replace bool) e
 				return err
 			}
 		}
-		return g.store.Snapshot(ctx, id, snapID)
+		start := time.Now()
+		if err := g.store.Snapshot(ctx, id, snapID); err != nil {
+			return err
+		}
+		g.snapshots.Observe(time.Since(start).Seconds())
+		return nil
 	})
 }
 
@@ -225,10 +271,15 @@ func (g *Group) Restore(ctx context.Context, id, snapID string) error {
 		if !slices.ContainsFunc(snaps, func(snap store.Snapshot) bool { return snap.ID == snapID }) {
 			return fmt.Errorf("snapshot %s/%s: %w", id, snapID, store.ErrNotFound)
 		}
+		start := time.Now()
 		if err := a.stopBox(ctx, g.driver.Sleep); err != nil {
 			return err
 		}
-		return g.store.Restore(ctx, id, snapID)
+		if err := g.store.Restore(ctx, id, snapID); err != nil {
+			return err
+		}
+		g.restores.Observe(time.Since(start).Seconds())
+		return nil
 	})
 }
 
@@ -375,10 +426,12 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 	a.addr = ""
 	// Set first: a wake that fails half-way may leave the box running.
 	a.awake = true
+	start := time.Now()
 	addr, err := a.g.driver.Wake(ctx, env)
 	if err != nil {
 		return store.Env{}, err
 	}
+	a.g.wakes.Observe(time.Since(start).Seconds())
 	a.addr = addr
 	return env, nil
 }
@@ -442,6 +495,7 @@ func (a *actor) sleepIfIdle(ctx context.Context) {
 		a.closed = time.Now()
 		return
 	}
+	a.g.idleSleeps.Inc()
 	a.g.log.InfoContext(ctx, "idle box went to sleep", slog.String("env", a.id))
 }
 

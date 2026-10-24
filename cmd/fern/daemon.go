@@ -14,6 +14,9 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
@@ -54,6 +57,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	var idle actor.Idle
 	flags.DurationVar(&idle.Agent, "idle-agent", 5*time.Minute, "sleep this long after a box's last command ended (0: never)")
 	flags.DurationVar(&idle.Human, "idle-human", 20*time.Minute, "… and this long after it started (0: never)")
+	metricsAddr := flags.String("metrics-addr", ":9090", "serve Prometheus metrics at /metrics on this address")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -88,6 +92,10 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	metricsLis, err := new(net.ListenConfig).Listen(ctx, "tcp", *metricsAddr)
+	if err != nil {
+		return err
+	}
 
 	g, ctx := errgroup.WithContext(ctx)
 	drv := driver.New(kube, node, *image)
@@ -95,6 +103,12 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	httpSrv := &http.Server{
 		Handler:           api.NewServer(st, drv, envs, log).Handler(),
 		BaseContext:       func(net.Listener) context.Context { return ctx },
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(envs, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	metricsSrv := &http.Server{
+		Handler:           promhttp.HandlerFor(reg, promhttp.HandlerOpts{}),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	grpcSrv := grpc.NewServer()
@@ -113,6 +127,12 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		return nil
 	})
 	g.Go(func() error {
+		if err := metricsSrv.Serve(metricsLis); !errors.Is(err, http.ErrServerClosed) {
+			return fmt.Errorf("metrics: %w", err)
+		}
+		return nil
+	})
+	g.Go(func() error {
 		if err := grpcSrv.Serve(csiLis); err != nil {
 			return fmt.Errorf("csi: %w", err)
 		}
@@ -123,6 +143,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		grpcSrv.GracefulStop()
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
+		_ = metricsSrv.Shutdown(shutdownCtx)
 		return httpSrv.Shutdown(shutdownCtx)
 	})
 	return g.Wait()
