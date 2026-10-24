@@ -1,7 +1,6 @@
 package store
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -174,9 +173,8 @@ func (s *Store) adopt(ctx context.Context, id, path string) error {
 		return err
 	}
 	// -T copies path's own owner and mode onto next, and its contents into it.
-	out, err := exec.CommandContext(ctx, "cp", "-a", "--reflink=always", "-T", path, next).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("adopt %s: cp: %w: %s", path, err, bytes.TrimSpace(out))
+	if err := run(exec.CommandContext(ctx, "cp", "-a", "--reflink=always", "-T", path, next)); err != nil {
+		return fmt.Errorf("adopt %s: cp: %w", path, err)
 	}
 	if err := s.step("adopt: copied"); err != nil {
 		return err
@@ -197,8 +195,8 @@ func untar(ctx context.Context, dir string, r io.Reader) error {
 	cmd := exec.CommandContext(ctx, "tar", "-x", "--no-same-owner", "-C", dir, "-f", "-")
 	cmd.Stdin = r
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: BoxUID, Gid: BoxGID}}
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("untar: %w: %s", err, bytes.TrimSpace(out))
+	if err := run(cmd); err != nil {
+		return fmt.Errorf("untar: %w", err)
 	}
 	return nil
 }

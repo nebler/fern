@@ -15,11 +15,49 @@ import (
 )
 
 func btrfs(ctx context.Context, args ...string) error {
-	out, err := exec.CommandContext(ctx, "btrfs", args...).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("btrfs %s: %w: %s", strings.Join(args, " "), err, bytes.TrimSpace(out))
+	if err := run(exec.CommandContext(ctx, "btrfs", args...)); err != nil {
+		return fmt.Errorf("btrfs %s: %w", strings.Join(args, " "), err)
 	}
 	return nil
+}
+
+// run runs cmd and, if it fails, returns an error quoting the start of its
+// output. The rest is counted, not kept: an archive's untar can print a
+// line per file, and the daemon must not hold all of it.
+func run(cmd *exec.Cmd) error {
+	out := &headBuffer{max: maxOutput}
+	cmd.Stdout, cmd.Stderr = out, out
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("%w: %s", err, out)
+	}
+	return nil
+}
+
+// maxOutput is how much of a failed command's output its error quotes.
+const maxOutput = 4 << 10
+
+// headBuffer keeps the first max bytes written to it and counts the rest.
+// As a command's Stdout and Stderr both, os/exec writes to it from one
+// goroutine at a time.
+type headBuffer struct {
+	max     int
+	buf     []byte
+	dropped int
+}
+
+func (b *headBuffer) Write(p []byte) (int, error) {
+	n := min(len(p), b.max-len(b.buf))
+	b.buf = append(b.buf, p[:n]...)
+	b.dropped += len(p) - n
+	return len(p), nil
+}
+
+func (b *headBuffer) String() string {
+	s := string(bytes.TrimSpace(b.buf))
+	if b.dropped > 0 {
+		return fmt.Sprintf("%s… (%d more bytes)", s, b.dropped)
+	}
+	return s
 }
 
 // deleteSubvolumes deletes those of paths that are subvolumes, with any
