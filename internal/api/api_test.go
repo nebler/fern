@@ -192,7 +192,7 @@ type driverWith interface {
 
 // newServer returns the API's handler for st and drv, with their actors
 // running until the test ends.
-func newServer(t *testing.T, st *fakeStore, drv actor.Driver) http.Handler {
+func newServer(t testing.TB, st *fakeStore, drv actor.Driver) http.Handler {
 	t.Helper()
 	log := slog.New(slog.DiscardHandler)
 	envs := actor.New(st, drv, actor.Idle{}, log)
@@ -209,7 +209,7 @@ func newServer(t *testing.T, st *fakeStore, drv actor.Driver) http.Handler {
 }
 
 // newAPIWith is newAPI with the fake driver wrapped by wrap, if it isn't nil.
-func newAPIWith(t *testing.T, wrap func(*driver.Fake) driverWith) (*api.Client, *driver.Fake) {
+func newAPIWith(t testing.TB, wrap func(*driver.Fake) driverWith) (*api.Client, *driver.Fake) {
 	t.Helper()
 	log := slog.New(slog.DiscardHandler)
 	mux := http.NewServeMux()
