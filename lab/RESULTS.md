@@ -916,3 +916,116 @@ notification: one volume already incurs the same approximately 301 ms
 wait as three, and publishes finish approximately 123 ms before the waiter
 notices them. There is no measured reason here to add a Fern volume merger
 or retain more aggressive polling.
+
+## VPS sleep: PLEG cache waits, 2026-10-25
+
+CAX21, the pinned k3s `v1.36.5+k3s1` and gVisor `20261012`. Unchanged
+`fc7dd98b`, deployed before measuring: `WAKES=10 REPEAT=3 lab/perf.sh box t3`
+gave sleep p50/p95 **2,615.2/2,819.5 ms**, wake **1,064.9/1,171.5 ms**,
+and T3 restore **837.0 ms**. All metrics passed the existing VPS gate.
+After reverting both configuration experiments below, a further ten cycles
+gave sleep **2,614.7/2,815.8 ms**, wake **1,079.4/1,131.9 ms**.
+
+**Cause:** kubelet's pod worker waits for PLEG's status cache to be newer
+than its last sync, even before termination. A pending ordinary sync can
+wait first, followed by another wait before termination, followed by one
+before cleanup. The [pinned pod worker](https://github.com/kubernetes/kubernetes/blob/v1.36.5/pkg/kubelet/pod_workers.go#L1268-L1288)
+calls `GetNewerThan`; the [generic PLEG period](https://github.com/kubernetes/kubernetes/blob/v1.36.5/pkg/kubelet/kubelet.go#L207-L216)
+is one second. This is not a two-second container grace period.
+
+One traced VPS sleep took **2,614.2 ms**. Pod
+`7c4e8707-eff4-4aea-8fd7-181ec6b0bee4`, UTC:
+
+- **20:00:51.394009:** kubelet receives graceful deletion while an ordinary
+  sync is already waiting for fresh status.
+- **20:00:51.948529:** that sync has finished; the terminating event starts
+  processing (**554.5 ms** after deletion).
+- **20:00:52.950373:** `SyncTerminatingPod` finally enters (**1,001.8 ms**
+  more in `GetNewerThan`). StopContainer follows immediately.
+- **20:00:53.479724:** container and sandbox stop complete (**529.4 ms**).
+- **20:00:53.955824:** `SyncTerminatedPod` enters (**476.1 ms** more waiting
+  for fresh status). Volumes are already unmounted.
+- **20:00:53.964566:** cleanup finishes (**8.7 ms**); pod deletion and
+  Fern's existing 200 ms observation interval account for the remainder.
+
+These timestamps come from kubelet verbosity 4, enabled temporarily through
+its authenticated `/debug/flags/v` endpoint, plus containerd's CRI logs.
+The unchanged gates ran with verbosity restored to zero. A separate 20-cycle
+node-local diagnostic produced sleep **1,015/2,415 ms**: the slow path
+depends on where wake and the following request land in the PLEG cycle.
+The earlier lab trace (183 ms containers + 113 ms sandbox + 750 ms cleanup)
+does not have the extra pre-stop waits. Faster startup and different
+request timing can avoid them; the fixed timer belongs to kubelet, not
+Fern's service stop commands.
+
+The live lab's k3s config is byte-identical to `deploy/k3s-config.yaml`.
+Both nodes' `configz` show no feature-gate overrides, the same 1 minute
+ordinary sync frequency, 2 minute runtime timeout, 100 ms CPU quota period
+and API QPS of 50. The cgroup drivers differ (`cgroupfs` in the lab,
+`systemd` on the VPS), but the traced VPS cleanup above took only 8.7 ms
+after the cache wait. The excess time precedes CRI calls and is not cgroup
+destruction or a different configured grace period.
+
+**Rejected host changes, same Fern images:**
+
+- `EventedPLEG=true`: ten cycles, sleep **13,615.5/13,816.0 ms**, wake
+  **1,074.0/1,116.6 ms**, T3 restore **6,836.0 ms**. The event stream
+  connected with zero errors, but the evented cache has a five-second
+  fallback refresh. A brief diagnostic log change overlapped its first
+  cycle; the nine subsequent samples at verbosity zero were 13.4–13.8 s.
+  The gate failed; the flag was removed.
+- `PLEGOnDemandRelist=false`: ten cycles, sleep **2,815.2/3,017.2 ms**,
+  wake **1,824.6/1,966.8 ms**, T3 restore **1,433.5 ms**. Wake regressed;
+  the flag was removed. Both experiments applied `deploy/k3s-config.yaml`
+  and restarted k3s; the original configuration was restored afterward.
+
+An initial measurement overlapping the first image transfer was discarded:
+the saturated SSH connection delayed requests enough to change which PLEG
+waits they hit. Both host comparisons and the unchanged gates ran after
+the transfer finished; the traced node-local run only attributes the waits.
+
+A later local validation wrapper was also discarded: its nested lock
+handoff reopened fd 9 for the VPS lock, releasing the inherited local lock.
+Its baseline build overlapped another lab build around 21:45–21:47 UTC.
+The rerun holds one local lock for the whole paired comparison and checks
+its owner and fd before building. None of the overlapping lab results count.
+
+**Kept: start graceful shutdown after durable stop intent.** The driver
+first suspends or deletes the Sandbox, then sends an authenticated,
+pod-UID-bound request to fern-init. Services can finish their normal
+shutdown while kubelet waits for status. The existing pod/mount fence
+still determines completion. Old or unreachable init falls back to
+kubelet; no kubelet or gVisor configuration change is retained.
+
+Final consecutive A/B comparisons used unchanged `fc7dd98b` and this
+change, each with `WAKES=10 REPEAT=3 lab/perf.sh box t3`. One local
+lock covered the entire window; both nodes used the same settings
+throughout their pair. Timing excludes image transfers.
+
+| Metric (ms, except memory in MiB) | VPS A | VPS B | Lab A | Lab B |
+|---|---:|---:|---:|---:|
+| `box.box_memory_mib` | 47.2 | 47.2 | 47.3 | 46.9 |
+| `box.daemon_memory_mib` | 13.8 | 14.6 | 14.5 | 14.3 |
+| `box.force_delete_ms` | 1323.0 | 1443.0 | 1188.0 | 1145.0 |
+| `box.sleep_ms.p50` | 2614.0 | 1622.6 | 1014.5 | 1017.7 |
+| `box.sleep_ms.p95` | 2815.9 | 1824.0 | 1612.3 | 1814.3 |
+| `box.wake_ms.p50` | 1018.5 | 1090.0 | 743.1 | 766.6 |
+| `box.wake_ms.p95` | 1131.2 | 1140.4 | 921.1 | 1066.6 |
+| `t3.adopt_ms` | 309.0 | 294.0 | 208.0 | 210.0 |
+| `t3.checkpoint_ms` | 10.6 | 10.3 | 20.0 | 20.3 |
+| `t3.checkpoint_replaced_ms` | 14.7 | 15.9 | 13.4 | 9.9 |
+| `t3.restore_ms` | 1029.5 | 1037.1 | 1026.2 | 1025.1 |
+
+VPS sleep p50 improved **38%**;
+the VPS gate passed. Other paired changes stayed within the existing
+target margins and absolute floors (25 ms / 8 MiB). No baseline file
+was edited. The saved lab gate flagged sleep p95 in unchanged A and
+sleep/wake p95 in B; their paired changes stayed within its margins.
+Lab sleep median was unchanged within noise.
+
+**Correctness:** race tests for all Go packages, vet and lint passed,
+including replay after interruptions at both new stop boundaries,
+request authorization, stale pod UIDs, retry and old-init fallback.
+Lab `box restore golden t3` and VPS `box restore t3` passed: mounts
+are gone after sleep, Postgres data survives, and restores fence execs.
+The committed code is redeployed to the VPS after these checks.

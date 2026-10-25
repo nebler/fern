@@ -1,7 +1,8 @@
 // Command fern-init is the main process of every box (the pod's pause
 // container is PID 1 and reaps orphans). It starts and supervises the
 // services in the workspace's services.yaml, serves exec and readiness on
-// boxexec.Port, and on SIGTERM stops the services before exiting.
+// boxexec.Port, and stops the services before exiting on SIGTERM or an
+// authenticated stop request.
 package main
 
 import (
@@ -34,6 +35,8 @@ func main() {
 }
 
 func run(ctx context.Context, log *slog.Logger) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	dir := os.Getenv("FERN_WORKSPACE")
 	if dir == "" {
 		return errors.New("FERN_WORKSPACE is not set")
@@ -72,6 +75,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	mux.Handle("GET "+boxexec.ReadyPath, readiness(func(ctx context.Context) error {
 		return checkServices(ctx, services, dir, env)
 	}))
+	mux.Handle("POST "+boxexec.StopPath, shutdown(token, os.Getenv("FERN_POD_UID"), cancel))
 	srv := &http.Server{
 		Addr:              ":" + strconv.Itoa(boxexec.Port),
 		Handler:           mux,

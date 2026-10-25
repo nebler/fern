@@ -92,6 +92,9 @@ func TestWakeSetsUpTheBox(t *testing.T) {
 	for _, v := range sb.Spec.PodTemplate.Spec.Containers[0].Env {
 		vars[v.Name] = v
 	}
+	if ref := vars["FERN_POD_UID"].ValueFrom; ref == nil || ref.FieldRef == nil || ref.FieldRef.FieldPath != "metadata.uid" {
+		t.Errorf("FERN_POD_UID = %+v, want the pod's UID from the downward API", ref)
+	}
 	if got := vars["CLAUDE_CONFIG_DIR"].Value; got != env.Claude {
 		t.Errorf("CLAUDE_CONFIG_DIR = %q, want %q", got, env.Claude)
 	}

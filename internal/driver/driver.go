@@ -217,6 +217,7 @@ func (d *Driver) Sleep(ctx context.Context, id string) error {
 	if err != nil {
 		return fmt.Errorf("sleep %s: %w", id, err)
 	}
+	d.stopInit(ctx, id)
 	if err := d.waitGone(ctx, id, &corev1.Pod{}); err != nil {
 		return fmt.Errorf("sleep %s: %w", id, err)
 	}
@@ -232,6 +233,7 @@ func (d *Driver) Delete(ctx context.Context, id string) error {
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete sandbox %s: %w", id, err)
 	}
+	d.stopInit(ctx, id)
 	if err := d.waitGone(ctx, id, &sandboxv1.Sandbox{}); err != nil {
 		return fmt.Errorf("delete sandbox %s: %w", id, err)
 	}
@@ -239,6 +241,51 @@ func (d *Driver) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("delete sandbox %s: %w", id, err)
 	}
 	return nil
+}
+
+// stopInit lets services shut down while kubelet waits for fresh PLEG status.
+// It is only a head start: durable Sandbox suspension/deletion comes first,
+// and waitGone still fences the workspace. A crash at either boundary leaves
+// Kubernetes responsible for finishing the stop. Older or unreachable boxes
+// take the normal kubelet SIGTERM path instead.
+func (d *Driver) stopInit(ctx context.Context, id string) {
+	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	defer cancel()
+	var pod corev1.Pod
+	if err := d.c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: id}, &pod); err != nil {
+		return
+	}
+	if pod.Status.PodIP == "" || pod.UID == "" {
+		return
+	}
+	var token string
+	for _, c := range pod.Spec.Containers {
+		if c.Name != "box" {
+			continue
+		}
+		for _, v := range c.Env {
+			if v.Name == "FERN_BOX_TOKEN" {
+				token = v.Value
+			}
+		}
+	}
+	if token == "" {
+		return
+	}
+	addr := net.JoinHostPort(pod.Status.PodIP, strconv.Itoa(boxexec.Port))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+addr+boxexec.StopPath, nil)
+	if err != nil {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("If-Match", strconv.Quote(string(pod.UID)))
+	resp, err := d.ready.Do(req)
+	if err != nil {
+		return
+	}
+	if err := resp.Body.Close(); err != nil {
+		return
+	}
 }
 
 // States reports the state of every box that has a Sandbox, by environment
@@ -303,6 +350,7 @@ func poll(ctx context.Context, interval, timeout time.Duration, cond wait.Condit
 func (d *Driver) podTemplate(env store.Env) sandboxv1.PodTemplate {
 	vars := []corev1.EnvVar{
 		{Name: "FERN_BOX_TOKEN", Value: env.BoxToken},
+		{Name: "FERN_POD_UID", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.uid"}}},
 		{Name: "FERN_WORKSPACE", Value: env.Workspace},
 	}
 	// A golden builder's box runs no agent and gets no login: what its

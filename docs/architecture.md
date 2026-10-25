@@ -331,6 +331,15 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
 | Network | deny by default; allowlist (package registries, GitHub, the model provider); previews only through the front door |
 | Stop | SIGTERM to services (`stop:` commands), timeout, then kill; never during an open exec unless forced |
 
+**Built stop protocol:** the driver first persists the Sandbox's suspension
+or deletion, then asks fern-init to start its normal graceful shutdown with
+an authenticated `POST /stop`. `If-Match` names the pod UID: an old request
+cannot stop a replacement pod at a reused address. The request has a 250 ms
+budget; older or unreachable boxes still get kubelet's SIGTERM. The driver
+waits for the pod and its mounts to disappear before acknowledging sleep,
+deletion or the stop in a restore. A crash before or after the request leaves
+the durable Sandbox intent for Kubernetes to finish; replay is safe.
+
 ---
 
 ## 11. Front door (wake layer)

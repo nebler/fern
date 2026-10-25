@@ -30,6 +30,9 @@ const Path = "/exec"
 // are ready; with ?wait=DURATION it answers as soon as they are.
 const ReadyPath = "/readyz"
 
+// StopPath is the authenticated endpoint that starts fern-init's graceful shutdown.
+const StopPath = "/stop"
+
 // Frame kinds: the first byte of every binary message.
 const (
 	frameStdin byte = iota
