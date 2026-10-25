@@ -388,7 +388,7 @@ restore() {
 pg_load() {
   local env=$1 n=$2 ok=0
   fern exec "$env" -- pgbench -iq -s 5 >/dev/null 2>&1
-  fern exec "$env" -- pgbench -n -c 4 -T $((n + 10)) >/dev/null 2>&1 &
+  fern exec "$env" -- pgbench -n -c 4 -T $((n + 10)) >"$TMP/pg-load-$env" 2>&1 &
   local load=$!
   sleep 2
   for i in $(seq "$n"); do
@@ -396,6 +396,8 @@ pg_load() {
     sleep 1
   done
   wait $load
+  metric pgload.latency_ms "pgbench write latency under snapshots, ms" \
+    "$(awk '$1 == "latency" && $2 == "average" { print $4 }' "$TMP/pg-load-$env")"
   local whole="select (select sum(abalance) from pgbench_accounts) = (select sum(bbalance) from pgbench_branches)
     and (select sum(bbalance) from pgbench_branches) = (select sum(tbalance) from pgbench_tellers)"
   # The daemon keeps an environment's newest 50 snapshots (store.keepTurns).
