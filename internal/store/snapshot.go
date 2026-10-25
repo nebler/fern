@@ -49,7 +49,7 @@ func (s *Store) snapshot(ctx context.Context, env Env, snapID string) error {
 	// Taking one flushes the workspace's dirty pages first, so it holds every
 	// write made before. It replaces a row whose subvolume a DeleteSnapshot
 	// that stopped half-way already removed, if Reconcile hasn't.
-	if err := btrfs(ctx, "subvolume", "snapshot", "-r", env.Workspace, path); err != nil {
+	if err := snapshotSubvolume(ctx, env.Workspace, path, true); err != nil {
 		return err
 	}
 	if err := s.step("snapshot: taken"); err != nil {
@@ -70,7 +70,7 @@ func (s *Store) DeleteSnapshot(ctx context.Context, id, snapID string) error {
 	if _, err := s.Get(ctx, id); err != nil {
 		return err
 	}
-	if err := deleteSubvolumes(ctx, s.snapPath(id, snapID)); err != nil {
+	if err := s.deleteSubvolumes(ctx, s.snapPath(id, snapID)); err != nil {
 		return fmt.Errorf("delete snapshot %s/%s: %w", id, snapID, err)
 	}
 	if err := s.step("delete snapshot: removed"); err != nil {
@@ -145,10 +145,10 @@ func (s *Store) restore(ctx context.Context, env Env, snapID string) error {
 	// A leftover is a half-made copy, or the old workspace of a restore that
 	// stopped before its last step, which its pre-restore snapshot holds.
 	// Either way it is garbage.
-	if err := deleteSubvolumes(ctx, next); err != nil {
+	if err := s.deleteSubvolumes(ctx, next); err != nil {
 		return err
 	}
-	if err := btrfs(ctx, "subvolume", "snapshot", s.snapPath(env.ID, snapID), next); err != nil {
+	if err := snapshotSubvolume(ctx, s.snapPath(env.ID, snapID), next, false); err != nil {
 		return err
 	}
 	if err := s.step("restore: copied"); err != nil {
@@ -168,7 +168,7 @@ func (s *Store) restore(ctx context.Context, env Env, snapID string) error {
 	if err := s.step("restore: swapped"); err != nil {
 		return err
 	}
-	return deleteSubvolumes(ctx, next)
+	return s.deleteSubvolumes(ctx, next)
 }
 
 // A restore keeps the workspace it replaces as a snapshot named for the time,

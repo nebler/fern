@@ -133,7 +133,8 @@ func crashCases() []crashCase {
 				writeAll(t, filepath.Join(first, "seed.sql"), "v1")
 				create(t, st, "first", store.CreateOptions{Workspace: first})
 				snapshot(t, st, "first", "golden-source")
-				create(t, st, "golden", store.CreateOptions{})
+				builder := create(t, st, "golden", store.CreateOptions{})
+				writeAll(t, filepath.Join(builder.Workspace, "old-output"), "discard")
 			},
 			change: func(t *testing.T, st *store.Store, _ string) error {
 				return st.BuildSource(t.Context(), "golden", store.SnapshotRef{Env: "first", Snapshot: "golden-source"})
@@ -148,6 +149,10 @@ func crashCases() []crashCase {
 				}
 				if got := readFile(t, filepath.Join(live, "seed.sql")); got != "v1" {
 					t.Errorf("seed.sql = %q after building again, want v1", got)
+				}
+				gone(t, filepath.Join(live, "old-output"))
+				if got := readFile(t, filepath.Join(dir, "envs", "first", "snaps", "golden-source", "seed.sql")); got != "v1" {
+					t.Errorf("source seed.sql = %q after building again, want v1", got)
 				}
 			},
 		},

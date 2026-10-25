@@ -19,7 +19,7 @@ import (
 // BenchmarkStore exercises the real btrfs and SQLite paths. Run in the pool
 // provided by lab/test-store.sh; fixture creation and cleanup are not timed.
 func BenchmarkStore(b *testing.B) {
-	for _, name := range []string{"CreateEmpty", "CreateSeed20000", "Adopt20000", "SnapshotClean", "SnapshotDirty8MiB", "DeleteSnapshot", "Restore", "Delete10Snapshots", "Reconcile", "Reconcile100Orphans", "List", "Get", "FindByPath"} {
+	for _, name := range []string{"CreateEmpty", "CreateSeed20000", "Adopt20000", "BuildSource20000", "SnapshotClean", "SnapshotDirty8MiB", "DeleteSnapshot", "Restore", "Delete10Snapshots", "Reconcile", "Reconcile100Orphans", "List", "Get", "FindByPath"} {
 		b.Run(name, func(b *testing.B) { benchmarkStore(b, name) })
 	}
 }
@@ -71,7 +71,7 @@ func benchmarkStore(b *testing.B, name string) {
 		return env
 	}
 	var seed bytes.Buffer
-	if name == "CreateSeed20000" || name == "SnapshotClean" || name == "Restore" || name == "Delete10Snapshots" {
+	if name == "CreateSeed20000" || name == "BuildSource20000" || name == "SnapshotClean" || name == "Restore" || name == "Delete10Snapshots" {
 		tw := tar.NewWriter(&seed)
 		body := bytes.Repeat([]byte("x"), 1024)
 		for i := range 20000 {
@@ -82,11 +82,14 @@ func benchmarkStore(b *testing.B, name string) {
 		check(tw.Close())
 	}
 	env := create("demo", store.CreateOptions{})
-	if name == "SnapshotClean" || name == "Restore" || name == "Delete10Snapshots" {
+	if name == "BuildSource20000" || name == "SnapshotClean" || name == "Restore" || name == "Delete10Snapshots" {
 		check(st.Delete(b.Context(), "demo"))
 		env = create("demo", store.CreateOptions{Seed: bytes.NewReader(seed.Bytes())})
 	}
 	check(st.Snapshot(b.Context(), "demo", "base"))
+	if name == "BuildSource20000" {
+		create("builder", store.CreateOptions{})
+	}
 	var index *sql.DB
 	if name == "Reconcile100Orphans" {
 		for i := range 100 {
@@ -147,6 +150,8 @@ func benchmarkStore(b *testing.B, name string) {
 		switch name {
 		case "CreateEmpty", "CreateSeed20000", "Adopt20000":
 			create(id, opts)
+		case "BuildSource20000":
+			check(st.BuildSource(b.Context(), "builder", store.SnapshotRef{Env: "demo", Snapshot: "base"}))
 		case "SnapshotClean", "SnapshotDirty8MiB":
 			check(st.Snapshot(b.Context(), "demo", id))
 		case "DeleteSnapshot":
