@@ -525,7 +525,7 @@ scale() {
     wait
     metric scale.n$n.parallel_exec_ms "one exec in each awake box at once, ms until all ended" $(($(now_ms) - start))
     : >"$TMP/snap$n"
-    for i in $(seq 5); do fern snapshot s1 "n$n-$i" | took >>"$TMP/snap$n"; done
+    for i in $(seq 20); do fern snapshot s1 "n$n-$i" | took >>"$TMP/snap$n"; done
     metric scale.n$n.snapshot_ms "a snapshot of an awake box, ms" "$(stats <"$TMP/snap$n")"
     prev=$n
   done
