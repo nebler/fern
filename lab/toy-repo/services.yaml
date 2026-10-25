@@ -1,0 +1,4 @@
+services:
+  web:
+    run: node server.js
+    ready: curl -sf localhost:3000/health

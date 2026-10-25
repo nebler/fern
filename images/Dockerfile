@@ -35,10 +35,11 @@ ENTRYPOINT ["/usr/local/bin/fern"]
 
 FROM debian:trixie-slim AS fern-box
 # Postgres binaries only: clusters live in each environment's workspace.
+# Node runs the lab's toy repo, the sample without a database.
 RUN mkdir -p /etc/postgresql-common/createcluster.d \
  && echo 'create_main_cluster = false' > /etc/postgresql-common/createcluster.d/fern.conf \
  && apt-get update \
- && apt-get install -y --no-install-recommends postgresql-17 ca-certificates curl git \
+ && apt-get install -y --no-install-recommends postgresql-17 nodejs ca-certificates curl git \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 1000 --user-group --home-dir /tmp --no-create-home fern
 COPY --from=go /out/fern-init /usr/local/bin/fern-init
