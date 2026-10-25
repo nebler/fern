@@ -595,3 +595,76 @@ Wake on the VPS went 1,144 → 1,035 ms (baseline medians); box and daemon memor
 **Rejected,** with numbers in the commits and reports: a watch instead of polling for wakes (704 → 707 ms), 50 ms polling for stops, deleting the pod in `rm`, grouping shims (4 MiB a box), `GOGC=20` for helpers, prepared SQLite statements, stripping the CLI.
 
 **Found on the way:** `lab_lock`'s mkdir lock let two scripts in when both took over a dead owner's lock; it is a kernel flock now. The first wake agent's measurements were void for it.
+
+## WAKE beyond the volume wait: floor, 2026-10-25
+
+Base `fc7dd98b`, ARM64 Docker Desktop lab, gVisor 20261012. Builds and
+measurements held the same shared `lab_lock`. No VPS or perf-baseline edits.
+The unchanged three-run gate (`WAKES=10 REPEAT=3 lab/perf.sh box golden`)
+measured wake p50/p95 **742.4/930.7 ms**, golden first wake **745.1 ms**, cold
+first wake **1,900.1 ms**, and box anon + shmem **47.6 MiB**. All correctness
+checks passed; the unchanged p95 exceeded the existing gate's 25% margin.
+
+### The zero-volume floor
+
+Thirty disposable pods, ten per case, alternating 0/1/3 then 3/1/0 volumes.
+Each used the real fern-init entrypoint without services, `fern-box:dev`,
+gVisor, a read-only root, uid/gid 1000, the shared PID namespace, runtime
+seccomp, CPU limit 2 and memory limit 2 GiB. Each explicitly set
+`automountServiceAccountToken: false` and `enableServiceLinks: false`.
+The returned pod specs confirmed exactly 0, 1 or 3 volumes; the nonzero
+controls used emptyDir volumes mounted at distinct paths.
+
+| Median, ms | 0 volumes | 1 volume | 3 volumes |
+|---|---:|---:|---:|
+| Scheduled → RunPodSandbox begins | 9.5 | 310.1 | 309.7 |
+| WaitForAttachAndMount | 0 | 301.0 | 300.7 |
+| Host request → fern-init startup log | 382.7 | 675.7 | 667.2 |
+
+The last row includes the host's Docker/kubectl request overhead. The first
+row correlates kubelet and CRI timestamps. With zero volumes the volume
+manager returns before logging a wait; with either one or three, the first
+wait consumes one 300 ms retry. More volumes do not add another cycle.
+
+Today's regular box has **three volumes**: emptyDir `/tmp`, CSI workspace,
+and CSI Claude state. A T3 worktree has **four**, adding the read-only git
+folder; its read-only `.git` subPath is another mount of the workspace
+volume, not another volume. A golden builder has **two**, tmp and workspace.
+There is no projected service-account token, ConfigMap or Secret volume;
+Claude's login comes through an environment variable backed by a Secret.
+
+**No volume merger retained.** Going from three volumes to one did not
+reduce the wait. A production box still needs its CSI workspace and the
+separate, unsnapshotted Claude state; bypassing CSI or copying state into the
+container would break architecture §§10/13/14. The zero-volume pod is a
+control, not a replacement box design.
+
+### Ten initialized Postgres wakes
+
+A separate warm trace matched pod UIDs across daemon, CSI, kubelet and CRI
+logs. Kubelet logging verbosity was temporarily raised for this diagnostic
+and restored before releasing the lock. Wake mean/p50: **713.4/690.3 ms**.
+
+| Component | Mean ms |
+|---|---:|
+| Before the volume wait, including Sandbox API and scheduling | 17.3 |
+| WaitForAttachAndMount | 301.0 |
+| RunPodSandbox | 103.3 |
+| CreateContainer | 7.7 |
+| StartContainer | 79.1 |
+| After StartContainer until Fern answers ready | 198.0 |
+| Other gaps between calls | 7.1 |
+
+The last CSI publish completed **123.2 ms** before kubelet noticed it
+(median **122.4 ms**). The separate attach-verification → mount
+reconciliation pass remains visible about 100 ms apart.
+
+Within service startup, fern-init's startup log → Postgres's first log took
+**82.1 ms**, Postgres's first log → accepting connections **62.1 ms**, and
+accepting connections → Fern's wake response **62.1 ms**, all means. These
+span a few milliseconds before StartContainer returns, so they do not sum
+exactly to the after-StartContainer row. Readiness is already a direct long
+HTTP request to fern-init; it executes service checks every 100 ms. Fern
+polls for a new pod address every 200 ms and does not wait for Kubernetes'
+Ready condition. The remaining service-side candidates are the sample's
+process wrappers and the initial readiness retry cadence.
