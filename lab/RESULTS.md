@@ -426,3 +426,31 @@ under build load; the rerun passed. The sample still had 3 users after the
 final 25 initialized restarts. `FERN_HOST=HOST lab/build.sh` redeployed the
 final code. The daemon and T3 CLI hashes both matched the local image,
 `cad3acd333fac00e…`.
+
+## Memory, exec, store and T3 passes, 2026-10-25
+
+Four more agents (GPT-6.1-Sol), each in its own worktree. Their full notes stay on their branches (`t3/measure-memory-footprint`, `t3/reduce-exec-overhead`, `t3/store-performance`, `t3/t3-turn-performance`); what was kept is here.
+
+| Measurement | Result |
+|---|---|
+| empty box under gVisor, lab (fern-init, pause, runtime) | 25.6 MiB |
+| sample Postgres in it | +44.6 MiB; 128 MiB shared_buffers only partly resident |
+| a Postgres backend with a psql client | +3.2 MiB a pair |
+| Claude started and waiting, no prompt | +83 MiB, most of it file-backed |
+| box image unpacked | 756 MiB: Claude 275 MiB, an LLVM library 118 MiB |
+| `fern` CLI start, in the daemon pod | 160–240 ms: the CLI is the daemon's binary and loads Kubernetes, CSI and gRPC |
+| a path lookup over the socket / a checkpoint, fake store | 0.29 / 0.60 ms |
+| Go heap held per idle exec, through the relay | 279 KiB → 72 KiB: stream buffers start at 4 KiB, grow to 64 KiB |
+| re-indexing 100 snapshots on start | 3.40 s → 27 ms: one transaction, not 100 commits |
+| `fern-claude` per Claude start | two lookups → one |
+
+**Rejected:**
+- **A smaller Postgres** (32 MiB buffers, 20 connections): 9–20 MiB a box saved, writes looked slower.
+- **SQLite `synchronous=NORMAL`:** the index holds box tokens.
+- **Flushing before adopt's reflink copy, prepared statements for single rows:** no gain.
+
+**For an 8 GiB node:** plan on 10–12 boxes with Claude active at once. The suggested box settings (request 384 MiB, a 64 MiB RuntimeClass overhead, limit 2 GiB) are a recommendation, not measured; not applied.
+
+**Not merged yet:** btrfs ioctls instead of the `btrfs` command (`t3/store-performance`, `e70e95bf`). Far fewer allocations, but in the lab a snapshot after 8 MiB of writes went 67 → 84 ms while a clean one went 51 → 28 ms; it is measured on the VPS first.
+
+**Biggest remaining per-call cost:** the CLI's start, paid at every checkpoint and twice per Claude start. A small CLI binary, or the checkpoint hook speaking to the socket, would remove most of it.
