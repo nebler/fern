@@ -745,3 +745,53 @@ service startup in this confirmation. The sleep medians were unchanged,
 so the earlier unpaired sleep-tail increase is not established as a script
 regression either. The unpaired 761.4 → 723.0 ms result is not retained as
 a performance claim.
+
+### Combined candidate and unchanged validation
+
+Combining the warm-script change with the bounded 25 ms service retries
+passed the three-run gate: wake p50/p95 **714.7/787.0 ms**, box anon + shmem
+**46.9 MiB**, golden first wake **749.5 ms**, cold first wake **2,147.7 ms**,
+and sleep p95 **1,417.4 ms**. This is a 27.7 ms p50 change against A and
+46.7 ms against the unchanged crossover. It is not independently a claim
+that either of the rejected standalone changes helps.
+
+The unchanged code then passed `lab/go.sh test -race ./...`, `lab/lint.sh`
+(0 issues), `lab/go.sh vet ./...`, a build, and
+`WAKES=10 JOBS=1 lab/check.sh box golden restore`, under one lock. A fresh
+ten-wake trace on this unchanged code illustrates the between-batch spread:
+
+| Mean ms | Early unchanged trace | Later unchanged trace |
+|---|---:|---:|
+| Whole wake | 713.4 | 813.2 |
+| Before the volume wait | 17.3 | 22.9 |
+| WaitForAttachAndMount | 301.0 | 301.3 |
+| RunPodSandbox | 103.3 | 153.1 |
+| CreateContainer | 7.7 | 11.3 |
+| StartContainer | 79.1 | 89.3 |
+| After StartContainer until ready | 198.0 | 226.7 |
+| Other gaps | 7.1 | 8.6 |
+
+The later trace's p50 was **833.4 ms**. Its service subinterval means were
+**97.3 ms** to the first Postgres log, **70.2 ms** until Postgres accepted
+connections, and **64.1 ms** until Fern answered ready. The volume wait is
+stable; runtime and process startup varied substantially on unchanged code.
+
+**Final disposition: no production optimization retained.** The combined
+candidate's 27.7–46.7 ms median shift is smaller than the observed
+unchanged-code spread, and the script's apparent standalone saving failed
+the alternating confirmation. The combined candidate's additional full
+validation and phase-trace run never acquired the shared lab lock before
+the timebox ended. Its own waiting lock helper was cancelled before any
+source or deployment change. Do not treat 714.7 ms as a confirmed gain.
+
+Only these measurement notes remain on the branch. Production Go, the
+sample scripts, node settings and `lab/perf/*.tsv` are unchanged. The
+unchanged code passed the required box/golden/restore correctness checks,
+race tests, lint and vet; its timing-gate tail failures are recorded above.
+No VPS access, lab restart, full suite, push or merge was performed.
+
+The substantial remaining target is kubelet's mount scheduling and waiter
+notification: one volume already incurs the same approximately 301 ms
+wait as three, and publishes finish approximately 123 ms before the waiter
+notices them. There is no measured reason here to add a Fern volume merger
+or retain more aggressive polling.
