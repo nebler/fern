@@ -1,0 +1,27 @@
+# lab/perf.sh baseline for lab: metric, median of 5 runs, tolerance; 2026-10-25, commit eee2513e with changes
+box.box_memory_mib 47.2 0.25
+box.daemon_memory_mib 17.3 0.25
+box.force_delete_ms 1889 0.25
+box.sleep_ms.p50 1010.6 0.25
+box.sleep_ms.p95 1212.6 0.50
+box.wake_ms.p50 691.4 0.25
+box.wake_ms.p95 775.3 0.25
+disk.create_seeded_ms 1410 0.35
+disk.restore_ms.p50 16.5 0.81
+disk.restore_ms.p95 273.2 1.54
+disk.rm_ms 1022 1.41
+disk.snapshot_ms.p50 8.3 0.27
+disk.snapshot_ms.p95 74.1 0.88
+golden.build_ms 3362 0.49
+golden.create_ms 80 0.58
+golden.first_wake_cold_ms 1751.3 0.34
+golden.first_wake_ms 716.8 0.25
+many.wake10_ms 9969 0.58
+paths.adopt_20k_ms 835 0.53
+paths.adopt_ms 92 0.67
+stream.roundtrip_50mb_ms 587 0.56
+stream.stdout_200mb_ms 1448 1.48
+t3.adopt_ms 198 0.36
+t3.checkpoint_ms 10.1 12.06
+t3.checkpoint_replaced_ms 14.2 6.15
+t3.restore_ms 822.8 1.09

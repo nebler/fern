@@ -21,9 +21,14 @@ The nouns are in [architecture §2](docs/architecture.md#2-concepts). In the cod
 - **boxexec:** Fern's WebSocket protocol for running a command in a box.
 
 ## Commands
+- Setup, once, and again to update: `lab/setup.sh` (the local lab; `FERN_HOST=…` for the VPS). It ends with a pairing link for the T3 app.
+- After a change: `lab/dev.sh` (about a minute): unit tests and the build, then `check.sh`'s quick sections in the lab
 - Unit tests: `go test -race ./...` (fake driver, runs anywhere Go runs)
 - Lint: `golangci-lint run` (config in `.golangci.yml`; fix the code, don't silence the linter)
 - Integration tests: `lab/check.sh` (the quick sections, under a minute in the lab) after a change, `lab/check.sh all` before a merge or a tag; against k3s in the local lab (`lab/up.sh`) first, then on the VPS with `FERN_HOST` (see engine-local.md)
+- Perf gate: `lab/perf.sh --fast` (about 1.5 minutes, big regressions only) while working on speed or memory, and `lab/perf.sh` (about 9 minutes) before merging anything that could change them; it fails when a metric is worse than `lab/perf/<lab|vps>.tsv`. A change that is meant to move a number updates the baseline with `lab/perf.sh --accept` in the same commit. The VPS's baseline is the one that counts.
+- The T3 demo, end to end: `lab/t3-run.sh toy 5` (Haiku, your subscription)
+- The lab is shared by every worktree: its scripts wait for each other (`lab_lock`). Don't run two at once by other means.
 
 ## Style sources
 Follow, in this order:

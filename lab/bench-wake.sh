@@ -5,6 +5,7 @@
 # Leaves its pf1- environment asleep.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
+lab_lock
 : "${FERN_HOST:?set FERN_HOST to the VPS; this benchmark does not use the local lab}"
 env=${1:-pf1-wake} count=${2:-25}
 [[ $env =~ ^pf1-[a-z0-9-]+$ && $count =~ ^[0-9]+$ && $count -ge 20 ]] || {

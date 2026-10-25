@@ -6,6 +6,7 @@
 # the tags stay the same.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
+lab_lock
 images=(fern fern-box)
 t3=no
 if [ "${1:-}" = t3 ] || { lab_up && k -n fern-system get deploy/t3 >/dev/null 2>&1; }; then

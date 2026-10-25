@@ -4,6 +4,7 @@
 # Fern. Everything it makes is named fern-lab* or labelled part-of=fern.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
+lab_lock
 
 if [ -n "$FERN_HOST" ]; then
   echo "FERN_HOST is set; lab/vps.sh sets up a VPS" >&2

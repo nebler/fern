@@ -9,6 +9,7 @@
 set -euo pipefail
 export FERN_HOST=${1:?usage: lab/vps.sh HOST}
 source "$(dirname "$0")/lib.sh"
+lab_lock
 
 on_node mkdir -p /etc/rancher/k3s </dev/null
 on_node tee /etc/rancher/k3s/config.yaml <deploy/k3s-config.yaml >/dev/null

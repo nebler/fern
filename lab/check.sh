@@ -41,6 +41,7 @@
 # shellcheck disable=SC2329,SC2086
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
+lab_lock
 # WAKES is how many times box sleeps and wakes its box, for the timings.
 ENV=ck IDLE=${IDLE:-180} WAKES=${WAKES:-10}
 CLAUDE="$(sed -n 's/^ARG CLAUDE_VERSION=//p' images/Dockerfile) (Claude Code)"
@@ -53,6 +54,16 @@ check() {
   if [ "$2" = "$3" ]; then echo "PASS $1"; else echo "FAIL $1: want '$2', got '$3'"; FAILED=1; fi
 }
 note() { echo "NOTE $*"; }
+# metric KEY TEXT VALUE notes "TEXT: VALUE" and records VALUE under KEY for
+# lab/perf.sh, which compares it with a baseline: lower is better, and KEY
+# ends in its unit (_ms, _mib). A VALUE from stats records its p50 and p95.
+metric() {
+  note "$2: $3"
+  case $3 in
+    n=*) for p in p50 p95; do echo "METRIC $1.$p $(sed -nE "s/.* $p=([0-9.]+).*/\1/p" <<<"$3")"; done ;;
+    *) echo "METRIC $1 ${3%% *}" ;;
+  esac
+}
 # succeeds prints yes if the command succeeds, no if it fails.
 succeeds() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
 # now_ms prints the wall clock in milliseconds.
@@ -185,9 +196,16 @@ box() {
     mounted=$((mounted + $(mounts $ENV)))
     fern wake $ENV | took >>"$TMP/wake"
   done
-  note "sleep (until the pod is gone), ms: $(stats <"$TMP/sleep")"
-  note "wake (until Postgres is ready), ms: $(stats <"$TMP/wake")"
+  metric box.sleep_ms "sleep (until the pod is gone), ms" "$(stats <"$TMP/sleep")"
+  metric box.wake_ms "wake (until Postgres is ready), ms" "$(stats <"$TMP/wake")"
   note "wake steps: $(wake_steps "$TMP/metrics")"
+  # Memory without the page cache, which comes and goes: the box's (Postgres
+  # idle, gVisor included) and the daemon's. gVisor keeps what the box's
+  # programs allocate in shared memory, so the box's counts shmem too.
+  metric box.box_memory_mib "an awake box's memory, MiB" \
+    "$(pod_cgroup $ENV memory.stat | awk '$1 == "anon" || $1 == "shmem" { b += $2 } END { printf "%.1f", b / 1048576 }')"
+  metric box.daemon_memory_mib "the daemon's memory, MiB" \
+    "$(in_daemon 'cat /proc/1/status' | awk '$1 == "RssAnon:" { printf "%.1f", $2 / 1024 }')"
   check "the workspace is unmounted at every sleep" 0 "$mounted"
   check "and mounted once while awake" 1 "$(mounts $ENV)"
   check "a write outside the workspace is gone" no "$(succeeds fern exec $ENV -- test -e /tmp/outside)"
@@ -206,7 +224,7 @@ box() {
     sleep 0.5
   done
   check "Postgres recovers after its pod is force-deleted (5 users)" 5 "$users"
-  note "force delete until Postgres answers: $(($(now_ms) - start)) ms"
+  metric box.force_delete_ms "force delete until Postgres answers, ms" $(($(now_ms) - start))
   check "and the seed ran once" 1 "$(sql $ENV "select count(*) from users where name = 'Ada'")"
 }
 
@@ -225,14 +243,14 @@ disk() {
     head -c 1000000000 /dev/urandom > ../blob && chown -R 1000:1000 $D/live && sync"
   note "workspace: $(in_daemon "find $D/live | wc -l") files, $(in_daemon "du -sh $D/live | cut -f1")"
   for i in $(seq 10); do fern snapshot big "s$i" | took; done >"$TMP/snap"
-  note "snapshot ms: $(stats <"$TMP/snap")"
+  metric disk.snapshot_ms "snapshot, ms" "$(stats <"$TMP/snap")"
   in_daemon "echo changed > $D/live/blob && rm $D/live/node_modules/p0/f1 && echo new > $D/live/new"
   for i in $(seq 5); do fern restore big "s$i" | took; done >"$TMP/restore"
-  note "restore ms (asleep, so no box to stop): $(stats <"$TMP/restore")"
+  metric disk.restore_ms "restore (asleep, so no box to stop), ms" "$(stats <"$TMP/restore")"
   check "a restore equals its snapshot (tree hash)" "$(treehash $D/snaps/s1)" "$(treehash $D/live)"
   start=$(now_ms)
   fern rm big
-  note "rm with 10 snapshots: $(($(now_ms) - start)) ms"
+  metric disk.rm_ms "rm with 10 snapshots, ms" $(($(now_ms) - start))
   check "rm leaves nothing behind" no "$(succeeds in_daemon "test -e $D")"
 
   python3 -c '
@@ -243,7 +261,7 @@ for d in range(200):
         open(f"{sys.argv[1]}/d{d}/f{f}", "wb").write(os.urandom(1024))' "$TMP/repo"
   start=$(now_ms)
   fern create seeded --repo "$TMP/repo" >/dev/null
-  note "create seeded from the Mac with 20,000 files (20 MB): $(($(now_ms) - start)) ms"
+  metric disk.create_seeded_ms "create seeded from the Mac with 20,000 files (20 MB), ms" $(($(now_ms) - start))
   fern rm seeded
 
   fresh $ENV
@@ -266,13 +284,13 @@ stream() {
   head -c 50000000 /dev/urandom >"$TMP/bin"
   start=$(now_ms)
   got=$(fern exec -i $ENV -- cat <"$TMP/bin" | sha256)
-  note "50 MB round trip (Mac -> box -> Mac): $(($(now_ms) - start)) ms"
+  metric stream.roundtrip_50mb_ms "50 MB round trip (Mac -> box -> Mac), ms" $(($(now_ms) - start))
   check "50 MB of random bytes through cat, unchanged" "$(sha256 <"$TMP/bin")" "$got"
   # Counted on the node: kubectl exec, which carries a command's output to
   # the Mac, sometimes cuts a large one short over a slow link (the VPS).
   start=$(now_ms)
   n=$(in_daemon "fern exec $ENV -- head -c 200000000 /dev/zero | wc -c" | tr -d ' ')
-  note "200 MB of stdout: $(($(now_ms) - start)) ms"
+  metric stream.stdout_200mb_ms "200 MB of stdout, ms" $(($(now_ms) - start))
   check "200 MB of stdout, every byte" 200000000 "$n"
   check "stdout and stderr stay apart" out "$(fern exec $ENV -- sh -c 'echo out; echo err >&2' 2>/dev/null)"
   check "the exit code passes through" 42 "$(fern exec $ENV -- sh -c 'exit 42' >/dev/null 2>&1; echo $?)"
@@ -313,7 +331,7 @@ concurrency() {
   start=$(now_ms)
   for i in $(seq 10); do sql $ENV 'select count(*) from users' >"$TMP/asleep$i" 2>&1 & done
   wait
-  note "10 parallel execs on a sleeping box: $(($(now_ms) - start)) ms in all"
+  metric concurrency.parallel_execs_ms "10 parallel execs on a sleeping box, ms in all" $(($(now_ms) - start))
   check "all 10 wake it and see the database" 10 "$(cat "$TMP"/asleep* | grep -cx 3 || true)"
 }
 
@@ -367,7 +385,7 @@ pg_load() {
       note "snapshot p$i: Postgres isn't consistent"
     fi
   done
-  note "snapshot under load, ms: $(stats <"$TMP/pg-snap-$env")"
+  metric pgload.snapshot_ms "snapshot under load, ms" "$(stats <"$TMP/pg-snap-$env")"
   check "Postgres is whole and uncorrupted after each of $((n - first + 1)) restores" $((n - first + 1)) "$ok"
 }
 
@@ -454,12 +472,12 @@ many() {
   start=$(now_ms)
   for i in $(seq 10); do sql "m$i" 'select count(*) from users' >"$TMP/many$i" 2>&1 & done
   wait
-  note "10 sleeping environments woken at once: $(($(now_ms) - start)) ms until all answered"
+  metric many.wake10_ms "10 sleeping environments woken at once, ms until all answered" $(($(now_ms) - start))
   check "all 10 answer (3 users each)" 10 "$(cat "$TMP"/many* | grep -cx 3 || true)"
   check "all 10 run under gVisor" 10 \
     "$(k -n fern-boxes get pods -o jsonpath='{range .items[*]}{.metadata.name} {.spec.runtimeClassName}{"\n"}{end}' | grep -cE '^m[0-9]+ gvisor$' || true)"
   if [ -n "$FERN_HOST" ]; then
-    note "node memory used with 10 boxes awake: $(on_node free -m </dev/null | awk 'NR == 2 { print $3 }') MiB"
+    metric many.node_memory10_mib "node memory used with 10 boxes awake, MiB" "$(on_node free -m </dev/null | awk 'NR == 2 { print $3 }')"
   else
     note "lab memory with 10 boxes awake: $(docker stats --no-stream --format '{{.MemUsage}}' "$LAB")"
   fi
@@ -520,13 +538,13 @@ paths() {
   tar_dir lab/sample-repo | in_daemon "mkdir -p $W/adopted && tar -x -C $W/adopted -f - && chown -R 1000:1000 $W/adopted"
   start=$(now_ms)
   fern create adopted --path $W/adopted >/dev/null
-  note "adopting the sample repo: $(($(now_ms) - start)) ms"
+  metric paths.adopt_ms "adopting the sample repo, ms" $(($(now_ms) - start))
   check "the adopted workspace is a subvolume" 256 "$(in_daemon "stat -c %i $W/adopted")"
   check "the adopted workspace runs Postgres (3 users)" 3 "$(sql adopted 'select count(*) from users')"
   in_daemon "mkdir -p $W/big && cd $W/big && seq 20000 | xargs -n 2000 sh -c 'for i; do echo \$i > f\$i; done' _ && chown -R 1000:1000 $W/big"
   start=$(now_ms)
   fern create adopted-big --path $W/big >/dev/null
-  note "adopting 20,000 files: $(($(now_ms) - start)) ms"
+  metric paths.adopt_20k_ms "adopting 20,000 files, ms" $(($(now_ms) - start))
   check "all 20,000 files adopted" 20000 "$(in_daemon "ls $W/big | wc -l" | tr -d ' ')"
   # T3 reuses a checkpoint's name after a revert, so the snapshot is taken again.
   fern snapshot adopted c1 >/dev/null
@@ -560,7 +578,7 @@ golden() {
     [ -n "$key" ] && break
     sleep 1
   done
-  note "golden build: $(($(now_ms) - start)) ms"
+  metric golden.build_ms "golden build, ms" $(($(now_ms) - start))
   check "a golden snapshot is built from the first worktree" 1 "$(grep -c . <<<"$key")"
   check "it holds the seeded database, not the checkout" "yes no" \
     "$(in_daemon "cd /var/lib/fern/envs/$G/snaps/$key && { test -e .fern/seeded && echo yes || echo no; } && { test -e seed.sql && echo yes || echo no; }" | xargs)"
@@ -568,11 +586,11 @@ golden() {
   # The next one starts from it: its database is there before its first wake.
   start=$(now_ms)
   fern create gold2 --path $W/two >/dev/null
-  note "create from golden: $(($(now_ms) - start)) ms"
+  metric golden.create_ms "create from golden, ms" $(($(now_ms) - start))
   check "the next worktree has the database before its first wake" yes \
     "$(in_daemon "test -e $W/two/.fern/seeded && test -e $W/two/seed.sql" && echo yes || echo no)"
-  note "first wake from golden, ms: $(fern wake gold2 | took)"
-  note "first wake without one (initdb and seed), ms: $(fern wake gold1 | took)"
+  metric golden.first_wake_ms "first wake from golden, ms" "$(fern wake gold2 | took)"
+  metric golden.first_wake_cold_ms "first wake without one (initdb and seed), ms" "$(fern wake gold1 | took)"
   check "and Postgres runs on it (3 users)" 3 "$(sql gold2 'select count(*) from users')"
   for e in gold1 gold2 "$G"; do fern rm "$e"; done
   in_daemon "rm -rf $W"
@@ -624,7 +642,7 @@ t3() {
     && git add a.txt && git -c user.email=t@fern -c user.name=t commit -qm init && git worktree add -q -b t3/one $W"
   start=$(now_ms)
   in_t3 "fern create --path $W t3c" >/dev/null
-  note "T3's worktree adopted (first checkpoint): $(($(now_ms) - start)) ms"
+  metric t3.adopt_ms "T3's worktree adopted (first checkpoint), ms" $(($(now_ms) - start))
   check "claude in a T3 worktree runs" "$CLAUDE" "$(in_t3 "cd $W && claude --version")"
   check "in its box, which it woke" running "$(state t3c)"
   # Claude's folder is outside the workspace, so sleep and restore keep it.
@@ -647,11 +665,11 @@ t3() {
   check "T3's new threads are New worktrees, and deleting one removes it" "worktree true" \
     "$(in_t3 "node -p 'const s = require(\"/var/lib/fern/userdata/settings.json\"); s.defaultThreadEnvMode + \" \" + s.storageCleanup.worktreeOnDelete'")"
   in_t3 "echo v1 > $W/a.txt && echo junk > $W/ignored.bin"
-  note "checkpoint snapshot: $(in_t3 'fern snapshot --replace t3c c1' | took) ms"
+  metric t3.checkpoint_ms "checkpoint snapshot, ms" "$(in_t3 'fern snapshot --replace t3c c1' | took)"
   in_t3 "echo v2 > $W/a.txt"
-  note "checkpoint snapshot, replaced: $(in_t3 'fern snapshot --replace t3c c1' | took) ms"
+  metric t3.checkpoint_replaced_ms "checkpoint snapshot, replaced, ms" "$(in_t3 'fern snapshot --replace t3c c1' | took)"
   in_t3 "echo v3 > $W/a.txt && rm $W/ignored.bin"
-  note "restore: $(in_t3 'fern restore t3c c1' | took) ms"
+  metric t3.restore_ms "restore, ms" "$(in_t3 'fern restore t3c c1' | took)"
   check "restore brings back the replaced snapshot" v2 "$(in_t3 "cat $W/a.txt")"
   check "and a file git doesn't track" junk "$(in_t3 "cat $W/ignored.bin")"
   check "git works in the restored worktree" "M a.txt" "$(in_t3 "git -C $W status --short --untracked-files=no" | xargs)"

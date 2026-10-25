@@ -3,6 +3,7 @@
 # caches and the images. Nothing else is touched.
 set -uo pipefail
 source "$(dirname "$0")/lib.sh"
+lab_lock
 docker rm -f "$LAB" >/dev/null 2>&1
 docker ps -aq --filter "label=$LABEL" | xargs -r docker rm -f >/dev/null
 docker volume ls -q --filter "label=$LABEL" | xargs -r docker volume rm >/dev/null

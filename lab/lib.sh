@@ -102,3 +102,24 @@ import_images() {
 # tar_dir writes a tar of a directory to stdout, without the extended
 # attributes and ._ files macOS's tar adds.
 tar_dir() { COPYFILE_DISABLE=1 tar -C "$1" --no-xattrs -cf - .; }
+
+# lab_lock waits until no other script uses the lab (or FERN_HOST's VPS),
+# then holds it until this script and its children end: worktrees share
+# the lab, the images' :dev tags and Docker, and two builds or check runs
+# at once overwrite each other's images and skew each other's timings. A
+# lock whose owner is gone is taken over, so a killed script leaves none.
+lab_lock() {
+  [ -z "${FERN_LAB_LOCKED:-}" ] || return 0
+  local lock=${TMPDIR:-/tmp}/fern-lab-${FERN_HOST:-local}.lock owner said=""
+  until mkdir "$lock" 2>/dev/null; do
+    owner=$(cat "$lock/owner" 2>/dev/null || true)
+    if [ -n "$owner" ] && ! kill -0 "${owner%% *}" 2>/dev/null; then
+      rm -rf "$lock"
+      continue
+    fi
+    [ -n "$said" ] || { echo "waiting for the lab, held by: ${owner#* }" >&2; said=1; }
+    sleep 1
+  done
+  echo "$$ $(basename "$0") in $PWD" >"$lock/owner"
+  export FERN_LAB_LOCKED=$lock
+}
