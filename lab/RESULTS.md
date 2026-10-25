@@ -486,3 +486,89 @@ The daemon, exec and snapshots don't grow with the number of boxes. Waking many 
 Five threads at once cost about 240 MiB each at the peak (box plus Claude), so the 8 GiB node holds 20 or more active threads by memory; CPU limits it first.
 
 **Not Fern:** `disk.create_seeded_ms` (33 s) and `stream.roundtrip_50mb_ms` (67 s) in the VPS baseline carry 20–50 MB from the Mac to Germany; they measure the home link.
+
+## Wake follow-up after the kernel lab lock, 2026-10-25
+
+Local Docker Desktop lab, ARM64, gVisor; base `508befc5`, which includes
+`944075b5`'s flock fix. Each build and its measurement held one lab lock.
+No VPS runs or baseline changes. Reproduce each comparison with:
+
+```sh
+bash -c 'source lab/lib.sh; lab_lock; lab/build.sh && WAKES=10 REPEAT=3 lab/perf.sh box golden'
+```
+
+**No optimization retained.** The saved watch prototype was adapted to
+`cmd/fern-daemon`, measured, then reverted. A crossover redeployed the
+unchanged code. Values below are medians of three runs; each box run has
+ten sleep/wake cycles.
+
+| Metric, ms | Unchanged A | Watch B | Unchanged crossover A |
+|---|---:|---:|---:|
+| wake p50 | 703.9 | 706.6 | 706.8 |
+| wake p95 | 847.3 | 861.1 | 951.3 |
+| golden first wake | 747.1 | 741.9 | 865.9 |
+| cold first wake | 1,739.2 | 2,000.6 | 1,926.2 |
+| sleep p50 | 1,011.0 | 1,010.3 | 1,011.8 |
+| sleep p95 | 1,213.3 | 1,818.6 | 1,657.2 |
+
+All three gates passed. Watching did not beat the baseline's 25% wake
+margin (34% for cold first wake). Across the three runs, the step means
+shifted from approximately **668 ms pod / 64 ms ready** to **555 / 172**:
+earlier address detection mostly moved time between the two buckets.
+
+**Where the time goes:** a separate ten-wake trace correlated daemon, CSI,
+kubelet and containerd timestamps by pod UID. Extra kubelet logging was
+enabled only for this diagnostic run and restored afterward. Its wake
+p50 was 725.5 ms, mean 807.6 ms; one Postgres startup took 745 ms.
+
+| Component | Mean ms |
+|---|---:|
+| Fern's Sandbox API call | 6.7 |
+| Controller, scheduling and kubelet before the volume wait | 13.1 |
+| Kubelet WaitForAttachAndMount | 302.1 |
+| RunPodSandbox, including CNI and gVisor | 117.7 |
+| CreateContainer | 9.3 |
+| StartContainer | 87.5 |
+| Services and detecting readiness after StartContainer | 263.1 |
+| Other gaps between calls | 8.1 |
+
+The initial volume check ran before mounts were ready. Every wake then
+waited for its first 300 ms recheck: **300.2–306.5 ms** in the trace.
+CSI publishes averaged **0.51 ms**, maximum **1.00 ms** (22 publishes,
+including warmup). The last publish finished **29–181 ms**, mean **104 ms**,
+before kubelet noticed the mounts. This is not CSI just missing a second
+poll tick: mounts completed before the first recheck, after the initial
+check. The trace also shows a separate reconciliation pass to mark these
+non-attachable volumes attached, then another pass about 100 ms later to
+mount them. Kubernetes' 100 ms discovery/reconciliation loops explain
+most of the earlier part of the wait.
+
+Four disposable gVisor pods per volume type confirmed the boundary:
+Scheduled → RunPodSandbox averaged **9.2 ms without volumes**, **309.0 ms
+with hostPath**, and **308.5 ms with emptyDir**. These were diagnostic
+controls, not proposed replacements for Fern's CSI mounts. Fern already
+sets `attachRequired: false` and `fsGroupPolicy: None`; switching volume
+types does not remove this wait. The retry and loop periods are constants
+in [Kubernetes' volume manager](https://github.com/kubernetes/kubernetes/blob/v1.36.5/pkg/kubelet/volumemanager/volume_manager.go),
+not a kubelet configuration setting.
+
+**Inside gVisor:** an additional warm wake, with info-level runtime logs,
+spent 122 ms in RunPodSandbox and 78 ms in StartContainer. Its built-in
+boot timer covered 53 ms: 16 ms waiting for the parent's start signal,
+9 ms compiling seccomp, 5 ms trimming capabilities, 3 ms initializing
+systrap, and 7 ms creating/starting the root container, plus other setup.
+The workload's gofer took about 18 ms to prepare mounts and filters;
+filter compilation accounted for 4 ms. Both sentry and gofer reported
+missing precompiled seccomp programs for this ARM64 configuration. These
+timings overlap the CRI intervals.
+The temporary runtime wrapper was removed before further measurements.
+
+The next substantial target is upstream kubelet volume scheduling and
+notification: notifying a waiter when mounts complete could recover the
+measured 104 ms average recheck gap; faster discovery/reconciliation is a
+separate opportunity. Runtime startup and service startup follow it.
+
+Validation on the restored code: `lab/go.sh test -race ./...`,
+`lab/go.sh vet ./...`, `lab/lint.sh` (0 issues), gofmt, and the quick
+`WAKES=3 lab/check.sh` sections all passed. The final deployed binaries
+use the unchanged wake path.
