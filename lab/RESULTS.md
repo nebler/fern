@@ -595,3 +595,124 @@ Wake on the VPS went 1,144 → 1,035 ms (baseline medians); box and daemon memor
 **Rejected,** with numbers in the commits and reports: a watch instead of polling for wakes (704 → 707 ms), 50 ms polling for stops, deleting the pod in `rm`, grouping shims (4 MiB a box), `GOGC=20` for helpers, prepared SQLite statements, stripping the CLI.
 
 **Found on the way:** `lab_lock`'s mkdir lock let two scripts in when both took over a dead owner's lock; it is a kernel flock now. The first wake agent's measurements were void for it.
+
+## T3 turn timing, 2026-10-25
+
+Local lab only, from `fc7dd98b` with timing enabled; build and measurement
+held the same `lab_lock`. Two `toy` runs on `claude-haiku-5-5` passed,
+including their reverts. `lab/check.sh t3 claude` and `lab/perf.sh --fast`
+also passed. No perf baseline was changed.
+
+The driver retains `wallMs`, `runMs`, answers and daemon histogram deltas.
+Its new `timing` object joins T3's launch/checkpoint logs with fern-init's
+successful exec start and first stdout, and records completion delivered by
+T3's WebSocket stream. Log collection follows the measured interval. The
+Mac and node clocks must agree; intervals within the startup benchmark use
+one process's monotonic clock. The exec protocol and its output are unchanged.
+
+Baseline ranges across the two runs (seconds after sending the message):
+
+| Boundary | New worktree | After revert |
+|---|---:|---:|
+| T3 launches the wrapper | 0.364–0.523 | 0.111–0.327 |
+| Claude's process has started | 1.320–1.625 | 1.002–1.412 |
+| First stdout from Claude | 2.404–2.866 | 1.940–2.371 |
+| First decoded SDK event | 2.486–2.939 | 1.995–2.432 |
+| Completion reaches the driver | 5.146–6.239 | 6.563–8.304 |
+
+The warm edit/test turn reused the process and completed in 9.171–13.633 s.
+There was **no per-tool Fern checkpoint**: its three command tools and two
+file changes produced one end-of-turn snapshot. New worktrees and turns
+after a revert captured a baseline as well as the end checkpoint.
+
+- Waking took 873–1,086 ms in these turns. Wrapper launch to process start
+  exceeded the daemon's wake by only 16–18 ms, including the lookup,
+  transport and 1–2 ms process spawn.
+- Native Claude startup to first stdout took 1,084–1,241 ms on a new
+  environment and 938–959 ms after a revert. Claude is the pinned native/Bun
+  executable in the image; Node runs the toy service, not Claude.
+- The hook's actual adoption took 22–26 ms, versus `check.sh`'s 212 ms
+  `t3.adopt_ms`, which includes the kubectl measurement transport.
+- Ten Fern snapshot hook spans took 11–37 ms, median 18 ms. The associated
+  Git captures took 49–220 ms, median 69.5 ms. Claude result to streamed
+  completion took 147–253 ms, including the final Git/Fern capture.
+
+Two traps in the old timings: T3 assigns `completedAt` before the checkpoint
+finishes, and its worktree-preparation command is not Claude output. The
+first actual provider command on a new thread started at 4.066–4.867 s
+(from retained baseline event IDs); new records exclude preparation using
+`providerTurnId`. Claude's `duration_api_ms` is cumulative across turns and
+resumes and can exceed its reported turn duration. The driver records the
+raw total and its delta rather than subtracting it as pure model wall time.
+
+The cold box build initially remained in HTTP package downloads after
+450 s and was stopped to release the lab. Bootstrapping apt's CA path and
+using HTTPS completed the box build in 77 s (105 MB fetched in 39 s).
+
+Reproduce startup and transport comparisons without a model prompt:
+
+```bash
+bash -c 'source lab/lib.sh; lab_lock; lab/build.sh t3 && lab/t3-start.sh'
+```
+
+### Snapshot transport comparison
+
+The kept candidate sends the awaited `POST /envs/<id>/snapshots` directly
+from the checkpoint hook over `/run/fern/fern.sock`, instead of spawning
+`fern snapshot`. Git capture still succeeds first; adoption, restore and
+pruning still use the CLI. Snapshot replacement, the 120 s deadline,
+cancellation and the best-effort failure rule stay in place. The added
+socket tests cover 200/204 success and 503 failure while retaining Git refs.
+
+Twenty alternating CLI/socket samples in one T3 Node process, against the
+same daemon and workspace, each with a fresh snapshot ID:
+
+| Snapshot request | CLI | Socket |
+|---|---:|---:|
+| p50, ms | 15.49 | 11.85 |
+| p95, ms | 41.67 | 24.19 |
+
+That is a **3.64 ms (24%) p50 saving**, with one process removed per capture.
+Across two more passing Haiku toy runs, the ten hook spans had median
+**18 → 13 ms** (ranges 11–37 → 7–39 ms). Summed hook time above the daemon's
+snapshot time fell from approximately **10 → 4 ms per capture**. These
+millisecond savings are attributable to the transport; overall turns had
+larger model/wake variation. The warm turn still has one Fern capture,
+and individual tool calls have none.
+
+### Native startup experiments
+
+Ten samples per case, without a model prompt. The same native Claude
+2.1.304 binary, worktree and Claude config directory are used on both
+sides. Inside is the normal two-CPU gVisor box; outside is T3's pod. The
+initialize probe waits for a successful SDK control response, then stops
+its own process. Values are warm p50 milliseconds:
+
+| Probe | Outside | Inside |
+|---|---:|---:|
+| `claude --version` | 11.2 | 31.3 |
+| SDK initialize, default | 542.3 | 694.1 |
+| JIT disabled | 549.8 | 704.3 |
+| One GC marker | 554.9 | 703.2 |
+| Telemetry/error reporting disabled | 237.8 | 376.6 |
+
+`fern which` took 5.2 ms, a complete `fern exec --here -- true` 15.7 ms,
+and `fern-claude --version` 42.8 ms (all measured from T3, without kubectl
+per sample). Rejected JIT/GC changes: neither improved the median.
+Telemetry opt-out saved about 318 ms inside, but also disables feature-flag
+fetching and associated CLI features, so it is not enabled in the image
+([Claude's variable reference](https://code.claude.com/docs/en/env-vars#features-that-need-feature-flag-fetching)).
+Node's compile cache is inapplicable to the native/Bun agent executable.
+No runtime tuning flags were kept.
+
+The socket cohort also passed `lab/check.sh t3 claude`. Its first fast gate
+flagged `paths.adopt_ms` at 139 ms versus the 75 ms baseline; wake, streaming
+and Git captures were also slower in that run. The adoption implementation
+is unchanged. The baseline cohort's fast gate passed at 85 ms. No margin or
+baseline was changed for the repeat.
+The second single-sample repeat also flagged adoption (170 ms), wake p95
+(1,466.8 ms) and sleep p95 (2,815.5 ms). Race tests, vet and lint passed on
+the final Go source. The final control against the committed CLI baseline
+and three-sample candidate gate never acquired the shared lab before the
+time box ended. The queued control was canceled before it ran. The full
+fast gate remains unresolved; its failures are not reported as a pass.

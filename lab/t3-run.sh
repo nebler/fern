@@ -35,6 +35,13 @@ rm_env='source lab/lib.sh; id=$(fern which "$1") && fern rm "$id"'
 # and samples the node's used memory, in MiB.
 # shellcheck disable=SC2016
 node_memory='source lab/lib.sh; on_node free -m </dev/null | awk "NR == 2 { print \$3 }"'
-T3_PAIR_URL=$pair_url T3_METRICS_CMD=$metrics T3_RM_ENV_CMD=$rm_env T3_NODE_MEMORY_CMD=$node_memory \
+# Timings are read after the step's wall clock and metrics stop. Only the
+# timing lines are collected: provider payloads and service output stay out.
+# shellcheck disable=SC2016
+trace='source lab/lib.sh
+k -n fern-system logs deploy/t3 -c t3 | sed -n "s/^fern-timing //p"
+id=t3-$(printf %s "$1" | shasum -a 256 | cut -c1-16)
+k -n fern-boxes logs "$id" -c box 2>/dev/null | sed -n "/msg=\"claude started\"/p; /msg=\"claude first stdout\"/p" || true'
+T3_PAIR_URL=$pair_url T3_METRICS_CMD=$metrics T3_RM_ENV_CMD=$rm_env T3_NODE_MEMORY_CMD=$node_memory T3_TRACE_CMD=$trace \
   FERN_HOST=$FERN_HOST SCENARIO=${1:-toy} RUNS=${2:-1} MODEL=${3:-claude-haiku-5-5} PARALLEL=${PARALLEL:-1} \
   node lab/t3-run.mjs

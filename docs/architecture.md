@@ -471,6 +471,7 @@ A first, then propose B with what the spike learned (roadmap week 8). C only if 
   - built: histograms `fern_wake_seconds`, `fern_stop_seconds`, `fern_restore_seconds` and `fern_snapshot_seconds` (by `result`: `ok` or `error`), `fern_queue_seconds` (how long a change waited for its actor, by `change`), `fern_wake_step_seconds` (by `step`: `sandbox`, `pod`, `ready`); `fern_idle_sleeps_total`; Go's process metrics. A wake and a restore are also logged with their time
   - planned: golden hit rate and build time, active sessions, pool usage, box restarts
 - **Logs:** per environment (services, `fern-init`, resume/setup output), viewable with `fern logs <env>`.
+- **Turn timing (built):** `FERN_TIMING=1` on T3 records provider launch, the first decoded Claude event, Claude's cumulative API counter and each Git/Fern checkpoint span. `fern-claude` passes the flag to boxexec, which logs the successful process start and first stdout without arguments, environment values or stream contents. `lab/t3-run.sh` adds a `timing` object to each turn; it reads logs after the wall timer stops and uses T3's event stream for completion, keeping the existing `wallMs`, `runMs` and daemon metric fields. Driver and node clocks must be synchronized. `lab/t3-start.sh` compares the pinned native Claude binary inside and outside gVisor, including SDK initialization without a model prompt.
 - **CLI:** `fern ls`, `fern inspect <env>`, `fern snapshots <env>`, `fern top`.
 
 ---

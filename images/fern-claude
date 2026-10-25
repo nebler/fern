@@ -40,4 +40,4 @@ case "$PWD/" in
 	fi
 	;;
 esac
-exec fern exec -i --here -e CLAUDE_CODE_ENTRYPOINT -e CLAUDE_AGENT_SDK_VERSION -- claude "$@"
+exec fern exec -i --here -e CLAUDE_CODE_ENTRYPOINT -e CLAUDE_AGENT_SDK_VERSION -e FERN_TIMING -- claude "$@"

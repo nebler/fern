@@ -3,6 +3,7 @@ package boxexec_test
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"go.uber.org/goleak"
 
 	"github.com/nebler/fern/internal/boxexec"
@@ -22,6 +24,49 @@ import (
 
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
+}
+
+func TestClaudeTiming(t *testing.T) {
+	for _, tt := range []struct {
+		name, timing, script string
+		want                 []string
+	}{
+		{name: "disabled", script: "printf hello"},
+		{name: "stdout", timing: "1", script: "printf hello; printf again", want: []string{"claude started", "claude first stdout"}},
+		{name: "stderr only", timing: "1", script: "printf warning >&2", want: []string{"claude started"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			command := filepath.Join(dir, "claude")
+			if err := os.WriteFile(command, []byte("#!/bin/sh\n"+tt.script+"\n"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			var logs bytes.Buffer
+			srv := httptest.NewServer(boxexec.NewServer(token, dir, nil, slog.New(slog.NewJSONHandler(&logs, nil))))
+			defer srv.Close()
+			req := boxexec.Request{Argv: []string{command, "private-argument"}, Environ: []string{"FERN_TIMING=" + tt.timing, "PRIVATE=private-environment"}}
+			if got := run(t, "ws"+strings.TrimPrefix(srv.URL, "http"), req, nil); got.code != 0 {
+				t.Fatalf("Run() = %+v, want exit 0", got)
+			}
+			if strings.Contains(logs.String(), "private-") {
+				t.Fatal("timing log exposed an argument or environment value")
+			}
+			var got []string
+			decoder := json.NewDecoder(&logs)
+			for decoder.More() {
+				var record struct {
+					Message string `json:"msg"`
+				}
+				if err := decoder.Decode(&record); err != nil {
+					t.Fatal(err)
+				}
+				got = append(got, record.Message)
+			}
+			if diff := cmp.Diff(tt.want, got); diff != "" {
+				t.Errorf("timing events (-want +got):\n%s", diff)
+			}
+		})
+	}
 }
 
 const token = "secret"
