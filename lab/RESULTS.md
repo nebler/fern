@@ -293,3 +293,25 @@ Same lab, with `deploy/k3s-config.yaml` applied (k3s restarted). Commands: `lab/
 **Found on the way:**
 - **The 25–41 s wakes in the metrics were `check.sh many` during a disk stall:** Docker Desktop's disk held up k3s's datastore and containerd (10 s to create a pod sandbox, 10 s more for its container). Healthy wakes under the same load test take 0.6–1.5 s. Fern has no timer of that length.
 - **T3 kept Claude running for 30 idle minutes,** so a short turn kept its box (and Claude's 200 MB and more) awake about 35 minutes. Fern's T3 image now releases idle sessions after 5 minutes.
+
+## First VPS, 2026-10-24
+
+A Hetzner CAX21 (4 shared Ampere ARM cores, 7.5 GiB, local NVMe, Nuremberg), Ubuntu 26.04, set up by `lab/vps.sh`: k3s 1.36.5 with `deploy/k3s-config.yaml`, gVisor 20261012, the pool a 50 GB image file on the server's disk. Every box runs under gVisor (in the lab too). Command: `FERN_HOST=… lab/check.sh` and `lab/check.sh`; both run all 81 checks.
+
+| Measurement | VPS, gVisor | VPS, runc (earlier the same day) | lab, gVisor |
+|---|---|---|---|
+| wake, 30 times, p50 / p95 | 1,142 / 1,225 ms | 696 / 885 ms | 708 / 909 ms |
+| a wake's steps (mean): Sandbox call, pod until it has an address, Postgres ready | 13, 944, 191 ms | 12, 686, 49 ms | 6, 679, 44 ms |
+| sleep, p50 | 1,019 ms | 1,415 ms | 809 ms |
+| snapshot of a 100,000-file workspace, p50 | 18 ms | 17 ms | 10 ms |
+| snapshot under pgbench's writes, p50 / p95 | 26 / 39 ms | 25 / 32 ms | 17 / 23 ms |
+| ten existing environments woken at once | 5.4 s until all answered (3.3–4.4 s each) | | |
+| ten new environments woken at once (first wake: `initdb`) | 34 s | 6.6 s | 10 s |
+| node memory used with ten boxes awake | 2.9 GiB | 2.0 GiB | 1.9 GiB (lab container) |
+
+**Found on the way:**
+- **gVisor costs about 0.45 s a wake on this CPU:** containerd's sandbox start goes from 150 to 250 ms and the container's start from 100 to 200 ms; Postgres takes 140 ms longer to be ready. Turning off gVisor's root overlay (`overlay2=none`; the root is read-only) changed nothing (1,152 ms either way), so it isn't set.
+- **A new environment's first wake runs `initdb`,** about 6 CPU-seconds under gVisor (2.2 s alone, 15 s for ten at once with the four cores busy, 42% of it system time). Golden snapshots, with the database already made, remove that step; nothing is done about it before then.
+- **The node's public address let boxes reach the Kubernetes API:** inside the cluster the API's address leads there, which the egress policy allowed. `lab/build.sh` adds the address to the policy's exceptions on a VPS.
+- **`kubectl exec` cuts large output short** over the slow link from the VPS to the Mac (one run lost 200 KB of 200 MB, without an error). Fern's stream is whole in the node, even to a reader that stalls 30 s; check.sh counts the 200 MB there.
+- **From the Mac, over home internet to Germany:** a 50 MB round trip through a box takes 42 s, and a create seeded with 20 MB from the Mac 26 s. T3 runs on the node, so daily use doesn't take this path.
