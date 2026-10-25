@@ -435,6 +435,11 @@ Your Mac or phone only runs the T3 app. More nodes: `fern join <token>`.
 
 **The environment ID is derived from T3's thread ID.** T3's worktree path *is* the environment's `live/`. Fern **never snapshots T3's own database.** Rewinding it would resurrect revoked logins; T3 keeps its own history.
 
+**Planned: a Local thread must not look like a Fern one.** Only a *New worktree* thread gets an environment. A thread in *Local* (the project's main folder) runs Claude in T3's pod, with no box and no database, and Claude says so only in its answer; a Revert there brings nothing back. Seen twice, in the lab and on the first VPS. In order of cost:
+1. A Fern project's threads default to *New worktree* (T3's per-project `defaultThreadEnvMode`), set when the project is added.
+2. `fern-claude` refuses a project's main folder under `repos/` with a message that names *New worktree*, as it already refuses a worktree without an environment; the agent and the person both see why.
+3. The main folder becomes an environment of its own on its first turn (adopt), so Local works too, with one box shared by every Local thread of that project.
+
 ### 15.1 How the hook reaches a user
 Nobody applies a patch by hand. T3's server has to run next to the pool anyway (it runs git and the agent on the worktree paths), so Fern runs it as a pod from an image Fern builds (§14.1). The user installs Fern, opens the T3 app on their Mac and pairs it with the printed link (Settings → Connections). From then on checkpoints and reverts also cover dependencies and the database.
 
@@ -511,7 +516,7 @@ Kubernetes first, with a vertical slice in week 1. The week-by-week plan (MVP in
 - **Wake time budget:** box start + `resume` + services. Target ≤15 s, so T3's first connection attempt succeeds. To be measured.
 - **agent-sandbox:** `Suspended` → `Running` latency; recreation of a force-deleted pod; pod → `Sandbox` → `Environment` ownership for CSI checks.
 - **Quotas:** btrfs qgroups vs cgroup/box-level limits, given qgroups' performance cost.
-- **Revert edge cases:** T3's "revert files only" vs "revert files too", and threads that work in the project directory rather than a worktree.
+- **Revert edge cases:** T3's "revert files only" vs "revert files too". Threads in the project directory rather than a worktree: see §15, planned.
 - **CSI inline volumes:** btrfs subvolume bind mounts under gVisor (week 0 spike); reliable pod identity for mount authorization.
 - **Admission policy:** can it read the node name from node-bound tokens?
 - **Reattach:** does `sandboxd` support it, or does `fern-init` need its own protocol?

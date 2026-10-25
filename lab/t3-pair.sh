@@ -3,7 +3,9 @@
 # repo (Postgres with three users) as a project at repos/sample, once, and
 # prints a pairing link for 127.0.0.1:30773 that works for 15 minutes. In the
 # app: Settings → Connections, add the link. Needs lab/up.sh and
-# lab/build.sh t3.
+# lab/build.sh t3. For a VPS (FERN_HOST), T3_PORT names the Mac's end of an
+# SSH tunnel to the node's NodePort:
+#   ssh -N -L 127.0.0.1:30774:127.0.0.1:30773 root@HOST
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 t3() { k -n fern-system exec deploy/t3 -c t3 -- node /opt/t3/apps/server/dist/bin.mjs "$@" </dev/null; }
@@ -20,4 +22,4 @@ fi
 # The server names its pod's address; the Mac reaches it through the NodePort.
 t3 pair --ttl 15m --label "lab on $(hostname -s)" |
   grep -E '^(Pairing URL|Expires):' |
-  sed -E 's#http://[^/]+/#http://127.0.0.1:30773/#'
+  sed -E "s#http://[^/]+/#http://127.0.0.1:${T3_PORT:-30773}/#"
