@@ -46,7 +46,8 @@ type Server struct {
 	envs   *actor.Group
 	log    *slog.Logger
 	// boxes connects to boxes. A box that vanished can leave an address
-	// nothing answers; a short connect timeout gets to the next wake soon.
+	// nothing answers; the same short connect timeout as readiness gets to
+	// the next wake without waiting a second on that stale address.
 	boxes *http.Client
 }
 
@@ -55,7 +56,7 @@ type Server struct {
 func NewServer(st Store, drv Driver, envs *actor.Group, log *slog.Logger) *Server {
 	return &Server{
 		store: st, driver: drv, envs: envs, log: log,
-		boxes: &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: time.Second}).DialContext}},
+		boxes: &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext}},
 	}
 }
 
