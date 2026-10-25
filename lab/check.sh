@@ -128,10 +128,32 @@ asleep_within() {
 # sets and the box can't see. Its name depends on the cgroup driver:
 # pod<uid> in the lab, ...-pod<uid with _>.slice under systemd.
 pod_cgroup() {
-  local uid
-  uid=$(pod_uid "$1")
-  on_node sh -c "cat /sys/fs/cgroup/kubepods*/pod$uid/$2 /sys/fs/cgroup/kubepods*/*/pod$uid/$2 \
-    /sys/fs/cgroup/kubepods*/*/*pod${uid//-/_}.slice/$2 /sys/fs/cgroup/kubepods*/*pod${uid//-/_}.slice/$2 2>/dev/null" </dev/null
+  pod_cgroups "$2" "$(pod_uid "$1")"
+}
+# pod_cgroups reads file $1 for the pod UIDs that follow, in one node call.
+pod_cgroups() {
+  on_node sh -s -- "$@" <<'NODE'
+file=$1
+shift
+for uid do
+  slice=$(printf %s "$uid" | tr - _)
+  found=
+  for dir in /sys/fs/cgroup/kubepods*/pod"$uid" /sys/fs/cgroup/kubepods*/*/pod"$uid" \
+    /sys/fs/cgroup/kubepods*/*/*pod"$slice".slice /sys/fs/cgroup/kubepods*/*pod"$slice".slice; do
+    [ -r "$dir/$file" ] || continue
+    cat "$dir/$file" || exit 1
+    found=yes
+    break
+  done
+  [ -n "$found" ] || exit 1
+done
+NODE
+}
+# node_used counts shared application memory too: BusyBox free's used column
+# subtracts Cached (including shmem), while procps free uses MemAvailable.
+node_used() {
+  on_node awk '/^MemTotal:/ { total = $2 } /^MemAvailable:/ { available = $2 }
+    END { printf "%.3f\n", (total - available) / 1024 }' /proc/meminfo </dev/null
 }
 # golden_id prints the ID of the environment that builds repo $1's golden
 # snapshots (setup.ID), for a name of lowercase letters, digits and dashes.
@@ -491,14 +513,17 @@ many() {
 
 # scale wakes more and more boxes and measures, at each step, what the step
 # cost and how the node holds up with that many awake. Memory per box is
-# the node's used memory (page cache not counted) above what it used
-# before the first wake, divided by the boxes awake.
+# the node's used memory above what it used before the first wake, divided
+# by the boxes awake. Keep the legacy free-based metric for its baselines;
+# node_used_per_box_mib uses the same definition on BusyBox and procps.
 scale() {
-  local steps n i prev=0 base used
+  local steps n i prev=0 base used base_available used_available uids pod_stats box_mib kernel_mib
+  local -a pod_uids
   read -ra steps <<<"${SCALE:-1 5 10 20}"
   echo "== scale: ${steps[*]} awake boxes"
   for i in $(seq "${steps[-1]}"); do fresh "s$i"; done
   base=$(on_node free -m </dev/null | awk 'NR == 2 { print $3 }')
+  base_available=$(node_used)
   for n in "${steps[@]}"; do
     : >"$TMP/wakes$n"
     start=$(now_ms)
@@ -511,6 +536,26 @@ scale() {
     check "all $n awake boxes answer" "$n" "$answered"
     used=$(on_node free -m </dev/null | awk 'NR == 2 { print $3 }')
     metric scale.n$n.memory_per_box_mib "node memory per awake box, MiB" "$(awk -v u="$used" -v b="$base" -v n="$n" 'BEGIN { printf "%.1f", (u - b) / n }')"
+    used_available=$(node_used)
+    metric scale.n$n.node_used_per_box_mib "node memory per awake box, MiB (MemTotal - MemAvailable)" \
+      "$(awk -v u="$used_available" -v b="$base_available" -v n="$n" 'BEGIN { printf "%.1f", (u - b) / n }')"
+    # The box section measures a warm box. Read these fresh boxes' cgroups
+    # here too, so their startup memory isn't mistaken for outside-pod cost.
+    uids=$(k -n fern-boxes get pods -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.uid}{"\n"}{end}' |
+      awk -v n="$n" '$1 ~ /^s[1-9][0-9]*$/ && substr($1, 2) + 0 <= n { printf "%s ", $2 }')
+    read -ra pod_uids <<<"$uids"
+    check "memory accounts for all $n boxes" "$n" "${#pod_uids[@]}"
+    if ! pod_stats=$(pod_cgroups memory.stat "${pod_uids[@]}"); then
+      echo "FAIL reading memory of all $n awake boxes" >&2
+      FAILED=1
+      return
+    fi
+    read -r box_mib kernel_mib <<<"$(awk -v n="$n" '
+      $1 == "anon" || $1 == "shmem" { box += $2 }
+      $1 == "kernel" { kernel += $2 }
+      END { printf "%.1f %.1f", box / 1048576 / n, kernel / 1048576 / n }' <<<"$pod_stats")"
+    metric scale.n$n.box_memory_mib "box memory per awake box, MiB (anon + shmem)" "$box_mib"
+    metric scale.n$n.pod_kernel_mib "kernel memory charged per awake pod, MiB" "$kernel_mib"
     metric scale.n$n.daemon_memory_mib "the daemon's memory, MiB" \
       "$(in_daemon 'cat /proc/1/status' | awk '$1 == "RssAnon:" { printf "%.1f", $2 / 1024 }')"
     : >"$TMP/exec$n"
