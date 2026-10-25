@@ -169,8 +169,9 @@ box() {
   echo "== a box keeps no state of its own"
   fresh $ENV
   sql $ENV "insert into users (name, email) values ('Edsger', 'edsger@example.com')" >/dev/null
-  # setsid: an exec's own process group ends with it.
-  fern exec $ENV -- sh -c 'echo x > /tmp/outside && echo y > inside && setsid -f sleep 1000 >/dev/null 2>&1'
+  # setsid: an exec's own process group ends with it. The pause lets the
+  # child leave the group before the exec ends and the group is killed.
+  fern exec $ENV -- sh -c 'echo x > /tmp/outside && echo y > inside && setsid -f sleep 1000 >/dev/null 2>&1 && sleep 0.5'
   check "the box runs under gVisor" "Starting gVisor..." "$(fern exec $ENV -- dmesg | head -1 | cut -c16-)"
   check "the pod belongs to its Sandbox" Sandbox \
     "$(k -n fern-boxes get pod $ENV -o jsonpath='{.metadata.ownerReferences[0].kind}')"
