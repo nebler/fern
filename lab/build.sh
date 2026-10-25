@@ -19,6 +19,7 @@ done
 lab_up || exit 0
 
 import_images "${images[@]/%/:dev}"
+install_cli
 k apply -f - <deploy/fern.yaml >/dev/null
 if [ -n "$FERN_HOST" ]; then
   # In the cluster, the Kubernetes API's address leads to the node's public

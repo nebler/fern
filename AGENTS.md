@@ -23,7 +23,7 @@ The nouns are in [architecture §2](docs/architecture.md#2-concepts). In the cod
 ## Commands
 - Unit tests: `go test -race ./...` (fake driver, runs anywhere Go runs)
 - Lint: `golangci-lint run` (config in `.golangci.yml`; fix the code, don't silence the linter)
-- Integration tests: `lab/check.sh`, against k3s in the local lab (`lab/up.sh`) first, then on the VPS (see engine-local.md)
+- Integration tests: `lab/check.sh` (the quick sections, under a minute in the lab) after a change, `lab/check.sh all` before a merge or a tag; against k3s in the local lab (`lab/up.sh`) first, then on the VPS with `FERN_HOST` (see engine-local.md)
 
 ## Style sources
 Follow, in this order:

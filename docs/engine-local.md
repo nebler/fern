@@ -54,7 +54,7 @@ With `FERN_HOST=HOST`, the lab's scripts (`check.sh`, `fern`, `claude-login.sh`,
 
 ### 1.3 Fast inner loop
 - **Unit tests** run anywhere (`go test -race ./...`), using the fake driver. That works on the Mac inside a Go container, or on the VM.
-- **Integration tests** run against k3s, in the local lab first and on the VM before each tag: `lab/build.sh` builds the images and restarts the pods, then `lab/check.sh` runs the checks by section (E0 is `box`, E1 is `disk`, E4 is `box`).
+- **Integration tests** run against k3s, in the local lab first and on the VM before each tag: `lab/build.sh` builds the images and restarts the pods, then `lab/check.sh` runs the checks by section (E0 is `box`, E1 is `disk`, E4 is `box`): by default the quick ones (slice, box, stream, restore, paths, golden, t3; 36 s in the lab, 103 s on the VPS from the Mac), with `all` every one. Sections run four at a time, each with an environment of its own, except those that restart the daemon or the node or load it (idle, daemon, node, many), which run alone after; `JOBS=1` runs them one by one, for timings undisturbed by the others. The scripts run the fern CLI on the node, against the daemon's socket, rather than through `kubectl exec` (70 ms a command instead of 200 in the lab).
 - **Rules:**
   - Everything Fern creates is labelled `app.kubernetes.io/part-of=fern`, so cleanup is `helm uninstall fern` plus deleting the pool.
   - No credentials in images or snapshots. Agent logins are done by you on the VM and mounted from outside `live/`.
@@ -122,7 +122,7 @@ Each one: **shows**, **how**, **pass**. Numbers are reported as p50/p95, with no
   3. Take 50+ snapshots during the writes.
   4. Recover each snapshot on a writable copy.
 - **Pass:** every copy recovers; `max(id)` ≥ the last ID acknowledged before the snapshot; `amcheck` is clean. Bonus: SQLite in WAL mode.
-- **Status (2026-10-24):** `lab/check.sh pgload`: 60 snapshots, one a second, under `pgbench -c 4`; each restored into the environment, then pgbench's account, teller and branch balances agree (every transaction whole) and `pg_amcheck --heapallindexed` is clean: 60 of 60. The acknowledged-ID part isn't checked. Under gVisor: the same with 10 snapshots, in `lab/check.sh gvisor`.
+- **Status (2026-10-24):** `lab/check.sh pgload`: 60 snapshots, one a second, under `pgbench -c 4`; each restored into the environment, then pgbench's account, teller and branch balances agree (every transaction whole) and `pg_amcheck --heapallindexed` is clean: 60 of 60. The acknowledged-ID part isn't checked. Every box runs under gVisor now; since retention keeps an environment's newest 50 snapshots, the newest 50 of the 60 are restored, and the oldest are checked to be refused.
 
 ### E3. Golden snapshots
 - **How:**

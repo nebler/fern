@@ -49,7 +49,31 @@ on_node() {
 k() { on_node kubectl "$@"; }
 
 # fern runs the fern CLI in the daemon pod.
-fern() { lab/fern "$@"; }
+fern() {
+  case " $* " in
+    *" --repo "* | *" -it "*) lab/fern "$@" ;; # a local repo to send, or a terminal
+    *) on_node "$FERN_CLI" "$@" ;;
+  esac
+}
+
+# FERN_CLI is the fern CLI on the node, a copy of the daemon's own binary
+# (install_cli). It talks to the daemon's socket, which is on the node, so a
+# command doesn't go through kubectl exec (about 110 ms a command).
+FERN_CLI=/usr/local/bin/fern-cli
+
+# install_cli copies the fern binary from the fern:dev image to the node,
+# unless the node has the same one.
+install_cli() {
+  local tmp cid
+  tmp=$(mktemp -d)
+  cid=$(docker create --label "$LABEL" fern:dev)
+  docker cp -q "$cid:/usr/local/bin/fern" "$tmp/fern"
+  docker rm "$cid" >/dev/null
+  if [ "$(on_node sh -c "sha256sum $FERN_CLI 2>/dev/null | cut -d' ' -f1" </dev/null)" != "$(shasum -a 256 "$tmp/fern" | cut -d' ' -f1)" ]; then
+    gzip -c "$tmp/fern" | on_node sh -c "gunzip > $FERN_CLI.new && chmod 755 $FERN_CLI.new && mv $FERN_CLI.new $FERN_CLI"
+  fi
+  rm -rf "$tmp"
+}
 
 # in_t3 runs a shell command in T3's server container, as T3's user.
 in_t3() { k -n fern-system exec -i deploy/t3 -c t3 -- sh -c "$1"; }

@@ -8,7 +8,8 @@
 #   disk         a 100,000-file workspace: snapshot, restore (equal to its
 #                snapshot) and rm (nothing left); a seeded create; a real clone
 #   stream       fern exec keeps a stream intact: bytes, stderr, exit codes,
-#                stdin, signals, cancellation, long idle commands
+#                stdin, signals, cancellation
+#   idle_exec    a command that prints nothing for 3 minutes still answers
 #   concurrency  parallel execs on an awake and on a sleeping environment
 #   restore      a restore while an exec is open; a missing snapshot
 #   pgload       Postgres recovers, consistent, from every snapshot kept (the
@@ -29,12 +30,19 @@
 #   claude       Claude Code in a box: network, stream-json, its terminal UI
 #   t3           T3's server: the checkpoint hook's commands on a worktree it
 #                made, and that worktree's box with git, Claude's folder and
-#                login. Needs lab/build.sh t3; not in the default run.
-# Run all but t3, or name some: lab/check.sh stream daemon. Needs lab/up.sh,
-# or lab/vps.sh and FERN_HOST for a VPS.
+#                login. Needs lab/build.sh t3.
+# lab/check.sh runs the quick sections (slice box stream restore paths golden
+# t3); lab/check.sh all runs every one; or name some: lab/check.sh stream
+# daemon. Sections run side by side, JOBS (4) at a time, except those that
+# restart things; JOBS=1 for timings undisturbed by the others. Needs
+# lab/up.sh, or lab/vps.sh and FERN_HOST for a VPS.
+# The sections are called by name, from main; ENV is ck-<section>, never
+# words to split.
+# shellcheck disable=SC2329,SC2086
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
-ENV=ck IDLE=${IDLE:-180}
+# WAKES is how many times box sleeps and wakes its box, for the timings.
+ENV=ck IDLE=${IDLE:-180} WAKES=${WAKES:-10}
 CLAUDE="$(sed -n 's/^ARG CLAUDE_VERSION=//p' images/Dockerfile) (Claude Code)"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -171,7 +179,7 @@ box() {
   check "a stray process runs" 1 "$(procs $ENV | grep -cx sleep || true)"
   local mounted=0
   metrics >"$TMP/metrics"
-  for _ in $(seq 30); do
+  for _ in $(seq "$WAKES"); do
     fern sleep $ENV | took >>"$TMP/sleep"
     mounted=$((mounted + $(mounts $ENV)))
     fern wake $ENV | took >>"$TMP/wake"
@@ -188,11 +196,15 @@ box() {
   sql $ENV "insert into users (name, email) values ('Barbara', 'barbara@example.com')" >/dev/null
   start=$(now_ms)
   k -n fern-boxes delete pod $ENV --force --grace-period=0 >/dev/null 2>&1
-  # A command sent while the pod is being killed can reach it and be cut off
-  # (seen under gVisor in the lab); it isn't retried, as it may have run.
-  # The next one reaches the new pod.
-  check "Postgres recovers after its pod is force-deleted (5 users)" 5 \
-    "$(sql $ENV 'select count(*) from users' 2>/dev/null || sql $ENV 'select count(*) from users')"
+  # A command sent while the pod is being replaced can fail (reaching the
+  # dying pod, under gVisor in the lab); it isn't retried, as it may have
+  # run. Commands within the next 10 s reach the new pod.
+  local users=""
+  for _ in $(seq 20); do
+    users=$(sql $ENV 'select count(*) from users' 2>/dev/null) && break
+    sleep 0.5
+  done
+  check "Postgres recovers after its pod is force-deleted (5 users)" 5 "$users"
   note "force delete until Postgres answers: $(($(now_ms) - start)) ms"
   check "and the seed ran once" 1 "$(sql $ENV "select count(*) from users where name = 'Ada'")"
 }
@@ -279,6 +291,13 @@ stream() {
   sleep 2
   check "a client that goes away stops its command" 0 \
     "$(fern exec $ENV -- sh -c 'cat /proc/[0-9]*/cmdline 2>/dev/null | tr "\0" " "' | grep -c 'sleep 301' || true)"
+}
+
+# idle_exec: a command that prints nothing for IDLE seconds (180) still
+# answers: nothing between the client and the box drops an idle stream.
+idle_exec() {
+  echo "== an idle exec stream"
+  fresh $ENV
   check "a command idle for ${IDLE}s still answers" alive "$(fern exec $ENV -- sh -c "sleep $IDLE; echo alive")"
 }
 
@@ -655,14 +674,66 @@ t3() {
   in_t3 "fern rm t3c && rm -rf $R /var/lib/fern/worktrees/t3check"
 }
 
-all=(slice box disk stream concurrency restore pgload idle daemon node many limits paths golden claude)
-[ $# -gt 0 ] || set -- "${all[@]}"
-for s in "$@"; do
-  case " ${all[*]} t3 " in
-    *" $s "*) ;;
-    *) echo "no section $s; the sections are: ${all[*]} t3" >&2; exit 2 ;;
+# main runs the sections. It is one function, called on the script's last
+# line, so bash has read all of it before it starts: editing the script
+# while it runs can't change what it does.
+main() {
+  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many limits paths golden claude)
+  quick=(slice box stream restore paths golden t3)
+  # These restart the daemon or the node, change the daemon's arguments or
+  # load the node with ten boxes, so they run alone, after the others.
+  alone=" idle daemon node many "
+  case "${1:-}" in
+    "") set -- "${quick[@]}" ;;
+    all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} ;;
   esac
-done
-for s in "$@"; do "$s"; done
-fern rm $ENV 2>/dev/null || true
-if [ "$FAILED" = 0 ]; then echo "check: PASS"; else echo "check: FAIL"; exit 1; fi
+  for s in "$@"; do
+    case " ${all[*]} t3 " in
+      *" $s "*) ;;
+      *) echo "no section $s; the sections are: ${all[*]} t3 (or quick, the default, or all)" >&2; exit 2 ;;
+    esac
+  done
+
+  # run_section runs section $1 with an environment and a temporary folder of
+  # its own, so sections can run side by side, and prints its output and how
+  # long it took when it is done. Its status is 1 if a check failed.
+  run_section() {
+    local s=$1 start status=0
+    start=$(now_ms)
+    # shellcheck disable=SC2030,SC2031 # the section's own, in its subshell
+    (
+      ENV=ck-${s//_/-} TMP=$TMP/$s
+      mkdir -p "$TMP"
+      "$s"
+      fern rm "$ENV" 2>/dev/null || true
+      exit "$FAILED"
+    ) >"$TMP/$s.out" 2>&1 || status=1
+    # shellcheck disable=SC2031
+    echo "$s $(($(now_ms) - start))" >>"$TMP/times"
+    # shellcheck disable=SC2031
+    cat "$TMP/$s.out"
+    return $status
+  }
+
+  # Up to JOBS sections at a time (default 4); JOBS=1 runs them one by one,
+  # for timings undisturbed by the others.
+  jobs=${JOBS:-4} failed=0
+  start=$(now_ms)
+  for s in "$@"; do
+    case "$alone" in *" $s "*) continue ;; esac
+    while [ "$(jobs -rp | wc -l)" -ge "$jobs" ]; do wait -n || failed=1; done
+    run_section "$s" &
+  done
+  while [ -n "$(jobs -rp)" ]; do wait -n || failed=1; done
+  for s in "$@"; do
+    case "$alone" in *" $s "*) run_section "$s" || failed=1 ;; esac
+  done
+  echo "== time per section, ms (side by side, so they add up to more than the run)"
+  # shellcheck disable=SC2031
+  sort -k2 -n -r "$TMP/times" | awk '{ printf "  %-12s %7d\n", $1, $2 }'
+  echo "  total        $(printf %7d $(($(now_ms) - start)))"
+  FAILED=$failed
+  if [ "$FAILED" = 0 ]; then echo "check: PASS"; else echo "check: FAIL"; exit 1; fi
+}
+
+main "$@"; exit
