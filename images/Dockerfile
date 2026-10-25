@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Fern's images, one target each; lab/build.sh builds them:
-#   fern      the daemon, which is also the CLI and the CSI node plugin
+#   fern      the daemon, CLI and CSI node plugin
 #   fern-box  a box: Debian slim with Postgres, git, curl and Claude Code
 #   fern-t3   T3 Code's server with Fern's checkpoint hook
 
@@ -11,7 +11,7 @@ RUN --mount=type=cache,target=/go/pkg/mod go mod download
 COPY cmd cmd
 COPY internal internal
 RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache/go-build \
-    CGO_ENABLED=0 go build -trimpath -o /out/ ./cmd/fern ./cmd/fern-init
+    CGO_ENABLED=0 go build -trimpath -o /out/ ./cmd/fern ./cmd/fern-daemon ./cmd/fern-init
 
 # Claude Code's native binary, pinned and checked against its release manifest.
 FROM debian:trixie-slim AS claude
@@ -31,6 +31,7 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends btrfs-progs \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=go /out/fern /usr/local/bin/fern
+COPY --from=go /out/fern-daemon /usr/local/bin/fern-daemon
 ENTRYPOINT ["/usr/local/bin/fern"]
 
 FROM debian:trixie-slim AS fern-box

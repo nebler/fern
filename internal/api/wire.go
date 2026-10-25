@@ -5,21 +5,14 @@ import (
 	"io"
 	"net/http"
 	"time"
-
-	"github.com/nebler/fern/internal/driver"
-	"github.com/nebler/fern/internal/store"
 )
 
 // Env is an environment as the API reports it.
 type Env struct {
-	ID        string       `json:"id"`
-	Workspace string       `json:"workspace"` // on the host and in the box
-	Created   time.Time    `json:"created"`
-	State     driver.State `json:"state,omitempty"` // not in a lookup by path
-}
-
-func toAPIEnv(env store.Env, state driver.State) Env {
-	return Env{ID: env.ID, Workspace: env.Workspace, Created: env.Created, State: state}
+	ID        string    `json:"id"`
+	Workspace string    `json:"workspace"` // on the host and in the box
+	Created   time.Time `json:"created"`
+	State     string    `json:"state,omitempty"` // not in a lookup by path
 }
 
 // Snapshot is a snapshot as the API reports it.
@@ -28,16 +21,16 @@ type Snapshot struct {
 	Created time.Time `json:"created"`
 }
 
-// snapshotRequest is the body of POST /envs/{id}/snapshots.
-type snapshotRequest struct {
+// SnapshotRequest is the body of POST /envs/{id}/snapshots.
+type SnapshotRequest struct {
 	ID string `json:"id"`
 	// Replace takes the snapshot again if one with this ID exists. T3 reuses
 	// checkpoint names after a revert.
 	Replace bool `json:"replace,omitempty"`
 }
 
-// restoreRequest is the body of POST /envs/{id}/restore.
-type restoreRequest struct {
+// RestoreRequest is the body of POST /envs/{id}/restore.
+type RestoreRequest struct {
 	Snapshot string `json:"snapshot"`
 }
 

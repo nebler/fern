@@ -1,4 +1,4 @@
-// Command fern is the Fern daemon and its command-line client.
+// Command fern is the Fern command-line client.
 //
 //	fern daemon [--idle-agent D] [--idle-human D] [--metrics-addr ADDR]
 //	                                         run the node daemon and CSI plugin
@@ -26,6 +26,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -44,16 +45,23 @@ import (
 const socket = "/run/fern/fern.sock"
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "daemon" {
+		// Keep the existing command without loading the daemon's dependencies
+		// on every checkpoint and exec. Exec preserves PID 1 and its signals.
+		exe, err := os.Executable()
+		if err == nil {
+			daemon := filepath.Join(filepath.Dir(exe), "fern-daemon")
+			err = syscall.Exec(daemon, append([]string{daemon}, os.Args[2:]...), os.Environ())
+			err = fmt.Errorf("exec %s: %w", daemon, err)
+		}
+		_, _ = fmt.Fprintf(os.Stderr, "fern daemon: %v\n", err)
+		os.Exit(1)
+	}
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
 // run runs one invocation and returns the process exit code.
 func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	if len(args) > 0 && args[0] == "daemon" {
-		ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		return runDaemon(ctx, args[1:], stderr)
-	}
 	cmd, err := parse(args)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "fern: %v\n", err)
