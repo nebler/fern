@@ -100,21 +100,40 @@ async function connect({ origin, token }) {
     ws.onerror = () => reject(new Error("websocket: could not connect"));
   });
   const pending = new Map();
+  const subscriptions = new Map();
   let next = 0;
   ws.onmessage = (event) => {
     const frame = JSON.parse(event.data);
-    if (frame._tag !== "Exit") return; // only unary calls: no chunks to ack
+    if (frame._tag === "Chunk") {
+      const observe = subscriptions.get(frame.requestId);
+      for (const value of frame.values) observe?.(value, Date.now());
+      ws.send(JSON.stringify({ _tag: "Ack", requestId: frame.requestId }));
+      return;
+    }
+    if (frame._tag !== "Exit") return;
+    subscriptions.delete(frame.requestId);
     const call = pending.get(frame.requestId);
     pending.delete(frame.requestId);
+    if (!call) return;
     if (frame.exit._tag === "Success") call?.resolve(frame.exit.value);
     else call?.reject(new Error(`${call.tag}: ${JSON.stringify(frame.exit.cause)}`));
   };
   ws.onclose = () => {
     for (const call of pending.values()) call.reject(new Error(`${call.tag}: websocket closed`));
     pending.clear();
+    subscriptions.clear();
   };
   const ping = setInterval(() => ws.send(JSON.stringify({ _tag: "Ping" })), 5000);
   return {
+    subscribe(tag, payload, observe) {
+      const id = String(++next);
+      subscriptions.set(id, observe);
+      ws.send(JSON.stringify({ _tag: "Request", id, tag, payload, headers: [] }));
+      return () => {
+        subscriptions.delete(id);
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ _tag: "Interrupt", requestId: id }));
+      };
+    },
     call(tag, payload) {
       const id = String(++next);
       ws.send(JSON.stringify({ _tag: "Request", id, tag, payload, headers: [] }));
@@ -168,16 +187,71 @@ async function waitFor(what, check, timeoutMs = 300_000) {
 const done = new Set(["completed", "failed", "interrupted", "cancelled"]);
 const ms = (a, b) => (a && b ? new Date(b) - new Date(a) : null);
 
+// These timestamps use the server/node clock, except sentAt and observedEndAt
+// on the driver. The lab VM and driver must have synchronized clocks. A reused
+// Claude process has no new start or first-event timestamp for that step.
+async function turnTiming(p, run, start, end, streamEvents, previousApiMs) {
+  const cwd = p.thread.worktreePath;
+  const trace = [];
+  if (env("T3_TRACE_CMD") && cwd) {
+    for (const line of (await bash(env("T3_TRACE_CMD"), cwd)).split("\n")) {
+      if (line.startsWith("{")) {
+        const event = JSON.parse(line);
+        if (event.cwd === cwd && Date.parse(event.at) >= start && Date.parse(event.at) <= end) trace.push(event);
+      } else {
+        const match = line.match(/^time=(\S+) level=INFO msg="claude (started|first stdout)" .*pid=(\d+) (?:spawn_ms|since_request_ms)=([\d.]+)/);
+        if (match && Date.parse(match[1]) >= start && Date.parse(match[1]) <= end) {
+          trace.push({ event: `claude.${match[2].replaceAll(" ", "_")}`, at: match[1], pid: Number(match[3]), ms: Number(match[4]) });
+        }
+      }
+    }
+  }
+  trace.sort((a, b) => Date.parse(a.at) - Date.parse(b.at));
+  const at = (event) => trace.find((e) => e.event === event)?.at ?? null;
+  const items = p.turnItems.filter((item) => item.runId === run.id && item.type !== "user_message");
+  // T3 also represents worktree preparation as a command. It has no
+  // provider turn and must not masquerade as Claude's first output.
+  const firstContentAt = items.filter((item) => item.providerTurnId && ["assistant_message", "reasoning", "command_execution", "file_change", "tool_call"].includes(item.type))
+    .map((item) => item.startedAt).filter(Boolean).sort()[0] ?? null;
+  const events = streamEvents.filter((event) => event.observedAt >= start && event.runId === run.id);
+  const completed = events.find((event) => event.type === "run.updated" && done.has(event.status));
+  const result = trace.find((event) => event.event === "claude.result");
+  return {
+    sentAt: new Date(start).toISOString(),
+    observedEndAt: new Date(end).toISOString(),
+    requestedAt: run.requestedAt, startedAt: run.startedAt, completedAt: run.completedAt,
+    messageToProcessMs: ms(start, at("claude.started")),
+    wrapperToProcessMs: ms(at("wrapper.start"), at("claude.started")),
+    processToStdoutMs: ms(at("claude.started"), at("claude.first_stdout")),
+    messageToFirstEventMs: ms(start, at("claude.first_event")),
+    messageToFirstContentMs: ms(start, firstContentAt),
+    // Stream delivery is the user-facing boundary; wallMs retains its old
+    // polling-based meaning for compatibility with existing result readers.
+    messageToCompletedMs: completed ? completed.observedAt - start : null,
+    claudeApiTotalMs: result?.apiMs ?? null,
+    claudeApiDeltaMs: result ? result.apiMs - (result.apiMs >= previousApiMs ? previousApiMs : 0) : null,
+    claudeTurnMs: result?.cliMs ?? null,
+    afterClaudeResultMs: completed ? ms(result?.at, completed.observedAt) : null,
+    streamEvents: events.map((event) => ({ ...event, observedAt: new Date(event.observedAt).toISOString() })),
+    events: items.map(({ id, type, status, providerTurnId, startedAt, completedAt }) => ({ id, type, status, providerTurnId, startedAt, completedAt })),
+    trace,
+  };
+}
+
 async function runOnce(rpc, project, baseRef, n) {
   const threadId = randomUUID();
   const record = { at: new Date().toISOString(), scenario: scenarioName, model, run: n, threadId, steps: [] };
   const projection = () => rpc.call("orchestration.getThreadProjection", { threadId });
   let turns = 0;
+  let previousApiMs = 0;
+  const streamEvents = [];
+  let unsubscribe;
   try {
     for (const step of scenario.steps) {
       const before = await metrics();
       const start = Date.now();
       const result = { step: step.send ? `turn ${turns + 1}` : `revert to before turn ${step.revert}` };
+      let finished;
       if (step.send) {
         turns++;
         const messageId = randomUUID();
@@ -194,6 +268,13 @@ async function runOnce(rpc, project, baseRef, n) {
             interactionMode: "default",
             workspaceStrategy: { type: "worktree", baseRef },
             initialMessage: { messageId, text: step.send, attachments: [] },
+          });
+          unsubscribe = rpc.subscribe("orchestration.subscribeThread", { threadId }, (item, observedAt) => {
+            if (item.kind !== "event") return;
+            const { type, occurredAt, runId, payload } = item.event;
+            // Keep lifecycle metadata, never prompts, tool inputs or output.
+            streamEvents.push({ type, occurredAt, observedAt, runId: runId ?? payload?.runId ?? (type.startsWith("run.") ? payload?.id : null),
+              status: payload?.status, itemType: type.startsWith("turn-item.") ? payload?.type : undefined });
           });
         } else {
           await rpc.call("orchestration.dispatchCommand", {
@@ -224,6 +305,7 @@ async function runOnce(rpc, project, baseRef, n) {
           answer: answer.slice(0, 300),
           pass: run.status === "completed" && step.expect.test(answer),
         });
+        finished = { p, run };
       } else {
         const p = await projection();
         // The checkpoint before turn N is the one turn N-1 left, or the
@@ -250,6 +332,10 @@ async function runOnce(rpc, project, baseRef, n) {
       }
       result.wallMs = Date.now() - start;
       result.server = serverCost(before, await metrics());
+      if (finished) {
+        result.timing = await turnTiming(finished.p, finished.run, start, start + result.wallMs, streamEvents, previousApiMs);
+        previousApiMs = result.timing.claudeApiTotalMs ?? previousApiMs;
+      }
       record.steps.push(result);
       console.log(`  ${result.step}: ${result.pass ? "PASS" : "FAIL"} ${result.wallMs} ms ${JSON.stringify(result.server)}`);
       if (!result.pass) {
@@ -261,6 +347,7 @@ async function runOnce(rpc, project, baseRef, n) {
     record.error = String(err.message ?? err);
     console.log(`  error: ${record.error}`);
   } finally {
+    unsubscribe?.();
     record.pass = !record.error && record.steps.length === scenario.steps.length && record.steps.every((s) => s.pass);
     if (!keep) await remove(rpc, project, threadId);
   }

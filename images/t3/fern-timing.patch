@@ -1,0 +1,97 @@
+--- a/apps/server/src/checkpointing/FernCheckpointStore.ts
++++ b/apps/server/src/checkpointing/FernCheckpointStore.ts
+@@ -51,9 +51,23 @@
+       return NodePath.join(worktrees, repo, name);
+     };
+
++    const timed = <A, E, R>(operation: string, cwd: string, effect: Effect.Effect<A, E, R>) =>
++      Effect.gen(function* () {
++        const start = Date.now();
++        try {
++          return yield* effect;
++        } finally {
++          if (process.env.FERN_TIMING === "1") {
++            console.error("fern-timing " + JSON.stringify({
++              event: operation, cwd, at: new Date(start).toISOString(), ms: Date.now() - start,
++            }));
++          }
++        }
++      });
++
+     // Runs the fern CLI. With allowNonZeroExit, a failing command is a result, not an error.
+     const fern = (cwd: string, args: ReadonlyArray<string>, allowNonZeroExit = false) =>
+-      vcsProcess.run({
++      timed(`fern.${args[0]}`, cwd, vcsProcess.run({
+         operation: `FernCheckpointStore.${args[0]}`,
+         command: options.command,
+         args,
+@@ -62,13 +76,13 @@
+         spawnCwd: "/",
+         timeoutMs: FERN_TIMEOUT_MS,
+         allowNonZeroExit,
+-      });
++      }));
+
+     const captureCheckpoint: CheckpointStore.CheckpointStore["Service"]["captureCheckpoint"] = (
+       input,
+     ) =>
+       Effect.gen(function* () {
+-        yield* git.captureCheckpoint(input);
++        yield* timed("git.capture", input.cwd, git.captureCheckpoint(input));
+         const workspace = workspaceOf(input.cwd);
+         if (workspace === null) {
+           return;
+diff --git a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts b/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
+index 0a289a5226..1a0ba7d881 100644
+--- a/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
++++ b/apps/server/src/orchestration-v2/Adapters/ClaudeAdapterV2.ts
+@@ -240,6 +240,11 @@ const CLAUDE_MCP_REGISTRATION_TIMEOUT = "90 seconds";
+  * CLI exits for any reason.
+  */
+ function spawnClaudeProcessGroup(options: ClaudeSpawnOptions): ClaudeSpawnedProcess {
++  if (process.env.FERN_TIMING === "1") {
++    console.error("fern-timing " + JSON.stringify({
++      event: "wrapper.start", cwd: options.cwd, at: new Date().toISOString(),
++    }));
++  }
+   const child = NodeChildProcess.spawn(options.command, options.args, {
+     cwd: options.cwd,
+     env: options.env,
+@@ -827,17 +832,33 @@ export const layerQueryRunner: Layer.Layer<
+           ),
+         );
+
++        let firstMessage = true;
+         return {
+           messages: Stream.fromAsyncIterable(claudeQueryMessages(queryRuntime), (cause) =>
+             queryRunnerError(cause, "fromAsyncIterable"),
+           ).pipe(
+-            Stream.tap((message) =>
+-              logProtocolEvent({
++            Stream.tap((message) => Effect.gen(function* () {
++              if (firstMessage && process.env.FERN_TIMING === "1") {
++                console.error("fern-timing " + JSON.stringify({
++                  event: "claude.first_event", cwd: input.options.cwd,
++                  at: new Date().toISOString(), threadId: input.threadId,
++                }));
++              }
++              firstMessage = false;
++              if (message.type === "result" && process.env.FERN_TIMING === "1") {
++                console.error("fern-timing " + JSON.stringify({
++                  event: "claude.result", cwd: input.options.cwd,
++                  at: new Date().toISOString(), threadId: input.threadId,
++                  apiMs: message.duration_api_ms, cliMs: message.duration_ms,
++                  modelTurns: message.num_turns,
++                }));
++              }
++              yield* logProtocolEvent({
+                 direction: "incoming",
+                 stage: "decoded",
+                 payload: message,
+-              }),
+-            ),
++              });
++            })),
+           ),
+           offer: (message) =>
+             Queue.offer(promptQueue, message).pipe(

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -118,6 +119,8 @@ type process struct {
 	outputs []*os.File
 	output  sync.WaitGroup
 	exited  atomic.Bool // the command has been reaped: don't signal its group
+	trace   *slog.Logger
+	start   time.Time
 }
 
 func (s *Server) start(ctx context.Context, conn *websocket.Conn, req Request) (*process, error) {
@@ -139,6 +142,12 @@ func (s *Server) start(ctx context.Context, conn *websocket.Conn, req Request) (
 	// has gone.
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	p := &process{cmd: cmd}
+	// Only opted-in Claude launches are traced. Arguments and environment
+	// values can contain credentials, so neither belongs in the trace.
+	if filepath.Base(req.Argv[0]) == "claude" && slices.Contains(req.Environ, "FERN_TIMING=1") {
+		p.trace = s.log.With(slog.String("dir", cmd.Dir))
+		p.start = time.Now()
+	}
 	if !req.TTY {
 		if err := p.startPipes(cmd); err != nil {
 			return nil, err
@@ -197,8 +206,28 @@ func (p *process) startPipes(cmd *exec.Cmd) error {
 // matching kind. Each copy ends once the command and its children have
 // closed their end (EOF; EIO for a terminal), or at the deadline wait sets.
 func (p *process) copyOutput(ctx context.Context, conn *websocket.Conn, kinds ...byte) {
+	if p.trace != nil {
+		p.trace.InfoContext(ctx, "claude started",
+			slog.Int("pid", p.cmd.Process.Pid),
+			slog.Float64("spawn_ms", float64(time.Since(p.start))/float64(time.Millisecond)))
+	}
 	for i, out := range p.outputs {
-		p.output.Go(func() { _, _ = io.Copy(frames(ctx, conn, kinds[i]), out) })
+		p.output.Go(func() {
+			w := frames(ctx, conn, kinds[i])
+			if p.trace != nil && kinds[i] == frameStdout {
+				first := true
+				w.send = func(frame []byte) error {
+					if first {
+						p.trace.InfoContext(ctx, "claude first stdout",
+							slog.Int("pid", p.cmd.Process.Pid),
+							slog.Float64("since_request_ms", float64(time.Since(p.start))/float64(time.Millisecond)))
+						first = false
+					}
+					return conn.Write(ctx, websocket.MessageBinary, frame)
+				}
+			}
+			_, _ = io.Copy(w, out)
+		})
 	}
 }
 

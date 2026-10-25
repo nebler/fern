@@ -37,10 +37,16 @@ ENTRYPOINT ["/usr/local/bin/fern"]
 FROM debian:trixie-slim AS fern-box
 # Postgres binaries only: clusters live in each environment's workspace.
 # Node runs the lab's toy repo, the sample without a database.
-RUN mkdir -p /etc/postgresql-common/createcluster.d \
+# Bootstrap HTTPS before apt installs its own CA bundle: large HTTP
+# downloads can stall on the lab's network.
+COPY --from=claude /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
+ && echo 'Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";' > /etc/apt/apt.conf.d/fern-bootstrap-ca \
+ && mkdir -p /etc/postgresql-common/createcluster.d \
  && echo 'create_main_cluster = false' > /etc/postgresql-common/createcluster.d/fern.conf \
  && apt-get update \
  && apt-get install -y --no-install-recommends postgresql-17 nodejs ca-certificates curl git \
+ && rm /etc/apt/apt.conf.d/fern-bootstrap-ca \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 1000 --user-group --home-dir /tmp --no-create-home fern
 COPY --from=go /out/fern-init /usr/local/bin/fern-init
@@ -66,7 +72,7 @@ RUN git init -q && git fetch -q --depth 1 https://github.com/pingdotgg/t3code.gi
 # sessions released after 5 minutes, so their boxes can sleep.
 FROM t3-src AS t3-build
 COPY images/t3/*.patch /tmp/
-RUN git apply /tmp/fern-checkpoints.patch /tmp/fern-sessions.patch
+RUN git apply /tmp/fern-checkpoints.patch /tmp/fern-sessions.patch /tmp/fern-timing.patch
 RUN --mount=type=cache,id=fern-t3-pnpm,target=/pnpm \
     pnpm install --frozen-lockfile --store-dir /pnpm/store --filter "t3..."
 WORKDIR /t3/apps/server
