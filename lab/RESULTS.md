@@ -572,3 +572,26 @@ Validation on the restored code: `lab/go.sh test -race ./...`,
 `lab/go.sh vet ./...`, `lab/lint.sh` (0 issues), gofmt, and the quick
 `WAKES=3 lab/check.sh` sections all passed. The final deployed binaries
 use the unchanged wake path.
+
+## Five agents, one layer each, 2026-10-25
+
+Five agents (GPT-6.1) each took one layer (wake, box memory, daemon and CLI, stop and revert, disk and golden) in its own worktree and measured only its own sections, A against B. Merged into iter-1; then `lab/perf.sh` on the merge passed in the lab and on the VPS, and both baselines were recorded again (5 runs each).
+
+| Kept | measured by its agent (lab) | VPS gate, before → after |
+|---|---|---|
+| `fern` CLI apart from the daemon (`cmd/fern-daemon`): no Kubernetes, SQLite, gRPC in the client | exec in the node 15.4 → 6.3 ms, start 10.2 → 1.3 ms, binary 61 → 9.7 MB | checkpoint 16.4 → 10.3 ms, adopt 155 → 100 ms, exec with 20 boxes 103 → 87 ms |
+| btrfs ioctls instead of the `btrfs` command | restore p50 19.2 → 11.4 ms, 128 → 11 KB allocated | snapshot p50 18.9 → 15.4 ms |
+| golden sources cloned, not copied | 20,000 files 751 → 16 ms | golden build 5,696 → 4,479 ms |
+| 250 ms connect timeout to a stale pod | force-delete recovery 1,924 → 1,141 ms | 2,114 → 1,303 ms |
+| box memory counted with gVisor's shared memory | (accounting only: 44.6 → 70.5 MiB a box) | |
+
+Wake on the VPS went 1,144 → 1,035 ms (baseline medians); box and daemon memory didn't change (47, 16 MiB). Sleep stays 2.6 s.
+
+**Where the rest goes:**
+- **A box, about 72 MiB warm in the lab:** 24 the application, 23 gVisor's sentry and gofers, 15 shims and helpers, 9 kernel and node. Details in `lab/BOX-MEMORY.md`.
+- **A wake, lab:** kubelet's volume wait 302 ms (CSI publishes in 0.5 ms; the mount is done 104 ms before kubelet notices), RunPodSandbox 118, StartContainer 87, services and readiness 263.
+- **A stop, lab:** containers 183 ms, sandbox and network 113, kubelet's cleanup until Fern sees it 750.
+
+**Rejected,** with numbers in the commits and reports: a watch instead of polling for wakes (704 → 707 ms), 50 ms polling for stops, deleting the pod in `rm`, grouping shims (4 MiB a box), `GOGC=20` for helpers, prepared SQLite statements, stripping the CLI.
+
+**Found on the way:** `lab_lock`'s mkdir lock let two scripts in when both took over a dead owner's lock; it is a kernel flock now. The first wake agent's measurements were void for it.
