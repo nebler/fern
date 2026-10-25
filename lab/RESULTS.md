@@ -716,3 +716,203 @@ the final Go source. The final control against the committed CLI baseline
 and three-sample candidate gate never acquired the shared lab before the
 time box ended. The queued control was canceled before it ran. The full
 fast gate remains unresolved; its failures are not reported as a pass.
+
+## WAKE beyond the volume wait: floor, 2026-10-25
+
+Base `fc7dd98b`, ARM64 Docker Desktop lab, gVisor 20261012. Builds and
+measurements held the same shared `lab_lock`. No VPS or perf-baseline edits.
+The unchanged three-run gate (`WAKES=10 REPEAT=3 lab/perf.sh box golden`)
+measured wake p50/p95 **742.4/930.7 ms**, golden first wake **745.1 ms**, cold
+first wake **1,900.1 ms**, and box anon + shmem **47.6 MiB**. All correctness
+checks passed; the unchanged p95 exceeded the existing gate's 25% margin.
+
+### The zero-volume floor
+
+Thirty disposable pods, ten per case, alternating 0/1/3 then 3/1/0 volumes.
+Each used the real fern-init entrypoint without services, `fern-box:dev`,
+gVisor, a read-only root, uid/gid 1000, the shared PID namespace, runtime
+seccomp, CPU limit 2 and memory limit 2 GiB. Each explicitly set
+`automountServiceAccountToken: false` and `enableServiceLinks: false`.
+The returned pod specs confirmed exactly 0, 1 or 3 volumes; the nonzero
+controls used emptyDir volumes mounted at distinct paths.
+
+| Median, ms | 0 volumes | 1 volume | 3 volumes |
+|---|---:|---:|---:|
+| Scheduled → RunPodSandbox begins | 9.5 | 310.1 | 309.7 |
+| WaitForAttachAndMount | 0 | 301.0 | 300.7 |
+| Host request → fern-init startup log | 382.7 | 675.7 | 667.2 |
+
+The last row includes the host's Docker/kubectl request overhead. The first
+row correlates scheduler and CRI timestamps. With zero volumes the volume
+manager returns before logging a wait; with either one or three, the first
+wait consumes one 300 ms retry. More volumes do not add another cycle.
+
+Today's regular box has **three volumes**: emptyDir `/tmp`, CSI workspace,
+and CSI Claude state. A T3 worktree has **four**, adding the read-only git
+folder; its read-only `.git` subPath is another mount of the workspace
+volume, not another volume. A golden builder has **two**, tmp and workspace.
+There is no projected service-account token, ConfigMap or Secret volume;
+Claude's login comes through an environment variable backed by a Secret.
+
+**No volume merger retained.** Going from three volumes to one did not
+reduce the wait. A production box still needs its CSI workspace and the
+separate, unsnapshotted Claude state; bypassing CSI or copying state into the
+container would break architecture §§10/13/14. The zero-volume pod is a
+control, not a replacement box design.
+
+### Ten initialized Postgres wakes
+
+A separate warm trace matched pod UIDs across daemon, CSI, kubelet and CRI
+logs. Kubelet logging verbosity was temporarily raised for this diagnostic
+and restored before releasing the lock. Wake mean/p50: **713.4/690.3 ms**.
+
+| Component | Mean ms |
+|---|---:|
+| Before the volume wait, including Sandbox API and scheduling | 17.3 |
+| WaitForAttachAndMount | 301.0 |
+| RunPodSandbox | 103.3 |
+| CreateContainer | 7.7 |
+| StartContainer | 79.1 |
+| After StartContainer until Fern answers ready | 198.0 |
+| Other gaps between calls | 7.1 |
+
+The last CSI publish completed **123.2 ms** before kubelet noticed it
+(median **122.4 ms**). The separate attach-verification → mount
+reconciliation pass remains visible about 100 ms apart.
+
+Within service startup, fern-init's startup log → Postgres's first log took
+**82.1 ms**, Postgres's first log → accepting connections **62.1 ms**, and
+accepting connections → Fern's wake response **62.1 ms**, all means. These
+span a few milliseconds before StartContainer returns, so they do not sum
+exactly to the after-StartContainer row. Readiness is already a direct long
+HTTP request to fern-init; it executes service checks every 100 ms. Fern
+polls for a new pod address every 200 ms and does not wait for Kubernetes'
+Ready condition. The remaining service-side candidates are the sample's
+process wrappers and the initial readiness retry cadence.
+
+### Runtime flag trials
+
+Each candidate used the unchanged Go code and sample, a build and
+`WAKES=10 REPEAT=3 lab/perf.sh box golden` in one lock. The installed runsc
+was temporarily invoked through an exec wrapper with the selected flag;
+the original executable was restored before releasing the lock. Values are
+medians across the three runs.
+
+| Metric | Unchanged A | `directfs=false` | `host-settings=ignore` | `cpu-num-from-quota=false` | Unchanged crossover |
+|---|---:|---:|---:|---:|---:|
+| Warm wake p50, ms | 742.4 | 761.7 | 746.9 | 698.6 | 761.4 |
+| Warm wake p95, ms | 930.7 | 889.1 | 927.0 | 849.1 | 983.3 |
+| Box anon + shmem, MiB | 47.6 | 49.6 | 47.4 | 49.4 | 47.0 |
+| Golden first wake, ms | 745.1 | 875.2 | 1,364.4 | 709.1 | 895.5 |
+| Cold first wake, ms | 1,900.1 | 3,568.9 | 4,776.0 | 2,033.2 | 2,014.5 |
+
+**None retained.** DirectFS-off and ignoring host settings did not improve
+warm wakes and failed the cold-start gate. The CPU-count flag passed the
+gate but increased box memory by 1.8 MiB against A and 2.4 MiB against the
+unchanged crossover. Over thirty warm pods per flag, median
+RunPodSandbox/StartContainer were **102.9/104.0**, **119.9/82.0**, and
+**109.7/76.3 ms**, respectively, versus **101.4/73.6 ms** in the unchanged
+ten-wake trace. The unchanged crossover through the same wrapper measured
+**122.7/83.0 ms**; the CPU-count candidate lies between these unchanged
+batches. The crossover also failed the wake and sleep p95 gates. These
+sequential batches show why a small end-to-end median change alone is
+insufficient evidence for a runtime setting.
+
+### Services and readiness: individual trials
+
+Each standard trial again used a build and `WAKES=10 REPEAT=3 lab/perf.sh
+box golden` under one lock. Candidate source files were restored before
+releasing the lock, keeping the trials independent. The daemon retry trial
+changed connection retries from 50 to 10 ms while leaving pod-address
+lookup at 200 ms; it was not the earlier rejected 50 ms pod-lookup trial.
+
+| Metric | Unchanged A | Unchanged crossover | Postgres script | Early service checks | Daemon connection retry |
+|---|---:|---:|---:|---:|---:|
+| Wake p50, ms | 742.4 | 761.4 | 723.0 | 744.3 | 798.6 |
+| Wake p95, ms | 930.7 | 983.3 | 895.8 | 1,081.8 | 916.4 |
+| Box anon + shmem, MiB | 47.6 | 47.0 | 46.8 | 47.4 | 47.5 |
+| Golden first wake, ms | 745.1 | 895.5 | 846.6 | 782.5 | 867.1 |
+| Cold first wake, ms | 1,900.1 | 2,014.5 | 1,941.4 | 1,865.5 | 2,318.8 |
+| Sleep p95, ms | 1,218.7 | 1,617.0 | 2,615.5 | 2,611.2 | 1,214.7 |
+
+**Neither retry change retained on its own.** Service checks used 25 ms
+retries for the first 200 ms, then the existing 100 ms pace. This did not
+improve warm wake against A, and its wake tail worsened. The 10 ms daemon
+connection retry passed the gate but was slower than both unchanged runs.
+Passing the gate alone is not an improvement.
+
+The Postgres script trial skipped `rm` when there was no stale pid file,
+used `exec` for an already seeded Postgres, and used an explicit `exec` in
+the service's run command. Cold initialization and seeding stayed intact.
+Its apparent unpaired saving needed confirmation, especially given the
+sleep-tail change.
+
+A same-lock confirmation alternated A/B then B/A for ten pairs, on the
+same initialized environment. Only the script and services.yaml changed,
+while the box was asleep. Each wake was followed by a timed sleep. The
+installed runtime was release-20261012.0 with the default two-line runsc
+runtime configuration.
+
+| Paired-run medians | Original A | Script B |
+|---|---:|---:|
+| Wake, ms | 717.7 | 745.1 |
+| Sleep, ms | 811.3 | 812.7 |
+| fern-init → first Postgres log, ms | 78.4 | 86.9 |
+| fern-init → Postgres accepting connections, ms | 139.7 | 158.0 |
+
+**Script change rejected on its own.** Median within-pair B-minus-A wake
+was **+30.7 ms**; B was slower in seven of ten pairs. It did not shorten
+service startup in this confirmation. The sleep medians were unchanged,
+so the earlier unpaired sleep-tail increase is not established as a script
+regression either. The unpaired 761.4 → 723.0 ms result is not retained as
+a performance claim.
+
+### Combined candidate and unchanged validation
+
+Combining the warm-script change with the bounded 25 ms service retries
+passed the three-run gate: wake p50/p95 **714.7/787.0 ms**, box anon + shmem
+**46.9 MiB**, golden first wake **749.5 ms**, cold first wake **2,147.7 ms**,
+and sleep p95 **1,417.4 ms**. This is a 27.7 ms p50 change against A and
+46.7 ms against the unchanged crossover. It is not independently a claim
+that either of the rejected standalone changes helps.
+
+The unchanged code then passed `lab/go.sh test -race ./...`, `lab/lint.sh`
+(0 issues), `lab/go.sh vet ./...`, a build, and
+`WAKES=10 JOBS=1 lab/check.sh box golden restore`, under one lock. A fresh
+ten-wake trace on this unchanged code illustrates the between-batch spread:
+
+| Mean ms | Early unchanged trace | Later unchanged trace |
+|---|---:|---:|
+| Whole wake | 713.4 | 813.2 |
+| Before the volume wait | 17.3 | 22.9 |
+| WaitForAttachAndMount | 301.0 | 301.3 |
+| RunPodSandbox | 103.3 | 153.1 |
+| CreateContainer | 7.7 | 11.3 |
+| StartContainer | 79.1 | 89.3 |
+| After StartContainer until ready | 198.0 | 226.7 |
+| Other gaps | 7.1 | 8.6 |
+
+The later trace's p50 was **833.4 ms**. Its service subinterval means were
+**97.3 ms** to the first Postgres log, **70.2 ms** until Postgres accepted
+connections, and **64.1 ms** until Fern answered ready. The volume wait is
+stable; runtime and process startup varied substantially on unchanged code.
+
+**Final disposition: no production optimization retained.** The combined
+candidate's 27.7–46.7 ms median shift is smaller than the observed
+unchanged-code spread, and the script's apparent standalone saving failed
+the alternating confirmation. The combined candidate's additional full
+validation and phase-trace run never acquired the shared lab lock before
+the timebox ended. Its own waiting lock helper was cancelled before any
+source or deployment change. Do not treat 714.7 ms as a confirmed gain.
+
+Only these measurement notes remain on the branch. Production Go, the
+sample scripts, node settings and `lab/perf/*.tsv` are unchanged. The
+unchanged code passed the required box/golden/restore correctness checks,
+race tests, lint and vet; its timing-gate tail failures are recorded above.
+No VPS access, lab restart, full suite, push or merge was performed.
+
+The substantial remaining target is kubelet's mount scheduling and waiter
+notification: one volume already incurs the same approximately 301 ms
+wait as three, and publishes finish approximately 123 ms before the waiter
+notices them. There is no measured reason here to add a Fern volume merger
+or retain more aggressive polling.
