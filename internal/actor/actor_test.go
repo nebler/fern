@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"sync"
@@ -18,6 +20,7 @@ import (
 
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/driver"
+	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -32,15 +35,23 @@ type fakeStore struct {
 	snaps   map[string][]string
 	pruned  []string // environments pruned, in order
 	orphans []string // what Orphans returns
+	from    map[string]*store.SnapshotRef
+	built   []string // BuildSource and StripSource calls, in order
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{envs: make(map[string]bool), snaps: make(map[string][]string)}
 }
 
-func (f *fakeStore) Create(_ context.Context, id string, _ store.CreateOptions) (store.Env, error) {
+func (f *fakeStore) Create(_ context.Context, id string, opts store.CreateOptions) (store.Env, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if !f.envs[id] {
+		if f.from == nil {
+			f.from = make(map[string]*store.SnapshotRef)
+		}
+		f.from[id] = opts.From
+	}
 	f.envs[id] = true
 	return store.Env{ID: id}, nil
 }
@@ -95,6 +106,20 @@ func (f *fakeStore) Prune(_ context.Context, id string) error {
 	return nil
 }
 
+func (f *fakeStore) BuildSource(_ context.Context, id string, src store.SnapshotRef) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.built = append(f.built, "source "+id+" from "+src.Env+"/"+src.Snapshot)
+	return nil
+}
+
+func (f *fakeStore) StripSource(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.built = append(f.built, "strip "+id)
+	return nil
+}
+
 func (f *fakeStore) Orphans(context.Context) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -107,7 +132,7 @@ var idle = actor.Idle{Agent: 5 * time.Minute, Human: 20 * time.Minute}
 // synctest bubble.
 func start(t *testing.T, st *fakeStore, drv *driver.Fake, idle actor.Idle) *actor.Group {
 	t.Helper()
-	g := actor.New(st, drv, idle, slog.New(slog.DiscardHandler))
+	g := actor.New(st, drv, idle, "box", slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -372,7 +397,7 @@ func (d guardDriver) States(ctx context.Context) (map[string]driver.State, error
 // call ends, and afterwards each environment that exists still works.
 func TestConcurrentChanges(t *testing.T) {
 	g := &guard{fakeStore: newFakeStore(), drv: driver.NewFake("box"), busy: make(map[string]bool)}
-	envs := actor.New(g, guardDriver{g}, actor.Idle{}, slog.New(slog.DiscardHandler))
+	envs := actor.New(g, guardDriver{g}, actor.Idle{}, "box", slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -526,7 +551,7 @@ func TestExecGivenUpDuringWake(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		st, fake := newFakeStore(), driver.NewFake("box")
 		drv := &slowWake{Fake: fake, release: make(chan struct{})}
-		g := actor.New(st, drv, idle, slog.New(slog.DiscardHandler))
+		g := actor.New(st, drv, idle, "box", slog.New(slog.DiscardHandler))
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan struct{})
 		go func() { _ = g.Run(ctx); close(done) }()
@@ -607,6 +632,60 @@ func TestSweepDeletesOrphans(t *testing.T) {
 		}
 		if !exists("back") {
 			t.Error("after two sweeps: back was deleted, want it kept: its worktree came back")
+		}
+	})
+}
+
+// The first new worktree of a repository with a setup contract misses and
+// has a golden snapshot built from its checkout; the next starts from it.
+func TestGolden(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		repo := filepath.Join(t.TempDir(), "worktrees", "sample")
+		for _, wt := range []string{"one", "two"} {
+			if err := os.MkdirAll(filepath.Join(repo, wt), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(repo, wt, "services.yaml"), []byte("services: {pg: {run: ./pg.sh}}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		st, drv := newFakeStore(), driver.NewFake("box")
+		g := start(t, st, drv, idle)
+		if err := g.Create(t.Context(), "one", store.CreateOptions{Workspace: filepath.Join(repo, "one")}); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		builder := setup.ID("sample")
+		key, err := setup.Key(filepath.Join(repo, "one"), "box")
+		if err != nil {
+			t.Fatal(err)
+		}
+		st.mu.Lock()
+		if got := st.from["one"]; got != nil {
+			t.Errorf("the first worktree started from %v, want nothing: there is no golden yet", got)
+		}
+		if diff := cmp.Diff([]string{"source " + builder + " from one/golden-source", "strip " + builder}, st.built); diff != "" {
+			t.Errorf("golden build mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]string{key}, st.snaps[builder]); diff != "" {
+			t.Errorf("builder's snapshots mismatch (-want +got):\n%s", diff)
+		}
+		if got := st.snaps["one"]; len(got) != 0 {
+			t.Errorf("one's snapshots after the build = %v, want the golden source gone", got)
+		}
+		st.mu.Unlock()
+		if got := state(t, drv, builder); got != driver.Asleep {
+			t.Errorf("builder's box after the build: %s, want %s", got, driver.Asleep)
+		}
+
+		if err := g.Create(t.Context(), "two", store.CreateOptions{Workspace: filepath.Join(repo, "two")}); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if diff := cmp.Diff(&store.SnapshotRef{Env: builder, Snapshot: key}, st.from["two"]); diff != "" {
+			t.Errorf("the second worktree's golden mismatch (-want +got):\n%s", diff)
 		}
 	})
 }

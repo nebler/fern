@@ -24,6 +24,8 @@
 #                pod can't mount an environment
 #   paths        workspaces at a path, as T3's worktrees: adopt, which,
 #                exec --here, snapshot replace and delete
+#   golden       a new worktree's checkout is built into a golden snapshot,
+#                and the next worktree starts from it, its database seeded
 #   claude       Claude Code in a box: network, stream-json, its terminal UI
 #   t3           T3's server: the checkpoint hook's commands on a worktree it
 #                made, and that worktree's box with git, Claude's folder and
@@ -107,6 +109,9 @@ pod_cgroup() {
   on_node sh -c "cat /sys/fs/cgroup/kubepods*/pod$uid/$2 /sys/fs/cgroup/kubepods*/*/pod$uid/$2 \
     /sys/fs/cgroup/kubepods*/*/*pod${uid//-/_}.slice/$2 /sys/fs/cgroup/kubepods*/*pod${uid//-/_}.slice/$2 2>/dev/null" </dev/null
 }
+# golden_id prints the ID of the environment that builds repo $1's golden
+# snapshots (setup.ID), for a name of lowercase letters, digits and dashes.
+golden_id() { echo "golden-$1-$(printf %s "$1" | shasum -a 256 | cut -c1-8)"; }
 # in_daemon runs a shell command in the daemon container, which sees the pool.
 in_daemon() { k -n fern-system exec -i ds/fern -c fern -- sh -c "$1"; }
 pod_uid() { k -n fern-boxes get pod "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null || true; }
@@ -514,6 +519,43 @@ paths() {
   check "rmsnap removes it" 0 "$(fern snapshots adopted | grep -c '^c1 ' || true)"
   for e in at-path adopted adopted-big; do fern rm $e; done
   check "rm removes the workspaces at their paths" "" "$(in_daemon "ls $W")"
+  # The adopted sample started a golden build for its repo.
+  fern rm "$(golden_id fern-check)" 2>/dev/null || true
+}
+
+golden() {
+  echo "== golden snapshots"
+  local W=/var/lib/fern/worktrees/golden-check G key
+  G=$(golden_id golden-check)
+  for e in gold1 gold2 "$G"; do fern rm "$e" 2>/dev/null || true; done
+  for wt in one two; do
+    tar_dir lab/sample-repo | in_daemon "rm -rf $W/$wt && mkdir -p $W/$wt && tar -x -C $W/$wt -f - && chown -R 1000:1000 $W/$wt"
+  done
+  # The first new worktree of a repository has no golden yet: it starts as
+  # it is, and its checkout is built into one in the background.
+  fern create gold1 --path $W/one >/dev/null
+  start=$(now_ms)
+  for _ in $(seq 120); do
+    key=$(fern snapshots "$G" 2>/dev/null | awk '$1 ~ /^golden-/ { print $1 }')
+    [ -n "$key" ] && break
+    sleep 1
+  done
+  note "golden build: $(($(now_ms) - start)) ms"
+  check "a golden snapshot is built from the first worktree" 1 "$(grep -c . <<<"$key")"
+  check "it holds the seeded database, not the checkout" "yes no" \
+    "$(in_daemon "cd /var/lib/fern/envs/$G/snaps/$key && { test -e .fern/seeded && echo yes || echo no; } && { test -e seed.sql && echo yes || echo no; }" | xargs)"
+  check "the first worktree's source copy is gone" 0 "$(fern snapshots gold1 | grep -c golden-source || true)"
+  # The next one starts from it: its database is there before its first wake.
+  start=$(now_ms)
+  fern create gold2 --path $W/two >/dev/null
+  note "create from golden: $(($(now_ms) - start)) ms"
+  check "the next worktree has the database before its first wake" yes \
+    "$(in_daemon "test -e $W/two/.fern/seeded && test -e $W/two/seed.sql" && echo yes || echo no)"
+  note "first wake from golden, ms: $(fern wake gold2 | took)"
+  note "first wake without one (initdb and seed), ms: $(fern wake gold1 | took)"
+  check "and Postgres runs on it (3 users)" 3 "$(sql gold2 'select count(*) from users')"
+  for e in gold1 gold2 "$G"; do fern rm "$e"; done
+  in_daemon "rm -rf $W"
 }
 
 claude() {
@@ -613,7 +655,7 @@ t3() {
   in_t3 "fern rm t3c && rm -rf $R /var/lib/fern/worktrees/t3check"
 }
 
-all=(slice box disk stream concurrency restore pgload idle daemon node many limits paths claude)
+all=(slice box disk stream concurrency restore pgload idle daemon node many limits paths golden claude)
 [ $# -gt 0 ] || set -- "${all[@]}"
 for s in "$@"; do
   case " ${all[*]} t3 " in

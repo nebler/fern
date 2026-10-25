@@ -101,7 +101,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 
 	g, ctx := errgroup.WithContext(ctx)
 	drv := driver.New(kube, node, boxImage, *runtimeClass)
-	envs := actor.New(st, drv, idle, log)
+	envs := actor.New(st, drv, idle, boxImage, log)
 	httpSrv := &http.Server{
 		Handler:           api.NewServer(st, drv, envs, log).Handler(),
 		BaseContext:       func(net.Listener) context.Context { return ctx },

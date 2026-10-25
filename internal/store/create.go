@@ -54,8 +54,8 @@ func (s *Store) Create(ctx context.Context, id string, opts CreateOptions) (Env,
 // whatever a create that stops leaves is garbage the next one clears.
 func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env, error) {
 	workspace := s.livePath(id)
+	var err error
 	if opts.Workspace != "" {
-		var err error
 		if workspace, err = s.checkWorkspace(ctx, opts.Workspace); err != nil {
 			return Env{}, err
 		}
@@ -79,7 +79,13 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 	if err := os.Chown(s.claudePath(id), BoxUID, BoxGID); err != nil {
 		return Env{}, err
 	}
-	if err := s.makeWorkspace(ctx, id, workspace); err != nil {
+	var from string
+	if opts.From != nil {
+		if from, err = s.snapshotPath(ctx, *opts.From); err != nil {
+			return Env{}, err
+		}
+	}
+	if err := s.makeWorkspace(ctx, id, workspace, from); err != nil {
 		return Env{}, err
 	}
 	if err := s.step("create: workspace made"); err != nil {
@@ -129,7 +135,7 @@ func (s *Store) readopt(ctx context.Context, env Env) (Env, error) {
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return Env{}, err
 	}
-	if err := s.makeWorkspace(ctx, env.ID, env.Workspace); err != nil {
+	if err := s.makeWorkspace(ctx, env.ID, env.Workspace, ""); err != nil {
 		return Env{}, err
 	}
 	git, err := s.repoGitDir(env.Workspace)
@@ -170,8 +176,9 @@ func (s *Store) checkWorkspace(ctx context.Context, path string) (string, error)
 }
 
 // makeWorkspace makes workspace a subvolume owned by the box user, keeping
-// what is already there.
-func (s *Store) makeWorkspace(ctx context.Context, id, workspace string) error {
+// what is already there; a plain directory there is adopted onto snapshot
+// from, if it isn't empty.
+func (s *Store) makeWorkspace(ctx context.Context, id, workspace, from string) error {
 	fi, err := os.Lstat(workspace)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -199,21 +206,38 @@ func (s *Store) makeWorkspace(ctx context.Context, id, workspace string) error {
 		// adopted it.
 		return nil
 	default:
-		return s.adopt(ctx, id, workspace)
+		return s.adopt(ctx, id, workspace, from)
 	}
 }
 
 // adopt turns the plain directory path into a subvolume with the same files:
 // a reflink copy (no data is copied, but every file gets a new inode) that is
-// swapped in with one atomic rename. Writes to path during the copy are lost,
-// so adopt before an agent starts working in it.
-func (s *Store) adopt(ctx context.Context, id, path string) error {
+// swapped in with one atomic rename. With from, the subvolume starts as a
+// writable copy of that golden snapshot, so it holds its build output under
+// path's files. Writes to path during the copy are lost, so adopt before an
+// agent starts working in it.
+func (s *Store) adopt(ctx context.Context, id, path, from string) error {
 	next := s.adoptPath(id)
-	if err := btrfs(ctx, "subvolume", "create", next); err != nil {
+	if from != "" {
+		if err := btrfs(ctx, "subvolume", "snapshot", from, next); err != nil {
+			return err
+		}
+	} else if err := btrfs(ctx, "subvolume", "create", next); err != nil {
 		return err
 	}
-	// -T copies path's own owner and mode onto next, and its contents into it.
-	if err := run(exec.CommandContext(ctx, "cp", "-a", "--reflink=always", "-T", path, next)); err != nil {
+	if from != "" {
+		if err := overlay(next, path); err != nil {
+			return fmt.Errorf("adopt %s onto golden: %w", path, err)
+		}
+		fi, err := os.Lstat(path)
+		if err != nil {
+			return err
+		}
+		if err := os.Chmod(next, fi.Mode().Perm()); err != nil {
+			return err
+		}
+	} else if err := run(exec.CommandContext(ctx, "cp", "-a", "--reflink=always", "-T", path, next)); err != nil {
+		// -T copies path's own owner and mode onto next, and its contents into it.
 		return fmt.Errorf("adopt %s: cp: %w", path, err)
 	}
 	if err := s.step("adopt: copied"); err != nil {

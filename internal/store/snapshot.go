@@ -207,3 +207,19 @@ func (s *Store) prunePreRestores(ctx context.Context, id, keep string) error {
 	}
 	return nil
 }
+
+// snapshotPath returns the path of snapshot ref, which must have a row.
+func (s *Store) snapshotPath(ctx context.Context, ref SnapshotRef) (string, error) {
+	if err := checkSnapID(ref.Snapshot); err != nil {
+		return "", err
+	}
+	var one int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM snapshots WHERE env = ? AND id = ?`, ref.Env, ref.Snapshot).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("snapshot %s/%s: %w", ref.Env, ref.Snapshot, ErrNotFound)
+	}
+	if err != nil {
+		return "", err
+	}
+	return s.snapPath(ref.Env, ref.Snapshot), nil
+}

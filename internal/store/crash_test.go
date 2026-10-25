@@ -125,6 +125,38 @@ func crashCases() []crashCase {
 			},
 		},
 		{
+			// Adopting onto a golden snapshot must never lose the work in the
+			// worktree either.
+			name: "adopt onto golden",
+			setup: func(t *testing.T, st *store.Store, dir string) {
+				first := filepath.Join(dir, "worktrees", "repo", "first")
+				writeAll(t, filepath.Join(first, "seed.sql"), "v1")
+				create(t, st, "first", store.CreateOptions{Workspace: first})
+				snapshot(t, st, "first", "golden-source")
+				buildGolden(t, st, store.SnapshotRef{Env: "first", Snapshot: "golden-source"}, func(live string) {
+					writeAll(t, filepath.Join(live, ".fern", "pg", "PG_VERSION"), "17")
+				})
+				writeAll(t, filepath.Join(worktree(dir), "work"), "kept")
+			},
+			change: func(t *testing.T, st *store.Store, dir string) error {
+				_, err := st.Create(t.Context(), "wt", store.CreateOptions{
+					Workspace: worktree(dir), From: &store.SnapshotRef{Env: "golden", Snapshot: "g1"},
+				})
+				return err
+			},
+			check: func(t *testing.T, st *store.Store, dir string) {
+				if got := readFile(t, filepath.Join(worktree(dir), "work")); got != "kept" {
+					t.Errorf("work = %q after the crash, want %q", got, "kept")
+				}
+				create(t, st, "wt", store.CreateOptions{
+					Workspace: worktree(dir), From: &store.SnapshotRef{Env: "golden", Snapshot: "g1"},
+				})
+				if got := readFile(t, filepath.Join(worktree(dir), ".fern", "pg", "PG_VERSION")); got != "17" {
+					t.Errorf("PG_VERSION = %q after creating again, want the golden's", got)
+				}
+			},
+		},
+		{
 			// T3 made a removed worktree again: adopting it back must keep
 			// both its new files and the environment's snapshots.
 			name: "readopt",

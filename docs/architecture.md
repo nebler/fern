@@ -213,6 +213,8 @@ Built: the actor's timer, with both clocks touched by every exec (`--idle-agent`
 3. **Golden hit:** `live/` = a writable snapshot of golden (ms). **Miss:** build golden (§8), then copy.
 4. Environment `asleep`. No box yet.
 
+**Built:** at its first checkpoint, T3's hook creates the environment for the worktree T3 made (`PUT /envs/{id}?path=P`). The key (`internal/setup`) is a hash of `services.yaml`, `.agents/`/`.fern/` `setup` and `prepare`, the lockfiles at the root, the files `services.yaml` lists under `golden.inputs` (the sample lists its seed and start script) and the box image; a repository with none of the contract files gets no golden. **Hit:** the worktree is adopted onto a writable copy of the golden instead of an empty subvolume, so it has its own checkout over the golden's build output (the sample's seeded database): 0.21 s to create, a first wake of 0.78 s instead of 2.0 s with `initdb` (lab). **Miss:** the worktree is adopted as before and the thread doesn't wait; its first workspace is kept as snapshot `golden-source` and built in the background (§7.5), so the next thread hits. T3's turn-0 checkpoint comes right after the create, so a revert to it keeps the database too.
+
 ### 7.2 A turn
 1. T3 → `POST /envs/t3-8f2c/exec {cmd: "claude …", pty: true}`.
 2. Asleep → the front door holds the request → the actor → the driver starts a session → `fern-init` runs `.agents/resume` (planned), starts services → ready.
@@ -241,6 +243,8 @@ Built: the actor's timer, with both clocks touched by every exec (`--idle-agent`
 2. **Kill leftover processes; strip credentials** (anything injected for setup); verify nothing secret remains (a scan).
 3. Read-only snapshot → `golden/<repo>@<key>`; record it in `goldens`.
 4. **Incremental:** when the key changes, start from the previous golden, so `install` is warm.
+
+**Built,** one build at a time, in the daemon (`internal/actor/golden.go`): the repository's builder environment (`golden-<repo>-<hash>`, listed by `fern ls`) gets a fresh workspace with a copy of the `golden-source` checkout, wakes, so its services make their first start (`initdb`, seed), sleeps, which stops them cleanly, and loses every file the copy brought in; what is left is snapshotted as `golden-<key>`, and the builder keeps the newest 50. A build that stops leaves no snapshot, and the next starts afresh. A golden holds what the repository's code made, so it is the agent's: a new worktree goes onto it through an `os.Root` (no symlink in it leads a file out), and a build starts from an empty workspace rather than the last one's. **Not built yet:** running `.agents/setup` (only services' first start is), step 2's scan, the `goldens` table (the builder's snapshots are the index), incremental builds, and keeping the Claude login out of the builder's box. Build output that names its absolute path (a Python venv's scripts) points at the builder's workspace, not the thread's.
 
 ### 7.6 Delete
 Stop the session → delete `live/` → apply retention to snapshots (keep tagged) → remove rows.
@@ -275,6 +279,8 @@ services:
     run: pnpm dev
     port: 3000          # the default preview, <env>.<repo>.<host>
     env: { DATABASE_URL: "postgres://localhost:${services.postgres.port}/app" }
+golden:
+  inputs: [db/seed.sql]  # built: files beyond the contract and lockfiles that the golden key covers
 ```
 
 ---
@@ -283,7 +289,7 @@ services:
 
 ```
 /var/lib/fern/                   btrfs (a real partition, or a loop-mounted image file)
-  golden/<repo>@<key>/           read-only
+  golden/<repo>@<key>/           read-only (built as envs/golden-<repo>-<hash>/snaps/golden-<key>/)
   envs/<id>/live/                writable workspace of an environment without a path
       <repo files> node_modules/ .fern/pg/
   envs/<id>/snaps/<snapshot>/    read-only

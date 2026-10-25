@@ -33,6 +33,8 @@ type Store interface {
 	Restore(ctx context.Context, id, snapID string) error
 	Prune(ctx context.Context, id string) error
 	Orphans(ctx context.Context) ([]string, error)
+	BuildSource(ctx context.Context, id string, src store.SnapshotRef) error
+	StripSource(ctx context.Context, id string) error
 }
 
 // Driver runs environments' boxes.
@@ -70,14 +72,17 @@ type Group struct {
 	store  Store
 	driver Driver
 	idle   Idle
+	image  string // the box image, part of every golden key
 	log    *slog.Logger
 
 	// Time histograms, by result ("ok" or "error"), and, for queue, by
 	// change: how long a change waited for its actor.
-	wakes, stops, restores, snapshots, queue *prometheus.HistogramVec
-	idleSleeps                               prometheus.Counter
+	wakes, stops, restores, snapshots, queue, goldenBuilds *prometheus.HistogramVec
+	idleSleeps                                             prometheus.Counter
+	goldens                                                *prometheus.CounterVec // new worktrees, by golden hit, miss or none
 
 	find    chan findRequest // to Run, for an environment's actor
+	builds  chan build       // to Run's builder, golden builds to make
 	stopped chan struct{}    // closed when Run returns
 }
 
@@ -86,9 +91,9 @@ type findRequest struct {
 	reply chan *actor
 }
 
-// New returns a Group for the environments in st, run by drv. Call Run
-// before anything else.
-func New(st Store, drv Driver, idle Idle, log *slog.Logger) *Group {
+// New returns a Group for the environments in st, run by drv from image.
+// Call Run before anything else.
+func New(st Store, drv Driver, idle Idle, image string, log *slog.Logger) *Group {
 	// Boxes take from tens of milliseconds to the timeouts' minutes; disk
 	// changes and queueing take from a millisecond.
 	boxBuckets := prometheus.ExponentialBuckets(0.025, 2, 13)  // 25ms to 102s
@@ -97,21 +102,25 @@ func New(st Store, drv Driver, idle Idle, log *slog.Logger) *Group {
 		return prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: name, Help: help, Buckets: buckets}, []string{label})
 	}
 	return &Group{
-		store: st, driver: drv, idle: idle, log: log,
-		wakes:     histogram("fern_wake_seconds", "Time to wake a box, until its services are ready.", boxBuckets, "result"),
-		stops:     histogram("fern_stop_seconds", "Time to stop a box, until its pod is gone.", boxBuckets, "result"),
-		restores:  histogram("fern_restore_seconds", "Time to restore a snapshot, stopping the box included.", boxBuckets, "result"),
-		snapshots: histogram("fern_snapshot_seconds", "Time to take a snapshot, replacing one included.", diskBuckets, "result"),
-		queue:     histogram("fern_queue_seconds", "Time a change waited for its environment's actor.", diskBuckets, "change"),
+		store: st, driver: drv, idle: idle, image: image, log: log,
+		wakes:        histogram("fern_wake_seconds", "Time to wake a box, until its services are ready.", boxBuckets, "result"),
+		stops:        histogram("fern_stop_seconds", "Time to stop a box, until its pod is gone.", boxBuckets, "result"),
+		restores:     histogram("fern_restore_seconds", "Time to restore a snapshot, stopping the box included.", boxBuckets, "result"),
+		snapshots:    histogram("fern_snapshot_seconds", "Time to take a snapshot, replacing one included.", diskBuckets, "result"),
+		goldenBuilds: histogram("fern_golden_build_seconds", "Time to build a golden snapshot.", boxBuckets, "result"),
+		goldens: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "fern_golden_total", Help: "New worktree environments, by whether a golden snapshot was there (hit), is being built (miss) or has no setup contract (none).",
+		}, []string{"result"}),
+		queue: histogram("fern_queue_seconds", "Time a change waited for its environment's actor.", diskBuckets, "change"),
 		idleSleeps: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "fern_idle_sleeps_total", Help: "Boxes put to sleep because they were idle.",
 		}),
-		find: make(chan findRequest), stopped: make(chan struct{}),
+		find: make(chan findRequest), builds: make(chan build, buildQueue), stopped: make(chan struct{}),
 	}
 }
 
 func (g *Group) collectors() []prometheus.Collector {
-	return []prometheus.Collector{g.wakes, g.stops, g.restores, g.snapshots, g.queue, g.idleSleeps}
+	return []prometheus.Collector{g.wakes, g.stops, g.restores, g.snapshots, g.queue, g.goldenBuilds, g.idleSleeps, g.goldens}
 }
 
 // Describe sends the descriptions of the Group's metrics.
@@ -156,6 +165,7 @@ func (g *Group) Run(ctx context.Context) error {
 		return fmt.Errorf("box states: %w", err)
 	}
 	wg.Go(func() { g.sweep(ctx) })
+	wg.Go(func() { g.buildGoldens(ctx) })
 	for id, state := range states {
 		if state != driver.Asleep {
 			start(id, true)
@@ -264,11 +274,34 @@ func isClosed(c <-chan struct{}) bool {
 	}
 }
 
-// Create makes environment id. Its box comes with its first wake.
+// Create makes environment id. Its box comes with its first wake. A new
+// environment at a worktree whose repository has a golden snapshot for its
+// setup starts from it; without one, it keeps its first workspace for a
+// golden build, so the next one does.
 func (g *Group) Create(ctx context.Context, id string, opts store.CreateOptions) error {
 	return g.do(ctx, "create", id, func(ctx context.Context, _ *actor) error {
+		var b *build
+		if _, err := g.store.Get(ctx, id); errors.Is(err, store.ErrNotFound) && opts.Workspace != "" && opts.Seed == nil {
+			opts.From, b = g.golden(ctx, id, opts.Workspace)
+		}
 		_, err := g.store.Create(ctx, id, opts)
-		return err
+		if err != nil && opts.From != nil && errors.Is(err, store.ErrNotFound) {
+			// A build pruned the golden since it was looked up.
+			opts.From = nil
+			_, err = g.store.Create(ctx, id, opts)
+		}
+		if err != nil {
+			return err
+		}
+		if b == nil {
+			return nil
+		}
+		if err := g.store.Snapshot(ctx, id, goldenSource); err != nil {
+			g.log.WarnContext(ctx, "keeping a golden source failed", slog.String("env", id), slog.Any("error", err))
+			return nil
+		}
+		g.queueBuild(ctx, b)
+		return nil
 	})
 }
 

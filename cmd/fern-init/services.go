@@ -38,6 +38,11 @@ func loadServices(path string) (map[string]service, error) {
 func parseServices(data []byte) (map[string]service, error) {
 	var f struct {
 		Services map[string]service `json:"services"`
+		// Golden lists the files a golden build depends on; the daemon reads
+		// it (internal/setup), fern-init doesn't.
+		Golden struct {
+			Inputs []string `json:"inputs,omitempty"`
+		} `json:"golden"`
 	}
 	if err := yaml.UnmarshalStrict(data, &f); err != nil {
 		return nil, fmt.Errorf("services.yaml: %w", err)

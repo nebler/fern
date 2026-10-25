@@ -88,6 +88,15 @@ type Snapshot struct {
 type CreateOptions struct {
 	Workspace string    // under worktrees/; empty means envs/<id>/live
 	Seed      io.Reader // a tar stream to fill the workspace with
+	// From, for a workspace at a path that is a plain directory, is the
+	// golden snapshot it is adopted onto: the directory's files over the
+	// golden's build output (architecture §7.1).
+	From *SnapshotRef
+}
+
+// SnapshotRef names snapshot Snapshot of environment Env.
+type SnapshotRef struct {
+	Env, Snapshot string
 }
 
 // CheckEnvID returns an error wrapping ErrInvalidID if id can't name an

@@ -61,6 +61,10 @@ func (f *fakeStore) Prune(context.Context, string) error { return nil }
 
 func (f *fakeStore) Orphans(context.Context) ([]string, error) { return nil, nil }
 
+func (f *fakeStore) BuildSource(context.Context, string, store.SnapshotRef) error { return nil }
+
+func (f *fakeStore) StripSource(context.Context, string) error { return nil }
+
 func (f *fakeStore) Create(_ context.Context, id string, opts store.CreateOptions) (store.Env, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -199,7 +203,7 @@ type driverWith interface {
 func newServer(t testing.TB, st *fakeStore, drv actor.Driver) http.Handler {
 	t.Helper()
 	log := slog.New(slog.DiscardHandler)
-	envs := actor.New(st, drv, actor.Idle{}, log)
+	envs := actor.New(st, drv, actor.Idle{}, "box", log)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
