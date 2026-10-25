@@ -395,7 +395,12 @@ pg_load() {
     fern snapshot "$env" "p$i" | took >>"$TMP/pg-snap-$env"
     sleep 1
   done
-  wait $load
+  # run_section collects failures with ||, which disables errexit here.
+  if ! wait "$load"; then
+    check "pgbench write load completes" yes no
+    cat "$TMP/pg-load-$env" >&2
+    return
+  fi
   metric pgload.latency_ms "pgbench write latency under snapshots, ms" \
     "$(awk '$1 == "latency" && $2 == "average" { print $4 }' "$TMP/pg-load-$env")"
   local whole="select (select sum(abalance) from pgbench_accounts) = (select sum(bbalance) from pgbench_branches)
