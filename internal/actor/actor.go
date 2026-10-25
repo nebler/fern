@@ -310,6 +310,7 @@ func (g *Group) Wake(ctx context.Context, id string) error {
 		}
 		now := time.Now()
 		a.opened, a.closed = now, now
+		g.log.InfoContext(ctx, "box touched", slog.String("env", id), slog.Int("active", len(a.execs)))
 		return nil
 	})
 }
@@ -342,6 +343,7 @@ func (g *Group) Exec(ctx context.Context, id, stale string, cancel context.Cance
 		n := a.next
 		a.execs[n] = cancel
 		a.opened = time.Now()
+		g.log.InfoContext(ctx, "exec opened", slog.String("env", id), slog.Int("exec", n), slog.Int("active", len(a.execs)))
 		ex = &Exec{Addr: a.addr, Token: env.BoxToken, close: func() { a.endExec(n) }}
 		return nil
 	})
@@ -469,10 +471,12 @@ func (a *actor) stopBox(ctx context.Context, stop func(ctx context.Context, id s
 // endExec stops counting command n, from the goroutine that ran it. A
 // command that a stop already cancelled is not counted any more.
 func (a *actor) endExec(n int) {
-	end := func(context.Context, *actor) error {
+	end := func(ctx context.Context, _ *actor) error {
 		if _, ok := a.execs[n]; ok {
 			delete(a.execs, n)
 			a.closed = time.Now()
+			a.g.log.InfoContext(ctx, "exec closed", slog.String("env", a.id), slog.Int("exec", n),
+				slog.Int("active", len(a.execs)), slog.Time("last_opened", a.opened))
 		}
 		return nil
 	}
@@ -510,7 +514,8 @@ func (a *actor) sleepIfIdle(ctx context.Context) {
 		return
 	}
 	a.g.idleSleeps.Inc()
-	a.g.log.InfoContext(ctx, "idle box went to sleep", slog.String("env", a.id))
+	a.g.log.InfoContext(ctx, "idle box went to sleep", slog.String("env", a.id),
+		slog.Time("last_opened", a.opened), slog.Time("last_closed", a.closed), slog.Time("idle_at", a.deadline()))
 }
 
 // observe adds the time since start to h, labelled with whether *err is

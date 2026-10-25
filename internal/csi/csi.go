@@ -10,6 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"time"
 
 	csispec "github.com/container-storage-interface/spec/lib/go/csi"
 	"golang.org/x/sys/unix"
@@ -102,6 +103,7 @@ func (p *Plugin) NodeGetCapabilities(context.Context, *csispec.NodeGetCapabiliti
 // pod's volume mount: a read-only remount here would change only this
 // namespace's copy of the mount, not the one that reaches the box.
 func (p *Plugin) NodePublishVolume(ctx context.Context, req *csispec.NodePublishVolumeRequest) (*csispec.NodePublishVolumeResponse, error) {
+	started := time.Now()
 	vc, target := req.GetVolumeContext(), req.GetTargetPath()
 	if target == "" {
 		return nil, status.Error(codes.InvalidArgument, "target path is required")
@@ -112,14 +114,6 @@ func (p *Plugin) NodePublishVolume(ctx context.Context, req *csispec.NodePublish
 		return nil, status.Errorf(codes.PermissionDenied, "pod %s/%s may not mount environment %q",
 			vc[keyNamespace], vc[keyPod], vc[AttrEnv])
 	}
-	p.log.InfoContext(ctx, "publish",
-		slog.String("env", vc[AttrEnv]),
-		slog.String("folder", vc[AttrFolder]),
-		slog.String("pod", vc[keyNamespace]+"/"+vc[keyPod]),
-		slog.String("pod_uid", vc[keyPodUID]),
-		slog.String("service_account", vc[keyAccount]),
-		slog.String("target", target))
-
 	src, err := p.source(ctx, vc[AttrEnv], vc[AttrFolder])
 	if err != nil {
 		return nil, err
@@ -136,6 +130,13 @@ func (p *Plugin) NodePublishVolume(ctx context.Context, req *csispec.NodePublish
 			return nil, status.Errorf(codes.Internal, "bind %s on %s: %v", src, target, err)
 		}
 	}
+	p.log.InfoContext(ctx, "publish",
+		slog.String("env", vc[AttrEnv]),
+		slog.String("folder", vc[AttrFolder]),
+		slog.String("pod", vc[keyNamespace]+"/"+vc[keyPod]),
+		slog.String("pod_uid", vc[keyPodUID]),
+		slog.String("service_account", vc[keyAccount]),
+		slog.String("target", target), slog.Duration("took", time.Since(started)))
 	return &csispec.NodePublishVolumeResponse{}, nil
 }
 
