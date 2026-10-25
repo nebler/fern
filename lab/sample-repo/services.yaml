@@ -2,5 +2,6 @@ services:
   postgres:
     run: ./scripts/postgres.sh
     stop: pg_ctl stop -D .fern/pg -m fast
+    # Check the marker first to avoid spawning Postgres probes during initdb.
     # Ready means usable: accepting connections and, the first time, seeded.
-    ready: pg_isready -q && test -e .fern/seeded
+    ready: test -e .fern/seeded && pg_isready -q
