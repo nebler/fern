@@ -106,20 +106,23 @@ tar_dir() { COPYFILE_DISABLE=1 tar -C "$1" --no-xattrs -cf - .; }
 # lab_lock waits until no other script uses the lab (or FERN_HOST's VPS),
 # then holds it until this script and its children end: worktrees share
 # the lab, the images' :dev tags and Docker, and two builds or check runs
-# at once overwrite each other's images and skew each other's timings. A
-# lock whose owner is gone is taken over, so a killed script leaves none.
+# at once overwrite each other's images and skew each other's timings.
+# The lock is the kernel's (flock, through perl: macOS has no flock
+# command) on fd 9, so it ends with the last process holding fd 9, even a
+# killed one. The mkdir lock before it had to take over a dead owner's
+# lock, and two waiters could both do so at once.
 lab_lock() {
   [ -z "${FERN_LAB_LOCKED:-}" ] || return 0
-  local lock=${TMPDIR:-/tmp}/fern-lab-${FERN_HOST:-local}.lock owner said=""
-  until mkdir "$lock" 2>/dev/null; do
-    owner=$(cat "$lock/owner" 2>/dev/null || true)
-    if [ -n "$owner" ] && ! kill -0 "${owner%% *}" 2>/dev/null; then
-      rm -rf "$lock"
-      continue
-    fi
-    [ -n "$said" ] || { echo "waiting for the lab, held by: ${owner#* }" >&2; said=1; }
-    sleep 1
-  done
-  echo "$$ $(basename "$0") in $PWD" >"$lock/owner"
+  local lock=${TMPDIR:-/tmp}/fern-lab-${FERN_HOST:-local}.flock
+  exec 9>>"$lock"
+  if ! _flock nb; then
+    echo "waiting for the lab, held by: $(cat "$lock.owner" 2>/dev/null)" >&2
+    _flock
+  fi
+  echo "$$ $(basename "$0") in $PWD" >"$lock.owner"
   export FERN_LAB_LOCKED=$lock
+}
+_flock() {
+  perl -MFcntl=:flock -e 'open(my $f, ">&=", 9) or die "lab_lock: fd 9: $!\n";
+    flock($f, LOCK_EX | (@ARGV ? LOCK_NB : 0)) or exit 1' "$@"
 }
