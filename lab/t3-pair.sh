@@ -13,7 +13,7 @@ t3() { k -n fern-system exec deploy/t3 -c t3 -- node /opt/t3/apps/server/dist/bi
 # add_project NAME DIR adds DIR as the project NAME at repos/NAME, once.
 add_project() {
   local r=/var/lib/fern/repos/$1
-  in_t3 "test -d $r/.git" </dev/null && return
+  in_t3 "test -d $r/.git" </dev/null 2>/dev/null && return
   tar_dir "$2" | in_t3 "
     set -e
     mkdir -p $r && tar -x -C $r -f -

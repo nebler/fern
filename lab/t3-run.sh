@@ -18,7 +18,7 @@ if [ -n "$FERN_HOST" ]; then
   port=30775
   "${SSH[@]}" -o ExitOnForwardFailure=yes -N -L "127.0.0.1:$port:127.0.0.1:30773" "root@$FERN_HOST" &
   tunnel=$!
-  trap 'kill $tunnel 2>/dev/null' EXIT
+  trap 'kill $tunnel 2>/dev/null || true' EXIT
   for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:$port/" && break; sleep 0.2; done
 fi
 pair_url=$(k -n fern-system exec deploy/t3 -c t3 -- node /opt/t3/apps/server/dist/bin.mjs \

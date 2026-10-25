@@ -454,3 +454,35 @@ Four more agents (GPT-6.1-Sol), each in its own worktree. Their full notes stay 
 **Not merged yet:** btrfs ioctls instead of the `btrfs` command (`t3/store-performance`, `e70e95bf`). Far fewer allocations, but in the lab a snapshot after 8 MiB of writes went 67 → 84 ms while a clean one went 51 → 28 ms; it is measured on the VPS first.
 
 **Biggest remaining per-call cost:** the CLI's start, paid at every checkpoint and twice per Claude start. A small CLI binary, or the checkpoint hook speaking to the socket, would remove most of it.
+
+## The whole suite on the VPS, 2026-10-25
+
+The same CAX21. Command: `FERN_HOST=… lab/perf.sh --accept` (the baseline, `lab/perf/vps.tsv`, 5 runs, 42 min), then `FERN_HOST=… lab/suite.sh` (45 min), at commit `2deaff9d`.
+
+**PASS:** all checks (13 min), the perf gate against the new baseline (`golden.build_ms` 21% better), and every T3 run: 5/5 one at a time, 5/5 at once, 2/2 on `sample`. The suite first reported the T3 parts as failed: `t3-run.sh`'s tunnel cleanup returned 1 under `set -e` after the tunnel had already ended. Fixed.
+
+**Scale** (`check.sh scale`: 1, 5, 10, 20 new boxes woken at once):
+
+| Awake boxes | until all are ready | node memory per box | daemon memory | exec p50 | 20 execs at once | snapshot p50 |
+|---|---|---|---|---|---|---|
+| 1 | 3.1 s | 94 MiB | 15.1 MiB | 102 ms | 103 ms | 17 ms |
+| 5 | 9.5 s | 88 MiB | 15.1 MiB | 119 ms | 168 ms | 16 ms |
+| 10 | 12.5 s | 93 MiB | 15.2 MiB | 114 ms | 262 ms | 18 ms |
+| 20 | 26.7 s | 88 MiB | 15.8 MiB | 115 ms | 1,430 ms | 18 ms |
+
+The daemon, exec and snapshots don't grow with the number of boxes. Waking many at once does, at about 1.3 s a box: the four cores are the limit (gVisor and Postgres starting). A box's own cgroup holds 47 MiB; on the node it costs about 90 MiB.
+
+**T3 end to end** (`toy`, Haiku, through T3's server as the app would):
+
+| | one thread at a time | five threads at once |
+|---|---|---|
+| turn 1 (new worktree, first wake), p50 / max | 8.3 / 9.3 s | 13.9 / 16.2 s |
+| turn 2 (edit, run the tests), p50 | 14.8 s | 17.0 s |
+| revert files to before turn 2, p50 / max | 1.8 / 2.4 s | 2.6 / 4.7 s |
+| turn 3 (after the revert), p50 | 11.6 s | 13.8 s |
+| a wake inside a turn, p50 | 1.3 s | 1.9 s |
+| node memory, before → peak | 1.66 → 2.03 GiB | 1.89 → 3.07 GiB |
+
+Five threads at once cost about 240 MiB each at the peak (box plus Claude), so the 8 GiB node holds 20 or more active threads by memory; CPU limits it first.
+
+**Not Fern:** `disk.create_seeded_ms` (33 s) and `stream.roundtrip_50mb_ms` (67 s) in the VPS baseline carry 20–50 MB from the Mac to Germany; they measure the home link.
