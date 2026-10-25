@@ -68,7 +68,9 @@ func Run(ctx context.Context, conn *websocket.Conn, req Request, s Streams) (int
 	} else if err := conn.Write(ctx, websocket.MessageBinary, []byte{frameStdinEOF}); err != nil {
 		return 0, fmt.Errorf("close stdin: %w", err)
 	}
-	senders.Go(func() { sendControls(ctx, conn, s.Resize, s.Signal) })
+	if s.Resize != nil || s.Signal != nil {
+		senders.Go(func() { sendControls(ctx, conn, s.Resize, s.Signal) })
+	}
 	r := &messageReader{conn: conn}
 	for {
 		typ, data, err := r.read(ctx)

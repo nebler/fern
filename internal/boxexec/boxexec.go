@@ -83,6 +83,9 @@ type exit struct {
 // frameData is the most data the sides put in one frame they send.
 const frameData = 64 << 10
 
+// initialFrameData keeps quiet execs small; a busy stream grows to frameData.
+const initialFrameData = 4 << 10
+
 // frameWriter sends what is written to it as frames of one kind, through one
 // buffer it reuses. It is not safe for concurrent use.
 type frameWriter struct {
@@ -95,7 +98,7 @@ type frameWriter struct {
 func frames(ctx context.Context, conn *websocket.Conn, kind byte) *frameWriter {
 	w := &frameWriter{
 		send: func(frame []byte) error { return conn.Write(ctx, websocket.MessageBinary, frame) },
-		buf:  make([]byte, 1+frameData),
+		buf:  make([]byte, 1+initialFrameData),
 	}
 	w.buf[0] = kind
 	return w
@@ -103,6 +106,9 @@ func frames(ctx context.Context, conn *websocket.Conn, kind byte) *frameWriter {
 
 // Write sends p as one frame, or as several if it is longer than frameData.
 func (w *frameWriter) Write(p []byte) (int, error) {
+	if size := 1 + min(len(p), frameData); size > len(w.buf) {
+		w.grow(size)
+	}
 	var n int
 	for len(p) > 0 {
 		c := copy(w.buf[1:], p)
@@ -133,7 +139,16 @@ func (w *frameWriter) ReadFrom(r io.Reader) (int64, error) {
 		if err != nil {
 			return total, err
 		}
+		if n == len(w.buf)-1 && len(w.buf) < 1+frameData {
+			w.grow(1 + frameData)
+		}
 	}
+}
+
+func (w *frameWriter) grow(size int) {
+	kind := w.buf[0]
+	w.buf = make([]byte, size)
+	w.buf[0] = kind
 }
 
 // messageReader reads whole messages into one buffer it reuses, where
