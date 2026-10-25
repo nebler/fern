@@ -125,6 +125,33 @@ func crashCases() []crashCase {
 			},
 		},
 		{
+			// A golden build's copy: after a crash at any step the builder
+			// has a workspace, and the build can be made again.
+			name: "build source",
+			setup: func(t *testing.T, st *store.Store, dir string) {
+				first := filepath.Join(dir, "worktrees", "repo", "first")
+				writeAll(t, filepath.Join(first, "seed.sql"), "v1")
+				create(t, st, "first", store.CreateOptions{Workspace: first})
+				snapshot(t, st, "first", "golden-source")
+				create(t, st, "golden", store.CreateOptions{})
+			},
+			change: func(t *testing.T, st *store.Store, _ string) error {
+				return st.BuildSource(t.Context(), "golden", store.SnapshotRef{Env: "first", Snapshot: "golden-source"})
+			},
+			check: func(t *testing.T, st *store.Store, dir string) {
+				live := filepath.Join(dir, "envs", "golden", "live")
+				if _, ino, _ := stat(t, live); ino != subvolumeIno {
+					t.Errorf("builder's workspace inode = %d after the crash, want a subvolume", ino)
+				}
+				if err := st.BuildSource(t.Context(), "golden", store.SnapshotRef{Env: "first", Snapshot: "golden-source"}); err != nil {
+					t.Fatalf("BuildSource() again error: %v", err)
+				}
+				if got := readFile(t, filepath.Join(live, "seed.sql")); got != "v1" {
+					t.Errorf("seed.sql = %q after building again, want v1", got)
+				}
+			},
+		},
+		{
 			// Adopting onto a golden snapshot must never lose the work in the
 			// worktree either.
 			name: "adopt onto golden",

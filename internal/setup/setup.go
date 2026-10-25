@@ -151,6 +151,14 @@ func readFile(dir, p string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(f, maxFile))
 }
 
+// builderPrefix starts the IDs of the environments that build goldens.
+const builderPrefix = "golden-"
+
+// IsBuilder reports whether environment id builds golden snapshots. Its box
+// gets no credentials: what it makes goes into every thread of its
+// repository.
+func IsBuilder(id string) bool { return strings.HasPrefix(id, builderPrefix) }
+
 // ID returns the ID of the environment that builds repo's golden snapshots.
 func ID(repo string) string {
 	sum := sha256.Sum256([]byte(repo))
@@ -172,5 +180,5 @@ func ID(repo string) string {
 	if readable == "" {
 		readable = "repo"
 	}
-	return "golden-" + readable + "-" + hex.EncodeToString(sum[:])[:8]
+	return builderPrefix + readable + "-" + hex.EncodeToString(sum[:])[:8]
 }

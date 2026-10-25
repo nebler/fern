@@ -23,15 +23,16 @@ import (
 // makes came from the repository's code, so it is the agent's: every path
 // into it goes through an os.Root, which follows no symlink out of it.
 
-// sourceList is the builder environment's list of the files a build copied
-// in, which StripSource removes. A build adds to it before it copies, so a
-// build that stopped half-way is stripped too.
+// sourceList is the builder environment's list of the files the last build
+// copied in, NUL-separated, which StripSource removes. A build writes it
+// before it copies, so a build that stopped half-way is stripped too.
 func (s *Store) sourceList(id string) string { return filepath.Join(s.envDir(id), "source.list") }
 
 // BuildSource makes builder environment id's workspace a fresh copy of
 // snapshot src, a checkout, and lists its files for StripSource. What an
 // earlier build left in the workspace goes: it could hold symlinks that
-// lead a copy elsewhere. The box must be asleep.
+// lead a copy elsewhere. The box must be asleep. After a crash at any step,
+// Reconcile leaves a workspace, and BuildSource can be run again.
 func (s *Store) BuildSource(ctx context.Context, id string, src SnapshotRef) error {
 	env, err := s.Get(ctx, id)
 	if err != nil {
@@ -47,22 +48,34 @@ func (s *Store) BuildSource(ctx context.Context, id string, src SnapshotRef) err
 	if err := s.listSource(id, from); err != nil {
 		return fmt.Errorf("build source for %s: %w", id, err)
 	}
+	if err := s.step("build source: listed"); err != nil {
+		return err
+	}
 	if err := deleteSubvolumes(ctx, env.Workspace); err != nil {
+		return err
+	}
+	if err := s.step("build source: cleared"); err != nil {
 		return err
 	}
 	if err := s.makeWorkspace(ctx, id, env.Workspace, ""); err != nil {
 		return err
 	}
-	// The workspace is new and empty, so nothing in it can lead the copy out.
+	if err := s.step("build source: made"); err != nil {
+		return err
+	}
+	// The workspace is new and empty, and the source a read-only snapshot,
+	// so nothing can lead the copy out.
 	if err := run(exec.CommandContext(ctx, "cp", "-a", "--reflink=always", "-T", from, env.Workspace)); err != nil {
 		return fmt.Errorf("build source for %s: cp: %w", id, err)
 	}
 	return nil
 }
 
-// listSource adds the files and symlinks in dir to id's source list.
+// listSource writes the files and symlinks in dir, a read-only snapshot, as
+// id's source list, replacing the last build's.
 func (s *Store) listSource(id, dir string) error {
-	f, err := os.OpenFile(s.sourceList(id), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	tmp := s.sourceList(id) + ".tmp"
+	f, err := os.Create(tmp)
 	if err != nil {
 		return err
 	}
@@ -75,8 +88,10 @@ func (s *Store) listSource(id, dir string) error {
 		if err != nil {
 			return err
 		}
-		_, err = fmt.Fprintln(w, rel)
-		return err
+		if _, err := w.WriteString(rel); err != nil {
+			return err
+		}
+		return w.WriteByte(0)
 	})
 	if err == nil {
 		err = w.Flush()
@@ -84,11 +99,14 @@ func (s *Store) listSource(id, dir string) error {
 	if err == nil {
 		err = f.Sync()
 	}
-	return errors.Join(err, f.Close())
+	if err := errors.Join(err, f.Close()); err != nil {
+		return err
+	}
+	return os.Rename(tmp, s.sourceList(id))
 }
 
 // StripSource removes from builder environment id's workspace the files its
-// builds copied in, keeping what they made, and clears the list.
+// last build copied in, keeping what it made, and clears the list.
 func (s *Store) StripSource(ctx context.Context, id string) error {
 	env, err := s.Get(ctx, id)
 	if err != nil {
@@ -106,9 +124,8 @@ func (s *Store) StripSource(ctx context.Context, id string) error {
 		return err
 	}
 	defer func() { _ = root.Close() }()
-	for rel := range strings.Lines(string(data)) {
-		rel = strings.TrimSuffix(rel, "\n")
-		if !filepath.IsLocal(rel) {
+	for rel := range strings.SplitSeq(string(data), "\x00") {
+		if rel == "" || !filepath.IsLocal(rel) {
 			continue
 		}
 		// A build may have replaced a file with a directory; then it is the
@@ -122,39 +139,60 @@ func (s *Store) StripSource(ctx context.Context, id string) error {
 
 func isNotEmpty(err error) bool { return errors.Is(err, unix.ENOTEMPTY) || errors.Is(err, unix.EEXIST) }
 
-// overlay copies the tree at src into dst, a writable copy of a golden
-// snapshot, replacing what is there: files as reflinks, with their owners,
-// modes and times. dst came from a build, so it is opened as an os.Root:
-// a symlink in it can't lead the copy out of it.
+// Sources returns the golden sources kept for builds: snapshots named name,
+// of any environment. A build queued when the daemon stopped is found here.
+func (s *Store) Sources(ctx context.Context, name string) ([]SnapshotRef, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT env FROM snapshots WHERE id = ? ORDER BY created_at, rowid`, name)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var refs []SnapshotRef
+	for rows.Next() {
+		ref := SnapshotRef{Snapshot: name}
+		if err := rows.Scan(&ref.Env); err != nil {
+			return nil, err
+		}
+		refs = append(refs, ref)
+	}
+	return refs, rows.Err()
+}
+
+// overlay copies the tree at src, a worktree, into dst, a writable copy of
+// a golden snapshot, replacing what is there: files as reflinks, with their
+// owners, modes and times. Both are opened as os.Roots: dst came from a
+// build, and src can change while it is copied, so a symlink in either can't
+// lead the copy, as root, to a file outside them.
 func overlay(dst, src string) error {
-	root, err := os.OpenRoot(dst)
+	to, err := os.OpenRoot(dst)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = root.Close() }()
-	return filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
+	defer func() { _ = to.Close() }()
+	from, err := os.OpenRoot(src)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = from.Close() }()
+	return fs.WalkDir(from.FS(), ".", func(rel string, _ fs.DirEntry, err error) error {
 		if err != nil || rel == "." {
 			return err
 		}
-		fi, err := d.Info()
+		fi, err := from.Lstat(rel)
 		if err != nil {
 			return err
 		}
 		switch {
-		case d.IsDir():
-			if err := root.Mkdir(rel, fi.Mode().Perm()); errors.Is(err, fs.ErrExist) {
+		case fi.IsDir():
+			if err := to.Mkdir(rel, fi.Mode().Perm()); errors.Is(err, fs.ErrExist) {
 				// Keep a directory the build made; replace anything else.
-				if cur, err := root.Lstat(rel); err != nil {
+				if cur, err := to.Lstat(rel); err != nil {
 					return err
 				} else if !cur.IsDir() {
-					if err := root.RemoveAll(rel); err != nil {
+					if err := to.RemoveAll(rel); err != nil {
 						return err
 					}
-					if err := root.Mkdir(rel, fi.Mode().Perm()); err != nil {
+					if err := to.Mkdir(rel, fi.Mode().Perm()); err != nil {
 						return err
 					}
 				}
@@ -162,43 +200,51 @@ func overlay(dst, src string) error {
 				return err
 			}
 		case fi.Mode()&fs.ModeSymlink != 0:
-			target, err := os.Readlink(path)
+			target, err := from.Readlink(rel)
 			if err != nil {
 				return err
 			}
-			if err := root.RemoveAll(rel); err != nil {
+			if err := to.RemoveAll(rel); err != nil {
 				return err
 			}
-			if err := root.Symlink(target, rel); err != nil {
+			if err := to.Symlink(target, rel); err != nil {
 				return err
 			}
 		case fi.Mode().IsRegular():
-			if err := cloneFile(root, rel, path, fi); err != nil {
+			if fi, err = cloneFile(to, from, rel); err != nil || fi == nil {
 				return err
 			}
 		default:
 			return nil // sockets, pipes and devices aren't checkout files
 		}
-		return setAttrs(root, rel, fi)
+		return setAttrs(to, rel, fi)
 	})
 }
 
-// cloneFile makes rel in root a reflink of the file at path.
-func cloneFile(root *os.Root, rel, path string, fi fs.FileInfo) error {
-	if err := root.RemoveAll(rel); err != nil {
-		return err
+// cloneFile makes rel in to a reflink of rel in from, and returns what it
+// cloned, or nil if rel is no longer a regular file.
+func cloneFile(to, from *os.Root, rel string) (fs.FileInfo, error) {
+	in, err := from.OpenFile(rel, os.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK, 0)
+	if errors.Is(err, unix.ELOOP) {
+		return nil, nil // replaced by a symlink since the walk saw it
 	}
-	in, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = in.Close() }()
-	out, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, fi.Mode().Perm())
+	fi, err := in.Stat()
+	if err != nil || !fi.Mode().IsRegular() {
+		return nil, err
+	}
+	if err := to.RemoveAll(rel); err != nil {
+		return nil, err
+	}
+	out, err := to.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL|unix.O_NOFOLLOW, fi.Mode().Perm())
 	if err != nil {
-		return err
+		return nil, err
 	}
 	err = unix.IoctlFileClone(int(out.Fd()), int(in.Fd()))
-	return errors.Join(err, out.Close())
+	return fi, errors.Join(err, out.Close())
 }
 
 // setAttrs gives rel in root fi's owner and, unless it is a symlink, mode

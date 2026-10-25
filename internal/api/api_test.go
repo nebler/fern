@@ -63,6 +63,8 @@ func (f *fakeStore) Orphans(context.Context) ([]string, error) { return nil, nil
 
 func (f *fakeStore) BuildSource(context.Context, string, store.SnapshotRef) error { return nil }
 
+func (f *fakeStore) Sources(context.Context, string) ([]store.SnapshotRef, error) { return nil, nil }
+
 func (f *fakeStore) StripSource(context.Context, string) error { return nil }
 
 func (f *fakeStore) Create(_ context.Context, id string, opts store.CreateOptions) (store.Env, error) {

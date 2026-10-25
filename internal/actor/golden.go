@@ -20,11 +20,11 @@ const goldenSource = "golden-source"
 // next new environment of that repository asks again.
 const buildQueue = 16
 
-// build is a golden build to make: of repo's checkout in snapshot src, for
-// key.
+// build is a golden build to make, of the checkout in snapshot src. Its key
+// is computed again from that snapshot, which can't change, rather than
+// from the worktree it was taken of.
 type build struct {
-	repo, key string
-	src       store.SnapshotRef
+	src store.SnapshotRef
 }
 
 // golden returns the golden snapshot for a new environment at workspace, a
@@ -53,7 +53,7 @@ func (g *Group) golden(ctx context.Context, id, workspace string) (*store.Snapsh
 		g.log.WarnContext(ctx, "looking for a golden snapshot failed", slog.String("env", id), slog.Any("error", err))
 	}
 	g.goldens.WithLabelValues("miss").Inc()
-	return nil, &build{repo: repo, key: key, src: store.SnapshotRef{Env: id, Snapshot: goldenSource}}
+	return nil, &build{src: store.SnapshotRef{Env: id, Snapshot: goldenSource}}
 }
 
 // queueBuild hands b to the builder, or drops it and its source if the
@@ -62,7 +62,7 @@ func (g *Group) queueBuild(ctx context.Context, b *build) {
 	select {
 	case g.builds <- *b:
 	default:
-		g.log.WarnContext(ctx, "golden build queue full; dropped", slog.String("repo", b.repo))
+		g.log.WarnContext(ctx, "golden build queue full; dropped", slog.String("env", b.src.Env))
 		if err := g.store.DeleteSnapshot(ctx, b.src.Env, b.src.Snapshot); err != nil {
 			g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", b.src.Env), slog.Any("error", err))
 		}
@@ -70,8 +70,16 @@ func (g *Group) queueBuild(ctx context.Context, b *build) {
 }
 
 // buildGoldens makes the queued golden builds one at a time, until ctx is
-// done.
+// done. It first queues the builds the last daemon left: their sources are
+// still there.
 func (g *Group) buildGoldens(ctx context.Context) {
+	srcs, err := g.store.Sources(ctx, goldenSource)
+	if err != nil {
+		g.log.WarnContext(ctx, "looking for golden sources failed", slog.Any("error", err))
+	}
+	for _, src := range srcs {
+		g.queueBuild(ctx, &build{src: src})
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -81,7 +89,7 @@ func (g *Group) buildGoldens(ctx context.Context) {
 			err := g.buildGolden(ctx, b)
 			observe(g.goldenBuilds, start, &err)
 			if err != nil {
-				g.log.WarnContext(ctx, "golden build failed", slog.String("repo", b.repo), slog.String("key", b.key), slog.Any("error", err))
+				g.log.WarnContext(ctx, "golden build failed", slog.String("source", b.src.Env), slog.Any("error", err))
 			}
 			if err := g.DeleteSnapshot(ctx, b.src.Env, b.src.Snapshot); err != nil && !errors.Is(err, store.ErrNotFound) {
 				g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", b.src.Env), slog.Any("error", err))
@@ -96,12 +104,13 @@ func (g *Group) buildGoldens(ctx context.Context) {
 // stripped, so that the snapshot holds only what the build made. A build
 // that stops leaves no snapshot, and the next one starts afresh.
 func (g *Group) buildGolden(ctx context.Context, b build) error {
-	id := setup.ID(b.repo)
+	srcEnv, err := g.store.Get(ctx, b.src.Env)
+	if err != nil {
+		return err
+	}
+	repo := filepath.Base(filepath.Dir(srcEnv.Workspace))
+	id := setup.ID(repo)
 	return g.do(ctx, "golden_build", id, func(ctx context.Context, a *actor) error {
-		if snaps, err := g.store.Snapshots(ctx, id); err == nil &&
-			slices.ContainsFunc(snaps, func(s store.Snapshot) bool { return s.ID == b.key }) {
-			return nil // an earlier build made it
-		}
 		if _, err := g.store.Create(ctx, id, store.CreateOptions{}); err != nil {
 			return err
 		}
@@ -111,7 +120,19 @@ func (g *Group) buildGolden(ctx context.Context, b build) error {
 		if err := g.store.BuildSource(ctx, id, b.src); err != nil {
 			return err
 		}
-		_, err := a.wake(ctx, "")
+		env, err := g.store.Get(ctx, id)
+		if err != nil {
+			return err
+		}
+		key, err := setup.Key(env.Workspace, g.image)
+		if err != nil {
+			return err
+		}
+		if snaps, err := g.store.Snapshots(ctx, id); err == nil &&
+			slices.ContainsFunc(snaps, func(s store.Snapshot) bool { return s.ID == key }) {
+			return nil // an earlier build made it
+		}
+		_, err = a.wake(ctx, "")
 		if stopErr := a.stopBox(ctx, g.driver.Sleep); err == nil {
 			err = stopErr
 		}
@@ -121,10 +142,10 @@ func (g *Group) buildGolden(ctx context.Context, b build) error {
 		if err := g.store.StripSource(ctx, id); err != nil {
 			return err
 		}
-		if err := g.store.Snapshot(ctx, id, b.key); err != nil {
+		if err := g.store.Snapshot(ctx, id, key); err != nil {
 			return err
 		}
-		g.log.InfoContext(ctx, "golden built", slog.String("repo", b.repo), slog.String("key", b.key))
+		g.log.InfoContext(ctx, "golden built", slog.String("repo", repo), slog.String("key", key))
 		if err := g.store.Prune(ctx, id); err != nil {
 			g.log.WarnContext(ctx, "pruning old goldens failed", slog.String("env", id), slog.Any("error", err))
 		}

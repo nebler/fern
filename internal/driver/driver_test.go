@@ -16,6 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/nebler/fern/internal/driver"
+	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -207,5 +208,22 @@ func TestSleepAndDeleteWithoutSandbox(t *testing.T) {
 	}
 	if err := d.Delete(t.Context(), "demo"); err != nil {
 		t.Errorf("Delete(demo) error: %v", err)
+	}
+}
+
+// A golden builder's box gets no Claude login and no Claude folder.
+func TestWakeBuilderHasNoCredentials(t *testing.T) {
+	d, c := newDriver(t)
+	builder := env
+	builder.ID = setup.ID("sample")
+	wake(t, d, builder)
+	spec := sandbox(t, c, builder.ID).Spec.PodTemplate.Spec
+	for _, v := range spec.Containers[0].Env {
+		if v.Name == "CLAUDE_CODE_OAUTH_TOKEN" || v.Name == "CLAUDE_CONFIG_DIR" {
+			t.Errorf("builder's box has %s, want no Claude login or folder", v.Name)
+		}
+	}
+	if _, ok := mounts(sandbox(t, c, builder.ID))[env.Claude]; ok {
+		t.Errorf("builder's box mounts Claude's folder %s", env.Claude)
 	}
 }

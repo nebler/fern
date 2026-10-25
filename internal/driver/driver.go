@@ -27,6 +27,7 @@ import (
 
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/csi"
+	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -303,17 +304,24 @@ func (d *Driver) podTemplate(env store.Env) sandboxv1.PodTemplate {
 	vars := []corev1.EnvVar{
 		{Name: "FERN_BOX_TOKEN", Value: env.BoxToken},
 		{Name: "FERN_WORKSPACE", Value: env.Workspace},
-		// Claude keeps its transcripts here, so `--resume` works after a
-		// sleep or a restore, which both replace the box.
-		{Name: "CLAUDE_CONFIG_DIR", Value: env.Claude},
-		// The login comes from the Secret when the pod starts, so it is
-		// never in the Sandbox, the index or a file. Boxes start without it
-		// until it exists.
-		{Name: "CLAUDE_CODE_OAUTH_TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
-			LocalObjectReference: corev1.LocalObjectReference{Name: claudeSecret},
-			Key:                  "token",
-			Optional:             new(true),
-		}}},
+	}
+	// A golden builder's box runs no agent and gets no login: what its
+	// services write goes into every thread of the repository.
+	if setup.IsBuilder(env.ID) {
+		env.Claude = ""
+	} else {
+		vars = append(vars,
+			// Claude keeps its transcripts here, so `--resume` works after a
+			// sleep or a restore, which both replace the box.
+			corev1.EnvVar{Name: "CLAUDE_CONFIG_DIR", Value: env.Claude},
+			// The login comes from the Secret when the pod starts, so it is
+			// never in the Sandbox, the index or a file. Boxes start without
+			// it until it exists.
+			corev1.EnvVar{Name: "CLAUDE_CODE_OAUTH_TOKEN", ValueFrom: &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: claudeSecret},
+				Key:                  "token",
+				Optional:             new(true),
+			}}})
 	}
 	// HOME is /tmp (images/Dockerfile), so caches land here; capped
 	// because every box shares the node's disk.

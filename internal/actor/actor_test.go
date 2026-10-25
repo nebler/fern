@@ -36,7 +36,8 @@ type fakeStore struct {
 	pruned  []string // environments pruned, in order
 	orphans []string // what Orphans returns
 	from    map[string]*store.SnapshotRef
-	built   []string // BuildSource and StripSource calls, in order
+	built   []string          // BuildSource and StripSource calls, in order
+	paths   map[string]string // workspaces at a path; a builder's is its source's
 }
 
 func newFakeStore() *fakeStore {
@@ -48,12 +49,15 @@ func (f *fakeStore) Create(_ context.Context, id string, opts store.CreateOption
 	defer f.mu.Unlock()
 	if !f.envs[id] {
 		if f.from == nil {
-			f.from = make(map[string]*store.SnapshotRef)
+			f.from, f.paths = make(map[string]*store.SnapshotRef), make(map[string]string)
 		}
 		f.from[id] = opts.From
+		if opts.Workspace != "" {
+			f.paths[id] = opts.Workspace
+		}
 	}
 	f.envs[id] = true
-	return store.Env{ID: id}, nil
+	return store.Env{ID: id, Workspace: f.paths[id]}, nil
 }
 
 func (f *fakeStore) Get(_ context.Context, id string) (store.Env, error) {
@@ -62,7 +66,7 @@ func (f *fakeStore) Get(_ context.Context, id string) (store.Env, error) {
 	if !f.envs[id] {
 		return store.Env{}, fmt.Errorf("environment %s: %w", id, store.ErrNotFound)
 	}
-	return store.Env{ID: id}, nil
+	return store.Env{ID: id, Workspace: f.paths[id]}, nil
 }
 
 func (f *fakeStore) Delete(_ context.Context, id string) error {
@@ -110,8 +114,11 @@ func (f *fakeStore) BuildSource(_ context.Context, id string, src store.Snapshot
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.built = append(f.built, "source "+id+" from "+src.Env+"/"+src.Snapshot)
+	f.paths[id] = f.paths[src.Env]
 	return nil
 }
+
+func (f *fakeStore) Sources(context.Context, string) ([]store.SnapshotRef, error) { return nil, nil }
 
 func (f *fakeStore) StripSource(_ context.Context, id string) error {
 	f.mu.Lock()

@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/nebler/fern/internal/store"
@@ -147,4 +148,69 @@ func TestStripAfterAnUnfinishedBuild(t *testing.T) {
 	if got := readFile(t, filepath.Join(env.Workspace, "out")); got != "made" {
 		t.Errorf("out = %q, want the build's output kept", got)
 	}
+}
+
+// A build's list is its own: a file an earlier build copied in and this one
+// made is kept, and a name with a newline is stripped whole.
+func TestStripListsThisBuild(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	for name, files := range map[string][]string{"a": {"made-later.js", "keep"}, "b": {"two\nlines", "keep"}} {
+		wt := filepath.Join(dir, "worktrees", "repo", name)
+		for _, f := range files {
+			writeAll(t, filepath.Join(wt, f), f)
+		}
+		create(t, st, name, store.CreateOptions{Workspace: wt})
+		snapshot(t, st, name, "golden-source")
+	}
+	env := create(t, st, "golden", store.CreateOptions{})
+	if err := st.BuildSource(ctx, "golden", store.SnapshotRef{Env: "a", Snapshot: "golden-source"}); err != nil {
+		t.Fatal(err) // and then this build fails
+	}
+	if err := st.BuildSource(ctx, "golden", store.SnapshotRef{Env: "b", Snapshot: "golden-source"}); err != nil {
+		t.Fatal(err)
+	}
+	writeAll(t, filepath.Join(env.Workspace, "made-later.js"), "made by build b")
+	writeAll(t, filepath.Join(env.Workspace, "two"), "made by build b")
+	if err := st.StripSource(ctx, "golden"); err != nil {
+		t.Fatal(err)
+	}
+	for _, f := range []string{"made-later.js", "two"} {
+		if got := readFile(t, filepath.Join(env.Workspace, f)); got != "made by build b" {
+			t.Errorf("%s = %q, want build b's output kept", f, got)
+		}
+	}
+	for _, f := range []string{"two\nlines", "keep"} {
+		gone(t, filepath.Join(env.Workspace, f))
+	}
+	srcs, err := st.Sources(ctx, "golden-source")
+	if err != nil || len(srcs) != 2 {
+		t.Errorf("Sources() = %v, %v, want a's and b's", srcs, err)
+	}
+}
+
+// A worktree's symlinks are copied as symlinks, never read through, and
+// what isn't a file, a directory or a symlink isn't copied.
+func TestOverlayCopiesSymlinksAsLinks(t *testing.T) {
+	st, dir := openPool(t)
+	first := filepath.Join(dir, "worktrees", "repo", "first")
+	writeAll(t, filepath.Join(first, "README"), "x")
+	create(t, st, "first", store.CreateOptions{Workspace: first})
+	snapshot(t, st, "first", "golden-source")
+	buildGolden(t, st, store.SnapshotRef{Env: "first", Snapshot: "golden-source"}, func(string) {})
+	secret := filepath.Join(dir, "secret")
+	writeFile(t, secret, "root's")
+	next := filepath.Join(dir, "worktrees", "repo", "next")
+	writeAll(t, filepath.Join(next, "README"), "x")
+	if err := os.Symlink(secret, filepath.Join(next, "link")); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(next, "pipe"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	create(t, st, "next", store.CreateOptions{Workspace: next, From: &store.SnapshotRef{Env: "golden", Snapshot: "g1"}})
+	if target, err := os.Readlink(filepath.Join(next, "link")); err != nil || target != secret {
+		t.Errorf("link = %q, %v, want the symlink itself", target, err)
+	}
+	gone(t, filepath.Join(next, "pipe"))
 }

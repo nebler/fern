@@ -35,6 +35,7 @@ type Store interface {
 	Orphans(ctx context.Context) ([]string, error)
 	BuildSource(ctx context.Context, id string, src store.SnapshotRef) error
 	StripSource(ctx context.Context, id string) error
+	Sources(ctx context.Context, name string) ([]store.SnapshotRef, error)
 }
 
 // Driver runs environments' boxes.
@@ -285,8 +286,11 @@ func (g *Group) Create(ctx context.Context, id string, opts store.CreateOptions)
 			opts.From, b = g.golden(ctx, id, opts.Workspace)
 		}
 		_, err := g.store.Create(ctx, id, opts)
-		if err != nil && opts.From != nil && errors.Is(err, store.ErrNotFound) {
-			// A build pruned the golden since it was looked up.
+		if err != nil && opts.From != nil {
+			// Such as a build that pruned the golden since it was looked up:
+			// a thread starts without one rather than not at all. A create
+			// that stopped is cleared by the next.
+			g.log.WarnContext(ctx, "creating from a golden failed; creating without", slog.String("env", id), slog.Any("error", err))
 			opts.From = nil
 			_, err = g.store.Create(ctx, id, opts)
 		}

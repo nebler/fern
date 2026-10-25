@@ -59,7 +59,7 @@ func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 			lost = append(lost, s.envDir(id))
 			continue
 		}
-		_, err := s.Get(ctx, id)
+		env, err := s.Get(ctx, id)
 		switch {
 		case errors.Is(err, ErrNotFound):
 			err := s.clearLeftovers(ctx, id)
@@ -85,6 +85,16 @@ func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 				return lost, fmt.Errorf("reconcile %s: %w", id, err)
 			}
 			if err := s.reconcileSnapshots(ctx, id); err != nil {
+				return lost, fmt.Errorf("reconcile %s: %w", id, err)
+			}
+			// A golden build's BuildSource replaces its builder's live/; one
+			// that stopped in between left none, and the next build makes it
+			// afresh. Only that leaves an indexed environment without one.
+			if _, err := os.Lstat(env.Workspace); errors.Is(err, fs.ErrNotExist) && env.Workspace == s.livePath(id) {
+				if err := s.makeWorkspace(ctx, id, env.Workspace, ""); err != nil {
+					return lost, fmt.Errorf("reconcile %s: %w", id, err)
+				}
+			} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 				return lost, fmt.Errorf("reconcile %s: %w", id, err)
 			}
 			if err := s.prunePreRestores(ctx, id, ""); err != nil {
