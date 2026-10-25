@@ -299,10 +299,11 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
 - **Snapshot:** `btrfs subvolume snapshot -r`. **Fork:** the same without `-r`. **Restore:** snapshot to `live.new`, then swap. All are metadata operations, whose time doesn't grow with the workspace. A snapshot first flushes what was written since the last one: about 1 ms with nothing written, 24 ms after 8 MB (measured), and more on a busy disk.
 - **Consistency:** a snapshot is atomic (crash-consistent). Postgres recovers through its WAL; SQLite needs its WAL file kept beside it.
 - **Retention:**
-  - keep the last N turn snapshots per environment, plus tagged snapshots, plus golden
-  - keep `pre-restore` copies (§7.3) for a day
+  - keep the last N turn snapshots per environment, plus tagged snapshots, plus golden (built: the newest 50, pruned after every snapshot; no tags yet)
+  - keep `pre-restore` copies (§7.3) for a day (built)
   - expire unused goldens after M days
-  - **space pressure → refuse new snapshots with a clear error** rather than fill the disk
+  - **space pressure → refuse new snapshots with a clear error** rather than fill the disk (built: below 5% of the pool and 2 GiB free, new snapshots and environments get `ErrPoolFull`, HTTP 507; restores still run)
+  - **an environment whose worktree T3 removed** (its thread was deleted) is deleted when it is still gone an hour later (built); a worktree T3 makes again at the same path, for a thread that resumes, is adopted back with its snapshots
 - **Quotas:** btrfs qgroups per environment (cost to be measured), or cgroup-level limits on the box.
 - **Moving between machines:** `btrfs send | receive`, incremental against a shared parent. Used for backups, migration and forks on remote machines.
 - **ZFS** is an optional alternative backend (`zfs snapshot/clone/rollback`). Clones depend on their origin, so the swap logic differs.
@@ -344,7 +345,7 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
 | **Box crash** | the actor restarts it with backoff; after N failures in a window → `failed`, the next touch retries |
 | **Crash mid-turn** | the agent CLI resumes from its session files; Fern can restore to the last turn snapshot before resuming if the transcript is broken |
 | **Restore during an exec** | the box stops and the actor cancels the exec, so no late write from the old session reaches the restored disk (built) |
-| **Disk full** | snapshots refused with `quota_exceeded`; retention runs; the box keeps working |
+| **Disk full** | snapshots and new environments refused with "the pool is almost full" (HTTP 507) before the disk is; retention runs at every snapshot; the box keeps working (built) |
 | **Snapshot fails at a turn's end** | the turn still counts: T3 keeps its git checkpoint and the hook logs the error; reverting to that turn is refused with the reason (§7.3) |
 | **Node loss (Kubernetes)** | environments on that node are unavailable until it returns, or until they're restored elsewhere from shipped snapshots (`btrfs send` to object storage, optional) |
 | **Golden build fails** | the environment is created from the previous golden, with a visible warning; the agent is asked to fix the setup |
@@ -435,10 +436,12 @@ Your Mac or phone only runs the T3 app. More nodes: `fern join <token>`.
 
 **The environment ID is derived from T3's thread ID.** T3's worktree path *is* the environment's `live/`. Fern **never snapshots T3's own database.** Rewinding it would resurrect revoked logins; T3 keeps its own history.
 
-**Planned: a Local thread must not look like a Fern one.** Only a *New worktree* thread gets an environment. A thread in *Local* (the project's main folder) runs Claude in T3's pod, with no box and no database, and Claude says so only in its answer; a Revert there brings nothing back. Seen twice, in the lab and on the first VPS. In order of cost:
-1. A Fern project's threads default to *New worktree* (T3's per-project `defaultThreadEnvMode`), set when the project is added.
-2. `fern-claude` refuses a project's main folder under `repos/` with a message that names *New worktree*, as it already refuses a worktree without an environment; the agent and the person both see why.
-3. The main folder becomes an environment of its own on its first turn (adopt), so Local works too, with one box shared by every Local thread of that project.
+**A new thread is a Fern environment, with no setting to change (built).** Only a *New worktree* thread gets an environment: a thread in *Local* works in the project's main folder, which has no box or database, and there a Revert brings nothing back (seen in the lab and on the first VPS). So:
+1. **T3's defaults on Fern's server** (an init container in `deploy/t3.yaml`, only where the person hasn't chosen): new threads are *New worktree* (the server-wide `defaultThreadEnvMode`, so nothing happens per project), and deleting a thread removes its worktree (`storageCleanup.worktreeOnDelete`), which takes its environment with it (§9). The app reads the setting from the server, so the composer shows *New worktree* from the start.
+2. **`fern-claude` refuses a thread's session in a project's main folder** (`repos/`), with a message naming *New worktree*. T3's probes and the commit messages it writes there still run: T3 starts sessions with `--session-id` or `--resume`, and those without. It also keeps Claude out of T3's pod, with its login and the whole pool. Still open: whether T3 shows the message or only "exited with code 1".
+3. **Claude is told where it is:** fern-init writes a `CLAUDE.md` in Claude's folder (outside the workspace, so in no snapshot or diff): its own services and data, that a revert brings data back, that it doesn't commit.
+
+Not done: making the main folder an environment. One environment for many threads breaks per-thread revert, gives the box the main repository's `.git` to write (and so code that T3 runs, §13), and puts whatever the folder holds into snapshots. Next, already planned: create the environment when T3 creates the worktree, not at its first checkpoint, which is where goldens start (§7.1).
 
 ### 15.1 How the hook reaches a user
 Nobody applies a patch by hand. T3's server has to run next to the pool anyway (it runs git and the agent on the worktree paths), so Fern runs it as a pod from an image Fern builds (§14.1). The user installs Fern, opens the T3 app on their Mac and pairs it with the printed link (Settings → Connections). From then on checkpoints and reverts also cover dependencies and the database.

@@ -6,17 +6,33 @@
 # Claude: $FERN_LOCAL_CLAUDE, by default where the T3 image keeps it. In the
 # pool's worktrees it never does: there an agent must not run in T3's own pod,
 # with its login, the whole pool and the daemon's socket, just because the
-# daemon didn't answer or the environment wasn't made.
+# daemon didn't answer or the environment wasn't made. Nor does a thread's
+# session in a project's main folder (T3's Local mode), which has no box:
+# T3 starts sessions with --session-id or --resume, its probes and the
+# commit messages it writes without.
 #
 # Only the variables Claude's SDK sets are passed on: T3's own environment,
 # and any credentials in it, stays out of the box, which gets its login from
 # the environment. fern exec passes SIGTERM on to Claude, so it can save its
 # transcript, and exits when the box goes away.
 set -eu
+pool=${FERN_POOL:-/var/lib/fern}
 case "$PWD/" in
-"${FERN_POOL:-/var/lib/fern}"/worktrees/*)
+"$pool"/worktrees/*)
 	# --here does the lookup itself and fails if the environment is missing.
 	# A preliminary `which` would add a process and repeat the same request.
+	;;
+"$pool"/repos/*)
+	for arg in "$@"; do
+		case "$arg" in
+		--session-id | --session-id=* | --resume | --resume=*)
+			echo "fern-claude: this thread works in the project's main folder, which has no Fern box or database." \
+				"Start a new thread in New worktree to get one." >&2
+			exit 1
+			;;
+		esac
+	done
+	exec "${FERN_LOCAL_CLAUDE:-/usr/local/libexec/claude}" "$@"
 	;;
 *)
 	if ! fern which "$PWD" >/dev/null 2>&1; then

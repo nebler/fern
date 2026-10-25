@@ -183,7 +183,11 @@ box() {
   sql $ENV "insert into users (name, email) values ('Barbara', 'barbara@example.com')" >/dev/null
   start=$(now_ms)
   k -n fern-boxes delete pod $ENV --force --grace-period=0 >/dev/null 2>&1
-  check "Postgres recovers after its pod is force-deleted (5 users)" 5 "$(sql $ENV 'select count(*) from users')"
+  # A command sent while the pod is being killed can reach it and be cut off
+  # (seen under gVisor in the lab); it isn't retried, as it may have run.
+  # The next one reaches the new pod.
+  check "Postgres recovers after its pod is force-deleted (5 users)" 5 \
+    "$(sql $ENV 'select count(*) from users' 2>/dev/null || sql $ENV 'select count(*) from users')"
   note "force delete until Postgres answers: $(($(now_ms) - start)) ms"
   check "and the seed ran once" 1 "$(sql $ENV "select count(*) from users where name = 'Ada'")"
 }
@@ -560,12 +564,20 @@ t3() {
   check "the box keeps Claude's state outside the workspace" "$C" \
     "$(in_t3 "cd $W && fern exec --here -- sh -c 'echo \$CLAUDE_CONFIG_DIR'")"
   in_t3 "cd $W && fern exec --here -- sh -c 'echo kept > $C/note'"
+  check "Claude is told it is in a Fern environment" yes \
+    "$(in_t3 "cd $W && fern exec --here -- cat $C/CLAUDE.md" | grep -q 'Fern environment' && echo yes || echo no)"
   check "git works in the box" init "$(in_t3 "cd $W && fern exec --here -- git log --format=%s -1")"
   check "and can't change the main repository" no "$(succeeds in_t3 "cd $W && fern exec --here -- touch $R/.git/x")"
   check "or point the worktree's .git elsewhere" no \
     "$(succeeds in_t3 "cd $W && fern exec --here -- sh -c 'echo gitdir: /tmp > .git'")"
   check "claude in a worktree without an environment doesn't run" no \
     "$(succeeds in_t3 "mkdir -p /var/lib/fern/worktrees/t3check/none && cd /var/lib/fern/worktrees/t3check/none && claude --version")"
+  # A thread in T3's Local mode works in the main folder, which has no box.
+  check "claude in a project's main folder answers T3's probes" "$CLAUDE" "$(in_t3 "cd $R && claude --version")"
+  check "but a thread's session there is refused, naming New worktree" yes \
+    "$(in_t3 "cd $R && claude --session-id 00000000-0000-4000-8000-000000000000 -p hi 2>&1" | grep -q 'New worktree' && echo yes || echo no)"
+  check "T3's new threads are New worktrees, and deleting one removes it" "worktree true" \
+    "$(in_t3 "node -p 'const s = require(\"/var/lib/fern/userdata/settings.json\"); s.defaultThreadEnvMode + \" \" + s.storageCleanup.worktreeOnDelete'")"
   in_t3 "echo v1 > $W/a.txt && echo junk > $W/ignored.bin"
   note "checkpoint snapshot: $(in_t3 'fern snapshot --replace t3c c1' | took) ms"
   in_t3 "echo v2 > $W/a.txt"

@@ -54,6 +54,12 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if claude := os.Getenv("CLAUDE_CONFIG_DIR"); claude != "" {
+		// Claude works without the hint, only less well.
+		if err := writeHint(claude, services); err != nil {
+			log.WarnContext(ctx, "writing Claude's hint failed", slog.Any("error", err))
+		}
+	}
 
 	// Services outlive ctx: they are stopped, all at once, after it is done.
 	supervisors := make([]*supervisor, 0, len(services))
