@@ -179,6 +179,55 @@ func crashCases() []crashCase {
 			},
 		},
 		{
+			name: "delete nested",
+			setup: func(t *testing.T, st *store.Store, dir string) {
+				create(t, st, "demo", store.CreateOptions{})
+				snapshot(t, st, "demo", "s1")
+				subvolume(t, filepath.Join(live(dir), "nested", "deep"))
+			},
+			change: func(t *testing.T, st *store.Store, _ string) error { return st.Delete(t.Context(), "demo") },
+			check: func(t *testing.T, st *store.Store, dir string) {
+				if err := st.Delete(t.Context(), "demo"); err != nil {
+					t.Fatalf("Delete(demo) again: %v", err)
+				}
+				gone(t, filepath.Join(dir, "envs", "demo"))
+			},
+		},
+		{
+			name: "reconcile snapshots",
+			setup: func(t *testing.T, st *store.Store, _ string) {
+				create(t, st, "demo", store.CreateOptions{})
+				snapshot(t, st, "demo", "stale")
+				store.SetFailAt(st, func(step string) error {
+					if step == "delete snapshot: removed" || step == "snapshot: taken" {
+						return errCrash
+					}
+					return nil
+				})
+				if err := st.DeleteSnapshot(t.Context(), "demo", "stale"); !errors.Is(err, errCrash) {
+					t.Fatalf("DeleteSnapshot() = %v, want crash", err)
+				}
+				for _, id := range []string{"orphan-a", "orphan-b"} {
+					if err := st.Snapshot(t.Context(), "demo", id); !errors.Is(err, errCrash) {
+						t.Fatalf("Snapshot(%s) = %v, want crash", id, err)
+					}
+				}
+				store.SetFailAt(st, nil)
+			},
+			change: func(t *testing.T, st *store.Store, _ string) error {
+				_, err := st.Reconcile(t.Context())
+				return err
+			},
+			check: func(t *testing.T, st *store.Store, _ string) {
+				if got := snapIDs(t, st); len(got) != 2 || got[0] != "orphan-a" || got[1] != "orphan-b" {
+					t.Errorf("Snapshots() = %v, want [orphan-a orphan-b]", got)
+				}
+				if _, err := st.Reconcile(t.Context()); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
 			// The workspace is the old one or the restored one, and the
 			// old one is never lost.
 			name: "restore",

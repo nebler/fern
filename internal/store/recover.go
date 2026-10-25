@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -112,6 +113,7 @@ func (s *Store) reconcileSnapshots(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
+	var missing []string
 	for _, d := range dirs {
 		fi, err := d.Info()
 		if err != nil {
@@ -124,13 +126,52 @@ func (s *Store) reconcileSnapshots(ctx context.Context, id string) error {
 			delete(indexed, d.Name())
 			continue
 		}
-		if _, err := s.db.ExecContext(ctx, `INSERT INTO snapshots (env, id, created_at) VALUES (?, ?, ?)`,
-			id, d.Name(), now().Unix()); err != nil {
+		missing = append(missing, d.Name())
+	}
+	if len(missing) == 0 && len(indexed) == 0 {
+		return nil
+	}
+	// The disk has already decided the result. Recover all rows atomically
+	// and pay for one durable WAL commit, rather than one per snapshot.
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.indexRecoveredSnapshots(ctx, tx, id, missing, indexed); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.step("reconcile: snapshot rows committed")
+}
+
+func (s *Store) indexRecoveredSnapshots(ctx context.Context, tx *sql.Tx, id string, missing []string, stale map[string]bool) error {
+	insert, err := tx.PrepareContext(ctx, `INSERT INTO snapshots (env, id, created_at) VALUES (?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = insert.Close() }()
+	created := now().Unix()
+	for _, snapID := range missing {
+		if _, err := insert.ExecContext(ctx, id, snapID, created); err != nil {
+			return err
+		}
+		if err := s.step("reconcile: indexed " + snapID); err != nil {
 			return err
 		}
 	}
-	for snapID := range indexed {
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM snapshots WHERE env = ? AND id = ?`, id, snapID); err != nil {
+	remove, err := tx.PrepareContext(ctx, `DELETE FROM snapshots WHERE env = ? AND id = ?`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = remove.Close() }()
+	for snapID := range stale {
+		if _, err := remove.ExecContext(ctx, id, snapID); err != nil {
+			return err
+		}
+		if err := s.step("reconcile: unindexed " + snapID); err != nil {
 			return err
 		}
 	}
