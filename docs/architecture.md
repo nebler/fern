@@ -495,9 +495,11 @@ classes:
 ## 18. Code layout
 
 ```
-cmd/fern/            daemon + CLI
+cmd/fern/            small CLI (fern daemon execs its sibling fern-daemon)
+cmd/fern-daemon/     node daemon + CSI plugin
 cmd/fern-init/       the main process inside boxes
-internal/api/        socket API, auth, idempotency
+internal/api/        socket protocol and client
+internal/api/server/ socket API server, auth, idempotency
 internal/wake/       front door, preview routing, webhooks, coalescing
 internal/actor/      per-environment actors, idle rule, supervision
 internal/store/      btrfs (and later zfs) backends, retention, index

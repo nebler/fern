@@ -1,3 +1,5 @@
+// Package api defines the daemon's socket protocol and its client. The
+// server is separate so clients do not load the daemon's dependencies.
 package api
 
 import (
@@ -72,7 +74,7 @@ func (c *Client) Delete(ctx context.Context, id string) error {
 // Snapshot takes snapshot snapID of environment id. With replace, it takes
 // it again if it exists.
 func (c *Client) Snapshot(ctx context.Context, id, snapID string, replace bool) error {
-	return c.doJSON(ctx, http.MethodPost, envPath(id)+"/snapshots", snapshotRequest{ID: snapID, Replace: replace})
+	return c.doJSON(ctx, http.MethodPost, envPath(id)+"/snapshots", SnapshotRequest{ID: snapID, Replace: replace})
 }
 
 // DeleteSnapshot removes snapshot snapID of environment id; removing one
@@ -90,7 +92,7 @@ func (c *Client) Snapshots(ctx context.Context, id string) ([]Snapshot, error) {
 
 // Restore puts environment id to sleep and restores snapshot snapID.
 func (c *Client) Restore(ctx context.Context, id, snapID string) error {
-	return c.doJSON(ctx, http.MethodPost, envPath(id)+"/restore", restoreRequest{Snapshot: snapID})
+	return c.doJSON(ctx, http.MethodPost, envPath(id)+"/restore", RestoreRequest{Snapshot: snapID})
 }
 
 // Sleep stops environment id's box.

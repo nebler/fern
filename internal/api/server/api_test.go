@@ -1,4 +1,4 @@
-package api_test
+package server_test
 
 import (
 	"bytes"
@@ -26,6 +26,7 @@ import (
 
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api"
+	"github.com/nebler/fern/internal/api/server"
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/driver"
 	"github.com/nebler/fern/internal/store"
@@ -197,7 +198,7 @@ func newAPI(t *testing.T) (*api.Client, *driver.Fake) {
 // driverWith is what a test's wrapped fake driver must do.
 type driverWith interface {
 	actor.Driver
-	api.Driver
+	server.Driver
 }
 
 // newServer returns the API's handler for st and drv, with their actors
@@ -215,7 +216,7 @@ func newServer(t testing.TB, st *fakeStore, drv actor.Driver) http.Handler {
 		close(done)
 	}()
 	t.Cleanup(func() { cancel(); <-done })
-	return api.NewServer(st, drv, envs, log).Handler()
+	return server.New(st, drv, envs, log).Handler()
 }
 
 // newAPIWith is newAPI with the fake driver wrapped by wrap, if it isn't nil.
@@ -278,7 +279,7 @@ func stateOf(t *testing.T, c *api.Client, id string) driver.State {
 	if i < 0 {
 		t.Fatalf("List() has no %s", id)
 	}
-	return envs[i].State
+	return driver.State(envs[i].State)
 }
 
 func run(t *testing.T, c *api.Client, id string, argv ...string) {
@@ -296,7 +297,7 @@ func TestCreateList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List() error: %v", err)
 	}
-	want := []api.Env{{ID: "demo", Workspace: "/pool/envs/demo/live", Created: created, State: driver.Asleep}}
+	want := []api.Env{{ID: "demo", Workspace: "/pool/envs/demo/live", Created: created, State: string(driver.Asleep)}}
 	if diff := cmp.Diff(want, list); diff != "" {
 		t.Errorf("List() mismatch (-want +got):\n%s", diff)
 	}

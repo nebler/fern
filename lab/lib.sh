@@ -56,7 +56,7 @@ fern() {
   esac
 }
 
-# FERN_CLI is the fern CLI on the node, a copy of the daemon's own binary
+# FERN_CLI is the fern CLI on the node, a copy of the image's client binary
 # (install_cli). It talks to the daemon's socket, which is on the node, so a
 # command doesn't go through kubectl exec (about 110 ms a command).
 FERN_CLI=/usr/local/bin/fern-cli

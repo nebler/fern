@@ -74,7 +74,8 @@ With `FERN_HOST=HOST`, the lab's scripts (`check.sh`, `fern`, `claude-login.sh`,
 | `setup` | golden from `.agents/setup`; golden keys | E3 |
 | `wake` | front door: socket, previews, one wake per burst, holding requests | E7, E8 |
 | `identity` | post-fork hook: new ID, secrets, ports | E9 |
-| `cmd/fern` | daemon + CLI | all |
+| `cmd/fern` | small CLI; `fern daemon` execs the sibling `fern-daemon` binary | all |
+| `cmd/fern-daemon` | node daemon + CSI plugin | all |
 
 ---
 

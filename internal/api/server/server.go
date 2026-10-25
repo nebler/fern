@@ -1,6 +1,5 @@
-// Package api is the daemon's HTTP API, served on a unix socket, and a
-// client for it.
-package api
+// Package server serves the daemon's HTTP API on a Unix socket.
+package server
 
 import (
 	"context"
@@ -15,6 +14,7 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/nebler/fern/internal/actor"
+	"github.com/nebler/fern/internal/api"
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/driver"
 	"github.com/nebler/fern/internal/store"
@@ -50,9 +50,9 @@ type Server struct {
 	boxes *http.Client
 }
 
-// NewServer returns a Server that reads from st and drv and changes
+// New returns a Server that reads from st and drv and changes
 // environments through envs.
-func NewServer(st Store, drv Driver, envs *actor.Group, log *slog.Logger) *Server {
+func New(st Store, drv Driver, envs *actor.Group, log *slog.Logger) *Server {
 	return &Server{
 		store: st, driver: drv, envs: envs, log: log,
 		boxes: &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: time.Second}).DialContext}},
@@ -102,12 +102,12 @@ func (s *Server) list(r *http.Request) (any, error) {
 	if path := r.URL.Query().Get("path"); path != "" {
 		env, err := s.store.FindByPath(r.Context(), path)
 		if errors.Is(err, store.ErrNotFound) {
-			return []Env{}, nil
+			return []api.Env{}, nil
 		}
 		if err != nil {
 			return nil, err
 		}
-		return []Env{toAPIEnv(env, "")}, nil
+		return []api.Env{toAPIEnv(env, "")}, nil
 	}
 	envs, err := s.store.List(r.Context())
 	if err != nil {
@@ -118,7 +118,7 @@ func (s *Server) list(r *http.Request) (any, error) {
 	if err != nil {
 		s.log.WarnContext(r.Context(), "box states", slog.Any("error", err))
 	}
-	out := make([]Env, 0, len(envs))
+	out := make([]api.Env, 0, len(envs))
 	for _, env := range envs {
 		state, ok := states[env.ID]
 		switch {
@@ -147,7 +147,7 @@ func (s *Server) delete(r *http.Request) (any, error) {
 }
 
 func (s *Server) snapshot(r *http.Request) (any, error) {
-	var req snapshotRequest
+	var req api.SnapshotRequest
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
@@ -159,9 +159,9 @@ func (s *Server) snapshots(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Snapshot, 0, len(snaps))
+	out := make([]api.Snapshot, 0, len(snaps))
 	for _, snap := range snaps {
-		out = append(out, Snapshot{ID: snap.ID, Created: snap.Created})
+		out = append(out, api.Snapshot{ID: snap.ID, Created: snap.Created})
 	}
 	return out, nil
 }
@@ -171,7 +171,7 @@ func (s *Server) deleteSnapshot(r *http.Request) (any, error) {
 }
 
 func (s *Server) restore(r *http.Request) (any, error) {
-	var req restoreRequest
+	var req api.RestoreRequest
 	if err := decode(r, &req); err != nil {
 		return nil, err
 	}
@@ -257,7 +257,7 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		s.log.ErrorContext(r.Context(), "request failed",
 			slog.String("method", r.Method), slog.String("path", r.URL.Path), slog.Any("error", err))
 	}
-	writeJSON(w, status, Error{Message: err.Error()})
+	writeJSON(w, status, api.Error{Message: err.Error()})
 }
 
 // writeJSON answers with v. A client that went away gets nothing more.
@@ -265,4 +265,8 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func toAPIEnv(env store.Env, state driver.State) api.Env {
+	return api.Env{ID: env.ID, Workspace: env.Workspace, Created: env.Created, State: string(state)}
 }

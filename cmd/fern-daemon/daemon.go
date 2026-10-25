@@ -1,3 +1,5 @@
+// Command fern-daemon runs the node daemon and CSI plugin. The fern CLI
+// also starts it with "fern daemon".
 package main
 
 import (
@@ -11,7 +13,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -26,7 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/nebler/fern/internal/actor"
-	"github.com/nebler/fern/internal/api"
+	"github.com/nebler/fern/internal/api/server"
 	"github.com/nebler/fern/internal/csi"
 	"github.com/nebler/fern/internal/driver"
 	"github.com/nebler/fern/internal/store"
@@ -35,11 +39,19 @@ import (
 // Where the daemon finds the pool and serves the CSI plugin; deploy/fern.yaml
 // mounts both.
 const (
+	socket    = "/run/fern/fern.sock"
 	pool      = "/var/lib/fern"
 	csiSocket = "/csi/csi.sock"
 	// boxImage is what lab/build.sh builds and imports into every node.
 	boxImage = "fern-box:dev"
 )
+
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := runDaemon(ctx, os.Args[1:], os.Stderr)
+	stop()
+	os.Exit(code)
+}
 
 // runDaemon serves the API and the CSI plugin until ctx is cancelled, and
 // returns the process exit code.
@@ -103,7 +115,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	drv := driver.New(kube, node, boxImage, *runtimeClass)
 	envs := actor.New(st, drv, idle, boxImage, log)
 	httpSrv := &http.Server{
-		Handler:           api.NewServer(st, drv, envs, log).Handler(),
+		Handler:           server.New(st, drv, envs, log).Handler(),
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 		ReadHeaderTimeout: 10 * time.Second,
 	}
