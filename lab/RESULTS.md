@@ -315,3 +315,18 @@ A Hetzner CAX21 (4 shared Ampere ARM cores, 7.5 GiB, local NVMe, Nuremberg), Ubu
 - **The node's public address let boxes reach the Kubernetes API:** inside the cluster the API's address leads there, which the egress policy allowed. `lab/build.sh` adds the address to the policy's exceptions on a VPS.
 - **`kubectl exec` cuts large output short** over the slow link from the VPS to the Mac (one run lost 200 KB of 200 MB, without an error). Fern's stream is whole in the node, even to a reader that stalls 30 s; check.sh counts the 200 MB there.
 - **From the Mac, over home internet to Germany:** a 50 MB round trip through a box takes 42 s, and a create seeded with 20 MB from the Mac 26 s. T3 runs on the node, so daily use doesn't take this path.
+
+## The demo on the VPS, 2026-10-25
+
+The T3 app on the Mac, paired with the VPS's T3 server through an SSH tunnel (`T3_PORT=30774 lab/t3-pair.sh`), Claude on the user's subscription (`lab/claude-login.sh`). In the `sample` project, a thread in a new worktree:
+1. "How many users?" 3; then Claude dropped the table. The first wake took 3.4 s.
+2. "Revert files too" to the checkpoint before it (restore 1.9 s, the next wake 3.3 s), then "how many users?": 3.
+3. Left alone, the box went to sleep by itself (06:36 UTC).
+4. "What did I ask you first?" The box woke in 1.18 s and Claude answered from the conversation before the sleep. "Felt instant."
+
+**PASS.** The box ran under gVisor; the environment had a snapshot per checkpoint and the `pre-restore-` one.
+
+**Found on the way:**
+- **A thread in Local gets no box:** Claude ran in T3's pod and found no database. Planned in architecture §15.
+- **The wakes in a turn took 3.3–3.4 s,** not the 1.1 s of the benchmark's. Not yet looked into.
+- **The box slept 4 minutes later than its idle times say,** after a `fern exec` at 06:12 that reset them: something touched it about 06:16. Not yet looked into.
