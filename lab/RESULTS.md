@@ -696,3 +696,52 @@ ten-wake trace. The unchanged crossover through the same wrapper measured
 batches. The crossover also failed the wake and sleep p95 gates. These
 sequential batches show why a small end-to-end median change alone is
 insufficient evidence for a runtime setting.
+
+### Services and readiness: individual trials
+
+Each standard trial again used a build and `WAKES=10 REPEAT=3 lab/perf.sh
+box golden` under one lock. Candidate source files were restored before
+releasing the lock, keeping the trials independent. The daemon retry trial
+changed connection retries from 50 to 10 ms while leaving pod-address
+lookup at 200 ms; it was not the earlier rejected 50 ms pod-lookup trial.
+
+| Metric | Unchanged A | Unchanged crossover | Postgres script | Early service checks | Daemon connection retry |
+|---|---:|---:|---:|---:|---:|
+| Wake p50, ms | 742.4 | 761.4 | 723.0 | 744.3 | 798.6 |
+| Wake p95, ms | 930.7 | 983.3 | 895.8 | 1,081.8 | 916.4 |
+| Box anon + shmem, MiB | 47.6 | 47.0 | 46.8 | 47.4 | 47.5 |
+| Golden first wake, ms | 745.1 | 895.5 | 846.6 | 782.5 | 867.1 |
+| Cold first wake, ms | 1,900.1 | 2,014.5 | 1,941.4 | 1,865.5 | 2,318.8 |
+| Sleep p95, ms | 1,218.7 | 1,617.0 | 2,615.5 | 2,611.2 | 1,214.7 |
+
+**Neither retry change retained on its own.** Service checks used 25 ms
+retries for the first 200 ms, then the existing 100 ms pace. This did not
+improve warm wake against A, and its wake tail worsened. The 10 ms daemon
+connection retry passed the gate but was slower than both unchanged runs.
+Passing the gate alone is not an improvement.
+
+The Postgres script trial skipped `rm` when there was no stale pid file,
+used `exec` for an already seeded Postgres, and used an explicit `exec` in
+the service's run command. Cold initialization and seeding stayed intact.
+Its apparent unpaired saving needed confirmation, especially given the
+sleep-tail change.
+
+A same-lock confirmation alternated A/B then B/A for ten pairs, on the
+same initialized environment. Only the script and services.yaml changed,
+while the box was asleep. Each wake was followed by a timed sleep. The
+installed runtime was release-20261012.0 with the default two-line runsc
+runtime configuration.
+
+| Paired-run medians | Original A | Script B |
+|---|---:|---:|
+| Wake, ms | 717.7 | 745.1 |
+| Sleep, ms | 811.3 | 812.7 |
+| fern-init → first Postgres log, ms | 78.4 | 86.9 |
+| fern-init → Postgres accepting connections, ms | 139.7 | 158.0 |
+
+**Script change rejected on its own.** Median within-pair B-minus-A wake
+was **+30.7 ms**; B was slower in seven of ten pairs. It did not shorten
+service startup in this confirmation. The sleep medians were unchanged,
+so the earlier unpaired sleep-tail increase is not established as a script
+regression either. The unpaired 761.4 → 723.0 ms result is not retained as
+a performance claim.
