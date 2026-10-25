@@ -581,7 +581,7 @@ t3() {
   # A thread in T3's Local mode works in the main folder, which has no box.
   check "claude in a project's main folder answers T3's probes" "$CLAUDE" "$(in_t3 "cd $R && claude --version")"
   check "but a thread's session there is refused, naming New worktree" yes \
-    "$(in_t3 "cd $R && claude --session-id 00000000-0000-4000-8000-000000000000 -p hi 2>&1" | grep -q 'New worktree' && echo yes || echo no)"
+    "$(in_t3 "cd $R && claude --session-id 00000000-0000-4000-8000-000000000000 -p hi 2>&1; true" | grep -q 'New worktree' && echo yes || echo no)"
   check "T3's new threads are New worktrees, and deleting one removes it" "worktree true" \
     "$(in_t3 "node -p 'const s = require(\"/var/lib/fern/userdata/settings.json\"); s.defaultThreadEnvMode + \" \" + s.storageCleanup.worktreeOnDelete'")"
   in_t3 "echo v1 > $W/a.txt && echo junk > $W/ignored.bin"
