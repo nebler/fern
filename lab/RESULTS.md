@@ -622,7 +622,7 @@ controls used emptyDir volumes mounted at distinct paths.
 | Host request → fern-init startup log | 382.7 | 675.7 | 667.2 |
 
 The last row includes the host's Docker/kubectl request overhead. The first
-row correlates kubelet and CRI timestamps. With zero volumes the volume
+row correlates scheduler and CRI timestamps. With zero volumes the volume
 manager returns before logging a wait; with either one or three, the first
 wait consumes one 300 ms retry. More volumes do not add another cycle.
 
@@ -668,3 +668,31 @@ HTTP request to fern-init; it executes service checks every 100 ms. Fern
 polls for a new pod address every 200 ms and does not wait for Kubernetes'
 Ready condition. The remaining service-side candidates are the sample's
 process wrappers and the initial readiness retry cadence.
+
+### Runtime flag trials
+
+Each candidate used the unchanged Go code and sample, a build and
+`WAKES=10 REPEAT=3 lab/perf.sh box golden` in one lock. The installed runsc
+was temporarily invoked through an exec wrapper with the selected flag;
+the original executable was restored before releasing the lock. Values are
+medians across the three runs.
+
+| Metric | Unchanged A | `directfs=false` | `host-settings=ignore` | `cpu-num-from-quota=false` | Unchanged crossover |
+|---|---:|---:|---:|---:|---:|
+| Warm wake p50, ms | 742.4 | 761.7 | 746.9 | 698.6 | 761.4 |
+| Warm wake p95, ms | 930.7 | 889.1 | 927.0 | 849.1 | 983.3 |
+| Box anon + shmem, MiB | 47.6 | 49.6 | 47.4 | 49.4 | 47.0 |
+| Golden first wake, ms | 745.1 | 875.2 | 1,364.4 | 709.1 | 895.5 |
+| Cold first wake, ms | 1,900.1 | 3,568.9 | 4,776.0 | 2,033.2 | 2,014.5 |
+
+**None retained.** DirectFS-off and ignoring host settings did not improve
+warm wakes and failed the cold-start gate. The CPU-count flag passed the
+gate but increased box memory by 1.8 MiB against A and 2.4 MiB against the
+unchanged crossover. Over thirty warm pods per flag, median
+RunPodSandbox/StartContainer were **102.9/104.0**, **119.9/82.0**, and
+**109.7/76.3 ms**, respectively, versus **101.4/73.6 ms** in the unchanged
+ten-wake trace. The unchanged crossover through the same wrapper measured
+**122.7/83.0 ms**; the CPU-count candidate lies between these unchanged
+batches. The crossover also failed the wake and sleep p95 gates. These
+sequential batches show why a small end-to-end median change alone is
+insufficient evidence for a runtime setting.
