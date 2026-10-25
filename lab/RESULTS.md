@@ -330,3 +330,99 @@ The T3 app on the Mac, paired with the VPS's T3 server through an SSH tunnel (`T
 - **A thread in Local gets no box:** Claude ran in T3's pod and found no database. Planned in architecture §15.
 - **The wakes in a turn took 3.3–3.4 s,** not the 1.1 s of the benchmark's. Not yet looked into.
 - **The box slept 4 minutes later than its idle times say,** after a `fern exec` at 06:12 that reset them: something touched it about 06:16. Not yet looked into.
+
+## Wake and sleep profile, 2026-10-25
+
+Same CAX21 and gVisor. Each single-box comparison has 25 cycles, timed at
+the node's Unix socket. SSH and kubectl run outside the timed operations.
+Percentiles use nearest rank. Reproduce with
+`FERN_HOST=HOST lab/bench-wake.sh pf1-wake 25`. Pass a snapshot ID as the
+third argument to measure restore/wake cycles. For cold wakes, take that
+snapshot before the first wake.
+
+Before: wake p50/p95 **1,023/1,143 ms**; sleep **817/1,816 ms**. The earlier
+1,142 ms wake median was a different run on shared cores. Compare changes
+with this run, rather than claiming that difference as an improvement.
+
+| Rank | Wake component | Before, mean ms | Evidence |
+|---|---|---:|---|
+| 1 | Kubelet and volume preparation before RunPodSandbox | 327 | Scheduled event to CRI call, 25 pods |
+| 2 | Services and readiness after StartContainer returns | 267 | CRI completion to wake response, 25 pods |
+| 3 | containerd/gVisor RunPodSandbox, including CNI | 224 | containerd log pairs, 25 pods |
+| 4 | containerd/gVisor StartContainer | 178 | containerd log pairs, 25 pods |
+| 5 | CreateContainer | 16 | containerd log pairs, 25 pods |
+| 6 | Fern's Sandbox API call | 12 | histogram delta, 25 wakes |
+| 7 | agent-sandbox controller and scheduler | 12 | request to Scheduled was 24 ms, including the API call |
+
+The first component includes CSI and kubelet's waits; 90 CSI publishes
+averaged **0.50 ms** (maximum 2.24 ms). One warm box took 215 ms from fern-init's startup log to
+Postgres accepting connections, then another 132 ms until wake answered.
+Fern-init started 25 ms before StartContainer returned, so these finer
+measurements overlap the table's components. The old `pod` histogram
+combined most of this startup with up to 200 ms of address polling.
+
+Sleep's means: StopContainer **252 ms**, StopPodSandbox/CNI **154 ms**, then
+**468 ms** for kubelet cleanup, pod removal and Fern noticing it. Postgres
+gets its graceful stop; returning before the pod and mounts disappear is
+not safe for restore.
+
+**The slow demo wakes:** T3's initial checkpoint was captured at
+06:05:51.246, before the first box wake. The rollback explicitly selected
+checkpoint 0. Thus both wakes ran `initdb`; the restored checkpoint did not
+contain an initialized cluster. Twenty-five restores of an empty snapshot
+gave wake p50/p95 **3,123/3,226 ms**; box logs put about 2 s between fern-init
+starting and Postgres starting. The demo's CRI container startup finished
+at 06:05:53.043 and 06:08:59.970, well before Fern answered at 06:05:55.581
+and 06:09:02.469. Golden snapshots address this planned cost.
+
+**The late sleep:** T3's event database records its Claude session stopping
+at 06:14:13.893. The supervising Iteration 1 thread, run 215, then ran
+`fern exec ... /proc` at 06:16:26 to check the process list. Its tool result
+was recorded at 06:16:27.109. That probe reset the human clock to 06:36:26;
+the daemon logged sleep complete at 06:36:28.118. The previous answer had
+mistakenly called the probe time 06:12. No hidden T3 keepalive is needed to
+explain the four minutes. Use `fern ls` and node/pod logs to observe idle
+boxes without resetting their clocks.
+
+**Kept:** `7156cb02` checks the sample repo's seed marker before spawning
+`pg_isready`. Readiness still requires both conditions. It avoids probes
+while initdb runs. Cold wake p50/p95 became **2,971/3,080 ms**, down
+**152/146 ms**, about 5%, in 25 more empty-snapshot restores. Existing
+worktrees benefit when their `services.yaml` is updated; this is a sample
+service optimization. Golden snapshots still remove roughly 2 s more.
+
+The final 25 initialized wakes were **1,020/1,128 ms**; sleep was
+**817/2,616 ms**. The sleep median is unchanged. In both 2.6 s outliers,
+the controller logged deletion in the request's second; there was about
+1.46 s before StopContainer and 0.75 s after StopPodSandbox. The CRI stops
+themselves took about 250/156 ms. The tail sits around kubelet's lifecycle
+handling. No sleep change was retained.
+
+`a7eed297` logs exec activity, idle deadlines and completed CSI timings.
+`372993c4` records pod-address detection after the API call, correcting
+the step boundary. `1d49dee1` adds restore cycles to the benchmark.
+
+**Rejected:** 50 ms pod polling. An original-code crossover repeated the
+baseline: wake **1,014/1,104 ms**, sleep **816/1,815 ms**. At 50 ms, wake
+was **1,072/1,115 ms**, sleep **814/914 ms**. Thirty concurrent initialized
+wakes per variant gave p50/p95 **3,546/4,374 ms** at 200 ms polling and
+**3,775/4,227 ms** at 50 ms. The better single-box sleep tail did not justify
+four times as many queries and a worse wake median. Polling remains 200 ms.
+
+Non-waiting `pg_ctl stop -W` was considered, not shipped: fern-init would
+start its 3 s kill deadline immediately instead of allowing up to 8 s for
+the stop command. PostgreSQL documents its waiting behavior in
+[pg_ctl](https://www.postgresql.org/docs/17/app-pg-ctl.html).
+
+Remaining gains are estimates: golden snapshots **about 2 s** per cold
+wake; upstream kubelet/volume scheduling **50–200 ms** of the measured
+327 ms; service startup and readiness commands **30–100 ms**. The planned
+watches should reduce API work; allow **0–100 ms** for faster detection,
+not a guaranteed latency win. CSI's bind mounts are already negligible.
+
+Validation: Docker `lab/go.sh test -race ./...`, `lab/lint.sh` (0 issues),
+`go vet` and gofmt. An existing supervisor timing assertion flaked once
+under build load; the rerun passed. The sample still had 3 users after the
+final 25 initialized restarts. `FERN_HOST=HOST lab/build.sh` redeployed the
+final code. The daemon and T3 CLI hashes both matched the local image,
+`cad3acd333fac00e…`.
