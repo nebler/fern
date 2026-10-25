@@ -37,6 +37,65 @@ func buildGolden(t *testing.T, st *store.Store, src store.SnapshotRef, build fun
 	snapshot(t, st, "golden", "g1")
 }
 
+// Rebuilding replaces the previous build's output without changing the
+// source snapshot. File metadata and symlinks belong to the checkout.
+func TestBuildSourceIndependent(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rebuild bool
+	}{
+		{name: "first"},
+		{name: "rebuild", rebuild: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st, dir := openPool(t)
+			source := create(t, st, "source", store.CreateOptions{})
+			writeAll(t, filepath.Join(source.Workspace, "src", "file"), "source")
+			file := filepath.Join(source.Workspace, "src", "file")
+			if err := os.Chmod(file, 0o750); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chown(file, store.BoxUID, store.BoxGID); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink("src/file", filepath.Join(source.Workspace, "link")); err != nil {
+				t.Fatal(err)
+			}
+			snapshot(t, st, "source", "base")
+			builder := create(t, st, "builder", store.CreateOptions{})
+			ref := store.SnapshotRef{Env: "source", Snapshot: "base"}
+			if tc.rebuild {
+				if err := st.BuildSource(t.Context(), "builder", ref); err != nil {
+					t.Fatal(err)
+				}
+				writeAll(t, filepath.Join(builder.Workspace, "old-output"), "discard")
+			}
+			if err := st.BuildSource(t.Context(), "builder", ref); err != nil {
+				t.Fatal(err)
+			}
+			gone(t, filepath.Join(builder.Workspace, "old-output"))
+			copied := filepath.Join(builder.Workspace, "src", "file")
+			if uid, _, mode := stat(t, copied); uid != store.BoxUID || mode != 0o750 {
+				t.Errorf("copied owner/mode = %d/%v, want %d/0750", uid, mode, store.BoxUID)
+			}
+			if target, err := os.Readlink(filepath.Join(builder.Workspace, "link")); err != nil || target != "src/file" {
+				t.Errorf("copied link = %q, %v, want src/file", target, err)
+			}
+			writeFile(t, copied, "build")
+			for _, path := range []string{file, filepath.Join(dir, "envs", "source", "snaps", "base", "src", "file")} {
+				if got := readFile(t, path); got != "source" {
+					t.Errorf("source %s = %q after building, want source", path, got)
+				}
+			}
+			if err := st.StripSource(t.Context(), "builder"); err != nil {
+				t.Fatal(err)
+			}
+			gone(t, copied)
+			gone(t, filepath.Join(builder.Workspace, "link"))
+		})
+	}
+}
+
 // A golden snapshot holds only what its build made, and a new worktree
 // adopted onto it has its own files over that output.
 func TestGolden(t *testing.T) {

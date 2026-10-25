@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -57,18 +56,13 @@ func (s *Store) BuildSource(ctx context.Context, id string, src SnapshotRef) err
 	if err := s.step("build source: cleared"); err != nil {
 		return err
 	}
-	if err := s.makeWorkspace(ctx, id, env.Workspace, ""); err != nil {
+	// A writable snapshot preserves the checkout's metadata and shares its
+	// tree as well as its extents. A file-by-file reflink copy would still
+	// allocate one inode per source file on every build.
+	if err := snapshotSubvolume(ctx, from, env.Workspace, false); err != nil {
 		return err
 	}
-	if err := s.step("build source: made"); err != nil {
-		return err
-	}
-	// The workspace is new and empty, and the source a read-only snapshot,
-	// so nothing can lead the copy out.
-	if err := run(exec.CommandContext(ctx, "cp", "-a", "--reflink=always", "-T", from, env.Workspace)); err != nil {
-		return fmt.Errorf("build source for %s: cp: %w", id, err)
-	}
-	return nil
+	return s.step("build source: made")
 }
 
 // listSource writes the files and symlinks in dir, a read-only snapshot, as
