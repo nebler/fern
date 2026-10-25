@@ -2,12 +2,18 @@
 // many times without anyone clicking: it starts a New worktree thread on a
 // sample project, sends the scenario's messages, reverts a turn, checks the
 // answers and times every step. Run it through lab/t3-run.sh, which pairs
-// with the server and passes T3_PAIR_URL, T3_METRICS_CMD and T3_RM_ENV_CMD.
+// with the server and passes T3_PAIR_URL, T3_METRICS_CMD, T3_RM_ENV_CMD and
+// T3_NODE_MEMORY_CMD.
+//
+// PARALLEL runs that many threads at once, as several T3 threads working
+// side by side would; the server costs of their steps then overlap, so
+// only the wall times and the node's peak memory are each run's own.
 //
 // The threads show up in the T3 app under the server's connection while they
 // run. T3's wire protocol is Effect RPC over a WebSocket, one JSON object per
 // frame; see T3's packages/contracts/src/orchestrationV2.ts for the payloads.
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { appendFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 
@@ -17,6 +23,10 @@ const runs = Number(env("RUNS", "1"));
 const model = env("MODEL", "claude-haiku-5-5");
 const keep = env("KEEP", "") !== "";
 const out = env("OUT", "lab/t3-runs.jsonl");
+const parallel = Number(env("PARALLEL", "1"));
+// The commands go through bash, as the wrapper's helpers are bash; not
+// blocking, so parallel runs keep polling while one waits on the node.
+const bash = async (cmd, ...args) => (await promisify(execFile)("bash", ["-c", cmd, "bash", ...args])).stdout;
 
 // A scenario is a project and its steps. A "send" step is a user message,
 // with a pattern its answer must match; a "revert" step goes back to the
@@ -120,8 +130,8 @@ async function connect({ origin, token }) {
 // metrics reads the daemon's Prometheus counters: each histogram's _sum and
 // _count, by name and labels. The difference across a step is what the step
 // cost on the server.
-function metrics() {
-  const text = execFileSync("bash", ["-c", env("T3_METRICS_CMD")], { encoding: "utf8" });
+async function metrics() {
+  const text = await bash(env("T3_METRICS_CMD"));
   const values = new Map();
   for (const line of text.split("\n")) {
     const m = line.match(/^(fern_\w+)_(sum|count)(\{[^}]*\})? ([0-9.e+-]+)$/);
@@ -165,7 +175,7 @@ async function runOnce(rpc, project, baseRef, n) {
   let turns = 0;
   try {
     for (const step of scenario.steps) {
-      const before = metrics();
+      const before = await metrics();
       const start = Date.now();
       const result = { step: step.send ? `turn ${turns + 1}` : `revert to before turn ${step.revert}` };
       if (step.send) {
@@ -239,7 +249,7 @@ async function runOnce(rpc, project, baseRef, n) {
         result.pass = true;
       }
       result.wallMs = Date.now() - start;
-      result.server = serverCost(before, metrics());
+      result.server = serverCost(before, await metrics());
       record.steps.push(result);
       console.log(`  ${result.step}: ${result.pass ? "PASS" : "FAIL"} ${result.wallMs} ms ${JSON.stringify(result.server)}`);
       if (!result.pass) {
@@ -266,7 +276,7 @@ async function remove(rpc, project, threadId) {
     await rpc.call("orchestration.dispatchCommand", { type: "thread.delete", commandId: randomUUID(), threadId });
     const path = p.thread.worktreePath;
     if (path) {
-      execFileSync("bash", ["-c", env("T3_RM_ENV_CMD"), "rm-env", path], { stdio: "inherit" });
+      await bash(env("T3_RM_ENV_CMD"), path);
       await rpc.call("vcs.removeWorktree", { cwd: project.workspaceRoot, path, force: true });
     }
   } catch (err) {
@@ -289,17 +299,34 @@ try {
   const { refs } = await rpc.call("vcs.listRefs", { cwd: project.workspaceRoot, refKind: "local", limit: 50 });
   const baseRef = (refs.find((r) => r.current) ?? refs.find((r) => r.isDefault) ?? refs[0]).name;
 
+  // The node's used memory (page cache not counted) before the runs and at
+  // its highest while they ran, sampled every 5 s.
+  const nodeMemory = async () => Number((await bash(env("T3_NODE_MEMORY_CMD"))).trim());
+  const memoryBefore = await nodeMemory();
+  let memoryPeak = memoryBefore;
+  const sampler = setInterval(() => nodeMemory().then((m) => (memoryPeak = Math.max(memoryPeak, m)), () => {}), 5000);
+
   const records = [];
-  for (let n = 1; n <= runs; n++) {
-    console.log(`run ${n}/${runs}: ${scenarioName} on ${model}`);
-    const record = await runOnce(rpc, project, baseRef, n);
-    appendFileSync(out, JSON.stringify(record) + "\n");
-    records.push(record);
-  }
+  let next = 1;
+  const worker = async () => {
+    for (let n = next++; n <= runs; n = next++) {
+      console.log(`run ${n}/${runs}: ${scenarioName} on ${model}`);
+      const record = await runOnce(rpc, project, baseRef, n);
+      record.parallel = parallel;
+      appendFileSync(out, JSON.stringify(record) + "\n");
+      records.push(record);
+    }
+  };
+  const start = Date.now();
+  await Promise.all(Array.from({ length: parallel }, worker));
+  clearInterval(sampler);
+  records.sort((a, b) => a.run - b.run);
+  console.log(`\n${runs} runs, ${parallel} at a time: ${Math.round((Date.now() - start) / 1000)} s;` +
+    ` node memory ${memoryBefore} MiB before, ${memoryPeak} MiB at the peak`);
 
   // Per step, across the runs that got that far: wall time, and the wake
   // time the server spent inside it.
-  console.log(`\n${records.filter((r) => r.pass).length}/${runs} runs passed; results in ${out}`);
+  console.log(`${records.filter((r) => r.pass).length}/${runs} runs passed; results in ${out}`);
   const steps = scenario.steps.map((_, i) => records.map((r) => r.steps[i]).filter(Boolean));
   for (const done of steps) {
     if (done.length === 0) continue;

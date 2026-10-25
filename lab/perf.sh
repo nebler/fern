@@ -30,7 +30,7 @@ while [ $# -gt 0 ]; do
 done
 if [ "$accept$fast" = yesyes ]; then echo "perf: a baseline needs more than one fast run" >&2; exit 2; fi
 if [ $# -eq 0 ]; then
-  if [ "$fast" = yes ]; then set -- box stream paths golden t3; else set -- box disk stream paths golden t3 many; fi
+  if [ "$fast" = yes ]; then set -- box stream paths golden t3; else set -- box disk stream paths golden t3 many scale; fi
 fi
 target=${FERN_HOST:+vps}
 target=${target:-lab}
@@ -45,7 +45,7 @@ trap 'rm -rf "$tmp"' EXIT
 
 for i in $(seq "$repeat"); do
   echo "== run $i/$repeat: $*"
-  if ! JOBS=1 WAKES=$wakes lab/check.sh "$@" >"$tmp/run$i.out" 2>&1; then
+  if ! METRICS=1 JOBS=1 WAKES=$wakes lab/check.sh "$@" >"$tmp/run$i.out" 2>&1; then
     grep -E '^FAIL' "$tmp/run$i.out" >&2 || tail -20 "$tmp/run$i.out" >&2
     echo "perf: a check failed, so the timings don't count" >&2
     exit 1

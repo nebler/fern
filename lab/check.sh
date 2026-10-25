@@ -20,6 +20,9 @@
 #                whose client went away
 #   node         the whole node (k3s) restarts
 #   many         ten environments woken at once
+#   scale        awake boxes ramped up, 1, 5, 10, then 20 (SCALE): at each
+#                step the new boxes' wakes, memory per box and the daemon's,
+#                and exec and snapshot times with that many awake
 #   limits       what a box can't do: gain privileges, use more than its CPU
 #                and PIDs, reach another box or anything private; and another
 #                pod can't mount an environment
@@ -54,11 +57,13 @@ check() {
   if [ "$2" = "$3" ]; then echo "PASS $1"; else echo "FAIL $1: want '$2', got '$3'"; FAILED=1; fi
 }
 note() { echo "NOTE $*"; }
-# metric KEY TEXT VALUE notes "TEXT: VALUE" and records VALUE under KEY for
-# lab/perf.sh, which compares it with a baseline: lower is better, and KEY
-# ends in its unit (_ms, _mib). A VALUE from stats records its p50 and p95.
+# metric KEY TEXT VALUE notes "TEXT: VALUE" and, with METRICS set (by
+# lab/perf.sh, which compares it with a baseline), records VALUE under KEY:
+# lower is better, and KEY ends in its unit (_ms, _mib). A VALUE from stats
+# records its p50 and p95.
 metric() {
   note "$2: $3"
+  [ -n "${METRICS:-}" ] || return 0
   case $3 in
     n=*) for p in p50 p95; do echo "METRIC $1.$p $(sed -nE "s/.* $p=([0-9.]+).*/\1/p" <<<"$3")"; done ;;
     *) echo "METRIC $1 ${3%% *}" ;;
@@ -484,6 +489,49 @@ many() {
   for i in $(seq 10); do fern rm "m$i"; done
 }
 
+# scale wakes more and more boxes and measures, at each step, what the step
+# cost and how the node holds up with that many awake. Memory per box is
+# the node's used memory (page cache not counted) above what it used
+# before the first wake, divided by the boxes awake.
+scale() {
+  local steps n i prev=0 base used
+  read -ra steps <<<"${SCALE:-1 5 10 20}"
+  echo "== scale: ${steps[*]} awake boxes"
+  for i in $(seq "${steps[-1]}"); do fresh "s$i"; done
+  base=$(on_node free -m </dev/null | awk 'NR == 2 { print $3 }')
+  for n in "${steps[@]}"; do
+    : >"$TMP/wakes$n"
+    start=$(now_ms)
+    for i in $(seq $((prev + 1)) "$n"); do fern wake "s$i" | took >>"$TMP/wakes$n" & done
+    wait
+    metric scale.n$n.all_awake_ms "boxes $((prev + 1))-$n woken at once, ms until all were ready" $(($(now_ms) - start))
+    metric scale.n$n.wake_ms "their wakes, ms" "$(stats <"$TMP/wakes$n")"
+    local answered=0
+    for i in $(seq "$n"); do [ "$(sql "s$i" 'select count(*) from users' 2>/dev/null)" = 3 ] && answered=$((answered + 1)); done
+    check "all $n awake boxes answer" "$n" "$answered"
+    used=$(on_node free -m </dev/null | awk 'NR == 2 { print $3 }')
+    metric scale.n$n.memory_per_box_mib "node memory per awake box, MiB" "$(awk -v u="$used" -v b="$base" -v n="$n" 'BEGIN { printf "%.1f", (u - b) / n }')"
+    metric scale.n$n.daemon_memory_mib "the daemon's memory, MiB" \
+      "$(in_daemon 'cat /proc/1/status' | awk '$1 == "RssAnon:" { printf "%.1f", $2 / 1024 }')"
+    : >"$TMP/exec$n"
+    for _ in $(seq 20); do
+      start=$(now_ms)
+      fern exec s1 -- true
+      echo $(($(now_ms) - start)) >>"$TMP/exec$n"
+    done
+    metric scale.n$n.exec_ms "an exec in an awake box, ms" "$(stats <"$TMP/exec$n")"
+    start=$(now_ms)
+    for i in $(seq "$n"); do fern exec "s$i" -- true & done
+    wait
+    metric scale.n$n.parallel_exec_ms "one exec in each awake box at once, ms until all ended" $(($(now_ms) - start))
+    : >"$TMP/snap$n"
+    for i in $(seq 5); do fern snapshot s1 "n$n-$i" | took >>"$TMP/snap$n"; done
+    metric scale.n$n.snapshot_ms "a snapshot of an awake box, ms" "$(stats <"$TMP/snap$n")"
+    prev=$n
+  done
+  for i in $(seq "${steps[-1]}"); do fern rm "s$i"; done
+}
+
 limits() {
   echo "== a box's limits"
   fresh $ENV
@@ -697,11 +745,11 @@ t3() {
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many limits paths golden claude)
+  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden claude)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
-  # load the node with ten boxes, so they run alone, after the others.
-  alone=" idle daemon node many "
+  # load the node with many boxes, so they run alone, after the others.
+  alone=" idle daemon node many scale "
   case "${1:-}" in
     "") set -- "${quick[@]}" ;;
     all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} ;;
