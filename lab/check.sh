@@ -540,8 +540,9 @@ t3() {
     check "T3's server runs (lab/build.sh t3)" yes no
     return
   fi
+  # A VPS's NodePort is reached through an SSH tunnel at T3_PORT.
   check "the Mac reaches T3 through the NodePort" 200 \
-    "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 http://127.0.0.1:30773/.well-known/t3/environment)"
+    "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${T3_PORT:-30773}/.well-known/t3/environment")"
   check "T3 runs as uid 1000" 1000 "$(in_t3 'id -u')"
   check "T3 reaches the daemon's socket" yes "$(succeeds in_t3 'fern ls')"
   check "claude outside a workspace is the local one" "$CLAUDE" "$(in_t3 'cd / && claude --version')"
