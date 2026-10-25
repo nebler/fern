@@ -13,13 +13,15 @@
 # the environment. fern exec passes SIGTERM on to Claude, so it can save its
 # transcript, and exits when the box goes away.
 set -eu
-if ! fern which "$PWD" >/dev/null 2>&1; then
-	case "$PWD/" in
-	"${FERN_POOL:-/var/lib/fern}"/worktrees/*)
-		echo "fern-claude: no Fern environment holds $PWD; not running Claude outside its box" >&2
-		exit 1
-		;;
-	esac
-	exec "${FERN_LOCAL_CLAUDE:-/usr/local/libexec/claude}" "$@"
-fi
+case "$PWD/" in
+"${FERN_POOL:-/var/lib/fern}"/worktrees/*)
+	# --here does the lookup itself and fails if the environment is missing.
+	# A preliminary `which` would add a process and repeat the same request.
+	;;
+*)
+	if ! fern which "$PWD" >/dev/null 2>&1; then
+		exec "${FERN_LOCAL_CLAUDE:-/usr/local/libexec/claude}" "$@"
+	fi
+	;;
+esac
 exec fern exec -i --here -e CLAUDE_CODE_ENTRYPOINT -e CLAUDE_AGENT_SDK_VERSION -- claude "$@"
