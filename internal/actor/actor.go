@@ -31,6 +31,8 @@ type Store interface {
 	DeleteSnapshot(ctx context.Context, id, snapID string) error
 	Snapshots(ctx context.Context, id string) ([]store.Snapshot, error)
 	Restore(ctx context.Context, id, snapID string) error
+	Prune(ctx context.Context, id string) error
+	Orphans(ctx context.Context) ([]string, error)
 }
 
 // Driver runs environments' boxes.
@@ -48,6 +50,12 @@ type Idle struct {
 	Agent time.Duration
 	Human time.Duration
 }
+
+// sweepEvery is how often Run looks for environments whose worktree T3
+// removed. One that is still gone at the next look is deleted: T3 removes a
+// deleted thread's worktree, and makes it again only for a thread that
+// resumes, which comes with a checkpoint that adopts it back.
+const sweepEvery = time.Hour
 
 // changeTimeout bounds a change of an environment. Changes don't stop when
 // their caller goes away, which would leave them half done.
@@ -147,6 +155,7 @@ func (g *Group) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("box states: %w", err)
 	}
+	wg.Go(func() { g.sweep(ctx) })
 	for id, state := range states {
 		if state != driver.Asleep {
 			start(id, true)
@@ -167,6 +176,39 @@ func (g *Group) Run(ctx context.Context) error {
 				delete(actors, a.id)
 			}
 		}
+	}
+}
+
+// sweep deletes, every sweepEvery, the environments whose worktree was gone
+// at the last look too, until ctx is done.
+func (g *Group) sweep(ctx context.Context) {
+	ticker := time.NewTicker(sweepEvery)
+	defer ticker.Stop()
+	var gone map[string]bool
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		ids, err := g.store.Orphans(ctx)
+		if err != nil {
+			g.log.WarnContext(ctx, "looking for removed worktrees failed", slog.Any("error", err))
+			continue
+		}
+		now := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			now[id] = true
+			if !gone[id] {
+				continue
+			}
+			if err := g.Delete(ctx, id); err != nil {
+				g.log.WarnContext(ctx, "deleting an environment whose worktree is gone failed", slog.String("env", id), slog.Any("error", err))
+				continue
+			}
+			g.log.InfoContext(ctx, "deleted an environment whose worktree is gone", slog.String("env", id))
+		}
+		gone = now
 	}
 }
 
@@ -252,7 +294,15 @@ func (g *Group) Snapshot(ctx context.Context, id, snapID string, replace bool) e
 				return err
 			}
 		}
-		return g.store.Snapshot(ctx, id, snapID)
+		if err := g.store.Snapshot(ctx, id, snapID); err != nil {
+			return err
+		}
+		// The snapshot is taken; an old one left over costs only disk, and
+		// the next snapshot prunes again.
+		if err := g.store.Prune(ctx, id); err != nil {
+			g.log.WarnContext(ctx, "pruning old snapshots failed", slog.String("env", id), slog.Any("error", err))
+		}
+		return nil
 	})
 }
 

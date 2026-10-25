@@ -248,6 +248,9 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusBadRequest
 	case errors.Is(err, actor.ErrStopped):
 		status = http.StatusServiceUnavailable
+	case errors.Is(err, store.ErrPoolFull):
+		// The caller can free space; the daemon has nothing to log.
+		status = http.StatusInsufficientStorage
 	case errors.Is(err, context.Canceled) && r.Context().Err() != nil:
 		// The client gave up waiting; there is no one to answer.
 	default:

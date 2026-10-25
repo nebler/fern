@@ -114,6 +114,9 @@ type Store struct {
 	// than one; an error stops the change there, as a crash would. Crash
 	// tests set it.
 	failAt func(step string) error
+	// Retention (retention.go); tests change it.
+	keepTurns    int
+	minFreeBytes uint64
 }
 
 // step returns failAt's error for the named step, if failAt is set.
@@ -152,7 +155,7 @@ func Open(ctx context.Context, root string) (*Store, error) {
 	if fsInfo.Type != unix.BTRFS_SUPER_MAGIC {
 		return nil, fmt.Errorf("open pool: %s is not on btrfs", root)
 	}
-	s := &Store{root: root}
+	s := &Store{root: root, keepTurns: keepTurns, minFreeBytes: minFreeBytes}
 	if err := os.MkdirAll(filepath.Join(root, "envs"), 0o755); err != nil {
 		return nil, fmt.Errorf("open pool: %w", err)
 	}

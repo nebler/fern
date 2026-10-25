@@ -18,18 +18,31 @@ import (
 )
 
 // Create makes an environment, its workspace filled from opts.Seed if it
-// isn't nil. Creating an environment that exists returns it unchanged.
+// isn't nil. Creating an environment that exists returns it unchanged,
+// except that a workspace at a path that is gone or no longer a subvolume
+// (T3 removed the worktree and made it again) is made or adopted again,
+// keeping the environment's snapshots. A new environment isn't made when the
+// pool is almost full (ErrPoolFull).
 //
 // With opts.Workspace, the workspace is at that path: if nothing is there
 // yet, an empty subvolume (about 10 ms; `git worktree add` can fill it); if a
 // plain directory is there, it is adopted, which costs one reflink per file.
 func (s *Store) Create(ctx context.Context, id string, opts CreateOptions) (Env, error) {
 	env, err := s.Get(ctx, id)
-	if !errors.Is(err, ErrNotFound) {
-		if err == nil && opts.Workspace != "" && filepath.Clean(opts.Workspace) != env.Workspace {
+	if err == nil {
+		if opts.Workspace != "" && filepath.Clean(opts.Workspace) != env.Workspace {
 			return Env{}, fmt.Errorf("create %s: it exists with workspace %s: %w", id, env.Workspace, ErrInvalidPath)
 		}
-		return env, err
+		if env, err = s.readopt(ctx, env); err != nil {
+			return Env{}, fmt.Errorf("create %s: %w", id, err)
+		}
+		return env, nil
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return Env{}, err
+	}
+	if err := s.checkFree(); err != nil {
+		return Env{}, fmt.Errorf("create %s: %w", id, err)
 	}
 	if env, err = s.create(ctx, id, opts); err != nil {
 		return Env{}, fmt.Errorf("create %s: %w", id, err)
@@ -100,6 +113,33 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 	if err := os.Remove(s.markerPath(id)); err != nil {
 		return Env{}, err
 	}
+	return env, nil
+}
+
+// readopt makes env's workspace a subvolume again if it is gone or a plain
+// directory, and records its git folder, which a new worktree may name
+// differently. Its steps are safe to repeat: Reconcile clears an adopt that
+// stopped half-way.
+func (s *Store) readopt(ctx context.Context, env Env) (Env, error) {
+	if env.Workspace == s.livePath(env.ID) {
+		return env, nil
+	}
+	if fi, err := os.Lstat(env.Workspace); err == nil && isSubvolume(fi) {
+		return env, nil
+	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return Env{}, err
+	}
+	if err := s.makeWorkspace(ctx, env.ID, env.Workspace); err != nil {
+		return Env{}, err
+	}
+	git, err := s.repoGitDir(env.Workspace)
+	if err != nil {
+		return Env{}, err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE environments SET git = ? WHERE id = ?`, git, env.ID); err != nil {
+		return Env{}, err
+	}
+	env.Git = git
 	return env, nil
 }
 

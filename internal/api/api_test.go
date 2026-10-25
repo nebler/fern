@@ -57,6 +57,10 @@ func newFakeStore() *fakeStore {
 	}
 }
 
+func (f *fakeStore) Prune(context.Context, string) error { return nil }
+
+func (f *fakeStore) Orphans(context.Context) ([]string, error) { return nil, nil }
+
 func (f *fakeStore) Create(_ context.Context, id string, opts store.CreateOptions) (store.Env, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

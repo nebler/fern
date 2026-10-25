@@ -27,9 +27,11 @@ func TestMain(m *testing.M) {
 
 // fakeStore keeps environments and snapshot names in memory.
 type fakeStore struct {
-	mu    sync.Mutex
-	envs  map[string]bool
-	snaps map[string][]string
+	mu      sync.Mutex
+	envs    map[string]bool
+	snaps   map[string][]string
+	pruned  []string // environments pruned, in order
+	orphans []string // what Orphans returns
 }
 
 func newFakeStore() *fakeStore {
@@ -85,6 +87,19 @@ func (f *fakeStore) Snapshots(_ context.Context, id string) ([]store.Snapshot, e
 }
 
 func (f *fakeStore) Restore(context.Context, string, string) error { return nil }
+
+func (f *fakeStore) Prune(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.pruned = append(f.pruned, id)
+	return nil
+}
+
+func (f *fakeStore) Orphans(context.Context) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.orphans), nil
+}
 
 var idle = actor.Idle{Agent: 5 * time.Minute, Human: 20 * time.Minute}
 
@@ -535,6 +550,63 @@ func TestExecGivenUpDuringWake(t *testing.T) {
 		synctest.Wait()
 		if got := state(t, fake, "demo"); got != driver.Asleep {
 			t.Errorf("after %v: state %s, want %s", idle.Human, got, driver.Asleep)
+		}
+	})
+}
+
+// A snapshot prunes its environment's old snapshots.
+func TestSnapshotPrunes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		st, drv := newFakeStore(), driver.NewFake("box")
+		g := start(t, st, drv, idle)
+		if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		if err := g.Snapshot(t.Context(), "demo", "s1", false); err != nil {
+			t.Fatal(err)
+		}
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		if diff := cmp.Diff([]string{"demo"}, st.pruned); diff != "" {
+			t.Errorf("pruned environments mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// An environment whose worktree is gone at two sweeps in a row is deleted,
+// its box with it; one that comes back in between is kept.
+func TestSweepDeletesOrphans(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		st, drv := newFakeStore(), driver.NewFake("box")
+		g := start(t, st, drv, idle)
+		for _, id := range []string{"gone", "back"} {
+			if err := g.Create(t.Context(), id, store.CreateOptions{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := g.Wake(t.Context(), "gone"); err != nil {
+			t.Fatal(err)
+		}
+		setOrphans := func(ids ...string) {
+			st.mu.Lock()
+			st.orphans = ids
+			st.mu.Unlock()
+		}
+		exists := func(id string) bool {
+			_, err := st.Get(t.Context(), id)
+			return err == nil
+		}
+		setOrphans("gone", "back")
+		time.Sleep(time.Hour) // the first sweep sees both gone
+		synctest.Wait()
+		setOrphans("gone")
+		time.Sleep(time.Hour) // the second sees "back" again
+		synctest.Wait()
+		if exists("gone") || state(t, drv, "gone") != "" {
+			t.Errorf("after two sweeps: gone exists %v, box %s; want deleted, no box", exists("gone"), state(t, drv, "gone"))
+		}
+		if !exists("back") {
+			t.Error("after two sweeps: back was deleted, want it kept: its worktree came back")
 		}
 	})
 }

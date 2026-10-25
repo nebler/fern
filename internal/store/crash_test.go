@@ -3,6 +3,7 @@ package store_test
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -120,6 +121,39 @@ func crashCases() []crashCase {
 				}
 				if got := readFile(t, filepath.Join(worktree(dir), "work")); got != "kept" {
 					t.Errorf("work = %q after creating again, want %q", got, "kept")
+				}
+			},
+		},
+		{
+			// T3 made a removed worktree again: adopting it back must keep
+			// both its new files and the environment's snapshots.
+			name: "readopt",
+			setup: func(t *testing.T, st *store.Store, dir string) {
+				create(t, st, "wt", store.CreateOptions{Workspace: worktree(dir)})
+				snapshot(t, st, "wt", "s1")
+				if out, err := exec.CommandContext(t.Context(), "btrfs", "subvolume", "delete", worktree(dir)).CombinedOutput(); err != nil {
+					t.Fatalf("btrfs subvolume delete: %v: %s", err, out)
+				}
+				if err := os.MkdirAll(worktree(dir), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, filepath.Join(worktree(dir), "work"), "kept")
+			},
+			change: func(t *testing.T, st *store.Store, dir string) error {
+				_, err := st.Create(t.Context(), "wt", store.CreateOptions{Workspace: worktree(dir)})
+				return err
+			},
+			check: func(t *testing.T, st *store.Store, dir string) {
+				if got := readFile(t, filepath.Join(worktree(dir), "work")); got != "kept" {
+					t.Errorf("work = %q after the crash, want %q", got, "kept")
+				}
+				create(t, st, "wt", store.CreateOptions{Workspace: worktree(dir)})
+				if _, ino, _ := stat(t, worktree(dir)); ino != subvolumeIno {
+					t.Errorf("worktree inode = %d after creating again, want a subvolume", ino)
+				}
+				snaps, err := st.Snapshots(t.Context(), "wt")
+				if err != nil || len(snaps) != 1 {
+					t.Errorf("Snapshots(wt) = %v, %v after creating again, want s1", snaps, err)
 				}
 			},
 		},

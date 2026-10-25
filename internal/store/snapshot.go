@@ -14,7 +14,8 @@ import (
 
 // Snapshot freezes environment id's workspace as the read-only snapshot
 // snapID. Taking a snapshot that exists changes nothing, so callers can
-// retry; DeleteSnapshot first to take it again.
+// retry; DeleteSnapshot first to take it again. It returns ErrPoolFull
+// rather than fill the pool.
 func (s *Store) Snapshot(ctx context.Context, id, snapID string) error {
 	if err := checkSnapID(snapID); err != nil {
 		return err
@@ -22,6 +23,9 @@ func (s *Store) Snapshot(ctx context.Context, id, snapID string) error {
 	env, err := s.Get(ctx, id)
 	if err != nil {
 		return err
+	}
+	if err := s.checkFree(); err != nil {
+		return fmt.Errorf("snapshot %s/%s: %w", id, snapID, err)
 	}
 	if err := s.snapshot(ctx, env, snapID); err != nil {
 		return fmt.Errorf("snapshot %s/%s: %w", id, snapID, err)

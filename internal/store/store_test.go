@@ -43,6 +43,8 @@ func openPool(t *testing.T) (*store.Store, string) {
 	if err != nil {
 		t.Fatalf("Open(%s) error: %v", dir, err)
 	}
+	// The test pool is smaller than the free space a real one keeps.
+	store.SetRetention(st, 50, 0)
 	t.Cleanup(func() {
 		// Subvolumes and read-only snapshots can't be removed with RemoveAll.
 		ctx := context.WithoutCancel(t.Context())
