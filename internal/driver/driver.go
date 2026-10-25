@@ -129,7 +129,7 @@ func (d *Driver) Wake(ctx context.Context, env store.Env) (string, error) {
 				return false, err
 			}
 			if addr != "" && found.IsZero() {
-				found = looked
+				found = time.Now()
 			}
 		}
 		return addr != "" && d.isReady(ctx, addr), nil
