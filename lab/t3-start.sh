@@ -20,5 +20,6 @@ fern wake "$id" >/dev/null
 
 # One Node process times each command, so kubectl/docker startup isn't part
 # of each sample. The native binary is identical on both sides of gVisor.
-in_t3 "BENCH_WORKSPACE=$workspace node --input-type=module - /usr/local/libexec/claude local" <lab/t3-start.mjs
+in_t3 "BENCH_WORKSPACE=$workspace CLAUDE_CONFIG_DIR=/var/lib/fern/envs/$id/claude \
+  node --input-type=module - /usr/local/libexec/claude local" <lab/t3-start.mjs
 fern exec -i "$id" -- node --input-type=module - claude box <lab/t3-start.mjs

@@ -71,7 +71,8 @@ for (let n = 0; n < 10; n++) {
     if (startupErrors[i]) continue;
     const start = performance.now();
     const child = spawn(binary, ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose"], {
-      cwd, env: { ...process.env, ...variants[i][1] }, stdio: ["pipe", "pipe", "ignore"],
+      cwd, env: { ...process.env, CLAUDE_CODE_ENTRYPOINT: "sdk-ts", ...variants[i][1] },
+      stdio: ["pipe", "pipe", "ignore"], detached: true,
     });
     const exited = once(child, "exit");
     const timeout = setTimeout(() => child.kill("SIGKILL"), 5_000);
@@ -82,7 +83,18 @@ for (let n = 0; n < 10; n++) {
         child.once("exit", () => reject(new Error("Claude exited before initialize answered")));
         child.stdout.on("data", (chunk) => {
           text += chunk;
-          if (text.includes("\n")) resolve(JSON.parse(text.split("\n")[0]));
+          while (text.includes("\n")) {
+            const newline = text.indexOf("\n");
+            const line = text.slice(0, newline);
+            text = text.slice(newline + 1);
+            if (!line.trim()) continue;
+            try {
+              const event = JSON.parse(line);
+              if (event.type === "control_response" && event.response?.request_id === "bench") resolve(event);
+            } catch (error) {
+              reject(error);
+            }
+          }
         });
       });
       child.stdin.write(JSON.stringify({ type: "control_request", request_id: "bench", request: { subtype: "initialize" } }) + "\n");
@@ -97,6 +109,11 @@ for (let n = 0; n < 10; n++) {
       child.kill("SIGTERM");
       await exited;
       clearTimeout(timeout);
+      // Like T3's runner, reap any helpers left in this launch's own group.
+      if (child.pid) {
+        try { process.kill(-child.pid, "SIGKILL"); }
+        catch (error) { if (error.code !== "ESRCH") throw error; }
+      }
     }
   }
 }

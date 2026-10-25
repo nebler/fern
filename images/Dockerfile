@@ -72,7 +72,7 @@ RUN git init -q && git fetch -q --depth 1 https://github.com/pingdotgg/t3code.gi
 # sessions released after 5 minutes, so their boxes can sleep.
 FROM t3-src AS t3-build
 COPY images/t3/*.patch /tmp/
-RUN git apply /tmp/fern-checkpoints.patch /tmp/fern-sessions.patch /tmp/fern-timing.patch
+RUN git apply /tmp/fern-checkpoints.patch /tmp/fern-sessions.patch /tmp/fern-timing.patch /tmp/fern-socket.patch
 RUN --mount=type=cache,id=fern-t3-pnpm,target=/pnpm \
     pnpm install --frozen-lockfile --store-dir /pnpm/store --filter "t3..."
 WORKDIR /t3/apps/server

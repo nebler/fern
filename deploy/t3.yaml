@@ -80,7 +80,7 @@ spec:
             # The checkpoint hook's pool: T3's worktrees must be its worktrees/.
             - name: FERN_POOL
               value: /var/lib/fern
-            # Launch and checkpoint timings contain paths, IDs and durations only.
+            # Launch and checkpoint timings contain paths, IDs, counts and durations.
             - name: FERN_TIMING
               value: "1"
             # For the Claude T3 runs itself, outside environments (its probes);
