@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
-# Measures initialized wakes and sleeps on the VPS without an SSH or kubectl
-# round trip inside the timed operation. Leaves its pf1- environment asleep.
+# Measures box wakes and sleeps on the VPS without an SSH or kubectl
+# round trip inside the timed operation. With a snapshot ID as the third
+# argument, restores that snapshot before each wake instead of sleeping.
+# Leaves its pf1- environment asleep.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 : "${FERN_HOST:?set FERN_HOST to the VPS; this benchmark does not use the local lab}"
 env=${1:-pf1-wake} count=${2:-25}
 [[ $env =~ ^pf1-[a-z0-9-]+$ && $count =~ ^[0-9]+$ && $count -ge 20 ]] || {
-  echo 'usage: FERN_HOST=HOST lab/bench-wake.sh pf1-NAME COUNT (at least 20)' >&2
+  echo 'usage: FERN_HOST=HOST lab/bench-wake.sh pf1-NAME COUNT [SNAPSHOT] (at least 20)' >&2
   exit 2
 }
 
 git archive HEAD:lab/sample-repo | on_node curl -sSf --unix-socket /run/fern/fern.sock \
   -X PUT -H 'Content-Type: application/x-tar' --data-binary @- "http://localhost/envs/$env"
-on_node python3 - "$env" "$count" <<'PY'
+on_node python3 - "$env" "$count" "${3:-}" <<'PY'
 import http.client
 import json
 import math
@@ -29,10 +31,12 @@ class UnixConnection(http.client.HTTPConnection):
         self.sock.connect('/run/fern/fern.sock')
 
 
-def request(path):
+def request(path, body=None):
     conn = UnixConnection('localhost')
     started = time.perf_counter()
-    conn.request('POST', '/envs/' + sys.argv[1] + path)
+    conn.request('POST', '/envs/' + sys.argv[1] + path,
+                 None if body is None else json.dumps(body),
+                 {'Content-Type': 'application/json'})
     response = conn.getresponse()
     body = response.read()
     conn.close()
@@ -59,15 +63,18 @@ def metrics():
 print(json.dumps({'warmup_ms': request('/wake')}), flush=True)
 before = metrics()
 rows = []
+snapshot = sys.argv[3]
+transition = 'restore_ms' if snapshot else 'sleep_ms'
 for cycle in range(int(sys.argv[2])):
-    sleep_ms = request('/sleep')
+    transition_ms = (request('/restore', {'snapshot': snapshot})
+                     if snapshot else request('/sleep'))
     started = time.time()
     wake_ms = request('/wake')
     uid = subprocess.check_output([
         'kubectl', '-n', 'fern-boxes', 'get', 'pod', sys.argv[1],
         '-o', 'jsonpath={.metadata.uid}',
     ], text=True)
-    row = {'cycle': cycle, 'sleep_ms': sleep_ms, 'wake_ms': wake_ms,
+    row = {'cycle': cycle, transition: transition_ms, 'wake_ms': wake_ms,
            'start_unix': started, 'pod_uid': uid}
     rows.append(row)
     print(json.dumps(row), flush=True)
@@ -76,7 +83,7 @@ for step in ['sandbox', 'pod', 'ready']:
     key = f'fern_wake_step_seconds_count{{step="{step}"}}'
     if after[key] - before.get(key, 0) != len(rows):
         raise RuntimeError('another wake or a daemon restart changed the step metrics')
-for name in ['sleep_ms', 'wake_ms']:
+for name in [transition, 'wake_ms']:
     values = sorted(row[name] for row in rows)
     print(json.dumps({'operation': name, 'n': len(values),
                       'p50': values[math.ceil(len(values) * .50) - 1],
