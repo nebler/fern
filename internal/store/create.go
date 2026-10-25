@@ -193,7 +193,7 @@ func (s *Store) makeWorkspace(ctx context.Context, id, workspace, from string) e
 				return err
 			}
 		}
-		if err := btrfs(ctx, "subvolume", "create", workspace); err != nil {
+		if err := createSubvolume(ctx, workspace); err != nil {
 			return err
 		}
 		return os.Chown(workspace, BoxUID, BoxGID)
@@ -219,10 +219,10 @@ func (s *Store) makeWorkspace(ctx context.Context, id, workspace, from string) e
 func (s *Store) adopt(ctx context.Context, id, path, from string) error {
 	next := s.adoptPath(id)
 	if from != "" {
-		if err := btrfs(ctx, "subvolume", "snapshot", from, next); err != nil {
+		if err := snapshotSubvolume(ctx, from, next, false); err != nil {
 			return err
 		}
-	} else if err := btrfs(ctx, "subvolume", "create", next); err != nil {
+	} else if err := createSubvolume(ctx, next); err != nil {
 		return err
 	}
 	if from != "" {

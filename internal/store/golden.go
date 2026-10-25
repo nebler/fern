@@ -51,7 +51,7 @@ func (s *Store) BuildSource(ctx context.Context, id string, src SnapshotRef) err
 	if err := s.step("build source: listed"); err != nil {
 		return err
 	}
-	if err := deleteSubvolumes(ctx, env.Workspace); err != nil {
+	if err := s.deleteSubvolumes(ctx, env.Workspace); err != nil {
 		return err
 	}
 	if err := s.step("build source: cleared"); err != nil {

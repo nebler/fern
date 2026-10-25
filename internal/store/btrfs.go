@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 
@@ -61,11 +62,10 @@ func (b *headBuffer) String() string {
 }
 
 // deleteSubvolumes deletes those of paths that are subvolumes, with any
-// subvolumes a box made inside them, in one btrfs call. Paths that don't
-// exist or aren't subvolumes are left alone.
-func deleteSubvolumes(ctx context.Context, paths ...string) error {
-	args := []string{"subvolume", "delete", "--recursive"}
-	n := len(args)
+// subvolumes a box made inside them. Paths that don't exist or aren't
+// subvolumes are left alone.
+func (s *Store) deleteSubvolumes(ctx context.Context, paths ...string) error {
+	var nested []string
 	for _, p := range paths {
 		fi, err := os.Lstat(p)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -74,14 +74,27 @@ func deleteSubvolumes(ctx context.Context, paths ...string) error {
 		if err != nil {
 			return err
 		}
-		if isSubvolume(fi) {
-			args = append(args, p)
+		if !isSubvolume(fi) {
+			continue
+		}
+		// Most trees have no nested subvolumes. Try the deletion directly rather
+		// than walking btrfs's root tree for every snapshot. A failed ENOTEMPTY
+		// leaves the tree intact; btrfs-progs handles the uncommon recursive case.
+		if err := deleteSubvolume(ctx, p); errors.Is(err, unix.ENOTEMPTY) {
+			nested = append(nested, p)
+		} else if err != nil {
+			return err
+		} else if err := s.step("delete subvolume: " + filepath.Base(p)); err != nil {
+			return err
 		}
 	}
-	if len(args) == n {
+	if len(nested) == 0 {
 		return nil
 	}
-	return btrfs(ctx, args...)
+	if err := btrfs(ctx, append([]string{"subvolume", "delete", "--recursive"}, nested...)...); err != nil {
+		return err
+	}
+	return s.step("delete subvolumes: nested removed")
 }
 
 // isSubvolume reports whether fi describes the root of a btrfs subvolume,

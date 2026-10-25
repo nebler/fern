@@ -75,7 +75,7 @@ func (s *Store) Reconcile(ctx context.Context) (lost []string, err error) {
 			// adopt.new, when a power cut undoes the cleanup that came before
 			// the row; the copy is garbage either way. A create or delete
 			// that stopped next to its row left the marker.
-			if err := deleteSubvolumes(ctx, s.restorePath(id), s.adoptPath(id)); err != nil {
+			if err := s.deleteSubvolumes(ctx, s.restorePath(id), s.adoptPath(id)); err != nil {
 				return lost, fmt.Errorf("reconcile %s: %w", id, err)
 			}
 			if err := os.RemoveAll(s.adoptPath(id)); err != nil {
@@ -235,7 +235,8 @@ func holdsData(dir string) (bool, error) {
 }
 
 // removeDisk deletes environment id's directory and, if workspace isn't
-// empty, that workspace too. All subvolumes go in one btrfs call.
+// empty, that workspace too. Subvolumes go before their parent directories,
+// so a cleanup interrupted by a crash can be repeated.
 func (s *Store) removeDisk(ctx context.Context, id, workspace string) error {
 	paths := []string{s.livePath(id), s.restorePath(id), s.adoptPath(id)}
 	if workspace != "" && workspace != s.livePath(id) {
@@ -248,7 +249,7 @@ func (s *Store) removeDisk(ctx context.Context, id, workspace string) error {
 	for _, snap := range snaps {
 		paths = append(paths, s.snapPath(id, snap.Name()))
 	}
-	if err := deleteSubvolumes(ctx, paths...); err != nil {
+	if err := s.deleteSubvolumes(ctx, paths...); err != nil {
 		return err
 	}
 	return os.RemoveAll(s.envDir(id))
