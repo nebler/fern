@@ -11,8 +11,8 @@
 #                stdin, signals, cancellation, long idle commands
 #   concurrency  parallel execs on an awake and on a sleeping environment
 #   restore      a restore while an exec is open; a missing snapshot
-#   pgload       Postgres recovers, consistent, from every one of 60 snapshots
-#                taken under pgbench's write load
+#   pgload       Postgres recovers, consistent, from every snapshot kept (the
+#                newest 50) of 60 taken under pgbench's write load
 #   idle         an idle box goes to sleep, with the daemon's idle times
 #                shortened for the section; a running command keeps it awake
 #   daemon       the daemon restarts while a box is awake, and finishes an rm
@@ -328,7 +328,12 @@ pg_load() {
   wait $load
   local whole="select (select sum(abalance) from pgbench_accounts) = (select sum(bbalance) from pgbench_branches)
     and (select sum(bbalance) from pgbench_branches) = (select sum(tbalance) from pgbench_tellers)"
-  for i in $(seq "$n"); do
+  # The daemon keeps an environment's newest 50 snapshots (store.keepTurns).
+  local first=$((n > 50 ? n - 49 : 1))
+  if [ "$first" -gt 1 ]; then
+    check "the oldest snapshots were pruned, keeping the newest 50" no "$(succeeds fern restore "$env" p1)"
+  fi
+  for i in $(seq "$first" "$n"); do
     fern restore "$env" "p$i" >/dev/null
     if [ "$(sql "$env" "$whole" 2>/dev/null)" = t ] &&
       fern exec "$env" -- pg_amcheck --install-missing --heapallindexed postgres >/dev/null 2>&1; then
@@ -338,7 +343,7 @@ pg_load() {
     fi
   done
   note "snapshot under load, ms: $(stats <"$TMP/pg-snap-$env")"
-  check "Postgres is whole and uncorrupted after each of $n restores" "$n" "$ok"
+  check "Postgres is whole and uncorrupted after each of $((n - first + 1)) restores" $((n - first + 1)) "$ok"
 }
 
 pgload() {
