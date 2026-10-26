@@ -1161,3 +1161,88 @@ After reverting, race tests and lint pass again, and the restored VPS
 passes `lab/check.sh box restore t3`. The local lab is also rebuilt from
 the unchanged Go source. Temporary image aliases and the diagnostic marker
 are removed, and kubelet verbosity is returned to zero.
+
+## CPU, disk and platform perf gate, 2026-10-26
+
+Collectors `c28b56b4`, based on `a23cefdd`; Go/image sources, runtime settings
+and baselines unchanged. Each target completed `JOBS=1 WAKES=10` quick checks
+plus `hardware scale stability`, and `lab/t3-run.sh toy 2` (six Haiku turns).
+These are one complete cohort's values: medians for repeated operations;
+fresh/golden wake and T3 checkpoint/restore have one observation.
+
+Build + lab measurements shared one `lab_lock`. The cohort passed, then
+repeat 2 hit host ENOSPC and Docker metadata I/O errors: **lab numbers are
+provisional**. The VPS build also failed locally, so it used the unchanged
+deployment. Its harness/TMP moved onto the node under the shared VPS lock;
+wall timings have a different client path from the saved baseline.
+
+| Operation: CPU-ms, node / box / daemon pod | VPS | Lab |
+|---|---:|---:|
+| Fresh wake, including initdb | 5180 / 3780 / 17.6 | 3580 / 1684 / 13.0 |
+| Golden wake | 1500 / 561 / 18.1 | 1790 / 408 / 12.4 |
+| Warm wake | 1600 / 626 / 18.2 | 665 / 261 / 12.4 |
+| Sleep | 1200 / — / 16.0 | 680 / — / 10.6 |
+| Restore, awake T3 workspace | 1000 / — / 23.7 | 820 / — / 14.6 |
+| T3 checkpoint | 20 / — / 3.7 | 10 / — / 2.5 |
+| Postgres checkpoint, 1 MiB changed | 30 / — / 5.2 | 20 / — / 2.4 |
+
+Cgroups use `usage_usec`, with Sentry/gofers included for boxes. Node CPU
+uses `/proc/stat` (10 ms resolution), includes platform/observer work,
+and covers the whole Docker VM in the lab. Dying box cgroups have no final
+CPU sample.
+
+Idle box CPU, VPS / lab: **461 / 524 CPU-ms/min with Postgres**, **102 / 110
+without services**, normalized from 15-second windows. Daemon CPU under the
+20-box exec/checkpoint workload was **2,220 / 3,614 CPU-ms/min**.
+
+| Idle platform: MiB anon(+shmem for pods) / CPU-ms per minute | VPS | Lab |
+|---|---:|---:|
+| k3s | 446.5 / 4091 | 513.2 / 4738 |
+| containerd | 55.1 / 553 | 64.3 / 637 |
+| agent-sandbox controller pod | 18.9 / 72 | 22.0 / 462 |
+| T3 pod | 273.6 / 338 | 369.8 / 1159 |
+| Daemon pod, registrar included | 19.0 / 4 | 19.1 / 14 |
+
+Full k3s/containerd RSS was **586.6/166.5 MiB** VPS, **596.2/105.1 MiB** lab.
+Pod kernel charges are separate metrics.
+
+**Claude:** service-only toy boxes used **38.4 / 37.8 MiB**. Active pod
+peaks were **174–217 / 172–204 MiB**; median increments **152 / 158 MiB**
+(about 80%) include Claude, tools and runtime growth. Median turn CPU,
+box/T3/daemon, was **5,834/2,121/87 ms** versus **2,949/1,081/77 ms**;
+sampled Claude-tree CPU lower bounds were **3,435 / 1,750 ms**.
+Guest RSS/anonymous estimates exceed host charges; the process figures and
+method limits are in [BOX-MEMORY.md](BOX-MEMORY.md#claude-process-accounting-2026-10-26).
+
+**Disk:** live data **38.1 MiB**, golden **38.5 MiB**, latest snapshot
+**39.4 MiB referenced, zero exclusive** (shared with live). Environment plus
+five checkpoints: **43.4 MiB**, versus **236.5 MiB** summed references.
+Replacing 1 MiB/checkpoint grew data allocation **1.000 / 1.055 MiB**.
+`btrfs filesystem du` excludes metadata. Charged fresh/golden wake writes
+were **16.8/0.37 / 49.3/0.63 MiB**; checkpoint daemon writes **0.38 / 2.67 MiB**.
+Request-window `io.stat` includes delayed-writeback/stacked-device effects,
+so these are not physical device-write totals.
+
+| Retained delta: daemon RSS / node used memory, MiB | VPS | Lab |
+|---|---:|---:|
+| 1 → 20 → 0 boxes | -3.1 / +59.9 | +2.0 / -130.9 |
+| 50 wake/sleep cycles | -0.7 / +93.9 | -1.3 / -43.9 |
+
+After 50 cycles, descriptors **15 → 14**, goroutines **20 → 20** on both;
+no pods/mounts remained. VPS node retention needs a longer settling/process
+breakdown. Subsequent VPS ramps had median positive node-memory growth **0**.
+
+**Verification:** race tests, Bash syntax, accounting fixtures and
+`koalaman/shellcheck:stable -x -P SCRIPTDIR` passed (final lint via VPS
+containerd). Functional checks and both toy runs passed per target. The
+three-repeat VPS gate flagged 20-box completion **25,258 → 29,173 ms**
+and wake p95 **25,114 → 29,123 ms** (+16%, margin 15%); other existing
+metrics passed, restore **838.8 ms**. New metrics await coordinator baselines;
+neither TSV changed.
+
+`hardware`: **40 s lab / 50 s VPS**, default gate, outside quick/fast.
+`stability`: **115 / 125 s**, in `all`, opt-in for perf. Cheap extras:
+throttled CPU, default-interface bytes, descriptors/goroutines/threads,
+concurrent-exec p50/p95. Still unmeasured: exact guest-process host residency,
+final dying-box CPU, filesystem metadata/physical write amplification,
+useful contention p99, sustained network and long-duration retention.

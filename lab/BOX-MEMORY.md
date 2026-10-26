@@ -362,3 +362,29 @@ local change. Baselines and tolerances were not changed.
 
 Race tests, golangci-lint (0 issues), go vet, gofmt, shell syntax and whitespace
 checks passed. No Go source changes remain.
+
+
+## Claude process accounting, 2026-10-26
+
+The hardware gate's two toy runs per target sampled six completed Haiku
+turns. Host pod anon + shmem peaks were 174–217 MiB on the VPS and
+172–204 MiB in the lab; matched service-only boxes used 38.4/37.8 MiB.
+Median increments, 152/158 MiB, include Claude, its tools and runtime growth.
+
+Inside gVisor, Claude-tree peak RSS/anonymous estimates ranged
+483–765/208–292 MiB on the VPS, 480–517/205–243 MiB in the lab.
+Other guest processes' median peak RSS/anonymous estimates were
+157/50 MiB and 156/49 MiB respectively. Guest status lacks RssAnon here;
+the sampler sums smaps Anonymous. These guest figures approximate residency
+and can count shared mappings repeatedly, explaining why they exceed the
+entire host pod's charge. Use the matched host increment for capacity;
+exact process-level host attribution remains unavailable.
+
+The guest sampler reads PID, parent PID, start time, CPU, RSS and anonymous
+fields every two seconds. Ancestry identifies Claude's tree; start time
+distinguishes reused PIDs; CPU accounting retains ancestry after reparenting.
+CPU is a lower bound because children can start and exit between polls.
+Box CPU comes from pod cgroups, including Sentry/gofers. Observer execs
+add a small cost; guest sampling is disabled during restore to avoid waking
+an environment for measurement. See [RESULTS.md](RESULTS.md) for operation,
+platform, disk and lifecycle measurements.
