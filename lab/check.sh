@@ -23,6 +23,7 @@
 #   scale        awake boxes ramped up, 1, 5, 10, then 20 (SCALE): at each
 #                step the new boxes' wakes, memory per box and the daemon's,
 #                and exec and snapshot times with that many awake
+#                SCALE_HARDWARE=0 disables the extra collectors for A/B runs
 #   hardware     idle CPU with/without Postgres, platform overhead, pool data
 #   stability    50 wake/sleep cycles and retained memory/FDs (all, not quick)
 #   limits       what a box can't do: gain privileges, use more than its CPU
@@ -535,13 +536,15 @@ many() {
 # by the boxes awake. Keep the legacy free-based metric for its baselines;
 # node_used_per_box_mib uses the same definition on BusyBox and procps.
 scale() {
-  local steps n i prev=0 base used base_available used_available uids pod_stats box_mib kernel_mib
+  local steps n i prev=0 base used base_available used_available uids pod_stats box_mib kernel_mib parallel_ms
   local -a pod_uids
   read -ra steps <<<"${SCALE:-1 5 10 20}"
   echo "== scale: ${steps[*]} awake boxes"
-  hardware_uids
-  hardware_sample >"$TMP/scale-before"
-  metrics | awk '$1=="go_goroutines" {print "daemon_goroutines_count",$2}' >>"$TMP/scale-before"
+  if [ "${SCALE_HARDWARE:-1}" = 1 ]; then
+    hardware_uids
+    hardware_sample >"$TMP/scale-before"
+    metrics | awk '$1=="go_goroutines" {print "daemon_goroutines_count",$2}' >>"$TMP/scale-before"
+  fi
   for i in $(seq "${steps[-1]}"); do fresh "s$i"; done
   base=$(on_node free -m </dev/null | awk 'NR == 2 { print $3 }')
   base_available=$(node_used)
@@ -579,7 +582,7 @@ scale() {
     metric scale.n$n.pod_kernel_mib "kernel memory charged per awake pod, MiB" "$kernel_mib"
     metric scale.n$n.daemon_memory_mib "the daemon's memory, MiB" \
       "$(in_daemon 'cat /proc/1/status' | awk '$1 == "RssAnon:" { printf "%.1f", $2 / 1024 }')"
-    hardware_sample "${pod_uids[@]}" >"$TMP/load-before$n"
+    if [ "${SCALE_HARDWARE:-1}" = 1 ]; then hardware_sample --counters "${pod_uids[@]}" >"$TMP/load-before$n"; fi
     : >"$TMP/exec$n"
     for _ in $(seq 20); do
       start=$(now_ms)
@@ -588,24 +591,35 @@ scale() {
     done
     metric scale.n$n.exec_ms "an exec in an awake box, ms" "$(stats <"$TMP/exec$n")"
     start=$(now_ms)
-    for i in $(seq "$n"); do
-      (command_start=$(now_ms); fern exec "s$i" -- true; echo $(($(now_ms) - command_start)) >"$TMP/parallel-$n-$i") &
-    done
+    for i in $(seq "$n"); do fern exec "s$i" -- true & done
     wait
-    metric scale.n$n.contended_exec_ms "per-command latency with $n concurrent execs, ms" "$(cat "$TMP/parallel-$n-"* | stats)"
-    metric scale.n$n.parallel_exec_ms "one exec in each awake box at once, ms until all ended" $(($(now_ms) - start))
+    parallel_ms=$(($(now_ms) - start))
+    metric scale.n$n.parallel_exec_ms "one exec in each awake box at once, ms until all ended" "$parallel_ms"
+    # Collect individual latencies separately: timestamps and result files
+    # must not inflate the existing parallel completion metric.
+    if [ "${SCALE_HARDWARE:-1}" = 1 ]; then
+      for i in $(seq "$n"); do
+        (command_start=$(now_ms); fern exec "s$i" -- true; echo $(($(now_ms) - command_start)) >"$TMP/parallel-$n-$i") &
+      done
+      wait
+      metric scale.n$n.contended_exec_ms "per-command latency with $n concurrent execs, ms" "$(cat "$TMP/parallel-$n-"* | stats)"
+    fi
     : >"$TMP/snap$n"
     for i in $(seq 20); do fern snapshot s1 "n$n-$i" | took >>"$TMP/snap$n"; done
     metric scale.n$n.snapshot_ms "a snapshot of an awake box, ms" "$(stats <"$TMP/snap$n")"
-    hardware_sample "${pod_uids[@]}" >"$TMP/load-after$n"
-    resource_rates scale.n$n.load "$TMP/load-before$n" "$TMP/load-after$n" "$n"
+    if [ "${SCALE_HARDWARE:-1}" = 1 ]; then
+      hardware_sample --counters "${pod_uids[@]}" >"$TMP/load-after$n"
+      resource_rates scale.n$n.load "$TMP/load-before$n" "$TMP/load-after$n" "$n"
+    fi
     prev=$n
   done
   for i in $(seq "${steps[-1]}"); do fern rm "s$i"; done
-  sleep 2
-  hardware_sample >"$TMP/scale-after"
-  metrics | awk '$1=="go_goroutines" {print "daemon_goroutines_count",$2}' >>"$TMP/scale-after"
-  resource_stability scale "$TMP/scale-before" "$TMP/scale-after"
+  if [ "${SCALE_HARDWARE:-1}" = 1 ]; then
+    sleep 2
+    hardware_sample >"$TMP/scale-after"
+    metrics | awk '$1=="go_goroutines" {print "daemon_goroutines_count",$2}' >>"$TMP/scale-after"
+    resource_stability scale "$TMP/scale-before" "$TMP/scale-after"
+  fi
 }
 
 limits() {
@@ -842,20 +856,24 @@ hardware() {
   uid=$(pod_uid $ENV) empty_uid=$(pod_uid ${ENV}-empty)
   # Let initdb's startup activity settle before the idle interval.
   sleep 2
-  hardware_sample "$uid" >"$TMP/pg-before"
-  hardware_sample "$empty_uid" >"$TMP/empty-before"
+  hardware_sample --counters "$uid" >"$TMP/pg-before"
+  hardware_sample --counters "$empty_uid" >"$TMP/empty-before"
   sleep "$seconds"
-  hardware_sample "$uid" >"$TMP/pg-after"
-  hardware_sample "$empty_uid" >"$TMP/empty-after"
+  hardware_sample --counters "$uid" >"$TMP/pg-after"
+  hardware_sample --counters "$empty_uid" >"$TMP/empty-after"
   resource_rates hardware.postgres_idle "$TMP/pg-before" "$TMP/pg-after"
   resource_rates hardware.empty_idle "$TMP/empty-before" "$TMP/empty-after"
   fern rm ${ENV}-empty
+  # btrfs du cannot see delayed allocations. Flush initdb and seed writes
+  # before attributing any later allocation growth to checkpoints.
+  in_daemon 'sync -f /var/lib/fern'
   pool_du hardware.environment "/var/lib/fern/envs/$ENV/live"
   before_bytes=$(in_daemon "btrfs filesystem du -s --raw /var/lib/fern/envs/$ENV" | awk 'NR>1 {print $2+$3}')
   for i in $(seq 5); do
     fern exec $ENV -- sh -c 'head -c 1048576 /dev/urandom > checkpoint-data'
     resource_op hardware.snapshot snapshot $ENV "disk-$i" >/dev/null
   done
+  in_daemon 'sync -f /var/lib/fern'
   pool_du hardware.snapshot "/var/lib/fern/envs/$ENV/snaps/disk-5"
   pool_du hardware.environment_with_snapshots "/var/lib/fern/envs/$ENV"
   after_bytes=$(in_daemon "btrfs filesystem du -s --raw /var/lib/fern/envs/$ENV" | awk 'NR>1 {print $2+$3}')

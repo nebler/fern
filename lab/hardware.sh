@@ -5,8 +5,11 @@ hardware_uids() {
   HW_T3=$(k -n fern-system get pod -l app.kubernetes.io/name=t3 -o jsonpath='{.items[0].metadata.uid}')
   HW_CONTROLLER=$(k -n agent-sandbox-system get pods -o jsonpath='{.items[0].metadata.uid}')
 }
+# Workload polling needs cgroups, not a census of platform processes.
 hardware_sample() {
-  on_node sh -s -- sample "$HW_DAEMON" "$HW_T3" "$HW_CONTROLLER" "$@" <lab/hardware-node.sh |
+  local mode=sample
+  if [ "${1:-}" = --counters ]; then mode=counters; shift; fi
+  on_node sh -s -- "$mode" "$HW_DAEMON" "$HW_T3" "$HW_CONTROLLER" "$@" <lab/hardware-node.sh |
     awk '{v[$1]+=$2} END {for(k in v) printf "%s %.3f\n",k,v[k]}' || {
       echo "FAIL hardware sample" >&2
       return 1

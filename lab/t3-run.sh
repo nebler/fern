@@ -55,12 +55,12 @@ uid=${2:-}
 if [ -z "$uid" ] && [ -n "$1" ]; then uid=$(k -n fern-boxes get pod "$id" -o jsonpath="{.metadata.uid}" 2>/dev/null || true); fi
 if [ -n "$uid" ]; then
   echo "BOXUID $uid"
-  hardware_sample "$uid"
+  hardware_sample --counters "$uid"
   if [ "${3:-guest}" = guest ] && fern ls | awk -v id="$id" '\''$1==id && $2=="running" {ok=1} END {exit !ok}'\''; then
     fern exec -i "$id" -- sh -s <lab/hardware-guest.sh || true
   fi
 else
-  hardware_sample
+  hardware_sample --counters
 fi'
 # A matched service-only box puts the host pod peak in context. The
 # increment includes Claude, tools and runtime growth, not just CLI heap.
@@ -72,7 +72,7 @@ fern create "$id" --repo "lab/$1-repo" >/dev/null
 fern wake "$id" >/dev/null
 uid=$(k -n fern-boxes get pod "$id" -o jsonpath="{.metadata.uid}")
 source lab/hardware.sh
-HW_DAEMON=$HW_DAEMON HW_T3=$HW_T3 HW_CONTROLLER=$HW_CONTROLLER hardware_sample "$uid" | awk '\''$1=="box_memory_mib" {print $2}'\''
+HW_DAEMON=$HW_DAEMON HW_T3=$HW_T3 HW_CONTROLLER=$HW_CONTROLLER hardware_sample --counters "$uid" | awk '\''$1=="box_memory_mib" {print $2}'\''
 fern rm "$id" >/dev/null'
 T3_RESOURCE_CMD=$resources T3_BOX_BASELINE_CMD=$box_baseline \
 T3_PAIR_URL=$pair_url T3_METRICS_CMD=$metrics T3_RM_ENV_CMD=$rm_env T3_NODE_MEMORY_CMD=$node_memory T3_TRACE_CMD=$trace \

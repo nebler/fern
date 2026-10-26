@@ -38,7 +38,7 @@ process_sample() {
   # k3s embeds kubelet/apiserver; containerd is its own child. Do not count
   # both k3s's parent cgroup and containerd's child cgroup as separate costs.
   for proc in /proc/[0-9]*; do
-    comm=$(cat "$proc/comm" 2>/dev/null) || continue
+    IFS= read -r comm 2>/dev/null <"$proc/comm" || continue
     case $comm in
       k3s|k3s-server) name=k3s ;;
       exe) case $(tr '\000' ' ' <"$proc/cmdline" 2>/dev/null) in *'k3s server'*) name=k3s ;; *) continue ;; esac ;;
@@ -79,7 +79,7 @@ EOF
     awk -v bn="$before_node" -v an="$after_node" -v bc="$before_cpu" -v ac="$after_cpu" -v bi="$before_io" -v ai="$after_io" \
       'BEGIN { printf "RESOURCE node_cpu_ms %.3f\nRESOURCE daemon_cpu_ms %.3f\nRESOURCE daemon_write_bytes %.0f\n",an-bn,ac-bc,ai-bi }'
     ;;
-  sample)
+  sample|counters)
     awk '{ printf "elapsed_ms %.0f\n", $1*1000 }' /proc/uptime
     echo "node_cpu_ms $(node_cpu)"
     awk '/^MemTotal:/ {t=$2} /^MemAvailable:/ {a=$2} END {printf "node_used_mib %.3f\n",(t-a)/1024}' /proc/meminfo
@@ -91,7 +91,7 @@ EOF
       # A restore can remove a box between metadata lookup and this read.
       if cgroup "$uid" >/dev/null; then pod_sample box "$uid"; fi
     done
-    process_sample
+    if [ "$mode" = sample ]; then process_sample; fi
     ;;
   *) echo "unknown hardware sampler mode: $mode" >&2; exit 2 ;;
 esac
