@@ -1322,3 +1322,20 @@ both toy runs passed per target.
 Still unmeasured: exact guest-process host residency; final dying-box CPU;
 filesystem metadata/physical write amplification; statistically useful
 contention p99; sustained network load; and retention over hours/days.
+
+## Baselines with the hardware metrics, 2026-10-26
+
+The full gate on `d9daca01` against the `59dfdff2` baselines flagged
+`t3.checkpoint_ms` on the VPS (12.2 → 94.2 ms), `scale.n20.exec_ms.p95` on
+the VPS (121 → 165) and `scale.n1.snapshot_ms.p95` in the lab (10.2 → 64.6).
+No Go code changed between them. The checkpoint flag isn't from the new
+measurement either: in the gate's order (`box disk stream paths golden t3`)
+on the VPS the old `check.sh` gave 122.8 and 28.8 ms, the new one 37.6, 84.5
+and 103.4 ms. Run alone, or after `golden` only, both give 12–20 ms. The
+first checkpoint after the earlier sections sometimes costs the daemon
+60–80 ms of CPU (66 ms in one run), most likely btrfs finishing the earlier
+sections' deletes in the snapshot's transaction. The old 12.2 ms baseline was
+a quiet run. The replaced checkpoint stays at 18–32 ms. The p95 flags are
+p95s of 20 samples under load. The new baselines (5 runs each) include the
+CPU, disk and platform metrics; the VPS checkpoint baseline is now 91.8 ms
+with a wide margin.
