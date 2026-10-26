@@ -502,26 +502,7 @@ func TestMetrics(t *testing.T) {
 		if err := g.Restore(ctx, "demo", "missing"); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("Restore(demo, missing) error = %v, want %v", err, store.ErrNotFound)
 		}
-		reg := prometheus.NewRegistry()
-		reg.MustRegister(g)
-		families, err := reg.Gather()
-		if err != nil {
-			t.Fatal(err)
-		}
-		got := make(map[string]uint64)
-		for _, f := range families {
-			for _, m := range f.GetMetric() {
-				name := f.GetName()
-				for _, l := range m.GetLabel() {
-					name += "{" + l.GetName() + "=" + l.GetValue() + "}"
-				}
-				if h := m.GetHistogram(); h != nil {
-					got[name] = h.GetSampleCount()
-				} else {
-					got[name] = uint64(m.GetCounter().GetValue())
-				}
-			}
-		}
+		got := counts(t, g)
 		want := map[string]uint64{
 			"fern_wake_seconds{result=ok}":     1,
 			"fern_snapshot_seconds{result=ok}": 1,
@@ -539,6 +520,33 @@ func TestMetrics(t *testing.T) {
 			t.Errorf("metrics mismatch (-want +got):\n%s", diff)
 		}
 	})
+}
+
+// counts returns g's metrics by name and labels: a counter's value, a
+// histogram's number of samples.
+func counts(t *testing.T, g *actor.Group) map[string]uint64 {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	reg.MustRegister(g)
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(map[string]uint64)
+	for _, f := range families {
+		for _, m := range f.GetMetric() {
+			name := f.GetName()
+			for _, l := range m.GetLabel() {
+				name += "{" + l.GetName() + "=" + l.GetValue() + "}"
+			}
+			if h := m.GetHistogram(); h != nil {
+				got[name] = h.GetSampleCount()
+			} else {
+				got[name] = uint64(m.GetCounter().GetValue())
+			}
+		}
+	}
+	return got
 }
 
 // slowWake is a driver whose Wake waits until release is closed.

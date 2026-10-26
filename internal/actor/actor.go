@@ -1,6 +1,7 @@
 // Package actor gives every environment one goroutine, its actor, which makes
 // the environment's changes one at a time, counts the commands running in its
-// box, and puts the box to sleep when it has been idle.
+// box, and puts the box to sleep when it has been idle. It also wakes boxes
+// ahead of their next command (Prewake).
 //
 // An actor lives while its environment's box may be running or a message
 // for it is waiting; an asleep environment has none. Its state is touched
@@ -48,11 +49,23 @@ type Driver interface {
 
 // Idle says when a box with no command running goes to sleep: Agent after
 // its last command ended, and Human after its last command started. Zero
-// durations keep boxes awake.
+// durations keep boxes awake. A box woken by Prewake instead sleeps Prewake
+// after its wake, unless a command comes first; a zero Prewake turns
+// Prewake off.
 type Idle struct {
-	Agent time.Duration
-	Human time.Duration
+	Agent   time.Duration
+	Human   time.Duration
+	Prewake time.Duration
 }
+
+// prewakers is how many pre-wakes run at once, and prewakeQueue how many may
+// wait for one. A pre-wake is a guess, so it never holds up more than two
+// boxes' starts on the node, and one asked for when the queue is full is
+// dropped.
+const (
+	prewakers    = 2
+	prewakeQueue = 8
+)
 
 // sweepEvery is how often Run looks for environments whose worktree T3
 // removed. One that is still gone at the next look is deleted: T3 removes a
@@ -81,10 +94,12 @@ type Group struct {
 	wakes, stops, restores, snapshots, queue, goldenBuilds *prometheus.HistogramVec
 	idleSleeps                                             prometheus.Counter
 	goldens                                                *prometheus.CounterVec // new worktrees, by golden hit, miss or none
+	prewakeResults                                         *prometheus.CounterVec // pre-wakes, by what came of them
 
-	find    chan findRequest // to Run, for an environment's actor
-	builds  chan build       // to Run's builder, golden builds to make
-	stopped chan struct{}    // closed when Run returns
+	find     chan findRequest // to Run, for an environment's actor
+	builds   chan build       // to Run's builder, golden builds to make
+	prewakes chan string      // to Run's prewakers, environments to wake ahead
+	stopped  chan struct{}    // closed when Run returns
 }
 
 type findRequest struct {
@@ -116,12 +131,18 @@ func New(st Store, drv Driver, idle Idle, image string, log *slog.Logger) *Group
 		idleSleeps: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "fern_idle_sleeps_total", Help: "Boxes put to sleep because they were idle.",
 		}),
-		find: make(chan findRequest), builds: make(chan build, buildQueue), stopped: make(chan struct{}),
+		prewakeResults: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "fern_prewakes_total",
+			Help: "Pre-wakes, by result: woken; then used (a command came) or wasted (the box stopped first); " +
+				"or awake (it was already), unknown (no such environment), dropped (the queue was full), error.",
+		}, []string{"result"}),
+		find: make(chan findRequest), builds: make(chan build, buildQueue), prewakes: make(chan string, prewakeQueue),
+		stopped: make(chan struct{}),
 	}
 }
 
 func (g *Group) collectors() []prometheus.Collector {
-	return []prometheus.Collector{g.wakes, g.stops, g.restores, g.snapshots, g.queue, g.goldenBuilds, g.idleSleeps, g.goldens}
+	return []prometheus.Collector{g.wakes, g.stops, g.restores, g.snapshots, g.queue, g.goldenBuilds, g.idleSleeps, g.goldens, g.prewakeResults}
 }
 
 // Describe sends the descriptions of the Group's metrics.
@@ -167,6 +188,9 @@ func (g *Group) Run(ctx context.Context) error {
 	}
 	wg.Go(func() { g.sweep(ctx) })
 	wg.Go(func() { g.buildGoldens(ctx) })
+	for range prewakers {
+		wg.Go(func() { g.prewakeBoxes(ctx) })
+	}
 	for id, state := range states {
 		if state != driver.Asleep {
 			start(id, true)
@@ -395,11 +419,77 @@ func (g *Group) Wake(ctx context.Context, id string) error {
 		if _, err := a.wake(ctx, ""); err != nil {
 			return err
 		}
+		a.endLease("used")
 		now := time.Now()
 		a.opened, a.closed = now, now
 		g.log.InfoContext(ctx, "box touched", slog.String("env", id), slog.Int("active", len(a.execs)))
 		return nil
 	})
+}
+
+// Prewake asks for environment id's box to be woken in the background,
+// because a command is likely soon: T3 asks when a thread is opened or
+// reverted. It returns at once. A box that is awake is left as it is, its
+// idle times included; one it wakes sleeps after Idle.Prewake unless a
+// command comes first. An unknown environment is only counted.
+func (g *Group) Prewake(id string) error {
+	if err := store.CheckEnvID(id); err != nil {
+		return err
+	}
+	// With idle sleep off, a box woken ahead would never sleep again.
+	if g.idle.Prewake == 0 || g.idle.Agent == 0 || g.idle.Human == 0 {
+		return nil
+	}
+	select {
+	case g.prewakes <- id:
+	default:
+		g.prewakeResults.WithLabelValues("dropped").Inc()
+	}
+	return nil
+}
+
+// prewakeBoxes makes the pre-wakes asked for, one at a time, until ctx is
+// done.
+func (g *Group) prewakeBoxes(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case id := <-g.prewakes:
+			g.prewake(ctx, id)
+		}
+	}
+}
+
+func (g *Group) prewake(ctx context.Context, id string) {
+	result := "woken"
+	err := g.do(ctx, "prewake", id, func(ctx context.Context, a *actor) error {
+		if a.awake {
+			result = "awake"
+			return nil
+		}
+		// Set first, so that a wake that fails half-way, leaving the box
+		// running, still ends with the lease.
+		a.lease = time.Now().Add(g.idle.Prewake)
+		if _, err := a.wake(ctx, ""); err != nil {
+			if !a.awake {
+				a.lease = time.Time{}
+			}
+			return err
+		}
+		a.lease, a.prewoken = time.Now().Add(g.idle.Prewake), true
+		g.log.InfoContext(ctx, "box woken ahead", slog.String("env", id), slog.Time("until", a.lease))
+		return nil
+	})
+	switch {
+	case errors.Is(err, store.ErrNotFound):
+		// Such as a thread whose first checkpoint hasn't adopted its worktree.
+		result = "unknown"
+	case err != nil:
+		result = "error"
+		g.log.WarnContext(ctx, "pre-wake failed", slog.String("env", id), slog.Any("error", err))
+	}
+	g.prewakeResults.WithLabelValues(result).Inc()
 }
 
 // Exec is a command running in a box, counted by its environment's actor
@@ -426,6 +516,7 @@ func (g *Group) Exec(ctx context.Context, id, stale string, cancel context.Cance
 		if err != nil {
 			return err
 		}
+		a.endLease("used")
 		a.next++
 		n := a.next
 		a.execs[n] = cancel
@@ -459,13 +550,15 @@ type actor struct {
 	mailbox chan message
 	done    chan struct{} // closed when run returns
 
-	addr   string                     // the box's exec address while it is known to be up
-	awake  bool                       // the box may be running
-	execs  map[int]context.CancelFunc // commands running in the box, by number
-	next   int                        // the last command's number
-	opened time.Time                  // when the last command started
-	closed time.Time                  // when the last command ended
-	idle   *time.Timer                // fires when the box may have been idle long enough
+	addr     string                     // the box's exec address while it is known to be up
+	awake    bool                       // the box may be running
+	execs    map[int]context.CancelFunc // commands running in the box, by number
+	next     int                        // the last command's number
+	opened   time.Time                  // when the last command started
+	closed   time.Time                  // when the last command ended
+	lease    time.Time                  // set while a pre-woken box waits for a command: when it sleeps
+	prewoken bool                       // the lease's wake succeeded, so its end is counted
+	idle     *time.Timer                // fires when the box may have been idle long enough
 }
 
 // run handles messages until ctx is done, or until the box is asleep with
@@ -547,6 +640,7 @@ func (a *actor) stopBox(ctx context.Context, stop func(ctx context.Context, id s
 	if err != nil {
 		return err
 	}
+	a.endLease("wasted")
 	a.awake = false
 	for n, cancel := range a.execs {
 		cancel()
@@ -573,8 +667,21 @@ func (a *actor) endExec(n int) {
 	}
 }
 
+// endLease ends a pre-wake's lease, if there is one, counting result for a
+// wake that succeeded: used when a command came, wasted when the box stopped
+// first.
+func (a *actor) endLease(result string) {
+	if a.prewoken {
+		a.g.prewakeResults.WithLabelValues(result).Inc()
+	}
+	a.lease, a.prewoken = time.Time{}, false
+}
+
 // deadline is when an awake box with nothing running may go to sleep.
 func (a *actor) deadline() time.Time {
+	if !a.lease.IsZero() {
+		return a.lease
+	}
 	return later(a.closed.Add(a.g.idle.Agent), a.opened.Add(a.g.idle.Human))
 }
 

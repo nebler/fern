@@ -70,6 +70,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	var idle actor.Idle
 	flags.DurationVar(&idle.Agent, "idle-agent", 5*time.Minute, "sleep this long after a box's last command ended (0: never)")
 	flags.DurationVar(&idle.Human, "idle-human", 20*time.Minute, "… and this long after it started (0: never)")
+	flags.DurationVar(&idle.Prewake, "idle-prewake", 2*time.Minute, "sleep a box woken ahead this long after its wake, unless a command comes (0: no pre-wakes)")
 	metricsAddr := flags.String("metrics-addr", ":9090", "serve Prometheus metrics at /metrics on this address")
 	runtimeClass := flags.String("runtime-class", "", "run boxes under this RuntimeClass, such as gvisor (\"\": the node's default)")
 	if err := flags.Parse(args); err != nil {

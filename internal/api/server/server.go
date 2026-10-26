@@ -72,6 +72,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /envs/{id}/restore", s.handle(s.restore))
 	mux.HandleFunc("POST /envs/{id}/sleep", s.handle(s.sleep))
 	mux.HandleFunc("POST /envs/{id}/wake", s.handle(s.wake))
+	mux.HandleFunc("POST /envs/{id}/prewake", s.handle(s.prewake))
 	// WebSocket handshakes are GET requests.
 	mux.HandleFunc("GET /envs/{id}/exec", s.exec)
 	return mux
@@ -185,6 +186,13 @@ func (s *Server) sleep(r *http.Request) (any, error) {
 
 func (s *Server) wake(r *http.Request) (any, error) {
 	return nil, s.envs.Wake(r.Context(), r.PathValue("id"))
+}
+
+// prewake queues a wake of the environment's box and answers at once,
+// without saying whether the environment exists: its caller, T3, only
+// guesses that a command is coming.
+func (s *Server) prewake(r *http.Request) (any, error) {
+	return nil, s.envs.Prewake(r.PathValue("id"))
 }
 
 // exec runs a command in the environment's box, waking it first if needed,

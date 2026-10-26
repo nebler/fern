@@ -69,15 +69,18 @@ RUN git init -q && git fetch -q --depth 1 https://github.com/pingdotgg/t3code.gi
 
 # The server's bundle with Fern's patches, the hook's tests run first:
 # fern-checkpoints.patch, the hook; fern-sessions.patch, idle provider
-# sessions released after 5 minutes, so their boxes can sleep.
+# sessions released after 5 minutes, so their boxes can sleep;
+# fern-prewake.patch, boxes woken ahead when a thread is opened or reverted.
 FROM t3-src AS t3-build
 COPY images/t3/*.patch /tmp/
-RUN git apply /tmp/fern-checkpoints.patch /tmp/fern-sessions.patch /tmp/fern-timing.patch /tmp/fern-socket.patch
+RUN git apply /tmp/fern-checkpoints.patch /tmp/fern-sessions.patch /tmp/fern-timing.patch /tmp/fern-socket.patch \
+    /tmp/fern-prewake.patch
 RUN --mount=type=cache,id=fern-t3-pnpm,target=/pnpm \
     pnpm install --frozen-lockfile --store-dir /pnpm/store --filter "t3..."
 WORKDIR /t3/apps/server
 RUN git config --global user.email build@fern && git config --global user.name build \
  && pnpm exec vp test run src/checkpointing/FernCheckpointStore.test.ts src/checkpointing/CheckpointStore.test.ts \
+      src/orchestration-v2/CheckpointRollbackService.test.ts \
  && pnpm run build:bundle
 
 # The packages the bundle loads at run time: the server's production

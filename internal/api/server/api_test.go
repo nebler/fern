@@ -317,6 +317,7 @@ func TestErrors(t *testing.T) {
 		{"snapshot without a name", func(ctx context.Context) error { return c.Snapshot(ctx, "demo", "", false) }, http.StatusBadRequest},
 		{"restore unknown snapshot", func(ctx context.Context) error { return c.Restore(ctx, "demo", "nope") }, http.StatusNotFound},
 		{"wake unknown", func(ctx context.Context) error { return c.Wake(ctx, "nope") }, http.StatusNotFound},
+		{"prewake invalid", func(ctx context.Context) error { return c.Prewake(ctx, "Bad_ID") }, http.StatusBadRequest},
 		{"exec unknown", func(ctx context.Context) error {
 			_, err := c.Exec(ctx, "nope", boxexec.Request{Argv: []string{"true"}}, boxexec.Streams{Stdout: io.Discard, Stderr: io.Discard})
 			return err

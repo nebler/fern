@@ -1,0 +1,416 @@
+diff --git a/apps/server/src/checkpointing/FernCheckpointStore.test.ts b/apps/server/src/checkpointing/FernCheckpointStore.test.ts
+index 717d3b91..ccf0f173 100644
+--- a/apps/server/src/checkpointing/FernCheckpointStore.test.ts
++++ b/apps/server/src/checkpointing/FernCheckpointStore.test.ts
+@@ -7,7 +7,10 @@ import { it } from "@effect/vitest";
+ import { ThreadId } from "@t3tools/contracts";
+ import * as Effect from "effect/Effect";
+ import * as FileSystem from "effect/FileSystem";
++import * as Fiber from "effect/Fiber";
+ import * as Layer from "effect/Layer";
++import * as Stream from "effect/Stream";
++import * as TestClock from "effect/testing/TestClock";
+ import { describe, expect } from "vite-plus/test";
+ 
+ import { checkpointRefForThreadTurn } from "./Utils.ts";
+@@ -71,6 +74,35 @@ const setUp = Effect.gen(function* () {
+   return { fileSystem, tmp, workspace, store, env, calls };
+ });
+ 
++/** Waits, in real time, until done is true or 500 ms have passed. */
++const settled = (done: () => boolean) =>
++  Effect.gen(function* () {
++    for (let i = 0; i < 50 && !done(); i++) {
++      yield* TestClock.withLive(Effect.sleep("10 millis"));
++    }
++  });
++
++/** A fake daemon API on socketPath that answers every request with status and records it. */
++const fakeApi = (socketPath: string, status: number) =>
++  Effect.gen(function* () {
++    const requests: Array<{ method: string | undefined; path: string | undefined; body: unknown }> = [];
++    const server = NodeHttp.createServer((req, res) => {
++      let body = "";
++      req.setEncoding("utf8");
++      req.on("data", (chunk: string) => { body += chunk; });
++      req.on("end", () => {
++        requests.push({ method: req.method, path: req.url, body: body === "" ? undefined : JSON.parse(body) });
++        res.writeHead(status).end();
++      });
++    });
++    yield* Effect.acquireRelease(
++      Effect.promise(() => new Promise<void>((resolve) => server.listen(socketPath, resolve))),
++      () => Effect.promise(() => new Promise<void>((resolve, reject) =>
++        server.close((error) => error ? reject(error) : resolve()))),
++    );
++    return requests;
++  });
++
+ it.layer(layerTest)("FernCheckpointStore", (it) => {
+   describe("captureCheckpoint", () => {
+     it.effect("adopts the worktree once, then snapshots it with every checkpoint", () =>
+@@ -97,21 +129,7 @@ it.layer(layerTest)("FernCheckpointStore", (it) => {
+         Effect.gen(function* () {
+           const { tmp, workspace, env, calls } = yield* setUp;
+           const socketPath = NodePath.join(tmp, "api.sock");
+-          const requests: Array<{ method?: string; path?: string; body: string }> = [];
+-          const server = NodeHttp.createServer((req, res) => {
+-            let body = "";
+-            req.setEncoding("utf8");
+-            req.on("data", (chunk: string) => { body += chunk; });
+-            req.on("end", () => {
+-              requests.push({ method: req.method, path: req.url, body });
+-              res.writeHead(status).end();
+-            });
+-          });
+-          yield* Effect.acquireRelease(
+-            Effect.promise(() => new Promise<void>((resolve) => server.listen(socketPath, resolve))),
+-            () => Effect.promise(() => new Promise<void>((resolve, reject) =>
+-              server.close((error) => error ? reject(error) : resolve()))),
+-          );
++          const requests = yield* fakeApi(socketPath, status);
+           const store = yield* FernCheckpointStore.make({
+             pool: NodePath.join(tmp, "pool"), command: NodePath.join(tmp, "fern"), socketPath,
+           });
+@@ -119,7 +137,7 @@ it.layer(layerTest)("FernCheckpointStore", (it) => {
+           yield* store.captureCheckpoint({ cwd: workspace, checkpointRef: ref1 });
+           expect(yield* store.hasCheckpointRef({ cwd: workspace, checkpointRef: ref1 })).toBe(true);
+           expect(yield* calls).toEqual([`create --path ${workspace} ${env}`]);
+-          expect(requests.map(({ method, path, body }) => ({ method, path, body: JSON.parse(body) }))).toEqual(
++          expect(requests).toEqual(
+             [ref0, ref1].map((ref) => ({
+               method: "POST", path: `/envs/${env}/snapshots`,
+               body: { id: FernCheckpointStore.fernSnapshotId(ref), replace: true },
+@@ -189,26 +207,78 @@ it.layer(layerTest)("FernCheckpointStore", (it) => {
+       }),
+     );
+ 
+-    it.effect("refuses a restore Fern can't do, before git touches the files", () =>
++  });
++
++  describe("prewakeWorktree", () => {
++    it.effect("wakes the environment of a worktree in the pool, and nothing else", () =>
+       Effect.gen(function* () {
+-        const { fileSystem, tmp, workspace, store } = yield* setUp;
+-        const readme = NodePath.join(workspace, "README.md");
+-        yield* store.captureCheckpoint({ cwd: workspace, checkpointRef: ref0 });
+-        yield* fileSystem.writeFileString(readme, "# changed\n");
+-        yield* fileSystem.writeFileString(NodePath.join(tmp, "broken"), "");
++        const { tmp, workspace, env } = yield* setUp;
++        const socketPath = NodePath.join(tmp, "api.sock");
++        const requests = yield* fakeApi(socketPath, 204);
++        const pool = NodePath.join(tmp, "pool");
+ 
+-        yield* Effect.flip(store.restoreCheckpoint({ cwd: workspace, checkpointRef: ref0 }));
++        yield* FernCheckpointStore.prewakeWorktree(workspace, { pool, socketPath });
++        yield* FernCheckpointStore.prewakeWorktree(NodePath.join(tmp, "project"), { pool, socketPath });
++        yield* FernCheckpointStore.prewakeWorktree(workspace, { pool: undefined, socketPath });
+ 
+-        expect(yield* fileSystem.readFileString(readme)).toBe("# changed\n");
++        expect(requests).toEqual([{ method: "POST", path: `/envs/${env}/prewake`, body: undefined }]);
+       }),
+     );
+ 
+-    it.effect("doesn't ask Fern for a checkpoint git doesn't have", () =>
++    it.effect("never fails, even without the daemon", () =>
+       Effect.gen(function* () {
+-        const { workspace, store, calls } = yield* setUp;
++        const { tmp, workspace } = yield* setUp;
+ 
+-        expect(yield* store.restoreCheckpoint({ cwd: workspace, checkpointRef: ref0 })).toBe(false);
+-        expect(yield* calls).toEqual([]);
++        yield* FernCheckpointStore.prewakeWorktree(workspace, {
++          pool: NodePath.join(tmp, "pool"), socketPath: NodePath.join(tmp, "nothing.sock"),
++        });
++      }),
++    );
++  });
++
++  describe("prewakeWhileOpen", () => {
++    for (const [open, wanted] of [["1 second", 0], ["3 seconds", 1]] as const) {
++      it.effect(`wakes ahead a thread whose stream is open ${open}: ${wanted}`, () =>
++        Effect.gen(function* () {
++          const { tmp, workspace } = yield* setUp;
++          const socketPath = NodePath.join(tmp, "api.sock");
++          const requests = yield* fakeApi(socketPath, 204);
++          const lookups: Array<string> = [];
++          const stream = Stream.never.pipe(
++            FernCheckpointStore.prewakeWhileOpen(
++              Effect.sync(() => { lookups.push(workspace); return workspace; }),
++              { pool: NodePath.join(tmp, "pool"), socketPath },
++            ),
++          );
++          const fiber = yield* Effect.forkChild(Stream.runDrain(stream));
++          yield* settled(() => false); // the stream has started
++          yield* TestClock.adjust(open);
++          // The request is real I/O, outside the test clock.
++          yield* settled(() => requests.length >= wanted);
++          yield* Fiber.interrupt(fiber);
++          // A thread closed before the delay isn't woken later either.
++          yield* TestClock.adjust("1 minute");
++          yield* settled(() => false);
++
++          expect(lookups.length).toBe(wanted);
++          expect(requests.length).toBe(wanted);
++        }),
++      );
++    }
++
++    it.effect("keeps the stream when the lookup fails", () =>
++      Effect.gen(function* () {
++        const fiber = yield* Effect.forkChild(
++          Stream.make(1, 2).pipe(
++            Stream.concat(Stream.fromEffect(Effect.sleep("3 seconds").pipe(Effect.as(3)))),
++            FernCheckpointStore.prewakeWhileOpen(Effect.fail("no thread"), { pool: undefined }),
++            Stream.runCollect,
++          ),
++        );
++        yield* settled(() => false); // the stream has started
++        yield* TestClock.adjust("3 seconds");
++
++        expect(Array.from(yield* Fiber.join(fiber))).toEqual([1, 2, 3]);
+       }),
+     );
+   });
+diff --git a/apps/server/src/checkpointing/FernCheckpointStore.ts b/apps/server/src/checkpointing/FernCheckpointStore.ts
+index 6b952db9..f72f1b26 100644
+--- a/apps/server/src/checkpointing/FernCheckpointStore.ts
++++ b/apps/server/src/checkpointing/FernCheckpointStore.ts
+@@ -10,8 +10,10 @@ import * as NodeHttp from "node:http";
+ import * as NodePath from "node:path";
+ 
+ import type { CheckpointRef } from "@t3tools/contracts";
++import * as Data from "effect/Data";
+ import * as Effect from "effect/Effect";
+ import * as Layer from "effect/Layer";
++import * as Stream from "effect/Stream";
+ 
+ import * as CheckpointStore from "./CheckpointStore.ts";
+ import * as VcsProcess from "../vcs/VcsProcess.ts";
+@@ -28,6 +30,12 @@ export interface FernOptions {
+ // A restore stops the environment's box before it swaps the disk.
+ const FERN_TIMEOUT_MS = 120_000;
+ 
++// The daemon's API on this node.
++const FERN_SOCKET = "/run/fern/fern.sock";
++
++// Fern answers a pre-wake at once; one that takes longer is lost, not waited for.
++const PREWAKE_TIMEOUT_MS = 5_000;
++
+ const digest = (value: string, length: number) =>
+   NodeCrypto.createHash("sha256").update(value).digest("hex").slice(0, length);
+ 
+@@ -37,6 +45,103 @@ export const fernEnvironmentId = (workspace: string) => `t3-${digest(workspace,
+ /** Refs can be longer and use more characters than snapshot IDs allow. */
+ export const fernSnapshotId = (ref: CheckpointRef) => `t3-${digest(ref, 32)}`;
+ 
++// The worktree holding cwd, or null for folders Fern doesn't manage.
++const workspaceIn = (worktrees: string, cwd: string) => {
++  const [repo, name] = NodePath.relative(worktrees, NodePath.resolve(cwd)).split(NodePath.sep);
++  if (repo === undefined || name === undefined || repo === "..") {
++    return null;
++  }
++  return NodePath.join(worktrees, repo, name);
++};
++
++/** A request to Fern's API that failed: it was refused, or the daemon didn't answer. */
++export class FernApiError extends Data.TaggedError("FernApiError")<{
++  readonly path: string;
++  readonly cause: unknown;
++}> {}
++
++// POSTs body, if any, as JSON to the daemon's API at socketPath, and fails unless it answers 2xx.
++const post = (socketPath: string, path: string, body?: unknown) =>
++  Effect.tryPromise({
++    try: (signal) => new Promise<void>((resolve, reject) => {
++      const req = NodeHttp.request({
++        socketPath, path, method: "POST", signal,
++        headers: body === undefined ? {} : { "content-type": "application/json" },
++      }, (res) => {
++        let error = "";
++        res.setEncoding("utf8");
++        res.on("data", (chunk: string) => { error += chunk.slice(0, 4096 - error.length); });
++        res.on("error", reject);
++        res.on("end", () => {
++          const status = res.statusCode ?? 500;
++          if (status >= 200 && status < 300) resolve();
++          else reject(new Error(`fern ${path}: HTTP ${status}: ${error}`));
++        });
++      });
++      req.on("error", reject);
++      req.end(body === undefined ? undefined : JSON.stringify(body));
++    }),
++    catch: (cause) => new FernApiError({ path, cause }),
++  });
++
++/**
++ * Asks Fern to wake environment env's box ahead of its next turn, so the turn doesn't wait for
++ * the wake. Fern answers at once and puts a box no turn comes to back to sleep. A pre-wake is
++ * only a guess, so a failure is logged, never returned.
++ */
++export const prewake = (socketPath: string, env: string) =>
++  post(socketPath, `/envs/${env}/prewake`).pipe(
++    Effect.timeout(PREWAKE_TIMEOUT_MS),
++    Effect.catch((cause) =>
++      Effect.logDebug("FernCheckpointStore: Fern couldn't wake ahead", { environment: env, cause }),
++    ),
++  );
++
++/** Where prewakeWorktree finds Fern; by default from FERN_POOL, and none without it. */
++export interface PrewakeOptions {
++  readonly pool?: string | undefined;
++  readonly socketPath?: string;
++}
++
++/** Pre-wakes the box of the thread worktree at worktreePath, if Fern holds it. */
++export const prewakeWorktree = (worktreePath: string, options: PrewakeOptions = {}) => {
++  const pool = "pool" in options ? options.pool : process.env.FERN_POOL?.trim();
++  const workspace = pool ? workspaceIn(NodePath.join(pool, "worktrees"), worktreePath) : null;
++  return workspace === null
++    ? Effect.void
++    : prewake(options.socketPath ?? FERN_SOCKET, fernEnvironmentId(workspace));
++};
++
++/**
++ * A thread whose stream stays open this long is being looked at, and its next turn is likely
++ * soon. Threads only clicked past aren't woken.
++ */
++export const PREWAKE_AFTER = "2 seconds";
++
++/**
++ * Pre-wakes the worktree that worktreePath looks up once stream has been open PREWAKE_AFTER;
++ * the stream's end, before that, cancels it. A failure is logged, and never ends the stream.
++ */
++export const prewakeWhileOpen =
++  <E2, R2>(
++    worktreePath: Effect.Effect<string | null | undefined, E2, R2>,
++    options: PrewakeOptions = {},
++  ) =>
++  <A, E, R>(stream: Stream.Stream<A, E, R>) =>
++    stream.pipe(
++      Stream.drainFork(
++        Stream.fromEffect(
++          Effect.sleep(PREWAKE_AFTER).pipe(
++            Effect.andThen(worktreePath),
++            Effect.flatMap((path) => (path ? prewakeWorktree(path, options) : Effect.void)),
++            Effect.catchCause((cause) =>
++              Effect.logDebug("FernCheckpointStore: couldn't wake an opened thread ahead", { cause }),
++            ),
++          ),
++        ),
++      ),
++    );
++
+ export const make = (options: FernOptions) =>
+   Effect.gen(function* () {
+     const git = yield* CheckpointStore.make;
+@@ -45,14 +150,7 @@ export const make = (options: FernOptions) =>
+     // Creating an environment that exists is a no-op, but it would cost a process per capture.
+     const created = new Set<string>();
+ 
+-    // The worktree holding cwd, or null for folders Fern doesn't manage.
+-    const workspaceOf = (cwd: string) => {
+-      const [repo, name] = NodePath.relative(worktrees, NodePath.resolve(cwd)).split(NodePath.sep);
+-      if (repo === undefined || name === undefined || repo === "..") {
+-        return null;
+-      }
+-      return NodePath.join(worktrees, repo, name);
+-    };
++    const workspaceOf = (cwd: string) => workspaceIn(worktrees, cwd);
+ 
+     const timed = <A, E, R>(operation: string, cwd: string, effect: Effect.Effect<A, E, R>) =>
+       Effect.gen(function* () {
+@@ -88,27 +186,8 @@ export const make = (options: FernOptions) =>
+       if (options.socketPath === undefined) {
+         return fern(cwd, ["snapshot", "--replace", env, id]);
+       }
+-      return timed("fern.snapshot", cwd, Effect.tryPromise({
+-        try: (signal) => new Promise<void>((resolve, reject) => {
+-          const req = NodeHttp.request({
+-            socketPath: options.socketPath,
+-            path: `/envs/${env}/snapshots`, method: "POST", signal,
+-            headers: { "content-type": "application/json" },
+-          }, (res) => {
+-            let error = "";
+-            res.setEncoding("utf8");
+-            res.on("data", (chunk: string) => { error += chunk.slice(0, 4096 - error.length); });
+-            res.on("error", reject);
+-            res.on("end", () => {
+-              const status = res.statusCode ?? 500;
+-              if (status >= 200 && status < 300) resolve();
+-              else reject(new Error(`fern snapshot: HTTP ${status}: ${error}`));
+-            });
+-          });
+-          req.on("error", reject);
+-          req.end(JSON.stringify({ id, replace: true }));
+-        }),
+-        catch: (cause) => cause,
++      return timed("fern.snapshot", cwd, post(options.socketPath, `/envs/${env}/snapshots`, {
++        id, replace: true,
+       }).pipe(Effect.timeout(FERN_TIMEOUT_MS)));
+     };
+ 
+@@ -189,6 +268,6 @@ export const layer = Layer.effect(
+   CheckpointStore.CheckpointStore,
+   Effect.suspend(() => {
+     const pool = process.env.FERN_POOL?.trim();
+-    return pool ? make({ pool, command: "fern", socketPath: "/run/fern/fern.sock" }) : CheckpointStore.make;
++    return pool ? make({ pool, command: "fern", socketPath: FERN_SOCKET }) : CheckpointStore.make;
+   }),
+ );
+diff --git a/apps/server/src/orchestration-v2/CheckpointRollbackService.ts b/apps/server/src/orchestration-v2/CheckpointRollbackService.ts
+index abacb6d6..c24ddd33 100644
+--- a/apps/server/src/orchestration-v2/CheckpointRollbackService.ts
++++ b/apps/server/src/orchestration-v2/CheckpointRollbackService.ts
+@@ -33,6 +33,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
+ import { ProviderSessionManagerV2 } from "./ProviderSessionManager.ts";
+ import { RuntimePolicyV2 } from "./RuntimePolicy.ts";
+ import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
++import * as FernCheckpointStore from "../checkpointing/FernCheckpointStore.ts";
+ 
+ export const ROLLBACK_FAILED_MESSAGE =
+   "The provider could not roll back this conversation. Try again; if it keeps failing, check the provider and server logs.";
+@@ -388,7 +389,12 @@ export const layer: Layer.Layer<
+           const { thread } = yield* projections.getThreadRecords(input.threadId, []);
+           yield* thread.worktreePath === null
+             ? execute(input)
+-            : withWorkspaceLease(path.resolve(thread.worktreePath), execute(input));
++            : withWorkspaceLease(path.resolve(thread.worktreePath), execute(input)).pipe(
++                // Fern: the restore left the thread's box asleep, and its next turn is likely
++                // soon. Its wake starts only now, so it holds up none of the rollback's disk
++                // changes, and starts no services on half-restored files.
++                Effect.andThen(FernCheckpointStore.prewakeWorktree(thread.worktreePath)),
++              );
+         }).pipe(
+           Effect.mapError((cause) =>
+             isCheckpointRollbackExecutionError(cause)
+diff --git a/apps/server/src/ws.ts b/apps/server/src/ws.ts
+index 7e9181cb..75fe2f13 100644
+--- a/apps/server/src/ws.ts
++++ b/apps/server/src/ws.ts
+@@ -112,6 +112,7 @@ import {
+ import { RpcSerialization, RpcServer } from "effect/rpc";
+ 
+ import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
++import * as FernCheckpointStore from "./checkpointing/FernCheckpointStore.ts";
+ import * as ServerConfig from "./config.ts";
+ import * as EnvironmentTheme from "./environmentTheme.ts";
+ import * as Keybindings from "./keybindings.ts";
+@@ -2021,6 +2022,17 @@ const layerWsRpc = (
+             Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
+               Effect.andThen(subscribeOrchestrationV2Thread(input)),
+             ),
++          ).pipe(
++            // Fern: an opened thread's next turn is likely soon, so its box is woken ahead.
++            // Sidebar prewarming opens this stream for a few threads too; Fern runs two
++            // pre-wakes at a time and puts boxes no turn comes to back to sleep.
++            FernCheckpointStore.prewakeWhileOpen(
++              Effect.gen(function* () {
++                const threadManagement = yield* ThreadManagementService.ThreadManagementService;
++                const shell = yield* threadManagement.getThreadShell(input.threadId);
++                return shell?.worktreePath;
++              }),
++            ),
+           ),
+         [ORCHESTRATION_V2_WS_METHODS.subscribeCommandOutput]: (input) =>
+           Stream.unwrap(

@@ -131,6 +131,7 @@ func subcommands() []subcommand {
 		{name: "exec", run: execute},
 		{name: "sleep", min: 1, max: 1, run: timed((*api.Client).Sleep)},
 		{name: "wake", min: 1, max: 1, run: timed((*api.Client).Wake)},
+		{name: "prewake", min: 1, max: 1, run: timed((*api.Client).Prewake)},
 	}
 }
 

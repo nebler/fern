@@ -149,6 +149,7 @@ Unix socket `/run/fern/fern.sock` (a host directory, so T3's server pod can shar
 | `GET /envs/{id}/snapshots` | list snapshots | built |
 | `POST /envs/{id}/restore` | restore `{snapshot}` | built; stops the box, swaps the workspace; the box restarts lazily |
 | `POST /envs/{id}/sleep` / `wake` | explicit lifecycle | built; planned: usually automatic |
+| `POST /envs/{id}/prewake` | wake the box ahead of a likely command, in the background | built; answers at once (§6.4); the T3 hook calls it when a thread is opened or reverted |
 | `DELETE /envs/{id}` | delete the environment, its box and snapshots | built |
 | `DELETE /envs/{id}/snapshots/{s}` | prune | built; the T3 hook calls this when checkpoints are deleted |
 | `POST /envs/{id}/fork` | new environment from `{snapshot}` `{newId, count?}` | planned; runs the identity hook; fork caps apply |
@@ -202,6 +203,15 @@ CPU usage and running services are ignored. An explicit `hold` keeps it awake.
 Built: the actor's timer, with both clocks touched by every exec (`--idle-agent`, `--idle-human`; 0 turns it off). Terminals, previews and `hold` are planned.
 
 **T3 keeps a thread's Claude running between turns,** in one exec, and ends it once the session has been idle (no turn, tool call, approval or background task). Unpatched T3 waits 30 minutes, so a box would stay awake about 35 minutes after a short turn, holding Claude's memory (200 MB and up). Fern's T3 image waits 5 minutes (`images/t3/fern-sessions.patch`; `T3CODE_PROVIDER_IDLE_TIMEOUT_MS` changes it): Claude exits 5 minutes after the last turn, and the box sleeps 5 minutes later, or 20 minutes after Claude started if that is later. The next turn wakes the box and T3 resumes the same conversation.
+
+### 6.4 Pre-wake
+A wake takes about a second (0.7 s in the lab, 1.0–1.2 s on the VPS), and a turn that finds its box asleep waits for it. When a turn is likely soon, T3's hook asks for the wake ahead (`POST /envs/{id}/prewake`), and the user's think time hides it:
+- **a thread is opened:** T3's server streams an open thread to the app (`orchestration.subscribeThread`); one still open after 2 s is woken ahead. A thread only clicked past isn't: the stream's end cancels the wait. The app's sidebar opens the same stream for the first three threads it shows, which can't be told apart; those cost a wake and two minutes of an idle box each.
+- **a thread is reverted:** after T3's rollback has finished (Fern's restore, git's restore and the deleted checkpoints' snapshots), so the wake holds up none of them and starts no services on half-restored files.
+
+The daemon answers at once and wakes in the background, two pre-wakes at a time; up to 8 more wait, and further ones are dropped. A box that is awake is left as it is, its idle clocks included. A box woken ahead sleeps after `--idle-prewake` (default 2 min) unless a command comes first; the first command gives it the usual clocks (§6.3). A pre-wake holds its environment's actor during the wake, like any wake: a command that comes meanwhile waits for the same wake instead of starting another. `fern_prewakes_total` counts them by result (`woken`, then `used` or `wasted`; `awake`, `unknown`, `dropped`, `error`).
+
+Measured (lab, `lab/check.sh box`): a command 3 s after a pre-wake takes 65 ms (p50), one to an asleep box 733 ms. In T3 (`lab/t3-run.sh toy 3`), the turn after a revert no longer waits for a wake, and the revert itself is unchanged (2.2 s p50).
 
 ---
 
@@ -477,7 +487,7 @@ A first, then propose B with what the spike learned (roadmap week 8). C only if 
 
 - **Events:** `GET /events` (created, woke, slept, snapshot, restored, forked, failed).
 - **Metrics (Prometheus),** at `/metrics` on the daemon's port 9090 (`--metrics-addr`):
-  - built: histograms `fern_wake_seconds`, `fern_stop_seconds`, `fern_restore_seconds` and `fern_snapshot_seconds` (by `result`: `ok` or `error`), `fern_queue_seconds` (how long a change waited for its actor, by `change`), `fern_wake_step_seconds` (by `step`: `sandbox`, `pod`, `ready`); `fern_idle_sleeps_total`; Go's process metrics. A wake and a restore are also logged with their time
+  - built: histograms `fern_wake_seconds`, `fern_stop_seconds`, `fern_restore_seconds` and `fern_snapshot_seconds` (by `result`: `ok` or `error`), `fern_queue_seconds` (how long a change waited for its actor, by `change`), `fern_wake_step_seconds` (by `step`: `sandbox`, `pod`, `ready`); `fern_idle_sleeps_total`; `fern_prewakes_total` (by `result`, §6.4); Go's process metrics. A wake and a restore are also logged with their time
   - planned: golden hit rate and build time, active sessions, pool usage, box restarts
 - **Logs:** per environment (services, `fern-init`, resume/setup output), viewable with `fern logs <env>`.
 - **Turn timing (built):** `FERN_TIMING=1` on T3 records provider launch, the first decoded Claude event, Claude's cumulative API counter and each Git/Fern checkpoint span. `fern-claude` passes the flag to boxexec, which logs the successful process start and first stdout without arguments, environment values or stream contents. `lab/t3-run.sh` adds a `timing` object to each turn; it reads logs after the wall timer stops and uses T3's event stream for completion, keeping the existing `wallMs`, `runMs` and daemon metric fields. Driver and node clocks must be synchronized. `lab/t3-start.sh` compares the pinned native Claude binary inside and outside gVisor, including SDK initialization without a model prompt.

@@ -50,8 +50,9 @@ set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 lab_lock
 source lab/hardware.sh
-# WAKES is how many times box sleeps and wakes its box, for the timings.
-ENV=ck IDLE=${IDLE:-180} WAKES=${WAKES:-10}
+# WAKES is how many times box sleeps and wakes its box, for the timings, and
+# PREWAKES how many times it wakes it ahead.
+ENV=ck IDLE=${IDLE:-180} WAKES=${WAKES:-10} PREWAKES=${PREWAKES:-5}
 CLAUDE="$(sed -n 's/^ARG CLAUDE_VERSION=//p' images/Dockerfile) (Claude Code)"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -103,6 +104,11 @@ metrics() {
   local pod
   pod=$(k -n fern-system get pod -l app.kubernetes.io/name=fern -o jsonpath='{.items[0].metadata.name}')
   k get --raw "/api/v1/namespaces/fern-system/pods/$pod:9090/proxy/metrics"
+}
+# counter_since prints how much counter $2 in the metrics on stdin grew
+# since the metrics in file $1 were read.
+counter_since() {
+  awk -v c="$2" 'NR == FNR { if ($1 == c) b = $2; next } $1 == c { a = $2 } END { printf "%d", a - b }' "$1" -
 }
 # wake_steps prints the mean time of each step of the wakes since the
 # metrics in file BEFORE were read.
@@ -251,6 +257,26 @@ box() {
   check "a write in it stays" y "$(fern exec $ENV -- cat inside)"
   check "and so does the database (4 users)" 4 "$(sql $ENV 'select count(*) from users')"
   check "only the declared services come back" 0 "$(procs $ENV | grep -cx sleep || true)"
+  # T3 asks for a pre-wake when a thread is opened or reverted. It answers
+  # at once; a command after the user's think time (3 s here) finds the box
+  # up. Interleaved with commands to an asleep box, which wait for the wake.
+  metrics >"$TMP/metrics"
+  for _ in $(seq "$PREWAKES"); do
+    fern sleep $ENV >/dev/null
+    fern prewake $ENV | took >>"$TMP/prewake"
+    sleep 3
+    start=$(now_ms)
+    fern exec $ENV -- true
+    echo $(($(now_ms) - start)) >>"$TMP/prewoken"
+    fern sleep $ENV >/dev/null
+    start=$(now_ms)
+    fern exec $ENV -- true
+    echo $(($(now_ms) - start)) >>"$TMP/asleep"
+  done
+  metric box.prewake_ms "a pre-wake's answer, ms" "$(stats <"$TMP/prewake")"
+  metric box.prewoken_exec_ms "a command 3 s after a pre-wake, ms" "$(stats <"$TMP/prewoken")"
+  metric box.asleep_exec_ms "a command to an asleep box, ms" "$(stats <"$TMP/asleep")"
+  check "every pre-wake was used by its command" "$PREWAKES" "$(metrics | counter_since "$TMP/metrics" 'fern_prewakes_total{result="used"}')"
   sql $ENV "insert into users (name, email) values ('Barbara', 'barbara@example.com')" >/dev/null
   start=$(now_ms)
   k -n fern-boxes delete pod $ENV --force --grace-period=0 >/dev/null 2>&1

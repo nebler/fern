@@ -1339,3 +1339,35 @@ a quiet run. The replaced checkpoint stays at 18–32 ms. The p95 flags are
 p95s of 20 samples under load. The new baselines (5 runs each) include the
 CPU, disk and platform metrics; the VPS checkpoint baseline is now 91.8 ms
 with a wide margin.
+
+## Pre-wake, 2026-10-26
+
+Built as architecture §6.4: T3 asks for a box ahead when a thread has been
+open 2 s and after a rollback; the daemon wakes two at a time and puts a box
+no command comes to back to sleep after 2 minutes.
+
+| | lab | VPS |
+|---|---|---|
+| a pre-wake's answer, p50 | 0.4 ms | 0.9 ms |
+| a command 3 s after a pre-wake, p50 | 65 ms | 107 ms |
+| a command to an asleep box, p50 | 733 ms | 1,150 ms |
+
+`lab/t3-run.sh toy 3` (now with a reopen step: the thread's box sleeps, the
+thread is opened again and read for 3 s), on the VPS: each run's two
+pre-wakes (after the revert, at the reopen) woke a box the next turn used,
+and no turn after a revert or a reopen waited for a wake. Since the VPS's
+daemon started (the gates included): 54 woken, 54 used, none wasted.
+The first version woke from inside T3's restore, and the revert went from
+2.1 to 3.2 s: T3 deletes the reverted checkpoints' snapshots after the
+restore, and they waited for the wake in the environment's actor. Waking
+after the whole rollback put the revert back at 2.0–2.4 s (VPS).
+
+The full gates against the `8ca5c960` baselines: on the VPS, 3 metrics
+flagged, none in what pre-wake touches (load CPU per minute in scale, +18% to
++29%, and 10 MiB of node memory growth); in the lab, 37, all node-wide CPU
+and timing, because Go tests and lint ran in Docker on the same Mac during
+the gate (idle node CPU alone +55%). The lab's new baseline was recorded
+with the Mac quiet. Between the two VPS baselines, with no change in
+between that touches them, sleep went 1,622 → 1,422 → 1,621 ms and the
+first checkpoint 12 → 92 → 10 ms: one gate run against one baseline can't
+tell such changes from a regression; `lab/ab.sh` can.

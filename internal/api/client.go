@@ -105,6 +105,12 @@ func (c *Client) Wake(ctx context.Context, id string) error {
 	return c.do(ctx, http.MethodPost, envPath(id)+"/wake", nil, "", nil)
 }
 
+// Prewake asks for environment id's box to be woken in the background, and
+// returns without waiting for it.
+func (c *Client) Prewake(ctx context.Context, id string) error {
+	return c.do(ctx, http.MethodPost, envPath(id)+"/prewake", nil, "", nil)
+}
+
 // Exec runs req in environment id's box, waking it if needed, and returns
 // the command's exit code. See boxexec.Run for the streams.
 func (c *Client) Exec(ctx context.Context, id string, req boxexec.Request, streams boxexec.Streams) (int, error) {

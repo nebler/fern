@@ -92,7 +92,8 @@ disk/control transition and delayed exec admission.
 The smaller alternative is **pre-wake after T3 completes its Git restore**.
 It could hide the next-turn wake during user think time; it does not shorten
 restore itself. Waking from the current pre-Git hook would race T3's writes.
-This alternative is proposed, not implemented or measured.
+Since built, after T3's whole rollback rather than its restore: see
+[architecture §6.4](../docs/architecture.md#64-pre-wake).
 
 Validation passed: `lab/go.sh test -race ./...`, `lab/lint.sh` (0 issues),
 and `lab/test-store.sh -run '^TestCrash/restore$' -v` (all five existing
