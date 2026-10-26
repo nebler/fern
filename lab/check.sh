@@ -62,10 +62,11 @@ check() {
 note() { echo "NOTE $*"; }
 # metric KEY TEXT VALUE notes "TEXT: VALUE" and, with METRICS set (by
 # lab/perf.sh, which compares it with a baseline), records VALUE under KEY:
-# lower is better, and KEY ends in its unit (_ms, _mib, _bytes, _count). A VALUE from stats
-# records its p50 and p95.
+# lower is better, and KEY ends in its unit (_ms, _mib, _bytes, _count).
+# A VALUE from stats records its p50 and p95. Node memory deltas can be
+# negative when unrelated memory is reclaimed during a scale step.
 metric() {
-  if [[ $3 != n=* && ! $3 =~ ^[0-9]+([.][0-9]+)?([[:space:]].*)?$ ]]; then
+  if [[ $3 != n=* && ! $3 =~ ^-?[0-9]+([.][0-9]+)?([[:space:]].*)?$ ]]; then
     echo "FAIL metric $1: invalid value '$3'" >&2
     FAILED=1
     return 1
