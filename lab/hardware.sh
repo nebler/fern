@@ -23,12 +23,16 @@ resource_op() {
     metric "$key.$name" "$key $name" "$value" >&2
   done < <(sed -n '/^RESOURCE /p' <<<"$out")
   if [ "$1" = wake ]; then
-    local uid
+    local uid pod_cpu pod_io
     uid=$(pod_uid "$2")
-    pod_cgroups cpu.stat "$uid" | awk '$1=="usage_usec" {printf "%.3f\n",$2/1000}' |
-      while read -r value; do metric "$key.box_cpu_ms" "$key pod CPU since birth, ms (gVisor included)" "$value" >&2; done
-    pod_cgroups io.stat "$uid" | awk '{for(i=2;i<=NF;i++) if($i ~ /^wbytes=/) {split($i,a,"=");b+=a[2]}} END {printf "%.0f\n",b}' |
-      while read -r value; do metric "$key.box_write_bytes" "$key pod issued writes since birth, bytes" "$value" >&2; done
+    if [ -z "$uid" ] || ! pod_cpu=$(pod_cgroups cpu.stat "$uid") || ! pod_io=$(pod_cgroups io.stat "$uid"); then
+      echo "FAIL $key reading wake pod counters" >&2
+      return 1
+    fi
+    value=$(awk '$1=="usage_usec" {printf "%.3f", $2/1000}' <<<"$pod_cpu")
+    metric "$key.box_cpu_ms" "$key pod CPU since birth, ms (gVisor included)" "$value" >&2 || return
+    value=$(awk '{for(i=2;i<=NF;i++) if($i ~ /^wbytes=/) {split($i,a,"=");b+=a[2]}} END {printf "%.0f",b}' <<<"$pod_io")
+    metric "$key.box_write_bytes" "$key pod charged writes since birth, bytes" "$value" >&2 || return
   fi
   sed '/^RESOURCE /d' <<<"$out"
 }
