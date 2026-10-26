@@ -5,7 +5,8 @@
 #   box          a box runs under gVisor and keeps no state of its own: only
 #                its workspace survives a sleep, and a force-deleted pod
 #                comes back
-#   disk         a 100,000-file workspace: snapshot, restore (equal to its
+#   disk         DISK_HARDWARE=1 adds CPU/I/O profiling (all, not perf default)
+#                a 100,000-file workspace: snapshot, restore (equal to its
 #                snapshot) and rm (nothing left); a seeded create; a real clone
 #   stream       fern exec keeps a stream intact: bytes, stderr, exit codes,
 #                stdin, signals, cancellation
@@ -217,7 +218,6 @@ procs() { fern exec "$1" -- sh -c 'cat /proc/[0-9]*/comm 2>/dev/null; true' | so
 box() {
   echo "== a box keeps no state of its own"
   fresh $ENV
-  resource_op box.fresh_wake wake $ENV >/dev/null
   sql $ENV "insert into users (name, email) values ('Edsger', 'edsger@example.com')" >/dev/null
   # setsid: an exec's own process group ends with it. The pause lets the
   # child leave the group before the exec ends and the group is killed.
@@ -231,9 +231,9 @@ box() {
   local mounted=0
   metrics >"$TMP/metrics"
   for _ in $(seq "$WAKES"); do
-    resource_op box.sleep sleep $ENV | took >>"$TMP/sleep"
+    fern sleep $ENV | took >>"$TMP/sleep"
     mounted=$((mounted + $(mounts $ENV)))
-    resource_op box.wake wake $ENV | took >>"$TMP/wake"
+    fern wake $ENV | took >>"$TMP/wake"
   done
   metric box.sleep_ms "sleep (until the pod is gone), ms" "$(stats <"$TMP/sleep")"
   metric box.wake_ms "wake (until Postgres is ready), ms" "$(stats <"$TMP/wake")"
@@ -273,6 +273,13 @@ treehash() { in_daemon "cd '$1' && find . -type f -print0 | sort -z | xargs -0r 
 disk() {
   echo "== a big workspace"
   local D=/var/lib/fern/envs/big
+  local -a snapshot=(fern snapshot) restore_disk=(fern restore)
+  # Resource reads alter the I/O cadence before seeded-create. Profile
+  # these large-workspace operations only in all or explicit CPU runs.
+  if [ "${DISK_HARDWARE:-0}" = 1 ]; then
+    snapshot=(resource_op disk.snapshot snapshot)
+    restore_disk=(resource_op disk.restore restore)
+  fi
   fern rm big 2>/dev/null || true
   fern create big >/dev/null
   # 1,000 folders of 100 small files, as node_modules has, and a 1 GB file.
@@ -281,10 +288,10 @@ disk() {
     for d in \$(seq 999); do cp -r --reflink=never p0 p\$d; done &&
     head -c 1000000000 /dev/urandom > ../blob && chown -R 1000:1000 $D/live && sync"
   note "workspace: $(in_daemon "find $D/live | wc -l") files, $(in_daemon "du -sh $D/live | cut -f1")"
-  for i in $(seq 10); do resource_op disk.snapshot snapshot big "s$i" | took; done >"$TMP/snap"
+  for i in $(seq 10); do "${snapshot[@]}" big "s$i" | took; done >"$TMP/snap"
   metric disk.snapshot_ms "snapshot, ms" "$(stats <"$TMP/snap")"
   in_daemon "echo changed > $D/live/blob && rm $D/live/node_modules/p0/f1 && echo new > $D/live/new"
-  for i in $(seq 5); do resource_op disk.restore restore big "s$i" | took; done >"$TMP/restore"
+  for i in $(seq 5); do "${restore_disk[@]}" big "s$i" | took; done >"$TMP/restore"
   metric disk.restore_ms "restore (asleep, so no box to stop), ms" "$(stats <"$TMP/restore")"
   check "a restore equals its snapshot (tree hash)" "$(treehash $D/snaps/s1)" "$(treehash $D/live)"
   start=$(now_ms)
@@ -849,7 +856,7 @@ hardware() {
     esac
   done <"$TMP/platform-after"
   fresh $ENV
-  resource_op hardware.fresh_wake wake $ENV >/dev/null
+  resource_op box.fresh_wake wake $ENV >/dev/null
   fern rm ${ENV}-empty 2>/dev/null || true
   fern create ${ENV}-empty >/dev/null
   fern wake ${ENV}-empty >/dev/null
@@ -879,6 +886,12 @@ hardware() {
   after_bytes=$(in_daemon "btrfs filesystem du -s --raw /var/lib/fern/envs/$ENV" | awk 'NR>1 {print $2+$3}')
   metric hardware.checkpoint_growth_bytes "allocated data growth/checkpoint (1 MiB replaced each time), bytes" \
     "$(awk -v a="$after_bytes" -v b="$before_bytes" 'BEGIN {printf "%.0f",(a-b)/5}')"
+  # Counter reads and pod lookups change the cadence between wakes and
+  # sleeps. Keep CPU samples separate from box's original timing loop.
+  for _ in $(seq 3); do
+    resource_op box.sleep sleep $ENV >/dev/null
+    resource_op box.wake wake $ENV >/dev/null
+  done
 }
 
 # Fifty lifecycle cycles are too long for quick or the repeated default
@@ -915,7 +928,7 @@ main() {
   alone=" idle daemon node many scale hardware stability "
   case "${1:-}" in
     "") set -- "${quick[@]}" ;;
-    all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} ;;
+    all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} && DISK_HARDWARE=1 ;;
   esac
   for s in "$@"; do
     case " ${all[*]} t3 " in
