@@ -366,25 +366,34 @@ checks passed. No Go source changes remain.
 
 ## Claude process accounting, 2026-10-26
 
-The hardware gate's two toy runs per target sampled six completed Haiku
-turns. Host pod anon + shmem peaks were 174–217 MiB on the VPS and
-172–204 MiB in the lab; matched service-only boxes used 38.4/37.8 MiB.
-Median increments, 152/158 MiB, include Claude, its tools and runtime growth.
+Sampler `6f51f56e` (unchanged by timing isolation `05f84f96`): two clean toy
+runs per target, six completed Haiku turns each. Host pod anon + shmem peaks were
+178–222 MiB on the VPS and 176–208 MiB in the lab;
+matched service-only boxes used 38.2/37.9 MiB.
+Median increments, 155/159 MiB, include Claude, tools and runtime growth.
+The lab figures replace the ENOSPC-interrupted cohort.
 
 Inside gVisor, Claude-tree peak RSS/anonymous estimates ranged
-483–765/208–292 MiB on the VPS, 480–517/205–243 MiB in the lab.
+487–767/213–295 MiB on the VPS,
+488–766/213–299 MiB in the lab.
 Other guest processes' median peak RSS/anonymous estimates were
-157/50 MiB and 156/49 MiB respectively. Guest status lacks RssAnon here;
-the sampler sums smaps Anonymous. These guest figures approximate residency
-and can count shared mappings repeatedly, explaining why they exceed the
-entire host pod's charge. Use the matched host increment for capacity;
-exact process-level host attribution remains unavailable.
+156/49 MiB and 153/46 MiB respectively.
+Guest status lacks RssAnon here; the sampler sums smaps Anonymous. These
+estimates can double-count shared mappings and exceed the whole host pod's
+charge. Use the matched host increment for capacity; exact process-level
+host attribution remains unavailable.
+
+Median turn CPU, box/T3/daemon, was
+7,096/2,246/118 ms VPS and
+3,205/1,089/50 ms lab. Sampled Claude-tree CPU lower bounds were
+3,815/1,765 ms. Box CPU includes Sentry/gofers and observer execs.
 
 The guest sampler reads PID, parent PID, start time, CPU, RSS and anonymous
 fields every two seconds. Ancestry identifies Claude's tree; start time
 distinguishes reused PIDs; CPU accounting retains ancestry after reparenting.
-CPU is a lower bound because children can start and exit between polls.
-Box CPU comes from pod cgroups, including Sentry/gofers. Observer execs
-add a small cost; guest sampling is disabled during restore to avoid waking
-an environment for measurement. See [RESULTS.md](RESULTS.md) for operation,
-platform, disk and lifecycle measurements.
+Children can start and exit between polls. Host polling now reads cgroup
+counters without a platform-process census (166 ms median VPS wall cost,
+including SSH, versus 1,342 ms for the original full sampler). Guest
+sampling stays disabled during restore to avoid waking an environment.
+See [RESULTS.md](RESULTS.md#cpu-disk-and-platform-perf-gate-2026-10-26) for
+operation, platform, disk, lifecycle measurements and remaining gate flags.
