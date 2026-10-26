@@ -1029,3 +1029,20 @@ request authorization, stale pod UIDs, retry and old-init fallback.
 Lab `box restore golden t3` and VPS `box restore t3` passed: mounts
 are gone after sleep, Postgres data survives, and restores fence execs.
 The committed code is redeployed to the VPS after these checks.
+
+## Second round, merged, 2026-10-26
+
+Five more agents (sleep on the VPS, restore without a stop, wake past the volume wait, box memory, a T3 turn's Fern share), merged into iter-1 at `546eb7d4`; `lab/perf.sh` passed in the lab and on the VPS, and both baselines were recorded again (5 runs).
+
+| VPS, baseline medians | before | after |
+|---|---|---|
+| sleep p50 / p95 | 2,615 / 2,817 ms | 1,621 / 1,822 ms |
+| node memory per box, 20 awake | 89.8 MiB | 80.0 MiB |
+| a box's memory (pod cgroup, sample) | 46.7 MiB | 39.5 MiB |
+| wake | 1,035 ms | 1,018 ms |
+| `t3.restore_ms` | 832 ms | 1,039 ms (worse; being looked into) |
+
+- **Sleep:** kubelet waited for its one-second PLEG cache before it stopped the container; the driver now asks fern-init for its graceful shutdown right after the Sandbox's suspension is stored (`POST /stop`, 250 ms budget, the pod's UID in `If-Match`), and still waits for the pod and its mounts to go. Architecture §10 says how.
+- **Memory:** the sample's Postgres has 20 connection slots, 512 KiB WAL buffers and no logical replication launcher; its 128 MiB cache stays. See `lab/BOX-MEMORY.md`.
+- **A turn:** the checkpoint hook talks to the daemon's socket itself, 18 → 13 ms. Claude starts in 694 ms in a box (542 outside); Fern takes no checkpoint per tool call.
+- **Not built:** a restore under a running box (the CSI bind keeps the old subvolume; with the parent mounted, open files stay old; `lab/LIVE-RESTORE.md`), and a wake without volumes (the volume wait is 300 ms of a wake, 10 ms with none; it needs another way to bring the workspace in).
