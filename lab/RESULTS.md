@@ -1046,3 +1046,118 @@ Five more agents (sleep on the VPS, restore without a stop, wake past the volume
 - **Memory:** the sample's Postgres has 20 connection slots, 512 KiB WAL buffers and no logical replication launcher; its 128 MiB cache stays. See `lab/BOX-MEMORY.md`.
 - **A turn:** the checkpoint hook talks to the daemon's socket itself, 18 → 13 ms. Claude starts in 694 ms in a box (542 outside); Fern takes no checkpoint per tool call.
 - **Not built:** a restore under a running box (the CSI bind keeps the old subvolume; with the parent mounted, open files stay old; `lab/LIVE-RESTORE.md`), and a wake without volumes (the volume wait is 300 ms of a wake, 10 ms with none; it needs another way to bring the workspace in).
+
+## VPS restore: reserve the head start for services, 2026-10-26
+
+Base `59dfdff2`, CAX21, the existing k3s/gVisor configuration. The T3
+worktree has no services (`fern-init started services=0`), so the sample
+Postgres settings in `2cb57c62` do not run in it. Between `fc7dd98b` and
+`546eb7d4`, the actor/store restore path is unchanged; `dc912be3` adds the
+stop request to the driver.
+
+A fresh unchanged `REPEAT=3 WAKES=10 lab/perf.sh t3 box` passed with restore
+**633.9 ms** and sleep **1,621.2 ms**. Its daemon restore durations were
+1,233.4 / 632.7 / 436.2 ms; this small cohort alone does not reproduce
+the saved 1,039 ms median. Do not interpret a single three-run median as a
+repair: kubelet's periodic cleanup and Fern's 200 ms observation interval
+make this metric strongly phase-dependent.
+
+Two alternating cohorts then isolated `stopInit`, using one diagnostic
+binary and a temporary node-local switch that skipped the pod lookup and
+HTTP request. Each cohort ran six pairs of the complete T3 check, reversing
+the order every pair and adding a random 0–999 ms pause before each check.
+No image transfer or other check overlapped these measurements. All checks
+passed. Across twelve restores per side, nearest-rank medians were:
+
+| `stopInit` | Restore p50, ms | Mean, ms |
+|---|---:|---:|
+| early stop enabled | 1,033.9 | 1,053.1 |
+| early stop disabled | 833.2 | 966.5 |
+
+The request is authorized and UID-matched: traced replies were HTTP 204 in
+roughly 3–9 ms, not a lost 250 ms timeout. One slow restore, UTC, pod
+`6b0455e4-364a-431a-839b-00b34eef8cdc`:
+
+- **00:44:53.650:** suspension persisted, 12.3 ms after entering Sleep.
+- **53.654:** pod lookup and `/stop` complete, 4.5 ms total; init starts
+  stopping. There are no services to wait for.
+- **53.659–53.976:** kubelet's `SyncTerminatingPod`; CRI StopContainer takes
+  134 ms and StopPodSandbox 168 ms.
+- **54.154:** the workspace, git and Claude CSI volumes are unmounted.
+- **54.712:** PLEG reports the container finished; `SyncTerminatedPod`
+  enters after another 736 ms waiting for fresh cache status.
+- **54.721:** cleanup finishes; **54.857:** Fern observes the pod gone;
+  **54.873:** restore finishes. Driver stop is 1,220 ms, restore 1,236 ms;
+  only about 16 ms is outside the stop. The restore histogram records
+  1.235567 seconds. The whole check records three stops, 4.663880 seconds.
+
+The same trace also caught a restart in the final delete: pod
+`05e6dcb4-d0da-410e-b855-9039ba3da465` exits at **00:45:01.635826**, kubelet
+starts a second box container at **01.943649**, then enters
+`SyncTerminatingPod` at **01.943745**. Its final status has restartCount 1.
+Persisting Sandbox intent does not mean kubelet has observed pod deletion;
+exiting init in that gap races ordinary pod reconciliation. Not every
+slow restore restarts: the trace above also shows the independent PLEG
+cleanup wait.
+
+A broader candidate kept init alive after draining in every box. Its local
+checks and perf gate passed (restore 834.5 ms, sleep 1,015.3 ms), but it was
+rejected on the VPS: restore 636.5 ms, sleep **2,618.7 ms**, sleep p95
+2,820.9 ms. Keeping a service box's init alive lost the full sleep win.
+
+A narrower candidate limited the head start to boxes with services. Without services,
+init still authenticates the token and pod UID and acknowledges `/stop`, but
+does not cancel its context; kubelet's SIGTERM performs the normal shutdown.
+There is no service work to overlap in that case. Boxes with services keep
+the original early shutdown, including process exit. The durable Sandbox
+mutation, kubelet fallback and pod/mount fence are unchanged. No new disk
+state needs reconciliation.
+
+Handler tests cover repeated acknowledgement without cancellation for an
+empty box, graceful cancellation for a service box, and token/UID rejection
+in both cases. The tests wait for the handler to return, after the flushed
+acknowledgement and deferred cancellation, before checking its effect.
+Removing only the service guard makes the empty-box case fail.
+
+The scoped candidate passed `lab/go.sh test -race ./...`, `lab/go.sh vet ./...`
+and `lab/lint.sh` (zero issues), and the Go code review. Local
+`lab/build.sh t3`, `lab/check.sh box restore t3` and
+`REPEAT=3 lab/perf.sh t3 box` pass. Fresh before/candidate lab medians:
+restore **836.7 → 643.5 ms**, sleep **1,013.6 → 1,014.7 ms**, wake
+**723.3 → 714.2 ms**. The before run used ten box cycles per repeat and
+the candidate run the default twenty. The restore comparison remains subject
+to the phase variation described above.
+
+The scoped candidate also passed the requested VPS three-repeat gate:
+restore **837.6 ms**, sleep **1,621.4 ms** (p95 1,824.1 ms), wake
+1,007.6 ms. VPS `box restore t3` correctness passed, and a follow-up trace
+showed restartCount 0. These results alone would have looked like a fix.
+
+However, a final image-only A/B did **not** validate it. Two balanced cohorts
+of six pairs alternated the original and scoped init images under the same
+unmodified daemon, with a random 0–999 ms pause before each T3 check. Each
+sample checked the CRI image ID after retagging; all checks passed. Twelve
+restores per image gave:
+
+| Init image | Restore p50, ms | Mean, ms |
+|---|---:|---:|
+| original | 837.8 | 854.6 |
+| scoped candidate | 1,032.1 | 1,021.5 |
+
+The scoped candidate is therefore **rejected**, despite its passing gates.
+Both candidates' Go changes and the architecture edit are reverted. The
+original init image is restored on the VPS; no performance baseline is
+edited. Only this investigation is committed.
+
+**Conclusion:** there is a verified premature-exit/restart race, observed
+in delete, but the evidence does not establish that it caused the whole
+reported restore median shift. PLEG cache waits and the 200 ms observer
+make small cohorts misleading. No verified restore latency fix was found
+within the 90-minute time box. Preserve the sleep win and investigate the
+cleanup/cache phase with longer paired measurements before changing stop
+semantics again.
+
+After reverting, race tests and lint pass again, and the restored VPS
+passes `lab/check.sh box restore t3`. The local lab is also rebuilt from
+the unchanged Go source. Temporary image aliases and the diagnostic marker
+are removed, and kubelet verbosity is returned to zero.
