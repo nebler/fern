@@ -12,6 +12,9 @@
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 lab_lock
+source lab/hardware.sh
+hardware_uids
+export HW_DAEMON HW_T3 HW_CONTROLLER
 port=30773
 if [ -n "$FERN_HOST" ]; then
   # A port of its own, so the T3 app's tunnel (30774) can stay open.
@@ -34,7 +37,7 @@ k get --raw "/api/v1/namespaces/fern-system/pods/$pod:9090/proxy/metrics"'
 rm_env='source lab/lib.sh; id=$(fern which "$1") && fern rm "$id"'
 # and samples the node's used memory, in MiB.
 # shellcheck disable=SC2016
-node_memory='source lab/lib.sh; on_node free -m </dev/null | awk "NR == 2 { print \$3 }"'
+node_memory='source lab/lib.sh; on_node awk '\''/^MemTotal:/ {t=$2} /^MemAvailable:/ {a=$2} END {print (t-a)/1024}'\'' /proc/meminfo </dev/null'
 # Timings are read after the step's wall clock and metrics stop. Only the
 # timing lines are collected: provider payloads and service output stay out.
 # shellcheck disable=SC2016
@@ -42,6 +45,36 @@ trace='source lab/lib.sh
 k -n fern-system logs deploy/t3 -c t3 | sed -n "s/^fern-timing //p"
 id=t3-$(printf %s "$1" | shasum -a 256 | cut -c1-16)
 k -n fern-boxes logs "$id" -c box 2>/dev/null | sed -n "/msg=\"claude started\"/p; /msg=\"claude first stdout\"/p" || true'
+# Sample host cgroups and the box guest process tree, using metadata only.
+# Empty path (before launch) means no box exists yet. Missing boxes during
+# restore are expected, but failure to read fixed platform cgroups is fatal.
+# shellcheck disable=SC2016
+resources='source lab/lib.sh; source lab/hardware.sh
+id=t3-$(printf %s "$1" | shasum -a 256 | cut -c1-16)
+uid=${2:-}
+if [ -z "$uid" ] && [ -n "$1" ]; then uid=$(k -n fern-boxes get pod "$id" -o jsonpath="{.metadata.uid}" 2>/dev/null || true); fi
+if [ -n "$uid" ]; then
+  echo "BOXUID $uid"
+  hardware_sample "$uid"
+  if [ "${3:-guest}" = guest ] && fern ls | awk -v id="$id" '\''$1==id && $2=="running" {ok=1} END {exit !ok}'\''; then
+    fern exec -i "$id" -- sh -s <lab/hardware-guest.sh || true
+  fi
+else
+  hardware_sample
+fi'
+# A matched service-only box puts the host pod peak in context. The
+# increment includes Claude, tools and runtime growth, not just CLI heap.
+# shellcheck disable=SC2016
+box_baseline='source lab/lib.sh
+id=ck-t3-profile
+fern rm "$id" 2>/dev/null || true
+fern create "$id" --repo "lab/$1-repo" >/dev/null
+fern wake "$id" >/dev/null
+uid=$(k -n fern-boxes get pod "$id" -o jsonpath="{.metadata.uid}")
+source lab/hardware.sh
+HW_DAEMON=$HW_DAEMON HW_T3=$HW_T3 HW_CONTROLLER=$HW_CONTROLLER hardware_sample "$uid" | awk '\''$1=="box_memory_mib" {print $2}'\''
+fern rm "$id" >/dev/null'
+T3_RESOURCE_CMD=$resources T3_BOX_BASELINE_CMD=$box_baseline \
 T3_PAIR_URL=$pair_url T3_METRICS_CMD=$metrics T3_RM_ENV_CMD=$rm_env T3_NODE_MEMORY_CMD=$node_memory T3_TRACE_CMD=$trace \
   FERN_HOST=$FERN_HOST SCENARIO=${1:-toy} RUNS=${2:-1} MODEL=${3:-claude-haiku-5-5} PARALLEL=${PARALLEL:-1} \
   node lab/t3-run.mjs

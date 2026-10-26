@@ -23,6 +23,8 @@
 #   scale        awake boxes ramped up, 1, 5, 10, then 20 (SCALE): at each
 #                step the new boxes' wakes, memory per box and the daemon's,
 #                and exec and snapshot times with that many awake
+#   hardware     idle CPU with/without Postgres, platform overhead, pool data
+#   stability    50 wake/sleep cycles and retained memory/FDs (all, not quick)
 #   limits       what a box can't do: gain privileges, use more than its CPU
 #                and PIDs, reach another box or anything private; and another
 #                pod can't mount an environment
@@ -45,6 +47,7 @@
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 lab_lock
+source lab/hardware.sh
 # WAKES is how many times box sleeps and wakes its box, for the timings.
 ENV=ck IDLE=${IDLE:-180} WAKES=${WAKES:-10}
 CLAUDE="$(sed -n 's/^ARG CLAUDE_VERSION=//p' images/Dockerfile) (Claude Code)"
@@ -59,9 +62,14 @@ check() {
 note() { echo "NOTE $*"; }
 # metric KEY TEXT VALUE notes "TEXT: VALUE" and, with METRICS set (by
 # lab/perf.sh, which compares it with a baseline), records VALUE under KEY:
-# lower is better, and KEY ends in its unit (_ms, _mib). A VALUE from stats
+# lower is better, and KEY ends in its unit (_ms, _mib, _bytes, _count). A VALUE from stats
 # records its p50 and p95.
 metric() {
+  if [[ $3 != n=* && ! $3 =~ ^[0-9]+([.][0-9]+)?([[:space:]].*)?$ ]]; then
+    echo "FAIL metric $1: invalid value '$3'" >&2
+    FAILED=1
+    return 1
+  fi
   note "$2: $3"
   [ -n "${METRICS:-}" ] || return 0
   case $3 in
@@ -152,6 +160,7 @@ NODE
 # node_used counts shared application memory too: BusyBox free's used column
 # subtracts Cached (including shmem), while procps free uses MemAvailable.
 node_used() {
+  # shellcheck disable=SC2016 # awk fields, not shell variables
   on_node awk '/^MemTotal:/ { total = $2 } /^MemAvailable:/ { available = $2 }
     END { printf "%.3f\n", (total - available) / 1024 }' /proc/meminfo </dev/null
 }
@@ -206,6 +215,7 @@ procs() { fern exec "$1" -- sh -c 'cat /proc/[0-9]*/comm 2>/dev/null; true' | so
 box() {
   echo "== a box keeps no state of its own"
   fresh $ENV
+  resource_op box.fresh_wake wake $ENV >/dev/null
   sql $ENV "insert into users (name, email) values ('Edsger', 'edsger@example.com')" >/dev/null
   # setsid: an exec's own process group ends with it. The pause lets the
   # child leave the group before the exec ends and the group is killed.
@@ -219,9 +229,9 @@ box() {
   local mounted=0
   metrics >"$TMP/metrics"
   for _ in $(seq "$WAKES"); do
-    fern sleep $ENV | took >>"$TMP/sleep"
+    resource_op box.sleep sleep $ENV | took >>"$TMP/sleep"
     mounted=$((mounted + $(mounts $ENV)))
-    fern wake $ENV | took >>"$TMP/wake"
+    resource_op box.wake wake $ENV | took >>"$TMP/wake"
   done
   metric box.sleep_ms "sleep (until the pod is gone), ms" "$(stats <"$TMP/sleep")"
   metric box.wake_ms "wake (until Postgres is ready), ms" "$(stats <"$TMP/wake")"
@@ -269,10 +279,10 @@ disk() {
     for d in \$(seq 999); do cp -r --reflink=never p0 p\$d; done &&
     head -c 1000000000 /dev/urandom > ../blob && chown -R 1000:1000 $D/live && sync"
   note "workspace: $(in_daemon "find $D/live | wc -l") files, $(in_daemon "du -sh $D/live | cut -f1")"
-  for i in $(seq 10); do fern snapshot big "s$i" | took; done >"$TMP/snap"
+  for i in $(seq 10); do resource_op disk.snapshot snapshot big "s$i" | took; done >"$TMP/snap"
   metric disk.snapshot_ms "snapshot, ms" "$(stats <"$TMP/snap")"
   in_daemon "echo changed > $D/live/blob && rm $D/live/node_modules/p0/f1 && echo new > $D/live/new"
-  for i in $(seq 5); do fern restore big "s$i" | took; done >"$TMP/restore"
+  for i in $(seq 5); do resource_op disk.restore restore big "s$i" | took; done >"$TMP/restore"
   metric disk.restore_ms "restore (asleep, so no box to stop), ms" "$(stats <"$TMP/restore")"
   check "a restore equals its snapshot (tree hash)" "$(treehash $D/snaps/s1)" "$(treehash $D/live)"
   start=$(now_ms)
@@ -528,6 +538,9 @@ scale() {
   local -a pod_uids
   read -ra steps <<<"${SCALE:-1 5 10 20}"
   echo "== scale: ${steps[*]} awake boxes"
+  hardware_uids
+  hardware_sample >"$TMP/scale-before"
+  metrics | awk '$1=="go_goroutines" {print "daemon_goroutines_count",$2}' >>"$TMP/scale-before"
   for i in $(seq "${steps[-1]}"); do fresh "s$i"; done
   base=$(on_node free -m </dev/null | awk 'NR == 2 { print $3 }')
   base_available=$(node_used)
@@ -565,6 +578,7 @@ scale() {
     metric scale.n$n.pod_kernel_mib "kernel memory charged per awake pod, MiB" "$kernel_mib"
     metric scale.n$n.daemon_memory_mib "the daemon's memory, MiB" \
       "$(in_daemon 'cat /proc/1/status' | awk '$1 == "RssAnon:" { printf "%.1f", $2 / 1024 }')"
+    hardware_sample "${pod_uids[@]}" >"$TMP/load-before$n"
     : >"$TMP/exec$n"
     for _ in $(seq 20); do
       start=$(now_ms)
@@ -573,15 +587,24 @@ scale() {
     done
     metric scale.n$n.exec_ms "an exec in an awake box, ms" "$(stats <"$TMP/exec$n")"
     start=$(now_ms)
-    for i in $(seq "$n"); do fern exec "s$i" -- true & done
+    for i in $(seq "$n"); do
+      (command_start=$(now_ms); fern exec "s$i" -- true; echo $(($(now_ms) - command_start)) >"$TMP/parallel-$n-$i") &
+    done
     wait
+    metric scale.n$n.contended_exec_ms "per-command latency with $n concurrent execs, ms" "$(cat "$TMP/parallel-$n-"* | stats)"
     metric scale.n$n.parallel_exec_ms "one exec in each awake box at once, ms until all ended" $(($(now_ms) - start))
     : >"$TMP/snap$n"
     for i in $(seq 20); do fern snapshot s1 "n$n-$i" | took >>"$TMP/snap$n"; done
     metric scale.n$n.snapshot_ms "a snapshot of an awake box, ms" "$(stats <"$TMP/snap$n")"
+    hardware_sample "${pod_uids[@]}" >"$TMP/load-after$n"
+    resource_rates scale.n$n.load "$TMP/load-before$n" "$TMP/load-after$n" "$n"
     prev=$n
   done
   for i in $(seq "${steps[-1]}"); do fern rm "s$i"; done
+  sleep 2
+  hardware_sample >"$TMP/scale-after"
+  metrics | awk '$1=="go_goroutines" {print "daemon_goroutines_count",$2}' >>"$TMP/scale-after"
+  resource_stability scale "$TMP/scale-before" "$TMP/scale-after"
 }
 
 limits() {
@@ -689,8 +712,9 @@ golden() {
   metric golden.create_ms "create from golden, ms" $(($(now_ms) - start))
   check "the next worktree has the database before its first wake" yes \
     "$(in_daemon "test -e $W/two/.fern/seeded && test -e $W/two/seed.sql" && echo yes || echo no)"
-  metric golden.first_wake_ms "first wake from golden, ms" "$(fern wake gold2 | took)"
-  metric golden.first_wake_cold_ms "first wake without one (initdb and seed), ms" "$(fern wake gold1 | took)"
+  pool_du golden.snapshot "/var/lib/fern/envs/$G/snaps/$key"
+  metric golden.first_wake_ms "first wake from golden, ms" "$(resource_op golden.first_wake wake gold2 | took)"
+  metric golden.first_wake_cold_ms "first wake without one (initdb and seed), ms" "$(resource_op golden.first_wake_cold wake gold1 | took)"
   check "and Postgres runs on it (3 users)" 3 "$(sql gold2 'select count(*) from users')"
   for e in gold1 gold2 "$G"; do fern rm "$e"; done
   in_daemon "rm -rf $W"
@@ -765,11 +789,11 @@ t3() {
   check "T3's new threads are New worktrees, and deleting one removes it" "worktree true" \
     "$(in_t3 "node -p 'const s = require(\"/var/lib/fern/userdata/settings.json\"); s.defaultThreadEnvMode + \" \" + s.storageCleanup.worktreeOnDelete'")"
   in_t3 "echo v1 > $W/a.txt && echo junk > $W/ignored.bin"
-  metric t3.checkpoint_ms "checkpoint snapshot, ms" "$(in_t3 'fern snapshot --replace t3c c1' | took)"
+  metric t3.checkpoint_ms "checkpoint snapshot, ms" "$(resource_op t3.checkpoint snapshot --replace t3c c1 | took)"
   in_t3 "echo v2 > $W/a.txt"
-  metric t3.checkpoint_replaced_ms "checkpoint snapshot, replaced, ms" "$(in_t3 'fern snapshot --replace t3c c1' | took)"
+  metric t3.checkpoint_replaced_ms "checkpoint snapshot, replaced, ms" "$(resource_op t3.checkpoint_replaced snapshot --replace t3c c1 | took)"
   in_t3 "echo v3 > $W/a.txt && rm $W/ignored.bin"
-  metric t3.restore_ms "restore, ms" "$(in_t3 'fern restore t3c c1' | took)"
+  metric t3.restore_ms "restore, ms" "$(resource_op t3.restore restore t3c c1 | took)"
   check "restore brings back the replaced snapshot" v2 "$(in_t3 "cat $W/a.txt")"
   check "and a file git doesn't track" junk "$(in_t3 "cat $W/ignored.bin")"
   check "git works in the restored worktree" "M a.txt" "$(in_t3 "git -C $W status --short --untracked-files=no" | xargs)"
@@ -793,15 +817,83 @@ t3() {
   in_t3 "fern rm t3c && rm -rf $R /var/lib/fern/worktrees/t3check"
 }
 
+# hardware is deliberately alone: idle CPU needs a quiet node, and the
+# platform sample must not include a concurrently running timing section.
+hardware() {
+  echo "== hardware: idle CPU, fixed platform cost and allocated pool extents"
+  local uid empty_uid before_bytes after_bytes seconds=${CPU_IDLE_SECONDS:-15}
+  hardware_uids
+  hardware_sample >"$TMP/platform-before"
+  sleep "$seconds"
+  hardware_sample >"$TMP/platform-after"
+  resource_rates hardware.platform_idle "$TMP/platform-before" "$TMP/platform-after"
+  while read -r name value; do
+    case $name in
+      k3s_*mib|containerd_*mib|controller_*mib|t3_*mib|daemon_*mib|daemon_*count)
+        metric "hardware.platform.$name" "idle platform $name" "$value" ;;
+    esac
+  done <"$TMP/platform-after"
+  fresh $ENV
+  resource_op hardware.fresh_wake wake $ENV >/dev/null
+  fern rm ${ENV}-empty 2>/dev/null || true
+  fern create ${ENV}-empty >/dev/null
+  fern wake ${ENV}-empty >/dev/null
+  uid=$(pod_uid $ENV) empty_uid=$(pod_uid ${ENV}-empty)
+  # Let initdb's startup activity settle before the idle interval.
+  sleep 2
+  hardware_sample "$uid" >"$TMP/pg-before"
+  hardware_sample "$empty_uid" >"$TMP/empty-before"
+  sleep "$seconds"
+  hardware_sample "$uid" >"$TMP/pg-after"
+  hardware_sample "$empty_uid" >"$TMP/empty-after"
+  resource_rates hardware.postgres_idle "$TMP/pg-before" "$TMP/pg-after"
+  resource_rates hardware.empty_idle "$TMP/empty-before" "$TMP/empty-after"
+  fern rm ${ENV}-empty
+  pool_du hardware.environment "/var/lib/fern/envs/$ENV/live"
+  before_bytes=$(in_daemon "btrfs filesystem du -s --raw /var/lib/fern/envs/$ENV" | awk 'NR>1 {print $2+$3}')
+  for i in $(seq 5); do
+    fern exec $ENV -- sh -c 'head -c 1048576 /dev/urandom > checkpoint-data'
+    resource_op hardware.snapshot snapshot $ENV "disk-$i" >/dev/null
+  done
+  pool_du hardware.snapshot "/var/lib/fern/envs/$ENV/snaps/disk-5"
+  pool_du hardware.environment_with_snapshots "/var/lib/fern/envs/$ENV"
+  after_bytes=$(in_daemon "btrfs filesystem du -s --raw /var/lib/fern/envs/$ENV" | awk 'NR>1 {print $2+$3}')
+  metric hardware.checkpoint_growth_bytes "allocated data growth/checkpoint (1 MiB replaced each time), bytes" \
+    "$(awk -v a="$after_bytes" -v b="$before_bytes" 'BEGIN {printf "%.0f",(a-b)/5}')"
+}
+
+# Fifty lifecycle cycles are too long for quick or the repeated default
+# gate. This is an all-only stability check; LEAK_CYCLES permits a smoke run.
+stability() {
+  echo "== lifecycle stability: ${LEAK_CYCLES:-50} wake/sleep cycles"
+  hardware_uids
+  fresh $ENV
+  fern wake $ENV >/dev/null
+  fern sleep $ENV >/dev/null
+  sleep 2
+  hardware_sample >"$TMP/before"
+  metrics | awk '$1=="go_goroutines" {print "daemon_goroutines_count",$2}' >>"$TMP/before"
+  for _ in $(seq "${LEAK_CYCLES:-50}"); do
+    fern wake $ENV >/dev/null
+    fern sleep $ENV >/dev/null
+  done
+  sleep 2
+  hardware_sample >"$TMP/after"
+  metrics | awk '$1=="go_goroutines" {print "daemon_goroutines_count",$2}' >>"$TMP/after"
+  resource_stability stability "$TMP/before" "$TMP/after"
+  check "no pod remains after the cycles" "" "$(pod_uid $ENV)"
+  check "no workspace mount remains after the cycles" 0 "$(mounts $ENV)"
+}
+
 # main runs the sections. It is one function, called on the script's last
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden claude)
+  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden claude hardware stability)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.
-  alone=" idle daemon node many scale "
+  alone=" idle daemon node many scale hardware stability "
   case "${1:-}" in
     "") set -- "${quick[@]}" ;;
     all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} ;;
@@ -818,6 +910,7 @@ main() {
   # long it took when it is done. Its status is 1 if a check failed.
   run_section() {
     local s=$1 start status=0
+    local output=$TMP/$s.out
     start=$(now_ms)
     # shellcheck disable=SC2030,SC2031 # the section's own, in its subshell
     (
@@ -826,11 +919,12 @@ main() {
       "$s"
       fern rm "$ENV" 2>/dev/null || true
       exit "$FAILED"
-    ) >"$TMP/$s.out" 2>&1 || status=1
+    ) >"$output" 2>&1 || status=1
     # shellcheck disable=SC2031
     echo "$s $(($(now_ms) - start))" >>"$TMP/times"
     # shellcheck disable=SC2031
-    cat "$TMP/$s.out"
+    cat "$output"
+    if grep -q '^FAIL ' "$output"; then status=1; fi
     return $status
   }
 

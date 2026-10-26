@@ -26,7 +26,56 @@ const out = env("OUT", "lab/t3-runs.jsonl");
 const parallel = Number(env("PARALLEL", "1"));
 // The commands go through bash, as the wrapper's helpers are bash; not
 // blocking, so parallel runs keep polling while one waits on the node.
-const bash = async (cmd, ...args) => (await promisify(execFile)("bash", ["-c", cmd, "bash", ...args])).stdout;
+const bash = async (cmd, ...args) => (await promisify(execFile)("bash", ["-e", "-o", "pipefail", "-c", cmd, "bash", ...args])).stdout;
+
+// CPU counters are cgroup lifetime totals. Guest CPU is a sampled lower
+// bound (short-lived children between polls are missed). Pod CPU includes
+// sentry/gofers; guest RSS is approximate and may double-count shared pages.
+async function resourceSample(path = "", includeGuest = true, boxUID = "") {
+  if (!env("T3_RESOURCE_CMD")) return null;
+  const values = {}, guest = [];
+  for (const line of (await bash(env("T3_RESOURCE_CMD"), path, boxUID, includeGuest ? "guest" : "host")).trim().split("\n")) {
+    const parts = line.trim().split(/\s+/);
+    if (parts[0] === "BOXUID") boxUID = parts[1];
+    else if (parts[0] === "GUEST") guest.push({ id: parts[1], cpu: +parts[2], rss: +parts[3], anon: +parts[4], role: parts[5] });
+    else if (parts.length === 2) values[parts[0]] = +parts[1];
+  }
+  if (values.box_cpu_ms == null) boxUID = "";
+  return { values, guest, boxUID };
+}
+
+function resourceTracker(before) {
+  const peaks = {}, processCPU = new Map();
+  let last = before, seenClaude = false, samples = 0;
+  const add = (sample) => {
+    if (!sample) return;
+    samples++;
+    const totals = {};
+    for (const p of sample.guest) {
+      const counter = processCPU.get(p.id) ?? { first: samples === 1 ? p.cpu : 0, last: 0, role: p.role };
+      counter.last = Math.max(counter.last, p.cpu);
+      // Retain ancestry if a child is later reparented after Claude exits.
+      if (p.role === "claude") counter.role = "claude";
+      processCPU.set(p.id, counter);
+      for (const field of ["rss", "anon"]) totals[`guest_${p.role}_peak_${field}_mib`] = (totals[`guest_${p.role}_peak_${field}_mib`] ?? 0) + p[field];
+      if (p.role === "claude") seenClaude = true;
+    }
+    for (const [k, v] of Object.entries(totals)) peaks[k] = Math.max(peaks[k] ?? 0, v);
+    peaks.box_peak_memory_mib = Math.max(peaks.box_peak_memory_mib ?? 0, sample.values.box_memory_mib ?? 0);
+    last = sample;
+  };
+  add(before);
+  return { add, result() {
+    const values = { ...peaks, samples_count: samples };
+    for (const name of ["node", "daemon", "t3", "box"]) {
+      const key = `${name}_cpu_ms`;
+      if (last?.values[key] != null) values[key] = Math.max(0, last.values[key] - (before?.values[key] ?? 0));
+    }
+    if (seenClaude) for (const role of ["claude", "other"]) values[`guest_${role}_sampled_cpu_ms`] =
+      [...processCPU.values()].filter((p) => p.role === role).reduce((sum, p) => sum + p.last - p.first, 0);
+    return values;
+  } };
+}
 
 // A scenario is a project and its steps. A "send" step is a user message,
 // with a pattern its answer must match; a "revert" step goes back to the
@@ -238,105 +287,134 @@ async function turnTiming(p, run, start, end, streamEvents, previousApiMs) {
   };
 }
 
-async function runOnce(rpc, project, baseRef, n) {
+async function runOnce(rpc, project, baseRef, n, idleBoxMiB) {
   const threadId = randomUUID();
-  const record = { at: new Date().toISOString(), scenario: scenarioName, model, run: n, threadId, steps: [] };
+  const record = { at: new Date().toISOString(), scenario: scenarioName, model, run: n, threadId, idleBoxMiB, steps: [] };
   const projection = () => rpc.call("orchestration.getThreadProjection", { threadId });
   let turns = 0;
   let previousApiMs = 0;
   const streamEvents = [];
   let unsubscribe;
+  let resourcePath = "";
+  let boxUID = "";
+  const sampleResources = async (includeGuest) => {
+    const sample = await resourceSample(resourcePath, includeGuest, boxUID);
+    boxUID = sample?.boxUID ?? "";
+    return sample;
+  };
   try {
     for (const step of scenario.steps) {
       const before = await metrics();
+      const resources = resourceTracker(await sampleResources(Boolean(step.send)));
+      let sampling = false, sampleError, pendingSample;
+      const sampler = setInterval(() => {
+        if (sampling) return;
+        sampling = true;
+        pendingSample = (async () => {
+          if (!resourcePath) resourcePath = (await projection()).thread.worktreePath ?? "";
+          resources.add(await sampleResources(Boolean(step.send)));
+        })().catch((err) => { sampleError = err; }).finally(() => { sampling = false; });
+      }, 2000);
       const start = Date.now();
       const result = { step: step.send ? `turn ${turns + 1}` : `revert to before turn ${step.revert}` };
       let finished;
-      if (step.send) {
-        turns++;
-        const messageId = randomUUID();
-        if (turns === 1) {
-          await rpc.call("orchestration.launchThread", {
-            commandId: randomUUID(),
-            creationSource: "web",
-            threadId,
-            projectId: project.id,
-            title: `t3-run ${scenarioName} #${n}`,
-            generateTitle: false,
-            modelSelection: { instanceId: "claudeAgent", model },
-            runtimeMode: "full-access",
-            interactionMode: "default",
-            workspaceStrategy: { type: "worktree", baseRef },
-            initialMessage: { messageId, text: step.send, attachments: [] },
+      try {
+        if (step.send) {
+          turns++;
+          const messageId = randomUUID();
+          if (turns === 1) {
+            await rpc.call("orchestration.launchThread", {
+              commandId: randomUUID(),
+              creationSource: "web",
+              threadId,
+              projectId: project.id,
+              title: `t3-run ${scenarioName} #${n}`,
+              generateTitle: false,
+              modelSelection: { instanceId: "claudeAgent", model },
+              runtimeMode: "full-access",
+              interactionMode: "default",
+              workspaceStrategy: { type: "worktree", baseRef },
+              initialMessage: { messageId, text: step.send, attachments: [] },
+            });
+            unsubscribe = rpc.subscribe("orchestration.subscribeThread", { threadId }, (item, observedAt) => {
+              if (item.kind !== "event") return;
+              const { type, occurredAt, runId, payload } = item.event;
+              // Keep lifecycle metadata, never prompts, tool inputs or output.
+              streamEvents.push({ type, occurredAt, observedAt, runId: runId ?? payload?.runId ?? (type.startsWith("run.") ? payload?.id : null),
+                status: payload?.status, itemType: type.startsWith("turn-item.") ? payload?.type : undefined });
+            });
+          } else {
+            await rpc.call("orchestration.dispatchCommand", {
+              type: "message.dispatch",
+              commandId: randomUUID(),
+              createdBy: "user",
+              creationSource: "web",
+              threadId,
+              messageId,
+              text: step.send,
+              attachments: [],
+              dispatchMode: { type: "start_immediately" },
+            });
+          }
+          const { run, p } = await waitFor(`turn ${turns}`, async () => {
+            const p = await projection();
+            const run = p.runs.find((r) => r.userMessageId === messageId);
+            return run && done.has(run.status) ? { run, p } : null;
           });
-          unsubscribe = rpc.subscribe("orchestration.subscribeThread", { threadId }, (item, observedAt) => {
-            if (item.kind !== "event") return;
-            const { type, occurredAt, runId, payload } = item.event;
-            // Keep lifecycle metadata, never prompts, tool inputs or output.
-            streamEvents.push({ type, occurredAt, observedAt, runId: runId ?? payload?.runId ?? (type.startsWith("run.") ? payload?.id : null),
-              status: payload?.status, itemType: type.startsWith("turn-item.") ? payload?.type : undefined });
+          const answer = p.messages
+            .filter((m) => m.role === "assistant" && m.runId === run.id && !m.streaming)
+            .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+            .at(-1)?.text ?? "";
+          Object.assign(result, {
+            status: run.status,
+            queuedMs: ms(run.requestedAt, run.startedAt),
+            runMs: ms(run.startedAt, run.completedAt),
+            answer: answer.slice(0, 300),
+            pass: run.status === "completed" && step.expect.test(answer),
           });
+          finished = { p, run };
         } else {
+          const p = await projection();
+          // The checkpoint before turn N is the one turn N-1 left, or the
+          // thread's baseline for turn 1: what T3's Revert picks.
+          const target = p.checkpoints.find((c) =>
+            step.revert === 1 ? c.appRunOrdinal === null && c.ordinalWithinScope === 0 : c.appRunOrdinal === step.revert - 1,
+          );
+          if (target?.status !== "ready") throw new Error(`no ready checkpoint before turn ${step.revert}`);
+          const commandId = randomUUID();
           await rpc.call("orchestration.dispatchCommand", {
-            type: "message.dispatch",
-            commandId: randomUUID(),
-            createdBy: "user",
-            creationSource: "web",
+            type: "checkpoint.rollback",
+            commandId,
             threadId,
-            messageId,
-            text: step.send,
-            attachments: [],
-            dispatchMode: { type: "start_immediately" },
+            scopeId: target.scopeId,
+            checkpointId: target.id,
+            restoreFiles: true,
           });
+          await waitFor("the revert", async () => {
+            const p = await projection();
+            if (p.thread.rollbackFailure?.requestId === commandId) throw new Error(`revert: ${p.thread.rollbackFailure.message}`);
+            return p.runs.some((r) => r.ordinal >= step.revert && r.status === "rolled_back");
+          });
+          result.pass = true;
         }
-        const { run, p } = await waitFor(`turn ${turns}`, async () => {
-          const p = await projection();
-          const run = p.runs.find((r) => r.userMessageId === messageId);
-          return run && done.has(run.status) ? { run, p } : null;
-        });
-        const answer = p.messages
-          .filter((m) => m.role === "assistant" && m.runId === run.id && !m.streaming)
-          .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
-          .at(-1)?.text ?? "";
-        Object.assign(result, {
-          status: run.status,
-          queuedMs: ms(run.requestedAt, run.startedAt),
-          runMs: ms(run.startedAt, run.completedAt),
-          answer: answer.slice(0, 300),
-          pass: run.status === "completed" && step.expect.test(answer),
-        });
-        finished = { p, run };
-      } else {
-        const p = await projection();
-        // The checkpoint before turn N is the one turn N-1 left, or the
-        // thread's baseline for turn 1: what T3's Revert picks.
-        const target = p.checkpoints.find((c) =>
-          step.revert === 1 ? c.appRunOrdinal === null && c.ordinalWithinScope === 0 : c.appRunOrdinal === step.revert - 1,
-        );
-        if (target?.status !== "ready") throw new Error(`no ready checkpoint before turn ${step.revert}`);
-        const commandId = randomUUID();
-        await rpc.call("orchestration.dispatchCommand", {
-          type: "checkpoint.rollback",
-          commandId,
-          threadId,
-          scopeId: target.scopeId,
-          checkpointId: target.id,
-          restoreFiles: true,
-        });
-        await waitFor("the revert", async () => {
-          const p = await projection();
-          if (p.thread.rollbackFailure?.requestId === commandId) throw new Error(`revert: ${p.thread.rollbackFailure.message}`);
-          return p.runs.some((r) => r.ordinal >= step.revert && r.status === "rolled_back");
-        });
-        result.pass = true;
+        result.wallMs = Date.now() - start;
+      } finally {
+        clearInterval(sampler);
+        await pendingSample;
       }
-      result.wallMs = Date.now() - start;
+      if (sampleError) throw sampleError;
+      if (!resourcePath) resourcePath = (await projection()).thread.worktreePath ?? "";
+      resources.add(await sampleResources(Boolean(step.send)));
+      result.resources = resources.result();
+      if (idleBoxMiB != null && step.send) result.resources.box_incremental_peak_memory_mib =
+        Math.max(0, result.resources.box_peak_memory_mib - idleBoxMiB);
       result.server = serverCost(before, await metrics());
       if (finished) {
         result.timing = await turnTiming(finished.p, finished.run, start, start + result.wallMs, streamEvents, previousApiMs);
         previousApiMs = result.timing.claudeApiTotalMs ?? previousApiMs;
       }
       record.steps.push(result);
+      console.log(`  hardware: ${JSON.stringify(result.resources)}`);
       console.log(`  ${result.step}: ${result.pass ? "PASS" : "FAIL"} ${result.wallMs} ms ${JSON.stringify(result.server)}`);
       if (!result.pass) {
         console.log(`    answer: ${JSON.stringify(result.answer)}`);
@@ -386,6 +464,10 @@ try {
   const { refs } = await rpc.call("vcs.listRefs", { cwd: project.workspaceRoot, refKind: "local", limit: 50 });
   const baseRef = (refs.find((r) => r.current) ?? refs.find((r) => r.isDefault) ?? refs[0]).name;
 
+  const idleBoxMiB = env("T3_BOX_BASELINE_CMD") ? Number((await bash(env("T3_BOX_BASELINE_CMD"), scenarioName)).trim()) : null;
+  if (idleBoxMiB != null && (!Number.isFinite(idleBoxMiB) || idleBoxMiB <= 0)) throw new Error("invalid service-only box memory sample");
+  console.log(`service-only box: ${idleBoxMiB ?? "unmeasured"} MiB (host anon + shmem)`);
+
   // The node's used memory (page cache not counted) before the runs and at
   // its highest while they ran, sampled every 5 s.
   const nodeMemory = async () => Number((await bash(env("T3_NODE_MEMORY_CMD"))).trim());
@@ -398,7 +480,7 @@ try {
   const worker = async () => {
     for (let n = next++; n <= runs; n = next++) {
       console.log(`run ${n}/${runs}: ${scenarioName} on ${model}`);
-      const record = await runOnce(rpc, project, baseRef, n);
+      const record = await runOnce(rpc, project, baseRef, n, idleBoxMiB);
       record.parallel = parallel;
       appendFileSync(out, JSON.stringify(record) + "\n");
       records.push(record);
