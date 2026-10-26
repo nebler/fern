@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/goleak"
 
 	"github.com/nebler/fern/internal/actor"
@@ -31,6 +32,9 @@ import (
 	"github.com/nebler/fern/internal/driver"
 	"github.com/nebler/fern/internal/store"
 )
+
+// notrace records nothing.
+var notrace = noop.NewTracerProvider().Tracer("")
 
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
@@ -206,7 +210,7 @@ type driverWith interface {
 func newServer(t testing.TB, st *fakeStore, drv actor.Driver) http.Handler {
 	t.Helper()
 	log := slog.New(slog.DiscardHandler)
-	envs := actor.New(st, drv, actor.Idle{}, "box", log)
+	envs := actor.New(st, drv, actor.Idle{}, "box", notrace, log)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -216,7 +220,7 @@ func newServer(t testing.TB, st *fakeStore, drv actor.Driver) http.Handler {
 		close(done)
 	}()
 	t.Cleanup(func() { cancel(); <-done })
-	return server.New(st, drv, envs, log).Handler()
+	return server.New(st, drv, envs, notrace, log).Handler()
 }
 
 // newAPIWith is newAPI with the fake driver wrapped by wrap, if it isn't nil.

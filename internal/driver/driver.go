@@ -15,6 +15,9 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -74,6 +77,7 @@ type Driver struct {
 	image        string       // the box image; its entrypoint is fern-init
 	runtimeClass string       // the boxes' RuntimeClass, such as gvisor; "" is the node's default
 	ready        *http.Client // asks waking boxes' fern-init whether they are ready
+	tracer       trace.Tracer
 	// steps times the steps of a wake that succeeded: making the Sandbox
 	// run, until its pod has an address, and until its services are ready.
 	steps *prometheus.HistogramVec
@@ -81,8 +85,8 @@ type Driver struct {
 
 // New returns a Driver that runs boxes from image on node under RuntimeClass
 // runtimeClass (or the node's default, if ""), through c, whose scheme must
-// include corev1 and the agent-sandbox types.
-func New(c client.Client, node, image, runtimeClass string) *Driver {
+// include corev1 and the agent-sandbox types, and records its steps with tr.
+func New(c client.Client, node, image, runtimeClass string, tr trace.Tracer) *Driver {
 	// fern-init answers within readyWait and its checks' 2.25s. Connecting
 	// gets far less: for a moment after a pod starts, the network policy can
 	// drop packets to it instead of refusing them, and a wait for the full
@@ -96,7 +100,7 @@ func New(c client.Client, node, image, runtimeClass string) *Driver {
 		Help:    "Time a wake spent in each step: sandbox (the API call), pod (until the pod has an address) and ready (until its services are).",
 		Buckets: prometheus.ExponentialBuckets(0.005, 2, 15), // 5ms to 82s
 	}, []string{"step"})
-	return &Driver{c: c, node: node, image: image, runtimeClass: runtimeClass, ready: ready, steps: steps}
+	return &Driver{c: c, node: node, image: image, runtimeClass: runtimeClass, ready: ready, tracer: tr, steps: steps}
 }
 
 // Describe sends the descriptions of the Driver's metrics.
@@ -116,25 +120,40 @@ func (d *Driver) Collect(ch chan<- prometheus.Metric) { d.steps.Collect(ch) }
 // second, and polling them costs Kubernetes API calls.
 func (d *Driver) Wake(ctx context.Context, env store.Env) (string, error) {
 	start := time.Now()
-	if err := d.apply(ctx, env); err != nil {
+	_, span := d.tracer.Start(ctx, "sandbox")
+	err := d.apply(ctx, env)
+	end(span, err)
+	if err != nil {
 		return "", fmt.Errorf("wake %s: %w", env.ID, err)
 	}
 	applied := time.Now()
+	_, span = d.tracer.Start(ctx, "pod")
 	var addr string
 	var looked, found time.Time
-	err := poll(ctx, readyInterval, wakeTimeout, func(ctx context.Context) (bool, error) {
+	var looks, asks int
+	err = poll(ctx, readyInterval, wakeTimeout, func(ctx context.Context) (bool, error) {
 		if since := time.Since(looked); (addr == "" && since >= podInterval) || since >= podCheckEvery {
 			looked = time.Now()
+			looks++
 			var err error
 			if addr, err = d.podAddr(ctx, env.ID); err != nil {
 				return false, err
 			}
 			if addr != "" && found.IsZero() {
 				found = time.Now()
+				span.SetAttributes(attribute.Int("fern.pod_looks", looks))
+				span.End()
+				_, span = d.tracer.Start(ctx, "ready")
 			}
 		}
-		return addr != "" && d.isReady(ctx, addr), nil
+		if addr == "" {
+			return false, nil
+		}
+		asks++
+		return d.isReady(ctx, addr), nil
 	})
+	span.SetAttributes(attribute.Int("fern.ready_asks", asks))
+	end(span, err)
 	if err != nil {
 		return "", fmt.Errorf("wake %s: %w", env.ID, err)
 	}
@@ -210,10 +229,13 @@ func (d *Driver) isReady(ctx context.Context, addr string) bool {
 func (d *Driver) Sleep(ctx context.Context, id string) error {
 	patch := fmt.Appendf(nil, `{"spec":{"operatingMode":%q}}`, sandboxv1.SandboxOperatingModeSuspended)
 	sb := &sandboxv1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: namespace}}
+	_, span := d.tracer.Start(ctx, "suspend")
 	err := d.c.Patch(ctx, sb, client.RawPatch(types.MergePatchType, patch))
 	if apierrors.IsNotFound(err) {
+		span.End()
 		return nil
 	}
+	end(span, err)
 	if err != nil {
 		return fmt.Errorf("sleep %s: %w", id, err)
 	}
@@ -229,8 +251,13 @@ func (d *Driver) Sleep(ctx context.Context, id string) error {
 // finding the old one still being deleted.
 func (d *Driver) Delete(ctx context.Context, id string) error {
 	sb := &sandboxv1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: id, Namespace: namespace}}
+	_, span := d.tracer.Start(ctx, "delete")
 	err := d.c.Delete(ctx, sb, client.PropagationPolicy(metav1.DeletePropagationForeground))
-	if err != nil && !apierrors.IsNotFound(err) {
+	if apierrors.IsNotFound(err) {
+		err = nil
+	}
+	end(span, err)
+	if err != nil {
 		return fmt.Errorf("delete sandbox %s: %w", id, err)
 	}
 	d.stopInit(ctx, id)
@@ -249,6 +276,8 @@ func (d *Driver) Delete(ctx context.Context, id string) error {
 // Kubernetes responsible for finishing the stop. Older or unreachable boxes
 // take the normal kubelet SIGTERM path instead.
 func (d *Driver) stopInit(ctx context.Context, id string) {
+	ctx, span := d.tracer.Start(ctx, "stop_init")
+	defer span.End()
 	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
 	var pod corev1.Pod
@@ -321,13 +350,28 @@ func stateOf(sb *sandboxv1.Sandbox) State {
 // waitGone waits until the object named id of obj's kind doesn't exist.
 func (d *Driver) waitGone(ctx context.Context, id string, obj client.Object) error {
 	key := types.NamespacedName{Namespace: namespace, Name: id}
-	return poll(ctx, podInterval, goneTimeout, func(ctx context.Context) (bool, error) {
+	_, span := d.tracer.Start(ctx, "wait_gone", trace.WithAttributes(attribute.String("fern.kind", fmt.Sprintf("%T", obj))))
+	looks := 0
+	err := poll(ctx, podInterval, goneTimeout, func(ctx context.Context) (bool, error) {
+		looks++
 		err := d.c.Get(ctx, key, obj)
 		if apierrors.IsNotFound(err) {
 			return true, nil
 		}
 		return false, err
 	})
+	span.SetAttributes(attribute.Int("fern.looks", looks))
+	end(span, err)
+	return err
+}
+
+// end ends span, marking it failed if err isn't nil.
+func end(span trace.Span, err error) {
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	}
+	span.End()
 }
 
 // poll calls cond every interval until it is done or fails, for at most

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"go.opentelemetry.io/otel/trace/noop"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -19,6 +20,9 @@ import (
 	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
+
+// notrace records nothing.
+var notrace = noop.NewTracerProvider().Tracer("")
 
 func newDriver(t *testing.T, objs ...client.Object) (*driver.Driver, client.Client) {
 	t.Helper()
@@ -35,7 +39,7 @@ func newDriverWithClass(t *testing.T, class string, objs ...client.Object) (*dri
 		t.Fatal(err)
 	}
 	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
-	return driver.New(c, "node-1", "fern-box:test", class), c
+	return driver.New(c, "node-1", "fern-box:test", class, notrace), c
 }
 
 // wake runs Wake until it has set the Sandbox up; with no pod to wait for, it

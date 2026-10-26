@@ -3,7 +3,6 @@ box.asleep_exec_ms.p50 1150 0.17
 box.asleep_exec_ms.p95 1254 0.15
 box.box_memory_mib 39.5 0.15
 box.daemon_memory_mib 16.3 0.15
-box.force_delete_ms 1347 0.36
 box.fresh_wake.box_cpu_ms 3730.420 0.15
 box.fresh_wake.box_write_bytes 17530880 0.15
 box.fresh_wake.daemon_cpu_ms 18.218 0.58

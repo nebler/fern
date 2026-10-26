@@ -13,7 +13,7 @@ import (
 // BenchmarkExec measures mailbox and accounting costs without starting a box.
 // Idle sleep is disabled; this measures work rather than timer behavior.
 func BenchmarkExec(b *testing.B) {
-	g := actor.New(newFakeStore(), driver.NewFake("box"), actor.Idle{}, "box", slog.New(slog.DiscardHandler))
+	g := actor.New(newFakeStore(), driver.NewFake("box"), actor.Idle{}, "box", notrace, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(b.Context())
 	done := make(chan error, 1)
 	go func() { done <- g.Run(ctx) }()

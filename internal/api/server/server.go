@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api"
@@ -44,6 +46,7 @@ type Server struct {
 	store  Store
 	driver Driver
 	envs   *actor.Group
+	tracer trace.Tracer
 	log    *slog.Logger
 	// boxes connects to boxes. A box that vanished can leave an address
 	// nothing answers; the same short connect timeout as readiness gets to
@@ -51,11 +54,11 @@ type Server struct {
 	boxes *http.Client
 }
 
-// New returns a Server that reads from st and drv and changes
-// environments through envs.
-func New(st Store, drv Driver, envs *actor.Group, log *slog.Logger) *Server {
+// New returns a Server that reads from st and drv, changes environments
+// through envs and records every request with tr.
+func New(st Store, drv Driver, envs *actor.Group, tr trace.Tracer, log *slog.Logger) *Server {
 	return &Server{
-		store: st, driver: drv, envs: envs, log: log,
+		store: st, driver: drv, envs: envs, tracer: tr, log: log,
 		boxes: &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext}},
 	}
 }
@@ -82,7 +85,12 @@ func (s *Server) Handler() http.Handler {
 // nothing (204), or a value as JSON.
 func (s *Server) handle(h func(*http.Request) (any, error)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		v, err := h(r)
+		ctx, span := s.tracer.Start(r.Context(), r.Pattern)
+		defer span.End()
+		v, err := h(r.WithContext(ctx))
+		if err != nil {
+			span.SetStatus(codes.Error, err.Error())
+		}
 		switch {
 		case err != nil:
 			s.fail(w, r, err)
@@ -203,14 +211,19 @@ func (s *Server) prewake(r *http.Request) (any, error) {
 func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	box, ex, err := s.dialBox(ctx, r.PathValue("id"), cancel)
+	// The span ends once the command can start: its run is the box's time.
+	spanCtx, span := s.tracer.Start(ctx, "exec.open")
+	box, ex, err := s.dialBox(spanCtx, r.PathValue("id"), cancel)
 	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		span.End()
 		s.fail(w, r, err)
 		return
 	}
 	defer ex.Close()
 	defer func() { _ = box.CloseNow() }()
 	client, err := boxexec.Accept(w, r)
+	span.End()
 	if err != nil {
 		return // Accept has answered the client.
 	}

@@ -105,6 +105,13 @@ metrics() {
   pod=$(k -n fern-system get pod -l app.kubernetes.io/name=fern -o jsonpath='{.items[0].metadata.name}')
   k get --raw "/api/v1/namespaces/fern-system/pods/$pod:9090/proxy/metrics"
 }
+# api_requests_since prints how many Kubernetes API requests the daemon made,
+# by the metrics on stdin, since the metrics in file $1 were read, divided
+# by $2.
+api_requests_since() {
+  awk -v n="$2" '$1 ~ /^rest_client_requests_total[{]/ { if (NR == FNR) b += $2; else a += $2 }
+    END { printf "%.1f", (a - b) / n }' "$1" -
+}
 # counter_since prints how much counter $2 in the metrics on stdin grew
 # since the metrics in file $1 were read.
 counter_since() {
@@ -243,6 +250,10 @@ box() {
   done
   metric box.sleep_ms "sleep (until the pod is gone), ms" "$(stats <"$TMP/sleep")"
   metric box.wake_ms "wake (until Postgres is ready), ms" "$(stats <"$TMP/wake")"
+  # A count: it moves with how many polls a wake needs, far less than the
+  # times do with the machine's other load.
+  metric box.sleep_wake_api_requests_count "the daemon's Kubernetes API requests per sleep and wake" \
+    "$(metrics | api_requests_since "$TMP/metrics" "$WAKES")"
   note "wake steps: $(wake_steps "$TMP/metrics")"
   # Memory without the page cache, which comes and goes: the box's (Postgres
   # idle, gVisor included) and the daemon's. gVisor keeps what the box's
@@ -278,18 +289,23 @@ box() {
   metric box.asleep_exec_ms "a command to an asleep box, ms" "$(stats <"$TMP/asleep")"
   check "every pre-wake was used by its command" "$PREWAKES" "$(metrics | counter_since "$TMP/metrics" 'fern_prewakes_total{result="used"}')"
   sql $ENV "insert into users (name, email) values ('Barbara', 'barbara@example.com')" >/dev/null
+  local old users="" uid
+  old=$(pod_uid $ENV)
   start=$(now_ms)
   k -n fern-boxes delete pod $ENV --force --grace-period=0 >/dev/null 2>&1
-  # A command sent while the pod is being replaced can fail (reaching the
-  # dying pod, under gVisor in the lab); it isn't retried, as it may have
-  # run. Commands within the next 10 s reach the new pod.
-  local users=""
-  for _ in $(seq 20); do
-    users=$(sql $ENV 'select count(*) from users' 2>/dev/null) && break
-    sleep 0.5
+  # The deleted pod's box can answer for a moment after the delete (its
+  # sandbox is still stopping), and a command sent while the pod is being
+  # replaced can fail; it isn't retried, as it may have run. So the
+  # commands start once the new pod exists.
+  for _ in $(seq 80); do
+    uid=$(pod_uid $ENV)
+    if [ -n "$uid" ] && [ "$uid" != "$old" ]; then
+      users=$(sql $ENV 'select count(*) from users' 2>/dev/null) && break
+    fi
+    sleep 0.25
   done
   check "Postgres recovers after its pod is force-deleted (5 users)" 5 "$users"
-  metric box.force_delete_ms "force delete until Postgres answers, ms" $(($(now_ms) - start))
+  metric box.force_delete_recovery_ms "force delete until the new pod's Postgres answers, ms" $(($(now_ms) - start))
   check "and the seed ran once" 1 "$(sql $ENV "select count(*) from users where name = 'Ada'")"
 }
 
@@ -969,6 +985,10 @@ main() {
   run_section() {
     local s=$1 start status=0
     local output=$TMP/$s.out
+    # One by one, for timings: btrfs first finishes removing what earlier
+    # sections deleted, which a later snapshot would otherwise wait for
+    # (lab/RESULTS.md, "Baselines with the hardware metrics").
+    if [ "${JOBS:-4}" = 1 ]; then in_daemon "btrfs subvolume sync /var/lib/fern" >/dev/null; fi
     start=$(now_ms)
     # shellcheck disable=SC2030,SC2031 # the section's own, in its subshell
     (

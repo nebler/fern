@@ -137,7 +137,7 @@ func TestStopShutdownReplay(t *testing.T) {
 					if boundary == "intent recorded" {
 						interrupted.cancel = cancel
 					}
-					d := driver.New(interrupted, "node-1", "fern-box:test", "")
+					d := driver.New(interrupted, "node-1", "fern-box:test", "", notrace)
 					if err := op.run(d, ctx, "demo"); !errors.Is(err, context.Canceled) {
 						t.Fatalf("interrupted stop error = %v, want canceled", err)
 					}
@@ -151,7 +151,7 @@ func TestStopShutdownReplay(t *testing.T) {
 					if err := c.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{}); err != nil {
 						t.Fatalf("pod before replay: %v", err)
 					}
-					d = driver.New(c, "node-1", "fern-box:test", "")
+					d = driver.New(c, "node-1", "fern-box:test", "", notrace)
 					if err := op.run(d, t.Context(), "demo"); err != nil {
 						t.Fatalf("replayed stop: %v", err)
 					}
@@ -176,7 +176,7 @@ func TestSleepDoesNotStopBeforeSuspension(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	want := errors.New("suspension refused")
-	d := driver.New(stopClient{Client: c, fail: want}, "node-1", "fern-box:test", "")
+	d := driver.New(stopClient{Client: c, fail: want}, "node-1", "fern-box:test", "", notrace)
 	if err := d.Sleep(t.Context(), "demo"); !errors.Is(err, want) {
 		t.Errorf("Sleep error = %v, want suspension refusal", err)
 	}

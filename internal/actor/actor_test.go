@@ -16,6 +16,7 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/goleak"
 
 	"github.com/nebler/fern/internal/actor"
@@ -27,6 +28,9 @@ import (
 func TestMain(m *testing.M) {
 	goleak.VerifyTestMain(m)
 }
+
+// notrace records nothing.
+var notrace = noop.NewTracerProvider().Tracer("")
 
 // fakeStore keeps environments and snapshot names in memory.
 type fakeStore struct {
@@ -139,7 +143,7 @@ var idle = actor.Idle{Agent: 5 * time.Minute, Human: 20 * time.Minute}
 // synctest bubble.
 func start(t *testing.T, st *fakeStore, drv *driver.Fake, idle actor.Idle) *actor.Group {
 	t.Helper()
-	g := actor.New(st, drv, idle, "box", slog.New(slog.DiscardHandler))
+	g := actor.New(st, drv, idle, "box", notrace, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -404,7 +408,7 @@ func (d guardDriver) States(ctx context.Context) (map[string]driver.State, error
 // call ends, and afterwards each environment that exists still works.
 func TestConcurrentChanges(t *testing.T) {
 	g := &guard{fakeStore: newFakeStore(), drv: driver.NewFake("box"), busy: make(map[string]bool)}
-	envs := actor.New(g, guardDriver{g}, actor.Idle{}, "box", slog.New(slog.DiscardHandler))
+	envs := actor.New(g, guardDriver{g}, actor.Idle{}, "box", notrace, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -566,7 +570,7 @@ func TestExecGivenUpDuringWake(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		st, fake := newFakeStore(), driver.NewFake("box")
 		drv := &slowWake{Fake: fake, release: make(chan struct{})}
-		g := actor.New(st, drv, idle, "box", slog.New(slog.DiscardHandler))
+		g := actor.New(st, drv, idle, "box", notrace, slog.New(slog.DiscardHandler))
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan struct{})
 		go func() { _ = g.Run(ctx); close(done) }()

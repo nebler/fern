@@ -12,15 +12,26 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	dto "github.com/prometheus/client_model/go"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+	"go.opentelemetry.io/otel/sdk/resource"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
+	"go.opentelemetry.io/otel/trace/noop"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
@@ -28,6 +39,7 @@ import (
 	"k8s.io/client-go/rest"
 	sandboxv1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	crmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api/server"
@@ -71,7 +83,8 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	flags.DurationVar(&idle.Agent, "idle-agent", 5*time.Minute, "sleep this long after a box's last command ended (0: never)")
 	flags.DurationVar(&idle.Human, "idle-human", 20*time.Minute, "… and this long after it started (0: never)")
 	flags.DurationVar(&idle.Prewake, "idle-prewake", 2*time.Minute, "sleep a box woken ahead this long after its wake, unless a command comes (0: no pre-wakes)")
-	metricsAddr := flags.String("metrics-addr", ":9090", "serve Prometheus metrics at /metrics on this address")
+	metricsAddr := flags.String("metrics-addr", ":9090", "serve Prometheus metrics at /metrics, and Go's profiles at /debug/pprof/, on this address")
+	traceEndpoint := flags.String("trace-endpoint", "", "send traces by OTLP/HTTP to this URL, such as http://10.0.0.1:4318 (\"\": none)")
 	runtimeClass := flags.String("runtime-class", "", "run boxes under this RuntimeClass, such as gvisor (\"\": the node's default)")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -112,18 +125,41 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		return err
 	}
 
+	tp, err := tracerProvider(ctx, *traceEndpoint, node)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		// Send the spans still buffered; a collector that is gone costs at most this long.
+		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := tp.Shutdown(shutdownCtx); err != nil {
+			log.WarnContext(ctx, "sending the last traces failed", slog.Any("error", err))
+		}
+	}()
+	tr := tp.Tracer("github.com/nebler/fern")
+
 	g, ctx := errgroup.WithContext(ctx)
-	drv := driver.New(kube, node, boxImage, *runtimeClass)
-	envs := actor.New(st, drv, idle, boxImage, log)
+	drv := driver.New(kube, node, boxImage, *runtimeClass, tr)
+	envs := actor.New(st, drv, idle, boxImage, tr, log)
 	httpSrv := &http.Server{
-		Handler:           server.New(st, drv, envs, log).Handler(),
+		Handler:           server.New(st, drv, envs, tr, log).Handler(),
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(envs, drv, collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.HandlerFor(prometheus.Gatherers{reg, restMetrics{}}, promhttp.HandlerOpts{}))
+	// Profiles cost nothing until asked for. The port is the pod's, which
+	// boxes can't reach: their network policy blocks private addresses.
+	metricsMux.HandleFunc("/debug/pprof/", pprof.Index)
+	metricsMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	metricsMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	metricsMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	metricsMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 	metricsSrv := &http.Server{
-		Handler:           promhttp.HandlerFor(reg, promhttp.HandlerOpts{}),
+		Handler:           metricsMux,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	grpcSrv := grpc.NewServer()
@@ -160,6 +196,53 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	})
 	return g.Wait()
 }
+
+// tracerProvider returns a provider whose spans go to endpoint by OTLP/HTTP,
+// as the service fern-daemon on node, or one that records nothing if
+// endpoint is "". Its Shutdown sends what is buffered.
+func tracerProvider(ctx context.Context, endpoint, node string) (tracing, error) {
+	if endpoint == "" {
+		return noopProvider{noop.NewTracerProvider()}, nil
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return nil, fmt.Errorf("trace endpoint: %w", err)
+	}
+	// The exporter posts to the URL's path as it is, and a collector's
+	// traces are at /v1/traces.
+	if u.Path == "" || u.Path == "/" {
+		u.Path = "/v1/traces"
+	}
+	exp, err := otlptracehttp.New(ctx, otlptracehttp.WithEndpointURL(u.String()))
+	if err != nil {
+		return nil, fmt.Errorf("trace exporter: %w", err)
+	}
+	res := resource.NewSchemaless(attribute.String("service.name", "fern-daemon"), attribute.String("host.name", node))
+	return sdktrace.NewTracerProvider(sdktrace.WithBatcher(exp), sdktrace.WithResource(res)), nil
+}
+
+// restMetrics gathers client-go's counts and times of Kubernetes API
+// requests (rest_client_*), which controller-runtime keeps in a registry of
+// its own: a change's requests are a cost no busier machine changes.
+type restMetrics struct{}
+
+func (restMetrics) Gather() ([]*dto.MetricFamily, error) {
+	families, err := crmetrics.Registry.Gather()
+	return slices.DeleteFunc(families, func(f *dto.MetricFamily) bool {
+		return !strings.HasPrefix(f.GetName(), "rest_client_")
+	}), err
+}
+
+// tracing is a TracerProvider whose Shutdown sends the spans it holds.
+type tracing interface {
+	trace.TracerProvider
+	Shutdown(ctx context.Context) error
+}
+
+// noopProvider is a provider that records nothing, with nothing to send.
+type noopProvider struct{ noop.TracerProvider }
+
+func (noopProvider) Shutdown(context.Context) error { return nil }
 
 func kubeClient() (client.Client, error) {
 	cfg, err := rest.InClusterConfig()

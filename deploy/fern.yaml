@@ -158,6 +158,11 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: spec.nodeName
+            # Where lab/profile.sh's trace collector listens, when it runs.
+            - name: HOST_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
           # Requests keep the daemon out of the BestEffort class, which is
           # the first to be starved or evicted when boxes are busy.
           resources:

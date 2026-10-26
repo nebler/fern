@@ -23,6 +23,11 @@
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 lab_lock
+# Tracing slows what it watches: its cost isn't Fern's.
+if k -n fern-system get deploy/jaeger >/dev/null 2>&1; then
+  echo "perf: tracing is on; turn it off first (lab/profile.sh off)" >&2
+  exit 1
+fi
 accept=no fast=no
 while [ $# -gt 0 ]; do
   case $1 in

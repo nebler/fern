@@ -196,7 +196,7 @@ func TestPrewakeLimit(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		st, fake := newFakeStore(), driver.NewFake("box")
 		drv := &blockedWake{Fake: fake, release: make(chan struct{})}
-		g := actor.New(st, drv, prewakeIdle, "box", slog.New(slog.DiscardHandler))
+		g := actor.New(st, drv, prewakeIdle, "box", notrace, slog.New(slog.DiscardHandler))
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan struct{})
 		go func() { _ = g.Run(ctx); close(done) }()
@@ -271,7 +271,7 @@ func TestPrewakeFails(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		st := newFakeStore()
 		drv := &failingWake{Fake: driver.NewFake("box")}
-		g := actor.New(st, drv, prewakeIdle, "box", slog.New(slog.DiscardHandler))
+		g := actor.New(st, drv, prewakeIdle, "box", notrace, slog.New(slog.DiscardHandler))
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan struct{})
 		go func() { _ = g.Run(ctx); close(done) }()

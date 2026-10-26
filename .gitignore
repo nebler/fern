@@ -14,3 +14,8 @@ __pycache__/
 *.pyc
 # lab/t3-run.sh results: raw runs, summarized in lab/RESULTS.md.
 /lab/t3-runs.jsonl
+# lab/profile.sh: profiles, and the FlameGraph scripts it fetches.
+/lab/profiles/
+/lab/.cache/
+# lab/ab.sh: A/B runs.
+/lab/ab-results/

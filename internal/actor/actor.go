@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/nebler/fern/internal/driver"
 	"github.com/nebler/fern/internal/store"
@@ -87,6 +88,7 @@ type Group struct {
 	driver Driver
 	idle   Idle
 	image  string // the box image, part of every golden key
+	tracer trace.Tracer
 	log    *slog.Logger
 
 	// Time histograms, by result ("ok" or "error"), and, for queue, by
@@ -107,9 +109,9 @@ type findRequest struct {
 	reply chan *actor
 }
 
-// New returns a Group for the environments in st, run by drv from image.
-// Call Run before anything else.
-func New(st Store, drv Driver, idle Idle, image string, log *slog.Logger) *Group {
+// New returns a Group for the environments in st, run by drv from image,
+// that records its changes with tr. Call Run before anything else.
+func New(st Store, drv Driver, idle Idle, image string, tr trace.Tracer, log *slog.Logger) *Group {
 	// Boxes take from tens of milliseconds to the timeouts' minutes; disk
 	// changes and queueing take from a millisecond.
 	boxBuckets := prometheus.ExponentialBuckets(0.025, 2, 13)  // 25ms to 102s
@@ -118,7 +120,7 @@ func New(st Store, drv Driver, idle Idle, image string, log *slog.Logger) *Group
 		return prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: name, Help: help, Buckets: buckets}, []string{label})
 	}
 	return &Group{
-		store: st, driver: drv, idle: idle, image: image, log: log,
+		store: tracedStore{st: st, tr: tr}, driver: drv, idle: idle, image: image, tracer: tr, log: log,
 		wakes:        histogram("fern_wake_seconds", "Time to wake a box, until its services are ready.", boxBuckets, "result"),
 		stops:        histogram("fern_stop_seconds", "Time to stop a box, until its pod is gone.", boxBuckets, "result"),
 		restores:     histogram("fern_restore_seconds", "Time to restore a snapshot, stopping the box included.", boxBuckets, "result"),
@@ -268,11 +270,16 @@ func (g *Group) actorOf(ctx context.Context, id string) (*actor, error) {
 // it has, fn runs to the end, and do waits for it, so that fn never uses what
 // its caller has let go of (such as a request's body). changeTimeout bounds
 // the wait.
-func (g *Group) do(ctx context.Context, change, id string, fn func(ctx context.Context, a *actor) error) error {
+func (g *Group) do(ctx context.Context, change, id string, fn func(ctx context.Context, a *actor) error) (err error) {
+	ctx, span := startSpan(ctx, g.tracer, change, id)
+	defer func() { endSpan(span, err) }()
 	queued := time.Now()
-	m := message{reply: make(chan error, 1), fn: func(ctx context.Context, a *actor) error {
+	m := message{reply: make(chan error, 1), fn: func(actx context.Context, a *actor) error {
 		g.queue.WithLabelValues(change).Observe(time.Since(queued).Seconds())
-		return fn(ctx, a)
+		// The actor's context carries the caller's span, not its deadline.
+		_, wait := g.tracer.Start(ctx, "queue", trace.WithTimestamp(queued))
+		wait.End()
+		return fn(trace.ContextWithSpan(actx, span), a)
 	}}
 	for {
 		a, err := g.actorOf(ctx, id)
@@ -619,7 +626,9 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 		a.opened, a.closed = time.Now(), time.Now()
 	}
 	start := time.Now()
+	ctx, span := startSpan(ctx, a.g.tracer, "box.wake", a.id)
 	addr, err := a.g.driver.Wake(ctx, env)
+	endSpan(span, err)
 	observe(a.g.wakes, start, &err)
 	if err != nil {
 		return store.Env{}, err
@@ -635,7 +644,9 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 func (a *actor) stopBox(ctx context.Context, stop func(ctx context.Context, id string) error) error {
 	a.addr = ""
 	start := time.Now()
-	err := stop(ctx, a.id)
+	spanCtx, span := startSpan(ctx, a.g.tracer, "box.stop", a.id)
+	err := stop(spanCtx, a.id)
+	endSpan(span, err)
 	observe(a.g.stops, start, &err)
 	if err != nil {
 		return err

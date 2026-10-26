@@ -1371,3 +1371,57 @@ with the Mac quiet. Between the two VPS baselines, with no change in
 between that touches them, sleep went 1,622 → 1,422 → 1,621 ms and the
 first checkpoint 12 → 92 → 10 ms: one gate run against one baseline can't
 tell such changes from a regression; `lab/ab.sh` can.
+
+## Where a wake, a sleep and a restore go (lab/profile.sh, VPS), 2026-10-26
+
+Traces from the daemon and kubelet on one timeline, and whole-node perf
+samples within the operations' windows (10 wakes, 10 sleeps, 5 restores;
+perf recording makes each a little slower).
+
+**Wake** (median 1,103 ms): Fern patches the Sandbox (11 ms); kubelet's
+syncPod starts at 27 ms and then does nothing it traces until 346 ms, about
+315 ms that match the volume wait measured before (one box has 3 volumes);
+RunPodSandbox 237 ms (gVisor's sandbox and pod networking), CreateContainer
+19 ms, StartContainer 214 ms; the container runs at 820 ms and Fern's pod
+poll (every 200 ms) sees it at 864; fern-init and Postgres are ready at
+1,103 (238 ms).
+
+**Sleep** (median 1,219 ms): suspend 11 ms, fern-init's stop 4 ms; kubelet
+stops the container (188 ms) and the sandbox (163 ms) by 470 ms, and then
+waits until 1,106 ms, about 635 ms, for its next pod status check (PLEG)
+before it removes the container and deletes the pod (1,131); Fern's poll
+sees it gone at 1,219. **Restore** is the same stop (1,217 ms) and 33 ms of
+Fern's own disk work.
+
+CPU per wake on the node (not counting idle): 1,681 ms. gVisor's sentry
+551 (about a fifth of it the box's own programs), kubelet 328, runsc 171,
+iptables 89 (+24 for iptables-save/restore), containerd-shim 82,
+containerd 81, gofers 65, systemd 47, the sandbox controller 20, Fern's
+daemon 18. About 250 ms per wake is pod networking (iptables, CNI's bridge
+and portmap, udev, networkctl, dbus). A sleep costs 1,141 ms, a restore
+1,202.
+
+Leads, by size: kubelet's wait for its status check after a stop (~635 ms
+of every sleep and restore; kubelet's evented PLEG could end it), the
+volume wait before a wake's sandbox (~315 ms), pod networking's CPU, and
+Fern's 200 ms polls (about half an interval of each wake, sleep and
+restore; a watch would end them).
+
+k3s's containerd is built without tracing, so its calls are timed by
+kubelet's spans only. k3s, runsc and the controllers are stripped Go;
+`lab/profile.sh` names their frames from Go's own function table.
+
+## lab/ab.sh, checked against itself, 2026-10-26
+
+`lab/ab.sh -n 6 -s box` on the VPS, A = `d931dc71`, B = the tracing work
+with tracing off (no change meant to move a number): **0 worse, 0 better,
+13 same**, and the new API-request count (16 per sleep and wake) "from 0".
+The spreads it reports show why one gate run can't judge a change: the
+force-delete time's 95% interval for B's change was -57% … +215%.
+
+That spread was the test's: after a force delete, the first query
+sometimes still reached the deleted pod's box, which answers for a moment,
+so `box.force_delete_ms` timed the old pod (about 700 ms) on some runs and
+the new one on others, and the next query, landing mid-replacement, once
+failed ("and the seed ran once"). The check now waits for the new pod
+first: `box.force_delete_recovery_ms`, 1,561 ms on the VPS.
