@@ -1503,3 +1503,25 @@ CSI mounts and the network policy from the install (3A step 5), the
 warm pool, and Phase 4 (Claude outside the box), whose threat model
 (`docs/briefs/claude-outside-the-box.md`) waits for review. The VPS is left
 running boxes with runsc.
+
+## Phase 4 and the new default: Claude in a box of its own (VPS), 2026-10-28
+
+The default is now the daemon's runsc boxes with an agent box per
+environment (`--boxes=runsc --agent-boxes`): Claude runs in `<env>.agent`,
+its shell commands run through the daemon's MCP Bash in the environment's
+box, and that box gets no login. Against the Phase 0 baseline (median of 3):
+
+| | Phase 0 | runsc | runsc + agent boxes |
+|---|---:|---:|---:|
+| CPU per short turn | 62,434 ms | 8,518 ms | **7,188 ms** |
+| box memory x minutes per turn | 2,886 | 69 | 66 |
+| wake, p50 | 993 ms | 256 ms | 253 ms |
+| sleep, p50 | 1,221 ms | 89 ms | 90 ms |
+| revert in T3 (restore) | 1,034 ms | 110 ms | 108 ms |
+| memory per box, 20 awake | 82.8 MiB | 48.8 MiB | 45.2 MiB |
+
+`lab/t3-run.sh toy 2` (Haiku): 2/2 passed; both boxes sleep 26.8 s after a
+turn; the turn after Fern stopped Claude resumes it in 5.0 s (agent box
+woken in 277 ms); revert 1.1 s. Every check of the gate passes, the network
+ones included; its 9 flags are the same moves as with runsc alone (the
+daemon's own CPU, on-demand initdb in a fresh environment's first command).
