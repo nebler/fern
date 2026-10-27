@@ -916,9 +916,11 @@ turn() {
   fresh $ENV
   metric turn.wake_ms "a turn's wake, ms" "$(resource_op turn.wake wake $ENV 2>"$TMP/wake" | took)"
   cat "$TMP/wake"
+  # In a session of its own, which the end of SSH's doesn't hang up; its
+  # process group is the session's ID.
   # shellcheck disable=SC2016 # expanded on the node
-  claude=$(on_node sh -c 'sleep "$1" | "$2" exec -i "$3" -- claude -p --input-format stream-json \
-    --output-format stream-json --verbose >/dev/null 2>&1 & echo $!' sh $((seconds + 120)) "$FERN_CLI" $ENV </dev/null)
+  claude=$(on_node sh -c 'setsid sh -c '\''sleep "$1" | "$2" exec -i "$3" -- claude -p --input-format stream-json \
+    --output-format stream-json --verbose'\'' sh "$@" >/dev/null 2>&1 </dev/null & echo $!' sh $((seconds + 120)) "$FERN_CLI" $ENV </dev/null)
   # Tool calls, as Claude's Bash tool makes them: one process after another.
   # shellcheck disable=SC2016 # expanded in the box
   metric turn.tools_ms "six tool calls (git, grep, read, psql, write, diff), ms" "$(resource_op turn.tools exec $ENV -- sh -c '
@@ -938,7 +940,7 @@ turn() {
   metric turn.box_memory_mib "box memory with Claude waiting, MiB (anon + shmem)" \
     "$(awk '$1 == "box_memory_mib" { print $2 }' "$TMP/idle-after")"
   # T3 ends Claude: fern exec passes SIGTERM on to it.
-  on_node kill "$claude" </dev/null
+  on_node kill -TERM -- "-$claude" </dev/null
   metric turn.sleep_ms "a turn's sleep, ms" "$(resource_op turn.sleep sleep $ENV 2>"$TMP/sleep" | took)"
   cat "$TMP/sleep"
   read -r hibernate t3 agent human <<<"$(idle_policy)"
