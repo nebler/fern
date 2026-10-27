@@ -45,7 +45,7 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
  && mkdir -p /etc/postgresql-common/createcluster.d \
  && echo 'create_main_cluster = false' > /etc/postgresql-common/createcluster.d/fern.conf \
  && apt-get update \
- && apt-get install -y --no-install-recommends postgresql-17 nodejs ca-certificates curl git \
+ && apt-get install -y --no-install-recommends postgresql-17 nodejs ca-certificates curl git tini \
  && rm /etc/apt/apt.conf.d/fern-bootstrap-ca \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 1000 --user-group --home-dir /tmp --no-create-home fern

@@ -1,0 +1,153 @@
+package runsc
+
+import (
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/google/go-cmp/cmp"
+
+	"github.com/nebler/fern/internal/store"
+)
+
+var env = store.Env{
+	ID: "demo", Workspace: "/pool/worktrees/r/demo", Claude: "/pool/envs/demo/claude",
+	Git: "/pool/repos/r/.git", BoxToken: "tok",
+}
+
+// mounts returns the spec's bind mounts as destination: options.
+func binds(s spec) map[string]string {
+	m := make(map[string]string)
+	for _, mt := range s.Mounts {
+		if mt.Type == "bind" {
+			m[mt.Destination] = mt.Source + " " + strings.Join(mt.Options, ",")
+		}
+	}
+	return m
+}
+
+func TestBoxSpec(t *testing.T) {
+	b := newBox("/pool", env.ID)
+	s := boxSpec(env, b, []string{"PATH=/bin"}, boxVars(env, "w1", "login", false))
+	want := map[string]string{
+		"/etc/resolv.conf": "/pool/boxes/resolv.conf rbind,ro",
+		"/tmp":             "/pool/boxes/demo/tmp rbind,rw",
+		env.Workspace:      env.Workspace + " rbind,rw",
+		env.Claude:         env.Claude + " rbind,rw",
+		// The git folder and the worktree's .git file are read-only: a box
+		// that could change them could run code in T3's server.
+		env.Git:                 env.Git + " rbind,ro",
+		env.Workspace + "/.git": env.Workspace + "/.git bind,ro",
+	}
+	if diff := cmp.Diff(want, binds(s)); diff != "" {
+		t.Errorf("bind mounts (-want +got):\n%s", diff)
+	}
+	if !s.Root.Readonly || s.Root.Path != "/pool/boxes/demo/rootfs" {
+		t.Errorf("root = %+v, want the box's overlay, read-only", s.Root)
+	}
+	if s.Process.User.UID != store.BoxUID || len(s.Process.Capabilities.Bounding) != 0 || !s.Process.NoNewPrivileges {
+		t.Errorf("process runs as %+v with capabilities %v, want the box's user, none", s.Process.User, s.Process.Capabilities)
+	}
+	for _, v := range []string{"PATH=/bin", "FERN_BOX_TOKEN=tok", "FERN_POD_UID=w1", "CLAUDE_CONFIG_DIR=" + env.Claude, "CLAUDE_CODE_OAUTH_TOKEN=login"} {
+		if !slices.Contains(s.Process.Env, v) {
+			t.Errorf("env lacks %s: %v", v, s.Process.Env)
+		}
+	}
+	if s.Linux.CgroupsPath != "/fern/demo" || s.Linux.Resources.Memory.Limit != 2<<30 || s.Linux.Resources.Pids.Limit != 4096 {
+		t.Errorf("cgroup %s with %+v, want /fern/demo with the pod's limits", s.Linux.CgroupsPath, s.Linux.Resources)
+	}
+	if ns := s.Linux.Namespaces[1]; ns.Type != "network" || ns.Path != b.netns() {
+		t.Errorf("network namespace %+v, want %s", ns, b.netns())
+	}
+}
+
+// A golden builder's box gets no login and starts its services at once.
+func TestBuilderVars(t *testing.T) {
+	vars := boxVars(env, "w1", "login", true)
+	for _, v := range vars {
+		if strings.HasPrefix(v, "CLAUDE_") {
+			t.Errorf("builder's box has %s", v)
+		}
+	}
+	if !slices.Contains(vars, "FERN_ON_DEMAND=off") {
+		t.Errorf("builder's vars %v, want FERN_ON_DEMAND=off", vars)
+	}
+}
+
+func TestAddrs(t *testing.T) {
+	for _, tc := range []struct {
+		n           int
+		host, guest string
+	}{
+		{0, "10.89.0.1", "10.89.0.2"},
+		{1, "10.89.0.5", "10.89.0.6"},
+		{64, "10.89.1.1", "10.89.1.2"},
+		{maxBoxes - 1, "10.89.255.253", "10.89.255.254"},
+	} {
+		host, guest, err := addrs(tc.n)
+		if err != nil || host.String() != tc.host || guest.String() != tc.guest {
+			t.Errorf("addrs(%d) = %s, %s, %v; want %s, %s", tc.n, host, guest, err, tc.host, tc.guest)
+		}
+	}
+	if _, _, err := addrs(maxBoxes); err == nil {
+		t.Errorf("addrs(%d) succeeded, want no address left", maxBoxes)
+	}
+}
+
+// Interface names have at most 15 characters, and differ per environment.
+func TestNames(t *testing.T) {
+	a, b := newBox("/pool", strings.Repeat("x", 63)), newBox("/pool", "demo")
+	if len(a.veth()) > 15 || len(a.nsName()) > 32 {
+		t.Errorf("names too long: %s, %s", a.veth(), a.nsName())
+	}
+	if a.veth() == b.veth() {
+		t.Errorf("two environments share veth %s", a.veth())
+	}
+}
+
+// The firewall's jumps come first, in order, and are added only if missing;
+// a box may reach no private range.
+func TestFirewall(t *testing.T) {
+	var jumps []string
+	drops := map[string]bool{}
+	for _, r := range firewall() {
+		if r.args[0] == "-I" {
+			if r.unless == nil {
+				t.Errorf("jump %v is added every time", r.args)
+			}
+			jumps = append([]string{strings.Join(r.args[1:], " ")}, jumps...)
+		}
+		if len(r.args) > 4 && r.args[1] == chainOut && r.args[len(r.args)-1] == "DROP" {
+			drops[r.args[3]] = true
+		}
+	}
+	want := []string{
+		"FORWARD -i fbx+ -j FERN-BOX-OUT",
+		"FORWARD -o fbx+ -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
+		"FORWARD -o fbx+ -j DROP",
+		"INPUT -i fbx+ -j FERN-BOX-IN",
+	}
+	if diff := cmp.Diff(want, jumps); diff != "" {
+		t.Errorf("jumps, top first (-want +got):\n%s", diff)
+	}
+	for _, r := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "127.0.0.0/8"} {
+		if !drops[r] {
+			t.Errorf("boxes may reach %s", r)
+		}
+	}
+}
+
+// runsc finds a container by a prefix of its ID: no box's ID may be a
+// prefix of another's, as "m1" is of "m10".
+func TestContainerIDs(t *testing.T) {
+	ids := map[string]string{}
+	for _, id := range []string{"m1", "m10", "a", "a-b", "ab", strings.Repeat("z", 63)} {
+		cid := newBox("/pool", id).cid
+		for other, ocid := range ids {
+			if strings.HasPrefix(cid, ocid) || strings.HasPrefix(ocid, cid) {
+				t.Errorf("box IDs of %s (%s) and %s (%s) are prefixes", id, cid, other, ocid)
+			}
+		}
+		ids[id] = cid
+	}
+}

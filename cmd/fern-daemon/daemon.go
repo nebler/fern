@@ -35,6 +35,7 @@ import (
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
 	sandboxv1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
@@ -45,6 +46,7 @@ import (
 	"github.com/nebler/fern/internal/api/server"
 	"github.com/nebler/fern/internal/csi"
 	"github.com/nebler/fern/internal/driver"
+	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -56,6 +58,8 @@ const (
 	csiSocket = "/csi/csi.sock"
 	// boxImage is what lab/build.sh builds and imports into every node.
 	boxImage = "fern-box:dev"
+	// runscState is runsc's state directory on the node, with --boxes=runsc.
+	runscState = "/run/fern/runsc"
 )
 
 func main() {
@@ -86,6 +90,8 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	metricsAddr := flags.String("metrics-addr", ":9090", "serve Prometheus metrics at /metrics, and Go's profiles at /debug/pprof/, on this address")
 	traceEndpoint := flags.String("trace-endpoint", "", "send traces by OTLP/HTTP to this URL, such as http://10.0.0.1:4318 (\"\": none)")
 	runtimeClass := flags.String("runtime-class", "", "run boxes under this RuntimeClass, such as gvisor (\"\": the node's default)")
+	boxes := flags.String("boxes", "kubernetes", "who runs boxes: kubernetes (a Sandbox each) or runsc (the daemon itself; needs the node's PID and network namespaces)")
+	boxDNS := flags.String("box-dns", "1.1.1.1,8.8.8.8", "with --boxes=runsc, the resolvers boxes use")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -140,8 +146,25 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	tr := tp.Tracer("github.com/nebler/fern")
 
 	g, ctx := errgroup.WithContext(ctx)
-	drv := driver.New(kube, node, boxImage, *runtimeClass, tr)
-	envs := actor.New(st, drv, idle, boxImage, tr, log)
+	var drv boxDriver
+	image := boxImage
+	switch *boxes {
+	case "kubernetes":
+		drv = driver.New(kube, node, boxImage, *runtimeClass, tr)
+	case "runsc":
+		r := runsc.New(runsc.NodeHost, runsc.Config{
+			Pool: pool, State: runscState, Image: "docker.io/library/" + boxImage,
+			DNS: strings.Split(*boxDNS, ","), Login: claudeLogin(kube),
+		}, tr)
+		// Golden keys name the image's content, not its tag.
+		if image, err = r.Prepare(ctx); err != nil {
+			return fmt.Errorf("prepare the node for boxes: %w", err)
+		}
+		drv = r
+	default:
+		return fmt.Errorf("--boxes=%s: want kubernetes or runsc", *boxes)
+	}
+	envs := actor.New(st, drv, idle, image, tr, log)
 	httpSrv := &http.Server{
 		Handler:           server.New(st, drv, envs, tr, log).Handler(),
 		BaseContext:       func(net.Listener) context.Context { return ctx },
@@ -195,6 +218,28 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		return httpSrv.Shutdown(shutdownCtx)
 	})
 	return g.Wait()
+}
+
+// boxDriver runs boxes, and reports its steps as metrics.
+type boxDriver interface {
+	actor.Driver
+	prometheus.Collector
+}
+
+// claudeLogin returns a function that reads Claude's login from its Secret
+// at every wake, as kubelet does for a pod: "" while there is none.
+func claudeLogin(kube client.Client) func(ctx context.Context) (string, error) {
+	return func(ctx context.Context) (string, error) {
+		var s corev1.Secret
+		err := kube.Get(ctx, client.ObjectKey{Namespace: csi.BoxNamespace, Name: "claude-login"}, &s)
+		if apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		return string(s.Data["token"]), nil
+	}
 }
 
 // tracerProvider returns a provider whose spans go to endpoint by OTLP/HTTP,

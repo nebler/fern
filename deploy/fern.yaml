@@ -111,6 +111,11 @@ rules:
   - apiGroups: [""]
     resources: [pods]
     verbs: [get, list, watch, delete] # watch: a waking or stopping pod; delete: a failed one, so it is replaced
+  # With --boxes=runsc the daemon gives boxes Claude's login itself.
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [claude-login]
+    verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

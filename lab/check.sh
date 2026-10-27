@@ -169,7 +169,8 @@ shift
 for uid do
   slice=$(printf %s "$uid" | tr - _)
   found=
-  for dir in /sys/fs/cgroup/kubepods*/pod"$uid" /sys/fs/cgroup/kubepods*/*/pod"$uid" \
+  box=${uid#runsc-}
+  for dir in /sys/fs/cgroup/fern/"${box%@*}" /sys/fs/cgroup/kubepods*/pod"$uid" /sys/fs/cgroup/kubepods*/*/pod"$uid" \
     /sys/fs/cgroup/kubepods*/*/*pod"$slice".slice /sys/fs/cgroup/kubepods*/*pod"$slice".slice; do
     [ -r "$dir/$file" ] || continue
     cat "$dir/$file" || exit 1
@@ -192,7 +193,47 @@ node_used() {
 golden_id() { echo "golden-$1-$(printf %s "$1" | shasum -a 256 | cut -c1-8)"; }
 # in_daemon runs a shell command in the daemon container, which sees the pool.
 in_daemon() { k -n fern-system exec -i ds/fern -c fern -- sh -c "$1"; }
-pod_uid() { k -n fern-boxes get pod "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null || true; }
+# pod_uid prints what identifies environment $1's running box: its pod's
+# UID, or with runsc boxes runsc-<env>@<sandbox pid>; nothing if none runs.
+pod_uid() {
+  if [ -z "${RUNSC:-}" ]; then
+    k -n fern-boxes get pod "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null || true
+    return
+  fi
+  # runsc's IDs are hashes; its list names each box's bundle, boxes/<env>.
+  on_node runsc --root /run/fern/runsc list </dev/null 2>/dev/null |
+    awk -v b="/var/lib/fern/boxes/$1" '$4 == b && $3 == "running" { print "runsc-" substr(b, 21) "@" $2 }'
+}
+# kill_box kills environment $1's box as a crash would: its pod deleted at
+# once, or its sandbox killed.
+kill_box() {
+  if [ -n "${RUNSC:-}" ]; then
+    local pid
+    pid=$(pod_uid "$1")
+    on_node kill -KILL "${pid#*@}" </dev/null >/dev/null 2>&1
+  else
+    k -n fern-boxes delete pod "$1" --force --grace-period=0 >/dev/null 2>&1
+  fi
+}
+# box_ip prints environment $1's box's address.
+box_ip() {
+  if [ -n "${RUNSC:-}" ]; then
+    in_daemon "cat /var/lib/fern/boxes/$1/net" | awk '{ n = $1 * 4 + 2; printf "10.89.%d.%d\n", int(n / 256), n % 256 }'
+  else
+    k -n fern-boxes get pod "$1" -o jsonpath='{.status.podIP}'
+  fi
+}
+# box_uids prints the boxes' identities (pod_uid) of the environments named
+# $1 followed by a number up to $2.
+box_uids() {
+  if [ -n "${RUNSC:-}" ]; then
+    local i
+    for i in $(seq "$2"); do pod_uid "$1$i"; done | tr '\n' ' '
+  else
+    k -n fern-boxes get pods -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.uid}{"\n"}{end}' |
+      awk -v p="$1" -v n="$2" 'index($1, p) == 1 && substr($1, length(p) + 1) ~ /^[0-9]+$/ && substr($1, length(p) + 1) + 0 <= n { printf "%s ", $2 }'
+  fi
+}
 # wait_daemon waits until the daemon answers.
 wait_daemon() {
   k -n fern-system rollout status ds/fern --timeout=300s >/dev/null
@@ -231,7 +272,13 @@ slice() {
 }
 
 # mounts prints how often an environment's workspace is mounted on the node.
-mounts() { on_node grep -c "/envs/$1/live " /proc/self/mountinfo </dev/null || true; }
+# mounts counts environment $1's box's mounts on the node: its workspace's
+# (CSI) or, with runsc boxes, its root's.
+mounts() {
+  local what="/envs/$1/live "
+  [ -n "${RUNSC:-}" ] && what="/boxes/$1/rootfs "
+  on_node grep -c "$what" /proc/self/mountinfo </dev/null || true
+}
 # procs prints the names of the processes in an environment's box.
 procs() { fern exec "$1" -- sh -c 'cat /proc/[0-9]*/comm 2>/dev/null; true' | sort -u; }
 
@@ -243,8 +290,12 @@ box() {
   # child leave the group before the exec ends and the group is killed.
   fern exec $ENV -- sh -c 'echo x > /tmp/outside && echo y > inside && setsid -f sleep 1000 >/dev/null 2>&1 && sleep 0.5'
   check "the box runs under gVisor" "Starting gVisor..." "$(fern exec $ENV -- dmesg | head -1 | cut -c16-)"
-  check "the pod belongs to its Sandbox" Sandbox \
-    "$(k -n fern-boxes get pod $ENV -o jsonpath='{.metadata.ownerReferences[0].kind}')"
+  if [ -n "${RUNSC:-}" ]; then
+    check "the daemon runs the box with runsc" yes "$([ -n "$(pod_uid $ENV)" ] && echo yes || echo no)"
+  else
+    check "the pod belongs to its Sandbox" Sandbox \
+      "$(k -n fern-boxes get pod $ENV -o jsonpath='{.metadata.ownerReferences[0].kind}')"
+  fi
   check "the root filesystem is read-only" no "$(succeeds fern exec $ENV -- touch /etc/x)"
   check "the box writes to the pool" y "$(in_daemon "cat /var/lib/fern/envs/$ENV/live/inside")"
   check "a stray process runs" 1 "$(procs $ENV | grep -cx sleep || true)"
@@ -295,14 +346,15 @@ box() {
   local old users="" uid
   old=$(pod_uid $ENV)
   start=$(now_ms)
-  k -n fern-boxes delete pod $ENV --force --grace-period=0 >/dev/null 2>&1
+  kill_box $ENV
   # The deleted pod's box can answer for a moment after the delete (its
   # sandbox is still stopping), and a command sent while the pod is being
   # replaced can fail; it isn't retried, as it may have run. So the
-  # commands start once the new pod exists.
+  # commands start once the new pod exists. A box the daemon runs comes
+  # back with the next command, which finds the old one gone.
   for _ in $(seq 80); do
     uid=$(pod_uid $ENV)
-    if [ -n "$uid" ] && [ "$uid" != "$old" ]; then
+    if [ -n "${RUNSC:-}" ] || { [ -n "$uid" ] && [ "$uid" != "$old" ]; }; then
       users=$(sql $ENV 'select count(*) from users' 2>/dev/null) && break
     fi
     sleep 0.25
@@ -572,8 +624,12 @@ many() {
   wait
   metric many.wake10_ms "10 sleeping environments woken at once, ms until all answered" $(($(now_ms) - start))
   check "all 10 answer (3 users each)" 10 "$(cat "$TMP"/many* | grep -cx 3 || true)"
-  check "all 10 run under gVisor" 10 \
-    "$(k -n fern-boxes get pods -o jsonpath='{range .items[*]}{.metadata.name} {.spec.runtimeClassName}{"\n"}{end}' | grep -cE '^m[0-9]+ gvisor$' || true)"
+  if [ -n "${RUNSC:-}" ]; then
+    check "all 10 run under gVisor" 10 "$(box_uids m 10 | wc -w | tr -d ' ')"
+  else
+    check "all 10 run under gVisor" 10 \
+      "$(k -n fern-boxes get pods -o jsonpath='{range .items[*]}{.metadata.name} {.spec.runtimeClassName}{"\n"}{end}' | grep -cE '^m[0-9]+ gvisor$' || true)"
+  fi
   if [ -n "$FERN_HOST" ]; then
     metric many.node_memory10_mib "node memory used with 10 boxes awake, MiB" "$(on_node free -m </dev/null | awk 'NR == 2 { print $3 }')"
   else
@@ -617,8 +673,7 @@ scale() {
       "$(awk -v u="$used_available" -v b="$base_available" -v n="$n" 'BEGIN { printf "%.1f", (u - b) / n }')"
     # The box section measures a warm box. Read these fresh boxes' cgroups
     # here too, so their startup memory isn't mistaken for outside-pod cost.
-    uids=$(k -n fern-boxes get pods -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.uid}{"\n"}{end}' |
-      awk -v n="$n" '$1 ~ /^s[1-9][0-9]*$/ && substr($1, 2) + 0 <= n { printf "%s ", $2 }')
+    uids=$(box_uids s "$n")
     read -ra pod_uids <<<"$uids"
     check "memory accounts for all $n boxes" "$n" "${#pod_uids[@]}"
     if ! pod_stats=$(pod_cgroups memory.stat "${pod_uids[@]}"); then
@@ -678,7 +733,7 @@ limits() {
   check "the box's pod has a CPU limit (2 cores)" "200000 100000" "$(pod_cgroup $ENV cpu.max)"
   check "the box's pod has a PID limit" 4096 "$(pod_cgroup $ENV pids.max)"
   fern wake ${ENV}2 >/dev/null
-  ip=$(k -n fern-boxes get pod ${ENV}2 -o jsonpath='{.status.podIP}')
+  ip=$(box_ip ${ENV}2)
   check "a box can't reach another box" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:7070/")"
   check "the daemon can" ok "$(fern exec ${ENV}2 -- echo ok)"
   fern rm ${ENV}2
@@ -1045,6 +1100,10 @@ main() {
     "") set -- "${quick[@]}" ;;
     all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} && DISK_HARDWARE=1 ;;
   esac
+  # Boxes run by the daemon itself (lab/boxes.sh runsc) have no pods.
+  if k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -q -- '--boxes=runsc'; then
+    export RUNSC=1
+  fi
   for s in "$@"; do
     case " ${all[*]} t3 " in
       *" $s "*) ;;

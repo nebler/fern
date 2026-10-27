@@ -4,7 +4,9 @@
 set -eu
 cgroup() {
   slice=$(printf %s "$1" | tr - _)
-  for dir in /sys/fs/cgroup/kubepods*/pod"$1" /sys/fs/cgroup/kubepods*/*/pod"$1" \
+  # runsc-<env>@<pid>: a box the daemon runs itself (lab/check.sh pod_uid).
+  box=${1#runsc-}
+  for dir in /sys/fs/cgroup/fern/"${box%@*}" /sys/fs/cgroup/kubepods*/pod"$1" /sys/fs/cgroup/kubepods*/*/pod"$1" \
     /sys/fs/cgroup/kubepods*/*/*pod"$slice".slice /sys/fs/cgroup/kubepods*/*pod"$slice".slice; do
     [ -r "$dir/cpu.stat" ] || continue
     printf '%s\n' "$dir"
