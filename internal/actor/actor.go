@@ -500,17 +500,23 @@ func (g *Group) prewake(ctx context.Context, id string) {
 }
 
 // Exec is a command running in a box, counted by its environment's actor
-// until Close.
+// until Close or CloseAndSleep.
 type Exec struct {
 	Addr  string // the box's exec address
 	Token string // authenticates the daemon to the box
 
-	close func()
+	close func(sleep bool)
 }
 
 // Close ends the count of the command, which starts the idle times. It may
 // be called more than once.
-func (e *Exec) Close() { e.close() }
+func (e *Exec) Close() { e.close(false) }
+
+// CloseAndSleep ends the count of the command and, if no other command runs
+// in the box, puts it to sleep at once instead of after the idle times: the
+// command was an agent that stopped because it had nothing to do (package
+// hibernate).
+func (e *Exec) CloseAndSleep() { e.close(true) }
 
 // Exec wakes environment id's box if needed and counts a command running in
 // it until the returned Exec is closed. A restore, sleep or delete calls
@@ -529,7 +535,7 @@ func (g *Group) Exec(ctx context.Context, id, stale string, cancel context.Cance
 		a.execs[n] = cancel
 		a.opened = time.Now()
 		g.log.InfoContext(ctx, "exec opened", slog.String("env", id), slog.Int("exec", n), slog.Int("active", len(a.execs)))
-		ex = &Exec{Addr: a.addr, Token: env.BoxToken, close: func() { a.endExec(n) }}
+		ex = &Exec{Addr: a.addr, Token: env.BoxToken, close: func(sleep bool) { a.endExec(n, sleep) }}
 		return nil
 	})
 	if err != nil {
@@ -563,7 +569,7 @@ type actor struct {
 	next     int                        // the last command's number
 	opened   time.Time                  // when the last command started
 	closed   time.Time                  // when the last command ended
-	lease    time.Time                  // set while a pre-woken box waits for a command: when it sleeps
+	lease    time.Time                  // when an awake box with nothing running sleeps instead of after the idle times: set by a pre-wake, or a command that asked
 	prewoken bool                       // the lease's wake succeeded, so its end is counted
 	idle     *time.Timer                // fires when the box may have been idle long enough
 }
@@ -660,13 +666,17 @@ func (a *actor) stopBox(ctx context.Context, stop func(ctx context.Context, id s
 	return nil
 }
 
-// endExec stops counting command n, from the goroutine that ran it. A
-// command that a stop already cancelled is not counted any more.
-func (a *actor) endExec(n int) {
+// endExec stops counting command n, from the goroutine that ran it; with
+// sleep, the box sleeps at once if nothing else runs. A command that a stop
+// already cancelled is not counted any more.
+func (a *actor) endExec(n int, sleep bool) {
 	end := func(ctx context.Context, _ *actor) error {
 		if _, ok := a.execs[n]; ok {
 			delete(a.execs, n)
 			a.closed = time.Now()
+			if sleep && len(a.execs) == 0 {
+				a.lease = a.closed
+			}
 			a.g.log.InfoContext(ctx, "exec closed", slog.String("env", a.id), slog.Int("exec", n),
 				slog.Int("active", len(a.execs)), slog.Time("last_opened", a.opened))
 		}

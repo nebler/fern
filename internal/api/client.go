@@ -114,7 +114,18 @@ func (c *Client) Prewake(ctx context.Context, id string) error {
 // Exec runs req in environment id's box, waking it if needed, and returns
 // the command's exit code. See boxexec.Run for the streams.
 func (c *Client) Exec(ctx context.Context, id string, req boxexec.Request, streams boxexec.Streams) (int, error) {
-	conn, err := boxexec.Dial(ctx, "ws://fern"+envPath(id)+"/exec", "", c.hc)
+	return c.exec(ctx, envPath(id)+"/exec", id, req, streams)
+}
+
+// ExecThenSleep runs a command like Exec; once it ends, the box sleeps at
+// once unless another command runs, instead of after the idle times. An
+// agent stopped because it had nothing to do (package hibernate) ends so.
+func (c *Client) ExecThenSleep(ctx context.Context, id string, req boxexec.Request, streams boxexec.Streams) (int, error) {
+	return c.exec(ctx, envPath(id)+"/exec?then=sleep", id, req, streams)
+}
+
+func (c *Client) exec(ctx context.Context, path, id string, req boxexec.Request, streams boxexec.Streams) (int, error) {
+	conn, err := boxexec.Dial(ctx, "ws://fern"+path, "", c.hc)
 	if err != nil {
 		var dialErr *boxexec.DialError
 		if errors.As(err, &dialErr) {

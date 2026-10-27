@@ -81,7 +81,10 @@ function resourceTracker(before) {
 // with a pattern its answer must match; a "revert" step goes back to the
 // checkpoint before turn N, files and environment too; a "reopen" step
 // leaves the thread until its box sleeps, then opens it again and reads it
-// for that many ms, so the next turn shows what opening a thread hides.
+// for that many ms, so the next turn shows what opening a thread hides; an
+// "idle" step leaves the thread alone until its box sleeps by itself (Fern
+// stops the idle Claude), at most that many ms, and checks that T3 kept its
+// Claude session: the next turn resumes it.
 const scenarios = {
   sample: {
     project: "sample",
@@ -92,6 +95,8 @@ const scenarios = {
       { send: "How many rows are in the users table now? Answer with just the number.", expect: /\b3\b/ },
       { reopen: 3000 },
       { send: "How many rows are in the users table? Answer with just the number.", expect: /\b3\b/ },
+      { idle: 120000 },
+      { send: "What did I ask you in my previous message? Answer in five words or fewer.", expect: /row|users|table/i },
     ],
   },
   toy: {
@@ -113,6 +118,8 @@ const scenarios = {
       },
       { reopen: 3000 },
       { send: "How many notes does curl localhost:3000/notes return? Answer with just the number.", expect: /\b3\b/ },
+      { idle: 120000 },
+      { send: "What did I ask you in my previous message? Answer in five words or fewer.", expect: /note|curl/i },
     ],
   },
 };
@@ -331,7 +338,8 @@ async function runOnce(rpc, project, baseRef, n, idleBoxMiB) {
       }, 2000);
       const start = Date.now();
       const result = {
-        step: step.send ? `turn ${turns + 1}` : step.revert ? `revert to before turn ${step.revert}` : `reopen, ${step.reopen} ms`,
+        step: step.send ? `turn ${turns + 1}` : step.revert ? `revert to before turn ${step.revert}` :
+          step.idle ? "idle until the box sleeps" : `reopen, ${step.reopen} ms`,
       };
       let finished;
       try {
@@ -383,6 +391,23 @@ async function runOnce(rpc, project, baseRef, n, idleBoxMiB) {
             pass: run.status === "completed" && step.expect.test(answer),
           });
           finished = { p, run };
+        } else if (step.idle) {
+          const path = (await projection()).thread.worktreePath;
+          const look = async () => {
+            const [state, pids = ""] = (await bash(env("T3_IDLE_CMD"), path)).split("\n");
+            return { state: state.trim(), pids: pids.trim() };
+          };
+          const first = await look();
+          let now = first;
+          while (now.state !== "asleep" && Date.now() - start < step.idle) {
+            await sleep(1000);
+            now = await look();
+          }
+          Object.assign(result, {
+            asleepAfterMs: now.state === "asleep" ? Date.now() - start : null,
+            claudeKept: first.pids !== "" && first.pids === now.pids,
+          });
+          result.pass = now.state === "asleep" && result.claudeKept;
         } else if (step.reopen) {
           // As the app does when the user leaves the thread, and opens it again.
           unsubscribe?.();

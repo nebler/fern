@@ -38,6 +38,13 @@ rm_env='source lab/lib.sh; id=$(fern which "$1") && fern rm "$id"'
 # puts it to sleep, as idle time would, for a reopen step,
 # shellcheck disable=SC2016
 sleep_env='source lab/lib.sh; id=$(fern which "$1") && fern sleep "$id" >/dev/null'
+# prints its box's state and the fern exec processes standing in for Claude
+# in T3's pod, for an idle step,
+# shellcheck disable=SC2016
+idle_env='source lab/lib.sh; id=$(fern which "$1") && fern ls | awk -v id="$id" '\''$1 == id { print $2 }'\''
+k -n fern-system exec deploy/t3 -c t3 -- sh -c '\''for p in /proc/[0-9]*; do
+  case $(tr "\0" " " <"$p/cmdline" 2>/dev/null) in "fern exec "*) printf "%s " "${p#/proc/}" ;; esac
+done'\''; echo'
 # and samples the node's used memory, in MiB.
 # shellcheck disable=SC2016
 node_memory='source lab/lib.sh; on_node awk '\''/^MemTotal:/ {t=$2} /^MemAvailable:/ {a=$2} END {print (t-a)/1024}'\'' /proc/meminfo </dev/null'
@@ -78,6 +85,6 @@ source lab/hardware.sh
 HW_DAEMON=$HW_DAEMON HW_T3=$HW_T3 HW_CONTROLLER=$HW_CONTROLLER hardware_sample --counters "$uid" | awk '\''$1=="box_memory_mib" {print $2}'\''
 fern rm "$id" >/dev/null'
 T3_RESOURCE_CMD=$resources T3_BOX_BASELINE_CMD=$box_baseline \
-T3_PAIR_URL=$pair_url T3_METRICS_CMD=$metrics T3_RM_ENV_CMD=$rm_env T3_SLEEP_CMD=$sleep_env T3_NODE_MEMORY_CMD=$node_memory T3_TRACE_CMD=$trace \
+T3_PAIR_URL=$pair_url T3_METRICS_CMD=$metrics T3_RM_ENV_CMD=$rm_env T3_SLEEP_CMD=$sleep_env T3_IDLE_CMD=$idle_env T3_NODE_MEMORY_CMD=$node_memory T3_TRACE_CMD=$trace \
   FERN_HOST=$FERN_HOST SCENARIO=${1:-toy} RUNS=${2:-1} MODEL=${3:-claude-haiku-5-5} PARALLEL=${PARALLEL:-1} \
   node lab/t3-run.mjs

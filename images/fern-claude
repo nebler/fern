@@ -15,6 +15,11 @@
 # and any credentials in it, stays out of the box, which gets its login from
 # the environment. fern exec passes SIGTERM on to Claude, so it can save its
 # transcript, and exits when the box goes away.
+#
+# T3 keeps a thread's Claude running between turns. fern exec --hibernate
+# stops it after $FERN_HIBERNATE (30s) with nothing to do, so the box sleeps,
+# and starts it again in its session at T3's next message; 0 keeps Claude
+# running until T3 ends it.
 set -eu
 pool=${FERN_POOL:-/var/lib/fern}
 case "$PWD/" in
@@ -40,4 +45,4 @@ case "$PWD/" in
 	fi
 	;;
 esac
-exec fern exec -i --here -e CLAUDE_CODE_ENTRYPOINT -e CLAUDE_AGENT_SDK_VERSION -e FERN_TIMING -- claude "$@"
+exec fern exec -i --here --hibernate "${FERN_HIBERNATE:-30s}" -e CLAUDE_CODE_ENTRYPOINT -e CLAUDE_AGENT_SDK_VERSION -e FERN_TIMING -- claude "$@"

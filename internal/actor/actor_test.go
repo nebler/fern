@@ -248,6 +248,61 @@ func TestNoIdleSleep(t *testing.T) {
 	}
 }
 
+// A command that ends with CloseAndSleep puts the box to sleep at once,
+// unless another command still runs; that one's end starts the idle times.
+func TestCloseAndSleep(t *testing.T) {
+	tests := []struct {
+		name  string
+		other bool // another command runs meanwhile
+		want  driver.State
+	}{
+		{"alone", false, driver.Asleep},
+		{"another running", true, driver.Running},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				st, drv := newFakeStore(), driver.NewFake("box")
+				g := start(t, st, drv, idle)
+				if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				var other *actor.Exec
+				if tt.other {
+					var err error
+					if other, err = g.Exec(t.Context(), "demo", "", func() {}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				ex, err := g.Exec(t.Context(), "demo", "", func() {})
+				if err != nil {
+					t.Fatal(err)
+				}
+				time.Sleep(time.Minute)
+				ex.CloseAndSleep()
+				synctest.Wait()
+				if got := state(t, drv, "demo"); got != tt.want {
+					t.Fatalf("after CloseAndSleep: state %s, want %s", got, tt.want)
+				}
+				if other == nil {
+					return
+				}
+				other.Close()
+				time.Sleep(20*time.Minute - time.Minute - time.Second)
+				synctest.Wait()
+				if got := state(t, drv, "demo"); got != driver.Running {
+					t.Fatalf("before the idle times: state %s, want %s", got, driver.Running)
+				}
+				time.Sleep(time.Second)
+				synctest.Wait()
+				if got := state(t, drv, "demo"); got != driver.Asleep {
+					t.Errorf("after the idle times: state %s, want %s", got, driver.Asleep)
+				}
+			})
+		})
+	}
+}
+
 // A box an earlier daemon left running goes to sleep when idle too.
 func TestIdleSleepAfterRestart(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {

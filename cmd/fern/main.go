@@ -15,6 +15,9 @@
 //	                                         run a command, waking the box if needed
 //	fern exec [flags] --here -- cmd…         … in the environment holding the current
 //	                                         directory, in that directory (fern-claude)
+//	fern exec --hibernate D …                stop a Claude driven by its SDK after D
+//	                                         with nothing to do, so its box sleeps, and
+//	                                         resume it at the next message (fern-claude)
 //	fern sleep <env> | fern wake <env>       stop or start the box
 package main
 
@@ -38,6 +41,7 @@ import (
 
 	"github.com/nebler/fern/internal/api"
 	"github.com/nebler/fern/internal/boxexec"
+	"github.com/nebler/fern/internal/hibernate"
 )
 
 // socket is in a directory of its own, so pods can share it through a
@@ -85,15 +89,16 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 // command is a parsed CLI invocation.
 type command struct {
 	name    string
-	args    []string // positional arguments; for exec, the environment
-	path    string   // create --path
-	seed    bool     // create --seed
-	replace bool     // snapshot --replace
-	stdin   bool     // exec -i
-	tty     bool     // exec -it
-	here    bool     // exec --here
-	environ []string // exec -e, as NAME=VALUE
-	argv    []string // exec: the command
+	args    []string      // positional arguments; for exec, the environment
+	path    string        // create --path
+	seed    bool          // create --seed
+	replace bool          // snapshot --replace
+	stdin   bool          // exec -i
+	tty     bool          // exec -it
+	here    bool          // exec --here
+	environ []string      // exec -e, as NAME=VALUE
+	idle    time.Duration // exec --hibernate
+	argv    []string      // exec: the command
 }
 
 // stdio is the invocation's standard streams.
@@ -184,6 +189,7 @@ func parseExec(fs *flag.FlagSet, cmd command, args []string) (command, error) {
 	fs.BoolVar(&cmd.stdin, "i", false, "send stdin")
 	fs.BoolVar(&cmd.tty, "it", false, "send stdin from a terminal")
 	fs.BoolVar(&cmd.here, "here", false, "use the environment holding the current directory, and run in it")
+	fs.DurationVar(&cmd.idle, "hibernate", 0, "stop a Claude driven by its SDK after this long with nothing to do, and resume it at the next message")
 	fs.Func("e", "pass the variable `NAME` on to the command, if it is set", func(name string) error {
 		if v, ok := os.LookupEnv(name); ok {
 			cmd.environ = append(cmd.environ, name+"="+v)
@@ -350,6 +356,12 @@ func execute(ctx context.Context, c command, cl *api.Client, std stdio) (int, er
 		cancel()
 	})
 
+	if c.idle > 0 && hibernate.Applies(req) {
+		run := func(ctx context.Context, req boxexec.Request, s boxexec.Streams) (int, error) {
+			return cl.ExecThenSleep(ctx, id, req, s)
+		}
+		return hibernate.Run(ctx, run, req, streams, c.idle)
+	}
 	f, ok := streams.Stdin.(*os.File)
 	if !ok || !c.tty || !term.IsTerminal(int(f.Fd())) {
 		return cl.Exec(ctx, id, req, streams)

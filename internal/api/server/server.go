@@ -204,7 +204,8 @@ func (s *Server) prewake(r *http.Request) (any, error) {
 }
 
 // exec runs a command in the environment's box, waking it first if needed,
-// by relaying the client's WebSocket to the box's. It wakes and dials the
+// by relaying the client's WebSocket to the box's. With ?then=sleep the box
+// sleeps as soon as the command ends, unless another runs. It wakes and dials the
 // box before taking the client's WebSocket, so that a failure is still an
 // HTTP error with a body Client.Exec can read. A restore, sleep or delete
 // of the environment ends it.
@@ -220,7 +221,12 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	defer ex.Close()
+	// An agent that stopped because it had nothing to do lets its box sleep.
+	if r.URL.Query().Get("then") == "sleep" {
+		defer ex.CloseAndSleep()
+	} else {
+		defer ex.Close()
+	}
 	defer func() { _ = box.CloseNow() }()
 	client, err := boxexec.Accept(w, r)
 	span.End()
