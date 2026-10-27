@@ -1425,3 +1425,81 @@ so `box.force_delete_ms` timed the old pod (about 700 ms) on some runs and
 the new one on others, and the next query, landing mid-replacement, once
 failed ("and the seed ran once"). The check now waits for the new pod
 first: `box.force_delete_recovery_ms`, 1,561 ms on the VPS.
+
+## Phases 0–3A of the speed plan (VPS), 2026-10-27
+
+**Phase 0.** Short commands are timed on the node (`node_ms`): the SSH hop
+from the Mac (80–160 ms, jittery) had failed a gate on five metrics that
+hadn't moved; an exec in an awake box is 19 ms, not 103. The new `turn`
+section costs one agent turn as T3 runs it (wake, real Claude waiting on
+stream-json, six tool calls, the wait, the sleep), with the wait's length
+from the deployed idle times. Baseline (`c7a162a8`): **62.4 s of CPU per
+short turn**, nearly all the 20 minutes its box stays awake with Claude
+waiting (2.7 s of CPU a minute, 144 MiB).
+
+**Each step, gated against that baseline** (median of 3; VPS):
+
+| | Phase 0 | + hibernation, on-demand Postgres, pod watch | + runsc boxes |
+|---|---:|---:|---:|
+| CPU per short turn | 62,434 ms | 11,343 ms | **8,518 ms** |
+| box awake after the turn | 1,200 s | 30 s | 30 s |
+| box memory x minutes per turn | 2,886 | 73 | 69 |
+| wake, p50 (warm box) | 993 ms | 862 ms | **256 ms** |
+| node CPU per wake (turn) | 4,960 ms | 1,420 ms | **400 ms** |
+| sleep, p50 | 1,221 ms | 1,682 ms | **89 ms** |
+| command to an asleep box, p50 | 1,052 ms | 909 ms | 273 ms |
+| revert in T3 (restore) | 1,034 ms | 1,006 ms | **110 ms** |
+| awake box memory, Postgres idle | 39.7 MiB | 22.4 MiB | 16.1 MiB |
+| memory per awake box, 20 awake | 82.8 MiB | 76.5 MiB | 48.8 MiB |
+| 20 boxes woken at once, until all ready | 25.0 s | 3.2 s | **1.2 s** |
+| API requests per sleep and wake | 15.2 | 8.0 | 1.0 |
+
+What moved what, and the caveats:
+- **Hibernation** (`fern exec --hibernate`, 30 s) makes the turn's cost:
+  awake 1,200 → 30 s. In T3 (`lab/t3-run.sh toy 2`, VPS, pods) the box slept
+  30.7 s after a turn and the next turn resumed the same session.
+- **On-demand Postgres** takes the database's start out of the wake (warm
+  wake -150 ms in the lab) and out of memory until used. For a brand-new
+  environment without a golden it *moves* initdb into the first query: the
+  turn's tool calls went 0.5 → 3.1–3.4 s, and its wake plus tools is ~0.8 s
+  slower than before. The scale section's wakes are of such fresh
+  environments, so their 8–20x is mostly that move.
+- **Pod watch:** `lab/ab.sh` (6 rounds, box): API requests -52%, wake p50
+  -2.6% (29 ms), sleep unchanged; kubelet's 1 s PLEG relist dominates it.
+- **EventedPLEG** (#3) was tried in the lab and reverted: sleeps went 1.2 →
+  4.2 s (gVisor's container events don't reach kubelet's evented path).
+- **Smaller Postgres buffers** (#5) were not repeated: BOX-MEMORY.md
+  measured 5–7 MiB per box for 10–50% fewer writes per second.
+- **runsc boxes** (Phase 3A step 1, `--boxes=runsc`): the daemon does the work
+  kubelet did, so its own CPU per wake went 18 → 123 ms while the node's fell
+  1,420 → 400 ms. Two bugs found on the way: kube-router rewrote `INPUT` and
+  dropped the iptables jump, so a box reached the Kubernetes API through its
+  service address (fixed with an nftables table of its own; the gate's
+  network checks pass), and boxes had no `/etc/hosts`, so `localhost` went to
+  DNS and the toy's `node --test` failed (a T3 turn took 267 s).
+
+**Phase 2 spike** (`lab/spike/runsc/RESULTS.md`): restoring a checkpoint
+costs 362 ms of CPU (bar: ~100), can't serve a revert (Postgres was corrupt
+on a swapped workspace) and its image holds credentials: rejected. A plain
+runsc cold start (494 ms, 683 ms CPU) and a warm subcontainer pool (395 ms,
+503 ms CPU) work.
+
+**T3 end to end** (`lab/t3-run.sh toy 2`, Haiku, VPS, p50; both 2/2 passed):
+
+| step | pods + hibernation | runsc boxes |
+|---|---:|---:|
+| whole run (2 runs, one at a time) | 230 s | 199 s |
+| turn 1 (wake included) | 10.5 s | 9.1 s |
+| revert | 2.6 s | 1.6 s |
+| idle until the box sleeps by itself | 30.7 s | 29.0 s |
+| turn after the stop (wakes, resumes Claude) | 9.1 s | 5.3 s |
+
+A T3 box's wake is 0.8–0.9 s on runsc against 1.5–1.6 s as a pod: the toy's
+web service starts with the box (it has no `listen`), and Claude's start is
+part of every first turn.
+
+Not done yet: making runsc the default and removing agent-sandbox, the box
+CSI mounts and the network policy from the install (3A step 5), the
+warm pool, and Phase 4 (Claude outside the box), whose threat model
+(`docs/briefs/claude-outside-the-box.md`) waits for review. The VPS is left
+running boxes with runsc.
