@@ -54,7 +54,7 @@ node_memory='source lab/lib.sh; on_node awk '\''/^MemTotal:/ {t=$2} /^MemAvailab
 trace='source lab/lib.sh
 k -n fern-system logs deploy/t3 -c t3 | sed -n "s/^fern-timing //p"
 id=t3-$(printf %s "$1" | shasum -a 256 | cut -c1-16)
-k -n fern-boxes logs "$id" -c box 2>/dev/null | sed -n "/msg=\"claude started\"/p; /msg=\"claude first stdout\"/p" || true'
+box_log "$id" | sed -n "/msg=\"claude started\"/p; /msg=\"claude first stdout\"/p" || true'
 # Sample host cgroups and the box guest process tree, using metadata only.
 # Empty path (before launch) means no box exists yet. Missing boxes during
 # restore are expected, but failure to read fixed platform cgroups is fatal.
@@ -62,7 +62,7 @@ k -n fern-boxes logs "$id" -c box 2>/dev/null | sed -n "/msg=\"claude started\"/
 resources='source lab/lib.sh; source lab/hardware.sh
 id=t3-$(printf %s "$1" | shasum -a 256 | cut -c1-16)
 uid=${2:-}
-if [ -z "$uid" ] && [ -n "$1" ]; then uid=$(k -n fern-boxes get pod "$id" -o jsonpath="{.metadata.uid}" 2>/dev/null || true); fi
+if [ -z "$uid" ] && [ -n "$1" ]; then uid=$(box_uid "$id"); fi
 if [ -n "$uid" ]; then
   echo "BOXUID $uid"
   hardware_sample --counters "$uid"
@@ -80,7 +80,7 @@ id=ck-t3-profile
 fern rm "$id" 2>/dev/null || true
 fern create "$id" --repo "lab/$1-repo" >/dev/null
 fern wake "$id" >/dev/null
-uid=$(k -n fern-boxes get pod "$id" -o jsonpath="{.metadata.uid}")
+uid=$(box_uid "$id")
 source lab/hardware.sh
 HW_DAEMON=$HW_DAEMON HW_T3=$HW_T3 HW_CONTROLLER=$HW_CONTROLLER hardware_sample --counters "$uid" | awk '\''$1=="box_memory_mib" {print $2}'\''
 fern rm "$id" >/dev/null'

@@ -58,8 +58,10 @@ const (
 	csiSocket = "/csi/csi.sock"
 	// boxImage is what lab/build.sh builds and imports into every node.
 	boxImage = "fern-box:dev"
-	// runscState is runsc's state directory on the node, with --boxes=runsc.
-	runscState = "/run/fern/runsc"
+	// runscState is runsc's state directory on the node, with --boxes=runsc,
+	// and runscBundles the boxes' bundles: both on the node's tmpfs.
+	runscState   = "/run/fern/runsc"
+	runscBundles = "/run/fern/boxes"
 )
 
 func main() {
@@ -153,7 +155,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		drv = driver.New(kube, node, boxImage, *runtimeClass, tr)
 	case "runsc":
 		r := runsc.New(runsc.NodeHost, runsc.Config{
-			Pool: pool, State: runscState, Image: "docker.io/library/" + boxImage,
+			Pool: pool, Bundles: runscBundles, State: runscState, Image: "docker.io/library/" + boxImage,
 			DNS: strings.Split(*boxDNS, ","), Login: claudeLogin(kube),
 		}, tr)
 		// Golden keys name the image's content, not its tag.

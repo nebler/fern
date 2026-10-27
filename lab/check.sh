@@ -193,21 +193,12 @@ node_used() {
 golden_id() { echo "golden-$1-$(printf %s "$1" | shasum -a 256 | cut -c1-8)"; }
 # in_daemon runs a shell command in the daemon container, which sees the pool.
 in_daemon() { k -n fern-system exec -i ds/fern -c fern -- sh -c "$1"; }
-# pod_uid prints what identifies environment $1's running box: its pod's
-# UID, or with runsc boxes runsc-<env>@<sandbox pid>; nothing if none runs.
-pod_uid() {
-  if [ -z "${RUNSC:-}" ]; then
-    k -n fern-boxes get pod "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null || true
-    return
-  fi
-  # runsc's IDs are hashes; its list names each box's bundle, boxes/<env>.
-  on_node runsc --root /run/fern/runsc list </dev/null 2>/dev/null |
-    awk -v b="/var/lib/fern/boxes/$1" '$4 == b && $3 == "running" { print "runsc-" substr(b, 21) "@" $2 }'
-}
+# pod_uid prints what identifies environment $1's running box (box_uid).
+pod_uid() { box_uid "$1"; }
 # kill_box kills environment $1's box as a crash would: its pod deleted at
 # once, or its sandbox killed.
 kill_box() {
-  if [ -n "${RUNSC:-}" ]; then
+  if [ "${RUNSC:-0}" = 1 ]; then
     local pid
     pid=$(pod_uid "$1")
     on_node kill -KILL "${pid#*@}" </dev/null >/dev/null 2>&1
@@ -217,8 +208,8 @@ kill_box() {
 }
 # box_ip prints environment $1's box's address.
 box_ip() {
-  if [ -n "${RUNSC:-}" ]; then
-    in_daemon "cat /var/lib/fern/boxes/$1/net" | awk '{ n = $1 * 4 + 2; printf "10.89.%d.%d\n", int(n / 256), n % 256 }'
+  if [ "${RUNSC:-0}" = 1 ]; then
+    in_daemon "cat /run/fern/boxes/$1/net" | awk '{ n = $1 * 4 + 2; printf "10.89.%d.%d\n", int(n / 256), n % 256 }'
   else
     k -n fern-boxes get pod "$1" -o jsonpath='{.status.podIP}'
   fi
@@ -226,7 +217,7 @@ box_ip() {
 # box_uids prints the boxes' identities (pod_uid) of the environments named
 # $1 followed by a number up to $2.
 box_uids() {
-  if [ -n "${RUNSC:-}" ]; then
+  if [ "${RUNSC:-0}" = 1 ]; then
     local i
     for i in $(seq "$2"); do pod_uid "$1$i"; done | tr '\n' ' '
   else
@@ -276,7 +267,7 @@ slice() {
 # (CSI) or, with runsc boxes, its root's.
 mounts() {
   local what="/envs/$1/live "
-  [ -n "${RUNSC:-}" ] && what="/boxes/$1/rootfs "
+  [ "${RUNSC:-0}" = 1 ] && what="/boxes/$1/rootfs "
   on_node grep -c "$what" /proc/self/mountinfo </dev/null || true
 }
 # procs prints the names of the processes in an environment's box.
@@ -290,7 +281,7 @@ box() {
   # child leave the group before the exec ends and the group is killed.
   fern exec $ENV -- sh -c 'echo x > /tmp/outside && echo y > inside && setsid -f sleep 1000 >/dev/null 2>&1 && sleep 0.5'
   check "the box runs under gVisor" "Starting gVisor..." "$(fern exec $ENV -- dmesg | head -1 | cut -c16-)"
-  if [ -n "${RUNSC:-}" ]; then
+  if [ "${RUNSC:-0}" = 1 ]; then
     check "the daemon runs the box with runsc" yes "$([ -n "$(pod_uid $ENV)" ] && echo yes || echo no)"
   else
     check "the pod belongs to its Sandbox" Sandbox \
@@ -354,7 +345,7 @@ box() {
   # back with the next command, which finds the old one gone.
   for _ in $(seq 80); do
     uid=$(pod_uid $ENV)
-    if [ -n "${RUNSC:-}" ] || { [ -n "$uid" ] && [ "$uid" != "$old" ]; }; then
+    if [ "${RUNSC:-0}" = 1 ] || { [ -n "$uid" ] && [ "$uid" != "$old" ]; }; then
       users=$(sql $ENV 'select count(*) from users' 2>/dev/null) && break
     fi
     sleep 0.25
@@ -624,7 +615,7 @@ many() {
   wait
   metric many.wake10_ms "10 sleeping environments woken at once, ms until all answered" $(($(now_ms) - start))
   check "all 10 answer (3 users each)" 10 "$(cat "$TMP"/many* | grep -cx 3 || true)"
-  if [ -n "${RUNSC:-}" ]; then
+  if [ "${RUNSC:-0}" = 1 ]; then
     check "all 10 run under gVisor" 10 "$(box_uids m 10 | wc -w | tr -d ' ')"
   else
     check "all 10 run under gVisor" 10 \
@@ -971,11 +962,18 @@ turn() {
   fresh $ENV
   metric turn.wake_ms "a turn's wake, ms" "$(resource_op turn.wake wake $ENV 2>"$TMP/wake" | took)"
   cat "$TMP/wake"
-  # In a session of its own, which the end of SSH's doesn't hang up; its
-  # process group is the session's ID.
+  # In a session of its own where there is setsid (the VPS), which the end
+  # of SSH's doesn't hang up: then its process group is what to stop. The
+  # lab's node, reached without SSH, has none: there fern exec itself.
   # shellcheck disable=SC2016 # expanded on the node
-  claude=$(on_node sh -c 'setsid sh -c '\''sleep "$1" | "$2" exec -i "$3" -- claude -p --input-format stream-json \
-    --output-format stream-json --verbose'\'' sh "$@" >/dev/null 2>&1 </dev/null & echo $!' sh $((seconds + 120)) "$FERN_CLI" $ENV </dev/null)
+  claude=$(on_node sh -c 'claude="claude -p --input-format stream-json --output-format stream-json --verbose"
+    if command -v setsid >/dev/null; then
+      setsid sh -c '\''sleep "$1" | "$2" exec -i "$3" -- $4'\'' sh "$@" "$claude" >/dev/null 2>&1 </dev/null &
+      echo "-$!"
+    else
+      sleep "$1" | "$2" exec -i "$3" -- $claude >/dev/null 2>&1 &
+      echo "$!"
+    fi' sh $((seconds + 120)) "$FERN_CLI" $ENV </dev/null)
   # Tool calls, as Claude's Bash tool makes them: one process after another.
   # shellcheck disable=SC2016 # expanded in the box
   metric turn.tools_ms "six tool calls (git, grep, read, psql, write, diff), ms" "$(resource_op turn.tools exec $ENV -- sh -c '
@@ -995,7 +993,7 @@ turn() {
   metric turn.box_memory_mib "box memory with Claude waiting, MiB (anon + shmem)" \
     "$(awk '$1 == "box_memory_mib" { print $2 }' "$TMP/idle-after")"
   # T3 ends Claude: fern exec passes SIGTERM on to it.
-  on_node kill -TERM -- "-$claude" </dev/null
+  on_node kill -TERM -- "$claude" </dev/null
   metric turn.sleep_ms "a turn's sleep, ms" "$(resource_op turn.sleep sleep $ENV 2>"$TMP/sleep" | took)"
   cat "$TMP/sleep"
   read -r hibernate t3 agent human <<<"$(idle_policy)"
@@ -1101,9 +1099,7 @@ main() {
     all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} && DISK_HARDWARE=1 ;;
   esac
   # Boxes run by the daemon itself (lab/boxes.sh runsc) have no pods.
-  if k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -q -- '--boxes=runsc'; then
-    export RUNSC=1
-  fi
+  if runsc_boxes; then export RUNSC=1; else export RUNSC=0; fi
   for s in "$@"; do
     case " ${all[*]} t3 " in
       *" $s "*) ;;

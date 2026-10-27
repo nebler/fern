@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -82,10 +83,11 @@ func (d *Driver) run(ctx context.Context, name string, args ...string) ([]byte, 
 
 // Config is where a Driver keeps its boxes and what it gives them.
 type Config struct {
-	Pool  string   // the pool, /var/lib/fern
-	State string   // runsc's state directory, on the node
-	Image string   // the box image, as the node's containerd names it
-	DNS   []string // the resolvers boxes use: the node's own is the node
+	Pool    string   // the pool, /var/lib/fern
+	Bundles string   // the boxes' bundles, on the node's tmpfs: /run/fern/boxes
+	State   string   // runsc's state directory, on the node
+	Image   string   // the box image, as the node's containerd names it
+	DNS     []string // the resolvers boxes use: the node's own is the node
 	// Login returns Claude's login, or "" if there is none yet.
 	Login func(ctx context.Context) (string, error)
 }
@@ -197,18 +199,58 @@ func (d *Driver) Prepare(ctx context.Context) (string, error) {
 	if _, err := d.host(ctx, Command{Name: "tee", Args: []string{cg + "/cgroup.subtree_control"}, Stdin: []byte("+cpu +memory +pids")}); err != nil {
 		return "", fmt.Errorf("box cgroup: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Join(d.cfg.Pool, "boxes"), 0o700); err != nil {
-		return "", err
+	for _, dir := range []string{d.cfg.Bundles, filepath.Join(d.cfg.Pool, "boxes")} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return "", err
+		}
 	}
 	var resolv strings.Builder
 	for _, ns := range d.cfg.DNS {
 		fmt.Fprintf(&resolv, "nameserver %s\n", ns)
 	}
-	if err := os.WriteFile(newBox(d.cfg.Pool, "").resolv, []byte(resolv.String()), 0o644); err != nil {
+	if err := os.WriteFile(d.box("").resolv, []byte(resolv.String()), 0o644); err != nil {
+		return "", err
+	}
+	if err := d.reconcile(ctx); err != nil {
 		return "", err
 	}
 	return id, nil
 }
+
+// reconcile finishes what a crash cut short: a box directory with no box
+// running is a wake or a stop that didn't end (or a node that restarted),
+// and is stopped, which frees its network, overlay, address and /tmp. Running boxes are left alone; the
+// actors adopt them.
+func (d *Driver) reconcile(ctx context.Context) error {
+	states, err := d.States(ctx)
+	if err != nil {
+		return err
+	}
+	ids := map[string]bool{}
+	for _, dir := range []string{d.cfg.Bundles, filepath.Join(d.cfg.Pool, "boxes")} {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				ids[e.Name()] = true
+			}
+		}
+	}
+	for id := range ids {
+		if states[id] == driver.Running {
+			continue
+		}
+		if err := d.stop(ctx, id); err != nil {
+			return fmt.Errorf("clear box %s: %w", id, err)
+		}
+	}
+	return nil
+}
+
+// box names environment id's box's resources.
+func (d *Driver) box(id string) box { return newBox(d.cfg.Bundles, d.cfg.Pool, id) }
 
 // container is a box as runsc lists it.
 type container struct {
@@ -243,9 +285,8 @@ func (d *Driver) States(ctx context.Context) (map[string]driver.State, error) {
 		return nil, err
 	}
 	states := make(map[string]driver.State, len(cs))
-	boxes := filepath.Join(d.cfg.Pool, "boxes")
 	for _, c := range cs {
-		if filepath.Dir(c.Bundle) != boxes {
+		if filepath.Dir(c.Bundle) != d.cfg.Bundles {
 			continue // not a box of this pool's
 		}
 		id := filepath.Base(c.Bundle)
@@ -262,15 +303,19 @@ func (d *Driver) States(ctx context.Context) (map[string]driver.State, error) {
 }
 
 // Wake starts env's box, waits until its services are ready and returns
-// the address of its exec server. A box left from before (a crash, a stop
-// that didn't finish) is stopped first, so every wake starts clean.
+// the address of its exec server. A box that runs and is ready, such as one
+// that outlived a daemon restart, is kept; any other left from before (a
+// crash, a stop that didn't finish) is stopped first, so a wake starts clean.
 func (d *Driver) Wake(ctx context.Context, env store.Env) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, wakeTimeout)
 	defer cancel()
+	b := d.box(env.ID)
+	if addr, ok := d.running(ctx, b); ok {
+		return addr, nil
+	}
 	if err := d.stop(ctx, env.ID); err != nil {
 		return "", fmt.Errorf("wake %s: %w", env.ID, err)
 	}
-	b := newBox(d.cfg.Pool, env.ID)
 	start := time.Now()
 	addr, err := d.netUp(ctx, b)
 	if err != nil {
@@ -291,6 +336,40 @@ func (d *Driver) Wake(ctx context.Context, env store.Env) (string, error) {
 	d.steps.WithLabelValues("start").Observe(started.Sub(netDone).Seconds())
 	d.steps.WithLabelValues("ready").Observe(time.Since(started).Seconds())
 	return addr, nil
+}
+
+// running returns the exec address of b's box if it runs and fern-init says
+// it is ready.
+func (d *Driver) running(ctx context.Context, b box) (string, bool) {
+	cs, err := d.list(ctx)
+	if err != nil || !slices.ContainsFunc(cs, func(c container) bool { return c.ID == b.cid && c.Status == "running" }) {
+		return "", false
+	}
+	addr, err := boxAddr(b)
+	if err != nil {
+		return "", false
+	}
+	ctx, cancel := context.WithTimeout(ctx, readyWait)
+	defer cancel()
+	return addr, d.isReady(ctx, addr)
+}
+
+// boxAddr returns the exec address of b's box, from the address number in
+// its directory.
+func boxAddr(b box) (string, error) {
+	data, err := os.ReadFile(filepath.Join(b.dir, "net"))
+	if err != nil {
+		return "", err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return "", err
+	}
+	_, guest, err := addrs(n)
+	if err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(guest.String(), strconv.Itoa(boxexec.Port)), nil
 }
 
 // netUp makes b's network with a free address and returns the box's exec
@@ -324,7 +403,7 @@ func (d *Driver) allocate(b box) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	taken := make(map[int]bool)
-	files, err := filepath.Glob(filepath.Join(d.cfg.Pool, "boxes", "*", "net"))
+	files, err := filepath.Glob(filepath.Join(d.cfg.Bundles, "*", "net"))
 	if err != nil {
 		return 0, err
 	}
@@ -365,6 +444,9 @@ func (d *Driver) start(ctx context.Context, env store.Env, b box) error {
 	if err = os.RemoveAll(b.tmp); err != nil {
 		return err
 	}
+	if err = os.MkdirAll(b.data, 0o700); err != nil {
+		return err
+	}
 	if err = os.Mkdir(b.tmp, 0o700); err != nil {
 		return err
 	}
@@ -397,7 +479,7 @@ func (d *Driver) start(ctx context.Context, env store.Env, b box) error {
 	}
 	// The box's stdio is create's: a file, as a pipe would stay open as
 	// long as the box runs.
-	log, err := os.OpenFile(filepath.Join(b.dir, "log"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	log, err := os.OpenFile(filepath.Join(b.data, "log"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
@@ -456,7 +538,7 @@ func (d *Driver) Delete(ctx context.Context, id string) error { return d.Sleep(c
 // directory. Every step is safe to repeat, so a stop that a crash cut short
 // is finished by the next.
 func (d *Driver) stop(ctx context.Context, id string) error {
-	b := newBox(d.cfg.Pool, id)
+	b := d.box(id)
 	cs, err := d.list(ctx)
 	if err != nil {
 		return err
@@ -489,8 +571,10 @@ func (d *Driver) stop(ctx context.Context, id string) error {
 			return err
 		}
 	}
-	if err := os.RemoveAll(b.dir); err != nil {
-		return err
+	for _, dir := range []string{b.dir, b.data} {
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -516,21 +600,13 @@ func (d *Driver) askStop(ctx context.Context, b box) {
 			wakeID = w
 		}
 	}
-	n, err := os.ReadFile(filepath.Join(b.dir, "net"))
-	if err != nil {
-		return
-	}
-	num, err := strconv.Atoi(strings.TrimSpace(string(n)))
-	if err != nil {
-		return
-	}
-	_, guest, err := addrs(num)
+	addr, err := boxAddr(b)
 	if err != nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
-	url := "http://" + net.JoinHostPort(guest.String(), strconv.Itoa(boxexec.Port)) + boxexec.StopPath
+	url := "http://" + addr + boxexec.StopPath
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
 	if err != nil {
 		return

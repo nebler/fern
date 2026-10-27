@@ -21,6 +21,14 @@ lab_up || exit 0
 
 import_images "${images[@]/%/:dev}"
 install_cli
+# deploy/fern.yaml has Kubernetes run boxes; a lab switched to runsc
+# (lab/boxes.sh) is switched back after, its boxes asleep meanwhile, as the
+# daemon of one mode doesn't see the other's.
+runsc=no
+if k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null | grep -q -- --boxes=runsc; then
+  runsc=yes
+  fern ls | awk 'NR > 1 && $2 != "asleep" { print $1 }' | while read -r id; do fern sleep "$id" </dev/null >/dev/null; done
+fi
 k apply -f - <deploy/fern.yaml >/dev/null
 if [ -n "$FERN_HOST" ]; then
   # In the cluster, the Kubernetes API's address leads to the node's public
@@ -30,6 +38,7 @@ if [ -n "$FERN_HOST" ]; then
 fi
 k -n fern-system rollout restart ds/fern >/dev/null
 k -n fern-system rollout status ds/fern --timeout=300s >/dev/null
+if [ "$runsc" = yes ]; then lab/boxes.sh runsc >/dev/null; fi
 echo "restarted the daemon"
 if [ "$t3" = yes ]; then
   k apply -f - <deploy/t3.yaml >/dev/null

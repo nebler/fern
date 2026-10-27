@@ -179,10 +179,16 @@ spec:
           volumeMounts:
             - name: pool
               mountPath: /var/lib/fern
+              # Mounts the node makes there reach the daemon, and their
+              # unmounts too: with --boxes=runsc a box's root is mounted on
+              # the node, and a restarted daemon must not keep a copy.
+              mountPropagation: HostToContainer
             - name: plugin
               mountPath: /csi
             - name: socket
               mountPath: /run/fern
+              # As the pool's: with --boxes=runsc the boxes' roots are mounted here.
+              mountPropagation: HostToContainer
             # Bind mounts made here must reach kubelet and the box containers.
             - name: kubelet-pods
               mountPath: /var/lib/kubelet/pods

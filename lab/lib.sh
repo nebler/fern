@@ -78,6 +78,37 @@ install_cli() {
 # in_t3 runs a shell command in T3's server container, as T3's user.
 in_t3() { k -n fern-system exec -i deploy/t3 -c t3 -- sh -c "$1"; }
 
+# runsc_boxes says whether the daemon runs boxes itself (lab/boxes.sh runsc),
+# so they have no pods.
+runsc_boxes() {
+  k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -q -- '--boxes=runsc'
+}
+
+# box_uid prints what identifies environment $1's running box: its pod's
+# UID, or with runsc boxes runsc-<env>@<sandbox pid>; nothing if none runs.
+# RUNSC=1 or RUNSC=0 skips asking which.
+box_uid() {
+  local runsc=${RUNSC:-}
+  [ -n "$runsc" ] || { runsc_boxes && runsc=1 || runsc=0; }
+  if [ "$runsc" != 1 ]; then
+    k -n fern-boxes get pod "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null || true
+    return
+  fi
+  # runsc's IDs are hashes; its list names each box's bundle, /run/fern/boxes/<env>.
+  on_node runsc --root /run/fern/runsc list </dev/null 2>/dev/null |
+    awk -v b="/run/fern/boxes/$1" '$4 == b && $3 == "running" { print "runsc-" substr(b, 17) "@" $2 }'
+}
+
+# box_log prints environment $1's box's output: its pod's log, or the file
+# runsc writes it to.
+box_log() {
+  if runsc_boxes; then
+    on_node cat "/var/lib/fern/boxes/$1/log" </dev/null 2>/dev/null || true
+  else
+    k -n fern-boxes logs "$1" -c box 2>/dev/null || true
+  fi
+}
+
 # import_images copies images from Docker into the node's containerd,
 # skipping those it has: the node keeps the Docker ID of each it imported,
 # since a VPS is far away for gigabytes.

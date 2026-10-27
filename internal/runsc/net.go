@@ -20,23 +20,28 @@ const cgroupParent = "fern"
 
 // box names the host's resources of one environment's box.
 type box struct {
-	id     string
-	cid    string // runsc's ID for it
-	dir    string // <pool>/boxes/<id>: the bundle while the box may run
+	id  string
+	cid string // runsc's ID for it
+	// dir is <bundles>/<id>, the bundle while the box may run. It is on the
+	// node's tmpfs, as containerd keeps a pod's: the spec holds the login.
+	dir    string
 	rootfs string // its root: an overlay of the image, for the mount points
+	data   string // <pool>/boxes/<id>: what may be big, its /tmp and its log
 	tmp    string // its /tmp, emptied at every wake
 	resolv string // its /etc/resolv.conf
 	short  string // a short stable name for its netns and veth
 }
 
-func newBox(pool, id string) box {
+func newBox(bundles, pool, id string) box {
 	sum := sha256.Sum256([]byte(id))
-	dir := filepath.Join(pool, "boxes", id)
+	dir := filepath.Join(bundles, id)
+	data := filepath.Join(pool, "boxes", id)
 	return box{
 		// runsc finds a container by a prefix of its ID, so "m1" would be
 		// ambiguous next to "m10": every box's ID has the same length.
-		id: id, cid: "fern-" + hex.EncodeToString(sum[:16]), dir: dir, rootfs: filepath.Join(dir, "rootfs"), tmp: filepath.Join(dir, "tmp"),
-		resolv: filepath.Join(pool, "boxes", "resolv.conf"),
+		id: id, cid: "fern-" + hex.EncodeToString(sum[:16]), dir: dir,
+		rootfs: filepath.Join(dir, "rootfs"), data: data, tmp: filepath.Join(data, "tmp"),
+		resolv: filepath.Join(bundles, "resolv.conf"),
 		short:  hex.EncodeToString(sum[:])[:11],
 	}
 }

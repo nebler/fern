@@ -27,10 +27,10 @@ func binds(s spec) map[string]string {
 }
 
 func TestBoxSpec(t *testing.T) {
-	b := newBox("/pool", env.ID)
+	b := newBox("/run/boxes", "/pool", env.ID)
 	s := boxSpec(env, b, []string{"PATH=/bin"}, boxVars(env, "w1", "login", false))
 	want := map[string]string{
-		"/etc/resolv.conf": "/pool/boxes/resolv.conf rbind,ro",
+		"/etc/resolv.conf": "/run/boxes/resolv.conf rbind,ro",
 		"/tmp":             "/pool/boxes/demo/tmp rbind,rw",
 		env.Workspace:      env.Workspace + " rbind,rw",
 		env.Claude:         env.Claude + " rbind,rw",
@@ -42,7 +42,7 @@ func TestBoxSpec(t *testing.T) {
 	if diff := cmp.Diff(want, binds(s)); diff != "" {
 		t.Errorf("bind mounts (-want +got):\n%s", diff)
 	}
-	if !s.Root.Readonly || s.Root.Path != "/pool/boxes/demo/rootfs" {
+	if !s.Root.Readonly || s.Root.Path != "/run/boxes/demo/rootfs" {
 		t.Errorf("root = %+v, want the box's overlay, read-only", s.Root)
 	}
 	if s.Process.User.UID != store.BoxUID || len(s.Process.Capabilities.Bounding) != 0 || !s.Process.NoNewPrivileges {
@@ -96,7 +96,7 @@ func TestAddrs(t *testing.T) {
 
 // Interface names have at most 15 characters, and differ per environment.
 func TestNames(t *testing.T) {
-	a, b := newBox("/pool", strings.Repeat("x", 63)), newBox("/pool", "demo")
+	a, b := newBox("/run/boxes", "/pool", strings.Repeat("x", 63)), newBox("/run/boxes", "/pool", "demo")
 	if len(a.veth()) > 15 || len(a.nsName()) > 32 {
 		t.Errorf("names too long: %s, %s", a.veth(), a.nsName())
 	}
@@ -142,7 +142,7 @@ func TestFirewall(t *testing.T) {
 func TestContainerIDs(t *testing.T) {
 	ids := map[string]string{}
 	for _, id := range []string{"m1", "m10", "a", "a-b", "ab", strings.Repeat("z", 63)} {
-		cid := newBox("/pool", id).cid
+		cid := newBox("/run/boxes", "/pool", id).cid
 		for other, ocid := range ids {
 			if strings.HasPrefix(cid, ocid) || strings.HasPrefix(ocid, cid) {
 				t.Errorf("box IDs of %s (%s) and %s (%s) are prefixes", id, cid, other, ocid)
