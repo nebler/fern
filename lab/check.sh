@@ -327,7 +327,12 @@ box() {
     fern sleep $ENV >/dev/null
     fern prewake $ENV | took >>"$TMP/prewake"
     sleep 3
-    node_ms "$FERN_CLI" exec $ENV -- true >>"$TMP/prewoken"
+    # With agent boxes a pre-wake wakes Claude's: the next turn's command.
+    if [ "${AGENTS:-0}" = 1 ]; then
+      node_ms "$FERN_CLI" exec --agent $ENV -- true >>"$TMP/prewoken"
+    else
+      node_ms "$FERN_CLI" exec $ENV -- true >>"$TMP/prewoken"
+    fi
     fern sleep $ENV >/dev/null
     node_ms "$FERN_CLI" exec $ENV -- true >>"$TMP/asleep"
   done
@@ -870,14 +875,24 @@ t3() {
   metric t3.adopt_ms "T3's worktree adopted (first checkpoint), ms" \
     "$(in_t3 "s=\$(date +%s%N); fern create --path $W t3c >/dev/null && echo \$(((\$(date +%s%N) - s) / 1000000))")"
   check "claude in a T3 worktree runs" "$CLAUDE" "$(in_t3 "cd $W && claude --version")"
-  check "in its box, which it woke" running "$(state t3c)"
+  # Claude's box: the environment's own, or with agent boxes its agent box.
+  local x="--here"
+  if [ "${AGENTS:-0}" = 1 ]; then
+    x="--here --agent"
+    # The agent box sleeps as soon as Claude ends: the sign is the other.
+    check "in its agent box: the box with the services stays asleep" asleep "$(state t3c)"
+    check "the box with the services has no Claude login or folder" "0 no" \
+      "$(in_t3 "cd $W && fern exec --here -- sh -c 'env | grep -c ^CLAUDE_; test -d /var/lib/fern/envs/t3c/claude && echo yes || echo no'" | xargs)"
+  else
+    check "in its box, which it woke" running "$(state t3c)"
+  fi
   # Claude's folder is outside the workspace, so sleep and restore keep it.
   local C=/var/lib/fern/envs/t3c/claude
   check "the box keeps Claude's state outside the workspace" "$C" \
-    "$(in_t3 "cd $W && fern exec --here -- sh -c 'echo \$CLAUDE_CONFIG_DIR'")"
-  in_t3 "cd $W && fern exec --here -- sh -c 'echo kept > $C/note'"
+    "$(in_t3 "cd $W && fern exec $x -- sh -c 'echo \$CLAUDE_CONFIG_DIR'")"
+  in_t3 "cd $W && fern exec $x -- sh -c 'echo kept > $C/note'"
   check "Claude is told it is in a Fern environment" yes \
-    "$(in_t3 "cd $W && fern exec --here -- cat $C/CLAUDE.md" | grep -q 'Fern environment' && echo yes || echo no)"
+    "$(in_t3 "cd $W && fern exec $x -- cat $C/CLAUDE.md" | grep -q 'Fern environment' && echo yes || echo no)"
   check "git works in the box" init "$(in_t3 "cd $W && fern exec --here -- git log --format=%s -1")"
   check "and can't change the main repository" no "$(succeeds in_t3 "cd $W && fern exec --here -- touch $R/.git/x")"
   check "or point the worktree's .git elsewhere" no \
@@ -899,14 +914,14 @@ t3() {
   check "restore brings back the replaced snapshot" v2 "$(in_t3 "cat $W/a.txt")"
   check "and a file git doesn't track" junk "$(in_t3 "cat $W/ignored.bin")"
   check "git works in the restored worktree" "M a.txt" "$(in_t3 "git -C $W status --short --untracked-files=no" | xargs)"
-  check "Claude's state outlives the restore" kept "$(in_t3 "cd $W && fern exec --here -- cat $C/note")"
+  check "Claude's state outlives the restore" kept "$(in_t3 "cd $W && fern exec $x -- cat $C/note")"
   # The login reaches the box from the Secret, which a box reads when it
   # starts. Without one, a fake one shows the way works: Claude then fails at
   # Anthropic's API instead of asking for a login.
   if k -n fern-boxes get secret claude-login >/dev/null 2>&1; then
     fern sleep t3c >/dev/null
-    check "the box has Claude's login" yes \
-      "$(succeeds in_t3 "cd $W && fern exec --here -- sh -c 'test -n \"\$CLAUDE_CODE_OAUTH_TOKEN\"'")"
+    check "Claude's box has its login" yes \
+      "$(succeeds in_t3 "cd $W && fern exec $x -- sh -c 'test -n \"\$CLAUDE_CODE_OAUTH_TOKEN\"'")"
     check "T3 has Claude's login" yes "$(succeeds in_t3 "test -n \"\$CLAUDE_CODE_OAUTH_TOKEN\"")"
   else
     printf %s fern-lab-not-a-token | k -n fern-boxes create secret generic claude-login --from-file=token=/dev/stdin >/dev/null
@@ -1102,6 +1117,8 @@ main() {
   esac
   # Boxes run by the daemon itself (lab/boxes.sh runsc) have no pods.
   if runsc_boxes; then export RUNSC=1; else export RUNSC=0; fi
+  # Claude in a box of its own (lab/boxes.sh agents): <env>.agent.
+  if agent_boxes; then export AGENTS=1; else export AGENTS=0; fi
   for s in "$@"; do
     case " ${all[*]} t3 " in
       *" $s "*) ;;

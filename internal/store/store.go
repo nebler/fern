@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -107,6 +108,20 @@ func CheckEnvID(id string) error {
 	}
 	return nil
 }
+
+// agentSuffix names an environment's agent box, the box Claude runs in when
+// it has one: an environment ID can't contain a dot, so the names never meet.
+const agentSuffix = ".agent"
+
+// AgentBox is the name of environment id's agent box.
+func AgentBox(id string) string { return id + agentSuffix }
+
+// IsAgentBox says whether box is an environment's agent box.
+func IsAgentBox(box string) bool { return strings.HasSuffix(box, agentSuffix) }
+
+// EnvOfBox is the environment box belongs to: box, or the environment whose
+// agent box it is.
+func EnvOfBox(box string) string { return strings.TrimSuffix(box, agentSuffix) }
 
 func checkSnapID(id string) error {
 	if !snapIDPattern.MatchString(id) {

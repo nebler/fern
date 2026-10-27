@@ -84,6 +84,12 @@ runsc_boxes() {
   k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -q -- '--boxes=runsc'
 }
 
+# agent_boxes says whether Claude runs in a box of its own per environment
+# (lab/boxes.sh agents): environment <id>'s is <id>.agent.
+agent_boxes() {
+  k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -q -- '--agent-boxes'
+}
+
 # box_uid prints what identifies environment $1's running box: its pod's
 # UID, or with runsc boxes runsc-<env>@<sandbox pid>; nothing if none runs.
 # RUNSC=1 or RUNSC=0 skips asking which.

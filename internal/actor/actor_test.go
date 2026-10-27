@@ -279,7 +279,7 @@ func TestCloseAndSleep(t *testing.T) {
 					t.Fatal(err)
 				}
 				time.Sleep(time.Minute)
-				ex.CloseAndSleep()
+				ex.CloseAndSleep(0)
 				synctest.Wait()
 				if got := state(t, drv, "demo"); got != tt.want {
 					t.Fatalf("after CloseAndSleep: state %s, want %s", got, tt.want)
@@ -301,6 +301,81 @@ func TestCloseAndSleep(t *testing.T) {
 			})
 		})
 	}
+}
+
+// An agent box is its own: it wakes for its commands, sleeps on its own
+// clocks, and goes with its environment's restore, sleep or delete.
+func TestAgentBox(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		stop func(ctx context.Context, g *actor.Group) error
+	}{
+		{"restore", func(ctx context.Context, g *actor.Group) error { return g.Restore(ctx, "demo", "s1") }},
+		{"sleep", func(ctx context.Context, g *actor.Group) error { return g.Sleep(ctx, "demo") }},
+		{"delete", func(ctx context.Context, g *actor.Group) error { return g.Delete(ctx, "demo") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				st, drv := newFakeStore(), driver.NewFake("box")
+				g := start(t, st, drv, idle)
+				if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				if err := g.Snapshot(t.Context(), "demo", "s1", false); err != nil {
+					t.Fatal(err)
+				}
+				agent := actor.AgentBox("demo")
+				ex, err := g.Exec(t.Context(), agent, "", func() {})
+				if err != nil {
+					t.Fatal(err)
+				}
+				synctest.Wait()
+				if got, main := state(t, drv, agent), state(t, drv, "demo"); got != driver.Running || main == driver.Running {
+					t.Fatalf("agent box %s, environment's %s; want only the agent box running", got, main)
+				}
+				ex.Close()
+				if err := tc.stop(t.Context(), g); err != nil {
+					t.Fatal(err)
+				}
+				synctest.Wait()
+				if got := state(t, drv, agent); got == driver.Running {
+					t.Errorf("after %s: agent box %s, want asleep", tc.name, got)
+				}
+			})
+		})
+	}
+}
+
+// A command closed with CloseAndSleep(d) lets the box sleep d later, unless
+// another comes first.
+func TestCloseAndSleepAfter(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		st, drv := newFakeStore(), driver.NewFake("box")
+		g := start(t, st, drv, idle)
+		if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		run := func() {
+			ex, err := g.Exec(t.Context(), "demo", "", func() {})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ex.CloseAndSleep(5 * time.Second)
+		}
+		run()
+		time.Sleep(4 * time.Second)
+		run() // within the 5 s: no wake, and the time starts again
+		time.Sleep(4 * time.Second)
+		synctest.Wait()
+		if got := state(t, drv, "demo"); got != driver.Running {
+			t.Fatalf("4 s after the last command: %s, want running", got)
+		}
+		time.Sleep(2 * time.Second)
+		synctest.Wait()
+		if got := state(t, drv, "demo"); got != driver.Asleep {
+			t.Errorf("6 s after the last command: %s, want asleep", got)
+		}
+	})
 }
 
 // A box an earlier daemon left running goes to sleep when idle too.
@@ -566,14 +641,15 @@ func TestMetrics(t *testing.T) {
 			"fern_wake_seconds{result=ok}":     1,
 			"fern_snapshot_seconds{result=ok}": 1,
 			// The idle sleep's stop and the restore's.
-			"fern_stop_seconds{result=ok}":        2,
-			"fern_restore_seconds{result=ok}":     1,
-			"fern_restore_seconds{result=error}":  1,
-			"fern_queue_seconds{change=create}":   1,
-			"fern_queue_seconds{change=snapshot}": 1,
-			"fern_queue_seconds{change=exec}":     1,
-			"fern_queue_seconds{change=restore}":  2,
-			"fern_idle_sleeps_total":              1,
+			"fern_stop_seconds{result=ok}":          2,
+			"fern_restore_seconds{result=ok}":       1,
+			"fern_restore_seconds{result=error}":    1,
+			"fern_queue_seconds{change=create}":     1,
+			"fern_queue_seconds{change=snapshot}":   1,
+			"fern_queue_seconds{change=stop_agent}": 1,
+			"fern_queue_seconds{change=exec}":       1,
+			"fern_queue_seconds{change=restore}":    2,
+			"fern_idle_sleeps_total":                1,
 		}
 		if diff := cmp.Diff(want, got); diff != "" {
 			t.Errorf("metrics mismatch (-want +got):\n%s", diff)

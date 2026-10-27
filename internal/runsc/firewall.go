@@ -5,6 +5,9 @@ import (
 	"strings"
 )
 
+// links are the node's ends of boxes' links: services' boxes and agent boxes.
+var links = []string{"fbx*", "fag*"}
+
 // blocked are the destinations a box may not reach: private, shared,
 // loopback and link-local ranges (other boxes, the cluster, the node's
 // services, a cloud's metadata endpoint), multicast and reserved ones.
@@ -22,19 +25,30 @@ var blocked = []string{
 // tools (kube-proxy, kube-router) don't rewrite as they do iptables'
 // chains, and a drop in it is final whatever other tables accept. Loading
 // it replaces the table in one transaction, so it is safe to repeat.
-func firewall() string {
+//
+// Agent boxes (links fag*) get the same, except that they may connect to the
+// daemon's MCP port on the node; nothing else reaches that port.
+func firewall(mcpPort int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "add table inet fern\ndelete table inet fern\n")
 	fmt.Fprintf(&b, "table inet fern {\n")
 	fmt.Fprintf(&b, "\tchain forward {\n\t\ttype filter hook forward priority -10; policy accept;\n")
-	fmt.Fprintf(&b, "\t\tiifname \"fbx*\" ip daddr { %s } drop\n", strings.Join(blocked, ", "))
-	fmt.Fprintf(&b, "\t\tiifname \"fbx*\" meta nfproto ipv6 drop\n")
-	fmt.Fprintf(&b, "\t\toifname \"fbx*\" ct state established,related accept\n")
-	fmt.Fprintf(&b, "\t\toifname \"fbx*\" drop\n\t}\n")
+	for _, l := range links {
+		fmt.Fprintf(&b, "\t\tiifname %q ip daddr { %s } drop\n", l, strings.Join(blocked, ", "))
+		fmt.Fprintf(&b, "\t\tiifname %q meta nfproto ipv6 drop\n", l)
+		fmt.Fprintf(&b, "\t\toifname %q ct state established,related accept\n", l)
+		fmt.Fprintf(&b, "\t\toifname %q drop\n", l)
+	}
+	fmt.Fprintf(&b, "\t}\n")
 	fmt.Fprintf(&b, "\tchain input {\n\t\ttype filter hook input priority -10; policy accept;\n")
-	fmt.Fprintf(&b, "\t\tiifname \"fbx*\" ct state established,related accept\n")
-	fmt.Fprintf(&b, "\t\tiifname \"fbx*\" drop\n\t}\n")
+	fmt.Fprintf(&b, "\t\tiifname \"fag*\" tcp dport %d accept\n", mcpPort)
+	fmt.Fprintf(&b, "\t\ttcp dport %d drop\n", mcpPort)
+	for _, l := range links {
+		fmt.Fprintf(&b, "\t\tiifname %q ct state established,related accept\n", l)
+		fmt.Fprintf(&b, "\t\tiifname %q drop\n", l)
+	}
+	fmt.Fprintf(&b, "\t}\n")
 	fmt.Fprintf(&b, "\tchain postrouting {\n\t\ttype nat hook postrouting priority 100; policy accept;\n")
-	fmt.Fprintf(&b, "\t\tip saddr %s oifname != \"fbx*\" masquerade\n\t}\n}\n", boxNet)
+	fmt.Fprintf(&b, "\t\tip saddr %s oifname != \"fbx*\" oifname != \"fag*\" masquerade\n\t}\n}\n", boxNet)
 	return b.String()
 }

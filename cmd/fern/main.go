@@ -15,6 +15,7 @@
 //	                                         run a command, waking the box if needed
 //	fern exec [flags] --here -- cmd…         … in the environment holding the current
 //	                                         directory, in that directory (fern-claude)
+//	fern exec --agent …                      … in the environment's agent box (fern-claude)
 //	fern exec --hibernate D …                stop a Claude driven by its SDK after D
 //	                                         with nothing to do, so its box sleeps, and
 //	                                         resume it at the next message (fern-claude)
@@ -98,6 +99,7 @@ type command struct {
 	here    bool          // exec --here
 	environ []string      // exec -e, as NAME=VALUE
 	idle    time.Duration // exec --hibernate
+	agent   bool          // exec --agent
 	argv    []string      // exec: the command
 }
 
@@ -190,6 +192,7 @@ func parseExec(fs *flag.FlagSet, cmd command, args []string) (command, error) {
 	fs.BoolVar(&cmd.tty, "it", false, "send stdin from a terminal")
 	fs.BoolVar(&cmd.here, "here", false, "use the environment holding the current directory, and run in it")
 	fs.DurationVar(&cmd.idle, "hibernate", 0, "stop a Claude driven by its SDK after this long with nothing to do, and resume it at the next message")
+	fs.BoolVar(&cmd.agent, "agent", false, "run in the environment's agent box, Claude's own, if the daemon has them (fern-claude)")
 	fs.Func("e", "pass the variable `NAME` on to the command, if it is set", func(name string) error {
 		if v, ok := os.LookupEnv(name); ok {
 			cmd.environ = append(cmd.environ, name+"="+v)
@@ -356,6 +359,12 @@ func execute(ctx context.Context, c command, cl *api.Client, std stdio) (int, er
 		cancel()
 	})
 
+	if c.agent {
+		run := func(ctx context.Context, req boxexec.Request, s boxexec.Streams) (int, error) {
+			return cl.ExecAgent(ctx, id, req, s)
+		}
+		return hibernate.Run(ctx, run, req, streams, c.idle)
+	}
 	if c.idle > 0 && hibernate.Applies(req) {
 		run := func(ctx context.Context, req boxexec.Request, s boxexec.Streams) (int, error) {
 			return cl.ExecThenSleep(ctx, id, req, s)

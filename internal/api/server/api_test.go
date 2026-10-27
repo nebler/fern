@@ -220,7 +220,7 @@ func newServer(t testing.TB, st *fakeStore, drv actor.Driver) http.Handler {
 		close(done)
 	}()
 	t.Cleanup(func() { cancel(); <-done })
-	return server.New(st, drv, envs, notrace, log).Handler()
+	return server.New(st, drv, envs, "", notrace, log).Handler()
 }
 
 // newAPIWith is newAPI with the fake driver wrapped by wrap, if it isn't nil.

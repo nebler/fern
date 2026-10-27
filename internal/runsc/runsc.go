@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -90,6 +91,10 @@ type Config struct {
 	DNS     []string // the resolvers boxes use: the node's own is the node
 	// Login returns Claude's login, or "" if there is none yet.
 	Login func(ctx context.Context) (string, error)
+	// Agents runs Claude in each environment's agent box: then only agent
+	// boxes get Claude's folder and login, and reach the daemon's MCP port.
+	Agents  bool
+	MCPPort int
 }
 
 // The limits of a wake and a stop. fern-init needs at most 8 s for the
@@ -182,7 +187,7 @@ func (d *Driver) Prepare(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("mount box image: %w", err)
 		}
 	}
-	if _, err := d.host(ctx, Command{Name: "nft", Args: []string{"-f", "-"}, Stdin: []byte(firewall())}); err != nil {
+	if _, err := d.host(ctx, Command{Name: "nft", Args: []string{"-f", "-"}, Stdin: []byte(firewall(d.cfg.MCPPort))}); err != nil {
 		return "", fmt.Errorf("box firewall: %w", err)
 	}
 	cg := "/sys/fs/cgroup/" + cgroupParent
@@ -350,19 +355,31 @@ func (d *Driver) running(ctx context.Context, b box) (string, bool) {
 // boxAddr returns the exec address of b's box, from the address number in
 // its directory.
 func boxAddr(b box) (string, error) {
-	data, err := os.ReadFile(filepath.Join(b.dir, "net"))
-	if err != nil {
-		return "", err
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		return "", err
-	}
-	_, guest, err := addrs(n)
+	_, guest, err := linkAddrs(b)
 	if err != nil {
 		return "", err
 	}
 	return net.JoinHostPort(guest.String(), strconv.Itoa(boxexec.Port)), nil
+}
+
+// hostAddr returns the node's address on b's link.
+func hostAddr(b box) (netip.Addr, error) {
+	host, _, err := linkAddrs(b)
+	return host, err
+}
+
+// linkAddrs returns the node's and the box's address on b's link, from the
+// address number in its directory.
+func linkAddrs(b box) (host, guest netip.Addr, err error) {
+	data, err := os.ReadFile(filepath.Join(b.dir, "net"))
+	if err != nil {
+		return host, guest, err
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return host, guest, err
+	}
+	return addrs(n)
 }
 
 // netUp makes b's network with a free address and returns the box's exec
@@ -423,10 +440,13 @@ func (d *Driver) start(ctx context.Context, env store.Env, b box) error {
 	var err error
 	defer func() { end(span, err) }()
 	builder := setup.IsBuilder(env.ID)
+	agent := store.IsAgentBox(env.ID)
 	login := ""
-	if builder {
+	if builder || (d.cfg.Agents && !agent) {
 		// A golden builder's box runs no agent and gets no login: what its
-		// services write goes into every thread of the repository.
+		// services write goes into every thread of the repository. With
+		// agent boxes, neither does a services' box: Claude runs elsewhere,
+		// and a box that can't see Claude's folder can't plant settings in it.
 		env.Claude = ""
 	} else if d.cfg.Login != nil {
 		if login, err = d.cfg.Login(ctx); err != nil {
@@ -462,7 +482,11 @@ func (d *Driver) start(ctx context.Context, env store.Env, b box) error {
 	}
 	wakeID := make([]byte, 8)
 	_, _ = rand.Read(wakeID)
-	s := boxSpec(env, b, d.imageEnv, boxVars(env, hex.EncodeToString(wakeID), login, builder))
+	vars := boxVars(env, hex.EncodeToString(wakeID), login, builder)
+	if agent {
+		vars = append(vars, "FERN_SERVICES=off") // the services run in the environment's own box
+	}
+	s := boxSpec(env, b, d.imageEnv, vars)
 	data, err := json.MarshalIndent(s, "", " ")
 	if err != nil {
 		return err
@@ -470,7 +494,11 @@ func (d *Driver) start(ctx context.Context, env store.Env, b box) error {
 	if err = os.WriteFile(filepath.Join(b.dir, "config.json"), data, 0o600); err != nil {
 		return err
 	}
-	if err = os.WriteFile(b.hosts(), []byte(hostsFile(env.ID)), 0o644); err != nil {
+	host, err := hostAddr(b)
+	if err != nil {
+		return err
+	}
+	if err = os.WriteFile(b.hosts(), []byte(hostsFile(env.ID, host)), 0o644); err != nil {
 		return err
 	}
 	// The box's stdio is create's: a file, as a pipe would stay open as

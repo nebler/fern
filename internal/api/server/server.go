@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"path"
+	"strings"
 	"time"
 
 	"github.com/coder/websocket"
@@ -24,6 +26,7 @@ import (
 
 // Store reads environments and snapshots on disk.
 type Store interface {
+	Get(ctx context.Context, id string) (store.Env, error)
 	FindByPath(ctx context.Context, path string) (store.Env, error)
 	List(ctx context.Context) ([]store.Env, error)
 	Snapshots(ctx context.Context, id string) ([]store.Snapshot, error)
@@ -48,6 +51,10 @@ type Server struct {
 	envs   *actor.Group
 	tracer trace.Tracer
 	log    *slog.Logger
+	// agentMCP is where agent boxes reach the daemon's MCP endpoint (Bash),
+	// such as http://fern-daemon:7071; "" runs Claude in the environment's
+	// own box, as before agent boxes.
+	agentMCP string
 	// boxes connects to boxes. A box that vanished can leave an address
 	// nothing answers; the same short connect timeout as readiness gets to
 	// the next wake without waiting a second on that stale address.
@@ -55,10 +62,11 @@ type Server struct {
 }
 
 // New returns a Server that reads from st and drv, changes environments
-// through envs and records every request with tr.
-func New(st Store, drv Driver, envs *actor.Group, tr trace.Tracer, log *slog.Logger) *Server {
+// through envs and records every request with tr. With agentMCP, where agent
+// boxes reach MCPHandler, Claude runs in each environment's agent box.
+func New(st Store, drv Driver, envs *actor.Group, agentMCP string, tr trace.Tracer, log *slog.Logger) *Server {
 	return &Server{
-		store: st, driver: drv, envs: envs, tracer: tr, log: log,
+		store: st, driver: drv, envs: envs, tracer: tr, log: log, agentMCP: agentMCP,
 		boxes: &http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext}},
 	}
 }
@@ -200,12 +208,20 @@ func (s *Server) wake(r *http.Request) (any, error) {
 // without saying whether the environment exists: its caller, T3, only
 // guesses that a command is coming.
 func (s *Server) prewake(r *http.Request) (any, error) {
-	return nil, s.envs.Prewake(r.PathValue("id"))
+	id := r.PathValue("id")
+	// The next turn needs Claude, whose box is the agent box; the services'
+	// box waits for its Bash.
+	if s.agentMCP != "" {
+		id = actor.AgentBox(id)
+	}
+	return nil, s.envs.Prewake(id)
 }
 
 // exec runs a command in the environment's box, waking it first if needed,
 // by relaying the client's WebSocket to the box's. With ?then=sleep the box
-// sleeps as soon as the command ends, unless another runs. It wakes and dials the
+// sleeps as soon as the command ends, unless another runs. With ?box=agent
+// and agent boxes, it runs in the environment's agent box, and Claude there
+// gets Fern's Bash in place of its own (startClaude). It wakes and dials the
 // box before taking the client's WebSocket, so that a failure is still an
 // HTTP error with a body Client.Exec can read. A restore, sleep or delete
 // of the environment ends it.
@@ -214,7 +230,12 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	// The span ends once the command can start: its run is the box's time.
 	spanCtx, span := s.tracer.Start(ctx, "exec.open")
-	box, ex, err := s.dialBox(spanCtx, r.PathValue("id"), cancel)
+	id := r.PathValue("id")
+	agent := s.agentMCP != "" && r.URL.Query().Get("box") == "agent"
+	if agent {
+		id = actor.AgentBox(id)
+	}
+	box, ex, err := s.dialBox(spanCtx, id, cancel)
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
 		span.End()
@@ -223,7 +244,7 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	}
 	// An agent that stopped because it had nothing to do lets its box sleep.
 	if r.URL.Query().Get("then") == "sleep" {
-		defer ex.CloseAndSleep()
+		defer ex.CloseAndSleep(0)
 	} else {
 		defer ex.Close()
 	}
@@ -234,7 +255,43 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 		return // Accept has answered the client.
 	}
 	defer func() { _ = client.CloseNow() }()
+	if agent {
+		if err := s.startClaude(ctx, client, box, r.PathValue("id"), ex.Token); err != nil {
+			s.log.WarnContext(ctx, "starting a command in an agent box", slog.String("env", r.PathValue("id")), slog.Any("error", err))
+			return
+		}
+	}
 	boxexec.Proxy(ctx, client, box)
+}
+
+// noShell are Claude's tools that run shell commands. In an agent box they
+// would run without the services; Fern's Bash runs them in the services' box.
+var noShell = []string{"Bash", "BashOutput", "KillShell", "KillBash", "Monitor"}
+
+// startClaude passes on the client's first message, the command's request,
+// and if it starts Claude, adds Fern's MCP server for environment id (its
+// Bash) and takes away Claude's own shell tools.
+func (s *Server) startClaude(ctx context.Context, client, box *websocket.Conn, id, token string) error {
+	typ, data, err := client.Read(ctx)
+	if err != nil {
+		return err
+	}
+	var req boxexec.Request
+	if typ == websocket.MessageText && json.Unmarshal(data, &req) == nil && len(req.Argv) > 0 && path.Base(req.Argv[0]) == "claude" {
+		cfg, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"fern": map[string]any{
+			"type":    "http",
+			"url":     s.agentMCP + "/mcp/" + id,
+			"headers": map[string]string{"Authorization": "Bearer " + token},
+		}}})
+		if err != nil {
+			return err
+		}
+		req.Argv = append(req.Argv, "--mcp-config", string(cfg), "--disallowedTools", strings.Join(noShell, ","))
+		if data, err = json.Marshal(req); err != nil {
+			return err
+		}
+	}
+	return box.Write(ctx, typ, data)
 }
 
 // dialBox connects to environment id's box, waking it if needed. A box seen

@@ -109,7 +109,7 @@ func TestNames(t *testing.T) {
 // The firewall replaces its own table whole, so loading it twice is the same
 // as once, and keeps boxes from every private range and the node.
 func TestFirewall(t *testing.T) {
-	rules := firewall()
+	rules := firewall(7071)
 	if !strings.HasPrefix(rules, "add table inet fern\ndelete table inet fern\n") {
 		t.Errorf("firewall doesn't replace its table:\n%s", rules)
 	}

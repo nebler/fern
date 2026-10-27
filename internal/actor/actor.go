@@ -81,6 +81,16 @@ const changeTimeout = 10 * time.Minute
 // ErrStopped means the daemon is shutting down.
 var ErrStopped = errors.New("daemon is stopping")
 
+// AgentBox is the name of environment id's agent box (store.AgentBox): with
+// --agent-boxes Claude runs in a box of its own, next to the box with the
+// services, which its Bash tool wakes (docs/briefs/claude-outside-the-box.md).
+// Its actor is its own, so it wakes and sleeps on its own clocks; a restore,
+// sleep or delete of the environment stops it too.
+func AgentBox(id string) string { return store.AgentBox(id) }
+
+// envOf is the environment a box belongs to.
+func envOf(id string) string { return store.EnvOfBox(id) }
+
 // Group runs the actors of a node's environments. It is a Prometheus
 // collector of their metrics.
 type Group struct {
@@ -251,7 +261,7 @@ func (g *Group) sweep(ctx context.Context) {
 
 // actorOf returns environment id's actor, starting one if it has none.
 func (g *Group) actorOf(ctx context.Context, id string) (*actor, error) {
-	if err := store.CheckEnvID(id); err != nil {
+	if err := store.CheckEnvID(envOf(id)); err != nil {
 		return nil, err
 	}
 	req := findRequest{id: id, reply: make(chan *actor, 1)}
@@ -349,6 +359,9 @@ func (g *Group) Delete(ctx context.Context, id string) error {
 		if err := a.stopBox(ctx, g.driver.Delete); err != nil {
 			return err
 		}
+		if err := g.stopAgent(ctx, id, g.driver.Delete); err != nil {
+			return err
+		}
 		return g.store.Delete(ctx, id)
 	})
 }
@@ -401,6 +414,10 @@ func (g *Group) Restore(ctx context.Context, id, snapID string) error {
 		if err := a.stopBox(ctx, g.driver.Sleep); err != nil {
 			return err
 		}
+		// Claude's box sees the old disk through its mount: it goes too.
+		if err := g.stopAgent(ctx, id, g.driver.Sleep); err != nil {
+			return err
+		}
 		if err := g.store.Restore(ctx, id, snapID); err != nil {
 			return err
 		}
@@ -409,13 +426,32 @@ func (g *Group) Restore(ctx context.Context, id, snapID string) error {
 	})
 }
 
-// Sleep stops environment id's box, ending the commands running in it.
+// Sleep stops environment id's box, ending the commands running in it, and
+// its agent box if it has one awake.
 func (g *Group) Sleep(ctx context.Context, id string) error {
 	return g.do(ctx, "sleep", id, func(ctx context.Context, a *actor) error {
-		if _, err := g.store.Get(ctx, id); err != nil {
+		if _, err := g.store.Get(ctx, envOf(id)); err != nil {
 			return err
 		}
-		return a.stopBox(ctx, g.driver.Sleep)
+		if err := a.stopBox(ctx, g.driver.Sleep); err != nil {
+			return err
+		}
+		if id == envOf(id) {
+			return g.stopAgent(ctx, id, g.driver.Sleep)
+		}
+		return nil
+	})
+}
+
+// stopAgent stops environment id's agent box with stop if it is awake, from
+// the environment's own actor: the agent box's actor never waits for that
+// one, so the two can't wait for each other.
+func (g *Group) stopAgent(ctx context.Context, id string, stop func(ctx context.Context, id string) error) error {
+	return g.do(ctx, "stop_agent", AgentBox(id), func(ctx context.Context, a *actor) error {
+		if !a.awake {
+			return nil
+		}
+		return a.stopBox(ctx, stop)
 	})
 }
 
@@ -440,7 +476,7 @@ func (g *Group) Wake(ctx context.Context, id string) error {
 // idle times included; one it wakes sleeps after Idle.Prewake unless a
 // command comes first. An unknown environment is only counted.
 func (g *Group) Prewake(id string) error {
-	if err := store.CheckEnvID(id); err != nil {
+	if err := store.CheckEnvID(envOf(id)); err != nil {
 		return err
 	}
 	// With idle sleep off, a box woken ahead would never sleep again.
@@ -505,18 +541,18 @@ type Exec struct {
 	Addr  string // the box's exec address
 	Token string // authenticates the daemon to the box
 
-	close func(sleep bool)
+	close func(sleep bool, after time.Duration)
 }
 
 // Close ends the count of the command, which starts the idle times. It may
 // be called more than once.
-func (e *Exec) Close() { e.close(false) }
+func (e *Exec) Close() { e.close(false, 0) }
 
 // CloseAndSleep ends the count of the command and, if no other command runs
-// in the box, puts it to sleep at once instead of after the idle times: the
+// in the box, puts it to sleep after d instead of after the idle times: the
 // command was an agent that stopped because it had nothing to do (package
-// hibernate).
-func (e *Exec) CloseAndSleep() { e.close(true) }
+// hibernate, d = 0), or one of an agent's Bash calls, which come in bursts.
+func (e *Exec) CloseAndSleep(d time.Duration) { e.close(true, d) }
 
 // Exec wakes environment id's box if needed and counts a command running in
 // it until the returned Exec is closed. A restore, sleep or delete calls
@@ -535,7 +571,7 @@ func (g *Group) Exec(ctx context.Context, id, stale string, cancel context.Cance
 		a.execs[n] = cancel
 		a.opened = time.Now()
 		g.log.InfoContext(ctx, "exec opened", slog.String("env", id), slog.Int("exec", n), slog.Int("active", len(a.execs)))
-		ex = &Exec{Addr: a.addr, Token: env.BoxToken, close: func(sleep bool) { a.endExec(n, sleep) }}
+		ex = &Exec{Addr: a.addr, Token: env.BoxToken, close: func(sleep bool, after time.Duration) { a.endExec(n, sleep, after) }}
 		return nil
 	})
 	if err != nil {
@@ -617,10 +653,11 @@ func (a *actor) handle(ctx context.Context, m message) {
 // wake returns environment id's record once its box is up, waking it unless
 // it is known to be up somewhere other than stale.
 func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
-	env, err := a.g.store.Get(ctx, a.id)
+	env, err := a.g.store.Get(ctx, envOf(a.id))
 	if err != nil {
 		return store.Env{}, err
 	}
+	env.ID = a.id // the driver runs the agent box apart
 	if a.addr != "" && a.addr != stale {
 		return env, nil
 	}
@@ -667,15 +704,15 @@ func (a *actor) stopBox(ctx context.Context, stop func(ctx context.Context, id s
 }
 
 // endExec stops counting command n, from the goroutine that ran it; with
-// sleep, the box sleeps at once if nothing else runs. A command that a stop
+// sleep, the box sleeps after d if nothing else runs. A command that a stop
 // already cancelled is not counted any more.
-func (a *actor) endExec(n int, sleep bool) {
+func (a *actor) endExec(n int, sleep bool, d time.Duration) {
 	end := func(ctx context.Context, _ *actor) error {
 		if _, ok := a.execs[n]; ok {
 			delete(a.execs, n)
 			a.closed = time.Now()
 			if sleep && len(a.execs) == 0 {
-				a.lease = a.closed
+				a.lease = a.closed.Add(d)
 			}
 			a.g.log.InfoContext(ctx, "exec closed", slog.String("env", a.id), slog.Int("exec", n),
 				slog.Int("active", len(a.execs)), slog.Time("last_opened", a.opened))

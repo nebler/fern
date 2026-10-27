@@ -1,6 +1,35 @@
 # Claude outside the box: threat model (Phase 4, #10)
 
-For review before #8 and #9 are built. Nothing here is built yet.
+**Decided 2026-10-27, and built** (`--agent-boxes`, with `--boxes=runsc`): Claude
+runs in **a small sandbox of its own per thread, its agent box** (option 1b
+below), not in T3's pod. That changes the plan's #8: with Claude sandboxed,
+its own Read, Edit, Write, Glob and Grep run safely in the agent box, on the
+workspace, so the daemon serves no file tools; only shell commands move.
+Claude's shell tools (Bash, BashOutput, KillShell, KillBash, Monitor) are off,
+and the daemon's MCP endpoint gives it **Bash, which runs each command in the
+environment's own box**, where the services are, waking it; that box sleeps
+5 s after the last call. WebFetch and WebSearch stay on in the agent box, whose
+firewall gives it the internet and nothing else. What is built, against the
+threats below:
+
+- Claude runs in `<env>.agent`, a runsc box with the workspace, Claude's folder
+  and login, the git folder read-only, no services (`FERN_SERVICES=off`), and the
+  same firewall as every box plus one opening: the daemon's MCP port (7071),
+  which nothing else reaches.
+- The box with the services gets **no login and no Claude folder** (T6, T2): a
+  box can no longer read the subscription token, or plant settings or hooks
+  where Claude reads them.
+- The MCP endpoint (`/mcp/<env>`) takes the environment's box token and offers
+  only that environment's Bash (T4). Tests: `internal/api/server/bash_test.go`.
+- T1, T3, T8 and T9 no longer apply as written: Claude is in a box, not in T3's
+  pod.
+- Measured in the lab (`lab/t3-run.sh toy 1`, `lab/boxes.sh agents`): the run
+  passes; Claude's commands reach the environment's box through Bash; both boxes
+  sleep 29 s after a turn; the turn after resumes Claude in 3.7 s, its box
+  woken in 157 ms. `check.sh` quick sections pass. A service box can't reach the
+  MCP port; an agent box gets 401 without its token.
+
+The analysis as it was written, before the decision:
 
 ## What changes
 

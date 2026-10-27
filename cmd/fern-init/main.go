@@ -57,6 +57,10 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// An agent box runs Claude next to the box that runs the services.
+	if os.Getenv("FERN_SERVICES") == "off" {
+		services = nil
+	}
 	if claude := os.Getenv("CLAUDE_CONFIG_DIR"); claude != "" {
 		// Claude works without the hint, only less well.
 		if err := writeHint(claude, services); err != nil {

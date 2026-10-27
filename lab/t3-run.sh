@@ -38,10 +38,12 @@ rm_env='source lab/lib.sh; id=$(fern which "$1") && fern rm "$id"'
 # puts it to sleep, as idle time would, for a reopen step,
 # shellcheck disable=SC2016
 sleep_env='source lab/lib.sh; id=$(fern which "$1") && fern sleep "$id" >/dev/null'
-# prints its box's state and the fern exec processes standing in for Claude
-# in T3's pod, for an idle step,
+# prints its boxes' state (running while either is: the environment's, or
+# Claude's agent box) and the fern exec processes standing in for Claude in
+# T3's pod, for an idle step,
 # shellcheck disable=SC2016
-idle_env='source lab/lib.sh; id=$(fern which "$1") && fern ls | awk -v id="$id" '\''$1 == id { print $2 }'\''
+idle_env='source lab/lib.sh; id=$(fern which "$1") && if [ -n "$(box_uid "$id.agent")" ]; then echo running; else
+  fern ls | awk -v id="$id" '\''$1 == id { print $2 }'\''; fi''
 k -n fern-system exec deploy/t3 -c t3 -- sh -c '\''for p in /proc/[0-9]*; do
   case $(tr "\0" " " <"$p/cmdline" 2>/dev/null) in "fern exec "*) printf "%s " "${p#/proc/}" ;; esac
 done'\''; echo'
@@ -61,13 +63,17 @@ box_log "$id" | sed -n "/msg=\"claude started\"/p; /msg=\"claude first stdout\"/
 # shellcheck disable=SC2016
 resources='source lab/lib.sh; source lab/hardware.sh
 id=t3-$(printf %s "$1" | shasum -a 256 | cut -c1-16)
+# With agent boxes Claude is in its own: sample that one, and only while it
+# runs, as an exec into the box with the services would keep it up.
+box=$id exec=(fern exec -i "$id")
+agent_boxes && box=$id.agent exec=(fern exec --agent -i "$id")
 uid=${2:-}
-if [ -z "$uid" ] && [ -n "$1" ]; then uid=$(box_uid "$id"); fi
+if [ -z "$uid" ] && [ -n "$1" ]; then uid=$(box_uid "$box"); fi
 if [ -n "$uid" ]; then
   echo "BOXUID $uid"
   hardware_sample --counters "$uid"
-  if [ "${3:-guest}" = guest ] && fern ls | awk -v id="$id" '\''$1==id && $2=="running" {ok=1} END {exit !ok}'\''; then
-    fern exec -i "$id" -- sh -s <lab/hardware-guest.sh || true
+  if [ "${3:-guest}" = guest ] && [ -n "$(box_uid "$box")" ]; then
+    "${exec[@]}" -- sh -s <lab/hardware-guest.sh || true
   fi
 else
   hardware_sample --counters

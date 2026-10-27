@@ -19,7 +19,9 @@
 # T3 keeps a thread's Claude running between turns. fern exec --hibernate
 # stops it after $FERN_HIBERNATE (30s) with nothing to do, so the box sleeps,
 # and starts it again in its session at T3's next message; 0 keeps Claude
-# running until T3 ends it.
+# running until T3 ends it. --agent runs Claude in the environment's agent box
+# when the daemon has them (--agent-boxes): Claude's own, whose Bash runs in
+# the box with the services (docs/briefs/claude-outside-the-box.md).
 set -eu
 pool=${FERN_POOL:-/var/lib/fern}
 case "$PWD/" in
@@ -45,4 +47,4 @@ case "$PWD/" in
 	fi
 	;;
 esac
-exec fern exec -i --here --hibernate "${FERN_HIBERNATE:-30s}" -e CLAUDE_CODE_ENTRYPOINT -e CLAUDE_AGENT_SDK_VERSION -e FERN_TIMING -- claude "$@"
+exec fern exec -i --here --agent --hibernate "${FERN_HIBERNATE:-30s}" -e CLAUDE_CODE_ENTRYPOINT -e CLAUDE_AGENT_SDK_VERSION -e FERN_TIMING -- claude "$@"

@@ -25,8 +25,10 @@ install_cli
 # (lab/boxes.sh) is switched back after, its boxes asleep meanwhile, as the
 # daemon of one mode doesn't see the other's.
 runsc=no
-if k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null | grep -q -- --boxes=runsc; then
-  runsc=yes
+args=$(k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null || true)
+if grep -q -- --boxes=runsc <<<"$args"; then
+  runsc=runsc
+  grep -q -- --agent-boxes <<<"$args" && runsc=agents
   fern ls | awk 'NR > 1 && $2 != "asleep" { print $1 }' | while read -r id; do fern sleep "$id" </dev/null >/dev/null; done
 fi
 k apply -f - <deploy/fern.yaml >/dev/null
@@ -38,7 +40,7 @@ if [ -n "$FERN_HOST" ]; then
 fi
 k -n fern-system rollout restart ds/fern >/dev/null
 k -n fern-system rollout status ds/fern --timeout=300s >/dev/null
-if [ "$runsc" = yes ]; then lab/boxes.sh runsc >/dev/null; fi
+if [ "$runsc" != no ]; then lab/boxes.sh "$runsc" >/dev/null; fi
 echo "restarted the daemon"
 if [ "$t3" = yes ]; then
   k apply -f - <deploy/t3.yaml >/dev/null

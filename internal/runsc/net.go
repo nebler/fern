@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/netip"
 	"path/filepath"
+
+	"github.com/nebler/fern/internal/store"
 )
 
 // Every box gets a /30 of boxNet: the host's end of its veth is the first
@@ -49,9 +51,18 @@ func newBox(bundles, pool, id string) box {
 // hosts is the path of the box's /etc/hosts.
 func (b box) hosts() string { return filepath.Join(b.dir, "hosts") }
 
-// hostsFile is a box's /etc/hosts: loopback, and its own name.
-func hostsFile(id string) string {
-	return "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t" + id + "\n"
+// DaemonHost is the name an agent box reaches the daemon at: the node's end
+// of its link.
+const DaemonHost = "fern-daemon"
+
+// hostsFile is a box's /etc/hosts: loopback, its own name and, for an agent
+// box, the daemon at host.
+func hostsFile(id string, host netip.Addr) string {
+	s := "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t" + id + "\n"
+	if store.IsAgentBox(id) {
+		s += host.String() + "\t" + DaemonHost + "\n"
+	}
+	return s
 }
 
 // netns is the path of the box's network namespace, where ip netns keeps
@@ -61,8 +72,14 @@ func (b box) netns() string { return "/var/run/netns/" + b.nsName() }
 func (b box) nsName() string { return "fern-" + b.short }
 
 // veth is the host's end of the box's link; interface names have at most 15
-// characters.
-func (b box) veth() string { return "fbx" + b.short }
+// characters. An agent box's starts with fag, which the firewall lets reach
+// the daemon's MCP port.
+func (b box) veth() string {
+	if store.IsAgentBox(b.id) {
+		return "fag" + b.short
+	}
+	return "fbx" + b.short
+}
 
 // addrs returns the host's and the box's address in /30 number n.
 func addrs(n int) (host, guest netip.Addr, err error) {

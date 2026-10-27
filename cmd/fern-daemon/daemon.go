@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -62,6 +63,8 @@ const (
 	// and runscBundles the boxes' bundles: both on the node's tmpfs.
 	runscState   = "/run/fern/runsc"
 	runscBundles = "/run/fern/boxes"
+	// mcpPort is where agent boxes reach the daemon's MCP endpoint.
+	mcpPort = 7071
 )
 
 func main() {
@@ -94,6 +97,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	runtimeClass := flags.String("runtime-class", "", "run boxes under this RuntimeClass, such as gvisor (\"\": the node's default)")
 	boxes := flags.String("boxes", "kubernetes", "who runs boxes: kubernetes (a Sandbox each) or runsc (the daemon itself; needs the node's PID and network namespaces)")
 	boxDNS := flags.String("box-dns", "1.1.1.1,8.8.8.8", "with --boxes=runsc, the resolvers boxes use")
+	agentBoxes := flags.Bool("agent-boxes", false, "with --boxes=runsc, run Claude in a box of its own per environment, whose Bash runs in the environment's box (docs/briefs/claude-outside-the-box.md)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -156,7 +160,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	case "runsc":
 		r := runsc.New(runsc.NodeHost, runsc.Config{
 			Pool: pool, Bundles: runscBundles, State: runscState, Image: "docker.io/library/" + boxImage,
-			DNS: strings.Split(*boxDNS, ","), Login: claudeLogin(kube),
+			DNS: strings.Split(*boxDNS, ","), Login: claudeLogin(kube), Agents: *agentBoxes, MCPPort: mcpPort,
 		}, tr)
 		// Golden keys name the image's content, not its tag.
 		if image, err = r.Prepare(ctx); err != nil {
@@ -166,9 +170,22 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	default:
 		return fmt.Errorf("--boxes=%s: want kubernetes or runsc", *boxes)
 	}
+	agentMCP := ""
+	var mcpLis net.Listener
+	if *agentBoxes {
+		if *boxes != "runsc" {
+			return errors.New("--agent-boxes needs --boxes=runsc")
+		}
+		// On every address: the boxes' firewall lets only agent boxes in.
+		if mcpLis, err = new(net.ListenConfig).Listen(ctx, "tcp", ":"+strconv.Itoa(mcpPort)); err != nil {
+			return err
+		}
+		agentMCP = "http://" + runsc.DaemonHost + ":" + strconv.Itoa(mcpPort)
+	}
 	envs := actor.New(st, drv, idle, image, tr, log)
+	apiSrv := server.New(st, drv, envs, agentMCP, tr, log)
 	httpSrv := &http.Server{
-		Handler:           server.New(st, drv, envs, tr, log).Handler(),
+		Handler:           apiSrv.Handler(),
 		BaseContext:       func(net.Listener) context.Context { return ctx },
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -205,6 +222,15 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		}
 		return nil
 	})
+	mcpSrv := &http.Server{Handler: apiSrv.MCPHandler(), BaseContext: func(net.Listener) context.Context { return ctx }, ReadHeaderTimeout: 10 * time.Second}
+	if mcpLis != nil {
+		g.Go(func() error {
+			if err := mcpSrv.Serve(mcpLis); !errors.Is(err, http.ErrServerClosed) {
+				return fmt.Errorf("mcp: %w", err)
+			}
+			return nil
+		})
+	}
 	g.Go(func() error {
 		if err := grpcSrv.Serve(csiLis); err != nil {
 			return fmt.Errorf("csi: %w", err)
@@ -217,6 +243,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		_ = metricsSrv.Shutdown(shutdownCtx)
+		_ = mcpSrv.Shutdown(shutdownCtx)
 		return httpSrv.Shutdown(shutdownCtx)
 	})
 	return g.Wait()

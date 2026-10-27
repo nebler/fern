@@ -124,6 +124,13 @@ func (c *Client) ExecThenSleep(ctx context.Context, id string, req boxexec.Reque
 	return c.exec(ctx, envPath(id)+"/exec?then=sleep", id, req, streams)
 }
 
+// ExecAgent runs a command like ExecThenSleep in environment id's agent box,
+// Claude's own (with the daemon's --agent-boxes; otherwise in its box). There
+// Claude's Bash runs in the environment's box, with the services.
+func (c *Client) ExecAgent(ctx context.Context, id string, req boxexec.Request, streams boxexec.Streams) (int, error) {
+	return c.exec(ctx, envPath(id)+"/exec?box=agent&then=sleep", id, req, streams)
+}
+
 func (c *Client) exec(ctx context.Context, path, id string, req boxexec.Request, streams boxexec.Streams) (int, error) {
 	conn, err := boxexec.Dial(ctx, "ws://fern"+path, "", c.hc)
 	if err != nil {
