@@ -85,6 +85,13 @@ metric() {
 succeeds() { if "$@" >/dev/null 2>&1; then echo yes; else echo no; fi; }
 # now_ms prints the wall clock in milliseconds.
 now_ms() { local t=${EPOCHREALTIME//[!0-9]/}; echo $((t / 1000)); }
+# node_ms runs a command on the node and prints how long it took there, ms.
+# Short commands are timed where they run: the way to the node (SSH to a VPS
+# from a Mac, 80-160 ms and jittery) isn't Fern's time.
+node_ms() {
+  # shellcheck disable=SC2016 # expanded on the node
+  on_node sh -c 's=$(date +%s%N); "$@" >/dev/null || exit; echo $((($(date +%s%N) - s) / 1000000))' sh "$@" </dev/null
+}
 # took reads the time from fern's "… took 12.3ms".
 took() { sed -nE 's/.* took ([0-9.]+)ms$/\1/p'; }
 # stats reads numbers, one per line, and prints "n=… p50=… p95=… max=…",
@@ -276,13 +283,9 @@ box() {
     fern sleep $ENV >/dev/null
     fern prewake $ENV | took >>"$TMP/prewake"
     sleep 3
-    start=$(now_ms)
-    fern exec $ENV -- true
-    echo $(($(now_ms) - start)) >>"$TMP/prewoken"
+    node_ms "$FERN_CLI" exec $ENV -- true >>"$TMP/prewoken"
     fern sleep $ENV >/dev/null
-    start=$(now_ms)
-    fern exec $ENV -- true
-    echo $(($(now_ms) - start)) >>"$TMP/asleep"
+    node_ms "$FERN_CLI" exec $ENV -- true >>"$TMP/asleep"
   done
   metric box.prewake_ms "a pre-wake's answer, ms" "$(stats <"$TMP/prewake")"
   metric box.prewoken_exec_ms "a command 3 s after a pre-wake, ms" "$(stats <"$TMP/prewoken")"
@@ -633,25 +636,19 @@ scale() {
       "$(in_daemon 'cat /proc/1/status' | awk '$1 == "RssAnon:" { printf "%.1f", $2 / 1024 }')"
     if [ "${SCALE_HARDWARE:-1}" = 1 ]; then hardware_sample --counters "${pod_uids[@]}" >"$TMP/load-before$n"; fi
     : >"$TMP/exec$n"
-    for _ in $(seq 20); do
-      start=$(now_ms)
-      fern exec s1 -- true
-      echo $(($(now_ms) - start)) >>"$TMP/exec$n"
-    done
+    for _ in $(seq 20); do node_ms "$FERN_CLI" exec s1 -- true >>"$TMP/exec$n"; done
     metric scale.n$n.exec_ms "an exec in an awake box, ms" "$(stats <"$TMP/exec$n")"
-    start=$(now_ms)
-    for i in $(seq "$n"); do fern exec "s$i" -- true & done
-    wait
-    parallel_ms=$(($(now_ms) - start))
+    # shellcheck disable=SC2016 # expanded on the node
+    parallel_ms=$(node_ms sh -c 'for i in $(seq "$1"); do "$2" exec "s$i" -- true & done; wait' sh "$n" "$FERN_CLI")
     metric scale.n$n.parallel_exec_ms "one exec in each awake box at once, ms until all ended" "$parallel_ms"
     # Collect individual latencies separately: timestamps and result files
     # must not inflate the existing parallel completion metric.
     if [ "${SCALE_HARDWARE:-1}" = 1 ]; then
-      for i in $(seq "$n"); do
-        (command_start=$(now_ms); fern exec "s$i" -- true; echo $(($(now_ms) - command_start)) >"$TMP/parallel-$n-$i") &
-      done
-      wait
-      metric scale.n$n.contended_exec_ms "per-command latency with $n concurrent execs, ms" "$(cat "$TMP/parallel-$n-"* | stats)"
+      # shellcheck disable=SC2016 # expanded on the node
+      on_node sh -c 'for i in $(seq "$1"); do
+          (s=$(date +%s%N); "$2" exec "s$i" -- true; echo $((($(date +%s%N) - s) / 1000000))) &
+        done; wait' sh "$n" "$FERN_CLI" </dev/null >"$TMP/parallel-$n"
+      metric scale.n$n.contended_exec_ms "per-command latency with $n concurrent execs, ms" "$(stats <"$TMP/parallel-$n")"
     fi
     : >"$TMP/snap$n"
     for i in $(seq 20); do fern snapshot s1 "n$n-$i" | took >>"$TMP/snap$n"; done
@@ -723,15 +720,11 @@ paths() {
     "$(in_daemon "cd $W/main && CLAUDE_CODE_ENTRYPOINT=sdk-ts fern exec --here -e CLAUDE_CODE_ENTRYPOINT -- sh -c 'echo \$CLAUDE_CODE_ENTRYPOINT'")"
   # A worktree T3 made before Fern saw it is adopted.
   tar_dir lab/sample-repo | in_daemon "mkdir -p $W/adopted && tar -x -C $W/adopted -f - && chown -R 1000:1000 $W/adopted"
-  start=$(now_ms)
-  fern create adopted --path $W/adopted >/dev/null
-  metric paths.adopt_ms "adopting the sample repo, ms" $(($(now_ms) - start))
+  metric paths.adopt_ms "adopting the sample repo, ms" "$(node_ms "$FERN_CLI" create adopted --path $W/adopted)"
   check "the adopted workspace is a subvolume" 256 "$(in_daemon "stat -c %i $W/adopted")"
   check "the adopted workspace runs Postgres (3 users)" 3 "$(sql adopted 'select count(*) from users')"
   in_daemon "mkdir -p $W/big && cd $W/big && seq 20000 | xargs -n 2000 sh -c 'for i; do echo \$i > f\$i; done' _ && chown -R 1000:1000 $W/big"
-  start=$(now_ms)
-  fern create adopted-big --path $W/big >/dev/null
-  metric paths.adopt_20k_ms "adopting 20,000 files, ms" $(($(now_ms) - start))
+  metric paths.adopt_20k_ms "adopting 20,000 files, ms" "$(node_ms "$FERN_CLI" create adopted-big --path $W/big)"
   check "all 20,000 files adopted" 20000 "$(in_daemon "ls $W/big | wc -l" | tr -d ' ')"
   # T3 reuses a checkpoint's name after a revert, so the snapshot is taken again.
   fern snapshot adopted c1 >/dev/null
@@ -771,9 +764,7 @@ golden() {
     "$(in_daemon "cd /var/lib/fern/envs/$G/snaps/$key && { test -e .fern/seeded && echo yes || echo no; } && { test -e seed.sql && echo yes || echo no; }" | xargs)"
   check "the first worktree's source copy is gone" 0 "$(fern snapshots gold1 | grep -c golden-source || true)"
   # The next one starts from it: its database is there before its first wake.
-  start=$(now_ms)
-  fern create gold2 --path $W/two >/dev/null
-  metric golden.create_ms "create from golden, ms" $(($(now_ms) - start))
+  metric golden.create_ms "create from golden, ms" "$(node_ms "$FERN_CLI" create gold2 --path $W/two)"
   check "the next worktree has the database before its first wake" yes \
     "$(in_daemon "test -e $W/two/.fern/seeded && test -e $W/two/seed.sql" && echo yes || echo no)"
   pool_du golden.snapshot "/var/lib/fern/envs/$G/snaps/$key"
@@ -828,9 +819,8 @@ t3() {
   fern rm t3c 2>/dev/null || true
   in_t3 "rm -rf $R /var/lib/fern/worktrees/t3check && git init -q -b main $R && cd $R && echo v0 > a.txt \
     && git add a.txt && git -c user.email=t@fern -c user.name=t commit -qm init && git worktree add -q -b t3/one $W"
-  start=$(now_ms)
-  in_t3 "fern create --path $W t3c" >/dev/null
-  metric t3.adopt_ms "T3's worktree adopted (first checkpoint), ms" $(($(now_ms) - start))
+  metric t3.adopt_ms "T3's worktree adopted (first checkpoint), ms" \
+    "$(in_t3 "s=\$(date +%s%N); fern create --path $W t3c >/dev/null && echo \$(((\$(date +%s%N) - s) / 1000000))")"
   check "claude in a T3 worktree runs" "$CLAUDE" "$(in_t3 "cd $W && claude --version")"
   check "in its box, which it woke" running "$(state t3c)"
   # Claude's folder is outside the workspace, so sleep and restore keep it.
@@ -883,6 +873,87 @@ t3() {
 
 # hardware is deliberately alone: idle CPU needs a quiet node, and the
 # platform sample must not include a concurrently running timing section.
+# go_seconds prints a Go duration (5m, 1m30s, 250ms) in seconds.
+go_seconds() {
+  awk -v d="$1" 'BEGIN {
+    while (match(d, /^[0-9.]+(ms|h|m|s)/)) {
+      u = substr(d, 1, RLENGTH); d = substr(d, RLENGTH + 1); n = u + 0; sub(/^[0-9.]+/, "", u)
+      s += n * (u == "h" ? 3600 : u == "m" ? 60 : u == "s" ? 1 : 0.001)
+    }
+    print s + 0 }'
+}
+# idle_policy prints, in seconds, how long Fern lets an idle Claude run
+# before it stops it (fern-claude's FERN_HIBERNATE; 0: never), how long T3
+# keeps Claude after a turn, and the daemon's agent and human idle times, as
+# deployed.
+idle_policy() {
+  local args t3 hibernate
+  args=$(k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}')
+  t3=$(k -n fern-system get deploy t3 -o jsonpath='{..env[?(@.name=="T3CODE_PROVIDER_IDLE_TIMEOUT_MS")].value}')
+  hibernate=$(k -n fern-system get deploy t3 -o jsonpath='{..env[?(@.name=="FERN_HIBERNATE")].value}')
+  # An older T3 image's fern-claude doesn't hibernate.
+  in_t3 'grep -q -- --hibernate /usr/local/bin/claude' 2>/dev/null || hibernate=0
+  echo "$(go_seconds "${hibernate:-30s}")" "$((${t3:-300000} / 1000))" \
+    "$(go_seconds "$(sed -nE 's/.*"--?idle-agent=([^"]+)".*/\1/p' <<<"$args" | grep . || echo 5m)")" \
+    "$(go_seconds "$(sed -nE 's/.*"--?idle-human=([^"]+)".*/\1/p' <<<"$args" | grep . || echo 20m)")"
+}
+# res_value prints metric $2 from resource_op's output in file $1.
+res_value() { awk -v k="$2" '$1 == "METRIC" && $2 == k { print $3 }' "$1"; }
+
+# turn measures what one agent turn costs the node, the way T3 runs it: the
+# box wakes, Claude starts and makes a few tool calls, then waits until T3
+# ends it, and the box sleeps. Claude is the real binary waiting for its next
+# stream-json message, as T3 keeps it between turns; it needs no login until
+# a message comes. The idle part isn't waited out: its CPU rate and memory
+# are measured over TURN_IDLE_SECONDS, and how long it lasts comes from the
+# deployed idle times (architecture §6.3): Fern stops an idle Claude after
+# FERN_HIBERNATE and the box sleeps at once; without hibernation T3 ends
+# Claude after its idle timeout, and the box sleeps the daemon's agent time
+# later, or its human time after the turn started if that is later.
+turn() {
+  echo "== a turn: wake, tool calls, idle, sleep"
+  local seconds=${TURN_IDLE_SECONDS:-30} uid claude hibernate t3 agent human awake wake_cpu tools_cpu sleep_cpu
+  fresh $ENV
+  metric turn.wake_ms "a turn's wake, ms" "$(resource_op turn.wake wake $ENV 2>"$TMP/wake" | took)"
+  cat "$TMP/wake"
+  # shellcheck disable=SC2016 # expanded on the node
+  claude=$(on_node sh -c 'sleep "$1" | "$2" exec -i "$3" -- claude -p --input-format stream-json \
+    --output-format stream-json --verbose >/dev/null 2>&1 & echo $!' sh $((seconds + 120)) "$FERN_CLI" $ENV </dev/null)
+  # Tool calls, as Claude's Bash tool makes them: one process after another.
+  # shellcheck disable=SC2016 # expanded in the box
+  metric turn.tools_ms "six tool calls (git, grep, read, psql, write, diff), ms" "$(resource_op turn.tools exec $ENV -- sh -c '
+    s=$(date +%s%N)
+    git status --short >/dev/null 2>&1; grep -rn users . >/dev/null; cat services.yaml >/dev/null
+    psql -tAc "select count(*) from users" >/dev/null; echo "-- a turn" >>notes.md; git diff --stat >/dev/null 2>&1
+    echo $((($(date +%s%N) - s) / 1000000))' 2>"$TMP/tools")"
+  cat "$TMP/tools"
+  check "Claude waits in the box" yes "$(succeeds fern exec $ENV -- pgrep -x claude)"
+  sleep 5
+  uid=$(pod_uid $ENV)
+  hardware_uids
+  hardware_sample --counters "$uid" >"$TMP/idle-before"
+  sleep "$seconds"
+  hardware_sample --counters "$uid" >"$TMP/idle-after"
+  resource_rates turn.idle "$TMP/idle-before" "$TMP/idle-after" | tee "$TMP/rates"
+  metric turn.box_memory_mib "box memory with Claude waiting, MiB (anon + shmem)" \
+    "$(awk '$1 == "box_memory_mib" { print $2 }' "$TMP/idle-after")"
+  # T3 ends Claude: fern exec passes SIGTERM on to it.
+  on_node kill "$claude" </dev/null
+  metric turn.sleep_ms "a turn's sleep, ms" "$(resource_op turn.sleep sleep $ENV 2>"$TMP/sleep" | took)"
+  cat "$TMP/sleep"
+  read -r hibernate t3 agent human <<<"$(idle_policy)"
+  awake=$(awk -v z="$hibernate" -v t="$t3" -v a="$agent" -v h="$human" 'BEGIN { print (z > 0 ? z : t + a > h ? t + a : h) }')
+  metric turn.awake_after_s "how long a box stays awake after a short turn, s (deployed idle times)" "$awake"
+  wake_cpu=$(res_value "$TMP/wake" turn.wake.node_cpu_ms) tools_cpu=$(res_value "$TMP/tools" turn.tools.node_cpu_ms)
+  sleep_cpu=$(res_value "$TMP/sleep" turn.sleep.node_cpu_ms)
+  metric turn.cpu_ms "CPU of a turn, ms: wake, tools and sleep (node), then the box's while it waits" \
+    "$(awk -v w="$wake_cpu" -v t="$tools_cpu" -v s="$sleep_cpu" -v a="$awake" \
+      -v r="$(res_value "$TMP/rates" turn.idle.box_cpu_per_min_ms)" \
+      'BEGIN { printf "%.0f", w + t + s + r * a / 60 }')"
+  metric turn.box_mib_minutes "memory held by a turn's box while it waits, MiB x minutes" \
+    "$(awk -v m="$(awk '$1 == "box_memory_mib" { print $2 }' "$TMP/idle-after")" -v a="$awake" 'BEGIN { printf "%.0f", m * a / 60 }')"
+}
+
 hardware() {
   echo "== hardware: idle CPU, fixed platform cost and allocated pool extents"
   local uid empty_uid before_bytes after_bytes seconds=${CPU_IDLE_SECONDS:-15}
@@ -963,11 +1034,11 @@ stability() {
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden claude hardware stability)
+  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden claude turn hardware stability)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.
-  alone=" idle daemon node many scale hardware stability "
+  alone=" idle daemon node many scale turn hardware stability "
   case "${1:-}" in
     "") set -- "${quick[@]}" ;;
     all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} && DISK_HARDWARE=1 ;;

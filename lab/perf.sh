@@ -17,7 +17,8 @@
 #                                wide; it catches only big regressions
 # E2E=N also runs lab/t3-run.sh toy N times (Haiku, your subscription) and
 # gates the wakes, revert and sampled hardware costs of sequential turns.
-# hardware (idle CPU/platform/pool) is in the default gate, not --fast;
+# hardware (idle CPU/platform/pool) and turn (one agent turn's CPU and
+# memory) are in the default gate, not --fast;
 # stability (50 lifecycle cycles) is opt-in, or check.sh all, not repeated
 # by default. CPU_IDLE_SECONDS (15) and LEAK_CYCLES (50) tune those windows.
 set -euo pipefail
@@ -39,7 +40,7 @@ while [ $# -gt 0 ]; do
 done
 if [ "$accept$fast" = yesyes ]; then echo "perf: a baseline needs more than one fast run" >&2; exit 2; fi
 if [ $# -eq 0 ]; then
-  if [ "$fast" = yes ]; then set -- box stream paths golden t3; else set -- box disk stream paths golden t3 many scale hardware; fi
+  if [ "$fast" = yes ]; then set -- box stream paths golden t3; else set -- box disk stream paths golden t3 many scale turn hardware; fi
 fi
 target=${FERN_HOST:+vps}
 target=${target:-lab}
@@ -66,7 +67,8 @@ if [ -n "${E2E:-}" ]; then
   echo "== $E2E end-to-end runs through T3 (toy, Haiku)"
   OUT=$tmp/e2e.jsonl lab/t3-run.sh toy "$E2E" >"$tmp/e2e.out" 2>&1 || { tail -20 "$tmp/e2e.out" >&2; exit 1; }
   # What the server spent per step of each run: turn 1's wake (the first,
-  # golden or not), the revert's restore and the wake after it.
+  # golden or not), the revert's restore and the wake after it, and how
+  # soon an idle box sleeps and the turn after it.
   # shellcheck disable=SC2016 # JavaScript, not shell
   node -e '
     const lines = require("fs").readFileSync(process.argv[1], "utf8").trim().split("\n");
@@ -82,6 +84,10 @@ if [ -n "${E2E:-}" ]; then
       if (wake(t1) != null) console.log(`e2e.turn1_wake_ms ${wake(t1)}`);
       console.log(`e2e.revert_ms ${revert.wallMs}`);
       if (wake(t3) != null) console.log(`e2e.wake_after_revert_ms ${wake(t3)}`);
+      // Fern stops the idle Claude and the box sleeps; the next turn resumes it.
+      const i = r.steps.findIndex((s) => s.asleepAfterMs != null);
+      if (i >= 0) console.log(`e2e.asleep_after_idle_ms ${r.steps[i].asleepAfterMs}`);
+      if (i >= 0 && r.steps[i + 1]) console.log(`e2e.turn_after_idle_ms ${r.steps[i + 1].wallMs}`);
     }' "$tmp/e2e.jsonl" >>"$tmp/all"
 fi
 
