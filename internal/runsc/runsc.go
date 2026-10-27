@@ -182,15 +182,8 @@ func (d *Driver) Prepare(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("mount box image: %w", err)
 		}
 	}
-	for _, r := range firewall() {
-		if r.unless != nil {
-			if _, err := d.run(ctx, "iptables", r.unless...); err == nil {
-				continue
-			}
-		}
-		if _, err := d.run(ctx, "iptables", r.args...); err != nil && !r.mayFail {
-			return "", fmt.Errorf("box firewall: %w", err)
-		}
+	if _, err := d.host(ctx, Command{Name: "nft", Args: []string{"-f", "-"}, Stdin: []byte(firewall())}); err != nil {
+		return "", fmt.Errorf("box firewall: %w", err)
 	}
 	cg := "/sys/fs/cgroup/" + cgroupParent
 	if _, err := d.run(ctx, "mkdir", "-p", cg); err != nil {

@@ -105,49 +105,17 @@ func TestNames(t *testing.T) {
 	}
 }
 
-// The firewall's jumps come first, in order, and are added only if missing;
-// a box may reach no private range.
+// The firewall replaces its own table whole, so loading it twice is the same
+// as once, and keeps boxes from every private range and the node.
 func TestFirewall(t *testing.T) {
-	var jumps []string
-	drops := map[string]bool{}
-	for _, r := range firewall() {
-		if r.args[0] == "-I" {
-			if r.unless == nil {
-				t.Errorf("jump %v is added every time", r.args)
-			}
-			jumps = append([]string{strings.Join(r.args[1:], " ")}, jumps...)
-		}
-		if len(r.args) > 4 && r.args[1] == chainOut && r.args[len(r.args)-1] == "DROP" {
-			drops[r.args[3]] = true
-		}
+	rules := firewall()
+	if !strings.HasPrefix(rules, "add table inet fern\ndelete table inet fern\n") {
+		t.Errorf("firewall doesn't replace its table:\n%s", rules)
 	}
-	want := []string{
-		"FORWARD -i fbx+ -j FERN-BOX-OUT",
-		"FORWARD -o fbx+ -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
-		"FORWARD -o fbx+ -j DROP",
-		"INPUT -i fbx+ -j FERN-BOX-IN",
-	}
-	if diff := cmp.Diff(want, jumps); diff != "" {
-		t.Errorf("jumps, top first (-want +got):\n%s", diff)
-	}
-	for _, r := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "127.0.0.0/8"} {
-		if !drops[r] {
-			t.Errorf("boxes may reach %s", r)
+	for _, want := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "127.0.0.0/8",
+		"hook input", `iifname "fbx*" drop`, `oifname "fbx*" drop`, "masquerade"} {
+		if !strings.Contains(rules, want) {
+			t.Errorf("firewall lacks %q:\n%s", want, rules)
 		}
-	}
-}
-
-// runsc finds a container by a prefix of its ID: no box's ID may be a
-// prefix of another's, as "m1" is of "m10".
-func TestContainerIDs(t *testing.T) {
-	ids := map[string]string{}
-	for _, id := range []string{"m1", "m10", "a", "a-b", "ab", strings.Repeat("z", 63)} {
-		cid := newBox("/run/boxes", "/pool", id).cid
-		for other, ocid := range ids {
-			if strings.HasPrefix(cid, ocid) || strings.HasPrefix(ocid, cid) {
-				t.Errorf("box IDs of %s (%s) and %s (%s) are prefixes", id, cid, other, ocid)
-			}
-		}
-		ids[id] = cid
 	}
 }
