@@ -3,6 +3,7 @@ package driver_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -236,5 +237,15 @@ func TestWakeBuilderHasNoCredentials(t *testing.T) {
 	}
 	if _, ok := mounts(sandbox(t, c, builder.ID))[env.Claude]; ok {
 		t.Errorf("builder's box mounts Claude's folder %s", env.Claude)
+	}
+	// Its services start with it: their first start is the golden.
+	if !slices.ContainsFunc(spec.Containers[0].Env, func(v corev1.EnvVar) bool { return v.Name == "FERN_ON_DEMAND" && v.Value == "off" }) {
+		t.Error("builder's box starts services on demand, want at once")
+	}
+	wake(t, d, env)
+	for _, v := range sandbox(t, c, env.ID).Spec.PodTemplate.Spec.Containers[0].Env {
+		if v.Name == "FERN_ON_DEMAND" {
+			t.Errorf("a thread's box has FERN_ON_DEMAND=%s, want services on demand", v.Value)
+		}
 	}
 }

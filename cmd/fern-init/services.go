@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -20,6 +21,11 @@ type service struct {
 	Run   string `json:"run"`
 	Stop  string `json:"stop,omitempty"`  // graceful stop; else SIGTERM
 	Ready string `json:"ready,omitempty"` // exits 0 when the service is ready
+	// Listen is where the service accepts connections, "unix:PATH" or
+	// "tcp:PORT": fern-init holds it and starts the service on demand, at
+	// its first connection (onDemand). Without it, the service starts with
+	// the box.
+	Listen string `json:"listen,omitempty"`
 }
 
 // loadServices reads services.yaml at path. A missing file means no services.
@@ -51,6 +57,11 @@ func parseServices(data []byte) (map[string]service, error) {
 		if svc.Run == "" {
 			return nil, fmt.Errorf("services.yaml: service %q: run is required", name)
 		}
+		if svc.Listen != "" {
+			if _, _, err := listenAddr(svc.Listen); err != nil {
+				return nil, fmt.Errorf("services.yaml: service %q: %w", name, err)
+			}
+		}
 	}
 	return f.Services, nil
 }
@@ -81,6 +92,7 @@ type supervisor struct {
 	quit      chan struct{}      // closed when the service must not be restarted
 	terminate context.CancelFunc // sends SIGTERM to the running service
 	done      chan struct{}      // closed when run has returned
+	group     atomic.Int64       // the running service's process group; 0 while none runs
 }
 
 // startService starts and supervises svc. It keeps running after ctx is
@@ -101,7 +113,8 @@ func (s *supervisor) run(ctx context.Context) {
 	backoff := minBackoff
 	for {
 		started := time.Now()
-		err := runService(ctx, s.svc, s.dir, s.env)
+		err := runService(ctx, s.svc, s.dir, s.env, func(pgid int) { s.group.Store(int64(pgid)) })
+		s.group.Store(0)
 		select {
 		case <-s.quit:
 			return
@@ -133,8 +146,9 @@ func (s *supervisor) stop(ctx context.Context) {
 	<-s.done
 }
 
-// runService runs svc once, until it exits or ctx is done.
-func runService(ctx context.Context, svc service, dir string, env []string) error {
+// runService runs svc once, until it exits or ctx is done, and tells
+// started the process group it runs in.
+func runService(ctx context.Context, svc service, dir string, env []string, started func(pgid int)) error {
 	cmd := exec.CommandContext(ctx, "/bin/sh", "-c", svc.Run)
 	cmd.Dir, cmd.Env = dir, env
 	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
@@ -160,8 +174,12 @@ func runService(ctx context.Context, svc service, dir string, env []string) erro
 		escalate = time.AfterFunc(killDelay, func() { _ = syscall.Kill(-pgid, syscall.SIGKILL) })
 		return syscall.Kill(-pgid, syscall.SIGTERM)
 	}
-	err := cmd.Run()
-	// Run reports Cancel's error, so it returns only after Cancel has:
+	err := cmd.Start()
+	if err == nil {
+		started(cmd.Process.Pid)
+		err = cmd.Wait()
+	}
+	// Wait reports Cancel's error, so it returns only after Cancel has:
 	// escalate and kill need no lock.
 	if escalate != nil {
 		escalate.Stop()

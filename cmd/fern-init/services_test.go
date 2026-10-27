@@ -20,6 +20,11 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	// The test binary is also the service the on-demand tests start.
+	if addr := os.Getenv("FERN_TEST_ECHO"); addr != "" {
+		serveEcho(addr)
+		return
+	}
 	goleak.VerifyTestMain(m)
 }
 
@@ -50,6 +55,12 @@ services:
 		{name: "no services", yaml: "services: {}\n"},
 		{name: "missing run", yaml: "services:\n  db:\n    ready: x\n", wantErr: true},
 		{name: "unknown field", yaml: "services:\n  db:\n    run: x\n    restart: always\n", wantErr: true},
+		{
+			name: "on demand",
+			yaml: "services:\n  db:\n    run: x\n    listen: unix:/tmp/.s.PGSQL.5432\n  web:\n    run: npm start\n    listen: tcp:3000\n",
+			want: map[string]service{"db": {Run: "x", Listen: "unix:/tmp/.s.PGSQL.5432"}, "web": {Run: "npm start", Listen: "tcp:3000"}},
+		},
+		{name: "bad listen", yaml: "services:\n  db:\n    run: x\n    listen: 5432\n", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

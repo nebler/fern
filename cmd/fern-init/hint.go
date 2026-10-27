@@ -34,7 +34,7 @@ func writeHint(claudeDir string, services map[string]service) error {
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "- This thread's worktree is its own environment, in a sandboxed box. Other threads have their own copies; nothing you change here reaches them or the main branch's data.")
 	if len(services) > 0 {
-		fmt.Fprintf(&b, "- The box runs this repository's services (services.yaml): %s. They are running now; use them directly.\n",
+		fmt.Fprintf(&b, "- The box runs this repository's services (services.yaml): %s. Use them directly; one that isn't running yet starts at its first connection.\n",
 			strings.Join(slices.Sorted(maps.Keys(services)), ", "))
 		fmt.Fprintln(&b, "- Their data lives in the worktree (git ignores it), so T3's diff doesn't show data changes: say what you changed.")
 	}

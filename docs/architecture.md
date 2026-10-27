@@ -279,6 +279,7 @@ Read from the repo, in order of preference:
 - `linked` paths come from the project's main repository (`repos/<repo>/`) and are mounted read-only into the box, **outside `live/`**, so they never enter golden or snapshots. They are not mounted while `setup` runs. (Delta symlinks them to one shared copy instead.)
 - `resume` runs on **every wake** and when `fern-init` reconnects without a sleep, so it must be **safe to run twice**. A turn waits for it at most 10 s; after that it keeps running in the background. It's for logins, tunnels and machine identity.
 - Services must respect **`PORT`** and **`PUBLIC_URL`**. **A running service does not keep the environment awake.**
+- **On demand (built):** a service with `listen: unix:PATH` or `listen: tcp:PORT` starts at the first connection there, not with the box: fern-init holds the socket, the box is ready without the service, and the first connections wait and are relayed once its `ready` passes. A unix socket stays fern-init's until then (the service replaces the socket file, as Postgres does, and later connections reach it directly); a TCP port is let go at the first connection, and one in between is refused. A golden builder's box starts every service at once (`FERN_ON_DEMAND=off`), as their first start is what it builds.
 
 `services.yaml`:
 ```yaml
@@ -287,6 +288,7 @@ services:
     run: pg_ctl start -w -D .fern/pg -o "-p $PORT"
     stop: pg_ctl stop -D .fern/pg -m fast
     ready: pg_isready -p $PORT
+    listen: tcp:5432    # built: start at the first connection (on demand)
   web:
     run: pnpm dev
     port: 3000          # the default preview, <env>.<repo>.<host>

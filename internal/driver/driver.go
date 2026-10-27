@@ -507,9 +507,11 @@ func (d *Driver) podTemplate(env store.Env) sandboxv1.PodTemplate {
 		{Name: "FERN_WORKSPACE", Value: env.Workspace},
 	}
 	// A golden builder's box runs no agent and gets no login: what its
-	// services write goes into every thread of the repository.
+	// services write goes into every thread of the repository. Its services
+	// start with it, as their first start is what it builds.
 	if setup.IsBuilder(env.ID) {
 		env.Claude = ""
+		vars = append(vars, corev1.EnvVar{Name: "FERN_ON_DEMAND", Value: "off"})
 	} else {
 		vars = append(vars,
 			// Claude keeps its transcripts here, so `--resume` works after a

@@ -65,15 +65,37 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 
 	// Services outlive ctx: they are stopped, all at once, after it is done.
-	supervisors := make([]*supervisor, 0, len(services))
+	// One with a socket starts at its first connection, except in a golden
+	// builder's box, whose services must make their first start.
+	var stoppers []func(context.Context)
+	lazy := make(map[string]*onDemand)
 	for name, svc := range services {
-		supervisors = append(supervisors, startService(ctx, name, svc, dir, env, log))
+		if svc.Listen != "" && os.Getenv("FERN_ON_DEMAND") != "off" {
+			o, err := listenOnDemand(ctx, name, svc, dir, env, log)
+			if err != nil {
+				for _, stop := range stoppers {
+					stop(ctx)
+				}
+				return err
+			}
+			lazy[name] = o
+			stoppers = append(stoppers, o.stop)
+			continue
+		}
+		stoppers = append(stoppers, startService(ctx, name, svc, dir, env, log).stop)
 	}
 
 	mux := http.NewServeMux()
 	mux.Handle("GET "+boxexec.Path, boxexec.NewServer(token, dir, env, log))
 	mux.Handle("GET "+boxexec.ReadyPath, readiness(func(ctx context.Context) error {
-		return checkServices(ctx, services, dir, env)
+		// A service that hasn't started is ready: its socket is.
+		check := make(map[string]service, len(services))
+		for name, svc := range services {
+			if o, ok := lazy[name]; !ok || o.isStarted() {
+				check[name] = svc
+			}
+		}
+		return checkServices(ctx, check, dir, env)
 	}))
 	mux.Handle("POST "+boxexec.StopPath, shutdown(token, os.Getenv("FERN_POD_UID"), cancel))
 	srv := &http.Server{
@@ -92,8 +114,8 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 	log.InfoContext(ctx, "stopping")
 	var stopping sync.WaitGroup
-	for _, s := range supervisors {
-		stopping.Go(func() { s.stop(context.WithoutCancel(ctx)) })
+	for _, stop := range stoppers {
+		stopping.Go(func() { stop(context.WithoutCancel(ctx)) })
 	}
 	stopping.Wait()
 	// Execs have ended with ctx; what is left is a readiness answer no one
