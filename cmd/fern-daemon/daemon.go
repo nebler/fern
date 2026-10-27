@@ -244,7 +244,7 @@ type noopProvider struct{ noop.TracerProvider }
 
 func (noopProvider) Shutdown(context.Context) error { return nil }
 
-func kubeClient() (client.Client, error) {
+func kubeClient() (client.WithWatch, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes config: %w", err)
@@ -259,7 +259,7 @@ func kubeClient() (client.Client, error) {
 	if err := sandboxv1.AddToScheme(scheme); err != nil {
 		return nil, err
 	}
-	c, err := client.New(cfg, client.Options{Scheme: scheme})
+	c, err := client.NewWithWatch(cfg, client.Options{Scheme: scheme})
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes client: %w", err)
 	}

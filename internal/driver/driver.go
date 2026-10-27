@@ -7,6 +7,7 @@ package driver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -25,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/watch"
 	sandboxv1 "sigs.k8s.io/agent-sandbox/api/v1beta1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -61,8 +63,9 @@ const (
 	// its own checks.
 	readyInterval = 50 * time.Millisecond
 	readyWait     = 5 * time.Second
-	// podInterval is how often a pod is looked at while it has no address,
-	// and podCheckEvery once it has one: it may have been replaced or failed.
+	// podInterval is how often a Sandbox being deleted is looked at, and
+	// podCheckEvery how often a waking box's pod is while fern-init isn't
+	// ready: it may have been replaced or failed. Waits for a pod watch it.
 	podInterval   = 200 * time.Millisecond
 	podCheckEvery = time.Second
 	// stopGrace bounds a box's stop. fern-init needs at most 8s for the
@@ -72,7 +75,7 @@ const (
 
 // Driver manages Sandboxes through the Kubernetes API.
 type Driver struct {
-	c            client.Client
+	c            client.WithWatch
 	node         string       // boxes are pinned here: its daemon has their disks
 	image        string       // the box image; its entrypoint is fern-init
 	runtimeClass string       // the boxes' RuntimeClass, such as gvisor; "" is the node's default
@@ -86,7 +89,7 @@ type Driver struct {
 // New returns a Driver that runs boxes from image on node under RuntimeClass
 // runtimeClass (or the node's default, if ""), through c, whose scheme must
 // include corev1 and the agent-sandbox types, and records its steps with tr.
-func New(c client.Client, node, image, runtimeClass string, tr trace.Tracer) *Driver {
+func New(c client.WithWatch, node, image, runtimeClass string, tr trace.Tracer) *Driver {
 	// fern-init answers within readyWait and its checks' 2.25s. Connecting
 	// gets far less: for a moment after a pod starts, the network policy can
 	// drop packets to it instead of refusing them, and a wait for the full
@@ -127,35 +130,44 @@ func (d *Driver) Wake(ctx context.Context, env store.Env) (string, error) {
 		return "", fmt.Errorf("wake %s: %w", env.ID, err)
 	}
 	applied := time.Now()
-	_, span = d.tracer.Start(ctx, "pod")
+	ctx, cancel := context.WithTimeout(ctx, wakeTimeout)
+	defer cancel()
 	var addr string
-	var looked, found time.Time
-	var looks, asks int
-	err = poll(ctx, readyInterval, wakeTimeout, func(ctx context.Context) (bool, error) {
-		if since := time.Since(looked); (addr == "" && since >= podInterval) || since >= podCheckEvery {
-			looked = time.Now()
-			looks++
+	var found time.Time
+	for addr == "" {
+		_, span = d.tracer.Start(ctx, "pod")
+		err = d.watchPod(ctx, env.ID, func(pod *corev1.Pod) (bool, error) {
 			var err error
-			if addr, err = d.podAddr(ctx, env.ID); err != nil {
-				return false, err
-			}
-			if addr != "" && found.IsZero() {
-				found = time.Now()
-				span.SetAttributes(attribute.Int("fern.pod_looks", looks))
-				span.End()
-				_, span = d.tracer.Start(ctx, "ready")
-			}
+			addr, err = d.addrOf(ctx, pod)
+			return addr != "", err
+		})
+		end(span, err)
+		if err != nil {
+			return "", fmt.Errorf("wake %s: %w", env.ID, timedOut(ctx, err))
 		}
-		if addr == "" {
-			return false, nil
+		if found.IsZero() {
+			found = time.Now()
 		}
-		asks++
-		return d.isReady(ctx, addr), nil
-	})
-	span.SetAttributes(attribute.Int("fern.ready_asks", asks))
-	end(span, err)
-	if err != nil {
-		return "", fmt.Errorf("wake %s: %w", env.ID, err)
+		_, span = d.tracer.Start(ctx, "ready")
+		var looked time.Time
+		asks := 0
+		err = poll(ctx, readyInterval, wakeTimeout, func(ctx context.Context) (bool, error) {
+			if time.Since(looked) >= podCheckEvery {
+				looked = time.Now()
+				now, err := d.podAddr(ctx, env.ID)
+				if err != nil || now != addr {
+					addr = "" // replaced or failed: wait for the next pod
+					return true, err
+				}
+			}
+			asks++
+			return d.isReady(ctx, addr), nil
+		})
+		span.SetAttributes(attribute.Int("fern.ready_asks", asks))
+		end(span, err)
+		if err != nil {
+			return "", fmt.Errorf("wake %s: %w", env.ID, err)
+		}
 	}
 	d.steps.WithLabelValues("sandbox").Observe(applied.Sub(start).Seconds())
 	d.steps.WithLabelValues("pod").Observe(found.Sub(applied).Seconds())
@@ -186,8 +198,7 @@ func (d *Driver) apply(ctx context.Context, env store.Env) error {
 }
 
 // podAddr returns the exec address of environment id's running pod, or ""
-// if it has none yet. A failed pod is deleted, so the controller makes a new
-// one: agent-sandbox doesn't replace a pod that kubelet evicted.
+// if it has none yet.
 func (d *Driver) podAddr(ctx context.Context, id string) (string, error) {
 	pod := &corev1.Pod{}
 	err := d.c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: id}, pod)
@@ -197,9 +208,19 @@ func (d *Driver) podAddr(ctx context.Context, id string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("get pod %s: %w", id, err)
 	}
+	return d.addrOf(ctx, pod)
+}
+
+// addrOf returns the exec address of pod if it runs, or "" if it doesn't
+// yet or is nil. A failed pod is deleted, so the controller makes a new
+// one: agent-sandbox doesn't replace a pod that kubelet evicted.
+func (d *Driver) addrOf(ctx context.Context, pod *corev1.Pod) (string, error) {
+	if pod == nil {
+		return "", nil
+	}
 	if pod.Status.Phase == corev1.PodFailed {
 		if err := d.c.Delete(ctx, pod); err != nil && !apierrors.IsNotFound(err) {
-			return "", fmt.Errorf("delete failed pod %s: %w", id, err)
+			return "", fmt.Errorf("delete failed pod %s: %w", pod.Name, err)
 		}
 		return "", nil
 	}
@@ -240,7 +261,7 @@ func (d *Driver) Sleep(ctx context.Context, id string) error {
 		return fmt.Errorf("sleep %s: %w", id, err)
 	}
 	d.stopInit(ctx, id)
-	if err := d.waitGone(ctx, id, &corev1.Pod{}); err != nil {
+	if err := d.waitPodGone(ctx, id); err != nil {
 		return fmt.Errorf("sleep %s: %w", id, err)
 	}
 	return nil
@@ -264,7 +285,7 @@ func (d *Driver) Delete(ctx context.Context, id string) error {
 	if err := d.waitGone(ctx, id, &sandboxv1.Sandbox{}); err != nil {
 		return fmt.Errorf("delete sandbox %s: %w", id, err)
 	}
-	if err := d.waitGone(ctx, id, &corev1.Pod{}); err != nil {
+	if err := d.waitPodGone(ctx, id); err != nil {
 		return fmt.Errorf("delete sandbox %s: %w", id, err)
 	}
 	return nil
@@ -362,6 +383,94 @@ func (d *Driver) waitGone(ctx context.Context, id string, obj client.Object) err
 	})
 	span.SetAttributes(attribute.Int("fern.looks", looks))
 	end(span, err)
+	return err
+}
+
+// waitPodGone waits until environment id's pod doesn't exist.
+func (d *Driver) waitPodGone(ctx context.Context, id string) error {
+	_, span := d.tracer.Start(ctx, "wait_gone", trace.WithAttributes(attribute.String("fern.kind", "*v1.Pod")))
+	ctx, cancel := context.WithTimeout(ctx, goneTimeout)
+	defer cancel()
+	err := d.watchPod(ctx, id, func(pod *corev1.Pod) (bool, error) { return pod == nil, nil })
+	err = timedOut(ctx, err)
+	end(span, err)
+	return err
+}
+
+// watchPod calls done with environment id's pod, nil while there is none,
+// now and at every change, until done says so, fails or ctx ends. One watch
+// sees a change the moment it is made, where looking every podInterval saw
+// it 100 ms later on average, and costs one API call.
+func (d *Driver) watchPod(ctx context.Context, id string, done func(pod *corev1.Pod) (bool, error)) error {
+	opts := []client.ListOption{client.InNamespace(namespace), client.MatchingFields{"metadata.name": id}}
+	for {
+		var list corev1.PodList
+		if err := d.c.List(ctx, &list, opts...); err != nil {
+			return fmt.Errorf("list pod %s: %w", id, err)
+		}
+		var pod *corev1.Pod
+		if len(list.Items) > 0 {
+			pod = &list.Items[0]
+		}
+		if ok, err := done(pod); ok || err != nil {
+			return err
+		}
+		w, err := d.c.Watch(ctx, &corev1.PodList{}, append(opts, &client.ListOptions{Raw: &metav1.ListOptions{ResourceVersion: list.ResourceVersion}})...)
+		if err != nil {
+			return fmt.Errorf("watch pod %s: %w", id, err)
+		}
+		ok, err := podEvents(ctx, w, done)
+		w.Stop()
+		if ok || err != nil {
+			return err
+		}
+		// The watch ended (the server's timeout, or history it no longer
+		// has): look again and watch from there.
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+}
+
+// podEvents calls done with the pod of every event from w until done says
+// so or fails, or w or ctx ends.
+func podEvents(ctx context.Context, w watch.Interface, done func(pod *corev1.Pod) (bool, error)) (bool, error) {
+	for {
+		var ev watch.Event
+		select {
+		case <-ctx.Done():
+			return false, ctx.Err()
+		case e, ok := <-w.ResultChan():
+			if !ok {
+				return false, nil
+			}
+			ev = e
+		}
+		var pod *corev1.Pod
+		switch ev.Type {
+		case watch.Added, watch.Modified:
+			p, ok := ev.Object.(*corev1.Pod)
+			if !ok {
+				continue
+			}
+			pod = p
+		case watch.Deleted:
+		default: // an error ends the watch; Bookmark has no pod
+			continue
+		}
+		if ok, err := done(pod); ok || err != nil {
+			return ok, err
+		}
+	}
+}
+
+// timedOut says that a wait ran out of time when ctx did, in place of the
+// client's error, which can hide it: its rate limiter fails early near a
+// deadline.
+func timedOut(ctx context.Context, err error) error {
+	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("not done in time: %w", context.DeadlineExceeded)
+	}
 	return err
 }
 

@@ -24,12 +24,12 @@ import (
 // notrace records nothing.
 var notrace = noop.NewTracerProvider().Tracer("")
 
-func newDriver(t *testing.T, objs ...client.Object) (*driver.Driver, client.Client) {
+func newDriver(t *testing.T, objs ...client.Object) (*driver.Driver, client.WithWatch) {
 	t.Helper()
 	return newDriverWithClass(t, "", objs...)
 }
 
-func newDriverWithClass(t *testing.T, class string, objs ...client.Object) (*driver.Driver, client.Client) {
+func newDriverWithClass(t *testing.T, class string, objs ...client.Object) (*driver.Driver, client.WithWatch) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	if err := corev1.AddToScheme(scheme); err != nil {
@@ -38,7 +38,11 @@ func newDriverWithClass(t *testing.T, class string, objs ...client.Object) (*dri
 	if err := sandboxv1.AddToScheme(scheme); err != nil {
 		t.Fatal(err)
 	}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	// The driver watches a pod by its name, which the API server can select
+	// on and the fake client needs an index for.
+	byName := func(o client.Object) []string { return []string{o.GetName()} }
+	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).
+		WithIndex(&corev1.Pod{}, "metadata.name", byName).Build()
 	return driver.New(c, "node-1", "fern-box:test", class, notrace), c
 }
 

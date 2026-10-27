@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.uber.org/goleak"
 	corev1 "k8s.io/api/core/v1"
@@ -28,7 +29,7 @@ func TestMain(m *testing.M) {
 
 // stopClient interrupts a stop at the boundary after its durable mutation.
 type stopClient struct {
-	client.Client
+	client.WithWatch
 	cancel context.CancelFunc
 	fail   error
 }
@@ -37,7 +38,7 @@ func (c stopClient) Patch(ctx context.Context, obj client.Object, patch client.P
 	if c.fail != nil {
 		return c.fail
 	}
-	if err := c.Client.Patch(ctx, obj, patch, opts...); err != nil {
+	if err := c.WithWatch.Patch(ctx, obj, patch, opts...); err != nil {
 		return err
 	}
 	if c.cancel != nil {
@@ -50,14 +51,14 @@ func (c stopClient) Get(ctx context.Context, key types.NamespacedName, obj clien
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	return c.Client.Get(ctx, key, obj, opts...)
+	return c.WithWatch.Get(ctx, key, obj, opts...)
 }
 
 func (c stopClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
 	if c.fail != nil {
 		return c.fail
 	}
-	if err := c.Client.Delete(ctx, obj, opts...); err != nil {
+	if err := c.WithWatch.Delete(ctx, obj, opts...); err != nil {
 		return err
 	}
 	if c.cancel != nil {
@@ -133,7 +134,7 @@ func TestStopShutdownReplay(t *testing.T) {
 						}
 						w.WriteHeader(http.StatusNoContent)
 					})
-					interrupted := stopClient{Client: c}
+					interrupted := stopClient{WithWatch: c}
 					if boundary == "intent recorded" {
 						interrupted.cancel = cancel
 					}
@@ -176,7 +177,7 @@ func TestSleepDoesNotStopBeforeSuspension(t *testing.T) {
 		w.WriteHeader(http.StatusNoContent)
 	})
 	want := errors.New("suspension refused")
-	d := driver.New(stopClient{Client: c, fail: want}, "node-1", "fern-box:test", "", notrace)
+	d := driver.New(stopClient{WithWatch: c, fail: want}, "node-1", "fern-box:test", "", notrace)
 	if err := d.Sleep(t.Context(), "demo"); !errors.Is(err, want) {
 		t.Errorf("Sleep error = %v, want suspension refusal", err)
 	}
@@ -200,5 +201,39 @@ func TestSleepWithOlderInit(t *testing.T) {
 	}
 	if err := c.Get(t.Context(), client.ObjectKeyFromObject(pod), &corev1.Pod{}); !apierrors.IsNotFound(err) {
 		t.Errorf("pod after sleep error = %v, want not found", err)
+	}
+}
+
+// Wake waits for the box's pod as it comes: here it has no address at
+// first, gets one while Wake waits, and its fern-init is ready.
+func TestWakeWaitsForThePod(t *testing.T) {
+	_, pod := stopObjects()
+	pod.Status.PodIP = ""
+	d, c := newDriver(t, pod)
+	serveStop(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != boxexec.ReadyPath {
+			http.NotFound(w, r)
+		}
+	})
+	got := make(chan error, 1)
+	go func() {
+		addr, err := d.Wake(t.Context(), env)
+		if err == nil && addr != net.JoinHostPort("127.0.0.1", strconv.Itoa(boxexec.Port)) {
+			err = errors.New("wrong address " + addr)
+		}
+		got <- err
+	}()
+	time.Sleep(50 * time.Millisecond)
+	pod.Status.PodIP = "127.0.0.1"
+	if err := c.Status().Update(t.Context(), pod); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Errorf("Wake error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Wake didn't see the pod's address")
 	}
 }
