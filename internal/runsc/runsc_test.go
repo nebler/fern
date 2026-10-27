@@ -112,8 +112,10 @@ func TestFirewall(t *testing.T) {
 	if !strings.HasPrefix(rules, "add table inet fern\ndelete table inet fern\n") {
 		t.Errorf("firewall doesn't replace its table:\n%s", rules)
 	}
-	for _, want := range []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "127.0.0.0/8",
-		"hook input", `iifname "fbx*" drop`, `oifname "fbx*" drop`, "masquerade"} {
+	for _, want := range []string{
+		"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "127.0.0.0/8",
+		"hook input", `iifname "fbx*" drop`, `oifname "fbx*" drop`, "masquerade",
+	} {
 		if !strings.Contains(rules, want) {
 			t.Errorf("firewall lacks %q:\n%s", want, rules)
 		}
