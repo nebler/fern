@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Sets up a VPS as a Fern node, as root over SSH from the Mac: the btrfs pool,
-# k3s with deploy/k3s-config.yaml, gVisor, the agent-sandbox controller, then
+# k3s with deploy/k3s-config.yaml, gVisor, then
 # Fern and T3 from images built here. Run it again to update; every step
 # skips what is done. Then the lab's scripts work on it with FERN_HOST set:
 #   FERN_HOST=1.2.3.4 lab/check.sh
@@ -99,9 +99,8 @@ done
 kubectl get nodes
 NODE
 
-echo "installing agent-sandbox $SANDBOX_VERSION"
-k apply --server-side -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/$SANDBOX_VERSION/sandbox.yaml" >/dev/null
-k -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=300s >/dev/null
+# Boxes are the daemon's own (runsc); lab/boxes.sh kubernetes installs the
+# agent-sandbox controller when pods should run them instead.
 
 # The pods' first start comes with the images: build.sh imports them, applies
 # deploy/ and restarts.

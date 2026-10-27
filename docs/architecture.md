@@ -14,7 +14,7 @@ Fern gives every AI coding thread its own **environment**: code, installed depen
 - It **sleeps** when idle and **wakes** on the next touch.
 - It takes a **snapshot at every agent turn**, so rewinding or forking a thread brings the data along with the code.
 
-Fern runs on **Kubernetes only**: one Go daemon per node (a DaemonSet), a thin operator, and a CSI driver. Sessions are standard [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) `Sandbox` objects. One person on one machine runs a single-node k3s. Everything runs on a **remote Linux machine**; your Mac or phone only runs the T3 app. Fern integrates with **T3 Code** and runs the real `claude` / `codex` CLIs with your own subscriptions.
+Fern runs on **Kubernetes**: one Go daemon per node (a DaemonSet), which runs the sessions (boxes) itself as gVisor sandboxes (`runsc`, since 2026-10-27, [briefs/boxes-without-kubernetes.md](briefs/boxes-without-kubernetes.md)), and Claude in a box of its own per thread ([briefs/claude-outside-the-box.md](briefs/claude-outside-the-box.md)). `--boxes=kubernetes` keeps the first design: standard [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) `Sandbox` objects with a CSI driver; sections below that describe pods, the CSI driver and network policies are that mode. One person on one machine runs a single-node k3s. Everything runs on a **remote Linux machine**; your Mac or phone only runs the T3 app. Fern integrates with **T3 Code** and runs the real `claude` / `codex` CLIs with your own subscriptions.
 
 ### 1.1 In scope
 - environments, snapshots, golden snapshots, boxes, sleep and wake, rewind, fork

@@ -78,17 +78,16 @@ install_cli() {
 # in_t3 runs a shell command in T3's server container, as T3's user.
 in_t3() { k -n fern-system exec -i deploy/t3 -c t3 -- sh -c "$1"; }
 
-# runsc_boxes says whether the daemon runs boxes itself (lab/boxes.sh runsc),
-# so they have no pods.
-runsc_boxes() {
-  k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -q -- '--boxes=runsc'
-}
+# daemon_args prints the daemon's arguments.
+daemon_args() { k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}'; }
+
+# runsc_boxes says whether the daemon runs boxes itself, so they have no
+# pods: its default, unless --boxes=kubernetes (lab/boxes.sh).
+runsc_boxes() { ! daemon_args | grep -q -- '--boxes=kubernetes'; }
 
 # agent_boxes says whether Claude runs in a box of its own per environment
 # (lab/boxes.sh agents): environment <id>'s is <id>.agent.
-agent_boxes() {
-  k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}' | grep -q -- '--agent-boxes'
-}
+agent_boxes() { runsc_boxes && ! daemon_args | grep -q -- '--agent-boxes=false'; }
 
 # box_uid prints what identifies environment $1's running box: its pod's
 # UID, or with runsc boxes runsc-<env>@<sandbox pid>; nothing if none runs.
@@ -113,6 +112,14 @@ box_log() {
   else
     k -n fern-boxes logs "$1" -c box 2>/dev/null || true
   fi
+}
+
+# install_sandbox installs the agent-sandbox controller, which Kubernetes
+# boxes need (lab/boxes.sh kubernetes); the daemon's own runsc boxes don't.
+install_sandbox() {
+  echo "installing agent-sandbox $SANDBOX_VERSION"
+  k apply --server-side -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/$SANDBOX_VERSION/sandbox.yaml" >/dev/null
+  k -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=300s >/dev/null
 }
 
 # import_images copies images from Docker into the node's containerd,

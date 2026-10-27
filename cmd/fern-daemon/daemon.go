@@ -95,9 +95,9 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	metricsAddr := flags.String("metrics-addr", ":9090", "serve Prometheus metrics at /metrics, and Go's profiles at /debug/pprof/, on this address")
 	traceEndpoint := flags.String("trace-endpoint", "", "send traces by OTLP/HTTP to this URL, such as http://10.0.0.1:4318 (\"\": none)")
 	runtimeClass := flags.String("runtime-class", "", "run boxes under this RuntimeClass, such as gvisor (\"\": the node's default)")
-	boxes := flags.String("boxes", "kubernetes", "who runs boxes: kubernetes (a Sandbox each) or runsc (the daemon itself; needs the node's PID and network namespaces)")
+	boxes := flags.String("boxes", "runsc", "who runs boxes: runsc (the daemon itself; needs the node's PID and network namespaces) or kubernetes (a Sandbox each, with the agent-sandbox controller)")
 	boxDNS := flags.String("box-dns", "1.1.1.1,8.8.8.8", "with --boxes=runsc, the resolvers boxes use")
-	agentBoxes := flags.Bool("agent-boxes", false, "with --boxes=runsc, run Claude in a box of its own per environment, whose Bash runs in the environment's box (docs/briefs/claude-outside-the-box.md)")
+	agentBoxes := flags.Bool("agent-boxes", true, "with --boxes=runsc, run Claude in a box of its own per environment, whose Bash runs in the environment's box (docs/briefs/claude-outside-the-box.md)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}

@@ -151,12 +151,19 @@ spec:
         app.kubernetes.io/part-of: fern
     spec:
       serviceAccountName: fern
+      # The daemon runs the boxes itself (runsc, with an agent box for Claude
+      # per environment): in the node's PID namespace, so they outlive a
+      # daemon restart, and its network namespace, where their links are.
+      hostPID: true
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
       containers:
         - name: fern
           image: fern:dev
           imagePullPolicy: Never # the lab imports its images
           # Boxes run under gVisor: the agent runs code nobody reviewed. The
-          # lab and the VPS install it (lab/up.sh, lab/vps.sh).
+          # lab and the VPS install it (lab/up.sh, lab/vps.sh). The runtime
+          # class is for --boxes=kubernetes (lab/boxes.sh).
           args: [daemon, -runtime-class=gvisor]
           env:
             - name: NODE_NAME

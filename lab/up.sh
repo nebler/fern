@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Starts the local lab: k3s in one privileged Docker container, with a
-# loop-mounted btrfs pool at /var/lib/fern, the agent-sandbox controller and
+# loop-mounted btrfs pool at /var/lib/fern and
 # Fern. Everything it makes is named fern-lab* or labelled part-of=fern.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
@@ -72,9 +72,8 @@ k get nodes
 echo "importing images"
 import_images fern:dev fern-box:dev
 
-echo "installing agent-sandbox $SANDBOX_VERSION"
-k apply --server-side -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/$SANDBOX_VERSION/sandbox.yaml" >/dev/null
-k -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=300s
+# Boxes are the daemon's own (runsc); lab/boxes.sh kubernetes installs the
+# agent-sandbox controller when pods should run them instead.
 
 echo "installing fern"
 k apply -f - <deploy/fern.yaml >/dev/null

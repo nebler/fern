@@ -3,7 +3,7 @@
 Rules for anyone (human or agent) writing code in this repository. Read this before writing Go.
 
 ## The project
-Fern gives every T3 Code thread an environment that behaves like git for everything: code, dependencies and the running database. It runs on Kubernetes only (k3s for one person).
+Fern gives every T3 Code thread an environment that behaves like git for everything: code, dependencies and the running database. It runs on Kubernetes (k3s for one person), and its daemon runs the boxes itself with gVisor's runsc ([briefs/boxes-without-kubernetes.md](docs/briefs/boxes-without-kubernetes.md)).
 - What we build: [docs/architecture.md](docs/architecture.md)
 - Order of work: [docs/roadmap.md](docs/roadmap.md)
 - Experiments: [docs/engine-local.md](docs/engine-local.md)
@@ -15,7 +15,7 @@ If the code and the docs disagree, stop and say so. Don't silently pick one.
 The nouns are in [architecture §2](docs/architecture.md#2-concepts). In the code:
 - **Pool:** the btrfs filesystem at `/var/lib/fern`, which holds every environment's folders (`envs/<id>/`) and snapshots.
 - **Workspace:** an environment's writable folder, a btrfs subvolume: `envs/<id>/live`, or a T3 worktree at its own path.
-- **Box:** an environment's pod (an agent-sandbox `Sandbox`). An asleep environment has none.
+- **Box:** an environment's sandbox, a gVisor sandbox the daemon runs (`internal/runsc`; `--boxes=kubernetes` makes it an agent-sandbox `Sandbox` pod instead). An asleep environment has none. Its **agent box**, `<env>.agent`, runs Claude; Claude's Bash runs in the box ([briefs/claude-outside-the-box.md](docs/briefs/claude-outside-the-box.md)).
 - **Daemon:** `fern daemon` on every node: the API on a Unix socket, the store, the driver and the CSI node plugin.
 - **fern-init:** a box's main process. It runs the services in `services.yaml` and serves boxexec.
 - **boxexec:** Fern's WebSocket protocol for running a command in a box.
@@ -76,7 +76,7 @@ The same sources are available as on-demand skills in [.claude/skills/](.claude/
 ## Fern rules
 - **Every multi-step change is crash-safe:** after a crash at any step, the disk shows what was under way (a marker file, a leftover copy beside the workspace, a snapshot without its row), and `Reconcile` finishes it or clears it on start. Every step is safe to repeat (idempotent).
 - **The disk is the truth; SQLite is the index.** On start, reconcile what exists with what the tables say.
-- **Per-turn work never touches the Kubernetes API.** Snapshots and execs in an awake box go to the node-local daemon only. Only a box's wake and stop (a sleep, or the stop in a restore) change its `Sandbox`.
+- **Per-turn work never touches the Kubernetes API.** Snapshots and execs in an awake box go to the node-local daemon only. A box's wake reads Claude's login Secret; with `--boxes=kubernetes`, a wake and a stop (a sleep, or the stop in a restore) change its `Sandbox`.
 - **Credentials never enter `live/`, golden or snapshots.**
 - **No API keys.** Agents are the real `claude` / `codex` CLIs with the user's own subscription.
 

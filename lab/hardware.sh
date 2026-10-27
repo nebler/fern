@@ -3,7 +3,7 @@
 hardware_uids() {
   HW_DAEMON=$(k -n fern-system get pod -l app.kubernetes.io/name=fern -o jsonpath='{.items[0].metadata.uid}')
   HW_T3=$(k -n fern-system get pod -l app.kubernetes.io/name=t3 -o jsonpath='{.items[0].metadata.uid}')
-  HW_CONTROLLER=$(k -n agent-sandbox-system get pods -o jsonpath='{.items[0].metadata.uid}')
+  HW_CONTROLLER=$(k -n agent-sandbox-system get pods -o jsonpath='{.items[*].metadata.uid}' 2>/dev/null | awk '{ print $1 }')
 }
 # Workload polling needs cgroups, not a census of platform processes.
 hardware_sample() {

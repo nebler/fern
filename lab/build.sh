@@ -21,14 +21,17 @@ lab_up || exit 0
 
 import_images "${images[@]/%/:dev}"
 install_cli
-# deploy/fern.yaml has Kubernetes run boxes; a lab switched to runsc
-# (lab/boxes.sh) is switched back after, its boxes asleep meanwhile, as the
-# daemon of one mode doesn't see the other's.
+# deploy/fern.yaml has the daemon run boxes with agent boxes; a lab switched
+# to another mode (lab/boxes.sh) is switched back after, its boxes asleep
+# meanwhile, as the daemon of one mode doesn't see the other's.
 runsc=no
 args=$(k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}' 2>/dev/null || true)
-if grep -q -- --boxes=runsc <<<"$args"; then
+if grep -q -- --boxes=kubernetes <<<"$args"; then
+  runsc=kubernetes
+elif grep -q -- --agent-boxes=false <<<"$args"; then
   runsc=runsc
-  grep -q -- --agent-boxes <<<"$args" && runsc=agents
+fi
+if [ "$runsc" != no ]; then
   fern ls | awk 'NR > 1 && $2 != "asleep" { print $1 }' | while read -r id; do fern sleep "$id" </dev/null >/dev/null; done
 fi
 k apply -f - <deploy/fern.yaml >/dev/null

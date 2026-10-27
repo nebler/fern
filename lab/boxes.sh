@@ -15,8 +15,9 @@ fern ls | awk 'NR > 1 && $2 != "asleep" { print $1 }' | while read -r id; do fer
 args=$(k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}')
 args=$(python3 -c 'import json,sys
 a = [x for x in json.loads(sys.argv[1]) if not x.startswith(("--boxes=", "--agent-boxes"))]
-a += {"runsc": ["--boxes=runsc"], "agents": ["--boxes=runsc", "--agent-boxes"]}.get(sys.argv[2], [])
+a += {"runsc": ["--agent-boxes=false"], "kubernetes": ["--boxes=kubernetes", "--agent-boxes=false"]}.get(sys.argv[2], [])
 print(json.dumps(a))' "$args" "$mode")
+if [ "$mode" = kubernetes ] && ! k get crd sandboxes.agents.x-k8s.io >/dev/null 2>&1; then install_sandbox; fi
 host=false dns=ClusterFirst
 [ "$mode" != kubernetes ] && host=true dns=ClusterFirstWithHostNet
 k -n fern-system patch ds fern --type=json -p "[

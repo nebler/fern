@@ -29,6 +29,9 @@ writes() {
 }
 pod_sample() {
   name=$1
+  # A pod that isn't there, such as agent-sandbox's controller when the
+  # daemon runs the boxes itself.
+  [ -n "$2" ] || return 0
   cg=$(cgroup "$2") || { echo "missing cgroup for $name" >&2; return 1; }
   echo "${name}_cpu_ms $(usage "$cg")"
   awk -v n="$name" '$1 == "throttled_usec" { printf "%s_throttled_ms %.3f\n", n, $2/1000 }' "$cg/cpu.stat"
