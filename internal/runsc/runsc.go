@@ -470,6 +470,9 @@ func (d *Driver) start(ctx context.Context, env store.Env, b box) error {
 	if err = os.WriteFile(filepath.Join(b.dir, "config.json"), data, 0o600); err != nil {
 		return err
 	}
+	if err = os.WriteFile(b.hosts(), []byte(hostsFile(env.ID)), 0o644); err != nil {
+		return err
+	}
 	// The box's stdio is create's: a file, as a pipe would stay open as
 	// long as the box runs.
 	log, err := os.OpenFile(filepath.Join(b.data, "log"), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)

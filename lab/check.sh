@@ -288,6 +288,8 @@ box() {
       "$(k -n fern-boxes get pod $ENV -o jsonpath='{.metadata.ownerReferences[0].kind}')"
   fi
   check "the root filesystem is read-only" no "$(succeeds fern exec $ENV -- touch /etc/x)"
+  # The C library's lookup, as Node's fetch makes it: curl knows localhost itself.
+  check "localhost is the loopback address" 127.0.0.1 "$(fern exec $ENV -- getent ahostsv4 localhost | awk 'NR == 1 { print $1 }')"
   check "the box writes to the pool" y "$(in_daemon "cat /var/lib/fern/envs/$ENV/live/inside")"
   check "a stray process runs" 1 "$(procs $ENV | grep -cx sleep || true)"
   local mounted=0

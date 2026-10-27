@@ -46,6 +46,14 @@ func newBox(bundles, pool, id string) box {
 	}
 }
 
+// hosts is the path of the box's /etc/hosts.
+func (b box) hosts() string { return filepath.Join(b.dir, "hosts") }
+
+// hostsFile is a box's /etc/hosts: loopback, and its own name.
+func hostsFile(id string) string {
+	return "127.0.0.1\tlocalhost\n::1\tlocalhost ip6-localhost ip6-loopback\n127.0.1.1\t" + id + "\n"
+}
+
 // netns is the path of the box's network namespace, where ip netns keeps
 // it: /var/run, which isn't /run everywhere (k3s's image).
 func (b box) netns() string { return "/var/run/netns/" + b.nsName() }

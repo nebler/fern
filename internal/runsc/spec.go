@@ -100,6 +100,8 @@ func boxSpec(env store.Env, b box, image, vars []string) spec {
 		{Destination: "/dev/shm", Type: "tmpfs", Source: "shm", Options: []string{"nosuid", "noexec", "nodev", "mode=1777", "size=65536k"}},
 		{Destination: "/sys", Type: "sysfs", Source: "sysfs", Options: []string{"nosuid", "noexec", "nodev", "ro"}},
 		{Destination: "/etc/resolv.conf", Type: "bind", Source: b.resolv, Options: []string{"rbind", "ro"}},
+		// As kubelet writes a pod's: without it, localhost goes to DNS.
+		{Destination: "/etc/hosts", Type: "bind", Source: b.hosts(), Options: []string{"rbind", "ro"}},
 		{Destination: "/tmp", Type: "bind", Source: b.tmp, Options: []string{"rbind", "rw"}},
 		{Destination: env.Workspace, Type: "bind", Source: env.Workspace, Options: []string{"rbind", "rw"}},
 	}

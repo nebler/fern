@@ -31,6 +31,7 @@ func TestBoxSpec(t *testing.T) {
 	s := boxSpec(env, b, []string{"PATH=/bin"}, boxVars(env, "w1", "login", false))
 	want := map[string]string{
 		"/etc/resolv.conf": "/run/boxes/resolv.conf rbind,ro",
+		"/etc/hosts":       "/run/boxes/demo/hosts rbind,ro",
 		"/tmp":             "/pool/boxes/demo/tmp rbind,rw",
 		env.Workspace:      env.Workspace + " rbind,rw",
 		env.Claude:         env.Claude + " rbind,rw",
