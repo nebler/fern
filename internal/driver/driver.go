@@ -455,7 +455,7 @@ func podEvents(ctx context.Context, w watch.Interface, done func(pod *corev1.Pod
 			}
 			pod = p
 		case watch.Deleted:
-		default: // an error ends the watch; Bookmark has no pod
+		case watch.Error, watch.Bookmark: // an error ends the watch; a bookmark has no pod
 			continue
 		}
 		if ok, err := done(pod); ok || err != nil {

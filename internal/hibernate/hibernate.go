@@ -49,8 +49,8 @@ func Run(ctx context.Context, exec Exec, req boxexec.Request, s boxexec.Streams,
 	if idle <= 0 || s.Stdin == nil || !Applies(req) {
 		return exec(ctx, req, s)
 	}
-	h := &hibernator{ctx: ctx, exec: exec, req: req, std: s, idle: idle, st: newStream()}
-	return h.run()
+	h := &hibernator{exec: exec, req: req, std: s, idle: idle, st: newStream()}
+	return h.run(ctx)
 }
 
 // Applies says whether req runs a Claude that Run can stop and resume
@@ -61,7 +61,6 @@ func Applies(req boxexec.Request) bool { return !req.TTY && isStreamingClaude(re
 // hibernator is one Run: Claude, and the processes standing in for it one
 // after another.
 type hibernator struct {
-	ctx  context.Context
 	exec Exec
 	req  boxexec.Request
 	std  boxexec.Streams
@@ -83,11 +82,11 @@ type result struct {
 	err  error
 }
 
-func (h *hibernator) run() (int, error) {
+func (h *hibernator) run(ctx context.Context) (int, error) {
 	done := make(chan struct{})
 	defer close(done)
 	lines := readLines(done, h.std.Stdin)
-	c := h.start(h.req)
+	c := h.start(ctx, h.req)
 	var (
 		waiting  [][]byte  // lines for the next Claude, read while one stopped
 		eof      bool      // the SDK's stdin has ended
@@ -121,7 +120,7 @@ func (h *hibernator) run() (int, error) {
 				continue
 			}
 			if c == nil {
-				c = h.restart()
+				c = h.restart(ctx)
 			}
 			h.send(c, line)
 		case sig := <-h.std.Signal:
@@ -141,7 +140,7 @@ func (h *hibernator) run() (int, error) {
 				code = 128 + int(syscall.SIGTERM)
 			}
 			if len(waiting) > 0 {
-				c = h.restart()
+				c = h.restart(ctx)
 				for _, line := range waiting {
 					h.send(c, line)
 				}
@@ -172,9 +171,9 @@ func (h *hibernator) run() (int, error) {
 }
 
 // start runs a Claude with req.
-func (h *hibernator) start(req boxexec.Request) *claude {
+func (h *hibernator) start(ctx context.Context, req boxexec.Request) *claude {
 	pr, pw := io.Pipe()
-	ctx, cancel := context.WithCancel(h.ctx)
+	ctx, cancel := context.WithCancel(ctx)
 	c := &claude{stdin: pw, sigs: make(chan os.Signal, 4), cancel: cancel, done: make(chan result, 1)}
 	out := &lineWriter{w: h.std.Stdout, keep: h.st.Out}
 	go func() {
@@ -191,11 +190,11 @@ func (h *hibernator) start(req boxexec.Request) *claude {
 }
 
 // restart starts Claude again in its session and sends it the setup.
-func (h *hibernator) restart() *claude {
+func (h *hibernator) restart(ctx context.Context) *claude {
 	argv, setup := h.st.restart(h.req.Argv)
 	req := h.req
 	req.Argv = argv
-	c := h.start(req)
+	c := h.start(ctx, req)
 	for _, line := range setup {
 		// A failed write means Claude has ended; its result says why.
 		_, _ = c.stdin.Write(line)
