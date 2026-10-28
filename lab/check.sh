@@ -203,7 +203,12 @@ restart_node() {
   if [ -n "$FERN_HOST" ]; then
     on_node systemctl reboot </dev/null || true
     sleep 15
-    until lab_up 2>/dev/null; do sleep 2; done
+    local i
+    for i in $(seq 150); do
+      lab_up 2>/dev/null && break
+      [ "$i" = 150 ] && { echo "the VPS isn't back 5 minutes after its reboot" >&2; return 1; }
+      sleep 2
+    done
   else
     docker restart "$LAB" >/dev/null
   fi

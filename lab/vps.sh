@@ -84,10 +84,14 @@ if ! mountpoint -q /var/lib/fern; then
     mkfs.btrfs -q /var/lib/fern-img/pool.img
   fi
   grep -q ' /var/lib/fern ' /etc/fstab ||
-    echo '/var/lib/fern-img/pool.img /var/lib/fern btrfs loop,noatime 0 0' >>/etc/fstab
+    echo '/var/lib/fern-img/pool.img /var/lib/fern btrfs loop,noatime,nofail 0 0' >>/etc/fstab
   mount /var/lib/fern
   echo "mounted the pool"
 fi
+
+# A pool that doesn't mount at boot must not stop the boot (emergency mode,
+# without SSH): Fern's units wait for it instead (RequiresMountsFor).
+sed -i -E 's#^(/var/lib/fern-img/pool.img /var/lib/fern btrfs )loop,noatime( |$)#\1loop,noatime,nofail\2#' /etc/fstab
 
 # gVisor mirrors all of a box's memory mappings into one host process; at
 # the kernel's default limit, large builds (Node, JVM) segfault.
