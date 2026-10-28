@@ -105,8 +105,25 @@ COPY --from=go /out/fern /usr/local/bin/fern
 # the environment's box, or the real one outside environments.
 COPY images/fern-claude /usr/local/bin/claude
 COPY --from=claude /claude /usr/local/libexec/claude
+COPY images/t3-settings.js /opt/fern/t3-settings.js
+# Where fern-t3.service binds the pool and the daemon's socket.
+RUN mkdir -p /var/lib/fern /run/fern
 # node's image has uid 1000 as "node"; Claude refuses full access as root.
 USER 1000:1000
 ENV DISABLE_AUTOUPDATER=1
 ENTRYPOINT ["node", "/opt/t3/apps/server/dist/bin.mjs"]
 CMD ["serve"]
+
+# The local lab's node (lab/up.sh): Debian with systemd as PID 1, as a VPS
+# runs Fern, and what the daemon runs on its node: btrfs-progs, iproute2 and
+# nftables. gVisor is installed at every start, from the lab's volume.
+FROM debian:trixie AS lab-node
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends systemd systemd-sysv dbus btrfs-progs iproute2 nftables \
+      ca-certificates curl procps psmisc util-linux kmod less python3 \
+ && rm -rf /var/lib/apt/lists/* \
+ && systemctl mask getty.target systemd-firstboot.service systemd-logind.service console-getty.service \
+      systemd-networkd-wait-online.service
+COPY images/lab-node-start /usr/local/sbin/lab-node-start
+STOPSIGNAL SIGRTMIN+3
+ENTRYPOINT ["/usr/local/sbin/lab-node-start"]

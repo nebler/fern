@@ -1,0 +1,40 @@
+# T3 Code's server on a Fern node, run from its image's root (fern image
+# load fern-t3:dev) as the box user, which owns T3's folders in the pool.
+# It reaches the daemon at /run/fern/fern.sock, serves on port 30773 (the
+# port it had as a NodePort, which the lab's scripts and tunnels use), and
+# gets Claude's login from /etc/fern/claude.env for the Claude it runs
+# outside environments.
+[Unit]
+Description=T3 Code's server, on Fern
+After=fern-daemon.service
+Wants=fern-daemon.service
+RequiresMountsFor=/var/lib/fern
+
+[Service]
+User=1000
+Group=1000
+RootDirectory=/var/lib/fern/images/fern-t3:dev/root
+BindPaths=/var/lib/fern /run/fern
+BindReadOnlyPaths=/etc/resolv.conf /etc/hosts
+# The image's root is read-only for it; T3 writes only to the pool.
+ProtectSystem=strict
+ReadWritePaths=/var/lib/fern /run/fern
+PrivateTmp=yes
+WorkingDirectory=/opt/t3
+# Its home is the pool, so its worktrees (<home>/worktrees) are where Fern
+# expects workspaces; FERN_POOL is the checkpoint hook's.
+Environment=HOME=/home/node T3CODE_HOME=/var/lib/fern FERN_POOL=/var/lib/fern FERN_TIMING=1 DISABLE_AUTOUPDATER=1
+EnvironmentFile=-/etc/fern/claude.env
+# T3's folders in the pool, owned by its user (on the node: + runs it
+# outside the image), then Fern's defaults for its settings.
+ExecStartPre=+/usr/bin/install -d -o 1000 -g 1000 /var/lib/fern/userdata /var/lib/fern/caches \
+  /var/lib/fern/tools /var/lib/fern/repos /var/lib/fern/worktrees
+ExecStartPre=/usr/local/bin/node /opt/fern/t3-settings.js
+ExecStart=/usr/local/bin/node /opt/t3/apps/server/dist/bin.mjs serve --host=0.0.0.0 --port=30773
+Restart=always
+RestartSec=1
+# Its disk writes, which lab/perf.sh measures, as a pod's were.
+IOAccounting=yes
+
+[Install]
+WantedBy=multi-user.target

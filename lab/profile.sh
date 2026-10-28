@@ -2,7 +2,7 @@
 # Shows where an operation's time and CPU go, as flamegraphs and traces:
 #
 #   lab/profile.sh on            turn tracing on: Jaeger, and traces from the
-#                                daemon and kubelet (k3s restarts)
+#                                daemon (it restarts; its boxes keep running)
 #   lab/profile.sh run OP [N]    profile OP (wake, sleep, restore, snapshot,
 #                                exec) N times (default 10)
 #   lab/profile.sh diff A B      what changed from profile A to profile B
@@ -13,10 +13,11 @@
 # process, the steps' times, the median operation's timeline), oncpu.svg and
 # offcpu.svg (the whole node, kernel included: what ran, and what waited for
 # what), their .folded stacks, the daemon's Go CPU profile (daemon.pprof,
-# for "go tool pprof") and Jaeger's traces. k3s's containerd is built
-# without tracing; kubelet's spans time each of its calls to it, and the
-# flamegraphs show its CPU and runsc's. Flamegraphs need perf, which "on"
-# installs on the VPS; the local lab has traces and the daemon's profile.
+# for "go tool pprof") and Jaeger's traces. The flamegraphs show runsc's
+# CPU too. They need perf, which "on" installs on the VPS; the local lab
+# has traces and the daemon's profile. Jaeger runs on the node as the
+# transient unit fern-jaeger, from its image loaded into the pool, with its
+# traces in memory.
 # Tracing slows what it watches a little, so lab/perf.sh refuses to run
 # while it is on.
 set -euo pipefail
@@ -42,90 +43,51 @@ flamegraph() {
 send() { on_node sh -c "mkdir -p '$(dirname "$2")' && cat >'$2'" <"$1"; }
 
 # daemon_get fetches path $1 from the daemon's metrics port.
-daemon_get() {
-  local pod
-  pod=$(k -n fern-system get pod -l app.kubernetes.io/name=fern -o jsonpath='{.items[0].metadata.name}')
-  k get --raw "/api/v1/namespaces/fern-system/pods/$pod:9090/proxy$1"
-}
-
-tracing_on() { k -n fern-system get deploy/jaeger >/dev/null 2>&1; }
+daemon_get() { on_node curl -sf "http://127.0.0.1:9090$1" </dev/null; }
 
 # rfc3339 prints Unix time $1 as Jaeger's queries take it.
 rfc3339() { date -u -r "$1" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -d "@$1" +%Y-%m-%dT%H:%M:%SZ; }
 
-# trace_arg prints the index of the daemon's -trace-endpoint argument, if it
-# has one. The daemon is the DaemonSet's first container.
-trace_arg() {
-  k -n fern-system get ds/fern -o jsonpath='{.spec.template.spec.containers[0].args}' |
-    tr -d '[]"' | tr ',' '\n' | awk '/^-trace-endpoint=/ {print NR - 1}'
-}
+JAEGER=jaegertracing/jaeger:2.22.0
 
-KUBELET_TRACING=/var/lib/rancher/k3s/agent/etc/kubelet.conf.d/50-fern-tracing.conf
+# traced says whether the daemon sends its spans to Jaeger.
+traced() { daemon_args | grep -q -- --trace-endpoint=; }
 
 on() {
-  k apply -f - <lab/profile/jaeger.yaml >/dev/null
-  k -n fern-system rollout status deploy/jaeger --timeout=180s >/dev/null
+  docker image inspect "$JAEGER" >/dev/null 2>&1 || docker pull -q "$JAEGER" >/dev/null
+  load_images "$JAEGER"
+  if ! tracing_on; then
+    on_node systemd-run -q --unit=fern-jaeger -p "RootDirectory=/var/lib/fern/images/${JAEGER//\//_}/root" \
+      -p User=10001 -p MemoryMax=512M -p Environment=JAEGER_LISTEN_HOST=0.0.0.0 /cmd/jaeger/jaeger-linux </dev/null
+  fi
   daemon_tracing
   if [ -n "$FERN_HOST" ]; then
-    # kubelet traces too, which needs k3s to restart; its boxes keep
-    # running. perf records the node for the flamegraphs.
+    # perf records the node for the flamegraphs.
     on_node sh -c "command -v perf >/dev/null || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq linux-tools-\$(uname -r) linux-tools-common >/dev/null"
-    on_node sh -c "cat >$KUBELET_TRACING" <<'EOF'
-apiVersion: kubelet.config.k8s.io/v1beta1
-kind: KubeletConfiguration
-tracing:
-  endpoint: localhost:4317
-  samplingRatePerMillion: 1000000
-EOF
-    restart_k3s
-  else
-    echo "profile: the local lab traces the daemon only: kubelet needs a restart of its node" >&2
   fi
   echo "profile: tracing is on; lab/profile.sh off turns it off"
 }
 
 off() {
-  k -n fern-system delete deploy/jaeger --ignore-not-found >/dev/null
-  if [ -n "$FERN_HOST" ]; then
-    on_node rm -f $KUBELET_TRACING
-    restart_k3s
+  on_node systemctl stop fern-jaeger </dev/null 2>/dev/null || true
+  if traced; then
+    # shellcheck disable=SC2046 # the arguments are words
+    set_daemon_args $(daemon_args | tr ' ' '\n' | grep -v -- '^--trace-endpoint=')
   fi
-  local i
-  i=$(trace_arg)
-  if [ -n "$i" ]; then
-    k -n fern-system patch ds/fern --type=json \
-      -p "[{\"op\":\"remove\",\"path\":\"/spec/template/spec/containers/0/args/$i\"}]" >/dev/null
-  fi
-  k -n fern-system rollout status ds/fern --timeout=180s >/dev/null
   echo "profile: tracing is off"
 }
 
-# daemon_tracing makes the daemon send its spans to Jaeger, at its node's
-# address (HOST_IP).
+# daemon_tracing makes the daemon send its spans to Jaeger, on its node.
 daemon_tracing() {
-  if [ -z "$(trace_arg)" ]; then
-    # shellcheck disable=SC2016 # $(HOST_IP) is Kubernetes's to expand
-    k -n fern-system patch ds/fern --type=json \
-      -p '[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"-trace-endpoint=http://$(HOST_IP):4318"}]' >/dev/null
-  fi
-  k -n fern-system rollout status ds/fern --timeout=180s >/dev/null
-}
-
-restart_k3s() {
-  on_node systemctl restart k3s
-  for _ in $(seq 60); do
-    k get --raw /readyz >/dev/null 2>&1 && break
-    sleep 2
-  done
-  k wait --for=condition=Ready node --all --timeout=120s >/dev/null
+  # shellcheck disable=SC2046 # the arguments are words
+  traced || set_daemon_args $(daemon_args) --trace-endpoint=http://127.0.0.1:4318
 }
 
 run() {
   local op=$1 n=${2:-10} out
   case $op in wake | sleep | restore | snapshot | exec) ;; *) echo "profile: unknown operation $op" >&2 && exit 2 ;; esac
   lab_lock
-  # lab/build.sh puts the daemon back as deploy/fern.yaml has it, untraced.
-  if tracing_on && [ -z "$(trace_arg)" ]; then daemon_tracing; fi
+  if tracing_on; then daemon_tracing; fi
   out=lab/profiles/$(date -u +%Y%m%dT%H%M%SZ)-${FERN_HOST:-local}-$op
   mkdir -p "$out"
   fern rm $ENV_ID 2>/dev/null || true
@@ -206,7 +168,7 @@ run() {
     # Spans arrive in batches, every few seconds.
     sleep 6
     local query
-    for service in fern-daemon kubelet; do
+    for service in fern-daemon; do
       query="query.service_name=$service&query.start_time_min=$(rfc3339 $((from - 5)))&query.start_time_max=$(rfc3339 $((to + 5)))&query.num_traces=5000"
       on_node sh -c "curl -fsS 'http://localhost:16686/api/v3/traces?$query' 2>/dev/null ||
         wget -qO- 'http://localhost:16686/api/v3/traces?$query'" >"$out/traces-$service.json" 2>/dev/null || true
@@ -259,8 +221,8 @@ ui() {
     echo "Jaeger: http://localhost:16686 (Ctrl-C ends the tunnel)"
     exec "${SSH[@]}" -N -L 16686:127.0.0.1:16686 "root@$FERN_HOST"
   fi
-  echo "Jaeger: http://localhost:16686 (Ctrl-C ends it)"
-  exec docker exec -i "$LAB" kubectl -n fern-system port-forward deploy/jaeger 16686:16686 --address 0.0.0.0
+  # lab/up.sh publishes the lab node's port 16686 on this Mac.
+  echo "Jaeger: http://localhost:16686"
 }
 
 case ${1:-} in

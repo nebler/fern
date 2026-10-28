@@ -1,5 +1,5 @@
-# Only the Go sources, the fern-claude wrapper and the T3 patch go into image
-# builds.
+# Only the Go sources, the fern-claude wrapper, T3's patches and settings
+# script, and the lab node's entrypoint go into image builds.
 *
 !go.mod
 !go.sum
@@ -7,3 +7,5 @@
 !internal
 !images/fern-claude
 !images/t3
+!images/t3-settings.js
+!images/lab-node-start

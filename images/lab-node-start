@@ -1,0 +1,11 @@
+#!/bin/sh
+# The lab node's entrypoint: the pool, gVisor and the kernel's settings,
+# then systemd, which starts Fern's units (lab/up.sh).
+set -e
+mkdir -p /var/lib/fern
+mountpoint -q /var/lib/fern || mount -o loop,noatime /var/lib/fern-img/pool.img /var/lib/fern
+cp -r /var/lib/fern-img/gvisor/bin/. /usr/local/bin/
+# gVisor mirrors all of a box's memory mappings into one host process; at
+# the kernel's default map count, large builds segfault.
+sysctl -qw vm.max_map_count=4194304
+exec /sbin/init

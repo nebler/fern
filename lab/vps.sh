@@ -1,26 +1,51 @@
 #!/usr/bin/env bash
 # Sets up a VPS as a Fern node, as root over SSH from the Mac: the btrfs pool,
-# k3s with deploy/k3s-config.yaml, gVisor, then
-# Fern and T3 from images built here. Run it again to update; every step
-# skips what is done. Then the lab's scripts work on it with FERN_HOST set:
+# gVisor, a firewall, then Fern and T3 as systemd services (deploy/systemd)
+# from images built here. Run it again to update; every step skips what is
+# done. Then the lab's scripts work on it with FERN_HOST set:
 #   FERN_HOST=1.2.3.4 lab/check.sh
 # Needs Ubuntu, the Mac's CPU architecture (the images are built here) and a
-# firewall in front that lets in only SSH: T3's NodePort must not be public.
+# firewall in front that lets in only SSH: T3's port must not be public.
+#
+# A VPS set up with k3s before (docs/briefs/fern-without-kubernetes.md)
+# moves over: Claude's login from its Secret to /etc/fern/claude.env, boxes
+# put to sleep, then k3s removed. The pool stays.
 set -euo pipefail
 export FERN_HOST=${1:?usage: lab/vps.sh HOST}
 source "$(dirname "$0")/lib.sh"
 lab_lock
 
-on_node mkdir -p /etc/rancher/k3s </dev/null
-on_node tee /etc/rancher/k3s/config.yaml <deploy/k3s-config.yaml >/dev/null
-on_node env K3S_VERSION="$K3S_VERSION" GVISOR_RELEASE="$GVISOR_RELEASE" bash -s <<'NODE'
+on_node env GVISOR_RELEASE="$GVISOR_RELEASE" bash -s <<'NODE'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-{ command -v mkfs.btrfs && command -v bzip2; } >/dev/null || { apt-get update -qq && apt-get install -yqq btrfs-progs bzip2 >/dev/null; }
+{ command -v mkfs.btrfs && command -v bzip2 && command -v nft && command -v nsenter; } >/dev/null ||
+  { apt-get update -qq && apt-get install -yqq btrfs-progs bzip2 nftables iproute2 util-linux curl >/dev/null; }
 
-# The firewall: from the public interface, only SSH may open a connection.
-# It hooks in before Kubernetes' NAT, which would otherwise pass NodePorts
-# (T3) by, and loads at boot before k3s. A firewall in front is still wise.
+# From k3s: Claude's login moves to the file the daemon and T3 read, on the
+# node only; boxes sleep, so their services stop cleanly; then k3s goes,
+# and the image mounts containerd made in the pool.
+if command -v k3s >/dev/null; then
+  mkdir -p /etc/fern
+  token=$(k3s kubectl -n fern-boxes get secret claude-login -o jsonpath='{.data.token}' 2>/dev/null | base64 -d || true)
+  if [ -n "$token" ] && [ ! -s /etc/fern/claude.env ]; then
+    (umask 077 && printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' "$token" >/etc/fern/claude.env)
+    echo "moved Claude's login to /etc/fern/claude.env"
+  fi
+  unset token
+  if [ -x /usr/local/bin/fern-cli ]; then
+    fern-cli ls 2>/dev/null | awk 'NR > 1 && $2 != "asleep" { print $1 }' | while read -r id; do fern-cli sleep "$id" </dev/null >/dev/null; done
+  fi
+  /usr/local/bin/k3s-uninstall.sh >/dev/null 2>&1
+  rm -rf /etc/systemd/system/k3s.service.d /usr/local/bin/fern-cli /var/lib/fern-images
+  for m in /var/lib/fern/images/*; do
+    if mountpoint -q "$m"; then umount "$m" && rmdir "$m"; fi
+  done
+  echo "removed k3s"
+fi
+
+# The firewall: from the public interface, only SSH may open a connection,
+# T3's port included. It loads at boot before Fern. A firewall in front is
+# still wise.
 public=$(ip route show default | awk '{ print $5; exit }')
 mkdir -p /etc/fern
 cat >/etc/fern/firewall.nft <<NFT
@@ -37,7 +62,7 @@ NFT
 cat >/etc/systemd/system/fern-firewall.service <<'UNIT'
 [Unit]
 Description=Fern's firewall: only SSH from outside
-Before=k3s.service network-pre.target
+Before=fern-daemon.service fern-t3.service network-pre.target
 Wants=network-pre.target
 [Service]
 Type=oneshot
@@ -51,7 +76,7 @@ systemctl enable -q fern-firewall
 systemctl restart fern-firewall
 
 # The pool: a sparse image file on the server's own disk, which is faster
-# than a network volume. fstab mounts it at boot; k3s waits for it.
+# than a network volume. fstab mounts it at boot; Fern's units wait for it.
 if ! mountpoint -q /var/lib/fern; then
   mkdir -p /var/lib/fern-img /var/lib/fern
   if [ ! -f /var/lib/fern-img/pool.img ]; then
@@ -63,8 +88,6 @@ if ! mountpoint -q /var/lib/fern; then
   mount /var/lib/fern
   echo "mounted the pool"
 fi
-mkdir -p /etc/systemd/system/k3s.service.d
-printf '[Unit]\nRequiresMountsFor=/var/lib/fern\n' >/etc/systemd/system/k3s.service.d/fern.conf
 
 # gVisor mirrors all of a box's memory mappings into one host process; at
 # the kernel's default limit, large builds (Node, JVM) segfault.
@@ -81,28 +104,9 @@ if ! { /usr/local/bin/runsc --version 2>/dev/null | grep -q "release-$GVISOR_REL
   rm -rf "$tmp"
   echo "installed gVisor $GVISOR_RELEASE"
 fi
-# Before k3s starts, so its containerd has the runtime from the start.
-d=/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d
-mkdir -p $d
-printf '%s\n' "[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc]" \
-  '  runtime_type = "io.containerd.runsc.v1"' >$d/runsc.toml
-
-if ! k3s --version 2>/dev/null | grep -qF "$K3S_VERSION"; then
-  curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="$K3S_VERSION" sh - >/dev/null
-  echo "installed k3s $K3S_VERSION"
-fi
-systemctl daemon-reload
-for _ in $(seq 120); do
-  kubectl get nodes 2>/dev/null | grep -q ' Ready' && break
-  sleep 1
-done
-kubectl get nodes
 NODE
 
-# Boxes are the daemon's own (runsc); lab/boxes.sh kubernetes installs the
-# agent-sandbox controller when pods should run them instead.
-
-# The pods' first start comes with the images: build.sh imports them, applies
-# deploy/ and restarts.
+# The services' first start comes with the images: build.sh loads them,
+# installs the units and starts them.
 lab/build.sh t3
 echo "$FERN_HOST is up"

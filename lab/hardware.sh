@@ -1,27 +1,27 @@
 # shellcheck shell=bash
 # Host-side helpers. Source after lib.sh (check.sh and t3-run.sh).
+# hardware_uids names the cgroups of the daemon's and T3's services, which
+# the sampler reads.
 hardware_uids() {
-  HW_DAEMON=$(k -n fern-system get pod -l app.kubernetes.io/name=fern -o jsonpath='{.items[0].metadata.uid}')
-  HW_T3=$(k -n fern-system get pod -l app.kubernetes.io/name=t3 -o jsonpath='{.items[0].metadata.uid}')
-  HW_CONTROLLER=$(k -n agent-sandbox-system get pods -o jsonpath='{.items[*].metadata.uid}' 2>/dev/null | awk '{ print $1 }')
+  HW_DAEMON=unit:fern-daemon.service HW_T3=
+  if t3_installed; then HW_T3=unit:fern-t3.service; fi
 }
 # Workload polling needs cgroups, not a census of platform processes.
 hardware_sample() {
   local mode=sample
   if [ "${1:-}" = --counters ]; then mode=counters; shift; fi
-  on_node sh -s -- "$mode" "$HW_DAEMON" "$HW_T3" "$HW_CONTROLLER" "$@" <lab/hardware-node.sh |
+  on_node sh -s -- "$mode" "$HW_DAEMON" "$HW_T3" "$@" <lab/hardware-node.sh |
     awk '{v[$1]+=$2} END {for(k in v) printf "%s %.3f\n",k,v[k]}' || {
       echo "FAIL hardware sample" >&2
       return 1
     }
 }
 # resource_op preserves the CLI's output and adds metrics for its node-local
-# interval. No SSH/kubectl round trip is inside that interval.
+# interval. No SSH round trip is inside that interval.
 resource_op() {
   local key=$1 out name value
   shift
-  [ -n "${HW_DAEMON:-}" ] || HW_DAEMON=$(k -n fern-system get pod -l app.kubernetes.io/name=fern -o jsonpath='{.items[0].metadata.uid}')
-  out=$(on_node sh -s -- op "$HW_DAEMON" "$FERN_CLI" "$@" <lab/hardware-node.sh) || { echo "FAIL $key resource operation" >&2; return 1; }
+  out=$(on_node sh -s -- op unit:fern-daemon.service "$FERN_CLI" "$@" <lab/hardware-node.sh) || { echo "FAIL $key resource operation" >&2; return 1; }
   while read -r _ name value; do
     metric "$key.$name" "$key $name" "$value" >&2
   done < <(sed -n '/^RESOURCE /p' <<<"$out")
@@ -40,7 +40,7 @@ resource_op() {
   sed '/^RESOURCE /d' <<<"$out"
 }
 # resource_rates uses real elapsed time to normalize a short idle window to
-# CPU-ms/minute. Cumulative counters stay in their cgroups, not in a pod exec.
+# CPU-ms/minute. Cumulative counters stay in their cgroups.
 resource_rates() {
   local key=$1 before=$2 after=$3 boxes=${4:-1}
   awk -v key="$key" -v boxes="$boxes" '

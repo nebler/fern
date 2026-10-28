@@ -20,6 +20,10 @@
 //	                                         with nothing to do, so its box sleeps, and
 //	                                         resume it at the next message (fern-claude)
 //	fern sleep <env> | fern wake <env>       stop or start the box
+//	fern prebuild <repo>                     build repo's golden snapshot from a tar
+//	                                         stream of its checkout on stdin
+//	fern image load                          unpack the images of a docker save stream
+//	                                         on stdin into the pool, as root on the node
 package main
 
 import (
@@ -43,11 +47,15 @@ import (
 	"github.com/nebler/fern/internal/api"
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/hibernate"
+	"github.com/nebler/fern/internal/image"
 )
 
 // socket is in a directory of its own, so pods can share it through a
 // hostPath.
 const socket = "/run/fern/fern.sock"
+
+// images is where the daemon finds the box image and systemd T3's.
+const images = "/var/lib/fern/images"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "daemon" {
@@ -127,6 +135,7 @@ func subcommands() []subcommand {
 			fs.BoolVar(&c.seed, "seed", false, "fill the workspace from a tar stream on stdin")
 		}},
 		{name: "prebuild", min: 1, max: 1, run: prebuild},
+		{name: "image", min: 1, max: 1, run: loadImages},
 		{name: "ls", run: list},
 		{name: "which", min: 1, max: 1, run: which},
 		{name: "rm", min: 1, max: 1, run: remove},
@@ -253,6 +262,25 @@ func create(ctx context.Context, c command, cl *api.Client, std stdio) (int, err
 // into its golden snapshot: git archive HEAD | fern prebuild REPO.
 func prebuild(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
 	return 0, cl.Prebuild(ctx, c.args[0], std.in)
+}
+
+// loadImages unpacks the images of a docker save stream on stdin into the
+// pool: fern image load. It works on the node's disk, not through the
+// daemon, which needs the box image to start.
+func loadImages(ctx context.Context, c command, _ *api.Client, std stdio) (int, error) {
+	if c.args[0] != "load" {
+		return 2, fmt.Errorf("unknown command %q: want load", c.args[0])
+	}
+	imgs, err := image.Load(ctx, std.in, images)
+	if err != nil {
+		return 0, err
+	}
+	for _, img := range imgs {
+		if _, err := fmt.Fprintf(std.out, "loaded image %.12s\n", img.ID); err != nil {
+			return 0, err
+		}
+	}
+	return 0, nil
 }
 
 func list(ctx context.Context, _ command, cl *api.Client, std stdio) (int, error) {

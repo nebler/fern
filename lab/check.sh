@@ -3,8 +3,7 @@
 #   slice        the whole disk, database included, is snapshotted and restored,
 #                and a restore can be undone
 #   box          a box runs under gVisor and keeps no state of its own: only
-#                its workspace survives a sleep, and a force-deleted pod
-#                comes back
+#                its workspace survives a sleep, and a killed box comes back
 #   disk         DISK_HARDWARE=1 adds CPU/I/O profiling (all, not perf default)
 #                a 100,000-file workspace: snapshot, restore (equal to its
 #                snapshot) and rm (nothing left); a seeded create; a real clone
@@ -19,7 +18,7 @@
 #                shortened for the section; a running command keeps it awake
 #   daemon       the daemon restarts while a box is awake, and finishes an rm
 #                whose client went away
-#   node         the whole node (k3s) restarts
+#   node         the whole node restarts (the lab's container; a VPS reboots)
 #   many         ten environments woken at once
 #   scale        awake boxes ramped up, 1, 5, 10, then 20 (SCALE): at each
 #                step the new boxes' wakes, memory per box and the daemon's,
@@ -28,8 +27,7 @@
 #   hardware     idle CPU with/without Postgres, platform overhead, pool data
 #   stability    50 wake/sleep cycles and retained memory/FDs (all, not quick)
 #   limits       what a box can't do: gain privileges, use more than its CPU
-#                and PIDs, reach another box or anything private; and another
-#                pod can't mount an environment
+#                and PIDs, reach another box, the node or anything private
 #   paths        workspaces at a path, as T3's worktrees: adopt, which,
 #                exec --here, snapshot replace and delete
 #   golden       a new worktree's checkout is built into a golden snapshot,
@@ -107,11 +105,7 @@ stats() {
       print "" }'
 }
 # metrics prints the daemon's Prometheus metrics.
-metrics() {
-  local pod
-  pod=$(k -n fern-system get pod -l app.kubernetes.io/name=fern -o jsonpath='{.items[0].metadata.name}')
-  k get --raw "/api/v1/namespaces/fern-system/pods/$pod:9090/proxy/metrics"
-}
+metrics() { on_node curl -sf http://127.0.0.1:9090/metrics </dev/null; }
 # api_requests_since prints how many Kubernetes API requests the daemon made,
 # by the metrics on stdin, since the metrics in file $1 were read, divided
 # by $2.
@@ -155,29 +149,20 @@ asleep_within() {
   done
   echo "$s"
 }
-# pod_cgroup prints file $2 of pod $1's cgroup on the node, which kubelet
-# sets and the box can't see. Its name depends on the cgroup driver:
-# pod<uid> in the lab, ...-pod<uid with _>.slice under systemd.
+# pod_cgroup prints file $2 of environment $1's box's cgroup on the node,
+# which the daemon sets and the box can't see.
 pod_cgroup() {
   pod_cgroups "$2" "$(pod_uid "$1")"
 }
-# pod_cgroups reads file $1 for the pod UIDs that follow, in one node call.
+# pod_cgroups reads file $1 for the boxes (box_uid) that follow, in one node
+# call.
 pod_cgroups() {
   on_node sh -s -- "$@" <<'NODE'
 file=$1
 shift
 for uid do
-  slice=$(printf %s "$uid" | tr - _)
-  found=
   box=${uid#runsc-}
-  for dir in /sys/fs/cgroup/fern/"${box%@*}" /sys/fs/cgroup/kubepods*/pod"$uid" /sys/fs/cgroup/kubepods*/*/pod"$uid" \
-    /sys/fs/cgroup/kubepods*/*/*pod"$slice".slice /sys/fs/cgroup/kubepods*/*pod"$slice".slice; do
-    [ -r "$dir/$file" ] || continue
-    cat "$dir/$file" || exit 1
-    found=yes
-    break
-  done
-  [ -n "$found" ] || exit 1
+  cat "/sys/fs/cgroup/fern/${box%@*}/$file" || exit 1
 done
 NODE
 }
@@ -191,53 +176,37 @@ node_used() {
 # golden_id prints the ID of the environment that builds repo $1's golden
 # snapshots (setup.ID), for a name of lowercase letters, digits and dashes.
 golden_id() { echo "golden-$1-$(printf %s "$1" | shasum -a 256 | cut -c1-8)"; }
-# in_daemon runs a shell command in the daemon container, which sees the pool.
-in_daemon() { k -n fern-system exec -i ds/fern -c fern -- sh -c "$1"; }
+# in_daemon runs a shell command on the node, where the daemon runs and
+# sees the pool.
+in_daemon() { on_node sh -c "$1"; }
 # pod_uid prints what identifies environment $1's running box (box_uid).
 pod_uid() { box_uid "$1"; }
-# kill_box kills environment $1's box as a crash would: its pod deleted at
-# once, or its sandbox killed.
+# kill_box kills environment $1's box as a crash would: its sandbox killed.
 kill_box() {
-  if [ "${RUNSC:-0}" = 1 ]; then
-    local pid
-    pid=$(pod_uid "$1")
-    on_node kill -KILL "${pid#*@}" </dev/null >/dev/null 2>&1
-  else
-    k -n fern-boxes delete pod "$1" --force --grace-period=0 >/dev/null 2>&1
-  fi
+  local pid
+  pid=$(pod_uid "$1")
+  on_node kill -KILL "${pid#*@}" </dev/null >/dev/null 2>&1
 }
 # box_ip prints environment $1's box's address.
 box_ip() {
-  if [ "${RUNSC:-0}" = 1 ]; then
-    in_daemon "cat /run/fern/boxes/$1/net" | awk '{ n = $1 * 4 + 2; printf "10.89.%d.%d\n", int(n / 256), n % 256 }'
-  else
-    k -n fern-boxes get pod "$1" -o jsonpath='{.status.podIP}'
-  fi
+  in_daemon "cat /run/fern/boxes/$1/net" | awk '{ n = $1 * 4 + 2; printf "10.89.%d.%d\n", int(n / 256), n % 256 }'
 }
 # box_uids prints the boxes' identities (pod_uid) of the environments named
 # $1 followed by a number up to $2.
 box_uids() {
-  if [ "${RUNSC:-0}" = 1 ]; then
-    local i
-    for i in $(seq "$2"); do pod_uid "$1$i"; done | tr '\n' ' '
-  else
-    k -n fern-boxes get pods -o jsonpath='{range .items[*]}{.metadata.name}{" "}{.metadata.uid}{"\n"}{end}' |
-      awk -v p="$1" -v n="$2" 'index($1, p) == 1 && substr($1, length(p) + 1) ~ /^[0-9]+$/ && substr($1, length(p) + 1) + 0 <= n { printf "%s ", $2 }'
-  fi
+  local i
+  for i in $(seq "$2"); do pod_uid "$1$i"; done | tr '\n' ' '
 }
-# wait_daemon waits until the daemon answers.
-wait_daemon() {
-  k -n fern-system rollout status ds/fern --timeout=300s >/dev/null
-  until fern ls >/dev/null 2>&1; do sleep 1; done
-}
-# restart_node restarts k3s, and with it every pod.
+# restart_node restarts the node, and with it every box: the lab's
+# container, or a VPS's machine.
 restart_node() {
   if [ -n "$FERN_HOST" ]; then
-    on_node sh -c 'k3s-killall.sh >/dev/null 2>&1; systemctl start k3s' </dev/null
+    on_node systemctl reboot </dev/null || true
+    sleep 15
+    until lab_up 2>/dev/null; do sleep 2; done
   else
     docker restart "$LAB" >/dev/null
   fi
-  until k get nodes 2>/dev/null | grep -q ' Ready'; do sleep 1; done
   wait_daemon
 }
 
@@ -262,14 +231,8 @@ slice() {
   check "rm removes it" "" "$(state $ENV)"
 }
 
-# mounts prints how often an environment's workspace is mounted on the node.
-# mounts counts environment $1's box's mounts on the node: its workspace's
-# (CSI) or, with runsc boxes, its root's.
-mounts() {
-  local what="/envs/$1/live "
-  [ "${RUNSC:-0}" = 1 ] && what="/boxes/$1/rootfs "
-  on_node grep -c "$what" /proc/self/mountinfo </dev/null || true
-}
+# mounts counts environment $1's box's mounts on the node: its root's.
+mounts() { on_node grep -c "/boxes/$1/rootfs " /proc/self/mountinfo </dev/null || true; }
 # procs prints the names of the processes in an environment's box.
 procs() { fern exec "$1" -- sh -c 'cat /proc/[0-9]*/comm 2>/dev/null; true' | sort -u; }
 
@@ -281,12 +244,7 @@ box() {
   # child leave the group before the exec ends and the group is killed.
   fern exec $ENV -- sh -c 'echo x > /tmp/outside && echo y > inside && setsid -f sleep 1000 >/dev/null 2>&1 && sleep 0.5'
   check "the box runs under gVisor" "Starting gVisor..." "$(fern exec $ENV -- dmesg | head -1 | cut -c16-)"
-  if [ "${RUNSC:-0}" = 1 ]; then
-    check "the daemon runs the box with runsc" yes "$([ -n "$(pod_uid $ENV)" ] && echo yes || echo no)"
-  else
-    check "the pod belongs to its Sandbox" Sandbox \
-      "$(k -n fern-boxes get pod $ENV -o jsonpath='{.metadata.ownerReferences[0].kind}')"
-  fi
+  check "the daemon runs the box with runsc" yes "$([ -n "$(pod_uid $ENV)" ] && echo yes || echo no)"
   check "the root filesystem is read-only" no "$(succeeds fern exec $ENV -- touch /etc/x)"
   # The C library's lookup, as Node's fetch makes it: curl knows localhost itself.
   check "localhost is the loopback address" 127.0.0.1 "$(fern exec $ENV -- getent ahostsv4 localhost | awk 'NR == 1 { print $1 }')"
@@ -341,24 +299,16 @@ box() {
   metric box.asleep_exec_ms "a command to an asleep box, ms" "$(stats <"$TMP/asleep")"
   check "every pre-wake was used by its command" "$PREWAKES" "$(metrics | counter_since "$TMP/metrics" 'fern_prewakes_total{result="used"}')"
   sql $ENV "insert into users (name, email) values ('Barbara', 'barbara@example.com')" >/dev/null
-  local old users="" uid
-  old=$(pod_uid $ENV)
+  local users=""
   start=$(now_ms)
   kill_box $ENV
-  # The deleted pod's box can answer for a moment after the delete (its
-  # sandbox is still stopping), and a command sent while the pod is being
-  # replaced can fail; it isn't retried, as it may have run. So the
-  # commands start once the new pod exists. A box the daemon runs comes
-  # back with the next command, which finds the old one gone.
+  # The box comes back with the next command, which finds the old one gone.
   for _ in $(seq 80); do
-    uid=$(pod_uid $ENV)
-    if [ "${RUNSC:-0}" = 1 ] || { [ -n "$uid" ] && [ "$uid" != "$old" ]; }; then
-      users=$(sql $ENV 'select count(*) from users' 2>/dev/null) && break
-    fi
+    users=$(sql $ENV 'select count(*) from users' 2>/dev/null) && break
     sleep 0.25
   done
-  check "Postgres recovers after its pod is force-deleted (5 users)" 5 "$users"
-  metric box.force_delete_recovery_ms "force delete until the new pod's Postgres answers, ms" $(($(now_ms) - start))
+  check "Postgres recovers after its box is killed (5 users)" 5 "$users"
+  metric box.force_delete_recovery_ms "kill until the new box's Postgres answers, ms" $(($(now_ms) - start))
   check "and the seed ran once" 1 "$(sql $ENV "select count(*) from users where name = 'Ada'")"
 }
 
@@ -427,8 +377,7 @@ stream() {
   got=$(fern exec -i $ENV -- cat <"$TMP/bin" | sha256)
   metric stream.roundtrip_50mb_ms "50 MB round trip (Mac -> box -> Mac), ms" $(($(now_ms) - start))
   check "50 MB of random bytes through cat, unchanged" "$(sha256 <"$TMP/bin")" "$got"
-  # Counted on the node: kubectl exec, which carries a command's output to
-  # the Mac, sometimes cuts a large one short over a slow link (the VPS).
+  # Counted on the node: the Mac's link to a VPS is too slow to measure Fern by.
   start=$(now_ms)
   n=$(in_daemon "fern exec $ENV -- head -c 200000000 /dev/zero | wc -c" | tr -d ' ')
   metric stream.stdout_200mb_ms "200 MB of stdout, ms" $(($(now_ms) - start))
@@ -543,19 +492,12 @@ pgload() {
   pg_load $ENV 60
 }
 
-# set_daemon_args sets the daemon's arguments, a JSON list, and waits for it.
-set_daemon_args() {
-  k -n fern-system patch ds fern --type=json \
-    -p "[{\"op\": \"replace\", \"path\": \"/spec/template/spec/containers/0/args\", \"value\": $1}]" >/dev/null
-  wait_daemon
-}
-
 idle() {
   echo "== an idle box goes to sleep"
-  # The deployed arguments, such as the runtime class, stay.
+  # The deployed arguments, such as --agent-boxes, stay.
   local args
-  args=$(k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}')
-  set_daemon_args "${args%]}, \"--idle-agent=5s\", \"--idle-human=10s\"]"
+  args=$(daemon_args)
+  set_daemon_args $args --idle-agent=5s --idle-human=10s
   fresh $ENV
   fern exec $ENV -- true
   check "a box is awake after a command" running "$(state $ENV)"
@@ -569,11 +511,10 @@ idle() {
   sleep 5
   check "it sleeps 5 s after the command ended" asleep "$(asleep_within $ENV 5)"
   fern wake $ENV >/dev/null
-  k -n fern-system delete pod -l app.kubernetes.io/name=fern --wait=false >/dev/null
-  wait_daemon
+  restart_daemon
   sleep 10
   check "a box awake across a daemon restart goes to sleep too" asleep "$(asleep_within $ENV 5)"
-  set_daemon_args "$args"
+  set_daemon_args $args
 }
 
 daemon() {
@@ -582,10 +523,9 @@ daemon() {
   sql $ENV "insert into users (name, email) values ('Grace', 'grace@example.com')" >/dev/null
   uid=$(pod_uid $ENV)
   start=$(now_ms)
-  k -n fern-system delete pod -l app.kubernetes.io/name=fern --wait=false >/dev/null
-  wait_daemon
+  restart_daemon
   note "the daemon was back after $(($(now_ms) - start)) ms"
-  check "the box kept running while the daemon restarted (same pod)" "$uid" "$(pod_uid $ENV)"
+  check "the box kept running while the daemon restarted (same sandbox)" "$uid" "$(pod_uid $ENV)"
   check "Postgres kept its data (4 users)" 4 "$(sql $ENV 'select count(*) from users')"
   check "the box still sees its workspace" yes "$(succeeds fern exec $ENV -- test -s seed.sql)"
   fern snapshot $ENV d1 >/dev/null
@@ -622,12 +562,7 @@ many() {
   wait
   metric many.wake10_ms "10 sleeping environments woken at once, ms until all answered" $(($(now_ms) - start))
   check "all 10 answer (3 users each)" 10 "$(cat "$TMP"/many* | grep -cx 3 || true)"
-  if [ "${RUNSC:-0}" = 1 ]; then
-    check "all 10 run under gVisor" 10 "$(box_uids m 10 | wc -w | tr -d ' ')"
-  else
-    check "all 10 run under gVisor" 10 \
-      "$(k -n fern-boxes get pods -o jsonpath='{range .items[*]}{.metadata.name} {.spec.runtimeClassName}{"\n"}{end}' | grep -cE '^m[0-9]+ gvisor$' || true)"
-  fi
+  check "all 10 run under gVisor" 10 "$(box_uids m 10 | wc -w | tr -d ' ')"
   if [ -n "$FERN_HOST" ]; then
     metric many.node_memory10_mib "node memory used with 10 boxes awake, MiB" "$(on_node free -m </dev/null | awk 'NR == 2 { print $3 }')"
   else
@@ -728,32 +663,19 @@ limits() {
   # The runtime mounts the workspace without nosuid (whatever the CSI plugin
   # sets); no_new_privs is what makes setuid files useless in the box.
   check "commands run with no_new_privs" 1 "$(fern exec $ENV -- grep NoNewPrivs /proc/self/status | awk '{print $2}')"
-  check "the box's pod has a CPU limit (2 cores)" "200000 100000" "$(pod_cgroup $ENV cpu.max)"
-  check "the box's pod has a PID limit" 4096 "$(pod_cgroup $ENV pids.max)"
+  check "the box has a CPU limit (2 cores)" "200000 100000" "$(pod_cgroup $ENV cpu.max)"
+  check "the box has a PID limit" 4096 "$(pod_cgroup $ENV pids.max)"
   fern wake ${ENV}2 >/dev/null
   ip=$(box_ip ${ENV}2)
   check "a box can't reach another box" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:7070/")"
   check "the daemon can" ok "$(fern exec ${ENV}2 -- echo ok)"
   fern rm ${ENV}2
-  ip=$(k -n fern-system get pod -l app.kubernetes.io/name=fern -o jsonpath='{.items[0].status.podIP}')
+  # The node's own address on the box's link: the daemon's metrics are on
+  # every address of the node.
+  ip=$(box_ip $ENV | awk -F. '{ printf "%s.%s.%s.%d", $1, $2, $3, $4 - 1 }')
   check "a box can't reach the daemon's metrics" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:9090/metrics")"
-  check "or the Kubernetes API" no "$(succeeds fern exec $ENV -- curl -sk -m 3 https://10.43.0.1/)"
+  check "or T3's server" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:30773/")"
   check "but reaches the internet" yes "$(succeeds fern exec $ENV -- curl -s -m 10 -o /dev/null https://api.anthropic.com/)"
-  # A pod that isn't the environment's box can't mount its folders.
-  k apply -f - >/dev/null <<YAML
-apiVersion: v1
-kind: Pod
-metadata: {name: fern-thief, namespace: default, labels: {app.kubernetes.io/part-of: fern}}
-spec:
-  containers:
-    - {name: c, image: fern-box:dev, imagePullPolicy: Never, command: [sleep, "60"], volumeMounts: [{name: w, mountPath: /w}]}
-  volumes: [{name: w, csi: {driver: fern.dev, volumeAttributes: {env: $ENV, folder: workspace}}}]
-YAML
-  sleep 10
-  local refused=no
-  k get events -n default --field-selector involvedObject.name=fern-thief | grep -q 'may not mount' && refused=yes
-  check "another pod can't mount an environment's workspace" yes "$refused"
-  k delete pod fern-thief --now >/dev/null
 }
 
 paths() {
@@ -876,12 +798,12 @@ except Exception as e:
 
 t3() {
   echo "== T3's server on Fern's node"
-  if ! k -n fern-system rollout status deploy/t3 --timeout=180s >/dev/null 2>&1; then
+  if ! t3_installed || ! wait_t3 2>/dev/null; then
     check "T3's server runs (lab/build.sh t3)" yes no
     return
   fi
-  # A VPS's NodePort is reached through an SSH tunnel at T3_PORT.
-  check "the Mac reaches T3 through the NodePort" 200 \
+  # A VPS's T3 is reached through an SSH tunnel at T3_PORT.
+  check "the Mac reaches T3" 200 \
     "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${T3_PORT:-30773}/.well-known/t3/environment")"
   check "T3 runs as uid 1000" 1000 "$(in_t3 'id -u')"
   check "T3 reaches the daemon's socket" yes "$(succeeds in_t3 'fern ls')"
@@ -938,20 +860,20 @@ t3() {
   check "and a file git doesn't track" junk "$(in_t3 "cat $W/ignored.bin")"
   check "git works in the restored worktree" "M a.txt" "$(in_t3 "git -C $W status --short --untracked-files=no" | xargs)"
   check "Claude's state outlives the restore" kept "$(in_t3 "cd $W && fern exec $x -- cat $C/note")"
-  # The login reaches the box from the Secret, which a box reads when it
-  # starts. Without one, a fake one shows the way works: Claude then fails at
-  # Anthropic's API instead of asking for a login.
-  if k -n fern-boxes get secret claude-login >/dev/null 2>&1; then
+  # The login reaches the box from /etc/fern/claude.env, which a box reads
+  # when it starts. Without one, a fake one shows the way works: Claude then
+  # fails at Anthropic's API instead of asking for a login.
+  if on_node test -s /etc/fern/claude.env </dev/null; then
     fern sleep t3c >/dev/null
     check "Claude's box has its login" yes \
       "$(succeeds in_t3 "cd $W && fern exec $x -- sh -c 'test -n \"\$CLAUDE_CODE_OAUTH_TOKEN\"'")"
     check "T3 has Claude's login" yes "$(succeeds in_t3 "test -n \"\$CLAUDE_CODE_OAUTH_TOKEN\"")"
   else
-    printf %s fern-lab-not-a-token | k -n fern-boxes create secret generic claude-login --from-file=token=/dev/stdin >/dev/null
+    echo CLAUDE_CODE_OAUTH_TOKEN=fern-lab-not-a-token | on_node sh -c 'umask 077 && cat >/etc/fern/claude.env'
     fern sleep t3c >/dev/null
-    check "Claude in the box uses the login from the Secret" "API Error: 401" \
+    check "Claude in the box uses the login from /etc/fern/claude.env" "API Error: 401" \
       "$(in_t3 "cd $W && claude -p hi 2>&1" 2>/dev/null | grep -o 'API Error: 401' | head -1)"
-    k -n fern-boxes delete secret claude-login >/dev/null
+    on_node rm /etc/fern/claude.env </dev/null
     note "no Claude login stored yet: lab/claude-login.sh"
   fi
   in_t3 "fern rm t3c && rm -rf $R /var/lib/fern/worktrees/t3check"
@@ -974,14 +896,16 @@ go_seconds() {
 # deployed.
 idle_policy() {
   local args t3 hibernate
-  args=$(k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}')
-  t3=$(k -n fern-system get deploy t3 -o jsonpath='{..env[?(@.name=="T3CODE_PROVIDER_IDLE_TIMEOUT_MS")].value}')
-  hibernate=$(k -n fern-system get deploy t3 -o jsonpath='{..env[?(@.name=="FERN_HIBERNATE")].value}')
+  local env
+  args=$(daemon_args)
+  env=$(on_node systemctl show -p Environment --value fern-t3 </dev/null | tr ' ' '\n')
+  t3=$(sed -n 's/^T3CODE_PROVIDER_IDLE_TIMEOUT_MS=//p' <<<"$env")
+  hibernate=$(sed -n 's/^FERN_HIBERNATE=//p' <<<"$env")
   # An older T3 image's fern-claude doesn't hibernate.
   in_t3 'grep -q -- --hibernate /usr/local/bin/claude' 2>/dev/null || hibernate=0
   echo "$(go_seconds "${hibernate:-30s}")" "$((${t3:-300000} / 1000))" \
-    "$(go_seconds "$(sed -nE 's/.*"--?idle-agent=([^"]+)".*/\1/p' <<<"$args" | grep . || echo 5m)")" \
-    "$(go_seconds "$(sed -nE 's/.*"--?idle-human=([^"]+)".*/\1/p' <<<"$args" | grep . || echo 20m)")"
+    "$(go_seconds "$(tr ' ' '\n' <<<"$args" | sed -nE 's/^--?idle-agent=//p' | grep . || echo 5m)")" \
+    "$(go_seconds "$(tr ' ' '\n' <<<"$args" | sed -nE 's/^--?idle-human=//p' | grep . || echo 20m)")"
 }
 # res_value prints metric $2 from resource_op's output in file $1.
 res_value() { awk -v k="$2" '$1 == "METRIC" && $2 == k { print $3 }' "$1"; }
@@ -1059,7 +983,7 @@ hardware() {
   resource_rates hardware.platform_idle "$TMP/platform-before" "$TMP/platform-after"
   while read -r name value; do
     case $name in
-      k3s_*mib|containerd_*mib|controller_*mib|t3_*mib|daemon_*mib|daemon_*count)
+      t3_*mib|daemon_*mib|daemon_*count)
         metric "hardware.platform.$name" "idle platform $name" "$value" ;;
     esac
   done <"$TMP/platform-after"
@@ -1138,8 +1062,6 @@ main() {
     "") set -- "${quick[@]}" ;;
     all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} && DISK_HARDWARE=1 ;;
   esac
-  # Boxes run by the daemon itself (lab/boxes.sh runsc) have no pods.
-  if runsc_boxes; then export RUNSC=1; else export RUNSC=0; fi
   # Claude in a box of its own (lab/boxes.sh agents): <env>.agent.
   if agent_boxes; then export AGENTS=1; else export AGENTS=0; fi
   for s in "$@"; do

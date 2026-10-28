@@ -29,7 +29,7 @@ shift $((OPTIND - 1))
 base=${1:-HEAD}
 lab_lock
 lab_up || { echo "ab: the lab isn't up" >&2; exit 1; }
-if k -n fern-system get deploy/jaeger >/dev/null 2>&1; then
+if tracing_on; then
   echo "ab: tracing is on; turn it off first (lab/profile.sh off)" >&2
   exit 1
 fi
@@ -51,18 +51,28 @@ for v in a b; do
   done
   echo "ab: built $v"
 done
-import_images fern:ab-a fern-box:ab-a fern:ab-b fern-box:ab-b
+load_images fern-box:ab-a fern-box:ab-b
 install_cli
-
-# use makes version $1's images the node's fern:dev and fern-box:dev and
-# restarts the daemon on them. Boxes take the new image at their next wake.
-use() {
-  local image
-  for image in fern fern-box; do
-    on_node ctr -n k8s.io images tag --force "docker.io/library/$image:ab-$1" "docker.io/library/$image:dev" >/dev/null
+# Each version's binaries, beside the node's.
+for v in a b; do
+  cid=$(docker create --label "$LABEL" "fern:ab-$v")
+  for bin in fern fern-daemon; do
+    docker cp -q "$cid:/usr/local/bin/$bin" - | on_node sh -c "mkdir -p /usr/local/lib/fern-ab/$v && tar -x -C /usr/local/lib/fern-ab/$v"
   done
-  k -n fern-system rollout restart ds/fern >/dev/null
-  k -n fern-system rollout status ds/fern --timeout=300s >/dev/null
+  docker rm "$cid" >/dev/null
+done
+
+# use makes version $1's binaries the node's and its box image fern-box:dev,
+# and restarts the daemon on them. Boxes take the new image at their next
+# wake.
+use() {
+  on_node sh -c "set -e
+    for bin in fern fern-daemon; do
+      cp /usr/local/lib/fern-ab/$1/\$bin /usr/local/bin/\$bin.new && mv /usr/local/bin/\$bin.new /usr/local/bin/\$bin
+    done
+    ln -sfn \$(readlink /var/lib/fern/images/fern-box:ab-$1) /var/lib/fern/images/.ab-link
+    mv -T /var/lib/fern/images/.ab-link /var/lib/fern/images/fern-box:dev" </dev/null
+  restart_daemon
 }
 
 for r in $(seq "$rounds"); do
@@ -79,9 +89,8 @@ done
 
 # Leave the node as lab/build.sh would: the working tree's images, as :dev.
 for image in fern fern-box; do docker tag "$image:ab-b" "$image:dev"; done
-import_images fern:dev fern-box:dev
 use b
-for v in a b; do
-  on_node ctr -n k8s.io images rm "docker.io/library/fern:ab-$v" "docker.io/library/fern-box:ab-$v" >/dev/null
-done
+on_node rm -rf /usr/local/lib/fern-ab /var/lib/fern/images/fern-box:ab-a /var/lib/fern/images/fern-box:ab-b \
+  /var/lib/fern-images/fern-box-ab-a /var/lib/fern-images/fern-box-ab-b </dev/null
+load_images fern-box:dev
 python3 -I lab/ab-compare.py "$out" | tee "$out/summary.md"

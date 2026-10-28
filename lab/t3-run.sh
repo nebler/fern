@@ -14,7 +14,7 @@ source "$(dirname "$0")/lib.sh"
 lab_lock
 source lab/hardware.sh
 hardware_uids
-export HW_DAEMON HW_T3 HW_CONTROLLER
+export HW_DAEMON HW_T3
 port=30773
 if [ -n "$FERN_HOST" ]; then
   # A port of its own, so the T3 app's tunnel (30774) can stay open.
@@ -24,14 +24,11 @@ if [ -n "$FERN_HOST" ]; then
   trap 'kill $tunnel 2>/dev/null || true' EXIT
   for _ in $(seq 50); do curl -s -o /dev/null "http://127.0.0.1:$port/" && break; sleep 0.2; done
 fi
-pair_url=$(k -n fern-system exec deploy/t3 -c t3 -- node /opt/t3/apps/server/dist/bin.mjs \
-  pair --ttl 5m --label "t3-run on $(hostname -s)" </dev/null |
+pair_url=$(in_t3 "node /opt/t3/apps/server/dist/bin.mjs pair --ttl 5m --label 't3-run on $(hostname -s)'" </dev/null |
   sed -nE "s#^Pairing URL: http://[^/]+/#http://127.0.0.1:$port/#p")
 # The driver reads the daemon's metrics before and after every step,
 # shellcheck disable=SC2016 # expanded later, by the driver's bash -c
-metrics='source lab/lib.sh
-pod=$(k -n fern-system get pod -l app.kubernetes.io/name=fern -o jsonpath="{.items[0].metadata.name}")
-k get --raw "/api/v1/namespaces/fern-system/pods/$pod:9090/proxy/metrics"'
+metrics='source lab/lib.sh; on_node curl -sf http://127.0.0.1:9090/metrics </dev/null'
 # deletes each run's environment, given its worktree's path,
 # shellcheck disable=SC2016
 rm_env='source lab/lib.sh; id=$(fern which "$1") && fern rm "$id"'
@@ -40,13 +37,13 @@ rm_env='source lab/lib.sh; id=$(fern which "$1") && fern rm "$id"'
 sleep_env='source lab/lib.sh; id=$(fern which "$1") && fern sleep "$id" >/dev/null'
 # prints its boxes' state (running while either is: the environment's, or
 # Claude's agent box) and the fern exec processes standing in for Claude in
-# T3's pod, for an idle step,
+# T3's service, for an idle step,
 # shellcheck disable=SC2016
 idle_env='source lab/lib.sh; id=$(fern which "$1") && if [ -n "$(box_uid "$id.agent")" ]; then echo running; else
   fern ls | awk -v id="$id" '\''$1 == id { print $2 }'\''; fi''
-k -n fern-system exec deploy/t3 -c t3 -- sh -c '\''for p in /proc/[0-9]*; do
-  case $(tr "\0" " " <"$p/cmdline" 2>/dev/null) in "fern exec "*) printf "%s " "${p#/proc/}" ;; esac
-done'\''; echo'
+on_node sh -c '\''for p in $(cat /sys/fs/cgroup/system.slice/fern-t3.service/cgroup.procs); do
+  case $(tr "\0" " " </proc/$p/cmdline 2>/dev/null) in "fern exec "*) printf "%s " "$p" ;; esac
+done'\'' </dev/null; echo'
 # and samples the node's used memory, in MiB.
 # shellcheck disable=SC2016
 node_memory='source lab/lib.sh; on_node awk '\''/^MemTotal:/ {t=$2} /^MemAvailable:/ {a=$2} END {print (t-a)/1024}'\'' /proc/meminfo </dev/null'
@@ -54,7 +51,7 @@ node_memory='source lab/lib.sh; on_node awk '\''/^MemTotal:/ {t=$2} /^MemAvailab
 # timing lines are collected: provider payloads and service output stay out.
 # shellcheck disable=SC2016
 trace='source lab/lib.sh
-k -n fern-system logs deploy/t3 -c t3 | sed -n "s/^fern-timing //p"
+on_node sh -c "journalctl -o cat _SYSTEMD_INVOCATION_ID=\$(systemctl show -p InvocationID --value fern-t3)" </dev/null | sed -n "s/^fern-timing //p"
 id=t3-$(printf %s "$1" | shasum -a 256 | cut -c1-16)
 box_log "$id" | sed -n "/msg=\"claude started\"/p; /msg=\"claude first stdout\"/p" || true'
 # Sample host cgroups and the box guest process tree, using metadata only.

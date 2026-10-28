@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Removes everything the lab made: the k3s container, the pool, the Go
+# Removes everything the lab made: the node container, the pool, the Go
 # caches and the images. Nothing else is touched.
 set -uo pipefail
 source "$(dirname "$0")/lib.sh"

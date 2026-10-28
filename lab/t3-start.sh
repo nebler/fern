@@ -18,7 +18,7 @@ in_t3 "git init -q -b main $repo && git -C $repo -c user.email=t@fern -c user.na
   && git -C $repo worktree add -q -b bench $workspace && fern create --path $workspace $id" >/dev/null
 fern wake "$id" >/dev/null
 
-# One Node process times each command, so kubectl/docker startup isn't part
+# One Node process times each command, so SSH/docker startup isn't part
 # of each sample. The native binary is identical on both sides of gVisor.
 in_t3 "BENCH_WORKSPACE=$workspace CLAUDE_CONFIG_DIR=/var/lib/fern/envs/$id/claude \
   node --input-type=module - /usr/local/libexec/claude local" <lab/t3-start.mjs

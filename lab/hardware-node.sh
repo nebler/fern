@@ -1,18 +1,15 @@
 #!/bin/sh
 # Read-only Linux cgroup-v2/proc sampler, sent to on_node's sh on stdin.
-# UID arguments avoid Kubernetes calls in operation and turn measurements.
+# Its arguments name cgroups: unit:<service> for a systemd service, or
+# runsc-<env>@<pid> for a box (lab/lib.sh box_uid).
 set -eu
 cgroup() {
-  slice=$(printf %s "$1" | tr - _)
-  # runsc-<env>@<pid>: a box the daemon runs itself (lab/check.sh pod_uid).
-  box=${1#runsc-}
-  for dir in /sys/fs/cgroup/fern/"${box%@*}" /sys/fs/cgroup/kubepods*/pod"$1" /sys/fs/cgroup/kubepods*/*/pod"$1" \
-    /sys/fs/cgroup/kubepods*/*/*pod"$slice".slice /sys/fs/cgroup/kubepods*/*pod"$slice".slice; do
-    [ -r "$dir/cpu.stat" ] || continue
-    printf '%s\n' "$dir"
-    return
-  done
-  return 1
+  case $1 in
+    unit:*) dir=/sys/fs/cgroup/system.slice/${1#unit:} ;;
+    *) box=${1#runsc-} && dir=/sys/fs/cgroup/fern/${box%@*} ;;
+  esac
+  [ -r "$dir/cpu.stat" ] || return 1
+  printf '%s\n' "$dir"
 }
 network() {
   iface=$(awk '$2=="00000000" {print $1; exit}' /proc/net/route)
@@ -29,8 +26,7 @@ writes() {
 }
 pod_sample() {
   name=$1
-  # A pod that isn't there, such as agent-sandbox's controller when the
-  # daemon runs the boxes itself.
+  # A service that isn't installed, such as T3's.
   [ -n "$2" ] || return 0
   cg=$(cgroup "$2") || { echo "missing cgroup for $name" >&2; return 1; }
   echo "${name}_cpu_ms $(usage "$cg")"
@@ -40,14 +36,9 @@ pod_sample() {
     $1 == "kernel" { k=$2 } END { printf "%s_memory_mib %.3f\n%s_kernel_mib %.3f\n", n,b/1048576,n,k/1048576 }' "$cg/memory.stat"
 }
 process_sample() {
-  # k3s embeds kubelet/apiserver; containerd is its own child. Do not count
-  # both k3s's parent cgroup and containerd's child cgroup as separate costs.
   for proc in /proc/[0-9]*; do
     IFS= read -r comm 2>/dev/null <"$proc/comm" || continue
     case $comm in
-      k3s|k3s-server) name=k3s ;;
-      exe) case $(tr '\000' ' ' <"$proc/cmdline" 2>/dev/null) in *'k3s server'*) name=k3s ;; *) continue ;; esac ;;
-      containerd) name=containerd ;;
       fern-daemon) name=daemon ;;
       *) continue ;;
     esac
@@ -61,7 +52,7 @@ process_sample() {
     fi
   done | awk '{ v[$1]+=$2 } END {
     for(k in v) printf "%s %.3f\n",k,v[k]
-    if (!("k3s_rss_mib" in v) || !("containerd_rss_mib" in v) || !("daemon_rss_mib" in v)) exit 1
+    if (!("daemon_rss_mib" in v)) exit 1
   }'
 }
 mode=$1
@@ -90,8 +81,7 @@ EOF
     awk '/^MemTotal:/ {t=$2} /^MemAvailable:/ {a=$2} END {printf "node_used_mib %.3f\n",(t-a)/1024}' /proc/meminfo
     pod_sample daemon "$1"
     pod_sample t3 "$2"
-    pod_sample controller "$3"
-    shift 3
+    shift 2
     for uid do
       # A restore can remove a box between metadata lookup and this read.
       if cgroup "$uid" >/dev/null; then pod_sample box "$uid"; fi

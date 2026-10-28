@@ -35,6 +35,7 @@ import (
 
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/driver"
+	"github.com/nebler/fern/internal/image"
 	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
@@ -56,10 +57,19 @@ type Host func(ctx context.Context, c Command) ([]byte, error)
 // PID 1: the daemon shares the node's PID namespace, so that is the node's
 // init.
 func NodeHost(ctx context.Context, c Command) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "nsenter", append([]string{"--target", "1", "--mount", "--cgroup", "--", c.Name}, c.Args...)...)
-	// The node's programs, wherever it keeps them: k3s's image has its
-	// iptables in /bin/aux.
-	cmd.Env = []string{"PATH=" + nodePath}
+	return LocalHost(ctx, Command{
+		// The node's programs, wherever it keeps them: k3s's image has its
+		// iptables in /bin/aux.
+		Name:  "env",
+		Args:  append([]string{"-i", "PATH=" + nodePath, "nsenter", "--target", "1", "--mount", "--cgroup", "--", c.Name}, c.Args...),
+		Stdin: c.Stdin, Out: c.Out,
+	})
+}
+
+// LocalHost runs programs as they are: for a daemon that runs on the node
+// itself, as a systemd service.
+func LocalHost(ctx context.Context, c Command) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
 	if c.Stdin != nil {
 		cmd.Stdin = bytes.NewReader(c.Stdin)
 	}
@@ -72,6 +82,20 @@ func NodeHost(ctx context.Context, c Command) ([]byte, error) {
 		return out.Bytes(), fmt.Errorf("%s %s: %w: %s", c.Name, strings.Join(c.Args, " "), err, strings.TrimSpace(errOut.String()))
 	}
 	return out.Bytes(), nil
+}
+
+// OnNode reports whether this process shares the mount namespace of the
+// node's PID 1, so LocalHost reaches the node: false in a container.
+func OnNode() (bool, error) {
+	self, err := os.Readlink("/proc/self/ns/mnt")
+	if err != nil {
+		return false, err
+	}
+	init, err := os.Readlink("/proc/1/ns/mnt")
+	if err != nil {
+		return false, err
+	}
+	return self == init, nil
 }
 
 // nodePath is where NodeHost looks for programs on the node.
@@ -87,7 +111,8 @@ type Config struct {
 	Pool    string   // the pool, /var/lib/fern
 	Bundles string   // the boxes' bundles, on the node's tmpfs: /run/fern/boxes
 	State   string   // runsc's state directory, on the node
-	Image   string   // the box image, as the node's containerd names it
+	Images  string   // where images are unpacked (fern image load): <pool>/images
+	Image   string   // the box image's tag, such as fern-box:dev
 	DNS     []string // the resolvers boxes use: the node's own is the node
 	// Login returns Claude's login, or "" if there is none yet.
 	Login func(ctx context.Context) (string, error)
@@ -114,7 +139,7 @@ type Driver struct {
 	ready  *http.Client // asks waking boxes' fern-init whether they are ready
 	steps  *prometheus.HistogramVec
 
-	rootfs   string   // the image's root, mounted read-only; set by Prepare
+	rootfs   string   // the image's root, which boxes' overlays share; set by Prepare
 	imageEnv []string // the image's environment
 
 	mu sync.Mutex // allocations of box addresses
@@ -143,59 +168,29 @@ func (d *Driver) Describe(ch chan<- *prometheus.Desc) { d.steps.Describe(ch) }
 // Collect sends the Driver's metrics.
 func (d *Driver) Collect(ch chan<- prometheus.Metric) { d.steps.Collect(ch) }
 
-// imageInfo is what Prepare reads from crictl inspecti.
-type imageInfo struct {
-	Status struct {
-		ID string `json:"id"`
-	} `json:"status"`
-	Info struct {
-		ImageSpec struct {
-			Config struct {
-				Env []string `json:"Env"`
-			} `json:"config"`
-		} `json:"imageSpec"`
-	} `json:"info"`
-}
-
-// Prepare gets the node ready for boxes: the box image's root, mounted
-// read-only from containerd's store under <pool>/images/<id>, the firewall
-// that keeps boxes to the internet, the cgroup that holds them, and their
-// resolv.conf. It returns the image's ID, which
-// golden keys include.
+// Prepare gets the node ready for boxes: the box image's root, the
+// firewall that keeps boxes to the internet, the cgroup that holds them,
+// and their resolv.conf. It returns the image's ID, which golden keys
+// include.
 func (d *Driver) Prepare(ctx context.Context) (string, error) {
-	out, err := d.run(ctx, "crictl", "inspecti", "-o", "json", d.cfg.Image)
+	img, err := image.Open(d.cfg.Images, d.cfg.Image)
 	if err != nil {
-		return "", fmt.Errorf("box image %s: %w", d.cfg.Image, err)
+		return "", fmt.Errorf("box image (fern image load): %w", err)
 	}
-	var info imageInfo
-	if err := json.Unmarshal(out, &info); err != nil {
-		return "", fmt.Errorf("box image %s: %w", d.cfg.Image, err)
-	}
-	id := strings.TrimPrefix(info.Status.ID, "sha256:")
-	if id == "" {
-		return "", fmt.Errorf("box image %s has no ID", d.cfg.Image)
-	}
-	d.imageEnv = info.Info.ImageSpec.Config.Env
-	d.rootfs = filepath.Join(d.cfg.Pool, "images", id)
-	if _, err := d.run(ctx, "mountpoint", "-q", d.rootfs); err != nil {
-		if err := os.MkdirAll(d.rootfs, 0o755); err != nil {
-			return "", err
-		}
-		// A lease named after the target keeps containerd from collecting
-		// the image's layers while it is mounted.
-		if _, err := d.run(ctx, "ctr", "-n", "k8s.io", "images", "mount", d.cfg.Image, d.rootfs); err != nil {
-			return "", fmt.Errorf("mount box image: %w", err)
-		}
-	}
+	d.rootfs, d.imageEnv = img.Root, img.Env
 	if _, err := d.host(ctx, Command{Name: "nft", Args: []string{"-f", "-"}, Stdin: []byte(firewall(d.cfg.MCPPort))}); err != nil {
 		return "", fmt.Errorf("box firewall: %w", err)
 	}
+	// The controllers boxes' limits need, from the root down: systemd, unlike
+	// kubelet, doesn't enable cpu at the root unless a unit asks for it.
 	cg := "/sys/fs/cgroup/" + cgroupParent
 	if _, err := d.run(ctx, "mkdir", "-p", cg); err != nil {
 		return "", err
 	}
-	if _, err := d.host(ctx, Command{Name: "tee", Args: []string{cg + "/cgroup.subtree_control"}, Stdin: []byte("+cpu +memory +pids")}); err != nil {
-		return "", fmt.Errorf("box cgroup: %w", err)
+	for _, dir := range []string{"/sys/fs/cgroup", cg} {
+		if _, err := d.host(ctx, Command{Name: "tee", Args: []string{dir + "/cgroup.subtree_control"}, Stdin: []byte("+cpu +memory +pids")}); err != nil {
+			return "", fmt.Errorf("box cgroup: %w", err)
+		}
 	}
 	for _, dir := range []string{d.cfg.Bundles, filepath.Join(d.cfg.Pool, "boxes")} {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -212,7 +207,7 @@ func (d *Driver) Prepare(ctx context.Context) (string, error) {
 	if err := d.reconcile(ctx); err != nil {
 		return "", err
 	}
-	return id, nil
+	return img.ID, nil
 }
 
 // reconcile finishes what a crash cut short: a box directory with no box

@@ -3,7 +3,7 @@
 Rules for anyone (human or agent) writing code in this repository. Read this before writing Go.
 
 ## The project
-Fern gives every T3 Code thread an environment that behaves like git for everything: code, dependencies and the running database. It runs on Kubernetes (k3s for one person), and its daemon runs the boxes itself with gVisor's runsc ([briefs/boxes-without-kubernetes.md](docs/briefs/boxes-without-kubernetes.md)).
+Fern gives every T3 Code thread an environment that behaves like git for everything: code, dependencies and the running database. On one server it runs as two systemd services, the daemon and T3's server ([briefs/fern-without-kubernetes.md](docs/briefs/fern-without-kubernetes.md)); the daemon runs the boxes itself with gVisor's runsc ([briefs/boxes-without-kubernetes.md](docs/briefs/boxes-without-kubernetes.md)). Installing into an existing Kubernetes cluster (`deploy/fern.yaml`) stays possible but isn't what the lab tests.
 - What we build: [docs/architecture.md](docs/architecture.md)
 - Order of work: [docs/roadmap.md](docs/roadmap.md)
 - Experiments: [docs/engine-local.md](docs/engine-local.md)
@@ -16,7 +16,7 @@ The nouns are in [architecture §2](docs/architecture.md#2-concepts). In the cod
 - **Pool:** the btrfs filesystem at `/var/lib/fern`, which holds every environment's folders (`envs/<id>/`) and snapshots.
 - **Workspace:** an environment's writable folder, a btrfs subvolume: `envs/<id>/live`, or a T3 worktree at its own path.
 - **Box:** an environment's sandbox, a gVisor sandbox the daemon runs (`internal/runsc`; `--boxes=kubernetes` makes it an agent-sandbox `Sandbox` pod instead). An asleep environment has none. Its **agent box**, `<env>.agent`, runs Claude; Claude's Bash runs in the box ([briefs/claude-outside-the-box.md](docs/briefs/claude-outside-the-box.md)).
-- **Daemon:** `fern daemon` on every node: the API on a Unix socket, the store, the driver and the CSI node plugin.
+- **Daemon:** `fern daemon` on every node (`fern-daemon.service`): the API on a Unix socket, the store and the driver; in a cluster also the CSI node plugin.
 - **fern-init:** a box's main process. It runs the services in `services.yaml` and serves boxexec.
 - **boxexec:** Fern's WebSocket protocol for running a command in a box.
 
@@ -25,10 +25,10 @@ The nouns are in [architecture §2](docs/architecture.md#2-concepts). In the cod
 - After a change: `lab/dev.sh` (about a minute): unit tests and the build, then `check.sh`'s quick sections in the lab
 - Unit tests: `go test -race ./...` (fake driver, runs anywhere Go runs)
 - Lint: `golangci-lint run` (config in `.golangci.yml`; fix the code, don't silence the linter)
-- Integration tests: `lab/check.sh` (the quick sections, under a minute in the lab) after a change, `lab/check.sh all` before a merge or a tag; against k3s in the local lab (`lab/up.sh`) first, then on the VPS with `FERN_HOST` (see engine-local.md)
+- Integration tests: `lab/check.sh` (the quick sections, under a minute in the lab) after a change, `lab/check.sh all` before a merge or a tag; in the local lab (`lab/up.sh`, a systemd node in Docker) first, then on the VPS with `FERN_HOST` (see engine-local.md)
 - Perf gate: `lab/perf.sh --fast` (about 1.5 minutes, big regressions only) while working on speed or memory, and `lab/perf.sh` (about 13 minutes in the lab, 26 on the VPS) before merging anything that could change them; it fails when a metric is worse than `lab/perf/<lab|vps>.tsv`. A change that is meant to move a number updates the baseline with `lab/perf.sh --accept` in the same commit. The VPS's baseline is the one that counts.
 - Did a change move a number: `lab/ab.sh -s "box t3"` builds HEAD (A) and the working tree (B), runs the sections on each in turn on the same node (A B, then B A, 6 rounds) and gives a verdict per metric (medians, change, 95% interval, p). Trust it over a single gate run: both versions see the same machine. About 25 minutes for `box` on the VPS.
-- Where an operation's time and CPU go: `lab/profile.sh on` (traces from the daemon and kubelet; restarts k3s on the VPS), `lab/profile.sh run wake 10` (also `sleep`, `restore`, `snapshot`, `exec`), then `lab/profile.sh off`. Each run writes `lab/profiles/<run>/`: `summary.md` (CPU by process, hottest functions, every step's p50/p95 and the median operation's timeline), whole-node on- and off-CPU flamegraphs (VPS: perf), the daemon's Go profile and the traces. `lab/profile.sh diff A B` draws what changed; `lab/profile.sh ui` opens Jaeger. The gate refuses to run while tracing is on.
+- Where an operation's time and CPU go: `lab/profile.sh on` (Jaeger on the node, traces from the daemon), `lab/profile.sh run wake 10` (also `sleep`, `restore`, `snapshot`, `exec`), then `lab/profile.sh off`. Each run writes `lab/profiles/<run>/`: `summary.md` (CPU by process, hottest functions, every step's p50/p95 and the median operation's timeline), whole-node on- and off-CPU flamegraphs (VPS: perf), the daemon's Go profile and the traces. `lab/profile.sh diff A B` draws what changed; `lab/profile.sh ui` opens Jaeger. The gate refuses to run while tracing is on.
 - The T3 demo, end to end: `lab/t3-run.sh toy 5` (Haiku, your subscription); `PARALLEL=5` runs five threads at once
 - Everything, the same way each time: `lab/suite.sh`: every check (scale included: 1 to 20 awake boxes), the perf gate and T3 end to end, one thread at a time and five at once (about 45 minutes on the VPS). Run it before a tag, on the VPS; its summary goes into `lab/RESULTS.md`.
 - The lab is shared by every worktree: its scripts wait for each other (`lab_lock`). Don't run two at once by other means.
@@ -76,11 +76,11 @@ The same sources are available as on-demand skills in [.claude/skills/](.claude/
 ## Fern rules
 - **Every multi-step change is crash-safe:** after a crash at any step, the disk shows what was under way (a marker file, a leftover copy beside the workspace, a snapshot without its row), and `Reconcile` finishes it or clears it on start. Every step is safe to repeat (idempotent).
 - **The disk is the truth; SQLite is the index.** On start, reconcile what exists with what the tables say.
-- **Per-turn work never touches the Kubernetes API.** Snapshots and execs in an awake box go to the node-local daemon only. A box's wake reads Claude's login Secret; with `--boxes=kubernetes`, a wake and a stop (a sleep, or the stop in a restore) change its `Sandbox`.
+- **Per-turn work never touches the Kubernetes API.** Snapshots and execs in an awake box go to the node-local daemon only. A box's wake reads Claude's login (`/etc/fern/claude.env`; in a cluster, its Secret); with `--boxes=kubernetes`, a wake and a stop (a sleep, or the stop in a restore) change its `Sandbox`.
 - **Credentials never enter `live/`, golden or snapshots.**
 - **No API keys.** Agents are the real `claude` / `codex` CLIs with the user's own subscription.
 
-## Kubernetes rules
+## Kubernetes rules (the cluster install)
 - Use controller-runtime. Reconcile = read desired state, compare with reality, take one idempotent step, requeue.
 - Status uses `metav1.Condition`. Spec is never written by the controller. Cleanup uses finalizers and owner references.
 - CRD types live in `api/v1alpha1/` with kubebuilder markers; regenerate with `controller-gen`, never hand-edit generated files.

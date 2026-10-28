@@ -41,6 +41,11 @@ func TestParse(t *testing.T) {
 			want: command{name: "prebuild", args: []string{"sample"}},
 		},
 		{
+			name: "image load",
+			args: []string{"image", "load"},
+			want: command{name: "image", args: []string{"load"}},
+		},
+		{
 			name: "ls",
 			args: []string{"ls"},
 			want: command{name: "ls"},

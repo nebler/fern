@@ -8,9 +8,9 @@
 LAB=fern-lab
 LABEL=app.kubernetes.io/part-of=fern
 FERN_HOST=${FERN_HOST:-}
-# The versions the lab and the VPS run.
-# shellcheck disable=SC2034 # the scripts that source this use them
-K3S_VERSION=v1.36.5+k3s1 SANDBOX_VERSION=v1.0.7 GVISOR_RELEASE=20261012
+# The gVisor release the lab and the VPS run.
+# shellcheck disable=SC2034 # the scripts that source this use it
+GVISOR_RELEASE=20261012
 # One SSH connection serves a script's many commands.
 SSH=(ssh -o BatchMode=yes -o LogLevel=ERROR -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/fern-%C" -o ControlPersist=60)
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit
@@ -45,10 +45,7 @@ on_node() {
   fi
 }
 
-# k runs kubectl on the node.
-k() { on_node kubectl "$@"; }
-
-# fern runs the fern CLI in the daemon pod.
+# fern runs the fern CLI on the node.
 fern() {
   case " $* " in
     *" --repo "* | *" -it "*) lab/fern "$@" ;; # a local repo to send, or a terminal
@@ -56,90 +53,130 @@ fern() {
   esac
 }
 
-# FERN_CLI is the fern CLI on the node, a copy of the image's client binary
-# (install_cli). It talks to the daemon's socket, which is on the node, so a
-# command doesn't go through kubectl exec (about 110 ms a command).
-FERN_CLI=/usr/local/bin/fern-cli
+# FERN_CLI is the fern CLI on the node (install_cli), beside fern-daemon,
+# which fern-daemon.service runs.
+FERN_CLI=/usr/local/bin/fern
 
-# install_cli copies the fern binary from the fern:dev image to the node,
-# unless the node has the same one.
+# install_cli copies the fern and fern-daemon binaries from the fern:dev
+# image to the node, unless it has the same ones.
 install_cli() {
-  local tmp cid
+  local tmp cid bin
   tmp=$(mktemp -d)
   cid=$(docker create --label "$LABEL" fern:dev)
-  docker cp -q "$cid:/usr/local/bin/fern" "$tmp/fern"
+  for bin in fern fern-daemon; do
+    docker cp -q "$cid:/usr/local/bin/$bin" "$tmp/$bin"
+    if [ "$(on_node sh -c "sha256sum /usr/local/bin/$bin 2>/dev/null | cut -d' ' -f1" </dev/null)" != "$(shasum -a 256 "$tmp/$bin" | cut -d' ' -f1)" ]; then
+      gzip -c "$tmp/$bin" | on_node sh -c "gunzip > /usr/local/bin/$bin.new && chmod 755 /usr/local/bin/$bin.new && mv /usr/local/bin/$bin.new /usr/local/bin/$bin"
+    fi
+  done
   docker rm "$cid" >/dev/null
-  if [ "$(on_node sh -c "sha256sum $FERN_CLI 2>/dev/null | cut -d' ' -f1" </dev/null)" != "$(shasum -a 256 "$tmp/fern" | cut -d' ' -f1)" ]; then
-    gzip -c "$tmp/fern" | on_node sh -c "gunzip > $FERN_CLI.new && chmod 755 $FERN_CLI.new && mv $FERN_CLI.new $FERN_CLI"
-  fi
   rm -rf "$tmp"
 }
 
-# in_t3 runs a shell command in T3's server container, as T3's user.
-in_t3() { k -n fern-system exec -i deploy/t3 -c t3 -- sh -c "$1"; }
+# install_units installs Fern's systemd units (deploy/systemd) on the node
+# and enables them: fern-daemon, and fern-t3 with "t3".
+install_units() {
+  local unit units=(fern-daemon)
+  [ "${1:-}" = t3 ] && units+=(fern-t3)
+  for unit in "${units[@]}"; do
+    on_node tee "/etc/systemd/system/$unit.service" <"deploy/systemd/$unit.service" >/dev/null
+  done
+  # The box user, which runs T3 and owns workspaces: systemd needs it in the
+  # node's user database. A node whose uid 1000 is someone already keeps it.
+  on_node sh -c 'getent group 1000 >/dev/null || groupadd --gid 1000 fern
+    getent passwd 1000 >/dev/null || useradd --uid 1000 --gid 1000 --no-create-home \
+      --home-dir /var/lib/fern --shell /usr/sbin/nologin fern' </dev/null
+  # The daemon's arguments (set_daemon_args), none until set.
+  on_node sh -c 'mkdir -p /etc/fern && [ -e /etc/fern/daemon.env ] || echo FERN_DAEMON_ARGS= >/etc/fern/daemon.env' </dev/null
+  on_node systemctl daemon-reload </dev/null
+  on_node systemctl enable -q "${units[@]}" </dev/null
+}
 
-# daemon_args prints the daemon's arguments.
-daemon_args() { k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}'; }
+# t3_installed says whether the node runs T3's server.
+t3_installed() { on_node systemctl is-enabled -q fern-t3 </dev/null 2>/dev/null; }
 
-# runsc_boxes says whether the daemon runs boxes itself, so they have no
-# pods: its default, unless --boxes=kubernetes (lab/boxes.sh).
-runsc_boxes() { ! daemon_args | grep -q -- '--boxes=kubernetes'; }
+# wait_daemon waits until the daemon answers.
+wait_daemon() {
+  for _ in $(seq 300); do
+    fern ls >/dev/null 2>&1 </dev/null && return 0
+    sleep 0.2
+  done
+  echo "the daemon doesn't answer: journalctl -u fern-daemon" >&2
+  return 1
+}
+
+# restart_daemon restarts the daemon and waits until it answers; its boxes
+# keep running.
+restart_daemon() {
+  on_node systemctl restart fern-daemon </dev/null
+  wait_daemon
+}
+
+# wait_t3 waits until T3's server answers on its port.
+wait_t3() {
+  for _ in $(seq 180); do
+    on_node curl -sf -o /dev/null --max-time 2 http://127.0.0.1:30773/.well-known/t3/environment </dev/null && return 0
+    sleep 1
+  done
+  echo "T3's server doesn't answer: journalctl -u fern-t3" >&2
+  return 1
+}
+
+# in_t3 runs a shell command as T3's server does: in its root, as its user,
+# with its environment.
+in_t3() {
+  on_node bash -c 'p=$(systemctl show -p MainPID --value fern-t3) && [ "$p" != 0 ] &&
+    mapfile -d "" env </proc/$p/environ &&
+    exec nsenter -t "$p" -m -r -w -S 1000 -G 1000 -- env -i "${env[@]}" sh -c "$1"' in_t3 "$1"
+}
+
+# tracing_on says whether Jaeger runs on the node (lab/profile.sh on).
+tracing_on() { on_node systemctl is-active -q fern-jaeger </dev/null 2>/dev/null; }
+
+# daemon_args prints the daemon's arguments (FERN_DAEMON_ARGS in
+# /etc/fern/daemon.env).
+daemon_args() { on_node sh -c '. /etc/fern/daemon.env 2>/dev/null; echo "${FERN_DAEMON_ARGS:-}"' </dev/null; }
+
+# set_daemon_args sets the daemon's arguments and restarts it.
+set_daemon_args() {
+  printf 'FERN_DAEMON_ARGS="%s"\n' "$*" | on_node sh -c 'mkdir -p /etc/fern && cat >/etc/fern/daemon.env'
+  restart_daemon
+}
 
 # agent_boxes says whether Claude runs in a box of its own per environment
 # (lab/boxes.sh agents): environment <id>'s is <id>.agent.
-agent_boxes() { runsc_boxes && ! daemon_args | grep -q -- '--agent-boxes=false'; }
+agent_boxes() { ! daemon_args | grep -q -- '--agent-boxes=false'; }
 
-# box_uid prints what identifies environment $1's running box: its pod's
-# UID, or with runsc boxes runsc-<env>@<sandbox pid>; nothing if none runs.
-# RUNSC=1 or RUNSC=0 skips asking which.
+# box_uid prints what identifies environment $1's running box,
+# runsc-<env>@<sandbox pid>, or nothing if none runs.
 box_uid() {
-  local runsc=${RUNSC:-}
-  [ -n "$runsc" ] || { runsc_boxes && runsc=1 || runsc=0; }
-  if [ "$runsc" != 1 ]; then
-    k -n fern-boxes get pod "$1" -o jsonpath='{.metadata.uid}' 2>/dev/null || true
-    return
-  fi
   # runsc's IDs are hashes; its list names each box's bundle, /run/fern/boxes/<env>.
   on_node runsc --root /run/fern/runsc list </dev/null 2>/dev/null |
     awk -v b="/run/fern/boxes/$1" '$4 == b && $3 == "running" { print "runsc-" substr(b, 17) "@" $2 }'
 }
 
-# box_log prints environment $1's box's output: its pod's log, or the file
-# runsc writes it to.
-box_log() {
-  if runsc_boxes; then
-    on_node cat "/var/lib/fern/boxes/$1/log" </dev/null 2>/dev/null || true
-  else
-    k -n fern-boxes logs "$1" -c box 2>/dev/null || true
-  fi
-}
+# box_log prints environment $1's box's output, from the file runsc writes
+# it to.
+box_log() { on_node cat "/var/lib/fern/boxes/$1/log" </dev/null 2>/dev/null || true; }
 
-# install_sandbox installs the agent-sandbox controller, which Kubernetes
-# boxes need (lab/boxes.sh kubernetes); the daemon's own runsc boxes don't.
-install_sandbox() {
-  echo "installing agent-sandbox $SANDBOX_VERSION"
-  k apply --server-side -f "https://github.com/kubernetes-sigs/agent-sandbox/releases/download/$SANDBOX_VERSION/sandbox.yaml" >/dev/null
-  k -n agent-sandbox-system rollout status deploy/agent-sandbox-controller --timeout=300s >/dev/null
-}
-
-# import_images copies images from Docker into the node's containerd,
-# skipping those it has: the node keeps the Docker ID of each it imported,
-# since a VPS is far away for gigabytes.
-import_images() {
+# load_images unpacks images from Docker into the node's pool (fern image
+# load), skipping those it has: the node keeps the Docker ID of each it
+# loaded, since a VPS is far away for gigabytes.
+load_images() {
   local arch image id changed=() ids=()
   case $(on_node uname -m </dev/null) in aarch64) arch=arm64 ;; *) arch=amd64 ;; esac
   for image in "$@"; do
     id=$(docker image inspect -f '{{.Id}}' "$image")
-    if [ "$(on_node sh -c "crictl inspecti -q docker.io/library/$image >/dev/null 2>&1 &&
-      cat /var/lib/fern-images/${image/:/-}" </dev/null 2>/dev/null)" != "$id" ]; then
+    # fern image load names a tag's link with its slashes as underscores.
+    if [ "$(on_node sh -c "test -e '/var/lib/fern/images/${image//\//_}' && cat /var/lib/fern-images/${image//[\/:]/-}" </dev/null 2>/dev/null)" != "$id" ]; then
       changed+=("$image")
       ids+=("$id")
     fi
   done
   [ ${#changed[@]} -gt 0 ] || return 0
-  docker save --platform "linux/$arch" "${changed[@]}" | on_node ctr -n k8s.io images import - >/dev/null
+  docker save --platform "linux/$arch" "${changed[@]}" | on_node "$FERN_CLI" image load >/dev/null
   for i in "${!changed[@]}"; do
-    echo "${ids[$i]}" | on_node sh -c "mkdir -p /var/lib/fern-images && cat >/var/lib/fern-images/${changed[$i]/:/-}"
+    echo "${ids[$i]}" | on_node sh -c "mkdir -p /var/lib/fern-images && cat >/var/lib/fern-images/${changed[$i]//[\/:]/-}"
   done
 }
 

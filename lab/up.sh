@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Starts the local lab: k3s in one privileged Docker container, with a
-# loop-mounted btrfs pool at /var/lib/fern and
-# Fern. Everything it makes is named fern-lab* or labelled part-of=fern.
+# Starts the local lab: one privileged Docker container with systemd as PID
+# 1, as a VPS runs Fern (images/Dockerfile, lab-node), a loop-mounted btrfs
+# pool at /var/lib/fern, gVisor and Fern's units. Everything it makes is
+# named fern-lab* or labelled part-of=fern.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
 lab_lock
@@ -16,14 +17,13 @@ if lab_up; then
 fi
 lab/build.sh
 
-# The pool is a sparse image file in its own volume, formatted with the
-# daemon image's btrfs-progs (the k3s image has none).
+# The pool is a sparse image file in its own volume.
 docker volume create --label "$LABEL" fern-lab-pool >/dev/null
 docker run --rm --label "$LABEL" -v fern-lab-pool:/img --entrypoint sh fern:dev \
   -c 'truncate -s 30G /img/pool.img && mkfs.btrfs -q -f /img/pool.img'
 
 # gVisor, for the boxes: a pinned release, checked, kept beside the pool. The
-# node installs it at every start, before k3s's containerd reads its config.
+# node installs it at every start (images/lab-node-start).
 url=https://storage.googleapis.com/gvisor/releases/release/$GVISOR_RELEASE
 case $(docker version -f '{{.Server.Arch}}') in arm64) url+=/aarch64 ;; *) url+=/x86_64 ;; esac
 tmp=$(mktemp -d)
@@ -35,47 +35,28 @@ if [ "$(shasum -a 512 "$tmp/gvisor.tar.bz2" | cut -d' ' -f1)" != "$(curl -sSfL "
 fi
 mkdir "$tmp/gvisor" "$tmp/gvisor/bin"
 tar -xjf "$tmp/gvisor.tar.bz2" -C "$tmp/gvisor/bin"
-printf '%s\n' "[plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runsc]" \
-  '  runtime_type = "io.containerd.runsc.v1"' >"$tmp/gvisor/runsc.toml"
 tar_dir "$tmp/gvisor" | docker run --rm -i --label "$LABEL" -v fern-lab-pool:/img --entrypoint sh fern:dev \
   -c 'mkdir -p /img/gvisor && tar -x -C /img/gvisor'
 
-# "/" must be rshared so the CSI plugin's bind mounts reach the box containers.
-# k3s exits when its datastore is slow, as under a big image build; Docker
-# then starts it again. Its settings are deploy/k3s-config.yaml, as on a VPS.
-# noatime: reading a file mustn't write to the pool, which snapshots would
-# then have to flush. gVisor mirrors all of a box's memory mappings into one
-# host process; at the kernel's default map count, large builds segfault.
-docker run -d --name "$LAB" --hostname "$LAB" --label "$LABEL" --privileged --restart on-failure \
-  --tmpfs /run --tmpfs /var/run -v fern-lab-pool:/var/lib/fern-img \
-  -p 127.0.0.1:30773:30773 -e K3S_SETTINGS="$(cat deploy/k3s-config.yaml)" \
-  --entrypoint /bin/sh "rancher/k3s:${K3S_VERSION/+/-}" -c '
-    set -e
-    mount --make-rshared /
-    mkdir -p /var/lib/fern /etc/rancher/k3s
-    mount -o loop,noatime /var/lib/fern-img/pool.img /var/lib/fern
-    printf "%s\n" "$K3S_SETTINGS" >/etc/rancher/k3s/config.yaml
-    d=/var/lib/rancher/k3s/agent/etc/containerd/config-v3.toml.d
-    mkdir -p /usr/local/bin $d
-    cp -r /var/lib/fern-img/gvisor/bin/. /usr/local/bin/
-    cp /var/lib/fern-img/gvisor/runsc.toml $d/
-    sysctl -qw vm.max_map_count=4194304
-    exec /bin/k3s server' >/dev/null
+# systemd needs /run as a tmpfs, and its own cgroup namespace. noatime (in
+# lab-node-start): reading a file mustn't write to the pool, which
+# snapshots would then have to flush.
+docker build -q --label "$LABEL" --target lab-node -f images/Dockerfile -t fern-lab-node:dev . >/dev/null
+docker run -d --name "$LAB" --hostname "$LAB" --label "$LABEL" --privileged --cgroupns=private \
+  --tmpfs /run --tmpfs /run/lock -v fern-lab-pool:/var/lib/fern-img \
+  -p 127.0.0.1:30773:30773 -p 127.0.0.1:16686:16686 fern-lab-node:dev >/dev/null
 
-echo "waiting for k3s"
-for _ in $(seq 120); do
-  k get nodes 2>/dev/null | grep -q ' Ready' && break
+echo "waiting for systemd"
+for _ in $(seq 60); do
+  state=$(on_node systemctl is-system-running </dev/null 2>/dev/null || true)
+  case $state in running | degraded) break ;; esac
   sleep 1
 done
-k get nodes
-
-echo "importing images"
-import_images fern:dev fern-box:dev
-
-# Boxes are the daemon's own (runsc); lab/boxes.sh kubernetes installs the
-# agent-sandbox controller when pods should run them instead.
 
 echo "installing fern"
-k apply -f - <deploy/fern.yaml >/dev/null
-k -n fern-system rollout status ds/fern --timeout=300s
+install_cli
+load_images fern-box:dev
+install_units
+on_node systemctl start fern-daemon </dev/null
+wait_daemon
 echo "lab is up"

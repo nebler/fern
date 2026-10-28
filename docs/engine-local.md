@@ -23,20 +23,12 @@ The engine is everything Fern runs on a node:
 ## 1. The dev machines
 
 ### 1.0 The local lab (weeks 0–3)
-- **What:** Docker Desktop (you start it), one privileged `rancher/k3s` container, a btrfs image file loop-mounted inside it at `/var/lib/fern`. A second k3s container joins as node 2 when needed.
+- **What:** Docker Desktop (you start it), one privileged container with systemd as PID 1 (`images/Dockerfile`, `lab-node`), a btrfs image file loop-mounted inside it at `/var/lib/fern`, and Fern's units, as on the VPS. Until 2026-10-28 it was a `rancher/k3s` container ([briefs/fern-without-kubernetes.md](briefs/fern-without-kubernetes.md)).
 - **Go:** builds and unit tests run in a `golang` container with the repo mounted.
 - **Known to work** (earlier spikes on this Mac): btrfs snapshots and swaps, Postgres recovery, git worktrees in subvolumes, k3s pods restarting with their data (kernel 6.10 linuxkit, btrfs-progs 6.6).
-- **gVisor** (`runsc`) works inside Docker Desktop's k3s: `lab/up.sh` installs it, and every box runs under it, as on the VPS.
+- **gVisor** (`runsc`) works inside Docker Desktop: `lab/up.sh` installs it, and every box runs under it, as on the VPS.
 - **Use it for correctness, not speed:** the virtual disk makes some snapshots slow (spike 01: 1 in 10 took 200 ms–1 s). Only VPS numbers go into the demo.
 - **Cleanup:** delete the lab containers and the image file; nothing else is touched.
-
-```sh
-# on the Mac (sketch)
-docker run -d --name fern-lab --privileged -v fern-lab:/var/lib/fern-img rancher/k3s server
-docker exec fern-lab sh -c 'truncate -s 40G /var/lib/fern-img/pool.img && mkfs.btrfs -q /var/lib/fern-img/pool.img \
-  && mkdir -p /var/lib/fern && mount -o loop /var/lib/fern-img/pool.img /var/lib/fern'
-docker exec fern-lab kubectl get nodes
-```
 
 ### 1.1 The remote machine (from week 4)
 - **Node 1:** 8 GB RAM, 2–4 vCPU, NVMe, a recent kernel (6.7+ for btrfs simple quotas; 1.36+ Kubernetes for user namespaces). For example, Netcup VPS 1000 G12, or a Hetzner CX/CAX if available. Check prices in the console first.
@@ -45,16 +37,16 @@ docker exec fern-lab kubectl get nodes
 
 ### 1.2 Bootstrap on the VPS (week 4)
 `lab/vps.sh HOST`, from the Mac, as root over SSH. Every step skips what is done, so running it again updates Fern:
-- **The pool:** a sparse 50 GB image file on the server's own disk, btrfs, loop-mounted `noatime` at `/var/lib/fern` from fstab; k3s waits for the mount. A network volume would be slower.
-- **gVisor:** a pinned release, checked against its SHA-512, registered with k3s's containerd before k3s first starts; RuntimeClass `gvisor`.
-- **k3s:** a pinned version with `deploy/k3s-config.yaml`; then a pinned agent-sandbox release.
-- **Fern and T3:** `lab/build.sh t3` builds the images on the Mac and streams them to the node's containerd, so the VPS needs the Mac's CPU architecture (ARM for an M-series Mac).
+- **The pool:** a sparse 50 GB image file on the server's own disk, btrfs, loop-mounted `noatime` at `/var/lib/fern` from fstab; Fern's units wait for the mount. A network volume would be slower.
+- **gVisor:** a pinned release, checked against its SHA-512, in `/usr/local/bin`.
+- **A firewall:** nftables lets only SSH in from the public interface.
+- **Fern and T3:** `lab/build.sh t3` builds the images on the Mac, installs `fern` and `fern-daemon`, streams the images into the pool (`fern image load`) and installs and starts `deploy/systemd/`, so the VPS needs the Mac's CPU architecture (ARM for an M-series Mac). A VPS set up with k3s before is moved over: k3s is removed, the pool stays.
 
-With `FERN_HOST=HOST`, the lab's scripts (`check.sh`, `fern`, `claude-login.sh`, `t3-pair.sh`, `build.sh`) work on the VPS. Only SSH may be reachable from outside: a firewall in front of the server must close the Kubernetes API and T3's NodePort.
+With `FERN_HOST=HOST`, the lab's scripts (`check.sh`, `fern`, `claude-login.sh`, `t3-pair.sh`, `build.sh`) work on the VPS. Only SSH may be reachable from outside: a firewall in front of the server must close T3's port too.
 
 ### 1.3 Fast inner loop
 - **Unit tests** run anywhere (`go test -race ./...`), using the fake driver. That works on the Mac inside a Go container, or on the VM.
-- **Integration tests** run against k3s, in the local lab first and on the VM before each tag: `lab/build.sh` builds the images and restarts the pods, then `lab/check.sh` runs the checks by section (E0 is `box`, E1 is `disk`, E4 is `box`): by default the quick ones (slice, box, stream, restore, paths, golden, t3; 36 s in the lab, 103 s on the VPS from the Mac), with `all` every one. Sections run four at a time, each with an environment of its own, except those that restart the daemon or the node or load it (idle, daemon, node, many), which run alone after; `JOBS=1` runs them one by one, for timings undisturbed by the others. The scripts run the fern CLI on the node, against the daemon's socket, rather than through `kubectl exec` (70 ms a command instead of 200 in the lab).
+- **Integration tests** run in the local lab first and on the VM before each tag: `lab/build.sh` builds the images and restarts the services, then `lab/check.sh` runs the checks by section (E0 is `box`, E1 is `disk`, E4 is `box`): by default the quick ones (slice, box, stream, restore, paths, golden, t3; 36 s in the lab, 103 s on the VPS from the Mac), with `all` every one. Sections run four at a time, each with an environment of its own, except those that restart the daemon or the node or load it (idle, daemon, node, many), which run alone after; `JOBS=1` runs them one by one, for timings undisturbed by the others. The scripts run the fern CLI on the node, against the daemon's socket.
 - **Rules:**
   - Everything Fern creates is labelled `app.kubernetes.io/part-of=fern`, so cleanup is `helm uninstall fern` plus deleting the pool.
   - No credentials in images or snapshots. Agent logins are done by you on the VM and mounted from outside `live/`.

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # From nothing to a working Fern with T3, in one command; run it again any
 # time, as every step skips what is done:
-#   lab/setup.sh                 the local lab (k3s in Docker on this Mac)
+#   lab/setup.sh                 the local lab (a systemd node in Docker on this Mac)
 #   FERN_HOST=1.2.3.4 lab/setup.sh   a VPS, as root over SSH (lab/vps.sh)
-# It starts or updates the cluster with T3, asks once for Claude's login
+# It starts or updates the node with T3, asks once for Claude's login
 # (`claude setup-token`, your subscription), runs the quick checks and
 # prints the pairing link for the T3 app: Settings → Connections.
 set -euo pipefail
@@ -31,7 +31,7 @@ else
   port=30773
 fi
 
-if ! k -n fern-boxes get secret claude-login >/dev/null 2>&1; then
+if ! on_node test -s /etc/fern/claude.env </dev/null; then
   echo "== Claude's login: run 'claude setup-token' in another terminal and paste its token"
   lab/claude-login.sh
 fi

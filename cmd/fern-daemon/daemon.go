@@ -1,5 +1,7 @@
-// Command fern-daemon runs the node daemon and CSI plugin. The fern CLI
-// also starts it with "fern daemon".
+// Command fern-daemon runs the node daemon: as a systemd service on its
+// node (deploy/systemd), or in a Kubernetes cluster as a DaemonSet
+// (deploy/fern.yaml), where it is also the CSI plugin. The fern CLI also
+// starts it with "fern daemon".
 package main
 
 import (
@@ -57,8 +59,13 @@ const (
 	socket    = "/run/fern/fern.sock"
 	pool      = "/var/lib/fern"
 	csiSocket = "/csi/csi.sock"
-	// boxImage is what lab/build.sh builds and imports into every node.
+	// boxImage is what lab/build.sh builds and loads into every node (fern
+	// image load), and imports into containerd for --boxes=kubernetes.
 	boxImage = "fern-box:dev"
+	// loginFile holds Claude's login outside a cluster, as
+	// CLAUDE_CODE_OAUTH_TOKEN=…, readable by root only. T3's server reads
+	// it as its environment.
+	loginFile = "/etc/fern/claude.env"
 	// runscState is runsc's state directory on the node, with --boxes=runsc,
 	// and runscBundles the boxes' bundles: both on the node's tmpfs.
 	runscState   = "/run/fern/runsc"
@@ -101,7 +108,16 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	// In a cluster, Kubernetes holds Claude's login and serves boxes'
+	// volumes through the CSI plugin; on its own, the node does.
+	inCluster := os.Getenv("KUBERNETES_SERVICE_HOST") != ""
 	node := os.Getenv("NODE_NAME")
+	if node == "" && !inCluster {
+		var err error
+		if node, err = os.Hostname(); err != nil {
+			return err
+		}
+	}
 	if node == "" {
 		return errors.New("NODE_NAME is not set")
 	}
@@ -119,18 +135,26 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	for _, dir := range lost {
 		log.WarnContext(ctx, "environment directory not in the index; left for a person to remove", slog.String("dir", dir))
 	}
-	kube, err := kubeClient()
-	if err != nil {
-		return err
+	var kube client.WithWatch
+	login := fileLogin(loginFile)
+	if inCluster {
+		if kube, err = kubeClient(); err != nil {
+			return err
+		}
+		login = secretLogin(kube)
+	} else if *boxes != "runsc" {
+		return fmt.Errorf("--boxes=%s needs a Kubernetes cluster", *boxes)
 	}
 	// T3's server runs as the box user, and uses the API too.
 	apiLis, err := listenUnix(ctx, socket, store.BoxGID)
 	if err != nil {
 		return err
 	}
-	csiLis, err := listenUnix(ctx, csiSocket, -1)
-	if err != nil {
-		return err
+	var csiLis net.Listener
+	if inCluster {
+		if csiLis, err = listenUnix(ctx, csiSocket, -1); err != nil {
+			return err
+		}
 	}
 	metricsLis, err := new(net.ListenConfig).Listen(ctx, "tcp", *metricsAddr)
 	if err != nil {
@@ -158,9 +182,15 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	case "kubernetes":
 		drv = driver.New(kube, node, boxImage, *runtimeClass, tr)
 	case "runsc":
-		r := runsc.New(runsc.NodeHost, runsc.Config{
-			Pool: pool, Bundles: runscBundles, State: runscState, Image: "docker.io/library/" + boxImage,
-			DNS: strings.Split(*boxDNS, ","), Login: claudeLogin(kube), Agents: *agentBoxes, MCPPort: mcpPort,
+		host := runsc.NodeHost
+		if onNode, err := runsc.OnNode(); err != nil {
+			return err
+		} else if onNode {
+			host = runsc.LocalHost
+		}
+		r := runsc.New(host, runsc.Config{
+			Pool: pool, Bundles: runscBundles, State: runscState, Images: filepath.Join(pool, "images"), Image: boxImage,
+			DNS: strings.Split(*boxDNS, ","), Login: login, Agents: *agentBoxes, MCPPort: mcpPort,
 		}, tr)
 		// Golden keys name the image's content, not its tag.
 		if image, err = r.Prepare(ctx); err != nil {
@@ -205,7 +235,9 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	grpcSrv := grpc.NewServer()
-	csi.New(node, st.Get, log).Register(grpcSrv)
+	if csiLis != nil {
+		csi.New(node, st.Get, log).Register(grpcSrv)
+	}
 	log.InfoContext(ctx, "fern daemon started", slog.String("node", node))
 	// Changes outlive their requests: Run returns once they have ended, and
 	// the store stays open until then.
@@ -231,12 +263,14 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 			return nil
 		})
 	}
-	g.Go(func() error {
-		if err := grpcSrv.Serve(csiLis); err != nil {
-			return fmt.Errorf("csi: %w", err)
-		}
-		return nil
-	})
+	if csiLis != nil {
+		g.Go(func() error {
+			if err := grpcSrv.Serve(csiLis); err != nil {
+				return fmt.Errorf("csi: %w", err)
+			}
+			return nil
+		})
+	}
 	g.Go(func() error {
 		<-ctx.Done()
 		grpcSrv.GracefulStop()
@@ -255,9 +289,30 @@ type boxDriver interface {
 	prometheus.Collector
 }
 
-// claudeLogin returns a function that reads Claude's login from its Secret
+// fileLogin returns a function that reads Claude's login from file, a line
+// CLAUDE_CODE_OAUTH_TOKEN=…, at every wake, so a new login needs no
+// restart: "" while there is none.
+func fileLogin(file string) func(ctx context.Context) (string, error) {
+	return func(context.Context) (string, error) {
+		data, err := os.ReadFile(file)
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", nil
+		}
+		if err != nil {
+			return "", err
+		}
+		for line := range strings.Lines(string(data)) {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(line), "CLAUDE_CODE_OAUTH_TOKEN="); ok {
+				return v, nil
+			}
+		}
+		return "", nil
+	}
+}
+
+// secretLogin returns a function that reads Claude's login from its Secret
 // at every wake, as kubelet does for a pod: "" while there is none.
-func claudeLogin(kube client.Client) func(ctx context.Context) (string, error) {
+func secretLogin(kube client.Client) func(ctx context.Context) (string, error) {
 	return func(ctx context.Context) (string, error) {
 		var s corev1.Secret
 		err := kube.Get(ctx, client.ObjectKey{Namespace: csi.BoxNamespace, Name: "claude-login"}, &s)

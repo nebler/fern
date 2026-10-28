@@ -1,5 +1,9 @@
-# Fern for the local lab: the daemon (with its CSI node plugin) on every node,
-# and a namespace for boxes. Helm replaces this in week 5.
+# Fern in an existing Kubernetes cluster: the daemon (with its CSI node
+# plugin) on every node, and a namespace for boxes. On one machine Fern runs
+# as systemd services instead (deploy/systemd), which is what the lab tests.
+# Each node needs the box image in its pool first, as root on the node:
+#   docker save fern-box:dev | fern image load
+# and Claude's login in the Secret claude-login (key token) in fern-boxes.
 apiVersion: v1
 kind: Namespace
 metadata:
