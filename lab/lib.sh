@@ -174,7 +174,8 @@ load_images() {
     fi
   done
   [ ${#changed[@]} -gt 0 ] || return 0
-  docker save --platform "linux/$arch" "${changed[@]}" | on_node "$FERN_CLI" image load >/dev/null
+  # Compressed on the way: a Mac's upload to a VPS is the slow part.
+  docker save --platform "linux/$arch" "${changed[@]}" | gzip -1 | on_node sh -c "gunzip | $FERN_CLI image load" >/dev/null
   for i in "${!changed[@]}"; do
     echo "${ids[$i]}" | on_node sh -c "mkdir -p /var/lib/fern-images && cat >/var/lib/fern-images/${changed[$i]//[\/:]/-}"
   done
