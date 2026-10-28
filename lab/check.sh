@@ -198,9 +198,11 @@ box_uids() {
   for i in $(seq "$2"); do pod_uid "$1$i"; done | tr '\n' ' '
 }
 # restart_node restarts the node, and with it every box: the lab's
-# container, or a VPS's machine.
+# container. A VPS loses power instead: its services stop and every box is
+# killed, as at a crash, then they start again. A real reboot (REBOOT=1)
+# risks a machine that doesn't come back without its provider's console.
 restart_node() {
-  if [ -n "$FERN_HOST" ]; then
+  if [ -n "$FERN_HOST" ] && [ "${REBOOT:-}" = 1 ]; then
     on_node systemctl reboot </dev/null || true
     sleep 15
     local i
@@ -209,6 +211,10 @@ restart_node() {
       [ "$i" = 150 ] && { echo "the VPS isn't back 5 minutes after its reboot" >&2; return 1; }
       sleep 2
     done
+  elif [ -n "$FERN_HOST" ]; then
+    on_node sh -c 'systemctl kill -s KILL fern-daemon fern-t3; systemctl stop fern-daemon fern-t3
+      echo 1 >/sys/fs/cgroup/fern/cgroup.kill
+      systemctl start fern-daemon; systemctl is-enabled -q fern-t3 && systemctl start fern-t3' </dev/null || true
   else
     docker restart "$LAB" >/dev/null
   fi
