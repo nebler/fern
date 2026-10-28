@@ -52,6 +52,13 @@ func (t tracedStore) Get(ctx context.Context, id string) (store.Env, error) {
 	return env, err
 }
 
+func (t tracedStore) List(ctx context.Context) ([]store.Env, error) {
+	ctx, span := t.tr.Start(ctx, "store.list")
+	envs, err := t.st.List(ctx)
+	endSpan(span, err)
+	return envs, err
+}
+
 func (t tracedStore) Delete(ctx context.Context, id string) error {
 	ctx, span := startSpan(ctx, t.tr, "store.delete", id)
 	err := t.st.Delete(ctx, id)

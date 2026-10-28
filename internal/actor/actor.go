@@ -28,6 +28,7 @@ import (
 type Store interface {
 	Create(ctx context.Context, id string, opts store.CreateOptions) (store.Env, error)
 	Get(ctx context.Context, id string) (store.Env, error)
+	List(ctx context.Context) ([]store.Env, error)
 	Delete(ctx context.Context, id string) error
 	Snapshot(ctx context.Context, id, snapID string) error
 	DeleteSnapshot(ctx context.Context, id, snapID string) error

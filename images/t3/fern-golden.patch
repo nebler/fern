@@ -1,0 +1,188 @@
+diff --git a/apps/server/src/checkpointing/FernCheckpointStore.test.ts b/apps/server/src/checkpointing/FernCheckpointStore.test.ts
+index ccf0f173..226d13a2 100644
+--- a/apps/server/src/checkpointing/FernCheckpointStore.test.ts
++++ b/apps/server/src/checkpointing/FernCheckpointStore.test.ts
+@@ -91,7 +91,8 @@ const fakeApi = (socketPath: string, status: number) =>
+       req.setEncoding("utf8");
+       req.on("data", (chunk: string) => { body += chunk; });
+       req.on("end", () => {
+-        requests.push({ method: req.method, path: req.url, body: body === "" ? undefined : JSON.parse(body) });
++        const json = body !== "" && req.headers["content-type"] === "application/json";
++        requests.push({ method: req.method, path: req.url, body: json ? JSON.parse(body) : body || undefined });
+         res.writeHead(status).end();
+       });
+     });
+@@ -236,6 +237,44 @@ it.layer(layerTest)("FernCheckpointStore", (it) => {
+     );
+   });
+ 
++  describe("prebuildGolden", () => {
++    it.effect("sends the project's committed files to Fern, named after its folder", () =>
++      Effect.gen(function* () {
++        const { fileSystem, tmp, workspace } = yield* setUp;
++        const socketPath = NodePath.join(tmp, "api.sock");
++        const requests = yield* fakeApi(socketPath, 204);
++        yield* fileSystem.writeFileString(NodePath.join(workspace, "uncommitted.env"), "SECRET=1\n");
++
++        yield* FernCheckpointStore.prebuildGolden(workspace, { pool: NodePath.join(tmp, "pool"), socketPath });
++        yield* FernCheckpointStore.prebuildGolden(workspace, { pool: undefined, socketPath });
++
++        expect(requests.map(({ method, path }) => ({ method, path }))).toEqual([
++          { method: "PUT", path: "/goldens/feature" },
++        ]);
++        const tar = String(requests[0]?.body);
++        expect(tar).toContain("README.md");
++        expect(tar).toContain("# test");
++        expect(tar).not.toContain("SECRET");
++      }),
++    );
++
++    it.effect("sends nothing for a folder without a commit, and never fails", () =>
++      Effect.gen(function* () {
++        const { fileSystem, tmp } = yield* setUp;
++        const socketPath = NodePath.join(tmp, "api.sock");
++        const requests = yield* fakeApi(socketPath, 204);
++        const empty = NodePath.join(tmp, "empty");
++        yield* fileSystem.makeDirectory(empty);
++        const pool = NodePath.join(tmp, "pool");
++
++        yield* FernCheckpointStore.prebuildGolden(empty, { pool, socketPath });
++        yield* FernCheckpointStore.prebuildGolden(empty, { pool, socketPath: NodePath.join(tmp, "nothing.sock") });
++
++        expect(requests).toEqual([]);
++      }),
++    );
++  });
++
+   describe("prewakeWhileOpen", () => {
+     for (const [open, wanted] of [["1 second", 0], ["3 seconds", 1]] as const) {
+       it.effect(`wakes ahead a thread whose stream is open ${open}: ${wanted}`, () =>
+diff --git a/apps/server/src/checkpointing/FernCheckpointStore.ts b/apps/server/src/checkpointing/FernCheckpointStore.ts
+index f72f1b26..41ed276d 100644
+--- a/apps/server/src/checkpointing/FernCheckpointStore.ts
++++ b/apps/server/src/checkpointing/FernCheckpointStore.ts
+@@ -5,6 +5,7 @@
+  * `<pool>/worktrees/<repo>/<name>` is a Fern environment, and every checkpoint there is also a
+  * Fern snapshot. Git checkpoints still run, so diffs work as before.
+  */
++import * as NodeChildProcess from "node:child_process";
+ import * as NodeCrypto from "node:crypto";
+ import * as NodeHttp from "node:http";
+ import * as NodePath from "node:path";
+@@ -36,6 +37,9 @@ const FERN_SOCKET = "/run/fern/fern.sock";
+ // Fern answers a pre-wake at once; one that takes longer is lost, not waited for.
+ const PREWAKE_TIMEOUT_MS = 5_000;
+ 
++// Fern takes a checkout as fast as git archive makes it, and builds after it answers.
++const PREBUILD_TIMEOUT_MS = 120_000;
++
+ const digest = (value: string, length: number) =>
+   NodeCrypto.createHash("sha256").update(value).digest("hex").slice(0, length);
+ 
+@@ -67,23 +71,27 @@ const post = (socketPath: string, path: string, body?: unknown) =>
+       const req = NodeHttp.request({
+         socketPath, path, method: "POST", signal,
+         headers: body === undefined ? {} : { "content-type": "application/json" },
+-      }, (res) => {
+-        let error = "";
+-        res.setEncoding("utf8");
+-        res.on("data", (chunk: string) => { error += chunk.slice(0, 4096 - error.length); });
+-        res.on("error", reject);
+-        res.on("end", () => {
+-          const status = res.statusCode ?? 500;
+-          if (status >= 200 && status < 300) resolve();
+-          else reject(new Error(`fern ${path}: HTTP ${status}: ${error}`));
+-        });
+-      });
++      }, answer(path, resolve, reject));
+       req.on("error", reject);
+       req.end(body === undefined ? undefined : JSON.stringify(body));
+     }),
+     catch: (cause) => new FernApiError({ path, cause }),
+   });
+ 
++// Settles a request to path: resolves on a 2xx answer, rejects with the answer's start otherwise.
++const answer = (path: string, resolve: () => void, reject: (error: unknown) => void) =>
++  (res: NodeHttp.IncomingMessage) => {
++    let error = "";
++    res.setEncoding("utf8");
++    res.on("data", (chunk: string) => { error += chunk.slice(0, 4096 - error.length); });
++    res.on("error", reject);
++    res.on("end", () => {
++      const status = res.statusCode ?? 500;
++      if (status >= 200 && status < 300) resolve();
++      else reject(new Error(`fern ${path}: HTTP ${status}: ${error}`));
++    });
++  };
++
+ /**
+  * Asks Fern to wake environment env's box ahead of its next turn, so the turn doesn't wait for
+  * the wake. Fern answers at once and puts a box no turn comes to back to sleep. A pre-wake is
+@@ -112,6 +120,46 @@ export const prewakeWorktree = (worktreePath: string, options: PrewakeOptions =
+     : prewake(options.socketPath ?? FERN_SOCKET, fernEnvironmentId(workspace));
+ };
+ 
++/**
++ * Sends the committed files of the project at workspaceRoot, as a new worktree has them, to
++ * Fern, which builds the project's golden snapshot from them: its services' data made once
++ * (such as a database's initdb and seed), which every worktree starts from. Sent when the
++ * project is added, the first thread starts from it too, rather than making that data itself.
++ * Only an optimization, so a failure (no commit yet, no daemon) is logged, never returned.
++ */
++export const prebuildGolden = (workspaceRoot: string, options: PrewakeOptions = {}) => {
++  const pool = "pool" in options ? options.pool : process.env.FERN_POOL?.trim();
++  if (!pool) return Effect.void;
++  const socketPath = options.socketPath ?? FERN_SOCKET;
++  // T3 names a project's worktrees' folder after its checkout's, and so does Fern its goldens.
++  const repo = NodePath.basename(NodePath.resolve(workspaceRoot));
++  const path = `/goldens/${encodeURIComponent(repo)}`;
++  return Effect.tryPromise({
++    try: (signal) => new Promise<void>((resolve, reject) => {
++      const req = NodeHttp.request({
++        socketPath, path, method: "PUT", signal, headers: { "content-type": "application/x-tar" },
++      }, answer(path, resolve, reject));
++      req.on("error", reject);
++      const git = NodeChildProcess.spawn("git", ["archive", "--format=tar", "HEAD"], {
++        cwd: workspaceRoot, signal, stdio: ["ignore", "pipe", "ignore"],
++      });
++      git.on("error", (error) => req.destroy(error));
++      // The tar ends only if git succeeded: a cut one is refused, not built.
++      git.stdout.pipe(req, { end: false });
++      git.on("close", (code) => {
++        if (code === 0) req.end();
++        else req.destroy(new Error(`git archive: exit ${code}`));
++      });
++    }),
++    catch: (cause) => new FernApiError({ path, cause }),
++  }).pipe(
++    Effect.timeout(PREBUILD_TIMEOUT_MS),
++    Effect.catch((cause) =>
++      Effect.logDebug("FernCheckpointStore: Fern couldn't build ahead", { workspaceRoot, cause }),
++    ),
++  );
++};
++
+ /**
+  * A thread whose stream stays open this long is being looked at, and its next turn is likely
+  * soon. Threads only clicked past aren't woken.
+diff --git a/apps/server/src/project/ProjectService.ts b/apps/server/src/project/ProjectService.ts
+index 1cfb2e09..972cfc78 100644
+--- a/apps/server/src/project/ProjectService.ts
++++ b/apps/server/src/project/ProjectService.ts
+@@ -17,6 +17,7 @@ import * as Option from "effect/Option";
+ import * as Result from "effect/Result";
+ import * as Schema from "effect/Schema";
+ 
++import * as FernCheckpointStore from "../checkpointing/FernCheckpointStore.ts";
+ import * as EventSink from "../orchestration-v2/EventSink.ts";
+ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+ import * as LegacyV1ThreadImporter from "../orchestration-v2/legacy/LegacyV1ThreadImporter.ts";
+@@ -341,6 +342,8 @@ export const make = Effect.gen(function* () {
+         ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
+       });
+       yield* projectEnrichment.invalidate([workspaceRoot]);
++      // Fern builds the project's golden snapshot now, rather than with its first thread.
++      yield* FernCheckpointStore.prebuildGolden(workspaceRoot).pipe(Effect.forkDetach);
+       return yield* readCommitted(input.projectId);
+     },
+   );

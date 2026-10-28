@@ -543,8 +543,8 @@ pgload() {
   pg_load $ENV 60
 }
 
-# daemon_args sets the daemon's arguments, a JSON list, and waits for it.
-daemon_args() {
+# set_daemon_args sets the daemon's arguments, a JSON list, and waits for it.
+set_daemon_args() {
   k -n fern-system patch ds fern --type=json \
     -p "[{\"op\": \"replace\", \"path\": \"/spec/template/spec/containers/0/args\", \"value\": $1}]" >/dev/null
   wait_daemon
@@ -555,7 +555,7 @@ idle() {
   # The deployed arguments, such as the runtime class, stay.
   local args
   args=$(k -n fern-system get ds fern -o jsonpath='{.spec.template.spec.containers[0].args}')
-  daemon_args "${args%]}, \"--idle-agent=5s\", \"--idle-human=10s\"]"
+  set_daemon_args "${args%]}, \"--idle-agent=5s\", \"--idle-human=10s\"]"
   fresh $ENV
   fern exec $ENV -- true
   check "a box is awake after a command" running "$(state $ENV)"
@@ -573,7 +573,7 @@ idle() {
   wait_daemon
   sleep 10
   check "a box awake across a daemon restart goes to sleep too" asleep "$(asleep_within $ENV 5)"
-  daemon_args "$args"
+  set_daemon_args "$args"
 }
 
 daemon() {
@@ -825,6 +825,29 @@ golden() {
   metric golden.first_wake_cold_ms "first wake without one (initdb and seed), ms" "$(resource_op golden.first_wake_cold wake gold1 | took)"
   check "and Postgres runs on it (3 users)" 3 "$(sql gold2 'select count(*) from users')"
   for e in gold1 gold2 "$G"; do fern rm "$e"; done
+  in_daemon "rm -rf $W"
+
+  # T3 sends a project's checkout when it is added, so that even its first
+  # worktree starts from a golden.
+  W=/var/lib/fern/worktrees/golden-pre
+  G=$(golden_id golden-pre)
+  for e in gold3 "$G"; do fern rm "$e" 2>/dev/null || true; done
+  tar_dir lab/sample-repo | on_node -i "$FERN_CLI" prebuild golden-pre
+  start=$(now_ms)
+  key=
+  for _ in $(seq 120); do
+    key=$(fern snapshots "$G" 2>/dev/null | awk '$1 ~ /^golden-/ { print $1 }')
+    [ -n "$key" ] && break
+    sleep 1
+  done
+  metric golden.prebuild_ms "golden build from a project's checkout, ms" $(($(now_ms) - start))
+  check "a project's checkout is built into a golden" 1 "$(grep -c . <<<"$key")"
+  check "its source environment is gone" no "$(succeeds in_daemon "test -e /var/lib/fern/envs/$G-src")"
+  tar_dir lab/sample-repo | in_daemon "rm -rf $W/one && mkdir -p $W/one && tar -x -C $W/one -f - && chown -R 1000:1000 $W/one"
+  fern create gold3 --path $W/one >/dev/null
+  check "the project's first worktree has the database before its first wake" yes \
+    "$(in_daemon "test -e $W/one/.fern/seeded" && echo yes || echo no)"
+  for e in gold3 "$G"; do fern rm "$e"; done
   in_daemon "rm -rf $W"
 }
 

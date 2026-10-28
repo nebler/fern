@@ -40,7 +40,7 @@ type Driver interface {
 // dialTimeout bounds connecting to a box and its WebSocket handshake.
 const dialTimeout = 10 * time.Second
 
-// errBadBody means a request's body isn't the JSON its route takes.
+// errBadBody means a request's body isn't what its route takes.
 var errBadBody = errors.New("bad request body")
 
 // Server handles API requests. Reads go to the store and the driver; every
@@ -84,6 +84,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /envs/{id}/sleep", s.handle(s.sleep))
 	mux.HandleFunc("POST /envs/{id}/wake", s.handle(s.wake))
 	mux.HandleFunc("POST /envs/{id}/prewake", s.handle(s.prewake))
+	mux.HandleFunc("PUT /goldens/{repo}", s.handle(s.prebuild))
 	// WebSocket handshakes are GET requests.
 	mux.HandleFunc("GET /envs/{id}/exec", s.exec)
 	return mux
@@ -158,6 +159,16 @@ func (s *Server) create(r *http.Request) (any, error) {
 		opts.Seed = r.Body
 	}
 	return nil, s.envs.Create(r.Context(), r.PathValue("id"), opts)
+}
+
+// prebuild builds the golden snapshot of a repository from its checkout, a
+// tar stream, ahead of its first worktree: T3 sends it when a project is
+// added. The answer comes before the build.
+func (s *Server) prebuild(r *http.Request) (any, error) {
+	if r.Header.Get("Content-Type") != "application/x-tar" {
+		return nil, fmt.Errorf("a checkout as application/x-tar: %w", errBadBody)
+	}
+	return nil, s.envs.Prebuild(r.Context(), r.PathValue("repo"), r.Body)
 }
 
 func (s *Server) delete(r *http.Request) (any, error) {

@@ -3,6 +3,7 @@ package actor
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"path/filepath"
 	"slices"
@@ -44,16 +45,62 @@ func (g *Group) golden(ctx context.Context, id, workspace string) (*store.Snapsh
 		return nil, nil
 	}
 	builder := setup.ID(repo)
-	snaps, err := g.store.Snapshots(ctx, builder)
-	if err == nil && slices.ContainsFunc(snaps, func(s store.Snapshot) bool { return s.ID == key }) {
+	if g.hasSnapshot(ctx, builder, key) {
 		g.goldens.WithLabelValues("hit").Inc()
 		return &store.SnapshotRef{Env: builder, Snapshot: key}, nil
 	}
+	g.goldens.WithLabelValues("miss").Inc()
+	return nil, &build{src: store.SnapshotRef{Env: id, Snapshot: goldenSource}}
+}
+
+// hasSnapshot reports whether environment id has snapshot snapID, such as a
+// builder its golden snapshot.
+func (g *Group) hasSnapshot(ctx context.Context, id, snapID string) bool {
+	snaps, err := g.store.Snapshots(ctx, id)
 	if err != nil && !errors.Is(err, store.ErrNotFound) {
 		g.log.WarnContext(ctx, "looking for a golden snapshot failed", slog.String("env", id), slog.Any("error", err))
 	}
-	g.goldens.WithLabelValues("miss").Inc()
-	return nil, &build{src: store.SnapshotRef{Env: id, Snapshot: goldenSource}}
+	return err == nil && slices.ContainsFunc(snaps, func(s store.Snapshot) bool { return s.ID == snapID })
+}
+
+// Prebuild builds the golden snapshot of repo from seed, a tar stream of its
+// checkout, unless repo has one for that checkout already or no setup
+// contract: then a project's first thread starts from a golden too, rather
+// than paying its services' first start (such as initdb) itself. The build
+// runs after Prebuild returns, in the order builds are queued. A prebuild of
+// a repo whose last one is still waiting for its build does nothing.
+func (g *Group) Prebuild(ctx context.Context, repo string, seed io.Reader) error {
+	id := setup.SourceID(repo)
+	return g.do(ctx, "golden_prebuild", id, func(ctx context.Context, _ *actor) error {
+		if g.hasSnapshot(ctx, id, goldenSource) {
+			return nil // the source of a build that is queued
+		}
+		// What a prebuild that failed left, if anything.
+		if err := g.store.Delete(ctx, id); err != nil && !errors.Is(err, store.ErrNotFound) {
+			return err
+		}
+		env, err := g.store.Create(ctx, id, store.CreateOptions{Seed: seed})
+		var key string
+		if err == nil {
+			key, err = setup.Key(env.Workspace, g.image)
+		}
+		if errors.Is(err, setup.ErrNoContract) || err == nil && g.hasSnapshot(ctx, setup.ID(repo), key) {
+			return g.store.Delete(ctx, id)
+		}
+		if err == nil {
+			// The snapshot marks the build as under way: a daemon that stops
+			// before the build finds it at its next start (buildGoldens).
+			err = g.store.Snapshot(ctx, id, goldenSource)
+		}
+		if err != nil {
+			if delErr := g.store.Delete(ctx, id); delErr != nil {
+				g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", id), slog.Any("error", delErr))
+			}
+			return err
+		}
+		g.queueBuild(ctx, &build{src: store.SnapshotRef{Env: id, Snapshot: goldenSource}})
+		return nil
+	})
 }
 
 // queueBuild hands b to the builder, or drops it and its source if the
@@ -63,7 +110,11 @@ func (g *Group) queueBuild(ctx context.Context, b *build) {
 	case g.builds <- *b:
 	default:
 		g.log.WarnContext(ctx, "golden build queue full; dropped", slog.String("env", b.src.Env))
-		if err := g.store.DeleteSnapshot(ctx, b.src.Env, b.src.Snapshot); err != nil {
+		err := g.store.DeleteSnapshot(ctx, b.src.Env, b.src.Snapshot)
+		if _, ok := setup.BuilderOf(b.src.Env); ok && err == nil {
+			err = g.store.Delete(ctx, b.src.Env) // a prebuild's source holds nothing else
+		}
+		if err != nil {
 			g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", b.src.Env), slog.Any("error", err))
 		}
 	}
@@ -80,6 +131,7 @@ func (g *Group) buildGoldens(ctx context.Context) {
 	for _, src := range srcs {
 		g.queueBuild(ctx, &build{src: src})
 	}
+	g.clearSources(ctx, srcs)
 	for {
 		select {
 		case <-ctx.Done():
@@ -94,6 +146,30 @@ func (g *Group) buildGoldens(ctx context.Context) {
 			if err := g.DeleteSnapshot(ctx, b.src.Env, b.src.Snapshot); err != nil && !errors.Is(err, store.ErrNotFound) {
 				g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", b.src.Env), slog.Any("error", err))
 			}
+			if _, ok := setup.BuilderOf(b.src.Env); ok {
+				if err := g.Delete(ctx, b.src.Env); err != nil && !errors.Is(err, store.ErrNotFound) {
+					g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", b.src.Env), slog.Any("error", err))
+				}
+			}
+		}
+	}
+}
+
+// clearSources deletes the source environments of prebuilds (Prebuild) that
+// stopped before their source snapshot, which marks a build under way: they
+// aren't among srcs.
+func (g *Group) clearSources(ctx context.Context, srcs []store.SnapshotRef) {
+	envs, err := g.store.List(ctx)
+	if err != nil {
+		g.log.WarnContext(ctx, "looking for golden sources failed", slog.Any("error", err))
+		return
+	}
+	for _, env := range envs {
+		if _, ok := setup.BuilderOf(env.ID); !ok || slices.ContainsFunc(srcs, func(r store.SnapshotRef) bool { return r.Env == env.ID }) {
+			continue
+		}
+		if err := g.Delete(ctx, env.ID); err != nil {
+			g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", env.ID), slog.Any("error", err))
 		}
 	}
 }
@@ -108,8 +184,14 @@ func (g *Group) buildGolden(ctx context.Context, b build) error {
 	if err != nil {
 		return err
 	}
-	repo := filepath.Base(filepath.Dir(srcEnv.Workspace))
-	id := setup.ID(repo)
+	// A prebuild's source names its builder; a worktree's repository is its
+	// parent folder.
+	id, ok := setup.BuilderOf(b.src.Env)
+	repo := id
+	if !ok {
+		repo = filepath.Base(filepath.Dir(srcEnv.Workspace))
+		id = setup.ID(repo)
+	}
 	return g.do(ctx, "golden_build", id, func(ctx context.Context, a *actor) error {
 		if _, err := g.store.Create(ctx, id, store.CreateOptions{}); err != nil {
 			return err
@@ -128,8 +210,7 @@ func (g *Group) buildGolden(ctx context.Context, b build) error {
 		if err != nil {
 			return err
 		}
-		if snaps, err := g.store.Snapshots(ctx, id); err == nil &&
-			slices.ContainsFunc(snaps, func(s store.Snapshot) bool { return s.ID == key }) {
+		if g.hasSnapshot(ctx, id, key) {
 			return nil // an earlier build made it
 		}
 		_, err = a.wake(ctx, "")

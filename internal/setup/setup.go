@@ -159,6 +159,24 @@ const builderPrefix = "golden-"
 // repository.
 func IsBuilder(id string) bool { return strings.HasPrefix(id, builderPrefix) }
 
+// sourceSuffix ends the ID of the environment that holds a checkout sent
+// ahead of a repository's first worktree, until its golden build has copied
+// it. An ID from ID ends in hex, so the suffix can't be part of one.
+const sourceSuffix = "-src"
+
+// SourceID returns the ID of the environment that holds repo's checkout for
+// a golden build ahead of its first worktree.
+func SourceID(repo string) string { return ID(repo) + sourceSuffix }
+
+// BuilderOf returns the ID of the builder whose source environment id is,
+// from SourceID, or false if id isn't one.
+func BuilderOf(id string) (string, bool) {
+	if !IsBuilder(id) {
+		return "", false
+	}
+	return strings.CutSuffix(id, sourceSuffix)
+}
+
 // ID returns the ID of the environment that builds repo's golden snapshots.
 func ID(repo string) string {
 	sum := sha256.Sum256([]byte(repo))

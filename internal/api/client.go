@@ -47,6 +47,13 @@ func (c *Client) Create(ctx context.Context, id, path string, seed io.Reader) er
 	return c.do(ctx, http.MethodPut, envPath(id)+"?"+url.Values{"path": {path}}.Encode(), seed, contentType, nil)
 }
 
+// Prebuild sends checkout, a tar stream of repository repo's files, to be
+// built into its golden snapshot ahead of its first worktree. It returns
+// before the build.
+func (c *Client) Prebuild(ctx context.Context, repo string, checkout io.Reader) error {
+	return c.do(ctx, http.MethodPut, "/goldens/"+url.PathEscape(repo), checkout, "application/x-tar", nil)
+}
+
 // FindByPath returns the environment whose workspace is path or holds it.
 func (c *Client) FindByPath(ctx context.Context, path string) (Env, error) {
 	var envs []Env

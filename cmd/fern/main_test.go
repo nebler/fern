@@ -36,6 +36,11 @@ func TestParse(t *testing.T) {
 			want: command{name: "create", args: []string{"demo"}, seed: true},
 		},
 		{
+			name: "prebuild",
+			args: []string{"prebuild", "sample"},
+			want: command{name: "prebuild", args: []string{"sample"}},
+		},
+		{
 			name: "ls",
 			args: []string{"ls"},
 			want: command{name: "ls"},

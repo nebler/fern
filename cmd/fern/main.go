@@ -126,6 +126,7 @@ func subcommands() []subcommand {
 			fs.StringVar(&c.path, "path", "", "the workspace: <pool>/worktrees/<repo>/<name>; a directory there is adopted")
 			fs.BoolVar(&c.seed, "seed", false, "fill the workspace from a tar stream on stdin")
 		}},
+		{name: "prebuild", min: 1, max: 1, run: prebuild},
 		{name: "ls", run: list},
 		{name: "which", min: 1, max: 1, run: which},
 		{name: "rm", min: 1, max: 1, run: remove},
@@ -246,6 +247,12 @@ func create(ctx context.Context, c command, cl *api.Client, std stdio) (int, err
 	}
 	_, err := fmt.Fprintf(std.out, "created environment %s\n", c.args[0])
 	return 0, err
+}
+
+// prebuild sends a repository's checkout, a tar stream on stdin, to be built
+// into its golden snapshot: git archive HEAD | fern prebuild REPO.
+func prebuild(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	return 0, cl.Prebuild(ctx, c.args[0], std.in)
 }
 
 func list(ctx context.Context, _ command, cl *api.Client, std stdio) (int, error) {

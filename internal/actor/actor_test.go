@@ -1,14 +1,18 @@
 package actor_test
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -42,6 +46,7 @@ type fakeStore struct {
 	from    map[string]*store.SnapshotRef
 	built   []string          // BuildSource and StripSource calls, in order
 	paths   map[string]string // workspaces at a path; a builder's is its source's
+	seeds   string            // where a seeded environment's workspace is unpacked: seeds/<id>
 }
 
 func newFakeStore() *fakeStore {
@@ -59,6 +64,12 @@ func (f *fakeStore) Create(_ context.Context, id string, opts store.CreateOption
 		if opts.Workspace != "" {
 			f.paths[id] = opts.Workspace
 		}
+		if opts.Seed != nil {
+			f.paths[id] = filepath.Join(f.seeds, id)
+			if err := untar(opts.Seed, f.paths[id]); err != nil {
+				return store.Env{}, err
+			}
+		}
 	}
 	f.envs[id] = true
 	return store.Env{ID: id, Workspace: f.paths[id]}, nil
@@ -71,6 +82,16 @@ func (f *fakeStore) Get(_ context.Context, id string) (store.Env, error) {
 		return store.Env{}, fmt.Errorf("environment %s: %w", id, store.ErrNotFound)
 	}
 	return store.Env{ID: id, Workspace: f.paths[id]}, nil
+}
+
+func (f *fakeStore) List(context.Context) ([]store.Env, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []store.Env
+	for id := range f.envs {
+		out = append(out, store.Env{ID: id, Workspace: f.paths[id]})
+	}
+	return out, nil
 }
 
 func (f *fakeStore) Delete(_ context.Context, id string) error {
@@ -135,6 +156,34 @@ func (f *fakeStore) Orphans(context.Context) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return slices.Clone(f.orphans), nil
+}
+
+// untar unpacks the regular files of tar stream r into dir.
+func untar(r io.Reader, dir string) error {
+	tr := tar.NewReader(r)
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if h.Typeflag != tar.TypeReg {
+			continue
+		}
+		p := filepath.Join(dir, filepath.FromSlash(h.Name))
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			return err
+		}
+		data, err := io.ReadAll(tr)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(p, data, 0o644); err != nil {
+			return err
+		}
+	}
 }
 
 var idle = actor.Idle{Agent: 5 * time.Minute, Human: 20 * time.Minute}
@@ -836,6 +885,93 @@ func TestGolden(t *testing.T) {
 		defer st.mu.Unlock()
 		if diff := cmp.Diff(&store.SnapshotRef{Env: builder, Snapshot: key}, st.from["two"]); diff != "" {
 			t.Errorf("the second worktree's golden mismatch (-want +got):\n%s", diff)
+		}
+	})
+}
+
+// tarOf returns a tar stream of files, by name.
+func tarOf(t *testing.T, files map[string]string) io.Reader {
+	t.Helper()
+	var b bytes.Buffer
+	tw := tar.NewWriter(&b)
+	for name, data := range files {
+		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: 0o644, Size: int64(len(data))}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tw.Write([]byte(data)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return &b
+}
+
+// A project's checkout, sent before its first worktree, is built into a
+// golden snapshot, which that first worktree starts from; sending it again
+// builds nothing, and a repository without a setup contract has none.
+func TestPrebuild(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		const services = "services: {pg: {run: ./pg.sh}}\n"
+		tmp := t.TempDir()
+		wt := filepath.Join(tmp, "worktrees", "sample", "one")
+		if err := os.MkdirAll(wt, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(wt, "services.yaml"), []byte(services), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		st, drv := newFakeStore(), driver.NewFake("box")
+		st.seeds = filepath.Join(tmp, "seeds")
+		g := start(t, st, drv, idle)
+		builder, src := setup.ID("sample"), setup.SourceID("sample")
+		key, err := setup.Key(wt, "box")
+		if err != nil {
+			t.Fatal(err)
+		}
+		exists := func(id string) bool {
+			_, err := st.Get(t.Context(), id)
+			return err == nil
+		}
+
+		// A checkout cut short is refused, and leaves nothing to stop the next.
+		if err := g.Prebuild(t.Context(), "sample", strings.NewReader("not a tar stream")); err == nil {
+			t.Error("Prebuild() of a broken tar stream succeeded, want an error")
+		}
+		for range 2 {
+			if err := g.Prebuild(t.Context(), "sample", tarOf(t, map[string]string{"services.yaml": services, "pg.sh": "#!/bin/sh\n"})); err != nil {
+				t.Fatal(err)
+			}
+			synctest.Wait()
+		}
+		st.mu.Lock()
+		if diff := cmp.Diff([]string{"source " + builder + " from " + src + "/golden-source", "strip " + builder}, st.built); diff != "" {
+			t.Errorf("golden builds after two prebuilds mismatch (-want +got):\n%s", diff)
+		}
+		if diff := cmp.Diff([]string{key}, st.snaps[builder]); diff != "" {
+			t.Errorf("builder's snapshots mismatch (-want +got):\n%s", diff)
+		}
+		st.mu.Unlock()
+		if exists(src) {
+			t.Errorf("source %s exists after the build, want it deleted", src)
+		}
+
+		if err := g.Create(t.Context(), "one", store.CreateOptions{Workspace: wt}); err != nil {
+			t.Fatal(err)
+		}
+		st.mu.Lock()
+		if diff := cmp.Diff(&store.SnapshotRef{Env: builder, Snapshot: key}, st.from["one"]); diff != "" {
+			t.Errorf("the first worktree's golden mismatch (-want +got):\n%s", diff)
+		}
+		st.mu.Unlock()
+
+		if err := g.Prebuild(t.Context(), "plain", tarOf(t, map[string]string{"README.md": "hi\n"})); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait()
+		if exists(setup.SourceID("plain")) || exists(setup.ID("plain")) {
+			t.Error("a repository without a setup contract left a source or a builder, want neither")
 		}
 	})
 }

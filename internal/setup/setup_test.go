@@ -120,3 +120,24 @@ func TestID(t *testing.T) {
 		ids[id] = true
 	}
 }
+
+func TestSourceID(t *testing.T) {
+	dns := regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
+	for _, repo := range []string{"sample", "src", "a-very-long-repository-name-that-goes-on-and-on"} {
+		id := setup.SourceID(repo)
+		if !dns.MatchString(id) {
+			t.Errorf("SourceID(%q) = %q, not a DNS label", repo, id)
+		}
+		if got, ok := setup.BuilderOf(id); !ok || got != setup.ID(repo) {
+			t.Errorf("BuilderOf(SourceID(%q)) = %q, %v; want %q, true", repo, got, ok, setup.ID(repo))
+		}
+		if _, ok := setup.BuilderOf(setup.ID(repo)); ok {
+			t.Errorf("BuilderOf(ID(%q)) is a source, want not", repo)
+		}
+	}
+	for _, id := range []string{"t3-abc-src", "src"} {
+		if _, ok := setup.BuilderOf(id); ok {
+			t.Errorf("BuilderOf(%q) is a source, want not: no builder's", id)
+		}
+	}
+}
