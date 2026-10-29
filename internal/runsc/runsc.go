@@ -522,8 +522,12 @@ func (d *Driver) stop(ctx context.Context, id string) error {
 	_, _ = run(ip) // fails for what is gone already
 	// runsc removes the box's cgroup only on a clean exit.
 	_ = os.Remove("/sys/fs/cgroup/" + cgroupParent + "/" + id)
-	if err := unix.Unmount(b.rootfs, 0); err != nil && !errors.Is(err, unix.EINVAL) && !errors.Is(err, fs.ErrNotExist) {
-		return fmt.Errorf("unmount %s: %w", b.rootfs, err) // EINVAL: not mounted
+	if mounted, err := isMountPoint(b.rootfs); err != nil {
+		return err
+	} else if mounted {
+		if err := unix.Unmount(b.rootfs, 0); err != nil {
+			return fmt.Errorf("unmount %s: %w", b.rootfs, err)
+		}
 	}
 	for _, dir := range []string{b.dir, b.data} {
 		if err := os.RemoveAll(dir); err != nil {
@@ -575,6 +579,22 @@ func (d *Driver) askStop(ctx context.Context, b layout) {
 	if err != nil || resp.StatusCode != http.StatusNoContent {
 		_, _ = d.runsc(ctx, "kill", b.cid, "TERM")
 	}
+}
+
+// isMountPoint reports whether something is mounted at path: the box's
+// overlay is a filesystem of its own, so its device differs from its
+// parent folder's. A path that isn't there has nothing mounted.
+func isMountPoint(path string) (bool, error) {
+	var st, parent unix.Stat_t
+	if err := unix.Lstat(path, &st); errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	} else if err != nil {
+		return false, fmt.Errorf("stat %s: %w", path, err)
+	}
+	if err := unix.Lstat(filepath.Dir(path), &parent); err != nil {
+		return false, fmt.Errorf("stat %s: %w", filepath.Dir(path), err)
+	}
+	return st.Dev != parent.Dev, nil
 }
 
 // run runs cmd and returns its stdout, or an error with its stderr.
