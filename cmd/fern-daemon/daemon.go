@@ -83,7 +83,9 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	flags.DurationVar(&cfg.Idle.Human, "idle-human", 20*time.Minute, "… and this long after it started (0: never)")
 	flags.DurationVar(&cfg.Idle.Prewake, "idle-prewake", 2*time.Minute, "sleep a box woken ahead this long after its wake, unless a command comes (0: no pre-wakes)")
 	flags.BoolVar(&cfg.Agents, "agent-boxes", true, "run Claude in a box of its own per environment, whose Bash runs in the environment's box (docs/briefs/claude-outside-the-box.md)")
-	metricsAddr := flags.String("metrics-addr", ":9090", "serve Prometheus metrics at /metrics, and Go's profiles at /debug/pprof/, on this address")
+	// Localhost only: Go's profiles cost CPU on demand, and nothing but the
+	// node itself needs them. A scraper elsewhere sets an address.
+	metricsAddr := flags.String("metrics-addr", "127.0.0.1:9090", "serve Prometheus metrics at /metrics, and Go's profiles at /debug/pprof/, on this address")
 	traceEndpoint := flags.String("trace-endpoint", "", "send traces by OTLP/HTTP to this URL, such as http://10.0.0.1:4318 (\"\": none)")
 	boxDNS := flags.String("box-dns", "1.1.1.1,8.8.8.8", "the resolvers boxes use")
 	if err := flags.Parse(args); err != nil {
@@ -195,7 +197,8 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 
 // metricsHandler serves reg's metrics at /metrics and Go's profiles at
 // /debug/pprof/. Profiles cost nothing until asked for; boxes can't reach
-// the port, as their firewall blocks the node.
+// the port, as their firewall blocks the node, and by default it listens on
+// localhost only.
 func metricsHandler(reg *prometheus.Registry) http.Handler {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))

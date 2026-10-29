@@ -3,7 +3,9 @@
 # It reaches the daemon at /run/fern/fern.sock, serves on port 30773 (the
 # port it had as a NodePort, which the lab's scripts and tunnels use), and
 # gets Claude's login from /etc/fern/claude.env for the Claude it runs
-# outside environments.
+# outside environments. It listens on every address: a firewall must keep
+# the port from the internet (lab/vps.sh installs one that lets in only
+# SSH); reach it through an SSH tunnel or a private network.
 [Unit]
 Description=T3 Code's server, on Fern
 After=fern-daemon.service

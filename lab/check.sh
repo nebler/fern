@@ -660,8 +660,8 @@ limits() {
   echo "== a box's limits"
   fresh $ENV
   fresh ${ENV}2
-  # The runtime mounts the workspace without nosuid (whatever the CSI plugin
-  # sets); no_new_privs is what makes setuid files useless in the box.
+  # The runtime mounts the workspace without nosuid; no_new_privs is what
+  # makes setuid files useless in the box.
   check "commands run with no_new_privs" 1 "$(fern exec $ENV -- grep NoNewPrivs /proc/self/status | awk '{print $2}')"
   check "the box has a CPU limit (2 cores)" "200000 100000" "$(pod_cgroup $ENV cpu.max)"
   check "the box has a PID limit" 4096 "$(pod_cgroup $ENV pids.max)"
@@ -670,11 +670,17 @@ limits() {
   check "a box can't reach another box" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:7070/")"
   check "the daemon can" ok "$(fern exec ${ENV}2 -- echo ok)"
   fern rm ${ENV}2
-  # The node's own address on the box's link: the daemon's metrics are on
-  # every address of the node.
+  # The node's own address on the box's link. The daemon's metrics listen on
+  # localhost unless --metrics-addr says otherwise; the boxes' firewall
+  # keeps them out either way.
   ip=$(box_ip $ENV | awk -F. '{ printf "%s.%s.%s.%d", $1, $2, $3, $4 - 1 }')
   check "a box can't reach the daemon's metrics" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:9090/metrics")"
   check "or T3's server" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:30773/")"
+  if [ -n "$FERN_HOST" ]; then
+    # The daemon replaces its own table (inet fern) whole at every start;
+    # the VPS's firewall, which keeps T3's port private, has another.
+    check "the VPS's firewall outlives the daemon's start" yes "$(succeeds on_node nft list table inet fern_host </dev/null)"
+  fi
   check "but reaches the internet" yes "$(succeeds fern exec $ENV -- curl -s -m 10 -o /dev/null https://api.anthropic.com/)"
 }
 

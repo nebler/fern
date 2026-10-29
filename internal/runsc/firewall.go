@@ -21,7 +21,8 @@ var blocked = []string{
 // other box, nothing on the node, and nothing but answers coming in, since
 // only the daemon, on the node, connects to a box. It is a table of its
 // own, so a drop in it is final whatever other tables accept. Loading it
-// replaces the table in one transaction, so it is safe to repeat.
+// replaces the table in one transaction, so it is safe to repeat; nothing
+// else may use the table's name (lab/vps.sh's host firewall is fern_host).
 //
 // Agent boxes (links fag*) get the same, except that they may connect to the
 // daemon's MCP port on the node; nothing else reaches that port.

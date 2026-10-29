@@ -45,13 +45,14 @@ fi
 
 # The firewall: from the public interface, only SSH may open a connection,
 # T3's port included. It loads at boot before Fern. A firewall in front is
-# still wise.
+# still wise. Its table is its own: the daemon replaces table inet fern,
+# the boxes' firewall, whole at every start.
 public=$(ip route show default | awk '{ print $5; exit }')
 mkdir -p /etc/fern
 cat >/etc/fern/firewall.nft <<NFT
-table inet fern
-delete table inet fern
-table inet fern {
+table inet fern_host
+delete table inet fern_host
+table inet fern_host {
   chain in {
     type filter hook prerouting priority -150; policy accept;
     iifname "$public" ct state new tcp dport != 22 drop

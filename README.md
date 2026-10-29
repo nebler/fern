@@ -95,6 +95,8 @@ FERN_HOST=1.2.3.4 lab/setup.sh  # or a VPS, as root over SSH
 
 It builds the images, starts the node with the daemon and T3's server, asks once for your Claude login (`claude setup-token`), runs the quick checks and prints a pairing link. In the T3 app, open Settings → Connections, paste the link, and start a thread in **New worktree**.
 
+On a VPS, `lab/setup.sh` installs a firewall that lets in only SSH: T3's port (30773) must never be public. Reach it through an SSH tunnel or a private network such as Tailscale.
+
 After a change: `lab/dev.sh` runs the unit tests, builds and runs the quick integration checks (about 3 minutes). [AGENTS.md](AGENTS.md) lists every command.
 
 ## Repository
