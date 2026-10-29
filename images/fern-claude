@@ -1,0 +1,50 @@
+#!/bin/sh
+# fern-claude is `claude` on the PATH of Fern's T3 image, so T3 runs it. In a
+# Fern workspace it runs Claude in that environment's box, in the same
+# directory, so T3, the box and Claude's transcripts all name files the same
+# way. Anywhere else (T3's version checks and probes) it runs the local
+# Claude: $FERN_LOCAL_CLAUDE, by default where the T3 image keeps it. In the
+# pool's worktrees it never does: there an agent must not run in T3's own pod,
+# with its login, the whole pool and the daemon's socket, just because the
+# daemon didn't answer or the environment wasn't made. Nor does a thread's
+# session in a project's main folder (T3's Local mode), which has no box:
+# T3 starts sessions with --session-id or --resume, its probes and the
+# commit messages it writes without.
+#
+# Only the variables Claude's SDK sets are passed on: T3's own environment,
+# and any credentials in it, stays out of the box, which gets its login from
+# the environment. fern exec passes SIGTERM on to Claude, so it can save its
+# transcript, and exits when the box goes away.
+#
+# T3 keeps a thread's Claude running between turns. fern exec --hibernate
+# stops it after $FERN_HIBERNATE (30s) with nothing to do, so the box sleeps,
+# and starts it again in its session at T3's next message; 0 keeps Claude
+# running until T3 ends it. --agent runs Claude in the environment's agent box
+# when the daemon has them (--agent-boxes): Claude's own, whose Bash runs in
+# the box with the services (docs/briefs/claude-outside-the-box.md).
+set -eu
+pool=${FERN_POOL:-/var/lib/fern}
+case "$PWD/" in
+"$pool"/worktrees/*)
+	# --here does the lookup itself and fails if the environment is missing.
+	# A preliminary `which` would add a process and repeat the same request.
+	;;
+"$pool"/repos/*)
+	for arg in "$@"; do
+		case "$arg" in
+		--session-id | --session-id=* | --resume | --resume=*)
+			echo "fern-claude: this thread works in the project's main folder, which has no Fern box or database." \
+				"Start a new thread in New worktree to get one." >&2
+			exit 1
+			;;
+		esac
+	done
+	exec "${FERN_LOCAL_CLAUDE:-/usr/local/libexec/claude}" "$@"
+	;;
+*)
+	if ! fern which "$PWD" >/dev/null 2>&1; then
+		exec "${FERN_LOCAL_CLAUDE:-/usr/local/libexec/claude}" "$@"
+	fi
+	;;
+esac
+exec fern exec -i --here --agent --hibernate "${FERN_HIBERNATE:-30s}" -e CLAUDE_CODE_ENTRYPOINT -e CLAUDE_AGENT_SDK_VERSION -e FERN_TIMING -- claude "$@"

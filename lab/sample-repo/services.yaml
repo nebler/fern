@@ -1,0 +1,14 @@
+services:
+  postgres:
+    run: ./scripts/postgres.sh
+    stop: pg_ctl stop -D .fern/pg -m fast
+    # Check the marker first to avoid spawning Postgres probes during initdb.
+    # Ready means usable: accepting connections and, the first time, seeded.
+    ready: test -e .fern/seeded && pg_isready -q
+    # Started at the first connection to its socket (PGHOST=/tmp): a turn
+    # that doesn't use the database doesn't wait for it.
+    listen: unix:/tmp/.s.PGSQL.5432
+# A golden snapshot holds the first start's database: a new thread starts
+# with it, already seeded. It is built again when these files change.
+golden:
+  inputs: [seed.sql, scripts/postgres.sh]

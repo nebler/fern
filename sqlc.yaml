@@ -1,0 +1,12 @@
+# sqlc generates internal/store/index from its schema and queries:
+# lab/sqlc.sh generate. Never edit the generated files.
+version: "2"
+sql:
+  - engine: sqlite
+    schema: internal/store/index/schema.sql
+    queries: internal/store/index/queries.sql
+    gen:
+      go:
+        package: index
+        out: internal/store/index
+        emit_empty_slices: false

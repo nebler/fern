@@ -1,0 +1,388 @@
+diff --git a/apps/server/src/checkpointing/FernCheckpointStore.test.ts b/apps/server/src/checkpointing/FernCheckpointStore.test.ts
+new file mode 100644
+index 00000000..58c1c36c
+--- /dev/null
++++ b/apps/server/src/checkpointing/FernCheckpointStore.test.ts
+@@ -0,0 +1,203 @@
++// @effect-diagnostics nodeBuiltinImport:off
++import * as NodePath from "node:path";
++
++import * as NodeServices from "@effect/platform-node/NodeServices";
++import { it } from "@effect/vitest";
++import { ThreadId } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as FileSystem from "effect/FileSystem";
++import * as Layer from "effect/Layer";
++import { describe, expect } from "vite-plus/test";
++
++import { checkpointRefForThreadTurn } from "./Utils.ts";
++import * as FernCheckpointStore from "./FernCheckpointStore.ts";
++import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
++import * as VcsProcess from "../vcs/VcsProcess.ts";
++
++const layerVcsProcessTest = VcsProcess.layer.pipe(Layer.provide(NodeServices.layer));
++const layerTest = VcsDriverRegistry.layer.pipe(
++  Layer.provideMerge(layerVcsProcessTest),
++  Layer.provideMerge(NodeServices.layer),
++);
++
++const threadId = ThreadId.make("thread-fern-checkpoint-store");
++const ref0 = checkpointRefForThreadTurn(threadId, 0);
++const ref1 = checkpointRefForThreadTurn(threadId, 1);
++
++const run = (cwd: string, args: ReadonlyArray<string>) =>
++  Effect.gen(function* () {
++    const vcsProcess = yield* VcsProcess.VcsProcess;
++    yield* vcsProcess.run({ operation: "FernCheckpointStore.test", command: "git", cwd, args });
++  });
++
++/**
++ * A pool with one git worktree, and a fake fern CLI that logs its arguments. On restore it also
++ * logs README.md as Fern finds it. Once `broken` exists, snapshot, restore and rmsnap fail.
++ */
++const setUp = Effect.gen(function* () {
++  const fileSystem = yield* FileSystem.FileSystem;
++  const tmp = yield* fileSystem.makeTempDirectoryScoped({ prefix: "fern-checkpoint-store-" });
++  const pool = NodePath.join(tmp, "pool");
++  const workspace = NodePath.join(pool, "worktrees", "repo", "feature");
++  const log = NodePath.join(tmp, "fern.log");
++  const command = NodePath.join(tmp, "fern");
++  yield* fileSystem.makeDirectory(workspace, { recursive: true });
++  yield* fileSystem.writeFileString(log, "");
++  yield* fileSystem.writeFileString(
++    command,
++    [
++      "#!/bin/sh",
++      `echo "$*" >> '${log}'`,
++      `[ -e '${tmp}/broken' ] && [ "$1" != create ] && exit 1`,
++      `[ "$1" = restore ] && echo "saw $(cat '${workspace}/README.md')" >> '${log}'`,
++      "exit 0",
++      "",
++    ].join("\n"),
++  );
++  yield* fileSystem.chmod(command, 0o755);
++  yield* run(workspace, ["init"]);
++  yield* run(workspace, ["config", "user.email", "test@test.com"]);
++  yield* run(workspace, ["config", "user.name", "Test"]);
++  yield* fileSystem.writeFileString(NodePath.join(workspace, "README.md"), "# test\n");
++  yield* run(workspace, ["add", "."]);
++  yield* run(workspace, ["commit", "-m", "initial commit"]);
++
++  const store = yield* FernCheckpointStore.make({ pool, command });
++  const env = FernCheckpointStore.fernEnvironmentId(workspace);
++  const calls = Effect.map(fileSystem.readFileString(log), (text) =>
++    text.split("\n").filter((line) => line !== ""),
++  );
++  return { fileSystem, tmp, workspace, store, env, calls };
++});
++
++it.layer(layerTest)("FernCheckpointStore", (it) => {
++  describe("captureCheckpoint", () => {
++    it.effect("adopts the worktree once, then snapshots it with every checkpoint", () =>
++      Effect.gen(function* () {
++        const { workspace, store, env, calls } = yield* setUp;
++
++        yield* store.captureCheckpoint({ cwd: workspace, checkpointRef: ref0 });
++        yield* store.captureCheckpoint({
++          cwd: `${workspace}/.`,
++          checkpointRef: ref1,
++        });
++
++        expect(yield* store.hasCheckpointRef({ cwd: workspace, checkpointRef: ref1 })).toBe(true);
++        expect(yield* calls).toEqual([
++          `create --path ${workspace} ${env}`,
++          `snapshot --replace ${env} ${FernCheckpointStore.fernSnapshotId(ref0)}`,
++          `snapshot --replace ${env} ${FernCheckpointStore.fernSnapshotId(ref1)}`,
++        ]);
++      }),
++    );
++
++    it.effect("uses the worktree's environment for a folder inside it", () =>
++      Effect.gen(function* () {
++        const { fileSystem, workspace, store, env, calls } = yield* setUp;
++        const nested = NodePath.join(workspace, "packages", "app");
++        yield* fileSystem.makeDirectory(nested, { recursive: true });
++
++        yield* store.captureCheckpoint({ cwd: nested, checkpointRef: ref0 });
++
++        expect((yield* calls)[0]).toBe(`create --path ${workspace} ${env}`);
++      }),
++    );
++
++    it.effect("keeps the git checkpoint when Fern can't snapshot", () =>
++      Effect.gen(function* () {
++        const { fileSystem, tmp, workspace, store, env, calls } = yield* setUp;
++        yield* fileSystem.writeFileString(NodePath.join(tmp, "broken"), "");
++
++        yield* store.captureCheckpoint({ cwd: workspace, checkpointRef: ref0 });
++
++        expect(yield* store.hasCheckpointRef({ cwd: workspace, checkpointRef: ref0 })).toBe(true);
++        expect((yield* calls).at(-1)).toBe(
++          `snapshot --replace ${env} ${FernCheckpointStore.fernSnapshotId(ref0)}`,
++        );
++      }),
++    );
++
++    it.effect("leaves folders outside the pool's worktrees to git", () =>
++      Effect.gen(function* () {
++        const { fileSystem, tmp, store, calls } = yield* setUp;
++        const cwd = NodePath.join(tmp, "project");
++        yield* fileSystem.makeDirectory(cwd);
++        yield* run(cwd, ["init"]);
++
++        yield* store.captureCheckpoint({ cwd, checkpointRef: ref0 });
++        yield* store.restoreCheckpoint({ cwd, checkpointRef: ref0 });
++        yield* store.deleteCheckpointRefs({ cwd, checkpointRefs: [ref0] });
++
++        expect(yield* calls).toEqual([]);
++      }),
++    );
++  });
++
++  describe("restoreCheckpoint", () => {
++    it.effect("restores Fern's snapshot before git restores the files and index", () =>
++      Effect.gen(function* () {
++        const { fileSystem, workspace, store, env, calls } = yield* setUp;
++        const readme = NodePath.join(workspace, "README.md");
++        yield* store.captureCheckpoint({ cwd: workspace, checkpointRef: ref0 });
++        yield* fileSystem.writeFileString(readme, "# changed\n");
++
++        expect(yield* store.restoreCheckpoint({ cwd: workspace, checkpointRef: ref0 })).toBe(true);
++
++        expect((yield* calls).slice(2)).toEqual([
++          `restore ${env} ${FernCheckpointStore.fernSnapshotId(ref0)}`,
++          "saw # changed",
++        ]);
++        expect(yield* fileSystem.readFileString(readme)).toBe("# test\n");
++      }),
++    );
++
++    it.effect("refuses a restore Fern can't do, before git touches the files", () =>
++      Effect.gen(function* () {
++        const { fileSystem, tmp, workspace, store } = yield* setUp;
++        const readme = NodePath.join(workspace, "README.md");
++        yield* store.captureCheckpoint({ cwd: workspace, checkpointRef: ref0 });
++        yield* fileSystem.writeFileString(readme, "# changed\n");
++        yield* fileSystem.writeFileString(NodePath.join(tmp, "broken"), "");
++
++        yield* Effect.flip(store.restoreCheckpoint({ cwd: workspace, checkpointRef: ref0 }));
++
++        expect(yield* fileSystem.readFileString(readme)).toBe("# changed\n");
++      }),
++    );
++
++    it.effect("doesn't ask Fern for a checkpoint git doesn't have", () =>
++      Effect.gen(function* () {
++        const { workspace, store, calls } = yield* setUp;
++
++        expect(yield* store.restoreCheckpoint({ cwd: workspace, checkpointRef: ref0 })).toBe(false);
++        expect(yield* calls).toEqual([]);
++      }),
++    );
++  });
++
++  describe("deleteCheckpointRefs", () => {
++    it.effect("deletes the snapshots of the worktree's environment", () =>
++      Effect.gen(function* () {
++        const { workspace, store, env, calls } = yield* setUp;
++
++        yield* store.deleteCheckpointRefs({ cwd: workspace, checkpointRefs: [ref0, ref1] });
++
++        expect(yield* calls).toEqual([
++          `rmsnap ${env} ${FernCheckpointStore.fernSnapshotId(ref0)} ${FernCheckpointStore.fernSnapshotId(ref1)}`,
++        ]);
++      }),
++    );
++
++    it.effect("deletes git's refs even when Fern can't delete its snapshots", () =>
++      Effect.gen(function* () {
++        const { fileSystem, tmp, workspace, store } = yield* setUp;
++        yield* store.captureCheckpoint({ cwd: workspace, checkpointRef: ref0 });
++        yield* fileSystem.writeFileString(NodePath.join(tmp, "broken"), "");
++
++        yield* store.deleteCheckpointRefs({ cwd: workspace, checkpointRefs: [ref0] });
++
++        expect(yield* store.hasCheckpointRef({ cwd: workspace, checkpointRef: ref0 })).toBe(false);
++      }),
++    );
++  });
++});
+diff --git a/apps/server/src/checkpointing/FernCheckpointStore.ts b/apps/server/src/checkpointing/FernCheckpointStore.ts
+new file mode 100644
+index 00000000..7d0678e9
+--- /dev/null
++++ b/apps/server/src/checkpointing/FernCheckpointStore.ts
+@@ -0,0 +1,151 @@
++// @effect-diagnostics nodeBuiltinImport:off
++/**
++ * Fern keeps a worktree's whole disk with each checkpoint: ignored files, dependencies and
++ * running databases, which git checkpoints leave behind. A worktree at
++ * `<pool>/worktrees/<repo>/<name>` is a Fern environment, and every checkpoint there is also a
++ * Fern snapshot. Git checkpoints still run, so diffs work as before.
++ */
++import * as NodeCrypto from "node:crypto";
++import * as NodePath from "node:path";
++
++import type { CheckpointRef } from "@t3tools/contracts";
++import * as Effect from "effect/Effect";
++import * as Layer from "effect/Layer";
++
++import * as CheckpointStore from "./CheckpointStore.ts";
++import * as VcsProcess from "../vcs/VcsProcess.ts";
++
++export interface FernOptions {
++  /** Fern's pool. T3's worktrees directory must be `<pool>/worktrees`. */
++  readonly pool: string;
++  /** The fern CLI, which talks to the daemon on this node. */
++  readonly command: string;
++}
++
++// A restore stops the environment's box before it swaps the disk.
++const FERN_TIMEOUT_MS = 120_000;
++
++const digest = (value: string, length: number) =>
++  NodeCrypto.createHash("sha256").update(value).digest("hex").slice(0, length);
++
++/** The environment that holds a worktree; the same path always gives the same ID. */
++export const fernEnvironmentId = (workspace: string) => `t3-${digest(workspace, 16)}`;
++
++/** Refs can be longer and use more characters than snapshot IDs allow. */
++export const fernSnapshotId = (ref: CheckpointRef) => `t3-${digest(ref, 32)}`;
++
++export const make = (options: FernOptions) =>
++  Effect.gen(function* () {
++    const git = yield* CheckpointStore.make;
++    const vcsProcess = yield* VcsProcess.VcsProcess;
++    const worktrees = NodePath.join(options.pool, "worktrees");
++    // Creating an environment that exists is a no-op, but it would cost a process per capture.
++    const created = new Set<string>();
++
++    // The worktree holding cwd, or null for folders Fern doesn't manage.
++    const workspaceOf = (cwd: string) => {
++      const [repo, name] = NodePath.relative(worktrees, NodePath.resolve(cwd)).split(NodePath.sep);
++      if (repo === undefined || name === undefined || repo === "..") {
++        return null;
++      }
++      return NodePath.join(worktrees, repo, name);
++    };
++
++    // Runs the fern CLI. With allowNonZeroExit, a failing command is a result, not an error.
++    const fern = (cwd: string, args: ReadonlyArray<string>, allowNonZeroExit = false) =>
++      vcsProcess.run({
++        operation: `FernCheckpointStore.${args[0]}`,
++        command: options.command,
++        args,
++        cwd,
++        // A restore swaps the worktree's directory; fern must not be holding it.
++        spawnCwd: "/",
++        timeoutMs: FERN_TIMEOUT_MS,
++        allowNonZeroExit,
++      });
++
++    const captureCheckpoint: CheckpointStore.CheckpointStore["Service"]["captureCheckpoint"] = (
++      input,
++    ) =>
++      Effect.gen(function* () {
++        yield* git.captureCheckpoint(input);
++        const workspace = workspaceOf(input.cwd);
++        if (workspace === null) {
++          return;
++        }
++        const env = fernEnvironmentId(workspace);
++        yield* Effect.gen(function* () {
++          if (!created.has(env)) {
++            // The first checkpoint adopts the worktree: Fern turns it into a snapshottable volume.
++            yield* fern(input.cwd, ["create", "--path", workspace, env]);
++            created.add(env);
++          }
++          // T3 reuses ordinals after a revert, so a snapshot of the same ref is taken again.
++          yield* fern(input.cwd, [
++            "snapshot",
++            "--replace",
++            env,
++            fernSnapshotId(input.checkpointRef),
++          ]);
++        }).pipe(
++          // The turn keeps its git checkpoint. Restoring it is refused later, with Fern's reason,
++          // rather than bringing back the files without the rest of the disk.
++          Effect.catch((cause) =>
++            Effect.logWarning("FernCheckpointStore: Fern couldn't snapshot this checkpoint", {
++              cwd: input.cwd,
++              environment: env,
++              cause,
++            }),
++          ),
++        );
++      });
++
++    const restoreCheckpoint: CheckpointStore.CheckpointStore["Service"]["restoreCheckpoint"] = (
++      input,
++    ) =>
++      Effect.gen(function* () {
++        const workspace = workspaceOf(input.cwd);
++        if (workspace !== null && (yield* git.hasCheckpointRef(input))) {
++          // Fern first: git's restore then fixes the index, which lives in the main repository.
++          yield* fern(input.cwd, [
++            "restore",
++            fernEnvironmentId(workspace),
++            fernSnapshotId(input.checkpointRef),
++          ]);
++        }
++        return yield* git.restoreCheckpoint(input);
++      });
++
++    const deleteCheckpointRefs: CheckpointStore.CheckpointStore["Service"]["deleteCheckpointRefs"] =
++      (input) =>
++        Effect.gen(function* () {
++          yield* git.deleteCheckpointRefs(input);
++          const workspace = workspaceOf(input.cwd);
++          if (workspace === null || input.checkpointRefs.length === 0) {
++            return;
++          }
++          // A worktree no checkpoint was captured in has no environment, and a daemon that is
++          // down leaves the snapshots until T3 reuses their ordinals: both only cost disk.
++          yield* fern(
++            input.cwd,
++            ["rmsnap", fernEnvironmentId(workspace), ...input.checkpointRefs.map(fernSnapshotId)],
++            true,
++          );
++        });
++
++    return CheckpointStore.CheckpointStore.of({
++      ...git,
++      captureCheckpoint,
++      restoreCheckpoint,
++      deleteCheckpointRefs,
++    });
++  });
++
++/** Wraps T3's git checkpoints with Fern's when FERN_POOL is set. */
++export const layer = Layer.effect(
++  CheckpointStore.CheckpointStore,
++  Effect.suspend(() => {
++    const pool = process.env.FERN_POOL?.trim();
++    return pool ? make({ pool, command: "fern" }) : CheckpointStore.make;
++  }),
++);
+diff --git a/apps/server/src/server.ts b/apps/server/src/server.ts
+index 2d35647f..0a89c628 100644
+--- a/apps/server/src/server.ts
++++ b/apps/server/src/server.ts
+@@ -56,7 +56,7 @@ import * as OpenCodeServerLedger from "@t3tools/provider-opencode/server/OpenCod
+ import * as ProviderHostLive from "./provider/ProviderHostLive.ts";
+ import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRegistrySupport";
+ import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
+-import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
++import * as FernCheckpointStore from "./checkpointing/FernCheckpointStore.ts";
+ import * as SourceControlBuiltInDrivers from "./sourceControl/builtInDrivers.ts";
+ import * as TextGeneration from "./textGeneration/TextGeneration.ts";
+ import * as ProviderInstanceRegistryHydration from "./provider/ProviderInstanceRegistryHydration.ts";
+@@ -403,7 +403,7 @@ const layerVcs = Layer.empty.pipe(
+   ),
+ );
+ 
+-const layerCheckpointStore = CheckpointStore.layer.pipe(Layer.provide(layerVcsDriverRegistry));
++const layerCheckpointStore = FernCheckpointStore.layer.pipe(Layer.provide(layerVcsDriverRegistry));
+ 
+ const layerPortScanner = PortScanner.layer.pipe(Layer.provide(ProcessRunner.layer));
+ 

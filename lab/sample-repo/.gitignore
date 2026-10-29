@@ -1,0 +1,2 @@
+# Postgres and its seed marker live here: Fern snapshots them, git must not.
+.fern/

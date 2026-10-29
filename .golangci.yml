@@ -1,33 +1,68 @@
 version: "2"
 
 linters:
-  default: none
+  default: standard # errcheck, govet, ineffassign, staticcheck, unused
   enable:
-    - errcheck
-    - govet
-    - ineffassign
-    - staticcheck
-    - unused
+    - bodyclose
+    - contextcheck
+    - copyloopvar
+    - depguard
+    - errorlint
+    - exhaustive
+    - forbidigo
+    - forcetypeassert
+    - gocritic
+    - intrange
+    - misspell
+    - nilerr
+    - noctx
+    - nolintlint
+    - revive
+    - sloglint
+    - unparam
+    - usestdlibvars
   settings:
-    errcheck:
-      exclude-functions:
-        - os.Remove
-        - golang.org/x/sys/unix.Close
-        - golang.org/x/sys/unix.Unlinkat
-        - fmt.Fprint
-        - fmt.Fprintf
-        - fmt.Fprintln
-    staticcheck:
-      checks:
-        - default
-        - -QF*
-        - -ST1005
+    depguard:
+      rules:
+        main:
+          deny:
+            - pkg: github.com/stretchr/testify
+              desc: use the standard testing package and go-cmp (AGENTS.md)
+            - pkg: github.com/golang/mock
+              desc: write a small hand-written fake (AGENTS.md)
+            - pkg: go.uber.org/mock
+              desc: write a small hand-written fake (AGENTS.md)
+            - pkg: github.com/pkg/errors
+              desc: use fmt.Errorf with %w and errors.Is/As
+    forbidigo:
+      forbid:
+        - pattern: ^fmt\.Print(f|ln)?$
+          msg: log with log/slog; CLI output uses fmt.Fprint* to an explicit writer
+        - pattern: ^print(ln)?$
+          msg: log with log/slog
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+    sloglint:
+      attr-only: true
+      no-global: all
+      context: scope
   exclusions:
     rules:
-      # Best-effort cleanup on paths that already return the primary error.
-      - linters: [errcheck]
-        source: '(^\s*defer |\.(Close|Rollback)\(\)$)'
+      - path: _test\.go
+        linters:
+          - forcetypeassert
+          - unparam
 
 formatters:
   enable:
-    - gofmt
+    - gofumpt
+    - goimports
+  settings:
+    gofumpt:
+      extra:
+        group-params: true
+        clothe-returns: true
+    goimports:
+      local-prefixes:
+        - github.com/nebler/fern

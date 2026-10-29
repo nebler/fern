@@ -1,0 +1,27 @@
+# Fern's daemon on its node (docs/briefs/fern-without-kubernetes.md):
+# environments, their boxes (runsc) and the API at /run/fern/fern.sock.
+# lab/build.sh installs it with /usr/local/bin/fern-daemon; the box image
+# must be loaded first (fern image load).
+[Unit]
+Description=Fern daemon: environments and their boxes
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/var/lib/fern
+
+[Service]
+# Arguments, such as --idle-agent=5s, as FERN_DAEMON_ARGS=…; Claude's login
+# is read from /etc/fern/claude.env at every wake.
+EnvironmentFile=-/etc/fern/daemon.env
+ExecStart=/usr/local/bin/fern-daemon $FERN_DAEMON_ARGS
+Restart=always
+RestartSec=1
+# Boxes outlive the daemon, which adopts them when it starts again: a
+# restart stops only the daemon's own process. Boxes run in cgroups of
+# their own (/fern/<env>), outside the service's.
+KillMode=process
+LimitNOFILE=1048576
+# Its disk writes, which lab/perf.sh measures, as a pod's were.
+IOAccounting=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -1,188 +1,128 @@
 # Fern
 
-Fern is a self-hosted Go control plane for engineers who want to run coding-agent jobs in disposable containers, steer them live, and retain a verified Git artifact after the workspace is removed.
+[![ci](https://github.com/nebler/fern/actions/workflows/ci.yml/badge.svg)](https://github.com/nebler/fern/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/nebler/fern/badge)](https://scorecard.dev/viewer/?uri=github.com/nebler/fern)
+![Go 1.27](https://img.shields.io/badge/go-1.27-00ADD8?logo=go)
+![gVisor](https://img.shields.io/badge/sandbox-gVisor-4285F4)
+[![MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-## Why it exists
+**Give every AI coding thread its own environment that behaves like git for everything: code, dependencies and the running database.**
 
-Coding-agent runs are long-lived processes that edit repositories, invoke tools,
-and handle credentials. They can lose a network response, outlive a client, or
-crash halfway through an operation. A message from the agent saying “done” does
-not establish which process wrote the result, whether the work survived, or
-whether retrying will repeat an external effect.
+Fern runs behind [T3 Code](https://github.com/pingdotgg/t3code). Each thread gets a sandboxed box with its own copy of the repository and its services (such as Postgres). Every agent turn is snapshotted, so reverting a thread in T3 brings back the files *and* the database as they were. Idle boxes sleep and wake on the next message. Claude runs as the real `claude` CLI on your own subscription: no API keys.
 
-Fern treats completion as a control-plane operation rather than an agent claim.
-Its job is to preserve intent, identify the exact writer, retain its work, and
-remove disposable compute safely. The agent remains responsible for the coding
-workflow: edits, tests, commits, pushes, and pull requests.
-
-## What Fern does differently
-
-- **Intent before effect.** SQLite records admission and lifecycle
-  transitions before the corresponding external mutations. Recovery reconciles
-  observed effects with durable intent. If evidence cannot establish what
-  happened, the run becomes uncertain rather than blindly replaying a prompt.
-- **Exact writer, exact result.** A run binds its repository revision, image,
-  session, and container process identity. Explicit sealing stops and fences
-  that writer, verifies the Git snapshot and bundle, commits retained-result
-  authority, then tears down the workspace. “Verified” means artifact integrity
-  and identity—not that repository tests passed.
-- **Scoped credential delivery.** A host-side GitHub App broker mints short-lived,
-  repository-scoped installation tokens and refreshes them in the run's private
-  storage. The App private key stays on the host. Git and `gh` read rotating
-  credentials without personal `gh` configuration or tokens in Docker config,
-  repository files, command arguments, or retained artifacts.
-- **Live inspection without a second writer.** `fern attach` opens the existing
-  exact OpenCode session through an expiring capability. You can inspect and
-  steer the work before deciding to seal it.
-
-## Architecture
+## How it works
 
 ```mermaid
 flowchart LR
-    Trigger["Trigger: OpenCode plugin"] --> Intent["Fern: durable intent"]
-    Intent --> Checkout["Exact Git revision checkout"]
-    subgraph Workspace["Isolated, disposable workspace"]
-        Checkout --> Container["Container: pinned OpenCode runtime"]
-        Container --> Agent["Agent execution"]
+    app["T3 app<br/>Mac or phone"] -->|pairing link| t3
+
+    subgraph server["One Linux server"]
+        t3["T3 server<br/>fern-t3.service"]
+
+        subgraph daemon["fern-daemon.service"]
+            api["API<br/>unix socket"] --> actors["actors<br/>one per environment"]
+            actors --> store["store<br/>btrfs + SQLite index"]
+            actors --> runsc["box driver<br/>runsc"]
+            mcp["MCP Bash"]
+        end
+
+        t3 -->|"run Claude, checkpoint,<br/>revert"| api
+        runsc --> agent["agent box<br/>Claude"]
+        runsc --> box["environment box<br/>fern-init, Postgres, app"]
+        agent -->|Bash tool| mcp
+        mcp -->|exec| box
+        store --- pool[("btrfs pool<br/>workspaces, snapshots")]
     end
-    App["Host GitHub App broker"] -->|"short-lived repo token"| Container
-    Agent -->|"optional: agent runs git / gh"| PR["GitHub draft PR"]
-    Agent -->|"explicit Seal request"| Seal["Fence writer and verify Git artifact"]
-    Seal --> Retained["Durable sealed Git artifact"]
-    Seal --> Teardown["Container, volume, and clone teardown"]
 ```
 
-**PR creation is not a post-seal Fern operation.** The agent may create a draft
-PR while running; sealing independently retains the final work. A previously
-pushed PR may therefore differ from the sealed artifact. Cancellation via Stop
-is also distinct from sealing: choose Seal when you want retention.
+- **The daemon** (`fern-daemon`) owns the environments. Each one has an **actor**, a goroutine that makes its changes one at a time, counts the commands running in its boxes and puts them to sleep when idle.
+- **The store** keeps each workspace as a btrfs subvolume. A snapshot is a btrfs snapshot (milliseconds, no copy), and a revert swaps the workspace for a copy of one in a single atomic rename. SQLite is only the index: the disk is the truth.
+- **Boxes** are [gVisor](https://gvisor.dev) sandboxes the daemon starts itself with `runsc`, each with its own network namespace, an nftables firewall (internet only) and cgroup limits. Claude runs in an **agent box** of its own; its shell commands go through the daemon to the **environment box**, where the services are. The environment box never sees Claude's login.
+- **Golden snapshots** hold a repository's built setup (installed dependencies, an initialised database), so a new thread starts from one instead of running setup again.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for the authority and recovery boundaries.
+A turn, end to end:
 
-## Quickstart
+```mermaid
+sequenceDiagram
+    participant T3 as T3 server
+    participant D as fern-daemon
+    participant A as agent box (Claude)
+    participant B as environment box
 
-### Build and inspect on a clean machine
+    T3->>D: run Claude in the thread's worktree
+    D->>A: wake the box, start Claude
+    A->>D: Bash: run the tests
+    D->>B: wake on first use, run the command
+    B-->>D: output
+    D-->>A: output
+    T3->>D: checkpoint the turn
+    D->>D: btrfs snapshot of the workspace
+    Note over D,B: nothing to do for 30 s: Claude is stopped, both boxes sleep
+    T3->>D: revert to an earlier turn
+    D->>D: stop the boxes, swap the workspace for the snapshot
+    Note over T3,B: the next message wakes the boxes and resumes Claude's session
+```
 
-These commands target a fresh **Ubuntu 24.04 machine with sudo access and
-network access**. They install Git and Docker and build Fern with Go 1.27 inside
-a container, so no existing Go installation is required.
+## Results
+
+Measured on the VPS, median of 3 runs: the current design against the first v2 design (agent-sandbox pods on Kubernetes).
+
+| | first design | now | |
+|---|---:|---:|---:|
+| CPU per short agent turn | 62,434 ms | 7,188 ms | **8.7× less** |
+| wake, p50 | 993 ms | 253 ms | 3.9× faster |
+| sleep, p50 | 1,221 ms | 90 ms | 13.6× faster |
+| revert in T3 (restore) | 1,034 ms | 108 ms | 9.6× faster |
+| memory per box, 20 awake | 82.8 MiB | 45.2 MiB | 45% less |
+
+Every number and how it was measured is in [`lab/RESULTS.md`](lab/RESULTS.md).
+
+## Engineering
+
+- **Crash-safe by construction.** Every multi-step change leaves the disk showing how far it got (a marker file, a copy beside the workspace, a snapshot without its row), and `Reconcile` finishes or clears it on start. Crash tests stop each change at every one of its steps, on a real btrfs filesystem in CI.
+- **Actors, tested with a fake clock.** One goroutine per environment, talked to through its mailbox. Idle sleeps, pre-wakes and concurrent changes are tested in `testing/synctest` bubbles, with `goleak` checking for leaked goroutines.
+- **Performance is gated.** `lab/perf.sh` fails a change that makes any of its 288 metrics worse than the baseline (time, CPU, memory, disk and network). `lab/ab.sh` runs two versions in alternation on the same machine and gives each metric's change with a 95% interval and a p-value. `lab/profile.sh` traces an operation with OpenTelemetry and draws flamegraphs of the whole node.
+- **Typed SQL.** The index's queries are plain SQL; [sqlc](https://sqlc.dev) generates the Go for them.
+- **Sandboxing in depth.** gVisor, no capabilities, a read-only root, the repository's git folder mounted read-only, a firewall that allows only the internet, and the login kept out of every box that runs the repository's code. Threat model: [`docs/briefs/claude-outside-the-box.md`](docs/briefs/claude-outside-the-box.md); reporting: [`SECURITY.md`](SECURITY.md).
+- **Checked on every pull request.** Unit, btrfs and fuzz tests; golangci-lint, shellcheck and hadolint; govulncheck on the Go and Trivy on the images; generated code and `go.mod` up to date. Actions are pinned to commits, and OpenSSF Scorecard grades the repository weekly.
+
+## Try it
+
+You need Docker, bash 5 (on a Mac: `brew install bash`), a Claude subscription and the T3 app.
 
 ```sh
-sudo apt-get update
-sudo apt-get install -y ca-certificates git docker.io
-sudo systemctl enable --now docker
-
-git clone https://github.com/nebler/fern.git
-cd fern
-sudo docker run --rm \
-  -e CGO_ENABLED=0 -v "$PWD:/src" -w /src \
-  golang:1.27 go build -o /src/fern ./cmd/fern
-
-./fern version
-./fern --help
+lab/setup.sh                    # a local lab: a systemd Linux node in Docker
+FERN_HOST=1.2.3.4 lab/setup.sh  # or a VPS, as root over SSH
 ```
 
-To build the source-verified runtime image on that machine:
+It builds the images, starts the node with the daemon and T3's server, asks once for your Claude login (`claude setup-token`), runs the quick checks and prints a pairing link. In the T3 app, open Settings → Connections, paste the link, and start a thread in **New worktree**.
 
-```sh
-sudo docker build -t fern/opencode-background-source:local \
-  images/opencode-background-source
-sudo docker image inspect fern/opencode-background-source:local \
-  --format '{{.Id}}'
-```
+On a VPS, `lab/setup.sh` installs a firewall that lets in only SSH: T3's port (30773) must never be public. Reach it through an SSH tunnel or a private network such as Tailscale.
 
-Record the image ID for host qualification and configuration. Building the image
-does not qualify the host or make a run ready to execute.
+After a change: `lab/dev.sh` runs the unit tests, builds and runs the quick integration checks (about 3 minutes). [AGENTS.md](AGENTS.md) lists every command.
 
-### Execute a job: prerequisites still required
+## Repository
 
-**There is not yet an honest one-command, clean-machine execution quickstart.**
-The current execution contract requires:
+| | |
+|---|---|
+| [`cmd/fern-daemon`](cmd/fern-daemon) | the daemon: wiring only |
+| [`cmd/fern-init`](cmd/fern-init) | a box's main process: runs the services, serves exec |
+| [`cmd/fern`](cmd/fern) | the CLI |
+| [`internal/actor`](internal/actor) | one actor per environment, idle sleep, golden builds |
+| [`internal/store`](internal/store) | the btrfs pool, snapshots, retention, `Reconcile` |
+| [`internal/runsc`](internal/runsc) | boxes as gVisor sandboxes: bundle, network, firewall |
+| [`internal/boxexec`](internal/boxexec) | the exec protocol over WebSocket |
+| [`internal/hibernate`](internal/hibernate) | stops an idle Claude and resumes it unseen |
+| [`internal/api`](internal/api) | the daemon's HTTP API on a unix socket, and its client |
+| [`lab`](lab) | the lab, integration checks, perf gate, A/B and profiler |
+| [`docs`](docs) | architecture, design, roadmap and decision briefs |
 
-1. Native Linux amd64/arm64, kernel 5.14+, and a same-host Docker Unix socket.
-2. Operator-provisioned XFS project storage with enforced byte and inode hard
-   limits, separate from the durable-state filesystem, plus host-space reserve.
-3. Permission to query those project limits. Linux requires `CAP_SYS_ADMIN` for
-   the query used here; **the stock unprivileged service cannot execute it
-   unchanged**. Fern neither grants that capability nor installs a helper.
-4. A qualified image, a bound host Git repository, private HTTPS control and
-   attachment origins, and a GitHub App you create by hand (metadata read,
-   contents and pull requests write), installed on only the bound repository and
-   registered with `fern credentials set --app-id N --private-key app.pem`.
-5. A usable credential-free model provider for the pinned runtime. Arbitrary
-   provider API-key environment injection is currently rejected. A GitHub token
-   does not supply model-provider authentication.
+## Status
 
-Follow **[the usage guide](docs/usage.md)** for configuration, GitHub App setup,
-local plugin installation, and the daily workflow:
+Built and measured on a VPS: environments, snapshots per turn, revert, golden snapshots, idle sleep and wake, pre-wake, agent boxes, and the T3 integration (T3 patches in [`images/t3`](images/t3)). Next: forking a thread's environment, and a warm pool of boxes for faster first wakes.
 
-```text
-/fern → Run → inspect with fern attach → Seal → Result
-```
-
-The plugin targets OpenCode **1.18.16** and is not published to npm yet. It must
-be built and installed locally. There is no `fern run` CLI command; submission
-uses the plugin. See [the plugin README](plugins/opencode/README.md).
-
-## Engineering discipline
-
-The repository carries checks for the properties this design depends on, not
-just successful agent output:
-
-- **Concurrency and static checks:** Go race detection, `go vet`, formatting,
-  package coverage floors, and function-level gates for critical coordinator
-  paths. These are release gates, not proof that every failure path is covered.
-- **Runtime qualification:** a digest/ID-bound image and exact source profile
-  are exercised against session identity, response loss, prompt replay,
-  attachment, writer replacement, and retained-result reconstruction. Local
-  image IDs are distinguished from published registry digests.
-- **Source authentication:** the image build verifies the pinned OpenCode commit
-  against a vendored GitHub web-flow signing key before dependency installation.
-  This authenticates GitHub-signed content, not independent maintainer approval.
-- **Reproducible binaries:** `make release VERSION=vX.Y.Z` builds trimmed,
-  CGO-free Linux amd64/arm64 binaries plus `SHA256SUMS`; a `v*` tag publishes
-  them as a GitHub release. There are no signatures, SBOMs, or attestations,
-  and the OpenCode image is built locally rather than published.
-
-Review the [CI workflow](.github/workflows/ci.yml)
-and [coverage gates](scripts/test-critical-coverage.sh). The machinery demonstrates
-engineering rigor; it does not erase the deployment and qualification gaps below.
-
-## Known limitations
-
-- **Pre-release deployment:** the quota-query privilege arrangement remains an
-  operator security decision. Actual XFS byte/inode exhaustion and recovery have
-  not been qualified on the local development host. The full qualification path
-  needs an XFS project-quota storage boundary, which CI provisions on a loop
-  device. Docker Desktop is not an execution fallback.
-- **Capacity one:** Fern is a single-host runner, not a fleet scheduler.
-- **Trusted code and network:** bridge isolation is not a hostile-code sandbox.
-  An agent can misuse or exfiltrate its scoped GitHub token until expiry. Quotas
-  bound project allocation, not all other host writers or global free space.
-- **No authoritative publication or test result:** Fern does not guarantee
-  exactly-once PR creation, successful repository tests, or equality between a
-  PR and the later sealed artifact. The qualification suite does not mutate a
-  live GitHub repository; credential responses are synthetic.
-- **Upstream uncertainty remains explicit:** question recovery after replacement,
-  automatic completion authority, and durable provider-turn start remain
-  blocked/unproven in the OpenCode qualification contract.
-- **Client and result gaps:** submission refuses an explicit remote `--server`
-  TUI; the plugin is unpublished; result reads expose metadata, not an artifact
-  download URL or a `fern result download` command.
-- **Breaking development formats:** older state formats may be rejected without
-  migration. Preserve offline backups; do not delete state to bypass an error.
-
-## Documentation
-
-- **[Usage guide](docs/usage.md):** setup, run, attach, seal, results, and recovery.
-- **[Phone demo guide](docs/phone-demo.md):** private Tailscale pairing and an end-to-end demo checklist.
-- **[Architecture](ARCHITECTURE.md):** ownership, persistence, and effect boundaries, plus the package map in suggested reading order.
+Fern v1, a control plane for coding-agent jobs in disposable containers, is at tag [`v1-final`](https://github.com/nebler/fern/tree/v1-final).
 
 ## License
 
-[MIT](LICENSE).
-
-### About the name
-
-*Fern* is German for “far away” or “distant”: work runs in a separate disposable
-workspace, and sealing brings back the verified Git artifact before removing it.
+[MIT](LICENSE)

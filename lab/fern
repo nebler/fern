@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Runs the fern CLI on the node (the lab's, or FERN_HOST's), next to the
+# daemon's socket, so it works from the Mac.
+# "create ENV --repo DIR" with a local DIR fills the workspace from DIR.
+set -euo pipefail
+args=() repo=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "--repo" ] && [ $# -gt 1 ] && [ -d "$2" ]; then
+    repo=$(cd "$2" && pwd)
+    args+=(--seed)
+    shift 2
+  else
+    args+=("$1")
+    shift
+  fi
+done
+# After the loop: it changes directory.
+source "$(dirname "$0")/lib.sh"
+tty=(-i)
+if [ -t 0 ] && [ -t 1 ] && [ -z "$repo" ]; then
+  for a in "${args[@]}"; do
+    case "$a" in -it) tty=(-it) ;; --) break ;; esac
+  done
+fi
+run() { on_node "${tty[@]}" "$FERN_CLI" "${args[@]}"; }
+if [ -n "$repo" ]; then
+  tar_dir "$repo" | run
+else
+  run
+fi

@@ -1,0 +1,17 @@
+diff --git a/apps/server/src/orchestration-v2/runtimeLayer.ts b/apps/server/src/orchestration-v2/runtimeLayer.ts
+index 52e9adf..594d1be 100644
+--- a/apps/server/src/orchestration-v2/runtimeLayer.ts
++++ b/apps/server/src/orchestration-v2/runtimeLayer.ts
+@@ -130,7 +130,11 @@ const layerCommandOutputHubProvided = CommandOutputHub.layer.pipe(
+   Layer.provide(Layer.merge(layerEventSinkProvided, ProjectionStore.layer)),
+ );
+ 
+-const layerProviderSessionManagerProvided = ProviderSessionManager.layer.pipe(
++// Fern: a provider session's CLI runs in the thread's box, which can't sleep
++// while it runs. Release idle sessions after 5 minutes instead of 30.
++const layerProviderSessionManagerProvided = ProviderSessionManager.layerWithOptions({
++  idleTimeoutMs: Number(process.env.T3CODE_PROVIDER_IDLE_TIMEOUT_MS) || 5 * 60 * 1000,
++}).pipe(
+   Layer.provide(
+     Layer.mergeAll(
+       layerCommandOutputHubProvided,

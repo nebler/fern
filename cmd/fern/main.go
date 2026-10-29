@@ -1,67 +1,445 @@
+// Command fern is the Fern command-line client.
+//
+//	fern create [--path P] [--seed] <env>    make an environment; P is its workspace,
+//	                                         --seed fills it from a tar stream on stdin
+//	fern ls                                  list environments
+//	fern which <path>                        print the environment whose workspace holds path
+//	fern rm <env>                            delete an environment
+//	fern snapshot [--replace] <env> <snap>   take a snapshot (again, with --replace)
+//	fern snapshots <env>                     list snapshots
+//	fern rmsnap <env> <snap>…                delete snapshots
+//	fern restore <env> <snap>                restore a snapshot; the box stays asleep
+//	fern exec [-i|-it] [-e NAME]… <env> -- cmd…
+//	                                         run a command, waking the box if needed
+//	fern exec [flags] --here -- cmd…         … in the environment holding the current
+//	                                         directory, in that directory (fern-claude)
+//	fern exec --agent …                      … in the environment's agent box (fern-claude)
+//	fern exec --hibernate D …                stop a Claude driven by its SDK after D
+//	                                         with nothing to do, so its box sleeps, and
+//	                                         resume it at the next message (fern-claude)
+//	fern sleep <env> | fern wake <env>       stop or start the box
+//	fern prebuild <repo>                     build repo's golden snapshot from a tar
+//	                                         stream of its checkout on stdin
+//	fern image load                          unpack the images of a docker save stream
+//	                                         on stdin into the pool, as root on the node
 package main
 
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
-	"log/slog"
+	"io"
 	"os"
+	"os/signal"
+	"slices"
+	"strings"
+	"sync"
+	"syscall"
+	"text/tabwriter"
+	"time"
+
+	"golang.org/x/term"
+
+	"github.com/nebler/fern/internal/api"
+	"github.com/nebler/fern/internal/boxexec"
+	"github.com/nebler/fern/internal/hibernate"
+	"github.com/nebler/fern/internal/image"
 )
 
+// socket is the daemon's API.
+const socket = "/run/fern/fern.sock"
+
+// images is where the daemon finds the box image and systemd T3's.
+const images = "/var/lib/fern/images"
+
 func main() {
-	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	if err := run(os.Args[1:], log); err != nil {
-		fmt.Fprintf(os.Stderr, "fern: %v\n", err)
-		var invocation invocationError
-		if errors.As(err, &invocation) {
-			fmt.Fprintln(os.Stderr, "Run 'fern --help' for usage.")
+	os.Exit(run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+}
+
+// run runs one invocation and returns the process exit code.
+func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	cmd, err := parse(args)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "fern: %v\n", err)
+		return 2
+	}
+	// exec passes signals on to the command; everything else stops.
+	if cmd.name != "exec" {
+		var stop context.CancelFunc
+		ctx, stop = signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
+		defer stop()
+	}
+	sc, _ := lookup(cmd.name) // parse has checked it
+	code, err := sc.run(ctx, cmd, api.NewClient(socket), stdio{stdin, stdout, stderr})
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "fern %s: %v\n", cmd.name, err)
+		return 1
+	}
+	return code
+}
+
+// command is a parsed CLI invocation.
+type command struct {
+	name    string
+	args    []string      // positional arguments; for exec, the environment
+	path    string        // create --path
+	seed    bool          // create --seed
+	replace bool          // snapshot --replace
+	stdin   bool          // exec -i
+	tty     bool          // exec -it
+	here    bool          // exec --here
+	environ []string      // exec -e, as NAME=VALUE
+	idle    time.Duration // exec --hibernate
+	agent   bool          // exec --agent
+	argv    []string      // exec: the command
+}
+
+// stdio is the invocation's standard streams.
+type stdio struct {
+	in       io.Reader
+	out, err io.Writer
+}
+
+// subcommand is one of the CLI's commands.
+type subcommand struct {
+	name     string
+	min, max int // how many positional arguments it takes; max -1 means no limit
+	// flags defines the command's flags on fs, to be parsed into c.
+	flags func(fs *flag.FlagSet, c *command)
+	run   func(ctx context.Context, c command, cl *api.Client, std stdio) (int, error)
+}
+
+// subcommands are the CLI's commands, in the order the usage lists them.
+// exec parses its own arguments.
+func subcommands() []subcommand {
+	return []subcommand{
+		{name: "create", min: 1, max: 1, run: create, flags: func(fs *flag.FlagSet, c *command) {
+			fs.StringVar(&c.path, "path", "", "the workspace: <pool>/worktrees/<repo>/<name>; a directory there is adopted")
+			fs.BoolVar(&c.seed, "seed", false, "fill the workspace from a tar stream on stdin")
+		}},
+		{name: "prebuild", min: 1, max: 1, run: prebuild},
+		{name: "image", min: 1, max: 1, run: loadImages},
+		{name: "ls", run: list},
+		{name: "which", min: 1, max: 1, run: which},
+		{name: "rm", min: 1, max: 1, run: remove},
+		{name: "snapshot", min: 2, max: 2, run: snapshot, flags: func(fs *flag.FlagSet, c *command) {
+			fs.BoolVar(&c.replace, "replace", false, "take it again if it exists")
+		}},
+		{name: "snapshots", min: 1, max: 1, run: snapshots},
+		{name: "rmsnap", min: 2, max: -1, run: removeSnapshots},
+		{name: "restore", min: 2, max: 2, run: restore},
+		{name: "exec", run: execute},
+		{name: "sleep", min: 1, max: 1, run: timed((*api.Client).Sleep)},
+		{name: "wake", min: 1, max: 1, run: timed((*api.Client).Wake)},
+		{name: "prewake", min: 1, max: 1, run: timed((*api.Client).Prewake)},
+	}
+}
+
+// lookup returns the subcommand called name, if there is one.
+func lookup(name string) (subcommand, bool) {
+	scs := subcommands()
+	i := slices.IndexFunc(scs, func(sc subcommand) bool { return sc.name == name })
+	if i < 0 {
+		return subcommand{}, false
+	}
+	return scs[i], true
+}
+
+// parse turns the CLI's arguments into a command.
+func parse(args []string) (command, error) {
+	if len(args) == 0 {
+		var names []string
+		for _, sc := range subcommands() {
+			names = append(names, sc.name)
 		}
-		os.Exit(exitCode(err))
+		return command{}, fmt.Errorf("usage: fern <%s> …", strings.Join(names, "|"))
+	}
+	cmd := command{name: args[0]}
+	sc, ok := lookup(cmd.name)
+	if !ok {
+		return command{}, fmt.Errorf("unknown command %q", cmd.name)
+	}
+	fs := flag.NewFlagSet(cmd.name, flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	if cmd.name == "exec" {
+		return parseExec(fs, cmd, args[1:])
+	}
+	if sc.flags != nil {
+		sc.flags(fs, &cmd)
+	}
+	pos, err := parseInterleaved(fs, args[1:])
+	if err != nil {
+		return command{}, err
+	}
+	if len(pos) < sc.min || (sc.max >= 0 && len(pos) > sc.max) {
+		return command{}, fmt.Errorf("%s: wrong number of arguments", cmd.name)
+	}
+	cmd.args = pos
+	return cmd, nil
+}
+
+// parseExec parses exec's flags, which come before the environment:
+// everything after it belongs to the command.
+func parseExec(fs *flag.FlagSet, cmd command, args []string) (command, error) {
+	fs.BoolVar(&cmd.stdin, "i", false, "send stdin")
+	fs.BoolVar(&cmd.tty, "it", false, "send stdin from a terminal")
+	fs.BoolVar(&cmd.here, "here", false, "use the environment holding the current directory, and run in it")
+	fs.DurationVar(&cmd.idle, "hibernate", 0, "stop a Claude driven by its SDK after this long with nothing to do, and resume it at the next message")
+	fs.BoolVar(&cmd.agent, "agent", false, "run in the environment's agent box, Claude's own, if the daemon has them (fern-claude)")
+	fs.Func("e", "pass the variable `NAME` on to the command, if it is set", func(name string) error {
+		if v, ok := os.LookupEnv(name); ok {
+			cmd.environ = append(cmd.environ, name+"="+v)
+		}
+		return nil
+	})
+	if err := fs.Parse(args); err != nil {
+		return command{}, err
+	}
+	pos := fs.Args()
+	if !cmd.here {
+		if len(pos) == 0 {
+			return command{}, errors.New("exec: wrong number of arguments")
+		}
+		cmd.args, pos = pos[:1], pos[1:]
+	}
+	cmd.stdin = cmd.stdin || cmd.tty
+	if len(pos) > 0 && pos[0] == "--" {
+		pos = pos[1:]
+	}
+	if len(pos) == 0 {
+		return command{}, errors.New("exec: no command given")
+	}
+	cmd.argv = pos
+	return cmd, nil
+}
+
+// parseInterleaved parses flags that may come before, between or after the
+// positional arguments, and returns the positional ones.
+func parseInterleaved(fs *flag.FlagSet, args []string) ([]string, error) {
+	var pos []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return nil, err
+		}
+		if fs.NArg() == 0 {
+			return pos, nil
+		}
+		pos = append(pos, fs.Arg(0))
+		args = fs.Args()[1:]
 	}
 }
 
-func run(args []string, log *slog.Logger) error {
-	if len(args) == 0 {
-		return invocationError{message: "a command is required"}
+func create(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	var seed io.Reader
+	if c.seed {
+		seed = std.in
 	}
-	switch args[0] {
-	case "-h", "--help":
-		printTopLevelHelp(os.Stdout)
-		return nil
-	case "--version":
-		return runVersion(nil, os.Stdout)
-	case "help":
-		return runHelp(args[1:], func(helpArgs []string) error { return run(helpArgs, log) })
+	if err := cl.Create(ctx, c.args[0], c.path, seed); err != nil {
+		return 0, err
 	}
-	entry := lookupCommand(args[0])
-	if entry == nil {
-		return unknownCommand(args[:1])
+	_, err := fmt.Fprintf(std.out, "created environment %s\n", c.args[0])
+	return 0, err
+}
+
+// prebuild sends a repository's checkout, a tar stream on stdin, to be built
+// into its golden snapshot: git archive HEAD | fern prebuild REPO.
+func prebuild(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	return 0, cl.Prebuild(ctx, c.args[0], std.in)
+}
+
+// loadImages unpacks the images of a docker save stream on stdin into the
+// pool: fern image load. It works on the node's disk, not through the
+// daemon, which needs the box image to start.
+func loadImages(ctx context.Context, c command, _ *api.Client, std stdio) (int, error) {
+	if c.args[0] != "load" {
+		return 2, fmt.Errorf("unknown command %q: want load", c.args[0])
 	}
-	err := dispatchCommand(entry, args[1:], log)
-	if errors.Is(err, errHelpShown) {
-		return nil
+	imgs, err := image.Load(ctx, std.in, images)
+	if err != nil {
+		return 0, err
 	}
+	for _, img := range imgs {
+		if _, err := fmt.Fprintf(std.out, "loaded image %.12s\n", img.ID); err != nil {
+			return 0, err
+		}
+	}
+	return 0, nil
+}
+
+func list(ctx context.Context, _ command, cl *api.Client, std stdio) (int, error) {
+	envs, err := cl.List(ctx)
+	if err != nil {
+		return 0, err
+	}
+	tw := tabwriter.NewWriter(std.out, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "ENV\tSTATE\tCREATED\tWORKSPACE") // tabwriter reports errors on Flush
+	for _, e := range envs {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", e.ID, e.State, e.Created.Format(time.RFC3339), e.Workspace)
+	}
+	return 0, tw.Flush()
+}
+
+func which(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	env, err := cl.FindByPath(ctx, c.args[0])
+	if err != nil {
+		return 0, err
+	}
+	_, err = fmt.Fprintln(std.out, env.ID)
+	return 0, err
+}
+
+func remove(ctx context.Context, c command, cl *api.Client, _ stdio) (int, error) {
+	return 0, cl.Delete(ctx, c.args[0])
+}
+
+func snapshot(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	id, snapID := c.args[0], c.args[1]
+	start := time.Now()
+	if err := cl.Snapshot(ctx, id, snapID, c.replace); err != nil {
+		return 0, err
+	}
+	return 0, took(std, start, "snapshot "+id+"/"+snapID)
+}
+
+func snapshots(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	snaps, err := cl.Snapshots(ctx, c.args[0])
+	if err != nil {
+		return 0, err
+	}
+	tw := tabwriter.NewWriter(std.out, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(tw, "SNAPSHOT\tCREATED")
+	for _, s := range snaps {
+		_, _ = fmt.Fprintf(tw, "%s\t%s\n", s.ID, s.Created.Format(time.RFC3339))
+	}
+	return 0, tw.Flush()
+}
+
+func removeSnapshots(ctx context.Context, c command, cl *api.Client, _ stdio) (int, error) {
+	for _, snapID := range c.args[1:] {
+		if err := cl.DeleteSnapshot(ctx, c.args[0], snapID); err != nil {
+			return 0, err
+		}
+	}
+	return 0, nil
+}
+
+func restore(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	id, snapID := c.args[0], c.args[1]
+	start := time.Now()
+	if err := cl.Restore(ctx, id, snapID); err != nil {
+		return 0, err
+	}
+	return 0, took(std, start, "restore "+id+" to "+snapID)
+}
+
+func execute(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	req := boxexec.Request{Argv: c.argv, TTY: c.tty, Environ: c.environ}
+	var id string
+	if c.here {
+		wd, err := os.Getwd()
+		if err != nil {
+			return 0, err
+		}
+		env, err := cl.FindByPath(ctx, wd)
+		if err != nil {
+			return 0, err
+		}
+		id, req.Dir = env.ID, wd
+	} else {
+		id = c.args[0]
+	}
+	streams := boxexec.Streams{Stdout: std.out, Stderr: std.err}
+	if c.stdin {
+		streams.Stdin = std.in
+	}
+	var relays sync.WaitGroup
+	defer relays.Wait() // after cancel, which runs first
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Signals go to the command, which decides how to stop (T3 stops Claude
+	// with SIGTERM); a second interrupt gives up on it.
+	sigs := make(chan os.Signal, 4)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sigs)
+	streams.Signal = sigs
+	interrupts := make(chan os.Signal, 2)
+	signal.Notify(interrupts, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(interrupts)
+	relays.Go(func() {
+		for range 2 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-interrupts:
+			}
+		}
+		cancel()
+	})
+
+	if c.agent {
+		run := func(ctx context.Context, req boxexec.Request, s boxexec.Streams) (int, error) {
+			return cl.ExecAgent(ctx, id, req, s)
+		}
+		return hibernate.Run(ctx, run, req, streams, c.idle)
+	}
+	if c.idle > 0 && hibernate.Applies(req) {
+		run := func(ctx context.Context, req boxexec.Request, s boxexec.Streams) (int, error) {
+			return cl.ExecThenSleep(ctx, id, req, s)
+		}
+		return hibernate.Run(ctx, run, req, streams, c.idle)
+	}
+	f, ok := streams.Stdin.(*os.File)
+	if !ok || !c.tty || !term.IsTerminal(int(f.Fd())) {
+		return cl.Exec(ctx, id, req, streams)
+	}
+	fd := int(f.Fd())
+	old, err := term.MakeRaw(fd)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = term.Restore(fd, old) }()
+	size := func() boxexec.Size {
+		w, h, _ := term.GetSize(fd)
+		return boxexec.Size{Rows: uint16(h), Cols: uint16(w)}
+	}
+	req.Size = size()
+	winch := make(chan os.Signal, 1)
+	signal.Notify(winch, syscall.SIGWINCH)
+	defer signal.Stop(winch)
+	resize := make(chan boxexec.Size, 1)
+	streams.Resize = resize
+	relays.Go(func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-winch:
+			}
+			select { // only the newest size matters
+			case <-resize:
+			default:
+			}
+			resize <- size()
+		}
+	})
+	return cl.Exec(ctx, id, req, streams)
+}
+
+// timed runs op on the command's environment and says how long it took.
+func timed(op func(*api.Client, context.Context, string) error) func(context.Context, command, *api.Client, stdio) (int, error) {
+	return func(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+		start := time.Now()
+		if err := op(cl, ctx, c.args[0]); err != nil {
+			return 0, err
+		}
+		return 0, took(std, start, c.name+" "+c.args[0])
+	}
+}
+
+// took says how long what took since start, as the lab's scripts read it.
+func took(std stdio, start time.Time, what string) error {
+	_, err := fmt.Fprintf(std.out, "%s took %.1fms\n", what, float64(time.Since(start).Microseconds())/1000)
 	return err
-}
-
-// dispatchCommand routes remaining arguments to a registry entry. Namespace
-// commands (debug, github) resolve their single subcommand level; version and
-// the namespaces render grouped help for -h because they do not parse flags.
-func dispatchCommand(entry *command, args []string, log *slog.Logger) error {
-	ctx := context.Background()
-	if entry.overview != "" && len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
-		fmt.Fprintln(os.Stdout, groupedHelp(entry))
-		return nil
-	}
-	if entry.run != nil {
-		return entry.run(ctx, args, log)
-	}
-	if len(args) == 0 {
-		return unknownCommand([]string{entry.name})
-	}
-	sub := entry.subcommand(args[0])
-	if sub == nil {
-		return unknownCommand([]string{entry.name, args[0]})
-	}
-	return sub.run(ctx, args[1:], log)
 }

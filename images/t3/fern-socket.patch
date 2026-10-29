@@ -1,0 +1,131 @@
+--- a/apps/server/src/checkpointing/FernCheckpointStore.ts
++++ b/apps/server/src/checkpointing/FernCheckpointStore.ts
+@@ -6,6 +6,7 @@
+  * Fern snapshot. Git checkpoints still run, so diffs work as before.
+  */
+ import * as NodeCrypto from "node:crypto";
++import * as NodeHttp from "node:http";
+ import * as NodePath from "node:path";
+
+ import type { CheckpointRef } from "@t3tools/contracts";
+@@ -20,6 +21,8 @@
+   readonly pool: string;
+   /** The fern CLI, which talks to the daemon on this node. */
+   readonly command: string;
++  /** The node-local API; omitted by callers using a custom fern command. */
++  readonly socketPath?: string;
+ }
+
+ // A restore stops the environment's box before it swaps the disk.
+@@ -78,6 +81,37 @@
+         allowNonZeroExit,
+       }));
+
++    // Snapshots are on every turn's critical path. Reuse a socket connection
++    // instead of starting the CLI for this small request; other calls are rare.
++    const snapshot = (cwd: string, env: string, ref: CheckpointRef) => {
++      const id = fernSnapshotId(ref);
++      if (options.socketPath === undefined) {
++        return fern(cwd, ["snapshot", "--replace", env, id]);
++      }
++      return timed("fern.snapshot", cwd, Effect.tryPromise({
++        try: (signal) => new Promise<void>((resolve, reject) => {
++          const req = NodeHttp.request({
++            socketPath: options.socketPath,
++            path: `/envs/${env}/snapshots`, method: "POST", signal,
++            headers: { "content-type": "application/json" },
++          }, (res) => {
++            let error = "";
++            res.setEncoding("utf8");
++            res.on("data", (chunk: string) => { error += chunk.slice(0, 4096 - error.length); });
++            res.on("error", reject);
++            res.on("end", () => {
++              const status = res.statusCode ?? 500;
++              if (status >= 200 && status < 300) resolve();
++              else reject(new Error(`fern snapshot: HTTP ${status}: ${error}`));
++            });
++          });
++          req.on("error", reject);
++          req.end(JSON.stringify({ id, replace: true }));
++        }),
++        catch: (cause) => cause,
++      }).pipe(Effect.timeout(FERN_TIMEOUT_MS)));
++    };
++
+     const captureCheckpoint: CheckpointStore.CheckpointStore["Service"]["captureCheckpoint"] = (
+       input,
+     ) =>
+@@ -95,12 +129,7 @@
+             created.add(env);
+           }
+           // T3 reuses ordinals after a revert, so a snapshot of the same ref is taken again.
+-          yield* fern(input.cwd, [
+-            "snapshot",
+-            "--replace",
+-            env,
+-            fernSnapshotId(input.checkpointRef),
+-          ]);
++          yield* snapshot(input.cwd, env, input.checkpointRef);
+         }).pipe(
+           // The turn keeps its git checkpoint. Restoring it is refused later, with Fern's reason,
+           // rather than bringing back the files without the rest of the disk.
+@@ -160,6 +189,6 @@
+   CheckpointStore.CheckpointStore,
+   Effect.suspend(() => {
+     const pool = process.env.FERN_POOL?.trim();
+-    return pool ? make({ pool, command: "fern" }) : CheckpointStore.make;
++    return pool ? make({ pool, command: "fern", socketPath: "/run/fern/fern.sock" }) : CheckpointStore.make;
+   }),
+ );
+--- a/apps/server/src/checkpointing/FernCheckpointStore.test.ts
++++ b/apps/server/src/checkpointing/FernCheckpointStore.test.ts
+@@ -1,4 +1,5 @@
+ // @effect-diagnostics nodeBuiltinImport:off
++import * as NodeHttp from "node:http";
+ import * as NodePath from "node:path";
+
+ import * as NodeServices from "@effect/platform-node/NodeServices";
+@@ -91,6 +92,43 @@
+       }),
+     );
+
++    for (const status of [200, 204, 503]) {
++      it.effect(`snapshots over the socket (HTTP ${status}) and keeps the git checkpoint`, () =>
++        Effect.gen(function* () {
++          const { tmp, workspace, env, calls } = yield* setUp;
++          const socketPath = NodePath.join(tmp, "api.sock");
++          const requests: Array<{ method?: string; path?: string; body: string }> = [];
++          const server = NodeHttp.createServer((req, res) => {
++            let body = "";
++            req.setEncoding("utf8");
++            req.on("data", (chunk: string) => { body += chunk; });
++            req.on("end", () => {
++              requests.push({ method: req.method, path: req.url, body });
++              res.writeHead(status).end();
++            });
++          });
++          yield* Effect.acquireRelease(
++            Effect.promise(() => new Promise<void>((resolve) => server.listen(socketPath, resolve))),
++            () => Effect.promise(() => new Promise<void>((resolve, reject) =>
++              server.close((error) => error ? reject(error) : resolve()))),
++          );
++          const store = yield* FernCheckpointStore.make({
++            pool: NodePath.join(tmp, "pool"), command: NodePath.join(tmp, "fern"), socketPath,
++          });
++          yield* store.captureCheckpoint({ cwd: workspace, checkpointRef: ref0 });
++          yield* store.captureCheckpoint({ cwd: workspace, checkpointRef: ref1 });
++          expect(yield* store.hasCheckpointRef({ cwd: workspace, checkpointRef: ref1 })).toBe(true);
++          expect(yield* calls).toEqual([`create --path ${workspace} ${env}`]);
++          expect(requests.map(({ method, path, body }) => ({ method, path, body: JSON.parse(body) }))).toEqual(
++            [ref0, ref1].map((ref) => ({
++              method: "POST", path: `/envs/${env}/snapshots`,
++              body: { id: FernCheckpointStore.fernSnapshotId(ref), replace: true },
++            })),
++          );
++        }),
++      );
++    }
++
+     it.effect("uses the worktree's environment for a folder inside it", () =>
+       Effect.gen(function* () {
+         const { fileSystem, workspace, store, env, calls } = yield* setUp;
