@@ -1,38 +1,36 @@
 # Fern v2 architecture
 
-**Status:** what we intend to build. What exists is marked built; the rest is planned.
+**Status:** what Fern is and how it works, as built on 2026-10-29, with what is planned marked so.
 - Why, and the research behind it: [design.md](design.md).
-- Experiments and dev loop: [engine-local.md](engine-local.md).
+- How each decision was made: [briefs/](briefs/). The first, Kubernetes-first design and its experiments are in [history/](history/).
 
 ---
 
 ## 1. What Fern is
 
 Fern gives every AI coding thread its own **environment**: code, installed dependencies and database data on a copy-on-write disk.
-- It starts instantly from a **golden snapshot**.
-- It runs in a **box** (container or pod) only while something is happening.
+- It starts from a **golden snapshot**.
+- It runs in a **box**, a gVisor sandbox, only while something is happening.
 - It **sleeps** when idle and **wakes** on the next touch.
-- It takes a **snapshot at every agent turn**, so rewinding or forking a thread brings the data along with the code.
+- It takes a **snapshot at every agent turn**, so reverting a thread brings the data back along with the code.
 
-On one machine Fern runs as **two systemd services** (since 2026-10-28, [briefs/fern-without-kubernetes.md](briefs/fern-without-kubernetes.md)): one Go daemon per node (`fern-daemon.service`) and T3's server (`fern-t3.service`, from its image's root). The daemon runs the sessions (boxes) itself as gVisor sandboxes (`runsc`, since 2026-10-27, [briefs/boxes-without-kubernetes.md](briefs/boxes-without-kubernetes.md)), and Claude in a box of its own per thread ([briefs/claude-outside-the-box.md](briefs/claude-outside-the-box.md)). The first design, standard [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) `Sandbox` objects with a CSI driver and a cluster install, was removed on 2026-10-29 (it cost too much disk and memory, and nothing tested it); sections below that describe pods, the CSI driver and network policies describe that history, not the code. Everything runs on a **remote Linux machine**; your Mac or phone only runs the T3 app. Fern integrates with **T3 Code** and runs the real `claude` / `codex` CLIs with your own subscriptions.
+Fern runs on **one remote Linux machine as two systemd services**: the Go daemon (`fern-daemon.service`), which owns the environments and runs their boxes itself with gVisor's `runsc`, and T3 Code's server (`fern-t3.service`). Claude runs in a box of its own per thread; its shell commands run in the box with the services ([briefs/claude-outside-the-box.md](briefs/claude-outside-the-box.md)). Your Mac or phone only runs the T3 app. Agents are the real `claude` / `codex` CLIs on your own subscription.
+
+How it got here: the first design ran boxes as agent-sandbox `Sandbox` pods on Kubernetes with a CSI driver. The daemon took over running the boxes on 2026-10-27 ([briefs/boxes-without-kubernetes.md](briefs/boxes-without-kubernetes.md)), Kubernetes left the single-machine install on 2026-10-28 ([briefs/fern-without-kubernetes.md](briefs/fern-without-kubernetes.md)), and the Kubernetes mode was removed from the code on 2026-10-29.
 
 ### 1.1 In scope
-- environments, snapshots, golden snapshots, boxes, sleep and wake, rewind, fork
-- the setup contract (`.agents/setup`, `.agents/resume`, `services.yaml`)
-- a local socket API, a CLI, MCP tools for agents, and a small hook for T3
-- Kubernetes only: DaemonSet + CSI driver + thin operator (`Environment`, `EnvironmentClass` CRDs) + agent-sandbox `Sandbox` for sessions; single-node k3s for one machine
+- environments, snapshots, golden snapshots, boxes, sleep and wake, revert; fork (planned)
+- the setup contract (`services.yaml`, `.agents/setup`, `.agents/prepare`)
+- a local socket API, a CLI, Bash for an agent box over MCP, and a small hook in T3
 
 ### 1.2 Out of scope (non-goals)
 - **Owning threads or chat.** T3 owns conversations and git; Fern owns disks and boxes.
-- **Memory snapshots** (`runsc checkpoint`, CRIU). The promise is "stop and restart"; memory snapshots are a later stretch goal.
+- **Memory snapshots** (`runsc checkpoint`, CRIU). The promise is "stop and restart". Tried: restoring a checkpoint cost more CPU than a cold start and corrupted Postgres on a swapped workspace (`lab/spike/runsc/RESULTS.md`).
 - **API-key model access,** and any proxy that intermediates subscription credentials.
 - **A hosted multi-tenant service.** Fern is self-hosted, one login per person.
-- **Per-turn Kubernetes objects.** Snapshots and execs in an awake box never go through the API server; CRDs hold only desired state. Only a box's wake and stop (a sleep, or the stop in a restore) change its `Sandbox`, which happens when a thread wakes or reverts, not every turn.
-- **A non-Kubernetes local backend.** A fake driver exists only for unit tests.
-- **Our own URL product.** We use portless or the front door's simple hostname routing.
+- **Kubernetes.** Removed; see §1.
+- **Our own URL product.** Previews (planned) use portless or simple hostname routing.
 - **Running on the Mac.** Fern runs on a remote Linux machine; the Mac only runs the T3 app.
-
----
 
 ## 2. Concepts
 
@@ -42,12 +40,12 @@ Three nouns. Everything else is a property of one of them.
 |---|---|---|---|
 | **Snapshot** | a read-only, frozen copy of an environment's disk | never changes; deleted only by retention | commit |
 | **Environment** | a name + a pointer to its latest state + a writable `live/` folder | as long as the thread | branch + working tree |
-| **Session** (the "box") | a container or pod running on top of `live/` | only while working | running the checkout |
+| **Session** (the "box") | a gVisor sandbox running on top of the workspace | only while working | running the checkout |
 
 **Properties:**
 - **Golden** = a snapshot tagged as the starting point for a repo.
-- **Retention** = `persistent` (default) or `ephemeral`.
-- **Class** = size and isolation (`light`, `heavy`, `bench`, `untrusted`, `gpu`).
+- **Retention** = `persistent` (planned: `ephemeral`).
+- **Class** (planned) = size and isolation (`light`, `heavy`, `bench`, `untrusted`, `gpu`). Today every box gets the same limits (§10).
 
 **Who sees what:**
 - **The user in T3:** threads, a preview URL, a sleep badge, Revert, Fork.
@@ -60,85 +58,57 @@ Three nouns. Everything else is a property of one of them.
 |---|---|---|
 | Environment | the T3 thread ID (or any caller-chosen name) | `t3-8f2c` |
 | Snapshot | the T3 checkpoint ref, or a generated ID | `7f3a…`, `golden/myrepo@<key>` |
-| Session | a generated ID, never addressed by callers | `s-01HZ…` |
-| Operation | a generated ID + a caller **idempotency key** | `op-…`, key `t3:checkpoint:7f3a` |
+| Box | the environment's ID, or `<env>.agent` for its agent box | `t3-8f2c.agent` |
+| Golden builder | `golden-<repo>-<hash>`, from the repository's name | `golden-app-1a2b3c4d` |
 
 ---
 
 ## 3. Components (one job each)
 
 ```
-                ┌──────────────────────── fern daemon (one per machine) ────────────────────────┐
- T3 hook ──┐    │                                                                                │
- CLI ──────┼──▶ │ api      ──▶ wake (front door) ──▶ actor (one per environment) ──┬──▶ store    │──▶ btrfs pool
- MCP ──────┘    │ (socket)     (previews, hooks)       mailbox · one op at a time  ├──▶ driver   │──▶ boxes
- browser ──────▶│ preview http                                                   ├──▶ setup    │
- webhook ──────▶│ /hooks                                                          └──▶ identity │
-                │                       Reconcile ◀── finishes or clears a change a crash stopped │
-                └────────────────────────────────────────────────────────────────────────────────┘
- inside every box:  fern-init (main process) → runs services, serves exec/PTY and readiness, reports activity
+                ┌──────────────────────────── fern-daemon (one per machine) ─────────────────────────┐
+ T3 hook ──┐    │                                                                                     │
+ CLI ──────┴──▶ │ api (unix socket) ──▶ actor (one per box) ──┬──▶ store (btrfs + SQLite index) │──▶ btrfs pool
+ agent box ───▶ │ MCP Bash (port 7071)  mailbox · one change    └──▶ runsc driver                    │──▶ boxes
+                │                       at a time; idle sleep                                          │
+                │                       Reconcile ◀── finishes or clears a change a crash stopped      │
+                └─────────────────────────────────────────────────────────────────────────────────────┘
+ inside every box:  tini → fern-init → runs the services, serves exec (boxexec) and readiness
 ```
 
-| Component | Job | Talks to |
+| Component | Job | Code |
 |---|---|---|
-| **api** | the daemon's request surface: unix socket (JSON over HTTP), auth, idempotency keys | wake, actor |
-| **wake** (front door) | finds or creates the environment's actor; wakes sleeping environments **once**, holds requests while waking, routes previews and webhooks | actor |
-| **actor** | owns one environment while its box may be running: applies changes **one at a time**, counts running execs, cancels them on restore, sleep and delete, and puts an idle box to sleep (built: `internal/actor`) | store, driver, setup, identity |
-| **Reconcile** (in store) | crash safety without a separate log: every multi-step change leaves the disk in a state that shows how far it got, and `Reconcile` finishes or clears it on start (built). Crash tests stop each change at every step | btrfs, SQLite |
-| **store** | btrfs pool: subvolumes, snapshots, forks, restore by swap, retention, size accounting | btrfs |
-| **operator** (in the daemon) | kubelet-style: watches `Environment` resources assigned to **its own node**, reconciles them, writes status; each `Environment` owns one `Sandbox`, which owns the session pod | Kubernetes API (controller-runtime) |
-| **driver** | makes one agent-sandbox `Sandbox` per environment at its first wake and brings its `podTemplate` up to date at every wake, then flips `operatingMode` (`Running` = awake, `Suspended` = asleep); the template carries the CSI volumes, RuntimeClass, limits and node pinning. Kubernetes only, plus a fake for unit tests | Kubernetes API (agent-sandbox `v1beta1`) |
-| **setup** | builds golden snapshots from the repo's setup contract; computes golden keys | driver, store |
-| **identity** | post-fork / post-restore hook: new environment ID, fresh secrets, new preview names and ports | actor |
-| **fern-init** | the main process of every box (the pod's pause container is PID 1): starts and supervises services, serves exec with PTYs and readiness, reports activity (open execs, preview connections; planned) | api (via the driver) |
-| **mcp** | exposes agent tools (`env_snapshot`, `env_restore`, `env_fork`, `env_exec`, `env_delete`) | api |
-| **csi** | CSI node plugin: mounts an environment's folders (workspace, Claude's folder, git folder) into its box, **only for that environment's own pod**: named after it, in `fern-boxes` (built); planned: the pod's UID checked against its `Sandbox` | store |
+| **api** | the daemon's request surface: JSON over HTTP on a unix socket; exec as a WebSocket relayed to the box; for agent boxes, an MCP server whose one tool, Bash, runs a command in the environment's box | `internal/api`, `internal/api/server` |
+| **actor** | one goroutine per box while it may run: makes its environment's changes **one at a time**, counts the commands running in it, cancels them on restore, sleep and delete, and puts it to sleep when idle (§6.3). Pre-wakes (§6.4) and golden builds (§7.5) go through it too | `internal/actor` |
+| **box policy** | decides what each box runs and gets: services or Claude, Claude's folder and login or not (`Group.boxOf`) | `internal/actor` |
+| **store** | the btrfs pool: workspaces, snapshots, restore by swap, adoption of T3's worktrees, retention, and the SQLite index. `Reconcile` gives crash safety without a log: every multi-step change leaves the disk showing how far it got, and Reconcile finishes or clears it at start. Crash tests stop each change at every step | `internal/store` |
+| **runsc driver** | wakes and stops boxes: a network namespace and veth per wake, an overlay root on the box image, an OCI bundle, `runsc create`/`start`; the nftables firewall; adopts boxes that outlived a daemon restart | `internal/runsc` |
+| **setup** | reads the setup contract and computes golden keys | `internal/setup` |
+| **image** | unpacks `docker save` streams into the pool, as box and T3 roots (`fern image load`) | `internal/image` |
+| **fern-init** | a box's main process: starts and supervises the services (on demand, §8), serves exec with PTYs (`internal/boxexec`), readiness and a graceful stop | `cmd/fern-init` |
+| **hibernate** | in the CLI that T3 runs as `claude`: stops an idle Claude so its box can sleep, and resumes it at the next message (§6.3) | `internal/hibernate` |
+| front door, identity, MCP tools for agents | planned (§5, §11) | |
 
-**Why an in-box agent (`fern-init`)?** Exec, services and activity reporting then work the same way locally and on Kubernetes. That avoids `docker exec` / `kubectl exec` as a data plane (those are fragile for long streams). Its exec protocol is Fern's own: one WebSocket per command, with frames for stdin, stdout, stderr, terminal sizes and signals (`internal/boxexec`). Speaking agent-sandbox's `sandboxd` (gRPC with PTY) instead, so its SDKs would work, is still open (§20).
+**Why an in-box agent (`fern-init`)?** Exec, services and readiness work the same however the box is run, without `docker exec`-style side channels, which are fragile for long streams. Its exec protocol is Fern's own: one WebSocket per command, with frames for stdin, stdout, stderr, terminal sizes and signals (`internal/boxexec`).
 
----
+## 4. Data model (the index, SQLite)
 
-## 4. Data model (daemon state, SQLite)
+The tables are in `internal/store/index/schema.sql`; [sqlc](https://sqlc.dev) generates the Go for the queries in `queries.sql`.
 
 ```sql
-environments(
-  id TEXT PRIMARY KEY,            -- t3-8f2c
-  repo TEXT, class TEXT, retention TEXT,          -- persistent | ephemeral
-  state TEXT,                     -- see §6
-  live_subvol TEXT,               -- /var/lib/fern/envs/t3-8f2c/live
-  head_snapshot TEXT,             -- last snapshot taken or restored
-  golden TEXT,                    -- golden it was created from
-  created_at, last_activity_at, generation INTEGER  -- generation bumps on every restore/fork (fencing)
-)
-snapshots(
-  id TEXT PRIMARY KEY, env TEXT, parent TEXT, kind TEXT,  -- turn | manual | golden
-  path TEXT, bytes_exclusive INTEGER, tags TEXT, created_at
-)
-sessions(
-  id TEXT PRIMARY KEY, env TEXT, driver_ref TEXT,  -- container id / pod name
-  state TEXT, started_at, generation INTEGER
-)
-goldens(key TEXT PRIMARY KEY, repo TEXT, snapshot TEXT, built_at, last_used_at)
+environments(id PRIMARY KEY, workspace UNIQUE, git, created_at, box_token)
+snapshots(env REFERENCES environments ON DELETE CASCADE, id, created_at, PRIMARY KEY (env, id))
 ```
 
-- The disk is the data; SQLite is the index and the log. On startup the daemon **reconciles**: the subvolumes and sessions that actually exist versus what the tables say (§12).
-- **A restore fences stale work** by stopping the box and cancelling every exec the actor counts, including one still connecting, so nothing that started before it runs after it (built). The planned `generation` column records the count of restores for status.
-- **Timers** (idle sleep, fork TTL, retention) are rows too (`timers(env, kind, due_at)`), so they survive restarts, like Durable Objects' alarms.
-- **Kubernetes holds desired state, the daemon holds observed state:**
-```yaml
-apiVersion: fern.dev/v1alpha1
-kind: Environment
-metadata: { name: t3-8f2c, namespace: noah }
-spec: { repo: github.com/acme/app, class: light, retention: persistent, node: node-1 }
-status: { phase: Asleep, head: 7f3a, session: null, generation: 12, bytes: 1.2Gi }
-```
-  Snapshots are listed in status (counts, head), never as objects.
-
----
+- **The disk is the truth; SQLite is the index.** At start the daemon **reconciles** what exists on disk with what the tables say (§12).
+- `git` is the main repository's git folder that the box gets read-only (§13); `box_token` authenticates the daemon to the environment's boxes, and is why only root may read the index.
+- **A restore fences stale work** by stopping the box and cancelling every command the actor counts, including one still connecting, so nothing that started before it runs after it.
+- **Golden snapshots are rows too:** a golden is a snapshot of its builder environment named `golden-<key>`, and a build waiting at a restart is a snapshot named `golden-source` (§7.5).
+- **Planned:** tags, a snapshot's parent and size, and timers as rows so idle clocks survive a restart (today a box still running at a restart gets an actor whose clocks start over).
 
 ## 5. API
 
-Unix socket `/run/fern/fern.sock` (a host directory, so T3's server pod can share it), JSON over HTTP; exec is a WebSocket. Every call is safe to repeat; planned: an `Idempotency-Key` on every mutating call.
+Unix socket `/run/fern/fern.sock`, for root and the box user's group (T3's server runs as the box user), JSON over HTTP; exec is a WebSocket. Every call is safe to repeat; planned: an `Idempotency-Key` on every mutating call.
 
 | Call | Meaning | Notes |
 |---|---|---|
@@ -162,7 +132,9 @@ Unix socket `/run/fern/fern.sock` (a host directory, so T3's server pod can shar
 
 **Errors:** an HTTP status (404 not found, 400 invalid, 500 failed) with `{"error": message}`. Planned with the actor and quotas: busy, conflict and quota exceeded; normal calls will queue in the actor's mailbox.
 
-**Agent tools (MCP):** `env_snapshot`, `env_restore`, `env_fork`, `env_exec`, `env_delete`. A **Code Mode** client wraps the same API as a small TypeScript library.
+**For agent boxes (built):** an MCP server on port 7071, which only agent boxes can reach (§13), at `/mcp/{env}`, authenticated with the environment's box token. Its one tool, Bash, runs a command in the environment's box (§10).
+
+**Agent tools (planned):** `env_snapshot`, `env_restore`, `env_fork`, `env_exec`, `env_delete` over MCP.
 
 ---
 
@@ -188,9 +160,9 @@ Unix socket `/run/fern/fern.sock` (a host directory, so T3's server pod can shar
 - **Ephemeral environments:** on idle, `stopping` → discard `live/` (keep tagged snapshots) → `asleep (empty)`. The next touch forks from golden again.
 
 ### 6.2 Session
-`creating → starting (fern-init up, resume script, services) → ready → stopping (SIGTERM services, timeout, kill) → gone`
+`waking (network, runsc create and start, fern-init up) → ready (fern-init's /readyz) → stopping (POST /stop: the services' stop commands, SIGTERM, then kill) → gone`
 
-The driver reports unexpected exits. The actor restarts with backoff, and gives up after N failures in a window (OTP-style supervision).
+A box that is up but doesn't answer (a crash, one stopped by hand) is found by the next command, whose dial fails: the actor wakes it once more (built). Planned: restarts with backoff, and giving up after N failures in a window (OTP-style supervision).
 
 ### 6.3 Idle rule
 An environment goes to sleep when all of these hold (two clocks, copied from Amp):
@@ -204,16 +176,16 @@ Built: the actor's timer, with both clocks touched by every exec (`--idle-agent`
 
 **T3 keeps a thread's Claude running between turns,** in one exec, and ends it once the session has been idle (no turn, tool call, approval or background task). Unpatched T3 waits 30 minutes, so a box would stay awake about 35 minutes after a short turn, holding Claude's memory (200 MB and up). Fern's T3 image waits 5 minutes (`images/t3/fern-sessions.patch`; `T3CODE_PROVIDER_IDLE_TIMEOUT_MS` changes it): Claude exits 5 minutes after the last turn, and the box sleeps 5 minutes later, or 20 minutes after Claude started if that is later.
 
-**Hibernation: Fern stops an idle Claude itself (built).** T3's wait is still 20 minutes of an awake box per short turn, and Claude waiting costs more than the box: in the lab, a box with Claude waiting uses about 1.8 s of CPU a minute and 146 MiB, against 40 MiB without it. So `fern exec --hibernate D` (fern-claude passes `$FERN_HIBERNATE`, default 30 s; 0 turns it off) stands in for Claude in T3's pod (`internal/hibernate`). It reads the stream-json between Claude and its SDK; once Claude has had nothing to do for D (its turn ended with a `result`, no control request is unanswered either way, no background task runs), it sends Claude SIGTERM, which saves its session, and ends its exec with `?then=sleep`: the box sleeps at once unless another command runs, and T3 keeps its session as before. The SDK's next line starts Claude again with `--resume=<session>` (the flags that picked or forked a session are dropped), sends it first the setup the SDK gave the stopped one (the newest `initialize`, `mcp_set_servers`, `set_model`, `set_permission_mode` and the like), keeps their answers from the SDK, then the line. Only a Claude driven by its SDK (stream-json both ways, no terminal) is stopped; anything else runs as it is. In T3 (`lab/t3-run.sh`, the idle step) the box sleeps 32.7 s after the turn, the same `fern exec` keeps T3's session, and the next turn, which wakes the box and resumes Claude, answers about the turn before it (lab).
+**Hibernation: Fern stops an idle Claude itself (built).** T3's wait is still 20 minutes of an awake box per short turn, and Claude waiting costs more than the box: in the lab, a box with Claude waiting uses about 1.8 s of CPU a minute and 146 MiB, against 40 MiB without it. So `fern exec --hibernate D` (fern-claude passes `$FERN_HIBERNATE`, default 30 s; 0 turns it off) stands in for Claude in T3's server (`internal/hibernate`). It reads the stream-json between Claude and its SDK; once Claude has had nothing to do for D (its turn ended with a `result`, no control request is unanswered either way, no background task runs), it sends Claude SIGTERM, which saves its session, and ends its exec with `?then=sleep`: the box sleeps at once unless another command runs, and T3 keeps its session as before. The SDK's next line starts Claude again with `--resume=<session>` (the flags that picked or forked a session are dropped), sends it first the setup the SDK gave the stopped one (the newest `initialize`, `mcp_set_servers`, `set_model`, `set_permission_mode` and the like), keeps their answers from the SDK, then the line. Only a Claude driven by its SDK (stream-json both ways, no terminal) is stopped; anything else runs as it is. In T3 (`lab/t3-run.sh`, the idle step) the box sleeps 32.7 s after the turn, the same `fern exec` keeps T3's session, and the next turn, which wakes the box and resumes Claude, answers about the turn before it (lab).
 
 ### 6.4 Pre-wake
-A wake takes about a second (0.7 s in the lab, 1.0–1.2 s on the VPS), and a turn that finds its box asleep waits for it. When a turn is likely soon, T3's hook asks for the wake ahead (`POST /envs/{id}/prewake`), and the user's think time hides it:
+A wake takes about 250 ms on the VPS (it took about a second as a pod), and a turn that finds its box asleep waits for it. When a turn is likely soon, T3's hook asks for the wake ahead (`POST /envs/{id}/prewake`), and the user's think time hides it:
 - **a thread is opened:** T3's server streams an open thread to the app (`orchestration.subscribeThread`); one still open after 2 s is woken ahead. A thread only clicked past isn't: the stream's end cancels the wait. The app's sidebar opens the same stream for the first three threads it shows, which can't be told apart; those cost a wake and two minutes of an idle box each.
 - **a thread is reverted:** after T3's rollback has finished (Fern's restore, git's restore and the deleted checkpoints' snapshots), so the wake holds up none of them and starts no services on half-restored files.
 
 The daemon answers at once and wakes in the background, two pre-wakes at a time; up to 8 more wait, and further ones are dropped. A box that is awake is left as it is, its idle clocks included. A box woken ahead sleeps after `--idle-prewake` (default 2 min) unless a command comes first; the first command gives it the usual clocks (§6.3). A pre-wake holds its environment's actor during the wake, like any wake: a command that comes meanwhile waits for the same wake instead of starting another. `fern_prewakes_total` counts them by result (`woken`, then `used` or `wasted`; `awake`, `unknown`, `dropped`, `error`).
 
-Measured (lab, `lab/check.sh box`): a command 3 s after a pre-wake takes 65 ms (p50), one to an asleep box 733 ms. In T3 (`lab/t3-run.sh toy 3`), the turn after a revert no longer waits for a wake, and the revert itself is unchanged (2.2 s p50).
+Measured when boxes were pods (lab, `lab/check.sh box`): a command 3 s after a pre-wake took 65 ms (p50), one to an asleep box 733 ms. In T3 (`lab/t3-run.sh toy 3`), the turn after a revert no longer waits for a wake, and the revert itself is unchanged (2.2 s p50).
 
 ---
 
@@ -229,7 +201,7 @@ Measured (lab, `lab/check.sh box`): a command 3 s after a pre-wake takes 65 ms (
 
 ### 7.2 A turn
 1. T3 → `POST /envs/t3-8f2c/exec {cmd: "claude …", pty: true}`.
-2. Asleep → the front door holds the request → the actor → the driver starts a session → `fern-init` runs `.agents/resume` (planned), starts services → ready.
+2. Asleep → the actor wakes the box (requests that come meanwhile wait for the same wake) → `fern-init` is ready; a service with `listen` starts at its first connection (§8).
 3. The exec streams across turns: T3 keeps Claude running and sends it each turn, and ends it when the session is idle (§6.3).
 4. T3 saves git checkpoint `7f3a` → the hook → `POST /snapshots {id: "7f3a"}` → `btrfs subvolume snapshot -r` → ok. **A failed snapshot doesn't fail the turn** (copied from Delta, whose hooks never break the agent): the hook logs it and T3 keeps its git checkpoint. That turn then has code but no disk, and §7.3 refuses to revert to it.
 
@@ -309,7 +281,9 @@ golden:
   envs/<id>/snaps/<snapshot>/    read-only
   envs/<id>/claude/              Claude's state (CLAUDE_CONFIG_DIR): never snapshotted, so a restore keeps the transcripts
   worktrees/<repo>/<name>/       writable workspace of an environment at a path: T3's worktrees
-  state/fern.sqlite              the index (on the same disk, not inside any snapshot)
+  state/fern.sqlite              the index (on the same disk, not inside any snapshot; root only)
+  boxes/<box>/                   a box's /tmp and log while it may run (its bundle is on the node's tmpfs)
+  images/<id>/  images/<tag>     the box and T3 images, unpacked (fern image load)
   userdata/ caches/ tools/       T3's own state: T3's home is the pool, so its worktrees land in worktrees/
   repos/<repo>/                  the projects' main repositories, which T3's worktrees point into
 ```
@@ -332,41 +306,33 @@ Only `live/` and `worktrees/` are workspaces; Fern never snapshots T3's state or
 
 ## 10. Boxes (sessions)
 
-**Rule: a box holds no state.** Everything writable comes from `live/`.
+**Rule: a box holds no state.** Everything writable comes from the workspace; a box's own `/tmp` is emptied at every wake.
+
+The daemon runs each box itself as a gVisor sandbox (`internal/runsc`; reasons in [briefs/boxes-without-kubernetes.md](briefs/boxes-without-kubernetes.md)). A box is the node's process, so it outlives a daemon restart, and the restarted daemon adopts it.
 
 | Aspect | Spec |
 |---|---|
-| Image | read-only base image with common toolchains (Node, Bun, pnpm, Python, uv, git, gh, Postgres binaries, agent CLIs pinned to tested versions) |
-| Main process | `fern-init` (the pause container is PID 1 and reaps orphans): services, exec/PTY server, readiness for the daemon's wake (`/readyz`), graceful shutdown; planned: **reattachable sessions** (agent terminals survive daemon restarts and upgrades) and activity reporting |
-| Mounts | `live/` → the workspace at **the same path T3 uses**; Claude's folder `envs/<id>/claude/` → `CLAUDE_CONFIG_DIR` at the same path, **outside `live/`**, so a restore doesn't rewind its transcripts; the main repository's git folder **read-only**, so git works and can't change the repository's config or hooks; agent logins as environment variables from a Secret |
-| User | non-root, the same uid as T3 so file ownership matches; **user namespaces on** (GA in Kubernetes 1.36), so a box escape isn't that user on the host |
-| Runtime | from the class: `crun`/`runc` (light), `runsc` / gVisor (untrusted), a `docker` class for repos that need `docker compose` inside (gVisor or Kata). Built: every box runs under gVisor, from the daemon's `-runtime-class`, until classes exist |
-| Limits | CPU and memory from the class (cgroups / pod resources); fork count and TTL caps |
-| Network | deny by default; allowlist (package registries, GitHub, the model provider); previews only through the front door |
-| Stop | SIGTERM to services (`stop:` commands), timeout, then kill; never during an open exec unless forced |
+| Image | read-only Debian base with Postgres, git, curl, Node and Claude Code (pinned, checksum-verified), unpacked into the pool (`fern image load`); each box gets an overlay on it for its mount points |
+| Main process | `tini` as PID 1 (reaps orphans) → `fern-init`: services, exec/PTY server, readiness (`/readyz`), graceful stop (`POST /stop`, which names the wake it stops, so a late request can't stop the next wake at a reused address) |
+| Mounts | the workspace at **the same path T3 uses**; Claude's folder `envs/<id>/claude/` (`CLAUDE_CONFIG_DIR`) at its own path, **outside the workspace**, so a restore doesn't rewind its transcripts; the main repository's git folder and the worktree's `.git` file **read-only** (§13) |
+| User | non-root, the same uid as T3 (1000), no capabilities, `no_new_privs`, a read-only root |
+| Runtime | gVisor (`runsc`) for every box; planned: classes (§2) |
+| Limits | 2 CPUs, 2 GiB of memory, 4,096 processes, a cgroup per box under `/fern` |
+| Network | a network namespace and veth per wake, a /30 from `10.89.0.0/16`; the internet only (§13) |
+| Stop | `POST /stop` to fern-init (the services' `stop:` commands, then SIGTERM and kill), `runsc kill` after 15 s; then the network, overlay and cgroup go |
 
-**Built, opt-in: the daemon runs boxes itself** (`--boxes=runsc`, `internal/runsc`; `lab/boxes.sh runsc` switches the lab; design and reasons in [briefs/boxes-without-kubernetes.md](briefs/boxes-without-kubernetes.md)). A box is then a gVisor sandbox the daemon starts with `runsc` in the node's mount and cgroup namespaces (the daemon shares the node's PID and network namespaces), not a pod: the image's root, unpacked into the pool by `fern image load` (`internal/image`; containerd's store before 2026-10-28), under an overlay per box, the same user, limits and folders as the pod template, `tini` as PID 1 in place of the pause container, a network namespace and veth per wake from `10.89.0.0/16`, and an nftables firewall in place of the network policy (§13). `<pool>/boxes/<env>` holds a box's bundle while it may run; at start the daemon stops every box whose directory has no running sandbox, and a wake keeps a box that runs and is ready (one that outlived a daemon restart). Lab: a wake 114 ms, a sleep 50 ms (p50), against ~540 and ~1,180 ms as a pod; one API request per wake and sleep (the login Secret) instead of ~16.
+**Two boxes per environment** (the default, `--agent-boxes`; [briefs/claude-outside-the-box.md](briefs/claude-outside-the-box.md)). The **environment's box** runs the services and gets no Claude folder or login. The **agent box**, `<env>.agent`, runs Claude (`fern exec --agent`, which fern-claude passes) with its file tools and no services; its shell tools are replaced by the daemon's MCP Bash, which runs each command in the environment's box, waking it, and lets it sleep 5 s after the last. A restore, sleep or delete stops both; a pre-wake wakes the agent box. A golden builder's box runs the services, started at once, and gets no Claude at all. The actor decides this in one place (`Group.boxOf`).
 
-**Built, opt-in: Claude in a box of its own** (`--agent-boxes`, with runsc; `lab/boxes.sh agents`; [briefs/claude-outside-the-box.md](briefs/claude-outside-the-box.md)). Each environment gets a second box, `<env>.agent`, with no services: Claude runs there (`fern exec --agent`, which fern-claude passes) with its file tools, and its shell tools are replaced by the daemon's MCP Bash, which runs each command in the environment's own box, waking it, and lets it sleep 5 s after the last. Only the agent box gets Claude's folder and login. A restore, sleep or delete stops both boxes; a pre-wake wakes the agent box.
-
-**Built stop protocol:** the driver first persists the Sandbox's suspension
-or deletion, then asks fern-init to start its normal graceful shutdown with
-an authenticated `POST /stop`. `If-Match` names the pod UID: an old request
-cannot stop a replacement pod at a reused address. The request has a 250 ms
-budget; older or unreachable boxes still get kubelet's SIGTERM. The driver
-waits for the pod and its mounts to disappear before acknowledging sleep,
-deletion or the stop in a restore. A crash before or after the request leaves
-the durable Sandbox intent for Kubernetes to finish; replay is safe.
-
----
+**Measured on the VPS** (2026-10-28, median of 3): a wake 253 ms and a sleep 90 ms at p50, against 993 and 1,221 ms as pods; 45 MiB per box with 20 awake.
 
 ## 11. Front door (wake layer)
+
+Planned, except wake coalescing: today the actor gives every request that comes during a wake the same wake.
 
 - **Entrances:** the unix socket (T3, CLI, MCP), HTTP previews (Host-header routing), webhooks.
 - **Wake coalescing:** the first touch on an asleep environment starts **one** wake; later touches wait on it.
 - **Holding:** requests are held up to `wake_timeout` (default 30 s). Health and probe requests get **503 + Retry-After** while waking.
 - **Activity:** the front door and `fern-init` report open execs, attached terminals and preview connections to the actor for the idle rule.
-- **On Kubernetes:** a preview can arrive at any machine's daemon. It forwards the request to the daemon that owns the environment (ownership is the `node` field of its `Environment` resource). An optional edge Deployment can do the lookup behind a wildcard Ingress.
 
 ---
 
@@ -375,37 +341,36 @@ the durable Sandbox intent for Kubernetes to finish; replay is safe.
 | Failure | What happens |
 |---|---|
 | **Daemon crash** | on restart, `Reconcile` reads what each half-done change left on disk (markers, `live.new`, snapshots without rows) and finishes or clears it; boxes left running get an actor, so they still sleep when idle (built) |
-| **Box crash** | the actor restarts it with backoff; after N failures in a window → `failed`, the next touch retries |
+| **Box crash** | the next command's dial fails and the actor wakes the box once more (built); planned: restarts with backoff, and `failed` after N failures in a window |
 | **Crash mid-turn** | the agent CLI resumes from its session files; Fern can restore to the last turn snapshot before resuming if the transcript is broken |
 | **Restore during an exec** | the box stops and the actor cancels the exec, so no late write from the old session reaches the restored disk (built) |
 | **Disk full** | snapshots and new environments refused with "the pool is almost full" (HTTP 507) before the disk is; retention runs at every snapshot; the box keeps working (built) |
 | **Snapshot fails at a turn's end** | the turn still counts: T3 keeps its git checkpoint and the hook logs the error; reverting to that turn is refused with the reason (§7.3) |
-| **Node loss (Kubernetes)** | environments on that node are unavailable until it returns, or until they're restored elsewhere from shipped snapshots (`btrfs send` to object storage, optional) |
+| **Machine loss** | environments are unavailable until it returns; planned: restoring them elsewhere from shipped snapshots (`btrfs send` to object storage) |
 | **Golden build fails** | the environment is created from the previous golden, with a visible warning; the agent is asked to fix the setup |
 
 ---
 
 ## 13. Security
 
+The threat model is in [briefs/claude-outside-the-box.md](briefs/claude-outside-the-box.md); reporting is in [SECURITY.md](../SECURITY.md).
+
 - **Trust boundaries:**
-  - the daemon is privileged (it manages btrfs and the runtime)
-  - **boxes are untrusted**
-  - T3 and the CLI are trusted local callers
-  - agents via MCP get **a token scoped to their own environment**
-- **Mounting is the permission.** A box sees only its own workspace and Claude folder, and its repository's git folder read-only, only through the CSI driver, never raw host paths.
-- **A box can't make T3 run its code.** T3's server runs git in the worktrees, as the box's user. The box gets the main repository's git folder read-only, and the worktree's `.git` file read-only too, so it can't point git at a folder whose config runs commands (such as `core.fsmonitor`). `fern-claude` never runs Claude in T3's pod for a folder in the pool's worktrees. Built and checked (`lab/check.sh t3`).
-- **The CSI driver authorizes every mount:** it only mounts an environment for the pod named after it in `fern-boxes`, where only the daemon makes pods (built). Without this, any pod could name another environment and get its disk. Planned: the pod's UID checked against its `Sandbox`, and the `Environment` owner once there are CRDs.
-- **An admission policy limits the daemon:** it may only create `Sandbox` objects pinned to its own node (node-bound service-account tokens) and only with allowed runtimes.
-- **User namespaces** for every box.
+  - the daemon is privileged (it manages btrfs, mounts and the boxes)
+  - **boxes are untrusted:** they run what an agent writes
+  - T3 and the CLI are trusted local callers, through the socket's group
+  - an agent box's MCP Bash is authenticated with its environment's box token and reaches only that environment's box
+- **A box sees only its own folders:** its workspace, its Claude folder (the agent box only) and its repository's git folder read-only, as bind mounts in its OCI spec. Nothing else of the host.
+- **A box can't make T3 run its code.** T3's server runs git in the worktrees, as the box's user. The box gets the main repository's git folder read-only, and the worktree's `.git` file read-only too, so it can't point git at a folder whose config runs commands (such as `core.fsmonitor`). `fern-claude` never runs Claude in T3's process for a folder in the pool's worktrees. Checked by `lab/check.sh t3`.
+- **Isolation:** gVisor, a non-root user, no capabilities, `no_new_privs`, a read-only root, cgroup limits (§10).
 - **Credentials:**
-  - agent logins (`CLAUDE_CODE_OAUTH_TOKEN`, a short-lived Codex access token from the login the daemon refreshes) come from `/etc/fern/claude.env`, which only root reads (in a cluster, a Kubernetes Secret), as environment variables when the box starts (§13.1), so they are never in the `Sandbox`, the index or a file
-  - **never in `live/`, golden or snapshots** (golden builds are scanned). Claude's state lives in `envs/<id>/claude/`, outside `live/`; with the login in its environment it writes no credentials file. Codex keeps `auth.json` in its home, which is mounted from outside `live/` the same way
-  - forks get fresh credentials
-- **Non-model secrets:** a host-side broker for short-lived, scoped tokens (Fern v1's GitHub App broker); per-environment OIDC tokens later.
-- **Network with `--boxes=runsc`:** an nftables table of its own (`inet fern`, hooks at priority -10, replaced whole in one transaction) drops what boxes send to private, shared, loopback, link-local and multicast ranges and everything they send to the node itself except answers; only the daemon, on the node, connects to a box. Boxes resolve names with public resolvers (`--box-dns`). Measured in the lab: the Kubernetes API, the node's ports (T3, kubelet, the daemon's metrics), another box and the metadata address time out; the internet answers. A first version put the rules in iptables chains; on the VPS kube-router rewrote `INPUT` and dropped the jump, and a box reached the Kubernetes API through its service address, which a table of its own prevents.
-- **Network:** a box takes connections only from the daemon, and reaches only DNS and the public internet: not T3, the daemon, the Kubernetes API, other boxes, private addresses or a cloud's metadata endpoint (built, `deploy/fern.yaml`). Inside the cluster the Kubernetes API's address leads to the node's public address, as do NodePorts, so the policy also excepts the node's public address (on the VPS, `lab/build.sh` adds it; measured: the API and T3 refused, the internet reached). Some network plugins always allow traffic to the node; there it takes the node's firewall. Planned: per-class allowlists.
-- **Known gaps:** boxes of the same repository share its read-only git folder, so one can read another's checkpoints (the full fix is a repository per thread); the box token is readable in `/proc` by the box's own processes (harmless while only the daemon can reach fern-init); user namespaces and a Pod Security level for `fern-boxes` aren't set yet.
-- **Isolation levels by class:** runc → gVisor → micro-VM.
+  - Claude's login (`CLAUDE_CODE_OAUTH_TOKEN`) is in `/etc/fern/claude.env`, which only root reads; the daemon reads it at every wake and gives it, as an environment variable, only to the box that runs Claude (§13.1). It is never in the index or a workspace
+  - **never in a workspace, golden or snapshot.** Claude's state lives in `envs/<id>/claude/`, outside the workspace; with the login in its environment Claude writes no credentials file. A golden builder's box gets no login (§7.5)
+  - planned: fresh credentials for forks; a host-side broker for short-lived, scoped tokens (Fern v1's GitHub App broker)
+- **The boxes' network:** an nftables table of their own (`inet fern`, replaced whole in one transaction at every daemon start) drops what boxes send to private, shared, loopback, link-local and multicast ranges and everything they send to the node except answers; only the daemon, on the node, connects to a box. Agent boxes alone may reach the daemon's MCP port. Boxes resolve names with public resolvers (`--box-dns`). Checked by `lab/check.sh`: another box, the node's ports (T3, the daemon's metrics) and the metadata address time out; the internet answers.
+- **The machine's network:** T3's port must never be public, as anyone who reaches it uses the owner's subscription (§13.1). On a VPS, `lab/vps.sh` installs a firewall (`inet fern_host`, a table of its own) that lets in only SSH; reach T3 through an SSH tunnel or a tailnet. The daemon's metrics and profiles listen on localhost.
+- **Known gaps:** boxes of the same repository share its read-only git folder, so one can read another's checkpoints (the full fix is a repository per thread); the box token is readable in `/proc` by the box's own processes (harmless while only the daemon can reach fern-init); user namespaces inside gVisor aren't set up.
+- **Isolation levels by class (planned):** gVisor → micro-VM.
 
 ### 13.1 Subscription terms
 Checked 2026-10-22 against Anthropic's, OpenAI's and the other providers' published terms. These pages change (Anthropic's twice in 2026): check again before a public release.
@@ -413,7 +378,7 @@ Checked 2026-10-22 against Anthropic's, OpenAI's and the other providers' publis
 **Allowed:** a person runs the vendor's real, unmodified CLI with their own subscription on their own machines, in containers, headless. Anthropic says so for Claude Code ([legal and compliance](https://code.claude.com/docs/en/legal-and-compliance)), and suggests keeping a `setup-token` token as a secret. OpenAI documents Codex on headless machines ([auth](https://learn.chatgpt.com/docs/auth)). Using it through T3 Code is tolerated: since 2026-10-07 Anthropic still lets third-party apps use plan limits through the Agent SDK.
 
 **Fern never:**
-- has a login screen, or stores, proxies or relays a subscription token. The person runs `claude setup-token` (or the Codex login) and stores the token on their node (`lab/claude-login.sh`); Fern only passes it to the boxes.
+- has a login screen, or stores, proxies or relays a subscription token. The person runs `claude setup-token` (or the Codex login) and stores the token on their machine (`lab/claude-login.sh`); Fern only passes it to the boxes.
 - changes how a CLI authenticates or what it sends (no `ANTHROPIC_BASE_URL` relay, no client spoofing).
 - serves one login to several people. Multi-person cells: each person brings their own.
 - is reachable without auth. Anyone who reaches T3 uses the owner's account, which is account sharing. On a VPS the T3 port is behind a firewall or a tailnet, never public.
@@ -427,34 +392,14 @@ Checked 2026-10-22 against Anthropic's, OpenAI's and the other providers' publis
 
 ## 14. Running modes
 
-### 14.1 One remote Linux machine = two systemd services
-Built (`lab/vps.sh`, `lab/setup.sh`), on the remote machine:
-- creates the btrfs pool (a loop-mounted image), installs gVisor and a firewall that lets in only SSH
+One remote Linux machine running two systemd services. `lab/setup.sh` (with `FERN_HOST` for a VPS, through `lab/vps.sh`):
+- creates the btrfs pool (a loop-mounted image file), installs gVisor and a firewall that lets in only SSH
 - installs `fern` and `fern-daemon` in `/usr/local/bin`, loads the box and T3 images into the pool (`fern image load`) and installs `deploy/systemd/` (`fern-daemon.service`, `fern-t3.service`)
-- stores Claude's login in `/etc/fern/claude.env` and prints the pairing link
+- stores Claude's login in `/etc/fern/claude.env`, runs the quick checks and prints the pairing link
 
-Your Mac or phone only runs the T3 app. Measured on the VPS, this saves what k3s and containerd cost while idle: about 780 MiB and 9% of a core.
+The local lab is the same machine as a systemd container in Docker (`lab/up.sh`). Your Mac or phone only runs the T3 app. Against the earlier k3s install, this saves what k3s and containerd cost while idle: about 780 MiB and 9% of a core.
 
-### 14.2 Kubernetes (an existing cluster)
-| Concept | Kubernetes |
-|---|---|
-| Fern daemon | **DaemonSet**, privileged, owns `/var/lib/fern` on each node |
-| Mounting `live/` into a pod | **CSI inline (ephemeral) volume** served by the daemon's CSI node plugin: `csi: {driver: fern, volumeAttributes: {env: t3-8f2c}}` |
-| Session | an **agent-sandbox `Sandbox` owned by its `Environment`**, created by that node's daemon (kubelet-style), pinned to the node, labelled `fern/env`, `t3/thread`; sleep/wake = `operatingMode: Suspended/Running` |
-| T3 server | one pod per person per node (1-replica StatefulSet), sharing the node's Fern pool |
-| Class | RuntimeClass + resources + node selector (no warm pools in v1) |
-| Per-person limits | a namespace per person + ResourceQuota + NetworkPolicy |
-| API objects | `Environment` (desired state + status) and `EnvironmentClass` CRDs; nothing per turn |
-| Durable/cross-node copies | `VolumeSnapshot` or `btrfs send`; **never on the per-turn hot path** |
-| Install | `fern up --k8s`: k3s if there's no cluster, the Helm chart, a loop-mounted btrfs pool if needed, `fern join <token>` for more nodes |
-
-**Scaling:**
-- sessions scale within a node (they sleep when idle)
-- nodes scale out
-- each person's T3 + environments form a **cell** pinned to a node; one person can have cells on several nodes, and T3's load balancer picks
-- agent benchmark forks can run on any node (the disk is shipped with `send`)
-
----
+**Scaling (planned):** boxes scale within a machine, since they sleep when idle; more machines, each with its own pool and T3, form cells, and a thread's disk moves with `btrfs send`.
 
 ## 15. T3 integration
 
@@ -470,14 +415,14 @@ Your Mac or phone only runs the T3 app. Measured on the VPS, this saves what k3s
 **The environment ID is derived from T3's thread ID.** T3's worktree path *is* the environment's `live/`. Fern **never snapshots T3's own database.** Rewinding it would resurrect revoked logins; T3 keeps its own history.
 
 **A new thread is a Fern environment, with no setting to change (built).** Only a *New worktree* thread gets an environment: a thread in *Local* works in the project's main folder, which has no box or database, and there a Revert brings nothing back (seen in the lab and on the first VPS). So:
-1. **T3's defaults on Fern's server** (an init container in `deploy/t3.yaml`, only where the person hasn't chosen): new threads are *New worktree* (the server-wide `defaultThreadEnvMode`, so nothing happens per project), and deleting a thread removes its worktree (`storageCleanup.worktreeOnDelete`), which takes its environment with it (§9). The app reads the setting from the server, so the composer shows *New worktree* from the start.
-2. **`fern-claude` refuses a thread's session in a project's main folder** (`repos/`), with a message naming *New worktree*. T3's probes and the commit messages it writes there still run: T3 starts sessions with `--session-id` or `--resume`, and those without. It also keeps Claude out of T3's pod, with its login and the whole pool. Still open: whether T3 shows the message or only "exited with code 1".
+1. **T3's defaults on Fern's server** (`images/t3-settings.js`, which `fern-t3.service` runs before T3 starts, only where the person hasn't chosen): new threads are *New worktree* (the server-wide `defaultThreadEnvMode`, so nothing happens per project), and deleting a thread removes its worktree (`storageCleanup.worktreeOnDelete`), which takes its environment with it (§9). The app reads the setting from the server, so the composer shows *New worktree* from the start.
+2. **`fern-claude` refuses a thread's session in a project's main folder** (`repos/`), with a message naming *New worktree*. T3's probes and the commit messages it writes there still run: T3 starts sessions with `--session-id` or `--resume`, and those without. It also keeps Claude out of T3's own process, with its login and the whole pool. Still open: whether T3 shows the message or only "exited with code 1".
 3. **Claude is told where it is:** fern-init writes a `CLAUDE.md` in Claude's folder (outside the workspace, so in no snapshot or diff): its own services and data, that a revert brings data back, that it doesn't commit.
 
 Not done: making the main folder an environment. One environment for many threads breaks per-thread revert, gives the box the main repository's `.git` to write (and so code that T3 runs, §13), and puts whatever the folder holds into snapshots. Next, already planned: create the environment when T3 creates the worktree, not at its first checkpoint, which is where goldens start (§7.1).
 
 ### 15.1 How the hook reaches a user
-Nobody applies a patch by hand. T3's server has to run next to the pool anyway (it runs git and the agent on the worktree paths), so Fern runs it as a pod from an image Fern builds (§14.1). The user installs Fern, opens the T3 app on their Mac and pairs it with the printed link (Settings → Connections). From then on checkpoints and reverts also cover dependencies and the database.
+Nobody applies a patch by hand. T3's server has to run next to the pool anyway (it runs git and the agent on the worktree paths), so Fern runs it as a systemd service from an image Fern builds with its patches (`images/t3/`) and unpacks into the pool (§14). The user installs Fern, opens the T3 app on their Mac and pairs it with the printed link (Settings → Connections). From then on checkpoints and reverts also cover dependencies and the database.
 
 The cost moves to Fern: the image follows T3's releases, and the hook can break when T3 changes. Three ways to carry it:
 
@@ -493,34 +438,32 @@ A first, then propose B with what the spike learned (roadmap week 8). C only if 
 
 ## 16. Observability
 
-- **Events:** `GET /events` (created, woke, slept, snapshot, restored, forked, failed).
-- **Metrics (Prometheus),** at `/metrics` on the daemon's port 9090 (`--metrics-addr`):
-  - built: histograms `fern_wake_seconds`, `fern_stop_seconds`, `fern_restore_seconds` and `fern_snapshot_seconds` (by `result`: `ok` or `error`), `fern_queue_seconds` (how long a change waited for its actor, by `change`), `fern_wake_step_seconds` (by `step`: `sandbox`, `pod`, `ready`); `fern_idle_sleeps_total`; `fern_prewakes_total` (by `result`, §6.4); Go's process metrics. A wake and a restore are also logged with their time
-  - built too: the daemon's Kubernetes API requests (`rest_client_requests_total`, from client-go), and Go's profiles at `/debug/pprof/` on the same port
-  - planned: golden hit rate and build time, active sessions, pool usage, box restarts
-- **Traces (built):** with `--trace-endpoint` (OTLP/HTTP), the daemon sends a span per API request, per change (with the wait for its actor as `queue`), per store call, and per step of a box's wake (`sandbox`, `pod`, `ready`) and stop (`suspend`, `stop_init`, `wait_gone`). `lab/profile.sh` turns them on with Jaeger on the node, puts them beside whole-node flamegraphs, and turns them off again: they cost a little, so the perf gate refuses to run with them.
-- **Logs:** per environment (services, `fern-init`, resume/setup output), viewable with `fern logs <env>`.
-- **Turn timing (built):** `FERN_TIMING=1` on T3 records provider launch, the first decoded Claude event, Claude's cumulative API counter and each Git/Fern checkpoint span. `fern-claude` passes the flag to boxexec, which logs the successful process start and first stdout without arguments, environment values or stream contents. `lab/t3-run.sh` adds a `timing` object to each turn; it reads logs after the wall timer stops and uses T3's event stream for completion, keeping the existing `wallMs`, `runMs` and daemon metric fields. Driver and node clocks must be synchronized. `lab/t3-start.sh` compares the pinned native Claude binary inside and outside gVisor, including SDK initialization without a model prompt.
-- **CLI:** `fern ls`, `fern inspect <env>`, `fern snapshots <env>`, `fern top`.
+- **Metrics (Prometheus)** at `/metrics` on `127.0.0.1:9090` (`--metrics-addr`):
+  - histograms `fern_wake_seconds`, `fern_stop_seconds`, `fern_restore_seconds`, `fern_snapshot_seconds` and `fern_golden_build_seconds` (by `result`: `ok` or `error`); `fern_queue_seconds` (how long a change waited for its actor, by `change`); `fern_wake_step_seconds` (by `step`: `net`, `start`, `ready`)
+  - counters `fern_idle_sleeps_total`, `fern_prewakes_total` (by `result`, §6.4), `fern_golden_total` (new worktrees by golden `hit`, `miss` or `none`); Go's runtime and process metrics
+  - Go's profiles at `/debug/pprof/` on the same address
+  - planned: active boxes, pool usage, box restarts
+- **Traces:** with `--trace-endpoint` (OTLP/HTTP), the daemon sends a span per API request, per change (with the wait for its actor as `queue`), per store call, and per step of a box's wake (`net`, `start`, `ready`) and stop. `lab/profile.sh` turns them on with Jaeger on the node, puts them beside whole-node flamegraphs, and turns them off again: they cost a little, so the perf gate refuses to run with them.
+- **Logs:** the daemon's with `journalctl -u fern-daemon`; a box's output in `boxes/<box>/log` while it runs. Planned: `fern logs <env>`.
+- **Turn timing:** `FERN_TIMING=1` on T3 records provider launch, the first decoded Claude event, Claude's cumulative API counter and each checkpoint span. `fern-claude` passes the flag to boxexec, which logs the process start and first stdout without arguments, environment values or stream contents. `lab/t3-run.sh` adds a `timing` object to each turn.
+- **The lab measures everything else:** `lab/perf.sh` gates 288 metrics against a baseline, `lab/ab.sh` compares two versions on the same machine, `lab/profile.sh` shows where an operation's time and CPU go.
+- **CLI:** `fern ls`, `fern snapshots <env>`; planned: `fern inspect`, `fern top`.
 
----
+## 17. Configuration
 
-## 17. Configuration (`fern.yaml`, minimal)
+The daemon's flags (`deploy/systemd/fern-daemon.service` reads them from `/etc/fern/daemon.env` as `FERN_DAEMON_ARGS`):
 
-```yaml
-pool: /var/lib/fern            # btrfs mount (created if missing, as an image file)
-driver: local                  # local | k8s
-idle: { agent: 5m, human: 20m }
-wake_timeout: 30s
-retention: { turns: 50, golden_unused: 7d, pre_restore: 1d }
-fork: { max: 8, agent_ttl: 1h }
-classes:
-  light:     { runtime: runc,  cpu: 2, memory: 4Gi }
-  untrusted: { runtime: runsc, cpu: 2, memory: 4Gi, network: none }
-  bench:     { runtime: runc,  cpu: 4, memory: 8Gi, pinned_cpus: true }
-```
+| Flag | Default | Meaning |
+|---|---|---|
+| `--idle-agent` | 5m | sleep a box this long after its last command ended (0: never) |
+| `--idle-human` | 20m | … and this long after its last command started (0: never) |
+| `--idle-prewake` | 2m | sleep a box woken ahead this long after its wake, unless a command comes (0: no pre-wakes) |
+| `--agent-boxes` | true | run Claude in an agent box per environment (§10) |
+| `--box-dns` | 1.1.1.1,8.8.8.8 | the resolvers boxes use |
+| `--metrics-addr` | 127.0.0.1:9090 | metrics and Go's profiles |
+| `--trace-endpoint` | none | send traces by OTLP/HTTP |
 
----
+Fixed in the code for now: the pool (`/var/lib/fern`), retention (50 turn snapshots, pre-restore copies for a day, §9) and the box limits (§10). Planned: a `fern.yaml` with classes, fork caps and retention.
 
 ## 18. Code layout
 
@@ -538,7 +481,7 @@ internal/hibernate/  stops an idle Claude and resumes it at the next message
 internal/image/      unpacks docker save streams into box roots
 internal/setup/      setup contract, golden keys
 internal/span/       trace spans
-lab/                 experiments and crash-test harness (see engine-local.md)
+lab/                 the lab: setup, integration checks, perf gate, A/B, profiler
 deploy/systemd/      the daemon's and T3's units
 ```
 
@@ -546,18 +489,12 @@ deploy/systemd/      the daemon's and T3's units
 
 ## 19. Milestones
 
-Kubernetes first, with a vertical slice in week 1. The week-by-week plan (MVP in about 3 weeks, v1 by week 8) is in [roadmap.md](roadmap.md); the demo script is in [design.md §21](design.md#21-roadmap-about-8-weeks-kubernetes-first). Week 0 proves the riskiest piece: a gVisor `Sandbox` using a btrfs subvolume through the CSI inline volume.
-
----
+The order of work is [roadmap.md](roadmap.md). Measured results, phase by phase, are in [lab/RESULTS.md](../lab/RESULTS.md).
 
 ## 20. Open questions
 
-- **Wake time budget:** box start + `resume` + services. Target ≤15 s, so T3's first connection attempt succeeds. To be measured.
-- **agent-sandbox:** `Suspended` → `Running` latency; recreation of a force-deleted pod; pod → `Sandbox` → `Environment` ownership for CSI checks.
-- **Quotas:** btrfs qgroups vs cgroup/box-level limits, given qgroups' performance cost.
-- **Revert edge cases:** T3's "revert files only" vs "revert files too". Threads in the project directory rather than a worktree: see §15, planned.
-- **CSI inline volumes:** btrfs subvolume bind mounts under gVisor (week 0 spike); reliable pod identity for mount authorization.
-- **Admission policy:** can it read the node name from node-bound tokens?
-- **Reattach:** does `sandboxd` support it, or does `fern-init` need its own protocol?
-- **portless:** whether it can name an already-forwarded port, or needs an adapter.
+- **Wake time:** a warm pool of boxes could take a box's start (about 250 ms) out of a turn; a runsc subcontainer pool measured 395 ms against a cold 494 ms (`lab/spike/runsc/RESULTS.md`).
+- **Quotas:** btrfs qgroups vs cgroup-level limits, given qgroups' performance cost.
+- **Revert edge cases:** T3's "revert files only" vs "revert files too"; threads in the project directory rather than a worktree (§15).
+- **Previews:** whether portless can name an already-forwarded port, or needs an adapter.
 - **Is the hook enough** to cover every T3 flow that should snapshot or restore?

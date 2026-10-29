@@ -1,8 +1,10 @@
+> **History.** This was the plan for the engine's experiments and dev loop when Fern ran on Kubernetes (k3s in Docker, agent-sandbox pods, a CSI driver), from 2026-10-16. That mode was removed on 2026-10-29; what Fern is now is in [architecture.md](../architecture.md), and how it is tested is in [AGENTS.md](../../AGENTS.md#commands). The experiments' results are in [lab/RESULTS.md](../../lab/RESULTS.md).
+
 # The engine: experiments and dev loop
 
 **Status:** plan, revised 2026-10-17 to match the Kubernetes-first decision.
-- [architecture.md](architecture.md) says what we build.
-- [roadmap.md](roadmap.md) gives the week-by-week plan; [design.md §21](design.md) gives the demo.
+- [architecture.md](../architecture.md) says what we build.
+- [roadmap.md](../roadmap.md) gives the week-by-week plan; [design.md §21](../design.md) gives the demo.
 
 The engine is everything Fern runs on a node:
 - the **store** (btrfs snapshots)
@@ -16,14 +18,14 @@ The engine is everything Fern runs on a node:
 - the **front door** (wake on touch)
 - the **T3 hook**
 
-**Where it runs:** **locally first, then remote** ([roadmap.md](roadmap.md)). Weeks 0–3 use a local lab: k3s inside a privileged Docker container on the Mac. From week 4, a remote Linux machine with k3s. Both are Kubernetes, so there is one code path. Nothing gets installed on the Mac itself.
+**Where it runs:** **locally first, then remote** ([roadmap.md](../roadmap.md)). Weeks 0–3 use a local lab: k3s inside a privileged Docker container on the Mac. From week 4, a remote Linux machine with k3s. Both are Kubernetes, so there is one code path. Nothing gets installed on the Mac itself.
 
 ---
 
 ## 1. The dev machines
 
 ### 1.0 The local lab (weeks 0–3)
-- **What:** Docker Desktop (you start it), one privileged container with systemd as PID 1 (`images/Dockerfile`, `lab-node`), a btrfs image file loop-mounted inside it at `/var/lib/fern`, and Fern's units, as on the VPS. Until 2026-10-28 it was a `rancher/k3s` container ([briefs/fern-without-kubernetes.md](briefs/fern-without-kubernetes.md)).
+- **What:** Docker Desktop (you start it), one privileged container with systemd as PID 1 (`images/Dockerfile`, `lab-node`), a btrfs image file loop-mounted inside it at `/var/lib/fern`, and Fern's units, as on the VPS. Until 2026-10-28 it was a `rancher/k3s` container ([briefs/fern-without-kubernetes.md](../briefs/fern-without-kubernetes.md)).
 - **Go:** builds and unit tests run in a `golang` container with the repo mounted.
 - **Known to work** (earlier spikes on this Mac): btrfs snapshots and swaps, Postgres recovery, git worktrees in subvolumes, k3s pods restarting with their data (kernel 6.10 linuxkit, btrfs-progs 6.6).
 - **gVisor** (`runsc`) works inside Docker Desktop: `lab/up.sh` installs it, and every box runs under it, as on the VPS.
@@ -194,7 +196,7 @@ Each one: **shows**, **how**, **pass**. Numbers are reported as p50/p95, with no
 
 ---
 
-## 6. Order (matches [roadmap.md](roadmap.md))
+## 6. Order (matches [roadmap.md](../roadmap.md))
 | Week | Experiments |
 |---|---|
 | 0 (local) | E0 (runc; gVisor if possible) |

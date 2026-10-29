@@ -1,6 +1,8 @@
 # Fern: environments for AI coding agents (design doc, 2026-10-16)
 
-> **Status:** design draft for Fern v2. Nothing here is built yet. Fern v1 (a control plane that runs coding-agent jobs in disposable containers and seals a verified Git artifact) is preserved at tag [`v1-final`](https://github.com/nebler/fern/tree/v1-final).
+> **Status:** the design draft for Fern v2, as of 2026-10-16. Its problem, landscape, principles and rejected designs still hold. Its Kubernetes-first parts do not: §9's box driver (agent-sandbox), how §13 stops a box (pods), §16 (Kubernetes) and §21's Kubernetes-first roadmap describe the first design, which was replaced step by step and removed from the code on 2026-10-29 ([briefs/boxes-without-kubernetes.md](briefs/boxes-without-kubernetes.md), [briefs/fern-without-kubernetes.md](briefs/fern-without-kubernetes.md)). What Fern is now: [architecture.md](architecture.md).
+>
+> Fern v2 was not yet built when this was written. Fern v1 (a control plane that runs coding-agent jobs in disposable containers and seals a verified Git artifact) is preserved at tag [`v1-final`](https://github.com/nebler/fern/tree/v1-final).
 > This document covers the problem, the landscape, the architecture, the T3 Code integration, Kubernetes, setup, agent tooling, risks, and the designs we rejected.
 
 ---
