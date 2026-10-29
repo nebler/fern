@@ -15,6 +15,8 @@ import (
 	"syscall"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/nebler/fern/internal/store/index"
 )
 
 // Create makes an environment, its workspace filled from opts.Seed if it
@@ -107,9 +109,9 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 		return Env{}, err
 	}
 	env := Env{ID: id, Workspace: workspace, Claude: s.claudePath(id), Git: git, Created: now(), BoxToken: rand.Text()}
-	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO environments (`+envColumns+`) VALUES (?, ?, ?, ?, ?)`,
-		env.ID, env.Workspace, env.Git, env.Created.Unix(), env.BoxToken); err != nil {
+	if err := s.q.InsertEnv(ctx, index.InsertEnvParams{
+		ID: env.ID, Workspace: env.Workspace, Git: env.Git, CreatedAt: env.Created.Unix(), BoxToken: env.BoxToken,
+	}); err != nil {
 		return Env{}, err
 	}
 	if err := s.step("create: indexed"); err != nil {
@@ -142,7 +144,7 @@ func (s *Store) readopt(ctx context.Context, env Env) (Env, error) {
 	if err != nil {
 		return Env{}, err
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE environments SET git = ? WHERE id = ?`, git, env.ID); err != nil {
+	if err := s.q.SetEnvGit(ctx, index.SetEnvGitParams{Git: git, ID: env.ID}); err != nil {
 		return Env{}, err
 	}
 	env.Git = git
@@ -164,10 +166,9 @@ func (s *Store) checkWorkspace(ctx context.Context, path string) (string, error)
 			return "", fmt.Errorf("%s is a symlink: %w", p, ErrInvalidPath)
 		}
 	}
-	var other string
-	err = s.db.QueryRowContext(ctx, `SELECT id FROM environments WHERE workspace = ?`, clean).Scan(&other)
+	other, err := s.q.EnvAt(ctx, clean)
 	if err == nil {
-		return "", fmt.Errorf("%s is environment %s's workspace: %w", path, other, ErrInvalidPath)
+		return "", fmt.Errorf("%s is environment %s's workspace: %w", path, other.ID, ErrInvalidPath)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return "", err

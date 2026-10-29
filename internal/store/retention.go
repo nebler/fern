@@ -8,6 +8,8 @@ import (
 	"os"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/nebler/fern/internal/store/index"
 )
 
 // Retention keeps the pool from filling up (architecture §9): every turn of
@@ -35,9 +37,9 @@ func (s *Store) Prune(ctx context.Context, id string) error {
 	if err := s.prunePreRestores(ctx, id, ""); err != nil {
 		return fmt.Errorf("prune %s: %w", id, err)
 	}
-	old, err := column[string](ctx, s.db,
-		`SELECT id FROM snapshots WHERE env = ? AND id NOT LIKE ? ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?`,
-		id, preRestorePrefix+"%", s.keepTurns)
+	old, err := s.q.SnapshotsBeyond(ctx, index.SnapshotsBeyondParams{
+		Env: id, Pattern: preRestorePrefix + "%", Keep: int64(s.keepTurns),
+	})
 	if err != nil {
 		return fmt.Errorf("prune %s: %w", id, err)
 	}

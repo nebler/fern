@@ -136,7 +136,7 @@ func isNotEmpty(err error) bool { return errors.Is(err, unix.ENOTEMPTY) || error
 // Sources returns the golden sources kept for builds: snapshots named name,
 // of any environment. A build queued when the daemon stopped is found here.
 func (s *Store) Sources(ctx context.Context, name string) ([]SnapshotRef, error) {
-	envs, err := column[string](ctx, s.db, `SELECT env FROM snapshots WHERE id = ? ORDER BY created_at, rowid`, name)
+	envs, err := s.q.EnvsWithSnapshot(ctx, name)
 	if err != nil {
 		return nil, err
 	}

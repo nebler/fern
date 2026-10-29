@@ -34,6 +34,8 @@ import (
 
 	"golang.org/x/sys/unix"
 	_ "modernc.org/sqlite" // registers the "sqlite" database/sql driver
+
+	"github.com/nebler/fern/internal/store/index"
 )
 
 // BoxUID and BoxGID own every workspace, so the non-root box (and T3, which
@@ -134,6 +136,7 @@ func checkSnapID(id string) error {
 type Store struct {
 	root string
 	db   *sql.DB
+	q    *index.Queries // the index's queries, on db
 	// failAt, if set, is called at every step of a change that has more
 	// than one; an error stops the change there, as a crash would. Crash
 	// tests set it.
@@ -150,24 +153,6 @@ func (s *Store) step(name string) error {
 	}
 	return s.failAt(name)
 }
-
-const schema = `
-CREATE TABLE IF NOT EXISTS environments (
-	id         TEXT PRIMARY KEY,
-	workspace  TEXT NOT NULL UNIQUE,
-	git        TEXT NOT NULL,
-	created_at INTEGER NOT NULL,
-	box_token  TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS snapshots (
-	env        TEXT NOT NULL REFERENCES environments(id) ON DELETE CASCADE,
-	id         TEXT NOT NULL,
-	created_at INTEGER NOT NULL,
-	PRIMARY KEY (env, id)
-);`
-
-// envColumns are the environments columns scanEnv reads, in its order.
-const envColumns = `id, workspace, git, created_at, box_token`
 
 // Open opens the pool mounted at root, which must be on btrfs, creating the
 // index if needed.
@@ -205,11 +190,11 @@ func Open(ctx context.Context, root string) (*Store, error) {
 		return nil, fmt.Errorf("open index: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	if _, err := db.ExecContext(ctx, schema); err != nil {
+	if _, err := db.ExecContext(ctx, index.Schema); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("create index: %w", err)
 	}
-	s.db = db
+	s.db, s.q = db, index.New(db)
 	return s, nil
 }
 
@@ -221,33 +206,25 @@ func (s *Store) Get(ctx context.Context, id string) (Env, error) {
 	if err := CheckEnvID(id); err != nil {
 		return Env{}, err
 	}
-	env, err := s.scanEnv(s.db.QueryRowContext(ctx, `SELECT `+envColumns+` FROM environments WHERE id = ?`, id))
+	e, err := s.q.Env(ctx, id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Env{}, fmt.Errorf("environment %q: %w", id, ErrNotFound)
 	}
 	if err != nil {
 		return Env{}, fmt.Errorf("get %s: %w", id, err)
 	}
-	return env, nil
+	return s.env(e), nil
 }
 
 // List returns all environments, ordered by ID.
 func (s *Store) List(ctx context.Context) ([]Env, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+envColumns+` FROM environments ORDER BY id`)
+	rows, err := s.q.Envs(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list environments: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
-	var envs []Env
-	for rows.Next() {
-		env, err := s.scanEnv(rows)
-		if err != nil {
-			return nil, fmt.Errorf("list environments: %w", err)
-		}
-		envs = append(envs, env)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list environments: %w", err)
+	envs := make([]Env, len(rows))
+	for i, e := range rows {
+		envs[i] = s.env(e)
 	}
 	return envs, nil
 }
@@ -255,45 +232,24 @@ func (s *Store) List(ctx context.Context) ([]Env, error) {
 // FindByPath returns the environment whose workspace is path or holds it.
 func (s *Store) FindByPath(ctx context.Context, path string) (Env, error) {
 	for p := filepath.Clean(path); p != s.root && p != filepath.Dir(p); p = filepath.Dir(p) {
-		env, err := s.scanEnv(s.db.QueryRowContext(ctx, `SELECT `+envColumns+` FROM environments WHERE workspace = ?`, p))
+		e, err := s.q.EnvAt(ctx, p)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
 		}
 		if err != nil {
 			return Env{}, fmt.Errorf("find %s: %w", path, err)
 		}
-		return env, nil
+		return s.env(e), nil
 	}
 	return Env{}, fmt.Errorf("environment at %s: %w", path, ErrNotFound)
 }
 
-func (s *Store) scanEnv(row interface{ Scan(...any) error }) (Env, error) {
-	var env Env
-	var created int64
-	if err := row.Scan(&env.ID, &env.Workspace, &env.Git, &created, &env.BoxToken); err != nil {
-		return Env{}, err
+// env returns the environment that row e of the index describes.
+func (s *Store) env(e index.Environment) Env {
+	return Env{
+		ID: e.ID, Workspace: e.Workspace, Claude: s.claudePath(e.ID), Git: e.Git,
+		Created: time.Unix(e.CreatedAt, 0).UTC(), BoxToken: e.BoxToken,
 	}
-	env.Created = time.Unix(created, 0).UTC()
-	env.Claude = s.claudePath(env.ID)
-	return env, nil
-}
-
-// column returns the one column of the rows query selects.
-func column[T any](ctx context.Context, db *sql.DB, query string, args ...any) ([]T, error) {
-	rows, err := db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = rows.Close() }()
-	var out []T
-	for rows.Next() {
-		var v T
-		if err := rows.Scan(&v); err != nil {
-			return nil, err
-		}
-		out = append(out, v)
-	}
-	return out, rows.Err()
 }
 
 // now is a creation time as the index keeps it, to the second.

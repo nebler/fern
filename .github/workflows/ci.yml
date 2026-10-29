@@ -23,3 +23,5 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - run: lab/lint.sh
+      # The store's queries are generated from internal/store/index/*.sql.
+      - run: lab/sqlc.sh diff

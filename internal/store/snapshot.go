@@ -2,7 +2,6 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -10,6 +9,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/nebler/fern/internal/store/index"
 )
 
 // Snapshot freezes environment id's workspace as the read-only snapshot
@@ -39,9 +40,7 @@ func (s *Store) snapshot(ctx context.Context, env Env, snapID string) error {
 	if err == nil {
 		// A retry, or a snapshot taken just before a crash: btrfs snapshots
 		// are atomic, so it is complete. It keeps its row if it has one.
-		_, err = s.db.ExecContext(ctx, `INSERT OR IGNORE INTO snapshots (env, id, created_at) VALUES (?, ?, ?)`,
-			env.ID, snapID, now().Unix())
-		return err
+		return s.q.KeepSnapshot(ctx, index.KeepSnapshotParams{Env: env.ID, ID: snapID, CreatedAt: now().Unix()})
 	}
 	if !errors.Is(err, fs.ErrNotExist) {
 		return err
@@ -55,9 +54,7 @@ func (s *Store) snapshot(ctx context.Context, env Env, snapID string) error {
 	if err := s.step("snapshot: taken"); err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT OR REPLACE INTO snapshots (env, id, created_at) VALUES (?, ?, ?)`,
-		env.ID, snapID, now().Unix())
-	return err
+	return s.q.ReplaceSnapshot(ctx, index.ReplaceSnapshotParams{Env: env.ID, ID: snapID, CreatedAt: now().Unix()})
 }
 
 // DeleteSnapshot removes snapshot snapID of environment id. Deleting one
@@ -76,7 +73,7 @@ func (s *Store) DeleteSnapshot(ctx context.Context, id, snapID string) error {
 	if err := s.step("delete snapshot: removed"); err != nil {
 		return err
 	}
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM snapshots WHERE env = ? AND id = ?`, id, snapID); err != nil {
+	if err := s.q.DeleteSnapshot(ctx, index.DeleteSnapshotParams{Env: id, ID: snapID}); err != nil {
 		return fmt.Errorf("delete snapshot %s/%s: %w", id, snapID, err)
 	}
 	return nil
@@ -87,24 +84,13 @@ func (s *Store) Snapshots(ctx context.Context, id string) ([]Snapshot, error) {
 	if _, err := s.Get(ctx, id); err != nil {
 		return nil, err
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, created_at FROM snapshots WHERE env = ? ORDER BY created_at, rowid`, id)
+	rows, err := s.q.Snapshots(ctx, id)
 	if err != nil {
 		return nil, fmt.Errorf("list snapshots of %s: %w", id, err)
 	}
-	defer func() { _ = rows.Close() }()
-	var snaps []Snapshot
-	for rows.Next() {
-		var snap Snapshot
-		var created int64
-		if err := rows.Scan(&snap.ID, &created); err != nil {
-			return nil, fmt.Errorf("list snapshots of %s: %w", id, err)
-		}
-		snap.Created = time.Unix(created, 0).UTC()
-		snaps = append(snaps, snap)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("list snapshots of %s: %w", id, err)
+	snaps := make([]Snapshot, len(rows))
+	for i, r := range rows {
+		snaps[i] = Snapshot{ID: r.ID, Created: time.Unix(r.CreatedAt, 0).UTC()}
 	}
 	return snaps, nil
 }
@@ -177,9 +163,9 @@ const (
 // prunePreRestores deletes environment id's pre-restore snapshots that are
 // older than preRestoreKeep, except snapshot keep.
 func (s *Store) prunePreRestores(ctx context.Context, id, keep string) error {
-	old, err := column[string](ctx, s.db,
-		`SELECT id FROM snapshots WHERE env = ? AND id LIKE ? AND id != ? AND created_at < ?`,
-		id, preRestorePrefix+"%", keep, time.Now().Add(-preRestoreKeep).Unix())
+	old, err := s.q.SnapshotsBefore(ctx, index.SnapshotsBeforeParams{
+		Env: id, Pattern: preRestorePrefix + "%", Keep: keep, Before: time.Now().Add(-preRestoreKeep).Unix(),
+	})
 	if err != nil {
 		return err
 	}
@@ -196,15 +182,11 @@ func (s *Store) HasSnapshot(ctx context.Context, ref SnapshotRef) (bool, error) 
 	if err := checkSnapID(ref.Snapshot); err != nil {
 		return false, err
 	}
-	var one int
-	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM snapshots WHERE env = ? AND id = ?`, ref.Env, ref.Snapshot).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+	ok, err := s.q.HasSnapshot(ctx, index.HasSnapshotParams{Env: ref.Env, ID: ref.Snapshot})
 	if err != nil {
 		return false, fmt.Errorf("snapshot %s/%s: %w", ref.Env, ref.Snapshot, err)
 	}
-	return true, nil
+	return ok, nil
 }
 
 // snapshotPath returns the path of snapshot ref, which must exist.

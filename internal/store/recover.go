@@ -2,13 +2,14 @@ package store
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/nebler/fern/internal/store/index"
 )
 
 // Delete removes environment id's index rows and disk, its workspace
@@ -28,7 +29,7 @@ func (s *Store) Delete(ctx context.Context, id string) error {
 		if err := s.step("delete: marked"); err != nil {
 			return err
 		}
-		if _, err := s.db.ExecContext(ctx, `DELETE FROM environments WHERE id = ?`, id); err != nil {
+		if err := s.q.DeleteEnv(ctx, id); err != nil {
 			return fmt.Errorf("delete %s: %w", id, err)
 		}
 		if err := s.step("delete: unindexed"); err != nil {
@@ -148,7 +149,7 @@ func (s *Store) reconcileSnapshots(ctx context.Context, id string) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	if err := s.indexRecoveredSnapshots(ctx, tx, id, missing, indexed); err != nil {
+	if err := s.indexRecoveredSnapshots(ctx, s.q.WithTx(tx), id, missing, indexed); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -157,28 +158,18 @@ func (s *Store) reconcileSnapshots(ctx context.Context, id string) error {
 	return s.step("reconcile: snapshot rows committed")
 }
 
-func (s *Store) indexRecoveredSnapshots(ctx context.Context, tx *sql.Tx, id string, missing []string, stale map[string]bool) error {
-	insert, err := tx.PrepareContext(ctx, `INSERT INTO snapshots (env, id, created_at) VALUES (?, ?, ?)`)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = insert.Close() }()
+func (s *Store) indexRecoveredSnapshots(ctx context.Context, q *index.Queries, id string, missing []string, stale map[string]bool) error {
 	created := now().Unix()
 	for _, snapID := range missing {
-		if _, err := insert.ExecContext(ctx, id, snapID, created); err != nil {
+		if err := q.KeepSnapshot(ctx, index.KeepSnapshotParams{Env: id, ID: snapID, CreatedAt: created}); err != nil {
 			return err
 		}
 		if err := s.step("reconcile: indexed " + snapID); err != nil {
 			return err
 		}
 	}
-	remove, err := tx.PrepareContext(ctx, `DELETE FROM snapshots WHERE env = ? AND id = ?`)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = remove.Close() }()
 	for snapID := range stale {
-		if _, err := remove.ExecContext(ctx, id, snapID); err != nil {
+		if err := q.DeleteSnapshot(ctx, index.DeleteSnapshotParams{Env: id, ID: snapID}); err != nil {
 			return err
 		}
 		if err := s.step("reconcile: unindexed " + snapID); err != nil {
