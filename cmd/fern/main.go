@@ -54,11 +54,12 @@ const socket = "/run/fern/fern.sock"
 const images = "/var/lib/fern/images"
 
 func main() {
-	os.Exit(run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	os.Exit(run(context.Background(), socket, os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 
-// run runs one invocation and returns the process exit code.
-func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+// run runs one invocation against the daemon at socket and returns the
+// process exit code.
+func run(ctx context.Context, socket string, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	cmd, err := parse(args)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "fern: %v\n", err)
@@ -74,7 +75,8 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	code, err := sc.run(ctx, cmd, api.NewClient(socket), stdio{stdin, stdout, stderr})
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "fern %s: %v\n", cmd.name, err)
-		return 1
+		// A command that failed says how, such as 2 for a usage error.
+		return max(code, 1)
 	}
 	return code
 }
