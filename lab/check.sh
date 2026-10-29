@@ -106,13 +106,6 @@ stats() {
 }
 # metrics prints the daemon's Prometheus metrics.
 metrics() { on_node curl -sf http://127.0.0.1:9090/metrics </dev/null; }
-# api_requests_since prints how many Kubernetes API requests the daemon made,
-# by the metrics on stdin, since the metrics in file $1 were read, divided
-# by $2.
-api_requests_since() {
-  awk -v n="$2" '$1 ~ /^rest_client_requests_total[{]/ { if (NR == FNR) b += $2; else a += $2 }
-    END { printf "%.1f", (a - b) / n }' "$1" -
-}
 # counter_since prints how much counter $2 in the metrics on stdin grew
 # since the metrics in file $1 were read.
 counter_since() {
@@ -268,12 +261,8 @@ box() {
     mounted=$((mounted + $(mounts $ENV)))
     fern wake $ENV | took >>"$TMP/wake"
   done
-  metric box.sleep_ms "sleep (until the pod is gone), ms" "$(stats <"$TMP/sleep")"
+  metric box.sleep_ms "sleep (until the box is gone), ms" "$(stats <"$TMP/sleep")"
   metric box.wake_ms "wake (until Postgres is ready), ms" "$(stats <"$TMP/wake")"
-  # A count: it moves with how many polls a wake needs, far less than the
-  # times do with the machine's other load.
-  metric box.sleep_wake_api_requests_count "the daemon's Kubernetes API requests per sleep and wake" \
-    "$(metrics | api_requests_since "$TMP/metrics" "$WAKES")"
   note "wake steps: $(wake_steps "$TMP/metrics")"
   # Memory without the page cache, which comes and goes: the box's (Postgres
   # idle, gVisor included) and the daemon's. gVisor keeps what the box's

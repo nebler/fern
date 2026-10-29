@@ -9,22 +9,19 @@ import (
 var links = []string{"fbx*", "fag*"}
 
 // blocked are the destinations a box may not reach: private, shared,
-// loopback and link-local ranges (other boxes, the cluster, the node's
-// services, a cloud's metadata endpoint), multicast and reserved ones.
+// loopback and link-local ranges (other boxes, the node's services, a
+// cloud's metadata endpoint), multicast and reserved ones.
 var blocked = []string{
 	"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "100.64.0.0/10",
 	"127.0.0.0/8", "169.254.0.0/16", "0.0.0.0/8", "224.0.0.0/4", "240.0.0.0/4",
 }
 
 // firewall is the nftables ruleset that gives boxes the internet and
-// nothing else, as the network policy did for pods (architecture §13): no
-// private or link-local address, no other box, nothing on the node (which a
-// box reaches at the node's own addresses, after kube-proxy's DNAT for a
-// service), and nothing but answers coming in, since only the daemon, on
-// the node, connects to a box. It is a table of its own, which Kubernetes'
-// tools (kube-proxy, kube-router) don't rewrite as they do iptables'
-// chains, and a drop in it is final whatever other tables accept. Loading
-// it replaces the table in one transaction, so it is safe to repeat.
+// nothing else (architecture §13): no private or link-local address, no
+// other box, nothing on the node, and nothing but answers coming in, since
+// only the daemon, on the node, connects to a box. It is a table of its
+// own, so a drop in it is final whatever other tables accept. Loading it
+// replaces the table in one transaction, so it is safe to repeat.
 //
 // Agent boxes (links fag*) get the same, except that they may connect to the
 // daemon's MCP port on the node; nothing else reaches that port.

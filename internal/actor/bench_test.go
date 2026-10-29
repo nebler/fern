@@ -5,15 +5,17 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/nebler/fern/internal/actor"
-	"github.com/nebler/fern/internal/driver"
+	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
 )
 
 // BenchmarkExec measures mailbox and accounting costs without starting a box.
 // Idle sleep is disabled; this measures work rather than timer behavior.
 func BenchmarkExec(b *testing.B) {
-	g := actor.New(newFakeStore(), driver.NewFake("box"), actor.Idle{}, "box", notrace, slog.New(slog.DiscardHandler))
+	g := actor.New(newFakeStore(), runsc.NewFake("box"), actor.Config{Image: "box"}, notrace, prometheus.NewRegistry(), slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(b.Context())
 	done := make(chan error, 1)
 	go func() { done <- g.Run(ctx) }()

@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/trace/noop"
 	"go.uber.org/goleak"
 
@@ -29,7 +30,7 @@ import (
 	"github.com/nebler/fern/internal/api"
 	"github.com/nebler/fern/internal/api/server"
 	"github.com/nebler/fern/internal/boxexec"
-	"github.com/nebler/fern/internal/driver"
+	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -180,6 +181,12 @@ func (f *fakeStore) Snapshots(_ context.Context, id string) ([]store.Snapshot, e
 	return slices.Clone(f.snaps[id]), nil
 }
 
+func (f *fakeStore) HasSnapshot(_ context.Context, ref store.SnapshotRef) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.ContainsFunc(f.snaps[ref.Env], func(s store.Snapshot) bool { return s.ID == ref.Snapshot }), nil
+}
+
 func (f *fakeStore) Restore(_ context.Context, id, snapID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -194,7 +201,7 @@ func (f *fakeStore) Restore(_ context.Context, id, snapID string) error {
 
 // newAPI serves the API over a unix socket, with a fake store and a fake
 // driver whose boxes all run commands with a real boxexec server.
-func newAPI(t *testing.T) (*api.Client, *driver.Fake) {
+func newAPI(t *testing.T) (*api.Client, *runsc.Fake) {
 	t.Helper()
 	return newAPIWith(t, nil)
 }
@@ -210,7 +217,7 @@ type driverWith interface {
 func newServer(t testing.TB, st *fakeStore, drv actor.Driver) http.Handler {
 	t.Helper()
 	log := slog.New(slog.DiscardHandler)
-	envs := actor.New(st, drv, actor.Idle{}, "box", notrace, log)
+	envs := actor.New(st, drv, actor.Config{Image: "box"}, notrace, prometheus.NewRegistry(), log)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -224,7 +231,7 @@ func newServer(t testing.TB, st *fakeStore, drv actor.Driver) http.Handler {
 }
 
 // newAPIWith is newAPI with the fake driver wrapped by wrap, if it isn't nil.
-func newAPIWith(t testing.TB, wrap func(*driver.Fake) driverWith) (*api.Client, *driver.Fake) {
+func newAPIWith(t testing.TB, wrap func(*runsc.Fake) driverWith) (*api.Client, *runsc.Fake) {
 	t.Helper()
 	log := slog.New(slog.DiscardHandler)
 	mux := http.NewServeMux()
@@ -232,7 +239,7 @@ func newAPIWith(t testing.TB, wrap func(*driver.Fake) driverWith) (*api.Client, 
 	box := httptest.NewServer(mux)
 	t.Cleanup(box.Close)
 
-	drv := driver.NewFake(box.Listener.Addr().String())
+	drv := runsc.NewFake(box.Listener.Addr().String())
 	var d driverWith = drv
 	if wrap != nil {
 		d = wrap(drv)
@@ -273,7 +280,7 @@ func status(err error) int {
 }
 
 // stateOf returns the state List reports for environment id.
-func stateOf(t *testing.T, c *api.Client, id string) driver.State {
+func stateOf(t *testing.T, c *api.Client, id string) runsc.State {
 	t.Helper()
 	envs, err := c.List(t.Context())
 	if err != nil {
@@ -283,7 +290,7 @@ func stateOf(t *testing.T, c *api.Client, id string) driver.State {
 	if i < 0 {
 		t.Fatalf("List() has no %s", id)
 	}
-	return driver.State(envs[i].State)
+	return runsc.State(envs[i].State)
 }
 
 func run(t *testing.T, c *api.Client, id string, argv ...string) {
@@ -301,7 +308,7 @@ func TestCreateList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List() error: %v", err)
 	}
-	want := []api.Env{{ID: "demo", Workspace: "/pool/envs/demo/live", Created: created, State: string(driver.Asleep)}}
+	want := []api.Env{{ID: "demo", Workspace: "/pool/envs/demo/live", Created: created, State: string(runsc.Asleep)}}
 	if diff := cmp.Diff(want, list); diff != "" {
 		t.Errorf("List() mismatch (-want +got):\n%s", diff)
 	}
@@ -346,14 +353,14 @@ func TestSnapshotRestore(t *testing.T) {
 	if err := c.Wake(ctx, "demo"); err != nil {
 		t.Fatalf("Wake(demo) error: %v", err)
 	}
-	if got := stateOf(t, c, "demo"); got != driver.Running {
-		t.Fatalf("after Wake: state %s, want %s", got, driver.Running)
+	if got := stateOf(t, c, "demo"); got != runsc.Running {
+		t.Fatalf("after Wake: state %s, want %s", got, runsc.Running)
 	}
 	if err := c.Restore(ctx, "demo", "s1"); err != nil {
 		t.Fatalf("Restore(demo, s1) error: %v", err)
 	}
-	if got := stateOf(t, c, "demo"); got != driver.Asleep {
-		t.Errorf("after Restore: state %s, want %s", got, driver.Asleep)
+	if got := stateOf(t, c, "demo"); got != runsc.Asleep {
+		t.Errorf("after Restore: state %s, want %s", got, runsc.Asleep)
 	}
 	// The next exec must wake the box again, not reuse the old address.
 	run(t, c, "demo", "true")
@@ -380,8 +387,8 @@ func TestExecWakesOnce(t *testing.T) {
 			t.Errorf("after exec #%d: Wakes() = %d, want 1", i+1, got)
 		}
 	}
-	if got := stateOf(t, c, "demo"); got != driver.Running {
-		t.Errorf("state %s, want %s", got, driver.Running)
+	if got := stateOf(t, c, "demo"); got != runsc.Running {
+		t.Errorf("state %s, want %s", got, runsc.Running)
 	}
 }
 
@@ -427,17 +434,17 @@ func TestLifecycleRepeats(t *testing.T) {
 	steps := []struct {
 		name      string
 		do        func() error
-		wantState driver.State
+		wantState runsc.State
 		wantWakes int
 	}{
-		{"create", create, driver.Asleep, 0},
-		{"create again", create, driver.Asleep, 0},
-		{"wake", wake, driver.Running, 1},
-		{"wake again", wake, driver.Running, 1},
-		{"create while running", create, driver.Running, 1},
-		{"sleep", sleep, driver.Asleep, 1},
-		{"sleep again", sleep, driver.Asleep, 1},
-		{"wake after sleep", wake, driver.Running, 2},
+		{"create", create, runsc.Asleep, 0},
+		{"create again", create, runsc.Asleep, 0},
+		{"wake", wake, runsc.Running, 1},
+		{"wake again", wake, runsc.Running, 1},
+		{"create while running", create, runsc.Running, 1},
+		{"sleep", sleep, runsc.Asleep, 1},
+		{"sleep again", sleep, runsc.Asleep, 1},
+		{"wake after sleep", wake, runsc.Running, 2},
 	}
 	for _, step := range steps {
 		if err := step.do(); err != nil {
@@ -500,25 +507,26 @@ func TestRestoreUnknownKeepsBox(t *testing.T) {
 	if err := c.Restore(ctx, "demo", "typo"); status(err) != http.StatusNotFound {
 		t.Fatalf("Restore(demo, typo) error = %v, want status %d", err, http.StatusNotFound)
 	}
-	if got := stateOf(t, c, "demo"); got != driver.Running {
-		t.Errorf("after a failed Restore: state %s, want %s", got, driver.Running)
+	if got := stateOf(t, c, "demo"); got != runsc.Running {
+		t.Errorf("after a failed Restore: state %s, want %s", got, runsc.Running)
 	}
 	if got := drv.Wakes(); got != 1 {
 		t.Errorf("Wakes() = %d, want 1", got)
 	}
 }
 
-// blockingDelete is a driver whose Delete waits until release is closed.
-type blockingDelete struct {
-	*driver.Fake
+// blockingStop is a driver whose Sleep, which stops a box, waits until
+// release is closed.
+type blockingStop struct {
+	*runsc.Fake
 	started chan struct{}
 	release chan struct{}
 }
 
-func (d *blockingDelete) Delete(ctx context.Context, id string) error {
+func (d *blockingStop) Sleep(ctx context.Context, id string) error {
 	close(d.started)
 	<-d.release
-	return d.Fake.Delete(ctx, id)
+	return d.Fake.Sleep(ctx, id)
 }
 
 // A client that goes away must not leave a delete half done: the box gone
@@ -530,7 +538,7 @@ func TestDeleteOutlivesClient(t *testing.T) {
 	if _, err := st.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	d := &blockingDelete{Fake: driver.NewFake(""), started: make(chan struct{}), release: make(chan struct{})}
+	d := &blockingStop{Fake: runsc.NewFake(""), started: make(chan struct{}), release: make(chan struct{})}
 	h := newServer(t, st, d)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
@@ -553,15 +561,15 @@ func TestDeleteOutlivesClient(t *testing.T) {
 }
 
 // staleWake is a driver whose first wake reports an address nothing
-// listens on, like a box whose pod has just gone.
+// listens on, like a box that has just gone.
 type staleWake struct {
-	*driver.Fake
+	*runsc.Fake
 	dead  string
 	waked bool
 }
 
-func (d *staleWake) Wake(ctx context.Context, env store.Env) (string, error) {
-	addr, err := d.Fake.Wake(ctx, env)
+func (d *staleWake) Wake(ctx context.Context, box runsc.Box) (string, error) {
+	addr, err := d.Fake.Wake(ctx, box)
 	if err == nil && !d.waked {
 		d.waked = true
 		return d.dead, nil
@@ -577,7 +585,7 @@ func TestExecRedialsStaleBox(t *testing.T) {
 	dead := ln.Addr().String()
 	_ = ln.Close()
 	d := &staleWake{dead: dead}
-	c, _ := newAPIWith(t, func(f *driver.Fake) driverWith { d.Fake = f; return d })
+	c, _ := newAPIWith(t, func(f *runsc.Fake) driverWith { d.Fake = f; return d })
 	mustCreate(t, c, "demo")
 	var stdout bytes.Buffer
 	code, err := c.Exec(t.Context(), "demo", boxexec.Request{Argv: []string{"echo", "hi"}}, boxexec.Streams{Stdout: &stdout, Stderr: io.Discard})
@@ -589,18 +597,18 @@ func TestExecRedialsStaleBox(t *testing.T) {
 // countStates counts how often the server asks for every box's state, which
 // costs a Kubernetes call.
 type countStates struct {
-	*driver.Fake
+	*runsc.Fake
 	n atomic.Int32
 }
 
-func (d *countStates) States(ctx context.Context) (map[string]driver.State, error) {
+func (d *countStates) States(ctx context.Context) (map[string]runsc.State, error) {
 	d.n.Add(1)
 	return d.Fake.States(ctx)
 }
 
 func TestFindByPath(t *testing.T) {
 	var drv *countStates
-	c, _ := newAPIWith(t, func(f *driver.Fake) driverWith {
+	c, _ := newAPIWith(t, func(f *runsc.Fake) driverWith {
 		drv = &countStates{Fake: f}
 		return drv
 	})

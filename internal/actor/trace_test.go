@@ -7,11 +7,12 @@ import (
 	"testing/synctest"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/prometheus/client_golang/prometheus"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/nebler/fern/internal/actor"
-	"github.com/nebler/fern/internal/driver"
+	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -21,8 +22,8 @@ func TestTraceSpans(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		rec := tracetest.NewSpanRecorder()
 		tr := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)).Tracer("test")
-		st, drv := newFakeStore(), driver.NewFake("box")
-		g := actor.New(st, drv, idle, "box", tr, slog.New(slog.DiscardHandler))
+		st, drv := newFakeStore(), runsc.NewFake("box")
+		g := actor.New(st, drv, actor.Config{Idle: idle, Image: "box"}, tr, prometheus.NewRegistry(), slog.New(slog.DiscardHandler))
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan struct{})
 		go func() { _ = g.Run(ctx); close(done) }()

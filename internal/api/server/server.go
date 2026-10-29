@@ -20,7 +20,7 @@ import (
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api"
 	"github.com/nebler/fern/internal/boxexec"
-	"github.com/nebler/fern/internal/driver"
+	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -32,9 +32,9 @@ type Store interface {
 	Snapshots(ctx context.Context, id string) ([]store.Snapshot, error)
 }
 
-// Driver reports the state of environments' boxes.
+// Driver reports the state of boxes.
 type Driver interface {
-	States(ctx context.Context) (map[string]driver.State, error)
+	States(ctx context.Context) (map[string]runsc.State, error)
 }
 
 // dialTimeout bounds connecting to a box and its WebSocket handshake.
@@ -53,7 +53,7 @@ type Server struct {
 	log    *slog.Logger
 	// agentMCP is where agent boxes reach the daemon's MCP endpoint (Bash),
 	// such as http://fern-daemon:7071; "" runs Claude in the environment's
-	// own box, as before agent boxes.
+	// own box.
 	agentMCP string
 	// boxes connects to boxes. A box that vanished can leave an address
 	// nothing answers; the same short connect timeout as readiness gets to
@@ -116,7 +116,7 @@ func (s *Server) handle(h func(*http.Request) (any, error)) http.HandlerFunc {
 //
 // fern-claude looks its environment up by path before every Claude start,
 // so that answer comes from the index alone, without the box's state: a
-// state costs a Kubernetes call.
+// state costs a runsc call.
 func (s *Server) list(r *http.Request) (any, error) {
 	if path := r.URL.Query().Get("path"); path != "" {
 		env, err := s.store.FindByPath(r.Context(), path)
@@ -132,7 +132,7 @@ func (s *Server) list(r *http.Request) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// One Kubernetes call for all of them, not one each.
+	// One runsc call for all of them, not one each.
 	states, err := s.driver.States(r.Context())
 	if err != nil {
 		s.log.WarnContext(r.Context(), "box states", slog.Any("error", err))
@@ -142,9 +142,9 @@ func (s *Server) list(r *http.Request) (any, error) {
 		state, ok := states[env.ID]
 		switch {
 		case err != nil:
-			state = driver.Unknown
+			state = runsc.Unknown
 		case !ok:
-			state = driver.Asleep // never woken: no box yet
+			state = runsc.Asleep
 		}
 		out = append(out, toAPIEnv(env, state))
 	}
@@ -223,7 +223,7 @@ func (s *Server) prewake(r *http.Request) (any, error) {
 	// The next turn needs Claude, whose box is the agent box; the services'
 	// box waits for its Bash.
 	if s.agentMCP != "" {
-		id = actor.AgentBox(id)
+		id = store.AgentBox(id)
 	}
 	return nil, s.envs.Prewake(id)
 }
@@ -244,7 +244,7 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	agent := s.agentMCP != "" && r.URL.Query().Get("box") == "agent"
 	if agent {
-		id = actor.AgentBox(id)
+		id = store.AgentBox(id)
 	}
 	box, ex, err := s.dialBox(spanCtx, id, cancel)
 	if err != nil {
@@ -306,7 +306,7 @@ func (s *Server) startClaude(ctx context.Context, client, box *websocket.Conn, i
 }
 
 // dialBox connects to environment id's box, waking it if needed. A box seen
-// earlier may be gone (a crash, a deleted pod): then it is woken once more.
+// earlier may be gone (a crash, a box stopped by hand): then it is woken once more.
 func (s *Server) dialBox(ctx context.Context, id string, cancel context.CancelFunc) (*websocket.Conn, *actor.Exec, error) {
 	var stale string
 	var err error
@@ -363,6 +363,6 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 
-func toAPIEnv(env store.Env, state driver.State) api.Env {
+func toAPIEnv(env store.Env, state runsc.State) api.Env {
 	return api.Env{ID: env.ID, Workspace: env.Workspace, Created: env.Created, State: string(state)}
 }

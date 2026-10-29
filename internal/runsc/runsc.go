@@ -1,12 +1,9 @@
 // Package runsc runs each environment's box as a gVisor sandbox that the
-// daemon starts itself with runsc, instead of as a Kubernetes pod
-// (docs/briefs/boxes-without-kubernetes.md). It skips the API server, the
-// controller, kubelet, the CSI calls and the CNI, which cost a pod's wake
-// about half its time and more than half its CPU.
+// daemon starts itself with runsc (docs/briefs/boxes-without-kubernetes.md).
 //
-// Everything runs in the node's mount and cgroup namespaces (Host): a box is
-// the node's process, outside the daemon's container, so it outlives a
-// daemon restart. While a box may run, <pool>/boxes/<id> holds its bundle.
+// The daemon runs on the node, as a systemd service, and a box is the
+// node's process: it outlives a daemon restart. While a box may run,
+// <bundles>/<id> holds its bundle and <pool>/boxes/<id> its /tmp and log.
 package runsc
 
 import (
@@ -17,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/netip"
@@ -30,96 +28,63 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"go.opentelemetry.io/otel/codes"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.opentelemetry.io/otel/trace"
+	"golang.org/x/sys/unix"
 
 	"github.com/nebler/fern/internal/boxexec"
-	"github.com/nebler/fern/internal/driver"
 	"github.com/nebler/fern/internal/image"
-	"github.com/nebler/fern/internal/setup"
+	"github.com/nebler/fern/internal/span"
 	"github.com/nebler/fern/internal/store"
 )
 
-// Command is a program to run on the node.
-type Command struct {
-	Name  string
-	Args  []string
-	Stdin []byte // nil: none
-	// Out, if set, gets the program's stdout and stderr, and nothing is
-	// returned: what it leaves running (a box) may hold them open.
-	Out *os.File
-}
+// State is whether a box is up.
+type State string
 
-// Host runs a program in the node's namespaces and returns what it printed.
-type Host func(ctx context.Context, c Command) ([]byte, error)
+// The states of a box. A box that runsc doesn't list is Asleep.
+const (
+	Asleep   State = "asleep"
+	Waking   State = "waking"   // created, not started yet
+	Running  State = "running"  // its fern-init runs
+	Stopping State = "stopping" // stopped, not deleted yet
+	Unknown  State = "unknown"  // runsc didn't say
+)
 
-// NodeHost runs programs in the mount and cgroup namespaces of the node's
-// PID 1: the daemon shares the node's PID namespace, so that is the node's
-// init.
-func NodeHost(ctx context.Context, c Command) ([]byte, error) {
-	return LocalHost(ctx, Command{
-		// The node's programs, wherever it keeps them: k3s's image has its
-		// iptables in /bin/aux.
-		Name:  "env",
-		Args:  append([]string{"-i", "PATH=" + nodePath, "nsenter", "--target", "1", "--mount", "--cgroup", "--", c.Name}, c.Args...),
-		Stdin: c.Stdin, Out: c.Out,
-	})
-}
+// Kind is what a box runs.
+type Kind int
 
-// LocalHost runs programs as they are: for a daemon that runs on the node
-// itself, as a systemd service.
-func LocalHost(ctx context.Context, c Command) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
-	if c.Stdin != nil {
-		cmd.Stdin = bytes.NewReader(c.Stdin)
-	}
-	var out, errOut bytes.Buffer
-	cmd.Stdout, cmd.Stderr = &out, &errOut
-	if c.Out != nil {
-		cmd.Stdout, cmd.Stderr = c.Out, c.Out
-	}
-	if err := cmd.Run(); err != nil {
-		return out.Bytes(), fmt.Errorf("%s %s: %w: %s", c.Name, strings.Join(c.Args, " "), err, strings.TrimSpace(errOut.String()))
-	}
-	return out.Bytes(), nil
-}
+// The kinds of box.
+const (
+	// Services runs the environment's services, each started by its first
+	// connection.
+	Services Kind = iota
+	// Agent runs Claude for an environment whose services run in its own
+	// box: it runs no services, and may reach the daemon's MCP port, whose
+	// Bash runs commands in the services' box.
+	Agent
+	// Builder makes a golden snapshot: its services start with it, since
+	// their first start is what it builds.
+	Builder
+)
 
-// OnNode reports whether this process shares the mount namespace of the
-// node's PID 1, so LocalHost reaches the node: false in a container.
-func OnNode() (bool, error) {
-	self, err := os.Readlink("/proc/self/ns/mnt")
-	if err != nil {
-		return false, err
-	}
-	init, err := os.Readlink("/proc/1/ns/mnt")
-	if err != nil {
-		return false, err
-	}
-	return self == init, nil
-}
-
-// nodePath is where NodeHost looks for programs on the node.
-const nodePath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/bin/aux"
-
-// run runs name with args on the node.
-func (d *Driver) run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return d.host(ctx, Command{Name: name, Args: args})
+// Box is a box to wake.
+type Box struct {
+	ID   string    // its name: its environment's ID, or the environment's agent box's
+	Kind Kind      // what it runs
+	Env  store.Env // its folders and token; with Env.Claude "", it gets no Claude folder or login
 }
 
 // Config is where a Driver keeps its boxes and what it gives them.
 type Config struct {
 	Pool    string   // the pool, /var/lib/fern
 	Bundles string   // the boxes' bundles, on the node's tmpfs: /run/fern/boxes
-	State   string   // runsc's state directory, on the node
+	State   string   // runsc's state directory, on the node's tmpfs
 	Images  string   // where images are unpacked (fern image load): <pool>/images
 	Image   string   // the box image's tag, such as fern-box:dev
-	DNS     []string // the resolvers boxes use: the node's own is the node
+	DNS     []string // the resolvers boxes use
 	// Login returns Claude's login, or "" if there is none yet.
-	Login func(ctx context.Context) (string, error)
-	// Agents runs Claude in each environment's agent box: then only agent
-	// boxes get Claude's folder and login, and reach the daemon's MCP port.
-	Agents  bool
-	MCPPort int
+	Login   func(ctx context.Context) (string, error)
+	MCPPort int // the daemon's port agent boxes may reach
 }
 
 // The limits of a wake and a stop. fern-init needs at most 8 s for the
@@ -133,7 +98,6 @@ const (
 
 // Driver runs boxes with runsc on the node.
 type Driver struct {
-	host   Host
 	cfg    Config
 	tracer trace.Tracer
 	ready  *http.Client // asks waking boxes' fern-init whether they are ready
@@ -145,28 +109,22 @@ type Driver struct {
 	mu sync.Mutex // allocations of box addresses
 }
 
-// New returns a Driver that runs boxes as cfg says, through host, and
-// records its steps with tr. Call Prepare before anything else.
-func New(host Host, cfg Config, tr trace.Tracer) *Driver {
+// New returns a Driver that runs boxes as cfg says, records its steps with
+// tr and its metrics in reg. Call Prepare before anything else.
+func New(cfg Config, tr trace.Tracer, reg prometheus.Registerer) *Driver {
 	return &Driver{
-		host: host, cfg: cfg, tracer: tr,
+		cfg: cfg, tracer: tr,
 		ready: &http.Client{
 			Timeout:   readyWait + 3*time.Second,
 			Transport: &http.Transport{DialContext: (&net.Dialer{Timeout: 250 * time.Millisecond}).DialContext},
 		},
-		steps: prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		steps: promauto.With(reg).NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "fern_wake_step_seconds",
 			Help:    "Time a wake spent in each step: net (the box's network), start (runsc create and start) and ready (until its services are).",
 			Buckets: prometheus.ExponentialBuckets(0.005, 2, 15), // 5ms to 82s
 		}, []string{"step"}),
 	}
 }
-
-// Describe sends the descriptions of the Driver's metrics.
-func (d *Driver) Describe(ch chan<- *prometheus.Desc) { d.steps.Describe(ch) }
-
-// Collect sends the Driver's metrics.
-func (d *Driver) Collect(ch chan<- prometheus.Metric) { d.steps.Collect(ch) }
 
 // Prepare gets the node ready for boxes: the box image's root, the
 // firewall that keeps boxes to the internet, the cgroup that holds them,
@@ -178,17 +136,19 @@ func (d *Driver) Prepare(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("box image (fern image load): %w", err)
 	}
 	d.rootfs, d.imageEnv = img.Root, img.Env
-	if _, err := d.host(ctx, Command{Name: "nft", Args: []string{"-f", "-"}, Stdin: []byte(firewall(d.cfg.MCPPort))}); err != nil {
+	nft := exec.CommandContext(ctx, "nft", "-f", "-")
+	nft.Stdin = strings.NewReader(firewall(d.cfg.MCPPort))
+	if _, err := run(nft); err != nil {
 		return "", fmt.Errorf("box firewall: %w", err)
 	}
-	// The controllers boxes' limits need, from the root down: systemd, unlike
-	// kubelet, doesn't enable cpu at the root unless a unit asks for it.
+	// The controllers boxes' limits need, from the root down: systemd
+	// doesn't enable cpu at the root unless a unit asks for it.
 	cg := "/sys/fs/cgroup/" + cgroupParent
-	if _, err := d.run(ctx, "mkdir", "-p", cg); err != nil {
+	if err := os.MkdirAll(cg, 0o755); err != nil {
 		return "", err
 	}
 	for _, dir := range []string{"/sys/fs/cgroup", cg} {
-		if _, err := d.host(ctx, Command{Name: "tee", Args: []string{dir + "/cgroup.subtree_control"}, Stdin: []byte("+cpu +memory +pids")}); err != nil {
+		if err := os.WriteFile(dir+"/cgroup.subtree_control", []byte("+cpu +memory +pids"), 0o644); err != nil {
 			return "", fmt.Errorf("box cgroup: %w", err)
 		}
 	}
@@ -201,7 +161,7 @@ func (d *Driver) Prepare(ctx context.Context) (string, error) {
 	for _, ns := range d.cfg.DNS {
 		fmt.Fprintf(&resolv, "nameserver %s\n", ns)
 	}
-	if err := os.WriteFile(d.box("").resolv, []byte(resolv.String()), 0o644); err != nil {
+	if err := os.WriteFile(d.layout("").resolv, []byte(resolv.String()), 0o644); err != nil {
 		return "", err
 	}
 	if err := d.reconcile(ctx); err != nil {
@@ -212,8 +172,8 @@ func (d *Driver) Prepare(ctx context.Context) (string, error) {
 
 // reconcile finishes what a crash cut short: a box directory with no box
 // running is a wake or a stop that didn't end (or a node that restarted),
-// and is stopped, which frees its network, overlay, address and /tmp. Running boxes are left alone; the
-// actors adopt them.
+// and is stopped, which frees its network, overlay, address and /tmp.
+// Running boxes are left alone; the actors adopt them.
 func (d *Driver) reconcile(ctx context.Context) error {
 	states, err := d.States(ctx)
 	if err != nil {
@@ -232,7 +192,7 @@ func (d *Driver) reconcile(ctx context.Context) error {
 		}
 	}
 	for id := range ids {
-		if states[id] == driver.Running {
+		if states[id] == Running {
 			continue
 		}
 		if err := d.stop(ctx, id); err != nil {
@@ -242,18 +202,18 @@ func (d *Driver) reconcile(ctx context.Context) error {
 	return nil
 }
 
-// box names environment id's box's resources.
-func (d *Driver) box(id string) box { return newBox(d.cfg.Bundles, d.cfg.Pool, id) }
+// layout names box id's resources on the node.
+func (d *Driver) layout(id string) layout { return newLayout(d.cfg.Bundles, d.cfg.Pool, id) }
 
 // container is a box as runsc lists it.
 type container struct {
 	ID     string `json:"id"`
 	Status string `json:"status"` // created, running or stopped
-	Bundle string `json:"bundle"` // <pool>/boxes/<environment>
+	Bundle string `json:"bundle"` // <bundles>/<box>
 }
 
 func (d *Driver) runsc(ctx context.Context, args ...string) ([]byte, error) {
-	return d.run(ctx, "runsc", append([]string{"--root", d.cfg.State}, args...)...)
+	return run(exec.CommandContext(ctx, "runsc", append([]string{"--root", d.cfg.State}, args...)...))
 }
 
 func (d *Driver) list(ctx context.Context) ([]container, error) {
@@ -262,7 +222,7 @@ func (d *Driver) list(ctx context.Context) ([]container, error) {
 		return nil, err
 	}
 	var cs []container
-	if len(bytes.TrimSpace(out)) > 0 && !bytes.Equal(bytes.TrimSpace(out), []byte("null")) {
+	if out = bytes.TrimSpace(out); len(out) > 0 && !bytes.Equal(out, []byte("null")) {
 		if err := json.Unmarshal(out, &cs); err != nil {
 			return nil, fmt.Errorf("runsc list: %w", err)
 		}
@@ -270,14 +230,14 @@ func (d *Driver) list(ctx context.Context) ([]container, error) {
 	return cs, nil
 }
 
-// States reports the state of every box runsc runs, by environment ID. An
-// environment that has none is asleep.
-func (d *Driver) States(ctx context.Context) (map[string]driver.State, error) {
+// States reports the state of every box runsc runs, by box ID. A box that
+// isn't there is asleep.
+func (d *Driver) States(ctx context.Context) (map[string]State, error) {
 	cs, err := d.list(ctx)
 	if err != nil {
 		return nil, err
 	}
-	states := make(map[string]driver.State, len(cs))
+	states := make(map[string]State, len(cs))
 	for _, c := range cs {
 		if filepath.Dir(c.Bundle) != d.cfg.Bundles {
 			continue // not a box of this pool's
@@ -285,45 +245,45 @@ func (d *Driver) States(ctx context.Context) (map[string]driver.State, error) {
 		id := filepath.Base(c.Bundle)
 		switch c.Status {
 		case "running":
-			states[id] = driver.Running
+			states[id] = Running
 		case "created":
-			states[id] = driver.Waking
+			states[id] = Waking
 		default:
-			states[id] = driver.Stopping
+			states[id] = Stopping
 		}
 	}
 	return states, nil
 }
 
-// Wake starts env's box, waits until its services are ready and returns
-// the address of its exec server. A box that runs and is ready, such as one
+// Wake starts box, waits until its services are ready and returns the
+// address of its exec server. A box that runs and is ready, such as one
 // that outlived a daemon restart, is kept; any other left from before (a
 // crash, a stop that didn't finish) is stopped first, so a wake starts clean.
-func (d *Driver) Wake(ctx context.Context, env store.Env) (string, error) {
+func (d *Driver) Wake(ctx context.Context, box Box) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, wakeTimeout)
 	defer cancel()
-	b := d.box(env.ID)
+	b := d.layout(box.ID)
 	if addr, ok := d.running(ctx, b); ok {
 		return addr, nil
 	}
-	if err := d.stop(ctx, env.ID); err != nil {
-		return "", fmt.Errorf("wake %s: %w", env.ID, err)
+	if err := d.stop(ctx, box.ID); err != nil {
+		return "", fmt.Errorf("wake %s: %w", box.ID, err)
 	}
 	start := time.Now()
-	addr, err := d.netUp(ctx, b)
+	addr, err := d.netUp(ctx, b, box.Kind)
 	if err != nil {
-		return "", fmt.Errorf("wake %s: %w", env.ID, err)
+		return "", fmt.Errorf("wake %s: %w", box.ID, err)
 	}
 	netDone := time.Now()
-	if err := d.start(ctx, env, b); err != nil {
-		return "", fmt.Errorf("wake %s: %w", env.ID, err)
+	if err := d.start(ctx, box, b); err != nil {
+		return "", fmt.Errorf("wake %s: %w", box.ID, err)
 	}
 	started := time.Now()
-	_, span := d.tracer.Start(ctx, "ready")
+	_, sp := d.tracer.Start(ctx, "ready")
 	err = d.waitReady(ctx, addr)
-	end(span, err)
+	span.End(sp, err)
 	if err != nil {
-		return "", fmt.Errorf("wake %s: %w", env.ID, err)
+		return "", fmt.Errorf("wake %s: %w", box.ID, err)
 	}
 	d.steps.WithLabelValues("net").Observe(netDone.Sub(start).Seconds())
 	d.steps.WithLabelValues("start").Observe(started.Sub(netDone).Seconds())
@@ -333,39 +293,29 @@ func (d *Driver) Wake(ctx context.Context, env store.Env) (string, error) {
 
 // running returns the exec address of b's box if it runs and fern-init says
 // it is ready.
-func (d *Driver) running(ctx context.Context, b box) (string, bool) {
+func (d *Driver) running(ctx context.Context, b layout) (string, bool) {
 	cs, err := d.list(ctx)
 	if err != nil || !slices.ContainsFunc(cs, func(c container) bool { return c.ID == b.cid && c.Status == "running" }) {
 		return "", false
 	}
-	addr, err := boxAddr(b)
+	_, guest, err := linkAddrs(b)
 	if err != nil {
 		return "", false
 	}
+	addr := execAddr(guest)
 	ctx, cancel := context.WithTimeout(ctx, readyWait)
 	defer cancel()
 	return addr, d.isReady(ctx, addr)
 }
 
-// boxAddr returns the exec address of b's box, from the address number in
-// its directory.
-func boxAddr(b box) (string, error) {
-	_, guest, err := linkAddrs(b)
-	if err != nil {
-		return "", err
-	}
-	return net.JoinHostPort(guest.String(), strconv.Itoa(boxexec.Port)), nil
-}
-
-// hostAddr returns the node's address on b's link.
-func hostAddr(b box) (netip.Addr, error) {
-	host, _, err := linkAddrs(b)
-	return host, err
+// execAddr is the address of fern-init's exec server in the box at guest.
+func execAddr(guest netip.Addr) string {
+	return net.JoinHostPort(guest.String(), strconv.Itoa(boxexec.Port))
 }
 
 // linkAddrs returns the node's and the box's address on b's link, from the
 // address number in its directory.
-func linkAddrs(b box) (host, guest netip.Addr, err error) {
+func linkAddrs(b layout) (host, guest netip.Addr, err error) {
 	data, err := os.ReadFile(filepath.Join(b.dir, "net"))
 	if err != nil {
 		return host, guest, err
@@ -379,32 +329,31 @@ func linkAddrs(b box) (host, guest netip.Addr, err error) {
 
 // netUp makes b's network with a free address and returns the box's exec
 // address. The address's number is in b's directory, which shows it taken.
-func (d *Driver) netUp(ctx context.Context, b box) (string, error) {
-	_, span := d.tracer.Start(ctx, "net")
-	var err error
-	defer func() { end(span, err) }()
-	if err = os.MkdirAll(b.dir, 0o700); err != nil {
+func (d *Driver) netUp(ctx context.Context, b layout, kind Kind) (_ string, err error) {
+	_, sp := d.tracer.Start(ctx, "net")
+	defer func() { span.End(sp, err) }()
+	if err := os.MkdirAll(b.dir, 0o700); err != nil {
 		return "", err
 	}
 	n, err := d.allocate(b)
 	if err != nil {
 		return "", err
 	}
-	cmds, err := netUp(b, n)
+	cmds, err := netUp(b, kind, n)
 	if err != nil {
 		return "", err
 	}
 	for _, c := range cmds {
-		if _, err = d.run(ctx, c[0], c[1:]...); err != nil {
+		if _, err := run(exec.CommandContext(ctx, c[0], c[1:]...)); err != nil {
 			return "", err
 		}
 	}
 	_, guest, _ := addrs(n)
-	return net.JoinHostPort(guest.String(), strconv.Itoa(boxexec.Port)), nil
+	return execAddr(guest), nil
 }
 
 // allocate gives b the lowest address number no other box holds.
-func (d *Driver) allocate(b box) (int, error) {
+func (d *Driver) allocate(b layout) (int, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	taken := make(map[int]bool)
@@ -429,71 +378,58 @@ func (d *Driver) allocate(b box) (int, error) {
 	return 0, fmt.Errorf("no address left for box %s", b.id)
 }
 
-// start writes b's bundle and starts it.
-func (d *Driver) start(ctx context.Context, env store.Env, b box) error {
-	_, span := d.tracer.Start(ctx, "start")
-	var err error
-	defer func() { end(span, err) }()
-	builder := setup.IsBuilder(env.ID)
-	agent := store.IsAgentBox(env.ID)
+// start writes box's bundle to b and starts it.
+func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
+	_, sp := d.tracer.Start(ctx, "start")
+	defer func() { span.End(sp, err) }()
 	login := ""
-	if builder || (d.cfg.Agents && !agent) {
-		// A golden builder's box runs no agent and gets no login: what its
-		// services write goes into every thread of the repository. With
-		// agent boxes, neither does a services' box: Claude runs elsewhere,
-		// and a box that can't see Claude's folder can't plant settings in it.
-		env.Claude = ""
-	} else if d.cfg.Login != nil {
+	if box.Env.Claude != "" && d.cfg.Login != nil {
 		if login, err = d.cfg.Login(ctx); err != nil {
 			return fmt.Errorf("claude login: %w", err)
 		}
 	}
-	// A fresh /tmp, as a pod gets a new emptyDir.
-	if err = os.RemoveAll(b.tmp); err != nil {
+	// A fresh /tmp at every wake.
+	if err := os.RemoveAll(b.tmp); err != nil {
 		return err
 	}
-	if err = os.MkdirAll(b.data, 0o700); err != nil {
+	if err := os.MkdirAll(b.data, 0o700); err != nil {
 		return err
 	}
-	if err = os.Mkdir(b.tmp, 0o700); err != nil {
+	if err := os.Mkdir(b.tmp, 0o700); err != nil {
 		return err
 	}
-	if err = os.Chown(b.tmp, store.BoxUID, store.BoxGID); err != nil {
+	if err := os.Chown(b.tmp, store.BoxUID, store.BoxGID); err != nil {
 		return err
 	}
 	// runsc's gofer makes the mount points in the root, so each box has its
 	// own: an overlay on the image, whose upper layer holds only them. The
-	// box sees its root read-only.
-	// The overlay's root takes the upper layer's mode: the box's user must
-	// be able to walk it.
-	for _, dir := range []string{b.rootfs, filepath.Join(b.dir, "upper"), filepath.Join(b.dir, "work")} {
-		if err = os.MkdirAll(dir, 0o755); err != nil {
+	// box sees its root read-only. The overlay's root takes the upper
+	// layer's mode: the box's user must be able to walk it.
+	upper, work := filepath.Join(b.dir, "upper"), filepath.Join(b.dir, "work")
+	for _, dir := range []string{b.rootfs, upper, work} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			return err
 		}
 	}
-	opts := "lowerdir=" + d.rootfs + ",upperdir=" + filepath.Join(b.dir, "upper") + ",workdir=" + filepath.Join(b.dir, "work")
-	if _, err = d.run(ctx, "mount", "-t", "overlay", "overlay", "-o", opts, b.rootfs); err != nil {
-		return err
+	opts := "lowerdir=" + d.rootfs + ",upperdir=" + upper + ",workdir=" + work
+	if err := unix.Mount("overlay", b.rootfs, "overlay", 0, opts); err != nil {
+		return fmt.Errorf("mount %s: %w", b.rootfs, err)
 	}
 	wakeID := make([]byte, 8)
 	_, _ = rand.Read(wakeID)
-	vars := boxVars(env, hex.EncodeToString(wakeID), login, builder)
-	if agent {
-		vars = append(vars, "FERN_SERVICES=off") // the services run in the environment's own box
-	}
-	s := boxSpec(env, b, d.imageEnv, vars)
+	s := boxSpec(box, b, d.imageEnv, boxVars(box, hex.EncodeToString(wakeID), login))
 	data, err := json.MarshalIndent(s, "", " ")
 	if err != nil {
 		return err
 	}
-	if err = os.WriteFile(filepath.Join(b.dir, "config.json"), data, 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(b.dir, "config.json"), data, 0o600); err != nil {
 		return err
 	}
-	host, err := hostAddr(b)
+	host, _, err := linkAddrs(b)
 	if err != nil {
 		return err
 	}
-	if err = os.WriteFile(b.hosts(), []byte(hostsFile(env.ID, host)), 0o644); err != nil {
+	if err := os.WriteFile(b.hosts(), []byte(hostsFile(box, host)), 0o644); err != nil {
 		return err
 	}
 	// The box's stdio is create's: a file, as a pipe would stay open as
@@ -503,8 +439,10 @@ func (d *Driver) start(ctx context.Context, env store.Env, b box) error {
 		return err
 	}
 	defer func() { _ = log.Close() }()
-	if _, err = d.host(ctx, Command{Name: "runsc", Args: []string{"--root", d.cfg.State, "create", "--bundle", b.dir, b.cid}, Out: log}); err != nil {
-		return err
+	create := exec.CommandContext(ctx, "runsc", "--root", d.cfg.State, "create", "--bundle", b.dir, b.cid)
+	create.Stdout, create.Stderr = log, log
+	if err := create.Run(); err != nil {
+		return fmt.Errorf("runsc create: %w (see %s)", err, log.Name())
 	}
 	_, err = d.runsc(ctx, "start", b.cid)
 	return err
@@ -537,27 +475,25 @@ func (d *Driver) isReady(ctx context.Context, addr string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-// Sleep stops environment id's box and waits until it is gone, with its
-// network and cgroup. A box that isn't there is asleep already.
+// Sleep stops box id and waits until it is gone, with its network and
+// cgroup. A box that isn't there is asleep already. A box has nothing that
+// outlives it, so this is also how one is deleted.
 func (d *Driver) Sleep(ctx context.Context, id string) error {
-	ctx, span := d.tracer.Start(ctx, "stop")
+	ctx, sp := d.tracer.Start(ctx, "stop")
 	err := d.stop(ctx, id)
-	end(span, err)
+	span.End(sp, err)
 	if err != nil {
 		return fmt.Errorf("sleep %s: %w", id, err)
 	}
 	return nil
 }
 
-// Delete is Sleep: a box has nothing that outlives it.
-func (d *Driver) Delete(ctx context.Context, id string) error { return d.Sleep(ctx, id) }
-
 // stop asks fern-init to shut down, waits for the box to exit (killing it
 // after stopGrace), deletes it, and removes its network, cgroup and
 // directory. Every step is safe to repeat, so a stop that a crash cut short
 // is finished by the next.
 func (d *Driver) stop(ctx context.Context, id string) error {
-	b := d.box(id)
+	b := d.layout(id)
 	cs, err := d.list(ctx)
 	if err != nil {
 		return err
@@ -580,15 +516,14 @@ func (d *Driver) stop(ctx context.Context, id string) error {
 			return err
 		}
 	}
-	for _, c := range netDown(b) {
-		_, _ = d.run(ctx, c[0], c[1:]...) // gone already, after a crash
-	}
+	// One process for the three commands: a stop is on every sleep's path.
+	ip := exec.CommandContext(ctx, "ip", "-force", "-batch", "-")
+	ip.Stdin = strings.NewReader(netDown(b))
+	_, _ = run(ip) // fails for what is gone already
 	// runsc removes the box's cgroup only on a clean exit.
-	_, _ = d.run(ctx, "rmdir", "/sys/fs/cgroup/"+cgroupParent+"/"+id)
-	if _, err := d.run(ctx, "mountpoint", "-q", b.rootfs); err == nil {
-		if _, err := d.run(ctx, "umount", b.rootfs); err != nil {
-			return err
-		}
+	_ = os.Remove("/sys/fs/cgroup/" + cgroupParent + "/" + id)
+	if err := unix.Unmount(b.rootfs, 0); err != nil && !errors.Is(err, unix.EINVAL) && !errors.Is(err, fs.ErrNotExist) {
+		return fmt.Errorf("unmount %s: %w", b.rootfs, err) // EINVAL: not mounted
 	}
 	for _, dir := range []string{b.dir, b.data} {
 		if err := os.RemoveAll(dir); err != nil {
@@ -599,9 +534,9 @@ func (d *Driver) stop(ctx context.Context, id string) error {
 }
 
 // askStop starts fern-init's graceful shutdown with its authenticated
-// POST /stop, naming the wake it stops. An older or unreachable box gets
-// runsc's SIGTERM instead.
-func (d *Driver) askStop(ctx context.Context, b box) {
+// POST /stop, naming the wake it stops. A box that doesn't answer, or
+// refuses (an older fern-init), gets runsc's SIGTERM instead.
+func (d *Driver) askStop(ctx context.Context, b layout) {
 	data, err := os.ReadFile(filepath.Join(b.dir, "config.json"))
 	if err != nil {
 		return
@@ -615,36 +550,37 @@ func (d *Driver) askStop(ctx context.Context, b box) {
 		if t, ok := strings.CutPrefix(v, "FERN_BOX_TOKEN="); ok {
 			token = t
 		}
-		if w, ok := strings.CutPrefix(v, "FERN_POD_UID="); ok {
+		if w, ok := strings.CutPrefix(v, "FERN_WAKE_ID="); ok {
 			wakeID = w
 		}
 	}
-	addr, err := boxAddr(b)
+	_, guest, err := linkAddrs(b)
 	if err != nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
-	url := "http://" + addr + boxexec.StopPath
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+execAddr(guest)+boxexec.StopPath, nil)
 	if err != nil {
 		return
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("If-Match", strconv.Quote(wakeID))
 	resp, err := d.ready.Do(req)
-	if err != nil {
-		_, _ = d.runsc(ctx, "kill", b.cid, "TERM")
-		return
+	if err == nil {
+		_ = resp.Body.Close()
 	}
-	_ = resp.Body.Close()
+	if err != nil || resp.StatusCode != http.StatusNoContent {
+		_, _ = d.runsc(ctx, "kill", b.cid, "TERM")
+	}
 }
 
-// end ends span, marking it failed if err isn't nil.
-func end(span trace.Span, err error) {
-	if err != nil && !errors.Is(err, context.Canceled) {
-		span.RecordError(err)
-		span.SetStatus(codes.Error, err.Error())
+// run runs cmd and returns its stdout, or an error with its stderr.
+func run(cmd *exec.Cmd) ([]byte, error) {
+	var out, errOut bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &out, &errOut
+	if err := cmd.Run(); err != nil {
+		return out.Bytes(), fmt.Errorf("%s: %w: %s", strings.Join(cmd.Args, " "), err, strings.TrimSpace(errOut.String()))
 	}
-	span.End()
+	return out.Bytes(), nil
 }

@@ -22,7 +22,6 @@ box.sleep.node_rx_bytes 150 24.20
 box.sleep.node_tx_bytes 200 17.61
 box.sleep_ms.p50 89.0 0.15
 box.sleep_ms.p95 100.3 0.15
-box.sleep_wake_api_requests_count 0.0 0.15
 box.wake.box_cpu_ms 611.836 0.30
 box.wake.box_write_bytes 335872 0.82
 box.wake.daemon_cpu_ms 16.668 0.66

@@ -13,14 +13,16 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.opentelemetry.io/otel/trace"
 
-	"github.com/nebler/fern/internal/driver"
+	"github.com/nebler/fern/internal/runsc"
+	"github.com/nebler/fern/internal/setup"
+	"github.com/nebler/fern/internal/span"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -32,7 +34,7 @@ type Store interface {
 	Delete(ctx context.Context, id string) error
 	Snapshot(ctx context.Context, id, snapID string) error
 	DeleteSnapshot(ctx context.Context, id, snapID string) error
-	Snapshots(ctx context.Context, id string) ([]store.Snapshot, error)
+	HasSnapshot(ctx context.Context, ref store.SnapshotRef) (bool, error)
 	Restore(ctx context.Context, id, snapID string) error
 	Prune(ctx context.Context, id string) error
 	Orphans(ctx context.Context) ([]string, error)
@@ -41,12 +43,23 @@ type Store interface {
 	Sources(ctx context.Context, name string) ([]store.SnapshotRef, error)
 }
 
-// Driver runs environments' boxes.
+// Driver runs boxes.
 type Driver interface {
-	Wake(ctx context.Context, env store.Env) (addr string, err error)
+	Wake(ctx context.Context, box runsc.Box) (addr string, err error)
 	Sleep(ctx context.Context, id string) error
-	Delete(ctx context.Context, id string) error
-	States(ctx context.Context) (map[string]driver.State, error)
+	States(ctx context.Context) (map[string]runsc.State, error)
+}
+
+// Config is how a Group runs its environments' boxes.
+type Config struct {
+	Idle  Idle
+	Image string // the box image's ID, part of every golden key
+	// Agents runs Claude in each environment's agent box (store.AgentBox),
+	// next to the box with the services, which its Bash tool wakes
+	// (docs/briefs/claude-outside-the-box.md). The agent box has an actor of
+	// its own, so it wakes and sleeps on its own clocks; a restore, sleep or
+	// delete of the environment stops it too.
+	Agents bool
 }
 
 // Idle says when a box with no command running goes to sleep: Agent after
@@ -82,23 +95,11 @@ const changeTimeout = 10 * time.Minute
 // ErrStopped means the daemon is shutting down.
 var ErrStopped = errors.New("daemon is stopping")
 
-// AgentBox is the name of environment id's agent box (store.AgentBox): with
-// --agent-boxes Claude runs in a box of its own, next to the box with the
-// services, which its Bash tool wakes (docs/briefs/claude-outside-the-box.md).
-// Its actor is its own, so it wakes and sleeps on its own clocks; a restore,
-// sleep or delete of the environment stops it too.
-func AgentBox(id string) string { return store.AgentBox(id) }
-
-// envOf is the environment a box belongs to.
-func envOf(id string) string { return store.EnvOfBox(id) }
-
-// Group runs the actors of a node's environments. It is a Prometheus
-// collector of their metrics.
+// Group runs the actors of a node's environments.
 type Group struct {
 	store  Store
 	driver Driver
-	idle   Idle
-	image  string // the box image, part of every golden key
+	cfg    Config
 	tracer trace.Tracer
 	log    *slog.Logger
 
@@ -110,7 +111,7 @@ type Group struct {
 	prewakeResults                                         *prometheus.CounterVec // pre-wakes, by what came of them
 
 	find     chan findRequest // to Run, for an environment's actor
-	builds   chan build       // to Run's builder, golden builds to make
+	builds   chan string      // to Run's builder, the environments whose golden source to build
 	prewakes chan string      // to Run's prewakers, environments to wake ahead
 	stopped  chan struct{}    // closed when Run returns
 }
@@ -120,55 +121,39 @@ type findRequest struct {
 	reply chan *actor
 }
 
-// New returns a Group for the environments in st, run by drv from image,
-// that records its changes with tr. Call Run before anything else.
-func New(st Store, drv Driver, idle Idle, image string, tr trace.Tracer, log *slog.Logger) *Group {
+// New returns a Group for the environments in st, whose boxes drv runs as
+// cfg says, that records its changes with tr and its metrics in reg. Call
+// Run before anything else.
+func New(st Store, drv Driver, cfg Config, tr trace.Tracer, reg prometheus.Registerer, log *slog.Logger) *Group {
 	// Boxes take from tens of milliseconds to the timeouts' minutes; disk
 	// changes and queueing take from a millisecond.
 	boxBuckets := prometheus.ExponentialBuckets(0.025, 2, 13)  // 25ms to 102s
 	diskBuckets := prometheus.ExponentialBuckets(0.001, 2, 16) // 1ms to 33s
+	metrics := promauto.With(reg)
 	histogram := func(name, help string, buckets []float64, label string) *prometheus.HistogramVec {
-		return prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: name, Help: help, Buckets: buckets}, []string{label})
+		return metrics.NewHistogramVec(prometheus.HistogramOpts{Name: name, Help: help, Buckets: buckets}, []string{label})
 	}
 	return &Group{
-		store: tracedStore{st: st, tr: tr}, driver: drv, idle: idle, image: image, tracer: tr, log: log,
+		store: tracedStore{st: st, tr: tr}, driver: drv, cfg: cfg, tracer: tr, log: log,
 		wakes:        histogram("fern_wake_seconds", "Time to wake a box, until its services are ready.", boxBuckets, "result"),
-		stops:        histogram("fern_stop_seconds", "Time to stop a box, until its pod is gone.", boxBuckets, "result"),
+		stops:        histogram("fern_stop_seconds", "Time to stop a box, until it is gone.", boxBuckets, "result"),
 		restores:     histogram("fern_restore_seconds", "Time to restore a snapshot, stopping the box included.", boxBuckets, "result"),
 		snapshots:    histogram("fern_snapshot_seconds", "Time to take a snapshot, replacing one included.", diskBuckets, "result"),
 		goldenBuilds: histogram("fern_golden_build_seconds", "Time to build a golden snapshot.", boxBuckets, "result"),
-		goldens: prometheus.NewCounterVec(prometheus.CounterOpts{
+		goldens: metrics.NewCounterVec(prometheus.CounterOpts{
 			Name: "fern_golden_total", Help: "New worktree environments, by whether a golden snapshot was there (hit), is being built (miss) or has no setup contract (none).",
 		}, []string{"result"}),
 		queue: histogram("fern_queue_seconds", "Time a change waited for its environment's actor.", diskBuckets, "change"),
-		idleSleeps: prometheus.NewCounter(prometheus.CounterOpts{
+		idleSleeps: metrics.NewCounter(prometheus.CounterOpts{
 			Name: "fern_idle_sleeps_total", Help: "Boxes put to sleep because they were idle.",
 		}),
-		prewakeResults: prometheus.NewCounterVec(prometheus.CounterOpts{
+		prewakeResults: metrics.NewCounterVec(prometheus.CounterOpts{
 			Name: "fern_prewakes_total",
 			Help: "Pre-wakes, by result: woken; then used (a command came) or wasted (the box stopped first); " +
 				"or awake (it was already), unknown (no such environment), dropped (the queue was full), error.",
 		}, []string{"result"}),
-		find: make(chan findRequest), builds: make(chan build, buildQueue), prewakes: make(chan string, prewakeQueue),
+		find: make(chan findRequest), builds: make(chan string, buildQueue), prewakes: make(chan string, prewakeQueue),
 		stopped: make(chan struct{}),
-	}
-}
-
-func (g *Group) collectors() []prometheus.Collector {
-	return []prometheus.Collector{g.wakes, g.stops, g.restores, g.snapshots, g.queue, g.goldenBuilds, g.idleSleeps, g.goldens, g.prewakeResults}
-}
-
-// Describe sends the descriptions of the Group's metrics.
-func (g *Group) Describe(ch chan<- *prometheus.Desc) {
-	for _, c := range g.collectors() {
-		c.Describe(ch)
-	}
-}
-
-// Collect sends the Group's metrics.
-func (g *Group) Collect(ch chan<- prometheus.Metric) {
-	for _, c := range g.collectors() {
-		c.Collect(ch)
 	}
 }
 
@@ -204,10 +189,8 @@ func (g *Group) Run(ctx context.Context) error {
 	for range prewakers {
 		wg.Go(func() { g.prewakeBoxes(ctx) })
 	}
-	for id, state := range states {
-		if state != driver.Asleep {
-			start(id, true)
-		}
+	for id := range states {
+		start(id, true)
 	}
 	for {
 		select {
@@ -262,7 +245,7 @@ func (g *Group) sweep(ctx context.Context) {
 
 // actorOf returns environment id's actor, starting one if it has none.
 func (g *Group) actorOf(ctx context.Context, id string) (*actor, error) {
-	if err := store.CheckEnvID(envOf(id)); err != nil {
+	if err := store.CheckEnvID(store.EnvOfBox(id)); err != nil {
 		return nil, err
 	}
 	req := findRequest{id: id, reply: make(chan *actor, 1)}
@@ -282,15 +265,15 @@ func (g *Group) actorOf(ctx context.Context, id string) (*actor, error) {
 // its caller has let go of (such as a request's body). changeTimeout bounds
 // the wait.
 func (g *Group) do(ctx context.Context, change, id string, fn func(ctx context.Context, a *actor) error) (err error) {
-	ctx, span := startSpan(ctx, g.tracer, change, id)
-	defer func() { endSpan(span, err) }()
+	ctx, sp := span.Start(ctx, g.tracer, change, id)
+	defer func() { span.End(sp, err) }()
 	queued := time.Now()
 	m := message{reply: make(chan error, 1), fn: func(actx context.Context, a *actor) error {
 		g.queue.WithLabelValues(change).Observe(time.Since(queued).Seconds())
 		// The actor's context carries the caller's span, not its deadline.
 		_, wait := g.tracer.Start(ctx, "queue", trace.WithTimestamp(queued))
 		wait.End()
-		return fn(trace.ContextWithSpan(actx, span), a)
+		return fn(trace.ContextWithSpan(actx, sp), a)
 	}}
 	for {
 		a, err := g.actorOf(ctx, id)
@@ -323,9 +306,9 @@ func isClosed(c <-chan struct{}) bool {
 // golden build, so the next one does.
 func (g *Group) Create(ctx context.Context, id string, opts store.CreateOptions) error {
 	return g.do(ctx, "create", id, func(ctx context.Context, _ *actor) error {
-		var b *build
+		build := false
 		if _, err := g.store.Get(ctx, id); errors.Is(err, store.ErrNotFound) && opts.Workspace != "" && opts.Seed == nil {
-			opts.From, b = g.golden(ctx, id, opts.Workspace)
+			opts.From, build = g.golden(ctx, id, opts.Workspace)
 		}
 		_, err := g.store.Create(ctx, id, opts)
 		if err != nil && opts.From != nil {
@@ -339,14 +322,14 @@ func (g *Group) Create(ctx context.Context, id string, opts store.CreateOptions)
 		if err != nil {
 			return err
 		}
-		if b == nil {
+		if !build {
 			return nil
 		}
 		if err := g.store.Snapshot(ctx, id, goldenSource); err != nil {
 			g.log.WarnContext(ctx, "keeping a golden source failed", slog.String("env", id), slog.Any("error", err))
 			return nil
 		}
-		g.queueBuild(ctx, b)
+		g.queueBuild(ctx, id)
 		return nil
 	})
 }
@@ -357,10 +340,10 @@ func (g *Group) Delete(ctx context.Context, id string) error {
 		if _, err := g.store.Get(ctx, id); err != nil {
 			return err
 		}
-		if err := a.stopBox(ctx, g.driver.Delete); err != nil {
+		if err := a.stopBox(ctx); err != nil {
 			return err
 		}
-		if err := g.stopAgent(ctx, id, g.driver.Delete); err != nil {
+		if err := g.stopAgent(ctx, id); err != nil {
 			return err
 		}
 		return g.store.Delete(ctx, id)
@@ -405,18 +388,18 @@ func (g *Group) Restore(ctx context.Context, id, snapID string) error {
 		defer observe(g.restores, start, &err)
 		// Check the snapshot before stopping the box: a typo mustn't cost
 		// the agent its running processes.
-		snaps, err := g.store.Snapshots(ctx, id)
+		ok, err := g.store.HasSnapshot(ctx, store.SnapshotRef{Env: id, Snapshot: snapID})
 		if err != nil {
 			return err
 		}
-		if !slices.ContainsFunc(snaps, func(snap store.Snapshot) bool { return snap.ID == snapID }) {
+		if !ok {
 			return fmt.Errorf("snapshot %s/%s: %w", id, snapID, store.ErrNotFound)
 		}
-		if err := a.stopBox(ctx, g.driver.Sleep); err != nil {
+		if err := a.stopBox(ctx); err != nil {
 			return err
 		}
 		// Claude's box sees the old disk through its mount: it goes too.
-		if err := g.stopAgent(ctx, id, g.driver.Sleep); err != nil {
+		if err := g.stopAgent(ctx, id); err != nil {
 			return err
 		}
 		if err := g.store.Restore(ctx, id, snapID); err != nil {
@@ -431,28 +414,28 @@ func (g *Group) Restore(ctx context.Context, id, snapID string) error {
 // its agent box if it has one awake.
 func (g *Group) Sleep(ctx context.Context, id string) error {
 	return g.do(ctx, "sleep", id, func(ctx context.Context, a *actor) error {
-		if _, err := g.store.Get(ctx, envOf(id)); err != nil {
+		if _, err := g.store.Get(ctx, store.EnvOfBox(id)); err != nil {
 			return err
 		}
-		if err := a.stopBox(ctx, g.driver.Sleep); err != nil {
+		if err := a.stopBox(ctx); err != nil {
 			return err
 		}
-		if id == envOf(id) {
-			return g.stopAgent(ctx, id, g.driver.Sleep)
+		if !store.IsAgentBox(id) {
+			return g.stopAgent(ctx, id)
 		}
 		return nil
 	})
 }
 
-// stopAgent stops environment id's agent box with stop if it is awake, from
-// the environment's own actor: the agent box's actor never waits for that
-// one, so the two can't wait for each other.
-func (g *Group) stopAgent(ctx context.Context, id string, stop func(ctx context.Context, id string) error) error {
-	return g.do(ctx, "stop_agent", AgentBox(id), func(ctx context.Context, a *actor) error {
+// stopAgent stops environment id's agent box if it is awake, from the
+// environment's own actor: the agent box's actor never waits for that one,
+// so the two can't wait for each other.
+func (g *Group) stopAgent(ctx context.Context, id string) error {
+	return g.do(ctx, "stop_agent", store.AgentBox(id), func(ctx context.Context, a *actor) error {
 		if !a.awake {
 			return nil
 		}
-		return a.stopBox(ctx, stop)
+		return a.stopBox(ctx)
 	})
 }
 
@@ -477,11 +460,11 @@ func (g *Group) Wake(ctx context.Context, id string) error {
 // idle times included; one it wakes sleeps after Idle.Prewake unless a
 // command comes first. An unknown environment is only counted.
 func (g *Group) Prewake(id string) error {
-	if err := store.CheckEnvID(envOf(id)); err != nil {
+	if err := store.CheckEnvID(store.EnvOfBox(id)); err != nil {
 		return err
 	}
 	// With idle sleep off, a box woken ahead would never sleep again.
-	if g.idle.Prewake == 0 || g.idle.Agent == 0 || g.idle.Human == 0 {
+	if idle := g.cfg.Idle; idle.Prewake == 0 || idle.Agent == 0 || idle.Human == 0 {
 		return nil
 	}
 	select {
@@ -514,14 +497,14 @@ func (g *Group) prewake(ctx context.Context, id string) {
 		}
 		// Set first, so that a wake that fails half-way, leaving the box
 		// running, still ends with the lease.
-		a.lease = time.Now().Add(g.idle.Prewake)
+		a.lease = time.Now().Add(g.cfg.Idle.Prewake)
 		if _, err := a.wake(ctx, ""); err != nil {
 			if !a.awake {
 				a.lease = time.Time{}
 			}
 			return err
 		}
-		a.lease, a.prewoken = time.Now().Add(g.idle.Prewake), true
+		a.lease, a.prewoken = time.Now().Add(g.cfg.Idle.Prewake), true
 		g.log.InfoContext(ctx, "box woken ahead", slog.String("env", id), slog.Time("until", a.lease))
 		return nil
 	})
@@ -584,6 +567,28 @@ func (g *Group) Exec(ctx context.Context, id, stale string, cancel context.Cance
 		return nil, err
 	}
 	return ex, nil
+}
+
+// boxOf returns box id of env as the driver is to wake it. This is where
+// it is decided what each box runs and gets:
+//
+//   - a golden builder's box runs the services, started at once, and gets
+//     no Claude: what it writes goes into every thread of the repository;
+//   - with agent boxes, an agent box runs Claude and no services, and the
+//     environment's own box the services and no Claude, so it can't plant
+//     settings in Claude's folder;
+//   - without, the environment's box runs both.
+func (g *Group) boxOf(id string, env store.Env) runsc.Box {
+	box := runsc.Box{ID: id, Kind: runsc.Services, Env: env}
+	switch {
+	case setup.IsBuilder(id):
+		box.Kind, box.Env.Claude = runsc.Builder, ""
+	case store.IsAgentBox(id):
+		box.Kind = runsc.Agent
+	case g.cfg.Agents:
+		box.Env.Claude = ""
+	}
+	return box
 }
 
 // message is a call for an actor to make.
@@ -651,14 +656,14 @@ func (a *actor) handle(ctx context.Context, m message) {
 	m.reply <- m.fn(ctx, a)
 }
 
-// wake returns environment id's record once its box is up, waking it unless
-// it is known to be up somewhere other than stale.
+// wake returns the record of the environment a's box belongs to once the
+// box is up, waking it unless it is known to be up somewhere other than
+// stale.
 func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
-	env, err := a.g.store.Get(ctx, envOf(a.id))
+	env, err := a.g.store.Get(ctx, store.EnvOfBox(a.id))
 	if err != nil {
 		return store.Env{}, err
 	}
-	env.ID = a.id // the driver runs the agent box apart
 	if a.addr != "" && a.addr != stale {
 		return env, nil
 	}
@@ -670,9 +675,9 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 		a.opened, a.closed = time.Now(), time.Now()
 	}
 	start := time.Now()
-	ctx, span := startSpan(ctx, a.g.tracer, "box.wake", a.id)
-	addr, err := a.g.driver.Wake(ctx, env)
-	endSpan(span, err)
+	ctx, sp := span.Start(ctx, a.g.tracer, "box.wake", a.id)
+	addr, err := a.g.driver.Wake(ctx, a.g.boxOf(a.id, env))
+	span.End(sp, err)
 	observe(a.g.wakes, start, &err)
 	if err != nil {
 		return store.Env{}, err
@@ -682,15 +687,14 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 	return env, nil
 }
 
-// stopBox stops the box with stop (the driver's Sleep or Delete), then
-// cancels the commands still counted as running in it, so that none goes on
-// against the disk that comes next.
-func (a *actor) stopBox(ctx context.Context, stop func(ctx context.Context, id string) error) error {
+// stopBox stops the box, then cancels the commands still counted as running
+// in it, so that none goes on against the disk that comes next.
+func (a *actor) stopBox(ctx context.Context) error {
 	a.addr = ""
 	start := time.Now()
-	spanCtx, span := startSpan(ctx, a.g.tracer, "box.stop", a.id)
-	err := stop(spanCtx, a.id)
-	endSpan(span, err)
+	spanCtx, sp := span.Start(ctx, a.g.tracer, "box.stop", a.id)
+	err := a.g.driver.Sleep(spanCtx, a.id)
+	span.End(sp, err)
 	observe(a.g.stops, start, &err)
 	if err != nil {
 		return err
@@ -741,13 +745,13 @@ func (a *actor) deadline() time.Time {
 	if !a.lease.IsZero() {
 		return a.lease
 	}
-	return later(a.closed.Add(a.g.idle.Agent), a.opened.Add(a.g.idle.Human))
+	return later(a.closed.Add(a.g.cfg.Idle.Agent), a.opened.Add(a.g.cfg.Idle.Human))
 }
 
 // armIdle sets the idle timer for an awake box with nothing running, and
 // stops it otherwise.
 func (a *actor) armIdle() {
-	if !a.awake || len(a.execs) > 0 || a.g.idle.Agent == 0 || a.g.idle.Human == 0 {
+	if !a.awake || len(a.execs) > 0 || a.g.cfg.Idle.Agent == 0 || a.g.cfg.Idle.Human == 0 {
 		a.idle.Stop()
 		return
 	}
@@ -760,7 +764,7 @@ func (a *actor) sleepIfIdle(ctx context.Context) {
 	}
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), changeTimeout)
 	defer cancel()
-	if err := a.stopBox(ctx, a.g.driver.Sleep); err != nil {
+	if err := a.stopBox(ctx); err != nil {
 		// Try again after another idle time.
 		a.g.log.WarnContext(ctx, "idle sleep", slog.String("env", a.id), slog.Any("error", err))
 		a.closed = time.Now()

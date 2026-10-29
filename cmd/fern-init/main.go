@@ -1,5 +1,5 @@
-// Command fern-init is the main process of every box (the pod's pause
-// container is PID 1 and reaps orphans). It starts and supervises the
+// Command fern-init is the main process of every box (under tini, which is
+// PID 1 and reaps orphans). It starts and supervises the
 // services in the workspace's services.yaml, serves exec and readiness on
 // boxexec.Port, and stops the services before exiting on SIGTERM or an
 // authenticated stop request.
@@ -101,7 +101,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		}
 		return checkServices(ctx, check, dir, env)
 	}))
-	mux.Handle("POST "+boxexec.StopPath, shutdown(token, os.Getenv("FERN_POD_UID"), cancel))
+	mux.Handle("POST "+boxexec.StopPath, shutdown(token, os.Getenv("FERN_WAKE_ID"), cancel))
 	srv := &http.Server{
 		Addr:              ":" + strconv.Itoa(boxexec.Port),
 		Handler:           mux,

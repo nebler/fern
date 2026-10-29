@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Fern's images, one target each; lab/build.sh builds them:
-#   fern      the daemon, CLI and CSI node plugin
+#   fern      the daemon and the CLI
 #   fern-box  a box: Debian slim with Postgres, git, curl and Claude Code
 #   fern-t3   T3 Code's server with Fern's checkpoint hook
 

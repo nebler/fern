@@ -1,11 +1,13 @@
 package runsc
 
 import (
+	"net/netip"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 
 	"github.com/nebler/fern/internal/store"
 )
@@ -27,8 +29,9 @@ func binds(s spec) map[string]string {
 }
 
 func TestBoxSpec(t *testing.T) {
-	b := newBox("/run/boxes", "/pool", env.ID)
-	s := boxSpec(env, b, []string{"PATH=/bin"}, boxVars(env, "w1", "login", false))
+	box := Box{ID: env.ID, Kind: Services, Env: env}
+	b := newLayout("/run/boxes", "/pool", box.ID)
+	s := boxSpec(box, b, []string{"PATH=/bin"}, boxVars(box, "w1", "login"))
 	want := map[string]string{
 		"/etc/resolv.conf": "/run/boxes/resolv.conf rbind,ro",
 		"/etc/hosts":       "/run/boxes/demo/hosts rbind,ro",
@@ -49,7 +52,7 @@ func TestBoxSpec(t *testing.T) {
 	if s.Process.User.UID != store.BoxUID || len(s.Process.Capabilities.Bounding) != 0 || !s.Process.NoNewPrivileges {
 		t.Errorf("process runs as %+v with capabilities %v, want the box's user, none", s.Process.User, s.Process.Capabilities)
 	}
-	for _, v := range []string{"PATH=/bin", "FERN_BOX_TOKEN=tok", "FERN_POD_UID=w1", "CLAUDE_CONFIG_DIR=" + env.Claude, "CLAUDE_CODE_OAUTH_TOKEN=login"} {
+	for _, v := range []string{"PATH=/bin", "FERN_BOX_TOKEN=tok", "FERN_WAKE_ID=w1", "CLAUDE_CONFIG_DIR=" + env.Claude, "CLAUDE_CODE_OAUTH_TOKEN=login"} {
 		if !slices.Contains(s.Process.Env, v) {
 			t.Errorf("env lacks %s: %v", v, s.Process.Env)
 		}
@@ -62,16 +65,50 @@ func TestBoxSpec(t *testing.T) {
 	}
 }
 
-// A golden builder's box gets no login and starts its services at once.
-func TestBuilderVars(t *testing.T) {
-	vars := boxVars(env, "w1", "login", true)
-	for _, v := range vars {
-		if strings.HasPrefix(v, "CLAUDE_") {
-			t.Errorf("builder's box has %s", v)
-		}
+// Each kind of box turns off what it doesn't run, and a box without
+// Claude's folder gets no Claude variables.
+func TestBoxVars(t *testing.T) {
+	noClaude := env
+	noClaude.Claude = ""
+	for _, tc := range []struct {
+		name string
+		box  Box
+		want []string // the variables beyond the token, the wake and the workspace
+	}{
+		{
+			"services with Claude",
+			Box{ID: "demo", Kind: Services, Env: env},
+			[]string{"CLAUDE_CONFIG_DIR=" + env.Claude, "CLAUDE_CODE_OAUTH_TOKEN=login"},
+		},
+		{"services", Box{ID: "demo", Kind: Services, Env: noClaude}, nil},
+		{
+			"agent",
+			Box{ID: "demo.agent", Kind: Agent, Env: env},
+			[]string{"FERN_SERVICES=off", "CLAUDE_CONFIG_DIR=" + env.Claude, "CLAUDE_CODE_OAUTH_TOKEN=login"},
+		},
+		{"builder", Box{ID: "golden-r", Kind: Builder, Env: noClaude}, []string{"FERN_ON_DEMAND=off"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			login := ""
+			if tc.box.Env.Claude != "" {
+				login = "login" // Wake reads it only for a box with Claude
+			}
+			got := boxVars(tc.box, "w1", login)[3:]
+			if diff := cmp.Diff(tc.want, got, cmpopts.EquateEmpty()); diff != "" {
+				t.Errorf("vars (-want +got):\n%s", diff)
+			}
+		})
 	}
-	if !slices.Contains(vars, "FERN_ON_DEMAND=off") {
-		t.Errorf("builder's vars %v, want FERN_ON_DEMAND=off", vars)
+}
+
+// Only an agent box's /etc/hosts names the daemon.
+func TestHostsFile(t *testing.T) {
+	host := netip.MustParseAddr("10.89.0.1")
+	for _, kind := range []Kind{Services, Agent, Builder} {
+		got := strings.Contains(hostsFile(Box{ID: "demo", Kind: kind}, host), "10.89.0.1\t"+DaemonHost)
+		if want := kind == Agent; got != want {
+			t.Errorf("kind %d: hosts names the daemon = %t, want %t", kind, got, want)
+		}
 	}
 }
 
@@ -97,12 +134,12 @@ func TestAddrs(t *testing.T) {
 
 // Interface names have at most 15 characters, and differ per environment.
 func TestNames(t *testing.T) {
-	a, b := newBox("/run/boxes", "/pool", strings.Repeat("x", 63)), newBox("/run/boxes", "/pool", "demo")
-	if len(a.veth()) > 15 || len(a.nsName()) > 32 {
-		t.Errorf("names too long: %s, %s", a.veth(), a.nsName())
+	a, b := newLayout("/run/boxes", "/pool", strings.Repeat("x", 63)), newLayout("/run/boxes", "/pool", "demo")
+	if len(a.veth(Agent)) > 15 || len(a.nsName()) > 32 {
+		t.Errorf("names too long: %s, %s", a.veth(Agent), a.nsName())
 	}
-	if a.veth() == b.veth() {
-		t.Errorf("two environments share veth %s", a.veth())
+	if a.veth(Services) == b.veth(Services) {
+		t.Errorf("two environments share veth %s", a.veth(Services))
 	}
 }
 

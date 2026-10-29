@@ -2,6 +2,7 @@ package runsc
 
 import (
 	"path/filepath"
+	"slices"
 
 	"github.com/nebler/fern/internal/store"
 )
@@ -78,20 +79,20 @@ type (
 	}
 )
 
-// The box's limits, as the pod template has them: one runaway agent mustn't
-// starve the other boxes and the daemon.
+// The box's limits: one runaway agent mustn't starve the other boxes and
+// the daemon.
 const (
 	cpuLimit    = 2       // CPUs
 	memoryLimit = 2 << 30 // bytes
-	pidsLimit   = 4096    // as kubelet's pod-max-pids
+	pidsLimit   = 4096
 )
 
-// boxSpec returns the spec of env's box: fern-init (under tini, which reaps
-// orphans as a pod's pause container did) as the box's user with no
-// capabilities, a read-only root, the environment's folders at their own
-// paths and the box's own /tmp. image is the image's environment; vars are
-// the box's own (its token, its login).
-func boxSpec(env store.Env, b box, image, vars []string) spec {
+// boxSpec returns the spec of box: fern-init (under tini, which reaps
+// orphans) as the box's user with no capabilities, a read-only root, the
+// environment's folders at their own paths and the box's own /tmp. image is
+// the image's environment; vars are the box's own (its token, its login).
+func boxSpec(box Box, b layout, image, vars []string) spec {
+	env := box.Env
 	none := []string{}
 	mounts := []mount{
 		{Destination: "/proc", Type: "proc", Source: "proc"},
@@ -100,7 +101,6 @@ func boxSpec(env store.Env, b box, image, vars []string) spec {
 		{Destination: "/dev/shm", Type: "tmpfs", Source: "shm", Options: []string{"nosuid", "noexec", "nodev", "mode=1777", "size=65536k"}},
 		{Destination: "/sys", Type: "sysfs", Source: "sysfs", Options: []string{"nosuid", "noexec", "nodev", "ro"}},
 		{Destination: "/etc/resolv.conf", Type: "bind", Source: b.resolv, Options: []string{"rbind", "ro"}},
-		// As kubelet writes a pod's: without it, localhost goes to DNS.
 		{Destination: "/etc/hosts", Type: "bind", Source: b.hosts(), Options: []string{"rbind", "ro"}},
 		{Destination: "/tmp", Type: "bind", Source: b.tmp, Options: []string{"rbind", "rw"}},
 		{Destination: env.Workspace, Type: "bind", Source: env.Workspace, Options: []string{"rbind", "rw"}},
@@ -123,17 +123,17 @@ func boxSpec(env store.Env, b box, image, vars []string) spec {
 		Process: process{
 			User:            user{UID: store.BoxUID, GID: store.BoxGID},
 			Args:            []string{"/usr/bin/tini", "-s", "--", "/usr/local/bin/fern-init"},
-			Env:             append(append([]string{}, image...), vars...),
+			Env:             slices.Concat(image, vars),
 			Cwd:             "/",
 			NoNewPrivileges: true,
 			Capabilities:    capabilities{Bounding: none, Effective: none, Inheritable: none, Permitted: none, Ambient: none},
 			Rlimits:         []rlimit{{Type: "RLIMIT_NOFILE", Hard: 1 << 20, Soft: 1 << 20}},
 		},
 		Root:     root{Path: b.rootfs, Readonly: true},
-		Hostname: env.ID,
+		Hostname: box.ID,
 		Mounts:   mounts,
 		Linux: linux{
-			CgroupsPath: "/" + cgroupParent + "/" + env.ID,
+			CgroupsPath: "/" + cgroupParent + "/" + box.ID,
 			Resources: resources{
 				CPU:    cpu{Quota: cpuLimit * 100_000, Period: 100_000},
 				Memory: memory{Limit: memoryLimit},
@@ -147,19 +147,23 @@ func boxSpec(env store.Env, b box, image, vars []string) spec {
 }
 
 // boxVars are the variables fern-init needs: the token that authenticates
-// the daemon, the wake's ID (stop requests name it), the workspace, and
-// Claude's folder and login unless the box is a golden builder's.
-func boxVars(env store.Env, wakeID, login string, builder bool) []string {
+// the daemon, the wake's ID (stop requests name it), the workspace, what
+// box's kind turns off, and Claude's folder and login if it gets them.
+func boxVars(box Box, wakeID, login string) []string {
 	vars := []string{
-		"FERN_BOX_TOKEN=" + env.BoxToken,
-		"FERN_POD_UID=" + wakeID,
-		"FERN_WORKSPACE=" + env.Workspace,
+		"FERN_BOX_TOKEN=" + box.Env.BoxToken,
+		"FERN_WAKE_ID=" + wakeID,
+		"FERN_WORKSPACE=" + box.Env.Workspace,
 	}
-	if builder {
-		return append(vars, "FERN_ON_DEMAND=off")
+	switch box.Kind {
+	case Services:
+	case Agent:
+		vars = append(vars, "FERN_SERVICES=off")
+	case Builder:
+		vars = append(vars, "FERN_ON_DEMAND=off")
 	}
-	if env.Claude != "" {
-		vars = append(vars, "CLAUDE_CONFIG_DIR="+env.Claude)
+	if box.Env.Claude != "" {
+		vars = append(vars, "CLAUDE_CONFIG_DIR="+box.Env.Claude)
 	}
 	if login != "" {
 		vars = append(vars, "CLAUDE_CODE_OAUTH_TOKEN="+login)

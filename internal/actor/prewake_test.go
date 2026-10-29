@@ -11,19 +11,20 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/nebler/fern/internal/actor"
-	"github.com/nebler/fern/internal/driver"
+	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
 )
 
 var prewakeIdle = actor.Idle{Agent: 5 * time.Minute, Human: 20 * time.Minute, Prewake: 2 * time.Minute}
 
-// prewakes returns g's pre-wake counts by result.
-func prewakes(t *testing.T, g *actor.Group) map[string]uint64 {
+// prewakes returns the pre-wake counts in reg by result.
+func prewakes(t *testing.T, reg prometheus.Gatherer) map[string]uint64 {
 	t.Helper()
 	out := make(map[string]uint64)
-	for name, n := range counts(t, g) {
+	for name, n := range counts(t, reg) {
 		var result string
 		if _, err := fmt.Sscanf(name, "fern_prewakes_total{result=%s", &result); err == nil {
 			out[result[:len(result)-1]] = n
@@ -33,7 +34,7 @@ func prewakes(t *testing.T, g *actor.Group) map[string]uint64 {
 }
 
 // wantState fails the test unless demo's box is in state want after d more.
-func wantState(t *testing.T, drv *driver.Fake, d time.Duration, want driver.State) {
+func wantState(t *testing.T, drv *runsc.Fake, d time.Duration, want runsc.State) {
 	t.Helper()
 	time.Sleep(d)
 	synctest.Wait()
@@ -56,24 +57,24 @@ func prewake(t *testing.T, g *actor.Group) {
 func TestPrewake(t *testing.T) {
 	t.Run("no command", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			st, drv := newFakeStore(), driver.NewFake("box")
-			g := start(t, st, drv, prewakeIdle)
+			st, drv := newFakeStore(), runsc.NewFake("box")
+			g, reg := startMetered(t, st, drv, prewakeIdle)
 			if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 				t.Fatal(err)
 			}
 			prewake(t, g)
-			wantState(t, drv, 0, driver.Running)
-			wantState(t, drv, prewakeIdle.Prewake-time.Second, driver.Running)
-			wantState(t, drv, time.Second, driver.Asleep)
-			if diff := cmp.Diff(map[string]uint64{"woken": 1, "wasted": 1}, prewakes(t, g)); diff != "" {
+			wantState(t, drv, 0, runsc.Running)
+			wantState(t, drv, prewakeIdle.Prewake-time.Second, runsc.Running)
+			wantState(t, drv, time.Second, runsc.Asleep)
+			if diff := cmp.Diff(map[string]uint64{"woken": 1, "wasted": 1}, prewakes(t, reg)); diff != "" {
 				t.Errorf("pre-wakes mismatch (-want +got):\n%s", diff)
 			}
 		})
 	})
 	t.Run("a command comes", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			st, drv := newFakeStore(), driver.NewFake("box")
-			g := start(t, st, drv, prewakeIdle)
+			st, drv := newFakeStore(), runsc.NewFake("box")
+			g, reg := startMetered(t, st, drv, prewakeIdle)
 			if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 				t.Fatal(err)
 			}
@@ -84,17 +85,17 @@ func TestPrewake(t *testing.T) {
 				t.Errorf("%d wakes, want 1: the command uses the box woken ahead", got)
 			}
 			// Asleep 20 minutes after the command started, not 2 after the wake.
-			wantState(t, drv, prewakeIdle.Human-2*time.Second, driver.Running)
-			wantState(t, drv, time.Second, driver.Asleep)
-			if diff := cmp.Diff(map[string]uint64{"woken": 1, "used": 1}, prewakes(t, g)); diff != "" {
+			wantState(t, drv, prewakeIdle.Human-2*time.Second, runsc.Running)
+			wantState(t, drv, time.Second, runsc.Asleep)
+			if diff := cmp.Diff(map[string]uint64{"woken": 1, "used": 1}, prewakes(t, reg)); diff != "" {
 				t.Errorf("pre-wakes mismatch (-want +got):\n%s", diff)
 			}
 		})
 	})
 	t.Run("a restore comes", func(t *testing.T) {
 		synctest.Test(t, func(t *testing.T) {
-			st, drv := newFakeStore(), driver.NewFake("box")
-			g := start(t, st, drv, prewakeIdle)
+			st, drv := newFakeStore(), runsc.NewFake("box")
+			g, reg := startMetered(t, st, drv, prewakeIdle)
 			ctx := t.Context()
 			if err := g.Create(ctx, "demo", store.CreateOptions{}); err != nil {
 				t.Fatal(err)
@@ -106,9 +107,9 @@ func TestPrewake(t *testing.T) {
 			if err := g.Restore(ctx, "demo", "s1"); err != nil {
 				t.Fatal(err)
 			}
-			wantState(t, drv, 0, driver.Asleep)
-			wantState(t, drv, prewakeIdle.Prewake, driver.Asleep)
-			if diff := cmp.Diff(map[string]uint64{"woken": 1, "wasted": 1}, prewakes(t, g)); diff != "" {
+			wantState(t, drv, 0, runsc.Asleep)
+			wantState(t, drv, prewakeIdle.Prewake, runsc.Asleep)
+			if diff := cmp.Diff(map[string]uint64{"woken": 1, "wasted": 1}, prewakes(t, reg)); diff != "" {
 				t.Errorf("pre-wakes mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -119,17 +120,17 @@ func TestPrewake(t *testing.T) {
 // idle times, earlier or later.
 func TestPrewakeAwake(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		st, drv := newFakeStore(), driver.NewFake("box")
-		g := start(t, st, drv, prewakeIdle)
+		st, drv := newFakeStore(), runsc.NewFake("box")
+		g, reg := startMetered(t, st, drv, prewakeIdle)
 		if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
 		exec(t, g, time.Minute)
 		time.Sleep(18 * time.Minute) // the box sleeps 20 minutes after the command started
 		prewake(t, g)
-		wantState(t, drv, time.Minute-time.Second, driver.Running)
-		wantState(t, drv, time.Second, driver.Asleep)
-		if diff := cmp.Diff(map[string]uint64{"awake": 1}, prewakes(t, g)); diff != "" {
+		wantState(t, drv, time.Minute-time.Second, runsc.Running)
+		wantState(t, drv, time.Second, runsc.Asleep)
+		if diff := cmp.Diff(map[string]uint64{"awake": 1}, prewakes(t, reg)); diff != "" {
 			t.Errorf("pre-wakes mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -151,8 +152,8 @@ func TestPrewakeNothing(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				st, drv := newFakeStore(), driver.NewFake("box")
-				g := start(t, st, drv, tt.idle)
+				st, drv := newFakeStore(), runsc.NewFake("box")
+				g, reg := startMetered(t, st, drv, tt.idle)
 				if tt.create {
 					if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 						t.Fatal(err)
@@ -162,7 +163,7 @@ func TestPrewakeNothing(t *testing.T) {
 				if got := drv.Wakes(); got != 0 {
 					t.Errorf("%d wakes, want 0", got)
 				}
-				if diff := cmp.Diff(tt.want, prewakes(t, g)); diff != "" {
+				if diff := cmp.Diff(tt.want, prewakes(t, reg)); diff != "" {
 					t.Errorf("pre-wakes mismatch (-want +got):\n%s", diff)
 				}
 				if err := g.Prewake("../demo"); err == nil {
@@ -176,27 +177,28 @@ func TestPrewakeNothing(t *testing.T) {
 // blockedWake is a driver whose Wake waits until release is closed, and
 // counts the wakes waiting.
 type blockedWake struct {
-	*driver.Fake
+	*runsc.Fake
 	release chan struct{}
 	mu      sync.Mutex
 	waiting int
 }
 
-func (d *blockedWake) Wake(ctx context.Context, env store.Env) (string, error) {
+func (d *blockedWake) Wake(ctx context.Context, box runsc.Box) (string, error) {
 	d.mu.Lock()
 	d.waiting++
 	d.mu.Unlock()
 	<-d.release
-	return d.Fake.Wake(ctx, env)
+	return d.Fake.Wake(ctx, box)
 }
 
 // Two pre-wakes run at once and eight wait; more are dropped. A command
 // doesn't wait for another environment's pre-wake.
 func TestPrewakeLimit(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		st, fake := newFakeStore(), driver.NewFake("box")
+		st, fake := newFakeStore(), runsc.NewFake("box")
 		drv := &blockedWake{Fake: fake, release: make(chan struct{})}
-		g := actor.New(st, drv, prewakeIdle, "box", notrace, slog.New(slog.DiscardHandler))
+		reg := prometheus.NewRegistry()
+		g := actor.New(st, drv, actor.Config{Idle: prewakeIdle, Image: "box"}, notrace, reg, slog.New(slog.DiscardHandler))
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan struct{})
 		go func() { _ = g.Run(ctx); close(done) }()
@@ -240,7 +242,7 @@ func TestPrewakeLimit(t *testing.T) {
 			t.Fatal(err)
 		}
 		synctest.Wait()
-		if diff := cmp.Diff(map[string]uint64{"woken": n - 1, "dropped": 1}, prewakes(t, g)); diff != "" {
+		if diff := cmp.Diff(map[string]uint64{"woken": n - 1, "dropped": 1}, prewakes(t, reg)); diff != "" {
 			t.Errorf("pre-wakes mismatch (-want +got):\n%s", diff)
 		}
 	})
@@ -249,12 +251,12 @@ func TestPrewakeLimit(t *testing.T) {
 // failingWake is a driver whose Wake fails, perhaps leaving the box
 // running, and that counts the stops.
 type failingWake struct {
-	*driver.Fake
+	*runsc.Fake
 	mu     sync.Mutex
 	sleeps int
 }
 
-func (d *failingWake) Wake(context.Context, store.Env) (string, error) {
+func (d *failingWake) Wake(context.Context, runsc.Box) (string, error) {
 	return "", errors.New("no node")
 }
 
@@ -270,8 +272,9 @@ func (d *failingWake) Sleep(ctx context.Context, id string) error {
 func TestPrewakeFails(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		st := newFakeStore()
-		drv := &failingWake{Fake: driver.NewFake("box")}
-		g := actor.New(st, drv, prewakeIdle, "box", notrace, slog.New(slog.DiscardHandler))
+		drv := &failingWake{Fake: runsc.NewFake("box")}
+		reg := prometheus.NewRegistry()
+		g := actor.New(st, drv, actor.Config{Idle: prewakeIdle, Image: "box"}, notrace, reg, slog.New(slog.DiscardHandler))
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan struct{})
 		go func() { _ = g.Run(ctx); close(done) }()
@@ -287,7 +290,7 @@ func TestPrewakeFails(t *testing.T) {
 		if got := drv.sleeps; got != 1 {
 			t.Errorf("%d sleeps after %v, want 1", got, prewakeIdle.Prewake)
 		}
-		if diff := cmp.Diff(map[string]uint64{"error": 1}, prewakes(t, g)); diff != "" {
+		if diff := cmp.Diff(map[string]uint64{"error": 1}, prewakes(t, reg)); diff != "" {
 			t.Errorf("pre-wakes mismatch (-want +got):\n%s", diff)
 		}
 	})

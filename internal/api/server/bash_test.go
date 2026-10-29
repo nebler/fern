@@ -9,11 +9,12 @@ import (
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api/server"
 	"github.com/nebler/fern/internal/boxexec"
-	"github.com/nebler/fern/internal/driver"
+	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -28,19 +29,19 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 
 // newMCP serves environment demo's MCP endpoint, its box a real boxexec
 // server, and returns the endpoint's URL and the fake driver.
-func newMCP(t *testing.T) (string, *driver.Fake) {
+func newMCP(t *testing.T) (string, *runsc.Fake) {
 	t.Helper()
 	log := slog.New(slog.DiscardHandler)
 	mux := http.NewServeMux()
 	mux.Handle(boxexec.Path, boxexec.NewServer(boxToken, t.TempDir(), nil, log))
 	box := httptest.NewServer(mux)
 	t.Cleanup(box.Close)
-	drv := driver.NewFake(box.Listener.Addr().String())
+	drv := runsc.NewFake(box.Listener.Addr().String())
 	st := newFakeStore()
 	if _, err := st.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	envs := actor.New(st, drv, actor.Idle{}, "box", notrace, log)
+	envs := actor.New(st, drv, actor.Config{Image: "box"}, notrace, prometheus.NewRegistry(), log)
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() { _ = envs.Run(ctx); close(done) }()
@@ -79,7 +80,7 @@ func TestBash(t *testing.T) {
 		t.Errorf("a command that failed is a result, not a tool error: %q", text)
 	}
 	states, _ := drv.States(t.Context())
-	if states["demo"] != driver.Running {
+	if states["demo"] != runsc.Running {
 		t.Errorf("box %s after Bash, want it woken", states["demo"])
 	}
 }

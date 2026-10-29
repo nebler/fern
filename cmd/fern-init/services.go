@@ -66,8 +66,8 @@ func parseServices(data []byte) (map[string]service, error) {
 	return f.Services, nil
 }
 
-// Stopping a box must fit in its pod's 15s grace period, after which
-// Kubernetes kills everything.
+// Stopping a box must fit in the daemon's 15s grace (runsc's stopGrace),
+// after which it kills everything.
 const (
 	stopTimeout = 8 * time.Second // bounds a service's stop command
 	killDelay   = 3 * time.Second // from SIGTERM to SIGKILL

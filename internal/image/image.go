@@ -1,6 +1,5 @@
 // Package image unpacks container images, as `docker save` writes them,
-// into directories that boxes and T3's server use as their root: what
-// containerd's store did when Fern ran on Kubernetes.
+// into directories that boxes and T3's server use as their root.
 //
 // An image is <dir>/<id>/, its root filesystem in root/ and its config in
 // config.json, where id is the config's SHA-256, as containerd's image IDs

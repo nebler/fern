@@ -7,18 +7,18 @@ import (
 	"strconv"
 )
 
-// shutdown starts the same service shutdown as SIGTERM. The daemon sends it
-// only after Kubernetes has durable intent to remove this box.
-func shutdown(token, uid string, cancel context.CancelFunc) http.HandlerFunc {
+// shutdown starts the same service shutdown as SIGTERM, for a request that
+// names this wake of the box, wakeID.
+func shutdown(token, wakeID string, cancel context.CancelFunc) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+token)) != 1 {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		// An environment keeps its token across wakes. A delayed request to
-		// an IP reused by its next pod must not stop that replacement.
-		if uid == "" || r.Header.Get("If-Match") != strconv.Quote(uid) {
-			http.Error(w, "pod changed", http.StatusPreconditionFailed)
+		// an address its next wake reuses must not stop that one.
+		if wakeID == "" || r.Header.Get("If-Match") != strconv.Quote(wakeID) {
+			http.Error(w, "another wake of the box", http.StatusPreconditionFailed)
 			return
 		}
 		defer cancel()

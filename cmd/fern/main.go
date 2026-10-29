@@ -1,7 +1,5 @@
 // Command fern is the Fern command-line client.
 //
-//	fern daemon [--idle-agent D] [--idle-human D] [--metrics-addr ADDR]
-//	                                         run the node daemon and CSI plugin
 //	fern create [--path P] [--seed] <env>    make an environment; P is its workspace,
 //	                                         --seed fills it from a tar stream on stdin
 //	fern ls                                  list environments
@@ -34,7 +32,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -50,26 +47,13 @@ import (
 	"github.com/nebler/fern/internal/image"
 )
 
-// socket is in a directory of its own, so pods can share it through a
-// hostPath.
+// socket is the daemon's API.
 const socket = "/run/fern/fern.sock"
 
 // images is where the daemon finds the box image and systemd T3's.
 const images = "/var/lib/fern/images"
 
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "daemon" {
-		// Keep the existing command without loading the daemon's dependencies
-		// on every checkpoint and exec. Exec preserves PID 1 and its signals.
-		exe, err := os.Executable()
-		if err == nil {
-			daemon := filepath.Join(filepath.Dir(exe), "fern-daemon")
-			err = syscall.Exec(daemon, append([]string{daemon}, os.Args[2:]...), os.Environ())
-			err = fmt.Errorf("exec %s: %w", daemon, err)
-		}
-		_, _ = fmt.Fprintf(os.Stderr, "fern daemon: %v\n", err)
-		os.Exit(1)
-	}
 	os.Exit(run(context.Background(), os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 }
 

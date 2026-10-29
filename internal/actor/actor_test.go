@@ -24,7 +24,7 @@ import (
 	"go.uber.org/goleak"
 
 	"github.com/nebler/fern/internal/actor"
-	"github.com/nebler/fern/internal/driver"
+	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
@@ -72,7 +72,7 @@ func (f *fakeStore) Create(_ context.Context, id string, opts store.CreateOption
 		}
 	}
 	f.envs[id] = true
-	return store.Env{ID: id, Workspace: f.paths[id]}, nil
+	return store.Env{ID: id, Workspace: f.paths[id], Claude: "claude/" + id}, nil
 }
 
 func (f *fakeStore) Get(_ context.Context, id string) (store.Env, error) {
@@ -81,7 +81,7 @@ func (f *fakeStore) Get(_ context.Context, id string) (store.Env, error) {
 	if !f.envs[id] {
 		return store.Env{}, fmt.Errorf("environment %s: %w", id, store.ErrNotFound)
 	}
-	return store.Env{ID: id, Workspace: f.paths[id]}, nil
+	return store.Env{ID: id, Workspace: f.paths[id], Claude: "claude/" + id}, nil
 }
 
 func (f *fakeStore) List(context.Context) ([]store.Env, error) {
@@ -89,7 +89,7 @@ func (f *fakeStore) List(context.Context) ([]store.Env, error) {
 	defer f.mu.Unlock()
 	var out []store.Env
 	for id := range f.envs {
-		out = append(out, store.Env{ID: id, Workspace: f.paths[id]})
+		out = append(out, store.Env{ID: id, Workspace: f.paths[id], Claude: "claude/" + id})
 	}
 	return out, nil
 }
@@ -116,14 +116,10 @@ func (f *fakeStore) DeleteSnapshot(_ context.Context, id, snapID string) error {
 	return nil
 }
 
-func (f *fakeStore) Snapshots(_ context.Context, id string) ([]store.Snapshot, error) {
+func (f *fakeStore) HasSnapshot(_ context.Context, ref store.SnapshotRef) (bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var out []store.Snapshot
-	for _, s := range f.snaps[id] {
-		out = append(out, store.Snapshot{ID: s})
-	}
-	return out, nil
+	return slices.Contains(f.snaps[ref.Env], ref.Snapshot), nil
 }
 
 func (f *fakeStore) Restore(context.Context, string, string) error { return nil }
@@ -190,9 +186,18 @@ var idle = actor.Idle{Agent: 5 * time.Minute, Human: 20 * time.Minute}
 
 // start runs a Group for st and drv until the test ends. Call it inside a
 // synctest bubble.
-func start(t *testing.T, st *fakeStore, drv *driver.Fake, idle actor.Idle) *actor.Group {
+func start(t *testing.T, st *fakeStore, drv *runsc.Fake, idle actor.Idle) *actor.Group {
 	t.Helper()
-	g := actor.New(st, drv, idle, "box", notrace, slog.New(slog.DiscardHandler))
+	g, _ := startMetered(t, st, drv, idle)
+	return g
+}
+
+// startMetered is start that also returns the registry of the Group's
+// metrics.
+func startMetered(t *testing.T, st *fakeStore, drv *runsc.Fake, idle actor.Idle) (*actor.Group, *prometheus.Registry) {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	g := actor.New(st, drv, actor.Config{Idle: idle, Image: "box"}, notrace, reg, slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -202,16 +207,20 @@ func start(t *testing.T, st *fakeStore, drv *driver.Fake, idle actor.Idle) *acto
 		close(done)
 	}()
 	t.Cleanup(func() { cancel(); <-done })
-	return g
+	return g, reg
 }
 
-func state(t *testing.T, drv *driver.Fake, id string) driver.State {
+// state returns box id's state: Asleep if drv lists none.
+func state(t *testing.T, drv *runsc.Fake, id string) runsc.State {
 	t.Helper()
 	states, err := drv.States(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	return states[id]
+	if s, ok := states[id]; ok {
+		return s
+	}
+	return runsc.Asleep
 }
 
 // exec counts a command in demo's box from now for d.
@@ -239,7 +248,7 @@ func TestIdleSleep(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				st, drv := newFakeStore(), driver.NewFake("box")
+				st, drv := newFakeStore(), runsc.NewFake("box")
 				g := start(t, st, drv, idle)
 				if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 					t.Fatal(err)
@@ -247,13 +256,13 @@ func TestIdleSleep(t *testing.T) {
 				exec(t, g, tt.ran)
 				time.Sleep(tt.want - tt.ran - time.Second)
 				synctest.Wait()
-				if got := state(t, drv, "demo"); got != driver.Running {
-					t.Fatalf("a second before %v: state %s, want %s", tt.want, got, driver.Running)
+				if got := state(t, drv, "demo"); got != runsc.Running {
+					t.Fatalf("a second before %v: state %s, want %s", tt.want, got, runsc.Running)
 				}
 				time.Sleep(time.Second)
 				synctest.Wait()
-				if got := state(t, drv, "demo"); got != driver.Asleep {
-					t.Errorf("at %v: state %s, want %s", tt.want, got, driver.Asleep)
+				if got := state(t, drv, "demo"); got != runsc.Asleep {
+					t.Errorf("at %v: state %s, want %s", tt.want, got, runsc.Asleep)
 				}
 			})
 		})
@@ -274,7 +283,7 @@ func TestNoIdleSleep(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				st, drv := newFakeStore(), driver.NewFake("box")
+				st, drv := newFakeStore(), runsc.NewFake("box")
 				g := start(t, st, drv, tt.idle)
 				if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 					t.Fatal(err)
@@ -288,8 +297,8 @@ func TestNoIdleSleep(t *testing.T) {
 				}
 				time.Sleep(24 * time.Hour)
 				synctest.Wait()
-				if got := state(t, drv, "demo"); got != driver.Running {
-					t.Errorf("after a day: state %s, want %s", got, driver.Running)
+				if got := state(t, drv, "demo"); got != runsc.Running {
+					t.Errorf("after a day: state %s, want %s", got, runsc.Running)
 				}
 				ex.Close()
 			})
@@ -303,15 +312,15 @@ func TestCloseAndSleep(t *testing.T) {
 	tests := []struct {
 		name  string
 		other bool // another command runs meanwhile
-		want  driver.State
+		want  runsc.State
 	}{
-		{"alone", false, driver.Asleep},
-		{"another running", true, driver.Running},
+		{"alone", false, runsc.Asleep},
+		{"another running", true, runsc.Running},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				st, drv := newFakeStore(), driver.NewFake("box")
+				st, drv := newFakeStore(), runsc.NewFake("box")
 				g := start(t, st, drv, idle)
 				if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 					t.Fatal(err)
@@ -339,13 +348,13 @@ func TestCloseAndSleep(t *testing.T) {
 				other.Close()
 				time.Sleep(20*time.Minute - time.Minute - time.Second)
 				synctest.Wait()
-				if got := state(t, drv, "demo"); got != driver.Running {
-					t.Fatalf("before the idle times: state %s, want %s", got, driver.Running)
+				if got := state(t, drv, "demo"); got != runsc.Running {
+					t.Fatalf("before the idle times: state %s, want %s", got, runsc.Running)
 				}
 				time.Sleep(time.Second)
 				synctest.Wait()
-				if got := state(t, drv, "demo"); got != driver.Asleep {
-					t.Errorf("after the idle times: state %s, want %s", got, driver.Asleep)
+				if got := state(t, drv, "demo"); got != runsc.Asleep {
+					t.Errorf("after the idle times: state %s, want %s", got, runsc.Asleep)
 				}
 			})
 		})
@@ -354,6 +363,47 @@ func TestCloseAndSleep(t *testing.T) {
 
 // An agent box is its own: it wakes for its commands, sleeps on its own
 // clocks, and goes with its environment's restore, sleep or delete.
+// Each box is woken with what it runs and gets: Claude's folder goes only
+// to the box that runs Claude, and never to a golden builder's.
+func TestBoxes(t *testing.T) {
+	builder := setup.ID("r")
+	for _, tc := range []struct {
+		name   string
+		agents bool
+		box    string
+		kind   runsc.Kind
+		claude bool
+	}{
+		{"one box", false, "demo", runsc.Services, true},
+		{"services' box", true, "demo", runsc.Services, false},
+		{"agent box", true, store.AgentBox("demo"), runsc.Agent, true},
+		{"builder", true, builder, runsc.Builder, false},
+		{"builder without agent boxes", false, builder, runsc.Builder, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				st, drv := newFakeStore(), runsc.NewFake("box")
+				g := actor.New(st, drv, actor.Config{Image: "box", Agents: tc.agents}, notrace, prometheus.NewRegistry(), slog.New(slog.DiscardHandler))
+				ctx, cancel := context.WithCancel(t.Context())
+				done := make(chan struct{})
+				go func() { _ = g.Run(ctx); close(done) }()
+				defer func() { cancel(); <-done }()
+				env := store.EnvOfBox(tc.box)
+				if err := g.Create(ctx, env, store.CreateOptions{}); err != nil {
+					t.Fatal(err)
+				}
+				if err := g.Wake(ctx, tc.box); err != nil {
+					t.Fatal(err)
+				}
+				box := drv.Woken(tc.box)
+				if box.Kind != tc.kind || (box.Env.Claude != "") != tc.claude || box.Env.ID != env {
+					t.Errorf("woke %+v, want kind %d of environment %s, with Claude %t", box, tc.kind, env, tc.claude)
+				}
+			})
+		})
+	}
+}
+
 func TestAgentBox(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -365,7 +415,7 @@ func TestAgentBox(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				st, drv := newFakeStore(), driver.NewFake("box")
+				st, drv := newFakeStore(), runsc.NewFake("box")
 				g := start(t, st, drv, idle)
 				if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 					t.Fatal(err)
@@ -373,13 +423,13 @@ func TestAgentBox(t *testing.T) {
 				if err := g.Snapshot(t.Context(), "demo", "s1", false); err != nil {
 					t.Fatal(err)
 				}
-				agent := actor.AgentBox("demo")
+				agent := store.AgentBox("demo")
 				ex, err := g.Exec(t.Context(), agent, "", func() {})
 				if err != nil {
 					t.Fatal(err)
 				}
 				synctest.Wait()
-				if got, main := state(t, drv, agent), state(t, drv, "demo"); got != driver.Running || main == driver.Running {
+				if got, main := state(t, drv, agent), state(t, drv, "demo"); got != runsc.Running || main == runsc.Running {
 					t.Fatalf("agent box %s, environment's %s; want only the agent box running", got, main)
 				}
 				ex.Close()
@@ -387,7 +437,7 @@ func TestAgentBox(t *testing.T) {
 					t.Fatal(err)
 				}
 				synctest.Wait()
-				if got := state(t, drv, agent); got == driver.Running {
+				if got := state(t, drv, agent); got == runsc.Running {
 					t.Errorf("after %s: agent box %s, want asleep", tc.name, got)
 				}
 			})
@@ -399,7 +449,7 @@ func TestAgentBox(t *testing.T) {
 // another comes first.
 func TestCloseAndSleepAfter(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		st, drv := newFakeStore(), driver.NewFake("box")
+		st, drv := newFakeStore(), runsc.NewFake("box")
 		g := start(t, st, drv, idle)
 		if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 			t.Fatal(err)
@@ -416,12 +466,12 @@ func TestCloseAndSleepAfter(t *testing.T) {
 		run() // within the 5 s: no wake, and the time starts again
 		time.Sleep(4 * time.Second)
 		synctest.Wait()
-		if got := state(t, drv, "demo"); got != driver.Running {
+		if got := state(t, drv, "demo"); got != runsc.Running {
 			t.Fatalf("4 s after the last command: %s, want running", got)
 		}
 		time.Sleep(2 * time.Second)
 		synctest.Wait()
-		if got := state(t, drv, "demo"); got != driver.Asleep {
+		if got := state(t, drv, "demo"); got != runsc.Asleep {
 			t.Errorf("6 s after the last command: %s, want asleep", got)
 		}
 	})
@@ -430,15 +480,15 @@ func TestCloseAndSleepAfter(t *testing.T) {
 // A box an earlier daemon left running goes to sleep when idle too.
 func TestIdleSleepAfterRestart(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		st, drv := newFakeStore(), driver.NewFake("box")
-		if _, err := drv.Wake(t.Context(), store.Env{ID: "demo"}); err != nil {
+		st, drv := newFakeStore(), runsc.NewFake("box")
+		if _, err := drv.Wake(t.Context(), runsc.Box{ID: "demo"}); err != nil {
 			t.Fatal(err)
 		}
 		start(t, st, drv, idle)
 		time.Sleep(idle.Human)
 		synctest.Wait()
-		if got := state(t, drv, "demo"); got != driver.Asleep {
-			t.Errorf("after %v: state %s, want %s", idle.Human, got, driver.Asleep)
+		if got := state(t, drv, "demo"); got != runsc.Asleep {
+			t.Errorf("after %v: state %s, want %s", idle.Human, got, runsc.Asleep)
 		}
 	})
 }
@@ -464,7 +514,7 @@ func TestStopCancelsExecs(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
-				st, drv := newFakeStore(), driver.NewFake("box")
+				st, drv := newFakeStore(), runsc.NewFake("box")
 				g := start(t, st, drv, idle)
 				ctx := t.Context()
 				if err := g.Create(ctx, "demo", store.CreateOptions{}); err != nil {
@@ -494,7 +544,7 @@ func TestStopCancelsExecs(t *testing.T) {
 // An exec of an environment that doesn't exist fails and wakes nothing.
 func TestExecUnknown(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		st, drv := newFakeStore(), driver.NewFake("box")
+		st, drv := newFakeStore(), runsc.NewFake("box")
 		g := start(t, st, drv, idle)
 		if _, err := g.Exec(t.Context(), "nope", "", func() {}); !errors.Is(err, store.ErrNotFound) {
 			t.Errorf("Exec(nope) error = %v, want %v", err, store.ErrNotFound)
@@ -509,7 +559,7 @@ func TestExecUnknown(t *testing.T) {
 // the same environment overlap: an actor must make them one at a time.
 type guard struct {
 	*fakeStore
-	drv *driver.Fake
+	drv *runsc.Fake
 
 	mu       sync.Mutex
 	busy     map[string]bool
@@ -557,13 +607,13 @@ func (g *guard) Restore(ctx context.Context, id, snapID string) error {
 	return g.fakeStore.Restore(ctx, id, snapID)
 }
 
-// guardDriver is guard's driver side: its Delete deletes the box.
+// guardDriver is guard's driver side.
 type guardDriver struct{ *guard }
 
-func (d guardDriver) Wake(ctx context.Context, env store.Env) (string, error) {
-	d.enter(env.ID)
-	defer d.leave(env.ID)
-	return d.drv.Wake(ctx, env)
+func (d guardDriver) Wake(ctx context.Context, box runsc.Box) (string, error) {
+	d.enter(box.ID)
+	defer d.leave(box.ID)
+	return d.drv.Wake(ctx, box)
 }
 
 func (d guardDriver) Sleep(ctx context.Context, id string) error {
@@ -572,13 +622,7 @@ func (d guardDriver) Sleep(ctx context.Context, id string) error {
 	return d.drv.Sleep(ctx, id)
 }
 
-func (d guardDriver) Delete(ctx context.Context, id string) error {
-	d.enter(id)
-	defer d.leave(id)
-	return d.drv.Delete(ctx, id)
-}
-
-func (d guardDriver) States(ctx context.Context) (map[string]driver.State, error) {
+func (d guardDriver) States(ctx context.Context) (map[string]runsc.State, error) {
 	return d.drv.States(ctx)
 }
 
@@ -586,8 +630,8 @@ func (d guardDriver) States(ctx context.Context) (map[string]driver.State, error
 // environments at once. No two changes of one environment overlap, every
 // call ends, and afterwards each environment that exists still works.
 func TestConcurrentChanges(t *testing.T) {
-	g := &guard{fakeStore: newFakeStore(), drv: driver.NewFake("box"), busy: make(map[string]bool)}
-	envs := actor.New(g, guardDriver{g}, actor.Idle{}, "box", notrace, slog.New(slog.DiscardHandler))
+	g := &guard{fakeStore: newFakeStore(), drv: runsc.NewFake("box"), busy: make(map[string]bool)}
+	envs := actor.New(g, guardDriver{g}, actor.Config{Image: "box"}, notrace, prometheus.NewRegistry(), slog.New(slog.DiscardHandler))
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -667,8 +711,8 @@ func TestConcurrentChanges(t *testing.T) {
 // The Group counts wakes, snapshots, restores and idle sleeps.
 func TestMetrics(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		st, drv := newFakeStore(), driver.NewFake("box")
-		g := start(t, st, drv, idle)
+		st, drv := newFakeStore(), runsc.NewFake("box")
+		g, reg := startMetered(t, st, drv, idle)
 		ctx := t.Context()
 		if err := g.Create(ctx, "demo", store.CreateOptions{}); err != nil {
 			t.Fatal(err)
@@ -685,7 +729,7 @@ func TestMetrics(t *testing.T) {
 		if err := g.Restore(ctx, "demo", "missing"); !errors.Is(err, store.ErrNotFound) {
 			t.Fatalf("Restore(demo, missing) error = %v, want %v", err, store.ErrNotFound)
 		}
-		got := counts(t, g)
+		got := counts(t, reg)
 		want := map[string]uint64{
 			"fern_wake_seconds{result=ok}":     1,
 			"fern_snapshot_seconds{result=ok}": 1,
@@ -706,12 +750,10 @@ func TestMetrics(t *testing.T) {
 	})
 }
 
-// counts returns g's metrics by name and labels: a counter's value, a
-// histogram's number of samples.
-func counts(t *testing.T, g *actor.Group) map[string]uint64 {
+// counts returns the metrics in reg by name and labels: a counter's value,
+// a histogram's number of samples.
+func counts(t *testing.T, reg prometheus.Gatherer) map[string]uint64 {
 	t.Helper()
-	reg := prometheus.NewRegistry()
-	reg.MustRegister(g)
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatal(err)
@@ -735,22 +777,22 @@ func counts(t *testing.T, g *actor.Group) map[string]uint64 {
 
 // slowWake is a driver whose Wake waits until release is closed.
 type slowWake struct {
-	*driver.Fake
+	*runsc.Fake
 	release chan struct{}
 }
 
-func (d *slowWake) Wake(ctx context.Context, env store.Env) (string, error) {
+func (d *slowWake) Wake(ctx context.Context, box runsc.Box) (string, error) {
 	<-d.release
-	return d.Fake.Wake(ctx, env)
+	return d.Fake.Wake(ctx, box)
 }
 
 // A caller that gives up while the box wakes runs no command, so the box
 // still goes to sleep when idle.
 func TestExecGivenUpDuringWake(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		st, fake := newFakeStore(), driver.NewFake("box")
+		st, fake := newFakeStore(), runsc.NewFake("box")
 		drv := &slowWake{Fake: fake, release: make(chan struct{})}
-		g := actor.New(st, drv, idle, "box", notrace, slog.New(slog.DiscardHandler))
+		g := actor.New(st, drv, actor.Config{Idle: idle, Image: "box"}, notrace, prometheus.NewRegistry(), slog.New(slog.DiscardHandler))
 		ctx, cancel := context.WithCancel(t.Context())
 		done := make(chan struct{})
 		go func() { _ = g.Run(ctx); close(done) }()
@@ -772,8 +814,8 @@ func TestExecGivenUpDuringWake(t *testing.T) {
 		}
 		time.Sleep(idle.Human)
 		synctest.Wait()
-		if got := state(t, fake, "demo"); got != driver.Asleep {
-			t.Errorf("after %v: state %s, want %s", idle.Human, got, driver.Asleep)
+		if got := state(t, fake, "demo"); got != runsc.Asleep {
+			t.Errorf("after %v: state %s, want %s", idle.Human, got, runsc.Asleep)
 		}
 	})
 }
@@ -781,7 +823,7 @@ func TestExecGivenUpDuringWake(t *testing.T) {
 // A snapshot prunes its environment's old snapshots.
 func TestSnapshotPrunes(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		st, drv := newFakeStore(), driver.NewFake("box")
+		st, drv := newFakeStore(), runsc.NewFake("box")
 		g := start(t, st, drv, idle)
 		if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
 			t.Fatal(err)
@@ -801,7 +843,7 @@ func TestSnapshotPrunes(t *testing.T) {
 // its box with it; one that comes back in between is kept.
 func TestSweepDeletesOrphans(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		st, drv := newFakeStore(), driver.NewFake("box")
+		st, drv := newFakeStore(), runsc.NewFake("box")
 		g := start(t, st, drv, idle)
 		for _, id := range []string{"gone", "back"} {
 			if err := g.Create(t.Context(), id, store.CreateOptions{}); err != nil {
@@ -826,7 +868,7 @@ func TestSweepDeletesOrphans(t *testing.T) {
 		setOrphans("gone")
 		time.Sleep(time.Hour) // the second sees "back" again
 		synctest.Wait()
-		if exists("gone") || state(t, drv, "gone") != "" {
+		if exists("gone") || state(t, drv, "gone") != runsc.Asleep {
 			t.Errorf("after two sweeps: gone exists %v, box %s; want deleted, no box", exists("gone"), state(t, drv, "gone"))
 		}
 		if !exists("back") {
@@ -848,7 +890,7 @@ func TestGolden(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		st, drv := newFakeStore(), driver.NewFake("box")
+		st, drv := newFakeStore(), runsc.NewFake("box")
 		g := start(t, st, drv, idle)
 		if err := g.Create(t.Context(), "one", store.CreateOptions{Workspace: filepath.Join(repo, "one")}); err != nil {
 			t.Fatal(err)
@@ -873,8 +915,8 @@ func TestGolden(t *testing.T) {
 			t.Errorf("one's snapshots after the build = %v, want the golden source gone", got)
 		}
 		st.mu.Unlock()
-		if got := state(t, drv, builder); got != driver.Asleep {
-			t.Errorf("builder's box after the build: %s, want %s", got, driver.Asleep)
+		if got := state(t, drv, builder); got != runsc.Asleep {
+			t.Errorf("builder's box after the build: %s, want %s", got, runsc.Asleep)
 		}
 
 		if err := g.Create(t.Context(), "two", store.CreateOptions{Workspace: filepath.Join(repo, "two")}); err != nil {
@@ -922,7 +964,7 @@ func TestPrebuild(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(wt, "services.yaml"), []byte(services), 0o644); err != nil {
 			t.Fatal(err)
 		}
-		st, drv := newFakeStore(), driver.NewFake("box")
+		st, drv := newFakeStore(), runsc.NewFake("box")
 		st.seeds = filepath.Join(tmp, "seeds")
 		g := start(t, st, drv, idle)
 		builder, src := setup.ID("sample"), setup.SourceID("sample")
