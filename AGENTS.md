@@ -24,7 +24,8 @@ The nouns are in [architecture §2](docs/architecture.md#2-concepts). In the cod
 - Setup, once, and again to update: `lab/setup.sh` (the local lab; `FERN_HOST=…` for the VPS). It ends with a pairing link for the T3 app.
 - After a change: `lab/dev.sh` (about a minute): unit tests and the build, then `check.sh`'s quick sections in the lab
 - Unit tests: `go test -race ./...` (fake driver, runs anywhere Go runs)
-- Lint: `golangci-lint run` (config in `.golangci.yml`; fix the code, don't silence the linter)
+- Lint: `lab/lint.sh`: golangci-lint (config in `.golangci.yml`), shellcheck on the scripts and hadolint on the Dockerfile (`.hadolint.yaml`). Fix the code, don't silence the linter.
+- Fuzz: `lab/fuzz.sh` runs every `Fuzz` test for 20 s (`FUZZTIME=5m` for longer). A failure leaves its input in the package's `testdata/fuzz/`; commit it with the fix.
 - The index's SQL: tables in `internal/store/index/schema.sql`, queries in `queries.sql`; `lab/sqlc.sh generate` writes the Go for them (`sqlc.yaml`). Never edit the generated files; CI fails if they are out of date (`lab/sqlc.sh diff`).
 - Integration tests: `lab/check.sh` (the quick sections, under a minute in the lab) after a change, `lab/check.sh all` before a merge or a tag; in the local lab (`lab/up.sh`, a systemd node in Docker) first, then on the VPS with `FERN_HOST` (see engine-local.md)
 - Perf gate: `lab/perf.sh --fast` (about 1.5 minutes, big regressions only) while working on speed or memory, and `lab/perf.sh` (about 13 minutes in the lab, 26 on the VPS) before merging anything that could change them; it fails when a metric is worse than `lab/perf/<lab|vps>.tsv`. A change that is meant to move a number updates the baseline with `lab/perf.sh --accept` in the same commit. The VPS's baseline is the one that counts.

@@ -15,6 +15,8 @@ RUN --mount=type=cache,target=/go/pkg/mod --mount=type=cache,target=/root/.cache
 
 # Claude Code's native binary, pinned and checked against its release manifest.
 FROM debian:trixie-slim AS claude
+# A failed download must fail the build, not reach the checksum's pipe.
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ARG TARGETARCH
 ARG CLAUDE_VERSION=2.1.304
 ARG CLAUDE_SHA256_arm64=c487117526509ab6d2ee6013e14f181faf68d6d6afe6bb0d4b2b4a9feca5ecb3

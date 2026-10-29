@@ -1,0 +1,5 @@
+# hadolint's config (CI runs it on images/Dockerfile).
+ignored:
+  # Pinning apt packages to versions breaks the build as soon as Debian's
+  # mirrors drop the old version; the base images' tags pin the release.
+  - DL3008

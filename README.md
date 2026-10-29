@@ -1,6 +1,7 @@
 # Fern
 
 [![ci](https://github.com/nebler/fern/actions/workflows/ci.yml/badge.svg)](https://github.com/nebler/fern/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/nebler/fern/badge)](https://scorecard.dev/viewer/?uri=github.com/nebler/fern)
 ![Go 1.27](https://img.shields.io/badge/go-1.27-00ADD8?logo=go)
 ![gVisor](https://img.shields.io/badge/sandbox-gVisor-4285F4)
 [![MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
@@ -82,7 +83,8 @@ Every number and how it was measured is in [`lab/RESULTS.md`](lab/RESULTS.md).
 - **Actors, tested with a fake clock.** One goroutine per environment, talked to through its mailbox. Idle sleeps, pre-wakes and concurrent changes are tested in `testing/synctest` bubbles, with `goleak` checking for leaked goroutines.
 - **Performance is gated.** `lab/perf.sh` fails a change that makes any of its 288 metrics worse than the baseline (time, CPU, memory, disk and network). `lab/ab.sh` runs two versions in alternation on the same machine and gives each metric's change with a 95% interval and a p-value. `lab/profile.sh` traces an operation with OpenTelemetry and draws flamegraphs of the whole node.
 - **Typed SQL.** The index's queries are plain SQL; [sqlc](https://sqlc.dev) generates the Go for them.
-- **Sandboxing in depth.** gVisor, no capabilities, a read-only root, the repository's git folder mounted read-only, a firewall that allows only the internet, and the login kept out of every box that runs the repository's code. Threat model: [`docs/briefs/claude-outside-the-box.md`](docs/briefs/claude-outside-the-box.md).
+- **Sandboxing in depth.** gVisor, no capabilities, a read-only root, the repository's git folder mounted read-only, a firewall that allows only the internet, and the login kept out of every box that runs the repository's code. Threat model: [`docs/briefs/claude-outside-the-box.md`](docs/briefs/claude-outside-the-box.md); reporting: [`SECURITY.md`](SECURITY.md).
+- **Checked on every pull request.** Unit, btrfs and fuzz tests; golangci-lint, shellcheck and hadolint; govulncheck on the Go and Trivy on the images; generated code and `go.mod` up to date. Actions are pinned to commits, and OpenSSF Scorecard grades the repository weekly.
 
 ## Try it
 

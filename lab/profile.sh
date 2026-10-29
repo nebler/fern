@@ -167,12 +167,10 @@ run() {
   if tracing_on; then
     # Spans arrive in batches, every few seconds.
     sleep 6
-    local query
-    for service in fern-daemon; do
-      query="query.service_name=$service&query.start_time_min=$(rfc3339 $((from - 5)))&query.start_time_max=$(rfc3339 $((to + 5)))&query.num_traces=5000"
-      on_node sh -c "curl -fsS 'http://localhost:16686/api/v3/traces?$query' 2>/dev/null ||
-        wget -qO- 'http://localhost:16686/api/v3/traces?$query'" >"$out/traces-$service.json" 2>/dev/null || true
-    done
+    local query service=fern-daemon
+    query="query.service_name=$service&query.start_time_min=$(rfc3339 $((from - 5)))&query.start_time_max=$(rfc3339 $((to + 5)))&query.num_traces=5000"
+    on_node sh -c "curl -fsS 'http://localhost:16686/api/v3/traces?$query' 2>/dev/null ||
+      wget -qO- 'http://localhost:16686/api/v3/traces?$query'" >"$out/traces-$service.json" 2>/dev/null || true
     { echo; node lab/profile/traces.mjs "$out/times" "$out"/traces-*.json; } >>"$out/summary.md"
   else
     echo -e "\nNo traces: tracing is off (lab/profile.sh on)." >>"$out/summary.md"
