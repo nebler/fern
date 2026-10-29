@@ -46,7 +46,7 @@ const (
 var (
 	// ErrNotFound means the environment or snapshot doesn't exist.
 	ErrNotFound = errors.New("not found")
-	// ErrInvalidID means an ID can't be used as a file name or a Kubernetes name.
+	// ErrInvalidID means an ID can't be used as a file name or a box's hostname.
 	ErrInvalidID = errors.New("invalid id")
 	// ErrInvalidPath means a workspace path is outside worktrees/, isn't two
 	// levels below it, goes through a symlink, or is taken.
@@ -57,7 +57,7 @@ var (
 )
 
 var (
-	// Environment IDs name Kubernetes objects, so they are DNS labels.
+	// Environment IDs are boxes' hostnames, so they are DNS labels.
 	envIDPattern  = regexp.MustCompile(`^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$`)
 	snapIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	// A worktree's repo and name, as T3 makes them.
@@ -276,6 +276,24 @@ func (s *Store) scanEnv(row interface{ Scan(...any) error }) (Env, error) {
 	env.Created = time.Unix(created, 0).UTC()
 	env.Claude = s.claudePath(env.ID)
 	return env, nil
+}
+
+// column returns the one column of the rows query selects.
+func column[T any](ctx context.Context, db *sql.DB, query string, args ...any) ([]T, error) {
+	rows, err := db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var out []T
+	for rows.Next() {
+		var v T
+		if err := rows.Scan(&v); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 // now is a creation time as the index keeps it, to the second.

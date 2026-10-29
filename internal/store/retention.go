@@ -35,22 +35,10 @@ func (s *Store) Prune(ctx context.Context, id string) error {
 	if err := s.prunePreRestores(ctx, id, ""); err != nil {
 		return fmt.Errorf("prune %s: %w", id, err)
 	}
-	rows, err := s.db.QueryContext(ctx,
+	old, err := column[string](ctx, s.db,
 		`SELECT id FROM snapshots WHERE env = ? AND id NOT LIKE ? ORDER BY created_at DESC, rowid DESC LIMIT -1 OFFSET ?`,
 		id, preRestorePrefix+"%", s.keepTurns)
 	if err != nil {
-		return fmt.Errorf("prune %s: %w", id, err)
-	}
-	defer func() { _ = rows.Close() }()
-	var old []string
-	for rows.Next() {
-		var snapID string
-		if err := rows.Scan(&snapID); err != nil {
-			return fmt.Errorf("prune %s: %w", id, err)
-		}
-		old = append(old, snapID)
-	}
-	if err := rows.Err(); err != nil {
 		return fmt.Errorf("prune %s: %w", id, err)
 	}
 	for _, snapID := range old {

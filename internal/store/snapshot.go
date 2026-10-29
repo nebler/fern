@@ -123,13 +123,8 @@ func (s *Store) Restore(ctx context.Context, id, snapID string) error {
 	if err != nil {
 		return err
 	}
-	var one int
-	err = s.db.QueryRowContext(ctx, `SELECT 1 FROM snapshots WHERE env = ? AND id = ?`, id, snapID).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("snapshot %s/%s: %w", id, snapID, ErrNotFound)
-	}
-	if err != nil {
-		return fmt.Errorf("restore %s to %s: %w", id, snapID, err)
+	if _, err := s.snapshotPath(ctx, SnapshotRef{Env: id, Snapshot: snapID}); err != nil {
+		return err
 	}
 	if err := s.restore(ctx, env, snapID); err != nil {
 		return fmt.Errorf("restore %s to %s: %w", id, snapID, err)
@@ -182,22 +177,10 @@ const (
 // prunePreRestores deletes environment id's pre-restore snapshots that are
 // older than preRestoreKeep, except snapshot keep.
 func (s *Store) prunePreRestores(ctx context.Context, id, keep string) error {
-	rows, err := s.db.QueryContext(ctx,
+	old, err := column[string](ctx, s.db,
 		`SELECT id FROM snapshots WHERE env = ? AND id LIKE ? AND id != ? AND created_at < ?`,
 		id, preRestorePrefix+"%", keep, time.Now().Add(-preRestoreKeep).Unix())
 	if err != nil {
-		return err
-	}
-	defer func() { _ = rows.Close() }()
-	var old []string
-	for rows.Next() {
-		var snapID string
-		if err := rows.Scan(&snapID); err != nil {
-			return err
-		}
-		old = append(old, snapID)
-	}
-	if err := rows.Err(); err != nil {
 		return err
 	}
 	for _, snapID := range old {
@@ -208,18 +191,30 @@ func (s *Store) prunePreRestores(ctx context.Context, id, keep string) error {
 	return nil
 }
 
-// snapshotPath returns the path of snapshot ref, which must have a row.
-func (s *Store) snapshotPath(ctx context.Context, ref SnapshotRef) (string, error) {
+// HasSnapshot reports whether snapshot ref exists.
+func (s *Store) HasSnapshot(ctx context.Context, ref SnapshotRef) (bool, error) {
 	if err := checkSnapID(ref.Snapshot); err != nil {
-		return "", err
+		return false, err
 	}
 	var one int
 	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM snapshots WHERE env = ? AND id = ?`, ref.Env, ref.Snapshot).Scan(&one)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", fmt.Errorf("snapshot %s/%s: %w", ref.Env, ref.Snapshot, ErrNotFound)
+		return false, nil
 	}
 	if err != nil {
+		return false, fmt.Errorf("snapshot %s/%s: %w", ref.Env, ref.Snapshot, err)
+	}
+	return true, nil
+}
+
+// snapshotPath returns the path of snapshot ref, which must exist.
+func (s *Store) snapshotPath(ctx context.Context, ref SnapshotRef) (string, error) {
+	ok, err := s.HasSnapshot(ctx, ref)
+	if err != nil {
 		return "", err
+	}
+	if !ok {
+		return "", fmt.Errorf("snapshot %s/%s: %w", ref.Env, ref.Snapshot, ErrNotFound)
 	}
 	return s.snapPath(ref.Env, ref.Snapshot), nil
 }

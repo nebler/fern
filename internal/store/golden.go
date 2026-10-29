@@ -136,20 +136,15 @@ func isNotEmpty(err error) bool { return errors.Is(err, unix.ENOTEMPTY) || error
 // Sources returns the golden sources kept for builds: snapshots named name,
 // of any environment. A build queued when the daemon stopped is found here.
 func (s *Store) Sources(ctx context.Context, name string) ([]SnapshotRef, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT env FROM snapshots WHERE id = ? ORDER BY created_at, rowid`, name)
+	envs, err := column[string](ctx, s.db, `SELECT env FROM snapshots WHERE id = ? ORDER BY created_at, rowid`, name)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
-	var refs []SnapshotRef
-	for rows.Next() {
-		ref := SnapshotRef{Snapshot: name}
-		if err := rows.Scan(&ref.Env); err != nil {
-			return nil, err
-		}
-		refs = append(refs, ref)
+	refs := make([]SnapshotRef, len(envs))
+	for i, env := range envs {
+		refs[i] = SnapshotRef{Env: env, Snapshot: name}
 	}
-	return refs, rows.Err()
+	return refs, nil
 }
 
 // overlay copies the tree at src, a worktree, into dst, a writable copy of
