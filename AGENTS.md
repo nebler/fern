@@ -3,7 +3,7 @@
 Rules for anyone (human or agent) writing code in this repository. Read this before writing Go.
 
 ## The project
-Fern gives every T3 Code thread an environment that behaves like git for everything: code, dependencies and the running database. On one server it runs as two systemd services, the daemon and T3's server ([briefs/fern-without-kubernetes.md](docs/briefs/fern-without-kubernetes.md)); the daemon runs the boxes itself with gVisor's runsc ([briefs/boxes-without-kubernetes.md](docs/briefs/boxes-without-kubernetes.md)). Installing into an existing Kubernetes cluster (`deploy/fern.yaml`) stays possible but isn't what the lab tests.
+Fern gives every T3 Code thread an environment that behaves like git for everything: code, dependencies and the running database. On one server it runs as two systemd services, the daemon and T3's server ([briefs/fern-without-kubernetes.md](docs/briefs/fern-without-kubernetes.md)); the daemon runs the boxes itself with gVisor's runsc ([briefs/boxes-without-kubernetes.md](docs/briefs/boxes-without-kubernetes.md)). The Kubernetes install (agent-sandbox pods and a CSI driver) was removed on 2026-10-29: it cost too much disk and memory, and nothing tested it. It is in git history before that date.
 - What we build: [docs/architecture.md](docs/architecture.md)
 - Order of work: [docs/roadmap.md](docs/roadmap.md)
 - Experiments: [docs/engine-local.md](docs/engine-local.md)
@@ -15,8 +15,8 @@ If the code and the docs disagree, stop and say so. Don't silently pick one.
 The nouns are in [architecture §2](docs/architecture.md#2-concepts). In the code:
 - **Pool:** the btrfs filesystem at `/var/lib/fern`, which holds every environment's folders (`envs/<id>/`) and snapshots.
 - **Workspace:** an environment's writable folder, a btrfs subvolume: `envs/<id>/live`, or a T3 worktree at its own path.
-- **Box:** an environment's sandbox, a gVisor sandbox the daemon runs (`internal/runsc`; `--boxes=kubernetes` makes it an agent-sandbox `Sandbox` pod instead). An asleep environment has none. Its **agent box**, `<env>.agent`, runs Claude; Claude's Bash runs in the box ([briefs/claude-outside-the-box.md](docs/briefs/claude-outside-the-box.md)).
-- **Daemon:** `fern daemon` on every node (`fern-daemon.service`): the API on a Unix socket, the store and the driver; in a cluster also the CSI node plugin.
+- **Box:** an environment's sandbox, a gVisor sandbox the daemon runs (`internal/runsc`). An asleep environment has none. Its **agent box**, `<env>.agent`, runs Claude; Claude's Bash runs in the box ([briefs/claude-outside-the-box.md](docs/briefs/claude-outside-the-box.md)).
+- **Daemon:** `fern-daemon` on every node (`fern-daemon.service`): the API on a Unix socket, the store, the actors and the box driver.
 - **fern-init:** a box's main process. It runs the services in `services.yaml` and serves boxexec.
 - **boxexec:** Fern's WebSocket protocol for running a command in a box.
 
@@ -44,7 +44,7 @@ The same sources are available as on-demand skills in [.claude/skills/](.claude/
 ## Go rules
 
 **Packages and types**
-- One job per package, named after the job (`store`, `actor`, `driver`). No `util`, `common`, `helpers`, `types` or `models` packages.
+- One job per package, named after the job (`store`, `actor`, `runsc`). No `util`, `common`, `helpers`, `types` or `models` packages.
 - No stutter: `store.Store`, not `store.StoreService`.
 - Plain structs and constructors (`New(...)`). No builders, no getters/setters. Functional options only when a constructor really has many optional settings.
 - No globals, no `init()`, no package-level mutable state. Wiring happens by hand in `cmd/`.
@@ -52,7 +52,7 @@ The same sources are available as on-demand skills in [.claude/skills/](.claude/
 **Interfaces**
 - Define an interface in the package that **uses** it, not the one that implements it.
 - Keep interfaces small (1–3 methods). Return concrete types.
-- Only add an interface when there are two implementations. A test fake counts (for example `driver.Fake`). Never `type X interface` + `xImpl`.
+- Only add an interface when there are two implementations. A test fake counts (for example `runsc.Fake`). Never `type X interface` + `xImpl`.
 
 **Errors**
 - Handle an error, or wrap it and return it: `fmt.Errorf("restore %s: %w", env, err)`. Never both log and return it; log once, at the top.
@@ -62,7 +62,7 @@ The same sources are available as on-demand skills in [.claude/skills/](.claude/
 **Concurrency**
 - Every goroutine has an owner who cancels it (a `context.Context`) and waits for it (`errgroup` or a `done` channel). Tests check for leaks with `goleak`. The one exception is a goroutine blocked reading the CLI's stdin, which nothing can interrupt: it ends at its next read, or with the process.
 - An actor's state is touched only by its own goroutine. Talk to it through its mailbox. No mutex next to a mailbox.
-- `context.Context` is the first parameter of anything that blocks, does I/O or calls Kubernetes. Never store it in a struct. Never `context.Background()` below `main` or tests.
+- `context.Context` is the first parameter of anything that blocks, or does I/O. Never store it in a struct. Never `context.Background()` below `main` or tests.
 
 **Time, processes, I/O**
 - Use the `time` package directly. Tests of timers and actors run in a `testing/synctest` bubble, whose clock is fake. No `time.Sleep` in tests outside a bubble.
@@ -76,14 +76,9 @@ The same sources are available as on-demand skills in [.claude/skills/](.claude/
 ## Fern rules
 - **Every multi-step change is crash-safe:** after a crash at any step, the disk shows what was under way (a marker file, a leftover copy beside the workspace, a snapshot without its row), and `Reconcile` finishes it or clears it on start. Every step is safe to repeat (idempotent).
 - **The disk is the truth; SQLite is the index.** On start, reconcile what exists with what the tables say.
-- **Per-turn work never touches the Kubernetes API.** Snapshots and execs in an awake box go to the node-local daemon only. A box's wake reads Claude's login (`/etc/fern/claude.env`; in a cluster, its Secret); with `--boxes=kubernetes`, a wake and a stop (a sleep, or the stop in a restore) change its `Sandbox`.
+- **Per-turn work stays on the node.** Snapshots and execs in an awake box go to the node-local daemon only. A box's wake reads Claude's login from `/etc/fern/claude.env`.
 - **Credentials never enter `live/`, golden or snapshots.**
 - **No API keys.** Agents are the real `claude` / `codex` CLIs with the user's own subscription.
-
-## Kubernetes rules (the cluster install)
-- Use controller-runtime. Reconcile = read desired state, compare with reality, take one idempotent step, requeue.
-- Status uses `metav1.Condition`. Spec is never written by the controller. Cleanup uses finalizers and owner references.
-- CRD types live in `api/v1alpha1/` with kubebuilder markers; regenerate with `controller-gen`, never hand-edit generated files.
 
 ## Tests
 - Table-driven tests with `t.Run`. Diffs with `github.com/google/go-cmp/cmp`.
@@ -91,7 +86,7 @@ The same sources are available as on-demand skills in [.claude/skills/](.claude/
 - Test behaviour through the public API of the package. Crash tests stop every multi-step change at each of its steps (`store.SetFailAt`).
 
 ## Dependencies
-Allowed without asking: the standard library, `golang.org/x/...`, `k8s.io/...`, `sigs.k8s.io/...`, `modernc.org/sqlite`, the CSI spec + gRPC, `creack/pty`, `coder/websocket`, the MCP Go SDK, Prometheus and OpenTelemetry clients, `go-cmp`, `goleak`, the agent-sandbox API types. Anything else: ask first and say why the standard library isn't enough.
+Allowed without asking: the standard library, `golang.org/x/...`, `sigs.k8s.io/yaml`, `modernc.org/sqlite`, `creack/pty`, `coder/websocket`, the MCP Go SDK, Prometheus and OpenTelemetry clients, `go-cmp`, `goleak`. Anything else: ask first and say why the standard library isn't enough.
 
 ## Don't
 - Don't add files or abstractions "for later". Build what the current roadmap step needs.

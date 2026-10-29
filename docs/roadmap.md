@@ -5,6 +5,8 @@
 - [engine-local.md](engine-local.md): the experiments (E0–E16)
 - [design.md §21](design.md#21-roadmap-about-8-weeks-kubernetes-first): the demo script and the agent-sandbox contribution plan
 
+**Update 2026-10-29:** Fern no longer runs on Kubernetes. The daemon runs boxes itself with runsc, as a systemd service ([briefs/fern-without-kubernetes.md](briefs/fern-without-kubernetes.md)), and the Kubernetes mode (agent-sandbox, CSI, `deploy/fern.yaml`) was removed. The phases below that say k3s, Helm or Kubernetes are the history of how it got here; Week 4b (EKS) is on hold, since it needs that mode.
+
 **Local first, then remote.**
 - **Phase 1, local (weeks 0–3):** everything is built and tested on the Mac, inside Docker: k3s runs in a privileged container with a loop-mounted btrfs image. Nothing is installed on the Mac itself. It is the **same code path** as remote (Kubernetes only); there is no local driver.
 - **Phase 2, remote (from week 4):** the same Helm chart on a Linux VPS, for what a laptop can't show: gVisor (if it doesn't work locally), real timings, the Mac and phone as thin clients, days of sleep and wake. After `v0.1`, the same checks also run on EKS (week 4b, added 2026-10-21).

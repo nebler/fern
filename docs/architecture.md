@@ -14,7 +14,7 @@ Fern gives every AI coding thread its own **environment**: code, installed depen
 - It **sleeps** when idle and **wakes** on the next touch.
 - It takes a **snapshot at every agent turn**, so rewinding or forking a thread brings the data along with the code.
 
-On one machine Fern runs as **two systemd services** (since 2026-10-28, [briefs/fern-without-kubernetes.md](briefs/fern-without-kubernetes.md)): one Go daemon per node (`fern-daemon.service`) and T3's server (`fern-t3.service`, from its image's root). The daemon runs the sessions (boxes) itself as gVisor sandboxes (`runsc`, since 2026-10-27, [briefs/boxes-without-kubernetes.md](briefs/boxes-without-kubernetes.md)), and Claude in a box of its own per thread ([briefs/claude-outside-the-box.md](briefs/claude-outside-the-box.md)). `--boxes=kubernetes` keeps the first design: standard [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) `Sandbox` objects with a CSI driver; sections below that describe pods, the CSI driver and network policies are that mode, and so is the cluster install (`deploy/fern.yaml`: the daemon as a DaemonSet), kept for people who already run a cluster. Everything runs on a **remote Linux machine**; your Mac or phone only runs the T3 app. Fern integrates with **T3 Code** and runs the real `claude` / `codex` CLIs with your own subscriptions.
+On one machine Fern runs as **two systemd services** (since 2026-10-28, [briefs/fern-without-kubernetes.md](briefs/fern-without-kubernetes.md)): one Go daemon per node (`fern-daemon.service`) and T3's server (`fern-t3.service`, from its image's root). The daemon runs the sessions (boxes) itself as gVisor sandboxes (`runsc`, since 2026-10-27, [briefs/boxes-without-kubernetes.md](briefs/boxes-without-kubernetes.md)), and Claude in a box of its own per thread ([briefs/claude-outside-the-box.md](briefs/claude-outside-the-box.md)). The first design, standard [agent-sandbox](https://github.com/kubernetes-sigs/agent-sandbox) `Sandbox` objects with a CSI driver and a cluster install, was removed on 2026-10-29 (it cost too much disk and memory, and nothing tested it); sections below that describe pods, the CSI driver and network policies describe that history, not the code. Everything runs on a **remote Linux machine**; your Mac or phone only runs the T3 app. Fern integrates with **T3 Code** and runs the real `claude` / `codex` CLIs with your own subscriptions.
 
 ### 1.1 In scope
 - environments, snapshots, golden snapshots, boxes, sleep and wake, rewind, fork
@@ -525,23 +525,21 @@ classes:
 ## 18. Code layout
 
 ```
-cmd/fern/            small CLI (fern daemon execs its sibling fern-daemon)
-cmd/fern-daemon/     node daemon + CSI plugin
+cmd/fern/            small CLI
+cmd/fern-daemon/     node daemon: wiring only
 cmd/fern-init/       the main process inside boxes
 internal/api/        socket protocol and client
-internal/api/server/ socket API server, auth, idempotency
-internal/wake/       front door, preview routing, webhooks, coalescing
-internal/actor/      per-environment actors, idle rule, supervision
-internal/store/      btrfs (and later zfs) backends, retention, index
-internal/operator/   kubelet-style reconciler for this node's Environments (controller-runtime)
-internal/driver/     agent-sandbox Sandbox per environment (+ a fake for unit tests)
-internal/setup/      setup contract, golden keys and builds
-internal/identity/   post-fork/restore identity hook
-internal/mcp/        agent tools
-internal/csi/        CSI node plugin with per-pod mount authorization
-api/v1alpha1/        Environment, EnvironmentClass CRD types
+internal/api/server/ socket API server, the agent box's MCP Bash
+internal/actor/      per-environment actors, idle rule, the box policy, golden builds
+internal/store/      btrfs pool, snapshots, retention, the SQLite index, Reconcile
+internal/runsc/      boxes as gVisor sandboxes: bundle, network, firewall (+ a fake for unit tests)
+internal/boxexec/    the exec protocol: fern-init's server, the client, the daemon's relay
+internal/hibernate/  stops an idle Claude and resumes it at the next message
+internal/image/      unpacks docker save streams into box roots
+internal/setup/      setup contract, golden keys
+internal/span/       trace spans
 lab/                 experiments and crash-test harness (see engine-local.md)
-deploy/              systemd unit, Helm chart
+deploy/systemd/      the daemon's and T3's units
 ```
 
 ---
