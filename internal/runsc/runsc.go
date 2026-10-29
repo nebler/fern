@@ -558,9 +558,11 @@ func (d *Driver) askStop(ctx context.Context, b layout) {
 	if err != nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
+	// The request's own deadline: the SIGTERM below must not share it, or a
+	// box that didn't answer in time would get none.
+	reqCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://"+execAddr(guest)+boxexec.StopPath, nil)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodPost, "http://"+execAddr(guest)+boxexec.StopPath, nil)
 	if err != nil {
 		return
 	}
