@@ -1,27 +1,84 @@
 # Runs the same scripts as the lab, so CI and the Mac use the same pinned
-# containers (golang:1.27, golangci-lint v2.15.0).
+# containers (golang:1.27, golangci-lint v2.15.0, sqlc 1.31.1).
 name: ci
 on:
   push:
+    branches: [main]
   pull_request:
+  workflow_dispatch:
+# A new push to a pull request cancels its run still going.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
+env:
+  # lab/go.sh keeps Go's caches here instead of in Docker volumes, so
+  # actions/cache can keep them between runs.
+  FERN_GOMODCACHE: /home/runner/go-mod
+  FERN_GOCACHE: /home/runner/go-build
 jobs:
   test:
+    name: unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        with:
+          path: |
+            /home/runner/go-mod
+            /home/runner/go-build
+          key: go-test-${{ hashFiles('go.sum') }}
+          restore-keys: go-test-
       - run: lab/go.sh test -race ./...
   store:
     # The store tests need a real btrfs filesystem (a loop-mounted image).
+    name: store tests on btrfs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        with:
+          path: |
+            /home/runner/go-mod
+            /home/runner/go-build
+          key: go-store-${{ hashFiles('go.sum') }}
+          restore-keys: go-store-
       - run: lab/test-store.sh
-  lint:
+  checks:
+    name: lint, generated code, modules, vulnerabilities
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
+      - uses: actions/cache@v6
+        with:
+          path: |
+            /home/runner/go-mod
+            /home/runner/go-build
+          key: go-checks-${{ hashFiles('go.sum') }}
+          restore-keys: go-checks-
       - run: lab/lint.sh
       # The store's queries are generated from internal/store/index/*.sql.
       - run: lab/sqlc.sh diff
+      - run: lab/go.sh mod tidy -diff
+      - run: lab/go.sh run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+  images:
+    # The daemon's binaries and the box image build; T3's image (fern-t3)
+    # builds T3 from source and is left to the lab.
+    name: image ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fern, fern-box]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: images/Dockerfile
+          target: ${{ matrix.target }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.target }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.target }}

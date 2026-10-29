@@ -16,10 +16,11 @@ SSH=(ssh -o BatchMode=yes -o LogLevel=ERROR -o ControlMaster=auto -o "ControlPat
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit
 
 # GO_RUN starts a container with the repository mounted and Go's module and
-# build caches kept in volumes, so nothing is installed on the Mac.
+# build caches kept in volumes, so nothing is installed on the Mac. CI sets
+# FERN_GOMODCACHE and FERN_GOCACHE to folders on the runner, which it caches.
 # shellcheck disable=SC2034 # the scripts that source this use it
 GO_RUN=(docker run --rm --label "$LABEL" -v "$PWD:/src" -w /src
-  -v fern-lab-gomod:/go/pkg/mod -v fern-lab-gocache:/root/.cache/go-build
+  -v "${FERN_GOMODCACHE:-fern-lab-gomod}:/go/pkg/mod" -v "${FERN_GOCACHE:-fern-lab-gocache}:/root/.cache/go-build"
   -e GOFLAGS=-buildvcs=false)
 
 # lab_up says whether the lab's container exists, or the VPS answers.
