@@ -37,6 +37,7 @@ import (
 	"github.com/nebler/fern/internal/api/server"
 	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
+	"github.com/nebler/fern/internal/watch"
 )
 
 // Where the daemon finds the pool, serves its API and keeps its boxes.
@@ -151,6 +152,9 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	// Golden keys name the image's content, not its tag.
 	if cfg.Image, err = drv.Prepare(ctx); err != nil {
 		return fmt.Errorf("prepare the node for boxes: %w", err)
+	}
+	if cfg.Agents {
+		cfg.Watcher = watch.New(runsc.BoxOf, log)
 	}
 	envs := actor.New(st, drv, cfg, tr, reg, log)
 	apiSrv := server.New(st, drv, envs, agentMCP, tr, log)

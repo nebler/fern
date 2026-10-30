@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sync"
 	"time"
 
@@ -59,6 +60,10 @@ type Config struct {
 	// its own, so it wakes and sleeps on its own clocks; a restore, sleep or
 	// delete of the environment stops it too.
 	Agents bool
+	// Watcher, with Agents, passes the files Claude writes on to the
+	// services' box, whose file watchers would not hear of them otherwise:
+	// gVisor tells a box only of its own changes. nil: they don't.
+	Watcher Watcher
 }
 
 // Idle says when a box with no command running goes to sleep: Agent after
@@ -92,6 +97,8 @@ type Group struct {
 	cfg    Config
 	tracer trace.Tracer
 	log    *slog.Logger
+	// touches asks services' boxes to touch the files Claude changed.
+	touches *http.Client
 
 	// Time histograms, by result ("ok" or "error"), and, for queue, by
 	// change: how long a change waited for its actor.
@@ -125,6 +132,7 @@ func New(st Store, drv Driver, cfg Config, tr trace.Tracer, reg prometheus.Regis
 	}
 	return &Group{
 		store: tracedStore{st: st, tr: tr}, driver: drv, cfg: cfg, tracer: tr, log: log,
+		touches:      &http.Client{Timeout: touchTimeout},
 		wakes:        histogram("fern_wake_seconds", "Time to wake a box, until its services are ready.", boxBuckets, "result"),
 		stops:        histogram("fern_stop_seconds", "Time to stop a box, until it is gone.", boxBuckets, "result"),
 		restores:     histogram("fern_restore_seconds", "Time to restore a snapshot, stopping the box included.", boxBuckets, "result"),
@@ -313,6 +321,9 @@ type actor struct {
 	lease    time.Time                  // when an awake box with nothing running sleeps instead of after the idle times: set by a pre-wake, or a command that asked
 	prewoken bool                       // the lease's wake succeeded, so its end is counted
 	idle     *time.Timer                // fires when the box may have been idle long enough
+	// stopWatch stops the watch of an agent box's writes (watch), and is nil
+	// while there is none.
+	stopWatch func()
 }
 
 // run handles messages until ctx is done, or until the box is asleep with
@@ -322,6 +333,11 @@ func (a *actor) run(ctx context.Context, awake bool) {
 	a.idle = time.NewTimer(0)
 	a.idle.Stop()
 	defer a.idle.Stop()
+	defer func() {
+		if a.stopWatch != nil {
+			a.stopWatch()
+		}
+	}()
 	if awake {
 		a.awake = true
 		a.opened, a.closed = time.Now(), time.Now()
@@ -383,6 +399,7 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 	}
 	a.g.log.InfoContext(ctx, "box woke", slog.String("env", a.id), slog.Duration("took", time.Since(start)))
 	a.addr = addr
+	a.watch(ctx, env.Workspace)
 	return env, nil
 }
 
@@ -390,6 +407,10 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 // in it, so that none goes on against the disk that comes next.
 func (a *actor) stopBox(ctx context.Context) error {
 	a.addr = ""
+	// Started again by the next wake.
+	if a.stopWatch != nil {
+		a.stopWatch()
+	}
 	start := time.Now()
 	spanCtx, sp := span.Start(ctx, a.g.tracer, "box.stop", a.id)
 	err := a.g.driver.Sleep(spanCtx, a.id)

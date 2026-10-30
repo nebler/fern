@@ -33,6 +33,8 @@
 #   golden       a new worktree's checkout is built into a golden snapshot,
 #                and the next worktree starts from it, its database seeded
 #   claude       Claude Code in a box: network, stream-json, its terminal UI
+#   devserver    a Vite dev server in the box hears the files Claude's box
+#                writes, and serves them (with agent boxes; needs the internet)
 #   t3           T3's server: the checkpoint hook's commands on a worktree it
 #                made, and that worktree's box with git, Claude's folder and
 #                login. Needs lab/build.sh t3.
@@ -802,6 +804,69 @@ except Exception as e:
   check "claude draws its screen through a terminal" yes "$(succeeds grep -qa Welcome <<<"$tui")"
 }
 
+# devserver runs Vite in the environment's box and changes files from its
+# agent box, as Claude's Edit and Write do: gVisor tells a box only of its
+# own changes, so Fern passes them on (package watch).
+devserver() {
+  echo "== a dev server hears Claude's edits"
+  if [ "${AGENTS:-0}" != 1 ]; then
+    note "skipped: no agent boxes (lab/boxes.sh agents)"
+    return
+  fi
+  fern rm $ENV 2>/dev/null || true
+  fern create $ENV >/dev/null
+  # The box image has node but no npm.
+  fern exec $ENV -- sh -c '
+    set -e
+    mkdir -p .tools src
+    curl -fsSL https://registry.npmjs.org/npm/-/npm-10.9.2.tgz | tar -xz -C .tools
+    node .tools/package/bin/npm-cli.js init -y >/dev/null
+    node .tools/package/bin/npm-cli.js install --no-audit --no-fund --loglevel=error vite@7 >/dev/null 2>&1
+    echo "<script type=module src=/src/main.js></script>" > index.html
+    echo "export const v = 1" > src/main.js
+    cat > vite.config.mjs <<EOF
+import { appendFileSync } from "node:fs";
+import { relative } from "node:path";
+// Every event of the watcher Vite uses, in /tmp, where it is not watching.
+export default {
+  server: { watch: { ignored: ["**/.tools/**"] } },
+  plugins: [{ name: "log", configureServer(s) {
+    s.watcher.on("all", (e, p) => appendFileSync("/tmp/watch.log", e + " " + relative(process.cwd(), p) + "\n"));
+  } }],
+};
+EOF'
+  # The exec keeps the box awake, as a terminal running the dev server would.
+  fern exec $ENV -- node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5173 --strictPort </dev/null >"$TMP/vite.log" 2>&1 &
+  local vite=$!
+  # served PATTERN waits up to 10 s for Vite to serve src/main.js matching it.
+  served() {
+    fern exec $ENV -- sh -c 'for i in $(seq 100); do curl -sf localhost:5173/src/main.js | grep -q "$1" && exit; sleep 0.1; done; exit 1' sh "$1"
+  }
+  if ! served 'v = 1' >/dev/null 2>&1; then
+    check "Vite serves src/main.js" yes no
+    sed 's/^/  vite: /' "$TMP/vite.log"
+    kill $vite 2>/dev/null || true
+    return
+  fi
+  start=$(now_ms)
+  fern exec --agent $ENV -- sh -c '
+    echo "export const v = 2" > src/main.js
+    echo "export const n = 1" > src/new.js
+    mkdir -p src/feature/deep && echo "export const d = 1" > src/feature/deep/d.js'
+  check "after Claude's edit, Vite serves the new src/main.js" yes "$(succeeds served 'v = 2')"
+  note "edit to served: $(($(now_ms) - start)) ms, the agent box's exec included"
+  # heard EVENT waits up to 5 s for Vite's watcher to report it.
+  heard() {
+    fern exec $ENV -- sh -c 'for i in $(seq 50); do grep -Eqx "$1" /tmp/watch.log 2>/dev/null && exit; sleep 0.1; done; exit 1' sh "$1"
+  }
+  check "Vite's watcher hears the edit" yes "$(succeeds heard 'change src/main.js')"
+  check "… a new file" yes "$(succeeds heard '(add|change) src/new.js')"
+  check "… a file in new folders" yes "$(succeeds heard '(add|change) src/feature/deep/d.js')"
+  note "Vite's watcher heard: $(fern exec $ENV -- cat /tmp/watch.log 2>/dev/null | sort -u | tr '\n' ';')"
+  kill $vite 2>/dev/null || true
+  wait $vite 2>/dev/null || true
+}
+
 t3() {
   echo "== T3's server on Fern's node"
   if ! t3_installed || ! wait_t3 2>/dev/null; then
@@ -1059,7 +1124,7 @@ stability() {
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden claude turn hardware stability)
+  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden claude devserver turn hardware stability)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.

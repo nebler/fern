@@ -102,6 +102,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return checkServices(ctx, check, dir, env)
 	}))
 	mux.Handle("POST "+boxexec.StopPath, shutdown(token, os.Getenv("FERN_WAKE_ID"), cancel))
+	mux.Handle("POST "+boxexec.TouchPath, touch(token, dir))
 	srv := &http.Server{
 		Addr:              ":" + strconv.Itoa(boxexec.Port),
 		Handler:           mux,

@@ -606,3 +606,25 @@ func run(cmd *exec.Cmd) ([]byte, error) {
 	}
 	return out.Bytes(), nil
 }
+
+// BoxOf returns the ID of the box process pid runs in, by its cgroup, or ""
+// if it runs in none: runsc puts a box's sandbox and gofer in the box's
+// cgroup (boxSpec).
+func BoxOf(pid int) string {
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cgroup")
+	if err != nil {
+		return "" // it has exited
+	}
+	return boxOfCgroup(string(data))
+}
+
+// boxOfCgroup returns the box whose cgroup /proc/<pid>/cgroup names, or "".
+func boxOfCgroup(data string) string {
+	for line := range strings.Lines(data) {
+		cg, ok := strings.CutPrefix(strings.TrimSpace(line), "0::/"+cgroupParent+"/")
+		if ok && cg != "" && !strings.Contains(cg, "/") {
+			return cg
+		}
+	}
+	return ""
+}

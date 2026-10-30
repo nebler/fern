@@ -154,6 +154,17 @@ Develop each item in the local lab first, then verify it on the VPS. Two local k
 | **7** | measurements, failure analysis (daemon, box, node, disk full), record the 2.5-minute demo (design §21.1); bug-fix PRs to agent-sandbox; **pre-wake on thread open**, only if wake is slower than about 2 s: a small T3 hook sends "thread opened", Fern wakes in the background after about 2 s on the thread, at most 2 pre-wakes at a time, back to sleep after about 2 min without a message, never resetting the idle timer; lists, diffs and status never wake | every number in the demo comes from a script; pre-wake: a table of wake time hidden vs. wasted pre-wakes |
 | **8** | buffer, blog post, upstream proposals (T3 checkpoint hook; agent-sandbox auto-suspend and snapshot provider, with Fern as working code) | tag `v1.0` |
 
+### 4.1 Web development in a thread (next, decided 2026-10-31)
+
+A thread on a Next.js, TanStack Start or Vite repo needs its dev server to reload on Claude's edits and to be reachable, so this comes before the rest of v1. In order:
+
+| Step | Build | Done when |
+|---|---|---|
+| 1 (built 2026-10-31) | Claude's edits reach the dev servers in the environment's box: fanotify on the host, touches in the box (architecture §10) | `lab/check.sh devserver`: Vite hears an edit, a new file and a file in new folders, and serves the new module; it fails without the fix |
+| 2 | a dev server can run: today Bash's process group is killed when the command ends, and the box sleeps 5 s after the last call. A long-running service (`services.yaml`, or one Claude starts) and an open preview keep the box awake | Claude starts `vite`, ends its turn, and the server still answers a minute later |
+| 3 | previews through the front door: `<env>.<repo>.<host>` to the service with a `port`, waking the box on the first request (architecture §11) | a browser on the Mac loads the thread's dev server; a request to an asleep thread wakes it once |
+| 4 | tools per repo: a tool manager (mise) in the box image; setup installs the repo's `.tool-versions` / `mise.toml` (Node, pnpm, bun, …) into the golden snapshot, shared by every thread. Later, the repo's own Dockerfile or `devcontainer.json` for system packages | a TanStack Start repo pinned to Node 22 and pnpm starts and serves with no npm in the image |
+
 ---
 
 ## 5. Rules for staying fast

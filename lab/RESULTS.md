@@ -1525,3 +1525,33 @@ turn; the turn after Fern stopped Claude resumes it in 5.0 s (agent box
 woken in 277 ms); revert 1.1 s. Every check of the gate passes, the network
 ones included; its 9 flags are the same moves as with runsc alone (the
 daemon's own CPU, on-demand initdb in a fresh environment's first command).
+
+## Dev servers hear Claude's edits (local lab), 2026-10-31
+
+With agent boxes, a dev server in the environment's box never heard of the
+files Claude wrote from its agent box: gVisor delivers inotify events only
+inside the sandbox that made the change. Measured with `fs.watch` in the
+services' box: its own edits fire, the agent box's fire nothing, though the
+new content is there to read. One sandbox with both as containers doesn't
+help either ([spike/watch/RESULTS.md](spike/watch/RESULTS.md)).
+
+The fix (architecture §10): the daemon watches the workspace on the host
+with fanotify while the agent box is awake, keeps the writes of processes
+in the agent box's cgroup, and has the environment's fern-init touch each
+file (its own times again), which the box's watchers hear.
+
+`lab/check.sh devserver` runs Vite 7.3.7 in the box and edits, adds and
+nests files from the agent box:
+
+| | without the fix (HEAD's daemon) | with it |
+|---|---|---|
+| Vite serves the edited module | no: the old one, after 10 s | yes |
+| Vite's watcher hears the edit, the new file, the file in new folders | none of them | `change`, `add`, `add` (and `addDir` for the folders) |
+| edit to served, the agent box's exec included | | 1.3 s and 3.2 s (two runs) |
+
+That time isn't broken down yet: it holds the agent box's wake for the
+edit command, two execs from the Mac and the check's 100 ms polling, around
+the watch's 20 ms batch and one touch request. Also: the box image has no
+npm (the check fetches its tarball), and workerd (Miniflare 4, D1) runs
+under gVisor, with D1's SQLite in the workspace rewound by a restore taken
+while it ran.

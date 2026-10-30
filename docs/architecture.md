@@ -85,7 +85,8 @@ Three nouns. Everything else is a property of one of them.
 | **runsc driver** | wakes and stops boxes: a network namespace and veth per wake, an overlay root on the box image, an OCI bundle, `runsc create`/`start`; the nftables firewall; adopts boxes that outlived a daemon restart | `internal/runsc` |
 | **setup** | reads the setup contract and computes golden keys | `internal/setup` |
 | **image** | unpacks `docker save` streams into the pool, as box and T3 roots (`fern image load`) | `internal/image` |
-| **fern-init** | a box's main process: starts and supervises the services (on demand, §8), serves exec with PTYs (`internal/boxexec`), readiness and a graceful stop | `cmd/fern-init` |
+| **watch** | while an agent box is awake, watches its workspace from the host with fanotify and keeps the writes of the agent box's processes (their cgroup names the box); the actor passes them to the environment's box as touches (§10) | `internal/watch` |
+| **fern-init** | a box's main process: starts and supervises the services (on demand, §8), serves exec with PTYs (`internal/boxexec`), readiness, a graceful stop and touches | `cmd/fern-init` |
 | **hibernate** | in the CLI that T3 runs as `claude`: stops an idle Claude so its box can sleep, and resumes it at the next message (§6.3) | `internal/hibernate` |
 | front door, identity, MCP tools for agents | planned (§5, §11) | |
 
@@ -323,6 +324,8 @@ The daemon runs each box itself as a gVisor sandbox (`internal/runsc`; reasons i
 
 **Two boxes per environment** (the default, `--agent-boxes`; [briefs/claude-outside-the-box.md](briefs/claude-outside-the-box.md)). The **environment's box** runs the services and gets no Claude folder or login. The **agent box**, `<env>.agent`, runs Claude (`fern exec --agent`, which fern-claude passes) with its file tools and no services; its shell tools are replaced by the daemon's MCP Bash, which runs each command in the environment's box, waking it, and lets it sleep 5 s after the last. A restore, sleep or delete stops both; a pre-wake wakes the agent box. A golden builder's box runs the services, started at once, and gets no Claude at all. The actor decides this in one place (`Group.boxOf`).
 
+**Claude's edits reach the dev servers (built).** gVisor tells a box only of its own changes: a dev server (Vite, Next.js) in the environment's box never hears of the files Claude writes from the agent box, and keeps serving the old ones. One sandbox with both as containers doesn't help: events cross only within one container's mount, and gVisor shares bind mounts between containers only for tmpfs ([lab/spike/watch/RESULTS.md](../lab/spike/watch/RESULTS.md)). So while the agent box is awake the daemon watches its workspace from the host with fanotify (`internal/watch`), whose events name the writing process; it keeps those in the agent box's cgroup, outside `.git` and `node_modules`, gathers them for 20 ms, and if the environment's box is awake, asks its fern-init (`POST /touch`) to set each file's times to what they are. That is an attribute change inside the box, which its watchers hear: Vite reports `change`, and `add` for new files and folders. The box's own touches are its writes, not the agent box's, so nothing loops. Not passed on: deletes and renames away (Claude's file tools don't make them), and files changed while the environment's box was asleep, which its next wake reads as they are. Checked by `lab/check.sh devserver`.
+
 **Measured on the VPS** (2026-10-28, median of 3): a wake 253 ms and a sleep 90 ms at p50, against 993 and 1,221 ms as pods; 45 MiB per box with 20 awake.
 
 ## 11. Front door (wake layer)
@@ -476,7 +479,8 @@ internal/api/server/ socket API server, the agent box's MCP Bash
 internal/actor/      per-environment actors, idle rule, the box policy, golden builds
 internal/store/      btrfs pool, snapshots, retention, the SQLite index, Reconcile
 internal/runsc/      boxes as gVisor sandboxes: bundle, network, firewall (+ a fake for unit tests)
-internal/boxexec/    the exec protocol: fern-init's server, the client, the daemon's relay
+internal/boxexec/    the exec protocol: fern-init's server, the client, the daemon's relay; touches
+internal/watch/      the files an agent box writes, as the host sees them (fanotify)
 internal/hibernate/  stops an idle Claude and resumes it at the next message
 internal/image/      unpacks docker save streams into box roots
 internal/setup/      setup contract, golden keys
