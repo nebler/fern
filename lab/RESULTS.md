@@ -1555,3 +1555,24 @@ the watch's 20 ms batch and one touch request. Also: the box image has no
 npm (the check fetches its tarball), and workerd (Miniflare 4, D1) runs
 under gVisor, with D1's SQLite in the workspace rewound by a restore taken
 while it ran.
+
+## Dev servers Claude starts keep running (local lab), 2026-10-31
+
+A Bash call's command ended with the call, its process group killed, and
+the box slept 5 s after the last call: Claude couldn't keep a dev server
+up. MCP Bash now takes `run_in_background` (with BashOutput and KillShell):
+the daemon holds the command open as a job, and a box with one sleeps on its
+idle clocks instead (architecture §6.3, §10).
+
+`lab/check.sh devserver`, which starts Vite 7.3.7 through MCP Bash from the
+agent box, as Claude does, and reaches it from the node:
+
+| | |
+|---|---|
+| a minute after the Bash call | the box is awake and Vite serves |
+| BashOutput | Vite's output (`ready in …`) |
+| Claude's edit, a new file, a file in new folders | Vite hears them and serves the new module; edit to served 1.0 s |
+| KillShell | Vite is killed, and the box sleeps 5 s after the last call |
+
+Not yet run with Claude itself choosing `run_in_background` (no login in
+the lab): the tool's description and Claude's hint tell it to.

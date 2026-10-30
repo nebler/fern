@@ -48,7 +48,8 @@ func (a *actor) watch(ctx context.Context, workspace string) {
 
 // touch tells environment id's box that paths changed, so that its file
 // watchers (dev servers) hear of them, if the box is awake: an asleep one
-// runs no dev server, and its next wake reads the files as they are.
+// runs no dev server, and its next wake reads the files as they are. It
+// counts as a use of the box, for the human clock that keeps its jobs (Job).
 func (g *Group) touch(ctx context.Context, id string, paths []string) {
 	var addr, token string
 	err := g.do(ctx, "touch", id, func(ctx context.Context, a *actor) error {
@@ -60,6 +61,7 @@ func (g *Group) touch(ctx context.Context, id string, paths []string) {
 			return err
 		}
 		addr, token = a.addr, env.BoxToken
+		a.opened = time.Now()
 		return nil
 	})
 	if err == nil && addr != "" {

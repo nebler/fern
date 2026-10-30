@@ -33,8 +33,9 @@
 #   golden       a new worktree's checkout is built into a golden snapshot,
 #                and the next worktree starts from it, its database seeded
 #   claude       Claude Code in a box: network, stream-json, its terminal UI
-#   devserver    a Vite dev server in the box hears the files Claude's box
-#                writes, and serves them (with agent boxes; needs the internet)
+#   devserver    a Vite dev server Claude starts in the background keeps
+#                running after the call, hears the files Claude's box writes
+#                and serves them (with agent boxes; needs the internet)
 #   t3           T3's server: the checkpoint hook's commands on a worktree it
 #                made, and that worktree's box with git, Claude's folder and
 #                login. Needs lab/build.sh t3.
@@ -804,11 +805,40 @@ except Exception as e:
   check "claude draws its screen through a terminal" yes "$(succeeds grep -qa Welcome <<<"$tui")"
 }
 
-# devserver runs Vite in the environment's box and changes files from its
-# agent box, as Claude's Edit and Write do: gVisor tells a box only of its
-# own changes, so Fern passes them on (package watch).
+# mcp ENV TOOL ARGS calls TOOL (Bash, BashOutput, KillShell) of environment
+# ENV's MCP server with ARGS, a JSON object, from its agent box, as Claude
+# there does (only agent boxes reach the port), and prints the answer's
+# text; it fails if the tool did.
+mcp() {
+  local token call out
+  # shellcheck disable=SC2016 # python's, on the node
+  token=$(on_node python3 -c 'import sqlite3, sys
+db = sqlite3.connect("file:/var/lib/fern/state/fern.sqlite?mode=ro", uri=True)
+print(db.execute("select box_token from environments where id = ?", (sys.argv[1],)).fetchone()[0])' "$1" </dev/null)
+  call=$(python3 -c 'import json, sys
+print(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": sys.argv[1], "arguments": json.loads(sys.argv[2])}}))' "$2" "$3")
+  # shellcheck disable=SC2016 # the box's shell's
+  out=$(fern exec --agent "$1" -- sh -c '
+    set -- "Authorization: Bearer $1" "http://fern-daemon:7071/mcp/$2" "$3"
+    for body in "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"check\", \"version\": \"1\"}}}" "$3"; do
+      out=$(curl -sf -m 600 -H "$1" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d "$body" "$2") || exit
+    done
+    printf %s "$out"' sh "$token" "$1" "$call") || return
+  python3 -c 'import json, sys
+res = json.load(sys.stdin)["result"]
+print(res["content"][0]["text"])
+sys.exit(1 if res.get("isError") else 0)' <<<"$out"
+}
+
+# devserver starts Vite in the environment's box as Claude does, with MCP
+# Bash's run_in_background, and checks that it keeps running after the call
+# (a Bash call alone lets the box sleep 5 s later), then changes files from
+# the agent box, as Claude's Edit and Write do: gVisor tells a box only of its
+# own changes, so Fern passes them on (package watch). Vite is reached from
+# the node, at the box's address: a command in the box would start the box's
+# idle clocks and keep it awake by itself.
 devserver() {
-  echo "== a dev server hears Claude's edits"
+  echo "== a dev server Claude starts keeps running and hears Claude's edits"
   if [ "${AGENTS:-0}" != 1 ]; then
     note "skipped: no agent boxes (lab/boxes.sh agents)"
     return
@@ -831,23 +861,33 @@ import { relative } from "node:path";
 export default {
   server: { watch: { ignored: ["**/.tools/**"] } },
   plugins: [{ name: "log", configureServer(s) {
-    s.watcher.on("all", (e, p) => appendFileSync("/tmp/watch.log", e + " " + relative(process.cwd(), p) + "\n"));
+    s.watcher.on("all", (e, p) => appendFileSync("/tmp/watch.log", e + " " + relative(process.cwd(), p) + "\\n"));
   } }],
 };
 EOF'
-  # The exec keeps the box awake, as a terminal running the dev server would.
-  fern exec $ENV -- node node_modules/vite/bin/vite.js --host 127.0.0.1 --port 5173 --strictPort </dev/null >"$TMP/vite.log" 2>&1 &
-  local vite=$!
+  # From here on only Claude's tools wake and use the box.
+  fern sleep $ENV >/dev/null
+  local job
+  job=$(mcp $ENV Bash '{"command": "node node_modules/vite/bin/vite.js --host 0.0.0.0 --port 5173 --strictPort", "run_in_background": true}' |
+    grep -o 'bash_[0-9]*')
+  check "Bash starts Vite in the background" yes "$([ -n "$job" ] && echo yes || echo no)"
+  local ip
+  ip=$(box_ip $ENV)
   # served PATTERN waits up to 10 s for Vite to serve src/main.js matching it.
   served() {
-    fern exec $ENV -- sh -c 'for i in $(seq 100); do curl -sf localhost:5173/src/main.js | grep -q "$1" && exit; sleep 0.1; done; exit 1' sh "$1"
+    # shellcheck disable=SC2016 # expanded on the node
+    on_node sh -c 'for i in $(seq 100); do curl -sf "http://$1:5173/src/main.js" | grep -q "$2" && exit; sleep 0.1; done; exit 1' sh "$ip" "$1" </dev/null
   }
   if ! served 'v = 1' >/dev/null 2>&1; then
     check "Vite serves src/main.js" yes no
-    sed 's/^/  vite: /' "$TMP/vite.log"
-    kill $vite 2>/dev/null || true
+    mcp $ENV BashOutput "{\"bash_id\": \"$job\"}" | sed 's/^/  vite: /'
     return
   fi
+  sleep 65
+  check "a minute after the Bash call, the box is awake" running "$(state $ENV)"
+  check "… and Vite still serves" yes "$(succeeds served 'v = 1')"
+  check "BashOutput shows Vite's output" yes "$(succeeds grep -q 'ready in' <<<"$(mcp $ENV BashOutput "{\"bash_id\": \"$job\"}")")"
+
   start=$(now_ms)
   fern exec --agent $ENV -- sh -c '
     echo "export const v = 2" > src/main.js
@@ -857,14 +897,17 @@ EOF'
   note "edit to served: $(($(now_ms) - start)) ms, the agent box's exec included"
   # heard EVENT waits up to 5 s for Vite's watcher to report it.
   heard() {
-    fern exec $ENV -- sh -c 'for i in $(seq 50); do grep -Eqx "$1" /tmp/watch.log 2>/dev/null && exit; sleep 0.1; done; exit 1' sh "$1"
+    local out
+    out=$(mcp $ENV Bash "{\"command\": \"for i in \$(seq 50); do if grep -Eqx '$1' /tmp/watch.log; then exit 0; fi; sleep 0.1; done; exit 1\"}") || return
+    ! grep -q 'exit code' <<<"$out"
   }
   check "Vite's watcher hears the edit" yes "$(succeeds heard 'change src/main.js')"
   check "… a new file" yes "$(succeeds heard '(add|change) src/new.js')"
   check "… a file in new folders" yes "$(succeeds heard '(add|change) src/feature/deep/d.js')"
-  note "Vite's watcher heard: $(fern exec $ENV -- cat /tmp/watch.log 2>/dev/null | sort -u | tr '\n' ';')"
-  kill $vite 2>/dev/null || true
-  wait $vite 2>/dev/null || true
+  note "Vite's watcher heard: $(mcp $ENV Bash '{"command": "sort -u /tmp/watch.log | tr \"\\n\" \";\""}')"
+
+  check "KillShell stops Vite" yes "$(succeeds grep -q 'is killed' <<<"$(mcp $ENV KillShell "{\"shell_id\": \"$job\"}")")"
+  check "… and then the box sleeps after the last Bash call's 5 s" asleep "$(asleep_within $ENV 20)"
 }
 
 t3() {

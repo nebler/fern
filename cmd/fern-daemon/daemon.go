@@ -194,6 +194,8 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		for _, s := range servers {
 			errs = append(errs, s.srv.Shutdown(shutdownCtx))
 		}
+		// Claude's background commands, which no request holds.
+		apiSrv.Close()
 		return errors.Join(errs...)
 	})
 	return g.Wait()

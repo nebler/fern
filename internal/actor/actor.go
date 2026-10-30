@@ -315,6 +315,7 @@ type actor struct {
 	addr     string                     // the box's exec address while it is known to be up
 	awake    bool                       // the box may be running
 	execs    map[int]context.CancelFunc // commands running in the box, by number
+	jobs     map[int]context.CancelFunc // background commands running in it (Job), by number
 	next     int                        // the last command's number
 	opened   time.Time                  // when the last command started
 	closed   time.Time                  // when the last command ended
@@ -329,7 +330,7 @@ type actor struct {
 // run handles messages until ctx is done, or until the box is asleep with
 // nothing left to do. awake says the box may be running already.
 func (a *actor) run(ctx context.Context, awake bool) {
-	a.execs = make(map[int]context.CancelFunc)
+	a.execs, a.jobs = make(map[int]context.CancelFunc), make(map[int]context.CancelFunc)
 	a.idle = time.NewTimer(0)
 	a.idle.Stop()
 	defer a.idle.Stop()
@@ -352,7 +353,7 @@ func (a *actor) run(ctx context.Context, awake bool) {
 		case <-a.idle.C:
 			a.sleepIfIdle(ctx)
 		}
-		if a.awake || len(a.execs) > 0 {
+		if a.awake || len(a.execs) > 0 || len(a.jobs) > 0 {
 			continue
 		}
 		// Asleep with nothing running: exit, unless a message is waiting.
@@ -421,9 +422,11 @@ func (a *actor) stopBox(ctx context.Context) error {
 	}
 	a.endLease("wasted")
 	a.awake = false
-	for n, cancel := range a.execs {
-		cancel()
-		delete(a.execs, n)
+	for _, running := range []map[int]context.CancelFunc{a.execs, a.jobs} {
+		for n, cancel := range running {
+			cancel()
+			delete(running, n)
+		}
 	}
 	return nil
 }

@@ -38,6 +38,7 @@ func writeHint(claudeDir string, services map[string]service) error {
 			strings.Join(slices.Sorted(maps.Keys(services)), ", "))
 		fmt.Fprintln(&b, "- Their data lives in the worktree (git ignores it), so T3's diff doesn't show data changes: say what you changed.")
 	}
+	fmt.Fprintln(&b, "- Start dev servers and other commands that must keep running (`npm run dev`) with Bash's run_in_background, not with `&` or `nohup`: what a command leaves running ends with it.")
 	fmt.Fprintln(&b, "- Every turn is snapshotted. T3's \"Revert files too\" brings back the files and the services' data together, so changing data is safe.")
 	fmt.Fprintln(&b, "- Don't commit or push: the repository's git folder is read-only here. The person commits from T3.")
 	tmp := path + ".tmp"

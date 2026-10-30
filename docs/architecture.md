@@ -133,7 +133,7 @@ Unix socket `/run/fern/fern.sock`, for root and the box user's group (T3's serve
 
 **Errors:** an HTTP status (404 not found, 400 invalid, 500 failed) with `{"error": message}`. Planned with the actor and quotas: busy, conflict and quota exceeded; normal calls will queue in the actor's mailbox.
 
-**For agent boxes (built):** an MCP server on port 7071, which only agent boxes can reach (§13), at `/mcp/{env}`, authenticated with the environment's box token. Its one tool, Bash, runs a command in the environment's box (§10).
+**For agent boxes (built):** an MCP server on port 7071, which only agent boxes can reach (§13), at `/mcp/{env}`, authenticated with the environment's box token. Its tool Bash runs a command in the environment's box (§10); with `run_in_background` the command goes on after the call, and BashOutput and KillShell read and stop it (§10).
 
 **Agent tools (planned):** `env_snapshot`, `env_restore`, `env_fork`, `env_exec`, `env_delete` over MCP.
 
@@ -172,6 +172,8 @@ An environment goes to sleep when all of these hold (two clocks, copied from Amp
 - **human clock:** `idle.human` (default 20 min) since the last human touch: an exec or terminal opened, or a preview request
 
 CPU usage and running services are ignored. An explicit `hold` keeps it awake.
+
+**Background commands (built)** are the exception to the first rule: one Claude starts with Bash's `run_in_background`, such as a dev server, is an exec the daemon holds open (`Group.Job`), but it doesn't hold the box awake as other execs do. With one running, the box sleeps on the two clocks, ignoring a Bash call's 5 s linger and a pre-wake's lease, and Claude's edits passed on to it (§10) count as touches of the human clock. That sleep ends the command: a dev server Claude forgot costs at most 20 minutes of an awake box.
 
 Built: the actor's timer, with both clocks touched by every exec (`--idle-agent`, `--idle-human`; 0 turns it off). Terminals, previews and `hold` are planned.
 
@@ -323,6 +325,8 @@ The daemon runs each box itself as a gVisor sandbox (`internal/runsc`; reasons i
 | Stop | `POST /stop` to fern-init (the services' `stop:` commands, then SIGTERM and kill), `runsc kill` after 15 s; then the network, overlay and cgroup go |
 
 **Two boxes per environment** (the default, `--agent-boxes`; [briefs/claude-outside-the-box.md](briefs/claude-outside-the-box.md)). The **environment's box** runs the services and gets no Claude folder or login. The **agent box**, `<env>.agent`, runs Claude (`fern exec --agent`, which fern-claude passes) with its file tools and no services; its shell tools are replaced by the daemon's MCP Bash, which runs each command in the environment's box, waking it, and lets it sleep 5 s after the last. A restore, sleep or delete stops both; a pre-wake wakes the agent box. A golden builder's box runs the services, started at once, and gets no Claude at all. The actor decides this in one place (`Group.boxOf`).
+
+**Claude's background commands (built).** A Bash call's command, its process group included, ends with the call, and the box sleeps 5 s after the last one: `npm run dev &` would die at once. So Bash takes `run_in_background`, as Claude's own Bash does: the daemon runs the command as an exec in the environment's box that it holds open itself, keeps its output (the newest 1 MiB not yet read) and answers with an ID (`bash_1`); `BashOutput` returns what it printed since the last read and whether it runs, `KillShell` ends it with its process group. Up to 16 per environment, finished ones included. A job outlives the Bash call and Claude's hibernation (Claude stops 30 s after its turn and its box sleeps; the dev server's box stays up), and ends with KillShell, the box's sleep on its idle clocks (§6.3), a restore, a delete, or the daemon. Claude's hint says to start dev servers this way. Checked by `lab/check.sh devserver`, which starts Vite through MCP Bash, as Claude does: a minute later its box is awake and Vite serves; after KillShell the box sleeps 5 s after the last call.
 
 **Claude's edits reach the dev servers (built).** gVisor tells a box only of its own changes: a dev server (Vite, Next.js) in the environment's box never hears of the files Claude writes from the agent box, and keeps serving the old ones. One sandbox with both as containers doesn't help: events cross only within one container's mount, and gVisor shares bind mounts between containers only for tmpfs ([lab/spike/watch/RESULTS.md](../lab/spike/watch/RESULTS.md)). So while the agent box is awake the daemon watches its workspace from the host with fanotify (`internal/watch`), whose events name the writing process; it keeps those in the agent box's cgroup, outside `.git` and `node_modules`, gathers them for 20 ms, and if the environment's box is awake, asks its fern-init (`POST /touch`) to set each file's times to what they are. That is an attribute change inside the box, which its watchers hear: Vite reports `change`, and `add` for new files and folders. The box's own touches are its writes, not the agent box's, so nothing loops. Not passed on: deletes and renames away (Claude's file tools don't make them), and files changed while the environment's box was asleep, which its next wake reads as they are. Checked by `lab/check.sh devserver`.
 
