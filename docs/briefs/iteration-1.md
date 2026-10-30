@@ -21,7 +21,7 @@ This proves the core: a `Sandbox` pod runs on a btrfs subvolume served by our CS
 1. [AGENTS.md](../../AGENTS.md): the rules. Use the `go-*` skills in `.claude/skills/`, and run `go-code-review` before you finish.
 2. [roadmap.md](../roadmap.md) §2 (shortcuts) and §3 weeks 0–1
 3. [architecture.md](../architecture.md) §3 (components), §5 (API), §9 (storage), §10 (boxes), §14.2 (Kubernetes mapping), §18 (code layout)
-4. [engine-local.md](../engine-local.md) §1.0 (local lab) and experiments E0, E1, E4
+4. [engine-local.md](../history/engine-local.md) §1.0 (local lab) and experiments E0, E1, E4
 
 If this brief and those docs disagree, this brief wins for this iteration. List every disagreement in the report.
 

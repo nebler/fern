@@ -2,7 +2,7 @@
 
 **Status:** plan, 2026-10-18. This is the source of truth for the order of work.
 - [architecture.md](architecture.md): what we build
-- [engine-local.md](engine-local.md): the experiments (E0–E16)
+- [history/engine-local.md](history/engine-local.md): the first design's experiments (E0–E16)
 - [design.md §21](design.md#21-roadmap-about-8-weeks-kubernetes-first): the demo script and the agent-sandbox contribution plan
 
 **Update 2026-10-29:** Fern no longer runs on Kubernetes. The daemon runs boxes itself with runsc, as a systemd service ([briefs/fern-without-kubernetes.md](briefs/fern-without-kubernetes.md)), and the Kubernetes mode (agent-sandbox, CSI, `deploy/fern.yaml`) was removed. The phases below that say k3s, Helm or Kubernetes are the history of how it got here; Week 4b (EKS) is on hold, since it needs that mode.
@@ -57,7 +57,7 @@ These keep T3 changes to one small hook and skip whole components.
 
 ### Phase 1: local (Docker on the Mac)
 
-**The local lab** (details in [engine-local.md §1](engine-local.md#1-the-dev-machines)):
+**The local lab** (details in [history/engine-local.md §1](history/engine-local.md#1-the-dev-machines)):
 - Docker Desktop (you start it), one privileged `rancher/k3s` container, a btrfs image file loop-mounted inside it
 - Go builds and unit tests in a `golang` container
 - the agent-sandbox controller and Fern's chart installed into that k3s
