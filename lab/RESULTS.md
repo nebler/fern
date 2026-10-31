@@ -1576,3 +1576,25 @@ agent box, as Claude does, and reaches it from the node:
 
 Not yet run with Claude itself choosing `run_in_background` (no login in
 the lab): the tool's description and Claude's hint tell it to.
+
+## Previews (local lab), 2026-10-31
+
+The daemon's front door (`internal/preview`, `--preview-addr :30780`)
+serves `http://<port>-<env>.localhost:30780/` and, for the service in
+services.yaml with a `port`, `http://<env>.localhost:30780/`, waking an
+asleep box; a request in progress counts as a use of the box.
+
+In a browser on the Mac (the lab's port forwarded to its localhost), with
+Vite declared in a `demo` environment's services.yaml and the box asleep:
+opening `http://demo.localhost:30780/` woke the box, started Vite and loaded
+the page; an edit of `src/main.js` from the agent box changed the open page
+by itself, through Vite's live reload over the preview's WebSocket.
+
+`lab/check.sh devserver`, from the node: a port nothing listens on answers
+502 saying so; the default preview wakes an asleep box and serves Vite,
+asleep to served 1.9 s (Vite's own start included); `5173-<env>` serves the
+same; Claude's edit reaches the preview. Edit to served is now 464 ms, the
+agent box's exec included: the watch is the environment's box's, so it is
+running before Claude's edit (it was the agent box's, which slept 70 ms
+after the edit command and dropped the edit in one of the runs).
+`lab/check.sh limits` adds: a box can't reach the previews' port.

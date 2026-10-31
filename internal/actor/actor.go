@@ -61,8 +61,9 @@ type Config struct {
 	// delete of the environment stops it too.
 	Agents bool
 	// Watcher, with Agents, passes the files Claude writes on to the
-	// services' box, whose file watchers would not hear of them otherwise:
-	// gVisor tells a box only of its own changes. nil: they don't.
+	// services' box while it is awake, whose file watchers would not hear of
+	// them otherwise: gVisor tells a box only of its own changes. nil: they
+	// don't.
 	Watcher Watcher
 }
 
@@ -322,8 +323,8 @@ type actor struct {
 	lease    time.Time                  // when an awake box with nothing running sleeps instead of after the idle times: set by a pre-wake, or a command that asked
 	prewoken bool                       // the lease's wake succeeded, so its end is counted
 	idle     *time.Timer                // fires when the box may have been idle long enough
-	// stopWatch stops the watch of an agent box's writes (watch), and is nil
-	// while there is none.
+	// stopWatch stops the watch of the agent box's writes for this box
+	// (watch), and is nil while there is none.
 	stopWatch func()
 }
 

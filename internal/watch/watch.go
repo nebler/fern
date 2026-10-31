@@ -36,8 +36,9 @@ const mask = unix.FAN_MODIFY | unix.FAN_CREATE | unix.FAN_DELETE | unix.FAN_MOVE
 	unix.FAN_ONDIR | unix.FAN_EVENT_ON_CHILD
 
 // skip says whether a folder isn't watched: dev servers don't watch these,
-// and they hold most of a workspace's folders.
-func skip(name string) bool { return name == ".git" || name == "node_modules" }
+// and they hold most of a workspace's folders, or (.fern, the services'
+// data, such as Postgres's) most of its writes.
+func skip(name string) bool { return name == ".git" || name == "node_modules" || name == ".fern" }
 
 // Watcher watches workspaces.
 type Watcher struct {
@@ -55,7 +56,7 @@ func New(boxOf func(pid int) string, log *slog.Logger) *Watcher {
 // renamed into place, as paths relative to dir, until ctx is done or reading
 // the changes fails, whose error it returns. Changes
 // within batchDelay come in one call; changed runs on Watch's goroutine.
-// Files in skipped folders (.git, node_modules) are left out.
+// Files in skipped folders (.git, node_modules, .fern) are left out.
 func (w *Watcher) Watch(ctx context.Context, dir, box string, changed func(ctx context.Context, paths []string)) error {
 	fd, err := unix.FanotifyInit(unix.FAN_CLASS_NOTIF|unix.FAN_CLOEXEC|unix.FAN_NONBLOCK|unix.FAN_REPORT_DFID_NAME,
 		unix.O_RDONLY|unix.O_LARGEFILE)

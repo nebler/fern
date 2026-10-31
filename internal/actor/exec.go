@@ -43,6 +43,19 @@ func (g *Group) Job(ctx context.Context, id, stale string, cancel context.Cancel
 	return g.exec(ctx, "job", id, stale, cancel)
 }
 
+// Preview is Exec for a request to a preview of the box (internal/preview):
+// while it lasts, the box stays awake, as a browser tab with a dev server's
+// live reload open keeps it. It is logged only at debug level: a page load
+// can be a hundred requests.
+// It returns the box's exec address and done, which ends the count.
+func (g *Group) Preview(ctx context.Context, id string, cancel context.CancelFunc) (addr string, done func(), err error) {
+	ex, err := g.exec(ctx, "preview", id, "", cancel)
+	if err != nil {
+		return "", nil, err
+	}
+	return ex.Addr, ex.Close, nil
+}
+
 func (g *Group) exec(ctx context.Context, kind, id, stale string, cancel context.CancelFunc) (*Exec, error) {
 	var ex *Exec
 	err := g.do(ctx, kind, id, func(ctx context.Context, a *actor) error {
@@ -59,9 +72,13 @@ func (g *Group) exec(ctx context.Context, kind, id, stale string, cancel context
 			a.execs[n] = cancel
 		}
 		a.opened = time.Now()
-		g.log.InfoContext(ctx, kind+" opened", slog.String("env", id), slog.Int("exec", n),
+		level := slog.LevelInfo
+		if kind == "preview" {
+			level = slog.LevelDebug
+		}
+		g.log.Log(ctx, level, kind+" opened", slog.String("env", id), slog.Int("exec", n),
 			slog.Int("active", len(a.execs)), slog.Int("jobs", len(a.jobs)))
-		ex = &Exec{Addr: a.addr, Token: env.BoxToken, close: func(sleep bool, after time.Duration) { a.endExec(n, sleep, after) }}
+		ex = &Exec{Addr: a.addr, Token: env.BoxToken, close: func(sleep bool, after time.Duration) { a.endExec(n, sleep, after, level) }}
 		return nil
 	})
 	if err != nil {
@@ -76,9 +93,9 @@ func (g *Group) exec(ctx context.Context, kind, id, stale string, cancel context
 }
 
 // endExec stops counting command n, from the goroutine that ran it; with
-// sleep, the box sleeps after d if nothing else runs. A command that a stop
-// already cancelled is not counted any more.
-func (a *actor) endExec(n int, sleep bool, d time.Duration) {
+// sleep, the box sleeps after d if nothing else runs. Its end is logged at
+// level. A command that a stop already cancelled is not counted any more.
+func (a *actor) endExec(n int, sleep bool, d time.Duration, level slog.Level) {
 	end := func(ctx context.Context, _ *actor) error {
 		if _, ok := a.jobs[n]; ok {
 			delete(a.jobs, n)
@@ -91,7 +108,7 @@ func (a *actor) endExec(n int, sleep bool, d time.Duration) {
 			if sleep && len(a.execs) == 0 {
 				a.lease = a.closed.Add(d)
 			}
-			a.g.log.InfoContext(ctx, "exec closed", slog.String("env", a.id), slog.Int("exec", n),
+			a.g.log.Log(ctx, level, "exec closed", slog.String("env", a.id), slog.Int("exec", n),
 				slog.Int("active", len(a.execs)), slog.Time("last_opened", a.opened))
 		}
 		return nil

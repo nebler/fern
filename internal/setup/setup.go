@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -106,6 +107,33 @@ func goldenInputs(dir string) ([]string, error) {
 		paths = append(paths, clean)
 	}
 	return paths, nil
+}
+
+// PreviewPort returns the port of the first service in dir's services.yaml,
+// by name, that has one: the environment's default preview. 0 means none.
+// The file is the agent's, read as root: readFile keeps it to dir.
+func PreviewPort(dir string) (int, error) {
+	data, err := readFile(dir, "services.yaml")
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var f struct {
+		Services map[string]struct {
+			Port int `json:"port"`
+		} `json:"services"`
+	}
+	if err := yaml.Unmarshal(data, &f); err != nil {
+		return 0, fmt.Errorf("services.yaml: %w", err)
+	}
+	for _, name := range slices.Sorted(maps.Keys(f.Services)) {
+		if p := f.Services[name].Port; p > 0 && p <= 65535 {
+			return p, nil
+		}
+	}
+	return 0, nil
 }
 
 // fileSum returns the SHA-256 of file p in dir, or "missing".

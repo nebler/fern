@@ -40,9 +40,8 @@ func (w *fakeWatcher) Watch(ctx context.Context, dir, box string, changed func(c
 	}
 }
 
-// TestWatch checks that the files the agent box writes reach the
-// environment's box while it is awake, and that the watch ends with the agent
-// box.
+// TestWatch checks that the environment's box, while it is awake, watches
+// for the files the agent box writes and is touched with them.
 func TestWatch(t *testing.T) {
 	touched := make(chan []string, 4)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -76,40 +75,28 @@ func TestWatch(t *testing.T) {
 		<-fw.fired
 	}
 
-	// The environment's own box doesn't watch.
-	main, err := g.Exec(t.Context(), "demo", "", func() {})
-	if err != nil {
-		t.Fatal(err)
-	}
-	main.Close()
-	if err := g.Sleep(t.Context(), "demo"); err != nil {
-		t.Fatal(err)
-	}
+	// The agent box alone doesn't watch: no dev server would hear.
 	agent, err := g.Exec(t.Context(), store.AgentBox("demo"), "", func() {})
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer agent.Close()
-	if diff := cmp.Diff([2]string{ws, store.AgentBox("demo")}, <-fw.started); diff != "" {
-		t.Errorf("Watch (-want +got):\n%s", diff)
-	}
-
-	// Asleep, the environment's box is neither woken nor touched.
-	fire("asleep.txt")
-	if state(t, drv, "demo") == runsc.Running {
-		t.Error("a change woke the environment's box")
-	}
+	agent.Close()
 	select {
-	case paths := <-touched:
-		t.Errorf("touched %v in an asleep box", paths)
+	case w := <-fw.started:
+		t.Fatalf("the agent box's wake started a watch of %v", w)
 	default:
 	}
 
-	main, err = g.Exec(t.Context(), "demo", "", func() {})
+	// The environment's box watches for the agent box's writes, and passes
+	// them on to itself.
+	main, err := g.Exec(t.Context(), "demo", "", func() {})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer main.Close()
+	if diff := cmp.Diff([2]string{ws, store.AgentBox("demo")}, <-fw.started); diff != "" {
+		t.Errorf("Watch (-want +got):\n%s", diff)
+	}
 	fire("src/a.ts", "src/b.ts")
 	select {
 	case paths := <-touched:
@@ -117,10 +104,10 @@ func TestWatch(t *testing.T) {
 			t.Errorf("touched (-want +got):\n%s", diff)
 		}
 	default:
-		t.Error("an awake box wasn't touched")
+		t.Error("the box wasn't touched")
 	}
 
-	// Sleeping the environment stops its agent box, and the watch with it.
+	// The watch ends with the box.
 	if err := g.Sleep(t.Context(), "demo"); err != nil {
 		t.Fatal(err)
 	}

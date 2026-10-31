@@ -141,3 +141,30 @@ func TestSourceID(t *testing.T) {
 		}
 	}
 }
+
+func TestPreviewPort(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml string
+		want       int
+		wantErr    bool
+	}{
+		{"no file", "", 0, false},
+		{"no port", "services:\n  db:\n    run: postgres\n", 0, false},
+		{"first by name", "services:\n  web:\n    run: a\n    port: 3000\n  api:\n    run: b\n    port: 4000\n", 4000, false},
+		{"not a port", "services:\n  web:\n    run: a\n    port: 70000\n", 0, false},
+		{"broken", "services: [", 0, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.yaml != "" {
+				if err := os.WriteFile(filepath.Join(dir, "services.yaml"), []byte(tc.yaml), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := setup.PreviewPort(dir)
+			if (err != nil) != tc.wantErr || got != tc.want {
+				t.Errorf("PreviewPort = %d, %v; want %d, error %t", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}

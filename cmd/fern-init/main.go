@@ -63,7 +63,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 	if claude := os.Getenv("CLAUDE_CONFIG_DIR"); claude != "" {
 		// Claude works without the hint, only less well.
-		if err := writeHint(claude, services); err != nil {
+		if err := writeHint(claude, services, os.Getenv("FERN_PREVIEW")); err != nil {
 			log.WarnContext(ctx, "writing Claude's hint failed", slog.Any("error", err))
 		}
 	}
@@ -74,6 +74,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	var stoppers []func(context.Context)
 	lazy := make(map[string]*onDemand)
 	for name, svc := range services {
+		env := svc.environ(env)
 		if svc.Listen != "" && os.Getenv("FERN_ON_DEMAND") != "off" {
 			o, err := listenOnDemand(ctx, name, svc, dir, env, log)
 			if err != nil {

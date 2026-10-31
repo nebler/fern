@@ -679,6 +679,7 @@ limits() {
   ip=$(box_ip $ENV | awk -F. '{ printf "%s.%s.%s.%d", $1, $2, $3, $4 - 1 }')
   check "a box can't reach the daemon's metrics" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:9090/metrics")"
   check "or T3's server" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:30773/")"
+  check "or the previews, which would reach every box" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:30780/")"
   if [ -n "$FERN_HOST" ]; then
     # The daemon replaces its own table (inet fern) whole at every start;
     # the VPS's firewall, which keeps T3's port private, has another.
@@ -908,6 +909,24 @@ EOF'
 
   check "KillShell stops Vite" yes "$(succeeds grep -q 'is killed' <<<"$(mcp $ENV KillShell "{\"shell_id\": \"$job\"}")")"
   check "… and then the box sleeps after the last Bash call's 5 s" asleep "$(asleep_within $ENV 20)"
+
+  # Previews, as a browser on the machine asks for them. A preview request
+  # wakes the box and counts as its use, so these come last.
+  # preview HOST PATH prints what the front door answers for HOST.
+  preview() {
+    on_node curl -s -H "Host: $1" "http://127.0.0.1:30780$2" </dev/null
+  }
+  check "a preview of a port nothing listens on says so" yes "$(succeeds grep -q 'nothing listens on port 5173' <<<"$(preview "5173-$ENV.localhost:30780" /)")"
+  # A dev server in services.yaml starts with the box, which a preview wakes.
+  fern exec $ENV -- sh -c 'printf "services:\n  web:\n    run: node node_modules/vite/bin/vite.js --host 0.0.0.0 --port \$PORT --strictPort\n    port: 5173\n" > services.yaml'
+  fern sleep $ENV >/dev/null
+  start=$(now_ms)
+  check "the default preview http://$ENV.localhost:30780/ wakes the box and serves Vite" yes "$(succeeds grep -q 'v = 2' <<<"$(preview "$ENV.localhost:30780" /src/main.js)")"
+  note "asleep to served through the preview: $(($(now_ms) - start)) ms"
+  check "… as does http://5173-$ENV.localhost:30780/" yes "$(succeeds grep -q 'v = 2' <<<"$(preview "5173-$ENV.localhost:30780" /src/main.js)")"
+  check "… with its live reload's client" yes "$(succeeds grep -q WebSocket <<<"$(preview "$ENV.localhost:30780" /@vite/client)")"
+  fern exec --agent $ENV -- sh -c 'echo "export const v = 3" > src/main.js'
+  check "an edit of Claude's reaches the preview" yes "$(succeeds on_node sh -c 'for i in $(seq 100); do curl -s -H "Host: $1" http://127.0.0.1:30780/src/main.js | grep -q "v = 3" && exit; sleep 0.1; done; exit 1' sh "$ENV.localhost:30780" </dev/null)"
 }
 
 t3() {

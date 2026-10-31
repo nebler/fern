@@ -85,6 +85,10 @@ type Config struct {
 	// Login returns Claude's login, or "" if there is none yet.
 	Login   func(ctx context.Context) (string, error)
 	MCPPort int // the daemon's port agent boxes may reach
+	// Preview is where people open previews, such as localhost:30780
+	// (internal/preview). A box learns its own as FERN_PREVIEW, for Claude
+	// to hand out links; "" means there are none.
+	Preview string
 }
 
 // The limits of a wake and a stop. fern-init needs at most 8 s for the
@@ -417,7 +421,12 @@ func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 	}
 	wakeID := make([]byte, 8)
 	_, _ = rand.Read(wakeID)
-	s := boxSpec(box, b, d.imageEnv, boxVars(box, hex.EncodeToString(wakeID), login))
+	vars := boxVars(box, hex.EncodeToString(wakeID), login)
+	if d.cfg.Preview != "" {
+		// {port} is for the box to fill in.
+		vars = append(vars, "FERN_PREVIEW=http://{port}-"+box.Env.ID+"."+d.cfg.Preview+"/")
+	}
+	s := boxSpec(box, b, d.imageEnv, vars)
 	data, err := json.MarshalIndent(s, "", " ")
 	if err != nil {
 		return err
