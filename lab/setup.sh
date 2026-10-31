@@ -12,9 +12,11 @@ lab_lock
 
 need() { command -v "$1" >/dev/null || { echo "setup: needs $1: $2" >&2; exit 1; }; }
 [ "${BASH_VERSINFO[0]}" -ge 5 ] || { echo "setup: needs bash 5: brew install bash, first in PATH" >&2; exit 1; }
-need docker "Docker Desktop, running"
 need node "Node 22 or newer, for lab/t3-run.sh"
-docker info >/dev/null 2>&1 || { echo "setup: Docker isn't running" >&2; exit 1; }
+if [ -z "$FERN_HOST" ]; then
+  need docker "Docker Desktop, running"
+  docker info >/dev/null 2>&1 || { echo "setup: Docker isn't running" >&2; exit 1; }
+fi
 
 if [ -n "$FERN_HOST" ]; then
   echo "== the VPS $FERN_HOST"

@@ -1,0 +1,9 @@
+services:
+  web:
+    # A golden build's first start installs the dependencies; a thread's
+    # start only finds them installed.
+    run: pnpm install --frozen-lockfile --prefer-offline && exec pnpm exec vite dev --host 0.0.0.0 --port $PORT --strictPort
+    # Vite's own client answers once it listens; the page itself renders on
+    # its first request, which can take longer than a check may.
+    ready: curl -sf localhost:$PORT/@vite/client >/dev/null
+    port: 3000

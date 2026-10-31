@@ -44,7 +44,7 @@ tar_dir "$tmp/gvisor" | docker run --rm -i --label "$LABEL" -v fern-lab-pool:/im
 docker build -q --label "$LABEL" --target lab-node -f images/Dockerfile -t fern-lab-node:dev . >/dev/null
 docker run -d --name "$LAB" --hostname "$LAB" --label "$LABEL" --privileged --cgroupns=private \
   --tmpfs /run --tmpfs /run/lock -v fern-lab-pool:/var/lib/fern-img \
-  -p 127.0.0.1:30773:30773 -p 127.0.0.1:16686:16686 fern-lab-node:dev >/dev/null
+  -p 127.0.0.1:30773:30773 -p 127.0.0.1:30780:30780 -p 127.0.0.1:16686:16686 fern-lab-node:dev >/dev/null
 
 echo "waiting for systemd"
 for _ in $(seq 60); do

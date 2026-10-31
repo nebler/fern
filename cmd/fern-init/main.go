@@ -51,19 +51,22 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err := os.Unsetenv("FERN_BOX_TOKEN"); err != nil {
 		return err
 	}
-	env := os.Environ()
+	env := toolsEnv(dir, os.Environ())
 
 	services, err := loadServices(filepath.Join(dir, "services.yaml"))
 	if err != nil {
 		return err
 	}
-	// An agent box runs Claude next to the box that runs the services.
+	// An agent box runs Claude next to the box that runs the services, which
+	// installs the tools they share.
 	if os.Getenv("FERN_SERVICES") == "off" {
 		services = nil
+	} else {
+		installTools(ctx, dir, env, log)
 	}
 	if claude := os.Getenv("CLAUDE_CONFIG_DIR"); claude != "" {
 		// Claude works without the hint, only less well.
-		if err := writeHint(claude, services); err != nil {
+		if err := writeHint(claude, services, os.Getenv("FERN_PREVIEW")); err != nil {
 			log.WarnContext(ctx, "writing Claude's hint failed", slog.Any("error", err))
 		}
 	}
@@ -74,6 +77,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	var stoppers []func(context.Context)
 	lazy := make(map[string]*onDemand)
 	for name, svc := range services {
+		env := svc.environ(env)
 		if svc.Listen != "" && os.Getenv("FERN_ON_DEMAND") != "off" {
 			o, err := listenOnDemand(ctx, name, svc, dir, env, log)
 			if err != nil {
@@ -102,6 +106,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 		return checkServices(ctx, check, dir, env)
 	}))
 	mux.Handle("POST "+boxexec.StopPath, shutdown(token, os.Getenv("FERN_WAKE_ID"), cancel))
+	mux.Handle("POST "+boxexec.TouchPath, touch(token, dir))
 	srv := &http.Server{
 		Addr:              ":" + strconv.Itoa(boxexec.Port),
 		Handler:           mux,

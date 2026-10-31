@@ -159,3 +159,19 @@ func TestFirewall(t *testing.T) {
 		}
 	}
 }
+
+func TestBoxOfCgroup(t *testing.T) {
+	for _, tc := range []struct{ data, want string }{
+		{"0::/fern/demo.agent\n", "demo.agent"},
+		{"0::/fern/demo\n", "demo"},
+		{"0::/init.scope\n", ""},
+		{"0::/fern\n", ""},
+		{"0::/fern/demo/inner\n", ""},
+		{"0::/other/fern/demo\n", ""},
+		{"", ""},
+	} {
+		if got := boxOfCgroup(tc.data); got != tc.want {
+			t.Errorf("boxOfCgroup(%q) = %q, want %q", tc.data, got, tc.want)
+		}
+	}
+}

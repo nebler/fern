@@ -8,6 +8,8 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"slices"
+	"strconv"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -26,6 +28,19 @@ type service struct {
 	// its first connection (onDemand). Without it, the service starts with
 	// the box.
 	Listen string `json:"listen,omitempty"`
+	// Port is the port the service serves on, which it gets as PORT. The
+	// first service with one, by name, is the environment's default
+	// preview (internal/preview).
+	Port int `json:"port,omitempty"`
+}
+
+// environ returns the environment the service's commands run with: env,
+// and PORT if it has a port.
+func (s service) environ(env []string) []string {
+	if s.Port == 0 {
+		return env
+	}
+	return append(slices.Clone(env), "PORT="+strconv.Itoa(s.Port))
 }
 
 // loadServices reads services.yaml at path. A missing file means no services.
@@ -56,6 +71,9 @@ func parseServices(data []byte) (map[string]service, error) {
 	for name, svc := range f.Services {
 		if svc.Run == "" {
 			return nil, fmt.Errorf("services.yaml: service %q: run is required", name)
+		}
+		if svc.Port < 0 || svc.Port > 65535 {
+			return nil, fmt.Errorf("services.yaml: service %q: port %d is not a port", name, svc.Port)
 		}
 		if svc.Listen != "" {
 			if _, _, err := listenAddr(svc.Listen); err != nil {

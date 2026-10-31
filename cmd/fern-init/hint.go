@@ -18,8 +18,9 @@ const hintMark = "<!-- written by Fern's fern-init; it replaces this file at eve
 // writeHint tells Claude where it runs: the user-level CLAUDE.md in Claude's
 // folder (CLAUDE_CONFIG_DIR), which is outside the workspace, so the hint is
 // never in a snapshot, a diff or the repository. A CLAUDE.md that someone
-// else wrote there is left alone.
-func writeHint(claudeDir string, services map[string]service) error {
+// else wrote there is left alone. preview is where the box's ports can be
+// opened (FERN_PREVIEW), with {port} for the port; "" if they can't.
+func writeHint(claudeDir string, services map[string]service, preview string) error {
 	path := filepath.Join(claudeDir, "CLAUDE.md")
 	old, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -37,6 +38,11 @@ func writeHint(claudeDir string, services map[string]service) error {
 		fmt.Fprintf(&b, "- The box runs this repository's services (services.yaml): %s. Use them directly; one that isn't running yet starts at its first connection.\n",
 			strings.Join(slices.Sorted(maps.Keys(services)), ", "))
 		fmt.Fprintln(&b, "- Their data lives in the worktree (git ignores it), so T3's diff doesn't show data changes: say what you changed.")
+	}
+	fmt.Fprintln(&b, "- Start dev servers and other commands that must keep running (`npm run dev`) with Bash's run_in_background, not with `&` or `nohup`: what a command leaves running ends with it.")
+	if preview != "" {
+		fmt.Fprintf(&b, "- The person opens a server in this box at %s, such as %s for port 5173: give them that link when you start one. It answers once something listens on the port.\n",
+			preview, strings.ReplaceAll(preview, "{port}", "5173"))
 	}
 	fmt.Fprintln(&b, "- Every turn is snapshotted. T3's \"Revert files too\" brings back the files and the services' data together, so changing data is safe.")
 	fmt.Fprintln(&b, "- Don't commit or push: the repository's git folder is read-only here. The person commits from T3.")

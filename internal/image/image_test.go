@@ -197,6 +197,18 @@ func TestLoad(t *testing.T) {
 	}
 }
 
+// An image Podman saved, as localhost/NAME, opens as NAME, as Docker's does.
+func TestLoadPodman(t *testing.T) {
+	dir := t.TempDir()
+	stream, id := saved(t, "localhost/fern-box:dev", "", tarOf(t, entry{name: "a", data: "a"}))
+	if _, err := image.Load(t.Context(), bytes.NewReader(stream), dir); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := image.Open(dir, "fern-box:dev"); err != nil || got.ID != id {
+		t.Errorf("Open(fern-box:dev) = %v, %v; want image %s", got, err, id)
+	}
+}
+
 // A tag's previous image stays, which running boxes may use; older ones go.
 func TestLoadKeepsPrevious(t *testing.T) {
 	dir := t.TempDir()

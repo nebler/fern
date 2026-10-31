@@ -32,7 +32,13 @@
 #                exec --here, snapshot replace and delete
 #   golden       a new worktree's checkout is built into a golden snapshot,
 #                and the next worktree starts from it, its database seeded
+#   tools        a TanStack Start repository pinning Node 22 and pnpm (mise)
+#                gets a golden snapshot with them, and a thread of it serves
+#                through a preview (needs the internet)
 #   claude       Claude Code in a box: network, stream-json, its terminal UI
+#   devserver    a Vite dev server Claude starts in the background keeps
+#                running after the call, hears the files Claude's box writes
+#                and serves them (with agent boxes; needs the internet)
 #   t3           T3's server: the checkpoint hook's commands on a worktree it
 #                made, and that worktree's box with git, Claude's folder and
 #                login. Needs lab/build.sh t3.
@@ -676,6 +682,7 @@ limits() {
   ip=$(box_ip $ENV | awk -F. '{ printf "%s.%s.%s.%d", $1, $2, $3, $4 - 1 }')
   check "a box can't reach the daemon's metrics" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:9090/metrics")"
   check "or T3's server" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:30773/")"
+  check "or the previews, which would reach every box" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:30780/")"
   if [ -n "$FERN_HOST" ]; then
     # The daemon replaces its own table (inet fern) whole at every start;
     # the VPS's firewall, which keeps T3's port private, has another.
@@ -800,6 +807,179 @@ except Exception as e:
   tui=$(in_daemon "sleep 9 | timeout 8 script -qec 'fern exec -it $ENV -- claude' /dev/null" 2>/dev/null || true)
   # It draws the spaces between words as cursor moves.
   check "claude draws its screen through a terminal" yes "$(succeeds grep -qa Welcome <<<"$tui")"
+}
+
+# mcp ENV TOOL ARGS calls TOOL (Bash, BashOutput, KillShell) of environment
+# ENV's MCP server with ARGS, a JSON object, from its agent box, as Claude
+# there does (only agent boxes reach the port), and prints the answer's
+# text; it fails if the tool did.
+mcp() {
+  local token call out
+  # shellcheck disable=SC2016 # python's, on the node
+  token=$(on_node python3 -c 'import sqlite3, sys
+db = sqlite3.connect("file:/var/lib/fern/state/fern.sqlite?mode=ro", uri=True)
+print(db.execute("select box_token from environments where id = ?", (sys.argv[1],)).fetchone()[0])' "$1" </dev/null)
+  call=$(python3 -c 'import json, sys
+print(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": sys.argv[1], "arguments": json.loads(sys.argv[2])}}))' "$2" "$3")
+  # shellcheck disable=SC2016 # the box's shell's
+  out=$(fern exec --agent "$1" -- sh -c '
+    set -- "Authorization: Bearer $1" "http://fern-daemon:7071/mcp/$2" "$3"
+    for body in "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"check\", \"version\": \"1\"}}}" "$3"; do
+      out=$(curl -sf -m 600 -H "$1" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d "$body" "$2") || exit
+    done
+    printf %s "$out"' sh "$token" "$1" "$call") || return
+  python3 -c 'import json, sys
+res = json.load(sys.stdin)["result"]
+print(res["content"][0]["text"])
+sys.exit(1 if res.get("isError") else 0)' <<<"$out"
+}
+
+# devserver starts Vite in the environment's box as Claude does, with MCP
+# Bash's run_in_background, and checks that it keeps running after the call
+# (a Bash call alone lets the box sleep 5 s later), then changes files from
+# the agent box, as Claude's Edit and Write do: gVisor tells a box only of its
+# own changes, so Fern passes them on (package watch). Vite is reached from
+# the node, at the box's address: a command in the box would start the box's
+# idle clocks and keep it awake by itself.
+devserver() {
+  echo "== a dev server Claude starts keeps running and hears Claude's edits"
+  if [ "${AGENTS:-0}" != 1 ]; then
+    note "skipped: no agent boxes (lab/boxes.sh agents)"
+    return
+  fi
+  fern rm $ENV 2>/dev/null || true
+  fern create $ENV >/dev/null
+  # The box image has neither npm nor pnpm: the repository pins them, and
+  # the box installs them when it wakes.
+  fern exec $ENV -- sh -c 'printf "[tools]\nnode = \"22\"\npnpm = \"10\"\n" > mise.toml'
+  fern sleep $ENV >/dev/null
+  start=$(now_ms)
+  check "a wake installs the tools mise.toml pins" v22 "$(fern exec $ENV -- node --version | cut -d. -f1)"
+  note "a wake that installs Node 22 and pnpm 10, ms: $(($(now_ms) - start))"
+  fern exec $ENV -- sh -c '
+    set -e
+    mkdir -p src
+    echo "{}" > package.json
+    pnpm add vite@7 >/dev/null 2>&1
+    echo "<script type=module src=/src/main.js></script>" > index.html
+    echo "export const v = 1" > src/main.js
+    cat > vite.config.mjs <<EOF
+import { appendFileSync } from "node:fs";
+import { relative } from "node:path";
+// Every event of the watcher Vite uses, in /tmp, where it is not watching.
+export default {
+  plugins: [{ name: "log", configureServer(s) {
+    s.watcher.on("all", (e, p) => appendFileSync("/tmp/watch.log", e + " " + relative(process.cwd(), p) + "\\n"));
+  } }],
+};
+EOF'
+  # From here on only Claude's tools wake and use the box.
+  fern sleep $ENV >/dev/null
+  local job
+  job=$(mcp $ENV Bash '{"command": "pnpm exec vite --host 0.0.0.0 --port 5173 --strictPort", "run_in_background": true}' |
+    grep -o 'bash_[0-9]*')
+  check "Bash starts Vite in the background" yes "$([ -n "$job" ] && echo yes || echo no)"
+  local ip
+  ip=$(box_ip $ENV)
+  # served PATTERN waits up to 10 s for Vite to serve src/main.js matching it.
+  served() {
+    # shellcheck disable=SC2016 # expanded on the node
+    on_node sh -c 'for i in $(seq 100); do curl -sf "http://$1:5173/src/main.js" | grep -q "$2" && exit; sleep 0.1; done; exit 1' sh "$ip" "$1" </dev/null
+  }
+  if ! served 'v = 1' >/dev/null 2>&1; then
+    check "Vite serves src/main.js" yes no
+    mcp $ENV BashOutput "{\"bash_id\": \"$job\"}" | sed 's/^/  vite: /'
+    return
+  fi
+  sleep 65
+  check "a minute after the Bash call, the box is awake" running "$(state $ENV)"
+  check "… and Vite still serves" yes "$(succeeds served 'v = 1')"
+  check "BashOutput shows Vite's output" yes "$(succeeds grep -q 'ready in' <<<"$(mcp $ENV BashOutput "{\"bash_id\": \"$job\"}")")"
+
+  start=$(now_ms)
+  fern exec --agent $ENV -- sh -c '
+    echo "export const v = 2" > src/main.js
+    echo "export const n = 1" > src/new.js
+    mkdir -p src/feature/deep && echo "export const d = 1" > src/feature/deep/d.js'
+  check "after Claude's edit, Vite serves the new src/main.js" yes "$(succeeds served 'v = 2')"
+  note "edit to served: $(($(now_ms) - start)) ms, the agent box's exec included"
+  # heard EVENT waits up to 5 s for Vite's watcher to report it.
+  heard() {
+    local out
+    out=$(mcp $ENV Bash "{\"command\": \"for i in \$(seq 50); do if grep -Eqx '$1' /tmp/watch.log; then exit 0; fi; sleep 0.1; done; exit 1\"}") || return
+    ! grep -q 'exit code' <<<"$out"
+  }
+  check "Vite's watcher hears the edit" yes "$(succeeds heard 'change src/main.js')"
+  check "… a new file" yes "$(succeeds heard '(add|change) src/new.js')"
+  check "… a file in new folders" yes "$(succeeds heard '(add|change) src/feature/deep/d.js')"
+  note "Vite's watcher heard: $(mcp $ENV Bash '{"command": "sort -u /tmp/watch.log | tr \"\\n\" \";\""}')"
+
+  check "KillShell stops Vite" yes "$(succeeds grep -q 'is killed' <<<"$(mcp $ENV KillShell "{\"shell_id\": \"$job\"}")")"
+  check "… and then the box sleeps after the last Bash call's 5 s" asleep "$(asleep_within $ENV 20)"
+
+  # Previews, as a browser on the machine asks for them. A preview request
+  # wakes the box and counts as its use, so these come last.
+  # preview HOST PATH prints what the front door answers for HOST.
+  preview() {
+    on_node curl -s -H "Host: $1" "http://127.0.0.1:30780$2" </dev/null
+  }
+  check "a preview of a port nothing listens on says so" yes "$(succeeds grep -q 'nothing listens on port 5173' <<<"$(preview "5173-$ENV.localhost:30780" /)")"
+  # A dev server in services.yaml starts with the box, which a preview wakes.
+  fern exec $ENV -- sh -c 'printf "services:\n  web:\n    run: pnpm exec vite --host 0.0.0.0 --port \$PORT --strictPort\n    port: 5173\n" > services.yaml'
+  fern sleep $ENV >/dev/null
+  start=$(now_ms)
+  check "the default preview http://$ENV.localhost:30780/ wakes the box and serves Vite" yes "$(succeeds grep -q 'v = 2' <<<"$(preview "$ENV.localhost:30780" /src/main.js)")"
+  note "asleep to served through the preview: $(($(now_ms) - start)) ms"
+  check "… as does http://5173-$ENV.localhost:30780/" yes "$(succeeds grep -q 'v = 2' <<<"$(preview "5173-$ENV.localhost:30780" /src/main.js)")"
+  check "… with its live reload's client" yes "$(succeeds grep -q WebSocket <<<"$(preview "$ENV.localhost:30780" /@vite/client)")"
+  fern exec --agent $ENV -- sh -c 'echo "export const v = 3" > src/main.js'
+  check "an edit of Claude's reaches the preview" yes "$(succeeds on_node sh -c 'for i in $(seq 100); do curl -s -H "Host: $1" http://127.0.0.1:30780/src/main.js | grep -q "v = 3" && exit; sleep 0.1; done; exit 1' sh "$ENV.localhost:30780" </dev/null)"
+}
+
+# tools builds a golden snapshot of a TanStack Start repository that pins
+# Node 22 and pnpm 10 (lab/tanstack-repo), which the box image hasn't got,
+# and serves a thread of it through a preview.
+tools() {
+  echo "== a repository's pinned tools, in its golden snapshot"
+  local W=/var/lib/fern/worktrees/tools-check G key
+  G=$(golden_id tools-check)
+  for e in tools1 tools2 "$G"; do fern rm "$e" 2>/dev/null || true; done
+  fresh $ENV
+  check "the box image has no npm or pnpm" "no no" \
+    "$(fern exec $ENV -- sh -c 'for t in npm pnpm; do PATH=/usr/local/bin:/usr/bin:/bin command -v $t >/dev/null && echo yes || echo no; done' | xargs)"
+  for wt in one two; do
+    tar_dir lab/tanstack-repo | in_daemon "rm -rf $W/$wt && mkdir -p $W/$wt && tar -x -C $W/$wt -f - && chown -R 1000:1000 $W/$wt"
+  done
+  fern create tools1 --path $W/one >/dev/null
+  start=$(now_ms)
+  for _ in $(seq 300); do
+    key=$(fern snapshots "$G" 2>/dev/null | awk '$1 ~ /^golden-/ { print $1 }')
+    [ -n "$key" ] && break
+    sleep 1
+  done
+  metric tools.golden_build_ms "golden build with Node, pnpm and the dependencies, ms" $(($(now_ms) - start))
+  check "a golden snapshot is built" 1 "$(grep -c . <<<"$key")"
+  if [ -z "$key" ]; then
+    box_log "$G" | tail -20 | sed 's/^/  builder: /'
+    return
+  fi
+  check "it holds Node 22, pnpm and node_modules, not the checkout" "yes yes yes no" \
+    "$(in_daemon "cd /var/lib/fern/envs/$G/snaps/$key && for p in .fern/tools/installs/node/22 .fern/tools/installs/pnpm node_modules/.pnpm package.json; do test -e \$p && echo yes || echo no; done" | xargs)"
+  pool_du tools.golden "/var/lib/fern/envs/$G/snaps/$key"
+  metric tools.create_ms "create from golden, ms" "$(node_ms "$FERN_CLI" create tools2 --path $W/two)"
+  check "git ignores the tools" '*' "$(in_daemon "cat $W/two/.fern/tools/.gitignore")"
+  # preview HOST PATH prints what the front door answers for HOST.
+  preview() {
+    on_node curl -s -H "Host: $1" "http://127.0.0.1:30780$2" </dev/null
+  }
+  start=$(now_ms)
+  check "a preview wakes the thread and TanStack Start serves its page" yes \
+    "$(succeeds grep -q 'Hello world' <<<"$(preview "tools2.localhost:30780" /)")"
+  note "asleep to TanStack Start's page through the preview, from golden: $(($(now_ms) - start)) ms"
+  check "Claude's Bash gets the pinned Node and pnpm" "v22 10" \
+    "$(fern exec tools2 -- sh -c 'echo $(node --version | cut -d. -f1) $(pnpm --version | cut -d. -f1)')"
+  for e in tools1 tools2 "$G" $ENV; do fern rm "$e"; done
+  in_daemon "rm -rf $W"
 }
 
 t3() {
@@ -1059,7 +1239,7 @@ stability() {
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden claude turn hardware stability)
+  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden tools claude devserver turn hardware stability)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.
