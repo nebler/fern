@@ -4,8 +4,8 @@
 # from images built here. Run it again to update; every step skips what is
 # done. Then the lab's scripts work on it with FERN_HOST set:
 #   FERN_HOST=1.2.3.4 lab/check.sh
-# Needs Ubuntu, the Mac's CPU architecture (the images are built here) and a
-# firewall in front that lets in only SSH: T3's port must not be public.
+# Needs Ubuntu and a firewall in front that lets in only SSH: T3's port must
+# not be public. The images are built on the VPS, with Podman.
 #
 # A VPS set up with k3s before (docs/briefs/fern-without-kubernetes.md)
 # moves over: Claude's login from its Secret to /etc/fern/claude.env, boxes
@@ -18,8 +18,12 @@ lab_lock
 on_node env GVISOR_RELEASE="$GVISOR_RELEASE" bash -s <<'NODE'
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-{ command -v mkfs.btrfs && command -v bzip2 && command -v nft && command -v nsenter; } >/dev/null ||
-  { apt-get update -qq && apt-get install -yqq btrfs-progs bzip2 nftables iproute2 util-linux curl >/dev/null; }
+{ command -v mkfs.btrfs && command -v bzip2 && command -v nft && command -v nsenter && command -v podman; } >/dev/null ||
+  { apt-get update -qq && apt-get install -yqq btrfs-progs bzip2 nftables iproute2 util-linux curl >/dev/null &&
+    apt-get install -yqq --no-install-recommends podman buildah >/dev/null; }
+# The Dockerfile's and the lab's short image names are Docker Hub's.
+mkdir -p /etc/containers/registries.conf.d
+printf 'unqualified-search-registries = ["docker.io"]\nshort-name-mode = "permissive"\n' >/etc/containers/registries.conf.d/fern.conf
 
 # From k3s: Claude's login moves to the file the daemon and T3 read, on the
 # node only; boxes sleep, so their services stop cleanly; then k3s goes,
@@ -63,16 +67,23 @@ NFT
 cat >/etc/systemd/system/fern-firewall.service <<'UNIT'
 [Unit]
 Description=Fern's firewall: only SSH from outside
-Before=fern-daemon.service fern-t3.service network-pre.target
+# Like Ubuntu's nftables.service: no default dependencies, which would wait
+# for sysinit.target, which waits for cloud-init's network stage, which
+# waits for the network this unit holds back. The boot hung there.
+DefaultDependencies=no
+Before=fern-daemon.service fern-t3.service network-pre.target shutdown.target
 Wants=network-pre.target
+Conflicts=shutdown.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/sbin/nft -f /etc/fern/firewall.nft
 [Install]
-WantedBy=multi-user.target
+WantedBy=sysinit.target
 UNIT
 systemctl daemon-reload
+# A node set up before 2026-10-31 has it in multi-user.target.
+systemctl disable -q fern-firewall
 systemctl enable -q fern-firewall
 systemctl restart fern-firewall
 
@@ -95,8 +106,10 @@ fi
 sed -i -E 's#^(/var/lib/fern-img/pool.img /var/lib/fern btrfs )loop,noatime( |$)#\1loop,noatime,nofail\2#' /etc/fstab
 
 # gVisor mirrors all of a box's memory mappings into one host process; at
-# the kernel's default limit, large builds (Node, JVM) segfault.
-echo vm.max_map_count=4194304 >/etc/sysctl.d/90-fern.conf
+# the kernel's default limit, large builds (Node, JVM) segfault. Boxes reach
+# the internet through the node, which forwards for them (k3s used to turn
+# that on, and a node without it lost it at its next boot).
+printf 'vm.max_map_count=4194304\nnet.ipv4.ip_forward=1\n' >/etc/sysctl.d/90-fern.conf
 sysctl -q --system
 
 if ! { /usr/local/bin/runsc --version 2>/dev/null | grep -q "release-$GVISOR_RELEASE" && [ -x /usr/local/bin/gvisor-bin/gvisor_sentry ]; }; then

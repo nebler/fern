@@ -3,7 +3,7 @@
 # golang container with a loop-mounted pool. Nothing is installed on the Mac.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
-exec "${GO_RUN[@]}" --privileged -e DEBIAN_FRONTEND=noninteractive golang:1.27 bash -c '
+"${GO_RUN[@]}" --privileged -e DEBIAN_FRONTEND=noninteractive golang:1.27 bash -c '
     set -euo pipefail
     apt-get update -qq && apt-get install -y -qq btrfs-progs >/dev/null
     truncate -s 2G /tmp/pool.img && mkfs.btrfs -q /tmp/pool.img
