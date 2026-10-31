@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Fern's images, one target each; lab/build.sh builds them:
 #   fern      the daemon and the CLI
-#   fern-box  a box: Debian slim with Postgres, git, curl and Claude Code
+#   fern-box  a box: Debian slim with Postgres, git, curl, mise and Claude Code
 #   fern-t3   T3 Code's server with Fern's checkpoint hook
 
 FROM golang:1.27 AS go
@@ -22,11 +22,26 @@ ARG CLAUDE_VERSION=2.1.304
 ARG CLAUDE_SHA256_arm64=c487117526509ab6d2ee6013e14f181faf68d6d6afe6bb0d4b2b4a9feca5ecb3
 ARG CLAUDE_SHA256_amd64=ea0f135784631619a7a409d07322ecec964f9cc4fd377508ed1ba3f141f27912
 RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
  && case "$TARGETARCH" in arm64) platform=linux-arm64 sum=$CLAUDE_SHA256_arm64 ;; \
       amd64) platform=linux-x64 sum=$CLAUDE_SHA256_amd64 ;; *) exit 1 ;; esac \
  && curl -fsSL -o /claude "https://downloads.claude.ai/claude-code-releases/$CLAUDE_VERSION/$platform/claude" \
  && echo "$sum  /claude" | sha256sum -c - \
  && chmod 755 /claude
+
+# mise, which installs the tools a repository pins (Node, pnpm, bun, …) into
+# its workspace (fern-init), pinned and checked against its release's sums.
+FROM claude AS mise
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG TARGETARCH
+ARG MISE_VERSION=2026.10.25
+ARG MISE_SHA256_arm64=bb09e88b13164ca90691a5cc042726d079f0ba26ab55527344cb173c2e83c998
+ARG MISE_SHA256_amd64=5d362ecc578dc7c146679b841dda949d6472cbf86ff5635db7afdca1b6b3fd87
+RUN case "$TARGETARCH" in arm64) platform=linux-arm64 sum=$MISE_SHA256_arm64 ;; \
+      amd64) platform=linux-x64 sum=$MISE_SHA256_amd64 ;; *) exit 1 ;; esac \
+ && curl -fsSL -o /mise "https://github.com/jdx/mise/releases/download/v$MISE_VERSION/mise-v$MISE_VERSION-$platform" \
+ && echo "$sum  /mise" | sha256sum -c - \
+ && chmod 755 /mise
 
 FROM debian:trixie-slim AS fern
 RUN apt-get update \
@@ -53,6 +68,7 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
  && useradd --uid 1000 --user-group --home-dir /tmp --no-create-home fern
 COPY --from=go /out/fern-init /usr/local/bin/fern-init
 COPY --from=claude /claude /usr/local/bin/claude
+COPY --from=mise /mise /usr/local/bin/mise
 # The root filesystem is read-only, so Claude Code must not update itself.
 ENV PATH=/usr/lib/postgresql/17/bin:$PATH \
     HOME=/tmp PGHOST=/tmp PGUSER=postgres PGDATABASE=postgres \

@@ -35,8 +35,10 @@ import (
 
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api/server"
+	"github.com/nebler/fern/internal/preview"
 	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
+	"github.com/nebler/fern/internal/watch"
 )
 
 // Where the daemon finds the pool, serves its API and keeps its boxes.
@@ -88,6 +90,9 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	metricsAddr := flags.String("metrics-addr", "127.0.0.1:9090", "serve Prometheus metrics at /metrics, and Go's profiles at /debug/pprof/, on this address")
 	traceEndpoint := flags.String("trace-endpoint", "", "send traces by OTLP/HTTP to this URL, such as http://10.0.0.1:4318 (\"\": none)")
 	boxDNS := flags.String("box-dns", "1.1.1.1,8.8.8.8", "the resolvers boxes use")
+	// On every address, as T3's port: the node's firewall keeps it private.
+	previewAddr := flags.String("preview-addr", ":30780", "serve previews of boxes' ports on this address (\"\": none)")
+	previewHost := flags.String("preview-host", "localhost", "previews are http://PORT-ENV.HOST/ and http://ENV.HOST/")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -118,6 +123,17 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	var previewLis net.Listener
+	previewAt := "" // where boxes tell people to open their previews
+	if *previewAddr != "" {
+		if previewLis, err = new(net.ListenConfig).Listen(ctx, "tcp", *previewAddr); err != nil {
+			return err
+		}
+		previewAt = *previewHost
+		if _, port, err := net.SplitHostPort(*previewAddr); err == nil && port != "80" {
+			previewAt += ":" + port
+		}
+	}
 	var mcpLis net.Listener
 	agentMCP := ""
 	if cfg.Agents {
@@ -146,11 +162,14 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 
 	drv := runsc.New(runsc.Config{
 		Pool: pool, Bundles: runscBundles, State: runscState, Images: filepath.Join(pool, "images"), Image: boxImage,
-		DNS: strings.Split(*boxDNS, ","), Login: fileLogin(loginFile), MCPPort: mcpPort,
+		DNS: strings.Split(*boxDNS, ","), Login: fileLogin(loginFile), MCPPort: mcpPort, Preview: previewAt,
 	}, tr, reg)
 	// Golden keys name the image's content, not its tag.
 	if cfg.Image, err = drv.Prepare(ctx); err != nil {
 		return fmt.Errorf("prepare the node for boxes: %w", err)
+	}
+	if cfg.Agents {
+		cfg.Watcher = watch.New(runsc.BoxOf, log)
 	}
 	envs := actor.New(st, drv, cfg, tr, reg, log)
 	apiSrv := server.New(st, drv, envs, agentMCP, tr, log)
@@ -164,6 +183,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		{"api", &http.Server{Handler: apiSrv.Handler()}, apiLis},
 		{"metrics", &http.Server{Handler: metricsHandler(reg)}, metricsLis},
 		{"mcp", &http.Server{Handler: apiSrv.MCPHandler()}, mcpLis},
+		{"preview", &http.Server{Handler: preview.New(*previewHost, st, envs, log)}, previewLis},
 	}
 	log.InfoContext(ctx, "fern daemon started", slog.String("node", node))
 	// Changes outlive their requests: Run returns once they have ended, and
@@ -190,6 +210,8 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		for _, s := range servers {
 			errs = append(errs, s.srv.Shutdown(shutdownCtx))
 		}
+		// Claude's background commands, which no request holds.
+		apiSrv.Close()
 		return errors.Join(errs...)
 	})
 	return g.Wait()

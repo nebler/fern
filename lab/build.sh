@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Builds the lab's images from images/Dockerfile: fern:dev and fern-box:dev,
-# and fern-t3:dev with "lab/build.sh t3" or when the node runs T3. If the lab
+# and fern-t3:dev with "lab/build.sh t3" or when the node runs T3, in the
+# Mac's Docker, or with FERN_HOST on the VPS, with Podman. If the lab
 # is up, it installs the binaries and units, loads the images into the pool
 # (fern image load) and restarts the services. Boxes keep running through
 # the daemon's restart; it adopts them.
@@ -13,8 +14,9 @@ if [ "${1:-}" = t3 ] || { lab_up && t3_installed; }; then
   t3=yes
   images+=(fern-t3)
 fi
+sync_src
 for image in "${images[@]}"; do
-  docker build -q --label "$LABEL" --target "$image" -f images/Dockerfile -t "$image:dev" . >/dev/null
+  builder build -q --label "$LABEL" "${NET[@]}" --target "$image" -f "$SRC/images/Dockerfile" -t "$image:dev" "$SRC" </dev/null >/dev/null
   echo "built $image:dev"
 done
 lab_up || exit 0

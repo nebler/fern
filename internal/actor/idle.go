@@ -93,9 +93,11 @@ func (a *actor) endLease(result string) {
 	a.lease, a.prewoken = time.Time{}, false
 }
 
-// deadline is when an awake box with nothing running may go to sleep.
+// deadline is when an awake box with nothing running but jobs may go to
+// sleep.
 func (a *actor) deadline() time.Time {
-	if !a.lease.IsZero() {
+	// A lease is for a box with nothing left to do; jobs are something.
+	if !a.lease.IsZero() && len(a.jobs) == 0 {
 		return a.lease
 	}
 	return later(a.closed.Add(a.g.cfg.Idle.Agent), a.opened.Add(a.g.cfg.Idle.Human))

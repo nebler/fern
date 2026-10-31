@@ -6,6 +6,7 @@
 # with the fix.
 set -euo pipefail
 source "$(dirname "$0")/lib.sh"
+sync_src
 "${GO_RUN[@]}" -e FUZZTIME="${FUZZTIME:-20s}" golang:1.27 bash -c '
   set -euo pipefail
   for pkg in $(go list ./...); do

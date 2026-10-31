@@ -4,7 +4,8 @@
 # /bin/bash is 3.2, so put Homebrew's first in PATH.
 #
 # With FERN_HOST set, the scripts work on that VPS (lab/vps.sh), as root over
-# SSH, instead of the local lab's container.
+# SSH, instead of the local lab's container, and build and run Go there too:
+# the Mac's Docker isn't needed.
 LAB=fern-lab
 LABEL=app.kubernetes.io/part-of=fern
 FERN_HOST=${FERN_HOST:-}
@@ -15,11 +16,46 @@ GVISOR_RELEASE=20261012
 SSH=(ssh -o BatchMode=yes -o LogLevel=ERROR -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/fern-%C" -o ControlPersist=60)
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit
 
+# SRC is the repository the builds and containers use: the working tree, or
+# with FERN_HOST its copy on the VPS (sync_src), where Podman stands in for
+# Docker (builder). NET keeps Podman's containers on the host's network, so
+# it adds no bridge or firewall rules to the node.
+if [ -n "$FERN_HOST" ]; then
+  SRC=/root/fern-src
+  NET=(--network=host)
+else
+  SRC=$PWD
+  NET=()
+fi
+
+# builder runs a Docker command where the builds are: the Mac's Docker, or
+# the VPS's Podman.
+builder() {
+  if [ -n "$FERN_HOST" ]; then
+    on_node podman "$@"
+  else
+    docker "$@"
+  fi
+}
+
+# sync_src copies the working tree, its tracked files and the untracked ones
+# git doesn't ignore, to SRC on the VPS, once for a script and the scripts
+# it runs.
+sync_src() {
+  [ -n "$FERN_HOST" ] && [ -z "${FERN_SRC_SYNCED:-}" ] || return 0
+  git ls-files -z -co --exclude-standard | perl -0ne 'chomp; print "$_\0" if -e' |
+    COPYFILE_DISABLE=1 tar --no-xattrs --null -T - -czf - |
+    on_node sh -c "rm -rf $SRC.new && mkdir -p $SRC.new && tar -xzf - -C $SRC.new &&
+      rm -rf $SRC.old && { [ ! -e $SRC ] || mv $SRC $SRC.old; } && mv $SRC.new $SRC"
+  export FERN_SRC_SYNCED=1
+}
+
 # GO_RUN starts a container with the repository mounted and Go's module and
 # build caches kept in volumes, so nothing is installed on the Mac. CI sets
 # FERN_GOMODCACHE and FERN_GOCACHE to folders on the runner, which it caches.
+# Scripts that use it call sync_src first.
 # shellcheck disable=SC2034 # the scripts that source this use it
-GO_RUN=(docker run --rm --label "$LABEL" -v "$PWD:/src" -w /src
+GO_RUN=(builder run --rm --label "$LABEL" "${NET[@]}" -v "$SRC:/src" -w /src
   -v "${FERN_GOMODCACHE:-fern-lab-gomod}:/go/pkg/mod" -v "${FERN_GOCACHE:-fern-lab-gocache}:/root/.cache/go-build"
   -e GOFLAGS=-buildvcs=false)
 
@@ -62,6 +98,16 @@ FERN_CLI=/usr/local/bin/fern
 # image to the node, unless it has the same ones.
 install_cli() {
   local tmp cid bin
+  if [ -n "$FERN_HOST" ]; then
+    on_node sh -c 'set -e; cid=$(podman create fern:dev)
+      for bin in fern fern-daemon; do
+        podman cp "$cid:/usr/local/bin/$bin" "/usr/local/bin/$bin.new"
+        if cmp -s "/usr/local/bin/$bin.new" "/usr/local/bin/$bin"; then rm "/usr/local/bin/$bin.new"
+        else chmod 755 "/usr/local/bin/$bin.new" && mv "/usr/local/bin/$bin.new" "/usr/local/bin/$bin"; fi
+      done
+      podman rm "$cid" >/dev/null' </dev/null
+    return
+  fi
   tmp=$(mktemp -d)
   cid=$(docker create --label "$LABEL" fern:dev)
   for bin in fern fern-daemon; do
@@ -160,14 +206,13 @@ box_uid() {
 # it to.
 box_log() { on_node cat "/var/lib/fern/boxes/$1/log" </dev/null 2>/dev/null || true; }
 
-# load_images unpacks images from Docker into the node's pool (fern image
-# load), skipping those it has: the node keeps the Docker ID of each it
-# loaded, since a VPS is far away for gigabytes.
+# load_images unpacks images from Docker (Podman on a VPS) into the node's
+# pool (fern image load), skipping those it has: the node keeps the ID of
+# each it loaded.
 load_images() {
   local arch image id changed=() ids=()
-  case $(on_node uname -m </dev/null) in aarch64) arch=arm64 ;; *) arch=amd64 ;; esac
   for image in "$@"; do
-    id=$(docker image inspect -f '{{.Id}}' "$image")
+    id=$(builder image inspect -f '{{.Id}}' "$image" </dev/null)
     # fern image load names a tag's link with its slashes as underscores.
     if [ "$(on_node sh -c "test -e '/var/lib/fern/images/${image//\//_}' && cat /var/lib/fern-images/${image//[\/:]/-}" </dev/null 2>/dev/null)" != "$id" ]; then
       changed+=("$image")
@@ -175,8 +220,12 @@ load_images() {
     fi
   done
   [ ${#changed[@]} -gt 0 ] || return 0
-  # Compressed on the way: a Mac's upload to a VPS is the slow part.
-  docker save --platform "linux/$arch" "${changed[@]}" | gzip -1 | on_node sh -c "gunzip | $FERN_CLI image load" >/dev/null
+  if [ -n "$FERN_HOST" ]; then
+    on_node sh -c "podman save -m $(printf '%q ' "${changed[@]}") | $FERN_CLI image load" </dev/null >/dev/null
+  else
+    case $(on_node uname -m </dev/null) in aarch64) arch=arm64 ;; *) arch=amd64 ;; esac
+    docker save --platform "linux/$arch" "${changed[@]}" | on_node "$FERN_CLI" image load >/dev/null
+  fi
   for i in "${!changed[@]}"; do
     echo "${ids[$i]}" | on_node sh -c "mkdir -p /var/lib/fern-images && cat >/var/lib/fern-images/${changed[$i]//[\/:]/-}"
   done

@@ -134,8 +134,11 @@ func read(dir, id string) (Image, error) {
 }
 
 // tagName is the name of tag's symlink: a repository's slashes would make
-// folders.
-func tagName(tag string) string { return strings.ReplaceAll(tag, "/", "_") }
+// folders. Podman saves a local image NAME as localhost/NAME, which is the
+// image Docker saves as NAME.
+func tagName(tag string) string {
+	return strings.ReplaceAll(strings.TrimPrefix(tag, "localhost/"), "/", "_")
+}
 
 // extract writes the regular files of tar stream r into stage.
 func extract(ctx context.Context, r io.Reader, stage string) error {

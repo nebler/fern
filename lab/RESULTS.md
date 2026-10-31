@@ -1525,3 +1525,141 @@ turn; the turn after Fern stopped Claude resumes it in 5.0 s (agent box
 woken in 277 ms); revert 1.1 s. Every check of the gate passes, the network
 ones included; its 9 flags are the same moves as with runsc alone (the
 daemon's own CPU, on-demand initdb in a fresh environment's first command).
+
+## Dev servers hear Claude's edits (local lab), 2026-10-31
+
+With agent boxes, a dev server in the environment's box never heard of the
+files Claude wrote from its agent box: gVisor delivers inotify events only
+inside the sandbox that made the change. Measured with `fs.watch` in the
+services' box: its own edits fire, the agent box's fire nothing, though the
+new content is there to read. One sandbox with both as containers doesn't
+help either ([spike/watch/RESULTS.md](spike/watch/RESULTS.md)).
+
+The fix (architecture §10): the daemon watches the workspace on the host
+with fanotify while the agent box is awake, keeps the writes of processes
+in the agent box's cgroup, and has the environment's fern-init touch each
+file (its own times again), which the box's watchers hear.
+
+`lab/check.sh devserver` runs Vite 7.3.7 in the box and edits, adds and
+nests files from the agent box:
+
+| | without the fix (HEAD's daemon) | with it |
+|---|---|---|
+| Vite serves the edited module | no: the old one, after 10 s | yes |
+| Vite's watcher hears the edit, the new file, the file in new folders | none of them | `change`, `add`, `add` (and `addDir` for the folders) |
+| edit to served, the agent box's exec included | | 1.3 s and 3.2 s (two runs) |
+
+That time isn't broken down yet: it holds the agent box's wake for the
+edit command, two execs from the Mac and the check's 100 ms polling, around
+the watch's 20 ms batch and one touch request. Also: the box image has no
+npm (the check fetches its tarball), and workerd (Miniflare 4, D1) runs
+under gVisor, with D1's SQLite in the workspace rewound by a restore taken
+while it ran.
+
+## Dev servers Claude starts keep running (local lab), 2026-10-31
+
+A Bash call's command ended with the call, its process group killed, and
+the box slept 5 s after the last call: Claude couldn't keep a dev server
+up. MCP Bash now takes `run_in_background` (with BashOutput and KillShell):
+the daemon holds the command open as a job, and a box with one sleeps on its
+idle clocks instead (architecture §6.3, §10).
+
+`lab/check.sh devserver`, which starts Vite 7.3.7 through MCP Bash from the
+agent box, as Claude does, and reaches it from the node:
+
+| | |
+|---|---|
+| a minute after the Bash call | the box is awake and Vite serves |
+| BashOutput | Vite's output (`ready in …`) |
+| Claude's edit, a new file, a file in new folders | Vite hears them and serves the new module; edit to served 1.0 s |
+| KillShell | Vite is killed, and the box sleeps 5 s after the last call |
+
+Not yet run with Claude itself choosing `run_in_background` (no login in
+the lab): the tool's description and Claude's hint tell it to.
+
+## Previews (local lab), 2026-10-31
+
+The daemon's front door (`internal/preview`, `--preview-addr :30780`)
+serves `http://<port>-<env>.localhost:30780/` and, for the service in
+services.yaml with a `port`, `http://<env>.localhost:30780/`, waking an
+asleep box; a request in progress counts as a use of the box.
+
+In a browser on the Mac (the lab's port forwarded to its localhost), with
+Vite declared in a `demo` environment's services.yaml and the box asleep:
+opening `http://demo.localhost:30780/` woke the box, started Vite and loaded
+the page; an edit of `src/main.js` from the agent box changed the open page
+by itself, through Vite's live reload over the preview's WebSocket.
+
+`lab/check.sh devserver`, from the node: a port nothing listens on answers
+502 saying so; the default preview wakes an asleep box and serves Vite,
+asleep to served 1.9 s (Vite's own start included); `5173-<env>` serves the
+same; Claude's edit reaches the preview. Edit to served is now 464 ms, the
+agent box's exec included: the watch is the environment's box's, so it is
+running before Claude's edit (it was the agent box's, which slept 70 ms
+after the edit command and dropped the edit in one of the runs).
+`lab/check.sh limits` adds: a box can't reach the previews' port.
+
+## The VPS again: built on it, a hung boot, a new baseline, 2026-10-31
+
+Hetzner CAX21 as before (`FERN_HOST=178.105.167.141`). The images and Go
+now build and run on the VPS with Podman (`lab/lib.sh`); the Mac only
+sends the source. The full build (T3's image included) took 7 minutes.
+
+**Two node bugs, both from `lab/vps.sh`:**
+- **Every boot since 2026-10-28 hung before SSH.** `fern-firewall.service`
+  ordered itself before `network-pre.target` but kept systemd's default
+  dependencies: it waited for `sysinit.target`, which waits for
+  cloud-init's network stage, which waits for the network. Found from
+  Hetzner's rescue system in the journal (`cloud-init-network` running for
+  2 days 22 hours, `systemd-networkd` never started). The unit now has
+  `DefaultDependencies=no`, as Ubuntu's `nftables.service`; a reboot comes
+  back up with the firewall, the daemon and T3.
+- **Boxes had no internet after a reboot.** Nothing turned on IP forwarding
+  once k3s was gone (k3s did, until the next boot). `/etc/sysctl.d/90-fern.conf`
+  sets it. Four of `check.sh all`'s checks failed on it (the box reaches
+  the internet, Claude's screen, Vite's npm install); with it, `limits`,
+  `claude`, `devserver` and `t3` pass.
+
+On the VPS, `devserver`: edit to served 416 ms; asleep to served through the
+preview 1.5 s.
+
+**Perf:** `lab/perf/vps.tsv` was from 2026-10-27, under k3s; HEAD and the
+commit before web development (a185c6c9) both failed it, by 12 and 13
+metrics, mostly daemon CPU, now that the daemon runs the boxes containerd
+used to. Against each other, one run each, they differ past the margins
+only in the daemon's memory (10.1 → 12.0 MiB: the preview server and the
+watch) and in noisy single-run numbers. New baseline: `lab/perf.sh
+--accept` at d10ad4a6, 5 runs, 50 minutes (box wake p50 220 ms, 20 boxes'
+wake p50 763 ms, the daemon 10.8 MiB).
+
+## Tools per repository (mise), VPS, 2026-10-31
+
+The box image has mise (2026.10.25) and no npm or pnpm. A repository pins
+its tools in `mise.toml` / `.tool-versions`; the environment's box installs
+them into the workspace's `.fern/tools/` before its services start, and a
+golden snapshot holds them (architecture §8).
+
+`lab/check.sh tools`, TanStack Start's `start-bare` example pinning Node 22
+and pnpm 10 (`lab/tanstack-repo`): the golden build (tools, `pnpm install`,
+Vite's first start) took 29–41 s; a thread is created from it in 35 ms with
+the tools and `node_modules`; a preview wakes it and serves the page in
+16.6 s; Claude's Bash gets Node 22 and pnpm 10. `devserver` now gets Node
+and pnpm the same way, without a golden: the wake that installs them takes
+11.7–12.6 s (2.7 s under runc on the same VPS).
+
+**Bug found:** a command run without a shell (`fern exec … -- node`) got the
+image's Node 20: Go looked the program up on fern-init's PATH, not the
+command's. boxexec now looks it up on the PATH the command runs with.
+
+**Where TanStack Start's 16.6 s goes:** Vite is ready about 5 s after the
+box starts (1 s of it `pnpm install` finding everything installed) and the
+first server render takes about 10 s; the next request takes 32 ms. The same
+workspace under runc: ready 1.7 s, first page 4.6 s. gVisor costs about 2.2
+times on this file-heavy start (the workspace is mounted shared, so gVisor
+revalidates every file it opens). Not path-bound caches: a second wake of
+the same thread, whose Vite cache matches its path, took 15.6 s.
+
+`lab/perf.sh --fast` fails on box.sleep_ms.p95 (382 ms against 81) at this
+change and at the commit before it alike: one sleep in each run takes about
+385 ms, which is the p95 of the fast gate's few samples (with 20, p95 is
+88 ms).

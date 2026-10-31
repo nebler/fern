@@ -61,6 +61,12 @@ services:
 			want: map[string]service{"db": {Run: "x", Listen: "unix:/tmp/.s.PGSQL.5432"}, "web": {Run: "npm start", Listen: "tcp:3000"}},
 		},
 		{name: "bad listen", yaml: "services:\n  db:\n    run: x\n    listen: 5432\n", wantErr: true},
+		{
+			name: "port",
+			yaml: "services:\n  web:\n    run: vite --port $PORT\n    port: 5173\n",
+			want: map[string]service{"web": {Run: "vite --port $PORT", Port: 5173}},
+		},
+		{name: "bad port", yaml: "services:\n  web:\n    run: x\n    port: 70000\n", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

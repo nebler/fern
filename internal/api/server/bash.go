@@ -34,12 +34,25 @@ type bashInput struct {
 	Command     string `json:"command" jsonschema:"the command to run, with /bin/sh, in the workspace"`
 	Timeout     int    `json:"timeout,omitempty" jsonschema:"milliseconds before the command is stopped; 120000 if 0, at most 600000"`
 	Description string `json:"description,omitempty" jsonschema:"what the command does, in a few words"`
+	// Background keeps the command running after the call, as a job.
+	Background bool `json:"run_in_background,omitempty" jsonschema:"keep the command running after this call returns, such as a dev server; read its output with BashOutput, stop it with KillShell"`
 }
 
+// bashOutputInput and killShellInput name a background command.
+type (
+	bashOutputInput struct {
+		ID string `json:"bash_id" jsonschema:"the ID Bash gave the background command"`
+	}
+	killShellInput struct {
+		ID string `json:"shell_id" jsonschema:"the ID Bash gave the background command"`
+	}
+)
+
 // MCPHandler serves each environment's MCP server at /mcp/{id}, for its agent
-// box's Claude. Its one tool, Bash, runs a command in the environment's own
-// box, where the services are, waking it first; the box sleeps bashLinger
-// after the last. A request must carry the environment's box token, which
+// box's Claude. Its tool Bash runs a command in the environment's own box,
+// where the services are, waking it first; the box sleeps bashLinger after
+// the last. A command run in the background goes on after the call (jobs),
+// and BashOutput and KillShell read and stop it. A request must carry the environment's box token, which
 // only its boxes have.
 func (s *Server) MCPHandler() http.Handler {
 	mux := http.NewServeMux()
@@ -66,8 +79,16 @@ func (s *Server) bashServer(id string) *mcp.Server {
 		Description: "Runs a shell command in this thread's box, where its services (databases, servers) run, " +
 			"in the workspace, and returns what it printed and its exit code. Use it as you would Bash. " +
 			"Every command starts in the workspace: put a cd in the same command if you need another folder. " +
-			"There are no background commands.",
+			"Run servers that must keep running, such as `npm run dev`, with run_in_background: they keep running " +
+			"after your turn, until KillShell stops them or the box sleeps, 20 minutes after its last use.",
 	}, func(ctx context.Context, _ *mcp.CallToolRequest, in bashInput) (*mcp.CallToolResult, any, error) {
+		if in.Background {
+			jobID, err := s.startJob(ctx, id, in)
+			if err != nil {
+				return toolError(err), nil, nil
+			}
+			return toolText(fmt.Sprintf("Running in the background as %s: read its output with BashOutput, stop it with KillShell.", jobID)), nil, nil
+		}
 		// A command that couldn't run is the tool's error, for Claude to read,
 		// not the protocol's.
 		res := &mcp.CallToolResult{}
@@ -82,7 +103,37 @@ func (s *Server) bashServer(id string) *mcp.Server {
 		res.Content = []mcp.Content{&mcp.TextContent{Text: text}}
 		return res, nil, nil
 	})
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "BashOutput",
+		Description: "Returns what a background command started by Bash printed since the last call, and whether it still runs.",
+	}, func(_ context.Context, _ *mcp.CallToolRequest, in bashOutputInput) (*mcp.CallToolResult, any, error) {
+		j, err := s.findJob(id, in.ID)
+		if err != nil {
+			return toolError(err), nil, nil
+		}
+		return toolText(j.read()), nil, nil
+	})
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "KillShell",
+		Description: "Stops a background command started by Bash, with what it started, and returns its last output.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in killShellInput) (*mcp.CallToolResult, any, error) {
+		text, err := s.killJob(ctx, id, in.ID)
+		if err != nil {
+			return toolError(err), nil, nil
+		}
+		return toolText(text), nil, nil
+	})
 	return srv
+}
+
+func toolText(text string) *mcp.CallToolResult {
+	return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: text}}}
+}
+
+func toolError(err error) *mcp.CallToolResult {
+	res := toolText(err.Error())
+	res.IsError = true
+	return res
 }
 
 // bash runs in's command in environment id's box and returns its output,
@@ -97,7 +148,7 @@ func (s *Server) bash(ctx context.Context, id string, in bashInput) (string, int
 	}
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	conn, ex, err := s.dialBox(ctx, id, cancel)
+	conn, ex, err := s.dialBox(ctx, id, cancel, s.envs.Exec)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			return "", 0, fmt.Errorf("no environment %s", id)

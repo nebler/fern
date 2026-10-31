@@ -60,7 +60,7 @@ func checkServices(ctx context.Context, services map[string]service, dir string,
 			continue
 		}
 		wg.Go(func() {
-			if err := shell(ctx, readyTimeout, services[name].Ready, dir, env); err != nil {
+			if err := shell(ctx, readyTimeout, services[name].Ready, dir, services[name].environ(env)); err != nil {
 				errs[i] = fmt.Errorf("%s not ready: %w", name, err)
 			}
 		})
