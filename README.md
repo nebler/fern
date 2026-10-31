@@ -8,7 +8,15 @@
 
 **Give every AI coding thread its own environment that behaves like git for everything: code, dependencies and the running database.**
 
-Fern runs behind [T3 Code](https://github.com/pingdotgg/t3code). Each thread gets a sandboxed box with its own copy of the repository and its services (such as Postgres). Every agent turn is snapshotted, so reverting a thread in T3 brings back the files *and* the database as they were. Idle boxes sleep and wake on the next message. Claude runs as the real `claude` CLI on your own subscription: no API keys.
+<img src="docs/img/how-it-works.svg" alt="Every turn is a snapshot; revert brings back the code and the database" width="100%">
+
+Fern runs behind [T3 Code](https://github.com/pingdotgg/t3code). Each thread gets a sandboxed box with its own copy of the repository and its services (such as Postgres or a Vite dev server). Every agent turn is snapshotted, so reverting a thread in T3 brings back the files *and* the database as they were. Idle boxes sleep and wake on the next message, or when someone opens the thread's preview. Claude runs as the real `claude` CLI on your own subscription: no API keys.
+
+**What a thread gets:**
+- **Undo for everything.** A btrfs snapshot per turn (12 ms); a revert puts back files and Postgres together (about 0.1 s).
+- **A head start.** A new thread starts from the repository's golden snapshot in 35 ms, with its pinned tools (Node, pnpm, … through [mise](https://mise.jdx.dev)), `node_modules` and its initialised database.
+- **Web development.** Dev servers Claude starts keep running; they hear Claude's edits; `http://<thread>.localhost:30780/` is a preview that wakes the box and reloads by itself (edit to page: 0.4 s).
+- **Sleep when idle.** 30 s after a turn, Claude is stopped and both boxes sleep: no CPU until the next message.
 
 ## How it works
 
@@ -38,7 +46,8 @@ flowchart LR
 - **The daemon** (`fern-daemon`) owns the environments. Each one has an **actor**, a goroutine that makes its changes one at a time, counts the commands running in its boxes and puts them to sleep when idle.
 - **The store** keeps each workspace as a btrfs subvolume. A snapshot is a btrfs snapshot (milliseconds, no copy), and a revert swaps the workspace for a copy of one in a single atomic rename. SQLite is only the index: the disk is the truth.
 - **Boxes** are [gVisor](https://gvisor.dev) sandboxes the daemon starts itself with `runsc`, each with its own network namespace, an nftables firewall (internet only) and cgroup limits. Claude runs in an **agent box** of its own; its shell commands go through the daemon to the **environment box**, where the services are. The environment box never sees Claude's login.
-- **Golden snapshots** hold a repository's built setup (installed dependencies, an initialised database), so a new thread starts from one instead of running setup again.
+- **Golden snapshots** hold a repository's built setup (its pinned tools, installed dependencies, an initialised database), so a new thread starts from one instead of running setup again.
+- **The front door** (`:30780`) serves each box's ports as previews by host name, waking an asleep box; a request in progress, such as a live reload's WebSocket, keeps it awake. A fanotify watch on the host passes Claude's edits on to the dev servers in the environment's box, which gVisor would otherwise hide from them.
 
 A turn, end to end:
 
@@ -63,19 +72,28 @@ sequenceDiagram
     Note over T3,B: the next message wakes the boxes and resumes Claude's session
 ```
 
-## Results
+## Benchmarks
 
-Measured on the VPS, median of 3 runs: the current design against the first v2 design (agent-sandbox pods on Kubernetes).
+On a Hetzner CAX21 VPS (4 ARM cores, 8 GB), gVisor, medians:
 
-| | first design | now | |
-|---|---:|---:|---:|
-| CPU per short agent turn | 62,434 ms | 7,188 ms | **8.7× less** |
-| wake, p50 | 993 ms | 253 ms | 3.9× faster |
-| sleep, p50 | 1,221 ms | 90 ms | 13.6× faster |
-| revert in T3 (restore) | 1,034 ms | 108 ms | 9.6× faster |
-| memory per box, 20 awake | 82.8 MiB | 45.2 MiB | 45% less |
+| | time | CPU |
+|---|---:|---:|
+| snapshot a turn | 12 ms | 20 ms |
+| revert (files and database) | 86 ms | 140 ms |
+| wake a box | 220 ms | 330 ms |
+| put a box to sleep | 71 ms | 130 ms |
+| run a command in an awake box | 19 ms | |
+| new thread from a golden snapshot | 35 ms | |
+| Claude's edit to a reloaded preview | 416 ms | |
+| a whole short agent turn | | 7.3 s |
 
-Every number and how it was measured is in [`lab/RESULTS.md`](lab/RESULTS.md).
+Memory: 16 MiB for an awake box with Postgres idle, 10.8 MiB for the daemon. An idle box sleeps 30 s after a turn and then uses no CPU.
+
+Against the first design (agent-sandbox pods on Kubernetes): 8.7× less CPU per turn, revert 9.6× faster, 20 boxes woken at once 25 s → 1.2 s.
+
+Still slow: a heavy dev server's first page. TanStack Start takes 16.6 s from an asleep box, 4.6 s under runc: gVisor without KVM costs about twice the CPU.
+
+How each number was measured: [`lab/RESULTS.md`](lab/RESULTS.md).
 
 ## Engineering
 
@@ -88,7 +106,7 @@ Every number and how it was measured is in [`lab/RESULTS.md`](lab/RESULTS.md).
 
 ## Try it
 
-You need Docker, bash 5 (on a Mac: `brew install bash`), a Claude subscription and the T3 app.
+You need Docker (for the local lab; a VPS builds with Podman), bash 5 (on a Mac: `brew install bash`), a Claude subscription and the T3 app.
 
 ```sh
 lab/setup.sh                    # a local lab: a systemd Linux node in Docker
@@ -113,13 +131,18 @@ After a change: `lab/dev.sh` runs the unit tests, builds and runs the quick inte
 | [`internal/runsc`](internal/runsc) | boxes as gVisor sandboxes: bundle, network, firewall |
 | [`internal/boxexec`](internal/boxexec) | the exec protocol over WebSocket |
 | [`internal/hibernate`](internal/hibernate) | stops an idle Claude and resumes it unseen |
+| [`internal/setup`](internal/setup) | the setup contract and the golden key, pinned tools included |
+| [`internal/preview`](internal/preview) | the front door: previews by host name, waking boxes |
+| [`internal/watch`](internal/watch) | passes Claude's edits on to the dev servers |
 | [`internal/api`](internal/api) | the daemon's HTTP API on a unix socket, and its client |
 | [`lab`](lab) | the lab, integration checks, perf gate, A/B and profiler |
 | [`docs`](docs) | architecture, design, roadmap and decision briefs |
 
 ## Status
 
-Built and measured on a VPS: environments, snapshots per turn, revert, golden snapshots, idle sleep and wake, pre-wake, agent boxes, and the T3 integration (T3 patches in [`images/t3`](images/t3)). Next: forking a thread's environment, and a warm pool of boxes for faster first wakes.
+Built and measured on a VPS: environments, snapshots per turn, revert, golden snapshots, idle sleep and wake, pre-wake, agent boxes, the T3 integration (T3 patches in [`images/t3`](images/t3)), and web development in a thread: dev servers, previews and pinned tools ([roadmap §4.1](docs/roadmap.md)).
+
+Next: a real Claude run on a web repository end to end on the VPS; a faster first page (KVM for gVisor, or a lighter runtime class for your own repositories); forking a thread's environment; running `.agents/setup` in golden builds.
 
 Fern v1, a control plane for coding-agent jobs in disposable containers, is at tag [`v1-final`](https://github.com/nebler/fern/tree/v1-final).
 
