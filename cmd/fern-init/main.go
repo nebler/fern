@@ -51,15 +51,18 @@ func run(ctx context.Context, log *slog.Logger) error {
 	if err := os.Unsetenv("FERN_BOX_TOKEN"); err != nil {
 		return err
 	}
-	env := os.Environ()
+	env := toolsEnv(dir, os.Environ())
 
 	services, err := loadServices(filepath.Join(dir, "services.yaml"))
 	if err != nil {
 		return err
 	}
-	// An agent box runs Claude next to the box that runs the services.
+	// An agent box runs Claude next to the box that runs the services, which
+	// installs the tools they share.
 	if os.Getenv("FERN_SERVICES") == "off" {
 		services = nil
+	} else {
+		installTools(ctx, dir, env, log)
 	}
 	if claude := os.Getenv("CLAUDE_CONFIG_DIR"); claude != "" {
 		// Claude works without the hint, only less well.

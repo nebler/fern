@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -127,14 +128,17 @@ func (s *Server) start(ctx context.Context, conn *websocket.Conn, req Request) (
 	if len(req.Argv) == 0 {
 		return nil, errors.New("no command")
 	}
-	cmd := exec.CommandContext(ctx, req.Argv[0], req.Argv[1:]...)
-	cmd.Dir, cmd.Env = s.dir, s.env
-	if req.Dir != "" {
-		cmd.Dir = req.Dir
-	}
+	env := s.env
 	if len(req.Environ) > 0 {
 		// Later entries win (os/exec keeps the last of each name).
-		cmd.Env = append(slices.Clone(s.env), req.Environ...)
+		env = append(slices.Clone(s.env), req.Environ...)
+	}
+	// The program is found on the PATH it runs with, which puts the tools a
+	// workspace pins first, not on this process's.
+	cmd := exec.CommandContext(ctx, lookPath(req.Argv[0], env), req.Argv[1:]...)
+	cmd.Dir, cmd.Env = s.dir, env
+	if req.Dir != "" {
+		cmd.Dir = req.Dir
 	}
 	// The command leads its own process group (a terminal makes it a session
 	// leader, which is one too). Cancelling kills the whole group, so nothing
@@ -422,4 +426,28 @@ func exitCode(err error, log *slog.Logger) int {
 		log.Warn("exec: wait", slog.Any("error", err))
 		return exitNotStarted
 	}
+}
+
+// lookPath returns the path of program name on the last PATH in env, or
+// name as it is if it names a path or isn't found there, for exec to find
+// or fail on.
+func lookPath(name string, env []string) string {
+	if strings.Contains(name, "/") {
+		return name
+	}
+	path := ""
+	for _, v := range env {
+		if p, ok := strings.CutPrefix(v, "PATH="); ok {
+			path = p
+		}
+	}
+	for _, dir := range filepath.SplitList(path) {
+		if dir == "" {
+			continue
+		}
+		if p, err := exec.LookPath(filepath.Join(dir, name)); err == nil {
+			return p
+		}
+	}
+	return name
 }

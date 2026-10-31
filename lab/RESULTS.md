@@ -1631,3 +1631,35 @@ only in the daemon's memory (10.1 → 12.0 MiB: the preview server and the
 watch) and in noisy single-run numbers. New baseline: `lab/perf.sh
 --accept` at d10ad4a6, 5 runs, 50 minutes (box wake p50 220 ms, 20 boxes'
 wake p50 763 ms, the daemon 10.8 MiB).
+
+## Tools per repository (mise), VPS, 2026-10-31
+
+The box image has mise (2026.10.25) and no npm or pnpm. A repository pins
+its tools in `mise.toml` / `.tool-versions`; the environment's box installs
+them into the workspace's `.fern/tools/` before its services start, and a
+golden snapshot holds them (architecture §8).
+
+`lab/check.sh tools`, TanStack Start's `start-bare` example pinning Node 22
+and pnpm 10 (`lab/tanstack-repo`): the golden build (tools, `pnpm install`,
+Vite's first start) took 29–41 s; a thread is created from it in 35 ms with
+the tools and `node_modules`; a preview wakes it and serves the page in
+16.6 s; Claude's Bash gets Node 22 and pnpm 10. `devserver` now gets Node
+and pnpm the same way, without a golden: the wake that installs them takes
+11.7–12.6 s (2.7 s under runc on the same VPS).
+
+**Bug found:** a command run without a shell (`fern exec … -- node`) got the
+image's Node 20: Go looked the program up on fern-init's PATH, not the
+command's. boxexec now looks it up on the PATH the command runs with.
+
+**Where TanStack Start's 16.6 s goes:** Vite is ready about 5 s after the
+box starts (1 s of it `pnpm install` finding everything installed) and the
+first server render takes about 10 s; the next request takes 32 ms. The same
+workspace under runc: ready 1.7 s, first page 4.6 s. gVisor costs about 2.2
+times on this file-heavy start (the workspace is mounted shared, so gVisor
+revalidates every file it opens). Not path-bound caches: a second wake of
+the same thread, whose Vite cache matches its path, took 15.6 s.
+
+`lab/perf.sh --fast` fails on box.sleep_ms.p95 (382 ms against 81) at this
+change and at the commit before it alike: one sleep in each run takes about
+385 ms, which is the p95 of the fast gate's few samples (with 20, p95 is
+88 ms).

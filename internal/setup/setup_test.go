@@ -49,6 +49,7 @@ func TestKey(t *testing.T) {
 		"a golden input": func() { write(t, dir, "seed.sql", "insert 2;") },
 		"a lockfile":     func() { write(t, dir, "package-lock.json", "{}") },
 		"a setup script": func() { write(t, dir, ".agents/setup", "npm ci") },
+		"pinned tools":   func() { write(t, dir, "mise.toml", "[tools]\nnode = \"22\"\n") },
 		"the services": func() {
 			write(t, dir, "services.yaml", "services: {pg: {run: ./pg2.sh}}\ngolden: {inputs: [seed.sql]}\n")
 		},
@@ -63,6 +64,34 @@ func TestKey(t *testing.T) {
 		if got := key(t, dir, image); got == before {
 			t.Errorf("Key() didn't change with %s", name)
 		}
+	}
+}
+
+// A repository that only pins its tools gets a golden: it holds them.
+func TestKeyTools(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, ".tool-versions", "node 22\n")
+	key(t, dir, "box")
+}
+
+func TestToolsKey(t *testing.T) {
+	dir := t.TempDir()
+	if k, err := setup.ToolsKey(dir); k != "" || err != nil {
+		t.Errorf("ToolsKey() without tool files = %q, %v; want \"\", nil", k, err)
+	}
+	write(t, dir, "mise.toml", "[tools]\nnode = \"22\"\n")
+	write(t, dir, "package.json", "{}")
+	k1, err := setup.ToolsKey(dir)
+	if err != nil || k1 == "" {
+		t.Fatalf("ToolsKey() = %q, %v; want a key", k1, err)
+	}
+	write(t, dir, "package.json", `{"name": "app"}`)
+	if k, _ := setup.ToolsKey(dir); k != k1 {
+		t.Errorf("ToolsKey() changed with package.json: it isn't a tool file")
+	}
+	write(t, dir, ".config/mise/config.toml", "[tools]\npnpm = \"10\"\n")
+	if k, _ := setup.ToolsKey(dir); k == k1 {
+		t.Errorf("ToolsKey() didn't change with a tool file")
 	}
 }
 

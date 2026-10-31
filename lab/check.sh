@@ -32,6 +32,9 @@
 #                exec --here, snapshot replace and delete
 #   golden       a new worktree's checkout is built into a golden snapshot,
 #                and the next worktree starts from it, its database seeded
+#   tools        a TanStack Start repository pinning Node 22 and pnpm (mise)
+#                gets a golden snapshot with them, and a thread of it serves
+#                through a preview (needs the internet)
 #   claude       Claude Code in a box: network, stream-json, its terminal UI
 #   devserver    a Vite dev server Claude starts in the background keeps
 #                running after the call, hears the files Claude's box writes
@@ -846,13 +849,18 @@ devserver() {
   fi
   fern rm $ENV 2>/dev/null || true
   fern create $ENV >/dev/null
-  # The box image has node but no npm.
+  # The box image has neither npm nor pnpm: the repository pins them, and
+  # the box installs them when it wakes.
+  fern exec $ENV -- sh -c 'printf "[tools]\nnode = \"22\"\npnpm = \"10\"\n" > mise.toml'
+  fern sleep $ENV >/dev/null
+  start=$(now_ms)
+  check "a wake installs the tools mise.toml pins" v22 "$(fern exec $ENV -- node --version | cut -d. -f1)"
+  note "a wake that installs Node 22 and pnpm 10, ms: $(($(now_ms) - start))"
   fern exec $ENV -- sh -c '
     set -e
-    mkdir -p .tools src
-    curl -fsSL https://registry.npmjs.org/npm/-/npm-10.9.2.tgz | tar -xz -C .tools
-    node .tools/package/bin/npm-cli.js init -y >/dev/null
-    node .tools/package/bin/npm-cli.js install --no-audit --no-fund --loglevel=error vite@7 >/dev/null 2>&1
+    mkdir -p src
+    echo "{}" > package.json
+    pnpm add vite@7 >/dev/null 2>&1
     echo "<script type=module src=/src/main.js></script>" > index.html
     echo "export const v = 1" > src/main.js
     cat > vite.config.mjs <<EOF
@@ -860,7 +868,6 @@ import { appendFileSync } from "node:fs";
 import { relative } from "node:path";
 // Every event of the watcher Vite uses, in /tmp, where it is not watching.
 export default {
-  server: { watch: { ignored: ["**/.tools/**"] } },
   plugins: [{ name: "log", configureServer(s) {
     s.watcher.on("all", (e, p) => appendFileSync("/tmp/watch.log", e + " " + relative(process.cwd(), p) + "\\n"));
   } }],
@@ -869,7 +876,7 @@ EOF'
   # From here on only Claude's tools wake and use the box.
   fern sleep $ENV >/dev/null
   local job
-  job=$(mcp $ENV Bash '{"command": "node node_modules/vite/bin/vite.js --host 0.0.0.0 --port 5173 --strictPort", "run_in_background": true}' |
+  job=$(mcp $ENV Bash '{"command": "pnpm exec vite --host 0.0.0.0 --port 5173 --strictPort", "run_in_background": true}' |
     grep -o 'bash_[0-9]*')
   check "Bash starts Vite in the background" yes "$([ -n "$job" ] && echo yes || echo no)"
   local ip
@@ -918,7 +925,7 @@ EOF'
   }
   check "a preview of a port nothing listens on says so" yes "$(succeeds grep -q 'nothing listens on port 5173' <<<"$(preview "5173-$ENV.localhost:30780" /)")"
   # A dev server in services.yaml starts with the box, which a preview wakes.
-  fern exec $ENV -- sh -c 'printf "services:\n  web:\n    run: node node_modules/vite/bin/vite.js --host 0.0.0.0 --port \$PORT --strictPort\n    port: 5173\n" > services.yaml'
+  fern exec $ENV -- sh -c 'printf "services:\n  web:\n    run: pnpm exec vite --host 0.0.0.0 --port \$PORT --strictPort\n    port: 5173\n" > services.yaml'
   fern sleep $ENV >/dev/null
   start=$(now_ms)
   check "the default preview http://$ENV.localhost:30780/ wakes the box and serves Vite" yes "$(succeeds grep -q 'v = 2' <<<"$(preview "$ENV.localhost:30780" /src/main.js)")"
@@ -927,6 +934,52 @@ EOF'
   check "… with its live reload's client" yes "$(succeeds grep -q WebSocket <<<"$(preview "$ENV.localhost:30780" /@vite/client)")"
   fern exec --agent $ENV -- sh -c 'echo "export const v = 3" > src/main.js'
   check "an edit of Claude's reaches the preview" yes "$(succeeds on_node sh -c 'for i in $(seq 100); do curl -s -H "Host: $1" http://127.0.0.1:30780/src/main.js | grep -q "v = 3" && exit; sleep 0.1; done; exit 1' sh "$ENV.localhost:30780" </dev/null)"
+}
+
+# tools builds a golden snapshot of a TanStack Start repository that pins
+# Node 22 and pnpm 10 (lab/tanstack-repo), which the box image hasn't got,
+# and serves a thread of it through a preview.
+tools() {
+  echo "== a repository's pinned tools, in its golden snapshot"
+  local W=/var/lib/fern/worktrees/tools-check G key
+  G=$(golden_id tools-check)
+  for e in tools1 tools2 "$G"; do fern rm "$e" 2>/dev/null || true; done
+  fresh $ENV
+  check "the box image has no npm or pnpm" "no no" \
+    "$(fern exec $ENV -- sh -c 'for t in npm pnpm; do PATH=/usr/local/bin:/usr/bin:/bin command -v $t >/dev/null && echo yes || echo no; done' | xargs)"
+  for wt in one two; do
+    tar_dir lab/tanstack-repo | in_daemon "rm -rf $W/$wt && mkdir -p $W/$wt && tar -x -C $W/$wt -f - && chown -R 1000:1000 $W/$wt"
+  done
+  fern create tools1 --path $W/one >/dev/null
+  start=$(now_ms)
+  for _ in $(seq 300); do
+    key=$(fern snapshots "$G" 2>/dev/null | awk '$1 ~ /^golden-/ { print $1 }')
+    [ -n "$key" ] && break
+    sleep 1
+  done
+  metric tools.golden_build_ms "golden build with Node, pnpm and the dependencies, ms" $(($(now_ms) - start))
+  check "a golden snapshot is built" 1 "$(grep -c . <<<"$key")"
+  if [ -z "$key" ]; then
+    box_log "$G" | tail -20 | sed 's/^/  builder: /'
+    return
+  fi
+  check "it holds Node 22, pnpm and node_modules, not the checkout" "yes yes yes no" \
+    "$(in_daemon "cd /var/lib/fern/envs/$G/snaps/$key && for p in .fern/tools/installs/node/22 .fern/tools/installs/pnpm node_modules/.pnpm package.json; do test -e \$p && echo yes || echo no; done" | xargs)"
+  pool_du tools.golden "/var/lib/fern/envs/$G/snaps/$key"
+  metric tools.create_ms "create from golden, ms" "$(node_ms "$FERN_CLI" create tools2 --path $W/two)"
+  check "git ignores the tools" '*' "$(in_daemon "cat $W/two/.fern/tools/.gitignore")"
+  # preview HOST PATH prints what the front door answers for HOST.
+  preview() {
+    on_node curl -s -H "Host: $1" "http://127.0.0.1:30780$2" </dev/null
+  }
+  start=$(now_ms)
+  check "a preview wakes the thread and TanStack Start serves its page" yes \
+    "$(succeeds grep -q 'Hello world' <<<"$(preview "tools2.localhost:30780" /)")"
+  note "asleep to TanStack Start's page through the preview, from golden: $(($(now_ms) - start)) ms"
+  check "Claude's Bash gets the pinned Node and pnpm" "v22 10" \
+    "$(fern exec tools2 -- sh -c 'echo $(node --version | cut -d. -f1) $(pnpm --version | cut -d. -f1)')"
+  for e in tools1 tools2 "$G" $ENV; do fern rm "$e"; done
+  in_daemon "rm -rf $W"
 }
 
 t3() {
@@ -1186,7 +1239,7 @@ stability() {
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden claude devserver turn hardware stability)
+  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden tools claude devserver turn hardware stability)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.

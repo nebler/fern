@@ -364,6 +364,14 @@ func TestRunDirAndEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A program the box's own PATH doesn't have, as mise's shims.
+	bin := filepath.Join(dir, "bin")
+	if err := os.Mkdir(bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bin, "tool"), []byte("#!/bin/sh\necho pinned\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	tests := []struct {
 		name string
 		req  boxexec.Request
@@ -373,6 +381,7 @@ func TestRunDirAndEnv(t *testing.T) {
 		{"dir", boxexec.Request{Argv: []string{"pwd", "-P"}, Dir: filepath.Join(dir, "sub")}, filepath.Join(resolved, "sub") + "\n"},
 		{"env added", boxexec.Request{Argv: []string{"sh", "-c", `echo "$A $PATH"`}, Environ: []string{"A=1"}}, "1 /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n"},
 		{"env replaces", boxexec.Request{Argv: []string{"sh", "-c", `echo "$PATH"`}, Environ: []string{"PATH=/bin"}}, "/bin\n"},
+		{"found on the command's PATH", boxexec.Request{Argv: []string{"tool"}, Environ: []string{"PATH=" + bin + ":/usr/bin:/bin"}}, "pinned\n"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

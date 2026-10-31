@@ -21,27 +21,55 @@ import (
 
 // version changes when what goes into a golden snapshot does, so goldens
 // built the old way aren't used.
-const version = "fern-golden-1"
+const version = "fern-golden-2"
 
 // Contract files: what a golden build runs. Lockfiles: what it installs.
 // Both are read at the repository's root.
 var (
-	contractFiles = []string{
+	contractFiles = slices.Concat([]string{
 		"services.yaml",
 		".agents/setup", ".agents/prepare", ".fern/setup", ".fern/prepare",
-	}
+	}, ToolFiles)
 	lockFiles = []string{
 		"package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb",
 		"go.sum", "Cargo.lock", "uv.lock", "poetry.lock", "requirements.txt", "Gemfile.lock", "composer.lock",
 	}
 )
 
+// ToolFiles are mise's files that pin a repository's tools, at its root.
+// The environment's box installs what they pin into ToolsDir (fern-init),
+// so a golden snapshot holds the tools and every thread shares them.
+var ToolFiles = []string{"mise.toml", ".mise.toml", ".tool-versions", ".config/mise.toml", ".config/mise/config.toml"}
+
+// ToolsDir is where a workspace's tools are installed: mise's data folder.
+// The watch skips it, as all of .fern/.
+const ToolsDir = ".fern/tools"
+
+// ToolsKey returns a hash of the tool files in dir, or "" if there are
+// none: the tools installed in ToolsDir are up to date when it is unchanged.
+func ToolsKey(dir string) (string, error) {
+	h := sha256.New()
+	has := false
+	for _, p := range ToolFiles {
+		sum, err := fileSum(dir, p)
+		if err != nil {
+			return "", fmt.Errorf("tools: %s: %w", p, err)
+		}
+		has = has || sum != "missing"
+		_, _ = fmt.Fprintf(h, "%s\x00%s\x00", p, sum) // a hash takes every write
+	}
+	if !has {
+		return "", nil
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
 // maxFile bounds a file read into the key: a workspace is the agent's, and
 // a key mustn't cost the daemon much.
 const maxFile = 16 << 20
 
 // ErrNoContract means the repository has nothing a golden snapshot would
-// hold: no services.yaml and no setup script.
+// hold: no services.yaml, no setup script and no pinned tools.
 var ErrNoContract = errors.New("no setup contract")
 
 // Key returns the golden key of the repository checked out at dir, for
