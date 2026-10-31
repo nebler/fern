@@ -1598,3 +1598,36 @@ agent box's exec included: the watch is the environment's box's, so it is
 running before Claude's edit (it was the agent box's, which slept 70 ms
 after the edit command and dropped the edit in one of the runs).
 `lab/check.sh limits` adds: a box can't reach the previews' port.
+
+## The VPS again: built on it, a hung boot, a new baseline, 2026-10-31
+
+Hetzner CAX21 as before (`FERN_HOST=178.105.167.141`). The images and Go
+now build and run on the VPS with Podman (`lab/lib.sh`); the Mac only
+sends the source. The full build (T3's image included) took 7 minutes.
+
+**Two node bugs, both from `lab/vps.sh`:**
+- **Every boot since 2026-10-28 hung before SSH.** `fern-firewall.service`
+  ordered itself before `network-pre.target` but kept systemd's default
+  dependencies: it waited for `sysinit.target`, which waits for
+  cloud-init's network stage, which waits for the network. Found from
+  Hetzner's rescue system in the journal (`cloud-init-network` running for
+  2 days 22 hours, `systemd-networkd` never started). The unit now has
+  `DefaultDependencies=no`, as Ubuntu's `nftables.service`; a reboot comes
+  back up with the firewall, the daemon and T3.
+- **Boxes had no internet after a reboot.** Nothing turned on IP forwarding
+  once k3s was gone (k3s did, until the next boot). `/etc/sysctl.d/90-fern.conf`
+  sets it. Four of `check.sh all`'s checks failed on it (the box reaches
+  the internet, Claude's screen, Vite's npm install); with it, `limits`,
+  `claude`, `devserver` and `t3` pass.
+
+On the VPS, `devserver`: edit to served 416 ms; asleep to served through the
+preview 1.5 s.
+
+**Perf:** `lab/perf/vps.tsv` was from 2026-10-27, under k3s; HEAD and the
+commit before web development (a185c6c9) both failed it, by 12 and 13
+metrics, mostly daemon CPU, now that the daemon runs the boxes containerd
+used to. Against each other, one run each, they differ past the margins
+only in the daemon's memory (10.1 → 12.0 MiB: the preview server and the
+watch) and in noisy single-run numbers. New baseline: `lab/perf.sh
+--accept` at d10ad4a6, 5 runs, 50 minutes (box wake p50 220 ms, 20 boxes'
+wake p50 763 ms, the daemon 10.8 MiB).
