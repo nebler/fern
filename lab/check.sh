@@ -321,6 +321,13 @@ box() {
   check "Postgres recovers after its box is killed (5 users)" 5 "$users"
   metric box.force_delete_recovery_ms "kill until the new box's Postgres answers, ms" $(($(now_ms) - start))
   check "and the seed ran once" 1 "$(sql $ENV "select count(*) from users where name = 'Ada'")"
+  # That was its first crash; at the third in five minutes it is given up on.
+  kill_box $ENV
+  fern exec $ENV -- true >/dev/null 2>&1
+  kill_box $ENV
+  check "a box that crashed 3 times in 5 minutes isn't woken again" yes \
+    "$(succeeds grep -q 'keeps crashing' <<<"$(fern exec $ENV -- true 2>&1)")"
+  check "until a person wakes it" 0 "$(fern wake $ENV >/dev/null 2>&1; fern exec $ENV -- true >/dev/null 2>&1; echo $?)"
 }
 
 # treehash hashes the path and content of every file in a folder of the pool.

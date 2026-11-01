@@ -1017,3 +1017,73 @@ func TestPrebuild(t *testing.T) {
 		}
 	})
 }
+
+// A box that dies under its commands is woken again at the next one, up to
+// three times in five minutes; then commands fail at once with
+// ErrCrashing, until the first of those crashes is five minutes old. The
+// count goes on across the box's sleeps, when its actor ends.
+func TestCrashingBox(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		st, drv := newFakeStore(), runsc.NewFake("box")
+		g := start(t, st, drv, idle)
+		if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		exec := func(stale string) error {
+			ex, err := g.Exec(t.Context(), "demo", stale, func() {})
+			if err == nil {
+				ex.Close()
+			}
+			return err
+		}
+		if err := exec(""); err != nil {
+			t.Fatal(err)
+		}
+		// "box" is the address that stopped answering: it died.
+		for i := range 2 {
+			if err := exec("box"); err != nil {
+				t.Fatalf("command after crash %d: %v, want it woken again", i+1, err)
+			}
+		}
+		if err := g.Sleep(t.Context(), "demo"); err != nil {
+			t.Fatal(err)
+		}
+		synctest.Wait() // its actor ends; the next counts on
+		if err := exec("box"); !errors.Is(err, actor.ErrCrashing) {
+			t.Fatalf("command after a third crash: %v, want ErrCrashing", err)
+		}
+		if err := exec(""); !errors.Is(err, actor.ErrCrashing) {
+			t.Errorf("next command: %v, want ErrCrashing", err)
+		}
+		time.Sleep(5 * time.Minute)
+		if err := exec(""); err != nil {
+			t.Errorf("command five minutes after the first crash: %v, want it woken", err)
+		}
+	})
+}
+
+// A box that fails to wake counts as crashing too, and a person who wakes
+// it gets another try.
+func TestFailingWakes(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		st, drv := newFakeStore(), runsc.NewFake("box")
+		g := start(t, st, drv, idle)
+		if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		broken := errors.New("runsc: boom")
+		drv.FailWakes("demo", broken)
+		for i := range 3 {
+			if _, err := g.Exec(t.Context(), "demo", "", func() {}); !errors.Is(err, broken) {
+				t.Fatalf("wake %d: %v, want the driver's error", i+1, err)
+			}
+		}
+		if _, err := g.Exec(t.Context(), "demo", "", func() {}); !errors.Is(err, actor.ErrCrashing) {
+			t.Fatalf("fourth command: %v, want ErrCrashing without another wake", err)
+		}
+		drv.FailWakes("demo", nil)
+		if err := g.Wake(t.Context(), "demo"); err != nil {
+			t.Errorf("Wake() by a person: %v, want it tried again", err)
+		}
+	})
+}

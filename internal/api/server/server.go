@@ -347,7 +347,7 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, store.ErrInvalidID), errors.Is(err, store.ErrInvalidPath), errors.Is(err, errBadBody):
 		status = http.StatusBadRequest
-	case errors.Is(err, actor.ErrStopped):
+	case errors.Is(err, actor.ErrStopped), errors.Is(err, actor.ErrCrashing):
 		status = http.StatusServiceUnavailable
 	case errors.Is(err, store.ErrPoolFull):
 		// The caller can free space; the daemon has nothing to log.
