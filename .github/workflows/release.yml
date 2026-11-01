@@ -1,0 +1,108 @@
+# Publishes Fern's images, which install.sh installs: ghcr.io/nebler/fern,
+# fern-box and fern-t3, for arm64 and amd64, each built on a runner of its
+# own architecture (T3's build is too slow under emulation). A tag v* is a
+# release: its images are tagged with it and latest, and it gets a GitHub
+# release. Run by hand, it publishes sha-<commit> only, to try a branch:
+#   FERN_VERSION=sha-abc1234 ./install.sh root@HOST
+name: release
+on:
+  push:
+    tags: ["v*"]
+    branches: [easy-start] # TEMPORARY: to try the branch
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    name: ${{ matrix.target }} ${{ matrix.arch }}
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-24.04' }}
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [fern, fern-box, fern-t3]
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      # Pushed by digest only; the publish job tags the two architectures
+      # together.
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: images/Dockerfile
+          target: ${{ matrix.target }}
+          platforms: linux/${{ matrix.arch }}
+          outputs: type=image,name=ghcr.io/nebler/${{ matrix.target }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=release-${{ matrix.target }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=release-${{ matrix.target }}-${{ matrix.arch }}
+      - run: mkdir -p /tmp/digests && touch "/tmp/digests/${DIGEST#sha256:}"
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: digests-${{ matrix.target }}-${{ matrix.arch }}
+          path: /tmp/digests/*
+          retention-days: 1
+  publish:
+    name: publish ${{ matrix.target }}
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        target: [fern, fern-box, fern-t3]
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: digests-${{ matrix.target }}-*
+          merge-multiple: true
+          path: /tmp/digests
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: tag both architectures
+        env:
+          IMAGE: ghcr.io/nebler/${{ matrix.target }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "$REF_TYPE" = tag ]; then
+            tags=(-t "$IMAGE:$REF_NAME" -t "$IMAGE:latest")
+          else
+            tags=(-t "$IMAGE:sha-${GITHUB_SHA::7}")
+          fi
+          cd /tmp/digests
+          # shellcheck disable=SC2046 # one argument per digest file
+          docker buildx imagetools create "${tags[@]}" $(printf "$IMAGE@sha256:%s " *)
+          docker buildx imagetools inspect "${tags[1]}"
+  release:
+    name: GitHub release
+    if: github.ref_type == 'tag'
+    needs: publish
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --generate-notes \
+            --notes "Install or update a server: \`curl -fsSL https://raw.githubusercontent.com/nebler/fern/main/install.sh | FERN_VERSION=$TAG bash -s -- root@HOST\`"
