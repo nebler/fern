@@ -269,3 +269,16 @@ func (s *Store) snapsDir(id string) string    { return filepath.Join(s.envDir(id
 func (s *Store) snapPath(id, snapID string) string {
 	return filepath.Join(s.snapsDir(id), snapID)
 }
+
+// SnapshotPath returns where environment id's snapshot snapID is: a
+// read-only subvolume, which btrfs send can send.
+func (s *Store) SnapshotPath(id, snapID string) string { return s.snapPath(id, snapID) }
+
+// BackupIndex writes a consistent copy of the index to path, which must not
+// exist, while the daemon runs.
+func (s *Store) BackupIndex(ctx context.Context, path string) error {
+	if _, err := s.db.ExecContext(ctx, "VACUUM INTO ?", path); err != nil {
+		return fmt.Errorf("back up the index: %w", err)
+	}
+	return nil
+}

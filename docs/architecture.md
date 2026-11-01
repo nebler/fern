@@ -357,7 +357,7 @@ Built for previews (`internal/preview`, §5); webhooks are planned. The actor gi
 | **Restore during an exec** | the box stops and the actor cancels the exec, so no late write from the old session reaches the restored disk (built) |
 | **Disk full** | snapshots and new environments refused with "the pool is almost full" (HTTP 507) before the disk is; retention runs at every snapshot; the box keeps working (built) |
 | **Snapshot fails at a turn's end** | the turn still counts: T3 keeps its git checkpoint and the hook logs the error; reverting to that turn is refused with the reason (§7.3) |
-| **Machine loss** | environments are unavailable until it returns; planned: restoring them elsewhere from shipped snapshots (`btrfs send` to object storage) |
+| **Machine loss** | restored on a new machine from the hourly backups (built): `install.sh` with `FERN_RESTORE_FROM` brings back each thread's workspace as of its last backup, the index, T3's data and the repositories; turns older than that backup can't be reverted to |
 | **Golden build fails** | the environment is created from the previous golden, with a visible warning; the agent is asked to fix the setup |
 
 ---
@@ -410,6 +410,8 @@ One remote Linux machine running two systemd services. `lab/setup.sh` (with `FER
 - stores Claude's login in `/etc/fern/claude.env`, runs the quick checks and prints the pairing link
 
 The local lab is the same machine as a systemd container in Docker (`lab/up.sh`). Your Mac or phone only runs the T3 app. Against the earlier k3s install, this saves what k3s and containerd cost while idle: about 780 MiB and 9% of a core.
+
+**Backups (built):** with `/etc/fern/backup.env` (root only; `install.sh` writes it), the daemon backs up hourly (`--backup-every`), and `fern backup` now (`internal/backup`). Each environment whose workspace's btrfs generation moved since its last backup gets a snapshot through its actor (`fern-backup-<time>`), sent with `btrfs send`, incremental from the last one (which is then deleted; a full send every 168, or when the parent was pruned). Around them goes an archive of the state: the index (`VACUUM INTO`), T3's data with its databases copied by SQLite (its `server-owner.sqlite` is only a lock), the projects' repositories and each environment's Claude folder. Everything is gzipped and encrypted on the node (AES-256-GCM in 64 KiB chunks, the STREAM construction) with a key the person's Mac keeps, and uploaded to an S3 bucket in parts by a small SigV4 client (no SDK). A manifest, written last, names what makes up the backup; what a backup that stopped left (objects, snapshots) the next one deletes. `fern-daemon restore NODE` receives each workspace's chain into a new pool, then the state. `lab/check.sh backup` runs it against versitygw on the node: a backup, an incremental one, none for an unchanged thread, and a restore into another pool that matches the snapshot file for file.
 
 **Scaling (planned):** boxes scale within a machine, since they sleep when idle; more machines, each with its own pool and T3, form cells, and a thread's disk moves with `btrfs send`.
 

@@ -60,7 +60,7 @@ func TestDoctor(t *testing.T) {
 	}
 	want := map[string]string{
 		"daemon": "ok", "T3": "ok", "Claude login": "ok", "pool": "fail", "gVisor": "ok", "box image": "ok",
-		"forwarding": "fail", "firewall": "info", "memory": "ok", "GitHub App": "info",
+		"forwarding": "fail", "firewall": "info", "memory": "ok", "GitHub App": "info", "backups": "info",
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("findings (-want +got):\n%s", diff)

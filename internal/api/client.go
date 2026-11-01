@@ -71,6 +71,13 @@ func (c *Client) GitHubToken(ctx context.Context, repository string) (string, er
 	return t.Token, nil
 }
 
+// Backup makes a backup of the node's threads now, as the hourly ones do,
+// and returns once it is done. An *Error with status 404 means no backups
+// are set up.
+func (c *Client) Backup(ctx context.Context) error {
+	return c.do(ctx, http.MethodPost, "/backup", nil, "", nil)
+}
+
 // FindByPath returns the environment whose workspace is path or holds it.
 func (c *Client) FindByPath(ctx context.Context, path string) (Env, error) {
 	var envs []Env

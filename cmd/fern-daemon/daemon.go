@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -35,6 +36,7 @@ import (
 
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api/server"
+	"github.com/nebler/fern/internal/backup"
 	"github.com/nebler/fern/internal/github"
 	"github.com/nebler/fern/internal/preview"
 	"github.com/nebler/fern/internal/runsc"
@@ -58,6 +60,8 @@ const (
 	runscBundles = "/run/fern/boxes"
 	// mcpPort is where agent boxes reach the daemon's MCP endpoint.
 	mcpPort = 7071
+	// backupConfig says where backups go (internal/backup), root only.
+	backupConfig = "/etc/fern/backup.env"
 )
 
 func main() {
@@ -71,6 +75,19 @@ func main() {
 // returns the process exit code.
 func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	log := slog.New(slog.NewTextHandler(stderr, nil))
+	// fern-daemon restore NODE [POOL], on a new node with the daemon
+	// stopped; POOL, another pool than the node's, is for tests.
+	if len(args) >= 2 && len(args) <= 3 && args[0] == "restore" {
+		into := pool
+		if len(args) == 3 {
+			into = args[2]
+		}
+		if err := restoreBackup(ctx, args[1], into, log); err != nil {
+			log.ErrorContext(ctx, "restore failed", slog.Any("error", err))
+			return 1
+		}
+		return 0
+	}
 	if err := serve(ctx, args, log); err != nil {
 		log.ErrorContext(ctx, "fern daemon failed", slog.Any("error", err))
 		return 1
@@ -96,6 +113,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	previewHost := flags.String("preview-host", "localhost", "previews are http://PORT-ENV.HOST/ and http://ENV.HOST/")
 	githubApp := flags.String("github-app", "/etc/fern/github-app", "the GitHub App T3's git and gh get tokens from: its id and key.pem (missing: none)")
 	githubAPI := flags.String("github-api", github.API, "GitHub's API (another for tests)")
+	backupEvery := flags.Duration("backup-every", time.Hour, "back up the threads this often, if "+backupConfig+" says where")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -185,6 +203,31 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	api := http.NewServeMux()
 	api.Handle("/", apiSrv.Handler())
 	api.Handle("POST /github/token", github.Handler(app))
+	backups, err := backup.LoadConfig(backupConfig)
+	if err != nil {
+		return err
+	}
+	var backer *backup.Backer
+	if backups != nil {
+		backer = backup.New(backups, node, pool, st, envs, log)
+	}
+	// fern backup: one now, as the hourly ones make it.
+	api.HandleFunc("POST /backup", func(w http.ResponseWriter, r *http.Request) {
+		fail := func(code int, msg string) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(code)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+		}
+		if backer == nil {
+			fail(http.StatusNotFound, "no backups are set up: "+backupConfig+" is missing (README: backups)")
+			return
+		}
+		if err := backer.Once(r.Context()); err != nil {
+			fail(http.StatusInternalServerError, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	g, ctx := errgroup.WithContext(ctx)
 	servers := []struct {
@@ -203,6 +246,9 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	g.Go(func() error { return envs.Run(ctx) })
 	// Background commands an earlier daemon watched run on in their boxes.
 	g.Go(func() error { apiSrv.AdoptJobs(ctx); return nil })
+	if backer != nil {
+		g.Go(func() error { backer.Run(ctx, *backupEvery); return nil })
+	}
 	for _, s := range servers {
 		if s.lis == nil {
 			continue
@@ -329,4 +375,17 @@ func listenUnix(ctx context.Context, path string, gid int) (net.Listener, error)
 		return nil, err
 	}
 	return lis, nil
+}
+
+// restoreBackup brings node's latest backup into the pool: fern-daemon
+// restore NODE, on a new node, with the daemon and T3 stopped.
+func restoreBackup(ctx context.Context, node, into string, log *slog.Logger) error {
+	cfg, err := backup.LoadConfig(backupConfig)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		return fmt.Errorf("%s is missing: it says where the backups are", backupConfig)
+	}
+	return backup.Restore(ctx, cfg, node, into, log)
 }
