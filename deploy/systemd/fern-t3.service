@@ -30,7 +30,7 @@ EnvironmentFile=-/etc/fern/claude.env
 # T3's folders in the pool, owned by its user (on the node: + runs it
 # outside the image), then Fern's defaults for its settings.
 ExecStartPre=+/usr/bin/install -d -o 1000 -g 1000 /var/lib/fern/userdata /var/lib/fern/caches \
-  /var/lib/fern/tools /var/lib/fern/repos /var/lib/fern/worktrees
+  /var/lib/fern/tools /var/lib/fern/repos /var/lib/fern/projects /var/lib/fern/worktrees
 ExecStartPre=/usr/local/bin/node /opt/fern/t3-settings.js
 ExecStart=/usr/local/bin/node /opt/t3/apps/server/dist/bin.mjs serve --host=0.0.0.0 --port=30773
 Restart=always

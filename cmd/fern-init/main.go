@@ -14,7 +14,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"syscall"
@@ -53,7 +52,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 	env := toolsEnv(dir, os.Environ())
 
-	services, err := loadServices(filepath.Join(dir, "services.yaml"))
+	services, guessed, err := loadServices(dir)
 	if err != nil {
 		return err
 	}
@@ -66,7 +65,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 	if claude := os.Getenv("CLAUDE_CONFIG_DIR"); claude != "" {
 		// Claude works without the hint, only less well.
-		if err := writeHint(claude, services, os.Getenv("FERN_PREVIEW")); err != nil {
+		if err := writeHint(claude, services, guessed, os.Getenv("FERN_PREVIEW")); err != nil {
 			log.WarnContext(ctx, "writing Claude's hint failed", slog.Any("error", err))
 		}
 	}

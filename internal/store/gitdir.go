@@ -8,29 +8,40 @@ import (
 	"strings"
 )
 
-// repoGitDir returns the git folder of the main repository under repos/ that
+// repoGitDir returns the git folder of the main repository under repos/
+// (projects T3 was given a path for) or projects/ (those it cloned) that
 // the worktree at workspace belongs to, or "" if it isn't a worktree of one.
 // `git worktree add` writes a .git file naming the worktree's own git folder,
 // which lies inside the repository's and names it in its commondir file.
-// Nothing outside repos/ is read: the files there are T3's.
+// Nothing outside those folders is read: the files there are T3's.
 func (s *Store) repoGitDir(workspace string) (string, error) {
 	own, err := pathIn(workspace, ".git", "gitdir: ")
 	if err != nil {
 		return "", err
 	}
-	if own == "" || !within(s.repos(), own) || !isRealDir(own) {
+	if own == "" {
 		return "", nil
 	}
-	common, err := pathIn(own, "commondir", "")
-	if err != nil {
-		return "", err
+	for _, root := range []string{s.repos(), s.projects()} {
+		if !within(root, own) {
+			continue
+		}
+		if !isRealDir(own) {
+			return "", nil
+		}
+		common, err := pathIn(own, "commondir", "")
+		if err != nil {
+			return "", err
+		}
+		// The box gets exactly this folder, so it must be what it says: in
+		// the same folder of projects, holding the worktree's own folder,
+		// with no symlink on the way.
+		if common == "" || !within(root, common) || !within(common, own) || !isRealDir(common) {
+			return "", nil
+		}
+		return common, nil
 	}
-	// The box gets exactly this folder, so it must be what it says: under
-	// repos/, holding the worktree's own folder, with no symlink on the way.
-	if common == "" || !within(s.repos(), common) || !within(common, own) || !isRealDir(common) {
-		return "", nil
-	}
-	return common, nil
+	return "", nil
 }
 
 // pathIn returns the path that the regular file dir/name holds after prefix,

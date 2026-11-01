@@ -104,3 +104,32 @@ func TestInstallToolsFails(t *testing.T) {
 		t.Errorf("a failed install left %s: %v", installedFile, err)
 	}
 }
+
+// A repository with no services.yaml and no pinned tools gets the tools
+// Fern guessed, from a config of its own in the tools' folder.
+func TestInstallGuessedTools(t *testing.T) {
+	bin, dir := t.TempDir(), t.TempDir()
+	calls := filepath.Join(bin, "calls")
+	script := "#!/bin/sh\necho \"$MISE_GLOBAL_CONFIG_FILE $*\" >>" + calls + "\n"
+	if err := os.WriteFile(filepath.Join(bin, "mise"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+":/usr/bin:/bin")
+	pkg := `{"scripts": {"dev": "vite"}, "devDependencies": {"vite": "7"}, "packageManager": "pnpm@10.4.1"}`
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(pkg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env := toolsEnv(dir, []string{"PATH=" + bin + ":/usr/bin:/bin"})
+	config := filepath.Join(dir, setup.GuessedTools)
+	if !slices.Contains(env, "MISE_GLOBAL_CONFIG_FILE="+config) {
+		t.Errorf("toolsEnv() = %q, want MISE_GLOBAL_CONFIG_FILE=%s", env, config)
+	}
+	installTools(t.Context(), dir, env, slog.New(slog.DiscardHandler))
+	got, err := os.ReadFile(calls)
+	if err != nil || string(got) != config+" install\n" {
+		t.Errorf("mise calls = %q, %v; want one install with the guessed config", got, err)
+	}
+	if data, err := os.ReadFile(config); err != nil || !strings.Contains(string(data), `pnpm = "10.4.1"`) {
+		t.Errorf("%s = %q, %v; want the guessed tools", setup.GuessedTools, data, err)
+	}
+}

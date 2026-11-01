@@ -20,7 +20,8 @@ const hintMark = "<!-- written by Fern's fern-init; it replaces this file at eve
 // never in a snapshot, a diff or the repository. A CLAUDE.md that someone
 // else wrote there is left alone. preview is where the box's ports can be
 // opened (FERN_PREVIEW), with {port} for the port; "" if they can't.
-func writeHint(claudeDir string, services map[string]service, preview string) error {
+// guessed says Fern guessed the services (setup.MakeGuess).
+func writeHint(claudeDir string, services map[string]service, guessed bool, preview string) error {
 	path := filepath.Join(claudeDir, "CLAUDE.md")
 	old, err := os.ReadFile(path)
 	if err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -38,6 +39,9 @@ func writeHint(claudeDir string, services map[string]service, preview string) er
 		fmt.Fprintf(&b, "- The box runs this repository's services (services.yaml): %s. Use them directly; one that isn't running yet starts at its first connection.\n",
 			strings.Join(slices.Sorted(maps.Keys(services)), ", "))
 		fmt.Fprintln(&b, "- Their data lives in the worktree (git ignores it), so T3's diff doesn't show data changes: say what you changed.")
+		if guessed {
+			fmt.Fprintln(&b, "- The repository has no services.yaml: Fern guessed these from package.json (and docker-compose's Postgres, as DATABASE_URL). If one doesn't run right, write a services.yaml at the root to replace the guess; `cat .fern/tools/guess.toml` shows the Node and package manager it chose.")
+		}
 	}
 	fmt.Fprintln(&b, "- Start dev servers and other commands that must keep running (`npm run dev`) with Bash's run_in_background, not with `&` or `nohup`: what a command leaves running ends with it.")
 	if preview != "" {

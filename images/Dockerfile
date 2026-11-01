@@ -58,6 +58,7 @@ ENTRYPOINT ["/usr/local/bin/fern"]
 FROM debian:trixie-slim AS fern-box
 # Postgres binaries only: clusters live in each environment's workspace.
 # Node runs the lab's toy repo, the sample without a database.
+# libatomic1: the Node builds mise installs need it from Node 26 on.
 # Bootstrap HTTPS before apt installs its own CA bundle: large HTTP
 # downloads can stall on the lab's network.
 COPY --from=claude /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
@@ -66,7 +67,7 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
  && mkdir -p /etc/postgresql-common/createcluster.d \
  && echo 'create_main_cluster = false' > /etc/postgresql-common/createcluster.d/fern.conf \
  && apt-get update \
- && apt-get install -y --no-install-recommends postgresql-17 nodejs ca-certificates curl git tini \
+ && apt-get install -y --no-install-recommends postgresql-17 nodejs ca-certificates curl git tini libatomic1 \
  && rm /etc/apt/apt.conf.d/fern-bootstrap-ca \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --uid 1000 --user-group --home-dir /tmp --no-create-home fern
