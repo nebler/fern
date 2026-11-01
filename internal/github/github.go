@@ -71,22 +71,22 @@ func New(id int64, keyPEM []byte, base string) (*App, error) {
 	if block == nil {
 		return nil, errors.New("the GitHub App's key isn't PEM")
 	}
-	var key *rsa.PrivateKey
-	switch k, err := x509.ParsePKCS8PrivateKey(block.Bytes); {
-	case err == nil:
-		rk, ok := k.(*rsa.PrivateKey)
-		if !ok {
-			return nil, errors.New("the GitHub App's key isn't RSA")
-		}
-		key = rk
-	default:
-		// GitHub's downloads are PKCS #1.
-		if key, err = x509.ParsePKCS1PrivateKey(block.Bytes); err != nil {
+	// GitHub's downloads are PKCS #1; a key converted since may be PKCS #8.
+	key, err := x509.ParsePKCS1PrivateKey(block.Bytes)
+	if err != nil {
+		k, err8 := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err8 != nil {
 			return nil, fmt.Errorf("the GitHub App's key: %w", err)
 		}
+		var ok bool
+		if key, ok = k.(*rsa.PrivateKey); !ok {
+			return nil, errors.New("the GitHub App's key isn't RSA")
+		}
 	}
-	return &App{id: id, key: key, base: strings.TrimSuffix(base, "/"), hc: &http.Client{Timeout: 30 * time.Second},
-		tokens: make(map[string]Token)}, nil
+	return &App{
+		id: id, key: key, base: strings.TrimSuffix(base, "/"),
+		hc: &http.Client{Timeout: 30 * time.Second}, tokens: make(map[string]Token),
+	}, nil
 }
 
 // Load returns the App in dir: its ID in the file id and its private key in

@@ -183,7 +183,7 @@ func TestHandler(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			github.Handler(tt.app).ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/github/token", strings.NewReader(tt.body)))
+			github.Handler(tt.app).ServeHTTP(rec, httptest.NewRequestWithContext(t.Context(), http.MethodPost, "/github/token", strings.NewReader(tt.body)))
 			if rec.Code != tt.want {
 				t.Errorf("status = %d, want %d: %s", rec.Code, tt.want, rec.Body)
 			}
