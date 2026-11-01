@@ -33,6 +33,7 @@ The nouns are in [architecture §2](docs/architecture.md#2-concepts). In the cod
 - Where an operation's time and CPU go: `lab/profile.sh on` (Jaeger on the node, traces from the daemon), `lab/profile.sh run wake 10` (also `sleep`, `restore`, `snapshot`, `exec`), then `lab/profile.sh off`. Each run writes `lab/profiles/<run>/`: `summary.md` (CPU by process, hottest functions, every step's p50/p95 and the median operation's timeline), whole-node on- and off-CPU flamegraphs (VPS: perf), the daemon's Go profile and the traces. `lab/profile.sh diff A B` draws what changed; `lab/profile.sh ui` opens Jaeger. The gate refuses to run while tracing is on.
 - The T3 demo, end to end: `lab/t3-run.sh toy 5` (Haiku, your subscription); `PARALLEL=5` runs five threads at once
 - Everything, the same way each time: `lab/suite.sh`: every check (scale included: 1 to 20 awake boxes), the perf gate and T3 end to end, one thread at a time and five at once (about 45 minutes on the VPS). Run it before a tag, on the VPS; its summary goes into `lab/RESULTS.md`.
+- A release: push a tag `v*`; `.github/workflows/release.yml` publishes the images (`ghcr.io/nebler/fern`, `fern-box`, `fern-t3`, both architectures) that `install.sh` installs. Run by hand, it publishes `sha-<commit>` to try a branch: `FERN_VERSION=sha-abc1234 ./install.sh root@HOST`.
 - The lab is shared by every worktree: its scripts wait for each other (`lab_lock`). Don't run two at once by other means.
 
 ## Style sources

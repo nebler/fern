@@ -1,5 +1,6 @@
 # Only the Go sources, the fern-claude wrapper, T3's patches and settings
-# script, and the lab node's entrypoint go into image builds.
+# script, the lab node's entrypoint, and what install.sh takes from the fern
+# image (the systemd units and the sample project) go into image builds.
 *
 !go.mod
 !go.sum
@@ -9,3 +10,5 @@
 !images/t3
 !images/t3-settings.js
 !images/lab-node-start
+!deploy/systemd
+!lab/sample-repo

@@ -9,12 +9,12 @@
 LAB=fern-lab
 LABEL=app.kubernetes.io/part-of=fern
 FERN_HOST=${FERN_HOST:-}
-# The gVisor release the lab and the VPS run.
-# shellcheck disable=SC2034 # the scripts that source this use it
-GVISOR_RELEASE=20261012
 # One SSH connection serves a script's many commands.
 SSH=(ssh -o BatchMode=yes -o LogLevel=ERROR -o ControlMaster=auto -o "ControlPath=$HOME/.ssh/fern-%C" -o ControlPersist=60)
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit
+# The gVisor release the lab and the VPS run: install.sh's.
+# shellcheck disable=SC2034 # the scripts that source this use it
+GVISOR_RELEASE=$(sed -nE 's/^GVISOR_RELEASE=\$\{GVISOR_RELEASE:-([0-9]+)\}$/\1/p' install.sh)
 
 # SRC is the repository the builds and containers use: the working tree, or
 # with FERN_HOST its copy on the VPS (sync_src), where Podman stands in for

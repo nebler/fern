@@ -74,6 +74,9 @@ sequenceDiagram
 
 ## Benchmarks
 
+<img src="docs/img/benchmarks.svg" alt="Snapshot 12 ms, revert 86 ms, wake 220 ms, new thread 35 ms" width="100%">
+<img src="docs/img/footprint.svg" alt="50 MiB per awake box, 20 awake boxes tested at once, no CPU while a thread sleeps, 11 MiB for the daemon" width="100%">
+
 On a Hetzner CAX21 VPS (4 ARM cores, 8 GB), gVisor, medians:
 
 | | time | CPU |
@@ -106,18 +109,17 @@ How each number was measured: [`lab/RESULTS.md`](lab/RESULTS.md).
 
 ## Try it
 
-You need Docker (for the local lab; a VPS builds with Podman), bash 5 (on a Mac: `brew install bash`), a Claude subscription and the T3 app.
+You need a Linux server for Fern alone (Ubuntu 26.04 or Debian 13, arm64 or amd64, 4 GB or more; others may work) that you reach as root with an SSH key, a Claude subscription and the T3 app. From your Mac:
 
 ```sh
-lab/setup.sh                    # a local lab: a systemd Linux node in Docker
-FERN_HOST=1.2.3.4 lab/setup.sh  # or a VPS, as root over SSH
+curl -fsSL https://raw.githubusercontent.com/nebler/fern/main/install.sh | bash -s -- root@1.2.3.4
 ```
 
-It builds the images, starts the node with the daemon and T3's server, asks once for your Claude login (`claude setup-token`), runs the quick checks and prints a pairing link. In the T3 app, open Settings → Connections, paste the link, and start a thread in **New worktree**.
+It installs Fern and T3's server on the server from the released images (a few minutes the first time, about a minute for an update), asks once for your Claude login there (`claude setup-token`: open the link, paste back the code, then the token), keeps an SSH tunnel to the server running in the background and copies a pairing link. In the T3 app: Settings → Connections, paste the link. Then open the **sample** project and start a thread: ask Claude to drop the `email` column, then revert.
 
-On a VPS, `lab/setup.sh` installs a firewall that lets in only SSH: T3's port (30773) must never be public. Reach it through an SSH tunnel or a private network such as Tailscale.
+Run the same command again to update, or for a new pairing link. The server gets a firewall that lets in only SSH (`FERN_FIREWALL=off` keeps yours): T3's port is never public, and the tunnel is how your Mac reaches it and the previews (`http://<thread>.localhost:30780/`).
 
-After a change: `lab/dev.sh` runs the unit tests, builds and runs the quick integration checks (about 3 minutes). [AGENTS.md](AGENTS.md) lists every command.
+**Working on Fern itself:** `lab/setup.sh` builds everything from your working tree, in a local lab (a systemd Linux node in Docker) or on a VPS with `FERN_HOST=1.2.3.4`; it needs Docker for the local lab and bash 5 (`brew install bash`). After a change, `lab/dev.sh` runs the unit tests, builds and runs the quick integration checks. [AGENTS.md](AGENTS.md) lists every command.
 
 ## Repository
 

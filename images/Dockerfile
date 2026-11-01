@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 # Fern's images, one target each; lab/build.sh builds them:
-#   fern      the daemon and the CLI
+#   fern      the daemon and the CLI, with the units install.sh installs
 #   fern-box  a box: Debian slim with Postgres, git, curl, mise and Claude Code
 #   fern-t3   T3 Code's server with Fern's checkpoint hook
 
@@ -49,6 +49,10 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=go /out/fern /usr/local/bin/fern
 COPY --from=go /out/fern-daemon /usr/local/bin/fern-daemon
+# What install.sh installs with the binaries: the units, and the sample
+# project it adds to T3.
+COPY deploy/systemd /usr/share/fern/systemd
+COPY lab/sample-repo /usr/share/fern/sample-repo
 ENTRYPOINT ["/usr/local/bin/fern"]
 
 FROM debian:trixie-slim AS fern-box
