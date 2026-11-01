@@ -27,8 +27,10 @@ type node struct {
 
 // thisNode returns the node doctor runs on.
 func thisNode() node {
-	return node{etc: "/etc/fern", pool: "/var/lib/fern", poolImage: "/var/lib/fern-img", proc: "/proc", bin: "/usr/local/bin",
-		t3: "http://127.0.0.1:30773"}
+	return node{
+		etc: "/etc/fern", pool: "/var/lib/fern", poolImage: "/var/lib/fern-img", proc: "/proc", bin: "/usr/local/bin",
+		t3: "http://127.0.0.1:30773",
+	}
 }
 
 // boxImage is the image the daemon runs boxes from.

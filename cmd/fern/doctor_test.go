@@ -18,8 +18,10 @@ import (
 func TestDoctor(t *testing.T) {
 	d := newFakeDaemon(t)
 	root := t.TempDir()
-	n := node{etc: filepath.Join(root, "etc"), pool: filepath.Join(root, "pool"), poolImage: filepath.Join(root, "none"),
-		proc: filepath.Join(root, "proc"), bin: filepath.Join(root, "bin")}
+	n := node{
+		etc: filepath.Join(root, "etc"), pool: filepath.Join(root, "pool"), poolImage: filepath.Join(root, "none"),
+		proc: filepath.Join(root, "proc"), bin: filepath.Join(root, "bin"),
+	}
 	for path, data := range map[string]string{
 		"etc/claude.env":                  "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-x\n",
 		"pool/images/fern-box:dev/root/x": "",
