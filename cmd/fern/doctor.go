@@ -169,6 +169,13 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 		})
 	}
 
+	// Backups, which are optional.
+	if _, err := os.Stat(filepath.Join(n.etc, "backup.env")); err != nil {
+		add(finding{name: "backups", info: true, detail: "none: if this server is lost, its threads are (README: backups)"})
+	} else {
+		add(finding{name: "backups", ok: true, detail: "set up: hourly, encrypted; fern backup makes one now"})
+	}
+
 	// The GitHub App, which is optional.
 	switch app, err := github.Load(filepath.Join(n.etc, "github-app"), github.API); {
 	case err != nil:

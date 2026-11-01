@@ -19,7 +19,11 @@
 # latest), FERN_FIREWALL=off
 # to keep your own firewall, and FERN_GITHUB_APP_ID with FERN_GITHUB_APP_KEY
 # (the .pem GitHub gave you, on the machine you run this on) for private
-# repositories, push and pull requests through your GitHub App (README).
+# repositories, push and pull requests through your GitHub App (README),
+# and FERN_BACKUP_ENDPOINT, _REGION, _BUCKET, _ACCESS_KEY and _SECRET_KEY
+# for hourly encrypted backups to an S3 bucket (README); with
+# FERN_RESTORE_FROM=<old server's hostname> it brings that server's
+# threads back onto this one.
 #
 # The server: Ubuntu or Debian (tested: Ubuntu 26.04, Debian 13), arm64 or
 # amd64, dedicated to Fern. It gets a firewall that lets in only SSH (T3's
@@ -33,6 +37,8 @@ FERN_VERSION=${FERN_VERSION:-latest}
 FERN_FIREWALL=${FERN_FIREWALL:-on}
 FERN_GITHUB_APP_ID=${FERN_GITHUB_APP_ID:-}
 FERN_GITHUB_APP_KEY=${FERN_GITHUB_APP_KEY:-}
+FERN_BACKUP_BUCKET=${FERN_BACKUP_BUCKET:-}
+FERN_RESTORE_FROM=${FERN_RESTORE_FROM:-}
 GVISOR_RELEASE=${GVISOR_RELEASE:-20261012}
 REGISTRY=ghcr.io/nebler
 SCRIPT_URL=${FERN_SCRIPT_URL:-https://raw.githubusercontent.com/nebler/fern/main/install.sh}
@@ -308,14 +314,51 @@ server() {
   node
   [ "${1:-}" = --node-only ] && return
   fern_from_release
+  if [ -n "$FERN_RESTORE_FROM" ]; then
+    restore "$FERN_RESTORE_FROM"
+  fi
   login
   if [ -n "$FERN_GITHUB_APP_ID" ]; then
     [ -r "$FERN_GITHUB_APP_KEY" ] || die "FERN_GITHUB_APP_KEY must name the App's .pem file"
     github_app "$FERN_GITHUB_APP_ID" <"$FERN_GITHUB_APP_KEY"
   fi
-  sample
+  # A restored server has its own projects.
+  [ -n "$FERN_RESTORE_FROM" ] || sample
   # The Mac's half of this script finds the link in this line.
   echo "pairing link: $(pair)"
+}
+
+# backup_config stores where backups go, from stdin (NAME=VALUE lines,
+# the encryption key among them), readable by root only, and restarts the
+# daemon, which backs up hourly from then on.
+backup_config() {
+  local f=/etc/fern/backup.env
+  mkdir -p /etc/fern
+  (umask 077 && cat >"$f.new")
+  for name in ENDPOINT REGION BUCKET ACCESS_KEY SECRET_KEY KEY; do
+    grep -q "^FERN_BACKUP_$name=." "$f.new" || { rm -f "$f.new"; die "the backup settings lack FERN_BACKUP_$name"; }
+  done
+  mv "$f.new" "$f"
+  if systemctl is-active -q fern-daemon; then
+    systemctl restart fern-daemon
+    wait_daemon
+    echo "backups are set up: hourly, encrypted, to $(sed -n 's/^FERN_BACKUP_BUCKET=//p' "$f")"
+  fi
+}
+
+# restore brings the threads of server node, from the backups the settings
+# name, onto this new one, with Fern and T3 stopped while it does.
+restore() {
+  local node=$1
+  [ -s /etc/fern/backup.env ] || die "restoring needs the backup settings (FERN_BACKUP_*)"
+  say "restoring $node's threads"
+  systemctl stop fern-t3 fern-daemon
+  /usr/local/bin/fern-daemon restore "$node" || die "the restore failed; see above"
+  systemctl start fern-daemon
+  wait_daemon
+  systemctl start fern-t3
+  wait_t3
+  echo "restored $node's threads"
 }
 
 # github_app stores the GitHub App's ID and its key, from stdin, where the
@@ -373,6 +416,26 @@ tunnel() {
   esac
 }
 
+# backup_settings prints the backup settings for the server: the bucket's,
+# from the environment, and the encryption key, which this machine keeps
+# in ~/.config/fern/backup-key (made the first time): a restore onto a new
+# server needs it, and the old server may be gone.
+backup_settings() {
+  local keyfile=$HOME/.config/fern/backup-key name
+  for name in ENDPOINT REGION BUCKET ACCESS_KEY SECRET_KEY; do
+    eval "[ -n \"\${FERN_BACKUP_$name:-}\" ]" || die "backups need FERN_BACKUP_$name too"
+  done
+  if [ ! -s "$keyfile" ]; then
+    mkdir -p "$(dirname "$keyfile")"
+    (umask 077 && openssl rand -hex 32 >"$keyfile")
+    echo "made the backup key, $keyfile: keep a copy somewhere safe; without it the backups can't be read" >&2
+  fi
+  for name in ENDPOINT REGION BUCKET ACCESS_KEY SECRET_KEY; do
+    eval "printf 'FERN_BACKUP_%s=%s\n' $name \"\$FERN_BACKUP_$name\""
+  done
+  printf 'FERN_BACKUP_KEY=%s\n' "$(cat "$keyfile")"
+}
+
 remote() {
   local host=$1 run
   command -v ssh >/dev/null || die "needs ssh"
@@ -386,7 +449,11 @@ remote() {
   else
     curl -fsSL "$SCRIPT_URL" | ssh -o BatchMode=yes "$host" 'cat >/tmp/fern-install.sh'
   fi
-  run="FERN_VERSION=$(printf %q "$FERN_VERSION") FERN_FIREWALL=$(printf %q "$FERN_FIREWALL") bash /tmp/fern-install.sh server"
+  if [ -n "$FERN_BACKUP_BUCKET" ]; then
+    backup_settings "$host" | ssh -o BatchMode=yes "$host" "if [ \"\$(id -u)\" = 0 ]; then bash /tmp/fern-install.sh backup-config; else sudo -n bash /tmp/fern-install.sh backup-config; fi"
+  fi
+  case $FERN_RESTORE_FROM in *[!A-Za-z0-9.-]*) die "FERN_RESTORE_FROM must be the old server's hostname" ;; esac
+  run="FERN_VERSION=$(printf %q "$FERN_VERSION") FERN_FIREWALL=$(printf %q "$FERN_FIREWALL") FERN_RESTORE_FROM=$(printf %q "$FERN_RESTORE_FROM") bash /tmp/fern-install.sh server"
   # One session for all of it, with a terminal for Claude's login and sudo's
   # password; its output is kept for the pairing link.
   local out
@@ -452,6 +519,7 @@ case "${1:-}" in
   pair) pair ;;
   doctor) doctor "${2:?usage: install.sh doctor root@HOST}" ;;
   github) github_app "${2:-}" ;;
+  backup-config) backup_config ;;
   server) server ;;
   --node-only) server --node-only ;;
   "") server && say "done; T3 listens on 127.0.0.1:$T3_PORT only through an SSH tunnel: from your Mac, run this with root@<this server> for one" ;;

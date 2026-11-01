@@ -124,6 +124,8 @@ Run the same command again to update, or for a new pairing link. When something 
 2. Install it (Install App, in its settings) on the repositories Fern may use.
 3. Run the install again with it: `FERN_GITHUB_APP_ID=123456 FERN_GITHUB_APP_KEY=~/Downloads/your-app.pem bash install.sh root@1.2.3.4` (or through `curl … | FERN_GITHUB_APP_ID=… FERN_GITHUB_APP_KEY=… bash -s -- root@1.2.3.4`).
 
+**Backups:** hourly to an S3 bucket (Hetzner Object Storage, R2, any S3), encrypted before they leave the server with a key that stays on your Mac (`~/.config/fern/backup-key`; keep a copy). Each thread's workspace goes as a btrfs send stream, incremental after the first, with the index, T3's data and the projects' repositories. Create a bucket and an access key, then run the install again with `FERN_BACKUP_ENDPOINT=https://fsn1.your-objectstorage.com FERN_BACKUP_REGION=fsn1 FERN_BACKUP_BUCKET=… FERN_BACKUP_ACCESS_KEY=… FERN_BACKUP_SECRET_KEY=…`. To bring a lost server's threads onto a new one, install the new one with the same settings and `FERN_RESTORE_FROM=<old server's hostname>`.
+
 **Working on Fern itself:** `lab/setup.sh` builds everything from your working tree, in a local lab (a systemd Linux node in Docker) or on a VPS with `FERN_HOST=1.2.3.4`; it needs Docker for the local lab and bash 5 (`brew install bash`). After a change, `lab/dev.sh` runs the unit tests, builds and runs the quick integration checks. [AGENTS.md](AGENTS.md) lists every command.
 
 ## Repository

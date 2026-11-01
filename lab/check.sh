@@ -40,6 +40,9 @@
 #                builds its golden and serves it (needs the internet)
 #   github       T3's git and gh get a token from the daemon's GitHub App,
 #                against a fake GitHub on the node (restarts the daemon)
+#   backup       a thread with Postgres backed up to an S3 store (versitygw
+#                on the node), twice, and restored into another pool, the same
+#                file for file (restarts the daemon; needs the internet)
 #   claude       Claude Code in a box: network, stream-json, its terminal UI
 #   devserver    a Vite dev server Claude starts in the background keeps
 #                running after the call, hears the files Claude's box writes
@@ -1162,6 +1165,54 @@ PY
   in_daemon "pkill -f $dir/fake.py; rm -rf $dir"
 }
 
+# backup runs versitygw on the node as the object store, backs a thread up to
+# it, changes the thread's data, backs up again (an incremental send), and
+# restores the bucket into a scratch pool: the restored workspace must be
+# the backed-up one, file for file.
+backup() {
+  echo "== threads backed up to an object store, and restored"
+  if on_node test -e /etc/fern/backup.env </dev/null; then
+    note "skipped: this node has backups set up already (/etc/fern/backup.env)"
+    return
+  fi
+  local args scratch=/tmp/fern-restore node
+  args=$(daemon_args)
+  node=$(on_node hostname </dev/null)
+  in_daemon "podman rm -f fern-s3 >/dev/null 2>&1; podman run -d -q --name fern-s3 --network=host --tmpfs /data \
+    docker.io/versity/versitygw:latest --access fernkey --secret fernsecret --port 127.0.0.1:19000 posix /data >/dev/null
+    for i in \$(seq 50); do curl -s -o /dev/null http://127.0.0.1:19000/ && break; sleep 0.2; done
+    curl -sf --aws-sigv4 aws:amz:us-east-1:s3 --user fernkey:fernsecret -X PUT http://127.0.0.1:19000/fern-check
+    umask 077; printf 'FERN_BACKUP_ENDPOINT=http://127.0.0.1:19000\nFERN_BACKUP_REGION=us-east-1\nFERN_BACKUP_BUCKET=fern-check\nFERN_BACKUP_ACCESS_KEY=fernkey\nFERN_BACKUP_SECRET_KEY=fernsecret\nFERN_BACKUP_KEY=%s\n' \$(openssl rand -hex 32) >/etc/fern/backup.env"
+  set_daemon_args $args --backup-every=24h
+  fresh $ENV
+  sql $ENV "insert into users (name, email) values ('Backed', 'up@example.com')" >/dev/null
+  fern sleep $ENV >/dev/null
+  objects() { in_daemon "curl -s --aws-sigv4 aws:amz:us-east-1:s3 --user fernkey:fernsecret 'http://127.0.0.1:19000/fern-check?list-type=2&prefix=fern/$node/envs/$ENV/'" | grep -o '<Key>' | wc -l | tr -d ' '; }
+  check "fern backup backs the thread up" 0 "$(fern backup >/dev/null 2>&1; echo $?)"
+  check "… as one send" 1 "$(objects)"
+  sql $ENV "insert into users (name, email) values ('Again', 'again@example.com')" >/dev/null
+  fern sleep $ENV >/dev/null
+  check "a change, and the next backup sends it from the first" 2 "$(fern backup >/dev/null 2>&1; objects)"
+  check "an unchanged thread isn't sent again" 2 "$(fern backup >/dev/null 2>&1; objects)"
+  in_daemon "set -e; umount $scratch 2>/dev/null || true; rm -rf $scratch $scratch.img; mkdir -p $scratch
+    truncate -s 4G $scratch.img && mkfs.btrfs -q $scratch.img && mount -o loop $scratch.img $scratch"
+  check "the backup restores into another pool" 0 "$(in_daemon "fern-daemon restore $node $scratch >/dev/null 2>&1; echo \$?")"
+  local snap
+  snap=$(in_daemon "ls /var/lib/fern/envs/$ENV/snaps | grep '^fern-backup-' | tail -1")
+  check "… the workspace file for file" "$(treehash /var/lib/fern/envs/$ENV/snaps/$snap)" "$(treehash $scratch/envs/$ENV/live)"
+  check "… and the index and T3's data with it" "yes yes" \
+    "$(in_daemon "for p in state/fern.sqlite userdata; do test -e $scratch/\$p && echo yes || echo no; done" | xargs)"
+  in_daemon "umount $scratch; rm -rf $scratch $scratch.img; rm -f /etc/fern/backup.env; podman rm -f fern-s3 >/dev/null"
+  set_daemon_args $args
+  fern rm $ENV
+  # The node's other threads were backed up too: each keeps its last
+  # backup snapshot, as the next backup's parent.
+  local e s
+  for e in $(fern ls | awk 'NR > 1 { print $1 }'); do
+    for s in $(fern snapshots "$e" 2>/dev/null | awk '/^fern-backup-/ { print $1 }'); do fern rmsnap "$e" "$s" >/dev/null; done
+  done
+}
+
 # go_seconds prints a Go duration (5m, 1m30s, 250ms) in seconds.
 go_seconds() {
   awk -v d="$1" 'BEGIN {
@@ -1334,11 +1385,11 @@ stability() {
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden tools guess github claude devserver turn hardware stability)
+  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden tools guess backup github claude devserver turn hardware stability)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.
-  alone=" idle daemon node many scale turn hardware stability github devserver "
+  alone=" idle daemon node many scale turn hardware stability github devserver backup "
   case "${1:-}" in
     "") set -- "${quick[@]}" ;;
     all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} && DISK_HARDWARE=1 ;;
