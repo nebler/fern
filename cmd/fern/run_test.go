@@ -52,6 +52,16 @@ func newFakeDaemon(t *testing.T) *fakeDaemon {
 	mux.HandleFunc("GET /envs/{id}/snapshots", func(w http.ResponseWriter, _ *http.Request) {
 		reply(w, []api.Snapshot{{ID: "s1", Created: created}})
 	})
+	mux.HandleFunc("POST /github/token", func(w http.ResponseWriter, r *http.Request) {
+		var req struct{ Repository string }
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		if req.Repository != "owner/app" {
+			w.WriteHeader(http.StatusNotFound)
+			reply(w, api.Error{Message: "the GitHub App isn't installed on this repository"})
+			return
+		}
+		reply(w, map[string]string{"token": "ghs_x"})
+	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "missing") {
 			w.WriteHeader(http.StatusNotFound)
@@ -65,6 +75,7 @@ func newFakeDaemon(t *testing.T) *fakeDaemon {
 		d.mu.Lock()
 		d.got = append(d.got, strings.TrimSpace(r.Method+" "+r.URL.RequestURI()+" "+string(bytes.TrimSpace(body))))
 		d.mu.Unlock()
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		mux.ServeHTTP(w, r)
 	})}
 	done := make(chan struct{})

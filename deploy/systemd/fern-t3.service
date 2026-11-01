@@ -27,6 +27,9 @@ WorkingDirectory=/opt/t3
 # expects workspaces; FERN_POOL is the checkpoint hook's.
 Environment=HOME=/home/node T3CODE_HOME=/var/lib/fern FERN_POOL=/var/lib/fern FERN_TIMING=1 DISABLE_AUTOUPDATER=1
 EnvironmentFile=-/etc/fern/claude.env
+# git's credential helper for github.com: a token for the one repository,
+# from the daemon's GitHub App (fern git-credential), if there is one.
+Environment=GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=credential.https://github.com.helper "GIT_CONFIG_VALUE_0=!/usr/local/bin/fern git-credential" GIT_CONFIG_KEY_1=credential.https://github.com.useHttpPath GIT_CONFIG_VALUE_1=true
 # T3's folders in the pool, owned by its user (on the node: + runs it
 # outside the image), then Fern's defaults for its settings.
 ExecStartPre=+/usr/bin/install -d -o 1000 -g 1000 /var/lib/fern/userdata /var/lib/fern/caches \

@@ -14,7 +14,9 @@
 #
 # Run it again to update; every step skips what is done. Settings, in the
 # environment: FERN_VERSION (a release tag, default latest), FERN_FIREWALL=off
-# to keep your own firewall.
+# to keep your own firewall, and FERN_GITHUB_APP_ID with FERN_GITHUB_APP_KEY
+# (the .pem GitHub gave you, on the machine you run this on) for private
+# repositories, push and pull requests through your GitHub App (README).
 #
 # The server: Ubuntu or Debian (tested: Ubuntu 26.04, Debian 13), arm64 or
 # amd64, dedicated to Fern. It gets a firewall that lets in only SSH (T3's
@@ -26,6 +28,8 @@ set -Eeuo pipefail
 
 FERN_VERSION=${FERN_VERSION:-latest}
 FERN_FIREWALL=${FERN_FIREWALL:-on}
+FERN_GITHUB_APP_ID=${FERN_GITHUB_APP_ID:-}
+FERN_GITHUB_APP_KEY=${FERN_GITHUB_APP_KEY:-}
 GVISOR_RELEASE=${GVISOR_RELEASE:-20261012}
 REGISTRY=ghcr.io/nebler
 SCRIPT_URL=${FERN_SCRIPT_URL:-https://raw.githubusercontent.com/nebler/fern/main/install.sh}
@@ -302,9 +306,29 @@ server() {
   [ "${1:-}" = --node-only ] && return
   fern_from_release
   login
+  if [ -n "$FERN_GITHUB_APP_ID" ]; then
+    [ -r "$FERN_GITHUB_APP_KEY" ] || die "FERN_GITHUB_APP_KEY must name the App's .pem file"
+    github_app "$FERN_GITHUB_APP_ID" <"$FERN_GITHUB_APP_KEY"
+  fi
   sample
   # The Mac's half of this script finds the link in this line.
   echo "pairing link: $(pair)"
+}
+
+# github_app stores the GitHub App's ID and its key, from stdin, where the
+# daemon reads them (internal/github), readable by root only, and restarts
+# the daemon to load them.
+github_app() {
+  local id=$1 dir=/etc/fern/github-app
+  case $id in '' | *[!0-9]*) die "FERN_GITHUB_APP_ID must be the App's number, from its settings page" ;; esac
+  install -d -m 700 "$dir"
+  (umask 077 && cat >"$dir/key.pem.new")
+  grep -q 'PRIVATE KEY' "$dir/key.pem.new" || { rm -f "$dir/key.pem.new"; die "FERN_GITHUB_APP_KEY isn't a private key (.pem)"; }
+  mv "$dir/key.pem.new" "$dir/key.pem"
+  echo "$id" >"$dir/id"
+  systemctl restart fern-daemon
+  wait_daemon
+  echo "the daemon has GitHub App $id: T3's git and gh get tokens for the repositories it is installed on"
 }
 
 # ---------------------------------------------------------------- your Mac
@@ -365,6 +389,12 @@ remote() {
   local out
   out=$(mktemp)
   ssh -t "$host" "if [ \"\$(id -u)\" = 0 ]; then $run; else sudo $run; fi" | tee "$out"
+  if [ -n "$FERN_GITHUB_APP_ID" ]; then
+    case $FERN_GITHUB_APP_ID in *[!0-9]*) die "FERN_GITHUB_APP_ID must be the App's number, from its settings page" ;; esac
+    [ -r "$FERN_GITHUB_APP_KEY" ] || die "FERN_GITHUB_APP_KEY must name the App's .pem file on this machine"
+    # The key goes on stdin, never in a command line.
+    ssh -o BatchMode=yes "$host" "if [ \"\$(id -u)\" = 0 ]; then bash /tmp/fern-install.sh github $FERN_GITHUB_APP_ID; else sudo -n bash /tmp/fern-install.sh github $FERN_GITHUB_APP_ID; fi" <"$FERN_GITHUB_APP_KEY"
+  fi
   local link
   link=$(tr -d '\r' <"$out" | sed -n 's/^pairing link: //p' | tail -1)
   rm -f "$out"
@@ -400,6 +430,7 @@ EOF
 
 case "${1:-}" in
   pair) pair ;;
+  github) github_app "${2:-}" ;;
   server) server ;;
   --node-only) server --node-only ;;
   "") server && say "done; T3 listens on 127.0.0.1:$T3_PORT only through an SSH tunnel: from your Mac, run this with root@<this server> for one" ;;

@@ -43,6 +43,20 @@ RUN case "$TARGETARCH" in arm64) platform=linux-arm64 sum=$MISE_SHA256_arm64 ;; 
  && echo "$sum  /mise" | sha256sum -c - \
  && chmod 755 /mise
 
+# GitHub's CLI, which T3 runs for pull requests, pinned and checked
+# against its release's sums. images/fern-gh gives it a token.
+FROM claude AS gh
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG TARGETARCH
+ARG GH_VERSION=2.103.3
+ARG GH_SHA256_arm64=ee32df2323c8847f5fac6cb6b4b69ca75828e9329a8f22f677021f7b3306ce63
+ARG GH_SHA256_amd64=4c806978ffce1cec70853302a56d70ac6da4f19bae7adca4e1a8ab00633dd91d
+RUN case "$TARGETARCH" in arm64) sum=$GH_SHA256_arm64 ;; amd64) sum=$GH_SHA256_amd64 ;; *) exit 1 ;; esac \
+ && curl -fsSL -o /gh.tar.gz "https://github.com/cli/cli/releases/download/v$GH_VERSION/gh_${GH_VERSION}_linux_$TARGETARCH.tar.gz" \
+ && echo "$sum  /gh.tar.gz" | sha256sum -c - \
+ && tar -xzf /gh.tar.gz --strip-components=2 -C / "gh_${GH_VERSION}_linux_$TARGETARCH/bin/gh" \
+ && chmod 755 /gh
+
 FROM debian:trixie-slim AS fern
 RUN apt-get update \
  && apt-get install -y --no-install-recommends btrfs-progs \
@@ -128,6 +142,10 @@ COPY --from=go /out/fern /usr/local/bin/fern
 # the environment's box, or the real one outside environments.
 COPY images/fern-claude /usr/local/bin/claude
 COPY --from=claude /claude /usr/local/libexec/claude
+# T3 runs "gh" for pull requests: fern-gh gives the real one a token for
+# the repository from Fern's GitHub App, if there is one.
+COPY images/fern-gh /usr/local/bin/gh
+COPY --from=gh /gh /usr/local/libexec/gh
 COPY images/t3-settings.js /opt/fern/t3-settings.js
 # Where fern-t3.service binds the pool and the daemon's socket.
 RUN mkdir -p /var/lib/fern /run/fern

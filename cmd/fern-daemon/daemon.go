@@ -35,6 +35,7 @@ import (
 
 	"github.com/nebler/fern/internal/actor"
 	"github.com/nebler/fern/internal/api/server"
+	"github.com/nebler/fern/internal/github"
 	"github.com/nebler/fern/internal/preview"
 	"github.com/nebler/fern/internal/runsc"
 	"github.com/nebler/fern/internal/store"
@@ -93,6 +94,8 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	// On every address, as T3's port: the node's firewall keeps it private.
 	previewAddr := flags.String("preview-addr", ":30780", "serve previews of boxes' ports on this address (\"\": none)")
 	previewHost := flags.String("preview-host", "localhost", "previews are http://PORT-ENV.HOST/ and http://ENV.HOST/")
+	githubApp := flags.String("github-app", "/etc/fern/github-app", "the GitHub App T3's git and gh get tokens from: its id and key.pem (missing: none)")
+	githubAPI := flags.String("github-api", github.API, "GitHub's API (another for tests)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -173,6 +176,15 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	}
 	envs := actor.New(st, drv, cfg, tr, reg, log)
 	apiSrv := server.New(st, drv, envs, agentMCP, tr, log)
+	app, err := github.Load(*githubApp, *githubAPI)
+	if err != nil {
+		return fmt.Errorf("the GitHub App: %w", err)
+	}
+	// T3's git and gh get their tokens on the API's socket, which boxes
+	// can't reach.
+	api := http.NewServeMux()
+	api.Handle("/", apiSrv.Handler())
+	api.Handle("POST /github/token", github.Handler(app))
 
 	g, ctx := errgroup.WithContext(ctx)
 	servers := []struct {
@@ -180,7 +192,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		srv  *http.Server
 		lis  net.Listener // nil: not served
 	}{
-		{"api", &http.Server{Handler: apiSrv.Handler()}, apiLis},
+		{"api", &http.Server{Handler: api}, apiLis},
 		{"metrics", &http.Server{Handler: metricsHandler(reg)}, metricsLis},
 		{"mcp", &http.Server{Handler: apiSrv.MCPHandler()}, mcpLis},
 		{"preview", &http.Server{Handler: preview.New(*previewHost, st, envs, log)}, previewLis},

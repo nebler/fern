@@ -119,6 +119,11 @@ It installs Fern and T3's server on the server from the released images (a few m
 
 Run the same command again to update, or for a new pairing link. The server gets a firewall that lets in only SSH (`FERN_FIREWALL=off` keeps yours): T3's port is never public, and the tunnel is how your Mac reaches it and the previews (`http://<thread>.localhost:30780/`).
 
+**Private repositories, push and pull requests:** T3 pushes and opens pull requests from its server, with tokens from a GitHub App of your own: each lasts an hour and is for one repository, and none ever enters a box. Once:
+1. Create the App at [github.com/settings/apps/new](https://github.com/settings/apps/new): any name and homepage; under Webhook, untick Active; under Repository permissions, Contents and Pull requests: Read and write. Create it, note its App ID, and under Private keys, generate one (a `.pem` downloads).
+2. Install it (Install App, in its settings) on the repositories Fern may use.
+3. Run the install again with it: `FERN_GITHUB_APP_ID=123456 FERN_GITHUB_APP_KEY=~/Downloads/your-app.pem bash install.sh root@1.2.3.4` (or through `curl … | FERN_GITHUB_APP_ID=… FERN_GITHUB_APP_KEY=… bash -s -- root@1.2.3.4`).
+
 **Working on Fern itself:** `lab/setup.sh` builds everything from your working tree, in a local lab (a systemd Linux node in Docker) or on a VPS with `FERN_HOST=1.2.3.4`; it needs Docker for the local lab and bash 5 (`brew install bash`). After a change, `lab/dev.sh` runs the unit tests, builds and runs the quick integration checks. [AGENTS.md](AGENTS.md) lists every command.
 
 ## Repository
