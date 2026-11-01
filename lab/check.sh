@@ -1187,7 +1187,6 @@ backup() {
   fresh $ENV
   sql $ENV "insert into users (name, email) values ('Backed', 'up@example.com')" >/dev/null
   fern sleep $ENV >/dev/null
-  local objects
   objects() { in_daemon "curl -s --aws-sigv4 aws:amz:us-east-1:s3 --user fernkey:fernsecret 'http://127.0.0.1:19000/fern-check?list-type=2&prefix=fern/$node/envs/$ENV/'" | grep -o '<Key>' | wc -l | tr -d ' '; }
   check "fern backup backs the thread up" 0 "$(fern backup >/dev/null 2>&1; echo $?)"
   check "… as one send" 1 "$(objects)"
