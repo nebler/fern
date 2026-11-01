@@ -17,9 +17,9 @@
 # to keep your own firewall.
 #
 # The server: Ubuntu or Debian (tested: Ubuntu 26.04, Debian 13), arm64 or
-# amd64, dedicated to Fern. It gets a
-# firewall that lets in only SSH (T3's port must never be public), a 50 GB
-# sparse btrfs pool at /var/lib/fern, gVisor and Podman.
+# amd64, dedicated to Fern. It gets a firewall that lets in only SSH (T3's
+# port must never be public), a 50 GB sparse btrfs pool at /var/lib/fern,
+# gVisor and Podman.
 #
 # lab/vps.sh runs it with --node-only, then builds the images itself.
 set -Eeuo pipefail
