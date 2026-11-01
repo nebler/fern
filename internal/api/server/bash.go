@@ -106,12 +106,12 @@ func (s *Server) bashServer(id string) *mcp.Server {
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "BashOutput",
 		Description: "Returns what a background command started by Bash printed since the last call, and whether it still runs.",
-	}, func(_ context.Context, _ *mcp.CallToolRequest, in bashOutputInput) (*mcp.CallToolResult, any, error) {
-		j, err := s.findJob(id, in.ID)
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in bashOutputInput) (*mcp.CallToolResult, any, error) {
+		text, err := s.readJob(ctx, id, in.ID)
 		if err != nil {
 			return toolError(err), nil, nil
 		}
-		return toolText(j.read()), nil, nil
+		return toolText(text), nil, nil
 	})
 	mcp.AddTool(srv, &mcp.Tool{
 		Name:        "KillShell",

@@ -29,13 +29,24 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 	return http.DefaultTransport.RoundTrip(r)
 }
 
-// newMCP serves environment demo's MCP endpoint, its box a real boxexec
-// server, and returns the endpoint's URL, the fake driver and the actors.
-func newMCP(t *testing.T) (string, *runsc.Fake, *actor.Group) {
+// demoBox is environment demo, its box a real boxexec server with jobs, run
+// by a fake driver and actors.
+type demoBox struct {
+	st   *fakeStore
+	drv  *runsc.Fake
+	envs *actor.Group
+	log  *slog.Logger
+}
+
+func newDemoBox(t *testing.T) demoBox {
 	t.Helper()
 	log := slog.New(slog.DiscardHandler)
 	mux := http.NewServeMux()
-	mux.Handle(boxexec.Path, boxexec.NewServer(boxToken, t.TempDir(), nil, log))
+	dir := t.TempDir()
+	mux.Handle(boxexec.Path, boxexec.NewServer(boxToken, dir, nil, log))
+	jobs := boxexec.NewJobs(boxToken, dir, nil, log)
+	jobs.Register(mux)
+	t.Cleanup(jobs.Close)
 	box := httptest.NewServer(mux)
 	t.Cleanup(box.Close)
 	drv := runsc.NewFake(box.Listener.Addr().String())
@@ -48,11 +59,27 @@ func newMCP(t *testing.T) (string, *runsc.Fake, *actor.Group) {
 	done := make(chan struct{})
 	go func() { _ = envs.Run(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
-	api := server.New(st, drv, envs, "http://fern-daemon:7071", notrace, log)
+	return demoBox{st: st, drv: drv, envs: envs, log: log}
+}
+
+// serve serves the box's environment's MCP endpoint from a new API server,
+// and returns the endpoint's URL and the server.
+func (b demoBox) serve(t *testing.T) (string, *server.Server) {
+	t.Helper()
+	api := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
 	t.Cleanup(api.Close)
 	srv := httptest.NewServer(api.MCPHandler())
 	t.Cleanup(srv.Close)
-	return srv.URL + "/mcp/demo", drv, envs
+	return srv.URL + "/mcp/demo", api
+}
+
+// newMCP serves environment demo's MCP endpoint, its box a real boxexec
+// server, and returns the endpoint's URL, the fake driver and the actors.
+func newMCP(t *testing.T) (string, *runsc.Fake, *actor.Group) {
+	t.Helper()
+	b := newDemoBox(t)
+	url, _ := b.serve(t)
+	return url, b.drv, b.envs
 }
 
 func connect(t *testing.T, url, token string) (*mcp.ClientSession, error) {
@@ -109,7 +136,7 @@ func TestBashNeedsToken(t *testing.T) {
 }
 
 // jobID finds a background command's ID in Bash's answer.
-var jobID = regexp.MustCompile(`bash_[0-9]+`)
+var jobID = regexp.MustCompile(`bash_[a-z0-9]+`)
 
 // call calls tool with args and returns its text, failing the test if the
 // tool answers with an error.
@@ -188,4 +215,33 @@ func TestBashBackgroundEnds(t *testing.T) {
 		t.Fatal(err)
 	}
 	output(t, s, runs, "stopped: its box went to sleep")
+}
+
+// A background command runs on when the daemon stops, and the next daemon
+// adopts it: BashOutput and KillShell reach it again.
+func TestBashBackgroundAdopted(t *testing.T) {
+	b := newDemoBox(t)
+	url, api := b.serve(t)
+	s, err := connect(t, url, boxToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := jobID.FindString(call(t, s, "Bash", map[string]any{"command": "echo up; sleep 100", "run_in_background": true}))
+	output(t, s, id, "up")
+	_ = s.Close()
+	api.Close() // the daemon stops
+
+	url, api = b.serve(t)
+	api.AdoptJobs(t.Context())
+	s, err = connect(t, url, boxToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if got := call(t, s, "BashOutput", map[string]any{"bash_id": id}); !strings.Contains(got, "is running") {
+		t.Errorf("BashOutput after a new daemon = %q, want it running", got)
+	}
+	if got := call(t, s, "KillShell", map[string]any{"shell_id": id}); !strings.Contains(got, "is killed") {
+		t.Errorf("KillShell after a new daemon = %q, want it killed", got)
+	}
 }
