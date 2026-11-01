@@ -16,23 +16,28 @@
 # environment: FERN_VERSION (a release tag, default latest), FERN_FIREWALL=off
 # to keep your own firewall.
 #
-# The server: Ubuntu or Debian, arm64 or amd64, dedicated to Fern. It gets a
+# The server: Ubuntu or Debian (tested: Ubuntu 26.04, Debian 13), arm64 or
+# amd64, dedicated to Fern. It gets a
 # firewall that lets in only SSH (T3's port must never be public), a 50 GB
 # sparse btrfs pool at /var/lib/fern, gVisor and Podman.
 #
 # lab/vps.sh runs it with --node-only, then builds the images itself.
-set -euo pipefail
+set -Eeuo pipefail
 
 FERN_VERSION=${FERN_VERSION:-latest}
 FERN_FIREWALL=${FERN_FIREWALL:-on}
 GVISOR_RELEASE=${GVISOR_RELEASE:-20261012}
 REGISTRY=ghcr.io/nebler
-SCRIPT_URL=https://raw.githubusercontent.com/nebler/fern/main/install.sh
+SCRIPT_URL=${FERN_SCRIPT_URL:-https://raw.githubusercontent.com/nebler/fern/main/install.sh}
 T3_PORT=30773
 PREVIEW_PORT=30780
 
 say() { printf '\033[1m== %s\033[0m\n' "$*"; }
 die() { printf 'fern install: %s\n' "$*" >&2; exit 1; }
+warn() { printf 'fern install: %s\n' "$*" >&2; }
+# A command that fails unexpectedly says where, so the person knows what to
+# report; the steps that can fail for a known reason say why themselves.
+trap 'printf "fern install: failed at line %s (%s); running it again is safe\n" "$LINENO" "$BASH_COMMAND" >&2' ERR
 
 # ---------------------------------------------------------------- the server
 
@@ -40,18 +45,25 @@ die() { printf 'fern install: %s\n' "$*" >&2; exit 1; }
 # settings and gVisor.
 node() {
   export DEBIAN_FRONTEND=noninteractive
-  { command -v mkfs.btrfs && command -v bzip2 && command -v nft && command -v nsenter && command -v podman && command -v curl; } >/dev/null ||
+  { command -v mkfs.btrfs && command -v bzip2 && command -v nft && command -v nsenter && command -v podman && { command -v netavark || [ -x /usr/lib/podman/netavark ]; } && command -v curl && command -v sysctl; } >/dev/null ||
     { say "installing btrfs-progs, nftables and podman"
-      apt-get update -qq && apt-get install -yqq btrfs-progs bzip2 nftables iproute2 util-linux curl ca-certificates >/dev/null &&
-      apt-get install -yqq --no-install-recommends podman >/dev/null; }
+      # A new cloud server updates itself at its first boot, holding apt's
+      # lock for a few minutes: wait for it rather than fail.
+      local apt=(apt-get -o DPkg::Lock::Timeout=600)
+      "${apt[@]}" update -qq && "${apt[@]}" install -yqq btrfs-progs bzip2 nftables iproute2 util-linux procps curl ca-certificates >/dev/null &&
+      "${apt[@]}" install -yqq --no-install-recommends podman netavark >/dev/null; }
 
   # The firewall: from the public interface, only SSH may open a connection,
   # T3's port included. It loads at boot before Fern. Its table is its own:
   # the daemon replaces table inet fern, the boxes' firewall, whole at every
   # start.
   if [ "$FERN_FIREWALL" != off ]; then
-    local public
+    local public ssh
     public=$(ip route show default | awk '{ print $5; exit }')
+    # Every port sshd listens on stays open, so a server with SSH on another
+    # port doesn't lock its owner out.
+    ssh=$(ss -Htlnp 2>/dev/null | awk '/"sshd"/ { sub(/.*:/, "", $4); print $4 }' | sort -un | paste -sd, -)
+    ssh=${ssh:-22}
     mkdir -p /etc/fern
     cat >/etc/fern/firewall.nft <<NFT
 table inet fern_host
@@ -59,7 +71,7 @@ delete table inet fern_host
 table inet fern_host {
   chain in {
     type filter hook prerouting priority -150; policy accept;
-    iifname "$public" ct state new tcp dport != 22 drop
+    iifname "$public" ct state new tcp dport != { $ssh } drop
     iifname "$public" ct state new udp dport != 68 drop
   }
 }
@@ -108,6 +120,7 @@ UNIT
   # gVisor mirrors all of a box's memory mappings into one host process; at
   # the kernel's default limit, large builds (Node, JVM) segfault. Boxes reach
   # the internet through the node, which forwards for them.
+  mkdir -p /etc/sysctl.d
   printf 'vm.max_map_count=4194304\nnet.ipv4.ip_forward=1\n' >/etc/sysctl.d/90-fern.conf
   sysctl -q --system
 
@@ -128,10 +141,10 @@ UNIT
 # (re)starts the services when any of them changed.
 fern_from_release() {
   local name changed=no
-  say "fetching Fern $FERN_VERSION"
+  say "fetching Fern $FERN_VERSION (about 1 GB the first time)"
   for name in fern fern-box fern-t3; do
     podman pull -q "$REGISTRY/$name:$FERN_VERSION" >/dev/null ||
-      die "can't pull $REGISTRY/$name:$FERN_VERSION"
+      die "can't download $REGISTRY/$name:$FERN_VERSION: is FERN_VERSION a release (https://github.com/nebler/fern/releases), and does the server reach ghcr.io?"
   done
 
   # The binaries, units and sample project are in the fern image.
@@ -187,6 +200,8 @@ fern_from_release() {
 
   systemctl daemon-reload
   systemctl enable -q fern-daemon fern-t3
+  # A run that failed may have left them past systemd's start limit.
+  systemctl reset-failed fern-daemon fern-t3 2>/dev/null || true
   if [ "$changed" = yes ]; then
     systemctl restart fern-daemon
     wait_daemon
@@ -278,11 +293,18 @@ server() {
   [ "$(uname -s)" = Linux ] && command -v apt-get >/dev/null && command -v systemctl >/dev/null ||
     die "the server must be Ubuntu or Debian with systemd"
   case $(uname -m) in aarch64 | x86_64) ;; *) die "the server must be arm64 or amd64" ;; esac
+  local mem disk
+  mem=$(awk '/^MemTotal:/ { print int($2 / 1024) }' /proc/meminfo)
+  [ "$mem" -ge 3500 ] || warn "the server has $mem MB of memory; Fern and T3 want 4 GB or more"
+  disk=$(df -Pm / | awk 'NR == 2 { print $4 }')
+  [ "$disk" -ge 10240 ] || warn "the server has $((disk / 1024)) GB of disk free; Fern wants 10 GB or more"
   node
   [ "${1:-}" = --node-only ] && return
   fern_from_release
   login
   sample
+  # The Mac's half of this script finds the link in this line.
+  echo "pairing link: $(pair)"
 }
 
 # ---------------------------------------------------------------- your Mac
@@ -327,23 +349,43 @@ tunnel() {
 remote() {
   local host=$1 run
   command -v ssh >/dev/null || die "needs ssh"
-  ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" true ||
-    die "can't log in to $host with an SSH key; check: ssh $host"
-  # Run this same script there: from its file, or fetched again when it came
-  # through a pipe.
+  # The first connection to a new server learns its host key (accept-new).
+  ssh -o BatchMode=yes -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$host" true ||
+    die "can't log in to $host with an SSH key. Check 'ssh $host' works without a password (ssh-copy-id $host sets that up)"
+  # Run this same script there: from its file, or fetched here when it came
+  # through a pipe, so the server needs nothing but SSH.
   if [ -f "${BASH_SOURCE[0]:-}" ]; then
     ssh -o BatchMode=yes "$host" 'cat >/tmp/fern-install.sh' <"${BASH_SOURCE[0]}"
   else
-    ssh -o BatchMode=yes "$host" "curl -fsSL $SCRIPT_URL -o /tmp/fern-install.sh"
+    curl -fsSL "$SCRIPT_URL" | ssh -o BatchMode=yes "$host" 'cat >/tmp/fern-install.sh'
   fi
   run="FERN_VERSION=$(printf %q "$FERN_VERSION") FERN_FIREWALL=$(printf %q "$FERN_FIREWALL") bash /tmp/fern-install.sh server"
-  ssh -t "$host" "if [ \"\$(id -u)\" = 0 ]; then $run; else sudo $run; fi"
+  # One session for all of it, with a terminal for Claude's login and sudo's
+  # password; its output is kept for the pairing link.
+  local out
+  out=$(mktemp)
+  ssh -t "$host" "if [ \"\$(id -u)\" = 0 ]; then $run; else sudo $run; fi" | tee "$out"
+  local link
+  link=$(tr -d '\r' <"$out" | sed -n 's/^pairing link: //p' | tail -1)
+  rm -f "$out"
+  [ -n "$link" ] || die "the server gave no pairing link; see the messages above"
+
   say "connecting"
   tunnel "$host"
-  local link
-  link=$(ssh -o BatchMode=yes "$host" "if [ \"\$(id -u)\" = 0 ]; then bash /tmp/fern-install.sh pair; else sudo bash /tmp/fern-install.sh pair; fi")
-  [ -n "$link" ] || die "no pairing link: ssh $host sudo journalctl -u fern-t3"
-  command -v pbcopy >/dev/null && printf %s "$link" | pbcopy && copied=" (copied)" || copied=""
+  # The tunnel runs in the background: check it reaches T3 before saying so.
+  local ok=no
+  for _ in $(seq 20); do
+    if curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:$T3_PORT/.well-known/t3/environment"; then ok=yes && break; fi
+    sleep 1
+  done
+  if [ "$ok" = no ]; then
+    warn "the tunnel doesn't reach T3 on 127.0.0.1:$T3_PORT. Is the port taken (lsof -i :$T3_PORT), or does your SSH key need a passphrase that isn't in your keychain (ssh-add --apple-use-keychain)?"
+    [ -f "$HOME/Library/Logs/fern-tunnel.log" ] && tail -3 "$HOME/Library/Logs/fern-tunnel.log" >&2
+    exit 1
+  fi
+
+  local copied=""
+  if command -v pbcopy >/dev/null; then printf %s "$link" | pbcopy && copied=" (copied)"; fi
   cat <<EOF
 
 Fern is ready. In the T3 app: Settings → Connections → add this link$copied,
@@ -360,7 +402,7 @@ case "${1:-}" in
   pair) pair ;;
   server) server ;;
   --node-only) server --node-only ;;
-  "") server && say "done; from your Mac, run this with root@<this server> for the tunnel and a pairing link" ;;
+  "") server && say "done; T3 listens on 127.0.0.1:$T3_PORT only through an SSH tunnel: from your Mac, run this with root@<this server> for one" ;;
   -*) die "unknown option $1" ;;
   *) remote "$1" ;;
 esac

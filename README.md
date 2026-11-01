@@ -109,7 +109,7 @@ How each number was measured: [`lab/RESULTS.md`](lab/RESULTS.md).
 
 ## Try it
 
-You need a Linux server for Fern alone (Ubuntu or Debian, arm64 or amd64, 4 GB or more) that you reach as root with an SSH key, a Claude subscription and the T3 app. From your Mac:
+You need a Linux server for Fern alone (Ubuntu 26.04 or Debian 13, arm64 or amd64, 4 GB or more; others may work) that you reach as root with an SSH key, a Claude subscription and the T3 app. From your Mac:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/nebler/fern/main/install.sh | bash -s -- root@1.2.3.4
