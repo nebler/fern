@@ -45,23 +45,49 @@ var ToolFiles = []string{"mise.toml", ".mise.toml", ".tool-versions", ".config/m
 // The watch skips it, as all of .fern/.
 const ToolsDir = ".fern/tools"
 
-// ToolsKey returns a hash of the tool files in dir, or "" if there are
-// none: the tools installed in ToolsDir are up to date when it is unchanged.
+// GuessedTools is the mise config of a Guess, in ToolsDir: fern-init
+// writes it there and points mise at it, outside the repository's files.
+const GuessedTools = ToolsDir + "/guess.toml"
+
+// ToolsKey returns a hash of the tool files in dir, or of the tools a Guess
+// gives a repository without them, or "" if there are none: the tools
+// installed in ToolsDir are up to date when it is unchanged.
 func ToolsKey(dir string) (string, error) {
 	h := sha256.New()
-	has := false
+	has, err := hasToolFiles(dir)
+	if err != nil {
+		return "", err
+	}
+	if !has {
+		g, err := MakeGuess(dir)
+		if err != nil || g.Tools == nil {
+			return "", err
+		}
+		sum := sha256.Sum256(g.Tools)
+		return hex.EncodeToString(sum[:]), nil
+	}
 	for _, p := range ToolFiles {
 		sum, err := fileSum(dir, p)
 		if err != nil {
 			return "", fmt.Errorf("tools: %s: %w", p, err)
 		}
-		has = has || sum != "missing"
 		_, _ = fmt.Fprintf(h, "%s\x00%s\x00", p, sum) // a hash takes every write
 	}
-	if !has {
-		return "", nil
-	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+// hasToolFiles reports whether dir pins tools of its own.
+func hasToolFiles(dir string) (bool, error) {
+	for _, p := range ToolFiles {
+		sum, err := fileSum(dir, p)
+		if err != nil {
+			return false, fmt.Errorf("tools: %s: %w", p, err)
+		}
+		if sum != "missing" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // maxFile bounds a file read into the key: a workspace is the agent's, and
@@ -69,14 +95,15 @@ func ToolsKey(dir string) (string, error) {
 const maxFile = 16 << 20
 
 // ErrNoContract means the repository has nothing a golden snapshot would
-// hold: no services.yaml, no setup script and no pinned tools.
+// hold: no services.yaml, no setup script, no pinned tools and nothing
+// MakeGuess could run.
 var ErrNoContract = errors.New("no setup contract")
 
 // Key returns the golden key of the repository checked out at dir, for
 // boxes from image: a hash of its contract files, its lockfiles, the files
-// services.yaml lists under golden.inputs (such as a seed), image and the
-// format version. Two checkouts with the same key can share a golden
-// snapshot.
+// services.yaml lists under golden.inputs (such as a seed), the files a
+// Guess read, image and the format version. Two checkouts with the same key
+// can share a golden snapshot.
 func Key(dir, image string) (string, error) {
 	paths := slices.Concat(contractFiles, lockFiles)
 	has := false
@@ -84,6 +111,14 @@ func Key(dir, image string) (string, error) {
 		if _, err := os.Lstat(filepath.Join(dir, p)); err == nil {
 			has = true
 		}
+	}
+	g, err := MakeGuess(dir)
+	if err != nil {
+		return "", err
+	}
+	if g.Services != nil {
+		has = true
+		paths = append(paths, g.Inputs...)
 	}
 	if !has {
 		return "", ErrNoContract
@@ -113,7 +148,7 @@ func Key(dir, image string) (string, error) {
 func goldenInputs(dir string) ([]string, error) {
 	data, err := readFile(dir, "services.yaml")
 	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+		return nil, nil // a guess has none
 	}
 	if err != nil {
 		return nil, err
@@ -137,15 +172,24 @@ func goldenInputs(dir string) ([]string, error) {
 	return paths, nil
 }
 
-// PreviewPort returns the port of the first service in dir's services.yaml,
-// by name, that has one: the environment's default preview. 0 means none.
-// The file is the agent's, read as root: readFile keeps it to dir.
-func PreviewPort(dir string) (int, error) {
-	data, err := readFile(dir, "services.yaml")
-	if errors.Is(err, fs.ErrNotExist) {
-		return 0, nil
+// ServicesFile returns dir's services.yaml, or the one MakeGuess makes
+// when it has none, and whether it is guessed; nil if there is neither.
+func ServicesFile(dir string) (data []byte, guessed bool, err error) {
+	data, err = readFile(dir, "services.yaml")
+	if !errors.Is(err, fs.ErrNotExist) {
+		return data, false, err
 	}
-	if err != nil {
+	g, err := MakeGuess(dir)
+	return g.Services, g.Services != nil, err
+}
+
+// PreviewPort returns the port of the first service in dir's services.yaml
+// (or its guess), by name, that has one: the environment's default
+// preview. 0 means none. The file is the agent's, read as root: readFile
+// keeps it to dir.
+func PreviewPort(dir string) (int, error) {
+	data, _, err := ServicesFile(dir)
+	if err != nil || data == nil {
 		return 0, err
 	}
 	var f struct {

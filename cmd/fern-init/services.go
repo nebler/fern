@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -15,6 +14,8 @@ import (
 	"time"
 
 	"sigs.k8s.io/yaml"
+
+	"github.com/nebler/fern/internal/setup"
 )
 
 // service is one entry in services.yaml. Commands are shell scripts, run
@@ -43,16 +44,16 @@ func (s service) environ(env []string) []string {
 	return append(slices.Clone(env), "PORT="+strconv.Itoa(s.Port))
 }
 
-// loadServices reads services.yaml at path. A missing file means no services.
-func loadServices(path string) (map[string]service, error) {
-	data, err := os.ReadFile(path)
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil
+// loadServices reads workspace dir's services.yaml, or the one Fern guesses
+// for a repository without one (setup.MakeGuess), and says which. Neither
+// means no services.
+func loadServices(dir string) (services map[string]service, guessed bool, err error) {
+	data, guessed, err := setup.ServicesFile(dir)
+	if err != nil || data == nil {
+		return nil, false, err
 	}
-	if err != nil {
-		return nil, err
-	}
-	return parseServices(data)
+	services, err = parseServices(data)
+	return services, guessed, err
 }
 
 // parseServices parses services.yaml; every service needs a run command.

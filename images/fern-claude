@@ -7,7 +7,8 @@
 # pool's worktrees it never does: there an agent must not run in T3's own pod,
 # with its login, the whole pool and the daemon's socket, just because the
 # daemon didn't answer or the environment wasn't made. Nor does a thread's
-# session in a project's main folder (T3's Local mode), which has no box:
+# session in a project's main folder (T3's Local mode: repos/, or projects/
+# for those T3 cloned), which has no box:
 # T3 starts sessions with --session-id or --resume, its probes and the
 # commit messages it writes without.
 #
@@ -29,7 +30,7 @@ case "$PWD/" in
 	# --here does the lookup itself and fails if the environment is missing.
 	# A preliminary `which` would add a process and repeat the same request.
 	;;
-"$pool"/repos/*)
+"$pool"/repos/* | "$pool"/projects/*)
 	for arg in "$@"; do
 		case "$arg" in
 		--session-id | --session-id=* | --resume | --resume=*)

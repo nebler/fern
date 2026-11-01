@@ -257,6 +257,7 @@ func now() time.Time { return time.Now().UTC().Truncate(time.Second) }
 
 func (s *Store) worktrees() string            { return filepath.Join(s.root, "worktrees") }
 func (s *Store) repos() string                { return filepath.Join(s.root, "repos") }
+func (s *Store) projects() string             { return filepath.Join(s.root, "projects") }
 func (s *Store) envDir(id string) string      { return filepath.Join(s.root, "envs", id) }
 func (s *Store) livePath(id string) string    { return filepath.Join(s.envDir(id), "live") }
 func (s *Store) claudePath(id string) string  { return filepath.Join(s.envDir(id), "claude") }

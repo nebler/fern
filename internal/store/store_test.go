@@ -548,9 +548,9 @@ func TestCreatePathErrors(t *testing.T) {
 	}
 }
 
-// A worktree of a repository under repos/ gets that repository's git folder,
-// which its box mounts read-only. Anything that would hand the box another
-// folder gets none.
+// A worktree of a repository under repos/ or projects/ gets that
+// repository's git folder, which its box mounts read-only. Anything that
+// would hand the box another folder gets none.
 func TestWorktreeGit(t *testing.T) {
 	st, dir := openPool(t)
 	repos := filepath.Join(dir, "repos")
@@ -570,6 +570,15 @@ func TestWorktreeGit(t *testing.T) {
 	if err := os.Symlink(filepath.Join(repos, "app"), filepath.Join(repos, "alias")); err != nil {
 		t.Fatal(err)
 	}
+	// A project T3 cloned, under projects/; its commondir mustn't lead into
+	// repos/ either.
+	cloned := filepath.Join(dir, "projects", "web", ".git")
+	for name, commondir := range map[string]string{"cloned": "../..", "crossing": "../../../../../repos/app/.git"} {
+		if err := os.MkdirAll(filepath.Join(cloned, "worktrees", name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeFile(t, filepath.Join(cloned, "worktrees", name, "commondir"), commondir+"\n")
+	}
 	tests := []struct {
 		name, id string
 		dotGit   string // the worktree's .git file; "dir" makes a directory, "link" a symlink to a good one, "" nothing
@@ -578,6 +587,8 @@ func TestWorktreeGit(t *testing.T) {
 		{"worktree of a repository under repos", "abs", "gitdir: " + own("abs"), gitDir},
 		{"relative gitdir", "rel", "gitdir: ../../../repos/app/.git/worktrees/rel", gitDir},
 		{"commondir outside repos", "escape", "gitdir: " + own("escape"), ""},
+		{"worktree of a project T3 cloned", "cloned", "gitdir: " + filepath.Join(cloned, "worktrees", "cloned"), cloned},
+		{"commondir from projects into repos", "crossing", "gitdir: " + filepath.Join(cloned, "worktrees", "crossing"), ""},
 		{"repository outside the pool", "outside", "gitdir: /elsewhere/.git/worktrees/x", ""},
 		{"repository through a symlink", "symlink", "gitdir: " + filepath.Join(repos, "alias", ".git", "worktrees", "abs"), ""},
 		{"a repository of its own", "own", "dir", ""},
