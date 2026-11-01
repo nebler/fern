@@ -995,6 +995,17 @@ tools() {
   check "a preview wakes the thread and TanStack Start serves its page" yes \
     "$(succeeds grep -q 'Hello world' <<<"$(preview "tools2.localhost:30780" /)")"
   note "asleep to TanStack Start's page through the preview, from golden: $(($(now_ms) - start)) ms"
+  # A command wakes the box, as Claude's turn does: the daemon renders the
+  # default preview ahead, so the person who opens it then finds it done.
+  fern sleep tools2 >/dev/null
+  fern exec tools2 -- true >/dev/null
+  sleep 30
+  start=$(now_ms)
+  check "after a command's wake, the page is rendered ahead" yes \
+    "$(succeeds grep -q 'Hello world' <<<"$(preview "tools2.localhost:30780" /)")"
+  local ahead=$(($(now_ms) - start))
+  metric tools.page_after_wake_ms "the page through the preview 30 s after a command woke the box, ms" "$ahead"
+  check "… and served at once (under 3 s)" yes "$([ "$ahead" -lt 3000 ] && echo yes || echo no)"
   check "Claude's Bash gets the pinned Node and pnpm" "v22 10" \
     "$(fern exec tools2 -- sh -c 'echo $(node --version | cut -d. -f1) $(pnpm --version | cut -d. -f1)')"
   for e in tools1 tools2 "$G" $ENV; do fern rm "$e"; done

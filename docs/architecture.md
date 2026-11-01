@@ -342,6 +342,7 @@ Built for previews (`internal/preview`, §5); webhooks are planned. The actor gi
 
 - **Entrances:** the unix socket (T3, CLI, MCP), HTTP previews (Host-header routing), webhooks.
 - **Wake coalescing:** the first touch on an asleep environment starts **one** wake; later touches wait on it.
+- **Rendering ahead (built):** when an environment's own box wakes (not its agent box or a golden builder's), the actor names it on a channel (`Config.Woken`), and the front door asks its default preview for `/` once, by the preview's name, as a browser's first request would, retrying while the dev server starts (`Server.Warm`, 2 min at most). A dev server compiles a page at its first request: TanStack Start's takes 10 s in a box, so the page a person opens after Claude's turn woke the box comes in 0.11 s instead of 16.6 s (`lab/check.sh tools`, VPS). A wake a browser's request made isn't rendered twice: that request is the first.
 - **Holding (built):** a preview request waits for the wake (about 250 ms), then up to 5 s for the port to listen; a wake that fails is **503 + Retry-After**. Planned: health and probe requests get the 503 at once while waking.
 - **Activity (built for previews):** a preview request is an exec of the box's actor while it lasts (§6.3). Planned: attached terminals.
 

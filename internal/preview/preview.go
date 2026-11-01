@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -55,13 +56,16 @@ type Server struct {
 	boxes     Boxes
 	transport *http.Transport
 	log       *slog.Logger
+
+	mu      sync.Mutex
+	loading map[string]int // requests in progress, by environment
 }
 
 // New returns a Server for the previews under host, such as "localhost".
 func New(host string, st Store, boxes Boxes, log *slog.Logger) *Server {
 	dialer := &net.Dialer{Timeout: 2 * time.Second}
 	return &Server{
-		host: strings.ToLower(host), store: st, boxes: boxes, log: log,
+		host: strings.ToLower(host), store: st, boxes: boxes, log: log, loading: make(map[string]int),
 		transport: &http.Transport{
 			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 				deadline := time.Now().Add(refusedWait)
@@ -102,6 +106,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	s.count(id, 1)
+	defer s.count(id, -1)
 	// A restore, sleep or delete of the environment ends the request.
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
@@ -187,5 +193,98 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, id string, err err
 		s.log.WarnContext(r.Context(), "a preview's box didn't wake", slog.String("env", id), slog.Any("error", err))
 		w.Header().Set("Retry-After", "5")
 		http.Error(w, "the box isn't up: "+err.Error(), http.StatusServiceUnavailable)
+	}
+}
+
+// count adds n to environment id's requests in progress.
+func (s *Server) count(id string, n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.loading[id] += n; s.loading[id] <= 0 {
+		delete(s.loading, id)
+	}
+}
+
+func (s *Server) isLoading(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loading[id] > 0
+}
+
+// Warm renders the default preview of each environment woken names, once,
+// as a browser's first request would, until ctx is done: a dev server
+// compiles a page at its first request (TanStack Start: 10 s in a box), and
+// the person who opens it later finds it done. An environment whose preview
+// is loading already, as when a browser woke it, isn't rendered again.
+func (s *Server) Warm(ctx context.Context, woken <-chan string) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case id := <-woken:
+			s.warm(ctx, id)
+		}
+	}
+}
+
+// warmWait bounds one render ahead: the dev server's start and its first
+// page.
+const warmWait = 2 * time.Minute
+
+func (s *Server) warm(ctx context.Context, id string) {
+	port, err := s.defaultPort(ctx, id)
+	if err != nil || port == 0 {
+		return
+	}
+	// A browser's request that woke the box is counted by now.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(time.Second):
+	}
+	if s.isLoading(id) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, warmWait)
+	defer cancel()
+	start := time.Now()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+id+"."+s.host+"/", nil)
+	if err != nil {
+		return
+	}
+	for ctx.Err() == nil {
+		rec := &discard{header: make(http.Header)}
+		s.ServeHTTP(rec, req)
+		// Nothing listens yet: the dev server is starting.
+		if rec.code != http.StatusBadGateway {
+			s.log.InfoContext(ctx, "preview rendered ahead", slog.String("env", id), slog.Int("status", rec.code),
+				slog.Duration("took", time.Since(start)))
+			return
+		}
+		select {
+		case <-ctx.Done():
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// discard is a ResponseWriter that keeps only the status.
+type discard struct {
+	header http.Header
+	code   int
+}
+
+func (d *discard) Header() http.Header { return d.header }
+
+func (d *discard) Write(p []byte) (int, error) {
+	if d.code == 0 {
+		d.code = http.StatusOK
+	}
+	return len(p), nil
+}
+
+func (d *discard) WriteHeader(code int) {
+	if d.code == 0 {
+		d.code = code
 	}
 }

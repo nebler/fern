@@ -94,7 +94,7 @@ Memory: 16 MiB for an awake box with Postgres idle, 10.8 MiB for the daemon. An 
 
 Against the first design (agent-sandbox pods on Kubernetes): 8.7× less CPU per turn, revert 9.6× faster, 20 boxes woken at once 25 s → 1.2 s.
 
-Still slow: a heavy dev server's first page. TanStack Start takes 16.6 s from an asleep box, 4.6 s under runc: gVisor without KVM costs about twice the CPU.
+A heavy dev server's first page: TanStack Start renders it in about 10 s in a box. Fern renders it ahead when Claude's turn wakes the box, so the page comes in 0.11 s; a browser that wakes an asleep thread itself still waits 16.6 s (4.6 s under runc: gVisor without KVM costs about twice the CPU).
 
 How each number was measured: [`lab/RESULTS.md`](lab/RESULTS.md).
 

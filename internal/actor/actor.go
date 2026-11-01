@@ -23,6 +23,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/nebler/fern/internal/runsc"
+	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/span"
 	"github.com/nebler/fern/internal/store"
 )
@@ -66,6 +67,11 @@ type Config struct {
 	// them otherwise: gVisor tells a box only of its own changes. nil: they
 	// don't.
 	Watcher Watcher
+	// Woken, if not nil, gets the ID of every environment whose own box
+	// (not its agent box, not a golden builder) has just woken, so that its
+	// default preview can be rendered ahead (preview.Server.Warm). A full
+	// channel drops it.
+	Woken chan<- string
 }
 
 // Idle says when a box with no command running goes to sleep: Agent after
@@ -443,6 +449,12 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 	}
 	a.g.log.InfoContext(ctx, "box woke", slog.String("env", a.id), slog.Duration("took", time.Since(start)))
 	a.addr = addr
+	if a.g.cfg.Woken != nil && store.EnvOfBox(a.id) == a.id && !setup.IsBuilder(a.id) {
+		select {
+		case a.g.cfg.Woken <- a.id:
+		default:
+		}
+	}
 	a.watch(ctx, env.Workspace)
 	return env, nil
 }
