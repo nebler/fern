@@ -12,8 +12,11 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/nebler/fern/main/install.sh | bash
 #
-# Run it again to update; every step skips what is done. Settings, in the
-# environment: FERN_VERSION (a release tag, default latest), FERN_FIREWALL=off
+# Run it again to update; every step skips what is done. When something
+# doesn't work, install.sh doctor root@1.2.3.4 says what, and what to do.
+#
+# Settings, in the environment: FERN_VERSION (a release tag, default
+# latest), FERN_FIREWALL=off
 # to keep your own firewall, and FERN_GITHUB_APP_ID with FERN_GITHUB_APP_KEY
 # (the .pem GitHub gave you, on the machine you run this on) for private
 # repositories, push and pull requests through your GitHub App (README).
@@ -428,8 +431,26 @@ http://<thread>.localhost:$PREVIEW_PORT/
 EOF
 }
 
+# doctor checks the server (fern doctor) and this Mac's tunnel to it, and
+# says what to do about each problem.
+doctor() {
+  local host=$1 code=0
+  say "the server"
+  ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" "if [ \"\$(id -u)\" = 0 ]; then fern doctor; else sudo -n fern doctor; fi" || code=1
+  say "this Mac"
+  if curl -sf -o /dev/null --max-time 3 "http://127.0.0.1:$T3_PORT/.well-known/t3/environment"; then
+    echo "ok    tunnel         reaches T3 at 127.0.0.1:$T3_PORT"
+  else
+    echo "FAIL  tunnel         doesn't reach T3 at 127.0.0.1:$T3_PORT"
+    echo "                     → run the install again; if it still fails: lsof -i :$T3_PORT, and ~/Library/Logs/fern-tunnel.log"
+    code=1
+  fi
+  return $code
+}
+
 case "${1:-}" in
   pair) pair ;;
+  doctor) doctor "${2:?usage: install.sh doctor root@HOST}" ;;
   github) github_app "${2:-}" ;;
   server) server ;;
   --node-only) server --node-only ;;

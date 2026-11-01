@@ -26,6 +26,8 @@
 //	                                         token from the daemon's GitHub App
 //	fern github-token [owner/repo]           print a token for the repository, or the
 //	                                         one origin names (T3's gh wrapper)
+//	fern doctor                              check the node Fern runs on, as root on it,
+//	                                         and say what to do about each problem
 package main
 
 import (
@@ -141,6 +143,7 @@ func subcommands() []subcommand {
 		{name: "prewake", min: 1, max: 1, run: timed((*api.Client).Prewake)},
 		{name: "git-credential", min: 1, max: 1, run: gitCredential},
 		{name: "github-token", max: 1, run: githubToken},
+		{name: "doctor", run: doctor},
 	}
 }
 
