@@ -38,6 +38,8 @@
 #   guess        the same repository with no Fern files and Postgres in
 #                docker-compose.yml: Fern guesses its services and tools,
 #                builds its golden and serves it (needs the internet)
+#   github       T3's git and gh get a token from the daemon's GitHub App,
+#                against a fake GitHub on the node (restarts the daemon)
 #   claude       Claude Code in a box: network, stream-json, its terminal UI
 #   devserver    a Vite dev server Claude starts in the background keeps
 #                running after the call, hears the files Claude's box writes
@@ -1111,6 +1113,44 @@ guess() {
   in_daemon "rm -rf $W"
 }
 
+# github sets up a GitHub App with a new key, points the daemon at a fake
+# GitHub on the node that answers as GitHub's API does for an App installed
+# on owner/app, and asks for credentials as T3's git and gh do.
+github() {
+  echo "== T3's git and gh get tokens from the daemon's GitHub App"
+  local args dir=/tmp/fern-github-check
+  args=$(daemon_args)
+  in_daemon "set -e; rm -rf $dir; mkdir -p $dir/app; echo 7 >$dir/app/id
+    openssl genrsa -traditional -out $dir/app/key.pem 2048 2>/dev/null
+    cat >$dir/fake.py <<'PY'
+import http.server, json
+class H(http.server.BaseHTTPRequestHandler):
+    def reply(self, code, body):
+        self.send_response(code); self.send_header('Content-Type', 'application/json'); self.end_headers()
+        self.wfile.write(json.dumps(body).encode())
+    def do_GET(self):
+        ok = self.path == '/repos/owner/app/installation' and self.headers.get('Authorization', '').startswith('Bearer ey')
+        self.reply(200, {'id': 42}) if ok else self.reply(404, {'message': 'Not Found'})
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
+        ok = self.path == '/app/installations/42/access_tokens' and body['repositories'] == ['app']
+        self.reply(201, {'token': 'ghs_check', 'expires_at': '2099-01-01T00:00:00Z'}) if ok else self.reply(400, {})
+    def log_message(self, *a): pass
+http.server.HTTPServer(('127.0.0.1', 18080), H).serve_forever()
+PY
+    (python3 $dir/fake.py >/dev/null 2>&1 &) ; sleep 0.5"
+  set_daemon_args $args --github-app=$dir/app --github-api=http://127.0.0.1:18080
+  local ask='printf "protocol=https\nhost=github.com\npath=owner/app.git\n\n" | git credential fill'
+  check "T3's git gets a token for a repository with the App" password=ghs_check \
+    "$(in_t3 "$ask" 2>&1 | grep '^password=')"
+  check "and none for one without it" "" \
+    "$(in_t3 "${ask/owner\/app/owner/other} </dev/null 2>/dev/null; true" 2>&1 | grep '^password=' || true)"
+  check "T3's gh gets one through its wrapper" ghs_check "$(in_t3 'fern github-token owner/app' 2>&1)"
+  check "T3's image has GitHub's CLI" yes "$(succeeds in_t3 'gh --version >/dev/null')"
+  set_daemon_args $args
+  in_daemon "pkill -f $dir/fake.py; rm -rf $dir"
+}
+
 # go_seconds prints a Go duration (5m, 1m30s, 250ms) in seconds.
 go_seconds() {
   awk -v d="$1" 'BEGIN {
@@ -1283,11 +1323,11 @@ stability() {
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden tools guess claude devserver turn hardware stability)
+  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden tools guess github claude devserver turn hardware stability)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.
-  alone=" idle daemon node many scale turn hardware stability "
+  alone=" idle daemon node many scale turn hardware stability github "
   case "${1:-}" in
     "") set -- "${quick[@]}" ;;
     all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} && DISK_HARDWARE=1 ;;

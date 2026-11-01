@@ -8,6 +8,6 @@ sync_src
 "${GO_RUN[@]}" -v fern-lab-lintcache:/root/.cache/golangci-lint \
   golangci/golangci-lint:v2.15.0 golangci-lint run "$@"
 builder run --rm --label "$LABEL" "${NET[@]}" -v "$SRC:/mnt" -w /mnt koalaman/shellcheck:v0.11.0 \
-  -S warning -x install.sh lab/*.sh images/fern-claude images/lab-node-start
+  -S warning -x install.sh lab/*.sh images/fern-claude images/fern-gh images/lab-node-start
 builder run --rm -i --label "$LABEL" "${NET[@]}" -v "$SRC/.hadolint.yaml:/.config/hadolint.yaml:ro" \
   hadolint/hadolint:v2.15.1 <images/Dockerfile

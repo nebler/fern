@@ -54,6 +54,23 @@ func (c *Client) Prebuild(ctx context.Context, repo string, checkout io.Reader) 
 	return c.do(ctx, http.MethodPut, "/goldens/"+url.PathEscape(repo), checkout, "application/x-tar", nil)
 }
 
+// GitHubToken returns a token for GitHub repository owner/repo from the
+// daemon's GitHub App (internal/github). An *Error with status 404 means no
+// App is set up, or it isn't installed on the repository.
+func (c *Client) GitHubToken(ctx context.Context, repository string) (string, error) {
+	body, err := json.Marshal(map[string]string{"repository": repository})
+	if err != nil {
+		return "", err
+	}
+	var t struct {
+		Token string `json:"token"`
+	}
+	if err := c.do(ctx, http.MethodPost, "/github/token", bytes.NewReader(body), "application/json", &t); err != nil {
+		return "", err
+	}
+	return t.Token, nil
+}
+
 // FindByPath returns the environment whose workspace is path or holds it.
 func (c *Client) FindByPath(ctx context.Context, path string) (Env, error) {
 	var envs []Env

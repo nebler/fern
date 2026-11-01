@@ -22,6 +22,10 @@
 //	                                         stream of its checkout on stdin
 //	fern image load                          unpack the images of a docker save stream
 //	                                         on stdin into the pool, as root on the node
+//	fern git-credential get                  git's credential helper in T3's server: a
+//	                                         token from the daemon's GitHub App
+//	fern github-token [owner/repo]           print a token for the repository, or the
+//	                                         one origin names (T3's gh wrapper)
 package main
 
 import (
@@ -135,6 +139,8 @@ func subcommands() []subcommand {
 		{name: "sleep", min: 1, max: 1, run: timed((*api.Client).Sleep)},
 		{name: "wake", min: 1, max: 1, run: timed((*api.Client).Wake)},
 		{name: "prewake", min: 1, max: 1, run: timed((*api.Client).Prewake)},
+		{name: "git-credential", min: 1, max: 1, run: gitCredential},
+		{name: "github-token", max: 1, run: githubToken},
 	}
 }
 

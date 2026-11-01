@@ -1,0 +1,11 @@
+#!/bin/sh
+# fern-gh is `gh` on the PATH of Fern's T3 image, which T3 runs for pull
+# requests. It gives GitHub's CLI a token for the repository T3 runs it in,
+# from the daemon's GitHub App (fern github-token): one repository, one
+# hour. Without an App, or one installed on the repository, gh runs as it
+# would anyway, with no token.
+set -eu
+if [ -z "${GH_TOKEN:-}" ] && token=$(/usr/local/bin/fern github-token 2>/dev/null); then
+	export GH_TOKEN="$token"
+fi
+exec /usr/local/libexec/gh "$@"

@@ -17,7 +17,7 @@
 | # | Build | Done when |
 |---|---|---|
 | 1 (built 2026-11-01) | **Your own repository from a git URL:** add a project by its URL; without a `services.yaml`, Fern guesses one from the repository (the `dev` script and its port, the Node version, the package manager, Postgres in `docker-compose.yml`) | a Vite repo and a Next.js repo with Postgres, neither with Fern files, start and serve a preview from their URLs |
-| 2 | **GitHub access for private repositories and `git push`**, without a token in any workspace, golden or snapshot | a thread clones a private repo and pushes a branch; a scan finds no token in the pool |
+| 2 (built 2026-11-01) | **GitHub access for private repositories and `git push`**, without a token in any workspace, golden or snapshot | a thread clones a private repo and pushes a branch; a scan finds no token in the pool |
 | 3 | **`fern doctor`:** the services, the tunnel, Claude's login, the disk and gVisor, each with what to do when it fails | each failure the installer knows of is named by it |
 | 4 | **Supervision:** a box that keeps crashing backs off, then its environment is `failed`, with the reason; background jobs and idle clocks survive a daemon restart | crash tests: a box that dies at once ends `failed` after N tries; a dev server started through Bash runs on after `systemctl restart fern-daemon` |
 | 5 | **Backups:** snapshots shipped with `btrfs send` to object storage, and an environment restored from them on a new server | a server deleted and set up again gets its threads back, the database included |
