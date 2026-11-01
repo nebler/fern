@@ -43,7 +43,8 @@
 #   claude       Claude Code in a box: network, stream-json, its terminal UI
 #   devserver    a Vite dev server Claude starts in the background keeps
 #                running after the call, hears the files Claude's box writes
-#                and serves them (with agent boxes; needs the internet)
+#                and serves them, and runs on through a daemon restart (with
+#                agent boxes; needs the internet; restarts the daemon)
 #   t3           T3's server: the checkpoint hook's commands on a worktree it
 #                made, and that worktree's box with git, Claude's folder and
 #                login. Needs lab/build.sh t3.
@@ -889,7 +890,7 @@ EOF'
   fern sleep $ENV >/dev/null
   local job
   job=$(mcp $ENV Bash '{"command": "pnpm exec vite --host 0.0.0.0 --port 5173 --strictPort", "run_in_background": true}' |
-    grep -o 'bash_[0-9]*')
+    grep -o 'bash_[a-z0-9]*')
   check "Bash starts Vite in the background" yes "$([ -n "$job" ] && echo yes || echo no)"
   local ip
   ip=$(box_ip $ENV)
@@ -907,6 +908,9 @@ EOF'
   check "a minute after the Bash call, the box is awake" running "$(state $ENV)"
   check "… and Vite still serves" yes "$(succeeds served 'v = 1')"
   check "BashOutput shows Vite's output" yes "$(succeeds grep -q 'ready in' <<<"$(mcp $ENV BashOutput "{\"bash_id\": \"$job\"}")")"
+  restart_daemon
+  check "after the daemon restarts, Vite still serves" yes "$(succeeds served 'v = 1')"
+  check "… and BashOutput still reaches it" yes "$(succeeds grep -q 'is running' <<<"$(mcp $ENV BashOutput "{\"bash_id\": \"$job\"}")")"
 
   start=$(now_ms)
   fern exec --agent $ENV -- sh -c '
@@ -1334,7 +1338,7 @@ main() {
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.
-  alone=" idle daemon node many scale turn hardware stability github "
+  alone=" idle daemon node many scale turn hardware stability github devserver "
   case "${1:-}" in
     "") set -- "${quick[@]}" ;;
     all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} && DISK_HARDWARE=1 ;;

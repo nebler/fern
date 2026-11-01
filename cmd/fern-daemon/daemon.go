@@ -201,6 +201,8 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	// Changes outlive their requests: Run returns once they have ended, and
 	// the store stays open until then.
 	g.Go(func() error { return envs.Run(ctx) })
+	// Background commands an earlier daemon watched run on in their boxes.
+	g.Go(func() error { apiSrv.AdoptJobs(ctx); return nil })
 	for _, s := range servers {
 		if s.lis == nil {
 			continue

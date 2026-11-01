@@ -94,6 +94,9 @@ func run(ctx context.Context, log *slog.Logger) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("GET "+boxexec.Path, boxexec.NewServer(token, dir, env, log))
+	// Background commands, which outlive the daemon's connections to them.
+	jobs := boxexec.NewJobs(token, dir, env, log)
+	jobs.Register(mux)
 	mux.Handle("GET "+boxexec.ReadyPath, readiness(func(ctx context.Context) error {
 		// A service that hasn't started is ready: its socket is.
 		check := make(map[string]service, len(services))
@@ -121,6 +124,7 @@ func run(ctx context.Context, log *slog.Logger) error {
 	case err = <-serveErr:
 	}
 	log.InfoContext(ctx, "stopping")
+	jobs.Close()
 	var stopping sync.WaitGroup
 	for _, stop := range stoppers {
 		stopping.Go(func() { stop(context.WithoutCancel(ctx)) })
