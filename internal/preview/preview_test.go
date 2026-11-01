@@ -13,6 +13,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 	"go.uber.org/goleak"
@@ -191,5 +192,46 @@ func TestPreviewWebSocket(t *testing.T) {
 	}
 	if open, _ := boxes.counts(); open != 1 {
 		t.Errorf("%d requests open in the box during a WebSocket, want 1", open)
+	}
+}
+
+// A woken environment's default preview is rendered ahead, as its first
+// browser request would be: one request for /, by the preview's name.
+func TestWarm(t *testing.T) {
+	var mu sync.Mutex
+	var asked []string
+	srv := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		asked = append(asked, r.Host+r.URL.Path)
+		mu.Unlock()
+	}))
+	defer srv.Close()
+	_, port, _ := net.SplitHostPort(srv.Listener.Addr().String())
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "services.yaml"), []byte("services: {web: {run: x, port: "+port+"}}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	p := preview.New("localhost", fakeStore{ws}, &fakeBoxes{}, slog.New(slog.DiscardHandler))
+	ctx, cancel := context.WithCancel(t.Context())
+	woken := make(chan string, 1)
+	done := make(chan struct{})
+	go func() { p.Warm(ctx, woken); close(done) }()
+	woken <- "demo"
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		mu.Lock()
+		n := len(asked)
+		mu.Unlock()
+		if n > 0 || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 1 || asked[0] != "demo.localhost/" {
+		t.Errorf("the dev server was asked for %q, want [demo.localhost/]", asked)
 	}
 }

@@ -1702,3 +1702,14 @@ the same thread, whose Vite cache matches its path, took 15.6 s.
 change and at the commit before it alike: one sleep in each run takes about
 385 ms, which is the p95 of the fast gate's few samples (with 20, p95 is
 88 ms).
+
+## Rendering ahead, VPS, 2026-11-01
+
+A dev server compiles a page at its first request; TanStack Start's takes
+about 10 s in a box. When an environment's own box wakes, the daemon now
+asks its default preview for `/` once, as a browser would
+(`preview.Server.Warm`). `lab/check.sh tools`: the TanStack thread woken by
+a command, as Claude's turn wakes it, serves its page through the preview
+30 s later in **110 ms** (rendered ahead in 9.5 s); woken by the browser's
+own request, as before, 16.6 s. `lab/perf.sh --fast` passes (the sample
+repository has no preview, so the gate's boxes render nothing).

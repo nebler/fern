@@ -192,6 +192,11 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	if cfg.Agents {
 		cfg.Watcher = watch.New(runsc.BoxOf, log)
 	}
+	// Woken boxes' default previews are rendered ahead.
+	woken := make(chan string, 16)
+	if previewLis != nil {
+		cfg.Woken = woken
+	}
 	envs := actor.New(st, drv, cfg, tr, reg, log)
 	apiSrv := server.New(st, drv, envs, agentMCP, tr, log)
 	app, err := github.Load(*githubApp, *githubAPI)
@@ -229,6 +234,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
+	previews := preview.New(*previewHost, st, envs, log)
 	g, ctx := errgroup.WithContext(ctx)
 	servers := []struct {
 		name string
@@ -238,12 +244,15 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		{"api", &http.Server{Handler: api}, apiLis},
 		{"metrics", &http.Server{Handler: metricsHandler(reg)}, metricsLis},
 		{"mcp", &http.Server{Handler: apiSrv.MCPHandler()}, mcpLis},
-		{"preview", &http.Server{Handler: preview.New(*previewHost, st, envs, log)}, previewLis},
+		{"preview", &http.Server{Handler: previews}, previewLis},
 	}
 	log.InfoContext(ctx, "fern daemon started", slog.String("node", node))
 	// Changes outlive their requests: Run returns once they have ended, and
 	// the store stays open until then.
 	g.Go(func() error { return envs.Run(ctx) })
+	if previewLis != nil {
+		g.Go(func() error { previews.Warm(ctx, woken); return nil })
+	}
 	// Background commands an earlier daemon watched run on in their boxes.
 	g.Go(func() error { apiSrv.AdoptJobs(ctx); return nil })
 	if backer != nil {
