@@ -1,9 +1,48 @@
 # Lab results
 
-Numbers from the local lab. They show correctness; timings come from Docker
-Desktop's virtual disk and VM and are **not** demo numbers (those come from the
-VPS in week 4). All timings are wall clock as seen by the CLI, inside the
-daemon pod, so they include the HTTP round trip over the unix socket.
+Every measurement, oldest first. Numbers from the local lab (Docker Desktop's
+virtual disk and VM) show correctness; timings that count come from the VPS
+(Hetzner CAX21, 4 ARM cores, 8 GB, gVisor without KVM).
+
+## Summary (2026-11-01)
+
+**Now, on the VPS** (`lab/perf/vps.tsv`, median of 5 runs, 2026-10-31):
+
+| | time | CPU |
+|---|---:|---:|
+| snapshot a turn | 12 ms | 20 ms |
+| revert, files and database | 86 ms | 140 ms |
+| wake a box | 220 ms | 330 ms |
+| put a box to sleep | 71 ms | 130 ms |
+| a command in an awake box | 19 ms | |
+| a new thread from a golden snapshot | 35 ms | |
+| Claude's edit to a reloaded preview | 416 ms | |
+| a short agent turn, all of it | | 7.3 s |
+
+An awake box with Postgres idle: 16 MiB; with 20 awake, about 50 MiB each;
+the daemon: 10.8 MiB. 20 boxes woken at once are ready in 1.2 s.
+
+**How it got there** (median of 3, VPS), from the first v2 design, agent-sandbox
+pods on k3s, to the daemon's own runsc boxes with Claude in a box of its own:
+CPU per short turn 62.4 → 7.2 s; sleep 1,221 → 90 ms; revert 1,034 → 108 ms;
+wake 993 → 253 ms; 20 boxes at once 25.0 → 1.2 s. See
+[Phases 0–3A](#phases-03a-of-the-speed-plan-vps-2026-10-27) and
+[Phase 4](#phase-4-and-the-new-default-claude-in-a-box-of-its-own-vps-2026-10-28).
+
+**Where it is slow:** a heavy dev server's first page. TanStack Start: 16.6 s
+from an asleep box, 4.6 s under runc; gVisor without KVM costs about twice the
+CPU on its file-heavy start
+([Tools per repository](#tools-per-repository-mise-vps-2026-10-31)).
+
+**Tried and rejected:** memory snapshots (`runsc checkpoint`: 362 ms of CPU to
+restore, a corrupt Postgres on a swapped workspace, credentials in the image;
+[spike/runsc/RESULTS.md](spike/runsc/RESULTS.md)); EventedPLEG (sleeps 1.2 →
+4.2 s); both boxes in one sandbox, so dev servers hear Claude's edits (gVisor delivers inotify
+only inside the sandbox that wrote; [spike/watch/RESULTS.md](spike/watch/RESULTS.md)).
+
+The early sections below are from the local lab: their timings come from
+Docker Desktop's virtual disk and VM, and were taken as wall clock by the CLI
+inside the daemon's pod.
 
 ## Run of 2026-10-18 (iteration 1)
 

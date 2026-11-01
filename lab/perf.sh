@@ -14,7 +14,9 @@
 #   lab/perf.sh --accept         make this run the baseline; commit the file
 #   lab/perf.sh --fast           one run, 5 wakes, the quick timing sections:
 #                                about 1.5 minutes, with margins twice as
-#                                wide; it catches only big regressions
+#                                wide; it catches only big regressions.
+#                                Its p95s are shown, not gated: of 5
+#                                samples, a p95 is the slowest one
 # E2E=N also runs lab/t3-run.sh toy N times (Haiku, your subscription) and
 # gates the wakes, revert and sampled hardware costs of sequential turns.
 # hardware (idle CPU/platform/pool) and turn (one agent turn's CPU and
@@ -123,12 +125,13 @@ fi
 [ -f "$baseline" ] || { echo "perf: no baseline $baseline yet; make one with lab/perf.sh --accept" >&2; exit 1; }
 echo "== against $baseline ($(sed -n '1s/^# //p' "$baseline"))"
 printf "  %-34s %10s %10s %8s %6s\n" metric baseline now change margin
-awk -v tol="$tol" -v widen="$widen" '
+awk -v tol="$tol" -v widen="$widen" -v fast="$fast" '
   NR == FNR { if ($1 !~ /^#/) { base[$1] = $2; margin[$1] = widen * ($3 == "" ? tol : $3) }; next }
   {
     key = $1; now = $2
     if (!(key in base)) { printf "  %-34s %10s %10s %8s %6s  new\n", key, "-", now, "", ""; next }
     b = base[key]; t = margin[key]; floor = 25
+    if (fast == "yes" && key ~ /\.p95$/) { printf "  %-34s %10s %10s %8s %6s  not gated\n", key, b, now, "", ""; next }
     if (key ~ /_mib($|\.)/) floor = 8
     else if (key ~ /_bytes($|\.)/) floor = 1048576
     else if (key ~ /_count($|\.)/) floor = 2

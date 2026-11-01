@@ -4,7 +4,7 @@
 
 **Status:** plan, revised 2026-10-17 to match the Kubernetes-first decision.
 - [architecture.md](../architecture.md) says what we build.
-- [roadmap.md](../roadmap.md) gives the week-by-week plan; [design.md §21](../design.md) gives the demo.
+- [roadmap-weeks.md](roadmap-weeks.md) gives the week-by-week plan; [design.md §21](../design.md) gives the demo.
 
 The engine is everything Fern runs on a node:
 - the **store** (btrfs snapshots)
@@ -18,7 +18,7 @@ The engine is everything Fern runs on a node:
 - the **front door** (wake on touch)
 - the **T3 hook**
 
-**Where it runs:** **locally first, then remote** ([roadmap.md](../roadmap.md)). Weeks 0–3 use a local lab: k3s inside a privileged Docker container on the Mac. From week 4, a remote Linux machine with k3s. Both are Kubernetes, so there is one code path. Nothing gets installed on the Mac itself.
+**Where it runs:** **locally first, then remote** ([roadmap-weeks.md](roadmap-weeks.md)). Weeks 0–3 use a local lab: k3s inside a privileged Docker container on the Mac. From week 4, a remote Linux machine with k3s. Both are Kubernetes, so there is one code path. Nothing gets installed on the Mac itself.
 
 ---
 
@@ -196,7 +196,7 @@ Each one: **shows**, **how**, **pass**. Numbers are reported as p50/p95, with no
 
 ---
 
-## 6. Order (matches [roadmap.md](../roadmap.md))
+## 6. Order (matches [roadmap-weeks.md](roadmap-weeks.md))
 | Week | Experiments |
 |---|---|
 | 0 (local) | E0 (runc; gVisor if possible) |

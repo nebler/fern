@@ -1,0 +1,19 @@
+{"case": "propagate", "opt": "rslave", "runsc_flags": [], "guest_mounts": {"rc": 0, "out": ["none / 9p ro,trans=fd,rfdno=4,wfdno=4,aname=/,dfltuid=4294967294,dfltgid=4294967294,dcache=1000,cache=fscache,disable_fifo_open,overlayfs_stale_read,directfs 0 0", "none /slot 9p rw,trans=fd,rfdno=7,wfdno=7,aname=/,dfltuid=4294967294,dfltgid=4294967294,dcache=1000,cache=remote_revalidating,disable_fifo_open,directfs 0 0"], "err": []}, "before": {"rc": 0, "out": ["0", "23 2"], "err": []}, "host_mount_ms": 2.49, "gofer_sees": [], "after_primed": {"rc": 0, "out": ["6", "23 3", "services:", "  postgres:", "    run: ./scripts"], "err": []}, "after_late": {"rc": 0, "out": ["6", "services:", "  postgres:", "    run: ./scripts"], "err": []}, "box_write_on_host": {"in_subvolume": true}, "host_write_in_box": {"rc": 0, "out": ["from-host"], "err": []}, "postgres": {"rc": 0, "out": ["420"], "err": []}, "after_unmount": {"rc": 0, "out": ["0"], "err": []}, "over_root": {"rc": 0, "out": ["late", "ws"], "err": []}}
+{"case": "propagate", "opt": "rprivate", "runsc_flags": [], "guest_mounts": {"rc": 0, "out": ["none / 9p ro,trans=fd,rfdno=4,wfdno=4,aname=/,dfltuid=4294967294,dfltgid=4294967294,dcache=1000,cache=fscache,disable_fifo_open,overlayfs_stale_read,directfs 0 0", "none /slot 9p rw,trans=fd,rfdno=7,wfdno=7,aname=/,dfltuid=4294967294,dfltgid=4294967294,dcache=1000,cache=remote_revalidating,disable_fifo_open,directfs 0 0"], "err": []}, "before": {"rc": 0, "out": ["0", "23 2"], "err": []}, "host_mount_ms": 1.92, "gofer_sees": [], "after_primed": {"rc": 1, "out": ["0", "23 2"], "err": ["head: cannot open '/slot/ws/services.yaml' for reading: No such file or directory"]}, "after_late": {"rc": 1, "out": ["0"], "err": ["head: cannot open '/slot/late/services.yaml' for reading: No such file or directory"]}, "over_root": {"rc": 0, "out": ["late", "ws"], "err": []}}
+{"case": "propagate", "opt": "rslave", "runsc_flags": ["--directfs=false"], "guest_mounts": {"rc": 0, "out": ["none / 9p ro,trans=fd,rfdno=4,wfdno=4,aname=/,dfltuid=4294967294,dfltgid=4294967294,dcache=1000,cache=fscache,disable_fifo_open,overlayfs_stale_read 0 0", "none /slot 9p rw,trans=fd,rfdno=7,wfdno=7,aname=/,dfltuid=4294967294,dfltgid=4294967294,dcache=1000,cache=remote_revalidating,disable_fifo_open 0 0"], "err": []}, "before": {"rc": 0, "out": ["0", "23 2"], "err": []}, "host_mount_ms": 2.94, "gofer_sees": [], "after_primed": {"rc": 0, "out": ["6", "23 3", "services:", "  postgres:", "    run: ./scripts"], "err": []}, "after_late": {"rc": 0, "out": ["6", "services:", "  postgres:", "    run: ./scripts"], "err": []}, "box_write_on_host": {"in_subvolume": true}, "host_write_in_box": {"rc": 0, "out": ["from-host"], "err": []}, "postgres": {"rc": 0, "out": ["420"], "err": []}, "after_unmount": {"rc": 0, "out": ["0"], "err": []}, "over_root": {"rc": 0, "out": ["late", "ws"], "err": []}}
+Traceback (most recent call last):
+  File "/var/lib/fern/spike/code/mount7.py", line 160, in <module>
+    main()
+    ~~~~^^
+  File "/var/lib/fern/spike/code/mount7.py", line 154, in main
+    propagate(sys.argv[2])
+    ~~~~~~~~~^^^^^^^^^^^^^
+  File "/var/lib/fern/spike/code/mount7.py", line 44, in propagate
+    box.create_start(bid, b)
+    ~~~~~~~~~~~~~~~~^^^^^^^^
+  File "/var/lib/fern/spike/code/box.py", line 208, in create_start
+    sh(*RUNSC, *args, capture=False, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+    ~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/var/lib/fern/spike/code/box.py", line 34, in sh
+    raise RuntimeError(f"{' '.join(args)}: {r.returncode}: {(r.stderr or '').strip()}")
+RuntimeError: runsc --root=/run/spike-runsc create --bundle=/var/lib/fern/spike/bundle/m7-rshared m7-rshared: 128: 

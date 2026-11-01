@@ -796,7 +796,7 @@ Fern v1 (this repository at tag `v1-final`, 393 commits, Go) is "a self-hosted G
 
 *Revised 2026-10-17: "engine first, Kubernetes later" built throwaway local code and left the riskiest piece for last.*
 
-**The week-by-week plan now lives in [roadmap.md](roadmap.md)** (2026-10-18): an MVP (`v0.1`) in about 3 weeks, where "Revert files too" also restores the database, then v1 by week 8. The table below is the v1 summary; the demo, cut list, machines and contribution plan follow.
+**The week-by-week plan now lives in [roadmap.md](roadmap.md) (the plan of 2026-10-18 is [history/roadmap-weeks.md](history/roadmap-weeks.md))** (2026-10-18): an MVP (`v0.1`) in about 3 weeks, where "Revert files too" also restores the database, then v1 by week 8. The table below is the v1 summary; the demo, cut list, machines and contribution plan follow.
 
 | Week | Goal |
 |---|---|
