@@ -8,7 +8,6 @@ name: release
 on:
   push:
     tags: ["v*"]
-    branches: [easy-start] # TEMPORARY: to try the branch
   workflow_dispatch:
 permissions:
   contents: read

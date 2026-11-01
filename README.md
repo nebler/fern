@@ -115,7 +115,7 @@ You need a Linux server for Fern alone (Ubuntu or Debian, arm64 or amd64, 4 GB o
 curl -fsSL https://raw.githubusercontent.com/nebler/fern/main/install.sh | bash -s -- root@1.2.3.4
 ```
 
-It installs Fern and T3's server on the server from the released images (about 2 minutes), asks once for your Claude login there (`claude setup-token`: open the link, paste back the code, then the token), keeps an SSH tunnel to the server running in the background and copies a pairing link. In the T3 app: Settings → Connections, paste the link. Then open the **sample** project and start a thread: ask Claude to drop the `email` column, then revert.
+It installs Fern and T3's server on the server from the released images (a few minutes the first time, about a minute for an update), asks once for your Claude login there (`claude setup-token`: open the link, paste back the code, then the token), keeps an SSH tunnel to the server running in the background and copies a pairing link. In the T3 app: Settings → Connections, paste the link. Then open the **sample** project and start a thread: ask Claude to drop the `email` column, then revert.
 
 Run the same command again to update, or for a new pairing link. The server gets a firewall that lets in only SSH (`FERN_FIREWALL=off` keeps yours): T3's port is never public, and the tunnel is how your Mac reaches it and the previews (`http://<thread>.localhost:30780/`).
 

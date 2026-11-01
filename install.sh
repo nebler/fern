@@ -336,7 +336,7 @@ remote() {
   else
     ssh -o BatchMode=yes "$host" "curl -fsSL $SCRIPT_URL -o /tmp/fern-install.sh"
   fi
-  run="FERN_VERSION=$(printf %q "$FERN_VERSION") FERN_FIREWALL=$(printf %q "$FERN_FIREWALL") bash /tmp/fern-install.sh"
+  run="FERN_VERSION=$(printf %q "$FERN_VERSION") FERN_FIREWALL=$(printf %q "$FERN_FIREWALL") bash /tmp/fern-install.sh server"
   ssh -t "$host" "if [ \"\$(id -u)\" = 0 ]; then $run; else sudo $run; fi"
   say "connecting"
   tunnel "$host"
@@ -358,6 +358,7 @@ EOF
 
 case "${1:-}" in
   pair) pair ;;
+  server) server ;;
   --node-only) server --node-only ;;
   "") server && say "done; from your Mac, run this with root@<this server> for the tunnel and a pairing link" ;;
   -*) die "unknown option $1" ;;
