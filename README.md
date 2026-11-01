@@ -142,9 +142,9 @@ Run the same command again to update, or for a new pairing link. The server gets
 
 ## Status
 
-Built and measured on a VPS: environments, snapshots per turn, revert, golden snapshots, idle sleep and wake, pre-wake, agent boxes, the T3 integration (T3 patches in [`images/t3`](images/t3)), and web development in a thread: dev servers, previews and pinned tools ([roadmap §4.1](docs/roadmap.md)).
+Built and measured on a VPS: environments, snapshots per turn, revert, golden snapshots, idle sleep and wake, pre-wake, agent boxes, the T3 integration (T3 patches in [`images/t3`](images/t3)),, web development in a thread (dev servers, previews and pinned tools) and a one-command install from released images.
 
-Next: a real Claude run on a web repository end to end on the VPS; a faster first page (KVM for gVisor, or a lighter runtime class for your own repositories); forking a thread's environment; running `.agents/setup` in golden builds.
+Next ([roadmap](docs/roadmap.md)): your own repository from a git URL, GitHub access for private repositories, `fern doctor`, supervision of crashing boxes, backups, a faster first page, forks and Codex.
 
 Fern v1, a control plane for coding-agent jobs in disposable containers, is at tag [`v1-final`](https://github.com/nebler/fern/tree/v1-final).
 

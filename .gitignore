@@ -19,3 +19,6 @@ __pycache__/
 /lab/.cache/
 # lab/ab.sh: A/B runs.
 /lab/ab-results/
+# Left from Fern v1 and its experiments; never read or committed (docs/briefs/iteration-1.md).
+/integration/
+/plugins/

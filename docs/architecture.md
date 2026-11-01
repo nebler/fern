@@ -441,7 +441,7 @@ The cost moves to Fern: the image follows T3's releases, and the hook can break 
 | **B. Upstream hook** | A general T3 setting (~50 lines): a command T3 runs when it takes, restores or deletes a checkpoint, with the cwd and the ref | The goal: stock T3, Fern only sets the setting. Needs T3's maintainers |
 | **C. No T3 change** | git's `reference-transaction` hook sees saves and deletes (`git update-ref` on `refs/t3/…/checkpoints`) | Fallback only: a restore (`git restore --source <commit>`) moves no ref and fires no hook, so it would need a `git` shim in the image, which breaks when T3's git calls change |
 
-A first, then propose B with what the spike learned (roadmap week 8). C only if B is refused.
+A first, then propose B with what the spike learned ([history/roadmap-weeks.md](history/roadmap-weeks.md) week 8). C only if B is refused.
 
 ---
 
