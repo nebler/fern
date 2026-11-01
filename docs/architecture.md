@@ -164,7 +164,7 @@ Unix socket `/run/fern/fern.sock`, for root and the box user's group (T3's serve
 ### 6.2 Session
 `waking (network, runsc create and start, fern-init up) → ready (fern-init's /readyz) → stopping (POST /stop: the services' stop commands, SIGTERM, then kill) → gone`
 
-A box that is up but doesn't answer (a crash, one stopped by hand) is found by the next command, whose dial fails: the actor wakes it once more (built). Planned: restarts with backoff, and giving up after N failures in a window (OTP-style supervision).
+A box that is up but doesn't answer (a crash, one stopped by hand) is found by the next command, whose dial fails: the actor wakes it once more (built). **Giving up (built):** a box that dies under its commands or fails to wake 3 times in 5 minutes isn't woken again until the first of those is 5 minutes old; until then every command fails at once with `ErrCrashing` (503), naming its log, rather than each paying for a wake that ends the same way. `fern wake` (a person) tries again at once. The count lives in `Run` between actors, as a box's actor ends when it sleeps; it starts over with the daemon.
 
 ### 6.3 Idle rule
 An environment goes to sleep when all of these hold (two clocks, copied from Amp):
@@ -352,7 +352,7 @@ Built for previews (`internal/preview`, §5); webhooks are planned. The actor gi
 | Failure | What happens |
 |---|---|
 | **Daemon crash** | on restart, `Reconcile` reads what each half-done change left on disk (markers, `live.new`, snapshots without rows) and finishes or clears it; boxes left running get an actor, so they still sleep when idle (built) |
-| **Box crash** | the next command's dial fails and the actor wakes the box once more (built); planned: restarts with backoff, and `failed` after N failures in a window |
+| **Box crash** | the next command's dial fails and the actor wakes the box once more (built); after 3 crashes or failed wakes in 5 minutes, commands fail at once with `ErrCrashing` until the window has passed or a person wakes it (built) |
 | **Crash mid-turn** | the agent CLI resumes from its session files; Fern can restore to the last turn snapshot before resuming if the transcript is broken |
 | **Restore during an exec** | the box stops and the actor cancels the exec, so no late write from the old session reaches the restored disk (built) |
 | **Disk full** | snapshots and new environments refused with "the pool is almost full" (HTTP 507) before the disk is; retention runs at every snapshot; the box keeps working (built) |

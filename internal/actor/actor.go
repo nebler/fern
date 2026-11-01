@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sync"
 	"time"
 
@@ -91,6 +92,20 @@ const changeTimeout = 10 * time.Minute
 // ErrStopped means the daemon is shutting down.
 var ErrStopped = errors.New("daemon is stopping")
 
+// ErrCrashing means a box died or failed to wake crashLimit times within
+// crashWindow: it isn't woken again until the oldest of those is older,
+// or a person wakes it (Wake).
+var ErrCrashing = errors.New("the box keeps crashing")
+
+// A box that dies under its commands, or fails to wake, is woken again at
+// the next command, up to crashLimit times in crashWindow; then commands
+// fail at once with ErrCrashing, rather than each paying for a wake that
+// ends the same way.
+const (
+	crashLimit  = 3
+	crashWindow = 5 * time.Minute
+)
+
 // Group runs the actors of a node's environments.
 type Group struct {
 	store  Store
@@ -165,9 +180,12 @@ func (g *Group) Run(ctx context.Context) error {
 	defer wg.Wait()
 	defer close(g.stopped)
 	actors := make(map[string]*actor)
+	// An actor ends when its box sleeps; the next one goes on counting
+	// the box's crashes.
+	crashes := make(map[string][]time.Time)
 	exited := make(chan *actor)
 	start := func(id string, awake bool) *actor {
-		a := &actor{id: id, g: g, mailbox: make(chan message), done: make(chan struct{})}
+		a := &actor{id: id, g: g, mailbox: make(chan message), done: make(chan struct{}), crashes: crashes[id]}
 		actors[id] = a
 		wg.Go(func() {
 			a.run(ctx, awake)
@@ -204,6 +222,12 @@ func (g *Group) Run(ctx context.Context) error {
 		case a := <-exited:
 			if actors[a.id] == a {
 				delete(actors, a.id)
+			}
+			// Its goroutine is done with it (a.done is closed).
+			if a.crashes = recent(a.crashes); len(a.crashes) > 0 {
+				crashes[a.id] = a.crashes
+			} else {
+				delete(crashes, a.id)
 			}
 		}
 	}
@@ -326,6 +350,14 @@ type actor struct {
 	// stopWatch stops the watch of the agent box's writes for this box
 	// (watch), and is nil while there is none.
 	stopWatch func()
+	// crashes are when the box was found dead or failed to wake, within
+	// crashWindow; Run reads them once the actor is done, for the next.
+	crashes []time.Time
+}
+
+// recent returns the times in ts within crashWindow of now.
+func recent(ts []time.Time) []time.Time {
+	return slices.DeleteFunc(ts, func(t time.Time) bool { return time.Since(t) >= crashWindow })
 }
 
 // run handles messages until ctx is done, or until the box is asleep with
@@ -384,6 +416,15 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 	if a.addr != "" && a.addr != stale {
 		return env, nil
 	}
+	if stale != "" {
+		// It died under a command.
+		a.crashes = append(a.crashes, time.Now())
+	}
+	if a.crashes = recent(a.crashes); len(a.crashes) >= crashLimit {
+		return store.Env{}, fmt.Errorf("%s: %w: it died or failed to wake %d times in %s, and is woken again after %s, or by fern wake; "+
+			"its log is boxes/%s/log in the pool", a.id, ErrCrashing, len(a.crashes), crashWindow,
+			a.crashes[0].Add(crashWindow).Format(time.TimeOnly), a.id)
+	}
 	a.addr = ""
 	// Set first: a wake that fails half-way may leave the box running. Its
 	// idle times start now, so a slow wake isn't put back to sleep at once.
@@ -397,6 +438,7 @@ func (a *actor) wake(ctx context.Context, stale string) (store.Env, error) {
 	span.End(sp, err)
 	observe(a.g.wakes, start, &err)
 	if err != nil {
+		a.crashes = append(a.crashes, time.Now())
 		return store.Env{}, err
 	}
 	a.g.log.InfoContext(ctx, "box woke", slog.String("env", a.id), slog.Duration("took", time.Since(start)))

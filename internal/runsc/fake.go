@@ -13,18 +13,30 @@ type Fake struct {
 	mu    sync.Mutex
 	boxes map[string]Box  // the last wake of each box
 	up    map[string]bool // the boxes that are up
+	fail  map[string]error
 	wakes int
 }
 
 // NewFake returns a Fake whose boxes serve exec at addr.
 func NewFake(addr string) *Fake {
-	return &Fake{addr: addr, boxes: make(map[string]Box), up: make(map[string]bool)}
+	return &Fake{addr: addr, boxes: make(map[string]Box), up: make(map[string]bool), fail: make(map[string]error)}
 }
 
-// Wake starts box and returns the Fake's address.
+// FailWakes makes box id's wakes fail with err; nil makes them succeed.
+func (f *Fake) FailWakes(id string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fail[id] = err
+}
+
+// Wake starts box and returns the Fake's address, or the error FailWakes
+// gave it.
 func (f *Fake) Wake(_ context.Context, box Box) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err := f.fail[box.ID]; err != nil {
+		return "", err
+	}
 	if !f.up[box.ID] {
 		f.wakes++
 	}

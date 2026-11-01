@@ -152,9 +152,12 @@ func (g *Group) stopAgent(ctx context.Context, id string) error {
 }
 
 // Wake starts environment id's box. It counts as a touch, so the box stays
-// up for the idle times.
+// up for the idle times. A box that kept crashing (ErrCrashing) is tried
+// again: a person asked.
 func (g *Group) Wake(ctx context.Context, id string) error {
 	return g.do(ctx, "wake", id, func(ctx context.Context, a *actor) error {
+		// A person asks: a box that kept crashing gets another try.
+		a.crashes = nil
 		if _, err := a.wake(ctx, ""); err != nil {
 			return err
 		}
