@@ -127,8 +127,10 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 	// under it has.
 	if err := unix.Statfs(n.poolImage, &fs); err == nil {
 		free := fs.Bavail * uint64(max(fs.Bsize, 0))
-		add(finding{name: "disk", ok: free >= minFree, detail: fmt.Sprintf("%.1f GB free under the pool", float64(free)/1e9),
-			fix: "free space on the server's disk: the pool is a file on it, and fills it as it grows"})
+		add(finding{
+			name: "disk", ok: free >= minFree, detail: fmt.Sprintf("%.1f GB free under the pool", float64(free)/1e9),
+			fix: "free space on the server's disk: the pool is a file on it, and fills it as it grows",
+		})
 	}
 
 	// gVisor and the box image.
@@ -161,8 +163,10 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 
 	// Memory.
 	if avail, err := memAvailable(filepath.Join(n.proc, "meminfo")); err == nil {
-		add(finding{name: "memory", ok: avail >= 512<<20, detail: fmt.Sprintf("%d MB available", avail>>20),
-			fix: "fewer threads awake at once, or a server with more memory"})
+		add(finding{
+			name: "memory", ok: avail >= 512<<20, detail: fmt.Sprintf("%d MB available", avail>>20),
+			fix: "fewer threads awake at once, or a server with more memory",
+		})
 	}
 
 	// The GitHub App, which is optional.
