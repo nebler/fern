@@ -36,7 +36,7 @@ func TestMakeGuess(t *testing.T) {
 				"package.json":      `{"scripts": {"dev": "vite"}, "devDependencies": {"vite": "^7"}}`,
 				"package-lock.json": `{}`,
 			},
-			wantRun:   "npm ci --prefer-offline && exec npm run dev -- --host 0.0.0.0 --port $PORT --strictPort",
+			wantRun:   "npm install --prefer-offline --no-audit --no-fund && exec npm run dev -- --host 0.0.0.0 --port $PORT --strictPort",
 			wantPort:  5173,
 			wantTools: "# Fern's guess, from package.json.\n[tools]\nnode = \"lts\"\n",
 		},
@@ -77,7 +77,7 @@ func TestMakeGuess(t *testing.T) {
 				"docker-compose.yml": "services:\n  db:\n    image: docker.io/library/postgres:16\n" +
 					"    environment:\n      POSTGRES_USER: app\n      POSTGRES_PASSWORD: ${DB_PASSWORD:-secret}\n",
 			},
-			wantRun:   "export DATABASE_URL=${DATABASE_URL:-postgres://app:secret@localhost:5432/app}; npm install --prefer-offline && exec npm run dev -- -H 0.0.0.0 -p $PORT",
+			wantRun:   "export DATABASE_URL=${DATABASE_URL:-postgres://app:secret@localhost:5432/app}; npm install --prefer-offline --no-audit --no-fund && exec npm run dev -- -H 0.0.0.0 -p $PORT",
 			wantPort:  3000,
 			wantTools: "# Fern's guess, from package.json.\n[tools]\nnode = \"lts\"\n",
 			wantDB:    true,
@@ -88,7 +88,7 @@ func TestMakeGuess(t *testing.T) {
 				"package.json": `{"scripts": {"dev": "vite"}, "devDependencies": {"vite": "7"}}`,
 				"mise.toml":    "[tools]\nnode = \"24\"\n",
 			},
-			wantRun:  "npm install --prefer-offline && exec npm run dev -- --host 0.0.0.0 --port $PORT --strictPort",
+			wantRun:  "npm install --prefer-offline --no-audit --no-fund && exec npm run dev -- --host 0.0.0.0 --port $PORT --strictPort",
 			wantPort: 5173,
 		},
 		{

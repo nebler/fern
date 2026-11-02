@@ -1752,3 +1752,16 @@ them is the disk: what each thread writes beyond its golden, plus about 75
 KiB. The pool's 46 GB free would hold some 600,000 threads' metadata; in
 practice it holds as many as their writes fit. Awake boxes are the scarce
 thing: about 50 MiB each (`scale`, 20 at once).
+
+## Next.js without Fern's files, VPS, 2026-11-02
+
+`lab/check.sh next`: `lab/next-repo`, a Next.js 16 app with a
+`package-lock.json`, Postgres in `docker-compose.yml` and a page that reads it
+through `DATABASE_URL`. Fern guessed npm, Next's flags and Postgres with
+compose's user; the golden build took 53 s, and the page answered as the
+database user `app`.
+
+The first page from an asleep thread took 47 s: the guess ran `npm ci` at
+every wake, which deletes `node_modules` and installs it again (35 s in a
+box). It runs `npm install` now, which keeps to the lockfile too and took
+1.4 s with `node_modules` in place: **47.3 → 10.5 s**, the page again 0.3 s.
