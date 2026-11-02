@@ -19,7 +19,7 @@ Fern runs on **one remote Linux machine as two systemd services**: the Go daemon
 How it got here: the first design ran boxes as agent-sandbox `Sandbox` pods on Kubernetes with a CSI driver. The daemon took over running the boxes on 2026-10-27 ([briefs/boxes-without-kubernetes.md](briefs/boxes-without-kubernetes.md)), Kubernetes left the single-machine install on 2026-10-28 ([briefs/fern-without-kubernetes.md](briefs/fern-without-kubernetes.md)), and the Kubernetes mode was removed from the code on 2026-10-29.
 
 ### 1.1 In scope
-- environments, snapshots, golden snapshots, boxes, sleep and wake, revert; fork (planned)
+- environments, snapshots, golden snapshots, boxes, sleep and wake, revert, fork
 - the setup contract (`services.yaml`, `.agents/setup`, `.agents/prepare`), or a guess from `package.json` without one
 - a local socket API, a CLI, Bash for an agent box over MCP, and a small hook in T3
 
@@ -124,7 +124,7 @@ Unix socket `/run/fern/fern.sock`, for root and the box user's group (T3's serve
 | `POST /envs/{id}/prewake` | wake the box ahead of a likely command, in the background | built; answers at once (§6.4); the T3 hook calls it when a thread is opened or reverted |
 | `DELETE /envs/{id}` | delete the environment, its box and snapshots | built |
 | `DELETE /envs/{id}/snapshots/{s}` | prune | built; the T3 hook calls this when checkpoints are deleted |
-| `POST /envs/{id}/fork` | new environment from `{snapshot}` `{newId, count?}` | planned; runs the identity hook; fork caps apply |
+| `POST /envs/{id}/fork` | `{count, snapshot?}` new environments, forks, from a snapshot or the workspace as it is; answers `{forks: [ids]}` | built (§7.4); at most 8 forks an environment (409 past that). Planned: the identity hook |
 | `GET /events` | event stream (state changes, snapshots, wakes) | planned; for UIs and tests |
 | `PUT /goldens/{repo}` | build repo's golden from a checkout, a tar body, unless it has one for it | built; T3 sends it when a project is added (`fern prebuild REPO`). Answers before the build |
 
@@ -136,7 +136,7 @@ Unix socket `/run/fern/fern.sock`, for root and the box user's group (T3's serve
 
 **For agent boxes (built):** an MCP server on port 7071, which only agent boxes can reach (§13), at `/mcp/{env}`, authenticated with the environment's box token. Its tool Bash runs a command in the environment's box (§10); with `run_in_background` the command goes on after the call, and BashOutput and KillShell read and stop it (§10).
 
-**Agent tools (planned):** `env_snapshot`, `env_restore`, `env_fork`, `env_exec`, `env_delete` over MCP.
+**Agent tools (built: `env_fork`, `env_exec`, `env_delete`):** on the same MCP server, Claude forks its own environment, runs commands in its forks (calls for different forks run at once) and deletes them; it reaches no other environment (§7.4). Planned: `env_snapshot`, `env_restore`.
 
 ---
 
@@ -223,8 +223,11 @@ Measured when boxes were pods (lab, `lab/check.sh box`): a command 3 s after a p
 **A turn without a snapshot** (§7.2) can't be reverted with its data: the restore fails with that reason, and T3's git restore doesn't run. Restoring the code alone would leave the database newer than the code.
 
 ### 7.4 Fork
-1. `POST /envs/t3-8f2c/fork {snapshot, newId: "t3-91aa"}`. The op is logged: create `t3-91aa/live` from the snapshot, then run the identity hook.
-2. The new environment is `asleep`. It wakes on its first touch.
+1. `POST /envs/t3-8f2c/fork {count: 3}` (or `fern fork -n 3 t3-8f2c`, or Claude's `env_fork`). The environment's actor picks the lowest free numbers, so two forks never take the same, and makes `t3-8f2c-fork-1` … `-3`: each an ordinary create (crash-safe the same way: the marker first) whose workspace, `envs/<fork>/live`, is a writable btrfs snapshot of the thread's workspace as it is, or of `{snapshot}`. Taking it flushes the workspace's writes first, so a running Postgres's data is as a crash would leave it, which it recovers from as from a revert.
+2. A fork is `asleep` and wakes on its first command into a box of its own: its own services, its own Postgres on :5432, its own box token and an empty Claude folder. Its `.git` file still names the thread's worktree, whose git folder the box gets read-only, as the thread's does.
+3. A fork's ID says whose it is (`store.ForkOf`): Claude's tools reach only its own environment's forks, and deleting an environment deletes its forks first. Forks sleep when idle like any environment; `env_exec` lets a fork's box sleep 5 s after its last command.
+
+**Built** (`lab/check.sh fork`, VPS): three forks of a thread with Postgres running take 77–94 ms; woken and each changing and counting its own database at the same time, 2.1–2.7 s. **Not built:** the identity hook (fresh secrets and ports; a fork's services get the same configuration as the thread's), T3's own Fork, which shares the thread's worktree (design §10.4), and forks on another machine.
 
 ### 7.5 Golden build
 1. A builder session on a fresh subvolume: clone at the commit → `.agents/setup` (time limit 20 min; must be safe to rerun).
@@ -379,7 +382,7 @@ The threat model is in [briefs/claude-outside-the-box.md](briefs/claude-outside-
   - Claude's login (`CLAUDE_CODE_OAUTH_TOKEN`) is in `/etc/fern/claude.env`, which only root reads; the daemon reads it at every wake and gives it, as an environment variable, only to the box that runs Claude (§13.1). It is never in the index or a workspace
   - **never in a workspace, golden or snapshot.** Claude's state lives in `envs/<id>/claude/`, outside the workspace; with the login in its environment Claude writes no credentials file. A golden builder's box gets no login (§7.5)
   - GitHub (built): T3's server pushes and opens pull requests, never a box (the repository's git folder is read-only there). Its git asks `fern git-credential` (set in `fern-t3.service`) and its `gh` asks `fern github-token` (`images/fern-gh`) for a token; the daemon mints it from the person's GitHub App (`internal/github`; its ID and key in `/etc/fern/github-app/`, root only): for the one repository, with contents and pull requests only, for an hour, renewed five minutes before. The request goes over the API's socket, which boxes can't reach, so no token is in a box, a workspace or a snapshot. Without an App, or one installed on the repository, git and gh go on without a token. `lab/check.sh github` checks it against a fake GitHub.
-  - planned: fresh credentials for forks
+  - forks get no credentials (built: an empty Claude folder, their own box token); planned: fresh secrets in the identity hook
 - **The boxes' network:** an nftables table of their own (`inet fern`, replaced whole in one transaction at every daemon start) drops what boxes send to private, shared, loopback, link-local and multicast ranges and everything they send to the node except answers; only the daemon, on the node, connects to a box. Agent boxes alone may reach the daemon's MCP port. Boxes resolve names with public resolvers (`--box-dns`). Checked by `lab/check.sh`: another box, the node's ports (T3, the daemon's metrics) and the metadata address time out; the internet answers.
 - **The machine's network:** T3's port must never be public, as anyone who reaches it uses the owner's subscription (§13.1). On a VPS, `lab/vps.sh` installs a firewall (`inet fern_host`, a table of its own) that lets in only SSH; reach T3 through an SSH tunnel or a tailnet. The daemon's metrics and profiles listen on localhost.
 - **Known gaps:** boxes of the same repository share its read-only git folder, so one can read another's checkpoints (the full fix is a repository per thread); the box token is readable in `/proc` by the box's own processes (harmless while only the daemon can reach fern-init); user namespaces inside gVisor aren't set up.
@@ -423,7 +426,7 @@ The local lab is the same machine as a systemd container in Docker (`lab/up.sh`)
 | `VcsCheckpointOps.captureCheckpoint(cwd, ref)` | `POST /envs/{env}/snapshots {id: ref}` | exists; needs a ~100-line hook |
 | `restoreCheckpoint(cwd, ref)` ("Revert files too") | `POST /envs/{env}/restore {snapshot: ref}` | exists; same hook |
 | `deleteCheckpointRefs(cwd, refs)` | `DELETE /envs/{env}/snapshots/{ref}` | exists; same hook |
-| Thread fork | `POST /envs/{env}/fork` | exists |
+| Thread fork | `POST /envs/{env}/fork` | built |
 | `SandboxService` (register / start / exec / stop / remove / ports) | env create / wake / exec / sleep / delete / previews | open upstream PR (#15350); Fern would be a backend |
 | MCP | `env_*` tools | exists (T3 exposes MCP to agents) |
 

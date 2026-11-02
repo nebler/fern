@@ -29,6 +29,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -95,6 +96,10 @@ type CreateOptions struct {
 	// golden snapshot it is adopted onto: the directory's files over the
 	// golden's build output (architecture §7.1).
 	From *SnapshotRef
+	// Fork, for an environment without Workspace, makes its workspace a
+	// writable copy of that snapshot, or with Snapshot empty of environment
+	// Env's workspace as it is now: a fork (ForkID).
+	Fork *SnapshotRef
 }
 
 // SnapshotRef names snapshot Snapshot of environment Env.
@@ -124,6 +129,28 @@ func IsAgentBox(box string) bool { return strings.HasSuffix(box, agentSuffix) }
 // EnvOfBox is the environment box belongs to: box, or the environment whose
 // agent box it is.
 func EnvOfBox(box string) string { return strings.TrimSuffix(box, agentSuffix) }
+
+// forkInfix joins a fork's number to the ID of the environment it was forked
+// from: <id>-fork-<n>.
+const forkInfix = "-fork-"
+
+// ForkID is the ID of environment id's fork number n.
+func ForkID(id string, n int) string { return id + forkInfix + strconv.Itoa(n) }
+
+// ForkOf returns the environment fork was forked from and its number, if
+// fork is the ID of a fork (ForkID).
+func ForkOf(fork string) (string, int, bool) {
+	i := strings.LastIndex(fork, forkInfix)
+	if i <= 0 {
+		return "", 0, false
+	}
+	digits := fork[i+len(forkInfix):]
+	n, err := strconv.Atoi(digits)
+	if err != nil || n < 1 || strconv.Itoa(n) != digits {
+		return "", 0, false
+	}
+	return fork[:i], n, true
+}
 
 func checkSnapID(id string) error {
 	if !snapIDPattern.MatchString(id) {

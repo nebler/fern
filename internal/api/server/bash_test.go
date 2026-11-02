@@ -2,11 +2,14 @@ package server_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -243,5 +246,52 @@ func TestBashBackgroundAdopted(t *testing.T) {
 	}
 	if got := call(t, s, "KillShell", map[string]any{"shell_id": id}); !strings.Contains(got, "is killed") {
 		t.Errorf("KillShell after a new daemon = %q, want it killed", got)
+	}
+}
+
+// Claude forks its environment, runs commands in the forks at the same time
+// and deletes them, and reaches no other environment so.
+func TestForkTools(t *testing.T) {
+	b := newDemoBox(t)
+	url, _ := b.serve(t)
+	s, err := connect(t, url, boxToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	if got := call(t, s, "env_fork", map[string]any{"count": 3}); got != "Forks: demo-fork-1, demo-fork-2, demo-fork-3" {
+		t.Errorf("env_fork answered %q", got)
+	}
+	var wg sync.WaitGroup
+	outs := make([]string, 3)
+	for i := range outs {
+		wg.Go(func() {
+			args := map[string]any{"env": fmt.Sprintf("demo-fork-%d", i+1), "command": "echo ran; exit 2"}
+			res, err := s.CallTool(t.Context(), &mcp.CallToolParams{Name: "env_exec", Arguments: args})
+			if err != nil {
+				outs[i] = err.Error()
+				return
+			}
+			outs[i] = res.Content[0].(*mcp.TextContent).Text
+		})
+	}
+	wg.Wait()
+	for i, out := range outs {
+		if out != "ran\n\n[exit code 2]" {
+			t.Errorf("env_exec in demo-fork-%d answered %q", i+1, out)
+		}
+	}
+	if states, _ := b.drv.States(t.Context()); states["demo-fork-2"] != runsc.Running || states["demo"] == runsc.Running {
+		t.Errorf("after env_exec in the forks: boxes %v, want the forks' woken and not demo's", states)
+	}
+	for _, env := range []string{"demo", "other-fork-1", "demo-fork-x"} {
+		res, err := s.CallTool(t.Context(), &mcp.CallToolParams{Name: "env_exec", Arguments: map[string]any{"env": env, "command": "true"}})
+		if err != nil || !res.IsError {
+			t.Errorf("env_exec in %s: %v, %v, want a tool error", env, res, err)
+		}
+	}
+	call(t, s, "env_delete", map[string]any{"env": "demo-fork-1"})
+	if _, err := b.st.Get(t.Context(), "demo-fork-1"); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("Get(demo-fork-1) after env_delete: error = %v, want ErrNotFound", err)
 	}
 }

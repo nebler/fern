@@ -87,6 +87,7 @@ On a Hetzner CAX21 VPS (4 ARM cores, 8 GB), gVisor, medians:
 | put a box to sleep | 71 ms | 130 ms |
 | run a command in an awake box | 19 ms | |
 | new thread from a golden snapshot | 35 ms | |
+| three forks of a running thread, Postgres included | 77 ms | |
 | Claude's edit to a reloaded preview | 416 ms | |
 | a whole short agent turn | | 7.3 s |
 
@@ -149,9 +150,9 @@ Run the same command again to update, or for a new pairing link. When something 
 
 ## Status
 
-Built and measured on a VPS: environments, snapshots per turn, revert, golden snapshots, idle sleep and wake, pre-wake, agent boxes, the T3 integration (T3 patches in [`images/t3`](images/t3)),, web development in a thread (dev servers, previews and pinned tools) and a one-command install from released images.
+Built and measured on a VPS: environments, snapshots per turn, revert, golden snapshots, idle sleep and wake, pre-wake, agent boxes, the T3 integration (T3 patches in [`images/t3`](images/t3)), web development in a thread (dev servers, previews and pinned tools), your own repositories without Fern files, GitHub access through your GitHub App, `fern doctor`, supervision of crashing boxes, encrypted backups, rendering the first page ahead, forks (Claude's `env_fork`, `env_exec`, `env_delete`) and a one-command install from released images.
 
-Next ([roadmap](docs/roadmap.md)): your own repository from a git URL, GitHub access for private repositories, `fern doctor`, supervision of crashing boxes, backups, a faster first page, forks and Codex.
+Next ([roadmap](docs/roadmap.md)): Codex next to Claude.
 
 Fern v1, a control plane for coding-agent jobs in disposable containers, is at tag [`v1-final`](https://github.com/nebler/fern/tree/v1-final).
 

@@ -85,6 +85,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /envs/{id}/snapshots", s.handle(s.snapshots))
 	mux.HandleFunc("DELETE /envs/{id}/snapshots/{snap}", s.handle(s.deleteSnapshot))
 	mux.HandleFunc("POST /envs/{id}/restore", s.handle(s.restore))
+	mux.HandleFunc("POST /envs/{id}/fork", s.handle(s.fork))
 	mux.HandleFunc("POST /envs/{id}/sleep", s.handle(s.sleep))
 	mux.HandleFunc("POST /envs/{id}/wake", s.handle(s.wake))
 	mux.HandleFunc("POST /envs/{id}/prewake", s.handle(s.prewake))
@@ -209,6 +210,21 @@ func (s *Server) restore(r *http.Request) (any, error) {
 		return nil, err
 	}
 	return nil, s.envs.Restore(r.Context(), r.PathValue("id"), req.Snapshot)
+}
+
+func (s *Server) fork(r *http.Request) (any, error) {
+	var req api.ForkRequest
+	if err := decode(r, &req); err != nil {
+		return nil, err
+	}
+	if req.Count < 1 || req.Count > actor.MaxForks {
+		return nil, fmt.Errorf("count %d: from 1 to %d: %w", req.Count, actor.MaxForks, errBadBody)
+	}
+	ids, err := s.envs.Fork(r.Context(), r.PathValue("id"), req.Snapshot, req.Count)
+	if err != nil {
+		return nil, err
+	}
+	return api.ForkResponse{Forks: ids}, nil
 }
 
 func (s *Server) sleep(r *http.Request) (any, error) {
@@ -347,6 +363,8 @@ func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, store.ErrInvalidID), errors.Is(err, store.ErrInvalidPath), errors.Is(err, errBadBody):
 		status = http.StatusBadRequest
+	case errors.Is(err, actor.ErrTooManyForks):
+		status = http.StatusConflict
 	case errors.Is(err, actor.ErrStopped), errors.Is(err, actor.ErrCrashing):
 		status = http.StatusServiceUnavailable
 	case errors.Is(err, store.ErrPoolFull):

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/nebler/fern/internal/runsc"
@@ -46,11 +47,23 @@ func (g *Group) Create(ctx context.Context, id string, opts store.CreateOptions)
 	})
 }
 
-// Delete stops environment id's box, then removes its disk.
+// Delete stops environment id's box, then removes its disk, and its forks
+// before it.
 func (g *Group) Delete(ctx context.Context, id string) error {
 	return g.do(ctx, "delete", id, func(ctx context.Context, a *actor) error {
 		if _, err := g.store.Get(ctx, id); err != nil {
 			return err
+		}
+		forks, err := g.forks(ctx, id)
+		if err != nil {
+			return err
+		}
+		// A fork's actor never waits for its source's, so this can't wait
+		// for itself.
+		for _, fork := range forks {
+			if err := g.Delete(ctx, store.ForkID(id, fork)); err != nil && !errors.Is(err, store.ErrNotFound) {
+				return err
+			}
 		}
 		if err := a.stopBox(ctx); err != nil {
 			return err
@@ -60,6 +73,75 @@ func (g *Group) Delete(ctx context.Context, id string) error {
 		}
 		return g.store.Delete(ctx, id)
 	})
+}
+
+// MaxForks is how many forks an environment can have at once: each awake
+// one is a box with its own services.
+const MaxForks = 8
+
+// ErrTooManyForks means a fork would give an environment more than MaxForks.
+var ErrTooManyForks = errors.New("too many forks")
+
+// Fork makes count new environments, forks, each a writable copy of
+// environment id's snapshot snapID, or with snapID empty, of its workspace
+// as it is now: the files, the dependencies, and the services' data as a
+// crash would leave them, which they recover from as from a revert. Each
+// fork's box runs its own services, its own Postgres on :5432 among them,
+// and sleeps when idle like any other. It returns the forks' IDs
+// (store.ForkID), with the lowest numbers id has free. Deleting id deletes
+// them.
+func (g *Group) Fork(ctx context.Context, id, snapID string, count int) ([]string, error) {
+	if count < 1 || count > MaxForks {
+		return nil, fmt.Errorf("%d forks: from 1 to %d at once: %w", count, MaxForks, ErrTooManyForks)
+	}
+	var ids []string
+	// The source's actor makes them one call at a time, so two calls never
+	// pick the same numbers.
+	err := g.do(ctx, "fork", id, func(ctx context.Context, _ *actor) error {
+		if _, err := g.store.Get(ctx, id); err != nil {
+			return err
+		}
+		forks, err := g.forks(ctx, id)
+		if err != nil {
+			return err
+		}
+		if len(forks)+count > MaxForks {
+			return fmt.Errorf("%s has %d forks; %d more would be over %d: delete some first: %w",
+				id, len(forks), count, MaxForks, ErrTooManyForks)
+		}
+		src := store.SnapshotRef{Env: id, Snapshot: snapID}
+		for n := 1; len(ids) < count; n++ {
+			if slices.Contains(forks, n) {
+				continue
+			}
+			fork := store.ForkID(id, n)
+			if err := g.Create(ctx, fork, store.CreateOptions{Fork: &src}); err != nil {
+				return err
+			}
+			ids = append(ids, fork)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("fork %s: %w", id, err)
+	}
+	g.log.InfoContext(ctx, "forked", slog.String("env", id), slog.String("snapshot", snapID), slog.Any("forks", ids))
+	return ids, nil
+}
+
+// forks returns the numbers of environment id's forks.
+func (g *Group) forks(ctx context.Context, id string) ([]int, error) {
+	envs, err := g.store.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	var forks []int
+	for _, env := range envs {
+		if parent, n, ok := store.ForkOf(env.ID); ok && parent == id {
+			forks = append(forks, n)
+		}
+	}
+	return forks, nil
 }
 
 // Snapshot takes snapshot snapID of environment id, again if replace is set.

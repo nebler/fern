@@ -1713,3 +1713,19 @@ a command, as Claude's turn wakes it, serves its page through the preview
 30 s later in **110 ms** (rendered ahead in 9.5 s); woken by the browser's
 own request, as before, 16.6 s. `lab/perf.sh --fast` passes (the sample
 repository has no preview, so the gate's boxes render nothing).
+
+## Forks, VPS, 2026-11-02
+
+`lab/check.sh fork`, twice: the sample repository's thread with Postgres
+running and a fourth user added, forked three times with `fern fork -n 3`.
+
+| | run 1 | run 2 |
+|---|---:|---:|
+| three forks (three writable btrfs snapshots and their rows) | 77 ms | 94 ms |
+| the three woken at once, each adding 1–3 users and counting them | 2.7 s | 2.1 s |
+
+Each fork counted its own users (5, 6, 7) on its own Postgres on :5432, and
+the thread still had 4: a fork taken while Postgres runs recovers like a
+revert. Claude's tools, called from the agent box over MCP, made two more
+forks, ran `psql` in one, refused the thread itself and deleted one; deleting
+the thread deleted every fork.

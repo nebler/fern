@@ -22,7 +22,7 @@
 | 4 (built 2026-11-01; idle clocks start over at a restart) | **Supervision:** a box that keeps crashing backs off, then its environment is `failed`, with the reason; background jobs and idle clocks survive a daemon restart | crash tests: a box that dies at once ends `failed` after N tries; a dev server started through Bash runs on after `systemctl restart fern-daemon` |
 | 5 (built 2026-11-01; tested against versitygw, not yet a real bucket or a new server) | **Backups:** snapshots shipped with `btrfs send` to object storage, and an environment restored from them on a new server | a server deleted and set up again gets its threads back, the database included |
 | 6 (rendering ahead built 2026-11-01: 16.6 s → 0.11 s after a command's wake; KVM not measured, a browser's own wake unchanged) | **A faster first page:** the default preview rendered in the background after a wake; gVisor with KVM measured | TanStack Start's first page from an asleep box well under 16.6 s (lab/RESULTS.md, 2026-10-31) |
-| 7 | **Forks:** an environment copied from a snapshot, several at once, each with its own Postgres on :5432 (`env_fork`) | three forks of a thread run their tests at once |
+| 7 (built 2026-11-02: three forks with Postgres in 77–94 ms, their tests at once in 2.1–2.7 s; T3's own Fork still shares the worktree) | **Forks:** an environment copied from a snapshot, several at once, each with its own Postgres on :5432 (`env_fork`) | three forks of a thread run their tests at once |
 | 8 | **Codex** next to Claude, with its own login | a Codex thread in T3 snapshots and reverts like a Claude one |
 
 ## Not now
