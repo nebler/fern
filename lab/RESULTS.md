@@ -1713,3 +1713,55 @@ a command, as Claude's turn wakes it, serves its page through the preview
 30 s later in **110 ms** (rendered ahead in 9.5 s); woken by the browser's
 own request, as before, 16.6 s. `lab/perf.sh --fast` passes (the sample
 repository has no preview, so the gate's boxes render nothing).
+
+## Forks, VPS, 2026-11-02
+
+`lab/check.sh fork`, twice: the sample repository's thread with Postgres
+running and a fourth user added, forked three times with `fern fork -n 3`.
+
+| | run 1 | run 2 |
+|---|---:|---:|
+| three forks (three writable btrfs snapshots and their rows) | 77 ms | 94 ms |
+| the three woken at once, each adding 1–3 users and counting them | 2.7 s | 2.1 s |
+
+Each fork counted its own users (5, 6, 7) on its own Postgres on :5432, and
+the thread still had 4: a fork taken while Postgres runs recovers like a
+revert. Claude's tools, called from the agent box over MCP, made two more
+forks, ran `psql` in one, refused the thread itself and deleted one; deleting
+the thread deleted every fork.
+
+## How many asleep threads a node holds, VPS, 2026-11-02
+
+`lab/check.sh sleeping`: a thread with Postgres forked into 8, each of those
+into 8, and again: 585 asleep threads, each with a Postgres data folder of its
+own, sharing their data as threads from one golden do.
+
+| | |
+|---|---:|
+| 584 forks made | 8.6 s |
+| disk per asleep thread (metadata until it writes) | 70–78 KiB |
+| the daemon's memory (RSS), 585 threads against 1 | +0.9 MiB |
+| `fern ls` | 35 ms |
+| the index | 164 KiB |
+| a wake among them (to its Postgres answering) | 231–241 ms (220 ms with one thread) |
+| daemon restart, until it answers | 554–559 ms |
+| deleting the thread and its 584 forks | 21 s (36 ms each) |
+
+An asleep thread has no box, no process and no actor, so the node's limit on
+them is the disk: what each thread writes beyond its golden, plus about 75
+KiB. The pool's 46 GB free would hold some 600,000 threads' metadata; in
+practice it holds as many as their writes fit. Awake boxes are the scarce
+thing: about 50 MiB each (`scale`, 20 at once).
+
+## Next.js without Fern's files, VPS, 2026-11-02
+
+`lab/check.sh next`: `lab/next-repo`, a Next.js 16 app with a
+`package-lock.json`, Postgres in `docker-compose.yml` and a page that reads it
+through `DATABASE_URL`. Fern guessed npm, Next's flags and Postgres with
+compose's user; the golden build took 53 s, and the page answered as the
+database user `app`.
+
+The first page from an asleep thread took 47 s: the guess ran `npm ci` at
+every wake, which deletes `node_modules` and installs it again (35 s in a
+box). It runs `npm install` now, which keeps to the lockfile too and took
+1.4 s with `node_modules` in place: **47.3 → 10.5 s**, the page again 0.3 s.

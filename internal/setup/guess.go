@@ -66,7 +66,10 @@ var packageManagers = []packageManager{
 	{"bun", "bun.lock", "bun install --frozen-lockfile", "bun install", "bun run", false, true},
 	{"bun", "bun.lockb", "bun install --frozen-lockfile", "bun install", "bun run", false, true},
 	{"yarn", "yarn.lock", "corepack yarn install", "corepack yarn install", "corepack yarn run", false, false},
-	{"npm", "package-lock.json", "npm ci --prefer-offline", "npm install --prefer-offline", "npm run", true, false},
+	// Not npm ci, which deletes node_modules first: it runs at every wake,
+	// and took 35 s for a Next.js app in a box where npm install, which
+	// keeps to the lockfile too, took 1.4 s.
+	{"npm", "package-lock.json", "npm install --prefer-offline --no-audit --no-fund", "npm install --prefer-offline --no-audit --no-fund", "npm run", true, false},
 }
 
 // version is what may go into the guessed mise config: a version, a range's

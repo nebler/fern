@@ -465,6 +465,85 @@ restore() {
   check "and leaves the box running" running "$(state $ENV)"
 }
 
+# fork: three forks of a thread, taken while its Postgres runs, run their
+# "tests" at the same time, each against its own Postgres on :5432
+# (roadmap step 7), and go with the thread.
+fork() {
+  echo "== fork"
+  fresh $ENV
+  sql $ENV "insert into users (name, email) values ('Fern', 'fern@example.com')" >/dev/null
+  fern fork -n 3 $ENV >"$TMP/forks" 2>"$TMP/took"
+  check "three forks" "$ENV-fork-1 $ENV-fork-2 $ENV-fork-3" "$(xargs <"$TMP/forks")"
+  metric fork.three_ms "three forks of a running thread, ms" "$(took <"$TMP/took")"
+  local start i
+  start=$(now_ms)
+  for i in 1 2 3; do
+    # Fork i adds i users, then counts them, and its Postgres's port.
+    fern exec $ENV-fork-$i -- sh -c "psql -qc \"insert into users (name, email) select 'f$i', 'x' from generate_series(1, $i)\" &&
+      psql -tAc 'select count(*) from users' && psql -tAc 'show port'" >"$TMP/fork$i" 2>&1 &
+  done
+  wait
+  metric fork.tests_ms "three forks woken and tested at once, ms" "$(($(now_ms) - start))"
+  for i in 1 2 3; do
+    check "fork $i has its own database (4 + $i users) on :5432" "$((4 + i)) 5432" "$(xargs <"$TMP/fork$i")"
+  done
+  check "the thread's database is untouched (4 users)" 4 "$(sql $ENV 'select count(*) from users')"
+  if [ "$AGENTS" = 1 ]; then
+    # Claude's tools, from its agent box, as Claude calls them.
+    check "env_fork" "Forks: $ENV-fork-4, $ENV-fork-5" "$(mcp $ENV env_fork '{"count": 2}')"
+    check "env_exec runs in a fork (4 users)" 4 "$(mcp $ENV env_exec "{\"env\": \"$ENV-fork-4\", \"command\": \"psql -tAc 'select count(*) from users'\"}")"
+    check "env_exec refuses the thread itself" no "$(succeeds mcp $ENV env_exec "{\"env\": \"$ENV\", \"command\": \"true\"}")"
+    check "env_delete" "Deleted $ENV-fork-5." "$(mcp $ENV env_delete "{\"env\": \"$ENV-fork-5\"}")"
+  fi
+  check "more than 8 forks are refused" no "$(succeeds fern fork -n 9 $ENV)"
+  fern rm $ENV
+  check "deleting the thread deletes its forks" 0 "$(fern ls | grep -c "^$ENV-fork-" || true)"
+}
+
+# sleeping: how many asleep threads a node holds. A thread with Postgres
+# forks into 8, each of those into 8, and so on: 585 environments that share
+# their data as threads from one golden do, each with a Postgres data folder
+# of its own. Asleep, a thread is files and a row; this measures what they
+# cost the disk, the daemon and its answers, and a wake among them.
+sleeping() {
+  echo "== sleeping threads"
+  fresh $ENV
+  sql $ENV 'select count(*) from users' >/dev/null
+  fern sleep $ENV >/dev/null
+  in_daemon "btrfs filesystem sync /var/lib/fern" >/dev/null
+  local disk0 rss0 start total
+  disk0=$(in_daemon "df --output=used -B1M /var/lib/fern | tail -1" | tr -d ' ')
+  # The process's own memory: its cgroup's also counts the page cache its
+  # snapshots read.
+  rss0=$(in_daemon 'ps -o rss= -p "$(systemctl show -P MainPID fern-daemon)"')
+  start=$(now_ms)
+  # On the node: one SSH session, not 73.
+  # shellcheck disable=SC2016 # the node's shell's
+  on_node bash -c 'set -e; level=("$1"); for _ in 1 2 3; do next=(); for e in "${level[@]}"; do
+      mapfile -t -O "${#next[@]}" next < <("$2" fork -n 8 "$e" 2>/dev/null); done; level=("${next[@]}"); done' bash $ENV "$FERN_CLI" </dev/null
+  total=$(fern ls | grep -c "^$ENV" || true)
+  check "585 threads (1 + 8 + 64 + 512)" 585 "$total"
+  metric sleeping.fork584_ms "584 forks made, ms" $(($(now_ms) - start))
+  in_daemon "btrfs filesystem sync /var/lib/fern" >/dev/null
+  metric sleeping.disk_per_thread_kib "disk per asleep thread, KiB (metadata: its data is shared until written)" \
+    "$(($(($(in_daemon "df --output=used -B1M /var/lib/fern | tail -1" | tr -d ' ') - disk0)) * 1024 / 584))"
+  metric sleeping.daemon_memory_mib "the daemon's memory (RSS) with 585 asleep threads, MiB more than with 1" \
+    "$(awk -v a="$(in_daemon 'ps -o rss= -p "$(systemctl show -P MainPID fern-daemon)"')" -v b="$rss0" 'BEGIN { printf "%.1f", (a - b) / 1024 }')"
+  metric sleeping.ls_ms "fern ls with 585 threads, ms" "$(node_ms "$FERN_CLI" ls)"
+  metric sleeping.index_kib "the index's size, KiB" "$(in_daemon "du -k /var/lib/fern/state/fern.sqlite | cut -f1")"
+  local deep=$ENV-fork-5-fork-3-fork-7
+  metric sleeping.wake_ms "a wake among them, ms" "$(fern wake $deep | took)"
+  check "it has its own Postgres with the data (3 users)" 3 "$(sql $deep 'select count(*) from users')"
+  start=$(now_ms)
+  restart_daemon
+  metric sleeping.restart_ms "daemon restart with 585 threads, ms until it answers" $(($(now_ms) - start))
+  check "the threads are all there after it" 585 "$(fern ls | grep -c "^$ENV" || true)"
+  start=$(now_ms)
+  fern rm $ENV
+  metric sleeping.delete585_ms "the thread and its 584 forks deleted, ms" $(($(now_ms) - start))
+  check "none is left" 0 "$(fern ls | grep -c "^$ENV" || true)"
+}
+
 # pg_load ENV N takes N snapshots of ENV's Postgres, one a second, while
 # pgbench writes to it, then restores each and checks that Postgres starts,
 # pg_amcheck finds no corruption, and every transaction is whole: pgbench
@@ -825,7 +904,7 @@ except Exception as e:
   check "claude draws its screen through a terminal" yes "$(succeeds grep -qa Welcome <<<"$tui")"
 }
 
-# mcp ENV TOOL ARGS calls TOOL (Bash, BashOutput, KillShell) of environment
+# mcp ENV TOOL ARGS calls TOOL (Bash, BashOutput, KillShell, env_fork, …) of environment
 # ENV's MCP server with ARGS, a JSON object, from its agent box, as Claude
 # there does (only agent boxes reach the port), and prints the answer's
 # text; it fails if the tool did.
@@ -1141,6 +1220,48 @@ guess() {
 # github sets up a GitHub App with a new key, points the daemon at a fake
 # GitHub on the node that answers as GitHub's API does for an App installed
 # on owner/app, and asks for credentials as T3's git and gh do.
+# next: a Next.js app with Postgres in docker-compose.yml and no Fern files
+# (lab/next-repo), from a lockfile npm installs, to its page reading the
+# database through the DATABASE_URL the guess sets (roadmap step 1).
+next() {
+  echo "== Next.js without Fern's files"
+  local W=/var/lib/fern/worktrees/next-check G key page
+  G=$(golden_id next-check)
+  for e in next1 next2 "$G"; do fern rm "$e" 2>/dev/null || true; done
+  for wt in one two; do
+    tar_dir lab/next-repo | in_daemon "rm -rf $W/$wt && mkdir -p $W/$wt && tar -x -C $W/$wt -f - && chown -R 1000:1000 $W/$wt"
+  done
+  fern create next1 --path $W/one >/dev/null
+  start=$(now_ms)
+  for _ in $(seq 600); do
+    key=$(fern snapshots "$G" 2>/dev/null | awk '$1 ~ /^golden-/ { print $1 }')
+    [ -n "$key" ] && break
+    sleep 1
+  done
+  metric next.golden_build_ms "golden build of the Next.js app, ms" $(($(now_ms) - start))
+  check "a golden snapshot is built from the guess" 1 "$(grep -c . <<<"$key")"
+  if [ -z "$key" ]; then
+    box_log "$G" | tail -20 | sed 's/^/  builder: /'
+    return
+  fi
+  check "it holds npm's node_modules, Next and the database" "yes yes" \
+    "$(in_daemon "cd /var/lib/fern/envs/$G/snaps/$key && for p in node_modules/next .fern/pg-ready; do test -e \$p && echo yes || echo no; done" | xargs)"
+  fern create next2 --path $W/two >/dev/null
+  start=$(now_ms)
+  page=$(on_node curl -s -m 300 -H "Host: next2.localhost:30780" http://127.0.0.1:30780/ </dev/null | sed 's/<!-- -->//g')
+  metric next.first_page_ms "asleep to Next.js's first page through the preview, ms" $(($(now_ms) - start))
+  check "the page reads docker-compose's database as its user" yes \
+    "$(succeeds grep -q 'Hello from Next.js, database user app' <<<"$page")"
+  if ! grep -q 'Hello from Next' <<<"$page"; then
+    box_log next2 | tail -20 | sed 's/^/  next2: /'
+  fi
+  start=$(now_ms)
+  on_node curl -s -m 60 -o /dev/null -H "Host: next2.localhost:30780" http://127.0.0.1:30780/ </dev/null
+  metric next.page_ms "the page again, ms" $(($(now_ms) - start))
+  for e in next1 next2 "$G"; do fern rm "$e"; done
+  in_daemon "rm -rf $W"
+}
+
 github() {
   echo "== T3's git and gh get tokens from the daemon's GitHub App"
   local args dir=/tmp/fern-github-check
@@ -1396,11 +1517,11 @@ stability() {
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk stream idle_exec concurrency restore pgload idle daemon node many scale limits paths golden tools guess backup github claude devserver turn hardware stability)
+  all=(slice box disk stream idle_exec concurrency restore fork pgload idle daemon node many scale sleeping limits paths golden tools guess next backup github claude devserver turn hardware stability)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.
-  alone=" idle daemon node many scale turn hardware stability github devserver backup "
+  alone=" idle daemon node many scale sleeping turn hardware stability github devserver backup "
   case "${1:-}" in
     "") set -- "${quick[@]}" ;;
     all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} && DISK_HARDWARE=1 ;;

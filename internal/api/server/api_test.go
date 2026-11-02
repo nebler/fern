@@ -327,6 +327,8 @@ func TestErrors(t *testing.T) {
 		{"snapshot unknown", func(ctx context.Context) error { return c.Snapshot(ctx, "nope", "s1", false) }, http.StatusNotFound},
 		{"snapshot without a name", func(ctx context.Context) error { return c.Snapshot(ctx, "demo", "", false) }, http.StatusBadRequest},
 		{"restore unknown snapshot", func(ctx context.Context) error { return c.Restore(ctx, "demo", "nope") }, http.StatusNotFound},
+		{"fork unknown", func(ctx context.Context) error { _, err := c.Fork(ctx, "nope", "", 1); return err }, http.StatusNotFound},
+		{"fork none", func(ctx context.Context) error { _, err := c.Fork(ctx, "demo", "", 0); return err }, http.StatusBadRequest},
 		{"wake unknown", func(ctx context.Context) error { return c.Wake(ctx, "nope") }, http.StatusNotFound},
 		{"prewake invalid", func(ctx context.Context) error { return c.Prewake(ctx, "Bad_ID") }, http.StatusBadRequest},
 		{"exec unknown", func(ctx context.Context) error {
@@ -660,5 +662,40 @@ func TestSnapshotDeleteAndReplace(t *testing.T) {
 	}
 	if err := c.DeleteSnapshot(ctx, "nope", "s1"); status(err) != http.StatusNotFound {
 		t.Errorf("DeleteSnapshot(nope, s1) error = %v, want status %d", err, http.StatusNotFound)
+	}
+}
+
+func TestFork(t *testing.T) {
+	c, _ := newAPI(t)
+	mustCreate(t, c, "demo")
+	forks, err := c.Fork(t.Context(), "demo", "", 3)
+	if err != nil {
+		t.Fatalf("Fork(demo, 3) error: %v", err)
+	}
+	if diff := cmp.Diff([]string{"demo-fork-1", "demo-fork-2", "demo-fork-3"}, forks); diff != "" {
+		t.Errorf("Fork(demo, 3) mismatch (-want +got):\n%s", diff)
+	}
+	// Each runs commands in a box of its own.
+	run(t, c, "demo-fork-2", "true")
+	if got := stateOf(t, c, "demo-fork-2"); got != runsc.Running {
+		t.Errorf("demo-fork-2 is %s after a command, want running", got)
+	}
+	if got := stateOf(t, c, "demo"); got != runsc.Asleep {
+		t.Errorf("demo is %s after its fork's command, want asleep", got)
+	}
+	// More than an environment may have is a conflict.
+	if _, err := c.Fork(t.Context(), "demo", "", actor.MaxForks-2); status(err) != http.StatusConflict {
+		t.Errorf("Fork over the cap: error = %v, want status %d", err, http.StatusConflict)
+	}
+	// Deleting the environment deletes its forks.
+	if err := c.Delete(t.Context(), "demo"); err != nil {
+		t.Fatal(err)
+	}
+	envs, err := c.List(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(envs) != 0 {
+		t.Errorf("after Delete(demo): List() = %v, want none", envs)
 	}
 }

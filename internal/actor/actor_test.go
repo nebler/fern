@@ -44,9 +44,10 @@ type fakeStore struct {
 	pruned  []string // environments pruned, in order
 	orphans []string // what Orphans returns
 	from    map[string]*store.SnapshotRef
-	built   []string          // BuildSource and StripSource calls, in order
-	paths   map[string]string // workspaces at a path; a builder's is its source's
-	seeds   string            // where a seeded environment's workspace is unpacked: seeds/<id>
+	built   []string                     // BuildSource and StripSource calls, in order
+	paths   map[string]string            // workspaces at a path; a builder's is its source's
+	seeds   string                       // where a seeded environment's workspace is unpacked: seeds/<id>
+	forked  map[string]store.SnapshotRef // forks, by what they were forked from
 }
 
 func newFakeStore() *fakeStore {
@@ -56,7 +57,16 @@ func newFakeStore() *fakeStore {
 func (f *fakeStore) Create(_ context.Context, id string, opts store.CreateOptions) (store.Env, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if opts.Fork != nil && !f.envs[opts.Fork.Env] {
+		return store.Env{}, fmt.Errorf("environment %s: %w", opts.Fork.Env, store.ErrNotFound)
+	}
 	if !f.envs[id] {
+		if opts.Fork != nil {
+			if f.forked == nil {
+				f.forked = make(map[string]store.SnapshotRef)
+			}
+			f.forked[id] = *opts.Fork
+		}
 		if f.from == nil {
 			f.from, f.paths = make(map[string]*store.SnapshotRef), make(map[string]string)
 		}

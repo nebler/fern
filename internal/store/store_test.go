@@ -751,3 +751,98 @@ func TestPreRestore(t *testing.T) {
 		gone(t, filepath.Join(dir, "envs", "demo", "snaps", id))
 	}
 }
+
+func TestFork(t *testing.T) {
+	st, dir := openPool(t)
+	ctx := t.Context()
+	// A worktree of a repository under repos/, so the fork's box gets its git
+	// folder too.
+	gitDir := filepath.Join(dir, "repos", "app", ".git")
+	if err := os.MkdirAll(filepath.Join(gitDir, "worktrees", "t1"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(gitDir, "worktrees", "t1", "commondir"), "../..\n")
+	path := filepath.Join(dir, "worktrees", "app", "t1")
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(path, ".git"), "gitdir: "+filepath.Join(gitDir, "worktrees", "t1")+"\n")
+	src := create(t, st, "t1", store.CreateOptions{Workspace: path})
+	writeFile(t, filepath.Join(src.Workspace, "data"), "v1")
+	snapshot(t, st, "t1", "s1")
+	writeFile(t, filepath.Join(src.Workspace, "data"), "v2")
+
+	now := create(t, st, store.ForkID("t1", 1), store.CreateOptions{Fork: &store.SnapshotRef{Env: "t1"}})
+	old := create(t, st, store.ForkID("t1", 2), store.CreateOptions{Fork: &store.SnapshotRef{Env: "t1", Snapshot: "s1"}})
+	for _, tt := range []struct {
+		env  store.Env
+		want string
+	}{{now, "v2"}, {old, "v1"}} {
+		if tt.env.Workspace != filepath.Join(dir, "envs", tt.env.ID, "live") {
+			t.Errorf("%s's workspace = %s, want its own live/", tt.env.ID, tt.env.Workspace)
+		}
+		if got := readFile(t, filepath.Join(tt.env.Workspace, "data")); got != tt.want {
+			t.Errorf("%s: data = %q, want %q", tt.env.ID, got, tt.want)
+		}
+		if tt.env.Git != gitDir {
+			t.Errorf("%s: Git = %q, want %q", tt.env.ID, tt.env.Git, gitDir)
+		}
+		if tt.env.BoxToken == src.BoxToken {
+			t.Errorf("%s has its source's box token", tt.env.ID)
+		}
+		if uid, ino, _ := stat(t, tt.env.Workspace); uid != store.BoxUID || ino != subvolumeIno {
+			t.Errorf("%s's workspace: uid %d, inode %d, want a subvolume of the box user", tt.env.ID, uid, ino)
+		}
+	}
+	// A fork is writable, and its source doesn't see what it writes.
+	writeFile(t, filepath.Join(now.Workspace, "data"), "fork")
+	if got := readFile(t, filepath.Join(src.Workspace, "data")); got != "v2" {
+		t.Errorf("after the fork wrote: t1's data = %q, want %q", got, "v2")
+	}
+
+	for _, tt := range []struct {
+		name string
+		opts store.CreateOptions
+		want error
+	}{
+		{"of no environment", store.CreateOptions{Fork: &store.SnapshotRef{Env: "nope"}}, store.ErrNotFound},
+		{"of no snapshot", store.CreateOptions{Fork: &store.SnapshotRef{Env: "t1", Snapshot: "nope"}}, store.ErrNotFound},
+		{"at a path", store.CreateOptions{Fork: &store.SnapshotRef{Env: "t1"}, Workspace: filepath.Join(dir, "worktrees", "app", "f")}, store.ErrInvalidPath},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := st.Create(ctx, "t1-fork-9", tt.opts); !errors.Is(err, tt.want) {
+				t.Errorf("Create(t1-fork-9) error = %v, want %v", err, tt.want)
+			}
+			if _, err := st.Get(ctx, "t1-fork-9"); !errors.Is(err, store.ErrNotFound) {
+				t.Errorf("Get(t1-fork-9) after a failed fork: error = %v, want ErrNotFound", err)
+			}
+		})
+	}
+}
+
+func TestForkOf(t *testing.T) {
+	tests := []struct {
+		id     string
+		parent string
+		n      int
+		ok     bool
+	}{
+		{"t3-abc-fork-1", "t3-abc", 1, true},
+		{"t3-abc-fork-1-fork-12", "t3-abc-fork-1", 12, true},
+		{"t3-abc", "", 0, false},
+		{"t3-abc-fork-", "", 0, false},
+		{"t3-abc-fork-01", "", 0, false},
+		{"t3-abc-fork-0", "", 0, false},
+		{"t3-abc-fork-x", "", 0, false},
+		{"-fork-1", "", 0, false},
+	}
+	for _, tt := range tests {
+		parent, n, ok := store.ForkOf(tt.id)
+		if parent != tt.parent || n != tt.n || ok != tt.ok {
+			t.Errorf("ForkOf(%q) = %q, %d, %v, want %q, %d, %v", tt.id, parent, n, ok, tt.parent, tt.n, tt.ok)
+		}
+	}
+	if got := store.ForkID("t3-abc", 3); got != "t3-abc-fork-3" {
+		t.Errorf("ForkID(t3-abc, 3) = %q", got)
+	}
+}

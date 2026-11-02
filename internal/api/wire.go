@@ -29,6 +29,18 @@ type SnapshotRequest struct {
 	Replace bool `json:"replace,omitempty"`
 }
 
+// ForkRequest is the body of POST /envs/{id}/fork.
+type ForkRequest struct {
+	// Snapshot is the snapshot to fork; empty forks the workspace as it is.
+	Snapshot string `json:"snapshot,omitempty"`
+	Count    int    `json:"count"`
+}
+
+// ForkResponse answers POST /envs/{id}/fork.
+type ForkResponse struct {
+	Forks []string `json:"forks"` // the new environments' IDs
+}
+
 // RestoreRequest is the body of POST /envs/{id}/restore.
 type RestoreRequest struct {
 	Snapshot string `json:"snapshot"`

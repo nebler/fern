@@ -99,6 +99,32 @@ func crashCases() []crashCase {
 			},
 		},
 		{
+			// A fork that stops leaves its source as it was.
+			name: "fork",
+			setup: func(t *testing.T, st *store.Store, _ string) {
+				src := create(t, st, "src", store.CreateOptions{})
+				writeFile(t, filepath.Join(src.Workspace, "f"), "src")
+			},
+			change: func(t *testing.T, st *store.Store, _ string) error {
+				_, err := st.Create(t.Context(), "src-fork-1", store.CreateOptions{Fork: &store.SnapshotRef{Env: "src"}})
+				return err
+			},
+			check: func(t *testing.T, st *store.Store, dir string) {
+				if _, err := st.Get(t.Context(), "src-fork-1"); errors.Is(err, store.ErrNotFound) {
+					gone(t, filepath.Join(dir, "envs", "src-fork-1"))
+				} else if err != nil {
+					t.Fatal(err)
+				}
+				if got := readFile(t, filepath.Join(dir, "envs", "src", "live", "f")); got != "src" {
+					t.Errorf("the source's f = %q after the crash, want %q", got, "src")
+				}
+				env := create(t, st, "src-fork-1", store.CreateOptions{Fork: &store.SnapshotRef{Env: "src"}})
+				if got := readFile(t, filepath.Join(env.Workspace, "f")); got != "src" {
+					t.Errorf("f = %q after forking again, want %q", got, "src")
+				}
+			},
+		},
+		{
 			// Adopting T3's worktree must never lose the work in it.
 			name: "adopt",
 			setup: func(t *testing.T, _ *store.Store, dir string) {

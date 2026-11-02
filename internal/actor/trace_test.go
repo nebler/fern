@@ -31,6 +31,8 @@ func TestTraceSpans(t *testing.T) {
 		if err := g.Create(ctx, "demo", store.CreateOptions{}); err != nil {
 			t.Fatal(err)
 		}
+		// Run's own start (the golden builder's first look) is done too.
+		synctest.Wait()
 		rec.Reset()
 
 		reqCtx, req := tr.Start(ctx, "request")

@@ -43,6 +43,9 @@ func (s *Store) Create(ctx context.Context, id string, opts CreateOptions) (Env,
 	if !errors.Is(err, ErrNotFound) {
 		return Env{}, err
 	}
+	if opts.Fork != nil && (opts.Workspace != "" || opts.Seed != nil || opts.From != nil) {
+		return Env{}, fmt.Errorf("create %s: a fork's workspace is its own: %w", id, ErrInvalidPath)
+	}
 	if err := s.checkFree(); err != nil {
 		return Env{}, fmt.Errorf("create %s: %w", id, err)
 	}
@@ -87,7 +90,12 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 			return Env{}, err
 		}
 	}
-	if err := s.makeWorkspace(ctx, id, workspace, from); err != nil {
+	if opts.Fork != nil {
+		err = s.forkWorkspace(ctx, *opts.Fork, workspace)
+	} else {
+		err = s.makeWorkspace(ctx, id, workspace, from)
+	}
+	if err != nil {
 		return Env{}, err
 	}
 	if err := s.step("create: workspace made"); err != nil {
@@ -122,6 +130,32 @@ func (s *Store) create(ctx context.Context, id string, opts CreateOptions) (Env,
 		return Env{}, err
 	}
 	return env, nil
+}
+
+// forkWorkspace makes workspace a writable copy of snapshot src, or of
+// environment src.Env's workspace if src.Snapshot is empty. Taking it
+// flushes the source's writes first, as a snapshot does, so a database in
+// it is as a crash would leave it, which it recovers from as from a revert.
+// Its git file still names the source's worktree, whose git folder the box
+// gets read-only.
+func (s *Store) forkWorkspace(ctx context.Context, src SnapshotRef, workspace string) error {
+	var from string
+	if src.Snapshot == "" {
+		env, err := s.Get(ctx, src.Env)
+		if err != nil {
+			return err
+		}
+		from = env.Workspace
+	} else {
+		var err error
+		if from, err = s.snapshotPath(ctx, src); err != nil {
+			return err
+		}
+	}
+	if err := snapshotSubvolume(ctx, from, workspace, false); err != nil {
+		return err
+	}
+	return os.Chown(workspace, BoxUID, BoxGID)
 }
 
 // readopt makes env's workspace a subvolume again if it is gone or a plain

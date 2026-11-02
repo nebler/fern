@@ -96,6 +96,7 @@ type command struct {
 	path    string        // create --path
 	seed    bool          // create --seed
 	replace bool          // snapshot --replace
+	count   int           // fork -n
 	stdin   bool          // exec -i
 	tty     bool          // exec -it
 	here    bool          // exec --here
@@ -139,6 +140,9 @@ func subcommands() []subcommand {
 		{name: "snapshots", min: 1, max: 1, run: snapshots},
 		{name: "rmsnap", min: 2, max: -1, run: removeSnapshots},
 		{name: "restore", min: 2, max: 2, run: restore},
+		{name: "fork", min: 1, max: 2, run: fork, flags: func(fs *flag.FlagSet, c *command) {
+			fs.IntVar(&c.count, "n", 1, "how many forks to make")
+		}},
 		{name: "exec", run: execute},
 		{name: "sleep", min: 1, max: 1, run: timed((*api.Client).Sleep)},
 		{name: "wake", min: 1, max: 1, run: timed((*api.Client).Wake)},
@@ -347,6 +351,27 @@ func restore(ctx context.Context, c command, cl *api.Client, std stdio) (int, er
 		return 0, err
 	}
 	return 0, took(std, start, "restore "+id+" to "+snapID)
+}
+
+// fork makes forks of an environment, from its snapshot if one is named,
+// and prints their IDs, one a line, and on stderr how long it took.
+func fork(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {
+	var snapID string
+	if len(c.args) == 2 {
+		snapID = c.args[1]
+	}
+	start := time.Now()
+	ids, err := cl.Fork(ctx, c.args[0], snapID, c.count)
+	if err != nil {
+		return 0, err
+	}
+	for _, id := range ids {
+		if _, err := fmt.Fprintln(std.out, id); err != nil {
+			return 0, err
+		}
+	}
+	// The IDs alone go to stdout, for scripts.
+	return 0, took(stdio{out: std.err}, start, fmt.Sprintf("fork %s into %d", c.args[0], len(ids)))
 }
 
 func execute(ctx context.Context, c command, cl *api.Client, std stdio) (int, error) {

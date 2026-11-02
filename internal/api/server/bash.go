@@ -48,6 +48,21 @@ type (
 	}
 )
 
+// The fork tools' calls.
+type (
+	forkInput struct {
+		Count int `json:"count" jsonschema:"how many forks to make, from 1 to 8"`
+	}
+	forkExecInput struct {
+		Env     string `json:"env" jsonschema:"the fork's ID, as env_fork gave it"`
+		Command string `json:"command" jsonschema:"the command to run, with /bin/sh, in the fork's workspace"`
+		Timeout int    `json:"timeout,omitempty" jsonschema:"milliseconds before the command is stopped; 120000 if 0, at most 600000"`
+	}
+	forkDeleteInput struct {
+		Env string `json:"env" jsonschema:"the fork's ID, as env_fork gave it"`
+	}
+)
+
 // MCPHandler serves each environment's MCP server at /mcp/{id}, for its agent
 // box's Claude. Its tool Bash runs a command in the environment's own box,
 // where the services are, waking it first; the box sleeps bashLinger after
@@ -123,7 +138,69 @@ func (s *Server) bashServer(id string) *mcp.Server {
 		}
 		return toolText(text), nil, nil
 	})
+	s.addForkTools(srv, id)
 	return srv
+}
+
+// addForkTools adds to srv the tools with which environment id's Claude
+// forks it, and runs commands in and deletes its forks, and only its own.
+func (s *Server) addForkTools(srv *mcp.Server, id string) {
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "env_fork",
+		Description: "Copies this thread's box as it is now into new ones, forks: the files, the installed dependencies " +
+			"and the databases' data. Each fork runs its own services (its own Postgres on the same port, say), so " +
+			"forks can run tests, migrations or experiments at the same time without touching each other or this " +
+			"thread. Returns the forks' IDs: run commands in them with env_exec, and delete them with env_delete " +
+			"when done. A fork's changes never come back to this thread. Forks sleep when idle.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in forkInput) (*mcp.CallToolResult, any, error) {
+		if in.Count == 0 {
+			in.Count = 1
+		}
+		ids, err := s.envs.Fork(ctx, id, "", in.Count)
+		if err != nil {
+			return toolError(err), nil, nil
+		}
+		return toolText("Forks: " + strings.Join(ids, ", ")), nil, nil
+	})
+	mcp.AddTool(srv, &mcp.Tool{
+		Name: "env_exec",
+		Description: "Runs a shell command in a fork of this thread (env_fork), in its workspace, with its services, " +
+			"and returns what it printed and its exit code. Calls for different forks run at the same time.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in forkExecInput) (*mcp.CallToolResult, any, error) {
+		if err := ownFork(id, in.Env); err != nil {
+			return toolError(err), nil, nil
+		}
+		out, code, err := s.bash(ctx, in.Env, bashInput{Command: in.Command, Timeout: in.Timeout})
+		if err != nil {
+			return toolError(err), nil, nil
+		}
+		text := clip(out)
+		if code != 0 {
+			text += fmt.Sprintf("\n[exit code %d]", code)
+		}
+		return toolText(text), nil, nil
+	})
+	mcp.AddTool(srv, &mcp.Tool{
+		Name:        "env_delete",
+		Description: "Deletes a fork of this thread (env_fork), its box and its files.",
+	}, func(ctx context.Context, _ *mcp.CallToolRequest, in forkDeleteInput) (*mcp.CallToolResult, any, error) {
+		if err := ownFork(id, in.Env); err != nil {
+			return toolError(err), nil, nil
+		}
+		if err := s.envs.Delete(ctx, in.Env); err != nil {
+			return toolError(err), nil, nil
+		}
+		return toolText("Deleted " + in.Env + "."), nil, nil
+	})
+}
+
+// ownFork returns an error unless env is a fork of environment id: its
+// Claude reaches no other environment.
+func ownFork(id, env string) error {
+	if parent, _, ok := store.ForkOf(env); !ok || parent != id {
+		return fmt.Errorf("%q isn't a fork of this thread: env_fork gives their IDs", env)
+	}
+	return nil
 }
 
 func toolText(text string) *mcp.CallToolResult {

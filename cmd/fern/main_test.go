@@ -71,6 +71,16 @@ func TestParse(t *testing.T) {
 			want: command{name: "restore", args: []string{"demo", "s1"}},
 		},
 		{
+			name: "fork",
+			args: []string{"fork", "-n", "3", "demo"},
+			want: command{name: "fork", args: []string{"demo"}, count: 3},
+		},
+		{
+			name: "fork a snapshot",
+			args: []string{"fork", "demo", "s1"},
+			want: command{name: "fork", args: []string{"demo", "s1"}, count: 1},
+		},
+		{
 			name: "exec with --",
 			args: []string{"exec", "demo", "--", "psql", "-c", "select 1"},
 			want: command{name: "exec", args: []string{"demo"}, argv: []string{"psql", "-c", "select 1"}},

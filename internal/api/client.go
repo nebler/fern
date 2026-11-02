@@ -121,6 +121,18 @@ func (c *Client) Snapshots(ctx context.Context, id string) ([]Snapshot, error) {
 	return out, err
 }
 
+// Fork makes count new environments from environment id's snapshot snapID,
+// or from its workspace as it is if snapID is empty, and returns their IDs.
+func (c *Client) Fork(ctx context.Context, id, snapID string, count int) ([]string, error) {
+	body, err := json.Marshal(ForkRequest{Snapshot: snapID, Count: count})
+	if err != nil {
+		return nil, err
+	}
+	var out ForkResponse
+	err = c.do(ctx, http.MethodPost, envPath(id)+"/fork", bytes.NewReader(body), "application/json", &out)
+	return out.Forks, err
+}
+
 // Restore puts environment id to sleep and restores snapshot snapID.
 func (c *Client) Restore(ctx context.Context, id, snapID string) error {
 	return c.doJSON(ctx, http.MethodPost, envPath(id)+"/restore", RestoreRequest{Snapshot: snapID})
