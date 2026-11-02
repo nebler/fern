@@ -91,7 +91,7 @@ On a Hetzner CAX21 VPS (4 ARM cores, 8 GB), gVisor, medians:
 | Claude's edit to a reloaded preview | 416 ms | |
 | a whole short agent turn | | 7.3 s |
 
-Memory: 16 MiB for an awake box with Postgres idle, 10.8 MiB for the daemon. An idle box sleeps 30 s after a turn and then uses no CPU.
+Memory: 16 MiB for an awake box with Postgres idle, 10.8 MiB for the daemon. An idle box sleeps 30 s after a turn and then uses no CPU. An asleep thread costs about 75 KiB of disk and no memory: 585 of them added 0.9 MiB to the daemon, and a wake among them still takes 231 ms.
 
 Against the first design (agent-sandbox pods on Kubernetes): 8.7× less CPU per turn, revert 9.6× faster, 20 boxes woken at once 25 s → 1.2 s.
 

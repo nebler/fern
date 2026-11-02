@@ -1729,3 +1729,26 @@ the thread still had 4: a fork taken while Postgres runs recovers like a
 revert. Claude's tools, called from the agent box over MCP, made two more
 forks, ran `psql` in one, refused the thread itself and deleted one; deleting
 the thread deleted every fork.
+
+## How many asleep threads a node holds, VPS, 2026-11-02
+
+`lab/check.sh sleeping`: a thread with Postgres forked into 8, each of those
+into 8, and again: 585 asleep threads, each with a Postgres data folder of its
+own, sharing their data as threads from one golden do.
+
+| | |
+|---|---:|
+| 584 forks made | 8.6 s |
+| disk per asleep thread (metadata until it writes) | 70–78 KiB |
+| the daemon's memory (RSS), 585 threads against 1 | +0.9 MiB |
+| `fern ls` | 35 ms |
+| the index | 164 KiB |
+| a wake among them (to its Postgres answering) | 231–241 ms (220 ms with one thread) |
+| daemon restart, until it answers | 554–559 ms |
+| deleting the thread and its 584 forks | 21 s (36 ms each) |
+
+An asleep thread has no box, no process and no actor, so the node's limit on
+them is the disk: what each thread writes beyond its golden, plus about 75
+KiB. The pool's 46 GB free would hold some 600,000 threads' metadata; in
+practice it holds as many as their writes fit. Awake boxes are the scarce
+thing: about 50 MiB each (`scale`, 20 at once).
