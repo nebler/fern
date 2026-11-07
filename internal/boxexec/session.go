@@ -35,9 +35,6 @@ const (
 	// sessionAckBytes is how many bytes of output a client gets between
 	// acknowledgements.
 	sessionAckBytes = sessionWindow / 4
-	// maxFreeFrames is how many used frame buffers a session keeps: a full
-	// window of the largest frames.
-	maxFreeFrames = sessionWindow / frameData
 )
 
 // session is a command and what it has printed that its client hasn't
@@ -53,10 +50,8 @@ type session struct {
 	delivered chan struct{} // closed once the client has the exit code
 
 	mu        sync.Mutex
-	changed   sync.Cond     // on mu: frames, ended, killed, or the connection changed
-	frames    [][]byte      // output frames from number base on
-	free      [][]byte      // acknowledged frames' buffers, to use again
-	sent      chan struct{} // closed when the latest connection's sender has ended
+	changed   sync.Cond // on mu: frames, ended, killed, or the connection changed
+	frames    [][]byte  // output frames from number base on
 	base      uint64
 	size      int  // bytes in frames
 	ended     bool // the command has exited with code
@@ -90,20 +85,9 @@ func (s *session) add(frame []byte) error {
 	if s.gone {
 		return errNoReader
 	}
-	s.frames = append(s.frames, append(s.takeFree(), frame...))
+	s.frames = append(s.frames, bytes.Clone(frame))
 	s.size += len(frame)
 	s.changed.Broadcast()
-	return nil
-}
-
-// takeFree returns an empty frame buffer to fill, a used one if there is one:
-// a busy command's output would otherwise allocate every frame.
-func (s *session) takeFree() []byte {
-	if n := len(s.free); n > 0 {
-		b := s.free[n-1]
-		s.free = s.free[:n-1]
-		return b
-	}
 	return nil
 }
 
@@ -136,12 +120,6 @@ func (s *session) ack(n uint64) {
 	defer s.mu.Unlock()
 	for s.base < n && len(s.frames) > 0 {
 		s.size -= len(s.frames[0])
-		// A sender holding this frame has already passed it, or the client
-		// wouldn't have acknowledged it; one replaying on a new connection
-		// starts past it too.
-		if len(s.free) < maxFreeFrames {
-			s.free = append(s.free, s.frames[0][:0])
-		}
 		s.frames[0] = nil
 		s.frames = s.frames[1:]
 		s.base++
@@ -156,11 +134,6 @@ func (s *session) serve(ctx context.Context, conn *websocket.Conn, seen uint64) 
 	if s.conn != nil {
 		_ = s.conn.CloseNow()
 	}
-	// The last connection's sender may still hold a frame, which an
-	// acknowledgement on this one would let add use again.
-	prev := s.sent
-	sent := make(chan struct{})
-	s.sent = sent
 	s.conn = conn
 	if s.timer != nil {
 		s.timer.Stop()
@@ -168,10 +141,6 @@ func (s *session) serve(ctx context.Context, conn *websocket.Conn, seen uint64) 
 	}
 	stdinSeen := s.stdinSeen
 	s.mu.Unlock()
-	defer close(sent)
-	if prev != nil {
-		<-prev
-	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
