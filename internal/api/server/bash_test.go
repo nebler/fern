@@ -1,15 +1,22 @@
 package server_test
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -293,5 +300,148 @@ func TestForkTools(t *testing.T) {
 	call(t, s, "env_delete", map[string]any{"env": "demo-fork-1"})
 	if _, err := b.st.Get(t.Context(), "demo-fork-1"); !errors.Is(err, store.ErrNotFound) {
 		t.Errorf("Get(demo-fork-1) after env_delete: error = %v, want ErrNotFound", err)
+	}
+}
+
+// A command's output can be far more than the daemon should hold: the answer,
+// and what it keeps meanwhile, stay small.
+func TestBashOutputBounded(t *testing.T) {
+	url, _, _ := newMCP(t)
+	s, err := connect(t, url, boxToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	text := call(t, s, "Bash", map[string]any{"command": "echo first; head -c 200000000 /dev/zero | tr '\\0' x; echo; echo last"})
+	if len(text) > 31_000 {
+		t.Errorf("Bash answered %d bytes", len(text))
+	}
+	for _, want := range []string{"first", "last", "bytes left out"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("Bash's answer has no %q", want)
+		}
+	}
+}
+
+// swapHandler is a daemon's address that a new daemon can take over.
+type swapHandler struct{ h atomic.Pointer[http.Handler] }
+
+func (s *swapHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	(*s.h.Load()).ServeHTTP(w, r)
+}
+
+func (s *swapHandler) set(h http.Handler) { s.h.Store(&h) }
+
+// The daemon restarts during a Bash call. Claude, through its box's relay,
+// sees nothing: the same call gets the command's whole output, from a command
+// that ran once and was never interrupted.
+func TestBashSurvivesDaemonRestart(t *testing.T) {
+	b := newDemoBox(t)
+	marker := filepath.Join(t.TempDir(), "runs")
+
+	stopping := make(chan struct{})
+	first := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+	first.Stopping = stopping
+	t.Cleanup(first.Close)
+	swap := &swapHandler{}
+	swap.set(first.MCPHandler())
+	daemon := httptest.NewServer(swap)
+	t.Cleanup(daemon.Close)
+	relay := httptest.NewServer(boxexec.NewMCPRelay(daemon.URL, 30*time.Second))
+	t.Cleanup(relay.Close)
+
+	s, err := connect(t, relay.URL+"/mcp/demo", boxToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	script := "echo run >> " + marker + "; echo before; while [ ! -e " + marker + ".go ]; do sleep 0.02; done; echo after; exit 4"
+	answer := make(chan string, 1)
+	go func() {
+		res, err := s.CallTool(t.Context(), &mcp.CallToolParams{Name: "Bash", Arguments: map[string]any{"command": script}})
+		if err != nil {
+			answer <- "error: " + err.Error()
+			return
+		}
+		answer <- res.Content[0].(*mcp.TextContent).Text
+	}()
+	for deadline := time.Now().Add(20 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+		if data, _ := os.ReadFile(marker); len(data) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the command didn't start")
+		}
+	}
+
+	// The first daemon stops, and its connections break.
+	close(stopping)
+	daemon.CloseClientConnections()
+	second := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+	t.Cleanup(second.Close)
+	swap.set(second.MCPHandler())
+	if err := os.WriteFile(marker+".go", nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	text := <-answer
+	for _, want := range []string{"after", "[exit code 4]"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("Bash answered %q, want %q in it", text, want)
+		}
+	}
+	data, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(data), "run"); got != 1 {
+		t.Errorf("the command ran %d times, want 1", got)
+	}
+}
+
+// A call cut off for any other reason ends its command.
+func TestBashCancelledCallKillsCommand(t *testing.T) {
+	url, _, _ := newMCP(t)
+	relay := httptest.NewServer(boxexec.NewMCPRelay(strings.TrimSuffix(url, "/mcp/demo"), 30*time.Second))
+	t.Cleanup(relay.Close)
+	pidfile := filepath.Join(t.TempDir(), "pid")
+	// As Claude gives up on a call: its request goes away.
+	call, err := json.Marshal(map[string]any{"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": map[string]any{
+		"name": "Bash", "arguments": map[string]any{"command": "echo $$ > " + pidfile + "; exec sleep 300"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, relay.URL+"/mcp/demo", bytes.NewReader(call))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+boxToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if resp, err := http.DefaultClient.Do(req); err == nil {
+			_ = resp.Body.Close()
+			t.Errorf("the call answered %s", resp.Status)
+		}
+	}()
+	var pid int
+	for deadline := time.Now().Add(20 * time.Second); pid == 0; time.Sleep(5 * time.Millisecond) {
+		data, _ := os.ReadFile(pidfile)
+		pid, _ = strconv.Atoi(strings.TrimSpace(string(data)))
+		if time.Now().After(deadline) {
+			t.Fatal("the command didn't start")
+		}
+	}
+	cancel()
+	<-done
+	for deadline := time.Now().Add(20 * time.Second); syscall.Kill(pid, 0) == nil; time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the command outlived its call")
+		}
 	}
 }

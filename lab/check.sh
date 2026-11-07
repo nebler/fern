@@ -43,6 +43,12 @@
 #   backup       a thread with Postgres backed up to an S3 store (versitygw
 #                on the node), twice, and restored into another pool, the same
 #                file for file (restarts the daemon; needs the internet)
+#   upgrade      commands and a Bash call run on through a daemon restart, with
+#                nothing lost or repeated, and a client that dies still ends
+#                its command (restarts the daemon)
+#   settings     settings and MCP servers planted in a workspace don't run in
+#                the agent box; uses a fake login, so no subscription (with
+#                agent boxes)
 #   claude       Claude Code in a box: network, stream-json, its terminal UI
 #   devserver    a Vite dev server Claude starts in the background keeps
 #                running after the call, hears the files Claude's box writes
@@ -615,7 +621,116 @@ idle() {
   restart_daemon
   sleep 10
   check "a box awake across a daemon restart goes to sleep too" asleep "$(asleep_within $ENV 5)"
+  # Used at 0, the daemon restarting at 7: its clocks go on from 0, so it
+  # sleeps by about 10, not at 17.
+  fern exec $ENV -- true
+  sleep 7
+  restart_daemon
+  check "a daemon restart doesn't start the idle clocks over" asleep "$(asleep_within $ENV 5)"
   set_daemon_args $args
+}
+
+upgrade() {
+  echo "== commands run on through a daemon restart"
+  fresh $ENV
+  local out=$TMP/upgrade.out in=$TMP/upgrade.in code pid
+  # A command that prints as it goes, for a while, and exits with a code of its own.
+  fern exec $ENV -- sh -c 'echo $$ > /tmp/up.pid; for i in $(seq 1 40); do echo line $i; sleep 0.25; done; exit 7' >"$out" 2>&1 &
+  pid=$!
+  until [ -s "$out" ]; do sleep 0.1; done
+  local before
+  before=$(fern exec $ENV -- cat /tmp/up.pid)
+  restart_daemon
+  check "the command is the same process after the restart" "$before" "$(fern exec $ENV -- cat /tmp/up.pid)"
+  check "and still running" yes "$(succeeds fern exec $ENV -- kill -0 "$before")"
+  code=0
+  wait $pid || code=$?
+  check "its client gets its exit code" 7 "$code"
+  check "and every line, once, in order" "$(seq 1 40 | sed 's/^/line /')" "$(cat "$out")"
+
+  # stdin too: each side of the restart.
+  : >"$out"
+  rm -f "$in"
+  mkfifo "$in"
+  fern exec -i $ENV -- sh -c 'while read -r l; do echo "got $l"; done; echo bye' <"$in" >"$out" 2>&1 &
+  pid=$!
+  exec 9>"$in"
+  echo one >&9
+  until grep -q 'got one' "$out"; do sleep 0.1; done
+  restart_daemon
+  echo two >&9
+  exec 9>&-
+  wait $pid || true
+  check "stdin goes on across the restart" "got one
+got two
+bye" "$(cat "$out")"
+
+  # A Bash call, as Claude makes it, through the agent box's relay.
+  if agent_boxes; then
+    fern exec $ENV -- rm -f /tmp/bash.runs
+    MCP_URL=relay mcp $ENV Bash '{"command": "echo run >> /tmp/bash.runs; echo before; sleep 8; echo after; exit 4"}' >"$out" 2>&1 &
+    pid=$!
+    until [ "$(fern exec $ENV -- sh -c 'cat /tmp/bash.runs 2>/dev/null' | wc -l)" -ge 1 ]; do sleep 0.2; done
+    restart_daemon
+    wait $pid || true
+    check "a Bash call gets its command's end across the restart" yes "$(succeeds grep -q after "$out")"
+    check "and its exit code" yes "$(succeeds grep -q 'exit code 4' "$out")"
+    check "and the command ran once" 1 "$(fern exec $ENV -- sh -c 'wc -l < /tmp/bash.runs' | tr -d ' ')"
+  else
+    note "skipped the Bash call: no agent boxes (lab/boxes.sh agents)"
+  fi
+
+  # A client that dies, with the daemon up, ends its command at once: no grace.
+  on_node sh -c "exec $FERN_CLI exec $ENV -- sh -c 'echo \$\$ > /tmp/dies.pid; exec sleep 300'" </dev/null >/dev/null 2>&1 &
+  pid=$!
+  until fern exec $ENV -- test -s /tmp/dies.pid; do sleep 0.1; done
+  local victim
+  victim=$(fern exec $ENV -- cat /tmp/dies.pid)
+  on_node pkill -KILL -f "dies.pid" </dev/null || true
+  wait $pid 2>/dev/null || true
+  sleep 2
+  check "a client killed with the daemon up ends its command" no "$(succeeds fern exec $ENV -- kill -0 "$victim")"
+}
+
+# settings: what a repository can plant for Claude. A committed
+# .claude/settings.json or .mcp.json would run code in the agent box, next to
+# the login. A fake login means no model call and no subscription, and hooks
+# and helpers run before any.
+settings() {
+  echo "== settings in a workspace don't run in the agent box"
+  if ! agent_boxes; then
+    note "skipped: no agent boxes (lab/boxes.sh agents)"
+    return
+  fi
+  fresh $ENV
+  # shellcheck disable=SC2016 # the box's shell's
+  fern exec $ENV -- sh -c 'mkdir -p .claude
+    cat > .claude/m.sh <<"M"
+echo ran >> "$PWD/marker-$1"
+case "$1" in apiKeyHelper) echo fake-key;; esac
+M
+    cat > .claude/settings.json <<"J"
+{"apiKeyHelper": "sh .claude/m.sh apiKeyHelper", "enableAllProjectMcpServers": true,
+ "hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "sh .claude/m.sh hook"}]}]}}
+J
+    cat > .mcp.json <<"J"
+{"mcpServers": {"planted": {"type": "stdio", "command": "sh", "args": [".claude/m.sh", "mcpjson"]}}}
+J'
+  local args='--output-format stream-json --verbose --input-format stream-json --permission-mode bypassPermissions --allow-dangerously-skip-permissions'
+  local turn='{"type":"control_request","request_id":"r1","request":{"subtype":"initialize","hooks":null}}
+{"type":"user","session_id":"","message":{"role":"user","content":"say ok"},"parent_tool_use_id":null}'
+  # The control: started through a shell, Fern adds no flags, and the planted
+  # files do run. Without it this check could pass by planting nothing.
+  # shellcheck disable=SC2086
+  (printf '%s\n' "$turn"; sleep 12) | on_node env CLAUDE_CODE_OAUTH_TOKEN=fake-login $FERN_CLI exec -i -e CLAUDE_CODE_OAUTH_TOKEN --agent $ENV -- sh -c "exec claude $args" >/dev/null 2>&1 || true
+  check "control: with no flags the planted files run" yes "$(succeeds fern exec $ENV -- sh -c 'ls marker-* >/dev/null 2>&1')"
+  fern exec $ENV -- sh -c 'rm -f marker-*'
+  # shellcheck disable=SC2086
+  (printf '%s\n' "$turn"; sleep 12) | on_node env CLAUDE_CODE_OAUTH_TOKEN=fake-login $FERN_CLI exec -i -e CLAUDE_CODE_OAUTH_TOKEN --agent $ENV -- claude $args >"$TMP/settings.out" 2>&1 || true
+  check "through Fern, none of them run" "" "$(fern exec $ENV -- sh -c 'ls marker-* 2>/dev/null')"
+  check "and Claude started" yes "$(succeeds grep -q '"subtype":"init"' "$TMP/settings.out")"
+  check "with Fern's MCP server" yes "$(succeeds grep -q '"name":"fern"' "$TMP/settings.out")"
+  check "and not the planted one" no "$(succeeds grep -q '"name":"planted"' "$TMP/settings.out")"
 }
 
 daemon() {
@@ -909,7 +1024,9 @@ except Exception as e:
 # there does (only agent boxes reach the port), and prints the answer's
 # text; it fails if the tool did.
 mcp() {
-  local token call out
+  local token call out host=fern-daemon:7071
+  # MCP_URL=relay goes through the box's relay, as Claude does.
+  [ "${MCP_URL:-}" = relay ] && host=127.0.0.1:7072
   # shellcheck disable=SC2016 # python's, on the node
   token=$(on_node python3 -c 'import sqlite3, sys
 db = sqlite3.connect("file:/var/lib/fern/state/fern.sqlite?mode=ro", uri=True)
@@ -918,11 +1035,11 @@ print(db.execute("select box_token from environments where id = ?", (sys.argv[1]
 print(json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": sys.argv[1], "arguments": json.loads(sys.argv[2])}}))' "$2" "$3")
   # shellcheck disable=SC2016 # the box's shell's
   out=$(fern exec --agent "$1" -- sh -c '
-    set -- "Authorization: Bearer $1" "http://fern-daemon:7071/mcp/$2" "$3"
+    set -- "Authorization: Bearer $1" "http://$4/mcp/$2" "$3"
     for body in "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"initialize\", \"params\": {\"protocolVersion\": \"2025-06-18\", \"capabilities\": {}, \"clientInfo\": {\"name\": \"check\", \"version\": \"1\"}}}" "$3"; do
       out=$(curl -sf -m 600 -H "$1" -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" -d "$body" "$2") || exit
     done
-    printf %s "$out"' sh "$token" "$1" "$call") || return
+    printf %s "$out"' sh "$token" "$1" "$call" "$host") || return
   python3 -c 'import json, sys
 res = json.load(sys.stdin)["result"]
 print(res["content"][0]["text"])
@@ -1517,11 +1634,11 @@ stability() {
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk stream idle_exec concurrency restore fork pgload idle daemon node many scale sleeping limits paths golden tools guess next backup github claude devserver turn hardware stability)
+  all=(slice box disk stream idle_exec concurrency restore fork pgload idle daemon upgrade settings node many scale sleeping limits paths golden tools guess next backup github claude devserver turn hardware stability)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.
-  alone=" idle daemon node many scale sleeping turn hardware stability github devserver backup "
+  alone=" idle daemon upgrade node many scale sleeping turn hardware stability github devserver backup "
   case "${1:-}" in
     "") set -- "${quick[@]}" ;;
     all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} && DISK_HARDWARE=1 ;;

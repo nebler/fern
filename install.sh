@@ -216,8 +216,11 @@ fern_from_release() {
   # A run that failed may have left them past systemd's start limit.
   systemctl reset-failed fern-daemon fern-t3 2>/dev/null || true
   if [ "$changed" = yes ]; then
+    # Running commands and turns carry on through the daemon's restart.
     systemctl restart fern-daemon
     wait_daemon
+    # They don't through T3's, which holds the turn.
+    wait_turns
     systemctl restart fern-t3
   else
     systemctl start fern-daemon fern-t3
@@ -240,6 +243,22 @@ wait_t3() {
     sleep 1
   done
   die "T3's server doesn't answer: journalctl -u fern-t3"
+}
+
+# wait_turns waits for the running turns to end, up to FERN_DRAIN seconds: an
+# agent box runs only while its Claude has something to do (hibernate).
+wait_turns() {
+  systemctl is-active -q fern-t3 || return 0
+  local waited=0 limit=${FERN_DRAIN:-600}
+  while [ "$(runsc --root /run/fern/runsc list 2>/dev/null | awk '$4 ~ /\.agent$/ && $3 == "running"' | wc -l)" != 0 ]; do
+    if [ "$waited" -ge "$limit" ]; then
+      echo "restarting T3 with turns still running: they end here, and T3 can continue them"
+      return 0
+    fi
+    [ "$waited" != 0 ] || echo "waiting up to ${limit}s for running turns to end before restarting T3 (FERN_DRAIN)"
+    sleep 5
+    waited=$((waited + 5))
+  done
 }
 
 # in_t3 runs a shell command as T3's server does: in its root, as its user,

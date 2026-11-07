@@ -10,7 +10,9 @@ import (
 	"net"
 	"net/http"
 	"path"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coder/websocket"
@@ -59,7 +61,23 @@ type Server struct {
 	// nothing answers; the same short connect timeout as readiness gets to
 	// the next wake without waiting a second on that stale address.
 	boxes *http.Client
-	jobs  jobs // Claude's background commands
+	jobs  jobs     // Claude's background commands
+	calls sync.Map // call key to the cancel of its running Bash command
+
+	// Stopping is closed when the daemon begins to stop. May be nil. Then the
+	// commands running in boxes are left to run: the next daemon's clients
+	// take them up (boxexec's sessions).
+	Stopping <-chan struct{}
+}
+
+// stopping reports whether the daemon has begun to stop.
+func (s *Server) stopping() bool {
+	select {
+	case <-s.Stopping:
+		return true
+	default:
+		return false
+	}
 }
 
 // opener counts a command in a box, waking it: actor.Group's Exec or Job.
@@ -287,12 +305,12 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = client.CloseNow() }()
 	if agent {
-		if err := s.startClaude(ctx, client, box, r.PathValue("id"), ex.Token); err != nil {
+		if err := s.startClaude(ctx, client, box, r.PathValue("id"), ex); err != nil {
 			s.log.WarnContext(ctx, "starting a command in an agent box", slog.String("env", r.PathValue("id")), slog.Any("error", err))
 			return
 		}
 	}
-	boxexec.Proxy(ctx, client, box)
+	boxexec.Proxy(ctx, client, box, s.stopping)
 }
 
 // noShell are Claude's tools that run shell commands. In an agent box they
@@ -301,8 +319,10 @@ var noShell = []string{"Bash", "BashOutput", "KillShell", "KillBash", "Monitor"}
 
 // startClaude passes on the client's first message, the command's request,
 // and if it starts Claude, adds Fern's MCP server for environment id (its
-// Bash) and takes away Claude's own shell tools.
-func (s *Server) startClaude(ctx context.Context, client, box *websocket.Conn, id, token string) error {
+// Bash), takes away Claude's own shell tools, and ignores the settings and
+// MCP servers in the workspace: the box writes those, and they run code here,
+// next to Claude's login. It has none on a later connection to a session.
+func (s *Server) startClaude(ctx context.Context, client, box *websocket.Conn, id string, ex *actor.Exec) error {
 	typ, data, err := client.Read(ctx)
 	if err != nil {
 		return err
@@ -311,18 +331,29 @@ func (s *Server) startClaude(ctx context.Context, client, box *websocket.Conn, i
 	if typ == websocket.MessageText && json.Unmarshal(data, &req) == nil && len(req.Argv) > 0 && path.Base(req.Argv[0]) == "claude" {
 		cfg, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"fern": map[string]any{
 			"type":    "http",
-			"url":     s.agentMCP + "/mcp/" + id,
-			"headers": map[string]string{"Authorization": "Bearer " + token},
+			"url":     s.mcpURL(ctx, ex) + "/mcp/" + id,
+			"headers": map[string]string{"Authorization": "Bearer " + ex.Token},
 		}}})
 		if err != nil {
 			return err
 		}
-		req.Argv = append(req.Argv, "--mcp-config", string(cfg), "--disallowedTools", strings.Join(noShell, ","))
+		req.Argv = append(req.Argv, "--mcp-config", string(cfg), "--disallowedTools", strings.Join(noShell, ","),
+			"--setting-sources=user")
 		if data, err = json.Marshal(req); err != nil {
 			return err
 		}
 	}
 	return box.Write(ctx, typ, data)
+}
+
+// mcpURL returns where Claude in the agent box of ex reaches Fern's MCP
+// server: through the box's own relay, which carries a call across a restart
+// of the daemon. An agent box still running from before the relay has none.
+func (s *Server) mcpURL(ctx context.Context, ex *actor.Exec) string {
+	if !boxexec.HasMCPRelay(ctx, s.boxes, ex.Addr, ex.Token) {
+		return s.agentMCP
+	}
+	return "http://127.0.0.1:" + strconv.Itoa(boxexec.MCPRelayPort)
 }
 
 // dialBox connects to environment id's box, waking it if needed, for a

@@ -5,6 +5,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+
+	"github.com/coder/websocket"
 
 	"github.com/nebler/fern/internal/boxexec"
 )
@@ -174,17 +177,32 @@ func (c *Client) ExecAgent(ctx context.Context, id string, req boxexec.Request, 
 	return c.exec(ctx, envPath(id)+"/exec?box=agent&then=sleep", id, req, streams)
 }
 
+// exec runs req as a session, so that it carries on through a restart of the
+// daemon, which is how Fern upgrades.
 func (c *Client) exec(ctx context.Context, path, id string, req boxexec.Request, streams boxexec.Streams) (int, error) {
-	conn, err := boxexec.Dial(ctx, "ws://fern"+path, "", c.hc)
-	if err != nil {
-		var dialErr *boxexec.DialError
-		if errors.As(err, &dialErr) {
-			return 0, readError(dialErr.StatusCode, bytes.NewReader(dialErr.Body))
-		}
-		return 0, fmt.Errorf("exec in %s: %w", id, err)
+	dial := func(ctx context.Context) (*websocket.Conn, error) {
+		return boxexec.Dial(ctx, "ws://fern"+path, "", c.hc)
 	}
-	defer func() { _ = conn.CloseNow() }()
-	return boxexec.Run(ctx, conn, req, streams)
+	conn, err := dial(ctx)
+	if err != nil {
+		return 0, execError(id, err)
+	}
+	req.Session = rand.Text()
+	code, err := boxexec.RunSession(ctx, conn, req, streams, boxexec.Resume{Dial: dial, For: boxexec.DefaultGrace})
+	var dialErr *boxexec.DialError
+	if errors.As(err, &dialErr) {
+		return 0, execError(id, err)
+	}
+	return code, err
+}
+
+// execError is the error of a connection to a box that couldn't open.
+func execError(id string, err error) error {
+	var dialErr *boxexec.DialError
+	if errors.As(err, &dialErr) {
+		return readError(dialErr.StatusCode, bytes.NewReader(dialErr.Body))
+	}
+	return fmt.Errorf("exec in %s: %w", id, err)
 }
 
 func envPath(id string) string { return "/envs/" + url.PathEscape(id) }

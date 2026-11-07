@@ -61,6 +61,9 @@ type Jobs struct {
 	env   []string
 	log   *slog.Logger
 
+	// OnStart, if set, is told of each job started.
+	OnStart func()
+
 	mu   sync.Mutex
 	jobs []*job // oldest first
 	wg   sync.WaitGroup
@@ -125,7 +128,7 @@ func (js *Jobs) start(w http.ResponseWriter, r *http.Request) {
 	js.mu.Lock()
 	defer js.mu.Unlock()
 	if slices.ContainsFunc(js.jobs, func(j *job) bool { return j.id == req.ID }) {
-		http.Error(w, "job "+req.ID+" exists", http.StatusConflict)
+		http.Error(w, "job "+req.ID+" exists", http.StatusConflict) // a call sent again finds it
 		return
 	}
 	if len(js.jobs) >= MaxJobs {
@@ -152,6 +155,9 @@ func (js *Jobs) start(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	js.jobs = append(js.jobs, j)
+	if js.OnStart != nil {
+		js.OnStart()
+	}
 	js.wg.Go(func() {
 		err := cmd.Wait()
 		// What the command left in its group ends with it, as with an exec.
@@ -270,6 +276,9 @@ type JobClient struct {
 // is a new one.
 var ErrNoJob = errors.New("no such background command in the box")
 
+// ErrJobExists means the box already has a job of that ID.
+var ErrJobExists = errors.New("the box already has this background command")
+
 // Start starts a job.
 func (c JobClient) Start(ctx context.Context, req JobRequest) error {
 	return c.call(ctx, http.MethodPost, JobsPath, req, nil)
@@ -321,6 +330,8 @@ func (c JobClient) call(ctx context.Context, method, path string, in, out any) e
 	switch {
 	case resp.StatusCode == http.StatusNotFound:
 		return ErrNoJob
+	case resp.StatusCode == http.StatusConflict:
+		return ErrJobExists
 	case resp.StatusCode/100 != 2:
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
 		return fmt.Errorf("%s %s: %s: %s", method, path, resp.Status, bytes.TrimSpace(msg))

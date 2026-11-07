@@ -236,6 +236,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 
 	previews := preview.New(*previewHost, st, envs, log)
 	g, ctx := errgroup.WithContext(ctx)
+	apiSrv.Stopping = ctx.Done()
 	servers := []struct {
 		name string
 		srv  *http.Server
@@ -277,6 +278,12 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 		defer cancel()
 		var errs []error
 		for _, s := range servers {
+			// A Bash call can run for minutes: its connection just breaks, and
+			// the agent box's relay sends it again to the next daemon.
+			if s.name == "mcp" {
+				errs = append(errs, s.srv.Close())
+				continue
+			}
 			errs = append(errs, s.srv.Shutdown(shutdownCtx))
 		}
 		// Claude's background commands, which no request holds.

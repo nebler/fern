@@ -31,7 +31,7 @@ func binds(s spec) map[string]string {
 func TestBoxSpec(t *testing.T) {
 	box := Box{ID: env.ID, Kind: Services, Env: env}
 	b := newLayout("/run/boxes", "/pool", box.ID)
-	s := boxSpec(box, b, []string{"PATH=/bin"}, boxVars(box, "w1", "login"))
+	s := boxSpec(box, b, []string{"PATH=/bin"}, boxVars(box, "w1", "login", 7071))
 	want := map[string]string{
 		"/etc/resolv.conf": "/run/boxes/resolv.conf rbind,ro",
 		"/etc/hosts":       "/run/boxes/demo/hosts rbind,ro",
@@ -84,7 +84,7 @@ func TestBoxVars(t *testing.T) {
 		{
 			"agent",
 			Box{ID: "demo.agent", Kind: Agent, Env: env},
-			[]string{"FERN_SERVICES=off", "CLAUDE_CONFIG_DIR=" + env.Claude, "CLAUDE_CODE_OAUTH_TOKEN=login"},
+			[]string{"FERN_SERVICES=off", "FERN_MCP=http://fern-daemon:7071", "CLAUDE_CONFIG_DIR=" + env.Claude, "CLAUDE_CODE_OAUTH_TOKEN=login"},
 		},
 		{"builder", Box{ID: "golden-r", Kind: Builder, Env: noClaude}, []string{"FERN_ON_DEMAND=off"}},
 	} {
@@ -93,7 +93,7 @@ func TestBoxVars(t *testing.T) {
 			if tc.box.Env.Claude != "" {
 				login = "login" // Wake reads it only for a box with Claude
 			}
-			got := boxVars(tc.box, "w1", login)[3:]
+			got := boxVars(tc.box, "w1", login, 7071)[3:]
 			if diff := cmp.Diff(tc.want, got, cmpopts.EquateEmpty()); diff != "" {
 				t.Errorf("vars (-want +got):\n%s", diff)
 			}

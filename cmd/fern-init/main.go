@@ -93,9 +93,12 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 
 	mux := http.NewServeMux()
-	mux.Handle("GET "+boxexec.Path, boxexec.NewServer(token, dir, env, log))
+	execs := boxexec.NewServer(token, dir, env, log)
+	mux.Handle("GET "+boxexec.Path, execs)
+	mux.HandleFunc("GET "+boxexec.ActivityPath, execs.ServeActivity)
 	// Background commands, which outlive the daemon's connections to them.
 	jobs := boxexec.NewJobs(token, dir, env, log)
+	jobs.OnStart = execs.Opened
 	jobs.Register(mux)
 	mux.Handle("GET "+boxexec.ReadyPath, readiness(func(ctx context.Context) error {
 		// A service that hasn't started is ready: its socket is.
@@ -109,6 +112,21 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}))
 	mux.Handle("POST "+boxexec.StopPath, shutdown(token, os.Getenv("FERN_WAKE_ID"), cancel))
 	mux.Handle("POST "+boxexec.TouchPath, touch(token, dir))
+	// An agent box's Claude reaches the daemon through this, which holds its
+	// calls while the daemon restarts.
+	var relayErr chan error
+	var relay *http.Server
+	if daemon := os.Getenv("FERN_MCP"); daemon != "" {
+		mux.Handle("GET "+boxexec.MCPRelayPath, boxexec.MCPRelayCheck(token))
+		relay = &http.Server{
+			Addr:              "127.0.0.1:" + strconv.Itoa(boxexec.MCPRelayPort),
+			Handler:           boxexec.NewMCPRelay(daemon, boxexec.DefaultGrace),
+			BaseContext:       func(net.Listener) context.Context { return ctx },
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		relayErr = make(chan error, 1)
+		go func() { relayErr <- relay.ListenAndServe() }()
+	}
 	srv := &http.Server{
 		Addr:              ":" + strconv.Itoa(boxexec.Port),
 		Handler:           mux,
@@ -122,6 +140,11 @@ func run(ctx context.Context, log *slog.Logger) error {
 	select {
 	case <-ctx.Done():
 	case err = <-serveErr:
+	case err = <-relayErr:
+		if err != nil {
+			err = fmt.Errorf("serve the MCP relay: %w", err)
+		}
+		cancel()
 	}
 	log.InfoContext(ctx, "stopping")
 	jobs.Close()
@@ -133,6 +156,9 @@ func run(ctx context.Context, log *slog.Logger) error {
 	// Execs have ended with ctx; what is left is a readiness answer no one
 	// needs any more.
 	_ = srv.Close()
+	if relay != nil {
+		_ = relay.Close()
+	}
 	if err == nil {
 		err = <-serveErr // the server has stopped: ErrServerClosed
 	}

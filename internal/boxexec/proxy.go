@@ -2,20 +2,38 @@ package boxexec
 
 import (
 	"context"
+	"sync"
 
 	"github.com/coder/websocket"
 )
 
-// Proxy copies messages between a and b, both ways, until either side ends,
-// and passes a close status on to the other side.
-func Proxy(ctx context.Context, a, b *websocket.Conn) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+// Proxy copies messages between client and box, both ways, until either side
+// ends or ctx does, and passes a close status on to the other side. When it
+// ends for any other reason it closes both with a close message: to a box, a
+// connection that breaks without one means the daemon has gone and a session's
+// command should wait for it (session.go). hold says when that is so, which
+// leaves both without one. It may be nil.
+func Proxy(ctx context.Context, client, box *websocket.Conn, hold func() bool) {
+	end := func() {
+		if hold != nil && hold() {
+			_ = client.CloseNow()
+			_ = box.CloseNow()
+			return
+		}
+		var both sync.WaitGroup
+		both.Go(func() { _ = client.Close(websocket.StatusGoingAway, "") })
+		both.Go(func() { _ = box.Close(websocket.StatusGoingAway, "") })
+		both.Wait()
+	}
+	stop := context.AfterFunc(ctx, end)
+	defer stop()
+	// Reads don't watch ctx: they'd close their connection with no message.
+	rctx := context.WithoutCancel(ctx)
 	done := make(chan struct{}, 2)
-	go func() { forward(ctx, a, b); done <- struct{}{} }()
-	go func() { forward(ctx, b, a); done <- struct{}{} }()
+	go func() { forward(rctx, client, box); done <- struct{}{} }()
+	go func() { forward(rctx, box, client); done <- struct{}{} }()
 	<-done
-	cancel()
+	end()
 	<-done
 }
 

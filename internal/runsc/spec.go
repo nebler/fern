@@ -1,8 +1,10 @@
 package runsc
 
 import (
+	"net"
 	"path/filepath"
 	"slices"
+	"strconv"
 
 	"github.com/nebler/fern/internal/store"
 )
@@ -149,7 +151,7 @@ func boxSpec(box Box, b layout, image, vars []string) spec {
 // boxVars are the variables fern-init needs: the token that authenticates
 // the daemon, the wake's ID (stop requests name it), the workspace, what
 // box's kind turns off, and Claude's folder and login if it gets them.
-func boxVars(box Box, wakeID, login string) []string {
+func boxVars(box Box, wakeID, login string, mcpPort int) []string {
 	vars := []string{
 		"FERN_BOX_TOKEN=" + box.Env.BoxToken,
 		"FERN_WAKE_ID=" + wakeID,
@@ -158,7 +160,7 @@ func boxVars(box Box, wakeID, login string) []string {
 	switch box.Kind {
 	case Services:
 	case Agent:
-		vars = append(vars, "FERN_SERVICES=off")
+		vars = append(vars, "FERN_SERVICES=off", "FERN_MCP=http://"+net.JoinHostPort(DaemonHost, strconv.Itoa(mcpPort)))
 	case Builder:
 		vars = append(vars, "FERN_ON_DEMAND=off")
 	}

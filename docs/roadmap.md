@@ -19,11 +19,27 @@
 | 1 (built 2026-11-01; Next.js with Postgres checked 2026-11-02: first page 10.5 s from asleep) | **Your own repository from a git URL:** add a project by its URL; without a `services.yaml`, Fern guesses one from the repository (the `dev` script and its port, the Node version, the package manager, Postgres in `docker-compose.yml`) | a Vite repo and a Next.js repo with Postgres, neither with Fern files, start and serve a preview from their URLs |
 | 2 (built 2026-11-01) | **GitHub access for private repositories and `git push`**, without a token in any workspace, golden or snapshot | a thread clones a private repo and pushes a branch; a scan finds no token in the pool |
 | 3 (built 2026-11-01) | **`fern doctor`:** the services, the tunnel, Claude's login, the disk and gVisor, each with what to do when it fails | each failure the installer knows of is named by it |
-| 4 (built 2026-11-01; idle clocks start over at a restart) | **Supervision:** a box that keeps crashing backs off, then its environment is `failed`, with the reason; background jobs and idle clocks survive a daemon restart | crash tests: a box that dies at once ends `failed` after N tries; a dev server started through Bash runs on after `systemctl restart fern-daemon` |
+| 4 (built 2026-11-01; idle clocks and running commands survive a daemon restart since 2026-11-07) | **Supervision:** a box that keeps crashing backs off, then its environment is `failed`, with the reason; background jobs and idle clocks survive a daemon restart | crash tests: a box that dies at once ends `failed` after N tries; a dev server started through Bash runs on after `systemctl restart fern-daemon` |
 | 5 (built 2026-11-01; tested against versitygw, not yet a real bucket or a new server) | **Backups:** snapshots shipped with `btrfs send` to object storage, and an environment restored from them on a new server | a server deleted and set up again gets its threads back, the database included |
 | 6 (rendering ahead built 2026-11-01: 16.6 s → 0.11 s after a command's wake; KVM not measured, a browser's own wake unchanged) | **A faster first page:** the default preview rendered in the background after a wake; gVisor with KVM measured | TanStack Start's first page from an asleep box well under 16.6 s (lab/RESULTS.md, 2026-10-31) |
 | 7 (built 2026-11-02: three forks with Postgres in 77–94 ms, their tests at once in 2.1–2.7 s; T3's own Fork still shares the worktree) | **Forks:** an environment copied from a snapshot, several at once, each with its own Postgres on :5432 (`env_fork`) | three forks of a thread run their tests at once |
 | 8 | **Codex** next to Claude, with its own login | a Codex thread in T3 snapshots and reverts like a Claude one |
+
+## Proposed, from Amp (2026-11-06)
+Not yet in the order above, which stays as it is until the owner decides. Nothing here is built, and the costs are guesses. The reasoning and sources are on the site's roadmap page (`site/src/pages/roadmap.astro`, "What to take from Amp").
+
+| Idea | Taken from | Done when |
+|---|---|---|
+| **Check what T3 already has, from a box:** webhooks, pull request watching, schedules, orchestrator tools | Event Driven Orbs, GitHub listeners, Automations, Spaces | one webhook wakes a box, one PR comment reaches a thread, and a thread starts another; T3's pin updated first if it needs to be |
+| **Setup an agent writes and tests:** a `services.yaml` kept outside the repository | Setup Without a Commit | a repository the guess can't handle, such as a Go API with Postgres, runs from its URL with no commit |
+| **App secrets at wake:** values kept outside the pool | Handling Secrets | a service reads a key; a scan finds it in no workspace, golden or snapshot |
+| **New boxes wait when the node is full** | Orb spawn pacing | 50 forks asked for at once on the VPS: all finish, none fail and the daemon survives |
+| **A T3 thread on a fork:** a coordinator tries an idea several ways from one running state, and keeps one | Spaces, Agent to Agent | three threads try one migration, each with its own Postgres, and the winner carries on as a thread |
+| **Point at a preview to change it** | Close the Loop | a note on a page element reaches the thread with its text and location |
+
+Later, if someone asks: short-lived identity for a box (OIDC), attempts side by side, `fern sync`, `fern usage`.
+
+Left out: team features, desktops and Chrome profiles, Mac machines and public preview links (previews are never public). Models, apps and review UI belong to the CLIs and T3.
 
 ## Not now
 Several nodes and moving environments between them, quotas and several people per server, micro-VM boxes, warm pools of boxes, memory snapshots (rejected: lab/spike/runsc), EKS.

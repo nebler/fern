@@ -421,7 +421,7 @@ func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 	}
 	wakeID := make([]byte, 8)
 	_, _ = rand.Read(wakeID)
-	vars := boxVars(box, hex.EncodeToString(wakeID), login)
+	vars := boxVars(box, hex.EncodeToString(wakeID), login, d.cfg.MCPPort)
 	if d.cfg.Preview != "" {
 		// {port} is for the box to fill in.
 		vars = append(vars, "FERN_PREVIEW=http://{port}-"+box.Env.ID+"."+d.cfg.Preview+"/")

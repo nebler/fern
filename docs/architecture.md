@@ -91,7 +91,7 @@ Three nouns. Everything else is a property of one of them.
 | **preview** | the front door for previews: serves boxes' ports over HTTP and WebSocket, routed by host, waking a box that is asleep and counting each request as a use of it (§5, §11) | `internal/preview` |
 | identity, more MCP tools for agents | planned (§5, §11) | |
 
-**Why an in-box agent (`fern-init`)?** Exec, services and readiness work the same however the box is run, without `docker exec`-style side channels, which are fragile for long streams. Its exec protocol is Fern's own: one WebSocket per command, with frames for stdin, stdout, stderr, terminal sizes and signals (`internal/boxexec`).
+**Why an in-box agent (`fern-init`)?** Exec, services and readiness work the same however the box is run, without `docker exec`-style side channels, which are fragile for long streams. Its exec protocol is Fern's own: one WebSocket per command, with frames for stdin, stdout, stderr, terminal sizes and signals (`internal/boxexec`). A command run as a **session** outlives its connection: both sides number their frames and keep them until acknowledged, so a new connection carries on with nothing lost or repeated. A close message means the client is done, and kills the command; a connection that just breaks means the daemon went away, and the command waits for one for 2 minutes. That is how running commands and turns get through a restart of the daemon, which is how Fern upgrades. In an agent box, Claude reaches the daemon's MCP server through a relay in fern-init, which sends a call again under the same key until a daemon answers, so a Bash call running then finds its command instead of failing or running it twice.
 
 ## 4. Data model (the index, SQLite)
 
@@ -106,7 +106,7 @@ snapshots(env REFERENCES environments ON DELETE CASCADE, id, created_at, PRIMARY
 - `git` is the main repository's git folder that the box gets read-only (§13); `box_token` authenticates the daemon to the environment's boxes, and is why only root may read the index.
 - **A restore fences stale work** by stopping the box and cancelling every command the actor counts, including one still connecting, so nothing that started before it runs after it.
 - **Golden snapshots are rows too:** a golden is a snapshot of its builder environment named `golden-<key>`, and a build waiting at a restart is a snapshot named `golden-source` (§7.5).
-- **Planned:** tags, a snapshot's parent and size, and timers as rows so idle clocks survive a restart (today a box still running at a restart gets an actor whose clocks start over).
+- **Planned:** tags, a snapshot's parent and size, and timers as rows. Idle clocks survive a restart in the box instead: fern-init keeps when it was last used (`GET /activity`), and the next daemon reads it.
 
 ## 5. API
 

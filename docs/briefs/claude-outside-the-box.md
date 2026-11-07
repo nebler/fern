@@ -90,8 +90,10 @@ reaches assets 1–5 directly.
 those can run commands in Claude's process environment: hooks, `statusLine`,
 `apiKeyHelper`, stdio MCP servers, plugins. The box writes the workspace, so
 today's harmless file becomes code execution in T3's pod.
-- Stop: `--setting-sources user` (no project or local settings),
-  `--strict-mcp-config` with only Fern's and T3's MCP servers, and no plugins.
+- Stop: `--setting-sources=user` (no project or local settings, which also
+  stops the workspace's `.mcp.json`; `lab/check.sh settings` tests it). Not
+  `--strict-mcp-config`, as first planned: this flag alone stopped all three
+  planted routes, and T3 hands Claude its own MCP servers after the start.
   `CLAUDE.md` in the workspace stays readable: it is text, so prompt injection
   (T5), not code.
 - Stop: the user settings themselves live in Claude's folder. Today the box
