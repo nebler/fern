@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/setup"
 )
 
@@ -106,18 +107,11 @@ func install(ctx context.Context, dir, data string, env []string, key string, gu
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "mise", "install")
 	cmd.Dir, cmd.Env = dir, env
-	var out strings.Builder
-	cmd.Stdout, cmd.Stderr = &out, &out
+	// A repository's hook can print any amount; the box's memory isn't for that.
+	out := boxexec.NewClipped(4000)
+	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("mise install: %w: %s", err, tail(out.String(), 2000))
+		return fmt.Errorf("mise install: %w: %s", err, out.String())
 	}
 	return os.WriteFile(filepath.Join(data, installedFile), []byte(key), 0o644)
-}
-
-// tail returns s's last n bytes.
-func tail(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[len(s)-n:]
 }

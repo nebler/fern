@@ -92,6 +92,18 @@ func (g *Group) exec(ctx context.Context, kind, id, stale string, cancel context
 	return ex, nil
 }
 
+// AdoptClocks sets the idle clocks of environment id's awake box to the times
+// it was last used, known from the box: they survive a daemon's restart there.
+// A command opened since keeps the box's newer times.
+func (g *Group) AdoptClocks(ctx context.Context, id string, opened, closed time.Time) error {
+	return g.do(ctx, "adopt", id, func(_ context.Context, a *actor) error {
+		if a.awake && len(a.execs) == 0 {
+			a.opened, a.closed = opened, closed
+		}
+		return nil
+	})
+}
+
 // endExec stops counting command n, from the goroutine that ran it; with
 // sleep, the box sleeps after d if nothing else runs. Its end is logged at
 // level. A command that a stop already cancelled is not counted any more.

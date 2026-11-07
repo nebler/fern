@@ -45,19 +45,36 @@ var errBoxStopped = errors.New("its box went to sleep, was restored or deleted")
 
 // startJob starts in's command in the background in environment id's box,
 // and returns its ID.
-func (s *Server) startJob(ctx context.Context, id string, in bashInput) (string, error) {
-	jobID := "bash_" + strings.ToLower(rand.Text()[:8])
+func (s *Server) startJob(ctx context.Context, id string, in bashInput, key string) (string, error) {
+	// A call sent again after a restart names the same job, and doesn't start
+	// a second one.
+	if key == "" {
+		key = rand.Text()
+	}
+	jobID := "bash_" + strings.ToLower(key[:8])
+	if s.hasJob(id, jobID) {
+		return jobID, nil
+	}
 	j, ex, wctx, err := s.openJob(ctx, id, jobID)
 	if err != nil {
 		return "", err
 	}
-	if err := j.box.Start(ctx, boxexec.JobRequest{ID: jobID, Argv: []string{"/bin/sh", "-c", in.Command}}); err != nil {
+	err = j.box.Start(ctx, boxexec.JobRequest{ID: jobID, Argv: []string{"/bin/sh", "-c", in.Command}})
+	if err != nil && !errors.Is(err, boxexec.ErrJobExists) {
 		j.cancel()
 		ex.Close()
 		return "", err
 	}
 	s.keepJob(wctx, id, j, ex)
 	return jobID, nil
+}
+
+// hasJob reports whether the daemon knows job jobID of environment id.
+func (s *Server) hasJob(id, jobID string) bool {
+	s.jobs.mu.Lock()
+	defer s.jobs.mu.Unlock()
+	_, ok := s.jobs.byEnv[id][jobID]
+	return ok
 }
 
 // openJob opens a job count in environment id's box, waking it, for job
@@ -179,13 +196,34 @@ func (s *Server) AdoptJobs(ctx context.Context) {
 		return
 	}
 	for box, state := range states {
-		// Jobs run in environments' own boxes; a golden builder's runs none.
-		if state != runsc.Running || store.EnvOfBox(box) != box || setup.IsBuilder(box) {
+		if state != runsc.Running || setup.IsBuilder(box) {
 			continue
 		}
-		if err := s.adoptJobs(ctx, box); err != nil {
-			s.log.WarnContext(ctx, "finding a box's background commands failed", slog.String("env", box), slog.Any("error", err))
+		// Jobs run in environments' own boxes.
+		if store.EnvOfBox(box) == box {
+			if err := s.adoptJobs(ctx, box); err != nil {
+				s.log.WarnContext(ctx, "finding a box's background commands failed", slog.String("env", box), slog.Any("error", err))
+			}
 		}
+		s.adoptClocks(ctx, box)
+	}
+}
+
+// adoptClocks gives box's idle clocks back the times its fern-init kept, so
+// that a restart doesn't keep idle boxes awake longer. A box running a
+// command, perhaps one waiting for its client to come back, keeps new ones.
+func (s *Server) adoptClocks(ctx context.Context, box string) {
+	ex, err := s.envs.Exec(ctx, box, "", func() {})
+	if err != nil {
+		return
+	}
+	a, err := boxexec.ActivityOf(ctx, s.boxes, ex.Addr, ex.Token)
+	ex.Close()
+	if err != nil || a.Running > 0 {
+		return // an older fern-init has none; the clocks just started over
+	}
+	if err := s.envs.AdoptClocks(ctx, box, a.Opened, a.Closed); err != nil {
+		s.log.WarnContext(ctx, "restoring a box's idle clocks failed", slog.String("env", box), slog.Any("error", err))
 	}
 }
 

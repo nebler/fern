@@ -131,7 +131,7 @@ func TestSleep(t *testing.T) {
 				}
 			}
 			box := Box{ID: "demo", Env: env}
-			config, err := json.Marshal(boxSpec(box, b, nil, boxVars(box, "w1", "")))
+			config, err := json.Marshal(boxSpec(box, b, nil, boxVars(box, "w1", "", 7071)))
 			if err != nil {
 				t.Fatal(err)
 			}

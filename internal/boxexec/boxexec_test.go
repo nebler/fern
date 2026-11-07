@@ -3,19 +3,27 @@ package boxexec_test
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/google/go-cmp/cmp"
 	"go.uber.org/goleak"
 
@@ -98,7 +106,7 @@ func newRelay(t testing.TB, boxURL string) string {
 			return
 		}
 		defer func() { _ = client.CloseNow() }()
-		boxexec.Proxy(r.Context(), client, box)
+		boxexec.Proxy(r.Context(), client, box, nil)
 	}))
 	t.Cleanup(srv.Close)
 	return "ws" + strings.TrimPrefix(srv.URL, "http")
@@ -465,4 +473,395 @@ func TestRunSignalBehindUnreadStdin(t *testing.T) {
 			}
 		})
 	}
+}
+
+// sessionServer serves token's commands in a temporary folder, with a short
+// grace. It returns a dial for its exec endpoint.
+func sessionServer(t *testing.T, grace time.Duration) func(context.Context) (*websocket.Conn, error) {
+	t.Helper()
+	s := boxexec.NewServer(token, t.TempDir(), os.Environ(), slog.New(slog.DiscardHandler))
+	s.Grace = grace
+	srv := httptest.NewServer(s)
+	t.Cleanup(srv.Close)
+	url := "ws" + strings.TrimPrefix(srv.URL, "http")
+	return func(ctx context.Context) (*websocket.Conn, error) { return boxexec.Dial(ctx, url, token, nil) }
+}
+
+// breaker dials through dial, and breaks the newest connection with no close
+// message, as a daemon that dies does.
+type breaker struct {
+	dial func(context.Context) (*websocket.Conn, error)
+	mu   sync.Mutex
+	conn *websocket.Conn
+	n    int
+}
+
+func (b *breaker) Dial(ctx context.Context) (*websocket.Conn, error) {
+	conn, err := b.dial(ctx)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if err == nil {
+		b.conn = conn
+		b.n++
+	}
+	return conn, err
+}
+
+func (b *breaker) Break() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	_ = b.conn.CloseNow()
+}
+
+func (b *breaker) dials() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.n
+}
+
+// lockedBuffer can be read while a session writes to it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func waitFor(t *testing.T, what string, ok func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(20 * time.Second); !ok(); time.Sleep(5 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+	}
+}
+
+func TestSessionSurvivesBrokenConnection(t *testing.T) {
+	b := &breaker{dial: sessionServer(t, time.Minute)}
+	ctx := t.Context()
+	conn, err := b.Dial(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Echoes each line it reads, numbered, then exits with a code of its own.
+	script := `n=0; while read -r line; do n=$((n+1)); echo "$n $line"; done; echo end; exit 7`
+	inR, inW := io.Pipe()
+	defer func() { _ = inW.Close() }()
+	var out lockedBuffer
+	type result struct {
+		code int
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		code, err := boxexec.RunSession(ctx, conn, boxexec.Request{Argv: []string{"/bin/sh", "-c", script}, Session: "s1"},
+			boxexec.Streams{Stdin: inR, Stdout: &out, Stderr: &out}, boxexec.Resume{Dial: b.Dial, For: 10 * time.Second})
+		done <- result{code, err}
+	}()
+	var want strings.Builder
+	for i := 1; i <= 20; i++ {
+		line := fmt.Sprintf("line%d", i)
+		if _, err := fmt.Fprintln(inW, line); err != nil {
+			t.Fatal(err)
+		}
+		fmt.Fprintf(&want, "%d %s\n", i, line)
+		// The connection breaks between lines and while they are on their way.
+		if i%5 == 0 {
+			waitFor(t, "line "+line, func() bool { return strings.Contains(out.String(), line) })
+			b.Break()
+		} else if i%7 == 0 {
+			b.Break()
+		}
+	}
+	_ = inW.Close()
+	want.WriteString("end\n")
+	r := <-done
+	if r.err != nil {
+		t.Fatalf("RunSession: %v", r.err)
+	}
+	if r.code != 7 {
+		t.Errorf("exit code = %d, want 7", r.code)
+	}
+	// Nothing lost, nothing repeated, and the same process all along.
+	if diff := cmp.Diff(want.String(), out.String()); diff != "" {
+		t.Errorf("output (-want +got):\n%s", diff)
+	}
+	if b.dials() < 2 {
+		t.Errorf("dialled %d times: nothing was broken", b.dials())
+	}
+}
+
+func TestSessionOutputPastWindow(t *testing.T) {
+	b := &breaker{dial: sessionServer(t, time.Minute)}
+	ctx := t.Context()
+	conn, err := b.Dial(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := sha256.New()
+	counted := &lockedBuffer{}
+	stop := make(chan struct{})
+	defer close(stop)
+	var total atomic.Int64
+	go func() {
+		// Breaks the connection as the output goes by.
+		for last := int64(0); ; time.Sleep(time.Millisecond) {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if n := total.Load(); n-last > 3<<20 {
+				last = n
+				b.Break()
+			}
+		}
+	}()
+	out := writerFunc(func(p []byte) (int, error) {
+		total.Add(int64(len(p)))
+		return h.Write(p)
+	})
+	const size = 16 << 20
+	code, err := boxexec.RunSession(ctx, conn,
+		boxexec.Request{Argv: []string{"/bin/sh", "-c", fmt.Sprintf("awk 'BEGIN { for (i = 1; ; i++) print i }' | head -c %d", size)}, Session: "s2"},
+		boxexec.Streams{Stdout: out, Stderr: counted}, boxexec.Resume{Dial: b.Dial, For: 10 * time.Second})
+	if err != nil || code != 0 {
+		t.Fatalf("RunSession = %d, %v; stderr %q", code, err, counted.String())
+	}
+	if total.Load() != size {
+		t.Errorf("got %d bytes, want %d", total.Load(), size)
+	}
+	wantSum := sha256.New()
+	// head cuts the numbers at size.
+	var written int
+	for i := 1; written < size; i++ {
+		s := strconv.Itoa(i) + "\n"
+		if written+len(s) > size {
+			s = s[:size-written]
+		}
+		wantSum.Write([]byte(s))
+		written += len(s)
+	}
+	if !bytes.Equal(h.Sum(nil), wantSum.Sum(nil)) {
+		t.Error("the output differs from what the command printed")
+	}
+}
+
+// During an upgrade a new client meets a box still running an older
+// fern-init, which ignores the session: the command just runs, as an exec.
+func TestSessionOnOlderServer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := boxexec.Accept(w, r)
+		if err != nil {
+			return
+		}
+		defer func() { _ = conn.CloseNow() }()
+		ctx := r.Context()
+		if _, _, err := conn.Read(ctx); err != nil {
+			return
+		}
+		// Back what stdin it was sent, then the end. Frames: 0 stdin, 3 its end, 1 stdout.
+		for {
+			_, data, err := conn.Read(ctx)
+			if err != nil {
+				return
+			}
+			if data[0] == 3 {
+				break
+			}
+			if err := conn.Write(ctx, websocket.MessageBinary, append([]byte{1}, data[1:]...)); err != nil {
+				return
+			}
+		}
+		_ = conn.Write(ctx, websocket.MessageText, []byte(`{"code":5}`))
+		_ = conn.Close(websocket.StatusNormalClosure, "")
+	}))
+	defer srv.Close()
+	ctx := t.Context()
+	conn, err := boxexec.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	code, err := boxexec.RunSession(ctx, conn, boxexec.Request{Argv: []string{"cat"}, Session: "s"},
+		boxexec.Streams{Stdin: strings.NewReader("hello"), Stdout: &out, Stderr: &out}, boxexec.Resume{})
+	if err != nil || code != 5 {
+		t.Fatalf("RunSession = %d, %v, want 5", code, err)
+	}
+	if out.String() != "hello" {
+		t.Errorf("output = %q", out.String())
+	}
+}
+
+func TestSessionEnds(t *testing.T) {
+	const marker = "alive"
+	running := func(t *testing.T, pidfile string) func() bool {
+		return func() bool {
+			data, err := os.ReadFile(pidfile)
+			if err != nil {
+				return false
+			}
+			pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+			if err != nil {
+				return false
+			}
+			return syscall.Kill(pid, 0) == nil
+		}
+	}
+	start := func(t *testing.T, dial func(context.Context) (*websocket.Conn, error), ctx context.Context, resume boxexec.Resume, session string) (string, chan error) {
+		t.Helper()
+		pidfile := filepath.Join(t.TempDir(), "pid")
+		conn, err := dial(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out lockedBuffer
+		done := make(chan error, 1)
+		go func() {
+			_, err := boxexec.RunSession(ctx, conn, boxexec.Request{
+				Argv:    []string{"/bin/sh", "-c", "echo $$ > " + pidfile + "; echo " + marker + "; exec sleep 300"},
+				Session: session,
+			}, boxexec.Streams{Stdout: &out, Stderr: &out}, resume)
+			done <- err
+		}()
+		waitFor(t, "the command", func() bool { return strings.Contains(out.String(), marker) })
+		return pidfile, done
+	}
+
+	t.Run("a cancelled client kills it at once", func(t *testing.T) {
+		dial := sessionServer(t, time.Hour)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		pidfile, done := start(t, dial, ctx, boxexec.Resume{Dial: dial, For: time.Second}, "cancel")
+		cancel()
+		if err := <-done; err == nil {
+			t.Error("RunSession returned no error")
+		}
+		waitFor(t, "the command to die", func() bool { return !running(t, pidfile)() })
+	})
+
+	t.Run("nobody coming back kills it after the grace", func(t *testing.T) {
+		b := &breaker{dial: sessionServer(t, 200*time.Millisecond)}
+		ctx := t.Context()
+		// No Resume: the client gives up, and the command is on its own.
+		pidfile, done := start(t, b.Dial, ctx, boxexec.Resume{}, "grace")
+		b.Break()
+		if err := <-done; err == nil {
+			t.Error("RunSession returned no error")
+		}
+		if !running(t, pidfile)() {
+			t.Error("the command died with its connection, inside the grace")
+		}
+		waitFor(t, "the command to die", func() bool { return !running(t, pidfile)() })
+	})
+
+	t.Run("a caller going away leaves it running", func(t *testing.T) {
+		dial := sessionServer(t, 300*time.Millisecond)
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		pidfile, done := start(t, dial, ctx, boxexec.Resume{Abandon: func() bool { return true }}, "abandon")
+		cancel()
+		<-done
+		if !running(t, pidfile)() {
+			t.Error("the command died with its caller")
+		}
+		waitFor(t, "the command to die", func() bool { return !running(t, pidfile)() })
+	})
+
+	t.Run("a session that is gone isn't started again", func(t *testing.T) {
+		dial := sessionServer(t, time.Minute)
+		ctx := t.Context()
+		conn, err := dial(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = boxexec.RunSession(ctx, conn, boxexec.Request{Session: "never"}, boxexec.Streams{Stdout: io.Discard, Stderr: io.Discard}, boxexec.Resume{})
+		if !errors.Is(err, boxexec.ErrSessionGone) {
+			t.Errorf("RunSession = %v, want ErrSessionGone", err)
+		}
+	})
+
+	t.Run("a retry after the end gets the code without running it again", func(t *testing.T) {
+		dial := sessionServer(t, time.Minute)
+		ctx := t.Context()
+		count := filepath.Join(t.TempDir(), "count")
+		req := boxexec.Request{Argv: []string{"/bin/sh", "-c", "echo x >> " + count + "; exit 3"}, Session: "again"}
+		for range 2 {
+			conn, err := dial(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			code, err := boxexec.RunSession(ctx, conn, req, boxexec.Streams{Stdout: io.Discard, Stderr: io.Discard}, boxexec.Resume{})
+			if err != nil || code != 3 {
+				t.Fatalf("RunSession = %d, %v, want 3", code, err)
+			}
+		}
+		data, err := os.ReadFile(count)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := strings.Count(string(data), "x"); got != 1 {
+			t.Errorf("ran %d times, want 1", got)
+		}
+	})
+}
+
+func TestClipped(t *testing.T) {
+	const limit = 100
+	for _, tt := range []struct {
+		name   string
+		writes []string
+		want   string
+	}{
+		{name: "short", writes: []string{"abc", "def"}, want: "abcdef"},
+		{name: "exactly the limit", writes: []string{strings.Repeat("a", limit)}, want: strings.Repeat("a", limit)},
+		{
+			name:   "one long write",
+			writes: []string{strings.Repeat("a", 50) + strings.Repeat("b", 1000) + strings.Repeat("c", 50)},
+			want:   strings.Repeat("a", 50) + "\n[… 1000 bytes left out …]\n" + strings.Repeat("c", 50),
+		},
+		{
+			name:   "small writes",
+			writes: slices.Repeat([]string{"x"}, 1000),
+			want:   strings.Repeat("x", 50) + "\n[… 900 bytes left out …]\n" + strings.Repeat("x", 50),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := boxexec.NewClipped(limit)
+			for _, w := range tt.writes {
+				if _, err := c.Write([]byte(w)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if diff := cmp.Diff(tt.want, c.String()); diff != "" {
+				t.Errorf("String() (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+func TestClippedKeepsLittle(t *testing.T) {
+	c := boxexec.NewClipped(1000)
+	chunk := make([]byte, 1<<16)
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	for range 1 << 14 { // 1 GiB
+		_, _ = c.Write(chunk)
+	}
+	runtime.ReadMemStats(&after)
+	if grown := int64(after.TotalAlloc) - int64(before.TotalAlloc); grown > 1<<20 {
+		t.Errorf("allocated %d bytes for 1 GiB of output", grown)
+	}
+	runtime.KeepAlive(c)
 }

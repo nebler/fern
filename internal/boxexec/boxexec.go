@@ -41,6 +41,10 @@ const (
 	frameStdinEOF
 	frameResize // four more bytes: rows, then columns, as big-endian uint16
 	frameSignal // one more byte: the signal number
+	// The rest are for sessions (session.go).
+	frameAck  // eight more bytes: how many frames the sender has taken, big-endian
+	frameLost // eight more bytes: how many output frames are gone; 0 if unknown
+	frameGone // the session asked for doesn't exist
 )
 
 // maxMessage is the largest message a connection reads, more than the
@@ -59,6 +63,12 @@ type Request struct {
 	// Environ adds NAME=VALUE variables to the command's, replacing any of
 	// the same name.
 	Environ []string `json:"environ,omitempty"`
+	// Session names a command that can outlive this connection (session.go):
+	// the server takes it up if it has it, and starts it from Argv if not.
+	// Without Argv, it never starts one.
+	Session string `json:"session,omitempty"`
+	// Seen is how many output frames the client has of Session.
+	Seen uint64 `json:"seen,omitempty"`
 }
 
 // Streams connect a command to the client: its standard streams, terminal

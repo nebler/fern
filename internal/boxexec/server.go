@@ -46,11 +46,69 @@ type Server struct {
 	dir   string
 	env   []string
 	log   *slog.Logger
+
+	// Grace is how long a session's command runs with no connection.
+	Grace time.Duration
+
+	mu       sync.Mutex
+	sessions map[string]*session
+	finished map[string]int // exit codes of sessions that ended lately
+	activity Activity
+}
+
+// ActivityPath is where fern-init says when its box was last used, which is
+// how the idle clocks of a box outlive the daemon that was keeping them.
+const ActivityPath = "/activity"
+
+// Activity is how a box has been used.
+type Activity struct {
+	Opened  time.Time `json:"opened"`  // a command last started
+	Closed  time.Time `json:"closed"`  // a command last ended
+	Running int       `json:"running"` // commands running, with a connection or waiting for one
+}
+
+// Opened records that a command has started. Background commands, which
+// aren't this server's, count too.
+func (s *Server) Opened() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activity.Opened = time.Now()
+}
+
+func (s *Server) running(by int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activity.Running += by
+	if by > 0 {
+		s.activity.Opened = time.Now()
+	} else {
+		s.activity.Closed = time.Now()
+	}
+}
+
+// ServeActivity answers with the box's Activity.
+func (s *Server) ServeActivity(w http.ResponseWriter, r *http.Request) {
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), []byte("Bearer "+s.token)) != 1 {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	s.mu.Lock()
+	a := s.activity
+	s.mu.Unlock()
+	writeJSONTo(w, a)
+}
+
+// ActivityOf returns the Activity of the box whose fern-init is at addr. A
+// box from before it has none, an error.
+func ActivityOf(ctx context.Context, hc *http.Client, addr, token string) (Activity, error) {
+	var a Activity
+	return a, JobClient{HC: hc, Addr: addr, Token: token}.call(ctx, http.MethodGet, ActivityPath, nil, &a)
 }
 
 // NewServer returns a Server that runs commands in dir with environment env.
 func NewServer(token, dir string, env []string, log *slog.Logger) *Server {
-	return &Server{token: token, dir: dir, env: env, log: log}
+	now := time.Now()
+	return &Server{token: token, dir: dir, env: env, log: log, Grace: DefaultGrace, activity: Activity{Opened: now, Closed: now}}
 }
 
 // ServeHTTP runs one command over a WebSocket.
@@ -70,9 +128,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if req.Session != "" {
+		s.serveSession(r.Context(), conn, req)
+		return
+	}
+
+	s.running(1)
+	defer s.running(-1)
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	p, err := s.start(ctx, conn, req)
+	p, err := s.start(ctx, req, func(kind byte) *frameWriter { return frames(ctx, conn, kind) })
 	if err != nil {
 		_ = conn.Write(r.Context(), websocket.MessageBinary, fmt.Appendf([]byte{frameStderr}, "exec: %v\n", err))
 		finish(r.Context(), conn, exitNotStarted)
@@ -84,7 +149,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// it.
 	stdin := make(chan []byte, stdinQueue)
 	var streams sync.WaitGroup
-	streams.Go(func() { writeStdin(p, stdin) })
+	streams.Go(func() { writeStdin(p, stdin, nil) })
 	streams.Go(func() {
 		readInput(ctx, conn, p, stdin)
 		close(stdin)
@@ -124,7 +189,9 @@ type process struct {
 	start   time.Time
 }
 
-func (s *Server) start(ctx context.Context, conn *websocket.Conn, req Request) (*process, error) {
+// start starts req's command, sending its output through the writers output
+// makes, one per kind of frame.
+func (s *Server) start(ctx context.Context, req Request, output func(kind byte) *frameWriter) (*process, error) {
 	if len(req.Argv) == 0 {
 		return nil, errors.New("no command")
 	}
@@ -156,7 +223,7 @@ func (s *Server) start(ctx context.Context, conn *websocket.Conn, req Request) (
 		if err := p.startPipes(cmd); err != nil {
 			return nil, err
 		}
-		p.copyOutput(ctx, conn, frameStdout, frameStderr)
+		p.copyOutput(ctx, output, frameStdout, frameStderr)
 		return p, nil
 	}
 	tty, err := startTTY(cmd, req.Size)
@@ -164,7 +231,7 @@ func (s *Server) start(ctx context.Context, conn *websocket.Conn, req Request) (
 		return nil, err
 	}
 	p.tty, p.stdin, p.outputs = tty, tty, []*os.File{tty}
-	p.copyOutput(ctx, conn, frameStdout)
+	p.copyOutput(ctx, output, frameStdout)
 	return p, nil
 }
 
@@ -209,7 +276,7 @@ func (p *process) startPipes(cmd *exec.Cmd) error {
 // copyOutput sends what comes out of each of the outputs as frames of the
 // matching kind. Each copy ends once the command and its children have
 // closed their end (EOF; EIO for a terminal), or at the deadline wait sets.
-func (p *process) copyOutput(ctx context.Context, conn *websocket.Conn, kinds ...byte) {
+func (p *process) copyOutput(ctx context.Context, output func(kind byte) *frameWriter, kinds ...byte) {
 	if p.trace != nil {
 		p.trace.InfoContext(ctx, "claude started",
 			slog.Int("pid", p.cmd.Process.Pid),
@@ -217,9 +284,9 @@ func (p *process) copyOutput(ctx context.Context, conn *websocket.Conn, kinds ..
 	}
 	for i, out := range p.outputs {
 		p.output.Go(func() {
-			w := frames(ctx, conn, kinds[i])
+			w := output(kinds[i])
 			if p.trace != nil && kinds[i] == frameStdout {
-				first := true
+				first, send := true, w.send
 				w.send = func(frame []byte) error {
 					if first {
 						p.trace.InfoContext(ctx, "claude first stdout",
@@ -227,7 +294,7 @@ func (p *process) copyOutput(ctx context.Context, conn *websocket.Conn, kinds ..
 							slog.Float64("since_request_ms", float64(time.Since(p.start))/float64(time.Millisecond)))
 						first = false
 					}
-					return conn.Write(ctx, websocket.MessageBinary, frame)
+					return send(frame)
 				}
 			}
 			_, _ = io.Copy(w, out)
@@ -369,17 +436,25 @@ func readInput(ctx context.Context, conn *websocket.Conn, p *process, stdin chan
 			if p.tty == nil && !queue(ctx, stdin, nil) {
 				return
 			}
-		case frameResize:
-			if p.tty != nil && len(data) == 5 {
-				size := Size{Rows: binary.BigEndian.Uint16(data[1:]), Cols: binary.BigEndian.Uint16(data[3:])}
-				_ = setSize(p.tty, size) // fails once wait has closed the terminal
-			}
-		case frameSignal:
-			// To the whole group, as a terminal would send it. Once the
-			// command has been reaped its group id may be reused.
-			if sig := syscall.Signal(data[len(data)-1]); len(data) == 2 && forwardable(sig) && !p.exited.Load() {
-				_ = syscall.Kill(-p.cmd.Process.Pid, sig)
-			}
+		default:
+			p.control(data)
+		}
+	}
+}
+
+// control applies a frame of a terminal size or a signal.
+func (p *process) control(data []byte) {
+	switch data[0] {
+	case frameResize:
+		if p.tty != nil && len(data) == 5 {
+			size := Size{Rows: binary.BigEndian.Uint16(data[1:]), Cols: binary.BigEndian.Uint16(data[3:])}
+			_ = setSize(p.tty, size) // fails once wait has closed the terminal
+		}
+	case frameSignal:
+		// To the whole group, as a terminal would send it. Once the
+		// command has been reaped its group id may be reused.
+		if sig := syscall.Signal(data[len(data)-1]); len(data) == 2 && forwardable(sig) && !p.exited.Load() {
+			_ = syscall.Kill(-p.cmd.Process.Pid, sig)
 		}
 	}
 }
@@ -394,12 +469,23 @@ func queue(ctx context.Context, stdin chan<- []byte, data []byte) bool {
 	}
 }
 
-// writeStdin writes what readInput queues to the command's stdin, and closes
-// it at nil. After that, or a failed write (the command closed its stdin or
-// exited), it drops the rest, so readInput is never held up.
-func writeStdin(p *process, stdin <-chan []byte) {
+// writeStdin writes what is queued to the command's stdin, and closes it at
+// nil. After that, or a failed write (the command closed its stdin or
+// exited), it drops the rest, so that whoever queues is never held up. It
+// ends when stdin is closed or over is.
+func writeStdin(p *process, stdin <-chan []byte, over <-chan struct{}) {
 	done := false
-	for data := range stdin {
+	for {
+		var data []byte
+		var ok bool
+		select {
+		case data, ok = <-stdin:
+			if !ok {
+				return
+			}
+		case <-over:
+			return
+		}
 		switch {
 		case done:
 		case data == nil:
