@@ -19,8 +19,9 @@ type Exec struct {
 // be called more than once.
 func (e *Exec) Close() { e.close(false, 0) }
 
-// CloseAndSleep ends the count of the command and, if no other command runs
-// in the box, puts it to sleep after d instead of after the idle times: the
+// CloseAndSleep ends the count of the command and, if no other command or
+// job runs in the box, puts it to sleep after d instead of after the idle
+// times: the
 // command was an agent that stopped because it had nothing to do (package
 // hibernate, d = 0), or one of an agent's Bash calls, which come in bursts.
 func (e *Exec) CloseAndSleep(d time.Duration) { e.close(true, d) }
@@ -117,7 +118,9 @@ func (a *actor) endExec(n int, sleep bool, d time.Duration, level slog.Level) {
 		if _, ok := a.execs[n]; ok {
 			delete(a.execs, n)
 			a.closed = time.Now()
-			if sleep && len(a.execs) == 0 {
+			// A job is something to do: the box sleeps on its idle clocks,
+			// and a lease set now would apply, long past, when the job ends.
+			if sleep && len(a.execs) == 0 && len(a.jobs) == 0 {
 				a.lease = a.closed.Add(d)
 			}
 			a.g.log.Log(ctx, level, "exec closed", slog.String("env", a.id), slog.Int("exec", n),

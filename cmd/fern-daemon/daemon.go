@@ -227,7 +227,10 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 			fail(http.StatusNotFound, "no backups are set up: "+backupConfig+" is missing (README: backups)")
 			return
 		}
-		if err := backer.Once(r.Context()); err != nil {
+		if err := backer.Once(r.Context()); errors.Is(err, backup.ErrBusy) {
+			fail(http.StatusConflict, err.Error())
+			return
+		} else if err != nil {
 			fail(http.StatusInternalServerError, err.Error())
 			return
 		}

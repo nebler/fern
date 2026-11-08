@@ -165,13 +165,13 @@ func (c *sessionClient) sendStdin(ctx context.Context, conn *websocket.Conn, nex
 func (c *sessionClient) attach(ctx context.Context, conn *websocket.Conn) (code int, broke bool, err error) {
 	// The connection's own calls don't watch ctx: they'd close it with no
 	// close message, which to the server means the daemon went away.
-	stopWatch := context.AfterFunc(ctx, func() { c.closeConn(ctx, conn, false) })
+	stopWatch := context.AfterFunc(ctx, func() { c.closeConn(conn, false) })
 	cctx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	wake := context.AfterFunc(cctx, c.wake)
 	var senders sync.WaitGroup
 	defer func() {
 		stopWatch()
-		c.closeConn(ctx, conn, broke)
+		c.closeConn(conn, broke)
 		cancel()
 		wake()
 		c.wake()
@@ -253,7 +253,7 @@ func (c *sessionClient) attach(ctx context.Context, conn *websocket.Conn) (code 
 // closeConn ends a connection attach has finished with. A close message tells
 // the server the client is done, which kills a command still running; so it
 // isn't sent on one that broke, or when the command is meant to run on.
-func (c *sessionClient) closeConn(ctx context.Context, conn *websocket.Conn, broke bool) {
+func (c *sessionClient) closeConn(conn *websocket.Conn, broke bool) {
 	if broke || (c.resume.Abandon != nil && c.resume.Abandon()) {
 		_ = conn.CloseNow()
 		return

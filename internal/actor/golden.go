@@ -115,37 +115,48 @@ func (g *Group) queueBuild(ctx context.Context, src string) {
 	}
 }
 
-// buildGoldens makes the queued golden builds one at a time, until ctx is
-// done. It first queues the builds the last daemon left: their sources are
-// still there.
+// buildGoldens makes the golden builds one at a time, until ctx is done:
+// first the ones the last daemon left, whose sources are still there, then
+// the queued ones.
 func (g *Group) buildGoldens(ctx context.Context) {
 	srcs, err := g.store.Sources(ctx, goldenSource)
 	if err != nil {
 		g.log.WarnContext(ctx, "looking for golden sources failed", slog.Any("error", err))
 	}
-	for _, src := range srcs {
-		g.queueBuild(ctx, src.Env)
-	}
 	g.clearSources(ctx, srcs)
+	// Straight from the store, not through the queue: it holds only 16, and
+	// one dropped would lose its source.
+	for _, src := range srcs {
+		if ctx.Err() != nil {
+			return
+		}
+		g.build(ctx, src.Env)
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case src := <-g.builds:
-			start := time.Now()
-			err := g.buildGolden(ctx, src)
-			observe(g.goldenBuilds, start, &err)
-			if err != nil {
-				g.log.WarnContext(ctx, "golden build failed", slog.String("source", src), slog.Any("error", err))
-			}
-			if err := g.DeleteSnapshot(ctx, src, goldenSource); err != nil && !errors.Is(err, store.ErrNotFound) {
-				g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", src), slog.Any("error", err))
-			}
-			if _, ok := setup.BuilderOf(src); ok {
-				if err := g.Delete(ctx, src); err != nil && !errors.Is(err, store.ErrNotFound) {
-					g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", src), slog.Any("error", err))
-				}
-			}
+			g.build(ctx, src)
+		}
+	}
+}
+
+// build makes the golden build of environment src's golden source, then
+// deletes the source.
+func (g *Group) build(ctx context.Context, src string) {
+	start := time.Now()
+	err := g.buildGolden(ctx, src)
+	observe(g.goldenBuilds, start, &err)
+	if err != nil {
+		g.log.WarnContext(ctx, "golden build failed", slog.String("source", src), slog.Any("error", err))
+	}
+	if err := g.DeleteSnapshot(ctx, src, goldenSource); err != nil && !errors.Is(err, store.ErrNotFound) {
+		g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", src), slog.Any("error", err))
+	}
+	if _, ok := setup.BuilderOf(src); ok {
+		if err := g.Delete(ctx, src); err != nil && !errors.Is(err, store.ErrNotFound) {
+			g.log.WarnContext(ctx, "deleting a golden source failed", slog.String("env", src), slog.Any("error", err))
 		}
 	}
 }

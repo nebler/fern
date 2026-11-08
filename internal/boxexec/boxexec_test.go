@@ -705,7 +705,7 @@ func TestSessionOnOlderServer(t *testing.T) {
 
 func TestSessionEnds(t *testing.T) {
 	const marker = "alive"
-	running := func(t *testing.T, pidfile string) func() bool {
+	running := func(_ *testing.T, pidfile string) func() bool {
 		return func() bool {
 			data, err := os.ReadFile(pidfile)
 			if err != nil {
@@ -771,7 +771,9 @@ func TestSessionEnds(t *testing.T) {
 		defer cancel()
 		pidfile, done := start(t, dial, ctx, boxexec.Resume{Abandon: func() bool { return true }}, "abandon")
 		cancel()
-		<-done
+		if err := <-done; err == nil {
+			t.Error("RunSession returned no error")
+		}
 		if !running(t, pidfile)() {
 			t.Error("the command died with its caller")
 		}

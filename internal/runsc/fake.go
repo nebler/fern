@@ -10,16 +10,18 @@ import (
 type Fake struct {
 	addr string
 
-	mu    sync.Mutex
-	boxes map[string]Box  // the last wake of each box
-	up    map[string]bool // the boxes that are up
-	fail  map[string]error
-	wakes int
+	mu        sync.Mutex
+	boxes     map[string]Box  // the last wake of each box
+	up        map[string]bool // the boxes that are up
+	fail      map[string]error
+	sleepFail map[string]error
+	wakes     int
+	sleeps    int
 }
 
 // NewFake returns a Fake whose boxes serve exec at addr.
 func NewFake(addr string) *Fake {
-	return &Fake{addr: addr, boxes: make(map[string]Box), up: make(map[string]bool), fail: make(map[string]error)}
+	return &Fake{addr: addr, boxes: make(map[string]Box), up: make(map[string]bool), fail: make(map[string]error), sleepFail: make(map[string]error)}
 }
 
 // FailWakes makes box id's wakes fail with err; nil makes them succeed.
@@ -44,12 +46,31 @@ func (f *Fake) Wake(_ context.Context, box Box) (string, error) {
 	return f.addr, nil
 }
 
-// Sleep stops box id.
+// FailSleeps makes box id's sleeps fail with err, leaving it up; nil makes
+// them succeed.
+func (f *Fake) FailSleeps(id string, err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.sleepFail[id] = err
+}
+
+// Sleep stops box id, or returns the error FailSleeps gave it.
 func (f *Fake) Sleep(_ context.Context, id string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.sleeps++
+	if err := f.sleepFail[id]; err != nil {
+		return err
+	}
 	delete(f.up, id)
 	return nil
+}
+
+// Sleeps returns how many times a box has been put to sleep, or tried to be.
+func (f *Fake) Sleeps() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.sleeps
 }
 
 // States returns the boxes that are up, as running: an asleep box isn't
