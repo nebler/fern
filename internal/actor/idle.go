@@ -120,9 +120,13 @@ func (a *actor) sleepIfIdle(ctx context.Context) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), changeTimeout)
 	defer cancel()
 	if err := a.stopBox(ctx); err != nil {
-		// Try again after another idle time.
+		// Try again after another idle time. A lease would otherwise stay in
+		// the past and have the timer retry at once, over and over.
 		a.g.log.WarnContext(ctx, "idle sleep", slog.String("env", a.id), slog.Any("error", err))
 		a.closed = time.Now()
+		if !a.lease.IsZero() {
+			a.lease = a.closed.Add(a.g.cfg.Idle.Agent)
+		}
 		return
 	}
 	a.g.idleSleeps.Inc()

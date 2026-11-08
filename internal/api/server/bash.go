@@ -86,8 +86,10 @@ func (s *Server) MCPHandler() http.Handler {
 		// for a tool isn't the request's.
 		if key := r.Header.Get(boxexec.CallKeyHeader); key != "" {
 			stop := context.AfterFunc(r.Context(), func() {
-				if cancel, ok := s.calls.Load(key); ok && !s.stopping() {
-					cancel.(context.CancelFunc)()
+				if c, ok := s.calls.Load(key); ok && !s.stopping() {
+					if c, ok := c.(*call); ok {
+						c.cancel()
+					}
 				}
 			})
 			defer stop()
@@ -255,6 +257,9 @@ func toolError(err error) *mcp.CallToolResult {
 	return res
 }
 
+// call is a running Bash command that its call's key can cancel.
+type call struct{ cancel context.CancelFunc }
+
 // callKey returns the name the agent box's relay gave this call, the same
 // each time it sends it (boxexec.MCPRelay), or "" if it came another way.
 func callKey(req *mcp.CallToolRequest) string {
@@ -280,8 +285,11 @@ func (s *Server) bash(ctx context.Context, id string, in bashInput, key string) 
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if key != "" {
-		s.calls.Store(key, cancel)
-		defer s.calls.Delete(key)
+		// Its own record: a call sent again under the same key replaces it,
+		// and this one's end must not remove that one's.
+		c := &call{cancel: cancel}
+		s.calls.Store(key, c)
+		defer s.calls.CompareAndDelete(key, c)
 	}
 	conn, ex, err := s.dialBox(ctx, id, cancel, s.envs.Exec)
 	if err != nil {

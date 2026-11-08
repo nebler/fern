@@ -62,7 +62,7 @@ type Server struct {
 	// the next wake without waiting a second on that stale address.
 	boxes *http.Client
 	jobs  jobs     // Claude's background commands
-	calls sync.Map // call key to the cancel of its running Bash command
+	calls sync.Map // call key to its running Bash command, a *call
 
 	// Stopping is closed when the daemon begins to stop. May be nil. Then the
 	// commands running in boxes are left to run: the next daemon's clients

@@ -48,6 +48,7 @@ type fakeStore struct {
 	paths   map[string]string            // workspaces at a path; a builder's is its source's
 	seeds   string                       // where a seeded environment's workspace is unpacked: seeds/<id>
 	forked  map[string]store.SnapshotRef // forks, by what they were forked from
+	sources []store.SnapshotRef          // what Sources returns: golden builds a last daemon left
 }
 
 func newFakeStore() *fakeStore {
@@ -149,7 +150,11 @@ func (f *fakeStore) BuildSource(_ context.Context, id string, src store.Snapshot
 	return nil
 }
 
-func (f *fakeStore) Sources(context.Context, string) ([]store.SnapshotRef, error) { return nil, nil }
+func (f *fakeStore) Sources(context.Context, string) ([]store.SnapshotRef, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.sources), nil
+}
 
 func (f *fakeStore) StripSource(_ context.Context, id string) error {
 	f.mu.Lock()
@@ -1094,6 +1099,105 @@ func TestFailingWakes(t *testing.T) {
 		drv.FailWakes("demo", nil)
 		if err := g.Wake(t.Context(), "demo"); err != nil {
 			t.Errorf("Wake() by a person: %v, want it tried again", err)
+		}
+	})
+}
+
+// A stop that fails under a lease is tried again after the agent's idle time,
+// not over and over at once.
+func TestFailedSleepBacksOff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		st, drv := newFakeStore(), runsc.NewFake("box")
+		g := start(t, st, drv, idle)
+		if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		ex, err := g.Exec(t.Context(), "demo", "", func() {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		drv.FailSleeps("demo", errors.New("runsc is stuck"))
+		ex.CloseAndSleep(0)
+		synctest.Wait()
+		if got := drv.Sleeps(); got != 1 {
+			t.Fatalf("sleeps right after the lease = %d, want 1", got)
+		}
+		time.Sleep(idle.Agent - time.Second)
+		synctest.Wait()
+		if got := drv.Sleeps(); got != 1 {
+			t.Errorf("sleeps within the agent's idle time = %d, want 1: no retry before it", got)
+		}
+		drv.FailSleeps("demo", nil)
+		time.Sleep(time.Second)
+		synctest.Wait()
+		if got := state(t, drv, "demo"); got != runsc.Asleep {
+			t.Errorf("after the agent's idle time: state %s, want %s", got, runsc.Asleep)
+		}
+	})
+}
+
+// A command that asks for a quick sleep while a job runs doesn't leave a
+// lease behind: when the job ends, the box sleeps on its idle clocks, not at
+// once.
+func TestLeaseNotKeptPastJob(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		st, drv := newFakeStore(), runsc.NewFake("box")
+		g := start(t, st, drv, idle)
+		if err := g.Create(t.Context(), "demo", store.CreateOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		job, err := g.Job(t.Context(), "demo", "", func() {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ex, err := g.Exec(t.Context(), "demo", "", func() {})
+		if err != nil {
+			t.Fatal(err)
+		}
+		ex.CloseAndSleep(5 * time.Second) // a Bash call's linger
+		time.Sleep(time.Minute)
+		job.Close() // the dev server exits a minute later
+		synctest.Wait()
+		if got := state(t, drv, "demo"); got != runsc.Running {
+			t.Fatalf("right after the job ended: state %s, want %s", got, runsc.Running)
+		}
+	})
+}
+
+// More golden builds than the queue holds, left by the last daemon, are all
+// made, and none of their sources is dropped.
+func TestGoldenSourcesAtStart(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		root := t.TempDir()
+		st, drv := newFakeStore(), runsc.NewFake("box")
+		const n = 20
+		for i := range n {
+			wt := filepath.Join(root, "worktrees", fmt.Sprintf("repo%d", i), "one")
+			if err := os.MkdirAll(wt, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(wt, "services.yaml"), []byte("services: {pg: {run: ./pg.sh}}\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			id := fmt.Sprintf("env%d", i)
+			if _, err := st.Create(t.Context(), id, store.CreateOptions{Workspace: wt}); err != nil {
+				t.Fatal(err)
+			}
+			st.snaps[id] = []string{"golden-source"}
+			st.sources = append(st.sources, store.SnapshotRef{Env: id, Snapshot: "golden-source"})
+		}
+		start(t, st, drv, idle)
+		synctest.Wait()
+		st.mu.Lock()
+		defer st.mu.Unlock()
+		var sourced int
+		for _, b := range st.built {
+			if strings.HasPrefix(b, "source ") {
+				sourced++
+			}
+		}
+		if sourced != n {
+			t.Errorf("golden builds made = %d, want %d", sourced, n)
 		}
 	})
 }

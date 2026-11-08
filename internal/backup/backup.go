@@ -24,6 +24,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/nebler/fern/internal/setup"
@@ -133,7 +134,14 @@ type Backer struct {
 	store  Store
 	envs   Envs
 	log    *slog.Logger
+
+	// running is held by the backup under way. Two at once would each read
+	// the same manifest and delete what the other just sent.
+	running sync.Mutex
 }
+
+// ErrBusy means a backup is already under way.
+var ErrBusy = errors.New("a backup is already running: try again when it ends")
 
 // New returns a Backer of node's pool.
 func New(cfg *Config, node, pool string, st Store, envs Envs, log *slog.Logger) *Backer {
@@ -159,8 +167,12 @@ func (b *Backer) Run(ctx context.Context, every time.Duration) {
 	}
 }
 
-// Once makes a backup now.
+// Once makes a backup now, or returns ErrBusy if one is under way.
 func (b *Backer) Once(ctx context.Context) error {
+	if !b.running.TryLock() {
+		return ErrBusy
+	}
+	defer b.running.Unlock()
 	m, err := b.manifest(ctx)
 	if err != nil {
 		return err
