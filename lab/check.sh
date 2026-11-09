@@ -872,6 +872,32 @@ scale() {
   fi
 }
 
+sizes() {
+  echo "== the daemon's flags set a box's size"
+  local args
+  args=$(daemon_args)
+  set_daemon_args $args --box-cpus=1.5 --box-memory=512 --box-pids=300
+  fresh $ENV
+  fern wake $ENV >/dev/null
+  check "a box gets the CPUs asked for" "150000 100000" "$(pod_cgroup $ENV cpu.max)"
+  check "and the memory" 536870912 "$(pod_cgroup $ENV memory.max)"
+  check "and the processes" 300 "$(pod_cgroup $ENV pids.max)"
+  if [ "$AGENTS" = 1 ]; then
+    fern exec --agent $ENV -- sleep 6 &
+    local open=$!
+    sleep 3
+    check "an agent box keeps its own size" 4096 "$(pod_cgroup $ENV.agent pids.max)"
+    wait $open
+  fi
+  # A box's size is set when it wakes: one awake across the change keeps its own.
+  fern wake $ENV >/dev/null
+  set_daemon_args $args
+  check "an awake box keeps its size when the flags change" 300 "$(pod_cgroup $ENV pids.max)"
+  fern sleep $ENV >/dev/null
+  fern wake $ENV >/dev/null
+  check "and gets the new one at its next wake" 4096 "$(pod_cgroup $ENV pids.max)"
+}
+
 limits() {
   echo "== a box's limits"
   fresh $ENV
@@ -1634,11 +1660,11 @@ stability() {
 # line, so bash has read all of it before it starts: editing the script
 # while it runs can't change what it does.
 main() {
-  all=(slice box disk stream idle_exec concurrency restore fork pgload idle daemon upgrade settings node many scale sleeping limits paths golden tools guess next backup github claude devserver turn hardware stability)
+  all=(slice box disk stream idle_exec concurrency restore fork pgload idle daemon upgrade settings node many scale sleeping limits sizes paths golden tools guess next backup github claude devserver turn hardware stability)
   quick=(slice box stream restore paths golden t3)
   # These restart the daemon or the node, change the daemon's arguments or
   # load the node with many boxes, so they run alone, after the others.
-  alone=" idle daemon upgrade node many scale sleeping turn hardware stability github devserver backup "
+  alone=" idle daemon upgrade sizes node many scale sleeping turn hardware stability github devserver backup "
   case "${1:-}" in
     "") set -- "${quick[@]}" ;;
     all) set -- "${all[@]}" t3 && WAKES=${WAKES_ALL:-30} && DISK_HARDWARE=1 ;;

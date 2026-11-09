@@ -89,6 +89,8 @@ type Config struct {
 	// (internal/preview). A box learns its own as FERN_PREVIEW, for Claude
 	// to hand out links; "" means there are none.
 	Preview string
+	// Limits are services' boxes' limits; the zero value means DefaultLimits.
+	Limits Limits
 }
 
 // The limits of a wake and a stop. fern-init needs at most 8 s for the
@@ -426,7 +428,7 @@ func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 		// {port} is for the box to fill in.
 		vars = append(vars, "FERN_PREVIEW=http://{port}-"+box.Env.ID+"."+d.cfg.Preview+"/")
 	}
-	s := boxSpec(box, b, d.imageEnv, vars)
+	s := boxSpec(box, b, d.imageEnv, vars, d.cfg.limitsOf(box.Kind))
 	data, err := json.MarshalIndent(s, "", " ")
 	if err != nil {
 		return err

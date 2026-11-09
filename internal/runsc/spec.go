@@ -1,6 +1,7 @@
 package runsc
 
 import (
+	"fmt"
 	"net"
 	"path/filepath"
 	"slices"
@@ -81,19 +82,49 @@ type (
 	}
 )
 
-// The box's limits: one runaway agent mustn't starve the other boxes and
-// the daemon.
-const (
-	cpuLimit    = 2       // CPUs
-	memoryLimit = 2 << 30 // bytes
-	pidsLimit   = 4096
-)
+// Limits are what a box may use, so that one runaway agent can't starve the
+// other boxes and the daemon. They are set when the box wakes.
+type Limits struct {
+	CPUs   float64
+	Memory int64 // bytes
+	Pids   int64 // processes and threads
+}
+
+// DefaultLimits are a box's limits unless Config says otherwise, and always
+// an agent box's.
+var DefaultLimits = Limits{CPUs: 2, Memory: 2 << 30, Pids: 4096}
+
+// minMemory is the least memory a box may be given. A box with only idle
+// services measures about 32 MiB (lab/t3-run.sh); less than this is a typo.
+const minMemory = 128 << 20
+
+// Check says what is wrong with the limits, if anything.
+func (l Limits) Check() error {
+	switch {
+	case l.CPUs < 0.1:
+		return fmt.Errorf("%g CPUs: a box needs at least 0.1", l.CPUs)
+	case l.Memory < minMemory:
+		return fmt.Errorf("%d MiB of memory: a box needs at least %d", l.Memory>>20, minMemory>>20)
+	case l.Pids < 64:
+		return fmt.Errorf("%d processes: a box needs at least 64", l.Pids)
+	}
+	return nil
+}
+
+// limitsOf returns the limits of a box of kind: services' boxes get the
+// configured ones, which are the defaults if none were set.
+func (c Config) limitsOf(kind Kind) Limits {
+	if kind != Services || c.Limits == (Limits{}) {
+		return DefaultLimits
+	}
+	return c.Limits
+}
 
 // boxSpec returns the spec of box: fern-init (under tini, which reaps
 // orphans) as the box's user with no capabilities, a read-only root, the
 // environment's folders at their own paths and the box's own /tmp. image is
 // the image's environment; vars are the box's own (its token, its login).
-func boxSpec(box Box, b layout, image, vars []string) spec {
+func boxSpec(box Box, b layout, image, vars []string, lim Limits) spec {
 	env := box.Env
 	none := []string{}
 	mounts := []mount{
@@ -137,9 +168,9 @@ func boxSpec(box Box, b layout, image, vars []string) spec {
 		Linux: linux{
 			CgroupsPath: "/" + cgroupParent + "/" + box.ID,
 			Resources: resources{
-				CPU:    cpu{Quota: cpuLimit * 100_000, Period: 100_000},
-				Memory: memory{Limit: memoryLimit},
-				Pids:   pids{Limit: pidsLimit},
+				CPU:    cpu{Quota: int64(lim.CPUs * 100_000), Period: 100_000},
+				Memory: memory{Limit: lim.Memory},
+				Pids:   pids{Limit: lim.Pids},
 			},
 			Namespaces: []namespace{
 				{Type: "pid"}, {Type: "network", Path: b.netns()}, {Type: "ipc"}, {Type: "uts"}, {Type: "mount"},

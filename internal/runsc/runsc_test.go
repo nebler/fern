@@ -31,7 +31,8 @@ func binds(s spec) map[string]string {
 func TestBoxSpec(t *testing.T) {
 	box := Box{ID: env.ID, Kind: Services, Env: env}
 	b := newLayout("/run/boxes", "/pool", box.ID)
-	s := boxSpec(box, b, []string{"PATH=/bin"}, boxVars(box, "w1", "login", 7071))
+	lim := Limits{CPUs: 1.5, Memory: 3 << 30, Pids: 500}
+	s := boxSpec(box, b, []string{"PATH=/bin"}, boxVars(box, "w1", "login", 7071), lim)
 	want := map[string]string{
 		"/etc/resolv.conf": "/run/boxes/resolv.conf rbind,ro",
 		"/etc/hosts":       "/run/boxes/demo/hosts rbind,ro",
@@ -57,8 +58,9 @@ func TestBoxSpec(t *testing.T) {
 			t.Errorf("env lacks %s: %v", v, s.Process.Env)
 		}
 	}
-	if s.Linux.CgroupsPath != "/fern/demo" || s.Linux.Resources.Memory.Limit != 2<<30 || s.Linux.Resources.Pids.Limit != 4096 {
-		t.Errorf("cgroup %s with %+v, want /fern/demo with the pod's limits", s.Linux.CgroupsPath, s.Linux.Resources)
+	if res := s.Linux.Resources; s.Linux.CgroupsPath != "/fern/demo" || res.CPU.Quota != 150_000 || res.CPU.Period != 100_000 ||
+		res.Memory.Limit != 3<<30 || res.Pids.Limit != 500 {
+		t.Errorf("cgroup %s with %+v, want /fern/demo with 1.5 CPUs, 3 GiB and 500 processes", s.Linux.CgroupsPath, res)
 	}
 	if ns := s.Linux.Namespaces[1]; ns.Type != "network" || ns.Path != b.netns() {
 		t.Errorf("network namespace %+v, want %s", ns, b.netns())
@@ -173,5 +175,47 @@ func TestBoxOfCgroup(t *testing.T) {
 		if got := boxOfCgroup(tc.data); got != tc.want {
 			t.Errorf("boxOfCgroup(%q) = %q, want %q", tc.data, got, tc.want)
 		}
+	}
+}
+
+// Services' boxes get the configured limits, agent boxes and an unset
+// configuration the defaults.
+func TestLimitsOf(t *testing.T) {
+	big := Limits{CPUs: 4, Memory: 8 << 30, Pids: 9000}
+	for _, tc := range []struct {
+		name string
+		cfg  Config
+		kind Kind
+		want Limits
+	}{
+		{name: "unset", kind: Services, want: DefaultLimits},
+		{name: "set, a services' box", cfg: Config{Limits: big}, kind: Services, want: big},
+		{name: "set, an agent box", cfg: Config{Limits: big}, kind: Agent, want: DefaultLimits},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.cfg.limitsOf(tc.kind); got != tc.want {
+				t.Errorf("limitsOf(%v) = %+v, want %+v", tc.kind, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLimitsCheck(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		lim  Limits
+		ok   bool
+	}{
+		{name: "the defaults", lim: DefaultLimits, ok: true},
+		{name: "small", lim: Limits{CPUs: 0.1, Memory: 128 << 20, Pids: 64}, ok: true},
+		{name: "no CPU", lim: Limits{Memory: 1 << 30, Pids: 100}},
+		{name: "too little memory", lim: Limits{CPUs: 1, Memory: 1 << 20, Pids: 100}},
+		{name: "too few processes", lim: Limits{CPUs: 1, Memory: 1 << 30, Pids: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := tc.lim.Check(); (err == nil) != tc.ok {
+				t.Errorf("Check() error = %v, want ok %v", err, tc.ok)
+			}
+		})
 	}
 }

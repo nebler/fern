@@ -108,6 +108,11 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	metricsAddr := flags.String("metrics-addr", "127.0.0.1:9090", "serve Prometheus metrics at /metrics, and Go's profiles at /debug/pprof/, on this address")
 	traceEndpoint := flags.String("trace-endpoint", "", "send traces by OTLP/HTTP to this URL, such as http://10.0.0.1:4318 (\"\": none)")
 	boxDNS := flags.String("box-dns", "1.1.1.1,8.8.8.8", "the resolvers boxes use")
+	// Agent boxes keep the defaults: they run the agent, not the repository.
+	limits := runsc.DefaultLimits
+	flags.Float64Var(&limits.CPUs, "box-cpus", limits.CPUs, "the CPUs a box may use, from its next wake on")
+	boxMemory := flags.Int64("box-memory", limits.Memory>>20, "… and its memory, in MiB")
+	flags.Int64Var(&limits.Pids, "box-pids", limits.Pids, "… and its processes and threads")
 	// On every address, as T3's port: the node's firewall keeps it private.
 	previewAddr := flags.String("preview-addr", ":30780", "serve previews of boxes' ports on this address (\"\": none)")
 	previewHost := flags.String("preview-host", "localhost", "previews are http://PORT-ENV.HOST/ and http://ENV.HOST/")
@@ -116,6 +121,10 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	backupEvery := flags.Duration("backup-every", time.Hour, "back up the threads this often, if "+backupConfig+" says where")
 	if err := flags.Parse(args); err != nil {
 		return err
+	}
+	limits.Memory = *boxMemory << 20
+	if err := limits.Check(); err != nil {
+		return fmt.Errorf("the box limits: %w", err)
 	}
 	node, err := os.Hostname()
 	if err != nil {
@@ -184,6 +193,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	drv := runsc.New(runsc.Config{
 		Pool: pool, Bundles: runscBundles, State: runscState, Images: filepath.Join(pool, "images"), Image: boxImage,
 		DNS: strings.Split(*boxDNS, ","), Login: fileLogin(loginFile), MCPPort: mcpPort, Preview: previewAt,
+		Limits: limits,
 	}, tr, reg)
 	// Golden keys name the image's content, not its tag.
 	if cfg.Image, err = drv.Prepare(ctx); err != nil {

@@ -45,7 +45,7 @@ Three nouns. Everything else is a property of one of them.
 **Properties:**
 - **Golden** = a snapshot tagged as the starting point for a repo.
 - **Retention** = `persistent` (planned: `ephemeral`).
-- **Class** (planned) = size and isolation (`light`, `heavy`, `bench`, `untrusted`, `gpu`). Today every box gets the same limits (§10).
+- **Class** (planned) = size and isolation (`light`, `heavy`, `bench`, `untrusted`, `gpu`). Today every services' box gets the same limits, which the daemon's flags set (§10, §17).
 
 **Who sees what:**
 - **The user in T3:** threads, a preview URL, a sleep badge, Revert, Fork.
@@ -327,7 +327,7 @@ The daemon runs each box itself as a gVisor sandbox (`internal/runsc`; reasons i
 | Mounts | the workspace at **the same path T3 uses**; Claude's folder `envs/<id>/claude/` (`CLAUDE_CONFIG_DIR`) at its own path, **outside the workspace**, so a restore doesn't rewind its transcripts; the main repository's git folder and the worktree's `.git` file **read-only** (§13) |
 | User | non-root, the same uid as T3 (1000), no capabilities, `no_new_privs`, a read-only root |
 | Runtime | gVisor (`runsc`) for every box; planned: classes (§2) |
-| Limits | 2 CPUs, 2 GiB of memory, 4,096 processes, a cgroup per box under `/fern` |
+| Limits | 2 CPUs, 2 GiB of memory, 4,096 processes, a cgroup per box under `/fern`. The daemon's `--box-cpus`, `--box-memory` and `--box-pids` change them for services' boxes, from a box's next wake on; an agent box keeps these |
 | Network | a network namespace and veth per wake, a /30 from `10.89.0.0/16`; the internet only (§13) |
 | Stop | `POST /stop` to fern-init (the services' `stop:` commands, then SIGTERM and kill), `runsc kill` after 15 s; then the network, overlay and cgroup go |
 
@@ -480,10 +480,13 @@ The daemon's flags (`deploy/systemd/fern-daemon.service` reads them from `/etc/f
 | `--preview-addr` | `:30780` | serve previews on this address; `""` turns them off (§5) |
 | `--preview-host` | `localhost` | previews are `http://<port>-<env>.<host>/` and `http://<env>.<host>/` (§5) |
 | `--box-dns` | 1.1.1.1,8.8.8.8 | the resolvers boxes use |
+| `--box-cpus` | 2 | the CPUs a services' box may use, from its next wake on (§10) |
+| `--box-memory` | 2048 | … and its memory, in MiB |
+| `--box-pids` | 4096 | … and its processes and threads |
 | `--metrics-addr` | 127.0.0.1:9090 | metrics and Go's profiles |
 | `--trace-endpoint` | none | send traces by OTLP/HTTP |
 
-Fixed in the code for now: the pool (`/var/lib/fern`), retention (50 turn snapshots, pre-restore copies for a day, §9) and the box limits (§10). Planned: a `fern.yaml` with classes, fork caps and retention.
+Fixed in the code for now: the pool (`/var/lib/fern`), retention (50 turn snapshots, pre-restore copies for a day, §9) and an agent box's limits (§10). Planned: a `fern.yaml` with classes, fork caps and retention; limits per repository, under a ceiling the daemon sets.
 
 ## 18. Code layout
 
