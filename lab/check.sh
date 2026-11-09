@@ -896,6 +896,20 @@ sizes() {
   fern sleep $ENV >/dev/null
   fern wake $ENV >/dev/null
   check "and gets the new one at its next wake" 4096 "$(pod_cgroup $ENV pids.max)"
+  # A repository asks for its own size in services.yaml, which its agent can
+  # write: without --box-max-…, only for less.
+  fern exec $ENV -- sh -c 'printf "limits:\n  memory: 512\n  pids: 100000\n" >>services.yaml'
+  fern sleep $ENV >/dev/null
+  fern wake $ENV >/dev/null
+  check "a repository gets the memory it asks for, if less" 536870912 "$(pod_cgroup $ENV memory.max)"
+  check "but no more processes than the node gives" 4096 "$(pod_cgroup $ENV pids.max)"
+  set_daemon_args $args --box-max-pids=5000 --box-max-memory=4096
+  fern exec $ENV -- sh -c 'sed -i "s/memory: 512/memory: 3072/" services.yaml'
+  fern sleep $ENV >/dev/null
+  fern wake $ENV >/dev/null
+  check "with a higher most, it gets more memory" 3221225472 "$(pod_cgroup $ENV memory.max)"
+  check "and processes up to the most" 5000 "$(pod_cgroup $ENV pids.max)"
+  set_daemon_args $args
 }
 
 limits() {

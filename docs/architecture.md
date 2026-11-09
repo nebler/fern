@@ -45,7 +45,7 @@ Three nouns. Everything else is a property of one of them.
 **Properties:**
 - **Golden** = a snapshot tagged as the starting point for a repo.
 - **Retention** = `persistent` (planned: `ephemeral`).
-- **Class** (planned) = size and isolation (`light`, `heavy`, `bench`, `untrusted`, `gpu`). Today every services' box gets the same limits, which the daemon's flags set (§10, §17).
+- **Class** (planned) = size and isolation (`light`, `heavy`, `bench`, `untrusted`, `gpu`). Today a services' box gets the limits the daemon's flags set, or the ones its repository asks for (§10, §17).
 
 **Who sees what:**
 - **The user in T3:** threads, a preview URL, a sleep badge, Revert, Fork.
@@ -276,6 +276,10 @@ services:
     env: { DATABASE_URL: "postgres://localhost:${services.postgres.port}/app" }
 golden:
   inputs: [db/seed.sql]  # built: files beyond the contract and lockfiles that the golden key covers
+limits:                  # built: the box's size, each up to the node's most (§17); left out, the node's default
+  cpus: 4
+  memory: 4096           # MiB
+  pids: 8192
 ```
 
 ---
@@ -327,7 +331,7 @@ The daemon runs each box itself as a gVisor sandbox (`internal/runsc`; reasons i
 | Mounts | the workspace at **the same path T3 uses**; Claude's folder `envs/<id>/claude/` (`CLAUDE_CONFIG_DIR`) at its own path, **outside the workspace**, so a restore doesn't rewind its transcripts; the main repository's git folder and the worktree's `.git` file **read-only** (§13) |
 | User | non-root, the same uid as T3 (1000), no capabilities, `no_new_privs`, a read-only root |
 | Runtime | gVisor (`runsc`) for every box; planned: classes (§2) |
-| Limits | 2 CPUs, 2 GiB of memory, 4,096 processes, a cgroup per box under `/fern`. The daemon's `--box-cpus`, `--box-memory` and `--box-pids` change them for services' boxes, from a box's next wake on; an agent box keeps these |
+| Limits | 2 CPUs, 2 GiB of memory, 4,096 processes, a cgroup per box under `/fern`. The daemon's `--box-cpus`, `--box-memory` and `--box-pids` change them for services' boxes, from a box's next wake on; an agent box keeps these. A repository asks for its own under `limits:` in `services.yaml` (§8), up to `--box-max-…` |
 | Network | a network namespace and veth per wake, a /30 from `10.89.0.0/16`; the internet only (§13) |
 | Stop | `POST /stop` to fern-init (the services' `stop:` commands, then SIGTERM and kill), `runsc kill` after 15 s; then the network, overlay and cgroup go |
 
@@ -483,10 +487,11 @@ The daemon's flags (`deploy/systemd/fern-daemon.service` reads them from `/etc/f
 | `--box-cpus` | 2 | the CPUs a services' box may use, from its next wake on (§10) |
 | `--box-memory` | 2048 | … and its memory, in MiB |
 | `--box-pids` | 4096 | … and its processes and threads |
+| `--box-max-cpus`, `--box-max-memory`, `--box-max-pids` | the three above | the most a repository's `services.yaml` may ask for its box. The agent can write that file, so by default it can only ask for less |
 | `--metrics-addr` | 127.0.0.1:9090 | metrics and Go's profiles |
 | `--trace-endpoint` | none | send traces by OTLP/HTTP |
 
-Fixed in the code for now: the pool (`/var/lib/fern`), retention (50 turn snapshots, pre-restore copies for a day, §9) and an agent box's limits (§10). Planned: a `fern.yaml` with classes, fork caps and retention; limits per repository, under a ceiling the daemon sets.
+Fixed in the code for now: the pool (`/var/lib/fern`), retention (50 turn snapshots, pre-restore copies for a day, §9) and an agent box's limits (§10). Planned: a `fern.yaml` with classes, fork caps and retention.
 
 ## 18. Code layout
 

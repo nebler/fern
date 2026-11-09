@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -111,13 +112,35 @@ func (l Limits) Check() error {
 	return nil
 }
 
-// limitsOf returns the limits of a box of kind: services' boxes get the
-// configured ones, which are the defaults if none were set.
-func (c Config) limitsOf(kind Kind) Limits {
-	if kind != Services || c.Limits == (Limits{}) {
-		return DefaultLimits
+// limitsOf returns the limits of a box of kind. An agent box has the
+// defaults. A services' box has the configured ones, or what its repository
+// asked for, up to the configured most: the workspace's services.yaml is
+// the agent's to write, so it must not be able to take the whole node.
+func (c Config) limitsOf(kind Kind, asked setup.Limits) (Limits, error) {
+	if kind != Services {
+		return DefaultLimits, nil
 	}
-	return c.Limits
+	lim := c.Limits
+	if lim == (Limits{}) {
+		lim = DefaultLimits
+	}
+	most := c.MaxLimits
+	if most == (Limits{}) {
+		most = lim
+	}
+	if asked.CPUs != 0 {
+		lim.CPUs = min(asked.CPUs, most.CPUs)
+	}
+	if asked.Memory != 0 {
+		lim.Memory = min(asked.Memory<<20, most.Memory)
+	}
+	if asked.Pids != 0 {
+		lim.Pids = min(asked.Pids, most.Pids)
+	}
+	if err := lim.Check(); err != nil {
+		return Limits{}, fmt.Errorf("services.yaml: limits: %w", err)
+	}
+	return lim, nil
 }
 
 // boxSpec returns the spec of box: fern-init (under tini, which reaps

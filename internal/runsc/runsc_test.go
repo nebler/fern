@@ -9,6 +9,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 
+	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -178,23 +179,33 @@ func TestBoxOfCgroup(t *testing.T) {
 	}
 }
 
-// Services' boxes get the configured limits, agent boxes and an unset
-// configuration the defaults.
+// A services' box gets the configured limits, or what its repository asks
+// for up to the most it may; an agent box gets the defaults.
 func TestLimitsOf(t *testing.T) {
 	big := Limits{CPUs: 4, Memory: 8 << 30, Pids: 9000}
+	all := setup.Limits{CPUs: 3, Memory: 4096, Pids: 6000}
 	for _, tc := range []struct {
-		name string
-		cfg  Config
-		kind Kind
-		want Limits
+		name    string
+		cfg     Config
+		kind    Kind
+		asked   setup.Limits
+		want    Limits
+		wantErr bool
 	}{
 		{name: "unset", kind: Services, want: DefaultLimits},
-		{name: "set, a services' box", cfg: Config{Limits: big}, kind: Services, want: big},
-		{name: "set, an agent box", cfg: Config{Limits: big}, kind: Agent, want: DefaultLimits},
+		{name: "set", cfg: Config{Limits: big}, kind: Services, want: big},
+		{name: "an agent box", cfg: Config{Limits: big, MaxLimits: big}, kind: Agent, asked: all, want: DefaultLimits},
+		{name: "asked for less", kind: Services, asked: setup.Limits{Memory: 512}, want: Limits{CPUs: 2, Memory: 512 << 20, Pids: 4096}},
+		{name: "asked for more than the node gives", kind: Services, asked: all, want: DefaultLimits},
+		{name: "asked for more, under the most", cfg: Config{MaxLimits: big}, kind: Services, asked: all, want: Limits{CPUs: 3, Memory: 4 << 30, Pids: 6000}},
+		{name: "asked for more than the most", cfg: Config{MaxLimits: big}, kind: Services, asked: setup.Limits{CPUs: 64, Memory: 1 << 20, Pids: 1 << 20}, want: big},
+		{name: "asked for too little", kind: Services, asked: setup.Limits{Memory: 1}, wantErr: true},
+		{name: "asked for less than nothing", cfg: Config{MaxLimits: big}, kind: Services, asked: setup.Limits{CPUs: -1}, wantErr: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.cfg.limitsOf(tc.kind); got != tc.want {
-				t.Errorf("limitsOf(%v) = %+v, want %+v", tc.kind, got, tc.want)
+			got, err := tc.cfg.limitsOf(tc.kind, tc.asked)
+			if (err != nil) != tc.wantErr || got != tc.want {
+				t.Errorf("limitsOf(%v, %+v) = %+v, %v; want %+v, error %t", tc.kind, tc.asked, got, err, tc.want, tc.wantErr)
 			}
 		})
 	}

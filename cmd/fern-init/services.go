@@ -65,6 +65,9 @@ func parseServices(data []byte) (map[string]service, error) {
 		Golden struct {
 			Inputs []string `json:"inputs,omitempty"`
 		} `json:"golden"`
+		// Limits are what the box asks to be given; the daemon reads them
+		// too, when it wakes the box (internal/runsc).
+		Limits setup.Limits `json:"limits"`
 	}
 	if err := yaml.UnmarshalStrict(data, &f); err != nil {
 		return nil, fmt.Errorf("services.yaml: %w", err)

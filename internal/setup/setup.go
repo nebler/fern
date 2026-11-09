@@ -183,6 +183,34 @@ func ServicesFile(dir string) (data []byte, guessed bool, err error) {
 	return g.Services, g.Services != nil, err
 }
 
+// Limits are what a repository's services.yaml asks for its box, under
+// limits:. A field left out, or 0, asks for the node's default.
+type Limits struct {
+	CPUs   float64 `json:"cpus"`
+	Memory int64   `json:"memory"` // MiB
+	Pids   int64   `json:"pids"`
+}
+
+// AskedLimits returns the limits dir's services.yaml asks for; none without
+// the file, as a guessed one asks for none. The file is the agent's, read
+// as root: readFile keeps it to dir, and the node caps what it may ask.
+func AskedLimits(dir string) (Limits, error) {
+	data, err := readFile(dir, "services.yaml")
+	if errors.Is(err, fs.ErrNotExist) {
+		return Limits{}, nil
+	}
+	if err != nil {
+		return Limits{}, err
+	}
+	var f struct {
+		Limits Limits `json:"limits"`
+	}
+	if err := yaml.Unmarshal(data, &f); err != nil {
+		return Limits{}, fmt.Errorf("services.yaml: %w", err)
+	}
+	return f.Limits, nil
+}
+
 // PreviewPort returns the port of the first service in dir's services.yaml
 // (or its guess), by name, that has one: the environment's default
 // preview. 0 means none. The file is the agent's, read as root: readFile

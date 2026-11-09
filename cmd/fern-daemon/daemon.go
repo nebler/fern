@@ -3,6 +3,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -95,6 +96,34 @@ func runDaemon(ctx context.Context, args []string, stderr io.Writer) int {
 	return 0
 }
 
+// limitFlags adds the flags for boxes' limits, and returns what reads them
+// once the flags are parsed: a services' box's limits, and the most a
+// repository may ask for its own in its services.yaml, which its agent can
+// write. Agent boxes keep the defaults: they run the agent, not the
+// repository.
+func limitFlags(flags *flag.FlagSet) func() (limits, most runsc.Limits, err error) {
+	def := runsc.DefaultLimits
+	cpus := flags.Float64("box-cpus", def.CPUs, "the CPUs a box may use, from its next wake on")
+	memory := flags.Int64("box-memory", def.Memory>>20, "… and its memory, in MiB")
+	pids := flags.Int64("box-pids", def.Pids, "… and its processes and threads")
+	maxCPUs := flags.Float64("box-max-cpus", 0, "the most CPUs a repository may ask for its box (0: --box-cpus, so only less)")
+	maxMemory := flags.Int64("box-max-memory", 0, "… and the most memory, in MiB (0: --box-memory)")
+	maxPids := flags.Int64("box-max-pids", 0, "… and the most processes and threads (0: --box-pids)")
+	return func() (limits, most runsc.Limits, err error) {
+		limits = runsc.Limits{CPUs: *cpus, Memory: *memory << 20, Pids: *pids}
+		if err := limits.Check(); err != nil {
+			return limits, most, err
+		}
+		most = runsc.Limits{
+			CPUs: cmp.Or(*maxCPUs, limits.CPUs), Memory: cmp.Or(*maxMemory<<20, limits.Memory), Pids: cmp.Or(*maxPids, limits.Pids),
+		}
+		if most.CPUs < limits.CPUs || most.Memory < limits.Memory || most.Pids < limits.Pids {
+			return limits, most, errors.New("a --box-max-… is under its --box-…")
+		}
+		return limits, most, nil
+	}
+}
+
 func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	flags := flag.NewFlagSet("daemon", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -108,11 +137,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	metricsAddr := flags.String("metrics-addr", "127.0.0.1:9090", "serve Prometheus metrics at /metrics, and Go's profiles at /debug/pprof/, on this address")
 	traceEndpoint := flags.String("trace-endpoint", "", "send traces by OTLP/HTTP to this URL, such as http://10.0.0.1:4318 (\"\": none)")
 	boxDNS := flags.String("box-dns", "1.1.1.1,8.8.8.8", "the resolvers boxes use")
-	// Agent boxes keep the defaults: they run the agent, not the repository.
-	limits := runsc.DefaultLimits
-	flags.Float64Var(&limits.CPUs, "box-cpus", limits.CPUs, "the CPUs a box may use, from its next wake on")
-	boxMemory := flags.Int64("box-memory", limits.Memory>>20, "… and its memory, in MiB")
-	flags.Int64Var(&limits.Pids, "box-pids", limits.Pids, "… and its processes and threads")
+	boxLimits := limitFlags(flags)
 	// On every address, as T3's port: the node's firewall keeps it private.
 	previewAddr := flags.String("preview-addr", ":30780", "serve previews of boxes' ports on this address (\"\": none)")
 	previewHost := flags.String("preview-host", "localhost", "previews are http://PORT-ENV.HOST/ and http://ENV.HOST/")
@@ -122,8 +147,8 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	limits.Memory = *boxMemory << 20
-	if err := limits.Check(); err != nil {
+	limits, most, err := boxLimits()
+	if err != nil {
 		return fmt.Errorf("the box limits: %w", err)
 	}
 	node, err := os.Hostname()
@@ -193,7 +218,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	drv := runsc.New(runsc.Config{
 		Pool: pool, Bundles: runscBundles, State: runscState, Images: filepath.Join(pool, "images"), Image: boxImage,
 		DNS: strings.Split(*boxDNS, ","), Login: fileLogin(loginFile), MCPPort: mcpPort, Preview: previewAt,
-		Limits: limits,
+		Limits: limits, MaxLimits: most,
 	}, tr, reg)
 	// Golden keys name the image's content, not its tag.
 	if cfg.Image, err = drv.Prepare(ctx); err != nil {

@@ -197,3 +197,31 @@ func TestPreviewPort(t *testing.T) {
 		})
 	}
 }
+
+func TestAskedLimits(t *testing.T) {
+	for _, tc := range []struct {
+		name, yaml string
+		want       setup.Limits
+		wantErr    bool
+	}{
+		{name: "no file"},
+		{name: "no limits", yaml: "services:\n  db:\n    run: postgres\n"},
+		{name: "all", yaml: "limits:\n  cpus: 1.5\n  memory: 4096\n  pids: 500\n", want: setup.Limits{CPUs: 1.5, Memory: 4096, Pids: 500}},
+		{name: "one", yaml: "limits: {memory: 512}\n", want: setup.Limits{Memory: 512}},
+		{name: "broken", yaml: "limits: [", wantErr: true},
+		{name: "not a number", yaml: "limits: {memory: lots}\n", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.yaml != "" {
+				if err := os.WriteFile(filepath.Join(dir, "services.yaml"), []byte(tc.yaml), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := setup.AskedLimits(dir)
+			if (err != nil) != tc.wantErr || got != tc.want {
+				t.Errorf("AskedLimits = %+v, %v; want %+v, error %t", got, err, tc.want, tc.wantErr)
+			}
+		})
+	}
+}

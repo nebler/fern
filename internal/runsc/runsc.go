@@ -34,6 +34,7 @@ import (
 
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/image"
+	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/span"
 	"github.com/nebler/fern/internal/store"
 )
@@ -91,6 +92,9 @@ type Config struct {
 	Preview string
 	// Limits are services' boxes' limits; the zero value means DefaultLimits.
 	Limits Limits
+	// MaxLimits is the most a repository's services.yaml may ask for its
+	// box; the zero value means Limits, so that it can only ask for less.
+	MaxLimits Limits
 }
 
 // The limits of a wake and a stop. fern-init needs at most 8 s for the
@@ -428,7 +432,17 @@ func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 		// {port} is for the box to fill in.
 		vars = append(vars, "FERN_PREVIEW=http://{port}-"+box.Env.ID+"."+d.cfg.Preview+"/")
 	}
-	s := boxSpec(box, b, d.imageEnv, vars, d.cfg.limitsOf(box.Kind))
+	var asked setup.Limits
+	if box.Kind == Services {
+		if asked, err = setup.AskedLimits(box.Env.Workspace); err != nil {
+			return err
+		}
+	}
+	lim, err := d.cfg.limitsOf(box.Kind, asked)
+	if err != nil {
+		return err
+	}
+	s := boxSpec(box, b, d.imageEnv, vars, lim)
 	data, err := json.MarshalIndent(s, "", " ")
 	if err != nil {
 		return err
