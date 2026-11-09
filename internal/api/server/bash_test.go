@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -20,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/prometheus/client_golang/prometheus"
 
@@ -443,5 +445,94 @@ func TestBashCancelledCallKillsCommand(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatal("the command outlived its call")
 		}
+	}
+}
+
+// An agent started in an agent box gets Fern's MCP server in place of its
+// own shell: Claude in its arguments, OpenCode's server in its settings,
+// with the box's address to listen on. Other commands are left alone.
+func TestAgentStart(t *testing.T) {
+	// Each agent here prints its arguments, then OpenCode's settings.
+	bin := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\"\nprintf '%s' \"$OPENCODE_CONFIG_CONTENT\"\n"
+	for _, name := range []string{"claude", "opencode"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const mcpURL = "http://fern-daemon:7071/mcp/demo"
+	fern := map[string]any{
+		"type": "remote", "url": mcpURL, "headers": map[string]any{"Authorization": "Bearer " + boxToken},
+		"oauth": false, "codemode": false,
+	}
+	noShell := map[string]any{"action": "tool.use", "resource": "shell:*", "effect": "deny"}
+	claudeMCP := `{"mcpServers":{"fern":{"headers":{"Authorization":"Bearer ` + boxToken + `"},"type":"http","url":"` + mcpURL + `"}}}`
+
+	tests := []struct {
+		name     string
+		req      boxexec.Request
+		wantArgs []string
+		wantCfg  map[string]any // nil: no settings
+	}{
+		{
+			name:     "claude",
+			req:      boxexec.Request{Argv: []string{filepath.Join(bin, "claude"), "-p"}},
+			wantArgs: []string{"-p", "--mcp-config", claudeMCP, "--disallowedTools", "Bash,BashOutput,KillShell,KillBash,Monitor", "--setting-sources=user"},
+		},
+		{
+			name:     "opencode's server",
+			req:      boxexec.Request{Argv: []string{filepath.Join(bin, "opencode"), "serve", "--hostname=10.0.0.1", "--port=4096"}},
+			wantArgs: []string{"serve", "--port=4096", "--hostname=127.0.0.1"},
+			wantCfg: map[string]any{
+				"mcp":      map[string]any{"servers": map[string]any{"fern": fern}},
+				"plugins":  []any{"-opencode.tool.shell"},
+				"policies": []any{noShell},
+			},
+		},
+		{
+			name: "opencode's server with settings",
+			req: boxexec.Request{
+				Argv:    []string{filepath.Join(bin, "opencode"), "serve"},
+				Environ: []string{`OPENCODE_CONFIG_CONTENT={"model":"m","mcp":{"servers":{"mine":{"type":"local"},"fern":{}}},"plugins":["opencode.tool.shell"],"policies":[{"action":"a"}]}`},
+			},
+			wantArgs: []string{"serve", "--hostname=127.0.0.1"},
+			wantCfg: map[string]any{
+				"model":    "m",
+				"mcp":      map[string]any{"servers": map[string]any{"mine": map[string]any{"type": "local"}, "fern": fern}},
+				"plugins":  []any{"opencode.tool.shell", "-opencode.tool.shell"},
+				"policies": []any{noShell, map[string]any{"action": "a"}},
+			},
+		},
+		{
+			name:     "another opencode command",
+			req:      boxexec.Request{Argv: []string{filepath.Join(bin, "opencode"), "models", "--hostname=10.0.0.1"}},
+			wantArgs: []string{"models", "--hostname=10.0.0.1"},
+		},
+	}
+	b := newDemoBox(t)
+	api := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+	t.Cleanup(api.Close)
+	c := serveSocket(t, api.Handler())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			if _, err := c.ExecAgent(t.Context(), "demo", tt.req, boxexec.Streams{Stdout: &stdout, Stderr: io.Discard}); err != nil {
+				t.Fatalf("ExecAgent() error: %v", err)
+			}
+			lines := strings.Split(stdout.String(), "\n")
+			args, content := lines[:len(lines)-1], lines[len(lines)-1]
+			if diff := cmp.Diff(tt.wantArgs, args); diff != "" {
+				t.Errorf("arguments (-want +got):\n%s", diff)
+			}
+			var cfg map[string]any
+			if content != "" {
+				if err := json.Unmarshal([]byte(content), &cfg); err != nil {
+					t.Fatalf("settings %q: %v", content, err)
+				}
+			}
+			if diff := cmp.Diff(tt.wantCfg, cfg); diff != "" {
+				t.Errorf("settings (-want +got):\n%s", diff)
+			}
+		})
 	}
 }

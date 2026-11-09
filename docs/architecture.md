@@ -402,7 +402,7 @@ Checked 2026-10-22 against Anthropic's, OpenAI's and the other providers' publis
 
 **Careful with:** parallel forks and automated turns (webhooks, schedules). Plans assume "ordinary, individual usage", so they are capped per subscription and opt-in. API keys stay out (no API keys).
 
-**Providers:** Claude Code and Codex through their own CLIs are supported. Blocked: Claude logins through other agents (pi, OpenCode), which Anthropic prohibits, and Google Antigravity / Gemini consumer logins, which Google forbids wrapping. Fine through T3 if wanted later: pi and OpenCode with ChatGPT, Copilot or xAI logins, Cursor, Muse. Grok's login in a container is undocumented.
+**Providers:** Claude Code and Codex through their own CLIs are supported. Blocked: Claude logins through other agents (pi, OpenCode's plugins), which Anthropic prohibits; OpenCode's Claude Agent provider (2.2.3, 2026-10-30) is not one, as it runs the unmodified `claude` with its own login through the Agent SDK, and Google Antigravity / Gemini consumer logins, which Google forbids wrapping. Fine through T3 if wanted later: pi and OpenCode with ChatGPT, Copilot or xAI logins, Cursor, Muse. Grok's login in a container is undocumented.
 
 ---
 

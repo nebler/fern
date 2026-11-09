@@ -5,6 +5,7 @@
 # turn and checks the answers; lab/t3-run.mjs has the scenarios. Results go
 # to lab/t3-runs.jsonl, one line per run. KEEP=1 leaves the threads in T3;
 # PARALLEL=N runs N threads at once and reports the node's peak memory.
+# INSTANCE=opencode with the model claude-agent/haiku runs it through OpenCode.
 #
 # Needs lab/t3-pair.sh once (it adds the projects). With FERN_HOST it
 # reaches the VPS's T3 through an SSH tunnel of its own. The model is the
@@ -89,5 +90,5 @@ HW_DAEMON=$HW_DAEMON HW_T3=$HW_T3 HW_CONTROLLER=$HW_CONTROLLER hardware_sample -
 fern rm "$id" >/dev/null'
 T3_RESOURCE_CMD=$resources T3_BOX_BASELINE_CMD=$box_baseline \
 T3_PAIR_URL=$pair_url T3_METRICS_CMD=$metrics T3_RM_ENV_CMD=$rm_env T3_SLEEP_CMD=$sleep_env T3_IDLE_CMD=$idle_env T3_NODE_MEMORY_CMD=$node_memory T3_TRACE_CMD=$trace \
-  FERN_HOST=$FERN_HOST SCENARIO=${1:-toy} RUNS=${2:-1} MODEL=${3:-claude-haiku-5-5} PARALLEL=${PARALLEL:-1} \
+  FERN_HOST=$FERN_HOST SCENARIO=${1:-toy} RUNS=${2:-1} MODEL=${3:-claude-haiku-5-5} PARALLEL=${PARALLEL:-1} INSTANCE=${INSTANCE:-} \
   node lab/t3-run.mjs

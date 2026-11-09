@@ -354,7 +354,7 @@ async function runOnce(rpc, project, baseRef, n, idleBoxMiB) {
               projectId: project.id,
               title: `t3-run ${scenarioName} #${n}`,
               generateTitle: false,
-              modelSelection: { instanceId: "claudeAgent", model },
+              modelSelection: { instanceId: process.env.INSTANCE || "claudeAgent", model },
               runtimeMode: "full-access",
               interactionMode: "default",
               workspaceStrategy: { type: "worktree", baseRef },

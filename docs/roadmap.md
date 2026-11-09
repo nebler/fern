@@ -24,6 +24,23 @@
 | 6 (rendering ahead built 2026-11-01: 16.6 s → 0.11 s after a command's wake; KVM not measured, a browser's own wake unchanged) | **A faster first page:** the default preview rendered in the background after a wake; gVisor with KVM measured | TanStack Start's first page from an asleep box well under 16.6 s (lab/RESULTS.md, 2026-10-31) |
 | 7 (built 2026-11-02: three forks with Postgres in 77–94 ms, their tests at once in 2.1–2.7 s; T3's own Fork still shares the worktree) | **Forks:** an environment copied from a snapshot, several at once, each with its own Postgres on :5432 (`env_fork`) | three forks of a thread run their tests at once |
 | 8 | **Codex** next to Claude, with its own login | a Codex thread in T3 snapshots and reverts like a Claude one |
+| 9 | **pi** in an agent box, with a ChatGPT, Copilot or xAI login | a pi thread in T3 snapshots and reverts like a Claude one |
+| 10 (built 2026-11-10 with Claude's login: `lab/t3-run.sh toy` with `INSTANCE=opencode` passes its turns, revert and reopen; the box doesn't sleep between turns yet, and other logins are untried) | **OpenCode** in an agent box, with Claude's login through its Claude Agent provider, or a ChatGPT, Copilot or xAI login | an OpenCode thread in T3 snapshots and reverts like a Claude one |
+
+### What each harness needs (steps 8 to 10, read from T3's source at the pinned commit, 2026-11-09; nothing built or tried)
+The owner decided on 2026-11-09 to support Claude Code, Codex, pi and OpenCode. Today every part of the route is written for Claude: the `claude` wrapper in T3's image, the arguments the daemon adds (`startAgent`), the login, Claude's folder, the hint in `CLAUDE.md` and hibernation, which reads Claude's stream.
+
+| | How T3 runs it | Fern's Bash in place of its own | Login |
+|---|---|---|---|
+| Claude Code (built) | `claude`, driven over stdin and stdout | `--mcp-config` and `--disallowedTools` | a `setup-token` token in `/etc/fern/claude.env` |
+| Codex | `codex app-server`, over stdin and stdout, one per provider session; T3 starts it in its own folder and names the thread's folder in the protocol, so the wrapper can't tell the environment: a T3 patch starts it in the thread's folder | an MCP server in its config (`-c mcp_servers.fern…`, with `bearer_token_env_var`) and `-c features.shell_tool=false`, both read in Codex's source on 2026-11-09 | ChatGPT; the app-server can take tokens from its client (`chatgptAuthTokens`), so the login may stay with T3, outside the box (to be tried); one `auth.json` must not be shared between boxes ([architecture §13.1](architecture.md#131-subscription-terms)) |
+| pi | `pi --mode rpc`, over stdin and stdout, started in the thread's folder: the wrapper route works | pi reads MCP servers from `~/.pi/agent/mcp.json`, and `--tools` takes its own `bash` away; T3's own tools reach pi through an extension file on T3's disk, which the box must be able to read | ChatGPT, Copilot or xAI |
+| OpenCode | `opencode serve` on a port, which T3 calls over HTTP. OpenCode 1: one server per session, so T3 needs a way to that port in the agent box. OpenCode 2 (the one with the Claude Agent provider): **one server for every thread**, started in T3's own folder, and its tools run in that process, so it fits no box until a T3 patch starts one per thread | an MCP server and its own shell turned off in `OPENCODE_CONFIG_CONTENT`; with the Claude Agent provider Claude's own tools are off and OpenCode runs every tool, so this covers Claude too | Claude's, through the `claude` in the box (the Claude Agent provider, OpenCode 2.2.3), or ChatGPT, Copilot or xAI |
+
+- **Shared first:** one table in the daemon of what each harness is started with, in place of `startAgent`'s one case, and one wrapper for all of them.
+- **Claude's login in OpenCode** works since OpenCode 2.2.3 (2026-10-30): its Claude Agent provider runs the unmodified `claude` through Anthropic's Agent SDK and never reads the login, which is what T3 does too. The agent box already has `claude` and its token. Anthropic has not said anything about it. Logging in to Claude from OpenCode or pi themselves (the community plugins) stays blocked (architecture §13.1).
+- **Hibernation is Claude's only:** the other three keep their box awake until T3 lets the session go.
+- **Each needs its own login to test**, which only the owner can give.
 
 ## Proposed, from Amp (2026-11-06)
 Not yet in the order above, which stays as it is until the owner decides. Nothing here is built, and the costs are guesses. The reasoning and sources are on the site's roadmap page (`site/src/pages/roadmap.astro`, "What to take from Amp").

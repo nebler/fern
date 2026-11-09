@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Fern's images, one target each; lab/build.sh builds them:
 #   fern      the daemon and the CLI, with the units install.sh installs
-#   fern-box  a box: Debian slim with Postgres, git, curl, mise and Claude Code
+#   fern-box  a box: Debian slim with Postgres, git, curl, mise, Claude Code and OpenCode
 #   fern-t3   T3 Code's server with Fern's checkpoint hook
 
 FROM golang:1.27 AS go
@@ -28,6 +28,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
  && curl -fsSL -o /claude "https://downloads.claude.ai/claude-code-releases/$CLAUDE_VERSION/$platform/claude" \
  && echo "$sum  /claude" | sha256sum -c - \
  && chmod 755 /claude
+
+# OpenCode's binary, pinned and checked against its release's digests. It
+# runs Claude through the claude above (its Claude Agent provider).
+FROM claude AS opencode
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG OPENCODE_VERSION=2.2.6
+ARG OPENCODE_SHA256_arm64=f2d27600c367e45057d6a16f6a5c2aa8d77b41a9b10d4bc3d849c2f88870e944
+ARG OPENCODE_SHA256_amd64=08bb21d6326ce740d91cce7ebe88a6536933f6e1e30353b91a06b01f25da306c
+RUN case "$TARGETARCH" in arm64) platform=linux-arm64 sum=$OPENCODE_SHA256_arm64 ;; \
+      amd64) platform=linux-x64 sum=$OPENCODE_SHA256_amd64 ;; *) exit 1 ;; esac \
+ && curl -fsSL -o /opencode.tar.gz \
+      "https://github.com/sst/opencode/releases/download/v$OPENCODE_VERSION/opencode-$platform.tar.gz" \
+ && echo "$sum  /opencode.tar.gz" | sha256sum -c - \
+ && tar -xzf /opencode.tar.gz -C / opencode && rm /opencode.tar.gz && chmod 755 /opencode
 
 # mise, which installs the tools a repository pins (Node, pnpm, bun, …) into
 # its workspace (fern-init), pinned and checked against its release's sums.
@@ -87,6 +101,9 @@ RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.l
  && useradd --uid 1000 --user-group --home-dir /tmp --no-create-home fern
 COPY --from=go /out/fern-init /usr/local/bin/fern-init
 COPY --from=claude /claude /usr/local/bin/claude
+# box-opencode gives OpenCode its folders and Claude's login, in an agent box.
+COPY images/box-opencode /usr/local/bin/opencode
+COPY --from=opencode /opencode /usr/local/libexec/opencode
 COPY --from=mise /mise /usr/local/bin/mise
 # The root filesystem is read-only, so Claude Code must not update itself.
 ENV PATH=/usr/lib/postgresql/17/bin:$PATH \
@@ -108,11 +125,12 @@ RUN git init -q && git fetch -q --depth 1 https://github.com/pingdotgg/t3code.gi
 # fern-checkpoints.patch, the hook; fern-sessions.patch, idle provider
 # sessions released after 5 minutes, so their boxes can sleep;
 # fern-prewake.patch, boxes woken ahead when a thread is opened or reverted;
-# fern-golden.patch, a project's golden snapshot built when it is added.
+# fern-golden.patch, a project's golden snapshot built when it is added;
+# fern-opencode.patch, an OpenCode server per worktree, started in it.
 FROM t3-src AS t3-build
 COPY images/t3/*.patch /tmp/
 RUN git apply /tmp/fern-checkpoints.patch /tmp/fern-sessions.patch /tmp/fern-timing.patch /tmp/fern-socket.patch \
-    /tmp/fern-prewake.patch /tmp/fern-golden.patch
+    /tmp/fern-prewake.patch /tmp/fern-golden.patch /tmp/fern-opencode.patch
 RUN --mount=type=cache,id=fern-t3-pnpm,target=/pnpm \
     pnpm install --frozen-lockfile --store-dir /pnpm/store --filter "t3..."
 WORKDIR /t3/apps/server
@@ -142,6 +160,9 @@ COPY --from=go /out/fern /usr/local/bin/fern
 # the environment's box, or the real one outside environments.
 COPY images/fern-claude /usr/local/bin/claude
 COPY --from=claude /claude /usr/local/libexec/claude
+# The same for "opencode": fern-opencode runs a worktree's server in its box.
+COPY images/fern-opencode /usr/local/bin/opencode
+COPY --from=opencode /opencode /usr/local/libexec/opencode
 # T3 runs "gh" for pull requests: fern-gh gives the real one a token for
 # the repository from Fern's GitHub App, if there is one.
 COPY images/fern-gh /usr/local/bin/gh

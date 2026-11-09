@@ -1,0 +1,55 @@
+#!/bin/sh
+# fern-opencode is `opencode` on the PATH of Fern's T3 image, so T3 runs it.
+# T3 starts an OpenCode server per directory (images/t3/fern-opencode.patch)
+# and calls it over HTTP. In a Fern worktree the server runs in that
+# environment's agent box, where the daemon gives it the box's address,
+# Fern's Bash in place of its shell tool, and Claude's login (startAgent).
+#
+# Anywhere else (T3's version checks, its model list and the commit messages
+# it writes) it runs the local OpenCode, without the tools that run commands
+# or change files: an agent must not work in T3's own service, with the whole
+# pool and the daemon's socket. Nor does a thread in a project's main folder
+# (T3's Local mode: repos/, or projects/ for those T3 cloned), which has no
+# box. T3's root is read-only, so the local one keeps its files in the pool.
+#
+# Only OpenCode's own two variables are passed on: T3's environment, and any
+# credentials in it, stays out of the box.
+set -eu
+pool=${FERN_POOL:-/var/lib/fern}
+real=${FERN_LOCAL_OPENCODE:-/usr/local/libexec/opencode}
+if [ "${1:-}" = serve ]; then
+	case "$PWD/" in
+	"$pool"/worktrees/*/?*)
+		# T3 opens OpenCode's session before the thread's first checkpoint,
+		# which is what makes a worktree an environment (T3's hook,
+		# fern-checkpoints.patch). So it is made here, the same one; making
+		# one that exists does nothing. It swaps the worktree's directory,
+		# which this shell must not be holding.
+		dir=$PWD
+		rest=${dir#"$pool"/worktrees/}
+		repo=${rest%%/*}
+		rest=${rest#*/}
+		workspace=$pool/worktrees/$repo/${rest%%/*}
+		cd /
+		fern create --path "$workspace" "t3-$(printf %s "$workspace" | sha256sum | cut -c1-16)" >/dev/null
+		cd "$dir"
+		exec fern exec --here --agent -e OPENCODE_PASSWORD -e OPENCODE_CONFIG_CONTENT -- opencode "$@"
+		;;
+	"$pool"/repos/* | "$pool"/projects/*)
+		echo "fern-opencode: this thread works in the project's main folder, which has no Fern box or database." \
+			"Start a new thread in New worktree to get one." >&2
+		exit 1
+		;;
+	esac
+fi
+data=$pool/userdata/opencode
+export XDG_DATA_HOME="$data/data" XDG_CONFIG_HOME="$data/config" XDG_STATE_HOME="$data/state" XDG_CACHE_HOME="$data/cache" \
+	OPENCODE_DISABLE_AUTOUPDATE=1 OPENCODE_CLAUDE_PATH="${FERN_LOCAL_CLAUDE:-/usr/local/libexec/claude}" \
+	OPENCODE_CONFIG_CONTENT='{"plugins":["-opencode.tool.shell","-opencode.tool.edit","-opencode.tool.write","-opencode.tool.patch"]}'
+if [ ! -e "$data/claude-agent" ]; then
+	mkdir -p "$data"
+	if "$real" auth login claude-agent --standalone >/dev/null 2>&1; then
+		: >"$data/claude-agent"
+	fi
+fi
+exec "$real" "$@"

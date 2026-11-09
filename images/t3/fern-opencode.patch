@@ -1,0 +1,160 @@
+diff --git a/packages/provider-opencode/src/server/OpenCodeRuntime.ts b/packages/provider-opencode/src/server/OpenCodeRuntime.ts
+index 25a24c01..3c96d23b 100644
+--- a/packages/provider-opencode/src/server/OpenCodeRuntime.ts
++++ b/packages/provider-opencode/src/server/OpenCodeRuntime.ts
+@@ -699,6 +699,9 @@ const makeOpenCodeRuntime = Effect.gen(function* () {
+           ChildProcess.make(spawnCommand.command, spawnCommand.args, {
+             detached: hostPlatform !== "win32",
+             shell: spawnCommand.shell,
++            // Fern: started in the directory it serves, so Fern's `opencode`
++            // can run it in that worktree's box.
++            cwd: input.directory,
+             env: {
+               ...input.environment,
+               ...(serverPassword !== undefined ? { OPENCODE_SERVER_PASSWORD: serverPassword } : {}),
+diff --git a/packages/provider-opencode/src/server/v2/OpenCode2Server.ts b/packages/provider-opencode/src/server/v2/OpenCode2Server.ts
+index 5991d575..43fc1fc3 100644
+--- a/packages/provider-opencode/src/server/v2/OpenCode2Server.ts
++++ b/packages/provider-opencode/src/server/v2/OpenCode2Server.ts
+@@ -10,6 +10,8 @@ import * as Base64Url from "effect/encoding/Base64Url";
+ import * as Layer from "effect/Layer";
+ import * as P from "effect/Predicate";
+ import * as Redacted from "effect/Redacted";
++import * as Scope from "effect/Scope";
++import * as Semaphore from "effect/Semaphore";
+ import * as HttpClientError from "effect/http/HttpClientError";
+ 
+ import * as OpenCodeRuntime from "../OpenCodeRuntime.ts";
+@@ -29,6 +31,8 @@ export class OpenCode2Server extends Context.Service<
+   {
+     readonly withConnection: <A, E, R>(
+       use: (connection: OpenCode2Connection) => Effect.Effect<A, E, R>,
++      // Fern: the directory whose server to use; the instance's by default.
++      directory?: string,
+     ) => Effect.Effect<A, E | OpenCodeRuntime.OpenCodeRuntimeError, R>;
+   }
+ >()("@t3tools/provider-opencode/server/v2/OpenCode2Server") {}
+@@ -162,19 +166,56 @@ export const make = Effect.fn("OpenCode2Server.make")(function* (input: {
+     });
+   }
+ 
++  // Fern: a server per directory, not one for the instance, so that a
++  // thread's server, which runs its tools, is in that thread's box.
+   const password = yield* generatePassword;
+-  const owner = yield* OpenCodeServerOwner.make({
+-    binaryPath: input.binaryPath,
+-    directory: input.directory,
+-    environment: serverEnvironment(input.environment, password),
+-    verify: (url) => connectTo(url, password, false).pipe(Effect.flatMap(remember)),
+-  });
++  const scope = yield* Effect.scope;
++  const runtime = yield* OpenCodeRuntime.OpenCodeRuntime;
++  const lock = yield* Semaphore.make(1);
++  const servers = new Map<
++    string,
++    {
++      readonly owner: OpenCodeServerOwner.OpenCodeServerOwner["Service"];
++      readonly latest: () => OpenCode2Connection | undefined;
++    }
++  >();
++  const serverFor = (directory: string) =>
++    lock.withPermit(
++      Effect.gen(function* () {
++        const known = servers.get(directory);
++        if (known !== undefined) return known;
++        let connection: OpenCode2Connection | undefined;
++        const owner = yield* OpenCodeServerOwner.make({
++          binaryPath: input.binaryPath,
++          directory,
++          environment: serverEnvironment(input.environment, password),
++          verify: (url) =>
++            connectTo(url, password, false).pipe(
++              Effect.map((connected) => {
++                connection = connected;
++                return connected.version;
++              }),
++            ),
++        }).pipe(
++          Effect.provideService(Scope.Scope, scope),
++          Effect.provideService(OpenCodeRuntime.OpenCodeRuntime, runtime),
++        );
++        const made = { owner, latest: () => connection };
++        servers.set(directory, made);
++        return made;
++      }),
++    );
+   return OpenCode2Server.of({
+-    withConnection: (use) =>
+-      owner.withServer((server) =>
+-        latest?.url === server.url
+-          ? use(latest)
+-          : Effect.die(new Error("OpenCode 2 server was lent before verification.")),
++    withConnection: (use, directory = input.directory) =>
++      serverFor(directory).pipe(
++        Effect.flatMap(({ owner, latest }) =>
++          owner.withServer((server) => {
++            const connection = latest();
++            return connection?.url === server.url
++              ? use(connection)
++              : Effect.die(new Error("OpenCode 2 server was lent before verification."));
++          }),
++        ),
+       ),
+   });
+ });
+diff --git a/packages/provider-opencode/src/server/v2/adapter.ts b/packages/provider-opencode/src/server/v2/adapter.ts
+index a1ed0275..01b02808 100644
+--- a/packages/provider-opencode/src/server/v2/adapter.ts
++++ b/packages/provider-opencode/src/server/v2/adapter.ts
+@@ -79,7 +79,8 @@ import { openCodeToolTurnItem } from "../toolItems.ts";
+ 
+ const OpenCode2ProviderCapabilities = {
+   sessions: {
+-    supportsMultipleProviderThreadsPerSession: true,
++    // Fern: a session per thread, each with its own directory's server.
++    supportsMultipleProviderThreadsPerSession: false,
+     supportsModelSwitchInSession: true,
+     supportsProviderSwitchingViaHandoff: true,
+     supportsRuntimeModeSwitchInSession: true,
+@@ -671,14 +672,16 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
+   const mcpServerNameFor = (threadId: string) =>
+     t3McpServerName(threadId).pipe(Effect.provideService(Crypto.Crypto, crypto));
+ 
+-  const borrow = Effect.gen(function* () {
++  // Fern: a session borrows its own directory's server (OpenCode2Server).
++  const borrow = Effect.fnUntraced(function* (directory: string) {
+     const lent = yield* Deferred.make<
+       OpenCode2Server.OpenCode2Connection,
+       OpenCodeRuntime.OpenCodeRuntimeError
+     >();
+     yield* server
+-      .withConnection((connection) =>
+-        Deferred.succeed(lent, connection).pipe(Effect.andThen(Effect.never)),
++      .withConnection(
++        (connection) => Deferred.succeed(lent, connection).pipe(Effect.andThen(Effect.never)),
++        directory,
+       )
+       .pipe(
+         Effect.catch((error) => Deferred.fail(lent, error)),
+@@ -2549,7 +2552,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
+       // sends a reconnect still in flight, so a spawned server can idle-stop.
+       const scope = yield* Scope.make();
+       const { next, stream } = yield* Effect.gen(function* () {
+-        const next = yield* borrow.pipe(Effect.provideService(Scope.Scope, scope));
++        const next = yield* borrow(directoryOf(session.cwd)).pipe(
++          Effect.provideService(Scope.Scope, scope),
++        );
+         return { next, stream: yield* next.events };
+       }).pipe(Effect.onError(() => Scope.close(scope, Exit.void)));
+       const previous = currentScope;
+@@ -3932,7 +3937,9 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
+       Effect.gen(function* () {
+         const scope = yield* Scope.make();
+         yield* Effect.addFinalizer((exit) => Scope.close(scope, exit));
+-        const connection = yield* borrow.pipe(Effect.provideService(Scope.Scope, scope));
++        const connection = yield* borrow(input.runtimePolicy.cwd ?? host.paths.cwd).pipe(
++          Effect.provideService(Scope.Scope, scope),
++        );
+         return yield* openSession(input, { connection, scope });
+       }).pipe(
+         Effect.mapError(

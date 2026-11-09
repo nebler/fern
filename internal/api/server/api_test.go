@@ -244,7 +244,13 @@ func newAPIWith(t testing.TB, wrap func(*runsc.Fake) driverWith) (*api.Client, *
 	if wrap != nil {
 		d = wrap(drv)
 	}
-	srv := httptest.NewUnstartedServer(newServer(t, newFakeStore(), d))
+	return serveSocket(t, newServer(t, newFakeStore(), d)), drv
+}
+
+// serveSocket serves h on a unix socket and returns a client of it.
+func serveSocket(t testing.TB, h http.Handler) *api.Client {
+	t.Helper()
+	srv := httptest.NewUnstartedServer(h)
 	// t.TempDir is too long for a socket path when test names are long.
 	dir, err := os.MkdirTemp("", "fern")
 	if err != nil {
@@ -260,7 +266,7 @@ func newAPIWith(t testing.TB, wrap func(*runsc.Fake) driverWith) (*api.Client, *
 	srv.Listener = ln
 	srv.Start()
 	t.Cleanup(srv.Close)
-	return api.NewClient(socket), drv
+	return api.NewClient(socket)
 }
 
 func mustCreate(t *testing.T, c *api.Client, id string) {

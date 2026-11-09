@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -270,7 +271,7 @@ func (s *Server) prewake(r *http.Request) (any, error) {
 // by relaying the client's WebSocket to the box's. With ?then=sleep the box
 // sleeps as soon as the command ends, unless another runs. With ?box=agent
 // and agent boxes, it runs in the environment's agent box, and Claude there
-// gets Fern's Bash in place of its own (startClaude). It wakes and dials the
+// gets Fern's Bash in place of its own (startAgent). It wakes and dials the
 // box before taking the client's WebSocket, so that a failure is still an
 // HTTP error with a body Client.Exec can read. A restore, sleep or delete
 // of the environment ends it.
@@ -305,7 +306,7 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = client.CloseNow() }()
 	if agent {
-		if err := s.startClaude(ctx, client, box, r.PathValue("id"), ex); err != nil {
+		if err := s.startAgent(ctx, client, box, r.PathValue("id"), ex); err != nil {
 			s.log.WarnContext(ctx, "starting a command in an agent box", slog.String("env", r.PathValue("id")), slog.Any("error", err))
 			return
 		}
@@ -317,33 +318,114 @@ func (s *Server) exec(w http.ResponseWriter, r *http.Request) {
 // would run without the services; Fern's Bash runs them in the services' box.
 var noShell = []string{"Bash", "BashOutput", "KillShell", "KillBash", "Monitor"}
 
-// startClaude passes on the client's first message, the command's request,
-// and if it starts Claude, adds Fern's MCP server for environment id (its
-// Bash), takes away Claude's own shell tools, and ignores the settings and
-// MCP servers in the workspace: the box writes those, and they run code here,
-// next to Claude's login. It has none on a later connection to a session.
-func (s *Server) startClaude(ctx context.Context, client, box *websocket.Conn, id string, ex *actor.Exec) error {
+// startAgent passes on the client's first message, the command's request,
+// and if it starts an agent (Claude, or OpenCode's server), gives the agent
+// Fern's MCP server for environment id (its Bash) in place of its own shell.
+// It has none on a later connection to a session.
+func (s *Server) startAgent(ctx context.Context, client, box *websocket.Conn, id string, ex *actor.Exec) error {
 	typ, data, err := client.Read(ctx)
 	if err != nil {
 		return err
 	}
 	var req boxexec.Request
-	if typ == websocket.MessageText && json.Unmarshal(data, &req) == nil && len(req.Argv) > 0 && path.Base(req.Argv[0]) == "claude" {
-		cfg, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"fern": map[string]any{
-			"type":    "http",
-			"url":     s.mcpURL(ctx, ex) + "/mcp/" + id,
-			"headers": map[string]string{"Authorization": "Bearer " + ex.Token},
-		}}})
+	if typ == websocket.MessageText && json.Unmarshal(data, &req) == nil && len(req.Argv) > 0 {
+		mcp := fernMCP{URL: s.mcpURL(ctx, ex) + "/mcp/" + id, Token: ex.Token}
+		switch path.Base(req.Argv[0]) {
+		case "claude":
+			err = mcp.claude(&req)
+		case "opencode":
+			err = mcp.openCode(&req, ex.Addr)
+		default:
+			return box.Write(ctx, typ, data)
+		}
 		if err != nil {
 			return err
 		}
-		req.Argv = append(req.Argv, "--mcp-config", string(cfg), "--disallowedTools", strings.Join(noShell, ","),
-			"--setting-sources=user")
 		if data, err = json.Marshal(req); err != nil {
 			return err
 		}
 	}
 	return box.Write(ctx, typ, data)
+}
+
+// fernMCP is Fern's MCP server as an agent in an agent box reaches it.
+type fernMCP struct {
+	URL   string
+	Token string // the box's, which the server takes as the bearer token
+}
+
+// claude adds the MCP server to Claude's arguments, takes away Claude's own
+// shell tools, and ignores the settings and MCP servers in the workspace:
+// the box writes those, and they run code in the agent box, next to
+// Claude's login.
+func (m fernMCP) claude(req *boxexec.Request) error {
+	cfg, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"fern": map[string]any{
+		"type":    "http",
+		"url":     m.URL,
+		"headers": map[string]string{"Authorization": "Bearer " + m.Token},
+	}}})
+	if err != nil {
+		return err
+	}
+	req.Argv = append(req.Argv, "--mcp-config", string(cfg), "--disallowedTools", strings.Join(noShell, ","),
+		"--setting-sources=user")
+	return nil
+}
+
+// openCodeConfig is the variable OpenCode reads settings from, as JSON, after
+// its settings files.
+const openCodeConfig = "OPENCODE_CONFIG_CONTENT"
+
+// openCode changes the request of OpenCode's server, which T3 calls over
+// HTTP. The server listens on the box's address, which is at addr, as T3
+// can't reach the box's loopback. Its settings get the MCP server and lose
+// the shell tool; a rule also refuses the tool, should a later settings file
+// bring it back. Any other opencode command is left as it is.
+func (m fernMCP) openCode(req *boxexec.Request, addr string) error {
+	if len(req.Argv) < 2 || req.Argv[1] != "serve" {
+		return nil
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("the box's address: %w", err)
+	}
+	req.Argv = slices.DeleteFunc(slices.Clone(req.Argv), func(arg string) bool { return strings.HasPrefix(arg, "--hostname=") })
+	req.Argv = append(req.Argv, "--hostname="+host)
+
+	cfg := map[string]any{}
+	req.Environ = slices.DeleteFunc(slices.Clone(req.Environ), func(v string) bool {
+		content, ok := strings.CutPrefix(v, openCodeConfig+"=")
+		if ok && json.Unmarshal([]byte(content), &cfg) != nil {
+			cfg = map[string]any{} // not an object: OpenCode would ignore it too
+		}
+		return ok
+	})
+	mcp, _ := cfg["mcp"].(map[string]any)
+	if mcp == nil {
+		mcp = map[string]any{}
+	}
+	servers, _ := mcp["servers"].(map[string]any)
+	if servers == nil {
+		servers = map[string]any{}
+	}
+	// Not in Code Mode, where only scripts could call it, and without OAuth,
+	// which OpenCode would try if the token were refused.
+	servers["fern"] = map[string]any{
+		"type": "remote", "url": m.URL, "headers": map[string]string{"Authorization": "Bearer " + m.Token},
+		"oauth": false, "codemode": false,
+	}
+	mcp["servers"] = servers
+	cfg["mcp"] = mcp
+	plugins, _ := cfg["plugins"].([]any)
+	cfg["plugins"] = append(plugins, "-opencode.tool.shell")
+	policies, _ := cfg["policies"].([]any)
+	cfg["policies"] = append([]any{map[string]string{"action": "tool.use", "resource": "shell:*", "effect": "deny"}}, policies...)
+	content, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	req.Environ = append(req.Environ, openCodeConfig+"="+string(content))
+	return nil
 }
 
 // mcpURL returns where Claude in the agent box of ex reaches Fern's MCP
