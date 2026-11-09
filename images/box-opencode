@@ -21,4 +21,11 @@ if [ ! -e "$dir/claude-agent" ]; then
 		: >"$dir/claude-agent"
 	fi
 fi
+# Fern's hint, which fern-init writes for Claude at every start, is OpenCode's
+# own instructions too, unless someone wrote their own there.
+hint=$dir/config/opencode/AGENTS.md
+if [ -L "$hint" ] || [ ! -e "$hint" ]; then
+	mkdir -p "$dir/config/opencode"
+	ln -sf "$CLAUDE_CONFIG_DIR/CLAUDE.md" "$hint"
+fi
 exec "$real" "$@"
