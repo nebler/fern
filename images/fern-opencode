@@ -14,6 +14,11 @@
 #
 # Only OpenCode's own two variables are passed on: T3's environment, and any
 # credentials in it, stays out of the box.
+#
+# fern exec --hibernate stands in for the server (internal/hibernate,
+# Serve): it stops the server after $FERN_HIBERNATE (30s) with no request
+# and no turn under way, so the box sleeps, and starts it again at T3's next
+# request; 0 keeps the server running until T3 ends it.
 set -eu
 pool=${FERN_POOL:-/var/lib/fern}
 real=${FERN_LOCAL_OPENCODE:-/usr/local/libexec/opencode}
@@ -33,7 +38,7 @@ if [ "${1:-}" = serve ]; then
 		cd /
 		fern create --path "$workspace" "t3-$(printf %s "$workspace" | sha256sum | cut -c1-16)" >/dev/null
 		cd "$dir"
-		exec fern exec --here --agent -e OPENCODE_PASSWORD -e OPENCODE_CONFIG_CONTENT -- opencode "$@"
+		exec fern exec --here --agent --hibernate "${FERN_HIBERNATE:-30s}" -e OPENCODE_PASSWORD -e OPENCODE_CONFIG_CONTENT -- opencode "$@"
 		;;
 	"$pool"/repos/* | "$pool"/projects/*)
 		echo "fern-opencode: this thread works in the project's main folder, which has no Fern box or database." \

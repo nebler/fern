@@ -39,7 +39,7 @@ The owner decided on 2026-11-09 to support Claude Code, Codex, pi and OpenCode. 
 
 - **Shared first:** one table in the daemon of what each harness is started with, in place of `startAgent`'s one case, and one wrapper for all of them.
 - **Claude's login in OpenCode** works since OpenCode 2.2.3 (2026-10-30): its Claude Agent provider runs the unmodified `claude` through Anthropic's Agent SDK and never reads the login, which is what T3 does too. The agent box already has `claude` and its token. Anthropic has not said anything about it. Logging in to Claude from OpenCode or pi themselves (the community plugins) stays blocked (architecture §13.1).
-- **Hibernation is Claude's only:** the other three keep their box awake until T3 lets the session go.
+- **Hibernation:** Claude's and OpenCode's are built (architecture §6.3); Codex and pi would keep their box awake until T3 lets the session go.
 - **Each needs its own login to test**, which only the owner can give.
 
 ## Proposed, from Amp (2026-11-06)

@@ -1,5 +1,5 @@
-// Package hibernate runs Claude in a box so that the box can sleep between
-// turns while T3 keeps Claude's session open.
+// Package hibernate runs Claude, or an OpenCode server (Serve), in a box so
+// that the box can sleep between turns while T3 keeps the session open.
 //
 // T3 keeps a thread's Claude running between turns and ends it only after
 // minutes without one; meanwhile its box stays awake, holding Claude's and
