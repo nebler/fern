@@ -34,6 +34,27 @@ func TestFileVar(t *testing.T) {
 	}
 }
 
+func TestFileSkills(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct{ name, data, want string }{
+		{name: "missing", want: "safety"},
+		{name: "packs", data: "# Claude's skills\nbeginner design\nengineering # and more\n", want: "beginner design engineering"},
+		{name: "none", data: "# none\n", want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			file := filepath.Join(dir, tc.name)
+			if tc.data != "" {
+				if err := os.WriteFile(file, []byte(tc.data), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got, err := fileSkills(file, "safety")(t.Context()); err != nil || got != tc.want {
+				t.Errorf("fileSkills() = %q, %v; want %q", got, err, tc.want)
+			}
+		})
+	}
+}
+
 func TestLimitFlags(t *testing.T) {
 	def := runsc.DefaultLimits
 	for _, tc := range []struct {

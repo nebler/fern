@@ -7,21 +7,31 @@ import (
 	"testing"
 )
 
-// A Cloudflare repository's Claude gets the image's skills as links; another
-// repository's loses them; someone's own skill is never touched.
+// The node's packs, then those Fern detects, then the repository's, less
+// those it turns off; names that can't be packs are dropped.
+func TestActivePacks(t *testing.T) {
+	got := activePacks("safety design", []string{"cloudflare"}, []string{"engineering", "../etc", "design"}, []string{"safety"})
+	if want := []string{"design", "cloudflare", "engineering"}; !slices.Equal(got, want) {
+		t.Errorf("activePacks() = %v, want %v", got, want)
+	}
+}
+
+// Claude gets the active packs' skills as links, loses a pack's when it
+// goes off or the image drops it, and keeps someone's own skill.
 func TestLinkSkills(t *testing.T) {
-	from := t.TempDir()
-	for _, s := range []string{"wrangler", "fern-deploy"} {
-		if err := os.MkdirAll(filepath.Join(from, s), 0o755); err != nil {
+	root := t.TempDir()
+	for _, s := range []string{"cloudflare/wrangler", "cloudflare/fern-deploy", "design/animate", "design/wrangler"} {
+		if err := os.MkdirAll(filepath.Join(root, s), 0o755); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.WriteFile(filepath.Join(from, "LICENSE"), nil, 0o644); err != nil {
-		t.Fatal(err)
+	for _, f := range []string{"cloudflare/LICENSE", "design/CLAUDE.md"} {
+		if err := os.WriteFile(filepath.Join(root, f), []byte("Animate with care.\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	claude := t.TempDir()
-	mine := filepath.Join(claude, "skills", "mine")
-	if err := os.MkdirAll(mine, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Join(claude, "skills", "mine"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	skills := func() []string {
@@ -36,35 +46,37 @@ func TestLinkSkills(t *testing.T) {
 		}
 		return names
 	}
-
-	for range 2 { // a second start finds them linked
-		if err := linkSkills(claude, from, true); err != nil {
-			t.Fatalf("linkSkills(on) error: %v", err)
+	link := func(packs ...string) {
+		t.Helper()
+		if err := linkSkills(claude, root, packs); err != nil {
+			t.Fatalf("linkSkills(%v) error: %v", packs, err)
 		}
 	}
-	if got, want := skills(), []string{"fern-deploy", "mine", "wrangler"}; !slices.Equal(got, want) {
+
+	link("cloudflare", "design", "missing")
+	link("cloudflare", "design", "missing") // a second start finds them linked
+	if got, want := skills(), []string{"animate", "fern-deploy", "mine", "wrangler"}; !slices.Equal(got, want) {
 		t.Errorf("skills = %v, want %v", got, want)
 	}
-	if target, err := os.Readlink(filepath.Join(claude, "skills", "wrangler")); err != nil || target != filepath.Join(from, "wrangler") {
-		t.Errorf("the wrangler link = %q, %v; want it to the image's", target, err)
+	if target, _ := os.Readlink(filepath.Join(claude, "skills", "wrangler")); target != filepath.Join(root, "cloudflare", "wrangler") {
+		t.Errorf("wrangler links to %q, want the first pack's", target)
+	}
+	if notes, err := packNotes(root, []string{"cloudflare", "design"}); err != nil || !slices.Equal(notes, []string{"Animate with care."}) {
+		t.Errorf("packNotes() = %q, %v; want design's", notes, err)
 	}
 
-	// The image drops a skill: its link goes.
-	if err := os.RemoveAll(filepath.Join(from, "wrangler")); err != nil {
-		t.Fatal(err)
+	// Cloudflare off: its links go, and design's wrangler takes the name.
+	link("design")
+	if got, want := skills(), []string{"animate", "mine", "wrangler"}; !slices.Equal(got, want) {
+		t.Errorf("skills with design only = %v, want %v", got, want)
 	}
-	if err := linkSkills(claude, from, true); err != nil {
-		t.Fatal(err)
-	}
-	if got, want := skills(), []string{"fern-deploy", "mine"}; !slices.Equal(got, want) {
-		t.Errorf("skills after the image dropped one = %v, want %v", got, want)
+	if target, _ := os.Readlink(filepath.Join(claude, "skills", "wrangler")); target != filepath.Join(root, "design", "wrangler") {
+		t.Errorf("wrangler links to %q, want design's", target)
 	}
 
-	// Not a Cloudflare repository any more: Fern's links go, someone's stay.
-	if err := linkSkills(claude, from, false); err != nil {
-		t.Fatal(err)
-	}
+	// Nothing on: only someone's own skill is left.
+	link()
 	if got, want := skills(), []string{"mine"}; !slices.Equal(got, want) {
-		t.Errorf("skills when off = %v, want %v", got, want)
+		t.Errorf("skills with none = %v, want %v", got, want)
 	}
 }

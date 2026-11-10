@@ -214,6 +214,28 @@ func TestIsCloudflare(t *testing.T) {
 	})
 }
 
+func TestIsAstro(t *testing.T) {
+	for name, tc := range map[string]struct {
+		pkg  string
+		want bool
+	}{
+		"astro":       {`{"dependencies": {"astro": "7"}}`, true},
+		"dev":         {`{"devDependencies": {"astro": "7"}}`, true},
+		"another":     {`{"dependencies": {"next": "16"}}`, false},
+		"no manifest": {"", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if tc.pkg != "" {
+				write(t, dir, "package.json", tc.pkg)
+			}
+			if got, err := setup.IsAstro(dir); err != nil || got != tc.want {
+				t.Errorf("IsAstro() = %t, %v; want %t", got, err, tc.want)
+			}
+		})
+	}
+}
+
 // A guess makes a golden key, which its files change, and a default
 // preview; a repository with nothing to guess still has no key.
 func TestGuessKeyAndPreview(t *testing.T) {

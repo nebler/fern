@@ -20,6 +20,8 @@
 # to keep your own firewall, and FERN_GITHUB_APP_ID with FERN_GITHUB_APP_KEY
 # (the .pem GitHub gave you, on the machine you run this on) for private
 # repositories, push and pull requests through your GitHub App (README),
+# FERN_SKILLS (the skill packs Claude gets on this server, such as
+# "beginner design engineering safety"; without it, safety; README),
 # FERN_CLOUDFLARE_TOKEN_FILE (a file holding a Cloudflare API token, on the
 # machine you run this on) to give Claude Cloudflare's MCP server in
 # repositories that deploy to Cloudflare (README),
@@ -41,6 +43,7 @@ FERN_FIREWALL=${FERN_FIREWALL:-on}
 FERN_GITHUB_APP_ID=${FERN_GITHUB_APP_ID:-}
 FERN_GITHUB_APP_KEY=${FERN_GITHUB_APP_KEY:-}
 FERN_CLOUDFLARE_TOKEN_FILE=${FERN_CLOUDFLARE_TOKEN_FILE:-}
+FERN_SKILLS=${FERN_SKILLS-unset}
 FERN_BACKUP_BUCKET=${FERN_BACKUP_BUCKET:-}
 FERN_RESTORE_FROM=${FERN_RESTORE_FROM:-}
 GVISOR_RELEASE=${GVISOR_RELEASE:-20261012}
@@ -341,6 +344,7 @@ server() {
     restore "$FERN_RESTORE_FROM"
   fi
   login
+  [ "$FERN_SKILLS" = unset ] || skills "$FERN_SKILLS"
   if [ -n "$FERN_GITHUB_APP_ID" ]; then
     [ -r "$FERN_GITHUB_APP_KEY" ] || die "FERN_GITHUB_APP_KEY must name the App's .pem file"
     github_app "$FERN_GITHUB_APP_ID" <"$FERN_GITHUB_APP_KEY"
@@ -398,6 +402,21 @@ github_app() {
   systemctl restart fern-daemon
   wait_daemon
   echo "the daemon has GitHub App $id: T3's git and gh get tokens for the repositories it is installed on"
+}
+
+# skills sets the skill packs Claude gets on this server, where the daemon
+# reads them at every wake (cmd/fern-daemon): names of folders in the box
+# image's /usr/local/share/fern/skills. "" turns them all off; a repository's
+# services.yaml can still turn one on or off (skills:).
+skills() {
+  local packs=$1 p
+  for p in $packs; do
+    case $p in *[!a-z0-9-]*) die "a skill pack's name is lowercase letters, digits and -: $p" ;; esac
+  done
+  install -d -m 755 /etc/fern
+  printf '# The skill packs Claude gets (install.sh skills): %s\n%s\n' "$(date -u +%F)" "$packs" >/etc/fern/skills.new
+  mv /etc/fern/skills.new /etc/fern/skills
+  echo "Claude's skill packs: ${packs:-none}"
 }
 
 # cloudflare_token stores a Cloudflare API token, from stdin, where the
@@ -490,7 +509,7 @@ remote() {
     backup_settings "$host" | ssh -o BatchMode=yes "$host" "if [ \"\$(id -u)\" = 0 ]; then bash /tmp/fern-install.sh backup-config; else sudo -n bash /tmp/fern-install.sh backup-config; fi"
   fi
   case $FERN_RESTORE_FROM in *[!A-Za-z0-9.-]*) die "FERN_RESTORE_FROM must be the old server's hostname" ;; esac
-  run="FERN_VERSION=$(printf %q "$FERN_VERSION") FERN_FIREWALL=$(printf %q "$FERN_FIREWALL") FERN_RESTORE_FROM=$(printf %q "$FERN_RESTORE_FROM") bash /tmp/fern-install.sh server"
+  run="FERN_VERSION=$(printf %q "$FERN_VERSION") FERN_FIREWALL=$(printf %q "$FERN_FIREWALL") FERN_RESTORE_FROM=$(printf %q "$FERN_RESTORE_FROM") FERN_SKILLS=$(printf %q "$FERN_SKILLS") bash /tmp/fern-install.sh server"
   # One session for all of it, with a terminal for Claude's login and sudo's
   # password; its output is kept for the pairing link.
   local out
@@ -562,6 +581,7 @@ case "${1:-}" in
   doctor) doctor "${2:?usage: install.sh doctor root@HOST}" ;;
   github) github_app "${2:-}" ;;
   cloudflare) cloudflare_token ;;
+  skills) skills "${2-}" ;;
   backup-config) backup_config ;;
   server) server ;;
   --node-only) server --node-only ;;

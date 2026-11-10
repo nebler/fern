@@ -140,6 +140,8 @@ Unix socket `/run/fern/fern.sock`, for root and the box user's group (T3's serve
 
 **`cloudflare_connect` (built, with a Cloudflare token and a GitHub App):** a tool on the environment's MCP server that sets the repository's `CLOUDFLARE_API_TOKEN` Actions secret to the node's token, so a push deploys from GitHub Actions: the daemon reads `origin` with git in the environment's box and seals the value with the repository's key, through the App (*Secrets: write*). Claude's skills for it (`fern-deploy`, and Cloudflare's own) are links in its folder into the box image (fern-init). Brief: [briefs/cloudflare-projects.md](briefs/cloudflare-projects.md).
 
+**Skill packs (built):** Claude's skills come in packs baked into the box image (`/usr/local/share/fern/skills`); a pack is on when the node turns it on (`/etc/fern/skills`, `safety` by default, passed to Claude's box as `FERN_SKILLS` at every wake), when Fern detects it (`cloudflare`), or when `services.yaml` asks (`skills:`). fern-init links the active packs' skills into Claude's folder, outside the workspace, and adds their notes to the hint. An Astro site's agent also gets Astro's docs MCP server. Brief: [briefs/cloudflare-projects.md](briefs/cloudflare-projects.md).
+
 **Agent tools (built: `env_fork`, `env_exec`, `env_delete`):** on the same MCP server, Claude forks its own environment, runs commands in its forks (calls for different forks run at once) and deletes them; it reaches no other environment (§7.4). Planned: `env_snapshot`, `env_restore`.
 
 ---

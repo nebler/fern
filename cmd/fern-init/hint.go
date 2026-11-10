@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+
+	"github.com/nebler/fern/internal/setup"
 )
 
 // hintMark starts the CLAUDE.md that fern-init writes, so it knows the file
@@ -23,6 +25,29 @@ type hint struct {
 	// {port} for the port; "" if they can't.
 	preview    string
 	cloudflare bool // the repository deploys to Cloudflare (setup.IsCloudflare)
+	// notes are the active skill packs' notes (packNotes).
+	notes []string
+}
+
+// briefClaude writes Claude's hint into claudeDir and gives it the active
+// skill packs, for the repository in workspace dir. A repository file it
+// can't read leaves out what it would have said, not the rest.
+func briefClaude(claudeDir, dir string, services map[string]service, guessed bool) error {
+	h := hint{services: services, guessed: guessed, preview: os.Getenv("FERN_PREVIEW")}
+	var errs []error
+	cloudflare, err := setup.IsCloudflare(dir)
+	errs = append(errs, err)
+	h.cloudflare = cloudflare
+	var detected []string
+	if h.cloudflare {
+		detected = append(detected, "cloudflare")
+	}
+	on, off, err := setup.AskedSkills(dir)
+	errs = append(errs, err)
+	packs := activePacks(os.Getenv("FERN_SKILLS"), detected, on, off)
+	h.notes, err = packNotes(skillPacks, packs)
+	errs = append(errs, err, writeHint(claudeDir, h), linkSkills(claudeDir, skillPacks, packs))
+	return errors.Join(errs...)
 }
 
 // writeHint tells Claude where it runs: the user-level CLAUDE.md in Claude's
@@ -63,6 +88,10 @@ func writeHint(claudeDir string, h hint) error {
 	}
 	fmt.Fprintln(&b, "- Every turn is snapshotted. T3's \"Revert files too\" brings back the files and the services' data together, so changing data is safe.")
 	fmt.Fprintln(&b, "- Don't commit or push: the repository's git folder is read-only here. The person commits from T3.")
+	for _, n := range h.notes {
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, n)
+	}
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, []byte(b.String()), 0o600); err != nil {
 		return err

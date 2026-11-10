@@ -68,6 +68,8 @@ func parseServices(data []byte) (map[string]service, error) {
 		// Limits are what the box asks to be given; the daemon reads them
 		// too, when it wakes the box (internal/runsc).
 		Limits setup.Limits `json:"limits"`
+		// Skills turns Claude's skill packs on or off (setup.AskedSkills).
+		Skills []string `json:"skills,omitempty"`
 	}
 	if err := yaml.UnmarshalStrict(data, &f); err != nil {
 		return nil, fmt.Errorf("services.yaml: %w", err)

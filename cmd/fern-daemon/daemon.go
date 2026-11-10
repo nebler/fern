@@ -66,6 +66,11 @@ const (
 	// (install.sh cloudflare): agents in Cloudflare repositories' agent
 	// boxes get Cloudflare's MCP server with it.
 	cloudflareFile = "/etc/fern/cloudflare.env"
+	// skillsFile lists the skill packs the node turns on for Claude
+	// (install.sh skills): names, separated by spaces or lines.
+	skillsFile = "/etc/fern/skills"
+	// defaultSkills are the packs without skillsFile.
+	defaultSkills = "safety"
 	// backupConfig says where backups go (internal/backup), root only.
 	backupConfig = "/etc/fern/backup.env"
 )
@@ -222,7 +227,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 
 	drv := runsc.New(runsc.Config{
 		Pool: pool, Bundles: runscBundles, State: runscState, Images: filepath.Join(pool, "images"), Image: boxImage,
-		DNS: strings.Split(*boxDNS, ","), Login: fileVar(loginFile, "CLAUDE_CODE_OAUTH_TOKEN"), MCPPort: mcpPort, Preview: previewAt,
+		DNS: strings.Split(*boxDNS, ","), Login: fileVar(loginFile, "CLAUDE_CODE_OAUTH_TOKEN"), Skills: fileSkills(skillsFile, defaultSkills), MCPPort: mcpPort, Preview: previewAt,
 		Limits: limits, MaxLimits: most,
 	}, tr, reg)
 	// Golden keys name the image's content, not its tag.
@@ -373,6 +378,28 @@ func fileVar(file, name string) func(ctx context.Context) (string, error) {
 			}
 		}
 		return "", nil
+	}
+}
+
+// fileSkills returns a function that reads the skill packs in file at every
+// wake, so a change needs no restart: def without the file. Lines starting
+// with # are comments.
+func fileSkills(file, def string) func(ctx context.Context) (string, error) {
+	return func(context.Context) (string, error) {
+		data, err := os.ReadFile(file)
+		if errors.Is(err, fs.ErrNotExist) {
+			return def, nil
+		}
+		if err != nil {
+			return "", err
+		}
+		var packs []string
+		for line := range strings.Lines(string(data)) {
+			if line, _, _ = strings.Cut(line, "#"); strings.TrimSpace(line) != "" {
+				packs = append(packs, strings.Fields(line)...)
+			}
+		}
+		return strings.Join(packs, " "), nil
 	}
 }
 

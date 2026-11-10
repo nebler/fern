@@ -463,8 +463,10 @@ func TestAgentStartCloudflare(t *testing.T) {
 	}
 	b := newDemoBox(t)
 	cf := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cf, "wrangler.jsonc"), []byte("{}"), 0o644); err != nil {
-		t.Fatal(err)
+	for name, data := range map[string]string{"wrangler.jsonc": "{}", "package.json": `{"dependencies": {"astro": "7"}}`} {
+		if err := os.WriteFile(filepath.Join(cf, name), []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := b.st.Create(t.Context(), "cf", store.CreateOptions{Workspace: cf}); err != nil {
 		t.Fatal(err)
@@ -497,6 +499,10 @@ func TestAgentStartCloudflare(t *testing.T) {
 					strings.Contains(stdout.String(), "Bearer cf-token")
 				if got != tt.want {
 					t.Errorf("%s has Cloudflare's MCP server: %t, want %t\n%s", filepath.Base(agent.Argv[0]), got, tt.want, stdout.String())
+				}
+				// cf is an Astro site, demo isn't; Astro's docs need no token.
+				if got := strings.Contains(stdout.String(), "https://mcp.docs.astro.build/mcp"); got != (tt.env == "cf") {
+					t.Errorf("%s has Astro's docs server: %t, want %t", filepath.Base(agent.Argv[0]), got, tt.env == "cf")
 				}
 			}
 		})

@@ -344,10 +344,10 @@ func (s *Server) startAgent(ctx context.Context, client, box *websocket.Conn, id
 		mcp := fernMCP{URL: s.mcpURL(ctx, ex) + "/mcp/" + id, Token: ex.Token}
 		switch path.Base(req.Argv[0]) {
 		case "claude":
-			mcp.Cloudflare = s.cloudflareToken(ctx, id)
+			mcp.Cloudflare, mcp.AstroDocs = s.cloudflareToken(ctx, id), s.isAstro(ctx, id)
 			err = mcp.claude(&req)
 		case "opencode":
-			mcp.Cloudflare = s.cloudflareToken(ctx, id)
+			mcp.Cloudflare, mcp.AstroDocs = s.cloudflareToken(ctx, id), s.isAstro(ctx, id)
 			err = mcp.openCode(&req, ex.Addr)
 		default:
 			return box.Write(ctx, typ, data)
@@ -398,14 +398,36 @@ func (s *Server) cloudflareToken(ctx context.Context, id string) string {
 	return token
 }
 
+// astroDocsMCP is Astro's MCP server for its documentation, which takes no
+// login.
+const astroDocsMCP = "https://mcp.docs.astro.build/mcp"
+
+// isAstro reports whether environment id's repository is an Astro site, for
+// Astro's docs server. The agent works without it, so a failure is logged.
+func (s *Server) isAstro(ctx context.Context, id string) bool {
+	env, err := s.store.Get(ctx, id)
+	if err != nil {
+		s.log.WarnContext(ctx, "finding the workspace for Astro's docs server", slog.String("env", id), slog.Any("error", err))
+		return false
+	}
+	// The workspace is the agent's: IsAstro keeps its reads inside it.
+	is, err := setup.IsAstro(env.Workspace)
+	if err != nil {
+		s.log.WarnContext(ctx, "reading whether the repository is an Astro site", slog.String("env", id), slog.Any("error", err))
+	}
+	return is
+}
+
 // fernMCP is Fern's MCP server as an agent in an agent box reaches it, and
-// Cloudflare's, for a repository that deploys there.
+// those for the repository: Cloudflare's for one that deploys there,
+// Astro's docs for an Astro site.
 type fernMCP struct {
 	URL   string
 	Token string // the box's, which the server takes as the bearer token
 	// Cloudflare is the Cloudflare API token for Cloudflare's MCP server; ""
 	// adds no server.
 	Cloudflare string
+	AstroDocs  bool // adds Astro's docs server
 }
 
 // claude adds the MCP server to Claude's arguments, takes away Claude's own
@@ -424,6 +446,9 @@ func (m fernMCP) claude(req *boxexec.Request) error {
 			"url":     cloudflareMCP,
 			"headers": map[string]string{"Authorization": "Bearer " + m.Cloudflare},
 		}
+	}
+	if m.AstroDocs {
+		servers["astro-docs"] = map[string]any{"type": "http", "url": astroDocsMCP}
 	}
 	cfg, err := json.Marshal(map[string]any{"mcpServers": servers})
 	if err != nil {
@@ -481,6 +506,9 @@ func (m fernMCP) openCode(req *boxexec.Request, addr string) error {
 			"type": "remote", "url": cloudflareMCP, "headers": map[string]string{"Authorization": "Bearer " + m.Cloudflare},
 			"oauth": false,
 		}
+	}
+	if m.AstroDocs {
+		servers["astro-docs"] = map[string]any{"type": "remote", "url": astroDocsMCP, "oauth": false}
 	}
 	mcp["servers"] = servers
 	cfg["mcp"] = mcp

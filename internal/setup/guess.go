@@ -213,6 +213,27 @@ func IsCloudflare(dir string) (bool, error) {
 	return false, nil
 }
 
+// IsAstro reports whether the repository checked out at dir is an Astro
+// site: its package.json depends on astro. The files are the agent's:
+// readFile keeps to dir.
+func IsAstro(dir string) (bool, error) {
+	data, err := readFile(dir, "package.json")
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var pkg struct {
+		Dependencies    map[string]string `json:"dependencies"`
+		DevDependencies map[string]string `json:"devDependencies"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return false, fmt.Errorf("package.json: %w", err)
+	}
+	return pkg.Dependencies["astro"] != "" || pkg.DevDependencies["astro"] != "", nil
+}
+
 // pickPackageManager returns the package manager field names
 // (package.json's field, as "pnpm@10.4.1"), else the one whose lockfile dir
 // has, else npm; and whether its lockfile is there.

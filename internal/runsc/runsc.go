@@ -84,7 +84,11 @@ type Config struct {
 	Image   string   // the box image's tag, such as fern-box:dev
 	DNS     []string // the resolvers boxes use
 	// Login returns Claude's login, or "" if there is none yet.
-	Login   func(ctx context.Context) (string, error)
+	Login func(ctx context.Context) (string, error)
+	// Skills returns the skill packs the node turns on for Claude, such as
+	// "beginner design": a box with Claude's folder learns them as
+	// FERN_SKILLS (fern-init). May be nil: none.
+	Skills  func(ctx context.Context) (string, error)
 	MCPPort int // the daemon's port agent boxes may reach
 	// Preview is where people open previews, such as localhost:30780
 	// (internal/preview). A box learns its own as FERN_PREVIEW, for Claude
@@ -392,10 +396,15 @@ func (d *Driver) allocate(b layout) (int, error) {
 func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 	_, sp := d.tracer.Start(ctx, "start")
 	defer func() { span.End(sp, err) }()
-	login := ""
+	login, skills := "", ""
 	if box.Env.Claude != "" && d.cfg.Login != nil {
 		if login, err = d.cfg.Login(ctx); err != nil {
 			return fmt.Errorf("claude login: %w", err)
+		}
+	}
+	if box.Env.Claude != "" && d.cfg.Skills != nil {
+		if skills, err = d.cfg.Skills(ctx); err != nil {
+			return fmt.Errorf("claude's skills: %w", err)
 		}
 	}
 	// A fresh /tmp at every wake.
@@ -428,6 +437,9 @@ func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 	wakeID := make([]byte, 8)
 	_, _ = rand.Read(wakeID)
 	vars := boxVars(box, hex.EncodeToString(wakeID), login, d.cfg.MCPPort)
+	if skills != "" {
+		vars = append(vars, "FERN_SKILLS="+skills)
+	}
 	if d.cfg.Preview != "" {
 		// {port} is for the box to fill in.
 		vars = append(vars, "FERN_PREVIEW=http://{port}-"+box.Env.ID+"."+d.cfg.Preview+"/")

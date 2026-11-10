@@ -1463,6 +1463,14 @@ cloudflare() {
     box_log "$G" | tail -20 | sed 's/^/  builder: /'
     return
   fi
+  # Every pack on for the node, the node's own choice kept aside.
+  local skills_saved=no
+  if in_daemon "test -e /etc/fern/skills"; then
+    in_daemon "cp -p /etc/fern/skills /etc/fern/skills.check" && skills_saved=yes
+  fi
+  on_node sh -c 'cat >/tmp/fern-install-skills.sh' <install.sh
+  on_node bash /tmp/fern-install-skills.sh skills "beginner design engineering safety" >/dev/null
+  in_daemon "rm /tmp/fern-install-skills.sh"
   fern create cf2 --path $W/two >/dev/null
   # api METHOD PATH [BODY] calls the site through the preview, which wakes
   # the box, and prints the body.
@@ -1495,6 +1503,8 @@ cloudflare() {
     check "Claude in the agent box gets Cloudflare's MCP server with the token" yes \
       "$(fern exec --agent cf2 -- $W/two/.fern/bin/claude -p | grep 'mcp.cloudflare.com' | grep -q "Bearer $secret" && echo yes || echo no)"
     # A pattern that doesn't match its own grep's command line.
+    check "and, in an Astro site, Astro's docs server" yes \
+      "$(fern exec --agent cf2 -- $W/two/.fern/bin/claude -p | grep -q 'mcp.docs.astro.build' && echo yes || echo no)"
     check "the box that runs the repository's code never sees it" no \
       "$(succeeds fern exec cf2 -- sh -c "grep -qs '${secret:0:1}[${secret:1:1}]${secret:2}' /proc/[0-9]*/environ /proc/[0-9]*/cmdline")"
     check "nor does the workspace" no "$(succeeds in_daemon "grep -rqs $secret $W /var/lib/fern/envs/cf2")"
@@ -1510,8 +1520,15 @@ cloudflare() {
   [ "$AGENTS" = 1 ] && claude_box=--agent
   check "Claude is told it is a Cloudflare repository" yes \
     "$(succeeds in_daemon "grep -q 'deploys to Cloudflare' /var/lib/fern/envs/cf2/claude/CLAUDE.md")"
-  check "and gets Cloudflare's skills and fern-deploy" "yes yes yes" \
-    "$(fern exec $claude_box cf2 -- sh -c 'cd "$CLAUDE_CONFIG_DIR/skills" && for s in fern-deploy wrangler frameworks-on-cloudflare; do test -f $s/SKILL.md && echo yes || echo no; done' | xargs)"
+  check "and gets Cloudflare's skills, fern-deploy and a skill of every pack the node turns on" "yes yes yes yes yes yes" \
+    "$(fern exec $claude_box cf2 -- sh -c 'cd "$CLAUDE_CONFIG_DIR/skills" && for s in fern-deploy wrangler frameworks-on-cloudflare animate coding-standards site-safety; do test -f $s/SKILL.md && echo yes || echo no; done' | xargs)"
+  check "and the beginner pack's note" yes \
+    "$(succeeds in_daemon "grep -q \"isn't a developer\" /var/lib/fern/envs/cf2/claude/CLAUDE.md")"
+  if [ $skills_saved = yes ]; then
+    in_daemon "mv /etc/fern/skills.check /etc/fern/skills"
+  else
+    in_daemon "rm -f /etc/fern/skills"
+  fi
   for e in cf1 cf2 "$G"; do fern rm "$e"; done
   in_daemon "rm -rf $W"
 }
