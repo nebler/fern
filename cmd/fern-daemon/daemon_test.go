@@ -9,7 +9,7 @@ import (
 	"github.com/nebler/fern/internal/runsc"
 )
 
-func TestFileLogin(t *testing.T) {
+func TestFileVar(t *testing.T) {
 	dir := t.TempDir()
 	for _, tc := range []struct {
 		name, data, want string
@@ -26,9 +26,9 @@ func TestFileLogin(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			got, err := fileLogin(file)(t.Context())
+			got, err := fileVar(file, "CLAUDE_CODE_OAUTH_TOKEN")(t.Context())
 			if err != nil || got != tc.want {
-				t.Errorf("fileLogin() = %q, %v; want %q", got, err, tc.want)
+				t.Errorf("fileVar() = %q, %v; want %q", got, err, tc.want)
 			}
 		})
 	}

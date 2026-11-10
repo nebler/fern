@@ -7,10 +7,11 @@
 # pool's worktrees it never does: there an agent must not run in T3's own pod,
 # with its login, the whole pool and the daemon's socket, just because the
 # daemon didn't answer or the environment wasn't made. Nor does a thread's
-# session in a project's main folder (T3's Local mode: repos/, or projects/
-# for those T3 cloned), which has no box:
-# T3 starts sessions with --session-id or --resume, its probes and the
-# commit messages it writes without.
+# session anywhere else: a project's main folder (T3's Local mode: repos/,
+# projects/, or wherever T3 cloned it, such as its home) has no box, and
+# Claude there would run unsandboxed in T3's own pod. T3 starts sessions with
+# --session-id or --resume, its probes and the commit messages it writes
+# without.
 #
 # Only the variables Claude's SDK sets are passed on: T3's own environment,
 # and any credentials in it, stays out of the box, which gets its login from
@@ -25,12 +26,10 @@
 # the box with the services (docs/briefs/claude-outside-the-box.md).
 set -eu
 pool=${FERN_POOL:-/var/lib/fern}
-case "$PWD/" in
-"$pool"/worktrees/*)
-	# --here does the lookup itself and fails if the environment is missing.
-	# A preliminary `which` would add a process and repeat the same request.
-	;;
-"$pool"/repos/* | "$pool"/projects/*)
+
+# local_claude runs the local Claude for T3's probes, and refuses a thread's
+# session, which needs a box.
+local_claude() {
 	for arg in "$@"; do
 		case "$arg" in
 		--session-id | --session-id=* | --resume | --resume=*)
@@ -41,10 +40,19 @@ case "$PWD/" in
 		esac
 	done
 	exec "${FERN_LOCAL_CLAUDE:-/usr/local/libexec/claude}" "$@"
+}
+
+case "$PWD/" in
+"$pool"/worktrees/*)
+	# --here does the lookup itself and fails if the environment is missing.
+	# A preliminary `which` would add a process and repeat the same request.
+	;;
+"$pool"/repos/* | "$pool"/projects/*)
+	local_claude "$@"
 	;;
 *)
 	if ! fern which "$PWD" >/dev/null 2>&1; then
-		exec "${FERN_LOCAL_CLAUDE:-/usr/local/libexec/claude}" "$@"
+		local_claude "$@"
 	fi
 	;;
 esac

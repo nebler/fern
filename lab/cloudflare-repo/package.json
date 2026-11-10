@@ -1,0 +1,17 @@
+{
+  "name": "cloudflare-check",
+  "type": "module",
+  "private": true,
+  "packageManager": "pnpm@10.34.9",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build"
+  },
+  "dependencies": {
+    "@astrojs/cloudflare": "14.4.6",
+    "astro": "7.4.8"
+  },
+  "devDependencies": {
+    "wrangler": "4.160.0"
+  }
+}

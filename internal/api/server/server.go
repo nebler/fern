@@ -24,6 +24,7 @@ import (
 	"github.com/nebler/fern/internal/api"
 	"github.com/nebler/fern/internal/boxexec"
 	"github.com/nebler/fern/internal/runsc"
+	"github.com/nebler/fern/internal/setup"
 	"github.com/nebler/fern/internal/store"
 )
 
@@ -64,6 +65,14 @@ type Server struct {
 	boxes *http.Client
 	jobs  jobs     // Claude's background commands
 	calls sync.Map // call key to its running Bash command, a *call
+
+	// Cloudflare returns the node's Cloudflare API token, "" while there is
+	// none. With one, an agent in the agent box of a repository that deploys
+	// to Cloudflare (setup.IsCloudflare) gets Cloudflare's MCP server, which
+	// acts on that account. The token goes to the agent box only: never to
+	// the box that runs the repository's code, nor into a workspace. May be
+	// nil.
+	Cloudflare func(ctx context.Context) (string, error)
 
 	// Stopping is closed when the daemon begins to stop. May be nil. Then the
 	// commands running in boxes are left to run: the next daemon's clients
@@ -332,8 +341,10 @@ func (s *Server) startAgent(ctx context.Context, client, box *websocket.Conn, id
 		mcp := fernMCP{URL: s.mcpURL(ctx, ex) + "/mcp/" + id, Token: ex.Token}
 		switch path.Base(req.Argv[0]) {
 		case "claude":
+			mcp.Cloudflare = s.cloudflareToken(ctx, id)
 			err = mcp.claude(&req)
 		case "opencode":
+			mcp.Cloudflare = s.cloudflareToken(ctx, id)
 			err = mcp.openCode(&req, ex.Addr)
 		default:
 			return box.Write(ctx, typ, data)
@@ -348,10 +359,50 @@ func (s *Server) startAgent(ctx context.Context, client, box *websocket.Conn, id
 	return box.Write(ctx, typ, data)
 }
 
-// fernMCP is Fern's MCP server as an agent in an agent box reaches it.
+// cloudflareMCP is Cloudflare's MCP server for its whole API, which takes an
+// API token as the bearer token.
+const cloudflareMCP = "https://mcp.cloudflare.com/mcp"
+
+// cloudflareToken returns the Cloudflare token for an agent in environment
+// id's agent box: the node's, if its repository deploys to Cloudflare, else
+// "". The agent works without it, so a failure is logged, not returned.
+func (s *Server) cloudflareToken(ctx context.Context, id string) string {
+	if s.Cloudflare == nil {
+		return ""
+	}
+	token, err := s.Cloudflare(ctx)
+	if err != nil {
+		s.log.WarnContext(ctx, "reading the Cloudflare token", slog.Any("error", err))
+		return ""
+	}
+	if token == "" {
+		return ""
+	}
+	env, err := s.store.Get(ctx, id)
+	if err != nil {
+		s.log.WarnContext(ctx, "finding the workspace for Cloudflare's MCP server", slog.String("env", id), slog.Any("error", err))
+		return ""
+	}
+	// The workspace is the agent's: IsCloudflare keeps its reads inside it.
+	is, err := setup.IsCloudflare(env.Workspace)
+	if err != nil {
+		s.log.WarnContext(ctx, "reading whether the repository deploys to Cloudflare", slog.String("env", id), slog.Any("error", err))
+		return ""
+	}
+	if !is {
+		return ""
+	}
+	return token
+}
+
+// fernMCP is Fern's MCP server as an agent in an agent box reaches it, and
+// Cloudflare's, for a repository that deploys there.
 type fernMCP struct {
 	URL   string
 	Token string // the box's, which the server takes as the bearer token
+	// Cloudflare is the Cloudflare API token for Cloudflare's MCP server; ""
+	// adds no server.
+	Cloudflare string
 }
 
 // claude adds the MCP server to Claude's arguments, takes away Claude's own
@@ -359,11 +410,19 @@ type fernMCP struct {
 // the box writes those, and they run code in the agent box, next to
 // Claude's login.
 func (m fernMCP) claude(req *boxexec.Request) error {
-	cfg, err := json.Marshal(map[string]any{"mcpServers": map[string]any{"fern": map[string]any{
+	servers := map[string]any{"fern": map[string]any{
 		"type":    "http",
 		"url":     m.URL,
 		"headers": map[string]string{"Authorization": "Bearer " + m.Token},
-	}}})
+	}}
+	if m.Cloudflare != "" {
+		servers["cloudflare"] = map[string]any{
+			"type":    "http",
+			"url":     cloudflareMCP,
+			"headers": map[string]string{"Authorization": "Bearer " + m.Cloudflare},
+		}
+	}
+	cfg, err := json.Marshal(map[string]any{"mcpServers": servers})
 	if err != nil {
 		return err
 	}
@@ -413,6 +472,12 @@ func (m fernMCP) openCode(req *boxexec.Request, addr string) error {
 	servers["fern"] = map[string]any{
 		"type": "remote", "url": m.URL, "headers": map[string]string{"Authorization": "Bearer " + m.Token},
 		"oauth": false, "codemode": false,
+	}
+	if m.Cloudflare != "" {
+		servers["cloudflare"] = map[string]any{
+			"type": "remote", "url": cloudflareMCP, "headers": map[string]string{"Authorization": "Bearer " + m.Cloudflare},
+			"oauth": false,
+		}
 	}
 	mcp["servers"] = servers
 	cfg["mcp"] = mcp

@@ -71,6 +71,26 @@ func TestMakeGuess(t *testing.T) {
 			wantTools: "# Fern's guess, from package.json.\n[tools]\nnode = \"lts\"\n",
 		},
 		{
+			name: "a Worker without a framework",
+			files: map[string]string{
+				"package.json":   `{"scripts": {"dev": "wrangler dev"}, "devDependencies": {"wrangler": "4"}, "packageManager": "pnpm@10.34.9"}`,
+				"pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+			},
+			wantRun:   "pnpm install --frozen-lockfile --prefer-offline && exec pnpm run dev --ip 0.0.0.0 --port $PORT",
+			wantPort:  8787,
+			wantTools: "# Fern's guess, from package.json.\n[tools]\nnode = \"lts\"\npnpm = \"10.34.9\"\n",
+		},
+		{
+			name: "astro on cloudflare is astro's dev server",
+			files: map[string]string{
+				"package.json":   `{"scripts": {"dev": "astro dev"}, "dependencies": {"astro": "7", "@astrojs/cloudflare": "13"}, "devDependencies": {"wrangler": "4"}}`,
+				"pnpm-lock.yaml": "lockfileVersion: '9.0'\n",
+			},
+			wantRun:   "pnpm install --frozen-lockfile --prefer-offline && exec pnpm run dev --host 0.0.0.0 --port $PORT",
+			wantPort:  4321,
+			wantTools: "# Fern's guess, from package.json.\n[tools]\nnode = \"lts\"\npnpm = \"latest\"\n",
+		},
+		{
 			name: "postgres from docker-compose",
 			files: map[string]string{
 				"package.json": `{"scripts": {"dev": "next dev"}, "dependencies": {"next": "16"}}`,
@@ -157,6 +177,41 @@ func TestMakeGuessNone(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A repository deploys to Cloudflare if it has wrangler's config or depends
+// on wrangler or an adapter for it.
+func TestIsCloudflare(t *testing.T) {
+	tests := []struct {
+		name  string
+		files map[string]string
+		want  bool
+	}{
+		{"wrangler.jsonc", map[string]string{"wrangler.jsonc": "{}"}, true},
+		{"wrangler.toml", map[string]string{"wrangler.toml": "name = \"x\"\n"}, true},
+		{"astro's adapter", map[string]string{"package.json": `{"dependencies": {"@astrojs/cloudflare": "13"}}`}, true},
+		{"wrangler as a dev dependency", map[string]string{"package.json": `{"devDependencies": {"wrangler": "4"}}`}, true},
+		{"another host", map[string]string{"package.json": `{"dependencies": {"next": "16"}}`}, false},
+		{"not node", map[string]string{"go.mod": "module x\n"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			for name, data := range tt.files {
+				write(t, dir, name, data)
+			}
+			if got, err := setup.IsCloudflare(dir); err != nil || got != tt.want {
+				t.Errorf("IsCloudflare() = %t, %v; want %t", got, err, tt.want)
+			}
+		})
+	}
+	t.Run("a package.json that isn't JSON", func(t *testing.T) {
+		dir := t.TempDir()
+		write(t, dir, "package.json", "{")
+		if _, err := setup.IsCloudflare(dir); err == nil {
+			t.Error("IsCloudflare() error = nil, want one")
+		}
+	})
 }
 
 // A guess makes a golden key, which its files change, and a default

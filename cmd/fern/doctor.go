@@ -185,6 +185,17 @@ func (n node) check(ctx context.Context, cl *api.Client) []finding {
 	default:
 		add(finding{name: "GitHub App", ok: true, detail: "set up: T3's git and gh get tokens"})
 	}
+	// Cloudflare's MCP server for Claude, which is optional too.
+	switch data, err := os.ReadFile(filepath.Join(n.etc, "cloudflare.env")); {
+	case errors.Is(err, os.ErrNotExist):
+		add(finding{name: "Cloudflare", info: true, detail: "no token: Claude has no Cloudflare MCP server; deploys by push still work (README)"})
+	case err != nil:
+		add(finding{name: "Cloudflare", detail: err.Error(), fix: "check " + n.etc + "/cloudflare.env"})
+	case !strings.Contains(string(data), "CLOUDFLARE_API_TOKEN="):
+		add(finding{name: "Cloudflare", detail: n.etc + "/cloudflare.env holds no CLOUDFLARE_API_TOKEN", fix: "delete it and run the install again with FERN_CLOUDFLARE_TOKEN_FILE"})
+	default:
+		add(finding{name: "Cloudflare", ok: true, detail: "token set: Claude gets Cloudflare's MCP server in Cloudflare repositories"})
+	}
 	return out
 }
 

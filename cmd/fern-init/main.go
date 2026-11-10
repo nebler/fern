@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/nebler/fern/internal/boxexec"
+	"github.com/nebler/fern/internal/setup"
 )
 
 func main() {
@@ -65,7 +66,12 @@ func run(ctx context.Context, log *slog.Logger) error {
 	}
 	if claude := os.Getenv("CLAUDE_CONFIG_DIR"); claude != "" {
 		// Claude works without the hint, only less well.
-		if err := writeHint(claude, services, guessed, os.Getenv("FERN_PREVIEW")); err != nil {
+		h := hint{services: services, guessed: guessed, preview: os.Getenv("FERN_PREVIEW")}
+		var err error
+		if h.cloudflare, err = setup.IsCloudflare(dir); err != nil {
+			log.WarnContext(ctx, "reading whether the repository deploys to Cloudflare", slog.Any("error", err))
+		}
+		if err := writeHint(claude, h); err != nil {
 			log.WarnContext(ctx, "writing Claude's hint failed", slog.Any("error", err))
 		}
 	}

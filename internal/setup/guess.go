@@ -48,6 +48,9 @@ var frameworks = []framework{
 	{"@tanstack/react-start", "--host 0.0.0.0 --port $PORT --strictPort", 3000},
 	{"@sveltejs/kit", "--host 0.0.0.0 --port $PORT --strictPort", 5173},
 	{"@react-router/dev", "--host 0.0.0.0 --port $PORT", 5173},
+	// A Worker without a framework: its dev script is wrangler dev. Last, as
+	// the frameworks above that deploy to Cloudflare depend on it too.
+	{"wrangler", "--ip 0.0.0.0 --port $PORT", 8787},
 }
 
 // packageManager is how a project installs and runs its scripts.
@@ -166,6 +169,48 @@ func MakeGuess(dir string) (Guess, error) {
 		return g, err
 	}
 	return g, nil
+}
+
+// cloudflareFiles are the files at a repository's root that make it a
+// Cloudflare project: wrangler's config.
+var cloudflareFiles = []string{"wrangler.jsonc", "wrangler.json", "wrangler.toml"}
+
+// cloudflarePackages are dependencies that deploy a project to Cloudflare.
+var cloudflarePackages = []string{"wrangler", "@astrojs/cloudflare", "@cloudflare/vite-plugin", "@opennextjs/cloudflare"}
+
+// IsCloudflare reports whether the repository checked out at dir deploys to
+// Cloudflare: it has wrangler's config, or package.json depends on wrangler
+// or an adapter for it. Its dev server then emulates D1, R2 and KV in the
+// workspace (.wrangler/state), so a turn's snapshot holds their data. The
+// files are the agent's: readFile keeps to dir.
+func IsCloudflare(dir string) (bool, error) {
+	for _, p := range cloudflareFiles {
+		if _, err := readFile(dir, p); err == nil {
+			return true, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return false, err
+		}
+	}
+	data, err := readFile(dir, "package.json")
+	if errors.Is(err, fs.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var pkg struct {
+		Dependencies    map[string]string `json:"dependencies"`
+		DevDependencies map[string]string `json:"devDependencies"`
+	}
+	if err := json.Unmarshal(data, &pkg); err != nil {
+		return false, fmt.Errorf("package.json: %w", err)
+	}
+	for _, name := range cloudflarePackages {
+		if pkg.Dependencies[name] != "" || pkg.DevDependencies[name] != "" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // pickPackageManager returns the package manager field names

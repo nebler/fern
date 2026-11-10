@@ -61,6 +61,11 @@ const (
 	runscBundles = "/run/fern/boxes"
 	// mcpPort is where agent boxes reach the daemon's MCP endpoint.
 	mcpPort = 7071
+	// cloudflareFile holds the node's Cloudflare API token as
+	// CLOUDFLARE_API_TOKEN=…, readable by root only, if someone opted in
+	// (install.sh cloudflare): agents in Cloudflare repositories' agent
+	// boxes get Cloudflare's MCP server with it.
+	cloudflareFile = "/etc/fern/cloudflare.env"
 	// backupConfig says where backups go (internal/backup), root only.
 	backupConfig = "/etc/fern/backup.env"
 )
@@ -217,7 +222,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 
 	drv := runsc.New(runsc.Config{
 		Pool: pool, Bundles: runscBundles, State: runscState, Images: filepath.Join(pool, "images"), Image: boxImage,
-		DNS: strings.Split(*boxDNS, ","), Login: fileLogin(loginFile), MCPPort: mcpPort, Preview: previewAt,
+		DNS: strings.Split(*boxDNS, ","), Login: fileVar(loginFile, "CLAUDE_CODE_OAUTH_TOKEN"), MCPPort: mcpPort, Preview: previewAt,
 		Limits: limits, MaxLimits: most,
 	}, tr, reg)
 	// Golden keys name the image's content, not its tag.
@@ -234,6 +239,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	}
 	envs := actor.New(st, drv, cfg, tr, reg, log)
 	apiSrv := server.New(st, drv, envs, agentMCP, tr, log)
+	apiSrv.Cloudflare = fileVar(cloudflareFile, "CLOUDFLARE_API_TOKEN")
 	app, err := github.Load(*githubApp, *githubAPI)
 	if err != nil {
 		return fmt.Errorf("the GitHub App: %w", err)
@@ -346,10 +352,10 @@ func metricsHandler(reg *prometheus.Registry) http.Handler {
 	return mux
 }
 
-// fileLogin returns a function that reads Claude's login from file, a line
-// CLAUDE_CODE_OAUTH_TOKEN=…, at every wake, so a new login needs no
-// restart: "" while there is none.
-func fileLogin(file string) func(ctx context.Context) (string, error) {
+// fileVar returns a function that reads variable name from file, a line
+// NAME=…, at every call (Claude's login at every wake), so a new value needs
+// no restart: "" while there is none.
+func fileVar(file, name string) func(ctx context.Context) (string, error) {
 	return func(context.Context) (string, error) {
 		data, err := os.ReadFile(file)
 		if errors.Is(err, fs.ErrNotExist) {
@@ -359,7 +365,7 @@ func fileLogin(file string) func(ctx context.Context) (string, error) {
 			return "", err
 		}
 		for line := range strings.Lines(string(data)) {
-			if v, ok := strings.CutPrefix(strings.TrimSpace(line), "CLAUDE_CODE_OAUTH_TOKEN="); ok {
+			if v, ok := strings.CutPrefix(strings.TrimSpace(line), name+"="); ok {
 				return v, nil
 			}
 		}

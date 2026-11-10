@@ -1,0 +1,6 @@
+{
+  "name": "cloudflare-check",
+  "compatibility_date": "2026-11-03",
+  "d1_databases": [{ "binding": "DB", "database_name": "scores", "database_id": "00000000-0000-4000-8000-000000000000" }],
+  "r2_buckets": [{ "binding": "PICS", "bucket_name": "pics" }]
+}

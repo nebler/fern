@@ -448,6 +448,59 @@ func TestBashCancelledCallKillsCommand(t *testing.T) {
 	}
 }
 
+// With a Cloudflare token on the node, an agent in the agent box of a
+// repository that deploys to Cloudflare gets Cloudflare's MCP server too; one
+// in another repository doesn't, nor does any agent without a token.
+func TestAgentStartCloudflare(t *testing.T) {
+	bin := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\"\nprintf '%s' \"$OPENCODE_CONFIG_CONTENT\"\n"
+	for _, name := range []string{"claude", "opencode"} {
+		if err := os.WriteFile(filepath.Join(bin, name), []byte(script), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := newDemoBox(t)
+	cf := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cf, "wrangler.jsonc"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.st.Create(t.Context(), "cf", store.CreateOptions{Workspace: cf}); err != nil {
+		t.Fatal(err)
+	}
+	tests := []struct {
+		name  string
+		env   string
+		token string
+		want  bool
+	}{
+		{"a Cloudflare repository", "cf", "cf-token", true},
+		{"another repository", "demo", "cf-token", false},
+		{"no token on the node", "cf", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			api := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+			t.Cleanup(api.Close)
+			api.Cloudflare = func(context.Context) (string, error) { return tt.token, nil }
+			c := serveSocket(t, api.Handler())
+			for _, agent := range []boxexec.Request{
+				{Argv: []string{filepath.Join(bin, "claude"), "-p"}},
+				{Argv: []string{filepath.Join(bin, "opencode"), "serve"}},
+			} {
+				var stdout bytes.Buffer
+				if _, err := c.ExecAgent(t.Context(), tt.env, agent, boxexec.Streams{Stdout: &stdout, Stderr: io.Discard}); err != nil {
+					t.Fatalf("ExecAgent(%s) error: %v", filepath.Base(agent.Argv[0]), err)
+				}
+				got := strings.Contains(stdout.String(), "https://mcp.cloudflare.com/mcp") &&
+					strings.Contains(stdout.String(), "Bearer cf-token")
+				if got != tt.want {
+					t.Errorf("%s has Cloudflare's MCP server: %t, want %t\n%s", filepath.Base(agent.Argv[0]), got, tt.want, stdout.String())
+				}
+			}
+		})
+	}
+}
+
 // An agent started in an agent box gets Fern's MCP server in place of its
 // own shell: Claude in its arguments, OpenCode's server in its settings,
 // with the box's address to listen on. Other commands are left alone.

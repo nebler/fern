@@ -20,6 +20,9 @@
 # to keep your own firewall, and FERN_GITHUB_APP_ID with FERN_GITHUB_APP_KEY
 # (the .pem GitHub gave you, on the machine you run this on) for private
 # repositories, push and pull requests through your GitHub App (README),
+# FERN_CLOUDFLARE_TOKEN_FILE (a file holding a Cloudflare API token, on the
+# machine you run this on) to give Claude Cloudflare's MCP server in
+# repositories that deploy to Cloudflare (README),
 # and FERN_BACKUP_ENDPOINT, _REGION, _BUCKET, _ACCESS_KEY and _SECRET_KEY
 # for hourly encrypted backups to an S3 bucket (README); with
 # FERN_RESTORE_FROM=<old server's hostname> it brings that server's
@@ -37,6 +40,7 @@ FERN_VERSION=${FERN_VERSION:-latest}
 FERN_FIREWALL=${FERN_FIREWALL:-on}
 FERN_GITHUB_APP_ID=${FERN_GITHUB_APP_ID:-}
 FERN_GITHUB_APP_KEY=${FERN_GITHUB_APP_KEY:-}
+FERN_CLOUDFLARE_TOKEN_FILE=${FERN_CLOUDFLARE_TOKEN_FILE:-}
 FERN_BACKUP_BUCKET=${FERN_BACKUP_BUCKET:-}
 FERN_RESTORE_FROM=${FERN_RESTORE_FROM:-}
 GVISOR_RELEASE=${GVISOR_RELEASE:-20261012}
@@ -396,6 +400,20 @@ github_app() {
   echo "the daemon has GitHub App $id: T3's git and gh get tokens for the repositories it is installed on"
 }
 
+# cloudflare_token stores a Cloudflare API token, from stdin, where the
+# daemon reads it at every agent's start (cmd/fern-daemon), readable by root
+# only: Claude in a repository that deploys to Cloudflare gets Cloudflare's
+# MCP server with it, in its agent box only. Deleting the file opts out.
+cloudflare_token() {
+  local file=/etc/fern/cloudflare.env token
+  IFS= read -r token || true
+  case $token in '' | *[!A-Za-z0-9_-]*) die "a Cloudflare API token is one line of letters, digits, - and _" ;; esac
+  install -d -m 755 /etc/fern
+  (umask 077 && printf 'CLOUDFLARE_API_TOKEN=%s\n' "$token" >"$file.new")
+  mv "$file.new" "$file"
+  echo "the daemon has a Cloudflare token: Claude gets Cloudflare's MCP server in repositories that deploy to Cloudflare"
+}
+
 # ---------------------------------------------------------------- your Mac
 
 # tunnel keeps an SSH tunnel to T3 and the previews running in the
@@ -484,6 +502,11 @@ remote() {
     # The key goes on stdin, never in a command line.
     ssh -o BatchMode=yes "$host" "if [ \"\$(id -u)\" = 0 ]; then bash /tmp/fern-install.sh github $FERN_GITHUB_APP_ID; else sudo -n bash /tmp/fern-install.sh github $FERN_GITHUB_APP_ID; fi" <"$FERN_GITHUB_APP_KEY"
   fi
+  if [ -n "$FERN_CLOUDFLARE_TOKEN_FILE" ]; then
+    [ -r "$FERN_CLOUDFLARE_TOKEN_FILE" ] || die "FERN_CLOUDFLARE_TOKEN_FILE must name a file holding the token, on this machine"
+    # The token goes on stdin, never in a command line.
+    ssh -o BatchMode=yes "$host" "if [ \"\$(id -u)\" = 0 ]; then bash /tmp/fern-install.sh cloudflare; else sudo -n bash /tmp/fern-install.sh cloudflare; fi" <"$FERN_CLOUDFLARE_TOKEN_FILE"
+  fi
   local link
   link=$(tr -d '\r' <"$out" | sed -n 's/^pairing link: //p' | tail -1)
   rm -f "$out"
@@ -538,6 +561,7 @@ case "${1:-}" in
   pair) pair ;;
   doctor) doctor "${2:?usage: install.sh doctor root@HOST}" ;;
   github) github_app "${2:-}" ;;
+  cloudflare) cloudflare_token ;;
   backup-config) backup_config ;;
   server) server ;;
   --node-only) server --node-only ;;

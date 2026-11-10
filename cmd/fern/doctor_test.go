@@ -24,6 +24,7 @@ func TestDoctor(t *testing.T) {
 	}
 	for path, data := range map[string]string{
 		"etc/claude.env":                  "CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat01-x\n",
+		"etc/cloudflare.env":              "CLOUDFLARE_API_TOKEN=cf-x\n",
 		"pool/images/fern-box:dev/root/x": "",
 		"proc/sys/net/ipv4/ip_forward":    "0\n",
 		"proc/meminfo":                    "MemTotal: 8000000 kB\nMemAvailable:    2048000 kB\n",
@@ -61,6 +62,7 @@ func TestDoctor(t *testing.T) {
 	want := map[string]string{
 		"daemon": "ok", "T3": "ok", "Claude login": "ok", "pool": "fail", "gVisor": "ok", "box image": "ok",
 		"forwarding": "fail", "firewall": "info", "memory": "ok", "GitHub App": "info", "backups": "info",
+		"Cloudflare": "ok",
 	}
 	if diff := cmp.Diff(want, got); diff != "" {
 		t.Errorf("findings (-want +got):\n%s", diff)

@@ -54,6 +54,17 @@ Not yet in the order above, which stays as it is until the owner decides. Nothin
 | **A T3 thread on a fork:** a coordinator tries an idea several ways from one running state, and keeps one | Spaces, Agent to Agent | three threads try one migration, each with its own Postgres, and the winner carries on as a thread |
 | **Point at a preview to change it** | Close the Loop | a note on a page element reaches the thread with its text and location |
 
+## Cloudflare projects (2026-11-10)
+A repository on Astro and Cloudflare (Workers, D1, R2) runs, reverts and deploys from a thread with nothing to set. Brief, with what was tried: [briefs/cloudflare-projects.md](briefs/cloudflare-projects.md).
+
+| Step | State |
+|---|---|
+| **Detect a Cloudflare project**, guess a plain Worker's dev server, tell Claude | built |
+| **D1, R2 and KV state in snapshots** (`.wrangler/state`) | built: `lab/check.sh cloudflare` reverts a deleted D1 row and R2 object |
+| **Deploys by push** (Cloudflare's Workers Builds), no token in a box | nothing for Fern to build: the hint and the README |
+| **Opt-in Cloudflare MCP for the agent box**, token kept on the node | built; the check greps for the token everywhere but the agent box |
+| **Hide Local** | needs T3's app (the picker is there): propose a "worktrees only" server setting upstream; `fern-claude` refuses Local sessions meanwhile |
+
 Later, if someone asks: short-lived identity for a box (OIDC), attempts side by side, `fern sync`, `fern usage`.
 
 Left out: team features, desktops and Chrome profiles, Mac machines and public preview links (previews are never public). Models, apps and review UI belong to the CLIs and T3.
