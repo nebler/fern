@@ -244,6 +244,9 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("the GitHub App: %w", err)
 	}
+	if app != nil {
+		apiSrv.GitHub = app
+	}
 	// T3's git and gh get their tokens on the API's socket, which boxes
 	// can't reach.
 	api := http.NewServeMux()

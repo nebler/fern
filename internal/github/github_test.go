@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"golang.org/x/crypto/nacl/box"
 
 	"github.com/nebler/fern/internal/github"
 )
@@ -33,8 +34,13 @@ type fakeGitHub struct {
 	key    *rsa.PublicKey
 	ttl    time.Duration
 	minted atomic.Int32
-	mu     sync.Mutex
-	asked  []map[string]any // the access token requests' bodies
+	// noWorkflows is an App that may not change workflows.
+	noWorkflows bool
+	// box is the repository's key for Actions secrets.
+	boxPub, boxPriv *[32]byte
+	mu              sync.Mutex
+	asked           []map[string]any  // the access token requests' bodies
+	secrets         map[string]string // name to the sealed value, as base64
 }
 
 func (f *fakeGitHub) requests() []map[string]any {
@@ -44,7 +50,33 @@ func (f *fakeGitHub) requests() []map[string]any {
 }
 
 func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if err := f.verify(strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")); err != nil {
+	bearer := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	// The secrets' routes take an installation token; the others the JWT.
+	if path, ok := strings.CutPrefix(r.URL.Path, "/repos/owner/app/actions/secrets/"); ok {
+		if !strings.HasPrefix(bearer, "ghs_") {
+			http.Error(w, "not a token", http.StatusUnauthorized)
+			return
+		}
+		switch {
+		case r.Method == http.MethodGet && path == "public-key":
+			_ = json.NewEncoder(w).Encode(map[string]string{"key_id": "k1", "key": base64.StdEncoding.EncodeToString(f.boxPub[:])})
+		case r.Method == http.MethodPut:
+			var body map[string]string
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			if body["key_id"] != "k1" {
+				http.Error(w, "key_id", http.StatusUnprocessableEntity)
+				return
+			}
+			f.mu.Lock()
+			f.secrets[path] = body["encrypted_value"]
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusCreated)
+		default:
+			http.Error(w, "unexpected "+r.Method+" "+r.URL.Path, http.StatusTeapot)
+		}
+		return
+	}
+	if err := f.verify(bearer); err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
@@ -59,6 +91,10 @@ func (f *fakeGitHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.asked = append(f.asked, body)
 		f.mu.Unlock()
+		if perms, _ := body["permissions"].(map[string]any); f.noWorkflows && perms["workflows"] != nil {
+			http.Error(w, `{"message":"The permissions requested are not granted to this installation."}`, http.StatusUnprocessableEntity)
+			return
+		}
 		n := f.minted.Add(1)
 		_ = json.NewEncoder(w).Encode(map[string]any{"token": fmt.Sprintf("ghs_%d", n), "expires_at": time.Now().Add(f.ttl)})
 	default:
@@ -103,7 +139,11 @@ func newApp(t *testing.T, ttl time.Duration) (*github.App, *fakeGitHub) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fake := &fakeGitHub{key: &key.PublicKey, ttl: ttl}
+	pub, priv, err := box.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeGitHub{key: &key.PublicKey, ttl: ttl, boxPub: pub, boxPriv: priv, secrets: make(map[string]string)}
 	srv := httptest.NewServer(fake)
 	t.Cleanup(srv.Close)
 	// As GitHub hands it out: PKCS #1.
@@ -131,7 +171,7 @@ func TestToken(t *testing.T) {
 	// Narrower than the App: the one repository, and what git and gh need.
 	want := []map[string]any{{
 		"repositories": []any{"app"},
-		"permissions":  map[string]any{"contents": "write", "pull_requests": "write", "metadata": "read"},
+		"permissions":  map[string]any{"contents": "write", "pull_requests": "write", "metadata": "read", "workflows": "write"},
 	}}
 	if diff := cmp.Diff(want, fake.requests()); diff != "" {
 		t.Errorf("token request (-want +got):\n%s", diff)
@@ -144,6 +184,51 @@ func TestToken(t *testing.T) {
 	}
 	if _, err := app.Token(t.Context(), "owner", "../app"); err == nil {
 		t.Errorf("Token() of a bad name succeeded")
+	}
+}
+
+// An App that may not change workflows still gets a token, without them.
+func TestTokenWithoutWorkflows(t *testing.T) {
+	app, fake := newApp(t, time.Hour)
+	fake.noWorkflows = true
+	if tok, err := app.Token(t.Context(), "owner", "app"); err != nil || tok.Token != "ghs_1" {
+		t.Fatalf("Token() = %+v, %v; want ghs_1", tok, err)
+	}
+	asked := fake.requests()
+	if len(asked) != 2 {
+		t.Fatalf("token requests = %d, want 2: with workflows, then without", len(asked))
+	}
+	if _, ok := asked[1]["permissions"].(map[string]any)["workflows"]; ok {
+		t.Errorf("the second request = %v, want it without workflows", asked[1])
+	}
+}
+
+// A secret is sealed with the repository's key, with a token that may only
+// write secrets.
+func TestSetSecret(t *testing.T) {
+	app, fake := newApp(t, time.Hour)
+	if err := app.SetSecret(t.Context(), "owner", "app", "CLOUDFLARE_API_TOKEN", "cf-1"); err != nil {
+		t.Fatalf("SetSecret() error: %v", err)
+	}
+	sealed, err := base64.StdEncoding.DecodeString(fake.secrets["CLOUDFLARE_API_TOKEN"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := box.OpenAnonymous(nil, sealed, fake.boxPub, fake.boxPriv); !ok || string(got) != "cf-1" {
+		t.Errorf("the secret opens to %q, %t; want cf-1", got, ok)
+	}
+	want := map[string]any{"secrets": "write", "metadata": "read"}
+	if diff := cmp.Diff(want, fake.requests()[0]["permissions"]); diff != "" {
+		t.Errorf("token permissions (-want +got):\n%s", diff)
+	}
+	for _, tc := range []struct{ owner, repo, secret string }{
+		{"owner", "other", "X"},
+		{"owner", "app", "lower"},
+		{"owner", "../app", "X"},
+	} {
+		if err := app.SetSecret(t.Context(), tc.owner, tc.repo, tc.secret, "v"); err == nil {
+			t.Errorf("SetSecret(%s/%s, %s) succeeded, want an error", tc.owner, tc.repo, tc.secret)
+		}
 	}
 }
 

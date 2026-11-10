@@ -1,0 +1,56 @@
+# Deploys to Cloudflare on every push: main is the live site, any other
+# branch gets a preview URL of its own. Needs the repository secret
+# CLOUDFLARE_API_TOKEN.
+name: deploy
+
+on:
+  push:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - name: Deploy the live site
+        if: github.ref == 'refs/heads/main'
+        id: live
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          packageManager: pnpm
+          command: deploy
+
+      # A preview alias is a DNS label: lowercase letters, digits and dashes.
+      - name: Name the preview
+        if: github.ref != 'refs/heads/main'
+        id: alias
+        run: |
+          alias=$(printf '%s' "$GITHUB_REF_NAME" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+//; s/-+$//' | cut -c1-40)
+          echo "alias=${alias%-}" >> "$GITHUB_OUTPUT"
+      - name: Upload a preview
+        if: github.ref != 'refs/heads/main'
+        id: preview
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          packageManager: pnpm
+          command: versions upload --preview-alias ${{ steps.alias.outputs.alias }}
+
+      - name: Say where it is
+        run: |
+          {
+            echo "### Deployed"
+            echo "${{ steps.live.outputs.deployment-url }}${{ steps.preview.outputs.deployment-url }}"
+          } >> "$GITHUB_STEP_SUMMARY"

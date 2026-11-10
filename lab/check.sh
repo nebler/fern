@@ -1504,9 +1504,14 @@ cloudflare() {
       in_daemon "rm -f /etc/fern/cloudflare.env"
     fi
   fi
-  # Claude's box, the agent box if there is one, wrote the hint as it woke.
+  # Claude's box, the agent box if there is one, wrote the hint as it woke;
+  # the skills are links into its image.
+  local claude_box=""
+  [ "$AGENTS" = 1 ] && claude_box=--agent
   check "Claude is told it is a Cloudflare repository" yes \
     "$(succeeds in_daemon "grep -q 'deploys to Cloudflare' /var/lib/fern/envs/cf2/claude/CLAUDE.md")"
+  check "and gets Cloudflare's skills and fern-deploy" "yes yes yes" \
+    "$(fern exec $claude_box cf2 -- sh -c 'cd "$CLAUDE_CONFIG_DIR/skills" && for s in fern-deploy wrangler frameworks-on-cloudflare; do test -f $s/SKILL.md && echo yes || echo no; done' | xargs)"
   for e in cf1 cf2 "$G"; do fern rm "$e"; done
   in_daemon "rm -rf $W"
 }

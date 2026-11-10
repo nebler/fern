@@ -58,7 +58,7 @@ func writeHint(claudeDir string, h hint) error {
 	}
 	if h.cloudflare {
 		fmt.Fprintln(&b, "- This repository deploys to Cloudflare. Its dev server (wrangler, or the framework's Cloudflare adapter) emulates D1, R2 and KV locally, in .wrangler/state in the worktree: use their bindings in wrangler's config, with no account and no token. That data is snapshotted with every turn, too.")
-		fmt.Fprintln(&b, "- Deploys happen when the person pushes from T3: Cloudflare builds the main branch into the live site and other branches into preview URLs. Don't run `wrangler deploy` or `wrangler login`; this box has no Cloudflare credentials, by design.")
+		fmt.Fprintln(&b, "- Deploys happen when the person pushes from T3, through GitHub Actions: main is the live site, other branches get preview URLs. To set that up, or when the person asks to put the site online, use the fern-deploy skill. Don't run `wrangler deploy` or `wrangler login`; this box has no Cloudflare credentials, by design.")
 		fmt.Fprintln(&b, "- If you have the `cloudflare` MCP server's tools, they act on the person's real Cloudflare account: use them to create a D1 database or an R2 bucket for production, read a deploy's build logs, or check what is live. Ask before deleting or changing anything there.")
 	}
 	fmt.Fprintln(&b, "- Every turn is snapshotted. T3's \"Revert files too\" brings back the files and the services' data together, so changing data is safe.")

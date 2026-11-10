@@ -74,6 +74,9 @@ func run(ctx context.Context, log *slog.Logger) error {
 		if err := writeHint(claude, h); err != nil {
 			log.WarnContext(ctx, "writing Claude's hint failed", slog.Any("error", err))
 		}
+		if err := linkSkills(claude, cloudflareSkills, h.cloudflare); err != nil {
+			log.WarnContext(ctx, "giving Claude the Cloudflare skills failed", slog.Any("error", err))
+		}
 	}
 
 	// Services outlive ctx: they are stopped, all at once, after it is done.

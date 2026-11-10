@@ -138,6 +138,8 @@ Unix socket `/run/fern/fern.sock`, for root and the box user's group (T3's serve
 
 **Cloudflare's, for Cloudflare repositories (built, opt-in):** with a token in `/etc/fern/cloudflare.env` (root only; `install.sh cloudflare`), the daemon adds Cloudflare's MCP server (`https://mcp.cloudflare.com/mcp`, the token as its bearer token) to the agent's MCP config as it starts Claude or OpenCode's server in the agent box, when the workspace deploys to Cloudflare (§8). It reads the file at each start, so adding or removing the token needs no restart. The token is in the agent's arguments or settings in the agent box only, beside Claude's login; the box that runs the repository's code, the workspace and its snapshots never see it (`lab/check.sh cloudflare`).
 
+**`cloudflare_connect` (built, with a Cloudflare token and a GitHub App):** a tool on the environment's MCP server that sets the repository's `CLOUDFLARE_API_TOKEN` Actions secret to the node's token, so a push deploys from GitHub Actions: the daemon reads `origin` with git in the environment's box and seals the value with the repository's key, through the App (*Secrets: write*). Claude's skills for it (`fern-deploy`, and Cloudflare's own) are links in its folder into the box image (fern-init). Brief: [briefs/cloudflare-projects.md](briefs/cloudflare-projects.md).
+
 **Agent tools (built: `env_fork`, `env_exec`, `env_delete`):** on the same MCP server, Claude forks its own environment, runs commands in its forks (calls for different forks run at once) and deletes them; it reaches no other environment (§7.4). Planned: `env_snapshot`, `env_restore`.
 
 ---

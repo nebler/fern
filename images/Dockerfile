@@ -71,6 +71,21 @@ RUN case "$TARGETARCH" in arm64) sum=$GH_SHA256_arm64 ;; amd64) sum=$GH_SHA256_a
  && tar -xzf /gh.tar.gz --strip-components=2 -C / "gh_${GH_VERSION}_linux_$TARGETARCH/bin/gh" \
  && chmod 755 /gh
 
+# Cloudflare's skills for agents (github.com/cloudflare/skills, Apache-2.0),
+# pinned and checked: the ones for building and running a site on Workers.
+# fern-init gives them, with Fern's own fern-deploy, to Claude in a repository
+# that deploys to Cloudflare.
+FROM claude AS cloudflare-skills
+SHELL ["/bin/bash", "-o", "pipefail", "-c"]
+ARG CLOUDFLARE_SKILLS_COMMIT=cbf893b954222276bf1af57e5f23379231e0efb9
+ARG CLOUDFLARE_SKILLS_SHA256=6bb259020f84b8d58fdff541340d50ecaa44b4ac59a99b6cbe10bd75bbaaf67e
+RUN curl -fsSL -o /skills.tar.gz "https://codeload.github.com/cloudflare/skills/tar.gz/$CLOUDFLARE_SKILLS_COMMIT" \
+ && echo "$CLOUDFLARE_SKILLS_SHA256  /skills.tar.gz" | sha256sum -c - \
+ && mkdir -p /src /skills && tar -xzf /skills.tar.gz -C /src --strip-components=1 \
+ && for s in cloudflare frameworks-on-cloudflare cloudflare-app-bootstrap wrangler cf-cli workers-best-practices durable-objects web-perf; do \
+      cp -r "/src/skills/$s" /skills/; done \
+ && cp /src/LICENSE /skills/LICENSE-cloudflare-skills
+
 FROM debian:trixie-slim AS fern
 RUN apt-get update \
  && apt-get install -y --no-install-recommends btrfs-progs \
@@ -105,6 +120,8 @@ COPY --from=claude /claude /usr/local/bin/claude
 COPY images/box-opencode /usr/local/bin/opencode
 COPY --from=opencode /opencode /usr/local/libexec/opencode
 COPY --from=mise /mise /usr/local/bin/mise
+COPY --from=cloudflare-skills /skills /usr/local/share/fern/skills/cloudflare
+COPY images/skills/fern-deploy /usr/local/share/fern/skills/cloudflare/fern-deploy
 # The root filesystem is read-only, so Claude Code must not update itself.
 ENV PATH=/usr/lib/postgresql/17/bin:$PATH \
     HOME=/tmp PGHOST=/tmp PGUSER=postgres PGDATABASE=postgres \

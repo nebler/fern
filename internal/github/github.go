@@ -1,10 +1,11 @@
 // Package github mints GitHub tokens for T3's git and gh, from a GitHub App
 // the person installed on their repositories: each token is for one
-// repository, lasts an hour, and may only read and write its contents and
-// pull requests. The App's private key stays on the node, readable by root
-// only; T3's server asks the daemon for a token over its socket, which
-// boxes can't reach, so no token is ever in a box, a workspace or a
-// snapshot.
+// repository, lasts an hour, and may only read and write its contents, its
+// workflows (if the App may) and pull requests. The App's private key stays
+// on the node, readable by root only; T3's server asks the daemon for a
+// token over its socket, which boxes can't reach, so no token is ever in a
+// box, a workspace or a snapshot. The daemon also sets a repository's
+// Actions secrets with it (SetSecret), for deploys from GitHub Actions.
 package github
 
 import (
@@ -30,6 +31,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/nacl/box"
 )
 
 // ErrNotInstalled means the App isn't installed on the repository, or the
@@ -38,6 +41,10 @@ var ErrNotInstalled = errors.New("the GitHub App isn't installed on this reposit
 
 // ErrBadRepository means a name that can't be a GitHub repository's.
 var ErrBadRepository = errors.New("not a repository")
+
+// ErrNotGranted means the App lacks a permission a token asked for: its
+// owner must add it in the App's settings and accept it on the installation.
+var ErrNotGranted = errors.New("the GitHub App doesn't have the permissions asked for")
 
 // Token is an installation access token.
 type Token struct {
@@ -113,6 +120,15 @@ func Load(dir, base string) (*App, error) {
 // name is an owner's or a repository's name as GitHub allows them.
 var name = regexp.MustCompile(`^[A-Za-z0-9_.-]{1,100}$`)
 
+// gitPermissions are what git and gh need. workflows lets a push change
+// .github/workflows; an App that may not is asked without it.
+var (
+	gitPermissions     = map[string]string{"contents": "write", "pull_requests": "write", "metadata": "read", "workflows": "write"}
+	gitPermissionsNoCI = map[string]string{"contents": "write", "pull_requests": "write", "metadata": "read"}
+	secretPermissions  = map[string]string{"secrets": "write", "metadata": "read"}
+	secretName         = regexp.MustCompile(`^[A-Z_][A-Z0-9_]{0,99}$`)
+)
+
 // Token returns a token for repository owner/repo.
 func (a *App) Token(ctx context.Context, owner, repo string) (Token, error) {
 	if !name.MatchString(owner) || !name.MatchString(repo) {
@@ -125,6 +141,22 @@ func (a *App) Token(ctx context.Context, owner, repo string) (Token, error) {
 	if ok && time.Until(t.Expires) > renewBefore {
 		return t, nil
 	}
+	t, err := a.mint(ctx, owner, repo, gitPermissions)
+	if errors.Is(err, ErrNotGranted) {
+		t, err = a.mint(ctx, owner, repo, gitPermissionsNoCI)
+	}
+	if err != nil {
+		return Token{}, err
+	}
+	a.mu.Lock()
+	a.tokens[full] = t
+	a.mu.Unlock()
+	return t, nil
+}
+
+// mint returns a new token for owner/repo with permissions, narrower than
+// the App: this repository and only what it is for.
+func (a *App) mint(ctx context.Context, owner, repo string, permissions map[string]string) (Token, error) {
 	jwt, err := a.jwt()
 	if err != nil {
 		return Token{}, err
@@ -135,18 +167,48 @@ func (a *App) Token(ctx context.Context, owner, repo string) (Token, error) {
 	if err := a.call(ctx, http.MethodGet, "/repos/"+url.PathEscape(owner)+"/"+url.PathEscape(repo)+"/installation", jwt, nil, &inst); err != nil {
 		return Token{}, err
 	}
-	// Narrower than the App: this repository, and only what git and gh need.
-	body := map[string]any{
-		"repositories": []string{repo},
-		"permissions":  map[string]string{"contents": "write", "pull_requests": "write", "metadata": "read"},
-	}
+	body := map[string]any{"repositories": []string{repo}, "permissions": permissions}
+	var t Token
 	if err := a.call(ctx, http.MethodPost, fmt.Sprintf("/app/installations/%d/access_tokens", inst.ID), jwt, body, &t); err != nil {
 		return Token{}, err
 	}
-	a.mu.Lock()
-	a.tokens[full] = t
-	a.mu.Unlock()
 	return t, nil
+}
+
+// SetSecret sets repository owner/repo's Actions secret to value,
+// sealed with the repository's public key as GitHub asks, with a token that
+// may only write its secrets. The App needs Secrets: Read and write.
+func (a *App) SetSecret(ctx context.Context, owner, repo, secret, value string) error {
+	if !secretName.MatchString(secret) {
+		return fmt.Errorf("%q isn't a secret's name", secret)
+	}
+	if !name.MatchString(owner) || !name.MatchString(repo) {
+		return fmt.Errorf("%q/%q: %w", owner, repo, ErrBadRepository)
+	}
+	t, err := a.mint(ctx, owner, repo, secretPermissions)
+	if err != nil {
+		return err
+	}
+	base := "/repos/" + url.PathEscape(owner) + "/" + url.PathEscape(repo) + "/actions/secrets/"
+	var key struct {
+		ID  string `json:"key_id"`
+		Key string `json:"key"`
+	}
+	if err := a.call(ctx, http.MethodGet, base+"public-key", t.Token, nil, &key); err != nil {
+		return err
+	}
+	raw, err := base64.StdEncoding.DecodeString(key.Key)
+	if err != nil || len(raw) != 32 {
+		return fmt.Errorf("the repository's public key %q isn't one", key.Key)
+	}
+	var pub [32]byte
+	copy(pub[:], raw)
+	sealed, err := box.SealAnonymous(nil, []byte(value), &pub, rand.Reader)
+	if err != nil {
+		return err
+	}
+	body := map[string]string{"encrypted_value": base64.StdEncoding.EncodeToString(sealed), "key_id": key.ID}
+	return a.call(ctx, http.MethodPut, base+url.PathEscape(secret), t.Token, body, nil)
 }
 
 // jwt returns the App's JSON Web Token, which lasts nine minutes (GitHub
@@ -170,9 +232,9 @@ func (a *App) jwt() (string, error) {
 	return signed + "." + enc.EncodeToString(sig), nil
 }
 
-// call makes a request to GitHub's API as the App and decodes its answer
-// into out.
-func (a *App) call(ctx context.Context, method, path, jwt string, in, out any) error {
+// call makes a request to GitHub's API with bearer, the App's JWT or one of
+// its tokens, and decodes its answer into out, unless out is nil.
+func (a *App) call(ctx context.Context, method, path, bearer string, in, out any) error {
 	var body io.Reader
 	if in != nil {
 		data, err := json.Marshal(in)
@@ -185,7 +247,7 @@ func (a *App) call(ctx context.Context, method, path, jwt string, in, out any) e
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Authorization", "Bearer "+jwt)
+	req.Header.Set("Authorization", "Bearer "+bearer)
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	resp, err := a.hc.Do(req)
@@ -198,7 +260,13 @@ func (a *App) call(ctx context.Context, method, path, jwt string, in, out any) e
 	}
 	if resp.StatusCode/100 != 2 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if resp.StatusCode == http.StatusUnprocessableEntity && bytes.Contains(msg, []byte("not granted")) {
+			return fmt.Errorf("github %s %s: %w", method, path, ErrNotGranted)
+		}
 		return fmt.Errorf("github %s %s: %s: %s", method, path, resp.Status, bytes.TrimSpace(msg))
+	}
+	if out == nil {
+		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
 }

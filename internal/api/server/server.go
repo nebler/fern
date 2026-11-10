@@ -73,6 +73,9 @@ type Server struct {
 	// the box that runs the repository's code, nor into a workspace. May be
 	// nil.
 	Cloudflare func(ctx context.Context) (string, error)
+	// GitHub sets repositories' Actions secrets (cloudflare_connect). May be
+	// nil: no GitHub App.
+	GitHub Secrets
 
 	// Stopping is closed when the daemon begins to stop. May be nil. Then the
 	// commands running in boxes are left to run: the next daemon's clients

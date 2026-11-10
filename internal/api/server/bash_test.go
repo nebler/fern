@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -44,6 +45,7 @@ func (b bearer) RoundTrip(r *http.Request) (*http.Response, error) {
 // demoBox is environment demo, its box a real boxexec server with jobs, run
 // by a fake driver and actors.
 type demoBox struct {
+	dir  string // where the box runs commands
 	st   *fakeStore
 	drv  *runsc.Fake
 	envs *actor.Group
@@ -71,7 +73,7 @@ func newDemoBox(t *testing.T) demoBox {
 	done := make(chan struct{})
 	go func() { _ = envs.Run(ctx); close(done) }()
 	t.Cleanup(func() { cancel(); <-done })
-	return demoBox{st: st, drv: drv, envs: envs, log: log}
+	return demoBox{dir: dir, st: st, drv: drv, envs: envs, log: log}
 }
 
 // serve serves the box's environment's MCP endpoint from a new API server,
@@ -498,6 +500,107 @@ func TestAgentStartCloudflare(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// fakeSecrets records the secrets cloudflare_connect sets.
+type fakeSecrets struct {
+	mu  sync.Mutex
+	set map[string]string // owner/repo/secret to value
+}
+
+func (f *fakeSecrets) SetSecret(_ context.Context, owner, repo, secret, value string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.set[owner+"/"+repo+"/"+secret] = value
+	return nil
+}
+
+// cloudflare_connect sets the repository's CLOUDFLARE_API_TOKEN secret to
+// the node's token, for the repository the box's git names; a repository
+// that doesn't deploy to Cloudflare, or one that isn't on GitHub, is refused.
+func TestCloudflareConnect(t *testing.T) {
+	tests := []struct {
+		name     string
+		remote   string // "" for none
+		wrangler bool
+		want     map[string]string
+		wantErr  string
+	}{
+		{"https", "https://github.com/owner/app.git", true, map[string]string{"owner/app/CLOUDFLARE_API_TOKEN": "cf-1"}, ""},
+		{"ssh", "git@github.com:owner/app.git", true, map[string]string{"owner/app/CLOUDFLARE_API_TOKEN": "cf-1"}, ""},
+		{"not cloudflare", "https://github.com/owner/app", false, map[string]string{}, "doesn't deploy to Cloudflare"},
+		{"not github", "https://gitlab.com/owner/app.git", true, map[string]string{}, "isn't a GitHub repository"},
+		{"no remote", "", true, map[string]string{}, "no remote"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := newDemoBox(t)
+			git := func(args ...string) {
+				t.Helper()
+				if out, err := exec.CommandContext(t.Context(), "git", append([]string{"-C", b.dir}, args...)...).CombinedOutput(); err != nil {
+					t.Fatalf("git %v: %v: %s", args, err, out)
+				}
+			}
+			git("init", "-q")
+			if tt.remote != "" {
+				git("remote", "add", "origin", tt.remote)
+			}
+			if tt.wrangler {
+				if err := os.WriteFile(filepath.Join(b.dir, "wrangler.jsonc"), []byte("{}"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := b.st.Create(t.Context(), "cf", store.CreateOptions{Workspace: b.dir}); err != nil {
+				t.Fatal(err)
+			}
+			api := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+			t.Cleanup(api.Close)
+			api.Cloudflare = func(context.Context) (string, error) { return "cf-1", nil }
+			secrets := &fakeSecrets{set: make(map[string]string)}
+			api.GitHub = secrets
+			srv := httptest.NewServer(api.MCPHandler())
+			t.Cleanup(srv.Close)
+			s, err := connect(t, srv.URL+"/mcp/cf", boxToken)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = s.Close() }()
+			res, err := s.CallTool(t.Context(), &mcp.CallToolParams{Name: "cloudflare_connect", Arguments: map[string]any{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := res.Content[0].(*mcp.TextContent).Text
+			if tt.wantErr == "" && res.IsError || tt.wantErr != "" && (!res.IsError || !strings.Contains(text, tt.wantErr)) {
+				t.Errorf("cloudflare_connect = %q (error %t), want error %q", text, res.IsError, tt.wantErr)
+			}
+			if strings.Contains(text, "cf-1") {
+				t.Errorf("cloudflare_connect told Claude the token: %q", text)
+			}
+			if diff := cmp.Diff(tt.want, secrets.set); diff != "" {
+				t.Errorf("secrets (-want +got):\n%s", diff)
+			}
+		})
+	}
+}
+
+// Without a Cloudflare token or a GitHub App on the node, Claude has no
+// cloudflare_connect.
+func TestCloudflareConnectAbsent(t *testing.T) {
+	url, _ := newDemoBox(t).serve(t)
+	s, err := connect(t, url, boxToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = s.Close() }()
+	tools, err := s.ListTools(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range tools.Tools {
+		if tool.Name == "cloudflare_connect" {
+			t.Error("cloudflare_connect is offered with no Cloudflare token or GitHub App")
+		}
 	}
 }
 
