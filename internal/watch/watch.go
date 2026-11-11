@@ -169,6 +169,11 @@ func (t *tree) apply(evs []event, mine func(pid int) bool, pending map[string]bo
 	for _, e := range evs {
 		if e.mask&unix.FAN_Q_OVERFLOW != 0 {
 			log.Warn("a workspace's changes overflowed; some are lost", slog.String("dir", t.root))
+			// The folders made meanwhile are among them: mark the tree
+			// again, which is safe to repeat.
+			if _, err := t.add("."); err != nil {
+				log.Warn("watching the workspace again failed", slog.String("dir", t.root), slog.Any("error", err))
+			}
 			continue
 		}
 		parent, ok := t.dirs[e.handle]
@@ -182,10 +187,13 @@ func (t *tree) apply(evs []event, mine func(pid int) bool, pending map[string]bo
 			}
 			continue
 		}
-		switch {
-		case e.mask&(unix.FAN_DELETE|unix.FAN_MOVED_FROM) != 0:
+		// The kernel merges a folder's events while they wait to be read: one
+		// removed and made again, as git checkout does, can come as one
+		// event with both. So both are acted on, the removal first.
+		if e.mask&(unix.FAN_DELETE|unix.FAN_MOVED_FROM) != 0 {
 			t.forget(rel)
-		case e.mask&(unix.FAN_CREATE|unix.FAN_MOVED_TO) != 0 && !skip(e.name):
+		}
+		if e.mask&(unix.FAN_CREATE|unix.FAN_MOVED_TO) != 0 && !skip(e.name) {
 			// What was written in it before its mark is found by walking it.
 			files, err := t.add(rel)
 			if err != nil {

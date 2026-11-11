@@ -61,6 +61,40 @@ func TestCrash(t *testing.T) {
 	}
 }
 
+// TestRepeat stops every change with more than one step at each of its
+// steps, then makes the change again in the same daemon, with no Reconcile in
+// between: a request that failed half-way and is sent again. Every step is
+// safe to repeat, so it succeeds.
+func TestRepeat(t *testing.T) {
+	for _, tc := range crashCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, step := range crashSteps(t, tc) {
+				t.Run(strings.ReplaceAll(step, " ", "_"), func(t *testing.T) {
+					st, dir := openPool(t)
+					tc.setup(t, st, dir)
+					store.SetFailAt(st, func(s string) error {
+						if s == step {
+							return errCrash
+						}
+						return nil
+					})
+					if err := tc.change(t, st, dir); !errors.Is(err, errCrash) {
+						t.Fatalf("change stopped at %q: error = %v, want %v", step, err, errCrash)
+					}
+					store.SetFailAt(st, nil)
+					if err := tc.change(t, st, dir); err != nil {
+						t.Fatalf("the change made again after it stopped at %q: %v", step, err)
+					}
+					// And it left nothing a restart would trip over.
+					if lost, err := st.Reconcile(t.Context()); err != nil || len(lost) != 0 {
+						t.Errorf("Reconcile() after it = %v, %v, want nothing lost", lost, err)
+					}
+				})
+			}
+		})
+	}
+}
+
 // crashSteps returns the steps tc's change takes, in order.
 func crashSteps(t *testing.T, tc crashCase) []string {
 	t.Helper()
@@ -132,6 +166,13 @@ func crashCases() []crashCase {
 					t.Fatal(err)
 				}
 				writeFile(t, filepath.Join(worktree(dir), "work"), "kept")
+				// As git worktree add leaves it, its git folder under a new name.
+				own := filepath.Join(dir, "repos", "repo", ".git", "worktrees", "wt2")
+				if err := os.MkdirAll(own, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, filepath.Join(own, "commondir"), "../..\n")
+				writeFile(t, filepath.Join(worktree(dir), ".git"), "gitdir: "+own+"\n")
 			},
 			change: func(t *testing.T, st *store.Store, dir string) error {
 				_, err := st.Create(t.Context(), "wt", store.CreateOptions{Workspace: worktree(dir)})
@@ -141,7 +182,10 @@ func crashCases() []crashCase {
 				if got := readFile(t, filepath.Join(worktree(dir), "work")); got != "kept" {
 					t.Errorf("work = %q after the crash, want %q", got, "kept")
 				}
-				create(t, st, "wt", store.CreateOptions{Workspace: worktree(dir)})
+				env := create(t, st, "wt", store.CreateOptions{Workspace: worktree(dir)})
+				if want := filepath.Join(dir, "repos", "repo", ".git"); env.Git != want {
+					t.Errorf("Git = %q after creating again, want %q: its box gets that folder", env.Git, want)
+				}
 				if _, ino, _ := stat(t, worktree(dir)); ino != subvolumeIno {
 					t.Errorf("worktree inode = %d after creating again, want a subvolume", ino)
 				}
@@ -228,6 +272,13 @@ func crashCases() []crashCase {
 					t.Fatal(err)
 				}
 				writeFile(t, filepath.Join(worktree(dir), "work"), "kept")
+				// As git worktree add leaves it, its git folder under a new name.
+				own := filepath.Join(dir, "repos", "repo", ".git", "worktrees", "wt2")
+				if err := os.MkdirAll(own, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				writeFile(t, filepath.Join(own, "commondir"), "../..\n")
+				writeFile(t, filepath.Join(worktree(dir), ".git"), "gitdir: "+own+"\n")
 			},
 			change: func(t *testing.T, st *store.Store, dir string) error {
 				_, err := st.Create(t.Context(), "wt", store.CreateOptions{Workspace: worktree(dir)})
@@ -237,7 +288,10 @@ func crashCases() []crashCase {
 				if got := readFile(t, filepath.Join(worktree(dir), "work")); got != "kept" {
 					t.Errorf("work = %q after the crash, want %q", got, "kept")
 				}
-				create(t, st, "wt", store.CreateOptions{Workspace: worktree(dir)})
+				env := create(t, st, "wt", store.CreateOptions{Workspace: worktree(dir)})
+				if want := filepath.Join(dir, "repos", "repo", ".git"); env.Git != want {
+					t.Errorf("Git = %q after creating again, want %q: its box gets that folder", env.Git, want)
+				}
 				if _, ino, _ := stat(t, worktree(dir)); ino != subvolumeIno {
 					t.Errorf("worktree inode = %d after creating again, want a subvolume", ino)
 				}

@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -112,6 +113,28 @@ func TestWatch(t *testing.T) {
 	}
 	if diff := cmp.Diff(want, seen); diff != "" {
 		t.Errorf("reported (-want +got):\n%s", diff)
+	}
+
+	// A folder removed and made again at once, as git checkout does, is
+	// still watched: the kernel may report both as one event.
+	for range 20 {
+		if err := os.RemoveAll(filepath.Join(dir, "src", "new")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.MkdirAll(filepath.Join(dir, "src", "new", "deep"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	drain(got, 200*time.Millisecond)
+	write(t, dir, "src/new/deep/again.txt")
+	deadline = time.After(5 * time.Second)
+	for again := false; !again; {
+		select {
+		case paths := <-got:
+			again = slices.Contains(paths, "src/new/deep/again.txt")
+		case <-deadline:
+			t.Fatal("a write in a folder removed and made again wasn't reported")
+		}
 	}
 }
 

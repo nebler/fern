@@ -171,9 +171,9 @@ func (s *Store) readopt(ctx context.Context, env Env) (Env, error) {
 	} else if err != nil && !errors.Is(err, fs.ErrNotExist) {
 		return Env{}, err
 	}
-	if err := s.makeWorkspace(ctx, env.ID, env.Workspace, ""); err != nil {
-		return Env{}, err
-	}
+	// Recorded before the workspace is swapped in: a re-adopt that stops
+	// after its swap isn't made again, as the workspace is a subvolume then.
+	// The copy names the same folder as the directory it is made from.
 	git, err := s.repoGitDir(env.Workspace)
 	if err != nil {
 		return Env{}, err
@@ -182,6 +182,9 @@ func (s *Store) readopt(ctx context.Context, env Env) (Env, error) {
 		return Env{}, err
 	}
 	env.Git = git
+	if err := s.makeWorkspace(ctx, env.ID, env.Workspace, ""); err != nil {
+		return Env{}, err
+	}
 	return env, nil
 }
 
@@ -253,6 +256,14 @@ func (s *Store) makeWorkspace(ctx context.Context, id, workspace, from string) e
 // agent starts working in it.
 func (s *Store) adopt(ctx context.Context, id, path, from string) error {
 	next := s.adoptPath(id)
+	// What an adopt that stopped before its swap left is garbage; after it,
+	// the old plain directory.
+	if err := s.deleteSubvolumes(ctx, next); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(next); err != nil {
+		return err
+	}
 	if from != "" {
 		if err := snapshotSubvolume(ctx, from, next, false); err != nil {
 			return err
