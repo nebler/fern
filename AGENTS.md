@@ -24,6 +24,7 @@ The nouns are in [architecture §2](docs/architecture.md#2-concepts). In the cod
 - Setup, once, and again to update: `lab/setup.sh` (the local lab; `FERN_HOST=…` for the VPS). It ends with a pairing link for the T3 app.
 - After a change: `lab/dev.sh` (about a minute): unit tests and the build, then `check.sh`'s quick sections in the lab
 - Unit tests: `go test -race ./...` (fake driver, runs anywhere Go runs)
+- The store's and the watch's tests: `lab/test-store.sh`, on a real btrfs, as root in a container. `go test ./...` skips them (the store's need `FERN_TEST_BTRFS`, the watch's fanotify), and so does `lab/dev.sh`: run it after a change to `internal/store` or `internal/watch`.
 - Lint: `lab/lint.sh`: golangci-lint (config in `.golangci.yml`), shellcheck on the scripts and hadolint on the Dockerfile (`.hadolint.yaml`). Fix the code, don't silence the linter.
 - Fuzz: `lab/fuzz.sh` runs every `Fuzz` test for 20 s (`FUZZTIME=5m` for longer). A failure leaves its input in the package's `testdata/fuzz/`; commit it with the fix.
 - The index's SQL: tables in `internal/store/index/schema.sql`, queries in `queries.sql`; `lab/sqlc.sh generate` writes the Go for them (`sqlc.yaml`). Never edit the generated files; CI fails if they are out of date (`lab/sqlc.sh diff`).

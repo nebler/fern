@@ -187,6 +187,61 @@ func TestSleepAsleep(t *testing.T) {
 	}
 }
 
+// A box whose fern-init exited as it started is never ready: its wake fails
+// with the end of its log, long before the wake's time is up.
+func TestWaitReadyExited(t *testing.T) {
+	node := newFakeNode(t, 0)
+	d := newTestDriver(t)
+	b := d.layout("demo")
+	if err := os.MkdirAll(b.data, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(b.data, "log"), []byte("fern-init: services.yaml: unknown field \"env\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	node.setList(t, []container{{ID: b.cid, Status: "stopped", Bundle: b.dir}})
+	// Nothing listens there.
+	err := d.waitReady(t.Context(), b, "127.0.0.1:1")
+	if err == nil || !strings.Contains(err.Error(), `unknown field "env"`) {
+		t.Errorf("waitReady() of a box that exited: %v, want its log's end", err)
+	}
+}
+
+// A box's network is made by two ip batches: one on the node, one in the
+// box's namespace.
+func TestNetUp(t *testing.T) {
+	node := newFakeNode(t, 0)
+	d := newTestDriver(t)
+	b := d.layout("demo")
+	addr, err := d.netUp(t.Context(), b, Agent)
+	if err != nil {
+		t.Fatalf("netUp() error: %v", err)
+	}
+	host, guest, err := addrs(0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := execAddr(guest); addr != want {
+		t.Errorf("netUp() = %s, want the first free address, %s", addr, want)
+	}
+	ns, veth := b.nsName(), b.veth(Agent)
+	want := []string{
+		"ip -batch -",
+		"netns add " + ns,
+		"link add " + veth + " type veth peer name eth0 netns " + ns,
+		"addr add " + host.String() + "/30 dev " + veth,
+		"link set " + veth + " up",
+		"ip -n " + ns + " -batch -",
+		"addr add " + guest.String() + "/30 dev eth0",
+		"link set eth0 up",
+		"link set lo up",
+		"route add default via " + host.String(),
+	}
+	if diff := cmp.Diff(want, node.calls(t)); diff != "" {
+		t.Errorf("calls mismatch (-want +got):\n%s", diff)
+	}
+}
+
 // Boxes waking at once get different addresses, the lowest free ones; an
 // address is free again once its box's directory is gone.
 func TestAllocate(t *testing.T) {

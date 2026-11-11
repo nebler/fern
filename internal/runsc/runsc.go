@@ -106,6 +106,8 @@ type Config struct {
 const (
 	wakeTimeout   = 2 * time.Minute
 	stopGrace     = 15 * time.Second
+	readyFirst    = 2 * time.Millisecond
+	exitedEvery   = time.Second // how often a box that isn't ready is looked for
 	readyInterval = 50 * time.Millisecond
 	readyWait     = 5 * time.Second
 )
@@ -277,14 +279,32 @@ func (d *Driver) Wake(ctx context.Context, box Box) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, wakeTimeout)
 	defer cancel()
 	b := d.layout(box.ID)
-	if addr, ok := d.running(ctx, b); ok {
-		return addr, nil
-	}
-	if err := d.stop(ctx, box.ID); err != nil {
-		return "", fmt.Errorf("wake %s: %w", box.ID, err)
+	// A box that was stopped has no directory: its stop removes that last.
+	// So there is none to find, and nothing of one to clear.
+	_, err := os.Lstat(b.dir)
+	stopped := errors.Is(err, fs.ErrNotExist)
+	if !stopped {
+		cs, err := d.list(ctx)
+		if err != nil {
+			return "", fmt.Errorf("wake %s: %w", box.ID, err)
+		}
+		if addr, ok := d.running(ctx, b, cs); ok {
+			return addr, nil
+		}
+		if err := d.stopListed(ctx, box.ID, cs); err != nil {
+			return "", fmt.Errorf("wake %s: %w", box.ID, err)
+		}
 	}
 	start := time.Now()
 	addr, err := d.netUp(ctx, b, box.Kind)
+	if err != nil && stopped {
+		// Its last stop left some of its network, which it can't say: a stop
+		// now clears it.
+		if err := d.stop(ctx, box.ID); err != nil {
+			return "", fmt.Errorf("wake %s: %w", box.ID, err)
+		}
+		addr, err = d.netUp(ctx, b, box.Kind)
+	}
 	if err != nil {
 		return "", fmt.Errorf("wake %s: %w", box.ID, err)
 	}
@@ -294,7 +314,7 @@ func (d *Driver) Wake(ctx context.Context, box Box) (string, error) {
 	}
 	started := time.Now()
 	_, sp := d.tracer.Start(ctx, "ready")
-	err = d.waitReady(ctx, addr)
+	err = d.waitReady(ctx, b, addr)
 	span.End(sp, err)
 	if err != nil {
 		return "", fmt.Errorf("wake %s: %w", box.ID, err)
@@ -305,11 +325,10 @@ func (d *Driver) Wake(ctx context.Context, box Box) (string, error) {
 	return addr, nil
 }
 
-// running returns the exec address of b's box if it runs and fern-init says
-// it is ready.
-func (d *Driver) running(ctx context.Context, b layout) (string, bool) {
-	cs, err := d.list(ctx)
-	if err != nil || !slices.ContainsFunc(cs, func(c container) bool { return c.ID == b.cid && c.Status == "running" }) {
+// running returns the exec address of b's box if it is among cs, runs, and
+// fern-init says it is ready.
+func (d *Driver) running(ctx context.Context, b layout, cs []container) (string, bool) {
+	if !slices.ContainsFunc(cs, func(c container) bool { return c.ID == b.cid && c.Status == "running" }) {
 		return "", false
 	}
 	_, guest, err := linkAddrs(b)
@@ -353,12 +372,20 @@ func (d *Driver) netUp(ctx context.Context, b layout, kind Kind) (_ string, err 
 	if err != nil {
 		return "", err
 	}
-	cmds, err := netUp(b, kind, n)
+	node, inside, err := netUp(b, kind, n)
 	if err != nil {
 		return "", err
 	}
-	for _, c := range cmds {
-		if _, err := run(exec.CommandContext(ctx, c[0], c[1:]...)); err != nil {
+	for _, batch := range []struct {
+		argv  []string
+		stdin string
+	}{
+		{[]string{"ip", "-batch", "-"}, node},
+		{[]string{"ip", "-n", b.nsName(), "-batch", "-"}, inside},
+	} {
+		ip := exec.CommandContext(ctx, batch.argv[0], batch.argv[1:]...)
+		ip.Stdin = strings.NewReader(batch.stdin)
+		if _, err := run(ip); err != nil {
 			return "", err
 		}
 	}
@@ -485,18 +512,50 @@ func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 	return err
 }
 
-// waitReady asks fern-init at addr until it says its services are ready.
-func (d *Driver) waitReady(ctx context.Context, addr string) error {
-	for {
+// waitReady asks the fern-init of b's box, at addr, until it says its
+// services are ready. Until fern-init listens, every answer is a refusal at
+// once: it is asked again soon at first, so that a box up in tens of
+// milliseconds isn't found up half an interval late, and less often after.
+//
+// A fern-init that has exited never answers: one that can't read its
+// services.yaml, or bind a socket. So the box is looked for now and then,
+// and the wake of one that is gone fails with the end of its log, not with
+// wakeTimeout two minutes later.
+func (d *Driver) waitReady(ctx context.Context, b layout, addr string) error {
+	looked := time.Now()
+	for wait := readyFirst; ; wait = min(2*wait, readyInterval) {
 		if d.isReady(ctx, addr) {
 			return nil
+		}
+		if time.Since(looked) >= exitedEvery {
+			looked = time.Now()
+			cs, err := d.list(ctx)
+			if err == nil && !slices.ContainsFunc(cs, func(c container) bool { return c.ID == b.cid && c.Status != "stopped" }) {
+				return fmt.Errorf("the box exited as it started; its log ends: %s", logEnd(filepath.Join(b.data, "log")))
+			}
 		}
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("not ready: %w", ctx.Err())
-		case <-time.After(readyInterval):
+		case <-time.After(wait):
 		}
 	}
+}
+
+// logEnd returns the last lines of the log at path, for an error.
+func logEnd(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "(no log: " + err.Error() + ")"
+	}
+	data = bytes.TrimSpace(data)
+	if len(data) > 600 {
+		data = data[len(data)-600:]
+		if i := bytes.IndexByte(data, '\n'); i >= 0 {
+			data = data[i+1:]
+		}
+	}
+	return string(data)
 }
 
 func (d *Driver) isReady(ctx context.Context, addr string) bool {
@@ -530,11 +589,16 @@ func (d *Driver) Sleep(ctx context.Context, id string) error {
 // directory. Every step is safe to repeat, so a stop that a crash cut short
 // is finished by the next.
 func (d *Driver) stop(ctx context.Context, id string) error {
-	b := d.layout(id)
 	cs, err := d.list(ctx)
 	if err != nil {
 		return err
 	}
+	return d.stopListed(ctx, id, cs)
+}
+
+// stopListed is stop for a caller that has runsc's list, cs, already.
+func (d *Driver) stopListed(ctx context.Context, id string, cs []container) error {
+	b := d.layout(id)
 	// By its bundle, not its ID: a box left by any earlier daemon is found.
 	for _, c := range cs {
 		if c.Bundle != b.dir {

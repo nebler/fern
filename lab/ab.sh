@@ -3,8 +3,8 @@
 #
 #   lab/ab.sh [-n ROUNDS] [-s "SECTIONS"] [BASE]
 #
-# A is commit BASE (default HEAD), B the working tree. Both are built and
-# imported; then each round runs check.sh's SECTIONS (default box) once on
+# A is commit BASE (default HEAD), B the working tree. Both are built (with
+# FERN_HOST on the VPS, as lab/build.sh does) and imported; then each round runs check.sh's SECTIONS (default box) once on
 # each, A B in odd rounds and B A in even ones, so that a node getting
 # slower or faster over the run counts against both. The daemon and box
 # images switch between runs; check.sh and the CLI are the working tree's.
@@ -35,19 +35,28 @@ if tracing_on; then
 fi
 out=lab/ab-results/$(date -u +%Y%m%dT%H%M%SZ)-${FERN_HOST:-local}
 mkdir -p "$out"
-src=$(mktemp -d)
-trap 'git worktree remove --force "$src/a" >/dev/null 2>&1 || true; rm -rf "$src"' EXIT
-
-git worktree add -q --detach "$src/a" "$base"
+# A's source: a worktree beside the Mac's Docker, or with FERN_HOST a copy of
+# the commit on the VPS, where the builds are (builder).
+if [ -n "$FERN_HOST" ]; then
+  a_src=$SRC-ab-a
+  trap 'on_node rm -rf "$a_src" </dev/null' EXIT
+  git archive "$base" | on_node sh -c "rm -rf $a_src && mkdir -p $a_src && tar -x -C $a_src"
+  sync_src
+else
+  src=$(mktemp -d)
+  a_src=$src/a
+  trap 'git worktree remove --force "$a_src" >/dev/null 2>&1 || true; rm -rf "$src"' EXIT
+  git worktree add -q --detach "$a_src" "$base"
+fi
 {
   echo "A: $(git rev-parse --short "$base") ($base)"
   echo "B: $(git rev-parse --short HEAD) + the working tree's changes"
   echo "sections: $sections; rounds: $rounds; host: ${FERN_HOST:-local}"
 } >"$out/versions"
 for v in a b; do
-  dir=$([ $v = a ] && echo "$src/a" || echo .)
+  dir=$([ $v = a ] && echo "$a_src" || echo "$SRC")
   for image in fern fern-box; do
-    docker build -q --label "$LABEL" --target $image -f "$dir/images/Dockerfile" -t "$image:ab-$v" "$dir" >/dev/null
+    builder build -q --label "$LABEL" "${NET[@]}" --target $image -f "$dir/images/Dockerfile" -t "$image:ab-$v" "$dir" </dev/null >/dev/null
   done
   echo "ab: built $v"
 done
@@ -55,6 +64,12 @@ load_images fern-box:ab-a fern-box:ab-b
 install_cli
 # Each version's binaries, beside the node's.
 for v in a b; do
+  if [ -n "$FERN_HOST" ]; then
+    on_node sh -c "set -e; mkdir -p /usr/local/lib/fern-ab/$v; cid=\$(podman create fern:ab-$v)
+      for bin in fern fern-daemon; do podman cp \"\$cid:/usr/local/bin/\$bin\" /usr/local/lib/fern-ab/$v/\$bin; done
+      podman rm \"\$cid\" >/dev/null" </dev/null
+    continue
+  fi
   cid=$(docker create --label "$LABEL" "fern:ab-$v")
   for bin in fern fern-daemon; do
     docker cp -q "$cid:/usr/local/bin/$bin" - | on_node sh -c "mkdir -p /usr/local/lib/fern-ab/$v && tar -x -C /usr/local/lib/fern-ab/$v"
@@ -88,7 +103,7 @@ for r in $(seq "$rounds"); do
 done
 
 # Leave the node as lab/build.sh would: the working tree's images, as :dev.
-for image in fern fern-box; do docker tag "$image:ab-b" "$image:dev"; done
+for image in fern fern-box; do builder tag "$image:ab-b" "$image:dev" </dev/null; done
 use b
 on_node rm -rf /usr/local/lib/fern-ab /var/lib/fern/images/fern-box:ab-a /var/lib/fern/images/fern-box:ab-b \
   /var/lib/fern-images/fern-box-ab-a /var/lib/fern-images/fern-box-ab-b </dev/null

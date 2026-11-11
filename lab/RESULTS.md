@@ -1765,3 +1765,47 @@ The first page from an asleep thread took 47 s: the guess ran `npm ci` at
 every wake, which deletes `node_modules` and installs it again (35 s in a
 box). It runs `npm install` now, which keeps to the lockfile too and took
 1.4 s with `node_modules` in place: **47.3 → 10.5 s**, the page again 0.3 s.
+
+## A wake without the spare processes, VPS, 2026-11-11
+
+A wake of an asleep box ran thirteen processes before the box's own: `runsc
+list` twice (16 ms each on the VPS), an `ip` batch that removed nothing, and
+eight `ip` commands for the network (3 ms each). And once the box was
+started, a refused dial waited a fixed 50 ms before the next.
+
+Now a box that was stopped, which has no directory left, is woken without a
+list and without a stop; if its last stop left some of its network, the
+network's failure brings the stop back. The network is two `ip` batches, one
+on the node and one in the namespace. Readiness is asked again after 2 ms,
+doubling to 50.
+
+`lab/ab.sh -s box`, six rounds, the commit before against it:
+
+| | before | after | change | p |
+|---|---:|---:|---:|---:|
+| wake, p50 | 223.2 ms | 149.6 ms | −33% (−37 … −28) | 0.002 |
+| wake, p95 | 238.5 ms | 169.5 ms | −29% | 0.002 |
+| a command on an asleep box, p50 | 247 ms | 179 ms | −27.5% | 0.002 |
+| sleep, p50 | 74.0 ms | 73.9 ms | same | 0.6 |
+
+It also called the box's memory 3% worse (16.05 → 16.6 MiB, p 0.04) and a
+pre-wake request 0.2 ms slower (p 0.05). The new baseline, five runs, has
+the pre-wake at 0.8 ms, as before, and the box at 16.4 MiB; the box's image
+is the same in both.
+
+The baseline's box metrics are from `lab/perf.sh --accept box` on that
+build: wake 155.9 ms p50, 171.1 p95.
+
+The same day, with tests that hadn't run before:
+- `lab/test-store.sh` now runs the watch's tests too, on the pool (they need
+  fanotify and file handles, so `go test ./...` skips them). It showed that a
+  folder removed and made again at once was no longer watched; fixed.
+- `TestRepeat` in the store makes every stopped change again without a
+  restart. It found a re-adopt that could not be repeated; fixed.
+- `lab/check.sh all` passed but for `backup`, which this node can't run
+  while it holds the large `cftest` environment: the check's object store is
+  a tmpfs. The first run also failed four sections for want of disk: 49 GB
+  of old build images had filled the VPS's root (`podman image prune`).
+- `BenchmarkMCPCall`: an MCP request to the daemon took 4.1 ms and 8,496
+  allocations, tools/list with the client's side; with the SDK's schema
+  cache, 2.45 ms and 2,450.

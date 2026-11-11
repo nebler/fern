@@ -170,7 +170,9 @@ Unix socket `/run/fern/fern.sock`, for root and the box user's group (T3's serve
 ### 6.2 Session
 `waking (network, runsc create and start, fern-init up) → ready (fern-init's /readyz) → stopping (POST /stop: the services' stop commands, SIGTERM, then kill) → gone`
 
-A box that is up but doesn't answer (a crash, one stopped by hand) is found by the next command, whose dial fails: the actor wakes it once more (built). **Giving up (built):** a box that dies under its commands or fails to wake 3 times in 5 minutes isn't woken again until the first of those is 5 minutes old; until then every command fails at once with `ErrCrashing` (503), naming its log, rather than each paying for a wake that ends the same way. `fern wake` (a person) tries again at once. The count lives in `Run` between actors, as a box's actor ends when it sleeps; it starts over with the daemon.
+A wake whose fern-init exits as it starts (a `services.yaml` it can't read, a socket it can't bind) fails within seconds with the end of the box's log: while it waits for `/readyz` the driver looks for the box once a second (built; `lab/check.sh limits`).
+
+A box that is up but doesn't answer (a crash, one stopped by hand) is found by the next command, whose dial fails: it tells the actor the box is dead (`Exec.Dead`), and tries again, which wakes it once more (built). A death is counted once, however many commands find it: each names the wake it ran in. **Giving up (built):** a box that dies under its commands or fails to wake 3 times in 5 minutes isn't woken again until the first of those is 5 minutes old; until then every command fails at once with `ErrCrashing` (503), naming its log, rather than each paying for a wake that ends the same way. `fern wake` (a person) tries again at once. The count lives in `Run` between actors, as a box's actor ends when it sleeps; it starts over with the daemon.
 
 ### 6.3 Idle rule
 An environment goes to sleep when all of these hold (two clocks, copied from Amp):
@@ -191,7 +193,7 @@ Built: the actor's timer, with both clocks touched by every exec (`--idle-agent`
 **OpenCode's hibernation (built).** T3 calls an OpenCode server over HTTP and reads its URL from what `opencode serve` prints; it keeps a long-lived event stream (`GET /api/event`) and, if that drops, reconnects at once, which would wake the box again. So for `opencode serve` `fern exec --hibernate D` (fern-opencode passes `$FERN_HIBERNATE`, default 30 s) runs a proxy instead (`hibernate.Serve`): it listens at the `--hostname` and `--port` T3 gave, prints its own URL, and passes T3's requests on to the server in the agent box. It follows the server's events itself; once no request and no execution (`session.execution.started` without its end) has been under way for D, it sends the server SIGTERM and ends its exec with `?then=sleep`. T3's event stream stays open meanwhile, with the proxy's own heartbeat every 15 s (T3 gives up after 45 s of silence). The next request, with T3's password (others are refused without waking the box), starts the server again, adds back the MCP servers T3 added at run time (`PUT /api/experimental/mcp/…`, which a restarted server forgets; session instructions are in OpenCode's database), subscribes to its events and then goes in; each of T3's streams begins with the first server's `server.connected` only. OpenCode keeps its sessions on disk in the agent box's Claude folder, and its Claude Agent provider resumes Claude's session from them. A server that ends by itself takes T3's streams along, so T3 reconnects and asks what became of the turns it lost.
 
 ### 6.4 Pre-wake
-A wake takes about 250 ms on the VPS (it took about a second as a pod), and a turn that finds its box asleep waits for it. When a turn is likely soon, T3's hook asks for the wake ahead (`POST /envs/{id}/prewake`), and the user's think time hides it:
+A wake takes about 155 ms on the VPS (it took about a second as a pod, and 220 ms until 2026-11-11, when a wake stopped asking runsc for its list of boxes and making the network one command at a time), and a turn that finds its box asleep waits for it. When a turn is likely soon, T3's hook asks for the wake ahead (`POST /envs/{id}/prewake`), and the user's think time hides it:
 - **a thread is opened:** T3's server streams an open thread to the app (`orchestration.subscribeThread`); one still open after 2 s is woken ahead. A thread only clicked past isn't: the stream's end cancels the wait. The app's sidebar opens the same stream for the first three threads it shows, which can't be told apart; those cost a wake and two minutes of an idle box each.
 - **a thread is reverted:** after T3's rollback has finished (Fern's restore, git's restore and the deleted checkpoints' snapshots), so the wake holds up none of them and starts no services on half-restored files.
 
@@ -359,7 +361,7 @@ Built for previews (`internal/preview`, §5); webhooks are planned. The actor gi
 - **Entrances:** the unix socket (T3, CLI, MCP), HTTP previews (Host-header routing), webhooks.
 - **Wake coalescing:** the first touch on an asleep environment starts **one** wake; later touches wait on it.
 - **Rendering ahead (built):** when an environment's own box wakes (not its agent box or a golden builder's), the actor names it on a channel (`Config.Woken`), and the front door asks its default preview for `/` once, by the preview's name, as a browser's first request would, retrying while the dev server starts (`Server.Warm`, 2 min at most). A dev server compiles a page at its first request: TanStack Start's takes 10 s in a box, so the page a person opens after Claude's turn woke the box comes in 0.11 s instead of 16.6 s (`lab/check.sh tools`, VPS). A wake a browser's request made isn't rendered twice: that request is the first.
-- **Holding (built):** a preview request waits for the wake (about 250 ms), then up to 5 s for the port to listen; a wake that fails is **503 + Retry-After**. Planned: health and probe requests get the 503 at once while waking.
+- **Holding (built):** a preview request waits for the wake (about 155 ms), then up to 5 s for the port to listen; a wake that fails is **503 + Retry-After**. Planned: health and probe requests get the 503 at once while waking.
 - **Activity (built for previews):** a preview request is an exec of the box's actor while it lasts (§6.3). Planned: attached terminals.
 
 ---
@@ -532,7 +534,7 @@ The order of work is [roadmap.md](roadmap.md). Measured results, phase by phase,
 
 ## 20. Open questions
 
-- **Wake time:** a warm pool of boxes could take a box's start (about 250 ms) out of a turn; a runsc subcontainer pool measured 395 ms against a cold 494 ms (`lab/spike/runsc/RESULTS.md`).
+- **Wake time:** a warm pool of boxes could take a box's start (about 155 ms) out of a turn; a runsc subcontainer pool measured 395 ms against a cold 494 ms (`lab/spike/runsc/RESULTS.md`).
 - **Quotas:** btrfs qgroups vs cgroup-level limits, given qgroups' performance cost.
 - **Revert edge cases:** T3's "revert files only" vs "revert files too"; threads in the project directory rather than a worktree (§15).
 - **Previews:** whether portless can name an already-forwarded port, or needs an adapter.

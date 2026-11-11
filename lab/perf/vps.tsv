@@ -1,9 +1,9 @@
-# lab/perf.sh baseline for vps: metric, median of 5 runs, tolerance; 2026-10-31, commit d10ad4a6
-box.asleep_exec_ms.p50 242 0.15
-box.asleep_exec_ms.p95 250 0.15
-box.box_memory_mib 16.0 0.15
-box.daemon_memory_mib 7.0 0.15
-box.force_delete_recovery_ms 4049 0.34
+# lab/perf.sh baseline for vps: metric, median of 5 runs, tolerance; 2026-11-11, commit 58e110df with changes
+box.asleep_exec_ms.p50 175 0.15
+box.asleep_exec_ms.p95 191 0.15
+box.box_memory_mib 16.4 0.15
+box.daemon_memory_mib 6.0 0.15
+box.force_delete_recovery_ms 4001 0.33
 box.fresh_wake.box_cpu_ms 151.339 0.15
 box.fresh_wake.box_write_bytes 0 0.15
 box.fresh_wake.daemon_cpu_ms 89.592 0.15
@@ -11,17 +11,17 @@ box.fresh_wake.daemon_write_bytes 0 0.15
 box.fresh_wake.node_cpu_ms 340.000 0.15
 box.fresh_wake.node_rx_bytes 0 0.15
 box.fresh_wake.node_tx_bytes 134 2.80
-box.prewake_ms.p50 1.0 0.75
-box.prewake_ms.p95 1.3 1.04
-box.prewoken_exec_ms.p50 20 0.15
-box.prewoken_exec_ms.p95 24 0.31
+box.prewake_ms.p50 0.8 0.19
+box.prewake_ms.p95 1.0 0.60
+box.prewoken_exec_ms.p50 22 0.27
+box.prewoken_exec_ms.p95 29 0.52
 box.sleep.daemon_cpu_ms 59.712 0.44
 box.sleep.daemon_write_bytes 0 0.15
 box.sleep.node_cpu_ms 130.000 0.23
 box.sleep.node_rx_bytes 0 0.15
 box.sleep.node_tx_bytes 134 0.87
-box.sleep_ms.p50 70.6 0.15
-box.sleep_ms.p95 81.4 0.34
+box.sleep_ms.p50 73.4 0.15
+box.sleep_ms.p95 83.0 0.15
 box.wake.box_cpu_ms 147.535 0.15
 box.wake.box_write_bytes 0 0.15
 box.wake.daemon_cpu_ms 88.671 0.27
@@ -29,8 +29,8 @@ box.wake.daemon_write_bytes 0 0.15
 box.wake.node_cpu_ms 330.000 0.27
 box.wake.node_rx_bytes 0 0.15
 box.wake.node_tx_bytes 134 24.38
-box.wake_ms.p50 219.8 0.15
-box.wake_ms.p95 238.1 0.15
+box.wake_ms.p50 155.9 0.15
+box.wake_ms.p95 171.1 0.15
 disk.create_seeded_ms 28759 0.36
 disk.restore_ms.p50 45.6 0.20
 disk.restore_ms.p95 387.3 0.15

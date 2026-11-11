@@ -93,26 +93,26 @@ func addrs(n int) (host, guest netip.Addr, err error) {
 	return ip(v + 1), ip(v + 2), nil
 }
 
-// netUp is the commands that make the network of a box of kind: its
-// namespace, a veth to the host, and the routes both ways. gVisor's netstack
-// takes the namespace's addresses when the box boots, so a namespace serves
-// one wake.
-func netUp(b layout, kind Kind, n int) ([][]string, error) {
+// netUp is the two ip batches that make the network of a box of kind: on
+// the node, its namespace and a veth into it; in the namespace, the box's
+// end of the veth, loopback and the route back. Two processes, where a
+// command each took eight, on every wake's path. gVisor's netstack takes the
+// namespace's addresses when the box boots, so a namespace serves one wake.
+func netUp(b layout, kind Kind, n int) (node, inside string, err error) {
 	host, guest, err := addrs(n)
 	if err != nil {
-		return nil, err
+		return "", "", err
 	}
 	ns, veth := b.nsName(), b.veth(kind)
-	return [][]string{
-		{"ip", "netns", "add", ns},
-		{"ip", "link", "add", veth, "type", "veth", "peer", "name", "eth0", "netns", ns},
-		{"ip", "addr", "add", host.String() + "/30", "dev", veth},
-		{"ip", "link", "set", veth, "up"},
-		{"ip", "-n", ns, "addr", "add", guest.String() + "/30", "dev", "eth0"},
-		{"ip", "-n", ns, "link", "set", "eth0", "up"},
-		{"ip", "-n", ns, "link", "set", "lo", "up"},
-		{"ip", "-n", ns, "route", "add", "default", "via", host.String()},
-	}, nil
+	node = "netns add " + ns + "\n" +
+		"link add " + veth + " type veth peer name eth0 netns " + ns + "\n" +
+		"addr add " + host.String() + "/30 dev " + veth + "\n" +
+		"link set " + veth + " up\n"
+	inside = "addr add " + guest.String() + "/30 dev eth0\n" +
+		"link set eth0 up\n" +
+		"link set lo up\n" +
+		"route add default via " + host.String() + "\n"
+	return node, inside, nil
 }
 
 // netDown is the ip batch that removes the box's network, whatever its

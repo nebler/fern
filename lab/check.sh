@@ -978,6 +978,18 @@ limits() {
   check "commands run with no_new_privs" 1 "$(fern exec $ENV -- grep NoNewPrivs /proc/self/status | awk '{print $2}')"
   check "the box has a CPU limit (2 cores)" "200000 100000" "$(pod_cgroup $ENV cpu.max)"
   check "the box has a PID limit" 4096 "$(pod_cgroup $ENV pids.max)"
+  # A services.yaml fern-init can't read ends it as the box starts. The wake
+  # says so from the box's log, and doesn't wait out its two minutes.
+  fresh ${ENV}3
+  fern exec ${ENV}3 -- sh -c 'echo "nonsense: 1" >>services.yaml'
+  fern sleep ${ENV}3 >/dev/null
+  local woke took
+  took=$(date +%s)
+  woke=$(fern wake ${ENV}3 2>&1 || true)
+  took=$(($(date +%s) - took))
+  check "a wake whose box exits at once fails with its log's end" yes "$(succeeds grep -q nonsense <<<"$woke")"
+  check "… in seconds, not the wake's two minutes" yes "$([ "$took" -lt 20 ] && echo yes || echo "no: $took s")"
+  fern rm ${ENV}3
   fern wake ${ENV}2 >/dev/null
   ip=$(box_ip ${ENV}2)
   check "a box can't reach another box" no "$(succeeds fern exec $ENV -- curl -s -m 3 "http://$ip:7070/")"
