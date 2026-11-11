@@ -87,10 +87,10 @@ ARG MULROY_SKILLS=8603380821fee6a77c82639f364ce8fe4f5a92be:3aec28d2de5ee9b673a1a
 ARG ANTI_SLOP=13909c9e07590f5a85d93c62712259fe14a883f7:b0e1716fa52e3e2f9bf96a10a4a994789709b36498c10d35d3a4d4b3f9a5dced
 ARG POCOCK_SKILLS=4ae2317ddb22b046e26455e4f9c9b3aaaf62212d:75b8a2ddccef7fc11059373dff29900934fc46bcb7bfdcfb034a699ce2cb0176
 # fetch REPO COMMIT:SHA256 unpacks the repository at the commit into /src/REPO.
-RUN fetch() { local repo=$1 commit=${2%%:*} sum=${2#*:}; \
-      curl -fsSL -o /src.tar.gz "https://codeload.github.com/$repo/tar.gz/$commit" \
-      && echo "$sum  /src.tar.gz" | sha256sum -c - \
-      && mkdir -p "/src/$repo" && tar -xzf /src.tar.gz -C "/src/$repo" --strip-components=1 && rm /src.tar.gz; } \
+RUN fetch() { \
+      curl -fsSL -o /src.tar.gz "https://codeload.github.com/$1/tar.gz/${2%%:*}" \
+      && echo "${2#*:}  /src.tar.gz" | sha256sum -c - \
+      && mkdir -p "/src/$1" && tar -xzf /src.tar.gz -C "/src/$1" --strip-components=1 && rm /src.tar.gz; } \
  && fetch cloudflare/skills "$CLOUDFLARE_SKILLS" && fetch emilkowalski/skills "$EMIL_SKILLS" \
  && fetch dmmulroy/skills "$MULROY_SKILLS" && fetch dmmulroy/anti-slop "$ANTI_SLOP" && fetch mattpocock/skills "$POCOCK_SKILLS" \
  && mkdir -p /skills/cloudflare /skills/safety /skills/design /skills/engineering \
@@ -109,7 +109,10 @@ RUN fetch() { local repo=$1 commit=${2%%:*} sum=${2#*:}; \
  && cp /src/mattpocock/skills/LICENSE /skills/engineering/LICENSE-mattpocock-skills
 
 FROM debian:trixie-slim AS fern
+# The upgrade takes Debian's security fixes the base image doesn't have yet;
+# CI's scan fails on any with a fix.
 RUN apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends btrfs-progs \
  && rm -rf /var/lib/apt/lists/*
 COPY --from=go /out/fern /usr/local/bin/fern
@@ -125,13 +128,15 @@ FROM debian:trixie-slim AS fern-box
 # Node runs the lab's toy repo, the sample without a database.
 # libatomic1: the Node builds mise installs need it from Node 26 on.
 # Bootstrap HTTPS before apt installs its own CA bundle: large HTTP
-# downloads can stall on the lab's network.
+# downloads can stall on the lab's network. The upgrade is for Debian's
+# security fixes, as in fern.
 COPY --from=claude /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 RUN sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources \
  && echo 'Acquire::https::CaInfo "/etc/ssl/certs/ca-certificates.crt";' > /etc/apt/apt.conf.d/fern-bootstrap-ca \
  && mkdir -p /etc/postgresql-common/createcluster.d \
  && echo 'create_main_cluster = false' > /etc/postgresql-common/createcluster.d/fern.conf \
  && apt-get update \
+ && apt-get upgrade -y \
  && apt-get install -y --no-install-recommends postgresql-17 nodejs ca-certificates curl git tini libatomic1 \
  && rm /etc/apt/apt.conf.d/fern-bootstrap-ca \
  && rm -rf /var/lib/apt/lists/* \
