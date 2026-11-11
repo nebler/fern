@@ -99,7 +99,7 @@ RUN fetch() { local repo=$1 commit=${2%%:*} sum=${2#*:}; \
  && cp /src/cloudflare/skills/LICENSE /skills/cloudflare/LICENSE-cloudflare-skills \
  && cp -r /src/cloudflare/skills/skills/turnstile-spin /skills/safety/ \
  && cp /src/cloudflare/skills/LICENSE /skills/safety/LICENSE-cloudflare-skills \
- && for s in animate animation-performance find-animation-opportunities review-animations improve-animations emil-design-eng mobile-native; do \
+ && for s in animate emil-design-eng mobile-native; do \
       cp -r "/src/emilkowalski/skills/skills/$s" /skills/design/; done \
  && cp /src/emilkowalski/skills/LICENSE /skills/design/LICENSE-emilkowalski-skills \
  && cp -r /src/dmmulroy/skills/coding-standards /src/dmmulroy/anti-slop/skills/install-anti-slop /skills/engineering/ \

@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"slices"
 	"syscall"
 	"testing"
 
@@ -224,18 +223,5 @@ func TestAskedLimits(t *testing.T) {
 				t.Errorf("AskedLimits = %+v, %v; want %+v, error %t", got, err, tc.want, tc.wantErr)
 			}
 		})
-	}
-}
-
-// A repository turns skill packs on, and off with a "-".
-func TestAskedSkills(t *testing.T) {
-	dir := t.TempDir()
-	if on, off, err := setup.AskedSkills(dir); on != nil || off != nil || err != nil {
-		t.Errorf("AskedSkills() without services.yaml = %v, %v, %v; want nothing", on, off, err)
-	}
-	write(t, dir, "services.yaml", "services: {}\nskills: [design, -safety]\n")
-	on, off, err := setup.AskedSkills(dir)
-	if err != nil || !slices.Equal(on, []string{"design"}) || !slices.Equal(off, []string{"safety"}) {
-		t.Errorf("AskedSkills() = %v, %v, %v; want [design], [safety]", on, off, err)
 	}
 }

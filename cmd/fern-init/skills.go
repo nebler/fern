@@ -19,13 +19,12 @@ const skillPacks = "/usr/local/share/fern/skills"
 var packName = regexp.MustCompile(`^[a-z0-9-]{1,40}$`)
 
 // activePacks returns the packs Claude gets: the node's (FERN_SKILLS, which
-// the daemon reads from /etc/fern/skills), those Fern turns on for what the
-// repository is (detected), and those its services.yaml turns on, less
-// those it turns off. A name that can't be a pack is dropped.
-func activePacks(node string, detected, on, off []string) []string {
+// the daemon reads from /etc/fern/skills) and those Fern turns on for what
+// the repository is (detected). A name that can't be a pack is dropped.
+func activePacks(node string, detected []string) []string {
 	var packs []string
-	for _, p := range slices.Concat(strings.Fields(node), detected, on) {
-		if packName.MatchString(p) && !slices.Contains(packs, p) && !slices.Contains(off, p) {
+	for _, p := range slices.Concat(strings.Fields(node), detected) {
+		if packName.MatchString(p) && !slices.Contains(packs, p) {
 			packs = append(packs, p)
 		}
 	}

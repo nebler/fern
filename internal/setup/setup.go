@@ -211,34 +211,6 @@ func AskedLimits(dir string) (Limits, error) {
 	return f.Limits, nil
 }
 
-// AskedSkills returns the skill packs dir's services.yaml turns on for
-// Claude, under skills:, and those it turns off, written "-name": on top of
-// the node's and those Fern turns on itself. None without the file. The file
-// is the agent's: it can only choose among the packs in the box image.
-func AskedSkills(dir string) (on, off []string, err error) {
-	data, err := readFile(dir, "services.yaml")
-	if errors.Is(err, fs.ErrNotExist) {
-		return nil, nil, nil
-	}
-	if err != nil {
-		return nil, nil, err
-	}
-	var f struct {
-		Skills []string `json:"skills"`
-	}
-	if err := yaml.Unmarshal(data, &f); err != nil {
-		return nil, nil, fmt.Errorf("services.yaml: %w", err)
-	}
-	for _, s := range f.Skills {
-		if name, ok := strings.CutPrefix(s, "-"); ok {
-			off = append(off, name)
-		} else {
-			on = append(on, s)
-		}
-	}
-	return on, off, nil
-}
-
 // PreviewPort returns the port of the first service in dir's services.yaml
 // (or its guess), by name, that has one: the environment's default
 // preview. 0 means none. The file is the agent's, read as root: readFile

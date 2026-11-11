@@ -406,8 +406,9 @@ github_app() {
 
 # skills sets the skill packs Claude gets on this server, where the daemon
 # reads them at every wake (cmd/fern-daemon): names of folders in the box
-# image's /usr/local/share/fern/skills. "" turns them all off; a repository's
-# services.yaml can still turn one on or off (skills:).
+# image's /usr/local/share/fern/skills. "" turns them all off. It is the one
+# switch: every thread on the server gets these, and cloudflare's where Fern
+# detects a Cloudflare repository.
 skills() {
   local packs=$1 p
   for p in $packs; do

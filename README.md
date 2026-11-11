@@ -134,10 +134,10 @@ Run the same command again to update, or for a new pairing link. When something 
 | `cloudflare` | [Cloudflare's skills](https://github.com/cloudflare/skills) and Fern's `fern-deploy` | in repositories that deploy to Cloudflare |
 | `safety` | Fern's `site-safety` (keys, visitors' input, uploads, bots, data) and Cloudflare's `turnstile-spin`; `/security-review` before the first deploy | by default |
 | `beginner` | plain words, the preview link after every visible change, errors fixed rather than shown | opt-in |
-| `design` | [Emil Kowalski's](https://github.com/emilkowalski/skills) design and animation skills | opt-in |
+| `design` | [Emil Kowalski's](https://github.com/emilkowalski/skills) design skills: `emil-design-eng`, `animate`, `mobile-native` | opt-in |
 | `engineering` | Dillon Mulroy's [coding-standards](https://github.com/dmmulroy/skills) and [anti-slop](https://github.com/dmmulroy/anti-slop) linter, Matt Pocock's [codebase-design and diagnosing-bugs](https://github.com/mattpocock/skills) | opt-in |
 
-Choose a server's once: `FERN_SKILLS="beginner design engineering safety"` with the install (or `install.sh skills "…"` on the server); a new thread or wake picks it up. A repository can add or drop one in its `services.yaml` (`skills: [design, -safety]`). An Astro site's Claude also gets [Astro's docs server](https://mcp.docs.astro.build/mcp), so it reads current docs.
+Choose a server's once: `FERN_SKILLS="beginner design engineering safety"` with the install (or `install.sh skills "…"` on the server); every thread on the server gets them from its next wake. An Astro site's Claude also gets [Astro's docs server](https://mcp.docs.astro.build/mcp), so it reads current docs.
 
 **Backups:** hourly to an S3 bucket (Hetzner Object Storage, R2, any S3), encrypted before they leave the server with a key that stays on your Mac (`~/.config/fern/backup-key`; keep a copy). Each thread's workspace goes as a btrfs send stream, incremental after the first, with the index, T3's data and the projects' repositories. Create a bucket and an access key, then run the install again with `FERN_BACKUP_ENDPOINT=https://fsn1.your-objectstorage.com FERN_BACKUP_REGION=fsn1 FERN_BACKUP_BUCKET=… FERN_BACKUP_ACCESS_KEY=… FERN_BACKUP_SECRET_KEY=…`. To bring a lost server's threads onto a new one, install the new one with the same settings and `FERN_RESTORE_FROM=<old server's hostname>`.
 

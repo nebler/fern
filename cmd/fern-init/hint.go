@@ -42,9 +42,7 @@ func briefClaude(claudeDir, dir string, services map[string]service, guessed boo
 	if h.cloudflare {
 		detected = append(detected, "cloudflare")
 	}
-	on, off, err := setup.AskedSkills(dir)
-	errs = append(errs, err)
-	packs := activePacks(os.Getenv("FERN_SKILLS"), detected, on, off)
+	packs := activePacks(os.Getenv("FERN_SKILLS"), detected)
 	h.notes, err = packNotes(skillPacks, packs)
 	errs = append(errs, err, writeHint(claudeDir, h), linkSkills(claudeDir, skillPacks, packs))
 	return errors.Join(errs...)

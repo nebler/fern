@@ -7,11 +7,11 @@ import (
 	"testing"
 )
 
-// The node's packs, then those Fern detects, then the repository's, less
-// those it turns off; names that can't be packs are dropped.
+// The node's packs, then those Fern detects, each once; names that can't be
+// packs are dropped.
 func TestActivePacks(t *testing.T) {
-	got := activePacks("safety design", []string{"cloudflare"}, []string{"engineering", "../etc", "design"}, []string{"safety"})
-	if want := []string{"design", "cloudflare", "engineering"}; !slices.Equal(got, want) {
+	got := activePacks("safety design ../etc", []string{"cloudflare", "design"})
+	if want := []string{"safety", "design", "cloudflare"}; !slices.Equal(got, want) {
 		t.Errorf("activePacks() = %v, want %v", got, want)
 	}
 }
