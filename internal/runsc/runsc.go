@@ -91,6 +91,11 @@ type Config struct {
 	// FERN_SKILLS (fern-init). May be nil: none.
 	Skills  func(ctx context.Context) (string, error)
 	MCPPort int // the daemon's port agent boxes may reach
+	// T3MCP is where T3 serves its own MCP server for its Claude, on the
+	// node's loopback, such as 127.0.0.1:30773; "" for none. An agent box's
+	// fern-init listens there, in the box, and passes the calls to the
+	// daemon (FERN_T3_ADDR, FERN_T3_MCP), which passes them to T3.
+	T3MCP string
 	// Preview is where people open previews, such as localhost:30780
 	// (internal/preview). A box learns its own as FERN_PREVIEW, for Claude
 	// to hand out links; "" means there are none.
@@ -542,6 +547,10 @@ func (d *Driver) start(ctx context.Context, box Box, b layout) (err error) {
 	vars := boxVars(box, hex.EncodeToString(wakeID), login, d.cfg.MCPPort)
 	if skills != "" {
 		vars = append(vars, "FERN_SKILLS="+skills)
+	}
+	if box.Kind == Agent && d.cfg.T3MCP != "" {
+		vars = append(vars, "FERN_T3_ADDR="+d.cfg.T3MCP,
+			"FERN_T3_MCP=http://"+net.JoinHostPort(DaemonHost, strconv.Itoa(d.cfg.MCPPort))+"/t3/"+box.Env.ID)
 	}
 	if d.cfg.Preview != "" {
 		// {port} is for the box to fill in.

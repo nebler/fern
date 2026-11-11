@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 	"time"
 
@@ -74,11 +76,12 @@ func (s *Server) MCPHandler() http.Handler {
 	h := mcp.NewStreamableHTTPHandler(func(r *http.Request) *mcp.Server {
 		return s.bashServer(r.PathValue("id"))
 	}, &mcp.StreamableHTTPOptions{Stateless: true, JSONResponse: true})
+	if s.T3 != "" {
+		mux.Handle("/t3/{id}", s.t3Handler())
+	}
 	mux.HandleFunc("/mcp/{id}", func(w http.ResponseWriter, r *http.Request) {
-		env, err := s.store.Get(r.Context(), r.PathValue("id"))
 		token, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if err != nil || env.BoxToken == "" || subtle.ConstantTimeCompare([]byte(token), []byte(env.BoxToken)) != 1 {
-			// The same answer whether or not the environment exists.
+		if !s.hasBoxToken(r.Context(), r.PathValue("id"), token) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -105,6 +108,43 @@ func (s *Server) MCPHandler() http.Handler {
 		answer.send(w)
 	})
 	return mux
+}
+
+// hasBoxToken says whether token is environment id's box token: the same
+// answer whether or not the environment exists.
+func (s *Server) hasBoxToken(ctx context.Context, id, token string) bool {
+	env, err := s.store.Get(ctx, id)
+	return err == nil && env.BoxToken != "" && subtle.ConstantTimeCompare([]byte(token), []byte(env.BoxToken)) == 1
+}
+
+// t3Handler passes an agent box's calls to T3's own MCP server on to T3, at
+// /t3/{id}: T3 serves it on the node's loopback, which a box can't reach.
+// Only that one path of T3's is reachable this way, and a call needs two
+// tokens: the box's, which its fern-init adds and the daemon checks and takes off, and T3's for
+// the thread, in Authorization, which T3 checks and only Claude's arguments
+// hold. The box that runs the repository's code has the first and not the
+// second.
+func (s *Server) t3Handler() http.Handler {
+	target, err := url.Parse(s.T3 + t3MCPPath)
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.Out.URL.Scheme, r.Out.URL.Host, r.Out.URL.Path, r.Out.URL.RawPath = target.Scheme, target.Host, target.Path, ""
+			r.Out.Host = target.Host
+			r.Out.Header.Del(boxexec.BoxTokenHeader)
+		},
+		FlushInterval: -1, // answers may be streams
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err != nil {
+			http.Error(w, "T3's address: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !s.hasBoxToken(r.Context(), r.PathValue("id"), r.Header.Get(boxexec.BoxTokenHeader)) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	})
 }
 
 // heldAnswer holds an answer until its call has ended, for a daemon that may

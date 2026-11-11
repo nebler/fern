@@ -91,3 +91,20 @@ func TestLimitFlags(t *testing.T) {
 		})
 	}
 }
+
+// A box can stand in for T3's MCP server only at an address on its own
+// loopback: T3 anywhere else gets no listener.
+func TestT3MCP(t *testing.T) {
+	for _, tc := range []struct{ t3, want string }{
+		{"http://127.0.0.1:30773", "127.0.0.1:30773"},
+		{"http://[::1]:30773", "[::1]:30773"},
+		{"http://10.0.0.5:30773", ""},
+		{"http://t3.example.com:30773", ""},
+		{"http://127.0.0.1", ""},
+		{"", ""},
+	} {
+		if got := t3MCP(tc.t3); got != tc.want {
+			t.Errorf("t3MCP(%q) = %q, want %q", tc.t3, got, tc.want)
+		}
+	}
+}

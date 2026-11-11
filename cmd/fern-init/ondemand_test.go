@@ -233,3 +233,30 @@ func TestOnDemandFailedLeavesNoSocket(t *testing.T) {
 		t.Errorf("socket file after stop: %v, want none", err)
 	}
 }
+
+// The port a service is previewed on is held on every address, as the
+// preview comes to the box's address; any other only on localhost.
+func TestOnDemandPreviewedPort(t *testing.T) {
+	for _, previewed := range []bool{true, false} {
+		t.Run(fmt.Sprintf("previewed=%v", previewed), func(t *testing.T) {
+			free, err := (&net.ListenConfig{}).Listen(t.Context(), "tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			port := free.Addr().(*net.TCPAddr).Port
+			_ = free.Close()
+			svc := service{Run: "true", Listen: fmt.Sprintf("tcp:%d", port)}
+			if previewed {
+				svc.Port = port
+			}
+			o, err := listenOnDemand(t.Context(), "web", svc, t.TempDir(), []string{pathEnv}, startTimeout, slog.New(slog.DiscardHandler))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer o.stop(context.Background())
+			if got := o.ln.Addr().(*net.TCPAddr).IP.IsUnspecified(); got != previewed {
+				t.Errorf("held on every address = %v, want %v (%s)", got, previewed, o.ln.Addr())
+			}
+		})
+	}
+}

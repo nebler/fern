@@ -17,6 +17,9 @@ const (
 	MCPRelayPort = 7072
 	// MCPRelayPath is where fern-init says it has the relay, on Port.
 	MCPRelayPath = "/mcp-relay"
+	// BoxTokenHeader carries the box's token to the daemon on a call to T3's
+	// MCP server, beside T3's own Authorization, which T3 needs.
+	BoxTokenHeader = "X-Fern-Box"
 	// CallKeyHeader names one call: the relay sends the same value each time.
 	CallKeyHeader = "X-Fern-Call"
 	// maxMCPCall is the largest call the relay holds to send again.

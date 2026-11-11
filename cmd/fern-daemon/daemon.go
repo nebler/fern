@@ -15,6 +15,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/pprof"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -151,6 +152,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	// On every address, as T3's port: the node's firewall keeps it private.
 	previewAddr := flags.String("preview-addr", ":30780", "serve previews of boxes' ports on this address (\"\": none)")
 	previewHost := flags.String("preview-host", "localhost", "previews are http://PORT-ENV.HOST/ and http://ENV.HOST/")
+	t3 := flags.String("t3", "http://127.0.0.1:30773", "T3's server on this node: Claude in an agent box reaches T3's MCP server there through the daemon (\"\": not)")
 	githubApp := flags.String("github-app", "/etc/fern/github-app", "the GitHub App T3's git and gh get tokens from: its id and key.pem (missing: none)")
 	githubAPI := flags.String("github-api", github.API, "GitHub's API (another for tests)")
 	backupEvery := flags.Duration("backup-every", time.Hour, "back up the threads this often, if "+backupConfig+" says where")
@@ -227,7 +229,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 
 	drv := runsc.New(runsc.Config{
 		Pool: pool, Bundles: runscBundles, State: runscState, Images: filepath.Join(pool, "images"), Image: boxImage,
-		DNS: strings.Split(*boxDNS, ","), Login: fileVar(loginFile, "CLAUDE_CODE_OAUTH_TOKEN"), Skills: fileSkills(skillsFile, defaultSkills), MCPPort: mcpPort, Preview: previewAt,
+		DNS: strings.Split(*boxDNS, ","), Login: fileVar(loginFile, "CLAUDE_CODE_OAUTH_TOKEN"), Skills: fileSkills(skillsFile, defaultSkills), MCPPort: mcpPort, T3MCP: t3MCP(*t3), Preview: previewAt,
 		Limits: limits, MaxLimits: most,
 	}, tr, reg)
 	// Golden keys name the image's content, not its tag.
@@ -245,6 +247,7 @@ func serve(ctx context.Context, args []string, log *slog.Logger) error {
 	envs := actor.New(st, drv, cfg, tr, reg, log)
 	apiSrv := server.New(st, drv, envs, agentMCP, tr, log)
 	apiSrv.Cloudflare = fileVar(cloudflareFile, "CLOUDFLARE_API_TOKEN")
+	apiSrv.T3 = *t3
 	app, err := github.Load(*githubApp, *githubAPI)
 	if err != nil {
 		return fmt.Errorf("the GitHub App: %w", err)
@@ -379,6 +382,20 @@ func fileVar(file, name string) func(ctx context.Context) (string, error) {
 		}
 		return "", nil
 	}
+}
+
+// t3MCP returns the address T3's server at URL t3 names its MCP server at to
+// its Claude, for an agent box's fern-init to answer at: T3 on the node's
+// loopback, which is where a box can stand in for it. "" otherwise.
+func t3MCP(t3 string) string {
+	u, err := url.Parse(t3)
+	if err != nil || u.Port() == "" {
+		return ""
+	}
+	if ip, err := netip.ParseAddr(u.Hostname()); err != nil || !ip.IsLoopback() {
+		return ""
+	}
+	return u.Host
 }
 
 // fileSkills returns a function that reads the skill packs in file at every

@@ -150,9 +150,11 @@ func MakeGuess(dir string) (Guess, error) {
 	}
 	// A golden build's first start installs the dependencies; a thread's
 	// only finds them installed. Ready when it listens: a first page can
-	// take longer to render than a check may wait.
-	fmt.Fprintf(&services, "  web:\n    run: %s\n    ready: %s\n    port: %d\n",
-		quote(web), quote(`bash -c 'exec 3<>/dev/tcp/127.0.0.1/$PORT'`), fw.port)
+	// take longer to render than a check may wait. It starts at its first
+	// connection (listen), not with the box: an Astro dev server took 22 s
+	// of every wake, in turns that never looked at the site too.
+	fmt.Fprintf(&services, "  web:\n    run: %s\n    ready: %s\n    listen: tcp:%d\n    port: %d\n",
+		quote(web), quote(`bash -c 'exec 3<>/dev/tcp/127.0.0.1/$PORT'`), fw.port, fw.port)
 
 	tools := fmt.Sprintf("# Fern's guess, from package.json.\n[tools]\nnode = %q\n", nodeVersion(dir, pkg.Engines.Node))
 	if pm.tool {

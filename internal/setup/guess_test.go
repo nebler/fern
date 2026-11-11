@@ -2,6 +2,7 @@ package setup_test
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"testing"
 
@@ -14,10 +15,11 @@ import (
 // guessed is a guessed services.yaml, parsed.
 type guessed struct {
 	Services map[string]struct {
-		Run   string `json:"run"`
-		Stop  string `json:"stop"`
-		Ready string `json:"ready"`
-		Port  int    `json:"port"`
+		Run    string `json:"run"`
+		Stop   string `json:"stop"`
+		Ready  string `json:"ready"`
+		Listen string `json:"listen"`
+		Port   int    `json:"port"`
 	} `json:"services"`
 }
 
@@ -139,6 +141,10 @@ func TestMakeGuess(t *testing.T) {
 			web := got.Services["web"]
 			if web.Run != tt.wantRun || web.Port != tt.wantPort {
 				t.Errorf("web = run %q port %d, want run %q port %d", web.Run, web.Port, tt.wantRun, tt.wantPort)
+			}
+			// The dev server starts at its first connection, on its port.
+			if want := fmt.Sprintf("tcp:%d", tt.wantPort); web.Listen != want {
+				t.Errorf("web listens on %q, want %q", web.Listen, want)
 			}
 			// Every command the guess runs is shell that parses.
 			for name, svc := range got.Services {

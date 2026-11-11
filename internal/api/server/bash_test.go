@@ -579,6 +579,60 @@ func TestAgentStartCloudflare(t *testing.T) {
 	}
 }
 
+// T3 serves its own MCP server on the node's loopback, which a box can't
+// reach: the daemon passes a call with the box's token on to T3's /mcp, with
+// T3's own token and without the box's, and refuses any other.
+func TestT3MCP(t *testing.T) {
+	type seen struct{ path, auth, box string }
+	calls := make(chan seen, 1)
+	t3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls <- seen{r.URL.Path, r.Header.Get("Authorization"), r.Header.Get(boxexec.BoxTokenHeader)}
+		_, _ = io.WriteString(w, "from t3")
+	}))
+	defer t3.Close()
+
+	b := newDemoBox(t)
+	api := server.New(b.st, b.drv, b.envs, "http://fern-daemon:7071", notrace, b.log)
+	t.Cleanup(api.Close)
+	api.T3 = t3.URL
+	daemon := httptest.NewServer(api.MCPHandler())
+	defer daemon.Close()
+	call := func(env, box string) (int, string) {
+		t.Helper()
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodPost, daemon.URL+"/t3/"+env, strings.NewReader("{}"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer t3-token")
+		req.Header.Set(boxexec.BoxTokenHeader, box)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = resp.Body.Close() }()
+		body, _ := io.ReadAll(resp.Body)
+		return resp.StatusCode, string(body)
+	}
+	if code, body := call("demo", boxToken); code != http.StatusOK || body != "from t3" {
+		t.Errorf("a call with the box's token = %d %q, want T3's answer", code, body)
+	}
+	if got, want := <-calls, (seen{"/mcp", "Bearer t3-token", ""}); got != want {
+		t.Errorf("T3 saw %+v, want %+v", got, want)
+	}
+	for _, tt := range []struct{ name, env, box string }{
+		{"another token", "demo", "guess"}, {"no token", "demo", ""}, {"no such environment", "none", boxToken},
+	} {
+		if code, _ := call(tt.env, tt.box); code != http.StatusUnauthorized {
+			t.Errorf("%s: status %d, want 401", tt.name, code)
+		}
+	}
+	select {
+	case got := <-calls:
+		t.Errorf("a refused call reached T3: %+v", got)
+	default:
+	}
+}
+
 // fakeSecrets records the secrets cloudflare_connect sets.
 type fakeSecrets struct {
 	mu  sync.Mutex

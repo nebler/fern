@@ -78,6 +78,11 @@ type Server struct {
 	// the box that runs the repository's code, nor into a workspace. May be
 	// nil.
 	Cloudflare func(ctx context.Context) (string, error)
+	// T3 is T3's server on the node, such as http://127.0.0.1:30773; ""
+	// for none. T3 gives its Claude an MCP server there, on the node's
+	// loopback, which a box can't reach: an agent box's fern-init listens
+	// at that address in the box and passes the calls to T3Handler's route.
+	T3 string
 	// GitHub sets repositories' Actions secrets (cloudflare_connect). May be
 	// nil: no GitHub App.
 	GitHub Secrets
@@ -438,6 +443,9 @@ type fernMCP struct {
 	Cloudflare string
 	AstroDocs  bool // adds Astro's docs server
 }
+
+// t3MCPPath is where T3's server has its MCP endpoint.
+const t3MCPPath = "/mcp"
 
 // claude adds the MCP server to Claude's arguments, takes away Claude's own
 // shell tools, and ignores the settings and MCP servers in the workspace:

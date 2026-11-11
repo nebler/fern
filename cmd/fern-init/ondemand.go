@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -97,7 +98,15 @@ func listenOnDemand(ctx context.Context, name string, svc service, dir string, e
 	if err != nil {
 		return nil, err
 	}
-	ln, err := (&net.ListenConfig{}).Listen(ctx, network, addr)
+	// The preview reaches a box's port at the box's address, not localhost:
+	// the port a service is previewed on is held on every address, or a
+	// page's first request would find nothing and never start it. The
+	// relay still reaches the service on localhost.
+	bind := addr
+	if network == "tcp" && svc.Port != 0 && svc.Listen == "tcp:"+strconv.Itoa(svc.Port) {
+		bind = ":" + strconv.Itoa(svc.Port)
+	}
+	ln, err := (&net.ListenConfig{}).Listen(ctx, network, bind)
 	if err != nil {
 		return nil, fmt.Errorf("service %s: %w", name, err)
 	}

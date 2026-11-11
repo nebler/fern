@@ -135,6 +135,28 @@ func run(ctx context.Context, log *slog.Logger) error {
 		relayErr = make(chan error, 1)
 		go func() { relayErr <- relay.ListenAndServe() }()
 	}
+	// T3 names its own MCP server to Claude at an address on the node's
+	// loopback: an agent box's fern-init answers there and passes the calls
+	// to the daemon, which passes them to T3.
+	var t3 *http.Server
+	t3Done := make(chan struct{})
+	if addr, daemon := os.Getenv("FERN_T3_ADDR"), os.Getenv("FERN_T3_MCP"); addr != "" && daemon != "" {
+		h, err := t3Relay(daemon, token)
+		if err != nil {
+			return fmt.Errorf("FERN_T3_MCP: %w", err)
+		}
+		t3 = &http.Server{
+			Addr: addr, Handler: h, BaseContext: func(net.Listener) context.Context { return ctx },
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			defer close(t3Done)
+			// Claude works without T3's tools: the box goes on without them.
+			if err := t3.ListenAndServe(); !errors.Is(err, http.ErrServerClosed) {
+				log.WarnContext(ctx, "serving T3's MCP server in the box", slog.Any("error", err))
+			}
+		}()
+	}
 	srv := &http.Server{
 		Addr:              ":" + strconv.Itoa(boxexec.Port),
 		Handler:           mux,
@@ -166,6 +188,10 @@ func run(ctx context.Context, log *slog.Logger) error {
 	_ = srv.Close()
 	if relay != nil {
 		_ = relay.Close()
+	}
+	if t3 != nil {
+		_ = t3.Close()
+		<-t3Done
 	}
 	if err == nil {
 		err = <-serveErr // the server has stopped: ErrServerClosed
