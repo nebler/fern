@@ -48,7 +48,9 @@ func (m *MCPRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	key := rand.Text()
 	wait := 50 * time.Millisecond
-	deadline := time.Now().Add(m.limit)
+	// From the first attempt that fails, not from the call's start: the
+	// daemon answers when the tool is done, which can be long after.
+	var deadline time.Time
 	for {
 		req, err := http.NewRequestWithContext(r.Context(), r.Method, m.daemon+r.URL.RequestURI(), bytes.NewReader(body))
 		if err != nil {
@@ -69,6 +71,9 @@ func (m *MCPRelay) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if errors.Is(r.Context().Err(), context.Canceled) {
 			return // Claude has given up on the call.
+		}
+		if deadline.IsZero() {
+			deadline = time.Now().Add(m.limit)
 		}
 		if time.Now().After(deadline) {
 			http.Error(w, "the daemon doesn't answer: "+err.Error(), http.StatusBadGateway)
