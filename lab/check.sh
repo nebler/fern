@@ -1370,7 +1370,9 @@ t3() {
   check "but a thread's session there is refused, naming New worktree" yes \
     "$(in_t3 "cd $R && claude --session-id 00000000-0000-4000-8000-000000000000 -p hi 2>&1; true" | grep -q 'New worktree' && echo yes || echo no)"
   # T3 clones a project from GitHub into its home unless told otherwise:
-  # outside the pool, but just as boxless.
+  # projects/, where an update of T3's image keeps it and a worktree's box
+  # gets its git folder, but just as boxless.
+  check "T3's home is projects/" /var/lib/fern/projects "$(in_t3 "cd \$HOME && pwd")"
   check "and so is one in a project T3 cloned into its home" yes \
     "$(in_t3 "mkdir -p \$HOME/fern-check-clone && cd \$HOME/fern-check-clone && claude --resume 00000000-0000-4000-8000-000000000000 -p hi 2>&1; true" | grep -q 'New worktree' && echo yes || echo no)"
   in_t3 "rm -rf \$HOME/fern-check-clone"

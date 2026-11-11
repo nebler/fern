@@ -23,9 +23,12 @@ ProtectSystem=strict
 ReadWritePaths=/var/lib/fern /run/fern
 PrivateTmp=yes
 WorkingDirectory=/opt/t3
-# Its home is the pool, so its worktrees (<home>/worktrees) are where Fern
-# expects workspaces; FERN_POOL is the checkpoint hook's.
-Environment=HOME=/home/node T3CODE_HOME=/var/lib/fern FERN_POOL=/var/lib/fern FERN_TIMING=1 DISABLE_AUTOUPDATER=1
+# T3's home is the pool, so its worktrees (<home>/worktrees) are where Fern
+# expects workspaces; FERN_POOL is the checkpoint hook's. The user's home is
+# projects/: T3 clones a repository from GitHub into its home, and there a
+# clone outlives an update (the image's /home/node doesn't), its worktrees'
+# boxes get its git folder (internal/store), and backups take it.
+Environment=HOME=/var/lib/fern/projects T3CODE_HOME=/var/lib/fern FERN_POOL=/var/lib/fern FERN_TIMING=1 DISABLE_AUTOUPDATER=1
 EnvironmentFile=-/etc/fern/claude.env
 # git's credential helper for github.com: a token for the one repository,
 # from the daemon's GitHub App (fern git-credential), if there is one.
